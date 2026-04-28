@@ -2,12 +2,12 @@ package notty
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/reearth/ygo/crdt"
@@ -19,43 +19,42 @@ func TestWorkspaceEndpointsOmitDocumentPayloads(t *testing.T) {
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "sync me")
 
 	router := server.Routes()
-	for _, path := range []string{"/api/workspace", "/api/workspace/sync"} {
-		payload := performJSONRequest(t, router, http.MethodGet, path, nil)
-		document := findDocumentPayload(t, payload, documentID)
-		if got := document["crdtState"].(string); got != "" {
-			t.Fatalf("expected %s to omit CRDT state, got %d bytes", path, len(got))
-		}
-		if got := document["content"].(string); got != "" {
-			t.Fatalf("expected %s to omit document content, got %d bytes", path, len(got))
-		}
-		if got := document["stateVector"].(string); got == "" {
-			t.Fatalf("expected %s to retain document state vector", path)
-		}
+	payload := performJSONRequest(t, router, http.MethodGet, "/api/workspace", nil)
+	document := findDocumentPayload(t, payload, documentID)
+	if _, ok := document["crdtState"]; ok {
+		t.Fatal("expected /api/workspace document metadata to omit crdtState")
+	}
+	if _, ok := document["content"]; ok {
+		t.Fatal("expected /api/workspace document metadata to omit content")
+	}
+	if got := document["stateVector"].(string); got == "" {
+		t.Fatal("expected /api/workspace to retain document state vector")
 	}
 
-	fullDocument := performJSONRequest(t, router, http.MethodGet, "/api/documents/"+documentID, nil)
-	if got := fullDocument["crdtState"].(string); got == "" {
-		t.Fatal("expected /api/documents/{id} to retain CRDT state for selected document bootstrap")
+	byPath := performJSONRequest(t, router, http.MethodGet, "/api/documents/by-path?path=docs/spec.md", nil)
+	byPathDocument := byPath["document"].(map[string]any)
+	if _, ok := byPathDocument["crdtState"]; ok {
+		t.Fatal("expected /api/documents/by-path document metadata to omit crdtState")
 	}
-	if got := fullDocument["content"].(string); got != "sync me" {
-		t.Fatalf("expected /api/documents/{id} to retain document content, got %q", got)
+	if _, ok := byPathDocument["content"]; ok {
+		t.Fatal("expected /api/documents/by-path document metadata to omit content")
 	}
+
+	assertNonOK(t, router, http.MethodGet, "/api/workspace/sync", nil)
+	assertNonOK(t, router, http.MethodGet, "/api/documents", nil)
+	assertNonOK(t, router, http.MethodGet, "/api/documents/"+documentID, nil)
+	assertNonOK(t, router, http.MethodPost, "/api/documents/"+documentID+"/sync", []byte(`{"stateVector":""}`))
+	assertNonOK(t, router, http.MethodPost, "/api/documents/"+documentID+"/updates", []byte(`{"update":""}`))
 }
 
-func TestDocumentSyncReturnsMissingCRDTUpdate(t *testing.T) {
+func TestDocumentProtocolSyncReturnsMissingCRDTUpdate(t *testing.T) {
 	server, store := newTestServer(t)
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "alpha")
-	router := server.Routes()
+	room := server.rooms.ForDocument(documentID)
 
-	first := performJSONRequest(t, router, http.MethodPost, "/api/documents/"+documentID+"/sync", []byte(`{"stateVector":""}`))
-	firstUpdate, err := base64.StdEncoding.DecodeString(first["update"].(string))
-	if err != nil {
-		t.Fatalf("decode first update: %v", err)
-	}
 	clientDoc := crdt.New()
-	if err := crdt.ApplyUpdateV1(clientDoc, firstUpdate, "initial-sync"); err != nil {
-		t.Fatalf("apply initial sync: %v", err)
-	}
+	clientConn := &DocumentConn{send: make(chan []byte, 4)}
+	syncClientFromServer(t, server, room, clientConn, documentID, clientDoc)
 	if got := clientDoc.GetText("content").ToString(); got != "alpha" {
 		t.Fatalf("unexpected initial sync content: %q", got)
 	}
@@ -77,32 +76,13 @@ func TestDocumentSyncReturnsMissingCRDTUpdate(t *testing.T) {
 		t.Fatalf("apply server peer update: %v", err)
 	}
 
-	stateVector := base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(clientDoc))
-	body, err := json.Marshal(DocumentSyncRequest{StateVector: stateVector})
-	if err != nil {
-		t.Fatalf("marshal sync request: %v", err)
-	}
-	second := performJSONRequest(t, router, http.MethodPost, "/api/documents/"+documentID+"/sync", body)
-	secondDocument := second["document"].(map[string]any)
-	if got := secondDocument["crdtState"].(string); got != "" {
-		t.Fatalf("expected document sync metadata to omit CRDT state, got %d bytes", len(got))
-	}
-	secondUpdate, err := base64.StdEncoding.DecodeString(second["update"].(string))
-	if err != nil {
-		t.Fatalf("decode second update: %v", err)
-	}
-	if len(secondUpdate) == 0 {
-		t.Fatal("expected second sync to return missing update")
-	}
-	if err := crdt.ApplyUpdateV1(clientDoc, secondUpdate, "delta-sync"); err != nil {
-		t.Fatalf("apply delta sync: %v", err)
-	}
+	syncClientFromServer(t, server, room, clientConn, documentID, clientDoc)
 	if got := clientDoc.GetText("content").ToString(); got != updated.Content {
 		t.Fatalf("delta sync diverged: got %q want %q", got, updated.Content)
 	}
 }
 
-func TestApplyUpdateWorkspaceEventOmitsFullDocumentContent(t *testing.T) {
+func TestDocumentProtocolUpdatePublishesMetadataOnlyWorkspaceEvent(t *testing.T) {
 	server, store := newTestServer(t)
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "alpha")
 	document, err := store.GetDocument(documentID)
@@ -117,21 +97,17 @@ func TestApplyUpdateWorkspaceEventOmitsFullDocumentContent(t *testing.T) {
 	update := captureDocUpdate(t, peerDoc, "browser", func(txn *crdt.Transaction) {
 		text.Insert(txn, text.Len(), " beta", nil)
 	})
-	body, err := json.Marshal(ApplyUpdateRequest{
-		Update: base64.StdEncoding.EncodeToString(update),
-		Meta: OperationMeta{
-			ActorID:   "owner",
-			ActorType: "human",
-			Source:    "test",
-		},
-	})
-	if err != nil {
-		t.Fatalf("marshal apply update request: %v", err)
-	}
 
 	events, unsubscribe := server.subscribers.Subscribe()
 	defer unsubscribe()
-	performJSONRequest(t, server.Routes(), http.MethodPost, "/api/documents/"+documentID+"/updates", body)
+	source := &DocumentConn{send: make(chan []byte, 4)}
+	if err := server.handleDocumentProtocolMessage(server.rooms.ForDocument(documentID), source, documentID, yproto.BuildSyncUpdate(update), OperationMeta{
+		ActorID:   "owner",
+		ActorType: "human",
+		Source:    "test",
+	}); err != nil {
+		t.Fatalf("handle document protocol message: %v", err)
+	}
 
 	select {
 	case event := <-events:
@@ -142,11 +118,11 @@ func TestApplyUpdateWorkspaceEventOmitsFullDocumentContent(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected document update payload, got %#v", event.Data)
 		}
-		if payload.Content != "" {
-			t.Fatalf("expected workspace update event to omit content, got %d bytes", len(payload.Content))
+		if payload.Update != "" {
+			t.Fatalf("expected workspace update event to omit raw CRDT update, got %d bytes", len(payload.Update))
 		}
-		if payload.Update == "" {
-			t.Fatal("expected workspace update event to retain the CRDT update")
+		if payload.UpdateID == 0 || payload.StateVector == "" {
+			t.Fatalf("expected workspace update event to keep metadata, got %#v", payload)
 		}
 	default:
 		t.Fatal("expected document.updated event to be published")
@@ -198,14 +174,6 @@ func TestWorkspaceEndpointsTrimHistoricalAgentRunPayloads(t *testing.T) {
 		t.Fatalf("expected /api/workspace to trim error, got %d bytes", len(got))
 	}
 
-	syncRun := findRunPayload(t, performJSONRequest(t, router, http.MethodGet, "/api/workspace/sync", nil), run.ID)
-	if got := syncRun["prompt"].(string); got != longPrompt {
-		t.Fatalf("expected /api/workspace/sync to keep active prompt, got %d bytes", len(got))
-	}
-	if got := syncRun["systemPrompt"].(string); got == "" {
-		t.Fatal("expected /api/workspace/sync to keep active system prompt")
-	}
-
 	_, _, err = store.UpdateAgentRun(run.ID, UpdateAgentRunRequest{
 		Status:        "completed",
 		DesiredStatus: "stopped",
@@ -214,15 +182,15 @@ func TestWorkspaceEndpointsTrimHistoricalAgentRunPayloads(t *testing.T) {
 		t.Fatalf("complete run: %v", err)
 	}
 
-	terminalSyncRun := findRunPayload(t, performJSONRequest(t, router, http.MethodGet, "/api/workspace/sync", nil), run.ID)
-	if got := terminalSyncRun["prompt"].(string); len(got) >= len(longPrompt) {
-		t.Fatalf("expected /api/workspace/sync to trim terminal prompt, got %d bytes", len(got))
+	terminalRun := findRunPayload(t, performJSONRequest(t, router, http.MethodGet, "/api/workspace", nil), run.ID)
+	if got := terminalRun["prompt"].(string); len(got) >= len(longPrompt) {
+		t.Fatalf("expected /api/workspace to trim terminal prompt, got %d bytes", len(got))
 	}
-	if got := terminalSyncRun["systemPrompt"].(string); got != "" {
-		t.Fatalf("expected /api/workspace/sync to omit terminal system prompt, got %q", got)
+	if got := terminalRun["systemPrompt"].(string); got != "" {
+		t.Fatalf("expected /api/workspace to omit terminal system prompt, got %q", got)
 	}
-	if got := terminalSyncRun["logTail"].([]any); len(got) != agentRunLogPreviewLines {
-		t.Fatalf("expected /api/workspace/sync to trim terminal log tail to %d lines, got %d", agentRunLogPreviewLines, len(got))
+	if got := terminalRun["logTail"].([]any); len(got) != agentRunLogPreviewLines {
+		t.Fatalf("expected /api/workspace to trim terminal log tail to %d lines, got %d", agentRunLogPreviewLines, len(got))
 	}
 }
 
@@ -277,9 +245,9 @@ func TestHandleDocumentProtocolMessageBroadcastsSyncUpdateToPeers(t *testing.T) 
 	server, store := newTestServer(t)
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "alpha")
 
-	document, err := store.GetLiveDocument(documentID)
+	document, err := store.GetDocument(documentID)
 	if err != nil {
-		t.Fatalf("get live document: %v", err)
+		t.Fatalf("get document: %v", err)
 	}
 
 	peer, err := decodeCRDTState(document.CRDTState, 99)
@@ -309,7 +277,7 @@ func TestHandleDocumentProtocolMessageBroadcastsSyncUpdateToPeers(t *testing.T) 
 	defer room.Remove(source)
 	defer room.Remove(peerConn)
 
-	err = server.handleDocumentProtocolMessage(room, source, document, yproto.BuildSyncUpdate(update), OperationMeta{
+	err = server.handleDocumentProtocolMessage(room, source, documentID, yproto.BuildSyncUpdate(update), OperationMeta{
 		ActorID:   "peer",
 		ActorType: "human",
 		Source:    "test",
@@ -350,17 +318,159 @@ func TestHandleDocumentProtocolMessageBroadcastsSyncUpdateToPeers(t *testing.T) 
 	}
 }
 
+func TestHandleDocumentProtocolMessageBroadcastsDeleteOnlySyncUpdate(t *testing.T) {
+	server, store := newTestServer(t)
+	documentID := mustCreateTestDocument(t, store, "docs/backspace.md", "abc")
+
+	document, err := store.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get document: %v", err)
+	}
+	peer, err := decodeCRDTState(document.CRDTState, 99)
+	if err != nil {
+		t.Fatalf("decode peer state: %v", err)
+	}
+	text := peer.GetText("content")
+
+	room := server.rooms.ForDocument(documentID)
+	source := &DocumentConn{send: make(chan []byte, 2)}
+	peerConn := &DocumentConn{send: make(chan []byte, 2)}
+	room.Add(source)
+	room.Add(peerConn)
+	defer room.Remove(source)
+	defer room.Remove(peerConn)
+
+	insertUpdate := captureDocUpdate(t, peer, "peer-insert", func(txn *crdt.Transaction) {
+		text.Insert(txn, text.Len(), "d", nil)
+	})
+	if err := server.handleDocumentProtocolMessage(room, source, documentID, yproto.BuildSyncUpdate(insertUpdate), OperationMeta{
+		ActorID:   "peer",
+		ActorType: "human",
+		Source:    "test",
+	}); err != nil {
+		t.Fatalf("handle insert document protocol message: %v", err)
+	}
+	select {
+	case <-peerConn.send:
+	default:
+		t.Fatal("expected peer connection to receive insert sync broadcast")
+	}
+
+	deleteUpdate := captureDocUpdate(t, peer, "peer-delete", func(txn *crdt.Transaction) {
+		text.Delete(txn, text.Len()-1, 1)
+	})
+	if err := server.handleDocumentProtocolMessage(room, source, documentID, yproto.BuildSyncUpdate(deleteUpdate), OperationMeta{
+		ActorID:   "peer",
+		ActorType: "human",
+		Source:    "test",
+	}); err != nil {
+		t.Fatalf("handle delete-only document protocol message: %v", err)
+	}
+
+	select {
+	case payload := <-peerConn.send:
+		messageType, reader, err := yproto.DecodeProtocolMessage(payload)
+		if err != nil {
+			t.Fatalf("decode broadcast message type: %v", err)
+		}
+		if messageType != yproto.MessageSync {
+			t.Fatalf("unexpected broadcast top-level type: %d", messageType)
+		}
+		syncType, data, err := yproto.DecodeSyncMessage(reader)
+		if err != nil {
+			t.Fatalf("decode broadcast sync message: %v", err)
+		}
+		if syncType != yproto.SyncUpdate {
+			t.Fatalf("unexpected broadcast sync type: %d", syncType)
+		}
+		if !bytes.Equal(data, deleteUpdate) {
+			t.Fatal("broadcast delete update did not match applied update")
+		}
+	default:
+		t.Fatal("expected peer connection to receive delete-only sync broadcast")
+	}
+
+	current, err := store.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get updated document: %v", err)
+	}
+	if current.Content != "abc" {
+		t.Fatalf("unexpected updated content after delete-only update: %q", current.Content)
+	}
+}
+
+func TestHandleDocumentProtocolMessageIgnoresDuplicateSyncUpdate(t *testing.T) {
+	server, store := newTestServer(t)
+	documentID := mustCreateTestDocument(t, store, "docs/duplicate.md", "alpha")
+
+	document, err := store.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get document: %v", err)
+	}
+	peer, err := decodeCRDTState(document.CRDTState, 99)
+	if err != nil {
+		t.Fatalf("decode peer state: %v", err)
+	}
+	text := peer.GetText("content")
+	update := captureDocUpdate(t, peer, "peer", func(txn *crdt.Transaction) {
+		text.Insert(txn, text.Len(), " bravo", nil)
+	})
+
+	room := server.rooms.ForDocument(documentID)
+	source := &DocumentConn{send: make(chan []byte, 4)}
+	peerConn := &DocumentConn{send: make(chan []byte, 4)}
+	room.Add(source)
+	room.Add(peerConn)
+	defer room.Remove(source)
+	defer room.Remove(peerConn)
+
+	if err := server.handleDocumentProtocolMessage(room, source, documentID, yproto.BuildSyncUpdate(update), OperationMeta{
+		ActorID:   "peer",
+		ActorType: "human",
+		Source:    "test",
+	}); err != nil {
+		t.Fatalf("apply first update: %v", err)
+	}
+	select {
+	case <-peerConn.send:
+	default:
+		t.Fatal("expected first update to broadcast")
+	}
+	afterFirst, err := store.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get updated document: %v", err)
+	}
+
+	if err := server.handleDocumentProtocolMessage(room, source, documentID, yproto.BuildSyncUpdate(update), OperationMeta{
+		ActorID:   "peer",
+		ActorType: "human",
+		Source:    "test",
+	}); err != nil {
+		t.Fatalf("apply duplicate update: %v", err)
+	}
+	select {
+	case payload := <-peerConn.send:
+		t.Fatalf("duplicate update should not broadcast, got %d bytes", len(payload))
+	default:
+	}
+	afterDuplicate, err := store.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get duplicate document: %v", err)
+	}
+	if afterDuplicate.UpdateID != afterFirst.UpdateID {
+		t.Fatalf("duplicate update changed version: before=%d after=%d", afterFirst.UpdateID, afterDuplicate.UpdateID)
+	}
+	if afterDuplicate.Content != afterFirst.Content {
+		t.Fatalf("duplicate update changed content: before=%q after=%q", afterFirst.Content, afterDuplicate.Content)
+	}
+}
+
 func TestHandleDocumentProtocolMessageRespondsToSyncStep1(t *testing.T) {
 	server, store := newTestServer(t)
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "alpha bravo")
 
-	document, err := store.GetLiveDocument(documentID)
-	if err != nil {
-		t.Fatalf("get live document: %v", err)
-	}
-
 	source := &DocumentConn{send: make(chan []byte, 2)}
-	err = server.handleDocumentProtocolMessage(server.rooms.ForDocument(documentID), source, document, yproto.BuildSyncStep1(crdt.New(crdt.WithClientID(77))), OperationMeta{
+	err := server.handleDocumentProtocolMessage(server.rooms.ForDocument(documentID), source, documentID, yproto.BuildSyncStep1(crdt.New(crdt.WithClientID(77))), OperationMeta{
 		ActorID:   "peer",
 		ActorType: "human",
 		Source:    "test",
@@ -389,9 +499,9 @@ func TestHandleDocumentProtocolMessageReconnectMergesServerAndClientEdits(t *tes
 	server, store := newTestServer(t)
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "base")
 
-	document, err := store.GetLiveDocument(documentID)
+	document, err := store.GetDocument(documentID)
 	if err != nil {
-		t.Fatalf("get live document: %v", err)
+		t.Fatalf("get document: %v", err)
 	}
 
 	clientDoc, err := decodeCRDTState(document.CRDTState, 101)
@@ -409,7 +519,7 @@ func TestHandleDocumentProtocolMessageReconnectMergesServerAndClientEdits(t *tes
 	})
 	room := server.rooms.ForDocument(documentID)
 	serverPeer := &DocumentConn{send: make(chan []byte, 4)}
-	if err := server.handleDocumentProtocolMessage(room, serverPeer, document, yproto.BuildSyncUpdate(serverUpdate), OperationMeta{
+	if err := server.handleDocumentProtocolMessage(room, serverPeer, documentID, yproto.BuildSyncUpdate(serverUpdate), OperationMeta{
 		ActorID:   "server-peer",
 		ActorType: "human",
 		Source:    "test",
@@ -423,7 +533,7 @@ func TestHandleDocumentProtocolMessageReconnectMergesServerAndClientEdits(t *tes
 	})
 
 	reconnected := &DocumentConn{send: make(chan []byte, 4)}
-	if err := server.handleDocumentProtocolMessage(room, reconnected, document, yproto.BuildSyncStep1(clientDoc), OperationMeta{
+	if err := server.handleDocumentProtocolMessage(room, reconnected, documentID, yproto.BuildSyncStep1(clientDoc), OperationMeta{
 		ActorID:   "client",
 		ActorType: "human",
 		Source:    "test",
@@ -436,7 +546,7 @@ func TestHandleDocumentProtocolMessageReconnectMergesServerAndClientEdits(t *tes
 		case payload := <-reconnected.send:
 			reply := applySyncPayloadToDoc(t, clientDoc, payload, "server-reconnect")
 			if len(reply) > 0 {
-				if err := server.handleDocumentProtocolMessage(room, reconnected, document, reply, OperationMeta{
+				if err := server.handleDocumentProtocolMessage(room, reconnected, documentID, reply, OperationMeta{
 					ActorID:   "client",
 					ActorType: "human",
 					Source:    "test",
@@ -462,7 +572,73 @@ func TestHandleDocumentProtocolMessageReconnectMergesServerAndClientEdits(t *tes
 	}
 }
 
-func TestHandleDocumentProtocolMessagePublishesMentionMetadataChange(t *testing.T) {
+func TestHandleDocumentProtocolMessageConcurrentSyncAndUpdates(t *testing.T) {
+	server, store := newTestServer(t)
+	documentID := mustCreateTestDocument(t, store, "docs/race.md", "base")
+	initial, err := store.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get document: %v", err)
+	}
+	room := server.rooms.ForDocument(documentID)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for worker := 0; worker < 4; worker++ {
+		worker := worker
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			peer, err := decodeCRDTState(initial.CRDTState, uint64(300+worker))
+			if err != nil {
+				errs <- err
+				return
+			}
+			text := peer.GetText("content")
+			conn := &DocumentConn{send: make(chan []byte, 1024)}
+			for i := 0; i < 40; i++ {
+				update := captureDocUpdate(t, peer, "writer", func(txn *crdt.Transaction) {
+					text.Insert(txn, text.Len(), "x", nil)
+				})
+				if err := server.handleDocumentProtocolMessage(room, conn, documentID, yproto.BuildSyncUpdate(update), OperationMeta{
+					ActorID:   "writer",
+					ActorType: "human",
+					Source:    "test",
+				}); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}()
+	}
+	for worker := 0; worker < 4; worker++ {
+		worker := worker
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			peer := crdt.New(crdt.WithClientID(crdt.ClientID(700 + worker)))
+			conn := &DocumentConn{send: make(chan []byte, 1024)}
+			for i := 0; i < 40; i++ {
+				if err := server.handleDocumentProtocolMessage(room, conn, documentID, yproto.BuildSyncStep1(peer), OperationMeta{
+					ActorID:   "syncer",
+					ActorType: "human",
+					Source:    "test",
+				}); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent protocol handling failed: %v", err)
+		}
+	}
+}
+
+func TestHandleDocumentProtocolMessageDoesNotPublishDocumentMentionMetadataChange(t *testing.T) {
 	server, store := newTestServer(t)
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "Draft.\n")
 	if _, err := store.CreateAgent(CreateAgentRequest{
@@ -473,9 +649,9 @@ func TestHandleDocumentProtocolMessagePublishesMentionMetadataChange(t *testing.
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"}); err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
-	document, err := store.GetLiveDocument(documentID)
+	document, err := store.GetDocument(documentID)
 	if err != nil {
-		t.Fatalf("get live document: %v", err)
+		t.Fatalf("get document: %v", err)
 	}
 	frontendDoc, err := decodeCRDTState(document.CRDTState, 303)
 	if err != nil {
@@ -490,7 +666,7 @@ func TestHandleDocumentProtocolMessagePublishesMentionMetadataChange(t *testing.
 	defer unsubscribe()
 
 	source := &DocumentConn{send: make(chan []byte, 4)}
-	if err := server.handleDocumentProtocolMessage(server.rooms.ForDocument(documentID), source, document, yproto.BuildSyncUpdate(update), OperationMeta{
+	if err := server.handleDocumentProtocolMessage(server.rooms.ForDocument(documentID), source, documentID, yproto.BuildSyncUpdate(update), OperationMeta{
 		ActorID:   "owner",
 		ActorType: "human",
 		Source:    "ws",
@@ -498,13 +674,22 @@ func TestHandleDocumentProtocolMessagePublishesMentionMetadataChange(t *testing.
 		t.Fatalf("handle document protocol message: %v", err)
 	}
 
-	select {
-	case event := <-events:
-		if event.Type != "document.mentions.updated" {
-			t.Fatalf("expected mention metadata event, got %#v", event)
+	sawDocumentUpdate := false
+	for {
+		select {
+		case event := <-events:
+			if event.Type == "document.mentions.updated" {
+				t.Fatalf("document text mentions must not publish metadata change event: %#v", event)
+			}
+			if event.Type == "document.updated" {
+				sawDocumentUpdate = true
+			}
+		default:
+			if !sawDocumentUpdate {
+				t.Fatal("expected document update event to be published")
+			}
+			return
 		}
-	default:
-		t.Fatal("expected mention metadata change to be published")
 	}
 }
 
@@ -524,6 +709,34 @@ func applySyncPayloadToDoc(t *testing.T, doc *crdt.Doc, payload []byte, origin a
 	return reply
 }
 
+func syncClientFromServer(t *testing.T, server *Server, room *DocumentRoom, conn *DocumentConn, documentID string, doc *crdt.Doc) {
+	t.Helper()
+	if err := server.handleDocumentProtocolMessage(room, conn, documentID, yproto.BuildSyncStep1(doc), OperationMeta{
+		ActorID:   "client",
+		ActorType: "human",
+		Source:    "test",
+	}); err != nil {
+		t.Fatalf("start protocol sync: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case payload := <-conn.send:
+			reply := applySyncPayloadToDoc(t, doc, payload, "server-sync")
+			if len(reply) > 0 {
+				if err := server.handleDocumentProtocolMessage(room, conn, documentID, reply, OperationMeta{
+					ActorID:   "client",
+					ActorType: "human",
+					Source:    "test",
+				}); err != nil {
+					t.Fatalf("apply protocol sync reply: %v", err)
+				}
+			}
+		default:
+			t.Fatalf("expected protocol sync message %d", i)
+		}
+	}
+}
+
 func newTestServer(t *testing.T) (*Server, *Store) {
 	t.Helper()
 	store, err := NewStore(filepath.Join(t.TempDir(), "state.json"))
@@ -534,6 +747,19 @@ func newTestServer(t *testing.T) (*Server, *Store) {
 		_ = store.Close()
 	})
 	return NewServer(Config{}, store), store
+}
+
+func assertNonOK(t *testing.T, handler http.Handler, method, target string, body []byte) {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(method, target, bytes.NewReader(body))
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code == http.StatusOK {
+		t.Fatalf("expected %s %s to be unavailable, got status 200 body=%s", method, target, recorder.Body.String())
+	}
 }
 
 func performJSONRequest(t *testing.T, handler http.Handler, method, target string, body []byte) map[string]any {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,6 +15,14 @@ import (
 
 func main() {
 	cfg := notty.LoadConfig()
+	if cfg.PprofAddr != "" {
+		go func() {
+			log.Printf("pprof listening on %s", cfg.PprofAddr)
+			if err := http.ListenAndServe(cfg.PprofAddr, nil); err != nil {
+				log.Printf("pprof stopped: %v", err)
+			}
+		}()
+	}
 	dataSource := cfg.DataFile
 	if cfg.DatabaseURL != "" {
 		dataSource = cfg.DatabaseURL

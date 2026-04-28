@@ -6,7 +6,6 @@ import (
 	"log"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -14,23 +13,8 @@ import (
 	"notty/internal/yproto"
 )
 
-func (s *Server) handleDocument(w http.ResponseWriter, r *http.Request) {
-	document, err := s.store.GetDocument(chi.URLParam(r, "id"))
-	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, document)
-}
-
-func (s *Server) handleDocuments(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"documents": s.store.ListDocuments(),
-	})
-}
-
 func (s *Server) handleDocumentByPath(w http.ResponseWriter, r *http.Request) {
-	document, err := s.store.GetDocumentByPath(r.URL.Query().Get("path"))
+	document, err := s.store.GetDocumentMetadataByPath(r.URL.Query().Get("path"))
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -39,7 +23,7 @@ func (s *Server) handleDocumentByPath(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, document)
+	writeJSON(w, http.StatusOK, map[string]any{"document": document})
 }
 
 func (s *Server) handleDocumentThreads(w http.ResponseWriter, r *http.Request) {
@@ -82,7 +66,7 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 		ActorID:    meta.ActorID,
 	}}
 	s.subscribers.Publish(event)
-	writeJSON(w, http.StatusCreated, document)
+	writeJSON(w, http.StatusCreated, documentMetadata(document))
 }
 
 func (s *Server) handleMoveDocument(w http.ResponseWriter, r *http.Request) {
@@ -114,7 +98,7 @@ func (s *Server) handleMoveDocument(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt:  document.UpdatedAt,
 		ActorID:    meta.ActorID,
 	}})
-	writeJSON(w, http.StatusOK, document)
+	writeJSON(w, http.StatusOK, documentMetadata(document))
 }
 
 func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
@@ -143,81 +127,10 @@ func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-func (s *Server) handleApplyUpdate(w http.ResponseWriter, r *http.Request) {
-	var req ApplyUpdateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	update, err := base64.StdEncoding.DecodeString(req.Update)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	result, err := s.store.ApplyCRDTUpdateWithResult(chi.URLParam(r, "id"), update, req.Meta)
-	if err != nil {
-		status := http.StatusBadRequest
-		if err == ErrNotFound {
-			status = http.StatusNotFound
-		}
-		writeError(w, status, err.Error())
-		return
-	}
-	document := result.Document
-
-	event := EventEnvelope{Type: "document.updated", Data: DocumentUpdateEvent{
-		DocumentID:  document.ID,
-		UpdateID:    document.UpdateID,
-		StateVector: document.StateVector,
-		Update:      req.Update,
-		Path:        document.Path,
-		UpdatedAt:   document.UpdatedAt,
-		ActorID:     req.Meta.ActorID,
-	}}
-	s.subscribers.Publish(event)
-	if result.MentionsChanged {
-		s.subscribers.Publish(documentMentionsUpdatedEvent(document, req.Meta.ActorID))
-	}
-	s.rooms.ForDocument(document.ID).Broadcast(yproto.BuildSyncUpdate(update), nil)
-	writeJSON(w, http.StatusOK, ApplyUpdateResponse{Document: document})
-}
-
-func (s *Server) handleDocumentSync(w http.ResponseWriter, r *http.Request) {
-	var req DocumentSyncRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	var stateVector []byte
-	if strings.TrimSpace(req.StateVector) != "" {
-		var err error
-		stateVector, err = base64.StdEncoding.DecodeString(req.StateVector)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	}
-	document, update, err := s.store.EncodeDocumentUpdate(chi.URLParam(r, "id"), stateVector)
-	if err != nil {
-		status := http.StatusBadRequest
-		if err == ErrNotFound {
-			status = http.StatusNotFound
-		}
-		writeError(w, status, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, DocumentSyncResponse{
-		Document: document,
-		Update:   base64.StdEncoding.EncodeToString(update),
-	})
-}
-
 func (s *Server) handleDocumentWebsocket(w http.ResponseWriter, r *http.Request) {
 	documentID := chi.URLParam(r, "id")
-	document, err := s.store.GetLiveDocument(documentID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+	if !s.store.HasDocument(documentID) {
+		writeError(w, http.StatusNotFound, ErrNotFound.Error())
 		return
 	}
 	conn, err := s.upgrader.Upgrade(w, r, nil)
@@ -256,7 +169,7 @@ func (s *Server) handleDocumentWebsocket(w http.ResponseWriter, r *http.Request)
 			if messageType != websocket.BinaryMessage {
 				continue
 			}
-			if err := s.handleDocumentProtocolMessage(room, session, document, payload, OperationMeta{
+			if err := s.handleDocumentProtocolMessage(room, session, documentID, payload, OperationMeta{
 				ActorID:     actorID,
 				ActorType:   actorType,
 				ExecutionID: "ws-session",
@@ -298,7 +211,7 @@ func (s *Server) handleDocumentWebsocket(w http.ResponseWriter, r *http.Request)
 	}
 }
 
-func (s *Server) handleDocumentProtocolMessage(room *DocumentRoom, session *DocumentConn, document *Document, payload []byte, meta OperationMeta) error {
+func (s *Server) handleDocumentProtocolMessage(room *DocumentRoom, session *DocumentConn, documentID string, payload []byte, meta OperationMeta) error {
 	messageType, reader, err := yproto.DecodeProtocolMessage(payload)
 	if err != nil {
 		return err
@@ -312,27 +225,45 @@ func (s *Server) handleDocumentProtocolMessage(room *DocumentRoom, session *Docu
 		}
 		switch syncType {
 		case yproto.SyncStep1:
-			reply, err := yproto.BuildSyncStep2(document.Doc, data)
+			document, updates, err := s.store.EncodeDocumentSyncUpdates(documentID, data)
 			if err != nil {
 				return err
 			}
-			session.send <- reply
-			session.send <- yproto.BuildSyncStep1(document.Doc)
+			for index, update := range updates {
+				if index == 0 {
+					session.send <- yproto.BuildSyncStep2FromUpdate(update)
+				} else {
+					session.send <- yproto.BuildSyncUpdate(update)
+				}
+			}
+			if document.StateVector != "" {
+				stateVector, err := base64.StdEncoding.DecodeString(document.StateVector)
+				if err != nil {
+					return err
+				}
+				session.send <- yproto.BuildSyncStep1FromStateVector(stateVector)
+			}
 		case yproto.SyncStep2, yproto.SyncUpdate:
-			result, err := s.store.ApplyCRDTUpdateWithResult(document.ID, data, meta)
+			if len(data) == 0 {
+				return nil
+			}
+			result, err := s.store.ApplyCRDTUpdateWithResult(documentID, data, meta)
 			if err != nil {
 				return err
+			}
+			if !result.Applied {
+				return nil
 			}
 			updated := result.Document
-			document.Content = updated.Content
-			document.CRDTState = updated.CRDTState
-			document.StateVector = updated.StateVector
-			document.UpdateID = updated.UpdateID
-			document.UpdatedAt = updated.UpdatedAt
-			if result.MentionsChanged {
-				s.subscribers.Publish(documentMentionsUpdatedEvent(updated, meta.ActorID))
-			}
 			room.Broadcast(yproto.BuildSyncUpdate(data), session)
+			s.subscribers.Publish(EventEnvelope{Type: "document.updated", Data: DocumentUpdateEvent{
+				DocumentID:  updated.ID,
+				UpdateID:    updated.UpdateID,
+				StateVector: updated.StateVector,
+				Path:        updated.Path,
+				UpdatedAt:   updated.UpdatedAt,
+				ActorID:     meta.ActorID,
+			}})
 		}
 	case yproto.MessageAwareness:
 		updates, err := yproto.DecodeAwarenessUpdate(reader)
@@ -348,14 +279,4 @@ func (s *Server) handleDocumentProtocolMessage(room *DocumentRoom, session *Docu
 		room.Broadcast(broadcast, session)
 	}
 	return nil
-}
-
-func documentMentionsUpdatedEvent(document *Document, actorID string) EventEnvelope {
-	return EventEnvelope{Type: "document.mentions.updated", Data: DocumentLifecycleEvent{
-		DocumentID: document.ID,
-		Path:       document.Path,
-		Title:      document.Title,
-		UpdatedAt:  document.UpdatedAt,
-		ActorID:    actorID,
-	}}
 }

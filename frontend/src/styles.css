@@ -580,24 +580,6 @@ p {
   font-size: 0.9rem;
 }
 
-.mentionChipRow {
-  margin-top: 0.8rem;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.45rem;
-}
-
-.mentionChip {
-  display: inline-flex;
-  align-items: center;
-  border-radius: 999px;
-  padding: 0.28rem 0.7rem;
-  background: rgba(47, 111, 88, 0.1);
-  color: var(--accent);
-  font-size: 0.82rem;
-  font-weight: 700;
-}
-
 .pathEditorRow {
   margin-top: 0.9rem;
   display: grid;
@@ -667,44 +649,6 @@ p {
 .inlineCommentInput::placeholder,
 .proposalInputInline::placeholder {
   color: #b4a999;
-}
-
-.mentionPopover {
-  position: absolute;
-  left: 1rem;
-  bottom: 1rem;
-  width: min(320px, calc(100% - 2rem));
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-  padding: 0.5rem;
-  border-radius: 18px;
-  border: 1px solid rgba(47, 111, 88, 0.18);
-  background: rgba(255, 253, 248, 0.96);
-  box-shadow: 0 18px 40px rgba(79, 60, 32, 0.1);
-}
-
-.mentionOption {
-  width: 100%;
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 0.75rem;
-  text-align: left;
-  background: transparent;
-  color: var(--ink);
-  border-radius: 14px;
-  box-shadow: none;
-  padding: 0.72rem 0.85rem;
-}
-
-.mentionOption:hover {
-  background: rgba(47, 111, 88, 0.08);
-}
-
-.mentionOption span {
-  color: var(--muted);
-  font-size: 0.82rem;
 }
 
 .commentRail {

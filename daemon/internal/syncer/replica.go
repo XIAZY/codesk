@@ -122,7 +122,7 @@ func (r *workspaceReplica) refresh(ctx context.Context) error {
 }
 
 func (r *workspaceReplica) fetchWorkspace(ctx context.Context) (*workspaceResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.backendURL+"/api/workspace/sync", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.backendURL+"/api/workspace", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -356,6 +356,9 @@ func (r *workspaceReplica) reconcileLocalWorkspace(ctx context.Context) error {
 		current, exists := remaining[tracked.Path]
 		if exists {
 			delete(remaining, tracked.Path)
+		}
+		if !tracked.hasProjectedContent() {
+			continue
 		}
 		if tracked.isProjecting() {
 			// File projection can briefly look like a local edit, move, or delete.

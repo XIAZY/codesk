@@ -87,8 +87,12 @@ func decodeVarString(reader *bytes.Reader) (string, error) {
 }
 
 func BuildSyncStep1(doc *crdt.Doc) []byte {
+	return BuildSyncStep1FromStateVector(crdt.EncodeStateVectorV1(doc))
+}
+
+func BuildSyncStep1FromStateVector(stateVector []byte) []byte {
 	message := append(encodeVarUint(MessageSync), encodeVarUint(SyncStep1)...)
-	return append(message, encodeVarBytes(crdt.EncodeStateVectorV1(doc))...)
+	return append(message, encodeVarBytes(stateVector)...)
 }
 
 func BuildSyncStep2(doc *crdt.Doc, stateVector []byte) ([]byte, error) {
@@ -101,8 +105,12 @@ func BuildSyncStep2(doc *crdt.Doc, stateVector []byte) ([]byte, error) {
 		}
 	}
 	update := crdt.EncodeStateAsUpdateV1(doc, sv)
+	return BuildSyncStep2FromUpdate(update), nil
+}
+
+func BuildSyncStep2FromUpdate(update []byte) []byte {
 	message := append(encodeVarUint(MessageSync), encodeVarUint(SyncStep2)...)
-	return append(message, encodeVarBytes(update)...), nil
+	return append(message, encodeVarBytes(update)...)
 }
 
 func BuildSyncUpdate(update []byte) []byte {

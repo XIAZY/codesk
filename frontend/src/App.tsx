@@ -7,7 +7,6 @@ import * as decoding from "lib0/decoding";
 import {
   buildLineThreads,
   computeReplace,
-  findMentionQuery,
   isFreshPresence,
   rebaseReplace,
   rebaseSelection,
@@ -19,8 +18,6 @@ type DocumentItem = {
   id: string;
   path: string;
   title: string;
-  content?: string;
-  crdtState?: string;
   stateVector?: string;
   updateId?: number;
   updatedAt: string;
@@ -71,16 +68,6 @@ type UserItem = {
   kind: string;
   status: string;
   updatedAt: string;
-};
-
-type MentionItem = {
-  documentId: string;
-  userId: string;
-  handle: string;
-  name: string;
-  kind: string;
-  start: number;
-  end: number;
 };
 
 type Proposal = {
@@ -144,7 +131,6 @@ type Workspace = {
   agents: Agent[];
   agentRuns: AgentRun[];
   presences: Record<string, PresenceItem>;
-  mentions: MentionItem[];
   threads: ThreadItem[];
   proposals: Record<string, Proposal>;
 };
@@ -152,7 +138,6 @@ type Workspace = {
 type DocumentUpdateEvent = {
   documentId: string;
   update: string;
-  content?: string;
   path: string;
   updatedAt: string;
   actorId: string;
@@ -177,13 +162,6 @@ type PresenceView = {
   activity: string;
 };
 
-type MentionSuggestion = {
-  id: string;
-  handle: string;
-  name: string;
-  kind: string;
-};
-
 const apiBase = import.meta.env.VITE_API_BASE ?? "http://localhost:8080";
 const currentUserStorageKey = "notty-current-user";
 
@@ -192,6 +170,7 @@ export function App() {
   const [workspaceConnected, setWorkspaceConnected] = useState(false);
   const [selectedId, setSelectedId] = useState<string>("");
   const [activeDocument, setActiveDocument] = useState<DocumentItem | null>(null);
+  const [documentReady, setDocumentReady] = useState(false);
   const [draft, setDraft] = useState("");
   const [message, setMessage] = useState("");
   const [newFilePath, setNewFilePath] = useState("notes/untitled.md");
@@ -213,14 +192,12 @@ export function App() {
   const [selectedThreadId, setSelectedThreadId] = useState<string>("");
   const [editorScrollTop, setEditorScrollTop] = useState(0);
   const [selectionRange, setSelectionRange] = useState({ start: 0, end: 0 });
-  const [mentionState, setMentionState] = useState<{ start: number; end: number; query: string } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const activeDocRef = useRef<{ id: string; ydoc: Y.Doc } | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const workspaceWsRef = useRef<WebSocket | null>(null);
   const awarenessRef = useRef<Awareness | null>(null);
   const selectedIdRef = useRef("");
-  const documentLoadTokenRef = useRef(0);
   const workspaceLoadTokenRef = useRef(0);
   const workspaceReloadTimerRef = useRef<number | null>(null);
   const draftRef = useRef("");
@@ -381,7 +358,6 @@ export function App() {
           envelope.type === "document.created" ||
           envelope.type === "document.moved" ||
           envelope.type === "document.deleted" ||
-          envelope.type === "document.mentions.updated" ||
           envelope.type === "thread.created" ||
           envelope.type === "thread.updated" ||
           envelope.type === "thread.message.created" ||
@@ -449,24 +425,6 @@ export function App() {
       anchor: resolveThreadAnchorLive(thread.anchor, ydoc, deferredDraft, lineStarts),
     }));
   }, [deferredDraft, lineStarts, selectedDocument, selectedThreads]);
-  const selectedMentions = workspace?.mentions.filter((mention) => mention.documentId === selectedId) ?? [];
-  const mentionables = useMemo<MentionSuggestion[]>(
-    () => [
-      ...(workspace?.users ?? []).map((user) => ({
-        id: user.id,
-        handle: user.handle,
-        name: user.name,
-        kind: user.kind,
-      })),
-      ...(workspace?.agents ?? []).map((agent) => ({
-        id: agent.id,
-        handle: agent.handle,
-        name: agent.name,
-        kind: "agent",
-      })),
-    ],
-    [workspace?.agents, workspace?.users]
-  );
   const lineThreads = useMemo(
     () => buildLineThreads(liveSelectedThreads),
     [liveSelectedThreads]
@@ -507,10 +465,6 @@ export function App() {
   const wordCount = useMemo(() => countWords(deferredDraft), [deferredDraft]);
   const charCount = deferredDraft.length;
   const editorTrackHeight = Math.max(documentLines.length * EDITOR_LINE_HEIGHT + 120, 640);
-  const mentionSuggestions = useMemo(
-    () => buildMentionSuggestions(mentionables, mentionState?.query ?? "", currentUser?.id ?? ""),
-    [currentUser?.id, mentionState?.query, mentionables]
-  );
 
   useEffect(() => {
     currentUserRef.current = currentUser;
@@ -559,34 +513,17 @@ export function App() {
   }, [selectedId, workspace]);
 
   useEffect(() => {
-    const requestToken = documentLoadTokenRef.current + 1;
-    documentLoadTokenRef.current = requestToken;
-    if (!selectedId) {
+    setDocumentReady(false);
+    activeDocRef.current?.ydoc.destroy();
+    activeDocRef.current = null;
+    if (!selectedId || !selectedDocumentMeta) {
       setActiveDocument(null);
-      activeDocRef.current?.ydoc.destroy();
-      activeDocRef.current = null;
       resetEditorState();
       return;
     }
-    setActiveDocument((current) => (current?.id === selectedId ? current : null));
-    resetEditorState(selectedDocumentMeta?.path ?? "");
-
-    void (async () => {
-      const response = await fetch(`${apiBase}/api/documents/${selectedId}`);
-      if (!response.ok) {
-        throw new Error(`load document ${selectedId} failed`);
-      }
-      const document = (await response.json()) as DocumentItem;
-      if (requestToken !== documentLoadTokenRef.current || document.id !== selectedIdRef.current) {
-        return;
-      }
-      setActiveDocument(document);
-    })().catch(() => {
-      if (requestToken === documentLoadTokenRef.current) {
-        setMessage("Could not load file.");
-      }
-    });
-  }, [selectedId]);
+    setActiveDocument(selectedDocumentMeta);
+    resetEditorState(selectedDocumentMeta.path);
+  }, [selectedDocumentMeta?.id, selectedDocumentMeta?.path, selectedDocumentMeta?.title, selectedId]);
 
   useEffect(() => {
     if (!workspace?.users.length) {
@@ -693,7 +630,6 @@ export function App() {
     setEditorScrollTop(0);
     selectionRangeRef.current = { start: 0, end: 0 };
     setSelectionRange({ start: 0, end: 0 });
-    setMentionState(null);
     setSelectedThreadId("");
     pendingSelectionRef.current = null;
     isComposingRef.current = false;
@@ -730,7 +666,6 @@ export function App() {
       setDraft(nextContent);
       setSelectionRange(nextSelection);
       pendingSelectionRef.current = nextSelection;
-      setMentionState(findMentionQuery(nextContent, nextSelection.start, nextSelection.end));
     };
 
     const scheduleDraftSyncFromYdoc = () => {
@@ -743,18 +678,20 @@ export function App() {
       }, 75);
     };
 
-    const unsubscribe = ydoc.on("update", (update: Uint8Array, origin: unknown) => {
+    const handleYdocUpdate = (update: Uint8Array, origin: unknown) => {
       if (origin === "remote" || origin === "bootstrap") {
         return;
       }
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(encodeSyncUpdate(update));
       }
-    });
+    };
+    ydoc.on("update", handleYdocUpdate);
 
     let disposed = false;
     let reconnectTimer: number | null = null;
     let attempt = 0;
+    let receivedInitialSync = false;
 
     const connect = () => {
       if (disposed) {
@@ -767,7 +704,6 @@ export function App() {
       wsRef.current = ws;
       ws.onopen = () => {
         attempt = 0;
-        void loadWorkspace(selectedDocument.id);
         ws.send(encodeSyncStep1(ydoc));
         ws.send(encodeAwarenessMessage(awareness, [ydoc.clientID]));
       };
@@ -783,7 +719,13 @@ export function App() {
           if (reply.length > 0) {
             ws.send(encodeSyncReply(reply));
           }
-          scheduleDraftSyncFromYdoc();
+          if (!receivedInitialSync) {
+            receivedInitialSync = true;
+            applyDraftFromYdoc();
+            setDocumentReady(true);
+          } else {
+            scheduleDraftSyncFromYdoc();
+          }
         }
         if (messageType === 1) {
           applyAwarenessUpdate(awareness, payload, "remote");
@@ -817,7 +759,7 @@ export function App() {
       }
       wsRef.current?.close();
       wsRef.current = null;
-      unsubscribe();
+      ydoc.off("update", handleYdocUpdate);
       awarenessRef.current?.destroy();
       awarenessRef.current = null;
     };
@@ -830,7 +772,6 @@ export function App() {
     setEditorScrollTop(0);
     selectionRangeRef.current = { start: 0, end: 0 };
     setSelectionRange({ start: 0, end: 0 });
-    setMentionState(null);
     setSelectedThreadId("");
     pendingSelectionRef.current = null;
     isComposingRef.current = false;
@@ -844,10 +785,6 @@ export function App() {
     }
     existing?.ydoc.destroy();
     const ydoc = new Y.Doc();
-    const update = decodeBase64(document.crdtState ?? "");
-    if (update.length > 0) {
-      Y.applyUpdate(ydoc, update, "bootstrap");
-    }
     activeDocRef.current = { id: document.id, ydoc };
     return ydoc;
   }
@@ -877,26 +814,6 @@ export function App() {
     const end = target.selectionEnd;
     selectionRangeRef.current = { start, end };
     setSelectionRange({ start, end });
-    setMentionState(findMentionQuery(target.value, start, end));
-  }
-
-  function insertMention(suggestion: MentionSuggestion) {
-    if (!mentionState) {
-      return;
-    }
-    const nextDraft = `${draft.slice(0, mentionState.start)}@${suggestion.handle} ${draft.slice(mentionState.end)}`;
-    handleDraftChange(nextDraft);
-    const nextCursor = mentionState.start + suggestion.handle.length + 2;
-    setMentionState(null);
-    queueMicrotask(() => {
-      if (!textareaRef.current) {
-        return;
-      }
-      textareaRef.current.focus();
-      textareaRef.current.selectionStart = nextCursor;
-      textareaRef.current.selectionEnd = nextCursor;
-      setSelectionRange({ start: nextCursor, end: nextCursor });
-    });
   }
 
   function handleDraftChange(nextDraft: string) {
@@ -933,7 +850,6 @@ export function App() {
       : selectionRangeRef.current;
     selectionRangeRef.current = nextSelection;
     setSelectionRange(nextSelection);
-    setMentionState(findMentionQuery(nextDraft, nextSelection.start, nextSelection.end));
   }
 
   async function createProposal() {
@@ -1673,15 +1589,6 @@ export function App() {
                   <span>{wordCount} words</span>
                   <span>{charCount} chars</span>
                 </div>
-                {selectedMentions.length ? (
-                  <div className="mentionChipRow">
-                    {selectedMentions.map((mention) => (
-                      <span key={`${mention.documentId}-${mention.start}-${mention.handle}`} className="mentionChip">
-                        @{mention.handle}
-                      </span>
-                    ))}
-                  </div>
-                ) : null}
                 <div className="pathEditorRow">
                   <input
                     value={pathEditor}
@@ -1724,7 +1631,7 @@ export function App() {
                   name="document-editor"
                   aria-label="Document editor"
                   spellCheck={false}
-                  disabled={!selectedDocument}
+                  disabled={!selectedDocument || !documentReady}
                   onChange={(event) => handleDraftChange(event.target.value)}
                   onCompositionStart={() => {
                     isComposingRef.current = true;
@@ -1750,30 +1657,14 @@ export function App() {
                     setDraft(nextContent);
                     setSelectionRange(nextSelection);
                     pendingSelectionRef.current = nextSelection;
-                    setMentionState(findMentionQuery(nextContent, nextSelection.start, nextSelection.end));
                   }}
                   onScroll={(event) => setEditorScrollTop(event.currentTarget.scrollTop)}
                   onClick={(event) => handleEditorSelection(event.currentTarget)}
                   onKeyUp={(event) => handleEditorSelection(event.currentTarget)}
                   onSelect={(event) => handleEditorSelection(event.currentTarget)}
                   className="markdownEditor"
-                  placeholder={selectedDocumentView && !selectedDocument ? "Loading document..." : "Start writing"}
+                  placeholder={selectedDocumentView && !documentReady ? "Loading document..." : "Start writing"}
                 />
-                {mentionState && mentionSuggestions.length ? (
-                  <div className="mentionPopover">
-                    {mentionSuggestions.map((suggestion) => (
-                      <button
-                        key={suggestion.id}
-                        type="button"
-                        className="mentionOption"
-                        onClick={() => insertMention(suggestion)}
-                      >
-                        <strong>@{suggestion.handle}</strong>
-                        <span>{suggestion.name} · {suggestion.kind}</span>
-                      </button>
-                    ))}
-                  </div>
-                ) : null}
               </div>
 
               <div className="commentRail" aria-label="Threads on document lines">
@@ -1968,20 +1859,8 @@ function encodeAwarenessMessage(awareness: Awareness, clients: number[]) {
   const update = encodeAwarenessUpdate(awareness, clients);
   const encoder = encoding.createEncoder();
   encoding.writeVarUint(encoder, 1);
-  encoding.write(encoder, update);
+  encoding.writeUint8Array(encoder, update);
   return encoding.toUint8Array(encoder);
-}
-
-function decodeBase64(value: string) {
-  if (!value) {
-    return new Uint8Array();
-  }
-  const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return bytes;
 }
 
 function decodeVarUint(bytes: Uint8Array) {
@@ -2112,15 +1991,6 @@ function formatSelection(start: number, end: number, lineStarts: number[]) {
     return `Selection on line ${startLine}`;
   }
   return `Selection across lines ${startLine}-${endLine}`;
-}
-
-function buildMentionSuggestions(items: MentionSuggestion[], query: string, currentUserId: string) {
-  const normalized = query.trim().toLowerCase();
-  return items
-    .filter((item) => item.id !== currentUserId)
-    .filter((item) => normalized === "" || item.handle.includes(normalized) || item.name.toLowerCase().includes(normalized))
-    .sort((left, right) => left.handle.localeCompare(right.handle))
-    .slice(0, 6);
 }
 
 function buildActiveCollaborators(

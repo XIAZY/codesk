@@ -71,7 +71,7 @@ type toolDocumentViewResponse struct {
 }
 
 func (s *Service) listDocumentsForRun(ctx context.Context) (*toolDocumentsResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.BackendURL+"/api/documents", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.BackendURL+"/api/workspace", nil)
 	if err != nil {
 		return nil, err
 	}

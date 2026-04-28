@@ -229,9 +229,6 @@ func summarizeNotification(notification *agentEvent, workspace *workspaceRespons
 	if workspace != nil {
 		if doc := findDocumentByID(workspace.Documents, notification.DocumentID); doc != nil {
 			parts = append(parts, doc.Path)
-			if notification.AnchorEnd > notification.AnchorStart {
-				parts = append(parts, "near \""+excerptForPrompt(doc.Content, notification.AnchorStart, notification.AnchorEnd)+"\"")
-			}
 		}
 	}
 	if workspace != nil {
@@ -281,28 +278,6 @@ func oneLine(value string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
 }
 
-func excerptForPrompt(content string, start, end int) string {
-	if content == "" {
-		return ""
-	}
-	if start < 0 {
-		start = 0
-	}
-	if end < start {
-		end = start
-	}
-	if start > len(content) {
-		start = len(content)
-	}
-	if end > len(content) {
-		end = len(content)
-	}
-	if end == start {
-		end = minInt(len(content), start+120)
-	}
-	return oneLine(content[start:end])
-}
-
 func firstNonEmptyText(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {
@@ -310,13 +285,6 @@ func firstNonEmptyText(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func minInt(left, right int) int {
-	if left < right {
-		return left
-	}
-	return right
 }
 
 func notificationSignature(notifications []*agentEvent) string {

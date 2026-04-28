@@ -1,7 +1,6 @@
 package notty
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 
@@ -52,15 +51,16 @@ func (s *Server) handleMergeProposal(w http.ResponseWriter, r *http.Request) {
 	if len(update) > 0 {
 		s.rooms.ForDocument(document.ID).Broadcast(yproto.BuildSyncUpdate(update), nil)
 		s.subscribers.Publish(EventEnvelope{Type: "document.updated", Data: DocumentUpdateEvent{
-			DocumentID: document.ID,
-			Update:     base64.StdEncoding.EncodeToString(update),
-			Path:       document.Path,
-			UpdatedAt:  document.UpdatedAt,
-			ActorID:    actor,
+			DocumentID:  document.ID,
+			UpdateID:    document.UpdateID,
+			StateVector: document.StateVector,
+			Path:        document.Path,
+			UpdatedAt:   document.UpdatedAt,
+			ActorID:     actor,
 		}})
 	}
-	s.subscribers.Publish(EventEnvelope{Type: "proposal.merged", Data: document})
-	writeJSON(w, http.StatusOK, document)
+	s.subscribers.Publish(EventEnvelope{Type: "proposal.merged", Data: documentMetadata(document)})
+	writeJSON(w, http.StatusOK, documentMetadata(document))
 }
 
 func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {

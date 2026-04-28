@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -63,123 +64,72 @@ func TestTrackedFileClearConnOnlyClearsMatchingConnection(t *testing.T) {
 	}
 }
 
-func TestMergeSessionUpdateCarriesThreadID(t *testing.T) {
-	service := &Service{pendingSessions: map[string]updateAgentSessionRequest{}}
-	service.mergeSessionUpdate(agentSessionStatusUpdate{
-		AgentID: "agent_1",
-		Payload: updateAgentSessionRequest{
-			Status:        "working",
-			CodexThreadID: "thread_123",
-			CurrentTurnID: "turn_123",
-		},
+func TestAgentStatusWorkerWritesLatestStateAfterInFlightUpdate(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	var mu sync.Mutex
+	var calls []updateAgentSessionRequest
+	updater := func(ctx context.Context, agentID string, payload updateAgentSessionRequest) error {
+		if agentID != "agent_1" {
+			t.Fatalf("unexpected agent id: %s", agentID)
+		}
+		mu.Lock()
+		calls = append(calls, payload)
+		mu.Unlock()
+		if payload.Status == "working" {
+			once.Do(func() { close(started) })
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return nil
+	}
+	worker := newAgentStatusWorker("agent_1", updater)
+	defer worker.Stop()
+
+	worker.Publish(updateAgentSessionRequest{Status: "working", CurrentTurnID: "turn_1"})
+	<-started
+	worker.Publish(updateAgentSessionRequest{Status: "idle", CurrentTurnID: "", CurrentActivity: "Idle"})
+	close(release)
+
+	waitUntil(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(calls) >= 2 && calls[len(calls)-1].Status == "idle"
 	})
-	got := service.pendingSessions["agent_1"]
-	if got.Status != "working" {
-		t.Fatalf("unexpected status: %#v", got)
-	}
-	if got.CodexThreadID != "thread_123" || got.CurrentTurnID != "turn_123" {
-		t.Fatalf("unexpected session ids: %#v", got)
-	}
 }
 
-func TestProcessSessionUpdateFlushesImmediately(t *testing.T) {
-	var sawPatch bool
-	client := &http.Client{
-		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			if r.Method != http.MethodPatch || r.URL.Path != "/api/agents/agent_1/session" {
-				t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
-			}
-			sawPatch = true
-			var payload updateAgentSessionRequest
-			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-				t.Fatalf("decode update payload: %v", err)
-			}
-			if payload.Status != "working" {
-				t.Fatalf("unexpected status payload: %#v", payload)
-			}
-			if payload.CodexThreadID != "thread_123" || payload.CurrentTurnID != "turn_123" {
-				t.Fatalf("unexpected session payload: %#v", payload)
-			}
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader(`{"status":"ok"}`)),
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-			}, nil
-		}),
+func TestAgentStatusWorkerRetriesLatestStateAfterFailure(t *testing.T) {
+	firstCall := make(chan struct{})
+	var once sync.Once
+	var mu sync.Mutex
+	var calls []updateAgentSessionRequest
+	updater := func(ctx context.Context, agentID string, payload updateAgentSessionRequest) error {
+		mu.Lock()
+		calls = append(calls, payload)
+		count := len(calls)
+		mu.Unlock()
+		if count == 1 {
+			once.Do(func() { close(firstCall) })
+			return errors.New("temporary failure")
+		}
+		return nil
 	}
+	worker := newAgentStatusWorker("agent_1", updater)
+	defer worker.Stop()
 
-	service := &Service{
-		cfg: Config{
-			BackendURL: "http://backend.test",
-			AgentID:    "daemon_agent",
-		},
-		client:          client,
-		pendingSessions: map[string]updateAgentSessionRequest{},
-	}
+	worker.Publish(updateAgentSessionRequest{Status: "working", CurrentTurnID: "turn_1"})
+	<-firstCall
+	worker.Publish(updateAgentSessionRequest{Status: "idle", CurrentTurnID: "", CurrentActivity: "Idle"})
 
-	service.processSessionUpdate(context.Background(), agentSessionStatusUpdate{
-		AgentID: "agent_1",
-		Payload: updateAgentSessionRequest{
-			Status:        "working",
-			CodexThreadID: "thread_123",
-			CurrentTurnID: "turn_123",
-		},
+	waitUntil(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(calls) >= 2 && calls[1].Status == "idle"
 	})
-
-	if !sawPatch {
-		t.Fatal("expected session update to flush immediately")
-	}
-	if len(service.pendingSessions) != 0 {
-		t.Fatalf("expected pending session updates to be flushed, got %#v", service.pendingSessions)
-	}
-}
-
-func TestFlushSessionUpdatesRetainsFailuresForRetry(t *testing.T) {
-	attempts := 0
-	client := &http.Client{
-		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			if r.Method != http.MethodPatch || r.URL.Path != "/api/agents/agent_1/session" {
-				t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
-			}
-			attempts++
-			if attempts == 1 {
-				return nil, errors.New("temporary failure")
-			}
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader(`{"status":"ok"}`)),
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-			}, nil
-		}),
-	}
-
-	service := &Service{
-		cfg: Config{
-			BackendURL: "http://backend.test",
-			AgentID:    "daemon_agent",
-		},
-		client: client,
-		pendingSessions: map[string]updateAgentSessionRequest{
-			"agent_1": {Status: "working", CodexThreadID: "thread_123"},
-		},
-	}
-
-	if err := service.flushSessionUpdates(context.Background()); err == nil {
-		t.Fatal("expected first flush to fail")
-	}
-	if len(service.pendingSessions) != 1 {
-		t.Fatalf("expected failed update to remain pending, got %#v", service.pendingSessions)
-	}
-
-	if err := service.flushSessionUpdates(context.Background()); err != nil {
-		t.Fatalf("expected retry flush to succeed, got %v", err)
-	}
-	if attempts != 2 {
-		t.Fatalf("expected two flush attempts, got %d", attempts)
-	}
-	if len(service.pendingSessions) != 0 {
-		t.Fatalf("expected pending session updates to clear after retry, got %#v", service.pendingSessions)
-	}
 }
 
 func TestRefreshSharesFetchedWorkspaceWithWorkersAndReplicas(t *testing.T) {
@@ -195,7 +145,7 @@ func TestRefreshSharesFetchedWorkspaceWithWorkersAndReplicas(t *testing.T) {
 	client := &http.Client{
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			switch {
-			case r.Method == http.MethodGet && r.URL.Path == "/api/workspace/sync":
+			case r.Method == http.MethodGet && r.URL.Path == "/api/workspace":
 				workspaceSyncRequests.Add(1)
 				body, err := json.Marshal(workspace)
 				if err != nil {
@@ -235,7 +185,6 @@ func TestRefreshSharesFetchedWorkspaceWithWorkersAndReplicas(t *testing.T) {
 		client:          client,
 		projectedByPath: map[string]*trackedFile{},
 		projectedByID:   map[string]*trackedFile{},
-		pendingSessions: map[string]updateAgentSessionRequest{},
 		agentReplicas:   map[string]*managedReplica{},
 		agentWorkers:    map[string]*managedAgentWorker{},
 	}
@@ -420,13 +369,18 @@ func TestMaterializeTrackedFileWritesNewRemoteDocumentToDisk(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	doc := &document{
-		ID:        "doc_1",
-		Path:      "docs/remote.md",
-		Content:   "remote content",
-		CRDTState: encodeStateForContent(t, "remote content"),
+		ID:   "doc_1",
+		Path: "docs/remote.md",
+	}
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new document cache: %v", err)
+	}
+	if err := cache.storeDoc("doc_1", "docs/remote.md", 1, newDocWithText(t, "remote content")); err != nil {
+		t.Fatalf("store cached document: %v", err)
 	}
 
-	tracked, err := materializeTrackedFile(context.Background(), nil, doc, path)
+	tracked, err := materializeTrackedFile(context.Background(), cache, doc, path)
 	if err != nil {
 		t.Fatalf("materialize tracked file: %v", err)
 	}
@@ -688,7 +642,6 @@ func TestReconcileLocalWorkspacePrefersMoveForSameContent(t *testing.T) {
 	}
 	defer watcher.Close()
 
-	state := encodeStateForContent(t, "same")
 	doc := newDocWithText(t, "same")
 	tracked := &trackedFile{
 		DocumentID: "doc_1",
@@ -716,9 +669,9 @@ func TestReconcileLocalWorkspacePrefersMoveForSameContent(t *testing.T) {
 					Body:       io.NopCloser(strings.NewReader(`{"id":"doc_1"}`)),
 					Header:     http.Header{"Content-Type": []string{"application/json"}},
 				}, nil
-			case r.Method == http.MethodGet && r.URL.Path == "/api/workspace/sync":
+			case r.Method == http.MethodGet && r.URL.Path == "/api/workspace":
 				body, err := json.Marshal(workspaceResponse{
-					Documents: []*document{{ID: "doc_1", Path: "docs/new.md", Content: "same", CRDTState: state}},
+					Documents: []*document{{ID: "doc_1", Path: "docs/new.md"}},
 				})
 				if err != nil {
 					t.Fatalf("marshal workspace: %v", err)
@@ -864,7 +817,7 @@ func TestReconcileLocalWorkspaceDeletesMissingTrackedDocument(t *testing.T) {
 					Body:       io.NopCloser(strings.NewReader(`{"status":"deleted"}`)),
 					Header:     http.Header{"Content-Type": []string{"application/json"}},
 				}, nil
-			case r.Method == http.MethodGet && r.URL.Path == "/api/workspace/sync":
+			case r.Method == http.MethodGet && r.URL.Path == "/api/workspace":
 				body, err := json.Marshal(workspaceResponse{Documents: []*document{}})
 				if err != nil {
 					t.Fatalf("marshal workspace: %v", err)
@@ -904,6 +857,15 @@ func TestReconcileLocalWorkspaceDeletesMissingTrackedDocument(t *testing.T) {
 	}
 }
 
+func TestShouldWakeAgentWorkersForEventIncludesDocumentUpdates(t *testing.T) {
+	if !shouldWakeAgentWorkersForEvent("document.updated") {
+		t.Fatal("document.updated is a product notification and should wake agent workers")
+	}
+	if !shouldWakeAgentWorkersForEvent("thread.replied") {
+		t.Fatal("thread replies should wake agent workers")
+	}
+}
+
 func newDocWithText(t *testing.T, content string) *crdt.Doc {
 	t.Helper()
 	doc := crdt.New()
@@ -932,4 +894,18 @@ func encodeDocState(doc *crdt.Doc) string {
 func encodeStateForContent(t *testing.T, content string) string {
 	t.Helper()
 	return encodeDocState(newDocWithText(t, content))
+}
+
+func waitUntil(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !condition() {
+		t.Fatal("condition was not met before timeout")
+	}
 }

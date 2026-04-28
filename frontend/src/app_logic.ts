@@ -4,12 +4,6 @@ export type ReplaceOp = {
   text: string;
 };
 
-export type MentionQuery = {
-  start: number;
-  end: number;
-  query: string;
-};
-
 export type TextSelection = {
   start: number;
   end: number;
@@ -114,22 +108,6 @@ export function buildLineThreads<T extends { anchor: { line: number } }>(threads
   return Array.from(grouped.entries())
     .sort((left, right) => left[0] - right[0])
     .map(([line, groupedThreads]) => ({ line, threads: groupedThreads }));
-}
-
-export function findMentionQuery(value: string, start: number, end: number): MentionQuery | null {
-  if (start !== end) {
-    return null;
-  }
-  const before = value.slice(0, start);
-  const match = before.match(/(^|[\s([{])@([a-z0-9_-]*)$/i);
-  if (!match) {
-    return null;
-  }
-  return {
-    start: start - match[2].length - 1,
-    end: start,
-    query: match[2].toLowerCase(),
-  };
 }
 
 export function isFreshPresence(value?: string) {

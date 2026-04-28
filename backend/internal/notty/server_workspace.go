@@ -16,26 +16,11 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		"users":       SortedUsers(state),
 		"agents":      SortedAgents(state),
 		"agentRuns":   SortedWorkspaceAgentRuns(state),
-		"mentions":    SortedMentions(state),
 		"threads":     SortedThreads(state),
 		"agentEvents": SortedAgentEvents(state),
 		"presences":   state.Presences,
 		"proposals":   state.Proposals,
 		"activities":  state.Activities,
-		"updatedAt":   state.UpdatedAt,
-	})
-}
-
-func (s *Server) handleWorkspaceSync(w http.ResponseWriter, r *http.Request) {
-	state := s.store.Snapshot()
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"workspaceId": state.WorkspaceID,
-		"name":        state.Name,
-		"documents":   SortedSyncDocuments(state),
-		"agents":      SortedAgents(state),
-		"agentRuns":   SortedSyncAgentRuns(state),
-		"threads":     SortedThreads(state),
-		"agentEvents": SortedAgentEvents(state),
 		"updatedAt":   state.UpdatedAt,
 	})
 }
@@ -58,7 +43,6 @@ func (s *Server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 			"users":       SortedUsers(snapshot),
 			"agents":      SortedAgents(snapshot),
 			"agentRuns":   SortedWorkspaceAgentRuns(snapshot),
-			"mentions":    SortedMentions(snapshot),
 			"threads":     SortedThreads(snapshot),
 			"agentEvents": SortedAgentEvents(snapshot),
 			"presences":   snapshot.Presences,

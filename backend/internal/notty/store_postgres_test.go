@@ -9,6 +9,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/reearth/ygo/crdt"
+	"notty/internal/yproto"
 )
 
 func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
@@ -158,6 +159,7 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	if len(snapshot.Activities) == 0 {
 		t.Fatal("expected activities after reload")
 	}
+	assertNoActivityMaterializedContentColumn(t, db)
 
 	var snapshotTable sql.NullString
 	if err := db.QueryRow(`SELECT to_regclass('public.workspace_snapshots')`).Scan(&snapshotTable); err != nil {
@@ -165,6 +167,239 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	}
 	if snapshotTable.Valid {
 		t.Fatalf("expected workspace_snapshots table to be removed, got %q", snapshotTable.String)
+	}
+}
+
+func TestPostgresDocumentUpdateHotPathKeepsHeadSnapshotless(t *testing.T) {
+	dsn := os.Getenv("NOTTY_DATABASE_TEST_URL")
+	if dsn == "" {
+		t.Skip("NOTTY_DATABASE_TEST_URL is not set")
+	}
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+	if err := initPostgresSchema(db); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+	if err := clearNottyTables(db); err != nil {
+		t.Fatalf("clear tables: %v", err)
+	}
+
+	store, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	documentID := mustCreateTestDocument(t, store, "docs/hot.md", "")
+	initial, err := store.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get initial document: %v", err)
+	}
+
+	var initialHeadUpdateID int64
+	var initialHeadStateVector string
+	if err := db.QueryRow(
+		`SELECT update_id, state_vector FROM document_heads WHERE workspace_id = $1 AND document_id = $2`,
+		"ws_notty",
+		documentID,
+	).Scan(&initialHeadUpdateID, &initialHeadStateVector); err != nil {
+		t.Fatalf("query initial head: %v", err)
+	}
+	if initialHeadUpdateID <= 0 || initialHeadStateVector == "" {
+		t.Fatalf("expected initialized lightweight head, updateID=%d stateVector=%q", initialHeadUpdateID, initialHeadStateVector)
+	}
+	assertNoDocumentHeadMaterializationColumns(t, db)
+	var initialCheckpointState string
+	if err := db.QueryRow(
+		`SELECT crdt_state FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2 AND update_id = $3`,
+		"ws_notty",
+		documentID,
+		initialHeadUpdateID,
+	).Scan(&initialCheckpointState); err != nil {
+		t.Fatalf("query initial checkpoint: %v", err)
+	}
+	if initialCheckpointState == "" {
+		t.Fatal("expected initial checkpoint to hold the full CRDT state")
+	}
+
+	peer, err := decodeCRDTState(initial.CRDTState, 77)
+	if err != nil {
+		t.Fatalf("decode peer document: %v", err)
+	}
+	text := peer.GetText("content")
+	for _, value := range []string{"a", "b"} {
+		update := captureDocUpdate(t, peer, "peer", func(txn *crdt.Transaction) {
+			text.Insert(txn, text.Len(), value, nil)
+		})
+		if _, err := store.ApplyCRDTUpdate(documentID, update, OperationMeta{
+			ActorID:   "peer",
+			ActorType: "human",
+			Source:    "test",
+		}); err != nil {
+			t.Fatalf("apply update %q: %v", value, err)
+		}
+	}
+
+	var storedUpdateID int64
+	var storedStateVector string
+	if err := db.QueryRow(
+		`SELECT update_id, state_vector FROM document_heads WHERE workspace_id = $1 AND document_id = $2`,
+		"ws_notty",
+		documentID,
+	).Scan(&storedUpdateID, &storedStateVector); err != nil {
+		t.Fatalf("query updated head: %v", err)
+	}
+	if storedUpdateID <= initialHeadUpdateID || storedStateVector == "" {
+		t.Fatalf("expected hot path to update only lightweight head metadata, updateID=%d initial=%d stateVector=%q", storedUpdateID, initialHeadUpdateID, storedStateVector)
+	}
+
+	current, err := store.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get current document: %v", err)
+	}
+	currentDoc, err := decodeCRDTState(current.CRDTState, 88)
+	if err != nil {
+		t.Fatalf("decode current crdt state: %v", err)
+	}
+	if got := currentDoc.GetText("content").ToString(); got != "ab" {
+		t.Fatalf("expected on-demand document state to include hot-path updates, got %q", got)
+	}
+
+	if _, err := db.Exec(`DELETE FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2`, "ws_notty", documentID); err != nil {
+		t.Fatalf("delete checkpoints: %v", err)
+	}
+	reloaded, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("reload store: %v", err)
+	}
+	defer reloaded.Close()
+	reloadedDocument, err := reloaded.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get reloaded document: %v", err)
+	}
+	if reloadedDocument.Content != "ab" {
+		t.Fatalf("expected reload to replay update log without a head snapshot, got %q", reloadedDocument.Content)
+	}
+}
+
+func TestPostgresDocumentAtHandleTextDoesNotCreateMentionEvent(t *testing.T) {
+	dsn := os.Getenv("NOTTY_DATABASE_TEST_URL")
+	if dsn == "" {
+		t.Skip("NOTTY_DATABASE_TEST_URL is not set")
+	}
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+	if err := initPostgresSchema(db); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+	if err := clearNottyTables(db); err != nil {
+		t.Fatalf("clear tables: %v", err)
+	}
+
+	store, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	agent, err := store.CreateAgent(CreateAgentRequest{
+		Handle: "codex-agent",
+		Name:   "Codex Agent",
+		Role:   "Reviews docs",
+		Kind:   "codex",
+	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	documentID := mustCreateTestDocument(t, store, "docs/plain-at-handle.md", "Draft.\n")
+	document, err := store.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get document: %v", err)
+	}
+	peer, err := decodeCRDTState(document.CRDTState, 77)
+	if err != nil {
+		t.Fatalf("decode document: %v", err)
+	}
+	text := peer.GetText("content")
+	update := captureDocUpdate(t, peer, "peer", func(txn *crdt.Transaction) {
+		text.Insert(txn, text.Len(), "Please review @codex-agent.\n", nil)
+	})
+	if _, err := store.ApplyCRDTUpdate(documentID, update, OperationMeta{
+		ActorID:   "peer",
+		ActorType: "human",
+		Source:    "test",
+	}); err != nil {
+		t.Fatalf("apply document update: %v", err)
+	}
+
+	items, err := store.ListAgentInbox(agent.ID, "for_me", "pending")
+	if err != nil {
+		t.Fatalf("list agent inbox: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("document @handle text must not enqueue for-me items, got %#v", items)
+	}
+}
+
+func TestPostgresUpdateAgentSessionPersistsTargetAgent(t *testing.T) {
+	dsn := os.Getenv("NOTTY_DATABASE_TEST_URL")
+	if dsn == "" {
+		t.Skip("NOTTY_DATABASE_TEST_URL is not set")
+	}
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+	if err := initPostgresSchema(db); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+	if err := clearNottyTables(db); err != nil {
+		t.Fatalf("clear tables: %v", err)
+	}
+
+	store, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	agent, err := store.CreateAgent(CreateAgentRequest{
+		Handle: "session-agent",
+		Name:   "Session Agent",
+		Role:   "Keeps one long-lived Codex thread",
+		Kind:   "codex",
+	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	if _, err := store.UpdateAgentSession(agent.ID, UpdateAgentSessionRequest{
+		Status:          "working",
+		CodexThreadID:   "thread_pg",
+		CurrentTurnID:   "turn_pg",
+		CurrentActivity: "Handling notifications",
+	}, OperationMeta{ActorID: "daemon_agent", ActorType: "agent", Source: "test"}); err != nil {
+		t.Fatalf("update agent session: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	reloaded, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("reload store: %v", err)
+	}
+	defer reloaded.Close()
+	got := reloaded.Snapshot().Agents[agent.ID]
+	if got == nil || got.Status != "working" || got.CodexThreadID != "thread_pg" || got.CurrentTurnID != "turn_pg" {
+		t.Fatalf("expected targeted session fields to persist, got %#v", got)
 	}
 }
 
@@ -209,18 +444,15 @@ func TestPostgresDocumentUpdatesPersistWithoutWorkspaceSnapshot(t *testing.T) {
 		t.Fatalf("unexpected updated content: %q", updated.Content)
 	}
 
-	var headContent string
 	var headUpdateID int64
 	var headStateVector string
-	if err := db.QueryRow(`SELECT content, update_id, state_vector FROM document_heads WHERE workspace_id = $1 AND document_id = $2`, "ws_notty", documentID).Scan(&headContent, &headUpdateID, &headStateVector); err != nil {
+	if err := db.QueryRow(`SELECT update_id, state_vector FROM document_heads WHERE workspace_id = $1 AND document_id = $2`, "ws_notty", documentID).Scan(&headUpdateID, &headStateVector); err != nil {
 		t.Fatalf("query document head: %v", err)
-	}
-	if headContent != "# after\n" {
-		t.Fatalf("unexpected document head content: %q", headContent)
 	}
 	if headUpdateID == 0 || headStateVector == "" {
 		t.Fatalf("expected versioned document head, updateID=%d stateVector=%q", headUpdateID, headStateVector)
 	}
+	assertNoDocumentHeadMaterializationColumns(t, db)
 
 	var updateCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM document_updates WHERE workspace_id = $1 AND document_id = $2`, "ws_notty", documentID).Scan(&updateCount); err != nil {
@@ -235,6 +467,123 @@ func TestPostgresDocumentUpdatesPersistWithoutWorkspaceSnapshot(t *testing.T) {
 	}
 	if checkpointCount == 0 {
 		t.Fatal("expected document checkpoint")
+	}
+}
+
+func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testing.T) {
+	dsn := os.Getenv("NOTTY_DATABASE_TEST_URL")
+	if dsn == "" {
+		t.Skip("NOTTY_DATABASE_TEST_URL is not set")
+	}
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+	if err := initPostgresSchema(db); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+	if err := clearNottyTables(db); err != nil {
+		t.Fatalf("clear tables: %v", err)
+	}
+
+	store, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+	server := NewServer(Config{}, store)
+
+	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "version 0\n")
+	for index := 1; index <= 105; index++ {
+		if _, _, err := store.ReplaceDocumentText(documentID, "version "+strconv.Itoa(index)+"\n", OperationMeta{
+			ActorID:   "owner",
+			ActorType: "human",
+			Source:    "test",
+		}); err != nil {
+			t.Fatalf("replace document text %d: %v", index, err)
+		}
+	}
+
+	head, err := store.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get document head: %v", err)
+	}
+	var checkpointUpdateID int64
+	if err := db.QueryRow(
+		`SELECT update_id
+		   FROM document_checkpoints
+		  WHERE workspace_id = $1 AND document_id = $2 AND update_id <= $3
+		  ORDER BY update_id DESC
+		  LIMIT 1`,
+		"ws_notty",
+		documentID,
+		head.UpdateID,
+	).Scan(&checkpointUpdateID); err != nil {
+		t.Fatalf("query latest checkpoint: %v", err)
+	}
+	var tailCount int
+	if err := db.QueryRow(
+		`SELECT COUNT(*)
+		   FROM document_updates
+		  WHERE workspace_id = $1 AND document_id = $2 AND id > $3 AND id <= $4`,
+		"ws_notty",
+		documentID,
+		checkpointUpdateID,
+		head.UpdateID,
+	).Scan(&tailCount); err != nil {
+		t.Fatalf("query tail updates: %v", err)
+	}
+	if tailCount == 0 {
+		t.Fatalf("test setup expected tail updates after checkpoint, checkpoint=%d head=%d", checkpointUpdateID, head.UpdateID)
+	}
+
+	clientDoc := crdt.New()
+	conn := &DocumentConn{send: make(chan []byte, 128)}
+	if err := server.handleDocumentProtocolMessage(server.rooms.ForDocument(documentID), conn, documentID, yproto.BuildSyncStep1(clientDoc), OperationMeta{
+		ActorID:   "client",
+		ActorType: "human",
+		Source:    "test",
+	}); err != nil {
+		t.Fatalf("start cold sync: %v", err)
+	}
+
+	var syncTypes []uint64
+	for {
+		select {
+		case payload := <-conn.send:
+			syncTypes = append(syncTypes, decodeSyncTypeForTest(t, payload))
+			reply := applySyncPayloadToDoc(t, clientDoc, payload, "server-cold-bootstrap")
+			if len(reply) > 0 {
+				if err := server.handleDocumentProtocolMessage(server.rooms.ForDocument(documentID), conn, documentID, reply, OperationMeta{
+					ActorID:   "client",
+					ActorType: "human",
+					Source:    "test",
+				}); err != nil {
+					t.Fatalf("apply cold sync reply: %v", err)
+				}
+			}
+		default:
+			if got := clientDoc.GetText("content").ToString(); got != head.Content {
+				t.Fatalf("cold bootstrap content diverged: got %q want %q", got, head.Content)
+			}
+			if len(syncTypes) != tailCount+2 {
+				t.Fatalf("expected checkpoint, %d tail updates, and server sync step1; got sync types %v", tailCount, syncTypes)
+			}
+			if syncTypes[0] != yproto.SyncStep2 {
+				t.Fatalf("expected checkpoint as sync step2, got sync types %v", syncTypes)
+			}
+			for index := 1; index <= tailCount; index++ {
+				if syncTypes[index] != yproto.SyncUpdate {
+					t.Fatalf("expected tail update at message %d, got sync types %v", index, syncTypes)
+				}
+			}
+			if syncTypes[len(syncTypes)-1] != yproto.SyncStep1 {
+				t.Fatalf("expected final server sync step1, got sync types %v", syncTypes)
+			}
+			return
+		}
 	}
 }
 
@@ -297,17 +646,14 @@ func TestPostgresApplyCRDTUpdatePersistsWithoutWorkspaceSnapshot(t *testing.T) {
 		t.Fatalf("unexpected updated content: %q", updated.Content)
 	}
 
-	var headContent string
 	var headUpdateID int64
-	if err := db.QueryRow(`SELECT content, update_id FROM document_heads WHERE workspace_id = $1 AND document_id = $2`, "ws_notty", documentID).Scan(&headContent, &headUpdateID); err != nil {
+	if err := db.QueryRow(`SELECT update_id FROM document_heads WHERE workspace_id = $1 AND document_id = $2`, "ws_notty", documentID).Scan(&headUpdateID); err != nil {
 		t.Fatalf("query document head: %v", err)
-	}
-	if headContent != "# before\nmore\n" {
-		t.Fatalf("unexpected document head content: %q", headContent)
 	}
 	if headUpdateID == 0 {
 		t.Fatal("expected document head update id")
 	}
+	assertNoDocumentHeadMaterializationColumns(t, db)
 
 	var updateCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM document_updates WHERE workspace_id = $1 AND document_id = $2`, "ws_notty", documentID).Scan(&updateCount); err != nil {
@@ -543,4 +889,64 @@ func clearNottyTables(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func decodeSyncTypeForTest(t *testing.T, payload []byte) uint64 {
+	t.Helper()
+	messageType, reader, err := yproto.DecodeProtocolMessage(payload)
+	if err != nil {
+		t.Fatalf("decode protocol message: %v", err)
+	}
+	if messageType != yproto.MessageSync {
+		t.Fatalf("expected sync message, got top-level type %d", messageType)
+	}
+	syncType, _, err := yproto.DecodeSyncMessage(reader)
+	if err != nil {
+		t.Fatalf("decode sync message: %v", err)
+	}
+	return syncType
+}
+
+func assertNoDocumentHeadMaterializationColumns(t *testing.T, db *sql.DB) {
+	t.Helper()
+	rows, err := db.Query(
+		`SELECT column_name
+		   FROM information_schema.columns
+		  WHERE table_name = 'document_heads'
+		    AND column_name IN ('content', 'crdt_state', 'crdt_state_update_id')`,
+	)
+	if err != nil {
+		t.Fatalf("query document_heads columns: %v", err)
+	}
+	defer rows.Close()
+	var columns []string
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&column); err != nil {
+			t.Fatalf("scan document_heads column: %v", err)
+		}
+		columns = append(columns, column)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate document_heads columns: %v", err)
+	}
+	if len(columns) != 0 {
+		t.Fatalf("document_heads must not materialize document state, found columns: %v", columns)
+	}
+}
+
+func assertNoActivityMaterializedContentColumn(t *testing.T, db *sql.DB) {
+	t.Helper()
+	var count int
+	if err := db.QueryRow(
+		`SELECT COUNT(*)
+		   FROM information_schema.columns
+		  WHERE table_name = 'activities'
+		    AND column_name = 'new_content'`,
+	).Scan(&count); err != nil {
+		t.Fatalf("query activities columns: %v", err)
+	}
+	if count != 0 {
+		t.Fatal("activities must not materialize document content in new_content")
+	}
 }

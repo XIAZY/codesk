@@ -152,11 +152,20 @@ func (a *fakeAppServer) PID() int {
 
 func TestAgentSessionStartsThreadWithDeveloperInstructions(t *testing.T) {
 	factory := newFakeAppServerFactory()
-	updates := make(chan agentSessionStatusUpdate, 8)
+	type statusUpdate struct {
+		agentID string
+		payload updateAgentSessionRequest
+	}
+	updates := make(chan statusUpdate, 8)
+	updater := func(ctx context.Context, agentID string, payload updateAgentSessionRequest) error {
+		updates <- statusUpdate{agentID: agentID, payload: payload}
+		return nil
+	}
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: t.TempDir(),
 		RuntimeDir:         t.TempDir(),
-	}, updates, factory.new)
+	}, updater, factory.new)
+	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Handle: "swe", Kind: "codex", SystemPrompt: "shared prompt"}
 
 	if err := supervisor.ensureSession(context.Background(), current); err != nil {
@@ -170,7 +179,7 @@ func TestAgentSessionStartsThreadWithDeveloperInstructions(t *testing.T) {
 		t.Fatalf("expected shared prompt in thread instructions, got %#v", app.threadInstructions)
 	}
 	update := <-updates
-	if update.AgentID != "agent_1" || update.Payload.Status != "idle" || update.Payload.CodexThreadID != "thread_new" {
+	if update.agentID != "agent_1" || update.payload.Status != "idle" || update.payload.CodexThreadID != "thread_new" {
 		t.Fatalf("unexpected session update: %#v", update)
 	}
 }
@@ -182,7 +191,8 @@ func TestAgentSessionConcurrentEnsureStartsOneAppServer(t *testing.T) {
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: t.TempDir(),
 		RuntimeDir:         t.TempDir(),
-	}, make(chan agentSessionStatusUpdate, 32), factory.new)
+	}, nil, factory.new)
+	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Handle: "swe", Kind: "codex", SystemPrompt: "shared prompt"}
 
 	const callers = 20
@@ -221,7 +231,8 @@ func TestAgentSessionIgnoresEventsFromStaleAppServer(t *testing.T) {
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: t.TempDir(),
 		RuntimeDir:         t.TempDir(),
-	}, make(chan agentSessionStatusUpdate, 16), factory.new)
+	}, nil, factory.new)
+	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
 	if err := supervisor.ensureSession(context.Background(), current); err != nil {
 		t.Fatalf("ensure session: %v", err)
@@ -257,7 +268,8 @@ func TestAgentSessionResumesExistingThread(t *testing.T) {
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: t.TempDir(),
 		RuntimeDir:         t.TempDir(),
-	}, make(chan agentSessionStatusUpdate, 8), factory.new)
+	}, nil, factory.new)
+	defer supervisor.Shutdown()
 
 	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex", CodexThreadID: "thread_existing"}); err != nil {
 		t.Fatalf("ensure session: %v", err)
@@ -276,7 +288,8 @@ func TestAgentSessionIdleNotificationStartsOncePerInboxSignature(t *testing.T) {
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: t.TempDir(),
 		RuntimeDir:         t.TempDir(),
-	}, make(chan agentSessionStatusUpdate, 16), factory.new)
+	}, nil, factory.new)
+	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
 
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "first", "for-me:v1", ""); err != nil {
@@ -306,7 +319,8 @@ func TestAgentSessionBusyForMeSteersOnceAndQueuesFollowup(t *testing.T) {
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: t.TempDir(),
 		RuntimeDir:         t.TempDir(),
-	}, make(chan agentSessionStatusUpdate, 16), factory.new)
+	}, nil, factory.new)
+	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
 
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "active", "", "general:v1"); err != nil {
@@ -343,7 +357,8 @@ func TestAgentSessionBusyGeneralQueuesFollowupWithoutSteer(t *testing.T) {
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: t.TempDir(),
 		RuntimeDir:         t.TempDir(),
-	}, make(chan agentSessionStatusUpdate, 16), factory.new)
+	}, nil, factory.new)
+	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
 
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "active", "for-me:v1", ""); err != nil {
@@ -375,7 +390,8 @@ func TestAgentSessionBusyGeneralCoalescesFollowupLogAndKeepsLatestSignature(t *t
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: workspaceRoot,
 		RuntimeDir:         t.TempDir(),
-	}, make(chan agentSessionStatusUpdate, 16), factory.new)
+	}, nil, factory.new)
+	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex", Handle: "tester"}
 
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "active", "for-me:v1", ""); err != nil {
@@ -416,7 +432,8 @@ func TestAgentSessionFailedTurnDoesNotMarkInboxSignatureDelivered(t *testing.T) 
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: t.TempDir(),
 		RuntimeDir:         t.TempDir(),
-	}, make(chan agentSessionStatusUpdate, 16), factory.new)
+	}, nil, factory.new)
+	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
 
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "first", "for-me:v1", ""); err != nil {
@@ -437,7 +454,8 @@ func TestAgentSessionBusyForMeSteersAtMostOncePerActiveTurn(t *testing.T) {
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: t.TempDir(),
 		RuntimeDir:         t.TempDir(),
-	}, make(chan agentSessionStatusUpdate, 16), factory.new)
+	}, nil, factory.new)
+	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
 
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "active", "", "general:v1"); err != nil {
@@ -461,7 +479,8 @@ func TestAgentSessionNoActiveTurnSteerErrorIsNotFatal(t *testing.T) {
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: t.TempDir(),
 		RuntimeDir:         t.TempDir(),
-	}, make(chan agentSessionStatusUpdate, 16), factory.new)
+	}, nil, factory.new)
+	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
 
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "active", "", "general:v1"); err != nil {

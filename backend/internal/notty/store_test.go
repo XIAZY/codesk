@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/reearth/ygo/crdt"
@@ -123,6 +124,84 @@ func TestStoreConvergesThreePeerOutOfOrderDuplicateUpdates(t *testing.T) {
 	}
 }
 
+func TestApplyCRDTDeleteOnlyUpdateIsAppliedEvenWhenStateVectorUnchanged(t *testing.T) {
+	dataFile := filepath.Join(t.TempDir(), "state.json")
+	store, err := NewStore(dataFile)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	documentID := mustCreateTestDocument(t, store, "docs/backspace.md", "abc")
+	document, err := store.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get document: %v", err)
+	}
+	beforeStateVector := document.StateVector
+
+	peer, err := decodeCRDTState(document.CRDTState, 77)
+	if err != nil {
+		t.Fatalf("decode peer state: %v", err)
+	}
+	text := peer.GetText("content")
+	insertUpdate := captureDocUpdate(t, peer, "peer-insert", func(txn *crdt.Transaction) {
+		text.Insert(txn, text.Len(), "d", nil)
+	})
+	if _, err := store.ApplyCRDTUpdateWithResult(documentID, insertUpdate, OperationMeta{
+		ActorID:   "peer",
+		ActorType: "human",
+		Source:    "test",
+	}); err != nil {
+		t.Fatalf("apply insert update: %v", err)
+	}
+	insertedDocument, err := store.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get inserted document: %v", err)
+	}
+	if insertedDocument.Content != "abcd" {
+		t.Fatalf("unexpected content after insert update: %q", insertedDocument.Content)
+	}
+	beforeDeleteStateVector := insertedDocument.StateVector
+
+	deleteUpdate := captureDocUpdate(t, peer, "peer-delete", func(txn *crdt.Transaction) {
+		text.Delete(txn, text.Len()-1, 1)
+	})
+	result, err := store.ApplyCRDTUpdateWithResult(documentID, deleteUpdate, OperationMeta{
+		ActorID:   "peer",
+		ActorType: "human",
+		Source:    "test",
+	})
+	if err != nil {
+		t.Fatalf("apply delete-only update: %v", err)
+	}
+	if !result.Applied {
+		t.Fatal("expected delete-only update to be marked applied")
+	}
+	if result.Document.Content != "abc" {
+		t.Fatalf("unexpected content after delete-only update: %q", result.Document.Content)
+	}
+	if result.Document.StateVector != beforeDeleteStateVector {
+		t.Fatalf("delete-only update should not advance state vector: before=%q after=%q", beforeDeleteStateVector, result.Document.StateVector)
+	}
+	if result.Document.StateVector == beforeStateVector {
+		t.Fatal("insert update should have advanced state vector before the delete-only update")
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	reloaded, err := NewStore(dataFile)
+	if err != nil {
+		t.Fatalf("reload store: %v", err)
+	}
+	defer reloaded.Close()
+	reloadedDocument, err := reloaded.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get reloaded document: %v", err)
+	}
+	if reloadedDocument.Content != "abc" {
+		t.Fatalf("expected delete-only update to persist, got %q", reloadedDocument.Content)
+	}
+}
+
 func TestStoreAppliesFrontendStyleUpdates(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
@@ -212,6 +291,66 @@ func TestStoreAppliesManySmallFrontendUpdatesExactlyOnce(t *testing.T) {
 	}
 	if reloadedDocument.Content != expected.String() {
 		t.Fatalf("reloaded content diverged: got %q want %q", reloadedDocument.Content, expected.String())
+	}
+}
+
+func TestConcurrentSelectedDocumentReadsAndUnrelatedUpdates(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	readDocumentID := mustCreateTestDocument(t, store, "docs/read-heavy.md", strings.Repeat("read-heavy\n", 2000))
+	writeDocumentID := mustCreateTestDocument(t, store, "docs/write-fast.md", "")
+
+	writeHead, err := store.GetDocument(writeDocumentID)
+	if err != nil {
+		t.Fatalf("get write document: %v", err)
+	}
+	writerDoc, err := decodeCRDTState(writeHead.CRDTState, 77)
+	if err != nil {
+		t.Fatalf("decode writer doc: %v", err)
+	}
+	writerText := writerDoc.GetText("content")
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 64)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 25; j++ {
+				if _, err := store.GetDocument(readDocumentID); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}()
+	}
+	for i := 0; i < 100; i++ {
+		update := captureDocUpdate(t, writerDoc, "browser", func(txn *crdt.Transaction) {
+			writerText.Insert(txn, writerText.Len(), "x", nil)
+		})
+		if _, err := store.ApplyCRDTUpdate(writeDocumentID, update, OperationMeta{
+			ActorID:   "web_user",
+			ActorType: "human",
+			Source:    "ui",
+		}); err != nil {
+			t.Fatalf("apply update %d: %v", i, err)
+		}
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent read failed: %v", err)
+		}
+	}
+	updated, err := store.GetDocument(writeDocumentID)
+	if err != nil {
+		t.Fatalf("get updated write document: %v", err)
+	}
+	if updated.Content != strings.Repeat("x", 100) {
+		t.Fatalf("write document diverged under concurrent reads: got %q", updated.Content)
 	}
 }
 
@@ -305,7 +444,8 @@ func assertSharedAgentPrompt(t *testing.T, prompt, name, handle, role string) {
 		role,
 		"Your file changes sync to other peers through the shared workspace promptly",
 		"Prefer direct edits to existing files when possible.",
-		"triggered by direct mentions, document edits, or thread messages",
+		"notified by direct thread mentions, document edits, thread messages, or an inbox check",
+		"Plain @handle text inside markdown documents is regular document text, not a notification",
 		"do not need to reply by default",
 		"If you have comments about a specific part of a document, reply in the existing thread anchored there or create a new thread anchored to that document range.",
 		"If you want help or input from other collaborators, mention them in the thread with their @handle.",
@@ -313,7 +453,7 @@ func assertSharedAgentPrompt(t *testing.T, prompt, name, handle, role string) {
 		"If you have doubts or are uncertain about a change, it is often better to ask for others' input in a thread before making the change.",
 		"It is important to consult others' opinions before making edits, and preferably have everyone aligned in a thread before making substantial changes.",
 		"Whenever possible, reuse an existing thread instead of opening a new one if the existing thread is already well aligned with the topic.",
-		"If you are directly mentioned, you must reply with the thread tools.",
+		"If you are directly mentioned in a thread, you must reply with the thread tools.",
 	} {
 		if !strings.Contains(prompt, fragment) {
 			t.Fatalf("expected system prompt to contain %q, got %q", fragment, prompt)
@@ -594,13 +734,12 @@ func TestUpdateAgentSessionPersistsCodexThreadAndTurn(t *testing.T) {
 	}
 }
 
-func TestUserCrudAndMentionExtraction(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "state.json"))
+func TestUserCrudPersistsPrincipalUpdates(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	store, err := NewStore(statePath)
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
-	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "Initial draft.\n")
-
 	user, err := store.CreateUser(CreateUserRequest{
 		Name:   "Ada Lovelace",
 		Handle: "ada",
@@ -624,24 +763,6 @@ func TestUserCrudAndMentionExtraction(t *testing.T) {
 		t.Fatalf("create agent: %v", err)
 	}
 
-	_, _, err = store.ReplaceDocumentText(documentID, "Ping @ada and @scribe in the plan.\n", OperationMeta{
-		ActorID:   "owner",
-		ActorType: "human",
-		Source:    "test",
-	})
-	if err != nil {
-		t.Fatalf("replace document text: %v", err)
-	}
-
-	snapshot := store.Snapshot()
-	if len(snapshot.Mentions) != 2 {
-		t.Fatalf("expected 2 mentions, got %d", len(snapshot.Mentions))
-	}
-	handles := []string{snapshot.Mentions[0].Handle, snapshot.Mentions[1].Handle}
-	if !(containsString(handles, "ada") && containsString(handles, "scribe")) {
-		t.Fatalf("unexpected mention handles: %#v", handles)
-	}
-
 	updated, err := store.UpdateUser(user.ID, UpdateUserRequest{
 		Handle: "ada-team",
 		Name:   "Ada Team",
@@ -654,9 +775,16 @@ func TestUserCrudAndMentionExtraction(t *testing.T) {
 		t.Fatalf("unexpected updated handle: %q", updated.Handle)
 	}
 
-	snapshot = store.Snapshot()
-	if len(snapshot.Mentions) != 1 || snapshot.Mentions[0].Handle != agent.Handle {
-		t.Fatalf("expected mention refresh after handle change, got %#v", snapshot.Mentions)
+	reloaded, err := NewStore(statePath)
+	if err != nil {
+		t.Fatalf("reload store: %v", err)
+	}
+	snapshot := reloaded.Snapshot()
+	if snapshot.Users[user.ID] == nil || snapshot.Users[user.ID].Handle != "ada-team" {
+		t.Fatalf("expected user update to persist, got %#v", snapshot.Users[user.ID])
+	}
+	if snapshot.Agents[agent.ID] == nil || snapshot.Agents[agent.ID].Handle != agent.Handle {
+		t.Fatalf("expected agent to persist, got %#v", snapshot.Agents[agent.ID])
 	}
 }
 
@@ -757,362 +885,22 @@ func TestLoadReconcilesMissingThreadMentionEvents(t *testing.T) {
 	}
 }
 
-func TestDocumentMentionEntersMentionedAgentForMeQueue(t *testing.T) {
+func TestDocumentAtHandleTextDoesNotCreateMentionNotification(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
 		t.Fatalf("new store: %v", err)
+	}
+	agent, err := store.CreateAgent(CreateAgentRequest{
+		Handle: "codex-agent",
+		Name:   "Codex Agent",
+		Role:   "Reviews docs",
+		Kind:   "codex",
+	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
 	}
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "Draft.\n")
-	reviewer, err := store.CreateAgent(CreateAgentRequest{
-		Handle: "codex-agent",
-		Name:   "Codex Agent",
-		Role:   "Reviews docs",
-		Kind:   "codex",
-	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
-	if err != nil {
-		t.Fatalf("create reviewer: %v", err)
-	}
-	observer, err := store.CreateAgent(CreateAgentRequest{
-		Handle: "observer",
-		Name:   "Observer",
-		Role:   "Watches general activity",
-		Kind:   "codex",
-	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
-	if err != nil {
-		t.Fatalf("create observer: %v", err)
-	}
-
-	if _, _, err := store.ReplaceDocumentText(documentID, "Please review this @codex-agent.\n", OperationMeta{
-		ActorID:   "owner",
-		ActorType: "human",
-		Source:    "test",
-	}); err != nil {
-		t.Fatalf("replace document text: %v", err)
-	}
-
-	reviewerItems, err := store.ListAgentInbox(reviewer.ID, "for_me", "pending")
-	if err != nil {
-		t.Fatalf("list reviewer for-me inbox: %v", err)
-	}
-	reviewerMention := findAgentEventByType(reviewerItems, "document.mentioned")
-	if reviewerMention == nil || reviewerMention.DocumentID != documentID || reviewerMention.AnchorEnd <= reviewerMention.AnchorStart {
-		t.Fatalf("expected document mention in reviewer for-me queue, got %s", formatAgentEvents(reviewerItems))
-	}
-
-	observerItems, err := store.ListAgentInbox(observer.ID, "for_me", "pending")
-	if err != nil {
-		t.Fatalf("list observer for-me inbox: %v", err)
-	}
-	if observerMention := findAgentEventByType(observerItems, "document.mentioned"); observerMention != nil {
-		t.Fatalf("expected observer not to receive document mention, got %#v", observerMention)
-	}
-
-	claimed, err := store.ClaimAgentEvent(ClaimAgentEventRequest{AgentID: reviewer.ID, ClaimedBy: "daemon"})
-	if err != nil {
-		t.Fatalf("claim reviewer event: %v", err)
-	}
-	if claimed.Type != "document.mentioned" || claimed.DocumentID != documentID || claimed.Status != "processing" {
-		t.Fatalf("unexpected claimed document mention: %#v", claimed)
-	}
-}
-
-func TestCreateDocumentQueuesInitialAgentMention(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "state.json"))
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	agent, err := store.CreateAgent(CreateAgentRequest{
-		Handle: "codex-agent",
-		Name:   "Codex Agent",
-		Role:   "Reviews docs",
-		Kind:   "codex",
-	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
-	if err != nil {
-		t.Fatalf("create agent: %v", err)
-	}
-	document, err := store.CreateDocument(CreateDocumentRequest{
-		Path:    "docs/mentioned.md",
-		Content: "Initial ask for @codex-agent.\n",
-	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
-	if err != nil {
-		t.Fatalf("create document: %v", err)
-	}
-
-	items, err := store.ListAgentInbox(agent.ID, "for_me", "pending")
-	if err != nil {
-		t.Fatalf("list agent inbox: %v", err)
-	}
-	mention := findAgentEventByType(items, "document.mentioned")
-	if mention == nil || mention.DocumentID != document.ID {
-		t.Fatalf("expected initial document mention in for-me queue, got %s", formatAgentEvents(items))
-	}
-}
-
-func TestApplyCRDTUpdateQueuesHyphenatedDocumentMention(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "state.json"))
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "Draft.\n")
-	agent, err := store.CreateAgent(CreateAgentRequest{
-		Handle: "codex-agent",
-		Name:   "Codex Agent",
-		Role:   "Reviews docs",
-		Kind:   "codex",
-	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
-	if err != nil {
-		t.Fatalf("create agent: %v", err)
-	}
-	document, err := store.GetDocument(documentID)
-	if err != nil {
-		t.Fatalf("get document: %v", err)
-	}
-	frontendDoc, err := decodeCRDTState(document.CRDTState, 404)
-	if err != nil {
-		t.Fatalf("decode frontend document: %v", err)
-	}
-	text := frontendDoc.GetText("content")
-	update := captureDocUpdate(t, frontendDoc, "browser", func(txn *crdt.Transaction) {
-		text.Insert(txn, text.Len(), "Please review this @codex-agent.\n", nil)
-	})
-
-	result, err := store.ApplyCRDTUpdateWithResult(documentID, update, OperationMeta{
-		ActorID:   "owner",
-		ActorType: "human",
-		Source:    "ws",
-	})
-	if err != nil {
-		t.Fatalf("apply crdt update: %v", err)
-	}
-	if !result.MentionsChanged {
-		t.Fatal("expected CRDT document update to report changed mentions")
-	}
-
-	items, err := store.ListAgentInbox(agent.ID, "for_me", "pending")
-	if err != nil {
-		t.Fatalf("list agent inbox: %v", err)
-	}
-	mention := findAgentEventByType(items, "document.mentioned")
-	if mention == nil || mention.DocumentID != documentID || mention.AnchorEnd <= mention.AnchorStart {
-		t.Fatalf("expected hyphenated document mention in for-me queue, got %s", formatAgentEvents(items))
-	}
-}
-
-func TestDocumentMentionMoveDoesNotQueueAnotherDirectMention(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "state.json"))
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	agent, err := store.CreateAgent(CreateAgentRequest{
-		Handle: "codex-agent",
-		Name:   "Codex Agent",
-		Role:   "Reviews docs",
-		Kind:   "codex",
-	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
-	if err != nil {
-		t.Fatalf("create agent: %v", err)
-	}
-	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "Ping @codex-agent.\n")
-	document, err := store.GetDocument(documentID)
-	if err != nil {
-		t.Fatalf("get document: %v", err)
-	}
-	frontendDoc, err := decodeCRDTState(document.CRDTState, 505)
-	if err != nil {
-		t.Fatalf("decode frontend document: %v", err)
-	}
-	text := frontendDoc.GetText("content")
-	update := captureDocUpdate(t, frontendDoc, "browser", func(txn *crdt.Transaction) {
-		text.Insert(txn, 0, "Intro. ", nil)
-	})
-	if _, err := store.ApplyCRDTUpdateWithResult(documentID, update, OperationMeta{
-		ActorID:   "owner",
-		ActorType: "human",
-		Source:    "ws",
-	}); err != nil {
-		t.Fatalf("apply crdt update: %v", err)
-	}
-
-	mentions := documentMentionsForDocument(store.Snapshot(), documentID)
-	if len(mentions) != 1 || mentions[0].ID == "" || mentions[0].Start <= 5 {
-		t.Fatalf("expected shifted durable mention overlay, got %#v", mentions)
-	}
-
-	var mentionEvents int
-	for _, event := range store.Snapshot().AgentEvents {
-		if event.AgentID == agent.ID && event.Type == "document.mentioned" {
-			mentionEvents++
-		}
-	}
-	if mentionEvents != 1 {
-		t.Fatalf("expected shifted existing mention not to queue again, got %d document mention events", mentionEvents)
-	}
-}
-
-func TestMultipleDocumentMentionsQueueSeparateEvents(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "state.json"))
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	agent, err := store.CreateAgent(CreateAgentRequest{
-		Handle: "codex-agent",
-		Name:   "Codex Agent",
-		Role:   "Reviews docs",
-		Kind:   "codex",
-	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
-	if err != nil {
-		t.Fatalf("create agent: %v", err)
-	}
-	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "First @codex-agent and later @codex-agent.\n")
-
-	mentions := documentMentionsForDocument(store.Snapshot(), documentID)
-	if len(mentions) != 2 || mentions[0].ID == mentions[1].ID {
-		t.Fatalf("expected two distinct durable mention overlays, got %#v", mentions)
-	}
-	if got := countAgentEvents(store.Snapshot(), agent.ID, "document.mentioned"); got != 2 {
-		t.Fatalf("expected one event per mention occurrence, got %d", got)
-	}
-}
-
-func TestDeletingDocumentMentionMarksRecordInactive(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "state.json"))
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	if _, err := store.CreateAgent(CreateAgentRequest{
-		Handle: "codex-agent",
-		Name:   "Codex Agent",
-		Role:   "Reviews docs",
-		Kind:   "codex",
-	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"}); err != nil {
-		t.Fatalf("create agent: %v", err)
-	}
-	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "Ping @codex-agent.\n")
-
-	if _, _, err := store.ReplaceDocumentText(documentID, "Ping nobody.\n", OperationMeta{
-		ActorID:   "owner",
-		ActorType: "human",
-		Source:    "test",
-	}); err != nil {
-		t.Fatalf("replace document text: %v", err)
-	}
-
-	snapshot := store.Snapshot()
-	if mentions := documentMentionsForDocument(snapshot, documentID); len(mentions) != 0 {
-		t.Fatalf("expected no active mention overlays after deletion, got %#v", mentions)
-	}
-	records := durableMentionsForDocument(snapshot, documentID)
-	if len(records) != 1 || records[0].Status != "inactive" || records[0].DeletedAt.IsZero() {
-		t.Fatalf("expected inactive durable mention record, got %#v", records)
-	}
-}
-
-func TestRetypingDocumentMentionCreatesNewRecordAndNotification(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "state.json"))
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	agent, err := store.CreateAgent(CreateAgentRequest{
-		Handle: "codex-agent",
-		Name:   "Codex Agent",
-		Role:   "Reviews docs",
-		Kind:   "codex",
-	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
-	if err != nil {
-		t.Fatalf("create agent: %v", err)
-	}
-	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "Ping @codex-agent.\n")
-	firstMentions := documentMentionsForDocument(store.Snapshot(), documentID)
-	if len(firstMentions) != 1 {
-		t.Fatalf("expected initial mention overlay, got %#v", firstMentions)
-	}
-
-	if _, _, err := store.ReplaceDocumentText(documentID, "Ping nobody.\n", OperationMeta{
-		ActorID:   "owner",
-		ActorType: "human",
-		Source:    "test",
-	}); err != nil {
-		t.Fatalf("remove mention: %v", err)
-	}
-	if _, _, err := store.ReplaceDocumentText(documentID, "Ping @codex-agent again.\n", OperationMeta{
-		ActorID:   "owner",
-		ActorType: "human",
-		Source:    "test",
-	}); err != nil {
-		t.Fatalf("retype mention: %v", err)
-	}
-
-	secondMentions := documentMentionsForDocument(store.Snapshot(), documentID)
-	if len(secondMentions) != 1 || secondMentions[0].ID == firstMentions[0].ID {
-		t.Fatalf("expected retyped mention to get a fresh durable identity, before=%#v after=%#v", firstMentions, secondMentions)
-	}
-	if got := countAgentEvents(store.Snapshot(), agent.ID, "document.mentioned"); got != 2 {
-		t.Fatalf("expected retyped mention to queue a new event, got %d", got)
-	}
-}
-
-func TestDocumentMentionRecordsPersistAcrossReload(t *testing.T) {
-	dataFile := filepath.Join(t.TempDir(), "state.json")
-	store, err := NewStore(dataFile)
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	if _, err := store.CreateAgent(CreateAgentRequest{
-		Handle: "codex-agent",
-		Name:   "Codex Agent",
-		Role:   "Reviews docs",
-		Kind:   "codex",
-	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"}); err != nil {
-		t.Fatalf("create agent: %v", err)
-	}
-	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "Ping @codex-agent.\n")
-	before := documentMentionsForDocument(store.Snapshot(), documentID)
-	if len(before) != 1 || before[0].ID == "" {
-		t.Fatalf("expected one durable mention before reload, got %#v", before)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatalf("close store: %v", err)
-	}
-
-	reloaded, err := NewStore(dataFile)
-	if err != nil {
-		t.Fatalf("reload store: %v", err)
-	}
-	defer reloaded.Close()
-	after := documentMentionsForDocument(reloaded.Snapshot(), documentID)
-	if len(after) != 1 || after[0].ID != before[0].ID || after[0].Start != before[0].Start {
-		t.Fatalf("expected durable mention identity to survive reload, before=%#v after=%#v", before, after)
-	}
-}
-
-func TestExistingDocumentMentionClassifiesLaterUpdatesAsDocumentUpdated(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "state.json"))
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	agent, err := store.CreateAgent(CreateAgentRequest{
-		Handle: "codex-agent",
-		Name:   "Codex Agent",
-		Role:   "Reviews docs",
-		Kind:   "codex",
-	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
-	if err != nil {
-		t.Fatalf("create agent: %v", err)
-	}
-	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "Ping @codex-agent.\n")
-	claimed, err := store.ClaimAgentEvent(ClaimAgentEventRequest{AgentID: agent.ID, ClaimedBy: "daemon"})
-	if err != nil {
-		t.Fatalf("claim initial mention: %v", err)
-	}
-	if _, err := store.UpdateAgentEvent(claimed.ID, UpdateAgentEventRequest{Status: "completed"}, OperationMeta{
-		ActorID:   agent.ID,
-		ActorType: "agent",
-		Source:    "test",
-	}); err != nil {
-		t.Fatalf("complete initial mention: %v", err)
-	}
-
-	if _, _, err := store.ReplaceDocumentText(documentID, "Intro.\nPing @codex-agent.\n", OperationMeta{
+	if _, _, err := store.ReplaceDocumentText(documentID, "Ping @codex-agent in plaintext.\n", OperationMeta{
 		ActorID:   "owner",
 		ActorType: "human",
 		Source:    "test",
@@ -1123,9 +911,11 @@ func TestExistingDocumentMentionClassifiesLaterUpdatesAsDocumentUpdated(t *testi
 	if err != nil {
 		t.Fatalf("list agent inbox: %v", err)
 	}
-	item := findDocumentInboxItem(items, documentID, "for_me")
-	if item == nil || item.Type != "document.updated" {
-		t.Fatalf("expected later edit to be classified as document.updated, got %s", formatAgentEvents(items))
+	if len(items) != 0 {
+		t.Fatalf("document @handle text must not create for-me notifications, got %#v", items)
+	}
+	if item := findDocumentInboxItem(items, documentID, "for_me"); item != nil {
+		t.Fatalf("document @handle text must not classify document update as for-me, got %#v", item)
 	}
 }
 
@@ -1314,19 +1104,26 @@ func TestStoreNotificationHelpersExposeAndUpdatePendingNotifications(t *testing.
 	if err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
-	if _, _, err := store.ReplaceDocumentText(documentID, "Please sync with @scribe.\n", OperationMeta{
+	thread, _, err := store.CreateThread(CreateThreadRequest{
+		DocumentID: documentID,
+		Title:      "Need review",
+		Body:       "Please sync with @scribe.",
+		Start:      0,
+		End:        5,
+	}, OperationMeta{
 		ActorID:   "owner",
 		ActorType: "human",
 		Source:    "test",
-	}); err != nil {
-		t.Fatalf("replace document text: %v", err)
+	})
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
 	}
 
 	notifications, err := store.ListAgentNotifications(agent.ID, "pending")
 	if err != nil {
 		t.Fatalf("list notifications: %v", err)
 	}
-	if len(notifications) != 1 || notifications[0].Type != "document.mentioned" {
+	if len(notifications) != 1 || notifications[0].Type != "thread.mentioned" || notifications[0].ThreadID != thread.ID {
 		t.Fatalf("unexpected notifications: %#v", notifications)
 	}
 	notification, err := store.GetAgentNotification(notifications[0].ID)
@@ -1618,7 +1415,7 @@ func TestAgentInboxDedupesDocumentUpdatesAndDiffsFromLastViewed(t *testing.T) {
 	}
 }
 
-func TestDocumentMentionEventClaimAndComplete(t *testing.T) {
+func TestThreadMentionEventClaimAndComplete(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
 		t.Fatalf("new store: %v", err)
@@ -1634,12 +1431,19 @@ func TestDocumentMentionEventClaimAndComplete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
-	if _, _, err := store.ReplaceDocumentText(documentID, "Please sync with @scribe.\n", OperationMeta{
+	thread, _, err := store.CreateThread(CreateThreadRequest{
+		DocumentID: documentID,
+		Title:      "Need review",
+		Body:       "Please sync with @scribe.",
+		Start:      0,
+		End:        5,
+	}, OperationMeta{
 		ActorID:   "owner",
 		ActorType: "human",
 		Source:    "test",
-	}); err != nil {
-		t.Fatalf("replace document text: %v", err)
+	})
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
 	}
 
 	claimed, err := store.ClaimAgentEvent(ClaimAgentEventRequest{
@@ -1649,7 +1453,7 @@ func TestDocumentMentionEventClaimAndComplete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim agent event: %v", err)
 	}
-	if claimed.Type != "document.mentioned" || claimed.Status != "processing" {
+	if claimed.Type != "thread.mentioned" || claimed.ThreadID != thread.ID || claimed.Status != "processing" {
 		t.Fatalf("unexpected claimed event: %#v", claimed)
 	}
 
@@ -1665,7 +1469,7 @@ func TestDocumentMentionEventClaimAndComplete(t *testing.T) {
 	}
 }
 
-func TestAgentSelfMentionDoesNotEnqueueDocumentEvent(t *testing.T) {
+func TestDocumentAtHandleTextNeverEnqueuesAgentEvent(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
 		t.Fatalf("new store: %v", err)
@@ -1691,7 +1495,7 @@ func TestAgentSelfMentionDoesNotEnqueueDocumentEvent(t *testing.T) {
 	}
 
 	if got := len(store.Snapshot().AgentEvents); got != 0 {
-		t.Fatalf("expected no agent event for self-mentioning edit, got %d", got)
+		t.Fatalf("expected no agent event for document @handle text, got %d", got)
 	}
 }
 
@@ -1790,28 +1594,6 @@ func containsString(items []string, target string) bool {
 		}
 	}
 	return false
-}
-
-func documentMentionsForDocument(state WorkspaceState, documentID string) []*Mention {
-	mentions := make([]*Mention, 0)
-	for _, mention := range state.Mentions {
-		if mention != nil && mention.DocumentID == documentID {
-			clone := *mention
-			mentions = append(mentions, &clone)
-		}
-	}
-	return mentions
-}
-
-func durableMentionsForDocument(state WorkspaceState, documentID string) []*DocumentMention {
-	mentions := make([]*DocumentMention, 0)
-	for _, mention := range state.DocumentMentions {
-		if mention != nil && mention.DocumentID == documentID {
-			clone := *mention
-			mentions = append(mentions, &clone)
-		}
-	}
-	return mentions
 }
 
 func countAgentEvents(state WorkspaceState, agentID string, eventType string) int {

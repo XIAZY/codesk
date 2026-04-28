@@ -3,7 +3,6 @@ package syncer
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,11 +34,9 @@ type Service struct {
 	watcher         *fsnotify.Watcher
 	sessions        *agentSessionSupervisor
 	toolServer      *http.Server
-	sessionUpdates  chan agentSessionStatusUpdate
 	mu              sync.Mutex
 	projectedByPath map[string]*trackedFile
 	projectedByID   map[string]*trackedFile
-	pendingSessions map[string]updateAgentSessionRequest
 	agentReplicas   map[string]*managedReplica
 	agentWorkers    map[string]*managedAgentWorker
 	latestWorkspace *workspaceResponse
@@ -93,8 +90,6 @@ type workspaceResponse struct {
 type document struct {
 	ID          string `json:"id"`
 	Path        string `json:"path"`
-	Content     string `json:"content"`
-	CRDTState   string `json:"crdtState"`
 	StateVector string `json:"stateVector"`
 	UpdateID    int64  `json:"updateId"`
 }
@@ -121,9 +116,8 @@ func New(cfg Config) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	sessionUpdates := make(chan agentSessionStatusUpdate, 128)
-	client := &http.Client{Timeout: 10 * time.Second}
-	cache, err := newDocumentCache(cfg.CacheDir, cfg.BackendURL, client)
+	client := &http.Client{Timeout: 30 * time.Second}
+	cache, err := newDocumentCache(cfg.CacheDir)
 	if err != nil {
 		_ = watcher.Close()
 		return nil, err
@@ -132,15 +126,14 @@ func New(cfg Config) (*Service, error) {
 		cfg:             cfg,
 		client:          client,
 		watcher:         watcher,
-		sessionUpdates:  sessionUpdates,
 		projectedByPath: map[string]*trackedFile{},
 		projectedByID:   map[string]*trackedFile{},
-		pendingSessions: map[string]updateAgentSessionRequest{},
 		agentReplicas:   map[string]*managedReplica{},
 		agentWorkers:    map[string]*managedAgentWorker{},
 		docCache:        cache,
 	}
-	service.sessions = newAgentSessionSupervisor(cfg, sessionUpdates, nil)
+	service.sessions = newAgentSessionSupervisor(cfg, service.updateRemoteAgentSession, nil)
+	service.sessions.SetIdleWake(service.wakeAgentWorker)
 	return service, nil
 }
 
@@ -176,10 +169,7 @@ func (s *Service) Run(ctx context.Context) error {
 			s.closeAgentReplicas()
 			s.sessions.Shutdown()
 			_ = shutdownToolGateway(context.Background(), s.toolServer)
-			_ = s.flushSessionUpdates(context.Background())
 			return nil
-		case update := <-s.sessionUpdates:
-			s.processSessionUpdate(ctx, update)
 		case event := <-s.watcher.Events:
 			if event.Op&fsnotify.Create != 0 {
 				if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
@@ -201,9 +191,6 @@ func (s *Service) Run(ctx context.Context) error {
 				fmt.Printf("watcher error: %v\n", err)
 			}
 		case <-ticker.C:
-			if err := s.flushSessionUpdates(ctx); err != nil {
-				fmt.Printf("agent status error: %v\n", err)
-			}
 			if err := s.reconcileLocalWorkspace(ctx); err != nil {
 				fmt.Printf("local reconcile error: %v\n", err)
 			}
@@ -343,7 +330,7 @@ func (s *Service) refresh(ctx context.Context) error {
 }
 
 func (s *Service) fetchWorkspace(ctx context.Context) (*workspaceResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.BackendURL+"/api/workspace/sync", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.BackendURL+"/api/workspace", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -686,6 +673,9 @@ func handleTrackedLocalChange(tracked *trackedFile, path string) ([]byte, error)
 	if tracked.isProjecting() {
 		return nil, nil
 	}
+	if !tracked.hasProjectedContent() {
+		return nil, nil
+	}
 	contentBytes, err := readFileLocked(path)
 	if err != nil {
 		return nil, err
@@ -768,8 +758,12 @@ func materializeTrackedFile(ctx context.Context, cache *documentCache, document 
 		cache:             cache,
 		cacheEntry:        materialized.Entry,
 	}
-	if err := applyProjectedContent(tracked, materialized.Content); err != nil {
-		return nil, err
+	if materialized.ContentKnown {
+		if err := applyProjectedContent(tracked, materialized.Content); err != nil {
+			return nil, err
+		}
+	} else {
+		tracked.setProjectedSnapshot("", projectedContentHash{}, false)
 	}
 	return tracked, nil
 }
@@ -799,6 +793,9 @@ func (s *Service) reconcileLocalWorkspace(ctx context.Context) error {
 		current, exists := remaining[tracked.Path]
 		if exists {
 			delete(remaining, tracked.Path)
+		}
+		if !tracked.hasProjectedContent() {
+			continue
 		}
 		if tracked.isProjecting() {
 			// File projection can briefly look like a local edit, move, or delete.
@@ -856,71 +853,6 @@ func (s *Service) closeConnections() {
 			_ = conn.Close()
 		}
 	}
-}
-
-func (s *Service) mergeSessionUpdate(update agentSessionStatusUpdate) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	current := s.pendingSessions[update.AgentID]
-	if update.Payload.Status != "" {
-		current.Status = update.Payload.Status
-	}
-	if update.Payload.CodexThreadID != "" {
-		current.CodexThreadID = update.Payload.CodexThreadID
-	}
-	if update.Payload.CurrentTurnID != "" || update.Payload.Status != "working" {
-		current.CurrentTurnID = update.Payload.CurrentTurnID
-	}
-	if update.Payload.CurrentActivity != "" {
-		current.CurrentActivity = update.Payload.CurrentActivity
-	}
-	if update.Payload.LastHeartbeatAt != "" {
-		current.LastHeartbeatAt = update.Payload.LastHeartbeatAt
-	}
-	s.pendingSessions[update.AgentID] = current
-}
-
-func (s *Service) processSessionUpdate(ctx context.Context, update agentSessionStatusUpdate) {
-	s.mergeSessionUpdate(update)
-	if err := s.flushSessionUpdates(ctx); err != nil {
-		fmt.Printf("agent status error: %v\n", err)
-	}
-	if update.Payload.Status == "idle" {
-		s.wakeAgentWorker(update.AgentID)
-	}
-}
-
-func (s *Service) flushSessionUpdates(ctx context.Context) error {
-	s.mu.Lock()
-	if len(s.pendingSessions) == 0 {
-		s.mu.Unlock()
-		return nil
-	}
-	pending := make(map[string]updateAgentSessionRequest, len(s.pendingSessions))
-	for agentID, update := range s.pendingSessions {
-		pending[agentID] = update
-	}
-	s.mu.Unlock()
-
-	failed := map[string]updateAgentSessionRequest{}
-	for agentID, update := range pending {
-		if err := s.updateRemoteAgentSession(ctx, agentID, update); err != nil {
-			failed[agentID] = update
-		}
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for agentID := range pending {
-		delete(s.pendingSessions, agentID)
-	}
-	for agentID, update := range failed {
-		s.pendingSessions[agentID] = update
-	}
-	if len(failed) > 0 {
-		return fmt.Errorf("failed to flush %d agent updates", len(failed))
-	}
-	return nil
 }
 
 func (s *Service) sendPresence(ctx context.Context) error {
@@ -1153,17 +1085,7 @@ func (t *trackedFile) persistCachedStateLocked() error {
 	if t.cache == nil {
 		return nil
 	}
-	if t.cacheEntry != nil {
-		t.cacheEntry.doc = t.Doc
-		t.cacheEntry.loaded = true
-		t.cacheEntry.metadata = documentCacheMetadata{
-			DocumentID:  t.DocumentID,
-			Path:        t.DocumentPath,
-			StateVector: base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(t.Doc)),
-			UpdatedAt:   time.Now().UTC(),
-		}
-	}
-	return t.cache.storeDocLocked(t.DocumentID, t.DocumentPath, 0, t.Doc)
+	return t.cache.maybeStoreDoc(t.DocumentID, t.DocumentPath, 0, t.Doc)
 }
 
 func (t *trackedFile) projectedHash() projectedContentHash {
@@ -1176,6 +1098,12 @@ func (t *trackedFile) projectedSnapshot() (string, projectedContentHash, bool) {
 	t.stateMu.Lock()
 	defer t.stateMu.Unlock()
 	return t.projectedContent, t.hash, t.projectedContentKnown
+}
+
+func (t *trackedFile) hasProjectedContent() bool {
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
+	return t.projectedContentKnown
 }
 
 func (t *trackedFile) setProjectedContent(content string) {
@@ -1240,21 +1168,6 @@ func (t *trackedFile) isProjecting() bool {
 	t.stateMu.Lock()
 	defer t.stateMu.Unlock()
 	return t.projecting > 0
-}
-
-func decodeDoc(encodedState string) (*crdt.Doc, error) {
-	doc := crdt.New()
-	if encodedState == "" {
-		return doc, nil
-	}
-	update, err := base64.StdEncoding.DecodeString(encodedState)
-	if err != nil {
-		return nil, err
-	}
-	if err := crdt.ApplyUpdateV1(doc, update, "remote"); err != nil {
-		return nil, err
-	}
-	return doc, nil
 }
 
 type replaceOp struct {

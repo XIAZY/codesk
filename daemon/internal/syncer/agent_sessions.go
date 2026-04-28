@@ -12,11 +12,7 @@ import (
 )
 
 const forMeSteerMessage = "You have new for-me items in your notification center. Continue your current task, but consider them when appropriate."
-
-type agentSessionStatusUpdate struct {
-	AgentID string
-	Payload updateAgentSessionRequest
-}
+const agentStatusUpdateTimeout = 30 * time.Second
 
 type updateAgentSessionRequest struct {
 	Status          string `json:"status"`
@@ -26,10 +22,13 @@ type updateAgentSessionRequest struct {
 	LastHeartbeatAt string `json:"lastHeartbeatAt,omitempty"`
 }
 
+type agentSessionUpdater func(context.Context, string, updateAgentSessionRequest) error
+
 type agentSessionSupervisor struct {
-	cfg     Config
-	updates chan<- agentSessionStatusUpdate
-	factory appServerFactory
+	cfg       Config
+	status    *agentStatusSyncer
+	factory   appServerFactory
+	wakeAgent func(string)
 
 	mu       sync.Mutex
 	sessions map[string]*managedAgentSession
@@ -62,17 +61,190 @@ type managedAgentSession struct {
 	steeredForMeTurn    string
 }
 
-func newAgentSessionSupervisor(cfg Config, updates chan<- agentSessionStatusUpdate, factory appServerFactory) *agentSessionSupervisor {
+type agentStatusSyncer struct {
+	updater agentSessionUpdater
+
+	mu      sync.Mutex
+	workers map[string]*agentStatusWorker
+	closed  bool
+}
+
+type agentStatusWorker struct {
+	agentID string
+	updater agentSessionUpdater
+
+	mu       sync.Mutex
+	latest   updateAgentSessionRequest
+	dirty    bool
+	wake     chan struct{}
+	stopped  chan struct{}
+	stopOnce sync.Once
+}
+
+func newAgentStatusSyncer(updater agentSessionUpdater) *agentStatusSyncer {
+	return &agentStatusSyncer{
+		updater: updater,
+		workers: map[string]*agentStatusWorker{},
+	}
+}
+
+func (s *agentStatusSyncer) Publish(agentID string, payload updateAgentSessionRequest) {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	worker := s.workers[agentID]
+	if worker == nil {
+		worker = newAgentStatusWorker(agentID, s.updater)
+		s.workers[agentID] = worker
+	}
+	s.mu.Unlock()
+	worker.Publish(payload)
+}
+
+func (s *agentStatusSyncer) Stop() {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	workers := make([]*agentStatusWorker, 0, len(s.workers))
+	for _, worker := range s.workers {
+		workers = append(workers, worker)
+	}
+	s.workers = map[string]*agentStatusWorker{}
+	s.mu.Unlock()
+	for _, worker := range workers {
+		worker.Stop()
+	}
+}
+
+func newAgentStatusWorker(agentID string, updater agentSessionUpdater) *agentStatusWorker {
+	worker := &agentStatusWorker{
+		agentID: agentID,
+		updater: updater,
+		wake:    make(chan struct{}, 1),
+		stopped: make(chan struct{}),
+	}
+	go worker.run()
+	return worker
+}
+
+func (w *agentStatusWorker) Publish(payload updateAgentSessionRequest) {
+	w.mu.Lock()
+	w.latest = payload
+	w.dirty = true
+	w.mu.Unlock()
+	w.signal()
+}
+
+func (w *agentStatusWorker) Stop() {
+	w.stopOnce.Do(func() {
+		close(w.stopped)
+	})
+	w.signal()
+}
+
+func (w *agentStatusWorker) signal() {
+	select {
+	case w.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (w *agentStatusWorker) run() {
+	backoff := 250 * time.Millisecond
+	for {
+		select {
+		case <-w.stopped:
+			return
+		case <-w.wake:
+		}
+
+		for {
+			payload, ok := w.takeLatest()
+			if !ok {
+				break
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), agentStatusUpdateTimeout)
+			err := w.updater(ctx, w.agentID, payload)
+			cancel()
+			if err == nil {
+				backoff = 250 * time.Millisecond
+				continue
+			}
+			fmt.Printf("agent status error for %s: %v\n", w.agentID, err)
+			w.requeueIfStillCurrent(payload)
+			if !w.waitRetryOrUpdate(backoff) {
+				return
+			}
+			if backoff < 5*time.Second {
+				backoff *= 2
+			}
+		}
+	}
+}
+
+func (w *agentStatusWorker) takeLatest() (updateAgentSessionRequest, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.dirty {
+		return updateAgentSessionRequest{}, false
+	}
+	payload := w.latest
+	w.dirty = false
+	return payload, true
+}
+
+func (w *agentStatusWorker) requeueIfStillCurrent(payload updateAgentSessionRequest) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.dirty {
+		return
+	}
+	w.latest = payload
+	w.dirty = true
+}
+
+func (w *agentStatusWorker) waitRetryOrUpdate(delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-w.stopped:
+		return false
+	case <-w.wake:
+		return true
+	case <-timer.C:
+		return true
+	}
+}
+
+func newAgentSessionSupervisor(cfg Config, updater agentSessionUpdater, factory appServerFactory) *agentSessionSupervisor {
 	if factory == nil {
 		factory = newCodexAppServer
 	}
+	if updater == nil {
+		updater = func(context.Context, string, updateAgentSessionRequest) error { return nil }
+	}
 	return &agentSessionSupervisor{
 		cfg:      cfg,
-		updates:  updates,
+		status:   newAgentStatusSyncer(updater),
 		factory:  factory,
 		sessions: map[string]*managedAgentSession{},
 		starting: map[string]*agentSessionStart{},
 	}
+}
+
+func (s *agentSessionSupervisor) SetIdleWake(wake func(string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.wakeAgent = wake
 }
 
 func (s *agentSessionSupervisor) Reconcile(ctx context.Context, agents []*agent) {
@@ -119,6 +291,7 @@ func (s *agentSessionSupervisor) Shutdown() {
 	for _, session := range sessions {
 		_ = session.app.Stop()
 	}
+	s.status.Stop()
 }
 
 func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *agent) error {
@@ -508,13 +681,16 @@ func (s *agentSessionSupervisor) markIdle(agentID string, app appServerClient, d
 	if workdir != "" {
 		appendAgentLog(workdir, logName, "event turn finished delivered=%t", delivered)
 	}
+	s.mu.Lock()
+	wake := s.wakeAgent
+	s.mu.Unlock()
+	if wake != nil {
+		wake(agentID)
+	}
 }
 
 func (s *agentSessionSupervisor) publish(agentID string, payload updateAgentSessionRequest) {
-	select {
-	case s.updates <- agentSessionStatusUpdate{AgentID: agentID, Payload: payload}:
-	default:
-	}
+	s.status.Publish(agentID, payload)
 }
 
 func (s *agentSessionSupervisor) workspacePath(current *agent) string {

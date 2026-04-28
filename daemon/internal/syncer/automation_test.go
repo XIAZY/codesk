@@ -46,10 +46,11 @@ func TestDriveAgentAutomationStartsNotificationTurnFromInbox(t *testing.T) {
 					Items: []*agentEvent{{
 						ID:          "evt_1",
 						AgentID:     "agent_1",
-						Type:        "document.mentioned",
+						Type:        "thread.mentioned",
 						Box:         "for_me",
 						Status:      "pending",
 						DocumentID:  "doc_spec",
+						ThreadID:    "thread_spec",
 						AnchorStart: 0,
 						AnchorEnd:   10,
 						Summary:     "mentioned in spec",
@@ -65,7 +66,7 @@ func TestDriveAgentAutomationStartsNotificationTurnFromInbox(t *testing.T) {
 		}),
 	}
 	workspace := &workspaceResponse{
-		Documents: []*document{{ID: "doc_spec", Path: "docs/spec.md", Content: "Hello reviewers.\n"}},
+		Documents: []*document{{ID: "doc_spec", Path: "docs/spec.md"}},
 		Agents:    []*agent{{ID: "agent_1", Handle: "reviewer", Name: "Reviewer", Role: "Review docs", Kind: "codex"}},
 	}
 
@@ -237,7 +238,7 @@ func TestToolGatewayGetsDocumentByPathAsAuthorizedAgent(t *testing.T) {
 				t.Fatalf("unexpected path query: %q", got)
 			}
 			return jsonResponse(t, http.StatusOK, toolDocumentResponse{
-				Document: &document{ID: "doc_spec", Path: "docs/spec.md", Content: "hello"},
+				Document: &document{ID: "doc_spec", Path: "docs/spec.md"},
 			}), nil
 		}),
 	}
@@ -321,7 +322,6 @@ func TestToolGatewayDiffDocumentUsesVersionQuery(t *testing.T) {
 
 func newAutomationTestService(t *testing.T, factory *fakeAppServerFactory) *Service {
 	t.Helper()
-	updates := make(chan agentSessionStatusUpdate, 16)
 	service := &Service{
 		cfg: Config{
 			BackendURL:         "http://backend.test",
@@ -330,10 +330,8 @@ func newAutomationTestService(t *testing.T, factory *fakeAppServerFactory) *Serv
 			RuntimeDir:         filepath.Join(t.TempDir(), "runtime"),
 			AgentID:            "daemon_agent",
 		},
-		sessionUpdates:  updates,
-		pendingSessions: map[string]updateAgentSessionRequest{},
 	}
-	service.sessions = newAgentSessionSupervisor(service.cfg, updates, factory.new)
+	service.sessions = newAgentSessionSupervisor(service.cfg, nil, factory.new)
 	return service
 }
 

@@ -14,8 +14,6 @@ type WorkspaceState struct {
 	Users               map[string]*User               `json:"users"`
 	Agents              map[string]*Agent              `json:"agents"`
 	AgentRuns           map[string]*AgentRun           `json:"agentRuns"`
-	Mentions            []*Mention                     `json:"mentions"`
-	DocumentMentions    map[string]*DocumentMention    `json:"documentMentions,omitempty"`
 	Threads             map[string]*Thread             `json:"threads"`
 	AgentEvents         map[string]*AgentEvent         `json:"agentEvents"`
 	AgentDocumentViews  map[string]*AgentDocumentView  `json:"agentDocumentViews,omitempty"`
@@ -37,6 +35,16 @@ type Document struct {
 	UpdatedAt    time.Time `json:"updatedAt"`
 	ClientIDSeed uint64    `json:"clientIdSeed,omitempty"`
 	Doc          *crdt.Doc `json:"-"`
+}
+
+type DocumentMetadata struct {
+	ID           string    `json:"id"`
+	Path         string    `json:"path"`
+	Title        string    `json:"title"`
+	StateVector  string    `json:"stateVector,omitempty"`
+	UpdateID     int64     `json:"updateId,omitempty"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+	ClientIDSeed uint64    `json:"clientIdSeed,omitempty"`
 }
 
 type ThreadAnchor struct {
@@ -88,29 +96,6 @@ type User struct {
 	Status    string    `json:"status"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
-}
-
-type Mention struct {
-	ID         string `json:"id,omitempty"`
-	DocumentID string `json:"documentId"`
-	UserID     string `json:"userId"`
-	Handle     string `json:"handle"`
-	Name       string `json:"name"`
-	Kind       string `json:"kind"`
-	Start      int    `json:"start"`
-	End        int    `json:"end"`
-}
-
-type DocumentMention struct {
-	ID               string    `json:"id"`
-	DocumentID       string    `json:"documentId"`
-	PrincipalID      string    `json:"principalId"`
-	RelativePosition string    `json:"relativePosition"`
-	Status           string    `json:"status"`
-	LastSeenUpdateID int64     `json:"lastSeenUpdateId,omitempty"`
-	DeletedAt        time.Time `json:"deletedAt,omitempty"`
-	CreatedAt        time.Time `json:"createdAt"`
-	UpdatedAt        time.Time `json:"updatedAt"`
 }
 
 type Presence struct {
@@ -249,7 +234,6 @@ type ActivityEvent struct {
 	Summary     string        `json:"summary"`
 	OccurredAt  time.Time     `json:"occurredAt"`
 	Provenance  OperationMeta `json:"provenance"`
-	NewContent  string        `json:"newContent,omitempty"`
 	ProposalID  string        `json:"proposalId,omitempty"`
 	PresenceRef string        `json:"presenceRef,omitempty"`
 }
@@ -266,24 +250,6 @@ type OperationMeta struct {
 	Source         string `json:"source"`
 	IntendedScope  string `json:"intendedScope,omitempty"`
 	ReadSetSummary string `json:"readSetSummary,omitempty"`
-}
-
-type ApplyUpdateRequest struct {
-	Update string        `json:"update"`
-	Meta   OperationMeta `json:"meta"`
-}
-
-type ApplyUpdateResponse struct {
-	Document *Document `json:"document,omitempty"`
-}
-
-type DocumentSyncRequest struct {
-	StateVector string `json:"stateVector,omitempty"`
-}
-
-type DocumentSyncResponse struct {
-	Document *Document `json:"document,omitempty"`
-	Update   string    `json:"update,omitempty"`
 }
 
 type CreateThreadRequest struct {
@@ -412,7 +378,6 @@ type DocumentUpdateEvent struct {
 	UpdateID    int64     `json:"updateId,omitempty"`
 	StateVector string    `json:"stateVector,omitempty"`
 	Update      string    `json:"update"`
-	Content     string    `json:"content,omitempty"`
 	Path        string    `json:"path"`
 	UpdatedAt   time.Time `json:"updatedAt"`
 	ActorID     string    `json:"actorId"`
@@ -438,15 +403,43 @@ func (d *Document) SyncDerivedFields() {
 	d.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(d.Doc))
 }
 
+func (d *Document) SyncProjectionFields() {
+	if d.Doc == nil {
+		d.Content = ""
+		d.StateVector = ""
+		return
+	}
+	d.Content = d.Doc.GetText("content").ToString()
+	d.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(d.Doc))
+}
+
 func cloneDocument(document *Document) *Document {
 	clone := *document
 	clone.Doc = nil
 	return &clone
 }
 
-func cloneDocumentForSync(document *Document) *Document {
+func cloneDocumentWithCRDTState(document *Document) *Document {
 	clone := cloneDocument(document)
-	clone.Content = ""
-	clone.CRDTState = ""
+	if document != nil && document.Doc != nil {
+		clone.Content = document.Doc.GetText("content").ToString()
+		clone.CRDTState = base64.StdEncoding.EncodeToString(document.Doc.EncodeStateAsUpdate())
+		clone.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(document.Doc))
+	}
 	return clone
+}
+
+func documentMetadata(document *Document) *DocumentMetadata {
+	if document == nil {
+		return nil
+	}
+	return &DocumentMetadata{
+		ID:           document.ID,
+		Path:         document.Path,
+		Title:        document.Title,
+		StateVector:  document.StateVector,
+		UpdateID:     document.UpdateID,
+		UpdatedAt:    document.UpdatedAt,
+		ClientIDSeed: document.ClientIDSeed,
+	}
 }

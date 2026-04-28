@@ -36,6 +36,7 @@ type Store struct {
 	db       *sql.DB
 	dataFile string
 
+	documentLocks         map[string]*sync.RWMutex
 	dirtyDocuments        map[string]struct{}
 	deletedDocuments      map[string]struct{}
 	pendingDocumentEvents []documentUpdateRecord
@@ -51,8 +52,15 @@ type documentUpdateRecord struct {
 }
 
 type ApplyCRDTUpdateResult struct {
-	Document        *Document
-	MentionsChanged bool
+	Document *Document
+	Applied  bool
+}
+
+type principalRef struct {
+	UserID string
+	Handle string
+	Name   string
+	Kind   string
 }
 
 func NewStore(dataFile string) (*Store, error) {
@@ -105,9 +113,6 @@ func (s *Store) load() error {
 			needsPersist = true
 		}
 		s.refreshAllThreadAnchorsLocked()
-		if s.rebuildMentionsLocked() {
-			needsPersist = true
-		}
 		s.refreshThreadParticipantsLocked()
 		if s.reconcileThreadMentionEventsLocked() {
 			needsPersist = true
@@ -120,7 +125,6 @@ func (s *Store) load() error {
 
 	if _, err := os.Stat(s.dataFile); errors.Is(err, os.ErrNotExist) {
 		s.state = seedWorkspace()
-		s.rebuildMentionsLocked()
 		return s.persistLocked()
 	}
 
@@ -145,9 +149,6 @@ func (s *Store) load() error {
 		needsPersist = true
 	}
 	s.refreshAllThreadAnchorsLocked()
-	if s.rebuildMentionsLocked() {
-		needsPersist = true
-	}
 	s.refreshThreadParticipantsLocked()
 	if s.reconcileThreadMentionEventsLocked() {
 		needsPersist = true
@@ -171,12 +172,6 @@ func (s *Store) ensureMaps() {
 	if s.state.AgentRuns == nil {
 		s.state.AgentRuns = map[string]*AgentRun{}
 	}
-	if s.state.Mentions == nil {
-		s.state.Mentions = []*Mention{}
-	}
-	if s.state.DocumentMentions == nil {
-		s.state.DocumentMentions = map[string]*DocumentMention{}
-	}
 	if s.state.Threads == nil {
 		s.state.Threads = map[string]*Thread{}
 	}
@@ -197,6 +192,9 @@ func (s *Store) ensureMaps() {
 	}
 	if s.state.Activities == nil {
 		s.state.Activities = []*ActivityEvent{}
+	}
+	if s.documentLocks == nil {
+		s.documentLocks = map[string]*sync.RWMutex{}
 	}
 	if s.dirtyDocuments == nil {
 		s.dirtyDocuments = map[string]struct{}{}
@@ -222,6 +220,18 @@ func (s *Store) ensureMaps() {
 	}
 }
 
+func (s *Store) documentLockLocked(documentID string) *sync.RWMutex {
+	if s.documentLocks == nil {
+		s.documentLocks = map[string]*sync.RWMutex{}
+	}
+	lock := s.documentLocks[documentID]
+	if lock == nil {
+		lock = &sync.RWMutex{}
+		s.documentLocks[documentID] = lock
+	}
+	return lock
+}
+
 func seedWorkspace() WorkspaceState {
 	now := time.Now().UTC()
 	return WorkspaceState{
@@ -242,8 +252,6 @@ func seedWorkspace() WorkspaceState {
 		},
 		Agents:              map[string]*Agent{},
 		AgentRuns:           map[string]*AgentRun{},
-		Mentions:            []*Mention{},
-		DocumentMentions:    map[string]*DocumentMention{},
 		Threads:             map[string]*Thread{},
 		AgentEvents:         map[string]*AgentEvent{},
 		AgentDocumentViews:  map[string]*AgentDocumentView{},
@@ -295,13 +303,17 @@ func (s *Store) Snapshot() WorkspaceState {
 }
 
 func (s *Store) GetDocument(id string) (*Document, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
 	document, ok := s.state.Documents[id]
 	if !ok {
+		s.mu.Unlock()
 		return nil, ErrNotFound
 	}
-	return cloneDocument(document), nil
+	documentLock := s.documentLockLocked(document.ID)
+	documentLock.RLock()
+	s.mu.Unlock()
+	defer documentLock.RUnlock()
+	return cloneDocumentWithCRDTState(document), nil
 }
 
 func (s *Store) ListDocuments() []*Document {
@@ -315,14 +327,40 @@ func (s *Store) GetDocumentByPath(path string) (*Document, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.mu.Lock()
+	for _, document := range s.state.Documents {
+		if document.Path == normalized {
+			documentLock := s.documentLockLocked(document.ID)
+			documentLock.RLock()
+			s.mu.Unlock()
+			defer documentLock.RUnlock()
+			return cloneDocumentWithCRDTState(document), nil
+		}
+	}
+	s.mu.Unlock()
+	return nil, ErrNotFound
+}
+
+func (s *Store) GetDocumentMetadataByPath(path string) (*DocumentMetadata, error) {
+	normalized, err := normalizeDocumentPath(path)
+	if err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, document := range s.state.Documents {
 		if document.Path == normalized {
-			return cloneDocument(document), nil
+			return documentMetadata(document), nil
 		}
 	}
 	return nil, ErrNotFound
+}
+
+func (s *Store) HasDocument(id string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.state.Documents[id]
+	return ok
 }
 
 func (s *Store) GetLiveDocument(id string) (*Document, error) {
@@ -335,13 +373,17 @@ func (s *Store) GetLiveDocument(id string) (*Document, error) {
 	return document, nil
 }
 
-func (s *Store) EncodeDocumentUpdate(documentID string, stateVector []byte) (*Document, []byte, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (s *Store) EncodeDocumentUpdate(documentID string, stateVector []byte) (*DocumentMetadata, []byte, error) {
+	s.mu.Lock()
 	document, ok := s.state.Documents[documentID]
 	if !ok {
+		s.mu.Unlock()
 		return nil, nil, ErrNotFound
 	}
+	documentLock := s.documentLockLocked(document.ID)
+	documentLock.RLock()
+	s.mu.Unlock()
+	defer documentLock.RUnlock()
 	var decoded crdt.StateVector
 	var err error
 	if len(stateVector) > 0 {
@@ -351,7 +393,62 @@ func (s *Store) EncodeDocumentUpdate(documentID string, stateVector []byte) (*Do
 		}
 	}
 	update := crdt.EncodeStateAsUpdateV1(document.Doc, decoded)
-	return cloneDocumentForSync(document), update, nil
+	return documentMetadata(document), update, nil
+}
+
+func (s *Store) EncodeDocumentSyncUpdates(documentID string, stateVector []byte) (*DocumentMetadata, [][]byte, error) {
+	document, updates, optimized, err := s.encodeDocumentCheckpointSyncUpdates(documentID, stateVector)
+	if err != nil {
+		return nil, nil, err
+	}
+	if optimized {
+		return document, updates, nil
+	}
+	document, update, err := s.EncodeDocumentUpdate(documentID, stateVector)
+	if err != nil {
+		return nil, nil, err
+	}
+	return document, [][]byte{update}, nil
+}
+
+func (s *Store) encodeDocumentCheckpointSyncUpdates(documentID string, stateVector []byte) (*DocumentMetadata, [][]byte, bool, error) {
+	if s.db == nil {
+		return nil, nil, false, nil
+	}
+	var decoded crdt.StateVector
+	if len(stateVector) > 0 {
+		var err error
+		decoded, err = crdt.DecodeStateVectorV1(stateVector)
+		if err != nil {
+			return nil, nil, false, err
+		}
+	}
+	if len(decoded) > 0 {
+		return nil, nil, false, nil
+	}
+
+	s.mu.Lock()
+	document, ok := s.state.Documents[documentID]
+	if !ok {
+		s.mu.Unlock()
+		return nil, nil, false, ErrNotFound
+	}
+	documentLock := s.documentLockLocked(document.ID)
+	documentLock.RLock()
+	workspaceID := s.state.WorkspaceID
+	headUpdateID := document.UpdateID
+	metadata := documentMetadata(document)
+	s.mu.Unlock()
+	defer documentLock.RUnlock()
+
+	updates, ok, err := loadDocumentBootstrapUpdatesPostgres(s.db, workspaceID, documentID, headUpdateID)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if !ok {
+		return nil, nil, false, nil
+	}
+	return metadata, updates, true, nil
 }
 
 func (s *Store) GetThread(id string) (*Thread, error) {
@@ -544,14 +641,15 @@ func (s *Store) UpdateAgentInboxItem(id string, req UpdateAgentNotificationReque
 
 func (s *Store) MarkDocumentViewed(agentID, documentID string, req MarkDocumentViewedRequest) (*AgentDocumentView, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	resolvedAgentID, _, err := s.resolveAgentIdentityLocked(strings.TrimSpace(agentID))
 	if err != nil {
+		s.mu.Unlock()
 		return nil, err
 	}
 	document, ok := s.state.Documents[strings.TrimSpace(documentID)]
 	if !ok {
+		s.mu.Unlock()
 		return nil, ErrNotFound
 	}
 	updateID := req.UpdateID
@@ -573,45 +671,81 @@ func (s *Store) MarkDocumentViewed(agentID, documentID string, req MarkDocumentV
 	s.state.AgentDocumentViews[agentDocumentViewKey(resolvedAgentID, document.ID)] = view
 	s.state.UpdatedAt = now
 	if s.db != nil {
-		if err := s.upsertAgentDocumentViewPostgresLocked(view); err != nil {
+		workspaceID := s.state.WorkspaceID
+		cloned := cloneAgentDocumentView(view)
+		s.mu.Unlock()
+		if err := upsertAgentDocumentViewPostgres(s.db, workspaceID, cloned); err != nil {
 			return nil, err
 		}
-		return cloneAgentDocumentView(view), nil
+		return cloned, nil
 	}
 	if err := s.persistLocked(); err != nil {
+		s.mu.Unlock()
 		return nil, err
 	}
-	return cloneAgentDocumentView(view), nil
+	cloned := cloneAgentDocumentView(view)
+	s.mu.Unlock()
+	return cloned, nil
 }
 
 func (s *Store) DiffDocument(agentID, documentID, fromSpec, toSpec string) (*DocumentDiff, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 
 	resolvedAgentID, _, err := s.resolveAgentIdentityLocked(strings.TrimSpace(agentID))
 	if err != nil {
+		s.mu.RUnlock()
 		return nil, err
 	}
 	document, ok := s.state.Documents[strings.TrimSpace(documentID)]
 	if !ok {
+		s.mu.RUnlock()
 		return nil, ErrNotFound
 	}
 	fromUpdateID, err := s.resolveDocumentVersionLocked(resolvedAgentID, document, fromSpec, "last-viewed")
 	if err != nil {
+		s.mu.RUnlock()
 		return nil, err
 	}
 	toUpdateID, err := s.resolveDocumentVersionLocked(resolvedAgentID, document, toSpec, "head")
 	if err != nil {
+		s.mu.RUnlock()
 		return nil, err
 	}
 	if fromUpdateID > toUpdateID {
+		s.mu.RUnlock()
 		return nil, fmt.Errorf("from version %d is newer than to version %d", fromUpdateID, toUpdateID)
 	}
-	fromContent, err := s.documentContentAtUpdateLocked(document, fromUpdateID)
+	if s.db == nil {
+		defer s.mu.RUnlock()
+		fromContent, err := s.documentContentAtUpdateLocked(document, fromUpdateID)
+		if err != nil {
+			return nil, err
+		}
+		toContent, err := s.documentContentAtUpdateLocked(document, toUpdateID)
+		if err != nil {
+			return nil, err
+		}
+		hunks := diffTextByLine(fromContent, toContent)
+		return &DocumentDiff{
+			DocumentID:   document.ID,
+			FromUpdateID: fromUpdateID,
+			ToUpdateID:   toUpdateID,
+			FromContent:  fromContent,
+			ToContent:    toContent,
+			Unified:      renderUnifiedDiff(hunks),
+			Hunks:        hunks,
+		}, nil
+	}
+	documentSnapshot := cloneDocument(document)
+	workspaceID := s.state.WorkspaceID
+	db := s.db
+	s.mu.RUnlock()
+
+	fromContent, err := documentContentAtUpdatePostgres(db, workspaceID, documentSnapshot, fromUpdateID)
 	if err != nil {
 		return nil, err
 	}
-	toContent, err := s.documentContentAtUpdateLocked(document, toUpdateID)
+	toContent, err := documentContentAtUpdatePostgres(db, workspaceID, documentSnapshot, toUpdateID)
 	if err != nil {
 		return nil, err
 	}
@@ -759,12 +893,6 @@ func (s *Store) syntheticDocumentInboxItemLocked(id string) (*AgentEvent, bool) 
 }
 
 func (s *Store) documentInboxClassificationLocked(agentID string, document *Document) (box string, eventType string, anchorStart int, anchorEnd int) {
-	for _, mention := range s.state.Mentions {
-		if mention == nil || mention.DocumentID != document.ID || mention.UserID != agentID {
-			continue
-		}
-		return "for_me", "document.updated", mention.Start, mention.End
-	}
 	for _, thread := range s.state.Threads {
 		if thread == nil || thread.DocumentID != document.ID || thread.Status != "open" {
 			continue
@@ -966,9 +1094,9 @@ func (s *Store) CreateDocument(req CreateDocumentRequest, meta OperationMeta) (*
 	id := "doc_" + uuid.NewString()
 	document := newSeedDocument(id, clientIDSeed, path, titleFromPath(path), req.Content, now)
 	s.state.Documents[id] = document
+	_ = s.documentLockLocked(document.ID)
 	s.markDocumentDirtyLocked(document.ID)
 	s.appendFullDocumentUpdateLocked(document, meta, now)
-	s.refreshDocumentMentionsLocked(document, meta, !isLogDocumentPath(document.Path))
 	s.state.UpdatedAt = now
 	s.appendActivityLocked(&ActivityEvent{
 		Type:       "document.created",
@@ -978,7 +1106,6 @@ func (s *Store) CreateDocument(req CreateDocumentRequest, meta OperationMeta) (*
 		Summary:    fmt.Sprintf("%s created %s", meta.ActorID, document.Path),
 		OccurredAt: now,
 		Provenance: meta,
-		NewContent: document.Content,
 	})
 	if err := s.persistDocumentMutationLocked(); err != nil {
 		return nil, err
@@ -1001,12 +1128,14 @@ func (s *Store) MoveDocument(id, nextPath string, meta OperationMeta) (*Document
 	if s.documentExistsAtPathLocked(path, id) {
 		return nil, "", fmt.Errorf("document already exists at %s", path)
 	}
+	documentLock := s.documentLockLocked(document.ID)
+	documentLock.Lock()
+	defer documentLock.Unlock()
 	oldPath := document.Path
 	document.Path = path
 	document.Title = titleFromPath(path)
 	document.UpdatedAt = time.Now().UTC()
 	s.markDocumentDirtyLocked(document.ID)
-	s.refreshDocumentMentionsLocked(document, meta, false)
 	s.state.UpdatedAt = document.UpdatedAt
 	s.appendActivityLocked(&ActivityEvent{
 		Type:       "document.moved",
@@ -1031,6 +1160,9 @@ func (s *Store) DeleteDocument(id string, meta OperationMeta) (*Document, error)
 	if !ok {
 		return nil, ErrNotFound
 	}
+	documentLock := s.documentLockLocked(document.ID)
+	documentLock.Lock()
+	defer documentLock.Unlock()
 	s.markDocumentDeletedLocked(id)
 	delete(s.state.Documents, id)
 	for proposalID, proposal := range s.state.Proposals {
@@ -1059,8 +1191,6 @@ func (s *Store) DeleteDocument(id string, meta OperationMeta) (*Document, error)
 			delete(s.state.Presences, actorID)
 		}
 	}
-	s.removeDocumentMentionsLocked(id)
-	s.removeDurableDocumentMentionsLocked(id)
 	now := time.Now().UTC()
 	s.state.UpdatedAt = now
 	s.appendActivityLocked(&ActivityEvent{
@@ -1093,7 +1223,6 @@ func (s *Store) CreateUser(req CreateUserRequest, meta OperationMeta) (*User, er
 	user.CreatedAt = time.Now().UTC()
 	user.UpdatedAt = user.CreatedAt
 	s.state.Users[user.ID] = user
-	s.rebuildMentionsLocked()
 	s.refreshThreadParticipantsLocked()
 	s.state.UpdatedAt = user.UpdatedAt
 	s.appendActivityLocked(&ActivityEvent{
@@ -1135,7 +1264,6 @@ func (s *Store) UpdateUser(id string, req UpdateUserRequest, meta OperationMeta)
 		user.Handle = handle
 	}
 	user.UpdatedAt = time.Now().UTC()
-	s.rebuildMentionsLocked()
 	s.refreshThreadParticipantsLocked()
 	s.state.UpdatedAt = user.UpdatedAt
 	s.appendActivityLocked(&ActivityEvent{
@@ -1164,7 +1292,6 @@ func (s *Store) DeleteUser(id string, meta OperationMeta) (*User, error) {
 		return nil, errors.New("workspace must keep at least one human user")
 	}
 	delete(s.state.Users, id)
-	s.rebuildMentionsLocked()
 	s.refreshThreadParticipantsLocked()
 	now := time.Now().UTC()
 	s.state.UpdatedAt = now
@@ -1209,7 +1336,6 @@ func (s *Store) CreateAgent(req CreateAgentRequest, meta OperationMeta) (*Agent,
 			ViewedAt:    agent.UpdatedAt,
 		}
 	}
-	s.rebuildMentionsLocked()
 	s.refreshThreadParticipantsLocked()
 	s.state.UpdatedAt = agent.UpdatedAt
 	s.appendActivityLocked(&ActivityEvent{
@@ -1252,7 +1378,6 @@ func (s *Store) UpdateAgent(id string, req UpdateAgentRequest, meta OperationMet
 	}
 	agent.SystemPrompt = sharedAgentSystemPrompt(agent)
 	agent.UpdatedAt = time.Now().UTC()
-	s.rebuildMentionsLocked()
 	s.refreshThreadParticipantsLocked()
 	s.state.UpdatedAt = agent.UpdatedAt
 	s.appendActivityLocked(&ActivityEvent{
@@ -1296,7 +1421,6 @@ func (s *Store) DeleteAgent(id string, meta OperationMeta) (*Agent, error) {
 	for _, thread := range s.state.Threads {
 		thread.ParticipantIDs = removeString(thread.ParticipantIDs, id)
 	}
-	s.rebuildMentionsLocked()
 	s.refreshThreadParticipantsLocked()
 	now := time.Now().UTC()
 	s.state.UpdatedAt = now
@@ -1492,10 +1616,10 @@ func (s *Store) StopAgentRun(id string, meta OperationMeta) (*AgentRun, error) {
 
 func (s *Store) UpdateAgentSession(id string, req UpdateAgentSessionRequest, meta OperationMeta) (*Agent, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	agent, ok := s.state.Agents[strings.TrimSpace(id)]
 	if !ok {
+		s.mu.Unlock()
 		return nil, ErrNotFound
 	}
 	now := time.Now().UTC()
@@ -1504,6 +1628,7 @@ func (s *Store) UpdateAgentSession(id string, req UpdateAgentSessionRequest, met
 		case "idle", "working", "disconnected":
 			agent.Status = status
 		default:
+			s.mu.Unlock()
 			return nil, fmt.Errorf("unsupported agent status %q", status)
 		}
 	}
@@ -1544,10 +1669,22 @@ func (s *Store) UpdateAgentSession(id string, req UpdateAgentSessionRequest, met
 		OccurredAt: now,
 		Provenance: meta,
 	})
+	if s.db != nil {
+		workspaceID := s.state.WorkspaceID
+		updated := cloneAgent(agent)
+		s.mu.Unlock()
+		if err := upsertAgentPostgres(s.db, workspaceID, updated); err != nil {
+			return nil, err
+		}
+		return updated, nil
+	}
 	if err := s.persistLocked(); err != nil {
+		s.mu.Unlock()
 		return nil, err
 	}
-	return cloneAgent(agent), nil
+	updated := cloneAgent(agent)
+	s.mu.Unlock()
+	return updated, nil
 }
 
 func (s *Store) ApplyCRDTUpdate(documentID string, update []byte, meta OperationMeta) (*Document, error) {
@@ -1566,25 +1703,39 @@ func (s *Store) ApplyCRDTUpdateWithResult(documentID string, update []byte, meta
 	if !ok {
 		return nil, ErrNotFound
 	}
+	documentLock := s.documentLockLocked(document.ID)
+	documentLock.Lock()
+	defer documentLock.Unlock()
+	beforeSnapshot := crdt.CaptureSnapshot(document.Doc)
 	if err := crdt.ApplyUpdateV1(document.Doc, update, meta); err != nil {
 		return nil, err
 	}
+	afterSnapshot := crdt.CaptureSnapshot(document.Doc)
+	if crdt.EqualSnapshots(beforeSnapshot, afterSnapshot) {
+		return &ApplyCRDTUpdateResult{
+			Document: cloneDocument(document),
+			Applied:  false,
+		}, nil
+	}
+	afterStateVector := crdt.EncodeStateVectorV1(document.Doc)
+	afterContent := document.Doc.GetText("content").ToString()
 	now := time.Now().UTC()
-	document.SyncDerivedFields()
+	document.Content = afterContent
+	document.StateVector = base64.StdEncoding.EncodeToString(afterStateVector)
 	s.markDocumentDirtyLocked(document.ID)
 	s.appendIncrementalDocumentUpdateLocked(document.ID, update, meta, now)
-	notify := !isLogDocumentPath(document.Path)
-	mentionsChanged := s.refreshDocumentMentionsLocked(document, meta, notify)
 	document.UpdatedAt = now
-	s.refreshThreadAnchorsForDocumentLocked(document.ID)
+	if s.documentHasThreadsLocked(document.ID) {
+		s.refreshThreadAnchorsForDocumentLocked(document.ID)
+	}
 	s.state.UpdatedAt = document.UpdatedAt
 
 	if err := s.persistDocumentMutationLocked(); err != nil {
 		return nil, err
 	}
 	return &ApplyCRDTUpdateResult{
-		Document:        cloneDocument(document),
-		MentionsChanged: mentionsChanged,
+		Document: cloneDocument(document),
+		Applied:  true,
 	}, nil
 }
 
@@ -1596,6 +1747,9 @@ func (s *Store) ReplaceDocumentText(documentID string, nextText string, meta Ope
 	if !ok {
 		return nil, nil, ErrNotFound
 	}
+	documentLock := s.documentLockLocked(document.ID)
+	documentLock.Lock()
+	defer documentLock.Unlock()
 	currentText := document.Doc.GetText("content").ToString()
 	text := document.Doc.GetText("content")
 
@@ -1615,11 +1769,10 @@ func (s *Store) ReplaceDocumentText(documentID string, nextText string, meta Ope
 	}, meta)
 	unsubscribe()
 
-	document.SyncDerivedFields()
+	document.SyncProjectionFields()
 	s.markDocumentDirtyLocked(document.ID)
 	s.appendIncrementalDocumentUpdateLocked(document.ID, update, meta, time.Now().UTC())
 	notify := !isLogDocumentPath(document.Path)
-	s.refreshDocumentMentionsLocked(document, meta, notify)
 	document.UpdatedAt = time.Now().UTC()
 	s.refreshThreadAnchorsForDocumentLocked(document.ID)
 	if notify {
@@ -1634,7 +1787,6 @@ func (s *Store) ReplaceDocumentText(documentID string, nextText string, meta Ope
 		Summary:    fmt.Sprintf("%s replaced %s", meta.ActorID, document.Path),
 		OccurredAt: document.UpdatedAt,
 		Provenance: meta,
-		NewContent: document.Content,
 	})
 
 	if err := s.persistDocumentMutationLocked(); err != nil {
@@ -1766,11 +1918,26 @@ func (s *Store) ReplyThread(id string, req ReplyThreadRequest, meta OperationMet
 
 func (s *Store) ClaimAgentEvent(req ClaimAgentEventRequest) (*AgentEvent, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	if s.db != nil {
-		return s.claimAgentEventPostgresLocked(req)
+		workspaceID := s.state.WorkspaceID
+		agentID, agentHandle, err := s.resolveAgentIdentityLocked(req.AgentID)
+		if err != nil {
+			s.mu.Unlock()
+			return nil, err
+		}
+		claimedBy := stringsOr(req.ClaimedBy, "daemon")
+		s.mu.Unlock()
+		event, err := claimAgentEventPostgres(s.db, workspaceID, agentID, agentHandle, claimedBy)
+		if err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		s.state.AgentEvents[event.ID] = cloneAgentEvent(event)
+		s.mu.Unlock()
+		return event, nil
 	}
+	defer s.mu.Unlock()
 
 	agentID, agentHandle, err := s.resolveAgentIdentityLocked(req.AgentID)
 	if err != nil {
@@ -1818,11 +1985,34 @@ func (s *Store) ClaimAgentEvent(req ClaimAgentEventRequest) (*AgentEvent, error)
 
 func (s *Store) UpdateAgentEvent(id string, req UpdateAgentEventRequest, meta OperationMeta) (*AgentEvent, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	if s.db != nil {
-		return s.updateAgentEventPostgresLocked(id, req, meta)
+		workspaceID := s.state.WorkspaceID
+		if _, ok := s.state.AgentEvents[id]; !ok {
+			s.mu.Unlock()
+			return nil, ErrNotFound
+		}
+		s.mu.Unlock()
+		updated, err := updateAgentEventPostgres(s.db, workspaceID, id, req)
+		if err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		s.state.AgentEvents[id] = cloneAgentEvent(updated)
+		s.state.UpdatedAt = updated.UpdatedAt
+		s.appendActivityLocked(&ActivityEvent{
+			Type:       "agent.event.updated",
+			DocumentID: updated.DocumentID,
+			ActorID:    meta.ActorID,
+			ActorType:  meta.ActorType,
+			Summary:    fmt.Sprintf("%s marked %s %s", meta.ActorID, updated.Type, updated.Status),
+			OccurredAt: updated.UpdatedAt,
+			Provenance: meta,
+		})
+		s.mu.Unlock()
+		return updated, nil
 	}
+	defer s.mu.Unlock()
 
 	event, ok := s.state.AgentEvents[id]
 	if !ok {
@@ -1866,7 +2056,6 @@ func (s *Store) UpdateAgentEvent(id string, req UpdateAgentEventRequest, meta Op
 
 func (s *Store) UpsertPresence(req UpsertPresenceRequest) (*Presence, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	now := time.Now().UTC()
 	presence := &Presence{
@@ -1882,15 +2071,23 @@ func (s *Store) UpsertPresence(req UpsertPresenceRequest) (*Presence, error) {
 	s.state.Presences[req.ActorID] = presence
 	s.state.UpdatedAt = now
 	if s.db != nil {
-		if err := s.upsertPresencePostgresLocked(presence); err != nil {
+		workspaceID := s.state.WorkspaceID
+		clone := *presence
+		clone.Selection = append([]int(nil), presence.Selection...)
+		s.mu.Unlock()
+		if err := upsertPresencePostgres(s.db, workspaceID, &clone); err != nil {
 			return nil, err
 		}
+		return &clone, nil
 	} else {
 		if err := s.persistLocked(); err != nil {
+			s.mu.Unlock()
 			return nil, err
 		}
 	}
 	clone := *presence
+	clone.Selection = append([]int(nil), presence.Selection...)
+	s.mu.Unlock()
 	return &clone, nil
 }
 
@@ -1943,6 +2140,9 @@ func (s *Store) MergeProposal(id, actor string) (*Document, []byte, error) {
 	if !ok {
 		return nil, nil, ErrNotFound
 	}
+	documentLock := s.documentLockLocked(document.ID)
+	documentLock.Lock()
+	defer documentLock.Unlock()
 
 	meta := OperationMeta{ActorID: actor, ActorType: "human", Source: "proposal-merge"}
 	currentText := document.Doc.GetText("content").ToString()
@@ -1982,7 +2182,6 @@ func (s *Store) MergeProposal(id, actor string) (*Document, []byte, error) {
 		OccurredAt: now,
 		Provenance: meta,
 		ProposalID: proposal.ID,
-		NewContent: document.Content,
 	})
 	if err := s.persistLocked(); err != nil {
 		return nil, nil, err
@@ -1993,9 +2192,6 @@ func (s *Store) MergeProposal(id, actor string) (*Document, []byte, error) {
 func (s *Store) persistLocked() error {
 	s.ensureMaps()
 	s.refreshAllThreadAnchorsLocked()
-	for _, document := range s.state.Documents {
-		document.SyncDerivedFields()
-	}
 	if s.db != nil {
 		return s.persistPostgresLocked()
 	}
@@ -2011,12 +2207,6 @@ func (s *Store) persistLocked() error {
 
 func (s *Store) persistDocumentMutationLocked() error {
 	s.ensureMaps()
-	for documentID := range s.dirtyDocuments {
-		document := s.state.Documents[documentID]
-		if document != nil {
-			document.SyncDerivedFields()
-		}
-	}
 	if s.db != nil {
 		return s.persistDocumentMutationPostgresLocked()
 	}
@@ -2069,19 +2259,6 @@ func cloneState(state WorkspaceState) WorkspaceState {
 	copyState.AgentRuns = map[string]*AgentRun{}
 	for key, run := range state.AgentRuns {
 		copyState.AgentRuns[key] = cloneAgentRun(run)
-	}
-	copyState.Mentions = make([]*Mention, len(state.Mentions))
-	for index, mention := range state.Mentions {
-		clone := *mention
-		copyState.Mentions[index] = &clone
-	}
-	copyState.DocumentMentions = map[string]*DocumentMention{}
-	for key, mention := range state.DocumentMentions {
-		if mention == nil {
-			continue
-		}
-		clone := *mention
-		copyState.DocumentMentions[key] = &clone
 	}
 	copyState.Threads = map[string]*Thread{}
 	for key, thread := range state.Threads {
@@ -2151,6 +2328,7 @@ func (s *Store) appendIncrementalDocumentUpdateLocked(documentID string, update 
 	if s.db == nil {
 		if document := s.state.Documents[documentID]; document != nil {
 			document.UpdateID++
+			document.SyncDerivedFields()
 			s.recordDocumentCheckpointLocked(document, now)
 		}
 	}
@@ -2239,31 +2417,13 @@ func SortedDocuments(state WorkspaceState) []*Document {
 	return docs
 }
 
-func SortedSyncDocuments(state WorkspaceState) []*Document {
-	docs := make([]*Document, 0, len(state.Documents))
+func SortedSyncDocuments(state WorkspaceState) []*DocumentMetadata {
+	docs := make([]*DocumentMetadata, 0, len(state.Documents))
 	for _, doc := range state.Documents {
-		docs = append(docs, cloneDocumentForSync(doc))
+		docs = append(docs, documentMetadata(doc))
 	}
 	sort.Slice(docs, func(i, j int) bool { return docs[i].Path < docs[j].Path })
 	return docs
-}
-
-func SortedMentions(state WorkspaceState) []*Mention {
-	mentions := make([]*Mention, len(state.Mentions))
-	for index, mention := range state.Mentions {
-		clone := *mention
-		mentions[index] = &clone
-	}
-	sort.Slice(mentions, func(i, j int) bool {
-		if mentions[i].DocumentID == mentions[j].DocumentID {
-			if mentions[i].Start == mentions[j].Start {
-				return mentions[i].Handle < mentions[j].Handle
-			}
-			return mentions[i].Start < mentions[j].Start
-		}
-		return mentions[i].DocumentID < mentions[j].DocumentID
-	})
-	return mentions
 }
 
 func isPostgresDSN(value string) bool {
@@ -2385,7 +2545,8 @@ Your role in this workspace is: %s.
 You work from your own dedicated workspace copy, and the backend's canonical workspace is the source of truth.
 Your file changes sync to other peers through the shared workspace promptly, so be careful with file operations.
 Prefer direct edits to existing files when possible. Avoid delete-and-recreate or broad filesystem churn unless that exact operation is clearly intended.
-You may be triggered by direct mentions, document edits, or thread messages, or by an inbox check.
+You may be notified by direct thread mentions, document edits, thread messages, or an inbox check.
+Plain @handle text inside markdown documents is regular document text, not a notification; use document threads when you want to mention a collaborator.
 Your inbox has two classes: for-me items are specific to you and should be reviewed first; general items are workspace activity and may not require action unless you have specific opinions, questions, or useful edits.
 Document update inbox items are deduplicated; use the diff-document tool to compare your last viewed CRDT update version with the current head, and mark documents viewed after review.
 Use notty-agent-tool list-inbox --box for-me and notty-agent-tool list-inbox --box general to inspect notification center items. Use get-inbox-item, complete-inbox-item, dismiss-inbox-item, diff-document, and mark-document-viewed when needed.
@@ -2398,7 +2559,7 @@ Respect other collaborators because this is a shared workspace.
 If you have doubts or are uncertain about a change, it is often better to ask for others' input in a thread before making the change.
 It is important to consult others' opinions before making edits, and preferably have everyone aligned in a thread before making substantial changes.
 Whenever possible, reuse an existing thread instead of opening a new one if the existing thread is already well aligned with the topic.
-If you are directly mentioned, you must reply with the thread tools. Reply in the existing thread when one is present; otherwise create a new anchored thread near the mention and respond there.
+If you are directly mentioned in a thread, you must reply with the thread tools.
 Keep edits bounded, relevant to your role, and grounded in the current document and thread context.`, name, handle, kind, role))
 }
 
@@ -2484,295 +2645,30 @@ func (s *Store) ensureHandleAvailableLocked(handle, exceptUserID, exceptAgentID 
 	return nil
 }
 
-func (s *Store) principalByHandleLocked(handle string) (*Mention, bool) {
+func (s *Store) principalByHandleLocked(handle string) (*principalRef, bool) {
 	for _, user := range s.state.Users {
 		if user.Handle == handle {
-			return &Mention{UserID: user.ID, Handle: user.Handle, Name: user.Name, Kind: user.Kind}, true
+			return &principalRef{UserID: user.ID, Handle: user.Handle, Name: user.Name, Kind: user.Kind}, true
 		}
 	}
 	for _, agent := range s.state.Agents {
 		if agent.Handle == handle {
-			return &Mention{UserID: agent.ID, Handle: agent.Handle, Name: agent.Name, Kind: "agent"}, true
+			return &principalRef{UserID: agent.ID, Handle: agent.Handle, Name: agent.Name, Kind: "agent"}, true
 		}
 	}
 	return nil, false
 }
 
-func (s *Store) principalByIDLocked(id string) (*Mention, bool) {
-	if user := s.state.Users[id]; user != nil {
-		return &Mention{UserID: user.ID, Handle: user.Handle, Name: user.Name, Kind: user.Kind}, true
-	}
-	if agent := s.state.Agents[id]; agent != nil {
-		return &Mention{UserID: agent.ID, Handle: agent.Handle, Name: agent.Name, Kind: "agent"}, true
-	}
-	return nil, false
-}
-
-func (s *Store) rebuildMentionsLocked() bool {
-	s.state.Mentions = s.state.Mentions[:0]
-	changed := false
-	for _, document := range s.state.Documents {
-		if s.reconcileDocumentMentionsLocked(document, OperationMeta{}, false) {
-			changed = true
-		}
-	}
-	return changed
-}
-
-func (s *Store) refreshDocumentMentionsLocked(document *Document, meta OperationMeta, notify bool) bool {
-	if document == nil {
+func (s *Store) documentHasThreadsLocked(documentID string) bool {
+	if documentID == "" {
 		return false
 	}
-	previous := cloneMentions(s.documentMentionsLocked(document.ID))
-	s.reconcileDocumentMentionsLocked(document, meta, notify)
-	current := s.documentMentionsLocked(document.ID)
-	return !sameMentionSet(previous, current)
-}
-
-func (s *Store) removeDocumentMentionsLocked(documentID string) {
-	filtered := s.state.Mentions[:0]
-	for _, mention := range s.state.Mentions {
-		if mention.DocumentID != documentID {
-			filtered = append(filtered, mention)
+	for _, thread := range s.state.Threads {
+		if thread != nil && thread.DocumentID == documentID {
+			return true
 		}
 	}
-	s.state.Mentions = filtered
-}
-
-func (s *Store) removeDurableDocumentMentionsLocked(documentID string) {
-	for id, mention := range s.state.DocumentMentions {
-		if mention != nil && mention.DocumentID == documentID {
-			delete(s.state.DocumentMentions, id)
-		}
-	}
-}
-
-type documentMentionScan struct {
-	Mention *Mention
-	Start   int
-	End     int
-}
-
-func (s *Store) scanDocumentMentionsLocked(document *Document) []documentMentionScan {
-	if document == nil || document.Content == "" {
-		return nil
-	}
-	matches := mentionPattern.FindAllStringSubmatchIndex(document.Content, -1)
-	if len(matches) == 0 {
-		return nil
-	}
-	mentions := make([]documentMentionScan, 0, len(matches))
-	for _, match := range matches {
-		if len(match) < 6 {
-			continue
-		}
-		handle := document.Content[match[4]:match[5]]
-		principal, ok := s.principalByHandleLocked(handle)
-		if !ok {
-			continue
-		}
-		mention := *principal
-		mention.DocumentID = document.ID
-		mention.Start = byteIndexToUTF16Offset(document.Content, match[4]-1)
-		mention.End = byteIndexToUTF16Offset(document.Content, match[5])
-		mentions = append(mentions, documentMentionScan{
-			Mention: &mention,
-			Start:   mention.Start,
-			End:     mention.End,
-		})
-	}
-	return mentions
-}
-
-func (s *Store) reconcileDocumentMentionsLocked(document *Document, meta OperationMeta, notify bool) bool {
-	if document == nil {
-		return false
-	}
-	s.ensureMaps()
-	s.removeDocumentMentionsLocked(document.ID)
-	now := time.Now().UTC()
-	persistentChanged := false
-	claimedRanges := map[string]struct{}{}
-	unresolvedByPrincipal := map[string][]*DocumentMention{}
-
-	for _, record := range s.sortedDocumentMentionRecordsLocked(document.ID) {
-		if record == nil || record.Status != "active" {
-			continue
-		}
-		mention, ok := s.resolveDocumentMentionLocked(document, record)
-		if !ok {
-			unresolvedByPrincipal[record.PrincipalID] = append(unresolvedByPrincipal[record.PrincipalID], record)
-			continue
-		}
-		if record.LastSeenUpdateID != document.UpdateID {
-			record.LastSeenUpdateID = document.UpdateID
-			record.UpdatedAt = now
-		}
-		s.state.Mentions = append(s.state.Mentions, mention)
-		claimedRanges[documentMentionRangeKey(mention.Start, mention.End)] = struct{}{}
-	}
-
-	for _, scanned := range s.scanDocumentMentionsLocked(document) {
-		if scanned.Mention == nil {
-			continue
-		}
-		rangeKey := documentMentionRangeKey(scanned.Start, scanned.End)
-		if _, ok := claimedRanges[rangeKey]; ok {
-			continue
-		}
-		if unresolved := unresolvedByPrincipal[scanned.Mention.UserID]; len(unresolved) > 0 {
-			record := unresolved[0]
-			unresolvedByPrincipal[scanned.Mention.UserID] = unresolved[1:]
-			if document.Doc != nil {
-				record.RelativePosition = encodeRelativePosition(document.Doc.GetText("content"), scanned.Start)
-			}
-			record.LastSeenUpdateID = document.UpdateID
-			record.DeletedAt = time.Time{}
-			record.UpdatedAt = now
-			mention := *scanned.Mention
-			mention.ID = record.ID
-			s.state.Mentions = append(s.state.Mentions, &mention)
-			claimedRanges[rangeKey] = struct{}{}
-			persistentChanged = true
-			continue
-		}
-		record := s.newDocumentMentionRecordLocked(document, scanned, now)
-		s.state.DocumentMentions[record.ID] = record
-		mention := *scanned.Mention
-		mention.ID = record.ID
-		s.state.Mentions = append(s.state.Mentions, &mention)
-		claimedRanges[rangeKey] = struct{}{}
-		persistentChanged = true
-		if notify {
-			s.enqueueDocumentMentionEventLocked(document, record, &mention, meta)
-		}
-	}
-	for _, records := range unresolvedByPrincipal {
-		for _, record := range records {
-			if record == nil || record.Status != "active" {
-				continue
-			}
-			record.Status = "inactive"
-			record.DeletedAt = now
-			record.UpdatedAt = now
-			persistentChanged = true
-		}
-	}
-	return persistentChanged
-}
-
-func (s *Store) sortedDocumentMentionRecordsLocked(documentID string) []*DocumentMention {
-	records := make([]*DocumentMention, 0)
-	for _, mention := range s.state.DocumentMentions {
-		if mention != nil && mention.DocumentID == documentID {
-			records = append(records, mention)
-		}
-	}
-	sort.Slice(records, func(i, j int) bool {
-		if records[i].CreatedAt.Equal(records[j].CreatedAt) {
-			return records[i].ID < records[j].ID
-		}
-		return records[i].CreatedAt.Before(records[j].CreatedAt)
-	})
-	return records
-}
-
-func (s *Store) newDocumentMentionRecordLocked(document *Document, scanned documentMentionScan, now time.Time) *DocumentMention {
-	relativePosition := ""
-	if document != nil && document.Doc != nil {
-		relativePosition = encodeRelativePosition(document.Doc.GetText("content"), scanned.Start)
-	}
-	return &DocumentMention{
-		ID:               "men_" + uuid.NewString(),
-		DocumentID:       document.ID,
-		PrincipalID:      scanned.Mention.UserID,
-		RelativePosition: relativePosition,
-		Status:           "active",
-		LastSeenUpdateID: document.UpdateID,
-		CreatedAt:        now,
-		UpdatedAt:        now,
-	}
-}
-
-func (s *Store) resolveDocumentMentionLocked(document *Document, record *DocumentMention) (*Mention, bool) {
-	if document == nil || document.Doc == nil || record == nil || record.Status != "active" {
-		return nil, false
-	}
-	principal, ok := s.principalByIDLocked(record.PrincipalID)
-	if !ok {
-		return nil, false
-	}
-	position, ok := decodeRelativePosition(record.RelativePosition)
-	if !ok {
-		return nil, false
-	}
-	absolute, resolved := crdt.ToAbsolutePosition(document.Doc, position)
-	if !resolved {
-		return nil, false
-	}
-	start := clampInt(absolute.Index, 0, utf16Length(document.Content))
-	handle, end, ok := mentionTokenAtUTF16Offset(document.Content, start)
-	if !ok || handle != principal.Handle {
-		return nil, false
-	}
-	mention := *principal
-	mention.ID = record.ID
-	mention.DocumentID = document.ID
-	mention.Start = start
-	mention.End = end
-	return &mention, true
-}
-
-func mentionTokenAtUTF16Offset(content string, start int) (string, int, bool) {
-	byteStart := utf16OffsetToByteIndex(content, start)
-	if byteStart < 0 || byteStart >= len(content) || content[byteStart] != '@' {
-		return "", 0, false
-	}
-	if previous, ok := previousRuneBeforeByte(content, byteStart); ok && isMentionBoundaryRune(previous) {
-		return "", 0, false
-	}
-	handleStart := byteStart + 1
-	handleEnd := handleStart
-	for handleEnd < len(content) && isMentionHandleByte(content[handleEnd]) {
-		handleEnd++
-	}
-	if handleEnd == handleStart {
-		return "", 0, false
-	}
-	handle := content[handleStart:handleEnd]
-	if len(handle) > 32 || !isMentionFirstByte(handle[0]) {
-		return "", 0, false
-	}
-	return handle, byteIndexToUTF16Offset(content, handleEnd), true
-}
-
-func previousRuneBeforeByte(content string, byteIndex int) (rune, bool) {
-	var previous rune
-	found := false
-	for index, r := range content {
-		if index >= byteIndex {
-			break
-		}
-		previous = r
-		found = true
-	}
-	return previous, found
-}
-
-func isMentionBoundaryRune(r rune) bool {
-	return r == '_' || (r >= '0' && r <= '9') || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z')
-}
-
-func isMentionFirstByte(b byte) bool {
-	return b >= 'a' && b <= 'z' || b >= '0' && b <= '9'
-}
-
-func isMentionHandleByte(b byte) bool {
-	return isMentionFirstByte(b) || b == '_' || b == '-'
-}
-
-func documentMentionRangeKey(start, end int) string {
-	return strconv.Itoa(start) + ":" + strconv.Itoa(end)
+	return false
 }
 
 func cloneAgentRun(run *AgentRun) *AgentRun {
@@ -2940,18 +2836,6 @@ func cloneAgentEvent(event *AgentEvent) *AgentEvent {
 	}
 	clone := *event
 	return &clone
-}
-
-func cloneMentions(items []*Mention) []*Mention {
-	clones := make([]*Mention, len(items))
-	for index, mention := range items {
-		if mention == nil {
-			continue
-		}
-		clone := *mention
-		clones[index] = &clone
-	}
-	return clones
 }
 
 func (s *Store) refreshThreadParticipantsLocked() {
@@ -3260,66 +3144,6 @@ func (s *Store) extractMentionPrincipalIDsLocked(content string) []string {
 		}
 	}
 	return ids
-}
-
-func (s *Store) documentMentionsLocked(documentID string) []*Mention {
-	mentions := make([]*Mention, 0)
-	for _, mention := range s.state.Mentions {
-		if mention.DocumentID == documentID {
-			mentions = append(mentions, mention)
-		}
-	}
-	return mentions
-}
-
-func sameMentionSet(left, right []*Mention) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	keys := make(map[string]int, len(left))
-	for _, mention := range left {
-		keys[mentionSetKey(mention)]++
-	}
-	for _, mention := range right {
-		key := mentionSetKey(mention)
-		if keys[key] == 0 {
-			return false
-		}
-		keys[key]--
-	}
-	return true
-}
-
-func mentionSetKey(mention *Mention) string {
-	if mention == nil {
-		return "<nil>"
-	}
-	return strings.Join([]string{
-		mention.ID,
-		mention.DocumentID,
-		mention.UserID,
-		mention.Handle,
-		mention.Kind,
-		strconv.Itoa(mention.Start),
-		strconv.Itoa(mention.End),
-	}, "\x00")
-}
-
-func (s *Store) enqueueDocumentMentionEventLocked(document *Document, record *DocumentMention, mention *Mention, meta OperationMeta) {
-	if document == nil || record == nil || mention == nil || mention.Kind != "agent" {
-		return
-	}
-	if isLogDocumentPath(document.Path) {
-		return
-	}
-	dedupKey := fmt.Sprintf("document-mentioned:%s", record.ID)
-	s.enqueueAgentNotificationLocked(mention.UserID, mention.Handle, "document.mentioned", dedupKey, meta, "", func(event *AgentEvent, now time.Time) {
-		event.DocumentID = mention.DocumentID
-		event.AnchorStart = mention.Start
-		event.AnchorEnd = mention.End
-		event.Summary = fmt.Sprintf("@%s was mentioned in %s", mention.Handle, document.Path)
-		event.Prompt = fmt.Sprintf("You were mentioned in %s near: %s", document.Path, excerptForRange(document.Content, mention.Start, mention.End))
-	})
 }
 
 func (s *Store) enqueueDocumentThreadEventsLocked(document *Document, meta OperationMeta) {

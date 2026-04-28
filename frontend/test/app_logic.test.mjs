@@ -5,7 +5,6 @@ import * as Y from "yjs";
 import {
   buildLineThreads,
   computeReplace,
-  findMentionQuery,
   isFreshPresence,
   rebaseSelection,
   rebaseReplace,
@@ -87,13 +86,6 @@ test("rebaseSelection preserves a span that was replaced remotely", () => {
 test("rebaseSelection collapses a caret that was inside a remote replacement", () => {
   const remote = computeReplace("abcdef", "abZZef");
   assert.deepEqual(rebaseSelection({ start: 3, end: 3 }, remote), { start: 4, end: 4 });
-});
-
-test("findMentionQuery only resolves a live mention token at the cursor", () => {
-  assert.equal(findMentionQuery("hi @rev", 7, 7)?.query, "rev");
-  assert.equal(findMentionQuery("hi @codex-agent", 15, 15)?.query, "codex-agent");
-  assert.equal(findMentionQuery("hi @rev there", 7, 12), null);
-  assert.equal(findMentionQuery("hi rev", 6, 6), null);
 });
 
 test("buildLineThreads groups multiple threads on the same line", () => {

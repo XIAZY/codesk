@@ -10,6 +10,7 @@ type Config struct {
 	DatabaseURL      string
 	DataFile         string
 	MaxLiveEditBytes int
+	PprofAddr        string
 }
 
 func LoadConfig() Config {
@@ -18,6 +19,7 @@ func LoadConfig() Config {
 		DatabaseURL:      getenv("NOTTY_DATABASE_URL", ""),
 		DataFile:         getenv("NOTTY_DATA_FILE", "/data/state.json"),
 		MaxLiveEditBytes: getenvInt("NOTTY_MAX_LIVE_EDIT_BYTES", 1500),
+		PprofAddr:        getenv("NOTTY_PPROF_ADDR", ""),
 	}
 }
 

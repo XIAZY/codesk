@@ -1,14 +1,10 @@
 package syncer
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,19 +15,20 @@ import (
 )
 
 type documentCache struct {
-	root       string
-	backendURL string
-	client     *http.Client
+	root string
 
 	mu      sync.Mutex
 	entries map[string]*documentCacheEntry
 }
 
 type documentCacheEntry struct {
-	mu       sync.Mutex
-	doc      *crdt.Doc
-	metadata documentCacheMetadata
-	loaded   bool
+	mu                  sync.Mutex
+	metadata            documentCacheMetadata
+	loaded              bool
+	contentKnown        bool
+	statePersisted      bool
+	updatesSincePersist int
+	lastPersistedAt     time.Time
 }
 
 type documentCacheMetadata struct {
@@ -43,23 +40,17 @@ type documentCacheMetadata struct {
 }
 
 type materializedCachedDocument struct {
-	Doc      *crdt.Doc
-	DocMu    *sync.Mutex
-	Entry    *documentCacheEntry
-	Content  string
-	UpdateID int64
+	Doc          *crdt.Doc
+	DocMu        *sync.Mutex
+	Entry        *documentCacheEntry
+	Content      string
+	ContentKnown bool
+	UpdateID     int64
 }
 
-type documentSyncRequest struct {
-	StateVector string `json:"stateVector,omitempty"`
-}
+const documentCachePersistEveryUpdates = 100
 
-type documentSyncResponse struct {
-	Document *document `json:"document,omitempty"`
-	Update   string    `json:"update,omitempty"`
-}
-
-func newDocumentCache(root, backendURL string, client *http.Client) (*documentCache, error) {
+func newDocumentCache(root string) (*documentCache, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, nil
 	}
@@ -67,10 +58,8 @@ func newDocumentCache(root, backendURL string, client *http.Client) (*documentCa
 		return nil, err
 	}
 	return &documentCache{
-		root:       root,
-		backendURL: strings.TrimRight(backendURL, "/"),
-		client:     client,
-		entries:    map[string]*documentCacheEntry{},
+		root:    root,
+		entries: map[string]*documentCacheEntry{},
 	}, nil
 }
 
@@ -79,15 +68,12 @@ func (c *documentCache) materialize(ctx context.Context, meta *document) (*mater
 		return nil, errors.New("document metadata is required")
 	}
 	if c == nil {
-		doc, err := decodeDoc(meta.CRDTState)
-		if err != nil {
-			return nil, err
-		}
+		doc := crdt.New()
 		return &materializedCachedDocument{
-			Doc:      doc,
-			DocMu:    &sync.Mutex{},
-			Content:  doc.GetText("content").ToString(),
-			UpdateID: meta.UpdateID,
+			Doc:          doc,
+			DocMu:        &sync.Mutex{},
+			ContentKnown: false,
+			UpdateID:     meta.UpdateID,
 		}, nil
 	}
 
@@ -95,40 +81,22 @@ func (c *documentCache) materialize(ctx context.Context, meta *document) (*mater
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 
-	if !entry.loaded {
-		doc, metadata, err := c.loadLocked(meta)
-		if err != nil {
-			return nil, err
-		}
-		entry.doc = doc
-		entry.metadata = metadata
-		entry.loaded = true
-	}
-	if entry.doc == nil {
-		entry.doc = crdt.New()
-	}
-	stateVector := entry.metadata.StateVector
-	if stateVector == "" {
-		stateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(entry.doc))
-	}
-	synced, err := c.fetchMissingUpdate(ctx, meta.ID, stateVector)
+	doc, metadata, contentKnown, statePersisted, err := c.loadLocked(meta)
 	if err != nil {
 		return nil, err
 	}
-	if synced.Document != nil {
-		entry.metadata.Path = synced.Document.Path
-		entry.metadata.UpdateID = synced.Document.UpdateID
-	}
-	if synced.Update != "" {
-		update, err := base64.StdEncoding.DecodeString(synced.Update)
-		if err != nil {
-			return nil, err
-		}
-		if len(update) > 0 {
-			if err := crdt.ApplyUpdateV1(entry.doc, update, "cache-sync"); err != nil {
-				return nil, err
-			}
-		}
+	entry.metadata = metadata
+	entry.loaded = true
+	entry.contentKnown = contentKnown
+	entry.statePersisted = statePersisted
+	if !contentKnown {
+		return &materializedCachedDocument{
+			Doc:          doc,
+			DocMu:        &sync.Mutex{},
+			Entry:        entry,
+			ContentKnown: false,
+			UpdateID:     entry.metadata.UpdateID,
+		}, nil
 	}
 
 	entry.metadata.DocumentID = meta.ID
@@ -138,17 +106,15 @@ func (c *documentCache) materialize(ctx context.Context, meta *document) (*mater
 	if entry.metadata.UpdateID == 0 {
 		entry.metadata.UpdateID = meta.UpdateID
 	}
-	entry.metadata.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(entry.doc))
+	entry.metadata.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
 	entry.metadata.UpdatedAt = time.Now().UTC()
-	if err := c.storeDocLocked(entry.metadata.DocumentID, entry.metadata.Path, entry.metadata.UpdateID, entry.doc); err != nil {
-		return nil, err
-	}
 	return &materializedCachedDocument{
-		Doc:      entry.doc,
-		DocMu:    &entry.mu,
-		Entry:    entry,
-		Content:  entry.doc.GetText("content").ToString(),
-		UpdateID: entry.metadata.UpdateID,
+		Doc:          doc,
+		DocMu:        &sync.Mutex{},
+		Entry:        entry,
+		Content:      doc.GetText("content").ToString(),
+		ContentKnown: true,
+		UpdateID:     entry.metadata.UpdateID,
 	}, nil
 }
 
@@ -159,41 +125,69 @@ func (c *documentCache) storeDoc(documentID, path string, updateID int64, doc *c
 	entry := c.entryFor(documentID)
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
-	entry.doc = doc
-	entry.metadata = documentCacheMetadata{
-		DocumentID:  documentID,
-		Path:        path,
-		UpdateID:    updateID,
-		StateVector: base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc)),
-		UpdatedAt:   time.Now().UTC(),
-	}
-	entry.loaded = true
-	return c.storeDocLocked(documentID, path, updateID, doc)
-}
-
-func (c *documentCache) storeDocLocked(documentID, path string, updateID int64, doc *crdt.Doc) error {
-	if err := os.MkdirAll(c.documentDir(documentID), 0o755); err != nil {
-		return err
-	}
-	state := doc.EncodeStateAsUpdate()
-	if err := os.WriteFile(c.statePath(documentID), state, 0o644); err != nil {
-		return err
-	}
+	stateVector := base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
 	metadata := documentCacheMetadata{
 		DocumentID:  documentID,
 		Path:        path,
 		UpdateID:    updateID,
-		StateVector: base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc)),
+		StateVector: stateVector,
 		UpdatedAt:   time.Now().UTC(),
+	}
+	return c.storeDocLocked(entry, metadata, doc)
+}
+
+func (c *documentCache) maybeStoreDoc(documentID, path string, updateID int64, doc *crdt.Doc) error {
+	if c == nil || documentID == "" || doc == nil {
+		return nil
+	}
+	stateVector := base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
+	entry := c.entryFor(documentID)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.loaded && entry.metadata.StateVector == stateVector {
+		return nil
+	}
+	entry.metadata = documentCacheMetadata{
+		DocumentID:  documentID,
+		Path:        path,
+		UpdateID:    updateID,
+		StateVector: stateVector,
+		UpdatedAt:   time.Now().UTC(),
+	}
+	entry.loaded = true
+	entry.contentKnown = true
+	entry.updatesSincePersist++
+	if entry.statePersisted && entry.updatesSincePersist < documentCachePersistEveryUpdates {
+		return nil
+	}
+	return c.storeDocLocked(entry, entry.metadata, doc)
+}
+
+func (c *documentCache) storeDocLocked(entry *documentCacheEntry, metadata documentCacheMetadata, doc *crdt.Doc) error {
+	if err := os.MkdirAll(c.documentDir(metadata.DocumentID), 0o755); err != nil {
+		return err
+	}
+	state := doc.EncodeStateAsUpdate()
+	if err := os.WriteFile(c.statePath(metadata.DocumentID), state, 0o644); err != nil {
+		return err
 	}
 	payload, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(c.metadataPath(documentID), payload, 0o644)
+	if err := os.WriteFile(c.metadataPath(metadata.DocumentID), payload, 0o644); err != nil {
+		return err
+	}
+	entry.metadata = metadata
+	entry.loaded = true
+	entry.contentKnown = true
+	entry.statePersisted = true
+	entry.updatesSincePersist = 0
+	entry.lastPersistedAt = metadata.UpdatedAt
+	return nil
 }
 
-func (c *documentCache) loadLocked(meta *document) (*crdt.Doc, documentCacheMetadata, error) {
+func (c *documentCache) loadLocked(meta *document) (*crdt.Doc, documentCacheMetadata, bool, bool, error) {
 	metadata := documentCacheMetadata{
 		DocumentID:  meta.ID,
 		Path:        meta.Path,
@@ -203,53 +197,28 @@ func (c *documentCache) loadLocked(meta *document) (*crdt.Doc, documentCacheMeta
 	if payload, err := os.ReadFile(c.metadataPath(meta.ID)); err == nil {
 		_ = json.Unmarshal(payload, &metadata)
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, metadata, err
+		return nil, metadata, false, false, err
 	}
 
 	doc := crdt.New()
+	contentKnown := false
+	statePersisted := false
 	state, err := os.ReadFile(c.statePath(meta.ID))
 	if errors.Is(err, os.ErrNotExist) {
-		if meta.CRDTState != "" {
-			decoded, err := base64.StdEncoding.DecodeString(meta.CRDTState)
-			if err != nil {
-				return nil, metadata, err
-			}
-			state = decoded
-		}
-	} else if err != nil {
-		return nil, metadata, err
+		return doc, metadata, false, false, nil
+	}
+	if err != nil {
+		return nil, metadata, false, false, err
+	} else {
+		contentKnown = true
+		statePersisted = true
 	}
 	if len(state) > 0 {
 		if err := crdt.ApplyUpdateV1(doc, state, "cache-load"); err != nil {
-			return nil, metadata, err
+			return nil, metadata, false, false, err
 		}
 	}
-	return doc, metadata, nil
-}
-
-func (c *documentCache) fetchMissingUpdate(ctx context.Context, documentID, stateVector string) (*documentSyncResponse, error) {
-	payload, err := json.Marshal(documentSyncRequest{StateVector: stateVector})
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.backendURL+"/api/documents/"+url.PathEscape(documentID)+"/sync", bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	res, err := c.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-	if res.StatusCode >= http.StatusBadRequest {
-		return nil, fmt.Errorf("document sync failed: %s", res.Status)
-	}
-	var response documentSyncResponse
-	if err := json.NewDecoder(res.Body).Decode(&response); err != nil {
-		return nil, err
-	}
-	return &response, nil
+	return doc, metadata, contentKnown, statePersisted, nil
 }
 
 func (c *documentCache) entryFor(documentID string) *documentCacheEntry {

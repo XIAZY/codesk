@@ -25,6 +25,7 @@ services:
     environment:
       NOTTY_PORT: "8080"
       NOTTY_DATABASE_URL: postgres://notty:notty@postgres:5432/notty?sslmode=disable
+      NOTTY_PPROF_ADDR: 127.0.0.1:6061
 
   daemon:
     build:
