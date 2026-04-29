@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -268,101 +269,629 @@ func TestApplyProjectedContentDoesNotOverwriteDivergedDiskState(t *testing.T) {
 	}
 }
 
-func TestHandleLocalChangeMergesLocalEditAfterProjectionConflict(t *testing.T) {
+func TestReconcileTrackedDocumentMergesLocalEditWithPendingRemoteUpdate(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "doc.md")
 	if err := os.WriteFile(path, []byte("base\n"), 0o644); err != nil {
 		t.Fatalf("write initial file: %v", err)
 	}
 
-	doc := newDocWithText(t, "base\n")
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base\n")
+	if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
 	tracked := &trackedFile{
-		DocumentID: "doc_1",
-		Path:       path,
-		Doc:        doc,
+		DocumentID:   "doc_1",
+		DocumentPath: "doc.md",
+		Path:         path,
+		cache:        cache,
 	}
 	tracked.setProjectedContent("base\n")
-
-	service := &Service{
-		projectedByPath: map[string]*trackedFile{path: tracked},
+	if err := tracked.storeProjectedBase("base\n"); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+	var sentLocalUpdate []byte
+	tracked.writeSyncUpdate = func(update []byte) error {
+		sentLocalUpdate = append([]byte(nil), update...)
+		return nil
 	}
 
-	updateDocText(t, doc, "base\nremote\n", "remote")
+	remoteUpdate := updateFromBaseDoc(t, baseDoc, "base\nremote\n", "remote")
+	if _, err := cache.appendPendingRemoteUpdate("doc_1", "doc.md", remoteUpdate); err != nil {
+		t.Fatalf("append pending remote: %v", err)
+	}
 	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
 		t.Fatalf("write local edit: %v", err)
 	}
-	if err := applyProjectedContent(tracked, "base\nremote\n"); err != nil {
-		t.Fatalf("apply projected content: %v", err)
-	}
-
-	if err := service.handleLocalChange(path); err != nil {
+	if err := markTrackedLocalDirty(tracked, path); err != nil {
 		t.Fatalf("handle local change: %v", err)
 	}
 
-	want := "base\nlocal\nremote\n"
-	if got := doc.GetText("content").ToString(); got != want {
-		t.Fatalf("expected merged CRDT content %q, got %q", want, got)
+	if err := reconcileTrackedDocument(cache, "doc_1", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("reconcile document: %v", err)
+	}
+	if len(sentLocalUpdate) == 0 {
+		t.Fatal("expected local CRDT update to be sent")
 	}
 	content, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read projected merge: %v", err)
 	}
-	if string(content) != want {
-		t.Fatalf("expected merged file content %q, got %q", want, content)
+	for _, part := range []string{"base\n", "local\n", "remote\n"} {
+		if !strings.Contains(string(content), part) {
+			t.Fatalf("expected merged file content to contain %q, got %q", part, content)
+		}
 	}
-	if !tracked.matchesProjectedString(want) {
+	if !tracked.matchesProjectedString(string(content)) {
 		t.Fatal("expected projected content hash to advance to merged content")
+	}
+	if tracked.isLocalDirty() {
+		t.Fatal("expected local dirty flag to clear after successful reconcile")
 	}
 }
 
-func TestWorkspaceReplicaHandleLocalChangeMergesLocalEditAfterProjectionConflict(t *testing.T) {
+func TestReconcileTrackedDocumentDefersLocalUpdateWhenProjectedBaseMissingCRDTState(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "doc.md")
-	if err := os.WriteFile(path, []byte("base\n"), 0o644); err != nil {
-		t.Fatalf("write initial file: %v", err)
+	if err := os.WriteFile(path, []byte("already synced\nnext\n"), 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
 	}
 
-	doc := newDocWithText(t, "base\n")
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
 	tracked := &trackedFile{
-		DocumentID: "doc_1",
-		Path:       path,
-		Doc:        doc,
+		DocumentID:   "doc_1",
+		DocumentPath: "doc.md",
+		Path:         path,
+		cache:        cache,
 	}
-	tracked.setProjectedContent("base\n")
-
-	replica := &workspaceReplica{
-		projectedByPath: map[string]*trackedFile{path: tracked},
+	tracked.setProjectedContent("already synced\n")
+	if err := tracked.storeProjectedBase("already synced\n"); err != nil {
+		t.Fatalf("store projected base: %v", err)
 	}
-
-	updateDocText(t, doc, "base\nremote\n", "remote")
-	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
-		t.Fatalf("write local edit: %v", err)
-	}
-	if err := applyProjectedContent(tracked, "base\nremote\n"); err != nil {
-		t.Fatalf("apply projected content: %v", err)
+	tracked.markLocalDirty()
+	tracked.writeSyncUpdate = func(update []byte) error {
+		t.Fatalf("must not send a full-file update when cached CRDT state is missing; update bytes=%d", len(update))
+		return nil
 	}
 
-	if err := replica.handleLocalChange(path); err != nil {
-		t.Fatalf("handle local change: %v", err)
+	if err := reconcileTrackedDocument(cache, "doc_1", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("reconcile document: %v", err)
+	}
+	if !tracked.isLocalDirty() {
+		t.Fatal("expected local dirty flag to remain until a matching CRDT base is available")
+	}
+}
+
+func TestReconcileTrackedDocumentDefersLocalUpdateWithoutProjectedBase(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "doc.md")
+	if err := os.WriteFile(path, []byte("large existing local file\nnew append\n"), 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
 	}
 
-	want := "base\nlocal\nremote\n"
-	if got := doc.GetText("content").ToString(); got != want {
-		t.Fatalf("expected replica merged CRDT content %q, got %q", want, got)
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	if err := cache.storeDoc("doc_1", "doc.md", 1, newDocWithText(t, "")); err != nil {
+		t.Fatalf("store empty remote base: %v", err)
+	}
+	tracked := &trackedFile{
+		DocumentID:   "doc_1",
+		DocumentPath: "doc.md",
+		Path:         path,
+		cache:        cache,
+	}
+	tracked.setProjectedContent("large existing local file\n")
+	tracked.markLocalDirty()
+	tracked.writeSyncUpdate = func(update []byte) error {
+		t.Fatalf("must not send local update before a projected base is established; update bytes=%d", len(update))
+		return nil
+	}
+
+	if err := reconcileTrackedDocument(cache, "doc_1", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("reconcile document: %v", err)
+	}
+	if !tracked.isLocalDirty() {
+		t.Fatal("expected local dirty flag to remain until projection base is established")
+	}
+}
+
+func TestMaterializeExistingLocalFileUsesCachedBaseAsProjection(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "append.txt")
+	baseContent := "1\n2\n"
+	localContent := "1\n2\n3\n"
+	if err := os.WriteFile(path, []byte(localContent), 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, baseContent)
+	if err := cache.storeDoc("doc_append", "append.txt", 1, baseDoc); err != nil {
+		t.Fatalf("store base doc: %v", err)
+	}
+
+	tracked, err := materializeTrackedFile(context.Background(), cache, &document{
+		ID:   "doc_append",
+		Path: "append.txt",
+	}, path)
+	if err != nil {
+		t.Fatalf("materialize tracked file: %v", err)
+	}
+	projectedBase, known, err := tracked.loadProjectedBase()
+	if err != nil {
+		t.Fatalf("load projected base: %v", err)
+	}
+	if !known || projectedBase != baseContent {
+		t.Fatalf("expected cached CRDT base %q, known=%v got %q", baseContent, known, projectedBase)
+	}
+	if tracked.matchesProjectedString(localContent) {
+		t.Fatal("existing local append was incorrectly treated as a clean projection")
+	}
+
+	serverDoc := crdt.New()
+	if err := crdt.ApplyUpdateV1(serverDoc, baseDoc.EncodeStateAsUpdate(), "server-base"); err != nil {
+		t.Fatalf("apply server base: %v", err)
+	}
+	sentUpdates := 0
+	tracked.writeSyncUpdate = func(update []byte) error {
+		sentUpdates++
+		return crdt.ApplyUpdateV1(serverDoc, update, "server")
+	}
+	if err := reconcileTrackedDocument(cache, "doc_append", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("reconcile document: %v", err)
+	}
+	if sentUpdates != 1 {
+		t.Fatalf("expected one local update, got %d", sentUpdates)
+	}
+	if got := serverDoc.GetText("content").ToString(); got != localContent {
+		t.Fatalf("server content mismatch: got %q want %q", got, localContent)
+	}
+	if tracked.isLocalDirty() {
+		t.Fatal("expected local dirty flag to clear")
+	}
+}
+
+func TestReconcileRebasesDirtyLocalFileAfterPendingRemoteEstablishesBase(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "append.txt")
+	baseContent := "base\n"
+	localContent := "base\nlocal\n"
+	if err := os.WriteFile(path, []byte(localContent), 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	tracked := &trackedFile{
+		DocumentID:   "doc_append",
+		DocumentPath: "append.txt",
+		Path:         path,
+		cache:        cache,
+	}
+	tracked.setProjectedContent("")
+	tracked.markLocalDirty()
+	remoteUpdate := updateFromBaseContent(t, "", baseContent, "remote")
+	if _, err := cache.appendPendingRemoteUpdate("doc_append", "append.txt", remoteUpdate); err != nil {
+		t.Fatalf("append pending remote: %v", err)
+	}
+
+	sentUpdates := 0
+	tracked.writeSyncUpdate = func(update []byte) error {
+		sentUpdates++
+		return nil
+	}
+	if err := reconcileTrackedDocument(cache, "doc_append", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	if sentUpdates != 0 {
+		t.Fatalf("expected no local update before rebasing, got %d", sentUpdates)
+	}
+	projectedBase, known, err := tracked.loadProjectedBase()
+	if err != nil {
+		t.Fatalf("load projected base: %v", err)
+	}
+	if !known || projectedBase != baseContent {
+		t.Fatalf("expected projected base to be established from remote update, known=%v base=%q", known, projectedBase)
+	}
+	if !tracked.isLocalDirty() {
+		t.Fatal("expected local dirty flag to remain after rebasing")
+	}
+
+	baseDoc, _, _, err := cache.loadBaseDoc("doc_append", "append.txt")
+	if err != nil {
+		t.Fatalf("load cached base doc: %v", err)
+	}
+	serverDoc := crdt.New()
+	if err := crdt.ApplyUpdateV1(serverDoc, baseDoc.EncodeStateAsUpdate(), "server-base"); err != nil {
+		t.Fatalf("apply server base: %v", err)
+	}
+	tracked.writeSyncUpdate = func(update []byte) error {
+		sentUpdates++
+		return crdt.ApplyUpdateV1(serverDoc, update, "server")
+	}
+	if err := reconcileTrackedDocument(cache, "doc_append", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	if sentUpdates != 1 {
+		t.Fatalf("expected one local update after rebasing, got %d", sentUpdates)
+	}
+	if got := serverDoc.GetText("content").ToString(); got != localContent {
+		t.Fatalf("server content mismatch: got %q want %q", got, localContent)
+	}
+}
+
+func TestSingleWriterAppendPressureReconcilesIncrementalBatches(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "append.txt")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("open append file: %v", err)
+	}
+	defer file.Close()
+
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "")
+	if err := cache.storeDoc("doc_append", "append.txt", 1, baseDoc); err != nil {
+		t.Fatalf("store base doc: %v", err)
+	}
+	tracked := &trackedFile{
+		DocumentID:   "doc_append",
+		DocumentPath: "append.txt",
+		Path:         path,
+		cache:        cache,
+	}
+	tracked.setProjectedContent("")
+	if err := tracked.storeProjectedBase(""); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+
+	serverDoc := newDocWithText(t, "")
+	sentUpdates := 0
+	maxUpdateBytes := 0
+	tracked.writeSyncUpdate = func(update []byte) error {
+		sentUpdates++
+		if len(update) > maxUpdateBytes {
+			maxUpdateBytes = len(update)
+		}
+		return crdt.ApplyUpdateV1(serverDoc, update, "server")
+	}
+
+	var expected strings.Builder
+	const totalLines = 30000
+	const batchSize = 1000
+	started := time.Now()
+	for i := 1; i <= totalLines; i++ {
+		line := fmt.Sprintf("%d\n", i)
+		expected.WriteString(line)
+		if err := appendOpenFileLocked(file, line); err != nil {
+			t.Fatalf("append line %d: %v", i, err)
+		}
+		if err := markTrackedLocalDirty(tracked, path); err != nil {
+			t.Fatalf("mark line %d dirty: %v", i, err)
+		}
+		if i%batchSize != 0 {
+			continue
+		}
+		if err := reconcileTrackedDocument(cache, "doc_append", []*trackedFile{tracked}); err != nil {
+			t.Fatalf("reconcile after line %d: %v", i, err)
+		}
+		if got := serverDoc.GetText("content").ToString(); got != expected.String() {
+			t.Fatalf("server content mismatch after line %d: got %d bytes want %d bytes", i, len(got), expected.Len())
+		}
+		if tracked.isLocalDirty() {
+			t.Fatalf("dirty flag remained after line %d", i)
+		}
+	}
+	if sentUpdates != totalLines/batchSize {
+		t.Fatalf("expected one CRDT update per reconciliation batch, got %d", sentUpdates)
+	}
+	if maxUpdateBytes > 64*1024 {
+		t.Fatalf("incremental append update was too large: max=%d bytes", maxUpdateBytes)
+	}
+	if elapsed := time.Since(started); elapsed > 10*time.Second {
+		t.Fatalf("append pressure test took too long: %s", elapsed)
 	}
 	content, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read replica projected merge: %v", err)
+		t.Fatalf("read append file: %v", err)
 	}
-	if string(content) != want {
-		t.Fatalf("expected replica merged file content %q, got %q", want, content)
-	}
-	if !tracked.matchesProjectedString(want) {
-		t.Fatal("expected replica projected content hash to advance to merged content")
+	if string(content) != expected.String() {
+		t.Fatalf("local file mismatch: got %d bytes want %d bytes", len(content), expected.Len())
 	}
 }
 
-func TestMaterializeTrackedFileWritesNewRemoteDocumentToDisk(t *testing.T) {
+func TestReconcileTrackedDocumentClearsCorruptPendingRemoteLog(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "doc.md")
+	if err := os.WriteFile(path, []byte("base"), 0o644); err != nil {
+		t.Fatalf("write initial file: %v", err)
+	}
+
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	if err := cache.storeDoc("doc_1", "doc.md", 1, newDocWithText(t, "base")); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	tracked := &trackedFile{
+		DocumentID:   "doc_1",
+		DocumentPath: "doc.md",
+		Path:         path,
+		cache:        cache,
+	}
+	tracked.setProjectedContent("base")
+	if err := tracked.storeProjectedBase("base"); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+	if _, err := cache.appendPendingRemoteUpdate("doc_1", "doc.md", []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}); err != nil {
+		t.Fatalf("append corrupt pending remote: %v", err)
+	}
+
+	err = reconcileTrackedDocument(cache, "doc_1", []*trackedFile{tracked})
+	if err == nil || !strings.Contains(err.Error(), "doc_1") {
+		t.Fatalf("expected document-scoped corrupt pending error, got %v", err)
+	}
+	count, err := cache.pendingRemoteUpdateCount("doc_1")
+	if err != nil {
+		t.Fatalf("pending count: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected corrupt pending log to be cleared, got %d pending updates", count)
+	}
+	if err := reconcileTrackedDocument(cache, "doc_1", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("expected second reconcile after clearing corrupt log to be clean, got %v", err)
+	}
+}
+
+func TestReconcileTrackedDocumentClearsPendingMetadataHashMismatch(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "doc.md")
+	if err := os.WriteFile(path, []byte("base"), 0o644); err != nil {
+		t.Fatalf("write initial file: %v", err)
+	}
+
+	cacheRoot := t.TempDir()
+	cache, err := newDocumentCache(cacheRoot)
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	if err := cache.storeDoc("doc_1", "doc.md", 1, newDocWithText(t, "base")); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	update := updateFromBaseContent(t, "base", "base\nremote", "remote")
+	if _, err := cache.appendPendingRemoteUpdate("doc_1", "doc.md", update); err != nil {
+		t.Fatalf("append pending remote: %v", err)
+	}
+	metadataPath := cache.metadataPath("doc_1")
+	var metadata documentCacheMetadata
+	payload, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatalf("read metadata: %v", err)
+	}
+	if err := json.Unmarshal(payload, &metadata); err != nil {
+		t.Fatalf("decode metadata: %v", err)
+	}
+	metadata.PendingSHA256 = "stale-hash"
+	nextPayload, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatalf("encode metadata: %v", err)
+	}
+	if err := os.WriteFile(metadataPath, nextPayload, 0o644); err != nil {
+		t.Fatalf("write stale metadata: %v", err)
+	}
+	cache, err = newDocumentCache(cacheRoot)
+	if err != nil {
+		t.Fatalf("reopen cache: %v", err)
+	}
+
+	tracked := &trackedFile{
+		DocumentID:   "doc_1",
+		DocumentPath: "doc.md",
+		Path:         path,
+		cache:        cache,
+	}
+	tracked.setProjectedContent("base")
+	if err := tracked.storeProjectedBase("base"); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+
+	if err := reconcileTrackedDocument(cache, "doc_1", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("expected stale pending metadata to be cleared without failing reconcile: %v", err)
+	}
+	count, err := cache.pendingRemoteUpdateCount("doc_1")
+	if err != nil {
+		t.Fatalf("pending count: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected stale pending log to be cleared, got %d pending updates", count)
+	}
+}
+
+func TestServiceReconcileTrackedDocumentsSharesRemoteUpdateAcrossAgentWorkspaces(t *testing.T) {
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base")
+	if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	remoteUpdate := updateFromBaseDoc(t, baseDoc, "base remote", "remote")
+	for i := 0; i < 10; i++ {
+		appended, err := cache.appendPendingRemoteUpdate("doc_1", "doc.md", remoteUpdate)
+		if err != nil {
+			t.Fatalf("append pending remote %d: %v", i, err)
+		}
+		if i == 0 && !appended {
+			t.Fatal("expected first remote update append")
+		}
+		if i > 0 && appended {
+			t.Fatalf("expected duplicate remote update %d to be deduped", i)
+		}
+	}
+	count, err := cache.pendingRemoteUpdateCount("doc_1")
+	if err != nil {
+		t.Fatalf("pending count: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one pending remote update, got %d", count)
+	}
+
+	mainPath := filepath.Join(t.TempDir(), "doc.md")
+	agentPath := filepath.Join(t.TempDir(), "doc.md")
+	for _, path := range []string{mainPath, agentPath} {
+		if err := os.WriteFile(path, []byte("base"), 0o644); err != nil {
+			t.Fatalf("write projection: %v", err)
+		}
+	}
+	mainTracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: mainPath, cache: cache}
+	agentTracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: agentPath, cache: cache}
+	for _, tracked := range []*trackedFile{mainTracked, agentTracked} {
+		tracked.setProjectedContent("base")
+		if err := tracked.storeProjectedBase("base"); err != nil {
+			t.Fatalf("store projected base: %v", err)
+		}
+	}
+	service := &Service{
+		docCache:        cache,
+		projectedByID:   map[string]*trackedFile{"doc_1": mainTracked},
+		projectedByPath: map[string]*trackedFile{mainPath: mainTracked},
+		agentReplicas: map[string]*managedReplica{
+			"agent_1": {
+				replica: &workspaceReplica{
+					projectedByID:   map[string]*trackedFile{"doc_1": agentTracked},
+					projectedByPath: map[string]*trackedFile{agentPath: agentTracked},
+				},
+			},
+		},
+	}
+	if err := service.reconcileTrackedDocuments(context.Background()); err != nil {
+		t.Fatalf("reconcile tracked documents: %v", err)
+	}
+	for _, path := range []string{mainPath, agentPath} {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read projection: %v", err)
+		}
+		if string(content) != "base remote" {
+			t.Fatalf("unexpected projection at %s: %q", path, content)
+		}
+	}
+}
+
+func TestDocumentCacheDedupesConcurrentRemoteDeliveries(t *testing.T) {
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	update := updateFromBaseContent(t, "", "concurrent", "remote")
+	const workers = 32
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	appended := atomic.Int32{}
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ok, err := cache.appendPendingRemoteUpdate("doc_1", "doc.md", update)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if ok {
+				appended.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("append pending remote: %v", err)
+		}
+	}
+	if got := appended.Load(); got != 1 {
+		t.Fatalf("expected exactly one concurrent append to win, got %d", got)
+	}
+	count, err := cache.pendingRemoteUpdateCount("doc_1")
+	if err != nil {
+		t.Fatalf("pending count: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one framed pending update, got %d", count)
+	}
+}
+
+func TestReconcileDoesNotAdvanceRemoteBehindDisconnectedLocalDirtyWorkspace(t *testing.T) {
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base\n")
+	if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	remoteUpdate := updateFromBaseDoc(t, baseDoc, "base\nremote\n", "remote")
+	if _, err := cache.appendPendingRemoteUpdate("doc_1", "doc.md", remoteUpdate); err != nil {
+		t.Fatalf("append remote: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "doc.md")
+	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
+		t.Fatalf("write local: %v", err)
+	}
+	tracked := &trackedFile{
+		DocumentID:   "doc_1",
+		DocumentPath: "doc.md",
+		Path:         path,
+		cache:        cache,
+	}
+	tracked.setProjectedContent("base\n")
+	if err := tracked.storeProjectedBase("base\n"); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+	tracked.markLocalDirty()
+
+	if err := reconcileTrackedDocument(cache, "doc_1", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if !tracked.isLocalDirty() {
+		t.Fatal("expected disconnected local dirty workspace to remain dirty")
+	}
+	count, err := cache.pendingRemoteUpdateCount("doc_1")
+	if err != nil {
+		t.Fatalf("pending count: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected pending remote update to remain for retry, got %d", count)
+	}
+	materialized, err := cache.materialize(context.Background(), &document{ID: "doc_1", Path: "doc.md"})
+	if err != nil {
+		t.Fatalf("materialize cache: %v", err)
+	}
+	if got := materialized.Doc.GetText("content").ToString(); got != "base\n" {
+		t.Fatalf("shared base advanced despite unsent local edit: %q", got)
+	}
+}
+
+func TestMaterializeTrackedFileProjectsMissingFileFromSharedCache(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "docs", "remote.md")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -389,13 +918,47 @@ func TestMaterializeTrackedFileWritesNewRemoteDocumentToDisk(t *testing.T) {
 		t.Fatalf("read materialized file: %v", err)
 	}
 	if string(content) != "remote content" {
-		t.Fatalf("unexpected materialized content: %q", content)
+		t.Fatalf("unexpected cached content projection: %q", content)
 	}
 	if tracked.DocumentID != "doc_1" || tracked.Path != path {
 		t.Fatalf("unexpected tracked file: %#v", tracked)
 	}
 	if !tracked.matchesProjectedString("remote content") {
-		t.Fatal("expected materialized content hash to be recorded")
+		t.Fatal("expected cached content hash to be recorded")
+	}
+	if tracked.shouldSyncFromScratch() {
+		t.Fatal("expected cached projection to avoid full websocket bootstrap")
+	}
+}
+
+func TestMaterializeTrackedFileCreatesEmptyFileForKnownEmptyDocument(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "docs", "empty.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new document cache: %v", err)
+	}
+
+	tracked, err := materializeTrackedFile(context.Background(), cache, &document{
+		ID:          "doc_1",
+		Path:        "docs/empty.md",
+		StateVector: emptyDocumentStateVector,
+	}, path)
+	if err != nil {
+		t.Fatalf("materialize tracked file: %v", err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read materialized file: %v", err)
+	}
+	if string(content) != "" {
+		t.Fatalf("unexpected materialized content: %q", content)
+	}
+	if !tracked.hasProjectedContent() || !tracked.matchesProjectedString("") {
+		t.Fatal("expected known empty projection to be recorded")
 	}
 }
 
@@ -553,7 +1116,7 @@ func TestWorkspaceReplicaHandleLocalChangeIgnoresProjectedWrite(t *testing.T) {
 	}
 }
 
-func TestHandleLocalChangeWhileDisconnectedDoesNotReapplySameDiff(t *testing.T) {
+func TestHandleLocalChangeWhileDisconnectedOnlyMarksDirty(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "doc.md")
 	if err := os.WriteFile(path, []byte("hello brave"), 0o644); err != nil {
@@ -575,21 +1138,24 @@ func TestHandleLocalChangeWhileDisconnectedDoesNotReapplySameDiff(t *testing.T) 
 	if err := service.handleLocalChange(path); err != nil {
 		t.Fatalf("first local change: %v", err)
 	}
-	if got := doc.GetText("content").ToString(); got != "hello brave" {
-		t.Fatalf("unexpected content after first local change: %q", got)
+	if got := doc.GetText("content").ToString(); got != "hello" {
+		t.Fatalf("local change should not mutate CRDT before reconciliation, got %q", got)
 	}
 	if err := service.handleLocalChange(path); err != nil {
 		t.Fatalf("second local change: %v", err)
 	}
-	if got := doc.GetText("content").ToString(); got != "hello brave" {
-		t.Fatalf("local change was applied twice while disconnected: %q", got)
+	if got := doc.GetText("content").ToString(); got != "hello" {
+		t.Fatalf("local change should still not mutate CRDT before reconciliation, got %q", got)
 	}
-	if !tracked.matchesProjectedString("hello brave") {
-		t.Fatal("expected projected content hash to advance while disconnected")
+	if !tracked.isLocalDirty() {
+		t.Fatal("expected local dirty flag while disconnected")
+	}
+	if !tracked.matchesProjectedString("hello") {
+		t.Fatal("expected projected content hash to remain at the last projected base")
 	}
 }
 
-func TestWorkspaceReplicaHandleLocalChangeWhileDisconnectedDoesNotReapplySameDiff(t *testing.T) {
+func TestWorkspaceReplicaHandleLocalChangeWhileDisconnectedOnlyMarksDirty(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "doc.md")
 	if err := os.WriteFile(path, []byte("hello brave"), 0o644); err != nil {
@@ -611,17 +1177,20 @@ func TestWorkspaceReplicaHandleLocalChangeWhileDisconnectedDoesNotReapplySameDif
 	if err := replica.handleLocalChange(path); err != nil {
 		t.Fatalf("first local change: %v", err)
 	}
-	if got := doc.GetText("content").ToString(); got != "hello brave" {
-		t.Fatalf("unexpected content after first local change: %q", got)
+	if got := doc.GetText("content").ToString(); got != "hello" {
+		t.Fatalf("local change should not mutate replica CRDT before reconciliation, got %q", got)
 	}
 	if err := replica.handleLocalChange(path); err != nil {
 		t.Fatalf("second local change: %v", err)
 	}
-	if got := doc.GetText("content").ToString(); got != "hello brave" {
-		t.Fatalf("replica local change was applied twice while disconnected: %q", got)
+	if got := doc.GetText("content").ToString(); got != "hello" {
+		t.Fatalf("replica local change should still not mutate CRDT before reconciliation, got %q", got)
 	}
-	if !tracked.matchesProjectedString("hello brave") {
-		t.Fatal("expected replica projected content hash to advance while disconnected")
+	if !tracked.isLocalDirty() {
+		t.Fatal("expected replica local dirty flag while disconnected")
+	}
+	if !tracked.matchesProjectedString("hello") {
+		t.Fatal("expected replica projected content hash to remain at the last projected base")
 	}
 }
 
@@ -885,6 +1454,33 @@ func updateDocText(t *testing.T, doc *crdt.Doc, content string, origin any) {
 			text.Insert(txn, 0, content, nil)
 		}
 	}, origin)
+}
+
+func updateFromBaseContent(t *testing.T, baseContent, nextContent string, origin any) []byte {
+	t.Helper()
+	doc := newDocWithText(t, baseContent)
+	return updateFromBaseDoc(t, doc, nextContent, origin)
+}
+
+func updateFromBaseDoc(t *testing.T, baseDoc *crdt.Doc, nextContent string, origin any) []byte {
+	t.Helper()
+	doc := crdt.New()
+	if err := crdt.ApplyUpdateV1(doc, baseDoc.EncodeStateAsUpdate(), "base"); err != nil {
+		t.Fatalf("apply base state: %v", err)
+	}
+	var update []byte
+	unsubscribe := doc.OnUpdate(func(next []byte, observedOrigin any) {
+		if observedOrigin == origin {
+			update = append([]byte(nil), next...)
+		}
+	})
+	baseContent := doc.GetText("content").ToString()
+	updateDocText(t, doc, nextContent, origin)
+	unsubscribe()
+	if len(update) == 0 && baseContent != nextContent {
+		t.Fatal("expected CRDT update from base content")
+	}
+	return update
 }
 
 func encodeDocState(doc *crdt.Doc) string {

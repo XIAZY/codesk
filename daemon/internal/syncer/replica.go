@@ -184,8 +184,9 @@ func (r *workspaceReplica) ensureTracked(ctx context.Context, document *document
 	r.mu.Unlock()
 
 	if exists {
-		nextContent := tracked.contentString()
+		tracked.StateVector = document.StateVector
 		if tracked.Path != absolutePath {
+			nextContent := tracked.contentString()
 			if err := moveLocalFile(tracked.Path, absolutePath, nextContent); err != nil {
 				return err
 			}
@@ -196,6 +197,9 @@ func (r *workspaceReplica) ensureTracked(ctx context.Context, document *document
 			r.projectedByPath[absolutePath] = tracked
 			r.mu.Unlock()
 			tracked.setProjectedContent(nextContent)
+			if err := tracked.storeProjectedBase(nextContent); err != nil {
+				return err
+			}
 		}
 		if tracked.getConn() == nil {
 			if err := r.connectDocument(tracked); err != nil {
@@ -224,6 +228,7 @@ func (r *workspaceReplica) connectDocument(tracked *trackedFile) error {
 	if current := tracked.getConn(); current != nil {
 		return nil
 	}
+	paceDocumentConnect()
 	wsURL, err := url.Parse(r.backendURL)
 	if err != nil {
 		return err
@@ -280,29 +285,13 @@ func (r *workspaceReplica) readLoop(tracked *trackedFile, conn *websocket.Conn) 
 		}
 		switch topLevel {
 		case yproto.MessageSync:
-			unlockDoc := tracked.lockDoc()
-			reply, changed, err := yproto.ReadSyncMessage(reader, tracked.Doc, "remote")
-			var nextContent string
-			var persistErr error
-			if changed {
-				nextContent = tracked.Doc.GetText("content").ToString()
-				persistErr = tracked.persistCachedStateLocked()
-			}
-			unlockDoc()
+			reply, _, err := handleRemoteSyncMessage(reader, tracked, "remote")
 			if err != nil {
 				log.Printf("%s ws sync error doc=%s err=%v", r.label, tracked.DocumentID, err)
 				continue
 			}
-			if persistErr != nil {
-				log.Printf("%s cache persist error doc=%s err=%v", r.label, tracked.DocumentID, persistErr)
-			}
 			if len(reply) > 0 {
 				_ = tracked.write(reply)
-			}
-			if changed {
-				if err := applyProjectedContent(tracked, nextContent); err != nil {
-					log.Printf("%s local projection error doc=%s err=%v", r.label, tracked.DocumentID, err)
-				}
 			}
 		case yproto.MessageAwareness:
 		}
@@ -316,20 +305,7 @@ func (r *workspaceReplica) handleLocalChange(path string) error {
 	if !ok {
 		return nil
 	}
-	update, err := handleTrackedLocalChange(tracked, path)
-	if err != nil {
-		return err
-	}
-	if len(update) == 0 {
-		return nil
-	}
-	if tracked.getConn() == nil {
-		return nil
-	}
-	if err := tracked.write(yproto.BuildSyncUpdate(update)); err != nil {
-		return err
-	}
-	return nil
+	return markTrackedLocalDirty(tracked, path)
 }
 
 func (r *workspaceReplica) reconcileLocalWorkspace(ctx context.Context) error {
@@ -369,7 +345,6 @@ func (r *workspaceReplica) reconcileLocalWorkspace(ctx context.Context) error {
 				if err := r.handleLocalChange(tracked.Path); err != nil {
 					return err
 				}
-				changed = true
 			}
 			continue
 		}

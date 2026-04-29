@@ -2,6 +2,7 @@ package notty
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"os"
 	"strconv"
 	"strings"
@@ -126,7 +127,7 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	defer reloaded.Close()
 
 	snapshot := reloaded.Snapshot()
-	if got := snapshot.Documents[documentID]; got == nil || got.Path != "docs/spec.md" || got.Content != "# notty\n\n" {
+	if got := snapshot.Documents[documentID]; got == nil || got.Path != "docs/spec.md" || got.Content != "" || got.CRDTState != "" || got.Doc != nil {
 		t.Fatalf("expected document after reload, got %#v", got)
 	}
 	if got := snapshot.Users[user.ID]; got == nil || got.Handle != "adaproof" {
@@ -195,10 +196,6 @@ func TestPostgresDocumentUpdateHotPathKeepsHeadSnapshotless(t *testing.T) {
 	defer store.Close()
 
 	documentID := mustCreateTestDocument(t, store, "docs/hot.md", "")
-	initial, err := store.GetDocument(documentID)
-	if err != nil {
-		t.Fatalf("get initial document: %v", err)
-	}
 
 	var initialHeadUpdateID int64
 	var initialHeadStateVector string
@@ -226,9 +223,13 @@ func TestPostgresDocumentUpdateHotPathKeepsHeadSnapshotless(t *testing.T) {
 		t.Fatal("expected initial checkpoint to hold the full CRDT state")
 	}
 
-	peer, err := decodeCRDTState(initial.CRDTState, 77)
+	peer := syncDocumentToDocForTest(t, store, documentID, 77)
+	liveAfterBootstrap, err := store.GetLiveDocument(documentID)
 	if err != nil {
-		t.Fatalf("decode peer document: %v", err)
+		t.Fatalf("get live document after bootstrap: %v", err)
+	}
+	if liveAfterBootstrap.Doc != nil || liveAfterBootstrap.Content != "" || liveAfterBootstrap.CRDTState != "" {
+		t.Fatalf("expected sync bootstrap to avoid retaining materialized document state, got %#v", liveAfterBootstrap)
 	}
 	text := peer.GetText("content")
 	for _, value := range []string{"a", "b"} {
@@ -253,20 +254,30 @@ func TestPostgresDocumentUpdateHotPathKeepsHeadSnapshotless(t *testing.T) {
 	).Scan(&storedUpdateID, &storedStateVector); err != nil {
 		t.Fatalf("query updated head: %v", err)
 	}
-	if storedUpdateID <= initialHeadUpdateID || storedStateVector == "" {
-		t.Fatalf("expected hot path to update only lightweight head metadata, updateID=%d initial=%d stateVector=%q", storedUpdateID, initialHeadUpdateID, storedStateVector)
+	if storedUpdateID <= initialHeadUpdateID || storedStateVector != "" {
+		t.Fatalf("expected hot path to advance version and invalidate unmaterialized state vector, updateID=%d initial=%d stateVector=%q", storedUpdateID, initialHeadUpdateID, storedStateVector)
 	}
 
 	current, err := store.GetDocument(documentID)
 	if err != nil {
 		t.Fatalf("get current document: %v", err)
 	}
-	currentDoc, err := decodeCRDTState(current.CRDTState, 88)
-	if err != nil {
-		t.Fatalf("decode current crdt state: %v", err)
+	if current.Content != "" || current.CRDTState != "" || current.Doc != nil {
+		t.Fatalf("expected in-memory document to stay metadata-only, got %#v", current)
 	}
-	if got := currentDoc.GetText("content").ToString(); got != "ab" {
-		t.Fatalf("expected on-demand document state to include hot-path updates, got %q", got)
+	if got, err := documentContentAtUpdatePostgres(db, "ws_notty", current, current.UpdateID); err != nil || got != "ab" {
+		t.Fatalf("expected reconstructable document state to include hot-path updates, got %q err=%v", got, err)
+	}
+	freshClient := syncDocumentToDocForTest(t, store, documentID, 88)
+	if got := freshClient.GetText("content").ToString(); got != "ab" {
+		t.Fatalf("expected fresh sync to read hot-path updates instead of stale in-memory doc, got %q", got)
+	}
+	liveAfterFreshSync, err := store.GetLiveDocument(documentID)
+	if err != nil {
+		t.Fatalf("get live document after fresh sync: %v", err)
+	}
+	if liveAfterFreshSync.Doc != nil || liveAfterFreshSync.Content != "" || liveAfterFreshSync.CRDTState != "" {
+		t.Fatalf("expected fresh sync to avoid retaining materialized document state, got %#v", liveAfterFreshSync)
 	}
 
 	if _, err := db.Exec(`DELETE FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2`, "ws_notty", documentID); err != nil {
@@ -281,8 +292,222 @@ func TestPostgresDocumentUpdateHotPathKeepsHeadSnapshotless(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get reloaded document: %v", err)
 	}
-	if reloadedDocument.Content != "ab" {
-		t.Fatalf("expected reload to replay update log without a head snapshot, got %q", reloadedDocument.Content)
+	if reloadedDocument.Content != "" || reloadedDocument.CRDTState != "" || reloadedDocument.Doc != nil {
+		t.Fatalf("expected reload to keep metadata-only document, got %#v", reloadedDocument)
+	}
+	if got, err := documentContentAtUpdatePostgres(db, "ws_notty", reloadedDocument, reloadedDocument.UpdateID); err != nil || got != "ab" {
+		t.Fatalf("expected reload to replay update log without a head snapshot on demand, got %q err=%v", got, err)
+	}
+	noCheckpointClient := syncDocumentToDocForTest(t, reloaded, documentID, 89)
+	if got := noCheckpointClient.GetText("content").ToString(); got != "ab" {
+		t.Fatalf("expected no-checkpoint sync to stream update log without materialization, got %q", got)
+	}
+	liveAfterNoCheckpointSync, err := reloaded.GetLiveDocument(documentID)
+	if err != nil {
+		t.Fatalf("get live document after no-checkpoint sync: %v", err)
+	}
+	if liveAfterNoCheckpointSync.Doc != nil || liveAfterNoCheckpointSync.Content != "" || liveAfterNoCheckpointSync.CRDTState != "" {
+		t.Fatalf("expected no-checkpoint sync to avoid retaining materialized document state, got %#v", liveAfterNoCheckpointSync)
+	}
+}
+
+func TestPostgresCheckpointStateVectorSyncsOnlyTailAfterReload(t *testing.T) {
+	dsn := os.Getenv("NOTTY_DATABASE_TEST_URL")
+	if dsn == "" {
+		t.Skip("NOTTY_DATABASE_TEST_URL is not set")
+	}
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+	if err := initPostgresSchema(db); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+	if err := clearNottyTables(db); err != nil {
+		t.Fatalf("clear tables: %v", err)
+	}
+
+	store, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	documentID := mustCreateTestDocument(t, store, "docs/checkpoint-tail.md", "")
+	var checkpointUpdateID int64
+	var checkpointStateVector string
+	var checkpointState string
+	if err := db.QueryRow(
+		`SELECT h.update_id, h.state_vector, c.crdt_state
+		   FROM document_heads h
+		   JOIN document_checkpoints c
+		     ON c.workspace_id = h.workspace_id
+		    AND c.document_id = h.document_id
+		    AND c.update_id = h.update_id
+		  WHERE h.workspace_id = $1 AND h.document_id = $2`,
+		"ws_notty",
+		documentID,
+	).Scan(&checkpointUpdateID, &checkpointStateVector, &checkpointState); err != nil {
+		t.Fatalf("query initial checkpoint: %v", err)
+	}
+	if checkpointUpdateID <= 0 || checkpointStateVector == "" || checkpointState == "" {
+		t.Fatalf("expected initialized checkpoint, updateID=%d stateVector=%q state=%q", checkpointUpdateID, checkpointStateVector, checkpointState)
+	}
+
+	peer := syncDocumentToDocForTest(t, store, documentID, 77)
+	text := peer.GetText("content")
+	for _, value := range []string{"1\n", "2\n", "3\n"} {
+		update := captureDocUpdate(t, peer, "peer", func(txn *crdt.Transaction) {
+			text.Insert(txn, text.Len(), value, nil)
+		})
+		if _, err := store.ApplyCRDTUpdate(documentID, update, OperationMeta{
+			ActorID:   "peer",
+			ActorType: "human",
+			Source:    "test",
+		}); err != nil {
+			t.Fatalf("apply update %q: %v", value, err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	reloaded, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("reload store: %v", err)
+	}
+	defer reloaded.Close()
+	reloadedDocument, err := reloaded.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get reloaded document: %v", err)
+	}
+	if reloadedDocument.StateVector != checkpointStateVector {
+		t.Fatalf("expected reload to advertise checkpoint state vector %q, got %q", checkpointStateVector, reloadedDocument.StateVector)
+	}
+	if reloadedDocument.Content != "" || reloadedDocument.CRDTState != "" || reloadedDocument.Doc != nil {
+		t.Fatalf("expected reload to keep metadata-only document, got %#v", reloadedDocument)
+	}
+
+	checkpointStateVectorBytes, err := base64.StdEncoding.DecodeString(checkpointStateVector)
+	if err != nil {
+		t.Fatalf("decode checkpoint state vector: %v", err)
+	}
+	_, tailUpdates, err := reloaded.EncodeDocumentSyncUpdates(documentID, checkpointStateVectorBytes)
+	if err != nil {
+		t.Fatalf("encode tail sync updates: %v", err)
+	}
+	if len(tailUpdates) != 3 {
+		t.Fatalf("expected only three tail updates after matching checkpoint vector, got %d", len(tailUpdates))
+	}
+
+	checkpointBytes, err := base64.StdEncoding.DecodeString(checkpointState)
+	if err != nil {
+		t.Fatalf("decode checkpoint state: %v", err)
+	}
+	clientDoc := crdt.New()
+	if err := crdt.ApplyUpdateV1(clientDoc, checkpointBytes, "checkpoint"); err != nil {
+		t.Fatalf("apply checkpoint: %v", err)
+	}
+	for _, update := range tailUpdates {
+		if err := crdt.ApplyUpdateV1(clientDoc, update, "tail"); err != nil {
+			t.Fatalf("apply tail update: %v", err)
+		}
+	}
+	if got := clientDoc.GetText("content").ToString(); got != "1\n2\n3\n" {
+		t.Fatalf("expected checkpoint plus tail to reconstruct document, got %q", got)
+	}
+
+	_, coldUpdates, err := reloaded.EncodeDocumentSyncUpdates(documentID, nil)
+	if err != nil {
+		t.Fatalf("encode cold sync updates: %v", err)
+	}
+	if len(coldUpdates) != len(tailUpdates)+1 {
+		t.Fatalf("expected cold sync to send checkpoint plus tail, got cold=%d tail=%d", len(coldUpdates), len(tailUpdates))
+	}
+}
+
+func TestPostgresLoadRegeneratesMissingCheckpointBeforeSync(t *testing.T) {
+	dsn := os.Getenv("NOTTY_DATABASE_TEST_URL")
+	if dsn == "" {
+		t.Skip("NOTTY_DATABASE_TEST_URL is not set")
+	}
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+	if err := initPostgresSchema(db); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+	if err := clearNottyTables(db); err != nil {
+		t.Fatalf("clear tables: %v", err)
+	}
+
+	store, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	documentID := mustCreateTestDocument(t, store, "docs/missing-checkpoint.md", "")
+	peer := syncDocumentToDocForTest(t, store, documentID, 77)
+	text := peer.GetText("content")
+	for _, value := range []string{"1\n", "2\n", "3\n"} {
+		update := captureDocUpdate(t, peer, "peer", func(txn *crdt.Transaction) {
+			text.Insert(txn, text.Len(), value, nil)
+		})
+		if _, err := store.ApplyCRDTUpdate(documentID, update, OperationMeta{
+			ActorID:   "peer",
+			ActorType: "human",
+			Source:    "test",
+		}); err != nil {
+			t.Fatalf("apply update %q: %v", value, err)
+		}
+	}
+	if _, err := db.Exec(`DELETE FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2`, "ws_notty", documentID); err != nil {
+		t.Fatalf("delete checkpoints: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE document_heads SET state_vector = '' WHERE workspace_id = $1 AND document_id = $2`, "ws_notty", documentID); err != nil {
+		t.Fatalf("clear head state vector: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	reloaded, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("reload store: %v", err)
+	}
+	defer reloaded.Close()
+	reloadedDocument, err := reloaded.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get reloaded document: %v", err)
+	}
+	if reloadedDocument.StateVector == "" {
+		t.Fatal("expected reload to regenerate and advertise a checkpoint state vector")
+	}
+
+	var checkpointCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2 AND update_id = $3`, "ws_notty", documentID, reloadedDocument.UpdateID).Scan(&checkpointCount); err != nil {
+		t.Fatalf("count regenerated checkpoint: %v", err)
+	}
+	if checkpointCount != 1 {
+		t.Fatalf("expected one regenerated head checkpoint, got %d", checkpointCount)
+	}
+
+	_, updates, err := reloaded.EncodeDocumentSyncUpdates(documentID, nil)
+	if err != nil {
+		t.Fatalf("encode cold sync after regenerated checkpoint: %v", err)
+	}
+	if len(updates) != 1 {
+		t.Fatalf("expected cold sync to send one regenerated checkpoint update, got %d updates", len(updates))
+	}
+	clientDoc := crdt.New()
+	if err := crdt.ApplyUpdateV1(clientDoc, updates[0], "checkpoint"); err != nil {
+		t.Fatalf("apply regenerated checkpoint: %v", err)
+	}
+	if got := clientDoc.GetText("content").ToString(); got != "1\n2\n3\n" {
+		t.Fatalf("expected regenerated checkpoint to reconstruct document, got %q", got)
 	}
 }
 
@@ -320,14 +545,7 @@ func TestPostgresDocumentAtHandleTextDoesNotCreateMentionEvent(t *testing.T) {
 		t.Fatalf("create agent: %v", err)
 	}
 	documentID := mustCreateTestDocument(t, store, "docs/plain-at-handle.md", "Draft.\n")
-	document, err := store.GetDocument(documentID)
-	if err != nil {
-		t.Fatalf("get document: %v", err)
-	}
-	peer, err := decodeCRDTState(document.CRDTState, 77)
-	if err != nil {
-		t.Fatalf("decode document: %v", err)
-	}
+	peer := syncDocumentToDocForTest(t, store, documentID, 77)
 	text := peer.GetText("content")
 	update := captureDocUpdate(t, peer, "peer", func(txn *crdt.Transaction) {
 		text.Insert(txn, text.Len(), "Please review @codex-agent.\n", nil)
@@ -492,8 +710,6 @@ func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testin
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
-	defer store.Close()
-	server := NewServer(Config{}, store)
 
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "version 0\n")
 	for index := 1; index <= 105; index++ {
@@ -509,6 +725,10 @@ func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testin
 	head, err := store.GetDocument(documentID)
 	if err != nil {
 		t.Fatalf("get document head: %v", err)
+	}
+	headContent, err := documentContentAtUpdatePostgres(db, "ws_notty", head, head.UpdateID)
+	if err != nil {
+		t.Fatalf("reconstruct document head: %v", err)
 	}
 	var checkpointUpdateID int64
 	if err := db.QueryRow(
@@ -538,6 +758,16 @@ func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testin
 	if tailCount == 0 {
 		t.Fatalf("test setup expected tail updates after checkpoint, checkpoint=%d head=%d", checkpointUpdateID, head.UpdateID)
 	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store before cold bootstrap: %v", err)
+	}
+
+	store, err = NewStore(dsn)
+	if err != nil {
+		t.Fatalf("reload store for cold bootstrap: %v", err)
+	}
+	defer store.Close()
+	server := NewServer(Config{}, store)
 
 	clientDoc := crdt.New()
 	conn := &DocumentConn{send: make(chan []byte, 128)}
@@ -565,8 +795,8 @@ func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testin
 				}
 			}
 		default:
-			if got := clientDoc.GetText("content").ToString(); got != head.Content {
-				t.Fatalf("cold bootstrap content diverged: got %q want %q", got, head.Content)
+			if got := clientDoc.GetText("content").ToString(); got != headContent {
+				t.Fatalf("cold bootstrap content diverged: got %q want %q", got, headContent)
 			}
 			if len(syncTypes) != tailCount+2 {
 				t.Fatalf("expected checkpoint, %d tail updates, and server sync step1; got sync types %v", tailCount, syncTypes)
@@ -574,9 +804,9 @@ func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testin
 			if syncTypes[0] != yproto.SyncStep2 {
 				t.Fatalf("expected checkpoint as sync step2, got sync types %v", syncTypes)
 			}
-			for index := 1; index <= tailCount; index++ {
-				if syncTypes[index] != yproto.SyncUpdate {
-					t.Fatalf("expected tail update at message %d, got sync types %v", index, syncTypes)
+			for index, syncType := range syncTypes[1 : len(syncTypes)-1] {
+				if syncType != yproto.SyncUpdate {
+					t.Fatalf("expected tail update %d as sync update, got sync types %v", index, syncTypes)
 				}
 			}
 			if syncTypes[len(syncTypes)-1] != yproto.SyncStep1 {
@@ -612,15 +842,8 @@ func TestPostgresApplyCRDTUpdatePersistsWithoutWorkspaceSnapshot(t *testing.T) {
 	defer store.Close()
 
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "# before\n")
-	document, err := store.GetDocument(documentID)
-	if err != nil {
-		t.Fatalf("get document: %v", err)
-	}
 
-	frontendDoc, err := decodeCRDTState(document.CRDTState, 77)
-	if err != nil {
-		t.Fatalf("decode initial state: %v", err)
-	}
+	frontendDoc := syncDocumentToDocForTest(t, store, documentID, 77)
 	text := frontendDoc.GetText("content")
 	var update []byte
 	unsubscribe := frontendDoc.OnUpdate(func(next []byte, origin any) {
@@ -642,8 +865,11 @@ func TestPostgresApplyCRDTUpdatePersistsWithoutWorkspaceSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply crdt update: %v", err)
 	}
-	if updated.Content != "# before\nmore\n" {
-		t.Fatalf("unexpected updated content: %q", updated.Content)
+	if updated.Content != "" || updated.CRDTState != "" || updated.Doc != nil {
+		t.Fatalf("expected append-only update result to stay metadata-only, got %#v", updated)
+	}
+	if got, err := documentContentAtUpdatePostgres(db, "ws_notty", updated, updated.UpdateID); err != nil || got != "# before\nmore\n" {
+		t.Fatalf("unexpected reconstructed updated content: %q err=%v", got, err)
 	}
 
 	var headUpdateID int64
@@ -834,6 +1060,10 @@ func TestPostgresDiffDocumentReconstructsAcrossCheckpointsAfterReload(t *testing
 		t.Fatalf("get final document: %v", err)
 	}
 	finalVersion := final.UpdateID
+	finalContent, err := documentContentAtUpdatePostgres(db, "ws_notty", final, finalVersion)
+	if err != nil {
+		t.Fatalf("reconstruct final document: %v", err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("close store: %v", err)
 	}
@@ -848,8 +1078,8 @@ func TestPostgresDiffDocumentReconstructsAcrossCheckpointsAfterReload(t *testing
 	if err != nil {
 		t.Fatalf("diff reconstructed document: %v", err)
 	}
-	if diff.FromContent != midContent || diff.ToContent != final.Content {
-		t.Fatalf("unexpected reconstructed diff contents: from=%q want=%q to=%q want=%q", diff.FromContent, midContent, diff.ToContent, final.Content)
+	if diff.FromContent != midContent || diff.ToContent != finalContent {
+		t.Fatalf("unexpected reconstructed diff contents: from=%q want=%q to=%q want=%q", diff.FromContent, midContent, diff.ToContent, finalContent)
 	}
 	if !strings.Contains(diff.Unified, "-v50\n") || !strings.Contains(diff.Unified, "+v105\n") {
 		t.Fatalf("expected reconstructed diff across checkpoints, got %q", diff.Unified)
@@ -871,7 +1101,6 @@ func clearNottyTables(db *sql.DB) error {
 		`DELETE FROM document_updates`,
 		`DELETE FROM document_heads`,
 		`DELETE FROM documents`,
-		`DELETE FROM comments`,
 		`DELETE FROM thread_messages`,
 		`DELETE FROM thread_participants`,
 		`DELETE FROM threads`,
@@ -905,6 +1134,21 @@ func decodeSyncTypeForTest(t *testing.T, payload []byte) uint64 {
 		t.Fatalf("decode sync message: %v", err)
 	}
 	return syncType
+}
+
+func syncDocumentToDocForTest(t *testing.T, store *Store, documentID string, clientID uint64) *crdt.Doc {
+	t.Helper()
+	doc := crdt.New(crdt.WithClientID(crdt.ClientID(clientID)))
+	_, updates, err := store.EncodeDocumentSyncUpdates(documentID, nil)
+	if err != nil {
+		t.Fatalf("encode document sync updates: %v", err)
+	}
+	for _, update := range updates {
+		if err := crdt.ApplyUpdateV1(doc, update, "test-bootstrap"); err != nil {
+			t.Fatalf("apply sync update: %v", err)
+		}
+	}
+	return doc
 }
 
 func assertNoDocumentHeadMaterializationColumns(t *testing.T, db *sql.DB) {

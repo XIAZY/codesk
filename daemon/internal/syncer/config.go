@@ -1,6 +1,9 @@
 package syncer
 
-import "os"
+import (
+	"os"
+	"path/filepath"
+)
 
 type Config struct {
 	BackendURL         string
@@ -15,16 +18,21 @@ type Config struct {
 }
 
 func LoadConfig() Config {
+	runtimeDir := getenv("NOTTY_RUNTIME_DIR", "/runtime/notty")
+	cacheDir := getenv("NOTTY_CACHE_DIR", "")
+	if cacheDir == "" {
+		cacheDir = filepath.Join(runtimeDir, "document-cache")
+	}
 	return Config{
 		BackendURL:         getenv("NOTTY_BACKEND_URL", "http://backend:8080"),
 		WorkspaceDir:       getenv("NOTTY_WORKSPACE_DIR", "/workspace/notty"),
 		AgentWorkspaceRoot: getenv("NOTTY_AGENT_WORKSPACE_ROOT", "/workspace/agents"),
 		AgentID:            getenv("NOTTY_AGENT_ID", "daemon_agent"),
 		CodexCommand:       getenv("NOTTY_CODEX_COMMAND", "codex"),
-		RuntimeDir:         getenv("NOTTY_RUNTIME_DIR", "/runtime/notty"),
+		RuntimeDir:         runtimeDir,
 		AgentToolBaseURL:   getenv("NOTTY_AGENT_TOOL_BASE_URL", "http://127.0.0.1:7778"),
 		PprofAddr:          getenv("NOTTY_PPROF_ADDR", ""),
-		CacheDir:           getenv("NOTTY_CACHE_DIR", "/tmp/notty-daemon-cache"),
+		CacheDir:           cacheDir,
 	}
 }
 

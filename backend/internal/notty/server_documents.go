@@ -140,9 +140,12 @@ func (s *Server) handleDocumentWebsocket(w http.ResponseWriter, r *http.Request)
 	defer conn.Close()
 
 	room := s.rooms.ForDocument(documentID)
-	session := &DocumentConn{send: make(chan []byte, 64)}
+	session := newDocumentConn(64)
 	room.Add(session)
-	defer room.Remove(session)
+	defer func() {
+		session.Close()
+		room.Remove(session)
+	}()
 
 	clientID, _ := strconv.ParseUint(r.URL.Query().Get("client_id"), 10, 64)
 	actorID := r.URL.Query().Get("actor_id")
@@ -198,6 +201,8 @@ func (s *Server) handleDocumentWebsocket(w http.ResponseWriter, r *http.Request)
 			}
 			log.Printf("document ws closed doc=%s actor=%s client=%d", documentID, actorID, clientID)
 			return
+		case <-session.Done():
+			return
 		case message := <-session.send:
 			if err := conn.WriteMessage(websocket.BinaryMessage, message); err != nil {
 				log.Printf("document ws write error doc=%s actor=%s err=%v", documentID, actorID, err)
@@ -231,9 +236,13 @@ func (s *Server) handleDocumentProtocolMessage(room *DocumentRoom, session *Docu
 			}
 			for index, update := range updates {
 				if index == 0 {
-					session.send <- yproto.BuildSyncStep2FromUpdate(update)
+					if !session.Enqueue(yproto.BuildSyncStep2FromUpdate(update)) {
+						return nil
+					}
 				} else {
-					session.send <- yproto.BuildSyncUpdate(update)
+					if !session.Enqueue(yproto.BuildSyncUpdate(update)) {
+						return nil
+					}
 				}
 			}
 			if document.StateVector != "" {
@@ -241,7 +250,9 @@ func (s *Server) handleDocumentProtocolMessage(room *DocumentRoom, session *Docu
 				if err != nil {
 					return err
 				}
-				session.send <- yproto.BuildSyncStep1FromStateVector(stateVector)
+				if !session.Enqueue(yproto.BuildSyncStep1FromStateVector(stateVector)) {
+					return nil
+				}
 			}
 		case yproto.SyncStep2, yproto.SyncUpdate:
 			if len(data) == 0 {

@@ -1,6 +1,7 @@
 package notty
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -313,6 +314,9 @@ func (s *Store) GetDocument(id string) (*Document, error) {
 	documentLock.RLock()
 	s.mu.Unlock()
 	defer documentLock.RUnlock()
+	if s.db != nil {
+		return cloneDocument(document), nil
+	}
 	return cloneDocumentWithCRDTState(document), nil
 }
 
@@ -334,6 +338,9 @@ func (s *Store) GetDocumentByPath(path string) (*Document, error) {
 			documentLock.RLock()
 			s.mu.Unlock()
 			defer documentLock.RUnlock()
+			if s.db != nil {
+				return cloneDocument(document), nil
+			}
 			return cloneDocumentWithCRDTState(document), nil
 		}
 	}
@@ -392,8 +399,20 @@ func (s *Store) EncodeDocumentUpdate(documentID string, stateVector []byte) (*Do
 			return nil, nil, err
 		}
 	}
-	update := crdt.EncodeStateAsUpdateV1(document.Doc, decoded)
-	return documentMetadata(document), update, nil
+	doc := document.Doc
+	metadata := documentMetadata(document)
+	if s.db != nil && document.Doc == nil {
+		doc, err = s.restoreDocumentDocPostgresLocked(document)
+		if err != nil {
+			return nil, nil, err
+		}
+		metadata.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
+	}
+	if doc == nil {
+		return nil, nil, errors.New("document CRDT state is unavailable")
+	}
+	update := crdt.EncodeStateAsUpdateV1(doc, decoded)
+	return metadata, update, nil
 }
 
 func (s *Store) EncodeDocumentSyncUpdates(documentID string, stateVector []byte) (*DocumentMetadata, [][]byte, error) {
@@ -423,9 +442,6 @@ func (s *Store) encodeDocumentCheckpointSyncUpdates(documentID string, stateVect
 			return nil, nil, false, err
 		}
 	}
-	if len(decoded) > 0 {
-		return nil, nil, false, nil
-	}
 
 	s.mu.Lock()
 	document, ok := s.state.Documents[documentID]
@@ -434,21 +450,48 @@ func (s *Store) encodeDocumentCheckpointSyncUpdates(documentID string, stateVect
 		return nil, nil, false, ErrNotFound
 	}
 	documentLock := s.documentLockLocked(document.ID)
-	documentLock.RLock()
+	documentLock.Lock()
 	workspaceID := s.state.WorkspaceID
 	headUpdateID := document.UpdateID
 	metadata := documentMetadata(document)
+	if len(stateVector) > 0 && document.StateVector != "" && (s.db == nil || document.Doc != nil) {
+		currentStateVector, err := base64.StdEncoding.DecodeString(document.StateVector)
+		if err != nil {
+			s.mu.Unlock()
+			documentLock.Unlock()
+			return nil, nil, false, err
+		}
+		if bytes.Equal(stateVector, currentStateVector) {
+			s.mu.Unlock()
+			documentLock.Unlock()
+			return metadata, nil, true, nil
+		}
+	}
+	if document.Doc != nil {
+		update := crdt.EncodeStateAsUpdateV1(document.Doc, decoded)
+		s.mu.Unlock()
+		documentLock.Unlock()
+		return metadata, [][]byte{update}, true, nil
+	}
 	s.mu.Unlock()
-	defer documentLock.RUnlock()
+	defer documentLock.Unlock()
 
-	updates, ok, err := loadDocumentBootstrapUpdatesPostgres(s.db, workspaceID, documentID, headUpdateID)
+	updates, ok, err := loadDocumentBootstrapUpdatesPostgres(s.db, workspaceID, documentID, headUpdateID, stateVector)
 	if err != nil {
 		return nil, nil, false, err
 	}
-	if !ok {
-		return nil, nil, false, nil
+	if ok {
+		return metadata, updates, true, nil
 	}
-	return metadata, updates, true, nil
+
+	doc, err := s.restoreDocumentDocPostgresLocked(document)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	metadata = documentMetadata(document)
+	metadata.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
+	update := crdt.EncodeStateAsUpdateV1(doc, decoded)
+	return metadata, [][]byte{update}, true, nil
 }
 
 func (s *Store) GetThread(id string) (*Thread, error) {
@@ -959,11 +1002,11 @@ func (s *Store) documentContentAtUpdateLocked(document *Document, updateID int64
 	if updateID <= 0 {
 		return "", nil
 	}
-	if updateID >= document.UpdateID {
-		return document.Content, nil
-	}
 	if s.db != nil {
 		return s.documentContentAtUpdatePostgresLocked(document, updateID)
+	}
+	if updateID >= document.UpdateID {
+		return document.Content, nil
 	}
 	checkpoint := s.bestDocumentCheckpointLocked(document.ID, updateID)
 	if checkpoint == nil {
@@ -1110,7 +1153,13 @@ func (s *Store) CreateDocument(req CreateDocumentRequest, meta OperationMeta) (*
 	if err := s.persistDocumentMutationLocked(); err != nil {
 		return nil, err
 	}
-	return cloneDocument(document), nil
+	created := cloneDocument(document)
+	if s.db != nil {
+		document.Doc = nil
+		document.Content = ""
+		document.CRDTState = ""
+	}
+	return created, nil
 }
 
 func (s *Store) MoveDocument(id, nextPath string, meta OperationMeta) (*Document, string, error) {
@@ -1703,6 +1752,24 @@ func (s *Store) ApplyCRDTUpdateWithResult(documentID string, update []byte, meta
 	if !ok {
 		return nil, ErrNotFound
 	}
+	if s.db != nil {
+		now := time.Now().UTC()
+		s.markDocumentDirtyLocked(document.ID)
+		s.appendIncrementalDocumentUpdateLocked(document.ID, update, meta, now)
+		document.Doc = nil
+		document.Content = ""
+		document.CRDTState = ""
+		document.StateVector = ""
+		document.UpdatedAt = now
+		s.state.UpdatedAt = now
+		if err := s.persistDocumentMutationLocked(); err != nil {
+			return nil, err
+		}
+		return &ApplyCRDTUpdateResult{
+			Document: cloneDocument(document),
+			Applied:  true,
+		}, nil
+	}
 	documentLock := s.documentLockLocked(document.ID)
 	documentLock.Lock()
 	defer documentLock.Unlock()
@@ -1718,10 +1785,11 @@ func (s *Store) ApplyCRDTUpdateWithResult(documentID string, update []byte, meta
 		}, nil
 	}
 	afterStateVector := crdt.EncodeStateVectorV1(document.Doc)
-	afterContent := document.Doc.GetText("content").ToString()
 	now := time.Now().UTC()
-	document.Content = afterContent
 	document.StateVector = base64.StdEncoding.EncodeToString(afterStateVector)
+	if s.db == nil {
+		document.Content = document.Doc.GetText("content").ToString()
+	}
 	s.markDocumentDirtyLocked(document.ID)
 	s.appendIncrementalDocumentUpdateLocked(document.ID, update, meta, now)
 	document.UpdatedAt = now
@@ -1750,6 +1818,14 @@ func (s *Store) ReplaceDocumentText(documentID string, nextText string, meta Ope
 	documentLock := s.documentLockLocked(document.ID)
 	documentLock.Lock()
 	defer documentLock.Unlock()
+	if s.db != nil && document.Doc == nil {
+		doc, err := s.restoreDocumentDocPostgresLocked(document)
+		if err != nil {
+			return nil, nil, err
+		}
+		document.Doc = doc
+		document.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
+	}
 	currentText := document.Doc.GetText("content").ToString()
 	text := document.Doc.GetText("content")
 
@@ -1769,7 +1845,11 @@ func (s *Store) ReplaceDocumentText(documentID string, nextText string, meta Ope
 	}, meta)
 	unsubscribe()
 
-	document.SyncProjectionFields()
+	if s.db != nil {
+		document.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(document.Doc))
+	} else {
+		document.SyncProjectionFields()
+	}
 	s.markDocumentDirtyLocked(document.ID)
 	s.appendIncrementalDocumentUpdateLocked(document.ID, update, meta, time.Now().UTC())
 	notify := !isLogDocumentPath(document.Path)
@@ -1792,7 +1872,7 @@ func (s *Store) ReplaceDocumentText(documentID string, nextText string, meta Ope
 	if err := s.persistDocumentMutationLocked(); err != nil {
 		return nil, nil, err
 	}
-	return cloneDocument(document), update, nil
+	return cloneDocumentWithCRDTState(document), update, nil
 }
 
 func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thread, *ThreadMessage, error) {
@@ -1812,12 +1892,23 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 		return nil, nil, err
 	}
 	now := time.Now().UTC()
+	anchorDocument := document
+	if s.db != nil && document.Doc == nil {
+		doc, err := s.restoreDocumentDocPostgresLocked(document)
+		if err != nil {
+			return nil, nil, err
+		}
+		projected := *document
+		projected.Doc = doc
+		projected.Content = doc.GetText("content").ToString()
+		anchorDocument = &projected
+	}
 	thread := &Thread{
 		ID:              "thread_" + uuid.NewString(),
 		DocumentID:      document.ID,
-		Title:           firstNonEmptyString(strings.TrimSpace(req.Title), inferThreadTitle(document, req.Start, req.End)),
+		Title:           firstNonEmptyString(strings.TrimSpace(req.Title), inferThreadTitle(anchorDocument, req.Start, req.End)),
 		Status:          "open",
-		Anchor:          buildThreadAnchor(document, req.Start, req.End),
+		Anchor:          buildThreadAnchor(anchorDocument, req.Start, req.End),
 		CreatedByID:     author.ID,
 		CreatedByType:   author.Type,
 		CreatedByHandle: author.Handle,
@@ -2143,6 +2234,14 @@ func (s *Store) MergeProposal(id, actor string) (*Document, []byte, error) {
 	documentLock := s.documentLockLocked(document.ID)
 	documentLock.Lock()
 	defer documentLock.Unlock()
+	if s.db != nil && document.Doc == nil {
+		doc, err := s.restoreDocumentDocPostgresLocked(document)
+		if err != nil {
+			return nil, nil, err
+		}
+		document.Doc = doc
+		document.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
+	}
 
 	meta := OperationMeta{ActorID: actor, ActorType: "human", Source: "proposal-merge"}
 	currentText := document.Doc.GetText("content").ToString()
@@ -2164,7 +2263,11 @@ func (s *Store) MergeProposal(id, actor string) (*Document, []byte, error) {
 	unsubscribe()
 
 	now := time.Now().UTC()
-	document.SyncDerivedFields()
+	if s.db != nil {
+		document.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(document.Doc))
+	} else {
+		document.SyncDerivedFields()
+	}
 	document.UpdatedAt = now
 	s.markDocumentDirtyLocked(document.ID)
 	s.appendIncrementalDocumentUpdateLocked(document.ID, update, meta, now)
@@ -2186,7 +2289,7 @@ func (s *Store) MergeProposal(id, actor string) (*Document, []byte, error) {
 	if err := s.persistLocked(); err != nil {
 		return nil, nil, err
 	}
-	return cloneDocument(document), update, nil
+	return cloneDocumentWithCRDTState(document), update, nil
 }
 
 func (s *Store) persistLocked() error {
@@ -2909,11 +3012,20 @@ func (s *Store) refreshThreadAnchorsForDocumentLocked(documentID string) {
 	if document == nil {
 		return
 	}
+	anchorDocument := document
+	if anchorDocument.Content == "" && anchorDocument.Doc != nil {
+		projected := *anchorDocument
+		projected.Content = anchorDocument.Doc.GetText("content").ToString()
+		anchorDocument = &projected
+	}
+	if anchorDocument.Content == "" && anchorDocument.Doc == nil {
+		return
+	}
 	for _, thread := range s.state.Threads {
 		if thread.DocumentID != documentID {
 			continue
 		}
-		resolveThreadAnchor(document, &thread.Anchor)
+		resolveThreadAnchor(anchorDocument, &thread.Anchor)
 	}
 }
 

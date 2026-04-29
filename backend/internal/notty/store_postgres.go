@@ -5,12 +5,15 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/reearth/ygo/crdt"
 )
+
+const postgresCheckpointTailLimit = 1000
 
 func initPostgresSchemaTables(db *sql.DB) error {
 	statements := []string{
@@ -356,6 +359,9 @@ func (s *Store) loadNormalizedPostgresLocked() error {
 	s.state.AgentDocumentViews = map[string]*AgentDocumentView{}
 	s.state.DocumentCheckpoints = map[string]*DocumentCheckpoint{}
 
+	if err := s.ensurePostgresCheckpointsLocked(); err != nil {
+		return err
+	}
 	if err := s.loadDocumentsPostgresLocked(); err != nil {
 		return err
 	}
@@ -625,7 +631,6 @@ func (s *Store) maybeInsertDocumentCheckpointPostgresLocked(tx *sql.Tx, document
 	}
 	crdtState := base64.StdEncoding.EncodeToString(document.Doc.EncodeStateAsUpdate())
 	stateVector := base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(document.Doc))
-	document.Content = document.Doc.GetText("content").ToString()
 	document.StateVector = stateVector
 	_, err = tx.Exec(
 		`INSERT INTO document_checkpoints (workspace_id, document_id, update_id, crdt_state, state_vector, created_at)
@@ -1358,7 +1363,7 @@ func documentContentAtUpdatePostgres(db *sql.DB, workspaceID string, document *D
 	return doc.GetText("content").ToString(), nil
 }
 
-func loadDocumentBootstrapUpdatesPostgres(db *sql.DB, workspaceID string, documentID string, headUpdateID int64) ([][]byte, bool, error) {
+func loadDocumentBootstrapUpdatesPostgres(db *sql.DB, workspaceID string, documentID string, headUpdateID int64, clientStateVector []byte) ([][]byte, bool, error) {
 	if db == nil || documentID == "" {
 		return nil, false, nil
 	}
@@ -1368,30 +1373,55 @@ func loadDocumentBootstrapUpdatesPostgres(db *sql.DB, workspaceID string, docume
 
 	updates := [][]byte{}
 	appliedThrough := int64(0)
-	var checkpointState string
-	var checkpointUpdateID int64
-	err := db.QueryRow(
-		`SELECT update_id, crdt_state
-		   FROM document_checkpoints
-		  WHERE workspace_id = $1 AND document_id = $2 AND update_id <= $3
-		  ORDER BY update_id DESC
-		  LIMIT 1`,
-		workspaceID,
-		documentID,
-		headUpdateID,
-	).Scan(&checkpointUpdateID, &checkpointState)
-	if err != nil && err != sql.ErrNoRows {
-		return nil, false, err
+	if len(clientStateVector) > 0 {
+		var clientCheckpointUpdateID int64
+		clientStateVectorEncoded := base64.StdEncoding.EncodeToString(clientStateVector)
+		err := db.QueryRow(
+			`SELECT update_id
+			   FROM document_checkpoints
+			  WHERE workspace_id = $1
+			    AND document_id = $2
+			    AND update_id <= $3
+			    AND state_vector = $4
+			  ORDER BY update_id DESC
+			  LIMIT 1`,
+			workspaceID,
+			documentID,
+			headUpdateID,
+			clientStateVectorEncoded,
+		).Scan(&clientCheckpointUpdateID)
+		if err != nil && err != sql.ErrNoRows {
+			return nil, false, err
+		}
+		if err == nil {
+			appliedThrough = clientCheckpointUpdateID
+		}
 	}
-	if err == sql.ErrNoRows || checkpointState == "" {
-		return nil, false, nil
+	if appliedThrough == 0 {
+		var checkpointState string
+		var checkpointUpdateID int64
+		err := db.QueryRow(
+			`SELECT update_id, crdt_state
+			   FROM document_checkpoints
+			  WHERE workspace_id = $1 AND document_id = $2 AND update_id <= $3
+			  ORDER BY update_id DESC
+			  LIMIT 1`,
+			workspaceID,
+			documentID,
+			headUpdateID,
+		).Scan(&checkpointUpdateID, &checkpointState)
+		if err != nil && err != sql.ErrNoRows {
+			return nil, false, err
+		}
+		if err == nil && checkpointState != "" {
+			checkpoint, decodeErr := base64.StdEncoding.DecodeString(checkpointState)
+			if decodeErr != nil {
+				return nil, false, decodeErr
+			}
+			updates = append(updates, checkpoint)
+			appliedThrough = checkpointUpdateID
+		}
 	}
-	checkpoint, decodeErr := base64.StdEncoding.DecodeString(checkpointState)
-	if decodeErr != nil {
-		return nil, false, decodeErr
-	}
-	updates = append(updates, checkpoint)
-	appliedThrough = checkpointUpdateID
 
 	rows, err := db.Query(
 		`SELECT update
@@ -1421,9 +1451,162 @@ func loadDocumentBootstrapUpdatesPostgres(db *sql.DB, workspaceID string, docume
 		return nil, false, err
 	}
 	if len(updates) == 0 {
-		return nil, false, nil
+		return nil, appliedThrough > 0, nil
 	}
 	return updates, true, nil
+}
+
+func (s *Store) ensurePostgresCheckpointsLocked() error {
+	rows, err := s.db.Query(
+		`SELECT d.id,
+		        d.client_id_seed,
+		        h.update_id,
+		        COALESCE(checkpoint.update_id, 0) AS checkpoint_update_id
+		   FROM documents d
+		   JOIN document_heads h
+		     ON h.workspace_id = d.workspace_id AND h.document_id = d.id
+		   LEFT JOIN LATERAL (
+		       SELECT update_id
+		         FROM document_checkpoints c
+		        WHERE c.workspace_id = d.workspace_id
+		          AND c.document_id = d.id
+		          AND c.update_id <= h.update_id
+		        ORDER BY c.update_id DESC
+		        LIMIT 1
+		   ) checkpoint ON TRUE
+		  WHERE d.workspace_id = $1
+		    AND h.update_id > 0
+		    AND (checkpoint.update_id IS NULL OR h.update_id - checkpoint.update_id > $2)
+		  ORDER BY d.path ASC`,
+		s.state.WorkspaceID,
+		postgresCheckpointTailLimit,
+	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type checkpointTarget struct {
+		documentID         string
+		clientIDSeed       uint64
+		headUpdateID       int64
+		checkpointUpdateID int64
+	}
+	targets := []checkpointTarget{}
+	for rows.Next() {
+		var target checkpointTarget
+		var clientIDSeed int64
+		if err := rows.Scan(&target.documentID, &clientIDSeed, &target.headUpdateID, &target.checkpointUpdateID); err != nil {
+			return err
+		}
+		target.clientIDSeed = uint64(clientIDSeed)
+		targets = append(targets, target)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, target := range targets {
+		if err := s.insertPostgresCheckpointAtHeadLocked(target.documentID, target.clientIDSeed, target.headUpdateID); err != nil {
+			return fmt.Errorf("checkpoint %s at update %d: %w", target.documentID, target.headUpdateID, err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) insertPostgresCheckpointAtHeadLocked(documentID string, clientIDSeed uint64, headUpdateID int64) error {
+	doc := crdt.New(crdt.WithClientID(crdt.ClientID(clientIDSeed)))
+	appliedThrough := int64(0)
+	var checkpointState string
+	var checkpointUpdateID int64
+	err := s.db.QueryRow(
+		`SELECT update_id, crdt_state
+		   FROM document_checkpoints
+		  WHERE workspace_id = $1 AND document_id = $2 AND update_id <= $3
+		  ORDER BY update_id DESC
+		  LIMIT 1`,
+		s.state.WorkspaceID,
+		documentID,
+		headUpdateID,
+	).Scan(&checkpointUpdateID, &checkpointState)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if err == nil && checkpointState != "" {
+		update, decodeErr := base64.StdEncoding.DecodeString(checkpointState)
+		if decodeErr != nil {
+			return decodeErr
+		}
+		if applyErr := crdt.ApplyUpdateV1(doc, update, "checkpoint"); applyErr != nil {
+			return applyErr
+		}
+		appliedThrough = checkpointUpdateID
+	}
+
+	rows, err := s.db.Query(
+		`SELECT update
+		   FROM document_updates
+		  WHERE workspace_id = $1
+		    AND document_id = $2
+		    AND id > $3
+		    AND id <= $4
+		  ORDER BY id ASC`,
+		s.state.WorkspaceID,
+		documentID,
+		appliedThrough,
+		headUpdateID,
+	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var update []byte
+		if err := rows.Scan(&update); err != nil {
+			return err
+		}
+		if err := crdt.ApplyUpdateV1(doc, update, "checkpoint-tail"); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	crdtState := base64.StdEncoding.EncodeToString(doc.EncodeStateAsUpdate())
+	stateVector := base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`INSERT INTO document_checkpoints (workspace_id, document_id, update_id, crdt_state, state_vector, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 ON CONFLICT (workspace_id, document_id, update_id)
+		 DO UPDATE SET crdt_state = EXCLUDED.crdt_state,
+		               state_vector = EXCLUDED.state_vector,
+		               created_at = EXCLUDED.created_at`,
+		s.state.WorkspaceID,
+		documentID,
+		headUpdateID,
+		crdtState,
+		stateVector,
+		time.Now().UTC(),
+	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`UPDATE document_heads
+		    SET state_vector = $1
+		  WHERE workspace_id = $2 AND document_id = $3 AND update_id = $4`,
+		stateVector,
+		s.state.WorkspaceID,
+		documentID,
+		headUpdateID,
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) loadUsersPostgresLocked() error {
@@ -1657,10 +1840,25 @@ func (s *Store) loadActivitiesPostgresLocked() error {
 
 func (s *Store) loadDocumentsPostgresLocked() error {
 	rows, err := s.db.Query(
-		`SELECT d.id, d.path, d.title, h.state_vector, h.update_id, d.updated_at, d.client_id_seed
+		`SELECT d.id,
+		        d.path,
+		        d.title,
+		        COALESCE(NULLIF(h.state_vector, ''), checkpoint.state_vector, '') AS state_vector,
+		        h.update_id,
+		        d.updated_at,
+		        d.client_id_seed
 		   FROM documents d
 		   JOIN document_heads h
 		     ON h.workspace_id = d.workspace_id AND h.document_id = d.id
+		   LEFT JOIN LATERAL (
+		       SELECT state_vector
+		         FROM document_checkpoints c
+		        WHERE c.workspace_id = d.workspace_id
+		          AND c.document_id = d.id
+		          AND c.update_id <= h.update_id
+		        ORDER BY c.update_id DESC
+		        LIMIT 1
+		   ) checkpoint ON TRUE
 		  WHERE d.workspace_id = $1
 		  ORDER BY d.path ASC`,
 		s.state.WorkspaceID,
@@ -1685,12 +1883,6 @@ func (s *Store) loadDocumentsPostgresLocked() error {
 			return err
 		}
 		document.ClientIDSeed = uint64(clientIDSeed)
-		doc, err := s.restoreDocumentDocPostgresLocked(document)
-		if err != nil {
-			return err
-		}
-		document.Doc = doc
-		document.SyncProjectionFields()
 		s.state.Documents[document.ID] = document
 	}
 	return rows.Err()

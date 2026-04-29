@@ -495,6 +495,29 @@ func TestHandleDocumentProtocolMessageRespondsToSyncStep1(t *testing.T) {
 	}
 }
 
+func TestHandleDocumentProtocolMessageIgnoresClosedSessionDuringSyncStep1(t *testing.T) {
+	server, store := newTestServer(t)
+	documentID := mustCreateTestDocument(t, store, "docs/closed-session.md", "alpha bravo")
+	room := server.rooms.ForDocument(documentID)
+	source := newDocumentConn(0)
+	room.Add(source)
+	source.Close()
+	room.Remove(source)
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("closed websocket session must not panic while sync replies are being built: %v", recovered)
+		}
+	}()
+	if err := server.handleDocumentProtocolMessage(room, source, documentID, yproto.BuildSyncStep1(crdt.New(crdt.WithClientID(77))), OperationMeta{
+		ActorID:   "peer",
+		ActorType: "human",
+		Source:    "test",
+	}); err != nil {
+		t.Fatalf("handle sync step1 for closed session: %v", err)
+	}
+}
+
 func TestHandleDocumentProtocolMessageReconnectMergesServerAndClientEdits(t *testing.T) {
 	server, store := newTestServer(t)
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "base")

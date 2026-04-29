@@ -31,8 +31,8 @@ func TestDocumentCacheMaterializesCachedStateWithoutBackendFetch(t *testing.T) {
 	if !materialized.ContentKnown {
 		t.Fatal("expected cached document content to be known")
 	}
-	if materialized.Content != "alpha" {
-		t.Fatalf("unexpected cached content: %q", materialized.Content)
+	if got := materialized.Doc.GetText("content").ToString(); got != "alpha" {
+		t.Fatalf("unexpected cached content: %q", got)
 	}
 	if _, err := os.Stat(cache.statePath("doc_1")); err != nil {
 		t.Fatalf("expected cache state on disk: %v", err)
@@ -96,8 +96,30 @@ func TestDocumentCacheReportsUnknownContentWithoutCacheOrBootstrapState(t *testi
 	if err != nil {
 		t.Fatalf("rematerialize synced doc: %v", err)
 	}
-	if !next.ContentKnown || next.Content != "after websocket sync" {
-		t.Fatalf("expected websocket-populated cache to be known, known=%v content=%q", next.ContentKnown, next.Content)
+	if got := next.Doc.GetText("content").ToString(); !next.ContentKnown || got != "after websocket sync" {
+		t.Fatalf("expected websocket-populated cache to be known, known=%v content=%q", next.ContentKnown, got)
+	}
+}
+
+func TestDocumentCacheTreatsEmptyStateVectorAsKnownEmptyContent(t *testing.T) {
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+
+	materialized, err := cache.materialize(context.Background(), &document{
+		ID:          "doc_1",
+		Path:        "docs/empty.md",
+		StateVector: emptyDocumentStateVector,
+	})
+	if err != nil {
+		t.Fatalf("materialize empty doc: %v", err)
+	}
+	if !materialized.ContentKnown {
+		t.Fatal("expected empty-state document content to be known")
+	}
+	if got := materialized.Doc.GetText("content").ToString(); got != "" {
+		t.Fatalf("expected empty document content, got %q", got)
 	}
 }
 
@@ -126,8 +148,8 @@ func TestDocumentCacheMaybeStoreDocCheckpointsInsteadOfEveryUpdate(t *testing.T)
 	if err != nil {
 		t.Fatalf("materialize before checkpoint: %v", err)
 	}
-	if beforeCheckpoint.Content != "alpha" {
-		t.Fatalf("expected disk cache to remain at last checkpoint, got %q", beforeCheckpoint.Content)
+	if got := beforeCheckpoint.Doc.GetText("content").ToString(); got != "alpha" {
+		t.Fatalf("expected disk cache to remain at last checkpoint, got %q", got)
 	}
 
 	appendText(t, doc, "x")
@@ -142,8 +164,73 @@ func TestDocumentCacheMaybeStoreDocCheckpointsInsteadOfEveryUpdate(t *testing.T)
 	if err != nil {
 		t.Fatalf("materialize after checkpoint: %v", err)
 	}
-	if afterCheckpoint.Content != doc.GetText("content").ToString() {
-		t.Fatalf("expected disk cache checkpoint to catch up, got %q", afterCheckpoint.Content)
+	if got := afterCheckpoint.Doc.GetText("content").ToString(); got != doc.GetText("content").ToString() {
+		t.Fatalf("expected disk cache checkpoint to catch up, got %q", got)
+	}
+}
+
+func TestDocumentCacheDedupesPendingRemoteUpdatesAfterReopen(t *testing.T) {
+	root := t.TempDir()
+	cache, err := newDocumentCache(root)
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	update := []byte{1, 2, 3, 4}
+	appended, err := cache.appendPendingRemoteUpdate("doc_1", "docs/spec.md", update)
+	if err != nil {
+		t.Fatalf("append first pending update: %v", err)
+	}
+	if !appended {
+		t.Fatal("expected first pending update to append")
+	}
+
+	reopened, err := newDocumentCache(root)
+	if err != nil {
+		t.Fatalf("reopen cache: %v", err)
+	}
+	appended, err = reopened.appendPendingRemoteUpdate("doc_1", "docs/spec.md", update)
+	if err != nil {
+		t.Fatalf("append duplicate pending update after reopen: %v", err)
+	}
+	if appended {
+		t.Fatal("expected duplicate pending update after reopen to be ignored")
+	}
+	count, err := reopened.pendingRemoteUpdateCount("doc_1")
+	if err != nil {
+		t.Fatalf("pending count: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one pending update after reopen, got %d", count)
+	}
+}
+
+func TestDocumentCacheDropsCorruptCachedState(t *testing.T) {
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	if err := cache.storeDoc("doc_1", "docs/spec.md", 1, newDocWithText(t, "cached")); err != nil {
+		t.Fatalf("store cached doc: %v", err)
+	}
+	if err := os.WriteFile(cache.statePath("doc_1"), []byte("not a crdt update"), 0o644); err != nil {
+		t.Fatalf("corrupt cached state: %v", err)
+	}
+
+	doc, metadata, state, err := cache.loadBaseDoc("doc_1", "docs/spec.md")
+	if err != nil {
+		t.Fatalf("load corrupt cached state: %v", err)
+	}
+	if len(state) != 0 {
+		t.Fatalf("expected corrupt state to be dropped, got %d bytes", len(state))
+	}
+	if got := doc.GetText("content").ToString(); got != "" {
+		t.Fatalf("expected empty doc after dropping corrupt cache, got %q", got)
+	}
+	if metadata.StateSHA256 != "" || metadata.StateVector != "" {
+		t.Fatalf("expected corrupt state metadata to be cleared, got %#v", metadata)
+	}
+	if _, err := os.Stat(cache.statePath("doc_1")); !os.IsNotExist(err) {
+		t.Fatalf("expected corrupt state file to be removed, stat err=%v", err)
 	}
 }
 

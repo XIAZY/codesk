@@ -2,6 +2,7 @@ package notty
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"notty/internal/yproto"
 )
@@ -18,11 +19,73 @@ type DocumentRoom struct {
 }
 
 type DocumentConn struct {
-	send chan []byte
+	send      chan []byte
+	done      chan struct{}
+	closeOnce sync.Once
+	closed    atomic.Bool
 }
 
 func NewDocumentRooms() *DocumentRooms {
 	return &DocumentRooms{rooms: map[string]*DocumentRoom{}}
+}
+
+func newDocumentConn(sendBuffer int) *DocumentConn {
+	return &DocumentConn{
+		send: make(chan []byte, sendBuffer),
+		done: make(chan struct{}),
+	}
+}
+
+func (c *DocumentConn) Close() {
+	c.closed.Store(true)
+	if c.done == nil {
+		return
+	}
+	c.closeOnce.Do(func() {
+		close(c.done)
+	})
+}
+
+func (c *DocumentConn) Done() <-chan struct{} {
+	return c.done
+}
+
+func (c *DocumentConn) Enqueue(payload []byte) bool {
+	if c == nil || c.send == nil || c.closed.Load() {
+		return false
+	}
+	if c.done == nil {
+		c.send <- payload
+		return true
+	}
+	select {
+	case <-c.done:
+		return false
+	case c.send <- payload:
+		return true
+	}
+}
+
+func (c *DocumentConn) TryEnqueue(payload []byte) bool {
+	if c == nil || c.send == nil || c.closed.Load() {
+		return false
+	}
+	if c.done == nil {
+		select {
+		case c.send <- payload:
+			return true
+		default:
+			return false
+		}
+	}
+	select {
+	case <-c.done:
+		return false
+	case c.send <- payload:
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *DocumentRooms) ForDocument(documentID string) *DocumentRoom {
@@ -49,7 +112,6 @@ func (r *DocumentRoom) Remove(conn *DocumentConn) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.conns, conn)
-	close(conn.send)
 }
 
 func (r *DocumentRoom) Broadcast(payload []byte, skip *DocumentConn) {
@@ -59,10 +121,7 @@ func (r *DocumentRoom) Broadcast(payload []byte, skip *DocumentConn) {
 		if conn == skip {
 			continue
 		}
-		select {
-		case conn.send <- payload:
-		default:
-		}
+		conn.TryEnqueue(payload)
 	}
 }
 
