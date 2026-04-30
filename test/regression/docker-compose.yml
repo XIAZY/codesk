@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: notty
+      POSTGRES_USER: notty
+      POSTGRES_PASSWORD: notty
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U notty -d notty"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  backend:
+    build:
+      context: ../..
+      dockerfile: backend/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1::8080"
+    environment:
+      NOTTY_PORT: "8080"
+      NOTTY_DATABASE_URL: postgres://notty:notty@postgres:5432/notty?sslmode=disable
+
+  daemon:
+    build:
+      context: ../..
+      dockerfile: daemon/Dockerfile
+    depends_on:
+      - backend
+    environment:
+      NOTTY_BACKEND_URL: http://backend:8080
+      NOTTY_WORKSPACE_DIR: /workspace/notty
+      NOTTY_AGENT_WORKSPACE_ROOT: /workspace/agents
+      NOTTY_AGENT_ID: daemon_agent
+      NOTTY_RUNTIME_DIR: /runtime/notty
+    volumes:
+      - daemon_workspace:/workspace
+      - daemon_runtime:/runtime
+
+volumes:
+  postgres_data:
+  daemon_workspace:
+  daemon_runtime:
