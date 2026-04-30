@@ -84,6 +84,45 @@ func TestDotPathsIgnoredWhileRootLogsSync(t *testing.T) {
 	stack.waitForBackendContentByPath(t, "codex-agent.log", "line one\nline two\n", 30*time.Second)
 }
 
+func TestMultipleWebsocketRecipientsConverge(t *testing.T) {
+	stack := newRegressionStack(t)
+	stack.up(t)
+
+	baseURL := stack.backendURL(t)
+	documentID := createDocument(t, baseURL, uniquePath("multi-recipient", ".md"), "start\n")
+	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/ws/documents/" + url.PathEscape(documentID)
+
+	writerDoc := crdt.New(crdt.WithClientID(301))
+	viewerOneDoc := crdt.New(crdt.WithClientID(302))
+	viewerTwoDoc := crdt.New(crdt.WithClientID(303))
+	writerConn := dialDocumentWebsocket(t, wsURL, "writer", 301)
+	defer writerConn.Close()
+	viewerOneConn := dialDocumentWebsocket(t, wsURL, "viewer-one", 302)
+	defer viewerOneConn.Close()
+	viewerTwoConn := dialDocumentWebsocket(t, wsURL, "viewer-two", 303)
+	defer viewerTwoConn.Close()
+
+	syncDocumentClient(t, writerConn, writerDoc, "start\n")
+	syncDocumentClient(t, viewerOneConn, viewerOneDoc, "start\n")
+	syncDocumentClient(t, viewerTwoConn, viewerTwoDoc, "start\n")
+
+	writerText := writerDoc.GetText("content")
+	firstUpdate := captureDocUpdate(t, writerDoc, "first-insert", func(txn *crdt.Transaction) {
+		writerText.Insert(txn, writerText.Len(), "one\n", nil)
+	})
+	writeBinary(t, writerConn, yproto.BuildSyncUpdate(firstUpdate))
+	waitForWebsocketContent(t, viewerOneConn, viewerOneDoc, "start\none\n")
+	waitForWebsocketContent(t, viewerTwoConn, viewerTwoDoc, "start\none\n")
+
+	secondUpdate := captureDocUpdate(t, writerDoc, "second-insert", func(txn *crdt.Transaction) {
+		writerText.Insert(txn, writerText.Len(), "two\n", nil)
+	})
+	writeBinary(t, writerConn, yproto.BuildSyncUpdate(secondUpdate))
+	waitForWebsocketContent(t, viewerOneConn, viewerOneDoc, "start\none\ntwo\n")
+	waitForWebsocketContent(t, viewerTwoConn, viewerTwoDoc, "start\none\ntwo\n")
+	stack.waitForBackendContent(t, documentID, "start\none\ntwo\n", 30*time.Second)
+}
+
 func TestDocumentWebsocketBroadcastsInsertUpdate(t *testing.T) {
 	stack := newRegressionStack(t)
 	stack.up(t)
@@ -105,11 +144,85 @@ func TestDocumentWebsocketBroadcastsInsertUpdate(t *testing.T) {
 		authorText.Insert(txn, authorText.Len(), "cd", nil)
 	})
 	writeBinary(t, authorConn, yproto.BuildSyncUpdate(insertUpdate))
-	if got := readNextSyncUpdate(t, viewerConn); !bytes.Equal(got, insertUpdate) {
-		t.Fatalf("insert broadcast update mismatch")
-	}
+	waitForSyncUpdate(t, viewerConn, insertUpdate)
 
 	stack.waitForBackendContent(t, documentID, "abcd", 30*time.Second)
+}
+
+func TestLocalAndRemoteAppendMergeConvergesAcrossRecipients(t *testing.T) {
+	stack := newRegressionStack(t)
+	stack.up(t)
+
+	baseURL := stack.backendURL(t)
+	path := uniquePath("local-remote-append", ".md")
+	documentID := createDocument(t, baseURL, path, "base\n")
+	stack.waitForLocalContent(t, path, "base\n", 30*time.Second)
+
+	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/ws/documents/" + url.PathEscape(documentID)
+	remoteDoc := crdt.New(crdt.WithClientID(401))
+	remoteConn := dialDocumentWebsocket(t, wsURL, "remote-writer", 401)
+	defer remoteConn.Close()
+	syncDocumentClient(t, remoteConn, remoteDoc, "base\n")
+
+	stack.appendLocalFile(t, path, "local\n")
+	remoteText := remoteDoc.GetText("content")
+	remoteUpdate := captureDocUpdate(t, remoteDoc, "remote-append", func(txn *crdt.Transaction) {
+		remoteText.Insert(txn, remoteText.Len(), "remote\n", nil)
+	})
+	writeBinary(t, remoteConn, yproto.BuildSyncUpdate(remoteUpdate))
+
+	finalContent := stack.waitForBackendContentPredicate(t, documentID, 60*time.Second, func(content string) bool {
+		return strings.HasPrefix(content, "base\n") &&
+			strings.Count(content, "local\n") == 1 &&
+			strings.Count(content, "remote\n") == 1
+	})
+	stack.waitForLocalContent(t, path, finalContent, 60*time.Second)
+
+	freshDoc := crdt.New(crdt.WithClientID(402))
+	freshConn := dialDocumentWebsocket(t, wsURL, "fresh-recipient", 402)
+	defer freshConn.Close()
+	syncDocumentClient(t, freshConn, freshDoc, finalContent)
+}
+
+func TestOverlappingLocalAndRemoteRewritePreservesLocalDivergence(t *testing.T) {
+	stack := newRegressionStack(t)
+	stack.up(t)
+
+	baseURL := stack.backendURL(t)
+	path := uniquePath("overlap-rewrite", ".md")
+	documentID := createDocument(t, baseURL, path, "title\nshared\n")
+	stack.waitForLocalContent(t, path, "title\nshared\n", 30*time.Second)
+
+	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/ws/documents/" + url.PathEscape(documentID)
+	remoteDoc := crdt.New(crdt.WithClientID(501))
+	remoteConn := dialDocumentWebsocket(t, wsURL, "remote-rewriter", 501)
+	defer remoteConn.Close()
+	syncDocumentClient(t, remoteConn, remoteDoc, "title\nshared\n")
+
+	stack.writeLocalFile(t, path, "title\nlocal rewrite\n")
+	remoteText := remoteDoc.GetText("content")
+	remoteUpdate := captureDocUpdate(t, remoteDoc, "remote-overlap", func(txn *crdt.Transaction) {
+		remoteText.Delete(txn, len("title\n"), len("shared\n"))
+		remoteText.Insert(txn, len("title\n"), "remote rewrite\n", nil)
+	})
+	writeBinary(t, remoteConn, yproto.BuildSyncUpdate(remoteUpdate))
+
+	finalContent := stack.waitForBackendContentPredicate(t, documentID, 60*time.Second, func(content string) bool {
+		return strings.HasPrefix(content, "title\n") &&
+			strings.Contains(content, "remote rewrite\n") &&
+			content != "title\nshared\n"
+	})
+	localContent := stack.waitForLocalContentPredicate(t, path, 60*time.Second, func(content string) bool {
+		return strings.HasPrefix(content, "title\n") && strings.Contains(content, "local rewrite")
+	})
+	if localContent == finalContent {
+		t.Fatalf("expected overlapping rewrite to remain locally divergent until resolved; both sides have %q", finalContent)
+	}
+
+	freshDoc := crdt.New(crdt.WithClientID(502))
+	freshConn := dialDocumentWebsocket(t, wsURL, "fresh-overlap-reader", 502)
+	defer freshConn.Close()
+	syncDocumentClient(t, freshConn, freshDoc, finalContent)
 }
 
 type regressionStack struct {
@@ -239,6 +352,60 @@ func (s *regressionStack) assertLocalSequence(t *testing.T, path string, lines i
 	s.execService(t, "daemon", script)
 }
 
+func (s *regressionStack) writeLocalFile(t *testing.T, path string, content string) {
+	t.Helper()
+	dir := filepath.ToSlash(filepath.Dir(path))
+	mkdir := ""
+	if dir != "." && dir != "" {
+		mkdir = "mkdir -p " + shellQuote(dir) + " && "
+	}
+	s.execService(t, "daemon", "cd /workspace/notty && "+mkdir+fmt.Sprintf("printf %%s %s > %s", shellQuote(content), shellQuote(path)))
+}
+
+func (s *regressionStack) appendLocalFile(t *testing.T, path string, content string) {
+	t.Helper()
+	dir := filepath.ToSlash(filepath.Dir(path))
+	mkdir := ""
+	if dir != "." && dir != "" {
+		mkdir = "mkdir -p " + shellQuote(dir) + " && "
+	}
+	s.execService(t, "daemon", "cd /workspace/notty && "+mkdir+fmt.Sprintf("printf %%s %s >> %s", shellQuote(content), shellQuote(path)))
+}
+
+func (s *regressionStack) localFileContent(t *testing.T, path string) string {
+	t.Helper()
+	return s.execService(t, "daemon", fmt.Sprintf("cd /workspace/notty && if [ -f %s ]; then cat %s; fi", shellQuote(path), shellQuote(path)))
+}
+
+func (s *regressionStack) waitForLocalContent(t *testing.T, path string, want string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last string
+	for time.Now().Before(deadline) {
+		last = s.localFileContent(t, path)
+		if last == want {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("local file %s did not converge: got %q want %q", path, last, want)
+}
+
+func (s *regressionStack) waitForLocalContentPredicate(t *testing.T, path string, timeout time.Duration, accept func(string) bool) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last string
+	for time.Now().Before(deadline) {
+		last = s.localFileContent(t, path)
+		if accept(last) {
+			return last
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("local file %s did not satisfy predicate: last=%q", path, last)
+	return ""
+}
+
 func (s *regressionStack) waitForLocalLineCountAtLeast(t *testing.T, path string, lines int, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -306,6 +473,27 @@ func (s *regressionStack) waitForBackendContentByPath(t *testing.T, path string,
 		time.Sleep(500 * time.Millisecond)
 	}
 	t.Fatalf("backend document path %s did not converge: got %q want %q", path, last, want)
+}
+
+func (s *regressionStack) waitForBackendContentPredicate(t *testing.T, documentID string, timeout time.Duration, accept func(string) bool) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last string
+	var lastErr error
+	for time.Now().Before(deadline) {
+		content, err := s.backendDocumentContent(documentID)
+		if err == nil {
+			last = content
+			if accept(content) {
+				return content
+			}
+		} else {
+			lastErr = err
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("backend document %s did not satisfy predicate: last=%q err=%v", documentID, last, lastErr)
+	return ""
 }
 
 func (s *regressionStack) waitForDocumentPath(t *testing.T, path string, timeout time.Duration) {
@@ -520,18 +708,19 @@ func syncDocumentClient(t *testing.T, conn *websocket.Conn, doc *crdt.Doc, want 
 	waitForWebsocketContent(t, conn, doc, want)
 }
 
-func readNextSyncUpdate(t *testing.T, conn *websocket.Conn) []byte {
+func waitForSyncUpdate(t *testing.T, conn *websocket.Conn, want []byte) {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	if err := conn.SetReadDeadline(deadline); err != nil {
 		t.Fatal(err)
 	}
+	var sawUpdates int
 	for time.Now().Before(deadline) {
 		messageType, payload, err := conn.ReadMessage()
 		if err != nil {
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
-				t.Fatal("timed out waiting for websocket sync update")
+				t.Fatalf("timed out waiting for websocket sync update after seeing %d other sync update(s)", sawUpdates)
 			}
 			t.Fatalf("read websocket message: %v", err)
 		}
@@ -547,11 +736,13 @@ func readNextSyncUpdate(t *testing.T, conn *websocket.Conn) []byte {
 			t.Fatalf("decode sync message: %v", err)
 		}
 		if syncType == yproto.SyncUpdate {
-			return data
+			if bytes.Equal(data, want) {
+				return
+			}
+			sawUpdates++
 		}
 	}
-	t.Fatal("timed out waiting for websocket sync update")
-	return nil
+	t.Fatalf("timed out waiting for websocket sync update after seeing %d other sync update(s)", sawUpdates)
 }
 
 func waitForWebsocketContent(t *testing.T, conn *websocket.Conn, doc *crdt.Doc, want string) {
