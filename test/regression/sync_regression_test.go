@@ -37,6 +37,7 @@ func TestAppendOnlyFileSyncReconstructsBackend(t *testing.T) {
 	stack.writeSequentialFile(t, path, lines, 1*time.Millisecond)
 	stack.assertLocalSequence(t, path, lines)
 	stack.waitForBackendSequence(t, path, lines, 90*time.Second)
+	stack.syncFreshWebsocketClientByPath(t, path, sequentialContent(lines))
 }
 
 func TestAppendOnlyFileSyncSurvivesBackendRestart(t *testing.T) {
@@ -123,6 +124,59 @@ func TestMultipleWebsocketRecipientsConverge(t *testing.T) {
 	stack.waitForBackendContent(t, documentID, "start\none\ntwo\n", 30*time.Second)
 }
 
+func TestConcurrentWebsocketWritersConverge(t *testing.T) {
+	stack := newRegressionStack(t)
+	stack.up(t)
+
+	baseURL := stack.backendURL(t)
+	documentID := createDocument(t, baseURL, uniquePath("concurrent-writers", ".md"), "base\n")
+	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/ws/documents/" + url.PathEscape(documentID)
+
+	writerOneDoc := crdt.New(crdt.WithClientID(601))
+	writerTwoDoc := crdt.New(crdt.WithClientID(602))
+	viewerDoc := crdt.New(crdt.WithClientID(603))
+	writerOneConn := dialDocumentWebsocket(t, wsURL, "writer-one", 601)
+	defer writerOneConn.Close()
+	writerTwoConn := dialDocumentWebsocket(t, wsURL, "writer-two", 602)
+	defer writerTwoConn.Close()
+	viewerConn := dialDocumentWebsocket(t, wsURL, "viewer", 603)
+	defer viewerConn.Close()
+
+	syncDocumentClient(t, writerOneConn, writerOneDoc, "base\n")
+	syncDocumentClient(t, writerTwoConn, writerTwoDoc, "base\n")
+	syncDocumentClient(t, viewerConn, viewerDoc, "base\n")
+
+	writerOneText := writerOneDoc.GetText("content")
+	writerTwoText := writerTwoDoc.GetText("content")
+	updateOne := captureDocUpdate(t, writerOneDoc, "writer-one", func(txn *crdt.Transaction) {
+		writerOneText.Insert(txn, writerOneText.Len(), "writer-one\n", nil)
+	})
+	updateTwo := captureDocUpdate(t, writerTwoDoc, "writer-two", func(txn *crdt.Transaction) {
+		writerTwoText.Insert(txn, writerTwoText.Len(), "writer-two\n", nil)
+	})
+
+	errs := make(chan error, 2)
+	go func() { errs <- writerOneConn.WriteMessage(websocket.BinaryMessage, yproto.BuildSyncUpdate(updateOne)) }()
+	go func() { errs <- writerTwoConn.WriteMessage(websocket.BinaryMessage, yproto.BuildSyncUpdate(updateTwo)) }()
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("write concurrent update: %v", err)
+		}
+	}
+
+	finalContent := stack.waitForBackendContentPredicate(t, documentID, 30*time.Second, func(content string) bool {
+		return strings.HasPrefix(content, "base\n") &&
+			strings.Count(content, "writer-one\n") == 1 &&
+			strings.Count(content, "writer-two\n") == 1
+	})
+	waitForWebsocketContent(t, viewerConn, viewerDoc, finalContent)
+
+	freshDoc := crdt.New(crdt.WithClientID(604))
+	freshConn := dialDocumentWebsocket(t, wsURL, "fresh-concurrent-reader", 604)
+	defer freshConn.Close()
+	syncDocumentClient(t, freshConn, freshDoc, finalContent)
+}
+
 func TestDocumentWebsocketBroadcastsInsertUpdate(t *testing.T) {
 	stack := newRegressionStack(t)
 	stack.up(t)
@@ -147,6 +201,34 @@ func TestDocumentWebsocketBroadcastsInsertUpdate(t *testing.T) {
 	waitForSyncUpdate(t, viewerConn, insertUpdate)
 
 	stack.waitForBackendContent(t, documentID, "abcd", 30*time.Second)
+}
+
+func TestDocumentWebsocketBroadcastsDeleteUpdate(t *testing.T) {
+	stack := newRegressionStack(t)
+	stack.up(t)
+
+	baseURL := stack.backendURL(t)
+	documentID := createDocument(t, baseURL, uniquePath("websocket-delete", ".md"), "abcd")
+	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/ws/documents/" + url.PathEscape(documentID)
+
+	authorDoc := crdt.New(crdt.WithClientID(701))
+	viewerDoc := crdt.New(crdt.WithClientID(702))
+	authorConn := dialDocumentWebsocket(t, wsURL, "writer", 701)
+	defer authorConn.Close()
+	viewerConn := dialDocumentWebsocket(t, wsURL, "viewer", 702)
+	defer viewerConn.Close()
+
+	syncDocumentClient(t, authorConn, authorDoc, "abcd")
+	syncDocumentClient(t, viewerConn, viewerDoc, "abcd")
+
+	authorText := authorDoc.GetText("content")
+	deleteUpdate := captureDocUpdate(t, authorDoc, "delete", func(txn *crdt.Transaction) {
+		authorText.Delete(txn, authorText.Len()-1, 1)
+	})
+	writeBinary(t, authorConn, yproto.BuildSyncUpdate(deleteUpdate))
+
+	waitForWebsocketContent(t, viewerConn, viewerDoc, "abc")
+	stack.waitForBackendContent(t, documentID, "abc", 30*time.Second)
 }
 
 func TestLocalAndRemoteAppendMergeConvergesAcrossRecipients(t *testing.T) {
@@ -496,6 +578,21 @@ func (s *regressionStack) waitForBackendContentPredicate(t *testing.T, documentI
 	return ""
 }
 
+func (s *regressionStack) syncFreshWebsocketClientByPath(t *testing.T, path string, want string) {
+	t.Helper()
+	documentID, _, _, err := s.documentHeaderByPath(path)
+	if err != nil {
+		t.Fatalf("document %s not found for fresh websocket sync: %v", path, err)
+	}
+	baseURL := s.backendURL(t)
+	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/ws/documents/" + url.PathEscape(documentID)
+	clientID := uint64(time.Now().UnixNano())
+	doc := crdt.New(crdt.WithClientID(crdt.ClientID(clientID)))
+	conn := dialDocumentWebsocket(t, wsURL, "fresh-stress-reader", clientID)
+	defer conn.Close()
+	syncDocumentClient(t, conn, doc, want)
+}
+
 func (s *regressionStack) waitForDocumentPath(t *testing.T, path string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -830,6 +927,15 @@ func assertSequentialContent(content string, lines int) error {
 		return fmt.Errorf("line count got=%d want=%d", count, lines)
 	}
 	return nil
+}
+
+func sequentialContent(lines int) string {
+	var builder strings.Builder
+	for i := 1; i <= lines; i++ {
+		builder.WriteString(strconv.Itoa(i))
+		builder.WriteByte('\n')
+	}
+	return builder.String()
 }
 
 func repoRoot(t *testing.T) string {

@@ -43,6 +43,46 @@ func TestReadSyncMessageAppliesIncrementalUpdate(t *testing.T) {
 	}
 }
 
+func TestDeleteUpdateAfterSyncOnlyDeletesTargetRange(t *testing.T) {
+	server := crdt.New(crdt.WithClientID(1))
+	serverText := server.GetText("content")
+	server.Transact(func(txn *crdt.Transaction) {
+		serverText.Insert(txn, 0, "abcd", nil)
+	}, "seed")
+
+	writer := crdt.New(crdt.WithClientID(2))
+	viewer := crdt.New(crdt.WithClientID(3))
+	initial := crdt.EncodeStateAsUpdateV1(server, nil)
+	if err := crdt.ApplyUpdateV1(writer, initial, "initial"); err != nil {
+		t.Fatalf("sync writer: %v", err)
+	}
+	if err := crdt.ApplyUpdateV1(viewer, initial, "initial"); err != nil {
+		t.Fatalf("sync viewer: %v", err)
+	}
+
+	writerText := writer.GetText("content")
+	var deleteUpdate []byte
+	unsubscribe := writer.OnUpdate(func(next []byte, origin any) {
+		if origin == "delete" {
+			deleteUpdate = append([]byte(nil), next...)
+		}
+	})
+	writer.Transact(func(txn *crdt.Transaction) {
+		writerText.Delete(txn, writerText.Len()-1, 1)
+	}, "delete")
+	unsubscribe()
+
+	if got := writerText.ToString(); got != "abc" {
+		t.Fatalf("unexpected writer content after delete: %q", got)
+	}
+	if err := crdt.ApplyUpdateV1(viewer, deleteUpdate, "remote-delete"); err != nil {
+		t.Fatalf("apply delete update: %v", err)
+	}
+	if got := viewer.GetText("content").ToString(); got != "abc" {
+		t.Fatalf("unexpected viewer content after delete: %q", got)
+	}
+}
+
 func TestBuildAndDecodeAwarenessUpdateRoundTrip(t *testing.T) {
 	payload := BuildAwarenessUpdate(map[uint64]AwarenessState{
 		7: {Clock: 2, State: []byte(`{"actorId":"owner"}`)},
