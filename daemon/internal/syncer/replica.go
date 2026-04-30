@@ -80,6 +80,9 @@ func (r *workspaceReplica) Run(ctx context.Context) error {
 			r.closeConnections()
 			return nil
 		case event := <-r.watcher.Events:
+			if isIgnoredWorkspaceAbsolutePath(r.rootDir, event.Name) {
+				continue
+			}
 			if event.Op&fsnotify.Create != 0 {
 				if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
 					_ = r.watcher.Add(event.Name)
@@ -145,6 +148,9 @@ func (r *workspaceReplica) applyWorkspace(ctx context.Context, workspace *worksp
 	}
 	activeIDs := make(map[string]struct{}, len(workspace.Documents))
 	for _, document := range workspace.Documents {
+		if document == nil || isIgnoredDocumentPath(document.Path) {
+			continue
+		}
 		activeIDs[document.ID] = struct{}{}
 		if err := r.ensureTracked(ctx, document); err != nil {
 			return err
@@ -165,6 +171,9 @@ func (r *workspaceReplica) removeMissingTracked(activeIDs map[string]struct{}) e
 		}
 		delete(r.projectedByID, documentID)
 		delete(r.projectedByPath, tracked.Path)
+		if isIgnoredDocumentPath(tracked.DocumentPath) || isIgnoredWorkspaceAbsolutePath(r.rootDir, tracked.Path) {
+			continue
+		}
 		if err := os.Remove(tracked.Path); err != nil && !errorsIsNotExist(err) {
 			return err
 		}
@@ -173,7 +182,13 @@ func (r *workspaceReplica) removeMissingTracked(activeIDs map[string]struct{}) e
 }
 
 func (r *workspaceReplica) ensureTracked(ctx context.Context, document *document) error {
+	if document == nil || isIgnoredDocumentPath(document.Path) {
+		return nil
+	}
 	absolutePath := filepath.Join(r.rootDir, filepath.FromSlash(document.Path))
+	if isIgnoredWorkspaceAbsolutePath(r.rootDir, absolutePath) {
+		return nil
+	}
 	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
 		return err
 	}
@@ -299,6 +314,9 @@ func (r *workspaceReplica) readLoop(tracked *trackedFile, conn *websocket.Conn) 
 }
 
 func (r *workspaceReplica) handleLocalChange(path string) error {
+	if isIgnoredWorkspaceAbsolutePath(r.rootDir, path) {
+		return nil
+	}
 	r.mu.Lock()
 	tracked, ok := r.projectedByPath[path]
 	r.mu.Unlock()

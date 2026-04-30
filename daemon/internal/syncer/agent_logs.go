@@ -17,10 +17,10 @@ type agentLog struct {
 }
 
 func openAgentLog(workdir string, name string) (*agentLog, error) {
-	if err := os.MkdirAll(workdir, 0o755); err != nil {
+	path := agentLogPath(workdir, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	path := agentLogPath(workdir, name)
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, err
@@ -31,11 +31,11 @@ func openAgentLog(workdir string, name string) (*agentLog, error) {
 }
 
 func appendAgentLog(workdir string, name string, format string, args ...any) {
-	if err := os.MkdirAll(workdir, 0o755); err != nil {
+	path := agentLogPath(workdir, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		log.Printf("agent log mkdir failed workdir=%s err=%v", workdir, err)
 		return
 	}
-	path := agentLogPath(workdir, name)
 	if err := appendFileLocked(path, agentLogLine(format, args...)); err != nil {
 		log.Printf("agent log append failed path=%s err=%v", path, err)
 	}

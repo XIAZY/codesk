@@ -2,6 +2,7 @@ package syncer
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,8 +111,42 @@ func TestWriteProjectedFileLockedRefusesDivergedDiskState(t *testing.T) {
 	}
 }
 
+func TestWriteProjectedFileLockedReplacesPathAtomically(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "doc.md")
+	if err := os.WriteFile(path, []byte("base"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	oldFile, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open old file: %v", err)
+	}
+	defer oldFile.Close()
+
+	if err := writeProjectedFileLocked(path, "remote projection", projectedHashString("base")); err != nil {
+		t.Fatalf("write projected file: %v", err)
+	}
+	current, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read current path: %v", err)
+	}
+	if string(current) != "remote projection" {
+		t.Fatalf("current path content mismatch: %q", current)
+	}
+	oldContent, err := io.ReadAll(oldFile)
+	if err != nil {
+		t.Fatalf("read old descriptor: %v", err)
+	}
+	if string(oldContent) != "base" {
+		t.Fatalf("projection rewrote the old inode in place: %q", oldContent)
+	}
+}
+
 func TestAgentLogConcurrentWritersKeepCompleteRecords(t *testing.T) {
 	workdir := t.TempDir()
+	logPath := agentLogPath(workdir, "agent-name")
+	if logPath != filepath.Join(workdir, "agent-name.log") {
+		t.Fatalf("agent log path must stay at workspace root, got %s", logPath)
+	}
 	logger, err := openAgentLog(workdir, "agent-name")
 	if err != nil {
 		t.Fatalf("open agent log: %v", err)
@@ -133,7 +168,7 @@ func TestAgentLogConcurrentWritersKeepCompleteRecords(t *testing.T) {
 	wg.Wait()
 	logger.Close()
 
-	content, err := os.ReadFile(agentLogPath(workdir, "agent-name"))
+	content, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read agent log: %v", err)
 	}

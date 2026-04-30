@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"syscall"
 )
 
@@ -80,13 +81,45 @@ func writeFileLocked(path string, content string, expected projectedContentHash,
 	if requireExpectedMatch && isKnownProjectedHash(expected) && currentHash != expected {
 		return errProjectedFileDiverged
 	}
-	if err := file.Truncate(0); err != nil {
+	info, err := file.Stat()
+	if err != nil {
 		return err
 	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
+	return replaceFileAtomically(path, content, info.Mode().Perm())
+}
+
+func replaceFileAtomically(path string, content string, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return writeFullString(file, content)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	removeTemp := true
+	defer func() {
+		if removeTemp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := io.WriteString(tmp, content); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	removeTemp = false
+	return nil
 }
 
 func lockFile(file *os.File, op int) error {

@@ -181,6 +181,9 @@ func (s *Service) Run(ctx context.Context) error {
 			_ = shutdownToolGateway(context.Background(), s.toolServer)
 			return nil
 		case event := <-s.watcher.Events:
+			if isIgnoredWorkspaceAbsolutePath(s.cfg.WorkspaceDir, event.Name) {
+				continue
+			}
 			if event.Op&fsnotify.Create != 0 {
 				if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
 					_ = s.watcher.Add(event.Name)
@@ -326,6 +329,9 @@ func (s *Service) refresh(ctx context.Context) error {
 
 	activeIDs := make(map[string]struct{}, len(workspace.Documents))
 	for _, document := range workspace.Documents {
+		if document == nil || isIgnoredDocumentPath(document.Path) {
+			continue
+		}
 		activeIDs[document.ID] = struct{}{}
 		if err := s.ensureTracked(ctx, document); err != nil {
 			return err
@@ -507,6 +513,9 @@ func (s *Service) removeMissingTracked(activeIDs map[string]struct{}) error {
 		}
 		delete(s.projectedByID, documentID)
 		delete(s.projectedByPath, tracked.Path)
+		if isIgnoredDocumentPath(tracked.DocumentPath) || isIgnoredWorkspaceAbsolutePath(s.cfg.WorkspaceDir, tracked.Path) {
+			continue
+		}
 		if err := os.Remove(tracked.Path); err != nil && !errorsIsNotExist(err) {
 			return err
 		}
@@ -515,7 +524,13 @@ func (s *Service) removeMissingTracked(activeIDs map[string]struct{}) error {
 }
 
 func (s *Service) ensureTracked(ctx context.Context, document *document) error {
+	if document == nil || isIgnoredDocumentPath(document.Path) {
+		return nil
+	}
 	absolutePath := filepath.Join(s.cfg.WorkspaceDir, filepath.FromSlash(document.Path))
+	if isIgnoredWorkspaceAbsolutePath(s.cfg.WorkspaceDir, absolutePath) {
+		return nil
+	}
 	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
 		return err
 	}
@@ -701,8 +716,9 @@ type trackedReconcileState struct {
 }
 
 type localReconcileUpdate struct {
-	state  trackedReconcileState
-	update []byte
+	state           trackedReconcileState
+	observedContent string
+	update          []byte
 }
 
 var errProjectedBaseDoesNotMatchCRDTState = errors.New("projected base does not match cached CRDT state")
@@ -792,6 +808,7 @@ func reconcileTrackedDocument(cache *documentCache, documentID string, trackedFi
 
 	localUpdates := make([]localReconcileUpdate, 0)
 	skippedLocalDirty := map[*trackedFile]bool{}
+	projectOnlyDirty := map[*trackedFile]struct{}{}
 	for _, state := range states {
 		if !state.localDirty {
 			continue
@@ -801,14 +818,46 @@ func reconcileTrackedDocument(cache *documentCache, documentID string, trackedFi
 			skippedLocalDirty[state.tracked] = true
 			continue
 		}
-		update, err := buildLocalUpdateFromBase(baseState, state.baseContent, state.localContent)
+		if state.baseContent == state.localContent && state.baseContent != baseContent {
+			projectOnlyDirty[state.tracked] = struct{}{}
+			continue
+		}
+		localContent := state.localContent
+		update, err := buildLocalUpdateFromBase(baseState, state.baseContent, localContent)
 		if err != nil {
-			if errors.Is(err, errProjectedBaseDoesNotMatchCRDTState) {
+			if !errors.Is(err, errProjectedBaseDoesNotMatchCRDTState) {
+				return err
+			}
+			if len(baseState) == 0 && baseContent != state.baseContent {
 				state.tracked.markLocalDirty()
 				skippedLocalDirty[state.tracked] = false
 				continue
 			}
-			return err
+			rebasedContent, ok := rebaseAppendOnlyContent(baseContent, state.baseContent, state.localContent)
+			if !ok {
+				state.tracked.markLocalDirty()
+				skippedLocalDirty[state.tracked] = false
+				continue
+			}
+			localContent = rebasedContent
+			update, err = buildLocalUpdateFromBase(baseState, baseContent, localContent)
+			if err != nil {
+				if errors.Is(err, errProjectedBaseDoesNotMatchCRDTState) {
+					state.tracked.markLocalDirty()
+					skippedLocalDirty[state.tracked] = false
+					continue
+				}
+				return err
+			}
+			if len(update) == 0 {
+				if err := state.tracked.storeProjectedBase(baseContent); err != nil {
+					return err
+				}
+				state.tracked.setProjectedContent(baseContent)
+				state.tracked.markLocalDirty()
+				skippedLocalDirty[state.tracked] = true
+				continue
+			}
 		}
 		if len(update) == 0 {
 			state.tracked.clearLocalDirty()
@@ -822,9 +871,13 @@ func reconcileTrackedDocument(cache *documentCache, documentID string, trackedFi
 			entry.seenUpdateHashes = map[string]struct{}{}
 		}
 		entry.seenUpdateHashes[sha256Hex(update)] = struct{}{}
-		localUpdates = append(localUpdates, localReconcileUpdate{state: state, update: update})
+		localUpdates = append(localUpdates, localReconcileUpdate{
+			state:           state,
+			observedContent: state.localContent,
+			update:          update,
+		})
 	}
-	if pendingRemoteCount == 0 && len(localUpdates) == 0 && len(skippedLocalDirty) == 0 {
+	if pendingRemoteCount == 0 && len(localUpdates) == 0 && len(skippedLocalDirty) == 0 && len(projectOnlyDirty) == 0 {
 		return nil
 	}
 
@@ -862,14 +915,28 @@ func reconcileTrackedDocument(cache *documentCache, documentID string, trackedFi
 	finalContent := baseDoc.GetText("content").ToString()
 	successfulLocal := map[*trackedFile]string{}
 	for _, local := range localUpdates {
-		successfulLocal[local.state.tracked] = local.state.localContent
+		successfulLocal[local.state.tracked] = local.observedContent
 	}
 	for _, state := range states {
 		if currentLocal, ok := successfulLocal[state.tracked]; ok {
-			if err := projectMergedContentOverLocalDisk(state.tracked, currentLocal, finalContent); err != nil {
+			clean, err := projectMergedContentOverLocalDisk(state.tracked, currentLocal, finalContent)
+			if err != nil {
 				return err
 			}
-			if state.tracked.matchesProjectedString(finalContent) {
+			if clean {
+				state.tracked.clearLocalDirty()
+				state.tracked.setSyncFromScratch(false)
+			} else {
+				state.tracked.markLocalDirty()
+			}
+			continue
+		}
+		if _, ok := projectOnlyDirty[state.tracked]; ok {
+			clean, err := applyProjectedContent(state.tracked, finalContent)
+			if err != nil {
+				return err
+			}
+			if clean {
 				state.tracked.clearLocalDirty()
 				state.tracked.setSyncFromScratch(false)
 			} else {
@@ -892,12 +959,15 @@ func reconcileTrackedDocument(cache *documentCache, documentID string, trackedFi
 			state.tracked.markLocalDirty()
 			continue
 		}
-		if err := applyProjectedContent(state.tracked, finalContent); err != nil {
+		clean, err := applyProjectedContent(state.tracked, finalContent)
+		if err != nil {
 			return err
 		}
-		if state.tracked.matchesProjectedString(finalContent) {
+		if clean {
 			state.tracked.clearLocalDirty()
 			state.tracked.setSyncFromScratch(false)
+		} else {
+			state.tracked.markLocalDirty()
 		}
 	}
 	return nil
@@ -975,7 +1045,26 @@ func buildLocalUpdateFromBase(baseState []byte, baseContent, localContent string
 	return update, nil
 }
 
+func rebaseAppendOnlyContent(sharedContent, baseContent, localContent string) (string, bool) {
+	if baseContent == localContent {
+		return sharedContent, false
+	}
+	if sharedContent == baseContent {
+		return localContent, true
+	}
+	if strings.HasPrefix(localContent, sharedContent) {
+		return localContent, true
+	}
+	if strings.HasPrefix(localContent, baseContent) {
+		return sharedContent + localContent[len(baseContent):], true
+	}
+	return "", false
+}
+
 func (s *Service) handleLocalChange(path string) error {
+	if isIgnoredWorkspaceAbsolutePath(s.cfg.WorkspaceDir, path) {
+		return nil
+	}
 	s.mu.Lock()
 	tracked, ok := s.projectedByPath[path]
 	s.mu.Unlock()
@@ -985,23 +1074,24 @@ func (s *Service) handleLocalChange(path string) error {
 	return markTrackedLocalDirty(tracked, path)
 }
 
-func applyProjectedContent(tracked *trackedFile, nextContent string) error {
+func applyProjectedContent(tracked *trackedFile, nextContent string) (bool, error) {
 	previousHash, previousKnown := tracked.projectedSnapshot()
 	tracked.beginProjection()
 	defer tracked.endProjection()
 	tracked.setProjectedContent(nextContent)
 	if err := writeProjectedFile(tracked.Path, nextContent, previousHash); err != nil {
-		tracked.setProjectedSnapshot(previousHash, previousKnown)
 		if errors.Is(err, errProjectedFileDiverged) {
-			return nil
+			tracked.setProjectedSnapshot(previousHash, previousKnown)
+			return false, nil
 		}
-		return err
+		tracked.setProjectedSnapshot(previousHash, previousKnown)
+		return false, err
 	}
 	if err := tracked.storeProjectedBase(nextContent); err != nil {
-		return err
+		return false, err
 	}
 	tracked.setSyncFromScratch(false)
-	return nil
+	return true, nil
 }
 
 func handleTrackedLocalChange(tracked *trackedFile, path string) ([]byte, error) {
@@ -1066,7 +1156,7 @@ func handleTrackedLocalChange(tracked *trackedFile, path string) ([]byte, error)
 		}
 		return update, nil
 	}
-	if err := projectMergedContentOverLocalDisk(tracked, current, mergedContent); err != nil {
+	if _, err := projectMergedContentOverLocalDisk(tracked, current, mergedContent); err != nil {
 		return nil, err
 	}
 	return update, nil
@@ -1086,23 +1176,29 @@ func markTrackedLocalDirty(tracked *trackedFile, _ string) error {
 	return nil
 }
 
-func projectMergedContentOverLocalDisk(tracked *trackedFile, currentDiskContent, mergedContent string) error {
+func projectMergedContentOverLocalDisk(tracked *trackedFile, currentDiskContent, mergedContent string) (bool, error) {
 	previousHash, previousKnown := tracked.projectedSnapshot()
 	tracked.beginProjection()
 	defer tracked.endProjection()
 	tracked.setProjectedContent(mergedContent)
 	if err := writeProjectedFile(tracked.Path, mergedContent, projectedHashString(currentDiskContent)); err != nil {
-		tracked.setProjectedSnapshot(previousHash, previousKnown)
 		if errors.Is(err, errProjectedFileDiverged) {
-			return nil
+			if baseErr := tracked.storeProjectedBase(currentDiskContent); baseErr != nil {
+				tracked.setProjectedSnapshot(previousHash, previousKnown)
+				return false, baseErr
+			}
+			tracked.setProjectedContent(currentDiskContent)
+			tracked.setSyncFromScratch(false)
+			return false, nil
 		}
-		return err
+		tracked.setProjectedSnapshot(previousHash, previousKnown)
+		return false, err
 	}
 	if err := tracked.storeProjectedBase(mergedContent); err != nil {
-		return err
+		return false, err
 	}
 	tracked.setSyncFromScratch(false)
-	return nil
+	return true, nil
 }
 
 func materializeTrackedFile(ctx context.Context, cache *documentCache, document *document, absolutePath string) (*trackedFile, error) {
@@ -1365,6 +1461,12 @@ func scanWorkspaceFiles(root string) (map[string]string, error) {
 		if err != nil {
 			return err
 		}
+		if path != root && isIgnoredWorkspaceAbsolutePath(root, path) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if entry.IsDir() {
 			return nil
 		}
@@ -1376,6 +1478,42 @@ func scanWorkspaceFiles(root string) (map[string]string, error) {
 		return nil
 	})
 	return files, err
+}
+
+func isIgnoredDocumentPath(documentPath string) bool {
+	return isIgnoredWorkspaceRelativePath(documentPath)
+}
+
+func isIgnoredWorkspaceAbsolutePath(root, absolutePath string) bool {
+	if root == "" {
+		return isIgnoredWorkspaceRelativePath(absolutePath)
+	}
+	relative, err := filepath.Rel(root, absolutePath)
+	if err != nil {
+		return true
+	}
+	if relative == "." {
+		return false
+	}
+	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return true
+	}
+	return isIgnoredWorkspaceRelativePath(relative)
+}
+
+func isIgnoredWorkspaceRelativePath(relativePath string) bool {
+	clean := filepath.ToSlash(filepath.Clean(relativePath))
+	if clean == "." || clean == "" {
+		return false
+	}
+	for _, segment := range strings.FieldsFunc(clean, func(r rune) bool {
+		return r == '/'
+	}) {
+		if strings.HasPrefix(segment, ".") {
+			return true
+		}
+	}
+	return false
 }
 
 func findMovedPath(candidates map[string]string, matches func(string) bool) (string, bool) {
