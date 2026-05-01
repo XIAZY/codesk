@@ -200,6 +200,9 @@ func (r *workspaceReplica) ensureTracked(ctx context.Context, document *document
 
 	if exists {
 		tracked.StateVector = document.StateVector
+		if tracked.WorkspaceRoot == "" {
+			tracked.WorkspaceRoot = workspaceRootForDocumentPath(absolutePath, document.Path)
+		}
 		if tracked.Path != absolutePath {
 			nextContent := tracked.contentString()
 			if err := moveLocalFile(tracked.Path, absolutePath, nextContent); err != nil {
@@ -209,10 +212,13 @@ func (r *workspaceReplica) ensureTracked(ctx context.Context, document *document
 			delete(r.projectedByPath, tracked.Path)
 			tracked.Path = absolutePath
 			tracked.DocumentPath = document.Path
+			if tracked.WorkspaceRoot == "" {
+				tracked.WorkspaceRoot = workspaceRootForDocumentPath(absolutePath, document.Path)
+			}
 			r.projectedByPath[absolutePath] = tracked
 			r.mu.Unlock()
 			tracked.setProjectedContent(nextContent)
-			if err := tracked.storeProjectedBase(nextContent); err != nil {
+			if err := tracked.storeProjectedBase(nextContent, tracked.projectedStateOrContentState(nextContent)); err != nil {
 				return err
 			}
 		}

@@ -13,7 +13,8 @@ import (
 	"github.com/reearth/ygo/crdt"
 )
 
-const postgresCheckpointTailLimit = 1000
+const postgresCheckpointInterval = 100
+const postgresCheckpointTailLimit = postgresCheckpointInterval
 
 func initPostgresSchemaTables(db *sql.DB) error {
 	statements := []string{
@@ -612,7 +613,7 @@ func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) error {
 }
 
 func (s *Store) maybeInsertDocumentCheckpointPostgresLocked(tx *sql.Tx, document *Document) error {
-	if document == nil || document.Doc == nil || document.UpdateID <= 0 {
+	if document == nil || document.UpdateID <= 0 {
 		return nil
 	}
 	var lastCheckpointID int64
@@ -626,24 +627,15 @@ func (s *Store) maybeInsertDocumentCheckpointPostgresLocked(tx *sql.Tx, document
 	if err != nil {
 		return err
 	}
-	if lastCheckpointID != 0 && document.UpdateID-lastCheckpointID < 100 {
+	if lastCheckpointID != 0 && document.UpdateID-lastCheckpointID < postgresCheckpointInterval {
 		return nil
 	}
-	crdtState := base64.StdEncoding.EncodeToString(document.Doc.EncodeStateAsUpdate())
-	stateVector := base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(document.Doc))
+	stateVector, err := s.insertPostgresCheckpointAtHeadTxLocked(tx, document.ID, document.ClientIDSeed, document.UpdateID)
+	if err != nil {
+		return err
+	}
 	document.StateVector = stateVector
-	_, err = tx.Exec(
-		`INSERT INTO document_checkpoints (workspace_id, document_id, update_id, crdt_state, state_vector, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6)
-		 ON CONFLICT (workspace_id, document_id, update_id) DO NOTHING`,
-		s.state.WorkspaceID,
-		document.ID,
-		document.UpdateID,
-		crdtState,
-		stateVector,
-		time.Now().UTC(),
-	)
-	return err
+	return nil
 }
 
 func (s *Store) replaceUsersPostgresLocked(tx *sql.Tx) error {
@@ -1514,11 +1506,23 @@ func (s *Store) ensurePostgresCheckpointsLocked() error {
 }
 
 func (s *Store) insertPostgresCheckpointAtHeadLocked(documentID string, clientIDSeed uint64, headUpdateID int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := s.insertPostgresCheckpointAtHeadTxLocked(tx, documentID, clientIDSeed, headUpdateID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) insertPostgresCheckpointAtHeadTxLocked(tx *sql.Tx, documentID string, clientIDSeed uint64, headUpdateID int64) (string, error) {
 	doc := crdt.New(crdt.WithClientID(crdt.ClientID(clientIDSeed)))
 	appliedThrough := int64(0)
 	var checkpointState string
 	var checkpointUpdateID int64
-	err := s.db.QueryRow(
+	err := tx.QueryRow(
 		`SELECT update_id, crdt_state
 		   FROM document_checkpoints
 		  WHERE workspace_id = $1 AND document_id = $2 AND update_id <= $3
@@ -1529,20 +1533,20 @@ func (s *Store) insertPostgresCheckpointAtHeadLocked(documentID string, clientID
 		headUpdateID,
 	).Scan(&checkpointUpdateID, &checkpointState)
 	if err != nil && err != sql.ErrNoRows {
-		return err
+		return "", err
 	}
 	if err == nil && checkpointState != "" {
 		update, decodeErr := base64.StdEncoding.DecodeString(checkpointState)
 		if decodeErr != nil {
-			return decodeErr
+			return "", decodeErr
 		}
 		if applyErr := crdt.ApplyUpdateV1(doc, update, "checkpoint"); applyErr != nil {
-			return applyErr
+			return "", applyErr
 		}
 		appliedThrough = checkpointUpdateID
 	}
 
-	rows, err := s.db.Query(
+	rows, err := tx.Query(
 		`SELECT update
 		   FROM document_updates
 		  WHERE workspace_id = $1
@@ -1556,29 +1560,24 @@ func (s *Store) insertPostgresCheckpointAtHeadLocked(documentID string, clientID
 		headUpdateID,
 	)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var update []byte
 		if err := rows.Scan(&update); err != nil {
-			return err
+			return "", err
 		}
 		if err := crdt.ApplyUpdateV1(doc, update, "checkpoint-tail"); err != nil {
-			return err
+			return "", err
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return "", err
 	}
 
 	crdtState := base64.StdEncoding.EncodeToString(doc.EncodeStateAsUpdate())
 	stateVector := base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 	if _, err := tx.Exec(
 		`INSERT INTO document_checkpoints (workspace_id, document_id, update_id, crdt_state, state_vector, created_at)
 		 VALUES ($1, $2, $3, $4, $5, $6)
@@ -1593,7 +1592,7 @@ func (s *Store) insertPostgresCheckpointAtHeadLocked(documentID string, clientID
 		stateVector,
 		time.Now().UTC(),
 	); err != nil {
-		return err
+		return "", err
 	}
 	if _, err := tx.Exec(
 		`UPDATE document_heads
@@ -1604,9 +1603,9 @@ func (s *Store) insertPostgresCheckpointAtHeadLocked(documentID string, clientID
 		documentID,
 		headUpdateID,
 	); err != nil {
-		return err
+		return "", err
 	}
-	return tx.Commit()
+	return stateVector, nil
 }
 
 func (s *Store) loadUsersPostgresLocked() error {

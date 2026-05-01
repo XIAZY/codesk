@@ -21,7 +21,7 @@ func LoadConfig() Config {
 	runtimeDir := getenv("NOTTY_RUNTIME_DIR", "/runtime/notty")
 	cacheDir := getenv("NOTTY_CACHE_DIR", "")
 	if cacheDir == "" {
-		cacheDir = filepath.Join(runtimeDir, "document-cache")
+		cacheDir = filepath.Join(runtimeDir, ".notty", "documents")
 	}
 	return Config{
 		BackendURL:         getenv("NOTTY_BACKEND_URL", "http://backend:8080"),

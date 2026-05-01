@@ -817,6 +817,87 @@ func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testin
 	}
 }
 
+func TestPostgresApplyCRDTUpdateCreatesPeriodicCheckpointFromHistory(t *testing.T) {
+	dsn := os.Getenv("NOTTY_DATABASE_TEST_URL")
+	if dsn == "" {
+		t.Skip("NOTTY_DATABASE_TEST_URL is not set")
+	}
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+	if err := initPostgresSchema(db); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+	if err := clearNottyTables(db); err != nil {
+		t.Fatalf("clear tables: %v", err)
+	}
+
+	store, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	documentID := mustCreateTestDocument(t, store, "docs/periodic-checkpoint.md", "")
+	peer := syncDocumentToDocForTest(t, store, documentID, 77)
+	text := peer.GetText("content")
+	var expected strings.Builder
+	for index := 0; index < postgresCheckpointInterval+5; index++ {
+		line := strconv.Itoa(index) + "\n"
+		expected.WriteString(line)
+		update := captureDocUpdate(t, peer, "peer", func(txn *crdt.Transaction) {
+			text.Insert(txn, text.Len(), line, nil)
+		})
+		if _, err := store.ApplyCRDTUpdate(documentID, update, OperationMeta{
+			ActorID:   "peer",
+			ActorType: "human",
+			Source:    "test",
+		}); err != nil {
+			t.Fatalf("apply update %d: %v", index, err)
+		}
+	}
+
+	head, err := store.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get document head: %v", err)
+	}
+	var latestCheckpointUpdateID int64
+	if err := db.QueryRow(
+		`SELECT update_id
+		   FROM document_checkpoints
+		  WHERE workspace_id = $1 AND document_id = $2
+		  ORDER BY update_id DESC
+		  LIMIT 1`,
+		"ws_notty",
+		documentID,
+	).Scan(&latestCheckpointUpdateID); err != nil {
+		t.Fatalf("query latest checkpoint: %v", err)
+	}
+	if tail := head.UpdateID - latestCheckpointUpdateID; tail > 5 {
+		t.Fatalf("expected write-side checkpointing to keep tail short, checkpoint=%d head=%d tail=%d", latestCheckpointUpdateID, head.UpdateID, tail)
+	}
+
+	_, updates, err := store.EncodeDocumentSyncUpdates(documentID, nil)
+	if err != nil {
+		t.Fatalf("encode cold bootstrap updates: %v", err)
+	}
+	if len(updates) > 6 {
+		t.Fatalf("expected checkpoint plus short tail, got %d updates", len(updates))
+	}
+	clientDoc := crdt.New()
+	for _, update := range updates {
+		if err := crdt.ApplyUpdateV1(clientDoc, update, "bootstrap"); err != nil {
+			t.Fatalf("apply bootstrap update: %v", err)
+		}
+	}
+	if got := clientDoc.GetText("content").ToString(); got != expected.String() {
+		t.Fatalf("checkpoint plus tail content diverged: got %q want %q", got, expected.String())
+	}
+}
+
 func TestPostgresApplyCRDTUpdatePersistsWithoutWorkspaceSnapshot(t *testing.T) {
 	dsn := os.Getenv("NOTTY_DATABASE_TEST_URL")
 	if dsn == "" {

@@ -592,38 +592,6 @@ func (c *documentCache) pendingPath(documentID string) string {
 	return filepath.Join(c.documentDir(documentID), "pending_remote.log")
 }
 
-func (c *documentCache) storeProjectedBase(documentID, projectionKey, content string) error {
-	if c == nil || documentID == "" || projectionKey == "" {
-		return nil
-	}
-	if err := os.MkdirAll(c.projectionDir(documentID), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(c.projectionPath(documentID, projectionKey), []byte(content), 0o644)
-}
-
-func (c *documentCache) loadProjectedBase(documentID, projectionKey string) (string, bool, error) {
-	if c == nil || documentID == "" || projectionKey == "" {
-		return "", false, nil
-	}
-	content, err := os.ReadFile(c.projectionPath(documentID, projectionKey))
-	if errors.Is(err, os.ErrNotExist) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, err
-	}
-	return string(content), true, nil
-}
-
-func (c *documentCache) projectionDir(documentID string) string {
-	return filepath.Join(c.documentDir(documentID), "projections")
-}
-
-func (c *documentCache) projectionPath(documentID, projectionKey string) string {
-	return filepath.Join(c.projectionDir(documentID), safeProjectionCacheName(projectionKey)+".txt")
-}
-
 func safeDocumentCacheName(value string) string {
 	var builder strings.Builder
 	for _, char := range value {
@@ -637,11 +605,6 @@ func safeDocumentCacheName(value string) string {
 		return "document"
 	}
 	return builder.String()
-}
-
-func safeProjectionCacheName(value string) string {
-	sum := sha256.Sum256([]byte(value))
-	return hex.EncodeToString(sum[:])
 }
 
 func sha256Hex(value []byte) string {

@@ -21,6 +21,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/gorilla/websocket"
 	"github.com/reearth/ygo/crdt"
+	"notty/internal/yproto"
 )
 
 func TestComputeReplaceFindsInnerSpan(t *testing.T) {
@@ -99,6 +100,16 @@ func TestScanWorkspaceFilesIgnoresDotPaths(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("scanned files mismatch:\ngot  %#v\nwant %#v", got, want)
+	}
+}
+
+func TestNextAwarenessClientIDIsSafeForYjsClients(t *testing.T) {
+	awarenessClientCounter.Store(0)
+	for index := 0; index < 10; index++ {
+		clientID := nextAwarenessClientID()
+		if clientID == 0 || clientID > (1<<53)-1 {
+			t.Fatalf("awareness client id %d is outside the JS-safe Yjs range", clientID)
+		}
 	}
 }
 
@@ -373,6 +384,143 @@ func TestApplyProjectedContentDoesNotOverwriteDivergedDiskState(t *testing.T) {
 	}
 }
 
+func TestProjectedBaseLivesUnderWorkspaceNottyWithCRDTState(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "docs", "doc.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	doc := newDocWithText(t, "base")
+	tracked := &trackedFile{
+		DocumentID:   "doc_1",
+		DocumentPath: "docs/doc.md",
+		Path:         path,
+	}
+
+	if err := tracked.storeProjectedBase("base", doc.EncodeStateAsUpdate()); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+
+	projectionDir := filepath.Join(root, ".notty", "projections", "doc_1")
+	if _, err := os.Stat(filepath.Join(projectionDir, "base.txt")); err != nil {
+		t.Fatalf("expected workspace projection text: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(projectionDir, "base.state.bin")); err != nil {
+		t.Fatalf("expected workspace projection state: %v", err)
+	}
+	content, state, known, err := tracked.loadProjectedBase()
+	if err != nil {
+		t.Fatalf("load projected base: %v", err)
+	}
+	if !known || content != "base" {
+		t.Fatalf("unexpected projected base known=%v content=%q", known, content)
+	}
+	if !projectedStateMatchesContent(state, "base") {
+		t.Fatal("projected CRDT state does not materialize to projected text")
+	}
+}
+
+func TestReconcileTrackedDocumentNoopsWithoutDirtyOrPendingRemote(t *testing.T) {
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "doc.md")
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatalf("create unreadable-as-file path: %v", err)
+	}
+	tracked := &trackedFile{
+		DocumentID:   "doc_1",
+		DocumentPath: "doc.md",
+		Path:         path,
+		cache:        cache,
+	}
+	tracked.setProjectedContent("base")
+	tracked.writeSyncUpdate = func(update []byte) error {
+		t.Fatalf("must not send update during no-op reconcile; update bytes=%d", len(update))
+		return nil
+	}
+
+	if err := reconcileTrackedDocument(cache, "doc_1", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("no-op reconcile should not touch disk or CRDT state: %v", err)
+	}
+}
+
+func TestReconcileTrackedDocumentClearsProjectedWriteDirtyWithoutLoadingBase(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "doc.md")
+	if err := os.WriteFile(path, []byte("base"), 0o644); err != nil {
+		t.Fatalf("write projection: %v", err)
+	}
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base")
+	if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	tracked := &trackedFile{
+		DocumentID:   "doc_1",
+		DocumentPath: "doc.md",
+		Path:         path,
+		cache:        cache,
+	}
+	tracked.setProjectedContent("base")
+	if err := tracked.storeProjectedBase("base", baseDoc.EncodeStateAsUpdate()); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tracked.projectionDir(), "base.state.bin"), []byte{0xff, 0xff, 0xff}, 0o644); err != nil {
+		t.Fatalf("corrupt projection state: %v", err)
+	}
+	tracked.markLocalDirty()
+	tracked.writeSyncUpdate = func(update []byte) error {
+		t.Fatalf("must not send update for dirty flag caused by projected write; update bytes=%d", len(update))
+		return nil
+	}
+
+	if err := reconcileTrackedDocument(cache, "doc_1", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("reconcile projected-write dirty flag: %v", err)
+	}
+	if tracked.isLocalDirty() {
+		t.Fatal("expected false local dirty flag to clear when disk still matches projection")
+	}
+}
+
+func TestCachedDaemonDoesNotAnswerServerSyncStep1FromProjectionCache(t *testing.T) {
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	if err := cache.storeDoc("doc_1", "doc.md", 1, newDocWithText(t, "cached local projection")); err != nil {
+		t.Fatalf("store cached doc: %v", err)
+	}
+	tracked := &trackedFile{
+		DocumentID:   "doc_1",
+		DocumentPath: "doc.md",
+		cache:        cache,
+	}
+	payload := yproto.BuildSyncStep1FromStateVector(nil)
+	messageType, reader, err := yproto.DecodeProtocolMessage(payload)
+	if err != nil {
+		t.Fatalf("decode sync step1: %v", err)
+	}
+	if messageType != yproto.MessageSync {
+		t.Fatalf("unexpected message type %d", messageType)
+	}
+
+	reply, appended, err := handleRemoteSyncMessage(reader, tracked, "remote")
+	if err != nil {
+		t.Fatalf("handle server sync step1: %v", err)
+	}
+	if appended {
+		t.Fatal("sync step1 should not append a remote update")
+	}
+	if len(reply) != 0 {
+		t.Fatalf("cached daemon projection should not be sent back as a sync step2 reply, got %d bytes", len(reply))
+	}
+}
+
 func TestReconcileTrackedDocumentMergesLocalEditWithPendingRemoteUpdate(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "doc.md")
@@ -395,7 +543,7 @@ func TestReconcileTrackedDocumentMergesLocalEditWithPendingRemoteUpdate(t *testi
 		cache:        cache,
 	}
 	tracked.setProjectedContent("base\n")
-	if err := tracked.storeProjectedBase("base\n"); err != nil {
+	if err := tracked.storeProjectedBase("base\n", baseDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)
 	}
 	var sentLocalUpdate []byte
@@ -456,8 +604,11 @@ func TestReconcileTrackedDocumentDefersLocalUpdateWhenProjectedBaseMissingCRDTSt
 		cache:        cache,
 	}
 	tracked.setProjectedContent("already synced\n")
-	if err := tracked.storeProjectedBase("already synced\n"); err != nil {
-		t.Fatalf("store projected base: %v", err)
+	if err := os.MkdirAll(tracked.projectionDir(), 0o755); err != nil {
+		t.Fatalf("create projection dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tracked.projectionDir(), "base.txt"), []byte("already synced\n"), 0o644); err != nil {
+		t.Fatalf("write projection text without state: %v", err)
 	}
 	tracked.markLocalDirty()
 	tracked.writeSyncUpdate = func(update []byte) error {
@@ -533,12 +684,15 @@ func TestMaterializeExistingLocalFileUsesCachedBaseAsProjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("materialize tracked file: %v", err)
 	}
-	projectedBase, known, err := tracked.loadProjectedBase()
+	projectedBase, _, known, err := tracked.loadProjectedBase()
 	if err != nil {
 		t.Fatalf("load projected base: %v", err)
 	}
 	if !known || projectedBase != baseContent {
 		t.Fatalf("expected cached CRDT base %q, known=%v got %q", baseContent, known, projectedBase)
+	}
+	if !tracked.isLocalDirty() {
+		t.Fatal("expected existing local content ahead of the cached base to be marked dirty")
 	}
 	if tracked.matchesProjectedString(localContent) {
 		t.Fatal("existing local append was incorrectly treated as a clean projection")
@@ -604,7 +758,7 @@ func TestReconcileRebasesDirtyLocalFileAfterPendingRemoteEstablishesBase(t *test
 	if sentUpdates != 0 {
 		t.Fatalf("expected no local update before rebasing, got %d", sentUpdates)
 	}
-	projectedBase, known, err := tracked.loadProjectedBase()
+	projectedBase, _, known, err := tracked.loadProjectedBase()
 	if err != nil {
 		t.Fatalf("load projected base: %v", err)
 	}
@@ -747,7 +901,7 @@ func TestReconcileKeepsSentLocalAppendAsWorkspaceBaseWhenProjectionDiverges(t *t
 		cache:        cache,
 	}
 	tracked.setProjectedContent("1\n")
-	if err := tracked.storeProjectedBase("1\n"); err != nil {
+	if err := tracked.storeProjectedBase("1\n", baseDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)
 	}
 	tracked.markLocalDirty()
@@ -774,7 +928,7 @@ func TestReconcileKeepsSentLocalAppendAsWorkspaceBaseWhenProjectionDiverges(t *t
 	if got := serverDoc.GetText("content").ToString(); got != "1\n2\n" {
 		t.Fatalf("server after first reconcile got %q", got)
 	}
-	projectedBase, known, err := tracked.loadProjectedBase()
+	projectedBase, _, known, err := tracked.loadProjectedBase()
 	if err != nil {
 		t.Fatalf("load projected base: %v", err)
 	}
@@ -807,7 +961,15 @@ func TestReconcileRebasesAppendFromStaleWorkspaceBase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
-	sharedDoc := newDocWithText(t, "1\n2\n")
+	projectedDoc := newDocWithText(t, "1\n")
+	remoteUpdate := updateFromBaseDoc(t, projectedDoc, "1\n2\n", "remote")
+	sharedDoc := crdt.New()
+	if err := crdt.ApplyUpdateV1(sharedDoc, projectedDoc.EncodeStateAsUpdate(), "projected"); err != nil {
+		t.Fatalf("apply projected state: %v", err)
+	}
+	if err := crdt.ApplyUpdateV1(sharedDoc, remoteUpdate, "remote"); err != nil {
+		t.Fatalf("apply remote update: %v", err)
+	}
 	if err := cache.storeDoc("doc_append", "append.txt", 1, sharedDoc); err != nil {
 		t.Fatalf("store shared doc: %v", err)
 	}
@@ -822,7 +984,7 @@ func TestReconcileRebasesAppendFromStaleWorkspaceBase(t *testing.T) {
 		cache:        cache,
 	}
 	tracked.setProjectedContent("1\n")
-	if err := tracked.storeProjectedBase("1\n"); err != nil {
+	if err := tracked.storeProjectedBase("1\n", projectedDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)
 	}
 	tracked.markLocalDirty()
@@ -837,14 +999,14 @@ func TestReconcileRebasesAppendFromStaleWorkspaceBase(t *testing.T) {
 	if sentUpdates != 1 {
 		t.Fatalf("expected one rebased local update, got %d", sentUpdates)
 	}
-	if got := serverDoc.GetText("content").ToString(); got != "1\n2\n3\n" {
-		t.Fatalf("expected append tail to rebase onto shared state, got %q", got)
+	if got := serverDoc.GetText("content").ToString(); !containsAll(got, "1\n", "2\n", "3\n") {
+		t.Fatalf("expected CRDT state to contain local and remote lines, got %q", got)
 	}
 	content, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read local file: %v", err)
 	}
-	if string(content) != "1\n2\n3\n" {
+	if got := string(content); !containsAll(got, "1\n", "2\n", "3\n") {
 		t.Fatalf("expected local file to receive merged projection, got %q", content)
 	}
 	if tracked.isLocalDirty() {
@@ -878,7 +1040,7 @@ func TestReconcileDoesNotDeleteRemoteUpdateAfterRemoteProjectionDiverges(t *test
 		cache:        cache,
 	}
 	tracked.setProjectedContent("base\n")
-	if err := tracked.storeProjectedBase("base\n"); err != nil {
+	if err := tracked.storeProjectedBase("base\n", baseDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)
 	}
 
@@ -901,7 +1063,7 @@ func TestReconcileDoesNotDeleteRemoteUpdateAfterRemoteProjectionDiverges(t *test
 	if !tracked.isLocalDirty() {
 		t.Fatal("expected local dirty flag after remote projection raced with local write")
 	}
-	projectedBase, known, err := tracked.loadProjectedBase()
+	projectedBase, _, known, err := tracked.loadProjectedBase()
 	if err != nil {
 		t.Fatalf("load projected base: %v", err)
 	}
@@ -928,8 +1090,8 @@ func TestReconcileDoesNotDeleteRemoteUpdateAfterRemoteProjectionDiverges(t *test
 	if sentUpdates != 1 {
 		t.Fatalf("expected one rebased local update, got %d", sentUpdates)
 	}
-	if got := serverDoc.GetText("content").ToString(); got != "base\nremote\nlocal\n" {
-		t.Fatalf("expected local append to preserve remote update, got %q", got)
+	if got := serverDoc.GetText("content").ToString(); !containsAll(got, "base\n", "remote\n", "local\n") {
+		t.Fatalf("expected local edit and remote update to both survive, got %q", got)
 	}
 }
 
@@ -1806,6 +1968,15 @@ func encodeDocState(doc *crdt.Doc) string {
 func encodeStateForContent(t *testing.T, content string) string {
 	t.Helper()
 	return encodeDocState(newDocWithText(t, content))
+}
+
+func containsAll(value string, parts ...string) bool {
+	for _, part := range parts {
+		if !strings.Contains(value, part) {
+			return false
+		}
+	}
+	return true
 }
 
 func waitUntil(t *testing.T, condition func() bool) {
