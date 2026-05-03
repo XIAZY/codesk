@@ -214,20 +214,41 @@ func runMarkDocumentViewed(baseURL, token string, args []string) {
 func runCreateThread(baseURL, token string, args []string) {
 	fs := flag.NewFlagSet("create-thread", flag.ExitOnError)
 	documentID := fs.String("document-id", "", "document id")
-	start := fs.Int("start", 0, "start offset")
-	end := fs.Int("end", 0, "end offset")
+	path := fs.String("path", "", "document path")
+	document := fs.Bool("document", false, "create a document-level thread")
+	line := fs.Int("line", 0, "1-based line to anchor")
+	quote := fs.String("quote", "", "exact text to anchor; combine with --line when repeated")
+	startLine := fs.Int("start-line", 0, "1-based start line for a precise range")
+	startColumn := fs.Int("start-column", 0, "1-based UTF-16 start column for a precise range")
+	endLine := fs.Int("end-line", 0, "1-based end line for a precise range")
+	endColumn := fs.Int("end-column", 0, "1-based UTF-16 exclusive end column for a precise range")
+	start := fs.Int("start", 0, "UTF-16 start offset")
+	end := fs.Int("end", 0, "UTF-16 exclusive end offset")
+	excerpt := fs.String("excerpt", "", "display excerpt override")
 	title := fs.String("title", "", "thread title")
 	body := fs.String("body", "", "thread body")
 	_ = fs.Parse(args)
-	if strings.TrimSpace(*documentID) == "" || strings.TrimSpace(*body) == "" {
-		fatalf("document-id and body are required")
+	if (strings.TrimSpace(*documentID) == "") == (strings.TrimSpace(*path) == "") {
+		fatalf("exactly one of --document-id or --path is required")
+	}
+	if strings.TrimSpace(*body) == "" {
+		fatalf("body is required")
 	}
 	request := map[string]any{
-		"documentId": *documentID,
-		"start":      *start,
-		"end":        *end,
-		"title":      *title,
-		"body":       *body,
+		"documentId":  *documentID,
+		"path":        *path,
+		"document":    *document,
+		"line":        *line,
+		"quote":       *quote,
+		"startLine":   *startLine,
+		"startColumn": *startColumn,
+		"endLine":     *endLine,
+		"endColumn":   *endColumn,
+		"start":       *start,
+		"end":         *end,
+		"excerpt":     *excerpt,
+		"title":       *title,
+		"body":        *body,
 	}
 	postJSON(baseURL+"/agent-tools/create-thread", token, request)
 }

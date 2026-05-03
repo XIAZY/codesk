@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +21,9 @@ func TestWorkspaceEndpointsOmitDocumentPayloads(t *testing.T) {
 
 	router := server.Routes()
 	payload := performJSONRequest(t, router, http.MethodGet, "/api/workspace", nil)
+	if _, ok := payload["proposals"]; ok {
+		t.Fatal("expected /api/workspace to omit removed proposals state")
+	}
 	document := findDocumentPayload(t, payload, documentID)
 	if _, ok := document["crdtState"]; ok {
 		t.Fatal("expected /api/workspace document metadata to omit crdtState")
@@ -45,6 +49,40 @@ func TestWorkspaceEndpointsOmitDocumentPayloads(t *testing.T) {
 	assertNonOK(t, router, http.MethodGet, "/api/documents/"+documentID, nil)
 	assertNonOK(t, router, http.MethodPost, "/api/documents/"+documentID+"/sync", []byte(`{"stateVector":""}`))
 	assertNonOK(t, router, http.MethodPost, "/api/documents/"+documentID+"/updates", []byte(`{"update":""}`))
+	assertNonOK(t, router, http.MethodPost, "/api/proposals", []byte(`{}`))
+}
+
+func TestAgentDocumentDiffEndpointRejectsLargeDiff(t *testing.T) {
+	server, store := newTestServer(t)
+	documentID := mustCreateTestDocument(t, store, "docs/large-api-diff.md", numberedLines(2001))
+	agent, err := store.CreateAgent(CreateAgentRequest{
+		Handle: "reviewer",
+		Name:   "Reviewer",
+		Role:   "Reviews docs",
+		Kind:   "codex",
+	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	initial, err := store.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get initial document: %v", err)
+	}
+	if _, _, err := store.ReplaceDocumentText(documentID, numberedLines(2001)+"tail\n", OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"}); err != nil {
+		t.Fatalf("replace document: %v", err)
+	}
+	current, err := store.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get current document: %v", err)
+	}
+
+	target := "/api/agents/" + agent.ID + "/documents/" + documentID + "/diff?from=" + strconv.FormatInt(initial.UpdateID, 10) + "&to=" + strconv.FormatInt(current.UpdateID, 10)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, target, nil)
+	server.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 for large diff, got status %d body=%s", recorder.Code, recorder.Body.String())
+	}
 }
 
 func TestDocumentProtocolSyncReturnsMissingCRDTUpdate(t *testing.T) {
@@ -200,11 +238,15 @@ func TestThreadEndpointsRoundTrip(t *testing.T) {
 
 	router := server.Routes()
 	body, err := json.Marshal(CreateThreadRequest{
-		DocumentID: documentID,
-		Title:      "Question",
-		Body:       "Please review this section.",
-		Start:      0,
-		End:        5,
+		DocumentID:    documentID,
+		Title:         "Question",
+		Body:          "Please review this section.",
+		RelativeStart: "browser-relative-start",
+		RelativeEnd:   "browser-relative-end",
+		Start:         0,
+		End:           5,
+		Line:          1,
+		Excerpt:       "alpha",
 	})
 	if err != nil {
 		t.Fatalf("marshal create thread request: %v", err)
@@ -229,6 +271,13 @@ func TestThreadEndpointsRoundTrip(t *testing.T) {
 	threadID, _ := threadMap["id"].(string)
 	if threadID == "" {
 		t.Fatalf("expected created thread id, got %#v", threadMap["id"])
+	}
+	anchorMap, ok := threadMap["anchor"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected thread anchor in response, got %#v", threadMap["anchor"])
+	}
+	if anchorMap["relativeStart"] != "browser-relative-start" || anchorMap["relativeEnd"] != "browser-relative-end" {
+		t.Fatalf("expected caller-provided relative anchors, got %#v", anchorMap)
 	}
 
 	fetched := performJSONRequest(t, router, http.MethodGet, "/api/threads/"+threadID, nil)

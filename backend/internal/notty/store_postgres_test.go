@@ -57,17 +57,21 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	}
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "# notty\n\n")
 	thread, _, err := store.CreateThread(CreateThreadRequest{
-		DocumentID: documentID,
-		Title:      "Persistence check",
-		Body:       "Looks durable. Please review this @pg-reviewer",
-		Start:      0,
-		End:        6,
+		DocumentID:    documentID,
+		Title:         "Persistence check",
+		Body:          "Looks durable. Please review this @pg-reviewer",
+		RelativeStart: "pg-relative-start",
+		RelativeEnd:   "pg-relative-end",
+		Start:         0,
+		End:           6,
+		Line:          1,
+		Excerpt:       "# notty",
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
 	}
-	if thread.Anchor.RelativeStart == "" || thread.Anchor.RelativeEnd == "" {
-		t.Fatalf("expected persisted thread to use relative positions, got %#v", thread.Anchor)
+	if thread.Anchor.RelativeStart != "pg-relative-start" || thread.Anchor.RelativeEnd != "pg-relative-end" {
+		t.Fatalf("expected persisted thread to use caller relative positions, got %#v", thread.Anchor)
 	}
 	if _, err := store.UpsertPresence(UpsertPresenceRequest{
 		ActorID:    user.ID,
@@ -79,15 +83,6 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 		Activity:   "Reviewing persistence",
 	}); err != nil {
 		t.Fatalf("upsert presence: %v", err)
-	}
-	proposal, err := store.CreateProposal(CreateProposalRequest{
-		DocumentID:   documentID,
-		Title:        "Persist it",
-		Author:       agent.ID,
-		ProposedText: "# notty\n\nPostgres-backed.\n",
-	})
-	if err != nil {
-		t.Fatalf("create proposal: %v", err)
 	}
 	_, run, err := store.StartAgentRun(StartAgentRunRequest{
 		AgentID: agent.ID,
@@ -139,7 +134,7 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	if got := snapshot.Agents[agent.ID]; got == nil || got.SessionID != "session_pg_123" {
 		t.Fatalf("expected agent session id after reload, got %#v", got)
 	}
-	if got := snapshot.Threads[thread.ID]; got == nil || len(got.Messages) != 1 || got.Anchor.RelativeStart == "" || got.Anchor.RelativeEnd == "" {
+	if got := snapshot.Threads[thread.ID]; got == nil || len(got.Messages) != 1 || got.Anchor.RelativeStart != "pg-relative-start" || got.Anchor.RelativeEnd != "pg-relative-end" {
 		t.Fatalf("expected thread messages after reload, got %#v", got)
 	}
 	if got := snapshot.AgentRuns[run.ID]; got == nil || got.Status != "completed" {
@@ -154,13 +149,11 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	if got := snapshot.Presences[user.ID]; got == nil || got.FilePath != "docs/spec.md" || len(got.Selection) != 2 {
 		t.Fatalf("expected presence after reload, got %#v", got)
 	}
-	if got := snapshot.Proposals[proposal.ID]; got == nil || got.Title != "Persist it" {
-		t.Fatalf("expected proposal after reload, got %#v", got)
-	}
 	if len(snapshot.Activities) == 0 {
 		t.Fatal("expected activities after reload")
 	}
 	assertNoActivityMaterializedContentColumn(t, db)
+	assertNoProposalTable(t, db)
 
 	var snapshotTable sql.NullString
 	if err := db.QueryRow(`SELECT to_regclass('public.workspace_snapshots')`).Scan(&snapshotTable); err != nil {
@@ -1022,11 +1015,13 @@ func TestPostgresAgentInboxSkipsLogDocumentUpdatesButKeepsThreadMentions(t *test
 	}
 
 	thread, message, err := store.CreateThread(CreateThreadRequest{
-		DocumentID: logDocumentID,
-		Title:      "Log question",
-		Body:       "Please inspect @reviewer",
-		Start:      0,
-		End:        5,
+		DocumentID:    logDocumentID,
+		Title:         "Log question",
+		Body:          "Please inspect @reviewer",
+		RelativeStart: "test-relative-start",
+		RelativeEnd:   "test-relative-end",
+		Start:         0,
+		End:           5,
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create log thread: %v", err)
@@ -1187,7 +1182,6 @@ func clearNottyTables(db *sql.DB) error {
 		`DELETE FROM threads`,
 		`DELETE FROM agent_events`,
 		`DELETE FROM agent_runs`,
-		`DELETE FROM proposals`,
 		`DELETE FROM presences`,
 		`DELETE FROM activities`,
 		`DELETE FROM agents`,
@@ -1273,5 +1267,16 @@ func assertNoActivityMaterializedContentColumn(t *testing.T, db *sql.DB) {
 	}
 	if count != 0 {
 		t.Fatal("activities must not materialize document content in new_content")
+	}
+}
+
+func assertNoProposalTable(t *testing.T, db *sql.DB) {
+	t.Helper()
+	var table sql.NullString
+	if err := db.QueryRow(`SELECT to_regclass('public.proposals')`).Scan(&table); err != nil {
+		t.Fatalf("query proposals table existence: %v", err)
+	}
+	if table.Valid {
+		t.Fatalf("proposals table should be removed, got %q", table.String)
 	}
 }

@@ -19,6 +19,8 @@ The suite uses a dedicated Docker Compose project and random localhost ports, so
 
 Delete/backspace coverage is included at both levels: a CRDT-only regression verifies partial delete ranges inside larger text items, and a websocket regression verifies peer propagation plus backend persistence.
 
+Thread integrity coverage verifies that clients can create document threads with Yjs relative anchors, that the backend preserves those caller-supplied anchors without materializing document text, and that raw-offset text-range thread creation is rejected.
+
 Known gap: the backend-restart append test is opt-in because it currently reproduces a lost-write/reconnect problem. During a 1000-line reduced run, backend reconstruction stopped at 143 lines after restart, indicating websocket write success is being treated as persistence without a server-level acknowledgement.
 
 Merge/conflict coverage:

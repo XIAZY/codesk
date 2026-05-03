@@ -2,6 +2,7 @@ package notty
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -171,6 +172,8 @@ func (s *Server) handleAgentDocumentDiff(w http.ResponseWriter, r *http.Request)
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
 			status = http.StatusNotFound
+		} else if errors.Is(err, ErrDocumentDiffTooLarge) {
+			status = http.StatusRequestEntityTooLarge
 		}
 		writeError(w, status, err.Error())
 		return

@@ -369,7 +369,11 @@ func (s *Service) createThreadAsRun(ctx context.Context, run *agentRun, payload 
 	if run == nil {
 		return nil, fmt.Errorf("missing agent run context")
 	}
-	body, err := json.Marshal(payload)
+	prepared, err := s.prepareCreateThreadPayload(ctx, payload)
+	if err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(prepared)
 	if err != nil {
 		return nil, err
 	}

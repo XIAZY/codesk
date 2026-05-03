@@ -36,8 +36,6 @@ func (s *Server) Routes() http.Handler {
 	router.Get("/api/threads/{id}", s.handleThread)
 	router.Post("/api/threads/{id}/messages", s.handleReplyThread)
 	router.Post("/api/presence", s.handlePresence)
-	router.Post("/api/proposals", s.handleCreateProposal)
-	router.Post("/api/proposals/{id}/merge", s.handleMergeProposal)
 	router.Post("/api/agent-runs", s.handleStartAgentRun)
 	router.Patch("/api/agent-runs/{id}", s.handleUpdateAgentRun)
 	router.Post("/api/agent-runs/{id}/stop", s.handleStopAgentRun)

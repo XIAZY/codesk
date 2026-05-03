@@ -1,6 +1,7 @@
 package notty
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -436,6 +437,93 @@ func TestDiffDocumentSupportsExplicitVersionsAndReload(t *testing.T) {
 	}
 }
 
+func TestDiffDocumentRejectsLargeLineProduct(t *testing.T) {
+	dataFile := filepath.Join(t.TempDir(), "state.json")
+	store, err := NewStore(dataFile)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	lineCount := 2001
+	documentID := mustCreateTestDocument(t, store, "docs/large-diff.md", numberedLines(lineCount))
+	agent, err := store.CreateAgent(CreateAgentRequest{
+		Handle: "reviewer",
+		Name:   "Reviewer",
+		Role:   "Reviews docs",
+		Kind:   "codex",
+	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	initial, err := store.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get initial document: %v", err)
+	}
+	if _, _, err := store.ReplaceDocumentText(documentID, numberedLines(lineCount)+"tail\n", OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"}); err != nil {
+		t.Fatalf("replace document: %v", err)
+	}
+	current, err := store.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get current document: %v", err)
+	}
+
+	if _, err := store.DiffDocument(agent.ID, documentID, strconv.FormatInt(initial.UpdateID, 10), strconv.FormatInt(current.UpdateID, 10)); !errors.Is(err, ErrDocumentDiffTooLarge) {
+		t.Fatalf("expected large diff rejection, got %v", err)
+	}
+}
+
+func TestDiffDocumentIdenticalLargeContentShortCircuitsBeforeLimits(t *testing.T) {
+	dataFile := filepath.Join(t.TempDir(), "state.json")
+	store, err := NewStore(dataFile)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	content := numberedLines(2001)
+	documentID := mustCreateTestDocument(t, store, "docs/no-op-large-diff.md", content)
+	agent, err := store.CreateAgent(CreateAgentRequest{
+		Handle: "reviewer",
+		Name:   "Reviewer",
+		Role:   "Reviews docs",
+		Kind:   "codex",
+	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	initial, err := store.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get initial document: %v", err)
+	}
+	if _, _, err := store.ReplaceDocumentText(documentID, content, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"}); err != nil {
+		t.Fatalf("replace document: %v", err)
+	}
+	current, err := store.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get current document: %v", err)
+	}
+	if current.UpdateID == initial.UpdateID {
+		t.Fatal("test setup expected distinct versions")
+	}
+
+	diff, err := store.DiffDocument(agent.ID, documentID, strconv.FormatInt(initial.UpdateID, 10), strconv.FormatInt(current.UpdateID, 10))
+	if err != nil {
+		t.Fatalf("expected identical large content to short-circuit, got %v", err)
+	}
+	if len(diff.Hunks) != 0 || diff.Unified != "" || diff.FromContent != "" || diff.ToContent != "" {
+		t.Fatalf("expected empty diff for identical content, got %#v", diff)
+	}
+}
+
+func numberedLines(count int) string {
+	var builder strings.Builder
+	for i := 1; i <= count; i++ {
+		fmt.Fprintf(&builder, "%d\n", i)
+	}
+	return builder.String()
+}
+
 func assertSharedAgentPrompt(t *testing.T, prompt, name, handle, role string) {
 	t.Helper()
 	for _, fragment := range []string{
@@ -458,33 +546,6 @@ func assertSharedAgentPrompt(t *testing.T, prompt, name, handle, role string) {
 		if !strings.Contains(prompt, fragment) {
 			t.Fatalf("expected system prompt to contain %q, got %q", fragment, prompt)
 		}
-	}
-}
-
-func TestProposalMergeRewritesDocumentThroughCRDT(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "state.json"))
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "# draft\n")
-	proposal, err := store.CreateProposal(CreateProposalRequest{
-		DocumentID:   documentID,
-		Author:       "refactor_agent",
-		Title:        "Rewrite spec heading",
-		ProposedText: "proposal body",
-	})
-	if err != nil {
-		t.Fatalf("create proposal: %v", err)
-	}
-	document, update, err := store.MergeProposal(proposal.ID, "reviewer")
-	if err != nil {
-		t.Fatalf("merge proposal: %v", err)
-	}
-	if document.Content != "proposal body" {
-		t.Fatalf("unexpected merged content: %q", document.Content)
-	}
-	if len(update) == 0 {
-		t.Fatal("expected incremental update bytes")
 	}
 }
 
@@ -806,11 +867,13 @@ func TestCreateThreadEnqueuesMentionedAgentEvent(t *testing.T) {
 	}
 
 	thread, message, err := store.CreateThread(CreateThreadRequest{
-		DocumentID: documentID,
-		Title:      "Need review",
-		Body:       "Please take a look @reviewer",
-		Start:      0,
-		End:        6,
+		DocumentID:    documentID,
+		Title:         "Need review",
+		Body:          "Please take a look @reviewer",
+		RelativeStart: "test-relative-start",
+		RelativeEnd:   "test-relative-end",
+		Start:         0,
+		End:           6,
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
@@ -853,11 +916,13 @@ func TestLoadReconcilesMissingThreadMentionEvents(t *testing.T) {
 		t.Fatalf("create agent: %v", err)
 	}
 	thread, message, err := store.CreateThread(CreateThreadRequest{
-		DocumentID: documentID,
-		Title:      "Need review",
-		Body:       "Please take a look @reviewer",
-		Start:      0,
-		End:        6,
+		DocumentID:    documentID,
+		Title:         "Need review",
+		Body:          "Please take a look @reviewer",
+		RelativeStart: "test-relative-start",
+		RelativeEnd:   "test-relative-end",
+		Start:         0,
+		End:           6,
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
@@ -945,11 +1010,13 @@ func TestThreadMentionEntersMentionedAgentForMeQueue(t *testing.T) {
 	}
 
 	thread, message, err := store.CreateThread(CreateThreadRequest{
-		DocumentID: documentID,
-		Title:      "Need review",
-		Body:       "Can you check this @codex-agent?",
-		Start:      0,
-		End:        6,
+		DocumentID:    documentID,
+		Title:         "Need review",
+		Body:          "Can you check this @codex-agent?",
+		RelativeStart: "test-relative-start",
+		RelativeEnd:   "test-relative-end",
+		Start:         0,
+		End:           6,
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
@@ -997,11 +1064,13 @@ func TestThreadReplyDirectMentionDoesNotAlsoQueueGenericReply(t *testing.T) {
 		t.Fatalf("create agent: %v", err)
 	}
 	thread, _, err := store.CreateThread(CreateThreadRequest{
-		DocumentID: documentID,
-		Title:      "Need review",
-		Body:       "Initial ask @reviewer",
-		Start:      0,
-		End:        6,
+		DocumentID:    documentID,
+		Title:         "Need review",
+		Body:          "Initial ask @reviewer",
+		RelativeStart: "test-relative-start",
+		RelativeEnd:   "test-relative-end",
+		Start:         0,
+		End:           6,
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
@@ -1030,61 +1099,64 @@ func TestThreadReplyDirectMentionDoesNotAlsoQueueGenericReply(t *testing.T) {
 	}
 }
 
-func TestThreadAnchorTracksRelativePositions(t *testing.T) {
+func TestCreateThreadStoresCallerProvidedAnchorWithoutResolvingDocument(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "alpha bravo charlie")
 	thread, _, err := store.CreateThread(CreateThreadRequest{
-		DocumentID: documentID,
-		Title:      "Check bravo",
-		Body:       "Anchor the middle word",
-		Start:      6,
-		End:        11,
+		DocumentID:    documentID,
+		Title:         "Check bravo",
+		Body:          "Anchor the middle word",
+		RelativeStart: "client-relative-start",
+		RelativeEnd:   "client-relative-end",
+		Start:         6,
+		End:           11,
+		Line:          1,
+		Excerpt:       "bravo",
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
 	}
-	if thread.Anchor.RelativeStart == "" || thread.Anchor.RelativeEnd == "" {
-		t.Fatalf("expected relative anchor positions, got %#v", thread.Anchor)
+	if thread.Anchor.RelativeStart != "client-relative-start" || thread.Anchor.RelativeEnd != "client-relative-end" {
+		t.Fatalf("expected caller-provided relative anchor positions, got %#v", thread.Anchor)
 	}
+	if thread.Anchor.Start != 6 || thread.Anchor.End != 11 || thread.Anchor.Line != 1 || thread.Anchor.Excerpt != "bravo" {
+		t.Fatalf("expected caller-provided display anchor metadata, got %#v", thread.Anchor)
+	}
+}
 
-	document, err := store.GetDocument(documentID)
+func TestCreateThreadRequiresRelativeAnchorPair(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
-		t.Fatalf("get document: %v", err)
+		t.Fatalf("new store: %v", err)
 	}
-	frontendDoc, err := decodeCRDTState(document.CRDTState, 88)
-	if err != nil {
-		t.Fatalf("decode document: %v", err)
+	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "alpha")
+	if _, _, err := store.CreateThread(CreateThreadRequest{
+		DocumentID:    documentID,
+		Body:          "broken anchor",
+		RelativeStart: "client-relative-start",
+	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"}); err == nil {
+		t.Fatal("expected missing relativeEnd to be rejected")
 	}
-	text := frontendDoc.GetText("content")
-	var update []byte
-	unsubscribe := frontendDoc.OnUpdate(func(next []byte, origin any) {
-		update = append([]byte(nil), next...)
-	})
-	frontendDoc.Transact(func(txn *crdt.Transaction) {
-		text.Insert(txn, 0, "wide ", nil)
-	}, "browser")
-	unsubscribe()
-
-	if _, err := store.ApplyCRDTUpdate(documentID, update, OperationMeta{
-		ActorID:   "owner",
-		ActorType: "human",
-		Source:    "test",
-	}); err != nil {
-		t.Fatalf("apply update: %v", err)
+	if _, _, err := store.CreateThread(CreateThreadRequest{
+		DocumentID: documentID,
+		Body:       "raw offset anchor",
+		Start:      0,
+		End:        5,
+	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"}); err == nil {
+		t.Fatal("expected text range without relative anchors to be rejected")
 	}
-
-	updated := store.Snapshot().Threads[thread.ID]
-	if updated == nil {
-		t.Fatal("expected thread in snapshot")
-	}
-	if updated.Anchor.Start != 11 || updated.Anchor.End != 16 {
-		t.Fatalf("expected anchor to move with inserted text, got start=%d end=%d", updated.Anchor.Start, updated.Anchor.End)
-	}
-	if !strings.Contains(updated.Anchor.Excerpt, "bravo") {
-		t.Fatalf("expected excerpt to follow anchored text, got %q", updated.Anchor.Excerpt)
+	if _, _, err := store.CreateThread(CreateThreadRequest{
+		DocumentID: documentID,
+		Body:       "document-level thread",
+		Start:      0,
+		End:        0,
+		Line:       0,
+		Excerpt:    "",
+	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"}); err != nil {
+		t.Fatalf("expected document-level thread without relative anchors to be accepted: %v", err)
 	}
 }
 
@@ -1105,11 +1177,13 @@ func TestStoreNotificationHelpersExposeAndUpdatePendingNotifications(t *testing.
 		t.Fatalf("create agent: %v", err)
 	}
 	thread, _, err := store.CreateThread(CreateThreadRequest{
-		DocumentID: documentID,
-		Title:      "Need review",
-		Body:       "Please sync with @scribe.",
-		Start:      0,
-		End:        5,
+		DocumentID:    documentID,
+		Title:         "Need review",
+		Body:          "Please sync with @scribe.",
+		RelativeStart: "test-relative-start",
+		RelativeEnd:   "test-relative-end",
+		Start:         0,
+		End:           5,
 	}, OperationMeta{
 		ActorID:   "owner",
 		ActorType: "human",
@@ -1193,11 +1267,13 @@ func TestLogDocumentContentDoesNotGenerateAgentEventsButThreadMessagesDo(t *test
 	}
 
 	thread, message, err := store.CreateThread(CreateThreadRequest{
-		DocumentID: logDocumentID,
-		Title:      "log thread",
-		Body:       "Please inspect @scribe",
-		Start:      0,
-		End:        5,
+		DocumentID:    logDocumentID,
+		Title:         "log thread",
+		Body:          "Please inspect @scribe",
+		RelativeStart: "test-relative-start",
+		RelativeEnd:   "test-relative-end",
+		Start:         0,
+		End:           5,
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create log thread: %v", err)
@@ -1273,11 +1349,13 @@ func TestAgentInboxRoutesDocumentUpdatesPerAgentParticipation(t *testing.T) {
 		t.Fatalf("create observer: %v", err)
 	}
 	if _, _, err := store.CreateThread(CreateThreadRequest{
-		DocumentID: documentID,
-		Title:      "Reviewer context",
-		Body:       "Please watch this area @reviewer",
-		Start:      0,
-		End:        5,
+		DocumentID:    documentID,
+		Title:         "Reviewer context",
+		Body:          "Please watch this area @reviewer",
+		RelativeStart: "test-relative-start",
+		RelativeEnd:   "test-relative-end",
+		Start:         0,
+		End:           5,
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"}); err != nil {
 		t.Fatalf("create thread: %v", err)
 	}
@@ -1432,11 +1510,13 @@ func TestThreadMentionEventClaimAndComplete(t *testing.T) {
 		t.Fatalf("create agent: %v", err)
 	}
 	thread, _, err := store.CreateThread(CreateThreadRequest{
-		DocumentID: documentID,
-		Title:      "Need review",
-		Body:       "Please sync with @scribe.",
-		Start:      0,
-		End:        5,
+		DocumentID:    documentID,
+		Title:         "Need review",
+		Body:          "Please sync with @scribe.",
+		RelativeStart: "test-relative-start",
+		RelativeEnd:   "test-relative-end",
+		Start:         0,
+		End:           5,
 	}, OperationMeta{
 		ActorID:   "owner",
 		ActorType: "human",
@@ -1516,11 +1596,13 @@ func TestAgentSelfReplyDoesNotEnqueueThreadEvent(t *testing.T) {
 		t.Fatalf("create agent: %v", err)
 	}
 	thread, _, err := store.CreateThread(CreateThreadRequest{
-		DocumentID: documentID,
-		Title:      "Need reviewer context",
-		Body:       "Please review this @reviewer",
-		Start:      0,
-		End:        5,
+		DocumentID:    documentID,
+		Title:         "Need reviewer context",
+		Body:          "Please review this @reviewer",
+		RelativeStart: "test-relative-start",
+		RelativeEnd:   "test-relative-end",
+		Start:         0,
+		End:           5,
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
@@ -1558,11 +1640,13 @@ func TestAgentOwnDocumentEditDoesNotEnqueueDocumentEditedEvent(t *testing.T) {
 		t.Fatalf("create agent: %v", err)
 	}
 	thread, _, err := store.CreateThread(CreateThreadRequest{
-		DocumentID: documentID,
-		Title:      "Need reviewer context",
-		Body:       "Please review this @reviewer",
-		Start:      0,
-		End:        5,
+		DocumentID:    documentID,
+		Title:         "Need reviewer context",
+		Body:          "Please review this @reviewer",
+		RelativeStart: "test-relative-start",
+		RelativeEnd:   "test-relative-end",
+		Start:         0,
+		End:           5,
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create thread: %v", err)

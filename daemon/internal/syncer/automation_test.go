@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/reearth/ygo/crdt"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -212,6 +214,73 @@ func TestToolGatewayRepliesAsOwningAgent(t *testing.T) {
 	}
 	if actorSeen != "agent_1" || actorTypeSeen != "agent" {
 		t.Fatalf("unexpected actor attribution: actor=%q actorType=%q", actorSeen, actorTypeSeen)
+	}
+}
+
+func TestToolGatewayCreateThreadResolvesPathQuoteToRelativeAnchors(t *testing.T) {
+	service := newToolGatewayTestService(&agent{ID: "agent_1", Handle: "reviewer", Kind: "codex"}, "token_123")
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new document cache: %v", err)
+	}
+	service.docCache = cache
+	service.projectedByID = map[string]*trackedFile{}
+	service.projectedByPath = map[string]*trackedFile{}
+	service.agentReplicas = map[string]*managedReplica{}
+	service.latestWorkspace = &workspaceResponse{
+		Documents: []*document{{ID: "doc_spec", Path: "docs/spec.md", UpdateID: 1}},
+	}
+	doc := crdt.New(crdt.WithClientID(771))
+	text := doc.GetText("content")
+	doc.Transact(func(txn *crdt.Transaction) {
+		text.Insert(txn, 0, "intro\nrepeat target\nother line\n", nil)
+	})
+	if err := cache.storeDoc("doc_spec", "docs/spec.md", 1, doc); err != nil {
+		t.Fatalf("store cached doc: %v", err)
+	}
+
+	var seen map[string]any
+	service.client = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Method != http.MethodPost || r.URL.Path != "/api/threads" {
+				t.Fatalf("unexpected backend request: %s %s", r.Method, r.URL.String())
+			}
+			if got := r.URL.Query().Get("actor"); got != "agent_1" {
+				t.Fatalf("unexpected actor: %q", got)
+			}
+			if err := json.NewDecoder(r.Body).Decode(&seen); err != nil {
+				t.Fatalf("decode backend request: %v", err)
+			}
+			if seen["documentId"] != "doc_spec" {
+				t.Fatalf("unexpected documentId: %#v", seen["documentId"])
+			}
+			if pathValue, ok := seen["path"]; ok && pathValue != "" {
+				t.Fatalf("gateway should not forward path to backend, got %#v", seen["path"])
+			}
+			if seen["relativeStart"] == "" || seen["relativeEnd"] == "" {
+				t.Fatalf("expected generated relative anchors, got %#v", seen)
+			}
+			if seen["line"] != float64(2) || seen["start"] != float64(13) || seen["end"] != float64(19) || seen["excerpt"] != "target" {
+				t.Fatalf("unexpected display anchor metadata: %#v", seen)
+			}
+			return jsonResponse(t, http.StatusCreated, toolThreadMutationResponse{
+				Thread:  &thread{ID: "thread_1"},
+				Message: &threadMessage{ID: "message_1", ThreadID: "thread_1"},
+			}), nil
+		}),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/agent-tools/create-thread", strings.NewReader(`{"path":"docs/spec.md","line":2,"quote":"target","body":"Please review this."}`))
+	req.Header.Set("Authorization", "Bearer token_123")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	service.handleCreateThreadTool(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+	if seen["relativeStart"] == seen["relativeEnd"] {
+		t.Fatalf("expected distinct range anchors, got %#v", seen)
 	}
 }
 

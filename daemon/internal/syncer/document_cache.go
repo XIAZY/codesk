@@ -19,6 +19,7 @@ import (
 )
 
 var errPendingUpdateLogHashMismatch = errors.New("cached pending update log hash mismatch")
+var errOutboxUpdateHashMismatch = errors.New("cached outgoing update outbox hash mismatch")
 
 type documentCache struct {
 	root string
@@ -37,6 +38,8 @@ type documentCacheEntry struct {
 	lastPersistedAt     time.Time
 	pendingHash         string
 	pendingHashLoaded   bool
+	outboxHash          string
+	outboxHashLoaded    bool
 	seenUpdateHashes    map[string]struct{}
 }
 
@@ -48,7 +51,19 @@ type documentCacheMetadata struct {
 	StateSHA256    string    `json:"stateSha256,omitempty"`
 	PendingSHA256  string    `json:"pendingSha256,omitempty"`
 	PendingUpdates int       `json:"pendingUpdates,omitempty"`
+	OutboxSHA256   string    `json:"outboxSha256,omitempty"`
+	OutboxUpdates  int       `json:"outboxUpdates,omitempty"`
 	UpdatedAt      time.Time `json:"updatedAt"`
+}
+
+type outboxUpdateRecord struct {
+	Update            []byte    `json:"update"`
+	UpdateSHA256      string    `json:"updateSha256"`
+	TargetStateVector []byte    `json:"targetStateVector"`
+	ObservedContent   string    `json:"observedContent"`
+	ObservedState     []byte    `json:"observedState"`
+	SourcePath        string    `json:"sourcePath"`
+	CreatedAt         time.Time `json:"createdAt"`
 }
 
 type materializedCachedDocument struct {
@@ -186,6 +201,10 @@ func (c *documentCache) storeDocLocked(entry *documentCacheEntry, metadata docum
 	}
 	if entry.pendingHashLoaded {
 		metadata.PendingSHA256 = entry.pendingHash
+	}
+	if entry.outboxHashLoaded {
+		metadata.OutboxSHA256 = entry.outboxHash
+		metadata.OutboxUpdates = entry.metadata.OutboxUpdates
 	}
 	payload, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
@@ -440,6 +459,79 @@ func (c *documentCache) clearPendingRemoteUpdatesLocked(entry *documentCacheEntr
 	return c.writeMetadataLocked(entry, entry.metadata)
 }
 
+func (c *documentCache) loadOutboxUpdateLocked(entry *documentCacheEntry, documentID string) (*outboxUpdateRecord, error) {
+	if err := c.ensureOutboxHashLoadedLocked(entry, documentID); err != nil {
+		return nil, err
+	}
+	payload, err := os.ReadFile(c.outboxPath(documentID))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if entry.outboxHashLoaded && entry.outboxHash != sha256Hex(payload) {
+		return nil, errOutboxUpdateHashMismatch
+	}
+	var record outboxUpdateRecord
+	if err := json.Unmarshal(payload, &record); err != nil {
+		return nil, err
+	}
+	if record.UpdateSHA256 == "" {
+		record.UpdateSHA256 = sha256Hex(record.Update)
+	}
+	if record.UpdateSHA256 != sha256Hex(record.Update) {
+		return nil, errOutboxUpdateHashMismatch
+	}
+	return &record, nil
+}
+
+func (c *documentCache) storeOutboxUpdateLocked(entry *documentCacheEntry, documentID, path string, record outboxUpdateRecord) error {
+	if c == nil || documentID == "" || len(record.Update) == 0 {
+		return nil
+	}
+	if err := os.MkdirAll(c.documentDir(documentID), 0o755); err != nil {
+		return err
+	}
+	record.UpdateSHA256 = sha256Hex(record.Update)
+	if record.CreatedAt.IsZero() {
+		record.CreatedAt = time.Now().UTC()
+	}
+	payload, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(c.outboxPath(documentID), payload, 0o644); err != nil {
+		return err
+	}
+	entry.outboxHash = sha256Hex(payload)
+	entry.outboxHashLoaded = true
+	if entry.seenUpdateHashes == nil {
+		entry.seenUpdateHashes = map[string]struct{}{}
+	}
+	entry.seenUpdateHashes[record.UpdateSHA256] = struct{}{}
+	entry.metadata.DocumentID = documentID
+	if entry.metadata.Path == "" {
+		entry.metadata.Path = path
+	}
+	entry.metadata.OutboxSHA256 = entry.outboxHash
+	entry.metadata.OutboxUpdates = 1
+	entry.metadata.UpdatedAt = time.Now().UTC()
+	return c.writeMetadataLocked(entry, entry.metadata)
+}
+
+func (c *documentCache) clearOutboxUpdateLocked(entry *documentCacheEntry, documentID string) error {
+	if err := os.Remove(c.outboxPath(documentID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	entry.outboxHash = sha256Hex(nil)
+	entry.outboxHashLoaded = true
+	entry.metadata.OutboxSHA256 = entry.outboxHash
+	entry.metadata.OutboxUpdates = 0
+	entry.metadata.UpdatedAt = time.Now().UTC()
+	return c.writeMetadataLocked(entry, entry.metadata)
+}
+
 func (c *documentCache) lockEntry(documentID string) (*documentCacheEntry, func()) {
 	if c == nil || documentID == "" {
 		return nil, func() {}
@@ -483,6 +575,40 @@ func (c *documentCache) ensurePendingHashLoadedLocked(entry *documentCacheEntry,
 	if seen != nil {
 		entry.seenUpdateHashes = seen
 	}
+	return nil
+}
+
+func (c *documentCache) ensureOutboxHashLoadedLocked(entry *documentCacheEntry, documentID string) error {
+	if entry.outboxHashLoaded {
+		return nil
+	}
+	if !entry.loaded {
+		if payload, err := os.ReadFile(c.metadataPath(documentID)); err == nil {
+			_ = json.Unmarshal(payload, &entry.metadata)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		entry.loaded = true
+	}
+	payload, err := os.ReadFile(c.outboxPath(documentID))
+	if errors.Is(err, os.ErrNotExist) {
+		entry.outboxHash = sha256Hex(nil)
+		entry.outboxHashLoaded = true
+		entry.metadata.OutboxSHA256 = entry.outboxHash
+		entry.metadata.OutboxUpdates = 0
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	hash := sha256Hex(payload)
+	if entry.metadata.OutboxSHA256 != "" && entry.metadata.OutboxSHA256 != hash {
+		return errOutboxUpdateHashMismatch
+	}
+	entry.outboxHash = hash
+	entry.outboxHashLoaded = true
+	entry.metadata.OutboxSHA256 = hash
+	entry.metadata.OutboxUpdates = 1
 	return nil
 }
 
@@ -590,6 +716,10 @@ func (c *documentCache) metadataPath(documentID string) string {
 
 func (c *documentCache) pendingPath(documentID string) string {
 	return filepath.Join(c.documentDir(documentID), "pending_remote.log")
+}
+
+func (c *documentCache) outboxPath(documentID string) string {
+	return filepath.Join(c.documentDir(documentID), "outbox_update.json")
 }
 
 func safeDocumentCacheName(value string) string {

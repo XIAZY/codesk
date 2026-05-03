@@ -5,7 +5,6 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
-	"notty/internal/yproto"
 )
 
 func (s *Server) handlePresence(w http.ResponseWriter, r *http.Request) {
@@ -21,46 +20,6 @@ func (s *Server) handlePresence(w http.ResponseWriter, r *http.Request) {
 	}
 	s.subscribers.Publish(EventEnvelope{Type: "presence.updated", Data: presence})
 	writeJSON(w, http.StatusOK, presence)
-}
-
-func (s *Server) handleCreateProposal(w http.ResponseWriter, r *http.Request) {
-	var req CreateProposalRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	proposal, err := s.store.CreateProposal(req)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	s.subscribers.Publish(EventEnvelope{Type: "proposal.created", Data: proposal})
-	writeJSON(w, http.StatusCreated, proposal)
-}
-
-func (s *Server) handleMergeProposal(w http.ResponseWriter, r *http.Request) {
-	actor := r.URL.Query().Get("actor")
-	if actor == "" {
-		actor = "owner"
-	}
-	document, update, err := s.store.MergeProposal(chi.URLParam(r, "id"), actor)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if len(update) > 0 {
-		s.rooms.ForDocument(document.ID).Broadcast(yproto.BuildSyncUpdate(update), nil)
-		s.subscribers.Publish(EventEnvelope{Type: "document.updated", Data: DocumentUpdateEvent{
-			DocumentID:  document.ID,
-			UpdateID:    document.UpdateID,
-			StateVector: document.StateVector,
-			Path:        document.Path,
-			UpdatedAt:   document.UpdatedAt,
-			ActorID:     actor,
-		}})
-	}
-	s.subscribers.Publish(EventEnvelope{Type: "proposal.merged", Data: documentMetadata(document)})
-	writeJSON(w, http.StatusOK, documentMetadata(document))
 }
 
 func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {

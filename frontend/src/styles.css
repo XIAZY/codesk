@@ -111,7 +111,6 @@ p {
 .documentFacts,
 .pageMeta small,
 .composerStatus,
-.proposalPill span,
 .lineCommentCard span,
 .lineCommentCard small,
 .miniStat span {
@@ -130,16 +129,14 @@ p {
 }
 
 .railSectionHeader,
-.workspaceHeader,
-.proposalDockHeader {
+.workspaceHeader {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 1rem;
 }
 
-.railSectionHeader h2,
-.proposalDockHeader h3 {
+.railSectionHeader h2 {
   font-size: 0.96rem;
   font-weight: 700;
 }
@@ -150,8 +147,7 @@ p {
   gap: 0.55rem;
 }
 
-.pageList,
-.proposalListInline {
+.pageList {
   display: flex;
   flex-direction: column;
   gap: 0.55rem;
@@ -228,7 +224,6 @@ p {
 }
 
 .pageMeta strong,
-.proposalPill strong,
 .lineCommentCard strong {
   font-size: 0.94rem;
   font-weight: 650;
@@ -646,8 +641,7 @@ p {
 }
 
 .markdownEditor::placeholder,
-.inlineCommentInput::placeholder,
-.proposalInputInline::placeholder {
+.inlineCommentInput::placeholder {
   color: #b4a999;
 }
 
@@ -813,11 +807,10 @@ p {
   color: var(--muted);
 }
 
-.inlineCommentInput,
-.proposalInputInline {
-  width: 100%;
-  border: 1px solid var(--line-strong);
-  border-radius: 16px;
+.inlineCommentInput {
+	width: 100%;
+	border: 1px solid var(--line-strong);
+	border-radius: 16px;
   background: rgba(255, 255, 255, 0.9);
   color: var(--ink);
   padding: 0.88rem 1rem;
@@ -827,39 +820,6 @@ p {
 .inlineCommentInput {
   min-height: 76px;
   resize: vertical;
-}
-
-.proposalDock {
-  display: flex;
-  flex-direction: column;
-  gap: 0.8rem;
-  padding: 1rem 1.1rem;
-  border: 1px solid var(--line);
-  border-radius: 24px;
-  background: rgba(255, 252, 246, 0.75);
-}
-
-.proposalComposer {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 0.75rem;
-}
-
-.proposalPill {
-  display: flex;
-  justify-content: space-between;
-  gap: 1rem;
-  align-items: center;
-  padding: 0.85rem 0.95rem;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.75);
-  border: 1px solid var(--line);
-}
-
-.proposalPill > div {
-  display: flex;
-  flex-direction: column;
-  gap: 0.14rem;
 }
 
 @media (max-width: 1240px) {
@@ -886,9 +846,8 @@ p {
     padding: 1rem;
   }
 
-  .workspaceHeader,
-  .composerStatus,
-  .proposalComposer {
+	.workspaceHeader,
+	.composerStatus {
     flex-direction: column;
     align-items: stretch;
   }
@@ -948,8 +907,7 @@ p {
     min-height: 56vh;
   }
 
-  .documentComposer,
-  .proposalDock {
+	.documentComposer {
     padding-left: 1rem;
     padding-right: 1rem;
   }

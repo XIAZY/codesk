@@ -249,22 +249,9 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			PRIMARY KEY (workspace_id, actor_id)
 		)
 		`,
+		`DROP TABLE IF EXISTS proposals`,
 		`
-		CREATE TABLE IF NOT EXISTS proposals (
-			workspace_id TEXT NOT NULL,
-			id TEXT PRIMARY KEY,
-			document_id TEXT NOT NULL,
-			title TEXT NOT NULL,
-			author TEXT NOT NULL,
-			proposed_text TEXT NOT NULL,
-			status TEXT NOT NULL,
-			created_at TIMESTAMPTZ NOT NULL,
-			last_activity_at TIMESTAMPTZ NOT NULL
-		)
-		`,
-		`CREATE INDEX IF NOT EXISTS idx_proposals_workspace_document_created ON proposals (workspace_id, document_id, created_at DESC)`,
-		`
-		CREATE TABLE IF NOT EXISTS activities (
+			CREATE TABLE IF NOT EXISTS activities (
 			id BIGSERIAL PRIMARY KEY,
 			workspace_id TEXT NOT NULL,
 			type TEXT NOT NULL,
@@ -283,13 +270,13 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			provenance_requested_by TEXT NOT NULL,
 			provenance_source TEXT NOT NULL,
 			provenance_intended_scope TEXT NOT NULL,
-			provenance_read_set_summary TEXT NOT NULL,
-			proposal_id TEXT NOT NULL,
-			comment_id TEXT NOT NULL DEFAULT '',
-			presence_ref TEXT NOT NULL
-		)
-		`,
+				provenance_read_set_summary TEXT NOT NULL,
+				comment_id TEXT NOT NULL DEFAULT '',
+				presence_ref TEXT NOT NULL
+			)
+			`,
 		`CREATE INDEX IF NOT EXISTS idx_activities_workspace_occurred ON activities (workspace_id, occurred_at DESC, id DESC)`,
+		`ALTER TABLE activities DROP COLUMN IF EXISTS proposal_id`,
 		`ALTER TABLE activities ALTER COLUMN comment_id SET DEFAULT ''`,
 		`ALTER TABLE activities DROP COLUMN IF EXISTS new_content`,
 		`
@@ -353,7 +340,6 @@ func (s *Store) loadNormalizedPostgresLocked() error {
 	s.state.Agents = map[string]*Agent{}
 	s.state.AgentRuns = map[string]*AgentRun{}
 	s.state.Presences = map[string]*Presence{}
-	s.state.Proposals = map[string]*Proposal{}
 	s.state.Activities = []*ActivityEvent{}
 	s.state.Threads = map[string]*Thread{}
 	s.state.AgentEvents = map[string]*AgentEvent{}
@@ -376,9 +362,6 @@ func (s *Store) loadNormalizedPostgresLocked() error {
 		return err
 	}
 	if err := s.loadPresencesPostgresLocked(); err != nil {
-		return err
-	}
-	if err := s.loadProposalsPostgresLocked(); err != nil {
 		return err
 	}
 	if err := s.loadActivitiesPostgresLocked(); err != nil {
@@ -420,9 +403,6 @@ func (s *Store) persistPostgresLocked() error {
 		return err
 	}
 	if err = s.replacePresencesPostgresLocked(tx); err != nil {
-		return err
-	}
-	if err = s.replaceProposalsPostgresLocked(tx); err != nil {
 		return err
 	}
 	if err = s.replaceActivitiesPostgresLocked(tx); err != nil {
@@ -892,33 +872,6 @@ func upsertPresencePostgres(db *sql.DB, workspaceID string, presence *Presence) 
 	return tx.Commit()
 }
 
-func (s *Store) replaceProposalsPostgresLocked(tx *sql.Tx) error {
-	if _, err := tx.Exec(`DELETE FROM proposals WHERE workspace_id = $1`, s.state.WorkspaceID); err != nil {
-		return err
-	}
-	for _, proposal := range s.state.Proposals {
-		if _, err := tx.Exec(
-			`INSERT INTO proposals (
-				workspace_id, id, document_id, title, author, proposed_text, status, created_at, last_activity_at
-			) VALUES (
-				$1, $2, $3, $4, $5, $6, $7, $8, $9
-			)`,
-			s.state.WorkspaceID,
-			proposal.ID,
-			proposal.DocumentID,
-			proposal.Title,
-			proposal.Author,
-			proposal.ProposedText,
-			proposal.Status,
-			proposal.CreatedAt,
-			proposal.LastActivityAt,
-		); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (s *Store) replaceActivitiesPostgresLocked(tx *sql.Tx) error {
 	if _, err := tx.Exec(`DELETE FROM activities WHERE workspace_id = $1`, s.state.WorkspaceID); err != nil {
 		return err
@@ -928,16 +881,16 @@ func (s *Store) replaceActivitiesPostgresLocked(tx *sql.Tx) error {
 			`INSERT INTO activities (
 				workspace_id, type, document_id, actor_id, actor_type, summary, occurred_at,
 				provenance_actor_id, provenance_actor_type, provenance_execution_id, provenance_tool,
-				provenance_trigger, provenance_autonomous, provenance_confidence, provenance_requested_by,
-				provenance_source, provenance_intended_scope, provenance_read_set_summary,
-				proposal_id, comment_id, presence_ref
-			) VALUES (
-				$1, $2, $3, $4, $5, $6, $7,
-				$8, $9, $10, $11,
-				$12, $13, $14, $15,
-				$16, $17, $18,
-				$19, $20, $21
-			)`,
+					provenance_trigger, provenance_autonomous, provenance_confidence, provenance_requested_by,
+					provenance_source, provenance_intended_scope, provenance_read_set_summary,
+					comment_id, presence_ref
+				) VALUES (
+					$1, $2, $3, $4, $5, $6, $7,
+					$8, $9, $10, $11,
+					$12, $13, $14, $15,
+					$16, $17, $18,
+					$19, $20
+				)`,
 			s.state.WorkspaceID,
 			activity.Type,
 			activity.DocumentID,
@@ -956,7 +909,6 @@ func (s *Store) replaceActivitiesPostgresLocked(tx *sql.Tx) error {
 			activity.Provenance.Source,
 			activity.Provenance.IntendedScope,
 			activity.Provenance.ReadSetSummary,
-			activity.ProposalID,
 			"",
 			activity.PresenceRef,
 		); err != nil {
@@ -1757,37 +1709,6 @@ func (s *Store) loadPresencesPostgresLocked() error {
 	return rows.Err()
 }
 
-func (s *Store) loadProposalsPostgresLocked() error {
-	rows, err := s.db.Query(
-		`SELECT id, document_id, title, author, proposed_text, status, created_at, last_activity_at
-		   FROM proposals
-		  WHERE workspace_id = $1`,
-		s.state.WorkspaceID,
-	)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		proposal := &Proposal{}
-		if err := rows.Scan(
-			&proposal.ID,
-			&proposal.DocumentID,
-			&proposal.Title,
-			&proposal.Author,
-			&proposal.ProposedText,
-			&proposal.Status,
-			&proposal.CreatedAt,
-			&proposal.LastActivityAt,
-		); err != nil {
-			return err
-		}
-		s.state.Proposals[proposal.ID] = proposal
-	}
-	return rows.Err()
-}
-
 func (s *Store) loadActivitiesPostgresLocked() error {
 	rows, err := s.db.Query(
 		`SELECT type, document_id, actor_id, actor_type, summary, occurred_at,
@@ -1795,7 +1716,7 @@ func (s *Store) loadActivitiesPostgresLocked() error {
 		        provenance_tool, provenance_trigger, provenance_autonomous,
 		        provenance_confidence, provenance_requested_by, provenance_source,
 		        provenance_intended_scope, provenance_read_set_summary,
-		        proposal_id, presence_ref
+		        presence_ref
 		   FROM activities
 		  WHERE workspace_id = $1
 		  ORDER BY occurred_at DESC, id DESC
@@ -1827,7 +1748,6 @@ func (s *Store) loadActivitiesPostgresLocked() error {
 			&activity.Provenance.Source,
 			&activity.Provenance.IntendedScope,
 			&activity.Provenance.ReadSetSummary,
-			&activity.ProposalID,
 			&activity.PresenceRef,
 		); err != nil {
 			return err

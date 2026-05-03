@@ -22,13 +22,18 @@ import (
 )
 
 var ErrNotFound = errors.New("not found")
+var ErrDocumentDiffTooLarge = errors.New("document diff too large")
 
 var mentionPattern = regexp.MustCompile(`(^|[^A-Za-z0-9_])@([a-z0-9][a-z0-9_-]{0,31})`)
 
 const (
-	agentRunLogPreviewLines = 5
-	agentRunLogLineLimit    = 240
-	agentRunErrorLimit      = 1000
+	agentRunLogPreviewLines  = 5
+	agentRunLogLineLimit     = 240
+	agentRunErrorLimit       = 1000
+	maxDiffInputBytesPerSide = 2 * 1024 * 1024
+	maxDiffLinesPerSide      = 20000
+	maxDiffLineProduct       = 2000000
+	maxDiffResponseBytes     = 1024 * 1024
 )
 
 type Store struct {
@@ -113,7 +118,6 @@ func (s *Store) load() error {
 		if s.refreshAgentSystemPromptsLocked() {
 			needsPersist = true
 		}
-		s.refreshAllThreadAnchorsLocked()
 		s.refreshThreadParticipantsLocked()
 		if s.reconcileThreadMentionEventsLocked() {
 			needsPersist = true
@@ -149,7 +153,6 @@ func (s *Store) load() error {
 	if s.refreshAgentSystemPromptsLocked() {
 		needsPersist = true
 	}
-	s.refreshAllThreadAnchorsLocked()
 	s.refreshThreadParticipantsLocked()
 	if s.reconcileThreadMentionEventsLocked() {
 		needsPersist = true
@@ -187,9 +190,6 @@ func (s *Store) ensureMaps() {
 	}
 	if s.state.Presences == nil {
 		s.state.Presences = map[string]*Presence{}
-	}
-	if s.state.Proposals == nil {
-		s.state.Proposals = map[string]*Proposal{}
 	}
 	if s.state.Activities == nil {
 		s.state.Activities = []*ActivityEvent{}
@@ -258,7 +258,6 @@ func seedWorkspace() WorkspaceState {
 		AgentDocumentViews:  map[string]*AgentDocumentView{},
 		DocumentCheckpoints: map[string]*DocumentCheckpoint{},
 		Presences:           map[string]*Presence{},
-		Proposals:           map[string]*Proposal{},
 		Activities:          []*ActivityEvent{},
 		UpdatedAt:           now,
 	}
@@ -481,6 +480,14 @@ func (s *Store) encodeDocumentCheckpointSyncUpdates(documentID string, stateVect
 		return nil, nil, false, err
 	}
 	if ok {
+		if len(stateVector) > 0 {
+			doc, err := s.restoreDocumentDocPostgresLocked(document)
+			if err != nil {
+				return nil, nil, false, err
+			}
+			metadata = documentMetadata(document)
+			metadata.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
+		}
 		return metadata, updates, true, nil
 	}
 
@@ -758,6 +765,10 @@ func (s *Store) DiffDocument(agentID, documentID, fromSpec, toSpec string) (*Doc
 		s.mu.RUnlock()
 		return nil, fmt.Errorf("from version %d is newer than to version %d", fromUpdateID, toUpdateID)
 	}
+	if fromUpdateID == toUpdateID {
+		s.mu.RUnlock()
+		return emptyDocumentDiff(document.ID, fromUpdateID, toUpdateID), nil
+	}
 	if s.db == nil {
 		defer s.mu.RUnlock()
 		fromContent, err := s.documentContentAtUpdateLocked(document, fromUpdateID)
@@ -768,16 +779,7 @@ func (s *Store) DiffDocument(agentID, documentID, fromSpec, toSpec string) (*Doc
 		if err != nil {
 			return nil, err
 		}
-		hunks := diffTextByLine(fromContent, toContent)
-		return &DocumentDiff{
-			DocumentID:   document.ID,
-			FromUpdateID: fromUpdateID,
-			ToUpdateID:   toUpdateID,
-			FromContent:  fromContent,
-			ToContent:    toContent,
-			Unified:      renderUnifiedDiff(hunks),
-			Hunks:        hunks,
-		}, nil
+		return buildDocumentDiff(document.ID, fromUpdateID, toUpdateID, fromContent, toContent)
 	}
 	documentSnapshot := cloneDocument(document)
 	workspaceID := s.state.WorkspaceID
@@ -792,16 +794,7 @@ func (s *Store) DiffDocument(agentID, documentID, fromSpec, toSpec string) (*Doc
 	if err != nil {
 		return nil, err
 	}
-	hunks := diffTextByLine(fromContent, toContent)
-	return &DocumentDiff{
-		DocumentID:   document.ID,
-		FromUpdateID: fromUpdateID,
-		ToUpdateID:   toUpdateID,
-		FromContent:  fromContent,
-		ToContent:    toContent,
-		Unified:      renderUnifiedDiff(hunks),
-		Hunks:        hunks,
-	}, nil
+	return buildDocumentDiff(document.ID, fromUpdateID, toUpdateID, fromContent, toContent)
 }
 
 type syntheticDocumentInboxSpec struct {
@@ -1080,6 +1073,82 @@ func diffTextByLine(before, after string) []DocumentDiffHunk {
 	return hunks
 }
 
+func emptyDocumentDiff(documentID string, fromUpdateID int64, toUpdateID int64) *DocumentDiff {
+	return &DocumentDiff{
+		DocumentID:   documentID,
+		FromUpdateID: fromUpdateID,
+		ToUpdateID:   toUpdateID,
+		Hunks:        []DocumentDiffHunk{},
+	}
+}
+
+func buildDocumentDiff(documentID string, fromUpdateID int64, toUpdateID int64, fromContent string, toContent string) (*DocumentDiff, error) {
+	if fromContent == toContent {
+		return emptyDocumentDiff(documentID, fromUpdateID, toUpdateID), nil
+	}
+	if err := validateDocumentDiffSize(fromContent, toContent); err != nil {
+		return nil, err
+	}
+	if len(fromContent)+len(toContent) > maxDiffResponseBytes {
+		return nil, fmt.Errorf("%w: response content is at least %d bytes, limit is %d bytes", ErrDocumentDiffTooLarge, len(fromContent)+len(toContent), maxDiffResponseBytes)
+	}
+	hunks := diffTextByLine(fromContent, toContent)
+	unified := renderUnifiedDiff(hunks)
+	if responseBytes := len(fromContent) + len(toContent) + len(unified) + documentDiffHunkTextBytes(hunks); responseBytes > maxDiffResponseBytes {
+		return nil, fmt.Errorf("%w: response is %d bytes, limit is %d bytes", ErrDocumentDiffTooLarge, responseBytes, maxDiffResponseBytes)
+	}
+	return &DocumentDiff{
+		DocumentID:   documentID,
+		FromUpdateID: fromUpdateID,
+		ToUpdateID:   toUpdateID,
+		FromContent:  fromContent,
+		ToContent:    toContent,
+		Unified:      unified,
+		Hunks:        hunks,
+	}, nil
+}
+
+func validateDocumentDiffSize(before, after string) error {
+	if len(before) > maxDiffInputBytesPerSide {
+		return fmt.Errorf("%w: from content is %d bytes, limit is %d bytes", ErrDocumentDiffTooLarge, len(before), maxDiffInputBytesPerSide)
+	}
+	if len(after) > maxDiffInputBytesPerSide {
+		return fmt.Errorf("%w: to content is %d bytes, limit is %d bytes", ErrDocumentDiffTooLarge, len(after), maxDiffInputBytesPerSide)
+	}
+	beforeLines := countDiffLines(before)
+	afterLines := countDiffLines(after)
+	if beforeLines > maxDiffLinesPerSide {
+		return fmt.Errorf("%w: from content has %d lines, limit is %d lines", ErrDocumentDiffTooLarge, beforeLines, maxDiffLinesPerSide)
+	}
+	if afterLines > maxDiffLinesPerSide {
+		return fmt.Errorf("%w: to content has %d lines, limit is %d lines", ErrDocumentDiffTooLarge, afterLines, maxDiffLinesPerSide)
+	}
+	lineProduct := beforeLines * afterLines
+	if lineProduct > maxDiffLineProduct {
+		return fmt.Errorf("%w: line product is %d, limit is %d", ErrDocumentDiffTooLarge, lineProduct, maxDiffLineProduct)
+	}
+	return nil
+}
+
+func documentDiffHunkTextBytes(hunks []DocumentDiffHunk) int {
+	total := 0
+	for _, hunk := range hunks {
+		total += len(hunk.Text)
+	}
+	return total
+}
+
+func countDiffLines(value string) int {
+	if value == "" {
+		return 0
+	}
+	lines := strings.Count(value, "\n")
+	if !strings.HasSuffix(value, "\n") {
+		lines++
+	}
+	return lines
+}
+
 func splitLinesKeepEnd(value string) []string {
 	if value == "" {
 		return nil
@@ -1214,11 +1283,6 @@ func (s *Store) DeleteDocument(id string, meta OperationMeta) (*Document, error)
 	defer documentLock.Unlock()
 	s.markDocumentDeletedLocked(id)
 	delete(s.state.Documents, id)
-	for proposalID, proposal := range s.state.Proposals {
-		if proposal.DocumentID == id {
-			delete(s.state.Proposals, proposalID)
-		}
-	}
 	for threadID, thread := range s.state.Threads {
 		if thread.DocumentID == id {
 			delete(s.state.Threads, threadID)
@@ -1793,9 +1857,6 @@ func (s *Store) ApplyCRDTUpdateWithResult(documentID string, update []byte, meta
 	s.markDocumentDirtyLocked(document.ID)
 	s.appendIncrementalDocumentUpdateLocked(document.ID, update, meta, now)
 	document.UpdatedAt = now
-	if s.documentHasThreadsLocked(document.ID) {
-		s.refreshThreadAnchorsForDocumentLocked(document.ID)
-	}
 	s.state.UpdatedAt = document.UpdatedAt
 
 	if err := s.persistDocumentMutationLocked(); err != nil {
@@ -1854,7 +1915,6 @@ func (s *Store) ReplaceDocumentText(documentID string, nextText string, meta Ope
 	s.appendIncrementalDocumentUpdateLocked(document.ID, update, meta, time.Now().UTC())
 	notify := !isLogDocumentPath(document.Path)
 	document.UpdatedAt = time.Now().UTC()
-	s.refreshThreadAnchorsForDocumentLocked(document.ID)
 	if notify {
 		s.enqueueDocumentThreadEventsLocked(document, meta)
 	}
@@ -1892,23 +1952,16 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 		return nil, nil, err
 	}
 	now := time.Now().UTC()
-	anchorDocument := document
-	if s.db != nil && document.Doc == nil {
-		doc, err := s.restoreDocumentDocPostgresLocked(document)
-		if err != nil {
-			return nil, nil, err
-		}
-		projected := *document
-		projected.Doc = doc
-		projected.Content = doc.GetText("content").ToString()
-		anchorDocument = &projected
+	anchor, err := buildThreadAnchorFromRequest(document, req)
+	if err != nil {
+		return nil, nil, err
 	}
 	thread := &Thread{
 		ID:              "thread_" + uuid.NewString(),
 		DocumentID:      document.ID,
-		Title:           firstNonEmptyString(strings.TrimSpace(req.Title), inferThreadTitle(anchorDocument, req.Start, req.End)),
+		Title:           firstNonEmptyString(strings.TrimSpace(req.Title), inferThreadTitleFromRequest(document, req)),
 		Status:          "open",
-		Anchor:          buildThreadAnchor(anchorDocument, req.Start, req.End),
+		Anchor:          anchor,
 		CreatedByID:     author.ID,
 		CreatedByType:   author.Type,
 		CreatedByHandle: author.Handle,
@@ -2182,119 +2235,8 @@ func (s *Store) UpsertPresence(req UpsertPresenceRequest) (*Presence, error) {
 	return &clone, nil
 }
 
-func (s *Store) CreateProposal(req CreateProposalRequest) (*Proposal, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, ok := s.state.Documents[req.DocumentID]; !ok {
-		return nil, ErrNotFound
-	}
-	now := time.Now().UTC()
-	proposal := &Proposal{
-		ID:             uuid.NewString(),
-		DocumentID:     req.DocumentID,
-		Title:          req.Title,
-		Author:         req.Author,
-		ProposedText:   req.ProposedText,
-		Status:         "open",
-		CreatedAt:      now,
-		LastActivityAt: now,
-	}
-	s.state.Proposals[proposal.ID] = proposal
-	s.appendActivityLocked(&ActivityEvent{
-		Type:       "proposal.created",
-		DocumentID: req.DocumentID,
-		ActorID:    req.Author,
-		ActorType:  "agent",
-		Summary:    fmt.Sprintf("%s created proposal %s", req.Author, proposal.Title),
-		OccurredAt: now,
-		Provenance: OperationMeta{ActorID: req.Author, ActorType: "agent", Source: "proposal"},
-		ProposalID: proposal.ID,
-	})
-	s.state.UpdatedAt = now
-	if err := s.persistLocked(); err != nil {
-		return nil, err
-	}
-	clone := *proposal
-	return &clone, nil
-}
-
-func (s *Store) MergeProposal(id, actor string) (*Document, []byte, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	proposal, ok := s.state.Proposals[id]
-	if !ok {
-		return nil, nil, ErrNotFound
-	}
-	document, ok := s.state.Documents[proposal.DocumentID]
-	if !ok {
-		return nil, nil, ErrNotFound
-	}
-	documentLock := s.documentLockLocked(document.ID)
-	documentLock.Lock()
-	defer documentLock.Unlock()
-	if s.db != nil && document.Doc == nil {
-		doc, err := s.restoreDocumentDocPostgresLocked(document)
-		if err != nil {
-			return nil, nil, err
-		}
-		document.Doc = doc
-		document.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
-	}
-
-	meta := OperationMeta{ActorID: actor, ActorType: "human", Source: "proposal-merge"}
-	currentText := document.Doc.GetText("content").ToString()
-	text := document.Doc.GetText("content")
-	var update []byte
-	unsubscribe := document.Doc.OnUpdate(func(nextUpdate []byte, origin any) {
-		if origin == meta {
-			update = append([]byte(nil), nextUpdate...)
-		}
-	})
-	document.Doc.Transact(func(txn *crdt.Transaction) {
-		if len(currentText) > 0 {
-			text.Delete(txn, 0, len(currentText))
-		}
-		if proposal.ProposedText != "" {
-			text.Insert(txn, 0, proposal.ProposedText, nil)
-		}
-	}, meta)
-	unsubscribe()
-
-	now := time.Now().UTC()
-	if s.db != nil {
-		document.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(document.Doc))
-	} else {
-		document.SyncDerivedFields()
-	}
-	document.UpdatedAt = now
-	s.markDocumentDirtyLocked(document.ID)
-	s.appendIncrementalDocumentUpdateLocked(document.ID, update, meta, now)
-	s.refreshThreadAnchorsForDocumentLocked(document.ID)
-	proposal.Status = "merged"
-	proposal.LastActivityAt = now
-	s.state.UpdatedAt = now
-
-	s.appendActivityLocked(&ActivityEvent{
-		Type:       "proposal.merged",
-		DocumentID: document.ID,
-		ActorID:    actor,
-		ActorType:  "human",
-		Summary:    fmt.Sprintf("%s merged proposal %s", actor, proposal.Title),
-		OccurredAt: now,
-		Provenance: meta,
-		ProposalID: proposal.ID,
-	})
-	if err := s.persistLocked(); err != nil {
-		return nil, nil, err
-	}
-	return cloneDocumentWithCRDTState(document), update, nil
-}
-
 func (s *Store) persistLocked() error {
 	s.ensureMaps()
-	s.refreshAllThreadAnchorsLocked()
 	if s.db != nil {
 		return s.persistPostgresLocked()
 	}
@@ -2388,11 +2330,6 @@ func cloneState(state WorkspaceState) WorkspaceState {
 		clone := *presence
 		clone.Selection = append([]int(nil), presence.Selection...)
 		copyState.Presences[key] = &clone
-	}
-	copyState.Proposals = map[string]*Proposal{}
-	for key, proposal := range state.Proposals {
-		clone := *proposal
-		copyState.Proposals[key] = &clone
 	}
 	copyState.Activities = make([]*ActivityEvent, len(state.Activities))
 	for index, activity := range state.Activities {
@@ -2654,6 +2591,7 @@ Your inbox has two classes: for-me items are specific to you and should be revie
 Document update inbox items are deduplicated; use the diff-document tool to compare your last viewed CRDT update version with the current head, and mark documents viewed after review.
 Use notty-agent-tool list-inbox --box for-me and notty-agent-tool list-inbox --box general to inspect notification center items. Use get-inbox-item, complete-inbox-item, dismiss-inbox-item, diff-document, and mark-document-viewed when needed.
 Use notty-agent-tool list-documents, get-document-by-path, get-thread, and list-threads-for-document to gather context before acting.
+Create document threads with simple anchors: notty-agent-tool create-thread --path <file> --line <line> --body "..." or add --quote "exact text" for a precise anchor. Use --document for document-level threads.
 You do not need to reply by default. If there is nothing worth replying to, and you have no disagreement, question, or constructive feedback, you may stay silent and only make useful workspace changes.
 If you decide to communicate, you must use the provided thread tools instead of writing conversational replies into documents.
 If you have comments about a specific part of a document, reply in the existing thread anchored there or create a new thread anchored to that document range.
@@ -2973,30 +2911,42 @@ func (s *Store) mergeThreadParticipantsLocked(thread *Thread, participantIDs ...
 	sort.Strings(thread.ParticipantIDs)
 }
 
-func buildThreadAnchor(document *Document, start, end int) ThreadAnchor {
+func buildThreadAnchorFromRequest(document *Document, req CreateThreadRequest) (ThreadAnchor, error) {
+	relativeStart := strings.TrimSpace(req.RelativeStart)
+	relativeEnd := strings.TrimSpace(req.RelativeEnd)
+	if (relativeStart == "") != (relativeEnd == "") {
+		return ThreadAnchor{}, errors.New("relativeStart and relativeEnd must be provided together")
+	}
+	start := maxInt(0, req.Start)
+	end := maxInt(start, req.End)
+	line := maxInt(1, req.Line)
+	excerpt := truncateText(strings.TrimSpace(req.Excerpt), 140)
+	if relativeStart == "" && relativeEnd == "" {
+		if start == 0 && end == 0 && req.Line == 0 && excerpt == "" {
+			return ThreadAnchor{
+				DocumentID: document.ID,
+				Kind:       "document",
+				Line:       1,
+			}, nil
+		}
+		return ThreadAnchor{}, errors.New("text-range threads require relativeStart and relativeEnd")
+	}
 	anchor := ThreadAnchor{
-		Kind: "text-range",
+		DocumentID: document.ID,
+		Kind:       "text-range",
+		Start:      start,
+		End:        end,
+		Line:       line,
+		Excerpt:    excerpt,
 	}
-	if document == nil {
-		return anchor
-	}
-	anchor.DocumentID = document.ID
-	if document.Doc != nil {
-		text := document.Doc.GetText("content")
-		textLen := text.Len()
-		safeStart := clampInt(start, 0, textLen)
-		safeEnd := clampInt(end, safeStart, textLen)
-		anchor.RelativeStart = encodeRelativePosition(text, safeStart)
-		anchor.RelativeEnd = encodeRelativePosition(text, safeEnd)
-	}
-	resolveThreadAnchor(document, &anchor)
-	return anchor
+	anchor.RelativeStart = relativeStart
+	anchor.RelativeEnd = relativeEnd
+	return anchor, nil
 }
 
-func inferThreadTitle(document *Document, start, end int) string {
-	anchor := buildThreadAnchor(document, start, end)
-	if anchor.Excerpt != "" {
-		return truncateText(anchor.Excerpt, 72)
+func inferThreadTitleFromRequest(document *Document, req CreateThreadRequest) string {
+	if excerpt := strings.TrimSpace(req.Excerpt); excerpt != "" {
+		return truncateText(excerpt, 72)
 	}
 	if document != nil {
 		return fmt.Sprintf("Discussion on %s", document.Title)
@@ -3004,178 +2954,11 @@ func inferThreadTitle(document *Document, start, end int) string {
 	return "Discussion"
 }
 
-func (s *Store) refreshThreadAnchorsForDocumentLocked(documentID string) {
-	if documentID == "" {
-		return
+func maxInt(left, right int) int {
+	if left > right {
+		return left
 	}
-	document := s.state.Documents[documentID]
-	if document == nil {
-		return
-	}
-	anchorDocument := document
-	if anchorDocument.Content == "" && anchorDocument.Doc != nil {
-		projected := *anchorDocument
-		projected.Content = anchorDocument.Doc.GetText("content").ToString()
-		anchorDocument = &projected
-	}
-	if anchorDocument.Content == "" && anchorDocument.Doc == nil {
-		return
-	}
-	for _, thread := range s.state.Threads {
-		if thread.DocumentID != documentID {
-			continue
-		}
-		resolveThreadAnchor(anchorDocument, &thread.Anchor)
-	}
-}
-
-func (s *Store) refreshAllThreadAnchorsLocked() {
-	for documentID := range s.state.Documents {
-		s.refreshThreadAnchorsForDocumentLocked(documentID)
-	}
-}
-
-func encodeRelativePosition(text *crdt.YText, index int) string {
-	if text == nil {
-		return ""
-	}
-	assoc := 0
-	if index >= text.Len() {
-		assoc = -1
-	}
-	return base64.StdEncoding.EncodeToString(crdt.EncodeRelativePosition(crdt.CreateRelativePositionFromIndex(text, index, assoc)))
-}
-
-func decodeRelativePosition(encoded string) (crdt.RelativePosition, bool) {
-	if strings.TrimSpace(encoded) == "" {
-		return crdt.RelativePosition{}, false
-	}
-	bytes, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return crdt.RelativePosition{}, false
-	}
-	position, err := crdt.DecodeRelativePosition(bytes)
-	if err != nil {
-		return crdt.RelativePosition{}, false
-	}
-	return position, true
-}
-
-func resolveThreadAnchor(document *Document, anchor *ThreadAnchor) {
-	if document == nil || anchor == nil {
-		return
-	}
-	if anchor.DocumentID == "" {
-		anchor.DocumentID = document.ID
-	}
-	if anchor.Kind == "" {
-		anchor.Kind = "text-range"
-	}
-	content := document.Content
-	textLen := utf16Length(content)
-	start := clampInt(anchor.Start, 0, textLen)
-	end := clampInt(anchor.End, start, textLen)
-	if document.Doc != nil {
-		text := document.Doc.GetText("content")
-		if anchor.RelativeStart == "" {
-			anchor.RelativeStart = encodeRelativePosition(text, clampInt(start, 0, text.Len()))
-		}
-		if anchor.RelativeEnd == "" {
-			anchor.RelativeEnd = encodeRelativePosition(text, clampInt(end, 0, text.Len()))
-		}
-		if startPos, ok := decodeRelativePosition(anchor.RelativeStart); ok {
-			if absolute, resolved := crdt.ToAbsolutePosition(document.Doc, startPos); resolved {
-				start = clampInt(absolute.Index, 0, textLen)
-			}
-		}
-		if endPos, ok := decodeRelativePosition(anchor.RelativeEnd); ok {
-			if absolute, resolved := crdt.ToAbsolutePosition(document.Doc, endPos); resolved {
-				end = clampInt(absolute.Index, start, textLen)
-			}
-		}
-	}
-	anchor.Start = start
-	anchor.End = end
-	anchor.Line = lineNumberForOffset(content, start)
-	anchor.Excerpt = excerptForRange(content, start, end)
-}
-
-func lineNumberForOffset(content string, offset int) int {
-	if offset <= 0 {
-		return 1
-	}
-	line := 1
-	consumed := 0
-	for _, r := range content {
-		if consumed >= offset {
-			break
-		}
-		if r == '\n' {
-			line++
-		}
-		consumed += utf16RuneWidth(r)
-	}
-	return line
-}
-
-func clampInt(value, min, max int) int {
-	if value < min {
-		return min
-	}
-	if value > max {
-		return max
-	}
-	return value
-}
-
-func utf16Length(content string) int {
-	length := 0
-	for _, r := range content {
-		length += utf16RuneWidth(r)
-	}
-	return length
-}
-
-func utf16RuneWidth(r rune) int {
-	if r > 0xFFFF {
-		return 2
-	}
-	return 1
-}
-
-func utf16OffsetToByteIndex(content string, offset int) int {
-	if offset <= 0 {
-		return 0
-	}
-	consumed := 0
-	for index, r := range content {
-		next := consumed + utf16RuneWidth(r)
-		if next >= offset {
-			if next == offset {
-				return index + len(string(r))
-			}
-			return index
-		}
-		consumed = next
-	}
-	return len(content)
-}
-
-func byteIndexToUTF16Offset(content string, byteIndex int) int {
-	if byteIndex <= 0 {
-		return 0
-	}
-	if byteIndex >= len(content) {
-		return utf16Length(content)
-	}
-	offset := 0
-	for index, r := range content {
-		if index >= byteIndex {
-			break
-		}
-		offset += utf16RuneWidth(r)
-	}
-	return offset
+	return right
 }
 
 func removeString(items []string, target string) []string {
@@ -3397,18 +3180,6 @@ func (s *Store) ensureAgentEventLocked(agentID, agentHandle, eventType, dedupKey
 	}
 	s.state.AgentEvents[event.ID] = event
 	s.dirtyAgentEvents = true
-}
-
-func excerptForRange(content string, start, end int) string {
-	maxOffset := utf16Length(content)
-	safeStart := clampInt(start, 0, maxOffset)
-	safeEnd := clampInt(end, safeStart, maxOffset)
-	if safeEnd == safeStart {
-		safeEnd = clampInt(safeStart+80, safeStart, maxOffset)
-	}
-	startByte := utf16OffsetToByteIndex(content, safeStart)
-	endByte := utf16OffsetToByteIndex(content, safeEnd)
-	return truncateText(strings.TrimSpace(content[startByte:endByte]), 140)
 }
 
 func containsText(items []string, target string) bool {

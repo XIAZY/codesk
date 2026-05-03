@@ -258,10 +258,12 @@ func (s *Server) handleDocumentProtocolMessage(room *DocumentRoom, session *Docu
 			if len(data) == 0 {
 				return nil
 			}
+			log.Printf("document ws inbound update doc=%s actor=%s actor_type=%s sync_type=%s bytes=%d canonical_empty_yjs_update=%t", documentID, meta.ActorID, meta.ActorType, documentSyncTypeLabel(syncType), len(data), isCanonicalEmptyYjsUpdate(data))
 			result, err := s.store.ApplyCRDTUpdateWithResult(documentID, data, meta)
 			if err != nil {
 				return err
 			}
+			log.Printf("document ws apply result doc=%s actor=%s actor_type=%s sync_type=%s bytes=%d applied=%t update_id=%d", documentID, meta.ActorID, meta.ActorType, documentSyncTypeLabel(syncType), len(data), result.Applied, result.Document.UpdateID)
 			if !result.Applied {
 				return nil
 			}
@@ -290,4 +292,21 @@ func (s *Server) handleDocumentProtocolMessage(room *DocumentRoom, session *Docu
 		room.Broadcast(broadcast, session)
 	}
 	return nil
+}
+
+func documentSyncTypeLabel(syncType uint64) string {
+	switch syncType {
+	case yproto.SyncStep1:
+		return "sync_step_1"
+	case yproto.SyncStep2:
+		return "sync_step_2"
+	case yproto.SyncUpdate:
+		return "sync_update"
+	default:
+		return "unknown"
+	}
+}
+
+func isCanonicalEmptyYjsUpdate(update []byte) bool {
+	return len(update) == 2 && update[0] == 0 && update[1] == 0
 }

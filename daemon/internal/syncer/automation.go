@@ -66,11 +66,22 @@ type agentEvent struct {
 }
 
 type createThreadPayload struct {
-	DocumentID string `json:"documentId"`
-	Title      string `json:"title"`
-	Body       string `json:"body"`
-	Start      int    `json:"start"`
-	End        int    `json:"end"`
+	DocumentID    string `json:"documentId"`
+	Path          string `json:"path,omitempty"`
+	Title         string `json:"title"`
+	Body          string `json:"body"`
+	Document      bool   `json:"document,omitempty"`
+	Quote         string `json:"quote,omitempty"`
+	RelativeStart string `json:"relativeStart,omitempty"`
+	RelativeEnd   string `json:"relativeEnd,omitempty"`
+	Start         int    `json:"start"`
+	End           int    `json:"end"`
+	Line          int    `json:"line,omitempty"`
+	StartLine     int    `json:"startLine,omitempty"`
+	StartColumn   int    `json:"startColumn,omitempty"`
+	EndLine       int    `json:"endLine,omitempty"`
+	EndColumn     int    `json:"endColumn,omitempty"`
+	Excerpt       string `json:"excerpt,omitempty"`
 }
 
 type replyThreadPayload struct {

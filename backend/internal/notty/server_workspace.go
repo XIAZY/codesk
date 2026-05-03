@@ -19,7 +19,6 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		"threads":     SortedThreads(state),
 		"agentEvents": SortedAgentEvents(state),
 		"presences":   state.Presences,
-		"proposals":   state.Proposals,
 		"activities":  state.Activities,
 		"updatedAt":   state.UpdatedAt,
 	})
@@ -46,7 +45,6 @@ func (s *Server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 			"threads":     SortedThreads(snapshot),
 			"agentEvents": SortedAgentEvents(snapshot),
 			"presences":   snapshot.Presences,
-			"proposals":   snapshot.Proposals,
 			"activities":  snapshot.Activities,
 		},
 	}); err != nil {

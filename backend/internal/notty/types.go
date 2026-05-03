@@ -19,7 +19,6 @@ type WorkspaceState struct {
 	AgentDocumentViews  map[string]*AgentDocumentView  `json:"agentDocumentViews,omitempty"`
 	DocumentCheckpoints map[string]*DocumentCheckpoint `json:"documentCheckpoints,omitempty"`
 	Presences           map[string]*Presence           `json:"presences"`
-	Proposals           map[string]*Proposal           `json:"proposals"`
 	Activities          []*ActivityEvent               `json:"activities"`
 	UpdatedAt           time.Time                      `json:"updatedAt"`
 }
@@ -107,17 +106,6 @@ type Presence struct {
 	Selection  []int     `json:"selection"`
 	Activity   string    `json:"activity"`
 	UpdatedAt  time.Time `json:"updatedAt"`
-}
-
-type Proposal struct {
-	ID             string    `json:"id"`
-	DocumentID     string    `json:"documentId"`
-	Title          string    `json:"title"`
-	Author         string    `json:"author"`
-	ProposedText   string    `json:"proposedText"`
-	Status         string    `json:"status"`
-	CreatedAt      time.Time `json:"createdAt"`
-	LastActivityAt time.Time `json:"lastActivityAt"`
 }
 
 type Agent struct {
@@ -234,7 +222,6 @@ type ActivityEvent struct {
 	Summary     string        `json:"summary"`
 	OccurredAt  time.Time     `json:"occurredAt"`
 	Provenance  OperationMeta `json:"provenance"`
-	ProposalID  string        `json:"proposalId,omitempty"`
 	PresenceRef string        `json:"presenceRef,omitempty"`
 }
 
@@ -253,11 +240,15 @@ type OperationMeta struct {
 }
 
 type CreateThreadRequest struct {
-	DocumentID string `json:"documentId"`
-	Title      string `json:"title"`
-	Body       string `json:"body"`
-	Start      int    `json:"start"`
-	End        int    `json:"end"`
+	DocumentID    string `json:"documentId"`
+	Title         string `json:"title"`
+	Body          string `json:"body"`
+	RelativeStart string `json:"relativeStart"`
+	RelativeEnd   string `json:"relativeEnd"`
+	Start         int    `json:"start"`
+	End           int    `json:"end"`
+	Line          int    `json:"line"`
+	Excerpt       string `json:"excerpt"`
 }
 
 type ReplyThreadRequest struct {
@@ -283,13 +274,6 @@ type UpsertPresenceRequest struct {
 	Mode       string `json:"mode"`
 	Selection  []int  `json:"selection"`
 	Activity   string `json:"activity"`
-}
-
-type CreateProposalRequest struct {
-	DocumentID   string `json:"documentId"`
-	Author       string `json:"author"`
-	Title        string `json:"title"`
-	ProposedText string `json:"proposedText"`
 }
 
 type ClaimAgentEventRequest struct {

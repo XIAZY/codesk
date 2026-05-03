@@ -67,11 +67,13 @@ type trackedFile struct {
 	cacheEntry            *documentCacheEntry
 	Conn                  *websocket.Conn
 	writeSyncUpdate       func([]byte) error
+	writeSyncStep1        func([]byte) error
 	connMu                sync.Mutex
 	stateMu               sync.Mutex
 	projecting            int
 	localDirty            bool
 	syncFromScratch       bool
+	serverStateVector     []byte
 	hash                  projectedContentHash
 	projectedContentKnown bool
 }
@@ -679,6 +681,7 @@ func handleRemoteSyncMessage(reader *bytes.Reader, tracked *trackedFile, origin 
 	}
 	switch messageType {
 	case yproto.SyncStep1:
+		tracked.setServerStateVector(data)
 		if tracked.cache != nil {
 			// The backend is the source of truth. Cached daemon projections are
 			// only local bases for explicit dirty-file reconciliation; replying
@@ -720,13 +723,6 @@ type trackedReconcileState struct {
 	baseContent  string
 	baseState    []byte
 	baseKnown    bool
-}
-
-type localReconcileUpdate struct {
-	state           trackedReconcileState
-	observedContent string
-	observedState   []byte
-	update          []byte
 }
 
 var errProjectedBaseDoesNotMatchCRDTState = errors.New("projected base does not match cached CRDT state")
@@ -783,6 +779,21 @@ func reconcileTrackedDocument(cache *documentCache, documentID string, trackedFi
 	entry, unlock := cache.lockEntry(documentID)
 	defer unlock()
 
+	outbox, err := cache.loadOutboxUpdateLocked(entry, documentID)
+	if err != nil {
+		return err
+	}
+	if outbox != nil {
+		if !outboxConverged(outbox, trackedFiles) {
+			_ = sendOutboxUpdateProbe(trackedFiles, outbox)
+			if outboxConverged(outbox, trackedFiles) {
+				return finalizeConvergedOutbox(cache, entry, documentID, documentPath, trackedFiles, outbox)
+			}
+			return nil
+		}
+		return finalizeConvergedOutbox(cache, entry, documentID, documentPath, trackedFiles, outbox)
+	}
+
 	pendingRemoteCount, err := cache.pendingRemoteUpdateCountLocked(entry, documentID)
 	if err != nil {
 		if errors.Is(err, errPendingUpdateLogHashMismatch) {
@@ -818,7 +829,6 @@ func reconcileTrackedDocument(cache *documentCache, documentID string, trackedFi
 		return nil
 	}
 
-	localUpdates := make([]localReconcileUpdate, 0)
 	skippedLocalDirty := map[*trackedFile]bool{}
 	projectOnlyDirty := map[*trackedFile]struct{}{}
 	for _, state := range states {
@@ -849,22 +859,29 @@ func reconcileTrackedDocument(cache *documentCache, documentID string, trackedFi
 			projectOnlyDirty[state.tracked] = struct{}{}
 			continue
 		}
-		if err := state.tracked.sendSyncUpdate(update); err != nil {
-			state.tracked.markLocalDirty()
-			return nil
+		targetStateVector := crdtStateVectorFromState(observedState)
+		if len(targetStateVector) == 0 {
+			return errors.New("failed to derive local update target state vector")
 		}
-		if entry.seenUpdateHashes == nil {
-			entry.seenUpdateHashes = map[string]struct{}{}
+		record := outboxUpdateRecord{
+			Update:            update,
+			TargetStateVector: targetStateVector,
+			ObservedContent:   state.localContent,
+			ObservedState:     observedState,
+			SourcePath:        state.tracked.Path,
+			CreatedAt:         time.Now().UTC(),
 		}
-		entry.seenUpdateHashes[sha256Hex(update)] = struct{}{}
-		localUpdates = append(localUpdates, localReconcileUpdate{
-			state:           state,
-			observedContent: state.localContent,
-			observedState:   observedState,
-			update:          update,
-		})
+		if err := cache.storeOutboxUpdateLocked(entry, documentID, documentPath, record); err != nil {
+			return err
+		}
+		state.tracked.markLocalDirty()
+		_ = sendOutboxUpdateProbe(trackedFiles, &record)
+		if outboxConverged(&record, trackedFiles) {
+			return finalizeConvergedOutbox(cache, entry, documentID, documentPath, trackedFiles, &record)
+		}
+		return nil
 	}
-	if pendingRemoteCount == 0 && len(localUpdates) == 0 && len(skippedLocalDirty) == 0 && len(projectOnlyDirty) == 0 {
+	if pendingRemoteCount == 0 && len(skippedLocalDirty) == 0 && len(projectOnlyDirty) == 0 {
 		return nil
 	}
 
@@ -879,11 +896,6 @@ func reconcileTrackedDocument(cache *documentCache, documentID string, trackedFi
 				return fmt.Errorf("apply pending remote update for %s: %w; clear corrupt pending log: %v", documentID, err, clearErr)
 			}
 			return fmt.Errorf("cleared corrupt pending remote updates for %s: %w", documentID, err)
-		}
-	}
-	for _, local := range localUpdates {
-		if err := crdt.ApplyUpdateV1(baseDoc, local.update, "local-reconcile"); err != nil {
-			return err
 		}
 	}
 	metadata.DocumentID = documentID
@@ -901,31 +913,7 @@ func reconcileTrackedDocument(cache *documentCache, documentID string, trackedFi
 
 	finalContent := baseDoc.GetText("content").ToString()
 	finalState := baseDoc.EncodeStateAsUpdate()
-	successfulLocal := map[*trackedFile]string{}
-	for _, local := range localUpdates {
-		successfulLocal[local.state.tracked] = local.observedContent
-	}
 	for _, state := range states {
-		if currentLocal, ok := successfulLocal[state.tracked]; ok {
-			var currentState []byte
-			for _, local := range localUpdates {
-				if local.state.tracked == state.tracked {
-					currentState = local.observedState
-					break
-				}
-			}
-			clean, err := projectMergedContentOverLocalDisk(state.tracked, currentLocal, currentState, finalContent, finalState)
-			if err != nil {
-				return err
-			}
-			if clean {
-				state.tracked.clearLocalDirty()
-				state.tracked.setSyncFromScratch(false)
-			} else {
-				state.tracked.markLocalDirty()
-			}
-			continue
-		}
 		if _, ok := projectOnlyDirty[state.tracked]; ok {
 			clean, err := applyProjectedContent(state.tracked, finalContent, finalState)
 			if err != nil {
@@ -975,6 +963,141 @@ func hasTrackedLocalDirty(trackedFiles []*trackedFile) bool {
 		}
 	}
 	return false
+}
+
+func outboxConverged(record *outboxUpdateRecord, trackedFiles []*trackedFile) bool {
+	if record == nil {
+		return true
+	}
+	for _, tracked := range trackedFiles {
+		if tracked != nil && tracked.serverStateVectorCovers(record.TargetStateVector) {
+			return true
+		}
+	}
+	return false
+}
+
+func sendOutboxUpdateProbe(trackedFiles []*trackedFile, record *outboxUpdateRecord) error {
+	if record == nil || len(record.Update) == 0 {
+		return nil
+	}
+	candidates := make([]*trackedFile, 0, len(trackedFiles))
+	for _, tracked := range trackedFiles {
+		if tracked != nil && tracked.Path == record.SourcePath {
+			candidates = append(candidates, tracked)
+		}
+	}
+	for _, tracked := range trackedFiles {
+		if tracked != nil && tracked.Path != record.SourcePath {
+			candidates = append(candidates, tracked)
+		}
+	}
+	var lastErr error
+	for _, tracked := range candidates {
+		if err := tracked.sendSyncUpdate(record.Update); err != nil {
+			lastErr = err
+			continue
+		}
+		if err := tracked.sendSyncStep1(record.TargetStateVector); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return errors.New("no tracked document connection available")
+}
+
+func finalizeConvergedOutbox(cache *documentCache, entry *documentCacheEntry, documentID, documentPath string, trackedFiles []*trackedFile, record *outboxUpdateRecord) error {
+	pendingRemoteCount, err := cache.pendingRemoteUpdateCountLocked(entry, documentID)
+	if err != nil {
+		if errors.Is(err, errPendingUpdateLogHashMismatch) {
+			if clearErr := cache.clearPendingRemoteUpdatesLocked(entry, documentID); clearErr != nil {
+				return fmt.Errorf("clear corrupt pending remote updates for %s: %w", documentID, clearErr)
+			}
+			pendingRemoteCount = 0
+		} else {
+			return err
+		}
+	}
+	baseDoc, metadata, baseState, err := cache.loadBaseDocLocked(entry, documentID, documentPath)
+	if err != nil {
+		return err
+	}
+	baseContent := baseDoc.GetText("content").ToString()
+	states, err := collectTrackedReconcileStates(trackedFiles, baseContent, baseState)
+	if err != nil {
+		return err
+	}
+	if pendingRemoteCount > 0 {
+		if err := cache.forEachPendingRemoteUpdateLocked(entry, documentID, func(update []byte) error {
+			if len(update) == 0 {
+				return nil
+			}
+			return crdt.ApplyUpdateV1(baseDoc, update, "remote-reconcile")
+		}); err != nil {
+			if clearErr := cache.clearPendingRemoteUpdatesLocked(entry, documentID); clearErr != nil {
+				return fmt.Errorf("apply pending remote update for %s: %w; clear corrupt pending log: %v", documentID, err, clearErr)
+			}
+			return fmt.Errorf("cleared corrupt pending remote updates for %s: %w", documentID, err)
+		}
+	}
+	if err := crdt.ApplyUpdateV1(baseDoc, record.Update, "local-reconcile"); err != nil {
+		return err
+	}
+	metadata.DocumentID = documentID
+	if metadata.Path == "" {
+		metadata.Path = documentPath
+	}
+	metadata.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(baseDoc))
+	metadata.UpdatedAt = time.Now().UTC()
+	if err := cache.storeDocLocked(entry, metadata, baseDoc); err != nil {
+		return err
+	}
+	if err := cache.clearPendingRemoteUpdatesLocked(entry, documentID); err != nil {
+		return err
+	}
+	if err := cache.clearOutboxUpdateLocked(entry, documentID); err != nil {
+		return err
+	}
+
+	finalContent := baseDoc.GetText("content").ToString()
+	finalState := baseDoc.EncodeStateAsUpdate()
+	for _, state := range states {
+		if state.tracked == nil {
+			continue
+		}
+		if state.tracked.Path == record.SourcePath {
+			clean, err := projectMergedContentOverLocalDisk(state.tracked, record.ObservedContent, record.ObservedState, finalContent, finalState)
+			if err != nil {
+				return err
+			}
+			if clean {
+				state.tracked.clearLocalDirty()
+				state.tracked.setSyncFromScratch(false)
+			} else {
+				state.tracked.markLocalDirty()
+			}
+			continue
+		}
+		if state.localDirty {
+			state.tracked.markLocalDirty()
+			continue
+		}
+		clean, err := applyProjectedContent(state.tracked, finalContent, finalState)
+		if err != nil {
+			return err
+		}
+		if clean {
+			state.tracked.clearLocalDirty()
+			state.tracked.setSyncFromScratch(false)
+		} else {
+			state.tracked.markLocalDirty()
+		}
+	}
+	return nil
 }
 
 func collectTrackedReconcileStates(trackedFiles []*trackedFile, sharedBaseContent string, sharedBaseState []byte) ([]trackedReconcileState, error) {
@@ -1526,6 +1649,13 @@ func (t *trackedFile) sendSyncUpdate(update []byte) error {
 	return t.write(yproto.BuildSyncUpdate(update))
 }
 
+func (t *trackedFile) sendSyncStep1(stateVector []byte) error {
+	if t.writeSyncStep1 != nil {
+		return t.writeSyncStep1(stateVector)
+	}
+	return t.write(yproto.BuildSyncStep1FromStateVector(stateVector))
+}
+
 func (t *trackedFile) getConn() *websocket.Conn {
 	t.connMu.Lock()
 	defer t.connMu.Unlock()
@@ -1732,6 +1862,29 @@ func projectedHashBytes(content []byte) projectedContentHash {
 	return projectedContentHash{size: len(content), sum: maphash.Bytes(projectedHashSeed, content)}
 }
 
+func stateVectorCovers(current []byte, target []byte) bool {
+	if len(target) == 0 {
+		return true
+	}
+	if len(current) == 0 {
+		return false
+	}
+	currentVector, err := crdt.DecodeStateVectorV1(current)
+	if err != nil {
+		return false
+	}
+	targetVector, err := crdt.DecodeStateVectorV1(target)
+	if err != nil {
+		return false
+	}
+	for client, clock := range targetVector {
+		if currentVector.Clock(client) < clock {
+			return false
+		}
+	}
+	return true
+}
+
 func (t *trackedFile) beginProjection() {
 	t.stateMu.Lock()
 	defer t.stateMu.Unlock()
@@ -1780,6 +1933,18 @@ func (t *trackedFile) shouldSyncFromScratch() bool {
 	t.stateMu.Lock()
 	defer t.stateMu.Unlock()
 	return t.syncFromScratch
+}
+
+func (t *trackedFile) setServerStateVector(stateVector []byte) {
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
+	t.serverStateVector = append(t.serverStateVector[:0], stateVector...)
+}
+
+func (t *trackedFile) serverStateVectorCovers(target []byte) bool {
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
+	return stateVectorCovers(t.serverStateVector, target)
 }
 
 type replaceOp struct {
@@ -1848,6 +2013,16 @@ func crdtStateFromContent(content string) []byte {
 		}, "projection-state")
 	}
 	return doc.EncodeStateAsUpdate()
+}
+
+func crdtStateVectorFromState(state []byte) []byte {
+	doc := crdt.New()
+	if len(state) > 0 {
+		if err := crdt.ApplyUpdateV1(doc, state, "state-vector"); err != nil {
+			return nil
+		}
+	}
+	return crdt.EncodeStateVectorV1(doc)
 }
 
 func errorsIsNotExist(err error) bool {

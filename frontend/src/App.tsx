@@ -70,16 +70,6 @@ type UserItem = {
   updatedAt: string;
 };
 
-type Proposal = {
-  id: string;
-  documentId: string;
-  title: string;
-  author: string;
-  proposedText: string;
-  status: string;
-  createdAt: string;
-};
-
 type Agent = {
   id: string;
   handle: string;
@@ -132,7 +122,6 @@ type Workspace = {
   agentRuns: AgentRun[];
   presences: Record<string, PresenceItem>;
   threads: ThreadItem[];
-  proposals: Record<string, Proposal>;
 };
 
 type DocumentUpdateEvent = {
@@ -175,7 +164,6 @@ export function App() {
   const [message, setMessage] = useState("");
   const [newFilePath, setNewFilePath] = useState("notes/untitled.md");
   const [pathEditor, setPathEditor] = useState("");
-  const [proposalTitle, setProposalTitle] = useState("Escalated change");
   const [threadBody, setThreadBody] = useState("");
   const [threadReplyBody, setThreadReplyBody] = useState("");
   const [newUserName, setNewUserName] = useState("Workspace Collaborator");
@@ -852,42 +840,18 @@ export function App() {
     setSelectionRange(nextSelection);
   }
 
-  async function createProposal() {
-    if (!selectedDocument) {
-      return;
-    }
-    const response = await fetch(`${apiBase}/api/proposals`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        documentId: selectedDocument.id,
-        author: actorHandle,
-        title: proposalTitle,
-        proposedText: draft,
-      }),
-    });
-    if (response.ok) {
-      setMessage("Proposal created.");
-      await loadWorkspace();
-    }
-  }
-
-  async function mergeProposal(id: string) {
-    const response = await fetch(`${apiBase}/api/proposals/${id}/merge?actor=${encodeURIComponent(actorHandle)}`, {
-      method: "POST",
-    });
-    if (response.ok) {
-      setMessage("Proposal merged.");
-      await loadWorkspace();
-    }
-  }
-
   async function createThread() {
     if (!selectedDocument || !threadBody.trim()) {
       return;
     }
+    const ydoc = getOrCreateDoc(selectedDocument);
+    const text = ydoc.getText("content");
     const selectionStart = textareaRef.current?.selectionStart ?? 0;
     const selectionEnd = textareaRef.current?.selectionEnd ?? selectionStart;
+    const safeStart = Math.max(0, Math.min(selectionStart, text.length));
+    const safeEnd = Math.max(safeStart, Math.min(selectionEnd, text.length));
+    const previewEnd = safeEnd === safeStart ? Math.min(draft.length, safeStart + 80) : safeEnd;
+    const excerpt = (draft.slice(safeStart, previewEnd).trim() || currentSelectionLabel).slice(0, 140);
     const response = await fetch(`${apiBase}/api/threads?actor=${encodeURIComponent(actorHandle)}&actor_type=human`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -895,8 +859,12 @@ export function App() {
         documentId: selectedDocument.id,
         title: currentSelectionLabel,
         body: threadBody,
-        start: selectionStart,
-        end: selectionEnd,
+        relativeStart: encodeRelativeAnchor(text, safeStart),
+        relativeEnd: encodeRelativeAnchor(text, safeEnd),
+        start: safeStart,
+        end: safeEnd,
+        line: getLineForOffset(lineStarts, safeStart),
+        excerpt,
       }),
     });
     if (response.ok) {
@@ -989,9 +957,6 @@ export function App() {
     await loadWorkspace();
   }
 
-  const proposals = Object.values(workspace?.proposals ?? {}).filter(
-    (proposal) => proposal.documentId === selectedId
-  );
   const actorHandle = currentUser?.handle ?? "owner";
   const agentRuns = workspace?.agentRuns ?? [];
   const agents = workspace?.agents ?? [];
@@ -1352,10 +1317,6 @@ export function App() {
           <div className="miniStat">
             <strong>{workspace?.threads.length ?? 0}</strong>
             <span>open threads</span>
-          </div>
-          <div className="miniStat">
-            <strong>{Object.keys(workspace?.proposals ?? {}).length}</strong>
-            <span>change proposals</span>
           </div>
         </div>
       </aside>
@@ -1793,41 +1754,6 @@ export function App() {
             </footer>
           </div>
 
-          <div className="proposalDock">
-            <div className="proposalDockHeader">
-              <div>
-                <p className="eyebrow">Proposals</p>
-                <h3>Change requests for this page</h3>
-              </div>
-              <span>{proposals.length}</span>
-            </div>
-            <div className="proposalComposer">
-              <input
-                value={proposalTitle}
-                name="proposal-title"
-                aria-label="Proposal title"
-                onChange={(event) => setProposalTitle(event.target.value)}
-                className="proposalInputInline"
-                placeholder="Name this change"
-              />
-              <button onClick={createProposal}>Create proposal</button>
-            </div>
-            <div className="proposalListInline">
-              {proposals.map((proposal) => (
-                <div key={proposal.id} className="proposalPill">
-                  <div>
-                    <strong>{proposal.title}</strong>
-                    <span>{proposal.author} · {proposal.status}</span>
-                  </div>
-                  {proposal.status === "open" ? (
-                    <button className="secondary" onClick={() => mergeProposal(proposal.id)}>
-                      Merge
-                    </button>
-                  ) : null}
-                </div>
-              ))}
-            </div>
-          </div>
         </section>
       </main>
     </div>
@@ -1971,6 +1897,11 @@ function resolveThreadAnchorLive(anchor: ThreadAnchor, ydoc: Y.Doc | null, conte
   }
 }
 
+function encodeRelativeAnchor(text: Y.Text, index: number) {
+  const assoc = index >= text.length ? -1 : 0;
+  return uint8ArrayToBase64(Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(text, index, assoc)));
+}
+
 function base64ToUint8Array(value: string) {
   const binary = window.atob(value);
   const bytes = new Uint8Array(binary.length);
@@ -1978,6 +1909,14 @@ function base64ToUint8Array(value: string) {
     bytes[index] = binary.charCodeAt(index);
   }
   return bytes;
+}
+
+function uint8ArrayToBase64(bytes: Uint8Array) {
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return window.btoa(binary);
 }
 
 function formatSelection(start: number, end: number, lineStarts: number[]) {

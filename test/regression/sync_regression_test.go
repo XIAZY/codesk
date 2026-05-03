@@ -28,6 +28,15 @@ import (
 	"notty/internal/yproto"
 )
 
+type regressionThreadAnchor struct {
+	RelativeStart string `json:"relativeStart"`
+	RelativeEnd   string `json:"relativeEnd"`
+	Start         int    `json:"start"`
+	End           int    `json:"end"`
+	Line          int    `json:"line"`
+	Excerpt       string `json:"excerpt"`
+}
+
 func TestAppendOnlyFileSyncReconstructsBackend(t *testing.T) {
 	stack := newRegressionStack(t)
 	stack.up(t)
@@ -83,6 +92,92 @@ func TestDotPathsIgnoredWhileRootLogsSync(t *testing.T) {
 		t.Fatalf(".notty cache file was incorrectly synced as a document: %v", paths)
 	}
 	stack.waitForBackendContentByPath(t, "codex-agent.log", "line one\nline two\n", 30*time.Second)
+}
+
+func TestThreadCreationAcceptsClientRelativeAnchors(t *testing.T) {
+	stack := newRegressionStack(t)
+	stack.up(t)
+
+	baseURL := stack.backendURL(t)
+	documentID := createDocument(t, baseURL, uniquePath("thread-anchor", ".md"), "alpha bravo charlie\n")
+	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/ws/documents/" + url.PathEscape(documentID)
+	clientDoc := crdt.New(crdt.WithClientID(901))
+	conn := dialDocumentWebsocket(t, wsURL, "thread-author", 901)
+	defer conn.Close()
+	syncDocumentClient(t, conn, clientDoc, "alpha bravo charlie\n")
+
+	text := clientDoc.GetText("content")
+	relativeStart := encodeRelativeAnchorForRegression(text, 6)
+	relativeEnd := encodeRelativeAnchorForRegression(text, 11)
+	payload, err := json.Marshal(map[string]any{
+		"documentId":    documentID,
+		"title":         "Check bravo",
+		"body":          "Please review this anchored range.",
+		"relativeStart": relativeStart,
+		"relativeEnd":   relativeEnd,
+		"start":         6,
+		"end":           11,
+		"line":          1,
+		"excerpt":       "bravo",
+	})
+	if err != nil {
+		t.Fatalf("marshal thread request: %v", err)
+	}
+	resp, err := http.Post(baseURL+"/api/threads?actor=owner&actor_type=human", "application/json", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("create thread status %d: %s", resp.StatusCode, body)
+	}
+	var created struct {
+		Thread struct {
+			ID     string                 `json:"id"`
+			Anchor regressionThreadAnchor `json:"anchor"`
+		} `json:"thread"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode create thread response: %v", err)
+	}
+	if created.Thread.ID == "" {
+		t.Fatal("expected thread id")
+	}
+	if created.Thread.Anchor.RelativeStart != relativeStart || created.Thread.Anchor.RelativeEnd != relativeEnd {
+		t.Fatalf("relative anchors were not preserved: %#v", created.Thread.Anchor)
+	}
+	if created.Thread.Anchor.Start != 6 || created.Thread.Anchor.End != 11 || created.Thread.Anchor.Line != 1 || created.Thread.Anchor.Excerpt != "bravo" {
+		t.Fatalf("display anchor metadata was not preserved: %#v", created.Thread.Anchor)
+	}
+}
+
+func TestThreadCreationRejectsRawOffsetsWithoutRelativeAnchors(t *testing.T) {
+	stack := newRegressionStack(t)
+	stack.up(t)
+
+	baseURL := stack.backendURL(t)
+	documentID := createDocument(t, baseURL, uniquePath("raw-thread-anchor", ".md"), "alpha bravo charlie\n")
+	payload, err := json.Marshal(map[string]any{
+		"documentId": documentID,
+		"title":      "Raw offset should fail",
+		"body":       "This should not create an unstable text-range thread.",
+		"start":      6,
+		"end":        11,
+		"line":       1,
+		"excerpt":    "bravo",
+	})
+	if err != nil {
+		t.Fatalf("marshal thread request: %v", err)
+	}
+	resp, err := http.Post(baseURL+"/api/threads?actor=owner&actor_type=human", "application/json", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusBadRequest {
+		t.Fatalf("expected raw-offset thread creation to fail, got status %d", resp.StatusCode)
+	}
 }
 
 func TestMultipleWebsocketRecipientsConverge(t *testing.T) {
@@ -803,6 +898,14 @@ func syncDocumentClient(t *testing.T, conn *websocket.Conn, doc *crdt.Doc, want 
 	t.Helper()
 	writeBinary(t, conn, yproto.BuildSyncStep1(doc))
 	waitForWebsocketContent(t, conn, doc, want)
+}
+
+func encodeRelativeAnchorForRegression(text *crdt.YText, index int) string {
+	assoc := 0
+	if index >= text.Len() {
+		assoc = -1
+	}
+	return base64.StdEncoding.EncodeToString(crdt.EncodeRelativePosition(crdt.CreateRelativePositionFromIndex(text, index, assoc)))
 }
 
 func waitForSyncUpdate(t *testing.T, conn *websocket.Conn, want []byte) {

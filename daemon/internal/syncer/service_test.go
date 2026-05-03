@@ -546,13 +546,24 @@ func TestReconcileTrackedDocumentMergesLocalEditWithPendingRemoteUpdate(t *testi
 	if err := tracked.storeProjectedBase("base\n", baseDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)
 	}
+	remoteUpdate := updateFromBaseDoc(t, baseDoc, "base\nremote\n", "remote")
+	serverDoc := crdt.New()
+	if err := crdt.ApplyUpdateV1(serverDoc, baseDoc.EncodeStateAsUpdate(), "server-base"); err != nil {
+		t.Fatalf("apply server base: %v", err)
+	}
+	if err := crdt.ApplyUpdateV1(serverDoc, remoteUpdate, "server-remote"); err != nil {
+		t.Fatalf("apply server remote: %v", err)
+	}
 	var sentLocalUpdate []byte
 	tracked.writeSyncUpdate = func(update []byte) error {
 		sentLocalUpdate = append([]byte(nil), update...)
+		return crdt.ApplyUpdateV1(serverDoc, update, "server-local")
+	}
+	tracked.writeSyncStep1 = func(_ []byte) error {
+		tracked.setServerStateVector(crdt.EncodeStateVectorV1(serverDoc))
 		return nil
 	}
 
-	remoteUpdate := updateFromBaseDoc(t, baseDoc, "base\nremote\n", "remote")
 	if _, err := cache.appendPendingRemoteUpdate("doc_1", "doc.md", remoteUpdate); err != nil {
 		t.Fatalf("append pending remote: %v", err)
 	}
@@ -707,6 +718,7 @@ func TestMaterializeExistingLocalFileUsesCachedBaseAsProjection(t *testing.T) {
 		sentUpdates++
 		return crdt.ApplyUpdateV1(serverDoc, update, "server")
 	}
+	ackTrackedFromServer(tracked, serverDoc)
 	if err := reconcileTrackedDocument(cache, "doc_append", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("reconcile document: %v", err)
 	}
@@ -781,6 +793,7 @@ func TestReconcileRebasesDirtyLocalFileAfterPendingRemoteEstablishesBase(t *test
 		sentUpdates++
 		return crdt.ApplyUpdateV1(serverDoc, update, "server")
 	}
+	ackTrackedFromServer(tracked, serverDoc)
 	if err := reconcileTrackedDocument(cache, "doc_append", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("second reconcile: %v", err)
 	}
@@ -830,6 +843,7 @@ func TestSingleWriterAppendPressureReconcilesIncrementalBatches(t *testing.T) {
 		}
 		return crdt.ApplyUpdateV1(serverDoc, update, "server")
 	}
+	ackTrackedFromServer(tracked, serverDoc)
 
 	var expected strings.Builder
 	const totalLines = 30000
@@ -908,6 +922,7 @@ func TestReconcileKeepsSentLocalAppendAsWorkspaceBaseWhenProjectionDiverges(t *t
 	tracked.writeSyncUpdate = func(update []byte) error {
 		return crdt.ApplyUpdateV1(serverDoc, update, "server")
 	}
+	ackTrackedFromServer(tracked, serverDoc)
 
 	original := writeProjectedFile
 	defer func() { writeProjectedFile = original }()
@@ -993,6 +1008,7 @@ func TestReconcileRebasesAppendFromStaleWorkspaceBase(t *testing.T) {
 		sentUpdates++
 		return crdt.ApplyUpdateV1(serverDoc, update, "server")
 	}
+	ackTrackedFromServer(tracked, serverDoc)
 	if err := reconcileTrackedDocument(cache, "doc_append", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -1084,6 +1100,7 @@ func TestReconcileDoesNotDeleteRemoteUpdateAfterRemoteProjectionDiverges(t *test
 		sentUpdates++
 		return crdt.ApplyUpdateV1(serverDoc, update, "server")
 	}
+	ackTrackedFromServer(tracked, serverDoc)
 	if err := reconcileTrackedDocument(cache, "doc_1", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("second reconcile: %v", err)
 	}
@@ -1904,6 +1921,199 @@ func TestReconcileLocalWorkspaceDeletesMissingTrackedDocument(t *testing.T) {
 	}
 }
 
+func TestOutgoingOutboxKeepsLocalUpdateWhenBackendSendFails(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "doc.md")
+	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base\n")
+	if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache}
+	tracked.setProjectedContent("base\n")
+	if err := tracked.storeProjectedBase("base\n", baseDoc.EncodeStateAsUpdate()); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+	tracked.markLocalDirty()
+
+	sendAttempts := 0
+	tracked.writeSyncUpdate = func(update []byte) error {
+		sendAttempts++
+		return errors.New("backend disconnected")
+	}
+	if err := reconcileTrackedDocument(cache, "doc_1", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	if sendAttempts != 1 {
+		t.Fatalf("expected one send attempt, got %d", sendAttempts)
+	}
+	if !tracked.isLocalDirty() {
+		t.Fatal("dirty flag must remain until backend convergence")
+	}
+	entry, unlock := cache.lockEntry("doc_1")
+	outbox, err := cache.loadOutboxUpdateLocked(entry, "doc_1")
+	unlock()
+	if err != nil {
+		t.Fatalf("load outbox: %v", err)
+	}
+	if outbox == nil || len(outbox.Update) == 0 {
+		t.Fatal("expected durable outgoing outbox after failed send")
+	}
+
+	serverDoc := crdt.New()
+	if err := crdt.ApplyUpdateV1(serverDoc, baseDoc.EncodeStateAsUpdate(), "server-base"); err != nil {
+		t.Fatalf("apply server base: %v", err)
+	}
+	tracked.writeSyncUpdate = func(update []byte) error {
+		sendAttempts++
+		return crdt.ApplyUpdateV1(serverDoc, update, "server")
+	}
+	ackTrackedFromServer(tracked, serverDoc)
+	if err := reconcileTrackedDocument(cache, "doc_1", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("retry reconcile: %v", err)
+	}
+	if got := serverDoc.GetText("content").ToString(); got != "base\nlocal\n" {
+		t.Fatalf("server content mismatch after retry: %q", got)
+	}
+	if tracked.isLocalDirty() {
+		t.Fatal("expected dirty flag to clear after converged retry")
+	}
+	entry, unlock = cache.lockEntry("doc_1")
+	outbox, err = cache.loadOutboxUpdateLocked(entry, "doc_1")
+	unlock()
+	if err != nil {
+		t.Fatalf("reload outbox: %v", err)
+	}
+	if outbox != nil {
+		t.Fatal("expected outbox to clear after backend convergence")
+	}
+}
+
+func TestOutgoingOutboxWaitsForBackendStateVectorBeforeClearing(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "doc.md")
+	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base\n")
+	if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	serverDoc := crdt.New()
+	if err := crdt.ApplyUpdateV1(serverDoc, baseDoc.EncodeStateAsUpdate(), "server-base"); err != nil {
+		t.Fatalf("apply server base: %v", err)
+	}
+	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache}
+	tracked.setProjectedContent("base\n")
+	if err := tracked.storeProjectedBase("base\n", baseDoc.EncodeStateAsUpdate()); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+	tracked.markLocalDirty()
+	sends := 0
+	tracked.writeSyncUpdate = func(update []byte) error {
+		sends++
+		return crdt.ApplyUpdateV1(serverDoc, update, "server")
+	}
+	tracked.writeSyncStep1 = func(_ []byte) error {
+		return nil
+	}
+	if err := reconcileTrackedDocument(cache, "doc_1", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	if !tracked.isLocalDirty() {
+		t.Fatal("dirty flag must remain without backend state-vector proof")
+	}
+	if sends != 1 {
+		t.Fatalf("expected one send before ack, got %d", sends)
+	}
+
+	tracked.setServerStateVector(crdt.EncodeStateVectorV1(serverDoc))
+	if err := reconcileTrackedDocument(cache, "doc_1", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("ack reconcile: %v", err)
+	}
+	if sends != 1 {
+		t.Fatalf("converged outbox should finalize without resending, sends=%d", sends)
+	}
+	if tracked.isLocalDirty() {
+		t.Fatal("expected dirty flag to clear after observed convergence")
+	}
+}
+
+func TestOutgoingOutboxSurvivesCacheReopenAndResendsIdempotently(t *testing.T) {
+	root := t.TempDir()
+	cacheRoot := t.TempDir()
+	path := filepath.Join(root, "doc.md")
+	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+	cache, err := newDocumentCache(cacheRoot)
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base\n")
+	if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	serverDoc := crdt.New()
+	if err := crdt.ApplyUpdateV1(serverDoc, baseDoc.EncodeStateAsUpdate(), "server-base"); err != nil {
+		t.Fatalf("apply server base: %v", err)
+	}
+	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache}
+	tracked.setProjectedContent("base\n")
+	if err := tracked.storeProjectedBase("base\n", baseDoc.EncodeStateAsUpdate()); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+	tracked.markLocalDirty()
+	tracked.writeSyncUpdate = func(update []byte) error {
+		return crdt.ApplyUpdateV1(serverDoc, update, "server")
+	}
+	tracked.writeSyncStep1 = func(_ []byte) error {
+		return nil
+	}
+	if err := reconcileTrackedDocument(cache, "doc_1", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	if got := serverDoc.GetText("content").ToString(); got != "base\nlocal\n" {
+		t.Fatalf("server should have accepted first send before restart, got %q", got)
+	}
+
+	reopened, err := newDocumentCache(cacheRoot)
+	if err != nil {
+		t.Fatalf("reopen cache: %v", err)
+	}
+	restarted := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: reopened}
+	restarted.setProjectedContent("base\n")
+	restarted.markLocalDirty()
+	duplicateSends := 0
+	restarted.writeSyncUpdate = func(update []byte) error {
+		duplicateSends++
+		return crdt.ApplyUpdateV1(serverDoc, update, "server-duplicate")
+	}
+	ackTrackedFromServer(restarted, serverDoc)
+	if err := reconcileTrackedDocument(reopened, "doc_1", []*trackedFile{restarted}); err != nil {
+		t.Fatalf("restarted reconcile: %v", err)
+	}
+	if duplicateSends != 1 {
+		t.Fatalf("expected one idempotent resend after restart, got %d", duplicateSends)
+	}
+	if got := serverDoc.GetText("content").ToString(); got != "base\nlocal\n" {
+		t.Fatalf("duplicate resend changed server content: %q", got)
+	}
+	if restarted.isLocalDirty() {
+		t.Fatal("expected restarted daemon to clear dirty flag after convergence")
+	}
+}
+
 func TestShouldWakeAgentWorkersForEventIncludesDocumentUpdates(t *testing.T) {
 	if !shouldWakeAgentWorkersForEvent("document.updated") {
 		t.Fatal("document.updated is a product notification and should wake agent workers")
@@ -1963,6 +2173,13 @@ func updateFromBaseDoc(t *testing.T, baseDoc *crdt.Doc, nextContent string, orig
 
 func encodeDocState(doc *crdt.Doc) string {
 	return base64.StdEncoding.EncodeToString(doc.EncodeStateAsUpdate())
+}
+
+func ackTrackedFromServer(tracked *trackedFile, serverDoc *crdt.Doc) {
+	tracked.writeSyncStep1 = func(_ []byte) error {
+		tracked.setServerStateVector(crdt.EncodeStateVectorV1(serverDoc))
+		return nil
+	}
 }
 
 func encodeStateForContent(t *testing.T, content string) string {
