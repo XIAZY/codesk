@@ -143,7 +143,7 @@ func (s *Service) refreshLatestWorkspaceForLookup(ctx context.Context) error {
 }
 
 func (s *Service) fetchDocumentByPath(ctx context.Context, path string) (*document, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.BackendURL+"/api/documents/by-path?path="+url.QueryEscape(path), nil)
+	req, err := s.newBackendRequest(ctx, http.MethodGet, "/api/documents/by-path?path="+url.QueryEscape(path), nil)
 	if err != nil {
 		return nil, err
 	}

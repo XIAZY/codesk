@@ -37,10 +37,12 @@ const (
 )
 
 type Store struct {
-	mu       sync.RWMutex
-	state    WorkspaceState
-	db       *sql.DB
-	dataFile string
+	mu            sync.RWMutex
+	state         WorkspaceState
+	db            *sql.DB
+	dataFile      string
+	workspaceID   string
+	workspaceName string
 
 	documentLocks         map[string]*sync.RWMutex
 	dirtyDocuments        map[string]struct{}
@@ -70,7 +72,19 @@ type principalRef struct {
 }
 
 func NewStore(dataFile string) (*Store, error) {
+	return NewStoreForWorkspace(dataFile, "ws_notty", "notty")
+}
+
+func NewStoreForWorkspace(dataFile string, workspaceID string, workspaceName string) (*Store, error) {
 	store := &Store{}
+	store.workspaceID = strings.TrimSpace(workspaceID)
+	if store.workspaceID == "" {
+		store.workspaceID = "ws_notty"
+	}
+	store.workspaceName = strings.TrimSpace(workspaceName)
+	if store.workspaceName == "" {
+		store.workspaceName = store.workspaceID
+	}
 	if isPostgresDSN(dataFile) {
 		db, err := sql.Open("pgx", dataFile)
 		if err != nil {
@@ -104,12 +118,16 @@ func (s *Store) Close() error {
 	return nil
 }
 
+func (s *Store) Reload() error {
+	return s.load()
+}
+
 func (s *Store) load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.db != nil {
-		s.state = seedWorkspace()
+		s.state = seedWorkspaceFor(s.workspaceID, s.workspaceName)
 		if err := s.loadNormalizedPostgresLocked(); err != nil {
 			return err
 		}
@@ -129,7 +147,7 @@ func (s *Store) load() error {
 	}
 
 	if _, err := os.Stat(s.dataFile); errors.Is(err, os.ErrNotExist) {
-		s.state = seedWorkspace()
+		s.state = seedWorkspaceFor(s.workspaceID, s.workspaceName)
 		return s.persistLocked()
 	}
 
@@ -169,6 +187,9 @@ func (s *Store) ensureMaps() {
 	}
 	if s.state.Users == nil {
 		s.state.Users = map[string]*User{}
+	}
+	if s.state.Daemons == nil {
+		s.state.Daemons = map[string]*Daemon{}
 	}
 	if s.state.Agents == nil {
 		s.state.Agents = map[string]*Agent{}
@@ -234,10 +255,22 @@ func (s *Store) documentLockLocked(documentID string) *sync.RWMutex {
 }
 
 func seedWorkspace() WorkspaceState {
+	return seedWorkspaceFor("ws_notty", "notty")
+}
+
+func seedWorkspaceFor(workspaceID string, workspaceName string) WorkspaceState {
 	now := time.Now().UTC()
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		workspaceID = "ws_notty"
+	}
+	workspaceName = strings.TrimSpace(workspaceName)
+	if workspaceName == "" {
+		workspaceName = workspaceID
+	}
 	return WorkspaceState{
-		WorkspaceID: "ws_notty",
-		Name:        "notty",
+		WorkspaceID: workspaceID,
+		Name:        workspaceName,
 		Documents:   map[string]*Document{},
 		Users: map[string]*User{
 			"user_owner": {
@@ -251,6 +284,7 @@ func seedWorkspace() WorkspaceState {
 				UpdatedAt: now,
 			},
 		},
+		Daemons:             map[string]*Daemon{},
 		Agents:              map[string]*Agent{},
 		AgentRuns:           map[string]*AgentRun{},
 		Threads:             map[string]*Thread{},
@@ -1426,6 +1460,38 @@ func (s *Store) CreateAgent(req CreateAgentRequest, meta OperationMeta) (*Agent,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	daemonID := strings.TrimSpace(req.DaemonID)
+	if daemonID == "" {
+		for id, daemon := range s.state.Daemons {
+			if daemon != nil && daemon.Status == "active" {
+				if daemonID != "" {
+					daemonID = ""
+					break
+				}
+				daemonID = id
+			}
+		}
+		if daemonID == "" && len(s.state.Daemons) == 0 {
+			daemonID = "daemon_local"
+			if s.state.Daemons[daemonID] == nil {
+				now := time.Now().UTC()
+				s.state.Daemons[daemonID] = &Daemon{
+					ID:          daemonID,
+					WorkspaceID: s.state.WorkspaceID,
+					Name:        "Local daemon",
+					Status:      "active",
+					CreatedAt:   now,
+				}
+			}
+		}
+	}
+	if daemonID == "" {
+		return nil, errors.New("daemon id is required")
+	}
+	daemon := s.state.Daemons[daemonID]
+	if daemon == nil || daemon.Status != "active" || !daemon.DeletedAt.IsZero() {
+		return nil, ErrNotFound
+	}
 	agent, err := buildAgent(req.Handle, req.Name, req.Role, req.Kind)
 	if err != nil {
 		return nil, err
@@ -1434,6 +1500,7 @@ func (s *Store) CreateAgent(req CreateAgentRequest, meta OperationMeta) (*Agent,
 		return nil, err
 	}
 	agent.ID = "agent_" + uuid.NewString()
+	agent.DaemonID = daemonID
 	agent.WorkspaceRoot = "agents/" + agent.ID
 	agent.UpdatedAt = time.Now().UTC()
 	s.state.Agents[agent.ID] = agent
@@ -2297,6 +2364,10 @@ func cloneState(state WorkspaceState) WorkspaceState {
 	for key, user := range state.Users {
 		copyState.Users[key] = cloneUser(user)
 	}
+	copyState.Daemons = map[string]*Daemon{}
+	for key, daemon := range state.Daemons {
+		copyState.Daemons[key] = cloneDaemon(daemon)
+	}
 	copyState.Agents = map[string]*Agent{}
 	for key, agent := range state.Agents {
 		copyState.Agents[key] = cloneAgent(agent)
@@ -2446,6 +2517,21 @@ func SortedAgents(state WorkspaceState) []*Agent {
 	}
 	sort.Slice(agents, func(i, j int) bool { return agents[i].Name < agents[j].Name })
 	return agents
+}
+
+func SortedDaemons(state WorkspaceState) []*Daemon {
+	daemons := make([]*Daemon, 0, len(state.Daemons))
+	now := time.Now().UTC()
+	for _, daemon := range state.Daemons {
+		daemons = append(daemons, daemonWithLiveness(daemon, now))
+	}
+	sort.Slice(daemons, func(i, j int) bool {
+		if daemons[i].CreatedAt.Equal(daemons[j].CreatedAt) {
+			return daemons[i].ID < daemons[j].ID
+		}
+		return daemons[i].CreatedAt.Before(daemons[j].CreatedAt)
+	})
+	return daemons
 }
 
 func SortedDocuments(state WorkspaceState) []*Document {
@@ -2656,6 +2742,49 @@ func cloneAgent(agent *Agent) *Agent {
 	}
 	clone := *agent
 	return &clone
+}
+
+func cloneDaemon(daemon *Daemon) *Daemon {
+	if daemon == nil {
+		return nil
+	}
+	clone := *daemon
+	return &clone
+}
+
+const (
+	daemonOnlineWindow = 30 * time.Second
+	daemonStaleWindow  = 2 * time.Minute
+)
+
+func daemonWithLiveness(daemon *Daemon, now time.Time) *Daemon {
+	clone := cloneDaemon(daemon)
+	applyDaemonLiveness(clone, now)
+	return clone
+}
+
+func applyDaemonLiveness(daemon *Daemon, now time.Time) {
+	if daemon == nil {
+		return
+	}
+	daemon.ConnectionStatus = "disconnected"
+	daemon.LastSeenAgeSeconds = 0
+	if daemon.Status != "active" || !daemon.DeletedAt.IsZero() || daemon.LastSeenAt.IsZero() {
+		return
+	}
+	age := now.Sub(daemon.LastSeenAt)
+	if age < 0 {
+		age = 0
+	}
+	daemon.LastSeenAgeSeconds = int64(age / time.Second)
+	switch {
+	case age <= daemonOnlineWindow:
+		daemon.ConnectionStatus = "online"
+	case age <= daemonStaleWindow:
+		daemon.ConnectionStatus = "stale"
+	default:
+		daemon.ConnectionStatus = "disconnected"
+	}
 }
 
 func cloneUser(user *User) *User {

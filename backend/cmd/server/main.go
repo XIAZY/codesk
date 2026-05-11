@@ -32,7 +32,6 @@ func main() {
 		log.Fatalf("create store: %v", err)
 	}
 	defer store.Close()
-
 	server := notty.NewServer(cfg, store)
 	httpServer := &http.Server{
 		Addr:              ":" + cfg.Port,

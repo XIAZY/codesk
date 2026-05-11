@@ -71,7 +71,7 @@ type toolDocumentViewResponse struct {
 }
 
 func (s *Service) listDocumentsForRun(ctx context.Context) (*toolDocumentsResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.BackendURL+"/api/workspace", nil)
+	req, err := s.newBackendRequest(ctx, http.MethodGet, "/api/workspace", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +95,7 @@ func (s *Service) getDocumentByPathForRun(ctx context.Context, path string) (*to
 	if trimmed == "" {
 		return nil, fmt.Errorf("document path is required")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.BackendURL+"/api/documents/by-path?path="+url.QueryEscape(trimmed), nil)
+	req, err := s.newBackendRequest(ctx, http.MethodGet, "/api/documents/by-path?path="+url.QueryEscape(trimmed), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +119,7 @@ func (s *Service) getThreadForRun(ctx context.Context, threadID string) (*toolTh
 	if threadID == "" {
 		return nil, fmt.Errorf("thread id is required")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.BackendURL+"/api/threads/"+url.PathEscape(threadID), nil)
+	req, err := s.newBackendRequest(ctx, http.MethodGet, "/api/threads/"+url.PathEscape(threadID), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -143,7 +143,7 @@ func (s *Service) listThreadsForDocumentForRun(ctx context.Context, documentID s
 	if documentID == "" {
 		return nil, fmt.Errorf("document id is required")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.BackendURL+"/api/documents/"+url.PathEscape(documentID)+"/threads", nil)
+	req, err := s.newBackendRequest(ctx, http.MethodGet, "/api/documents/"+url.PathEscape(documentID)+"/threads", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -198,7 +198,7 @@ func (s *Service) listInboxForAgent(ctx context.Context, agentID string, box str
 	if box == "" {
 		box = "for_me"
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.BackendURL+"/api/agents/"+url.PathEscape(agentID)+"/inbox?status=pending&box="+url.QueryEscape(box), nil)
+	req, err := s.newBackendRequest(ctx, http.MethodGet, "/api/agents/"+url.PathEscape(agentID)+"/inbox?status=pending&box="+url.QueryEscape(box), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +233,7 @@ func (s *Service) getInboxItemForRun(ctx context.Context, run *agentRun, itemID 
 	if itemID == "" {
 		return nil, fmt.Errorf("item id is required")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.BackendURL+"/api/agent-inbox/"+url.PathEscape(itemID), nil)
+	req, err := s.newAgentBackendRequest(ctx, run, http.MethodGet, "/api/agent-inbox/"+url.PathEscape(itemID), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -279,7 +279,7 @@ func (s *Service) updateInboxItemStatusForRun(ctx context.Context, run *agentRun
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, s.cfg.BackendURL+"/api/agent-inbox/"+url.PathEscape(itemID)+"?actor="+url.QueryEscape(run.AgentID)+"&actor_type=agent", bytes.NewReader(body))
+	req, err := s.newAgentBackendRequest(ctx, run, http.MethodPatch, "/api/agent-inbox/"+url.PathEscape(itemID), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -314,7 +314,7 @@ func (s *Service) diffDocumentForRun(ctx context.Context, run *agentRun, documen
 	if strings.TrimSpace(to) != "" {
 		query.Set("to", strings.TrimSpace(to))
 	}
-	endpoint := s.cfg.BackendURL + "/api/agents/" + url.PathEscape(run.AgentID) + "/documents/" + url.PathEscape(documentID) + "/diff"
+	endpoint := s.cfg.BackendURL + s.cfg.workspaceAPIPath("/api/agents/"+url.PathEscape(run.AgentID)+"/documents/"+url.PathEscape(documentID)+"/diff")
 	if encoded := query.Encode(); encoded != "" {
 		endpoint += "?" + encoded
 	}
@@ -322,6 +322,7 @@ func (s *Service) diffDocumentForRun(ctx context.Context, run *agentRun, documen
 	if err != nil {
 		return nil, err
 	}
+	applyBackendAuth(req.Header, s.cfg, run.AgentID)
 	res, err := s.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -345,7 +346,7 @@ func (s *Service) markDocumentViewedForRun(ctx context.Context, run *agentRun, d
 	if documentID == "" {
 		return nil, fmt.Errorf("document id is required")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.BackendURL+"/api/agents/"+url.PathEscape(run.AgentID)+"/documents/"+url.PathEscape(documentID)+"/viewed", bytes.NewReader([]byte("{}")))
+	req, err := s.newAgentBackendRequest(ctx, run, http.MethodPost, "/api/agents/"+url.PathEscape(run.AgentID)+"/documents/"+url.PathEscape(documentID)+"/viewed", bytes.NewReader([]byte("{}")))
 	if err != nil {
 		return nil, err
 	}
@@ -377,7 +378,7 @@ func (s *Service) createThreadAsRun(ctx context.Context, run *agentRun, payload 
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.BackendURL+"/api/threads?actor="+url.QueryEscape(run.AgentID)+"&actor_type=agent", bytes.NewReader(body))
+	req, err := s.newAgentBackendRequest(ctx, run, http.MethodPost, "/api/threads", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -409,7 +410,7 @@ func (s *Service) replyThreadAsRun(ctx context.Context, run *agentRun, threadID 
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.BackendURL+"/api/threads/"+threadID+"/messages?actor="+url.QueryEscape(run.AgentID)+"&actor_type=agent", bytes.NewReader(body))
+	req, err := s.newAgentBackendRequest(ctx, run, http.MethodPost, "/api/threads/"+threadID+"/messages", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

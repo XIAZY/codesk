@@ -1,376 +1,1534 @@
 # notty
 
-`notty` is a collaborative workspace for humans and resident AI agents.
+notty is a multi-tenant collaborative workspace where humans and long-running AI agents work in the same file tree, discuss document ranges in anchored threads, and coordinate through daemon-managed local workspaces.
 
-The product goal is not "chat with an agent beside a document." The goal is a shared working environment where humans and agents can read the same files, edit the same workspace, discuss specific document ranges in anchored threads, and decide when to act through a notification center.
+This README is the project encyclopedia. It is intended for product managers, designers, frontend agents, backend agents, and new engineers who have no prior context. It describes the product, its concepts, its components, the current user flows, and the API contracts those flows depend on.
 
-This README describes the current product shape and the frontend contract. It is intentionally written as a product/design brief so another agent or designer can rebuild the frontend without rediscovering the backend and daemon assumptions.
+## One Sentence
 
-## Product Summary
+notty is Google Docs plus a shared repo-like filesystem plus resident Codex agents that can edit files and discuss work in anchored threads.
 
-notty has three first-class objects:
+## Product Goals
 
-- Documents: Markdown/text/code files synced through Yjs CRDT state.
-- Threads: anchored discussions attached to a document or a specific document range.
-- Agents: long-running Codex collaborators with roles, handles, workspaces, logs, and notification inboxes.
+- Make humans and AI agents feel like collaborators in one shared workspace.
+- Keep documents as real files that can be projected to disk and edited by tools.
+- Keep discussion out of document text by using threads anchored to document ranges.
+- Let agents preserve identity and context over time instead of treating them as one-shot prompts.
+- Keep agent attention manageable through inboxes instead of waking agents for every keystroke.
+- Keep tenancy explicit: workspaces are the boundary for users, documents, daemons, agents, and threads.
 
-The workspace should feel like a collaborative editor where agents are present as teammates, not like a command console. Agents can make filesystem edits, but their communication should happen in threads.
+## Product Non-Goals
 
-## Current User Experience
+- notty is not a chat app with a document attached.
+- notty is not a generic task queue for one-off agents.
+- notty is not trying to support document-text mentions yet.
+- notty no longer has separate comments, proposals, or merge-request concepts.
+- notty should not require the frontend to load every document's CRDT history to render the workspace shell.
 
-The current product supports:
+## Key Features
 
-- A document library backed by canonical server state.
-- A live Yjs-powered editor for the active document.
-- File create, move, delete, and text editing.
-- Presence updates for humans and agents.
-- Document threads anchored with Yjs relative positions, so they survive normal edits better than raw line numbers.
-- Thread replies and `@handle` mentions inside threads.
-- Persistent agents with handle, name, role, status, current activity, and dedicated workspace.
-- Agent notification center with two inboxes: `for-me` and `general`.
-- Agent document diffs from an agent's last viewed document version to another version.
-- A daemon that syncs the canonical workspace to the local filesystem and gives every agent its own synced working copy.
+- Email/password registration and login for human users.
+- JWT-backed human frontend sessions.
+- Workspace creation and workspace-scoped membership.
+- Workspace-scoped daemon token creation.
+- One-time daemon token display for local daemon deployment.
+- Daemon liveness display: online, stale, offline.
+- Daemon-owned agents.
+- Single global `New agent` flow where the user selects the owning daemon.
+- Agent detail views with associated daemon information.
+- Markdown/text/code document creation, move, delete, and live editing.
+- Yjs/y-protocol document sync over per-document websockets.
+- Lightweight workspace metadata endpoint.
+- Document range threads using Yjs CRDT relative positions.
+- Thread replies and thread `@handle` mentions.
+- Agent notification center with `for-me` and `general` inboxes.
+- Agent document diffing from `last-viewed` to `head` or explicit update IDs.
+- Daemon filesystem projection for canonical workspace documents.
+- Dedicated synced workspace copy for each agent.
+- Resident Codex sessions supervised by the daemon.
+- Agent helper CLI for reading documents, reading threads, creating threads, replying, viewing inbox items, and diffing documents.
 
-Removed or intentionally absent:
+## Core Concepts
 
-- Proposal/merge UI and APIs are removed.
-- "Comments" are not a separate concept. Threads are the comment/discussion primitive.
-- Plain `@handle` text inside Markdown documents is not a notification. Mentions are notification-bearing only inside threads.
-- `/api/workspace` should not be used to fetch full document contents or CRDT history.
+### Workspace
 
-## Product Principles
+A workspace is the tenant boundary. Documents, users, members, daemons, agents, threads, presences, activities, CRDT updates, checkpoints, and agent inboxes all belong to a workspace.
 
-### Threads Are The Collaboration Layer
+Workspace ownership is created through the normal workspace creation flow. There is no global bootstrap owner.
 
-Threads are how humans and agents discuss work. A thread can be document-level or anchored to a document range.
+### Account
 
-Design implications:
+An account is a login identity. Accounts are global, identified by email, and authenticated with a password. A single account can be a member of multiple workspaces.
 
-- Thread affordances should be visible near the text they refer to.
-- If multiple threads sit on the same line/range, the UI must let the user inspect all of them, not just show a count.
-- Threads should show participants, latest activity, mention state, and whether the current user/agent is expected to respond.
-- Creating a thread should feel lightweight: select text, write a note, optionally mention an agent.
+### Workspace User
 
-Implementation implications:
+A workspace user is the account's in-workspace collaborator identity. It has a handle, display name, role, and status. Handles are unique inside a workspace, not globally.
 
-- Browser-created text-range threads must send `relativeStart` and `relativeEnd` generated from the live Yjs document.
-- Backend rejects text-range threads that only provide raw offsets.
-- Agent-created threads use simple helper arguments such as `--path`, `--line`, and `--quote`; the daemon generates CRDT-relative anchors.
+### Document
 
-### Agents Are Resident Collaborators
+A document is a file-like object with an ID, path, title, update ID, state vector, and Yjs CRDT history. The frontend should treat document text as live CRDT state, not as a REST string payload.
 
-Agents are intended to be long-running collaborators with memory, context, and stable identity. They are not one-shot tasks by default.
+### Thread
 
-Each agent has:
-
-- A handle such as `@codex-agent`.
-- A role describing how it should participate.
-- A dedicated synced workspace under `/workspace/agents/<agent-id>`.
-- A resident Codex app-server session when running.
-- A log file in its workspace, e.g. `codex-agent.log`.
-- A notification center.
-
-Design implications:
-
-- Agents should appear as teammates with understandable state: `idle`, `working`, or `disconnected`.
-- Show current task/activity when available, but avoid making process internals the center of the UI.
-- Agent logs are useful for debugging, but the primary product interaction should be through threads and inbox items.
-- The UI should distinguish "agent needs my attention" from "agent is merely present."
-
-### The Notification Center Controls Agent Attention
-
-Agents should not be woken up for every keystroke. Document updates are deduplicated into inbox items.
-
-There are two agent inbox classes:
-
-- `for-me`: direct thread mentions, thread replies/mentions relevant to the agent, and document updates for documents the agent has participated in.
-- `general`: broader workspace document activity that the agent may ignore unless it has useful feedback or wants to act.
-
-Design implications:
-
-- Surface `for-me` items as higher priority.
-- Show `general` items as ambient activity, not urgent tasks.
-- Provide clear actions: inspect item, view thread, diff document, mark viewed, complete/dismiss.
-- Do not force an agent response unless it was directly mentioned in a thread.
-
-### Documents Are CRDT Documents, Not REST Payloads
-
-The canonical text state is synchronized through Yjs/y-protocol over document websockets.
-
-Design implications:
-
-- The frontend should keep only the active document's Yjs document in memory.
-- Document switching should open/sync the selected document, not preload every document's CRDT history.
-- `/api/workspace` is for lightweight workspace metadata: document IDs/paths/update IDs, users, agents, threads, presences, and activities.
-- The editor should be robust under rapid typing, deletion, and remote updates.
-
-## Frontend Design Brief
-
-The frontend should be designed around three work zones:
-
-1. Workspace navigation
-2. Active document editor
-3. Collaboration/agent context
-
-### Workspace Navigation
-
-The navigation area should help users answer:
-
-- What files exist?
-- Which file am I editing?
-- Which files changed recently?
-- Which files have unresolved or active threads?
-- Which agents are active or need attention?
-
-Recommended elements:
-
-- File tree or grouped document list.
-- Recent activity indicators.
-- Thread badges per document.
-- Agent roster with concise status.
-- Create/move/delete file actions kept secondary and safe.
-
-### Active Document Editor
-
-The editor is the core working surface.
-
-Required behavior:
-
-- Open one active document at a time.
-- Sync through `/ws/documents/{id}` using Yjs/y-protocol.
-- Preserve local keystrokes during remote updates.
-- Support text selection and anchored thread creation.
-- Show presence/selection when available.
-- Show line-level thread affordances with a way to open every thread on that line.
-
-Important UX details:
-
-- Avoid hiding thread content behind a small count-only label.
-- Thread markers should be precise but not noisy.
-- If a document has many threads, provide filtering by open/recent/mentioned.
-- Backspace/delete must feel immediate and must sync in real time.
-
-### Thread Panel
-
-Threads are central enough to deserve a dedicated panel or drawer.
-
-Recommended thread panel capabilities:
-
-- Show all threads for the active document.
-- Jump from thread to anchor.
-- Show thread title, excerpt, participants, and messages.
-- Reply in thread.
-- Mention agents/users with `@handle`.
-- Create document-level thread when no text is selected.
-- Create range thread from selected text.
-
-Thread anchor behavior:
-
-- Browser should derive Yjs relative anchors directly from the active `Y.Doc`.
-- Display metadata such as line, start/end, and excerpt is useful but not authoritative.
-- If an anchor cannot resolve in the current document state, the UI should degrade gracefully and still show the thread in the document thread list.
-
-### Agent Area
-
-Agents should feel like collaborators, not background daemons.
-
-Recommended agent views:
-
-- Agent roster: handle, name, role, status, current activity.
-- Agent detail: role, workspace root, session state, latest log tail, inbox summary.
-- Notification center: `for-me` and `general` inboxes.
-- Thread mentions: show when an agent was directly mentioned.
-
-Avoid:
-
-- Exposing raw CRDT anchors to users or agents.
-- Treating every document update as urgent.
-- Making logs the main collaboration interface.
-
-### Activity Feed
-
-The workspace activity feed should summarize meaningful events:
-
-- Document created/moved/deleted.
-- Thread created/replied.
-- Agent status/session changes.
-- Presence changes if useful, but avoid spam.
-
-Document keystrokes should not flood the visible activity feed.
-
-## Core Workflows
-
-### Human Edits A Document
-
-1. Frontend loads `/api/workspace` for metadata.
-2. User selects a document.
-3. Frontend opens `/ws/documents/{id}`.
-4. Yjs sync initializes the active document.
-5. User edits locally.
-6. Frontend sends Yjs updates over the websocket.
-7. Backend persists updates and broadcasts them to peers.
-8. Daemon receives updates and projects the document into filesystem workspaces.
-9. Agent inbox document-update items are deduplicated.
-
-### Human Starts A Thread
-
-1. User selects a range or chooses document-level comment.
-2. Browser creates Yjs relative positions from the active document.
-3. Browser posts `POST /api/threads`.
-4. Backend stores the thread and broadcasts `thread.created`.
-5. Mentions inside the thread body create `for-me` inbox items for mentioned agents.
-
-### Agent Reviews Notifications
-
-1. Backend records inbox items for agents.
-2. Daemon periodically wakes/resumes each long-running agent session.
-3. Agent sees a short notification summary.
-4. Agent can call helper tools:
-   - `list-inbox --box for-me`
-   - `list-inbox --box general`
-   - `get-inbox-item`
-   - `diff-document`
-   - `mark-document-viewed`
-   - `create-thread`
-   - `reply-thread`
-5. Agent replies in an existing thread or creates a new anchored thread if it has useful feedback.
-
-### Agent Creates A Thread
-
-Agents do not create CRDT anchors manually.
-
-Example:
-
-```sh
-notty-agent-tool create-thread \
-  --path docs/spec.md \
-  --line 42 \
-  --quote "exact text to discuss" \
-  --title "Potential ambiguity" \
-  --body "I think this sentence needs clarification."
-```
-
-The daemon resolves the file, reconciles pending local/remote state, materializes text temporarily, computes Yjs relative anchors, and then calls the backend.
-
-## Architecture
-
-### Backend
-
-The backend is a Go HTTP/websocket server on `:8080`.
-
-Responsibilities:
-
-- Maintain canonical workspace metadata.
-- Store document CRDT updates and checkpoints in Postgres.
-- Serve lightweight workspace metadata.
-- Accept Yjs/y-protocol document websocket connections.
-- Persist and broadcast document updates.
-- Store users, agents, threads, presences, activities, and agent inbox items.
-- Compute bounded document diffs for agent review.
-
-The backend should generally avoid materializing all documents. Full text materialization should be reserved for bounded operations such as diffing.
+A thread is the only discussion primitive. It can be document-level or anchored to a document text range. Range threads use CRDT relative anchors. Display fields such as line, start, end, and excerpt are not authoritative.
 
 ### Daemon
 
-The daemon is a Go process that bridges the server and local filesystem.
+A daemon is a workspace-scoped process that syncs notty documents to local disk and runs agents. It authenticates with a daemon token minted by the backend. A daemon owns zero or more agents.
+
+### Agent
+
+An agent is a daemon-managed Codex collaborator. It has a stable UUID, handle, name, role, status, owning daemon, workspace root, Codex session metadata, log file, and notification inboxes.
+
+The agent UUID is the backend identity. The handle is user-facing and should not be used as daemon acting identity.
+
+### Agent Inbox
+
+Agents have two inbox classes:
+
+- `for-me`: direct thread mentions, relevant thread replies, and document activity on documents where the agent is already participating.
+- `general`: broader workspace document activity that the agent can inspect when useful.
+
+Document-update inbox items are deduplicated. Agents should use document diff tools rather than receiving a prompt for every keystroke.
+
+## Component Overview
+
+### Backend
+
+The backend is a Go HTTP/websocket server on port `8080`.
 
 Responsibilities:
 
-- Sync backend documents into `/workspace/notty`.
-- Maintain per-agent workspaces under `/workspace/agents/<agent-id>`.
-- Watch filesystem changes and convert local edits into CRDT updates.
-- Apply remote CRDT updates back to files.
-- Maintain local CRDT cache/state needed for correct projection and agent thread anchoring.
-- Respect file locks for notty's own file reads/writes.
-- Run and supervise resident Codex app-server sessions.
-- Expose `notty-agent-tool` to agents through an authenticated local tool gateway.
+- Authenticate human users with JWT.
+- Authenticate daemons with workspace-scoped opaque tokens.
+- Resolve daemon acting agent identity through `X-Notty-Acting-Agent-ID`.
+- Enforce workspace scoping.
+- Store canonical data in Postgres.
+- Serve lightweight workspace metadata.
+- Accept Yjs/y-protocol document websocket connections.
+- Persist CRDT document updates and checkpoints.
+- Broadcast workspace events and document updates.
+- Store threads, thread messages, participants, activities, presence, agents, agent runs, and agent inbox events.
+- Provide bounded document diffs.
 
-Dotfiles and `.notty` directories are internal workspace files and should not become documents. Agent log files such as `codex-agent.log` are normal synced workspace files.
+The backend should generally avoid materializing full document text. Bounded diffing is the main intentional server-side materialization path.
 
 ### Frontend
 
-The current frontend is React/Vite on `:5173`, but the product contract is more important than the implementation.
+The frontend is currently React/Vite on port `5173`.
 
-Frontend responsibilities:
+Responsibilities:
 
-- Render workspace metadata from `/api/workspace`.
-- Maintain a Yjs document only for the active document.
-- Connect to `/ws` for workspace events.
-- Connect to `/ws/documents/{id}` for active document sync.
-- Create threads with browser-generated relative anchors.
-- Show agents, presence, thread context, and notification state clearly.
+- Register and log in human users.
+- Create/select workspaces.
+- Manage workspace members.
+- Create daemons and show one-time daemon deploy tokens.
+- Display daemon liveness and daemon-owned agents.
+- Create agents through one global `New agent` flow with daemon selection.
+- Render workspace metadata.
+- Open only the active document's Yjs websocket.
+- Render and edit the active document.
+- Create document-level and range-anchored threads.
+- Show all threads for a selected document or line.
+- Show agent roster, agent details, associated daemon, current run state, and collaboration state.
 
-## API Surface For Frontend Rebuilds
+### Daemon
 
-Important HTTP endpoints:
+The daemon is a Go process normally run with the Docker Compose `daemon` profile.
 
-- `GET /api/workspace`: lightweight workspace metadata.
-- `GET /api/documents/by-path?path=...`: resolve document metadata by path.
-- `POST /api/documents`: create document.
-- `PATCH /api/documents/{id}`: move/rename document.
-- `DELETE /api/documents/{id}`: delete document.
-- `GET /api/documents/{id}/threads`: list document threads.
-- `POST /api/threads`: create thread.
-- `GET /api/threads/{id}`: fetch thread.
-- `POST /api/threads/{id}/messages`: reply to thread.
-- `POST /api/presence`: publish presence/selection.
-- `POST /api/users`, `PATCH /api/users/{id}`, `DELETE /api/users/{id}`.
-- `POST /api/agents`, `PATCH /api/agents/{id}`, `DELETE /api/agents/{id}`.
-- `PATCH /api/agents/{id}/session`: update agent session/status.
-- `GET /api/agents/{id}/inbox`: list agent inbox items.
-- `GET /api/agent-inbox/{id}`: fetch inbox item.
-- `PATCH /api/agent-inbox/{id}`: complete/dismiss/update inbox item.
-- `GET /api/agents/{id}/documents/{documentID}/diff`: bounded document diff.
-- `POST /api/agents/{id}/documents/{documentID}/viewed`: mark document viewed.
+Responsibilities:
 
-Websockets:
+- Authenticate to a specific workspace with `NOTTY_WORKSPACE_ID` and `NOTTY_DAEMON_TOKEN`.
+- Check in to update daemon liveness.
+- Sync canonical documents into a local workspace projection.
+- Maintain daemon-local CRDT/cache data.
+- Maintain per-agent workspaces.
+- Watch local filesystem changes and convert local edits into CRDT updates.
+- Apply remote CRDT updates back to local files.
+- Start, resume, and supervise Codex sessions for agents.
+- Expose `notty-agent-tool` to running agents.
+- Write agent logs as normal workspace files.
 
-- `GET /ws`: workspace event stream.
-- `GET /ws/documents/{id}?client_id=...&actor_id=...&actor_type=...`: Yjs/y-protocol document sync.
+### Postgres
 
-Frontend thread creation must provide:
+Postgres is the only datastore in the current product model.
 
-- `documentId`
-- `body`
-- `relativeStart` and `relativeEnd` for text-range threads
-- display metadata: `start`, `end`, `line`, `excerpt`
+Important tables:
 
-Document-level threads can omit relative anchors.
+- `accounts`: human login accounts.
+- `workspaces`: tenant records.
+- `workspace_members`: account-to-workspace membership.
+- `users`: in-workspace human collaborator identities.
+- `daemons`: workspace daemon records and token hashes.
+- `agents`: daemon-owned agent records.
+- `agent_runs`: agent process/run status.
+- `documents`: document metadata.
+- `document_heads`: current document `state_vector` and `update_id`, not full content.
+- `document_updates`: CRDT binary update log.
+- `document_checkpoints`: periodic compacted CRDT checkpoints.
+- `threads`: thread metadata and anchors.
+- `thread_messages`: thread message bodies.
+- `thread_participants`: users/agents involved in a thread.
+- `presences`: current actor presence.
+- `activities`: meaningful workspace activity.
+- `agent_events`: agent notifications/inbox records.
+- `agent_document_views`: per-agent last viewed document versions.
 
-## Agent Helper Tools
+## Storage And Sync Model
 
-Agents interact with notty through `notty-agent-tool`.
+### Source Of Truth
 
-Common commands:
+Postgres is the source of truth. For documents, the source of truth is the CRDT update stream plus checkpoints, not a plaintext file snapshot.
+
+### Document Heads
+
+`document_heads` stores lightweight head metadata:
+
+- `document_id`
+- `state_vector`
+- `update_id`
+- `updated_at`
+
+It intentionally does not store full plaintext content or full CRDT snapshots.
+
+### Document Updates
+
+`document_updates` stores binary Yjs CRDT updates. This is the canonical append-only update history.
+
+### Checkpoints
+
+`document_checkpoints` stores periodic compacted CRDT state. The backend currently creates checkpoints every 100 updates. Checkpoints are an optimization so clients and diff code do not need to replay an unbounded number of updates.
+
+### Frontend Document Loading
+
+The frontend should:
+
+1. Load workspace metadata from `GET /api/workspaces/{workspaceID}/workspace`.
+2. Keep document metadata in memory.
+3. Open a document websocket only for the active document.
+4. Use Yjs/y-protocol to receive the checkpoint/update-derived document state.
+5. Dispose inactive document CRDT state when switching documents.
+
+The frontend should not use workspace metadata as a full document content API.
+
+### Daemon Document Projection
+
+The daemon receives document updates, reconciles them with local filesystem changes, and projects canonical document state to files. Agent workspaces are separate local copies managed by the daemon.
+
+Daemon internal caches belong in daemon-controlled paths, not as product documents. Agent logs such as `codex-agent.log` are intentionally regular synced files for debugging.
+
+## Authentication And Identity
+
+### Human Authentication
+
+Humans authenticate with email/password:
+
+- Register: `POST /api/auth/register`
+- Login: `POST /api/auth/login`
+- Backend returns a JWT.
+- Frontend sends `Authorization: Bearer <jwt>` on HTTP requests.
+- Browser websockets may pass the JWT as `?token=<jwt>` because browser WebSocket APIs cannot set arbitrary headers.
+
+JWTs are signed with `NOTTY_JWT_SECRET`. Auth is enabled when both `NOTTY_JWT_SECRET` and Postgres are configured.
+
+### Daemon Authentication
+
+Daemons authenticate with an opaque token:
+
+- Human creates a daemon record.
+- Backend returns a plaintext token once.
+- Backend stores only `token_hash`.
+- Daemon sends `Authorization: Bearer <nottyd_token>`.
+- Daemon tokens are workspace-scoped and must match the route workspace ID.
+- Successful daemon authentication updates `daemons.last_seen_at`.
+
+### Agent Acting Identity
+
+Agents are managed by daemons. When a daemon performs an action on behalf of an agent, it sends:
+
+```http
+X-Notty-Acting-Agent-ID: agent_<uuid>
+```
+
+Rules:
+
+- The value must be the canonical agent UUID.
+- Handles are not accepted for daemon acting identity.
+- The backend verifies that the acting agent belongs to the authenticated daemon.
+- If the header is absent, the principal is the daemon itself.
+
+### Error Format
+
+Backend errors use:
+
+```json
+{"error":"message"}
+```
+
+Common statuses:
+
+- `400`: invalid request or validation error.
+- `401`: missing/invalid token.
+- `403`: authenticated but not allowed for this workspace/principal.
+- `404`: referenced object not found.
+- `413`: document diff request too large.
+- `503`: auth/database unavailable.
+
+## User Flows And Endpoint Mapping
+
+### 1. Human Registers
+
+Endpoint:
+
+```http
+POST /api/auth/register
+```
+
+Request:
+
+```json
+{
+  "email": "person@example.com",
+  "password": "secret123",
+  "displayName": "Person Name"
+}
+```
+
+Response `201`:
+
+```json
+{
+  "token": "<jwt>",
+  "account": {
+    "id": "account_...",
+    "email": "person@example.com",
+    "displayName": "Person Name",
+    "createdAt": "...",
+    "updatedAt": "..."
+  },
+  "workspaces": []
+}
+```
+
+Notes:
+
+- Registration creates the account only.
+- Workspace user handle is created later when the user creates or joins a workspace.
+
+### 2. Human Logs In
+
+Endpoint:
+
+```http
+POST /api/auth/login
+```
+
+Request:
+
+```json
+{
+  "email": "person@example.com",
+  "password": "secret123"
+}
+```
+
+Response `200`:
+
+```json
+{
+  "token": "<jwt>",
+  "account": {"id": "account_...", "email": "person@example.com", "displayName": "Person Name"},
+  "workspaces": [{"id": "ws_...", "slug": "product-workspace", "name": "Product Workspace"}]
+}
+```
+
+### 3. Human Creates A Workspace
+
+Endpoint:
+
+```http
+POST /api/workspaces
+Authorization: Bearer <jwt>
+```
+
+Request:
+
+```json
+{
+  "name": "Product Workspace",
+  "slug": "product-workspace",
+  "handle": "alice"
+}
+```
+
+Response `201`:
+
+```json
+{
+  "workspace": {
+    "id": "ws_...",
+    "slug": "product-workspace",
+    "name": "Product Workspace",
+    "createdAt": "...",
+    "updatedAt": "..."
+  },
+  "member": {
+    "workspaceId": "ws_...",
+    "accountId": "account_...",
+    "userId": "user_...",
+    "userHandle": "alice",
+    "userName": "Person Name",
+    "membershipRole": "owner",
+    "status": "active"
+  }
+}
+```
+
+Notes:
+
+- The `handle` field creates the account owner's workspace user handle.
+- Handles are normalized and must be unique inside the workspace.
+
+### 4. Human Selects A Workspace
+
+Endpoint:
+
+```http
+GET /api/workspaces
+Authorization: Bearer <jwt>
+```
+
+Response:
+
+```json
+{"workspaces":[{"id":"ws_...","slug":"product-workspace","name":"Product Workspace"}]}
+```
+
+Then load the selected workspace:
+
+```http
+GET /api/workspaces/{workspaceID}/workspace
+Authorization: Bearer <jwt>
+```
+
+Response:
+
+```json
+{
+  "workspaceId": "ws_...",
+  "currentUserId": "user_...",
+  "currentDaemonId": "",
+  "name": "Product Workspace",
+  "documents": [],
+  "users": [],
+  "daemons": [],
+  "agents": [],
+  "agentRuns": [],
+  "threads": [],
+  "agentEvents": [],
+  "presences": {},
+  "activities": [],
+  "updatedAt": "..."
+}
+```
+
+Notes:
+
+- `documents` is an array of `DocumentMetadata`, not full document content.
+- Human callers see all agents in the workspace.
+- Daemon callers only see agents owned by that daemon.
+
+### 5. Human Adds A Workspace Member
+
+List members:
+
+```http
+GET /api/workspaces/{workspaceID}/members
+Authorization: Bearer <jwt>
+```
+
+Create/add member:
+
+```http
+POST /api/workspaces/{workspaceID}/members
+Authorization: Bearer <jwt>
+```
+
+Request:
+
+```json
+{
+  "email": "teammate@example.com",
+  "displayName": "Teammate",
+  "handle": "teammate",
+  "role": "Designer"
+}
+```
+
+Response `201`:
+
+```json
+{"member": {"workspaceId":"ws_...","accountId":"account_...","userId":"user_...","membershipRole":"member","status":"active"}}
+```
+
+Notes:
+
+- The invited account must already exist.
+- This creates a workspace user identity for the account.
+
+### 6. Human Creates And Deploys A Daemon
+
+List daemons:
+
+```http
+GET /api/workspaces/{workspaceID}/daemons
+Authorization: Bearer <jwt>
+```
+
+Create daemon:
+
+```http
+POST /api/workspaces/{workspaceID}/daemons
+Authorization: Bearer <jwt>
+```
+
+Request:
+
+```json
+{"name":"Local daemon"}
+```
+
+Response `201`:
+
+```json
+{
+  "daemon": {
+    "id": "daemon_...",
+    "workspaceId": "ws_...",
+    "name": "Local daemon",
+    "status": "active",
+    "connectionStatus": "disconnected",
+    "lastSeenAgeSeconds": 0,
+    "createdAt": "..."
+  },
+  "token": "nottyd_..."
+}
+```
+
+Frontend should display the token once and provide a deployment command:
+
+```sh
+NOTTY_WORKSPACE_ID=ws_... \
+NOTTY_DAEMON_TOKEN=nottyd_... \
+docker compose --profile daemon up -d --build daemon
+```
+
+Delete daemon:
+
+```http
+DELETE /api/workspaces/{workspaceID}/daemons/{daemonID}
+Authorization: Bearer <jwt>
+```
+
+Response:
+
+```json
+{"daemon": {"id":"daemon_...","status":"deleted","connectionStatus":"disconnected"}}
+```
+
+Notes:
+
+- Delete is a soft delete.
+- Deleting a daemon marks its agents disconnected.
+
+### 7. Human Creates An Agent Under A Daemon
+
+Preferred endpoint:
+
+```http
+POST /api/workspaces/{workspaceID}/daemons/{daemonID}/agents
+Authorization: Bearer <jwt>
+```
+
+Request:
+
+```json
+{
+  "handle": "codex-agent",
+  "name": "Codex Agent",
+  "role": "Implement changes in the shared workspace",
+  "kind": "codex"
+}
+```
+
+Response `201`:
+
+```json
+{
+  "id": "agent_...",
+  "daemonId": "daemon_...",
+  "handle": "codex-agent",
+  "name": "Codex Agent",
+  "role": "Implement changes in the shared workspace",
+  "kind": "codex",
+  "systemPrompt": "...derived shared prompt...",
+  "workspaceRoot": "agents/agent_...",
+  "status": "idle",
+  "updatedAt": "..."
+}
+```
+
+Alternative endpoint:
+
+```http
+POST /api/workspaces/{workspaceID}/agents
+Authorization: Bearer <jwt>
+```
+
+This accepts the same request plus `"daemonId": "daemon_..."`. The frontend product should prefer the daemon-scoped endpoint.
+
+Notes:
+
+- Agent kind currently supports `codex`.
+- Agent system prompts are derived by the backend from the shared prompt template plus name, handle, kind, and role.
+- End users should not customize the system prompt directly.
+- The frontend should expose one `New agent` action and ask the user to select a daemon.
+
+### 8. Human Edits An Agent
+
+Update agent metadata:
+
+```http
+PATCH /api/workspaces/{workspaceID}/agents/{agentID}
+Authorization: Bearer <jwt>
+```
+
+Request:
+
+```json
+{
+  "handle": "reviewer",
+  "name": "Reviewer",
+  "role": "Review product changes"
+}
+```
+
+Response:
+
+```json
+{"id":"agent_...","handle":"reviewer","name":"Reviewer","role":"Review product changes"}
+```
+
+Delete agent:
+
+```http
+DELETE /api/workspaces/{workspaceID}/agents/{agentID}
+Authorization: Bearer <jwt>
+```
+
+Response:
+
+```json
+{"status":"deleted"}
+```
+
+### 9. Human Creates, Moves, Deletes Documents
+
+Create:
+
+```http
+POST /api/workspaces/{workspaceID}/documents
+Authorization: Bearer <jwt>
+```
+
+Request:
+
+```json
+{
+  "path": "docs/spec.md",
+  "content": "# Spec\n"
+}
+```
+
+Response `201`:
+
+```json
+{
+  "id": "doc_...",
+  "path": "docs/spec.md",
+  "title": "spec.md",
+  "stateVector": "...",
+  "updateId": 1,
+  "updatedAt": "...",
+  "clientIdSeed": 123
+}
+```
+
+Resolve by path:
+
+```http
+GET /api/workspaces/{workspaceID}/documents/by-path?path=docs/spec.md
+Authorization: Bearer <jwt-or-daemon-token>
+```
+
+Response:
+
+```json
+{"document": {"id":"doc_...","path":"docs/spec.md","title":"spec.md","updateId":1}}
+```
+
+Move/rename:
+
+```http
+PATCH /api/workspaces/{workspaceID}/documents/{documentID}
+Authorization: Bearer <jwt-or-daemon-token>
+```
+
+Request:
+
+```json
+{"path":"docs/new-name.md"}
+```
+
+Delete:
+
+```http
+DELETE /api/workspaces/{workspaceID}/documents/{documentID}
+Authorization: Bearer <jwt-or-daemon-token>
+```
+
+Response:
+
+```json
+{"status":"deleted"}
+```
+
+### 10. Frontend Syncs Active Document Text
+
+Open a document websocket:
+
+```http
+GET /ws/workspaces/{workspaceID}/documents/{documentID}?client_id=<uint64>&actor_id=<id>&actor_type=human&token=<jwt>
+```
+
+Protocol:
+
+- Websocket binary messages use Yjs/y-protocol.
+- `MessageSync` handles `SyncStep1`, `SyncStep2`, and incremental `SyncUpdate`.
+- `MessageAwareness` carries awareness/presence state for document peers.
+- Backend persists applied CRDT updates.
+- Backend broadcasts applied updates to other sessions in the document room.
+- Backend publishes a workspace event of type `document.updated`.
+
+Notes:
+
+- Browser clients normally pass JWT as `?token=...`.
+- Daemon clients can authenticate with `Authorization: Bearer <daemon-token>`.
+- Daemon agent document websocket operations may include `X-Notty-Acting-Agent-ID`.
+
+### 11. Human Creates A Thread
+
+Create thread:
+
+```http
+POST /api/workspaces/{workspaceID}/threads
+Authorization: Bearer <jwt-or-daemon-token>
+```
+
+Document-level request:
+
+```json
+{
+  "documentId": "doc_...",
+  "title": "General question",
+  "body": "Should this section be split?"
+}
+```
+
+Range-thread request:
+
+```json
+{
+  "documentId": "doc_...",
+  "title": "Clarify requirement",
+  "body": "@codex-agent can you review this?",
+  "relativeStart": "<base64 yjs relative position>",
+  "relativeEnd": "<base64 yjs relative position>",
+  "start": 12,
+  "end": 34,
+  "line": 5,
+  "excerpt": "text being discussed"
+}
+```
+
+Response `201`:
+
+```json
+{
+  "thread": {"id":"thread_...","documentId":"doc_...","status":"open","anchor":{},"messages":[]},
+  "message": {"id":"msg_...","threadId":"thread_...","body":"...","kind":"comment"}
+}
+```
+
+Rules:
+
+- `relativeStart` and `relativeEnd` must be supplied together.
+- If a thread has line/range metadata but no relative anchors, the backend rejects it.
+- If no range metadata and no relative anchors are supplied, the thread is document-level.
+- Thread message mentions create agent inbox events.
+
+### 12. Human Replies To A Thread
+
+Fetch thread:
+
+```http
+GET /api/workspaces/{workspaceID}/threads/{threadID}
+Authorization: Bearer <jwt-or-daemon-token>
+```
+
+List document threads:
+
+```http
+GET /api/workspaces/{workspaceID}/documents/{documentID}/threads
+Authorization: Bearer <jwt-or-daemon-token>
+```
+
+Reply:
+
+```http
+POST /api/workspaces/{workspaceID}/threads/{threadID}/messages
+Authorization: Bearer <jwt-or-daemon-token>
+```
+
+Request:
+
+```json
+{
+  "body": "I agree with this direction.",
+  "kind": "comment"
+}
+```
+
+Response `201`:
+
+```json
+{"thread": {"id":"thread_..."},"message": {"id":"msg_...","threadId":"thread_..."}}
+```
+
+Notes:
+
+- `@handle` mentions in `body` are resolved against workspace users and agents.
+- Mentions of agents create `for-me` inbox items.
+- Replies to threads can notify participating agents.
+
+### 13. Frontend Publishes Presence
+
+Endpoint:
+
+```http
+POST /api/workspaces/{workspaceID}/presence
+Authorization: Bearer <jwt-or-daemon-token>
+```
+
+Request:
+
+```json
+{
+  "actorId": "user_...",
+  "actorType": "human",
+  "documentId": "doc_...",
+  "filePath": "docs/spec.md",
+  "mode": "editing",
+  "selection": [10, 20],
+  "activity": "Editing docs/spec.md"
+}
+```
+
+Response:
+
+```json
+{"actorId":"user_...","actorType":"human","documentId":"doc_...","selection":[10,20],"activity":"Editing docs/spec.md"}
+```
+
+Notes:
+
+- In auth mode, actor identity is derived from auth context and can override request actor fields.
+- Workspace websocket broadcasts `presence.updated`.
+
+### 14. Human Starts Or Stops Agent Work
+
+Start run for one agent:
+
+```http
+POST /api/workspaces/{workspaceID}/agents/{agentID}/runs
+Authorization: Bearer <jwt>
+```
+
+Request:
+
+```json
+{
+  "prompt": "Review the current document and suggest improvements.",
+  "assignedTaskRef": "thread_..."
+}
+```
+
+Response `201`:
+
+```json
+{"agent": {"id":"agent_...","status":"working"},"run": {"id":"run_...","agentId":"agent_...","status":"queued"}}
+```
+
+Stop run:
+
+```http
+POST /api/workspaces/{workspaceID}/agent-runs/{runID}/stop
+Authorization: Bearer <jwt>
+```
+
+Response:
+
+```json
+{"id":"run_...","desiredStatus":"stopped"}
+```
+
+### 15. Daemon Updates Agent Runtime State
+
+Update agent session:
+
+```http
+PATCH /api/workspaces/{workspaceID}/agents/{agentID}/session
+Authorization: Bearer <daemon-token>
+X-Notty-Acting-Agent-ID: agent_...
+```
+
+Request:
+
+```json
+{
+  "status": "working",
+  "codexThreadId": "019...",
+  "currentTurnId": "turn_...",
+  "currentActivity": "Reviewing notifications",
+  "lastHeartbeatAt": "2026-05-10T12:00:00Z"
+}
+```
+
+Update run:
+
+```http
+PATCH /api/workspaces/{workspaceID}/agent-runs/{runID}
+Authorization: Bearer <daemon-token>
+X-Notty-Acting-Agent-ID: agent_...
+```
+
+Request:
+
+```json
+{
+  "status": "running",
+  "desiredStatus": "running",
+  "sessionId": "session_...",
+  "processId": 123,
+  "lastHeartbeatAt": "2026-05-10T12:00:00Z",
+  "lastMessage": "Started",
+  "logTail": ["line 1", "line 2"],
+  "error": "",
+  "exitCode": null
+}
+```
+
+Notes:
+
+- Daemon/agent access is restricted to agents owned by the authenticated daemon.
+- Workspace websocket broadcasts `agent.updated` and `agent.run.updated`.
+
+### 16. Agent Reviews Inbox And Diffs
+
+List inbox:
+
+```http
+GET /api/workspaces/{workspaceID}/agents/{agentID}/inbox?box=for-me&status=pending
+Authorization: Bearer <daemon-token>
+X-Notty-Acting-Agent-ID: agent_...
+```
+
+Response:
+
+```json
+{"items": [{"id":"aevt_...","agentId":"agent_...","type":"thread.mentioned","box":"for_me","status":"pending","summary":"..."}]}
+```
+
+Fetch inbox item:
+
+```http
+GET /api/workspaces/{workspaceID}/agent-inbox/{itemID}
+Authorization: Bearer <daemon-token>
+X-Notty-Acting-Agent-ID: agent_...
+```
+
+Update inbox item:
+
+```http
+PATCH /api/workspaces/{workspaceID}/agent-inbox/{itemID}
+Authorization: Bearer <daemon-token>
+X-Notty-Acting-Agent-ID: agent_...
+```
+
+Request:
+
+```json
+{"status":"completed"}
+```
+
+Allowed status values used by the product include `pending`, `processing`, `completed`, and `dismissed`.
+
+Diff document:
+
+```http
+GET /api/workspaces/{workspaceID}/agents/{agentID}/documents/{documentID}/diff?from=last-viewed&to=head
+Authorization: Bearer <daemon-token>
+X-Notty-Acting-Agent-ID: agent_...
+```
+
+Response:
+
+```json
+{
+  "diff": {
+    "documentId": "doc_...",
+    "fromUpdateId": 10,
+    "toUpdateId": 20,
+    "fromContent": "...",
+    "toContent": "...",
+    "unified": "...",
+    "hunks": [{"op":"equal","text":"..."},{"op":"insert","text":"..."}]
+  }
+}
+```
+
+Supported version specs:
+
+- `last-viewed`
+- `head`
+- `current`
+- `latest`
+- `update:<id>`
+- raw numeric update ID, such as `42`
+
+Diff limits:
+
+- Max input bytes per side: 2 MiB.
+- Max lines per side: 20,000.
+- Max line product: 2,000,000.
+- Max response bytes: 1 MiB.
+- Oversized diffs return `413`.
+
+Mark document viewed:
+
+```http
+POST /api/workspaces/{workspaceID}/agents/{agentID}/documents/{documentID}/viewed
+Authorization: Bearer <daemon-token>
+X-Notty-Acting-Agent-ID: agent_...
+```
+
+Request:
+
+```json
+{"updateId": 20}
+```
+
+If `updateId` is omitted, the backend marks the document viewed at the current head.
+
+### 17. Daemon Claims Agent Events
+
+Claim event:
+
+```http
+POST /api/workspaces/{workspaceID}/agent-events/claim
+Authorization: Bearer <daemon-token>
+X-Notty-Acting-Agent-ID: agent_...
+```
+
+Request:
+
+```json
+{
+  "agentId": "agent_...",
+  "claimedBy": "daemon_..."
+}
+```
+
+Response:
+
+```json
+{"event": {"id":"aevt_...","status":"processing","agentId":"agent_...","claimedBy":"daemon_..."}}
+```
+
+Update event:
+
+```http
+PATCH /api/workspaces/{workspaceID}/agent-events/{eventID}
+Authorization: Bearer <daemon-token>
+X-Notty-Acting-Agent-ID: agent_...
+```
+
+Request:
+
+```json
+{
+  "status": "completed",
+  "threadId": "thread_...",
+  "runId": "run_...",
+  "lastError": ""
+}
+```
+
+Notes:
+
+- Inbox endpoints are the preferred agent-facing interface.
+- Agent event endpoints exist for daemon automation state transitions.
+
+## API Contracts
+
+### Shared Headers
+
+Human HTTP:
+
+```http
+Authorization: Bearer <jwt>
+Content-Type: application/json
+```
+
+Daemon HTTP:
+
+```http
+Authorization: Bearer <nottyd_token>
+Content-Type: application/json
+```
+
+Daemon acting as agent:
+
+```http
+Authorization: Bearer <nottyd_token>
+X-Notty-Acting-Agent-ID: agent_...
+Content-Type: application/json
+```
+
+Browser websocket auth:
+
+```text
+?token=<jwt>
+```
+
+Daemon websocket auth:
+
+```http
+Authorization: Bearer <nottyd_token>
+X-Notty-Acting-Agent-ID: agent_...
+```
+
+### Models
+
+Account:
+
+```json
+{"id":"account_...","email":"person@example.com","displayName":"Person","createdAt":"...","updatedAt":"..."}
+```
+
+Workspace:
+
+```json
+{"id":"ws_...","slug":"product-workspace","name":"Product Workspace","createdAt":"...","updatedAt":"..."}
+```
+
+WorkspaceMember:
+
+```json
+{"workspaceId":"ws_...","accountId":"account_...","userId":"user_...","userHandle":"alice","userName":"Alice","membershipRole":"owner","status":"active","invitedBy":"","createdAt":"...","acceptedAt":"..."}
+```
+
+DocumentMetadata:
+
+```json
+{"id":"doc_...","path":"docs/spec.md","title":"spec.md","stateVector":"...","updateId":12,"updatedAt":"...","clientIdSeed":123}
+```
+
+Daemon:
+
+```json
+{"id":"daemon_...","workspaceId":"ws_...","name":"Local daemon","status":"active","connectionStatus":"online","lastSeenAt":"...","lastSeenAgeSeconds":4,"createdAt":"...","deletedAt":"..."}
+```
+
+Agent:
+
+```json
+{"id":"agent_...","daemonId":"daemon_...","handle":"codex-agent","name":"Codex Agent","role":"...","kind":"codex","systemPrompt":"...","workspaceRoot":"agents/agent_...","codexThreadId":"...","currentTurnId":"...","sessionId":"...","status":"idle","currentTask":"","currentActivity":"","currentRunId":"","lastHeartbeatAt":"...","lastRunCompleted":"...","updatedAt":"..."}
+```
+
+Thread:
+
+```json
+{"id":"thread_...","documentId":"doc_...","title":"Clarify requirement","status":"open","anchor":{"documentId":"doc_...","kind":"text-range","relativeStart":"...","relativeEnd":"...","start":12,"end":34,"line":5,"excerpt":"..."},"createdById":"user_...","createdByType":"human","createdByHandle":"alice","createdByName":"Alice","participantIds":["agent_..."],"participantHandles":["codex-agent"],"messages":[],"createdAt":"...","updatedAt":"..."}
+```
+
+ThreadMessage:
+
+```json
+{"id":"msg_...","threadId":"thread_...","authorId":"user_...","authorType":"human","authorHandle":"alice","authorName":"Alice","body":"@codex-agent please review","kind":"comment","createdAt":"..."}
+```
+
+AgentEvent:
+
+```json
+{"id":"aevt_...","agentId":"agent_...","agentHandle":"codex-agent","type":"thread.mentioned","box":"for_me","status":"pending","documentId":"doc_...","threadId":"thread_...","threadMessageId":"msg_...","anchorStart":12,"anchorEnd":34,"fromUpdateId":0,"toUpdateId":0,"summary":"...","prompt":"...","dedupKey":"...","claimedBy":"","runId":"","lastError":"","attemptCount":0,"availableAt":"...","createdAt":"...","updatedAt":"..."}
+```
+
+### HTTP Route Inventory
+
+| Method | Route | Auth | Request | Response | Used By |
+| --- | --- | --- | --- | --- | --- |
+| `GET` | `/healthz` | none | none | `{"status":"ok"}` | health checks |
+| `POST` | `/api/auth/register` | none | `RegisterRequest` | `AuthResponse` | registration |
+| `POST` | `/api/auth/login` | none | `LoginRequest` | `AuthResponse` | login |
+| `GET` | `/api/auth/me` | human | none | `{account, workspaces}` | session restore |
+| `GET` | `/api/workspaces` | human | none | `{workspaces}` | workspace picker |
+| `POST` | `/api/workspaces` | human | `CreateWorkspaceRequest` | `{workspace, member}` | workspace creation |
+| `GET` | `/api/workspaces/{workspaceID}/workspace` | human or daemon | none | workspace metadata | workspace shell and daemon refresh |
+| `GET` | `/api/workspaces/{workspaceID}/members` | human | none | `{members}` | member management |
+| `POST` | `/api/workspaces/{workspaceID}/members` | human | `AddWorkspaceMemberRequest` | `{member}` | member management |
+| `GET` | `/api/workspaces/{workspaceID}/daemons` | human | none | `{daemons}` | daemon management |
+| `POST` | `/api/workspaces/{workspaceID}/daemons` | human | `CreateDaemonRequest` | `{daemon, token}` | daemon setup |
+| `DELETE` | `/api/workspaces/{workspaceID}/daemons/{daemonID}` | human | none | `{daemon}` | daemon deletion |
+| `POST` | `/api/workspaces/{workspaceID}/daemons/{daemonID}/agents` | human | `CreateAgentRequest` without `daemonId` | `Agent` | preferred agent creation |
+| `GET` | `/api/workspaces/{workspaceID}/documents/by-path?path=...` | human or daemon | none | `{document}` | document lookup |
+| `POST` | `/api/workspaces/{workspaceID}/documents` | human or daemon | `CreateDocumentRequest` | `DocumentMetadata` | create file |
+| `GET` | `/api/workspaces/{workspaceID}/documents/{id}/threads` | human or daemon | none | `{threads}` | document thread list |
+| `PATCH` | `/api/workspaces/{workspaceID}/documents/{id}` | human or daemon | `UpdateDocumentRequest` | `DocumentMetadata` | move/rename file |
+| `DELETE` | `/api/workspaces/{workspaceID}/documents/{id}` | human or daemon | none | `{"status":"deleted"}` | delete file |
+| `POST` | `/api/workspaces/{workspaceID}/users` | human or daemon | `CreateUserRequest` | `User` | legacy/internal user records |
+| `PATCH` | `/api/workspaces/{workspaceID}/users/{id}` | human or daemon | `UpdateUserRequest` | `User` | legacy/internal user records |
+| `DELETE` | `/api/workspaces/{workspaceID}/users/{id}` | human or daemon | none | `{"status":"deleted"}` | legacy/internal user records |
+| `POST` | `/api/workspaces/{workspaceID}/agents` | human | `CreateAgentRequest` with `daemonId` | `Agent` | alternate agent creation |
+| `PATCH` | `/api/workspaces/{workspaceID}/agents/{id}` | human | `UpdateAgentRequest` | `Agent` | edit agent |
+| `PATCH` | `/api/workspaces/{workspaceID}/agents/{id}/session` | agent/daemon scoped | `UpdateAgentSessionRequest` | `Agent` | daemon runtime status |
+| `DELETE` | `/api/workspaces/{workspaceID}/agents/{id}` | human | none | `{"status":"deleted"}` | delete agent |
+| `POST` | `/api/workspaces/{workspaceID}/agents/{id}/runs` | human | `StartAgentRunRequest` | `{agent, run}` | start agent |
+| `POST` | `/api/workspaces/{workspaceID}/threads` | human or daemon/agent | `CreateThreadRequest` | `{thread, message}` | create thread |
+| `GET` | `/api/workspaces/{workspaceID}/threads/{id}` | human or daemon | none | `{thread}` | read thread |
+| `POST` | `/api/workspaces/{workspaceID}/threads/{id}/messages` | human or daemon/agent | `ReplyThreadRequest` | `{thread, message}` | reply thread |
+| `POST` | `/api/workspaces/{workspaceID}/presence` | human or daemon | `UpsertPresenceRequest` | `Presence` | presence |
+| `POST` | `/api/workspaces/{workspaceID}/agent-runs` | human | `StartAgentRunRequest` | `{agent, run}` | alternate run creation |
+| `PATCH` | `/api/workspaces/{workspaceID}/agent-runs/{id}` | agent/daemon scoped | `UpdateAgentRunRequest` | `AgentRun` | daemon runtime status |
+| `POST` | `/api/workspaces/{workspaceID}/agent-runs/{id}/stop` | human | none | `AgentRun` | stop agent |
+| `POST` | `/api/workspaces/{workspaceID}/agent-events/claim` | agent/daemon scoped | `ClaimAgentEventRequest` | `{event}` | daemon event loop |
+| `PATCH` | `/api/workspaces/{workspaceID}/agent-events/{id}` | agent/daemon scoped | `UpdateAgentEventRequest` | `AgentEvent` | daemon event loop |
+| `GET` | `/api/workspaces/{workspaceID}/agents/{id}/notifications` | agent/daemon scoped | `?status=pending` | `{notifications}` | legacy alias |
+| `GET` | `/api/workspaces/{workspaceID}/agent-notifications/{id}` | agent/daemon scoped | none | `{notification}` | legacy alias |
+| `PATCH` | `/api/workspaces/{workspaceID}/agent-notifications/{id}` | agent/daemon scoped | `UpdateAgentNotificationRequest` | `{notification}` | legacy alias |
+| `GET` | `/api/workspaces/{workspaceID}/agents/{id}/inbox` | agent/daemon scoped | `?box=for-me&status=pending` | `{items}` | notification center |
+| `GET` | `/api/workspaces/{workspaceID}/agent-inbox/{id}` | agent/daemon scoped | none | `{item}` | notification center |
+| `PATCH` | `/api/workspaces/{workspaceID}/agent-inbox/{id}` | agent/daemon scoped | `UpdateAgentNotificationRequest` | `{item}` | notification center |
+| `GET` | `/api/workspaces/{workspaceID}/agents/{id}/documents/{documentID}/diff` | agent/daemon scoped | `?from=last-viewed&to=head` | `{diff}` | agent review |
+| `POST` | `/api/workspaces/{workspaceID}/agents/{id}/documents/{documentID}/viewed` | agent/daemon scoped | `MarkDocumentViewedRequest` | `{view}` | agent review |
+
+### Request Types
+
+```ts
+type RegisterRequest = {
+  email: string;
+  password: string;
+  displayName: string;
+};
+
+type LoginRequest = {
+  email: string;
+  password: string;
+};
+
+type CreateWorkspaceRequest = {
+  name: string;
+  slug?: string;
+  handle?: string;
+};
+
+type AddWorkspaceMemberRequest = {
+  email: string;
+  displayName?: string;
+  handle?: string;
+  role?: string;
+};
+
+type CreateDaemonRequest = {
+  name: string;
+};
+
+type CreateDocumentRequest = {
+  path: string;
+  content?: string;
+};
+
+type UpdateDocumentRequest = {
+  path: string;
+};
+
+type CreateThreadRequest = {
+  documentId: string;
+  title?: string;
+  body: string;
+  relativeStart?: string;
+  relativeEnd?: string;
+  start?: number;
+  end?: number;
+  line?: number;
+  excerpt?: string;
+};
+
+type ReplyThreadRequest = {
+  body: string;
+  kind?: string;
+};
+
+type CreateAgentRequest = {
+  daemonId?: string;
+  handle: string;
+  name: string;
+  role?: string;
+  kind?: "codex";
+  systemPrompt?: string;
+};
+
+type UpdateAgentRequest = {
+  handle?: string;
+  name?: string;
+  role?: string;
+  systemPrompt?: string;
+};
+
+type UpdateAgentSessionRequest = {
+  status?: string;
+  codexThreadId?: string;
+  currentTurnId?: string;
+  currentActivity?: string;
+  lastHeartbeatAt?: string;
+};
+
+type StartAgentRunRequest = {
+  agentId?: string;
+  agentName?: string;
+  role?: string;
+  agentKind?: string;
+  prompt: string;
+  assignedTaskRef?: string;
+};
+
+type UpdateAgentRunRequest = {
+  status?: string;
+  desiredStatus?: string;
+  sessionId?: string;
+  processId?: number;
+  lastHeartbeatAt?: string;
+  lastMessage?: string;
+  logTail?: string[];
+  error?: string;
+  exitCode?: number | null;
+};
+
+type UpdateAgentNotificationRequest = {
+  status: "pending" | "completed" | "dismissed" | string;
+};
+
+type MarkDocumentViewedRequest = {
+  updateId?: number;
+};
+```
+
+Notes:
+
+- `systemPrompt` exists in legacy request structs, but the backend derives the actual prompt. Product UI should not expose system prompt customization.
+- `CreateThreadRequest.start`, `end`, and line fields use UTF-16 offsets for browser/editor compatibility.
+
+### Websocket Contracts
+
+Workspace event websocket:
+
+```http
+GET /ws/workspaces/{workspaceID}?token=<jwt>
+```
+
+Initial message:
+
+```json
+{"type":"workspace.snapshot","data":{"documents":[],"users":[],"daemons":[],"agents":[],"agentRuns":[],"threads":[],"agentEvents":[],"presences":{},"activities":[]}}
+```
+
+Event envelope:
+
+```json
+{"type":"event.name","data":{}}
+```
+
+Known event types:
+
+- `workspace.snapshot`
+- `document.created`
+- `document.moved`
+- `document.deleted`
+- `document.updated`
+- `thread.created`
+- `thread.updated`
+- `thread.message.created`
+- `presence.updated`
+- `daemon.created`
+- `daemon.deleted`
+- `agent.created`
+- `agent.updated`
+- `agent.deleted`
+- `agent.run.updated`
+- `agent.event.updated`
+- `user.created`
+- `user.updated`
+- `user.deleted`
+
+Document websocket:
+
+```http
+GET /ws/workspaces/{workspaceID}/documents/{documentID}?client_id=<uint64>&actor_id=<id>&actor_type=<human|agent|daemon>&token=<jwt>
+```
+
+Protocol:
+
+- Binary Yjs/y-protocol messages.
+- Backend sends sync replies and awareness broadcasts.
+- Client sends sync step/update messages and awareness messages.
+- Backend persists applied CRDT updates and broadcasts to peers.
+
+## Agent Helper CLI
+
+Agents should use `notty-agent-tool` instead of calling backend APIs manually. The daemon injects:
+
+- `NOTTY_AGENT_TOOL_BASE_URL`
+- `NOTTY_AGENT_TOOL_TOKEN`
+
+Commands:
 
 ```sh
 notty-agent-tool list-documents
 notty-agent-tool get-document-by-path --path docs/spec.md
-notty-agent-tool list-threads-for-document --document-id <document-id>
-notty-agent-tool get-thread --thread-id <thread-id>
+notty-agent-tool list-threads-for-document --document-id doc_...
+notty-agent-tool get-thread --thread-id thread_...
 notty-agent-tool list-inbox --box for-me
 notty-agent-tool list-inbox --box general
-notty-agent-tool get-inbox-item --item-id <item-id>
-notty-agent-tool diff-document --document-id <document-id> --from last-viewed --to head
-notty-agent-tool mark-document-viewed --document-id <document-id>
+notty-agent-tool get-inbox-item --item-id aevt_...
+notty-agent-tool complete-inbox-item --item-id aevt_...
+notty-agent-tool dismiss-inbox-item --item-id aevt_...
+notty-agent-tool diff-document --document-id doc_... --from last-viewed --to head
+notty-agent-tool mark-document-viewed --document-id doc_...
+notty-agent-tool create-thread --path docs/spec.md --line 42 --title "Question" --body "..."
 notty-agent-tool create-thread --path docs/spec.md --line 42 --quote "exact text" --body "..."
-notty-agent-tool reply-thread --thread-id <thread-id> --body "..."
+notty-agent-tool create-thread --document-id doc_... --document --body "Document-level note"
+notty-agent-tool reply-thread --thread-id thread_... --body "..."
 ```
 
-Agents should not need to know about raw CRDT relative-position encoding.
+Create-thread anchor options:
 
-## Design Constraints And Gotchas
+- `--document`: create document-level thread.
+- `--path` or `--document-id`: choose target document.
+- `--line`: anchor to a full line.
+- `--quote`: anchor to exact text, optionally constrained by `--line`.
+- `--start-line`, `--start-column`, `--end-line`, `--end-column`: precise range.
+- `--start`, `--end`: UTF-16 offsets.
 
-- Do not rebuild proposal/merge flows; they are intentionally removed.
-- Do not implement document plaintext mentions as notifications.
-- Do not treat raw line numbers as stable thread anchors.
-- Do not fetch or hold all document CRDT states in the frontend.
-- Do not make `/api/workspace` a document content loading path.
-- Do not hide multiple same-line threads behind an inaccessible badge.
-- Do not assume agent logs are the source of truth for agent state; use agent/session fields and inbox data.
-- Do not wake agents for every keystroke; document inbox items are deduplicated.
+The daemon resolves these into backend `relativeStart` and `relativeEnd` anchors.
 
-## Running Locally
+## Frontend Design Expectations
+
+### Workspace Shell
+
+The workspace shell should show:
+
+- Current workspace name and switcher.
+- Document list.
+- Active document.
+- Thread count/activity per document.
+- Daemon cards with online/stale/offline state.
+- Agents grouped or labeled by owning daemon.
+- Agent detail modal showing associated daemon.
+- Activity feed for meaningful events.
+
+### Daemon Management
+
+The UI should:
+
+- Allow creating a daemon.
+- Show the daemon token once.
+- Show the full deployment command.
+- Show daemon liveness as online, stale, or offline.
+- Allow deleting a daemon.
+- Show which agents belong to each daemon.
+
+### Agent Management
+
+The UI should:
+
+- Have one `New agent` button.
+- Ask the user to select a daemon in the new-agent form.
+- Show agent handle, name, role, status, and current activity.
+- Show associated daemon in agent detail.
+- Avoid exposing system prompt customization.
+
+### Document Editor
+
+The editor should:
+
+- Load only the active document CRDT.
+- Support rapid typing and deletion.
+- Keep local keystrokes stable while remote updates arrive.
+- Show document threads near the relevant ranges.
+- Let users open every thread on a line/range.
+- Create CRDT-relative anchors for range threads.
+
+### Thread Panel
+
+The thread UI should:
+
+- Show all threads for the active document.
+- Show messages and participants.
+- Support replies.
+- Support `@handle` mentions.
+- Jump to thread anchors when resolvable.
+- Degrade gracefully if an anchor cannot resolve.
+
+## Agent Behavior Contract
+
+The backend generates a shared system prompt for agents. Product-level behavior:
+
+- Agents work from their own dedicated workspace copy.
+- File changes sync promptly to other peers.
+- Agents should avoid broad filesystem churn unless intended.
+- Plain `@handle` text in Markdown is regular text, not a notification.
+- Thread mentions are notification-bearing.
+- Agents should inspect `for-me` inbox items first.
+- General inbox items are ambient and may not require action.
+- Agents do not need to reply unless mentioned or they have useful feedback.
+- If agents communicate, they must use thread tools.
+- If uncertain, agents should ask for input in a thread before substantial edits.
+- Agents should reuse relevant existing threads when possible.
+
+## Removed Or Intentionally Absent
+
+- No separate comments feature. Threads are the discussion/comment primitive.
+- No proposal/merge feature.
+- No document-text mention notifications.
+- No global bootstrap owner.
+- No daemon acting identity by agent handle.
+- No frontend preload of all document CRDT histories.
+- No full-content `/api/workspace` response.
+- No user-facing raw CRDT anchor editing.
+
+## Development Setup
+
+Start the default stack:
 
 ```sh
 docker compose up --build
@@ -382,14 +1540,39 @@ Open:
 http://localhost:5173
 ```
 
-Services:
+Default services:
 
 - `backend`: Go API and websocket server on `:8080`.
 - `frontend`: React/Vite client on `:5173`.
-- `daemon`: local projection daemon, agent workspace manager, and Codex app-server supervisor.
 - `postgres`: canonical datastore.
 
-The daemon container installs `@openai/codex` and mounts `${HOME}/.codex` so agent sessions can use local Codex credentials.
+Start a daemon after creating a daemon token in the frontend:
+
+```sh
+NOTTY_WORKSPACE_ID=ws_... \
+NOTTY_DAEMON_TOKEN=nottyd_... \
+docker compose --profile daemon up -d --build daemon
+```
+
+Important backend environment variables:
+
+- `NOTTY_PORT`: backend port, default `8080`.
+- `NOTTY_DATABASE_URL`: Postgres DSN.
+- `NOTTY_JWT_SECRET`: enables JWT auth when Postgres is configured.
+- `NOTTY_PPROF_ADDR`: optional pprof bind address.
+
+Important daemon environment variables:
+
+- `NOTTY_BACKEND_URL`: backend URL.
+- `NOTTY_WORKSPACE_ID`: workspace the daemon belongs to.
+- `NOTTY_DAEMON_TOKEN`: one-time daemon token from backend.
+- `NOTTY_WORKSPACE_DIR`: local canonical workspace projection.
+- `NOTTY_AGENT_WORKSPACE_ROOT`: parent directory for per-agent workspaces.
+- `NOTTY_RUNTIME_DIR`: daemon runtime data.
+- `NOTTY_CACHE_DIR`: daemon CRDT cache directory, defaults under runtime.
+- `NOTTY_CODEX_COMMAND`: Codex executable, default `codex`.
+- `NOTTY_AGENT_TOOL_BASE_URL`: local agent helper gateway URL.
+- `NOTTY_PPROF_ADDR`: optional daemon pprof bind address.
 
 ## Testing
 
@@ -406,4 +1589,26 @@ Regression tests:
 go test -tags=regression ./test/regression
 ```
 
-Stress and restart diagnostics are documented in `test/regression/README.md`.
+Correctness-focused regression areas:
+
+- CRDT sync under sustained append/write pressure.
+- Backend restart safety.
+- Daemon restart safety.
+- Filesystem reconciliation.
+- Workspace divergence across agent workspaces.
+- Thread mention notification enqueueing.
+- Agent inbox deduplication.
+- Document diff bounds.
+- Daemon token scoping.
+- Agent UUID acting identity enforcement.
+
+## Design Principles To Preserve
+
+- Keep the workspace metadata endpoint lightweight.
+- Keep the active document as the only frontend CRDT document in memory.
+- Treat Postgres as the only datastore.
+- Keep threads as the only discussion primitive.
+- Keep daemon ownership of agents visible.
+- Keep daemon token creation explicit and one-time.
+- Keep user-facing states simple.
+- Test fragile synchronization and identity code paths, not trivial getters/setters.

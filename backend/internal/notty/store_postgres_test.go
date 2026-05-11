@@ -1186,6 +1186,10 @@ func clearNottyTables(db *sql.DB) error {
 		`DELETE FROM activities`,
 		`DELETE FROM agents`,
 		`DELETE FROM users`,
+		`DELETE FROM daemons`,
+		`DELETE FROM workspace_members`,
+		`DELETE FROM accounts`,
+		`DELETE FROM workspaces`,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {

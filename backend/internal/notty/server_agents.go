@@ -9,6 +9,86 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
+func (s *Server) requireHumanPrincipal(w http.ResponseWriter, r *http.Request) bool {
+	if !s.authEnabled() {
+		return true
+	}
+	auth, ok := authFromContext(r.Context())
+	if ok && auth.PrincipalKind == "human" {
+		return true
+	}
+	writeError(w, http.StatusForbidden, "human authentication is required")
+	return false
+}
+
+func (s *Server) requireAgentEndpointAccess(w http.ResponseWriter, r *http.Request, agentID string) bool {
+	if !s.authEnabled() {
+		return true
+	}
+	auth, ok := authFromContext(r.Context())
+	if !ok || auth == nil || auth.PrincipalKind == "human" {
+		return true
+	}
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		writeError(w, http.StatusBadRequest, "agent id is required")
+		return false
+	}
+	if auth.PrincipalKind == "agent" {
+		if auth.ActingAgentID == agentID {
+			return true
+		}
+		writeError(w, http.StatusForbidden, "agent access denied")
+		return false
+	}
+	if auth.PrincipalKind == "daemon" {
+		snapshot := s.requestStore(r).Snapshot()
+		agent := snapshot.Agents[agentID]
+		if agent != nil && agent.DaemonID == auth.DaemonID {
+			return true
+		}
+		writeError(w, http.StatusForbidden, "daemon cannot access this agent")
+		return false
+	}
+	writeError(w, http.StatusForbidden, "agent access denied")
+	return false
+}
+
+func (s *Server) requireAgentEventEndpointAccess(w http.ResponseWriter, r *http.Request, eventID string) bool {
+	if !s.authEnabled() {
+		return true
+	}
+	auth, ok := authFromContext(r.Context())
+	if !ok || auth == nil || auth.PrincipalKind == "human" {
+		return true
+	}
+	eventID = strings.TrimSpace(eventID)
+	snapshot := s.requestStore(r).Snapshot()
+	if event := snapshot.AgentEvents[eventID]; event != nil {
+		return s.requireAgentEndpointAccess(w, r, event.AgentID)
+	}
+	if spec, ok := parseSyntheticDocumentInboxID(eventID); ok {
+		return s.requireAgentEndpointAccess(w, r, spec.AgentID)
+	}
+	return true
+}
+
+func (s *Server) requireAgentRunEndpointAccess(w http.ResponseWriter, r *http.Request, runID string) bool {
+	if !s.authEnabled() {
+		return true
+	}
+	auth, ok := authFromContext(r.Context())
+	if !ok || auth == nil || auth.PrincipalKind == "human" {
+		return true
+	}
+	runID = strings.TrimSpace(runID)
+	snapshot := s.requestStore(r).Snapshot()
+	if run := snapshot.AgentRuns[runID]; run != nil {
+		return s.requireAgentEndpointAccess(w, r, run.AgentID)
+	}
+	return true
+}
+
 func (s *Server) handleClaimAgentEvent(w http.ResponseWriter, r *http.Request) {
 	var req ClaimAgentEventRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -17,8 +97,14 @@ func (s *Server) handleClaimAgentEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.TrimSpace(req.AgentID) == "" {
 		req.AgentID = actorFromRequest(r, "")
+		if auth, ok := authFromContext(r.Context()); ok && auth.ActingAgentID != "" {
+			req.AgentID = auth.ActingAgentID
+		}
 	}
-	event, err := s.store.ClaimAgentEvent(req)
+	if !s.requireAgentEndpointAccess(w, r, req.AgentID) {
+		return
+	}
+	event, err := s.requestStore(r).ClaimAgentEvent(req)
 	if err != nil {
 		if err == ErrNotFound {
 			writeJSON(w, http.StatusOK, map[string]any{"event": nil})
@@ -27,23 +113,22 @@ func (s *Server) handleClaimAgentEvent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.subscribers.Publish(EventEnvelope{Type: "agent.event.updated", Data: event})
+	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.event.updated", Data: event})
 	writeJSON(w, http.StatusOK, map[string]any{"event": event})
 }
 
 func (s *Server) handleUpdateAgentEvent(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAgentEventEndpointAccess(w, r, chi.URLParam(r, "id")) {
+		return
+	}
 	var req UpdateAgentEventRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	meta := OperationMeta{
-		ActorID:   actorFromRequest(r, "daemon_agent"),
-		ActorType: actorTypeFromRequest(r, "agent"),
-		Source:    "api",
-		Tool:      "agent-event-update",
-	}
-	event, err := s.store.UpdateAgentEvent(chi.URLParam(r, "id"), req, meta)
+	auth, _ := authFromContext(r.Context())
+	meta := operationMetaFromAuth(auth, "agent-event-update", actorFromRequest(r, "daemon_agent"), actorTypeFromRequest(r, "agent"))
+	event, err := s.requestStore(r).UpdateAgentEvent(chi.URLParam(r, "id"), req, meta)
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -52,13 +137,16 @@ func (s *Server) handleUpdateAgentEvent(w http.ResponseWriter, r *http.Request) 
 		writeError(w, status, err.Error())
 		return
 	}
-	s.subscribers.Publish(EventEnvelope{Type: "agent.event.updated", Data: event})
+	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.event.updated", Data: event})
 	writeJSON(w, http.StatusOK, event)
 }
 
 func (s *Server) handleAgentNotifications(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAgentEndpointAccess(w, r, chi.URLParam(r, "id")) {
+		return
+	}
 	statuses := r.URL.Query()["status"]
-	notifications, err := s.store.ListAgentNotifications(chi.URLParam(r, "id"), statuses...)
+	notifications, err := s.requestStore(r).ListAgentNotifications(chi.URLParam(r, "id"), statuses...)
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -71,9 +159,12 @@ func (s *Server) handleAgentNotifications(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleAgentInbox(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAgentEndpointAccess(w, r, chi.URLParam(r, "id")) {
+		return
+	}
 	statuses := r.URL.Query()["status"]
 	box := r.URL.Query().Get("box")
-	items, err := s.store.ListAgentInbox(chi.URLParam(r, "id"), box, statuses...)
+	items, err := s.requestStore(r).ListAgentInbox(chi.URLParam(r, "id"), box, statuses...)
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -86,7 +177,10 @@ func (s *Server) handleAgentInbox(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAgentNotification(w http.ResponseWriter, r *http.Request) {
-	notification, err := s.store.GetAgentNotification(chi.URLParam(r, "id"))
+	if !s.requireAgentEventEndpointAccess(w, r, chi.URLParam(r, "id")) {
+		return
+	}
+	notification, err := s.requestStore(r).GetAgentNotification(chi.URLParam(r, "id"))
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -99,7 +193,10 @@ func (s *Server) handleAgentNotification(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleAgentInboxItem(w http.ResponseWriter, r *http.Request) {
-	item, err := s.store.GetAgentInboxItem(chi.URLParam(r, "id"))
+	if !s.requireAgentEventEndpointAccess(w, r, chi.URLParam(r, "id")) {
+		return
+	}
+	item, err := s.requestStore(r).GetAgentInboxItem(chi.URLParam(r, "id"))
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -112,18 +209,17 @@ func (s *Server) handleAgentInboxItem(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateAgentNotification(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAgentEventEndpointAccess(w, r, chi.URLParam(r, "id")) {
+		return
+	}
 	var req UpdateAgentNotificationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	meta := OperationMeta{
-		ActorID:   actorFromRequest(r, "daemon_agent"),
-		ActorType: actorTypeFromRequest(r, "agent"),
-		Source:    "api",
-		Tool:      "agent-notification-update",
-	}
-	notification, err := s.store.UpdateAgentNotification(chi.URLParam(r, "id"), req, meta)
+	auth, _ := authFromContext(r.Context())
+	meta := operationMetaFromAuth(auth, "agent-notification-update", actorFromRequest(r, "daemon_agent"), actorTypeFromRequest(r, "agent"))
+	notification, err := s.requestStore(r).UpdateAgentNotification(chi.URLParam(r, "id"), req, meta)
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -132,23 +228,22 @@ func (s *Server) handleUpdateAgentNotification(w http.ResponseWriter, r *http.Re
 		writeError(w, status, err.Error())
 		return
 	}
-	s.subscribers.Publish(EventEnvelope{Type: "agent.event.updated", Data: notification})
+	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.event.updated", Data: notification})
 	writeJSON(w, http.StatusOK, map[string]any{"notification": notification})
 }
 
 func (s *Server) handleUpdateAgentInboxItem(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAgentEventEndpointAccess(w, r, chi.URLParam(r, "id")) {
+		return
+	}
 	var req UpdateAgentNotificationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	meta := OperationMeta{
-		ActorID:   actorFromRequest(r, "daemon_agent"),
-		ActorType: actorTypeFromRequest(r, "agent"),
-		Source:    "api",
-		Tool:      "agent-inbox-update",
-	}
-	item, err := s.store.UpdateAgentInboxItem(chi.URLParam(r, "id"), req, meta)
+	auth, _ := authFromContext(r.Context())
+	meta := operationMetaFromAuth(auth, "agent-inbox-update", actorFromRequest(r, "daemon_agent"), actorTypeFromRequest(r, "agent"))
+	item, err := s.requestStore(r).UpdateAgentInboxItem(chi.URLParam(r, "id"), req, meta)
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -157,12 +252,15 @@ func (s *Server) handleUpdateAgentInboxItem(w http.ResponseWriter, r *http.Reque
 		writeError(w, status, err.Error())
 		return
 	}
-	s.subscribers.Publish(EventEnvelope{Type: "agent.event.updated", Data: item})
+	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.event.updated", Data: item})
 	writeJSON(w, http.StatusOK, map[string]any{"item": item})
 }
 
 func (s *Server) handleAgentDocumentDiff(w http.ResponseWriter, r *http.Request) {
-	diff, err := s.store.DiffDocument(
+	if !s.requireAgentEndpointAccess(w, r, chi.URLParam(r, "id")) {
+		return
+	}
+	diff, err := s.requestStore(r).DiffDocument(
 		chi.URLParam(r, "id"),
 		chi.URLParam(r, "documentID"),
 		r.URL.Query().Get("from"),
@@ -182,11 +280,14 @@ func (s *Server) handleAgentDocumentDiff(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleMarkAgentDocumentViewed(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAgentEndpointAccess(w, r, chi.URLParam(r, "id")) {
+		return
+	}
 	var req MarkDocumentViewedRequest
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 	}
-	view, err := s.store.MarkDocumentViewed(chi.URLParam(r, "id"), chi.URLParam(r, "documentID"), req)
+	view, err := s.requestStore(r).MarkDocumentViewed(chi.URLParam(r, "id"), chi.URLParam(r, "documentID"), req)
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -199,39 +300,66 @@ func (s *Server) handleMarkAgentDocumentViewed(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
+	if !s.requireHumanPrincipal(w, r) {
+		return
+	}
 	var req CreateAgentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	meta := OperationMeta{
-		ActorID:   actorFromRequest(r, "owner"),
-		ActorType: actorTypeFromRequest(r, "human"),
-		Source:    "api",
-		Tool:      "agent-create",
+	if strings.TrimSpace(req.DaemonID) == "" {
+		writeError(w, http.StatusBadRequest, "daemon id is required")
+		return
 	}
-	agent, err := s.store.CreateAgent(req, meta)
+	auth, _ := authFromContext(r.Context())
+	meta := operationMetaFromAuth(auth, "agent-create", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
+	agent, err := s.requestStore(r).CreateAgent(req, meta)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.subscribers.Publish(EventEnvelope{Type: "agent.created", Data: agent})
+	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.created", Data: agent})
+	writeJSON(w, http.StatusCreated, agent)
+}
+
+func (s *Server) handleCreateDaemonAgent(w http.ResponseWriter, r *http.Request) {
+	if !s.requireHumanPrincipal(w, r) {
+		return
+	}
+	var req CreateAgentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	req.DaemonID = chi.URLParam(r, "daemonID")
+	auth, _ := authFromContext(r.Context())
+	meta := operationMetaFromAuth(auth, "daemon-agent-create", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
+	agent, err := s.requestStore(r).CreateAgent(req, meta)
+	if err != nil {
+		status := http.StatusBadRequest
+		if err == ErrNotFound {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.created", Data: agent})
 	writeJSON(w, http.StatusCreated, agent)
 }
 
 func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
+	if !s.requireHumanPrincipal(w, r) {
+		return
+	}
 	var req UpdateAgentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	meta := OperationMeta{
-		ActorID:   actorFromRequest(r, "owner"),
-		ActorType: actorTypeFromRequest(r, "human"),
-		Source:    "api",
-		Tool:      "agent-update",
-	}
-	agent, err := s.store.UpdateAgent(chi.URLParam(r, "id"), req, meta)
+	auth, _ := authFromContext(r.Context())
+	meta := operationMetaFromAuth(auth, "agent-update", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
+	agent, err := s.requestStore(r).UpdateAgent(chi.URLParam(r, "id"), req, meta)
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -240,23 +368,22 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
-	s.subscribers.Publish(EventEnvelope{Type: "agent.updated", Data: agent})
+	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.updated", Data: agent})
 	writeJSON(w, http.StatusOK, agent)
 }
 
 func (s *Server) handleUpdateAgentSession(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAgentEndpointAccess(w, r, chi.URLParam(r, "id")) {
+		return
+	}
 	var req UpdateAgentSessionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	meta := OperationMeta{
-		ActorID:   actorFromRequest(r, "daemon_agent"),
-		ActorType: actorTypeFromRequest(r, "agent"),
-		Source:    "api",
-		Tool:      "agent-session-update",
-	}
-	agent, err := s.store.UpdateAgentSession(chi.URLParam(r, "id"), req, meta)
+	auth, _ := authFromContext(r.Context())
+	meta := operationMetaFromAuth(auth, "agent-session-update", actorFromRequest(r, "daemon_agent"), actorTypeFromRequest(r, "agent"))
+	agent, err := s.requestStore(r).UpdateAgentSession(chi.URLParam(r, "id"), req, meta)
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -265,18 +392,17 @@ func (s *Server) handleUpdateAgentSession(w http.ResponseWriter, r *http.Request
 		writeError(w, status, err.Error())
 		return
 	}
-	s.subscribers.Publish(EventEnvelope{Type: "agent.updated", Data: agent})
+	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.updated", Data: agent})
 	writeJSON(w, http.StatusOK, agent)
 }
 
 func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
-	meta := OperationMeta{
-		ActorID:   actorFromRequest(r, "owner"),
-		ActorType: actorTypeFromRequest(r, "human"),
-		Source:    "api",
-		Tool:      "agent-delete",
+	if !s.requireHumanPrincipal(w, r) {
+		return
 	}
-	agent, err := s.store.DeleteAgent(chi.URLParam(r, "id"), meta)
+	auth, _ := authFromContext(r.Context())
+	meta := operationMetaFromAuth(auth, "agent-delete", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
+	agent, err := s.requestStore(r).DeleteAgent(chi.URLParam(r, "id"), meta)
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -285,7 +411,7 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
-	s.subscribers.Publish(EventEnvelope{Type: "agent.deleted", Data: agent})
+	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.deleted", Data: agent})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -309,14 +435,13 @@ func (s *Server) handleStartAgentRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStartAgentRunRequest(w http.ResponseWriter, r *http.Request, req StartAgentRunRequest) {
-	meta := OperationMeta{
-		ActorID:   actorFromRequest(r, "owner"),
-		ActorType: actorTypeFromRequest(r, "human"),
-		Source:    "api",
-		Tool:      "agent-run-create",
-		Trigger:   "agent launch",
+	if !s.requireHumanPrincipal(w, r) {
+		return
 	}
-	agent, run, err := s.store.StartAgentRun(req, meta)
+	auth, _ := authFromContext(r.Context())
+	meta := operationMetaFromAuth(auth, "agent-run-create", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
+	meta.Trigger = "agent launch"
+	agent, run, err := s.requestStore(r).StartAgentRun(req, meta)
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -325,8 +450,8 @@ func (s *Server) handleStartAgentRunRequest(w http.ResponseWriter, r *http.Reque
 		writeError(w, status, err.Error())
 		return
 	}
-	s.subscribers.Publish(EventEnvelope{Type: "agent.updated", Data: agent})
-	s.subscribers.Publish(EventEnvelope{Type: "agent.run.updated", Data: cloneAgentRunForWorkspace(run)})
+	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.updated", Data: agent})
+	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.run.updated", Data: cloneAgentRunForWorkspace(run)})
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"agent": agent,
 		"run":   run,
@@ -334,19 +459,19 @@ func (s *Server) handleStartAgentRunRequest(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) handleUpdateAgentRun(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAgentRunEndpointAccess(w, r, chi.URLParam(r, "id")) {
+		return
+	}
 	var req UpdateAgentRunRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	meta := OperationMeta{
-		ActorID:   actorFromRequest(r, "daemon"),
-		ActorType: actorTypeFromRequest(r, "agent"),
-		Source:    "daemon",
-		Tool:      "agent-supervisor",
-		Trigger:   "process status",
-	}
-	run, agent, err := s.store.UpdateAgentRun(chi.URLParam(r, "id"), req, meta)
+	auth, _ := authFromContext(r.Context())
+	meta := operationMetaFromAuth(auth, "agent-supervisor", actorFromRequest(r, "daemon"), actorTypeFromRequest(r, "agent"))
+	meta.Source = "daemon"
+	meta.Trigger = "process status"
+	run, agent, err := s.requestStore(r).UpdateAgentRun(chi.URLParam(r, "id"), req, meta)
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -355,20 +480,19 @@ func (s *Server) handleUpdateAgentRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
-	s.subscribers.Publish(EventEnvelope{Type: "agent.updated", Data: agent})
-	s.subscribers.Publish(EventEnvelope{Type: "agent.run.updated", Data: cloneAgentRunForWorkspace(run)})
+	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.updated", Data: agent})
+	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.run.updated", Data: cloneAgentRunForWorkspace(run)})
 	writeJSON(w, http.StatusOK, run)
 }
 
 func (s *Server) handleStopAgentRun(w http.ResponseWriter, r *http.Request) {
-	meta := OperationMeta{
-		ActorID:   actorFromRequest(r, "owner"),
-		ActorType: actorTypeFromRequest(r, "human"),
-		Source:    "api",
-		Tool:      "agent-run-stop",
-		Trigger:   "user stop",
+	if !s.requireHumanPrincipal(w, r) {
+		return
 	}
-	run, err := s.store.StopAgentRun(chi.URLParam(r, "id"), meta)
+	auth, _ := authFromContext(r.Context())
+	meta := operationMetaFromAuth(auth, "agent-run-stop", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
+	meta.Trigger = "user stop"
+	run, err := s.requestStore(r).StopAgentRun(chi.URLParam(r, "id"), meta)
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -377,6 +501,6 @@ func (s *Server) handleStopAgentRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
-	s.subscribers.Publish(EventEnvelope{Type: "agent.run.updated", Data: cloneAgentRunForWorkspace(run)})
+	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.run.updated", Data: cloneAgentRunForWorkspace(run)})
 	writeJSON(w, http.StatusOK, run)
 }

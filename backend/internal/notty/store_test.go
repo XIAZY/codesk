@@ -8,9 +8,69 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/reearth/ygo/crdt"
 )
+
+func TestDaemonLivenessClassification(t *testing.T) {
+	now := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name   string
+		daemon Daemon
+		want   string
+	}{
+		{
+			name: "never seen active daemon is disconnected",
+			daemon: Daemon{
+				Status: "active",
+			},
+			want: "disconnected",
+		},
+		{
+			name: "recent active daemon is online",
+			daemon: Daemon{
+				Status:     "active",
+				LastSeenAt: now.Add(-10 * time.Second),
+			},
+			want: "online",
+		},
+		{
+			name: "recently stale active daemon is stale",
+			daemon: Daemon{
+				Status:     "active",
+				LastSeenAt: now.Add(-45 * time.Second),
+			},
+			want: "stale",
+		},
+		{
+			name: "old active daemon is disconnected",
+			daemon: Daemon{
+				Status:     "active",
+				LastSeenAt: now.Add(-3 * time.Minute),
+			},
+			want: "disconnected",
+		},
+		{
+			name: "deleted daemon is disconnected even if recently seen",
+			daemon: Daemon{
+				Status:     "deleted",
+				LastSeenAt: now.Add(-5 * time.Second),
+				DeletedAt:  now,
+			},
+			want: "disconnected",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			daemon := tt.daemon
+			applyDaemonLiveness(&daemon, now)
+			if daemon.ConnectionStatus != tt.want {
+				t.Fatalf("connection status = %q, want %q", daemon.ConnectionStatus, tt.want)
+			}
+		})
+	}
+}
 
 func TestApplyCRDTUpdateConvergesAcrossPeers(t *testing.T) {
 	left := crdt.New(crdt.WithClientID(1))

@@ -21,9 +21,9 @@ import (
 
 type workspaceReplica struct {
 	backendURL string
+	cfg        Config
 	rootDir    string
 	actorID    string
-	label      string
 
 	client   *http.Client
 	watcher  *fsnotify.Watcher
@@ -35,16 +35,16 @@ type workspaceReplica struct {
 	initialWorkspace *workspaceResponse
 }
 
-func newWorkspaceReplica(backendURL, rootDir, actorID, label string) (*workspaceReplica, error) {
+func newWorkspaceReplica(cfg Config, rootDir, actorID string) (*workspaceReplica, error) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
 	}
 	return &workspaceReplica{
-		backendURL:      backendURL,
+		backendURL:      cfg.BackendURL,
+		cfg:             cfg,
 		rootDir:         rootDir,
 		actorID:         actorID,
-		label:           label,
 		client:          &http.Client{Timeout: 10 * time.Second},
 		watcher:         watcher,
 		projectedByPath: map[string]*trackedFile{},
@@ -90,27 +90,27 @@ func (r *workspaceReplica) Run(ctx context.Context) error {
 			}
 			if event.Op&fsnotify.Write != 0 {
 				if err := r.handleLocalChange(event.Name); err != nil {
-					log.Printf("%s local change error for %s: %v", r.label, event.Name, err)
+					log.Printf("%s local change error for %s: %v", r.actorID, event.Name, err)
 				}
 			}
 			if event.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0 {
 				if err := r.reconcileLocalWorkspace(ctx); err != nil {
-					log.Printf("%s local reconcile error: %v", r.label, err)
+					log.Printf("%s local reconcile error: %v", r.actorID, err)
 				}
 			}
 		case err := <-r.watcher.Errors:
 			if err != nil {
-				log.Printf("%s watcher error: %v", r.label, err)
+				log.Printf("%s watcher error: %v", r.actorID, err)
 			}
 		case <-ticker.C:
 			if err := r.reconcileLocalWorkspace(ctx); err != nil {
-				log.Printf("%s local reconcile error: %v", r.label, err)
+				log.Printf("%s local reconcile error: %v", r.actorID, err)
 			}
 			if err := r.refresh(ctx); err != nil {
-				log.Printf("%s refresh error: %v", r.label, err)
+				log.Printf("%s refresh error: %v", r.actorID, err)
 			}
 			if err := r.sendPresence(ctx); err != nil {
-				log.Printf("%s presence error: %v", r.label, err)
+				log.Printf("%s presence error: %v", r.actorID, err)
 			}
 		}
 	}
@@ -125,10 +125,11 @@ func (r *workspaceReplica) refresh(ctx context.Context) error {
 }
 
 func (r *workspaceReplica) fetchWorkspace(ctx context.Context) (*workspaceResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.backendURL+"/api/workspace", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.backendURL+r.cfg.workspaceAPIPath("/api/workspace"), nil)
 	if err != nil {
 		return nil, err
 	}
+	applyBackendAuth(req.Header, r.cfg, "")
 	res, err := r.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -250,29 +251,17 @@ func (r *workspaceReplica) connectDocument(tracked *trackedFile) error {
 		return nil
 	}
 	paceDocumentConnect()
-	wsURL, err := url.Parse(r.backendURL)
-	if err != nil {
-		return err
-	}
-	if wsURL.Scheme == "https" {
-		wsURL.Scheme = "wss"
-	} else {
-		wsURL.Scheme = "ws"
-	}
-	wsURL.Path = "/ws/documents/" + tracked.DocumentID
 	clientID, syncStep := tracked.initialSyncState()
 	query := url.Values{
 		"client_id":  {fmt.Sprintf("%d", clientID)},
 		"actor_id":   {r.actorID},
 		"actor_type": {"agent"},
 	}
-	wsURL.RawQuery = query.Encode()
-
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL.String(), nil)
+	conn, _, err := dialWorkspaceWebsocket(context.Background(), r.cfg, "/ws/documents/"+tracked.DocumentID, query, r.actorID)
 	if err != nil {
 		return err
 	}
-	log.Printf("%s ws open doc=%s url=%s", r.label, tracked.DocumentID, wsURL.String())
+	log.Printf("%s ws open doc=%s", r.actorID, tracked.DocumentID)
 	tracked.setConn(conn)
 	go r.readLoop(tracked, conn)
 	if err := tracked.write(syncStep); err != nil {
@@ -294,7 +283,7 @@ func (r *workspaceReplica) readLoop(tracked *trackedFile, conn *websocket.Conn) 
 		messageType, payload, err := conn.ReadMessage()
 		if err != nil {
 			tracked.clearConn(conn)
-			log.Printf("%s ws read close doc=%s err=%v", r.label, tracked.DocumentID, err)
+			log.Printf("%s ws read close doc=%s err=%v", r.actorID, tracked.DocumentID, err)
 			return
 		}
 		if messageType != websocket.BinaryMessage {
@@ -308,7 +297,7 @@ func (r *workspaceReplica) readLoop(tracked *trackedFile, conn *websocket.Conn) 
 		case yproto.MessageSync:
 			reply, _, err := handleRemoteSyncMessage(reader, tracked, "remote")
 			if err != nil {
-				log.Printf("%s ws sync error doc=%s err=%v", r.label, tracked.DocumentID, err)
+				log.Printf("%s ws sync error doc=%s err=%v", r.actorID, tracked.DocumentID, err)
 				continue
 			}
 			if len(reply) > 0 {
@@ -420,15 +409,16 @@ func (r *workspaceReplica) sendPresence(ctx context.Context) error {
 		ActorType: "agent",
 		FilePath:  "",
 		Mode:      "syncing",
-		Activity:  "materializing " + r.label,
+		Activity:  "materializing " + r.actorID,
 	})
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.backendURL+"/api/presence", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.backendURL+r.cfg.workspaceAPIPath("/api/presence"), bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}
+	applyBackendAuth(req.Header, r.cfg, r.actorID)
 	req.Header.Set("Content-Type", "application/json")
 	_, err = r.client.Do(req)
 	return err
@@ -441,10 +431,11 @@ func (r *workspaceReplica) createRemoteDocument(ctx context.Context, path, conte
 	if err != nil {
 		return err
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, r.backendURL+"/api/documents?actor="+url.QueryEscape(r.actorID)+"&actor_type=agent", bytes.NewReader(payload))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, r.backendURL+r.cfg.workspaceAPIPath("/api/documents"), bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}
+	applyBackendAuth(httpReq.Header, r.cfg, r.actorID)
 	httpReq.Header.Set("Content-Type", "application/json")
 	res, err := r.client.Do(httpReq)
 	if err != nil {
@@ -462,10 +453,11 @@ func (r *workspaceReplica) moveRemoteDocument(ctx context.Context, documentID, p
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, r.backendURL+"/api/documents/"+documentID+"?actor="+url.QueryEscape(r.actorID)+"&actor_type=agent", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, r.backendURL+r.cfg.workspaceAPIPath("/api/documents/"+documentID), bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}
+	applyBackendAuth(req.Header, r.cfg, r.actorID)
 	req.Header.Set("Content-Type", "application/json")
 	res, err := r.client.Do(req)
 	if err != nil {
@@ -479,10 +471,11 @@ func (r *workspaceReplica) moveRemoteDocument(ctx context.Context, documentID, p
 }
 
 func (r *workspaceReplica) deleteRemoteDocument(ctx context.Context, documentID string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, r.backendURL+"/api/documents/"+documentID+"?actor="+url.QueryEscape(r.actorID)+"&actor_type=agent", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, r.backendURL+r.cfg.workspaceAPIPath("/api/documents/"+documentID), nil)
 	if err != nil {
 		return err
 	}
+	applyBackendAuth(req.Header, r.cfg, r.actorID)
 	res, err := r.client.Do(req)
 	if err != nil {
 		return err

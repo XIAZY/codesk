@@ -81,7 +81,7 @@ func TestDotPathsIgnoredWhileRootLogsSync(t *testing.T) {
 	stack := newRegressionStack(t)
 	stack.up(t)
 
-	stack.execService(t, "daemon", "cd /workspace/notty && mkdir -p .notty/cache && printf 'internal\\n' > .notty/cache/state.txt && printf 'hidden\\n' > .hidden.txt && printf 'line one\\nline two\\n' > codex-agent.log")
+	stack.execService(t, "daemon", "mkdir -p "+shellQuote(stack.daemonWorkspaceDir())+" && cd "+shellQuote(stack.daemonWorkspaceDir())+" && mkdir -p .notty/cache && printf 'internal\\n' > .notty/cache/state.txt && printf 'hidden\\n' > .hidden.txt && printf 'line one\\nline two\\n' > codex-agent.log")
 
 	stack.waitForDocumentPath(t, "codex-agent.log", 30*time.Second)
 	paths := stack.documentPaths()
@@ -98,9 +98,8 @@ func TestThreadCreationAcceptsClientRelativeAnchors(t *testing.T) {
 	stack := newRegressionStack(t)
 	stack.up(t)
 
-	baseURL := stack.backendURL(t)
-	documentID := createDocument(t, baseURL, uniquePath("thread-anchor", ".md"), "alpha bravo charlie\n")
-	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/ws/documents/" + url.PathEscape(documentID)
+	documentID := stack.createDocument(t, uniquePath("thread-anchor", ".md"), "alpha bravo charlie\n")
+	wsURL := stack.documentWSURL(t, documentID)
 	clientDoc := crdt.New(crdt.WithClientID(901))
 	conn := dialDocumentWebsocket(t, wsURL, "thread-author", 901)
 	defer conn.Close()
@@ -123,24 +122,13 @@ func TestThreadCreationAcceptsClientRelativeAnchors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal thread request: %v", err)
 	}
-	resp, err := http.Post(baseURL+"/api/threads?actor=owner&actor_type=human", "application/json", bytes.NewReader(payload))
-	if err != nil {
-		t.Fatalf("create thread: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("create thread status %d: %s", resp.StatusCode, body)
-	}
 	var created struct {
 		Thread struct {
 			ID     string                 `json:"id"`
 			Anchor regressionThreadAnchor `json:"anchor"`
 		} `json:"thread"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
-		t.Fatalf("decode create thread response: %v", err)
-	}
+	stack.postJSON(t, stack.workspaceAPIPath("/threads"), stack.authToken, json.RawMessage(payload), http.StatusCreated, &created)
 	if created.Thread.ID == "" {
 		t.Fatal("expected thread id")
 	}
@@ -156,8 +144,7 @@ func TestThreadCreationRejectsRawOffsetsWithoutRelativeAnchors(t *testing.T) {
 	stack := newRegressionStack(t)
 	stack.up(t)
 
-	baseURL := stack.backendURL(t)
-	documentID := createDocument(t, baseURL, uniquePath("raw-thread-anchor", ".md"), "alpha bravo charlie\n")
+	documentID := stack.createDocument(t, uniquePath("raw-thread-anchor", ".md"), "alpha bravo charlie\n")
 	payload, err := json.Marshal(map[string]any{
 		"documentId": documentID,
 		"title":      "Raw offset should fail",
@@ -170,7 +157,13 @@ func TestThreadCreationRejectsRawOffsetsWithoutRelativeAnchors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal thread request: %v", err)
 	}
-	resp, err := http.Post(baseURL+"/api/threads?actor=owner&actor_type=human", "application/json", bytes.NewReader(payload))
+	req, err := http.NewRequest(http.MethodPost, stack.backendURL(t)+stack.workspaceAPIPath("/threads"), bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("create thread request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+stack.authToken)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
 	}
@@ -184,9 +177,8 @@ func TestMultipleWebsocketRecipientsConverge(t *testing.T) {
 	stack := newRegressionStack(t)
 	stack.up(t)
 
-	baseURL := stack.backendURL(t)
-	documentID := createDocument(t, baseURL, uniquePath("multi-recipient", ".md"), "start\n")
-	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/ws/documents/" + url.PathEscape(documentID)
+	documentID := stack.createDocument(t, uniquePath("multi-recipient", ".md"), "start\n")
+	wsURL := stack.documentWSURL(t, documentID)
 
 	writerDoc := crdt.New(crdt.WithClientID(301))
 	viewerOneDoc := crdt.New(crdt.WithClientID(302))
@@ -223,9 +215,8 @@ func TestConcurrentWebsocketWritersConverge(t *testing.T) {
 	stack := newRegressionStack(t)
 	stack.up(t)
 
-	baseURL := stack.backendURL(t)
-	documentID := createDocument(t, baseURL, uniquePath("concurrent-writers", ".md"), "base\n")
-	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/ws/documents/" + url.PathEscape(documentID)
+	documentID := stack.createDocument(t, uniquePath("concurrent-writers", ".md"), "base\n")
+	wsURL := stack.documentWSURL(t, documentID)
 
 	writerOneDoc := crdt.New(crdt.WithClientID(601))
 	writerTwoDoc := crdt.New(crdt.WithClientID(602))
@@ -276,9 +267,8 @@ func TestDocumentWebsocketBroadcastsInsertUpdate(t *testing.T) {
 	stack := newRegressionStack(t)
 	stack.up(t)
 
-	baseURL := stack.backendURL(t)
-	documentID := createDocument(t, baseURL, uniquePath("websocket", ".md"), "ab")
-	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/ws/documents/" + url.PathEscape(documentID)
+	documentID := stack.createDocument(t, uniquePath("websocket", ".md"), "ab")
+	wsURL := stack.documentWSURL(t, documentID)
 
 	authorDoc := crdt.New(crdt.WithClientID(101))
 	authorConn := dialDocumentWebsocket(t, wsURL, "writer", 101)
@@ -302,9 +292,8 @@ func TestDocumentWebsocketBroadcastsDeleteUpdate(t *testing.T) {
 	stack := newRegressionStack(t)
 	stack.up(t)
 
-	baseURL := stack.backendURL(t)
-	documentID := createDocument(t, baseURL, uniquePath("websocket-delete", ".md"), "abcd")
-	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/ws/documents/" + url.PathEscape(documentID)
+	documentID := stack.createDocument(t, uniquePath("websocket-delete", ".md"), "abcd")
+	wsURL := stack.documentWSURL(t, documentID)
 
 	authorDoc := crdt.New(crdt.WithClientID(701))
 	viewerDoc := crdt.New(crdt.WithClientID(702))
@@ -330,12 +319,11 @@ func TestLocalAndRemoteAppendMergeConvergesAcrossRecipients(t *testing.T) {
 	stack := newRegressionStack(t)
 	stack.up(t)
 
-	baseURL := stack.backendURL(t)
 	path := uniquePath("local-remote-append", ".md")
-	documentID := createDocument(t, baseURL, path, "base\n")
+	documentID := stack.createDocument(t, path, "base\n")
 	stack.waitForLocalContent(t, path, "base\n", 30*time.Second)
 
-	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/ws/documents/" + url.PathEscape(documentID)
+	wsURL := stack.documentWSURL(t, documentID)
 	remoteDoc := crdt.New(crdt.WithClientID(401))
 	remoteConn := dialDocumentWebsocket(t, wsURL, "remote-writer", 401)
 	defer remoteConn.Close()
@@ -365,12 +353,11 @@ func TestOverlappingLocalAndRemoteRewritePreservesLocalDivergence(t *testing.T) 
 	stack := newRegressionStack(t)
 	stack.up(t)
 
-	baseURL := stack.backendURL(t)
 	path := uniquePath("overlap-rewrite", ".md")
-	documentID := createDocument(t, baseURL, path, "title\nshared\n")
+	documentID := stack.createDocument(t, path, "title\nshared\n")
 	stack.waitForLocalContent(t, path, "title\nshared\n", 30*time.Second)
 
-	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/ws/documents/" + url.PathEscape(documentID)
+	wsURL := stack.documentWSURL(t, documentID)
 	remoteDoc := crdt.New(crdt.WithClientID(501))
 	remoteConn := dialDocumentWebsocket(t, wsURL, "remote-rewriter", 501)
 	defer remoteConn.Close()
@@ -406,6 +393,9 @@ type regressionStack struct {
 	root        string
 	composeFile string
 	project     string
+	authToken   string
+	workspaceID string
+	daemonToken string
 }
 
 func newRegressionStack(t *testing.T) *regressionStack {
@@ -420,7 +410,7 @@ func newRegressionStack(t *testing.T) *regressionStack {
 
 func (s *regressionStack) up(t *testing.T) {
 	t.Helper()
-	s.run(t, "up", "-d", "--build", "postgres", "backend", "daemon")
+	s.run(t, "up", "-d", "--build", "postgres", "backend")
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
@@ -430,6 +420,11 @@ func (s *regressionStack) up(t *testing.T) {
 		}
 	})
 	s.waitForBackend(t, 2*time.Minute)
+	s.bootstrapWorkspace(t)
+	s.runWithEnv(t, map[string]string{
+		"NOTTY_WORKSPACE_ID": s.workspaceID,
+		"NOTTY_DAEMON_TOKEN": s.daemonToken,
+	}, "up", "-d", "--build", "daemon")
 }
 
 func (s *regressionStack) backendURL(t *testing.T) string {
@@ -439,6 +434,103 @@ func (s *regressionStack) backendURL(t *testing.T) string {
 		t.Fatal("backend port was empty")
 	}
 	return "http://" + output
+}
+
+func (s *regressionStack) bootstrapWorkspace(t *testing.T) {
+	t.Helper()
+	email := "regression-" + s.project + "@example.test"
+	var auth struct {
+		Token string `json:"token"`
+	}
+	s.postJSON(t, "/api/auth/register", "", map[string]string{
+		"email":       email,
+		"password":    "regression-password",
+		"displayName": "Regression User",
+	}, http.StatusCreated, &auth)
+	if auth.Token == "" {
+		t.Fatal("registration returned empty token")
+	}
+	s.authToken = auth.Token
+
+	var workspaceResponse struct {
+		Workspace struct {
+			ID string `json:"id"`
+		} `json:"workspace"`
+	}
+	s.postJSON(t, "/api/workspaces", s.authToken, map[string]string{
+		"name": "Regression Workspace",
+		"slug": s.project,
+	}, http.StatusCreated, &workspaceResponse)
+	if workspaceResponse.Workspace.ID == "" {
+		t.Fatal("workspace creation returned empty id")
+	}
+	s.workspaceID = workspaceResponse.Workspace.ID
+
+	var daemonResponse struct {
+		Token string `json:"token"`
+	}
+	s.postJSON(t, s.workspaceAPIPath("/daemons"), s.authToken, map[string]string{
+		"name": "Regression daemon",
+	}, http.StatusCreated, &daemonResponse)
+	if daemonResponse.Token == "" {
+		t.Fatal("daemon token creation returned empty token")
+	}
+	s.daemonToken = daemonResponse.Token
+}
+
+func (s *regressionStack) workspaceAPIPath(path string) string {
+	path = strings.TrimSpace(path)
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return "/api/workspaces/" + url.PathEscape(s.workspaceID) + path
+}
+
+func (s *regressionStack) documentWSURL(t *testing.T, documentID string) string {
+	t.Helper()
+	baseURL := s.backendURL(t)
+	u, err := url.Parse("ws" + strings.TrimPrefix(baseURL, "http") + "/ws/workspaces/" + url.PathEscape(s.workspaceID) + "/documents/" + url.PathEscape(documentID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := u.Query()
+	query.Set("token", s.authToken)
+	u.RawQuery = query.Encode()
+	return u.String()
+}
+
+func (s *regressionStack) daemonWorkspaceDir() string {
+	return "/workspace/notty/" + s.workspaceID
+}
+
+func (s *regressionStack) postJSON(t *testing.T, path string, bearer string, body any, wantStatus int, out any) {
+	t.Helper()
+	payload, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, s.backendURL(t)+path, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post %s: %v", path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != wantStatus {
+		response, _ := io.ReadAll(resp.Body)
+		t.Fatalf("post %s status %d, want %d: %s", path, resp.StatusCode, wantStatus, response)
+	}
+	if out != nil {
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+			t.Fatalf("decode post %s response: %v", path, err)
+		}
+	}
 }
 
 func (s *regressionStack) waitForBackend(t *testing.T, timeout time.Duration) {
@@ -475,11 +567,28 @@ func (s *regressionStack) run(t *testing.T, args ...string) {
 	_ = s.runOutput(t, args...)
 }
 
+func (s *regressionStack) runWithEnv(t *testing.T, env map[string]string, args ...string) {
+	t.Helper()
+	_ = s.runOutputWithEnv(t, env, args...)
+}
+
 func (s *regressionStack) runOutput(t *testing.T, args ...string) string {
+	t.Helper()
+	return s.runOutputWithEnv(t, nil, args...)
+}
+
+func (s *regressionStack) runOutputWithEnv(t *testing.T, env map[string]string, args ...string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	output, err := s.command(ctx, args...).CombinedOutput()
+	cmd := s.command(ctx, args...)
+	if len(env) > 0 {
+		cmd.Env = os.Environ()
+		for key, value := range env {
+			cmd.Env = append(cmd.Env, key+"="+value)
+		}
+	}
+	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("docker compose %s failed: %v\n%s", strings.Join(args, " "), err, output)
 	}
@@ -508,7 +617,9 @@ func (s *regressionStack) daemonWriterCommand(path string, lines int, delay time
 		mkdir = "mkdir -p " + shellQuote(dir) + " && "
 	}
 	script := fmt.Sprintf(
-		"cd /workspace/notty && %s: > %s && i=1 && while [ \"$i\" -le %d ]; do printf \"%%s\\n\" \"$i\" >> %s; sleep %s; i=$((i+1)); done",
+		"mkdir -p %s && cd %s && %s: > %s && i=1 && while [ \"$i\" -le %d ]; do printf \"%%s\\n\" \"$i\" >> %s; sleep %s; i=$((i+1)); done",
+		shellQuote(s.daemonWorkspaceDir()),
+		shellQuote(s.daemonWorkspaceDir()),
 		mkdir,
 		shellQuote(path),
 		lines,
@@ -522,7 +633,8 @@ func (s *regressionStack) daemonWriterCommand(path string, lines int, delay time
 func (s *regressionStack) assertLocalSequence(t *testing.T, path string, lines int) {
 	t.Helper()
 	script := fmt.Sprintf(
-		"cd /workspace/notty && awk -v want=%d 'NR != $1 { printf(\"first_mismatch line=%%d value=%%s\\n\", NR, $1); exit 1 } END { if (NR != want) { printf(\"bad_count got=%%d want=%%d\\n\", NR, want); exit 1 }; printf(\"local_ok lines=%%d last=%%s\\n\", NR, $1) }' %s",
+		"cd %s && awk -v want=%d 'NR != $1 { printf(\"first_mismatch line=%%d value=%%s\\n\", NR, $1); exit 1 } END { if (NR != want) { printf(\"bad_count got=%%d want=%%d\\n\", NR, want); exit 1 }; printf(\"local_ok lines=%%d last=%%s\\n\", NR, $1) }' %s",
+		shellQuote(s.daemonWorkspaceDir()),
 		lines,
 		shellQuote(path),
 	)
@@ -536,7 +648,7 @@ func (s *regressionStack) writeLocalFile(t *testing.T, path string, content stri
 	if dir != "." && dir != "" {
 		mkdir = "mkdir -p " + shellQuote(dir) + " && "
 	}
-	s.execService(t, "daemon", "cd /workspace/notty && "+mkdir+fmt.Sprintf("printf %%s %s > %s", shellQuote(content), shellQuote(path)))
+	s.execService(t, "daemon", "mkdir -p "+shellQuote(s.daemonWorkspaceDir())+" && cd "+shellQuote(s.daemonWorkspaceDir())+" && "+mkdir+fmt.Sprintf("printf %%s %s > %s", shellQuote(content), shellQuote(path)))
 }
 
 func (s *regressionStack) appendLocalFile(t *testing.T, path string, content string) {
@@ -546,12 +658,12 @@ func (s *regressionStack) appendLocalFile(t *testing.T, path string, content str
 	if dir != "." && dir != "" {
 		mkdir = "mkdir -p " + shellQuote(dir) + " && "
 	}
-	s.execService(t, "daemon", "cd /workspace/notty && "+mkdir+fmt.Sprintf("printf %%s %s >> %s", shellQuote(content), shellQuote(path)))
+	s.execService(t, "daemon", "mkdir -p "+shellQuote(s.daemonWorkspaceDir())+" && cd "+shellQuote(s.daemonWorkspaceDir())+" && "+mkdir+fmt.Sprintf("printf %%s %s >> %s", shellQuote(content), shellQuote(path)))
 }
 
 func (s *regressionStack) localFileContent(t *testing.T, path string) string {
 	t.Helper()
-	return s.execService(t, "daemon", fmt.Sprintf("cd /workspace/notty && if [ -f %s ]; then cat %s; fi", shellQuote(path), shellQuote(path)))
+	return s.execService(t, "daemon", fmt.Sprintf("if [ -d %s ]; then cd %s && if [ -f %s ]; then cat %s; fi; fi", shellQuote(s.daemonWorkspaceDir()), shellQuote(s.daemonWorkspaceDir()), shellQuote(path), shellQuote(path)))
 }
 
 func (s *regressionStack) waitForLocalContent(t *testing.T, path string, want string, timeout time.Duration) {
@@ -588,7 +700,7 @@ func (s *regressionStack) waitForLocalLineCountAtLeast(t *testing.T, path string
 	deadline := time.Now().Add(timeout)
 	var last string
 	for time.Now().Before(deadline) {
-		output := strings.TrimSpace(s.execService(t, "daemon", fmt.Sprintf("cd /workspace/notty && if [ -f %s ]; then wc -l < %s; fi", shellQuote(path), shellQuote(path))))
+		output := strings.TrimSpace(s.execService(t, "daemon", fmt.Sprintf("if [ -d %s ]; then cd %s && if [ -f %s ]; then wc -l < %s; fi; fi", shellQuote(s.daemonWorkspaceDir()), shellQuote(s.daemonWorkspaceDir()), shellQuote(path), shellQuote(path))))
 		last = output
 		if count, err := strconv.Atoi(output); err == nil && count >= lines {
 			return
@@ -679,8 +791,7 @@ func (s *regressionStack) syncFreshWebsocketClientByPath(t *testing.T, path stri
 	if err != nil {
 		t.Fatalf("document %s not found for fresh websocket sync: %v", path, err)
 	}
-	baseURL := s.backendURL(t)
-	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/ws/documents/" + url.PathEscape(documentID)
+	wsURL := s.documentWSURL(t, documentID)
 	clientID := uint64(time.Now().UnixNano())
 	doc := crdt.New(crdt.WithClientID(crdt.ClientID(clientID)))
 	conn := dialDocumentWebsocket(t, wsURL, "fresh-stress-reader", clientID)
@@ -701,7 +812,7 @@ func (s *regressionStack) waitForDocumentPath(t *testing.T, path string, timeout
 }
 
 func (s *regressionStack) documentPaths() []string {
-	output := strings.TrimSpace(s.psql("SELECT path FROM documents ORDER BY path"))
+	output := strings.TrimSpace(s.psql(fmt.Sprintf("SELECT path FROM documents WHERE workspace_id=%s ORDER BY path", sqlQuote(s.workspaceID))))
 	if output == "" {
 		return nil
 	}
@@ -745,7 +856,8 @@ func (s *regressionStack) backendDocumentContent(documentID string) (string, err
 
 func (s *regressionStack) documentHeaderByPath(path string) (string, uint64, int64, error) {
 	query := fmt.Sprintf(
-		"SELECT d.id || chr(9) || d.client_id_seed || chr(9) || h.update_id FROM documents d JOIN document_heads h ON h.document_id=d.id WHERE d.path=%s",
+		"SELECT d.id || chr(9) || d.client_id_seed || chr(9) || h.update_id FROM documents d JOIN document_heads h ON h.workspace_id=d.workspace_id AND h.document_id=d.id WHERE d.workspace_id=%s AND d.path=%s",
+		sqlQuote(s.workspaceID),
 		sqlQuote(path),
 	)
 	return parseDocumentHeader(s.psql(query))
@@ -753,7 +865,8 @@ func (s *regressionStack) documentHeaderByPath(path string) (string, uint64, int
 
 func (s *regressionStack) documentHeaderByID(documentID string) (string, uint64, int64, error) {
 	query := fmt.Sprintf(
-		"SELECT d.id || chr(9) || d.client_id_seed || chr(9) || h.update_id FROM documents d JOIN document_heads h ON h.document_id=d.id WHERE d.id=%s",
+		"SELECT d.id || chr(9) || d.client_id_seed || chr(9) || h.update_id FROM documents d JOIN document_heads h ON h.workspace_id=d.workspace_id AND h.document_id=d.id WHERE d.workspace_id=%s AND d.id=%s",
+		sqlQuote(s.workspaceID),
 		sqlQuote(documentID),
 	)
 	return parseDocumentHeader(s.psql(query))
@@ -781,7 +894,8 @@ func parseDocumentHeader(output string) (string, uint64, int64, error) {
 
 func (s *regressionStack) latestCheckpoint(documentID string, headID int64) (int64, []byte, error) {
 	query := fmt.Sprintf(
-		"SELECT update_id || chr(9) || crdt_state FROM document_checkpoints WHERE document_id=%s AND update_id <= %d ORDER BY update_id DESC LIMIT 1",
+		"SELECT update_id || chr(9) || crdt_state FROM document_checkpoints WHERE workspace_id=%s AND document_id=%s AND update_id <= %d ORDER BY update_id DESC LIMIT 1",
+		sqlQuote(s.workspaceID),
 		sqlQuote(documentID),
 		headID,
 	)
@@ -806,7 +920,8 @@ func (s *regressionStack) latestCheckpoint(documentID string, headID int64) (int
 
 func (s *regressionStack) documentUpdates(documentID string, afterID int64, throughID int64) ([][]byte, error) {
 	query := fmt.Sprintf(
-		"SELECT id || chr(9) || encode(update, 'hex') FROM document_updates WHERE document_id=%s AND id > %d AND id <= %d ORDER BY id ASC",
+		"SELECT id || chr(9) || encode(update, 'hex') FROM document_updates WHERE workspace_id=%s AND document_id=%s AND id > %d AND id <= %d ORDER BY id ASC",
+		sqlQuote(s.workspaceID),
 		sqlQuote(documentID),
 		afterID,
 		throughID,
@@ -842,27 +957,12 @@ func (s *regressionStack) psql(query string) string {
 	return string(output)
 }
 
-func createDocument(t *testing.T, baseURL string, path string, content string) string {
+func (s *regressionStack) createDocument(t *testing.T, path string, content string) string {
 	t.Helper()
-	body, err := json.Marshal(map[string]string{"path": path, "content": content})
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err := http.Post(baseURL+"/api/documents?actor=regression&actor_type=test", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("create document: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
-		response, _ := io.ReadAll(resp.Body)
-		t.Fatalf("create document status %d: %s", resp.StatusCode, response)
-	}
 	var document struct {
 		ID string `json:"id"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&document); err != nil {
-		t.Fatalf("decode create document response: %v", err)
-	}
+	s.postJSON(t, s.workspaceAPIPath("/documents"), s.authToken, map[string]string{"path": path, "content": content}, http.StatusCreated, &document)
 	if document.ID == "" {
 		t.Fatal("created document has empty id")
 	}

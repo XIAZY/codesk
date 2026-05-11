@@ -19,6 +19,53 @@ const postgresCheckpointTailLimit = postgresCheckpointInterval
 func initPostgresSchemaTables(db *sql.DB) error {
 	statements := []string{
 		`
+		CREATE TABLE IF NOT EXISTS workspaces (
+			id TEXT PRIMARY KEY,
+			slug TEXT UNIQUE NOT NULL,
+			name TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL
+		)
+		`,
+		`
+		CREATE TABLE IF NOT EXISTS accounts (
+			id TEXT PRIMARY KEY,
+			email TEXT UNIQUE NOT NULL,
+			display_name TEXT NOT NULL,
+			password_hash TEXT NOT NULL,
+			password_updated_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL
+		)
+		`,
+		`
+		CREATE TABLE IF NOT EXISTS workspace_members (
+			workspace_id TEXT NOT NULL,
+			account_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
+			membership_role TEXT NOT NULL DEFAULT 'member',
+			status TEXT NOT NULL DEFAULT 'active',
+			invited_by TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL,
+			accepted_at TIMESTAMPTZ,
+			PRIMARY KEY (workspace_id, account_id)
+		)
+		`,
+		`CREATE INDEX IF NOT EXISTS idx_workspace_members_account ON workspace_members (account_id, status, workspace_id)`,
+		`
+		CREATE TABLE IF NOT EXISTS daemons (
+			id TEXT PRIMARY KEY,
+			workspace_id TEXT NOT NULL,
+			name TEXT NOT NULL,
+			token_hash TEXT NOT NULL UNIQUE,
+			status TEXT NOT NULL DEFAULT 'active',
+			last_seen_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL,
+			deleted_at TIMESTAMPTZ
+		)
+		`,
+		`CREATE INDEX IF NOT EXISTS idx_daemons_workspace ON daemons (workspace_id, status)`,
+		`
 		CREATE TABLE IF NOT EXISTS documents (
 			workspace_id TEXT NOT NULL,
 			id TEXT PRIMARY KEY,
@@ -122,11 +169,13 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			updated_at TIMESTAMPTZ NOT NULL
 		)
 		`,
+		`ALTER TABLE users DROP COLUMN IF EXISTS daemon_id`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_workspace_handle ON users (workspace_id, handle)`,
 		`
 		CREATE TABLE IF NOT EXISTS agents (
 			workspace_id TEXT NOT NULL,
 			id TEXT PRIMARY KEY,
+			daemon_id TEXT NOT NULL DEFAULT '',
 			handle TEXT NOT NULL,
 			name TEXT NOT NULL,
 			role TEXT NOT NULL,
@@ -146,6 +195,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		)
 		`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_workspace_handle ON agents (workspace_id, handle)`,
+		`ALTER TABLE agents ADD COLUMN IF NOT EXISTS daemon_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE agents ADD COLUMN IF NOT EXISTS codex_thread_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE agents ADD COLUMN IF NOT EXISTS current_turn_id TEXT NOT NULL DEFAULT ''`,
 		`
@@ -337,6 +387,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 func (s *Store) loadNormalizedPostgresLocked() error {
 	s.state.Documents = map[string]*Document{}
 	s.state.Users = map[string]*User{}
+	s.state.Daemons = map[string]*Daemon{}
 	s.state.Agents = map[string]*Agent{}
 	s.state.AgentRuns = map[string]*AgentRun{}
 	s.state.Presences = map[string]*Presence{}
@@ -353,6 +404,9 @@ func (s *Store) loadNormalizedPostgresLocked() error {
 		return err
 	}
 	if err := s.loadUsersPostgresLocked(); err != nil {
+		return err
+	}
+	if err := s.loadDaemonsPostgresLocked(); err != nil {
 		return err
 	}
 	if err := s.loadAgentsPostgresLocked(); err != nil {
@@ -660,16 +714,17 @@ func upsertAgentPostgres(db *sql.DB, workspaceID string, agent *Agent) error {
 	}
 	_, err := db.Exec(
 		`INSERT INTO agents (
-			workspace_id, id, handle, name, role, kind, system_prompt, workspace_root,
+			workspace_id, id, daemon_id, handle, name, role, kind, system_prompt, workspace_root,
 			codex_thread_id, current_turn_id, session_id, status, current_task, current_activity,
 			current_run_id, last_heartbeat_at, last_run_completed, updated_at
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8,
-			$9, $10, $11, $12, $13, $14,
-			$15, $16, $17, $18
+			$1, $2, $3, $4, $5, $6, $7, $8, $9,
+			$10, $11, $12, $13, $14, $15,
+			$16, $17, $18, $19
 		)
 		ON CONFLICT (id)
-		DO UPDATE SET handle = EXCLUDED.handle,
+		DO UPDATE SET daemon_id = EXCLUDED.daemon_id,
+		              handle = EXCLUDED.handle,
 		              name = EXCLUDED.name,
 		              role = EXCLUDED.role,
 		              kind = EXCLUDED.kind,
@@ -687,6 +742,7 @@ func upsertAgentPostgres(db *sql.DB, workspaceID string, agent *Agent) error {
 		              updated_at = EXCLUDED.updated_at`,
 		workspaceID,
 		agent.ID,
+		agent.DaemonID,
 		agent.Handle,
 		agent.Name,
 		agent.Role,
@@ -713,16 +769,17 @@ func insertAgentPostgres(tx *sql.Tx, workspaceID string, agent *Agent) error {
 	}
 	_, err := tx.Exec(
 		`INSERT INTO agents (
-			workspace_id, id, handle, name, role, kind, system_prompt, workspace_root,
+			workspace_id, id, daemon_id, handle, name, role, kind, system_prompt, workspace_root,
 			codex_thread_id, current_turn_id, session_id, status, current_task, current_activity,
 			current_run_id, last_heartbeat_at, last_run_completed, updated_at
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8,
-			$9, $10, $11, $12, $13, $14,
-			$15, $16, $17, $18
+			$1, $2, $3, $4, $5, $6, $7, $8, $9,
+			$10, $11, $12, $13, $14, $15,
+			$16, $17, $18, $19
 		)`,
 		workspaceID,
 		agent.ID,
+		agent.DaemonID,
 		agent.Handle,
 		agent.Name,
 		agent.Role,
@@ -1591,9 +1648,48 @@ func (s *Store) loadUsersPostgresLocked() error {
 	return rows.Err()
 }
 
+func (s *Store) loadDaemonsPostgresLocked() error {
+	rows, err := s.db.Query(
+		`SELECT id, workspace_id, name, status, last_seen_at, created_at, deleted_at
+		   FROM daemons
+		  WHERE workspace_id = $1
+		    AND status <> 'deleted'`,
+		s.state.WorkspaceID,
+	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		daemon := &Daemon{}
+		var lastSeen sql.NullTime
+		var deletedAt sql.NullTime
+		if err := rows.Scan(
+			&daemon.ID,
+			&daemon.WorkspaceID,
+			&daemon.Name,
+			&daemon.Status,
+			&lastSeen,
+			&daemon.CreatedAt,
+			&deletedAt,
+		); err != nil {
+			return err
+		}
+		if lastSeen.Valid {
+			daemon.LastSeenAt = lastSeen.Time
+		}
+		if deletedAt.Valid {
+			daemon.DeletedAt = deletedAt.Time
+		}
+		s.state.Daemons[daemon.ID] = daemon
+	}
+	return rows.Err()
+}
+
 func (s *Store) loadAgentsPostgresLocked() error {
 	rows, err := s.db.Query(
-		`SELECT id, handle, name, role, kind, system_prompt, workspace_root,
+		`SELECT id, daemon_id, handle, name, role, kind, system_prompt, workspace_root,
 		        codex_thread_id, current_turn_id, session_id, status,
 		        current_task, current_activity, current_run_id, last_heartbeat_at,
 		        last_run_completed, updated_at
@@ -1612,6 +1708,7 @@ func (s *Store) loadAgentsPostgresLocked() error {
 		var lastRunCompleted sql.NullTime
 		if err := rows.Scan(
 			&agent.ID,
+			&agent.DaemonID,
 			&agent.Handle,
 			&agent.Name,
 			&agent.Role,

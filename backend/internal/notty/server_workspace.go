@@ -8,20 +8,53 @@ import (
 )
 
 func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
-	state := s.store.Snapshot()
+	state := s.requestStore(r).Snapshot()
+	currentUserID := ""
+	currentDaemonID := ""
+	auth, _ := authFromContext(r.Context())
+	if auth != nil {
+		currentUserID = auth.UserID
+		currentDaemonID = auth.DaemonID
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"workspaceId": state.WorkspaceID,
-		"name":        state.Name,
-		"documents":   SortedSyncDocuments(state),
-		"users":       SortedUsers(state),
-		"agents":      SortedAgents(state),
-		"agentRuns":   SortedWorkspaceAgentRuns(state),
-		"threads":     SortedThreads(state),
-		"agentEvents": SortedAgentEvents(state),
-		"presences":   state.Presences,
-		"activities":  state.Activities,
-		"updatedAt":   state.UpdatedAt,
+		"workspaceId":     state.WorkspaceID,
+		"currentUserId":   currentUserID,
+		"currentDaemonId": currentDaemonID,
+		"name":            state.Name,
+		"documents":       SortedSyncDocuments(state),
+		"users":           SortedUsers(state),
+		"daemons":         s.daemonsForWorkspace(r, state),
+		"agents":          visibleAgentsForAuth(state, auth),
+		"agentRuns":       SortedWorkspaceAgentRuns(state),
+		"threads":         SortedThreads(state),
+		"agentEvents":     SortedAgentEvents(state),
+		"presences":       state.Presences,
+		"activities":      state.Activities,
+		"updatedAt":       state.UpdatedAt,
 	})
+}
+
+func visibleAgentsForAuth(state WorkspaceState, auth *AuthContext) []*Agent {
+	agents := SortedAgents(state)
+	if auth == nil || auth.PrincipalKind != "daemon" || auth.DaemonID == "" {
+		return agents
+	}
+	filtered := make([]*Agent, 0, len(agents))
+	for _, agent := range agents {
+		if agent != nil && agent.DaemonID == auth.DaemonID {
+			filtered = append(filtered, agent)
+		}
+	}
+	return filtered
+}
+
+func (s *Server) daemonsForWorkspace(r *http.Request, state WorkspaceState) []*Daemon {
+	if s.authEnabled() {
+		if daemons, err := listDaemons(s.store.db, s.requestWorkspaceID(r)); err == nil {
+			return daemons
+		}
+	}
+	return SortedDaemons(state)
 }
 
 func (s *Server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
@@ -31,16 +64,18 @@ func (s *Server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	channel, unsubscribe := s.subscribers.Subscribe()
+	channel, unsubscribe := s.requestBroker(r).Subscribe()
 	defer unsubscribe()
 
-	snapshot := s.store.Snapshot()
+	snapshot := s.requestStore(r).Snapshot()
+	auth, _ := authFromContext(r.Context())
 	if err := conn.WriteJSON(EventEnvelope{
 		Type: "workspace.snapshot",
 		Data: map[string]interface{}{
 			"documents":   SortedSyncDocuments(snapshot),
 			"users":       SortedUsers(snapshot),
-			"agents":      SortedAgents(snapshot),
+			"daemons":     s.daemonsForWorkspace(r, snapshot),
+			"agents":      visibleAgentsForAuth(snapshot, auth),
 			"agentRuns":   SortedWorkspaceAgentRuns(snapshot),
 			"threads":     SortedThreads(snapshot),
 			"agentEvents": SortedAgentEvents(snapshot),

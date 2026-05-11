@@ -91,11 +91,12 @@ var nextDocumentConnect time.Time
 const documentConnectInterval = 100 * time.Millisecond
 
 type workspaceResponse struct {
-	Documents   []*document   `json:"documents"`
-	Agents      []*agent      `json:"agents"`
-	AgentRuns   []*agentRun   `json:"agentRuns"`
-	Threads     []*thread     `json:"threads"`
-	AgentEvents []*agentEvent `json:"agentEvents"`
+	CurrentDaemonID string        `json:"currentDaemonId"`
+	Documents       []*document   `json:"documents"`
+	Agents          []*agent      `json:"agents"`
+	AgentRuns       []*agentRun   `json:"agentRuns"`
+	Threads         []*thread     `json:"threads"`
+	AgentEvents     []*agentEvent `json:"agentEvents"`
 }
 
 type document struct {
@@ -270,17 +271,7 @@ func (s *Service) workspaceEventLoop(ctx context.Context) {
 }
 
 func (s *Service) runWorkspaceEventStream(ctx context.Context) error {
-	wsURL, err := url.Parse(s.cfg.BackendURL)
-	if err != nil {
-		return err
-	}
-	if wsURL.Scheme == "https" {
-		wsURL.Scheme = "wss"
-	} else {
-		wsURL.Scheme = "ws"
-	}
-	wsURL.Path = "/ws"
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL.String(), nil)
+	conn, _, err := dialWorkspaceWebsocket(ctx, s.cfg, "/ws", nil, "")
 	if err != nil {
 		return err
 	}
@@ -356,7 +347,7 @@ func (s *Service) refresh(ctx context.Context) error {
 }
 
 func (s *Service) fetchWorkspace(ctx context.Context) (*workspaceResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.BackendURL+"/api/workspace", nil)
+	req, err := s.newBackendRequest(ctx, http.MethodGet, "/api/workspace", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -595,28 +586,18 @@ func (s *Service) connectDocument(tracked *trackedFile) error {
 		return nil
 	}
 	paceDocumentConnect()
-	wsURL, err := url.Parse(s.cfg.BackendURL)
-	if err != nil {
-		return err
-	}
-	if wsURL.Scheme == "https" {
-		wsURL.Scheme = "wss"
-	} else {
-		wsURL.Scheme = "ws"
-	}
-	wsURL.Path = "/ws/documents/" + tracked.DocumentID
 	clientID, syncStep := tracked.initialSyncState()
-	wsURL.RawQuery = url.Values{
+	query := url.Values{
 		"client_id":  {fmt.Sprintf("%d", clientID)},
 		"actor_id":   {s.cfg.AgentID},
 		"actor_type": {"agent"},
-	}.Encode()
+	}
 
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL.String(), nil)
+	conn, _, err := dialWorkspaceWebsocket(context.Background(), s.cfg, "/ws/documents/"+tracked.DocumentID, query, "")
 	if err != nil {
 		return err
 	}
-	log.Printf("daemon ws open doc=%s url=%s", tracked.DocumentID, wsURL.String())
+	log.Printf("daemon ws open doc=%s", tracked.DocumentID)
 	tracked.setConn(conn)
 	go s.readLoop(tracked, conn)
 	if err := tracked.write(syncStep); err != nil {
@@ -1435,7 +1416,7 @@ func (s *Service) sendPresence(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.BackendURL+"/api/presence", bytes.NewReader(payload))
+	req, err := s.newBackendRequest(ctx, http.MethodPost, "/api/presence", bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}
@@ -1449,7 +1430,7 @@ func (s *Service) createRemoteDocument(ctx context.Context, path, content string
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.BackendURL+"/api/documents?actor="+url.QueryEscape(s.cfg.AgentID)+"&actor_type=agent", bytes.NewReader(payload))
+	req, err := s.newBackendRequest(ctx, http.MethodPost, "/api/documents", bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}
@@ -1470,7 +1451,7 @@ func (s *Service) moveRemoteDocument(ctx context.Context, documentID, path strin
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, s.cfg.BackendURL+"/api/documents/"+documentID+"?actor="+url.QueryEscape(s.cfg.AgentID)+"&actor_type=agent", bytes.NewReader(payload))
+	req, err := s.newBackendRequest(ctx, http.MethodPatch, "/api/documents/"+documentID, bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}
@@ -1487,7 +1468,7 @@ func (s *Service) moveRemoteDocument(ctx context.Context, documentID, path strin
 }
 
 func (s *Service) deleteRemoteDocument(ctx context.Context, documentID string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, s.cfg.BackendURL+"/api/documents/"+documentID+"?actor="+url.QueryEscape(s.cfg.AgentID)+"&actor_type=agent", nil)
+	req, err := s.newBackendRequest(ctx, http.MethodDelete, "/api/documents/"+documentID, nil)
 	if err != nil {
 		return err
 	}
@@ -1507,7 +1488,7 @@ func (s *Service) updateRemoteAgentSession(ctx context.Context, agentID string, 
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, s.cfg.BackendURL+"/api/agents/"+agentID+"/session?actor="+url.QueryEscape(s.cfg.AgentID)+"&actor_type=agent", bytes.NewReader(payload))
+	req, err := s.newBackendRequest(ctx, http.MethodPatch, "/api/agents/"+agentID+"/session", bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}

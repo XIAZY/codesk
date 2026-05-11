@@ -13,12 +13,17 @@ func (s *Server) handlePresence(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	presence, err := s.store.UpsertPresence(req)
+	if auth, ok := authFromContext(r.Context()); ok {
+		meta := operationMetaFromAuth(auth, "presence", req.ActorID, req.ActorType)
+		req.ActorID = meta.ActorID
+		req.ActorType = meta.ActorType
+	}
+	presence, err := s.requestStore(r).UpsertPresence(req)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.subscribers.Publish(EventEnvelope{Type: "presence.updated", Data: presence})
+	s.requestBroker(r).Publish(EventEnvelope{Type: "presence.updated", Data: presence})
 	writeJSON(w, http.StatusOK, presence)
 }
 
@@ -28,18 +33,14 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	meta := OperationMeta{
-		ActorID:   actorFromRequest(r, "owner"),
-		ActorType: actorTypeFromRequest(r, "human"),
-		Source:    "api",
-		Tool:      "user-create",
-	}
-	user, err := s.store.CreateUser(req, meta)
+	auth, _ := authFromContext(r.Context())
+	meta := operationMetaFromAuth(auth, "user-create", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
+	user, err := s.requestStore(r).CreateUser(req, meta)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.subscribers.Publish(EventEnvelope{Type: "user.created", Data: user})
+	s.requestBroker(r).Publish(EventEnvelope{Type: "user.created", Data: user})
 	writeJSON(w, http.StatusCreated, user)
 }
 
@@ -49,13 +50,9 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	meta := OperationMeta{
-		ActorID:   actorFromRequest(r, "owner"),
-		ActorType: actorTypeFromRequest(r, "human"),
-		Source:    "api",
-		Tool:      "user-update",
-	}
-	user, err := s.store.UpdateUser(chi.URLParam(r, "id"), req, meta)
+	auth, _ := authFromContext(r.Context())
+	meta := operationMetaFromAuth(auth, "user-update", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
+	user, err := s.requestStore(r).UpdateUser(chi.URLParam(r, "id"), req, meta)
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -64,18 +61,14 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
-	s.subscribers.Publish(EventEnvelope{Type: "user.updated", Data: user})
+	s.requestBroker(r).Publish(EventEnvelope{Type: "user.updated", Data: user})
 	writeJSON(w, http.StatusOK, user)
 }
 
 func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
-	meta := OperationMeta{
-		ActorID:   actorFromRequest(r, "owner"),
-		ActorType: actorTypeFromRequest(r, "human"),
-		Source:    "api",
-		Tool:      "user-delete",
-	}
-	user, err := s.store.DeleteUser(chi.URLParam(r, "id"), meta)
+	auth, _ := authFromContext(r.Context())
+	meta := operationMetaFromAuth(auth, "user-delete", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
+	user, err := s.requestStore(r).DeleteUser(chi.URLParam(r, "id"), meta)
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -84,6 +77,6 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
-	s.subscribers.Publish(EventEnvelope{Type: "user.deleted", Data: user})
+	s.requestBroker(r).Publish(EventEnvelope{Type: "user.deleted", Data: user})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

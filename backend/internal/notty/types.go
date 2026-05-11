@@ -12,6 +12,7 @@ type WorkspaceState struct {
 	Name                string                         `json:"name"`
 	Documents           map[string]*Document           `json:"documents"`
 	Users               map[string]*User               `json:"users"`
+	Daemons             map[string]*Daemon             `json:"daemons"`
 	Agents              map[string]*Agent              `json:"agents"`
 	AgentRuns           map[string]*AgentRun           `json:"agentRuns"`
 	Threads             map[string]*Thread             `json:"threads"`
@@ -97,6 +98,47 @@ type User struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
+type Account struct {
+	ID          string    `json:"id"`
+	Email       string    `json:"email"`
+	DisplayName string    `json:"displayName"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
+type Workspace struct {
+	ID        string    `json:"id"`
+	Slug      string    `json:"slug"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+type WorkspaceMember struct {
+	WorkspaceID    string    `json:"workspaceId"`
+	AccountID      string    `json:"accountId"`
+	UserID         string    `json:"userId"`
+	UserHandle     string    `json:"userHandle,omitempty"`
+	UserName       string    `json:"userName,omitempty"`
+	MembershipRole string    `json:"membershipRole"`
+	Status         string    `json:"status"`
+	InvitedBy      string    `json:"invitedBy,omitempty"`
+	CreatedAt      time.Time `json:"createdAt"`
+	AcceptedAt     time.Time `json:"acceptedAt,omitempty"`
+}
+
+type Daemon struct {
+	ID                 string    `json:"id"`
+	WorkspaceID        string    `json:"workspaceId"`
+	Name               string    `json:"name"`
+	Status             string    `json:"status"`
+	ConnectionStatus   string    `json:"connectionStatus"`
+	LastSeenAt         time.Time `json:"lastSeenAt,omitempty"`
+	LastSeenAgeSeconds int64     `json:"lastSeenAgeSeconds"`
+	CreatedAt          time.Time `json:"createdAt"`
+	DeletedAt          time.Time `json:"deletedAt,omitempty"`
+}
+
 type Presence struct {
 	ActorID    string    `json:"actorId"`
 	ActorType  string    `json:"actorType"`
@@ -110,6 +152,7 @@ type Presence struct {
 
 type Agent struct {
 	ID               string    `json:"id"`
+	DaemonID         string    `json:"daemonId"`
 	Handle           string    `json:"handle"`
 	Name             string    `json:"name"`
 	Role             string    `json:"role"`
@@ -239,6 +282,45 @@ type OperationMeta struct {
 	ReadSetSummary string `json:"readSetSummary,omitempty"`
 }
 
+type RegisterRequest struct {
+	Email       string `json:"email"`
+	Password    string `json:"password"`
+	DisplayName string `json:"displayName"`
+}
+
+type LoginRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+type AuthResponse struct {
+	Token      string       `json:"token"`
+	Account    *Account     `json:"account"`
+	Workspaces []*Workspace `json:"workspaces,omitempty"`
+}
+
+type CreateWorkspaceRequest struct {
+	Name   string `json:"name"`
+	Slug   string `json:"slug"`
+	Handle string `json:"handle"`
+}
+
+type AddWorkspaceMemberRequest struct {
+	Email       string `json:"email"`
+	DisplayName string `json:"displayName"`
+	Handle      string `json:"handle"`
+	Role        string `json:"role"`
+}
+
+type CreateDaemonRequest struct {
+	Name string `json:"name"`
+}
+
+type CreateDaemonResponse struct {
+	Daemon *Daemon `json:"daemon"`
+	Token  string  `json:"token"`
+}
+
 type CreateThreadRequest struct {
 	DocumentID    string `json:"documentId"`
 	Title         string `json:"title"`
@@ -310,6 +392,7 @@ type StartAgentRunRequest struct {
 }
 
 type CreateAgentRequest struct {
+	DaemonID     string `json:"daemonId"`
 	Handle       string `json:"handle"`
 	Name         string `json:"name"`
 	Role         string `json:"role"`

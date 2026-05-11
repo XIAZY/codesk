@@ -11,6 +11,7 @@ type Config struct {
 	DataFile         string
 	MaxLiveEditBytes int
 	PprofAddr        string
+	JWTSecret        string
 }
 
 func LoadConfig() Config {
@@ -20,6 +21,7 @@ func LoadConfig() Config {
 		DataFile:         getenv("NOTTY_DATA_FILE", "/data/state.json"),
 		MaxLiveEditBytes: getenvInt("NOTTY_MAX_LIVE_EDIT_BYTES", 1500),
 		PprofAddr:        getenv("NOTTY_PPROF_ADDR", ""),
+		JWTSecret:        getenv("NOTTY_JWT_SECRET", ""),
 	}
 }
 

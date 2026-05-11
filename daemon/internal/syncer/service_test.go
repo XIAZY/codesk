@@ -38,6 +38,33 @@ func TestComputeReplaceHandlesReplacement(t *testing.T) {
 	}
 }
 
+func TestReconcileAgentReplicasKeepsUUIDActorWhenHandleChanges(t *testing.T) {
+	cancelled := false
+	service := &Service{
+		agentReplicas: map[string]*managedReplica{
+			"agent_1": {
+				replica: &workspaceReplica{actorID: "agent_1"},
+				cancel: func() {
+					cancelled = true
+				},
+			},
+		},
+	}
+	workspace := &workspaceResponse{
+		Agents: []*agent{{ID: "agent_1", Handle: "renamed-agent"}},
+	}
+	if err := service.reconcileAgentReplicas(context.Background(), workspace); err != nil {
+		t.Fatalf("reconcile agent replicas: %v", err)
+	}
+	if cancelled {
+		t.Fatal("agent replica should not restart when only the handle changes")
+	}
+	replica := service.agentReplicas["agent_1"]
+	if replica == nil || replica.replica == nil || replica.replica.actorID != "agent_1" {
+		t.Fatalf("expected UUID actor to be preserved, got %#v", replica)
+	}
+}
+
 func TestIgnoredWorkspacePathPolicy(t *testing.T) {
 	root := t.TempDir()
 	cases := []struct {

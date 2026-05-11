@@ -24,18 +24,14 @@ func (s *Service) reconcileAgentReplicas(ctx context.Context, workspace *workspa
 	for agentID := range desired {
 		currentAgent := desired[agentID]
 		if managed, ok := s.agentReplicas[agentID]; ok {
-			if managed.replica.actorID == currentAgent.Handle || currentAgent.Handle == "" {
+			if managed.replica.actorID == currentAgent.ID {
 				continue
 			}
 			managed.cancel()
 			delete(s.agentReplicas, agentID)
 		}
 		rootDir := filepath.Join(s.cfg.AgentWorkspaceRoot, safeAgentWorkspaceName(agentID))
-		actorID := currentAgent.Handle
-		if actorID == "" {
-			actorID = agentID
-		}
-		replica, err := newWorkspaceReplica(s.cfg.BackendURL, rootDir, actorID, "agent workspace "+actorID)
+		replica, err := newWorkspaceReplica(s.cfg, rootDir, currentAgent.ID)
 		if err != nil {
 			s.mu.Unlock()
 			return err

@@ -72,6 +72,7 @@ type UserItem = {
 
 type Agent = {
   id: string;
+  daemonId: string;
   handle: string;
   name: string;
   role: string;
@@ -83,6 +84,18 @@ type Agent = {
   currentActivity: string;
   currentRunId: string;
   lastHeartbeatAt?: string;
+};
+
+type Daemon = {
+  id: string;
+  workspaceId: string;
+  name: string;
+  status: string;
+  connectionStatus?: "online" | "stale" | "disconnected";
+  lastSeenAt?: string;
+  lastSeenAgeSeconds?: number;
+  createdAt: string;
+  deletedAt?: string;
 };
 
 type AgentRun = {
@@ -115,13 +128,29 @@ type PresenceItem = {
 };
 
 type Workspace = {
+  workspaceId: string;
+  currentUserId?: string;
+  currentDaemonId?: string;
   name: string;
   documents: DocumentItem[];
   users: UserItem[];
+  daemons: Daemon[];
   agents: Agent[];
   agentRuns: AgentRun[];
   presences: Record<string, PresenceItem>;
   threads: ThreadItem[];
+};
+
+type Account = {
+  id: string;
+  email: string;
+  displayName: string;
+};
+
+type WorkspaceSummary = {
+  id: string;
+  slug: string;
+  name: string;
 };
 
 type DocumentUpdateEvent = {
@@ -153,10 +182,35 @@ type PresenceView = {
 
 const apiBase = import.meta.env.VITE_API_BASE ?? "http://localhost:8080";
 const currentUserStorageKey = "notty-current-user";
+const authTokenStorageKey = "notty-auth-token";
+const workspaceStorageKey = "notty-workspace-id";
+const daemonStatusRefreshMs = 10_000;
+const daemonWorkspaceRefreshMs = 15_000;
+
+function daemonDeployCommand(workspaceId: string, token: string) {
+  return `NOTTY_WORKSPACE_ID=${workspaceId} \\
+NOTTY_DAEMON_TOKEN=${token} \\
+docker compose --profile daemon up -d --build daemon`;
+}
 
 export function App() {
+  const [authToken, setAuthToken] = useState(() => localStorage.getItem(authTokenStorageKey) ?? "");
+  const [account, setAccount] = useState<Account | null>(null);
+  const [availableWorkspaces, setAvailableWorkspaces] = useState<WorkspaceSummary[]>([]);
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState(() => localStorage.getItem(workspaceStorageKey) ?? "");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authName, setAuthName] = useState("");
+  const [newWorkspaceName, setNewWorkspaceName] = useState("");
+  const [newWorkspaceSlug, setNewWorkspaceSlug] = useState("");
+  const [newMemberEmail, setNewMemberEmail] = useState("");
+  const [newMemberHandle, setNewMemberHandle] = useState("");
+  const [newDaemonName, setNewDaemonName] = useState("Local daemon");
+  const [createdDaemonToken, setCreatedDaemonToken] = useState("");
+  const [createdDaemonName, setCreatedDaemonName] = useState("");
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [workspaceConnected, setWorkspaceConnected] = useState(false);
+  const [daemonStatusNow, setDaemonStatusNow] = useState(() => Date.now());
   const [selectedId, setSelectedId] = useState<string>("");
   const [activeDocument, setActiveDocument] = useState<DocumentItem | null>(null);
   const [documentReady, setDocumentReady] = useState(false);
@@ -174,6 +228,7 @@ export function App() {
   const [newAgentHandle, setNewAgentHandle] = useState("codex-agent");
   const [newAgentName, setNewAgentName] = useState("Codex Agent");
   const [newAgentRole, setNewAgentRole] = useState("Implement changes in the shared workspace");
+  const [newAgentDaemonId, setNewAgentDaemonId] = useState("");
   const [agentDrafts, setAgentDrafts] = useState<Record<string, AgentDraft>>({});
   const [isAgentModalOpen, setIsAgentModalOpen] = useState(false);
   const [agentDetailsId, setAgentDetailsId] = useState<string>("");
@@ -200,7 +255,6 @@ export function App() {
   const remoteDraftSyncTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
-    void loadWorkspace();
     return () => {
       wsRef.current?.close();
       workspaceWsRef.current?.close();
@@ -218,6 +272,28 @@ export function App() {
       activeDocRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    if (!authToken) {
+      setAccount(null);
+      setAvailableWorkspaces([]);
+      setWorkspace(null);
+      return;
+    }
+    localStorage.setItem(authTokenStorageKey, authToken);
+    void loadMe();
+  }, [authToken]);
+
+  useEffect(() => {
+    if (selectedWorkspaceId) {
+      localStorage.setItem(workspaceStorageKey, selectedWorkspaceId);
+    } else {
+      localStorage.removeItem(workspaceStorageKey);
+    }
+    if (authToken && selectedWorkspaceId) {
+      void loadWorkspace();
+    }
+  }, [authToken, selectedWorkspaceId]);
 
   useEffect(() => {
     selectedIdRef.current = selectedId;
@@ -246,6 +322,9 @@ export function App() {
   }, [draft]);
 
   useEffect(() => {
+    if (!authToken || !selectedWorkspaceId) {
+      return;
+    }
     let disposed = false;
     let reconnectTimer: number | null = null;
     let attempt = 0;
@@ -264,7 +343,8 @@ export function App() {
       if (disposed) {
         return;
       }
-      const ws = new WebSocket(`${apiBase.replace("http", "ws")}/ws`);
+      const tokenParam = encodeURIComponent(authToken);
+      const ws = new WebSocket(`${apiBase.replace("http", "ws")}/ws/workspaces/${encodeURIComponent(selectedWorkspaceId)}?token=${tokenParam}`);
       workspaceWsRef.current = ws;
       ws.onopen = () => {
         attempt = 0;
@@ -314,6 +394,10 @@ export function App() {
                 }
               : current
           );
+          return;
+        }
+        if (envelope.type === "daemon.created" || envelope.type === "daemon.deleted") {
+          void loadWorkspace();
           return;
         }
         if (envelope.type === "document.updated") {
@@ -387,7 +471,27 @@ export function App() {
       }
       workspaceWsRef.current?.close();
     };
-  }, []);
+  }, [authToken, selectedWorkspaceId]);
+
+  useEffect(() => {
+    if (!authToken || !selectedWorkspaceId) {
+      return;
+    }
+    const interval = window.setInterval(() => {
+      setDaemonStatusNow(Date.now());
+    }, daemonStatusRefreshMs);
+    return () => window.clearInterval(interval);
+  }, [authToken, selectedWorkspaceId]);
+
+  useEffect(() => {
+    if (!authToken || !selectedWorkspaceId) {
+      return;
+    }
+    const interval = window.setInterval(() => {
+      void loadWorkspace();
+    }, daemonWorkspaceRefreshMs);
+    return () => window.clearInterval(interval);
+  }, [authToken, selectedWorkspaceId]);
 
   const selectedDocumentMeta = useMemo(
     () => workspace?.documents.find((doc) => doc.id === selectedId) ?? null,
@@ -427,9 +531,9 @@ export function App() {
         selectedDocumentView?.path ?? "",
         currentUser
           ? { actorId: currentUser.handle, actorName: currentUser.name, activity: "Editing this page" }
-          : { actorId: "owner", actorName: "Workspace Owner", activity: "Editing this page" }
+          : { actorId: "human", actorName: account?.displayName ?? account?.email ?? "Human", activity: "Editing this page" }
       ),
-    [currentUser, selectedDocumentView?.id, selectedDocumentView?.path, workspace?.agents, workspace?.presences, workspace?.users]
+    [account?.displayName, account?.email, currentUser, selectedDocumentView?.id, selectedDocumentView?.path, workspace?.agents, workspace?.presences, workspace?.users]
   );
   const commentedLines = useMemo(
     () => new Set(lineThreads.map((thread) => thread.line)),
@@ -537,7 +641,7 @@ export function App() {
       }
       lastPresenceSentAtRef.current = Date.now();
       try {
-        await fetch(`${apiBase}/api/presence`, {
+        await workspaceFetch("/presence", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -585,7 +689,7 @@ export function App() {
         return;
       }
       lastPresenceSentAtRef.current = Date.now();
-      void fetch(`${apiBase}/api/presence`, {
+      void workspaceFetch("/presence", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -622,8 +726,8 @@ export function App() {
     pendingSelectionRef.current = null;
     isComposingRef.current = false;
     hasQueuedRemoteSyncRef.current = false;
-    const actorHandle = currentUser?.handle ?? "owner";
-    const actorName = currentUser?.name ?? "Workspace Owner";
+    const actorHandle = currentUser?.handle ?? "human";
+    const actorName = currentUser?.name ?? account?.displayName ?? account?.email ?? "Human";
     const ydoc = getOrCreateDoc(selectedDocument);
     const awareness = new Awareness(ydoc);
     awareness.setLocalState({
@@ -685,8 +789,15 @@ export function App() {
       if (disposed) {
         return;
       }
+      if (!selectedWorkspaceId || !authToken) {
+        return;
+      }
+      const query = new URLSearchParams({
+        token: authToken,
+        client_id: String(ydoc.clientID),
+      });
       const ws = new WebSocket(
-        `${apiBase.replace("http", "ws")}/ws/documents/${selectedDocument.id}?client_id=${ydoc.clientID}&actor_id=${encodeURIComponent(actorHandle)}&actor_type=human`
+        `${apiBase.replace("http", "ws")}/ws/workspaces/${encodeURIComponent(selectedWorkspaceId)}/documents/${selectedDocument.id}?${query.toString()}`
       );
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
@@ -751,7 +862,7 @@ export function App() {
       awarenessRef.current?.destroy();
       awarenessRef.current = null;
     };
-  }, [currentUser?.id, selectedDocument?.id]);
+  }, [account?.displayName, account?.email, authToken, currentUser?.id, selectedDocument?.id, selectedWorkspaceId]);
 
   function resetEditorState(path = "") {
     draftRef.current = "";
@@ -778,10 +889,184 @@ export function App() {
   }
 
 
+  function authHeaders(extra?: HeadersInit): HeadersInit {
+    const headers = new Headers(extra);
+    if (authToken) {
+      headers.set("Authorization", `Bearer ${authToken}`);
+    }
+    return headers;
+  }
+
+  function workspaceEndpoint(path: string) {
+    return `${apiBase}/api/workspaces/${encodeURIComponent(selectedWorkspaceId)}${path}`;
+  }
+
+  async function workspaceFetch(path: string, options: RequestInit = {}) {
+    return fetch(workspaceEndpoint(path), {
+      ...options,
+      headers: authHeaders(options.headers),
+    });
+  }
+
+  async function loadMe() {
+    const response = await fetch(`${apiBase}/api/auth/me`, {
+      headers: authHeaders(),
+    });
+    if (!response.ok) {
+      logout();
+      return;
+    }
+    const data = (await response.json()) as { account: Account; workspaces: WorkspaceSummary[] };
+    const nextWorkspaces = data.workspaces ?? [];
+    setAccount(data.account);
+    setAvailableWorkspaces(nextWorkspaces);
+    setSelectedWorkspaceId((current) => {
+      if (current && nextWorkspaces.some((workspaceItem) => workspaceItem.id === current)) {
+        return current;
+      }
+      return nextWorkspaces[0]?.id ?? "";
+    });
+  }
+
+  async function login() {
+    const response = await fetch(`${apiBase}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: authEmail, password: authPassword }),
+    });
+    if (!response.ok) {
+      setMessage("Login failed.");
+      return;
+    }
+    const data = (await response.json()) as { token: string; account: Account; workspaces?: WorkspaceSummary[] };
+    const nextWorkspaces = data.workspaces ?? [];
+    setAuthToken(data.token);
+    setAccount(data.account);
+    setAvailableWorkspaces(nextWorkspaces);
+    setSelectedWorkspaceId(nextWorkspaces[0]?.id ?? "");
+    setMessage("Signed in.");
+  }
+
+  async function register() {
+    const response = await fetch(`${apiBase}/api/auth/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: authEmail, password: authPassword, displayName: authName }),
+    });
+    if (!response.ok) {
+      setMessage("Registration failed.");
+      return;
+    }
+    const data = (await response.json()) as { token: string; account: Account; workspaces?: WorkspaceSummary[] };
+    setAuthToken(data.token);
+    setAccount(data.account);
+    setAvailableWorkspaces(data.workspaces ?? []);
+    setSelectedWorkspaceId("");
+    setMessage("Account created.");
+  }
+
+  function logout() {
+    localStorage.removeItem(authTokenStorageKey);
+    localStorage.removeItem(workspaceStorageKey);
+    setAuthToken("");
+    setSelectedWorkspaceId("");
+    setCurrentUserId("");
+    setAccount(null);
+    setWorkspace(null);
+  }
+
+  async function createWorkspace() {
+    const response = await fetch(`${apiBase}/api/workspaces`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ name: newWorkspaceName, slug: newWorkspaceSlug }),
+    });
+    if (!response.ok) {
+      setMessage("Could not create workspace.");
+      return;
+    }
+    const data = (await response.json()) as { workspace: WorkspaceSummary };
+    await loadMe();
+    setSelectedWorkspaceId(data.workspace.id);
+    setMessage("Workspace created.");
+  }
+
+  async function addWorkspaceMember() {
+    if (!newMemberEmail.trim()) {
+      return;
+    }
+    const response = await workspaceFetch("/members", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: newMemberEmail, handle: newMemberHandle }),
+    });
+    if (!response.ok) {
+      setMessage("Could not add member. The account must register first.");
+      return;
+    }
+    setNewMemberEmail("");
+    setNewMemberHandle("");
+    setMessage("Workspace member added.");
+    await loadWorkspace();
+  }
+
+  async function createDaemon() {
+    const response = await workspaceFetch("/daemons", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: newDaemonName }),
+    });
+    if (!response.ok) {
+      setMessage("Could not create daemon token.");
+      return;
+    }
+    const data = (await response.json()) as { daemon: Daemon; token: string };
+    setCreatedDaemonToken(data.token);
+    setCreatedDaemonName(data.daemon?.name || newDaemonName.trim() || "Daemon");
+    setNewAgentDaemonId(data.daemon?.id ?? "");
+    setMessage("Daemon token created. Copy it now; it will not be shown again.");
+    await loadWorkspace();
+  }
+
+  async function copyDaemonCommand() {
+    if (!createdDaemonToken || !selectedWorkspaceId) {
+      return;
+    }
+    const command = daemonDeployCommand(selectedWorkspaceId, createdDaemonToken);
+    try {
+      await navigator.clipboard.writeText(command);
+      setMessage("Daemon command copied.");
+    } catch {
+      setMessage("Could not copy automatically. Select the command and copy it manually.");
+    }
+  }
+
+  async function deleteDaemon(daemonId: string) {
+    const response = await workspaceFetch(`/daemons/${daemonId}`, {
+      method: "DELETE",
+    });
+    if (!response.ok) {
+      setMessage("Could not delete daemon.");
+      return;
+    }
+    if (newAgentDaemonId === daemonId) {
+      setNewAgentDaemonId("");
+    }
+    setMessage("Daemon deleted.");
+    await loadWorkspace();
+  }
+
   async function loadWorkspace(nextSelectedId?: string) {
+    if (!authToken || !selectedWorkspaceId) {
+      return;
+    }
     const requestToken = workspaceLoadTokenRef.current + 1;
     workspaceLoadTokenRef.current = requestToken;
-    const response = await fetch(`${apiBase}/api/workspace`);
+    const response = await workspaceFetch("/workspace");
+    if (!response.ok) {
+      setMessage("Workspace access failed.");
+      return;
+    }
     const data = (await response.json()) as Workspace;
     const selection = resolveWorkspaceLoad(
       requestToken,
@@ -793,6 +1078,15 @@ export function App() {
       return;
     }
     setWorkspace(data);
+    setNewAgentDaemonId((current) => {
+      if (current && data.daemons?.some((daemon) => daemon.id === current)) {
+        return current;
+      }
+      return data.daemons?.[0]?.id ?? "";
+    });
+    if (data.currentUserId) {
+      setCurrentUserId(data.currentUserId);
+    }
     selectedIdRef.current = selection.selectedId;
     setSelectedId((current) => (current === selection.selectedId ? current : selection.selectedId));
   }
@@ -852,7 +1146,7 @@ export function App() {
     const safeEnd = Math.max(safeStart, Math.min(selectionEnd, text.length));
     const previewEnd = safeEnd === safeStart ? Math.min(draft.length, safeStart + 80) : safeEnd;
     const excerpt = (draft.slice(safeStart, previewEnd).trim() || currentSelectionLabel).slice(0, 140);
-    const response = await fetch(`${apiBase}/api/threads?actor=${encodeURIComponent(actorHandle)}&actor_type=human`, {
+    const response = await workspaceFetch("/threads", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -880,7 +1174,7 @@ export function App() {
     if (!threadReplyBody.trim()) {
       return;
     }
-    const response = await fetch(`${apiBase}/api/threads/${threadId}/messages?actor=${encodeURIComponent(actorHandle)}&actor_type=human`, {
+    const response = await workspaceFetch(`/threads/${threadId}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -900,7 +1194,7 @@ export function App() {
     if (!path) {
       return;
     }
-    const response = await fetch(`${apiBase}/api/documents?actor=${encodeURIComponent(actorHandle)}&actor_type=human`, {
+    const response = await workspaceFetch("/documents", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path, content: "" }),
@@ -923,8 +1217,8 @@ export function App() {
     if (!nextPath || nextPath === selectedDocument.path) {
       return;
     }
-    const response = await fetch(
-      `${apiBase}/api/documents/${selectedDocument.id}?actor=${encodeURIComponent(actorHandle)}&actor_type=human`,
+    const response = await workspaceFetch(
+      `/documents/${selectedDocument.id}`,
       {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -945,8 +1239,8 @@ export function App() {
     if (!selectedDocument) {
       return;
     }
-    const response = await fetch(
-      `${apiBase}/api/documents/${selectedDocument.id}?actor=${encodeURIComponent(actorHandle)}&actor_type=human`,
+    const response = await workspaceFetch(
+      `/documents/${selectedDocument.id}`,
       { method: "DELETE" }
     );
     if (!response.ok) {
@@ -960,6 +1254,7 @@ export function App() {
   const actorHandle = currentUser?.handle ?? "owner";
   const agentRuns = workspace?.agentRuns ?? [];
   const agents = workspace?.agents ?? [];
+  const daemons = workspace?.daemons ?? [];
   const users = workspace?.users ?? [];
   const selectedAgentDetails = useMemo(
     () => agents.find((agent) => agent.id === agentDetailsId) ?? null,
@@ -998,7 +1293,7 @@ export function App() {
     if (!newUserName.trim() || !newUserHandle.trim()) {
       return;
     }
-    const response = await fetch(`${apiBase}/api/users?actor=${encodeURIComponent(actorHandle)}&actor_type=human`, {
+    const response = await workspaceFetch("/users", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1025,7 +1320,7 @@ export function App() {
     if (!draft) {
       return;
     }
-    const response = await fetch(`${apiBase}/api/users/${userId}?actor=${encodeURIComponent(actorHandle)}&actor_type=human`, {
+    const response = await workspaceFetch(`/users/${userId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(draft),
@@ -1039,7 +1334,7 @@ export function App() {
   }
 
   async function deleteUser(userId: string) {
-    const response = await fetch(`${apiBase}/api/users/${userId}?actor=${encodeURIComponent(actorHandle)}&actor_type=human`, {
+    const response = await workspaceFetch(`/users/${userId}`, {
       method: "DELETE",
     });
     if (!response.ok) {
@@ -1051,10 +1346,11 @@ export function App() {
   }
 
   async function createAgent() {
-    if (!newAgentName.trim() || !newAgentHandle.trim()) {
+    if (!newAgentName.trim() || !newAgentHandle.trim() || !newAgentDaemonId) {
+      setMessage("Create a daemon before creating an agent.");
       return;
     }
-    const response = await fetch(`${apiBase}/api/agents?actor=${encodeURIComponent(actorHandle)}&actor_type=human`, {
+    const response = await workspaceFetch(`/daemons/${newAgentDaemonId}/agents`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1081,7 +1377,7 @@ export function App() {
     if (!draft) {
       return;
     }
-    const response = await fetch(`${apiBase}/api/agents/${agentId}?actor=${encodeURIComponent(actorHandle)}&actor_type=human`, {
+    const response = await workspaceFetch(`/agents/${agentId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1099,7 +1395,7 @@ export function App() {
   }
 
   async function deleteAgent(agentId: string) {
-    const response = await fetch(`${apiBase}/api/agents/${agentId}?actor=${encodeURIComponent(actorHandle)}&actor_type=human`, {
+    const response = await workspaceFetch(`/agents/${agentId}`, {
       method: "DELETE",
     });
     if (!response.ok) {
@@ -1116,7 +1412,7 @@ export function App() {
     if (!prompt) {
       return;
     }
-    const response = await fetch(`${apiBase}/api/agents/${agent.id}/runs?actor=${encodeURIComponent(actorHandle)}&actor_type=human`, {
+    const response = await workspaceFetch(`/agents/${agent.id}/runs`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt }),
@@ -1130,7 +1426,7 @@ export function App() {
   }
 
   async function stopAgentRun(runId: string) {
-    const response = await fetch(`${apiBase}/api/agent-runs/${runId}/stop?actor=${encodeURIComponent(actorHandle)}&actor_type=human`, {
+    const response = await workspaceFetch(`/agent-runs/${runId}/stop`, {
       method: "POST",
     });
     if (!response.ok) {
@@ -1139,6 +1435,77 @@ export function App() {
     }
     setMessage("Stop requested.");
     await loadWorkspace();
+  }
+
+  if (!authToken) {
+    return (
+      <div className="authShell">
+        <section className="authCard">
+          <p className="eyebrow">notty workspace auth</p>
+          <h1>Sign in to collaborate</h1>
+          <p className="railCopy">Register a human account first, then create a workspace. Daemons join later with workspace-scoped tokens.</p>
+          <label className="fieldLabel">
+            <span>Email</span>
+            <input value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} className="railInput" placeholder="you@example.com" />
+          </label>
+          <label className="fieldLabel">
+            <span>Password</span>
+            <input value={authPassword} type="password" onChange={(event) => setAuthPassword(event.target.value)} className="railInput" placeholder="At least 8 characters" />
+          </label>
+          <label className="fieldLabel">
+            <span>Display name</span>
+            <input value={authName} onChange={(event) => setAuthName(event.target.value)} className="railInput" placeholder="Your name" />
+          </label>
+          <div className="agentActionRow">
+            <button onClick={login}>Login</button>
+            <button className="secondary" onClick={register}>Register</button>
+          </div>
+          {message ? <p className="runError">{message}</p> : null}
+        </section>
+      </div>
+    );
+  }
+
+  if (!selectedWorkspaceId || !workspace) {
+    return (
+      <div className="authShell">
+        <section className="authCard">
+          <p className="eyebrow">Workspace</p>
+          <h1>{availableWorkspaces.length ? "Select or create a workspace" : "Create your first workspace"}</h1>
+          <p className="railCopy">Signed in as {account?.email}. A workspace is the tenant boundary for humans, agents, and daemons.</p>
+          {availableWorkspaces.length ? (
+            <label className="fieldLabel">
+              <span>Workspace</span>
+              <select
+                value={selectedWorkspaceId}
+                onChange={(event) => setSelectedWorkspaceId(event.target.value)}
+                className="identitySelect"
+              >
+                <option value="">Choose workspace</option>
+                {availableWorkspaces.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          <label className="fieldLabel">
+            <span>New workspace name</span>
+            <input value={newWorkspaceName} onChange={(event) => setNewWorkspaceName(event.target.value)} className="railInput" placeholder="Product workspace" />
+          </label>
+          <label className="fieldLabel">
+            <span>Slug</span>
+            <input value={newWorkspaceSlug} onChange={(event) => setNewWorkspaceSlug(event.target.value.toLowerCase())} className="railInput" placeholder="optional" />
+          </label>
+          <div className="agentActionRow">
+            <button onClick={createWorkspace}>Create workspace</button>
+            <button className="secondary" onClick={logout}>Logout</button>
+          </div>
+          {message ? <p className="runError">{message}</p> : null}
+        </section>
+      </div>
+    );
   }
 
   return (
@@ -1150,6 +1517,102 @@ export function App() {
           <p className="railCopy">
             A calm writing surface for humans and agents, with Yjs sync underneath.
           </p>
+        </div>
+
+        <div className="railSection">
+          <div className="railSectionHeader">
+            <h2>Tenant</h2>
+            <button className="secondary compactButton" onClick={logout}>Logout</button>
+          </div>
+          <label className="fieldLabel">
+            <span>Workspace</span>
+            <select
+              value={selectedWorkspaceId}
+              onChange={(event) => {
+                setWorkspace(null);
+                setSelectedWorkspaceId(event.target.value);
+              }}
+              className="identitySelect"
+            >
+              {availableWorkspaces.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <details className="entityDetails">
+            <summary>Add member</summary>
+            <div className="entityDetailsBody">
+              <input
+                value={newMemberEmail}
+                onChange={(event) => setNewMemberEmail(event.target.value)}
+                className="railInput"
+                placeholder="registered@email.com"
+              />
+              <input
+                value={newMemberHandle}
+                onChange={(event) => setNewMemberHandle(event.target.value.toLowerCase())}
+                className="railInput"
+                placeholder="workspace-handle"
+              />
+              <button onClick={addWorkspaceMember}>Add member</button>
+            </div>
+          </details>
+          <details className="entityDetails">
+            <summary>Deploy daemon</summary>
+            <div className="entityDetailsBody">
+              <p className="helperCopy">
+                Create a workspace-scoped daemon token, then pass it to the daemon as <code>NOTTY_DAEMON_TOKEN</code>.
+                Tokens are displayed once and cannot be recovered later.
+              </p>
+              <input
+                value={newDaemonName}
+                onChange={(event) => setNewDaemonName(event.target.value)}
+                className="railInput"
+                placeholder="Daemon name"
+              />
+              <button onClick={createDaemon}>Create daemon</button>
+              {createdDaemonToken ? (
+                <div className="daemonTokenCard">
+                  <strong>{createdDaemonName} token</strong>
+                  <span>Shown once. Store it now or create a new daemon token later.</span>
+                  <code className="agentLogSnippet">{createdDaemonToken}</code>
+                  <code className="agentLogSnippet">{daemonDeployCommand(selectedWorkspaceId, createdDaemonToken)}</code>
+                  <button onClick={copyDaemonCommand}>Copy command</button>
+                </div>
+              ) : null}
+            </div>
+          </details>
+          <div className="daemonList">
+            {daemons.map((daemon) => {
+              const daemonAgents = agents.filter((agent) => agent.daemonId === daemon.id);
+              const connectionStatus = daemonConnectionStatus(daemon, daemonStatusNow);
+              return (
+                <div key={daemon.id} className="daemonCard">
+                  <div className="agentRunHeader">
+                    <strong>{daemon.name}</strong>
+                    <span className={`statusPill status-${connectionStatus}`}>
+                      {formatDaemonConnectionLabel(connectionStatus)}
+                    </span>
+                  </div>
+                  <small>{daemonAgents.length} agent{daemonAgents.length === 1 ? "" : "s"}</small>
+                  <small>{formatDaemonCheckInText(daemon, daemonStatusNow)}</small>
+                  {daemon.status !== "active" ? <small>Lifecycle: {daemon.status}</small> : null}
+                  {daemonAgents.length ? (
+                    <small>{daemonAgents.map((agent) => `@${agent.handle}`).join(", ")}</small>
+                  ) : (
+                    <small>No agents yet</small>
+                  )}
+                  <div className="agentActionRow">
+                    <button className="dangerButton" onClick={() => deleteDaemon(daemon.id)}>
+                      Delete daemon
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
 
         <div className="railSection">
@@ -1341,6 +1804,20 @@ export function App() {
             </div>
             <div className="modalBody">
               <label className="fieldLabel">
+                <span>Daemon</span>
+                <select
+                  value={newAgentDaemonId}
+                  onChange={(event) => setNewAgentDaemonId(event.target.value)}
+                  className="identitySelect"
+                >
+                  {daemons.map((daemon) => (
+                    <option key={daemon.id} value={daemon.id}>
+                      {daemon.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="fieldLabel">
                 <span>Handle</span>
                 <input
                   value={newAgentHandle}
@@ -1378,7 +1855,7 @@ export function App() {
               <button className="secondary" onClick={() => setIsAgentModalOpen(false)}>
                 Cancel
               </button>
-              <button onClick={createAgent}>Create agent</button>
+              <button onClick={createAgent} disabled={!newAgentDaemonId}>Create agent</button>
             </div>
           </div>
         </div>
@@ -1399,6 +1876,8 @@ export function App() {
               const currentRun = agentRuns.find((run) => run.id === agent.currentRunId) ?? null;
               const agentPresence = workspace?.presences?.[agent.handle] ?? workspace?.presences?.[agent.id] ?? null;
               const status = summarizeAgentStatus(workspaceConnected, agent, currentRun, agentPresence);
+              const associatedDaemon = daemons.find((daemon) => daemon.id === agent.daemonId) ?? null;
+              const associatedDaemonStatus = associatedDaemon ? daemonConnectionStatus(associatedDaemon, daemonStatusNow) : "disconnected";
               return (
                 <>
                   <div className="modalHeader">
@@ -1424,6 +1903,14 @@ export function App() {
                       <div className="detailCard">
                         <span className="detailLabel">Workspace</span>
                         <p>{agent.workspaceRoot}</p>
+                      </div>
+                      <div className="detailCard">
+                        <span className="detailLabel">Daemon</span>
+                        <p>
+                          {associatedDaemon
+                            ? `${associatedDaemon.name} · ${formatDaemonConnectionLabel(associatedDaemonStatus)}`
+                            : "Unknown daemon"}
+                        </p>
                       </div>
                       <div className="detailCard">
                         <span className="detailLabel">Last heartbeat</span>
@@ -1842,6 +2329,53 @@ function formatTimestamp(value?: string) {
     hour: "numeric",
     minute: "2-digit",
   }).format(new Date(value));
+}
+
+function daemonConnectionStatus(daemon: Daemon, nowMs: number): "online" | "stale" | "disconnected" {
+  if (daemon.status !== "active" || !daemon.lastSeenAt) {
+    return "disconnected";
+  }
+  const lastSeenMs = Date.parse(daemon.lastSeenAt);
+  if (!Number.isFinite(lastSeenMs) || lastSeenMs <= 0) {
+    return "disconnected";
+  }
+  const ageMs = Math.max(0, nowMs - lastSeenMs);
+  if (ageMs <= 30_000) {
+    return "online";
+  }
+  if (ageMs <= 120_000) {
+    return "stale";
+  }
+  return "disconnected";
+}
+
+function formatDaemonConnectionLabel(status: "online" | "stale" | "disconnected") {
+  if (status === "disconnected") {
+    return "Offline";
+  }
+  return status[0].toUpperCase() + status.slice(1);
+}
+
+function formatDaemonCheckInText(daemon: Daemon, nowMs: number) {
+  if (!daemon.lastSeenAt) {
+    return "No check-ins yet";
+  }
+  const lastSeenMs = Date.parse(daemon.lastSeenAt);
+  if (!Number.isFinite(lastSeenMs) || lastSeenMs <= 0) {
+    return "No check-ins yet";
+  }
+  const ageSeconds = Math.max(0, Math.floor((nowMs - lastSeenMs) / 1000));
+  if (ageSeconds < 5) {
+    return "Connected just now";
+  }
+  if (ageSeconds < 60) {
+    return `Last check-in ${ageSeconds}s ago`;
+  }
+  const ageMinutes = Math.floor(ageSeconds / 60);
+  if (ageMinutes < 60) {
+    return `Last check-in ${ageMinutes}m ago`;
+  }
+  return `Last check-in ${formatTimestamp(daemon.lastSeenAt)}`;
 }
 
 function buildLineStarts(content: string) {

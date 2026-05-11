@@ -9,6 +9,7 @@ import (
 
 type agent struct {
 	ID              string `json:"id"`
+	DaemonID        string `json:"daemonId"`
 	Handle          string `json:"handle"`
 	Name            string `json:"name"`
 	Role            string `json:"role"`

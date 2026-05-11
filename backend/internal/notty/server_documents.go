@@ -14,7 +14,7 @@ import (
 )
 
 func (s *Server) handleDocumentByPath(w http.ResponseWriter, r *http.Request) {
-	document, err := s.store.GetDocumentMetadataByPath(r.URL.Query().Get("path"))
+	document, err := s.requestStore(r).GetDocumentMetadataByPath(r.URL.Query().Get("path"))
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -27,7 +27,7 @@ func (s *Server) handleDocumentByPath(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDocumentThreads(w http.ResponseWriter, r *http.Request) {
-	threads, err := s.store.ListThreadsForDocument(chi.URLParam(r, "id"))
+	threads, err := s.requestStore(r).ListThreadsForDocument(chi.URLParam(r, "id"))
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -47,13 +47,9 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	meta := OperationMeta{
-		ActorID:   actorFromRequest(r, "owner"),
-		ActorType: actorTypeFromRequest(r, "human"),
-		Source:    "api",
-		Tool:      "document-create",
-	}
-	document, err := s.store.CreateDocument(req, meta)
+	auth, _ := authFromContext(r.Context())
+	meta := operationMetaFromAuth(auth, "document-create", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
+	document, err := s.requestStore(r).CreateDocument(req, meta)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -65,7 +61,7 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt:  document.UpdatedAt,
 		ActorID:    meta.ActorID,
 	}}
-	s.subscribers.Publish(event)
+	s.requestBroker(r).Publish(event)
 	writeJSON(w, http.StatusCreated, documentMetadata(document))
 }
 
@@ -75,13 +71,9 @@ func (s *Server) handleMoveDocument(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	meta := OperationMeta{
-		ActorID:   actorFromRequest(r, "owner"),
-		ActorType: actorTypeFromRequest(r, "human"),
-		Source:    "api",
-		Tool:      "document-move",
-	}
-	document, oldPath, err := s.store.MoveDocument(chi.URLParam(r, "id"), req.Path, meta)
+	auth, _ := authFromContext(r.Context())
+	meta := operationMetaFromAuth(auth, "document-move", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
+	document, oldPath, err := s.requestStore(r).MoveDocument(chi.URLParam(r, "id"), req.Path, meta)
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -90,7 +82,7 @@ func (s *Server) handleMoveDocument(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
-	s.subscribers.Publish(EventEnvelope{Type: "document.moved", Data: DocumentLifecycleEvent{
+	s.requestBroker(r).Publish(EventEnvelope{Type: "document.moved", Data: DocumentLifecycleEvent{
 		DocumentID: document.ID,
 		Path:       document.Path,
 		OldPath:    oldPath,
@@ -102,13 +94,9 @@ func (s *Server) handleMoveDocument(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
-	meta := OperationMeta{
-		ActorID:   actorFromRequest(r, "owner"),
-		ActorType: actorTypeFromRequest(r, "human"),
-		Source:    "api",
-		Tool:      "document-delete",
-	}
-	document, err := s.store.DeleteDocument(chi.URLParam(r, "id"), meta)
+	auth, _ := authFromContext(r.Context())
+	meta := operationMetaFromAuth(auth, "document-delete", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
+	document, err := s.requestStore(r).DeleteDocument(chi.URLParam(r, "id"), meta)
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -117,7 +105,7 @@ func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
-	s.subscribers.Publish(EventEnvelope{Type: "document.deleted", Data: DocumentLifecycleEvent{
+	s.requestBroker(r).Publish(EventEnvelope{Type: "document.deleted", Data: DocumentLifecycleEvent{
 		DocumentID: document.ID,
 		Path:       document.Path,
 		Title:      document.Title,
@@ -129,7 +117,8 @@ func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDocumentWebsocket(w http.ResponseWriter, r *http.Request) {
 	documentID := chi.URLParam(r, "id")
-	if !s.store.HasDocument(documentID) {
+	store := s.requestStore(r)
+	if !store.HasDocument(documentID) {
 		writeError(w, http.StatusNotFound, ErrNotFound.Error())
 		return
 	}
@@ -139,7 +128,8 @@ func (s *Server) handleDocumentWebsocket(w http.ResponseWriter, r *http.Request)
 	}
 	defer conn.Close()
 
-	room := s.rooms.ForDocument(documentID)
+	workspaceID := s.requestWorkspaceID(r)
+	room := s.rooms.ForDocument(workspaceID + ":" + documentID)
 	session := newDocumentConn(64)
 	room.Add(session)
 	defer func() {
@@ -150,6 +140,11 @@ func (s *Server) handleDocumentWebsocket(w http.ResponseWriter, r *http.Request)
 	clientID, _ := strconv.ParseUint(r.URL.Query().Get("client_id"), 10, 64)
 	actorID := r.URL.Query().Get("actor_id")
 	actorType := r.URL.Query().Get("actor_type")
+	if auth, ok := authFromContext(r.Context()); ok {
+		meta := operationMetaFromAuth(auth, "y-protocol", actorID, actorType)
+		actorID = meta.ActorID
+		actorType = meta.ActorType
+	}
 	log.Printf("document ws open doc=%s actor=%s client=%d", documentID, actorID, clientID)
 
 	if awareness := room.SnapshotAwareness(); len(awareness) > 0 {
@@ -172,7 +167,7 @@ func (s *Server) handleDocumentWebsocket(w http.ResponseWriter, r *http.Request)
 			if messageType != websocket.BinaryMessage {
 				continue
 			}
-			if err := s.handleDocumentProtocolMessage(room, session, documentID, payload, OperationMeta{
+			if err := s.handleDocumentProtocolMessageWithStore(store, s.requestBroker(r), room, session, documentID, payload, OperationMeta{
 				ActorID:     actorID,
 				ActorType:   actorType,
 				ExecutionID: "ws-session",
@@ -217,6 +212,16 @@ func (s *Server) handleDocumentWebsocket(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleDocumentProtocolMessage(room *DocumentRoom, session *DocumentConn, documentID string, payload []byte, meta OperationMeta) error {
+	return s.handleDocumentProtocolMessageWithStore(s.store, s.subscribers, room, session, documentID, payload, meta)
+}
+
+func (s *Server) handleDocumentProtocolMessageWithStore(store *Store, broker *Broker, room *DocumentRoom, session *DocumentConn, documentID string, payload []byte, meta OperationMeta) error {
+	if store == nil {
+		store = s.store
+	}
+	if broker == nil {
+		broker = s.subscribers
+	}
 	messageType, reader, err := yproto.DecodeProtocolMessage(payload)
 	if err != nil {
 		return err
@@ -230,7 +235,7 @@ func (s *Server) handleDocumentProtocolMessage(room *DocumentRoom, session *Docu
 		}
 		switch syncType {
 		case yproto.SyncStep1:
-			document, updates, err := s.store.EncodeDocumentSyncUpdates(documentID, data)
+			document, updates, err := store.EncodeDocumentSyncUpdates(documentID, data)
 			if err != nil {
 				return err
 			}
@@ -259,7 +264,7 @@ func (s *Server) handleDocumentProtocolMessage(room *DocumentRoom, session *Docu
 				return nil
 			}
 			log.Printf("document ws inbound update doc=%s actor=%s actor_type=%s sync_type=%s bytes=%d canonical_empty_yjs_update=%t", documentID, meta.ActorID, meta.ActorType, documentSyncTypeLabel(syncType), len(data), isCanonicalEmptyYjsUpdate(data))
-			result, err := s.store.ApplyCRDTUpdateWithResult(documentID, data, meta)
+			result, err := store.ApplyCRDTUpdateWithResult(documentID, data, meta)
 			if err != nil {
 				return err
 			}
@@ -269,7 +274,7 @@ func (s *Server) handleDocumentProtocolMessage(room *DocumentRoom, session *Docu
 			}
 			updated := result.Document
 			room.Broadcast(yproto.BuildSyncUpdate(data), session)
-			s.subscribers.Publish(EventEnvelope{Type: "document.updated", Data: DocumentUpdateEvent{
+			broker.Publish(EventEnvelope{Type: "document.updated", Data: DocumentUpdateEvent{
 				DocumentID:  updated.ID,
 				UpdateID:    updated.UpdateID,
 				StateVector: updated.StateVector,

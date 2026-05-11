@@ -35,6 +35,33 @@ body {
   background: var(--page-bg);
 }
 
+.authShell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+  background:
+    radial-gradient(circle at 20% 20%, rgba(47, 111, 88, 0.12), transparent 30%),
+    linear-gradient(135deg, #f8f2df 0%, #edf3ec 100%);
+}
+
+.authCard {
+  width: min(520px, 100%);
+  display: grid;
+  gap: 1rem;
+  padding: 2rem;
+  background: rgba(255, 253, 248, 0.92);
+  border: 1px solid var(--line);
+  border-radius: 28px;
+  box-shadow: var(--shadow);
+}
+
+.authCard h1 {
+  font-size: clamp(2rem, 7vw, 4rem);
+  line-height: 0.95;
+  letter-spacing: -0.07em;
+}
+
 button,
 textarea,
 input {
@@ -107,6 +134,7 @@ p {
 }
 
 .railCopy,
+.helperCopy,
 .topBarTitle,
 .documentFacts,
 .pageMeta small,
@@ -321,6 +349,52 @@ p {
   gap: 0.55rem;
 }
 
+.helperCopy {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.helperCopy code {
+  color: var(--ink);
+}
+
+.daemonTokenCard {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.65rem;
+  border: 1px solid rgba(95, 79, 51, 0.18);
+  border-radius: 16px;
+  background: rgba(255, 252, 246, 0.72);
+}
+
+.daemonTokenCard span {
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.daemonList {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.daemonCard {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.72rem;
+  border: 1px solid rgba(95, 79, 51, 0.16);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.daemonCard small {
+  color: var(--muted);
+}
+
 .statusPill {
   display: inline-flex;
   align-items: center;
@@ -343,6 +417,21 @@ p {
 .status-idle {
   background: rgba(92, 74, 47, 0.08);
   color: #5c4a2f;
+}
+
+.status-online {
+  background: rgba(47, 111, 88, 0.14);
+  color: #2f6f58;
+}
+
+.status-stale {
+  background: rgba(190, 117, 45, 0.16);
+  color: #8a5321;
+}
+
+.status-disconnected {
+  background: rgba(123, 61, 45, 0.14);
+  color: #7b3d2d;
 }
 
 .status-queued,

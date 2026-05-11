@@ -26,8 +26,10 @@ services:
       NOTTY_PORT: "8080"
       NOTTY_DATABASE_URL: postgres://notty:notty@postgres:5432/notty?sslmode=disable
       NOTTY_PPROF_ADDR: 127.0.0.1:6061
+      NOTTY_JWT_SECRET: dev-notty-jwt-secret-change-me
 
   daemon:
+    profiles: ["daemon"]
     build:
       context: .
       dockerfile: daemon/Dockerfile
@@ -35,8 +37,10 @@ services:
       - backend
     environment:
       NOTTY_BACKEND_URL: http://backend:8080
-      NOTTY_WORKSPACE_DIR: /workspace/notty
-      NOTTY_AGENT_WORKSPACE_ROOT: /workspace/agents
+      NOTTY_WORKSPACE_ID: ${NOTTY_WORKSPACE_ID:-}
+      NOTTY_DAEMON_TOKEN: ${NOTTY_DAEMON_TOKEN:-}
+      NOTTY_WORKSPACE_DIR: /workspace/notty/${NOTTY_WORKSPACE_ID:-default}
+      NOTTY_AGENT_WORKSPACE_ROOT: /workspace/agents/${NOTTY_WORKSPACE_ID:-default}
       NOTTY_AGENT_ID: daemon_agent
       NOTTY_RUNTIME_DIR: /runtime/notty
       NOTTY_PPROF_ADDR: 127.0.0.1:6060
