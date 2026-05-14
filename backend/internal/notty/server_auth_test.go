@@ -45,13 +45,40 @@ func TestAuthenticatedWorkspaceRoutesIsolateTenantsAndIgnoreSpoofedActor(t *test
 		DocumentID: document.ID,
 		Title:      "Auth provenance",
 		Body:       "This should be owned by the authenticated workspace user.",
-		Start:      0,
-		End:        6,
-		Line:       1,
 		Excerpt:    "# Auth",
 	}, http.StatusCreated, &threadResponse)
 	if threadResponse.Thread.CreatedByID != workspace.OwnerUserID || threadResponse.Thread.CreatedByType != "human" {
 		t.Fatalf("expected authenticated author, got id=%q type=%q owner=%q", threadResponse.Thread.CreatedByID, threadResponse.Thread.CreatedByType, workspace.OwnerUserID)
+	}
+}
+
+func TestCreateWorkspaceAllocatesUniqueSlugForRepeatedNames(t *testing.T) {
+	router := newAuthTestRouter(t)
+
+	firstOwner := authTestRegister(t, router, "workspace-slug-one@example.com", "owner-pass", "Owner One")
+	secondOwner := authTestRegister(t, router, "workspace-slug-two@example.com", "owner-pass", "Owner Two")
+
+	var first struct {
+		Workspace Workspace `json:"workspace"`
+	}
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces", firstOwner.Token, CreateWorkspaceRequest{
+		Name:   "Product Workspace",
+		Handle: "owner-one",
+	}, http.StatusCreated, &first)
+
+	var second struct {
+		Workspace Workspace `json:"workspace"`
+	}
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces", secondOwner.Token, CreateWorkspaceRequest{
+		Name:   "Product Workspace",
+		Handle: "owner-two",
+	}, http.StatusCreated, &second)
+
+	if first.Workspace.Slug == "" || second.Workspace.Slug == "" {
+		t.Fatalf("expected slugs to be allocated, got first=%#v second=%#v", first.Workspace, second.Workspace)
+	}
+	if first.Workspace.Slug == second.Workspace.Slug {
+		t.Fatalf("expected repeated workspace names to get unique slugs, got %q", first.Workspace.Slug)
 	}
 }
 
@@ -116,9 +143,6 @@ func TestDaemonTokenIsWorkspaceScopedAndCanActAsWorkspaceAgent(t *testing.T) {
 		DocumentID: document.ID,
 		Title:      "Handle-based agent note",
 		Body:       "Handles are display names, not acting identities.",
-		Start:      0,
-		End:        8,
-		Line:       1,
 		Excerpt:    "# Daemon",
 	}, http.StatusForbidden)
 
@@ -131,9 +155,6 @@ func TestDaemonTokenIsWorkspaceScopedAndCanActAsWorkspaceAgent(t *testing.T) {
 		DocumentID: document.ID,
 		Title:      "Agent note",
 		Body:       "The daemon token may only speak as a verified workspace agent.",
-		Start:      0,
-		End:        8,
-		Line:       1,
 		Excerpt:    "# Daemon",
 	}, http.StatusCreated, &threadResponse)
 	if threadResponse.Thread.CreatedByID != agent.ID || threadResponse.Thread.CreatedByType != "agent" {

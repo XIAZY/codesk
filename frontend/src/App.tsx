@@ -1,2501 +1,1729 @@
-import { useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import * as Y from "yjs";
-import * as syncProtocol from "y-protocols/sync.js";
-import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate } from "y-protocols/awareness.js";
-import * as encoding from "lib0/encoding";
-import * as decoding from "lib0/decoding";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import type { FocusEvent, MouseEvent, ReactNode } from "react";
+import { ApiClient, apiBase, daemonStaticBase } from "./api";
 import {
+  agentStatus,
+  agentsByDaemon,
+  buildDaemonInstallCommand,
   buildLineThreads,
-  computeReplace,
-  isFreshPresence,
-  rebaseReplace,
-  rebaseSelection,
-  resolveWorkspaceLoad,
-  summarizeAgentStatus,
-} from "./app_logic";
+  daemonStatus,
+  encodeRelativeAnchor,
+  lineForOffset,
+  lineStartsForText,
+  type LineThreadGroup,
+  type ResolvedThreadAnchor,
+  resolveThreadAnchorLive,
+  selectionLabel,
+} from "./logic";
+import { useDocumentSync } from "./useDocument";
+import { useWorkspace } from "./useWorkspace";
+import type { Account, Agent, Daemon, DocumentItem, ThreadItem, WorkspaceSummary } from "./types";
+import "./styles.css";
 
-type DocumentItem = {
-  id: string;
-  path: string;
-  title: string;
-  stateVector?: string;
-  updateId?: number;
-  updatedAt: string;
-  clientIdSeed?: number;
-};
+const tokenStorageKey = "notty.auth.token";
+const workspaceStorageKey = "notty.workspace.id";
 
-type ThreadAnchor = {
-  documentId: string;
-  kind: string;
-  relativeStart?: string;
-  relativeEnd?: string;
-  start: number;
-  end: number;
-  line: number;
-  excerpt: string;
-};
+type LiveThread = ThreadItem & { anchor: ResolvedThreadAnchor };
 
-type ThreadMessage = {
-  id: string;
-  threadId: string;
-  authorId: string;
-  authorType: string;
-  authorHandle: string;
-  authorName: string;
-  body: string;
-  kind: string;
-  createdAt: string;
-};
+function initials(value?: string) {
+  const source = (value || "N").trim();
+  const words = source.split(/[\s@._/-]+/).filter(Boolean);
+  const letters = words.length > 1 ? `${words[0][0]}${words[1][0]}` : source.slice(0, 2);
+  return letters.toUpperCase();
+}
 
-type ThreadItem = {
-  id: string;
-  documentId: string;
-  title: string;
-  status: string;
-  anchor: ThreadAnchor;
-  participantIds: string[];
-  participantHandles: string[];
-  messages: ThreadMessage[];
-  createdAt: string;
-  updatedAt: string;
-};
+function fileName(path?: string) {
+  if (!path) {
+    return "Untitled";
+  }
+  return path.split("/").filter(Boolean).pop() || path;
+}
 
-type UserItem = {
-  id: string;
-  handle: string;
-  name: string;
-  role: string;
-  kind: string;
-  status: string;
-  updatedAt: string;
-};
+function folderName(path?: string) {
+  if (!path || !path.includes("/")) {
+    return "Workspace";
+  }
+  return path.split("/").filter(Boolean)[0] || "Workspace";
+}
 
-type Agent = {
-  id: string;
-  daemonId: string;
-  handle: string;
-  name: string;
-  role: string;
-  kind: string;
-  systemPrompt: string;
-  workspaceRoot: string;
-  status: string;
-  currentTask: string;
-  currentActivity: string;
-  currentRunId: string;
-  lastHeartbeatAt?: string;
-};
+function shortTime(value?: string) {
+  if (!value) {
+    return "now";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf()) || date.getUTCFullYear() < 2020) {
+    return "now";
+  }
+  const seconds = Math.max(0, Math.round((Date.now() - date.valueOf()) / 1000));
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  if (seconds < 3600) {
+    return `${Math.round(seconds / 60)}m`;
+  }
+  if (seconds < 86400) {
+    return `${Math.round(seconds / 3600)}h`;
+  }
+  return `${Math.round(seconds / 86400)}d`;
+}
 
-type Daemon = {
-  id: string;
-  workspaceId: string;
-  name: string;
-  status: string;
-  connectionStatus?: "online" | "stale" | "disconnected";
-  lastSeenAt?: string;
-  lastSeenAgeSeconds?: number;
-  createdAt: string;
-  deletedAt?: string;
-};
+function byFolder(documents: DocumentItem[]) {
+  const groups = new Map<string, DocumentItem[]>();
+  for (const document of documents) {
+    const group = folderName(document.path);
+    groups.set(group, [...(groups.get(group) ?? []), document]);
+  }
+  return Array.from(groups.entries()).sort(([left], [right]) => left.localeCompare(right));
+}
 
-type AgentRun = {
-  id: string;
-  agentId: string;
-  agentHandle: string;
-  agentName: string;
-  agentKind: string;
-  workingDirectory: string;
-  prompt: string;
-  status: string;
-  desiredStatus: string;
-  processId: number;
-  lastHeartbeatAt?: string;
-  lastMessage?: string;
-  logTail?: string[];
-  error?: string;
-  updatedAt: string;
-};
+function visibleAgentStatus(agent: Agent, runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"], daemons: Daemon[]) {
+  const daemon = daemons.find((item) => item.id === agent.daemonId);
+  const owningDaemonStatus = daemon ? daemonStatus(daemon) : "disconnected";
+  if (owningDaemonStatus === "disconnected" || owningDaemonStatus === "deleted") {
+    return "disconnected";
+  }
+  return agentStatus(agent, runs);
+}
 
-type PresenceItem = {
-  actorId: string;
-  actorType: string;
-  documentId?: string;
-  filePath?: string;
-  mode?: string;
-  selection?: number[];
-  activity: string;
-  updatedAt: string;
-};
+function renderInlineText(text: string) {
+  const parts = text.split(/(`[^`]+`|@[A-Za-z0-9_-]+)/g).filter(Boolean);
+  return parts.map((part, index) => {
+    if (part.startsWith("`") && part.endsWith("`")) {
+      return <code key={index}>{part.slice(1, -1)}</code>;
+    }
+    if (part.startsWith("@")) {
+      return <span className="agent-anchor" key={index}>{part}</span>;
+    }
+    return <span key={index}>{part}</span>;
+  });
+}
 
-type Workspace = {
-  workspaceId: string;
-  currentUserId?: string;
-  currentDaemonId?: string;
-  name: string;
-  documents: DocumentItem[];
-  users: UserItem[];
-  daemons: Daemon[];
-  agents: Agent[];
-  agentRuns: AgentRun[];
-  presences: Record<string, PresenceItem>;
-  threads: ThreadItem[];
-};
+function renderLineThreadChip(
+  group: LineThreadGroup<LiveThread> | undefined,
+  onLineThreadsClick: (group: LineThreadGroup<LiveThread>, event: MouseEvent<HTMLButtonElement>) => void
+) {
+  if (!group) {
+    return null;
+  }
+  const label = `${group.threads.length} thread${group.threads.length === 1 ? "" : "s"}`;
+  return (
+    <button
+      className="line-thread-chip"
+      type="button"
+      onClick={(event) => onLineThreadsClick(group, event)}
+      aria-label={`${label} on line ${group.line}`}
+      title={`${label} on this line`}
+    >
+      <Icon name="thread" />
+      {label}
+    </button>
+  );
+}
 
-type Account = {
-  id: string;
-  email: string;
-  displayName: string;
-};
+function lineClassName(sourceLine: number, group: LineThreadGroup<LiveThread> | undefined, focusedLine: number | null) {
+  return ["preview-line", group ? "has-thread-line" : "", focusedLine === sourceLine ? "line-flash" : ""].filter(Boolean).join(" ");
+}
 
-type WorkspaceSummary = {
-  id: string;
-  slug: string;
-  name: string;
-};
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
 
-type DocumentUpdateEvent = {
-  documentId: string;
-  update: string;
-  path: string;
-  updatedAt: string;
-  actorId: string;
-};
-
-type UserDraft = {
-  name: string;
-  handle: string;
-  role: string;
-};
-
-type AgentDraft = {
-  handle: string;
-  name: string;
-  role: string;
-  taskPrompt: string;
-};
-
-type PresenceView = {
-  actorId: string;
-  actorName: string;
-  activity: string;
-};
-
-const apiBase = import.meta.env.VITE_API_BASE ?? "http://localhost:8080";
-const currentUserStorageKey = "notty-current-user";
-const authTokenStorageKey = "notty-auth-token";
-const workspaceStorageKey = "notty-workspace-id";
-const daemonStatusRefreshMs = 10_000;
-const daemonWorkspaceRefreshMs = 15_000;
-
-function daemonDeployCommand(workspaceId: string, token: string) {
-  return `NOTTY_WORKSPACE_ID=${workspaceId} \\
-NOTTY_DAEMON_TOKEN=${token} \\
-docker compose --profile daemon up -d --build daemon`;
+function renderMarkdownPreview(
+  content: string,
+  threadGroups: Map<number, LineThreadGroup<LiveThread>>,
+  onLineThreadsClick: (group: LineThreadGroup<LiveThread>, event: MouseEvent<HTMLButtonElement>) => void,
+  focusedLine: number | null
+) {
+  const lines = content.split("\n").map((text, index) => ({ text, sourceLine: index + 1 }));
+  while (lines.length && !lines[0].text.trim()) {
+    lines.shift();
+  }
+  while (lines.length && !lines[lines.length - 1].text.trim()) {
+    lines.pop();
+  }
+  const nodes: ReactNode[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const { text: line, sourceLine } = lines[index];
+    const group = threadGroups.get(sourceLine);
+    const threadChip = renderLineThreadChip(group, onLineThreadsClick);
+    const className = lineClassName(sourceLine, group, focusedLine);
+    if (!line.trim()) {
+      nodes.push(<div className="preview-space" data-source-line={sourceLine} key={sourceLine} />);
+      continue;
+    }
+    if (line.startsWith("# ")) {
+      nodes.push(
+        <h1 className={className} data-source-line={sourceLine} key={sourceLine}>
+          <span className={group ? "anchored" : ""}>{renderInlineText(line.slice(2))}</span>
+          {threadChip}
+        </h1>
+      );
+      continue;
+    }
+    if (line.startsWith("## ")) {
+      nodes.push(
+        <h2 className={className} data-source-line={sourceLine} key={sourceLine}>
+          {renderInlineText(line.slice(3))}
+          {threadChip}
+        </h2>
+      );
+      continue;
+    }
+    if (line.startsWith("- ")) {
+      nodes.push(
+        <p className={`${className} bullet-line`} data-source-line={sourceLine} key={sourceLine}>
+          • {renderInlineText(line.slice(2))}
+          {threadChip}
+        </p>
+      );
+      continue;
+    }
+    nodes.push(
+      <p className={className} data-source-line={sourceLine} key={sourceLine}>
+        {renderInlineText(line)}
+        {threadChip}
+      </p>
+    );
+  }
+  return nodes.length ? nodes : <p className="muted">Start writing...</p>;
 }
 
 export function App() {
-  const [authToken, setAuthToken] = useState(() => localStorage.getItem(authTokenStorageKey) ?? "");
+  const [token, setToken] = useState(() => localStorage.getItem(tokenStorageKey) ?? "");
   const [account, setAccount] = useState<Account | null>(null);
-  const [availableWorkspaces, setAvailableWorkspaces] = useState<WorkspaceSummary[]>([]);
-  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState(() => localStorage.getItem(workspaceStorageKey) ?? "");
-  const [authEmail, setAuthEmail] = useState("");
-  const [authPassword, setAuthPassword] = useState("");
-  const [authName, setAuthName] = useState("");
-  const [newWorkspaceName, setNewWorkspaceName] = useState("");
-  const [newWorkspaceSlug, setNewWorkspaceSlug] = useState("");
-  const [newMemberEmail, setNewMemberEmail] = useState("");
-  const [newMemberHandle, setNewMemberHandle] = useState("");
-  const [newDaemonName, setNewDaemonName] = useState("Local daemon");
-  const [createdDaemonToken, setCreatedDaemonToken] = useState("");
-  const [createdDaemonName, setCreatedDaemonName] = useState("");
-  const [workspace, setWorkspace] = useState<Workspace | null>(null);
-  const [workspaceConnected, setWorkspaceConnected] = useState(false);
-  const [daemonStatusNow, setDaemonStatusNow] = useState(() => Date.now());
-  const [selectedId, setSelectedId] = useState<string>("");
-  const [activeDocument, setActiveDocument] = useState<DocumentItem | null>(null);
-  const [documentReady, setDocumentReady] = useState(false);
-  const [draft, setDraft] = useState("");
-  const [message, setMessage] = useState("");
-  const [newFilePath, setNewFilePath] = useState("notes/untitled.md");
-  const [pathEditor, setPathEditor] = useState("");
-  const [threadBody, setThreadBody] = useState("");
-  const [threadReplyBody, setThreadReplyBody] = useState("");
-  const [newUserName, setNewUserName] = useState("Workspace Collaborator");
-  const [newUserHandle, setNewUserHandle] = useState("collaborator");
-  const [newUserRole, setNewUserRole] = useState("Collaborates in the shared workspace");
-  const [userDrafts, setUserDrafts] = useState<Record<string, UserDraft>>({});
-  const [currentUserId, setCurrentUserId] = useState<string>(() => localStorage.getItem(currentUserStorageKey) ?? "");
-  const [newAgentHandle, setNewAgentHandle] = useState("codex-agent");
-  const [newAgentName, setNewAgentName] = useState("Codex Agent");
-  const [newAgentRole, setNewAgentRole] = useState("Implement changes in the shared workspace");
-  const [newAgentDaemonId, setNewAgentDaemonId] = useState("");
-  const [agentDrafts, setAgentDrafts] = useState<Record<string, AgentDraft>>({});
-  const [isAgentModalOpen, setIsAgentModalOpen] = useState(false);
-  const [agentDetailsId, setAgentDetailsId] = useState<string>("");
-  const [selectedThreadId, setSelectedThreadId] = useState<string>("");
-  const [editorScrollTop, setEditorScrollTop] = useState(0);
-  const [selectionRange, setSelectionRange] = useState({ start: 0, end: 0 });
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const activeDocRef = useRef<{ id: string; ydoc: Y.Doc } | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const workspaceWsRef = useRef<WebSocket | null>(null);
-  const awarenessRef = useRef<Awareness | null>(null);
-  const selectedIdRef = useRef("");
-  const workspaceLoadTokenRef = useRef(0);
-  const workspaceReloadTimerRef = useRef<number | null>(null);
-  const draftRef = useRef("");
-  const selectionRangeRef = useRef({ start: 0, end: 0 });
-  const currentUserRef = useRef<UserItem | null>(null);
-  const selectedDocumentRef = useRef<DocumentItem | null>(null);
-  const pendingPresenceTimerRef = useRef<number | null>(null);
-  const lastPresenceSentAtRef = useRef(0);
-  const pendingSelectionRef = useRef<{ start: number; end: number } | null>(null);
-  const isComposingRef = useRef(false);
-  const hasQueuedRemoteSyncRef = useRef(false);
-  const remoteDraftSyncTimerRef = useRef<number | null>(null);
+  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
+  const [workspaceId, setWorkspaceId] = useState(() => localStorage.getItem(workspaceStorageKey) ?? "");
+  const [restoringSession, setRestoringSession] = useState(false);
+  const api = useMemo(() => new ApiClient(token), [token]);
 
-  useEffect(() => {
-    return () => {
-      wsRef.current?.close();
-      workspaceWsRef.current?.close();
-      if (workspaceReloadTimerRef.current !== null) {
-        window.clearTimeout(workspaceReloadTimerRef.current);
-      }
-      if (pendingPresenceTimerRef.current !== null) {
-        window.clearTimeout(pendingPresenceTimerRef.current);
-      }
-      if (remoteDraftSyncTimerRef.current !== null) {
-        window.clearTimeout(remoteDraftSyncTimerRef.current);
-      }
-      awarenessRef.current?.destroy();
-      activeDocRef.current?.ydoc.destroy();
-      activeDocRef.current = null;
-    };
-  }, []);
+  const saveAuth = (nextToken: string, nextAccount: Account, nextWorkspaces: WorkspaceSummary[] = []) => {
+    const safeWorkspaces = Array.isArray(nextWorkspaces) ? nextWorkspaces : [];
+    localStorage.setItem(tokenStorageKey, nextToken);
+    setToken(nextToken);
+    setAccount(nextAccount);
+    setWorkspaces(safeWorkspaces);
+    const preferred = localStorage.getItem(workspaceStorageKey);
+    setWorkspaceId(preferred && safeWorkspaces.some((workspace) => workspace.id === preferred) ? preferred : safeWorkspaces[0]?.id ?? "");
+  };
 
-  useEffect(() => {
-    if (!authToken) {
-      setAccount(null);
-      setAvailableWorkspaces([]);
-      setWorkspace(null);
-      return;
-    }
-    localStorage.setItem(authTokenStorageKey, authToken);
-    void loadMe();
-  }, [authToken]);
-
-  useEffect(() => {
-    if (selectedWorkspaceId) {
-      localStorage.setItem(workspaceStorageKey, selectedWorkspaceId);
-    } else {
-      localStorage.removeItem(workspaceStorageKey);
-    }
-    if (authToken && selectedWorkspaceId) {
-      void loadWorkspace();
-    }
-  }, [authToken, selectedWorkspaceId]);
-
-  useEffect(() => {
-    selectedIdRef.current = selectedId;
-  }, [selectedId]);
-
-  useEffect(() => {
-    draftRef.current = draft;
-  }, [draft]);
-
-  useEffect(() => {
-    selectionRangeRef.current = selectionRange;
-  }, [selectionRange]);
-
-  useLayoutEffect(() => {
-    const pendingSelection = pendingSelectionRef.current;
-    if (!pendingSelection || !textareaRef.current) {
-      return;
-    }
-    if (document.activeElement !== textareaRef.current) {
-      pendingSelectionRef.current = null;
-      return;
-    }
-    textareaRef.current.selectionStart = pendingSelection.start;
-    textareaRef.current.selectionEnd = pendingSelection.end;
-    pendingSelectionRef.current = null;
-  }, [draft]);
-
-  useEffect(() => {
-    if (!authToken || !selectedWorkspaceId) {
-      return;
-    }
-    let disposed = false;
-    let reconnectTimer: number | null = null;
-    let attempt = 0;
-
-    const scheduleWorkspaceReload = () => {
-      if (workspaceReloadTimerRef.current !== null) {
-        return;
-      }
-      workspaceReloadTimerRef.current = window.setTimeout(() => {
-        workspaceReloadTimerRef.current = null;
-        void loadWorkspace();
-      }, 120);
-    };
-
-    const connect = () => {
-      if (disposed) {
-        return;
-      }
-      const tokenParam = encodeURIComponent(authToken);
-      const ws = new WebSocket(`${apiBase.replace("http", "ws")}/ws/workspaces/${encodeURIComponent(selectedWorkspaceId)}?token=${tokenParam}`);
-      workspaceWsRef.current = ws;
-      ws.onopen = () => {
-        attempt = 0;
-        setWorkspaceConnected(true);
-        void loadWorkspace();
-      };
-      ws.onmessage = (event) => {
-        const envelope = JSON.parse(String(event.data)) as { type?: string; data?: unknown };
-        if (envelope.type === "presence.updated") {
-          const presence = envelope.data as PresenceItem;
-          setWorkspace((current) =>
-            current
-              ? {
-                  ...current,
-                  presences: {
-                    ...current.presences,
-                    [presence.actorId]: presence,
-                  },
-                }
-              : current
-          );
-          return;
-        }
-        if (envelope.type === "agent.updated") {
-          const agent = envelope.data as Agent;
-          setWorkspace((current) =>
-            current
-              ? {
-                  ...current,
-                  agents: current.agents.some((currentAgent) => currentAgent.id === agent.id)
-                    ? current.agents.map((currentAgent) => (currentAgent.id === agent.id ? agent : currentAgent))
-                    : [...current.agents, agent],
-                }
-              : current
-          );
-          return;
-        }
-        if (envelope.type === "agent.run.updated") {
-          const run = envelope.data as AgentRun;
-          setWorkspace((current) =>
-            current
-              ? {
-                  ...current,
-                  agentRuns: current.agentRuns.some((currentRun) => currentRun.id === run.id)
-                    ? current.agentRuns.map((currentRun) => (currentRun.id === run.id ? run : currentRun))
-                    : [...current.agentRuns, run],
-                }
-              : current
-          );
-          return;
-        }
-        if (envelope.type === "daemon.created" || envelope.type === "daemon.deleted") {
-          void loadWorkspace();
-          return;
-        }
-        if (envelope.type === "document.updated") {
-          const documentEvent = envelope.data as DocumentUpdateEvent;
-          setWorkspace((current) =>
-            current
-              ? {
-                  ...current,
-                  documents: current.documents.map((currentDoc) =>
-                    currentDoc.id === documentEvent.documentId
-                      ? {
-                          ...currentDoc,
-                          path: documentEvent.path,
-                          updatedAt: documentEvent.updatedAt,
-                        }
-                      : currentDoc
-                  ),
-                }
-              : current
-          );
-          setActiveDocument((current) =>
-            current?.id === documentEvent.documentId
-              ? { ...current, path: documentEvent.path, updatedAt: documentEvent.updatedAt }
-              : current
-          );
-          return;
-        }
-        if (
-          envelope.type === "workspace.snapshot" ||
-          envelope.type === "document.created" ||
-          envelope.type === "document.moved" ||
-          envelope.type === "document.deleted" ||
-          envelope.type === "thread.created" ||
-          envelope.type === "thread.updated" ||
-          envelope.type === "thread.message.created" ||
-          envelope.type === "user.created" ||
-          envelope.type === "user.updated" ||
-          envelope.type === "user.deleted" ||
-          envelope.type === "agent.created" ||
-          envelope.type === "agent.deleted"
-        ) {
-          scheduleWorkspaceReload();
-        }
-      };
-      ws.onerror = () => {
-        ws.close();
-      };
-      ws.onclose = () => {
-        if (workspaceWsRef.current === ws) {
-          workspaceWsRef.current = null;
-        }
-        setWorkspaceConnected(false);
-        if (disposed) {
-          return;
-        }
-        const delay = Math.min(1000 * 2 ** attempt, 5000);
-        attempt += 1;
-        reconnectTimer = window.setTimeout(connect, delay);
-      };
-    };
-
-    connect();
-    return () => {
-      disposed = true;
-      if (reconnectTimer !== null) {
-        window.clearTimeout(reconnectTimer);
-      }
-      if (workspaceReloadTimerRef.current !== null) {
-        window.clearTimeout(workspaceReloadTimerRef.current);
-        workspaceReloadTimerRef.current = null;
-      }
-      workspaceWsRef.current?.close();
-    };
-  }, [authToken, selectedWorkspaceId]);
-
-  useEffect(() => {
-    if (!authToken || !selectedWorkspaceId) {
-      return;
-    }
-    const interval = window.setInterval(() => {
-      setDaemonStatusNow(Date.now());
-    }, daemonStatusRefreshMs);
-    return () => window.clearInterval(interval);
-  }, [authToken, selectedWorkspaceId]);
-
-  useEffect(() => {
-    if (!authToken || !selectedWorkspaceId) {
-      return;
-    }
-    const interval = window.setInterval(() => {
-      void loadWorkspace();
-    }, daemonWorkspaceRefreshMs);
-    return () => window.clearInterval(interval);
-  }, [authToken, selectedWorkspaceId]);
-
-  const selectedDocumentMeta = useMemo(
-    () => workspace?.documents.find((doc) => doc.id === selectedId) ?? null,
-    [selectedId, workspace]
-  );
-  const selectedDocument = activeDocument?.id === selectedId ? activeDocument : null;
-  const selectedDocumentView = selectedDocument ?? selectedDocumentMeta;
-  const deferredDraft = useDeferredValue(draft);
-  const documentLines = useMemo(() => deferredDraft.split("\n"), [deferredDraft]);
-  const lineStarts = useMemo(() => buildLineStarts(deferredDraft), [deferredDraft]);
-  const currentUser = useMemo(
-    () => workspace?.users.find((user) => user.id === currentUserId) ?? workspace?.users[0] ?? null,
-    [currentUserId, workspace?.users]
-  );
-  const selectedThreads = workspace?.threads.filter((thread) => thread.documentId === selectedId) ?? [];
-  const liveSelectedThreads = useMemo(() => {
-    if (!selectedDocument) {
-      return selectedThreads;
-    }
-    const ydoc = getOrCreateDoc(selectedDocument);
-    return selectedThreads.map((thread) => ({
-      ...thread,
-      anchor: resolveThreadAnchorLive(thread.anchor, ydoc, deferredDraft, lineStarts),
-    }));
-  }, [deferredDraft, lineStarts, selectedDocument, selectedThreads]);
-  const lineThreads = useMemo(
-    () => buildLineThreads(liveSelectedThreads),
-    [liveSelectedThreads]
-  );
-  const activeCollaborators = useMemo(
-    () =>
-      buildActiveCollaborators(
-        workspace?.presences ?? {},
-        workspace?.users ?? [],
-        workspace?.agents ?? [],
-        selectedDocumentView?.id ?? "",
-        selectedDocumentView?.path ?? "",
-        currentUser
-          ? { actorId: currentUser.handle, actorName: currentUser.name, activity: "Editing this page" }
-          : { actorId: "human", actorName: account?.displayName ?? account?.email ?? "Human", activity: "Editing this page" }
-      ),
-    [account?.displayName, account?.email, currentUser, selectedDocumentView?.id, selectedDocumentView?.path, workspace?.agents, workspace?.presences, workspace?.users]
-  );
-  const commentedLines = useMemo(
-    () => new Set(lineThreads.map((thread) => thread.line)),
-    [lineThreads]
-  );
-  const selectedThread = useMemo(
-    () => (!selectedThreadId ? null : liveSelectedThreads.find((thread) => thread.id === selectedThreadId) ?? null),
-    [liveSelectedThreads, selectedThreadId]
-  );
-  const selectedThreadGroup = useMemo(
-    () =>
-      !selectedThread
-        ? null
-        : lineThreads.find((threadGroup) => threadGroup.threads.some((thread) => thread.id === selectedThread.id)) ?? null,
-    [lineThreads, selectedThread]
-  );
-  const currentSelectionLabel = useMemo(
-    () => formatSelection(selectionRange.start, selectionRange.end, lineStarts),
-    [lineStarts, selectionRange.end, selectionRange.start]
-  );
-  const wordCount = useMemo(() => countWords(deferredDraft), [deferredDraft]);
-  const charCount = deferredDraft.length;
-  const editorTrackHeight = Math.max(documentLines.length * EDITOR_LINE_HEIGHT + 120, 640);
-
-  useEffect(() => {
-    currentUserRef.current = currentUser;
-  }, [currentUser]);
-
-  useEffect(() => {
-    selectedDocumentRef.current = selectedDocument;
-  }, [selectedDocument]);
-
-  useEffect(() => {
-    setUserDrafts((current) => {
-      const next: Record<string, UserDraft> = {};
-      for (const user of workspace?.users ?? []) {
-        const existing = current[user.id];
-        next[user.id] = existing ?? {
-          name: user.name,
-          handle: user.handle,
-          role: user.role,
-        };
-      }
-      return next;
-    });
-  }, [workspace?.users]);
-
-  useEffect(() => {
-    setAgentDrafts((current) => {
-      const next: Record<string, AgentDraft> = {};
-      for (const agent of workspace?.agents ?? []) {
-        const existing = current[agent.id];
-        next[agent.id] = existing ?? {
-          handle: agent.handle,
-          name: agent.name,
-          role: agent.role,
-          taskPrompt: `Review the latest workspace changes and continue the assigned task as ${agent.name}.`,
-        };
-      }
-      return next;
-    });
-  }, [workspace?.agents]);
-
-  useEffect(() => {
-    if (!selectedId && workspace?.documents.length) {
-      selectedIdRef.current = workspace.documents[0].id;
-      setSelectedId(workspace.documents[0].id);
-    }
-  }, [selectedId, workspace]);
-
-  useEffect(() => {
-    setDocumentReady(false);
-    activeDocRef.current?.ydoc.destroy();
-    activeDocRef.current = null;
-    if (!selectedId || !selectedDocumentMeta) {
-      setActiveDocument(null);
-      resetEditorState();
-      return;
-    }
-    setActiveDocument(selectedDocumentMeta);
-    resetEditorState(selectedDocumentMeta.path);
-  }, [selectedDocumentMeta?.id, selectedDocumentMeta?.path, selectedDocumentMeta?.title, selectedId]);
-
-  useEffect(() => {
-    if (!workspace?.users.length) {
-      return;
-    }
-    if (!currentUserId || !workspace.users.some((user) => user.id === currentUserId)) {
-      setCurrentUserId(workspace.users[0].id);
-    }
-  }, [currentUserId, workspace?.users]);
-
-  useEffect(() => {
-    if (currentUserId) {
-      localStorage.setItem(currentUserStorageKey, currentUserId);
-    }
-  }, [currentUserId]);
-
-  useEffect(() => {
-    const publishPresence = async () => {
-      const activeUser = currentUserRef.current;
-      const activeDocument = selectedDocumentRef.current;
-      if (!activeUser || !activeDocument) {
-        return;
-      }
-      lastPresenceSentAtRef.current = Date.now();
-      try {
-        await workspaceFetch("/presence", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            actorId: activeUser.handle,
-            actorType: "human",
-            documentId: activeDocument.id,
-            filePath: activeDocument.path,
-            mode: "editing",
-            selection: [selectionRangeRef.current.start, selectionRangeRef.current.end],
-            activity: `Editing ${activeDocument.title}`,
-          }),
-        });
-      } catch {
-        return;
-      }
-    };
-
-    if (!currentUser || !selectedDocument) {
-      return;
-    }
-    void publishPresence();
-    const interval = window.setInterval(() => {
-      void publishPresence();
-    }, 8000);
-    return () => {
-      window.clearInterval(interval);
-    };
-  }, [currentUser, selectedDocument]);
-
-  useEffect(() => {
-    if (!currentUser || !selectedDocument) {
-      return;
-    }
-    if (pendingPresenceTimerRef.current !== null) {
-      window.clearTimeout(pendingPresenceTimerRef.current);
-      pendingPresenceTimerRef.current = null;
-    }
-    const elapsed = Date.now() - lastPresenceSentAtRef.current;
-    const delay = elapsed >= 600 ? 0 : 600 - elapsed;
-    pendingPresenceTimerRef.current = window.setTimeout(() => {
-      pendingPresenceTimerRef.current = null;
-      const activeUser = currentUserRef.current;
-      const activeDocument = selectedDocumentRef.current;
-      if (!activeUser || !activeDocument) {
-        return;
-      }
-      lastPresenceSentAtRef.current = Date.now();
-      void workspaceFetch("/presence", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          actorId: activeUser.handle,
-          actorType: "human",
-          documentId: activeDocument.id,
-          filePath: activeDocument.path,
-          mode: "editing",
-          selection: [selectionRange.start, selectionRange.end],
-          activity: `Editing ${activeDocument.title}`,
-        }),
-      });
-    }, delay);
-    return () => {
-      if (pendingPresenceTimerRef.current !== null) {
-        window.clearTimeout(pendingPresenceTimerRef.current);
-        pendingPresenceTimerRef.current = null;
-      }
-    };
-  }, [currentUser, selectedDocument, selectionRange.end, selectionRange.start]);
-
-  useEffect(() => {
-    if (!selectedDocument) {
-      return;
-    }
-    const initialDraft = getOrCreateDoc(selectedDocument).getText("content").toString();
-    draftRef.current = initialDraft;
-    setDraft(initialDraft);
-    setPathEditor(selectedDocument.path);
-    setEditorScrollTop(0);
-    selectionRangeRef.current = { start: 0, end: 0 };
-    setSelectionRange({ start: 0, end: 0 });
-    setSelectedThreadId("");
-    pendingSelectionRef.current = null;
-    isComposingRef.current = false;
-    hasQueuedRemoteSyncRef.current = false;
-    const actorHandle = currentUser?.handle ?? "human";
-    const actorName = currentUser?.name ?? account?.displayName ?? account?.email ?? "Human";
-    const ydoc = getOrCreateDoc(selectedDocument);
-    const awareness = new Awareness(ydoc);
-    awareness.setLocalState({
-      actorId: actorHandle,
-      actorName,
-      actorType: "human",
-      activity: `Editing ${selectedDocument.title}`,
-      filePath: selectedDocument.path,
-    });
-    awarenessRef.current = awareness;
-
-    const applyDraftFromYdoc = () => {
-      const nextContent = ydoc.getText("content").toString();
-      const previousContent = draftRef.current;
-      if (nextContent === previousContent) {
-        return;
-      }
-      const nextSelection = rebaseSelection(
-        selectionRangeRef.current,
-        computeReplace(previousContent, nextContent)
-      );
-      if (isComposingRef.current) {
-        hasQueuedRemoteSyncRef.current = true;
-        return;
-      }
-      draftRef.current = nextContent;
-      selectionRangeRef.current = nextSelection;
-      setDraft(nextContent);
-      setSelectionRange(nextSelection);
-      pendingSelectionRef.current = nextSelection;
-    };
-
-    const scheduleDraftSyncFromYdoc = () => {
-      if (remoteDraftSyncTimerRef.current !== null) {
-        return;
-      }
-      remoteDraftSyncTimerRef.current = window.setTimeout(() => {
-        remoteDraftSyncTimerRef.current = null;
-        applyDraftFromYdoc();
-      }, 75);
-    };
-
-    const handleYdocUpdate = (update: Uint8Array, origin: unknown) => {
-      if (origin === "remote" || origin === "bootstrap") {
-        return;
-      }
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(encodeSyncUpdate(update));
-      }
-    };
-    ydoc.on("update", handleYdocUpdate);
-
-    let disposed = false;
-    let reconnectTimer: number | null = null;
-    let attempt = 0;
-    let receivedInitialSync = false;
-
-    const connect = () => {
-      if (disposed) {
-        return;
-      }
-      if (!selectedWorkspaceId || !authToken) {
-        return;
-      }
-      const query = new URLSearchParams({
-        token: authToken,
-        client_id: String(ydoc.clientID),
-      });
-      const ws = new WebSocket(
-        `${apiBase.replace("http", "ws")}/ws/workspaces/${encodeURIComponent(selectedWorkspaceId)}/documents/${selectedDocument.id}?${query.toString()}`
-      );
-      ws.binaryType = "arraybuffer";
-      wsRef.current = ws;
-      ws.onopen = () => {
-        attempt = 0;
-        ws.send(encodeSyncStep1(ydoc));
-        ws.send(encodeAwarenessMessage(awareness, [ydoc.clientID]));
-      };
-      ws.onmessage = (event) => {
-        const bytes = new Uint8Array(event.data as ArrayBuffer);
-        const { value: messageType, offset } = decodeVarUint(bytes);
-        const payload = bytes.slice(offset);
-        if (messageType === 0) {
-          const decoder = decoding.createDecoder(payload);
-          const encoder = encoding.createEncoder();
-          syncProtocol.readSyncMessage(decoder, encoder, ydoc, "remote");
-          const reply = encoding.toUint8Array(encoder);
-          if (reply.length > 0) {
-            ws.send(encodeSyncReply(reply));
-          }
-          if (!receivedInitialSync) {
-            receivedInitialSync = true;
-            applyDraftFromYdoc();
-            setDocumentReady(true);
-          } else {
-            scheduleDraftSyncFromYdoc();
-          }
-        }
-        if (messageType === 1) {
-          applyAwarenessUpdate(awareness, payload, "remote");
-        }
-      };
-      ws.onerror = () => {
-        ws.close();
-      };
-      ws.onclose = () => {
-        if (wsRef.current === ws) {
-          wsRef.current = null;
-        }
-        if (disposed) {
-          return;
-        }
-        const delay = Math.min(1000 * 2 ** attempt, 5000);
-        attempt += 1;
-        reconnectTimer = window.setTimeout(connect, delay);
-      };
-    };
-
-    connect();
-    return () => {
-      disposed = true;
-      if (reconnectTimer !== null) {
-        window.clearTimeout(reconnectTimer);
-      }
-      if (remoteDraftSyncTimerRef.current !== null) {
-        window.clearTimeout(remoteDraftSyncTimerRef.current);
-        remoteDraftSyncTimerRef.current = null;
-      }
-      wsRef.current?.close();
-      wsRef.current = null;
-      ydoc.off("update", handleYdocUpdate);
-      awarenessRef.current?.destroy();
-      awarenessRef.current = null;
-    };
-  }, [account?.displayName, account?.email, authToken, currentUser?.id, selectedDocument?.id, selectedWorkspaceId]);
-
-  function resetEditorState(path = "") {
-    draftRef.current = "";
-    setDraft("");
-    setPathEditor(path);
-    setEditorScrollTop(0);
-    selectionRangeRef.current = { start: 0, end: 0 };
-    setSelectionRange({ start: 0, end: 0 });
-    setSelectedThreadId("");
-    pendingSelectionRef.current = null;
-    isComposingRef.current = false;
-    hasQueuedRemoteSyncRef.current = false;
-  }
-
-  function getOrCreateDoc(document: DocumentItem) {
-    const existing = activeDocRef.current;
-    if (existing?.id === document.id) {
-      return existing.ydoc;
-    }
-    existing?.ydoc.destroy();
-    const ydoc = new Y.Doc();
-    activeDocRef.current = { id: document.id, ydoc };
-    return ydoc;
-  }
-
-
-  function authHeaders(extra?: HeadersInit): HeadersInit {
-    const headers = new Headers(extra);
-    if (authToken) {
-      headers.set("Authorization", `Bearer ${authToken}`);
-    }
-    return headers;
-  }
-
-  function workspaceEndpoint(path: string) {
-    return `${apiBase}/api/workspaces/${encodeURIComponent(selectedWorkspaceId)}${path}`;
-  }
-
-  async function workspaceFetch(path: string, options: RequestInit = {}) {
-    return fetch(workspaceEndpoint(path), {
-      ...options,
-      headers: authHeaders(options.headers),
-    });
-  }
-
-  async function loadMe() {
-    const response = await fetch(`${apiBase}/api/auth/me`, {
-      headers: authHeaders(),
-    });
-    if (!response.ok) {
-      logout();
-      return;
-    }
-    const data = (await response.json()) as { account: Account; workspaces: WorkspaceSummary[] };
-    const nextWorkspaces = data.workspaces ?? [];
-    setAccount(data.account);
-    setAvailableWorkspaces(nextWorkspaces);
-    setSelectedWorkspaceId((current) => {
-      if (current && nextWorkspaces.some((workspaceItem) => workspaceItem.id === current)) {
-        return current;
-      }
-      return nextWorkspaces[0]?.id ?? "";
-    });
-  }
-
-  async function login() {
-    const response = await fetch(`${apiBase}/api/auth/login`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: authEmail, password: authPassword }),
-    });
-    if (!response.ok) {
-      setMessage("Login failed.");
-      return;
-    }
-    const data = (await response.json()) as { token: string; account: Account; workspaces?: WorkspaceSummary[] };
-    const nextWorkspaces = data.workspaces ?? [];
-    setAuthToken(data.token);
-    setAccount(data.account);
-    setAvailableWorkspaces(nextWorkspaces);
-    setSelectedWorkspaceId(nextWorkspaces[0]?.id ?? "");
-    setMessage("Signed in.");
-  }
-
-  async function register() {
-    const response = await fetch(`${apiBase}/api/auth/register`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: authEmail, password: authPassword, displayName: authName }),
-    });
-    if (!response.ok) {
-      setMessage("Registration failed.");
-      return;
-    }
-    const data = (await response.json()) as { token: string; account: Account; workspaces?: WorkspaceSummary[] };
-    setAuthToken(data.token);
-    setAccount(data.account);
-    setAvailableWorkspaces(data.workspaces ?? []);
-    setSelectedWorkspaceId("");
-    setMessage("Account created.");
-  }
-
-  function logout() {
-    localStorage.removeItem(authTokenStorageKey);
+  const signOut = () => {
+    localStorage.removeItem(tokenStorageKey);
     localStorage.removeItem(workspaceStorageKey);
-    setAuthToken("");
-    setSelectedWorkspaceId("");
-    setCurrentUserId("");
+    setToken("");
     setAccount(null);
-    setWorkspace(null);
-  }
+    setWorkspaces([]);
+    setWorkspaceId("");
+  };
 
-  async function createWorkspace() {
-    const response = await fetch(`${apiBase}/api/workspaces`, {
-      method: "POST",
-      headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ name: newWorkspaceName, slug: newWorkspaceSlug }),
-    });
-    if (!response.ok) {
-      setMessage("Could not create workspace.");
+  useEffect(() => {
+    if (!token) {
       return;
     }
-    const data = (await response.json()) as { workspace: WorkspaceSummary };
-    await loadMe();
-    setSelectedWorkspaceId(data.workspace.id);
-    setMessage("Workspace created.");
-  }
-
-  async function addWorkspaceMember() {
-    if (!newMemberEmail.trim()) {
-      return;
-    }
-    const response = await workspaceFetch("/members", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: newMemberEmail, handle: newMemberHandle }),
-    });
-    if (!response.ok) {
-      setMessage("Could not add member. The account must register first.");
-      return;
-    }
-    setNewMemberEmail("");
-    setNewMemberHandle("");
-    setMessage("Workspace member added.");
-    await loadWorkspace();
-  }
-
-  async function createDaemon() {
-    const response = await workspaceFetch("/daemons", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: newDaemonName }),
-    });
-    if (!response.ok) {
-      setMessage("Could not create daemon token.");
-      return;
-    }
-    const data = (await response.json()) as { daemon: Daemon; token: string };
-    setCreatedDaemonToken(data.token);
-    setCreatedDaemonName(data.daemon?.name || newDaemonName.trim() || "Daemon");
-    setNewAgentDaemonId(data.daemon?.id ?? "");
-    setMessage("Daemon token created. Copy it now; it will not be shown again.");
-    await loadWorkspace();
-  }
-
-  async function copyDaemonCommand() {
-    if (!createdDaemonToken || !selectedWorkspaceId) {
-      return;
-    }
-    const command = daemonDeployCommand(selectedWorkspaceId, createdDaemonToken);
-    try {
-      await navigator.clipboard.writeText(command);
-      setMessage("Daemon command copied.");
-    } catch {
-      setMessage("Could not copy automatically. Select the command and copy it manually.");
-    }
-  }
-
-  async function deleteDaemon(daemonId: string) {
-    const response = await workspaceFetch(`/daemons/${daemonId}`, {
-      method: "DELETE",
-    });
-    if (!response.ok) {
-      setMessage("Could not delete daemon.");
-      return;
-    }
-    if (newAgentDaemonId === daemonId) {
-      setNewAgentDaemonId("");
-    }
-    setMessage("Daemon deleted.");
-    await loadWorkspace();
-  }
-
-  async function loadWorkspace(nextSelectedId?: string) {
-    if (!authToken || !selectedWorkspaceId) {
-      return;
-    }
-    const requestToken = workspaceLoadTokenRef.current + 1;
-    workspaceLoadTokenRef.current = requestToken;
-    const response = await workspaceFetch("/workspace");
-    if (!response.ok) {
-      setMessage("Workspace access failed.");
-      return;
-    }
-    const data = (await response.json()) as Workspace;
-    const selection = resolveWorkspaceLoad(
-      requestToken,
-      workspaceLoadTokenRef.current,
-      data.documents,
-      nextSelectedId ?? selectedIdRef.current
-    );
-    if (!selection.shouldApply) {
-      return;
-    }
-    setWorkspace(data);
-    setNewAgentDaemonId((current) => {
-      if (current && data.daemons?.some((daemon) => daemon.id === current)) {
-        return current;
-      }
-      return data.daemons?.[0]?.id ?? "";
-    });
-    if (data.currentUserId) {
-      setCurrentUserId(data.currentUserId);
-    }
-    selectedIdRef.current = selection.selectedId;
-    setSelectedId((current) => (current === selection.selectedId ? current : selection.selectedId));
-  }
-
-  function handleEditorSelection(target: HTMLTextAreaElement) {
-    const start = target.selectionStart;
-    const end = target.selectionEnd;
-    selectionRangeRef.current = { start, end };
-    setSelectionRange({ start, end });
-  }
-
-  function handleDraftChange(nextDraft: string) {
-    if (!selectedDocument) {
-      return;
-    }
-    const ydoc = getOrCreateDoc(selectedDocument);
-    const visibleCurrent = draftRef.current;
-    const current = ydoc.getText("content").toString();
-    let replace = computeReplace(visibleCurrent, nextDraft);
-    if (current !== visibleCurrent) {
-      replace = rebaseReplace(replace, computeReplace(visibleCurrent, current));
-    }
-    if (replace.start === replace.end && replace.text.length === 0) {
-      return;
-    }
-    ydoc.transact(() => {
-      const text = ydoc.getText("content");
-      const deleteLength = replace.end - replace.start;
-      if (deleteLength > 0) {
-        text.delete(replace.start, deleteLength);
-      }
-      if (replace.text.length > 0) {
-        text.insert(replace.start, replace.text);
-      }
-    }, "local");
-    draftRef.current = nextDraft;
-    setDraft(nextDraft);
-    const nextSelection = textareaRef.current
-      ? {
-          start: textareaRef.current.selectionStart,
-          end: textareaRef.current.selectionEnd,
+    let disposed = false;
+    setRestoringSession(true);
+    new ApiClient(token)
+      .me()
+      .then((response) => {
+        if (disposed) {
+          return;
         }
-      : selectionRangeRef.current;
-    selectionRangeRef.current = nextSelection;
-    setSelectionRange(nextSelection);
+        const safeWorkspaces = response.workspaces ?? [];
+        setAccount(response.account);
+        setWorkspaces(safeWorkspaces);
+        const preferred = localStorage.getItem(workspaceStorageKey);
+        if (preferred && safeWorkspaces.some((workspace) => workspace.id === preferred)) {
+          setWorkspaceId(preferred);
+        } else {
+          localStorage.removeItem(workspaceStorageKey);
+          setWorkspaceId(safeWorkspaces[0]?.id ?? "");
+        }
+      })
+      .catch(() => {
+        if (!disposed) {
+          signOut();
+        }
+      })
+      .finally(() => {
+        if (!disposed) {
+          setRestoringSession(false);
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [token]);
+
+  if (!token) {
+    return <AuthScreen api={api} onAuth={saveAuth} />;
   }
 
-  async function createThread() {
-    if (!selectedDocument || !threadBody.trim()) {
-      return;
-    }
-    const ydoc = getOrCreateDoc(selectedDocument);
-    const text = ydoc.getText("content");
-    const selectionStart = textareaRef.current?.selectionStart ?? 0;
-    const selectionEnd = textareaRef.current?.selectionEnd ?? selectionStart;
-    const safeStart = Math.max(0, Math.min(selectionStart, text.length));
-    const safeEnd = Math.max(safeStart, Math.min(selectionEnd, text.length));
-    const previewEnd = safeEnd === safeStart ? Math.min(draft.length, safeStart + 80) : safeEnd;
-    const excerpt = (draft.slice(safeStart, previewEnd).trim() || currentSelectionLabel).slice(0, 140);
-    const response = await workspaceFetch("/threads", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        documentId: selectedDocument.id,
-        title: currentSelectionLabel,
-        body: threadBody,
-        relativeStart: encodeRelativeAnchor(text, safeStart),
-        relativeEnd: encodeRelativeAnchor(text, safeEnd),
-        start: safeStart,
-        end: safeEnd,
-        line: getLineForOffset(lineStarts, safeStart),
-        excerpt,
-      }),
-    });
-    if (response.ok) {
-      const payload = (await response.json()) as { thread?: ThreadItem };
-      setThreadBody("");
-      setSelectedThreadId(payload.thread?.id ?? "");
-      setMessage("Thread started.");
-      await loadWorkspace(selectedDocument.id);
-    }
-  }
-
-  async function replyToThread(threadId: string) {
-    if (!threadReplyBody.trim()) {
-      return;
-    }
-    const response = await workspaceFetch(`/threads/${threadId}/messages`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        body: threadReplyBody,
-        kind: "comment",
-      }),
-    });
-    if (response.ok) {
-      setThreadReplyBody("");
-      setMessage("Thread updated.");
-      await loadWorkspace();
-    }
-  }
-
-  async function createDocument() {
-    const path = newFilePath.trim();
-    if (!path) {
-      return;
-    }
-    const response = await workspaceFetch("/documents", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path, content: "" }),
-    });
-    if (!response.ok) {
-      setMessage("Could not create file.");
-      return;
-    }
-    const created = (await response.json()) as DocumentItem;
-    setMessage("File created.");
-    setNewFilePath(nextSuggestedPath(path));
-    await loadWorkspace(created.id);
-  }
-
-  async function saveDocumentPath() {
-    if (!selectedDocument) {
-      return;
-    }
-    const nextPath = pathEditor.trim();
-    if (!nextPath || nextPath === selectedDocument.path) {
-      return;
-    }
-    const response = await workspaceFetch(
-      `/documents/${selectedDocument.id}`,
-      {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: nextPath }),
-      }
-    );
-    if (!response.ok) {
-      setMessage("Could not move file.");
-      return;
-    }
-    const updated = (await response.json()) as DocumentItem;
-    setActiveDocument((current) => (current?.id === updated.id ? { ...current, ...updated } : current));
-    setMessage("File moved.");
-    await loadWorkspace(selectedDocument.id);
-  }
-
-  async function deleteDocument() {
-    if (!selectedDocument) {
-      return;
-    }
-    const response = await workspaceFetch(
-      `/documents/${selectedDocument.id}`,
-      { method: "DELETE" }
-    );
-    if (!response.ok) {
-      setMessage("Could not delete file.");
-      return;
-    }
-    setMessage("File deleted.");
-    await loadWorkspace();
-  }
-
-  const actorHandle = currentUser?.handle ?? "owner";
-  const agentRuns = workspace?.agentRuns ?? [];
-  const agents = workspace?.agents ?? [];
-  const daemons = workspace?.daemons ?? [];
-  const users = workspace?.users ?? [];
-  const selectedAgentDetails = useMemo(
-    () => agents.find((agent) => agent.id === agentDetailsId) ?? null,
-    [agentDetailsId, agents]
-  );
-
-  function switchIdentity(userId: string) {
-    setCurrentUserId(userId);
-    const nextUser = users.find((user) => user.id === userId);
-    if (nextUser) {
-      setMessage(`Now acting as @${nextUser.handle}.`);
-    }
-  }
-
-  function patchUserDraft(userId: string, patch: Partial<UserDraft>) {
-    setUserDrafts((current) => ({
-      ...current,
-      [userId]: {
-        ...current[userId],
-        ...patch,
-      },
-    }));
-  }
-
-  function patchAgentDraft(agentId: string, patch: Partial<AgentDraft>) {
-    setAgentDrafts((current) => ({
-      ...current,
-      [agentId]: {
-        ...current[agentId],
-        ...patch,
-      },
-    }));
-  }
-
-  async function createUser() {
-    if (!newUserName.trim() || !newUserHandle.trim()) {
-      return;
-    }
-    const response = await workspaceFetch("/users", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name: newUserName,
-        handle: newUserHandle,
-        role: newUserRole,
-      }),
-    });
-    if (!response.ok) {
-      setMessage("Could not create user.");
-      return;
-    }
-    const created = (await response.json()) as UserItem;
-    setMessage(`User @${created.handle} created.`);
-    setCurrentUserId(created.id);
-    setNewUserName("Workspace Collaborator");
-    setNewUserHandle("collaborator");
-    setNewUserRole("Collaborates in the shared workspace");
-    await loadWorkspace();
-  }
-
-  async function saveUser(userId: string) {
-    const draft = userDrafts[userId];
-    if (!draft) {
-      return;
-    }
-    const response = await workspaceFetch(`/users/${userId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(draft),
-    });
-    if (!response.ok) {
-      setMessage("Could not save user.");
-      return;
-    }
-    setMessage("User updated.");
-    await loadWorkspace();
-  }
-
-  async function deleteUser(userId: string) {
-    const response = await workspaceFetch(`/users/${userId}`, {
-      method: "DELETE",
-    });
-    if (!response.ok) {
-      setMessage("Could not delete user.");
-      return;
-    }
-    setMessage("User deleted.");
-    await loadWorkspace();
-  }
-
-  async function createAgent() {
-    if (!newAgentName.trim() || !newAgentHandle.trim() || !newAgentDaemonId) {
-      setMessage("Create a daemon before creating an agent.");
-      return;
-    }
-    const response = await workspaceFetch(`/daemons/${newAgentDaemonId}/agents`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        handle: newAgentHandle,
-        name: newAgentName,
-        role: newAgentRole,
-        kind: "codex",
-      }),
-    });
-    if (!response.ok) {
-      setMessage("Could not create agent.");
-      return;
-    }
-    setMessage("Agent created.");
-    setNewAgentHandle("codex-agent");
-    setNewAgentName("Codex Agent");
-    setNewAgentRole("Implement changes in the shared workspace");
-    setIsAgentModalOpen(false);
-    await loadWorkspace();
-  }
-
-  async function saveAgent(agentId: string) {
-    const draft = agentDrafts[agentId];
-    if (!draft) {
-      return;
-    }
-    const response = await workspaceFetch(`/agents/${agentId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        handle: draft.handle,
-        name: draft.name,
-        role: draft.role,
-      }),
-    });
-    if (!response.ok) {
-      setMessage("Could not save agent.");
-      return;
-    }
-    setMessage("Agent updated.");
-    await loadWorkspace();
-  }
-
-  async function deleteAgent(agentId: string) {
-    const response = await workspaceFetch(`/agents/${agentId}`, {
-      method: "DELETE",
-    });
-    if (!response.ok) {
-      setMessage("Could not delete agent.");
-      return;
-    }
-    setMessage("Agent deleted.");
-    await loadWorkspace();
-  }
-
-  async function startAgentRun(agent: Agent) {
-    const draft = agentDrafts[agent.id];
-    const prompt = draft?.taskPrompt?.trim();
-    if (!prompt) {
-      return;
-    }
-    const response = await workspaceFetch(`/agents/${agent.id}/runs`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt }),
-    });
-    if (!response.ok) {
-      setMessage("Could not start agent run.");
-      return;
-    }
-    setMessage(`${agent.name} queued in the daemon.`);
-    await loadWorkspace();
-  }
-
-  async function stopAgentRun(runId: string) {
-    const response = await workspaceFetch(`/agent-runs/${runId}/stop`, {
-      method: "POST",
-    });
-    if (!response.ok) {
-      setMessage("Could not stop Codex.");
-      return;
-    }
-    setMessage("Stop requested.");
-    await loadWorkspace();
-  }
-
-  if (!authToken) {
+  if (restoringSession && !account) {
     return (
-      <div className="authShell">
-        <section className="authCard">
-          <p className="eyebrow">notty workspace auth</p>
-          <h1>Sign in to collaborate</h1>
-          <p className="railCopy">Register a human account first, then create a workspace. Daemons join later with workspace-scoped tokens.</p>
-          <label className="fieldLabel">
-            <span>Email</span>
-            <input value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} className="railInput" placeholder="you@example.com" />
-          </label>
-          <label className="fieldLabel">
-            <span>Password</span>
-            <input value={authPassword} type="password" onChange={(event) => setAuthPassword(event.target.value)} className="railInput" placeholder="At least 8 characters" />
-          </label>
-          <label className="fieldLabel">
-            <span>Display name</span>
-            <input value={authName} onChange={(event) => setAuthName(event.target.value)} className="railInput" placeholder="Your name" />
-          </label>
-          <div className="agentActionRow">
-            <button onClick={login}>Login</button>
-            <button className="secondary" onClick={register}>Register</button>
-          </div>
-          {message ? <p className="runError">{message}</p> : null}
+      <main className="auth-screen">
+        <section className="card p-24 auth-panel">
+          <Logo />
+          <h1 className="auth-title">Restoring your session</h1>
+          <p className="small muted">Loading account and workspace membership.</p>
         </section>
+      </main>
+    );
+  }
+
+  if (!workspaceId) {
+    return (
+      <WorkspacePicker
+        api={api}
+        account={account}
+        workspaces={workspaces}
+        onWorkspaces={setWorkspaces}
+        onSelect={(id) => {
+          localStorage.setItem(workspaceStorageKey, id);
+          setWorkspaceId(id);
+        }}
+        onSignOut={signOut}
+      />
+    );
+  }
+
+  return (
+    <WorkspaceApp
+      api={api}
+      token={token}
+      workspaceId={workspaceId}
+      account={account}
+      workspaces={workspaces}
+      onWorkspaceChange={(id) => {
+        localStorage.setItem(workspaceStorageKey, id);
+        setWorkspaceId(id);
+      }}
+      onSignOut={signOut}
+    />
+  );
+}
+
+function AuthScreen({ api, onAuth }: { api: ApiClient; onAuth: (token: string, account: Account, workspaces: WorkspaceSummary[]) => void }) {
+  const [mode, setMode] = useState<"login" | "register">("login");
+  const [displayName, setDisplayName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const response =
+        mode === "register"
+          ? await api.register({ email, password, displayName })
+          : await api.login({ email, password });
+      onAuth(response.token, response.account, response.workspaces ?? []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <main className="auth-screen">
+      <section className="card p-24 auth-panel">
+        <Logo />
+        <h1 className="auth-title">{mode === "login" ? "Welcome back" : "Create your account"}</h1>
+        <p className="small muted auth-copy">
+          {mode === "login" ? "Log in to your workspaces." : "You'll set up your workspace next."}
+        </p>
+        <form onSubmit={submit} className="form-stack">
+          {mode === "register" ? (
+            <label className="field">
+              <span className="lab">Display name</span>
+              <input value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="Ada Lovelace" required />
+            </label>
+          ) : null}
+          <label className="field">
+            <span className="lab">Email</span>
+            <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" required />
+          </label>
+          <label className="field">
+            <span className="lab">Password</span>
+            <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 8 characters" required />
+          </label>
+          {error ? <p className="error-text">{error}</p> : null}
+          <button className="btn accent full lg" disabled={busy}>{busy ? "Working..." : mode === "login" ? "Log in" : "Create account"}</button>
+        </form>
+        <div className="auth-switch">
+          {mode === "login" ? "No account?" : "Already have an account?"}
+          <button className="btn-link" onClick={() => setMode(mode === "login" ? "register" : "login")}>
+            {mode === "login" ? "Create one" : "Log in"}
+          </button>
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function WorkspacePicker({
+  api,
+  account,
+  workspaces,
+  onWorkspaces,
+  onSelect,
+  onSignOut,
+}: {
+  api: ApiClient;
+  account: Account | null;
+  workspaces: WorkspaceSummary[];
+  onWorkspaces: (workspaces: WorkspaceSummary[]) => void;
+  onSelect: (id: string) => void;
+  onSignOut: () => void;
+}) {
+  const [name, setName] = useState("Product Workspace");
+  const [handle, setHandle] = useState(account?.email.split("@")[0] ?? "owner");
+  const [error, setError] = useState("");
+
+  const createWorkspace = async (event: FormEvent) => {
+    event.preventDefault();
+    setError("");
+    try {
+      const response = await api.createWorkspace({ name, handle });
+      const next = [...workspaces, response.workspace];
+      onWorkspaces(next);
+      onSelect(response.workspace.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  return (
+    <main className="auth-screen picker-screen">
+      <section className="card p-24 picker-panel">
+        <div className="row between gap-12">
+          <Logo />
+          <button className="btn ghost sm" onClick={onSignOut}>Sign out</button>
+        </div>
+        <div className="picker-head">
+          <h1 className="auth-title">Choose a workspace</h1>
+          <p className="small muted">Pick a tenant or create a new workspace-scoped home for documents, daemons, and agents.</p>
+        </div>
+        {workspaces.length ? (
+          <div className="workspace-grid">
+            {workspaces.map((workspace) => (
+              <button className="workspace-tile card" key={workspace.id} onClick={() => onSelect(workspace.id)}>
+                <div className="avi">{initials(workspace.name)}</div>
+                <div className="col gap-2">
+                  <strong className="small">{workspace.name}</strong>
+                  <span className="tiny muted">{workspace.slug}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+        ) : null}
+        <form onSubmit={createWorkspace} className="form-stack create-workspace-card">
+          <div>
+            <h2 className="modal-title">Create workspace</h2>
+            <p className="small muted">You will become the workspace owner.</p>
+          </div>
+          <label className="field">
+            <span className="lab">Workspace name</span>
+            <input value={name} onChange={(event) => setName(event.target.value)} required />
+          </label>
+          <label className="field">
+            <span className="lab">Your workspace handle</span>
+            <input value={handle} onChange={(event) => setHandle(event.target.value)} required />
+          </label>
+          {error ? <p className="error-text">{error}</p> : null}
+          <button className="btn accent full lg">Create and enter</button>
+        </form>
+      </section>
+    </main>
+  );
+}
+
+function WorkspaceApp({
+  api,
+  token,
+  workspaceId,
+  account,
+  workspaces,
+  onWorkspaceChange,
+  onSignOut,
+}: {
+  api: ApiClient;
+  token: string;
+  workspaceId: string;
+  account: Account | null;
+  workspaces: WorkspaceSummary[];
+  onWorkspaceChange: (id: string) => void;
+  onSignOut: () => void;
+}) {
+  const { workspace, connected, loading, error, reload } = useWorkspace(workspaceId, token);
+  const [activeDocumentId, setActiveDocumentId] = useState("");
+  const [centerView, setCenterView] = useState<"document" | "daemons" | "agents">("document");
+  const [rightTab, setRightTab] = useState<"threads" | "activity" | "people">("threads");
+  const [modal, setModal] = useState<"daemon" | "agent" | "document" | "rename" | "agent-detail" | "daemon-detail" | null>(null);
+  const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
+  const [selectedDaemon, setSelectedDaemon] = useState<Daemon | null>(null);
+  const [selectedThreadId, setSelectedThreadId] = useState("");
+  const [focusThreadId, setFocusThreadId] = useState("");
+
+  const activeDocument = workspace.documents.find((document) => document.id === activeDocumentId) ?? workspace.documents[0] ?? null;
+  const documentId = activeDocument?.id ?? "";
+  useEffect(() => {
+    if (documentId && documentId !== activeDocumentId) {
+      setActiveDocumentId(documentId);
+    }
+  }, [activeDocumentId, documentId]);
+
+  const documentThreads = workspace.threads.filter((thread) => thread.documentId === activeDocument?.id);
+  const groupedAgents = agentsByDaemon(workspace.agents, workspace.daemons);
+  const documentGroups = byFolder(workspace.documents);
+  const activeFolder = folderName(activeDocument?.path);
+  const activeWorkspace = workspaces.find((item) => item.id === workspaceId);
+  const onlineAgents = workspace.agents.filter((agent) => visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons) !== "disconnected").length;
+
+  useEffect(() => {
+    if (selectedThreadId && !documentThreads.some((thread) => thread.id === selectedThreadId)) {
+      setSelectedThreadId("");
+    }
+  }, [documentThreads, selectedThreadId]);
+
+  return (
+    <main className={`shell ${centerView === "document" ? "" : "management-shell"}`}>
+      <aside className="sb">
+        <div className="workspace-switcher">
+          <div className="row gap-8 min-0">
+            <div className="avi workspace-avi">{initials(activeWorkspace?.name ?? workspace.name)}</div>
+            <div className="col gap-0 min-0">
+              <b className="small truncate">{workspace.name || activeWorkspace?.name || "Workspace"}</b>
+              <span className="tiny muted truncate">@{account?.email.split("@")[0] ?? "you"}</span>
+            </div>
+          </div>
+          <select aria-label="Workspace" value={workspaceId} onChange={(event) => onWorkspaceChange(event.target.value)}>
+            {workspaces.map((workspace) => (
+              <option value={workspace.id} key={workspace.id}>{workspace.name}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="sb-search">
+          <div className="input search-box">
+            <div className="row gap-6">
+              <Icon name="search" />
+              <span>Search or jump…</span>
+            </div>
+            <span className="kbd">⌘K</span>
+          </div>
+        </div>
+
+        <nav className="sb-section">
+          <button className="nav-item on" type="button">
+            <Icon name="home" />
+            <span>Home</span>
+          </button>
+          <button className="nav-item" type="button" onClick={() => setRightTab("activity")}>
+            <Icon name="activity" />
+            <span>Activity</span>
+            <span className={`ct ${workspace.agentEvents.length ? "has" : ""}`}>{workspace.agentEvents.length}</span>
+          </button>
+          <button className="nav-item" type="button" onClick={() => setRightTab("threads")}>
+            <Icon name="thread" />
+            <span>Threads</span>
+            <span className={`ct ${workspace.threads.length ? "has" : ""}`}>{workspace.threads.length}</span>
+          </button>
+        </nav>
+
+        <div className="divider sb-divider" />
+
+        <section className="sb-section flex-1 doc-tree">
+          <div className="lab">
+            <span className="label">Documents</span>
+            <button className="btn ghost icon sm" title="New doc" type="button" onClick={() => setModal("document")}>
+              <Icon name="plus" />
+            </button>
+          </div>
+          {documentGroups.map(([folder, documents]) => (
+            <div key={folder}>
+              <div className="nav-item group-label">
+                <span className="car">{folder === activeFolder ? "▾" : "▸"}</span>
+                <Icon name="stack" />
+                <span>{folder}</span>
+              </div>
+              <div className="tree-children">
+                {documents.map((document) => {
+                  const threadCount = workspace.threads.filter((thread) => thread.documentId === document.id).length;
+                  return (
+                    <button
+                      className={`nav-item ${document.id === activeDocument?.id ? "on" : ""}`}
+                      key={document.id}
+                      type="button"
+                      onClick={() => {
+                        setActiveDocumentId(document.id);
+                        setCenterView("document");
+                      }}
+                    >
+                      <span className="car">·</span>
+                      <Icon name="doc" />
+                      <span className="truncate">{fileName(document.path)}</span>
+                      {threadCount ? <span className="ct has">{threadCount}</span> : null}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+          {!workspace.documents.length ? <p className="tiny muted empty-note">No documents yet.</p> : null}
+        </section>
+
+        <div className="divider" />
+        <section className="agent-summary">
+          <div className="row between">
+            <span className="label">Agents</span>
+            <button className="btn ghost sm" type="button" onClick={() => setModal("agent")}>
+              <Icon name="plus" />
+              New
+            </button>
+          </div>
+          <div className="col gap-6 agent-summary-list">
+            {workspace.agents.slice(0, 5).map((agent) => {
+              const status = visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons);
+              return (
+                <button
+                  key={agent.id}
+                  className="agent-mini row gap-8"
+                  type="button"
+                  onClick={() => {
+                    setSelectedAgent(agent);
+                    setModal("agent-detail");
+                  }}
+                >
+                  <div className="avi sm agent">{initials(agent.handle)}</div>
+                  <span className="small truncate">@{agent.handle}</span>
+                  <StatusDot tone={status} />
+                </button>
+              );
+            })}
+            {!workspace.agents.length ? <span className="tiny muted">Create an agent after deploying a daemon.</span> : null}
+          </div>
+        </section>
+
+        <footer className="account-footer">
+          <div className="row between">
+            <div className="row gap-8 min-0">
+              <div className="avi sm you">{initials(account?.displayName ?? account?.email)}</div>
+              <span className="small truncate">{account?.displayName ?? account?.email ?? "Signed in"}</span>
+            </div>
+            <button className="btn ghost sm" onClick={onSignOut}>Sign out</button>
+          </div>
+        </footer>
+      </aside>
+
+      <section className="doc-area">
+        <header className="doc-toolbar">
+          <div className="breadcrumb">
+            <span>{centerView === "document" ? activeFolder : "Operations"}</span>
+            <Icon name="chevron" />
+            <b>{centerView === "daemons" ? "Daemons" : centerView === "agents" ? "Agents" : activeDocument ? fileName(activeDocument.path) : "No document selected"}</b>
+            {centerView === "document" && activeDocument?.updateId ? <span className="chip sm">v {activeDocument.updateId}</span> : null}
+            <span className={`chip sm ${connected ? "ok" : "warn"}`}>{connected ? "workspace live" : "workspace offline"}</span>
+          </div>
+          <div className="row gap-6">
+            <div className="avi-stack" aria-label="Workspace presence">
+              <div className="avi sm you" title="You">{initials(account?.displayName ?? account?.email)}</div>
+              {workspace.agents.slice(0, 2).map((agent) => (
+                <div className="avi sm agent" title={`@${agent.handle}`} key={agent.id}>{initials(agent.handle)}</div>
+              ))}
+            </div>
+            <span className="divider-v" />
+            <button className={`btn sm ${centerView === "daemons" ? "selected" : ""}`} type="button" onClick={() => setCenterView("daemons")}>
+              <Icon name="daemon" />
+              Daemons
+            </button>
+            <button className={`btn sm ${centerView === "agents" ? "selected" : ""}`} type="button" onClick={() => setCenterView("agents")}>
+              <Icon name="agent" />
+              Agents
+            </button>
+            <button className="btn sm ghost icon" type="button" onClick={() => setModal("rename")} disabled={!activeDocument || centerView !== "document"}>
+              <Icon name="more" />
+            </button>
+          </div>
+        </header>
+        {loading ? <div className="notice compact">Loading workspace...</div> : null}
+        {error ? <div className="notice error compact">{error}</div> : null}
+        {centerView === "daemons" ? (
+          <DaemonsManagement
+            workspace={workspace}
+            onRefresh={() => void reload()}
+            onNew={() => setModal("daemon")}
+            onDaemon={(daemon) => {
+              setSelectedDaemon(daemon);
+              setModal("daemon-detail");
+            }}
+          />
+        ) : centerView === "agents" ? (
+          <AgentsManagement
+            workspace={workspace}
+            groupedAgents={groupedAgents}
+            onNew={() => setModal("agent")}
+            onAgent={(agent) => {
+              setSelectedAgent(agent);
+              setModal("agent-detail");
+            }}
+          />
+        ) : activeDocument ? (
+          <DocumentEditor
+            api={api}
+            token={token}
+            workspaceId={workspaceId}
+            account={account}
+            document={activeDocument}
+            threads={documentThreads}
+            focusThreadId={focusThreadId}
+            onFocusThreadHandled={() => setFocusThreadId("")}
+            onThreadSelected={(threadId) => {
+              setRightTab("threads");
+              setSelectedThreadId(threadId);
+            }}
+            onThreadCreated={(threadId) => {
+              setRightTab("threads");
+              setSelectedThreadId(threadId);
+              void reload();
+            }}
+          />
+        ) : (
+          <EmptyWorkspace onCreateDocument={() => setModal("document")} onCreateDaemon={() => setModal("daemon")} />
+        )}
+      </section>
+
+      <aside className={`ctx ${centerView === "document" ? "" : "hidden"}`}>
+        <div className="ctx-tabs">
+          {(["threads", "activity", "people"] as const).map((tab) => (
+            <button key={tab} className={`btn sm ${rightTab === tab ? "selected" : "ghost"}`} onClick={() => setRightTab(tab)}>
+              <Icon name={tab === "threads" ? "thread" : tab === "activity" ? "activity" : "people"} />
+              {tab}
+              {tab === "threads" ? <span className="muted">{documentThreads.length}</span> : null}
+              {tab === "people" ? <span className="muted">{onlineAgents}</span> : null}
+            </button>
+          ))}
+        </div>
+        {rightTab === "threads" ? (
+          <ThreadsPanel
+            api={api}
+            workspaceId={workspaceId}
+            threads={documentThreads}
+            selectedThreadId={selectedThreadId}
+            onSelectThread={setSelectedThreadId}
+            onJumpToThread={(threadId) => {
+              setCenterView("document");
+              setFocusThreadId(threadId);
+            }}
+            onReply={() => void reload()}
+          />
+        ) : null}
+        {rightTab === "activity" ? <ActivityPanel workspace={workspace} /> : null}
+        {rightTab === "people" ? (
+          <PeoplePanel
+            workspace={workspace}
+            groupedAgents={groupedAgents}
+            onAgent={(agent) => {
+              setSelectedAgent(agent);
+              setModal("agent-detail");
+            }}
+            onDaemon={(daemon) => {
+              setSelectedDaemon(daemon);
+              setModal("daemon-detail");
+            }}
+          />
+        ) : null}
+      </aside>
+
+      {modal === "document" ? <CreateDocumentModal api={api} workspaceId={workspaceId} onClose={() => setModal(null)} onCreated={(doc) => { setActiveDocumentId(doc.id); setModal(null); void reload(); }} /> : null}
+      {modal === "rename" && activeDocument ? <RenameDocumentModal api={api} workspaceId={workspaceId} document={activeDocument} onClose={() => setModal(null)} onDone={() => { setModal(null); void reload(); }} /> : null}
+      {modal === "daemon" ? <CreateDaemonModal api={api} workspaceId={workspaceId} onClose={() => setModal(null)} onDone={() => void reload()} /> : null}
+      {modal === "agent" ? <CreateAgentModal api={api} workspaceId={workspaceId} daemons={workspace.daemons} onClose={() => setModal(null)} onDone={() => { setModal(null); void reload(); }} /> : null}
+      {modal === "agent-detail" && selectedAgent ? <AgentDetailModal api={api} workspaceId={workspaceId} agent={selectedAgent} daemons={workspace.daemons} runs={workspace.agentRuns} onClose={() => setModal(null)} onChanged={() => void reload()} /> : null}
+      {modal === "daemon-detail" && selectedDaemon ? <DaemonDetailModal api={api} workspaceId={workspaceId} daemon={selectedDaemon} agents={workspace.agents.filter((agent) => agent.daemonId === selectedDaemon.id)} runs={workspace.agentRuns} onClose={() => setModal(null)} onChanged={() => { setModal(null); void reload(); }} /> : null}
+    </main>
+  );
+}
+
+function DaemonsManagement({
+  workspace,
+  onRefresh,
+  onNew,
+  onDaemon,
+}: {
+  workspace: ReturnType<typeof useWorkspace>["workspace"];
+  onRefresh: () => void;
+  onNew: () => void;
+  onDaemon: (daemon: Daemon) => void;
+}) {
+  const visibleDaemons = workspace.daemons.filter((daemon) => daemon.status !== "deleted");
+  const countByStatus = (status: string) => visibleDaemons.filter((daemon) => daemonStatus(daemon) === status).length;
+  const agentsForDaemon = (daemonId: string) => workspace.agents.filter((agent) => agent.daemonId === daemonId);
+
+  return (
+    <div className="management-canvas">
+      <div className="management-inner">
+        <div className="management-head">
+          <div className="col gap-2">
+            <div className="row gap-8">
+              <span className="display management-title">Daemons</span>
+              <span className="chip">{visibleDaemons.length} total</span>
+            </div>
+            <div className="small muted">Local processes that sync this workspace and run agents.</div>
+          </div>
+          <div className="row gap-6">
+            <button className="btn" type="button" onClick={onRefresh}>
+              <Icon name="refresh" />
+              Check liveness
+            </button>
+            <button className="btn accent" type="button" onClick={onNew}>
+              <Icon name="plus" />
+              New daemon
+            </button>
+          </div>
+        </div>
+
+        <div className="metric-grid">
+          <MetricCard label="Online" value={countByStatus("online")} tone="ok" />
+          <MetricCard label="Stale" value={countByStatus("stale")} tone="warn" />
+          <MetricCard label="Offline" value={countByStatus("disconnected")} tone="err" />
+          <MetricCard label="Agents hosted" value={workspace.agents.length} />
+        </div>
+
+        <div className="card flat table-card">
+          <table className="ds-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Status</th>
+                <th>Agents</th>
+                <th>Fingerprint</th>
+                <th>Last check-in</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {visibleDaemons.map((daemon) => {
+                const status = daemonStatus(daemon);
+                return (
+                  <tr key={daemon.id} onClick={() => onDaemon(daemon)}>
+                    <td>
+                      <div className="row gap-8">
+                        <div className="avi sm daemon">{initials(daemon.name)}</div>
+                        <div className="col gap-0 min-0">
+                          <b className="small truncate">{daemon.name}</b>
+                          <div className="tiny muted mono truncate">{daemon.id}</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td><span className={`chip sm ${status}`}><StatusDot tone={status} />{status}</span></td>
+                    <td>{agentsForDaemon(daemon.id).length}</td>
+                    <td className="mono small muted">{daemon.id.slice(0, 10)}…{daemon.id.slice(-4)}</td>
+                    <td className="small muted">
+                      {daemon.lastSeenAt && new Date(daemon.lastSeenAt).getUTCFullYear() >= 2020 ? `${shortTime(daemon.lastSeenAt)} ago` : "never"}
+                    </td>
+                    <td><button className="btn ghost icon sm" type="button" onClick={(event) => { event.stopPropagation(); onDaemon(daemon); }}><Icon name="more" /></button></td>
+                  </tr>
+                );
+              })}
+              {!visibleDaemons.length ? (
+                <tr>
+                  <td colSpan={6} className="small muted">No daemons yet. Create one to sync docs locally and host agents.</td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AgentsManagement({
+  workspace,
+  groupedAgents,
+  onNew,
+  onAgent,
+}: {
+  workspace: ReturnType<typeof useWorkspace>["workspace"];
+  groupedAgents: Array<{ daemonId: string; daemonName: string; agents: Agent[] }>;
+  onNew: () => void;
+  onAgent: (agent: Agent) => void;
+}) {
+  const running = workspace.agents.filter((agent) => visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons) === "working").length;
+  const daemonById = new Map(workspace.daemons.map((daemon) => [daemon.id, daemon]));
+
+  return (
+    <div className="management-canvas">
+      <div className="management-inner">
+        <div className="management-head">
+          <div className="col gap-2">
+            <div className="row gap-8">
+              <span className="display management-title">Agents</span>
+              <span className="chip">{workspace.agents.length} total · {running} running</span>
+            </div>
+            <div className="small muted">Codex collaborators in this workspace. Each is owned by a daemon.</div>
+          </div>
+          <div className="row gap-6">
+            <div className="input roster-filter">
+              <Icon name="search" />
+              <span>Filter agents…</span>
+            </div>
+            <button className="btn accent" type="button" onClick={onNew}>
+              <Icon name="plus" />
+              New agent
+            </button>
+          </div>
+        </div>
+
+        {groupedAgents.map((group) => {
+          const daemon = daemonById.get(group.daemonId);
+          const daemonTone = daemon ? daemonStatus(daemon) : "disconnected";
+          return (
+            <section key={group.daemonId}>
+              <div className="roster-group-head">
+                <div className="avi sm daemon">{initials(group.daemonName)}</div>
+                <span><b>{group.daemonName}</b></span>
+                <span className={`chip sm ${daemonTone}`}><StatusDot tone={daemonTone} />{daemonTone}</span>
+                <span className="stripe" />
+                <span>{group.agents.length} agents</span>
+              </div>
+              <div className="roster-grid">
+                {group.agents.map((agent) => {
+                  const status = visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons);
+                  const inboxCount = workspace.agentEvents.filter((event) => event.agentId === agent.id && event.box === "for_me").length;
+                  return (
+                    <button className="agent-roster-card" key={agent.id} onClick={() => onAgent(agent)}>
+                      <div className="between gap-8">
+                        <div className="row gap-8 min-0">
+                          <div className="avi agent">{initials(agent.handle)}</div>
+                          <div className="col gap-0 min-0">
+                            <b className="truncate">@{agent.handle}</b>
+                            <span className="tiny muted truncate">{agent.role}</span>
+                          </div>
+                        </div>
+                        <span className={`chip sm ${status}`}><StatusDot tone={status} />{status}</span>
+                      </div>
+                      <div className="small muted roster-activity">{agent.currentActivity || agent.currentTask || "Waiting for workspace notifications."}</div>
+                      <div className="row between gap-8">
+                        <div className="row gap-4 tiny muted">
+                          <Icon name="thread" />
+                          <span>{workspace.threads.filter((thread) => thread.participantIds.includes(agent.id)).length} threads</span>
+                          <span>·</span>
+                          <span>{workspace.agentEvents.filter((event) => event.agentId === agent.id).length} inbox</span>
+                        </div>
+                        {inboxCount ? <span className="chip accent sm">{inboxCount} for-me</span> : null}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          );
+        })}
+        {!workspace.agents.length ? (
+          <p className="empty-note">
+            {workspace.daemons.some((daemon) => daemon.status !== "deleted")
+              ? "No agents yet. Add one to a daemon; it will start working when that daemon is online."
+              : "No agents yet. Create a daemon first, then add an agent to it."}
+          </p>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function MetricCard({ label, value, tone }: { label: string; value: number; tone?: "ok" | "warn" | "err" }) {
+  return (
+    <div className="card p-12 metric-card">
+      <div className="label">{label}</div>
+      <div className={`display metric-value ${tone ?? ""}`}>{value}</div>
+    </div>
+  );
+}
+
+function DocumentEditor({
+  api,
+  token,
+  workspaceId,
+  account,
+  document,
+  threads,
+  focusThreadId,
+  onFocusThreadHandled,
+  onThreadSelected,
+  onThreadCreated,
+}: {
+  api: ApiClient;
+  token: string;
+  workspaceId: string;
+  account: Account | null;
+  document: DocumentItem;
+  threads: ThreadItem[];
+  focusThreadId: string;
+  onFocusThreadHandled: () => void;
+  onThreadSelected: (threadId: string) => void;
+  onThreadCreated: (threadId: string) => void;
+}) {
+  const editorRootRef = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const previewRef = useRef<HTMLDivElement | null>(null);
+  const draftRef = useRef<HTMLTextAreaElement | null>(null);
+  const [selection, setSelection] = useState({ start: 0, end: 0 });
+  const [selectionPoint, setSelectionPoint] = useState({ x: 0, y: 0 });
+  const [threadDraftOpen, setThreadDraftOpen] = useState(false);
+  const [threadBody, setThreadBody] = useState("");
+  const [activeThreadLine, setActiveThreadLine] = useState<number | null>(null);
+  const [threadPopoverPoint, setThreadPopoverPoint] = useState({ x: 0, y: 0 });
+  const [focusedLine, setFocusedLine] = useState<number | null>(null);
+  const [editing, setEditing] = useState(false);
+  const { ydoc, content, ready, connected, replaceContent } = useDocumentSync({
+    workspaceId,
+    token,
+    document,
+    actorName: account?.displayName ?? account?.email ?? "Human",
+  });
+  const lines = lineStartsForText(content);
+  const liveThreads = useMemo(
+    () => threads.map((thread) => ({ ...thread, anchor: resolveThreadAnchorLive(thread.anchor, ydoc, content) })),
+    [threads, ydoc, content]
+  );
+  const threadGroups = useMemo(() => buildLineThreads(liveThreads), [liveThreads]);
+  const threadGroupsByLine = useMemo(() => new Map(threadGroups.map((group) => [group.line, group])), [threadGroups]);
+  const activeThreadGroup = activeThreadLine ? threadGroupsByLine.get(activeThreadLine) ?? null : null;
+  const currentLabel = selectionLabel(selection.start, selection.end, lines);
+  const selectedExcerpt = content.slice(selection.start, selection.end).trim();
+  const hasRangeSelection = selection.end - selection.start >= 2;
+  const toolbarPoint = {
+    x: clamp(selectionPoint.x, 12, Math.max(12, window.innerWidth - 420)),
+    y: clamp(selectionPoint.y - 48, 12, Math.max(12, window.innerHeight - 64)),
+  };
+  const drafterPoint = {
+    x: clamp(selectionPoint.x + 20, 12, Math.max(12, window.innerWidth - 340)),
+    y: clamp(selectionPoint.y + 28, 12, Math.max(12, window.innerHeight - 320)),
+  };
+
+  useEffect(() => {
+    setEditing(false);
+    setActiveThreadLine(null);
+    setSelection({ start: 0, end: 0 });
+    setThreadDraftOpen(false);
+    setThreadBody("");
+  }, [document.id]);
+
+  useEffect(() => {
+    if (!activeThreadGroup) {
+      setActiveThreadLine(null);
+    }
+  }, [activeThreadGroup]);
+
+  useEffect(() => {
+    if (!focusThreadId) {
+      return;
+    }
+    const thread = liveThreads.find((item) => item.id === focusThreadId);
+    if (!thread) {
+      onFocusThreadHandled();
+      return;
+    }
+    setEditing(false);
+    setFocusedLine(thread.anchor.line);
+    window.setTimeout(() => {
+      const block = previewRef.current?.querySelector<HTMLElement>(`[data-source-line="${thread.anchor.line}"]`);
+      block?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 0);
+    window.setTimeout(() => setFocusedLine(null), 1600);
+    onFocusThreadHandled();
+  }, [focusThreadId, liveThreads, onFocusThreadHandled]);
+
+  useEffect(() => {
+    if (threadDraftOpen) {
+      window.setTimeout(() => draftRef.current?.focus(), 0);
+    }
+  }, [threadDraftOpen]);
+
+  const updateSelection = () => {
+    const target = textareaRef.current;
+    if (!target) {
+      return;
+    }
+    const nextSelection = { start: target.selectionStart, end: target.selectionEnd };
+    setSelection(nextSelection);
+    if (nextSelection.end - nextSelection.start < 2) {
+      setThreadDraftOpen(false);
+      return;
+    }
+    const rect = target.getBoundingClientRect();
+    const style = window.getComputedStyle(target);
+    const lineHeight = Number.parseFloat(style.lineHeight) || 25.5;
+    const paddingTop = Number.parseFloat(style.paddingTop) || 0;
+    const paddingLeft = Number.parseFloat(style.paddingLeft) || 0;
+    const line = lineForOffset(lines, nextSelection.start);
+    const lineStart = lines[line - 1] ?? 0;
+    const column = Math.max(0, nextSelection.start - lineStart);
+    setSelectionPoint({
+      x: rect.left + paddingLeft + Math.min(column * 7.5, Math.max(0, rect.width - 260)),
+      y: rect.top + paddingTop + Math.max(0, line - 1) * lineHeight - target.scrollTop,
+    });
+  };
+
+  const createThread = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!threadBody.trim()) {
+      return;
+    }
+    const text = ydoc.getText("content");
+    const safeStart = Math.max(0, Math.min(selection.start, text.length));
+    const safeEnd = Math.max(safeStart, Math.min(selection.end, text.length));
+    const excerptEnd = safeEnd === safeStart ? Math.min(content.length, safeStart + 80) : safeEnd;
+    const result = await api.createThread(workspaceId, {
+      documentId: document.id,
+      title: currentLabel,
+      body: threadBody,
+      relativeStart: encodeRelativeAnchor(text, safeStart),
+      relativeEnd: encodeRelativeAnchor(text, safeEnd),
+      kind: "text-range",
+      excerpt: (content.slice(safeStart, excerptEnd).trim() || currentLabel).slice(0, 140),
+    });
+    setThreadBody("");
+    setSelection({ start: safeEnd, end: safeEnd });
+    setThreadDraftOpen(false);
+    setEditing(false);
+    onThreadCreated(result.thread.id);
+  };
+
+  const startEditing = () => {
+    setEditing(true);
+    window.setTimeout(() => textareaRef.current?.focus(), 0);
+  };
+
+  const openLineThreads = (group: LineThreadGroup<LiveThread>, event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    setThreadPopoverPoint({
+      x: Math.min(Math.max(12, rect.left), Math.max(12, window.innerWidth - 340)),
+      y: Math.min(rect.bottom + 8, Math.max(12, window.innerHeight - 260)),
+    });
+    setActiveThreadLine(group.line);
+  };
+
+  const openThread = (threadId: string) => {
+    onThreadSelected(threadId);
+    setActiveThreadLine(null);
+  };
+
+  const handleEditorBlur = (event: FocusEvent<HTMLTextAreaElement>) => {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget && editorRootRef.current?.contains(nextTarget)) {
+      return;
+    }
+    window.setTimeout(() => {
+      if (editorRootRef.current?.contains(window.document.activeElement)) {
+        return;
+      }
+      if (!threadDraftOpen) {
+        setEditing(false);
+      }
+    }, 0);
+  };
+
+  const openThreadDraft = () => {
+    if (!hasRangeSelection) {
+      return;
+    }
+    setThreadDraftOpen(true);
+  };
+
+  return (
+    <div className="doc-canvas">
+      <div className="doc-inner editor-body" ref={editorRootRef}>
+        <div className="doc-meta-row">
+          <span className="chip">Document</span>
+          <span className="chip outline">Owner · {account?.displayName ?? account?.email ?? "You"}</span>
+          <span className="chip outline">Updated {shortTime(document.updatedAt)} ago</span>
+          <span className={`chip outline ${connected ? "ok" : "warn"}`}>{connected ? "Live" : "Reconnecting"}</span>
+        </div>
+
+        <div className="editor-frame">
+          {editing ? (
+            <textarea
+              ref={textareaRef}
+              value={content}
+              onChange={(event) => replaceContent(event.target.value)}
+              onSelect={updateSelection}
+              onKeyUp={updateSelection}
+              onMouseUp={updateSelection}
+              onBlur={handleEditorBlur}
+              spellCheck={false}
+              placeholder="# Start writing..."
+              aria-label="Document editor"
+              className="doc-textarea"
+            />
+          ) : (
+            <div
+              ref={previewRef}
+              className="markdown-preview"
+              onClick={startEditing}
+              aria-label="Document preview"
+            >
+              {renderMarkdownPreview(content, threadGroupsByLine, openLineThreads, focusedLine)}
+              <span className="edit-hint">Click to edit</span>
+            </div>
+          )}
+        </div>
+
+        {editing && hasRangeSelection && !threadDraftOpen ? (
+          <div
+            className="selection-toolbar"
+            style={{ left: toolbarPoint.x, top: toolbarPoint.y }}
+            onMouseDown={(event) => event.preventDefault()}
+          >
+            <button className="primary" type="button" onClick={openThreadDraft}>
+              <Icon name="thread" />
+              Open thread
+            </button>
+            <div className="sep" />
+            <button type="button" title="Bold"><b>B</b></button>
+            <button type="button" title="Italic"><i>I</i></button>
+            <button type="button" title="Code"><span className="mono">{"{ }"}</span></button>
+          </div>
+        ) : null}
+
+        {threadDraftOpen ? (
+          <form
+            className="thread-drafter card lifted"
+            style={{ left: drafterPoint.x, top: drafterPoint.y }}
+            onSubmit={createThread}
+          >
+            <div className="thread-drafter-head">
+              <div className="row gap-6">
+                <Icon name="thread" />
+                <b className="small">New thread</b>
+              </div>
+              <button className="btn ghost icon sm" onClick={() => setThreadDraftOpen(false)} type="button">×</button>
+            </div>
+            <div className="thread-drafter-body">
+              <div className="quoted-range">
+                <div className="line">{currentLabel}</div>
+                <span>{selectedExcerpt || currentLabel}</span>
+              </div>
+              <textarea
+                ref={draftRef}
+                value={threadBody}
+                onChange={(event) => setThreadBody(event.target.value)}
+                placeholder="@codex-agent can you review this section?"
+              />
+              <div className="row between">
+                <span className="tiny muted">{ready ? "Synced" : "Opening document..."} · <span className="kbd">⌘↵</span> to post</span>
+                <button className="btn accent sm" disabled={!threadBody.trim()}>Open thread</button>
+              </div>
+            </div>
+          </form>
+        ) : null}
+
+        {activeThreadGroup ? (
+          <div className="thread-popover card lifted" style={{ left: threadPopoverPoint.x, top: threadPopoverPoint.y }}>
+            <div className="thread-popover-head">
+              <div>
+                <b className="small">{activeThreadGroup.threads.length} thread{activeThreadGroup.threads.length === 1 ? "" : "s"} on this line</b>
+                <div className="tiny muted">line {activeThreadGroup.line}</div>
+              </div>
+              <button className="btn ghost icon sm" onClick={() => setActiveThreadLine(null)} type="button">×</button>
+            </div>
+            <div className="thread-popover-list">
+              {activeThreadGroup.threads.map((thread) => (
+                <button className="thread-popover-row" key={thread.id} type="button" onClick={() => openThread(thread.id)}>
+                  <div className={`avi sm ${thread.createdByType === "agent" ? "agent" : "you"}`}>{initials(thread.createdByHandle || thread.createdByName || "T")}</div>
+                  <div className="col gap-2 min-0">
+                    <div className="small truncate">
+                      <b>{thread.createdByHandle ? `@${thread.createdByHandle}` : thread.createdByName || "Someone"}</b>{" "}
+                      {thread.messages[0]?.body || thread.title}
+                    </div>
+                    <div className="tiny muted">{shortTime(thread.updatedAt)} · {thread.messages.length} replies</div>
+                  </div>
+                </button>
+              ))}
+            </div>
+            <div className="thread-popover-foot">
+              <span className="tiny muted">Open a thread to reply or jump to range.</span>
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function ThreadsPanel({
+  api,
+  workspaceId,
+  threads,
+  selectedThreadId,
+  onSelectThread,
+  onJumpToThread,
+  onReply,
+}: {
+  api: ApiClient;
+  workspaceId: string;
+  threads: ThreadItem[];
+  selectedThreadId: string;
+  onSelectThread: (threadId: string) => void;
+  onJumpToThread: (threadId: string) => void;
+  onReply: () => void;
+}) {
+  const [reply, setReply] = useState("");
+  const selected = selectedThreadId ? threads.find((thread) => thread.id === selectedThreadId) ?? null : null;
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!selected || !reply.trim()) {
+      return;
+    }
+    await api.replyThread(workspaceId, selected.id, reply);
+    setReply("");
+    onReply();
+  };
+
+  if (!threads.length) {
+    return (
+      <div className="ctx-body">
+        <div className="row between">
+          <span className="label">Threads on this doc</span>
+          <button className="btn ghost sm icon" type="button"><Icon name="plus" /></button>
+        </div>
+        <p className="empty-note">No threads on this document yet. Select text in the editor and open a thread.</p>
       </div>
     );
   }
 
-  if (!selectedWorkspaceId || !workspace) {
+  if (selected) {
     return (
-      <div className="authShell">
-        <section className="authCard">
-          <p className="eyebrow">Workspace</p>
-          <h1>{availableWorkspaces.length ? "Select or create a workspace" : "Create your first workspace"}</h1>
-          <p className="railCopy">Signed in as {account?.email}. A workspace is the tenant boundary for humans, agents, and daemons.</p>
-          {availableWorkspaces.length ? (
-            <label className="fieldLabel">
-              <span>Workspace</span>
-              <select
-                value={selectedWorkspaceId}
-                onChange={(event) => setSelectedWorkspaceId(event.target.value)}
-                className="identitySelect"
-              >
-                <option value="">Choose workspace</option>
-                {availableWorkspaces.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : null}
-          <label className="fieldLabel">
-            <span>New workspace name</span>
-            <input value={newWorkspaceName} onChange={(event) => setNewWorkspaceName(event.target.value)} className="railInput" placeholder="Product workspace" />
-          </label>
-          <label className="fieldLabel">
-            <span>Slug</span>
-            <input value={newWorkspaceSlug} onChange={(event) => setNewWorkspaceSlug(event.target.value.toLowerCase())} className="railInput" placeholder="optional" />
-          </label>
-          <div className="agentActionRow">
-            <button onClick={createWorkspace}>Create workspace</button>
-            <button className="secondary" onClick={logout}>Logout</button>
+      <div className="tdetail full">
+        <div className="tdetail-head">
+          <div className="col gap-6 min-0">
+            <div className="row gap-6">
+              <button className="btn ghost icon sm" type="button" onClick={() => onSelectThread("")}>
+                <Icon name="back" />
+              </button>
+              <b>Thread</b>
+              <span className="chip sm">{selected.messages.length} replies</span>
+            </div>
+            <div className="quoted-range">
+              <div className="tiny mono muted">{selected.anchor.kind === "document" ? "document thread" : "anchored range"}</div>
+              <span>{selected.anchor.excerpt || selected.title}</span>
+              {selected.anchor.kind !== "document" ? (
+                <button className="jump-range-link" type="button" onClick={() => onJumpToThread(selected.id)}>
+                  Jump to range
+                </button>
+              ) : null}
+            </div>
           </div>
-          {message ? <p className="runError">{message}</p> : null}
-        </section>
+          <button className="btn ghost icon sm" type="button"><Icon name="more" /></button>
+        </div>
+        <div className="tdetail-body">
+          {selected.messages.map((message) => (
+            <article className={`tmsg ${message.authorType === "agent" ? "agent" : ""}`} key={message.id}>
+              <div className={`avi sm ${message.authorType === "agent" ? "agent" : "you"}`}>{initials(message.authorHandle || message.authorName || message.authorId)}</div>
+              <div className="bubble">
+                <div className="row between gap-8">
+                  <strong className="small">@{message.authorHandle || message.authorName || message.authorId}</strong>
+                  <span className="tiny muted">{shortTime(message.createdAt)}</span>
+                </div>
+                <p>{message.body}</p>
+              </div>
+            </article>
+          ))}
+        </div>
+        <form onSubmit={submit} className="tdetail-foot reply-form">
+          <textarea value={reply} onChange={(event) => setReply(event.target.value)} placeholder="Reply... use @ to mention humans or agents" />
+          <div className="row between">
+            <span className="tiny muted"><span className="kbd">⌘↵</span> to post</span>
+            <button className="btn accent sm">Reply</button>
+          </div>
+        </form>
       </div>
     );
   }
 
   return (
-    <div className="appShell">
-      <aside className="libraryRail">
-        <div className="brandBlock">
-          <p className="eyebrow">Collaborative workspace</p>
-          <h1>notty</h1>
-          <p className="railCopy">
-            A calm writing surface for humans and agents, with Yjs sync underneath.
-          </p>
-        </div>
-
-        <div className="railSection">
-          <div className="railSectionHeader">
-            <h2>Tenant</h2>
-            <button className="secondary compactButton" onClick={logout}>Logout</button>
-          </div>
-          <label className="fieldLabel">
-            <span>Workspace</span>
-            <select
-              value={selectedWorkspaceId}
-              onChange={(event) => {
-                setWorkspace(null);
-                setSelectedWorkspaceId(event.target.value);
-              }}
-              className="identitySelect"
-            >
-              {availableWorkspaces.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <details className="entityDetails">
-            <summary>Add member</summary>
-            <div className="entityDetailsBody">
-              <input
-                value={newMemberEmail}
-                onChange={(event) => setNewMemberEmail(event.target.value)}
-                className="railInput"
-                placeholder="registered@email.com"
-              />
-              <input
-                value={newMemberHandle}
-                onChange={(event) => setNewMemberHandle(event.target.value.toLowerCase())}
-                className="railInput"
-                placeholder="workspace-handle"
-              />
-              <button onClick={addWorkspaceMember}>Add member</button>
-            </div>
-          </details>
-          <details className="entityDetails">
-            <summary>Deploy daemon</summary>
-            <div className="entityDetailsBody">
-              <p className="helperCopy">
-                Create a workspace-scoped daemon token, then pass it to the daemon as <code>NOTTY_DAEMON_TOKEN</code>.
-                Tokens are displayed once and cannot be recovered later.
-              </p>
-              <input
-                value={newDaemonName}
-                onChange={(event) => setNewDaemonName(event.target.value)}
-                className="railInput"
-                placeholder="Daemon name"
-              />
-              <button onClick={createDaemon}>Create daemon</button>
-              {createdDaemonToken ? (
-                <div className="daemonTokenCard">
-                  <strong>{createdDaemonName} token</strong>
-                  <span>Shown once. Store it now or create a new daemon token later.</span>
-                  <code className="agentLogSnippet">{createdDaemonToken}</code>
-                  <code className="agentLogSnippet">{daemonDeployCommand(selectedWorkspaceId, createdDaemonToken)}</code>
-                  <button onClick={copyDaemonCommand}>Copy command</button>
-                </div>
-              ) : null}
-            </div>
-          </details>
-          <div className="daemonList">
-            {daemons.map((daemon) => {
-              const daemonAgents = agents.filter((agent) => agent.daemonId === daemon.id);
-              const connectionStatus = daemonConnectionStatus(daemon, daemonStatusNow);
-              return (
-                <div key={daemon.id} className="daemonCard">
-                  <div className="agentRunHeader">
-                    <strong>{daemon.name}</strong>
-                    <span className={`statusPill status-${connectionStatus}`}>
-                      {formatDaemonConnectionLabel(connectionStatus)}
-                    </span>
-                  </div>
-                  <small>{daemonAgents.length} agent{daemonAgents.length === 1 ? "" : "s"}</small>
-                  <small>{formatDaemonCheckInText(daemon, daemonStatusNow)}</small>
-                  {daemon.status !== "active" ? <small>Lifecycle: {daemon.status}</small> : null}
-                  {daemonAgents.length ? (
-                    <small>{daemonAgents.map((agent) => `@${agent.handle}`).join(", ")}</small>
-                  ) : (
-                    <small>No agents yet</small>
-                  )}
-                  <div className="agentActionRow">
-                    <button className="dangerButton" onClick={() => deleteDaemon(daemon.id)}>
-                      Delete daemon
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="railSection">
-          <div className="railSectionHeader">
-            <h2>Pages</h2>
-            <span>{workspace?.documents.length ?? 0}</span>
-          </div>
-          <div className="newFileRow">
-            <input
-              value={newFilePath}
-              name="new-file-path"
-              aria-label="New file path"
-              onChange={(event) => setNewFilePath(event.target.value)}
-              className="railInput"
-              placeholder="folder/file.md"
-            />
-            <button onClick={createDocument}>New</button>
-          </div>
-          <div className="pageList">
-            {workspace?.documents.map((doc) => (
-              <button
-                key={doc.id}
-                className={doc.id === selectedId ? "pageLink active" : "pageLink"}
-                onClick={() => {
-                  selectedIdRef.current = doc.id;
-                  setSelectedId(doc.id);
-                }}
-              >
-                <span className="pageEmoji">{doc.path.endsWith(".md") ? "M" : "D"}</span>
-                <span className="pageMeta">
-                  <strong>{doc.title}</strong>
-                  <small>{doc.path}</small>
-                  <small>{formatTimestamp(doc.updatedAt)}</small>
+    <div className="ctx-body">
+      <div className="row between ctx-head">
+        <span className="label">Threads on this doc</span>
+        <button className="btn ghost sm icon" type="button"><Icon name="plus" /></button>
+      </div>
+      <div className="tlist">
+        {threads.map((thread) => (
+          <button
+            key={thread.id}
+            className={thread.id === selectedThreadId ? "titem selected" : "titem"}
+            onClick={() => onSelectThread(thread.id)}
+          >
+            <Icon name="thread" />
+            <div className="col gap-4 min-0">
+              <div className="between gap-8">
+                <span className="chip code sm truncate">{thread.anchor.excerpt || thread.title}</span>
+                <span className="tiny muted">{shortTime(thread.updatedAt)}</span>
+              </div>
+              <div className="row gap-6 min-0">
+                <div className={`avi sm ${thread.createdByType === "agent" ? "agent" : "you"}`}>{initials(thread.createdByHandle || thread.createdByName || "You")}</div>
+                <span className="small truncate">
+                  <b>{thread.createdByHandle ? `@${thread.createdByHandle}` : thread.createdByName || "Someone"}</b>{" "}
+                  {thread.messages[0]?.body || thread.title}
                 </span>
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="railSection">
-          <div className="railSectionHeader">
-            <div className="sectionHeadingGroup">
-              <h2>People</h2>
-              <span>{users.length + agents.length}</span>
-            </div>
-            <button className="secondary compactButton" onClick={() => setIsAgentModalOpen(true)}>
-              New agent
-            </button>
-          </div>
-          <details className="entityDetails">
-            <summary>New user</summary>
-            <div className="entityDetailsBody">
-              <input
-                value={newUserName}
-                name="user-name"
-                aria-label="User name"
-                onChange={(event) => setNewUserName(event.target.value)}
-                className="railInput"
-                placeholder="Workspace collaborator"
-              />
-              <input
-                value={newUserHandle}
-                name="user-handle"
-                aria-label="User handle"
-                onChange={(event) => setNewUserHandle(event.target.value.toLowerCase())}
-                className="railInput"
-                placeholder="handle"
-              />
-              <input
-                value={newUserRole}
-                name="user-role"
-                aria-label="User role"
-                onChange={(event) => setNewUserRole(event.target.value)}
-                className="railInput"
-                placeholder="Role"
-              />
-              <button onClick={createUser}>Create user</button>
-            </div>
-          </details>
-          <div className="agentRunList">
-            {users.map((user) => {
-              const draft = userDrafts[user.id];
-              const isCurrent = currentUser?.id === user.id;
-              return (
-                <div key={user.id} className={isCurrent ? "agentRunCard activeUserCard" : "agentRunCard"}>
-                  <div className="agentRunHeader">
-                    <strong>{user.name}</strong>
-                    <span className={isCurrent ? "statusPill status-running" : "statusPill status-idle"}>
-                      {isCurrent ? "active" : user.status}
-                    </span>
-                  </div>
-                  <small>@{user.handle}</small>
-                  <small>{user.role}</small>
-                  <div className="agentActionRow">
-                    {isCurrent ? <span className="identityBadge">Current identity</span> : null}
-                    <details className="entityDetails">
-                      <summary>Edit</summary>
-                      <div className="entityDetailsBody">
-                        <input
-                          value={draft?.name ?? user.name}
-                          onChange={(event) => patchUserDraft(user.id, { name: event.target.value })}
-                          className="railInput"
-                          placeholder="User name"
-                        />
-                        <input
-                          value={draft?.handle ?? user.handle}
-                          onChange={(event) => patchUserDraft(user.id, { handle: event.target.value.toLowerCase() })}
-                          className="railInput"
-                          placeholder="handle"
-                        />
-                        <input
-                          value={draft?.role ?? user.role}
-                          onChange={(event) => patchUserDraft(user.id, { role: event.target.value })}
-                          className="railInput"
-                          placeholder="Role"
-                        />
-                        <button className="secondary" onClick={() => saveUser(user.id)}>Save</button>
-                      </div>
-                    </details>
-                    {users.length > 1 ? (
-                      <button className="dangerButton" onClick={() => deleteUser(user.id)}>Delete</button>
-                    ) : null}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="railSection">
-          <div className="railSectionHeader">
-            <h2>Agents</h2>
-            <span>{agents.length}</span>
-          </div>
-          <div className="agentRunList">
-            {agents.map((agent) => {
-              const draft = agentDrafts[agent.id];
-              const currentRun = agentRuns.find((run) => run.id === agent.currentRunId) ?? null;
-              const agentPresence = workspace?.presences?.[agent.handle] ?? workspace?.presences?.[agent.id] ?? null;
-              const status = summarizeAgentStatus(workspaceConnected, agent, currentRun, agentPresence);
-              return (
-                <div key={agent.id} className="agentRunCard">
-                  <div className="agentRunHeader">
-                    <strong>{agent.name}</strong>
-                    <span className={`statusPill status-${status.tone}`}>{status.label}</span>
-                  </div>
-                  <small>@{agent.handle}</small>
-                  <small>{agent.role}</small>
-                  <small>{status.copy}</small>
-                  <div className="agentActionRow">
-                    <button className="secondary" onClick={() => setAgentDetailsId(agent.id)}>Details</button>
-                    <button className="dangerButton" onClick={() => deleteAgent(agent.id)}>Delete</button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="railSection compact">
-          <div className="miniStat">
-            <strong>{activeCollaborators.length || 1}</strong>
-            <span>active editors</span>
-          </div>
-          <div className="miniStat">
-            <strong>{workspace?.threads.length ?? 0}</strong>
-            <span>open threads</span>
-          </div>
-        </div>
-      </aside>
-
-      {isAgentModalOpen ? (
-        <div className="modalScrim" onClick={() => setIsAgentModalOpen(false)}>
-          <div
-            className="modalCard"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="new-agent-title"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="modalHeader">
-              <div>
-                <p className="eyebrow">People</p>
-                <h2 id="new-agent-title">Create agent</h2>
               </div>
-              <button className="secondary compactButton" onClick={() => setIsAgentModalOpen(false)}>
-                Close
-              </button>
-            </div>
-            <div className="modalBody">
-              <label className="fieldLabel">
-                <span>Daemon</span>
-                <select
-                  value={newAgentDaemonId}
-                  onChange={(event) => setNewAgentDaemonId(event.target.value)}
-                  className="identitySelect"
-                >
-                  {daemons.map((daemon) => (
-                    <option key={daemon.id} value={daemon.id}>
-                      {daemon.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="fieldLabel">
-                <span>Handle</span>
-                <input
-                  value={newAgentHandle}
-                  name="agent-handle"
-                  aria-label="Agent handle"
-                  onChange={(event) => setNewAgentHandle(event.target.value.toLowerCase())}
-                  className="railInput"
-                  placeholder="agent-handle"
-                />
-              </label>
-              <label className="fieldLabel">
-                <span>Name</span>
-                <input
-                  value={newAgentName}
-                  name="agent-name"
-                  aria-label="Agent name"
-                  onChange={(event) => setNewAgentName(event.target.value)}
-                  className="railInput"
-                  placeholder="Codex Agent"
-                />
-              </label>
-              <label className="fieldLabel">
-                <span>Role</span>
-                <input
-                  value={newAgentRole}
-                  name="agent-role"
-                  aria-label="Agent role"
-                  onChange={(event) => setNewAgentRole(event.target.value)}
-                  className="railInput"
-                  placeholder="Agent role"
-                />
-              </label>
-            </div>
-            <div className="modalActions">
-              <button className="secondary" onClick={() => setIsAgentModalOpen(false)}>
-                Cancel
-              </button>
-              <button onClick={createAgent} disabled={!newAgentDaemonId}>Create agent</button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {selectedAgentDetails ? (
-        <div className="modalScrim" onClick={() => setAgentDetailsId("")}>
-          <div
-            className="modalCard"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="agent-details-title"
-            onClick={(event) => event.stopPropagation()}
-          >
-            {(() => {
-              const agent = selectedAgentDetails;
-              const draft = agentDrafts[agent.id];
-              const currentRun = agentRuns.find((run) => run.id === agent.currentRunId) ?? null;
-              const agentPresence = workspace?.presences?.[agent.handle] ?? workspace?.presences?.[agent.id] ?? null;
-              const status = summarizeAgentStatus(workspaceConnected, agent, currentRun, agentPresence);
-              const associatedDaemon = daemons.find((daemon) => daemon.id === agent.daemonId) ?? null;
-              const associatedDaemonStatus = associatedDaemon ? daemonConnectionStatus(associatedDaemon, daemonStatusNow) : "disconnected";
-              return (
-                <>
-                  <div className="modalHeader">
-                    <div>
-                      <p className="eyebrow">Agent</p>
-                      <h2 id="agent-details-title">{agent.name}</h2>
-                      <p className="modalSubcopy">@{agent.handle} · {status.label}</p>
-                    </div>
-                    <button className="secondary compactButton" onClick={() => setAgentDetailsId("")}>
-                      Close
-                    </button>
-                  </div>
-                  <div className="modalBody">
-                    <div className="agentDetailGrid">
-                      <div className="detailCard">
-                        <span className="detailLabel">Role</span>
-                        <p>{agent.role}</p>
-                      </div>
-                      <div className="detailCard">
-                        <span className="detailLabel">Current activity</span>
-                        <p>{agentPresence?.activity || agent.currentActivity || "Idle"}</p>
-                      </div>
-                      <div className="detailCard">
-                        <span className="detailLabel">Workspace</span>
-                        <p>{agent.workspaceRoot}</p>
-                      </div>
-                      <div className="detailCard">
-                        <span className="detailLabel">Daemon</span>
-                        <p>
-                          {associatedDaemon
-                            ? `${associatedDaemon.name} · ${formatDaemonConnectionLabel(associatedDaemonStatus)}`
-                            : "Unknown daemon"}
-                        </p>
-                      </div>
-                      <div className="detailCard">
-                        <span className="detailLabel">Last heartbeat</span>
-                        <p>{formatTimestamp(agentPresence?.updatedAt || agent.lastHeartbeatAt || currentRun?.lastHeartbeatAt || currentRun?.updatedAt)}</p>
-                      </div>
-                    </div>
-                    <label className="fieldLabel">
-                      <span>Handle</span>
-                      <input
-                        value={draft?.handle ?? agent.handle}
-                        onChange={(event) => patchAgentDraft(agent.id, { handle: event.target.value.toLowerCase() })}
-                        className="railInput"
-                        placeholder="Agent handle"
-                      />
-                    </label>
-                    <label className="fieldLabel">
-                      <span>Name</span>
-                      <input
-                        value={draft?.name ?? agent.name}
-                        onChange={(event) => patchAgentDraft(agent.id, { name: event.target.value })}
-                        className="railInput"
-                        placeholder="Agent name"
-                      />
-                    </label>
-                    <label className="fieldLabel">
-                      <span>Role</span>
-                      <input
-                        value={draft?.role ?? agent.role}
-                        onChange={(event) => patchAgentDraft(agent.id, { role: event.target.value })}
-                        className="railInput"
-                        placeholder="Agent role"
-                      />
-                    </label>
-                    <div className="detailCard">
-                      <span className="detailLabel">System behavior</span>
-                      <p>Managed by notty. Agents share a built-in collaboration prompt and cannot be customized here.</p>
-                    </div>
-                    {currentRun ? (
-                      <details className="entityDetails modalDetails">
-                        <summary>Run details</summary>
-                        <div className="entityDetailsBody">
-                          <div className="agentDetailGrid">
-                            <div className="detailCard">
-                              <span className="detailLabel">Run status</span>
-                              <p>{currentRun.status}</p>
-                            </div>
-                            <div className="detailCard">
-                              <span className="detailLabel">Last update</span>
-                              <p>{formatTimestamp(currentRun.lastHeartbeatAt || currentRun.updatedAt)}</p>
-                            </div>
-                          </div>
-                          <p>{currentRun.lastMessage || summarizeDocument(currentRun.prompt)}</p>
-                          {currentRun.logTail?.length ? (
-                            <code className="agentLogSnippet">{currentRun.logTail.join("\n")}</code>
-                          ) : null}
-                          {currentRun.error ? <small className="runError">{currentRun.error}</small> : null}
-                        </div>
-                      </details>
-                    ) : null}
-                  </div>
-                  <div className="modalActions">
-                    <button className="secondary" onClick={() => saveAgent(agent.id)}>Save</button>
-                  </div>
-                </>
-              );
-            })()}
-          </div>
-        </div>
-      ) : null}
-
-      <main className="workspaceMain">
-        <div className="workspaceHeader">
-          <div>
-            <p className="eyebrow">Markdown workspace</p>
-            <p className="topBarTitle">{workspace?.name ?? "Shared Workspace"}</p>
-            <p className="railCopy">Signed in as @{currentUser?.handle ?? "owner"}</p>
-          </div>
-          <div className="workspaceTools">
-            <label className="identitySwitcher">
-              <span className="identityLabel">Identity</span>
-              <select
-                value={currentUser?.id ?? ""}
-                onChange={(event) => switchIdentity(event.target.value)}
-                className="identitySelect"
-                aria-label="Switch user identity"
-              >
-                {users.map((user) => (
-                  <option key={user.id} value={user.id}>
-                    @{user.handle} · {user.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button className="secondary" onClick={() => setMessage("Y-protocol sync is active.")}>
-              Sync status
-            </button>
-            <div className="avatarStack" aria-label="People in this page">
-              {activeCollaborators.map((presence) => (
-                <div
-                  key={presence.actorId}
-                  className="avatarPill"
-                  title={`${presence.actorName} · ${presence.activity}`}
-                >
-                  {presence.actorName.slice(0, 1).toUpperCase()}
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <section className="documentStack">
-          <div className="documentSurface">
-            <header className="documentHeader">
-              <div className="documentIcon" aria-hidden="true">
-                {selectedDocumentView?.path.endsWith(".md") ? "M" : "D"}
-              </div>
-              <div className="documentHeading">
-                <p className="eyebrow">Page</p>
-                <h2>{selectedDocumentView?.title ?? "Untitled"}</h2>
-                <div className="documentFacts">
-                  <span>{selectedDocumentView?.path}</span>
-                  <span>{formatTimestamp(selectedDocumentView?.updatedAt)}</span>
-                  <span>{documentLines.length} lines</span>
-                  <span>{wordCount} words</span>
-                  <span>{charCount} chars</span>
-                </div>
-                <div className="pathEditorRow">
-                  <input
-                    value={pathEditor}
-                    name="document-path"
-                    aria-label="Document path"
-                    onChange={(event) => setPathEditor(event.target.value)}
-                    className="pathEditorInput"
-                    placeholder="folder/file.md"
-                  />
-                  <button className="secondary" onClick={saveDocumentPath}>Move / rename</button>
-                  <button className="dangerButton" onClick={deleteDocument}>Delete</button>
-                </div>
-              </div>
-            </header>
-
-            <div className="editorShell">
-              <div className="lineNumberRail" aria-hidden="true">
-                <div
-                  className="lineTrack"
-                  style={{
-                    height: `${editorTrackHeight}px`,
-                    transform: `translateY(-${editorScrollTop}px)`,
-                  }}
-                >
-                  {documentLines.map((_, index) => (
-                    <div
-                      key={`line-${index + 1}`}
-                      className={commentedLines.has(index + 1) ? "lineNumber hasComment" : "lineNumber"}
-                    >
-                      {index + 1}
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="editorBody">
-                <textarea
-                  ref={textareaRef}
-                  value={draft}
-                  name="document-editor"
-                  aria-label="Document editor"
-                  spellCheck={false}
-                  disabled={!selectedDocument || !documentReady}
-                  onChange={(event) => handleDraftChange(event.target.value)}
-                  onCompositionStart={() => {
-                    isComposingRef.current = true;
-                  }}
-                  onCompositionEnd={(event) => {
-                    isComposingRef.current = false;
-                    handleEditorSelection(event.currentTarget);
-                    if (!selectedDocument) {
-                      return;
-                    }
-                    const ydoc = getOrCreateDoc(selectedDocument);
-                    const nextContent = ydoc.getText("content").toString();
-                    if (!hasQueuedRemoteSyncRef.current && nextContent === draftRef.current) {
-                      return;
-                    }
-                    hasQueuedRemoteSyncRef.current = false;
-                    const nextSelection = rebaseSelection(
-                      selectionRangeRef.current,
-                      computeReplace(draftRef.current, nextContent)
-                    );
-                    draftRef.current = nextContent;
-                    selectionRangeRef.current = nextSelection;
-                    setDraft(nextContent);
-                    setSelectionRange(nextSelection);
-                    pendingSelectionRef.current = nextSelection;
-                  }}
-                  onScroll={(event) => setEditorScrollTop(event.currentTarget.scrollTop)}
-                  onClick={(event) => handleEditorSelection(event.currentTarget)}
-                  onKeyUp={(event) => handleEditorSelection(event.currentTarget)}
-                  onSelect={(event) => handleEditorSelection(event.currentTarget)}
-                  className="markdownEditor"
-                  placeholder={selectedDocumentView && !documentReady ? "Loading document..." : "Start writing"}
-                />
-              </div>
-
-              <div className="commentRail" aria-label="Threads on document lines">
-                <div
-                  className="commentTrack"
-                  style={{
-                    height: `${editorTrackHeight}px`,
-                    transform: `translateY(-${editorScrollTop}px)`,
-                  }}
-                >
-                  {lineThreads.map((threadGroup) => (
-                    (() => {
-                      const isGroupActive = threadGroup.threads.some((thread) => thread.id === selectedThreadId);
-                      const previewThread = isGroupActive
-                        ? threadGroup.threads.find((thread) => thread.id === selectedThreadId) ?? threadGroup.threads[0]
-                        : threadGroup.threads[0];
-                      return (
-                        <div
-                          key={`thread-line-${threadGroup.line}`}
-                          className="commentAnchor"
-                          style={{ top: `${(threadGroup.line - 1) * EDITOR_LINE_HEIGHT + 12}px` }}
-                        >
-                          <div className="commentConnector" />
-                          <div className={isGroupActive ? "lineCommentStack activeThreadCard" : "lineCommentStack"}>
-                            <button
-                              type="button"
-                              className="lineCommentCard"
-                              onClick={() => setSelectedThreadId(previewThread?.id ?? "")}
-                            >
-                              <small>Line {threadGroup.line}</small>
-                              <strong>{previewThread?.title || "Thread"}</strong>
-                              <span>{previewThread?.messages[previewThread.messages.length - 1]?.body || previewThread?.anchor.excerpt}</span>
-                              {threadGroup.threads.length > 1 ? (
-                                <small>{threadGroup.threads.length} threads on this line</small>
-                              ) : null}
-                            </button>
-                            {isGroupActive && threadGroup.threads.length > 1 ? (
-                              <div className="lineThreadList" aria-label={`Threads on line ${threadGroup.line}`}>
-                                {threadGroup.threads.map((thread, index) => (
-                                  <button
-                                    key={thread.id}
-                                    type="button"
-                                    className={thread.id === selectedThreadId ? "threadChoice activeThreadChoice" : "threadChoice"}
-                                    onClick={() => setSelectedThreadId(thread.id)}
-                                  >
-                                    <strong>{thread.title || `Thread ${index + 1}`}</strong>
-                                    <span>{thread.messages[thread.messages.length - 1]?.body || thread.anchor.excerpt}</span>
-                                  </button>
-                                ))}
-                              </div>
-                            ) : null}
-                          </div>
-                        </div>
-                      );
-                    })()
-                  ))}
-                </div>
+              <div className="row gap-4 tiny muted">
+                <span>{thread.messages.length} replies</span>
+                <span>·</span>
+                <span>{thread.anchor.kind === "document" ? "document" : "anchored"}</span>
               </div>
             </div>
-
-            <footer className="documentComposer">
-              <div className="composerStatus">
-                <span>{message || "Markdown edits and thread activity sync across frontend, backend, and daemon."}</span>
-                <span>{currentSelectionLabel}</span>
-              </div>
-              {selectedThread ? (
-                <div className="threadPanel">
-                  <div className="threadPanelHeader">
-                    <div>
-                      <strong>{selectedThread.title}</strong>
-                      <small>Line {selectedThread.anchor.line} · {selectedThread.status}</small>
-                    </div>
-                    <button className="secondary" onClick={() => setSelectedThreadId("")}>Close thread</button>
-                  </div>
-                  {selectedThreadGroup && selectedThreadGroup.threads.length > 1 ? (
-                    <div className="threadSwitcher" aria-label={`All threads on line ${selectedThreadGroup.line}`}>
-                      {selectedThreadGroup.threads.map((thread, index) => (
-                        <button
-                          key={thread.id}
-                          type="button"
-                          className={thread.id === selectedThreadId ? "threadChoice activeThreadChoice" : "threadChoice"}
-                          onClick={() => setSelectedThreadId(thread.id)}
-                        >
-                          <strong>{thread.title || `Thread ${index + 1}`}</strong>
-                          <span>{thread.messages[thread.messages.length - 1]?.body || thread.anchor.excerpt}</span>
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
-                  <div className="threadMessageList">
-                    {selectedThread.messages.map((threadMessage) => (
-                      <div key={threadMessage.id} className="threadMessageCard">
-                        <div className="threadMessageMeta">
-                          <strong>@{threadMessage.authorHandle}</strong>
-                          <span>{formatTimestamp(threadMessage.createdAt)}</span>
-                        </div>
-                        <p>{threadMessage.body}</p>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="composerRow">
-                    <textarea
-                      value={threadReplyBody}
-                      name="thread-reply-body"
-                      aria-label="Thread reply"
-                      onChange={(event) => setThreadReplyBody(event.target.value)}
-                      className="inlineCommentInput"
-                      placeholder="Reply in this thread"
-                    />
-                    <button onClick={() => replyToThread(selectedThread.id)}>Reply</button>
-                  </div>
-                </div>
-              ) : (
-                <div className="composerRow">
-                  <textarea
-                    value={threadBody}
-                    name="thread-body"
-                    aria-label="Thread body"
-                    onChange={(event) => setThreadBody(event.target.value)}
-                    className="inlineCommentInput"
-                    placeholder="Start a thread on the current selection"
-                  />
-                  <button onClick={createThread}>Start thread</button>
-                </div>
-              )}
-            </footer>
-          </div>
-
-        </section>
-      </main>
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
 
-function encodeSyncStep1(doc: Y.Doc) {
-  const encoder = encoding.createEncoder();
-  encoding.writeVarUint(encoder, 0);
-  syncProtocol.writeSyncStep1(encoder, doc);
-  return encoding.toUint8Array(encoder);
+function ActivityPanel({ workspace }: { workspace: ReturnType<typeof useWorkspace>["workspace"] }) {
+  return (
+    <div className="ctx-body">
+      <div className="row between ctx-head">
+        <span className="label">Recent activity</span>
+        <span className="chip sm">{workspace.agentEvents.length}</span>
+      </div>
+      {workspace.agentEvents.slice(0, 12).map((event) => (
+        <article className="activity-row" key={event.id}>
+          <div className="avi sm agent">{initials(event.agentHandle || event.agentId)}</div>
+          <div className="col gap-2 min-0">
+            <div className="small truncate"><b>@{event.agentHandle || event.agentId}</b> {event.type}</div>
+            <p className="tiny muted">{event.summary}</p>
+          </div>
+        </article>
+      ))}
+      {!workspace.agentEvents.length ? <p className="empty-note">Workspace activity will appear here.</p> : null}
+    </div>
+  );
 }
 
-function encodeSyncUpdate(update: Uint8Array) {
-  const encoder = encoding.createEncoder();
-  encoding.writeVarUint(encoder, 0);
-  syncProtocol.writeUpdate(encoder, update);
-  return encoding.toUint8Array(encoder);
+function PeoplePanel({
+  workspace,
+  groupedAgents,
+  onAgent,
+  onDaemon,
+}: {
+  workspace: ReturnType<typeof useWorkspace>["workspace"];
+  groupedAgents: Array<{ daemonId: string; daemonName: string; agents: Agent[] }>;
+  onAgent: (agent: Agent) => void;
+  onDaemon: (daemon: Daemon) => void;
+}) {
+  return (
+    <div className="ctx-body people-pane">
+      <div className="row between ctx-head">
+        <span className="label">Daemons</span>
+        <span className="chip sm">{workspace.daemons.length}</span>
+      </div>
+      {workspace.daemons.map((daemon) => (
+        <button className="daemon-card card" key={daemon.id} onClick={() => onDaemon(daemon)}>
+          <div className="avi sm daemon">{initials(daemon.name)}</div>
+          <div className="col gap-2 min-0">
+            <strong className="small truncate">{daemon.name}</strong>
+            <span className="tiny muted truncate">{daemon.id}</span>
+          </div>
+          <span className={`chip sm ${daemonStatus(daemon)}`}>{daemonStatus(daemon)}</span>
+        </button>
+      ))}
+      <div className="row between ctx-head with-space">
+        <span className="label">Agents</span>
+        <span className="chip sm">{workspace.agents.length}</span>
+      </div>
+      {groupedAgents.map((group) => (
+        <section className="agent-group" key={group.daemonId}>
+          <div className="grp-head">
+            <span>{group.daemonName}</span>
+            <span>{group.agents.length}</span>
+          </div>
+          {group.agents.map((agent) => (
+            <button key={agent.id} className="agent-card" onClick={() => onAgent(agent)}>
+              <div className="avi agent">{initials(agent.handle)}</div>
+              <div className="col gap-2 min-0">
+                <strong className="small truncate">@{agent.handle}</strong>
+                <span className="tiny muted truncate">{agent.currentActivity || agent.role}</span>
+              </div>
+              <StatusDot tone={visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons)} />
+            </button>
+          ))}
+        </section>
+      ))}
+    </div>
+  );
 }
 
-function encodeSyncReply(reply: Uint8Array) {
-  const encoder = encoding.createEncoder();
-  encoding.writeVarUint(encoder, 0);
-  encoding.writeUint8Array(encoder, reply);
-  return encoding.toUint8Array(encoder);
+function CreateDocumentModal({ api, workspaceId, onClose, onCreated }: { api: ApiClient; workspaceId: string; onClose: () => void; onCreated: (document: DocumentItem) => void }) {
+  const [path, setPath] = useState("docs/untitled.md");
+  const [content, setContent] = useState("# Untitled\n");
+  return (
+    <Modal title="New document" onClose={onClose}>
+      <form
+        className="form-stack"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          onCreated(await api.createDocument(workspaceId, { path, content }));
+        }}
+      >
+        <label className="field"><span className="lab">Path</span><input value={path} onChange={(event) => setPath(event.target.value)} required /></label>
+        <label className="field"><span className="lab">Initial content</span><textarea value={content} onChange={(event) => setContent(event.target.value)} /></label>
+        <button className="btn accent full">Create document</button>
+      </form>
+    </Modal>
+  );
 }
 
-function encodeAwarenessMessage(awareness: Awareness, clients: number[]) {
-  const update = encodeAwarenessUpdate(awareness, clients);
-  const encoder = encoding.createEncoder();
-  encoding.writeVarUint(encoder, 1);
-  encoding.writeUint8Array(encoder, update);
-  return encoding.toUint8Array(encoder);
+function RenameDocumentModal({ api, workspaceId, document, onClose, onDone }: { api: ApiClient; workspaceId: string; document: DocumentItem; onClose: () => void; onDone: () => void }) {
+  const [path, setPath] = useState(document.path);
+  return (
+    <Modal title="Rename document" onClose={onClose}>
+      <form
+        className="form-stack"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          await api.renameDocument(workspaceId, document.id, path);
+          onDone();
+        }}
+      >
+        <label className="field"><span className="lab">Path</span><input value={path} onChange={(event) => setPath(event.target.value)} required /></label>
+        <button className="btn accent full">Save path</button>
+      </form>
+    </Modal>
+  );
 }
 
-function decodeVarUint(bytes: Uint8Array) {
-  let value = 0;
-  let shift = 0;
-  let offset = 0;
-  while (offset < bytes.length) {
-    const current = bytes[offset];
-    value |= (current & 0x7f) << shift;
-    offset += 1;
-    if ((current & 0x80) === 0) {
-      return { value, offset };
-    }
-    shift += 7;
-  }
-  throw new Error("Unexpected end of array");
+function CreateDaemonModal({ api, workspaceId, onClose, onDone }: { api: ApiClient; workspaceId: string; onClose: () => void; onDone: () => void }) {
+  const [name, setName] = useState("Local daemon");
+  const [token, setToken] = useState("");
+  const command = buildDaemonInstallCommand({
+    backendUrl: apiBase,
+    workspaceId,
+    daemonToken: token || "nottyd_...",
+    staticBaseUrl: daemonStaticBase,
+  });
+  return (
+    <Modal title={token ? `${name} created` : "New daemon"} onClose={onClose}>
+      {token ? (
+        <div className="token-reveal">
+          <div className="token-warning">
+            <div className="row gap-8">
+              <div className="avi sm daemon">D</div>
+              <b>Save this token now. You won't see it again.</b>
+            </div>
+            <p className="small muted">The backend stores only the token hash. If you lose it, rotate the daemon token later.</p>
+            <div className="row gap-6">
+              <code className="token-block">{token}</code>
+            </div>
+          </div>
+          <div className="deploy-block">
+            <div className="row between">
+              <b className="small">Install daemon</b>
+              <span className="chip sm">Host native</span>
+            </div>
+            <pre className="code">{command}</pre>
+            <p className="small muted">This downloads the release bundle, installs the daemon and agent helper, writes daemon config, and starts a local service. Docker Compose is only for local development.</p>
+          </div>
+          <div className="row between">
+            <span className="chip"><StatusDot tone="stale" />Waiting for daemon to check in…</span>
+            <button className="btn accent" onClick={onClose}>Done</button>
+          </div>
+        </div>
+      ) : (
+        <form
+          className="form-stack"
+          onSubmit={async (event) => {
+            event.preventDefault();
+            const response = await api.createDaemon(workspaceId, name);
+            setToken(response.token);
+            onDone();
+          }}
+        >
+          <label className="field"><span className="lab">Name</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label>
+          <button className="btn accent full">Create daemon</button>
+        </form>
+      )}
+    </Modal>
+  );
 }
 
-function summarizeDocument(content: string) {
-  const collapsed = content.replace(/\s+/g, " ").trim();
-  if (!collapsed) {
-    return "Empty page";
-  }
-  return collapsed.length > 42 ? `${collapsed.slice(0, 42)}...` : collapsed;
+function CreateAgentModal({ api, workspaceId, daemons, onClose, onDone }: { api: ApiClient; workspaceId: string; daemons: Daemon[]; onClose: () => void; onDone: () => void }) {
+  const activeDaemons = daemons.filter((daemon) => daemon.status !== "deleted");
+  const [daemonId, setDaemonId] = useState(activeDaemons[0]?.id ?? "");
+  const [handle, setHandle] = useState("codex-agent");
+  const [name, setName] = useState("Codex Agent");
+  const [role, setRole] = useState("Review workspace changes and provide constructive engineering feedback.");
+  const selectedDaemon = activeDaemons.find((daemon) => daemon.id === daemonId);
+  const canCreate = Boolean(selectedDaemon);
+  return (
+    <Modal title="New agent" onClose={onClose}>
+      <form
+        className="form-stack"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          if (!canCreate) {
+            return;
+          }
+          await api.createAgent(workspaceId, daemonId, { handle, name, role, kind: "codex" });
+          onDone();
+        }}
+      >
+        <label className="field"><span className="lab">Display name</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label>
+        <label className="field"><span className="lab">Handle</span><input value={handle} onChange={(event) => setHandle(event.target.value)} required /></label>
+        <label className="field"><span className="lab">Role</span><textarea value={role} onChange={(event) => setRole(event.target.value)} required /></label>
+        <div className="field">
+          <span className="lab">Owning daemon</span>
+          <div className="daemon-choice-list">
+            {activeDaemons.map((daemon) => {
+              const status = daemonStatus(daemon);
+              return (
+                <label className={`daemon-choice ${daemonId === daemon.id ? "selected" : ""}`} key={daemon.id}>
+                  <input
+                    type="radio"
+                    checked={daemonId === daemon.id}
+                    onChange={() => setDaemonId(daemon.id)}
+                  />
+                  <div className="avi sm daemon">{initials(daemon.name)}</div>
+                  <div className="col gap-0 min-0">
+                    <b className="small truncate">{daemon.name}</b>
+                    <span className="tiny muted truncate">{daemon.id}</span>
+                  </div>
+                  <span className={`chip sm ${status}`}><StatusDot tone={status} />{status}</span>
+                </label>
+              );
+            })}
+            {!activeDaemons.length ? <p className="small muted">Create a daemon before adding agents.</p> : null}
+          </div>
+        </div>
+        <p className="small muted">System prompts are generated by the backend shared prompt and are not user-editable.</p>
+        <button className="btn accent full" disabled={!canCreate}>Create agent</button>
+      </form>
+    </Modal>
+  );
 }
 
-function nextSuggestedPath(path: string) {
-  const trimmed = path.trim();
-  if (!trimmed) {
-    return "notes/untitled.md";
-  }
-  const parts = trimmed.split("/");
-  const filename = parts.pop() ?? "untitled.md";
-  const dot = filename.lastIndexOf(".");
-  const stem = dot > 0 ? filename.slice(0, dot) : filename;
-  const ext = dot > 0 ? filename.slice(dot) : ".md";
-  parts.push(`${stem}-new${ext}`);
-  return parts.join("/");
+function AgentDetailModal({ api, workspaceId, agent, daemons, runs, onClose, onChanged }: { api: ApiClient; workspaceId: string; agent: Agent; daemons: Daemon[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; onClose: () => void; onChanged: () => void }) {
+  const [prompt, setPrompt] = useState("Review the current workspace and respond if you have useful feedback.");
+  const daemon = daemons.find((item) => item.id === agent.daemonId);
+  const status = visibleAgentStatus(agent, runs, daemons);
+  return (
+    <Modal title={`@${agent.handle}`} onClose={onClose}>
+      <div className="form-stack">
+        <div className="modal-identity">
+          <div className="avi agent">{initials(agent.handle)}</div>
+          <div className="col gap-2">
+            <span><StatusDot tone={status} /> {status}</span>
+            <span className="small muted">Daemon: {daemon?.name ?? agent.daemonId}</span>
+          </div>
+        </div>
+        <p className="small"><strong>Role:</strong> {agent.role}</p>
+        <label className="field"><span className="lab">One-off instruction</span><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} /></label>
+        <button className="btn accent full" onClick={async () => { await api.startAgent(workspaceId, agent.id, prompt); onChanged(); }}>Start run</button>
+        <button className="btn danger full" onClick={async () => { await api.deleteAgent(workspaceId, agent.id); onChanged(); onClose(); }}>Delete agent</button>
+      </div>
+    </Modal>
+  );
 }
 
-function countWords(value: string) {
-  const parts = value.trim().split(/\s+/).filter(Boolean);
-  return parts.length;
+function DaemonDetailModal({ api, workspaceId, daemon, agents, runs, onClose, onChanged }: { api: ApiClient; workspaceId: string; daemon: Daemon; agents: Agent[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; onClose: () => void; onChanged: () => void }) {
+  return (
+    <Modal title={daemon.name} onClose={onClose}>
+      <div className="form-stack">
+        <p><StatusDot tone={daemonStatus(daemon)} /> {daemonStatus(daemon)}</p>
+        <p className="tiny muted mono">ID: {daemon.id}</p>
+        <h3 className="modal-title">Agents on this daemon</h3>
+        {agents.map((agent) => <p className="small" key={agent.id}>@{agent.handle} · {visibleAgentStatus(agent, runs, [daemon])}</p>)}
+        <button className="btn danger full" onClick={async () => { await api.deleteDaemon(workspaceId, daemon.id); onChanged(); }}>Delete daemon</button>
+      </div>
+    </Modal>
+  );
 }
 
-function formatTimestamp(value?: string) {
-  if (!value) {
-    return "Not synced yet";
-  }
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(new Date(value));
+function EmptyWorkspace({ onCreateDocument, onCreateDaemon }: { onCreateDocument: () => void; onCreateDaemon: () => void }) {
+  return (
+    <section className="doc-canvas">
+      <div className="doc-inner empty-state">
+        <h2 className="display">Let's get this workspace working.</h2>
+        <p className="small muted">notty is best with at least one daemon: it syncs docs to disk and hosts your agents. You can also start by writing something.</p>
+        <div className="empty-grid">
+          <button className="card p-20 empty-choice" onClick={onCreateDaemon}>
+            <div className="row gap-8"><div className="avi sm daemon">D</div><b>Deploy a daemon</b></div>
+            <span className="small muted">Bring docs to local disk and enable agents.</span>
+          </button>
+          <button className="card p-20 empty-choice" onClick={onCreateDocument}>
+            <div className="row gap-8"><Icon name="doc" /><b>Create your first doc</b></div>
+            <span className="small muted">Markdown or plaintext. Threads and agents come along.</span>
+          </button>
+        </div>
+      </div>
+    </section>
+  );
 }
 
-function daemonConnectionStatus(daemon: Daemon, nowMs: number): "online" | "stale" | "disconnected" {
-  if (daemon.status !== "active" || !daemon.lastSeenAt) {
-    return "disconnected";
-  }
-  const lastSeenMs = Date.parse(daemon.lastSeenAt);
-  if (!Number.isFinite(lastSeenMs) || lastSeenMs <= 0) {
-    return "disconnected";
-  }
-  const ageMs = Math.max(0, nowMs - lastSeenMs);
-  if (ageMs <= 30_000) {
-    return "online";
-  }
-  if (ageMs <= 120_000) {
-    return "stale";
-  }
-  return "disconnected";
+function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
+  return (
+    <div className="modal-backdrop">
+      <section className="modal-card card lifted">
+        <header className="modal-header">
+          <h2 className="modal-title">{title}</h2>
+          <button className="btn ghost icon sm" onClick={onClose}>×</button>
+        </header>
+        {children}
+      </section>
+    </div>
+  );
 }
 
-function formatDaemonConnectionLabel(status: "online" | "stale" | "disconnected") {
-  if (status === "disconnected") {
-    return "Offline";
-  }
-  return status[0].toUpperCase() + status.slice(1);
+function StatusDot({ tone }: { tone: string }) {
+  return <span className={`status-dot ${tone}`} />;
 }
 
-function formatDaemonCheckInText(daemon: Daemon, nowMs: number) {
-  if (!daemon.lastSeenAt) {
-    return "No check-ins yet";
-  }
-  const lastSeenMs = Date.parse(daemon.lastSeenAt);
-  if (!Number.isFinite(lastSeenMs) || lastSeenMs <= 0) {
-    return "No check-ins yet";
-  }
-  const ageSeconds = Math.max(0, Math.floor((nowMs - lastSeenMs) / 1000));
-  if (ageSeconds < 5) {
-    return "Connected just now";
-  }
-  if (ageSeconds < 60) {
-    return `Last check-in ${ageSeconds}s ago`;
-  }
-  const ageMinutes = Math.floor(ageSeconds / 60);
-  if (ageMinutes < 60) {
-    return `Last check-in ${ageMinutes}m ago`;
-  }
-  return `Last check-in ${formatTimestamp(daemon.lastSeenAt)}`;
+function Logo() {
+  return (
+    <div className="row gap-8 logo-row">
+      <div className="logo-mark">n</div>
+      <span className="display logo-type">notty</span>
+    </div>
+  );
 }
 
-function buildLineStarts(content: string) {
-  const starts = [0];
-  for (let index = 0; index < content.length; index += 1) {
-    if (content[index] === "\n") {
-      starts.push(index + 1);
-    }
-  }
-  return starts;
-}
-
-function getLineForOffset(lineStarts: number[], offset: number) {
-  let line = 1;
-  for (let index = 0; index < lineStarts.length; index += 1) {
-    if (lineStarts[index] > offset) {
-      break;
-    }
-    line = index + 1;
-  }
-  return line;
-}
-
-function resolveThreadAnchorLive(anchor: ThreadAnchor, ydoc: Y.Doc | null, content: string, lineStarts: number[]) {
-  if (!ydoc || !anchor.relativeStart || !anchor.relativeEnd) {
-    return anchor;
-  }
-  try {
-    const startPosition = Y.createAbsolutePositionFromRelativePosition(
-      Y.decodeRelativePosition(base64ToUint8Array(anchor.relativeStart)),
-      ydoc
-    );
-    const endPosition = Y.createAbsolutePositionFromRelativePosition(
-      Y.decodeRelativePosition(base64ToUint8Array(anchor.relativeEnd)),
-      ydoc
-    );
-    if (!startPosition || !endPosition) {
-      return anchor;
-    }
-    const start = Math.max(0, startPosition.index);
-    const end = Math.max(start, endPosition.index);
-    const previewEnd = end === start ? Math.min(content.length, start + 80) : end;
-    const excerpt = (content.slice(start, previewEnd).trim() || anchor.excerpt).slice(0, 140);
-    return {
-      ...anchor,
-      start,
-      end,
-      line: getLineForOffset(lineStarts, start),
-      excerpt,
-    };
-  } catch {
-    return anchor;
+function Icon({ name }: { name: string }) {
+  switch (name) {
+    case "home":
+      return <svg className="i sm" viewBox="0 0 24 24"><path d="M3 12l9-9 9 9M5 10v10h14V10" /></svg>;
+    case "back":
+      return <svg className="i sm" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6" /></svg>;
+    case "activity":
+      return <svg className="i sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>;
+    case "thread":
+      return <svg className="i sm" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5A8.5 8.5 0 1 1 21 11.5z" /></svg>;
+    case "people":
+      return <svg className="i sm" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /></svg>;
+    case "search":
+      return <svg className="i sm" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" /></svg>;
+    case "plus":
+      return <svg className="i sm" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>;
+    case "refresh":
+      return <svg className="i sm" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 3" /><path d="M21 3v6h-6" /></svg>;
+    case "stack":
+      return <svg className="i sm" viewBox="0 0 24 24"><path d="M3 7l9-4 9 4-9 4-9-4zm0 6l9 4 9-4M3 17l9 4 9-4" /></svg>;
+    case "doc":
+      return <svg className="i sm" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" /><path d="M14 3v5h5" /></svg>;
+    case "chevron":
+      return <svg className="i sm muted" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6" /></svg>;
+    case "daemon":
+      return <svg className="i sm" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1.5" /><rect x="3" y="14" width="18" height="6" rx="1.5" /><circle cx="7" cy="7" r="0.6" /><circle cx="7" cy="17" r="0.6" /></svg>;
+    case "agent":
+      return <svg className="i sm" viewBox="0 0 24 24"><path d="M12 3l7 4v6c0 4-3 7-7 8-4-1-7-4-7-8V7l7-4z" /><path d="M9 12h6M9 16h6" /></svg>;
+    case "more":
+      return <svg className="i sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1.5" /><circle cx="19" cy="12" r="1.5" /><circle cx="5" cy="12" r="1.5" /></svg>;
+    default:
+      return null;
   }
 }
-
-function encodeRelativeAnchor(text: Y.Text, index: number) {
-  const assoc = index >= text.length ? -1 : 0;
-  return uint8ArrayToBase64(Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(text, index, assoc)));
-}
-
-function base64ToUint8Array(value: string) {
-  const binary = window.atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return bytes;
-}
-
-function uint8ArrayToBase64(bytes: Uint8Array) {
-  let binary = "";
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return window.btoa(binary);
-}
-
-function formatSelection(start: number, end: number, lineStarts: number[]) {
-  if (start === end) {
-    const line = getLineForOffset(lineStarts, start);
-    return `Cursor on line ${line}`;
-  }
-  const startLine = getLineForOffset(lineStarts, start);
-  const endLine = getLineForOffset(lineStarts, end);
-  if (startLine === endLine) {
-    return `Selection on line ${startLine}`;
-  }
-  return `Selection across lines ${startLine}-${endLine}`;
-}
-
-function buildActiveCollaborators(
-  presences: Record<string, PresenceItem>,
-  users: UserItem[],
-  agents: Agent[],
-  documentID: string,
-  filePath: string,
-  fallback: PresenceView
-) {
-  const people = new Map<string, { name: string }>();
-  for (const user of users) {
-    people.set(user.handle, { name: user.name });
-  }
-  for (const agent of agents) {
-    people.set(agent.handle, { name: agent.name });
-  }
-
-  const collaborators = Object.values(presences)
-    .filter((presence) => isFreshPresence(presence.updatedAt))
-    .filter((presence) => presence.documentId === documentID || presence.filePath === filePath)
-    .map((presence) => ({
-      actorId: presence.actorId,
-      actorName: people.get(presence.actorId)?.name ?? presence.actorId,
-      activity: presence.activity || "Editing this page",
-    }))
-    .sort((left, right) => left.actorName.localeCompare(right.actorName));
-
-  if (collaborators.length === 0) {
-    return [fallback];
-  }
-  return collaborators;
-}
-
-const EDITOR_LINE_HEIGHT = 34;

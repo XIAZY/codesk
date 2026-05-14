@@ -1,0 +1,301 @@
+#!/usr/bin/env sh
+set -eu
+
+static_base="${NOTTY_DAEMON_STATIC_BASE:-}"
+version="${NOTTY_DAEMON_VERSION:-latest}"
+install_dir="${NOTTY_INSTALL_DIR:-$HOME/.notty/bin}"
+data_dir="${NOTTY_DATA_DIR:-$HOME/.notty}"
+backend_url=""
+workspace_id=""
+daemon_token=""
+no_service=0
+
+usage() {
+	cat <<'EOF'
+Usage: install.sh --backend-url <url> --workspace-id <id> --daemon-token <token> [options]
+
+Options:
+  --static-base <url>   Static daemon artifact base URL.
+  --version <version>   Release version. Defaults to latest.
+  --install-dir <path>  Binary install directory. Defaults to ~/.notty/bin.
+  --data-dir <path>     Notty data directory. Defaults to ~/.notty.
+  --no-service          Install files but do not start a service.
+  -h, --help            Show this help.
+EOF
+}
+
+die() {
+	printf 'notty install: %s\n' "$*" >&2
+	exit 1
+}
+
+warn() {
+	printf 'notty install warning: %s\n' "$*" >&2
+}
+
+need_value() {
+	[ "$#" -ge 2 ] || die "$1 requires a value"
+	case "$2" in
+		-*) die "$1 requires a value" ;;
+	esac
+}
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--backend-url)
+			need_value "$1" "${2:-}"
+			backend_url="$2"
+			shift 2
+			;;
+		--workspace-id)
+			need_value "$1" "${2:-}"
+			workspace_id="$2"
+			shift 2
+			;;
+		--daemon-token)
+			need_value "$1" "${2:-}"
+			daemon_token="$2"
+			shift 2
+			;;
+		--static-base)
+			need_value "$1" "${2:-}"
+			static_base="$2"
+			shift 2
+			;;
+		--version)
+			need_value "$1" "${2:-}"
+			version="$2"
+			shift 2
+			;;
+		--install-dir)
+			need_value "$1" "${2:-}"
+			install_dir="$2"
+			shift 2
+			;;
+		--data-dir)
+			need_value "$1" "${2:-}"
+			data_dir="$2"
+			shift 2
+			;;
+		--no-service)
+			no_service=1
+			shift
+			;;
+		-h|--help)
+			usage
+			exit 0
+			;;
+		*)
+			die "unknown argument: $1"
+			;;
+	esac
+done
+
+[ -n "$backend_url" ] || die "--backend-url is required"
+[ -n "$workspace_id" ] || die "--workspace-id is required"
+[ -n "$daemon_token" ] || die "--daemon-token is required"
+[ -n "$static_base" ] || die "--static-base is required"
+
+static_base="$(printf '%s' "$static_base" | sed 's:/*$::')"
+backend_url="$(printf '%s' "$backend_url" | sed 's:/*$::')"
+
+case "$(uname -s)" in
+	Darwin) os="darwin" ;;
+	Linux) os="linux" ;;
+	*) die "unsupported operating system: $(uname -s)" ;;
+esac
+
+case "$(uname -m)" in
+	x86_64|amd64) arch="amd64" ;;
+	arm64|aarch64) arch="arm64" ;;
+	*) die "unsupported architecture: $(uname -m)" ;;
+esac
+
+download_to() {
+	url="$1"
+	dest="$2"
+	if command -v curl >/dev/null 2>&1; then
+		curl -fsSL "$url" -o "$dest"
+	elif command -v wget >/dev/null 2>&1; then
+		wget -q -O "$dest" "$url"
+	else
+		die "curl or wget is required"
+	fi
+}
+
+checksum_file() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | awk '{print $1}'
+	else
+		shasum -a 256 "$1" | awk '{print $1}'
+	fi
+}
+
+shell_quote() {
+	printf "'"
+	printf '%s' "$1" | sed "s/'/'\\\\''/g"
+	printf "'"
+}
+
+safe_name() {
+	printf '%s' "$1" | sed 's/[^A-Za-z0-9_.-]/-/g'
+}
+
+tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/notty-install.XXXXXX")"
+cleanup() {
+	rm -rf "$tmp_dir"
+}
+trap cleanup EXIT INT TERM
+
+if [ "$version" = "latest" ]; then
+	manifest="$tmp_dir/manifest.json"
+	download_to "$static_base/latest/manifest.json" "$manifest"
+	version="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -n 1)"
+	[ -n "$version" ] || die "could not determine latest daemon version"
+fi
+
+artifact="notty-daemon_${version}_${os}_${arch}.tar.gz"
+version_base="$static_base/$version"
+archive="$tmp_dir/$artifact"
+sums="$tmp_dir/SHA256SUMS"
+
+printf 'Installing Notty daemon %s for %s/%s\n' "$version" "$os" "$arch"
+download_to "$version_base/SHA256SUMS" "$sums"
+expected="$(awk -v file="$artifact" '$2 == file {print $1}' "$sums" | head -n 1)"
+[ -n "$expected" ] || die "release $version does not contain $artifact"
+
+download_to "$version_base/$artifact" "$archive"
+actual="$(checksum_file "$archive")"
+[ "$actual" = "$expected" ] || die "checksum mismatch for $artifact"
+
+tar -xzf "$archive" -C "$tmp_dir"
+package_dir="$tmp_dir/notty-daemon_${version}_${os}_${arch}"
+[ -x "$package_dir/bin/notty-daemon" ] || die "archive is missing bin/notty-daemon"
+[ -x "$package_dir/bin/notty-agent-tool" ] || die "archive is missing bin/notty-agent-tool"
+
+daemon_name="$(safe_name "$workspace_id")"
+daemon_dir="$data_dir/daemons/$daemon_name"
+runtime_dir="$data_dir/runtime/$daemon_name"
+workspace_dir="$HOME/Notty/workspaces/$daemon_name"
+agent_workspace_root="$HOME/Notty/agents/$daemon_name"
+log_file="$daemon_dir/daemon.log"
+env_file="$daemon_dir/daemon.env"
+run_script="$daemon_dir/run.sh"
+
+mkdir -p "$install_dir" "$daemon_dir" "$runtime_dir" "$workspace_dir" "$agent_workspace_root"
+cp "$package_dir/bin/notty-daemon" "$install_dir/.notty-daemon.$$"
+cp "$package_dir/bin/notty-agent-tool" "$install_dir/.notty-agent-tool.$$"
+chmod +x "$install_dir/.notty-daemon.$$" "$install_dir/.notty-agent-tool.$$"
+mv "$install_dir/.notty-daemon.$$" "$install_dir/notty-daemon"
+mv "$install_dir/.notty-agent-tool.$$" "$install_dir/notty-agent-tool"
+
+{
+	printf 'export NOTTY_BACKEND_URL=%s\n' "$(shell_quote "$backend_url")"
+	printf 'export NOTTY_WORKSPACE_ID=%s\n' "$(shell_quote "$workspace_id")"
+	printf 'export NOTTY_DAEMON_TOKEN=%s\n' "$(shell_quote "$daemon_token")"
+	printf 'export NOTTY_WORKSPACE_DIR=%s\n' "$(shell_quote "$workspace_dir")"
+	printf 'export NOTTY_AGENT_WORKSPACE_ROOT=%s\n' "$(shell_quote "$agent_workspace_root")"
+	printf 'export NOTTY_RUNTIME_DIR=%s\n' "$(shell_quote "$runtime_dir")"
+	printf 'export NOTTY_CODEX_COMMAND=%s\n' "$(shell_quote "${NOTTY_CODEX_COMMAND:-codex}")"
+} > "$env_file"
+chmod 600 "$env_file"
+
+{
+	printf '#!/usr/bin/env sh\n'
+	printf 'set -eu\n'
+	printf '. %s\n' "$(shell_quote "$env_file")"
+	printf 'export NOTTY_BACKEND_URL NOTTY_WORKSPACE_ID NOTTY_DAEMON_TOKEN NOTTY_WORKSPACE_DIR NOTTY_AGENT_WORKSPACE_ROOT NOTTY_RUNTIME_DIR NOTTY_CODEX_COMMAND\n'
+	printf 'export PATH=%s:"$PATH"\n' "$(shell_quote "$install_dir")"
+	printf 'exec %s\n' "$(shell_quote "$install_dir/notty-daemon")"
+} > "$run_script"
+chmod +x "$run_script"
+
+if ! command -v codex >/dev/null 2>&1; then
+	warn "codex CLI was not found on PATH. Workspace sync can start, but agents require Codex CLI to be installed and authenticated."
+fi
+
+start_background() {
+	(
+		nohup "$run_script" >> "$log_file" 2>&1 &
+	)
+	printf 'Started daemon in background. Log: %s\n' "$log_file"
+}
+
+install_launchd() {
+	label="com.notty.daemon.$daemon_name"
+	plist="$HOME/Library/LaunchAgents/$label.plist"
+	mkdir -p "$HOME/Library/LaunchAgents"
+	cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$label</string>
+  <key>ProgramArguments</key>
+  <array><string>$run_script</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>$log_file</string>
+  <key>StandardErrorPath</key><string>$log_file</string>
+</dict>
+</plist>
+EOF
+	launchctl bootout "gui/$(id -u)" "$plist" >/dev/null 2>&1 || true
+	if launchctl bootstrap "gui/$(id -u)" "$plist" >/dev/null 2>&1; then
+		launchctl kickstart -k "gui/$(id -u)/$label" >/dev/null 2>&1 || true
+		printf 'Installed LaunchAgent %s. Log: %s\n' "$label" "$log_file"
+	else
+		warn "LaunchAgent start failed; falling back to background process"
+		start_background
+	fi
+}
+
+install_systemd_user() {
+	service_name="notty-daemon-$daemon_name.service"
+	service_dir="$HOME/.config/systemd/user"
+	service_file="$service_dir/$service_name"
+	mkdir -p "$service_dir"
+	cat > "$service_file" <<EOF
+[Unit]
+Description=Notty daemon for $workspace_id
+
+[Service]
+ExecStart=$run_script
+Restart=always
+RestartSec=5
+StandardOutput=append:$log_file
+StandardError=append:$log_file
+
+[Install]
+WantedBy=default.target
+EOF
+	if systemctl --user daemon-reload >/dev/null 2>&1 && systemctl --user enable --now "$service_name" >/dev/null 2>&1; then
+		printf 'Installed systemd user service %s. Log: %s\n' "$service_name" "$log_file"
+	else
+		warn "systemd user service start failed; falling back to background process"
+		start_background
+	fi
+}
+
+if [ "$no_service" -eq 1 ]; then
+	printf 'Installed daemon binaries and config. Start manually with: %s\n' "$run_script"
+else
+	case "$os" in
+		darwin)
+			if command -v launchctl >/dev/null 2>&1; then
+				install_launchd
+			else
+				start_background
+			fi
+			;;
+		linux)
+			if command -v systemctl >/dev/null 2>&1; then
+				install_systemd_user
+			else
+				start_background
+			fi
+			;;
+	esac
+fi
+
+printf 'Notty daemon install complete.\n'

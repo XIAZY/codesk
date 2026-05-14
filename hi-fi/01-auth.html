@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>notty hi-fi · 01 Auth & onboarding</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<!-- ───── sticky doc nav ───── -->
+<nav class="doc-nav">
+  <div class="doc-nav-inner between">
+    <div class="row gap-12">
+      <a href="index.html" class="row gap-6" style="text-decoration:none;color:var(--ink)">
+        <svg class="i sm" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
+        <span class="small" style="font-weight:500">all flows</span>
+      </a>
+      <span class="faint">/</span>
+      <span class="small">01 · Auth &amp; onboarding</span>
+    </div>
+    <div class="row gap-16">
+      <a href="#login" class="small">Login</a>
+      <a href="#register" class="small">Register</a>
+      <a href="#picker" class="small">Workspace picker</a>
+      <a href="#create" class="small">Create workspace</a>
+      <a href="#spec" class="small">Engineering spec</a>
+    </div>
+  </div>
+</nav>
+
+<main class="doc">
+  <header>
+    <h1 class="eyebrow">Flow 01</h1>
+    <h1 class="title">Auth &amp; <em>onboarding</em></h1>
+    <p class="lede">The on-ramp. A human registers an account, lands in a workspace (existing or new), and gets a workspace-scoped <code class="api">@handle</code> they'll use everywhere — mentions, threads, presence.</p>
+  </header>
+
+  <!-- ───────────────── Purpose ───────────────── -->
+  <section class="doc-section">
+    <div class="sec-head">
+      <h2>Purpose &amp; flow at a glance</h2>
+      <div class="meta">Why this exists, and how it connects to the workspace shell.</div>
+    </div>
+
+    <div class="card p-24" style="display:grid; grid-template-columns: repeat(5, 1fr); gap: 0;">
+      <!-- 5-step flow strip -->
+      <!-- step template -->
+      <!-- 1 -->
+      <div class="col gap-8" style="padding-right:18px;border-right:1px dashed var(--border)">
+        <div class="row gap-6"><span class="chip ink sm">1</span><b class="small">Register</b></div>
+        <div class="tiny muted">Email + password. Returns JWT + account.</div>
+        <code class="api">POST /api/auth/register</code>
+      </div>
+      <!-- 2 -->
+      <div class="col gap-8" style="padding:0 18px;border-right:1px dashed var(--border)">
+        <div class="row gap-6"><span class="chip ink sm">2</span><b class="small">Login</b></div>
+        <div class="tiny muted">Returning user gets JWT + workspaces list.</div>
+        <code class="api">POST /api/auth/login</code>
+      </div>
+      <!-- 3 -->
+      <div class="col gap-8" style="padding:0 18px;border-right:1px dashed var(--border)">
+        <div class="row gap-6"><span class="chip ink sm">3</span><b class="small">Pick or create</b></div>
+        <div class="tiny muted">If memberships > 0, show picker. Else, create.</div>
+        <code class="api">GET /api/workspaces</code>
+      </div>
+      <!-- 4 -->
+      <div class="col gap-8" style="padding:0 18px;border-right:1px dashed var(--border)">
+        <div class="row gap-6"><span class="chip ink sm">4</span><b class="small">Mint handle</b></div>
+        <div class="tiny muted">Workspace-scoped @handle for this tenant.</div>
+        <code class="api">POST /api/workspaces</code>
+      </div>
+      <!-- 5 -->
+      <div class="col gap-8" style="padding-left:18px">
+        <div class="row gap-6"><span class="chip accent sm">5</span><b class="small">Enter shell</b></div>
+        <div class="tiny muted">Route to <code class="api">/w/:slug</code>. Boot socket on active doc only.</div>
+        <a href="02-shell.html" class="tiny" style="color:var(--accent-700)">→ Flow 02 · Workspace shell</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────────── LOGIN ───────────────── -->
+  <section class="doc-section" id="login">
+    <div class="sec-head">
+      <h2>A · Login</h2>
+      <div class="meta">Returning user → JWT → workspace picker (or shell, if memberships=1).</div>
+    </div>
+
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 32px; align-items: start;">
+      <!-- mock -->
+      <div class="frame" style="aspect-ratio: 4/3;">
+        <div class="frame-bar"><div class="dots"><span></span><span></span><span></span></div><span style="margin-left:8px">notty.app/login</span></div>
+        <div style="display:flex; align-items:center; justify-content:center; height: calc(100% - 32px); background: var(--paper-2); padding: 24px;">
+          <div class="card p-24" style="width: 360px;">
+            <div class="row gap-8" style="margin-bottom: 20px;">
+              <div style="width:24px;height:24px;border-radius:7px;background:var(--ink);display:flex;align-items:center;justify-content:center;color:#fff;font-family:var(--display);font-size:14px;font-style:italic;font-weight:500">n</div>
+              <span class="display" style="font-size:18px;">notty</span>
+            </div>
+            <h3 style="font-size:20px;font-weight:600;margin:0 0 4px;letter-spacing:-0.01em">Welcome back</h3>
+            <div class="small muted" style="margin-bottom:20px">Log in to your workspaces.</div>
+
+            <div class="col gap-12">
+              <div class="field">
+                <div class="lab">Email</div>
+                <div class="input"><span class="muted">amelia@studio.co</span></div>
+              </div>
+              <div class="field">
+                <div class="between"><div class="lab">Password</div><a class="tiny" style="color:var(--accent-700);text-decoration:none">Forgot?</a></div>
+                <div class="input"><span class="muted">••••••••••••</span></div>
+              </div>
+              <button class="btn accent full lg" style="margin-top:4px">Log in</button>
+              <div class="row" style="justify-content:center;font-size:12.5px;color:var(--ink-3);margin-top:4px">
+                No account? <a style="margin-left:4px;color:var(--accent-700);text-decoration:none;font-weight:500">Create one</a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- spec -->
+      <div class="prose-md">
+        <h3>Purpose</h3>
+        <p>Authenticate a returning account and hand the frontend a JWT + the list of workspaces they belong to. <strong>This screen is purely account-level</strong> — no workspace context yet.</p>
+
+        <h3>User experience</h3>
+        <ul>
+          <li>Email + password, with inline validation (email shape, min length 8 on password).</li>
+          <li>Submit on <span class="kbd">Enter</span>. Loading state on the CTA — never block the whole screen.</li>
+          <li>Bad credentials surface an inline non-modal error above the button: <em>"Email or password doesn't match an account."</em> Never leak which one failed.</li>
+          <li>On success: stash JWT in <code>httpOnly</code> cookie (or memory + refresh), then route to the picker.</li>
+        </ul>
+
+        <div class="trigger">
+          <b>Triggers</b><br>
+          • <strong>Submit:</strong> click "Log in" or press <span class="kbd">Enter</span> in either field.<br>
+          • <strong>Switch to register:</strong> "Create one" link → routes to <code>/register</code>.<br>
+          • <strong>Forgot password:</strong> link → routes to <code>/forgot</code> (out of scope of this flow).
+        </div>
+
+        <h3>Features for engineering</h3>
+        <ul>
+          <li>Form library: react-hook-form or equivalent. Show errors only after blur OR submit attempt — not on every keystroke.</li>
+          <li>Rate-limit feedback: after 5 failures, show a soft cooldown message; backend should also enforce.</li>
+          <li>Persist email locally so a fresh tab pre-fills it.</li>
+          <li>After success, call <code class="api">GET /api/workspaces</code> immediately — if length === 1, skip the picker and route straight to <code>/w/:slug</code>.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────────── REGISTER ───────────────── -->
+  <section class="doc-section" id="register">
+    <div class="sec-head">
+      <h2>B · Register</h2>
+      <div class="meta">Create the global account. No workspace yet — the next step is "Create workspace".</div>
+    </div>
+
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 32px; align-items: start;">
+      <div class="frame" style="aspect-ratio: 4/3;">
+        <div class="frame-bar"><div class="dots"><span></span><span></span><span></span></div><span style="margin-left:8px">notty.app/register</span></div>
+        <div style="display:flex; align-items:center; justify-content:center; height: calc(100% - 32px); background: var(--paper-2); padding: 24px;">
+          <div class="card p-24" style="width: 380px;">
+            <div class="row gap-8" style="margin-bottom: 20px;">
+              <div style="width:24px;height:24px;border-radius:7px;background:var(--ink);display:flex;align-items:center;justify-content:center;color:#fff;font-family:var(--display);font-size:14px;font-style:italic;font-weight:500">n</div>
+              <span class="display" style="font-size:18px;">notty</span>
+            </div>
+            <h3 style="font-size:20px;font-weight:600;margin:0 0 4px;letter-spacing:-0.01em">Create your account</h3>
+            <div class="small muted" style="margin-bottom:20px">You'll set up your workspace next.</div>
+
+            <div class="col gap-12">
+              <div class="field">
+                <div class="lab">Display name</div>
+                <div class="input"><span>Amelia Reyes</span></div>
+              </div>
+              <div class="field">
+                <div class="lab">Email</div>
+                <div class="input"><span>amelia@studio.co</span></div>
+              </div>
+              <div class="field">
+                <div class="lab">Password</div>
+                <div class="input focus"><span>•••••••••</span></div>
+                <div class="row gap-4" style="margin-top:2px">
+                  <div style="height:3px;flex:1;background:var(--ok);border-radius:2px"></div>
+                  <div style="height:3px;flex:1;background:var(--ok);border-radius:2px"></div>
+                  <div style="height:3px;flex:1;background:var(--ok);border-radius:2px"></div>
+                  <div style="height:3px;flex:1;background:var(--paper-3);border-radius:2px"></div>
+                </div>
+                <div class="hint">8+ characters · use a passphrase if possible.</div>
+              </div>
+              <button class="btn accent full lg" style="margin-top:4px">Create account</button>
+              <div class="tiny muted" style="text-align:center;line-height:1.5">By signing up you agree to the Terms &amp; Privacy.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="prose-md">
+        <h3>Purpose</h3>
+        <p>Create the <strong>global account</strong> (email is unique globally). Note: registration does <strong>not</strong> create a workspace and does <strong>not</strong> mint a handle — those happen at workspace creation. Per the README: <em>"Handles are unique inside a workspace, not globally."</em></p>
+
+        <h3>User experience</h3>
+        <ul>
+          <li>Three fields only: display name, email, password. Resist the urge to add anything else here.</li>
+          <li>Live password strength bar — visual only; the server is the gate.</li>
+          <li>On submit: account is created and the user is logged in. Route directly to <strong>Create workspace (D)</strong> — they have nothing to pick yet.</li>
+        </ul>
+
+        <div class="trigger">
+          <b>Triggers</b><br>
+          • <strong>Submit:</strong> "Create account" → <code class="api">POST /api/auth/register</code> → JWT issued → route to <code>/workspaces/new</code>.<br>
+          • <strong>Already have account:</strong> footer link → <code>/login</code>.
+        </div>
+
+        <h3>Features for engineering</h3>
+        <ul>
+          <li>Email-already-taken error is surfaced inline under the email field. Offer a "Log in instead" affordance when it triggers.</li>
+          <li>Password rules client-side: 8+ chars, not in common-password list (zxcvbn score ≥ 2).</li>
+          <li>No email verification step in the MVP scope — accounts are usable immediately.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────────── PICKER ───────────────── -->
+  <section class="doc-section" id="picker">
+    <div class="sec-head">
+      <h2>C · Workspace picker</h2>
+      <div class="meta">Shown only when the account belongs to more than one workspace. Single-workspace accounts skip this.</div>
+    </div>
+
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 32px; align-items: start;">
+      <div class="frame" style="aspect-ratio: 4/3;">
+        <div class="frame-bar"><div class="dots"><span></span><span></span><span></span></div><span style="margin-left:8px">notty.app/workspaces</span></div>
+        <div style="height: calc(100% - 32px); background: var(--paper-2); padding: 28px 40px; overflow:auto;">
+          <div style="max-width: 480px; margin: 0 auto;">
+            <div class="row gap-8" style="margin-bottom: 24px; justify-content:space-between;">
+              <div class="row gap-8">
+                <div style="width:24px;height:24px;border-radius:7px;background:var(--ink);display:flex;align-items:center;justify-content:center;color:#fff;font-family:var(--display);font-size:14px;font-style:italic;font-weight:500">n</div>
+                <span class="display" style="font-size:18px;">notty</span>
+              </div>
+              <div class="row gap-8">
+                <div class="avi sm you">A</div>
+                <span class="small">amelia@studio.co</span>
+              </div>
+            </div>
+
+            <h3 style="font-size:22px;font-weight:600;margin:0 0 4px;letter-spacing:-0.01em">Choose a workspace</h3>
+            <div class="small muted" style="margin-bottom:18px">You're a member of 3 workspaces.</div>
+
+            <div class="col gap-8">
+              <div class="card p-12 between" style="cursor:pointer">
+                <div class="row gap-12">
+                  <div class="avi lg" style="background:linear-gradient(140deg,#FCDEC5,#F0A875);color:#6B330C">St</div>
+                  <div class="col" style="gap:2px">
+                    <b>Studio Reyes</b>
+                    <div class="tiny muted">studio-reyes &middot; 12 members &middot; 4 daemons</div>
+                  </div>
+                </div>
+                <div class="row gap-6">
+                  <span class="chip code">@amelia</span>
+                  <svg class="i" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+                </div>
+              </div>
+              <div class="card p-12 between" style="cursor:pointer">
+                <div class="row gap-12">
+                  <div class="avi lg" style="background:linear-gradient(140deg,#DCEAFB,#A3C7F1);color:#1A3F6E">No</div>
+                  <div class="col" style="gap:2px">
+                    <b>Northwind Labs</b>
+                    <div class="tiny muted">northwind &middot; 38 members &middot; 7 daemons</div>
+                  </div>
+                </div>
+                <div class="row gap-6">
+                  <span class="chip code">@areyes</span>
+                  <svg class="i" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+                </div>
+              </div>
+              <div class="card p-12 between" style="cursor:pointer">
+                <div class="row gap-12">
+                  <div class="avi lg" style="background:linear-gradient(140deg,#E7E0F9,#C2B2EE);color:#3D2B7A">Pe</div>
+                  <div class="col" style="gap:2px">
+                    <b>Persimmon Co-op</b>
+                    <div class="tiny muted">persimmon &middot; 5 members &middot; 1 daemon</div>
+                  </div>
+                </div>
+                <div class="row gap-6">
+                  <span class="chip code">@amelia.r</span>
+                  <svg class="i" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+                </div>
+              </div>
+
+              <button class="btn full" style="margin-top:6px; height:42px; border-style:dashed; color:var(--ink-3); background:transparent">
+                <svg class="i" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+                Create a new workspace
+              </button>
+            </div>
+
+            <div class="row" style="justify-content:center;margin-top:18px">
+              <a class="small muted" style="text-decoration:none">Log out</a>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="prose-md">
+        <h3>Purpose</h3>
+        <p>Let the human <strong>pick which tenant they're entering</strong> for this session. The workspace boundary determines which documents, threads, daemons and agents they see — picking the wrong one shows nothing of theirs.</p>
+
+        <h3>User experience</h3>
+        <ul>
+          <li>Each card shows: workspace avatar/name, slug, member count, daemon count, and the user's <strong>per-workspace handle</strong> (because it can differ across workspaces).</li>
+          <li>Cards are sorted by <em>last-active-in-this-workspace</em>, descending. Persist last-active workspace locally for one-click re-entry.</li>
+          <li>Bottom CTA always offers "Create a new workspace" — never bury it behind a menu.</li>
+        </ul>
+
+        <div class="trigger">
+          <b>Triggers</b><br>
+          • <strong>Pick:</strong> click a card → route to <code>/w/{slug}</code>.<br>
+          • <strong>Create:</strong> dashed CTA → routes to "D · Create workspace".<br>
+          • <strong>Skip when alone:</strong> if <code>GET /api/workspaces</code> returns exactly one membership, never show this screen — route directly to <code>/w/{slug}</code>.
+        </div>
+
+        <h3>Features for engineering</h3>
+        <ul>
+          <li>Workspaces fetched once; cache for 5min, invalidate on workspace create/delete/leave.</li>
+          <li>Keyboard navigation: <span class="kbd">↑</span> <span class="kbd">↓</span> + <span class="kbd">↵</span>; <span class="kbd">⌘K</span> opens a small fuzzy search if &gt; 5 workspaces.</li>
+          <li>Empty state: zero memberships → render "D" inline instead of a separate screen.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────────── CREATE WORKSPACE ───────────────── -->
+  <section class="doc-section" id="create">
+    <div class="sec-head">
+      <h2>D · Create workspace</h2>
+      <div class="meta">Tenant + slug + the user's first workspace handle, in one form.</div>
+    </div>
+
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 32px; align-items: start;">
+      <div class="frame" style="aspect-ratio: 4/3;">
+        <div class="frame-bar"><div class="dots"><span></span><span></span><span></span></div><span style="margin-left:8px">notty.app/workspaces/new</span></div>
+        <div style="height: calc(100% - 32px); background: var(--paper-2); padding: 28px 40px; overflow:auto;">
+          <div style="max-width: 460px; margin: 0 auto;">
+            <a class="small muted row gap-6" style="text-decoration:none;margin-bottom:16px">
+              <svg class="i sm" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
+              Back to workspaces
+            </a>
+
+            <h3 style="font-size:24px;font-weight:600;margin:0 0 4px;letter-spacing:-0.01em">New workspace</h3>
+            <div class="small muted" style="margin-bottom:24px">A workspace is the boundary for your team's documents, daemons, agents, and threads.</div>
+
+            <div class="col gap-16">
+              <div class="field">
+                <div class="lab">Workspace name</div>
+                <div class="input"><span>Studio Reyes</span></div>
+              </div>
+
+              <div class="field">
+                <div class="lab">URL slug</div>
+                <div class="input" style="padding:0; overflow:hidden">
+                  <span class="mono small muted" style="padding:0 12px;background:var(--paper-2);height:34px;display:flex;align-items:center;border-right:1px solid var(--border)">notty.app/w/</span>
+                  <span class="mono small" style="padding:0 12px">studio-reyes</span>
+                </div>
+                <div class="hint">Lowercase, dashes only.</div>
+              </div>
+
+              <div class="divider" style="margin:6px 0"></div>
+
+              <div class="field">
+                <div class="lab">Your handle in this workspace</div>
+                <div class="input"><span class="mono small">@</span>&nbsp;<span>amelia</span></div>
+                <div class="hint">Used in mentions inside this workspace: <code>@amelia</code>. Different from other workspaces.</div>
+              </div>
+
+              <div class="field">
+                <div class="lab">Display name</div>
+                <div class="input"><span class="muted">Amelia Reyes</span></div>
+                <div class="hint">From your account; you can edit it per workspace.</div>
+              </div>
+
+              <button class="btn accent full lg" style="margin-top:8px">Create workspace</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="prose-md">
+        <h3>Purpose</h3>
+        <p>Mint the tenant <strong>and</strong> the founder's in-workspace identity in one shot. The workspace owner is set to this account.</p>
+
+        <h3>User experience</h3>
+        <ul>
+          <li>Slug auto-derives from name as the user types (kebab-case), but is editable.</li>
+          <li>Handle defaults to the local part of the email (<code>amelia@…</code> → <code>@amelia</code>), debounced live-check against the new workspace's namespace.</li>
+          <li>On success the user is dropped into the empty shell at <code>/w/{slug}</code> with a one-time onboarding nudge: <em>"Deploy your first daemon to bring agents in"</em>, deep-linked to Flow 04.</li>
+        </ul>
+
+        <div class="trigger">
+          <b>Triggers</b><br>
+          • <strong>Submit:</strong> "Create workspace" → <code class="api">POST /api/workspaces</code> (body: name, slug, handle, display_name).<br>
+          • <strong>Slug collision:</strong> backend 409 → inline error + suggest variants.<br>
+          • <strong>After create:</strong> route to <code>/w/{slug}</code> and open onboarding popover anchored to the "Daemons" nav item.
+        </div>
+
+        <h3>Features for engineering</h3>
+        <ul>
+          <li>One transaction on the backend: create workspace + create workspace_user (owner role).</li>
+          <li>Slug/handle live-validation endpoints; show ✓/✗ inline. 200ms debounce.</li>
+          <li>Disable submit until name, slug, and handle all pass client-side validation.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────────── SPEC ───────────────── -->
+  <section class="doc-section" id="spec">
+    <div class="sec-head">
+      <h2>Engineering spec — full surface</h2>
+      <div class="meta">All the contracts this flow depends on, in one table.</div>
+    </div>
+
+    <div class="spec">
+      <div class="k">Routes (FE)</div>
+      <div>
+        <code class="api">/login</code> · <code class="api">/register</code> · <code class="api">/workspaces</code> · <code class="api">/workspaces/new</code> · <code class="api">/w/:slug</code> (post-auth landing)
+      </div>
+
+      <div class="k">APIs (BE)</div>
+      <div>
+        <code class="api">POST /api/auth/register</code> → {jwt, account}<br>
+        <code class="api">POST /api/auth/login</code> → {jwt, account}<br>
+        <code class="api">POST /api/auth/logout</code><br>
+        <code class="api">GET /api/workspaces</code> → list of memberships (workspace + handle)<br>
+        <code class="api">POST /api/workspaces</code> body: <code>{name, slug, handle, display_name}</code><br>
+        <code class="api">GET /api/workspaces/check-slug?slug=</code> · <code class="api">GET /api/workspaces/:id/check-handle?h=</code>
+      </div>
+
+      <div class="k">Auth model</div>
+      <div>
+        JWT in <code>httpOnly</code> cookie. Token carries <code>account_id</code> only — workspace context is derived from the route (<code>/w/:slug</code>) and resolved against <code>workspace_members</code> on each request.
+      </div>
+
+      <div class="k">Components</div>
+      <div>
+        <code>&lt;AuthShell&gt;</code> centered card layout · <code>&lt;LoginForm&gt;</code> · <code>&lt;RegisterForm&gt;</code> · <code>&lt;WorkspacePicker&gt;</code> · <code>&lt;CreateWorkspaceForm&gt;</code> · shared <code>&lt;FieldInput&gt;</code>, <code>&lt;PasswordStrength&gt;</code>, <code>&lt;HandlePreview&gt;</code>.
+      </div>
+
+      <div class="k">State / cache</div>
+      <div>
+        <code>useAuth()</code> exposes <code>account</code>, <code>jwt</code>, <code>workspaces</code>, <code>activeWorkspace</code>. Workspaces cached via SWR with 5min staletime; invalidated on workspace create/delete/leave.
+      </div>
+
+      <div class="k">Error handling</div>
+      <div>
+        Inline form errors (never modal). Auth failure is generic ("Email or password doesn't match"). Slug/handle collisions show suggestions. Network errors → inline retry button, never a full-page toast.
+      </div>
+
+      <div class="k">Edge cases</div>
+      <div>
+        • Account with zero workspaces: route directly to <code>/workspaces/new</code> (skip picker).<br>
+        • Account with exactly one workspace: skip picker on login.<br>
+        • Expired JWT mid-session: redirect to <code>/login?return=…</code> preserving the deep link.<br>
+        • Invite-only sign-ups (future): same form, gated by an invite-token URL param.
+      </div>
+
+      <div class="k">Accessibility</div>
+      <div>
+        Full keyboard support; CTA is the default form action; password input announces strength via <code>aria-describedby</code>; workspace cards are <code>&lt;button&gt;</code> elements, not divs.
+      </div>
+
+      <div class="k">Analytics events</div>
+      <div>
+        <code>auth.register_submitted</code>, <code>auth.login_submitted</code>, <code>auth.login_succeeded</code>, <code>workspace.created</code>, <code>workspace.picked</code> (with placement: picker / direct).
+      </div>
+    </div>
+  </section>
+
+</main>
+</body>
+</html>

@@ -515,12 +515,14 @@ Response `201`:
 }
 ```
 
-Frontend should display the token once and provide a deployment command:
+Frontend should display the token once and provide a hosted installer command. The frontend origin defaults to `https://app.nottyai.co`; API, websocket, and daemon download traffic use that same origin.
 
 ```sh
-NOTTY_WORKSPACE_ID=ws_... \
-NOTTY_DAEMON_TOKEN=nottyd_... \
-docker compose --profile daemon up -d --build daemon
+curl -fsSL https://app.nottyai.co/daemons/install.sh | sh -s -- \
+  --backend-url https://app.nottyai.co \
+  --workspace-id ws_... \
+  --daemon-token nottyd_... \
+  --static-base https://app.nottyai.co/daemons
 ```
 
 Delete daemon:
@@ -1537,22 +1539,46 @@ docker compose up --build
 Open:
 
 ```text
+http://localhost
+```
+
+For frontend-only local debugging, the Vite preview server is also available on:
+
+```text
 http://localhost:5173
 ```
 
 Default services:
 
-- `backend`: Go API and websocket server on `:8080`.
-- `frontend`: React/Vite client on `:5173`.
+- `nginx`: public gateway on `${NOTTY_HTTP_PORT:-80}`; serves the homepage, frontend traffic, backend APIs/websockets, and daemon static artifacts.
+- `backend`: Go API and websocket server on internal port `:8080`; also bound to `127.0.0.1:${NOTTY_BACKEND_PORT:-8080}` for local development.
+- `frontend`: React/Vite client on internal port `:5173`; also bound to `127.0.0.1:${NOTTY_FRONTEND_PORT:-5173}` for local development.
 - `postgres`: canonical datastore.
 
-Start a daemon after creating a daemon token in the frontend:
+Default public routes:
+
+- Homepage: `https://nottyai.co`
+- App, API, websockets, and daemon downloads: `https://app.nottyai.co`
+
+For product development from a source checkout, `docker compose up --build` remains the supported one-command way to start the local backend, frontend, and Postgres stack. If host port 80 is unavailable locally, run `NOTTY_HTTP_PORT=8088 docker compose up --build` and open `http://localhost:8088`. The hosted installer is only for deploying a daemon onto a user's own machine without requiring the Notty source tree.
+
+Start an external daemon after creating a daemon token in the frontend:
 
 ```sh
-NOTTY_WORKSPACE_ID=ws_... \
-NOTTY_DAEMON_TOKEN=nottyd_... \
-docker compose --profile daemon up -d --build daemon
+curl -fsSL https://app.nottyai.co/daemons/install.sh | sh -s -- \
+  --backend-url https://app.nottyai.co \
+  --workspace-id ws_... \
+  --daemon-token nottyd_... \
+  --static-base https://app.nottyai.co/daemons
 ```
+
+Build daemon release artifacts for static hosting:
+
+```sh
+make daemon-release VERSION=v0.1.0
+```
+
+This creates `dist/daemons/install.sh`, `dist/daemons/latest/manifest.json`, `dist/daemons/latest/SHA256SUMS`, and versioned tarballs containing `notty-daemon` and `notty-agent-tool`. Docker Compose mounts `dist/daemons` into the Nginx gateway at `/daemons`; production deployments can serve the same directory from Nginx under the configured public origin. Gateway and static-only sample Nginx configs live under `deploy/nginx/`.
 
 Important backend environment variables:
 
@@ -1560,6 +1586,16 @@ Important backend environment variables:
 - `NOTTY_DATABASE_URL`: Postgres DSN.
 - `NOTTY_JWT_SECRET`: enables JWT auth when Postgres is configured.
 - `NOTTY_PPROF_ADDR`: optional pprof bind address.
+
+Important frontend environment variables:
+
+- `NOTTY_PUBLIC_ORIGIN`: public origin for frontend links, default `https://app.nottyai.co`. When opened on localhost, the frontend uses the current localhost origin for local development.
+- `NOTTY_HTTP_PORT`: Compose-facing host port for Nginx, default `80`. Use `8088` or another port for local development if port 80 is already taken.
+- `NOTTY_FRONTEND_PORT`: loopback-only frontend dev port, default `5173`.
+- `NOTTY_BACKEND_PORT`: loopback-only backend dev port, default `8080`.
+- `NOTTY_API_BASE`: optional frontend API origin override. By default, the frontend uses the public app origin.
+- `NOTTY_DAEMON_STATIC_BASE`: optional daemon artifact origin override. By default, the frontend uses `<public-app-origin>/daemons`.
+- `VITE_PUBLIC_ORIGIN`, `VITE_API_BASE`, and `VITE_DAEMON_STATIC_BASE`: build-time equivalents used outside Docker Compose.
 
 Important daemon environment variables:
 

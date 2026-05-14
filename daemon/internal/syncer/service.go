@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/maphash"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -89,6 +90,25 @@ var documentConnectMu sync.Mutex
 var nextDocumentConnect time.Time
 
 const documentConnectInterval = 100 * time.Millisecond
+const backendErrorBodyLimit = 4096
+
+type backendStatusError struct {
+	Method     string
+	URL        string
+	StatusCode int
+	Body       string
+}
+
+func (e *backendStatusError) Error() string {
+	if e == nil {
+		return ""
+	}
+	message := fmt.Sprintf("%s %s failed with HTTP %d", e.Method, e.URL, e.StatusCode)
+	if strings.TrimSpace(e.Body) != "" {
+		message += ": " + strings.TrimSpace(e.Body)
+	}
+	return message
+}
 
 type workspaceResponse struct {
 	CurrentDaemonID string        `json:"currentDaemonId"`
@@ -166,6 +186,13 @@ func (s *Service) Run(ctx context.Context) error {
 		return err
 	}
 	if err := s.refreshInitialWorkspace(ctx); err != nil {
+		s.closeConnections()
+		s.closeAgentWorkers()
+		s.closeAgentReplicas()
+		if s.sessions != nil {
+			s.sessions.Shutdown()
+		}
+		_ = shutdownToolGateway(context.Background(), s.toolServer)
 		return err
 	}
 	go s.workspaceEventLoop(ctx)
@@ -181,7 +208,9 @@ func (s *Service) Run(ctx context.Context) error {
 			s.closeConnections()
 			s.closeAgentWorkers()
 			s.closeAgentReplicas()
-			s.sessions.Shutdown()
+			if s.sessions != nil {
+				s.sessions.Shutdown()
+			}
 			_ = shutdownToolGateway(context.Background(), s.toolServer)
 			return nil
 		case event := <-s.watcher.Events:
@@ -234,6 +263,10 @@ func (s *Service) refreshInitialWorkspace(ctx context.Context) error {
 			return nil
 		} else {
 			lastErr = err
+			if isFatalInitializationError(err) {
+				fmt.Printf("initial refresh fatal error: %v\n", err)
+				return err
+			}
 			fmt.Printf("initial refresh error: %v; retrying\n", err)
 		}
 		if time.Now().After(deadline) {
@@ -248,6 +281,18 @@ func (s *Service) refreshInitialWorkspace(ctx context.Context) error {
 			backoff *= 2
 		}
 	}
+}
+
+func isFatalInitializationError(err error) bool {
+	var agentErr *agentSessionStartupError
+	if errors.As(err, &agentErr) {
+		return true
+	}
+	var statusErr *backendStatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.StatusCode == http.StatusUnauthorized || statusErr.StatusCode == http.StatusForbidden
+	}
+	return false
 }
 
 func (s *Service) workspaceEventLoop(ctx context.Context) {
@@ -341,7 +386,9 @@ func (s *Service) refresh(ctx context.Context) error {
 		return err
 	}
 	if s.sessions != nil {
-		s.sessions.Reconcile(ctx, workspace.Agents)
+		if err := s.sessions.Reconcile(ctx, workspace.Agents); err != nil {
+			return err
+		}
 	}
 	return s.removeMissingTracked(activeIDs)
 }
@@ -356,6 +403,15 @@ func (s *Service) fetchWorkspace(ctx context.Context) (*workspaceResponse, error
 		return nil, err
 	}
 	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(res.Body, backendErrorBodyLimit))
+		return nil, &backendStatusError{
+			Method:     req.Method,
+			URL:        req.URL.String(),
+			StatusCode: res.StatusCode,
+			Body:       string(body),
+		}
+	}
 
 	var workspace workspaceResponse
 	if err := json.NewDecoder(res.Body).Decode(&workspace); err != nil {

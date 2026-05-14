@@ -62,9 +62,6 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 		Body:          "Looks durable. Please review this @pg-reviewer",
 		RelativeStart: "pg-relative-start",
 		RelativeEnd:   "pg-relative-end",
-		Start:         0,
-		End:           6,
-		Line:          1,
 		Excerpt:       "# notty",
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
 	if err != nil {
@@ -1020,8 +1017,6 @@ func TestPostgresAgentInboxSkipsLogDocumentUpdatesButKeepsThreadMentions(t *test
 		Body:          "Please inspect @reviewer",
 		RelativeStart: "test-relative-start",
 		RelativeEnd:   "test-relative-end",
-		Start:         0,
-		End:           5,
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create log thread: %v", err)

@@ -7,3 +7,5 @@ frontend/.test-dist/
 
 .runtime/
 .vendor/
+bin/
+dist/

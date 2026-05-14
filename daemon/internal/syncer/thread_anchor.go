@@ -35,6 +35,7 @@ func (s *Service) prepareCreateThreadPayload(ctx context.Context, payload create
 		if hasThreadRangeTarget(payload) || strings.TrimSpace(payload.Quote) != "" {
 			return payload, fmt.Errorf("--document cannot be combined with line, range, quote, or offset anchors")
 		}
+		payload.Kind = "document"
 		payload.RelativeStart = ""
 		payload.RelativeEnd = ""
 		payload.Start = 0
@@ -48,6 +49,7 @@ func (s *Service) prepareCreateThreadPayload(ctx context.Context, payload create
 		if strings.TrimSpace(payload.RelativeStart) == "" || strings.TrimSpace(payload.RelativeEnd) == "" {
 			return payload, fmt.Errorf("relativeStart and relativeEnd must be provided together")
 		}
+		payload.Kind = "text-range"
 		return payload, nil
 	}
 
@@ -72,6 +74,7 @@ func (s *Service) prepareCreateThreadPayload(ctx context.Context, payload create
 	}
 	payload.RelativeStart = encodeRelativeAnchor(text, target.start)
 	payload.RelativeEnd = encodeRelativeAnchor(text, target.end)
+	payload.Kind = "text-range"
 	payload.Start = target.start
 	payload.End = target.end
 	payload.Line = target.line

@@ -1,0 +1,484 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>notty hi-fi · 04 Daemons</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css" />
+<style>
+  .ds-table { width:100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+  .ds-table th { text-align:left; padding: 10px 14px; color: var(--ink-4); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; border-bottom: 1px solid var(--border); background: var(--paper-2); }
+  .ds-table td { padding: 12px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  .ds-table tr:last-child td { border-bottom: none; }
+  .ds-table tr:hover td { background: var(--paper-2); }
+</style>
+</head>
+<body>
+
+<nav class="doc-nav">
+  <div class="doc-nav-inner between">
+    <div class="row gap-12">
+      <a href="index.html" class="row gap-6" style="text-decoration:none;color:var(--ink)">
+        <svg class="i sm" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
+        <span class="small" style="font-weight:500">all flows</span>
+      </a>
+      <span class="faint">/</span>
+      <span class="small">04 · Daemons</span>
+    </div>
+    <div class="row gap-16">
+      <a href="#list" class="small">Daemon list</a>
+      <a href="#create" class="small">Create + token</a>
+      <a href="#detail" class="small">Daemon detail</a>
+      <a href="#spec" class="small">Engineering spec</a>
+    </div>
+  </div>
+</nav>
+
+<main class="doc">
+  <header>
+    <h1 class="eyebrow">Flow 04</h1>
+    <h1 class="title">Daemons</h1>
+    <p class="lede">A daemon is a workspace-scoped local process. It projects docs to disk, watches filesystem changes, and supervises Codex agents. <strong>Tokens are revealed exactly once</strong> — after that, the backend has only the hash.</p>
+  </header>
+
+  <!-- ───── A · LIST ───── -->
+  <section class="doc-section" id="list">
+    <div class="sec-head">
+      <h2>A · Daemon list</h2>
+      <div class="meta">Liveness at a glance: online / stale / offline, plus agent count and last check-in.</div>
+    </div>
+
+    <div class="frame" style="height: 560px;">
+      <div class="frame-bar"><div class="dots"><span></span><span></span><span></span></div><span style="margin-left:8px">notty.app/w/studio-reyes/daemons</span></div>
+      <div style="padding: 28px 36px; background: var(--paper); height: calc(100% - 32px); overflow:auto">
+        <div class="between" style="margin-bottom: 20px;">
+          <div class="col" style="gap:2px">
+            <div class="row gap-8"><span class="display" style="font-size:26px">Daemons</span><span class="chip">4 total</span></div>
+            <div class="small muted">Local processes that sync this workspace and run agents.</div>
+          </div>
+          <div class="row gap-6">
+            <button class="btn"><svg class="i sm" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 3"/><path d="M21 3v6h-6"/></svg>Check liveness</button>
+            <button class="btn accent"><svg class="i sm" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New daemon</button>
+          </div>
+        </div>
+
+        <div class="row gap-12" style="margin-bottom: 18px;">
+          <div class="card p-12" style="flex:1">
+            <div class="label">Online</div>
+            <div class="display" style="font-size: 22px; color: var(--ok)">2</div>
+          </div>
+          <div class="card p-12" style="flex:1">
+            <div class="label">Stale</div>
+            <div class="display" style="font-size: 22px; color: var(--warn)">1</div>
+          </div>
+          <div class="card p-12" style="flex:1">
+            <div class="label">Offline</div>
+            <div class="display" style="font-size: 22px; color: var(--err)">1</div>
+          </div>
+          <div class="card p-12" style="flex:1">
+            <div class="label">Agents hosted</div>
+            <div class="display" style="font-size: 22px;">7</div>
+          </div>
+        </div>
+
+        <div class="card flat">
+          <table class="ds-table">
+            <thead>
+              <tr><th>Name</th><th>Status</th><th>Agents</th><th>Host</th><th>Last check-in</th><th></th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>
+                  <div class="row gap-8"><div class="avi sm daemon">D</div>
+                    <div class="col" style="gap:0">
+                      <b>daemon-prod</b>
+                      <div class="tiny muted mono">d_8c3f…11</div>
+                    </div>
+                  </div>
+                </td>
+                <td><span class="chip ok"><span class="dot ok pulse"></span>Online</span></td>
+                <td>3</td>
+                <td class="mono small muted">prod-mac-01</td>
+                <td class="small muted">8s ago</td>
+                <td><span class="btn ghost icon sm"><svg class="i sm" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg></span></td>
+              </tr>
+              <tr>
+                <td>
+                  <div class="row gap-8"><div class="avi sm daemon">D</div>
+                    <div class="col" style="gap:0">
+                      <b>daemon-amelia-laptop</b>
+                      <div class="tiny muted mono">d_3a91…aa</div>
+                    </div>
+                  </div>
+                </td>
+                <td><span class="chip ok"><span class="dot ok pulse"></span>Online</span></td>
+                <td>2</td>
+                <td class="mono small muted">amelia-mbp.local</td>
+                <td class="small muted">22s ago</td>
+                <td><span class="btn ghost icon sm"><svg class="i sm" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg></span></td>
+              </tr>
+              <tr>
+                <td>
+                  <div class="row gap-8"><div class="avi sm daemon">D</div>
+                    <div class="col" style="gap:0">
+                      <b>daemon-research-box</b>
+                      <div class="tiny muted mono">d_e02b…3c</div>
+                    </div>
+                  </div>
+                </td>
+                <td><span class="chip warn"><span class="dot warn"></span>Stale</span></td>
+                <td>1</td>
+                <td class="mono small muted">research-2.lan</td>
+                <td class="small muted">4m ago</td>
+                <td><span class="btn ghost icon sm"><svg class="i sm" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg></span></td>
+              </tr>
+              <tr>
+                <td>
+                  <div class="row gap-8"><div class="avi sm daemon" style="opacity:.55">D</div>
+                    <div class="col" style="gap:0">
+                      <b style="color:var(--ink-3)">daemon-staging</b>
+                      <div class="tiny muted mono">d_19fd…77</div>
+                    </div>
+                  </div>
+                </td>
+                <td><span class="chip err"><span class="dot err"></span>Offline</span></td>
+                <td>1</td>
+                <td class="mono small muted">stg-host-3</td>
+                <td class="small muted">2h ago</td>
+                <td><span class="btn ghost icon sm"><svg class="i sm" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg></span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="prose-md" style="margin-top: 24px; max-width: 980px;">
+      <h3>Purpose</h3>
+      <p>Operators need a one-glance view of which local processes are alive. Liveness drives every agent's status — a stale daemon means its agents go stale too.</p>
+
+      <h3>User experience</h3>
+      <ul>
+        <li>Counts at the top read like a small status board.</li>
+        <li>Rows have a stable visual identity: avatar tile + name + short fingerprint of the token hash.</li>
+        <li>Status chips share their dot color with sidebar dots elsewhere — same signal everywhere.</li>
+        <li>Row click → daemon detail (C). Overflow menu: rotate token, rename, delete.</li>
+      </ul>
+      <div class="trigger">
+        <b>Triggers</b><br>
+        • <strong>New daemon:</strong> "New daemon" button → modal (B).<br>
+        • <strong>Refresh:</strong> "Check liveness" button → re-fetches and animates updated dots.<br>
+        • <strong>Open detail:</strong> click row → routes to <code>/daemons/:id</code>.<br>
+        • <strong>Rotate / delete:</strong> overflow menu; rotate opens the same B modal with a "rotation" header.
+      </div>
+    </div>
+  </section>
+
+  <!-- ───── B · CREATE + TOKEN REVEAL ───── -->
+  <section class="doc-section" id="create">
+    <div class="sec-head">
+      <h2>B · Create daemon + one-time token reveal</h2>
+      <div class="meta">The most delicate moment in this flow: the user sees the token exactly once.</div>
+    </div>
+
+    <div style="display:grid; grid-template-columns: 1.1fr 1fr; gap: 32px; align-items: start;">
+      <div class="frame" style="height: 660px;">
+        <div class="frame-bar"><div class="dots"><span></span><span></span><span></span></div><span style="margin-left:8px">new daemon · step 2 of 2</span></div>
+        <div style="height: calc(100% - 32px); background: rgba(20,18,12,0.35); display:flex;align-items:center;justify-content:center; padding: 24px;">
+          <div class="card lifted" style="width: 520px;">
+            <!-- modal header -->
+            <div class="p-16 between" style="border-bottom: 1px solid var(--border)">
+              <div class="row gap-8">
+                <div class="avi sm daemon">D</div>
+                <div class="col" style="gap:0">
+                  <b>daemon-prod created</b>
+                  <div class="tiny muted">studio-reyes · workspace-scoped</div>
+                </div>
+              </div>
+              <span class="chip ok"><span class="dot ok"></span>Active</span>
+            </div>
+
+            <div class="p-16" style="border-bottom: 1px solid var(--border); background: linear-gradient(180deg, #FFF7EC, var(--paper));">
+              <div class="row gap-8" style="margin-bottom: 8px">
+                <div style="width:24px;height:24px;border-radius:7px;background:var(--accent-50);color:var(--accent-700);display:flex;align-items:center;justify-content:center">
+                  <svg class="i sm" viewBox="0 0 24 24"><path d="M12 2l9 4v6c0 5-4 9-9 10-5-1-9-5-9-10V6z"/></svg>
+                </div>
+                <b>Save this token now — you won't see it again.</b>
+              </div>
+              <div class="small muted" style="margin-bottom:12px">The backend stores only the SHA-256 hash. If you lose it, rotate to get a new one.</div>
+
+              <div class="row gap-6">
+                <div class="input code" style="flex:1; font-size: 13px; height: 38px; overflow:hidden">
+                  <span class="mono small">ndt_8f3a9b21c4e0…d5f7a221b08e4c3</span>
+                </div>
+                <button class="btn"><svg class="i sm" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V4H4v12h4"/></svg>Copy</button>
+                <button class="btn icon" title="Download .env"><svg class="i sm" viewBox="0 0 24 24"><path d="M12 3v12M5 12l7 7 7-7M5 21h14"/></svg></button>
+              </div>
+              <label class="row gap-6 tiny muted" style="margin-top:10px;cursor:pointer">
+                <input type="checkbox" /> I've saved the token securely
+              </label>
+            </div>
+
+            <!-- deploy instructions -->
+            <div class="p-16">
+              <div class="row between" style="margin-bottom: 8px">
+                <b class="small">Deploy with Docker Compose</b>
+                <div class="row gap-4">
+                  <button class="btn ghost sm" style="background:var(--paper-3);border-color:transparent">Compose</button>
+                  <button class="btn ghost sm">Binary</button>
+                  <button class="btn ghost sm">Kubernetes</button>
+                </div>
+              </div>
+              <pre class="code">
+<span class="cmt"># 1. drop into a directory you'll keep around</span>
+<span class="k">curl</span> -O <span class="s">https://notty.app/install/compose.yml</span>
+
+<span class="cmt"># 2. set env</span>
+<span class="k">export</span> NOTTY_WORKSPACE_ID=<span class="s">ws_studio-reyes</span>
+<span class="k">export</span> NOTTY_DAEMON_TOKEN=<span class="s">ndt_8f3a9b21c4e0…</span>
+
+<span class="cmt"># 3. start the daemon</span>
+<span class="k">docker compose</span> --profile daemon up -d</pre>
+
+              <div class="row between" style="margin-top:14px">
+                <div class="row gap-6">
+                  <span class="chip"><span class="dot"></span>Waiting for daemon to check in…</span>
+                </div>
+                <button class="btn accent" disabled style="opacity:.5">Done</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="prose-md">
+        <h3>Purpose</h3>
+        <p>Mint a workspace-scoped daemon token, reveal it <strong>exactly once</strong>, and give the operator everything they need to bring the daemon online from a local machine.</p>
+
+        <h3>User experience</h3>
+        <ul>
+          <li>Step 1 is a tiny "name + host (optional)" form (not shown — single input). Step 2, shown here, is the reveal.</li>
+          <li>The token block is treated as a security surface: amber wash, shield icon, "won't see it again" copy, mandatory "I've saved it" checkbox before <strong>Done</strong> enables.</li>
+          <li>Instructions tabs cover the common deploys: Docker Compose (recommended), Binary, K8s. Copy buttons on every code block.</li>
+          <li>While the modal is open, the bottom strip polls the daemon and flips to "Daemon online ✓" the moment it checks in; <strong>Done</strong> becomes enabled regardless of the checkbox once that happens.</li>
+        </ul>
+
+        <div class="trigger">
+          <b>Triggers</b><br>
+          • <strong>Open:</strong> "New daemon" button on the list, or "Rotate token" on a row's overflow menu.<br>
+          • <strong>Create:</strong> step 1 submit → <code class="api">POST /api/workspaces/:id/daemons</code> → returns <code>{daemon, token}</code>. Token is held in component memory only.<br>
+          • <strong>Copy / Download:</strong> client-side only; never re-fetches token.<br>
+          • <strong>Done:</strong> closes modal → routes to daemon detail.<br>
+          • <strong>Cancel:</strong> if the user closes without saving, show a confirmation: <em>"The token is gone if you close. Rotate later to get a new one."</em>
+        </div>
+
+        <h3>Features for engineering</h3>
+        <ul>
+          <li><strong>Token never leaves component state.</strong> Don't put it in Redux, localStorage, URL params, or analytics events.</li>
+          <li>Auto-clear on modal close. Memory zeroing isn't possible in JS, but unmount cleanly.</li>
+          <li>Liveness poll: <code class="api">GET /api/daemons/:id/liveness</code> every 3s while modal is open; cancel on unmount.</li>
+          <li>Rotation is the same modal with header "Rotate token". Old token is invalidated server-side at the moment the new one is minted.</li>
+          <li>Provide download as <code>.env</code> — the only outflow path other than copy.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───── C · DETAIL ───── -->
+  <section class="doc-section" id="detail">
+    <div class="sec-head">
+      <h2>C · Daemon detail</h2>
+      <div class="meta">One daemon — its agents, recent activity, liveness history, and operational actions.</div>
+    </div>
+
+    <div class="frame" style="height: 580px;">
+      <div class="frame-bar"><div class="dots"><span></span><span></span><span></span></div><span style="margin-left:8px">daemon-prod · detail</span></div>
+      <div style="height: calc(100% - 32px); display: grid; grid-template-columns: 1fr 320px; background: var(--paper);">
+        <div style="padding: 28px 32px; overflow:auto">
+          <a class="small muted row gap-6" href="#list" style="text-decoration:none;margin-bottom:12px">
+            <svg class="i sm" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>Daemons
+          </a>
+          <div class="row gap-12" style="margin-bottom: 18px;">
+            <div class="avi xl daemon">D</div>
+            <div class="col grow" style="gap:4px">
+              <div class="row gap-8">
+                <div class="display" style="font-size:24px">daemon-prod</div>
+                <span class="chip ok"><span class="dot ok pulse"></span>Online</span>
+              </div>
+              <div class="row gap-12 small muted">
+                <span class="mono">d_8c3f9d04…11a2</span>
+                <span>·</span>
+                <span>prod-mac-01</span>
+                <span>·</span>
+                <span>created Aug 12 by @amelia</span>
+              </div>
+            </div>
+            <div class="row gap-6">
+              <button class="btn sm"><svg class="i sm" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 3"/><path d="M21 3v6h-6"/></svg>Rotate token</button>
+              <button class="btn sm ghost icon"><svg class="i sm" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg></button>
+            </div>
+          </div>
+
+          <!-- mini stats -->
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:18px">
+            <div class="card p-12"><div class="label">Agents</div><div class="display" style="font-size:20px">3</div></div>
+            <div class="card p-12"><div class="label">Docs synced</div><div class="display" style="font-size:20px">142</div></div>
+            <div class="card p-12"><div class="label">Last sync</div><div class="display" style="font-size:20px">8s</div></div>
+            <div class="card p-12"><div class="label">Uptime</div><div class="display" style="font-size:20px">3d 4h</div></div>
+          </div>
+
+          <!-- agents owned -->
+          <div class="between" style="margin-bottom: 8px">
+            <b>Agents owned by this daemon</b>
+            <a href="05-agents.html" class="small" style="color:var(--accent-700);text-decoration:none">Manage agents →</a>
+          </div>
+          <div class="card flat">
+            <div style="padding:10px 14px;border-bottom:1px solid var(--border)" class="between">
+              <div class="row gap-8">
+                <div class="avi sm agent">ca</div>
+                <div class="col" style="gap:0"><b class="small">@cassia</b><div class="tiny muted">launch reporter</div></div>
+              </div>
+              <div class="row gap-8"><span class="chip ok sm"><span class="dot ok pulse"></span>running</span></div>
+            </div>
+            <div style="padding:10px 14px;border-bottom:1px solid var(--border)" class="between">
+              <div class="row gap-8">
+                <div class="avi sm agent">bo</div>
+                <div class="col" style="gap:0"><b class="small">@boreas</b><div class="tiny muted">research reader</div></div>
+              </div>
+              <div class="row gap-8"><span class="chip sm"><span class="dot"></span>idle</span></div>
+            </div>
+            <div style="padding:10px 14px" class="between">
+              <div class="row gap-8">
+                <div class="avi sm agent">dr</div>
+                <div class="col" style="gap:0"><b class="small">@drift</b><div class="tiny muted">copy editor</div></div>
+              </div>
+              <div class="row gap-8"><span class="chip warn sm"><span class="dot warn"></span>paused</span></div>
+            </div>
+          </div>
+
+          <div style="margin-top: 24px">
+            <b>Liveness — last 24 h</b>
+            <div class="card p-12" style="margin-top:8px">
+              <svg viewBox="0 0 600 64" style="width:100%;height:64px">
+                <defs>
+                  <linearGradient id="g1" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color="#2F8F5A" stop-opacity="0.22"/>
+                    <stop offset="100%" stop-color="#2F8F5A" stop-opacity="0"/>
+                  </linearGradient>
+                </defs>
+                <path d="M0 50 L40 48 L80 30 L120 38 L160 22 L200 24 L240 18 L280 28 L320 14 L360 20 L400 16 L440 22 L480 12 L520 18 L560 14 L600 18 L600 64 L0 64 Z" fill="url(#g1)"/>
+                <path d="M0 50 L40 48 L80 30 L120 38 L160 22 L200 24 L240 18 L280 28 L320 14 L360 20 L400 16 L440 22 L480 12 L520 18 L560 14 L600 18" fill="none" stroke="#2F8F5A" stroke-width="1.6"/>
+              </svg>
+              <div class="row between tiny muted">
+                <span>24h ago</span>
+                <span>now</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- right sub-pane -->
+        <aside style="border-left:1px solid var(--border); background: var(--paper-2); padding: 20px 18px; overflow:auto">
+          <div class="label" style="margin-bottom: 6px">Connection details</div>
+          <div class="card p-12 col gap-8" style="font-size:12.5px">
+            <div class="between"><span class="muted">Token fingerprint</span><span class="mono">8c3f…11a2</span></div>
+            <div class="between"><span class="muted">Endpoint</span><span class="mono">wss://api…</span></div>
+            <div class="between"><span class="muted">Workspace</span><span class="mono">studio-reyes</span></div>
+            <div class="between"><span class="muted">Daemon version</span><span class="mono">0.14.2</span></div>
+          </div>
+
+          <div class="label" style="margin: 16px 0 6px">Recent activity</div>
+          <div class="col gap-10" style="font-size:12.5px">
+            <div class="row gap-8"><span class="dot ok" style="margin-top:5px"></span><div class="col" style="gap:0"><span><b>Check-in</b></span><div class="tiny muted">8s ago</div></div></div>
+            <div class="row gap-8"><span class="dot daemon" style="margin-top:5px"></span><div class="col" style="gap:0"><span>Synced <code class="mono">/launch/press.md</code></span><div class="tiny muted">2m ago</div></div></div>
+            <div class="row gap-8"><span class="dot agent" style="margin-top:5px"></span><div class="col" style="gap:0"><span>@cassia run started</span><div class="tiny muted">12m ago</div></div></div>
+            <div class="row gap-8"><span class="dot warn" style="margin-top:5px"></span><div class="col" style="gap:0"><span>Brief disconnect (12s)</span><div class="tiny muted">2h ago</div></div></div>
+          </div>
+
+          <div class="label" style="margin: 18px 0 6px">Danger zone</div>
+          <button class="btn full danger sm" style="justify-content:flex-start">Delete daemon (stops agents)</button>
+        </aside>
+      </div>
+    </div>
+
+    <div class="prose-md" style="margin-top: 24px; max-width: 980px;">
+      <h3>Purpose</h3>
+      <p>The operational dashboard for one daemon. It surfaces liveness history (because brief disconnects matter), the agents it owns (because deleting a daemon kills them), and the safe-to-reveal token fingerprint (the last 4 of the hash, not the secret).</p>
+
+      <h3>User experience</h3>
+      <ul>
+        <li>Liveness chart is small and live-updated, not a focal point. The eye is drawn to the agents list.</li>
+        <li>Token <strong>fingerprint</strong> shown here is a one-way hash prefix — purely identity, not auth material.</li>
+        <li>Deleting a daemon shows a confirmation that names the agents that would be orphaned and offers to <em>"Reassign agents to another daemon"</em>.</li>
+      </ul>
+
+      <div class="trigger">
+        <b>Triggers</b><br>
+        • <strong>Rotate token:</strong> top-right → opens B with a "Rotation" header. New token shown once; old token invalidated atomically.<br>
+        • <strong>Manage agents:</strong> link → routes to Flow 05 filtered by this daemon.<br>
+        • <strong>Delete daemon:</strong> Danger Zone button → confirmation modal with agent reassignment option.<br>
+        • <strong>Check-in update:</strong> live SSE updates the liveness dot, chart tail, and "Last sync" stat without reload.
+      </div>
+    </div>
+  </section>
+
+  <!-- ───── SPEC ───── -->
+  <section class="doc-section" id="spec">
+    <div class="sec-head">
+      <h2>Engineering spec — full surface</h2>
+    </div>
+
+    <div class="spec">
+      <div class="k">Routes (FE)</div>
+      <div><code class="api">/w/:slug/daemons</code> · <code class="api">/w/:slug/daemons/new</code> · <code class="api">/w/:slug/daemons/:id</code></div>
+
+      <div class="k">APIs (BE)</div>
+      <div>
+        <code class="api">GET /api/workspaces/:id/daemons</code><br>
+        <code class="api">POST /api/workspaces/:id/daemons</code> → <code>{daemon, token}</code> (token returned exactly once)<br>
+        <code class="api">POST /api/daemons/:id/rotate-token</code> → new <code>{token}</code><br>
+        <code class="api">DELETE /api/daemons/:id</code> body: <code>{reassign_to?: daemon_id}</code><br>
+        <code class="api">GET /api/daemons/:id</code> · <code class="api">GET /api/daemons/:id/liveness?range=24h</code><br>
+        <code class="api">POST /api/daemons/checkin</code> (daemon-to-server; daemon-authenticated)
+      </div>
+
+      <div class="k">Daemon auth</div>
+      <div>
+        Daemons authenticate with the workspace-scoped opaque token. Backend stores only SHA-256 hash. Token rotation invalidates the old hash atomically. Daemons send their acting agent's UUID via <code>X-Notty-Acting-Agent-ID</code> on requests made on behalf of an agent.
+      </div>
+
+      <div class="k">Liveness model</div>
+      <div>
+        Status derived from <code>last_checkin_at</code>: <em>online</em> (&lt; 60s), <em>stale</em> (60s–10min), <em>offline</em> (&gt; 10min). Liveness history is checkpointed every minute for chart rendering.
+      </div>
+
+      <div class="k">Components</div>
+      <div>
+        <code>&lt;DaemonList&gt;</code>, <code>&lt;DaemonStatusChip&gt;</code>, <code>&lt;DaemonCreateModal&gt;</code> (multi-step), <code>&lt;TokenRevealCard&gt;</code> (uses memoized in-component state, never global), <code>&lt;DaemonDetail&gt;</code>, <code>&lt;LivenessSparkline&gt;</code>.
+      </div>
+
+      <div class="k">Security rules</div>
+      <div>
+        Token is in-component memory only. Never logged, never persisted, never sent to analytics. Copy/download are client-side. Rotation deletes the prior hash before responding so old daemons stop working immediately.
+      </div>
+
+      <div class="k">Edge cases</div>
+      <div>
+        • Delete a daemon with running agents → confirmation lists impacted agents and offers reassignment.<br>
+        • Daemon never checks in → modal shows "Still waiting…" with a "Show troubleshooting" toggle.<br>
+        • Network blip → "stale" within 60s, dot turns amber across the app simultaneously.
+      </div>
+
+      <div class="k">Analytics</div>
+      <div>
+        <code>daemon.created</code> · <code>daemon.token_copied</code> · <code>daemon.token_rotated</code> · <code>daemon.deleted</code> · <code>daemon.first_checkin</code> (with time-to-first-checkin metric).
+      </div>
+    </div>
+  </section>
+
+</main>
+</body>
+</html>

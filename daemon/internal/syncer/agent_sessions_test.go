@@ -3,6 +3,7 @@ package syncer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -11,11 +12,13 @@ import (
 )
 
 type fakeAppServerFactory struct {
-	mu           sync.Mutex
-	apps         []*fakeAppServer
-	startEntered chan struct{}
-	startRelease chan struct{}
-	turnSteerErr error
+	mu             sync.Mutex
+	apps           []*fakeAppServer
+	startEntered   chan struct{}
+	startRelease   chan struct{}
+	startErr       error
+	threadStartErr error
+	turnSteerErr   error
 }
 
 type fakeTurnStart struct {
@@ -46,6 +49,8 @@ type fakeAppServer struct {
 	nextTurn           int
 	startEntered       chan struct{}
 	startRelease       chan struct{}
+	startErr           error
+	threadStartErr     error
 	turnSteerErr       error
 }
 
@@ -55,10 +60,12 @@ func newFakeAppServerFactory() *fakeAppServerFactory {
 
 func (f *fakeAppServerFactory) new(cfg Config, workdir string, toolToken string, logName string) appServerClient {
 	app := &fakeAppServer{
-		events:       make(chan appServerEvent, 16),
-		startEntered: f.startEntered,
-		startRelease: f.startRelease,
-		turnSteerErr: f.turnSteerErr,
+		events:         make(chan appServerEvent, 16),
+		startEntered:   f.startEntered,
+		startRelease:   f.startRelease,
+		startErr:       f.startErr,
+		threadStartErr: f.threadStartErr,
+		turnSteerErr:   f.turnSteerErr,
 	}
 	f.mu.Lock()
 	f.apps = append(f.apps, app)
@@ -93,6 +100,9 @@ func (a *fakeAppServer) Start(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+	if a.startErr != nil {
+		return a.startErr
+	}
 	return nil
 }
 
@@ -108,6 +118,9 @@ func (a *fakeAppServer) ThreadStart(ctx context.Context, cwd string, instruction
 	defer a.mu.Unlock()
 	a.threadStartCount++
 	a.threadInstructions = append(a.threadInstructions, instructions)
+	if a.threadStartErr != nil {
+		return "", a.threadStartErr
+	}
 	return "thread_new", nil
 }
 
@@ -181,6 +194,61 @@ func TestAgentSessionStartsThreadWithDeveloperInstructions(t *testing.T) {
 	update := <-updates
 	if update.agentID != "agent_1" || update.payload.Status != "idle" || update.payload.CodexThreadID != "thread_new" {
 		t.Fatalf("unexpected session update: %#v", update)
+	}
+}
+
+func TestAgentSessionReconcileReturnsStartupError(t *testing.T) {
+	factory := newFakeAppServerFactory()
+	factory.startErr = errors.New("codex missing")
+	type statusUpdate struct {
+		agentID string
+		payload updateAgentSessionRequest
+	}
+	updates := make(chan statusUpdate, 1)
+	updater := func(ctx context.Context, agentID string, payload updateAgentSessionRequest) error {
+		updates <- statusUpdate{agentID: agentID, payload: payload}
+		return nil
+	}
+	supervisor := newAgentSessionSupervisor(Config{
+		AgentWorkspaceRoot: t.TempDir(),
+		RuntimeDir:         t.TempDir(),
+	}, updater, factory.new)
+	defer supervisor.Shutdown()
+
+	err := supervisor.Reconcile(context.Background(), []*agent{{ID: "agent_1", Handle: "swe", Kind: "codex"}})
+	if err == nil {
+		t.Fatal("expected reconcile startup error")
+	}
+	var startupErr *agentSessionStartupError
+	if !errors.As(err, &startupErr) || startupErr.AgentID != "agent_1" {
+		t.Fatalf("expected agent startup error, got %T %v", err, err)
+	}
+	update := <-updates
+	if update.agentID != "agent_1" || update.payload.Status != "disconnected" || !strings.Contains(update.payload.CurrentActivity, "codex missing") {
+		t.Fatalf("unexpected disconnected update: %#v", update)
+	}
+}
+
+func TestAgentSessionReconcileReturnsThreadStartError(t *testing.T) {
+	factory := newFakeAppServerFactory()
+	factory.threadStartErr = errors.New("thread start failed")
+	supervisor := newAgentSessionSupervisor(Config{
+		AgentWorkspaceRoot: t.TempDir(),
+		RuntimeDir:         t.TempDir(),
+	}, nil, factory.new)
+	defer supervisor.Shutdown()
+
+	err := supervisor.Reconcile(context.Background(), []*agent{{ID: "agent_1", Handle: "swe", Kind: "codex"}})
+	if err == nil {
+		t.Fatal("expected reconcile thread start error")
+	}
+	var startupErr *agentSessionStartupError
+	if !errors.As(err, &startupErr) || !strings.Contains(startupErr.Err.Error(), "thread start failed") {
+		t.Fatalf("expected wrapped thread start error, got %T %v", err, err)
+	}
+	app := factory.only(t)
+	if !app.stopped {
+		t.Fatal("failed thread start should stop the app server")
 	}
 }
 

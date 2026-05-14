@@ -9,14 +9,10 @@ import (
 )
 
 type threadAnchor struct {
-	DocumentID    string `json:"documentId"`
 	Kind          string `json:"kind"`
 	RelativeStart string `json:"relativeStart,omitempty"`
 	RelativeEnd   string `json:"relativeEnd,omitempty"`
-	Start         int    `json:"start"`
-	End           int    `json:"end"`
-	Line          int    `json:"line"`
-	Excerpt       string `json:"excerpt"`
+	Excerpt       string `json:"excerpt,omitempty"`
 }
 
 type threadMessage struct {
@@ -53,8 +49,6 @@ type agentEvent struct {
 	DocumentID      string    `json:"documentId"`
 	ThreadID        string    `json:"threadId"`
 	ThreadMessageID string    `json:"threadMessageId"`
-	AnchorStart     int       `json:"anchorStart"`
-	AnchorEnd       int       `json:"anchorEnd"`
 	FromUpdateID    int64     `json:"fromUpdateId"`
 	ToUpdateID      int64     `json:"toUpdateId"`
 	Summary         string    `json:"summary"`
@@ -70,6 +64,7 @@ type createThreadPayload struct {
 	Path          string `json:"path,omitempty"`
 	Title         string `json:"title"`
 	Body          string `json:"body"`
+	Kind          string `json:"kind,omitempty"`
 	Document      bool   `json:"document,omitempty"`
 	Quote         string `json:"quote,omitempty"`
 	RelativeStart string `json:"relativeStart,omitempty"`

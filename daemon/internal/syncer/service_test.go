@@ -337,6 +337,117 @@ func TestRefreshSharesFetchedWorkspaceWithWorkersAndReplicas(t *testing.T) {
 	}
 }
 
+func TestInitialRefreshFailsFastOnAgentStartupError(t *testing.T) {
+	factory := newFakeAppServerFactory()
+	factory.startErr = errors.New("codex missing")
+	var workspaceRequests atomic.Int32
+	workspace := workspaceResponse{
+		Agents: []*agent{{
+			ID:     "agent_1",
+			Handle: "agent-one",
+			Kind:   "codex",
+		}},
+	}
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/workspace":
+				workspaceRequests.Add(1)
+				body, err := json.Marshal(workspace)
+				if err != nil {
+					return nil, err
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(bytes.NewReader(body)),
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+				}, nil
+			case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agents/"):
+				body, err := json.Marshal(toolInboxResponse{Items: []*agentEvent{}})
+				if err != nil {
+					return nil, err
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(bytes.NewReader(body)),
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+				}, nil
+			default:
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Body:       io.NopCloser(strings.NewReader("not found")),
+				}, nil
+			}
+		}),
+	}
+	service := &Service{
+		cfg: Config{
+			BackendURL:         "http://backend.test",
+			WorkspaceDir:       t.TempDir(),
+			AgentWorkspaceRoot: t.TempDir(),
+			RuntimeDir:         t.TempDir(),
+			AgentID:            "daemon_agent",
+		},
+		client:          client,
+		projectedByPath: map[string]*trackedFile{},
+		projectedByID:   map[string]*trackedFile{},
+		agentReplicas:   map[string]*managedReplica{},
+		agentWorkers:    map[string]*managedAgentWorker{},
+	}
+	service.sessions = newAgentSessionSupervisor(service.cfg, nil, factory.new)
+	defer service.sessions.Shutdown()
+	defer service.closeAgentWorkers()
+
+	started := time.Now()
+	err := service.refreshInitialWorkspace(context.Background())
+	if err == nil {
+		t.Fatal("expected initial refresh to fail on resident agent startup error")
+	}
+	var startupErr *agentSessionStartupError
+	if !errors.As(err, &startupErr) || startupErr.AgentID != "agent_1" {
+		t.Fatalf("expected agent startup error, got %T %v", err, err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("agent startup errors should fail fast, took %s", elapsed)
+	}
+	if got := workspaceRequests.Load(); got != 1 {
+		t.Fatalf("expected no retry after fatal agent startup error, got %d workspace requests", got)
+	}
+}
+
+func TestInitialRefreshFailsFastOnUnauthorizedBackend(t *testing.T) {
+	var requests atomic.Int32
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			requests.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Body:       io.NopCloser(strings.NewReader("forbidden")),
+			}, nil
+		}),
+	}
+	service := &Service{
+		cfg:    Config{BackendURL: "http://backend.test"},
+		client: client,
+	}
+
+	started := time.Now()
+	err := service.refreshInitialWorkspace(context.Background())
+	if err == nil {
+		t.Fatal("expected initial refresh to fail on forbidden backend")
+	}
+	var statusErr *backendStatusError
+	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected forbidden backend status error, got %T %v", err, err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("forbidden backend should fail fast, took %s", elapsed)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("expected no retry after forbidden backend response, got %d requests", got)
+	}
+}
+
 func TestApplyProjectedContentUpdatesSnapshotBeforeWriting(t *testing.T) {
 	tracked := &trackedFile{Path: filepath.Join(t.TempDir(), "doc.md")}
 	tracked.setProjectedContent("old")

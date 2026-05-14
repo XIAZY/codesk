@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>notty hi-fi · 03 Documents & threads</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css" />
+<style>
+  .sel-pop {
+    position: absolute;
+    background: var(--ink); color: #fff;
+    border-radius: 10px;
+    padding: 4px;
+    display: flex; gap: 2px;
+    box-shadow: 0 18px 40px -12px rgba(0,0,0,0.35);
+  }
+  .sel-pop button {
+    all: unset; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 12.5px; font-weight: 500;
+    color: #fff;
+  }
+  .sel-pop button:hover { background: rgba(255,255,255,0.08); }
+  .sel-pop button.primary { background: var(--accent); }
+  .sel-pop button.primary:hover { background: var(--accent-700); }
+  .sel-pop .sep { width:1px; background: rgba(255,255,255,0.12); margin: 4px 2px; }
+
+  /* thread side-panel detail */
+  .tdetail { background: var(--paper); display: flex; flex-direction: column; height: 100%; }
+  .tdetail-head { padding: 12px 16px; border-bottom: 1px solid var(--border); display:flex; align-items:flex-start; justify-content:space-between; gap:10px;}
+  .tdetail-body { flex:1; overflow:auto; padding: 16px; display:flex; flex-direction:column; gap:14px;}
+  .tdetail-foot { border-top:1px solid var(--border); padding: 10px 12px; }
+  .quoted-range {
+    background: var(--accent-50);
+    border-left: 3px solid var(--accent);
+    padding: 8px 12px;
+    border-radius: 0 8px 8px 0;
+    font-size: 13.5px; color: var(--ink-2);
+    margin-bottom: 4px;
+  }
+  .quoted-range .line { font-family: var(--mono); font-size: 11px; color: var(--accent-700); margin-bottom: 4px; }
+</style>
+</head>
+<body>
+
+<nav class="doc-nav">
+  <div class="doc-nav-inner between">
+    <div class="row gap-12">
+      <a href="index.html" class="row gap-6" style="text-decoration:none;color:var(--ink)">
+        <svg class="i sm" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
+        <span class="small" style="font-weight:500">all flows</span>
+      </a>
+      <span class="faint">/</span>
+      <span class="small">03 · Documents &amp; threads</span>
+    </div>
+    <div class="row gap-16">
+      <a href="#create" class="small">Open thread on range</a>
+      <a href="#detail" class="small">Thread detail</a>
+      <a href="#gutter" class="small">Line affordance</a>
+      <a href="#spec" class="small">Engineering spec</a>
+    </div>
+  </div>
+</nav>
+
+<main class="doc">
+  <header>
+    <h1 class="eyebrow">Flow 03</h1>
+    <h1 class="title">Documents &amp; <em>threads</em></h1>
+    <p class="lede">Threads are the <strong>only</strong> discussion primitive — no comments, no proposals. They can be doc-level or anchored to a CRDT range. Display fields (line, excerpt) are advisory; the truth is the anchor, computed from Yjs relative positions.</p>
+  </header>
+
+  <!-- ───── A · OPEN THREAD ON RANGE ───── -->
+  <section class="doc-section" id="create">
+    <div class="sec-head">
+      <h2>A · Select text → open a thread</h2>
+      <div class="meta">The most common entry point. A range thread is born from a real selection.</div>
+    </div>
+
+    <div style="display:grid; grid-template-columns: 1.4fr 1fr; gap: 32px; align-items: start;">
+      <div class="frame" style="height: 560px;">
+        <div class="frame-bar"><div class="dots"><span></span><span></span><span></span></div><span style="margin-left:8px">Q3 launch plan</span></div>
+        <div class="editor-body" style="padding: 40px 48px; position:relative;">
+          <h1>Q3 launch plan</h1>
+          <p>This is our shared brief for the late-September launch — channels, owners, dependencies.</p>
+          <h2>Goals</h2>
+          <p>Three measurable outcomes by Oct&nbsp;7: <span style="background: #ffe6cf; padding:0 2px; box-shadow: 0 0 0 1.5px var(--accent);">12k self-serve signups</span>, 95% deploy success rate, and a clean 7-day retention curve over 35%.</p>
+          <p>Press list is in the linked doc and the daemon will sync the file tree to disk before we kick off rehearsal.</p>
+
+          <!-- selection popover -->
+          <div class="sel-pop" style="top: 178px; left: 232px;">
+            <button class="primary">
+              <svg class="i sm" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5A8.5 8.5 0 1 1 21 11.5z"/></svg>
+              Open thread
+            </button>
+            <div class="sep"></div>
+            <button title="Bold"><b>B</b></button>
+            <button title="Italic"><i>I</i></button>
+            <button title="Code"><span class="mono">{ }</span></button>
+            <button title="Link"><svg class="i sm" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg></button>
+            <div class="sep"></div>
+            <button>
+              <svg class="i sm" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>
+              Mention
+            </button>
+          </div>
+
+          <!-- inline draft drawer -->
+          <div class="card lifted" style="position:absolute; right: 36px; top: 168px; width: 260px;">
+            <div class="row between" style="padding: 10px 12px; border-bottom: 1px solid var(--border)">
+              <div class="row gap-6">
+                <svg class="i sm" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5A8.5 8.5 0 1 1 21 11.5z"/></svg>
+                <b class="small">New thread</b>
+              </div>
+              <span class="btn ghost icon sm"><svg class="i sm" viewBox="0 0 24 24"><path d="M6 6l12 12M6 18L18 6"/></svg></span>
+            </div>
+            <div style="padding: 10px 12px">
+              <div class="quoted-range" style="margin-bottom: 10px">
+                <div class="line">line 6 · range</div>
+                <span>12k self-serve signups</span>
+              </div>
+              <div class="input area" style="height:60px;border:none;background:transparent;padding:0;">
+                <span class="muted small">Ask @jules to confirm this number…</span>
+              </div>
+              <div class="row gap-6" style="flex-wrap:wrap;margin-top:6px">
+                <span class="chip agent sm">@cassia</span>
+                <span class="chip outline sm" style="border-style:dashed">+ mention</span>
+              </div>
+              <div class="between" style="margin-top:12px">
+                <span class="tiny muted"><span class="kbd">⌘↵</span> to post</span>
+                <button class="btn accent sm">Open thread</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="prose-md">
+        <h3>Purpose</h3>
+        <p>Lets a human (or agent CLI) start a conversation tied to a <strong>specific piece of text</strong>, with the anchor surviving edits — because the anchor is a CRDT relative position, not a character offset.</p>
+
+        <h3>User experience</h3>
+        <ul>
+          <li>Selecting any text shows a floating action bar with <strong>"Open thread"</strong> as the primary action, beside basic formatting.</li>
+          <li>Clicking it opens an inline drafter beside the selection, prefilled with a quoted snippet of the range.</li>
+          <li>The user types a message, optionally <code>@-mentions</code> humans or agents, and posts.</li>
+          <li>On post: the range highlight gets a permanent thread badge. The new thread appears in the right pane (selected) and in the line gutter.</li>
+        </ul>
+
+        <div class="trigger">
+          <b>Triggers</b><br>
+          • <strong>Selection:</strong> any text selection of ≥ 2 chars shows the floating bar; <span class="kbd">⌘/</span> opens the drafter without the bar.<br>
+          • <strong>Open thread (no selection):</strong> the right-pane "+" button creates a <em>doc-level</em> thread (no anchor).<br>
+          • <strong>Post:</strong> <span class="kbd">⌘↵</span> or click "Open thread" → creates the thread and clears selection.<br>
+          • <strong>Mention:</strong> typing <code>@</code> opens an autocomplete with humans + agents in this workspace.
+        </div>
+
+        <h3>Features for engineering</h3>
+        <ul>
+          <li>Capture the selection as a Yjs <strong>relative position pair</strong> (start, end) immediately at selection-time; persist that to the backend on submit.</li>
+          <li>Optimistic create: render the thread locally with a temp ID; reconcile on server response.</li>
+          <li>Excerpt field (≤ 80 chars) is sent for display fallback only; range remains authoritative.</li>
+          <li>Server may resolve the anchor server-side later for diff inboxes; client doesn't trust the line number across edits.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───── B · THREAD DETAIL ───── -->
+  <section class="doc-section" id="detail">
+    <div class="sec-head">
+      <h2>B · Thread detail</h2>
+      <div class="meta">Right-pane drilldown — the full conversation, participants, anchor jump.</div>
+    </div>
+
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 32px; align-items: start;">
+      <div class="frame" style="height: 620px; width: 420px;">
+        <div class="frame-bar"><div class="dots"><span></span><span></span><span></span></div><span style="margin-left:8px">thread #t_8f21</span></div>
+        <div class="tdetail" style="height: calc(100% - 32px);">
+          <div class="tdetail-head">
+            <div class="col" style="gap:6px;flex:1;min-width:0">
+              <div class="row gap-6">
+                <span class="btn ghost icon sm" title="Back"><svg class="i sm" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg></span>
+                <b>Thread</b>
+                <span class="chip sm">3 replies</span>
+              </div>
+              <div class="quoted-range">
+                <div class="line">line 6 · "Q3 launch plan"</div>
+                <span>12k self-serve signups</span>
+                <a class="tiny" style="display:inline-block;margin-top:4px;color:var(--accent-700);text-decoration:none">↗ jump to range</a>
+              </div>
+            </div>
+            <span class="btn ghost icon sm"><svg class="i sm" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg></span>
+          </div>
+
+          <div class="tdetail-body">
+            <div class="tmsg">
+              <div class="avi sm">J</div>
+              <div class="tmsg-body">
+                <div class="meta"><b>Jules</b> · 14m ago</div>
+                <div>Are we still locked on Sep 24? Marketing was asking about a slip to Oct 1.</div>
+              </div>
+            </div>
+
+            <div class="tmsg is-agent">
+              <div class="avi sm agent">ca</div>
+              <div class="tmsg-body">
+                <div class="meta"><b style="color:var(--agent)">@cassia</b> · agent · 12m ago</div>
+                <div>Yes — daemon checked the calendar overlap with the Northwind launch and Sep 24 is clean. I can draft a press hold note if you want.</div>
+              </div>
+            </div>
+
+            <div class="tmsg">
+              <div class="avi sm you">A</div>
+              <div class="tmsg-body">
+                <div class="meta"><b>You</b> · 10m ago</div>
+                <div><span class="mention agent">@cassia</span> draft it — keep it under 80 words.</div>
+              </div>
+            </div>
+
+            <div class="tmsg is-agent">
+              <div class="avi sm agent">ca</div>
+              <div class="tmsg-body">
+                <div class="meta"><b style="color:var(--agent)">@cassia</b> · agent · 2m ago</div>
+                <div>Drafted in <code style="font-family:var(--mono);font-size:12px">/launch/press-hold.md</code>. <a style="color:var(--accent-700);text-decoration:none">Open ↗</a></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="tdetail-foot">
+            <div class="row gap-6" style="margin-bottom:6px">
+              <span class="label">Participants</span>
+              <div class="avi-stack" style="margin-left:auto">
+                <div class="avi sm">J</div>
+                <div class="avi sm you">A</div>
+                <div class="avi sm agent">ca</div>
+              </div>
+            </div>
+            <div class="input area" style="min-height:60px;align-items:flex-start">
+              <span class="muted small">Reply… use <span class="kbd">@</span> to mention humans or agents</span>
+            </div>
+            <div class="between" style="margin-top:6px">
+              <div class="row gap-4">
+                <span class="btn ghost icon sm" title="Attach"><svg class="i sm" viewBox="0 0 24 24"><path d="M21 11l-9 9a5 5 0 0 1-7-7l9-9a3 3 0 0 1 4 4l-9 9a1 1 0 0 1-1-1l8-8"/></svg></span>
+                <span class="btn ghost icon sm" title="Code"><svg class="i sm" viewBox="0 0 24 24"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/></svg></span>
+              </div>
+              <button class="btn accent sm">Reply</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="prose-md">
+        <h3>Purpose</h3>
+        <p>One thread, end to end. Humans and agents speak in the same chronological list — agent messages are tinted, never hidden. Anchor is visible and clickable so context is never lost.</p>
+
+        <h3>User experience</h3>
+        <ul>
+          <li>Opens in the right pane (over the thread list) when a thread is selected. Sticky header with anchor; sticky composer at bottom.</li>
+          <li>"Jump to range" scrolls the editor to the anchored span and flashes it briefly.</li>
+          <li>Composer supports <code>@</code> mentions; mentioning an agent puts the message in their <strong>for-me inbox</strong> (Flow 06).</li>
+          <li>Agent messages are styled with the agent tint but use the same bubble grammar as human messages — emphasis is on collaboration, not species.</li>
+        </ul>
+
+        <div class="trigger">
+          <b>Triggers</b><br>
+          • <strong>Open thread:</strong> click a row in the right-pane Threads list, or click a range highlight in the editor, or click a line-gutter chip.<br>
+          • <strong>Reply:</strong> <span class="kbd">⌘↵</span> or click "Reply" → <code class="api">POST /api/threads/:id/messages</code>.<br>
+          • <strong>Mention agent:</strong> creates a <em>for-me</em> inbox event for that agent.<br>
+          • <strong>Jump to range:</strong> resolve the relative position to current Y state, scroll editor, flash highlight.<br>
+          • <strong>Resolve / mute / archive:</strong> overflow menu (top-right); resolved threads collapse with a "View resolved" toggle in the list.
+        </div>
+
+        <h3>Features for engineering</h3>
+        <ul>
+          <li>Messages stream via WS or SSE — same channel as activity. New messages animate in.</li>
+          <li>Optimistic send, with retry button if the message fails.</li>
+          <li>Mentions are stored structurally (target type + ID), not parsed from text at render time.</li>
+          <li>Anchor resolution: the editor resolves the relative position once when the thread opens; if the range is "lost" (deleted content), show a "anchor moved/removed" pill with the original excerpt.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───── C · LINE GUTTER AFFORDANCE ───── -->
+  <section class="doc-section" id="gutter">
+    <div class="sec-head">
+      <h2>C · Open threads on a line</h2>
+      <div class="meta">A hover affordance in the line gutter reveals existing threads + opens a quick summary.</div>
+    </div>
+
+    <div style="display:grid; grid-template-columns: 1.2fr 1fr; gap: 32px; align-items: start;">
+      <div class="frame" style="height: 460px;">
+        <div class="frame-bar"><div class="dots"><span></span><span></span><span></span></div><span style="margin-left:8px">Q3 launch plan</span></div>
+        <div class="editor-body" style="padding: 32px 48px;position:relative">
+          <h1>Q3 launch plan</h1>
+          <p>This is our shared brief for the late-September launch.</p>
+          <h2>Channels</h2>
+          <p style="position:relative">
+            <!-- gutter chips -->
+            <span style="position:absolute;left:-36px;top:0;display:flex;flex-direction:column;gap:6px;color:var(--ink-4);font-size:11px;font-family:var(--mono)">
+              <span>1</span>
+              <span>2</span>
+              <span style="color:var(--accent);font-weight:600">3</span>
+              <span>4</span>
+            </span>
+            1. Email — segmented sequence (5 emails).<br>
+            2. Blog — engineering deep dive on daemon model.<br>
+            <span style="background: linear-gradient(180deg,transparent 55%,var(--accent-100) 55%); padding: 0 2px;">3. Twitter/X — short thread, 2 short videos, demo clip.</span>
+            <button class="btn sm" style="margin-left:8px; height:22px; padding:0 8px; font-size:11px; border-color: var(--accent); color:var(--accent-700); background: var(--accent-50);">
+              <svg class="i sm" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5A8.5 8.5 0 1 1 21 11.5z"/></svg>
+              2 threads
+            </button><br>
+            4. Hacker News — Show HN post coordinated for Tuesday 9a PT.
+          </p>
+
+          <!-- hover popover summarizing threads on this line -->
+          <div class="card lifted" style="position: absolute; left: 230px; top: 232px; width: 300px;">
+            <div class="p-12" style="border-bottom:1px solid var(--border)">
+              <div class="between">
+                <b class="small">2 threads on this line</b>
+                <span class="tiny muted">line 3</span>
+              </div>
+            </div>
+            <div class="p-12 col gap-8" style="gap:10px">
+              <div class="row gap-8" style="cursor:pointer">
+                <div class="avi sm agent">bo</div>
+                <div class="col" style="gap:2px;flex:1">
+                  <div class="small"><b>@boreas</b> Should we add a 30s product clip here? <span class="chip sm" style="margin-left:4px">2 replies</span></div>
+                  <div class="tiny muted">12m · 2 participants</div>
+                </div>
+              </div>
+              <div class="divider"></div>
+              <div class="row gap-8" style="cursor:pointer">
+                <div class="avi sm">J</div>
+                <div class="col" style="gap:2px;flex:1">
+                  <div class="small"><b>Jules</b> Demo clip should match the blog hero.</div>
+                  <div class="tiny muted">1h · resolved</div>
+                </div>
+              </div>
+            </div>
+            <div class="between" style="padding: 8px 12px; border-top: 1px solid var(--border); background: var(--paper-2);">
+              <button class="btn ghost sm">Start new thread</button>
+              <span class="tiny muted"><span class="kbd">↵</span> open</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="prose-md">
+        <h3>Purpose</h3>
+        <p>Multiple threads can anchor to the same line. This affordance prevents pile-ups and gives a "what's been said about this" view that doesn't require leaving the doc.</p>
+
+        <h3>User experience</h3>
+        <ul>
+          <li>Lines with ≥ 1 thread show a small chip after the line: <em>"N threads"</em>.</li>
+          <li>Hovering the chip opens a popover summarizing each thread (most recent first); the line is also softly highlighted in the gutter.</li>
+          <li>Clicking a thread opens the right-pane detail; the chip stays so the user can come back.</li>
+          <li>"Start new thread" creates a doc-level-but-line-pinned thread on this line.</li>
+        </ul>
+
+        <div class="trigger">
+          <b>Triggers</b><br>
+          • <strong>Hover chip:</strong> opens summary popover.<br>
+          • <strong>Click row:</strong> opens thread detail.<br>
+          • <strong>Keyboard:</strong> <span class="kbd">⌥T</span> while caret is on a line cycles through that line's threads.
+        </div>
+
+        <h3>Features for engineering</h3>
+        <ul>
+          <li>Thread-counts-by-line are computed by resolving each thread's anchor against the current Y doc. Cache per render frame.</li>
+          <li>Gutter chip is virtualized along with the editor lines; never render off-screen chips.</li>
+          <li>"Resolved" threads dim but are not hidden; toggle in popover to hide.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───── SPEC ───── -->
+  <section class="doc-section" id="spec">
+    <div class="sec-head">
+      <h2>Engineering spec — full surface</h2>
+    </div>
+
+    <div class="spec">
+      <div class="k">APIs (BE)</div>
+      <div>
+        <code class="api">POST /api/documents/:id/threads</code> body: <code>{anchor?: {start, end}, excerpt?, message: {body, mentions?}}</code><br>
+        <code class="api">GET /api/documents/:id/threads</code> · <code class="api">GET /api/threads/:id</code><br>
+        <code class="api">POST /api/threads/:id/messages</code> body: <code>{body, mentions?}</code><br>
+        <code class="api">PATCH /api/threads/:id</code> body: <code>{status: 'open'|'resolved'|'archived'}</code><br>
+        <code class="api">GET /api/threads/:id/messages?after=cursor</code>
+      </div>
+
+      <div class="k">Anchor model</div>
+      <div>
+        Range threads store <em>Yjs relative positions</em> for start and end. Server keeps them opaque; the client resolves them against the current doc state to compute current absolute positions. <strong>Never trust the cached line number</strong> across edits.
+      </div>
+
+      <div class="k">Mentions</div>
+      <div>
+        Stored as <code>{type: 'user'|'agent', id, handle_at_insert}</code>. Mentioning an agent enqueues a <code>thread.mention</code> event on that agent's <strong>for-me</strong> inbox (Flow 06).
+      </div>
+
+      <div class="k">Components</div>
+      <div>
+        <code>&lt;SelectionToolbar&gt;</code> · <code>&lt;ThreadDrafter&gt;</code> · <code>&lt;ThreadList&gt;</code> · <code>&lt;ThreadDetail&gt;</code> · <code>&lt;ThreadMessage&gt;</code> · <code>&lt;GutterThreadChip&gt;</code> · <code>&lt;MentionAutocomplete&gt;</code>.
+      </div>
+
+      <div class="k">Realtime</div>
+      <div>
+        New messages and new threads are broadcast over the workspace SSE/WS channel. The active doc's threads tab updates live; non-active threads bump a count badge in the sidebar.
+      </div>
+
+      <div class="k">Editor integration</div>
+      <div>
+        TipTap + <code>y-prosemirror</code>. A custom <code>ThreadAnchorMark</code> decorates ranges that have at least one open thread. Anchored highlights are rendered as ProseMirror decorations, not stored marks.
+      </div>
+
+      <div class="k">Edge cases</div>
+      <div>
+        Anchor lost (range deleted) → display a non-modal "anchor removed; original excerpt preserved" tag in thread detail. Cross-doc references (a thread mentions another doc) are rendered as inline links.
+      </div>
+    </div>
+  </section>
+
+</main>
+</body>
+</html>

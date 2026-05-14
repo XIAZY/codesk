@@ -258,6 +258,24 @@ func uniqueWorkspaceHandle(db *sql.DB, workspaceID string, base string) (string,
 	return "", fmt.Errorf("could not allocate unique handle for %q", handle)
 }
 
+func uniqueWorkspaceSlug(db *sql.DB, base string) (string, error) {
+	slug := normalizeWorkspaceSlug(base)
+	for attempt := 0; attempt < 1000; attempt++ {
+		candidate := slug
+		if attempt > 0 {
+			candidate = fmt.Sprintf("%s-%d", slug, attempt+1)
+		}
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM workspaces WHERE slug = $1`, candidate).Scan(&count); err != nil {
+			return "", err
+		}
+		if count == 0 {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("could not allocate unique workspace slug for %q", slug)
+}
+
 func accountFromRow(row *sql.Row) (*Account, error) {
 	account := &Account{}
 	if err := row.Scan(&account.ID, &account.Email, &account.DisplayName, &account.CreatedAt, &account.UpdatedAt); err != nil {
@@ -386,7 +404,10 @@ func createWorkspaceForAccount(db *sql.DB, account *Account, req CreateWorkspace
 	if name == "" {
 		name = "Untitled workspace"
 	}
-	slug := normalizeWorkspaceSlug(firstNonEmptyString(req.Slug, name))
+	slug, err := uniqueWorkspaceSlug(db, firstNonEmptyString(req.Slug, name))
+	if err != nil {
+		return nil, nil, err
+	}
 	now := time.Now().UTC()
 	workspace := &Workspace{
 		ID:        "ws_" + uuid.NewString(),

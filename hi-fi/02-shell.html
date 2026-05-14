@@ -1,0 +1,524 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>notty hi-fi · 02 Workspace shell</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css" />
+<style>
+  /* shell-specific */
+  .shell {
+    display: grid;
+    grid-template-columns: 248px 1fr 320px;
+    height: 100%;
+    background: var(--paper);
+  }
+  .sb { background: var(--paper-2); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
+  .doc-area { display: flex; flex-direction: column; min-height: 0; }
+  .ctx { border-left: 1px solid var(--border); background: var(--paper-2); display: flex; flex-direction: column; min-height: 0; }
+  .sb-section { padding: 4px 8px; }
+  .sb-section .lab { padding: 0 8px; margin: 8px 0 4px; display:flex; align-items:center; justify-content:space-between; }
+  .doc-toolbar {
+    height: 44px; padding: 0 18px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    background: var(--paper);
+  }
+  .breadcrumb { display:flex; align-items:center; gap:6px; font-size:13px; color:var(--ink-3); }
+  .breadcrumb b { color: var(--ink); font-weight: 500; }
+  .doc-canvas { flex: 1; overflow: auto; background: var(--paper); }
+  .doc-inner { max-width: 740px; margin: 0 auto; padding: 56px 32px 120px; position: relative; }
+</style>
+</head>
+<body>
+
+<nav class="doc-nav">
+  <div class="doc-nav-inner between">
+    <div class="row gap-12">
+      <a href="index.html" class="row gap-6" style="text-decoration:none;color:var(--ink)">
+        <svg class="i sm" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
+        <span class="small" style="font-weight:500">all flows</span>
+      </a>
+      <span class="faint">/</span>
+      <span class="small">02 · Workspace shell (three-pane)</span>
+    </div>
+    <div class="row gap-16">
+      <a href="#full" class="small">Shell</a>
+      <a href="#regions" class="small">Regions</a>
+      <a href="#empty" class="small">Empty state</a>
+      <a href="#spec" class="small">Engineering spec</a>
+    </div>
+  </div>
+</nav>
+
+<main class="doc">
+  <header>
+    <h1 class="eyebrow">Flow 02</h1>
+    <h1 class="title">Workspace <em>shell</em></h1>
+    <p class="lede">The home of every working day. <strong>Three panes</strong>: left navigation (docs + people + agents + daemons), center document editor, right context (threads, presence, activity). Only the active document opens a CRDT websocket — everything else is metadata.</p>
+  </header>
+
+  <!-- ───────── FULL SHELL ───────── -->
+  <section class="doc-section" id="full">
+    <div class="sec-head">
+      <h2>The shell — full view</h2>
+      <div class="meta">A user opening "Q3 launch plan" with a thread anchored on the headline.</div>
+    </div>
+
+    <div class="frame" style="height: 760px;">
+      <div class="frame-bar"><div class="dots"><span></span><span></span><span></span></div><span style="margin-left:8px">notty.app/w/studio-reyes/d/q3-launch-plan</span></div>
+
+      <div class="shell" style="height: calc(100% - 32px);">
+
+        <!-- ───── LEFT SIDEBAR ───── -->
+        <aside class="sb">
+          <!-- workspace switcher -->
+          <div style="padding: 10px 12px; border-bottom: 1px solid var(--border); display:flex; align-items:center; justify-content:space-between; gap:8px;">
+            <div class="row gap-8" style="cursor:pointer;flex:1;min-width:0;">
+              <div class="avi" style="background:linear-gradient(140deg,#FCDEC5,#F0A875);color:#6B330C">St</div>
+              <div class="col" style="gap:0;min-width:0">
+                <b class="small" style="line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Studio Reyes</b>
+                <div class="tiny muted" style="line-height:1.2">@amelia</div>
+              </div>
+              <svg class="i sm muted" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5"/></svg>
+            </div>
+          </div>
+
+          <!-- search / new -->
+          <div style="padding: 8px;">
+            <div class="input" style="height:30px;font-size:12.5px;color:var(--ink-4);justify-content:space-between">
+              <div class="row gap-6">
+                <svg class="i sm" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
+                <span>Search or jump…</span>
+              </div>
+              <span class="kbd">⌘K</span>
+            </div>
+          </div>
+
+          <!-- top nav -->
+          <div class="sb-section">
+            <div class="nav-item">
+              <svg class="i sm" viewBox="0 0 24 24"><path d="M3 12l9-9 9 9M5 10v10h14V10"/></svg>
+              <span>Home</span>
+            </div>
+            <div class="nav-item">
+              <svg class="i sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+              <span>Activity</span>
+              <span class="ct has">12</span>
+            </div>
+            <div class="nav-item">
+              <svg class="i sm" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5A8.5 8.5 0 1 1 21 11.5z"/></svg>
+              <span>Threads</span>
+              <span class="ct">3</span>
+            </div>
+          </div>
+
+          <div class="divider" style="margin: 6px 8px;"></div>
+
+          <!-- documents tree -->
+          <div class="sb-section flex-1" style="overflow:auto">
+            <div class="lab">
+              <span class="label">Documents</span>
+              <span class="row gap-2">
+                <span class="btn ghost icon sm" title="New doc"><svg class="i sm" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span>
+              </span>
+            </div>
+
+            <div class="nav-item">
+              <span class="car">▾</span>
+              <svg class="i sm" viewBox="0 0 24 24"><path d="M3 7l9-4 9 4-9 4-9-4zm0 6l9 4 9-4M3 17l9 4 9-4"/></svg>
+              <span>Launch</span>
+            </div>
+            <div style="padding-left:16px">
+              <div class="nav-item on">
+                <span class="car">·</span>
+                <svg class="i sm" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+                <span>Q3 launch plan</span>
+                <span class="ct has">2</span>
+              </div>
+              <div class="nav-item">
+                <span class="car">·</span>
+                <svg class="i sm" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+                <span>Press messaging</span>
+              </div>
+              <div class="nav-item">
+                <span class="car">·</span>
+                <svg class="i sm" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+                <span>Pricing model</span>
+              </div>
+            </div>
+            <div class="nav-item">
+              <span class="car">▸</span>
+              <svg class="i sm" viewBox="0 0 24 24"><path d="M3 7l9-4 9 4-9 4-9-4zm0 6l9 4 9-4M3 17l9 4 9-4"/></svg>
+              <span>Engineering</span>
+            </div>
+            <div class="nav-item">
+              <span class="car">▸</span>
+              <svg class="i sm" viewBox="0 0 24 24"><path d="M3 7l9-4 9 4-9 4-9-4zm0 6l9 4 9-4M3 17l9 4 9-4"/></svg>
+              <span>Research</span>
+            </div>
+            <div class="nav-item">
+              <span class="car">▾</span>
+              <svg class="i sm" viewBox="0 0 24 24"><path d="M3 7l9-4 9 4-9 4-9-4zm0 6l9 4 9-4M3 17l9 4 9-4"/></svg>
+              <span>Agents</span>
+            </div>
+            <div style="padding-left:16px">
+              <div class="nav-item">
+                <span class="car">·</span>
+                <svg class="i sm" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+                <span>cassia / log.md</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- agents/daemons summary -->
+          <div class="divider"></div>
+          <div style="padding: 10px 12px;">
+            <div class="row between" style="margin-bottom:8px">
+              <span class="label">Agents</span>
+              <span class="btn ghost sm" style="height:22px;padding:0 6px;font-size:11px">
+                <svg class="i sm" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+                New
+              </span>
+            </div>
+            <div class="col gap-4">
+              <div class="row gap-8">
+                <div class="avi sm agent">ca</div>
+                <span class="small">@cassia</span>
+                <span class="dot ok pulse" style="margin-left:auto"></span>
+              </div>
+              <div class="row gap-8">
+                <div class="avi sm agent">bo</div>
+                <span class="small">@boreas</span>
+                <span class="dot ok" style="margin-left:auto"></span>
+              </div>
+              <div class="row gap-8">
+                <div class="avi sm agent" style="opacity:.65">dr</div>
+                <span class="small muted">@drift</span>
+                <span class="dot warn" style="margin-left:auto" title="daemon stale"></span>
+              </div>
+            </div>
+          </div>
+
+          <!-- footer: account -->
+          <div style="border-top: 1px solid var(--border); padding: 8px 12px;">
+            <div class="row between">
+              <div class="row gap-8">
+                <div class="avi sm you">A</div>
+                <span class="small">Amelia</span>
+              </div>
+              <div class="row gap-4">
+                <span class="btn ghost icon sm" title="Daemons"><svg class="i sm" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><circle cx="7" cy="7" r="0.6"/><circle cx="7" cy="17" r="0.6"/></svg></span>
+                <span class="btn ghost icon sm" title="Settings"><svg class="i sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-2-1.2L14 3h-4l-.6 2.6a7 7 0 0 0-2 1.2l-2.3-.9-2 3.4 2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-.9a7 7 0 0 0 2 1.2L10 21h4l.6-2.6a7 7 0 0 0 2-1.2l2.3.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.2z"/></svg></span>
+              </div>
+            </div>
+          </div>
+        </aside>
+
+        <!-- ───── CENTER DOCUMENT ───── -->
+        <section class="doc-area">
+          <div class="doc-toolbar">
+            <div class="breadcrumb">
+              <span>Launch</span>
+              <svg class="i sm muted" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+              <b>Q3 launch plan</b>
+              <span class="chip sm">v 142</span>
+            </div>
+            <div class="row gap-6">
+              <!-- presence -->
+              <div class="avi-stack">
+                <div class="avi sm you" title="Amelia (you)">A</div>
+                <div class="avi sm" title="Jules" style="background:linear-gradient(140deg,#DCEAFB,#A3C7F1);color:#1A3F6E">J</div>
+                <div class="avi sm agent" title="@cassia · editing">ca</div>
+              </div>
+              <span class="divider-v" style="height:18px;margin:0 4px"></span>
+              <button class="btn sm"><svg class="i sm" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 11h-6m3-3v6"/></svg>Share</button>
+              <button class="btn sm ghost icon"><svg class="i sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/><circle cx="5" cy="12" r="1.5"/></svg></button>
+            </div>
+          </div>
+
+          <div class="doc-canvas">
+            <div class="doc-inner editor-body">
+              <!-- cover spacer -->
+              <div class="row gap-8" style="margin-bottom:24px">
+                <span class="chip">📦 Launch</span>
+                <span class="chip outline">Owner · @amelia</span>
+                <span class="chip outline">Updated 12m ago</span>
+              </div>
+              <h1>
+                <span class="anchored">Q3 launch plan</span>
+                <span class="chip accent sm" style="vertical-align:middle;margin-left:6px">2 threads</span>
+              </h1>
+              <p>This is our shared brief for the late-September launch — channels, owners, dependencies. Cassia is drafting the press deck in <code style="font-family:var(--mono);font-size:13px;background:var(--paper-3);padding:1px 5px;border-radius:4px;border:1px solid var(--border)">/launch/press-messaging</code> and will flag risks here.</p>
+
+              <h2>Goals</h2>
+              <p>Three measurable outcomes by Oct&nbsp;7: <span class="anchored">12k self-serve signups</span>, 95% deploy success rate, and a clean 7-day retention curve over 35%.</p>
+
+              <h2>Channels</h2>
+              <p>Owned by Marketing with support from Eng. The cuts:</p>
+              <p style="position:relative">
+                <span class="gutter">1</span>Email — segmented sequence (5 emails) for active beta users.<br>
+                <span class="gutter">2</span>Blog — engineering deep dive on daemon model.<br>
+                <span class="gutter">3</span><span class="agent-anchor">Twitter/X — short thread, 2 short videos, demo clip.</span><br>
+                <span class="gutter">4</span>Hacker News — Show HN post coordinated for Tuesday 9a PT.
+              </p>
+
+              <p>Press list is in the linked doc and the daemon will sync the file tree to disk before we kick off rehearsal.</p>
+
+              <!-- live cursors -->
+              <div style="position:relative;height:0">
+                <div class="pcursor agent" style="top: -64px; left: 220px;">
+                  <span class="who">@cassia</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ───── RIGHT CONTEXT ───── -->
+        <aside class="ctx">
+          <div style="display:flex; border-bottom:1px solid var(--border); padding: 6px 8px; gap: 4px;">
+            <button class="btn sm" style="background:var(--paper-3);border-color:transparent">
+              <svg class="i sm" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5A8.5 8.5 0 1 1 21 11.5z"/></svg>
+              Threads <span class="muted" style="margin-left:2px">2</span>
+            </button>
+            <button class="btn sm ghost">
+              <svg class="i sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+              Activity
+            </button>
+            <button class="btn sm ghost">
+              <svg class="i sm" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>
+              People
+            </button>
+          </div>
+
+          <div style="padding: 12px 14px; flex:1; overflow:auto;">
+            <div class="row between" style="margin-bottom:10px">
+              <span class="label">Threads on this doc</span>
+              <span class="btn ghost sm icon"><svg class="i sm" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span>
+            </div>
+
+            <div class="tlist">
+              <!-- thread 1: range-anchored -->
+              <div class="titem" style="border-color:var(--accent);background:var(--accent-50)">
+                <svg class="i sm" style="margin-top:3px;color:var(--accent-700)" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5A8.5 8.5 0 1 1 21 11.5z"/></svg>
+                <div class="col gap-4" style="flex:1">
+                  <div class="between">
+                    <div class="row gap-6"><span class="chip code sm" style="background:#fff">"Q3 launch plan"</span></div>
+                    <span class="tiny muted">2m</span>
+                  </div>
+                  <div class="row gap-6"><div class="avi sm">J</div><span class="small"><b>Jules</b> Are we still locked on Sep 24?</span></div>
+                  <div class="row gap-6"><div class="avi sm agent">ca</div><span class="small"><b style="color:var(--agent)">@cassia</b> Yes — daemon checked the calendar overlap.</span></div>
+                  <div class="row gap-4 tiny muted" style="margin-top:2px">
+                    <span>3 replies</span><span>·</span><span>2 participants</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- thread 2: doc-level -->
+              <div class="titem">
+                <svg class="i sm" style="margin-top:3px;color:var(--ink-4)" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5A8.5 8.5 0 1 1 21 11.5z"/></svg>
+                <div class="col gap-4" style="flex:1">
+                  <div class="between">
+                    <span class="tiny muted">doc-level</span>
+                    <span class="tiny muted">1h</span>
+                  </div>
+                  <div class="row gap-6"><div class="avi sm you">A</div><span class="small"><b>You</b> Pulling press refs from the old Q2 doc.</span></div>
+                  <div class="row gap-4 tiny muted" style="margin-top:2px">
+                    <span>4 replies</span><span>·</span><span>3 participants</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="divider" style="margin: 18px 0 12px"></div>
+
+            <span class="label">Recent activity</span>
+            <div class="col gap-8" style="margin-top:8px">
+              <div class="row gap-8">
+                <div class="avi sm agent">ca</div>
+                <div class="col" style="gap:0">
+                  <div class="small"><b>@cassia</b> edited <span class="muted">Channels</span></div>
+                  <div class="tiny muted">just now</div>
+                </div>
+              </div>
+              <div class="row gap-8">
+                <div class="avi sm">J</div>
+                <div class="col" style="gap:0">
+                  <div class="small"><b>Jules</b> opened a thread</div>
+                  <div class="tiny muted">2m ago</div>
+                </div>
+              </div>
+              <div class="row gap-8">
+                <div class="avi sm daemon">D</div>
+                <div class="col" style="gap:0">
+                  <div class="small"><b class="muted">daemon-prod</b> synced to disk</div>
+                  <div class="tiny muted">8m ago</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </aside>
+
+      </div>
+    </div>
+
+    <div class="prose-md" style="margin-top: 28px; max-width: 980px;">
+      <h3>Purpose</h3>
+      <p>The shell is the home view after auth. Three persistent regions: <strong>navigate</strong> (left), <strong>do</strong> (center), <strong>context</strong> (right). It avoids burying anything important behind a click and matches the user's mental model: <em>files on the left, work in the middle, conversation on the right.</em></p>
+
+      <h3>Three regions — what's where</h3>
+      <ul>
+        <li><strong>Left (248px):</strong> workspace switcher, global search, top nav (Home / Activity / Threads), document tree, agents summary, account footer.</li>
+        <li><strong>Center (fluid):</strong> doc toolbar (breadcrumb + presence + share), then the editor surface. The editor is the <em>only</em> place that opens a Yjs websocket; switching docs closes the previous socket and opens a new one.</li>
+        <li><strong>Right (320px):</strong> tabs for <em>Threads on this doc</em>, <em>Activity</em>, <em>People</em>. Threads tab is the default.</li>
+      </ul>
+
+      <div class="trigger">
+        <b>Triggers</b><br>
+        • <strong>Switch doc:</strong> click in left tree → push <code>/w/:slug/d/:docId</code> → close old Y socket, open new one. URL is shareable.<br>
+        • <strong>New doc:</strong> "+" next to <em>Documents</em> label OR <span class="kbd">⌘N</span>. Inline-renames the new file immediately.<br>
+        • <strong>Open threads on a range:</strong> select text in the editor → small floating action appears with "Open thread" (see Flow 03).<br>
+        • <strong>Switch workspace:</strong> click the top-left workspace pill → opens picker overlay → routes to <code>/w/:other-slug</code>.<br>
+        • <strong>Right-pane tab:</strong> click Threads / Activity / People. State persists per workspace.<br>
+        • <strong>Cmd-K palette:</strong> jump to any doc, agent, daemon, thread by name; opens over the shell, dims it.
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────── EMPTY STATE ───────── -->
+  <section class="doc-section" id="empty">
+    <div class="sec-head">
+      <h2>Empty state — first run</h2>
+      <div class="meta">Right after workspace creation. The shell is intact; the canvas teaches the next move.</div>
+    </div>
+
+    <div class="frame" style="height: 520px;">
+      <div class="frame-bar"><div class="dots"><span></span><span></span><span></span></div><span style="margin-left:8px">notty.app/w/studio-reyes</span></div>
+
+      <div class="shell" style="height: calc(100% - 32px);">
+        <aside class="sb">
+          <div style="padding: 10px 12px; border-bottom: 1px solid var(--border);">
+            <div class="row gap-8">
+              <div class="avi" style="background:linear-gradient(140deg,#FCDEC5,#F0A875);color:#6B330C">St</div>
+              <div class="col" style="gap:0">
+                <b class="small">Studio Reyes</b>
+                <div class="tiny muted">@amelia</div>
+              </div>
+            </div>
+          </div>
+          <div style="padding:12px 16px;color:var(--ink-4)" class="small">
+            <div class="label">Documents</div>
+            <div class="tiny muted" style="margin:8px 0">No documents yet.</div>
+            <div class="label" style="margin-top:14px">Agents</div>
+            <div class="tiny muted" style="margin-top:8px">Deploy a daemon to add agents.</div>
+          </div>
+        </aside>
+
+        <section class="doc-area">
+          <div class="doc-toolbar"><div class="breadcrumb"><b>Welcome to Studio Reyes</b></div></div>
+          <div class="doc-canvas">
+            <div class="doc-inner" style="text-align:center; padding-top: 64px;">
+              <div class="display" style="font-size:34px;letter-spacing:-0.015em">Let's get this workspace working.</div>
+              <p class="small muted" style="max-width:480px;margin: 8px auto 28px">notty is best with at least one daemon — it syncs docs to disk and hosts your agents. You can also start by writing something.</p>
+
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;max-width:600px;margin: 0 auto;">
+                <a href="04-daemons.html" class="card p-20" style="text-align:left;text-decoration:none;color:inherit;display:block">
+                  <div class="row gap-8" style="margin-bottom:8px">
+                    <div class="avi sm daemon">D</div>
+                    <b>Deploy a daemon</b>
+                  </div>
+                  <div class="small muted">Bring docs to local disk &amp; enable agents. Takes ~2 min.</div>
+                  <div class="row gap-4 small" style="color:var(--accent-700);margin-top:10px">Start <svg class="i sm" viewBox="0 0 24 24"><path d="M5 12h14M13 5l7 7-7 7"/></svg></div>
+                </a>
+                <a class="card p-20" style="text-align:left;text-decoration:none;color:inherit;display:block">
+                  <div class="row gap-8" style="margin-bottom:8px">
+                    <svg class="i" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+                    <b>Create your first doc</b>
+                  </div>
+                  <div class="small muted">Markdown or plaintext. Threads and agents come along.</div>
+                  <div class="row gap-4 small" style="color:var(--ink-3);margin-top:10px">New doc <span class="kbd">⌘N</span></div>
+                </a>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <aside class="ctx">
+          <div style="padding: 16px;color:var(--ink-4);font-size:13px">
+            <div class="label">Threads</div>
+            <div class="tiny muted" style="margin-top:8px">Threads live next to documents. Open one once you have something to discuss.</div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────── SPEC ───────── -->
+  <section class="doc-section" id="spec">
+    <div class="sec-head">
+      <h2>Engineering spec — full surface</h2>
+      <div class="meta">Contracts, components, and the websocket lifecycle that this screen depends on.</div>
+    </div>
+
+    <div class="spec">
+      <div class="k">Route</div>
+      <div><code class="api">/w/:slug</code> (no doc selected — show empty editor or last-opened doc) · <code class="api">/w/:slug/d/:docId</code> (active doc).</div>
+
+      <div class="k">APIs (BE)</div>
+      <div>
+        <code class="api">GET /api/workspaces/:id/metadata</code> → workspace + members + daemons + agents (lightweight, no doc bodies).<br>
+        <code class="api">GET /api/workspaces/:id/documents</code> → doc tree (id, path, title, head meta).<br>
+        <code class="api">GET /api/documents/:id/threads</code> → threads with anchor metadata for the active doc.<br>
+        <code class="api">GET /api/workspaces/:id/activity?limit=20</code> → right-pane Activity tab feed.<br>
+        <code class="api">GET /api/workspaces/:id/presences</code> → poll/SSE every ~5s for sidebar/agent dots.
+      </div>
+
+      <div class="k">Websocket</div>
+      <div>
+        <code class="api">WS /api/documents/:id/y</code> — Yjs/y-protocol per active document only. Open on doc mount, close on unmount or doc switch. Reconnect with backoff on disconnect; show subtle "reconnecting…" pill in the toolbar.
+      </div>
+
+      <div class="k">Components</div>
+      <div>
+        <code>&lt;Shell&gt;</code> (CSS grid) → <code>&lt;Sidebar&gt;</code> · <code>&lt;DocPane&gt;</code> · <code>&lt;ContextPane&gt;</code>. <code>&lt;DocTree&gt;</code> virtualizes once node count &gt; 200. <code>&lt;CommandPalette&gt;</code> mounted at the shell root. Editor: TipTap with <code>y-prosemirror</code> binding.
+      </div>
+
+      <div class="k">State</div>
+      <div>
+        Global Zustand (or React context): <code>activeWorkspace</code>, <code>activeDoc</code>, <code>presence</code>, <code>threadCounts</code>. Doc bodies are <em>never</em> in store — they live in the Y doc bound to the editor. The store holds <em>head meta</em> only.
+      </div>
+
+      <div class="k">Presence</div>
+      <div>
+        Awareness piggybacks on the Y websocket for the active doc (cursors, selections, color). Outside the active doc, presence is server-pushed (SSE) and shown as dots on sidebar entries (e.g. "@cassia · editing /press-messaging").
+      </div>
+
+      <div class="k">Keyboard</div>
+      <div>
+        <span class="kbd">⌘K</span> palette · <span class="kbd">⌘N</span> new doc · <span class="kbd">⌘/</span> open thread on selection · <span class="kbd">⌘\</span> toggle left sidebar · <span class="kbd">⌘.</span> toggle right pane · <span class="kbd">⌘1</span>/<span class="kbd">⌘2</span>/<span class="kbd">⌘3</span> right-pane tabs.
+      </div>
+
+      <div class="k">Performance</div>
+      <div>
+        Only the active doc loads its Y history. Sidebar tree fetches metadata, not bodies. Right-pane thread list paginates. Activity feed is SSE with 50-item ring buffer.
+      </div>
+
+      <div class="k">Resilience</div>
+      <div>
+        Websocket drop → IndexedDB persistence keeps the local Y doc editable; updates replay when reconnected. Show non-modal "Offline — your changes are saved locally" banner in the toolbar.
+      </div>
+
+      <div class="k">Tenancy guard</div>
+      <div>
+        Every API and WS call carries the workspace ID derived from the route. Backend rejects cross-workspace access. The frontend should never read or render data for another workspace in this shell instance.
+      </div>
+    </div>
+  </section>
+
+</main>
+</body>
+</html>

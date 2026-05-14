@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>notty hi-fi · 05 Agents</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css" />
+<style>
+  .agent-card { padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--paper); display: flex; flex-direction: column; gap: 8px; cursor: pointer; }
+  .agent-card:hover { background: var(--paper-2); }
+  .grp-head { font-size: 12px; color: var(--ink-4); font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; display:flex; align-items:center; gap:8px; margin: 18px 0 10px; }
+  .grp-head .stripe { height:1px; background: var(--border); flex:1; }
+</style>
+</head>
+<body>
+
+<nav class="doc-nav">
+  <div class="doc-nav-inner between">
+    <div class="row gap-12">
+      <a href="index.html" class="row gap-6" style="text-decoration:none;color:var(--ink)">
+        <svg class="i sm" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
+        <span class="small" style="font-weight:500">all flows</span>
+      </a>
+      <span class="faint">/</span>
+      <span class="small">05 · Agents</span>
+    </div>
+    <div class="row gap-16">
+      <a href="#roster" class="small">Roster</a>
+      <a href="#new" class="small">New agent</a>
+      <a href="#detail" class="small">Agent detail</a>
+      <a href="#spec" class="small">Engineering spec</a>
+    </div>
+  </div>
+</nav>
+
+<main class="doc">
+  <header>
+    <h1 class="eyebrow">Flow 05</h1>
+    <h1 class="title">Agents</h1>
+    <p class="lede">Agents are first-class collaborators — they have stable UUIDs, handles, and inboxes. Every agent is <strong>owned by exactly one daemon</strong>, which is foregrounded everywhere. One global "New agent" entry; daemon selection is part of the form.</p>
+  </header>
+
+  <!-- ───── A · ROSTER ───── -->
+  <section class="doc-section" id="roster">
+    <div class="sec-head">
+      <h2>A · Roster — grouped by daemon</h2>
+      <div class="meta">Operators want to see, at a glance, which daemon is hosting which agents and what each is doing.</div>
+    </div>
+
+    <div class="frame" style="height: 600px;">
+      <div class="frame-bar"><div class="dots"><span></span><span></span><span></span></div><span style="margin-left:8px">notty.app/w/studio-reyes/agents</span></div>
+      <div style="height: calc(100% - 32px); padding: 24px 32px; overflow:auto; background: var(--paper);">
+        <div class="between" style="margin-bottom: 16px;">
+          <div class="col" style="gap:2px">
+            <div class="row gap-8"><span class="display" style="font-size:26px">Agents</span><span class="chip">6 total · 4 running</span></div>
+            <div class="small muted">Codex collaborators in this workspace. Each is owned by a daemon.</div>
+          </div>
+          <div class="row gap-6">
+            <div class="input" style="height:32px;font-size:12.5px;color:var(--ink-4);min-width:180px">
+              <svg class="i sm" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>&nbsp;
+              <span>Filter agents…</span>
+            </div>
+            <button class="btn accent"><svg class="i sm" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New agent</button>
+          </div>
+        </div>
+
+        <!-- daemon group 1 -->
+        <div class="grp-head">
+          <div class="avi sm daemon">D</div>
+          <span style="text-transform:none;font-size:13px;color:var(--ink-2)"><b>daemon-prod</b></span>
+          <span class="chip ok sm"><span class="dot ok pulse"></span>online</span>
+          <span class="stripe"></span>
+          <span style="text-transform:none;color:var(--ink-4);font-size:12px">3 agents</span>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px">
+          <div class="agent-card">
+            <div class="between">
+              <div class="row gap-8"><div class="avi agent">ca</div><div class="col" style="gap:0"><b>@cassia</b><div class="tiny muted">launch reporter</div></div></div>
+              <span class="chip ok sm"><span class="dot ok pulse"></span>running</span>
+            </div>
+            <div class="small muted" style="line-height:1.4">Drafting press messaging in <code class="mono" style="font-size:11px">/launch/press.md</code>.</div>
+            <div class="row between">
+              <div class="row gap-4 tiny muted">
+                <svg class="i sm" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5A8.5 8.5 0 1 1 21 11.5z"/></svg>
+                <span>5 threads</span>
+                <span>·</span>
+                <span>12 inbox</span>
+              </div>
+              <span class="chip accent sm">3 for-me</span>
+            </div>
+          </div>
+
+          <div class="agent-card">
+            <div class="between">
+              <div class="row gap-8"><div class="avi agent">bo</div><div class="col" style="gap:0"><b>@boreas</b><div class="tiny muted">research reader</div></div></div>
+              <span class="chip sm"><span class="dot"></span>idle</span>
+            </div>
+            <div class="small muted" style="line-height:1.4">Last action 14m ago · reading <code class="mono" style="font-size:11px">/research/state.md</code>.</div>
+            <div class="row between">
+              <div class="row gap-4 tiny muted"><span>2 threads</span><span>·</span><span>0 inbox</span></div>
+            </div>
+          </div>
+
+          <div class="agent-card">
+            <div class="between">
+              <div class="row gap-8"><div class="avi agent">dr</div><div class="col" style="gap:0"><b>@drift</b><div class="tiny muted">copy editor</div></div></div>
+              <span class="chip warn sm"><span class="dot warn"></span>paused</span>
+            </div>
+            <div class="small muted" style="line-height:1.4">Paused by @amelia 1h ago. Click to resume.</div>
+            <div class="row between">
+              <div class="row gap-4 tiny muted"><span>1 thread</span></div>
+              <button class="btn sm" style="height:24px;padding:0 8px;font-size:11px">Resume</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- daemon group 2 -->
+        <div class="grp-head">
+          <div class="avi sm daemon">D</div>
+          <span style="text-transform:none;font-size:13px;color:var(--ink-2)"><b>daemon-amelia-laptop</b></span>
+          <span class="chip ok sm"><span class="dot ok pulse"></span>online</span>
+          <span class="stripe"></span>
+          <span style="text-transform:none;color:var(--ink-4);font-size:12px">2 agents</span>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px">
+          <div class="agent-card">
+            <div class="between">
+              <div class="row gap-8"><div class="avi agent">si</div><div class="col" style="gap:0"><b>@sigrun</b><div class="tiny muted">backend reviewer</div></div></div>
+              <span class="chip ok sm"><span class="dot ok pulse"></span>running</span>
+            </div>
+            <div class="small muted">Reviewing <code class="mono" style="font-size:11px">/eng/auth-rewrite.md</code></div>
+            <div class="row between">
+              <div class="row gap-4 tiny muted"><span>3 threads</span></div>
+              <span class="chip accent sm">1 for-me</span>
+            </div>
+          </div>
+          <div class="agent-card">
+            <div class="between">
+              <div class="row gap-8"><div class="avi agent">th</div><div class="col" style="gap:0"><b>@thora</b><div class="tiny muted">scheduler</div></div></div>
+              <span class="chip sm"><span class="dot"></span>idle</span>
+            </div>
+            <div class="small muted">Watching <code class="mono" style="font-size:11px">/launch/*</code></div>
+            <div class="row between">
+              <div class="row gap-4 tiny muted"><span>0 threads</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- offline daemon -->
+        <div class="grp-head">
+          <div class="avi sm daemon" style="opacity:.55">D</div>
+          <span style="text-transform:none;font-size:13px;color:var(--ink-3)"><b>daemon-staging</b></span>
+          <span class="chip err sm"><span class="dot err"></span>offline</span>
+          <span class="stripe"></span>
+          <span style="text-transform:none;color:var(--ink-4);font-size:12px">1 agent</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px">
+          <div class="agent-card" style="opacity:.7">
+            <div class="between">
+              <div class="row gap-8"><div class="avi agent">no</div><div class="col" style="gap:0"><b>@noor</b><div class="tiny muted">staging shepherd</div></div></div>
+              <span class="chip err sm"><span class="dot err"></span>daemon offline</span>
+            </div>
+            <div class="small muted">Last seen 2h ago.</div>
+            <div class="row gap-4 tiny muted"><span>Bring daemon back online to resume.</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="prose-md" style="margin-top: 24px; max-width: 980px;">
+      <h3>Purpose</h3>
+      <p>One screen to see every agent in this workspace, who hosts them, what they're doing, and how much attention they're owed (<em>for-me</em> count). Grouping by daemon keeps ownership readable.</p>
+
+      <h3>User experience</h3>
+      <ul>
+        <li>Cards sort by status within each daemon group (running → idle → paused). Offline daemons collapse to a single muted band.</li>
+        <li>The <strong>for-me</strong> chip is the only loud signal on a card — it's how operators triage who needs intervention.</li>
+        <li>Paused agents get an inline "Resume" — no detail-page detour for a one-click action.</li>
+      </ul>
+
+      <div class="trigger">
+        <b>Triggers</b><br>
+        • <strong>New agent:</strong> the single global "New agent" button → opens form B.<br>
+        • <strong>Open detail:</strong> click anywhere on a card → routes to <code>/agents/:id</code>.<br>
+        • <strong>Resume / pause:</strong> inline button → <code class="api">POST /api/agents/:id/runs</code> with action.<br>
+        • <strong>Filter:</strong> the filter input narrows by name, role, daemon, or status (status:running, daemon:prod).
+      </div>
+    </div>
+  </section>
+
+  <!-- ───── B · NEW AGENT ───── -->
+  <section class="doc-section" id="new">
+    <div class="sec-head">
+      <h2>B · New agent</h2>
+      <div class="meta">Single global form. Daemon is selected here — not derived from where you clicked.</div>
+    </div>
+
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 32px; align-items: start;">
+      <div class="frame" style="height: 620px;">
+        <div class="frame-bar"><div class="dots"><span></span><span></span><span></span></div><span style="margin-left:8px">new agent</span></div>
+        <div style="height: calc(100% - 32px); background: rgba(20,18,12,0.32); display:flex;align-items:center;justify-content:center;padding:24px">
+          <div class="card lifted" style="width: 460px;">
+            <div class="between p-16" style="border-bottom: 1px solid var(--border)">
+              <div class="row gap-8">
+                <div class="avi sm agent">+</div>
+                <b>New agent</b>
+              </div>
+              <span class="btn ghost icon sm"><svg class="i sm" viewBox="0 0 24 24"><path d="M6 6l12 12M6 18L18 6"/></svg></span>
+            </div>
+
+            <div class="p-16 col gap-16">
+              <div class="field">
+                <div class="lab">Display name</div>
+                <div class="input"><span>Cassia</span></div>
+              </div>
+
+              <div class="field">
+                <div class="lab">Handle</div>
+                <div class="input"><span class="mono small">@</span>&nbsp;<span>cassia</span></div>
+                <div class="hint">User-facing. The backend identity is a UUID; handle can be renamed.</div>
+              </div>
+
+              <div class="field">
+                <div class="lab">Role</div>
+                <div class="input"><span>launch reporter</span></div>
+                <div class="hint">Short, role-based. Shown under the handle in lists.</div>
+              </div>
+
+              <div class="divider"></div>
+
+              <div class="field">
+                <div class="lab">Owning daemon</div>
+                <div class="card flat" style="border:1px solid var(--border-strong);padding:0">
+                  <label class="row gap-8" style="padding:10px 12px;border-bottom:1px solid var(--border);cursor:pointer;background:var(--accent-50)">
+                    <input type="radio" checked /><div class="avi sm daemon">D</div>
+                    <div class="col grow" style="gap:0"><b class="small">daemon-prod</b><div class="tiny muted">prod-mac-01 · 3 agents</div></div>
+                    <span class="chip ok sm"><span class="dot ok"></span>online</span>
+                  </label>
+                  <label class="row gap-8" style="padding:10px 12px;border-bottom:1px solid var(--border);cursor:pointer">
+                    <input type="radio" /><div class="avi sm daemon">D</div>
+                    <div class="col grow" style="gap:0"><b class="small">daemon-amelia-laptop</b><div class="tiny muted">2 agents</div></div>
+                    <span class="chip ok sm"><span class="dot ok"></span>online</span>
+                  </label>
+                  <label class="row gap-8" style="padding:10px 12px;cursor:pointer;opacity:.6">
+                    <input type="radio" disabled /><div class="avi sm daemon">D</div>
+                    <div class="col grow" style="gap:0"><b class="small">daemon-staging</b><div class="tiny muted">1 agent</div></div>
+                    <span class="chip err sm"><span class="dot err"></span>offline</span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="field">
+                <div class="lab">Workspace root</div>
+                <div class="input"><span class="mono small">~/notty/studio-reyes</span></div>
+                <div class="hint">Daemon-local path for this agent's projected copy.</div>
+              </div>
+
+              <div class="field">
+                <div class="lab">System prompt (optional)</div>
+                <div class="input area" style="min-height:60px"><span class="muted">e.g. "Draft press messaging based on /launch docs. Open threads on any uncertainty."</span></div>
+              </div>
+
+              <div class="row gap-6" style="justify-content:flex-end;margin-top:4px">
+                <button class="btn">Cancel</button>
+                <button class="btn accent">Create agent</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="prose-md">
+        <h3>Purpose</h3>
+        <p>Provision a new agent on a specific daemon. Daemon selection is <strong>explicit</strong> — never inferred — so users see exactly where this agent will run.</p>
+
+        <h3>User experience</h3>
+        <ul>
+          <li>Form is single-step. The visible radio list of daemons doubles as a status display — offline daemons are disabled in place.</li>
+          <li>The handle preview shows <code>@cassia</code> formatted like a chip; we live-check uniqueness inside this workspace.</li>
+          <li>System prompt is optional and collapsible; users can ship the agent and edit later.</li>
+        </ul>
+
+        <div class="trigger">
+          <b>Triggers</b><br>
+          • <strong>Open:</strong> "New agent" button on roster, sidebar, or anywhere we expose it (always routes to this same form).<br>
+          • <strong>Create:</strong> <code class="api">POST /api/workspaces/:id/agents</code> body: <code>{handle, name, role, daemon_id, workspace_root, system_prompt?}</code>.<br>
+          • <strong>After create:</strong> close modal → route to agent detail (C); daemon picks up the agent on next check-in (typically &lt; 5s).<br>
+          • <strong>No online daemons:</strong> disable submit; show inline link to "Deploy a daemon" (Flow 04).
+        </div>
+
+        <h3>Features for engineering</h3>
+        <ul>
+          <li>Backend creates the agent and emits a daemon-targeted event; daemon claims it on next check-in.</li>
+          <li>Default workspace root suggested from daemon config, editable.</li>
+          <li>Handle uniqueness check: 200ms debounce against the workspace's agent + user handles.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───── C · DETAIL ───── -->
+  <section class="doc-section" id="detail">
+    <div class="sec-head">
+      <h2>C · Agent detail — run controls + collaboration</h2>
+      <div class="meta">Owning daemon, current run, logs, recent threads, and inbox summary — one place.</div>
+    </div>
+
+    <div class="frame" style="height: 640px;">
+      <div class="frame-bar"><div class="dots"><span></span><span></span><span></span></div><span style="margin-left:8px">@cassia · agent detail</span></div>
+      <div style="height: calc(100% - 32px); display:grid; grid-template-columns: 1fr 320px; background: var(--paper)">
+        <div style="padding: 28px 32px; overflow:auto;">
+          <a class="small muted row gap-6" href="#roster" style="text-decoration:none;margin-bottom:10px">
+            <svg class="i sm" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>Agents
+          </a>
+          <div class="row gap-12" style="margin-bottom: 16px">
+            <div class="avi xl agent">ca</div>
+            <div class="col grow" style="gap:4px">
+              <div class="row gap-8">
+                <div class="display" style="font-size:24px">@cassia</div>
+                <span class="chip agent">Cassia · launch reporter</span>
+                <span class="chip ok"><span class="dot ok pulse"></span>running</span>
+              </div>
+              <div class="row gap-12 small muted">
+                <span>hosted by <b style="color:var(--ink-2)">daemon-prod</b></span>
+                <span>·</span>
+                <span class="mono">a_71fe…b2</span>
+                <span>·</span>
+                <span>created 6d ago</span>
+              </div>
+            </div>
+            <div class="row gap-6">
+              <button class="btn sm"><svg class="i sm" viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg>Pause</button>
+              <button class="btn sm"><svg class="i sm" viewBox="0 0 24 24"><path d="M5 5l14 7-14 7z"/></svg>Run prompt</button>
+              <button class="btn sm ghost icon"><svg class="i sm" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg></button>
+            </div>
+          </div>
+
+          <!-- run state -->
+          <div class="card p-16" style="margin-bottom: 16px;">
+            <div class="between" style="margin-bottom: 10px">
+              <div class="row gap-6">
+                <b>Current run</b>
+                <span class="chip ok sm"><span class="dot ok pulse"></span>active · 12m</span>
+              </div>
+              <a href="06-inbox-diff.html" class="small" style="color:var(--accent-700);text-decoration:none">View inbox →</a>
+            </div>
+            <div class="row gap-12" style="font-size:12.5px">
+              <div class="col" style="gap:2px;flex:1">
+                <div class="label">Codex session</div>
+                <div class="mono">s_2a83f4ec…</div>
+              </div>
+              <div class="col" style="gap:2px;flex:1">
+                <div class="label">Tokens</div>
+                <div>14,221 / 200k</div>
+              </div>
+              <div class="col" style="gap:2px;flex:1">
+                <div class="label">Last action</div>
+                <div>Edited /launch/press.md · 14s ago</div>
+              </div>
+              <div class="col" style="gap:2px;flex:1">
+                <div class="label">Log</div>
+                <a class="mono" style="color:var(--accent-700);text-decoration:none">/agents/cassia/log.md ↗</a>
+              </div>
+            </div>
+          </div>
+
+          <!-- recent activity stream -->
+          <b>Recent activity</b>
+          <div class="card flat" style="margin-top:8px">
+            <div style="padding:10px 14px;border-bottom:1px solid var(--border);display:flex;gap:10px;align-items:flex-start">
+              <span class="dot agent" style="margin-top:6px"></span>
+              <div class="col grow" style="gap:0">
+                <div class="small">Replied in thread <span style="background:var(--accent-50);color:var(--accent-700);padding:0 4px;border-radius:4px;font-weight:500;font-size:12px">"Q3 launch plan"</span></div>
+                <div class="tiny muted">2m ago · 3 messages</div>
+              </div>
+              <span class="btn ghost icon sm"><svg class="i sm" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></span>
+            </div>
+            <div style="padding:10px 14px;border-bottom:1px solid var(--border);display:flex;gap:10px;align-items:flex-start">
+              <span class="dot daemon" style="margin-top:6px"></span>
+              <div class="col grow" style="gap:0">
+                <div class="small">Edited <code class="mono" style="font-size:12px">/launch/press.md</code> · +42 / −8</div>
+                <div class="tiny muted">14s ago</div>
+              </div>
+            </div>
+            <div style="padding:10px 14px;display:flex;gap:10px;align-items:flex-start">
+              <span class="dot ok" style="margin-top:6px"></span>
+              <div class="col grow" style="gap:0">
+                <div class="small">Run started by @amelia</div>
+                <div class="tiny muted">12m ago</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- right sub-pane -->
+        <aside style="border-left:1px solid var(--border); background: var(--paper-2); padding: 20px 18px; overflow:auto">
+          <div class="label" style="margin-bottom: 8px">Owning daemon</div>
+          <div class="card p-12">
+            <div class="row gap-8">
+              <div class="avi sm daemon">D</div>
+              <div class="col grow" style="gap:0"><b class="small">daemon-prod</b><div class="tiny muted">prod-mac-01</div></div>
+              <span class="chip ok sm"><span class="dot ok pulse"></span></span>
+            </div>
+            <div class="divider" style="margin: 10px -12px"></div>
+            <a class="small" style="color:var(--accent-700);text-decoration:none">Open daemon →</a>
+          </div>
+
+          <div class="label" style="margin: 18px 0 8px">Inbox</div>
+          <a href="06-inbox-diff.html" class="card p-12" style="display:block;text-decoration:none;color:inherit">
+            <div class="between">
+              <span class="small"><b>for-me</b></span>
+              <span class="chip accent sm">3</span>
+            </div>
+            <div class="between" style="margin-top:6px">
+              <span class="small">general</span>
+              <span class="chip sm">12</span>
+            </div>
+          </a>
+
+          <div class="label" style="margin: 18px 0 8px">Threads · 5 open</div>
+          <div class="col gap-8">
+            <div class="row gap-6 small"><svg class="i sm" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5A8.5 8.5 0 1 1 21 11.5z"/></svg>Q3 launch plan <span class="chip sm" style="margin-left:auto">2</span></div>
+            <div class="row gap-6 small"><svg class="i sm" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5A8.5 8.5 0 1 1 21 11.5z"/></svg>Press messaging <span class="chip sm" style="margin-left:auto">1</span></div>
+            <div class="row gap-6 small"><svg class="i sm" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5A8.5 8.5 0 1 1 21 11.5z"/></svg>Pricing model <span class="chip sm" style="margin-left:auto">1</span></div>
+          </div>
+
+          <div class="label" style="margin: 18px 0 6px">Danger zone</div>
+          <button class="btn full danger sm" style="justify-content:flex-start">Archive agent</button>
+        </aside>
+      </div>
+    </div>
+
+    <div class="prose-md" style="margin-top: 24px; max-width: 980px;">
+      <h3>Purpose</h3>
+      <p>Operate one agent. The page exists to answer four questions quickly: <em>is it running?</em> · <em>who's hosting it?</em> · <em>what is it touching right now?</em> · <em>is anyone waiting on it?</em></p>
+
+      <h3>User experience</h3>
+      <ul>
+        <li>The handle and tinted chips make species (agent) immediately legible without making it the loudest signal.</li>
+        <li>Owning daemon is in the right rail with a one-click route — when a daemon goes stale, the operator can pivot from here.</li>
+        <li>"Run prompt" opens a small drafter inline; <strong>Pause</strong> immediately halts the current run.</li>
+        <li>Inbox card mirrors the layout in Flow 06 for muscle memory.</li>
+      </ul>
+
+      <div class="trigger">
+        <b>Triggers</b><br>
+        • <strong>Pause / Resume:</strong> <code class="api">POST /api/agents/:id/runs</code> with <code>{action: 'pause'|'resume'}</code>.<br>
+        • <strong>Run prompt:</strong> opens an inline composer → <code class="api">POST /api/agents/:id/runs</code> with <code>{prompt}</code>.<br>
+        • <strong>Open daemon:</strong> right-rail card → daemon detail (Flow 04 C).<br>
+        • <strong>View inbox:</strong> right-rail card or "View inbox →" → Flow 06.<br>
+        • <strong>Archive:</strong> Danger Zone → confirmation; archived agents are read-only and stop receiving inbox events.
+      </div>
+    </div>
+  </section>
+
+  <!-- ───── SPEC ───── -->
+  <section class="doc-section" id="spec">
+    <div class="sec-head">
+      <h2>Engineering spec — full surface</h2>
+    </div>
+
+    <div class="spec">
+      <div class="k">Routes (FE)</div>
+      <div><code class="api">/w/:slug/agents</code> · <code class="api">/w/:slug/agents/new</code> (modal) · <code class="api">/w/:slug/agents/:id</code></div>
+
+      <div class="k">APIs (BE)</div>
+      <div>
+        <code class="api">GET /api/workspaces/:id/agents</code> — list, with daemon + run + counts.<br>
+        <code class="api">POST /api/workspaces/:id/agents</code> body: <code>{handle, name, role, daemon_id, workspace_root, system_prompt?}</code><br>
+        <code class="api">GET /api/agents/:id</code> · <code class="api">PATCH /api/agents/:id</code> (rename, change daemon, edit prompt)<br>
+        <code class="api">DELETE /api/agents/:id</code> (archive)<br>
+        <code class="api">POST /api/agents/:id/runs</code> body: <code>{action: 'start'|'pause'|'resume', prompt?}</code><br>
+        <code class="api">GET /api/agents/:id/runs?limit=20</code>
+      </div>
+
+      <div class="k">Identity</div>
+      <div>
+        Backend identity is UUID; handle is renameable. Daemon-acting requests pass <code>X-Notty-Acting-Agent-ID: &lt;uuid&gt;</code>. Handles are unique within a workspace, scoped to <em>both</em> users and agents (no <code>@foo</code> collision).
+      </div>
+
+      <div class="k">Daemon ownership</div>
+      <div>
+        Each agent has exactly one <code>daemon_id</code>. Moving an agent to a different daemon is a PATCH; the source daemon releases the agent on next check-in, target claims it on its next check-in. Agents on offline daemons are visible but read-only.
+      </div>
+
+      <div class="k">Run model</div>
+      <div>
+        Run status: <em>running · idle · paused · errored</em>. <code>agent_runs</code> rows track each run. The current/active run is denormalized on the agent for display speed.
+      </div>
+
+      <div class="k">Components</div>
+      <div>
+        <code>&lt;AgentRoster&gt;</code>, <code>&lt;AgentCard&gt;</code>, <code>&lt;NewAgentModal&gt;</code>, <code>&lt;AgentDetail&gt;</code>, <code>&lt;RunControls&gt;</code>, <code>&lt;AgentRecentActivity&gt;</code>, shared <code>&lt;DaemonOwnerPill&gt;</code>.
+      </div>
+
+      <div class="k">Live updates</div>
+      <div>
+        Roster subscribes to workspace SSE; agent detail subscribes to <code>agent.:id.*</code> channel for run state, log tail, and inbox count deltas.
+      </div>
+
+      <div class="k">Edge cases</div>
+      <div>
+        • Daemon offline → all its agents render dimmed, "Resume" buttons disabled with a tooltip linking to the daemon.<br>
+        • Handle collision on create → 409 with suggestions.<br>
+        • Archive while running → confirm + soft stop. Reactivating reuses the same UUID; handle may be reclaimed if free.
+      </div>
+    </div>
+  </section>
+
+</main>
+</body>
+</html>

@@ -932,8 +932,6 @@ func TestCreateThreadEnqueuesMentionedAgentEvent(t *testing.T) {
 		Body:          "Please take a look @reviewer",
 		RelativeStart: "test-relative-start",
 		RelativeEnd:   "test-relative-end",
-		Start:         0,
-		End:           6,
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
@@ -981,8 +979,6 @@ func TestLoadReconcilesMissingThreadMentionEvents(t *testing.T) {
 		Body:          "Please take a look @reviewer",
 		RelativeStart: "test-relative-start",
 		RelativeEnd:   "test-relative-end",
-		Start:         0,
-		End:           6,
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
@@ -1075,8 +1071,6 @@ func TestThreadMentionEntersMentionedAgentForMeQueue(t *testing.T) {
 		Body:          "Can you check this @codex-agent?",
 		RelativeStart: "test-relative-start",
 		RelativeEnd:   "test-relative-end",
-		Start:         0,
-		End:           6,
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
@@ -1129,8 +1123,6 @@ func TestThreadReplyDirectMentionDoesNotAlsoQueueGenericReply(t *testing.T) {
 		Body:          "Initial ask @reviewer",
 		RelativeStart: "test-relative-start",
 		RelativeEnd:   "test-relative-end",
-		Start:         0,
-		End:           6,
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
@@ -1171,9 +1163,6 @@ func TestCreateThreadStoresCallerProvidedAnchorWithoutResolvingDocument(t *testi
 		Body:          "Anchor the middle word",
 		RelativeStart: "client-relative-start",
 		RelativeEnd:   "client-relative-end",
-		Start:         6,
-		End:           11,
-		Line:          1,
 		Excerpt:       "bravo",
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
 	if err != nil {
@@ -1182,8 +1171,8 @@ func TestCreateThreadStoresCallerProvidedAnchorWithoutResolvingDocument(t *testi
 	if thread.Anchor.RelativeStart != "client-relative-start" || thread.Anchor.RelativeEnd != "client-relative-end" {
 		t.Fatalf("expected caller-provided relative anchor positions, got %#v", thread.Anchor)
 	}
-	if thread.Anchor.Start != 6 || thread.Anchor.End != 11 || thread.Anchor.Line != 1 || thread.Anchor.Excerpt != "bravo" {
-		t.Fatalf("expected caller-provided display anchor metadata, got %#v", thread.Anchor)
+	if thread.Anchor.Kind != "text-range" || thread.Anchor.Excerpt != "bravo" {
+		t.Fatalf("expected caller-provided CRDT anchor metadata, got %#v", thread.Anchor)
 	}
 }
 
@@ -1203,17 +1192,13 @@ func TestCreateThreadRequiresRelativeAnchorPair(t *testing.T) {
 	if _, _, err := store.CreateThread(CreateThreadRequest{
 		DocumentID: documentID,
 		Body:       "raw offset anchor",
-		Start:      0,
-		End:        5,
+		Kind:       "text-range",
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"}); err == nil {
 		t.Fatal("expected text range without relative anchors to be rejected")
 	}
 	if _, _, err := store.CreateThread(CreateThreadRequest{
 		DocumentID: documentID,
 		Body:       "document-level thread",
-		Start:      0,
-		End:        0,
-		Line:       0,
 		Excerpt:    "",
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"}); err != nil {
 		t.Fatalf("expected document-level thread without relative anchors to be accepted: %v", err)
@@ -1242,8 +1227,6 @@ func TestStoreNotificationHelpersExposeAndUpdatePendingNotifications(t *testing.
 		Body:          "Please sync with @scribe.",
 		RelativeStart: "test-relative-start",
 		RelativeEnd:   "test-relative-end",
-		Start:         0,
-		End:           5,
 	}, OperationMeta{
 		ActorID:   "owner",
 		ActorType: "human",
@@ -1332,8 +1315,6 @@ func TestLogDocumentContentDoesNotGenerateAgentEventsButThreadMessagesDo(t *test
 		Body:          "Please inspect @scribe",
 		RelativeStart: "test-relative-start",
 		RelativeEnd:   "test-relative-end",
-		Start:         0,
-		End:           5,
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create log thread: %v", err)
@@ -1414,8 +1395,6 @@ func TestAgentInboxRoutesDocumentUpdatesPerAgentParticipation(t *testing.T) {
 		Body:          "Please watch this area @reviewer",
 		RelativeStart: "test-relative-start",
 		RelativeEnd:   "test-relative-end",
-		Start:         0,
-		End:           5,
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"}); err != nil {
 		t.Fatalf("create thread: %v", err)
 	}
@@ -1575,8 +1554,6 @@ func TestThreadMentionEventClaimAndComplete(t *testing.T) {
 		Body:          "Please sync with @scribe.",
 		RelativeStart: "test-relative-start",
 		RelativeEnd:   "test-relative-end",
-		Start:         0,
-		End:           5,
 	}, OperationMeta{
 		ActorID:   "owner",
 		ActorType: "human",
@@ -1661,8 +1638,6 @@ func TestAgentSelfReplyDoesNotEnqueueThreadEvent(t *testing.T) {
 		Body:          "Please review this @reviewer",
 		RelativeStart: "test-relative-start",
 		RelativeEnd:   "test-relative-end",
-		Start:         0,
-		End:           5,
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
@@ -1705,8 +1680,6 @@ func TestAgentOwnDocumentEditDoesNotEnqueueDocumentEditedEvent(t *testing.T) {
 		Body:          "Please review this @reviewer",
 		RelativeStart: "test-relative-start",
 		RelativeEnd:   "test-relative-end",
-		Start:         0,
-		End:           5,
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
@@ -1805,7 +1778,7 @@ func formatAgentEvents(items []*AgentEvent) string {
 			parts = append(parts, "<nil>")
 			continue
 		}
-		parts = append(parts, item.ID+" type="+item.Type+" box="+item.Box+" doc="+item.DocumentID+" anchor="+strconv.Itoa(item.AnchorStart)+"-"+strconv.Itoa(item.AnchorEnd))
+		parts = append(parts, item.ID+" type="+item.Type+" box="+item.Box+" doc="+item.DocumentID)
 	}
 	return strings.Join(parts, "; ")
 }

@@ -3,6 +3,7 @@ package syncer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,6 +39,33 @@ type agentSessionSupervisor struct {
 type agentSessionStart struct {
 	done chan struct{}
 	err  error
+}
+
+type agentSessionStartupError struct {
+	AgentID string
+	Handle  string
+	Err     error
+}
+
+func (e *agentSessionStartupError) Error() string {
+	if e == nil {
+		return ""
+	}
+	label := strings.TrimSpace(e.AgentID)
+	if strings.TrimSpace(e.Handle) != "" {
+		label = label + " (" + strings.TrimSpace(e.Handle) + ")"
+	}
+	if e.Err == nil {
+		return "agent session " + label + " failed during startup"
+	}
+	return "agent session " + label + " failed during startup: " + e.Err.Error()
+}
+
+func (e *agentSessionStartupError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
 }
 
 type managedAgentSession struct {
@@ -247,8 +275,9 @@ func (s *agentSessionSupervisor) SetIdleWake(wake func(string)) {
 	s.wakeAgent = wake
 }
 
-func (s *agentSessionSupervisor) Reconcile(ctx context.Context, agents []*agent) {
+func (s *agentSessionSupervisor) Reconcile(ctx context.Context, agents []*agent) error {
 	desired := map[string]*agent{}
+	var errs []error
 	for _, current := range agents {
 		if current == nil {
 			continue
@@ -259,6 +288,11 @@ func (s *agentSessionSupervisor) Reconcile(ctx context.Context, agents []*agent)
 		}
 		if err := s.ensureSession(ctx, current); err != nil {
 			fmt.Printf("agent session %s error: %v\n", current.ID, err)
+			errs = append(errs, &agentSessionStartupError{
+				AgentID: current.ID,
+				Handle:  current.Handle,
+				Err:     err,
+			})
 			s.publish(current.ID, updateAgentSessionRequest{
 				Status:          "disconnected",
 				CurrentActivity: err.Error(),
@@ -278,6 +312,7 @@ func (s *agentSessionSupervisor) Reconcile(ctx context.Context, agents []*agent)
 	for _, session := range stale {
 		_ = session.app.Stop()
 	}
+	return errors.Join(errs...)
 }
 
 func (s *agentSessionSupervisor) Shutdown() {

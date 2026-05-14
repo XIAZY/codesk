@@ -46,17 +46,15 @@ func TestDriveAgentAutomationStartsNotificationTurnFromInbox(t *testing.T) {
 			case "for_me":
 				return jsonResponse(t, http.StatusOK, toolInboxResponse{
 					Items: []*agentEvent{{
-						ID:          "evt_1",
-						AgentID:     "agent_1",
-						Type:        "thread.mentioned",
-						Box:         "for_me",
-						Status:      "pending",
-						DocumentID:  "doc_spec",
-						ThreadID:    "thread_spec",
-						AnchorStart: 0,
-						AnchorEnd:   10,
-						Summary:     "mentioned in spec",
-						UpdatedAt:   time.Unix(10, 0).UTC(),
+						ID:         "evt_1",
+						AgentID:    "agent_1",
+						Type:       "thread.mentioned",
+						Box:        "for_me",
+						Status:     "pending",
+						DocumentID: "doc_spec",
+						ThreadID:   "thread_spec",
+						Summary:    "mentioned in spec",
+						UpdatedAt:  time.Unix(10, 0).UTC(),
 					}},
 				}), nil
 			case "general":
@@ -260,8 +258,17 @@ func TestToolGatewayCreateThreadResolvesPathQuoteToRelativeAnchors(t *testing.T)
 			if seen["relativeStart"] == "" || seen["relativeEnd"] == "" {
 				t.Fatalf("expected generated relative anchors, got %#v", seen)
 			}
-			if seen["line"] != float64(2) || seen["start"] != float64(13) || seen["end"] != float64(19) || seen["excerpt"] != "target" {
-				t.Fatalf("unexpected display anchor metadata: %#v", seen)
+			if seen["kind"] != "text-range" || seen["excerpt"] != "target" {
+				t.Fatalf("unexpected canonical anchor metadata: %#v", seen)
+			}
+			if _, ok := seen["line"]; ok {
+				t.Fatalf("line is helper input and should not be forwarded: %#v", seen)
+			}
+			if _, ok := seen["start"]; ok {
+				t.Fatalf("start is helper input and should not be forwarded: %#v", seen)
+			}
+			if _, ok := seen["end"]; ok {
+				t.Fatalf("end is helper input and should not be forwarded: %#v", seen)
 			}
 			return jsonResponse(t, http.StatusCreated, toolThreadMutationResponse{
 				Thread:  &thread{ID: "thread_1"},

@@ -7,7 +7,7 @@
     "dev": "vite --host 0.0.0.0 --port 5173",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
-    "test": "npm run typecheck && tsc src/app_logic.ts --target ES2020 --module NodeNext --moduleResolution NodeNext --outDir .test-dist && node --test test/*.test.mjs"
+    "test": "npm run typecheck && vitest run"
   },
   "dependencies": {
     "lib0": "^0.2.114",

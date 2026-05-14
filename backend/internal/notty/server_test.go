@@ -243,9 +243,6 @@ func TestThreadEndpointsRoundTrip(t *testing.T) {
 		Body:          "Please review this section.",
 		RelativeStart: "browser-relative-start",
 		RelativeEnd:   "browser-relative-end",
-		Start:         0,
-		End:           5,
-		Line:          1,
 		Excerpt:       "alpha",
 	})
 	if err != nil {
@@ -278,6 +275,18 @@ func TestThreadEndpointsRoundTrip(t *testing.T) {
 	}
 	if anchorMap["relativeStart"] != "browser-relative-start" || anchorMap["relativeEnd"] != "browser-relative-end" {
 		t.Fatalf("expected caller-provided relative anchors, got %#v", anchorMap)
+	}
+	if _, ok := anchorMap["line"]; ok {
+		t.Fatalf("line should not be persisted in canonical anchors: %#v", anchorMap)
+	}
+	if _, ok := anchorMap["start"]; ok {
+		t.Fatalf("start should not be persisted in canonical anchors: %#v", anchorMap)
+	}
+	if _, ok := anchorMap["end"]; ok {
+		t.Fatalf("end should not be persisted in canonical anchors: %#v", anchorMap)
+	}
+	if _, ok := anchorMap["documentId"]; ok {
+		t.Fatalf("documentId is already on the thread and should not be duplicated in anchor: %#v", anchorMap)
 	}
 
 	fetched := performJSONRequest(t, router, http.MethodGet, "/api/threads/"+threadID, nil)

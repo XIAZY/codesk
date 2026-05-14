@@ -235,13 +235,9 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			document_id TEXT NOT NULL,
 			title TEXT NOT NULL,
 			status TEXT NOT NULL,
-			anchor JSONB NOT NULL DEFAULT '{}'::jsonb,
 			anchor_relative_start TEXT NOT NULL DEFAULT '',
 			anchor_relative_end TEXT NOT NULL DEFAULT '',
 			anchor_kind TEXT NOT NULL DEFAULT '',
-			anchor_start INTEGER NOT NULL DEFAULT 0,
-			anchor_end INTEGER NOT NULL DEFAULT 0,
-			anchor_line INTEGER NOT NULL DEFAULT 1,
 			anchor_excerpt TEXT NOT NULL DEFAULT '',
 			created_by_id TEXT NOT NULL,
 			created_by_type TEXT NOT NULL,
@@ -253,13 +249,13 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		`,
 		`CREATE INDEX IF NOT EXISTS idx_threads_workspace_document_updated ON threads (workspace_id, document_id, updated_at DESC)`,
 		`DROP TABLE IF EXISTS workspace_snapshots`,
-		`ALTER TABLE threads ALTER COLUMN anchor SET DEFAULT '{}'::jsonb`,
+		`ALTER TABLE threads DROP COLUMN IF EXISTS anchor`,
 		`ALTER TABLE threads ADD COLUMN IF NOT EXISTS anchor_relative_start TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE threads ADD COLUMN IF NOT EXISTS anchor_relative_end TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE threads ADD COLUMN IF NOT EXISTS anchor_kind TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE threads ADD COLUMN IF NOT EXISTS anchor_start INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE threads ADD COLUMN IF NOT EXISTS anchor_end INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE threads ADD COLUMN IF NOT EXISTS anchor_line INTEGER NOT NULL DEFAULT 1`,
+		`ALTER TABLE threads DROP COLUMN IF EXISTS anchor_start`,
+		`ALTER TABLE threads DROP COLUMN IF EXISTS anchor_end`,
+		`ALTER TABLE threads DROP COLUMN IF EXISTS anchor_line`,
 		`ALTER TABLE threads ADD COLUMN IF NOT EXISTS anchor_excerpt TEXT NOT NULL DEFAULT ''`,
 		`
 		CREATE TABLE IF NOT EXISTS thread_messages (
@@ -341,8 +337,6 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			document_id TEXT NOT NULL,
 			thread_id TEXT NOT NULL,
 			thread_message_id TEXT NOT NULL,
-			anchor_start INTEGER NOT NULL,
-			anchor_end INTEGER NOT NULL,
 			from_update_id BIGINT NOT NULL DEFAULT 0,
 			to_update_id BIGINT NOT NULL DEFAULT 0,
 			summary TEXT NOT NULL,
@@ -360,6 +354,8 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		)
 		`,
 		`ALTER TABLE agent_events ADD COLUMN IF NOT EXISTS box TEXT NOT NULL DEFAULT 'for_me'`,
+		`ALTER TABLE agent_events DROP COLUMN IF EXISTS anchor_start`,
+		`ALTER TABLE agent_events DROP COLUMN IF EXISTS anchor_end`,
 		`ALTER TABLE agent_events ADD COLUMN IF NOT EXISTS from_update_id BIGINT NOT NULL DEFAULT 0`,
 		`ALTER TABLE agent_events ADD COLUMN IF NOT EXISTS to_update_id BIGINT NOT NULL DEFAULT 0`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_events_workspace_agent_claim ON agent_events (workspace_id, agent_id, status, available_at, created_at)`,
@@ -986,34 +982,26 @@ func (s *Store) replaceThreadsPostgresLocked(tx *sql.Tx) error {
 		return err
 	}
 	for _, thread := range s.state.Threads {
-		anchor, err := json.Marshal(thread.Anchor)
-		if err != nil {
-			return err
-		}
 		if _, err := tx.Exec(
 			`INSERT INTO threads (
-				workspace_id, id, document_id, title, status, anchor,
-				anchor_relative_start, anchor_relative_end, anchor_kind, anchor_start, anchor_end, anchor_line, anchor_excerpt,
+				workspace_id, id, document_id, title, status,
+				anchor_relative_start, anchor_relative_end, anchor_kind, anchor_excerpt,
 				created_by_id, created_by_type, created_by_handle, created_by_name,
 				created_at, updated_at
 			) VALUES (
-				$1, $2, $3, $4, $5, $6::jsonb,
-				$7, $8, $9, $10, $11, $12, $13,
-				$14, $15, $16, $17,
-				$18, $19
+				$1, $2, $3, $4, $5,
+				$6, $7, $8, $9,
+				$10, $11, $12, $13,
+				$14, $15
 			)`,
 			s.state.WorkspaceID,
 			thread.ID,
 			thread.DocumentID,
 			thread.Title,
 			thread.Status,
-			string(anchor),
 			thread.Anchor.RelativeStart,
 			thread.Anchor.RelativeEnd,
 			thread.Anchor.Kind,
-			thread.Anchor.Start,
-			thread.Anchor.End,
-			thread.Anchor.Line,
 			thread.Anchor.Excerpt,
 			thread.CreatedByID,
 			thread.CreatedByType,
@@ -1069,14 +1057,14 @@ func (s *Store) replaceAgentEventsPostgresLocked(tx *sql.Tx) error {
 		if _, err := tx.Exec(
 			`INSERT INTO agent_events (
 				workspace_id, id, agent_id, agent_handle, type, box, status, document_id,
-				thread_id, thread_message_id, anchor_start, anchor_end, from_update_id, to_update_id, summary,
+				thread_id, thread_message_id, from_update_id, to_update_id, summary,
 				prompt, dedup_key, claimed_by, run_id, last_error, attempt_count,
 				available_at, claimed_at, completed_at, created_at, updated_at
 			) VALUES (
 				$1, $2, $3, $4, $5, $6, $7, $8,
-				$9, $10, $11, $12, $13, $14, $15,
-				$16, $17, $18, $19, $20, $21,
-				$22, $23, $24, $25, $26
+				$9, $10, $11, $12, $13,
+				$14, $15, $16, $17, $18, $19,
+				$20, $21, $22, $23, $24
 			)`,
 			s.state.WorkspaceID,
 			event.ID,
@@ -1088,8 +1076,6 @@ func (s *Store) replaceAgentEventsPostgresLocked(tx *sql.Tx) error {
 			event.DocumentID,
 			event.ThreadID,
 			event.ThreadMessageID,
-			event.AnchorStart,
-			event.AnchorEnd,
 			event.FromUpdateID,
 			event.ToUpdateID,
 			event.Summary,
@@ -1155,8 +1141,7 @@ func claimAgentEventPostgres(db *sql.DB, workspaceID string, agentID string, age
 		 WHERE agent_events.id = next.id
 			RETURNING agent_events.id, agent_events.agent_id, agent_events.agent_handle, agent_events.type,
 			          agent_events.box, agent_events.status, agent_events.document_id, agent_events.thread_id,
-			          agent_events.thread_message_id, agent_events.anchor_start, agent_events.anchor_end,
-			          agent_events.from_update_id, agent_events.to_update_id, agent_events.summary,
+			          agent_events.thread_message_id, agent_events.from_update_id, agent_events.to_update_id, agent_events.summary,
 			          agent_events.prompt, agent_events.dedup_key,
 			          agent_events.claimed_by, agent_events.run_id, agent_events.last_error,
 			          agent_events.attempt_count, agent_events.available_at, agent_events.claimed_at,
@@ -1208,7 +1193,7 @@ func updateAgentEventPostgres(db *sql.DB, workspaceID string, id string, req Upd
 		  WHERE workspace_id = $7
 		    AND id = $8
 		RETURNING id, agent_id, agent_handle, type, box, status, document_id, thread_id,
-		          thread_message_id, anchor_start, anchor_end, from_update_id, to_update_id,
+		          thread_message_id, from_update_id, to_update_id,
 		          summary, prompt, dedup_key, claimed_by, run_id, last_error, attempt_count,
 		          available_at, claimed_at, completed_at, created_at, updated_at`,
 		strings.TrimSpace(req.Status),
@@ -1973,7 +1958,7 @@ func (s *Store) restoreDocumentDocPostgresLocked(document *Document) (*crdt.Doc,
 func (s *Store) loadThreadsPostgresLocked() error {
 	rows, err := s.db.Query(
 		`SELECT id, document_id, title, status, anchor_relative_start, anchor_relative_end,
-		        anchor_kind, anchor_start, anchor_end, anchor_line, anchor_excerpt, anchor, created_by_id, created_by_type,
+		        anchor_kind, anchor_excerpt, created_by_id, created_by_type,
 		        created_by_handle, created_by_name, created_at, updated_at
 		   FROM threads
 		  WHERE workspace_id = $1`,
@@ -2049,7 +2034,7 @@ func (s *Store) loadThreadsPostgresLocked() error {
 func (s *Store) loadAgentEventsPostgresLocked() error {
 	rows, err := s.db.Query(
 		`SELECT id, agent_id, agent_handle, type, box, status, document_id, thread_id,
-		        thread_message_id, anchor_start, anchor_end, from_update_id, to_update_id,
+		        thread_message_id, from_update_id, to_update_id,
 		        summary, prompt, dedup_key, claimed_by, run_id, last_error, attempt_count,
 		        available_at, claimed_at, completed_at, created_at, updated_at
 		   FROM agent_events
@@ -2131,7 +2116,6 @@ func scanAgentRun(scanner interface{ Scan(...any) error }) (*AgentRun, error) {
 
 func scanThread(scanner interface{ Scan(...any) error }) (*Thread, error) {
 	thread := &Thread{Messages: []*ThreadMessage{}, ParticipantIDs: []string{}}
-	var anchorRaw []byte
 	if err := scanner.Scan(
 		&thread.ID,
 		&thread.DocumentID,
@@ -2140,11 +2124,7 @@ func scanThread(scanner interface{ Scan(...any) error }) (*Thread, error) {
 		&thread.Anchor.RelativeStart,
 		&thread.Anchor.RelativeEnd,
 		&thread.Anchor.Kind,
-		&thread.Anchor.Start,
-		&thread.Anchor.End,
-		&thread.Anchor.Line,
 		&thread.Anchor.Excerpt,
-		&anchorRaw,
 		&thread.CreatedByID,
 		&thread.CreatedByType,
 		&thread.CreatedByHandle,
@@ -2153,11 +2133,6 @@ func scanThread(scanner interface{ Scan(...any) error }) (*Thread, error) {
 		&thread.UpdatedAt,
 	); err != nil {
 		return nil, err
-	}
-	if thread.Anchor.Kind == "" && len(anchorRaw) > 0 {
-		if err := json.Unmarshal(anchorRaw, &thread.Anchor); err != nil {
-			return nil, err
-		}
 	}
 	return thread, nil
 }
@@ -2196,8 +2171,6 @@ func scanAgentEvent(scanner interface{ Scan(...any) error }) (*AgentEvent, error
 		&event.DocumentID,
 		&event.ThreadID,
 		&event.ThreadMessageID,
-		&event.AnchorStart,
-		&event.AnchorEnd,
 		&event.FromUpdateID,
 		&event.ToUpdateID,
 		&event.Summary,

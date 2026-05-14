@@ -31,6 +31,16 @@ type toolThreadsResponse struct {
 	Threads []*thread `json:"threads"`
 }
 
+type backendCreateThreadPayload struct {
+	DocumentID    string `json:"documentId"`
+	Title         string `json:"title"`
+	Body          string `json:"body"`
+	Kind          string `json:"kind"`
+	RelativeStart string `json:"relativeStart,omitempty"`
+	RelativeEnd   string `json:"relativeEnd,omitempty"`
+	Excerpt       string `json:"excerpt,omitempty"`
+}
+
 type toolNotificationResponse struct {
 	Notification *agentEvent `json:"notification"`
 }
@@ -374,7 +384,15 @@ func (s *Service) createThreadAsRun(ctx context.Context, run *agentRun, payload 
 	if err != nil {
 		return nil, err
 	}
-	body, err := json.Marshal(prepared)
+	body, err := json.Marshal(backendCreateThreadPayload{
+		DocumentID:    prepared.DocumentID,
+		Title:         prepared.Title,
+		Body:          prepared.Body,
+		Kind:          prepared.Kind,
+		RelativeStart: prepared.RelativeStart,
+		RelativeEnd:   prepared.RelativeEnd,
+		Excerpt:       prepared.Excerpt,
+	})
 	if err != nil {
 		return nil, err
 	}

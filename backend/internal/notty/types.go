@@ -48,14 +48,10 @@ type DocumentMetadata struct {
 }
 
 type ThreadAnchor struct {
-	DocumentID    string `json:"documentId"`
 	Kind          string `json:"kind"`
 	RelativeStart string `json:"relativeStart,omitempty"`
 	RelativeEnd   string `json:"relativeEnd,omitempty"`
-	Start         int    `json:"start"`
-	End           int    `json:"end"`
-	Line          int    `json:"line"`
-	Excerpt       string `json:"excerpt"`
+	Excerpt       string `json:"excerpt,omitempty"`
 }
 
 type ThreadMessage struct {
@@ -207,8 +203,6 @@ type AgentEvent struct {
 	DocumentID      string    `json:"documentId,omitempty"`
 	ThreadID        string    `json:"threadId,omitempty"`
 	ThreadMessageID string    `json:"threadMessageId,omitempty"`
-	AnchorStart     int       `json:"anchorStart,omitempty"`
-	AnchorEnd       int       `json:"anchorEnd,omitempty"`
 	FromUpdateID    int64     `json:"fromUpdateId"`
 	ToUpdateID      int64     `json:"toUpdateId"`
 	Summary         string    `json:"summary"`
@@ -325,11 +319,9 @@ type CreateThreadRequest struct {
 	DocumentID    string `json:"documentId"`
 	Title         string `json:"title"`
 	Body          string `json:"body"`
+	Kind          string `json:"kind"`
 	RelativeStart string `json:"relativeStart"`
 	RelativeEnd   string `json:"relativeEnd"`
-	Start         int    `json:"start"`
-	End           int    `json:"end"`
-	Line          int    `json:"line"`
 	Excerpt       string `json:"excerpt"`
 }
 

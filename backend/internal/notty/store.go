@@ -907,7 +907,7 @@ func (s *Store) computedDocumentInboxLocked(agentID string) []*AgentEvent {
 		if fromUpdateID >= document.UpdateID {
 			continue
 		}
-		box, eventType, anchorStart, anchorEnd := s.documentInboxClassificationLocked(agentID, document)
+		box, eventType := s.documentInboxClassificationLocked(agentID, document)
 		items = append(items, &AgentEvent{
 			ID:           syntheticDocumentInboxID(box, agentID, document.ID),
 			AgentID:      agentID,
@@ -916,8 +916,6 @@ func (s *Store) computedDocumentInboxLocked(agentID string) []*AgentEvent {
 			Box:          box,
 			Status:       "pending",
 			DocumentID:   document.ID,
-			AnchorStart:  anchorStart,
-			AnchorEnd:    anchorEnd,
 			FromUpdateID: fromUpdateID,
 			ToUpdateID:   document.UpdateID,
 			Summary:      fmt.Sprintf("%s changed from version %d to %d", document.Path, fromUpdateID, document.UpdateID),
@@ -962,16 +960,16 @@ func (s *Store) syntheticDocumentInboxItemLocked(id string) (*AgentEvent, bool) 
 	return nil, false
 }
 
-func (s *Store) documentInboxClassificationLocked(agentID string, document *Document) (box string, eventType string, anchorStart int, anchorEnd int) {
+func (s *Store) documentInboxClassificationLocked(agentID string, document *Document) (box string, eventType string) {
 	for _, thread := range s.state.Threads {
 		if thread == nil || thread.DocumentID != document.ID || thread.Status != "open" {
 			continue
 		}
 		if containsText(thread.ParticipantIDs, agentID) {
-			return "for_me", "document.updated", thread.Anchor.Start, thread.Anchor.End
+			return "for_me", "document.updated"
 		}
 	}
-	return "general", "document.updated", 0, 0
+	return "general", "document.updated"
 }
 
 func (s *Store) agentHandleByIDLocked(agentID string) string {
@@ -2019,7 +2017,7 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 		return nil, nil, err
 	}
 	now := time.Now().UTC()
-	anchor, err := buildThreadAnchorFromRequest(document, req)
+	anchor, err := buildThreadAnchorFromRequest(req)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -3040,33 +3038,39 @@ func (s *Store) mergeThreadParticipantsLocked(thread *Thread, participantIDs ...
 	sort.Strings(thread.ParticipantIDs)
 }
 
-func buildThreadAnchorFromRequest(document *Document, req CreateThreadRequest) (ThreadAnchor, error) {
+func buildThreadAnchorFromRequest(req CreateThreadRequest) (ThreadAnchor, error) {
 	relativeStart := strings.TrimSpace(req.RelativeStart)
 	relativeEnd := strings.TrimSpace(req.RelativeEnd)
 	if (relativeStart == "") != (relativeEnd == "") {
 		return ThreadAnchor{}, errors.New("relativeStart and relativeEnd must be provided together")
 	}
-	start := maxInt(0, req.Start)
-	end := maxInt(start, req.End)
-	line := maxInt(1, req.Line)
 	excerpt := truncateText(strings.TrimSpace(req.Excerpt), 140)
-	if relativeStart == "" && relativeEnd == "" {
-		if start == 0 && end == 0 && req.Line == 0 && excerpt == "" {
-			return ThreadAnchor{
-				DocumentID: document.ID,
-				Kind:       "document",
-				Line:       1,
-			}, nil
+	kind := strings.TrimSpace(req.Kind)
+	if kind == "" {
+		if relativeStart == "" {
+			kind = "document"
+		} else {
+			kind = "text-range"
 		}
+	}
+	if kind != "document" && kind != "text-range" {
+		return ThreadAnchor{}, errors.New("thread anchor kind must be document or text-range")
+	}
+	if kind == "document" {
+		if relativeStart != "" || relativeEnd != "" {
+			return ThreadAnchor{}, errors.New("document threads cannot include relative anchors")
+		}
+		return ThreadAnchor{
+			Kind:    "document",
+			Excerpt: excerpt,
+		}, nil
+	}
+	if relativeStart == "" && relativeEnd == "" {
 		return ThreadAnchor{}, errors.New("text-range threads require relativeStart and relativeEnd")
 	}
 	anchor := ThreadAnchor{
-		DocumentID: document.ID,
-		Kind:       "text-range",
-		Start:      start,
-		End:        end,
-		Line:       line,
-		Excerpt:    excerpt,
+		Kind:    "text-range",
+		Excerpt: excerpt,
 	}
 	anchor.RelativeStart = relativeStart
 	anchor.RelativeEnd = relativeEnd
@@ -3190,8 +3194,6 @@ func (s *Store) enqueueDocumentThreadEventsLocked(document *Document, meta Opera
 			s.enqueueAgentNotificationLocked(agent.ID, agent.Handle, "document.edited", dedupKey, meta, "", func(event *AgentEvent, now time.Time) {
 				event.DocumentID = document.ID
 				event.ThreadID = thread.ID
-				event.AnchorStart = thread.Anchor.Start
-				event.AnchorEnd = thread.Anchor.End
 				event.Summary = fmt.Sprintf("%s changed near thread %s", document.Path, thread.Title)
 				event.Prompt = fmt.Sprintf("Document %s changed near thread %q. Review the latest edits and continue the discussion if needed.", document.Path, thread.Title)
 			})
@@ -3214,8 +3216,6 @@ func (s *Store) enqueueThreadMentionEventsLocked(thread *Thread, message *Thread
 			event.DocumentID = thread.DocumentID
 			event.ThreadID = thread.ID
 			event.ThreadMessageID = message.ID
-			event.AnchorStart = thread.Anchor.Start
-			event.AnchorEnd = thread.Anchor.End
 			event.Summary = fmt.Sprintf("@%s was mentioned in thread %s", agent.Handle, thread.Title)
 			event.Prompt = fmt.Sprintf("You were mentioned by @%s in thread %q: %s", message.AuthorHandle, thread.Title, truncateText(message.Body, 240))
 		})
@@ -3259,8 +3259,6 @@ func (s *Store) enqueueThreadReplyEventsLocked(thread *Thread, message *ThreadMe
 			event.DocumentID = thread.DocumentID
 			event.ThreadID = thread.ID
 			event.ThreadMessageID = message.ID
-			event.AnchorStart = thread.Anchor.Start
-			event.AnchorEnd = thread.Anchor.End
 			event.Summary = fmt.Sprintf("New reply in thread %s", thread.Title)
 			event.Prompt = fmt.Sprintf("A new reply was added in thread %q by @%s: %s", thread.Title, message.AuthorHandle, truncateText(message.Body, 240))
 		})
