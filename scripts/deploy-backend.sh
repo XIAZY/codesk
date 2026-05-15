@@ -12,7 +12,6 @@ latest_image="$docker_repo:backend-latest"
 platforms="${DOCKER_PLATFORMS:-linux/amd64,linux/arm64}"
 ssh_host="${NOTTY_DEPLOY_SSH_HOST:-notty}"
 remote_dir="${NOTTY_REMOTE_DIR:-/opt/notty}"
-install_nginx="${INSTALL_NGINX:-0}"
 
 die() {
 	printf 'deploy-backend: %s\n' "$*" >&2
@@ -28,6 +27,8 @@ shell_quote() {
 command -v docker >/dev/null 2>&1 || die "docker is required"
 command -v ssh >/dev/null 2>&1 || die "ssh is required"
 command -v scp >/dev/null 2>&1 || die "scp is required"
+
+ssh "$ssh_host" "docker ps >/dev/null 2>&1" || die "remote user cannot access Docker on $ssh_host; add the SSH user to the docker group or configure passwordless Docker access before deploying"
 
 printf 'Building and pushing backend image %s\n' "$backend_image"
 docker buildx build \
@@ -51,18 +52,11 @@ printf 'Restarting backend on %s\n' "$ssh_host"
 ssh "$ssh_host" "cd $quoted_remote_dir && \
 	test -f notty.server.env || { echo 'missing $remote_dir/notty.server.env' >&2; exit 1; } && \
 	test -f .env || { echo 'missing $remote_dir/.env' >&2; exit 1; } && \
-	set -a && . ./notty.server.env && . ./.env && set +a && \
-	: \"\${NOTTY_DATABASE_URL:?missing NOTTY_DATABASE_URL in $remote_dir/.env}\" && \
-	: \"\${NOTTY_JWT_SECRET:?missing NOTTY_JWT_SECRET in $remote_dir/.env}\" && \
+	NOTTY_BACKEND_IMAGE=$quoted_backend_image docker compose -f compose.prod.yml --env-file notty.server.env --env-file .env config >/tmp/notty-compose-config.yml && \
+	grep -q 'NOTTY_DATABASE_URL:' /tmp/notty-compose-config.yml || { echo 'missing NOTTY_DATABASE_URL in $remote_dir/.env' >&2; exit 1; } && \
+	grep -q 'NOTTY_JWT_SECRET:' /tmp/notty-compose-config.yml || { echo 'missing NOTTY_JWT_SECRET in $remote_dir/.env' >&2; exit 1; } && \
 	NOTTY_BACKEND_IMAGE=$quoted_backend_image docker compose -f compose.prod.yml --env-file notty.server.env --env-file .env pull && \
 	NOTTY_BACKEND_IMAGE=$quoted_backend_image docker compose -f compose.prod.yml --env-file notty.server.env --env-file .env up -d --remove-orphans && \
 	NOTTY_BACKEND_IMAGE=$quoted_backend_image docker compose -f compose.prod.yml --env-file notty.server.env --env-file .env ps"
-
-if [ "$install_nginx" = "1" ]; then
-	printf 'Installing nginx API proxy on %s\n' "$ssh_host"
-	ssh "$ssh_host" "sudo cp $quoted_remote_dir/notty-api.nginx.conf /etc/nginx/conf.d/notty-api.conf && sudo nginx -t && sudo systemctl reload nginx"
-else
-	printf 'Uploaded nginx API proxy config to %s/notty-api.nginx.conf. Set INSTALL_NGINX=1 to install and reload nginx during deploy.\n' "$remote_dir"
-fi
 
 printf 'Backend deploy complete: %s\n' "$backend_image"

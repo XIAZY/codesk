@@ -1,14 +1,35 @@
 services:
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${NOTTY_HTTP_BIND:-0.0.0.0}:${NOTTY_HTTP_PORT:-80}:80"
+    environment:
+      NOTTY_API_HOST: ${NOTTY_API_HOST:-api.nottyai.co}
+      NOTTY_FRONTEND_ORIGIN: ${NOTTY_FRONTEND_ORIGIN:-https://app.nottyai.co}
+      NOTTY_HOMEPAGE_ORIGIN: ${NOTTY_HOMEPAGE_ORIGIN:-https://nottyai.co}
+      NOTTY_WWW_HOMEPAGE_ORIGIN: ${NOTTY_WWW_HOMEPAGE_ORIGIN:-https://www.nottyai.co}
+    volumes:
+      - ./notty-api.nginx.conf:/etc/nginx/templates/default.conf.template:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- --header='Host: ${NOTTY_API_HOST:-api.nottyai.co}' http://127.0.0.1/healthz >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
   backend:
     image: ${NOTTY_BACKEND_IMAGE:-alphatoad/notty:backend-latest}
     restart: unless-stopped
-    ports:
-      - "${NOTTY_BACKEND_BIND:-127.0.0.1}:${NOTTY_BACKEND_PORT:-8080}:8080"
+    expose:
+      - "8080"
     environment:
       NOTTY_PORT: "8080"
       NOTTY_DATABASE_URL: ${NOTTY_DATABASE_URL:?NOTTY_DATABASE_URL is required}
       NOTTY_JWT_SECRET: ${NOTTY_JWT_SECRET:?NOTTY_JWT_SECRET is required}
-      NOTTY_PUBLIC_ORIGIN: ${NOTTY_PUBLIC_ORIGIN:-https://app.nottyai.co}
+      NOTTY_PUBLIC_ORIGIN: ${NOTTY_PUBLIC_ORIGIN:-${NOTTY_FRONTEND_ORIGIN:-https://app.nottyai.co}}
       NOTTY_PPROF_ADDR: ${NOTTY_PPROF_ADDR:-}
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1"]

@@ -28,6 +28,7 @@ The observable local outcome is that `docker compose up --build` starts the loca
 - [x] (2026-05-15 06:30Z) Connect `nottyai.co` to the R2 static bucket and add a root-path rewrite to `homepage/index.html`.
 - [x] (2026-05-15 06:45Z) Replace shared static bucket routing with dedicated R2 buckets for homepage, app, and daemon artifacts; remove the transform rewrite.
 - [x] (2026-05-15 07:00Z) Split deployment entrypoints into frontend, daemon static, backend, and full-release scripts.
+- [x] (2026-05-15 07:20Z) Move production nginx into Docker Compose so backend remains private on the Compose network.
 
 ## Surprises & Discoveries
 
@@ -104,6 +105,10 @@ The observable local outcome is that `docker compose up --build` starts the loca
 
 - Decision: Keep separate deploy entrypoints for frontend, daemon static artifacts, and backend.
   Rationale: These deploy units have different dependencies and failure modes. Frontend and daemon artifacts only need build tooling plus R2, while backend deploy requires Docker push and SSH. Separate scripts make retries safer.
+  Date/Author: 2026-05-15 / Codex
+
+- Decision: Manage production nginx inside Docker Compose.
+  Rationale: Nginx is part of the backend service boundary. Keeping it in Compose makes host matching, CORS, websocket proxying, and upstream isolation versioned with the backend deploy instead of relying on host-level mutable config.
   Date/Author: 2026-05-15 / Codex
 
 ## Outcomes & Retrospective

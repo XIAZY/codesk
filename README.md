@@ -515,7 +515,7 @@ Response `201`:
 }
 ```
 
-Frontend should display the token once and provide a hosted installer command. The frontend origin defaults to `https://app.nottyai.co`, API/websocket traffic defaults to `https://api.nottyai.co`, and daemon downloads default to `https://static.nottyai.co/daemons`.
+Frontend should display the token once and provide a hosted installer command. The frontend, backend, and static origins are environment-driven so local development can use localhost while production uses the public domains.
 
 ```sh
 curl -fsSL https://static.nottyai.co/daemons/install.sh | sh -s -- \
@@ -1565,7 +1565,7 @@ Production services:
 - Static homepage is hosted at `https://nottyai.co`.
 - Static frontend is hosted at `https://app.nottyai.co`.
 - Static daemon installer and artifacts are hosted at `https://static.nottyai.co/daemons`.
-- The backend runs as the only Docker Compose service on the remote server and connects to external Postgres through `NOTTY_DATABASE_URL`.
+- The production server runs Docker Compose with `nginx` and `backend`. Nginx is the only public container, enforces `api.nottyai.co` host matching, and proxies to the private backend service. Backend connects to external Postgres through `NOTTY_DATABASE_URL`.
 
 Default production routes:
 
@@ -1574,7 +1574,7 @@ Default production routes:
 - API and websockets: `https://api.nottyai.co`
 - Daemon downloads: `https://static.nottyai.co/daemons`
 
-For product development from a source checkout, `docker compose up --build` remains the supported one-command way to start the local backend, frontend, and Postgres stack. Local dev does not run nginx. The hosted installer is only for deploying a daemon onto a user's own machine without requiring the Notty source tree.
+For product development from a source checkout, `docker compose --env-file deploy/env/dev.server.env up --build` remains the supported one-command way to start the local backend, frontend, static, and Postgres stack. Local dev does not run nginx. Local dev defaults `NOTTY_FRONTEND_ORIGIN`, `NOTTY_BACKEND_ORIGIN`, and `NOTTY_STATIC_ORIGIN` to localhost values instead of production domains. The local `static` service serves daemon scripts from `deploy/daemons` at `http://localhost:${NOTTY_STATIC_PORT:-5174}/daemons`, mirroring production’s separate static origin instead of coupling daemon downloads to the frontend.
 
 Start an external daemon after creating a daemon token in the frontend:
 
@@ -1659,32 +1659,19 @@ rule, `scripts/publish-static-r2.sh` uploads each root `index.html` twice when
 the bucket prefix is empty: once as `index.html`, and once as the empty object
 key. Daemon artifacts stay under `daemons/` so installer URLs remain stable.
 
-Production backend deployment uses `compose.prod.yml`. The remote server should keep `/opt/notty/.env` outside git with only secrets such as `NOTTY_DATABASE_URL` and `NOTTY_JWT_SECRET`. `scripts/deploy-backend.sh` builds and pushes `alphatoad/notty:backend-<version>`, uploads `compose.prod.yml` and `deploy/env/prod.server.env` to SSH host `notty`, and restarts the backend:
+Production backend deployment uses `compose.prod.yml`. The remote server should keep `/opt/notty/.env` outside git with only secrets such as `NOTTY_DATABASE_URL` and `NOTTY_JWT_SECRET`. `scripts/deploy-backend.sh` builds and pushes `alphatoad/notty:backend-<version>`, uploads `compose.prod.yml`, `deploy/env/prod.server.env`, and the Compose-mounted nginx config to SSH host `notty`, then restarts the production Compose stack:
 
 ```sh
 make deploy-backend VERSION=v0.1.0
 ```
 
-Production API traffic should be routed by host-level nginx from `https://api.nottyai.co` to the backend bound on `127.0.0.1:${NOTTY_BACKEND_PORT:-8080}`. The nginx config lives at `deploy/nginx/notty-api.conf`. It handles:
+Production API traffic is routed by the Compose-managed nginx service. The nginx config lives at `deploy/nginx/notty-api.conf` and is mounted into the nginx container as `/etc/nginx/conf.d/default.conf`. It handles:
 
+- Host matching for `api.nottyai.co`; unmatched hosts are closed.
 - CORS for `https://app.nottyai.co`, `https://nottyai.co`, and local development origins.
 - `Authorization`, `Content-Type`, and `X-Notty-Acting-Agent-ID` request headers.
 - Websocket upgrades for `/ws/...`.
 - Hiding backend `Access-Control-*` headers so production responses do not contain duplicate CORS headers.
-
-Install it on the production server after reviewing:
-
-```sh
-sudo cp /opt/notty/notty-api.nginx.conf /etc/nginx/conf.d/notty-api.conf
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-Or let the deploy script install/reload nginx:
-
-```sh
-INSTALL_NGINX=1 make deploy-backend VERSION=v0.1.0
-```
 
 Do not store production database credentials in git. Use `.env.example` only as the server secrets template.
 
@@ -1701,23 +1688,25 @@ Important deployment environment variables in `deploy/env/prod.deploy.env`:
 - `NOTTY_REMOTE_DIR`: remote deploy directory, default `/opt/notty`.
 - `DOCKER_REPO` and `DOCKER_PLATFORMS`: backend image repository and build platforms.
 - `CLOUDFLARE_ACCOUNT_ID`, `R2_ENDPOINT_URL`, `R2_*_BUCKET`, and `R2_*_PREFIX`: static publish targets.
-- `INSTALL_NGINX`: set to `1` locally or in an override env file to install/reload the nginx API proxy during deploy.
 
 Important production server defaults in `deploy/env/prod.server.env`:
 
 - `NOTTY_BACKEND_IMAGE`: default backend image if a deploy does not override it.
-- `NOTTY_BACKEND_BIND` and `NOTTY_BACKEND_PORT`: backend bind address and host port.
+- `NOTTY_HTTP_BIND` and `NOTTY_HTTP_PORT`: nginx bind address and host port.
+- `NOTTY_FRONTEND_ORIGIN`, `NOTTY_BACKEND_ORIGIN`, and `NOTTY_STATIC_ORIGIN`: public production origins for app, API, and static artifacts.
+- `NOTTY_API_HOST`: nginx host match for the backend API.
 - `NOTTY_PUBLIC_ORIGIN`: public frontend origin used by backend-generated links.
 - `NOTTY_PPROF_ADDR`: optional pprof bind address.
 
 Important frontend environment variables:
 
-- `NOTTY_PUBLIC_ORIGIN`: public origin for frontend links, default `https://app.nottyai.co`. When opened on localhost, the frontend uses the current localhost origin for local development.
+- `NOTTY_FRONTEND_ORIGIN`: public frontend origin, local default `http://localhost:5173`, production default `https://app.nottyai.co`.
+- `NOTTY_BACKEND_ORIGIN`: frontend API/websocket origin, local default `http://localhost:8080`, production default `https://api.nottyai.co`.
+- `NOTTY_STATIC_ORIGIN`: static artifact origin, local default `http://localhost:5173`, production default `https://static.nottyai.co`.
 - `NOTTY_FRONTEND_PORT`: loopback-only frontend dev port, default `5173`.
 - `NOTTY_BACKEND_PORT`: loopback-only backend dev port, default `8080`.
-- `VITE_API_BASE`: frontend API origin. Local Docker Compose defaults this to `http://localhost:${NOTTY_BACKEND_PORT:-8080}` so local browser traffic talks directly to the backend, matching the production split where `app.nottyai.co` talks to `api.nottyai.co`.
-- `NOTTY_DAEMON_STATIC_BASE`: optional daemon artifact origin override. Production default is `https://static.nottyai.co/daemons`.
-- `VITE_PUBLIC_ORIGIN`, `VITE_API_BASE`, and `VITE_DAEMON_STATIC_BASE`: build-time equivalents used outside Docker Compose.
+- `NOTTY_DAEMON_STATIC_BASE`: daemon artifact origin override. Defaults to `${NOTTY_STATIC_ORIGIN}/daemons`.
+- `VITE_PUBLIC_ORIGIN`, `VITE_API_BASE`, and `VITE_DAEMON_STATIC_BASE`: build-time equivalents used by Vite. They are derived from the origin variables in the standard env files.
 
 Important daemon environment variables:
 

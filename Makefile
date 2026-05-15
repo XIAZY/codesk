@@ -4,7 +4,7 @@ PLATFORMS ?= linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 GO_BUILD_FLAGS ?= -trimpath
 GO_LDFLAGS ?= -s -w
 
-.PHONY: dev dev-down prod-config-check static-build static-publish deploy deploy-backend deploy-frontend deploy-static backend-image daemon-build daemon-release daemon-checksums daemon-clean daemon-installer-check
+.PHONY: dev dev-down prod-config-check static-build static-publish deploy deploy-backend deploy-frontend deploy-static backend-image daemon-build daemon-release daemon-checksums daemon-clean daemon-installer-check daemon-uninstall-test
 
 dev:
 	docker compose --env-file deploy/env/dev.server.env up --build
@@ -49,6 +49,10 @@ daemon-checksums:
 
 daemon-installer-check:
 	sh -n deploy/daemons/install.sh
+	sh -n deploy/daemons/uninstall.sh
+
+daemon-uninstall-test:
+	sh scripts/test-daemon-uninstall.sh
 
 daemon-clean:
 	rm -rf bin "$(DIST_DIR)"

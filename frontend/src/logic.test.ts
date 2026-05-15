@@ -7,6 +7,7 @@ import {
   agentsByDaemon,
   applyReplaceToYText,
   buildDaemonInstallCommand,
+  buildDaemonUninstallCommand,
   buildLineThreads,
   computeReplace,
   daemonStatus,
@@ -198,5 +199,38 @@ describe("daemon install command", () => {
 
     expect(command).toContain("curl -fsSL https://notty.example.com/daemons/install.sh | sh -s --");
     expect(command).toContain("--static-base https://notty.example.com/daemons");
+  });
+});
+
+describe("daemon uninstall command", () => {
+  it("builds a hosted uninstaller command for the current workspace-scoped install layout", () => {
+    const command = buildDaemonUninstallCommand({
+      workspaceId: "ws_123",
+      staticBaseUrl: "https://static.example.com/daemons/",
+    });
+
+    expect(command).toContain("curl -fsSL https://static.example.com/daemons/uninstall.sh | sh -s --");
+    expect(command).toContain("--workspace-id ws_123");
+    expect(command).not.toContain("--daemon-token");
+  });
+
+  it("shell-quotes unsafe workspace ids", () => {
+    const command = buildDaemonUninstallCommand({
+      workspaceId: "ws bad'id",
+      staticBaseUrl: "https://static.example.com/daemons",
+    });
+
+    expect(command).toContain("--workspace-id 'ws bad'\\''id'");
+  });
+
+  it("builds an all-workspaces uninstaller command without requiring a workspace id", () => {
+    const command = buildDaemonUninstallCommand({
+      staticBaseUrl: "https://static.example.com/daemons",
+      all: true,
+    });
+
+    expect(command).toContain("curl -fsSL https://static.example.com/daemons/uninstall.sh | sh -s --");
+    expect(command).toContain("--all");
+    expect(command).not.toContain("--workspace-id");
   });
 });

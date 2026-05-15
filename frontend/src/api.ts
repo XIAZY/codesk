@@ -12,15 +12,12 @@ function cleanOrigin(value: string) {
   return value.trim().replace(/\/+$/, "");
 }
 
-const browserOrigin = typeof window !== "undefined" ? window.location.origin : "http://localhost:8088";
-const browserHost = typeof window !== "undefined" ? window.location.hostname : "";
-const localHosts = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"]);
-const isLocalBrowser = localHosts.has(browserHost);
-const configuredPublicOrigin = cleanOrigin(import.meta.env.VITE_PUBLIC_ORIGIN || "https://app.nottyai.co");
+const browserOrigin = typeof window !== "undefined" ? window.location.origin : "http://localhost:5173";
+const configuredPublicOrigin = cleanOrigin(import.meta.env.VITE_PUBLIC_ORIGIN || "");
 const configuredApiBase = cleanOrigin(import.meta.env.VITE_API_BASE || "");
 const configuredDaemonStaticBase = cleanOrigin(import.meta.env.VITE_DAEMON_STATIC_BASE || "");
 
-export const publicOrigin = isLocalBrowser ? cleanOrigin(browserOrigin) : configuredPublicOrigin;
+export const publicOrigin = configuredPublicOrigin || cleanOrigin(browserOrigin);
 export const apiBase = configuredApiBase || publicOrigin;
 export const daemonStaticBase = configuredDaemonStaticBase || `${publicOrigin}/daemons`;
 

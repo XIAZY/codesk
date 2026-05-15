@@ -16,6 +16,7 @@ latest_dir="$dist_abs/latest"
 tmp_dir="${TMPDIR:-/tmp}/notty-daemon-release-$$"
 manifest="$out_dir/manifest.json"
 installer="$root_dir/deploy/daemons/install.sh"
+uninstaller="$root_dir/deploy/daemons/uninstall.sh"
 
 checksum() {
 	if command -v sha256sum >/dev/null 2>&1; then
@@ -32,6 +33,10 @@ trap cleanup EXIT INT TERM
 
 if [ ! -f "$installer" ]; then
 	printf 'missing installer: %s\n' "$installer" >&2
+	exit 1
+fi
+if [ ! -f "$uninstaller" ]; then
+	printf 'missing uninstaller: %s\n' "$uninstaller" >&2
 	exit 1
 fi
 
@@ -87,5 +92,7 @@ cp "$out_dir/manifest.json" "$latest_dir/manifest.json"
 cp "$out_dir/SHA256SUMS" "$latest_dir/SHA256SUMS"
 cp "$installer" "$dist_abs/install.sh"
 cp "$installer" "$out_dir/install.sh"
+cp "$uninstaller" "$dist_abs/uninstall.sh"
+cp "$uninstaller" "$out_dir/uninstall.sh"
 
 printf 'Built daemon release %s in %s\n' "$version" "$out_dir"

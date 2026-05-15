@@ -5,6 +5,7 @@ import {
   agentStatus,
   agentsByDaemon,
   buildDaemonInstallCommand,
+  buildDaemonUninstallCommand,
   buildLineThreads,
   daemonStatus,
   encodeRelativeAnchor,
@@ -1632,6 +1633,14 @@ function AgentDetailModal({ api, workspaceId, agent, daemons, runs, onClose, onC
 }
 
 function DaemonDetailModal({ api, workspaceId, daemon, agents, runs, onClose, onChanged }: { api: ApiClient; workspaceId: string; daemon: Daemon; agents: Agent[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; onClose: () => void; onChanged: () => void }) {
+  const uninstallCommand = buildDaemonUninstallCommand({
+    workspaceId,
+    staticBaseUrl: daemonStaticBase,
+  });
+  const uninstallAllCommand = buildDaemonUninstallCommand({
+    staticBaseUrl: daemonStaticBase,
+    all: true,
+  });
   return (
     <Modal title={daemon.name} onClose={onClose}>
       <div className="form-stack">
@@ -1639,6 +1648,22 @@ function DaemonDetailModal({ api, workspaceId, daemon, agents, runs, onClose, on
         <p className="tiny muted mono">ID: {daemon.id}</p>
         <h3 className="modal-title">Agents on this daemon</h3>
         {agents.map((agent) => <p className="small" key={agent.id}>@{agent.handle} · {visibleAgentStatus(agent, runs, [daemon])}</p>)}
+        <div className="deploy-block">
+          <div className="row between">
+            <b className="small">Uninstall local daemon</b>
+            <span className="chip sm">Run on host</span>
+          </div>
+          <pre className="code">{uninstallCommand}</pre>
+          <p className="small muted">Run this on the machine where the daemon was installed. It stops the local service and removes daemon config, runtime, workspace, agent files, and unused Notty binaries. Delete the daemon record here after local uninstall.</p>
+        </div>
+        <div className="deploy-block">
+          <div className="row between">
+            <b className="small">Uninstall all local daemons</b>
+            <span className="chip sm danger">Destructive</span>
+          </div>
+          <pre className="code">{uninstallAllCommand}</pre>
+          <p className="small muted">Use this when you want zero local residue on that machine. It removes every Notty daemon service, config, runtime, synced workspace, agent workspace, and local Notty binary.</p>
+        </div>
         <button className="btn danger full" onClick={async () => { await api.deleteDaemon(workspaceId, daemon.id); onChanged(); }}>Delete daemon</button>
       </div>
     </Modal>

@@ -36,16 +36,25 @@ services:
       dockerfile: frontend/Dockerfile
     depends_on:
       - backend
+      - static
     ports:
       - "127.0.0.1:${NOTTY_FRONTEND_PORT:-5173}:5173"
     environment:
-      VITE_PUBLIC_ORIGIN: ${VITE_PUBLIC_ORIGIN:-http://localhost:${NOTTY_FRONTEND_PORT:-5173}}
-      VITE_API_BASE: ${VITE_API_BASE:-http://localhost:${NOTTY_BACKEND_PORT:-8080}}
-      VITE_DAEMON_STATIC_BASE: ${VITE_DAEMON_STATIC_BASE:-https://static.nottyai.co/daemons}
+      VITE_PUBLIC_ORIGIN: ${VITE_PUBLIC_ORIGIN:-${NOTTY_FRONTEND_ORIGIN:-http://localhost:${NOTTY_FRONTEND_PORT:-5173}}}
+      VITE_API_BASE: ${VITE_API_BASE:-${NOTTY_BACKEND_ORIGIN:-http://localhost:${NOTTY_BACKEND_PORT:-8080}}}
+      VITE_DAEMON_STATIC_BASE: ${VITE_DAEMON_STATIC_BASE:-${NOTTY_DAEMON_STATIC_BASE:-${NOTTY_STATIC_ORIGIN:-http://localhost:${NOTTY_STATIC_PORT:-5174}}/daemons}}
     volumes:
       - ./frontend:/app
       - frontend_node_modules:/app/node_modules
     command: sh -lc "npm ci && npm run dev"
+
+  static:
+    image: python:3.12-alpine
+    ports:
+      - "127.0.0.1:${NOTTY_STATIC_PORT:-5174}:8000"
+    volumes:
+      - ./deploy/daemons:/srv/static/daemons:ro
+    command: python -m http.server 8000 --directory /srv/static
 
   daemon:
     profiles: ["daemon"]

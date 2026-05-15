@@ -47,6 +47,19 @@ export function buildDaemonInstallCommand(input: {
   ].join("\n");
 }
 
+export function buildDaemonUninstallCommand(input: {
+  workspaceId?: string;
+  staticBaseUrl: string;
+  all?: boolean;
+}) {
+  const staticBaseUrl = input.staticBaseUrl.trim().replace(/\/+$/, "");
+  const lines = [
+    `curl -fsSL ${shellQuote(`${staticBaseUrl}/uninstall.sh`)} | sh -s -- \\`,
+    input.all ? "  --all" : `  --workspace-id ${shellQuote(input.workspaceId ?? "")}`,
+  ];
+  return lines.join("\n");
+}
+
 export function emptyWorkspace(): WorkspaceState {
   return {
     workspaceId: "",
