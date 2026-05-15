@@ -55,6 +55,10 @@ ssh "$ssh_host" "cd $quoted_remote_dir && \
 	NOTTY_BACKEND_IMAGE=$quoted_backend_image docker compose -f compose.prod.yml --env-file notty.server.env --env-file .env config >/tmp/notty-compose-config.yml && \
 	grep -q 'NOTTY_DATABASE_URL:' /tmp/notty-compose-config.yml || { echo 'missing NOTTY_DATABASE_URL in $remote_dir/.env' >&2; exit 1; } && \
 	grep -q 'NOTTY_JWT_SECRET:' /tmp/notty-compose-config.yml || { echo 'missing NOTTY_JWT_SECRET in $remote_dir/.env' >&2; exit 1; } && \
+	TLS_CERT_FILE=\$(awk -F': ' '/NOTTY_TLS_CERT_FILE:/ {print \$2; exit}' /tmp/notty-compose-config.yml) && \
+	TLS_KEY_FILE=\$(awk -F': ' '/NOTTY_TLS_KEY_FILE:/ {print \$2; exit}' /tmp/notty-compose-config.yml) && \
+	test -f \"\$TLS_CERT_FILE\" || { echo \"missing TLS certificate \$TLS_CERT_FILE\" >&2; exit 1; } && \
+	test -f \"\$TLS_KEY_FILE\" || { echo \"missing TLS private key \$TLS_KEY_FILE\" >&2; exit 1; } && \
 	NOTTY_BACKEND_IMAGE=$quoted_backend_image docker compose -f compose.prod.yml --env-file notty.server.env --env-file .env pull && \
 	NOTTY_BACKEND_IMAGE=$quoted_backend_image docker compose -f compose.prod.yml --env-file notty.server.env --env-file .env up -d --remove-orphans && \
 	NOTTY_BACKEND_IMAGE=$quoted_backend_image docker compose -f compose.prod.yml --env-file notty.server.env --env-file .env ps"

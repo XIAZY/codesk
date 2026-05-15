@@ -1668,6 +1668,7 @@ make deploy-backend VERSION=v0.1.0
 Production API traffic is routed by the Compose-managed nginx service. The nginx config lives at `deploy/nginx/notty-api.conf` and is mounted into the nginx container as `/etc/nginx/conf.d/default.conf`. It handles:
 
 - Host matching for `api.nottyai.co`; unmatched hosts are closed.
+- TLS termination on `443` using `NOTTY_TLS_CERT_FILE` and `NOTTY_TLS_KEY_FILE`; port `80` only redirects to HTTPS.
 - CORS for `https://app.nottyai.co`, `https://nottyai.co`, and local development origins.
 - `Authorization`, `Content-Type`, and `X-Notty-Acting-Agent-ID` request headers.
 - Websocket upgrades for `/ws/...`.
@@ -1693,8 +1694,10 @@ Important production server defaults in `deploy/env/prod.server.env`:
 
 - `NOTTY_BACKEND_IMAGE`: default backend image if a deploy does not override it.
 - `NOTTY_HTTP_BIND` and `NOTTY_HTTP_PORT`: nginx bind address and host port.
+- `NOTTY_HTTPS_BIND` and `NOTTY_HTTPS_PORT`: nginx TLS bind address and host port.
 - `NOTTY_FRONTEND_ORIGIN`, `NOTTY_BACKEND_ORIGIN`, and `NOTTY_STATIC_ORIGIN`: public production origins for app, API, and static artifacts.
 - `NOTTY_API_HOST`: nginx host match for the backend API.
+- `NOTTY_TLS_CERT_FILE` and `NOTTY_TLS_KEY_FILE`: TLS certificate and private key paths on the production host. Defaults are `/opt/notty/cert.pem` and `/opt/notty/private.pem`.
 - `NOTTY_PUBLIC_ORIGIN`: public frontend origin used by backend-generated links.
 - `NOTTY_PPROF_ADDR`: optional pprof bind address.
 

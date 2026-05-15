@@ -7,15 +7,30 @@ services:
         condition: service_healthy
     ports:
       - "${NOTTY_HTTP_BIND:-0.0.0.0}:${NOTTY_HTTP_PORT:-80}:80"
+      - "${NOTTY_HTTPS_BIND:-0.0.0.0}:${NOTTY_HTTPS_PORT:-443}:443"
     environment:
       NOTTY_API_HOST: ${NOTTY_API_HOST:-api.nottyai.co}
       NOTTY_FRONTEND_ORIGIN: ${NOTTY_FRONTEND_ORIGIN:-https://app.nottyai.co}
       NOTTY_HOMEPAGE_ORIGIN: ${NOTTY_HOMEPAGE_ORIGIN:-https://nottyai.co}
       NOTTY_WWW_HOMEPAGE_ORIGIN: ${NOTTY_WWW_HOMEPAGE_ORIGIN:-https://www.nottyai.co}
+      NOTTY_TLS_CERT_FILE: ${NOTTY_TLS_CERT_FILE:-/opt/notty/cert.pem}
+      NOTTY_TLS_KEY_FILE: ${NOTTY_TLS_KEY_FILE:-/opt/notty/private.pem}
     volumes:
       - ./notty-api.nginx.conf:/etc/nginx/templates/default.conf.template:ro
+      - type: bind
+        source: ${NOTTY_TLS_CERT_FILE:-/opt/notty/cert.pem}
+        target: ${NOTTY_TLS_CERT_FILE:-/opt/notty/cert.pem}
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${NOTTY_TLS_KEY_FILE:-/opt/notty/private.pem}
+        target: ${NOTTY_TLS_KEY_FILE:-/opt/notty/private.pem}
+        read_only: true
+        bind:
+          create_host_path: false
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- --header='Host: ${NOTTY_API_HOST:-api.nottyai.co}' http://127.0.0.1/healthz >/dev/null 2>&1"]
+      test: ["CMD-SHELL", "wget -qO- --no-check-certificate --header='Host: ${NOTTY_API_HOST:-api.nottyai.co}' https://127.0.0.1/healthz >/dev/null 2>&1"]
       interval: 10s
       timeout: 5s
       retries: 12
