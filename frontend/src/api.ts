@@ -21,10 +21,8 @@ const configuredApiBase = cleanOrigin(import.meta.env.VITE_API_BASE || "");
 const configuredDaemonStaticBase = cleanOrigin(import.meta.env.VITE_DAEMON_STATIC_BASE || "");
 
 export const publicOrigin = isLocalBrowser ? cleanOrigin(browserOrigin) : configuredPublicOrigin;
-export const apiBase = isLocalBrowser ? publicOrigin : configuredApiBase || publicOrigin;
-export const daemonStaticBase = isLocalBrowser
-  ? `${publicOrigin}/daemons`
-  : configuredDaemonStaticBase || `${publicOrigin}/daemons`;
+export const apiBase = configuredApiBase || publicOrigin;
+export const daemonStaticBase = configuredDaemonStaticBase || `${publicOrigin}/daemons`;
 
 export class ApiError extends Error {
   status: number;

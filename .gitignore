@@ -1,11 +1,15 @@
 .DS_Store
 *.log
+*.tar.gz
 
+node_modules/
 frontend/node_modules/
 frontend/dist/
 frontend/.test-dist/
 
 .runtime/
 .vendor/
+.wrangler/
 bin/
 dist/
+tmp/

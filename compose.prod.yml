@@ -1,0 +1,17 @@
+services:
+  backend:
+    image: ${NOTTY_BACKEND_IMAGE:-alphatoad/notty:backend-latest}
+    restart: unless-stopped
+    ports:
+      - "${NOTTY_BACKEND_BIND:-127.0.0.1}:${NOTTY_BACKEND_PORT:-8080}:8080"
+    environment:
+      NOTTY_PORT: "8080"
+      NOTTY_DATABASE_URL: ${NOTTY_DATABASE_URL:?NOTTY_DATABASE_URL is required}
+      NOTTY_JWT_SECRET: ${NOTTY_JWT_SECRET:?NOTTY_JWT_SECRET is required}
+      NOTTY_PUBLIC_ORIGIN: ${NOTTY_PUBLIC_ORIGIN:-https://app.nottyai.co}
+      NOTTY_PPROF_ADDR: ${NOTTY_PPROF_ADDR:-}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12

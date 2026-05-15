@@ -10,6 +10,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    ports:
+      - "127.0.0.1:${NOTTY_POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
@@ -20,8 +22,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    expose:
-      - "8080"
     ports:
       - "127.0.0.1:${NOTTY_BACKEND_PORT:-8080}:8080"
     environment:
@@ -29,6 +29,23 @@ services:
       NOTTY_DATABASE_URL: postgres://notty:notty@postgres:5432/notty?sslmode=disable
       NOTTY_PPROF_ADDR: 127.0.0.1:6061
       NOTTY_JWT_SECRET: dev-notty-jwt-secret-change-me
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    depends_on:
+      - backend
+    ports:
+      - "127.0.0.1:${NOTTY_FRONTEND_PORT:-5173}:5173"
+    environment:
+      VITE_PUBLIC_ORIGIN: ${VITE_PUBLIC_ORIGIN:-http://localhost:${NOTTY_FRONTEND_PORT:-5173}}
+      VITE_API_BASE: ${VITE_API_BASE:-http://localhost:${NOTTY_BACKEND_PORT:-8080}}
+      VITE_DAEMON_STATIC_BASE: ${VITE_DAEMON_STATIC_BASE:-https://static.nottyai.co/daemons}
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    command: sh -lc "npm ci && npm run dev"
 
   daemon:
     profiles: ["daemon"]
@@ -51,38 +68,8 @@ services:
       - daemon_runtime:/runtime
       - ${HOME}/.codex:/root/.codex
 
-  frontend:
-    build:
-      context: .
-      dockerfile: frontend/Dockerfile
-      args:
-        VITE_PUBLIC_ORIGIN: ${NOTTY_PUBLIC_ORIGIN:-https://app.nottyai.co}
-        VITE_API_BASE: ${NOTTY_API_BASE:-}
-        VITE_DAEMON_STATIC_BASE: ${NOTTY_DAEMON_STATIC_BASE:-}
-    depends_on:
-      - backend
-    expose:
-      - "5173"
-    ports:
-      - "127.0.0.1:${NOTTY_FRONTEND_PORT:-5173}:5173"
-    environment:
-      NOTTY_VITE_BACKEND_PROXY_TARGET: http://backend:8080
-      NOTTY_VITE_STATIC_PROXY_TARGET: http://nginx
-
-  nginx:
-    image: nginx:1.27-alpine
-    depends_on:
-      - backend
-      - frontend
-    ports:
-      - "${NOTTY_HTTP_PORT:-80}:80"
-    volumes:
-      - ./deploy/nginx/notty-gateway.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./homepage:/var/www/notty/homepage:ro
-      - ./deploy/daemons:/var/www/notty/daemon-install:ro
-      - ./dist/daemons:/var/www/notty/daemon-artifacts:ro
-
 volumes:
   postgres_data:
+  frontend_node_modules:
   daemon_workspace:
   daemon_runtime:
