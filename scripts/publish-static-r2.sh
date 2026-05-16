@@ -8,7 +8,7 @@ load_notty_deploy_env "$root_dir"
 version="${1:-${VERSION:-}}"
 target="${PUBLISH_TARGET:-all}"
 static_dist_dir="${STATIC_DIST_DIR:-$root_dir/dist/static}"
-daemon_dist_dir="${DAEMON_DIST_DIR:-$root_dir/dist/daemons}"
+daemon_dist_dir="${DAEMON_DIST_DIR:-$static_dist_dir/daemons}"
 
 die() {
 	printf 'publish-static-r2: %s\n' "$*" >&2

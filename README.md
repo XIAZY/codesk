@@ -517,6 +517,8 @@ Response `201`:
 
 Frontend should display the token once and provide a hosted installer command. The frontend, backend, and static origins are environment-driven so local development can use localhost while production uses the public domains.
 
+The installer requires a working Codex CLI before it writes daemon files or starts a service. It keeps `NOTTY_CODEX_COMMAND` as configured, defaulting to `codex`, and writes an explicit daemon `PATH` based on the install shell plus common Codex locations such as Homebrew, `/usr/local/bin`, system bin directories, `~/.local/bin`, `~/.npm-global/bin`, and the npm prefix bin. It aborts if that daemon environment cannot run `codex --version` and `codex app-server --help`.
+
 ```sh
 curl -fsSL https://static.nottyai.co/daemons/install.sh | sh -s -- \
   --backend-url https://api.nottyai.co \
@@ -1536,7 +1538,7 @@ Start the local development stack:
 make dev
 ```
 
-Equivalent direct command:
+Equivalent direct command if static artifacts were already generated:
 
 ```sh
 docker compose --env-file deploy/env/dev.server.env up --build
@@ -1559,6 +1561,7 @@ Local development services:
 - `backend`: Go API and websocket server on internal port `:8080`; bound to `127.0.0.1:${NOTTY_BACKEND_PORT:-8080}`.
 - `frontend`: React/Vite dev server on internal port `:5173`; bound to `127.0.0.1:${NOTTY_FRONTEND_PORT:-5173}`.
 - `postgres`: canonical datastore.
+- `static`: local static file server on internal port `:8000`; bound to `127.0.0.1:${NOTTY_STATIC_PORT:-5174}`.
 
 Production services:
 
@@ -1574,7 +1577,7 @@ Default production routes:
 - API and websockets: `https://api.nottyai.co`
 - Daemon downloads: `https://static.nottyai.co/daemons`
 
-For product development from a source checkout, `docker compose --env-file deploy/env/dev.server.env up --build` remains the supported one-command way to start the local backend, frontend, static, and Postgres stack. Local dev does not run nginx. Local dev defaults `NOTTY_FRONTEND_ORIGIN`, `NOTTY_BACKEND_ORIGIN`, and `NOTTY_STATIC_ORIGIN` to localhost values instead of production domains. The local `static` service serves daemon scripts from `deploy/daemons` at `http://localhost:${NOTTY_STATIC_PORT:-5174}/daemons`, mirroring production’s separate static origin instead of coupling daemon downloads to the frontend.
+For product development from a source checkout, `make dev` is the supported one-command way to start the local backend, frontend, static, and Postgres stack. It first builds host-platform daemon artifacts into `dist/static/daemons`, then starts Docker Compose. Local dev does not run nginx. Local dev defaults `NOTTY_FRONTEND_ORIGIN`, `NOTTY_BACKEND_ORIGIN`, and `NOTTY_STATIC_ORIGIN` to localhost values instead of production domains. The local `static` service serves `dist/static` at `http://localhost:${NOTTY_STATIC_PORT:-5174}`, mirroring production’s separate static origin instead of coupling daemon downloads to the frontend.
 
 Start an external daemon after creating a daemon token in the frontend:
 
@@ -1592,9 +1595,9 @@ Build daemon release artifacts for static hosting:
 make daemon-release VERSION=v0.1.0
 ```
 
-This creates `dist/daemons/install.sh`, `dist/daemons/latest/manifest.json`, `dist/daemons/latest/SHA256SUMS`, and versioned tarballs containing `notty-daemon` and `notty-agent-tool`.
+This creates `dist/static/daemons/install.sh`, `dist/static/daemons/latest/manifest.json`, `dist/static/daemons/latest/SHA256SUMS`, and versioned tarballs containing `notty-daemon` and `notty-agent-tool`.
 
-Build static frontend and homepage assets:
+Build the unified static tree:
 
 ```sh
 make static-build VERSION=v0.1.0
@@ -1604,6 +1607,15 @@ This creates:
 
 - `dist/static/app`: compiled Vite frontend for `app.nottyai.co`.
 - `dist/static/homepage`: homepage files for `nottyai.co`.
+- `dist/static/daemons`: daemon installer, uninstaller, `latest` metadata, and versioned daemon tarballs.
+
+Build only local daemon artifacts for the current host platform:
+
+```sh
+make static-build-local
+```
+
+This creates `dist/static/daemons` with `VERSION=dev` and only the current host platform, which is enough for local installer testing at `http://localhost:${NOTTY_STATIC_PORT:-5174}/daemons/install.sh`.
 
 Deploy frontend/homepage assets to Cloudflare R2:
 

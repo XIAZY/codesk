@@ -1,12 +1,17 @@
 VERSION ?= dev
-DIST_DIR ?= dist/daemons
+DIST_DIR ?= dist/static/daemons
 PLATFORMS ?= linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 GO_BUILD_FLAGS ?= -trimpath
 GO_LDFLAGS ?= -s -w
+UNAME_S := $(shell uname -s | tr '[:upper:]' '[:lower:]')
+UNAME_M := $(shell uname -m)
+HOST_OS := $(if $(filter darwin,$(UNAME_S)),darwin,$(if $(filter linux,$(UNAME_S)),linux,$(UNAME_S)))
+HOST_ARCH := $(if $(filter x86_64 amd64,$(UNAME_M)),amd64,$(if $(filter arm64 aarch64,$(UNAME_M)),arm64,$(UNAME_M)))
+HOST_PLATFORM := $(HOST_OS)/$(HOST_ARCH)
 
-.PHONY: dev dev-down prod-config-check static-build static-publish deploy deploy-backend deploy-frontend deploy-static backend-image daemon-build daemon-release daemon-checksums daemon-clean daemon-installer-check daemon-uninstall-test
+.PHONY: dev dev-down prod-config-check static-build static-build-local static-publish deploy deploy-backend deploy-frontend deploy-static backend-image daemon-build daemon-release daemon-checksums daemon-clean daemon-installer-check daemon-uninstall-test
 
-dev:
+dev: static-build-local
 	docker compose --env-file deploy/env/dev.server.env up --build
 
 dev-down:
@@ -22,6 +27,9 @@ daemon-release:
 
 static-build:
 	VERSION="$(VERSION)" scripts/build-static.sh
+
+static-build-local:
+	VERSION="dev" STATIC_BUILD_TARGET=daemons STATIC_DIST_DIR=dist/static PLATFORMS="$(HOST_PLATFORM)" scripts/build-static.sh
 
 static-publish:
 	VERSION="$(VERSION)" scripts/publish-static-r2.sh "$(VERSION)"
@@ -50,6 +58,7 @@ daemon-checksums:
 daemon-installer-check:
 	sh -n deploy/daemons/install.sh
 	sh -n deploy/daemons/uninstall.sh
+	sh scripts/test-daemon-installer.sh
 
 daemon-uninstall-test:
 	sh scripts/test-daemon-uninstall.sh

@@ -1,20 +1,14 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import type { FocusEvent, MouseEvent, ReactNode } from "react";
+import type { ReactNode } from "react";
 import { ApiClient, apiBase, daemonStaticBase } from "./api";
+import { DocumentSurface, type LiveThread, type SurfaceSelection } from "./DocumentSurface";
 import {
   agentStatus,
   agentsByDaemon,
   buildDaemonInstallCommand,
   buildDaemonUninstallCommand,
-  buildLineThreads,
   daemonStatus,
-  encodeRelativeAnchor,
-  lineForOffset,
-  lineStartsForText,
   type LineThreadGroup,
-  type ResolvedThreadAnchor,
-  resolveThreadAnchorLive,
-  selectionLabel,
 } from "./logic";
 import { useDocumentSync } from "./useDocument";
 import { useWorkspace } from "./useWorkspace";
@@ -23,8 +17,6 @@ import "./styles.css";
 
 const tokenStorageKey = "notty.auth.token";
 const workspaceStorageKey = "notty.workspace.id";
-
-type LiveThread = ThreadItem & { anchor: ResolvedThreadAnchor };
 
 function initials(value?: string) {
   const source = (value || "N").trim();
@@ -86,107 +78,8 @@ function visibleAgentStatus(agent: Agent, runs: ReturnType<typeof useWorkspace>[
   return agentStatus(agent, runs);
 }
 
-function renderInlineText(text: string) {
-  const parts = text.split(/(`[^`]+`|@[A-Za-z0-9_-]+)/g).filter(Boolean);
-  return parts.map((part, index) => {
-    if (part.startsWith("`") && part.endsWith("`")) {
-      return <code key={index}>{part.slice(1, -1)}</code>;
-    }
-    if (part.startsWith("@")) {
-      return <span className="agent-anchor" key={index}>{part}</span>;
-    }
-    return <span key={index}>{part}</span>;
-  });
-}
-
-function renderLineThreadChip(
-  group: LineThreadGroup<LiveThread> | undefined,
-  onLineThreadsClick: (group: LineThreadGroup<LiveThread>, event: MouseEvent<HTMLButtonElement>) => void
-) {
-  if (!group) {
-    return null;
-  }
-  const label = `${group.threads.length} thread${group.threads.length === 1 ? "" : "s"}`;
-  return (
-    <button
-      className="line-thread-chip"
-      type="button"
-      onClick={(event) => onLineThreadsClick(group, event)}
-      aria-label={`${label} on line ${group.line}`}
-      title={`${label} on this line`}
-    >
-      <Icon name="thread" />
-      {label}
-    </button>
-  );
-}
-
-function lineClassName(sourceLine: number, group: LineThreadGroup<LiveThread> | undefined, focusedLine: number | null) {
-  return ["preview-line", group ? "has-thread-line" : "", focusedLine === sourceLine ? "line-flash" : ""].filter(Boolean).join(" ");
-}
-
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
-}
-
-function renderMarkdownPreview(
-  content: string,
-  threadGroups: Map<number, LineThreadGroup<LiveThread>>,
-  onLineThreadsClick: (group: LineThreadGroup<LiveThread>, event: MouseEvent<HTMLButtonElement>) => void,
-  focusedLine: number | null
-) {
-  const lines = content.split("\n").map((text, index) => ({ text, sourceLine: index + 1 }));
-  while (lines.length && !lines[0].text.trim()) {
-    lines.shift();
-  }
-  while (lines.length && !lines[lines.length - 1].text.trim()) {
-    lines.pop();
-  }
-  const nodes: ReactNode[] = [];
-  for (let index = 0; index < lines.length; index += 1) {
-    const { text: line, sourceLine } = lines[index];
-    const group = threadGroups.get(sourceLine);
-    const threadChip = renderLineThreadChip(group, onLineThreadsClick);
-    const className = lineClassName(sourceLine, group, focusedLine);
-    if (!line.trim()) {
-      nodes.push(<div className="preview-space" data-source-line={sourceLine} key={sourceLine} />);
-      continue;
-    }
-    if (line.startsWith("# ")) {
-      nodes.push(
-        <h1 className={className} data-source-line={sourceLine} key={sourceLine}>
-          <span className={group ? "anchored" : ""}>{renderInlineText(line.slice(2))}</span>
-          {threadChip}
-        </h1>
-      );
-      continue;
-    }
-    if (line.startsWith("## ")) {
-      nodes.push(
-        <h2 className={className} data-source-line={sourceLine} key={sourceLine}>
-          {renderInlineText(line.slice(3))}
-          {threadChip}
-        </h2>
-      );
-      continue;
-    }
-    if (line.startsWith("- ")) {
-      nodes.push(
-        <p className={`${className} bullet-line`} data-source-line={sourceLine} key={sourceLine}>
-          • {renderInlineText(line.slice(2))}
-          {threadChip}
-        </p>
-      );
-      continue;
-    }
-    nodes.push(
-      <p className={className} data-source-line={sourceLine} key={sourceLine}>
-        {renderInlineText(line)}
-        {threadChip}
-      </p>
-    );
-  }
-  return nodes.length ? nodes : <p className="muted">Start writing...</p>;
 }
 
 export function App() {
@@ -968,76 +861,34 @@ function DocumentEditor({
   onThreadSelected: (threadId: string) => void;
   onThreadCreated: (threadId: string) => void;
 }) {
-  const editorRootRef = useRef<HTMLDivElement | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const previewRef = useRef<HTMLDivElement | null>(null);
   const draftRef = useRef<HTMLTextAreaElement | null>(null);
-  const [selection, setSelection] = useState({ start: 0, end: 0 });
-  const [selectionPoint, setSelectionPoint] = useState({ x: 0, y: 0 });
+  const [selection, setSelection] = useState<SurfaceSelection | null>(null);
   const [threadDraftOpen, setThreadDraftOpen] = useState(false);
   const [threadBody, setThreadBody] = useState("");
-  const [activeThreadLine, setActiveThreadLine] = useState<number | null>(null);
+  const [activeThreadGroup, setActiveThreadGroup] = useState<LineThreadGroup<LiveThread> | null>(null);
   const [threadPopoverPoint, setThreadPopoverPoint] = useState({ x: 0, y: 0 });
-  const [focusedLine, setFocusedLine] = useState<number | null>(null);
-  const [editing, setEditing] = useState(false);
-  const { ydoc, content, ready, connected, replaceContent } = useDocumentSync({
+  const { ydoc, ytext, ready, connected } = useDocumentSync({
     workspaceId,
     token,
     document,
     actorName: account?.displayName ?? account?.email ?? "Human",
   });
-  const lines = lineStartsForText(content);
-  const liveThreads = useMemo(
-    () => threads.map((thread) => ({ ...thread, anchor: resolveThreadAnchorLive(thread.anchor, ydoc, content) })),
-    [threads, ydoc, content]
-  );
-  const threadGroups = useMemo(() => buildLineThreads(liveThreads), [liveThreads]);
-  const threadGroupsByLine = useMemo(() => new Map(threadGroups.map((group) => [group.line, group])), [threadGroups]);
-  const activeThreadGroup = activeThreadLine ? threadGroupsByLine.get(activeThreadLine) ?? null : null;
-  const currentLabel = selectionLabel(selection.start, selection.end, lines);
-  const selectedExcerpt = content.slice(selection.start, selection.end).trim();
-  const hasRangeSelection = selection.end - selection.start >= 2;
+  const hasRangeSelection = Boolean(selection);
   const toolbarPoint = {
-    x: clamp(selectionPoint.x, 12, Math.max(12, window.innerWidth - 420)),
-    y: clamp(selectionPoint.y - 48, 12, Math.max(12, window.innerHeight - 64)),
+    x: clamp(selection?.point.x ?? 24, 12, Math.max(12, window.innerWidth - 420)),
+    y: clamp((selection?.point.y ?? 120) - 48, 12, Math.max(12, window.innerHeight - 64)),
   };
   const drafterPoint = {
-    x: clamp(selectionPoint.x + 20, 12, Math.max(12, window.innerWidth - 340)),
-    y: clamp(selectionPoint.y + 28, 12, Math.max(12, window.innerHeight - 320)),
+    x: clamp((selection?.point.x ?? 24) + 20, 12, Math.max(12, window.innerWidth - 340)),
+    y: clamp((selection?.point.y ?? 120) + 28, 12, Math.max(12, window.innerHeight - 320)),
   };
 
   useEffect(() => {
-    setEditing(false);
-    setActiveThreadLine(null);
-    setSelection({ start: 0, end: 0 });
+    setActiveThreadGroup(null);
+    setSelection(null);
     setThreadDraftOpen(false);
     setThreadBody("");
   }, [document.id]);
-
-  useEffect(() => {
-    if (!activeThreadGroup) {
-      setActiveThreadLine(null);
-    }
-  }, [activeThreadGroup]);
-
-  useEffect(() => {
-    if (!focusThreadId) {
-      return;
-    }
-    const thread = liveThreads.find((item) => item.id === focusThreadId);
-    if (!thread) {
-      onFocusThreadHandled();
-      return;
-    }
-    setEditing(false);
-    setFocusedLine(thread.anchor.line);
-    window.setTimeout(() => {
-      const block = previewRef.current?.querySelector<HTMLElement>(`[data-source-line="${thread.anchor.line}"]`);
-      block?.scrollIntoView({ behavior: "smooth", block: "center" });
-    }, 0);
-    window.setTimeout(() => setFocusedLine(null), 1600);
-    onFocusThreadHandled();
-  }, [focusThreadId, liveThreads, onFocusThreadHandled]);
 
   useEffect(() => {
     if (threadDraftOpen) {
@@ -1045,89 +896,34 @@ function DocumentEditor({
     }
   }, [threadDraftOpen]);
 
-  const updateSelection = () => {
-    const target = textareaRef.current;
-    if (!target) {
-      return;
-    }
-    const nextSelection = { start: target.selectionStart, end: target.selectionEnd };
-    setSelection(nextSelection);
-    if (nextSelection.end - nextSelection.start < 2) {
-      setThreadDraftOpen(false);
-      return;
-    }
-    const rect = target.getBoundingClientRect();
-    const style = window.getComputedStyle(target);
-    const lineHeight = Number.parseFloat(style.lineHeight) || 25.5;
-    const paddingTop = Number.parseFloat(style.paddingTop) || 0;
-    const paddingLeft = Number.parseFloat(style.paddingLeft) || 0;
-    const line = lineForOffset(lines, nextSelection.start);
-    const lineStart = lines[line - 1] ?? 0;
-    const column = Math.max(0, nextSelection.start - lineStart);
-    setSelectionPoint({
-      x: rect.left + paddingLeft + Math.min(column * 7.5, Math.max(0, rect.width - 260)),
-      y: rect.top + paddingTop + Math.max(0, line - 1) * lineHeight - target.scrollTop,
-    });
-  };
-
   const createThread = async (event: FormEvent) => {
     event.preventDefault();
-    if (!threadBody.trim()) {
+    if (!threadBody.trim() || !selection) {
       return;
     }
-    const text = ydoc.getText("content");
-    const safeStart = Math.max(0, Math.min(selection.start, text.length));
-    const safeEnd = Math.max(safeStart, Math.min(selection.end, text.length));
-    const excerptEnd = safeEnd === safeStart ? Math.min(content.length, safeStart + 80) : safeEnd;
     const result = await api.createThread(workspaceId, {
       documentId: document.id,
-      title: currentLabel,
+      title: selection.title,
       body: threadBody,
-      relativeStart: encodeRelativeAnchor(text, safeStart),
-      relativeEnd: encodeRelativeAnchor(text, safeEnd),
+      relativeStart: selection.relativeStart,
+      relativeEnd: selection.relativeEnd,
       kind: "text-range",
-      excerpt: (content.slice(safeStart, excerptEnd).trim() || currentLabel).slice(0, 140),
+      excerpt: selection.excerpt.slice(0, 140),
     });
     setThreadBody("");
-    setSelection({ start: safeEnd, end: safeEnd });
+    setSelection(null);
     setThreadDraftOpen(false);
-    setEditing(false);
     onThreadCreated(result.thread.id);
   };
 
-  const startEditing = () => {
-    setEditing(true);
-    window.setTimeout(() => textareaRef.current?.focus(), 0);
-  };
-
-  const openLineThreads = (group: LineThreadGroup<LiveThread>, event: MouseEvent<HTMLButtonElement>) => {
-    event.stopPropagation();
-    const rect = event.currentTarget.getBoundingClientRect();
-    setThreadPopoverPoint({
-      x: Math.min(Math.max(12, rect.left), Math.max(12, window.innerWidth - 340)),
-      y: Math.min(rect.bottom + 8, Math.max(12, window.innerHeight - 260)),
-    });
-    setActiveThreadLine(group.line);
+  const openLineThreads = (group: LineThreadGroup<LiveThread>, point: { x: number; y: number }) => {
+    setThreadPopoverPoint(point);
+    setActiveThreadGroup(group);
   };
 
   const openThread = (threadId: string) => {
     onThreadSelected(threadId);
-    setActiveThreadLine(null);
-  };
-
-  const handleEditorBlur = (event: FocusEvent<HTMLTextAreaElement>) => {
-    const nextTarget = event.relatedTarget;
-    if (nextTarget && editorRootRef.current?.contains(nextTarget)) {
-      return;
-    }
-    window.setTimeout(() => {
-      if (editorRootRef.current?.contains(window.document.activeElement)) {
-        return;
-      }
-      if (!threadDraftOpen) {
-        setEditing(false);
-      }
-    }, 0);
+    setActiveThreadGroup(null);
   };
 
   const openThreadDraft = () => {
@@ -1139,7 +935,7 @@ function DocumentEditor({
 
   return (
     <div className="doc-canvas">
-      <div className="doc-inner editor-body" ref={editorRootRef}>
+      <div className="doc-inner editor-body">
         <div className="doc-meta-row">
           <span className="chip">Document</span>
           <span className="chip outline">Owner · {account?.displayName ?? account?.email ?? "You"}</span>
@@ -1148,34 +944,20 @@ function DocumentEditor({
         </div>
 
         <div className="editor-frame">
-          {editing ? (
-            <textarea
-              ref={textareaRef}
-              value={content}
-              onChange={(event) => replaceContent(event.target.value)}
-              onSelect={updateSelection}
-              onKeyUp={updateSelection}
-              onMouseUp={updateSelection}
-              onBlur={handleEditorBlur}
-              spellCheck={false}
-              placeholder="# Start writing..."
-              aria-label="Document editor"
-              className="doc-textarea"
-            />
-          ) : (
-            <div
-              ref={previewRef}
-              className="markdown-preview"
-              onClick={startEditing}
-              aria-label="Document preview"
-            >
-              {renderMarkdownPreview(content, threadGroupsByLine, openLineThreads, focusedLine)}
-              <span className="edit-hint">Click to edit</span>
-            </div>
-          )}
+          <DocumentSurface
+            documentId={document.id}
+            ydoc={ydoc}
+            ytext={ytext}
+            ready={ready}
+            threads={threads}
+            focusThreadId={focusThreadId}
+            onFocusThreadHandled={onFocusThreadHandled}
+            onSelectionChange={setSelection}
+            onLineThreadsOpen={openLineThreads}
+          />
         </div>
 
-        {editing && hasRangeSelection && !threadDraftOpen ? (
+        {hasRangeSelection && !threadDraftOpen ? (
           <div
             className="selection-toolbar"
             style={{ left: toolbarPoint.x, top: toolbarPoint.y }}
@@ -1207,8 +989,8 @@ function DocumentEditor({
             </div>
             <div className="thread-drafter-body">
               <div className="quoted-range">
-                <div className="line">{currentLabel}</div>
-                <span>{selectedExcerpt || currentLabel}</span>
+                <div className="line">{selection?.title ?? "Selection"}</div>
+                <span>{selection?.excerpt || selection?.title || "Selection"}</span>
               </div>
               <textarea
                 ref={draftRef}
@@ -1218,7 +1000,7 @@ function DocumentEditor({
               />
               <div className="row between">
                 <span className="tiny muted">{ready ? "Synced" : "Opening document..."} · <span className="kbd">⌘↵</span> to post</span>
-                <button className="btn accent sm" disabled={!threadBody.trim()}>Open thread</button>
+                <button className="btn accent sm" disabled={!threadBody.trim() || !selection}>Open thread</button>
               </div>
             </div>
           </form>
@@ -1231,7 +1013,7 @@ function DocumentEditor({
                 <b className="small">{activeThreadGroup.threads.length} thread{activeThreadGroup.threads.length === 1 ? "" : "s"} on this line</b>
                 <div className="tiny muted">line {activeThreadGroup.line}</div>
               </div>
-              <button className="btn ghost icon sm" onClick={() => setActiveThreadLine(null)} type="button">×</button>
+              <button className="btn ghost icon sm" onClick={() => setActiveThreadGroup(null)} type="button">×</button>
             </div>
             <div className="thread-popover-list">
               {activeThreadGroup.threads.map((thread) => (

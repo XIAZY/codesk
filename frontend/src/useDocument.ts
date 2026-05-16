@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Awareness } from "y-protocols/awareness.js";
 import * as Y from "yjs";
 import { documentWsUrl } from "./api";
-import { applyReplaceToYText, computeReplace } from "./logic";
 import {
   encodeAwarenessMessage,
   encodeSyncStep1,
@@ -21,17 +20,14 @@ export function useDocumentSync(input: {
   document: DocumentItem | null;
   actorName: string;
 }) {
-  const [content, setContent] = useState("");
   const [ready, setReady] = useState(false);
   const [connected, setConnected] = useState(false);
   const ydoc = useMemo(() => new Y.Doc(), [input.document?.id]);
+  const ytext = useMemo(() => ydoc.getText("content"), [ydoc]);
   const awarenessRef = useRef<Awareness | null>(null);
-  const contentRef = useRef("");
   const socketRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
-    contentRef.current = "";
-    setContent("");
     setReady(false);
   }, [input.document?.id]);
 
@@ -42,7 +38,6 @@ export function useDocumentSync(input: {
     if (!documentId || !input.workspaceId || !input.token) {
       return;
     }
-    const text = ydoc.getText("content");
     const awareness = new Awareness(ydoc);
     awareness.setLocalState({
       actorName: input.actorName,
@@ -51,14 +46,6 @@ export function useDocumentSync(input: {
       filePath: documentPath,
     });
     awarenessRef.current = awareness;
-
-    const applyText = () => {
-      const next = text.toString();
-      if (next !== contentRef.current) {
-        contentRef.current = next;
-        setContent(next);
-      }
-    };
 
     const handleUpdate = (update: Uint8Array, origin: unknown) => {
       if (origin === "remote") {
@@ -94,7 +81,6 @@ export function useDocumentSync(input: {
           if (reply && ws.readyState === WebSocket.OPEN) {
             ws.send(reply);
           }
-          applyText();
           setReady(true);
         }
         if (messageType === messageAwareness) {
@@ -127,18 +113,11 @@ export function useDocumentSync(input: {
     };
   }, [documentId, documentPath, input.actorName, input.token, input.workspaceId, ydoc]);
 
-  const replaceContent = useCallback(
-    (next: string) => {
-      const text = ydoc.getText("content");
-      const replace = computeReplace(contentRef.current, next);
-      ydoc.transact(() => {
-        applyReplaceToYText(text, replace);
-      }, "local");
-      contentRef.current = next;
-      setContent(next);
-    },
-    [ydoc]
-  );
+  useEffect(() => {
+    return () => {
+      ydoc.destroy();
+    };
+  }, [ydoc]);
 
-  return { ydoc, content, ready, connected, replaceContent };
+  return { ydoc, ytext, ready, connected };
 }

@@ -2,7 +2,7 @@
 set -eu
 
 version="${1:-${VERSION:-dev}}"
-dist_dir="${2:-${DIST_DIR:-dist/daemons}}"
+dist_dir="${2:-${DIST_DIR:-dist/static/daemons}}"
 platforms="${PLATFORMS:-linux/amd64 linux/arm64 darwin/amd64 darwin/arm64}"
 
 root_dir="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"

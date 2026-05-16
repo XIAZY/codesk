@@ -21,6 +21,9 @@ Options:
   --data-dir <path>     Notty data directory. Defaults to ~/.notty.
   --no-service          Install files but do not start a service.
   -h, --help            Show this help.
+
+Environment:
+  NOTTY_CODEX_COMMAND   Codex executable to use. Defaults to codex.
 EOF
 }
 
@@ -141,6 +144,62 @@ safe_name() {
 	printf '%s' "$1" | sed 's/[^A-Za-z0-9_.-]/-/g'
 }
 
+codex_command="${NOTTY_CODEX_COMMAND:-codex}"
+daemon_path="${PATH:-}"
+
+path_has_dir() {
+	case ":$daemon_path:" in
+		*:"$1":*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+append_path_dir() {
+	dir="$1"
+	[ -n "$dir" ] || return 0
+	[ -d "$dir" ] || return 0
+	if ! path_has_dir "$dir"; then
+		if [ -n "$daemon_path" ]; then
+			daemon_path="$daemon_path:$dir"
+		else
+			daemon_path="$dir"
+		fi
+	fi
+}
+
+append_codex_search_paths() {
+	append_path_dir "/opt/homebrew/bin"
+	append_path_dir "/usr/local/bin"
+	append_path_dir "/usr/bin"
+	append_path_dir "/bin"
+	append_path_dir "/usr/sbin"
+	append_path_dir "/sbin"
+	append_path_dir "$HOME/.local/bin"
+	append_path_dir "$HOME/.npm-global/bin"
+	npm_prefix="$(PATH="$daemon_path" npm config get prefix 2>/dev/null || true)"
+	if [ -n "$npm_prefix" ]; then
+		append_path_dir "$npm_prefix/bin"
+	fi
+}
+
+append_codex_search_paths
+
+check_codex() {
+	case "$codex_command" in
+		*/*)
+			[ -x "$codex_command" ] || die "Codex CLI is required before installing the daemon. $codex_command is not executable. Install Codex or set NOTTY_CODEX_COMMAND to the Codex executable path."
+			;;
+		*)
+			PATH="$daemon_path" command -v "$codex_command" >/dev/null 2>&1 || die "Codex CLI is required before installing the daemon. '$codex_command' was not found on PATH. Install Codex or set NOTTY_CODEX_COMMAND to the Codex executable path."
+			;;
+	esac
+
+	PATH="$daemon_path" "$codex_command" --version >/dev/null 2>&1 || die "Codex CLI was found but did not run successfully with --version. Fix Codex before installing the daemon."
+	PATH="$daemon_path" "$codex_command" app-server --help >/dev/null 2>&1 || die "Codex CLI was found but does not support 'app-server'. Upgrade Codex before installing the daemon."
+}
+
+check_codex
+
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/notty-install.XXXXXX")"
 cleanup() {
 	rm -rf "$tmp_dir"
@@ -196,7 +255,8 @@ mv "$install_dir/.notty-agent-tool.$$" "$install_dir/notty-agent-tool"
 	printf 'export NOTTY_WORKSPACE_DIR=%s\n' "$(shell_quote "$workspace_dir")"
 	printf 'export NOTTY_AGENT_WORKSPACE_ROOT=%s\n' "$(shell_quote "$agent_workspace_root")"
 	printf 'export NOTTY_RUNTIME_DIR=%s\n' "$(shell_quote "$runtime_dir")"
-	printf 'export NOTTY_CODEX_COMMAND=%s\n' "$(shell_quote "${NOTTY_CODEX_COMMAND:-codex}")"
+	printf 'export NOTTY_CODEX_COMMAND=%s\n' "$(shell_quote "$codex_command")"
+	printf 'export PATH=%s\n' "$(shell_quote "$daemon_path")"
 } > "$env_file"
 chmod 600 "$env_file"
 
@@ -204,15 +264,11 @@ chmod 600 "$env_file"
 	printf '#!/usr/bin/env sh\n'
 	printf 'set -eu\n'
 	printf '. %s\n' "$(shell_quote "$env_file")"
-	printf 'export NOTTY_BACKEND_URL NOTTY_WORKSPACE_ID NOTTY_DAEMON_TOKEN NOTTY_WORKSPACE_DIR NOTTY_AGENT_WORKSPACE_ROOT NOTTY_RUNTIME_DIR NOTTY_CODEX_COMMAND\n'
+	printf 'export NOTTY_BACKEND_URL NOTTY_WORKSPACE_ID NOTTY_DAEMON_TOKEN NOTTY_WORKSPACE_DIR NOTTY_AGENT_WORKSPACE_ROOT NOTTY_RUNTIME_DIR NOTTY_CODEX_COMMAND PATH\n'
 	printf 'export PATH=%s:"$PATH"\n' "$(shell_quote "$install_dir")"
 	printf 'exec %s\n' "$(shell_quote "$install_dir/notty-daemon")"
 } > "$run_script"
 chmod +x "$run_script"
-
-if ! command -v codex >/dev/null 2>&1; then
-	warn "codex CLI was not found on PATH. Workspace sync can start, but agents require Codex CLI to be installed and authenticated."
-fi
 
 start_background() {
 	(
