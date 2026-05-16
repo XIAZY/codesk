@@ -31,9 +31,7 @@ import (
 type regressionThreadAnchor struct {
 	RelativeStart string `json:"relativeStart"`
 	RelativeEnd   string `json:"relativeEnd"`
-	Start         int    `json:"start"`
-	End           int    `json:"end"`
-	Line          int    `json:"line"`
+	Kind          string `json:"kind"`
 	Excerpt       string `json:"excerpt"`
 }
 
@@ -135,12 +133,12 @@ func TestThreadCreationAcceptsClientRelativeAnchors(t *testing.T) {
 	if created.Thread.Anchor.RelativeStart != relativeStart || created.Thread.Anchor.RelativeEnd != relativeEnd {
 		t.Fatalf("relative anchors were not preserved: %#v", created.Thread.Anchor)
 	}
-	if created.Thread.Anchor.Start != 6 || created.Thread.Anchor.End != 11 || created.Thread.Anchor.Line != 1 || created.Thread.Anchor.Excerpt != "bravo" {
-		t.Fatalf("display anchor metadata was not preserved: %#v", created.Thread.Anchor)
+	if created.Thread.Anchor.Kind != "text-range" || created.Thread.Anchor.Excerpt != "bravo" {
+		t.Fatalf("expected text-range anchor metadata, got %#v", created.Thread.Anchor)
 	}
 }
 
-func TestThreadCreationRejectsRawOffsetsWithoutRelativeAnchors(t *testing.T) {
+func TestThreadCreationWithoutRelativeAnchorsCreatesDocumentThread(t *testing.T) {
 	stack := newRegressionStack(t)
 	stack.up(t)
 
@@ -157,19 +155,18 @@ func TestThreadCreationRejectsRawOffsetsWithoutRelativeAnchors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal thread request: %v", err)
 	}
-	req, err := http.NewRequest(http.MethodPost, stack.backendURL(t)+stack.workspaceAPIPath("/threads"), bytes.NewReader(payload))
-	if err != nil {
-		t.Fatalf("create thread request: %v", err)
+	var created struct {
+		Thread struct {
+			ID     string                 `json:"id"`
+			Anchor regressionThreadAnchor `json:"anchor"`
+		} `json:"thread"`
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+stack.authToken)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("create thread: %v", err)
+	stack.postJSON(t, stack.workspaceAPIPath("/threads"), stack.authToken, json.RawMessage(payload), http.StatusCreated, &created)
+	if created.Thread.ID == "" {
+		t.Fatal("expected thread id")
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < http.StatusBadRequest {
-		t.Fatalf("expected raw-offset thread creation to fail, got status %d", resp.StatusCode)
+	if created.Thread.Anchor.Kind != "document" || created.Thread.Anchor.RelativeStart != "" || created.Thread.Anchor.RelativeEnd != "" {
+		t.Fatalf("expected raw offsets to be ignored and stored as a document thread, got %#v", created.Thread.Anchor)
 	}
 }
 

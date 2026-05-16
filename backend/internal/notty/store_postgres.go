@@ -556,6 +556,7 @@ func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) error {
 		}
 	}
 	latestUpdateByDocument := map[string]int64{}
+	latestMetaByDocument := map[string]OperationMeta{}
 	for _, event := range s.pendingDocumentEvents {
 		var updateID int64
 		if err := tx.QueryRow(
@@ -572,10 +573,16 @@ func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) error {
 			return err
 		}
 		latestUpdateByDocument[event.DocumentID] = updateID
+		latestMetaByDocument[event.DocumentID] = OperationMeta{
+			ActorID:   event.ActorID,
+			ActorType: event.ActorType,
+			Source:    "document-update",
+		}
 	}
 	for documentID, updateID := range latestUpdateByDocument {
 		if document := s.state.Documents[documentID]; document != nil {
 			document.UpdateID = updateID
+			s.enqueueDocumentUpdateEventsLocked(document, latestMetaByDocument[documentID])
 		}
 	}
 	for documentID := range s.dirtyDocuments {
@@ -1262,6 +1269,27 @@ func upsertAgentDocumentViewPostgres(db *sql.DB, workspaceID string, view *Agent
 		view.UpdateID,
 		view.StateVector,
 		view.ViewedAt,
+	)
+	return err
+}
+
+func completeDocumentInboxEventsPostgres(db *sql.DB, workspaceID string, agentID string, documentID string, updateID int64, completedAt time.Time) error {
+	_, err := db.Exec(
+		`UPDATE agent_events
+		    SET status = 'completed',
+		        completed_at = $5,
+		        updated_at = $5
+		  WHERE workspace_id = $1
+		    AND agent_id = $2
+		    AND document_id = $3
+		    AND type LIKE 'document.%'
+		    AND status NOT IN ('completed', 'dismissed')
+		    AND to_update_id <= $4`,
+		workspaceID,
+		agentID,
+		documentID,
+		updateID,
+		completedAt,
 	)
 	return err
 }

@@ -9,7 +9,12 @@ HOST_OS := $(if $(filter darwin,$(UNAME_S)),darwin,$(if $(filter linux,$(UNAME_S
 HOST_ARCH := $(if $(filter x86_64 amd64,$(UNAME_M)),amd64,$(if $(filter arm64 aarch64,$(UNAME_M)),arm64,$(UNAME_M)))
 HOST_PLATFORM := $(HOST_OS)/$(HOST_ARCH)
 
-.PHONY: dev dev-down prod-config-check static-build static-build-local static-publish deploy deploy-backend deploy-frontend deploy-static backend-image daemon-build daemon-release daemon-checksums daemon-clean daemon-installer-check daemon-uninstall-test
+.PHONY: dev dev-down \
+	test tests test-unit test-go test-frontend test-postgres test-regression test-live \
+	build build-go build-frontend build-daemon build-static build-static-local build-backend-image \
+	publish publish-backend publish-frontend publish-static \
+	deploy deploy-backend deploy-frontend deploy-static \
+	prod-config-check static-build static-build-local static-publish backend-image daemon-build daemon-release daemon-checksums daemon-clean daemon-installer-check daemon-uninstall-test
 
 dev: static-build-local
 	docker compose --env-file deploy/env/dev.server.env up --build
@@ -17,25 +22,73 @@ dev: static-build-local
 dev-down:
 	docker compose --env-file deploy/env/dev.server.env down
 
-daemon-build:
+test: tests
+
+tests: test-unit test-postgres test-regression test-live
+
+test-unit: test-go test-frontend daemon-installer-check daemon-uninstall-test
+
+test-go:
+	go test ./...
+
+test-frontend:
+	cd frontend && npm test
+
+test-postgres:
+	scripts/test-postgres.sh
+
+test-regression:
+	go test -tags=regression ./test/regression
+
+test-live:
+	scripts/test-live.sh
+
+build: build-go build-frontend build-daemon build-static-local
+
+build-go:
+	go build ./...
+
+build-frontend:
+	cd frontend && if [ ! -d node_modules ]; then npm ci; fi && npm run build
+
+build-daemon:
 	mkdir -p bin
 	CGO_ENABLED=0 go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS)" -o bin/notty-daemon ./daemon/cmd/daemon
 	CGO_ENABLED=0 go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS)" -o bin/notty-agent-tool ./daemon/cmd/agenttool
 
+daemon-build: build-daemon
+
 daemon-release:
 	VERSION="$(VERSION)" DIST_DIR="$(DIST_DIR)" PLATFORMS="$(PLATFORMS)" scripts/build-daemon-release.sh "$(VERSION)" "$(DIST_DIR)"
 
-static-build:
+build-static:
 	VERSION="$(VERSION)" scripts/build-static.sh
 
-static-build-local:
+static-build: build-static
+
+build-static-local:
 	VERSION="dev" STATIC_BUILD_TARGET=daemons STATIC_DIST_DIR=dist/static PLATFORMS="$(HOST_PLATFORM)" scripts/build-static.sh
+
+static-build-local: build-static-local
+
+build-backend-image:
+	VERSION="$(VERSION)" scripts/build-backend-image.sh
+
+backend-image: build-backend-image
+
+publish: publish-backend publish-frontend publish-static
+
+publish-backend:
+	VERSION="$(VERSION)" scripts/publish-backend.sh
+
+publish-frontend:
+	VERSION="$(VERSION)" scripts/publish-frontend.sh
+
+publish-static:
+	VERSION="$(VERSION)" scripts/publish-static.sh
 
 static-publish:
 	VERSION="$(VERSION)" scripts/publish-static-r2.sh "$(VERSION)"
-
-backend-image:
-	docker buildx build --load -f backend/Dockerfile -t alphatoad/notty:backend-$(VERSION) .
 
 deploy:
 	VERSION="$(VERSION)" scripts/deploy-notty.sh

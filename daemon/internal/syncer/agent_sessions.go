@@ -86,7 +86,6 @@ type managedAgentSession struct {
 	followupForMeSig    string
 	followupGeneralSig  string
 	steeredForMeSig     string
-	steeredForMeTurn    string
 }
 
 type agentStatusSyncer struct {
@@ -477,7 +476,7 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 			queuedFollowupGeneral = session.followupGeneralSig == ""
 			session.followupGeneralSig = generalSig
 		}
-		shouldSteer := hasForMe && session.activeTurn != "" && session.steeredForMeTurn != session.activeTurn && forMeSig != session.activeForMeSig
+		shouldSteer := hasForMe && session.activeTurn != "" && forMeSig != session.activeForMeSig && forMeSig != session.steeredForMeSig
 		app := session.app
 		threadID := session.threadID
 		turnID := session.activeTurn
@@ -485,7 +484,6 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 		logName := session.logName
 		if shouldSteer {
 			session.steeredForMeSig = forMeSig
-			session.steeredForMeTurn = session.activeTurn
 		}
 		s.mu.Unlock()
 		if shouldSteer {
@@ -519,7 +517,6 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 	session.activeForMeSig = forMeSig
 	session.activeGeneralSig = generalSig
 	session.steeredForMeSig = ""
-	session.steeredForMeTurn = ""
 	if session.followupForMeSig == forMeSig {
 		session.followupForMeSig = ""
 	}
@@ -620,7 +617,6 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, app appServerClie
 		session.activeForMeSig = ""
 		session.activeGeneralSig = ""
 		session.steeredForMeSig = ""
-		session.steeredForMeTurn = ""
 		restartAgent = cloneAgentValue(session.agent)
 		if restartAgent != nil && restartAgent.CodexThreadID == "" {
 			restartAgent.CodexThreadID = session.threadID
@@ -700,7 +696,6 @@ func (s *agentSessionSupervisor) markIdle(agentID string, app appServerClient, d
 		session.activeForMeSig = ""
 		session.activeGeneralSig = ""
 		session.steeredForMeSig = ""
-		session.steeredForMeTurn = ""
 		threadID = session.threadID
 		workdir = session.workdir
 		logName = session.logName

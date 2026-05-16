@@ -27,7 +27,17 @@ import (
 )
 
 type workspaceEventEnvelope struct {
-	Type string `json:"type"`
+	Type string          `json:"type"`
+	Data json.RawMessage `json:"data"`
+}
+
+type agentInboxChangedEvent struct {
+	WorkspaceID      string `json:"workspaceId"`
+	DaemonID         string `json:"daemonId"`
+	AgentID          string `json:"agentId"`
+	Box              string `json:"box"`
+	EventID          string `json:"eventId"`
+	NotificationType string `json:"notificationType"`
 }
 
 type Service struct {
@@ -336,15 +346,33 @@ func (s *Service) runWorkspaceEventStream(ctx context.Context) error {
 				log.Printf("workspace refresh error: %v", err)
 			}
 		}
+		if change, ok := parseAgentInboxChangedEvent(event); ok {
+			s.wakeAgentWorker(change.AgentID)
+			continue
+		}
 		if shouldWakeAgentWorkersForEvent(event.Type) {
 			s.wakeAllAgentWorkers()
 		}
 	}
 }
 
+func parseAgentInboxChangedEvent(event workspaceEventEnvelope) (agentInboxChangedEvent, bool) {
+	if strings.TrimSpace(event.Type) != "agent.inbox.changed" || len(event.Data) == 0 {
+		return agentInboxChangedEvent{}, false
+	}
+	var change agentInboxChangedEvent
+	if err := json.Unmarshal(event.Data, &change); err != nil {
+		return agentInboxChangedEvent{}, false
+	}
+	if strings.TrimSpace(change.AgentID) == "" {
+		return agentInboxChangedEvent{}, false
+	}
+	return change, true
+}
+
 func shouldWakeAgentWorkersForEvent(eventType string) bool {
 	switch strings.TrimSpace(eventType) {
-	case "workspace.snapshot", "presence.updated", "agent.run.updated":
+	case "workspace.snapshot", "presence.updated", "agent.run.updated", "document.updated", "thread.created", "thread.updated", "thread.message.created", "agent.event.updated":
 		return false
 	default:
 		return true

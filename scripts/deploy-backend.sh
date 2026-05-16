@@ -8,8 +8,6 @@ load_notty_deploy_env "$root_dir"
 version="${VERSION:-$(git -C "$root_dir" rev-parse --short HEAD)}"
 docker_repo="${DOCKER_REPO:-alphatoad/notty}"
 backend_image="$docker_repo:backend-$version"
-latest_image="$docker_repo:backend-latest"
-platforms="${DOCKER_PLATFORMS:-linux/amd64,linux/arm64}"
 ssh_host="${NOTTY_DEPLOY_SSH_HOST:-notty}"
 remote_dir="${NOTTY_REMOTE_DIR:-/opt/notty}"
 
@@ -30,14 +28,7 @@ command -v scp >/dev/null 2>&1 || die "scp is required"
 
 ssh "$ssh_host" "docker ps >/dev/null 2>&1" || die "remote user cannot access Docker on $ssh_host; add the SSH user to the docker group or configure passwordless Docker access before deploying"
 
-printf 'Building and pushing backend image %s\n' "$backend_image"
-docker buildx build \
-	--platform "$platforms" \
-	-f "$root_dir/backend/Dockerfile" \
-	-t "$backend_image" \
-	-t "$latest_image" \
-	--push \
-	"$root_dir"
+VERSION="$version" "$root_dir/scripts/publish-backend.sh"
 
 quoted_remote_dir="$(shell_quote "$remote_dir")"
 quoted_backend_image="$(shell_quote "$backend_image")"

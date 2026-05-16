@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: notty_test
+      POSTGRES_USER: notty
+      POSTGRES_PASSWORD: notty
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U notty -d notty_test"]
+      interval: 1s
+      timeout: 5s
+      retries: 30
+    ports:
+      - "127.0.0.1::5432"

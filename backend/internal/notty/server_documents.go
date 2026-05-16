@@ -62,6 +62,7 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 		ActorID:    meta.ActorID,
 	}}
 	s.requestBroker(r).Publish(event)
+	s.publishAgentInboxChanges(r)
 	writeJSON(w, http.StatusCreated, documentMetadata(document))
 }
 
@@ -282,6 +283,7 @@ func (s *Server) handleDocumentProtocolMessageWithStore(store *Store, broker *Br
 				UpdatedAt:   updated.UpdatedAt,
 				ActorID:     meta.ActorID,
 			}})
+			publishAgentInboxChanges(store, broker)
 		}
 	case yproto.MessageAwareness:
 		updates, err := yproto.DecodeAwarenessUpdate(reader)

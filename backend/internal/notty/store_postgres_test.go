@@ -3,6 +3,7 @@ package notty
 import (
 	"database/sql"
 	"encoding/base64"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -14,10 +15,7 @@ import (
 )
 
 func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
-	dsn := os.Getenv("NOTTY_DATABASE_TEST_URL")
-	if dsn == "" {
-		t.Skip("NOTTY_DATABASE_TEST_URL is not set")
-	}
+	dsn := postgresTestDSN(t)
 
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -162,10 +160,7 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 }
 
 func TestPostgresDocumentUpdateHotPathKeepsHeadSnapshotless(t *testing.T) {
-	dsn := os.Getenv("NOTTY_DATABASE_TEST_URL")
-	if dsn == "" {
-		t.Skip("NOTTY_DATABASE_TEST_URL is not set")
-	}
+	dsn := postgresTestDSN(t)
 
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -302,10 +297,7 @@ func TestPostgresDocumentUpdateHotPathKeepsHeadSnapshotless(t *testing.T) {
 }
 
 func TestPostgresCheckpointStateVectorSyncsOnlyTailAfterReload(t *testing.T) {
-	dsn := os.Getenv("NOTTY_DATABASE_TEST_URL")
-	if dsn == "" {
-		t.Skip("NOTTY_DATABASE_TEST_URL is not set")
-	}
+	dsn := postgresTestDSN(t)
 
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -418,10 +410,7 @@ func TestPostgresCheckpointStateVectorSyncsOnlyTailAfterReload(t *testing.T) {
 }
 
 func TestPostgresLoadRegeneratesMissingCheckpointBeforeSync(t *testing.T) {
-	dsn := os.Getenv("NOTTY_DATABASE_TEST_URL")
-	if dsn == "" {
-		t.Skip("NOTTY_DATABASE_TEST_URL is not set")
-	}
+	dsn := postgresTestDSN(t)
 
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -502,10 +491,7 @@ func TestPostgresLoadRegeneratesMissingCheckpointBeforeSync(t *testing.T) {
 }
 
 func TestPostgresDocumentAtHandleTextDoesNotCreateMentionEvent(t *testing.T) {
-	dsn := os.Getenv("NOTTY_DATABASE_TEST_URL")
-	if dsn == "" {
-		t.Skip("NOTTY_DATABASE_TEST_URL is not set")
-	}
+	dsn := postgresTestDSN(t)
 
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -558,10 +544,7 @@ func TestPostgresDocumentAtHandleTextDoesNotCreateMentionEvent(t *testing.T) {
 }
 
 func TestPostgresUpdateAgentSessionPersistsTargetAgent(t *testing.T) {
-	dsn := os.Getenv("NOTTY_DATABASE_TEST_URL")
-	if dsn == "" {
-		t.Skip("NOTTY_DATABASE_TEST_URL is not set")
-	}
+	dsn := postgresTestDSN(t)
 
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -612,10 +595,7 @@ func TestPostgresUpdateAgentSessionPersistsTargetAgent(t *testing.T) {
 }
 
 func TestPostgresDocumentUpdatesPersistWithoutWorkspaceSnapshot(t *testing.T) {
-	dsn := os.Getenv("NOTTY_DATABASE_TEST_URL")
-	if dsn == "" {
-		t.Skip("NOTTY_DATABASE_TEST_URL is not set")
-	}
+	dsn := postgresTestDSN(t)
 
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -679,10 +659,7 @@ func TestPostgresDocumentUpdatesPersistWithoutWorkspaceSnapshot(t *testing.T) {
 }
 
 func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testing.T) {
-	dsn := os.Getenv("NOTTY_DATABASE_TEST_URL")
-	if dsn == "" {
-		t.Skip("NOTTY_DATABASE_TEST_URL is not set")
-	}
+	dsn := postgresTestDSN(t)
 
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -808,10 +785,7 @@ func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testin
 }
 
 func TestPostgresApplyCRDTUpdateCreatesPeriodicCheckpointFromHistory(t *testing.T) {
-	dsn := os.Getenv("NOTTY_DATABASE_TEST_URL")
-	if dsn == "" {
-		t.Skip("NOTTY_DATABASE_TEST_URL is not set")
-	}
+	dsn := postgresTestDSN(t)
 
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -889,10 +863,7 @@ func TestPostgresApplyCRDTUpdateCreatesPeriodicCheckpointFromHistory(t *testing.
 }
 
 func TestPostgresApplyCRDTUpdatePersistsWithoutWorkspaceSnapshot(t *testing.T) {
-	dsn := os.Getenv("NOTTY_DATABASE_TEST_URL")
-	if dsn == "" {
-		t.Skip("NOTTY_DATABASE_TEST_URL is not set")
-	}
+	dsn := postgresTestDSN(t)
 
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -962,10 +933,7 @@ func TestPostgresApplyCRDTUpdatePersistsWithoutWorkspaceSnapshot(t *testing.T) {
 }
 
 func TestPostgresAgentInboxSkipsLogDocumentUpdatesButKeepsThreadMentions(t *testing.T) {
-	dsn := os.Getenv("NOTTY_DATABASE_TEST_URL")
-	if dsn == "" {
-		t.Skip("NOTTY_DATABASE_TEST_URL is not set")
-	}
+	dsn := postgresTestDSN(t)
 
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -1077,10 +1045,7 @@ func TestPostgresAgentInboxSkipsLogDocumentUpdatesButKeepsThreadMentions(t *test
 }
 
 func TestPostgresDiffDocumentReconstructsAcrossCheckpointsAfterReload(t *testing.T) {
-	dsn := os.Getenv("NOTTY_DATABASE_TEST_URL")
-	if dsn == "" {
-		t.Skip("NOTTY_DATABASE_TEST_URL is not set")
-	}
+	dsn := postgresTestDSN(t)
 
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -1163,6 +1128,25 @@ func TestPostgresDiffDocumentReconstructsAcrossCheckpointsAfterReload(t *testing
 	if checkpointCount < 2 {
 		t.Fatalf("expected multiple checkpoints after long edit history, got %d", checkpointCount)
 	}
+}
+
+func postgresTestDSN(t *testing.T) string {
+	t.Helper()
+	dsn := os.Getenv("NOTTY_DATABASE_TEST_URL")
+	if dsn == "" {
+		t.Skip("NOTTY_DATABASE_TEST_URL is not set")
+	}
+	if os.Getenv("NOTTY_DATABASE_TEST_ISOLATED") != "1" {
+		t.Fatalf("refusing to run destructive Postgres tests without NOTTY_DATABASE_TEST_ISOLATED=1; use scripts/test-postgres.sh")
+	}
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("parse NOTTY_DATABASE_TEST_URL: %v", err)
+	}
+	if dbName := strings.TrimPrefix(parsed.Path, "/"); dbName != "notty_test" {
+		t.Fatalf("refusing to run destructive Postgres tests against database %q; expected disposable database notty_test", dbName)
+	}
+	return dsn
 }
 
 func clearNottyTables(db *sql.DB) error {

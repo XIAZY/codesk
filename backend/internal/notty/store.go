@@ -48,6 +48,7 @@ type Store struct {
 	dirtyDocuments        map[string]struct{}
 	deletedDocuments      map[string]struct{}
 	pendingDocumentEvents []documentUpdateRecord
+	pendingInboxChanges   []AgentInboxChangedEvent
 	dirtyAgentEvents      bool
 }
 
@@ -604,6 +605,17 @@ func (s *Store) ListAgentNotifications(agentID string, statuses ...string) ([]*A
 	return notifications, nil
 }
 
+func (s *Store) DrainAgentInboxChanges() []AgentInboxChangedEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.pendingInboxChanges) == 0 {
+		return nil
+	}
+	changes := append([]AgentInboxChangedEvent(nil), s.pendingInboxChanges...)
+	s.pendingInboxChanges = nil
+	return changes
+}
+
 func (s *Store) ListAgentInbox(agentID string, box string, statuses ...string) ([]*AgentEvent, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -753,13 +765,36 @@ func (s *Store) MarkDocumentViewed(agentID, documentID string, req MarkDocumentV
 		ViewedAt:    now,
 	}
 	s.state.AgentDocumentViews[agentDocumentViewKey(resolvedAgentID, document.ID)] = view
+	for _, event := range s.state.AgentEvents {
+		if event == nil || event.AgentID != resolvedAgentID || event.DocumentID != document.ID || !strings.HasPrefix(event.Type, "document.") {
+			continue
+		}
+		if event.Status == "completed" || event.Status == "dismissed" {
+			continue
+		}
+		if event.ToUpdateID <= updateID {
+			event.Status = "completed"
+			event.CompletedAt = now
+			event.UpdatedAt = now
+			s.dirtyAgentEvents = true
+		}
+	}
 	s.state.UpdatedAt = now
 	if s.db != nil {
 		workspaceID := s.state.WorkspaceID
 		cloned := cloneAgentDocumentView(view)
+		dirtyEvents := s.dirtyAgentEvents
 		s.mu.Unlock()
 		if err := upsertAgentDocumentViewPostgres(s.db, workspaceID, cloned); err != nil {
 			return nil, err
+		}
+		if dirtyEvents {
+			if err := completeDocumentInboxEventsPostgres(s.db, workspaceID, resolvedAgentID, document.ID, updateID, now); err != nil {
+				return nil, err
+			}
+			s.mu.Lock()
+			s.dirtyAgentEvents = false
+			s.mu.Unlock()
 		}
 		return cloned, nil
 	}
@@ -970,6 +1005,13 @@ func (s *Store) documentInboxClassificationLocked(agentID string, document *Docu
 		}
 	}
 	return "general", "document.updated"
+}
+
+func shouldMarkDocumentViewedForEvent(event *AgentEvent) bool {
+	if event == nil || event.AgentID == "" || event.DocumentID == "" || !strings.HasPrefix(event.Type, "document.") {
+		return false
+	}
+	return event.Status == "completed" || event.Status == "dismissed"
 }
 
 func (s *Store) agentHandleByIDLocked(agentID string) string {
@@ -1921,6 +1963,7 @@ func (s *Store) ApplyCRDTUpdateWithResult(documentID string, update []byte, meta
 	}
 	s.markDocumentDirtyLocked(document.ID)
 	s.appendIncrementalDocumentUpdateLocked(document.ID, update, meta, now)
+	s.enqueueDocumentUpdateEventsLocked(document, meta)
 	document.UpdatedAt = now
 	s.state.UpdatedAt = document.UpdatedAt
 
@@ -1980,7 +2023,7 @@ func (s *Store) ReplaceDocumentText(documentID string, nextText string, meta Ope
 	s.appendIncrementalDocumentUpdateLocked(document.ID, update, meta, time.Now().UTC())
 	notify := !isLogDocumentPath(document.Path)
 	document.UpdatedAt = time.Now().UTC()
-	if notify {
+	if notify && s.db == nil {
 		s.enqueueDocumentThreadEventsLocked(document, meta)
 	}
 	s.state.UpdatedAt = document.UpdatedAt
@@ -2206,6 +2249,11 @@ func (s *Store) UpdateAgentEvent(id string, req UpdateAgentEventRequest, meta Op
 		if err != nil {
 			return nil, err
 		}
+		if shouldMarkDocumentViewedForEvent(updated) {
+			if _, err := s.MarkDocumentViewed(updated.AgentID, updated.DocumentID, MarkDocumentViewedRequest{UpdateID: updated.ToUpdateID}); err != nil {
+				return nil, err
+			}
+		}
 		s.mu.Lock()
 		s.state.AgentEvents[id] = cloneAgentEvent(updated)
 		s.state.UpdatedAt = updated.UpdatedAt
@@ -2242,6 +2290,21 @@ func (s *Store) UpdateAgentEvent(id string, req UpdateAgentEventRequest, meta Op
 	}
 	if event.Status == "completed" {
 		event.CompletedAt = now
+	}
+	if shouldMarkDocumentViewedForEvent(event) {
+		updateID := event.ToUpdateID
+		if document := s.state.Documents[event.DocumentID]; document != nil {
+			if updateID <= 0 || updateID > document.UpdateID {
+				updateID = document.UpdateID
+			}
+			s.state.AgentDocumentViews[agentDocumentViewKey(event.AgentID, event.DocumentID)] = &AgentDocumentView{
+				AgentID:     event.AgentID,
+				DocumentID:  event.DocumentID,
+				UpdateID:    updateID,
+				StateVector: document.StateVector,
+				ViewedAt:    now,
+			}
+		}
 	}
 	if event.Status == "pending" && event.AvailableAt.Before(now) {
 		event.AvailableAt = now.Add(5 * time.Second)
@@ -3178,27 +3241,98 @@ func (s *Store) enqueueDocumentThreadEventsLocked(document *Document, meta Opera
 	if document == nil {
 		return
 	}
-	if isLogDocumentPath(document.Path) {
+	s.enqueueDocumentUpdateEventsLocked(document, meta)
+}
+
+func (s *Store) enqueueDocumentUpdateEventsLocked(document *Document, meta OperationMeta) {
+	if document == nil || isLogDocumentPath(document.Path) || document.UpdateID <= 1 {
 		return
 	}
-	for _, thread := range s.state.Threads {
-		if thread.DocumentID != document.ID || thread.Status != "open" {
+	for _, agent := range s.state.Agents {
+		if agent == nil || !s.shouldNotifyAgentLocked(agent.ID, meta, "") {
 			continue
 		}
-		for _, participantID := range thread.ParticipantIDs {
-			agent, ok := s.state.Agents[participantID]
-			if !ok {
-				continue
-			}
-			dedupKey := fmt.Sprintf("document-edited:%s:%s:%d", document.ID, participantID, document.UpdatedAt.UnixNano())
-			s.enqueueAgentNotificationLocked(agent.ID, agent.Handle, "document.edited", dedupKey, meta, "", func(event *AgentEvent, now time.Time) {
-				event.DocumentID = document.ID
-				event.ThreadID = thread.ID
-				event.Summary = fmt.Sprintf("%s changed near thread %s", document.Path, thread.Title)
-				event.Prompt = fmt.Sprintf("Document %s changed near thread %q. Review the latest edits and continue the discussion if needed.", document.Path, thread.Title)
-			})
+		box, threadID, threadTitle := s.documentInboxTargetLocked(agent.ID, document)
+		view := s.state.AgentDocumentViews[agentDocumentViewKey(agent.ID, document.ID)]
+		fromUpdateID := int64(0)
+		if view != nil {
+			fromUpdateID = view.UpdateID
+		}
+		if fromUpdateID >= document.UpdateID {
+			continue
+		}
+		s.upsertDocumentInboxEventLocked(agent, document, box, threadID, threadTitle, fromUpdateID, document.UpdateID)
+	}
+}
+
+func (s *Store) documentInboxTargetLocked(agentID string, document *Document) (box string, threadID string, threadTitle string) {
+	for _, thread := range s.state.Threads {
+		if thread == nil || document == nil || thread.DocumentID != document.ID || thread.Status != "open" {
+			continue
+		}
+		if containsText(thread.ParticipantIDs, agentID) {
+			return "for_me", thread.ID, thread.Title
 		}
 	}
+	return "general", "", ""
+}
+
+func (s *Store) upsertDocumentInboxEventLocked(agent *Agent, document *Document, box string, threadID string, threadTitle string, fromUpdateID int64, toUpdateID int64) {
+	if agent == nil || document == nil || toUpdateID <= 0 {
+		return
+	}
+	box = normalizeInboxBox(box)
+	now := time.Now().UTC()
+	summary := fmt.Sprintf("%s changed from version %d to %d", document.Path, fromUpdateID, toUpdateID)
+	prompt := fmt.Sprintf("Review %s with notty-agent-tool diff-document --document-id %s --from %d --to %d. Act only if you have useful feedback or edits.", document.Path, document.ID, fromUpdateID, toUpdateID)
+	if threadID != "" {
+		summary = fmt.Sprintf("%s changed near thread %s", document.Path, firstNonEmptyString(threadTitle, threadID))
+		prompt = fmt.Sprintf("Document %s changed near thread %q. Review the latest edits and continue the discussion if needed.", document.Path, firstNonEmptyString(threadTitle, threadID))
+	}
+	for _, current := range s.state.AgentEvents {
+		if current == nil || current.AgentID != agent.ID || current.DocumentID != document.ID || !strings.HasPrefix(current.Type, "document.") {
+			continue
+		}
+		if normalizeInboxBox(current.Box) != box || current.Status != "pending" {
+			continue
+		}
+		if current.FromUpdateID == 0 || fromUpdateID < current.FromUpdateID {
+			current.FromUpdateID = fromUpdateID
+		}
+		if toUpdateID > current.ToUpdateID {
+			current.ToUpdateID = toUpdateID
+		}
+		current.AgentHandle = agent.Handle
+		current.ThreadID = threadID
+		current.Summary = summary
+		current.Prompt = prompt
+		current.UpdatedAt = now
+		current.AvailableAt = now
+		s.dirtyAgentEvents = true
+		s.recordAgentInboxChangedLocked(current)
+		return
+	}
+	event := &AgentEvent{
+		ID:           "aevt_" + uuid.NewString(),
+		AgentID:      agent.ID,
+		AgentHandle:  agent.Handle,
+		Type:         "document.updated",
+		Box:          box,
+		Status:       "pending",
+		DocumentID:   document.ID,
+		ThreadID:     threadID,
+		FromUpdateID: fromUpdateID,
+		ToUpdateID:   toUpdateID,
+		Summary:      summary,
+		Prompt:       prompt,
+		DedupKey:     fmt.Sprintf("document-updated:%s:%s:%s", box, document.ID, agent.ID),
+		CreatedAt:    now,
+		UpdatedAt:    now,
+		AvailableAt:  now,
+	}
+	s.state.AgentEvents[event.ID] = event
+	s.dirtyAgentEvents = true
+	s.recordAgentInboxChangedLocked(event)
 }
 
 func (s *Store) enqueueThreadMentionEventsLocked(thread *Thread, message *ThreadMessage, meta OperationMeta) {
@@ -3307,6 +3441,24 @@ func (s *Store) ensureAgentEventLocked(agentID, agentHandle, eventType, dedupKey
 	}
 	s.state.AgentEvents[event.ID] = event
 	s.dirtyAgentEvents = true
+	s.recordAgentInboxChangedLocked(event)
+}
+
+func (s *Store) recordAgentInboxChangedLocked(event *AgentEvent) {
+	if event == nil || event.AgentID == "" {
+		return
+	}
+	change := AgentInboxChangedEvent{
+		WorkspaceID:      s.state.WorkspaceID,
+		AgentID:          event.AgentID,
+		Box:              normalizeInboxBox(event.Box),
+		EventID:          event.ID,
+		NotificationType: event.Type,
+	}
+	if agent := s.state.Agents[event.AgentID]; agent != nil {
+		change.DaemonID = agent.DaemonID
+	}
+	s.pendingInboxChanges = append(s.pendingInboxChanges, change)
 }
 
 func containsText(items []string, target string) bool {

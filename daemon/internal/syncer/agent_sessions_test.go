@@ -517,7 +517,7 @@ func TestAgentSessionFailedTurnDoesNotMarkInboxSignatureDelivered(t *testing.T) 
 	}
 }
 
-func TestAgentSessionBusyForMeSteersAtMostOncePerActiveTurn(t *testing.T) {
+func TestAgentSessionBusyForMeSteersEachChangedInboxSignature(t *testing.T) {
 	factory := newFakeAppServerFactory()
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: t.TempDir(),
@@ -536,8 +536,8 @@ func TestAgentSessionBusyForMeSteersAtMostOncePerActiveTurn(t *testing.T) {
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "for-me v2", "for-me:v2", "general:v1"); err != nil {
 		t.Fatalf("schedule second for-me while busy: %v", err)
 	}
-	if len(app.turnSteers) != 1 {
-		t.Fatalf("expected one steer per active turn, got %d", len(app.turnSteers))
+	if len(app.turnSteers) != 2 {
+		t.Fatalf("expected a steer for each changed for-me inbox signature, got %d", len(app.turnSteers))
 	}
 }
 

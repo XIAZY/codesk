@@ -942,6 +942,10 @@ func TestCreateThreadEnqueuesMentionedAgentEvent(t *testing.T) {
 	if len(thread.Messages) != 1 {
 		t.Fatalf("expected 1 thread message, got %d", len(thread.Messages))
 	}
+	changes := store.DrainAgentInboxChanges()
+	if len(changes) != 1 || changes[0].AgentID != agent.ID || changes[0].NotificationType != "thread.mentioned" {
+		t.Fatalf("expected one thread mention push change, got %#v", changes)
+	}
 
 	snapshot := store.Snapshot()
 	if len(snapshot.Threads) != 1 {
@@ -1483,6 +1487,10 @@ func TestAgentInboxDedupesDocumentUpdatesAndDiffsFromLastViewed(t *testing.T) {
 	if len(firstItems) != 1 || firstItems[0].Type != "document.updated" {
 		t.Fatalf("unexpected first inbox: %#v", firstItems)
 	}
+	firstChanges := store.DrainAgentInboxChanges()
+	if len(firstChanges) != 1 || firstChanges[0].AgentID != agent.ID || firstChanges[0].EventID != firstItems[0].ID || firstChanges[0].Box != "general" {
+		t.Fatalf("expected one backend document inbox push after first edit, got %#v for item %#v", firstChanges, firstItems[0])
+	}
 	if firstItems[0].FromUpdateID == 0 || firstItems[0].ToUpdateID <= firstItems[0].FromUpdateID {
 		t.Fatalf("expected version span, got %#v", firstItems[0])
 	}
@@ -1503,6 +1511,10 @@ func TestAgentInboxDedupesDocumentUpdatesAndDiffsFromLastViewed(t *testing.T) {
 	}
 	if secondItems[0].ID != firstItems[0].ID || secondItems[0].ToUpdateID <= firstItems[0].ToUpdateID {
 		t.Fatalf("expected stable item id with advanced target version: first=%#v second=%#v", firstItems[0], secondItems[0])
+	}
+	secondChanges := store.DrainAgentInboxChanges()
+	if len(secondChanges) != 1 || secondChanges[0].AgentID != agent.ID || secondChanges[0].EventID != secondItems[0].ID || secondChanges[0].Box != "general" {
+		t.Fatalf("expected one backend document inbox push after coalesced second edit, got %#v for item %#v", secondChanges, secondItems[0])
 	}
 
 	diff, err := store.DiffDocument(agent.ID, documentID, "last-viewed", "head")

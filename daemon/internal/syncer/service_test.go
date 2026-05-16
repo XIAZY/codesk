@@ -2253,11 +2253,19 @@ func TestOutgoingOutboxSurvivesCacheReopenAndResendsIdempotently(t *testing.T) {
 }
 
 func TestShouldWakeAgentWorkersForEventIncludesDocumentUpdates(t *testing.T) {
-	if !shouldWakeAgentWorkersForEvent("document.updated") {
-		t.Fatal("document.updated is a product notification and should wake agent workers")
+	if shouldWakeAgentWorkersForEvent("document.updated") {
+		t.Fatal("document.updated should not be the agent wake source; agent.inbox.changed should")
 	}
-	if !shouldWakeAgentWorkersForEvent("thread.replied") {
-		t.Fatal("thread replies should wake agent workers")
+	if shouldWakeAgentWorkersForEvent("thread.message.created") {
+		t.Fatal("thread.message.created should not be the agent wake source; agent.inbox.changed should")
+	}
+	if !shouldWakeAgentWorkersForEvent("agent.inbox.changed") {
+		t.Fatal("agent.inbox.changed should wake agent workers")
+	}
+	payload := json.RawMessage(`{"agentId":"agent_1","eventId":"aevt_1","box":"for_me","notificationType":"thread.mentioned"}`)
+	change, ok := parseAgentInboxChangedEvent(workspaceEventEnvelope{Type: "agent.inbox.changed", Data: payload})
+	if !ok || change.AgentID != "agent_1" || change.EventID != "aevt_1" {
+		t.Fatalf("failed to parse inbox change: ok=%v change=%#v", ok, change)
 	}
 }
 

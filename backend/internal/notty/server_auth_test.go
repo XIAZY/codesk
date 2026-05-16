@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -172,10 +171,7 @@ type authTestWorkspace struct {
 
 func newAuthTestRouter(t *testing.T) http.Handler {
 	t.Helper()
-	dsn := os.Getenv("NOTTY_DATABASE_TEST_URL")
-	if dsn == "" {
-		t.Skip("NOTTY_DATABASE_TEST_URL is not set")
-	}
+	dsn := postgresTestDSN(t)
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatalf("open postgres: %v", err)

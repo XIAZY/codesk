@@ -451,6 +451,15 @@ type DocumentLifecycleEvent struct {
 	ActorID    string    `json:"actorId"`
 }
 
+type AgentInboxChangedEvent struct {
+	WorkspaceID      string `json:"workspaceId"`
+	DaemonID         string `json:"daemonId,omitempty"`
+	AgentID          string `json:"agentId"`
+	Box              string `json:"box"`
+	EventID          string `json:"eventId"`
+	NotificationType string `json:"notificationType"`
+}
+
 func (d *Document) SyncDerivedFields() {
 	if d.Doc == nil {
 		d.Content = ""

@@ -1589,6 +1589,21 @@ curl -fsSL https://static.nottyai.co/daemons/install.sh | sh -s -- \
   --static-base https://static.nottyai.co/daemons
 ```
 
+Build all local artifacts without publishing:
+
+```sh
+make build
+```
+
+Focused build targets:
+
+- `make build-go`: compile all Go packages.
+- `make build-frontend`: compile the Vite frontend into `frontend/dist`.
+- `make build-daemon`: compile local `notty-daemon` and `notty-agent-tool` binaries into `bin`.
+- `make build-static-local`: build local host-platform daemon artifacts into `dist/static/daemons`.
+- `make build-backend-image`: build the backend Docker image locally without pushing.
+- `make build-static VERSION=v0.1.0`: build the full production static tree.
+
 Build daemon release artifacts for static hosting:
 
 ```sh
@@ -1597,22 +1612,17 @@ make daemon-release VERSION=v0.1.0
 
 This creates `dist/static/daemons/install.sh`, `dist/static/daemons/latest/manifest.json`, `dist/static/daemons/latest/SHA256SUMS`, and versioned tarballs containing `notty-daemon` and `notty-agent-tool`.
 
-Build the unified static tree:
+Publish artifacts without changing the running backend:
 
-```sh
-make static-build VERSION=v0.1.0
-```
-
-This creates:
-
-- `dist/static/app`: compiled Vite frontend for `app.nottyai.co`.
-- `dist/static/homepage`: homepage files for `nottyai.co`.
-- `dist/static/daemons`: daemon installer, uninstaller, `latest` metadata, and versioned daemon tarballs.
+- `make publish-backend VERSION=v0.1.0`: build and push `alphatoad/notty:backend-v0.1.0` plus `backend-latest`.
+- `make publish-frontend VERSION=v0.1.0`: build and upload frontend/homepage assets to Cloudflare R2.
+- `make publish-static VERSION=v0.1.0`: build and upload daemon installer and release tarballs to Cloudflare R2.
+- `make publish VERSION=v0.1.0`: run all three publish jobs.
 
 Build only local daemon artifacts for the current host platform:
 
 ```sh
-make static-build-local
+make build-static-local
 ```
 
 This creates `dist/static/daemons` with `VERSION=dev` and only the current host platform, which is enough for local installer testing at `http://localhost:${NOTTY_STATIC_PORT:-5174}/daemons/install.sh`.
@@ -1671,7 +1681,7 @@ rule, `scripts/publish-static-r2.sh` uploads each root `index.html` twice when
 the bucket prefix is empty: once as `index.html`, and once as the empty object
 key. Daemon artifacts stay under `daemons/` so installer URLs remain stable.
 
-Production backend deployment uses `compose.prod.yml`. The remote server should keep `/opt/notty/.env` outside git with only secrets such as `NOTTY_DATABASE_URL` and `NOTTY_JWT_SECRET`. `scripts/deploy-backend.sh` builds and pushes `alphatoad/notty:backend-<version>`, uploads `compose.prod.yml`, `deploy/env/prod.server.env`, and the Compose-mounted nginx config to SSH host `notty`, then restarts the production Compose stack:
+Production backend deployment uses `compose.prod.yml`. The remote server should keep `/opt/notty/.env` outside git with only secrets such as `NOTTY_DATABASE_URL` and `NOTTY_JWT_SECRET`. `scripts/deploy-backend.sh` calls `scripts/publish-backend.sh` to build and push `alphatoad/notty:backend-<version>`, uploads `compose.prod.yml`, `deploy/env/prod.server.env`, and the Compose-mounted nginx config to SSH host `notty`, then restarts the production Compose stack:
 
 ```sh
 make deploy-backend VERSION=v0.1.0
@@ -1738,17 +1748,19 @@ Important daemon environment variables:
 
 ## Testing
 
-Normal test suite:
+One-command test suite:
 
 ```sh
-go test ./...
-cd frontend && npm test
+make tests
 ```
 
-Regression tests:
+Focused test tiers:
 
 ```sh
-go test -tags=regression ./test/regression
+make test-unit       # Go, frontend, installer, and uninstall unit/script tests
+make test-postgres   # Postgres-backed backend tests in a disposable Docker DB
+make test-regression # CRDT/filesystem/websocket regression stack in Docker
+make test-live       # API smoke test against an isolated Docker stack
 ```
 
 Correctness-focused regression areas:

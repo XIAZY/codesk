@@ -8,6 +8,5 @@ load_notty_deploy_env "$root_dir"
 version="${VERSION:-$(git -C "$root_dir" rev-parse --short HEAD)}"
 
 printf 'Deploying daemon static artifacts for %s\n' "$version"
-VERSION="$version" STATIC_BUILD_TARGET=daemons "$root_dir/scripts/build-static.sh"
-PUBLISH_TARGET=daemons "$root_dir/scripts/publish-static-r2.sh" "$version"
+VERSION="$version" "$root_dir/scripts/publish-static.sh"
 printf 'Daemon static deploy complete: %s\n' "$version"
