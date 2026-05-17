@@ -15,6 +15,32 @@ import (
 	"notty/internal/yproto"
 )
 
+func TestCloneThreadPreservesEmptyArrays(t *testing.T) {
+	thread := cloneThread(&Thread{
+		ID:                 "thread_1",
+		ParticipantIDs:     []string{},
+		ParticipantHandles: []string{},
+		Messages:           []*ThreadMessage{},
+	})
+	payload, err := json.Marshal(thread)
+	if err != nil {
+		t.Fatalf("marshal thread: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("decode thread: %v", err)
+	}
+	for _, key := range []string{"participantIds", "participantHandles", "messages"} {
+		values, ok := decoded[key].([]any)
+		if !ok {
+			t.Fatalf("expected %s to be an empty JSON array, got %#v in %s", key, decoded[key], payload)
+		}
+		if len(values) != 0 {
+			t.Fatalf("expected %s to be empty, got %#v", key, values)
+		}
+	}
+}
+
 func TestWorkspaceEndpointsOmitDocumentPayloads(t *testing.T) {
 	server, store := newTestServer(t)
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "sync me")

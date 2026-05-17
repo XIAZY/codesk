@@ -222,8 +222,6 @@ func TestToolGatewayCreateThreadResolvesPathQuoteToRelativeAnchors(t *testing.T)
 		t.Fatalf("new document cache: %v", err)
 	}
 	service.docCache = cache
-	service.projectedByID = map[string]*trackedFile{}
-	service.projectedByPath = map[string]*trackedFile{}
 	service.agentReplicas = map[string]*managedReplica{}
 	service.latestWorkspace = &workspaceResponse{
 		Documents: []*document{{ID: "doc_spec", Path: "docs/spec.md", UpdateID: 1}},

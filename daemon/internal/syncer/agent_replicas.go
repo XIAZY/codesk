@@ -21,17 +21,19 @@ func (s *Service) reconcileAgentReplicas(ctx context.Context, workspace *workspa
 	}
 
 	s.mu.Lock()
+	existing := make([]*workspaceReplica, 0, len(desired))
 	for agentID := range desired {
 		currentAgent := desired[agentID]
 		if managed, ok := s.agentReplicas[agentID]; ok {
 			if managed.replica.actorID == currentAgent.ID {
+				existing = append(existing, managed.replica)
 				continue
 			}
 			managed.cancel()
 			delete(s.agentReplicas, agentID)
 		}
 		rootDir := filepath.Join(s.cfg.AgentWorkspaceRoot, safeAgentWorkspaceName(agentID))
-		replica, err := newWorkspaceReplica(s.cfg, rootDir, currentAgent.ID)
+		replica, err := newWorkspaceReplica(s.cfg, rootDir, currentAgent.ID, "agent", s.markDocumentDirty)
 		if err != nil {
 			s.mu.Unlock()
 			return err
@@ -60,6 +62,11 @@ func (s *Service) reconcileAgentReplicas(ctx context.Context, workspace *workspa
 	}
 	s.mu.Unlock()
 
+	for _, replica := range existing {
+		if err := replica.applyWorkspace(ctx, workspace); err != nil {
+			return err
+		}
+	}
 	for index, agentID := range staleIDs {
 		stale[index].cancel()
 		_ = os.RemoveAll(filepath.Join(s.cfg.AgentWorkspaceRoot, safeAgentWorkspaceName(agentID)))

@@ -2592,13 +2592,20 @@ func cloneThread(thread *Thread) *Thread {
 		return nil
 	}
 	clone := *thread
-	clone.ParticipantIDs = append([]string(nil), thread.ParticipantIDs...)
-	clone.ParticipantHandles = append([]string(nil), thread.ParticipantHandles...)
+	clone.ParticipantIDs = cloneStringSlice(thread.ParticipantIDs)
+	clone.ParticipantHandles = cloneStringSlice(thread.ParticipantHandles)
 	clone.Messages = make([]*ThreadMessage, len(thread.Messages))
 	for index, message := range thread.Messages {
 		clone.Messages[index] = cloneThreadMessage(message)
 	}
 	return &clone
+}
+
+func cloneStringSlice(values []string) []string {
+	if len(values) == 0 {
+		return []string{}
+	}
+	return append([]string(nil), values...)
 }
 
 func cloneThreadMessage(message *ThreadMessage) *ThreadMessage {
