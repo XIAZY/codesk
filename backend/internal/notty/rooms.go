@@ -114,7 +114,7 @@ func (r *DocumentRoom) Remove(conn *DocumentConn) {
 	delete(r.conns, conn)
 }
 
-func (r *DocumentRoom) Broadcast(payload []byte, skip *DocumentConn) {
+func (r *DocumentRoom) BroadcastBestEffort(payload []byte, skip *DocumentConn) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for conn := range r.conns {
@@ -122,6 +122,19 @@ func (r *DocumentRoom) Broadcast(payload []byte, skip *DocumentConn) {
 			continue
 		}
 		conn.TryEnqueue(payload)
+	}
+}
+
+func (r *DocumentRoom) BroadcastSyncUpdate(payload []byte, skip *DocumentConn) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for conn := range r.conns {
+		if conn == skip {
+			continue
+		}
+		if !conn.TryEnqueue(payload) {
+			conn.Close()
+		}
 	}
 }
 

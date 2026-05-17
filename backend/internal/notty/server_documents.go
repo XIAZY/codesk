@@ -156,6 +156,11 @@ func (s *Server) handleDocumentWebsocket(w http.ResponseWriter, r *http.Request)
 		_ = conn.WriteMessage(websocket.BinaryMessage, yproto.BuildAwarenessUpdate(awareness, clients))
 	}
 
+	_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	})
+
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -193,7 +198,7 @@ func (s *Server) handleDocumentWebsocket(w http.ResponseWriter, r *http.Request)
 				message := yproto.BuildAwarenessUpdate(map[uint64]yproto.AwarenessState{
 					clientID: {Clock: time.Now().Unix(), State: []byte("null")},
 				}, []uint64{clientID})
-				room.Broadcast(message, nil)
+				room.BroadcastBestEffort(message, nil)
 			}
 			log.Printf("document ws closed doc=%s actor=%s client=%d", documentID, actorID, clientID)
 			return
@@ -277,7 +282,7 @@ func (s *Server) handleDocumentProtocolMessageWithStore(store *Store, broker *Br
 				return nil
 			}
 			updated := result.Document
-			room.Broadcast(yproto.BuildSyncUpdate(data), session)
+			room.BroadcastSyncUpdate(yproto.BuildSyncUpdate(data), session)
 			broker.Publish(EventEnvelope{Type: "document.updated", Data: DocumentUpdateEvent{
 				DocumentID: updated.ID,
 				UpdateID:   updated.UpdateID,
@@ -298,7 +303,7 @@ func (s *Server) handleDocumentProtocolMessageWithStore(store *Store, broker *Br
 		}
 		snapshot := room.SnapshotAwareness()
 		broadcast := yproto.BuildAwarenessUpdate(snapshot, changed)
-		room.Broadcast(broadcast, session)
+		room.BroadcastBestEffort(broadcast, session)
 	}
 	return nil
 }

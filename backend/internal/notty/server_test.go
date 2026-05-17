@@ -382,6 +382,79 @@ func TestHandleDocumentProtocolMessageBroadcastsSyncUpdateToPeers(t *testing.T) 
 	}
 }
 
+func TestHandleDocumentProtocolMessageClosesSlowPeerOnSyncUpdateOverflow(t *testing.T) {
+	server, store := newTestServer(t)
+	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "alpha")
+
+	peer := syncDocumentToDocForTest(t, store, documentID, 99)
+	var update []byte
+	text := peer.GetText("content")
+	unsubscribe := peer.OnUpdate(func(next []byte, origin any) {
+		if origin == "peer" {
+			update = append([]byte(nil), next...)
+		}
+	})
+	peer.Transact(func(txn *crdt.Transaction) {
+		text.Insert(txn, text.LenInTxn(txn), " bravo", nil)
+	}, "peer")
+	unsubscribe()
+	if len(update) == 0 {
+		t.Fatal("expected peer update bytes")
+	}
+
+	room := server.rooms.ForDocument(documentID)
+	source := newDocumentConn(1)
+	slowPeer := newDocumentConn(1)
+	slowPeer.send <- []byte("queued")
+	room.Add(source)
+	room.Add(slowPeer)
+	defer room.Remove(source)
+	defer room.Remove(slowPeer)
+
+	err := server.handleDocumentProtocolMessage(room, source, documentID, yproto.BuildSyncUpdate(update), OperationMeta{
+		ActorID:   "peer",
+		ActorType: "human",
+		Source:    "test",
+	})
+	if err != nil {
+		t.Fatalf("handle document protocol message: %v", err)
+	}
+
+	if !slowPeer.closed.Load() {
+		t.Fatal("expected slow peer to be closed when document update cannot be enqueued")
+	}
+	select {
+	case <-slowPeer.Done():
+	default:
+		t.Fatal("expected slow peer done channel to be closed")
+	}
+	if got := currentDocumentContentForTest(t, store, documentID); got != "alpha bravo" {
+		t.Fatalf("expected server to persist source update before closing slow peer, got %q", got)
+	}
+}
+
+func TestDocumentRoomAwarenessBroadcastRemainsBestEffort(t *testing.T) {
+	room := NewDocumentRooms().ForDocument("doc")
+	slowPeer := newDocumentConn(1)
+	slowPeer.send <- []byte("queued")
+	room.Add(slowPeer)
+	defer room.Remove(slowPeer)
+
+	payload := yproto.BuildAwarenessUpdate(map[uint64]yproto.AwarenessState{
+		1: {Clock: 1, State: []byte(`{"actorName":"a"}`)},
+	}, []uint64{1})
+	room.BroadcastBestEffort(payload, nil)
+
+	if slowPeer.closed.Load() {
+		t.Fatal("awareness overflow should not close the document session")
+	}
+	select {
+	case <-slowPeer.Done():
+		t.Fatal("awareness overflow should not close the done channel")
+	default:
+	}
+}
+
 func TestHandleDocumentProtocolMessageBroadcastsDeleteOnlySyncUpdate(t *testing.T) {
 	server, store := newTestServer(t)
 	documentID := mustCreateTestDocument(t, store, "docs/backspace.md", "abc")
