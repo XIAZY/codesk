@@ -65,7 +65,7 @@ afterEach(() => {
   cleanup();
 });
 
-function renderSurface(input: { ydoc: Y.Doc; ytext: Y.Text; threads?: ThreadItem[] }) {
+function renderSurface(input: { ydoc: Y.Doc; ytext: Y.Text; threads?: ThreadItem[]; enableMarkdownLivePreview?: boolean }) {
   return render(
     <DocumentSurface
       documentId="doc"
@@ -77,6 +77,7 @@ function renderSurface(input: { ydoc: Y.Doc; ytext: Y.Text; threads?: ThreadItem
       onFocusThreadHandled={vi.fn()}
       onSelectionChange={vi.fn()}
       onLineThreadsOpen={vi.fn()}
+      enableMarkdownLivePreview={input.enableMarkdownLivePreview}
     />
   );
 }
@@ -89,6 +90,19 @@ describe("DocumentSurface", () => {
     ytext.insert(0, lines.join("\n"));
 
     const { container } = renderSurface({ ydoc, ytext });
+
+    await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
+    expect(container.querySelectorAll("*").length).toBeLessThan(5_000);
+    expect(container.textContent?.length ?? 0).toBeLessThan(ytext.length / 10);
+  });
+
+  it("keeps Markdown live preview virtualized for large markdown documents", async () => {
+    const ydoc = new Y.Doc();
+    const ytext = ydoc.getText("content");
+    const lines = Array.from({ length: 50_000 }, (_, index) => `## Heading ${index}\nThis has **bold** and [link](https://example.com/${index}).`);
+    ytext.insert(0, lines.join("\n"));
+
+    const { container } = renderSurface({ ydoc, ytext, enableMarkdownLivePreview: true });
 
     await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
     expect(container.querySelectorAll("*").length).toBeLessThan(5_000);

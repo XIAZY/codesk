@@ -30,6 +30,10 @@ export function shellQuote(value: string) {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
+export function isMarkdownDocumentPath(path: string) {
+  return /\.(md|markdown)$/i.test(path);
+}
+
 export function buildDaemonInstallCommand(input: {
   backendUrl: string;
   workspaceId: string;

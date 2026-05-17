@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
-import { markdown } from "@codemirror/lang-markdown";
+import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import {
   bracketMatching,
   defaultHighlightStyle,
@@ -34,6 +34,11 @@ import {
   type LineThreadGroup,
   type ResolvedThreadAnchor,
 } from "./logic";
+import {
+  markdownPreviewCommand,
+  nottyMarkdownLivePreview,
+  type MarkdownPreviewCommandName,
+} from "./markdownLivePreview";
 import type { ThreadItem } from "./types";
 
 export type LiveThread = ThreadItem & { anchor: ResolvedThreadAnchor };
@@ -58,6 +63,8 @@ type DocumentSurfaceProps = {
   onFocusThreadHandled: () => void;
   onSelectionChange: (selection: SurfaceSelection | null) => void;
   onLineThreadsOpen: (group: LineThreadGroup<LiveThread>, point: { x: number; y: number }) => void;
+  formatRequest?: { id: number; command: MarkdownPreviewCommandName } | null;
+  enableMarkdownLivePreview?: boolean;
 };
 
 type ThreadRailMarker = LineThreadGroup<LiveThread> & {
@@ -88,15 +95,15 @@ const editorTheme = EditorView.theme({
     width: "100%",
     background: "transparent",
     color: "var(--ink)",
-    fontFamily: "var(--font-mono)",
-    fontSize: "14px",
+    fontFamily: "var(--sans)",
+    fontSize: "15px",
   },
   ".cm-scroller": {
     minHeight: "560px",
     maxHeight: "calc(100vh - 220px)",
     overflow: "auto",
-    fontFamily: "var(--font-mono)",
-    lineHeight: "1.65",
+    fontFamily: "var(--sans)",
+    lineHeight: "1.72",
   },
   ".cm-content": {
     padding: "28px 30px 64px 18px",
@@ -135,6 +142,8 @@ export function DocumentSurface({
   onFocusThreadHandled,
   onSelectionChange,
   onLineThreadsOpen,
+  formatRequest,
+  enableMarkdownLivePreview = false,
 }: DocumentSurfaceProps) {
   const shellRef = useRef<HTMLDivElement | null>(null);
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -181,7 +190,7 @@ export function DocumentSurface({
           bracketMatching(),
           highlightActiveLine(),
           highlightSelectionMatches(),
-          markdown(),
+          ...(enableMarkdownLivePreview ? [markdown({ base: markdownLanguage }), nottyMarkdownLivePreview()] : []),
           syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
           threadDecorationField,
           editorTheme,
@@ -240,7 +249,7 @@ export function DocumentSurface({
         viewRef.current = null;
       }
     };
-  }, [documentId, ydoc, ytext]);
+  }, [documentId, enableMarkdownLivePreview, ydoc, ytext]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -273,6 +282,15 @@ export function DocumentSurface({
     }
     onFocusThreadHandled();
   }, [focusThreadId, onFocusThreadHandled, threads, ydoc]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || !formatRequest || !enableMarkdownLivePreview) {
+      return;
+    }
+    markdownPreviewCommand(formatRequest.command)(view);
+    onSelectionChangeRef.current(selectionFromView(view, ytext));
+  }, [enableMarkdownLivePreview, formatRequest, ytext]);
 
   return (
     <div ref={shellRef} className="document-surface-shell">

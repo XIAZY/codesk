@@ -2,12 +2,14 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { ApiClient, apiBase, daemonStaticBase } from "./api";
 import { DocumentSurface, type LiveThread, type SurfaceSelection } from "./DocumentSurface";
+import type { MarkdownPreviewCommandName } from "./markdownLivePreview";
 import {
   agentStatus,
   agentsByDaemon,
   buildDaemonInstallCommand,
   buildDaemonUninstallCommand,
   daemonStatus,
+  isMarkdownDocumentPath,
   type LineThreadGroup,
 } from "./logic";
 import { useDocumentSync } from "./useDocument";
@@ -867,6 +869,8 @@ function DocumentEditor({
   const [threadBody, setThreadBody] = useState("");
   const [activeThreadGroup, setActiveThreadGroup] = useState<LineThreadGroup<LiveThread> | null>(null);
   const [threadPopoverPoint, setThreadPopoverPoint] = useState({ x: 0, y: 0 });
+  const [formatRequest, setFormatRequest] = useState<{ id: number; command: MarkdownPreviewCommandName } | null>(null);
+  const isMarkdownDocument = isMarkdownDocumentPath(document.path);
   const { ydoc, ytext, ready, connected } = useDocumentSync({
     workspaceId,
     token,
@@ -875,7 +879,7 @@ function DocumentEditor({
   });
   const hasRangeSelection = Boolean(selection);
   const toolbarPoint = {
-    x: clamp(selection?.point.x ?? 24, 12, Math.max(12, window.innerWidth - 420)),
+    x: clamp(selection?.point.x ?? 24, 12, Math.max(12, window.innerWidth - 680)),
     y: clamp((selection?.point.y ?? 120) - 48, 12, Math.max(12, window.innerHeight - 64)),
   };
   const drafterPoint = {
@@ -888,7 +892,8 @@ function DocumentEditor({
     setSelection(null);
     setThreadDraftOpen(false);
     setThreadBody("");
-  }, [document.id]);
+    setFormatRequest(null);
+  }, [document.id, document.path]);
 
   useEffect(() => {
     if (threadDraftOpen) {
@@ -933,6 +938,10 @@ function DocumentEditor({
     setThreadDraftOpen(true);
   };
 
+  const requestFormat = (command: MarkdownPreviewCommandName) => {
+    setFormatRequest((current) => ({ id: (current?.id ?? 0) + 1, command }));
+  };
+
   return (
     <div className="doc-canvas">
       <div className="doc-inner editor-body">
@@ -954,6 +963,8 @@ function DocumentEditor({
             onFocusThreadHandled={onFocusThreadHandled}
             onSelectionChange={setSelection}
             onLineThreadsOpen={openLineThreads}
+            formatRequest={formatRequest}
+            enableMarkdownLivePreview={isMarkdownDocument}
           />
         </div>
 
@@ -967,10 +978,19 @@ function DocumentEditor({
               <Icon name="thread" />
               Open thread
             </button>
-            <div className="sep" />
-            <button type="button" title="Bold"><b>B</b></button>
-            <button type="button" title="Italic"><i>I</i></button>
-            <button type="button" title="Code"><span className="mono">{"{ }"}</span></button>
+            {isMarkdownDocument ? (
+              <>
+                <div className="sep" />
+                <button type="button" title="Heading 1" onClick={() => requestFormat("heading1")}>H1</button>
+                <button type="button" title="Heading 2" onClick={() => requestFormat("heading2")}>H2</button>
+                <button type="button" title="Bold" onClick={() => requestFormat("bold")}><b>B</b></button>
+                <button type="button" title="Italic" onClick={() => requestFormat("italic")}><i>I</i></button>
+                <button type="button" title="Code" onClick={() => requestFormat("code")}><span className="mono">{"{ }"}</span></button>
+                <button type="button" title="Link" onClick={() => requestFormat("link")}>Link</button>
+                <button type="button" title="Quote" onClick={() => requestFormat("quote")}>Quote</button>
+                <button type="button" title="Bulleted list" onClick={() => requestFormat("bulletList")}>List</button>
+              </>
+            ) : null}
           </div>
         ) : null}
 
