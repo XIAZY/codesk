@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/reearth/ygo/crdt"
+	crdt "notty/internal/ycrdt"
 )
 
 const postgresCheckpointInterval = 100

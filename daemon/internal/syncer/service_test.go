@@ -20,7 +20,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/gorilla/websocket"
-	"github.com/reearth/ygo/crdt"
+	crdt "notty/internal/ycrdt"
 	"notty/internal/yproto"
 )
 
@@ -2280,9 +2280,10 @@ func updateDocText(t *testing.T, doc *crdt.Doc, content string, origin any) {
 	t.Helper()
 	text := doc.GetText("content")
 	current := text.ToString()
+	currentLength := text.Len()
 	doc.Transact(func(txn *crdt.Transaction) {
 		if current != "" {
-			text.Delete(txn, 0, len(current))
+			text.Delete(txn, 0, currentLength)
 		}
 		if content != "" {
 			text.Insert(txn, 0, content, nil)

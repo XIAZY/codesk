@@ -15,7 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
-	"github.com/reearth/ygo/crdt"
+	crdt "notty/internal/ycrdt"
 )
 
 var ErrNotFound = errors.New("not found")
@@ -361,14 +361,10 @@ func (s *Store) EncodeDocumentSyncUpdates(documentID string, stateVector []byte)
 		return nil, nil, err
 	}
 	metadata.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
-	var clientState crdt.StateVector
-	if len(stateVector) > 0 {
-		clientState, err = crdt.DecodeStateVectorV1(stateVector)
-		if err != nil {
-			return nil, nil, err
-		}
+	update, err := doc.EncodeStateAsUpdateV1(stateVector)
+	if err != nil {
+		return nil, nil, err
 	}
-	update := crdt.EncodeStateAsUpdateV1(doc, clientState)
 	if len(update) == 0 {
 		return metadata, nil, nil
 	}
@@ -1715,6 +1711,7 @@ func (s *Store) ReplaceDocumentText(documentID string, nextText string, meta Ope
 	}
 	currentText := doc.GetText("content").ToString()
 	text := doc.GetText("content")
+	currentLength := text.Len()
 
 	var update []byte
 	unsubscribe := doc.OnUpdate(func(nextUpdate []byte, origin any) {
@@ -1724,7 +1721,7 @@ func (s *Store) ReplaceDocumentText(documentID string, nextText string, meta Ope
 	})
 	doc.Transact(func(txn *crdt.Transaction) {
 		if len(currentText) > 0 {
-			text.Delete(txn, 0, len(currentText))
+			text.Delete(txn, 0, currentLength)
 		}
 		if nextText != "" {
 			text.Insert(txn, 0, nextText, nil)

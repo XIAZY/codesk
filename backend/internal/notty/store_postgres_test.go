@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
-	"github.com/reearth/ygo/crdt"
+	crdt "notty/internal/ycrdt"
 	"notty/internal/yproto"
 )
 
@@ -212,7 +212,7 @@ func TestPostgresDocumentUpdateHotPathKeepsHeadSnapshotless(t *testing.T) {
 	text := peer.GetText("content")
 	for _, value := range []string{"a", "b"} {
 		update := captureDocUpdate(t, peer, "peer", func(txn *crdt.Transaction) {
-			text.Insert(txn, text.Len(), value, nil)
+			text.Insert(txn, text.LenInTxn(txn), value, nil)
 		})
 		if _, err := store.ApplyCRDTUpdate(documentID, update, OperationMeta{
 			ActorID:   "peer",
@@ -313,7 +313,7 @@ func TestPostgresCheckpointStateVectorSyncsOnlyTailAfterReload(t *testing.T) {
 	text := peer.GetText("content")
 	for _, value := range []string{"1\n", "2\n", "3\n"} {
 		update := captureDocUpdate(t, peer, "peer", func(txn *crdt.Transaction) {
-			text.Insert(txn, text.Len(), value, nil)
+			text.Insert(txn, text.LenInTxn(txn), value, nil)
 		})
 		if _, err := store.ApplyCRDTUpdate(documentID, update, OperationMeta{
 			ActorID:   "peer",
@@ -406,7 +406,7 @@ func TestPostgresLoadRegeneratesMissingCheckpointBeforeSync(t *testing.T) {
 	text := peer.GetText("content")
 	for _, value := range []string{"1\n", "2\n", "3\n"} {
 		update := captureDocUpdate(t, peer, "peer", func(txn *crdt.Transaction) {
-			text.Insert(txn, text.Len(), value, nil)
+			text.Insert(txn, text.LenInTxn(txn), value, nil)
 		})
 		if _, err := store.ApplyCRDTUpdate(documentID, update, OperationMeta{
 			ActorID:   "peer",
@@ -497,7 +497,7 @@ func TestPostgresDocumentAtHandleTextDoesNotCreateMentionEvent(t *testing.T) {
 	peer := syncDocumentToDocForTest(t, store, documentID, 77)
 	text := peer.GetText("content")
 	update := captureDocUpdate(t, peer, "peer", func(txn *crdt.Transaction) {
-		text.Insert(txn, text.Len(), "Please review @codex-agent.\n", nil)
+		text.Insert(txn, text.LenInTxn(txn), "Please review @codex-agent.\n", nil)
 	})
 	if _, err := store.ApplyCRDTUpdate(documentID, update, OperationMeta{
 		ActorID:   "peer",
@@ -711,7 +711,7 @@ func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testin
 
 	clientDoc := crdt.New()
 	conn := &DocumentConn{send: make(chan []byte, 128)}
-	if err := server.handleDocumentProtocolMessage(server.rooms.ForDocument(documentID), conn, documentID, yproto.BuildSyncStep1(clientDoc), OperationMeta{
+	if err := server.handleDocumentProtocolMessage(server.rooms.ForDocument(documentID), conn, documentID, buildSyncStep1ForTest(clientDoc), OperationMeta{
 		ActorID:   "client",
 		ActorType: "human",
 		Source:    "test",
@@ -775,7 +775,7 @@ func TestPostgresApplyCRDTUpdateCreatesPeriodicCheckpointFromHistory(t *testing.
 		line := strconv.Itoa(index) + "\n"
 		expected.WriteString(line)
 		update := captureDocUpdate(t, peer, "peer", func(txn *crdt.Transaction) {
-			text.Insert(txn, text.Len(), line, nil)
+			text.Insert(txn, text.LenInTxn(txn), line, nil)
 		})
 		if _, err := store.ApplyCRDTUpdate(documentID, update, OperationMeta{
 			ActorID:   "peer",
@@ -854,7 +854,7 @@ func TestPostgresApplyCRDTUpdatePersistsWithoutWorkspaceSnapshot(t *testing.T) {
 		update = append([]byte(nil), next...)
 	})
 	frontendDoc.Transact(func(txn *crdt.Transaction) {
-		text.Insert(txn, text.Len(), "more\n", nil)
+		text.Insert(txn, text.LenInTxn(txn), "more\n", nil)
 	}, "browser")
 	unsubscribe()
 	if len(update) == 0 {

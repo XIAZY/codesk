@@ -22,7 +22,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/gorilla/websocket"
-	"github.com/reearth/ygo/crdt"
+	crdt "notty/internal/ycrdt"
 	"notty/internal/yproto"
 )
 
@@ -757,11 +757,19 @@ func handleRemoteSyncMessage(reader *bytes.Reader, tracked *trackedFile, origin 
 		unlockDoc := tracked.lockDoc()
 		defer unlockDoc()
 		if tracked.Doc == nil {
-			reply, err := yproto.BuildSyncStep2(crdt.New(), data)
-			return reply, false, err
+			doc := crdt.New()
+			defer doc.Close()
+			update, err := doc.EncodeStateAsUpdateV1(data)
+			if err != nil {
+				return nil, false, err
+			}
+			return yproto.BuildSyncStep2FromUpdate(update), false, nil
 		}
-		reply, err := yproto.BuildSyncStep2(tracked.Doc, data)
-		return reply, false, err
+		update, err := tracked.Doc.EncodeStateAsUpdateV1(data)
+		if err != nil {
+			return nil, false, err
+		}
+		return yproto.BuildSyncStep2FromUpdate(update), false, nil
 	case yproto.SyncStep2, yproto.SyncUpdate:
 		if tracked.cache != nil {
 			appended, err := tracked.cache.appendPendingRemoteUpdate(tracked.DocumentID, tracked.DocumentPath, data)
@@ -1230,6 +1238,7 @@ func buildLocalUpdateFromBase(baseState []byte, baseContent, localContent string
 		return nil, nil, errProjectedBaseDoesNotMatchCRDTState
 	}
 	replace := computeReplace(baseContent, localContent)
+	currentLength := text.Len()
 	var update []byte
 	unsubscribe := doc.OnUpdate(func(next []byte, origin any) {
 		if origin == "daemon-local-reconcile" {
@@ -1237,7 +1246,7 @@ func buildLocalUpdateFromBase(baseState []byte, baseContent, localContent string
 		}
 	})
 	doc.Transact(func(txn *crdt.Transaction) {
-		start, deleteLength := clampReplace(text.Len(), replace)
+		start, deleteLength := clampReplace(currentLength, replace)
 		if deleteLength > 0 {
 			text.Delete(txn, start, deleteLength)
 		}
@@ -1771,7 +1780,7 @@ func (t *trackedFile) initialSyncState() (uint64, []byte) {
 	if t.Doc == nil {
 		return clientID, yproto.BuildSyncStep1FromStateVector(nil)
 	}
-	return clientID, yproto.BuildSyncStep1(t.Doc)
+	return clientID, yproto.BuildSyncStep1FromStateVector(crdt.EncodeStateVectorV1(t.Doc))
 }
 
 func nextAwarenessClientID() uint64 {

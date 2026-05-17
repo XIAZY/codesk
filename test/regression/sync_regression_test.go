@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/reearth/ygo/crdt"
+	crdt "notty/internal/ycrdt"
 	"notty/internal/yproto"
 )
 
@@ -193,14 +193,14 @@ func TestMultipleWebsocketRecipientsConverge(t *testing.T) {
 
 	writerText := writerDoc.GetText("content")
 	firstUpdate := captureDocUpdate(t, writerDoc, "first-insert", func(txn *crdt.Transaction) {
-		writerText.Insert(txn, writerText.Len(), "one\n", nil)
+		writerText.Insert(txn, writerText.LenInTxn(txn), "one\n", nil)
 	})
 	writeBinary(t, writerConn, yproto.BuildSyncUpdate(firstUpdate))
 	waitForWebsocketContent(t, viewerOneConn, viewerOneDoc, "start\none\n")
 	waitForWebsocketContent(t, viewerTwoConn, viewerTwoDoc, "start\none\n")
 
 	secondUpdate := captureDocUpdate(t, writerDoc, "second-insert", func(txn *crdt.Transaction) {
-		writerText.Insert(txn, writerText.Len(), "two\n", nil)
+		writerText.Insert(txn, writerText.LenInTxn(txn), "two\n", nil)
 	})
 	writeBinary(t, writerConn, yproto.BuildSyncUpdate(secondUpdate))
 	waitForWebsocketContent(t, viewerOneConn, viewerOneDoc, "start\none\ntwo\n")
@@ -232,10 +232,10 @@ func TestConcurrentWebsocketWritersConverge(t *testing.T) {
 	writerOneText := writerOneDoc.GetText("content")
 	writerTwoText := writerTwoDoc.GetText("content")
 	updateOne := captureDocUpdate(t, writerOneDoc, "writer-one", func(txn *crdt.Transaction) {
-		writerOneText.Insert(txn, writerOneText.Len(), "writer-one\n", nil)
+		writerOneText.Insert(txn, writerOneText.LenInTxn(txn), "writer-one\n", nil)
 	})
 	updateTwo := captureDocUpdate(t, writerTwoDoc, "writer-two", func(txn *crdt.Transaction) {
-		writerTwoText.Insert(txn, writerTwoText.Len(), "writer-two\n", nil)
+		writerTwoText.Insert(txn, writerTwoText.LenInTxn(txn), "writer-two\n", nil)
 	})
 
 	errs := make(chan error, 2)
@@ -277,7 +277,7 @@ func TestDocumentWebsocketBroadcastsInsertUpdate(t *testing.T) {
 
 	authorText := authorDoc.GetText("content")
 	insertUpdate := captureDocUpdate(t, authorDoc, "insert", func(txn *crdt.Transaction) {
-		authorText.Insert(txn, authorText.Len(), "cd", nil)
+		authorText.Insert(txn, authorText.LenInTxn(txn), "cd", nil)
 	})
 	writeBinary(t, authorConn, yproto.BuildSyncUpdate(insertUpdate))
 	waitForSyncUpdate(t, viewerConn, insertUpdate)
@@ -304,7 +304,7 @@ func TestDocumentWebsocketBroadcastsDeleteUpdate(t *testing.T) {
 
 	authorText := authorDoc.GetText("content")
 	deleteUpdate := captureDocUpdate(t, authorDoc, "delete", func(txn *crdt.Transaction) {
-		authorText.Delete(txn, authorText.Len()-1, 1)
+		authorText.Delete(txn, authorText.LenInTxn(txn)-1, 1)
 	})
 	writeBinary(t, authorConn, yproto.BuildSyncUpdate(deleteUpdate))
 
@@ -329,7 +329,7 @@ func TestLocalAndRemoteAppendMergeConvergesAcrossRecipients(t *testing.T) {
 	stack.appendLocalFile(t, path, "local\n")
 	remoteText := remoteDoc.GetText("content")
 	remoteUpdate := captureDocUpdate(t, remoteDoc, "remote-append", func(txn *crdt.Transaction) {
-		remoteText.Insert(txn, remoteText.Len(), "remote\n", nil)
+		remoteText.Insert(txn, remoteText.LenInTxn(txn), "remote\n", nil)
 	})
 	writeBinary(t, remoteConn, yproto.BuildSyncUpdate(remoteUpdate))
 
@@ -993,7 +993,7 @@ func writeBinary(t *testing.T, conn *websocket.Conn, payload []byte) {
 
 func syncDocumentClient(t *testing.T, conn *websocket.Conn, doc *crdt.Doc, want string) {
 	t.Helper()
-	writeBinary(t, conn, yproto.BuildSyncStep1(doc))
+	writeBinary(t, conn, yproto.BuildSyncStep1FromStateVector(crdt.EncodeStateVectorV1(doc)))
 	waitForWebsocketContent(t, conn, doc, want)
 }
 
@@ -1002,7 +1002,11 @@ func encodeRelativeAnchorForRegression(text *crdt.YText, index int) string {
 	if index >= text.Len() {
 		assoc = -1
 	}
-	return base64.StdEncoding.EncodeToString(crdt.EncodeRelativePosition(crdt.CreateRelativePositionFromIndex(text, index, assoc)))
+	anchor, err := text.EncodeRelativeAnchor(index, assoc)
+	if err != nil {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString(anchor)
 }
 
 func waitForSyncUpdate(t *testing.T, conn *websocket.Conn, want []byte) {

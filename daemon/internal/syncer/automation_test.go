@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/reearth/ygo/crdt"
+	crdt "notty/internal/ycrdt"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

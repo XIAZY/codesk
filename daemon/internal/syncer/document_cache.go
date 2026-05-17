@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/reearth/ygo/crdt"
+	crdt "notty/internal/ycrdt"
 )
 
 var errPendingUpdateLogHashMismatch = errors.New("cached pending update log hash mismatch")

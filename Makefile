@@ -1,6 +1,5 @@
 VERSION ?= dev
 DIST_DIR ?= dist/static/daemons
-PLATFORMS ?= linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 GO_BUILD_FLAGS ?= -trimpath
 GO_LDFLAGS ?= -s -w
 UNAME_S := $(shell uname -s | tr '[:upper:]' '[:lower:]')
@@ -8,10 +7,11 @@ UNAME_M := $(shell uname -m)
 HOST_OS := $(if $(filter darwin,$(UNAME_S)),darwin,$(if $(filter linux,$(UNAME_S)),linux,$(UNAME_S)))
 HOST_ARCH := $(if $(filter x86_64 amd64,$(UNAME_M)),amd64,$(if $(filter arm64 aarch64,$(UNAME_M)),arm64,$(UNAME_M)))
 HOST_PLATFORM := $(HOST_OS)/$(HOST_ARCH)
+PLATFORMS ?= $(HOST_PLATFORM)
 
 .PHONY: dev dev-down \
 	test tests test-unit test-go test-frontend test-postgres test-regression test-live \
-	build build-go build-frontend build-daemon build-static build-static-local build-backend-image \
+	build build-yffi build-go build-frontend build-daemon build-static build-static-local build-backend-image \
 	publish publish-backend publish-frontend publish-static \
 	deploy deploy-backend deploy-frontend deploy-static \
 	prod-config-check static-build static-build-local static-publish backend-image daemon-build daemon-release daemon-checksums daemon-clean daemon-installer-check daemon-uninstall-test
@@ -28,7 +28,7 @@ tests: test-unit test-postgres test-regression test-live
 
 test-unit: test-go test-frontend daemon-installer-check daemon-uninstall-test
 
-test-go:
+test-go: build-yffi
 	go test ./...
 
 test-frontend:
@@ -45,15 +45,18 @@ test-live:
 
 build: build-go build-frontend build-daemon build-static-local
 
-build-go:
+build-yffi:
+	scripts/build-yffi.sh
+
+build-go: build-yffi
 	go build ./...
 
 build-frontend:
 	cd frontend && if [ ! -d node_modules ]; then npm ci; fi && npm run build
 
-build-daemon:
+build-daemon: build-yffi
 	mkdir -p bin
-	CGO_ENABLED=0 go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS)" -o bin/notty-daemon ./daemon/cmd/daemon
+	CGO_ENABLED=1 go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS)" -o bin/notty-daemon ./daemon/cmd/daemon
 	CGO_ENABLED=0 go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS)" -o bin/notty-agent-tool ./daemon/cmd/agenttool
 
 daemon-build: build-daemon

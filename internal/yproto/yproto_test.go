@@ -3,10 +3,10 @@ package yproto
 import (
 	"testing"
 
-	"github.com/reearth/ygo/crdt"
+	crdt "notty/internal/ycrdt"
 )
 
-func TestReadSyncMessageAppliesIncrementalUpdate(t *testing.T) {
+func TestDecodeSyncMessageAppliesIncrementalUpdate(t *testing.T) {
 	source := crdt.New(crdt.WithClientID(1))
 	target := crdt.New(crdt.WithClientID(2))
 
@@ -28,15 +28,15 @@ func TestReadSyncMessageAppliesIncrementalUpdate(t *testing.T) {
 	if topLevel != MessageSync {
 		t.Fatalf("unexpected top-level message: %d", topLevel)
 	}
-	reply, changed, err := ReadSyncMessage(reader, target, "remote")
+	syncType, data, err := DecodeSyncMessage(reader)
 	if err != nil {
 		t.Fatalf("read sync message: %v", err)
 	}
-	if len(reply) != 0 {
-		t.Fatalf("expected no reply for sync update, got %d bytes", len(reply))
+	if syncType != SyncUpdate {
+		t.Fatalf("expected sync update, got %d", syncType)
 	}
-	if !changed {
-		t.Fatal("expected sync update to change target doc")
+	if err := crdt.ApplyUpdateV1(target, data, "remote"); err != nil {
+		t.Fatalf("apply sync update: %v", err)
 	}
 	if got := target.GetText("content").ToString(); got != "hello" {
 		t.Fatalf("unexpected target content: %q", got)
@@ -52,7 +52,7 @@ func TestDeleteUpdateAfterSyncOnlyDeletesTargetRange(t *testing.T) {
 
 	writer := crdt.New(crdt.WithClientID(2))
 	viewer := crdt.New(crdt.WithClientID(3))
-	initial := crdt.EncodeStateAsUpdateV1(server, nil)
+	initial := server.EncodeStateAsUpdate()
 	if err := crdt.ApplyUpdateV1(writer, initial, "initial"); err != nil {
 		t.Fatalf("sync writer: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestDeleteUpdateAfterSyncOnlyDeletesTargetRange(t *testing.T) {
 		}
 	})
 	writer.Transact(func(txn *crdt.Transaction) {
-		writerText.Delete(txn, writerText.Len()-1, 1)
+		writerText.Delete(txn, writerText.LenInTxn(txn)-1, 1)
 	}, "delete")
 	unsubscribe()
 

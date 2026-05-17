@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/reearth/ygo/crdt"
+	crdt "notty/internal/ycrdt"
 )
 
 func TestDocumentCacheMaterializesCachedStateWithoutBackendFetch(t *testing.T) {
@@ -61,7 +61,7 @@ func TestDocumentCacheMaterializesIndependentMutableDocs(t *testing.T) {
 	}
 	firstText := first.Doc.GetText("content")
 	first.Doc.Transact(func(txn *crdt.Transaction) {
-		firstText.Insert(txn, firstText.Len(), " local", nil)
+		firstText.Insert(txn, firstText.LenInTxn(txn), " local", nil)
 	}, "first")
 	if got := second.Doc.GetText("content").ToString(); got != "alpha" {
 		t.Fatalf("second materialized doc observed first doc mutation: %q", got)
@@ -238,6 +238,6 @@ func appendText(t *testing.T, doc *crdt.Doc, value string) {
 	t.Helper()
 	text := doc.GetText("content")
 	doc.Transact(func(txn *crdt.Transaction) {
-		text.Insert(txn, text.Len(), value, nil)
+		text.Insert(txn, text.LenInTxn(txn), value, nil)
 	}, "test")
 }

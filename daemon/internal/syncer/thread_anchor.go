@@ -10,7 +10,7 @@ import (
 	"strings"
 	"unicode/utf16"
 
-	"github.com/reearth/ygo/crdt"
+	crdt "notty/internal/ycrdt"
 )
 
 type resolvedThreadTarget struct {
@@ -442,7 +442,11 @@ func encodeRelativeAnchor(text *crdt.YText, index int) string {
 	if index >= text.Len() {
 		assoc = -1
 	}
-	return base64.StdEncoding.EncodeToString(crdt.EncodeRelativePosition(crdt.CreateRelativePositionFromIndex(text, index, assoc)))
+	anchor, err := text.EncodeRelativeAnchor(index, assoc)
+	if err != nil {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString(anchor)
 }
 
 func maxInt(left, right int) int {

@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"io"
-
-	"github.com/reearth/ygo/crdt"
 )
 
 const (
@@ -86,26 +84,9 @@ func decodeVarString(reader *bytes.Reader) (string, error) {
 	return string(value), nil
 }
 
-func BuildSyncStep1(doc *crdt.Doc) []byte {
-	return BuildSyncStep1FromStateVector(crdt.EncodeStateVectorV1(doc))
-}
-
 func BuildSyncStep1FromStateVector(stateVector []byte) []byte {
 	message := append(encodeVarUint(MessageSync), encodeVarUint(SyncStep1)...)
 	return append(message, encodeVarBytes(stateVector)...)
-}
-
-func BuildSyncStep2(doc *crdt.Doc, stateVector []byte) ([]byte, error) {
-	var sv crdt.StateVector
-	var err error
-	if len(stateVector) > 0 {
-		sv, err = crdt.DecodeStateVectorV1(stateVector)
-		if err != nil {
-			return nil, err
-		}
-	}
-	update := crdt.EncodeStateAsUpdateV1(doc, sv)
-	return BuildSyncStep2FromUpdate(update), nil
 }
 
 func BuildSyncStep2FromUpdate(update []byte) []byte {
@@ -138,25 +119,6 @@ func DecodeSyncMessage(reader *bytes.Reader) (uint64, []byte, error) {
 		return messageType, value, err
 	default:
 		return 0, nil, errors.New("unknown sync message type")
-	}
-}
-
-func ReadSyncMessage(reader *bytes.Reader, doc *crdt.Doc, origin any) ([]byte, bool, error) {
-	messageType, data, err := DecodeSyncMessage(reader)
-	if err != nil {
-		return nil, false, err
-	}
-	switch messageType {
-	case SyncStep1:
-		reply, err := BuildSyncStep2(doc, data)
-		return reply, false, err
-	case SyncStep2, SyncUpdate:
-		if err := crdt.ApplyUpdateV1(doc, data, origin); err != nil {
-			return nil, false, err
-		}
-		return nil, true, nil
-	default:
-		return nil, false, errors.New("unknown sync message type")
 	}
 }
 

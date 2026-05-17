@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/reearth/ygo/crdt"
+	crdt "notty/internal/ycrdt"
 )
 
 func containsString(items []string, target string) bool {

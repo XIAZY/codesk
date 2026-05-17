@@ -3,7 +3,7 @@ set -eu
 
 version="${1:-${VERSION:-dev}}"
 dist_dir="${2:-${DIST_DIR:-dist/static/daemons}}"
-platforms="${PLATFORMS:-linux/amd64 linux/arm64 darwin/amd64 darwin/arm64}"
+platforms="${PLATFORMS:-}"
 
 root_dir="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
 case "$dist_dir" in
@@ -17,6 +17,21 @@ tmp_dir="${TMPDIR:-/tmp}/notty-daemon-release-$$"
 manifest="$out_dir/manifest.json"
 installer="$root_dir/deploy/daemons/install.sh"
 uninstaller="$root_dir/deploy/daemons/uninstall.sh"
+
+host_os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+case "$host_os" in
+	darwin|linux) ;;
+	*) host_os="$(uname -s)" ;;
+esac
+host_arch="$(uname -m)"
+case "$host_arch" in
+	x86_64|amd64) host_arch="amd64" ;;
+	arm64|aarch64) host_arch="arm64" ;;
+esac
+host_platform="$host_os/$host_arch"
+if [ -z "$platforms" ]; then
+	platforms="$host_platform"
+fi
 
 checksum() {
 	if command -v sha256sum >/dev/null 2>&1; then
@@ -49,6 +64,10 @@ first=1
 for platform in $platforms; do
 	os="${platform%/*}"
 	arch="${platform#*/}"
+	if [ "$platform" != "$host_platform" ]; then
+		printf 'build-daemon-release: %s requires cgo/Rust cross-compilation; this script currently supports host platform %s only\n' "$platform" "$host_platform" >&2
+		exit 1
+	fi
 	name="notty-daemon_${version}_${os}_${arch}"
 	package_dir="$tmp_dir/$name"
 	archive="$out_dir/$name.tar.gz"
@@ -56,7 +75,8 @@ for platform in $platforms; do
 	mkdir -p "$package_dir/bin"
 	(
 		cd "$root_dir"
-		CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "$package_dir/bin/notty-daemon" ./daemon/cmd/daemon
+		"$root_dir/scripts/build-yffi.sh"
+		CGO_ENABLED=1 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "$package_dir/bin/notty-daemon" ./daemon/cmd/daemon
 		CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "$package_dir/bin/notty-agent-tool" ./daemon/cmd/agenttool
 	)
 

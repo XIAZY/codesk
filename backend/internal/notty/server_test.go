@@ -3,6 +3,7 @@ package notty
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -10,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/reearth/ygo/crdt"
+	crdt "notty/internal/ycrdt"
 	"notty/internal/yproto"
 )
 
@@ -99,7 +100,7 @@ func TestDocumentProtocolSyncReturnsMissingCRDTUpdate(t *testing.T) {
 	serverPeer := syncDocumentToDocForTest(t, store, documentID, 99)
 	text := serverPeer.GetText("content")
 	update := captureDocUpdate(t, serverPeer, "server-peer", func(txn *crdt.Transaction) {
-		text.Insert(txn, text.Len(), " beta", nil)
+		text.Insert(txn, text.LenInTxn(txn), " beta", nil)
 	})
 	if _, err := store.ApplyCRDTUpdate(documentID, update, OperationMeta{ActorID: "peer", ActorType: "agent", Source: "test"}); err != nil {
 		t.Fatalf("apply server peer update: %v", err)
@@ -117,7 +118,7 @@ func TestDocumentProtocolUpdatePublishesMetadataOnlyWorkspaceEvent(t *testing.T)
 	peerDoc := syncDocumentToDocForTest(t, store, documentID, 77)
 	text := peerDoc.GetText("content")
 	update := captureDocUpdate(t, peerDoc, "browser", func(txn *crdt.Transaction) {
-		text.Insert(txn, text.Len(), " beta", nil)
+		text.Insert(txn, text.LenInTxn(txn), " beta", nil)
 	})
 
 	events, unsubscribe := server.subscribers.Subscribe()
@@ -329,7 +330,7 @@ func TestHandleDocumentProtocolMessageBroadcastsSyncUpdateToPeers(t *testing.T) 
 		}
 	})
 	peer.Transact(func(txn *crdt.Transaction) {
-		text.Insert(txn, text.Len(), " bravo", nil)
+		text.Insert(txn, text.LenInTxn(txn), " bravo", nil)
 	}, "peer")
 	unsubscribe()
 	if len(update) == 0 {
@@ -397,7 +398,7 @@ func TestHandleDocumentProtocolMessageBroadcastsDeleteOnlySyncUpdate(t *testing.
 	defer room.Remove(peerConn)
 
 	insertUpdate := captureDocUpdate(t, peer, "peer-insert", func(txn *crdt.Transaction) {
-		text.Insert(txn, text.Len(), "d", nil)
+		text.Insert(txn, text.LenInTxn(txn), "d", nil)
 	})
 	if err := server.handleDocumentProtocolMessage(room, source, documentID, yproto.BuildSyncUpdate(insertUpdate), OperationMeta{
 		ActorID:   "peer",
@@ -413,7 +414,7 @@ func TestHandleDocumentProtocolMessageBroadcastsDeleteOnlySyncUpdate(t *testing.
 	}
 
 	deleteUpdate := captureDocUpdate(t, peer, "peer-delete", func(txn *crdt.Transaction) {
-		text.Delete(txn, text.Len()-1, 1)
+		text.Delete(txn, text.LenInTxn(txn)-1, 1)
 	})
 	if err := server.handleDocumentProtocolMessage(room, source, documentID, yproto.BuildSyncUpdate(deleteUpdate), OperationMeta{
 		ActorID:   "peer",
@@ -456,7 +457,7 @@ func TestHandleDocumentProtocolMessageRespondsToSyncStep1(t *testing.T) {
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "alpha bravo")
 
 	source := &DocumentConn{send: make(chan []byte, 2)}
-	err := server.handleDocumentProtocolMessage(server.rooms.ForDocument(documentID), source, documentID, yproto.BuildSyncStep1(crdt.New(crdt.WithClientID(77))), OperationMeta{
+	err := server.handleDocumentProtocolMessage(server.rooms.ForDocument(documentID), source, documentID, buildSyncStep1ForTest(crdt.New(crdt.WithClientID(77))), OperationMeta{
 		ActorID:   "peer",
 		ActorType: "human",
 		Source:    "test",
@@ -495,7 +496,7 @@ func TestHandleDocumentProtocolMessageIgnoresClosedSessionDuringSyncStep1(t *tes
 			t.Fatalf("closed websocket session must not panic while sync replies are being built: %v", recovered)
 		}
 	}()
-	if err := server.handleDocumentProtocolMessage(room, source, documentID, yproto.BuildSyncStep1(crdt.New(crdt.WithClientID(77))), OperationMeta{
+	if err := server.handleDocumentProtocolMessage(room, source, documentID, buildSyncStep1ForTest(crdt.New(crdt.WithClientID(77))), OperationMeta{
 		ActorID:   "peer",
 		ActorType: "human",
 		Source:    "test",
@@ -513,7 +514,7 @@ func TestHandleDocumentProtocolMessageReconnectMergesServerAndClientEdits(t *tes
 
 	serverText := serverPeerDoc.GetText("content")
 	serverUpdate := captureDocUpdate(t, serverPeerDoc, "server-peer", func(txn *crdt.Transaction) {
-		serverText.Insert(txn, serverText.Len(), " server", nil)
+		serverText.Insert(txn, serverText.LenInTxn(txn), " server", nil)
 	})
 	room := server.rooms.ForDocument(documentID)
 	serverPeer := &DocumentConn{send: make(chan []byte, 4)}
@@ -527,11 +528,11 @@ func TestHandleDocumentProtocolMessageReconnectMergesServerAndClientEdits(t *tes
 
 	clientText := clientDoc.GetText("content")
 	captureDocUpdate(t, clientDoc, "client-local", func(txn *crdt.Transaction) {
-		clientText.Insert(txn, clientText.Len(), " client", nil)
+		clientText.Insert(txn, clientText.LenInTxn(txn), " client", nil)
 	})
 
 	reconnected := &DocumentConn{send: make(chan []byte, 4)}
-	if err := server.handleDocumentProtocolMessage(room, reconnected, documentID, yproto.BuildSyncStep1(clientDoc), OperationMeta{
+	if err := server.handleDocumentProtocolMessage(room, reconnected, documentID, buildSyncStep1ForTest(clientDoc), OperationMeta{
 		ActorID:   "client",
 		ActorType: "human",
 		Source:    "test",
@@ -584,7 +585,7 @@ func TestHandleDocumentProtocolMessageConcurrentSyncAndUpdates(t *testing.T) {
 			conn := &DocumentConn{send: make(chan []byte, 1024)}
 			for i := 0; i < 40; i++ {
 				update := captureDocUpdate(t, peer, "writer", func(txn *crdt.Transaction) {
-					text.Insert(txn, text.Len(), "x", nil)
+					text.Insert(txn, text.LenInTxn(txn), "x", nil)
 				})
 				if err := server.handleDocumentProtocolMessage(room, conn, documentID, yproto.BuildSyncUpdate(update), OperationMeta{
 					ActorID:   "writer",
@@ -605,7 +606,7 @@ func TestHandleDocumentProtocolMessageConcurrentSyncAndUpdates(t *testing.T) {
 			peer := crdt.New(crdt.WithClientID(crdt.ClientID(700 + worker)))
 			conn := &DocumentConn{send: make(chan []byte, 1024)}
 			for i := 0; i < 40; i++ {
-				if err := server.handleDocumentProtocolMessage(room, conn, documentID, yproto.BuildSyncStep1(peer), OperationMeta{
+				if err := server.handleDocumentProtocolMessage(room, conn, documentID, buildSyncStep1ForTest(peer), OperationMeta{
 					ActorID:   "syncer",
 					ActorType: "human",
 					Source:    "test",
@@ -639,7 +640,7 @@ func TestHandleDocumentProtocolMessageDoesNotPublishDocumentMentionMetadataChang
 	frontendDoc := syncDocumentToDocForTest(t, store, documentID, 303)
 	text := frontendDoc.GetText("content")
 	update := captureDocUpdate(t, frontendDoc, "browser", func(txn *crdt.Transaction) {
-		text.Insert(txn, text.Len(), "Ping @codex-agent.\n", nil)
+		text.Insert(txn, text.LenInTxn(txn), "Ping @codex-agent.\n", nil)
 	})
 
 	events, unsubscribe := server.subscribers.Subscribe()
@@ -682,16 +683,42 @@ func applySyncPayloadToDoc(t *testing.T, doc *crdt.Doc, payload []byte, origin a
 	if messageType != yproto.MessageSync {
 		t.Fatalf("expected sync payload, got message type %d", messageType)
 	}
-	reply, _, err := yproto.ReadSyncMessage(reader, doc, origin)
+	reply, _, err := readSyncMessageForTest(reader, doc, origin)
 	if err != nil {
 		t.Fatalf("apply sync payload: %v", err)
 	}
 	return reply
 }
 
+func buildSyncStep1ForTest(doc *crdt.Doc) []byte {
+	return yproto.BuildSyncStep1FromStateVector(crdt.EncodeStateVectorV1(doc))
+}
+
+func readSyncMessageForTest(reader *bytes.Reader, doc *crdt.Doc, origin any) ([]byte, bool, error) {
+	syncType, data, err := yproto.DecodeSyncMessage(reader)
+	if err != nil {
+		return nil, false, err
+	}
+	switch syncType {
+	case yproto.SyncStep1:
+		update, err := doc.EncodeStateAsUpdateV1(data)
+		if err != nil {
+			return nil, false, err
+		}
+		return yproto.BuildSyncStep2FromUpdate(update), false, nil
+	case yproto.SyncStep2, yproto.SyncUpdate:
+		if err := crdt.ApplyUpdateV1(doc, data, origin); err != nil {
+			return nil, false, err
+		}
+		return nil, true, nil
+	default:
+		return nil, false, errors.New("unknown sync message type")
+	}
+}
+
 func syncClientFromServer(t *testing.T, server *Server, room *DocumentRoom, conn *DocumentConn, documentID string, doc *crdt.Doc) {
 	t.Helper()
-	if err := server.handleDocumentProtocolMessage(room, conn, documentID, yproto.BuildSyncStep1(doc), OperationMeta{
+	if err := server.handleDocumentProtocolMessage(room, conn, documentID, buildSyncStep1ForTest(doc), OperationMeta{
 		ActorID:   "client",
 		ActorType: "human",
 		Source:    "test",
