@@ -8,7 +8,6 @@ import (
 type Config struct {
 	Port             string
 	DatabaseURL      string
-	DataFile         string
 	MaxLiveEditBytes int
 	PprofAddr        string
 	JWTSecret        string
@@ -18,7 +17,6 @@ func LoadConfig() Config {
 	return Config{
 		Port:             getenv("NOTTY_PORT", "8080"),
 		DatabaseURL:      getenv("NOTTY_DATABASE_URL", ""),
-		DataFile:         getenv("NOTTY_DATA_FILE", "/data/state.json"),
 		MaxLiveEditBytes: getenvInt("NOTTY_MAX_LIVE_EDIT_BYTES", 1500),
 		PprofAddr:        getenv("NOTTY_PPROF_ADDR", ""),
 		JWTSecret:        getenv("NOTTY_JWT_SECRET", ""),

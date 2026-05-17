@@ -117,7 +117,7 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	defer reloaded.Close()
 
 	snapshot := reloaded.Snapshot()
-	if got := snapshot.Documents[documentID]; got == nil || got.Path != "docs/spec.md" || got.Content != "" || got.CRDTState != "" || got.Doc != nil {
+	if got := snapshot.Documents[documentID]; got == nil || got.Path != "docs/spec.md" {
 		t.Fatalf("expected document after reload, got %#v", got)
 	}
 	if got := snapshot.Users[user.ID]; got == nil || got.Handle != "adaproof" {
@@ -209,13 +209,6 @@ func TestPostgresDocumentUpdateHotPathKeepsHeadSnapshotless(t *testing.T) {
 	}
 
 	peer := syncDocumentToDocForTest(t, store, documentID, 77)
-	liveAfterBootstrap, err := store.GetLiveDocument(documentID)
-	if err != nil {
-		t.Fatalf("get live document after bootstrap: %v", err)
-	}
-	if liveAfterBootstrap.Doc != nil || liveAfterBootstrap.Content != "" || liveAfterBootstrap.CRDTState != "" {
-		t.Fatalf("expected sync bootstrap to avoid retaining materialized document state, got %#v", liveAfterBootstrap)
-	}
 	text := peer.GetText("content")
 	for _, value := range []string{"a", "b"} {
 		update := captureDocUpdate(t, peer, "peer", func(txn *crdt.Transaction) {
@@ -247,9 +240,6 @@ func TestPostgresDocumentUpdateHotPathKeepsHeadSnapshotless(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get current document: %v", err)
 	}
-	if current.Content != "" || current.CRDTState != "" || current.Doc != nil {
-		t.Fatalf("expected in-memory document to stay metadata-only, got %#v", current)
-	}
 	if got, err := documentContentAtUpdatePostgres(db, "ws_notty", current, current.UpdateID); err != nil || got != "ab" {
 		t.Fatalf("expected reconstructable document state to include hot-path updates, got %q err=%v", got, err)
 	}
@@ -257,14 +247,6 @@ func TestPostgresDocumentUpdateHotPathKeepsHeadSnapshotless(t *testing.T) {
 	if got := freshClient.GetText("content").ToString(); got != "ab" {
 		t.Fatalf("expected fresh sync to read hot-path updates instead of stale in-memory doc, got %q", got)
 	}
-	liveAfterFreshSync, err := store.GetLiveDocument(documentID)
-	if err != nil {
-		t.Fatalf("get live document after fresh sync: %v", err)
-	}
-	if liveAfterFreshSync.Doc != nil || liveAfterFreshSync.Content != "" || liveAfterFreshSync.CRDTState != "" {
-		t.Fatalf("expected fresh sync to avoid retaining materialized document state, got %#v", liveAfterFreshSync)
-	}
-
 	if _, err := db.Exec(`DELETE FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2`, "ws_notty", documentID); err != nil {
 		t.Fatalf("delete checkpoints: %v", err)
 	}
@@ -277,22 +259,12 @@ func TestPostgresDocumentUpdateHotPathKeepsHeadSnapshotless(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get reloaded document: %v", err)
 	}
-	if reloadedDocument.Content != "" || reloadedDocument.CRDTState != "" || reloadedDocument.Doc != nil {
-		t.Fatalf("expected reload to keep metadata-only document, got %#v", reloadedDocument)
-	}
 	if got, err := documentContentAtUpdatePostgres(db, "ws_notty", reloadedDocument, reloadedDocument.UpdateID); err != nil || got != "ab" {
 		t.Fatalf("expected reload to replay update log without a head snapshot on demand, got %q err=%v", got, err)
 	}
 	noCheckpointClient := syncDocumentToDocForTest(t, reloaded, documentID, 89)
 	if got := noCheckpointClient.GetText("content").ToString(); got != "ab" {
 		t.Fatalf("expected no-checkpoint sync to stream update log without materialization, got %q", got)
-	}
-	liveAfterNoCheckpointSync, err := reloaded.GetLiveDocument(documentID)
-	if err != nil {
-		t.Fatalf("get live document after no-checkpoint sync: %v", err)
-	}
-	if liveAfterNoCheckpointSync.Doc != nil || liveAfterNoCheckpointSync.Content != "" || liveAfterNoCheckpointSync.CRDTState != "" {
-		t.Fatalf("expected no-checkpoint sync to avoid retaining materialized document state, got %#v", liveAfterNoCheckpointSync)
 	}
 }
 
@@ -367,10 +339,6 @@ func TestPostgresCheckpointStateVectorSyncsOnlyTailAfterReload(t *testing.T) {
 	if reloadedDocument.StateVector != checkpointStateVector {
 		t.Fatalf("expected reload to advertise checkpoint state vector %q, got %q", checkpointStateVector, reloadedDocument.StateVector)
 	}
-	if reloadedDocument.Content != "" || reloadedDocument.CRDTState != "" || reloadedDocument.Doc != nil {
-		t.Fatalf("expected reload to keep metadata-only document, got %#v", reloadedDocument)
-	}
-
 	checkpointStateVectorBytes, err := base64.StdEncoding.DecodeString(checkpointStateVector)
 	if err != nil {
 		t.Fatalf("decode checkpoint state vector: %v", err)
@@ -379,8 +347,8 @@ func TestPostgresCheckpointStateVectorSyncsOnlyTailAfterReload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode tail sync updates: %v", err)
 	}
-	if len(tailUpdates) != 3 {
-		t.Fatalf("expected only three tail updates after matching checkpoint vector, got %d", len(tailUpdates))
+	if len(tailUpdates) != 1 {
+		t.Fatalf("expected one merged diff update after matching checkpoint vector, got %d", len(tailUpdates))
 	}
 
 	checkpointBytes, err := base64.StdEncoding.DecodeString(checkpointState)
@@ -391,10 +359,8 @@ func TestPostgresCheckpointStateVectorSyncsOnlyTailAfterReload(t *testing.T) {
 	if err := crdt.ApplyUpdateV1(clientDoc, checkpointBytes, "checkpoint"); err != nil {
 		t.Fatalf("apply checkpoint: %v", err)
 	}
-	for _, update := range tailUpdates {
-		if err := crdt.ApplyUpdateV1(clientDoc, update, "tail"); err != nil {
-			t.Fatalf("apply tail update: %v", err)
-		}
+	if err := crdt.ApplyUpdateV1(clientDoc, tailUpdates[0], "tail"); err != nil {
+		t.Fatalf("apply tail update: %v", err)
 	}
 	if got := clientDoc.GetText("content").ToString(); got != "1\n2\n3\n" {
 		t.Fatalf("expected checkpoint plus tail to reconstruct document, got %q", got)
@@ -404,8 +370,15 @@ func TestPostgresCheckpointStateVectorSyncsOnlyTailAfterReload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode cold sync updates: %v", err)
 	}
-	if len(coldUpdates) != len(tailUpdates)+1 {
-		t.Fatalf("expected cold sync to send checkpoint plus tail, got cold=%d tail=%d", len(coldUpdates), len(tailUpdates))
+	if len(coldUpdates) != 1 {
+		t.Fatalf("expected cold sync to send one merged full-state update, got %d", len(coldUpdates))
+	}
+	coldDoc := crdt.New()
+	if err := crdt.ApplyUpdateV1(coldDoc, coldUpdates[0], "cold"); err != nil {
+		t.Fatalf("apply cold sync update: %v", err)
+	}
+	if got := coldDoc.GetText("content").ToString(); got != "1\n2\n3\n" {
+		t.Fatalf("expected cold sync update to reconstruct document, got %q", got)
 	}
 }
 
@@ -628,8 +601,8 @@ func TestPostgresDocumentUpdatesPersistWithoutWorkspaceSnapshot(t *testing.T) {
 	if len(update) == 0 {
 		t.Fatal("expected incremental document update bytes")
 	}
-	if updated.Content != "# after\n" {
-		t.Fatalf("unexpected updated content: %q", updated.Content)
+	if got, err := documentContentAtUpdatePostgres(db, "ws_notty", updated, updated.UpdateID); err != nil || got != "# after\n" {
+		t.Fatalf("unexpected reconstructed updated content: %q err=%v", got, err)
 	}
 
 	var headUpdateID int64
@@ -765,19 +738,8 @@ func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testin
 			if got := clientDoc.GetText("content").ToString(); got != headContent {
 				t.Fatalf("cold bootstrap content diverged: got %q want %q", got, headContent)
 			}
-			if len(syncTypes) != tailCount+2 {
-				t.Fatalf("expected checkpoint, %d tail updates, and server sync step1; got sync types %v", tailCount, syncTypes)
-			}
-			if syncTypes[0] != yproto.SyncStep2 {
-				t.Fatalf("expected checkpoint as sync step2, got sync types %v", syncTypes)
-			}
-			for index, syncType := range syncTypes[1 : len(syncTypes)-1] {
-				if syncType != yproto.SyncUpdate {
-					t.Fatalf("expected tail update %d as sync update, got sync types %v", index, syncTypes)
-				}
-			}
-			if syncTypes[len(syncTypes)-1] != yproto.SyncStep1 {
-				t.Fatalf("expected final server sync step1, got sync types %v", syncTypes)
+			if len(syncTypes) != 2 || syncTypes[0] != yproto.SyncStep2 || syncTypes[1] != yproto.SyncStep1 {
+				t.Fatalf("expected one merged sync step2 and final server sync step1; got sync types %v", syncTypes)
 			}
 			return
 		}
@@ -906,9 +868,6 @@ func TestPostgresApplyCRDTUpdatePersistsWithoutWorkspaceSnapshot(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("apply crdt update: %v", err)
-	}
-	if updated.Content != "" || updated.CRDTState != "" || updated.Doc != nil {
-		t.Fatalf("expected append-only update result to stay metadata-only, got %#v", updated)
 	}
 	if got, err := documentContentAtUpdatePostgres(db, "ws_notty", updated, updated.UpdateID); err != nil || got != "# before\nmore\n" {
 		t.Fatalf("unexpected reconstructed updated content: %q err=%v", got, err)
@@ -1088,7 +1047,7 @@ func TestPostgresDiffDocumentReconstructsAcrossCheckpointsAfterReload(t *testing
 		}
 		if index == 50 {
 			midVersion = updated.UpdateID
-			midContent = updated.Content
+			midContent = content
 		}
 	}
 	final, err := store.GetDocument(documentID)

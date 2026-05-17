@@ -1,13 +1,10 @@
 package notty
 
 import (
-	"bytes"
 	"database/sql"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -40,7 +37,7 @@ type Store struct {
 	mu            sync.RWMutex
 	state         WorkspaceState
 	db            *sql.DB
-	dataFile      string
+	databaseURL   string
 	workspaceID   string
 	workspaceName string
 
@@ -72,11 +69,11 @@ type principalRef struct {
 	Kind   string
 }
 
-func NewStore(dataFile string) (*Store, error) {
-	return NewStoreForWorkspace(dataFile, "ws_notty", "notty")
+func NewStore(databaseURL string) (*Store, error) {
+	return NewStoreForWorkspace(databaseURL, "ws_notty", "notty")
 }
 
-func NewStoreForWorkspace(dataFile string, workspaceID string, workspaceName string) (*Store, error) {
+func NewStoreForWorkspace(databaseURL string, workspaceID string, workspaceName string) (*Store, error) {
 	store := &Store{}
 	store.workspaceID = strings.TrimSpace(workspaceID)
 	if store.workspaceID == "" {
@@ -86,37 +83,33 @@ func NewStoreForWorkspace(dataFile string, workspaceID string, workspaceName str
 	if store.workspaceName == "" {
 		store.workspaceName = store.workspaceID
 	}
-	if isPostgresDSN(dataFile) {
-		db, err := sql.Open("pgx", dataFile)
-		if err != nil {
-			return nil, err
-		}
-		if err := db.Ping(); err != nil {
-			_ = db.Close()
-			return nil, err
-		}
-		if err := initPostgresSchema(db); err != nil {
-			_ = db.Close()
-			return nil, err
-		}
-		store.db = db
-	} else {
-		store.dataFile = dataFile
+	databaseURL = strings.TrimSpace(databaseURL)
+	if !isPostgresDSN(databaseURL) {
+		return nil, fmt.Errorf("Postgres database URL is required")
 	}
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := initPostgresSchema(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	store.db = db
+	store.databaseURL = databaseURL
 	if err := store.load(); err != nil {
-		if store.db != nil {
-			_ = store.db.Close()
-		}
+		_ = store.db.Close()
 		return nil, err
 	}
 	return store, nil
 }
 
 func (s *Store) Close() error {
-	if s.db != nil {
-		return s.db.Close()
-	}
-	return nil
+	return s.db.Close()
 }
 
 func (s *Store) Reload() error {
@@ -127,47 +120,11 @@ func (s *Store) load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.db != nil {
-		s.state = seedWorkspaceFor(s.workspaceID, s.workspaceName)
-		if err := s.loadNormalizedPostgresLocked(); err != nil {
-			return err
-		}
-		s.ensureMaps()
-		needsPersist := false
-		if s.refreshAgentSystemPromptsLocked() {
-			needsPersist = true
-		}
-		s.refreshThreadParticipantsLocked()
-		if s.reconcileThreadMentionEventsLocked() {
-			needsPersist = true
-		}
-		if needsPersist {
-			return s.persistLocked()
-		}
-		return nil
-	}
-
-	if _, err := os.Stat(s.dataFile); errors.Is(err, os.ErrNotExist) {
-		s.state = seedWorkspaceFor(s.workspaceID, s.workspaceName)
-		return s.persistLocked()
-	}
-
-	bytes, err := os.ReadFile(s.dataFile)
-	if err != nil {
-		return err
-	}
-	if err := json.Unmarshal(bytes, &s.state); err != nil {
+	s.state = seedWorkspaceFor(s.workspaceID, s.workspaceName)
+	if err := s.loadNormalizedPostgresLocked(); err != nil {
 		return err
 	}
 	s.ensureMaps()
-	for _, document := range s.state.Documents {
-		doc, err := decodeCRDTState(document.CRDTState, document.ClientIDSeed)
-		if err != nil {
-			return err
-		}
-		document.Doc = doc
-		document.SyncDerivedFields()
-	}
 	needsPersist := false
 	if s.refreshAgentSystemPromptsLocked() {
 		needsPersist = true
@@ -298,7 +255,7 @@ func seedWorkspaceFor(workspaceID string, workspaceName string) WorkspaceState {
 	}
 }
 
-func newSeedDocument(id string, clientID uint64, path string, title string, content string, now time.Time) *Document {
+func newSeedDocument(id string, clientID uint64, path string, title string, content string, now time.Time) (*Document, []byte) {
 	doc := crdt.New(crdt.WithClientID(crdt.ClientID(clientID)))
 	text := doc.GetText("content")
 	doc.Transact(func(txn *crdt.Transaction) {
@@ -310,25 +267,9 @@ func newSeedDocument(id string, clientID uint64, path string, title string, cont
 		Title:        title,
 		UpdatedAt:    now,
 		ClientIDSeed: clientID,
-		Doc:          doc,
 	}
-	document.SyncDerivedFields()
-	return document
-}
-
-func decodeCRDTState(encoded string, clientIDSeed uint64) (*crdt.Doc, error) {
-	doc := crdt.New(crdt.WithClientID(crdt.ClientID(clientIDSeed)))
-	if encoded == "" {
-		return doc, nil
-	}
-	update, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return nil, err
-	}
-	if err := crdt.ApplyUpdateV1(doc, update, "restore"); err != nil {
-		return nil, err
-	}
-	return doc, nil
+	document.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
+	return document, doc.EncodeStateAsUpdate()
 }
 
 func (s *Store) Snapshot() WorkspaceState {
@@ -348,10 +289,7 @@ func (s *Store) GetDocument(id string) (*Document, error) {
 	documentLock.RLock()
 	s.mu.Unlock()
 	defer documentLock.RUnlock()
-	if s.db != nil {
-		return cloneDocument(document), nil
-	}
-	return cloneDocumentWithCRDTState(document), nil
+	return cloneDocument(document), nil
 }
 
 func (s *Store) ListDocuments() []*Document {
@@ -372,10 +310,7 @@ func (s *Store) GetDocumentByPath(path string) (*Document, error) {
 			documentLock.RLock()
 			s.mu.Unlock()
 			defer documentLock.RUnlock()
-			if s.db != nil {
-				return cloneDocument(document), nil
-			}
-			return cloneDocumentWithCRDTState(document), nil
+			return cloneDocument(document), nil
 		}
 	}
 	s.mu.Unlock()
@@ -404,17 +339,7 @@ func (s *Store) HasDocument(id string) bool {
 	return ok
 }
 
-func (s *Store) GetLiveDocument(id string) (*Document, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	document, ok := s.state.Documents[id]
-	if !ok {
-		return nil, ErrNotFound
-	}
-	return document, nil
-}
-
-func (s *Store) EncodeDocumentUpdate(documentID string, stateVector []byte) (*DocumentMetadata, []byte, error) {
+func (s *Store) EncodeDocumentSyncUpdates(documentID string, stateVector []byte) (*DocumentMetadata, [][]byte, error) {
 	s.mu.Lock()
 	document, ok := s.state.Documents[documentID]
 	if !ok {
@@ -423,117 +348,31 @@ func (s *Store) EncodeDocumentUpdate(documentID string, stateVector []byte) (*Do
 	}
 	documentLock := s.documentLockLocked(document.ID)
 	documentLock.RLock()
-	s.mu.Unlock()
-	defer documentLock.RUnlock()
-	var decoded crdt.StateVector
-	var err error
-	if len(stateVector) > 0 {
-		decoded, err = crdt.DecodeStateVectorV1(stateVector)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-	doc := document.Doc
-	metadata := documentMetadata(document)
-	if s.db != nil && document.Doc == nil {
-		doc, err = s.restoreDocumentDocPostgresLocked(document)
-		if err != nil {
-			return nil, nil, err
-		}
-		metadata.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
-	}
-	if doc == nil {
-		return nil, nil, errors.New("document CRDT state is unavailable")
-	}
-	update := crdt.EncodeStateAsUpdateV1(doc, decoded)
-	return metadata, update, nil
-}
-
-func (s *Store) EncodeDocumentSyncUpdates(documentID string, stateVector []byte) (*DocumentMetadata, [][]byte, error) {
-	document, updates, optimized, err := s.encodeDocumentCheckpointSyncUpdates(documentID, stateVector)
-	if err != nil {
-		return nil, nil, err
-	}
-	if optimized {
-		return document, updates, nil
-	}
-	document, update, err := s.EncodeDocumentUpdate(documentID, stateVector)
-	if err != nil {
-		return nil, nil, err
-	}
-	return document, [][]byte{update}, nil
-}
-
-func (s *Store) encodeDocumentCheckpointSyncUpdates(documentID string, stateVector []byte) (*DocumentMetadata, [][]byte, bool, error) {
-	if s.db == nil {
-		return nil, nil, false, nil
-	}
-	var decoded crdt.StateVector
-	if len(stateVector) > 0 {
-		var err error
-		decoded, err = crdt.DecodeStateVectorV1(stateVector)
-		if err != nil {
-			return nil, nil, false, err
-		}
-	}
-
-	s.mu.Lock()
-	document, ok := s.state.Documents[documentID]
-	if !ok {
-		s.mu.Unlock()
-		return nil, nil, false, ErrNotFound
-	}
-	documentLock := s.documentLockLocked(document.ID)
-	documentLock.Lock()
-	workspaceID := s.state.WorkspaceID
 	headUpdateID := document.UpdateID
 	metadata := documentMetadata(document)
-	if len(stateVector) > 0 && document.StateVector != "" && (s.db == nil || document.Doc != nil) {
-		currentStateVector, err := base64.StdEncoding.DecodeString(document.StateVector)
-		if err != nil {
-			s.mu.Unlock()
-			documentLock.Unlock()
-			return nil, nil, false, err
-		}
-		if bytes.Equal(stateVector, currentStateVector) {
-			s.mu.Unlock()
-			documentLock.Unlock()
-			return metadata, nil, true, nil
-		}
-	}
-	if document.Doc != nil {
-		update := crdt.EncodeStateAsUpdateV1(document.Doc, decoded)
-		s.mu.Unlock()
-		documentLock.Unlock()
-		return metadata, [][]byte{update}, true, nil
-	}
 	s.mu.Unlock()
-	defer documentLock.Unlock()
+	defer documentLock.RUnlock()
 
-	updates, ok, err := loadDocumentBootstrapUpdatesPostgres(s.db, workspaceID, documentID, headUpdateID, stateVector)
-	if err != nil {
-		return nil, nil, false, err
+	if headUpdateID <= 0 {
+		return metadata, nil, nil
 	}
-	if ok {
-		if len(stateVector) > 0 {
-			doc, err := s.restoreDocumentDocPostgresLocked(document)
-			if err != nil {
-				return nil, nil, false, err
-			}
-			metadata = documentMetadata(document)
-			metadata.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
-		}
-		return metadata, updates, true, nil
-	}
-
 	doc, err := s.restoreDocumentDocPostgresLocked(document)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, err
 	}
-	metadata = documentMetadata(document)
 	metadata.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
-	update := crdt.EncodeStateAsUpdateV1(doc, decoded)
-	return metadata, [][]byte{update}, true, nil
+	var clientState crdt.StateVector
+	if len(stateVector) > 0 {
+		clientState, err = crdt.DecodeStateVectorV1(stateVector)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	update := crdt.EncodeStateAsUpdateV1(doc, clientState)
+	if len(update) == 0 {
+		return metadata, nil, nil
+	}
+	return metadata, [][]byte{update}, nil
 }
 
 func (s *Store) GetThread(id string) (*Thread, error) {
@@ -780,30 +619,21 @@ func (s *Store) MarkDocumentViewed(agentID, documentID string, req MarkDocumentV
 		}
 	}
 	s.state.UpdatedAt = now
-	if s.db != nil {
-		workspaceID := s.state.WorkspaceID
-		cloned := cloneAgentDocumentView(view)
-		dirtyEvents := s.dirtyAgentEvents
-		s.mu.Unlock()
-		if err := upsertAgentDocumentViewPostgres(s.db, workspaceID, cloned); err != nil {
-			return nil, err
-		}
-		if dirtyEvents {
-			if err := completeDocumentInboxEventsPostgres(s.db, workspaceID, resolvedAgentID, document.ID, updateID, now); err != nil {
-				return nil, err
-			}
-			s.mu.Lock()
-			s.dirtyAgentEvents = false
-			s.mu.Unlock()
-		}
-		return cloned, nil
-	}
-	if err := s.persistLocked(); err != nil {
-		s.mu.Unlock()
+	workspaceID := s.state.WorkspaceID
+	cloned := cloneAgentDocumentView(view)
+	dirtyEvents := s.dirtyAgentEvents
+	s.mu.Unlock()
+	if err := upsertAgentDocumentViewPostgres(s.db, workspaceID, cloned); err != nil {
 		return nil, err
 	}
-	cloned := cloneAgentDocumentView(view)
-	s.mu.Unlock()
+	if dirtyEvents {
+		if err := completeDocumentInboxEventsPostgres(s.db, workspaceID, resolvedAgentID, document.ID, updateID, now); err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		s.dirtyAgentEvents = false
+		s.mu.Unlock()
+	}
 	return cloned, nil
 }
 
@@ -837,18 +667,6 @@ func (s *Store) DiffDocument(agentID, documentID, fromSpec, toSpec string) (*Doc
 	if fromUpdateID == toUpdateID {
 		s.mu.RUnlock()
 		return emptyDocumentDiff(document.ID, fromUpdateID, toUpdateID), nil
-	}
-	if s.db == nil {
-		defer s.mu.RUnlock()
-		fromContent, err := s.documentContentAtUpdateLocked(document, fromUpdateID)
-		if err != nil {
-			return nil, err
-		}
-		toContent, err := s.documentContentAtUpdateLocked(document, toUpdateID)
-		if err != nil {
-			return nil, err
-		}
-		return buildDocumentDiff(document.ID, fromUpdateID, toUpdateID, fromContent, toContent)
 	}
 	documentSnapshot := cloneDocument(document)
 	workspaceID := s.state.WorkspaceID
@@ -1025,10 +843,6 @@ func agentDocumentViewKey(agentID, documentID string) string {
 	return agentID + ":" + documentID
 }
 
-func documentCheckpointKey(documentID string, updateID int64) string {
-	return documentID + ":" + strconv.FormatInt(updateID, 10)
-}
-
 func cloneAgentDocumentView(view *AgentDocumentView) *AgentDocumentView {
 	if view == nil {
 		return nil
@@ -1060,46 +874,6 @@ func (s *Store) resolveDocumentVersionLocked(agentID string, document *Document,
 		return 0, fmt.Errorf("document version %d is newer than head %d", parsed, document.UpdateID)
 	}
 	return parsed, nil
-}
-
-func (s *Store) documentContentAtUpdateLocked(document *Document, updateID int64) (string, error) {
-	if document == nil {
-		return "", ErrNotFound
-	}
-	if updateID <= 0 {
-		return "", nil
-	}
-	if s.db != nil {
-		return s.documentContentAtUpdatePostgresLocked(document, updateID)
-	}
-	if updateID >= document.UpdateID {
-		return document.Content, nil
-	}
-	checkpoint := s.bestDocumentCheckpointLocked(document.ID, updateID)
-	if checkpoint == nil {
-		return "", fmt.Errorf("no checkpoint available for %s at version %d", document.ID, updateID)
-	}
-	doc, err := decodeCRDTState(checkpoint.CRDTState, document.ClientIDSeed)
-	if err != nil {
-		return "", err
-	}
-	if checkpoint.UpdateID != updateID {
-		return "", fmt.Errorf("no update log available after checkpoint %d for %s at version %d", checkpoint.UpdateID, document.ID, updateID)
-	}
-	return doc.GetText("content").ToString(), nil
-}
-
-func (s *Store) bestDocumentCheckpointLocked(documentID string, updateID int64) *DocumentCheckpoint {
-	var best *DocumentCheckpoint
-	for _, checkpoint := range s.state.DocumentCheckpoints {
-		if checkpoint == nil || checkpoint.DocumentID != documentID || checkpoint.UpdateID > updateID {
-			continue
-		}
-		if best == nil || checkpoint.UpdateID > best.UpdateID {
-			best = checkpoint
-		}
-	}
-	return best
 }
 
 func diffTextByLine(before, after string) []DocumentDiffHunk {
@@ -1278,11 +1052,11 @@ func (s *Store) CreateDocument(req CreateDocumentRequest, meta OperationMeta) (*
 	now := time.Now().UTC()
 	clientIDSeed := s.nextClientIDSeedLocked()
 	id := "doc_" + uuid.NewString()
-	document := newSeedDocument(id, clientIDSeed, path, titleFromPath(path), req.Content, now)
+	document, initialUpdate := newSeedDocument(id, clientIDSeed, path, titleFromPath(path), req.Content, now)
 	s.state.Documents[id] = document
 	_ = s.documentLockLocked(document.ID)
 	s.markDocumentDirtyLocked(document.ID)
-	s.appendFullDocumentUpdateLocked(document, meta, now)
+	s.appendIncrementalDocumentUpdateLocked(document.ID, initialUpdate, meta, now)
 	s.state.UpdatedAt = now
 	s.appendActivityLocked(&ActivityEvent{
 		Type:       "document.created",
@@ -1297,11 +1071,6 @@ func (s *Store) CreateDocument(req CreateDocumentRequest, meta OperationMeta) (*
 		return nil, err
 	}
 	created := cloneDocument(document)
-	if s.db != nil {
-		document.Doc = nil
-		document.Content = ""
-		document.CRDTState = ""
-	}
 	return created, nil
 }
 
@@ -1889,21 +1658,12 @@ func (s *Store) UpdateAgentSession(id string, req UpdateAgentSessionRequest, met
 		OccurredAt: now,
 		Provenance: meta,
 	})
-	if s.db != nil {
-		workspaceID := s.state.WorkspaceID
-		updated := cloneAgent(agent)
-		s.mu.Unlock()
-		if err := upsertAgentPostgres(s.db, workspaceID, updated); err != nil {
-			return nil, err
-		}
-		return updated, nil
-	}
-	if err := s.persistLocked(); err != nil {
-		s.mu.Unlock()
-		return nil, err
-	}
+	workspaceID := s.state.WorkspaceID
 	updated := cloneAgent(agent)
 	s.mu.Unlock()
+	if err := upsertAgentPostgres(s.db, workspaceID, updated); err != nil {
+		return nil, err
+	}
 	return updated, nil
 }
 
@@ -1923,50 +1683,12 @@ func (s *Store) ApplyCRDTUpdateWithResult(documentID string, update []byte, meta
 	if !ok {
 		return nil, ErrNotFound
 	}
-	if s.db != nil {
-		now := time.Now().UTC()
-		s.markDocumentDirtyLocked(document.ID)
-		s.appendIncrementalDocumentUpdateLocked(document.ID, update, meta, now)
-		document.Doc = nil
-		document.Content = ""
-		document.CRDTState = ""
-		document.StateVector = ""
-		document.UpdatedAt = now
-		s.state.UpdatedAt = now
-		if err := s.persistDocumentMutationLocked(); err != nil {
-			return nil, err
-		}
-		return &ApplyCRDTUpdateResult{
-			Document: cloneDocument(document),
-			Applied:  true,
-		}, nil
-	}
-	documentLock := s.documentLockLocked(document.ID)
-	documentLock.Lock()
-	defer documentLock.Unlock()
-	beforeSnapshot := crdt.CaptureSnapshot(document.Doc)
-	if err := crdt.ApplyUpdateV1(document.Doc, update, meta); err != nil {
-		return nil, err
-	}
-	afterSnapshot := crdt.CaptureSnapshot(document.Doc)
-	if crdt.EqualSnapshots(beforeSnapshot, afterSnapshot) {
-		return &ApplyCRDTUpdateResult{
-			Document: cloneDocument(document),
-			Applied:  false,
-		}, nil
-	}
-	afterStateVector := crdt.EncodeStateVectorV1(document.Doc)
 	now := time.Now().UTC()
-	document.StateVector = base64.StdEncoding.EncodeToString(afterStateVector)
-	if s.db == nil {
-		document.Content = document.Doc.GetText("content").ToString()
-	}
 	s.markDocumentDirtyLocked(document.ID)
 	s.appendIncrementalDocumentUpdateLocked(document.ID, update, meta, now)
-	s.enqueueDocumentUpdateEventsLocked(document, meta)
+	document.StateVector = ""
 	document.UpdatedAt = now
-	s.state.UpdatedAt = document.UpdatedAt
-
+	s.state.UpdatedAt = now
 	if err := s.persistDocumentMutationLocked(); err != nil {
 		return nil, err
 	}
@@ -1987,24 +1709,20 @@ func (s *Store) ReplaceDocumentText(documentID string, nextText string, meta Ope
 	documentLock := s.documentLockLocked(document.ID)
 	documentLock.Lock()
 	defer documentLock.Unlock()
-	if s.db != nil && document.Doc == nil {
-		doc, err := s.restoreDocumentDocPostgresLocked(document)
-		if err != nil {
-			return nil, nil, err
-		}
-		document.Doc = doc
-		document.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
+	doc, err := s.restoreDocumentDocPostgresLocked(document)
+	if err != nil {
+		return nil, nil, err
 	}
-	currentText := document.Doc.GetText("content").ToString()
-	text := document.Doc.GetText("content")
+	currentText := doc.GetText("content").ToString()
+	text := doc.GetText("content")
 
 	var update []byte
-	unsubscribe := document.Doc.OnUpdate(func(nextUpdate []byte, origin any) {
+	unsubscribe := doc.OnUpdate(func(nextUpdate []byte, origin any) {
 		if origin == meta {
 			update = append([]byte(nil), nextUpdate...)
 		}
 	})
-	document.Doc.Transact(func(txn *crdt.Transaction) {
+	doc.Transact(func(txn *crdt.Transaction) {
 		if len(currentText) > 0 {
 			text.Delete(txn, 0, len(currentText))
 		}
@@ -2014,18 +1732,10 @@ func (s *Store) ReplaceDocumentText(documentID string, nextText string, meta Ope
 	}, meta)
 	unsubscribe()
 
-	if s.db != nil {
-		document.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(document.Doc))
-	} else {
-		document.SyncProjectionFields()
-	}
+	document.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
 	s.markDocumentDirtyLocked(document.ID)
 	s.appendIncrementalDocumentUpdateLocked(document.ID, update, meta, time.Now().UTC())
-	notify := !isLogDocumentPath(document.Path)
 	document.UpdatedAt = time.Now().UTC()
-	if notify && s.db == nil {
-		s.enqueueDocumentThreadEventsLocked(document, meta)
-	}
 	s.state.UpdatedAt = document.UpdatedAt
 	s.appendActivityLocked(&ActivityEvent{
 		Type:       "document.updated",
@@ -2040,7 +1750,7 @@ func (s *Store) ReplaceDocumentText(documentID string, nextText string, meta Ope
 	if err := s.persistDocumentMutationLocked(); err != nil {
 		return nil, nil, err
 	}
-	return cloneDocumentWithCRDTState(document), update, nil
+	return cloneDocument(document), update, nil
 }
 
 func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thread, *ThreadMessage, error) {
@@ -2170,160 +1880,55 @@ func (s *Store) ReplyThread(id string, req ReplyThreadRequest, meta OperationMet
 
 func (s *Store) ClaimAgentEvent(req ClaimAgentEventRequest) (*AgentEvent, error) {
 	s.mu.Lock()
-
-	if s.db != nil {
-		workspaceID := s.state.WorkspaceID
-		agentID, agentHandle, err := s.resolveAgentIdentityLocked(req.AgentID)
-		if err != nil {
-			s.mu.Unlock()
-			return nil, err
-		}
-		claimedBy := stringsOr(req.ClaimedBy, "daemon")
-		s.mu.Unlock()
-		event, err := claimAgentEventPostgres(s.db, workspaceID, agentID, agentHandle, claimedBy)
-		if err != nil {
-			return nil, err
-		}
-		s.mu.Lock()
-		s.state.AgentEvents[event.ID] = cloneAgentEvent(event)
-		s.mu.Unlock()
-		return event, nil
-	}
-	defer s.mu.Unlock()
-
 	agentID, agentHandle, err := s.resolveAgentIdentityLocked(req.AgentID)
+	if err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	workspaceID := s.state.WorkspaceID
+	claimedBy := stringsOr(req.ClaimedBy, "daemon")
+	s.mu.Unlock()
+	event, err := claimAgentEventPostgres(s.db, workspaceID, agentID, agentHandle, claimedBy)
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now().UTC()
-	var next *AgentEvent
-	for _, event := range s.state.AgentEvents {
-		if event.AgentID != agentID {
-			continue
-		}
-		if s.eventBelongsToLogDocumentLocked(event) {
-			continue
-		}
-		if event.AvailableAt.After(now) {
-			continue
-		}
-		if event.Status == "completed" || event.Status == "dismissed" {
-			continue
-		}
-		if event.Status == "processing" && now.Sub(event.ClaimedAt) < 30*time.Second {
-			continue
-		}
-		if next == nil || event.CreatedAt.Before(next.CreatedAt) {
-			next = event
-		}
-	}
-	if next == nil {
-		return nil, ErrNotFound
-	}
-	next.Status = "processing"
-	next.AgentHandle = agentHandle
-	next.ClaimedBy = strings.TrimSpace(req.ClaimedBy)
-	if next.ClaimedBy == "" {
-		next.ClaimedBy = "daemon"
-	}
-	next.ClaimedAt = now
-	next.AttemptCount++
-	next.UpdatedAt = now
-	if err := s.persistLocked(); err != nil {
-		return nil, err
-	}
-	return cloneAgentEvent(next), nil
+	s.mu.Lock()
+	s.state.AgentEvents[event.ID] = cloneAgentEvent(event)
+	s.mu.Unlock()
+	return event, nil
 }
 
 func (s *Store) UpdateAgentEvent(id string, req UpdateAgentEventRequest, meta OperationMeta) (*AgentEvent, error) {
 	s.mu.Lock()
-
-	if s.db != nil {
-		workspaceID := s.state.WorkspaceID
-		if _, ok := s.state.AgentEvents[id]; !ok {
-			s.mu.Unlock()
-			return nil, ErrNotFound
-		}
+	workspaceID := s.state.WorkspaceID
+	if _, ok := s.state.AgentEvents[id]; !ok {
 		s.mu.Unlock()
-		updated, err := updateAgentEventPostgres(s.db, workspaceID, id, req)
-		if err != nil {
-			return nil, err
-		}
-		if shouldMarkDocumentViewedForEvent(updated) {
-			if _, err := s.MarkDocumentViewed(updated.AgentID, updated.DocumentID, MarkDocumentViewedRequest{UpdateID: updated.ToUpdateID}); err != nil {
-				return nil, err
-			}
-		}
-		s.mu.Lock()
-		s.state.AgentEvents[id] = cloneAgentEvent(updated)
-		s.state.UpdatedAt = updated.UpdatedAt
-		s.appendActivityLocked(&ActivityEvent{
-			Type:       "agent.event.updated",
-			DocumentID: updated.DocumentID,
-			ActorID:    meta.ActorID,
-			ActorType:  meta.ActorType,
-			Summary:    fmt.Sprintf("%s marked %s %s", meta.ActorID, updated.Type, updated.Status),
-			OccurredAt: updated.UpdatedAt,
-			Provenance: meta,
-		})
-		s.mu.Unlock()
-		return updated, nil
-	}
-	defer s.mu.Unlock()
-
-	event, ok := s.state.AgentEvents[id]
-	if !ok {
 		return nil, ErrNotFound
 	}
-	now := time.Now().UTC()
-	if status := strings.TrimSpace(req.Status); status != "" {
-		event.Status = status
-	}
-	if threadID := strings.TrimSpace(req.ThreadID); threadID != "" {
-		event.ThreadID = threadID
-	}
-	if runID := strings.TrimSpace(req.RunID); runID != "" {
-		event.RunID = runID
-	}
-	if lastError := strings.TrimSpace(req.LastError); lastError != "" {
-		event.LastError = lastError
-	}
-	if event.Status == "completed" {
-		event.CompletedAt = now
-	}
-	if shouldMarkDocumentViewedForEvent(event) {
-		updateID := event.ToUpdateID
-		if document := s.state.Documents[event.DocumentID]; document != nil {
-			if updateID <= 0 || updateID > document.UpdateID {
-				updateID = document.UpdateID
-			}
-			s.state.AgentDocumentViews[agentDocumentViewKey(event.AgentID, event.DocumentID)] = &AgentDocumentView{
-				AgentID:     event.AgentID,
-				DocumentID:  event.DocumentID,
-				UpdateID:    updateID,
-				StateVector: document.StateVector,
-				ViewedAt:    now,
-			}
-		}
-	}
-	if event.Status == "pending" && event.AvailableAt.Before(now) {
-		event.AvailableAt = now.Add(5 * time.Second)
-	}
-	event.UpdatedAt = now
-	s.state.UpdatedAt = now
-	s.appendActivityLocked(&ActivityEvent{
-		Type:       "agent.event.updated",
-		DocumentID: event.DocumentID,
-		ActorID:    meta.ActorID,
-		ActorType:  meta.ActorType,
-		Summary:    fmt.Sprintf("%s marked %s %s", meta.ActorID, event.Type, event.Status),
-		OccurredAt: now,
-		Provenance: meta,
-	})
-	if err := s.persistLocked(); err != nil {
+	s.mu.Unlock()
+	updated, err := updateAgentEventPostgres(s.db, workspaceID, id, req)
+	if err != nil {
 		return nil, err
 	}
-	return cloneAgentEvent(event), nil
+	if shouldMarkDocumentViewedForEvent(updated) {
+		if _, err := s.MarkDocumentViewed(updated.AgentID, updated.DocumentID, MarkDocumentViewedRequest{UpdateID: updated.ToUpdateID}); err != nil {
+			return nil, err
+		}
+	}
+	s.mu.Lock()
+	s.state.AgentEvents[id] = cloneAgentEvent(updated)
+	s.state.UpdatedAt = updated.UpdatedAt
+	s.appendActivityLocked(&ActivityEvent{
+		Type:       "agent.event.updated",
+		DocumentID: updated.DocumentID,
+		ActorID:    meta.ActorID,
+		ActorType:  meta.ActorType,
+		Summary:    fmt.Sprintf("%s marked %s %s", meta.ActorID, updated.Type, updated.Status),
+		OccurredAt: updated.UpdatedAt,
+		Provenance: meta,
+	})
+	s.mu.Unlock()
+	return updated, nil
 }
 
 func (s *Store) UpsertPresence(req UpsertPresenceRequest) (*Presence, error) {
@@ -2342,48 +1947,24 @@ func (s *Store) UpsertPresence(req UpsertPresenceRequest) (*Presence, error) {
 	}
 	s.state.Presences[req.ActorID] = presence
 	s.state.UpdatedAt = now
-	if s.db != nil {
-		workspaceID := s.state.WorkspaceID
-		clone := *presence
-		clone.Selection = append([]int(nil), presence.Selection...)
-		s.mu.Unlock()
-		if err := upsertPresencePostgres(s.db, workspaceID, &clone); err != nil {
-			return nil, err
-		}
-		return &clone, nil
-	} else {
-		if err := s.persistLocked(); err != nil {
-			s.mu.Unlock()
-			return nil, err
-		}
-	}
+	workspaceID := s.state.WorkspaceID
 	clone := *presence
 	clone.Selection = append([]int(nil), presence.Selection...)
 	s.mu.Unlock()
+	if err := upsertPresencePostgres(s.db, workspaceID, &clone); err != nil {
+		return nil, err
+	}
 	return &clone, nil
 }
 
 func (s *Store) persistLocked() error {
 	s.ensureMaps()
-	if s.db != nil {
-		return s.persistPostgresLocked()
-	}
-	if err := os.MkdirAll(filepath.Dir(s.dataFile), 0o755); err != nil {
-		return err
-	}
-	bytes, err := json.MarshalIndent(s.state, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(s.dataFile, bytes, 0o644)
+	return s.persistPostgresLocked()
 }
 
 func (s *Store) persistDocumentMutationLocked() error {
 	s.ensureMaps()
-	if s.db != nil {
-		return s.persistDocumentMutationPostgresLocked()
-	}
-	return s.persistLocked()
+	return s.persistDocumentMutationPostgresLocked()
 }
 
 func (s *Store) nextClientIDSeedLocked() uint64 {
@@ -2497,13 +2078,6 @@ func (s *Store) appendIncrementalDocumentUpdateLocked(documentID string, update 
 	if len(update) == 0 || documentID == "" {
 		return
 	}
-	if s.db == nil {
-		if document := s.state.Documents[documentID]; document != nil {
-			document.UpdateID++
-			document.SyncDerivedFields()
-			s.recordDocumentCheckpointLocked(document, now)
-		}
-	}
 	s.pendingDocumentEvents = append(s.pendingDocumentEvents, documentUpdateRecord{
 		DocumentID: documentID,
 		Update:     append([]byte(nil), update...),
@@ -2511,29 +2085,6 @@ func (s *Store) appendIncrementalDocumentUpdateLocked(documentID string, update 
 		ActorType:  meta.ActorType,
 		CreatedAt:  now,
 	})
-}
-
-func (s *Store) appendFullDocumentUpdateLocked(document *Document, meta OperationMeta, now time.Time) {
-	if document == nil || document.Doc == nil {
-		return
-	}
-	s.appendIncrementalDocumentUpdateLocked(document.ID, document.Doc.EncodeStateAsUpdate(), meta, now)
-}
-
-func (s *Store) recordDocumentCheckpointLocked(document *Document, now time.Time) {
-	if document == nil || document.UpdateID <= 0 {
-		return
-	}
-	if s.state.DocumentCheckpoints == nil {
-		s.state.DocumentCheckpoints = map[string]*DocumentCheckpoint{}
-	}
-	s.state.DocumentCheckpoints[documentCheckpointKey(document.ID, document.UpdateID)] = &DocumentCheckpoint{
-		DocumentID:  document.ID,
-		UpdateID:    document.UpdateID,
-		CRDTState:   document.CRDTState,
-		StateVector: document.StateVector,
-		CreatedAt:   now,
-	}
 }
 
 func SortedAgentRuns(state WorkspaceState) []*AgentRun {

@@ -51,7 +51,7 @@ func (s *Server) workspaceStore(workspaceID string) (*Store, error) {
 		return store, nil
 	}
 	s.mu.Unlock()
-	if s.store == nil || s.store.db == nil {
+	if s.store == nil {
 		return s.store, nil
 	}
 	workspace, err := getWorkspace(s.store.db, workspaceID)
@@ -60,7 +60,7 @@ func (s *Server) workspaceStore(workspaceID string) (*Store, error) {
 	}
 	dataSource := s.cfg.DatabaseURL
 	if dataSource == "" {
-		dataSource = s.store.dataFile
+		dataSource = s.store.databaseURL
 	}
 	store, err := NewStoreForWorkspace(dataSource, workspace.ID, workspace.Name)
 	if err != nil {

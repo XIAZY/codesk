@@ -1,11 +1,6 @@
 package notty
 
-import (
-	"encoding/base64"
-	"time"
-
-	"github.com/reearth/ygo/crdt"
-)
+import "time"
 
 type WorkspaceState struct {
 	WorkspaceID         string                         `json:"workspaceId"`
@@ -28,13 +23,10 @@ type Document struct {
 	ID           string    `json:"id"`
 	Path         string    `json:"path"`
 	Title        string    `json:"title"`
-	Content      string    `json:"content"`
-	CRDTState    string    `json:"crdtState"`
 	StateVector  string    `json:"stateVector,omitempty"`
 	UpdateID     int64     `json:"updateId,omitempty"`
 	UpdatedAt    time.Time `json:"updatedAt"`
 	ClientIDSeed uint64    `json:"clientIdSeed,omitempty"`
-	Doc          *crdt.Doc `json:"-"`
 }
 
 type DocumentMetadata struct {
@@ -433,13 +425,12 @@ type EventEnvelope struct {
 }
 
 type DocumentUpdateEvent struct {
-	DocumentID  string    `json:"documentId"`
-	UpdateID    int64     `json:"updateId,omitempty"`
-	StateVector string    `json:"stateVector,omitempty"`
-	Update      string    `json:"update"`
-	Path        string    `json:"path"`
-	UpdatedAt   time.Time `json:"updatedAt"`
-	ActorID     string    `json:"actorId"`
+	DocumentID string    `json:"documentId"`
+	UpdateID   int64     `json:"updateId,omitempty"`
+	Update     string    `json:"update"`
+	Path       string    `json:"path"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+	ActorID    string    `json:"actorId"`
 }
 
 type DocumentLifecycleEvent struct {
@@ -460,41 +451,9 @@ type AgentInboxChangedEvent struct {
 	NotificationType string `json:"notificationType"`
 }
 
-func (d *Document) SyncDerivedFields() {
-	if d.Doc == nil {
-		d.Content = ""
-		d.CRDTState = ""
-		return
-	}
-	d.Content = d.Doc.GetText("content").ToString()
-	d.CRDTState = base64.StdEncoding.EncodeToString(d.Doc.EncodeStateAsUpdate())
-	d.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(d.Doc))
-}
-
-func (d *Document) SyncProjectionFields() {
-	if d.Doc == nil {
-		d.Content = ""
-		d.StateVector = ""
-		return
-	}
-	d.Content = d.Doc.GetText("content").ToString()
-	d.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(d.Doc))
-}
-
 func cloneDocument(document *Document) *Document {
 	clone := *document
-	clone.Doc = nil
 	return &clone
-}
-
-func cloneDocumentWithCRDTState(document *Document) *Document {
-	clone := cloneDocument(document)
-	if document != nil && document.Doc != nil {
-		clone.Content = document.Doc.GetText("content").ToString()
-		clone.CRDTState = base64.StdEncoding.EncodeToString(document.Doc.EncodeStateAsUpdate())
-		clone.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(document.Doc))
-	}
-	return clone
 }
 
 func documentMetadata(document *Document) *DocumentMetadata {

@@ -109,6 +109,26 @@ describe("DocumentSurface", () => {
     expect(container.textContent?.length ?? 0).toBeLessThan(ytext.length / 10);
   });
 
+  it("renders document surfaces without code-editor gutters", async () => {
+    const ydoc = new Y.Doc();
+    const ytext = ydoc.getText("content");
+    ytext.insert(0, "# Markdown document\n\nPlain writing surface.");
+
+    const markdownRender = renderSurface({ ydoc, ytext, enableMarkdownLivePreview: true });
+
+    await waitFor(() => expect(markdownRender.container.querySelector(".cm-editor")).toBeTruthy());
+    expect(markdownRender.container.querySelector(".cm-gutters")).toBeNull();
+    markdownRender.unmount();
+
+    const textDoc = new Y.Doc();
+    const plainText = textDoc.getText("content");
+    plainText.insert(0, "Plain text document.");
+    const plainRender = renderSurface({ ydoc: textDoc, ytext: plainText });
+
+    await waitFor(() => expect(plainRender.container.querySelector(".cm-editor")).toBeTruthy());
+    expect(plainRender.container.querySelector(".cm-gutters")).toBeNull();
+  });
+
   it("renders a CRDT-relative thread marker without full-document rendering", async () => {
     const ydoc = new Y.Doc();
     const ytext = ydoc.getText("content");

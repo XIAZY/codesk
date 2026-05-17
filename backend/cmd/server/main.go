@@ -23,11 +23,10 @@ func main() {
 			}
 		}()
 	}
-	dataSource := cfg.DataFile
-	if cfg.DatabaseURL != "" {
-		dataSource = cfg.DatabaseURL
+	if cfg.DatabaseURL == "" {
+		log.Fatal("NOTTY_DATABASE_URL is required")
 	}
-	store, err := notty.NewStore(dataSource)
+	store, err := notty.NewStore(cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("create store: %v", err)
 	}

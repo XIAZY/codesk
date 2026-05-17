@@ -265,6 +265,9 @@ func (s *Server) handleDocumentProtocolMessageWithStore(store *Store, broker *Br
 				return nil
 			}
 			log.Printf("document ws inbound update doc=%s actor=%s actor_type=%s sync_type=%s bytes=%d canonical_empty_yjs_update=%t", documentID, meta.ActorID, meta.ActorType, documentSyncTypeLabel(syncType), len(data), isCanonicalEmptyYjsUpdate(data))
+			if isCanonicalEmptyYjsUpdate(data) {
+				return nil
+			}
 			result, err := store.ApplyCRDTUpdateWithResult(documentID, data, meta)
 			if err != nil {
 				return err
@@ -276,12 +279,11 @@ func (s *Server) handleDocumentProtocolMessageWithStore(store *Store, broker *Br
 			updated := result.Document
 			room.Broadcast(yproto.BuildSyncUpdate(data), session)
 			broker.Publish(EventEnvelope{Type: "document.updated", Data: DocumentUpdateEvent{
-				DocumentID:  updated.ID,
-				UpdateID:    updated.UpdateID,
-				StateVector: updated.StateVector,
-				Path:        updated.Path,
-				UpdatedAt:   updated.UpdatedAt,
-				ActorID:     meta.ActorID,
+				DocumentID: updated.ID,
+				UpdateID:   updated.UpdateID,
+				Path:       updated.Path,
+				UpdatedAt:  updated.UpdatedAt,
+				ActorID:    meta.ActorID,
 			}})
 			publishAgentInboxChanges(store, broker)
 		}

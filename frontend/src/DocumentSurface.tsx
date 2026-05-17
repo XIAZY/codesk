@@ -4,8 +4,6 @@ import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import {
   bracketMatching,
   defaultHighlightStyle,
-  foldGutter,
-  foldKeymap,
   syntaxHighlighting,
 } from "@codemirror/language";
 import {
@@ -21,9 +19,7 @@ import {
   type DecorationSet,
   drawSelection,
   EditorView,
-  highlightActiveLine,
   keymap,
-  lineNumbers,
   type ViewUpdate,
 } from "@codemirror/view";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
@@ -91,7 +87,8 @@ const threadDecorationField = StateField.define<DecorationSet>({
 
 const editorTheme = EditorView.theme({
   "&": {
-    minHeight: "560px",
+    height: "100%",
+    minHeight: "0",
     width: "100%",
     background: "transparent",
     color: "var(--ink)",
@@ -99,28 +96,11 @@ const editorTheme = EditorView.theme({
     fontSize: "15px",
   },
   ".cm-scroller": {
-    minHeight: "560px",
-    maxHeight: "calc(100vh - 220px)",
+    height: "100%",
+    minHeight: "0",
     overflow: "auto",
     fontFamily: "var(--sans)",
     lineHeight: "1.72",
-  },
-  ".cm-content": {
-    padding: "28px 30px 64px 18px",
-  },
-  ".cm-line": {
-    padding: "0 4px",
-  },
-  ".cm-gutters": {
-    background: "rgba(255,255,255,0.62)",
-    borderRight: "1px solid var(--line)",
-    color: "var(--muted)",
-  },
-  ".cm-activeLine": {
-    background: "rgba(38, 82, 68, 0.06)",
-  },
-  ".cm-activeLineGutter": {
-    background: "rgba(38, 82, 68, 0.08)",
   },
   ".cm-selectionBackground": {
     background: "rgba(215, 138, 75, 0.28) !important",
@@ -129,6 +109,17 @@ const editorTheme = EditorView.theme({
     background: "rgba(215, 138, 75, 0.24)",
     borderBottom: "1px solid rgba(143, 81, 43, 0.42)",
     borderRadius: "5px",
+  },
+});
+
+const documentPaneTheme = EditorView.theme({
+  ".cm-content": {
+    boxSizing: "border-box",
+    minHeight: "100%",
+    padding: "56px max(32px, calc((100% - 740px) / 2 + 18px)) 140px",
+  },
+  ".cm-line": {
+    padding: "0 4px",
   },
 });
 
@@ -183,17 +174,15 @@ export function DocumentSurface({
       state: EditorState.create({
         doc: ytext.toString(),
         extensions: [
-          lineNumbers(),
-          foldGutter(),
           history(),
           drawSelection(),
           bracketMatching(),
-          highlightActiveLine(),
           highlightSelectionMatches(),
           ...(enableMarkdownLivePreview ? [markdown({ base: markdownLanguage }), nottyMarkdownLivePreview()] : []),
           syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
           threadDecorationField,
           editorTheme,
+          documentPaneTheme,
           EditorView.lineWrapping,
           EditorView.updateListener.of((update) => {
             if (update.docChanged && !update.transactions.some((transaction) => transaction.annotation(remoteYjsAnnotation))) {
@@ -209,7 +198,7 @@ export function DocumentSurface({
               onSelectionChangeRef.current(selectionFromView(update.view, ytext));
             }
           }),
-          keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap, ...foldKeymap, ...searchKeymap]),
+          keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap, ...searchKeymap]),
         ],
       }),
     });

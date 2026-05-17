@@ -781,15 +781,21 @@ svg.i.sm {
 .doc-canvas {
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background: var(--paper);
 }
 
 .doc-inner {
-  max-width: 740px;
-  margin: 0 auto;
-  padding: 56px 32px 120px;
+  width: 100%;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
   position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
 }
 
 .editor-body {
@@ -802,33 +808,37 @@ svg.i.sm {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-bottom: 24px;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 48px 0 16px;
+  padding: 0 max(32px, calc((100% - 740px) / 2 + 18px));
 }
 
 .editor-frame {
   position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
 }
 
 .document-surface-shell {
   width: 100%;
+  min-height: 0;
   position: relative;
-  border: 1px solid transparent;
-  border-radius: var(--r-2);
+  display: flex;
+  flex: 1;
   background: transparent;
-}
-
-.document-surface-shell:hover {
-  border-color: var(--border);
-  background: rgba(247, 244, 236, 0.26);
 }
 
 .document-surface {
   width: 100%;
-  min-height: calc(100vh - 250px);
+  height: 100%;
+  min-height: 0;
 }
 
 .document-surface .cm-editor {
-  border-radius: var(--r-2);
+  height: 100%;
+  border-radius: 0;
   outline: none;
 }
 
@@ -839,7 +849,7 @@ svg.i.sm {
 .thread-anchor-rail {
   position: absolute;
   top: 0;
-  right: -46px;
+  right: max(8px, calc((100% - 740px) / 2 - 46px));
   bottom: 0;
   width: 38px;
   pointer-events: none;
@@ -1562,8 +1572,14 @@ pre.code {
     z-index: 10;
   }
 
-  .doc-inner {
+  .doc-inner.empty-state {
     padding: 32px 18px 80px;
+  }
+
+  .doc-meta-row {
+    width: calc(100% - 32px);
+    margin: 28px auto 12px;
+    padding: 0;
   }
 
   .empty-grid {
