@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	crdt "notty/internal/ycrdt"
 )
 
 func TestAuthenticatedWorkspaceRoutesIsolateTenantsAndIgnoreSpoofedActor(t *testing.T) {
@@ -164,12 +165,89 @@ func TestDaemonTokenIsWorkspaceScopedAndCanActAsWorkspaceAgent(t *testing.T) {
 	authTestStatus(t, router, http.MethodGet, "/api/workspaces/"+workspace.ID+"/workspace", daemonResponse.Token, nil, http.StatusForbidden)
 }
 
+func TestDaemonTokenDocumentUpdateRouteAttributesActingAgent(t *testing.T) {
+	server, router := newAuthTestServer(t)
+
+	owner := authTestRegister(t, router, "daemon-document-owner@example.com", "owner-pass", "Daemon Document Owner")
+	workspace := authTestCreateWorkspace(t, router, owner.Token, "Daemon Document Tenant")
+	document := authTestCreateDocument(t, router, owner.Token, workspace.ID, "docs/daemon-update.md", "alpha")
+
+	var daemonResponse CreateDaemonResponse
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons", owner.Token, CreateDaemonRequest{Name: "Local daemon"}, http.StatusCreated, &daemonResponse)
+
+	var agent Agent
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+daemonResponse.Daemon.ID+"/agents", owner.Token, CreateAgentRequest{
+		Handle: "daemon-editor",
+		Name:   "Daemon Editor",
+		Role:   "Applies local document edits",
+		Kind:   "codex",
+	}, http.StatusCreated, &agent)
+
+	workspaceStore, err := server.workspaceStore(workspace.ID)
+	if err != nil {
+		t.Fatalf("get workspace store: %v", err)
+	}
+	peerDoc := syncDocumentToDocForTest(t, workspaceStore, document.ID, 404)
+	text := peerDoc.GetText("content")
+	update := captureDocUpdate(t, peerDoc, "daemon-edit", func(txn *crdt.Transaction) {
+		text.Insert(txn, text.LenInTxn(txn), " beta", nil)
+	})
+
+	events, unsubscribe := server.workspaceBroker(workspace.ID).Subscribe()
+	defer unsubscribe()
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/documents/"+document.ID+"/updates", bytes.NewReader(update))
+	request.Header.Set("Authorization", "Bearer "+daemonResponse.Token)
+	request.Header.Set("Content-Type", "application/octet-stream")
+	request.Header.Set("X-Notty-Acting-Agent-ID", agent.ID)
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected authenticated document update status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response postDocumentUpdateResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode document update response: %v body=%s", err, recorder.Body.String())
+	}
+	if !response.Accepted || !response.Applied || response.UpdateID == 0 {
+		t.Fatalf("unexpected document update response: %#v", response)
+	}
+	if got := currentDocumentContentForTest(t, workspaceStore, document.ID); got != "alpha beta" {
+		t.Fatalf("unexpected document content after authenticated daemon update: %q", got)
+	}
+
+	select {
+	case event := <-events:
+		if event.Type != "document.updated" {
+			t.Fatalf("expected document.updated event, got %#v", event)
+		}
+		payload, ok := event.Data.(DocumentUpdateEvent)
+		if !ok {
+			t.Fatalf("expected document update payload, got %#v", event.Data)
+		}
+		if payload.ActorID != agent.ID {
+			t.Fatalf("expected actor attribution %q, got %#v", agent.ID, payload)
+		}
+	default:
+		t.Fatal("expected document.updated event")
+	}
+	if got := countAgentEvents(workspaceStore.Snapshot(), agent.ID, "document.updated"); got != 0 {
+		t.Fatalf("acting agent should not receive its own daemon document update, got %d inbox events", got)
+	}
+}
+
 type authTestWorkspace struct {
 	ID          string
 	OwnerUserID string
 }
 
 func newAuthTestRouter(t *testing.T) http.Handler {
+	t.Helper()
+	_, router := newAuthTestServer(t)
+	return router
+}
+
+func newAuthTestServer(t *testing.T) (*Server, http.Handler) {
 	t.Helper()
 	dsn := postgresTestDSN(t)
 	db, err := sql.Open("pgx", dsn)
@@ -194,7 +272,7 @@ func newAuthTestRouter(t *testing.T) http.Handler {
 		_ = store.Close()
 	})
 	server := NewServer(Config{DatabaseURL: dsn, JWTSecret: "test-secret"}, store)
-	return server.Routes()
+	return server, server.Routes()
 }
 
 func authTestRegister(t *testing.T, router http.Handler, email string, password string, name string) AuthResponse {
