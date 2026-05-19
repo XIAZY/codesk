@@ -94,6 +94,10 @@ func (d *documentSync) runOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	stopClose := context.AfterFunc(ctx, func() {
+		_ = conn.Close()
+	})
+	defer stopClose()
 	defer conn.Close()
 
 	if err := conn.WriteMessage(websocket.BinaryMessage, d.initialSyncStep(document)); err != nil {

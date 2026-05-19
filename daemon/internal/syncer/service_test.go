@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	crdt "notty/internal/ycrdt"
 	"notty/internal/yproto"
 )
@@ -857,6 +858,70 @@ func TestDocumentSyncIgnoresServerSyncStep1(t *testing.T) {
 	}
 	if len(marked) != 0 {
 		t.Fatalf("server sync step 1 should not mark dirty, got %#v", marked)
+	}
+}
+
+func TestDocumentSyncRunOnceStopsWhenContextCancelsIdleWebsocket(t *testing.T) {
+	initialRead := make(chan struct{})
+	clientClosed := make(chan struct{})
+	handlerErr := make(chan error, 1)
+	var initialOnce sync.Once
+	var closedOnce sync.Once
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ws/documents/doc_1" {
+			http.NotFound(w, r)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			select {
+			case handlerErr <- err:
+			default:
+			}
+			return
+		}
+		defer conn.Close()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				closedOnce.Do(func() { close(clientClosed) })
+				return
+			}
+			initialOnce.Do(func() { close(initialRead) })
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sync := newDocumentSync(Config{BackendURL: server.URL, AgentID: "daemon_agent"}, nil, &document{
+		ID:   "doc_1",
+		Path: "doc.md",
+	}, nil)
+	done := make(chan error, 1)
+	go func() {
+		done <- sync.runOnce(ctx)
+	}()
+
+	select {
+	case <-initialRead:
+	case err := <-handlerErr:
+		t.Fatalf("websocket handler error: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for document sync to send initial sync message")
+	}
+
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("document sync did not exit after context cancellation")
+	}
+	select {
+	case <-clientClosed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not observe client websocket close after context cancellation")
 	}
 }
 
