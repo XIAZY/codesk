@@ -3,7 +3,6 @@ package syncer
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -29,25 +28,20 @@ type documentCache struct {
 }
 
 type documentCacheEntry struct {
-	mu                  sync.Mutex
-	metadata            documentCacheMetadata
-	loaded              bool
-	contentKnown        bool
-	statePersisted      bool
-	updatesSincePersist int
-	lastPersistedAt     time.Time
-	pendingHash         string
-	pendingHashLoaded   bool
-	outboxHash          string
-	outboxHashLoaded    bool
-	seenUpdateHashes    map[string]struct{}
+	mu                sync.Mutex
+	metadata          documentCacheMetadata
+	loaded            bool
+	pendingHash       string
+	pendingHashLoaded bool
+	outboxHash        string
+	outboxHashLoaded  bool
+	seenUpdateHashes  map[string]struct{}
 }
 
 type documentCacheMetadata struct {
 	DocumentID     string    `json:"documentId"`
 	Path           string    `json:"path"`
 	UpdateID       int64     `json:"updateId,omitempty"`
-	StateVector    string    `json:"stateVector,omitempty"`
 	StateSHA256    string    `json:"stateSha256,omitempty"`
 	PendingSHA256  string    `json:"pendingSha256,omitempty"`
 	PendingUpdates int       `json:"pendingUpdates,omitempty"`
@@ -57,13 +51,14 @@ type documentCacheMetadata struct {
 }
 
 type outboxUpdateRecord struct {
-	Update            []byte    `json:"update"`
-	UpdateSHA256      string    `json:"updateSha256"`
-	TargetStateVector []byte    `json:"targetStateVector"`
-	ObservedContent   string    `json:"observedContent"`
-	ObservedState     []byte    `json:"observedState"`
-	SourcePath        string    `json:"sourcePath"`
-	CreatedAt         time.Time `json:"createdAt"`
+	Update          []byte    `json:"update"`
+	UpdateSHA256    string    `json:"updateSha256"`
+	ObservedContent string    `json:"observedContent"`
+	ObservedState   []byte    `json:"observedState"`
+	SourcePath      string    `json:"sourcePath"`
+	ActorID         string    `json:"actorId"`
+	ActorType       string    `json:"actorType"`
+	CreatedAt       time.Time `json:"createdAt"`
 }
 
 type materializedCachedDocument struct {
@@ -73,10 +68,6 @@ type materializedCachedDocument struct {
 	ContentKnown bool
 	UpdateID     int64
 }
-
-const documentCachePersistEveryUpdates = 100
-
-var emptyDocumentStateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(crdt.New()))
 
 func newDocumentCache(root string) (*documentCache, error) {
 	if strings.TrimSpace(root) == "" {
@@ -109,14 +100,12 @@ func (c *documentCache) materialize(ctx context.Context, meta *document) (*mater
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 
-	doc, metadata, contentKnown, statePersisted, err := c.loadLocked(meta)
+	doc, metadata, contentKnown, err := c.loadLocked(meta)
 	if err != nil {
 		return nil, err
 	}
 	entry.metadata = metadata
 	entry.loaded = true
-	entry.contentKnown = contentKnown
-	entry.statePersisted = statePersisted
 	if !contentKnown {
 		return &materializedCachedDocument{
 			Doc:          doc,
@@ -134,7 +123,6 @@ func (c *documentCache) materialize(ctx context.Context, meta *document) (*mater
 	if entry.metadata.UpdateID == 0 {
 		entry.metadata.UpdateID = meta.UpdateID
 	}
-	entry.metadata.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
 	entry.metadata.UpdatedAt = time.Now().UTC()
 	return &materializedCachedDocument{
 		Doc:          doc,
@@ -152,42 +140,13 @@ func (c *documentCache) storeDoc(documentID, path string, updateID int64, doc *c
 	entry := c.entryFor(documentID)
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
-	stateVector := base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
 	metadata := documentCacheMetadata{
-		DocumentID:  documentID,
-		Path:        path,
-		UpdateID:    updateID,
-		StateVector: stateVector,
-		UpdatedAt:   time.Now().UTC(),
+		DocumentID: documentID,
+		Path:       path,
+		UpdateID:   updateID,
+		UpdatedAt:  time.Now().UTC(),
 	}
 	return c.storeDocLocked(entry, metadata, doc)
-}
-
-func (c *documentCache) maybeStoreDoc(documentID, path string, updateID int64, doc *crdt.Doc) error {
-	if c == nil || documentID == "" || doc == nil {
-		return nil
-	}
-	stateVector := base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
-	entry := c.entryFor(documentID)
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
-	if entry.loaded && entry.metadata.StateVector == stateVector {
-		return nil
-	}
-	entry.metadata = documentCacheMetadata{
-		DocumentID:  documentID,
-		Path:        path,
-		UpdateID:    updateID,
-		StateVector: stateVector,
-		UpdatedAt:   time.Now().UTC(),
-	}
-	entry.loaded = true
-	entry.contentKnown = true
-	entry.updatesSincePersist++
-	if entry.statePersisted && entry.updatesSincePersist < documentCachePersistEveryUpdates {
-		return nil
-	}
-	return c.storeDocLocked(entry, entry.metadata, doc)
 }
 
 func (c *documentCache) storeDocLocked(entry *documentCacheEntry, metadata documentCacheMetadata, doc *crdt.Doc) error {
@@ -215,80 +174,58 @@ func (c *documentCache) storeDocLocked(entry *documentCacheEntry, metadata docum
 	}
 	entry.metadata = metadata
 	entry.loaded = true
-	entry.contentKnown = true
-	entry.statePersisted = true
-	entry.updatesSincePersist = 0
-	entry.lastPersistedAt = metadata.UpdatedAt
 	return nil
 }
 
-func (c *documentCache) loadLocked(meta *document) (*crdt.Doc, documentCacheMetadata, bool, bool, error) {
+func (c *documentCache) loadLocked(meta *document) (*crdt.Doc, documentCacheMetadata, bool, error) {
 	metadata := documentCacheMetadata{
-		DocumentID:  meta.ID,
-		Path:        meta.Path,
-		UpdateID:    meta.UpdateID,
-		StateVector: meta.StateVector,
+		DocumentID: meta.ID,
+		Path:       meta.Path,
+		UpdateID:   meta.UpdateID,
 	}
 	if payload, err := os.ReadFile(c.metadataPath(meta.ID)); err == nil {
 		_ = json.Unmarshal(payload, &metadata)
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, metadata, false, false, err
+		return nil, metadata, false, err
 	}
 
 	doc := crdt.New()
 	contentKnown := false
-	statePersisted := false
 	state, err := os.ReadFile(c.statePath(meta.ID))
 	if errors.Is(err, os.ErrNotExist) {
-		if metadata.StateVector == emptyDocumentStateVector {
-			return doc, metadata, true, false, nil
-		}
-		return doc, metadata, false, false, nil
+		return doc, metadata, false, nil
 	}
 	if err != nil {
-		return nil, metadata, false, false, err
+		return nil, metadata, false, err
 	} else {
 		contentKnown = true
-		statePersisted = true
 	}
 	if len(state) > 0 {
 		if metadata.StateSHA256 != "" && metadata.StateSHA256 != sha256Hex(state) {
 			_ = os.Remove(c.statePath(meta.ID))
-			metadata.StateSHA256 = ""
-			metadata.StateVector = ""
-			return doc, metadata, false, false, nil
+			return doc, metadata, false, nil
 		}
 		if err := crdt.ApplyUpdateV1(doc, state, "cache-load"); err != nil {
 			_ = os.Remove(c.statePath(meta.ID))
-			metadata.StateSHA256 = ""
-			metadata.StateVector = ""
-			return crdt.New(), metadata, false, false, nil
+			return doc, metadata, false, nil
 		}
 	}
-	return doc, metadata, contentKnown, statePersisted, nil
+	return doc, metadata, contentKnown, nil
 }
 
-func (c *documentCache) cachedStateVector(documentID string) []byte {
+func (c *documentCache) localStateVector(documentID string) []byte {
 	if c == nil || documentID == "" {
 		return nil
 	}
-	entry := c.entryFor(documentID)
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
-	if !entry.loaded {
-		if payload, err := os.ReadFile(c.metadataPath(documentID)); err == nil {
-			_ = json.Unmarshal(payload, &entry.metadata)
-			entry.loaded = true
-		}
-	}
-	if entry.metadata.StateVector == "" {
-		return nil
-	}
-	stateVector, err := base64.StdEncoding.DecodeString(entry.metadata.StateVector)
+	doc, _, state, err := c.loadBaseDoc(documentID, "")
 	if err != nil {
 		return nil
 	}
-	return stateVector
+	defer doc.Close()
+	if len(state) == 0 {
+		return nil
+	}
+	return crdt.EncodeStateVectorV1(doc)
 }
 
 func (c *documentCache) appendPendingRemoteUpdate(documentID, path string, update []byte) (bool, error) {
@@ -371,34 +308,23 @@ func (c *documentCache) loadBaseDocLocked(entry *documentCacheEntry, documentID,
 	}
 	state, err := os.ReadFile(c.statePath(documentID))
 	if errors.Is(err, os.ErrNotExist) {
-		state = nil
+		return crdt.New(), metadata, nil, nil
 	} else if err != nil {
 		return nil, metadata, nil, err
 	}
-	stateCleared := false
 	if metadata.StateSHA256 != "" && metadata.StateSHA256 != sha256Hex(state) {
 		_ = os.Remove(c.statePath(documentID))
-		metadata.StateSHA256 = ""
-		metadata.StateVector = ""
-		state = nil
-		stateCleared = true
+		return crdt.New(), metadata, nil, nil
 	}
 	doc := crdt.New()
 	if len(state) > 0 {
 		if err := crdt.ApplyUpdateV1(doc, state, "cache-load"); err != nil {
 			_ = os.Remove(c.statePath(documentID))
-			metadata.StateSHA256 = ""
-			metadata.StateVector = ""
-			state = nil
-			doc = crdt.New()
-			stateCleared = true
+			return crdt.New(), metadata, nil, nil
 		}
 	}
 	entry.metadata = metadata
 	entry.loaded = true
-	if stateCleared {
-		_ = c.writeMetadataLocked(entry, metadata)
-	}
 	return doc, metadata, state, nil
 }
 

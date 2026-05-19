@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,8 +14,6 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/gorilla/websocket"
-	"notty/internal/yproto"
 )
 
 type workspaceReplica struct {
@@ -101,7 +98,6 @@ func (r *workspaceReplica) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			r.closeConnections()
 			return nil
 		case event := <-r.watcher.Events:
 			if isIgnoredWorkspaceAbsolutePath(r.rootDir, event.Name) {
@@ -190,9 +186,6 @@ func (r *workspaceReplica) removeMissingTracked(activeIDs map[string]struct{}) e
 		if _, ok := activeIDs[documentID]; ok {
 			continue
 		}
-		if tracked.Conn != nil {
-			_ = tracked.Conn.Close()
-		}
 		delete(r.projectedByID, documentID)
 		delete(r.projectedByPath, tracked.Path)
 		if isIgnoredDocumentPath(tracked.DocumentPath) || isIgnoredWorkspaceAbsolutePath(r.rootDir, tracked.Path) {
@@ -225,7 +218,8 @@ func (r *workspaceReplica) ensureTracked(ctx context.Context, document *document
 	r.mu.Unlock()
 
 	if exists {
-		tracked.StateVector = document.StateVector
+		tracked.ActorID = r.actorID
+		tracked.ActorType = r.actorKind()
 		if tracked.WorkspaceRoot == "" {
 			tracked.WorkspaceRoot = workspaceRootForDocumentPath(absolutePath, document.Path)
 		}
@@ -248,11 +242,6 @@ func (r *workspaceReplica) ensureTracked(ctx context.Context, document *document
 				return err
 			}
 		}
-		if tracked.getConn() == nil {
-			if err := r.connectDocument(tracked); err != nil {
-				return err
-			}
-		}
 		if tracked.isLocalDirty() {
 			r.markDocumentDirty(tracked.DocumentID)
 		}
@@ -263,9 +252,8 @@ func (r *workspaceReplica) ensureTracked(ctx context.Context, document *document
 	if err != nil {
 		return err
 	}
-	if err := r.connectDocument(tracked); err != nil {
-		return err
-	}
+	tracked.ActorID = r.actorID
+	tracked.ActorType = r.actorKind()
 
 	r.mu.Lock()
 	r.projectedByPath[absolutePath] = tracked
@@ -275,71 +263,6 @@ func (r *workspaceReplica) ensureTracked(ctx context.Context, document *document
 		r.markDocumentDirty(tracked.DocumentID)
 	}
 	return nil
-}
-
-func (r *workspaceReplica) connectDocument(tracked *trackedFile) error {
-	if current := tracked.getConn(); current != nil {
-		return nil
-	}
-	paceDocumentConnect()
-	clientID, syncStep := tracked.initialSyncState()
-	query := url.Values{
-		"client_id":  {fmt.Sprintf("%d", clientID)},
-		"actor_id":   {r.actorID},
-		"actor_type": {r.actorKind()},
-	}
-	conn, _, err := dialWorkspaceWebsocket(context.Background(), r.cfg, "/ws/documents/"+tracked.DocumentID, query, r.actingAgentID())
-	if err != nil {
-		return err
-	}
-	log.Printf("%s ws open doc=%s", r.actorID, tracked.DocumentID)
-	tracked.setConn(conn)
-	go r.readLoop(tracked, conn)
-	if err := tracked.write(syncStep); err != nil {
-		return err
-	}
-	if err := tracked.write(yproto.BuildAwarenessUpdate(map[uint64]yproto.AwarenessState{
-		clientID: {
-			Clock: 1,
-			State: []byte(fmt.Sprintf(`{"actorId":"%s","activity":"Syncing %s"}`, r.actorID, filepath.Base(tracked.Path))),
-		},
-	}, []uint64{clientID})); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (r *workspaceReplica) readLoop(tracked *trackedFile, conn *websocket.Conn) {
-	for {
-		messageType, payload, err := conn.ReadMessage()
-		if err != nil {
-			tracked.clearConn(conn)
-			log.Printf("%s ws read close doc=%s err=%v", r.actorID, tracked.DocumentID, err)
-			return
-		}
-		if messageType != websocket.BinaryMessage {
-			continue
-		}
-		topLevel, reader, err := yproto.DecodeProtocolMessage(payload)
-		if err != nil {
-			continue
-		}
-		switch topLevel {
-		case yproto.MessageSync:
-			reply, changed, err := handleRemoteSyncMessage(reader, tracked, "remote")
-			if err != nil {
-				log.Printf("%s ws sync error doc=%s err=%v", r.actorID, tracked.DocumentID, err)
-				continue
-			}
-			if changed {
-				r.markDocumentDirty(tracked.DocumentID)
-			}
-			if len(reply) > 0 {
-				_ = tracked.write(reply)
-			}
-		case yproto.MessageAwareness:
-		}
-	}
 }
 
 func (r *workspaceReplica) handleLocalChange(path string) error {
@@ -431,16 +354,6 @@ func (r *workspaceReplica) reconcileLocalWorkspace(ctx context.Context) error {
 		return r.refresh(ctx)
 	}
 	return nil
-}
-
-func (r *workspaceReplica) closeConnections() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, tracked := range r.projectedByID {
-		if conn := tracked.getConn(); conn != nil {
-			_ = conn.Close()
-		}
-	}
 }
 
 func (r *workspaceReplica) sendPresence(ctx context.Context) error {

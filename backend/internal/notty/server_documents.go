@@ -3,6 +3,8 @@ package notty
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -12,6 +14,14 @@ import (
 	"github.com/gorilla/websocket"
 	"notty/internal/yproto"
 )
+
+const maxRawDocumentUpdateBytes = 32 << 20
+
+type postDocumentUpdateResponse struct {
+	Accepted bool  `json:"accepted"`
+	Applied  bool  `json:"applied"`
+	UpdateID int64 `json:"updateId"`
+}
 
 func (s *Server) handleDocumentByPath(w http.ResponseWriter, r *http.Request) {
 	document, err := s.requestStore(r).GetDocumentMetadataByPath(r.URL.Query().Get("path"))
@@ -114,6 +124,45 @@ func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 		ActorID:    meta.ActorID,
 	}})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (s *Server) handlePostDocumentUpdate(w http.ResponseWriter, r *http.Request) {
+	documentID := chi.URLParam(r, "id")
+	store := s.requestStore(r)
+	if !store.HasDocument(documentID) {
+		writeError(w, http.StatusNotFound, ErrNotFound.Error())
+		return
+	}
+	payload, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRawDocumentUpdateBytes))
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "document update is too large")
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if len(payload) == 0 {
+		writeError(w, http.StatusBadRequest, "document update is required")
+		return
+	}
+	auth, _ := authFromContext(r.Context())
+	meta := operationMetaFromAuth(auth, "document-update", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
+	meta.Source = "http"
+	meta.Trigger = "daemon outgoing update"
+	meta.Confidence = "high"
+	room := s.rooms.ForDocument(s.requestWorkspaceID(r) + ":" + documentID)
+	result, err := s.applyAndPublishDocumentUpdate(r, room, nil, documentID, payload, meta)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, postDocumentUpdateResponse{
+		Accepted: true,
+		Applied:  result.Applied,
+		UpdateID: result.Document.UpdateID,
+	})
 }
 
 func (s *Server) handleDocumentWebsocket(w http.ResponseWriter, r *http.Request) {
@@ -270,27 +319,11 @@ func (s *Server) handleDocumentProtocolMessageWithStore(store *Store, broker *Br
 				return nil
 			}
 			log.Printf("document ws inbound update doc=%s actor=%s actor_type=%s sync_type=%s bytes=%d canonical_empty_yjs_update=%t", documentID, meta.ActorID, meta.ActorType, documentSyncTypeLabel(syncType), len(data), isCanonicalEmptyYjsUpdate(data))
-			if isCanonicalEmptyYjsUpdate(data) {
-				return nil
-			}
-			result, err := store.ApplyCRDTUpdateWithResult(documentID, data, meta)
+			result, err := applyAndPublishDocumentUpdate(store, broker, room, session, documentID, data, meta)
 			if err != nil {
 				return err
 			}
 			log.Printf("document ws apply result doc=%s actor=%s actor_type=%s sync_type=%s bytes=%d applied=%t update_id=%d", documentID, meta.ActorID, meta.ActorType, documentSyncTypeLabel(syncType), len(data), result.Applied, result.Document.UpdateID)
-			if !result.Applied {
-				return nil
-			}
-			updated := result.Document
-			room.BroadcastSyncUpdate(yproto.BuildSyncUpdate(data), session)
-			broker.Publish(EventEnvelope{Type: "document.updated", Data: DocumentUpdateEvent{
-				DocumentID: updated.ID,
-				UpdateID:   updated.UpdateID,
-				Path:       updated.Path,
-				UpdatedAt:  updated.UpdatedAt,
-				ActorID:    meta.ActorID,
-			}})
-			publishAgentInboxChanges(store, broker)
 		}
 	case yproto.MessageAwareness:
 		updates, err := yproto.DecodeAwarenessUpdate(reader)
@@ -306,6 +339,42 @@ func (s *Server) handleDocumentProtocolMessageWithStore(store *Store, broker *Br
 		room.BroadcastBestEffort(broadcast, session)
 	}
 	return nil
+}
+
+func (s *Server) applyAndPublishDocumentUpdate(r *http.Request, room *DocumentRoom, exclude *DocumentConn, documentID string, update []byte, meta OperationMeta) (*ApplyCRDTUpdateResult, error) {
+	return applyAndPublishDocumentUpdate(s.requestStore(r), s.requestBroker(r), room, exclude, documentID, update, meta)
+}
+
+func applyAndPublishDocumentUpdate(store *Store, broker *Broker, room *DocumentRoom, exclude *DocumentConn, documentID string, update []byte, meta OperationMeta) (*ApplyCRDTUpdateResult, error) {
+	if isCanonicalEmptyYjsUpdate(update) {
+		document, err := store.GetDocument(documentID)
+		if err != nil {
+			return nil, err
+		}
+		return &ApplyCRDTUpdateResult{Document: document, Applied: false}, nil
+	}
+	result, err := store.ApplyCRDTUpdateWithResult(documentID, update, meta)
+	if err != nil {
+		return nil, err
+	}
+	if !result.Applied {
+		return result, nil
+	}
+	updated := result.Document
+	if room != nil {
+		room.BroadcastSyncUpdate(yproto.BuildSyncUpdate(update), exclude)
+	}
+	if broker != nil {
+		broker.Publish(EventEnvelope{Type: "document.updated", Data: DocumentUpdateEvent{
+			DocumentID: updated.ID,
+			UpdateID:   updated.UpdateID,
+			Path:       updated.Path,
+			UpdatedAt:  updated.UpdatedAt,
+			ActorID:    meta.ActorID,
+		}})
+		publishAgentInboxChanges(store, broker)
+	}
+	return result, nil
 }
 
 func documentSyncTypeLabel(syncType uint64) string {

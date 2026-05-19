@@ -177,7 +177,7 @@ func (s *Service) reconcileDocumentForThreadAnchor(ctx context.Context, document
 	}
 	tracked := s.collectTrackedByDocument()[documentID]
 	if len(tracked) > 0 {
-		if err := reconcileTrackedDocument(s.docCache, documentID, tracked); err != nil {
+		if err := s.reconcileTrackedDocument(ctx, documentID, tracked); err != nil {
 			return err
 		}
 		for _, file := range tracked {

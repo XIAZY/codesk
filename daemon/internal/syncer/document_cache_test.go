@@ -68,7 +68,7 @@ func TestDocumentCacheMaterializesIndependentMutableDocs(t *testing.T) {
 	}
 }
 
-func TestDocumentCacheReportsUnknownContentWithoutCacheOrBootstrapState(t *testing.T) {
+func TestDocumentCacheReportsUnknownContentWithoutCacheState(t *testing.T) {
 	cache, err := newDocumentCache(t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
@@ -76,13 +76,16 @@ func TestDocumentCacheReportsUnknownContentWithoutCacheOrBootstrapState(t *testi
 
 	materialized, err := cache.materialize(context.Background(), &document{ID: "doc_1", Path: "docs/spec.md"})
 	if err != nil {
-		t.Fatalf("materialize uncached doc: %v", err)
+		t.Fatalf("materialize missing state: %v", err)
 	}
 	if materialized.ContentKnown {
-		t.Fatal("expected uncached metadata-only document content to be unknown")
+		t.Fatal("missing state.bin must not be treated as materialized document content")
 	}
 	if got := materialized.Doc.GetText("content").ToString(); got != "" {
-		t.Fatalf("expected unknown document to start empty locally, got %q", got)
+		t.Fatalf("expected empty placeholder doc, got %q", got)
+	}
+	if _, err := os.Stat(cache.statePath("doc_1")); !os.IsNotExist(err) {
+		t.Fatalf("missing state must not initialize state.bin, stat err=%v", err)
 	}
 
 	text := materialized.Doc.GetText("content")
@@ -98,74 +101,6 @@ func TestDocumentCacheReportsUnknownContentWithoutCacheOrBootstrapState(t *testi
 	}
 	if got := next.Doc.GetText("content").ToString(); !next.ContentKnown || got != "after websocket sync" {
 		t.Fatalf("expected websocket-populated cache to be known, known=%v content=%q", next.ContentKnown, got)
-	}
-}
-
-func TestDocumentCacheTreatsEmptyStateVectorAsKnownEmptyContent(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
-	if err != nil {
-		t.Fatalf("new cache: %v", err)
-	}
-
-	materialized, err := cache.materialize(context.Background(), &document{
-		ID:          "doc_1",
-		Path:        "docs/empty.md",
-		StateVector: emptyDocumentStateVector,
-	})
-	if err != nil {
-		t.Fatalf("materialize empty doc: %v", err)
-	}
-	if !materialized.ContentKnown {
-		t.Fatal("expected empty-state document content to be known")
-	}
-	if got := materialized.Doc.GetText("content").ToString(); got != "" {
-		t.Fatalf("expected empty document content, got %q", got)
-	}
-}
-
-func TestDocumentCacheMaybeStoreDocCheckpointsInsteadOfEveryUpdate(t *testing.T) {
-	root := t.TempDir()
-	cache, err := newDocumentCache(root)
-	if err != nil {
-		t.Fatalf("new cache: %v", err)
-	}
-	doc := newDocWithText(t, "alpha")
-	if err := cache.maybeStoreDoc("doc_1", "docs/spec.md", 1, doc); err != nil {
-		t.Fatalf("initial cache store: %v", err)
-	}
-
-	for i := 0; i < documentCachePersistEveryUpdates-1; i++ {
-		appendText(t, doc, "x")
-		if err := cache.maybeStoreDoc("doc_1", "docs/spec.md", int64(i+2), doc); err != nil {
-			t.Fatalf("skip cache store %d: %v", i, err)
-		}
-	}
-	reopened, err := newDocumentCache(root)
-	if err != nil {
-		t.Fatalf("reopen cache before checkpoint: %v", err)
-	}
-	beforeCheckpoint, err := reopened.materialize(context.Background(), &document{ID: "doc_1", Path: "docs/spec.md"})
-	if err != nil {
-		t.Fatalf("materialize before checkpoint: %v", err)
-	}
-	if got := beforeCheckpoint.Doc.GetText("content").ToString(); got != "alpha" {
-		t.Fatalf("expected disk cache to remain at last checkpoint, got %q", got)
-	}
-
-	appendText(t, doc, "x")
-	if err := cache.maybeStoreDoc("doc_1", "docs/spec.md", documentCachePersistEveryUpdates+1, doc); err != nil {
-		t.Fatalf("checkpoint cache store: %v", err)
-	}
-	reopened, err = newDocumentCache(root)
-	if err != nil {
-		t.Fatalf("reopen cache after checkpoint: %v", err)
-	}
-	afterCheckpoint, err := reopened.materialize(context.Background(), &document{ID: "doc_1", Path: "docs/spec.md"})
-	if err != nil {
-		t.Fatalf("materialize after checkpoint: %v", err)
-	}
-	if got := afterCheckpoint.Doc.GetText("content").ToString(); got != doc.GetText("content").ToString() {
-		t.Fatalf("expected disk cache checkpoint to catch up, got %q", got)
 	}
 }
 
@@ -216,7 +151,7 @@ func TestDocumentCacheDropsCorruptCachedState(t *testing.T) {
 		t.Fatalf("corrupt cached state: %v", err)
 	}
 
-	doc, metadata, state, err := cache.loadBaseDoc("doc_1", "docs/spec.md")
+	doc, _, state, err := cache.loadBaseDoc("doc_1", "docs/spec.md")
 	if err != nil {
 		t.Fatalf("load corrupt cached state: %v", err)
 	}
@@ -226,18 +161,7 @@ func TestDocumentCacheDropsCorruptCachedState(t *testing.T) {
 	if got := doc.GetText("content").ToString(); got != "" {
 		t.Fatalf("expected empty doc after dropping corrupt cache, got %q", got)
 	}
-	if metadata.StateSHA256 != "" || metadata.StateVector != "" {
-		t.Fatalf("expected corrupt state metadata to be cleared, got %#v", metadata)
-	}
 	if _, err := os.Stat(cache.statePath("doc_1")); !os.IsNotExist(err) {
 		t.Fatalf("expected corrupt state file to be removed, stat err=%v", err)
 	}
-}
-
-func appendText(t *testing.T, doc *crdt.Doc, value string) {
-	t.Helper()
-	text := doc.GetText("content")
-	doc.Transact(func(txn *crdt.Transaction) {
-		text.Insert(txn, text.LenInTxn(txn), value, nil)
-	}, "test")
 }

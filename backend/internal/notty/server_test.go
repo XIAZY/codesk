@@ -74,7 +74,6 @@ func TestWorkspaceEndpointsOmitDocumentPayloads(t *testing.T) {
 	assertNonOK(t, router, http.MethodGet, "/api/documents", nil)
 	assertNonOK(t, router, http.MethodGet, "/api/documents/"+documentID, nil)
 	assertNonOK(t, router, http.MethodPost, "/api/documents/"+documentID+"/sync", []byte(`{"stateVector":""}`))
-	assertNonOK(t, router, http.MethodPost, "/api/documents/"+documentID+"/updates", []byte(`{"update":""}`))
 	assertNonOK(t, router, http.MethodPost, "/api/proposals", []byte(`{}`))
 }
 
@@ -175,6 +174,99 @@ func TestDocumentProtocolUpdatePublishesMetadataOnlyWorkspaceEvent(t *testing.T)
 		}
 	default:
 		t.Fatal("expected document.updated event to be published")
+	}
+}
+
+func TestHTTPDocumentUpdatePersistsBroadcastsAndAttributesActor(t *testing.T) {
+	server, store := newTestServer(t)
+	documentID := mustCreateTestDocument(t, store, "docs/http-update.md", "alpha")
+	peerDoc := syncDocumentToDocForTest(t, store, documentID, 77)
+	text := peerDoc.GetText("content")
+	update := captureDocUpdate(t, peerDoc, "agent-edit", func(txn *crdt.Transaction) {
+		text.Insert(txn, text.LenInTxn(txn), " beta", nil)
+	})
+
+	events, unsubscribe := server.subscribers.Subscribe()
+	defer unsubscribe()
+	room := server.rooms.ForDocument(store.Snapshot().WorkspaceID + ":" + documentID)
+	viewer := &DocumentConn{send: make(chan []byte, 4)}
+	room.Add(viewer)
+	defer room.Remove(viewer)
+	broadcastDoc := syncDocumentToDocForTest(t, store, documentID, 88)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/documents/"+documentID+"/updates?actor=agent_1&actor_type=agent", bytes.NewReader(update))
+	request.Header.Set("Content-Type", "application/octet-stream")
+	server.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected HTTP update status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response postDocumentUpdateResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode update response: %v", err)
+	}
+	if !response.Accepted || !response.Applied || response.UpdateID == 0 {
+		t.Fatalf("unexpected update response: %#v", response)
+	}
+	if got := currentDocumentContentForTest(t, store, documentID); got != "alpha beta" {
+		t.Fatalf("unexpected document content after HTTP update: %q", got)
+	}
+
+	select {
+	case payload := <-viewer.send:
+		applySyncPayloadToDoc(t, broadcastDoc, payload, "http-broadcast")
+		if got := broadcastDoc.GetText("content").ToString(); got != "alpha beta" {
+			t.Fatalf("unexpected broadcast content: %q", got)
+		}
+	default:
+		t.Fatal("expected HTTP update to broadcast sync update")
+	}
+
+	select {
+	case event := <-events:
+		if event.Type != "document.updated" {
+			t.Fatalf("expected document.updated event, got %#v", event)
+		}
+		payload, ok := event.Data.(DocumentUpdateEvent)
+		if !ok {
+			t.Fatalf("expected document update payload, got %#v", event.Data)
+		}
+		if payload.ActorID != "agent_1" {
+			t.Fatalf("expected actor attribution agent_1, got %#v", payload)
+		}
+	default:
+		t.Fatal("expected document.updated event")
+	}
+}
+
+func TestHTTPDocumentUpdateAcceptsCanonicalEmptyUpdateWithoutMutation(t *testing.T) {
+	server, store := newTestServer(t)
+	documentID := mustCreateTestDocument(t, store, "docs/http-empty-update.md", "alpha")
+	before, err := store.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get before document: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/documents/"+documentID+"/updates?actor=agent_1&actor_type=agent", bytes.NewReader([]byte{0, 0}))
+	request.Header.Set("Content-Type", "application/octet-stream")
+	server.Routes().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected HTTP empty update status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response postDocumentUpdateResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode update response: %v", err)
+	}
+	if !response.Accepted || response.Applied || response.UpdateID != before.UpdateID {
+		t.Fatalf("unexpected empty update response: %#v before=%d", response, before.UpdateID)
+	}
+	after, err := store.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get after document: %v", err)
+	}
+	if after.UpdateID != before.UpdateID {
+		t.Fatalf("empty update changed document version: before=%d after=%d", before.UpdateID, after.UpdateID)
 	}
 }
 
