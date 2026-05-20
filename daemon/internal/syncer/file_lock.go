@@ -1,14 +1,11 @@
 package syncer
 
 import (
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"syscall"
 )
-
-var errProjectedFileDiverged = errors.New("projected file diverged from last materialized content")
 
 func readFileLocked(path string) ([]byte, error) {
 	file, err := os.Open(path)
@@ -45,19 +42,12 @@ func appendOpenFileLocked(file *os.File, line string) error {
 }
 
 func writeIfChanged(path string, content string) error {
-	return writeFileLocked(path, content, projectedContentHash{}, false)
+	return writeFileLocked(path, content)
 }
 
-func writeProjectedFileLocked(path string, content string, expected projectedContentHash) error {
-	return writeFileLocked(path, content, expected, true)
-}
-
-func writeFileLocked(path string, content string, expected projectedContentHash, requireExpectedMatch bool) error {
+func writeFileLocked(path string, content string) error {
 	file, err := os.OpenFile(path, os.O_RDWR, 0o644)
-	if errors.Is(err, os.ErrNotExist) {
-		if requireExpectedMatch && isKnownProjectedHash(expected) && expected != projectedHashBytes(nil) {
-			return errProjectedFileDiverged
-		}
+	if os.IsNotExist(err) {
 		file, err = os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	}
 	if err != nil {
@@ -77,9 +67,6 @@ func writeFileLocked(path string, content string, expected projectedContentHash,
 	currentHash := projectedHashBytes(current)
 	if currentHash == nextHash {
 		return nil
-	}
-	if requireExpectedMatch && isKnownProjectedHash(expected) && currentHash != expected {
-		return errProjectedFileDiverged
 	}
 	info, err := file.Stat()
 	if err != nil {

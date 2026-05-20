@@ -48,6 +48,7 @@ type Service struct {
 	latestWorkspace *workspaceResponse
 	docCache        *documentCache
 	reconcileQueue  *reconcileQueue
+	localCreates    *localCreateQueue
 }
 
 type managedReplica struct {
@@ -72,6 +73,8 @@ type trackedFile struct {
 	WorkspaceRoot         string
 	ActorID               string
 	ActorType             string
+	FS                    *WorkspaceFS
+	Owner                 *workspaceReplica
 	Doc                   *crdt.Doc
 	docMu                 *sync.Mutex
 	cache                 *documentCache
@@ -79,6 +82,9 @@ type trackedFile struct {
 	stateMu               sync.Mutex
 	projecting            int
 	localDirty            bool
+	localDeleted          bool
+	localMoved            bool
+	remoteDeleted         bool
 	hash                  projectedContentHash
 	projectedContentKnown bool
 }
@@ -152,6 +158,46 @@ type postDocumentUpdateResponse struct {
 	UpdateID int64 `json:"updateId"`
 }
 
+type localCreateCandidate struct {
+	Root      string
+	Path      string
+	ActorID   string
+	ActorType string
+}
+
+type localCreateQueue struct {
+	mu         sync.Mutex
+	candidates map[string]localCreateCandidate
+}
+
+func newLocalCreateQueue() *localCreateQueue {
+	return &localCreateQueue{candidates: map[string]localCreateCandidate{}}
+}
+
+func (q *localCreateQueue) Mark(candidate localCreateCandidate) {
+	if q == nil || strings.TrimSpace(candidate.Path) == "" {
+		return
+	}
+	q.mu.Lock()
+	q.candidates[candidate.Path] = candidate
+	q.mu.Unlock()
+}
+
+func (q *localCreateQueue) Drain() []localCreateCandidate {
+	if q == nil {
+		return nil
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	candidates := make([]localCreateCandidate, 0, len(q.candidates))
+	for _, candidate := range q.candidates {
+		candidates = append(candidates, candidate)
+	}
+	q.candidates = map[string]localCreateCandidate{}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Path < candidates[j].Path })
+	return candidates
+}
+
 func New(cfg Config) (*Service, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	cache, err := newDocumentCache(cfg.CacheDir)
@@ -159,7 +205,8 @@ func New(cfg Config) (*Service, error) {
 		return nil, err
 	}
 	queue := newReconcileQueue()
-	primaryReplica, err := newWorkspaceReplica(cfg, cfg.WorkspaceDir, cfg.AgentID, "daemon", queue.Mark)
+	localCreates := newLocalCreateQueue()
+	primaryReplica, err := newWorkspaceReplica(cfg, cfg.WorkspaceDir, cfg.AgentID, "daemon", queue.Mark, localCreates.Mark)
 	if err != nil {
 		return nil, err
 	}
@@ -174,6 +221,7 @@ func New(cfg Config) (*Service, error) {
 		agentWorkers:   map[string]*managedAgentWorker{},
 		docCache:       cache,
 		reconcileQueue: queue,
+		localCreates:   localCreates,
 	}
 	service.sessions = newAgentSessionSupervisor(cfg, service.updateRemoteAgentSession, nil)
 	service.sessions.SetIdleWake(service.wakeAgentWorker)
@@ -229,10 +277,16 @@ func (s *Service) Run(ctx context.Context) error {
 			_ = shutdownToolGateway(context.Background(), s.toolServer)
 			return nil
 		case <-reconcileTicker.C:
+			if err := s.processLocalCreates(ctx); err != nil {
+				fmt.Printf("local create reconcile error: %v\n", err)
+			}
 			if err := s.reconcileDirtyDocuments(ctx); err != nil {
 				fmt.Printf("document reconcile error: %v\n", err)
 			}
 		case <-ticker.C:
+			if err := s.processLocalCreates(ctx); err != nil {
+				fmt.Printf("local create reconcile error: %v\n", err)
+			}
 			if err := s.reconcileTrackedDocuments(ctx); err != nil {
 				fmt.Printf("document reconcile error: %v\n", err)
 			}
@@ -425,6 +479,96 @@ func (s *Service) fetchWorkspace(ctx context.Context) (*workspaceResponse, error
 	return &workspace, nil
 }
 
+func (s *Service) processLocalCreates(ctx context.Context) error {
+	if s == nil || s.localCreates == nil {
+		return nil
+	}
+	candidates := s.localCreates.Drain()
+	if len(candidates) == 0 {
+		return nil
+	}
+	created := false
+	var firstErr error
+	for _, candidate := range candidates {
+		if ctx.Err() != nil {
+			s.localCreates.Mark(candidate)
+			if firstErr == nil {
+				firstErr = ctx.Err()
+			}
+			continue
+		}
+		document, err := s.createDocumentFromLocalCandidate(ctx, candidate)
+		if err != nil {
+			s.localCreates.Mark(candidate)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if document != nil {
+			created = true
+			s.markDocumentDirty(document.ID)
+		}
+	}
+	if created {
+		if err := s.refresh(ctx); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func (s *Service) createDocumentFromLocalCandidate(ctx context.Context, candidate localCreateCandidate) (*document, error) {
+	fs := NewWorkspaceFS(candidate.Root)
+	snapshot, err := fs.Read(candidate.Path)
+	if err != nil {
+		return nil, err
+	}
+	if !snapshot.Exists {
+		return nil, nil
+	}
+	relativePath := workspaceRelativePath(candidate.Root, candidate.Path)
+	payload, err := json.Marshal(createDocumentRequest{
+		Path:    relativePath,
+		Content: string(snapshot.Bytes),
+	})
+	if err != nil {
+		return nil, err
+	}
+	req, err := s.newBackendRequest(ctx, http.MethodPost, "/api/documents", bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(candidate.ActorType) == "agent" && strings.TrimSpace(candidate.ActorID) != "" {
+		applyBackendAuth(req.Header, s.cfg, candidate.ActorID)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(io.LimitReader(res.Body, backendErrorBodyLimit))
+		return nil, &backendStatusError{Method: req.Method, URL: req.URL.String(), StatusCode: res.StatusCode, Body: string(body)}
+	}
+	var created document
+	if err := json.NewDecoder(res.Body).Decode(&created); err != nil {
+		return nil, err
+	}
+	tracked := &trackedFile{
+		DocumentID:    created.ID,
+		DocumentPath:  created.Path,
+		Path:          candidate.Path,
+		WorkspaceRoot: candidate.Root,
+		FS:            fs,
+	}
+	if err := tracked.storeProjectedBase(string(snapshot.Bytes), crdtStateFromContent(string(snapshot.Bytes))); err != nil {
+		return nil, err
+	}
+	return &created, nil
+}
+
 func (s *Service) reconcileAgentWorkers(ctx context.Context, agents []*agent) error {
 	desired := make(map[string]struct{}, len(agents))
 	skills := agentSkillExecutor{service: s}
@@ -578,6 +722,7 @@ type trackedReconcileState struct {
 }
 
 var errProjectedBaseDoesNotMatchCRDTState = errors.New("projected base does not match cached CRDT state")
+var errDocumentRemovedDuringReconcile = errors.New("document removed during reconciliation")
 
 func (s *Service) reconcileDirtyDocuments(ctx context.Context) error {
 	if s.reconcileQueue == nil {
@@ -679,8 +824,8 @@ func (s *Service) documentNeedsReconcile(documentID string, trackedFiles []*trac
 	}
 	entry, unlock := s.docCache.lockEntry(documentID)
 	defer unlock()
-	outbox, err := s.docCache.loadOutboxUpdateLocked(entry, documentID)
-	if err != nil || outbox != nil {
+	outboxes, err := s.docCache.loadOutboxUpdatesLocked(entry, documentID)
+	if err != nil || len(outboxes) > 0 {
 		return true
 	}
 	count, err := s.docCache.pendingRemoteUpdateCountLocked(entry, documentID)
@@ -696,72 +841,38 @@ func (s *Service) reconcileTrackedDocument(ctx context.Context, documentID strin
 	entry, unlock := cache.lockEntry(documentID)
 	defer unlock()
 
-	outbox, err := cache.loadOutboxUpdateLocked(entry, documentID)
+	outboxes, err := cache.loadOutboxUpdatesLocked(entry, documentID)
 	if err != nil {
 		return err
 	}
-	if outbox != nil {
-		if _, err := s.postDocumentUpdate(ctx, documentID, outbox); err != nil {
-			return err
-		}
-		return finalizeAcceptedOutbox(cache, entry, documentID, documentPath, trackedFiles, outbox)
-	}
-
-	pendingRemoteCount, err := cache.pendingRemoteUpdateCountLocked(entry, documentID)
-	if err != nil {
-		if errors.Is(err, errPendingUpdateLogHashMismatch) {
-			if clearErr := cache.clearPendingRemoteUpdatesLocked(entry, documentID); clearErr != nil {
-				return fmt.Errorf("clear corrupt pending remote updates for %s: %w", documentID, clearErr)
-			}
-			pendingRemoteCount = 0
-		} else {
-			return err
-		}
-	}
-	if pendingRemoteCount == 0 && !hasTrackedLocalDirty(trackedFiles) {
-		return nil
+	if len(outboxes) > 0 {
+		return s.flushOutboxUpdatesLocked(ctx, cache, entry, documentID, documentPath, trackedFiles, outboxes)
 	}
 
 	baseDoc, metadata, baseState, err := cache.loadBaseDocLocked(entry, documentID, documentPath)
 	if err != nil {
 		return err
 	}
-	if pendingRemoteCount > 0 {
-		if err := applyPendingRemoteUpdatesLocked(cache, entry, documentID, baseDoc); err != nil {
-			return err
-		}
-		metadata.DocumentID = documentID
-		if metadata.Path == "" {
-			metadata.Path = documentPath
-		}
-		metadata.UpdatedAt = time.Now().UTC()
-		if err := cache.storeDocLocked(entry, metadata, baseDoc); err != nil {
-			return err
-		}
-		if err := cache.clearPendingRemoteUpdatesLocked(entry, documentID); err != nil {
-			return err
-		}
-		baseState = baseDoc.EncodeStateAsUpdate()
-	}
-	cacheContentKnown := len(baseState) > 0
+	cacheContentKnown := baseState != nil
 	baseContent := baseDoc.GetText("content").ToString()
 	states, err := collectTrackedReconcileStates(trackedFiles)
 	if err != nil {
 		return err
 	}
-	hasReconcileWork := pendingRemoteCount > 0
-	for _, state := range states {
-		if state.localDirty || state.baseMissing {
-			hasReconcileWork = true
-			break
+	handledMetadata, err := s.reconcileLocalMetadataOperations(ctx, cache, entry, documentID, states)
+	if err != nil {
+		if errors.Is(err, errDocumentRemovedDuringReconcile) {
+			return nil
 		}
+		return err
 	}
-	if !hasReconcileWork {
+	if handledMetadata {
 		return nil
 	}
 
 	missingBase := map[*trackedFile]trackedReconcileState{}
 	projectOnlyDirty := map[*trackedFile]struct{}{}
+	records := make([]outboxUpdateRecord, 0)
 	for _, state := range states {
 		if state.baseMissing {
 			missingBase[state.tracked] = state
@@ -788,17 +899,7 @@ func (s *Service) reconcileTrackedDocument(ctx context.Context, documentID strin
 			projectOnlyDirty[state.tracked] = struct{}{}
 			continue
 		}
-		actorID := strings.TrimSpace(state.tracked.ActorID)
-		actorType := strings.TrimSpace(state.tracked.ActorType)
-		if actorID == "" {
-			actorID = strings.TrimSpace(s.cfg.AgentID)
-		}
-		if actorID == "" {
-			actorID = "daemon"
-		}
-		if actorType == "" {
-			actorType = "daemon"
-		}
+		actorID, actorType := s.actorForTracked(state.tracked)
 		record := outboxUpdateRecord{
 			Update:          update,
 			ObservedContent: state.localContent,
@@ -808,22 +909,69 @@ func (s *Service) reconcileTrackedDocument(ctx context.Context, documentID strin
 			ActorType:       actorType,
 			CreatedAt:       time.Now().UTC(),
 		}
-		if err := cache.storeOutboxUpdateLocked(entry, documentID, documentPath, record); err != nil {
-			return err
-		}
+		records = append(records, record)
 		state.tracked.markLocalDirty()
-		if _, err := s.postDocumentUpdate(ctx, documentID, &record); err != nil {
+	}
+	if len(records) > 0 {
+		if err := cache.storeOutboxUpdatesLocked(entry, documentID, documentPath, records); err != nil {
 			return err
 		}
-		return finalizeAcceptedOutbox(cache, entry, documentID, documentPath, trackedFiles, &record)
+		return s.flushOutboxUpdatesLocked(ctx, cache, entry, documentID, documentPath, trackedFiles, records)
 	}
-	if pendingRemoteCount == 0 && len(missingBase) == 0 && len(projectOnlyDirty) == 0 {
+
+	pendingRemoteCount, err := cache.pendingRemoteUpdateCountLocked(entry, documentID)
+	if err != nil {
+		if errors.Is(err, errPendingUpdateLogHashMismatch) {
+			if clearErr := cache.clearPendingRemoteUpdatesLocked(entry, documentID); clearErr != nil {
+				return fmt.Errorf("clear corrupt pending remote updates for %s: %w", documentID, clearErr)
+			}
+			pendingRemoteCount = 0
+		} else {
+			return err
+		}
+	}
+	if pendingRemoteCount > 0 {
+		if err := applyPendingRemoteUpdatesLocked(cache, entry, documentID, baseDoc); err != nil {
+			return err
+		}
+		metadata.DocumentID = documentID
+		if metadata.Path == "" {
+			metadata.Path = documentPath
+		}
+		metadata.UpdatedAt = time.Now().UTC()
+		if err := cache.storeDocLocked(entry, metadata, baseDoc); err != nil {
+			return err
+		}
+		if err := cache.clearPendingRemoteUpdatesLocked(entry, documentID); err != nil {
+			return err
+		}
+		baseState = baseDoc.EncodeStateAsUpdate()
+		cacheContentKnown = baseState != nil
+		baseContent = baseDoc.GetText("content").ToString()
+	}
+
+	hasReconcileWork := pendingRemoteCount > 0 || len(missingBase) > 0 || len(projectOnlyDirty) > 0
+	for _, state := range states {
+		if !state.fileExists && state.baseKnown {
+			hasReconcileWork = true
+			break
+		}
+	}
+	if !hasReconcileWork {
 		return nil
 	}
 
 	finalContent := baseDoc.GetText("content").ToString()
 	finalState := baseDoc.EncodeStateAsUpdate()
 	for _, state := range states {
+		pathReady, err := reconcileTrackedPathForProjection(state)
+		if err != nil {
+			return err
+		}
+		if !pathReady {
+			state.tracked.markLocalDirty()
+			continue
+		}
 		if _, ok := missingBase[state.tracked]; ok {
 			if state.fileExists {
 				if err := archiveUnknownWorkingCopy(state.tracked); err != nil {
@@ -875,6 +1023,122 @@ func (s *Service) reconcileTrackedDocument(ctx context.Context, documentID strin
 	return nil
 }
 
+func (s *Service) reconcileLocalMetadataOperations(ctx context.Context, cache *documentCache, entry *documentCacheEntry, documentID string, states []trackedReconcileState) (bool, error) {
+	for _, state := range states {
+		tracked := state.tracked
+		if tracked == nil || !tracked.isRemoteDeleted() {
+			continue
+		}
+		if err := cleanupRemovedDocument(cache, entry, documentID, states); err != nil {
+			return false, err
+		}
+		return true, errDocumentRemovedDuringReconcile
+	}
+	for _, state := range states {
+		tracked := state.tracked
+		if tracked == nil || !tracked.isLocalDeleted() {
+			continue
+		}
+		if !state.baseKnown {
+			tracked.clearLocalDeleted()
+			tracked.clearLocalDirty()
+			continue
+		}
+		if err := s.deleteRemoteDocument(ctx, tracked); err != nil {
+			return false, err
+		}
+		if err := cleanupRemovedDocument(cache, entry, documentID, states); err != nil {
+			return false, err
+		}
+		return true, errDocumentRemovedDuringReconcile
+	}
+	for _, state := range states {
+		tracked := state.tracked
+		if tracked == nil || !tracked.isLocalMoved() || state.localDirty {
+			continue
+		}
+		nextPath := workspaceRelativePath(tracked.WorkspaceRoot, tracked.Path)
+		if nextPath == "" || nextPath == "." || nextPath == tracked.DocumentPath {
+			tracked.clearLocalMoved()
+			continue
+		}
+		if err := s.updateRemoteDocumentPath(ctx, tracked, nextPath); err != nil {
+			return false, err
+		}
+		tracked.DocumentPath = nextPath
+		tracked.clearLocalMoved()
+		tracked.clearLocalDirty()
+		return true, nil
+	}
+	return false, nil
+}
+
+func cleanupRemovedDocument(cache *documentCache, entry *documentCacheEntry, documentID string, states []trackedReconcileState) error {
+	for _, state := range states {
+		tracked := state.tracked
+		if tracked == nil {
+			continue
+		}
+		if state.fileExists {
+			if state.baseKnown && !state.localDirty {
+				if err := tracked.workspaceFS().DeleteIfUnchanged(tracked.Path, projectedHashString(state.baseContent)); err != nil {
+					if errors.Is(err, ErrUnsafeDelete) {
+						if _, archiveErr := tracked.workspaceFS().Archive(tracked.Path, safeDocumentCacheName(documentID)); archiveErr != nil {
+							return archiveErr
+						}
+					} else {
+						return err
+					}
+				}
+			} else if _, err := tracked.workspaceFS().Archive(tracked.Path, safeDocumentCacheName(documentID)); err != nil {
+				return err
+			}
+		}
+		tracked.untrack()
+	}
+	if cache != nil && entry != nil {
+		if err := cache.removeDocumentLocked(entry, documentID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func reconcileTrackedPathForProjection(state trackedReconcileState) (bool, error) {
+	tracked := state.tracked
+	if tracked == nil || tracked.isLocalMoved() {
+		return !state.localDirty, nil
+	}
+	desiredPath := tracked.desiredPath()
+	if desiredPath == "" || desiredPath == tracked.Path {
+		return true, nil
+	}
+	if state.localDirty {
+		return false, nil
+	}
+	fs := tracked.workspaceFS()
+	if state.fileExists {
+		if state.baseKnown && projectedHashString(state.baseContent) == projectedHashString(state.localContent) {
+			if err := fs.MoveIfNoTarget(tracked.Path, desiredPath); err != nil {
+				if errors.Is(err, ErrPathCollision) {
+					if _, archiveErr := fs.Archive(desiredPath, safeDocumentCacheName(tracked.DocumentID)+"_collision"); archiveErr != nil {
+						return false, archiveErr
+					}
+					if retryErr := fs.MoveIfNoTarget(tracked.Path, desiredPath); retryErr != nil {
+						return false, retryErr
+					}
+				} else {
+					return false, err
+				}
+			}
+		} else if _, err := fs.Archive(tracked.Path, safeDocumentCacheName(tracked.DocumentID)); err != nil {
+			return false, err
+		}
+	}
+	tracked.setFilesystemPath(desiredPath)
+	return true, nil
+}
+
 func hasTrackedLocalDirty(trackedFiles []*trackedFile) bool {
 	for _, tracked := range trackedFiles {
 		if tracked != nil && tracked.isLocalDirty() {
@@ -882,6 +1146,94 @@ func hasTrackedLocalDirty(trackedFiles []*trackedFile) bool {
 		}
 	}
 	return false
+}
+
+func (s *Service) actorForTracked(tracked *trackedFile) (string, string) {
+	actorID := ""
+	actorType := ""
+	if tracked != nil {
+		actorID = strings.TrimSpace(tracked.ActorID)
+		actorType = strings.TrimSpace(tracked.ActorType)
+	}
+	if actorID == "" {
+		actorID = strings.TrimSpace(s.cfg.AgentID)
+	}
+	if actorID == "" {
+		actorID = "daemon"
+	}
+	if actorType == "" {
+		actorType = "daemon"
+	}
+	return actorID, actorType
+}
+
+func (s *Service) updateRemoteDocumentPath(ctx context.Context, tracked *trackedFile, path string) error {
+	if tracked == nil || tracked.DocumentID == "" {
+		return nil
+	}
+	payload, err := json.Marshal(updateDocumentRequest{Path: path})
+	if err != nil {
+		return err
+	}
+	req, err := s.newBackendRequest(ctx, http.MethodPatch, "/api/documents/"+tracked.DocumentID, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	if tracked.ActorType == "agent" && strings.TrimSpace(tracked.ActorID) != "" {
+		applyBackendAuth(req.Header, s.cfg, tracked.ActorID)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := s.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(io.LimitReader(res.Body, backendErrorBodyLimit))
+		return &backendStatusError{Method: req.Method, URL: req.URL.String(), StatusCode: res.StatusCode, Body: string(body)}
+	}
+	return nil
+}
+
+func (s *Service) deleteRemoteDocument(ctx context.Context, tracked *trackedFile) error {
+	if tracked == nil || tracked.DocumentID == "" {
+		return nil
+	}
+	req, err := s.newBackendRequest(ctx, http.MethodDelete, "/api/documents/"+tracked.DocumentID, nil)
+	if err != nil {
+		return err
+	}
+	if tracked.ActorType == "agent" && strings.TrimSpace(tracked.ActorID) != "" {
+		applyBackendAuth(req.Header, s.cfg, tracked.ActorID)
+	}
+	res, err := s.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(io.LimitReader(res.Body, backendErrorBodyLimit))
+		return &backendStatusError{Method: req.Method, URL: req.URL.String(), StatusCode: res.StatusCode, Body: string(body)}
+	}
+	return nil
+}
+
+func (s *Service) flushOutboxUpdatesLocked(ctx context.Context, cache *documentCache, entry *documentCacheEntry, documentID, documentPath string, trackedFiles []*trackedFile, records []outboxUpdateRecord) error {
+	for len(records) > 0 {
+		record := records[0]
+		if _, err := s.postDocumentUpdate(ctx, documentID, &record); err != nil {
+			return err
+		}
+		if err := finalizeAcceptedOutbox(cache, entry, documentID, documentPath, trackedFiles, &record); err != nil {
+			return err
+		}
+		var err error
+		records, err = cache.loadOutboxUpdatesLocked(entry, documentID)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func finalizeAcceptedOutbox(cache *documentCache, entry *documentCacheEntry, documentID, documentPath string, trackedFiles []*trackedFile, record *outboxUpdateRecord) error {
@@ -900,8 +1252,6 @@ func finalizeAcceptedOutbox(cache *documentCache, entry *documentCacheEntry, doc
 	if err != nil {
 		return err
 	}
-	baseContent := baseDoc.GetText("content").ToString()
-	_ = baseContent
 	states, err := collectTrackedReconcileStates(trackedFiles)
 	if err != nil {
 		return err
@@ -925,7 +1275,7 @@ func finalizeAcceptedOutbox(cache *documentCache, entry *documentCacheEntry, doc
 	if err := cache.clearPendingRemoteUpdatesLocked(entry, documentID); err != nil {
 		return err
 	}
-	if err := cache.clearOutboxUpdateLocked(entry, documentID); err != nil {
+	if err := cache.dropFirstOutboxUpdateLocked(entry, documentID); err != nil {
 		return err
 	}
 
@@ -1006,9 +1356,13 @@ func collectTrackedReconcileStates(trackedFiles []*trackedFile) ([]trackedReconc
 			}
 		} else {
 			state.baseMissing = true
+			if !tracked.isLocalDirty() {
+				states = append(states, state)
+				continue
+			}
 		}
-		contentBytes, err := readFileLocked(tracked.Path)
-		if errors.Is(err, os.ErrNotExist) {
+		snapshot, err := tracked.workspaceFS().Read(tracked.Path)
+		if err == nil && !snapshot.Exists {
 			states = append(states, state)
 			continue
 		}
@@ -1016,13 +1370,13 @@ func collectTrackedReconcileStates(trackedFiles []*trackedFile) ([]trackedReconc
 			return nil, err
 		}
 		state.fileExists = true
-		state.localContent = string(contentBytes)
+		state.localContent = string(snapshot.Bytes)
 		if state.baseMissing {
 			state.localDirty = true
 			states = append(states, state)
 			continue
 		}
-		if projectedHashBytes(contentBytes) == projectedHashString(state.baseContent) {
+		if snapshot.Hash == projectedHashString(state.baseContent) {
 			tracked.clearLocalDirty()
 			states = append(states, state)
 			continue
@@ -1080,8 +1434,8 @@ func applyProjectedContent(tracked *trackedFile, nextContent string, nextStates 
 	tracked.beginProjection()
 	defer tracked.endProjection()
 	tracked.setProjectedContent(nextContent)
-	if err := writeProjectedFile(tracked.Path, nextContent, previousHash); err != nil {
-		if errors.Is(err, errProjectedFileDiverged) {
+	if err := tracked.workspaceFS().WriteIfUnchanged(tracked.Path, previousHash, []byte(nextContent)); err != nil {
+		if errors.Is(err, ErrDivergedWorkingCopy) {
 			tracked.setProjectedSnapshot(previousHash, previousKnown)
 			return false, nil
 		}
@@ -1113,8 +1467,8 @@ func projectMergedContentOverLocalDisk(tracked *trackedFile, currentDiskContent 
 	tracked.beginProjection()
 	defer tracked.endProjection()
 	tracked.setProjectedContent(mergedContent)
-	if err := writeProjectedFile(tracked.Path, mergedContent, projectedHashString(currentDiskContent)); err != nil {
-		if errors.Is(err, errProjectedFileDiverged) {
+	if err := tracked.workspaceFS().WriteIfUnchanged(tracked.Path, projectedHashString(currentDiskContent), []byte(mergedContent)); err != nil {
+		if errors.Is(err, ErrDivergedWorkingCopy) {
 			if len(currentDiskState) == 0 {
 				currentDiskState = crdtStateFromContent(currentDiskContent)
 			}
@@ -1140,6 +1494,7 @@ func materializeTrackedFile(ctx context.Context, cache *documentCache, document 
 		DocumentPath:  document.Path,
 		Path:          absolutePath,
 		WorkspaceRoot: workspaceRootForDocumentPath(absolutePath, document.Path),
+		FS:            NewWorkspaceFS(workspaceRootForDocumentPath(absolutePath, document.Path)),
 		Doc:           crdt.New(),
 		docMu:         &sync.Mutex{},
 		cache:         cache,
@@ -1163,30 +1518,30 @@ func materializeTrackedFile(ctx context.Context, cache *documentCache, document 
 		}
 		if baseKnown {
 			tracked.setProjectedContent(baseContent)
-			content, readErr := readFileLocked(absolutePath)
-			if readErr == nil {
-				if !tracked.matchesProjectedBytes(content) {
+			snapshot, readErr := tracked.workspaceFS().Read(absolutePath)
+			if readErr == nil && snapshot.Exists {
+				if !tracked.matchesProjectedBytes(snapshot.Bytes) {
 					tracked.markLocalDirty()
 				}
 				return tracked, nil
 			}
-			if !errors.Is(readErr, os.ErrNotExist) {
+			if readErr != nil {
 				return nil, readErr
 			}
 			return tracked, nil
 		}
-		if _, readErr := readFileLocked(absolutePath); readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		if _, readErr := tracked.workspaceFS().Read(absolutePath); readErr != nil {
 			return nil, readErr
 		}
 		tracked.markLocalDirty()
 		return tracked, nil
 	}
-	content, err := readFileLocked(absolutePath)
-	if err == nil {
-		tracked.setProjectedContent(string(content))
+	snapshot, err := tracked.workspaceFS().Read(absolutePath)
+	if err == nil && snapshot.Exists {
+		tracked.setProjectedContent(string(snapshot.Bytes))
 		return tracked, nil
 	}
-	if !errors.Is(err, os.ErrNotExist) {
+	if err != nil {
 		return nil, err
 	}
 	if err := writeIfChanged(absolutePath, ""); err != nil {
@@ -1200,13 +1555,6 @@ func archiveUnknownWorkingCopy(tracked *trackedFile) error {
 	if tracked == nil || tracked.Path == "" {
 		return nil
 	}
-	content, err := readFileLocked(tracked.Path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
 	root := tracked.WorkspaceRoot
 	if root == "" {
 		root = workspaceRootForDocumentPath(tracked.Path, tracked.DocumentPath)
@@ -1214,41 +1562,8 @@ func archiveUnknownWorkingCopy(tracked *trackedFile) error {
 	if root == "" {
 		return nil
 	}
-	dir := filepath.Join(root, ".notty", "recovered", safeDocumentCacheName(tracked.DocumentID))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	base := filepath.Base(tracked.Path)
-	if base == "." || base == string(filepath.Separator) {
-		base = "document"
-	}
-	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
-	for i := 0; i < 100; i++ {
-		name := stamp + "-" + base
-		if i > 0 {
-			name = fmt.Sprintf("%s-%d-%s", stamp, i, base)
-		}
-		path := filepath.Join(dir, name)
-		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-		if errors.Is(err, os.ErrExist) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		if _, err := file.Write(content); err != nil {
-			_ = file.Close()
-			return err
-		}
-		if err := file.Close(); err != nil {
-			return err
-		}
-		if err := os.Remove(tracked.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		return nil
-	}
-	return errors.New("failed to allocate recovered workspace file name")
+	_, err := tracked.workspaceFS().Archive(tracked.Path, safeDocumentCacheName(tracked.DocumentID))
+	return err
 }
 
 func (s *Service) updateRemoteAgentSession(ctx context.Context, agentID string, update updateAgentSessionRequest) error {
@@ -1397,58 +1712,11 @@ func workspaceRelativePath(root, absolutePath string) string {
 	return filepath.ToSlash(relative)
 }
 
-var writeProjectedFile = writeProjectedFileLocked
-
-func moveLocalFile(from, to, content string) error {
-	if from == to {
-		return writeIfChanged(to, content)
-	}
-	if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
-		return err
-	}
-	if err := os.Rename(from, to); err != nil && !errorsIsNotExist(err) {
-		if writeErr := writeIfChanged(to, content); writeErr != nil {
-			return writeErr
-		}
-	} else if err != nil {
-		if writeErr := writeIfChanged(to, content); writeErr != nil {
-			return writeErr
-		}
-	}
-	if err := writeIfChanged(to, content); err != nil {
-		return err
-	}
-	if err := os.Remove(from); err != nil && !errorsIsNotExist(err) {
-		return err
-	}
-	return nil
-}
-
 func nextAwarenessClientID() uint64 {
 	// Awareness messages are decoded by JS Yjs clients, whose varuint reader
 	// rejects integers above Number.MAX_SAFE_INTEGER. Keep daemon-generated
 	// awareness IDs small; CRDT document client IDs remain separate.
 	return 10_000_000 + awarenessClientCounter.Add(1)
-}
-
-func (t *trackedFile) contentString() string {
-	if base, _, ok, err := t.loadProjectedBase(); err == nil && ok {
-		return base
-	}
-	unlockDoc := t.lockDoc()
-	defer unlockDoc()
-	if t.Doc == nil {
-		return ""
-	}
-	return t.Doc.GetText("content").ToString()
-}
-
-func (t *trackedFile) lockDoc() func() {
-	if t.docMu == nil {
-		return func() {}
-	}
-	t.docMu.Lock()
-	return t.docMu.Unlock
 }
 
 func (t *trackedFile) storeProjectedBase(content string, states ...[]byte) error {
@@ -1503,14 +1771,6 @@ func (t *trackedFile) loadProjectedBase() (string, []byte, bool, error) {
 	return string(content), state, true, nil
 }
 
-func (t *trackedFile) projectedStateOrContentState(content string) []byte {
-	_, state, known, err := t.loadProjectedBase()
-	if err == nil && known && len(state) > 0 {
-		return state
-	}
-	return crdtStateFromContent(content)
-}
-
 func (t *trackedFile) projectionDir() string {
 	root := t.WorkspaceRoot
 	if root == "" {
@@ -1520,6 +1780,53 @@ func (t *trackedFile) projectionDir() string {
 		return ""
 	}
 	return filepath.Join(root, ".notty", "projections", safeDocumentCacheName(t.DocumentID))
+}
+
+func (t *trackedFile) workspaceFS() *WorkspaceFS {
+	if t != nil && t.FS != nil {
+		return t.FS
+	}
+	root := ""
+	if t != nil {
+		root = t.WorkspaceRoot
+		if root == "" {
+			root = workspaceRootForDocumentPath(t.Path, t.DocumentPath)
+		}
+	}
+	return NewWorkspaceFS(root)
+}
+
+func (t *trackedFile) desiredPath() string {
+	if t == nil || t.WorkspaceRoot == "" || t.DocumentPath == "" {
+		return ""
+	}
+	return filepath.Join(t.WorkspaceRoot, filepath.FromSlash(t.DocumentPath))
+}
+
+func (t *trackedFile) setFilesystemPath(nextPath string) {
+	if t == nil || nextPath == "" || nextPath == t.Path {
+		return
+	}
+	if t.Owner != nil {
+		t.Owner.setTrackedPath(t, nextPath)
+		return
+	}
+	t.Path = nextPath
+	t.WorkspaceRoot = workspaceRootForDocumentPath(nextPath, t.DocumentPath)
+}
+
+func (t *trackedFile) untrack() {
+	if t == nil {
+		return
+	}
+	if t.Owner != nil {
+		t.Owner.untrack(t)
+		return
+	}
+	t.clearLocalDirty()
+	t.clearLocalDeleted()
+	t.clearLocalMoved()
+	t.clearRemoteDeleted()
 }
 
 func (t *trackedFile) projectedHash() projectedContentHash {
@@ -1545,13 +1852,6 @@ func (t *trackedFile) setProjectedContent(content string) {
 	defer t.stateMu.Unlock()
 	t.projectedContentKnown = true
 	t.hash = projectedHashString(content)
-}
-
-func (t *trackedFile) setProjectedHash(hash projectedContentHash) {
-	t.stateMu.Lock()
-	defer t.stateMu.Unlock()
-	t.hash = hash
-	t.projectedContentKnown = false
 }
 
 func (t *trackedFile) setProjectedSnapshot(hash projectedContentHash, known bool) {
@@ -1613,6 +1913,62 @@ func (t *trackedFile) isLocalDirty() bool {
 	t.stateMu.Lock()
 	defer t.stateMu.Unlock()
 	return t.localDirty
+}
+
+func (t *trackedFile) markLocalDeleted() {
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
+	t.localDeleted = true
+	t.localDirty = true
+}
+
+func (t *trackedFile) clearLocalDeleted() {
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
+	t.localDeleted = false
+}
+
+func (t *trackedFile) isLocalDeleted() bool {
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
+	return t.localDeleted
+}
+
+func (t *trackedFile) markLocalMoved() {
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
+	t.localMoved = true
+	t.localDirty = true
+}
+
+func (t *trackedFile) clearLocalMoved() {
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
+	t.localMoved = false
+}
+
+func (t *trackedFile) isLocalMoved() bool {
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
+	return t.localMoved
+}
+
+func (t *trackedFile) markRemoteDeleted() {
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
+	t.remoteDeleted = true
+}
+
+func (t *trackedFile) clearRemoteDeleted() {
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
+	t.remoteDeleted = false
+}
+
+func (t *trackedFile) isRemoteDeleted() bool {
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
+	return t.remoteDeleted
 }
 
 type replaceOp struct {
@@ -1681,8 +2037,4 @@ func crdtStateFromContent(content string) []byte {
 		}, "projection-state")
 	}
 	return doc.EncodeStateAsUpdate()
-}
-
-func errorsIsNotExist(err error) bool {
-	return errors.Is(err, os.ErrNotExist)
 }

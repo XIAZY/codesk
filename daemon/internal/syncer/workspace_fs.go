@@ -1,0 +1,379 @@
+package syncer
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"syscall"
+	"time"
+)
+
+var ErrDivergedWorkingCopy = errors.New("working copy diverged from expected hash")
+var ErrPathCollision = errors.New("target path already exists")
+var ErrUnsafeDelete = errors.New("refusing to delete non-matching working copy")
+var ErrOutsideWorkspace = errors.New("path is outside workspace")
+
+type WorkspaceFS struct {
+	Root string
+}
+
+type FileSnapshot struct {
+	Path   string
+	Exists bool
+	Bytes  []byte
+	Hash   projectedContentHash
+}
+
+type FSError struct {
+	Op         string
+	Path       string
+	TargetPath string
+	Err        error
+}
+
+func (e *FSError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.TargetPath != "" {
+		return fmt.Sprintf("%s %s -> %s: %v", e.Op, e.Path, e.TargetPath, e.Err)
+	}
+	return fmt.Sprintf("%s %s: %v", e.Op, e.Path, e.Err)
+}
+
+func (e *FSError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func NewWorkspaceFS(root string) *WorkspaceFS {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		abs = filepath.Clean(root)
+	}
+	return &WorkspaceFS{Root: abs}
+}
+
+func (fs *WorkspaceFS) CleanupStaleLocks() error {
+	if fs == nil || fs.Root == "" {
+		return nil
+	}
+	lockRoot := fs.lockRoot()
+	if err := os.RemoveAll(lockRoot); err != nil {
+		return &FSError{Op: "cleanup-locks", Path: lockRoot, Err: err}
+	}
+	return nil
+}
+
+func (fs *WorkspaceFS) Read(path string) (FileSnapshot, error) {
+	path, err := fs.cleanPath(path)
+	if err != nil {
+		return FileSnapshot{}, err
+	}
+	unlock, err := fs.lockPaths(path)
+	if err != nil {
+		return FileSnapshot{}, err
+	}
+	defer unlock()
+	content, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return FileSnapshot{Path: path, Exists: false}, nil
+	}
+	if err != nil {
+		return FileSnapshot{}, &FSError{Op: "read", Path: path, Err: err}
+	}
+	return FileSnapshot{
+		Path:   path,
+		Exists: true,
+		Bytes:  content,
+		Hash:   projectedHashBytes(content),
+	}, nil
+}
+
+func (fs *WorkspaceFS) Append(path string, content string) error {
+	path, err := fs.cleanPath(path)
+	if err != nil {
+		return err
+	}
+	unlock, err := fs.lockPaths(path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return &FSError{Op: "append", Path: path, Err: err}
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return &FSError{Op: "append", Path: path, Err: err}
+	}
+	defer file.Close()
+	if err := writeFullString(file, content); err != nil {
+		return &FSError{Op: "append", Path: path, Err: err}
+	}
+	return nil
+}
+
+func (fs *WorkspaceFS) WriteIfUnchanged(path string, expected projectedContentHash, content []byte) error {
+	path, err := fs.cleanPath(path)
+	if err != nil {
+		return err
+	}
+	unlock, err := fs.lockPaths(path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	current, err := os.ReadFile(path)
+	exists := true
+	if errors.Is(err, os.ErrNotExist) {
+		current = nil
+		exists = false
+	} else if err != nil {
+		return &FSError{Op: "write", Path: path, Err: err}
+	}
+	currentHash := projectedHashBytes(current)
+	if isKnownProjectedHash(expected) && currentHash != expected {
+		return &FSError{Op: "write", Path: path, Err: ErrDivergedWorkingCopy}
+	}
+	if exists && currentHash == projectedHashBytes(content) {
+		return nil
+	}
+	mode := os.FileMode(0o644)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	}
+	if err := replaceFileAtomically(path, string(content), mode); err != nil {
+		return &FSError{Op: "write", Path: path, Err: err}
+	}
+	return nil
+}
+
+func (fs *WorkspaceFS) DeleteIfUnchanged(path string, expected projectedContentHash) error {
+	path, err := fs.cleanPath(path)
+	if err != nil {
+		return err
+	}
+	unlock, err := fs.lockPaths(path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	current, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return &FSError{Op: "delete", Path: path, Err: err}
+	}
+	if isKnownProjectedHash(expected) && projectedHashBytes(current) != expected {
+		return &FSError{Op: "delete", Path: path, Err: ErrUnsafeDelete}
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return &FSError{Op: "delete", Path: path, Err: err}
+	}
+	return nil
+}
+
+func (fs *WorkspaceFS) MoveIfNoTarget(from string, to string) error {
+	from, err := fs.cleanPath(from)
+	if err != nil {
+		return err
+	}
+	to, err = fs.cleanPath(to)
+	if err != nil {
+		return err
+	}
+	if from == to {
+		return nil
+	}
+	unlock, err := fs.lockPaths(from, to)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if _, err := os.Stat(to); err == nil {
+		return &FSError{Op: "move", Path: from, TargetPath: to, Err: ErrPathCollision}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return &FSError{Op: "move", Path: from, TargetPath: to, Err: err}
+	}
+	if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
+		return &FSError{Op: "move", Path: from, TargetPath: to, Err: err}
+	}
+	if err := os.Rename(from, to); err != nil {
+		return &FSError{Op: "move", Path: from, TargetPath: to, Err: err}
+	}
+	return nil
+}
+
+func (fs *WorkspaceFS) Archive(path string, reason string) (string, error) {
+	path, err := fs.cleanPath(path)
+	if err != nil {
+		return "", err
+	}
+	reason = safeDocumentCacheName(firstNonEmptyText(reason, "recovered"))
+	for i := 0; i < 100; i++ {
+		archivePath := fs.archivePath(path, reason, i)
+		unlock, err := fs.lockPaths(path, archivePath)
+		if err != nil {
+			return "", err
+		}
+		if _, statErr := os.Stat(path); errors.Is(statErr, os.ErrNotExist) {
+			unlock()
+			return "", nil
+		} else if statErr != nil {
+			unlock()
+			return "", &FSError{Op: "archive", Path: path, TargetPath: archivePath, Err: statErr}
+		}
+		if _, statErr := os.Stat(archivePath); statErr == nil {
+			unlock()
+			continue
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			unlock()
+			return "", &FSError{Op: "archive", Path: path, TargetPath: archivePath, Err: statErr}
+		}
+		if err := os.MkdirAll(filepath.Dir(archivePath), 0o755); err != nil {
+			unlock()
+			return "", &FSError{Op: "archive", Path: path, TargetPath: archivePath, Err: err}
+		}
+		err = os.Rename(path, archivePath)
+		if err == nil {
+			unlock()
+			return archivePath, nil
+		}
+		if !errors.Is(err, syscall.EXDEV) {
+			unlock()
+			return "", &FSError{Op: "archive", Path: path, TargetPath: archivePath, Err: err}
+		}
+		if copyErr := copyThenRemove(path, archivePath); copyErr != nil {
+			unlock()
+			return "", &FSError{Op: "archive", Path: path, TargetPath: archivePath, Err: copyErr}
+		}
+		unlock()
+		return archivePath, nil
+	}
+	return "", &FSError{Op: "archive", Path: path, Err: errors.New("failed to allocate recovered workspace file name")}
+}
+
+func (fs *WorkspaceFS) EnsureParent(path string) error {
+	path, err := fs.cleanPath(path)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return &FSError{Op: "ensure-parent", Path: path, Err: err}
+	}
+	return nil
+}
+
+func (fs *WorkspaceFS) cleanPath(path string) (string, error) {
+	if fs == nil || strings.TrimSpace(fs.Root) == "" {
+		return filepath.Clean(path), nil
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", &FSError{Op: "resolve", Path: path, Err: err}
+	}
+	rel, err := filepath.Rel(fs.Root, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", &FSError{Op: "resolve", Path: path, Err: ErrOutsideWorkspace}
+	}
+	return abs, nil
+}
+
+func (fs *WorkspaceFS) lockPaths(paths ...string) (func(), error) {
+	if fs == nil || fs.Root == "" || len(paths) == 0 {
+		return func() {}, nil
+	}
+	locks := make([]string, 0, len(paths))
+	seen := map[string]struct{}{}
+	for _, path := range paths {
+		rel, err := filepath.Rel(fs.Root, path)
+		if err != nil {
+			return nil, &FSError{Op: "lock", Path: path, Err: err}
+		}
+		lockPath := filepath.Join(fs.lockRoot(), safeDocumentCacheName(sha256Hex([]byte(filepath.ToSlash(rel))))+".lock")
+		if _, ok := seen[lockPath]; ok {
+			continue
+		}
+		seen[lockPath] = struct{}{}
+		locks = append(locks, lockPath)
+	}
+	sort.Strings(locks)
+	files := make([]*os.File, 0, len(locks))
+	for _, lockPath := range locks {
+		if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+			for _, file := range files {
+				unlockFile(file)
+				_ = file.Close()
+			}
+			return nil, &FSError{Op: "lock", Path: lockPath, Err: err}
+		}
+		file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+		if err != nil {
+			for _, file := range files {
+				unlockFile(file)
+				_ = file.Close()
+			}
+			return nil, &FSError{Op: "lock", Path: lockPath, Err: err}
+		}
+		if err := lockFile(file, syscall.LOCK_EX); err != nil {
+			_ = file.Close()
+			for _, file := range files {
+				unlockFile(file)
+				_ = file.Close()
+			}
+			return nil, &FSError{Op: "lock", Path: lockPath, Err: err}
+		}
+		files = append(files, file)
+	}
+	return func() {
+		for i := len(files) - 1; i >= 0; i-- {
+			unlockFile(files[i])
+			_ = files[i].Close()
+		}
+	}, nil
+}
+
+func (fs *WorkspaceFS) lockRoot() string {
+	return filepath.Join(fs.Root, ".notty", "locks")
+}
+
+func (fs *WorkspaceFS) archivePath(path, reason string, attempt int) string {
+	base := filepath.Base(path)
+	if base == "." || base == string(filepath.Separator) {
+		base = "document"
+	}
+	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
+	name := stamp + "-" + base
+	if attempt > 0 {
+		name = fmt.Sprintf("%s-%d-%s", stamp, attempt, base)
+	}
+	return filepath.Join(fs.Root, ".notty", "recovered", reason, name)
+}
+
+func copyThenRemove(from, to string) error {
+	source, err := os.Open(from)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+	target, err := os.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(target, source); err != nil {
+		_ = target.Close()
+		return err
+	}
+	if err := target.Close(); err != nil {
+		return err
+	}
+	return os.Remove(from)
+}

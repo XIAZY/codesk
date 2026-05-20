@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -23,10 +22,12 @@ type workspaceReplica struct {
 	actorID    string
 	actorType  string
 	markDirty  func(documentID string)
+	markCreate func(localCreateCandidate)
 
 	client   *http.Client
 	watcher  *fsnotify.Watcher
 	docCache *documentCache
+	fs       *WorkspaceFS
 
 	mu               sync.Mutex
 	applyMu          sync.Mutex
@@ -35,7 +36,7 @@ type workspaceReplica struct {
 	initialWorkspace *workspaceResponse
 }
 
-func newWorkspaceReplica(cfg Config, rootDir, actorID, actorType string, markDirty func(string)) (*workspaceReplica, error) {
+func newWorkspaceReplica(cfg Config, rootDir, actorID, actorType string, markDirty func(string), markCreate func(localCreateCandidate)) (*workspaceReplica, error) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
@@ -50,8 +51,10 @@ func newWorkspaceReplica(cfg Config, rootDir, actorID, actorType string, markDir
 		actorID:         actorID,
 		actorType:       actorType,
 		markDirty:       markDirty,
+		markCreate:      markCreate,
 		client:          &http.Client{Timeout: 10 * time.Second},
 		watcher:         watcher,
+		fs:              NewWorkspaceFS(rootDir),
 		projectedByPath: map[string]*trackedFile{},
 		projectedByID:   map[string]*trackedFile{},
 	}, nil
@@ -81,6 +84,11 @@ func (r *workspaceReplica) Run(ctx context.Context) error {
 	defer r.watcher.Close()
 	if err := os.MkdirAll(r.rootDir, 0o755); err != nil {
 		return err
+	}
+	if r.fs != nil {
+		if err := r.fs.CleanupStaleLocks(); err != nil {
+			return err
+		}
 	}
 	if err := r.watcher.Add(r.rootDir); err != nil {
 		return err
@@ -181,19 +189,20 @@ func (r *workspaceReplica) applyWorkspace(ctx context.Context, workspace *worksp
 
 func (r *workspaceReplica) removeMissingTracked(activeIDs map[string]struct{}) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	missing := make([]*trackedFile, 0)
 	for documentID, tracked := range r.projectedByID {
 		if _, ok := activeIDs[documentID]; ok {
 			continue
 		}
-		delete(r.projectedByID, documentID)
-		delete(r.projectedByPath, tracked.Path)
 		if isIgnoredDocumentPath(tracked.DocumentPath) || isIgnoredWorkspaceAbsolutePath(r.rootDir, tracked.Path) {
 			continue
 		}
-		if err := os.Remove(tracked.Path); err != nil && !errorsIsNotExist(err) {
-			return err
-		}
+		tracked.markRemoteDeleted()
+		missing = append(missing, tracked)
+	}
+	r.mu.Unlock()
+	for _, tracked := range missing {
+		r.markDocumentDirty(tracked.DocumentID)
 	}
 	return nil
 }
@@ -220,27 +229,15 @@ func (r *workspaceReplica) ensureTracked(ctx context.Context, document *document
 	if exists {
 		tracked.ActorID = r.actorID
 		tracked.ActorType = r.actorKind()
+		tracked.FS = r.fs
+		tracked.Owner = r
+		tracked.clearRemoteDeleted()
 		if tracked.WorkspaceRoot == "" {
 			tracked.WorkspaceRoot = workspaceRootForDocumentPath(absolutePath, document.Path)
 		}
-		if tracked.Path != absolutePath {
-			nextContent := tracked.contentString()
-			if err := moveLocalFile(tracked.Path, absolutePath, nextContent); err != nil {
-				return err
-			}
-			r.mu.Lock()
-			delete(r.projectedByPath, tracked.Path)
-			tracked.Path = absolutePath
+		if tracked.DocumentPath != document.Path {
 			tracked.DocumentPath = document.Path
-			if tracked.WorkspaceRoot == "" {
-				tracked.WorkspaceRoot = workspaceRootForDocumentPath(absolutePath, document.Path)
-			}
-			r.projectedByPath[absolutePath] = tracked
-			r.mu.Unlock()
-			tracked.setProjectedContent(nextContent)
-			if err := tracked.storeProjectedBase(nextContent, tracked.projectedStateOrContentState(nextContent)); err != nil {
-				return err
-			}
+			r.markDocumentDirty(tracked.DocumentID)
 		}
 		if tracked.isLocalDirty() {
 			r.markDocumentDirty(tracked.DocumentID)
@@ -254,6 +251,8 @@ func (r *workspaceReplica) ensureTracked(ctx context.Context, document *document
 	}
 	tracked.ActorID = r.actorID
 	tracked.ActorType = r.actorKind()
+	tracked.FS = r.fs
+	tracked.Owner = r
 
 	r.mu.Lock()
 	r.projectedByPath[absolutePath] = tracked
@@ -303,7 +302,6 @@ func (r *workspaceReplica) reconcileLocalWorkspace(ctx context.Context) error {
 		remaining[path] = content
 	}
 
-	changed := false
 	for _, tracked := range trackedFiles {
 		current, exists := remaining[tracked.Path]
 		if exists {
@@ -326,17 +324,14 @@ func (r *workspaceReplica) reconcileLocalWorkspace(ctx context.Context) error {
 		}
 		nextPath, foundMove := findMovedPath(remaining, tracked.matchesProjectedString)
 		if foundMove {
-			if err := r.moveRemoteDocument(ctx, tracked.DocumentID, workspaceRelativePath(r.rootDir, nextPath)); err != nil {
-				return err
-			}
+			r.updateTrackedPath(tracked, nextPath)
+			tracked.markLocalMoved()
 			delete(remaining, nextPath)
-			changed = true
+			r.markDocumentDirty(tracked.DocumentID)
 			continue
 		}
-		if err := r.deleteRemoteDocument(ctx, tracked.DocumentID); err != nil {
-			return err
-		}
-		changed = true
+		tracked.markLocalDeleted()
+		r.markDocumentDirty(tracked.DocumentID)
 	}
 
 	newPaths := make([]string, 0, len(remaining))
@@ -345,15 +340,51 @@ func (r *workspaceReplica) reconcileLocalWorkspace(ctx context.Context) error {
 	}
 	sort.Strings(newPaths)
 	for _, path := range newPaths {
-		if err := r.createRemoteDocument(ctx, path, remaining[path]); err != nil {
-			return err
+		if r.markCreate != nil {
+			r.markCreate(localCreateCandidate{
+				Root:      r.rootDir,
+				Path:      path,
+				ActorID:   r.actorID,
+				ActorType: r.actorKind(),
+			})
 		}
-		changed = true
-	}
-	if changed {
-		return r.refresh(ctx)
 	}
 	return nil
+}
+
+func (r *workspaceReplica) updateTrackedPath(tracked *trackedFile, nextPath string) {
+	r.setTrackedPath(tracked, nextPath)
+}
+
+func (r *workspaceReplica) setTrackedPath(tracked *trackedFile, nextPath string) {
+	if r == nil || tracked == nil || nextPath == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.projectedByPath, tracked.Path)
+	tracked.Path = nextPath
+	tracked.WorkspaceRoot = workspaceRootForDocumentPath(nextPath, tracked.DocumentPath)
+	tracked.FS = r.fs
+	r.projectedByPath[nextPath] = tracked
+}
+
+func (r *workspaceReplica) untrack(tracked *trackedFile) {
+	if r == nil || tracked == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if current := r.projectedByID[tracked.DocumentID]; current == tracked {
+		delete(r.projectedByID, tracked.DocumentID)
+	}
+	if current := r.projectedByPath[tracked.Path]; current == tracked {
+		delete(r.projectedByPath, tracked.Path)
+	}
+	tracked.clearLocalDirty()
+	tracked.clearLocalDeleted()
+	tracked.clearLocalMoved()
+	tracked.clearRemoteDeleted()
 }
 
 func (r *workspaceReplica) sendPresence(ctx context.Context) error {
@@ -375,67 +406,4 @@ func (r *workspaceReplica) sendPresence(ctx context.Context) error {
 	req.Header.Set("Content-Type", "application/json")
 	_, err = r.client.Do(req)
 	return err
-}
-
-func (r *workspaceReplica) createRemoteDocument(ctx context.Context, path, content string) error {
-	relativePath := workspaceRelativePath(r.rootDir, path)
-	req := createDocumentRequest{Path: relativePath, Content: content}
-	payload, err := json.Marshal(req)
-	if err != nil {
-		return err
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, r.backendURL+r.cfg.workspaceAPIPath("/api/documents"), bytes.NewReader(payload))
-	if err != nil {
-		return err
-	}
-	applyBackendAuth(httpReq.Header, r.cfg, r.actingAgentID())
-	httpReq.Header.Set("Content-Type", "application/json")
-	res, err := r.client.Do(httpReq)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	if res.StatusCode >= http.StatusBadRequest {
-		return fmt.Errorf("create document failed: %s", res.Status)
-	}
-	return nil
-}
-
-func (r *workspaceReplica) moveRemoteDocument(ctx context.Context, documentID, path string) error {
-	payload, err := json.Marshal(updateDocumentRequest{Path: path})
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, r.backendURL+r.cfg.workspaceAPIPath("/api/documents/"+documentID), bytes.NewReader(payload))
-	if err != nil {
-		return err
-	}
-	applyBackendAuth(req.Header, r.cfg, r.actingAgentID())
-	req.Header.Set("Content-Type", "application/json")
-	res, err := r.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	if res.StatusCode >= http.StatusBadRequest {
-		return fmt.Errorf("move document failed: %s", res.Status)
-	}
-	return nil
-}
-
-func (r *workspaceReplica) deleteRemoteDocument(ctx context.Context, documentID string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, r.backendURL+r.cfg.workspaceAPIPath("/api/documents/"+documentID), nil)
-	if err != nil {
-		return err
-	}
-	applyBackendAuth(req.Header, r.cfg, r.actingAgentID())
-	res, err := r.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	if res.StatusCode >= http.StatusBadRequest {
-		return fmt.Errorf("delete document failed: %s", res.Status)
-	}
-	return nil
 }
