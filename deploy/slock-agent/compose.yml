@@ -1,0 +1,31 @@
+services:
+  slock-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: slock-agent:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SLOCK_SERVER_URL: ${SLOCK_SERVER_URL:-https://api.slock.ai}
+    volumes:
+      - slock_workspace:/workspace
+      - slock_codex:/root/.codex
+      - slock_state:/root/.slock
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${HOME}/.codex/auth.json
+        target: /run/host-codex/auth.json
+        read_only: true
+        bind:
+          create_host_path: false
+
+volumes:
+  slock_workspace:
+  slock_codex:
+  slock_state:

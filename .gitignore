@@ -13,3 +13,6 @@ frontend/.test-dist/
 bin/
 dist/
 tmp/
+
+deploy/slock-agent/.env
+deploy/slock-agent/.env.local
