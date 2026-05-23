@@ -73,3 +73,37 @@ func TestStreamSyncInitialStepUsesLocalStateVector(t *testing.T) {
 		t.Fatalf("expected sync step 1 with local state vector, type=%d bytes=%d", syncType, len(data))
 	}
 }
+
+func TestStreamSyncBuildsLocalUpdateForServerSyncStep1(t *testing.T) {
+	ctx := context.Background()
+	state, err := OpenWorkspaceStateDB(t.TempDir())
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer state.Close()
+	local := contentDoc(t, "doc_a", "local")
+	defer local.Close()
+	if _, err := state.PersistLatestStreamDoc(ctx, "doc_a", local, contentSHA256([]byte("local"))); err != nil {
+		t.Fatalf("persist local state: %v", err)
+	}
+	remote := crdt.New(crdt.WithGUID("doc_a"))
+	defer remote.Close()
+	stateVector, err := remote.StateVectorV1()
+	if err != nil {
+		t.Fatalf("remote state vector: %v", err)
+	}
+
+	update, err := newStreamSync(Config{}, state, "doc_a", "content", nil).localUpdateForStateVector(ctx, "doc_a", "content", stateVector)
+	if err != nil {
+		t.Fatalf("build local update: %v", err)
+	}
+	if len(update) == 0 {
+		t.Fatal("expected local update bytes")
+	}
+	if err := crdt.ApplyUpdateV1(remote, update, "local"); err != nil {
+		t.Fatalf("apply local update: %v", err)
+	}
+	if got := remote.GetText("content").ToString(); got != "local" {
+		t.Fatalf("unexpected synced content %q", got)
+	}
+}

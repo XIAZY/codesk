@@ -102,7 +102,7 @@ func (p ContentProjector) CaptureLocal(ctx context.Context, doc *crdt.Doc) ([]St
 			return nil, nil
 		}
 	}
-	update, err := BuildContentReplaceUpdate(base.StateUpdate, localContent)
+	update, err := BuildContentPatchUpdate(base.StateUpdate, baseContent, replace)
 	if err != nil {
 		return nil, err
 	}
@@ -121,6 +121,42 @@ func (p ContentProjector) CaptureLocal(ctx context.Context, doc *crdt.Doc) ([]St
 		ActorType:   firstNonEmptyText(p.ActorType, "daemon"),
 		Reason:      "content-local-edit",
 	}}, nil
+}
+
+func BuildContentPatchUpdate(projectedState []byte, baseContent string, replace replaceOp) ([]byte, error) {
+	doc := crdt.New()
+	defer doc.Close()
+	if len(projectedState) > 0 {
+		if err := crdt.ApplyUpdateV1(doc, projectedState, "projected-base"); err != nil {
+			return nil, err
+		}
+	}
+	if replace.Start < 0 || replace.End < replace.Start || replace.End > len(baseContent) {
+		return nil, fmt.Errorf("invalid content replace range")
+	}
+	start := utf16Length(baseContent[:replace.Start])
+	deleteLength := utf16Length(baseContent[replace.Start:replace.End])
+	text := doc.GetText("content")
+	update, err := doc.Update(func(txn *crdt.Transaction) error {
+		if deleteLength > 0 {
+			if err := text.DeleteRange(txn, start, deleteLength); err != nil {
+				return err
+			}
+		}
+		if replace.Text != "" {
+			if err := text.InsertValue(txn, start, replace.Text); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, "content-local-edit")
+	if err != nil {
+		return nil, err
+	}
+	if len(update) == 0 {
+		return nil, fmt.Errorf("content update is empty")
+	}
+	return update, nil
 }
 
 func (p ContentProjector) PlanApplyMerged(ctx context.Context, doc *crdt.Doc, stateID int64) error {

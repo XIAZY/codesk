@@ -174,6 +174,36 @@ func (s *WorkspaceStateDB) GetContentProjection(ctx context.Context, streamID st
 	return &projection, nil
 }
 
+func (s *WorkspaceStateDB) ListContentProjectionStreamIDs(ctx context.Context, limit int) ([]string, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("state db is required")
+	}
+	if limit <= 0 {
+		limit = 256
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT stream_id
+		  FROM content_projection
+		 WHERE materialized_path != ''
+		 ORDER BY updated_at ASC
+		 LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	streamIDs := []string{}
+	for rows.Next() {
+		var streamID string
+		if err := rows.Scan(&streamID); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(streamID) != "" {
+			streamIDs = append(streamIDs, streamID)
+		}
+	}
+	return streamIDs, rows.Err()
+}
+
 func (s *WorkspaceStateDB) UpsertContentProjection(ctx context.Context, row ContentProjectionRow) error {
 	if s == nil || s.db == nil {
 		return errors.New("state db is required")

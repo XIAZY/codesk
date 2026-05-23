@@ -16,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 type workspaceEventEnvelope struct {
@@ -584,14 +585,29 @@ type replaceOp struct {
 
 func computeReplace(before, after string) replaceOp {
 	start := 0
-	for start < len(before) && start < len(after) && before[start] == after[start] {
-		start++
+	for start < len(before) && start < len(after) {
+		_, beforeSize := utf8.DecodeRuneInString(before[start:])
+		_, afterSize := utf8.DecodeRuneInString(after[start:])
+		if before[start:start+beforeSize] != after[start:start+afterSize] {
+			break
+		}
+		start += beforeSize
 	}
 	beforeEnd := len(before)
 	afterEnd := len(after)
-	for beforeEnd > start && afterEnd > start && before[beforeEnd-1] == after[afterEnd-1] {
-		beforeEnd--
-		afterEnd--
+	for beforeEnd > start && afterEnd > start {
+		_, beforeSize := utf8.DecodeLastRuneInString(before[:beforeEnd])
+		_, afterSize := utf8.DecodeLastRuneInString(after[:afterEnd])
+		nextBeforeEnd := beforeEnd - beforeSize
+		nextAfterEnd := afterEnd - afterSize
+		if nextBeforeEnd < start || nextAfterEnd < start {
+			break
+		}
+		if before[nextBeforeEnd:beforeEnd] != after[nextAfterEnd:afterEnd] {
+			break
+		}
+		beforeEnd = nextBeforeEnd
+		afterEnd = nextAfterEnd
 	}
 	return replaceOp{Start: start, End: beforeEnd, Text: strings.Clone(after[start:afterEnd])}
 }

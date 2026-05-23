@@ -115,6 +115,20 @@ func (p *streamProjection) Reconcile(ctx context.Context) error {
 	if err := p.loop.ReconcileOne(ctx, p.rootStreamID); err != nil {
 		return err
 	}
+	if p.state != nil {
+		streamIDs, err := p.state.ListContentProjectionStreamIDs(ctx, 256)
+		if err != nil {
+			return err
+		}
+		for _, streamID := range streamIDs {
+			if strings.TrimSpace(streamID) == "" || streamID == p.rootStreamID {
+				continue
+			}
+			if err := p.loop.ReconcileOne(ctx, streamID); err != nil {
+				return err
+			}
+		}
+	}
 	return p.sender.SendPending(ctx)
 }
 

@@ -45,7 +45,7 @@ func (l *WorkspaceSyncLoop) ReconcileOne(ctx context.Context, streamID string) e
 	if streamID == l.RootStreamID {
 		kind = "root"
 	}
-	doc, _, err := l.State.LoadLatestStreamDoc(ctx, streamID, kind)
+	doc, stream, err := l.State.LoadLatestStreamDoc(ctx, streamID, kind)
 	if err != nil {
 		return err
 	}
@@ -78,11 +78,22 @@ func (l *WorkspaceSyncLoop) ReconcileOne(ctx context.Context, streamID string) e
 			l.queue(mutation.StreamID)
 		}
 	}
-	if _, err := l.State.ApplyReadyLocalOutbox(ctx, streamID, doc); err != nil {
+	localOutbox, err := l.State.ApplyReadyLocalOutbox(ctx, streamID, doc)
+	if err != nil {
 		return err
 	}
-	if _, err := l.State.ApplyUnappliedInbox(ctx, streamID, doc); err != nil {
+	inbox, err := l.State.ApplyUnappliedInbox(ctx, streamID, doc)
+	if err != nil {
 		return err
+	}
+	if streamID != l.RootStreamID && !stream.LatestStateID.Valid && len(localOutbox) == 0 && len(inbox) == 0 {
+		return nil
+	}
+	if streamID != l.RootStreamID &&
+		!stream.ProjectedStateID.Valid &&
+		len(localOutbox) == 0 &&
+		doc.GetText("content").ToString() == "" {
+		return nil
 	}
 	materializedHash := ""
 	if streamID != l.RootStreamID {
@@ -117,7 +128,7 @@ func (l *WorkspaceSyncLoop) ReconcileOne(ctx context.Context, streamID string) e
 	}
 	if err := l.State.RunPendingFSJobs(ctx, l.FS); err != nil {
 		l.queue(streamID)
-		if errors.Is(err, ErrDivergedWorkingCopy) {
+		if errors.Is(err, ErrDivergedWorkingCopy) || errors.Is(err, ErrPathCollision) {
 			return nil
 		}
 		return err

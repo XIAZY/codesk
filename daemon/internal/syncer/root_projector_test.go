@@ -289,6 +289,162 @@ func TestRootManifestProjectorPreservesUntrackedLocalFileCollidingWithRemoteEntr
 	}
 }
 
+func TestRootManifestProjectorClaimsUntrackedRemoteFileWhenBytesMatchLatestStream(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("remote\n"), 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+	state, err := OpenWorkspaceStateDB(root)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer state.Close()
+	remote := contentDoc(t, "doc_remote", "remote\n")
+	defer remote.Close()
+	if _, err := state.PersistLatestStreamDoc(ctx, "doc_remote", remote, contentSHA256([]byte("remote\n"))); err != nil {
+		t.Fatalf("persist remote stream: %v", err)
+	}
+	doc := crdt.New(crdt.WithGUID("root-stream"))
+	defer doc.Close()
+	if _, err := rootmanifest.ApplyIntents(doc, []rootmanifest.Intent{{
+		Type: "create-file",
+		Entry: rootmanifest.Entry{
+			ID:              "doc_remote",
+			Kind:            rootmanifest.EntryKindFile,
+			Loc:             rootmanifest.NewLocation(rootmanifest.RootEntryID, "README.md"),
+			ContentStreamID: "doc_remote",
+		},
+	}}); err != nil {
+		t.Fatalf("seed root: %v", err)
+	}
+
+	queued := []string{}
+	mutations, err := (RootManifestProjector{
+		State:        state,
+		FS:           NewWorkspaceFS(root),
+		RootStreamID: "root-stream",
+		ActorID:      "daemon",
+		ActorType:    "daemon",
+		NewID: func(kind string, relPath string) string {
+			if kind == "file" && relPath == "README.md" {
+				return "doc_local"
+			}
+			return kind + "_unexpected"
+		},
+		Queue: func(streamID string) {
+			queued = append(queued, streamID)
+		},
+	}).CaptureLocal(ctx, doc)
+	if err != nil {
+		t.Fatalf("capture local: %v", err)
+	}
+	if len(mutations) != 0 {
+		t.Fatalf("matching remote projection should not create local duplicate, got %#v", mutations)
+	}
+	manifest, err := rootmanifest.Read(doc)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if _, ok := manifest.EntriesByID["doc_local"]; ok {
+		t.Fatalf("unexpected local duplicate entry in manifest: %#v", manifest.EntriesByID["doc_local"])
+	}
+	if len(queued) != 1 || queued[0] != "doc_remote" {
+		t.Fatalf("expected remote content stream requeued, got %#v", queued)
+	}
+	projection, err := state.LoadManifestProjection(ctx)
+	if err != nil {
+		t.Fatalf("load manifest projection: %v", err)
+	}
+	row := projection["doc_remote"]
+	if row.EntryID != "doc_remote" || row.MaterializedPath != "README.md" || row.PendingCreate {
+		t.Fatalf("expected remote path claimed cleanly, got %#v", row)
+	}
+	var pendingCount int
+	if err := state.DB().QueryRow(`SELECT COUNT(*) FROM pending_content_creates`).Scan(&pendingCount); err != nil {
+		t.Fatalf("count pending content creates: %v", err)
+	}
+	if pendingCount != 0 {
+		t.Fatalf("expected no pending local create, got %d", pendingCount)
+	}
+}
+
+func TestRootManifestProjectorClaimsUntrackedCleanProjectionWhenLocalBytesDiffer(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("remote\nlocal edit\n"), 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+	state, err := OpenWorkspaceStateDB(root)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer state.Close()
+	remote := contentDoc(t, "doc_remote", "remote\n")
+	defer remote.Close()
+	stateID, err := state.PersistLatestStreamDoc(ctx, "doc_remote", remote, contentSHA256([]byte("remote\n")))
+	if err != nil {
+		t.Fatalf("persist remote stream: %v", err)
+	}
+	if err := state.UpsertContentProjection(ctx, ContentProjectionRow{
+		StreamID:         "doc_remote",
+		EntryID:          "doc_remote",
+		MaterializedPath: "README.md",
+		ProjectedStateID: sql.NullInt64{Int64: stateID, Valid: true},
+		ProjectedHash:    contentSHA256([]byte("remote\n")),
+	}); err != nil {
+		t.Fatalf("seed content projection: %v", err)
+	}
+	doc := crdt.New(crdt.WithGUID("root-stream"))
+	defer doc.Close()
+	if _, err := rootmanifest.ApplyIntents(doc, []rootmanifest.Intent{{
+		Type: "create-file",
+		Entry: rootmanifest.Entry{
+			ID:              "doc_remote",
+			Kind:            rootmanifest.EntryKindFile,
+			Loc:             rootmanifest.NewLocation(rootmanifest.RootEntryID, "README.md"),
+			ContentStreamID: "doc_remote",
+		},
+	}}); err != nil {
+		t.Fatalf("seed root: %v", err)
+	}
+
+	mutations, err := (RootManifestProjector{
+		State:        state,
+		FS:           NewWorkspaceFS(root),
+		RootStreamID: "root-stream",
+		ActorID:      "daemon",
+		ActorType:    "daemon",
+		NewID: func(kind string, relPath string) string {
+			if kind == "file" && relPath == "README.md" {
+				return "doc_local"
+			}
+			return kind + "_unexpected"
+		},
+	}).CaptureLocal(ctx, doc)
+	if err != nil {
+		t.Fatalf("capture local: %v", err)
+	}
+	if len(mutations) != 0 {
+		t.Fatalf("clean projected local edit should not create duplicate root mutation, got %#v", mutations)
+	}
+	manifest, err := rootmanifest.Read(doc)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if _, ok := manifest.EntriesByID["doc_local"]; ok {
+		t.Fatalf("unexpected local duplicate entry in manifest: %#v", manifest.EntriesByID["doc_local"])
+	}
+	projection, err := state.LoadManifestProjection(ctx)
+	if err != nil {
+		t.Fatalf("load manifest projection: %v", err)
+	}
+	row := projection["doc_remote"]
+	if row.EntryID != "doc_remote" || row.MaterializedPath != "README.md" || row.PendingCreate {
+		t.Fatalf("expected remote path claimed as edited projection, got %#v", row)
+	}
+}
+
 func TestRootManifestProjectorPlanRemoteCreateTracksContentProjection(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -402,6 +558,94 @@ func TestRootManifestProjectorPlanRemoteRenameSchedulesMove(t *testing.T) {
 	if kind != "move-entry" || source != "old.md" || target != "new.md" {
 		t.Fatalf("unexpected move job kind=%q source=%q target=%q", kind, source, target)
 	}
+	contentProjection, err := state.GetContentProjection(ctx, "doc_a")
+	if err != nil {
+		t.Fatalf("read content projection: %v", err)
+	}
+	if contentProjection == nil || contentProjection.MaterializedPath != "new.md" || !contentProjection.ProjectedStateID.Valid || contentProjection.ProjectedStateID.Int64 != 1 || contentProjection.ProjectedHash != contentSHA256([]byte("alpha")) {
+		t.Fatalf("rename should preserve projected content base while changing path, got %#v", contentProjection)
+	}
+}
+
+func TestRootManifestProjectorOrdersMoveJobsToFreeRenameConflictTarget(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	state, err := OpenWorkspaceStateDB(root)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer state.Close()
+	if err := state.UpsertManifestProjection(ctx, ManifestProjectionRow{
+		EntryID:              "doc_a",
+		Kind:                 rootmanifest.EntryKindFile,
+		ContentStreamID:      "doc_a",
+		DesiredPath:          "source.md",
+		MaterializedPath:     "source.md",
+		RootProjectedStateID: 1,
+	}); err != nil {
+		t.Fatalf("seed remote projection: %v", err)
+	}
+	if err := state.UpsertManifestProjection(ctx, ManifestProjectionRow{
+		EntryID:              "doc_z",
+		Kind:                 rootmanifest.EntryKindFile,
+		ContentStreamID:      "doc_z",
+		DesiredPath:          "target.md",
+		MaterializedPath:     "target.md",
+		RootProjectedStateID: 1,
+		PendingCreate:        true,
+	}); err != nil {
+		t.Fatalf("seed local projection: %v", err)
+	}
+	doc := crdt.New(crdt.WithGUID("root-stream"))
+	defer doc.Close()
+	if _, err := rootmanifest.ApplyIntents(doc, []rootmanifest.Intent{{
+		Type: "create-file",
+		Entry: rootmanifest.Entry{
+			ID:              "doc_a",
+			Kind:            rootmanifest.EntryKindFile,
+			Loc:             rootmanifest.NewLocation(rootmanifest.RootEntryID, "target.md"),
+			ContentStreamID: "doc_a",
+		},
+	}, {
+		Type: "create-file",
+		Entry: rootmanifest.Entry{
+			ID:              "doc_z",
+			Kind:            rootmanifest.EntryKindFile,
+			Loc:             rootmanifest.NewLocation(rootmanifest.RootEntryID, "target.md"),
+			ContentStreamID: "doc_z",
+		},
+	}}); err != nil {
+		t.Fatalf("seed root: %v", err)
+	}
+	if err := (RootManifestProjector{State: state, FS: NewWorkspaceFS(root), RootStreamID: "root-stream"}).PlanApplyMerged(ctx, doc, 2); err != nil {
+		t.Fatalf("plan rename conflict: %v", err)
+	}
+	rows, err := state.DB().Query(`SELECT source_path, target_path FROM fs_jobs WHERE kind = 'move-entry' ORDER BY id`)
+	if err != nil {
+		t.Fatalf("query move jobs: %v", err)
+	}
+	defer rows.Close()
+	got := [][2]string{}
+	for rows.Next() {
+		var source, target string
+		if err := rows.Scan(&source, &target); err != nil {
+			t.Fatalf("scan move job: %v", err)
+		}
+		got = append(got, [2]string{source, target})
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("move rows: %v", err)
+	}
+	localConflict := rootmanifest.ConflictPath("target.md", "doc_z")
+	want := [][2]string{{"target.md", localConflict}, {"source.md", "target.md"}}
+	if len(got) != len(want) {
+		t.Fatalf("unexpected move jobs %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("move job %d = %#v, want %#v (all jobs %#v)", i, got[i], want[i], got)
+		}
+	}
 }
 
 func TestRootManifestProjectorDetectsCleanHashMoveWithoutFileKey(t *testing.T) {
@@ -512,8 +756,19 @@ func TestRootManifestProjectorRemoteDeletePreservesDirtyBytes(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("seed tombstone: %v", err)
 	}
-	if err := (RootManifestProjector{State: state, FS: NewWorkspaceFS(root), RootStreamID: "root-stream"}).PlanApplyMerged(ctx, doc, 2); err != nil {
+	queued := []string{}
+	if err := (RootManifestProjector{
+		State:        state,
+		FS:           NewWorkspaceFS(root),
+		RootStreamID: "root-stream",
+		Queue: func(streamID string) {
+			queued = append(queued, streamID)
+		},
+	}).PlanApplyMerged(ctx, doc, 2); err != nil {
 		t.Fatalf("plan tombstone: %v", err)
+	}
+	if len(queued) != 1 || queued[0] != "root-stream" {
+		t.Fatalf("dirty delete should requeue root scan for replacement capture, got %#v", queued)
 	}
 	var jobs int
 	if err := state.DB().QueryRow(`SELECT COUNT(*) FROM fs_jobs WHERE kind = 'delete-clean-entry'`).Scan(&jobs); err != nil {
@@ -528,6 +783,86 @@ func TestRootManifestProjectorRemoteDeletePreservesDirtyBytes(t *testing.T) {
 	}
 	if string(content) != "dirty" {
 		t.Fatalf("dirty file changed to %q", string(content))
+	}
+}
+
+func TestRootManifestProjectorRemoteDeletePreservesLocalOutboxCreatedAfterTombstone(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.md"), []byte("local"), 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+	state, err := OpenWorkspaceStateDB(root)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer state.Close()
+	if err := state.UpsertManifestProjection(ctx, ManifestProjectionRow{
+		EntryID:              "doc_a",
+		Kind:                 rootmanifest.EntryKindFile,
+		ContentStreamID:      "doc_a",
+		DesiredPath:          "a.md",
+		MaterializedPath:     "a.md",
+		LastCleanHash:        contentSHA256([]byte("local")),
+		RootProjectedStateID: 1,
+	}); err != nil {
+		t.Fatalf("seed projection: %v", err)
+	}
+	if _, err := state.UpsertOutbox(ctx, StreamMutation{
+		StreamID:    "doc_a",
+		KindHint:    "content",
+		MutationKey: "content:edit:doc_a:local",
+		UpdateBytes: []byte("local update"),
+		ActorID:     "daemon",
+		ActorType:   "daemon",
+		Reason:      "content-local-edit",
+	}); err != nil {
+		t.Fatalf("seed outbox: %v", err)
+	}
+	doc := crdt.New(crdt.WithGUID("root-stream"))
+	defer doc.Close()
+	if _, err := rootmanifest.ApplyIntents(doc, []rootmanifest.Intent{{
+		Type: "create-file",
+		Entry: rootmanifest.Entry{
+			ID:              "doc_a",
+			Kind:            rootmanifest.EntryKindFile,
+			Loc:             rootmanifest.NewLocation(rootmanifest.RootEntryID, "a.md"),
+			ContentStreamID: "doc_a",
+		},
+	}, {
+		Type:      "tombstone",
+		EntryID:   "doc_a",
+		Tombstone: &rootmanifest.Tombstone{ActorID: "peer", ActorType: "daemon", At: "2000-01-01T00:00:00Z"},
+	}}); err != nil {
+		t.Fatalf("seed tombstone: %v", err)
+	}
+	queued := []string{}
+	if err := (RootManifestProjector{
+		State:        state,
+		FS:           NewWorkspaceFS(root),
+		RootStreamID: "root-stream",
+		Queue: func(streamID string) {
+			queued = append(queued, streamID)
+		},
+	}).PlanApplyMerged(ctx, doc, 2); err != nil {
+		t.Fatalf("plan tombstone: %v", err)
+	}
+	if len(queued) != 1 || queued[0] != "root-stream" {
+		t.Fatalf("local outbox delete should requeue root scan for replacement capture, got %#v", queued)
+	}
+	var jobs int
+	if err := state.DB().QueryRow(`SELECT COUNT(*) FROM fs_jobs WHERE kind = 'delete-clean-entry'`).Scan(&jobs); err != nil {
+		t.Fatalf("count delete jobs: %v", err)
+	}
+	if jobs != 0 {
+		t.Fatalf("locally edited remote delete must not schedule delete job, got %d", jobs)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "a.md"))
+	if err != nil {
+		t.Fatalf("read local file: %v", err)
+	}
+	if string(content) != "local" {
+		t.Fatalf("local file changed to %q", string(content))
 	}
 }
 

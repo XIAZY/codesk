@@ -89,3 +89,96 @@ func TestWorkspaceSyncLoopLocalCreateOrdersRootBeforeContentInit(t *testing.T) {
 		t.Fatal("expected loop to queue follow-up work")
 	}
 }
+
+func TestWorkspaceSyncLoopSkipsUninitializedRemoteContentProjection(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	state, err := OpenWorkspaceStateDB(root)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer state.Close()
+	if err := state.UpsertContentProjection(ctx, ContentProjectionRow{
+		StreamID:         "doc_remote",
+		EntryID:          "doc_remote",
+		MaterializedPath: "remote.md",
+	}); err != nil {
+		t.Fatalf("seed content projection: %v", err)
+	}
+	loop := &WorkspaceSyncLoop{
+		State:        state,
+		FS:           NewWorkspaceFS(root),
+		RootStreamID: "root-stream",
+		ActorID:      "daemon",
+		ActorType:    "daemon",
+	}
+	if err := loop.ReconcileOne(ctx, "doc_remote"); err != nil {
+		t.Fatalf("reconcile uninitialized content: %v", err)
+	}
+	stream, err := state.GetStream(ctx, "doc_remote")
+	if err != nil {
+		t.Fatalf("get stream: %v", err)
+	}
+	if stream.LatestStateID.Valid {
+		t.Fatalf("uninitialized remote content should not persist empty state: %#v", stream)
+	}
+	var jobs int
+	if err := state.DB().QueryRow(`SELECT COUNT(*) FROM fs_jobs WHERE kind = 'write-content'`).Scan(&jobs); err != nil {
+		t.Fatalf("count fs jobs: %v", err)
+	}
+	if jobs != 0 {
+		t.Fatalf("uninitialized remote content should not schedule empty write, got %d jobs", jobs)
+	}
+	if _, err := os.Stat(filepath.Join(root, "remote.md")); !os.IsNotExist(err) {
+		t.Fatalf("remote.md should not have been materialized, stat err=%v", err)
+	}
+}
+
+func TestWorkspaceSyncLoopSkipsFirstEmptyRemoteContentState(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	state, err := OpenWorkspaceStateDB(root)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer state.Close()
+	if err := state.UpsertContentProjection(ctx, ContentProjectionRow{
+		StreamID:         "doc_remote",
+		EntryID:          "doc_remote",
+		MaterializedPath: "remote.md",
+	}); err != nil {
+		t.Fatalf("seed content projection: %v", err)
+	}
+	empty := contentDoc(t, "doc_remote", "")
+	defer empty.Close()
+	if _, _, err := state.InsertInboxUpdate(ctx, "doc_remote", empty.EncodeStateAsUpdate(), 1); err != nil {
+		t.Fatalf("seed empty inbox: %v", err)
+	}
+	loop := &WorkspaceSyncLoop{
+		State:        state,
+		FS:           NewWorkspaceFS(root),
+		RootStreamID: "root-stream",
+		ActorID:      "daemon",
+		ActorType:    "daemon",
+	}
+	if err := loop.ReconcileOne(ctx, "doc_remote"); err != nil {
+		t.Fatalf("reconcile empty remote content: %v", err)
+	}
+	stream, err := state.GetStream(ctx, "doc_remote")
+	if err != nil {
+		t.Fatalf("get stream: %v", err)
+	}
+	if stream.LatestStateID.Valid {
+		t.Fatalf("first empty remote content should not persist latest state: %#v", stream)
+	}
+	var jobs int
+	if err := state.DB().QueryRow(`SELECT COUNT(*) FROM fs_jobs WHERE kind = 'write-content'`).Scan(&jobs); err != nil {
+		t.Fatalf("count fs jobs: %v", err)
+	}
+	if jobs != 0 {
+		t.Fatalf("first empty remote content should not schedule empty write, got %d jobs", jobs)
+	}
+	if _, err := os.Stat(filepath.Join(root, "remote.md")); !os.IsNotExist(err) {
+		t.Fatalf("remote.md should not have been materialized, stat err=%v", err)
+	}
+}

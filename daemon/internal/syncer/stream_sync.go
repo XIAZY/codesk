@@ -23,6 +23,8 @@ type streamSync struct {
 	mu sync.Mutex
 }
 
+var streamSyncReconnectInterval = 30 * time.Second
+
 func newStreamSync(cfg Config, state *WorkspaceStateDB, streamID string, kind string, queue func(string)) *streamSync {
 	return &streamSync{
 		cfg:      cfg,
@@ -83,24 +85,40 @@ func (s *streamSync) runOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	runCtx := ctx
+	cancel := func() {}
+	if streamSyncReconnectInterval > 0 {
+		runCtx, cancel = context.WithTimeout(ctx, streamSyncReconnectInterval)
+	}
+	defer cancel()
 	stopClose := context.AfterFunc(ctx, func() {
 		_ = conn.Close()
 	})
+	reconnectClose := context.AfterFunc(runCtx, func() {
+		_ = conn.Close()
+	})
 	defer stopClose()
+	defer reconnectClose()
 	defer conn.Close()
+	if streamSyncReconnectInterval > 0 {
+		_ = conn.SetReadDeadline(time.Now().Add(streamSyncReconnectInterval))
+	}
 
-	if err := conn.WriteMessage(websocket.BinaryMessage, s.initialSyncStep(ctx, streamID)); err != nil {
+	if err := conn.WriteMessage(websocket.BinaryMessage, s.initialSyncStep(runCtx, streamID)); err != nil {
 		return err
 	}
 	for {
 		messageType, payload, err := conn.ReadMessage()
 		if err != nil {
+			if runCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
+				return nil
+			}
 			return err
 		}
 		if messageType != websocket.BinaryMessage {
 			continue
 		}
-		if err := s.handleMessage(ctx, payload); err != nil {
+		if err := s.handleMessageWithConn(runCtx, payload, conn); err != nil {
 			log.Printf("stream sync message error stream=%s err=%v", streamID, err)
 		}
 	}
@@ -116,6 +134,10 @@ func (s *streamSync) initialSyncStep(ctx context.Context, streamID string) []byt
 }
 
 func (s *streamSync) handleMessage(ctx context.Context, payload []byte) error {
+	return s.handleMessageWithConn(ctx, payload, nil)
+}
+
+func (s *streamSync) handleMessageWithConn(ctx context.Context, payload []byte, conn *websocket.Conn) error {
 	topLevel, reader, err := yproto.DecodeProtocolMessage(payload)
 	if err != nil {
 		return err
@@ -133,7 +155,14 @@ func (s *streamSync) handleMessage(ctx context.Context, payload []byte) error {
 	}
 	switch syncType {
 	case yproto.SyncStep1:
-		return nil
+		if conn == nil || s.state == nil {
+			return nil
+		}
+		update, err := s.localUpdateForStateVector(ctx, streamID, kind, data)
+		if err != nil || len(update) == 0 {
+			return err
+		}
+		return conn.WriteMessage(websocket.BinaryMessage, yproto.BuildSyncStep2FromUpdate(update))
 	case yproto.SyncStep2, yproto.SyncUpdate:
 		if s.state == nil {
 			return nil
@@ -150,4 +179,16 @@ func (s *streamSync) handleMessage(ctx context.Context, payload []byte) error {
 		}
 	}
 	return nil
+}
+
+func (s *streamSync) localUpdateForStateVector(ctx context.Context, streamID string, kind string, stateVector []byte) ([]byte, error) {
+	if s == nil || s.state == nil || strings.TrimSpace(streamID) == "" {
+		return nil, nil
+	}
+	doc, _, err := s.state.LoadLatestStreamDoc(ctx, streamID, firstNonEmptyText(kind, "unknown"))
+	if err != nil {
+		return nil, err
+	}
+	defer doc.Close()
+	return doc.EncodeStateAsUpdateV1(stateVector)
 }

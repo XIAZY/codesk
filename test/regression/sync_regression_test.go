@@ -36,8 +36,9 @@ type regressionThreadAnchor struct {
 }
 
 type regressionWorkspaceDocument struct {
-	ID   string `json:"id"`
-	Path string `json:"path"`
+	ID          string `json:"id"`
+	Path        string `json:"path"`
+	DesiredPath string `json:"desiredPath"`
 }
 
 func TestAppendOnlyFileSyncReconstructsBackend(t *testing.T) {
@@ -151,6 +152,110 @@ func TestOfflineLocalSamePathCreatesConvergeToConflictPaths(t *testing.T) {
 			stack.waitForServiceLocalContent(t, service, path, content, 120*time.Second)
 		}
 	}
+}
+
+func TestOfflineLocalEditAndRemoteRenamePreservesIdentityPathAndContent(t *testing.T) {
+	stack := newRegressionStack(t)
+	stack.up(t)
+
+	oldPath := uniquePath("edit-rename/source", ".md")
+	newPath := uniquePath("edit-rename/renamed", ".md")
+	documentID := stack.createDocument(t, oldPath, "base\n")
+	stack.waitForLocalContent(t, oldPath, "base\n", 30*time.Second)
+
+	stack.stopService(t, "daemon")
+	stack.seedServiceLocalFile(t, stack.daemonEnv(), "daemon", oldPath, "base\nlocal edit\n")
+	renamed := stack.renameDocument(t, documentID, newPath)
+	if renamed.ID != documentID || renamed.Path != newPath {
+		t.Fatalf("unexpected rename response: %#v", renamed)
+	}
+
+	stack.startDaemon(t)
+	stack.waitForBackendContent(t, documentID, "base\nlocal edit\n", 90*time.Second)
+	stack.waitForLocalContent(t, newPath, "base\nlocal edit\n", 90*time.Second)
+	stack.waitForLocalPathAbsent(t, oldPath, 60*time.Second)
+	currentID, err := stack.documentIDByPath(newPath)
+	if err != nil {
+		t.Fatalf("renamed document not visible at %s: %v", newPath, err)
+	}
+	if currentID != documentID {
+		t.Fatalf("rename changed document identity: got %s want %s", currentID, documentID)
+	}
+}
+
+func TestOfflineLocalEditAndRemoteDeleteCreatesReplacementForDirtyBytes(t *testing.T) {
+	stack := newRegressionStack(t)
+	stack.up(t)
+
+	path := uniquePath("delete-edit", ".md")
+	deletedID := stack.createDocument(t, path, "base\n")
+	stack.waitForLocalContent(t, path, "base\n", 30*time.Second)
+
+	stack.stopService(t, "daemon")
+	stack.seedServiceLocalFile(t, stack.daemonEnv(), "daemon", path, "base\nlocal after delete\n")
+	stack.deleteDocument(t, deletedID)
+
+	stack.startDaemon(t)
+	replacement := stack.waitForDocumentPathAndDifferentID(t, path, deletedID, 120*time.Second)
+	content := stack.waitForBackendContentPredicate(t, replacement.ID, 90*time.Second, func(content string) bool {
+		return content == "base\nlocal after delete\n"
+	})
+	stack.waitForLocalContent(t, replacement.Path, content, 90*time.Second)
+	if _, err := stack.streamHeadID(deletedID); err != nil {
+		t.Fatalf("deleted stream head should remain for audit/history: %v", err)
+	}
+}
+
+func TestRemoteRenameCollidingWithOfflineLocalUntrackedBytesPreservesBothFiles(t *testing.T) {
+	stack := newRegressionStack(t)
+	stack.up(t)
+
+	oldPath := uniquePath("rename-collision/source", ".md")
+	newPath := uniquePath("rename-collision/target", ".md")
+	documentID := stack.createDocument(t, oldPath, "remote bytes\n")
+	stack.waitForLocalContent(t, oldPath, "remote bytes\n", 30*time.Second)
+
+	stack.stopService(t, "daemon")
+	stack.seedServiceLocalFile(t, stack.daemonEnv(), "daemon", newPath, "local untracked bytes\n")
+	stack.renameDocument(t, documentID, newPath)
+
+	stack.startDaemon(t)
+	docs := stack.waitForConflictDocuments(t, newPath, 120*time.Second)
+	contents := map[string]string{}
+	for _, doc := range docs {
+		contents[doc.Path] = stack.waitForBackendContentPredicate(t, doc.ID, 90*time.Second, func(content string) bool {
+			return content == "remote bytes\n" || content == "local untracked bytes\n"
+		})
+	}
+	if len(uniqueStringValues(contents)) != 2 {
+		t.Fatalf("expected both remote and local bytes to survive rename collision, got %#v", contents)
+	}
+	for path, content := range contents {
+		stack.waitForLocalContent(t, path, content, 90*time.Second)
+	}
+}
+
+func TestPrimaryAndAgentWorkspaceLocalEditsMergeToOneContentStream(t *testing.T) {
+	stack := newRegressionStack(t)
+	stack.upBackendOnly(t)
+	agent := stack.createAgent(t, "reviewer")
+	stack.startDaemon(t)
+
+	path := uniquePath("primary-agent-merge", ".md")
+	documentID := stack.createDocument(t, path, "base\n")
+	stack.waitForLocalContent(t, path, "base\n", 60*time.Second)
+	stack.waitForAgentLocalContent(t, agent.ID, path, "base\n", 90*time.Second)
+
+	stack.appendLocalFile(t, path, "primary edit\n")
+	stack.appendAgentLocalFile(t, agent.ID, path, "agent edit\n")
+
+	finalContent := stack.waitForBackendContentPredicate(t, documentID, 120*time.Second, func(content string) bool {
+		return strings.Count(content, "base\n") == 1 &&
+			strings.Count(content, "primary edit\n") == 1 &&
+			strings.Count(content, "agent edit\n") == 1
+	})
+	stack.waitForLocalContent(t, path, finalContent, 90*time.Second)
+	stack.waitForAgentLocalContent(t, agent.ID, path, finalContent, 90*time.Second)
 }
 
 func TestThreadCreationAcceptsClientRelativeAnchors(t *testing.T) {
@@ -453,6 +558,7 @@ type regressionStack struct {
 	project     string
 	authToken   string
 	workspaceID string
+	daemonID    string
 	daemonToken string
 }
 
@@ -469,10 +575,7 @@ func newRegressionStack(t *testing.T) *regressionStack {
 func (s *regressionStack) up(t *testing.T) {
 	t.Helper()
 	s.upBackendOnly(t)
-	s.runWithEnv(t, map[string]string{
-		"NOTTY_WORKSPACE_ID": s.workspaceID,
-		"NOTTY_DAEMON_TOKEN": s.daemonToken,
-	}, "up", "-d", "--build", "daemon")
+	s.runWithEnv(t, s.daemonEnv(), "up", "-d", "--build", "daemon")
 }
 
 func (s *regressionStack) upBackendOnly(t *testing.T) {
@@ -544,15 +647,39 @@ func (s *regressionStack) bootstrapWorkspace(t *testing.T) {
 	s.workspaceID = workspaceResponse.Workspace.ID
 
 	var daemonResponse struct {
+		Daemon struct {
+			ID string `json:"id"`
+		} `json:"daemon"`
 		Token string `json:"token"`
 	}
 	s.postJSON(t, s.workspaceAPIPath("/daemons"), s.authToken, map[string]string{
 		"name": "Regression daemon",
 	}, http.StatusCreated, &daemonResponse)
+	if daemonResponse.Daemon.ID == "" {
+		t.Fatal("daemon creation returned empty id")
+	}
 	if daemonResponse.Token == "" {
 		t.Fatal("daemon token creation returned empty token")
 	}
+	s.daemonID = daemonResponse.Daemon.ID
 	s.daemonToken = daemonResponse.Token
+}
+
+func (s *regressionStack) daemonEnv() map[string]string {
+	return map[string]string{
+		"NOTTY_WORKSPACE_ID": s.workspaceID,
+		"NOTTY_DAEMON_TOKEN": s.daemonToken,
+	}
+}
+
+func (s *regressionStack) startDaemon(t *testing.T) {
+	t.Helper()
+	s.runWithEnv(t, s.daemonEnv(), "up", "-d", "daemon")
+}
+
+func (s *regressionStack) stopService(t *testing.T, service string) {
+	t.Helper()
+	s.run(t, "stop", service)
 }
 
 func (s *regressionStack) workspaceAPIPath(path string) string {
@@ -581,32 +708,57 @@ func (s *regressionStack) daemonWorkspaceDir() string {
 	return "/workspace/notty/" + s.workspaceID
 }
 
+func (s *regressionStack) agentWorkspaceDir(agentID string) string {
+	return "/workspace/agents/" + s.workspaceID + "/" + safeAgentWorkspaceNameForRegression(agentID)
+}
+
 func (s *regressionStack) postJSON(t *testing.T, path string, bearer string, body any, wantStatus int, out any) {
+	t.Helper()
+	s.requestJSON(t, http.MethodPost, path, bearer, body, wantStatus, out)
+}
+
+func (s *regressionStack) patchJSON(t *testing.T, path string, bearer string, body any, wantStatus int, out any) {
+	t.Helper()
+	s.requestJSON(t, http.MethodPatch, path, bearer, body, wantStatus, out)
+}
+
+func (s *regressionStack) deleteJSON(t *testing.T, path string, bearer string, wantStatus int, out any) {
+	t.Helper()
+	s.requestJSON(t, http.MethodDelete, path, bearer, nil, wantStatus, out)
+}
+
+func (s *regressionStack) requestJSON(t *testing.T, method string, path string, bearer string, body any, wantStatus int, out any) {
 	t.Helper()
 	payload, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("marshal request: %v", err)
 	}
-	req, err := http.NewRequest(http.MethodPost, s.backendURL(t)+path, bytes.NewReader(payload))
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequest(method, s.backendURL(t)+path, reader)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("post %s: %v", path, err)
+		t.Fatalf("%s %s: %v", method, path, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != wantStatus {
 		response, _ := io.ReadAll(resp.Body)
-		t.Fatalf("post %s status %d, want %d: %s", path, resp.StatusCode, wantStatus, response)
+		t.Fatalf("%s %s status %d, want %d: %s", method, path, resp.StatusCode, wantStatus, response)
 	}
 	if out != nil {
 		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-			t.Fatalf("decode post %s response: %v", path, err)
+			t.Fatalf("decode %s %s response: %v", method, path, err)
 		}
 	}
 }
@@ -739,6 +891,17 @@ func (s *regressionStack) appendLocalFile(t *testing.T, path string, content str
 	s.execService(t, "daemon", "mkdir -p "+shellQuote(s.daemonWorkspaceDir())+" && cd "+shellQuote(s.daemonWorkspaceDir())+" && "+mkdir+fmt.Sprintf("printf %%s %s >> %s", shellQuote(content), shellQuote(path)))
 }
 
+func (s *regressionStack) appendAgentLocalFile(t *testing.T, agentID string, path string, content string) {
+	t.Helper()
+	dir := filepath.ToSlash(filepath.Dir(path))
+	mkdir := ""
+	if dir != "." && dir != "" {
+		mkdir = "mkdir -p " + shellQuote(dir) + " && "
+	}
+	root := s.agentWorkspaceDir(agentID)
+	s.execService(t, "daemon", "mkdir -p "+shellQuote(root)+" && cd "+shellQuote(root)+" && "+mkdir+fmt.Sprintf("printf %%s %s >> %s", shellQuote(content), shellQuote(path)))
+}
+
 func (s *regressionStack) seedServiceLocalFile(t *testing.T, env map[string]string, service string, path string, content string) {
 	t.Helper()
 	dir := filepath.ToSlash(filepath.Dir(path))
@@ -755,6 +918,18 @@ func (s *regressionStack) localFileContent(t *testing.T, path string) string {
 	return s.execService(t, "daemon", fmt.Sprintf("if [ -d %s ]; then cd %s && if [ -f %s ]; then cat %s; fi; fi", shellQuote(s.daemonWorkspaceDir()), shellQuote(s.daemonWorkspaceDir()), shellQuote(path), shellQuote(path)))
 }
 
+func (s *regressionStack) agentLocalFileContent(t *testing.T, agentID string, path string) string {
+	t.Helper()
+	root := s.agentWorkspaceDir(agentID)
+	return s.execService(t, "daemon", fmt.Sprintf("if [ -d %s ]; then cd %s && if [ -f %s ]; then cat %s; fi; fi", shellQuote(root), shellQuote(root), shellQuote(path), shellQuote(path)))
+}
+
+func (s *regressionStack) localPathExists(t *testing.T, path string) bool {
+	t.Helper()
+	output := s.execService(t, "daemon", fmt.Sprintf("if [ -e %s/%s ]; then printf present; fi", shellQuote(s.daemonWorkspaceDir()), shellQuote(path)))
+	return strings.TrimSpace(output) == "present"
+}
+
 func (s *regressionStack) waitForLocalContent(t *testing.T, path string, want string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -767,6 +942,32 @@ func (s *regressionStack) waitForLocalContent(t *testing.T, path string, want st
 		time.Sleep(500 * time.Millisecond)
 	}
 	t.Fatalf("local file %s did not converge: got %q want %q", path, last, want)
+}
+
+func (s *regressionStack) waitForAgentLocalContent(t *testing.T, agentID string, path string, want string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last string
+	for time.Now().Before(deadline) {
+		last = s.agentLocalFileContent(t, agentID, path)
+		if last == want {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("agent %s file %s did not converge: got %q want %q", agentID, path, last, want)
+}
+
+func (s *regressionStack) waitForLocalPathAbsent(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !s.localPathExists(t, path) {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("local path %s still exists", path)
 }
 
 func (s *regressionStack) waitForServiceLocalContent(t *testing.T, service string, path string, want string, timeout time.Duration) {
@@ -912,6 +1113,24 @@ func (s *regressionStack) waitForDocumentPath(t *testing.T, path string, timeout
 		time.Sleep(500 * time.Millisecond)
 	}
 	t.Fatalf("document path %s did not appear; current paths: %v", path, s.documentPaths())
+}
+
+func (s *regressionStack) waitForDocumentPathAndDifferentID(t *testing.T, path string, oldID string, timeout time.Duration) regressionWorkspaceDocument {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last []regressionWorkspaceDocument
+	for time.Now().Before(deadline) {
+		docs := s.workspaceDocuments()
+		for _, doc := range docs {
+			if doc.Path == path && doc.ID != oldID {
+				return doc
+			}
+		}
+		last = docs
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("replacement document for %s did not appear; old id %s current docs: %#v", path, oldID, last)
+	return regressionWorkspaceDocument{}
 }
 
 func (s *regressionStack) waitForConflictDocuments(t *testing.T, canonicalPath string, timeout time.Duration) []regressionWorkspaceDocument {
@@ -1144,6 +1363,46 @@ func (s *regressionStack) createDocument(t *testing.T, path string, content stri
 	return document.ID
 }
 
+func (s *regressionStack) renameDocument(t *testing.T, documentID string, path string) regressionWorkspaceDocument {
+	t.Helper()
+	var document regressionWorkspaceDocument
+	s.patchJSON(t, s.workspaceAPIPath("/documents/"+url.PathEscape(documentID)), s.authToken, map[string]string{"path": path}, http.StatusOK, &document)
+	if document.ID == "" {
+		t.Fatal("renamed document has empty id")
+	}
+	return document
+}
+
+func (s *regressionStack) deleteDocument(t *testing.T, documentID string) {
+	t.Helper()
+	var response struct {
+		Status string `json:"status"`
+	}
+	s.deleteJSON(t, s.workspaceAPIPath("/documents/"+url.PathEscape(documentID)), s.authToken, http.StatusOK, &response)
+	if response.Status != "deleted" {
+		t.Fatalf("unexpected delete response: %#v", response)
+	}
+}
+
+type regressionAgent struct {
+	ID string `json:"id"`
+}
+
+func (s *regressionStack) createAgent(t *testing.T, handle string) regressionAgent {
+	t.Helper()
+	var agent regressionAgent
+	s.postJSON(t, s.workspaceAPIPath("/daemons/"+url.PathEscape(s.daemonID)+"/agents"), s.authToken, map[string]string{
+		"handle": handle,
+		"name":   "Regression " + handle,
+		"role":   "Exercise regression workspace sync.",
+		"kind":   "codex",
+	}, http.StatusCreated, &agent)
+	if agent.ID == "" {
+		t.Fatal("created agent has empty id")
+	}
+	return agent
+}
+
 func dialDocumentWebsocket(t *testing.T, rawURL string, actorID string, clientID uint64) *websocket.Conn {
 	t.Helper()
 	u, err := url.Parse(rawURL)
@@ -1356,6 +1615,27 @@ func envInt(name string, fallback int) int {
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func safeAgentWorkspaceNameForRegression(agentID string) string {
+	trimmed := strings.TrimSpace(agentID)
+	if trimmed == "" {
+		return "agent"
+	}
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r
+		case r >= '0' && r <= '9':
+			return r
+		case r == '-' || r == '_' || r == '.':
+			return r
+		default:
+			return '_'
+		}
+	}, trimmed)
 }
 
 func sqlQuote(value string) string {

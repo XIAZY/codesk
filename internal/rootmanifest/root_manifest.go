@@ -174,13 +174,33 @@ func ApplyIntents(doc *crdt.Doc, intents []Intent) ([]byte, error) {
 	if err := Validate(previous, next); err != nil {
 		return nil, err
 	}
+	changed := map[string]struct{}{RootEntryID: {}}
+	for _, intent := range intents {
+		entryID := strings.TrimSpace(intent.EntryID)
+		if entryID == "" {
+			entryID = strings.TrimSpace(intent.Entry.ID)
+		}
+		if entryID != "" {
+			changed[entryID] = struct{}{}
+		}
+	}
 	text := doc.GetText(TextName)
 	entries := doc.GetMap(MapName)
-	return doc.Update(func(txn *crdt.Transaction) error {
-		if err := entries.RemoveAll(txn); err != nil {
-			return err
+	rawMap, _ := entries.JSON()
+	writeAll := strings.TrimSpace(rawMap) == "" || strings.TrimSpace(rawMap) == "{}"
+	ids := make([]string, 0, len(changed))
+	if writeAll {
+		ids = sortedEntryIDs(next)
+	} else {
+		for id := range changed {
+			if _, ok := next.EntriesByID[id]; ok {
+				ids = append(ids, id)
+			}
 		}
-		for _, id := range sortedEntryIDs(next) {
+		sort.Strings(ids)
+	}
+	return doc.Update(func(txn *crdt.Transaction) error {
+		for _, id := range ids {
 			payload, err := json.Marshal(next.EntriesByID[id])
 			if err != nil {
 				return err

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	crdt "notty/internal/ycrdt"
@@ -124,6 +125,36 @@ func TestContentProjectorCapturesDirtyAppendButSkipsDirtyRewrite(t *testing.T) {
 	}
 	if len(mutations) != 0 {
 		t.Fatalf("expected dirty rewrite to remain local-only, got %#v", mutations)
+	}
+}
+
+func TestBuildContentPatchUpdateConcurrentAppendsKeepSingleBase(t *testing.T) {
+	base := contentDoc(t, "doc", "base\n")
+	defer base.Close()
+	baseState := base.EncodeStateAsUpdate()
+	primaryUpdate, err := BuildContentPatchUpdate(baseState, "base\n", computeReplace("base\n", "base\nprimary edit\n"))
+	if err != nil {
+		t.Fatalf("build primary update: %v", err)
+	}
+	agentUpdate, err := BuildContentPatchUpdate(baseState, "base\n", computeReplace("base\n", "base\nagent edit\n"))
+	if err != nil {
+		t.Fatalf("build agent update: %v", err)
+	}
+
+	merged := crdt.New(crdt.WithGUID("doc"))
+	defer merged.Close()
+	if err := crdt.ApplyUpdateV1(merged, baseState, "base"); err != nil {
+		t.Fatalf("apply base: %v", err)
+	}
+	if err := crdt.ApplyUpdateV1(merged, primaryUpdate, "primary"); err != nil {
+		t.Fatalf("apply primary: %v", err)
+	}
+	if err := crdt.ApplyUpdateV1(merged, agentUpdate, "agent"); err != nil {
+		t.Fatalf("apply agent: %v", err)
+	}
+	content := merged.GetText("content").ToString()
+	if strings.Count(content, "base\n") != 1 || !strings.Contains(content, "primary edit\n") || !strings.Contains(content, "agent edit\n") {
+		t.Fatalf("concurrent appends should preserve one base and both edits, got %q", content)
 	}
 }
 

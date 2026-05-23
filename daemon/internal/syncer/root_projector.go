@@ -89,6 +89,11 @@ func (p RootManifestProjector) CaptureLocal(ctx context.Context, rootDoc *crdt.D
 		if stat, ok := scanStatForEntry(scan, materialized, entry.Kind); ok && stat.Exists {
 			if entry.Kind == rootmanifest.EntryKindFile && !tracked {
 				p.queue(entry.ContentStreamID)
+				if p.canClaimUntrackedManifestFile(ctx, entry.ContentStreamID, materialized, stat, caps) {
+					matchedPaths[entry.ID] = materialized
+					claimedPaths[materialized] = struct{}{}
+					_ = p.upsertManifestProjection(ctx, entry, projection, stat, false)
+				}
 				continue
 			}
 			matchedPaths[entry.ID] = materialized
@@ -292,6 +297,7 @@ func (p RootManifestProjector) PlanApplyMerged(ctx context.Context, rootDoc *crd
 	if err != nil {
 		return err
 	}
+	moveJobs := []FSJob{}
 	for _, entry := range sortedManifestEntries(manifest) {
 		if entry.ID == rootmanifest.RootEntryID {
 			continue
@@ -301,7 +307,10 @@ func (p RootManifestProjector) PlanApplyMerged(ctx context.Context, rootDoc *crd
 		previous, hadPrevious := tracker[entry.ID]
 		if entry.Tombstone != nil {
 			if hadPrevious && previous.Kind == rootmanifest.EntryKindFile && !previous.Tombstoned {
-				if p.localFileMatchesCleanHash(ctx, previous) {
+				if p.hasLocalContentOutboxAfter(ctx, previous.ContentStreamID, entry.Tombstone.At) {
+					_ = p.State.InsertScanHint(ctx, ScanHintPath, previous.MaterializedPath, "remote-delete-local-content-detach")
+					p.queue(p.RootStreamID)
+				} else if p.localFileMatchesCleanHash(ctx, previous) {
 					_, _ = p.State.InsertFSJob(ctx, FSJob{
 						JobKey:       "root:delete:" + entry.ID + ":" + hashKey(previous.MaterializedPath),
 						Kind:         "delete-clean-entry",
@@ -312,6 +321,7 @@ func (p RootManifestProjector) PlanApplyMerged(ctx context.Context, rootDoc *crd
 					})
 				} else {
 					_ = p.State.InsertScanHint(ctx, ScanHintPath, previous.MaterializedPath, "remote-delete-dirty-detach")
+					p.queue(p.RootStreamID)
 				}
 			}
 			previous.Tombstoned = true
@@ -338,7 +348,7 @@ func (p RootManifestProjector) PlanApplyMerged(ctx context.Context, rootDoc *crd
 		if hadPrevious {
 			row.LastCleanHash = previous.LastCleanHash
 			if previous.MaterializedPath != "" && previous.MaterializedPath != materialized {
-				_, _ = p.State.InsertFSJob(ctx, FSJob{
+				moveJobs = append(moveJobs, FSJob{
 					JobKey:     "root:move:" + entry.ID + ":" + hashKey(previous.MaterializedPath+"->"+materialized),
 					Kind:       "move-entry",
 					EntryID:    entry.ID,
@@ -358,11 +368,20 @@ func (p RootManifestProjector) PlanApplyMerged(ctx context.Context, rootDoc *crd
 			if _, err := p.State.GetContentProjection(ctx, entry.ContentStreamID); err != nil {
 				return err
 			}
-			if err := p.State.UpsertContentProjection(ctx, ContentProjectionRow{
+			contentRow := ContentProjectionRow{
 				StreamID:         entry.ContentStreamID,
 				EntryID:          entry.ID,
 				MaterializedPath: materialized,
-			}); err != nil {
+			}
+			if existing, err := p.State.GetContentProjection(ctx, entry.ContentStreamID); err != nil {
+				return err
+			} else if existing != nil {
+				contentRow.ProjectedStateID = existing.ProjectedStateID
+				contentRow.ProjectedHash = existing.ProjectedHash
+				contentRow.Stat = existing.Stat
+				contentRow.Dirty = existing.Dirty
+			}
+			if err := p.State.UpsertContentProjection(ctx, contentRow); err != nil {
 				return err
 			}
 			p.queue(entry.ContentStreamID)
@@ -374,6 +393,11 @@ func (p RootManifestProjector) PlanApplyMerged(ctx context.Context, rootDoc *crd
 				EntryID:    entry.ID,
 				TargetPath: materialized,
 			})
+		}
+	}
+	for _, job := range orderRootMoveJobs(moveJobs) {
+		if _, err := p.State.InsertFSJob(ctx, job); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -402,6 +426,87 @@ func (p RootManifestProjector) localFileMatchesCleanHash(ctx context.Context, ro
 		return false
 	}
 	return contentSHA256(read.Bytes) == row.LastCleanHash
+}
+
+func (p RootManifestProjector) localFileMatchesLatestStreamState(ctx context.Context, streamID string, rel string, stat FileStat, caps ScanCapabilities) bool {
+	if p.State == nil || p.FS == nil || strings.TrimSpace(streamID) == "" || rel == "" {
+		return false
+	}
+	if !stat.Exists || stat.Kind != FileKindFile || stat.SizeBytes > MaxSinglePendingCreateBytes {
+		return false
+	}
+	doc, stream, err := p.State.LoadLatestStreamDoc(ctx, streamID, "content")
+	if err != nil {
+		return false
+	}
+	defer doc.Close()
+	if !stream.LatestStateID.Valid {
+		return false
+	}
+	expectedHash := contentSHA256([]byte(doc.GetText("content").ToString()))
+	read, ok, err := p.FS.ReadBytesStable(ctx, rel, StableReadOptions{
+		ExpectedStat: &stat,
+		Capabilities: caps,
+		MaxBytes:     MaxSinglePendingCreateBytes,
+	})
+	if err != nil || !ok {
+		return false
+	}
+	return contentSHA256(read.Bytes) == expectedHash
+}
+
+func (p RootManifestProjector) canClaimUntrackedManifestFile(ctx context.Context, streamID string, rel string, stat FileStat, caps ScanCapabilities) bool {
+	if p.localFileMatchesLatestStreamState(ctx, streamID, rel, stat, caps) {
+		return true
+	}
+	projection, err := p.State.GetContentProjection(ctx, streamID)
+	if err != nil || projection == nil || projection.Dirty || !projection.ProjectedStateID.Valid {
+		return false
+	}
+	return normalizeStateRelPath(projection.MaterializedPath) == normalizeStateRelPath(rel)
+}
+
+func (p RootManifestProjector) hasLocalContentOutboxAfter(ctx context.Context, streamID string, after string) bool {
+	if p.State == nil {
+		return false
+	}
+	ok, err := p.State.HasOutboxCreatedAfter(ctx, streamID, after)
+	return err == nil && ok
+}
+
+func orderRootMoveJobs(jobs []FSJob) []FSJob {
+	if len(jobs) < 2 {
+		return jobs
+	}
+	remaining := append([]FSJob(nil), jobs...)
+	ordered := make([]FSJob, 0, len(jobs))
+	for len(remaining) > 0 {
+		next := -1
+		for i, job := range remaining {
+			target := normalizeStateRelPath(job.TargetPath)
+			blocked := false
+			for j, other := range remaining {
+				if i == j {
+					continue
+				}
+				if target != "" && target == normalizeStateRelPath(other.SourcePath) {
+					blocked = true
+					break
+				}
+			}
+			if !blocked {
+				next = i
+				break
+			}
+		}
+		if next == -1 {
+			ordered = append(ordered, remaining...)
+			break
+		}
+		ordered = append(ordered, remaining[next])
+		remaining = append(remaining[:next], remaining[next+1:]...)
+	}
+	return ordered
 }
 
 func DefaultRootScanBudget() ScanBudget {
