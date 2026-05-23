@@ -169,13 +169,13 @@ append_path_dir() {
 
 append_codex_search_paths() {
 	append_path_dir "/opt/homebrew/bin"
+	append_path_dir "$HOME/.local/bin"
+	append_path_dir "$HOME/.npm-global/bin"
 	append_path_dir "/usr/local/bin"
 	append_path_dir "/usr/bin"
 	append_path_dir "/bin"
 	append_path_dir "/usr/sbin"
 	append_path_dir "/sbin"
-	append_path_dir "$HOME/.local/bin"
-	append_path_dir "$HOME/.npm-global/bin"
 	npm_prefix="$(PATH="$daemon_path" npm config get prefix 2>/dev/null || true)"
 	if [ -n "$npm_prefix" ]; then
 		append_path_dir "$npm_prefix/bin"
