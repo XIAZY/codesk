@@ -108,7 +108,7 @@ func (p RootManifestProjector) CaptureLocal(ctx context.Context, rootDoc *crdt.D
 			if movedPath := fileKeyIndex[row.Stat.FileKey]; movedPath != "" {
 				if _, claimed := claimedPaths[movedPath]; !claimed {
 					if stat, ok := scanStatForEntry(scan, movedPath, entry.Kind); ok {
-						loc := locForProjectedPath(manifest, tracker, movedPath, entry.Kind, p)
+						loc := locForProjectedPath(manifest, tracker, movedPath, entry.ID)
 						if loc != nil {
 							intents = append(intents, rootmanifest.Intent{Type: "loc", EntryID: entry.ID, Loc: loc})
 							matchedPaths[entry.ID] = movedPath
@@ -125,7 +125,7 @@ func (p RootManifestProjector) CaptureLocal(ctx context.Context, rootDoc *crdt.D
 		}
 		if tracked && entry.Kind == rootmanifest.EntryKindFile && row.LastCleanHash != "" {
 			if movedPath, stat := p.detectCleanHashMove(ctx, row, scan, claimedPaths); movedPath != "" {
-				loc := locForProjectedPath(manifest, tracker, movedPath, entry.Kind, p)
+				loc := locForProjectedPath(manifest, tracker, movedPath, entry.ID)
 				if loc != nil {
 					intents = append(intents, rootmanifest.Intent{Type: "loc", EntryID: entry.ID, Loc: loc})
 					matchedPaths[entry.ID] = movedPath
@@ -156,6 +156,24 @@ func (p RootManifestProjector) CaptureLocal(ctx context.Context, rootDoc *crdt.D
 			p.queue(entry.ContentStreamID)
 			continue
 		}
+		if tracked && entry.Kind == rootmanifest.EntryKindFile && p.contentStreamNeedsProjection(ctx, entry.ContentStreamID, materialized) {
+			p.queue(entry.ContentStreamID)
+			continue
+		}
+		if tracked && entry.Kind == rootmanifest.EntryKindFile && p.isAgentReplica() {
+			p.queue(entry.ContentStreamID)
+			continue
+		}
+		if !tracked {
+			if entry.Kind == rootmanifest.EntryKindFile {
+				p.queue(entry.ContentStreamID)
+			}
+			continue
+		}
+		if entry.Kind == rootmanifest.EntryKindFile && p.hasLocalContentOutbox(ctx, entry.ContentStreamID) {
+			p.queue(entry.ContentStreamID)
+			continue
+		}
 		intents = append(intents, rootmanifest.Intent{
 			Type:    "tombstone",
 			EntryID: entry.ID,
@@ -168,6 +186,7 @@ func (p RootManifestProjector) CaptureLocal(ctx context.Context, rootDoc *crdt.D
 	}
 
 	dirIDsByPath := liveDirIDsByDesiredPath(manifest, tracker)
+	manifestCreateBlockPaths := p.manifestCreateBlockPaths(ctx, manifest, projection, tracker)
 	for _, rel := range sortedScanDirPaths(scan) {
 		if rel == "" || isIgnoredStatePath(rel) {
 			continue
@@ -181,8 +200,12 @@ func (p RootManifestProjector) CaptureLocal(ctx context.Context, rootDoc *crdt.D
 			_ = p.upsertManifestProjectionPath(ctx, entry, rel, rel, stat, true)
 		}
 	}
+	contentProjectionPaths, err := p.State.LoadContentProjectionPaths(ctx)
+	if err != nil {
+		return nil, err
+	}
 	for _, rel := range sortedScanFilePaths(scan) {
-		if _, claimed := claimedPaths[rel]; claimed || trackerPathExists(tracker, rel) {
+		if _, claimed := claimedPaths[rel]; claimed || trackerPathExists(tracker, rel) || contentProjectionPathBlocksLocalCreate(contentProjectionPaths, tracker, rel) || manifestCreateBlockPaths[rel] {
 			continue
 		}
 		parentID := rootmanifest.RootEntryID
@@ -474,6 +497,73 @@ func (p RootManifestProjector) hasLocalContentOutboxAfter(ctx context.Context, s
 	return err == nil && ok
 }
 
+func (p RootManifestProjector) hasLocalContentOutbox(ctx context.Context, streamID string) bool {
+	if p.State == nil {
+		return false
+	}
+	ok, err := p.State.HasOutbox(ctx, streamID)
+	return err == nil && ok
+}
+
+func (p RootManifestProjector) isAgentReplica() bool {
+	return strings.TrimSpace(p.ActorType) == "agent"
+}
+
+func (p RootManifestProjector) contentStreamNeedsProjection(ctx context.Context, streamID string, materialized string) bool {
+	if p.State == nil || strings.TrimSpace(streamID) == "" {
+		return false
+	}
+	if blocking, err := p.State.HasBlockingFSJob(ctx, streamID); err == nil && blocking {
+		return true
+	}
+	materialized = normalizeStateRelPath(materialized)
+	if projection, err := p.State.GetContentProjection(ctx, streamID); err == nil && projection != nil {
+		if normalizeStateRelPath(projection.MaterializedPath) == "" && materialized != "" {
+			projection.MaterializedPath = materialized
+			_ = p.State.UpsertContentProjection(ctx, *projection)
+			return true
+		}
+	}
+	stream, err := p.State.GetStream(ctx, streamID)
+	if err != nil {
+		return false
+	}
+	return stream.LatestStateID.Valid && (!stream.ProjectedStateID.Valid || stream.ProjectedStateID.Int64 != stream.LatestStateID.Int64)
+}
+
+func (p RootManifestProjector) manifestCreateBlockPaths(ctx context.Context, manifest rootmanifest.Manifest, projection rootmanifest.Projection, tracker map[string]ManifestProjectionRow) map[string]bool {
+	blocked := map[string]bool{}
+	if p.State == nil {
+		return blocked
+	}
+	for _, entry := range manifest.EntriesByID {
+		if entry.Kind != rootmanifest.EntryKindFile || entry.Tombstone != nil {
+			continue
+		}
+		rel := normalizeStateRelPath(projection.EntryPath[entry.ID])
+		if rel == "" {
+			continue
+		}
+		if row, ok := tracker[entry.ID]; ok && !row.Tombstoned {
+			blocked[rel] = true
+			continue
+		}
+		if contentProjection, err := p.State.GetContentProjection(ctx, entry.ContentStreamID); err == nil && contentProjection != nil {
+			blocked[rel] = true
+			continue
+		}
+		if p.hasLocalContentOutbox(ctx, entry.ContentStreamID) {
+			blocked[rel] = true
+			continue
+		}
+		if stream, err := p.State.GetStream(ctx, entry.ContentStreamID); err == nil && stream.LatestStateID.Valid {
+			blocked[rel] = true
+			continue
+		}
+	}
+	return blocked
+}
+
 func orderRootMoveJobs(jobs []FSJob) []FSJob {
 	if len(jobs) < 2 {
 		return jobs
@@ -718,6 +808,18 @@ func trackerPathExists(tracker map[string]ManifestProjectionRow, rel string) boo
 	return false
 }
 
+func contentProjectionPathBlocksLocalCreate(paths map[string]string, tracker map[string]ManifestProjectionRow, rel string) bool {
+	if len(paths) == 0 {
+		return false
+	}
+	entryID, ok := paths[normalizeStateRelPath(rel)]
+	if !ok {
+		return false
+	}
+	row, tracked := tracker[entryID]
+	return !tracked || !row.Tombstoned
+}
+
 func pendingEntryIDForPath(tracker map[string]ManifestProjectionRow, rel string) string {
 	for _, row := range tracker {
 		if row.MaterializedPath == rel && row.PendingCreate {
@@ -727,7 +829,10 @@ func pendingEntryIDForPath(tracker map[string]ManifestProjectionRow, rel string)
 	return ""
 }
 
-func locForProjectedPath(manifest rootmanifest.Manifest, tracker map[string]ManifestProjectionRow, rel string, kind string, p RootManifestProjector) *rootmanifest.Location {
+func locForProjectedPath(manifest rootmanifest.Manifest, tracker map[string]ManifestProjectionRow, rel string, entryID string) *rootmanifest.Location {
+	if pathReservedByOtherEntry(manifest, tracker, rel, entryID) {
+		return nil
+	}
 	parentPath := path.Dir(rel)
 	parentID := rootmanifest.RootEntryID
 	if parentPath != "." && parentPath != "" {
@@ -738,4 +843,24 @@ func locForProjectedPath(manifest rootmanifest.Manifest, tracker map[string]Mani
 		}
 	}
 	return rootmanifest.NewLocation(parentID, path.Base(rel))
+}
+
+func pathReservedByOtherEntry(manifest rootmanifest.Manifest, tracker map[string]ManifestProjectionRow, rel string, entryID string) bool {
+	rel = normalizeStateRelPath(rel)
+	if rel == "" {
+		return false
+	}
+	projection := rootmanifest.Resolve(manifest)
+	for id, projectedPath := range projection.EntryPath {
+		if id != entryID && normalizeStateRelPath(projectedPath) == rel {
+			return true
+		}
+	}
+	for id, row := range tracker {
+		rowEntryID := firstNonEmptyText(row.EntryID, id)
+		if rowEntryID != entryID && !row.Tombstoned && normalizeStateRelPath(row.MaterializedPath) == rel {
+			return true
+		}
+	}
+	return false
 }

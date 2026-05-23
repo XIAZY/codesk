@@ -51,7 +51,7 @@ func (p ContentProjector) CaptureLocal(ctx context.Context, doc *crdt.Doc) ([]St
 	if !stat.Exists {
 		return nil, nil
 	}
-	if projection.Stat.StatValid && SameStatTuple(projection.Stat, stat, p.Capabilities) {
+	if !projection.Dirty && projection.Stat.StatValid && SameStatTuple(projection.Stat, stat, p.Capabilities) {
 		return nil, nil
 	}
 	read, ok, err := p.FS.ReadBytesStable(ctx, projection.MaterializedPath, StableReadOptions{
@@ -67,6 +67,7 @@ func (p ContentProjector) CaptureLocal(ctx context.Context, doc *crdt.Doc) ([]St
 	localHash := contentSHA256(read.Bytes)
 	if localHash == projection.ProjectedHash {
 		projection.Stat = read.FinalStat
+		projection.Dirty = false
 		if err := p.State.UpsertContentProjection(ctx, *projection); err != nil {
 			return nil, err
 		}
@@ -178,12 +179,16 @@ func (p ContentProjector) PlanApplyMerged(ctx context.Context, doc *crdt.Doc, st
 	if projection.ProjectedStateID.Valid && projection.ProjectedStateID.Int64 == stateID && projection.ProjectedHash == targetHash {
 		return nil
 	}
+	targetPath := normalizeStateRelPath(projection.MaterializedPath)
+	if targetPath == "" {
+		return nil
+	}
 	_, err = p.State.InsertFSJob(ctx, FSJob{
-		JobKey:        "content:write:" + p.StreamID + ":" + strconv.FormatInt(stateID, 10),
+		JobKey:        "content:write:" + p.StreamID + ":" + strconv.FormatInt(stateID, 10) + ":" + hashKey(projection.ProjectedHash),
 		Kind:          "write-content",
 		StreamID:      p.StreamID,
 		EntryID:       projection.EntryID,
-		TargetPath:    projection.MaterializedPath,
+		TargetPath:    targetPath,
 		ExpectedHash:  projection.ProjectedHash,
 		TargetHash:    targetHash,
 		TargetStateID: sql.NullInt64{Int64: stateID, Valid: true},

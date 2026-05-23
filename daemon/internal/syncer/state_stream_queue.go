@@ -309,6 +309,22 @@ func (s *WorkspaceStateDB) HasOutboxCreatedAfter(ctx context.Context, streamID s
 	return count > 0, err
 }
 
+func (s *WorkspaceStateDB) HasOutbox(ctx context.Context, streamID string) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, errors.New("state db is required")
+	}
+	streamID = strings.TrimSpace(streamID)
+	if streamID == "" {
+		return false, nil
+	}
+	var count int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		  FROM stream_outbox
+		 WHERE stream_id = ?`, streamID).Scan(&count)
+	return count > 0, err
+}
+
 func (s *WorkspaceStateDB) MarkOutboxSent(ctx context.Context, outboxID int64, at time.Time) error {
 	if s == nil || s.db == nil {
 		return errors.New("state db is required")

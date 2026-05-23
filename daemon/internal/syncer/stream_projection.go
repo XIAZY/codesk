@@ -164,8 +164,55 @@ func (p *streamProjection) EnsureDocumentStreams(ctx context.Context, workspace 
 		if document == nil || strings.TrimSpace(document.ID) == "" || isIgnoredDocumentPath(document.Path) {
 			continue
 		}
+		if err := p.ensureDocumentProjectionPath(ctx, document); err != nil && ctx.Err() == nil {
+			log.Printf("stream projection seed error root=%s stream=%s path=%s err=%v", p.rootDir, document.ID, document.Path, err)
+		}
 		p.ensureManagedStreamSync(ctx, document.ID, "content")
 	}
+}
+
+func (p *streamProjection) ensureDocumentProjectionPath(ctx context.Context, document *document) error {
+	if p == nil || p.state == nil || document == nil {
+		return nil
+	}
+	streamID := strings.TrimSpace(document.ID)
+	rel := normalizeStateRelPath(document.Path)
+	if streamID == "" || rel == "" || isIgnoredDocumentPath(rel) {
+		return nil
+	}
+	existing, err := p.state.GetContentProjection(ctx, streamID)
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		if normalizeStateRelPath(existing.MaterializedPath) == rel {
+			return nil
+		}
+		if normalizeStateRelPath(existing.MaterializedPath) != "" {
+			return nil
+		}
+	} else if p.fs != nil {
+		stat, err := p.fs.Stat(ctx, rel)
+		if err != nil {
+			return err
+		}
+		if stat.Exists {
+			return nil
+		}
+	}
+	row := ContentProjectionRow{
+		StreamID:         streamID,
+		EntryID:          streamID,
+		MaterializedPath: rel,
+	}
+	if existing != nil {
+		row.EntryID = firstNonEmptyText(existing.EntryID, streamID)
+		row.ProjectedStateID = existing.ProjectedStateID
+		row.ProjectedHash = existing.ProjectedHash
+		row.Stat = existing.Stat
+		row.Dirty = existing.Dirty
+	}
+	return p.state.UpsertContentProjection(ctx, row)
 }
 
 func (p *streamProjection) ensureManagedStreamSync(ctx context.Context, streamID string, kind string) {

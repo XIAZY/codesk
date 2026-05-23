@@ -204,6 +204,32 @@ func (s *WorkspaceStateDB) ListContentProjectionStreamIDs(ctx context.Context, l
 	return streamIDs, rows.Err()
 }
 
+func (s *WorkspaceStateDB) LoadContentProjectionPaths(ctx context.Context) (map[string]string, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("state db is required")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT materialized_path, entry_id
+		  FROM content_projection
+		 WHERE materialized_path != ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	paths := map[string]string{}
+	for rows.Next() {
+		var rel, streamID string
+		if err := rows.Scan(&rel, &streamID); err != nil {
+			return nil, err
+		}
+		rel = normalizeStateRelPath(rel)
+		if rel != "" {
+			paths[rel] = streamID
+		}
+	}
+	return paths, rows.Err()
+}
+
 func (s *WorkspaceStateDB) UpsertContentProjection(ctx context.Context, row ContentProjectionRow) error {
 	if s == nil || s.db == nil {
 		return errors.New("state db is required")
@@ -425,15 +451,31 @@ func (s *WorkspaceStateDB) finishWriteContentJob(ctx context.Context, job FSJob,
 	return s.TryCompletePendingContentCreate(ctx, job.StreamID, job.TargetStateID.Int64)
 }
 
-func (s *WorkspaceStateDB) markWriteContentJobDiverged(ctx context.Context, job FSJob, targetHash string, stat FileStat) error {
-	return s.UpsertContentProjection(ctx, ContentProjectionRow{
+func (s *WorkspaceStateDB) markWriteContentJobDiverged(ctx context.Context, job FSJob, _ string, stat FileStat) error {
+	projection, err := s.GetContentProjection(ctx, job.StreamID)
+	if err != nil {
+		return err
+	}
+	row := ContentProjectionRow{
 		StreamID:         job.StreamID,
 		EntryID:          job.EntryID,
 		MaterializedPath: normalizeStateRelPath(job.TargetPath),
-		ProjectedStateID: job.TargetStateID,
-		ProjectedHash:    targetHash,
-		Stat:             stat,
 		Dirty:            true,
+		Stat:             stat,
+	}
+	if projection != nil {
+		row.EntryID = firstNonEmptyText(projection.EntryID, row.EntryID)
+		row.ProjectedStateID = projection.ProjectedStateID
+		row.ProjectedHash = projection.ProjectedHash
+	}
+	return s.UpsertContentProjection(ctx, ContentProjectionRow{
+		StreamID:         row.StreamID,
+		EntryID:          row.EntryID,
+		MaterializedPath: row.MaterializedPath,
+		ProjectedStateID: row.ProjectedStateID,
+		ProjectedHash:    row.ProjectedHash,
+		Stat:             row.Stat,
+		Dirty:            row.Dirty,
 	})
 }
 

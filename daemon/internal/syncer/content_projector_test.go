@@ -325,6 +325,151 @@ func TestContentProjectorDoesNotOverwriteDirtyRemoteWrite(t *testing.T) {
 	}
 }
 
+func TestContentProjectorRetriesRemoteWriteAfterLocalProjectionCatchesUp(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "doc.md"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base file: %v", err)
+	}
+	fs := NewWorkspaceFS(root)
+	state, err := OpenWorkspaceStateDB(root)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer state.Close()
+
+	base := contentDoc(t, "doc", "base\n")
+	baseID, err := state.PersistLatestStreamDoc(ctx, "doc", base, contentSHA256([]byte("base\n")))
+	if err != nil {
+		t.Fatalf("persist base: %v", err)
+	}
+	baseStat, err := fs.Stat(ctx, "doc.md")
+	if err != nil {
+		t.Fatalf("stat base file: %v", err)
+	}
+	if err := state.UpsertContentProjection(ctx, ContentProjectionRow{
+		StreamID:         "doc",
+		EntryID:          "doc",
+		MaterializedPath: "doc.md",
+		ProjectedStateID: sql.NullInt64{Int64: baseID, Valid: true},
+		ProjectedHash:    contentSHA256([]byte("base\n")),
+		Stat:             baseStat,
+	}); err != nil {
+		t.Fatalf("seed base projection: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "doc.md"), []byte("base\nprimary edit\n"), 0o644); err != nil {
+		t.Fatalf("write primary edit: %v", err)
+	}
+	primaryStat, err := fs.Stat(ctx, "doc.md")
+	if err != nil {
+		t.Fatalf("stat primary file: %v", err)
+	}
+	primary := contentDoc(t, "doc", "base\nprimary edit\n")
+	primaryID, err := state.PersistLatestStreamDoc(ctx, "doc", primary, contentSHA256([]byte("base\nprimary edit\n")))
+	if err != nil {
+		t.Fatalf("persist primary: %v", err)
+	}
+	final := contentDoc(t, "doc", "base\nprimary edit\nagent edit\n")
+	finalID, err := state.PersistLatestStreamDoc(ctx, "doc", final, contentSHA256([]byte("base\nprimary edit\nagent edit\n")))
+	if err != nil {
+		t.Fatalf("persist final: %v", err)
+	}
+
+	if err := (ContentProjector{State: state, StreamID: "doc"}).PlanApplyMerged(ctx, final, finalID); err != nil {
+		t.Fatalf("plan final write: %v", err)
+	}
+	err = state.RunPendingFSJobs(ctx, fs)
+	if !errors.Is(err, ErrDivergedWorkingCopy) {
+		t.Fatalf("expected first write to diverge, got %v", err)
+	}
+	projection, err := state.GetContentProjection(ctx, "doc")
+	if err != nil {
+		t.Fatalf("get diverged projection: %v", err)
+	}
+	if projection == nil || !projection.Dirty || projection.ProjectedHash != contentSHA256([]byte("base\n")) || !projection.ProjectedStateID.Valid || projection.ProjectedStateID.Int64 != baseID {
+		t.Fatalf("diverged write should preserve projected base, got %#v", projection)
+	}
+
+	if err := state.UpsertContentProjection(ctx, ContentProjectionRow{
+		StreamID:         "doc",
+		EntryID:          "doc",
+		MaterializedPath: "doc.md",
+		ProjectedStateID: sql.NullInt64{Int64: primaryID, Valid: true},
+		ProjectedHash:    contentSHA256([]byte("base\nprimary edit\n")),
+		Stat:             primaryStat,
+		Dirty:            false,
+	}); err != nil {
+		t.Fatalf("advance local projection: %v", err)
+	}
+	if err := (ContentProjector{State: state, StreamID: "doc"}).PlanApplyMerged(ctx, final, finalID); err != nil {
+		t.Fatalf("plan retry write: %v", err)
+	}
+	if err := state.RunPendingFSJobs(ctx, fs); err != nil {
+		t.Fatalf("run retry write: %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "doc.md"))
+	if err != nil {
+		t.Fatalf("read final file: %v", err)
+	}
+	if string(content) != "base\nprimary edit\nagent edit\n" {
+		t.Fatalf("unexpected final file %q", string(content))
+	}
+	var failed, done int
+	if err := state.DB().QueryRow(`SELECT COUNT(*) FROM fs_jobs WHERE kind = 'write-content' AND status = 'failed'`).Scan(&failed); err != nil {
+		t.Fatalf("count failed jobs: %v", err)
+	}
+	if err := state.DB().QueryRow(`SELECT COUNT(*) FROM fs_jobs WHERE kind = 'write-content' AND status = 'done'`).Scan(&done); err != nil {
+		t.Fatalf("count done jobs: %v", err)
+	}
+	if failed != 1 || done != 1 {
+		t.Fatalf("expected one failed stale write and one done retry, got failed=%d done=%d", failed, done)
+	}
+}
+
+func TestContentProjectorSkipsRemoteWriteWithoutMaterializedPath(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	state, err := OpenWorkspaceStateDB(root)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer state.Close()
+	doc := contentDoc(t, "doc", "remote\n")
+	defer doc.Close()
+	stateID, err := state.PersistLatestStreamDoc(ctx, "doc", doc, contentSHA256([]byte("remote\n")))
+	if err != nil {
+		t.Fatalf("persist remote: %v", err)
+	}
+	if err := state.UpsertContentProjection(ctx, ContentProjectionRow{
+		StreamID:         "doc",
+		EntryID:          "doc",
+		MaterializedPath: "doc.md",
+	}); err != nil {
+		t.Fatalf("seed projection: %v", err)
+	}
+	if err := state.UpsertContentProjection(ctx, ContentProjectionRow{
+		StreamID:         "doc_duplicate",
+		EntryID:          "doc_duplicate",
+		MaterializedPath: "doc.md",
+	}); err != nil {
+		t.Fatalf("seed duplicate projection: %v", err)
+	}
+	if err := (ContentProjector{
+		State:    state,
+		FS:       NewWorkspaceFS(root),
+		StreamID: "doc",
+	}).PlanApplyMerged(ctx, doc, stateID); err != nil {
+		t.Fatalf("plan apply merged: %v", err)
+	}
+	var jobs int
+	if err := state.DB().QueryRow(`SELECT COUNT(*) FROM fs_jobs`).Scan(&jobs); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if jobs != 0 {
+		t.Fatalf("content write without a path should not create fs jobs, got %d", jobs)
+	}
+}
+
 func TestWriteContentFSJobDoesNotOverwriteExistingFileWithUnknownBase(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
