@@ -35,6 +35,11 @@ type regressionThreadAnchor struct {
 	Excerpt       string `json:"excerpt"`
 }
 
+type regressionWorkspaceDocument struct {
+	ID   string `json:"id"`
+	Path string `json:"path"`
+}
+
 func TestAppendOnlyFileSyncReconstructsBackend(t *testing.T) {
 	stack := newRegressionStack(t)
 	stack.up(t)
@@ -90,6 +95,62 @@ func TestDotPathsIgnoredWhileRootLogsSync(t *testing.T) {
 		t.Fatalf(".notty cache file was incorrectly synced as a document: %v", paths)
 	}
 	stack.waitForBackendContentByPath(t, "codex-agent.log", "line one\nline two\n", 30*time.Second)
+}
+
+func TestTwoDaemonsSamePathEntriesConvergeToConflictPaths(t *testing.T) {
+	stack := newRegressionStack(t)
+	stack.upBackendOnly(t)
+
+	env := map[string]string{
+		"NOTTY_WORKSPACE_ID": stack.workspaceID,
+		"NOTTY_DAEMON_TOKEN": stack.daemonToken,
+	}
+	stack.createDocument(t, "README.md", "from-a\n")
+	stack.createDocument(t, "README.md", "from-b\n")
+
+	stack.runWithEnv(t, env, "up", "-d", "--build", "daemon_a", "daemon_b")
+	docs := stack.waitForConflictDocuments(t, "README.md", 90*time.Second)
+	contents := map[string]string{}
+	for _, doc := range docs {
+		contents[doc.Path] = stack.waitForBackendContentPredicate(t, doc.ID, 60*time.Second, func(content string) bool {
+			return content == "from-a\n" || content == "from-b\n"
+		})
+	}
+	for _, service := range []string{"daemon_a", "daemon_b"} {
+		for path, content := range contents {
+			stack.waitForServiceLocalContent(t, service, path, content, 90*time.Second)
+		}
+	}
+}
+
+func TestOfflineLocalSamePathCreatesConvergeToConflictPaths(t *testing.T) {
+	stack := newRegressionStack(t)
+	stack.upBackendOnly(t)
+
+	env := map[string]string{
+		"NOTTY_WORKSPACE_ID": stack.workspaceID,
+		"NOTTY_DAEMON_TOKEN": stack.daemonToken,
+	}
+	stack.runWithEnv(t, env, "build", "daemon_a", "daemon_b")
+	stack.seedServiceLocalFile(t, env, "daemon_a", "README.md", "offline-a\n")
+	stack.seedServiceLocalFile(t, env, "daemon_b", "README.md", "offline-b\n")
+
+	stack.runWithEnv(t, env, "up", "-d", "daemon_a", "daemon_b")
+	docs := stack.waitForConflictDocuments(t, "README.md", 120*time.Second)
+	contents := map[string]string{}
+	for _, doc := range docs {
+		contents[doc.Path] = stack.waitForBackendContentPredicate(t, doc.ID, 90*time.Second, func(content string) bool {
+			return content == "offline-a\n" || content == "offline-b\n"
+		})
+	}
+	if len(uniqueStringValues(contents)) != 2 {
+		t.Fatalf("expected both offline contents to survive, got %#v", contents)
+	}
+	for _, service := range []string{"daemon_a", "daemon_b"} {
+		for path, content := range contents {
+			stack.waitForServiceLocalContent(t, service, path, content, 120*time.Second)
+		}
+	}
 }
 
 func TestThreadCreationAcceptsClientRelativeAnchors(t *testing.T) {
@@ -334,7 +395,7 @@ func TestLocalAndRemoteAppendMergeConvergesAcrossRecipients(t *testing.T) {
 	writeBinary(t, remoteConn, yproto.BuildSyncUpdate(remoteUpdate))
 
 	finalContent := stack.waitForBackendContentPredicate(t, documentID, 60*time.Second, func(content string) bool {
-		return strings.HasPrefix(content, "base\n") &&
+		return strings.Count(content, "base\n") == 1 &&
 			strings.Count(content, "local\n") == 1 &&
 			strings.Count(content, "remote\n") == 1
 	})
@@ -407,6 +468,15 @@ func newRegressionStack(t *testing.T) *regressionStack {
 
 func (s *regressionStack) up(t *testing.T) {
 	t.Helper()
+	s.upBackendOnly(t)
+	s.runWithEnv(t, map[string]string{
+		"NOTTY_WORKSPACE_ID": s.workspaceID,
+		"NOTTY_DAEMON_TOKEN": s.daemonToken,
+	}, "up", "-d", "--build", "daemon")
+}
+
+func (s *regressionStack) upBackendOnly(t *testing.T) {
+	t.Helper()
 	s.run(t, "up", "-d", "--build", "postgres", "backend")
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -418,19 +488,29 @@ func (s *regressionStack) up(t *testing.T) {
 	})
 	s.waitForBackend(t, 2*time.Minute)
 	s.bootstrapWorkspace(t)
-	s.runWithEnv(t, map[string]string{
-		"NOTTY_WORKSPACE_ID": s.workspaceID,
-		"NOTTY_DAEMON_TOKEN": s.daemonToken,
-	}, "up", "-d", "--build", "daemon")
 }
 
 func (s *regressionStack) backendURL(t *testing.T) string {
 	t.Helper()
-	output := strings.TrimSpace(s.runOutput(t, "port", "backend", "8080"))
-	if output == "" {
+	url := s.backendURLNoFatal()
+	if url == "" {
 		t.Fatal("backend port was empty")
 	}
-	return "http://" + output
+	return url
+}
+
+func (s *regressionStack) backendURLNoFatal() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	output, err := s.command(ctx, "port", "backend", "8080").CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	port := strings.TrimSpace(string(output))
+	if port == "" {
+		return ""
+	}
+	return "http://" + port
 }
 
 func (s *regressionStack) bootstrapWorkspace(t *testing.T) {
@@ -486,7 +566,8 @@ func (s *regressionStack) workspaceAPIPath(path string) string {
 func (s *regressionStack) documentWSURL(t *testing.T, documentID string) string {
 	t.Helper()
 	baseURL := s.backendURL(t)
-	u, err := url.Parse("ws" + strings.TrimPrefix(baseURL, "http") + "/ws/workspaces/" + url.PathEscape(s.workspaceID) + "/documents/" + url.PathEscape(documentID))
+	route := "/streams/"
+	u, err := url.Parse("ws" + strings.TrimPrefix(baseURL, "http") + "/ws/workspaces/" + url.PathEscape(s.workspaceID) + route + url.PathEscape(documentID))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -658,6 +739,17 @@ func (s *regressionStack) appendLocalFile(t *testing.T, path string, content str
 	s.execService(t, "daemon", "mkdir -p "+shellQuote(s.daemonWorkspaceDir())+" && cd "+shellQuote(s.daemonWorkspaceDir())+" && "+mkdir+fmt.Sprintf("printf %%s %s >> %s", shellQuote(content), shellQuote(path)))
 }
 
+func (s *regressionStack) seedServiceLocalFile(t *testing.T, env map[string]string, service string, path string, content string) {
+	t.Helper()
+	dir := filepath.ToSlash(filepath.Dir(path))
+	mkdir := ""
+	if dir != "." && dir != "" {
+		mkdir = "mkdir -p " + shellQuote(dir) + " && "
+	}
+	script := "mkdir -p " + shellQuote(s.daemonWorkspaceDir()) + " && cd " + shellQuote(s.daemonWorkspaceDir()) + " && " + mkdir + fmt.Sprintf("printf %%s %s > %s", shellQuote(content), shellQuote(path))
+	s.runOutputWithEnv(t, env, "run", "--rm", "--no-deps", "--entrypoint", "sh", "-T", service, "-lc", script)
+}
+
 func (s *regressionStack) localFileContent(t *testing.T, path string) string {
 	t.Helper()
 	return s.execService(t, "daemon", fmt.Sprintf("if [ -d %s ]; then cd %s && if [ -f %s ]; then cat %s; fi; fi", shellQuote(s.daemonWorkspaceDir()), shellQuote(s.daemonWorkspaceDir()), shellQuote(path), shellQuote(path)))
@@ -675,6 +767,20 @@ func (s *regressionStack) waitForLocalContent(t *testing.T, path string, want st
 		time.Sleep(500 * time.Millisecond)
 	}
 	t.Fatalf("local file %s did not converge: got %q want %q", path, last, want)
+}
+
+func (s *regressionStack) waitForServiceLocalContent(t *testing.T, service string, path string, want string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last string
+	for time.Now().Before(deadline) {
+		last = s.execService(t, service, fmt.Sprintf("if [ -d %s ]; then cd %s && if [ -f %s ]; then cat %s; fi; fi", shellQuote(s.daemonWorkspaceDir()), shellQuote(s.daemonWorkspaceDir()), shellQuote(path), shellQuote(path)))
+		if last == want {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("%s file %s did not converge: got %q want %q", service, path, last, want)
 }
 
 func (s *regressionStack) waitForLocalContentPredicate(t *testing.T, path string, timeout time.Duration, accept func(string) bool) string {
@@ -784,7 +890,7 @@ func (s *regressionStack) waitForBackendContentPredicate(t *testing.T, documentI
 
 func (s *regressionStack) syncFreshWebsocketClientByPath(t *testing.T, path string, want string) {
 	t.Helper()
-	documentID, _, _, err := s.documentHeaderByPath(path)
+	documentID, err := s.documentIDByPath(path)
 	if err != nil {
 		t.Fatalf("document %s not found for fresh websocket sync: %v", path, err)
 	}
@@ -808,92 +914,164 @@ func (s *regressionStack) waitForDocumentPath(t *testing.T, path string, timeout
 	t.Fatalf("document path %s did not appear; current paths: %v", path, s.documentPaths())
 }
 
-func (s *regressionStack) documentPaths() []string {
-	output := strings.TrimSpace(s.psql(fmt.Sprintf("SELECT path FROM documents WHERE workspace_id=%s ORDER BY path", sqlQuote(s.workspaceID))))
-	if output == "" {
-		return nil
+func (s *regressionStack) waitForConflictDocuments(t *testing.T, canonicalPath string, timeout time.Duration) []regressionWorkspaceDocument {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last []regressionWorkspaceDocument
+	for time.Now().Before(deadline) {
+		docs := s.workspaceDocuments()
+		matches := make([]regressionWorkspaceDocument, 0, 2)
+		for _, doc := range docs {
+			if doc.Path == canonicalPath || isConflictPathFor(doc.Path, canonicalPath) {
+				matches = append(matches, doc)
+			}
+		}
+		if len(matches) == 2 && containsDocumentPath(matches, canonicalPath) {
+			return matches
+		}
+		last = docs
+		time.Sleep(500 * time.Millisecond)
 	}
-	return strings.Split(output, "\n")
+	t.Fatalf("conflict documents for %s did not appear; current docs: %#v", canonicalPath, last)
+	return nil
+}
+
+func isConflictPathFor(pathValue string, canonicalPath string) bool {
+	dir := filepath.ToSlash(filepath.Dir(canonicalPath))
+	base := filepath.Base(canonicalPath)
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	conflictBase := filepath.Base(pathValue)
+	if dir != "." && dir != "" && filepath.ToSlash(filepath.Dir(pathValue)) != dir {
+		return false
+	}
+	return strings.HasPrefix(conflictBase, stem+" (conflict ") && strings.HasSuffix(conflictBase, ")"+ext)
+}
+
+func containsDocumentPath(docs []regressionWorkspaceDocument, path string) bool {
+	for _, doc := range docs {
+		if doc.Path == path {
+			return true
+		}
+	}
+	return false
+}
+
+func uniqueStringValues(values map[string]string) map[string]struct{} {
+	unique := map[string]struct{}{}
+	for _, value := range values {
+		unique[value] = struct{}{}
+	}
+	return unique
+}
+
+func (s *regressionStack) documentPaths() []string {
+	documents := s.workspaceDocuments()
+	paths := make([]string, 0, len(documents))
+	for _, document := range documents {
+		paths = append(paths, document.Path)
+	}
+	return paths
 }
 
 func (s *regressionStack) backendDocumentContentByPath(path string) (string, error) {
-	docID, _, _, err := s.documentHeaderByPath(path)
+	docID, err := s.documentIDByPath(path)
 	if err != nil {
 		return "", err
 	}
-	return s.backendDocumentContent(docID)
+	return s.backendStreamContent(docID)
 }
 
 func (s *regressionStack) backendDocumentContent(documentID string) (string, error) {
-	_, clientID, headID, err := s.documentHeaderByID(documentID)
+	return s.backendStreamContent(documentID)
+}
+
+func (s *regressionStack) backendStreamContent(streamID string) (string, error) {
+	headID, err := s.streamHeadID(streamID)
 	if err != nil {
 		return "", err
 	}
-	doc := crdt.New(crdt.WithClientID(crdt.ClientID(clientID)))
-	checkpointID, checkpoint, err := s.latestCheckpoint(documentID, headID)
+	doc := crdt.New()
+	checkpointID, checkpoint, err := s.latestStreamCheckpoint(streamID, headID)
 	if err != nil {
 		return "", err
 	}
 	if len(checkpoint) > 0 {
-		if err := crdt.ApplyUpdateV1(doc, checkpoint, "checkpoint"); err != nil {
+		if err := crdt.ApplyUpdateV1(doc, checkpoint, "stream-checkpoint"); err != nil {
 			return "", err
 		}
 	}
-	updates, err := s.documentUpdates(documentID, checkpointID, headID)
+	updates, err := s.streamUpdates(streamID, checkpointID, headID)
 	if err != nil {
 		return "", err
 	}
 	for _, update := range updates {
-		if err := crdt.ApplyUpdateV1(doc, update, "tail"); err != nil {
+		if err := crdt.ApplyUpdateV1(doc, update, "stream-tail"); err != nil {
 			return "", err
 		}
 	}
 	return doc.GetText("content").ToString(), nil
 }
 
-func (s *regressionStack) documentHeaderByPath(path string) (string, uint64, int64, error) {
+func (s *regressionStack) streamHeadID(streamID string) (int64, error) {
 	query := fmt.Sprintf(
-		"SELECT d.id || chr(9) || d.client_id_seed || chr(9) || h.update_id FROM documents d JOIN document_heads h ON h.workspace_id=d.workspace_id AND h.document_id=d.id WHERE d.workspace_id=%s AND d.path=%s",
+		"SELECT update_id FROM crdt_stream_heads WHERE workspace_id=%s AND stream_id=%s",
 		sqlQuote(s.workspaceID),
-		sqlQuote(path),
+		sqlQuote(streamID),
 	)
-	return parseDocumentHeader(s.psql(query))
+	output := strings.TrimSpace(s.psql(query))
+	if output == "" {
+		return 0, errors.New("stream head not found")
+	}
+	return strconv.ParseInt(output, 10, 64)
 }
 
-func (s *regressionStack) documentHeaderByID(documentID string) (string, uint64, int64, error) {
-	query := fmt.Sprintf(
-		"SELECT d.id || chr(9) || d.client_id_seed || chr(9) || h.update_id FROM documents d JOIN document_heads h ON h.workspace_id=d.workspace_id AND h.document_id=d.id WHERE d.workspace_id=%s AND d.id=%s",
-		sqlQuote(s.workspaceID),
-		sqlQuote(documentID),
-	)
-	return parseDocumentHeader(s.psql(query))
+func (s *regressionStack) documentIDByPath(path string) (string, error) {
+	if documents := s.workspaceDocuments(); len(documents) > 0 {
+		for _, document := range documents {
+			if document.Path == path {
+				return document.ID, nil
+			}
+		}
+	}
+	return "", errors.New("document not found")
 }
 
-func parseDocumentHeader(output string) (string, uint64, int64, error) {
-	line := strings.TrimSpace(output)
-	if line == "" {
-		return "", 0, 0, errors.New("document not found")
+func (s *regressionStack) workspaceDocuments() []regressionWorkspaceDocument {
+	baseURL := s.backendURLNoFatal()
+	if baseURL == "" {
+		return nil
 	}
-	fields := strings.Split(line, "\t")
-	if len(fields) != 3 {
-		return "", 0, 0, fmt.Errorf("bad document header %q", line)
-	}
-	clientID, err := strconv.ParseUint(fields[1], 10, 64)
+	req, err := http.NewRequest(http.MethodGet, baseURL+s.workspaceAPIPath("/workspace"), nil)
 	if err != nil {
-		return "", 0, 0, err
+		return nil
 	}
-	headID, err := strconv.ParseInt(fields[2], 10, 64)
+	if s.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+s.authToken)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", 0, 0, err
+		return nil
 	}
-	return fields[0], clientID, headID, nil
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil
+	}
+	var payload struct {
+		Documents []regressionWorkspaceDocument `json:"documents"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil
+	}
+	return payload.Documents
 }
 
-func (s *regressionStack) latestCheckpoint(documentID string, headID int64) (int64, []byte, error) {
+func (s *regressionStack) latestStreamCheckpoint(streamID string, headID int64) (int64, []byte, error) {
 	query := fmt.Sprintf(
-		"SELECT update_id || chr(9) || crdt_state FROM document_checkpoints WHERE workspace_id=%s AND document_id=%s AND update_id <= %d ORDER BY update_id DESC LIMIT 1",
+		"SELECT update_id || chr(9) || encode(crdt_state, 'hex') FROM crdt_stream_checkpoints WHERE workspace_id=%s AND stream_id=%s AND update_id <= %d ORDER BY update_id DESC LIMIT 1",
 		sqlQuote(s.workspaceID),
-		sqlQuote(documentID),
+		sqlQuote(streamID),
 		headID,
 	)
 	output := strings.TrimSpace(s.psql(query))
@@ -902,24 +1080,24 @@ func (s *regressionStack) latestCheckpoint(documentID string, headID int64) (int
 	}
 	fields := strings.Split(output, "\t")
 	if len(fields) != 2 {
-		return 0, nil, fmt.Errorf("bad checkpoint row %q", output)
+		return 0, nil, fmt.Errorf("bad stream checkpoint row %q", output)
 	}
 	updateID, err := strconv.ParseInt(fields[0], 10, 64)
 	if err != nil {
 		return 0, nil, err
 	}
-	update, err := base64.StdEncoding.DecodeString(fields[1])
+	update, err := hex.DecodeString(fields[1])
 	if err != nil {
 		return 0, nil, err
 	}
 	return updateID, update, nil
 }
 
-func (s *regressionStack) documentUpdates(documentID string, afterID int64, throughID int64) ([][]byte, error) {
+func (s *regressionStack) streamUpdates(streamID string, afterID int64, throughID int64) ([][]byte, error) {
 	query := fmt.Sprintf(
-		"SELECT id || chr(9) || encode(update, 'hex') FROM document_updates WHERE workspace_id=%s AND document_id=%s AND id > %d AND id <= %d ORDER BY id ASC",
+		"SELECT id || chr(9) || encode(update, 'hex') FROM crdt_stream_updates WHERE workspace_id=%s AND stream_id=%s AND id > %d AND id <= %d ORDER BY id ASC",
 		sqlQuote(s.workspaceID),
-		sqlQuote(documentID),
+		sqlQuote(streamID),
 		afterID,
 		throughID,
 	)
@@ -933,7 +1111,7 @@ func (s *regressionStack) documentUpdates(documentID string, afterID int64, thro
 	for scanner.Scan() {
 		fields := strings.Split(scanner.Text(), "\t")
 		if len(fields) != 2 {
-			return nil, fmt.Errorf("bad update row %q", scanner.Text())
+			return nil, fmt.Errorf("bad stream update row %q", scanner.Text())
 		}
 		update, err := hex.DecodeString(fields[1])
 		if err != nil {

@@ -20,11 +20,18 @@ type Option func(*options)
 
 type options struct {
 	clientID ClientID
+	guid     string
 }
 
 func WithClientID(id ClientID) Option {
 	return func(opts *options) {
 		opts.clientID = id
+	}
+}
+
+func WithGUID(guid string) Option {
+	return func(opts *options) {
+		opts.guid = guid
 	}
 }
 
@@ -52,6 +59,12 @@ type YText struct {
 	branch *C.Branch
 }
 
+type YMap struct {
+	doc    *Doc
+	name   string
+	branch *C.Branch
+}
+
 func New(opts ...Option) *Doc {
 	cfg := options{}
 	for _, opt := range opts {
@@ -60,6 +73,12 @@ func New(opts ...Option) *Doc {
 	yopts := C.yoptions()
 	if cfg.clientID != 0 {
 		yopts.id = C.uint64_t(cfg.clientID)
+	}
+	var cGUID *C.char
+	if cfg.guid != "" {
+		cGUID = C.CString(cfg.guid)
+		defer C.free(unsafe.Pointer(cGUID))
+		yopts.guid = cGUID
 	}
 	yopts.encoding = C.Y_OFFSET_UTF16
 	ptr := C.ydoc_new_with_options(yopts)
@@ -92,6 +111,20 @@ func (d *Doc) ClientID() ClientID {
 	return ClientID(C.ydoc_id(d.ptr))
 }
 
+func (d *Doc) GUID() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed || d.ptr == nil {
+		return ""
+	}
+	ptr := C.ydoc_guid(d.ptr)
+	if ptr == nil {
+		return ""
+	}
+	defer C.ystring_destroy(ptr)
+	return C.GoString(ptr)
+}
+
 func (d *Doc) GetText(name string) *YText {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -101,6 +134,17 @@ func (d *Doc) GetText(name string) *YText {
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 	return &YText{doc: d, name: name, branch: C.ytext(d.ptr, cName)}
+}
+
+func (d *Doc) GetMap(name string) *YMap {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed || d.ptr == nil {
+		return &YMap{doc: d, name: name}
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	return &YMap{doc: d, name: name, branch: C.ymap(d.ptr, cName)}
 }
 
 func (d *Doc) Transact(fn func(*Transaction), origin ...any) {

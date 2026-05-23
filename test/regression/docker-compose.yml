@@ -45,7 +45,47 @@ services:
       - daemon_workspace:/workspace
       - daemon_runtime:/runtime
 
+  daemon_a:
+    build:
+      context: ../..
+      dockerfile: daemon/Dockerfile
+    depends_on:
+      - backend
+    environment:
+      NOTTY_BACKEND_URL: http://backend:8080
+      NOTTY_WORKSPACE_ID: ${NOTTY_WORKSPACE_ID:-}
+      NOTTY_DAEMON_TOKEN: ${NOTTY_DAEMON_TOKEN:-}
+      NOTTY_WORKSPACE_DIR: /workspace/notty/${NOTTY_WORKSPACE_ID:-default}
+      NOTTY_AGENT_WORKSPACE_ROOT: /workspace/agents/${NOTTY_WORKSPACE_ID:-default}
+      NOTTY_AGENT_ID: daemon_a
+      NOTTY_RUNTIME_DIR: /runtime/notty
+    volumes:
+      - daemon_a_workspace:/workspace
+      - daemon_a_runtime:/runtime
+
+  daemon_b:
+    build:
+      context: ../..
+      dockerfile: daemon/Dockerfile
+    depends_on:
+      - backend
+    environment:
+      NOTTY_BACKEND_URL: http://backend:8080
+      NOTTY_WORKSPACE_ID: ${NOTTY_WORKSPACE_ID:-}
+      NOTTY_DAEMON_TOKEN: ${NOTTY_DAEMON_TOKEN:-}
+      NOTTY_WORKSPACE_DIR: /workspace/notty/${NOTTY_WORKSPACE_ID:-default}
+      NOTTY_AGENT_WORKSPACE_ROOT: /workspace/agents/${NOTTY_WORKSPACE_ID:-default}
+      NOTTY_AGENT_ID: daemon_b
+      NOTTY_RUNTIME_DIR: /runtime/notty
+    volumes:
+      - daemon_b_workspace:/workspace
+      - daemon_b_runtime:/runtime
+
 volumes:
   postgres_data:
   daemon_workspace:
   daemon_runtime:
+  daemon_a_workspace:
+  daemon_a_runtime:
+  daemon_b_workspace:
+  daemon_b_runtime:

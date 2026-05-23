@@ -22,6 +22,7 @@ type WorkspaceState struct {
 type Document struct {
 	ID           string    `json:"id"`
 	Path         string    `json:"path"`
+	DesiredPath  string    `json:"desiredPath,omitempty"`
 	Title        string    `json:"title"`
 	StateVector  string    `json:"stateVector,omitempty"`
 	UpdateID     int64     `json:"updateId,omitempty"`
@@ -32,6 +33,7 @@ type Document struct {
 type DocumentMetadata struct {
 	ID           string    `json:"id"`
 	Path         string    `json:"path"`
+	DesiredPath  string    `json:"desiredPath,omitempty"`
 	Title        string    `json:"title"`
 	StateVector  string    `json:"stateVector,omitempty"`
 	UpdateID     int64     `json:"updateId,omitempty"`
@@ -463,6 +465,7 @@ func documentMetadata(document *Document) *DocumentMetadata {
 	return &DocumentMetadata{
 		ID:           document.ID,
 		Path:         document.Path,
+		DesiredPath:  document.DesiredPath,
 		Title:        document.Title,
 		StateVector:  document.StateVector,
 		UpdateID:     document.UpdateID,

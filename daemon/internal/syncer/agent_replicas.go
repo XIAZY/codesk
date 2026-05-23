@@ -5,84 +5,113 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 func (s *Service) reconcileAgentReplicas(ctx context.Context, workspace *workspaceResponse) error {
+	return s.reconcileAgentStreamProjections(ctx, workspace)
+}
+
+func (s *Service) reconcileAgentStreamProjections(ctx context.Context, workspace *workspaceResponse) error {
 	agents := []*agent(nil)
 	if workspace != nil {
 		agents = workspace.Agents
 	}
+	s.mu.Lock()
+	primary := s.primaryStream
+	if s.agentStreams == nil {
+		s.agentStreams = map[string]*managedStreamProjection{}
+	}
+	rootStreamID := ""
+	if primary != nil {
+		rootStreamID = primary.rootStreamID
+	}
+	s.mu.Unlock()
+	if rootStreamID == "" {
+		return nil
+	}
+
 	desired := make(map[string]*agent, len(agents))
 	for _, current := range agents {
-		if current == nil {
+		if current == nil || strings.TrimSpace(current.ID) == "" {
 			continue
 		}
 		desired[current.ID] = current
 	}
 
-	s.mu.Lock()
-	existing := make([]*workspaceReplica, 0, len(desired))
 	for agentID := range desired {
-		currentAgent := desired[agentID]
-		if managed, ok := s.agentReplicas[agentID]; ok {
-			if managed.replica.actorID == currentAgent.ID {
-				existing = append(existing, managed.replica)
-				continue
+		s.mu.Lock()
+		managed := s.agentStreams[agentID]
+		s.mu.Unlock()
+		if managed != nil {
+			if managed.projection != nil {
+				managed.projection.EnsureDocumentStreams(ctx, workspace)
 			}
-			managed.cancel()
-			delete(s.agentReplicas, agentID)
+			continue
 		}
 		rootDir := filepath.Join(s.cfg.AgentWorkspaceRoot, safeAgentWorkspaceName(agentID))
-		replica, err := newWorkspaceReplica(s.cfg, rootDir, currentAgent.ID, "agent", s.markDocumentDirty, s.localCreates.Mark)
+		projection, err := newStreamProjection(ctx, s.cfg, s.client, rootDir, agentID, "agent", rootStreamID)
 		if err != nil {
-			s.mu.Unlock()
 			return err
 		}
-		replica.client = s.client
-		replica.docCache = s.docCache
-		replica.initialWorkspace = workspace
-		replicaCtx, cancel := context.WithCancel(ctx)
-		s.agentReplicas[agentID] = &managedReplica{replica: replica, cancel: cancel}
-		go func() {
-			_ = replica.Run(replicaCtx)
-		}()
+		projection.EnsureDocumentStreams(ctx, workspace)
+		projectionCtx, cancel := context.WithCancel(ctx)
+		s.mu.Lock()
+		if s.agentStreams == nil {
+			s.agentStreams = map[string]*managedStreamProjection{}
+		}
+		if existing := s.agentStreams[agentID]; existing != nil {
+			s.mu.Unlock()
+			cancel()
+			projection.Close()
+			continue
+		}
+		s.agentStreams[agentID] = &managedStreamProjection{projection: projection, cancel: cancel}
+		s.mu.Unlock()
+		go projection.Run(projectionCtx)
 	}
 
 	staleIDs := make([]string, 0)
-	for agentID := range s.agentReplicas {
+	s.mu.Lock()
+	for agentID := range s.agentStreams {
 		if _, ok := desired[agentID]; !ok {
 			staleIDs = append(staleIDs, agentID)
 		}
 	}
 	sort.Strings(staleIDs)
-	stale := make([]*managedReplica, 0, len(staleIDs))
+	stale := make([]*managedStreamProjection, 0, len(staleIDs))
 	for _, agentID := range staleIDs {
-		stale = append(stale, s.agentReplicas[agentID])
-		delete(s.agentReplicas, agentID)
+		stale = append(stale, s.agentStreams[agentID])
+		delete(s.agentStreams, agentID)
 	}
 	s.mu.Unlock()
 
-	for _, replica := range existing {
-		if err := replica.applyWorkspace(ctx, workspace); err != nil {
-			return err
-		}
-	}
 	for index, agentID := range staleIDs {
 		stale[index].cancel()
+		if stale[index].projection != nil {
+			stale[index].projection.Close()
+		}
 		_ = os.RemoveAll(filepath.Join(s.cfg.AgentWorkspaceRoot, safeAgentWorkspaceName(agentID)))
 	}
 	return nil
 }
 
 func (s *Service) closeAgentReplicas() {
+	s.closeAgentStreamProjections()
+}
+
+func (s *Service) closeAgentStreamProjections() {
 	s.mu.Lock()
-	replicas := make([]*managedReplica, 0, len(s.agentReplicas))
-	for _, replica := range s.agentReplicas {
-		replicas = append(replicas, replica)
+	streams := make([]*managedStreamProjection, 0, len(s.agentStreams))
+	for _, projection := range s.agentStreams {
+		streams = append(streams, projection)
 	}
-	s.agentReplicas = map[string]*managedReplica{}
+	s.agentStreams = map[string]*managedStreamProjection{}
 	s.mu.Unlock()
-	for _, replica := range replicas {
-		replica.cancel()
+	for _, managed := range streams {
+		managed.cancel()
+		if managed.projection != nil {
+			managed.projection.Close()
+		}
 	}
 }

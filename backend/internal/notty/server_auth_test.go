@@ -218,18 +218,18 @@ func TestDaemonTokenDocumentUpdateRouteAttributesActingAgent(t *testing.T) {
 
 	select {
 	case event := <-events:
-		if event.Type != "document.updated" {
-			t.Fatalf("expected document.updated event, got %#v", event)
+		if event.Type != "stream.updated" {
+			t.Fatalf("expected stream.updated event, got %#v", event)
 		}
-		payload, ok := event.Data.(DocumentUpdateEvent)
+		payload, ok := event.Data.(map[string]any)
 		if !ok {
-			t.Fatalf("expected document update payload, got %#v", event.Data)
+			t.Fatalf("expected stream update payload, got %#v", event.Data)
 		}
-		if payload.ActorID != agent.ID {
+		if payload["streamId"] != document.ID || payload["actorId"] != agent.ID {
 			t.Fatalf("expected actor attribution %q, got %#v", agent.ID, payload)
 		}
 	default:
-		t.Fatal("expected document.updated event")
+		t.Fatal("expected stream.updated event")
 	}
 	if got := countAgentEvents(workspaceStore.Snapshot(), agent.ID, "document.updated"); got != 0 {
 		t.Fatalf("acting agent should not receive its own daemon document update, got %d inbox events", got)

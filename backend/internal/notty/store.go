@@ -41,20 +41,8 @@ type Store struct {
 	workspaceID   string
 	workspaceName string
 
-	documentLocks         map[string]*sync.RWMutex
-	dirtyDocuments        map[string]struct{}
-	deletedDocuments      map[string]struct{}
-	pendingDocumentEvents []documentUpdateRecord
-	pendingInboxChanges   []AgentInboxChangedEvent
-	dirtyAgentEvents      bool
-}
-
-type documentUpdateRecord struct {
-	DocumentID string
-	Update     []byte
-	ActorID    string
-	ActorType  string
-	CreatedAt  time.Time
+	pendingInboxChanges []AgentInboxChangedEvent
+	dirtyAgentEvents    bool
 }
 
 type ApplyCRDTUpdateResult struct {
@@ -173,18 +161,6 @@ func (s *Store) ensureMaps() {
 	if s.state.Activities == nil {
 		s.state.Activities = []*ActivityEvent{}
 	}
-	if s.documentLocks == nil {
-		s.documentLocks = map[string]*sync.RWMutex{}
-	}
-	if s.dirtyDocuments == nil {
-		s.dirtyDocuments = map[string]struct{}{}
-	}
-	if s.deletedDocuments == nil {
-		s.deletedDocuments = map[string]struct{}{}
-	}
-	if s.pendingDocumentEvents == nil {
-		s.pendingDocumentEvents = []documentUpdateRecord{}
-	}
 	if len(s.state.Users) == 0 {
 		now := time.Now().UTC()
 		s.state.Users["user_owner"] = &User{
@@ -198,18 +174,6 @@ func (s *Store) ensureMaps() {
 			UpdatedAt: now,
 		}
 	}
-}
-
-func (s *Store) documentLockLocked(documentID string) *sync.RWMutex {
-	if s.documentLocks == nil {
-		s.documentLocks = map[string]*sync.RWMutex{}
-	}
-	lock := s.documentLocks[documentID]
-	if lock == nil {
-		lock = &sync.RWMutex{}
-		s.documentLocks[documentID] = lock
-	}
-	return lock
 }
 
 func seedWorkspace() WorkspaceState {
@@ -255,23 +219,6 @@ func seedWorkspaceFor(workspaceID string, workspaceName string) WorkspaceState {
 	}
 }
 
-func newSeedDocument(id string, clientID uint64, path string, title string, content string, now time.Time) (*Document, []byte) {
-	doc := crdt.New(crdt.WithClientID(crdt.ClientID(clientID)))
-	text := doc.GetText("content")
-	doc.Transact(func(txn *crdt.Transaction) {
-		text.Insert(txn, 0, content, nil)
-	}, "seed")
-	document := &Document{
-		ID:           id,
-		Path:         path,
-		Title:        title,
-		UpdatedAt:    now,
-		ClientIDSeed: clientID,
-	}
-	document.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
-	return document, doc.EncodeStateAsUpdate()
-}
-
 func (s *Store) Snapshot() WorkspaceState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -279,23 +226,15 @@ func (s *Store) Snapshot() WorkspaceState {
 }
 
 func (s *Store) GetDocument(id string) (*Document, error) {
-	s.mu.Lock()
-	document, ok := s.state.Documents[id]
-	if !ok {
-		s.mu.Unlock()
-		return nil, ErrNotFound
-	}
-	documentLock := s.documentLockLocked(document.ID)
-	documentLock.RLock()
-	s.mu.Unlock()
-	defer documentLock.RUnlock()
-	return cloneDocument(document), nil
+	return s.GetStreamDocument(id)
 }
 
 func (s *Store) ListDocuments() []*Document {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return SortedDocuments(s.state)
+	documents, err := s.ListStreamDocuments()
+	if err != nil {
+		return nil
+	}
+	return documents
 }
 
 func (s *Store) GetDocumentByPath(path string) (*Document, error) {
@@ -303,72 +242,40 @@ func (s *Store) GetDocumentByPath(path string) (*Document, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.mu.Lock()
-	for _, document := range s.state.Documents {
+	documents, err := s.ListStreamDocuments()
+	if err != nil {
+		return nil, err
+	}
+	for _, document := range documents {
 		if document.Path == normalized {
-			documentLock := s.documentLockLocked(document.ID)
-			documentLock.RLock()
-			s.mu.Unlock()
-			defer documentLock.RUnlock()
 			return cloneDocument(document), nil
 		}
 	}
-	s.mu.Unlock()
 	return nil, ErrNotFound
 }
 
 func (s *Store) GetDocumentMetadataByPath(path string) (*DocumentMetadata, error) {
-	normalized, err := normalizeDocumentPath(path)
-	if err != nil {
-		return nil, err
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, document := range s.state.Documents {
-		if document.Path == normalized {
-			return documentMetadata(document), nil
-		}
-	}
-	return nil, ErrNotFound
+	return s.GetStreamDocumentMetadataByPath(path)
 }
 
 func (s *Store) HasDocument(id string) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	_, ok := s.state.Documents[id]
-	return ok
+	return s.HasStreamDocument(id)
 }
 
 func (s *Store) EncodeDocumentSyncUpdates(documentID string, stateVector []byte) (*DocumentMetadata, [][]byte, error) {
-	s.mu.Lock()
-	document, ok := s.state.Documents[documentID]
-	if !ok {
-		s.mu.Unlock()
-		return nil, nil, ErrNotFound
+	head, updates, err := s.EncodeStreamSyncUpdates(documentID, stateVector)
+	if err != nil {
+		return nil, nil, err
 	}
-	documentLock := s.documentLockLocked(document.ID)
-	documentLock.RLock()
-	headUpdateID := document.UpdateID
+	document, err := s.GetStreamDocument(documentID)
+	if err != nil {
+		return nil, nil, err
+	}
 	metadata := documentMetadata(document)
-	s.mu.Unlock()
-	defer documentLock.RUnlock()
-
-	if headUpdateID <= 0 {
-		return metadata, nil, nil
+	if len(head.StateVector) > 0 {
+		metadata.StateVector = base64.StdEncoding.EncodeToString(head.StateVector)
 	}
-	doc, err := s.restoreDocumentDocPostgresLocked(document)
-	if err != nil {
-		return nil, nil, err
-	}
-	metadata.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
-	update, err := doc.EncodeStateAsUpdateV1(stateVector)
-	if err != nil {
-		return nil, nil, err
-	}
-	if len(update) == 0 {
-		return metadata, nil, nil
-	}
-	return metadata, [][]byte{update}, nil
+	return metadata, updates, nil
 }
 
 func (s *Store) GetThread(id string) (*Thread, error) {
@@ -571,17 +478,16 @@ func (s *Store) UpdateAgentInboxItem(id string, req UpdateAgentNotificationReque
 }
 
 func (s *Store) MarkDocumentViewed(agentID, documentID string, req MarkDocumentViewedRequest) (*AgentDocumentView, error) {
+	document, err := s.GetStreamDocument(strings.TrimSpace(documentID))
+	if err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 
 	resolvedAgentID, _, err := s.resolveAgentIdentityLocked(strings.TrimSpace(agentID))
 	if err != nil {
 		s.mu.Unlock()
 		return nil, err
-	}
-	document, ok := s.state.Documents[strings.TrimSpace(documentID)]
-	if !ok {
-		s.mu.Unlock()
-		return nil, ErrNotFound
 	}
 	updateID := req.UpdateID
 	if updateID <= 0 || updateID > document.UpdateID {
@@ -634,17 +540,16 @@ func (s *Store) MarkDocumentViewed(agentID, documentID string, req MarkDocumentV
 }
 
 func (s *Store) DiffDocument(agentID, documentID, fromSpec, toSpec string) (*DocumentDiff, error) {
+	document, err := s.GetStreamDocument(strings.TrimSpace(documentID))
+	if err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 
 	resolvedAgentID, _, err := s.resolveAgentIdentityLocked(strings.TrimSpace(agentID))
 	if err != nil {
 		s.mu.RUnlock()
 		return nil, err
-	}
-	document, ok := s.state.Documents[strings.TrimSpace(documentID)]
-	if !ok {
-		s.mu.RUnlock()
-		return nil, ErrNotFound
 	}
 	fromUpdateID, err := s.resolveDocumentVersionLocked(resolvedAgentID, document, fromSpec, "last-viewed")
 	if err != nil {
@@ -1034,94 +939,19 @@ func renderUnifiedDiff(hunks []DocumentDiffHunk) string {
 }
 
 func (s *Store) CreateDocument(req CreateDocumentRequest, meta OperationMeta) (*Document, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	path, err := normalizeDocumentPath(req.Path)
-	if err != nil {
-		return nil, err
-	}
-	if s.documentExistsAtPathLocked(path, "") {
-		return nil, fmt.Errorf("document already exists at %s", path)
-	}
-
-	now := time.Now().UTC()
-	clientIDSeed := s.nextClientIDSeedLocked()
-	id := "doc_" + uuid.NewString()
-	document, initialUpdate := newSeedDocument(id, clientIDSeed, path, titleFromPath(path), req.Content, now)
-	s.state.Documents[id] = document
-	_ = s.documentLockLocked(document.ID)
-	s.markDocumentDirtyLocked(document.ID)
-	s.appendIncrementalDocumentUpdateLocked(document.ID, initialUpdate, meta, now)
-	s.state.UpdatedAt = now
-	s.appendActivityLocked(&ActivityEvent{
-		Type:       "document.created",
-		DocumentID: document.ID,
-		ActorID:    meta.ActorID,
-		ActorType:  meta.ActorType,
-		Summary:    fmt.Sprintf("%s created %s", meta.ActorID, document.Path),
-		OccurredAt: now,
-		Provenance: meta,
-	})
-	if err := s.persistDocumentMutationLocked(); err != nil {
-		return nil, err
-	}
-	created := cloneDocument(document)
-	return created, nil
+	return s.CreateStreamDocument(req, meta)
 }
 
 func (s *Store) MoveDocument(id, nextPath string, meta OperationMeta) (*Document, string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	document, ok := s.state.Documents[id]
-	if !ok {
-		return nil, "", ErrNotFound
-	}
-	path, err := normalizeDocumentPath(nextPath)
-	if err != nil {
-		return nil, "", err
-	}
-	if s.documentExistsAtPathLocked(path, id) {
-		return nil, "", fmt.Errorf("document already exists at %s", path)
-	}
-	documentLock := s.documentLockLocked(document.ID)
-	documentLock.Lock()
-	defer documentLock.Unlock()
-	oldPath := document.Path
-	document.Path = path
-	document.Title = titleFromPath(path)
-	document.UpdatedAt = time.Now().UTC()
-	s.markDocumentDirtyLocked(document.ID)
-	s.state.UpdatedAt = document.UpdatedAt
-	s.appendActivityLocked(&ActivityEvent{
-		Type:       "document.moved",
-		DocumentID: document.ID,
-		ActorID:    meta.ActorID,
-		ActorType:  meta.ActorType,
-		Summary:    fmt.Sprintf("%s moved %s to %s", meta.ActorID, oldPath, document.Path),
-		OccurredAt: document.UpdatedAt,
-		Provenance: meta,
-	})
-	if err := s.persistLocked(); err != nil {
-		return nil, "", err
-	}
-	return cloneDocument(document), oldPath, nil
+	return s.MoveStreamDocument(id, nextPath, meta)
 }
 
 func (s *Store) DeleteDocument(id string, meta OperationMeta) (*Document, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	document, ok := s.state.Documents[id]
-	if !ok {
-		return nil, ErrNotFound
+	document, err := s.DeleteStreamDocument(id, meta)
+	if err != nil {
+		return nil, err
 	}
-	documentLock := s.documentLockLocked(document.ID)
-	documentLock.Lock()
-	defer documentLock.Unlock()
-	s.markDocumentDeletedLocked(id)
-	delete(s.state.Documents, id)
+	s.mu.Lock()
 	for threadID, thread := range s.state.Threads {
 		if thread.DocumentID == id {
 			delete(s.state.Threads, threadID)
@@ -1143,21 +973,8 @@ func (s *Store) DeleteDocument(id string, meta OperationMeta) (*Document, error)
 			delete(s.state.Presences, actorID)
 		}
 	}
-	now := time.Now().UTC()
-	s.state.UpdatedAt = now
-	s.appendActivityLocked(&ActivityEvent{
-		Type:       "document.deleted",
-		DocumentID: id,
-		ActorID:    meta.ActorID,
-		ActorType:  meta.ActorType,
-		Summary:    fmt.Sprintf("%s deleted %s", meta.ActorID, document.Path),
-		OccurredAt: now,
-		Provenance: meta,
-	})
-	if err := s.persistDocumentMutationLocked(); err != nil {
-		return nil, err
-	}
-	return cloneDocument(document), nil
+	s.mu.Unlock()
+	return document, nil
 }
 
 func (s *Store) CreateUser(req CreateUserRequest, meta OperationMeta) (*User, error) {
@@ -1664,7 +1481,7 @@ func (s *Store) UpdateAgentSession(id string, req UpdateAgentSessionRequest, met
 }
 
 func (s *Store) ApplyCRDTUpdate(documentID string, update []byte, meta OperationMeta) (*Document, error) {
-	result, err := s.ApplyCRDTUpdateWithResult(documentID, update, meta)
+	result, err := s.ApplyStreamDocumentUpdate(documentID, update, meta)
 	if err != nil {
 		return nil, err
 	}
@@ -1672,40 +1489,14 @@ func (s *Store) ApplyCRDTUpdate(documentID string, update []byte, meta Operation
 }
 
 func (s *Store) ApplyCRDTUpdateWithResult(documentID string, update []byte, meta OperationMeta) (*ApplyCRDTUpdateResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	document, ok := s.state.Documents[documentID]
-	if !ok {
-		return nil, ErrNotFound
-	}
-	now := time.Now().UTC()
-	s.markDocumentDirtyLocked(document.ID)
-	s.appendIncrementalDocumentUpdateLocked(document.ID, update, meta, now)
-	document.StateVector = ""
-	document.UpdatedAt = now
-	s.state.UpdatedAt = now
-	if err := s.persistDocumentMutationLocked(); err != nil {
-		return nil, err
-	}
-	return &ApplyCRDTUpdateResult{
-		Document: cloneDocument(document),
-		Applied:  true,
-	}, nil
+	return s.ApplyStreamDocumentUpdate(documentID, update, meta)
 }
 
 func (s *Store) ReplaceDocumentText(documentID string, nextText string, meta OperationMeta) (*Document, []byte, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	document, ok := s.state.Documents[documentID]
-	if !ok {
-		return nil, nil, ErrNotFound
+	if _, err := s.GetStreamDocument(documentID); err != nil {
+		return nil, nil, err
 	}
-	documentLock := s.documentLockLocked(document.ID)
-	documentLock.Lock()
-	defer documentLock.Unlock()
-	doc, err := s.restoreDocumentDocPostgresLocked(document)
+	doc, _, err := s.RestoreStreamDoc(documentID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1729,35 +1520,28 @@ func (s *Store) ReplaceDocumentText(documentID string, nextText string, meta Ope
 	}, meta)
 	unsubscribe()
 
-	document.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
-	s.markDocumentDirtyLocked(document.ID)
-	s.appendIncrementalDocumentUpdateLocked(document.ID, update, meta, time.Now().UTC())
-	document.UpdatedAt = time.Now().UTC()
-	s.state.UpdatedAt = document.UpdatedAt
-	s.appendActivityLocked(&ActivityEvent{
-		Type:       "document.updated",
-		DocumentID: document.ID,
-		ActorID:    meta.ActorID,
-		ActorType:  meta.ActorType,
-		Summary:    fmt.Sprintf("%s replaced %s", meta.ActorID, document.Path),
-		OccurredAt: document.UpdatedAt,
-		Provenance: meta,
-	})
-
-	if err := s.persistDocumentMutationLocked(); err != nil {
+	if len(update) == 0 {
+		document, err := s.GetStreamDocument(documentID)
+		if err != nil {
+			return nil, nil, err
+		}
+		return document, nil, nil
+	}
+	result, err := s.ApplyStreamDocumentUpdate(documentID, update, meta)
+	if err != nil {
 		return nil, nil, err
 	}
-	return cloneDocument(document), update, nil
+	return result.Document, update, nil
 }
 
 func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thread, *ThreadMessage, error) {
+	document, err := s.GetStreamDocument(req.DocumentID)
+	if err != nil {
+		return nil, nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	document, ok := s.state.Documents[req.DocumentID]
-	if !ok {
-		return nil, nil, ErrNotFound
-	}
 	body := strings.TrimSpace(req.Body)
 	if body == "" {
 		return nil, nil, errors.New("thread body is required")
@@ -1959,33 +1743,6 @@ func (s *Store) persistLocked() error {
 	return s.persistPostgresLocked()
 }
 
-func (s *Store) persistDocumentMutationLocked() error {
-	s.ensureMaps()
-	return s.persistDocumentMutationPostgresLocked()
-}
-
-func (s *Store) nextClientIDSeedLocked() uint64 {
-	var next uint64 = 1001
-	for _, document := range s.state.Documents {
-		if document.ClientIDSeed >= next {
-			next = document.ClientIDSeed + 1
-		}
-	}
-	return next
-}
-
-func (s *Store) documentExistsAtPathLocked(path string, exceptID string) bool {
-	for id, document := range s.state.Documents {
-		if id == exceptID {
-			continue
-		}
-		if document.Path == path {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *Store) appendActivityLocked(event *ActivityEvent) {
 	s.state.Activities = append([]*ActivityEvent{event}, s.state.Activities...)
 	if len(s.state.Activities) > 100 {
@@ -2047,41 +1804,6 @@ func cloneState(state WorkspaceState) WorkspaceState {
 		copyState.Activities[index] = &clone
 	}
 	return copyState
-}
-
-func (s *Store) markDocumentDirtyLocked(documentID string) {
-	if documentID == "" {
-		return
-	}
-	if s.dirtyDocuments == nil {
-		s.dirtyDocuments = map[string]struct{}{}
-	}
-	delete(s.deletedDocuments, documentID)
-	s.dirtyDocuments[documentID] = struct{}{}
-}
-
-func (s *Store) markDocumentDeletedLocked(documentID string) {
-	if documentID == "" {
-		return
-	}
-	if s.deletedDocuments == nil {
-		s.deletedDocuments = map[string]struct{}{}
-	}
-	delete(s.dirtyDocuments, documentID)
-	s.deletedDocuments[documentID] = struct{}{}
-}
-
-func (s *Store) appendIncrementalDocumentUpdateLocked(documentID string, update []byte, meta OperationMeta, now time.Time) {
-	if len(update) == 0 || documentID == "" {
-		return
-	}
-	s.pendingDocumentEvents = append(s.pendingDocumentEvents, documentUpdateRecord{
-		DocumentID: documentID,
-		Update:     append([]byte(nil), update...),
-		ActorID:    meta.ActorID,
-		ActorType:  meta.ActorType,
-		CreatedAt:  now,
-	})
 }
 
 func SortedAgentRuns(state WorkspaceState) []*AgentRun {

@@ -380,7 +380,7 @@ func (s *Service) createThreadAsRun(ctx context.Context, run *agentRun, payload 
 	if run == nil {
 		return nil, fmt.Errorf("missing agent run context")
 	}
-	prepared, err := s.prepareCreateThreadPayload(ctx, payload)
+	prepared, err := s.prepareCreateThreadPayload(ctx, run, payload)
 	if err != nil {
 		return nil, err
 	}

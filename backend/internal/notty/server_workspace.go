@@ -8,7 +8,12 @@ import (
 )
 
 func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
-	state := s.requestStore(r).Snapshot()
+	store := s.requestStore(r)
+	state := store.Snapshot()
+	documents := SortedSyncDocuments(state)
+	if streamDocuments, err := store.ListStreamDocumentMetadata(); err == nil {
+		documents = streamDocuments
+	}
 	currentUserID := ""
 	currentDaemonID := ""
 	auth, _ := authFromContext(r.Context())
@@ -21,7 +26,7 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		"currentUserId":   currentUserID,
 		"currentDaemonId": currentDaemonID,
 		"name":            state.Name,
-		"documents":       SortedSyncDocuments(state),
+		"documents":       documents,
 		"users":           SortedUsers(state),
 		"daemons":         s.daemonsForWorkspace(r, state),
 		"agents":          visibleAgentsForAuth(state, auth),
@@ -67,12 +72,17 @@ func (s *Server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	channel, unsubscribe := s.requestBroker(r).Subscribe()
 	defer unsubscribe()
 
-	snapshot := s.requestStore(r).Snapshot()
+	store := s.requestStore(r)
+	snapshot := store.Snapshot()
+	documents := SortedSyncDocuments(snapshot)
+	if streamDocuments, err := store.ListStreamDocumentMetadata(); err == nil {
+		documents = streamDocuments
+	}
 	auth, _ := authFromContext(r.Context())
 	if err := conn.WriteJSON(EventEnvelope{
 		Type: "workspace.snapshot",
 		Data: map[string]interface{}{
-			"documents":   SortedSyncDocuments(snapshot),
+			"documents":   documents,
 			"users":       SortedUsers(snapshot),
 			"daemons":     s.daemonsForWorkspace(r, snapshot),
 			"agents":      visibleAgentsForAuth(snapshot, auth),

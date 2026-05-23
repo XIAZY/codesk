@@ -159,21 +159,159 @@ func TestDocumentProtocolUpdatePublishesMetadataOnlyWorkspaceEvent(t *testing.T)
 
 	select {
 	case event := <-events:
-		if event.Type != "document.updated" {
-			t.Fatalf("expected document.updated event, got %#v", event)
+		if event.Type != "stream.updated" {
+			t.Fatalf("expected stream.updated event, got %#v", event)
 		}
-		payload, ok := event.Data.(DocumentUpdateEvent)
+		payload, ok := event.Data.(map[string]any)
 		if !ok {
-			t.Fatalf("expected document update payload, got %#v", event.Data)
+			t.Fatalf("expected stream update payload, got %#v", event.Data)
 		}
-		if payload.Update != "" {
-			t.Fatalf("expected workspace update event to omit raw CRDT update, got %d bytes", len(payload.Update))
+		if _, ok := payload["update"]; ok {
+			t.Fatalf("expected workspace update event to omit raw CRDT update, got %#v", payload)
 		}
-		if payload.UpdateID == 0 || payload.Path != "docs/spec.md" {
+		if payload["streamId"] != documentID || payload["updateId"] == nil {
 			t.Fatalf("expected workspace update event to keep metadata, got %#v", payload)
 		}
 	default:
-		t.Fatal("expected document.updated event to be published")
+		t.Fatal("expected stream.updated event to be published")
+	}
+}
+
+func TestGenericStreamHTTPUpdatePersistsAndDedupes(t *testing.T) {
+	server, store := newTestServer(t)
+	router := server.Routes()
+
+	bootstrap := performJSONRequest(t, router, http.MethodGet, "/api/bootstrap", nil)
+	rootStreamID, _ := bootstrap["rootStreamId"].(string)
+	if rootStreamID == "" {
+		t.Fatalf("expected bootstrap root stream id, got %#v", bootstrap)
+	}
+
+	author := crdt.New(crdt.WithClientID(908))
+	text := author.GetText("content")
+	update := captureDocUpdate(t, author, "stream-http", func(txn *crdt.Transaction) {
+		text.Insert(txn, 0, "stream bytes", nil)
+	})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/streams/"+rootStreamID+"/updates?actor=agent_1&actor_type=agent", bytes.NewReader(update))
+	request.Header.Set("Content-Type", "application/octet-stream")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("post stream update status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var first postStreamUpdateResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &first); err != nil {
+		t.Fatalf("decode first stream update response: %v", err)
+	}
+	if !first.Accepted || !first.Applied || first.UpdateID == 0 || first.StateVector == "" {
+		t.Fatalf("expected applied stream update, got %#v", first)
+	}
+
+	recorder = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/api/streams/"+rootStreamID+"/updates?actor=agent_1&actor_type=agent", bytes.NewReader(update))
+	request.Header.Set("Content-Type", "application/octet-stream")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("post duplicate stream update status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var second postStreamUpdateResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &second); err != nil {
+		t.Fatalf("decode duplicate stream update response: %v", err)
+	}
+	if !second.Accepted || second.Applied || second.UpdateID != first.UpdateID {
+		t.Fatalf("expected duplicate stream update to be accepted but not applied, got %#v first=%#v", second, first)
+	}
+
+	restored, _, err := store.RestoreStreamDoc(rootStreamID)
+	if err != nil {
+		t.Fatalf("restore stream: %v", err)
+	}
+	if got := restored.GetText("content").ToString(); got != "stream bytes" {
+		t.Fatalf("expected restored stream content, got %q", got)
+	}
+}
+
+func TestGenericStreamProtocolSyncReturnsMissingUpdate(t *testing.T) {
+	server, store := newTestServer(t)
+	streamID, err := store.BootstrapWorkspaceStreams()
+	if err != nil {
+		t.Fatalf("bootstrap stream: %v", err)
+	}
+
+	author := crdt.New(crdt.WithClientID(909))
+	text := author.GetText("content")
+	update := captureDocUpdate(t, author, "stream-protocol", func(txn *crdt.Transaction) {
+		text.Insert(txn, 0, "root stream sync", nil)
+	})
+	if _, err := store.ApplyStreamUpdate(streamID, update, OperationMeta{ActorID: "peer", ActorType: "human", Source: "test"}); err != nil {
+		t.Fatalf("apply stream update: %v", err)
+	}
+
+	room := server.rooms.ForDocument(streamRoomID(store.Snapshot().WorkspaceID, streamID))
+	clientDoc := crdt.New(crdt.WithClientID(910))
+	clientConn := &DocumentConn{send: make(chan []byte, 4)}
+	syncStreamClientFromServer(t, server, room, clientConn, streamID, clientDoc)
+	if got := clientDoc.GetText("content").ToString(); got != "root stream sync" {
+		t.Fatalf("unexpected stream sync content: %q", got)
+	}
+}
+
+func TestDocumentUpdateRouteUsesContentStreamDocument(t *testing.T) {
+	server, store := newTestServer(t)
+	router := server.Routes()
+	rootStreamID, err := store.BootstrapWorkspaceStreams()
+	if err != nil {
+		t.Fatalf("bootstrap streams: %v", err)
+	}
+	rootDoc, _, err := store.RestoreStreamDoc(rootStreamID)
+	if err != nil {
+		t.Fatalf("restore root stream: %v", err)
+	}
+	rootUpdate, err := ApplyRootIntents(rootDoc, []RootIntent{{
+		Type: "create-file",
+		Entry: RootEntry{
+			ID:              "doc_stream_only",
+			Kind:            RootEntryKindFile,
+			Loc:             NewRootLocation(RootEntryID, "stream-only.md"),
+			ContentStreamID: "doc_stream_only",
+		},
+	}})
+	if err != nil {
+		t.Fatalf("build root update: %v", err)
+	}
+	if _, err := store.ApplyStreamUpdate(rootStreamID, rootUpdate, OperationMeta{ActorID: "peer", ActorType: "daemon", Source: "test"}); err != nil {
+		t.Fatalf("apply root update: %v", err)
+	}
+	if !store.HasStreamDocument("doc_stream_only") {
+		t.Fatal("expected stream document projection")
+	}
+
+	author := crdt.New(crdt.WithClientID(911))
+	text := author.GetText("content")
+	update := captureDocUpdate(t, author, "stream-doc-route", func(txn *crdt.Transaction) {
+		text.Insert(txn, 0, "stream route bytes", nil)
+	})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/documents/doc_stream_only/updates?actor=agent_1&actor_type=agent", bytes.NewReader(update))
+	request.Header.Set("Content-Type", "application/octet-stream")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("post stream-only document update status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response postStreamUpdateResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode stream fallback response: %v", err)
+	}
+	if !response.Accepted || !response.Applied || response.UpdateID == 0 {
+		t.Fatalf("unexpected stream fallback response: %#v", response)
+	}
+	restored, _, err := store.RestoreStreamDoc("doc_stream_only")
+	if err != nil {
+		t.Fatalf("restore content stream: %v", err)
+	}
+	if got := restored.GetText("content").ToString(); got != "stream route bytes" {
+		t.Fatalf("expected stream content update, got %q", got)
 	}
 }
 
@@ -224,18 +362,18 @@ func TestHTTPDocumentUpdatePersistsBroadcastsAndAttributesActor(t *testing.T) {
 
 	select {
 	case event := <-events:
-		if event.Type != "document.updated" {
-			t.Fatalf("expected document.updated event, got %#v", event)
+		if event.Type != "stream.updated" {
+			t.Fatalf("expected stream.updated event, got %#v", event)
 		}
-		payload, ok := event.Data.(DocumentUpdateEvent)
+		payload, ok := event.Data.(map[string]any)
 		if !ok {
-			t.Fatalf("expected document update payload, got %#v", event.Data)
+			t.Fatalf("expected stream update payload, got %#v", event.Data)
 		}
-		if payload.ActorID != "agent_1" {
+		if payload["streamId"] != documentID || payload["actorId"] != "agent_1" {
 			t.Fatalf("expected actor attribution agent_1, got %#v", payload)
 		}
 	default:
-		t.Fatal("expected document.updated event")
+		t.Fatal("expected stream.updated event")
 	}
 }
 
@@ -846,19 +984,19 @@ func TestHandleDocumentProtocolMessageDoesNotPublishDocumentMentionMetadataChang
 		t.Fatalf("handle document protocol message: %v", err)
 	}
 
-	sawDocumentUpdate := false
+	sawStreamUpdate := false
 	for {
 		select {
 		case event := <-events:
 			if event.Type == "document.mentions.updated" {
 				t.Fatalf("document text mentions must not publish metadata change event: %#v", event)
 			}
-			if event.Type == "document.updated" {
-				sawDocumentUpdate = true
+			if event.Type == "stream.updated" {
+				sawStreamUpdate = true
 			}
 		default:
-			if !sawDocumentUpdate {
-				t.Fatal("expected document update event to be published")
+			if !sawStreamUpdate {
+				t.Fatal("expected stream update event to be published")
 			}
 			return
 		}
@@ -931,6 +1069,34 @@ func syncClientFromServer(t *testing.T, server *Server, room *DocumentRoom, conn
 			}
 		default:
 			t.Fatalf("expected protocol sync message %d", i)
+		}
+	}
+}
+
+func syncStreamClientFromServer(t *testing.T, server *Server, room *DocumentRoom, conn *DocumentConn, streamID string, doc *crdt.Doc) {
+	t.Helper()
+	if err := server.handleStreamProtocolMessageWithStore(server.store, server.subscribers, room, conn, streamID, buildSyncStep1ForTest(doc), OperationMeta{
+		ActorID:   "client",
+		ActorType: "human",
+		Source:    "test",
+	}); err != nil {
+		t.Fatalf("start stream protocol sync: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case payload := <-conn.send:
+			reply := applySyncPayloadToDoc(t, doc, payload, "server-stream-sync")
+			if len(reply) > 0 {
+				if err := server.handleStreamProtocolMessageWithStore(server.store, server.subscribers, room, conn, streamID, reply, OperationMeta{
+					ActorID:   "client",
+					ActorType: "human",
+					Source:    "test",
+				}); err != nil {
+					t.Fatalf("apply stream protocol sync reply: %v", err)
+				}
+			}
+		default:
+			t.Fatalf("expected stream protocol sync message %d", i)
 		}
 	}
 }

@@ -3,6 +3,7 @@ package syncer
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -217,22 +218,32 @@ func TestToolGatewayRepliesAsOwningAgent(t *testing.T) {
 
 func TestToolGatewayCreateThreadResolvesPathQuoteToRelativeAnchors(t *testing.T) {
 	service := newToolGatewayTestService(&agent{ID: "agent_1", Handle: "reviewer", Kind: "codex"}, "token_123")
-	cache, err := newDocumentCache(t.TempDir())
+	state, err := OpenWorkspaceStateDB(t.TempDir())
 	if err != nil {
-		t.Fatalf("new document cache: %v", err)
+		t.Fatalf("open state db: %v", err)
 	}
-	service.docCache = cache
-	service.agentReplicas = map[string]*managedReplica{}
+	defer state.Close()
+	service.state = state
 	service.latestWorkspace = &workspaceResponse{
 		Documents: []*document{{ID: "doc_spec", Path: "docs/spec.md", UpdateID: 1}},
 	}
-	doc := crdt.New(crdt.WithClientID(771))
+	doc := crdt.New(crdt.WithGUID("doc_spec"), crdt.WithClientID(771))
 	text := doc.GetText("content")
 	doc.Transact(func(txn *crdt.Transaction) {
 		text.Insert(txn, 0, "intro\nrepeat target\nother line\n", nil)
 	})
-	if err := cache.storeDoc("doc_spec", "docs/spec.md", 1, doc); err != nil {
-		t.Fatalf("store cached doc: %v", err)
+	stateID, err := state.PersistLatestStreamDoc(context.Background(), "doc_spec", doc, contentSHA256([]byte("intro\nrepeat target\nother line\n")))
+	if err != nil {
+		t.Fatalf("persist stream doc: %v", err)
+	}
+	if err := state.UpsertContentProjection(context.Background(), ContentProjectionRow{
+		StreamID:         "doc_spec",
+		EntryID:          "doc_spec",
+		MaterializedPath: "docs/spec.md",
+		ProjectedStateID: sql.NullInt64{Int64: stateID, Valid: true},
+		ProjectedHash:    contentSHA256([]byte("intro\nrepeat target\nother line\n")),
+	}); err != nil {
+		t.Fatalf("upsert content projection: %v", err)
 	}
 
 	var seen map[string]any

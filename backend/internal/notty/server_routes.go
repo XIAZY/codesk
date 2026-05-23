@@ -30,6 +30,7 @@ func (s *Server) Routes() http.Handler {
 
 	router.Route("/api/workspaces/{workspaceID}", func(router chi.Router) {
 		router.Use(s.requireWorkspace)
+		router.Get("/bootstrap", s.handleWorkspaceBootstrap)
 		router.Get("/workspace", s.handleWorkspace)
 		router.Get("/members", s.handleListWorkspaceMembers)
 		router.Post("/members", s.handleAddWorkspaceMember)
@@ -39,6 +40,7 @@ func (s *Server) Routes() http.Handler {
 		router.Post("/daemons/{daemonID}/agents", s.handleCreateDaemonAgent)
 		router.Get("/documents/by-path", s.handleDocumentByPath)
 		router.Post("/documents", s.handleCreateDocument)
+		router.Post("/streams/{streamID}/updates", s.handlePostStreamUpdate)
 		router.Get("/documents/{id}/threads", s.handleDocumentThreads)
 		router.Post("/documents/{id}/updates", s.handlePostDocumentUpdate)
 		router.Patch("/documents/{id}", s.handleMoveDocument)
@@ -72,13 +74,16 @@ func (s *Server) Routes() http.Handler {
 	router.Group(func(router chi.Router) {
 		router.Use(s.requireWorkspace)
 		router.Get("/ws/workspaces/{workspaceID}", s.handleWebsocket)
+		router.Get("/ws/workspaces/{workspaceID}/streams/{streamID}", s.handleStreamWebsocket)
 		router.Get("/ws/workspaces/{workspaceID}/documents/{id}", s.handleDocumentWebsocket)
 	})
 
 	if !s.authEnabled() {
+		router.Get("/api/bootstrap", s.handleWorkspaceBootstrap)
 		router.Get("/api/workspace", s.handleWorkspace)
 		router.Get("/api/documents/by-path", s.handleDocumentByPath)
 		router.Post("/api/documents", s.handleCreateDocument)
+		router.Post("/api/streams/{streamID}/updates", s.handlePostStreamUpdate)
 		router.Get("/api/documents/{id}/threads", s.handleDocumentThreads)
 		router.Post("/api/documents/{id}/updates", s.handlePostDocumentUpdate)
 		router.Patch("/api/documents/{id}", s.handleMoveDocument)
@@ -109,6 +114,7 @@ func (s *Server) Routes() http.Handler {
 		router.Get("/api/agents/{id}/documents/{documentID}/diff", s.handleAgentDocumentDiff)
 		router.Post("/api/agents/{id}/documents/{documentID}/viewed", s.handleMarkAgentDocumentViewed)
 		router.Get("/ws", s.handleWebsocket)
+		router.Get("/ws/streams/{streamID}", s.handleStreamWebsocket)
 		router.Get("/ws/documents/{id}", s.handleDocumentWebsocket)
 	}
 

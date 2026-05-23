@@ -2,8 +2,10 @@ package syncer
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -20,7 +22,7 @@ type resolvedThreadTarget struct {
 	excerpt string
 }
 
-func (s *Service) prepareCreateThreadPayload(ctx context.Context, payload createThreadPayload) (createThreadPayload, error) {
+func (s *Service) prepareCreateThreadPayload(ctx context.Context, run *agentRun, payload createThreadPayload) (createThreadPayload, error) {
 	if strings.TrimSpace(payload.Body) == "" {
 		return payload, fmt.Errorf("thread body is required")
 	}
@@ -53,16 +55,11 @@ func (s *Service) prepareCreateThreadPayload(ctx context.Context, payload create
 		return payload, nil
 	}
 
-	if err := s.reconcileDocumentForThreadAnchor(ctx, document.ID); err != nil {
-		return payload, err
-	}
-	doc, _, state, err := s.docCache.loadBaseDoc(document.ID, document.Path)
+	doc, err := s.loadThreadAnchorDoc(ctx, run, document)
 	if err != nil {
 		return payload, err
 	}
-	if len(state) == 0 && document.UpdateID != 0 {
-		return payload, fmt.Errorf("document %s is not available in daemon CRDT cache yet", document.Path)
-	}
+	defer doc.Close()
 	text := doc.GetText("content")
 	content := text.ToString()
 	target, err := resolveThreadTarget(content, payload)
@@ -85,6 +82,78 @@ func (s *Service) prepareCreateThreadPayload(ctx context.Context, payload create
 	payload.EndLine = 0
 	payload.EndColumn = 0
 	return payload, nil
+}
+
+func (s *Service) loadThreadAnchorDoc(ctx context.Context, run *agentRun, document *document) (*crdt.Doc, error) {
+	if document == nil || strings.TrimSpace(document.ID) == "" {
+		return nil, fmt.Errorf("document is required")
+	}
+	state := s.threadAnchorState(run)
+	if state == nil {
+		return nil, fmt.Errorf("workspace stream state is unavailable")
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	projection, err := state.GetContentProjection(ctx, document.ID)
+	if err != nil {
+		return nil, err
+	}
+	if projection != nil && projection.Dirty {
+		return nil, fmt.Errorf("document %s has pending local edits; wait for sync before creating an anchored thread", document.Path)
+	}
+	blocked, err := state.HasBlockingFSJob(ctx, document.ID)
+	if err != nil {
+		return nil, err
+	}
+	if blocked {
+		return nil, fmt.Errorf("document %s has pending filesystem projection work; wait for sync before creating an anchored thread", document.Path)
+	}
+	remote, err := state.UnappliedInbox(ctx, document.ID, 1)
+	if err != nil {
+		return nil, err
+	}
+	if len(remote) > 0 {
+		return nil, fmt.Errorf("document has pending remote update(s); wait for reconciliation before creating an anchored thread")
+	}
+	local, err := state.PendingOutboxCount(ctx, document.ID)
+	if err != nil {
+		return nil, err
+	}
+	if local > 0 {
+		return nil, fmt.Errorf("document %s has pending local update(s); wait for sync before creating an anchored thread", document.Path)
+	}
+	stream, err := state.GetStream(ctx, document.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		if document.UpdateID != 0 {
+			return nil, fmt.Errorf("document %s is not available in daemon stream state yet", document.Path)
+		}
+		return crdt.New(crdt.WithGUID(document.ID)), nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !stream.LatestStateID.Valid && document.UpdateID != 0 {
+		return nil, fmt.Errorf("document %s is not available in daemon stream state yet", document.Path)
+	}
+	return state.LoadStreamDoc(ctx, document.ID, stream.LatestStateID)
+}
+
+func (s *Service) threadAnchorState(run *agentRun) *WorkspaceStateDB {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if run != nil && strings.TrimSpace(run.AgentID) != "" {
+		if managed := s.agentStreams[run.AgentID]; managed != nil && managed.projection != nil && managed.projection.state != nil {
+			return managed.projection.state
+		}
+	}
+	if s.primaryStream != nil && s.primaryStream.state != nil {
+		return s.primaryStream.state
+	}
+	return s.state
 }
 
 func (s *Service) resolveThreadDocument(ctx context.Context, payload createThreadPayload) (*document, error) {
@@ -166,34 +235,6 @@ func (s *Service) fetchDocumentByPath(ctx context.Context, path string) (*docume
 		return nil, fmt.Errorf("document path %q not found", path)
 	}
 	return response.Document, nil
-}
-
-func (s *Service) reconcileDocumentForThreadAnchor(ctx context.Context, documentID string) error {
-	if s.docCache == nil {
-		return fmt.Errorf("document CRDT cache is unavailable")
-	}
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	tracked := s.collectTrackedByDocument()[documentID]
-	if len(tracked) > 0 {
-		if err := s.reconcileTrackedDocument(ctx, documentID, tracked); err != nil {
-			return err
-		}
-		for _, file := range tracked {
-			if file != nil && file.isLocalDirty() {
-				return fmt.Errorf("document %s has pending local edits; wait for sync before creating an anchored thread", file.DocumentPath)
-			}
-		}
-	}
-	pending, err := s.docCache.pendingRemoteUpdateCount(documentID)
-	if err != nil {
-		return err
-	}
-	if pending > 0 {
-		return fmt.Errorf("document has %d pending remote update(s); wait for reconciliation before creating an anchored thread", pending)
-	}
-	return nil
 }
 
 func resolveThreadTarget(content string, payload createThreadPayload) (resolvedThreadTarget, error) {

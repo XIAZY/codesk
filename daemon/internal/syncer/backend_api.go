@@ -35,6 +35,9 @@ func (c Config) workspaceWSPath(path string) string {
 	if strings.HasPrefix(path, "/ws/documents/") {
 		return "/ws/workspaces/" + url.PathEscape(c.WorkspaceID) + "/documents/" + strings.TrimPrefix(path, "/ws/documents/")
 	}
+	if strings.HasPrefix(path, "/ws/streams/") {
+		return "/ws/workspaces/" + url.PathEscape(c.WorkspaceID) + "/streams/" + strings.TrimPrefix(path, "/ws/streams/")
+	}
 	if path == "/ws" {
 		return "/ws/workspaces/" + url.PathEscape(c.WorkspaceID)
 	}

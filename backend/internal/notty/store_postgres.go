@@ -3,18 +3,12 @@ package notty
 import (
 	"context"
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
-	"fmt"
-	"sort"
 	"strings"
 	"time"
-
-	crdt "notty/internal/ycrdt"
 )
 
 const postgresCheckpointInterval = 100
-const postgresCheckpointTailLimit = postgresCheckpointInterval
 
 func initPostgresSchemaTables(db *sql.DB) error {
 	statements := []string{
@@ -23,10 +17,51 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			id TEXT PRIMARY KEY,
 			slug TEXT UNIQUE NOT NULL,
 			name TEXT NOT NULL,
+			root_stream_id TEXT,
 			created_at TIMESTAMPTZ NOT NULL,
 			updated_at TIMESTAMPTZ NOT NULL
 		)
 		`,
+		`ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS root_stream_id TEXT`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_root_stream_id ON workspaces (root_stream_id) WHERE root_stream_id IS NOT NULL`,
+		`
+		CREATE TABLE IF NOT EXISTS crdt_stream_heads (
+			workspace_id TEXT NOT NULL,
+			stream_id TEXT NOT NULL,
+			kind TEXT NOT NULL DEFAULT 'unknown',
+			state_vector BYTEA NOT NULL DEFAULT '\x',
+			update_id BIGINT NOT NULL DEFAULT 0,
+			updated_at TIMESTAMPTZ NOT NULL,
+			PRIMARY KEY (workspace_id, stream_id)
+		)
+		`,
+		`
+		CREATE TABLE IF NOT EXISTS crdt_stream_updates (
+			id BIGSERIAL PRIMARY KEY,
+			workspace_id TEXT NOT NULL,
+			stream_id TEXT NOT NULL,
+			update BYTEA NOT NULL,
+			update_sha256 TEXT NOT NULL,
+			actor_id TEXT NOT NULL,
+			actor_type TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL
+		)
+		`,
+		`CREATE INDEX IF NOT EXISTS idx_crdt_stream_updates_stream_id ON crdt_stream_updates (workspace_id, stream_id, id ASC)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_crdt_stream_updates_dedupe ON crdt_stream_updates (workspace_id, stream_id, update_sha256)`,
+		`
+		CREATE TABLE IF NOT EXISTS crdt_stream_checkpoints (
+			id BIGSERIAL PRIMARY KEY,
+			workspace_id TEXT NOT NULL,
+			stream_id TEXT NOT NULL,
+			update_id BIGINT NOT NULL,
+			crdt_state BYTEA NOT NULL,
+			state_vector BYTEA NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL,
+			UNIQUE (workspace_id, stream_id, update_id)
+		)
+		`,
+		`CREATE INDEX IF NOT EXISTS idx_crdt_stream_checkpoints_stream_update ON crdt_stream_checkpoints (workspace_id, stream_id, update_id DESC)`,
 		`
 		CREATE TABLE IF NOT EXISTS accounts (
 			id TEXT PRIMARY KEY,
@@ -65,96 +100,10 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		)
 		`,
 		`CREATE INDEX IF NOT EXISTS idx_daemons_workspace ON daemons (workspace_id, status)`,
-		`
-		CREATE TABLE IF NOT EXISTS documents (
-			workspace_id TEXT NOT NULL,
-			id TEXT PRIMARY KEY,
-			path TEXT NOT NULL,
-			title TEXT NOT NULL,
-			client_id_seed BIGINT NOT NULL,
-			updated_at TIMESTAMPTZ NOT NULL
-		)
-		`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_workspace_path ON documents (workspace_id, path)`,
-		`
-		CREATE TABLE IF NOT EXISTS document_heads (
-			workspace_id TEXT NOT NULL,
-			document_id TEXT PRIMARY KEY,
-			state_vector TEXT NOT NULL DEFAULT '',
-			update_id BIGINT NOT NULL DEFAULT 0,
-			updated_at TIMESTAMPTZ NOT NULL
-		)
-		`,
-		`ALTER TABLE document_heads ADD COLUMN IF NOT EXISTS state_vector TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE document_heads ADD COLUMN IF NOT EXISTS update_id BIGINT NOT NULL DEFAULT 0`,
-		`
-		CREATE TABLE IF NOT EXISTS document_updates (
-			id BIGSERIAL PRIMARY KEY,
-			workspace_id TEXT NOT NULL,
-			document_id TEXT NOT NULL,
-			update BYTEA NOT NULL,
-			actor_id TEXT NOT NULL,
-			actor_type TEXT NOT NULL,
-			created_at TIMESTAMPTZ NOT NULL
-		)
-		`,
-		`CREATE INDEX IF NOT EXISTS idx_document_updates_workspace_document_created ON document_updates (workspace_id, document_id, created_at ASC, id ASC)`,
-		`CREATE INDEX IF NOT EXISTS idx_document_updates_workspace_document_id ON document_updates (workspace_id, document_id, id ASC)`,
-		`
-		CREATE TABLE IF NOT EXISTS document_checkpoints (
-			id BIGSERIAL PRIMARY KEY,
-			workspace_id TEXT NOT NULL,
-			document_id TEXT NOT NULL,
-			update_id BIGINT NOT NULL,
-			crdt_state TEXT NOT NULL,
-			state_vector TEXT NOT NULL,
-			created_at TIMESTAMPTZ NOT NULL,
-			UNIQUE (workspace_id, document_id, update_id)
-		)
-		`,
-		`CREATE INDEX IF NOT EXISTS idx_document_checkpoints_workspace_document_update ON document_checkpoints (workspace_id, document_id, update_id DESC)`,
-		`UPDATE document_heads h
-		    SET update_id = COALESCE((
-			    SELECT MAX(u.id)
-			      FROM document_updates u
-			     WHERE u.workspace_id = h.workspace_id AND u.document_id = h.document_id
-		    ), 0)
-		  WHERE h.update_id = 0`,
-		`DO $$
-		BEGIN
-			IF EXISTS (
-				SELECT 1 FROM information_schema.columns
-				 WHERE table_name = 'document_heads' AND column_name = 'crdt_state'
-			) THEN
-				IF EXISTS (
-					SELECT 1 FROM information_schema.columns
-					 WHERE table_name = 'document_heads' AND column_name = 'crdt_state_update_id'
-				) THEN
-					EXECUTE '
-						INSERT INTO document_checkpoints (workspace_id, document_id, update_id, crdt_state, state_vector, created_at)
-						SELECT workspace_id,
-						       document_id,
-						       CASE WHEN crdt_state_update_id > 0 THEN crdt_state_update_id ELSE update_id END,
-						       crdt_state,
-						       state_vector,
-						       updated_at
-						  FROM document_heads
-						 WHERE crdt_state <> ''''
-						   AND CASE WHEN crdt_state_update_id > 0 THEN crdt_state_update_id ELSE update_id END > 0
-						ON CONFLICT (workspace_id, document_id, update_id) DO NOTHING';
-				ELSE
-					EXECUTE '
-						INSERT INTO document_checkpoints (workspace_id, document_id, update_id, crdt_state, state_vector, created_at)
-						SELECT workspace_id, document_id, update_id, crdt_state, state_vector, updated_at
-						  FROM document_heads
-						 WHERE crdt_state <> '''' AND update_id > 0
-						ON CONFLICT (workspace_id, document_id, update_id) DO NOTHING';
-				END IF;
-			END IF;
-		END $$`,
-		`ALTER TABLE document_heads DROP COLUMN IF EXISTS content`,
-		`ALTER TABLE document_heads DROP COLUMN IF EXISTS crdt_state`,
-		`ALTER TABLE document_heads DROP COLUMN IF EXISTS crdt_state_update_id`,
+		`DROP TABLE IF EXISTS document_checkpoints`,
+		`DROP TABLE IF EXISTS document_updates`,
+		`DROP TABLE IF EXISTS document_heads`,
+		`DROP TABLE IF EXISTS documents`,
 		`DROP TABLE IF EXISTS document_mentions`,
 		`
 		CREATE TABLE IF NOT EXISTS users (
@@ -393,12 +342,6 @@ func (s *Store) loadNormalizedPostgresLocked() error {
 	s.state.AgentDocumentViews = map[string]*AgentDocumentView{}
 	s.state.DocumentCheckpoints = map[string]*DocumentCheckpoint{}
 
-	if err := s.ensurePostgresCheckpointsLocked(); err != nil {
-		return err
-	}
-	if err := s.loadDocumentsPostgresLocked(); err != nil {
-		return err
-	}
 	if err := s.loadUsersPostgresLocked(); err != nil {
 		return err
 	}
@@ -426,6 +369,9 @@ func (s *Store) loadNormalizedPostgresLocked() error {
 	if err := s.loadAgentDocumentViewsPostgresLocked(); err != nil {
 		return err
 	}
+	if err := s.refreshStreamDocumentCacheLocked(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -440,9 +386,6 @@ func (s *Store) persistPostgresLocked() error {
 		}
 	}()
 
-	if err = s.persistDocumentsPostgresLocked(tx); err != nil {
-		return err
-	}
 	if err = s.replaceUsersPostgresLocked(tx); err != nil {
 		return err
 	}
@@ -469,210 +412,6 @@ func (s *Store) persistPostgresLocked() error {
 		return err
 	}
 	return tx.Commit()
-}
-
-func (s *Store) persistDocumentMutationPostgresLocked() error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	if err = s.persistDocumentsPostgresLocked(tx); err != nil {
-		return err
-	}
-	if s.dirtyAgentEvents {
-		if err = s.replaceAgentEventsPostgresLocked(tx); err != nil {
-			return err
-		}
-		s.dirtyAgentEvents = false
-	}
-	return tx.Commit()
-}
-
-func (s *Store) pendingDocumentMutationIDsLocked() []string {
-	seen := map[string]struct{}{}
-	ids := make([]string, 0, len(s.dirtyDocuments)+len(s.deletedDocuments))
-	for documentID := range s.dirtyDocuments {
-		if documentID == "" {
-			continue
-		}
-		seen[documentID] = struct{}{}
-		ids = append(ids, documentID)
-	}
-	for documentID := range s.deletedDocuments {
-		if documentID == "" {
-			continue
-		}
-		if _, ok := seen[documentID]; ok {
-			continue
-		}
-		ids = append(ids, documentID)
-	}
-	sort.Strings(ids)
-	return ids
-}
-
-func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) error {
-	for documentID := range s.deletedDocuments {
-		if _, err := tx.Exec(`DELETE FROM agent_document_views WHERE workspace_id = $1 AND document_id = $2`, s.state.WorkspaceID, documentID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`DELETE FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2`, s.state.WorkspaceID, documentID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`DELETE FROM document_updates WHERE workspace_id = $1 AND document_id = $2`, s.state.WorkspaceID, documentID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`DELETE FROM document_heads WHERE workspace_id = $1 AND document_id = $2`, s.state.WorkspaceID, documentID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`DELETE FROM documents WHERE workspace_id = $1 AND id = $2`, s.state.WorkspaceID, documentID); err != nil {
-			return err
-		}
-	}
-	for documentID := range s.dirtyDocuments {
-		document := s.state.Documents[documentID]
-		if document == nil {
-			continue
-		}
-		if _, err := tx.Exec(
-			`INSERT INTO documents (workspace_id, id, path, title, client_id_seed, updated_at)
-			 VALUES ($1, $2, $3, $4, $5, $6)
-			 ON CONFLICT (id)
-			 DO UPDATE SET path = EXCLUDED.path, title = EXCLUDED.title, client_id_seed = EXCLUDED.client_id_seed, updated_at = EXCLUDED.updated_at`,
-			s.state.WorkspaceID,
-			document.ID,
-			document.Path,
-			document.Title,
-			int64(document.ClientIDSeed),
-			document.UpdatedAt,
-		); err != nil {
-			return err
-		}
-	}
-	latestUpdateByDocument := map[string]int64{}
-	latestMetaByDocument := map[string]OperationMeta{}
-	for _, event := range s.pendingDocumentEvents {
-		var updateID int64
-		if err := tx.QueryRow(
-			`INSERT INTO document_updates (workspace_id, document_id, update, actor_id, actor_type, created_at)
-			 VALUES ($1, $2, $3, $4, $5, $6)
-			 RETURNING id`,
-			s.state.WorkspaceID,
-			event.DocumentID,
-			event.Update,
-			event.ActorID,
-			event.ActorType,
-			event.CreatedAt,
-		).Scan(&updateID); err != nil {
-			return err
-		}
-		latestUpdateByDocument[event.DocumentID] = updateID
-		latestMetaByDocument[event.DocumentID] = OperationMeta{
-			ActorID:   event.ActorID,
-			ActorType: event.ActorType,
-			Source:    "document-update",
-		}
-	}
-	for documentID, updateID := range latestUpdateByDocument {
-		if document := s.state.Documents[documentID]; document != nil {
-			document.UpdateID = updateID
-			s.enqueueDocumentUpdateEventsLocked(document, latestMetaByDocument[documentID])
-		}
-	}
-	for documentID := range s.dirtyDocuments {
-		document := s.state.Documents[documentID]
-		if document == nil {
-			continue
-		}
-		_, hasIncrementalUpdate := latestUpdateByDocument[documentID]
-		if hasIncrementalUpdate {
-			result, err := tx.Exec(
-				`UPDATE document_heads
-				    SET state_vector = $1,
-				        update_id = $2,
-				        updated_at = $3
-				  WHERE workspace_id = $4 AND document_id = $5`,
-				document.StateVector,
-				document.UpdateID,
-				document.UpdatedAt,
-				s.state.WorkspaceID,
-				document.ID,
-			)
-			if err != nil {
-				return err
-			}
-			affected, err := result.RowsAffected()
-			if err != nil {
-				return err
-			}
-			if affected == 0 {
-				if _, err := tx.Exec(
-					`INSERT INTO document_heads (workspace_id, document_id, state_vector, update_id, updated_at)
-					 VALUES ($1, $2, $3, $4, $5)`,
-					s.state.WorkspaceID,
-					document.ID,
-					document.StateVector,
-					document.UpdateID,
-					document.UpdatedAt,
-				); err != nil {
-					return err
-				}
-			}
-		} else if _, err := tx.Exec(
-			`INSERT INTO document_heads (workspace_id, document_id, state_vector, update_id, updated_at)
-			 VALUES ($1, $2, $3, $4, $5)
-			 ON CONFLICT (document_id)
-			 DO UPDATE SET state_vector = EXCLUDED.state_vector,
-			               update_id = EXCLUDED.update_id,
-			               updated_at = EXCLUDED.updated_at`,
-			s.state.WorkspaceID,
-			document.ID,
-			document.StateVector,
-			document.UpdateID,
-			document.UpdatedAt,
-		); err != nil {
-			return err
-		}
-		if err := s.maybeInsertDocumentCheckpointPostgresLocked(tx, document); err != nil {
-			return err
-		}
-	}
-	s.dirtyDocuments = map[string]struct{}{}
-	s.deletedDocuments = map[string]struct{}{}
-	s.pendingDocumentEvents = []documentUpdateRecord{}
-	return nil
-}
-
-func (s *Store) maybeInsertDocumentCheckpointPostgresLocked(tx *sql.Tx, document *Document) error {
-	if document == nil || document.UpdateID <= 0 {
-		return nil
-	}
-	var lastCheckpointID int64
-	err := tx.QueryRow(
-		`SELECT COALESCE(MAX(update_id), 0)
-		   FROM document_checkpoints
-		  WHERE workspace_id = $1 AND document_id = $2`,
-		s.state.WorkspaceID,
-		document.ID,
-	).Scan(&lastCheckpointID)
-	if err != nil {
-		return err
-	}
-	if lastCheckpointID != 0 && document.UpdateID-lastCheckpointID < postgresCheckpointInterval {
-		return nil
-	}
-	stateVector, err := s.insertPostgresCheckpointAtHeadTxLocked(tx, document.ID, document.ClientIDSeed, document.UpdateID)
-	if err != nil {
-		return err
-	}
-	document.StateVector = stateVector
-	return nil
 }
 
 func (s *Store) replaceUsersPostgresLocked(tx *sql.Tx) error {
@@ -1121,21 +860,13 @@ func claimAgentEventPostgres(db *sql.DB, workspaceID string, agentID string, age
 				SELECT id
 			  FROM agent_events
 			 WHERE workspace_id = $1
-			   AND agent_id = $2
-			   AND available_at <= $3
-			   AND status NOT IN ('completed', 'dismissed')
-			   AND NOT (status = 'processing' AND claimed_at > $4)
-			   AND NOT EXISTS (
-			    SELECT 1
-			      FROM documents
-			     WHERE documents.workspace_id = agent_events.workspace_id
-			       AND documents.id = agent_events.document_id
-			       AND agent_events.type LIKE 'document.%'
-			       AND LOWER(documents.path) LIKE '%.log'
-			   )
-			 ORDER BY created_at ASC
-			 LIMIT 1
-			 FOR UPDATE SKIP LOCKED
+				   AND agent_id = $2
+				   AND available_at <= $3
+				   AND status NOT IN ('completed', 'dismissed')
+				   AND NOT (status = 'processing' AND claimed_at > $4)
+				 ORDER BY created_at ASC
+				 LIMIT 1
+				 FOR UPDATE SKIP LOCKED
 		)
 		UPDATE agent_events
 		   SET status = 'processing',
@@ -1320,221 +1051,11 @@ func (s *Store) documentContentAtUpdatePostgresLocked(document *Document, update
 }
 
 func documentContentAtUpdatePostgres(db *sql.DB, workspaceID string, document *Document, updateID int64) (string, error) {
-	doc := crdt.New(crdt.WithClientID(crdt.ClientID(document.ClientIDSeed)))
-	appliedThrough := int64(0)
-	var checkpointState string
-	err := db.QueryRow(
-		`SELECT update_id, crdt_state
-		   FROM document_checkpoints
-		  WHERE workspace_id = $1 AND document_id = $2 AND update_id <= $3
-		  ORDER BY update_id DESC
-		  LIMIT 1`,
-		workspaceID,
-		document.ID,
-		updateID,
-	).Scan(&appliedThrough, &checkpointState)
-	if err != nil && err != sql.ErrNoRows {
-		return "", err
-	}
-	if err == nil && checkpointState != "" {
-		checkpointUpdate, decodeErr := base64.StdEncoding.DecodeString(checkpointState)
-		if decodeErr != nil {
-			return "", decodeErr
-		}
-		if applyErr := crdt.ApplyUpdateV1(doc, checkpointUpdate, "checkpoint"); applyErr != nil {
-			return "", applyErr
-		}
-	}
-	rows, err := db.Query(
-		`SELECT update
-		   FROM document_updates
-		  WHERE workspace_id = $1
-		    AND document_id = $2
-		    AND id > $3
-		    AND id <= $4
-		  ORDER BY id ASC`,
-		workspaceID,
-		document.ID,
-		appliedThrough,
-		updateID,
-	)
+	doc, _, err := restoreStreamDocAtUpdate(db, workspaceID, document.ID, updateID)
 	if err != nil {
-		return "", err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var update []byte
-		if err := rows.Scan(&update); err != nil {
-			return "", err
-		}
-		if err := crdt.ApplyUpdateV1(doc, update, "history"); err != nil {
-			return "", err
-		}
-	}
-	if err := rows.Err(); err != nil {
 		return "", err
 	}
 	return doc.GetText("content").ToString(), nil
-}
-
-func (s *Store) ensurePostgresCheckpointsLocked() error {
-	rows, err := s.db.Query(
-		`SELECT d.id,
-		        d.client_id_seed,
-		        h.update_id,
-		        COALESCE(checkpoint.update_id, 0) AS checkpoint_update_id
-		   FROM documents d
-		   JOIN document_heads h
-		     ON h.workspace_id = d.workspace_id AND h.document_id = d.id
-		   LEFT JOIN LATERAL (
-		       SELECT update_id
-		         FROM document_checkpoints c
-		        WHERE c.workspace_id = d.workspace_id
-		          AND c.document_id = d.id
-		          AND c.update_id <= h.update_id
-		        ORDER BY c.update_id DESC
-		        LIMIT 1
-		   ) checkpoint ON TRUE
-		  WHERE d.workspace_id = $1
-		    AND h.update_id > 0
-		    AND (checkpoint.update_id IS NULL OR h.update_id - checkpoint.update_id > $2)
-		  ORDER BY d.path ASC`,
-		s.state.WorkspaceID,
-		postgresCheckpointTailLimit,
-	)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	type checkpointTarget struct {
-		documentID         string
-		clientIDSeed       uint64
-		headUpdateID       int64
-		checkpointUpdateID int64
-	}
-	targets := []checkpointTarget{}
-	for rows.Next() {
-		var target checkpointTarget
-		var clientIDSeed int64
-		if err := rows.Scan(&target.documentID, &clientIDSeed, &target.headUpdateID, &target.checkpointUpdateID); err != nil {
-			return err
-		}
-		target.clientIDSeed = uint64(clientIDSeed)
-		targets = append(targets, target)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, target := range targets {
-		if err := s.insertPostgresCheckpointAtHeadLocked(target.documentID, target.clientIDSeed, target.headUpdateID); err != nil {
-			return fmt.Errorf("checkpoint %s at update %d: %w", target.documentID, target.headUpdateID, err)
-		}
-	}
-	return nil
-}
-
-func (s *Store) insertPostgresCheckpointAtHeadLocked(documentID string, clientIDSeed uint64, headUpdateID int64) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err := s.insertPostgresCheckpointAtHeadTxLocked(tx, documentID, clientIDSeed, headUpdateID); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-func (s *Store) insertPostgresCheckpointAtHeadTxLocked(tx *sql.Tx, documentID string, clientIDSeed uint64, headUpdateID int64) (string, error) {
-	doc := crdt.New(crdt.WithClientID(crdt.ClientID(clientIDSeed)))
-	appliedThrough := int64(0)
-	var checkpointState string
-	var checkpointUpdateID int64
-	err := tx.QueryRow(
-		`SELECT update_id, crdt_state
-		   FROM document_checkpoints
-		  WHERE workspace_id = $1 AND document_id = $2 AND update_id <= $3
-		  ORDER BY update_id DESC
-		  LIMIT 1`,
-		s.state.WorkspaceID,
-		documentID,
-		headUpdateID,
-	).Scan(&checkpointUpdateID, &checkpointState)
-	if err != nil && err != sql.ErrNoRows {
-		return "", err
-	}
-	if err == nil && checkpointState != "" {
-		update, decodeErr := base64.StdEncoding.DecodeString(checkpointState)
-		if decodeErr != nil {
-			return "", decodeErr
-		}
-		if applyErr := crdt.ApplyUpdateV1(doc, update, "checkpoint"); applyErr != nil {
-			return "", applyErr
-		}
-		appliedThrough = checkpointUpdateID
-	}
-
-	rows, err := tx.Query(
-		`SELECT update
-		   FROM document_updates
-		  WHERE workspace_id = $1
-		    AND document_id = $2
-		    AND id > $3
-		    AND id <= $4
-		  ORDER BY id ASC`,
-		s.state.WorkspaceID,
-		documentID,
-		appliedThrough,
-		headUpdateID,
-	)
-	if err != nil {
-		return "", err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var update []byte
-		if err := rows.Scan(&update); err != nil {
-			return "", err
-		}
-		if err := crdt.ApplyUpdateV1(doc, update, "checkpoint-tail"); err != nil {
-			return "", err
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return "", err
-	}
-
-	crdtState := base64.StdEncoding.EncodeToString(doc.EncodeStateAsUpdate())
-	stateVector := base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
-	if _, err := tx.Exec(
-		`INSERT INTO document_checkpoints (workspace_id, document_id, update_id, crdt_state, state_vector, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6)
-		 ON CONFLICT (workspace_id, document_id, update_id)
-		 DO UPDATE SET crdt_state = EXCLUDED.crdt_state,
-		               state_vector = EXCLUDED.state_vector,
-		               created_at = EXCLUDED.created_at`,
-		s.state.WorkspaceID,
-		documentID,
-		headUpdateID,
-		crdtState,
-		stateVector,
-		time.Now().UTC(),
-	); err != nil {
-		return "", err
-	}
-	if _, err := tx.Exec(
-		`UPDATE document_heads
-		    SET state_vector = $1
-		  WHERE workspace_id = $2 AND document_id = $3 AND update_id = $4`,
-		stateVector,
-		s.state.WorkspaceID,
-		documentID,
-		headUpdateID,
-	); err != nil {
-		return "", err
-	}
-	return stateVector, nil
 }
 
 func (s *Store) loadUsersPostgresLocked() error {
@@ -1772,122 +1293,6 @@ func (s *Store) loadActivitiesPostgresLocked() error {
 		s.state.Activities = append(s.state.Activities, activity)
 	}
 	return rows.Err()
-}
-
-func (s *Store) loadDocumentsPostgresLocked() error {
-	rows, err := s.db.Query(
-		`SELECT d.id,
-		        d.path,
-		        d.title,
-		        COALESCE(NULLIF(h.state_vector, ''), checkpoint.state_vector, '') AS state_vector,
-		        h.update_id,
-		        d.updated_at,
-		        d.client_id_seed
-		   FROM documents d
-		   JOIN document_heads h
-		     ON h.workspace_id = d.workspace_id AND h.document_id = d.id
-		   LEFT JOIN LATERAL (
-		       SELECT state_vector
-		         FROM document_checkpoints c
-		        WHERE c.workspace_id = d.workspace_id
-		          AND c.document_id = d.id
-		          AND c.update_id <= h.update_id
-		        ORDER BY c.update_id DESC
-		        LIMIT 1
-		   ) checkpoint ON TRUE
-		  WHERE d.workspace_id = $1
-		  ORDER BY d.path ASC`,
-		s.state.WorkspaceID,
-	)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		document := &Document{}
-		var clientIDSeed int64
-		if err := rows.Scan(
-			&document.ID,
-			&document.Path,
-			&document.Title,
-			&document.StateVector,
-			&document.UpdateID,
-			&document.UpdatedAt,
-			&clientIDSeed,
-		); err != nil {
-			return err
-		}
-		document.ClientIDSeed = uint64(clientIDSeed)
-		s.state.Documents[document.ID] = document
-	}
-	return rows.Err()
-}
-
-func (s *Store) restoreDocumentDocPostgresLocked(document *Document) (*crdt.Doc, error) {
-	doc := crdt.New(crdt.WithClientID(crdt.ClientID(document.ClientIDSeed)))
-	appliedThrough := int64(0)
-	var checkpointState string
-	var checkpointUpdateID int64
-	err := s.db.QueryRow(
-		`SELECT update_id, crdt_state
-		   FROM document_checkpoints
-		  WHERE workspace_id = $1 AND document_id = $2 AND update_id <= $3
-		  ORDER BY update_id DESC
-		  LIMIT 1`,
-		s.state.WorkspaceID,
-		document.ID,
-		document.UpdateID,
-	).Scan(&checkpointUpdateID, &checkpointState)
-	if err != nil && err != sql.ErrNoRows {
-		return nil, err
-	}
-	if err == nil && checkpointState != "" {
-		update, decodeErr := base64.StdEncoding.DecodeString(checkpointState)
-		if decodeErr != nil {
-			return nil, decodeErr
-		}
-		if applyErr := crdt.ApplyUpdateV1(doc, update, "checkpoint"); applyErr != nil {
-			return nil, applyErr
-		}
-		appliedThrough = checkpointUpdateID
-	}
-	if appliedThrough > document.UpdateID {
-		appliedThrough = 0
-	}
-	if appliedThrough >= document.UpdateID {
-		return doc, nil
-	}
-	updateRows, err := s.db.Query(
-		`SELECT update
-		   FROM document_updates
-		  WHERE workspace_id = $1
-		    AND document_id = $2
-		    AND id > $3
-		    AND id <= $4
-		  ORDER BY id ASC`,
-		s.state.WorkspaceID,
-		document.ID,
-		appliedThrough,
-		document.UpdateID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer updateRows.Close()
-	for updateRows.Next() {
-		var update []byte
-		if err := updateRows.Scan(&update); err != nil {
-			return nil, err
-		}
-		if err := crdt.ApplyUpdateV1(doc, update, "restore-update"); err != nil {
-			return nil, err
-		}
-	}
-	if err := updateRows.Err(); err != nil {
-		return nil, err
-	}
-	return doc, nil
 }
 
 func (s *Store) loadThreadsPostgresLocked() error {

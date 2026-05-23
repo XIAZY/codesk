@@ -1,17 +1,13 @@
 package notty
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/gorilla/websocket"
 	"notty/internal/yproto"
 )
 
@@ -24,7 +20,8 @@ type postDocumentUpdateResponse struct {
 }
 
 func (s *Server) handleDocumentByPath(w http.ResponseWriter, r *http.Request) {
-	document, err := s.requestStore(r).GetDocumentMetadataByPath(r.URL.Query().Get("path"))
+	store := s.requestStore(r)
+	document, err := store.GetStreamDocumentMetadataByPath(r.URL.Query().Get("path"))
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -59,7 +56,7 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 	}
 	auth, _ := authFromContext(r.Context())
 	meta := operationMetaFromAuth(auth, "document-create", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
-	document, err := s.requestStore(r).CreateDocument(req, meta)
+	document, err := s.requestStore(r).CreateStreamDocument(req, meta)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -84,7 +81,7 @@ func (s *Server) handleMoveDocument(w http.ResponseWriter, r *http.Request) {
 	}
 	auth, _ := authFromContext(r.Context())
 	meta := operationMetaFromAuth(auth, "document-move", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
-	document, oldPath, err := s.requestStore(r).MoveDocument(chi.URLParam(r, "id"), req.Path, meta)
+	document, oldPath, err := s.requestStore(r).MoveStreamDocument(chi.URLParam(r, "id"), req.Path, meta)
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -107,7 +104,7 @@ func (s *Server) handleMoveDocument(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 	auth, _ := authFromContext(r.Context())
 	meta := operationMetaFromAuth(auth, "document-delete", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
-	document, err := s.requestStore(r).DeleteDocument(chi.URLParam(r, "id"), meta)
+	document, err := s.requestStore(r).DeleteStreamDocument(chi.URLParam(r, "id"), meta)
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -129,7 +126,7 @@ func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePostDocumentUpdate(w http.ResponseWriter, r *http.Request) {
 	documentID := chi.URLParam(r, "id")
 	store := s.requestStore(r)
-	if !store.HasDocument(documentID) {
+	if !store.HasStreamDocument(documentID) {
 		writeError(w, http.StatusNotFound, ErrNotFound.Error())
 		return
 	}
@@ -168,177 +165,15 @@ func (s *Server) handlePostDocumentUpdate(w http.ResponseWriter, r *http.Request
 func (s *Server) handleDocumentWebsocket(w http.ResponseWriter, r *http.Request) {
 	documentID := chi.URLParam(r, "id")
 	store := s.requestStore(r)
-	if !store.HasDocument(documentID) {
+	if !store.HasStreamDocument(documentID) {
 		writeError(w, http.StatusNotFound, ErrNotFound.Error())
 		return
 	}
-	conn, err := s.upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		return
-	}
-	defer conn.Close()
-
-	workspaceID := s.requestWorkspaceID(r)
-	room := s.rooms.ForDocument(workspaceID + ":" + documentID)
-	session := newDocumentConn(64)
-	room.Add(session)
-	defer func() {
-		session.Close()
-		room.Remove(session)
-	}()
-
-	clientID, _ := strconv.ParseUint(r.URL.Query().Get("client_id"), 10, 64)
-	actorID := r.URL.Query().Get("actor_id")
-	actorType := r.URL.Query().Get("actor_type")
-	if auth, ok := authFromContext(r.Context()); ok {
-		meta := operationMetaFromAuth(auth, "y-protocol", actorID, actorType)
-		actorID = meta.ActorID
-		actorType = meta.ActorType
-	}
-	log.Printf("document ws open doc=%s actor=%s client=%d", documentID, actorID, clientID)
-
-	if awareness := room.SnapshotAwareness(); len(awareness) > 0 {
-		clients := make([]uint64, 0, len(awareness))
-		for current := range awareness {
-			clients = append(clients, current)
-		}
-		_ = conn.WriteMessage(websocket.BinaryMessage, yproto.BuildAwarenessUpdate(awareness, clients))
-	}
-
-	_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-	conn.SetPongHandler(func(string) error {
-		return conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-	})
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			messageType, payload, err := conn.ReadMessage()
-			if err != nil {
-				log.Printf("document ws read close doc=%s actor=%s err=%v", documentID, actorID, err)
-				return
-			}
-			if messageType != websocket.BinaryMessage {
-				continue
-			}
-			if err := s.handleDocumentProtocolMessageWithStore(store, s.requestBroker(r), room, session, documentID, payload, OperationMeta{
-				ActorID:     actorID,
-				ActorType:   actorType,
-				ExecutionID: "ws-session",
-				Tool:        "y-protocol",
-				Trigger:     "websocket sync",
-				Source:      "ws",
-				Confidence:  "high",
-			}); err != nil {
-				log.Printf("document ws protocol error doc=%s actor=%s err=%v", documentID, actorID, err)
-				return
-			}
-		}
-	}()
-
-	ticker := time.NewTicker(25 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-done:
-			if clientID != 0 && room.RemoveAwareness(clientID) {
-				message := yproto.BuildAwarenessUpdate(map[uint64]yproto.AwarenessState{
-					clientID: {Clock: time.Now().Unix(), State: []byte("null")},
-				}, []uint64{clientID})
-				room.BroadcastBestEffort(message, nil)
-			}
-			log.Printf("document ws closed doc=%s actor=%s client=%d", documentID, actorID, clientID)
-			return
-		case <-session.Done():
-			return
-		case message := <-session.send:
-			if err := conn.WriteMessage(websocket.BinaryMessage, message); err != nil {
-				log.Printf("document ws write error doc=%s actor=%s err=%v", documentID, actorID, err)
-				return
-			}
-		case <-ticker.C:
-			if err := conn.WriteMessage(websocket.PingMessage, []byte("ping")); err != nil {
-				return
-			}
-		}
-	}
+	s.handleStreamWebsocketForID(w, r, documentID)
 }
 
 func (s *Server) handleDocumentProtocolMessage(room *DocumentRoom, session *DocumentConn, documentID string, payload []byte, meta OperationMeta) error {
-	return s.handleDocumentProtocolMessageWithStore(s.store, s.subscribers, room, session, documentID, payload, meta)
-}
-
-func (s *Server) handleDocumentProtocolMessageWithStore(store *Store, broker *Broker, room *DocumentRoom, session *DocumentConn, documentID string, payload []byte, meta OperationMeta) error {
-	if store == nil {
-		store = s.store
-	}
-	if broker == nil {
-		broker = s.subscribers
-	}
-	messageType, reader, err := yproto.DecodeProtocolMessage(payload)
-	if err != nil {
-		return err
-	}
-
-	switch messageType {
-	case yproto.MessageSync:
-		syncType, data, err := yproto.DecodeSyncMessage(reader)
-		if err != nil {
-			return err
-		}
-		switch syncType {
-		case yproto.SyncStep1:
-			document, updates, err := store.EncodeDocumentSyncUpdates(documentID, data)
-			if err != nil {
-				return err
-			}
-			for index, update := range updates {
-				if index == 0 {
-					if !session.Enqueue(yproto.BuildSyncStep2FromUpdate(update)) {
-						return nil
-					}
-				} else {
-					if !session.Enqueue(yproto.BuildSyncUpdate(update)) {
-						return nil
-					}
-				}
-			}
-			if document.StateVector != "" {
-				stateVector, err := base64.StdEncoding.DecodeString(document.StateVector)
-				if err != nil {
-					return err
-				}
-				if !session.Enqueue(yproto.BuildSyncStep1FromStateVector(stateVector)) {
-					return nil
-				}
-			}
-		case yproto.SyncStep2, yproto.SyncUpdate:
-			if len(data) == 0 {
-				return nil
-			}
-			log.Printf("document ws inbound update doc=%s actor=%s actor_type=%s sync_type=%s bytes=%d canonical_empty_yjs_update=%t", documentID, meta.ActorID, meta.ActorType, documentSyncTypeLabel(syncType), len(data), isCanonicalEmptyYjsUpdate(data))
-			result, err := applyAndPublishDocumentUpdate(store, broker, room, session, documentID, data, meta)
-			if err != nil {
-				return err
-			}
-			log.Printf("document ws apply result doc=%s actor=%s actor_type=%s sync_type=%s bytes=%d applied=%t update_id=%d", documentID, meta.ActorID, meta.ActorType, documentSyncTypeLabel(syncType), len(data), result.Applied, result.Document.UpdateID)
-		}
-	case yproto.MessageAwareness:
-		updates, err := yproto.DecodeAwarenessUpdate(reader)
-		if err != nil {
-			return err
-		}
-		changed := room.ApplyAwareness(updates)
-		if len(changed) == 0 {
-			return nil
-		}
-		snapshot := room.SnapshotAwareness()
-		broadcast := yproto.BuildAwarenessUpdate(snapshot, changed)
-		room.BroadcastBestEffort(broadcast, session)
-	}
-	return nil
+	return s.handleStreamProtocolMessageWithStore(s.store, s.subscribers, room, session, documentID, payload, meta)
 }
 
 func (s *Server) applyAndPublishDocumentUpdate(r *http.Request, room *DocumentRoom, exclude *DocumentConn, documentID string, update []byte, meta OperationMeta) (*ApplyCRDTUpdateResult, error) {
@@ -346,35 +181,18 @@ func (s *Server) applyAndPublishDocumentUpdate(r *http.Request, room *DocumentRo
 }
 
 func applyAndPublishDocumentUpdate(store *Store, broker *Broker, room *DocumentRoom, exclude *DocumentConn, documentID string, update []byte, meta OperationMeta) (*ApplyCRDTUpdateResult, error) {
-	if isCanonicalEmptyYjsUpdate(update) {
-		document, err := store.GetDocument(documentID)
-		if err != nil {
-			return nil, err
-		}
-		return &ApplyCRDTUpdateResult{Document: document, Applied: false}, nil
-	}
-	result, err := store.ApplyCRDTUpdateWithResult(documentID, update, meta)
+	result, err := applyAndPublishStreamUpdate(store, broker, room, exclude, documentID, update, meta)
 	if err != nil {
 		return nil, err
 	}
-	if !result.Applied {
-		return result, nil
+	document, err := store.GetStreamDocument(documentID)
+	if err != nil {
+		return nil, err
 	}
-	updated := result.Document
-	if room != nil {
-		room.BroadcastSyncUpdate(yproto.BuildSyncUpdate(update), exclude)
-	}
-	if broker != nil {
-		broker.Publish(EventEnvelope{Type: "document.updated", Data: DocumentUpdateEvent{
-			DocumentID: updated.ID,
-			UpdateID:   updated.UpdateID,
-			Path:       updated.Path,
-			UpdatedAt:  updated.UpdatedAt,
-			ActorID:    meta.ActorID,
-		}})
-		publishAgentInboxChanges(store, broker)
-	}
-	return result, nil
+	return &ApplyCRDTUpdateResult{
+		Document: document,
+		Applied:  result.Applied,
+	}, nil
 }
 
 func documentSyncTypeLabel(syncType uint64) string {

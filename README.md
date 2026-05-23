@@ -162,10 +162,9 @@ Important tables:
 - `daemons`: workspace daemon records and token hashes.
 - `agents`: daemon-owned agent records.
 - `agent_runs`: agent process/run status.
-- `documents`: document metadata.
-- `document_heads`: current document `state_vector` and `update_id`, not full content.
-- `document_updates`: CRDT binary update log.
-- `document_checkpoints`: periodic compacted CRDT checkpoints.
+- `crdt_stream_heads`: current generic stream `state_vector`, `update_id`, and kind.
+- `crdt_stream_updates`: append-only Yjs CRDT update log for root and content streams.
+- `crdt_stream_checkpoints`: periodic compacted CRDT stream checkpoints.
 - `threads`: thread metadata and anchors.
 - `thread_messages`: thread message bodies.
 - `thread_participants`: users/agents involved in a thread.
@@ -178,26 +177,27 @@ Important tables:
 
 ### Source Of Truth
 
-Postgres is the source of truth. For documents, the source of truth is the CRDT update stream plus checkpoints, not a plaintext file snapshot.
+Postgres is the source of truth. Workspace namespace metadata lives in one root manifest CRDT stream, and every file's bytes live in a separate content CRDT stream. Plaintext files are daemon projections, not backend authority.
 
-### Document Heads
+### Stream Heads
 
-`document_heads` stores lightweight head metadata:
+`crdt_stream_heads` stores lightweight head metadata:
 
-- `document_id`
+- `stream_id`
+- `kind`
 - `state_vector`
 - `update_id`
 - `updated_at`
 
 It intentionally does not store full plaintext content or full CRDT snapshots.
 
-### Document Updates
+### Stream Updates
 
-`document_updates` stores binary Yjs CRDT updates. This is the canonical append-only update history.
+`crdt_stream_updates` stores binary Yjs CRDT updates. This is the canonical append-only update history for both the root manifest and file content streams.
 
 ### Checkpoints
 
-`document_checkpoints` stores periodic compacted CRDT state. The backend currently creates checkpoints every 100 updates. Checkpoints are an optimization so clients and diff code do not need to replay an unbounded number of updates.
+`crdt_stream_checkpoints` stores periodic compacted CRDT state. The backend currently creates checkpoints every 100 updates. Checkpoints are an optimization so clients and diff code do not need to replay an unbounded number of updates.
 
 ### Frontend Document Loading
 
@@ -213,7 +213,7 @@ The frontend should not use workspace metadata as a full document content API.
 
 ### Daemon Document Projection
 
-The daemon receives document updates, reconciles them with local filesystem changes, and projects canonical document state to files. Agent workspaces are separate local copies managed by the daemon.
+The daemon syncs generic root/content streams, reconciles them with local filesystem changes, and projects canonical stream state to files. Agent workspaces are separate local projections managed by the daemon.
 
 Daemon internal caches belong in daemon-controlled paths, not as product documents. Agent logs such as `codex-agent.log` are intentionally regular synced files for debugging.
 
