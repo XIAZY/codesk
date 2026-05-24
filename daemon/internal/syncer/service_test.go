@@ -556,6 +556,7 @@ func TestInitialRefreshFailsFastOnAgentStartupError(t *testing.T) {
 	service.sessions = newAgentSessionSupervisor(service.cfg, nil, factory.new)
 	defer service.sessions.Shutdown()
 	defer service.closeAgentWorkers()
+	defer service.closeAgentRuntimes()
 
 	started := time.Now()
 	err := service.refreshInitialWorkspace(context.Background())

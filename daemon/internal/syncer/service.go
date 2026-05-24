@@ -899,6 +899,8 @@ func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documen
 	if s == nil || s.docCache == nil || documentID == "" || len(trackedFiles) == 0 {
 		return nil
 	}
+	unlockReconcile := s.lockDocumentReconcile(documentID)
+	defer unlockReconcile()
 	cache := s.docCache
 	documentPath := trackedFiles[0].DocumentPath
 	var flushRecords []outboxUpdateRecord

@@ -26,6 +26,8 @@ type workspaceRuntime struct {
 	reconcileQueue   *reconcileQueue
 	localCreates     *localCreateQueue
 	documentSyncs    map[string]*managedDocumentSync
+	reconcileLocksMu sync.Mutex
+	reconcileLocks   map[string]*sync.Mutex
 	initialWorkspace *workspaceResponse
 }
 
@@ -81,6 +83,21 @@ func newWorkspaceRuntime(cfg Config, client *http.Client, rootDir, actorID, acto
 	replica.docCache = cache
 	runtime.replica = replica
 	return runtime, nil
+}
+
+func (r *workspaceRuntime) lockDocumentReconcile(documentID string) func() {
+	r.reconcileLocksMu.Lock()
+	if r.reconcileLocks == nil {
+		r.reconcileLocks = map[string]*sync.Mutex{}
+	}
+	lock := r.reconcileLocks[documentID]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		r.reconcileLocks[documentID] = lock
+	}
+	r.reconcileLocksMu.Unlock()
+	lock.Lock()
+	return lock.Unlock
 }
 
 func (r *workspaceRuntime) markLocalCreate(candidate localCreateCandidate) {
