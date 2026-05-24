@@ -236,7 +236,7 @@ func (r *workspaceReplica) ensureTracked(ctx context.Context, document *document
 		tracked.Owner = r
 		tracked.clearRemoteDeleted()
 		if tracked.WorkspaceRoot == "" {
-			tracked.WorkspaceRoot = workspaceRootForDocumentPath(absolutePath, document.Path)
+			tracked.WorkspaceRoot = r.rootDir
 		}
 		if tracked.DocumentPath != document.Path {
 			tracked.DocumentPath = document.Path
@@ -367,7 +367,7 @@ func (r *workspaceReplica) setTrackedPath(tracked *trackedFile, nextPath string)
 	defer r.mu.Unlock()
 	delete(r.projectedByPath, tracked.Path)
 	tracked.Path = nextPath
-	tracked.WorkspaceRoot = workspaceRootForDocumentPath(nextPath, tracked.DocumentPath)
+	tracked.WorkspaceRoot = r.rootDir
 	tracked.FS = r.fs
 	r.projectedByPath[nextPath] = tracked
 }

@@ -2290,6 +2290,9 @@ func TestReconcileLocalWorkspacePrefersMoveForSameContent(t *testing.T) {
 	if tracked.Path != newPath {
 		t.Fatalf("expected tracked path to move to %q, got %q", newPath, tracked.Path)
 	}
+	if tracked.WorkspaceRoot != root {
+		t.Fatalf("expected tracked workspace root to remain %q, got %q", root, tracked.WorkspaceRoot)
+	}
 	if !tracked.isLocalMoved() || !tracked.isLocalDirty() {
 		t.Fatal("expected local clean move to be queued for central reconciliation")
 	}
