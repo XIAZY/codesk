@@ -17,17 +17,29 @@ type documentSync struct {
 	cfg       Config
 	cache     *documentCache
 	markDirty func(string)
+	actorID   string
+	actorType string
 
 	mu       sync.Mutex
 	document *document
 }
 
-func newDocumentSync(cfg Config, cache *documentCache, document *document, markDirty func(string)) *documentSync {
+func newDocumentSync(cfg Config, cache *documentCache, document *document, markDirty func(string), actors ...string) *documentSync {
+	actorID := ""
+	actorType := ""
+	if len(actors) > 0 {
+		actorID = actors[0]
+	}
+	if len(actors) > 1 {
+		actorType = actors[1]
+	}
 	return &documentSync{
 		cfg:       cfg,
 		cache:     cache,
 		document:  cloneSyncDocument(document),
 		markDirty: markDirty,
+		actorID:   actorID,
+		actorType: actorType,
 	}
 }
 
@@ -87,8 +99,8 @@ func (d *documentSync) runOnce(ctx context.Context) error {
 	clientID := nextAwarenessClientID()
 	query := url.Values{
 		"client_id":  {fmt.Sprintf("%d", clientID)},
-		"actor_id":   {d.cfg.AgentID},
-		"actor_type": {"daemon"},
+		"actor_id":   {firstNonEmptyText(d.actorID, d.cfg.AgentID)},
+		"actor_type": {firstNonEmptyText(d.actorType, "daemon")},
 	}
 	conn, _, err := dialWorkspaceWebsocket(ctx, d.cfg, "/ws/documents/"+document.ID, query, "")
 	if err != nil {
@@ -163,7 +175,7 @@ func (d *documentSync) handleMessage(payload []byte) error {
 	return nil
 }
 
-func (s *Service) reconcileDocumentSyncs(ctx context.Context, documents []*document) error {
+func (s *workspaceRuntime) reconcileDocumentSyncs(ctx context.Context, documents []*document) error {
 	desired := map[string]*document{}
 	for _, document := range documents {
 		if document == nil || document.ID == "" || isIgnoredDocumentPath(document.Path) {
@@ -179,7 +191,13 @@ func (s *Service) reconcileDocumentSyncs(ctx context.Context, documents []*docum
 			continue
 		}
 		syncCtx, cancel := context.WithCancel(ctx)
-		sync := newDocumentSync(s.cfg, s.docCache, document, s.markDocumentDirty)
+		actorID := s.cfg.AgentID
+		actorType := "daemon"
+		if s.replica != nil {
+			actorID = s.replica.actorID
+			actorType = s.replica.actorKind()
+		}
+		sync := newDocumentSync(s.cfg, s.docCache, document, s.markDocumentDirty, actorID, actorType)
 		s.documentSyncs[documentID] = &managedDocumentSync{sync: sync, cancel: cancel}
 		go sync.run(syncCtx)
 	}
@@ -203,7 +221,7 @@ func (s *Service) reconcileDocumentSyncs(ctx context.Context, documents []*docum
 	return nil
 }
 
-func (s *Service) closeDocumentSyncs() {
+func (s *workspaceRuntime) closeDocumentSyncs() {
 	s.mu.Lock()
 	syncs := make([]*managedDocumentSync, 0, len(s.documentSyncs))
 	for _, sync := range s.documentSyncs {

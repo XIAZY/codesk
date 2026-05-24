@@ -42,11 +42,19 @@ func (c Config) workspaceWSPath(path string) string {
 }
 
 func (s *Service) newBackendRequest(ctx context.Context, method string, path string, body io.Reader) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, method, s.cfg.BackendURL+s.cfg.workspaceAPIPath(path), body)
+	return newBackendRequestForConfig(ctx, s.cfg, method, path, body)
+}
+
+func (r *workspaceRuntime) newBackendRequest(ctx context.Context, method string, path string, body io.Reader) (*http.Request, error) {
+	return newBackendRequestForConfig(ctx, r.cfg, method, path, body)
+}
+
+func newBackendRequestForConfig(ctx context.Context, cfg Config, method string, path string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, cfg.BackendURL+cfg.workspaceAPIPath(path), body)
 	if err != nil {
 		return nil, err
 	}
-	applyBackendAuth(req.Header, s.cfg, "")
+	applyBackendAuth(req.Header, cfg, "")
 	return req, nil
 }
 
@@ -58,6 +66,23 @@ func (s *Service) newAgentBackendRequest(ctx context.Context, run *agentRun, met
 	if run != nil {
 		applyBackendAuth(req.Header, s.cfg, run.AgentID)
 		if strings.TrimSpace(s.cfg.WorkspaceID) == "" {
+			query := req.URL.Query()
+			query.Set("actor", run.AgentID)
+			query.Set("actor_type", "agent")
+			req.URL.RawQuery = query.Encode()
+		}
+	}
+	return req, nil
+}
+
+func (r *workspaceRuntime) newAgentBackendRequest(ctx context.Context, run *agentRun, method string, path string, body io.Reader) (*http.Request, error) {
+	req, err := r.newBackendRequest(ctx, method, path, body)
+	if err != nil {
+		return nil, err
+	}
+	if run != nil {
+		applyBackendAuth(req.Header, r.cfg, run.AgentID)
+		if strings.TrimSpace(r.cfg.WorkspaceID) == "" {
 			query := req.URL.Query()
 			query.Set("actor", run.AgentID)
 			query.Set("actor_type", "agent")

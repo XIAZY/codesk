@@ -99,6 +99,9 @@ func (r *workspaceReplica) Run(ctx context.Context) error {
 		}
 		r.initialWorkspace = nil
 	}
+	if err := r.reconcileLocalWorkspace(ctx); err != nil {
+		log.Printf("%s initial local reconcile error: %v", r.actorID, err)
+	}
 
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()

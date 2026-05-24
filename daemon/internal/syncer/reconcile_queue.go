@@ -9,10 +9,14 @@ import (
 type reconcileQueue struct {
 	mu    sync.Mutex
 	dirty map[string]struct{}
+	wake  chan struct{}
 }
 
 func newReconcileQueue() *reconcileQueue {
-	return &reconcileQueue{dirty: map[string]struct{}{}}
+	return &reconcileQueue{
+		dirty: map[string]struct{}{},
+		wake:  make(chan struct{}, 1),
+	}
 }
 
 func (q *reconcileQueue) Mark(documentID string) {
@@ -23,6 +27,10 @@ func (q *reconcileQueue) Mark(documentID string) {
 	q.mu.Lock()
 	q.dirty[documentID] = struct{}{}
 	q.mu.Unlock()
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
 }
 
 func (q *reconcileQueue) Drain() []string {
@@ -50,4 +58,11 @@ func (q *reconcileQueue) Len() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return len(q.dirty)
+}
+
+func (q *reconcileQueue) Wake() <-chan struct{} {
+	if q == nil {
+		return nil
+	}
+	return q.wake
 }

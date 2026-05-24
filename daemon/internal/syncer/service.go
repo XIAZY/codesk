@@ -41,6 +41,8 @@ type Service struct {
 	sessions        *agentSessionSupervisor
 	toolServer      *http.Server
 	mu              sync.Mutex
+	primaryRuntime  *workspaceRuntime
+	agentRuntimes   map[string]*managedWorkspaceRuntime
 	primaryReplica  *workspaceReplica
 	agentReplicas   map[string]*managedReplica
 	documentSyncs   map[string]*managedDocumentSync
@@ -53,6 +55,11 @@ type Service struct {
 
 type managedReplica struct {
 	replica *workspaceReplica
+	cancel  context.CancelFunc
+}
+
+type managedWorkspaceRuntime struct {
+	runtime *workspaceRuntime
 	cancel  context.CancelFunc
 }
 
@@ -200,32 +207,86 @@ func (q *localCreateQueue) Drain() []localCreateCandidate {
 
 func New(cfg Config) (*Service, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
-	cache, err := newDocumentCache(cfg.CacheDir)
+	primaryRuntime, err := newWorkspaceRuntime(cfg, client, cfg.WorkspaceDir, cfg.AgentID, "daemon", primaryWorkspaceRuntimeCacheDir(cfg))
 	if err != nil {
 		return nil, err
 	}
-	queue := newReconcileQueue()
-	localCreates := newLocalCreateQueue()
-	primaryReplica, err := newWorkspaceReplica(cfg, cfg.WorkspaceDir, cfg.AgentID, "daemon", queue.Mark, localCreates.Mark)
-	if err != nil {
-		return nil, err
-	}
-	primaryReplica.client = client
-	primaryReplica.docCache = cache
 	service := &Service{
 		cfg:            cfg,
 		client:         client,
-		primaryReplica: primaryReplica,
+		primaryRuntime: primaryRuntime,
+		agentRuntimes:  map[string]*managedWorkspaceRuntime{},
+		primaryReplica: primaryRuntime.replica,
 		agentReplicas:  map[string]*managedReplica{},
-		documentSyncs:  map[string]*managedDocumentSync{},
+		documentSyncs:  primaryRuntime.documentSyncs,
 		agentWorkers:   map[string]*managedAgentWorker{},
-		docCache:       cache,
-		reconcileQueue: queue,
-		localCreates:   localCreates,
+		docCache:       primaryRuntime.docCache,
+		reconcileQueue: primaryRuntime.reconcileQueue,
+		localCreates:   primaryRuntime.localCreates,
 	}
 	service.sessions = newAgentSessionSupervisor(cfg, service.updateRemoteAgentSession, nil)
 	service.sessions.SetIdleWake(service.wakeAgentWorker)
 	return service, nil
+}
+
+func (s *Service) ensurePrimaryRuntime() error {
+	if s == nil {
+		return nil
+	}
+	if s.client == nil {
+		s.client = &http.Client{Timeout: 30 * time.Second}
+	}
+	if s.primaryRuntime != nil {
+		s.primaryReplica = s.primaryRuntime.replica
+		s.docCache = s.primaryRuntime.docCache
+		s.reconcileQueue = s.primaryRuntime.reconcileQueue
+		s.localCreates = s.primaryRuntime.localCreates
+		s.documentSyncs = s.primaryRuntime.documentSyncs
+		return nil
+	}
+	if s.primaryReplica != nil {
+		if s.docCache == nil {
+			cache, err := newDocumentCache(primaryWorkspaceRuntimeCacheDir(s.cfg))
+			if err != nil {
+				return err
+			}
+			s.docCache = cache
+		}
+		if s.reconcileQueue == nil {
+			s.reconcileQueue = newReconcileQueue()
+		}
+		if s.localCreates == nil {
+			s.localCreates = newLocalCreateQueue()
+		}
+		if s.documentSyncs == nil {
+			s.documentSyncs = map[string]*managedDocumentSync{}
+		}
+		s.primaryReplica.client = s.client
+		s.primaryReplica.docCache = s.docCache
+		s.primaryReplica.markDirty = s.reconcileQueue.Mark
+		s.primaryRuntime = &workspaceRuntime{
+			cfg:            s.cfg,
+			client:         s.client,
+			replica:        s.primaryReplica,
+			docCache:       s.docCache,
+			reconcileQueue: s.reconcileQueue,
+			localCreates:   s.localCreates,
+			documentSyncs:  s.documentSyncs,
+		}
+		s.primaryReplica.markCreate = s.primaryRuntime.markLocalCreate
+		return nil
+	}
+	runtime, err := newWorkspaceRuntime(s.cfg, s.client, s.cfg.WorkspaceDir, s.cfg.AgentID, "daemon", primaryWorkspaceRuntimeCacheDir(s.cfg))
+	if err != nil {
+		return err
+	}
+	s.primaryRuntime = runtime
+	s.primaryReplica = runtime.replica
+	s.docCache = runtime.docCache
+	s.reconcileQueue = runtime.reconcileQueue
+	s.localCreates = runtime.localCreates
+	s.documentSyncs = runtime.documentSyncs
+	return nil
 }
 
 func (s *Service) Run(ctx context.Context) error {
@@ -240,8 +301,14 @@ func (s *Service) Run(ctx context.Context) error {
 	if err := os.MkdirAll(s.cfg.AgentWorkspaceRoot, 0o755); err != nil {
 		return err
 	}
+	if err := s.ensurePrimaryRuntime(); err != nil {
+		_ = shutdownToolGateway(context.Background(), s.toolServer)
+		return err
+	}
 	if err := s.refreshInitialWorkspace(ctx); err != nil {
-		s.closeDocumentSyncs()
+		if s.primaryRuntime != nil {
+			s.primaryRuntime.closeDocumentSyncs()
+		}
 		s.closeAgentWorkers()
 		s.closeAgentReplicas()
 		if s.sessions != nil {
@@ -253,22 +320,19 @@ func (s *Service) Run(ctx context.Context) error {
 	primaryCtx, cancelPrimary := context.WithCancel(ctx)
 	defer cancelPrimary()
 	go func() {
-		if err := s.primaryReplica.Run(primaryCtx); err != nil && primaryCtx.Err() == nil {
-			log.Printf("primary workspace replica error: %v", err)
+		if err := s.primaryRuntime.Run(primaryCtx); err != nil && primaryCtx.Err() == nil {
+			log.Printf("primary workspace runtime error: %v", err)
 		}
 	}()
 	go s.workspaceEventLoop(ctx)
 
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
-	reconcileTicker := time.NewTicker(2 * time.Second)
-	defer reconcileTicker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			cancelPrimary()
-			s.closeDocumentSyncs()
 			s.closeAgentWorkers()
 			s.closeAgentReplicas()
 			if s.sessions != nil {
@@ -276,20 +340,7 @@ func (s *Service) Run(ctx context.Context) error {
 			}
 			_ = shutdownToolGateway(context.Background(), s.toolServer)
 			return nil
-		case <-reconcileTicker.C:
-			if err := s.processLocalCreates(ctx); err != nil {
-				fmt.Printf("local create reconcile error: %v\n", err)
-			}
-			if err := s.reconcileDirtyDocuments(ctx); err != nil {
-				fmt.Printf("document reconcile error: %v\n", err)
-			}
 		case <-ticker.C:
-			if err := s.processLocalCreates(ctx); err != nil {
-				fmt.Printf("local create reconcile error: %v\n", err)
-			}
-			if err := s.reconcileTrackedDocuments(ctx); err != nil {
-				fmt.Printf("document reconcile error: %v\n", err)
-			}
 			if err := s.refresh(ctx); err != nil {
 				fmt.Printf("workspace refresh error: %v\n", err)
 			}
@@ -427,20 +478,20 @@ func (s *Service) refresh(ctx context.Context) error {
 		return err
 	}
 
-	if s.primaryReplica != nil {
-		if err := s.primaryReplica.applyWorkspace(ctx, workspace); err != nil {
+	if err := s.ensurePrimaryRuntime(); err != nil {
+		return err
+	}
+	if s.primaryRuntime != nil {
+		if err := s.primaryRuntime.applyWorkspace(ctx, workspace); err != nil {
 			return err
 		}
 	}
-	if err := s.reconcileDocumentSyncs(ctx, workspace.Documents); err != nil {
+	if err := s.reconcileAgentReplicas(ctx, workspace); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	s.latestWorkspace = workspace
 	s.mu.Unlock()
-	if err := s.reconcileAgentReplicas(ctx, workspace); err != nil {
-		return err
-	}
 	if err := s.reconcileAgentWorkers(ctx, workspace.Agents); err != nil {
 		return err
 	}
@@ -479,7 +530,7 @@ func (s *Service) fetchWorkspace(ctx context.Context) (*workspaceResponse, error
 	return &workspace, nil
 }
 
-func (s *Service) processLocalCreates(ctx context.Context) error {
+func (s *workspaceRuntime) processLocalCreates(ctx context.Context) error {
 	if s == nil || s.localCreates == nil {
 		return nil
 	}
@@ -491,7 +542,7 @@ func (s *Service) processLocalCreates(ctx context.Context) error {
 	var firstErr error
 	for _, candidate := range candidates {
 		if ctx.Err() != nil {
-			s.localCreates.Mark(candidate)
+			s.markLocalCreate(candidate)
 			if firstErr == nil {
 				firstErr = ctx.Err()
 			}
@@ -499,7 +550,7 @@ func (s *Service) processLocalCreates(ctx context.Context) error {
 		}
 		document, err := s.createDocumentFromLocalCandidate(ctx, candidate)
 		if err != nil {
-			s.localCreates.Mark(candidate)
+			s.markLocalCreate(candidate)
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -511,14 +562,19 @@ func (s *Service) processLocalCreates(ctx context.Context) error {
 		}
 	}
 	if created {
-		if err := s.refresh(ctx); err != nil && firstErr == nil {
+		workspace, err := s.fetchWorkspace(ctx)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+		} else if err := s.applyWorkspace(ctx, workspace); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
 }
 
-func (s *Service) createDocumentFromLocalCandidate(ctx context.Context, candidate localCreateCandidate) (*document, error) {
+func (s *workspaceRuntime) createDocumentFromLocalCandidate(ctx context.Context, candidate localCreateCandidate) (*document, error) {
 	fs := NewWorkspaceFS(candidate.Root)
 	snapshot, err := fs.Read(candidate.Path)
 	if err != nil {
@@ -530,7 +586,7 @@ func (s *Service) createDocumentFromLocalCandidate(ctx context.Context, candidat
 	relativePath := workspaceRelativePath(candidate.Root, candidate.Path)
 	payload, err := json.Marshal(createDocumentRequest{
 		Path:    relativePath,
-		Content: string(snapshot.Bytes),
+		Content: "",
 	})
 	if err != nil {
 		return nil, err
@@ -556,6 +612,14 @@ func (s *Service) createDocumentFromLocalCandidate(ctx context.Context, candidat
 	if err := json.NewDecoder(res.Body).Decode(&created); err != nil {
 		return nil, err
 	}
+	if s != nil && s.docCache != nil {
+		doc := crdt.New()
+		if err := s.docCache.storeDoc(created.ID, created.Path, created.UpdateID, doc); err != nil {
+			doc.Close()
+			return nil, err
+		}
+		doc.Close()
+	}
 	tracked := &trackedFile{
 		DocumentID:    created.ID,
 		DocumentPath:  created.Path,
@@ -563,7 +627,7 @@ func (s *Service) createDocumentFromLocalCandidate(ctx context.Context, candidat
 		WorkspaceRoot: candidate.Root,
 		FS:            fs,
 	}
-	if err := tracked.storeProjectedBase(string(snapshot.Bytes), crdtStateFromContent(string(snapshot.Bytes))); err != nil {
+	if err := tracked.storeProjectedBase("", crdtStateFromContent("")); err != nil {
 		return nil, err
 	}
 	return &created, nil
@@ -724,14 +788,14 @@ type trackedReconcileState struct {
 var errProjectedBaseDoesNotMatchCRDTState = errors.New("projected base does not match cached CRDT state")
 var errDocumentRemovedDuringReconcile = errors.New("document removed during reconciliation")
 
-func (s *Service) reconcileDirtyDocuments(ctx context.Context) error {
+func (s *workspaceRuntime) reconcileDirtyDocuments(ctx context.Context) error {
 	if s.reconcileQueue == nil {
 		return nil
 	}
 	return s.reconcileDocumentIDs(ctx, s.reconcileQueue.Drain())
 }
 
-func (s *Service) reconcileTrackedDocuments(ctx context.Context) error {
+func (s *workspaceRuntime) reconcileTrackedDocuments(ctx context.Context) error {
 	if s.docCache == nil {
 		return nil
 	}
@@ -744,7 +808,7 @@ func (s *Service) reconcileTrackedDocuments(ctx context.Context) error {
 	return s.reconcileDocumentIDsWithTracked(ctx, documentIDs, trackedByDocument)
 }
 
-func (s *Service) reconcileDocumentIDs(ctx context.Context, documentIDs []string) error {
+func (s *workspaceRuntime) reconcileDocumentIDs(ctx context.Context, documentIDs []string) error {
 	if s.docCache == nil || len(documentIDs) == 0 {
 		return nil
 	}
@@ -753,7 +817,7 @@ func (s *Service) reconcileDocumentIDs(ctx context.Context, documentIDs []string
 	return s.reconcileDocumentIDsWithTracked(ctx, documentIDs, trackedByDocument)
 }
 
-func (s *Service) reconcileDocumentIDsWithTracked(ctx context.Context, documentIDs []string, trackedByDocument map[string][]*trackedFile) error {
+func (s *workspaceRuntime) reconcileDocumentIDsWithTracked(ctx context.Context, documentIDs []string, trackedByDocument map[string][]*trackedFile) error {
 	if s.docCache == nil || len(documentIDs) == 0 {
 		return nil
 	}
@@ -783,36 +847,26 @@ func (s *Service) reconcileDocumentIDsWithTracked(ctx context.Context, documentI
 	return firstErr
 }
 
-func (s *Service) collectTrackedByDocument() map[string][]*trackedFile {
+func (s *workspaceRuntime) collectTrackedByDocument() map[string][]*trackedFile {
 	result := map[string][]*trackedFile{}
-	s.mu.Lock()
-	replicas := make([]*workspaceReplica, 0, len(s.agentReplicas)+1)
-	if s.primaryReplica != nil {
-		replicas = append(replicas, s.primaryReplica)
+	if s == nil || s.replica == nil {
+		return result
 	}
-	for _, managed := range s.agentReplicas {
-		if managed != nil && managed.replica != nil {
-			replicas = append(replicas, managed.replica)
-		}
+	s.replica.mu.Lock()
+	for documentID, tracked := range s.replica.projectedByID {
+		result[documentID] = append(result[documentID], tracked)
 	}
-	s.mu.Unlock()
-	for _, replica := range replicas {
-		replica.mu.Lock()
-		for documentID, tracked := range replica.projectedByID {
-			result[documentID] = append(result[documentID], tracked)
-		}
-		replica.mu.Unlock()
-	}
+	s.replica.mu.Unlock()
 	return result
 }
 
-func (s *Service) markDocumentDirty(documentID string) {
+func (s *workspaceRuntime) markDocumentDirty(documentID string) {
 	if s != nil && s.reconcileQueue != nil {
 		s.reconcileQueue.Mark(documentID)
 	}
 }
 
-func (s *Service) documentNeedsReconcile(documentID string, trackedFiles []*trackedFile) bool {
+func (s *workspaceRuntime) documentNeedsReconcile(documentID string, trackedFiles []*trackedFile) bool {
 	if documentID == "" {
 		return false
 	}
@@ -832,7 +886,7 @@ func (s *Service) documentNeedsReconcile(documentID string, trackedFiles []*trac
 	return err != nil || count > 0
 }
 
-func (s *Service) reconcileTrackedDocument(ctx context.Context, documentID string, trackedFiles []*trackedFile) error {
+func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documentID string, trackedFiles []*trackedFile) error {
 	if s == nil || s.docCache == nil || documentID == "" || len(trackedFiles) == 0 {
 		return nil
 	}
@@ -1023,7 +1077,7 @@ func (s *Service) reconcileTrackedDocument(ctx context.Context, documentID strin
 	return nil
 }
 
-func (s *Service) reconcileLocalMetadataOperations(ctx context.Context, cache *documentCache, entry *documentCacheEntry, documentID string, states []trackedReconcileState) (bool, error) {
+func (s *workspaceRuntime) reconcileLocalMetadataOperations(ctx context.Context, cache *documentCache, entry *documentCacheEntry, documentID string, states []trackedReconcileState) (bool, error) {
 	for _, state := range states {
 		tracked := state.tracked
 		if tracked == nil || !tracked.isRemoteDeleted() {
@@ -1148,7 +1202,7 @@ func hasTrackedLocalDirty(trackedFiles []*trackedFile) bool {
 	return false
 }
 
-func (s *Service) actorForTracked(tracked *trackedFile) (string, string) {
+func (s *workspaceRuntime) actorForTracked(tracked *trackedFile) (string, string) {
 	actorID := ""
 	actorType := ""
 	if tracked != nil {
@@ -1167,7 +1221,7 @@ func (s *Service) actorForTracked(tracked *trackedFile) (string, string) {
 	return actorID, actorType
 }
 
-func (s *Service) updateRemoteDocumentPath(ctx context.Context, tracked *trackedFile, path string) error {
+func (s *workspaceRuntime) updateRemoteDocumentPath(ctx context.Context, tracked *trackedFile, path string) error {
 	if tracked == nil || tracked.DocumentID == "" {
 		return nil
 	}
@@ -1195,7 +1249,7 @@ func (s *Service) updateRemoteDocumentPath(ctx context.Context, tracked *tracked
 	return nil
 }
 
-func (s *Service) deleteRemoteDocument(ctx context.Context, tracked *trackedFile) error {
+func (s *workspaceRuntime) deleteRemoteDocument(ctx context.Context, tracked *trackedFile) error {
 	if tracked == nil || tracked.DocumentID == "" {
 		return nil
 	}
@@ -1218,7 +1272,7 @@ func (s *Service) deleteRemoteDocument(ctx context.Context, tracked *trackedFile
 	return nil
 }
 
-func (s *Service) flushOutboxUpdatesLocked(ctx context.Context, cache *documentCache, entry *documentCacheEntry, documentID, documentPath string, trackedFiles []*trackedFile, records []outboxUpdateRecord) error {
+func (s *workspaceRuntime) flushOutboxUpdatesLocked(ctx context.Context, cache *documentCache, entry *documentCacheEntry, documentID, documentPath string, trackedFiles []*trackedFile, records []outboxUpdateRecord) error {
 	for len(records) > 0 {
 		record := records[0]
 		if _, err := s.postDocumentUpdate(ctx, documentID, &record); err != nil {
@@ -1587,7 +1641,7 @@ func (s *Service) updateRemoteAgentSession(ctx context.Context, agentID string, 
 	return nil
 }
 
-func (s *Service) postDocumentUpdate(ctx context.Context, documentID string, record *outboxUpdateRecord) (*postDocumentUpdateResponse, error) {
+func (s *workspaceRuntime) postDocumentUpdate(ctx context.Context, documentID string, record *outboxUpdateRecord) (*postDocumentUpdateResponse, error) {
 	if record == nil || len(record.Update) == 0 {
 		return &postDocumentUpdateResponse{Accepted: true}, nil
 	}

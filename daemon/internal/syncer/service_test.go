@@ -2543,7 +2543,7 @@ func TestCentralReconcileRemoteDeleteArchivesDirtyWorkingCopy(t *testing.T) {
 	}
 }
 
-func TestLocalCreateUploadsBytesAndStoresProjectedBaseWithoutRewrite(t *testing.T) {
+func TestLocalCreateCreatesEmptyDocumentAndKeepsLocalBytesDirty(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "docs", "new.md")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -2574,7 +2574,7 @@ func TestLocalCreateUploadsBytesAndStoresProjectedBaseWithoutRewrite(t *testing.
 	if created == nil || created.ID != "doc_created" {
 		t.Fatalf("unexpected created doc: %#v", created)
 	}
-	if seen.Path != "docs/new.md" || seen.Content != content {
+	if seen.Path != "docs/new.md" || seen.Content != "" {
 		t.Fatalf("unexpected create payload: %#v", seen)
 	}
 	after, err := os.ReadFile(path)
@@ -2589,8 +2589,8 @@ func TestLocalCreateUploadsBytesAndStoresProjectedBaseWithoutRewrite(t *testing.
 	if err != nil {
 		t.Fatalf("load projected base: %v", err)
 	}
-	if !known || base != content {
-		t.Fatalf("expected projected base from uploaded bytes, known=%v base=%q", known, base)
+	if !known || base != "" {
+		t.Fatalf("expected empty projected base so local bytes reconcile as first update, known=%v base=%q", known, base)
 	}
 }
 
