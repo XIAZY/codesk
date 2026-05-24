@@ -2,11 +2,8 @@ package syncer
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
-	"syscall"
 	"time"
 )
 
@@ -232,31 +229,6 @@ func fileStatFromInfo(path string, info os.FileInfo) FileStat {
 		CTimeNS:   ctimeNSFromInfo(info),
 		StatValid: true,
 	}
-}
-
-func fileKeyFromInfo(info os.FileInfo) (string, bool) {
-	if info == nil {
-		return "", false
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return "", false
-	}
-	if runtime.GOOS == "windows" {
-		return "", false
-	}
-	return fmt.Sprintf("%d:%d", uint64(stat.Dev), uint64(stat.Ino)), true
-}
-
-func ctimeNSFromInfo(info os.FileInfo) int64 {
-	if info == nil {
-		return 0
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0
-	}
-	return stat.Ctim.Nano()
 }
 
 func statDirMTimeNS(path string) (int64, bool) {
