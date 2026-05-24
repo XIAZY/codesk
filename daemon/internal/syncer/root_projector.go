@@ -532,8 +532,8 @@ func (p RootManifestProjector) hasLocalContentOutbox(ctx context.Context, stream
 	if p.State == nil {
 		return false
 	}
-	ok, err := p.State.HasOutbox(ctx, streamID)
-	return err == nil && ok
+	count, err := p.State.PendingOutboxCount(ctx, streamID)
+	return err == nil && count > 0
 }
 
 func (p RootManifestProjector) shouldRetryMissingDirectory(ctx context.Context, row ManifestProjectionRow, scan WorkspaceScan, fullScanComplete bool) bool {

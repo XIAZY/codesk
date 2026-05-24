@@ -234,6 +234,27 @@ func (s *WorkspaceStateDB) applyStreamQueueAtomically(ctx context.Context, strea
 		}
 	}
 
+	if len(localOutbox) == 0 && len(inbox) == 0 {
+		stream, err := getStreamTx(ctx, tx, streamID)
+		if err != nil {
+			return StreamQueueApplyResult{}, err
+		}
+		if opts.BeforeCommit != nil {
+			if err := opts.BeforeCommit(); err != nil {
+				return StreamQueueApplyResult{}, err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return StreamQueueApplyResult{}, err
+		}
+		result := StreamQueueApplyResult{}
+		if stream.LatestStateID.Valid {
+			result.StateID = stream.LatestStateID.Int64
+			result.StateVector = append([]byte(nil), stream.LatestStateVector...)
+		}
+		return result, nil
+	}
+
 	if kind != "root" {
 		materializedTextSHA256 = contentSHA256([]byte(doc.GetText("content").ToString()))
 	}
@@ -274,6 +295,22 @@ func (s *WorkspaceStateDB) applyStreamQueueAtomically(ctx context.Context, strea
 		LocalOutbox: localOutbox,
 		Inbox:       inbox,
 	}, nil
+}
+
+func getStreamTx(ctx context.Context, tx *sql.Tx, streamID string) (StreamRecord, error) {
+	if tx == nil {
+		return StreamRecord{}, errors.New("transaction is required")
+	}
+	streamID = strings.TrimSpace(streamID)
+	if streamID == "" {
+		return StreamRecord{}, errors.New("stream id is required")
+	}
+	row := tx.QueryRowContext(ctx, `
+		SELECT stream_id, kind, latest_state_id, projected_state_id,
+		       latest_update_id, latest_state_vector, created_at, updated_at
+		  FROM streams
+		 WHERE stream_id = ?`, streamID)
+	return scanStreamRecord(row)
 }
 
 func insertStreamStateTx(ctx context.Context, tx *sql.Tx, streamID string, stateUpdate []byte, stateVector []byte, materializedTextSHA256 string) (int64, error) {

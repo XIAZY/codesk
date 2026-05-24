@@ -98,6 +98,21 @@ func TestDotPathsIgnoredWhileRootLogsSync(t *testing.T) {
 	stack.waitForBackendContentByPath(t, "codex-agent.log", "line one\nline two\n", 30*time.Second)
 }
 
+func TestPostStartLocalCreateThenLocalDeleteSyncsAsDelete(t *testing.T) {
+	stack := newRegressionStack(t)
+	stack.up(t)
+
+	path := uniquePath("local-delete/docs/test3", ".md")
+	stack.writeLocalFile(t, path, "alpha\n")
+
+	documentID := stack.waitForDocumentPath(t, path, 90*time.Second)
+	stack.waitForBackendContent(t, documentID, "alpha\n", 90*time.Second)
+	stack.removeLocalPath(t, path)
+
+	stack.waitForDocumentPathAbsent(t, path, 120*time.Second)
+	stack.waitForLocalPathAbsent(t, path, 30*time.Second)
+}
+
 func TestTwoDaemonsSamePathEntriesConvergeToConflictPaths(t *testing.T) {
 	stack := newRegressionStack(t)
 	stack.upBackendOnly(t)
@@ -891,6 +906,11 @@ func (s *regressionStack) appendLocalFile(t *testing.T, path string, content str
 	s.execService(t, "daemon", "mkdir -p "+shellQuote(s.daemonWorkspaceDir())+" && cd "+shellQuote(s.daemonWorkspaceDir())+" && "+mkdir+fmt.Sprintf("printf %%s %s >> %s", shellQuote(content), shellQuote(path)))
 }
 
+func (s *regressionStack) removeLocalPath(t *testing.T, path string) {
+	t.Helper()
+	s.execService(t, "daemon", "cd "+shellQuote(s.daemonWorkspaceDir())+" && rm -f -- "+shellQuote(path))
+}
+
 func (s *regressionStack) appendAgentLocalFile(t *testing.T, agentID string, path string, content string) {
 	t.Helper()
 	dir := filepath.ToSlash(filepath.Dir(path))
@@ -1103,16 +1123,33 @@ func (s *regressionStack) syncFreshWebsocketClientByPath(t *testing.T, path stri
 	syncDocumentClient(t, conn, doc, want)
 }
 
-func (s *regressionStack) waitForDocumentPath(t *testing.T, path string, timeout time.Duration) {
+func (s *regressionStack) waitForDocumentPath(t *testing.T, path string, timeout time.Duration) string {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if contains(s.documentPaths(), path) {
-			return
+		for _, document := range s.workspaceDocuments() {
+			if document.Path == path {
+				return document.ID
+			}
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 	t.Fatalf("document path %s did not appear; current paths: %v", path, s.documentPaths())
+	return ""
+}
+
+func (s *regressionStack) waitForDocumentPathAbsent(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last []string
+	for time.Now().Before(deadline) {
+		last = s.documentPaths()
+		if !contains(last, path) {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("document path %s still present; current paths: %v", path, last)
 }
 
 func (s *regressionStack) waitForDocumentPathAndDifferentID(t *testing.T, path string, oldID string, timeout time.Duration) regressionWorkspaceDocument {
