@@ -46,7 +46,7 @@ After this plan is complete, a user can rely on the stream sync system under rea
 - Observation: Filesystem locking currently fails open.
   Evidence: `NewWorkspaceFS` sets `lock = nil` if `OpenFSLockDB` fails, and `withFilesystemLockContext` runs the operation directly when `fs.Locks == nil`.
 - Observation: Some review comments are reasonable cleanup but not immediate correctness blockers.
-  Evidence: `DocumentRoom` naming, `ClientIDSeed: 1001`, and hard-coded log path suppression are real design smells, but they do not explain a concrete data-loss or crash-recovery failure in the current code paths.
+  Evidence: `DocumentRoom` naming and hard-coded log path suppression are real design smells, but they do not explain a concrete data-loss or crash-recovery failure in the current code paths. `ClientIDSeed: 1001` was later removed to match daemon Yrs client ID behavior.
 - Observation: The quick safety fixes are covered by targeted package tests before moving on to transaction and projection recovery work.
   Evidence: `PATH="$HOME/.cargo/bin:$PATH" go test ./internal/rootmanifest ./daemon/internal/syncer ./backend/internal/notty` exited 0 at 2026-05-23 23:22Z.
 - Observation: Inbox/outbox applied markers now roll back with stream state persistence.
@@ -58,7 +58,7 @@ After this plan is complete, a user can rely on the stream sync system under rea
 - Observation: Missing directories are no longer treated as one case.
   Evidence: `TestRootManifestProjectorDoesNotTombstoneUnprojectedRemoteCreate` still schedules mkdir for an unmaterialized remote directory, while `TestRootManifestProjectorTombstonesLocallyDeletedDirectoryTree` tombstones a previously materialized deleted directory and child.
 - Observation: The implementation summary now states the explicit normalization and compatibility policies instead of leaving them implicit in code.
-  Evidence: `docs/crdt-native-subdocs-implementation-summary.md` documents `NormalizeName`, conflict paths, stream-backed compatibility aliases, `ClientIDSeed: 1001`, `DocumentRoom` naming, and log-path notification suppression.
+  Evidence: `docs/crdt-native-subdocs-implementation-summary.md` documents `NormalizeName`, conflict paths, stream-backed compatibility aliases, Yrs-assigned document client IDs, `DocumentRoom` naming, and log-path notification suppression.
 - Observation: Dropping backend-rejected stale content rows cannot erase the fact that local dirty bytes existed.
   Evidence: the dirty-delete Docker regression initially flaked because a stale old-stream content edit was locally applied, backend-rejected, then ignored by root delete planning; the old stream's projected clean hash advanced to the dirty bytes and a `delete-clean-entry` job removed the file. `TestWorkspaceSyncLoopDropsLocalOutboxForTombstonedContentStream` now proves tombstoned content outbox is dropped before local apply, and `TestDroppedOutboxRowsAreNotPendingOrSendable` proves dropped rows stop queue progress without disappearing as local mutation evidence.
 
@@ -128,7 +128,7 @@ Milestone 6 makes filesystem jobs retryable and handles move collisions. Classif
 
 Milestone 7 clarifies directory deletion semantics. Directories are first-class root entries, so a missing tracked directory cannot always mean "remote directory not yet projected." Track whether the local root projection is already caught up to the root state. If a tracked directory is missing and root projection is behind, schedule or retry `mkdir`. If root projection is current and a full or sufficiently targeted scan confirms the directory is missing, emit tombstones for the directory and live descendants in deterministic order. Add tests for local empty directory delete, local `rm -rf` of a tracked directory tree, and remote tombstoned parent with a concurrent live child becoming recovered/orphaned rather than corrupting the tree.
 
-Milestone 8 addresses cleanup and documentation that should not obscure the state-machine fixes. Document namespace normalization in `docs/crdt-native-subdocs-implementation-summary.md` or a new short doc: for v1, names are trimmed and case-insensitive through `rootmanifest.NormalizeName`. Decide whether hard-coded log path notification suppression remains; if it remains, document it as an existing product policy outside the CRDT projection model. Rename `DocumentRooms`, `DocumentRoom`, and `DocumentConn` to stream names only if the PR has stabilized and the diff risk is acceptable. Treat `ClientIDSeed: 1001` as a legacy response field and either document it or remove it from new stream-native paths if tests show no client depends on it.
+Milestone 8 addresses cleanup and documentation that should not obscure the state-machine fixes. Document namespace normalization in `docs/crdt-native-subdocs-implementation-summary.md` or a new short doc: for v1, names are trimmed and case-insensitive through `rootmanifest.NormalizeName`. Decide whether hard-coded log path notification suppression remains; if it remains, document it as an existing product policy outside the CRDT projection model. Rename `DocumentRooms`, `DocumentRoom`, and `DocumentConn` to stream names only if the PR has stabilized and the diff risk is acceptable. `ClientIDSeed: 1001` was removed after confirming production daemon CRDT documents omit `WithClientID` and let Yrs assign document client IDs.
 
 Milestone 9 validates the complete hardening pass. Run focused tests after every milestone, then run the broad suite. The full pass must include local Go tests, frontend tests/build, installer script tests, Postgres-backed tests, live smoke tests, and Docker regression tests. Update PR #2 with the fixes and the validation evidence.
 
@@ -248,7 +248,7 @@ The review comments considered actionable are summarized here so this plan does 
 The review comments considered lower-priority cleanup are:
 
     - Rename `DocumentRoom` types to stream names.
-    - Remove or document `ClientIDSeed: 1001`.
+    - Remove `ClientIDSeed: 1001`.
     - Replace log-path notification suppression with explicit notification policy.
     - Consider a future field-level root manifest CRDT layout instead of whole-entry JSON values.
 

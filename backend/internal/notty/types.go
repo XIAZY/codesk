@@ -28,7 +28,6 @@ type Document struct {
 	StateVector        string    `json:"stateVector,omitempty"`
 	UpdateID           int64     `json:"updateId,omitempty"`
 	UpdatedAt          time.Time `json:"updatedAt"`
-	ClientIDSeed       uint64    `json:"clientIdSeed,omitempty"`
 }
 
 type DocumentMetadata struct {
@@ -40,7 +39,6 @@ type DocumentMetadata struct {
 	StateVector        string    `json:"stateVector,omitempty"`
 	UpdateID           int64     `json:"updateId,omitempty"`
 	UpdatedAt          time.Time `json:"updatedAt"`
-	ClientIDSeed       uint64    `json:"clientIdSeed,omitempty"`
 }
 
 type ThreadAnchor struct {
@@ -474,6 +472,5 @@ func documentMetadata(document *Document) *DocumentMetadata {
 		StateVector:        document.StateVector,
 		UpdateID:           document.UpdateID,
 		UpdatedAt:          document.UpdatedAt,
-		ClientIDSeed:       document.ClientIDSeed,
 	}
 }

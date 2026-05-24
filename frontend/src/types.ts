@@ -17,7 +17,6 @@ export type DocumentItem = {
   stateVector?: string;
   updateId?: number;
   updatedAt: string;
-  clientIdSeed?: number;
 };
 
 export type UserItem = {

@@ -68,7 +68,7 @@ Review hardening changes after that commit are tracked in `docs/crdt-review-fixe
 - Duplicate desired paths are resolved by projection-only conflict paths. The root manifest location remains the desired namespace location; conflict paths are local materialization details.
 - Generic stream APIs are now the authority for CRDT writes. A stream update is accepted only for the workspace root stream or a live content stream referenced by the current root manifest.
 - Legacy document HTTP routes and document websocket routes remain as stream-backed compatibility aliases. They do not restore SQL document authority.
-- `ClientIDSeed: 1001` remains a legacy document response/create compatibility field. It is not used as stream identity, authorization, or root/content authority.
+- Document responses no longer expose `clientIdSeed`; backend-authored initial content updates let Yrs assign the document client ID, matching daemon-created CRDT docs.
 - `DocumentRooms`, `DocumentRoom`, and `DocumentConn` names remain for websocket room plumbing even when the room carries a generic stream. Renaming them was deferred because it is a broad mechanical diff with little correctness value.
 - Log-path notification suppression remains an existing product notification policy outside the CRDT projection model. Agent logs are not treated as normal notification-bearing documents.
 

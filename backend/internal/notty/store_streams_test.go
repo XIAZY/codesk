@@ -497,11 +497,10 @@ func TestMirrorDocumentCreateDoesNotLeaveContentHeadWhenContentInitFails(t *test
 	}
 	defer store.Close()
 	doc := &Document{
-		ID:           "doc_bad_content_init",
-		Path:         "bad-content.md",
-		DesiredPath:  "bad-content.md",
-		Title:        "bad-content.md",
-		ClientIDSeed: 1001,
+		ID:          "doc_bad_content_init",
+		Path:        "bad-content.md",
+		DesiredPath: "bad-content.md",
+		Title:       "bad-content.md",
 	}
 	if err := store.MirrorDocumentCreateToStreams(doc, "", []byte("not a yjs update"), OperationMeta{ActorID: "tester", ActorType: "human"}); err == nil {
 		t.Fatal("expected invalid content init to reject create")

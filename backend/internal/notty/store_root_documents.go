@@ -136,7 +136,6 @@ func (s *Store) CreateStreamDocument(req CreateDocumentRequest, meta OperationMe
 		Title:              titleFromPath(path),
 		NotificationPolicy: strings.TrimSpace(req.NotificationPolicy),
 		UpdatedAt:          now,
-		ClientIDSeed:       1001,
 	}
 	if err := s.MirrorDocumentCreateToStreams(document, req.Content, nil, meta); err != nil {
 		return nil, err
@@ -144,9 +143,6 @@ func (s *Store) CreateStreamDocument(req CreateDocumentRequest, meta OperationMe
 	created, err := s.GetStreamDocument(document.ID)
 	if err != nil {
 		return nil, err
-	}
-	if created.ClientIDSeed == 0 {
-		created.ClientIDSeed = document.ClientIDSeed
 	}
 	s.mu.Lock()
 	s.state.Documents[created.ID] = cloneDocument(created)
@@ -265,7 +261,7 @@ func (s *Store) MirrorDocumentCreateToStreams(document *Document, content string
 		return err
 	}
 	if len(initialUpdate) == 0 {
-		initialUpdate = contentStreamUpdate(content, document.ClientIDSeed)
+		initialUpdate = contentStreamUpdate(content)
 	}
 	if len(initialUpdate) > 0 {
 		if _, err := applyStreamUpdateTx(tx, workspaceID, document.ID, initialUpdate, meta); err != nil {
@@ -358,7 +354,6 @@ func (s *Store) streamDocumentFromEntry(entry RootEntry, materializedPath string
 		DesiredPath:        desiredPath,
 		Title:              titleFromPath(materializedPath),
 		NotificationPolicy: rootNotificationPolicyForDocument(entry.NotificationPolicy),
-		ClientIDSeed:       1001,
 	}
 	if updatedAt, ok := parseRootEntryTime(entry.UpdatedAt); ok {
 		document.UpdatedAt = updatedAt
@@ -468,8 +463,9 @@ func sortedRootEntries(manifest RootManifest) []RootEntry {
 	return entries
 }
 
-func contentStreamUpdate(content string, clientIDSeed uint64) []byte {
-	doc := crdt.New(crdt.WithClientID(crdt.ClientID(clientIDSeed)))
+func contentStreamUpdate(content string) []byte {
+	doc := crdt.New()
+	defer doc.Close()
 	text := doc.GetText("content")
 	doc.Transact(func(txn *crdt.Transaction) {
 		text.Insert(txn, 0, content, nil)

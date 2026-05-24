@@ -401,7 +401,7 @@ Resolver fuzzing can create large failing inputs. When a fuzz failure appears, m
 
 Notification policy migration should avoid ongoing path rules. If preserving current quiet behavior for existing `.log` files is required, write a bounded migration that sets explicit `notificationPolicy=quiet` once and record that migration in this plan. After migration, runtime notification code must consult metadata only.
 
-Avoid broad refactors while implementing this plan. `DocumentRoom` naming, `ClientIDSeed`, and the fixed pending-create stability delay remain outside this plan unless a validation failure shows they are directly coupled to the correctness changes above.
+Avoid broad refactors while implementing this plan. `DocumentRoom` naming and the fixed pending-create stability delay remain outside this plan unless a validation failure shows they are directly coupled to the correctness changes above. `ClientIDSeed` was removed in a follow-up cleanup after confirming daemon-created CRDT docs let Yrs assign document client IDs.
 
 ## Artifacts and Notes
 

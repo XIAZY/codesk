@@ -663,8 +663,7 @@ Response `201`:
   "title": "spec.md",
   "stateVector": "...",
   "updateId": 1,
-  "updatedAt": "...",
-  "clientIdSeed": 123
+  "updatedAt": "..."
 }
 ```
 
@@ -1155,7 +1154,7 @@ WorkspaceMember:
 DocumentMetadata:
 
 ```json
-{"id":"doc_...","path":"docs/spec.md","title":"spec.md","stateVector":"...","updateId":12,"updatedAt":"...","clientIdSeed":123}
+{"id":"doc_...","path":"docs/spec.md","title":"spec.md","stateVector":"...","updateId":12,"updatedAt":"..."}
 ```
 
 Daemon:
