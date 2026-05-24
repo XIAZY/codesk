@@ -25,6 +25,9 @@ After this change, a user can create, edit, and delete files in multiple local w
 - [x] (2026-05-24T18:59:08Z) Ran `go test ./daemon/internal/syncer`; it passed.
 - [x] (2026-05-24T18:59:22Z) Ran `go test ./...`; it passed.
 - [x] (2026-05-24T19:00:52Z) Ran `sudo env PATH="$PATH" HOME="$HOME" go test -tags=regression ./test/regression -run TestLocalCreateEditDeleteMultipleFiles -count=1 -v`; it launched the Docker Compose stack and passed.
+- [x] (2026-05-24T19:41:00Z) Corrected per-workspace state placement so `state.bin`, `metadata.json`, pending remote logs, outbox records, `base.txt`, and `base.state.bin` all live in one per-document directory under the runtime root: `<root>/.notty/documents/<doc-id>/`.
+- [x] (2026-05-24T22:19:31Z) Re-ran `go test ./...` and the targeted Docker regression after removing the compatibility migration path; both passed.
+- [x] (2026-05-24T22:24:15Z) Rebased onto remote `Fix daemon move path root tracking`, preserved the root-tracking fix, and reran `go test ./...` plus the targeted Docker regression; both passed.
 
 ## Surprises & Discoveries
 
@@ -36,6 +39,9 @@ After this change, a user can create, edit, and delete files in multiple local w
 
 - Observation: A purely event-driven local file watcher still needs an initial full scan once the root watcher is registered.
   Evidence: The first Docker regression run created backend documents with empty content only after the old 60-second local scan, and an event-driven unit regression reproduced missed pre-watcher file creates. `workspaceReplica.Run` now calls `reconcileLocalWorkspace` immediately after registering the root watcher.
+
+- Observation: The first per-workspace cache extraction still routed `state.bin` through `Config.CacheDir`, while projection state was rooted from the actual local workspace root.
+  Evidence: `trackedFile.projectionDir` used `WorkspaceRoot`, but `newWorkspaceRuntime` accepted a separate `cacheDir` derived from `Config.CacheDir`. The corrected implementation derives both document cache and projection files from the runtime root.
 
 ## Decision Log
 
@@ -67,6 +73,14 @@ After this change, a user can create, edit, and delete files in multiple local w
   Rationale: Channels and fsnotify events are wakeups, not durable state. A startup scan makes the local projection correct if files are created before the watcher goroutine reaches its select loop, while the per-document reconciliation work still runs through the channel-throttled workspace queue.
   Date/Author: 2026-05-24 / Codex
 
+- Decision: Store all per-document workspace replica state together under `<runtime-root>/.notty/documents/<doc-id>/`.
+  Rationale: `workspaceRuntime` owns one local root. Its durable document cache and its projection base are both workspace-specific state for the same local replica, so they should share one per-document directory rooted at that runtime root. This removes the daemon-wide cache path from document sync and avoids a split between `documents` and `projections`.
+  Date/Author: 2026-05-24 / Codex
+
+- Decision: Do not carry a compatibility migration path for the old projection directory.
+  Rationale: The clean storage invariant is more valuable for this refactor. Existing users can reinstall/reset local daemon workspace state instead of preserving old `.notty` metadata across this layout change.
+  Date/Author: 2026-05-24 / Codex
+
 ## Outcomes & Retrospective
 
 Milestone outcome 2026-05-24T09:15:04Z: The daemon now has a `workspaceRuntime` owner for document syncs, local-create queues, dirty queues, and per-root cache namespaces. `Service.Run` no longer runs the process-wide document reconciliation ticker. Targeted daemon tests pass, including the new create-edit-delete regression.
@@ -74,6 +88,8 @@ Milestone outcome 2026-05-24T09:15:04Z: The daemon now has a `workspaceRuntime` 
 Completion outcome 2026-05-24T09:16:57Z: Full Go tests pass. The implementation moves production document sync and reconciliation loop ownership into per-workspace runtimes, while preserving `Service` compatibility wrappers for existing tests and thread-anchor/tool helpers.
 
 Docker validation outcome 2026-05-24T19:00:52Z: The targeted regression `TestLocalCreateEditDeleteMultipleFiles` passes against the real Docker Compose stack. This covers the requested create, edit, then delete sequence for multiple local files through daemon, backend, and Postgres.
+
+State placement outcome 2026-05-24T19:41:00Z: Per-document local replica files now live together under `<runtime-root>/.notty/documents/<doc-id>/`. `documentCache` writes `state.bin`, `metadata.json`, `pending_remote.log`, and `outbox_update.json` there; `trackedFile.storeProjectedBase` writes `base.txt` and `base.state.bin` in the same directory.
 
 ## Future TODOs
 
@@ -95,7 +111,7 @@ First, add a new file `daemon/internal/syncer/workspace_runtime.go`. Define `wor
 
 Second, update constructors. `Service.New` should create the primary runtime instead of a primary replica plus process-wide document syncs and queues. Agent replica reconciliation should create one runtime per agent root instead of only a `workspaceReplica`. Because the current agent automation and session code still lives on `Service`, this migration keeps agent worker lifecycle on `Service`; only filesystem/document sync/reconcile behavior moves to runtimes. Existing tests that call `Service` helpers directly are supported by `daemon/internal/syncer/service_compat.go`.
 
-Third, isolate durable document state by local workspace root. The simplest safe approach is to create each runtime’s `documentCache` under a distinct subdirectory of `Config.CacheDir`, for example `primary` for the daemon workspace and `agent_<safeAgentWorkspaceName>` for agent workspaces. This prevents one local workspace from advancing another workspace’s `state.bin`, pending inbox, or outbox.
+Third, colocate durable document state by local workspace root. Each runtime’s document state directory is `<runtime-root>/.notty/documents`. For a document ID, the directory `<runtime-root>/.notty/documents/<doc-id>/` contains both the runtime CRDT cache files (`state.bin`, `metadata.json`, `pending_remote.log`, `outbox_update.json`) and projection base files (`base.txt`, `base.state.bin`). This prevents one local workspace from advancing another workspace’s replica state and keeps all per-document local state under the root that owns it.
 
 Fourth, change the reconciliation loop from a process-wide ticker in `Service.Run` to a throttled per-runtime wake loop. `reconcileQueue.Mark` should wake a buffered channel. The runtime reconcile loop should run when the channel is signaled, but not more often than once every two seconds. Local-create discovery uses the sentinel document ID `__local_create__` only to wake this queue; it is not treated as a real document. A rare safety sweep can remain as a long-period timer if existing tests or recovery require it, but normal reconciliation must be channel-woken and coalesced.
 
@@ -145,6 +161,12 @@ Observed Docker regression result:
     PASS
     ok  	notty/test/regression	52.290s
 
+Observed Docker regression result after colocating document cache and projection base files, with no migration fallback:
+
+    --- PASS: TestLocalCreateEditDeleteMultipleFiles (51.72s)
+    PASS
+    ok  	notty/test/regression	51.735s
+
 Expected success is `ok` lines for all packages. If a package has no test files, Go prints `[no test files]`.
 
 ## Validation and Acceptance
@@ -156,7 +178,7 @@ Acceptance requires:
 3. A new regression test proves local create, edit, then delete across multiple files under a workspace root.
 4. The code no longer has process-wide document sync ownership in `Service`; document sync maps live under per-workspace runtimes.
 5. The code no longer has process-wide dirty reconciliation ownership in `Service`; dirty queues and reconcile wake loops live under per-workspace runtimes.
-6. Each runtime uses an isolated cache directory so one workspace root cannot mutate another root’s replica state.
+6. Each runtime uses an isolated workspace-local document state directory so one workspace root cannot mutate another root’s replica state.
 
 ## Idempotence and Recovery
 
@@ -187,7 +209,7 @@ New or final interfaces should include:
         documentSyncs map[string]*managedDocumentSync
     }
 
-    func newWorkspaceRuntime(cfg Config, client *http.Client, rootDir string, actorID string, actorType string, cacheDir string) (*workspaceRuntime, error)
+    func newWorkspaceRuntime(cfg Config, client *http.Client, rootDir string, actorID string, actorType string) (*workspaceRuntime, error)
     func (r *workspaceRuntime) Run(ctx context.Context) error
     func (r *workspaceRuntime) applyWorkspace(ctx context.Context, workspace *workspaceResponse) error
     func (r *workspaceRuntime) reconcileLoop(ctx context.Context)

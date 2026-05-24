@@ -57,7 +57,7 @@ func (s *Service) reconcileAgentReplicas(ctx context.Context, workspace *workspa
 			delete(s.agentReplicas, agentID)
 		}
 		rootDir := filepath.Join(s.cfg.AgentWorkspaceRoot, safeAgentWorkspaceName(agentID))
-		runtime, err := newWorkspaceRuntime(s.cfg, s.client, rootDir, currentAgent.ID, "agent", agentWorkspaceRuntimeCacheDir(s.cfg, agentID))
+		runtime, err := newWorkspaceRuntime(s.cfg, s.client, rootDir, currentAgent.ID, "agent")
 		if err != nil {
 			s.mu.Unlock()
 			return err

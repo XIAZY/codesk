@@ -55,11 +55,11 @@ func (r *workspaceRuntime) fetchWorkspace(ctx context.Context) (*workspaceRespon
 	return &workspace, nil
 }
 
-func newWorkspaceRuntime(cfg Config, client *http.Client, rootDir, actorID, actorType, cacheDir string) (*workspaceRuntime, error) {
+func newWorkspaceRuntime(cfg Config, client *http.Client, rootDir, actorID, actorType string) (*workspaceRuntime, error) {
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
-	cache, err := newDocumentCache(cacheDir)
+	cache, err := newDocumentCache(workspaceDocumentStateDir(rootDir))
 	if err != nil {
 		return nil, err
 	}
@@ -91,20 +91,12 @@ func (r *workspaceRuntime) markLocalCreate(candidate localCreateCandidate) {
 	r.markDocumentDirty(localCreateReconcileWake)
 }
 
-func primaryWorkspaceRuntimeCacheDir(cfg Config) string {
-	return workspaceRuntimeCacheDir(cfg.CacheDir, "primary")
-}
-
-func agentWorkspaceRuntimeCacheDir(cfg Config, agentID string) string {
-	return workspaceRuntimeCacheDir(cfg.CacheDir, "agent_"+safeAgentWorkspaceName(agentID))
-}
-
-func workspaceRuntimeCacheDir(root, name string) string {
+func workspaceDocumentStateDir(root string) string {
 	root = strings.TrimSpace(root)
 	if root == "" {
 		return ""
 	}
-	return filepath.Join(root, safeDocumentCacheName(name))
+	return filepath.Join(root, ".notty", "documents")
 }
 
 func (r *workspaceRuntime) Run(ctx context.Context) error {

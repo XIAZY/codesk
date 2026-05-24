@@ -207,7 +207,7 @@ func (q *localCreateQueue) Drain() []localCreateCandidate {
 
 func New(cfg Config) (*Service, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
-	primaryRuntime, err := newWorkspaceRuntime(cfg, client, cfg.WorkspaceDir, cfg.AgentID, "daemon", primaryWorkspaceRuntimeCacheDir(cfg))
+	primaryRuntime, err := newWorkspaceRuntime(cfg, client, cfg.WorkspaceDir, cfg.AgentID, "daemon")
 	if err != nil {
 		return nil, err
 	}
@@ -246,7 +246,11 @@ func (s *Service) ensurePrimaryRuntime() error {
 	}
 	if s.primaryReplica != nil {
 		if s.docCache == nil {
-			cache, err := newDocumentCache(primaryWorkspaceRuntimeCacheDir(s.cfg))
+			cacheRoot := s.primaryReplica.rootDir
+			if strings.TrimSpace(cacheRoot) == "" {
+				cacheRoot = s.cfg.WorkspaceDir
+			}
+			cache, err := newDocumentCache(workspaceDocumentStateDir(cacheRoot))
 			if err != nil {
 				return err
 			}
@@ -276,7 +280,7 @@ func (s *Service) ensurePrimaryRuntime() error {
 		s.primaryReplica.markCreate = s.primaryRuntime.markLocalCreate
 		return nil
 	}
-	runtime, err := newWorkspaceRuntime(s.cfg, s.client, s.cfg.WorkspaceDir, s.cfg.AgentID, "daemon", primaryWorkspaceRuntimeCacheDir(s.cfg))
+	runtime, err := newWorkspaceRuntime(s.cfg, s.client, s.cfg.WorkspaceDir, s.cfg.AgentID, "daemon")
 	if err != nil {
 		return err
 	}
@@ -1833,7 +1837,7 @@ func (t *trackedFile) projectionDir() string {
 	if root == "" {
 		return ""
 	}
-	return filepath.Join(root, ".notty", "projections", safeDocumentCacheName(t.DocumentID))
+	return filepath.Join(workspaceDocumentStateDir(root), safeDocumentCacheName(t.DocumentID))
 }
 
 func (t *trackedFile) workspaceFS() *WorkspaceFS {

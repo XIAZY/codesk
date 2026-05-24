@@ -696,7 +696,7 @@ func TestProjectedBaseLivesUnderWorkspaceNottyWithCRDTState(t *testing.T) {
 		t.Fatalf("store projected base: %v", err)
 	}
 
-	projectionDir := filepath.Join(root, ".notty", "projections", "doc_1")
+	projectionDir := filepath.Join(root, ".notty", "documents", "doc_1")
 	if _, err := os.Stat(filepath.Join(projectionDir, "base.txt")); err != nil {
 		t.Fatalf("expected workspace projection text: %v", err)
 	}

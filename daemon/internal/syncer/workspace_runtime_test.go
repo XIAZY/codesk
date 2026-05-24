@@ -39,17 +39,17 @@ func TestReconcileQueueWakeCoalescesSignals(t *testing.T) {
 	}
 }
 
-func TestWorkspaceRuntimeCacheDirsArePerLocalWorkspace(t *testing.T) {
-	cacheRoot := t.TempDir()
-	cfg := Config{CacheDir: cacheRoot, WorkspaceDir: filepath.Join(t.TempDir(), "primary"), AgentWorkspaceRoot: filepath.Join(t.TempDir(), "agents"), AgentID: "daemon_agent"}
+func TestWorkspaceRuntimeDocumentStateDirsArePerLocalWorkspace(t *testing.T) {
+	cfg := Config{WorkspaceDir: filepath.Join(t.TempDir(), "primary"), AgentWorkspaceRoot: filepath.Join(t.TempDir(), "agents"), AgentID: "daemon_agent"}
 
-	primary, err := newWorkspaceRuntime(cfg, http.DefaultClient, cfg.WorkspaceDir, cfg.AgentID, "daemon", primaryWorkspaceRuntimeCacheDir(cfg))
+	primary, err := newWorkspaceRuntime(cfg, http.DefaultClient, cfg.WorkspaceDir, cfg.AgentID, "daemon")
 	if err != nil {
 		t.Fatalf("new primary runtime: %v", err)
 	}
 	defer primary.replica.watcher.Close()
 
-	agent, err := newWorkspaceRuntime(cfg, http.DefaultClient, filepath.Join(cfg.AgentWorkspaceRoot, "agent_1"), "agent_1", "agent", agentWorkspaceRuntimeCacheDir(cfg, "agent_1"))
+	agentRoot := filepath.Join(cfg.AgentWorkspaceRoot, "agent_1")
+	agent, err := newWorkspaceRuntime(cfg, http.DefaultClient, agentRoot, "agent_1", "agent")
 	if err != nil {
 		t.Fatalf("new agent runtime: %v", err)
 	}
@@ -60,6 +60,12 @@ func TestWorkspaceRuntimeCacheDirsArePerLocalWorkspace(t *testing.T) {
 	}
 	if primary.docCache.root == agent.docCache.root {
 		t.Fatalf("runtime caches must be isolated, both used %s", primary.docCache.root)
+	}
+	if primary.docCache.root != filepath.Join(cfg.WorkspaceDir, ".notty", "documents") {
+		t.Fatalf("primary cache root = %s, want workspace-local documents dir", primary.docCache.root)
+	}
+	if agent.docCache.root != filepath.Join(agentRoot, ".notty", "documents") {
+		t.Fatalf("agent cache root = %s, want agent-local documents dir", agent.docCache.root)
 	}
 
 	if err := primary.docCache.storeDoc("doc_1", "doc.md", 1, newDocWithText(t, "primary")); err != nil {
@@ -92,19 +98,17 @@ func TestWorkspaceRuntimeLocalCreateWakesReconcileQueue(t *testing.T) {
 
 func TestWorkspaceRuntimeCreateEditDeleteMultipleFilesRegression(t *testing.T) {
 	root := t.TempDir()
-	cacheRoot := t.TempDir()
 	cfg := Config{
 		WorkspaceDir:       root,
 		AgentWorkspaceRoot: filepath.Join(t.TempDir(), "agents"),
 		AgentID:            "daemon_agent",
-		CacheDir:           cacheRoot,
 	}
 
 	server := newWorkspaceRuntimeRegressionServer(t)
 	defer server.Close()
 	cfg.BackendURL = server.URL
 
-	runtime, err := newWorkspaceRuntime(cfg, server.Client(), root, cfg.AgentID, "daemon", primaryWorkspaceRuntimeCacheDir(cfg))
+	runtime, err := newWorkspaceRuntime(cfg, server.Client(), root, cfg.AgentID, "daemon")
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
@@ -173,19 +177,17 @@ func TestWorkspaceRuntimeCreateEditDeleteMultipleFilesRegression(t *testing.T) {
 
 func TestWorkspaceRuntimeRunReconcilesLocalCreateEvents(t *testing.T) {
 	root := t.TempDir()
-	cacheRoot := t.TempDir()
 	cfg := Config{
 		WorkspaceDir:       root,
 		AgentWorkspaceRoot: filepath.Join(t.TempDir(), "agents"),
 		AgentID:            "daemon_agent",
-		CacheDir:           cacheRoot,
 	}
 
 	server := newWorkspaceRuntimeRegressionServer(t)
 	defer server.Close()
 	cfg.BackendURL = server.URL
 
-	runtime, err := newWorkspaceRuntime(cfg, server.Client(), root, cfg.AgentID, "daemon", primaryWorkspaceRuntimeCacheDir(cfg))
+	runtime, err := newWorkspaceRuntime(cfg, server.Client(), root, cfg.AgentID, "daemon")
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
