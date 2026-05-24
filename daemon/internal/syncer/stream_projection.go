@@ -40,12 +40,21 @@ func newStreamProjection(ctx context.Context, cfg Config, client *http.Client, r
 	if err != nil {
 		return nil, err
 	}
-	fs := NewWorkspaceFS(rootDir)
-	fs.State = state
-	scanState, err := state.InitializeScanCapabilities(ctx, fs)
+	fs, err := OpenWorkspaceFS(rootDir)
 	if err != nil {
 		_ = state.Close()
 		return nil, err
+	}
+	fs.State = state
+	scanState, err := state.InitializeScanCapabilities(ctx, fs)
+	if err != nil {
+		_ = fs.Close()
+		_ = state.Close()
+		return nil, err
+	}
+	projectionMode := ProjectionPrimary
+	if actorType == "agent" {
+		projectionMode = ProjectionAgentCopy
 	}
 	projection := &streamProjection{
 		cfg:          localCfg,
@@ -59,13 +68,14 @@ func newStreamProjection(ctx context.Context, cfg Config, client *http.Client, r
 		streamSync:   map[string]*managedStreamSync{},
 	}
 	projection.loop = &WorkspaceSyncLoop{
-		State:        state,
-		FS:           fs,
-		RootStreamID: projection.rootStreamID,
-		ActorID:      actorID,
-		ActorType:    actorType,
-		Capabilities: scanState.Capabilities(),
-		Queue:        projection.Mark,
+		State:          state,
+		FS:             fs,
+		RootStreamID:   projection.rootStreamID,
+		ActorID:        actorID,
+		ActorType:      actorType,
+		ProjectionMode: projectionMode,
+		Capabilities:   scanState.Capabilities(),
+		Queue:          projection.Mark,
 	}
 	projection.sender = &StreamSender{
 		State: state,
@@ -248,12 +258,17 @@ func (p *streamProjection) Close() {
 	}
 	p.streamSync = map[string]*managedStreamSync{}
 	state := p.state
+	fs := p.fs
 	p.state = nil
+	p.fs = nil
 	p.mu.Unlock()
 	for _, managed := range syncs {
 		managed.cancel()
 	}
 	if state != nil {
 		_ = state.Close()
+	}
+	if fs != nil {
+		_ = fs.Close()
 	}
 }

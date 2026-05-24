@@ -267,6 +267,7 @@ func applyAndPublishStreamUpdate(store *Store, broker *Broker, room *DocumentRoo
 	if broker != nil {
 		broker.Publish(EventEnvelope{Type: "stream.updated", Data: map[string]any{
 			"streamId":  streamID,
+			"kind":      result.Kind,
 			"updateId":  result.UpdateID,
 			"actorId":   meta.ActorID,
 			"actorType": meta.ActorType,

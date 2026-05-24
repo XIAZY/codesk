@@ -3,6 +3,8 @@ package syncer
 import (
 	"context"
 	"errors"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -44,6 +46,12 @@ func (s *StreamSender) SendPending(ctx context.Context) error {
 		}
 		ack, err := s.Transport.PostStreamUpdate(ctx, *row)
 		if err != nil {
+			if isUnreferencedContentStreamError(err, *row) {
+				if dropErr := s.State.MarkOutboxDropped(ctx, row.ID, "backend-stream-not-referenced", s.now()); dropErr != nil {
+					return dropErr
+				}
+				continue
+			}
 			return err
 		}
 		if err := s.State.MarkOutboxAcked(ctx, row.ID, ack.UpdateID, s.now()); err != nil {
@@ -51,6 +59,13 @@ func (s *StreamSender) SendPending(ctx context.Context) error {
 		}
 		if s.OnAck != nil {
 			s.OnAck(row.StreamID)
+			dependents, err := s.State.DependentOutboxStreamIDs(ctx, row.ID)
+			if err != nil {
+				return err
+			}
+			for _, streamID := range dependents {
+				s.OnAck(streamID)
+			}
 		}
 	}
 }
@@ -60,4 +75,24 @@ func (s *StreamSender) now() time.Time {
 		return s.Now().UTC()
 	}
 	return time.Now().UTC()
+}
+
+func isUnreferencedContentStreamError(err error, row StreamOutboxRow) bool {
+	if !isContentOutboxRow(row) {
+		return false
+	}
+	var statusErr *backendStatusError
+	if !errors.As(err, &statusErr) || statusErr == nil {
+		return false
+	}
+	return statusErr.StatusCode == http.StatusBadRequest &&
+		strings.Contains(statusErr.Body, "not referenced by root manifest")
+}
+
+func isContentOutboxRow(row StreamOutboxRow) bool {
+	kind := strings.TrimSpace(row.KindHint.String)
+	if row.KindHint.Valid && strings.EqualFold(kind, "content") {
+		return true
+	}
+	return strings.HasPrefix(strings.TrimSpace(row.MutationKey), "content:")
 }

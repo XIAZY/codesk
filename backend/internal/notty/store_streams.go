@@ -25,6 +25,7 @@ type ApplyStreamUpdateResult struct {
 	Applied     bool
 	UpdateID    int64
 	StateVector []byte
+	Kind        string
 }
 
 type StreamHead struct {
@@ -180,9 +181,13 @@ func (s *Store) ApplyStreamUpdate(streamID string, update []byte, meta Operation
 func applyStreamUpdateTx(tx *sql.Tx, workspaceID string, streamID string, update []byte, meta OperationMeta) (ApplyStreamUpdateResult, error) {
 	now := time.Now().UTC()
 	hash := streamUpdateHash(update)
+	allowedKind, err := streamUpdateAllowedTx(tx, workspaceID, streamID)
+	if err != nil {
+		return ApplyStreamUpdateResult{}, err
+	}
 
 	var existingID int64
-	err := tx.QueryRow(
+	err = tx.QueryRow(
 		`SELECT id
 		   FROM crdt_stream_updates
 		  WHERE workspace_id = $1 AND stream_id = $2 AND update_sha256 = $3`,
@@ -203,6 +208,7 @@ func applyStreamUpdateTx(tx *sql.Tx, workspaceID string, streamID string, update
 			Applied:     false,
 			UpdateID:    head.UpdateID,
 			StateVector: append([]byte(nil), head.StateVector...),
+			Kind:        allowedKind,
 		}, nil
 	}
 
@@ -245,7 +251,7 @@ func applyStreamUpdateTx(tx *sql.Tx, workspaceID string, streamID string, update
 	}
 	if bytes.Equal(beforeSV, afterSV) && bytes.Equal(beforeState, afterState) {
 		if head.StreamID == "" {
-			if err := ensureStreamHeadTx(tx, workspaceID, streamID, StreamKindUnknown, afterSV, 0, now); err != nil {
+			if err := ensureStreamHeadTx(tx, workspaceID, streamID, allowedKind, afterSV, 0, now); err != nil {
 				return ApplyStreamUpdateResult{}, err
 			}
 		}
@@ -254,6 +260,7 @@ func applyStreamUpdateTx(tx *sql.Tx, workspaceID string, streamID string, update
 			Applied:     false,
 			UpdateID:    head.UpdateID,
 			StateVector: afterSV,
+			Kind:        allowedKind,
 		}, nil
 	}
 
@@ -282,7 +289,7 @@ func applyStreamUpdateTx(tx *sql.Tx, workspaceID string, streamID string, update
 		return ApplyStreamUpdateResult{}, err
 	}
 
-	kind := head.Kind
+	kind := firstNonEmptyString(nonUnknownStreamKind(head.Kind), allowedKind)
 	if strings.TrimSpace(kind) == "" {
 		kind = StreamKindUnknown
 	}
@@ -298,7 +305,53 @@ func applyStreamUpdateTx(tx *sql.Tx, workspaceID string, streamID string, update
 		Applied:     true,
 		UpdateID:    updateID,
 		StateVector: afterSV,
+		Kind:        kind,
 	}, nil
+}
+
+func nonUnknownStreamKind(kind string) string {
+	kind = strings.TrimSpace(kind)
+	if kind == "" || kind == StreamKindUnknown {
+		return ""
+	}
+	return kind
+}
+
+func streamUpdateAllowedTx(tx *sql.Tx, workspaceID string, streamID string) (string, error) {
+	streamID = strings.TrimSpace(streamID)
+	if streamID == "" {
+		return "", errors.New("stream id is required")
+	}
+	var rootStreamID sql.NullString
+	err := tx.QueryRow(`SELECT root_stream_id FROM workspaces WHERE id = $1`, workspaceID).Scan(&rootStreamID)
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("workspace %q is missing root stream", workspaceID)
+	}
+	if err != nil {
+		return "", err
+	}
+	rootID := strings.TrimSpace(rootStreamID.String)
+	if rootID == "" {
+		return "", fmt.Errorf("workspace %q is missing root stream", workspaceID)
+	}
+	if streamID == rootID {
+		return StreamKindRoot, nil
+	}
+	rootDoc, _, err := restoreStreamDocForUpdateTx(tx, workspaceID, rootID)
+	if err != nil {
+		return "", err
+	}
+	defer rootDoc.Close()
+	manifest, err := ReadRootManifest(rootDoc)
+	if err != nil {
+		return "", err
+	}
+	for _, entry := range manifest.EntriesByID {
+		if entry.Kind == RootEntryKindFile && entry.Tombstone == nil && strings.TrimSpace(entry.ContentStreamID) == streamID {
+			return StreamKindContent, nil
+		}
+	}
+	return "", fmt.Errorf("stream %q is not referenced by root manifest", streamID)
 }
 
 func isRootStreamTx(tx *sql.Tx, workspaceID string, streamID string, kind string) (bool, error) {
@@ -360,7 +413,7 @@ func restoreStreamDocAtUpdate(db *sql.DB, workspaceID string, streamID string, u
 	if updateID <= 0 {
 		head.UpdateID = 0
 		head.StateVector = nil
-		return crdt.New(), head, nil
+		return crdt.New(crdt.WithGUID(streamID)), head, nil
 	}
 	if updateID > 0 && updateID < head.UpdateID {
 		head.UpdateID = updateID
@@ -432,7 +485,7 @@ func getStreamHead(db *sql.DB, workspaceID string, streamID string) (StreamHead,
 func restoreStreamDocForUpdateTx(tx *sql.Tx, workspaceID string, streamID string) (*crdt.Doc, StreamHead, error) {
 	head, err := getStreamHeadTx(tx, workspaceID, streamID)
 	if err == sql.ErrNoRows {
-		return crdt.New(), StreamHead{WorkspaceID: workspaceID, StreamID: streamID, Kind: StreamKindUnknown}, nil
+		return crdt.New(crdt.WithGUID(streamID)), StreamHead{WorkspaceID: workspaceID, StreamID: streamID, Kind: StreamKindUnknown}, nil
 	}
 	if err != nil {
 		return nil, StreamHead{}, err
@@ -441,7 +494,7 @@ func restoreStreamDocForUpdateTx(tx *sql.Tx, workspaceID string, streamID string
 }
 
 func restoreStreamDocForHeadTx(tx *sql.Tx, head StreamHead) (*crdt.Doc, StreamHead, error) {
-	doc := crdt.New()
+	doc := crdt.New(crdt.WithGUID(head.StreamID))
 	appliedThrough := int64(0)
 	var checkpointUpdateID int64
 	var checkpointState []byte

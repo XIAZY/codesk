@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"path"
 	"sort"
@@ -15,12 +16,20 @@ import (
 	crdt "notty/internal/ycrdt"
 )
 
+type ProjectionMode string
+
+const (
+	ProjectionPrimary   ProjectionMode = "primary"
+	ProjectionAgentCopy ProjectionMode = "agent-copy"
+)
+
 type RootManifestProjector struct {
 	State        *WorkspaceStateDB
 	FS           *WorkspaceFS
 	RootStreamID string
 	ActorID      string
 	ActorType    string
+	Mode         ProjectionMode
 	Capabilities ScanCapabilities
 	NewID        func(kind string, relPath string) string
 	Now          func() time.Time
@@ -69,16 +78,21 @@ func (p RootManifestProjector) CaptureLocal(ctx context.Context, rootDoc *crdt.D
 	if err != nil {
 		return nil, err
 	}
+	fullScanComplete := !scan.Incomplete && (hasFullHint(hints) || len(hints) == 0)
 
 	intents := []rootmanifest.Intent{}
 	pendingCreates := []PendingContentCreate{}
 	matchedPaths := map[string]string{}
 	claimedPaths := map[string]struct{}{}
 	dirMoves := map[string]string{}
+	tombstonedByDirectoryDelete := map[string]struct{}{}
 	fileKeyIndex := buildScanFileKeyIndex(scan, caps)
 
 	for _, entry := range sortedManifestEntriesForCapture(manifest) {
 		if entry.ID == rootmanifest.RootEntryID || entry.Tombstone != nil {
+			continue
+		}
+		if _, tombstoned := tombstonedByDirectoryDelete[entry.ID]; tombstoned {
 			continue
 		}
 		materialized := projection.EntryPath[entry.ID]
@@ -144,12 +158,19 @@ func (p RootManifestProjector) CaptureLocal(ctx context.Context, rootDoc *crdt.D
 			}
 		}
 		if tracked && entry.Kind == rootmanifest.EntryKindDir {
-			_, _ = p.State.InsertFSJob(ctx, FSJob{
-				JobKey:     "root:mkdir:" + entry.ID + ":" + hashKey(materialized),
-				Kind:       "mkdir",
-				EntryID:    entry.ID,
-				TargetPath: materialized,
-			})
+			if p.shouldRetryMissingDirectory(ctx, row, scan, fullScanComplete) {
+				_, _ = p.State.InsertFSJob(ctx, FSJob{
+					JobKey:     "root:mkdir:" + entry.ID + ":" + hashKey(materialized),
+					Kind:       "mkdir",
+					EntryID:    entry.ID,
+					TargetPath: materialized,
+				})
+				continue
+			}
+			for _, intent := range p.tombstoneDirectoryTreeIntents(manifest, entry.ID) {
+				intents = append(intents, intent)
+				tombstonedByDirectoryDelete[intent.EntryID] = struct{}{}
+			}
 			continue
 		}
 		if tracked && entry.Kind == rootmanifest.EntryKindFile && row.LastCleanHash == "" && !row.PendingCreate {
@@ -160,7 +181,7 @@ func (p RootManifestProjector) CaptureLocal(ctx context.Context, rootDoc *crdt.D
 			p.queue(entry.ContentStreamID)
 			continue
 		}
-		if tracked && entry.Kind == rootmanifest.EntryKindFile && p.isAgentReplica() {
+		if tracked && entry.Kind == rootmanifest.EntryKindFile && p.isAgentCopyProjection() {
 			p.queue(entry.ContentStreamID)
 			continue
 		}
@@ -357,20 +378,26 @@ func (p RootManifestProjector) PlanApplyMerged(ctx context.Context, rootDoc *crd
 		if materialized == "" {
 			continue
 		}
-		stat, _ := p.FS.Stat(ctx, materialized)
+		materializedPath := materialized
+		movePending := false
+		if hadPrevious && !previous.Tombstoned && previous.MaterializedPath != "" && previous.MaterializedPath != materialized {
+			materializedPath = previous.MaterializedPath
+			movePending = true
+		}
+		stat, _ := p.FS.Stat(ctx, materializedPath)
 		row := ManifestProjectionRow{
 			EntryID:              entry.ID,
 			Kind:                 entry.Kind,
 			ContentStreamID:      entry.ContentStreamID,
 			DesiredPath:          desired,
-			MaterializedPath:     materialized,
+			MaterializedPath:     materializedPath,
 			Stat:                 stat,
 			RootProjectedStateID: rootStateID,
 			Tombstoned:           false,
 		}
 		if hadPrevious {
 			row.LastCleanHash = previous.LastCleanHash
-			if previous.MaterializedPath != "" && previous.MaterializedPath != materialized {
+			if movePending {
 				moveJobs = append(moveJobs, FSJob{
 					JobKey:     "root:move:" + entry.ID + ":" + hashKey(previous.MaterializedPath+"->"+materialized),
 					Kind:       "move-entry",
@@ -394,7 +421,7 @@ func (p RootManifestProjector) PlanApplyMerged(ctx context.Context, rootDoc *crd
 			contentRow := ContentProjectionRow{
 				StreamID:         entry.ContentStreamID,
 				EntryID:          entry.ID,
-				MaterializedPath: materialized,
+				MaterializedPath: materializedPath,
 			}
 			if existing, err := p.State.GetContentProjection(ctx, entry.ContentStreamID); err != nil {
 				return err
@@ -505,8 +532,69 @@ func (p RootManifestProjector) hasLocalContentOutbox(ctx context.Context, stream
 	return err == nil && ok
 }
 
-func (p RootManifestProjector) isAgentReplica() bool {
-	return strings.TrimSpace(p.ActorType) == "agent"
+func (p RootManifestProjector) shouldRetryMissingDirectory(ctx context.Context, row ManifestProjectionRow, scan WorkspaceScan, fullScanComplete bool) bool {
+	if scan.Incomplete || row.PendingCreate || !row.Stat.StatValid || row.RootProjectedStateID == 0 {
+		return true
+	}
+	if !fullScanComplete {
+		_, explicitlyMissing := scan.Missing[normalizeStateRelPath(row.MaterializedPath)]
+		if !explicitlyMissing {
+			return true
+		}
+	}
+	if p.State == nil || strings.TrimSpace(row.EntryID) == "" {
+		return false
+	}
+	ok, err := p.State.HasBlockingFSJobForEntry(ctx, row.EntryID)
+	return err == nil && ok
+}
+
+func (p RootManifestProjector) tombstoneDirectoryTreeIntents(manifest rootmanifest.Manifest, dirID string) []rootmanifest.Intent {
+	tombstone := rootmanifest.Tombstone{
+		ActorID:   firstNonEmptyText(p.ActorID, "daemon"),
+		ActorType: firstNonEmptyText(p.ActorType, "daemon"),
+		At:        p.now().Format(time.RFC3339Nano),
+	}
+	intents := []rootmanifest.Intent{}
+	for _, entry := range sortedManifestEntriesForCapture(manifest) {
+		if entry.ID == rootmanifest.RootEntryID || entry.Tombstone != nil {
+			continue
+		}
+		if entry.ID != dirID && !manifestEntryDescendsFrom(manifest, entry.ID, dirID) {
+			continue
+		}
+		entryTombstone := tombstone
+		intents = append(intents, rootmanifest.Intent{
+			Type:      "tombstone",
+			EntryID:   entry.ID,
+			Tombstone: &entryTombstone,
+		})
+	}
+	return intents
+}
+
+func manifestEntryDescendsFrom(manifest rootmanifest.Manifest, entryID string, ancestorID string) bool {
+	seen := map[string]struct{}{}
+	entry, ok := manifest.EntriesByID[entryID]
+	for ok && entry.Loc != nil {
+		parentID := strings.TrimSpace(entry.Loc.ParentID)
+		if parentID == ancestorID {
+			return true
+		}
+		if parentID == "" || parentID == rootmanifest.RootEntryID {
+			return false
+		}
+		if _, loop := seen[parentID]; loop {
+			return false
+		}
+		seen[parentID] = struct{}{}
+		entry, ok = manifest.EntriesByID[parentID]
+	}
+	return false
+}
+
+func (p RootManifestProjector) isAgentCopyProjection() bool {
+	return p.Mode == ProjectionAgentCopy
 }
 
 func (p RootManifestProjector) contentStreamNeedsProjection(ctx context.Context, streamID string, materialized string) bool {
@@ -590,13 +678,33 @@ func orderRootMoveJobs(jobs []FSJob) []FSJob {
 			}
 		}
 		if next == -1 {
-			ordered = append(ordered, remaining...)
-			break
+			cycle := remaining[0]
+			tempPath := tempMovePath(cycle)
+			ordered = append(ordered, FSJob{
+				JobKey:     "root:move-temp:" + cycle.EntryID + ":" + hashKey(cycle.SourcePath+"->"+tempPath),
+				Kind:       "move-entry-temp",
+				EntryID:    cycle.EntryID,
+				StreamID:   cycle.StreamID,
+				SourcePath: cycle.SourcePath,
+				TargetPath: tempPath,
+			})
+			remaining[0].SourcePath = tempPath
+			remaining[0].JobKey = "root:move:" + cycle.EntryID + ":" + hashKey(tempPath+"->"+cycle.TargetPath)
+			continue
 		}
 		ordered = append(ordered, remaining[next])
 		remaining = append(remaining[:next], remaining[next+1:]...)
 	}
 	return ordered
+}
+
+func tempMovePath(job FSJob) string {
+	stem := firstNonEmptyText(job.EntryID, hashKey(job.SourcePath+"->"+job.TargetPath))
+	base := path.Base(normalizeStateRelPath(job.SourcePath))
+	if base == "." || base == "/" || base == "" {
+		base = "entry"
+	}
+	return path.Join(".notty", "tmp", "moves", stem+"-"+hashKey(job.SourcePath+"->"+job.TargetPath), base)
 }
 
 func DefaultRootScanBudget() ScanBudget {
@@ -678,14 +786,38 @@ func (p RootManifestProjector) now() time.Time {
 func rootMutationKey(intents []rootmanifest.Intent) string {
 	parts := make([]string, 0, len(intents))
 	for _, intent := range intents {
-		id := intent.EntryID
-		if id == "" {
-			id = intent.Entry.ID
-		}
-		parts = append(parts, intent.Type+":"+id)
+		parts = append(parts, rootMutationKeyPart(intent))
 	}
 	sort.Strings(parts)
 	return "root:batch:" + hashKey(strings.Join(parts, "|"))
+}
+
+func rootMutationKeyPart(intent rootmanifest.Intent) string {
+	entryID := strings.TrimSpace(intent.EntryID)
+	if entryID == "" {
+		entryID = strings.TrimSpace(intent.Entry.ID)
+	}
+	payload := struct {
+		Type      string                  `json:"type"`
+		EntryID   string                  `json:"entryId,omitempty"`
+		Entry     *rootmanifest.Entry     `json:"entry,omitempty"`
+		Loc       *rootmanifest.Location  `json:"loc,omitempty"`
+		Tombstone *rootmanifest.Tombstone `json:"tombstone,omitempty"`
+	}{
+		Type:      strings.TrimSpace(intent.Type),
+		EntryID:   entryID,
+		Loc:       intent.Loc,
+		Tombstone: intent.Tombstone,
+	}
+	if intent.Entry.ID != "" {
+		entry := intent.Entry
+		payload.Entry = &entry
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return payload.Type + ":" + entryID
+	}
+	return string(raw)
 }
 
 func hashKey(value string) string {

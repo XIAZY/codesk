@@ -31,6 +31,19 @@ type StreamStateRecord struct {
 	CreatedAt              string
 }
 
+type StreamQueueApplyResult struct {
+	StateID     int64
+	StateVector []byte
+	LocalOutbox []StreamOutboxRow
+	Inbox       []StreamInboxRow
+}
+
+type streamQueueApplyOptions struct {
+	LocalLimit   int
+	InboxLimit   int
+	BeforeCommit func() error
+}
+
 func (s *WorkspaceStateDB) GetOrCreateStream(ctx context.Context, streamID string, kind string) (StreamRecord, error) {
 	if err := s.EnsureLocalStream(ctx, streamID, kind); err != nil {
 		return StreamRecord{}, err
@@ -226,6 +239,148 @@ func (s *WorkspaceStateDB) PersistLatestStreamDoc(ctx context.Context, streamID 
 		return 0, err
 	}
 	return stateID, nil
+}
+
+func (s *WorkspaceStateDB) ApplyStreamQueueAtomically(ctx context.Context, streamID string, kind string, doc *crdt.Doc, materializedTextSHA256 string) (StreamQueueApplyResult, error) {
+	return s.applyStreamQueueAtomically(ctx, streamID, kind, doc, materializedTextSHA256, streamQueueApplyOptions{})
+}
+
+func (s *WorkspaceStateDB) applyStreamQueueAtomically(ctx context.Context, streamID string, kind string, doc *crdt.Doc, materializedTextSHA256 string, opts streamQueueApplyOptions) (StreamQueueApplyResult, error) {
+	if s == nil || s.db == nil {
+		return StreamQueueApplyResult{}, errors.New("state db is required")
+	}
+	if doc == nil {
+		return StreamQueueApplyResult{}, errors.New("stream doc is required")
+	}
+	streamID = strings.TrimSpace(streamID)
+	if streamID == "" {
+		return StreamQueueApplyResult{}, errors.New("stream id is required")
+	}
+	if kind = strings.TrimSpace(kind); kind == "" {
+		kind = "unknown"
+	}
+	if opts.LocalLimit <= 0 {
+		opts.LocalLimit = 100
+	}
+	if opts.InboxLimit <= 0 {
+		opts.InboxLimit = 100
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return StreamQueueApplyResult{}, err
+	}
+	defer tx.Rollback()
+
+	if err := ensureLocalStreamTx(ctx, tx, streamID, kind); err != nil {
+		return StreamQueueApplyResult{}, err
+	}
+	localOutbox, err := readyLocalOutboxTx(ctx, tx, streamID, opts.LocalLimit)
+	if err != nil {
+		return StreamQueueApplyResult{}, err
+	}
+	for _, row := range localOutbox {
+		if err := crdt.ApplyUpdateV1(doc, row.UpdateBytes, "local-outbox"); err != nil {
+			return StreamQueueApplyResult{}, fmt.Errorf("apply local outbox %d: %w", row.ID, err)
+		}
+	}
+	inbox, err := unappliedInboxTx(ctx, tx, streamID, opts.InboxLimit)
+	if err != nil {
+		return StreamQueueApplyResult{}, err
+	}
+	for _, row := range inbox {
+		if err := crdt.ApplyUpdateV1(doc, row.UpdateBytes, "remote-inbox"); err != nil {
+			return StreamQueueApplyResult{}, fmt.Errorf("apply inbox %d: %w", row.ID, err)
+		}
+	}
+
+	if kind != "root" {
+		materializedTextSHA256 = contentSHA256([]byte(doc.GetText("content").ToString()))
+	}
+	stateUpdate := doc.EncodeStateAsUpdate()
+	stateVector, err := doc.StateVectorV1()
+	if err != nil {
+		return StreamQueueApplyResult{}, err
+	}
+	stateID, err := insertStreamStateTx(ctx, tx, streamID, stateUpdate, stateVector, materializedTextSHA256)
+	if err != nil {
+		return StreamQueueApplyResult{}, err
+	}
+	if err := updateLatestStreamStateTx(ctx, tx, streamID, stateID, stateVector); err != nil {
+		return StreamQueueApplyResult{}, err
+	}
+	appliedAt := time.Now().UTC()
+	for _, row := range localOutbox {
+		if err := markOutboxLocallyAppliedTx(ctx, tx, row.ID, appliedAt); err != nil {
+			return StreamQueueApplyResult{}, err
+		}
+	}
+	for _, row := range inbox {
+		if err := markInboxAppliedTx(ctx, tx, row.ID, appliedAt); err != nil {
+			return StreamQueueApplyResult{}, err
+		}
+	}
+	if opts.BeforeCommit != nil {
+		if err := opts.BeforeCommit(); err != nil {
+			return StreamQueueApplyResult{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return StreamQueueApplyResult{}, err
+	}
+	return StreamQueueApplyResult{
+		StateID:     stateID,
+		StateVector: stateVector,
+		LocalOutbox: localOutbox,
+		Inbox:       inbox,
+	}, nil
+}
+
+func insertStreamStateTx(ctx context.Context, tx *sql.Tx, streamID string, stateUpdate []byte, stateVector []byte, materializedTextSHA256 string) (int64, error) {
+	if tx == nil {
+		return 0, errors.New("transaction is required")
+	}
+	streamID = strings.TrimSpace(streamID)
+	if streamID == "" {
+		return 0, errors.New("stream id is required")
+	}
+	if len(stateUpdate) == 0 {
+		return 0, errors.New("state update is required")
+	}
+	result, err := tx.ExecContext(ctx, `
+		INSERT INTO stream_states(stream_id, state_update, state_vector, materialized_text_sha256, created_at)
+		VALUES (?, ?, ?, ?, ?)`,
+		streamID,
+		stateUpdate,
+		stateVector,
+		nullString(materializedTextSHA256),
+		time.Now().UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
+}
+
+func updateLatestStreamStateTx(ctx context.Context, tx *sql.Tx, streamID string, stateID int64, stateVector []byte) error {
+	if tx == nil {
+		return errors.New("transaction is required")
+	}
+	if strings.TrimSpace(streamID) == "" || stateID <= 0 {
+		return errors.New("stream id and state id are required")
+	}
+	_, err := tx.ExecContext(ctx, `
+		UPDATE streams
+		   SET latest_state_id = ?,
+		       latest_state_vector = ?,
+		       updated_at = ?
+		 WHERE stream_id = ?`,
+		stateID,
+		stateVector,
+		time.Now().UTC().Format(time.RFC3339Nano),
+		streamID,
+	)
+	return err
 }
 
 func scanStreamRecord(scanner interface{ Scan(...any) error }) (StreamRecord, error) {

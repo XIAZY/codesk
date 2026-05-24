@@ -2,6 +2,7 @@ package notty
 
 import (
 	"database/sql"
+	"errors"
 	"testing"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -52,6 +53,11 @@ func TestPostgresGenericStreamUpdateDedupeAndRestore(t *testing.T) {
 	})
 
 	contentStreamID := "content_generic_stream"
+	ensureRootContentEntryForTest(t, store, rootStreamID, contentStreamID, "generic.md")
+	rootHeadAfterEntry, err := store.GetStreamHead(rootStreamID)
+	if err != nil {
+		t.Fatalf("get root stream head after root entry: %v", err)
+	}
 	applied, err := store.ApplyStreamUpdate(contentStreamID, update, OperationMeta{ActorID: "tester", ActorType: "human"})
 	if err != nil {
 		t.Fatalf("apply stream update: %v", err)
@@ -122,8 +128,8 @@ func TestPostgresGenericStreamUpdateDedupeAndRestore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get root head after bootstrap: %v", err)
 	}
-	if headAfterBootstrap.UpdateID != 0 {
-		t.Fatalf("bootstrap must not reset root stream head, got update %d", headAfterBootstrap.UpdateID)
+	if headAfterBootstrap.UpdateID != rootHeadAfterEntry.UpdateID {
+		t.Fatalf("bootstrap must not reset root stream head, got update %d want %d", headAfterBootstrap.UpdateID, rootHeadAfterEntry.UpdateID)
 	}
 }
 
@@ -148,7 +154,12 @@ func TestPostgresGenericStreamCheckpointTailRestore(t *testing.T) {
 	}
 	defer store.Close()
 
+	rootStreamID, err := store.BootstrapWorkspaceStreams()
+	if err != nil {
+		t.Fatalf("bootstrap streams: %v", err)
+	}
 	streamID := "content_checkpoint_tail"
+	ensureRootContentEntryForTest(t, store, rootStreamID, streamID, "checkpoint-tail.md")
 	author := crdt.New(crdt.WithClientID(4102))
 	text := author.GetText("content")
 	for _, value := range []string{"a", "b", "c"} {
@@ -183,6 +194,77 @@ func TestPostgresGenericStreamCheckpointTailRestore(t *testing.T) {
 	}
 	if got := restored.GetText("content").ToString(); got != "abc" {
 		t.Fatalf("expected checkpoint plus tail restore to equal full replay, got %q", got)
+	}
+}
+
+func TestPostgresStreamUpdateRejectsUnreferencedContentStream(t *testing.T) {
+	dsn := postgresTestDSN(t)
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+	if err := initPostgresSchema(db); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+	if err := clearNottyTables(db); err != nil {
+		t.Fatalf("clear tables: %v", err)
+	}
+
+	store, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.BootstrapWorkspaceStreams(); err != nil {
+		t.Fatalf("bootstrap streams: %v", err)
+	}
+
+	author := crdt.New(crdt.WithClientID(4103))
+	text := author.GetText("content")
+	update := captureDocUpdate(t, author, "unknown-stream", func(txn *crdt.Transaction) {
+		text.Insert(txn, 0, "unauthorized", nil)
+	})
+	if _, err := store.ApplyStreamUpdate("content_not_in_root", update, OperationMeta{ActorID: "tester", ActorType: "human"}); err == nil {
+		t.Fatal("expected unreferenced content stream update to be rejected")
+	}
+	if _, err := store.GetStreamHead("content_not_in_root"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unreferenced update should not create stream head, got %v", err)
+	}
+}
+
+func TestPostgresRestoreStreamDocUsesStreamGUID(t *testing.T) {
+	dsn := postgresTestDSN(t)
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+	if err := initPostgresSchema(db); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+	if err := clearNottyTables(db); err != nil {
+		t.Fatalf("clear tables: %v", err)
+	}
+
+	store, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+	rootStreamID, err := store.BootstrapWorkspaceStreams()
+	if err != nil {
+		t.Fatalf("bootstrap streams: %v", err)
+	}
+	doc, _, err := store.RestoreStreamDoc(rootStreamID)
+	if err != nil {
+		t.Fatalf("restore root stream: %v", err)
+	}
+	defer doc.Close()
+	if got := doc.GUID(); got != rootStreamID {
+		t.Fatalf("restored stream doc GUID = %q, want %q", got, rootStreamID)
 	}
 }
 
@@ -226,5 +308,74 @@ func TestPostgresRootStreamValidationRejectsMalformedManifest(t *testing.T) {
 	}
 	if head.UpdateID != 0 {
 		t.Fatalf("rejected root update must not advance head, got %d", head.UpdateID)
+	}
+}
+
+func TestMirrorDocumentCreateDoesNotLeaveContentHeadWhenContentInitFails(t *testing.T) {
+	dsn := postgresTestDSN(t)
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+	if err := initPostgresSchema(db); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+	if err := clearNottyTables(db); err != nil {
+		t.Fatalf("clear tables: %v", err)
+	}
+
+	store, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+	doc := &Document{
+		ID:           "doc_bad_content_init",
+		Path:         "bad-content.md",
+		DesiredPath:  "bad-content.md",
+		Title:        "bad-content.md",
+		ClientIDSeed: 1001,
+	}
+	if err := store.MirrorDocumentCreateToStreams(doc, "", []byte("not a yjs update"), OperationMeta{ActorID: "tester", ActorType: "human"}); err == nil {
+		t.Fatal("expected invalid content init to reject create")
+	}
+	if _, err := store.GetStreamHead(doc.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("failed create should not leave content stream head, got %v", err)
+	}
+	rootStreamID, manifest, _, err := store.ReadRootManifestStream()
+	if err != nil {
+		t.Fatalf("read root manifest stream: %v", err)
+	}
+	if rootStreamID == "" {
+		t.Fatal("expected bootstrapped root stream")
+	}
+	if _, ok := manifest.EntriesByID[doc.ID]; ok {
+		t.Fatalf("failed create should not leave root entry %#v", manifest.EntriesByID[doc.ID])
+	}
+}
+
+func ensureRootContentEntryForTest(t *testing.T, store *Store, rootStreamID string, streamID string, path string) {
+	t.Helper()
+	rootDoc, _, err := store.RestoreStreamDoc(rootStreamID)
+	if err != nil {
+		t.Fatalf("restore root stream: %v", err)
+	}
+	defer rootDoc.Close()
+	update, err := ApplyRootIntents(rootDoc, []RootIntent{{
+		Type: "create-file",
+		Entry: RootEntry{
+			ID:              streamID,
+			Kind:            RootEntryKindFile,
+			Loc:             NewRootLocation(RootEntryID, path),
+			ContentStreamID: streamID,
+		},
+	}})
+	if err != nil {
+		t.Fatalf("build root content entry: %v", err)
+	}
+	if _, err := store.ApplyStreamUpdate(rootStreamID, update, OperationMeta{ActorID: "tester", ActorType: "daemon"}); err != nil {
+		t.Fatalf("apply root content entry: %v", err)
 	}
 }

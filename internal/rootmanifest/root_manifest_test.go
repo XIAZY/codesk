@@ -1,10 +1,38 @@
 package rootmanifest
 
 import (
+	"strings"
 	"testing"
 
 	crdt "notty/internal/ycrdt"
 )
+
+func TestValidateRejectsHardDeletedEntry(t *testing.T) {
+	previous := New()
+	previous.EntriesByID["doc_a"] = Entry{
+		ID:              "doc_a",
+		Kind:            EntryKindFile,
+		Loc:             NewLocation(RootEntryID, "a.md"),
+		ContentStreamID: "doc_a",
+	}
+	next := New()
+
+	err := Validate(previous, next)
+	if err == nil {
+		t.Fatal("expected hard-deleted entry to be rejected")
+	}
+	if !strings.Contains(err.Error(), "cannot be removed") {
+		t.Fatalf("expected removal error, got %v", err)
+	}
+
+	tombstoned := Clone(previous)
+	entry := tombstoned.EntriesByID["doc_a"]
+	entry.Tombstone = &Tombstone{ActorID: "tester", ActorType: "daemon", At: "2026-05-23T00:00:00Z"}
+	tombstoned.EntriesByID["doc_a"] = entry
+	if err := Validate(previous, tombstoned); err != nil {
+		t.Fatalf("tombstone should remain valid: %v", err)
+	}
+}
 
 func TestApplyIntentsConcurrentCreateDoesNotOverwriteRename(t *testing.T) {
 	base := crdt.New(crdt.WithGUID("root"))

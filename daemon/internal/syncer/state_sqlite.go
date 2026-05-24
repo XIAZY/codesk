@@ -125,6 +125,9 @@ func (s *WorkspaceStateDB) init(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := s.ensureSchemaCompatibility(ctx); err != nil {
+		return err
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO scan_state (
@@ -145,6 +148,23 @@ func (s *WorkspaceStateDB) init(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func (s *WorkspaceStateDB) ensureSchemaCompatibility(ctx context.Context) error {
+	statements := []string{
+		`ALTER TABLE stream_outbox ADD COLUMN dropped_at TEXT`,
+		`ALTER TABLE stream_outbox ADD COLUMN drop_reason TEXT`,
+	}
+	for _, statement := range statements {
+		if _, err := s.db.ExecContext(ctx, statement); err != nil && !isDuplicateSQLiteColumnError(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+func isDuplicateSQLiteColumnError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "duplicate column name")
 }
 
 func (s *WorkspaceStateDB) GetScanState(ctx context.Context) (ScanState, error) {
@@ -326,11 +346,14 @@ func stateSQLiteSchemaStatements() []string {
 			sent_at TEXT,
 			acked_at TEXT,
 			ack_update_id INTEGER,
+			dropped_at TEXT,
+			drop_reason TEXT,
 			UNIQUE(stream_id, mutation_key),
 			FOREIGN KEY(depends_on_id) REFERENCES stream_outbox(id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_stream_outbox_pending ON stream_outbox(acked_at, depends_on_id, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_stream_outbox_local_ready ON stream_outbox(stream_id, local_applied_at, depends_on_id, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_stream_outbox_sendable ON stream_outbox(dropped_at, acked_at, local_applied_at, depends_on_id, id)`,
 		`CREATE TABLE IF NOT EXISTS manifest_projection (
 			entry_id TEXT PRIMARY KEY,
 			kind TEXT NOT NULL,

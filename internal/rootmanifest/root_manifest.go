@@ -265,9 +265,12 @@ func Validate(previous Manifest, next Manifest) error {
 		}
 	}
 	for id, before := range previous.EntriesByID {
+		if id == RootEntryID {
+			continue
+		}
 		after, ok := next.EntriesByID[id]
 		if !ok {
-			continue
+			return fmt.Errorf("entry %q cannot be removed; tombstone required", id)
 		}
 		if before.Kind != "" && before.Kind != after.Kind {
 			return fmt.Errorf("entry %q kind cannot change", id)

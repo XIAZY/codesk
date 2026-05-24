@@ -3,6 +3,7 @@ package syncer
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -289,7 +290,7 @@ func TestRootManifestProjectorDoesNotTombstoneTrackedEntryWithUnprojectedContent
 	}
 }
 
-func TestRootManifestProjectorAgentReplicaDoesNotTombstoneMissingTrackedEntry(t *testing.T) {
+func TestRootManifestProjectorAgentCopyModeDoesNotTombstoneMissingTrackedEntry(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	state, err := OpenWorkspaceStateDB(root)
@@ -329,6 +330,7 @@ func TestRootManifestProjectorAgentReplicaDoesNotTombstoneMissingTrackedEntry(t 
 		RootStreamID: "root-stream",
 		ActorID:      "agent_1",
 		ActorType:    "agent",
+		Mode:         ProjectionAgentCopy,
 		Queue: func(streamID string) {
 			queued = append(queued, streamID)
 		},
@@ -337,14 +339,14 @@ func TestRootManifestProjectorAgentReplicaDoesNotTombstoneMissingTrackedEntry(t 
 		t.Fatalf("capture local: %v", err)
 	}
 	if len(mutations) != 0 {
-		t.Fatalf("agent replica should not tombstone missing tracked file, got %#v", mutations)
+		t.Fatalf("agent copy projection should not tombstone missing tracked file, got %#v", mutations)
 	}
 	manifest, err := rootmanifest.Read(doc)
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
 	if manifest.EntriesByID["doc_a"].Tombstone != nil {
-		t.Fatalf("agent replica tombstoned tracked file: %#v", manifest.EntriesByID["doc_a"])
+		t.Fatalf("agent copy projection tombstoned tracked file: %#v", manifest.EntriesByID["doc_a"])
 	}
 	if len(queued) != 1 || queued[0] != "doc_a" {
 		t.Fatalf("expected content stream requeued, got %#v", queued)
@@ -437,6 +439,107 @@ func TestRootManifestProjectorDoesNotTombstoneUnprojectedRemoteCreate(t *testing
 	}
 	if job.Kind != "mkdir" || job.TargetPath != "docs" {
 		t.Fatalf("unexpected mkdir job %#v", job)
+	}
+}
+
+func TestRootManifestProjectorTombstonesLocallyDeletedDirectoryTree(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "docs"), 0o755); err != nil {
+		t.Fatalf("mkdir docs: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "docs", "a.md"), []byte("alpha"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	fs := NewWorkspaceFS(root)
+	dirStat, err := fs.Stat(ctx, "docs")
+	if err != nil {
+		t.Fatalf("stat dir: %v", err)
+	}
+	fileStat, err := fs.Stat(ctx, "docs/a.md")
+	if err != nil {
+		t.Fatalf("stat file: %v", err)
+	}
+	state, err := OpenWorkspaceStateDB(root)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer state.Close()
+	doc := crdt.New(crdt.WithGUID("root-stream"))
+	defer doc.Close()
+	if _, err := rootmanifest.ApplyIntents(doc, []rootmanifest.Intent{{
+		Type: "create-dir",
+		Entry: rootmanifest.Entry{
+			ID:   "dir_docs",
+			Kind: rootmanifest.EntryKindDir,
+			Loc:  rootmanifest.NewLocation(rootmanifest.RootEntryID, "docs"),
+		},
+	}, {
+		Type: "create-file",
+		Entry: rootmanifest.Entry{
+			ID:              "doc_a",
+			Kind:            rootmanifest.EntryKindFile,
+			Loc:             rootmanifest.NewLocation("dir_docs", "a.md"),
+			ContentStreamID: "doc_a",
+		},
+	}}); err != nil {
+		t.Fatalf("seed root: %v", err)
+	}
+	if err := state.UpsertManifestProjection(ctx, ManifestProjectionRow{
+		EntryID:              "dir_docs",
+		Kind:                 rootmanifest.EntryKindDir,
+		DesiredPath:          "docs",
+		MaterializedPath:     "docs",
+		Stat:                 dirStat,
+		RootProjectedStateID: 1,
+	}); err != nil {
+		t.Fatalf("seed dir projection: %v", err)
+	}
+	if err := state.UpsertManifestProjection(ctx, ManifestProjectionRow{
+		EntryID:              "doc_a",
+		Kind:                 rootmanifest.EntryKindFile,
+		ContentStreamID:      "doc_a",
+		DesiredPath:          "docs/a.md",
+		MaterializedPath:     "docs/a.md",
+		Stat:                 fileStat,
+		LastCleanHash:        contentSHA256([]byte("alpha")),
+		RootProjectedStateID: 1,
+	}); err != nil {
+		t.Fatalf("seed file projection: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(root, "docs")); err != nil {
+		t.Fatalf("remove docs: %v", err)
+	}
+
+	mutations, err := (RootManifestProjector{
+		State:        state,
+		FS:           fs,
+		RootStreamID: "root-stream",
+		ActorID:      "daemon",
+		ActorType:    "daemon",
+	}).CaptureLocal(ctx, doc)
+	if err != nil {
+		t.Fatalf("capture local: %v", err)
+	}
+	if len(mutations) != 1 {
+		t.Fatalf("expected one root mutation, got %#v", mutations)
+	}
+	manifest, err := rootmanifest.Read(doc)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if manifest.EntriesByID["dir_docs"].Tombstone == nil {
+		t.Fatalf("expected deleted directory tombstoned: %#v", manifest.EntriesByID["dir_docs"])
+	}
+	if manifest.EntriesByID["doc_a"].Tombstone == nil {
+		t.Fatalf("expected deleted child tombstoned: %#v", manifest.EntriesByID["doc_a"])
+	}
+	var mkdirJobs int
+	if err := state.DB().QueryRow(`SELECT COUNT(*) FROM fs_jobs WHERE kind = 'mkdir' AND entry_id = 'dir_docs'`).Scan(&mkdirJobs); err != nil {
+		t.Fatalf("count mkdir jobs: %v", err)
+	}
+	if mkdirJobs != 0 {
+		t.Fatalf("local directory delete should not schedule mkdir retry, got %d", mkdirJobs)
 	}
 }
 
@@ -1009,7 +1112,8 @@ func TestRootManifestProjectorPlanRemoteRenameSchedulesMove(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("seed root: %v", err)
 	}
-	if err := (RootManifestProjector{State: state, FS: NewWorkspaceFS(root), RootStreamID: "root-stream"}).PlanApplyMerged(ctx, doc, 2); err != nil {
+	fs := NewWorkspaceFS(root)
+	if err := (RootManifestProjector{State: state, FS: fs, RootStreamID: "root-stream"}).PlanApplyMerged(ctx, doc, 2); err != nil {
 		t.Fatalf("plan rename: %v", err)
 	}
 	var kind, source, target string
@@ -1023,8 +1127,38 @@ func TestRootManifestProjectorPlanRemoteRenameSchedulesMove(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read content projection: %v", err)
 	}
-	if contentProjection == nil || contentProjection.MaterializedPath != "new.md" || !contentProjection.ProjectedStateID.Valid || contentProjection.ProjectedStateID.Int64 != 1 || contentProjection.ProjectedHash != contentSHA256([]byte("alpha")) {
-		t.Fatalf("rename should preserve projected content base while changing path, got %#v", contentProjection)
+	if contentProjection == nil || contentProjection.MaterializedPath != "old.md" || !contentProjection.ProjectedStateID.Valid || contentProjection.ProjectedStateID.Int64 != 1 || contentProjection.ProjectedHash != contentSHA256([]byte("alpha")) {
+		t.Fatalf("pending rename should preserve projected content base at old path, got %#v", contentProjection)
+	}
+	manifestProjection, err := state.GetManifestProjection(ctx, "doc_a")
+	if err != nil {
+		t.Fatalf("read manifest projection: %v", err)
+	}
+	if manifestProjection == nil || manifestProjection.DesiredPath != "new.md" || manifestProjection.MaterializedPath != "old.md" {
+		t.Fatalf("pending rename should keep old materialized path while recording desired path, got %#v", manifestProjection)
+	}
+	if err := state.RunPendingFSJobs(ctx, fs); err != nil {
+		t.Fatalf("run move job: %v", err)
+	}
+	contentProjection, err = state.GetContentProjection(ctx, "doc_a")
+	if err != nil {
+		t.Fatalf("read content projection after move: %v", err)
+	}
+	if contentProjection == nil || contentProjection.MaterializedPath != "new.md" {
+		t.Fatalf("completed rename should advance content projection path, got %#v", contentProjection)
+	}
+	manifestProjection, err = state.GetManifestProjection(ctx, "doc_a")
+	if err != nil {
+		t.Fatalf("read manifest projection after move: %v", err)
+	}
+	if manifestProjection == nil || manifestProjection.MaterializedPath != "new.md" {
+		t.Fatalf("completed rename should advance manifest projection path, got %#v", manifestProjection)
+	}
+	if _, err := os.Stat(filepath.Join(root, "old.md")); !os.IsNotExist(err) {
+		t.Fatalf("expected old path moved away, stat err=%v", err)
+	}
+	if content, err := os.ReadFile(filepath.Join(root, "new.md")); err != nil || string(content) != "alpha" {
+		t.Fatalf("expected new path content, content=%q err=%v", string(content), err)
 	}
 }
 
@@ -1106,6 +1240,202 @@ func TestRootManifestProjectorOrdersMoveJobsToFreeRenameConflictTarget(t *testin
 		if got[i] != want[i] {
 			t.Fatalf("move job %d = %#v, want %#v (all jobs %#v)", i, got[i], want[i], got)
 		}
+	}
+}
+
+func TestRootManifestProjectorPlansSwapThroughTempMove(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.md"), []byte("A"), 0o644); err != nil {
+		t.Fatalf("write a: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "b.md"), []byte("B"), 0o644); err != nil {
+		t.Fatalf("write b: %v", err)
+	}
+	fs := NewWorkspaceFS(root)
+	state, err := OpenWorkspaceStateDB(root)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer state.Close()
+	for _, row := range []ManifestProjectionRow{{
+		EntryID:              "doc_a",
+		Kind:                 rootmanifest.EntryKindFile,
+		ContentStreamID:      "doc_a",
+		DesiredPath:          "a.md",
+		MaterializedPath:     "a.md",
+		LastCleanHash:        contentSHA256([]byte("A")),
+		RootProjectedStateID: 1,
+	}, {
+		EntryID:              "doc_b",
+		Kind:                 rootmanifest.EntryKindFile,
+		ContentStreamID:      "doc_b",
+		DesiredPath:          "b.md",
+		MaterializedPath:     "b.md",
+		LastCleanHash:        contentSHA256([]byte("B")),
+		RootProjectedStateID: 1,
+	}} {
+		if err := state.UpsertManifestProjection(ctx, row); err != nil {
+			t.Fatalf("seed manifest projection: %v", err)
+		}
+		if err := state.UpsertContentProjection(ctx, ContentProjectionRow{
+			StreamID:         row.ContentStreamID,
+			EntryID:          row.EntryID,
+			MaterializedPath: row.MaterializedPath,
+			ProjectedHash:    row.LastCleanHash,
+		}); err != nil {
+			t.Fatalf("seed content projection: %v", err)
+		}
+	}
+	doc := crdt.New(crdt.WithGUID("root-stream"))
+	defer doc.Close()
+	if _, err := rootmanifest.ApplyIntents(doc, []rootmanifest.Intent{{
+		Type: "create-file",
+		Entry: rootmanifest.Entry{
+			ID:              "doc_a",
+			Kind:            rootmanifest.EntryKindFile,
+			Loc:             rootmanifest.NewLocation(rootmanifest.RootEntryID, "b.md"),
+			ContentStreamID: "doc_a",
+		},
+	}, {
+		Type: "create-file",
+		Entry: rootmanifest.Entry{
+			ID:              "doc_b",
+			Kind:            rootmanifest.EntryKindFile,
+			Loc:             rootmanifest.NewLocation(rootmanifest.RootEntryID, "a.md"),
+			ContentStreamID: "doc_b",
+		},
+	}}); err != nil {
+		t.Fatalf("seed root: %v", err)
+	}
+	if err := (RootManifestProjector{State: state, FS: fs, RootStreamID: "root-stream"}).PlanApplyMerged(ctx, doc, 2); err != nil {
+		t.Fatalf("plan swap: %v", err)
+	}
+	rows, err := state.DB().Query(`SELECT kind, source_path, target_path FROM fs_jobs ORDER BY id`)
+	if err != nil {
+		t.Fatalf("query jobs: %v", err)
+	}
+	defer rows.Close()
+	type moveRow struct{ kind, source, target string }
+	moves := []moveRow{}
+	for rows.Next() {
+		var row moveRow
+		if err := rows.Scan(&row.kind, &row.source, &row.target); err != nil {
+			t.Fatalf("scan job: %v", err)
+		}
+		moves = append(moves, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("jobs: %v", err)
+	}
+	if len(moves) != 3 || moves[0].kind != "move-entry-temp" || moves[1].kind != "move-entry" || moves[2].kind != "move-entry" {
+		t.Fatalf("expected temp move followed by two final moves, got %#v", moves)
+	}
+	if err := state.RunPendingFSJobs(ctx, fs); err != nil {
+		t.Fatalf("run swap jobs: %v", err)
+	}
+	if content, err := os.ReadFile(filepath.Join(root, "a.md")); err != nil || string(content) != "B" {
+		t.Fatalf("expected b content at a.md, content=%q err=%v", string(content), err)
+	}
+	if content, err := os.ReadFile(filepath.Join(root, "b.md")); err != nil || string(content) != "A" {
+		t.Fatalf("expected a content at b.md, content=%q err=%v", string(content), err)
+	}
+	projectionA, err := state.GetManifestProjection(ctx, "doc_a")
+	if err != nil {
+		t.Fatalf("projection a: %v", err)
+	}
+	projectionB, err := state.GetManifestProjection(ctx, "doc_b")
+	if err != nil {
+		t.Fatalf("projection b: %v", err)
+	}
+	if projectionA == nil || projectionA.MaterializedPath != "b.md" || projectionB == nil || projectionB.MaterializedPath != "a.md" {
+		t.Fatalf("expected swapped projection paths, a=%#v b=%#v", projectionA, projectionB)
+	}
+}
+
+func TestRetryableMoveJobCanBeRevivedAfterCollisionClears(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "source.md"), []byte("source"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "target.md"), []byte("blocking"), 0o644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	fs := NewWorkspaceFS(root)
+	state, err := OpenWorkspaceStateDB(root)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer state.Close()
+	job := FSJob{
+		JobKey:     "root:move:retryable",
+		Kind:       "move-entry",
+		SourcePath: "source.md",
+		TargetPath: "target.md",
+	}
+	if _, err := state.InsertFSJob(ctx, job); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+	err = state.RunPendingFSJobs(ctx, fs)
+	if !errors.Is(err, ErrPathCollision) {
+		t.Fatalf("expected path collision, got %v", err)
+	}
+	var status string
+	if err := state.DB().QueryRow(`SELECT status FROM fs_jobs WHERE job_key = ?`, job.JobKey).Scan(&status); err != nil {
+		t.Fatalf("read retryable status: %v", err)
+	}
+	if status != "retryable" {
+		t.Fatalf("expected retryable job status, got %q", status)
+	}
+	if err := os.Remove(filepath.Join(root, "target.md")); err != nil {
+		t.Fatalf("clear target: %v", err)
+	}
+	revived, err := state.InsertFSJob(ctx, job)
+	if err != nil {
+		t.Fatalf("revive job: %v", err)
+	}
+	if revived.Status != "pending" {
+		t.Fatalf("expected revived job pending, got %#v", revived)
+	}
+	if err := state.RunPendingFSJobs(ctx, fs); err != nil {
+		t.Fatalf("retry job: %v", err)
+	}
+	if content, err := os.ReadFile(filepath.Join(root, "target.md")); err != nil || string(content) != "source" {
+		t.Fatalf("expected source moved to target, content=%q err=%v", string(content), err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "source.md")); !os.IsNotExist(err) {
+		t.Fatalf("expected source removed, stat err=%v", err)
+	}
+}
+
+func TestRootMutationKeyIncludesIntentPayload(t *testing.T) {
+	locB := rootMutationKey([]rootmanifest.Intent{{
+		Type:    "loc",
+		EntryID: "doc_a",
+		Loc:     rootmanifest.NewLocation(rootmanifest.RootEntryID, "b.md"),
+	}})
+	locC := rootMutationKey([]rootmanifest.Intent{{
+		Type:    "loc",
+		EntryID: "doc_a",
+		Loc:     rootmanifest.NewLocation(rootmanifest.RootEntryID, "c.md"),
+	}})
+	if locB == locC {
+		t.Fatalf("distinct location assignments must not share a mutation key: %q", locB)
+	}
+
+	tombstoneA := rootMutationKey([]rootmanifest.Intent{{
+		Type:      "tombstone",
+		EntryID:   "doc_a",
+		Tombstone: &rootmanifest.Tombstone{ActorID: "actor_a", ActorType: "daemon", At: "2026-05-23T00:00:00Z"},
+	}})
+	tombstoneB := rootMutationKey([]rootmanifest.Intent{{
+		Type:      "tombstone",
+		EntryID:   "doc_a",
+		Tombstone: &rootmanifest.Tombstone{ActorID: "actor_b", ActorType: "daemon", At: "2026-05-23T00:00:00Z"},
+	}})
+	if tombstoneA == tombstoneB {
+		t.Fatalf("distinct tombstone assignments must not share a mutation key: %q", tombstoneA)
 	}
 }
 

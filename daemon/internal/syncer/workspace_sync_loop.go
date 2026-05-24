@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"notty/internal/rootmanifest"
 	crdt "notty/internal/ycrdt"
 )
 
@@ -16,14 +17,15 @@ type StreamProjector interface {
 }
 
 type WorkspaceSyncLoop struct {
-	State        *WorkspaceStateDB
-	FS           *WorkspaceFS
-	RootStreamID string
-	ActorID      string
-	ActorType    string
-	Capabilities ScanCapabilities
-	NewID        func(kind string, relPath string) string
-	Queue        func(streamID string)
+	State          *WorkspaceStateDB
+	FS             *WorkspaceFS
+	RootStreamID   string
+	ActorID        string
+	ActorType      string
+	ProjectionMode ProjectionMode
+	Capabilities   ScanCapabilities
+	NewID          func(kind string, relPath string) string
+	Queue          func(streamID string)
 
 	mu sync.Mutex
 }
@@ -50,6 +52,15 @@ func (l *WorkspaceSyncLoop) ReconcileOne(ctx context.Context, streamID string) e
 		return err
 	}
 	defer doc.Close()
+	if streamID != l.RootStreamID {
+		live, known, err := l.contentStreamLiveInRoot(ctx, streamID)
+		if err != nil {
+			return err
+		}
+		if known && !live {
+			return l.State.DropPendingOutboxForStream(ctx, streamID, "root-stream-not-live", time.Now())
+		}
+	}
 
 	projector := l.projectorFor(streamID)
 	mutations, err := projector.CaptureLocal(ctx, doc)
@@ -57,32 +68,19 @@ func (l *WorkspaceSyncLoop) ReconcileOne(ctx context.Context, streamID string) e
 		return err
 	}
 	for _, mutation := range mutations {
-		row, err := l.State.UpsertOutbox(ctx, mutation)
+		_, err := l.State.UpsertOutbox(ctx, mutation)
 		if err != nil {
 			return err
 		}
-		if mutation.StreamID == streamID {
-			ready, err := l.State.OutboxDependencyAcked(ctx, row.ID)
-			if err != nil {
-				return err
-			}
-			if ready && !row.LocalAppliedAt.Valid {
-				if err := crdt.ApplyUpdateV1(doc, row.UpdateBytes, "local-outbox"); err != nil {
-					return err
-				}
-				if err := l.State.MarkOutboxLocallyApplied(ctx, row.ID, time.Now()); err != nil {
-					return err
-				}
-			}
-		} else {
+		if mutation.StreamID != streamID {
 			l.queue(mutation.StreamID)
 		}
 	}
-	localOutbox, err := l.State.ApplyReadyLocalOutbox(ctx, streamID, doc)
+	localOutbox, err := l.State.ReadyLocalOutbox(ctx, streamID, 100)
 	if err != nil {
 		return err
 	}
-	inbox, err := l.State.ApplyUnappliedInbox(ctx, streamID, doc)
+	inbox, err := l.State.UnappliedInbox(ctx, streamID, 100)
 	if err != nil {
 		return err
 	}
@@ -93,17 +91,22 @@ func (l *WorkspaceSyncLoop) ReconcileOne(ctx context.Context, streamID string) e
 		!stream.ProjectedStateID.Valid &&
 		len(localOutbox) == 0 &&
 		doc.GetText("content").ToString() == "" {
-		return nil
+		if len(inbox) == 0 {
+			return nil
+		}
+		empty, err := queuedContentWouldRemainEmpty(doc, inbox)
+		if err != nil {
+			return err
+		}
+		if empty {
+			return nil
+		}
 	}
-	materializedHash := ""
-	if streamID != l.RootStreamID {
-		materializedHash = contentSHA256([]byte(doc.GetText("content").ToString()))
-	}
-	stateID, err := l.State.PersistLatestStreamDoc(ctx, streamID, doc, materializedHash)
+	result, err := l.State.ApplyStreamQueueAtomically(ctx, streamID, kind, doc, "")
 	if err != nil {
 		return err
 	}
-	if err := projector.PlanApplyMerged(ctx, doc, stateID); err != nil {
+	if err := projector.PlanApplyMerged(ctx, doc, result.StateID); err != nil {
 		return err
 	}
 	if streamID == l.RootStreamID {
@@ -150,6 +153,7 @@ func (l *WorkspaceSyncLoop) projectorFor(streamID string) StreamProjector {
 			RootStreamID: l.RootStreamID,
 			ActorID:      l.ActorID,
 			ActorType:    l.ActorType,
+			Mode:         l.ProjectionMode,
 			Capabilities: l.Capabilities,
 			NewID:        l.NewID,
 			Queue:        l.queue,
@@ -166,8 +170,51 @@ func (l *WorkspaceSyncLoop) projectorFor(streamID string) StreamProjector {
 	}
 }
 
+func (l *WorkspaceSyncLoop) contentStreamLiveInRoot(ctx context.Context, streamID string) (bool, bool, error) {
+	if l == nil || l.State == nil || strings.TrimSpace(l.RootStreamID) == "" || strings.TrimSpace(streamID) == "" {
+		return false, false, nil
+	}
+	rootDoc, rootStream, err := l.State.LoadLatestStreamDoc(ctx, l.RootStreamID, "root")
+	if err != nil {
+		return false, false, err
+	}
+	defer rootDoc.Close()
+	if !rootStream.LatestStateID.Valid {
+		return false, false, nil
+	}
+	manifest, err := rootmanifest.Read(rootDoc)
+	if err != nil {
+		return false, true, err
+	}
+	for _, entry := range manifest.EntriesByID {
+		if entry.Kind == rootmanifest.EntryKindFile &&
+			entry.Tombstone == nil &&
+			strings.TrimSpace(entry.ContentStreamID) == streamID {
+			return true, true, nil
+		}
+	}
+	return false, true, nil
+}
+
 func (l *WorkspaceSyncLoop) queue(streamID string) {
 	if l != nil && l.Queue != nil {
 		l.Queue(streamID)
 	}
+}
+
+func queuedContentWouldRemainEmpty(base *crdt.Doc, inbox []StreamInboxRow) (bool, error) {
+	if base == nil {
+		return false, errors.New("stream doc is required")
+	}
+	preview := crdt.New()
+	defer preview.Close()
+	if err := crdt.ApplyUpdateV1(preview, base.EncodeStateAsUpdate(), "preview-base"); err != nil {
+		return false, err
+	}
+	for _, row := range inbox {
+		if err := crdt.ApplyUpdateV1(preview, row.UpdateBytes, "preview-inbox"); err != nil {
+			return false, err
+		}
+	}
+	return preview.GetText("content").ToString() == "", nil
 }

@@ -81,6 +81,26 @@ func (s *WorkspaceStateDB) LoadManifestProjection(ctx context.Context) (map[stri
 	return result, rows.Err()
 }
 
+func (s *WorkspaceStateDB) GetManifestProjection(ctx context.Context, entryID string) (*ManifestProjectionRow, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("state db is required")
+	}
+	row := s.db.QueryRowContext(ctx, `
+		SELECT entry_id, kind, content_stream_id, desired_path, materialized_path,
+		       file_key, size_bytes, mode, mtime_ns, ctime_ns, stat_valid,
+		       last_clean_hash, root_projected_state_id, tombstoned, pending_create, updated_at
+		  FROM manifest_projection
+		 WHERE entry_id = ?`, strings.TrimSpace(entryID))
+	projection, err := scanManifestProjectionRow(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &projection, nil
+}
+
 func (s *WorkspaceStateDB) UpsertManifestProjection(ctx context.Context, row ManifestProjectionRow) error {
 	if s == nil || s.db == nil {
 		return errors.New("state db is required")
@@ -309,7 +329,22 @@ func (s *WorkspaceStateDB) HasBlockingFSJob(ctx context.Context, streamID string
 		return false, errors.New("state db is required")
 	}
 	var count int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fs_jobs WHERE stream_id = ? AND status IN ('pending', 'running')`, streamID).Scan(&count); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fs_jobs WHERE stream_id = ? AND status IN ('pending', 'running', 'retryable')`, streamID).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (s *WorkspaceStateDB) HasBlockingFSJobForEntry(ctx context.Context, entryID string) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, errors.New("state db is required")
+	}
+	entryID = strings.TrimSpace(entryID)
+	if entryID == "" {
+		return false, nil
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fs_jobs WHERE entry_id = ? AND status IN ('pending', 'running', 'retryable')`, entryID).Scan(&count); err != nil {
 		return false, err
 	}
 	return count > 0, nil
@@ -331,7 +366,19 @@ func (s *WorkspaceStateDB) InsertFSJob(ctx context.Context, job FSJob) (FSJob, e
 			expected_hash, target_hash, target_state_id,
 			status, created_at, updated_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
-		ON CONFLICT(job_key) DO NOTHING`,
+		ON CONFLICT(job_key) DO UPDATE SET
+			kind = excluded.kind,
+			entry_id = excluded.entry_id,
+			stream_id = excluded.stream_id,
+			source_path = excluded.source_path,
+			target_path = excluded.target_path,
+			expected_hash = excluded.expected_hash,
+			target_hash = excluded.target_hash,
+			target_state_id = excluded.target_state_id,
+			status = 'pending',
+			last_error = NULL,
+			updated_at = excluded.updated_at
+		WHERE fs_jobs.status = 'retryable'`,
 		job.JobKey,
 		job.Kind,
 		nullString(job.EntryID),
@@ -420,7 +467,9 @@ func (s *WorkspaceStateDB) runFSJob(ctx context.Context, fs *WorkspaceFS, job FS
 		}
 		return s.finishWriteContentJob(ctx, job, targetHash, stat)
 	case "move-entry":
-		return fs.MoveIfNoTarget(job.SourcePath, job.TargetPath)
+		return s.runMoveEntryJob(ctx, fs, job)
+	case "move-entry-temp":
+		return runMoveOnlyJob(ctx, fs, job)
 	case "delete-clean-entry":
 		return fs.DeleteIfSHA256Unchanged(ctx, job.TargetPath, job.ExpectedHash)
 	case "mkdir":
@@ -428,6 +477,77 @@ func (s *WorkspaceStateDB) runFSJob(ctx context.Context, fs *WorkspaceFS, job FS
 	default:
 		return fmt.Errorf("unknown fs job kind %q", job.Kind)
 	}
+}
+
+func runMoveOnlyJob(ctx context.Context, fs *WorkspaceFS, job FSJob) error {
+	if strings.TrimSpace(job.SourcePath) == "" || strings.TrimSpace(job.TargetPath) == "" {
+		return errors.New("move job requires source and target paths")
+	}
+	if err := fs.MoveIfNoTarget(job.SourcePath, job.TargetPath); err != nil {
+		if errors.Is(err, ErrPathCollision) && moveJobAlreadyMaterialized(ctx, fs, job) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *WorkspaceStateDB) runMoveEntryJob(ctx context.Context, fs *WorkspaceFS, job FSJob) error {
+	if strings.TrimSpace(job.SourcePath) == "" || strings.TrimSpace(job.TargetPath) == "" {
+		return errors.New("move-entry job requires source and target paths")
+	}
+	if err := fs.MoveIfNoTarget(job.SourcePath, job.TargetPath); err != nil {
+		if errors.Is(err, ErrPathCollision) && moveJobAlreadyMaterialized(ctx, fs, job) {
+			stat, statErr := fs.Stat(ctx, job.TargetPath)
+			if statErr != nil {
+				return statErr
+			}
+			return s.finishMoveEntryJob(ctx, job, stat)
+		}
+		return err
+	}
+	stat, err := fs.Stat(ctx, job.TargetPath)
+	if err != nil {
+		return err
+	}
+	return s.finishMoveEntryJob(ctx, job, stat)
+}
+
+func moveJobAlreadyMaterialized(ctx context.Context, fs *WorkspaceFS, job FSJob) bool {
+	source, sourceErr := fs.Stat(ctx, job.SourcePath)
+	target, targetErr := fs.Stat(ctx, job.TargetPath)
+	return sourceErr == nil && targetErr == nil && !source.Exists && target.Exists
+}
+
+func (s *WorkspaceStateDB) finishMoveEntryJob(ctx context.Context, job FSJob, stat FileStat) error {
+	entryID := strings.TrimSpace(job.EntryID)
+	if entryID != "" {
+		row, err := s.GetManifestProjection(ctx, entryID)
+		if err != nil {
+			return err
+		}
+		if row != nil {
+			row.MaterializedPath = normalizeStateRelPath(job.TargetPath)
+			row.Stat = stat
+			if err := s.UpsertManifestProjection(ctx, *row); err != nil {
+				return err
+			}
+		}
+	}
+	streamID := strings.TrimSpace(job.StreamID)
+	if streamID == "" {
+		return nil
+	}
+	content, err := s.GetContentProjection(ctx, streamID)
+	if err != nil {
+		return err
+	}
+	if content == nil {
+		return nil
+	}
+	content.MaterializedPath = normalizeStateRelPath(job.TargetPath)
+	content.Stat = stat
+	return s.UpsertContentProjection(ctx, *content)
 }
 
 func (s *WorkspaceStateDB) finishWriteContentJob(ctx context.Context, job FSJob, targetHash string, stat FileStat) error {
@@ -565,8 +685,16 @@ func (s *WorkspaceStateDB) markFSJobDone(ctx context.Context, id int64) error {
 }
 
 func (s *WorkspaceStateDB) markFSJobFailed(ctx context.Context, id int64, runErr error) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE fs_jobs SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?`, runErr.Error(), time.Now().UTC().Format(time.RFC3339Nano), id)
+	status := "failed"
+	if isRetryableFSJobError(runErr) {
+		status = "retryable"
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE fs_jobs SET status = ?, last_error = ?, updated_at = ? WHERE id = ?`, status, runErr.Error(), time.Now().UTC().Format(time.RFC3339Nano), id)
 	return err
+}
+
+func isRetryableFSJobError(err error) bool {
+	return errors.Is(err, ErrPathCollision)
 }
 
 func scanManifestProjectionRow(scanner interface{ Scan(...any) error }) (ManifestProjectionRow, error) {

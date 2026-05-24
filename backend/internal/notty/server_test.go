@@ -172,6 +172,9 @@ func TestDocumentProtocolUpdatePublishesMetadataOnlyWorkspaceEvent(t *testing.T)
 		if payload["streamId"] != documentID || payload["updateId"] == nil {
 			t.Fatalf("expected workspace update event to keep metadata, got %#v", payload)
 		}
+		if payload["kind"] != StreamKindContent {
+			t.Fatalf("expected content stream update kind, got %#v", payload)
+		}
 	default:
 		t.Fatal("expected stream.updated event to be published")
 	}
@@ -229,6 +232,25 @@ func TestGenericStreamHTTPUpdatePersistsAndDedupes(t *testing.T) {
 	}
 	if got := restored.GetText("content").ToString(); got != "stream bytes" {
 		t.Fatalf("expected restored stream content, got %q", got)
+	}
+}
+
+func TestGenericStreamHTTPUpdateRejectsUnreferencedContentStream(t *testing.T) {
+	server, _ := newTestServer(t)
+	router := server.Routes()
+
+	author := crdt.New(crdt.WithClientID(912))
+	text := author.GetText("content")
+	update := captureDocUpdate(t, author, "stream-http-unknown", func(txn *crdt.Transaction) {
+		text.Insert(txn, 0, "orphan bytes", nil)
+	})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/streams/content_not_in_root/updates", bytes.NewReader(update))
+	request.Header.Set("Content-Type", "application/octet-stream")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code == http.StatusOK {
+		t.Fatalf("expected unreferenced stream update to fail, got status 200 body=%s", recorder.Body.String())
 	}
 }
 
@@ -371,6 +393,9 @@ func TestHTTPDocumentUpdatePersistsBroadcastsAndAttributesActor(t *testing.T) {
 		}
 		if payload["streamId"] != documentID || payload["actorId"] != "agent_1" {
 			t.Fatalf("expected actor attribution agent_1, got %#v", payload)
+		}
+		if payload["kind"] != StreamKindContent {
+			t.Fatalf("expected content stream update kind, got %#v", payload)
 		}
 	default:
 		t.Fatal("expected stream.updated event")

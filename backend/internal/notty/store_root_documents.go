@@ -223,7 +223,32 @@ func (s *Store) MirrorDocumentCreateToStreams(document *Document, content string
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	rootStreamID, manifest, _, err := s.ReadRootManifestStream()
+	workspaceID := s.workspaceID
+	if workspaceID == "" {
+		workspaceID = s.state.WorkspaceID
+	}
+	if workspaceID == "" {
+		workspaceID = "ws_notty"
+	}
+	workspaceName := s.workspaceName
+	if workspaceName == "" {
+		workspaceName = workspaceID
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	rootStreamID, err := bootstrapWorkspaceStreamsTx(tx, workspaceID, workspaceName)
+	if err != nil {
+		return err
+	}
+	rootDoc, _, err := restoreStreamDocForUpdateTx(tx, workspaceID, rootStreamID)
+	if err != nil {
+		return err
+	}
+	defer rootDoc.Close()
+	manifest, err := ReadRootManifest(rootDoc)
 	if err != nil {
 		return err
 	}
@@ -231,29 +256,22 @@ func (s *Store) MirrorDocumentCreateToStreams(document *Document, content string
 	if err != nil {
 		return err
 	}
-	rootDoc, _, err := s.RestoreStreamDoc(rootStreamID)
-	if err != nil {
-		return err
-	}
 	rootUpdate, err := ApplyRootIntents(rootDoc, intents)
 	if err != nil {
 		return err
 	}
-	if err := s.EnsureStream(document.ID, StreamKindContent); err != nil {
+	if _, err := applyStreamUpdateTx(tx, workspaceID, rootStreamID, rootUpdate, meta); err != nil {
 		return err
 	}
 	if len(initialUpdate) == 0 {
 		initialUpdate = contentStreamUpdate(content, document.ClientIDSeed)
 	}
 	if len(initialUpdate) > 0 {
-		if _, err := s.ApplyStreamUpdate(document.ID, initialUpdate, meta); err != nil {
+		if _, err := applyStreamUpdateTx(tx, workspaceID, document.ID, initialUpdate, meta); err != nil {
 			return err
 		}
 	}
-	if _, err := s.ApplyStreamUpdate(rootStreamID, rootUpdate, meta); err != nil {
-		return err
-	}
-	return nil
+	return tx.Commit()
 }
 
 func (s *Store) MirrorDocumentMoveToRoot(documentID string, nextPath string, updatedAt time.Time, meta OperationMeta) error {

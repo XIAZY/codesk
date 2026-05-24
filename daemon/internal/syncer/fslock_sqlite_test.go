@@ -62,7 +62,11 @@ func TestFSLockDBSerializesFilesystemOperations(t *testing.T) {
 func TestWorkspaceFSUsesSQLiteFSLock(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "doc.md")
-	fs := NewWorkspaceFS(root)
+	fs, err := OpenWorkspaceFS(root)
+	if err != nil {
+		t.Fatalf("open workspace fs: %v", err)
+	}
+	defer fs.Close()
 	if fs.Locks == nil {
 		t.Fatal("expected workspace fs to initialize fslock.sqlite")
 	}
@@ -74,5 +78,15 @@ func TestWorkspaceFSUsesSQLiteFSLock(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, ".notty", "locks")); !os.IsNotExist(err) {
 		t.Fatalf("legacy lock directory should not be used, stat err=%v", err)
+	}
+}
+
+func TestOpenWorkspaceFSFailsClosedWhenLockDBCannotOpen(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".notty"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("seed .notty file: %v", err)
+	}
+	if _, err := OpenWorkspaceFS(root); err == nil {
+		t.Fatal("expected OpenWorkspaceFS to fail when fslock.sqlite cannot be opened")
 	}
 }

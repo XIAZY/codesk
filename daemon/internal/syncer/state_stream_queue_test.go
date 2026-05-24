@@ -221,3 +221,57 @@ func TestOutboxDependencyMustExist(t *testing.T) {
 		t.Fatal("expected missing dependency to reject outbox insertion")
 	}
 }
+
+func TestDroppedOutboxRowsAreNotPendingOrSendable(t *testing.T) {
+	ctx := context.Background()
+	state, err := OpenWorkspaceStateDB(t.TempDir())
+	if err != nil {
+		t.Fatalf("open state db: %v", err)
+	}
+	defer state.Close()
+
+	row, err := state.UpsertOutbox(ctx, StreamMutation{
+		StreamID:    "doc_1",
+		KindHint:    "content",
+		MutationKey: "content:edit:doc_1:old",
+		UpdateBytes: []byte("content-update"),
+	})
+	if err != nil {
+		t.Fatalf("insert outbox: %v", err)
+	}
+	if err := state.MarkOutboxLocallyApplied(ctx, row.ID, time.Now()); err != nil {
+		t.Fatalf("mark local: %v", err)
+	}
+	if err := state.MarkOutboxDropped(ctx, row.ID, "stale-content-stream", time.Now()); err != nil {
+		t.Fatalf("drop outbox: %v", err)
+	}
+
+	next, err := state.NextSendableOutboxRow(ctx)
+	if err != nil {
+		t.Fatalf("next sendable: %v", err)
+	}
+	if next != nil {
+		t.Fatalf("dropped row should not be sendable, got %#v", next)
+	}
+	count, err := state.PendingOutboxCount(ctx, "doc_1")
+	if err != nil {
+		t.Fatalf("pending count: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("dropped row should not count as pending, got %d", count)
+	}
+	has, err := state.HasOutbox(ctx, "doc_1")
+	if err != nil {
+		t.Fatalf("has outbox: %v", err)
+	}
+	if !has {
+		t.Fatal("dropped row should remain local mutation evidence")
+	}
+	var droppedAt, reason string
+	if err := state.DB().QueryRow(`SELECT COALESCE(dropped_at, ''), COALESCE(drop_reason, '') FROM stream_outbox WHERE id = ?`, row.ID).Scan(&droppedAt, &reason); err != nil {
+		t.Fatalf("read dropped row: %v", err)
+	}
+	if droppedAt == "" || reason != "stale-content-stream" {
+		t.Fatalf("expected dropped metadata to persist, dropped_at=%q reason=%q", droppedAt, reason)
+	}
+}

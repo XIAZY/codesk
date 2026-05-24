@@ -21,7 +21,11 @@ func openAgentLog(workdir string, name string) (*agentLog, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	agentLog := &agentLog{fs: NewWorkspaceFS(workdir), path: path}
+	fs, err := OpenWorkspaceFS(workdir)
+	if err != nil {
+		return nil, err
+	}
+	agentLog := &agentLog{fs: fs, path: path}
 	agentLog.Printf("log opened")
 	return agentLog, nil
 }
@@ -32,7 +36,13 @@ func appendAgentLog(workdir string, name string, format string, args ...any) {
 		log.Printf("agent log mkdir failed workdir=%s err=%v", workdir, err)
 		return
 	}
-	if err := NewWorkspaceFS(workdir).Append(path, agentLogLine(format, args...)); err != nil {
+	fs, err := OpenWorkspaceFS(workdir)
+	if err != nil {
+		log.Printf("agent log fs lock failed workdir=%s err=%v", workdir, err)
+		return
+	}
+	defer fs.Close()
+	if err := fs.Append(path, agentLogLine(format, args...)); err != nil {
 		log.Printf("agent log append failed path=%s err=%v", path, err)
 	}
 }
@@ -56,6 +66,9 @@ func (l *agentLog) Close() {
 	defer l.mu.Unlock()
 	if err := l.fs.Append(l.path, agentLogLine("log closed")); err != nil {
 		log.Printf("agent log close record failed path=%s err=%v", l.path, err)
+	}
+	if err := l.fs.Close(); err != nil {
+		log.Printf("agent log close failed path=%s err=%v", l.path, err)
 	}
 }
 

@@ -257,7 +257,7 @@ func (s *Service) runWorkspaceEventStream(ctx context.Context) error {
 		if err := json.Unmarshal(payload, &event); err != nil {
 			continue
 		}
-		if shouldRefreshForEvent(event.Type) {
+		if shouldRefreshForWorkspaceEvent(event) {
 			if err := s.refresh(ctx); err != nil && ctx.Err() == nil {
 				log.Printf("workspace refresh error: %v", err)
 			}
@@ -266,7 +266,7 @@ func (s *Service) runWorkspaceEventStream(ctx context.Context) error {
 			s.wakeAgentWorker(change.AgentID)
 			continue
 		}
-		if shouldWakeAgentWorkersForEvent(event.Type) {
+		if shouldWakeAgentWorkersForWorkspaceEvent(event) {
 			s.wakeAllAgentWorkers()
 		}
 	}
@@ -286,8 +286,12 @@ func parseAgentInboxChangedEvent(event workspaceEventEnvelope) (agentInboxChange
 	return change, true
 }
 
-func shouldWakeAgentWorkersForEvent(eventType string) bool {
-	switch strings.TrimSpace(eventType) {
+func shouldWakeAgentWorkersForWorkspaceEvent(event workspaceEventEnvelope) bool {
+	eventType := strings.TrimSpace(event.Type)
+	if eventType == "stream.updated" {
+		return false
+	}
+	switch eventType {
 	case "workspace.snapshot", "presence.updated", "agent.run.updated", "document.updated", "thread.created", "thread.updated", "thread.message.created", "agent.event.updated":
 		return false
 	default:
@@ -295,13 +299,30 @@ func shouldWakeAgentWorkersForEvent(eventType string) bool {
 	}
 }
 
-func shouldRefreshForEvent(eventType string) bool {
-	switch strings.TrimSpace(eventType) {
+func shouldRefreshForWorkspaceEvent(event workspaceEventEnvelope) bool {
+	eventType := strings.TrimSpace(event.Type)
+	if eventType == "stream.updated" {
+		return streamUpdatedKind(event) != "content"
+	}
+	switch eventType {
 	case "workspace.snapshot", "presence.updated", "document.updated", "agent.run.updated":
 		return false
 	default:
 		return true
 	}
+}
+
+func streamUpdatedKind(event workspaceEventEnvelope) string {
+	if strings.TrimSpace(event.Type) != "stream.updated" || len(event.Data) == 0 {
+		return ""
+	}
+	var payload struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.Unmarshal(event.Data, &payload); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.Kind)
 }
 
 func (s *Service) refresh(ctx context.Context) error {

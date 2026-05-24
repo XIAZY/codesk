@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"notty/internal/rootmanifest"
+	crdt "notty/internal/ycrdt"
 )
 
 func TestWorkspaceSyncLoopLocalCreateOrdersRootBeforeContentInit(t *testing.T) {
@@ -180,5 +183,94 @@ func TestWorkspaceSyncLoopSkipsFirstEmptyRemoteContentState(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "remote.md")); !os.IsNotExist(err) {
 		t.Fatalf("remote.md should not have been materialized, stat err=%v", err)
+	}
+}
+
+func TestWorkspaceSyncLoopDropsLocalOutboxForTombstonedContentStream(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	state, err := OpenWorkspaceStateDB(root)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer state.Close()
+
+	rootDoc := crdt.New(crdt.WithGUID("root-stream"))
+	defer rootDoc.Close()
+	if _, err := rootmanifest.ApplyIntents(rootDoc, []rootmanifest.Intent{{
+		Type: "create-file",
+		Entry: rootmanifest.Entry{
+			ID:              "doc_old",
+			Kind:            rootmanifest.EntryKindFile,
+			Loc:             rootmanifest.NewLocation(rootmanifest.RootEntryID, "old.md"),
+			ContentStreamID: "doc_old",
+		},
+	}, {
+		Type:    "tombstone",
+		EntryID: "doc_old",
+		Tombstone: &rootmanifest.Tombstone{
+			ActorID:   "remote",
+			ActorType: "human",
+			At:        time.Now().UTC().Format(time.RFC3339Nano),
+		},
+	}}); err != nil {
+		t.Fatalf("build root manifest: %v", err)
+	}
+	if err := state.EnsureLocalStream(ctx, "root-stream", "root"); err != nil {
+		t.Fatalf("ensure root stream: %v", err)
+	}
+	rootStateID, err := state.InsertStreamState(ctx, "root-stream", rootDoc.EncodeStateAsUpdate(), crdt.EncodeStateVectorV1(rootDoc), "")
+	if err != nil {
+		t.Fatalf("insert root state: %v", err)
+	}
+	if err := state.UpdateLatestStreamState(ctx, "root-stream", rootStateID, crdt.EncodeStateVectorV1(rootDoc)); err != nil {
+		t.Fatalf("update root latest: %v", err)
+	}
+
+	local := contentDoc(t, "doc_old", "dirty local")
+	defer local.Close()
+	outbox, err := state.UpsertOutbox(ctx, StreamMutation{
+		StreamID:    "doc_old",
+		KindHint:    "content",
+		MutationKey: "content:edit:doc_old:dirty",
+		UpdateBytes: local.EncodeStateAsUpdate(),
+	})
+	if err != nil {
+		t.Fatalf("seed outbox: %v", err)
+	}
+
+	loop := &WorkspaceSyncLoop{
+		State:        state,
+		FS:           NewWorkspaceFS(root),
+		RootStreamID: "root-stream",
+		ActorID:      "daemon",
+		ActorType:    "daemon",
+	}
+	if err := loop.ReconcileOne(ctx, "doc_old"); err != nil {
+		t.Fatalf("reconcile tombstoned content: %v", err)
+	}
+
+	var localApplied, droppedAt string
+	if err := state.DB().QueryRow(`
+		SELECT COALESCE(local_applied_at, ''), COALESCE(dropped_at, '')
+		  FROM stream_outbox WHERE id = ?`, outbox.ID).Scan(&localApplied, &droppedAt); err != nil {
+		t.Fatalf("read outbox: %v", err)
+	}
+	if localApplied != "" || droppedAt == "" {
+		t.Fatalf("expected tombstoned content outbox dropped before local apply, local_applied=%q dropped=%q", localApplied, droppedAt)
+	}
+	stream, err := state.GetStream(ctx, "doc_old")
+	if err != nil {
+		t.Fatalf("get stream: %v", err)
+	}
+	if stream.LatestStateID.Valid {
+		t.Fatalf("tombstoned content local outbox should not advance stream state: %#v", stream)
+	}
+	var jobs int
+	if err := state.DB().QueryRow(`SELECT COUNT(*) FROM fs_jobs WHERE stream_id = 'doc_old'`).Scan(&jobs); err != nil {
+		t.Fatalf("count fs jobs: %v", err)
+	}
+	if jobs != 0 {
+		t.Fatalf("tombstoned content should not schedule fs jobs, got %d", jobs)
 	}
 }

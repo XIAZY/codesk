@@ -38,6 +38,8 @@ type StreamOutboxRow struct {
 	SentAt         sql.NullString
 	AckedAt        sql.NullString
 	AckUpdateID    sql.NullInt64
+	DroppedAt      sql.NullString
+	DropReason     sql.NullString
 }
 
 type StreamInboxRow struct {
@@ -54,6 +56,10 @@ func (s *WorkspaceStateDB) EnsureLocalStream(ctx context.Context, streamID strin
 	if s == nil || s.db == nil {
 		return errors.New("state db is required")
 	}
+	return ensureLocalStreamTx(ctx, nil, streamID, kind, s.db)
+}
+
+func ensureLocalStreamTx(ctx context.Context, tx *sql.Tx, streamID string, kind string, db ...*sql.DB) error {
 	streamID = strings.TrimSpace(streamID)
 	if streamID == "" {
 		return errors.New("stream id is required")
@@ -62,7 +68,7 @@ func (s *WorkspaceStateDB) EnsureLocalStream(ctx context.Context, streamID strin
 		kind = "unknown"
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err := s.db.ExecContext(ctx, `
+	query := `
 		INSERT INTO streams(stream_id, kind, latest_update_id, created_at, updated_at)
 		VALUES (?, ?, 0, ?, ?)
 		ON CONFLICT(stream_id) DO UPDATE SET
@@ -71,12 +77,17 @@ func (s *WorkspaceStateDB) EnsureLocalStream(ctx context.Context, streamID strin
 				WHEN excluded.kind = 'unknown' THEN streams.kind
 				ELSE streams.kind
 			END,
-			updated_at = excluded.updated_at`,
-		streamID,
-		kind,
-		now,
-		now,
-	)
+			updated_at = excluded.updated_at`
+	args := []any{streamID, kind, now, now}
+	var err error
+	if tx != nil {
+		_, err = tx.ExecContext(ctx, query, args...)
+	} else {
+		if len(db) == 0 || db[0] == nil {
+			return errors.New("state db is required")
+		}
+		_, err = db[0].ExecContext(ctx, query, args...)
+	}
 	return err
 }
 
@@ -165,7 +176,9 @@ func (s *WorkspaceStateDB) UpsertOutbox(ctx context.Context, mutation StreamMuta
 			       actor_type = ?,
 			       reason = ?,
 			       kind_hint = ?,
-			       depends_on_id = ?
+			       depends_on_id = ?,
+			       dropped_at = NULL,
+			       drop_reason = NULL
 			 WHERE id = ?`,
 			sha,
 			mutation.UpdateBytes,
@@ -209,13 +222,27 @@ func (s *WorkspaceStateDB) ReadyLocalOutbox(ctx context.Context, streamID string
 	if s == nil || s.db == nil {
 		return nil, errors.New("state db is required")
 	}
+	return readyLocalOutboxWithQueryer(ctx, s.db, streamID, limit)
+}
+
+func readyLocalOutboxTx(ctx context.Context, tx *sql.Tx, streamID string, limit int) ([]StreamOutboxRow, error) {
+	if tx == nil {
+		return nil, errors.New("transaction is required")
+	}
+	return readyLocalOutboxWithQueryer(ctx, tx, streamID, limit)
+}
+
+func readyLocalOutboxWithQueryer(ctx context.Context, queryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, streamID string, limit int) ([]StreamOutboxRow, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := queryer.QueryContext(ctx, `
 		SELECT `+outboxColumns+`
 		  FROM stream_outbox
 		 WHERE stream_id = ?
+		   AND dropped_at IS NULL
 		   AND local_applied_at IS NULL
 		   AND (
 		     depends_on_id IS NULL
@@ -238,10 +265,23 @@ func (s *WorkspaceStateDB) MarkOutboxLocallyApplied(ctx context.Context, outboxI
 	if s == nil || s.db == nil {
 		return errors.New("state db is required")
 	}
+	return markOutboxLocallyAppliedWithExecer(ctx, s.db, outboxID, at)
+}
+
+func markOutboxLocallyAppliedTx(ctx context.Context, tx *sql.Tx, outboxID int64, at time.Time) error {
+	if tx == nil {
+		return errors.New("transaction is required")
+	}
+	return markOutboxLocallyAppliedWithExecer(ctx, tx, outboxID, at)
+}
+
+func markOutboxLocallyAppliedWithExecer(ctx context.Context, execer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, outboxID int64, at time.Time) error {
 	if at.IsZero() {
 		at = time.Now().UTC()
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE stream_outbox SET local_applied_at = ? WHERE id = ?`, at.UTC().Format(time.RFC3339Nano), outboxID)
+	_, err := execer.ExecContext(ctx, `UPDATE stream_outbox SET local_applied_at = ? WHERE id = ?`, at.UTC().Format(time.RFC3339Nano), outboxID)
 	return err
 }
 
@@ -253,6 +293,7 @@ func (s *WorkspaceStateDB) NextSendableOutboxRow(ctx context.Context) (*StreamOu
 		SELECT `+outboxColumns+`
 		  FROM stream_outbox
 		 WHERE acked_at IS NULL
+		   AND dropped_at IS NULL
 		   AND local_applied_at IS NOT NULL
 		   AND (
 		     depends_on_id IS NULL
@@ -274,6 +315,38 @@ func (s *WorkspaceStateDB) NextSendableOutboxRow(ctx context.Context) (*StreamOu
 	return &outbox, nil
 }
 
+func (s *WorkspaceStateDB) DependentOutboxStreamIDs(ctx context.Context, outboxID int64) ([]string, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("state db is required")
+	}
+	if outboxID <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT stream_id
+		  FROM stream_outbox
+		 WHERE depends_on_id = ?
+		   AND local_applied_at IS NULL
+		   AND acked_at IS NULL
+		   AND dropped_at IS NULL
+		 ORDER BY stream_id`, outboxID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	streamIDs := []string{}
+	for rows.Next() {
+		var streamID string
+		if err := rows.Scan(&streamID); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(streamID) != "" {
+			streamIDs = append(streamIDs, streamID)
+		}
+	}
+	return streamIDs, rows.Err()
+}
+
 func (s *WorkspaceStateDB) PendingOutboxCount(ctx context.Context, streamID string) (int, error) {
 	if s == nil || s.db == nil {
 		return 0, errors.New("state db is required")
@@ -287,7 +360,8 @@ func (s *WorkspaceStateDB) PendingOutboxCount(ctx context.Context, streamID stri
 		SELECT COUNT(*)
 		  FROM stream_outbox
 		 WHERE stream_id = ?
-		   AND acked_at IS NULL`, streamID).Scan(&count)
+		   AND acked_at IS NULL
+		   AND dropped_at IS NULL`, streamID).Scan(&count)
 	return count, err
 }
 
@@ -347,6 +421,59 @@ func (s *WorkspaceStateDB) MarkOutboxAcked(ctx context.Context, outboxID int64, 
 	return err
 }
 
+func (s *WorkspaceStateDB) MarkOutboxDropped(ctx context.Context, outboxID int64, reason string, at time.Time) error {
+	if s == nil || s.db == nil {
+		return errors.New("state db is required")
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "dropped"
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE stream_outbox
+		   SET dropped_at = ?,
+		       drop_reason = ?
+		 WHERE id = ?
+		   AND acked_at IS NULL`,
+		at.UTC().Format(time.RFC3339Nano),
+		reason,
+		outboxID,
+	)
+	return err
+}
+
+func (s *WorkspaceStateDB) DropPendingOutboxForStream(ctx context.Context, streamID string, reason string, at time.Time) error {
+	if s == nil || s.db == nil {
+		return errors.New("state db is required")
+	}
+	streamID = strings.TrimSpace(streamID)
+	if streamID == "" {
+		return errors.New("stream id is required")
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "stream-not-live"
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE stream_outbox
+		   SET dropped_at = ?,
+		       drop_reason = ?
+		 WHERE stream_id = ?
+		   AND acked_at IS NULL
+		   AND dropped_at IS NULL`,
+		at.UTC().Format(time.RFC3339Nano),
+		reason,
+		streamID,
+	)
+	return err
+}
+
 func (s *WorkspaceStateDB) InsertInboxUpdate(ctx context.Context, streamID string, update []byte, remoteUpdateID int64) (StreamInboxRow, bool, error) {
 	if s == nil || s.db == nil {
 		return StreamInboxRow{}, false, errors.New("state db is required")
@@ -389,10 +516,23 @@ func (s *WorkspaceStateDB) UnappliedInbox(ctx context.Context, streamID string, 
 	if s == nil || s.db == nil {
 		return nil, errors.New("state db is required")
 	}
+	return unappliedInboxWithQueryer(ctx, s.db, streamID, limit)
+}
+
+func unappliedInboxTx(ctx context.Context, tx *sql.Tx, streamID string, limit int) ([]StreamInboxRow, error) {
+	if tx == nil {
+		return nil, errors.New("transaction is required")
+	}
+	return unappliedInboxWithQueryer(ctx, tx, streamID, limit)
+}
+
+func unappliedInboxWithQueryer(ctx context.Context, queryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, streamID string, limit int) ([]StreamInboxRow, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := queryer.QueryContext(ctx, `
 		SELECT id, stream_id, update_sha256, update_bytes, remote_update_id, received_at, applied_at
 		  FROM stream_inbox
 		 WHERE stream_id = ? AND applied_at IS NULL
@@ -417,14 +557,27 @@ func (s *WorkspaceStateDB) MarkInboxApplied(ctx context.Context, inboxID int64, 
 	if s == nil || s.db == nil {
 		return errors.New("state db is required")
 	}
+	return markInboxAppliedWithExecer(ctx, s.db, inboxID, at)
+}
+
+func markInboxAppliedTx(ctx context.Context, tx *sql.Tx, inboxID int64, at time.Time) error {
+	if tx == nil {
+		return errors.New("transaction is required")
+	}
+	return markInboxAppliedWithExecer(ctx, tx, inboxID, at)
+}
+
+func markInboxAppliedWithExecer(ctx context.Context, execer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, inboxID int64, at time.Time) error {
 	if at.IsZero() {
 		at = time.Now().UTC()
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE stream_inbox SET applied_at = ? WHERE id = ?`, at.UTC().Format(time.RFC3339Nano), inboxID)
+	_, err := execer.ExecContext(ctx, `UPDATE stream_inbox SET applied_at = ? WHERE id = ?`, at.UTC().Format(time.RFC3339Nano), inboxID)
 	return err
 }
 
-const outboxColumns = `id, stream_id, mutation_key, update_sha256, update_bytes, actor_id, actor_type, reason, kind_hint, depends_on_id, local_applied_at, sent_at, acked_at, ack_update_id`
+const outboxColumns = `id, stream_id, mutation_key, update_sha256, update_bytes, actor_id, actor_type, reason, kind_hint, depends_on_id, local_applied_at, sent_at, acked_at, ack_update_id, dropped_at, drop_reason`
 
 func resolveOutboxDependencyID(ctx context.Context, tx *sql.Tx, streamID string, mutationKey string) (int64, error) {
 	mutationKey = strings.TrimSpace(mutationKey)
@@ -433,9 +586,9 @@ func resolveOutboxDependencyID(ctx context.Context, tx *sql.Tx, streamID string,
 	}
 	var row *sql.Row
 	if strings.TrimSpace(streamID) != "" {
-		row = tx.QueryRowContext(ctx, `SELECT id FROM stream_outbox WHERE stream_id = ? AND mutation_key = ?`, strings.TrimSpace(streamID), mutationKey)
+		row = tx.QueryRowContext(ctx, `SELECT id FROM stream_outbox WHERE stream_id = ? AND mutation_key = ? AND dropped_at IS NULL`, strings.TrimSpace(streamID), mutationKey)
 	} else {
-		row = tx.QueryRowContext(ctx, `SELECT id FROM stream_outbox WHERE mutation_key = ?`, mutationKey)
+		row = tx.QueryRowContext(ctx, `SELECT id FROM stream_outbox WHERE mutation_key = ? AND dropped_at IS NULL`, mutationKey)
 	}
 	var id int64
 	if err := row.Scan(&id); err != nil {
@@ -481,6 +634,8 @@ func scanOutboxRow(scanner interface{ Scan(...any) error }) (StreamOutboxRow, er
 		&row.SentAt,
 		&row.AckedAt,
 		&row.AckUpdateID,
+		&row.DroppedAt,
+		&row.DropReason,
 	)
 	return row, err
 }

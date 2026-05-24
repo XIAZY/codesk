@@ -1,7 +1,8 @@
 # CRDT-Native Subdocs Implementation Summary
 
 Branch: `codex/crdt-native-subdocs`  
-Latest implementation commit: `9c3ccaf Harden CRDT projection conflict recovery`
+Latest pushed implementation commit: `0cf6d50 Document CRDT stream implementation summary`  
+Review hardening changes after that commit are tracked in `docs/crdt-review-fixes-execplan.md`.
 
 ## What Was Implemented
 
@@ -48,6 +49,28 @@ Latest implementation commit: `9c3ccaf Harden CRDT projection conflict recovery`
   - `document_sync.go`;
   - `reconcile_queue.go`;
   - `replica.go`.
+- Hardened the stream sync state machine after review:
+  - root manifest validation rejects hard-deleted entries;
+  - root mutation keys include intent payloads;
+  - backend stream writes are authorized by root/content stream authority;
+  - compatibility creates apply root and content updates transactionally;
+  - daemon stream queue application persists state and applied markers atomically;
+  - projection paths advance only after filesystem jobs complete;
+  - retryable move collisions can be revived, and move swaps use temp moves;
+  - materialized directory deletes tombstone directory trees;
+  - stale backend-rejected content outbox rows are dropped without blocking later sends;
+  - content streams not live in the root manifest cannot apply local outbox or project bytes to disk.
+
+## Namespace And Compatibility Policies
+
+- Root namespace names are normalized with `rootmanifest.NormalizeName`: names are trimmed and compared case-insensitively within a parent directory.
+- `Location.Name` preserves the trimmed display name, while `Location.NormName` is the canonical sibling key.
+- Duplicate desired paths are resolved by projection-only conflict paths. The root manifest location remains the desired namespace location; conflict paths are local materialization details.
+- Generic stream APIs are now the authority for CRDT writes. A stream update is accepted only for the workspace root stream or a live content stream referenced by the current root manifest.
+- Legacy document HTTP routes and document websocket routes remain as stream-backed compatibility aliases. They do not restore SQL document authority.
+- `ClientIDSeed: 1001` remains a legacy document response/create compatibility field. It is not used as stream identity, authorization, or root/content authority.
+- `DocumentRooms`, `DocumentRoom`, and `DocumentConn` names remain for websocket room plumbing even when the room carries a generic stream. Renaming them was deferred because it is a broad mechanical diff with little correctness value.
+- Log-path notification suppression remains an existing product notification policy outside the CRDT projection model. Agent logs are not treated as normal notification-bearing documents.
 
 ## Different From Or Not Implemented From The Design
 
@@ -62,7 +85,8 @@ Latest implementation commit: `9c3ccaf Harden CRDT projection conflict recovery`
 - No production backfill from pre-existing SQL `documents` rows into root/content streams was added. Schema initialization drops the old document tables instead of migrating their data.
 - Bulk import handling is bounded, not optimized. Large imports are processed across multiple reconciliation cycles by byte and row budgets.
 - Property-style exhaustive tests were not added for every resolver/projector invariant. Focused unit, integration, Docker regression, Postgres, frontend, and live smoke coverage were added and run.
-- The branch is pushed but not merged, and no PR was opened by this work.
+- Field-level CRDT storage for each root entry property was not implemented. Root entries are stored as whole-entry JSON values inside `Y.Map("entriesById")`; validation and projection hardening protect the current representation.
+- The branch is pushed but not merged.
 
 ## Errors Hit And Fixes Applied
 
@@ -92,15 +116,21 @@ Latest implementation commit: `9c3ccaf Harden CRDT projection conflict recovery`
   - `daemon_a file README.md did not converge: got "offline-a\n" want "offline-b\n"`.
   - Root cause: generated conflict paths could be mistaken for user-authored moves when file keys were reused during projection.
   - Fixed by adding path ownership guards before file-key and clean-hash move detection accepts a move.
+- Dirty-delete Docker regression later exposed a stale old-content stream race:
+  - the daemon locally applied an old content outbox row after the root manifest had tombstoned that stream;
+  - the backend correctly rejected the stale content update as unreferenced;
+  - local projection had already advanced the old stream's clean hash to dirty bytes, allowing a clean-delete job to remove the file.
+  - Fixed by dropping non-live content outbox before local apply and by keeping dropped outbox rows as local dirty-byte evidence for root delete planning.
 
-## Final Verification Run
+## Verification Status
 
-- `go test ./...`
-- `npm test && npm run build`
+Final review-hardening verification on 2026-05-24 passed:
+
+- `PATH="$HOME/.cargo/bin:$PATH" go test ./...`
+- `cd frontend && npm test && npm run build`
 - daemon installer and uninstaller script tests
-- `scripts/test-postgres.sh`
-- `scripts/test-live.sh`
-- focused Docker regression for offline same-path creates
-- full Docker regression: `go test -tags=regression ./test/regression -count=1`
+- `sudo -n env HOME="$HOME" PATH="$HOME/.cargo/bin:$PATH" GOCACHE=/tmp/notty-gocache GOPATH="$HOME/go" scripts/test-postgres.sh`
+- `sudo -n env HOME="$HOME" PATH="$HOME/.cargo/bin:$PATH" GOCACHE=/tmp/notty-gocache GOPATH="$HOME/go" scripts/test-live.sh`
+- `sudo -n env HOME="$HOME" PATH="$HOME/.cargo/bin:$PATH" GOCACHE=/tmp/notty-gocache GOPATH="$HOME/go" go test -tags=regression ./test/regression -count=1 -timeout 30m -v`
 
-All final verification commands passed.
+Known non-failing warnings: frontend Vite esbuild/oxc deprecation warnings and the existing production chunk-size warning.

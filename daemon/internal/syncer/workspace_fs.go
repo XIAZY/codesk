@@ -56,26 +56,32 @@ func (e *FSError) Unwrap() error {
 }
 
 func NewWorkspaceFS(root string) *WorkspaceFS {
+	fs, err := OpenWorkspaceFS(root)
+	if err != nil {
+		panic(fmt.Sprintf("open workspace fs: %v", err))
+	}
+	return fs
+}
+
+func OpenWorkspaceFS(root string) (*WorkspaceFS, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		abs = filepath.Clean(root)
 	}
 	lock, err := OpenFSLockDB(abs, "workspace-fs")
 	if err != nil {
-		lock = nil
+		return nil, err
 	}
-	return &WorkspaceFS{Root: abs, Locks: lock}
+	return &WorkspaceFS{Root: abs, Locks: lock}, nil
 }
 
-func (fs *WorkspaceFS) CleanupStaleLocks() error {
-	if fs == nil || fs.Root == "" {
+func (fs *WorkspaceFS) Close() error {
+	if fs == nil || fs.Locks == nil {
 		return nil
 	}
-	lockRoot := fs.lockRoot()
-	if err := os.RemoveAll(lockRoot); err != nil {
-		return &FSError{Op: "cleanup-locks", Path: lockRoot, Err: err}
-	}
-	return nil
+	err := fs.Locks.Close()
+	fs.Locks = nil
+	return err
 }
 
 func (fs *WorkspaceFS) Read(path string) (FileSnapshot, error) {
@@ -83,30 +89,34 @@ func (fs *WorkspaceFS) Read(path string) (FileSnapshot, error) {
 	if err != nil {
 		return FileSnapshot{}, err
 	}
-	unlock, err := fs.lockPaths(path)
+	var snapshot FileSnapshot
+	err = fs.withFilesystemLock("read", path, "", func() error {
+		content, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			snapshot = FileSnapshot{Path: path, Exists: false}
+			return nil
+		}
+		if err != nil {
+			return &FSError{Op: "read", Path: path, Err: err}
+		}
+		info, statErr := os.Lstat(path)
+		stat := FileStat{Path: path, Exists: true}
+		if statErr == nil {
+			stat = fileStatFromInfo(path, info)
+		}
+		snapshot = FileSnapshot{
+			Path:   path,
+			Exists: true,
+			Stat:   stat,
+			Bytes:  content,
+			Hash:   projectedHashBytes(content),
+		}
+		return nil
+	})
 	if err != nil {
 		return FileSnapshot{}, err
 	}
-	defer unlock()
-	content, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return FileSnapshot{Path: path, Exists: false}, nil
-	}
-	if err != nil {
-		return FileSnapshot{}, &FSError{Op: "read", Path: path, Err: err}
-	}
-	info, statErr := os.Lstat(path)
-	stat := FileStat{Path: path, Exists: true}
-	if statErr == nil {
-		stat = fileStatFromInfo(path, info)
-	}
-	return FileSnapshot{
-		Path:   path,
-		Exists: true,
-		Stat:   stat,
-		Bytes:  content,
-		Hash:   projectedHashBytes(content),
-	}, nil
+	return snapshot, nil
 }
 
 func (fs *WorkspaceFS) Append(path string, content string) error {
@@ -369,23 +379,18 @@ func (fs *WorkspaceFS) cleanPath(path string) (string, error) {
 	return abs, nil
 }
 
-func (fs *WorkspaceFS) lockPaths(paths ...string) (func(), error) {
-	return func() {}, nil
-}
-
 func (fs *WorkspaceFS) withFilesystemLock(operation string, pathA string, pathB string, fn func() error) error {
 	return fs.withFilesystemLockContext(context.Background(), operation, pathA, pathB, fn)
 }
 
 func (fs *WorkspaceFS) withFilesystemLockContext(ctx context.Context, operation string, pathA string, pathB string, fn func() error) error {
-	if fs == nil || fs.Locks == nil {
-		return fn()
+	if fs == nil {
+		return errors.New("workspace fs is required")
+	}
+	if fs.Locks == nil {
+		return errors.New("workspace fs lock is required")
 	}
 	return fs.Locks.WithFilesystemLock(ctx, operation, pathA, pathB, fn)
-}
-
-func (fs *WorkspaceFS) lockRoot() string {
-	return filepath.Join(fs.Root, ".notty", "locks")
 }
 
 func (fs *WorkspaceFS) archivePath(path, reason string, attempt int) string {
