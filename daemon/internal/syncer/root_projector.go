@@ -67,6 +67,10 @@ func (p RootManifestProjector) CaptureLocal(ctx context.Context, rootDoc *crdt.D
 	if err != nil {
 		return nil, err
 	}
+	// TODO: Use fsnotify-backed scan hints for steady-state local changes so
+	// no-hint reconciles do not full-scan on every tick. Keep periodic full
+	// scans as the correctness fallback for missed events, overflow, and
+	// daemon downtime.
 	scan, err := p.FS.Scan(ctx, ScanOptions{
 		Hints:        hints,
 		StatOnly:     true,
