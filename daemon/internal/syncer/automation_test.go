@@ -232,7 +232,7 @@ func TestToolGatewayCreateThreadResolvesPathQuoteToRelativeAnchors(t *testing.T)
 	doc.Transact(func(txn *crdt.Transaction) {
 		text.Insert(txn, 0, "intro\nrepeat target\nother line\n", nil)
 	})
-	stateID, err := state.PersistLatestStreamDoc(context.Background(), "doc_spec", doc, contentSHA256([]byte("intro\nrepeat target\nother line\n")))
+	stateID, err := state.persistLatestStreamDocFixture(context.Background(), "doc_spec", doc, contentSHA256([]byte("intro\nrepeat target\nother line\n")))
 	if err != nil {
 		t.Fatalf("persist stream doc: %v", err)
 	}

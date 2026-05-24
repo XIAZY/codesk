@@ -130,12 +130,13 @@ func (s *Store) CreateStreamDocument(req CreateDocumentRequest, meta OperationMe
 	}
 	now := time.Now().UTC()
 	document := &Document{
-		ID:           "doc_" + uuid.NewString(),
-		Path:         path,
-		DesiredPath:  path,
-		Title:        titleFromPath(path),
-		UpdatedAt:    now,
-		ClientIDSeed: 1001,
+		ID:                 "doc_" + uuid.NewString(),
+		Path:               path,
+		DesiredPath:        path,
+		Title:              titleFromPath(path),
+		NotificationPolicy: strings.TrimSpace(req.NotificationPolicy),
+		UpdatedAt:          now,
+		ClientIDSeed:       1001,
 	}
 	if err := s.MirrorDocumentCreateToStreams(document, req.Content, nil, meta); err != nil {
 		return nil, err
@@ -252,7 +253,7 @@ func (s *Store) MirrorDocumentCreateToStreams(document *Document, content string
 	if err != nil {
 		return err
 	}
-	intents, err := rootCreateFileIntents(manifest, document.ID, document.Path, now, meta)
+	intents, err := rootCreateFileIntents(manifest, document.ID, document.Path, document.NotificationPolicy, now, meta)
 	if err != nil {
 		return err
 	}
@@ -287,12 +288,15 @@ func (s *Store) MirrorDocumentMoveToRoot(documentID string, nextPath string, upd
 	if err != nil {
 		return err
 	}
-	entry.UpdatedAt = updatedAt.Format(time.RFC3339Nano)
+	updatedAtString := updatedAt.Format(time.RFC3339Nano)
+	entry.UpdatedAt = updatedAtString
 	entry.UpdatedBy = meta.ActorID
 	intents = append(intents, RootIntent{
-		Type:    "loc",
-		EntryID: documentID,
-		Loc:     loc,
+		Type:      "loc",
+		EntryID:   documentID,
+		Loc:       loc,
+		UpdatedBy: meta.ActorID,
+		UpdatedAt: updatedAtString,
 	})
 	rootDoc, _, err := s.RestoreStreamDoc(rootStreamID)
 	if err != nil {
@@ -319,8 +323,10 @@ func (s *Store) MirrorDocumentDeleteToRoot(documentID string, deletedAt time.Tim
 		return err
 	}
 	update, err := ApplyRootIntents(rootDoc, []RootIntent{{
-		Type:    "tombstone",
-		EntryID: documentID,
+		Type:      "tombstone",
+		EntryID:   documentID,
+		UpdatedBy: meta.ActorID,
+		UpdatedAt: deletedAt.Format(time.RFC3339Nano),
 		Tombstone: &RootTombstone{
 			ActorID:   meta.ActorID,
 			ActorType: meta.ActorType,
@@ -347,11 +353,12 @@ func (s *Store) MirrorContentUpdateToStream(documentID string, update []byte, me
 
 func (s *Store) streamDocumentFromEntry(entry RootEntry, materializedPath string, desiredPath string) *Document {
 	document := &Document{
-		ID:           entry.ID,
-		Path:         materializedPath,
-		DesiredPath:  desiredPath,
-		Title:        titleFromPath(materializedPath),
-		ClientIDSeed: 1001,
+		ID:                 entry.ID,
+		Path:               materializedPath,
+		DesiredPath:        desiredPath,
+		Title:              titleFromPath(materializedPath),
+		NotificationPolicy: rootNotificationPolicyForDocument(entry.NotificationPolicy),
+		ClientIDSeed:       1001,
 	}
 	if updatedAt, ok := parseRootEntryTime(entry.UpdatedAt); ok {
 		document.UpdatedAt = updatedAt
@@ -368,7 +375,15 @@ func (s *Store) streamDocumentFromEntry(entry RootEntry, materializedPath string
 	return document
 }
 
-func rootCreateFileIntents(manifest RootManifest, documentID string, documentPath string, now time.Time, meta OperationMeta) ([]RootIntent, error) {
+func rootNotificationPolicyForDocument(policy string) string {
+	policy = strings.TrimSpace(policy)
+	if policy == "" || policy == RootNotificationPolicyNormal {
+		return ""
+	}
+	return policy
+}
+
+func rootCreateFileIntents(manifest RootManifest, documentID string, documentPath string, notificationPolicy string, now time.Time, meta OperationMeta) ([]RootIntent, error) {
 	intents, loc, err := rootLocationIntentsForPath(manifest, documentPath, now, meta)
 	if err != nil {
 		return nil, err
@@ -377,14 +392,15 @@ func rootCreateFileIntents(manifest RootManifest, documentID string, documentPat
 	intents = append(intents, RootIntent{
 		Type: "create-file",
 		Entry: RootEntry{
-			ID:              documentID,
-			Kind:            RootEntryKindFile,
-			Loc:             loc,
-			ContentStreamID: documentID,
-			CreatedBy:       meta.ActorID,
-			UpdatedBy:       meta.ActorID,
-			CreatedAt:       stamp,
-			UpdatedAt:       stamp,
+			ID:                 documentID,
+			Kind:               RootEntryKindFile,
+			Loc:                loc,
+			ContentStreamID:    documentID,
+			CreatedBy:          meta.ActorID,
+			UpdatedBy:          meta.ActorID,
+			CreatedAt:          stamp,
+			UpdatedAt:          stamp,
+			NotificationPolicy: strings.TrimSpace(notificationPolicy),
 		},
 	})
 	return intents, nil

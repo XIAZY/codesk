@@ -78,6 +78,11 @@ func (s *Server) handleStreamWebsocket(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStreamWebsocketForID(w http.ResponseWriter, r *http.Request, streamID string) {
+	if _, err := s.requestStore(r).AuthorizeStreamAccess(streamID); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
@@ -242,7 +247,7 @@ func (s *Server) applyAndPublishStreamUpdate(r *http.Request, room *DocumentRoom
 
 func applyAndPublishStreamUpdate(store *Store, broker *Broker, room *DocumentRoom, exclude *DocumentConn, streamID string, update []byte, meta OperationMeta) (*ApplyStreamUpdateResult, error) {
 	if isCanonicalEmptyYjsUpdate(update) {
-		head, err := store.GetStreamHead(streamID)
+		head, err := store.GetAuthorizedStreamHead(streamID)
 		if err != nil {
 			if err == ErrNotFound {
 				return &ApplyStreamUpdateResult{Accepted: true, Applied: false}, nil

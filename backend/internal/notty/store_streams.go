@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -35,6 +36,11 @@ type StreamHead struct {
 	StateVector []byte
 	UpdateID    int64
 	UpdatedAt   time.Time
+}
+
+type LegacyRootStorageFingerprint struct {
+	TextJSON    string
+	EntriesJSON string
 }
 
 func (s *Store) BootstrapWorkspaceStreams() (string, error) {
@@ -181,7 +187,7 @@ func (s *Store) ApplyStreamUpdate(streamID string, update []byte, meta Operation
 func applyStreamUpdateTx(tx *sql.Tx, workspaceID string, streamID string, update []byte, meta OperationMeta) (ApplyStreamUpdateResult, error) {
 	now := time.Now().UTC()
 	hash := streamUpdateHash(update)
-	allowedKind, err := streamUpdateAllowedTx(tx, workspaceID, streamID)
+	allowedKind, err := streamAccessAllowedTx(tx, workspaceID, streamID)
 	if err != nil {
 		return ApplyStreamUpdateResult{}, err
 	}
@@ -227,6 +233,13 @@ func applyStreamUpdateTx(tx *sql.Tx, workspaceID string, streamID string, update
 			return ApplyStreamUpdateResult{}, err
 		}
 	}
+	var beforeLegacyRootStorage LegacyRootStorageFingerprint
+	if rootStream {
+		beforeLegacyRootStorage, err = legacyRootStorageFingerprint(doc)
+		if err != nil {
+			return ApplyStreamUpdateResult{}, err
+		}
+	}
 	beforeSV, err := doc.StateVectorV1()
 	if err != nil {
 		return ApplyStreamUpdateResult{}, err
@@ -241,6 +254,13 @@ func applyStreamUpdateTx(tx *sql.Tx, workspaceID string, streamID string, update
 	}
 	afterState := doc.EncodeStateAsUpdate()
 	if rootStream {
+		afterLegacyRootStorage, err := legacyRootStorageFingerprint(doc)
+		if err != nil {
+			return ApplyStreamUpdateResult{}, err
+		}
+		if beforeLegacyRootStorage != afterLegacyRootStorage {
+			return ApplyStreamUpdateResult{}, errors.New("legacy root storage is read-only; use field maps")
+		}
 		nextRoot, err := ReadRootManifest(doc)
 		if err != nil {
 			return ApplyStreamUpdateResult{}, err
@@ -309,6 +329,36 @@ func applyStreamUpdateTx(tx *sql.Tx, workspaceID string, streamID string, update
 	}, nil
 }
 
+func legacyRootStorageFingerprint(doc *crdt.Doc) (LegacyRootStorageFingerprint, error) {
+	if doc == nil {
+		return LegacyRootStorageFingerprint{}, errors.New("root manifest doc is required")
+	}
+	entriesJSON, err := doc.GetMap(RootManifestMapName).JSON()
+	if err != nil {
+		return LegacyRootStorageFingerprint{}, err
+	}
+	return LegacyRootStorageFingerprint{
+		TextJSON:    canonicalRootStorageJSON(doc.GetText(RootManifestTextName).ToString()),
+		EntriesJSON: canonicalRootStorageJSON(entriesJSON),
+	}, nil
+}
+
+func canonicalRootStorageJSON(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var value any
+	if err := json.Unmarshal([]byte(raw), &value); err != nil {
+		return raw
+	}
+	canonical, err := json.Marshal(value)
+	if err != nil {
+		return raw
+	}
+	return string(canonical)
+}
+
 func nonUnknownStreamKind(kind string) string {
 	kind = strings.TrimSpace(kind)
 	if kind == "" || kind == StreamKindUnknown {
@@ -317,7 +367,7 @@ func nonUnknownStreamKind(kind string) string {
 	return kind
 }
 
-func streamUpdateAllowedTx(tx *sql.Tx, workspaceID string, streamID string) (string, error) {
+func streamAccessAllowedTx(tx *sql.Tx, workspaceID string, streamID string) (string, error) {
 	streamID = strings.TrimSpace(streamID)
 	if streamID == "" {
 		return "", errors.New("stream id is required")
@@ -384,6 +434,32 @@ func (s *Store) RestoreStreamDoc(streamID string) (*crdt.Doc, StreamHead, error)
 	return doc, head, nil
 }
 
+func (s *Store) AuthorizeStreamAccess(streamID string) (string, error) {
+	if s == nil || s.db == nil {
+		return "", errors.New("store database is required")
+	}
+	workspaceID := s.workspaceID
+	if workspaceID == "" {
+		workspaceID = s.state.WorkspaceID
+	}
+	if workspaceID == "" {
+		workspaceID = "ws_notty"
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	kind, err := streamAccessAllowedTx(tx, workspaceID, strings.TrimSpace(streamID))
+	if err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return kind, nil
+}
+
 func restoreStreamDoc(db *sql.DB, workspaceID string, streamID string) (*crdt.Doc, StreamHead, error) {
 	tx, err := db.Begin()
 	if err != nil {
@@ -429,16 +505,43 @@ func restoreStreamDocAtUpdate(db *sql.DB, workspaceID string, streamID string, u
 }
 
 func (s *Store) EncodeStreamSyncUpdates(streamID string, stateVector []byte) (StreamHead, [][]byte, error) {
-	doc, head, err := s.RestoreStreamDoc(streamID)
+	if s == nil || s.db == nil {
+		return StreamHead{}, nil, errors.New("store database is required")
+	}
+	workspaceID := s.workspaceID
+	if workspaceID == "" {
+		workspaceID = s.state.WorkspaceID
+	}
+	if workspaceID == "" {
+		workspaceID = "ws_notty"
+	}
+	streamID = strings.TrimSpace(streamID)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return StreamHead{}, nil, err
 	}
+	defer tx.Rollback()
+	allowedKind, err := streamAccessAllowedTx(tx, workspaceID, streamID)
+	if err != nil {
+		return StreamHead{}, nil, err
+	}
+	doc, head, err := restoreStreamDocForUpdateTx(tx, workspaceID, streamID)
+	if err != nil {
+		return StreamHead{}, nil, err
+	}
+	defer doc.Close()
 	currentStateVector, err := doc.StateVectorV1()
 	if err != nil {
 		return StreamHead{}, nil, err
 	}
 	head.StateVector = currentStateVector
+	if strings.TrimSpace(head.Kind) == "" || head.Kind == StreamKindUnknown {
+		head.Kind = allowedKind
+	}
 	if head.UpdateID <= 0 {
+		if err := tx.Commit(); err != nil {
+			return StreamHead{}, nil, err
+		}
 		return head, nil, nil
 	}
 	update, err := doc.EncodeStateAsUpdateV1(stateVector)
@@ -446,9 +549,52 @@ func (s *Store) EncodeStreamSyncUpdates(streamID string, stateVector []byte) (St
 		return StreamHead{}, nil, err
 	}
 	if len(update) == 0 {
+		if err := tx.Commit(); err != nil {
+			return StreamHead{}, nil, err
+		}
 		return head, nil, nil
 	}
+	if err := tx.Commit(); err != nil {
+		return StreamHead{}, nil, err
+	}
 	return head, [][]byte{update}, nil
+}
+
+func (s *Store) GetAuthorizedStreamHead(streamID string) (StreamHead, error) {
+	if s == nil || s.db == nil {
+		return StreamHead{}, errors.New("store database is required")
+	}
+	workspaceID := s.workspaceID
+	if workspaceID == "" {
+		workspaceID = s.state.WorkspaceID
+	}
+	if workspaceID == "" {
+		workspaceID = "ws_notty"
+	}
+	streamID = strings.TrimSpace(streamID)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return StreamHead{}, err
+	}
+	defer tx.Rollback()
+	allowedKind, err := streamAccessAllowedTx(tx, workspaceID, streamID)
+	if err != nil {
+		return StreamHead{}, err
+	}
+	head, err := getStreamHeadTx(tx, workspaceID, streamID)
+	if err == sql.ErrNoRows {
+		return StreamHead{}, ErrNotFound
+	}
+	if err != nil {
+		return StreamHead{}, err
+	}
+	if strings.TrimSpace(head.Kind) == "" || head.Kind == StreamKindUnknown {
+		head.Kind = allowedKind
+	}
+	if err := tx.Commit(); err != nil {
+		return StreamHead{}, err
+	}
+	return head, nil
 }
 
 func (s *Store) GetStreamHead(streamID string) (StreamHead, error) {

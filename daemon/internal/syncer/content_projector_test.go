@@ -26,7 +26,7 @@ func TestContentProjectorCapturesLocalEditFromProjectedBase(t *testing.T) {
 	defer state.Close()
 
 	doc := contentDoc(t, "doc", "alpha")
-	stateID, err := state.PersistLatestStreamDoc(ctx, "doc", doc, contentSHA256([]byte("alpha")))
+	stateID, err := state.persistLatestStreamDocFixture(ctx, "doc", doc, contentSHA256([]byte("alpha")))
 	if err != nil {
 		t.Fatalf("persist base: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestContentProjectorCapturesDirtyAppendButSkipsDirtyRewrite(t *testing.T) {
 	defer state.Close()
 
 	base := contentDoc(t, "doc", "alpha\n")
-	baseID, err := state.PersistLatestStreamDoc(ctx, "doc", base, contentSHA256([]byte("alpha\n")))
+	baseID, err := state.persistLatestStreamDocFixture(ctx, "doc", base, contentSHA256([]byte("alpha\n")))
 	if err != nil {
 		t.Fatalf("persist base: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestContentProjectorCapturesDirtyAppendButSkipsDirtyRewrite(t *testing.T) {
 		t.Fatalf("upsert dirty projection: %v", err)
 	}
 	remote := contentDoc(t, "doc", "alpha\nremote\n")
-	if _, err := state.PersistLatestStreamDoc(ctx, "doc", remote, contentSHA256([]byte("alpha\nremote\n"))); err != nil {
+	if _, err := state.persistLatestStreamDocFixture(ctx, "doc", remote, contentSHA256([]byte("alpha\nremote\n"))); err != nil {
 		t.Fatalf("persist remote: %v", err)
 	}
 	mutations, err := (ContentProjector{State: state, FS: fs, StreamID: "doc"}).CaptureLocal(ctx, base)
@@ -172,7 +172,7 @@ func TestContentProjectorPlansAndRunsSafeRemoteWrite(t *testing.T) {
 	defer state.Close()
 
 	base := contentDoc(t, "doc", "alpha")
-	baseID, err := state.PersistLatestStreamDoc(ctx, "doc", base, contentSHA256([]byte("alpha")))
+	baseID, err := state.persistLatestStreamDocFixture(ctx, "doc", base, contentSHA256([]byte("alpha")))
 	if err != nil {
 		t.Fatalf("persist base: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestContentProjectorPlansAndRunsSafeRemoteWrite(t *testing.T) {
 		t.Fatalf("upsert content projection: %v", err)
 	}
 	remote := contentDoc(t, "doc", "remote")
-	remoteID, err := state.PersistLatestStreamDoc(ctx, "doc", remote, contentSHA256([]byte("remote")))
+	remoteID, err := state.persistLatestStreamDocFixture(ctx, "doc", remote, contentSHA256([]byte("remote")))
 	if err != nil {
 		t.Fatalf("persist remote: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestWriteContentFSJobInfersDoneWhenTargetHashAlreadyPresent(t *testing.T) {
 	defer state.Close()
 
 	remote := contentDoc(t, "doc", "remote")
-	remoteID, err := state.PersistLatestStreamDoc(ctx, "doc", remote, contentSHA256([]byte("remote")))
+	remoteID, err := state.persistLatestStreamDocFixture(ctx, "doc", remote, contentSHA256([]byte("remote")))
 	if err != nil {
 		t.Fatalf("persist remote: %v", err)
 	}
@@ -289,7 +289,7 @@ func TestContentProjectorDoesNotOverwriteDirtyRemoteWrite(t *testing.T) {
 	defer state.Close()
 
 	remote := contentDoc(t, "doc", "remote")
-	remoteID, err := state.PersistLatestStreamDoc(ctx, "doc", remote, contentSHA256([]byte("remote")))
+	remoteID, err := state.persistLatestStreamDocFixture(ctx, "doc", remote, contentSHA256([]byte("remote")))
 	if err != nil {
 		t.Fatalf("persist remote: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestContentProjectorRetriesRemoteWriteAfterLocalProjectionCatchesUp(t *test
 	defer state.Close()
 
 	base := contentDoc(t, "doc", "base\n")
-	baseID, err := state.PersistLatestStreamDoc(ctx, "doc", base, contentSHA256([]byte("base\n")))
+	baseID, err := state.persistLatestStreamDocFixture(ctx, "doc", base, contentSHA256([]byte("base\n")))
 	if err != nil {
 		t.Fatalf("persist base: %v", err)
 	}
@@ -365,12 +365,12 @@ func TestContentProjectorRetriesRemoteWriteAfterLocalProjectionCatchesUp(t *test
 		t.Fatalf("stat primary file: %v", err)
 	}
 	primary := contentDoc(t, "doc", "base\nprimary edit\n")
-	primaryID, err := state.PersistLatestStreamDoc(ctx, "doc", primary, contentSHA256([]byte("base\nprimary edit\n")))
+	primaryID, err := state.persistLatestStreamDocFixture(ctx, "doc", primary, contentSHA256([]byte("base\nprimary edit\n")))
 	if err != nil {
 		t.Fatalf("persist primary: %v", err)
 	}
 	final := contentDoc(t, "doc", "base\nprimary edit\nagent edit\n")
-	finalID, err := state.PersistLatestStreamDoc(ctx, "doc", final, contentSHA256([]byte("base\nprimary edit\nagent edit\n")))
+	finalID, err := state.persistLatestStreamDocFixture(ctx, "doc", final, contentSHA256([]byte("base\nprimary edit\nagent edit\n")))
 	if err != nil {
 		t.Fatalf("persist final: %v", err)
 	}
@@ -436,7 +436,7 @@ func TestContentProjectorSkipsRemoteWriteWithoutMaterializedPath(t *testing.T) {
 	defer state.Close()
 	doc := contentDoc(t, "doc", "remote\n")
 	defer doc.Close()
-	stateID, err := state.PersistLatestStreamDoc(ctx, "doc", doc, contentSHA256([]byte("remote\n")))
+	stateID, err := state.persistLatestStreamDocFixture(ctx, "doc", doc, contentSHA256([]byte("remote\n")))
 	if err != nil {
 		t.Fatalf("persist remote: %v", err)
 	}
@@ -484,7 +484,7 @@ func TestWriteContentFSJobDoesNotOverwriteExistingFileWithUnknownBase(t *testing
 	defer state.Close()
 
 	remote := contentDoc(t, "doc", "remote snapshot")
-	remoteID, err := state.PersistLatestStreamDoc(ctx, "doc", remote, contentSHA256([]byte("remote snapshot")))
+	remoteID, err := state.persistLatestStreamDocFixture(ctx, "doc", remote, contentSHA256([]byte("remote snapshot")))
 	if err != nil {
 		t.Fatalf("persist remote: %v", err)
 	}

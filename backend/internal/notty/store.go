@@ -638,7 +638,7 @@ func (s *Store) eventBelongsToLogDocumentLocked(event *AgentEvent) bool {
 		return false
 	}
 	document := s.state.Documents[event.DocumentID]
-	return document != nil && isLogDocumentPath(document.Path)
+	return documentNotificationsQuiet(document)
 }
 
 func (s *Store) computedDocumentInboxLocked(agentID string) []*AgentEvent {
@@ -647,7 +647,7 @@ func (s *Store) computedDocumentInboxLocked(agentID string) []*AgentEvent {
 		if document == nil || document.UpdateID <= 0 {
 			continue
 		}
-		if isLogDocumentPath(document.Path) {
+		if documentNotificationsQuiet(document) {
 			continue
 		}
 		if s.documentInboxHandledLocked(agentID, document) {
@@ -1907,10 +1907,6 @@ func normalizeDocumentPath(value string) (string, error) {
 	return cleaned, nil
 }
 
-func isLogDocumentPath(path string) bool {
-	return strings.EqualFold(filepath.Ext(strings.TrimSpace(path)), ".log")
-}
-
 func titleFromPath(path string) string {
 	base := filepath.Base(path)
 	ext := filepath.Ext(base)
@@ -1928,6 +1924,13 @@ func titleFromPath(path string) string {
 		parts[index] = string(runes)
 	}
 	return strings.Join(parts, " ")
+}
+
+func documentNotificationsQuiet(document *Document) bool {
+	if document == nil {
+		return false
+	}
+	return strings.TrimSpace(document.NotificationPolicy) == RootNotificationPolicyQuiet
 }
 
 func buildUser(name, handle, role string) (*User, error) {
@@ -2294,7 +2297,7 @@ func SortedAgentEvents(state WorkspaceState) []*AgentEvent {
 	events := make([]*AgentEvent, 0, len(state.AgentEvents))
 	for _, event := range state.AgentEvents {
 		if event != nil && event.DocumentID != "" && strings.HasPrefix(event.Type, "document.") {
-			if document := state.Documents[event.DocumentID]; document != nil && isLogDocumentPath(document.Path) {
+			if document := state.Documents[event.DocumentID]; documentNotificationsQuiet(document) {
 				continue
 			}
 		}
@@ -2522,7 +2525,7 @@ func (s *Store) enqueueDocumentThreadEventsLocked(document *Document, meta Opera
 }
 
 func (s *Store) enqueueDocumentUpdateEventsLocked(document *Document, meta OperationMeta) {
-	if document == nil || isLogDocumentPath(document.Path) || document.UpdateID <= 1 {
+	if document == nil || documentNotificationsQuiet(document) || document.UpdateID <= 1 {
 		return
 	}
 	for _, agent := range s.state.Agents {

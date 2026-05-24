@@ -236,7 +236,7 @@ func TestRootManifestProjectorDoesNotTombstoneTrackedEntryWithUnprojectedContent
 	}
 	remote := contentDoc(t, "doc_a", "alpha\nremote\n")
 	defer remote.Close()
-	if _, err := state.PersistLatestStreamDoc(ctx, "doc_a", remote, contentSHA256([]byte("alpha\nremote\n"))); err != nil {
+	if _, err := state.persistLatestStreamDocFixture(ctx, "doc_a", remote, contentSHA256([]byte("alpha\nremote\n"))); err != nil {
 		t.Fatalf("persist remote content: %v", err)
 	}
 	if err := state.UpsertContentProjection(ctx, ContentProjectionRow{
@@ -677,7 +677,7 @@ func TestRootManifestProjectorClaimsUntrackedRemoteFileWhenBytesMatchLatestStrea
 	defer state.Close()
 	remote := contentDoc(t, "doc_remote", "remote\n")
 	defer remote.Close()
-	if _, err := state.PersistLatestStreamDoc(ctx, "doc_remote", remote, contentSHA256([]byte("remote\n"))); err != nil {
+	if _, err := state.persistLatestStreamDocFixture(ctx, "doc_remote", remote, contentSHA256([]byte("remote\n"))); err != nil {
 		t.Fatalf("persist remote stream: %v", err)
 	}
 	doc := crdt.New(crdt.WithGUID("root-stream"))
@@ -757,7 +757,7 @@ func TestRootManifestProjectorClaimsUntrackedCleanProjectionWhenLocalBytesDiffer
 	defer state.Close()
 	remote := contentDoc(t, "doc_remote", "remote\n")
 	defer remote.Close()
-	stateID, err := state.PersistLatestStreamDoc(ctx, "doc_remote", remote, contentSHA256([]byte("remote\n")))
+	stateID, err := state.persistLatestStreamDocFixture(ctx, "doc_remote", remote, contentSHA256([]byte("remote\n")))
 	if err != nil {
 		t.Fatalf("persist remote stream: %v", err)
 	}
@@ -833,7 +833,7 @@ func TestRootManifestProjectorDoesNotCreateDuplicateForManifestPathWithKnownStre
 	defer state.Close()
 	remote := contentDoc(t, "doc_remote", "remote\n")
 	defer remote.Close()
-	if _, err := state.PersistLatestStreamDoc(ctx, "doc_remote", remote, contentSHA256([]byte("remote\n"))); err != nil {
+	if _, err := state.persistLatestStreamDocFixture(ctx, "doc_remote", remote, contentSHA256([]byte("remote\n"))); err != nil {
 		t.Fatalf("persist remote stream: %v", err)
 	}
 	doc := crdt.New(crdt.WithGUID("root-stream"))
@@ -891,7 +891,7 @@ func TestRootManifestProjectorDoesNotCreateDuplicateForContentProjectedPathBefor
 	defer state.Close()
 	remote := contentDoc(t, "doc_remote", "remote\n")
 	defer remote.Close()
-	stateID, err := state.PersistLatestStreamDoc(ctx, "doc_remote", remote, contentSHA256([]byte("remote\n")))
+	stateID, err := state.persistLatestStreamDocFixture(ctx, "doc_remote", remote, contentSHA256([]byte("remote\n")))
 	if err != nil {
 		t.Fatalf("persist remote stream: %v", err)
 	}

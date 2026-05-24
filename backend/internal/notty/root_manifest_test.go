@@ -150,8 +150,9 @@ func TestValidateRootManifestAllowsDuplicatePathsRejectsImmutableChanges(t *test
 	}
 }
 
-func TestApplyRootIntentsStoresNativeEntriesMap(t *testing.T) {
+func TestApplyRootIntentsStoresFieldMapsWithoutLegacyWrites(t *testing.T) {
 	doc := crdt.New()
+	defer doc.Close()
 	if _, err := ApplyRootIntents(doc, []RootIntent{{
 		Type: "create-file",
 		Entry: RootEntry{
@@ -164,14 +165,28 @@ func TestApplyRootIntentsStoresNativeEntriesMap(t *testing.T) {
 		t.Fatalf("apply root intent: %v", err)
 	}
 	if got := strings.TrimSpace(doc.GetText(RootManifestTextName).ToString()); got != "" {
-		t.Fatalf("legacy root manifest text should be cleared, got %q", got)
+		t.Fatalf("legacy root manifest text should remain empty, got %q", got)
 	}
-	raw, err := doc.GetMap(RootManifestMapName).JSON()
+	rawLegacy, err := doc.GetMap(RootManifestMapName).JSON()
 	if err != nil {
 		t.Fatalf("read entries map json: %v", err)
 	}
-	if !strings.Contains(raw, `"doc_1"`) || !strings.Contains(raw, `"contentStreamId":"doc_1"`) {
-		t.Fatalf("entries map json missing doc_1: %s", raw)
+	if strings.TrimSpace(rawLegacy) != "{}" {
+		t.Fatalf("legacy entries map should stay empty, got %s", rawLegacy)
+	}
+	rawKind, err := doc.GetMap(RootManifestKindMapName).JSON()
+	if err != nil {
+		t.Fatalf("read kind field map json: %v", err)
+	}
+	if !strings.Contains(rawKind, `"doc_1":"file"`) {
+		t.Fatalf("kind field map missing doc_1: %s", rawKind)
+	}
+	rawContent, err := doc.GetMap(RootManifestContentStreamMapName).JSON()
+	if err != nil {
+		t.Fatalf("read content stream field map json: %v", err)
+	}
+	if !strings.Contains(rawContent, `"doc_1":"doc_1"`) {
+		t.Fatalf("content stream field map missing doc_1: %s", rawContent)
 	}
 	manifest, err := ReadRootManifest(doc)
 	if err != nil {

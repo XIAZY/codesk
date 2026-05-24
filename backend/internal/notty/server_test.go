@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/gorilla/websocket"
 	crdt "notty/internal/ycrdt"
 	"notty/internal/yproto"
 )
@@ -251,6 +252,37 @@ func TestGenericStreamHTTPUpdateRejectsUnreferencedContentStream(t *testing.T) {
 	router.ServeHTTP(recorder, request)
 	if recorder.Code == http.StatusOK {
 		t.Fatalf("expected unreferenced stream update to fail, got status 200 body=%s", recorder.Body.String())
+	}
+}
+
+func TestGenericStreamWebsocketRejectsUnauthorizedBeforeRoomJoin(t *testing.T) {
+	server, store := newTestServer(t)
+	if _, err := store.BootstrapWorkspaceStreams(); err != nil {
+		t.Fatalf("bootstrap streams: %v", err)
+	}
+	router := server.Routes()
+	httpServer := httptest.NewServer(router)
+	defer httpServer.Close()
+
+	streamID := "content_not_in_root"
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws/streams/" + streamID
+	conn, response, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err == nil {
+		conn.Close()
+		t.Fatal("expected unauthorized websocket handshake to fail")
+	}
+	if response == nil {
+		t.Fatalf("expected HTTP handshake response, got err=%v", err)
+	}
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected forbidden websocket handshake, got status %d", response.StatusCode)
+	}
+	roomID := streamRoomID(store.Snapshot().WorkspaceID, streamID)
+	server.rooms.mu.Lock()
+	_, roomCreated := server.rooms.rooms[roomID]
+	server.rooms.mu.Unlock()
+	if roomCreated {
+		t.Fatalf("unauthorized websocket should not create room %q", roomID)
 	}
 }
 

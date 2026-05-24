@@ -20,25 +20,27 @@ type WorkspaceState struct {
 }
 
 type Document struct {
-	ID           string    `json:"id"`
-	Path         string    `json:"path"`
-	DesiredPath  string    `json:"desiredPath,omitempty"`
-	Title        string    `json:"title"`
-	StateVector  string    `json:"stateVector,omitempty"`
-	UpdateID     int64     `json:"updateId,omitempty"`
-	UpdatedAt    time.Time `json:"updatedAt"`
-	ClientIDSeed uint64    `json:"clientIdSeed,omitempty"`
+	ID                 string    `json:"id"`
+	Path               string    `json:"path"`
+	DesiredPath        string    `json:"desiredPath,omitempty"`
+	Title              string    `json:"title"`
+	NotificationPolicy string    `json:"notificationPolicy,omitempty"`
+	StateVector        string    `json:"stateVector,omitempty"`
+	UpdateID           int64     `json:"updateId,omitempty"`
+	UpdatedAt          time.Time `json:"updatedAt"`
+	ClientIDSeed       uint64    `json:"clientIdSeed,omitempty"`
 }
 
 type DocumentMetadata struct {
-	ID           string    `json:"id"`
-	Path         string    `json:"path"`
-	DesiredPath  string    `json:"desiredPath,omitempty"`
-	Title        string    `json:"title"`
-	StateVector  string    `json:"stateVector,omitempty"`
-	UpdateID     int64     `json:"updateId,omitempty"`
-	UpdatedAt    time.Time `json:"updatedAt"`
-	ClientIDSeed uint64    `json:"clientIdSeed,omitempty"`
+	ID                 string    `json:"id"`
+	Path               string    `json:"path"`
+	DesiredPath        string    `json:"desiredPath,omitempty"`
+	Title              string    `json:"title"`
+	NotificationPolicy string    `json:"notificationPolicy,omitempty"`
+	StateVector        string    `json:"stateVector,omitempty"`
+	UpdateID           int64     `json:"updateId,omitempty"`
+	UpdatedAt          time.Time `json:"updatedAt"`
+	ClientIDSeed       uint64    `json:"clientIdSeed,omitempty"`
 }
 
 type ThreadAnchor struct {
@@ -326,8 +328,9 @@ type ReplyThreadRequest struct {
 }
 
 type CreateDocumentRequest struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	Path               string `json:"path"`
+	Content            string `json:"content"`
+	NotificationPolicy string `json:"notificationPolicy,omitempty"`
 }
 
 type UpdateDocumentRequest struct {
@@ -463,13 +466,14 @@ func documentMetadata(document *Document) *DocumentMetadata {
 		return nil
 	}
 	return &DocumentMetadata{
-		ID:           document.ID,
-		Path:         document.Path,
-		DesiredPath:  document.DesiredPath,
-		Title:        document.Title,
-		StateVector:  document.StateVector,
-		UpdateID:     document.UpdateID,
-		UpdatedAt:    document.UpdatedAt,
-		ClientIDSeed: document.ClientIDSeed,
+		ID:                 document.ID,
+		Path:               document.Path,
+		DesiredPath:        document.DesiredPath,
+		Title:              document.Title,
+		NotificationPolicy: document.NotificationPolicy,
+		StateVector:        document.StateVector,
+		UpdateID:           document.UpdateID,
+		UpdatedAt:          document.UpdatedAt,
+		ClientIDSeed:       document.ClientIDSeed,
 	}
 }

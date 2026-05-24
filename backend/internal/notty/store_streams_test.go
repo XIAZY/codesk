@@ -2,7 +2,9 @@ package notty
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -234,6 +236,64 @@ func TestPostgresStreamUpdateRejectsUnreferencedContentStream(t *testing.T) {
 	}
 }
 
+func TestPostgresStreamSyncAuthorizationUsesRootManifest(t *testing.T) {
+	dsn := postgresTestDSN(t)
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+	if err := initPostgresSchema(db); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+	if err := clearNottyTables(db); err != nil {
+		t.Fatalf("clear tables: %v", err)
+	}
+
+	store, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+	rootStreamID, err := store.BootstrapWorkspaceStreams()
+	if err != nil {
+		t.Fatalf("bootstrap streams: %v", err)
+	}
+	if _, _, err := store.EncodeStreamSyncUpdates(rootStreamID, nil); err != nil {
+		t.Fatalf("root stream sync should be allowed: %v", err)
+	}
+	if _, _, err := store.EncodeStreamSyncUpdates("content_not_in_root", nil); err == nil {
+		t.Fatal("expected unreferenced content stream sync to be rejected")
+	}
+
+	contentStreamID := "content_sync_authorized"
+	ensureRootContentEntryForTest(t, store, rootStreamID, contentStreamID, "sync-authorized.md")
+	if _, _, err := store.EncodeStreamSyncUpdates(contentStreamID, nil); err != nil {
+		t.Fatalf("live referenced content stream sync should be allowed: %v", err)
+	}
+
+	rootDoc, _, err := store.RestoreStreamDoc(rootStreamID)
+	if err != nil {
+		t.Fatalf("restore root stream: %v", err)
+	}
+	defer rootDoc.Close()
+	tombstoneUpdate, err := ApplyRootIntents(rootDoc, []RootIntent{{
+		Type:      "tombstone",
+		EntryID:   contentStreamID,
+		Tombstone: &RootTombstone{ActorID: "tester", ActorType: "human", At: "2026-05-24T00:00:00Z"},
+	}})
+	if err != nil {
+		t.Fatalf("build root tombstone update: %v", err)
+	}
+	if _, err := store.ApplyStreamUpdate(rootStreamID, tombstoneUpdate, OperationMeta{ActorID: "tester", ActorType: "human"}); err != nil {
+		t.Fatalf("apply root tombstone update: %v", err)
+	}
+	if _, _, err := store.EncodeStreamSyncUpdates(contentStreamID, nil); err == nil {
+		t.Fatal("expected tombstoned content stream sync to be rejected")
+	}
+}
+
 func TestPostgresRestoreStreamDocUsesStreamGUID(t *testing.T) {
 	dsn := postgresTestDSN(t)
 
@@ -308,6 +368,111 @@ func TestPostgresRootStreamValidationRejectsMalformedManifest(t *testing.T) {
 	}
 	if head.UpdateID != 0 {
 		t.Fatalf("rejected root update must not advance head, got %d", head.UpdateID)
+	}
+}
+
+func TestPostgresRootUpdateRejectsLegacyEntriesByIdWrite(t *testing.T) {
+	dsn := postgresTestDSN(t)
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+	if err := initPostgresSchema(db); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+	if err := clearNottyTables(db); err != nil {
+		t.Fatalf("clear tables: %v", err)
+	}
+
+	store, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	rootStreamID, err := store.BootstrapWorkspaceStreams()
+	if err != nil {
+		t.Fatalf("bootstrap streams: %v", err)
+	}
+	rootDoc, _, err := store.RestoreStreamDoc(rootStreamID)
+	if err != nil {
+		t.Fatalf("restore root stream: %v", err)
+	}
+	defer rootDoc.Close()
+
+	entriesMap := rootDoc.GetMap(RootManifestMapName)
+	update := captureDocUpdate(t, rootDoc, "legacy-entries-write", func(txn *crdt.Transaction) {
+		payload, err := json.Marshal(RootEntry{
+			ID:              "doc_legacy",
+			Kind:            RootEntryKindFile,
+			Loc:             NewRootLocation(RootEntryID, "legacy.md"),
+			ContentStreamID: "doc_legacy",
+		})
+		if err != nil {
+			t.Fatalf("marshal legacy entry: %v", err)
+		}
+		if err := entriesMap.InsertJSON(txn, "doc_legacy", string(payload)); err != nil {
+			t.Fatalf("write legacy entriesById: %v", err)
+		}
+	})
+	if _, err := store.ApplyStreamUpdate(rootStreamID, update, OperationMeta{ActorID: "tester", ActorType: "human"}); err == nil || !strings.Contains(err.Error(), "legacy root storage is read-only") {
+		t.Fatalf("expected legacy entriesById write rejection, got %v", err)
+	}
+	head, err := store.GetStreamHead(rootStreamID)
+	if err != nil {
+		t.Fatalf("get root head: %v", err)
+	}
+	if head.UpdateID != 0 {
+		t.Fatalf("rejected legacy root update must not advance head, got %d", head.UpdateID)
+	}
+}
+
+func TestPostgresRootUpdateRejectsRootManifestJSONWrite(t *testing.T) {
+	dsn := postgresTestDSN(t)
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+	if err := initPostgresSchema(db); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+	if err := clearNottyTables(db); err != nil {
+		t.Fatalf("clear tables: %v", err)
+	}
+
+	store, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	rootStreamID, err := store.BootstrapWorkspaceStreams()
+	if err != nil {
+		t.Fatalf("bootstrap streams: %v", err)
+	}
+	rootDoc, _, err := store.RestoreStreamDoc(rootStreamID)
+	if err != nil {
+		t.Fatalf("restore root stream: %v", err)
+	}
+	defer rootDoc.Close()
+
+	rootText := rootDoc.GetText(RootManifestTextName)
+	update := captureDocUpdate(t, rootDoc, "legacy-text-write", func(txn *crdt.Transaction) {
+		rootText.Insert(txn, 0, `{"entriesById":{"root":{"id":"root","kind":"dir","loc":null}}}`, nil)
+	})
+	if _, err := store.ApplyStreamUpdate(rootStreamID, update, OperationMeta{ActorID: "tester", ActorType: "human"}); err == nil || !strings.Contains(err.Error(), "legacy root storage is read-only") {
+		t.Fatalf("expected legacy rootManifestJSON write rejection, got %v", err)
+	}
+	head, err := store.GetStreamHead(rootStreamID)
+	if err != nil {
+		t.Fatalf("get root head: %v", err)
+	}
+	if head.UpdateID != 0 {
+		t.Fatalf("rejected legacy root update must not advance head, got %d", head.UpdateID)
 	}
 }
 

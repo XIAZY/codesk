@@ -12,12 +12,24 @@ import (
 )
 
 const (
-	TextName    = "rootManifestJSON"
-	MapName     = "entriesById"
-	RootEntryID = "root"
+	TextName                  = "rootManifestJSON"
+	MapName                   = "entriesById"
+	KindMapName               = "entryKindById"
+	LocMapName                = "entryLocById"
+	ContentStreamMapName      = "entryContentStreamIdById"
+	TombstoneMapName          = "entryTombstoneById"
+	CreatedByMapName          = "entryCreatedById"
+	UpdatedByMapName          = "entryUpdatedById"
+	CreatedAtMapName          = "entryCreatedAtById"
+	UpdatedAtMapName          = "entryUpdatedAtById"
+	NotificationPolicyMapName = "entryNotificationPolicyById"
+	RootEntryID               = "root"
 
 	EntryKindDir  = "dir"
 	EntryKindFile = "file"
+
+	NotificationPolicyNormal = "normal"
+	NotificationPolicyQuiet  = "quiet"
 )
 
 type Manifest struct {
@@ -25,15 +37,16 @@ type Manifest struct {
 }
 
 type Entry struct {
-	ID              string     `json:"id"`
-	Kind            string     `json:"kind"`
-	Loc             *Location  `json:"loc"`
-	ContentStreamID string     `json:"contentStreamId,omitempty"`
-	Tombstone       *Tombstone `json:"tombstone,omitempty"`
-	CreatedBy       string     `json:"createdBy,omitempty"`
-	UpdatedBy       string     `json:"updatedBy,omitempty"`
-	CreatedAt       string     `json:"createdAt,omitempty"`
-	UpdatedAt       string     `json:"updatedAt,omitempty"`
+	ID                 string     `json:"id"`
+	Kind               string     `json:"kind"`
+	Loc                *Location  `json:"loc"`
+	ContentStreamID    string     `json:"contentStreamId,omitempty"`
+	Tombstone          *Tombstone `json:"tombstone,omitempty"`
+	CreatedBy          string     `json:"createdBy,omitempty"`
+	UpdatedBy          string     `json:"updatedBy,omitempty"`
+	CreatedAt          string     `json:"createdAt,omitempty"`
+	UpdatedAt          string     `json:"updatedAt,omitempty"`
+	NotificationPolicy string     `json:"notificationPolicy,omitempty"`
 }
 
 type Location struct {
@@ -49,11 +62,14 @@ type Tombstone struct {
 }
 
 type Intent struct {
-	Type      string
-	Entry     Entry
-	EntryID   string
-	Loc       *Location
-	Tombstone *Tombstone
+	Type               string
+	Entry              Entry
+	EntryID            string
+	Loc                *Location
+	Tombstone          *Tombstone
+	UpdatedBy          string
+	UpdatedAt          string
+	NotificationPolicy string
 }
 
 type Projection struct {
@@ -99,10 +115,32 @@ func Read(doc *crdt.Doc) (Manifest, error) {
 	if doc == nil {
 		return Manifest{}, errors.New("root manifest doc is required")
 	}
+	base, err := readLegacyManifest(doc)
+	if err != nil {
+		return Manifest{}, err
+	}
+	return readFieldOverlays(doc, base)
+}
+
+func ReadValidated(doc *crdt.Doc) (Manifest, error) {
+	manifest, err := Read(doc)
+	if err != nil {
+		return Manifest{}, err
+	}
+	if err := ValidateShape(manifest); err != nil {
+		return Manifest{}, err
+	}
+	return manifest, nil
+}
+
+func readLegacyManifest(doc *crdt.Doc) (Manifest, error) {
 	if rawMap, err := doc.GetMap(MapName).JSON(); err == nil && strings.TrimSpace(rawMap) != "" && strings.TrimSpace(rawMap) != "{}" {
 		entries := map[string]Entry{}
 		if err := json.Unmarshal([]byte(rawMap), &entries); err != nil {
 			return Manifest{}, err
+		}
+		if entries == nil {
+			entries = map[string]Entry{}
 		}
 		return Manifest{EntriesByID: entries}, nil
 	}
@@ -118,6 +156,97 @@ func Read(doc *crdt.Doc) (Manifest, error) {
 		manifest.EntriesByID = map[string]Entry{}
 	}
 	return manifest, nil
+}
+
+func readFieldOverlays(doc *crdt.Doc, base Manifest) (Manifest, error) {
+	next := clone(base)
+	if next.EntriesByID == nil {
+		next.EntriesByID = map[string]Entry{}
+	}
+	if _, ok := next.EntriesByID[RootEntryID]; !ok {
+		next.EntriesByID[RootEntryID] = Entry{ID: RootEntryID}
+	}
+	ensure := func(entryID string) Entry {
+		entryID = strings.TrimSpace(entryID)
+		entry, ok := next.EntriesByID[entryID]
+		if !ok {
+			entry = Entry{ID: entryID}
+		}
+		if entry.ID == "" {
+			entry.ID = entryID
+		}
+		return entry
+	}
+	if err := overlayStringMap(doc, KindMapName, func(entryID string, value string) {
+		entry := ensure(entryID)
+		entry.Kind = value
+		next.EntriesByID[entryID] = entry
+	}); err != nil {
+		return Manifest{}, err
+	}
+	if err := overlayLocationMap(doc, LocMapName, func(entryID string, value *Location) {
+		entry := ensure(entryID)
+		if value != nil {
+			loc := *value
+			entry.Loc = &loc
+		}
+		next.EntriesByID[entryID] = entry
+	}); err != nil {
+		return Manifest{}, err
+	}
+	if err := overlayStringMap(doc, ContentStreamMapName, func(entryID string, value string) {
+		entry := ensure(entryID)
+		entry.ContentStreamID = value
+		next.EntriesByID[entryID] = entry
+	}); err != nil {
+		return Manifest{}, err
+	}
+	if err := overlayTombstoneMap(doc, TombstoneMapName, func(entryID string, value *Tombstone) {
+		entry := ensure(entryID)
+		if value != nil {
+			tombstone := *value
+			entry.Tombstone = &tombstone
+		}
+		next.EntriesByID[entryID] = entry
+	}); err != nil {
+		return Manifest{}, err
+	}
+	if err := overlayStringMap(doc, CreatedByMapName, func(entryID string, value string) {
+		entry := ensure(entryID)
+		entry.CreatedBy = value
+		next.EntriesByID[entryID] = entry
+	}); err != nil {
+		return Manifest{}, err
+	}
+	if err := overlayStringMap(doc, UpdatedByMapName, func(entryID string, value string) {
+		entry := ensure(entryID)
+		entry.UpdatedBy = value
+		next.EntriesByID[entryID] = entry
+	}); err != nil {
+		return Manifest{}, err
+	}
+	if err := overlayStringMap(doc, CreatedAtMapName, func(entryID string, value string) {
+		entry := ensure(entryID)
+		entry.CreatedAt = value
+		next.EntriesByID[entryID] = entry
+	}); err != nil {
+		return Manifest{}, err
+	}
+	if err := overlayStringMap(doc, UpdatedAtMapName, func(entryID string, value string) {
+		entry := ensure(entryID)
+		entry.UpdatedAt = value
+		next.EntriesByID[entryID] = entry
+	}); err != nil {
+		return Manifest{}, err
+	}
+	if err := overlayStringMap(doc, NotificationPolicyMapName, func(entryID string, value string) {
+		entry := ensure(entryID)
+		entry.NotificationPolicy = value
+		next.EntriesByID[entryID] = entry
+	}); err != nil {
+		return Manifest{}, err
+	}
+	return next, nil
 }
 
 func ApplyIntents(doc *crdt.Doc, intents []Intent) ([]byte, error) {
@@ -154,6 +283,7 @@ func ApplyIntents(doc *crdt.Doc, intents []Intent) ([]byte, error) {
 			}
 			loc := *intent.Loc
 			entry.Loc = &loc
+			applyIntentMetadata(&entry, intent)
 			next.EntriesByID[entryID] = entry
 		case "tombstone":
 			entryID := strings.TrimSpace(intent.EntryID)
@@ -166,6 +296,16 @@ func ApplyIntents(doc *crdt.Doc, intents []Intent) ([]byte, error) {
 			}
 			tombstone := *intent.Tombstone
 			entry.Tombstone = &tombstone
+			applyIntentMetadata(&entry, intent)
+			next.EntriesByID[entryID] = entry
+		case "notification-policy":
+			entryID := strings.TrimSpace(intent.EntryID)
+			entry, ok := next.EntriesByID[entryID]
+			if !ok {
+				return nil, fmt.Errorf("root notification-policy intent references missing entry %q", entryID)
+			}
+			entry.NotificationPolicy = strings.TrimSpace(intent.NotificationPolicy)
+			applyIntentMetadata(&entry, intent)
 			next.EntriesByID[entryID] = entry
 		default:
 			return nil, fmt.Errorf("unknown root intent type %q", intent.Type)
@@ -174,55 +314,293 @@ func ApplyIntents(doc *crdt.Doc, intents []Intent) ([]byte, error) {
 	if err := Validate(previous, next); err != nil {
 		return nil, err
 	}
-	changed := map[string]struct{}{RootEntryID: {}}
-	for _, intent := range intents {
-		entryID := strings.TrimSpace(intent.EntryID)
-		if entryID == "" {
-			entryID = strings.TrimSpace(intent.Entry.ID)
-		}
-		if entryID != "" {
-			changed[entryID] = struct{}{}
-		}
-	}
-	text := doc.GetText(TextName)
-	entries := doc.GetMap(MapName)
-	rawMap, _ := entries.JSON()
-	writeAll := strings.TrimSpace(rawMap) == "" || strings.TrimSpace(rawMap) == "{}"
-	ids := make([]string, 0, len(changed))
-	if writeAll {
-		ids = sortedEntryIDs(next)
-	} else {
-		for id := range changed {
-			if _, ok := next.EntriesByID[id]; ok {
-				ids = append(ids, id)
-			}
-		}
-		sort.Strings(ids)
-	}
+	fieldMaps := rootFieldMapsForDoc(doc)
 	return doc.Update(func(txn *crdt.Transaction) error {
-		for _, id := range ids {
-			payload, err := json.Marshal(next.EntriesByID[id])
-			if err != nil {
-				return err
+		for _, intent := range intents {
+			entryID := strings.TrimSpace(intent.EntryID)
+			if entryID == "" {
+				entryID = strings.TrimSpace(intent.Entry.ID)
 			}
-			if err := entries.InsertJSON(txn, id, string(payload)); err != nil {
-				return err
+			if entryID == "" {
+				continue
 			}
-		}
-		if length := text.LenInTxn(txn); length > 0 {
-			if err := text.DeleteRange(txn, 0, length); err != nil {
-				return err
+			entry, ok := next.EntriesByID[entryID]
+			if !ok {
+				continue
+			}
+			switch intent.Type {
+			case "create", "create-file", "create-dir":
+				if err := writeEntryCreateFields(txn, fieldMaps, entry); err != nil {
+					return err
+				}
+			case "loc":
+				if err := writeEntryLocField(txn, fieldMaps, entryID, entry.Loc); err != nil {
+					return err
+				}
+				if err := writeIntentMetadataFields(txn, fieldMaps, entryID, intent); err != nil {
+					return err
+				}
+			case "tombstone":
+				if err := writeEntryTombstoneField(txn, fieldMaps, entryID, entry.Tombstone); err != nil {
+					return err
+				}
+				if err := writeIntentMetadataFields(txn, fieldMaps, entryID, intent); err != nil {
+					return err
+				}
+			case "notification-policy":
+				if err := writeStringField(txn, fieldMaps.notificationPolicy, entryID, entry.NotificationPolicy); err != nil {
+					return err
+				}
+				if err := writeIntentMetadataFields(txn, fieldMaps, entryID, intent); err != nil {
+					return err
+				}
 			}
 		}
 		return nil
 	}, "root-manifest")
 }
 
+func readJSONMap(doc *crdt.Doc, mapName string) (map[string]json.RawMessage, error) {
+	raw, err := doc.GetMap(mapName).JSON()
+	if err != nil {
+		return nil, err
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "{}" {
+		return map[string]json.RawMessage{}, nil
+	}
+	values := map[string]json.RawMessage{}
+	if err := json.Unmarshal([]byte(raw), &values); err != nil {
+		return nil, fmt.Errorf("%s: invalid map JSON: %w", mapName, err)
+	}
+	if values == nil {
+		values = map[string]json.RawMessage{}
+	}
+	return values, nil
+}
+
+func overlayStringMap(doc *crdt.Doc, mapName string, apply func(entryID string, value string)) error {
+	values, err := readJSONMap(doc, mapName)
+	if err != nil {
+		return err
+	}
+	for entryID, raw := range values {
+		entryID = strings.TrimSpace(entryID)
+		if entryID == "" {
+			return fmt.Errorf("%s: entry id cannot be empty", mapName)
+		}
+		if strings.TrimSpace(string(raw)) == "null" {
+			return fmt.Errorf("%s[%s]: null value is not valid", mapName, entryID)
+		}
+		var value string
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return fmt.Errorf("%s[%s]: invalid string JSON: %w", mapName, entryID, err)
+		}
+		apply(entryID, value)
+	}
+	return nil
+}
+
+func overlayLocationMap(doc *crdt.Doc, mapName string, apply func(entryID string, value *Location)) error {
+	values, err := readJSONMap(doc, mapName)
+	if err != nil {
+		return err
+	}
+	for entryID, raw := range values {
+		entryID = strings.TrimSpace(entryID)
+		if entryID == "" {
+			return fmt.Errorf("%s: entry id cannot be empty", mapName)
+		}
+		if strings.TrimSpace(string(raw)) == "null" {
+			return fmt.Errorf("%s[%s]: null value is not valid", mapName, entryID)
+		}
+		var value Location
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return fmt.Errorf("%s[%s]: invalid location JSON: %w", mapName, entryID, err)
+		}
+		apply(entryID, &value)
+	}
+	return nil
+}
+
+func overlayTombstoneMap(doc *crdt.Doc, mapName string, apply func(entryID string, value *Tombstone)) error {
+	values, err := readJSONMap(doc, mapName)
+	if err != nil {
+		return err
+	}
+	for entryID, raw := range values {
+		entryID = strings.TrimSpace(entryID)
+		if entryID == "" {
+			return fmt.Errorf("%s: entry id cannot be empty", mapName)
+		}
+		if strings.TrimSpace(string(raw)) == "null" {
+			return fmt.Errorf("%s[%s]: null value is not valid", mapName, entryID)
+		}
+		var value Tombstone
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return fmt.Errorf("%s[%s]: invalid tombstone JSON: %w", mapName, entryID, err)
+		}
+		apply(entryID, &value)
+	}
+	return nil
+}
+
+func applyIntentMetadata(entry *Entry, intent Intent) {
+	if strings.TrimSpace(intent.UpdatedBy) != "" {
+		entry.UpdatedBy = strings.TrimSpace(intent.UpdatedBy)
+	}
+	if strings.TrimSpace(intent.UpdatedAt) != "" {
+		entry.UpdatedAt = strings.TrimSpace(intent.UpdatedAt)
+	}
+}
+
+type rootFieldMaps struct {
+	kind               *crdt.YMap
+	loc                *crdt.YMap
+	contentStream      *crdt.YMap
+	tombstone          *crdt.YMap
+	createdBy          *crdt.YMap
+	updatedBy          *crdt.YMap
+	createdAt          *crdt.YMap
+	updatedAt          *crdt.YMap
+	notificationPolicy *crdt.YMap
+}
+
+func rootFieldMapsForDoc(doc *crdt.Doc) rootFieldMaps {
+	return rootFieldMaps{
+		kind:               doc.GetMap(KindMapName),
+		loc:                doc.GetMap(LocMapName),
+		contentStream:      doc.GetMap(ContentStreamMapName),
+		tombstone:          doc.GetMap(TombstoneMapName),
+		createdBy:          doc.GetMap(CreatedByMapName),
+		updatedBy:          doc.GetMap(UpdatedByMapName),
+		createdAt:          doc.GetMap(CreatedAtMapName),
+		updatedAt:          doc.GetMap(UpdatedAtMapName),
+		notificationPolicy: doc.GetMap(NotificationPolicyMapName),
+	}
+}
+
+func writeEntryCreateFields(txn *crdt.Transaction, fieldMaps rootFieldMaps, entry Entry) error {
+	if err := writeStringField(txn, fieldMaps.kind, entry.ID, entry.Kind); err != nil {
+		return err
+	}
+	if entry.ID != RootEntryID && entry.Loc != nil {
+		if err := writeJSONField(txn, fieldMaps.loc, entry.ID, entry.Loc); err != nil {
+			return err
+		}
+	}
+	if entry.Kind == EntryKindFile && strings.TrimSpace(entry.ContentStreamID) != "" {
+		if err := writeStringField(txn, fieldMaps.contentStream, entry.ID, entry.ContentStreamID); err != nil {
+			return err
+		}
+	}
+	if entry.Tombstone != nil {
+		if err := writeEntryTombstoneField(txn, fieldMaps, entry.ID, entry.Tombstone); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(entry.CreatedBy) != "" {
+		if err := writeStringField(txn, fieldMaps.createdBy, entry.ID, entry.CreatedBy); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(entry.UpdatedBy) != "" {
+		if err := writeStringField(txn, fieldMaps.updatedBy, entry.ID, entry.UpdatedBy); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(entry.CreatedAt) != "" {
+		if err := writeStringField(txn, fieldMaps.createdAt, entry.ID, entry.CreatedAt); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(entry.UpdatedAt) != "" {
+		if err := writeStringField(txn, fieldMaps.updatedAt, entry.ID, entry.UpdatedAt); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(entry.NotificationPolicy) != "" {
+		if err := writeStringField(txn, fieldMaps.notificationPolicy, entry.ID, entry.NotificationPolicy); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeEntryLocField(txn *crdt.Transaction, fieldMaps rootFieldMaps, entryID string, loc *Location) error {
+	if loc == nil {
+		return errors.New("root loc field requires location")
+	}
+	return writeJSONField(txn, fieldMaps.loc, entryID, loc)
+}
+
+func writeEntryTombstoneField(txn *crdt.Transaction, fieldMaps rootFieldMaps, entryID string, tombstone *Tombstone) error {
+	if tombstone == nil {
+		return errors.New("root tombstone field requires tombstone")
+	}
+	return writeJSONField(txn, fieldMaps.tombstone, entryID, tombstone)
+}
+
+func writeIntentMetadataFields(txn *crdt.Transaction, fieldMaps rootFieldMaps, entryID string, intent Intent) error {
+	if strings.TrimSpace(intent.UpdatedBy) != "" {
+		if err := writeStringField(txn, fieldMaps.updatedBy, entryID, intent.UpdatedBy); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(intent.UpdatedAt) != "" {
+		if err := writeStringField(txn, fieldMaps.updatedAt, entryID, intent.UpdatedAt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeStringField(txn *crdt.Transaction, fieldMap *crdt.YMap, entryID string, value string) error {
+	return writeJSONField(txn, fieldMap, entryID, strings.TrimSpace(value))
+}
+
+func writeJSONField(txn *crdt.Transaction, fieldMap *crdt.YMap, entryID string, value any) error {
+	entryID = strings.TrimSpace(entryID)
+	if entryID == "" {
+		return errors.New("root field write requires entry id")
+	}
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return fieldMap.InsertJSON(txn, entryID, string(payload))
+}
+
 func Validate(previous Manifest, next Manifest) error {
-	if next.EntriesByID == nil {
+	if err := ValidateShape(next); err != nil {
+		return err
+	}
+	for id, before := range previous.EntriesByID {
+		if id == RootEntryID {
+			continue
+		}
+		after, ok := next.EntriesByID[id]
+		if !ok {
+			return fmt.Errorf("entry %q cannot be removed; tombstone required", id)
+		}
+		if before.Kind != "" && before.Kind != after.Kind {
+			return fmt.Errorf("entry %q kind cannot change", id)
+		}
+		if before.Kind == EntryKindFile && before.ContentStreamID != "" && before.ContentStreamID != after.ContentStreamID {
+			return fmt.Errorf("entry %q contentStreamId cannot change", id)
+		}
+		if before.Tombstone != nil && after.Tombstone == nil {
+			return fmt.Errorf("entry %q tombstone cannot be removed", id)
+		}
+	}
+	return nil
+}
+
+func ValidateShape(manifest Manifest) error {
+	if manifest.EntriesByID == nil {
 		return errors.New("entriesById is required")
 	}
-	root, ok := next.EntriesByID[RootEntryID]
+	root, ok := manifest.EntriesByID[RootEntryID]
 	if !ok {
 		return errors.New("root entry is required")
 	}
@@ -238,7 +616,7 @@ func Validate(previous Manifest, next Manifest) error {
 	if root.Tombstone != nil {
 		return errors.New("root entry cannot be tombstoned")
 	}
-	for key, entry := range next.EntriesByID {
+	for key, entry := range manifest.EntriesByID {
 		if strings.TrimSpace(key) == "" {
 			return errors.New("entry key cannot be empty")
 		}
@@ -257,29 +635,16 @@ func Validate(previous Manifest, next Manifest) error {
 		default:
 			return fmt.Errorf("entry %q has invalid kind %q", entry.ID, entry.Kind)
 		}
+		switch normalizeNotificationPolicy(entry.NotificationPolicy) {
+		case NotificationPolicyNormal, NotificationPolicyQuiet:
+		default:
+			return fmt.Errorf("entry %q has invalid notificationPolicy %q", entry.ID, entry.NotificationPolicy)
+		}
 		if entry.ID == RootEntryID {
 			continue
 		}
 		if err := validateLocation(entry.ID, entry.Loc); err != nil {
 			return err
-		}
-	}
-	for id, before := range previous.EntriesByID {
-		if id == RootEntryID {
-			continue
-		}
-		after, ok := next.EntriesByID[id]
-		if !ok {
-			return fmt.Errorf("entry %q cannot be removed; tombstone required", id)
-		}
-		if before.Kind != "" && before.Kind != after.Kind {
-			return fmt.Errorf("entry %q kind cannot change", id)
-		}
-		if before.Kind == EntryKindFile && before.ContentStreamID != "" && before.ContentStreamID != after.ContentStreamID {
-			return fmt.Errorf("entry %q contentStreamId cannot change", id)
-		}
-		if before.Tombstone != nil && after.Tombstone == nil {
-			return fmt.Errorf("entry %q tombstone cannot be removed", id)
 		}
 	}
 	return nil
@@ -448,6 +813,14 @@ func validateLocation(entryID string, loc *Location) error {
 		return fmt.Errorf("entry %q location normName %q does not match normalized name %q", entryID, loc.NormName, NormalizeName(loc.Name))
 	}
 	return nil
+}
+
+func normalizeNotificationPolicy(policy string) string {
+	policy = strings.TrimSpace(policy)
+	if policy == "" {
+		return NotificationPolicyNormal
+	}
+	return policy
 }
 
 func clone(manifest Manifest) Manifest {

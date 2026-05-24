@@ -2,6 +2,7 @@ package notty
 
 import (
 	"database/sql"
+	"errors"
 	"net/url"
 	"os"
 	"strconv"
@@ -12,6 +13,55 @@ import (
 	crdt "notty/internal/ycrdt"
 	"notty/internal/yproto"
 )
+
+func TestPostgresLegacyDocumentTablesFailClosedWhenNonEmpty(t *testing.T) {
+	dsn := postgresTestDSN(t)
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+	for _, statement := range []string{
+		`DROP TABLE IF EXISTS document_checkpoints`,
+		`DROP TABLE IF EXISTS document_updates`,
+		`DROP TABLE IF EXISTS document_heads`,
+		`DROP TABLE IF EXISTS document_mentions`,
+		`DROP TABLE IF EXISTS documents`,
+		`CREATE TABLE documents (id TEXT PRIMARY KEY)`,
+		`INSERT INTO documents (id) VALUES ('legacy_doc')`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatalf("prepare legacy table with %q: %v", statement, err)
+		}
+	}
+
+	err = initPostgresSchema(db)
+	if !errors.Is(err, ErrLegacyDocumentsNeedMigration) {
+		t.Fatalf("expected migration-required error, got %v", err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM documents`).Scan(&count); err != nil {
+		t.Fatalf("count legacy documents after failed init: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("failed init must preserve legacy rows, got %d", count)
+	}
+
+	if _, err := db.Exec(`DELETE FROM documents`); err != nil {
+		t.Fatalf("empty legacy documents table: %v", err)
+	}
+	if err := initPostgresSchema(db); err != nil {
+		t.Fatalf("empty legacy tables should not block schema init: %v", err)
+	}
+	var exists bool
+	if err := db.QueryRow(`SELECT to_regclass('documents') IS NOT NULL`).Scan(&exists); err != nil {
+		t.Fatalf("check legacy documents table after init: %v", err)
+	}
+	if exists {
+		t.Fatal("empty legacy documents table should be dropped after guard passes")
+	}
+}
 
 func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	dsn := postgresTestDSN(t)
@@ -265,7 +315,7 @@ func TestPostgresUpdateAgentSessionPersistsTargetAgent(t *testing.T) {
 	}
 }
 
-func TestPostgresAgentInboxSkipsLogDocumentUpdatesButKeepsThreadMentions(t *testing.T) {
+func TestPostgresAgentInboxUsesNotificationPolicyForDocumentUpdatesButKeepsThreadMentions(t *testing.T) {
 	dsn := postgresTestDSN(t)
 
 	db, err := sql.Open("pgx", dsn)
@@ -287,6 +337,8 @@ func TestPostgresAgentInboxSkipsLogDocumentUpdatesButKeepsThreadMentions(t *test
 	defer store.Close()
 
 	logDocumentID := mustCreateTestDocument(t, store, "agent.log", "start\n")
+	setDocumentNotificationPolicyForTest(t, store, logDocumentID, RootNotificationPolicyQuiet)
+	normalLogDocumentID := mustCreateTestDocument(t, store, "normal-agent.log", "start\n")
 	normalDocumentID := mustCreateTestDocument(t, store, "docs/spec.md", "start\n")
 	agent, err := store.CreateAgent(CreateAgentRequest{
 		Handle: "reviewer",
@@ -309,7 +361,25 @@ func TestPostgresAgentInboxSkipsLogDocumentUpdatesButKeepsThreadMentions(t *test
 		t.Fatalf("list inbox after log update: %v", err)
 	}
 	if len(items) != 0 {
-		t.Fatalf("expected log document update to stay out of inbox, got %#v", items)
+		t.Fatalf("expected quiet document update to stay out of inbox, got %#v", items)
+	}
+
+	if _, _, err := store.ReplaceDocumentText(normalLogDocumentID, "start\nnormal log update\n", OperationMeta{
+		ActorID:   "owner",
+		ActorType: "human",
+		Source:    "test",
+	}); err != nil {
+		t.Fatalf("normal .log document update: %v", err)
+	}
+	items, err = store.ListAgentInbox(agent.ID, "general", "pending")
+	if err != nil {
+		t.Fatalf("list inbox after normal .log update: %v", err)
+	}
+	if findDocumentInboxItem(items, normalLogDocumentID, "general") == nil {
+		t.Fatalf("expected .log document without quiet policy in inbox, got %#v", items)
+	}
+	if _, err := store.MarkDocumentViewed(agent.ID, normalLogDocumentID, MarkDocumentViewedRequest{}); err != nil {
+		t.Fatalf("mark normal .log document viewed: %v", err)
 	}
 
 	thread, message, err := store.CreateThread(CreateThreadRequest{
@@ -374,6 +444,33 @@ func TestPostgresAgentInboxSkipsLogDocumentUpdatesButKeepsThreadMentions(t *test
 	}
 	if len(items) != 1 {
 		t.Fatalf("expected normal document update in inbox, got %#v", items)
+	}
+}
+
+func setDocumentNotificationPolicyForTest(t *testing.T, store *Store, documentID string, policy string) {
+	t.Helper()
+	rootStreamID, _, _, err := store.ReadRootManifestStream()
+	if err != nil {
+		t.Fatalf("read root manifest stream: %v", err)
+	}
+	rootDoc, _, err := store.RestoreStreamDoc(rootStreamID)
+	if err != nil {
+		t.Fatalf("restore root stream: %v", err)
+	}
+	defer rootDoc.Close()
+	update, err := ApplyRootIntents(rootDoc, []RootIntent{{
+		Type:               "notification-policy",
+		EntryID:            documentID,
+		NotificationPolicy: policy,
+	}})
+	if err != nil {
+		t.Fatalf("build notification policy update: %v", err)
+	}
+	if _, err := store.ApplyStreamUpdate(rootStreamID, update, OperationMeta{ActorID: "tester", ActorType: "human", Source: "test"}); err != nil {
+		t.Fatalf("apply notification policy update: %v", err)
+	}
+	if err := store.RefreshStreamDocumentCache(); err != nil {
+		t.Fatalf("refresh document cache: %v", err)
 	}
 }
 

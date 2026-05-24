@@ -4,13 +4,28 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
 
 const postgresCheckpointInterval = 100
 
+var ErrLegacyDocumentsNeedMigration = errors.New("legacy document tables require migration")
+
+var legacyDocumentTables = []string{
+	"document_checkpoints",
+	"document_updates",
+	"document_heads",
+	"documents",
+	"document_mentions",
+}
+
 func initPostgresSchemaTables(db *sql.DB) error {
+	if err := guardLegacyDocumentTablesEmpty(context.Background(), db); err != nil {
+		return err
+	}
 	statements := []string{
 		`
 		CREATE TABLE IF NOT EXISTS workspaces (
@@ -327,6 +342,41 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func guardLegacyDocumentTablesEmpty(ctx context.Context, db *sql.DB) error {
+	if db == nil {
+		return errors.New("database is required")
+	}
+	for _, table := range legacyDocumentTables {
+		exists, err := legacyDocumentTableExists(ctx, db, table)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue
+		}
+		var count int64
+		if err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", table)).Scan(&count); err != nil {
+			return err
+		}
+		if count > 0 {
+			return fmt.Errorf("%w: %s contains %d rows", ErrLegacyDocumentsNeedMigration, table, count)
+		}
+	}
+	return nil
+}
+
+func legacyDocumentTableExists(ctx context.Context, db *sql.DB, table string) (bool, error) {
+	var exists bool
+	err := db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			  FROM information_schema.tables
+			 WHERE table_schema = current_schema()
+			   AND table_name = $1
+		)`, table).Scan(&exists)
+	return exists, err
 }
 
 func (s *Store) loadNormalizedPostgresLocked() error {

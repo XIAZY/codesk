@@ -181,66 +181,6 @@ func (s *WorkspaceStateDB) UpdateProjectedStreamState(ctx context.Context, strea
 	return err
 }
 
-func (s *WorkspaceStateDB) ApplyReadyLocalOutbox(ctx context.Context, streamID string, doc *crdt.Doc) ([]StreamOutboxRow, error) {
-	if doc == nil {
-		return nil, errors.New("stream doc is required")
-	}
-	rows, err := s.ReadyLocalOutbox(ctx, streamID, 100)
-	if err != nil {
-		return nil, err
-	}
-	for _, row := range rows {
-		if err := crdt.ApplyUpdateV1(doc, row.UpdateBytes, "local-outbox"); err != nil {
-			return nil, fmt.Errorf("apply local outbox %d: %w", row.ID, err)
-		}
-		if err := s.MarkOutboxLocallyApplied(ctx, row.ID, time.Now()); err != nil {
-			return nil, err
-		}
-	}
-	return rows, nil
-}
-
-func (s *WorkspaceStateDB) ApplyUnappliedInbox(ctx context.Context, streamID string, doc *crdt.Doc) ([]StreamInboxRow, error) {
-	if doc == nil {
-		return nil, errors.New("stream doc is required")
-	}
-	rows, err := s.UnappliedInbox(ctx, streamID, 100)
-	if err != nil {
-		return nil, err
-	}
-	for _, row := range rows {
-		if err := crdt.ApplyUpdateV1(doc, row.UpdateBytes, "remote-inbox"); err != nil {
-			return nil, fmt.Errorf("apply inbox %d: %w", row.ID, err)
-		}
-		if err := s.MarkInboxApplied(ctx, row.ID, time.Now()); err != nil {
-			return nil, err
-		}
-	}
-	return rows, nil
-}
-
-func (s *WorkspaceStateDB) PersistLatestStreamDoc(ctx context.Context, streamID string, doc *crdt.Doc, materializedTextSHA256 string) (int64, error) {
-	if doc == nil {
-		return 0, errors.New("stream doc is required")
-	}
-	if err := s.EnsureLocalStream(ctx, streamID, "unknown"); err != nil {
-		return 0, err
-	}
-	stateUpdate := doc.EncodeStateAsUpdate()
-	stateVector, err := doc.StateVectorV1()
-	if err != nil {
-		return 0, err
-	}
-	stateID, err := s.InsertStreamState(ctx, streamID, stateUpdate, stateVector, materializedTextSHA256)
-	if err != nil {
-		return 0, err
-	}
-	if err := s.UpdateLatestStreamState(ctx, streamID, stateID, stateVector); err != nil {
-		return 0, err
-	}
-	return stateID, nil
-}
-
 func (s *WorkspaceStateDB) ApplyStreamQueueAtomically(ctx context.Context, streamID string, kind string, doc *crdt.Doc, materializedTextSHA256 string) (StreamQueueApplyResult, error) {
 	return s.applyStreamQueueAtomically(ctx, streamID, kind, doc, materializedTextSHA256, streamQueueApplyOptions{})
 }

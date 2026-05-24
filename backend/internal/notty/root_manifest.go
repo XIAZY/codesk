@@ -6,12 +6,24 @@ import (
 )
 
 const (
-	RootManifestTextName = rootmanifest.TextName
-	RootManifestMapName  = rootmanifest.MapName
-	RootEntryID          = rootmanifest.RootEntryID
+	RootManifestTextName                  = rootmanifest.TextName
+	RootManifestMapName                   = rootmanifest.MapName
+	RootManifestKindMapName               = rootmanifest.KindMapName
+	RootManifestLocMapName                = rootmanifest.LocMapName
+	RootManifestContentStreamMapName      = rootmanifest.ContentStreamMapName
+	RootManifestTombstoneMapName          = rootmanifest.TombstoneMapName
+	RootManifestCreatedByMapName          = rootmanifest.CreatedByMapName
+	RootManifestUpdatedByMapName          = rootmanifest.UpdatedByMapName
+	RootManifestCreatedAtMapName          = rootmanifest.CreatedAtMapName
+	RootManifestUpdatedAtMapName          = rootmanifest.UpdatedAtMapName
+	RootManifestNotificationPolicyMapName = rootmanifest.NotificationPolicyMapName
+	RootEntryID                           = rootmanifest.RootEntryID
 
 	RootEntryKindDir  = rootmanifest.EntryKindDir
 	RootEntryKindFile = rootmanifest.EntryKindFile
+
+	RootNotificationPolicyNormal = rootmanifest.NotificationPolicyNormal
+	RootNotificationPolicyQuiet  = rootmanifest.NotificationPolicyQuiet
 )
 
 type RootManifest = rootmanifest.Manifest
@@ -34,7 +46,7 @@ func NewRootLocation(parentID string, name string) *RootLocation {
 }
 
 func ReadRootManifest(doc *crdt.Doc) (RootManifest, error) {
-	return rootmanifest.Read(doc)
+	return rootmanifest.ReadValidated(doc)
 }
 
 func ApplyRootIntents(doc *crdt.Doc, intents []RootIntent) ([]byte, error) {

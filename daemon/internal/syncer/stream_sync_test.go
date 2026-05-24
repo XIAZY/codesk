@@ -54,7 +54,7 @@ func TestStreamSyncInitialStepUsesLocalStateVector(t *testing.T) {
 	doc.Transact(func(txn *crdt.Transaction) {
 		text.Insert(txn, 0, "local", nil)
 	}, "test")
-	if _, err := state.PersistLatestStreamDoc(ctx, "doc_a", doc, contentSHA256([]byte("local"))); err != nil {
+	if _, err := state.persistLatestStreamDocFixture(ctx, "doc_a", doc, contentSHA256([]byte("local"))); err != nil {
 		t.Fatalf("persist state: %v", err)
 	}
 	payload := newStreamSync(Config{}, state, "doc_a", "content", nil).initialSyncStep(ctx, "doc_a")
@@ -83,7 +83,7 @@ func TestStreamSyncBuildsLocalUpdateForServerSyncStep1(t *testing.T) {
 	defer state.Close()
 	local := contentDoc(t, "doc_a", "local")
 	defer local.Close()
-	if _, err := state.PersistLatestStreamDoc(ctx, "doc_a", local, contentSHA256([]byte("local"))); err != nil {
+	if _, err := state.persistLatestStreamDocFixture(ctx, "doc_a", local, contentSHA256([]byte("local"))); err != nil {
 		t.Fatalf("persist local state: %v", err)
 	}
 	remote := crdt.New(crdt.WithGUID("doc_a"))
