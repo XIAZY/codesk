@@ -1,6 +1,7 @@
 package syncer
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -77,7 +78,6 @@ func newWorkspaceRuntime(cfg Config, client *http.Client, rootDir, actorID, acto
 	if err != nil {
 		return nil, err
 	}
-	replica.client = client
 	replica.docCache = cache
 	runtime.replica = replica
 	return runtime, nil
@@ -119,11 +119,72 @@ func (r *workspaceRuntime) Run(ctx context.Context) error {
 	}()
 
 	go r.reconcileLoop(ctx)
+	go r.presenceLoop(ctx)
 
 	<-ctx.Done()
 	cancelReplica()
 	r.closeDocumentSyncs()
 	return nil
+}
+
+func (r *workspaceRuntime) presenceLoop(ctx context.Context) {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := r.sendPresence(ctx); err != nil && ctx.Err() == nil {
+				log.Printf("%s presence error: %v", r.actorID(), err)
+			}
+		}
+	}
+}
+
+func (r *workspaceRuntime) actorID() string {
+	if r != nil && r.replica != nil && strings.TrimSpace(r.replica.actorID) != "" {
+		return r.replica.actorID
+	}
+	if r != nil && strings.TrimSpace(r.cfg.AgentID) != "" {
+		return r.cfg.AgentID
+	}
+	return "daemon"
+}
+
+func (r *workspaceRuntime) actorKind() string {
+	if r != nil && r.replica != nil {
+		return r.replica.actorKind()
+	}
+	return "daemon"
+}
+
+func (r *workspaceRuntime) actingAgentID() string {
+	if r == nil || r.replica == nil || r.replica.actorType != "agent" {
+		return ""
+	}
+	return r.replica.actorID
+}
+
+func (r *workspaceRuntime) sendPresence(ctx context.Context) error {
+	payload, err := json.Marshal(upsertPresenceRequest{
+		ActorID:   r.actorID(),
+		ActorType: r.actorKind(),
+		FilePath:  "",
+		Mode:      "syncing",
+		Activity:  "materializing " + r.actorID(),
+	})
+	if err != nil {
+		return err
+	}
+	req, err := r.newBackendRequest(ctx, http.MethodPost, "/api/presence", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	applyBackendAuth(req.Header, r.cfg, r.actingAgentID())
+	req.Header.Set("Content-Type", "application/json")
+	_, err = r.client.Do(req)
+	return err
 }
 
 func (r *workspaceRuntime) applyWorkspace(ctx context.Context, workspace *workspaceResponse) error {

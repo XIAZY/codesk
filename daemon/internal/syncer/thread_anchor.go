@@ -20,7 +20,7 @@ type resolvedThreadTarget struct {
 	excerpt string
 }
 
-func (s *Service) prepareCreateThreadPayload(ctx context.Context, payload createThreadPayload) (createThreadPayload, error) {
+func (s *Service) prepareCreateThreadPayload(ctx context.Context, run *agentRun, payload createThreadPayload) (createThreadPayload, error) {
 	if strings.TrimSpace(payload.Body) == "" {
 		return payload, fmt.Errorf("thread body is required")
 	}
@@ -53,10 +53,11 @@ func (s *Service) prepareCreateThreadPayload(ctx context.Context, payload create
 		return payload, nil
 	}
 
-	if err := s.reconcileDocumentForThreadAnchor(ctx, document.ID); err != nil {
-		return payload, err
+	runtime := s.runtimeForThreadAnchor(run)
+	if runtime == nil {
+		return payload, fmt.Errorf("workspace runtime is unavailable")
 	}
-	doc, _, state, err := s.docCache.loadBaseDoc(document.ID, document.Path)
+	doc, state, err := runtime.loadThreadAnchorDocument(ctx, document)
 	if err != nil {
 		return payload, err
 	}
@@ -85,6 +86,21 @@ func (s *Service) prepareCreateThreadPayload(ctx context.Context, payload create
 	payload.EndLine = 0
 	payload.EndColumn = 0
 	return payload, nil
+}
+
+func (s *Service) runtimeForThreadAnchor(run *agentRun) *workspaceRuntime {
+	if s == nil {
+		return nil
+	}
+	if run != nil && strings.TrimSpace(run.AgentID) != "" {
+		s.mu.Lock()
+		managed := s.agentRuntimes[run.AgentID]
+		s.mu.Unlock()
+		if managed != nil && managed.runtime != nil {
+			return managed.runtime
+		}
+	}
+	return s.primaryRuntime
 }
 
 func (s *Service) resolveThreadDocument(ctx context.Context, payload createThreadPayload) (*document, error) {
@@ -168,16 +184,30 @@ func (s *Service) fetchDocumentByPath(ctx context.Context, path string) (*docume
 	return response.Document, nil
 }
 
-func (s *Service) reconcileDocumentForThreadAnchor(ctx context.Context, documentID string) error {
-	if s.docCache == nil {
+func (r *workspaceRuntime) loadThreadAnchorDocument(ctx context.Context, document *document) (*crdt.Doc, []byte, error) {
+	if document == nil || document.ID == "" {
+		return nil, nil, fmt.Errorf("document is required")
+	}
+	if err := r.reconcileDocumentForThreadAnchor(ctx, document.ID); err != nil {
+		return nil, nil, err
+	}
+	doc, _, state, err := r.docCache.loadBaseDoc(document.ID, document.Path)
+	if err != nil {
+		return nil, nil, err
+	}
+	return doc, state, nil
+}
+
+func (r *workspaceRuntime) reconcileDocumentForThreadAnchor(ctx context.Context, documentID string) error {
+	if r == nil || r.docCache == nil {
 		return fmt.Errorf("document CRDT cache is unavailable")
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	tracked := s.collectTrackedByDocument()[documentID]
+	tracked := r.collectTrackedByDocument()[documentID]
 	if len(tracked) > 0 {
-		if err := s.reconcileTrackedDocument(ctx, documentID, tracked); err != nil {
+		if err := r.reconcileTrackedDocument(ctx, documentID, tracked); err != nil {
 			return err
 		}
 		for _, file := range tracked {
@@ -186,7 +216,7 @@ func (s *Service) reconcileDocumentForThreadAnchor(ctx context.Context, document
 			}
 		}
 	}
-	pending, err := s.docCache.pendingRemoteUpdateCount(documentID)
+	pending, err := r.docCache.pendingRemoteUpdateCount(documentID)
 	if err != nil {
 		return err
 	}

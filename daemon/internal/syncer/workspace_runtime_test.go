@@ -175,6 +175,142 @@ func TestWorkspaceRuntimeCreateEditDeleteMultipleFilesRegression(t *testing.T) {
 	server.assertDeleted(t, "docs/a.md", "docs/b.md", "notes/c.md")
 }
 
+func TestWorkspaceRuntimeDropsStaleLocalCreateCandidates(t *testing.T) {
+	root := t.TempDir()
+	desiredPath := filepath.Join(root, "docs", "desired.md")
+	trackedPath := filepath.Join(root, "docs", "tracked.md")
+	for _, path := range []string{desiredPath, trackedPath} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte("local bytes\n"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	var createAttempts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/workspace":
+			writeJSONResponse(w, http.StatusOK, &workspaceResponse{Documents: []*document{{ID: "doc_desired", Path: "docs/desired.md", UpdateID: 1}}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/documents":
+			createAttempts++
+			http.Error(w, "stale local create should have been dropped", http.StatusInternalServerError)
+		default:
+			http.Error(w, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{BackendURL: server.URL, WorkspaceDir: root, AgentWorkspaceRoot: filepath.Join(t.TempDir(), "agents"), AgentID: "daemon_agent"}
+	runtime, err := newWorkspaceRuntime(cfg, server.Client(), root, cfg.AgentID, "daemon")
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	defer runtime.replica.watcher.Close()
+	defer runtime.closeDocumentSyncs()
+	tracked := &trackedFile{DocumentID: "doc_tracked", DocumentPath: "docs/tracked.md", Path: trackedPath, WorkspaceRoot: root}
+	runtime.replica.projectedByPath[trackedPath] = tracked
+	runtime.replica.projectedByID[tracked.DocumentID] = tracked
+
+	runtime.localCreates.Mark(localCreateCandidate{Root: root, Path: desiredPath, ActorID: cfg.AgentID, ActorType: "daemon"})
+	runtime.localCreates.Mark(localCreateCandidate{Root: root, Path: trackedPath, ActorID: cfg.AgentID, ActorType: "daemon"})
+	if err := runtime.processLocalCreates(context.Background()); err != nil {
+		t.Fatalf("process local creates: %v", err)
+	}
+	if createAttempts != 0 {
+		t.Fatalf("expected no backend creates for stale candidates, got %d", createAttempts)
+	}
+	if got := runtime.localCreates.Drain(); len(got) != 0 {
+		t.Fatalf("expected stale candidates to be dropped, got %#v", got)
+	}
+}
+
+func TestWorkspaceRuntimeOutboxPostDoesNotBlockPendingRemoteAppend(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "doc.md")
+	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base\n")
+	if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	localUpdate := updateFromBaseDoc(t, baseDoc, "base\nlocal\n", "local")
+	entry, unlock := cache.lockEntry("doc_1")
+	if err := cache.storeOutboxUpdateLocked(entry, "doc_1", "doc.md", outboxUpdateRecord{
+		Update:          localUpdate,
+		ObservedContent: "base\nlocal\n",
+		ObservedState:   crdtStateFromContent("base\nlocal\n"),
+		SourcePath:      path,
+		ActorID:         "daemon_agent",
+		ActorType:       "daemon",
+		CreatedAt:       time.Now().UTC(),
+	}); err != nil {
+		unlock()
+		t.Fatalf("store outbox: %v", err)
+	}
+	unlock()
+
+	postStarted := make(chan struct{})
+	releasePost := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/documents/doc_1/updates" {
+			http.Error(w, "unexpected request", http.StatusNotFound)
+			return
+		}
+		close(postStarted)
+		<-releasePost
+		writeJSONResponse(w, http.StatusOK, postDocumentUpdateResponse{Accepted: true, Applied: true, UpdateID: 2})
+	}))
+	defer server.Close()
+
+	runtime := &workspaceRuntime{
+		cfg:      Config{BackendURL: server.URL, AgentID: "daemon_agent"},
+		client:   server.Client(),
+		docCache: cache,
+	}
+	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, WorkspaceRoot: root, cache: cache}
+	tracked.setProjectedContent("base\n")
+	if err := tracked.storeProjectedBase("base\n", baseDoc.EncodeStateAsUpdate()); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+
+	reconcileDone := make(chan error, 1)
+	go func() {
+		reconcileDone <- runtime.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked})
+	}()
+	select {
+	case <-postStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected outbox POST to start")
+	}
+
+	remoteUpdate := updateFromBaseDoc(t, baseDoc, "base\nremote\n", "remote")
+	appendDone := make(chan error, 1)
+	go func() {
+		_, err := cache.appendPendingRemoteUpdate("doc_1", "doc.md", remoteUpdate)
+		appendDone <- err
+	}()
+	select {
+	case err := <-appendDone:
+		if err != nil {
+			t.Fatalf("append pending remote: %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		close(releasePost)
+		t.Fatal("pending remote append was blocked by slow outbox POST")
+	}
+	close(releasePost)
+	if err := <-reconcileDone; err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+}
+
 func TestWorkspaceRuntimeRunReconcilesLocalCreateEvents(t *testing.T) {
 	root := t.TempDir()
 	cfg := Config{
