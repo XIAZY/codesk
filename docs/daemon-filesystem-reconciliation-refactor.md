@@ -437,18 +437,21 @@ This keeps policy in the reconciler while keeping the main flow readable.
 
 ## Projected Base Model
 
-Each workspace copy should have a projected base under:
+Each workspace copy should keep all per-document local state under:
 
 ```text
-<workspace>/.notty/projections/<documentID>/
+<workspace>/.notty/documents/<documentID>/
 ```
 
 Required files:
 
 ```text
+state.bin
+metadata.json
+pending_remote.log
+outbox_update.json
 base.txt
 base.state.bin
-metadata.json
 ```
 
 Recommended metadata:
@@ -529,7 +532,7 @@ Startup has an unavoidable ambiguity:
 
 ```text
 foo.md exists locally
-foo.md has no .notty/projections/<documentID>/metadata.json
+foo.md has no .notty/documents/<documentID>/metadata.json
 ```
 
 This could be:

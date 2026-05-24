@@ -1,9 +1,6 @@
 package syncer
 
-import (
-	"os"
-	"path/filepath"
-)
+import "os"
 
 type Config struct {
 	BackendURL         string
@@ -16,15 +13,10 @@ type Config struct {
 	RuntimeDir         string
 	AgentToolBaseURL   string
 	PprofAddr          string
-	CacheDir           string
 }
 
 func LoadConfig() Config {
 	runtimeDir := getenv("NOTTY_RUNTIME_DIR", "/runtime/notty")
-	cacheDir := getenv("NOTTY_CACHE_DIR", "")
-	if cacheDir == "" {
-		cacheDir = filepath.Join(runtimeDir, ".notty", "documents")
-	}
 	return Config{
 		BackendURL:         getenv("NOTTY_BACKEND_URL", "http://backend:8080"),
 		WorkspaceID:        getenv("NOTTY_WORKSPACE_ID", ""),
@@ -36,7 +28,6 @@ func LoadConfig() Config {
 		RuntimeDir:         runtimeDir,
 		AgentToolBaseURL:   getenv("NOTTY_AGENT_TOOL_BASE_URL", "http://127.0.0.1:7778"),
 		PprofAddr:          getenv("NOTTY_PPROF_ADDR", ""),
-		CacheDir:           cacheDir,
 	}
 }
 

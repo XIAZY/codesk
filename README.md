@@ -1741,7 +1741,6 @@ Important daemon environment variables:
 - `NOTTY_WORKSPACE_DIR`: local canonical workspace projection.
 - `NOTTY_AGENT_WORKSPACE_ROOT`: parent directory for per-agent workspaces.
 - `NOTTY_RUNTIME_DIR`: daemon runtime data.
-- `NOTTY_CACHE_DIR`: daemon CRDT cache directory, defaults under runtime.
 - `NOTTY_CODEX_COMMAND`: Codex executable, default `codex`.
 - `NOTTY_AGENT_TOOL_BASE_URL`: local agent helper gateway URL.
 - `NOTTY_PPROF_ADDR`: optional daemon pprof bind address.

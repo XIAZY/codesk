@@ -41,18 +41,14 @@ type Service struct {
 	sessions        *agentSessionSupervisor
 	toolServer      *http.Server
 	mu              sync.Mutex
-	primaryReplica  *workspaceReplica
-	agentReplicas   map[string]*managedReplica
-	documentSyncs   map[string]*managedDocumentSync
+	primaryRuntime  *workspaceRuntime
+	agentRuntimes   map[string]*managedWorkspaceRuntime
 	agentWorkers    map[string]*managedAgentWorker
 	latestWorkspace *workspaceResponse
-	docCache        *documentCache
-	reconcileQueue  *reconcileQueue
-	localCreates    *localCreateQueue
 }
 
-type managedReplica struct {
-	replica *workspaceReplica
+type managedWorkspaceRuntime struct {
+	runtime *workspaceRuntime
 	cancel  context.CancelFunc
 }
 
@@ -200,32 +196,38 @@ func (q *localCreateQueue) Drain() []localCreateCandidate {
 
 func New(cfg Config) (*Service, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
-	cache, err := newDocumentCache(cfg.CacheDir)
+	primaryRuntime, err := newWorkspaceRuntime(cfg, client, cfg.WorkspaceDir, cfg.AgentID, "daemon")
 	if err != nil {
 		return nil, err
 	}
-	queue := newReconcileQueue()
-	localCreates := newLocalCreateQueue()
-	primaryReplica, err := newWorkspaceReplica(cfg, cfg.WorkspaceDir, cfg.AgentID, "daemon", queue.Mark, localCreates.Mark)
-	if err != nil {
-		return nil, err
-	}
-	primaryReplica.client = client
-	primaryReplica.docCache = cache
 	service := &Service{
 		cfg:            cfg,
 		client:         client,
-		primaryReplica: primaryReplica,
-		agentReplicas:  map[string]*managedReplica{},
-		documentSyncs:  map[string]*managedDocumentSync{},
+		primaryRuntime: primaryRuntime,
+		agentRuntimes:  map[string]*managedWorkspaceRuntime{},
 		agentWorkers:   map[string]*managedAgentWorker{},
-		docCache:       cache,
-		reconcileQueue: queue,
-		localCreates:   localCreates,
 	}
 	service.sessions = newAgentSessionSupervisor(cfg, service.updateRemoteAgentSession, nil)
 	service.sessions.SetIdleWake(service.wakeAgentWorker)
 	return service, nil
+}
+
+func (s *Service) ensurePrimaryRuntime() error {
+	if s == nil {
+		return nil
+	}
+	if s.client == nil {
+		s.client = &http.Client{Timeout: 30 * time.Second}
+	}
+	if s.primaryRuntime != nil {
+		return nil
+	}
+	runtime, err := newWorkspaceRuntime(s.cfg, s.client, s.cfg.WorkspaceDir, s.cfg.AgentID, "daemon")
+	if err != nil {
+		return err
+	}
+	s.primaryRuntime = runtime
+	return nil
 }
 
 func (s *Service) Run(ctx context.Context) error {
@@ -240,10 +242,16 @@ func (s *Service) Run(ctx context.Context) error {
 	if err := os.MkdirAll(s.cfg.AgentWorkspaceRoot, 0o755); err != nil {
 		return err
 	}
+	if err := s.ensurePrimaryRuntime(); err != nil {
+		_ = shutdownToolGateway(context.Background(), s.toolServer)
+		return err
+	}
 	if err := s.refreshInitialWorkspace(ctx); err != nil {
-		s.closeDocumentSyncs()
+		if s.primaryRuntime != nil {
+			s.primaryRuntime.closeDocumentSyncs()
+		}
 		s.closeAgentWorkers()
-		s.closeAgentReplicas()
+		s.closeAgentRuntimes()
 		if s.sessions != nil {
 			s.sessions.Shutdown()
 		}
@@ -253,43 +261,27 @@ func (s *Service) Run(ctx context.Context) error {
 	primaryCtx, cancelPrimary := context.WithCancel(ctx)
 	defer cancelPrimary()
 	go func() {
-		if err := s.primaryReplica.Run(primaryCtx); err != nil && primaryCtx.Err() == nil {
-			log.Printf("primary workspace replica error: %v", err)
+		if err := s.primaryRuntime.Run(primaryCtx); err != nil && primaryCtx.Err() == nil {
+			log.Printf("primary workspace runtime error: %v", err)
 		}
 	}()
 	go s.workspaceEventLoop(ctx)
 
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
-	reconcileTicker := time.NewTicker(2 * time.Second)
-	defer reconcileTicker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			cancelPrimary()
-			s.closeDocumentSyncs()
 			s.closeAgentWorkers()
-			s.closeAgentReplicas()
+			s.closeAgentRuntimes()
 			if s.sessions != nil {
 				s.sessions.Shutdown()
 			}
 			_ = shutdownToolGateway(context.Background(), s.toolServer)
 			return nil
-		case <-reconcileTicker.C:
-			if err := s.processLocalCreates(ctx); err != nil {
-				fmt.Printf("local create reconcile error: %v\n", err)
-			}
-			if err := s.reconcileDirtyDocuments(ctx); err != nil {
-				fmt.Printf("document reconcile error: %v\n", err)
-			}
 		case <-ticker.C:
-			if err := s.processLocalCreates(ctx); err != nil {
-				fmt.Printf("local create reconcile error: %v\n", err)
-			}
-			if err := s.reconcileTrackedDocuments(ctx); err != nil {
-				fmt.Printf("document reconcile error: %v\n", err)
-			}
 			if err := s.refresh(ctx); err != nil {
 				fmt.Printf("workspace refresh error: %v\n", err)
 			}
@@ -427,21 +419,21 @@ func (s *Service) refresh(ctx context.Context) error {
 		return err
 	}
 
-	if s.primaryReplica != nil {
-		if err := s.primaryReplica.applyWorkspace(ctx, workspace); err != nil {
+	if err := s.ensurePrimaryRuntime(); err != nil {
+		return err
+	}
+	if s.primaryRuntime != nil {
+		if err := s.primaryRuntime.applyWorkspace(ctx, workspace); err != nil {
 			return err
 		}
 	}
-	if err := s.reconcileDocumentSyncs(ctx, workspace.Documents); err != nil {
+	if err := s.syncAgentRuntimes(ctx, workspace); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	s.latestWorkspace = workspace
 	s.mu.Unlock()
-	if err := s.reconcileAgentReplicas(ctx, workspace); err != nil {
-		return err
-	}
-	if err := s.reconcileAgentWorkers(ctx, workspace.Agents); err != nil {
+	if err := s.syncAgentWorkers(ctx, workspace.Agents); err != nil {
 		return err
 	}
 	if s.sessions != nil {
@@ -479,7 +471,7 @@ func (s *Service) fetchWorkspace(ctx context.Context) (*workspaceResponse, error
 	return &workspace, nil
 }
 
-func (s *Service) processLocalCreates(ctx context.Context) error {
+func (s *workspaceRuntime) processLocalCreates(ctx context.Context) error {
 	if s == nil || s.localCreates == nil {
 		return nil
 	}
@@ -487,19 +479,44 @@ func (s *Service) processLocalCreates(ctx context.Context) error {
 	if len(candidates) == 0 {
 		return nil
 	}
+	workspace, err := s.fetchWorkspace(ctx)
+	if err != nil {
+		for _, candidate := range candidates {
+			s.markLocalCreate(candidate)
+		}
+		return err
+	}
+	if err := s.applyWorkspace(ctx, workspace); err != nil {
+		for _, candidate := range candidates {
+			s.markLocalCreate(candidate)
+		}
+		return err
+	}
+	desiredPaths := desiredDocumentPaths(workspace.Documents)
 	created := false
 	var firstErr error
 	for _, candidate := range candidates {
 		if ctx.Err() != nil {
-			s.localCreates.Mark(candidate)
+			s.markLocalCreate(candidate)
 			if firstErr == nil {
 				firstErr = ctx.Err()
 			}
 			continue
 		}
-		document, err := s.createDocumentFromLocalCandidate(ctx, candidate)
+		relativePath, valid, err := s.validateLocalCreateCandidate(candidate, desiredPaths)
 		if err != nil {
-			s.localCreates.Mark(candidate)
+			s.markLocalCreate(candidate)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if !valid {
+			continue
+		}
+		document, err := s.createDocumentFromLocalCandidate(ctx, candidate, relativePath)
+		if err != nil {
+			s.markLocalCreate(candidate)
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -507,30 +524,78 @@ func (s *Service) processLocalCreates(ctx context.Context) error {
 		}
 		if document != nil {
 			created = true
+			desiredPaths[document.Path] = struct{}{}
 			s.markDocumentDirty(document.ID)
 		}
 	}
 	if created {
-		if err := s.refresh(ctx); err != nil && firstErr == nil {
+		workspace, err := s.fetchWorkspace(ctx)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+		} else if err := s.applyWorkspace(ctx, workspace); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
 }
 
-func (s *Service) createDocumentFromLocalCandidate(ctx context.Context, candidate localCreateCandidate) (*document, error) {
+func desiredDocumentPaths(documents []*document) map[string]struct{} {
+	paths := make(map[string]struct{}, len(documents))
+	for _, document := range documents {
+		if document == nil || strings.TrimSpace(document.Path) == "" {
+			continue
+		}
+		paths[document.Path] = struct{}{}
+	}
+	return paths
+}
+
+func (s *workspaceRuntime) validateLocalCreateCandidate(candidate localCreateCandidate, desiredPaths map[string]struct{}) (string, bool, error) {
+	path := strings.TrimSpace(candidate.Path)
+	root := strings.TrimSpace(candidate.Root)
+	if root == "" || path == "" || isIgnoredWorkspaceAbsolutePath(root, path) {
+		return "", false, nil
+	}
 	fs := NewWorkspaceFS(candidate.Root)
 	snapshot, err := fs.Read(candidate.Path)
 	if err != nil {
-		return nil, err
+		return "", false, err
 	}
 	if !snapshot.Exists {
-		return nil, nil
+		return "", false, nil
 	}
 	relativePath := workspaceRelativePath(candidate.Root, candidate.Path)
+	if relativePath == "" || relativePath == "." || isIgnoredDocumentPath(relativePath) {
+		return "", false, nil
+	}
+	if _, ok := desiredPaths[relativePath]; ok {
+		return "", false, nil
+	}
+	if s != nil && s.replica != nil {
+		s.replica.mu.Lock()
+		_, claimedPath := s.replica.projectedByPath[path]
+		_, claimedDesiredPath := s.replica.projectedByPath[filepath.Join(root, filepath.FromSlash(relativePath))]
+		for _, tracked := range s.replica.projectedByID {
+			if tracked != nil && tracked.DocumentPath == relativePath {
+				claimedPath = true
+				break
+			}
+		}
+		s.replica.mu.Unlock()
+		if claimedPath || claimedDesiredPath {
+			return "", false, nil
+		}
+	}
+	return relativePath, true, nil
+}
+
+func (s *workspaceRuntime) createDocumentFromLocalCandidate(ctx context.Context, candidate localCreateCandidate, relativePath string) (*document, error) {
+	fs := NewWorkspaceFS(candidate.Root)
 	payload, err := json.Marshal(createDocumentRequest{
 		Path:    relativePath,
-		Content: string(snapshot.Bytes),
+		Content: "",
 	})
 	if err != nil {
 		return nil, err
@@ -556,6 +621,14 @@ func (s *Service) createDocumentFromLocalCandidate(ctx context.Context, candidat
 	if err := json.NewDecoder(res.Body).Decode(&created); err != nil {
 		return nil, err
 	}
+	if s != nil && s.docCache != nil {
+		doc := crdt.New()
+		if err := s.docCache.storeDoc(created.ID, created.Path, created.UpdateID, doc); err != nil {
+			doc.Close()
+			return nil, err
+		}
+		doc.Close()
+	}
 	tracked := &trackedFile{
 		DocumentID:    created.ID,
 		DocumentPath:  created.Path,
@@ -563,13 +636,13 @@ func (s *Service) createDocumentFromLocalCandidate(ctx context.Context, candidat
 		WorkspaceRoot: candidate.Root,
 		FS:            fs,
 	}
-	if err := tracked.storeProjectedBase(string(snapshot.Bytes), crdtStateFromContent(string(snapshot.Bytes))); err != nil {
+	if err := tracked.storeProjectedBase("", crdtStateFromContent("")); err != nil {
 		return nil, err
 	}
 	return &created, nil
 }
 
-func (s *Service) reconcileAgentWorkers(ctx context.Context, agents []*agent) error {
+func (s *Service) syncAgentWorkers(ctx context.Context, agents []*agent) error {
 	desired := make(map[string]struct{}, len(agents))
 	skills := agentSkillExecutor{service: s}
 
@@ -724,14 +797,14 @@ type trackedReconcileState struct {
 var errProjectedBaseDoesNotMatchCRDTState = errors.New("projected base does not match cached CRDT state")
 var errDocumentRemovedDuringReconcile = errors.New("document removed during reconciliation")
 
-func (s *Service) reconcileDirtyDocuments(ctx context.Context) error {
+func (s *workspaceRuntime) reconcileDirtyDocuments(ctx context.Context) error {
 	if s.reconcileQueue == nil {
 		return nil
 	}
 	return s.reconcileDocumentIDs(ctx, s.reconcileQueue.Drain())
 }
 
-func (s *Service) reconcileTrackedDocuments(ctx context.Context) error {
+func (s *workspaceRuntime) reconcileTrackedDocuments(ctx context.Context) error {
 	if s.docCache == nil {
 		return nil
 	}
@@ -744,7 +817,7 @@ func (s *Service) reconcileTrackedDocuments(ctx context.Context) error {
 	return s.reconcileDocumentIDsWithTracked(ctx, documentIDs, trackedByDocument)
 }
 
-func (s *Service) reconcileDocumentIDs(ctx context.Context, documentIDs []string) error {
+func (s *workspaceRuntime) reconcileDocumentIDs(ctx context.Context, documentIDs []string) error {
 	if s.docCache == nil || len(documentIDs) == 0 {
 		return nil
 	}
@@ -753,7 +826,7 @@ func (s *Service) reconcileDocumentIDs(ctx context.Context, documentIDs []string
 	return s.reconcileDocumentIDsWithTracked(ctx, documentIDs, trackedByDocument)
 }
 
-func (s *Service) reconcileDocumentIDsWithTracked(ctx context.Context, documentIDs []string, trackedByDocument map[string][]*trackedFile) error {
+func (s *workspaceRuntime) reconcileDocumentIDsWithTracked(ctx context.Context, documentIDs []string, trackedByDocument map[string][]*trackedFile) error {
 	if s.docCache == nil || len(documentIDs) == 0 {
 		return nil
 	}
@@ -783,36 +856,26 @@ func (s *Service) reconcileDocumentIDsWithTracked(ctx context.Context, documentI
 	return firstErr
 }
 
-func (s *Service) collectTrackedByDocument() map[string][]*trackedFile {
+func (s *workspaceRuntime) collectTrackedByDocument() map[string][]*trackedFile {
 	result := map[string][]*trackedFile{}
-	s.mu.Lock()
-	replicas := make([]*workspaceReplica, 0, len(s.agentReplicas)+1)
-	if s.primaryReplica != nil {
-		replicas = append(replicas, s.primaryReplica)
+	if s == nil || s.replica == nil {
+		return result
 	}
-	for _, managed := range s.agentReplicas {
-		if managed != nil && managed.replica != nil {
-			replicas = append(replicas, managed.replica)
-		}
+	s.replica.mu.Lock()
+	for documentID, tracked := range s.replica.projectedByID {
+		result[documentID] = append(result[documentID], tracked)
 	}
-	s.mu.Unlock()
-	for _, replica := range replicas {
-		replica.mu.Lock()
-		for documentID, tracked := range replica.projectedByID {
-			result[documentID] = append(result[documentID], tracked)
-		}
-		replica.mu.Unlock()
-	}
+	s.replica.mu.Unlock()
 	return result
 }
 
-func (s *Service) markDocumentDirty(documentID string) {
+func (s *workspaceRuntime) markDocumentDirty(documentID string) {
 	if s != nil && s.reconcileQueue != nil {
 		s.reconcileQueue.Mark(documentID)
 	}
 }
 
-func (s *Service) documentNeedsReconcile(documentID string, trackedFiles []*trackedFile) bool {
+func (s *workspaceRuntime) documentNeedsReconcile(documentID string, trackedFiles []*trackedFile) bool {
 	if documentID == "" {
 		return false
 	}
@@ -832,154 +895,175 @@ func (s *Service) documentNeedsReconcile(documentID string, trackedFiles []*trac
 	return err != nil || count > 0
 }
 
-func (s *Service) reconcileTrackedDocument(ctx context.Context, documentID string, trackedFiles []*trackedFile) error {
+func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documentID string, trackedFiles []*trackedFile) error {
 	if s == nil || s.docCache == nil || documentID == "" || len(trackedFiles) == 0 {
 		return nil
 	}
+	unlockReconcile := s.lockDocumentReconcile(documentID)
+	defer unlockReconcile()
 	cache := s.docCache
 	documentPath := trackedFiles[0].DocumentPath
-	entry, unlock := cache.lockEntry(documentID)
-	defer unlock()
+	var flushRecords []outboxUpdateRecord
+	if err := func() error {
+		entry, unlock := cache.lockEntry(documentID)
+		defer unlock()
 
-	outboxes, err := cache.loadOutboxUpdatesLocked(entry, documentID)
-	if err != nil {
-		return err
-	}
-	if len(outboxes) > 0 {
-		return s.flushOutboxUpdatesLocked(ctx, cache, entry, documentID, documentPath, trackedFiles, outboxes)
-	}
-
-	baseDoc, metadata, baseState, err := cache.loadBaseDocLocked(entry, documentID, documentPath)
-	if err != nil {
-		return err
-	}
-	cacheContentKnown := baseState != nil
-	baseContent := baseDoc.GetText("content").ToString()
-	states, err := collectTrackedReconcileStates(trackedFiles)
-	if err != nil {
-		return err
-	}
-	handledMetadata, err := s.reconcileLocalMetadataOperations(ctx, cache, entry, documentID, states)
-	if err != nil {
-		if errors.Is(err, errDocumentRemovedDuringReconcile) {
+		outboxes, err := cache.loadOutboxUpdatesLocked(entry, documentID)
+		if err != nil {
+			return err
+		}
+		if len(outboxes) > 0 {
+			flushRecords = outboxes
 			return nil
 		}
-		return err
-	}
-	if handledMetadata {
-		return nil
-	}
 
-	missingBase := map[*trackedFile]trackedReconcileState{}
-	projectOnlyDirty := map[*trackedFile]struct{}{}
-	records := make([]outboxUpdateRecord, 0)
-	for _, state := range states {
-		if state.baseMissing {
-			missingBase[state.tracked] = state
-			continue
-		}
-		if !state.localDirty {
-			continue
-		}
-		if state.baseContent == state.localContent && state.baseContent != baseContent {
-			projectOnlyDirty[state.tracked] = struct{}{}
-			continue
-		}
-		localContent := state.localContent
-		update, observedState, err := buildLocalUpdateFromBase(state.baseState, state.baseContent, localContent)
-		if err != nil {
-			if !errors.Is(err, errProjectedBaseDoesNotMatchCRDTState) {
-				return err
-			}
-			state.tracked.markLocalDirty()
-			continue
-		}
-		if len(update) == 0 {
-			state.tracked.clearLocalDirty()
-			projectOnlyDirty[state.tracked] = struct{}{}
-			continue
-		}
-		actorID, actorType := s.actorForTracked(state.tracked)
-		record := outboxUpdateRecord{
-			Update:          update,
-			ObservedContent: state.localContent,
-			ObservedState:   observedState,
-			SourcePath:      state.tracked.Path,
-			ActorID:         actorID,
-			ActorType:       actorType,
-			CreatedAt:       time.Now().UTC(),
-		}
-		records = append(records, record)
-		state.tracked.markLocalDirty()
-	}
-	if len(records) > 0 {
-		if err := cache.storeOutboxUpdatesLocked(entry, documentID, documentPath, records); err != nil {
-			return err
-		}
-		return s.flushOutboxUpdatesLocked(ctx, cache, entry, documentID, documentPath, trackedFiles, records)
-	}
-
-	pendingRemoteCount, err := cache.pendingRemoteUpdateCountLocked(entry, documentID)
-	if err != nil {
-		if errors.Is(err, errPendingUpdateLogHashMismatch) {
-			if clearErr := cache.clearPendingRemoteUpdatesLocked(entry, documentID); clearErr != nil {
-				return fmt.Errorf("clear corrupt pending remote updates for %s: %w", documentID, clearErr)
-			}
-			pendingRemoteCount = 0
-		} else {
-			return err
-		}
-	}
-	if pendingRemoteCount > 0 {
-		if err := applyPendingRemoteUpdatesLocked(cache, entry, documentID, baseDoc); err != nil {
-			return err
-		}
-		metadata.DocumentID = documentID
-		if metadata.Path == "" {
-			metadata.Path = documentPath
-		}
-		metadata.UpdatedAt = time.Now().UTC()
-		if err := cache.storeDocLocked(entry, metadata, baseDoc); err != nil {
-			return err
-		}
-		if err := cache.clearPendingRemoteUpdatesLocked(entry, documentID); err != nil {
-			return err
-		}
-		baseState = baseDoc.EncodeStateAsUpdate()
-		cacheContentKnown = baseState != nil
-		baseContent = baseDoc.GetText("content").ToString()
-	}
-
-	hasReconcileWork := pendingRemoteCount > 0 || len(missingBase) > 0 || len(projectOnlyDirty) > 0
-	for _, state := range states {
-		if !state.fileExists && state.baseKnown {
-			hasReconcileWork = true
-			break
-		}
-	}
-	if !hasReconcileWork {
-		return nil
-	}
-
-	finalContent := baseDoc.GetText("content").ToString()
-	finalState := baseDoc.EncodeStateAsUpdate()
-	for _, state := range states {
-		pathReady, err := reconcileTrackedPathForProjection(state)
+		baseDoc, metadata, baseState, err := cache.loadBaseDocLocked(entry, documentID, documentPath)
 		if err != nil {
 			return err
 		}
-		if !pathReady {
-			state.tracked.markLocalDirty()
-			continue
+		cacheContentKnown := baseState != nil
+		baseContent := baseDoc.GetText("content").ToString()
+		states, err := collectTrackedReconcileStates(trackedFiles)
+		if err != nil {
+			return err
 		}
-		if _, ok := missingBase[state.tracked]; ok {
-			if state.fileExists {
-				if err := archiveUnknownWorkingCopy(state.tracked); err != nil {
+		handledMetadata, err := s.reconcileLocalMetadataOperations(ctx, cache, entry, documentID, states)
+		if err != nil {
+			if errors.Is(err, errDocumentRemovedDuringReconcile) {
+				return nil
+			}
+			return err
+		}
+		if handledMetadata {
+			return nil
+		}
+
+		missingBase := map[*trackedFile]trackedReconcileState{}
+		projectOnlyDirty := map[*trackedFile]struct{}{}
+		records := make([]outboxUpdateRecord, 0)
+		for _, state := range states {
+			if state.baseMissing {
+				missingBase[state.tracked] = state
+				continue
+			}
+			if !state.localDirty {
+				continue
+			}
+			if state.baseContent == state.localContent && state.baseContent != baseContent {
+				projectOnlyDirty[state.tracked] = struct{}{}
+				continue
+			}
+			localContent := state.localContent
+			update, observedState, err := buildLocalUpdateFromBase(state.baseState, state.baseContent, localContent)
+			if err != nil {
+				if !errors.Is(err, errProjectedBaseDoesNotMatchCRDTState) {
 					return err
 				}
+				state.tracked.markLocalDirty()
+				continue
 			}
-			state.tracked.setProjectedSnapshot(projectedContentHash{}, false)
-			if cacheContentKnown {
+			if len(update) == 0 {
+				state.tracked.clearLocalDirty()
+				projectOnlyDirty[state.tracked] = struct{}{}
+				continue
+			}
+			actorID, actorType := s.actorForTracked(state.tracked)
+			record := outboxUpdateRecord{
+				Update:          update,
+				ObservedContent: state.localContent,
+				ObservedState:   observedState,
+				SourcePath:      state.tracked.Path,
+				ActorID:         actorID,
+				ActorType:       actorType,
+				CreatedAt:       time.Now().UTC(),
+			}
+			records = append(records, record)
+			state.tracked.markLocalDirty()
+		}
+		if len(records) > 0 {
+			if err := cache.storeOutboxUpdatesLocked(entry, documentID, documentPath, records); err != nil {
+				return err
+			}
+			flushRecords = records
+			return nil
+		}
+
+		pendingRemoteCount, err := cache.pendingRemoteUpdateCountLocked(entry, documentID)
+		if err != nil {
+			if errors.Is(err, errPendingUpdateLogHashMismatch) {
+				if clearErr := cache.clearPendingRemoteUpdatesLocked(entry, documentID); clearErr != nil {
+					return fmt.Errorf("clear corrupt pending remote updates for %s: %w", documentID, clearErr)
+				}
+				pendingRemoteCount = 0
+			} else {
+				return err
+			}
+		}
+		if pendingRemoteCount > 0 {
+			if err := applyPendingRemoteUpdatesLocked(cache, entry, documentID, baseDoc); err != nil {
+				return err
+			}
+			metadata.DocumentID = documentID
+			if metadata.Path == "" {
+				metadata.Path = documentPath
+			}
+			metadata.UpdatedAt = time.Now().UTC()
+			if err := cache.storeDocLocked(entry, metadata, baseDoc); err != nil {
+				return err
+			}
+			if err := cache.clearPendingRemoteUpdatesLocked(entry, documentID); err != nil {
+				return err
+			}
+			baseState = baseDoc.EncodeStateAsUpdate()
+			cacheContentKnown = baseState != nil
+			baseContent = baseDoc.GetText("content").ToString()
+		}
+
+		hasReconcileWork := pendingRemoteCount > 0 || len(missingBase) > 0 || len(projectOnlyDirty) > 0
+		for _, state := range states {
+			if !state.fileExists && state.baseKnown {
+				hasReconcileWork = true
+				break
+			}
+		}
+		if !hasReconcileWork {
+			return nil
+		}
+
+		finalContent := baseDoc.GetText("content").ToString()
+		finalState := baseDoc.EncodeStateAsUpdate()
+		for _, state := range states {
+			pathReady, err := reconcileTrackedPathForProjection(state)
+			if err != nil {
+				return err
+			}
+			if !pathReady {
+				state.tracked.markLocalDirty()
+				continue
+			}
+			if _, ok := missingBase[state.tracked]; ok {
+				if state.fileExists {
+					if err := archiveUnknownWorkingCopy(state.tracked); err != nil {
+						return err
+					}
+				}
+				state.tracked.setProjectedSnapshot(projectedContentHash{}, false)
+				if cacheContentKnown {
+					clean, err := applyProjectedContent(state.tracked, finalContent, finalState)
+					if err != nil {
+						return err
+					}
+					if clean {
+						state.tracked.clearLocalDirty()
+					} else {
+						state.tracked.markLocalDirty()
+					}
+				} else {
+					state.tracked.markLocalDirty()
+				}
+				continue
+			}
+			if _, ok := projectOnlyDirty[state.tracked]; ok {
 				clean, err := applyProjectedContent(state.tracked, finalContent, finalState)
 				if err != nil {
 					return err
@@ -989,12 +1073,12 @@ func (s *Service) reconcileTrackedDocument(ctx context.Context, documentID strin
 				} else {
 					state.tracked.markLocalDirty()
 				}
-			} else {
-				state.tracked.markLocalDirty()
+				continue
 			}
-			continue
-		}
-		if _, ok := projectOnlyDirty[state.tracked]; ok {
+			if state.localDirty {
+				state.tracked.markLocalDirty()
+				continue
+			}
 			clean, err := applyProjectedContent(state.tracked, finalContent, finalState)
 			if err != nil {
 				return err
@@ -1004,26 +1088,18 @@ func (s *Service) reconcileTrackedDocument(ctx context.Context, documentID strin
 			} else {
 				state.tracked.markLocalDirty()
 			}
-			continue
 		}
-		if state.localDirty {
-			state.tracked.markLocalDirty()
-			continue
-		}
-		clean, err := applyProjectedContent(state.tracked, finalContent, finalState)
-		if err != nil {
-			return err
-		}
-		if clean {
-			state.tracked.clearLocalDirty()
-		} else {
-			state.tracked.markLocalDirty()
-		}
+		return nil
+	}(); err != nil {
+		return err
+	}
+	if len(flushRecords) > 0 {
+		return s.flushOutboxUpdates(ctx, cache, documentID, documentPath, trackedFiles, flushRecords)
 	}
 	return nil
 }
 
-func (s *Service) reconcileLocalMetadataOperations(ctx context.Context, cache *documentCache, entry *documentCacheEntry, documentID string, states []trackedReconcileState) (bool, error) {
+func (s *workspaceRuntime) reconcileLocalMetadataOperations(ctx context.Context, cache *documentCache, entry *documentCacheEntry, documentID string, states []trackedReconcileState) (bool, error) {
 	for _, state := range states {
 		tracked := state.tracked
 		if tracked == nil || !tracked.isRemoteDeleted() {
@@ -1148,7 +1224,7 @@ func hasTrackedLocalDirty(trackedFiles []*trackedFile) bool {
 	return false
 }
 
-func (s *Service) actorForTracked(tracked *trackedFile) (string, string) {
+func (s *workspaceRuntime) actorForTracked(tracked *trackedFile) (string, string) {
 	actorID := ""
 	actorType := ""
 	if tracked != nil {
@@ -1167,7 +1243,7 @@ func (s *Service) actorForTracked(tracked *trackedFile) (string, string) {
 	return actorID, actorType
 }
 
-func (s *Service) updateRemoteDocumentPath(ctx context.Context, tracked *trackedFile, path string) error {
+func (s *workspaceRuntime) updateRemoteDocumentPath(ctx context.Context, tracked *trackedFile, path string) error {
 	if tracked == nil || tracked.DocumentID == "" {
 		return nil
 	}
@@ -1195,7 +1271,7 @@ func (s *Service) updateRemoteDocumentPath(ctx context.Context, tracked *tracked
 	return nil
 }
 
-func (s *Service) deleteRemoteDocument(ctx context.Context, tracked *trackedFile) error {
+func (s *workspaceRuntime) deleteRemoteDocument(ctx context.Context, tracked *trackedFile) error {
 	if tracked == nil || tracked.DocumentID == "" {
 		return nil
 	}
@@ -1218,17 +1294,20 @@ func (s *Service) deleteRemoteDocument(ctx context.Context, tracked *trackedFile
 	return nil
 }
 
-func (s *Service) flushOutboxUpdatesLocked(ctx context.Context, cache *documentCache, entry *documentCacheEntry, documentID, documentPath string, trackedFiles []*trackedFile, records []outboxUpdateRecord) error {
+func (s *workspaceRuntime) flushOutboxUpdates(ctx context.Context, cache *documentCache, documentID, documentPath string, trackedFiles []*trackedFile, records []outboxUpdateRecord) error {
 	for len(records) > 0 {
 		record := records[0]
 		if _, err := s.postDocumentUpdate(ctx, documentID, &record); err != nil {
 			return err
 		}
+		entry, unlock := cache.lockEntry(documentID)
 		if err := finalizeAcceptedOutbox(cache, entry, documentID, documentPath, trackedFiles, &record); err != nil {
+			unlock()
 			return err
 		}
 		var err error
 		records, err = cache.loadOutboxUpdatesLocked(entry, documentID)
+		unlock()
 		if err != nil {
 			return err
 		}
@@ -1587,7 +1666,7 @@ func (s *Service) updateRemoteAgentSession(ctx context.Context, agentID string, 
 	return nil
 }
 
-func (s *Service) postDocumentUpdate(ctx context.Context, documentID string, record *outboxUpdateRecord) (*postDocumentUpdateResponse, error) {
+func (s *workspaceRuntime) postDocumentUpdate(ctx context.Context, documentID string, record *outboxUpdateRecord) (*postDocumentUpdateResponse, error) {
 	if record == nil || len(record.Update) == 0 {
 		return &postDocumentUpdateResponse{Accepted: true}, nil
 	}
@@ -1779,7 +1858,7 @@ func (t *trackedFile) projectionDir() string {
 	if root == "" {
 		return ""
 	}
-	return filepath.Join(root, ".notty", "projections", safeDocumentCacheName(t.DocumentID))
+	return filepath.Join(workspaceDocumentStateDir(root), safeDocumentCacheName(t.DocumentID))
 }
 
 func (t *trackedFile) workspaceFS() *WorkspaceFS {

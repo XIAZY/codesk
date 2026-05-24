@@ -1,11 +1,8 @@
 package syncer
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,15 +13,12 @@ import (
 )
 
 type workspaceReplica struct {
-	backendURL string
-	cfg        Config
 	rootDir    string
 	actorID    string
 	actorType  string
 	markDirty  func(documentID string)
 	markCreate func(localCreateCandidate)
 
-	client   *http.Client
 	watcher  *fsnotify.Watcher
 	docCache *documentCache
 	fs       *WorkspaceFS
@@ -36,7 +30,7 @@ type workspaceReplica struct {
 	initialWorkspace *workspaceResponse
 }
 
-func newWorkspaceReplica(cfg Config, rootDir, actorID, actorType string, markDirty func(string), markCreate func(localCreateCandidate)) (*workspaceReplica, error) {
+func newWorkspaceReplica(_ Config, rootDir, actorID, actorType string, markDirty func(string), markCreate func(localCreateCandidate)) (*workspaceReplica, error) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
@@ -45,26 +39,16 @@ func newWorkspaceReplica(cfg Config, rootDir, actorID, actorType string, markDir
 		actorType = "daemon"
 	}
 	return &workspaceReplica{
-		backendURL:      cfg.BackendURL,
-		cfg:             cfg,
 		rootDir:         rootDir,
 		actorID:         actorID,
 		actorType:       actorType,
 		markDirty:       markDirty,
 		markCreate:      markCreate,
-		client:          &http.Client{Timeout: 10 * time.Second},
 		watcher:         watcher,
 		fs:              NewWorkspaceFS(rootDir),
 		projectedByPath: map[string]*trackedFile{},
 		projectedByID:   map[string]*trackedFile{},
 	}, nil
-}
-
-func (r *workspaceReplica) actingAgentID() string {
-	if r == nil || r.actorType != "agent" {
-		return ""
-	}
-	return r.actorID
 }
 
 func (r *workspaceReplica) actorKind() string {
@@ -98,6 +82,9 @@ func (r *workspaceReplica) Run(ctx context.Context) error {
 			return err
 		}
 		r.initialWorkspace = nil
+	}
+	if err := r.reconcileLocalWorkspace(ctx); err != nil {
+		log.Printf("%s initial local reconcile error: %v", r.actorID, err)
 	}
 
 	ticker := time.NewTicker(60 * time.Second)
@@ -134,38 +121,8 @@ func (r *workspaceReplica) Run(ctx context.Context) error {
 			if err := r.reconcileLocalWorkspace(ctx); err != nil {
 				log.Printf("%s local reconcile error: %v", r.actorID, err)
 			}
-			if err := r.sendPresence(ctx); err != nil {
-				log.Printf("%s presence error: %v", r.actorID, err)
-			}
 		}
 	}
-}
-
-func (r *workspaceReplica) refresh(ctx context.Context) error {
-	workspace, err := r.fetchWorkspace(ctx)
-	if err != nil {
-		return err
-	}
-	return r.applyWorkspace(ctx, workspace)
-}
-
-func (r *workspaceReplica) fetchWorkspace(ctx context.Context) (*workspaceResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.backendURL+r.cfg.workspaceAPIPath("/api/workspace"), nil)
-	if err != nil {
-		return nil, err
-	}
-	applyBackendAuth(req.Header, r.cfg, r.actingAgentID())
-	res, err := r.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-
-	var workspace workspaceResponse
-	if err := json.NewDecoder(res.Body).Decode(&workspace); err != nil {
-		return nil, err
-	}
-	return &workspace, nil
 }
 
 func (r *workspaceReplica) applyWorkspace(ctx context.Context, workspace *workspaceResponse) error {
@@ -233,7 +190,7 @@ func (r *workspaceReplica) ensureTracked(ctx context.Context, document *document
 		tracked.Owner = r
 		tracked.clearRemoteDeleted()
 		if tracked.WorkspaceRoot == "" {
-			tracked.WorkspaceRoot = workspaceRootForDocumentPath(absolutePath, document.Path)
+			tracked.WorkspaceRoot = r.rootDir
 		}
 		if tracked.DocumentPath != document.Path {
 			tracked.DocumentPath = document.Path
@@ -364,7 +321,7 @@ func (r *workspaceReplica) setTrackedPath(tracked *trackedFile, nextPath string)
 	defer r.mu.Unlock()
 	delete(r.projectedByPath, tracked.Path)
 	tracked.Path = nextPath
-	tracked.WorkspaceRoot = workspaceRootForDocumentPath(nextPath, tracked.DocumentPath)
+	tracked.WorkspaceRoot = r.rootDir
 	tracked.FS = r.fs
 	r.projectedByPath[nextPath] = tracked
 }
@@ -385,25 +342,4 @@ func (r *workspaceReplica) untrack(tracked *trackedFile) {
 	tracked.clearLocalDeleted()
 	tracked.clearLocalMoved()
 	tracked.clearRemoteDeleted()
-}
-
-func (r *workspaceReplica) sendPresence(ctx context.Context) error {
-	payload, err := json.Marshal(upsertPresenceRequest{
-		ActorID:   r.actorID,
-		ActorType: r.actorKind(),
-		FilePath:  "",
-		Mode:      "syncing",
-		Activity:  "materializing " + r.actorID,
-	})
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.backendURL+r.cfg.workspaceAPIPath("/api/presence"), bytes.NewReader(payload))
-	if err != nil {
-		return err
-	}
-	applyBackendAuth(req.Header, r.cfg, r.actingAgentID())
-	req.Header.Set("Content-Type", "application/json")
-	_, err = r.client.Do(req)
-	return err
 }

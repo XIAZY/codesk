@@ -92,6 +92,39 @@ func TestDotPathsIgnoredWhileRootLogsSync(t *testing.T) {
 	stack.waitForBackendContentByPath(t, "codex-agent.log", "line one\nline two\n", 30*time.Second)
 }
 
+func TestLocalCreateEditDeleteMultipleFiles(t *testing.T) {
+	stack := newRegressionStack(t)
+	stack.up(t)
+
+	initial := map[string]string{
+		uniquePath("multi-create-a", ".md"): "alpha\n",
+		uniquePath("multi-create-b", ".md"): "bravo\n",
+		uniquePath("multi-create-c", ".md"): "charlie\n",
+	}
+	for path, content := range initial {
+		stack.writeLocalFile(t, path, content)
+	}
+	for path, content := range initial {
+		stack.waitForBackendContentByPath(t, path, content, 60*time.Second)
+	}
+
+	edited := map[string]string{}
+	for path, content := range initial {
+		edited[path] = strings.TrimSuffix(content, "\n") + " edited\n"
+		stack.writeLocalFile(t, path, edited[path])
+	}
+	for path, content := range edited {
+		stack.waitForBackendContentByPath(t, path, content, 60*time.Second)
+	}
+
+	for path := range edited {
+		stack.removeLocalFile(t, path)
+	}
+	for path := range edited {
+		stack.waitForDocumentPathGone(t, path, 60*time.Second)
+	}
+}
+
 func TestThreadCreationAcceptsClientRelativeAnchors(t *testing.T) {
 	stack := newRegressionStack(t)
 	stack.up(t)
@@ -658,6 +691,11 @@ func (s *regressionStack) appendLocalFile(t *testing.T, path string, content str
 	s.execService(t, "daemon", "mkdir -p "+shellQuote(s.daemonWorkspaceDir())+" && cd "+shellQuote(s.daemonWorkspaceDir())+" && "+mkdir+fmt.Sprintf("printf %%s %s >> %s", shellQuote(content), shellQuote(path)))
 }
 
+func (s *regressionStack) removeLocalFile(t *testing.T, path string) {
+	t.Helper()
+	s.execService(t, "daemon", "cd "+shellQuote(s.daemonWorkspaceDir())+" && rm -f "+shellQuote(path))
+}
+
 func (s *regressionStack) localFileContent(t *testing.T, path string) string {
 	t.Helper()
 	return s.execService(t, "daemon", fmt.Sprintf("if [ -d %s ]; then cd %s && if [ -f %s ]; then cat %s; fi; fi", shellQuote(s.daemonWorkspaceDir()), shellQuote(s.daemonWorkspaceDir()), shellQuote(path), shellQuote(path)))
@@ -806,6 +844,20 @@ func (s *regressionStack) waitForDocumentPath(t *testing.T, path string, timeout
 		time.Sleep(500 * time.Millisecond)
 	}
 	t.Fatalf("document path %s did not appear; current paths: %v", path, s.documentPaths())
+}
+
+func (s *regressionStack) waitForDocumentPathGone(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var paths []string
+	for time.Now().Before(deadline) {
+		paths = s.documentPaths()
+		if !contains(paths, path) {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("document path %s did not disappear; current paths: %v", path, paths)
 }
 
 func (s *regressionStack) documentPaths() []string {

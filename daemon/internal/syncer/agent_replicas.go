@@ -7,7 +7,10 @@ import (
 	"sort"
 )
 
-func (s *Service) reconcileAgentReplicas(ctx context.Context, workspace *workspaceResponse) error {
+func (s *Service) syncAgentRuntimes(ctx context.Context, workspace *workspaceResponse) error {
+	if s.agentRuntimes == nil {
+		s.agentRuntimes = map[string]*managedWorkspaceRuntime{}
+	}
 	agents := []*agent(nil)
 	if workspace != nil {
 		agents = workspace.Agents
@@ -21,68 +24,70 @@ func (s *Service) reconcileAgentReplicas(ctx context.Context, workspace *workspa
 	}
 
 	s.mu.Lock()
-	existing := make([]*workspaceReplica, 0, len(desired))
+	existing := make([]*workspaceRuntime, 0, len(desired))
 	for agentID := range desired {
 		currentAgent := desired[agentID]
-		if managed, ok := s.agentReplicas[agentID]; ok {
-			if managed.replica.actorID == currentAgent.ID {
-				existing = append(existing, managed.replica)
+		if managed, ok := s.agentRuntimes[agentID]; ok && managed != nil && managed.runtime != nil {
+			if managed.runtime.replica != nil && managed.runtime.replica.actorID == currentAgent.ID {
+				existing = append(existing, managed.runtime)
 				continue
 			}
 			managed.cancel()
-			delete(s.agentReplicas, agentID)
+			delete(s.agentRuntimes, agentID)
 		}
 		rootDir := filepath.Join(s.cfg.AgentWorkspaceRoot, safeAgentWorkspaceName(agentID))
-		replica, err := newWorkspaceReplica(s.cfg, rootDir, currentAgent.ID, "agent", s.markDocumentDirty, s.localCreates.Mark)
+		runtime, err := newWorkspaceRuntime(s.cfg, s.client, rootDir, currentAgent.ID, "agent")
 		if err != nil {
 			s.mu.Unlock()
 			return err
 		}
-		replica.client = s.client
-		replica.docCache = s.docCache
-		replica.initialWorkspace = workspace
-		replicaCtx, cancel := context.WithCancel(ctx)
-		s.agentReplicas[agentID] = &managedReplica{replica: replica, cancel: cancel}
+		runtime.initialWorkspace = workspace
+		runtimeCtx, cancel := context.WithCancel(ctx)
+		s.agentRuntimes[agentID] = &managedWorkspaceRuntime{runtime: runtime, cancel: cancel}
 		go func() {
-			_ = replica.Run(replicaCtx)
+			_ = runtime.Run(runtimeCtx)
 		}()
 	}
 
 	staleIDs := make([]string, 0)
-	for agentID := range s.agentReplicas {
+	for agentID := range s.agentRuntimes {
 		if _, ok := desired[agentID]; !ok {
 			staleIDs = append(staleIDs, agentID)
 		}
 	}
 	sort.Strings(staleIDs)
-	stale := make([]*managedReplica, 0, len(staleIDs))
+	stale := make([]*managedWorkspaceRuntime, 0, len(staleIDs))
 	for _, agentID := range staleIDs {
-		stale = append(stale, s.agentReplicas[agentID])
-		delete(s.agentReplicas, agentID)
+		stale = append(stale, s.agentRuntimes[agentID])
+		delete(s.agentRuntimes, agentID)
 	}
 	s.mu.Unlock()
 
-	for _, replica := range existing {
-		if err := replica.applyWorkspace(ctx, workspace); err != nil {
+	for _, runtime := range existing {
+		if err := runtime.applyWorkspace(ctx, workspace); err != nil {
 			return err
 		}
 	}
 	for index, agentID := range staleIDs {
-		stale[index].cancel()
+		if stale[index] != nil && stale[index].cancel != nil {
+			stale[index].cancel()
+		}
 		_ = os.RemoveAll(filepath.Join(s.cfg.AgentWorkspaceRoot, safeAgentWorkspaceName(agentID)))
 	}
 	return nil
 }
 
-func (s *Service) closeAgentReplicas() {
+func (s *Service) closeAgentRuntimes() {
 	s.mu.Lock()
-	replicas := make([]*managedReplica, 0, len(s.agentReplicas))
-	for _, replica := range s.agentReplicas {
-		replicas = append(replicas, replica)
+	runtimes := make([]*managedWorkspaceRuntime, 0, len(s.agentRuntimes))
+	for _, runtime := range s.agentRuntimes {
+		runtimes = append(runtimes, runtime)
 	}
-	s.agentReplicas = map[string]*managedReplica{}
+	s.agentRuntimes = map[string]*managedWorkspaceRuntime{}
 	s.mu.Unlock()
-	for _, replica := range replicas {
-		replica.cancel()
+	for _, runtime := range runtimes {
+		if runtime != nil {
+			runtime.cancel()
+		}
 	}
 }

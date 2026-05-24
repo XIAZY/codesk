@@ -24,7 +24,7 @@ import (
 	"notty/internal/yproto"
 )
 
-func newDocumentUpdateHTTPTestService(t *testing.T, cache *documentCache, handler func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int)) *Service {
+func newDocumentUpdateHTTPTestService(t *testing.T, cache *documentCache, handler func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int)) *workspaceRuntime {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -56,14 +56,14 @@ func newDocumentUpdateHTTPTestService(t *testing.T, cache *documentCache, handle
 		_ = json.NewEncoder(w).Encode(response)
 	}))
 	t.Cleanup(server.Close)
-	return &Service{
+	return &workspaceRuntime{
 		cfg:      Config{BackendURL: server.URL, AgentID: "daemon_agent"},
 		client:   server.Client(),
 		docCache: cache,
 	}
 }
 
-func newApplyingDocumentUpdateHTTPTestService(t *testing.T, cache *documentCache, serverDoc *crdt.Doc, sent *int) *Service {
+func newApplyingDocumentUpdateHTTPTestService(t *testing.T, cache *documentCache, serverDoc *crdt.Doc, sent *int) *workspaceRuntime {
 	t.Helper()
 	return newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
 		if sent != nil {
@@ -95,9 +95,9 @@ func TestComputeReplaceHandlesReplacement(t *testing.T) {
 func TestReconcileAgentReplicasKeepsUUIDActorWhenHandleChanges(t *testing.T) {
 	cancelled := false
 	service := &Service{
-		agentReplicas: map[string]*managedReplica{
+		agentRuntimes: map[string]*managedWorkspaceRuntime{
 			"agent_1": {
-				replica: &workspaceReplica{actorID: "agent_1"},
+				runtime: &workspaceRuntime{replica: &workspaceReplica{actorID: "agent_1"}},
 				cancel: func() {
 					cancelled = true
 				},
@@ -107,15 +107,15 @@ func TestReconcileAgentReplicasKeepsUUIDActorWhenHandleChanges(t *testing.T) {
 	workspace := &workspaceResponse{
 		Agents: []*agent{{ID: "agent_1", Handle: "renamed-agent"}},
 	}
-	if err := service.reconcileAgentReplicas(context.Background(), workspace); err != nil {
-		t.Fatalf("reconcile agent replicas: %v", err)
+	if err := service.syncAgentRuntimes(context.Background(), workspace); err != nil {
+		t.Fatalf("sync agent runtimes: %v", err)
 	}
 	if cancelled {
 		t.Fatal("agent replica should not restart when only the handle changes")
 	}
-	replica := service.agentReplicas["agent_1"]
-	if replica == nil || replica.replica == nil || replica.replica.actorID != "agent_1" {
-		t.Fatalf("expected UUID actor to be preserved, got %#v", replica)
+	runtime := service.agentRuntimes["agent_1"]
+	if runtime == nil || runtime.runtime == nil || runtime.runtime.replica == nil || runtime.runtime.replica.actorID != "agent_1" {
+		t.Fatalf("expected UUID actor to be preserved, got %#v", runtime)
 	}
 }
 
@@ -295,7 +295,7 @@ func TestReconcileDirtyDocumentsRequeuesOutboxAfterHTTPError(t *testing.T) {
 		return postDocumentUpdateResponse{}, http.StatusServiceUnavailable
 	})
 	service.reconcileQueue = queue
-	service.primaryReplica = &workspaceReplica{
+	service.replica = &workspaceReplica{
 		projectedByID: map[string]*trackedFile{"doc_1": tracked},
 	}
 
@@ -346,7 +346,7 @@ func TestReconcileDirtyDocumentsDoesNotDropLaterIDsAfterError(t *testing.T) {
 		return postDocumentUpdateResponse{}, http.StatusServiceUnavailable
 	})
 	service.reconcileQueue = queue
-	service.primaryReplica = &workspaceReplica{projectedByID: map[string]*trackedFile{
+	service.replica = &workspaceReplica{projectedByID: map[string]*trackedFile{
 		"doc_bad":   trackedBad,
 		"doc_retry": trackedRetry,
 	}}
@@ -481,7 +481,7 @@ func TestRefreshSharesFetchedWorkspaceWithWorkersAndReplicas(t *testing.T) {
 			AgentID:            "daemon_agent",
 		},
 		client:        client,
-		agentReplicas: map[string]*managedReplica{},
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 		agentWorkers:  map[string]*managedAgentWorker{},
 	}
 
@@ -491,7 +491,7 @@ func TestRefreshSharesFetchedWorkspaceWithWorkersAndReplicas(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 	cancel()
 	service.closeAgentWorkers()
-	service.closeAgentReplicas()
+	service.closeAgentRuntimes()
 
 	if got := workspaceSyncRequests.Load(); got != 1 {
 		t.Fatalf("expected one shared workspace sync request during refresh, got %d", got)
@@ -550,12 +550,13 @@ func TestInitialRefreshFailsFastOnAgentStartupError(t *testing.T) {
 			AgentID:            "daemon_agent",
 		},
 		client:        client,
-		agentReplicas: map[string]*managedReplica{},
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 		agentWorkers:  map[string]*managedAgentWorker{},
 	}
 	service.sessions = newAgentSessionSupervisor(service.cfg, nil, factory.new)
 	defer service.sessions.Shutdown()
 	defer service.closeAgentWorkers()
+	defer service.closeAgentRuntimes()
 
 	started := time.Now()
 	err := service.refreshInitialWorkspace(context.Background())
@@ -696,7 +697,7 @@ func TestProjectedBaseLivesUnderWorkspaceNottyWithCRDTState(t *testing.T) {
 		t.Fatalf("store projected base: %v", err)
 	}
 
-	projectionDir := filepath.Join(root, ".notty", "projections", "doc_1")
+	projectionDir := filepath.Join(root, ".notty", "documents", "doc_1")
 	if _, err := os.Stat(filepath.Join(projectionDir, "base.txt")); err != nil {
 		t.Fatalf("expected workspace projection text: %v", err)
 	}
@@ -1694,7 +1695,7 @@ func TestReconcileTrackedDocumentClearsPendingMetadataHashMismatch(t *testing.T)
 	}
 }
 
-func TestServiceReconcileTrackedDocumentsSharesRemoteUpdateAcrossAgentWorkspaces(t *testing.T) {
+func TestWorkspaceRuntimeReconcileTrackedDocumentsAppliesPendingRemoteUpdate(t *testing.T) {
 	cache, err := newDocumentCache(t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
@@ -1724,48 +1725,32 @@ func TestServiceReconcileTrackedDocumentsSharesRemoteUpdateAcrossAgentWorkspaces
 		t.Fatalf("expected one pending remote update, got %d", count)
 	}
 
-	mainPath := filepath.Join(t.TempDir(), "doc.md")
-	agentPath := filepath.Join(t.TempDir(), "doc.md")
-	for _, path := range []string{mainPath, agentPath} {
-		if err := os.WriteFile(path, []byte("base"), 0o644); err != nil {
-			t.Fatalf("write projection: %v", err)
-		}
+	path := filepath.Join(t.TempDir(), "doc.md")
+	if err := os.WriteFile(path, []byte("base"), 0o644); err != nil {
+		t.Fatalf("write projection: %v", err)
 	}
-	mainTracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: mainPath, cache: cache}
-	agentTracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: agentPath, cache: cache}
-	for _, tracked := range []*trackedFile{mainTracked, agentTracked} {
-		tracked.setProjectedContent("base")
-		if err := tracked.storeProjectedBase("base"); err != nil {
-			t.Fatalf("store projected base: %v", err)
-		}
+	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache}
+	tracked.setProjectedContent("base")
+	if err := tracked.storeProjectedBase("base"); err != nil {
+		t.Fatalf("store projected base: %v", err)
 	}
-	service := &Service{
+	runtime := &workspaceRuntime{
 		docCache: cache,
 		client:   http.DefaultClient,
-		primaryReplica: &workspaceReplica{
-			projectedByID:   map[string]*trackedFile{"doc_1": mainTracked},
-			projectedByPath: map[string]*trackedFile{mainPath: mainTracked},
-		},
-		agentReplicas: map[string]*managedReplica{
-			"agent_1": {
-				replica: &workspaceReplica{
-					projectedByID:   map[string]*trackedFile{"doc_1": agentTracked},
-					projectedByPath: map[string]*trackedFile{agentPath: agentTracked},
-				},
-			},
+		replica: &workspaceReplica{
+			projectedByID:   map[string]*trackedFile{"doc_1": tracked},
+			projectedByPath: map[string]*trackedFile{path: tracked},
 		},
 	}
-	if err := service.reconcileTrackedDocuments(context.Background()); err != nil {
+	if err := runtime.reconcileTrackedDocuments(context.Background()); err != nil {
 		t.Fatalf("reconcile tracked documents: %v", err)
 	}
-	for _, path := range []string{mainPath, agentPath} {
-		content, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read projection: %v", err)
-		}
-		if string(content) != "base remote" {
-			t.Fatalf("unexpected projection at %s: %q", path, content)
-		}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read projection: %v", err)
+	}
+	if string(content) != "base remote" {
+		t.Fatalf("unexpected projection at %s: %q", path, content)
 	}
 }
 
@@ -2262,21 +2247,8 @@ func TestReconcileLocalWorkspacePrefersMoveForSameContent(t *testing.T) {
 	}
 	tracked.setProjectedContent("same")
 
-	client := &http.Client{
-		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			t.Fatalf("workspace scan must not call backend directly, got %s %s", r.Method, r.URL.Path)
-			return nil, nil
-		}),
-	}
-
 	replica := &workspaceReplica{
-		rootDir:    root,
-		backendURL: "http://backend.test",
-		cfg: Config{
-			BackendURL: "http://backend.test",
-			AgentID:    "daemon_agent",
-		},
-		client:          client,
+		rootDir:         root,
 		fs:              NewWorkspaceFS(root),
 		projectedByPath: map[string]*trackedFile{oldPath: tracked},
 		projectedByID:   map[string]*trackedFile{"doc_1": tracked},
@@ -2289,6 +2261,9 @@ func TestReconcileLocalWorkspacePrefersMoveForSameContent(t *testing.T) {
 	}
 	if tracked.Path != newPath {
 		t.Fatalf("expected tracked path to move to %q, got %q", newPath, tracked.Path)
+	}
+	if tracked.WorkspaceRoot != root {
+		t.Fatalf("expected tracked workspace root to remain %q, got %q", root, tracked.WorkspaceRoot)
 	}
 	if !tracked.isLocalMoved() || !tracked.isLocalDirty() {
 		t.Fatal("expected local clean move to be queued for central reconciliation")
@@ -2309,21 +2284,8 @@ func TestReconcileLocalWorkspaceSkipsMissingTrackedFileDuringProjection(t *testi
 	tracked.beginProjection()
 	defer tracked.endProjection()
 
-	client := &http.Client{
-		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			t.Fatalf("projection reconcile should not call backend, got %s %s", r.Method, r.URL.Path)
-			return nil, nil
-		}),
-	}
-
 	replica := &workspaceReplica{
-		rootDir:    root,
-		backendURL: "http://backend.test",
-		cfg: Config{
-			BackendURL: "http://backend.test",
-			AgentID:    "daemon_agent",
-		},
-		client:          client,
+		rootDir:         root,
 		projectedByPath: map[string]*trackedFile{path: tracked},
 		projectedByID:   map[string]*trackedFile{"doc_1": tracked},
 	}
@@ -2350,17 +2312,8 @@ func TestWorkspaceReplicaReconcileSkipsMissingTrackedFileDuringProjection(t *tes
 	tracked.beginProjection()
 	defer tracked.endProjection()
 
-	client := &http.Client{
-		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			t.Fatalf("replica projection reconcile should not call backend, got %s %s", r.Method, r.URL.Path)
-			return nil, nil
-		}),
-	}
-
 	replica := &workspaceReplica{
 		rootDir:         root,
-		backendURL:      "http://backend.test",
-		client:          client,
 		projectedByPath: map[string]*trackedFile{path: tracked},
 		projectedByID:   map[string]*trackedFile{"doc_1": tracked},
 	}
@@ -2387,21 +2340,8 @@ func TestReconcileLocalWorkspaceDeletesMissingTrackedDocument(t *testing.T) {
 	}
 	tracked.setProjectedContent("gone")
 
-	client := &http.Client{
-		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			t.Fatalf("workspace scan must not call backend directly, got %s %s", r.Method, r.URL.Path)
-			return nil, nil
-		}),
-	}
-
 	replica := &workspaceReplica{
-		rootDir:    root,
-		backendURL: "http://backend.test",
-		cfg: Config{
-			BackendURL: "http://backend.test",
-			AgentID:    "daemon_agent",
-		},
-		client:          client,
+		rootDir:         root,
 		fs:              NewWorkspaceFS(root),
 		projectedByPath: map[string]*trackedFile{oldPath: tracked},
 		projectedByID:   map[string]*trackedFile{"doc_1": tracked},
@@ -2461,7 +2401,7 @@ func TestCentralReconcilePublishesQueuedCleanMove(t *testing.T) {
 		_, _ = w.Write([]byte(`{"id":"doc_1","path":"docs/new.md"}`))
 	}))
 	defer server.Close()
-	service := &Service{cfg: Config{BackendURL: server.URL, AgentID: "daemon_agent"}, client: server.Client(), docCache: cache}
+	service := &workspaceRuntime{cfg: Config{BackendURL: server.URL, AgentID: "daemon_agent"}, client: server.Client(), docCache: cache}
 
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("reconcile move: %v", err)
@@ -2517,7 +2457,7 @@ func TestCentralReconcileRemoteDeleteArchivesDirtyWorkingCopy(t *testing.T) {
 	}
 	tracked.markRemoteDeleted()
 
-	service := &Service{docCache: cache, client: http.DefaultClient}
+	service := &workspaceRuntime{docCache: cache, client: http.DefaultClient}
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("reconcile remote delete: %v", err)
 	}
@@ -2543,7 +2483,7 @@ func TestCentralReconcileRemoteDeleteArchivesDirtyWorkingCopy(t *testing.T) {
 	}
 }
 
-func TestLocalCreateUploadsBytesAndStoresProjectedBaseWithoutRewrite(t *testing.T) {
+func TestLocalCreateCreatesEmptyDocumentAndKeepsLocalBytesDirty(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "docs", "new.md")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -2565,16 +2505,16 @@ func TestLocalCreateUploadsBytesAndStoresProjectedBaseWithoutRewrite(t *testing.
 		_, _ = w.Write([]byte(`{"id":"doc_created","path":"docs/new.md","updateId":1}`))
 	}))
 	defer server.Close()
-	service := &Service{cfg: Config{BackendURL: server.URL, AgentID: "daemon_agent"}, client: server.Client()}
+	service := &workspaceRuntime{cfg: Config{BackendURL: server.URL, AgentID: "daemon_agent"}, client: server.Client()}
 
-	created, err := service.createDocumentFromLocalCandidate(context.Background(), localCreateCandidate{Root: root, Path: path, ActorID: "daemon_agent", ActorType: "daemon"})
+	created, err := service.createDocumentFromLocalCandidate(context.Background(), localCreateCandidate{Root: root, Path: path, ActorID: "daemon_agent", ActorType: "daemon"}, "docs/new.md")
 	if err != nil {
 		t.Fatalf("create from local candidate: %v", err)
 	}
 	if created == nil || created.ID != "doc_created" {
 		t.Fatalf("unexpected created doc: %#v", created)
 	}
-	if seen.Path != "docs/new.md" || seen.Content != content {
+	if seen.Path != "docs/new.md" || seen.Content != "" {
 		t.Fatalf("unexpected create payload: %#v", seen)
 	}
 	after, err := os.ReadFile(path)
@@ -2589,8 +2529,8 @@ func TestLocalCreateUploadsBytesAndStoresProjectedBaseWithoutRewrite(t *testing.
 	if err != nil {
 		t.Fatalf("load projected base: %v", err)
 	}
-	if !known || base != content {
-		t.Fatalf("expected projected base from uploaded bytes, known=%v base=%q", known, base)
+	if !known || base != "" {
+		t.Fatalf("expected empty projected base so local bytes reconcile as first update, known=%v base=%q", known, base)
 	}
 }
 
