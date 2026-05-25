@@ -233,6 +233,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			workspace_id TEXT NOT NULL,
 			id TEXT PRIMARY KEY,
 			document_id TEXT NOT NULL,
+			client_operation_id TEXT NOT NULL DEFAULT '',
 			title TEXT NOT NULL,
 			status TEXT NOT NULL,
 			anchor_relative_start TEXT NOT NULL DEFAULT '',
@@ -247,7 +248,9 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			updated_at TIMESTAMPTZ NOT NULL
 		)
 		`,
+		`ALTER TABLE threads ADD COLUMN IF NOT EXISTS client_operation_id TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_threads_workspace_document_updated ON threads (workspace_id, document_id, updated_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_threads_workspace_actor_operation ON threads (workspace_id, created_by_id, created_by_type, client_operation_id) WHERE client_operation_id <> ''`,
 		`DROP TABLE IF EXISTS workspace_snapshots`,
 		`ALTER TABLE threads DROP COLUMN IF EXISTS anchor`,
 		`ALTER TABLE threads ADD COLUMN IF NOT EXISTS anchor_relative_start TEXT NOT NULL DEFAULT ''`,
@@ -991,19 +994,20 @@ func (s *Store) replaceThreadsPostgresLocked(tx *sql.Tx) error {
 	for _, thread := range s.state.Threads {
 		if _, err := tx.Exec(
 			`INSERT INTO threads (
-				workspace_id, id, document_id, title, status,
+				workspace_id, id, document_id, client_operation_id, title, status,
 				anchor_relative_start, anchor_relative_end, anchor_kind, anchor_excerpt,
 				created_by_id, created_by_type, created_by_handle, created_by_name,
 				created_at, updated_at
 			) VALUES (
-				$1, $2, $3, $4, $5,
-				$6, $7, $8, $9,
-				$10, $11, $12, $13,
-				$14, $15
+				$1, $2, $3, $4, $5, $6,
+				$7, $8, $9, $10,
+				$11, $12, $13, $14,
+				$15, $16
 			)`,
 			s.state.WorkspaceID,
 			thread.ID,
 			thread.DocumentID,
+			thread.ClientOperationID,
 			thread.Title,
 			thread.Status,
 			thread.Anchor.RelativeStart,
@@ -1892,7 +1896,7 @@ func (s *Store) restoreDocumentDocPostgresLocked(document *Document) (*crdt.Doc,
 
 func (s *Store) loadThreadsPostgresLocked() error {
 	rows, err := s.db.Query(
-		`SELECT id, document_id, title, status, anchor_relative_start, anchor_relative_end,
+		`SELECT id, document_id, client_operation_id, title, status, anchor_relative_start, anchor_relative_end,
 		        anchor_kind, anchor_excerpt, created_by_id, created_by_type,
 		        created_by_handle, created_by_name, created_at, updated_at
 		   FROM threads
@@ -2054,6 +2058,7 @@ func scanThread(scanner interface{ Scan(...any) error }) (*Thread, error) {
 	if err := scanner.Scan(
 		&thread.ID,
 		&thread.DocumentID,
+		&thread.ClientOperationID,
 		&thread.Title,
 		&thread.Status,
 		&thread.Anchor.RelativeStart,

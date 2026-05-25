@@ -61,6 +61,7 @@ type ThreadMessage struct {
 type Thread struct {
 	ID                 string           `json:"id"`
 	DocumentID         string           `json:"documentId"`
+	ClientOperationID  string           `json:"clientOperationId,omitempty"`
 	Title              string           `json:"title"`
 	Status             string           `json:"status"`
 	Anchor             ThreadAnchor     `json:"anchor"`
@@ -308,13 +309,14 @@ type CreateDaemonResponse struct {
 }
 
 type CreateThreadRequest struct {
-	DocumentID    string `json:"documentId"`
-	Title         string `json:"title"`
-	Body          string `json:"body"`
-	Kind          string `json:"kind"`
-	RelativeStart string `json:"relativeStart"`
-	RelativeEnd   string `json:"relativeEnd"`
-	Excerpt       string `json:"excerpt"`
+	DocumentID        string `json:"documentId"`
+	ClientOperationID string `json:"clientOperationId,omitempty"`
+	Title             string `json:"title"`
+	Body              string `json:"body"`
+	Kind              string `json:"kind"`
+	RelativeStart     string `json:"relativeStart"`
+	RelativeEnd       string `json:"relativeEnd"`
+	Excerpt           string `json:"excerpt"`
 }
 
 type ReplyThreadRequest struct {

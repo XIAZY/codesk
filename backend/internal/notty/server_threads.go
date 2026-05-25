@@ -13,6 +13,9 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if req.ClientOperationID == "" {
+		req.ClientOperationID = r.Header.Get("X-Notty-Idempotency-Key")
+	}
 	auth, _ := authFromContext(r.Context())
 	meta := operationMetaFromAuth(auth, "thread-create", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
 	thread, message, err := s.requestStore(r).CreateThread(req, meta)

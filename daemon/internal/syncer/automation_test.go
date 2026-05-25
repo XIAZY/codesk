@@ -215,13 +215,14 @@ func TestToolGatewayRepliesAsOwningAgent(t *testing.T) {
 	}
 }
 
-func TestToolGatewayCreateThreadResolvesPathQuoteToRelativeAnchors(t *testing.T) {
+func TestToolGatewayCreateThreadQueuesPathQuoteIntent(t *testing.T) {
 	service := newToolGatewayTestService(&agent{ID: "agent_1", Handle: "reviewer", Kind: "codex"}, "token_123")
 	cache, err := newDocumentCache(t.TempDir())
 	if err != nil {
 		t.Fatalf("new document cache: %v", err)
 	}
-	service.primaryRuntime = &workspaceRuntime{docCache: cache}
+	queue := newReconcileQueue()
+	service.primaryRuntime = &workspaceRuntime{docCache: cache, reconcileQueue: queue}
 	service.latestWorkspace = &workspaceResponse{
 		Documents: []*document{{ID: "doc_spec", Path: "docs/spec.md", UpdateID: 1}},
 	}
@@ -234,43 +235,10 @@ func TestToolGatewayCreateThreadResolvesPathQuoteToRelativeAnchors(t *testing.T)
 		t.Fatalf("store cached doc: %v", err)
 	}
 
-	var seen map[string]any
 	service.client = &http.Client{
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			if r.Method != http.MethodPost || r.URL.Path != "/api/threads" {
-				t.Fatalf("unexpected backend request: %s %s", r.Method, r.URL.String())
-			}
-			if got := r.URL.Query().Get("actor"); got != "agent_1" {
-				t.Fatalf("unexpected actor: %q", got)
-			}
-			if err := json.NewDecoder(r.Body).Decode(&seen); err != nil {
-				t.Fatalf("decode backend request: %v", err)
-			}
-			if seen["documentId"] != "doc_spec" {
-				t.Fatalf("unexpected documentId: %#v", seen["documentId"])
-			}
-			if pathValue, ok := seen["path"]; ok && pathValue != "" {
-				t.Fatalf("gateway should not forward path to backend, got %#v", seen["path"])
-			}
-			if seen["relativeStart"] == "" || seen["relativeEnd"] == "" {
-				t.Fatalf("expected generated relative anchors, got %#v", seen)
-			}
-			if seen["kind"] != "text-range" || seen["excerpt"] != "target" {
-				t.Fatalf("unexpected canonical anchor metadata: %#v", seen)
-			}
-			if _, ok := seen["line"]; ok {
-				t.Fatalf("line is helper input and should not be forwarded: %#v", seen)
-			}
-			if _, ok := seen["start"]; ok {
-				t.Fatalf("start is helper input and should not be forwarded: %#v", seen)
-			}
-			if _, ok := seen["end"]; ok {
-				t.Fatalf("end is helper input and should not be forwarded: %#v", seen)
-			}
-			return jsonResponse(t, http.StatusCreated, toolThreadMutationResponse{
-				Thread:  &thread{ID: "thread_1"},
-				Message: &threadMessage{ID: "message_1", ThreadID: "thread_1"},
-			}), nil
+			t.Fatalf("create-thread should queue a thread intent, not POST immediately: %s %s", r.Method, r.URL.String())
+			return nil, nil
 		}),
 	}
 
@@ -283,8 +251,35 @@ func TestToolGatewayCreateThreadResolvesPathQuoteToRelativeAnchors(t *testing.T)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
 	}
-	if seen["relativeStart"] == seen["relativeEnd"] {
-		t.Fatalf("expected distinct range anchors, got %#v", seen)
+	var response toolThreadMutationResponse
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !response.Queued || response.IntentID == "" {
+		t.Fatalf("expected queued response with intent id, got %#v", response)
+	}
+	entry, unlock := cache.lockEntry("doc_spec")
+	intents, err := cache.loadThreadIntentsLocked(entry, "doc_spec")
+	unlock()
+	if err != nil {
+		t.Fatalf("load thread intents: %v", err)
+	}
+	if len(intents) != 1 {
+		t.Fatalf("expected one thread intent, got %d", len(intents))
+	}
+	intent := intents[0]
+	if intent.Status != threadIntentPending || intent.IntentID != response.IntentID {
+		t.Fatalf("unexpected intent state: %#v", intent)
+	}
+	if intent.ActorID != "agent_1" || intent.ActorType != "agent" {
+		t.Fatalf("unexpected intent actor: %#v", intent)
+	}
+	if intent.Request.Path != "" || intent.Request.DocumentID != "doc_spec" || intent.Request.Quote != "target" || intent.Request.Line != 2 {
+		t.Fatalf("unexpected queued request: %#v", intent.Request)
+	}
+	dirty := queue.Drain()
+	if len(dirty) != 1 || dirty[0] != "doc_spec" {
+		t.Fatalf("expected queued document reconcile wake, got %#v", dirty)
 	}
 }
 

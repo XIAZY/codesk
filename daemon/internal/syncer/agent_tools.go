@@ -8,11 +8,16 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
+
+	"github.com/google/uuid"
 )
 
 type toolThreadMutationResponse struct {
-	Thread  *thread        `json:"thread"`
-	Message *threadMessage `json:"message"`
+	Thread   *thread        `json:"thread"`
+	Message  *threadMessage `json:"message"`
+	Queued   bool           `json:"queued,omitempty"`
+	IntentID string         `json:"intentId,omitempty"`
 }
 
 type toolDocumentsResponse struct {
@@ -32,13 +37,14 @@ type toolThreadsResponse struct {
 }
 
 type backendCreateThreadPayload struct {
-	DocumentID    string `json:"documentId"`
-	Title         string `json:"title"`
-	Body          string `json:"body"`
-	Kind          string `json:"kind"`
-	RelativeStart string `json:"relativeStart,omitempty"`
-	RelativeEnd   string `json:"relativeEnd,omitempty"`
-	Excerpt       string `json:"excerpt,omitempty"`
+	DocumentID        string `json:"documentId"`
+	ClientOperationID string `json:"clientOperationId,omitempty"`
+	Title             string `json:"title"`
+	Body              string `json:"body"`
+	Kind              string `json:"kind"`
+	RelativeStart     string `json:"relativeStart,omitempty"`
+	RelativeEnd       string `json:"relativeEnd,omitempty"`
+	Excerpt           string `json:"excerpt,omitempty"`
 }
 
 type toolNotificationResponse struct {
@@ -380,18 +386,80 @@ func (s *Service) createThreadAsRun(ctx context.Context, run *agentRun, payload 
 	if run == nil {
 		return nil, fmt.Errorf("missing agent run context")
 	}
-	prepared, err := s.prepareCreateThreadPayload(ctx, run, payload)
+	if payload.Document {
+		prepared, err := s.prepareDocumentThreadPayload(ctx, payload)
+		if err != nil {
+			return nil, err
+		}
+		return s.postCreateThreadAsRun(ctx, run, backendCreateThreadPayload{
+			DocumentID: prepared.DocumentID,
+			Title:      prepared.Title,
+			Body:       prepared.Body,
+			Kind:       prepared.Kind,
+			Excerpt:    prepared.Excerpt,
+		}, "")
+	}
+	intentID, err := s.queueThreadCreateAsRun(ctx, run, payload)
 	if err != nil {
 		return nil, err
 	}
+	return &toolThreadMutationResponse{Queued: true, IntentID: intentID}, nil
+}
+
+func (s *Service) queueThreadCreateAsRun(ctx context.Context, run *agentRun, payload createThreadPayload) (string, error) {
+	if strings.TrimSpace(payload.Body) == "" {
+		return "", fmt.Errorf("thread body is required")
+	}
+	document, err := s.resolveThreadDocument(ctx, payload)
+	if err != nil {
+		return "", err
+	}
+	payload.DocumentID = document.ID
+	payload.Path = ""
+	if strings.TrimSpace(payload.RelativeStart) != "" || strings.TrimSpace(payload.RelativeEnd) != "" {
+		if strings.TrimSpace(payload.RelativeStart) == "" || strings.TrimSpace(payload.RelativeEnd) == "" {
+			return "", fmt.Errorf("relativeStart and relativeEnd must be provided together")
+		}
+		payload.Kind = "text-range"
+	} else if !hasThreadRangeTarget(payload) && strings.TrimSpace(payload.Quote) == "" {
+		return "", fmt.Errorf("provide --line, --quote, a line-column range, UTF-16 offsets, or --document")
+	}
+	runtime := s.runtimeForThreadAnchor(run)
+	if runtime == nil || runtime.docCache == nil {
+		return "", fmt.Errorf("workspace runtime is unavailable")
+	}
+	intentID := "threadintent_" + uuid.NewString()
+	now := time.Now().UTC()
+	intent := threadOutboxIntent{
+		IntentID:       intentID,
+		IdempotencyKey: intentID,
+		DocumentID:     document.ID,
+		DocumentPath:   document.Path,
+		ActorID:        run.AgentID,
+		ActorType:      "agent",
+		RunID:          run.ID,
+		Request:        payload,
+		Status:         threadIntentPending,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if err := runtime.docCache.appendThreadIntent(document.ID, intent); err != nil {
+		return "", err
+	}
+	runtime.markDocumentDirty(document.ID)
+	return intentID, nil
+}
+
+func (s *Service) postCreateThreadAsRun(ctx context.Context, run *agentRun, payload backendCreateThreadPayload, idempotencyKey string) (*toolThreadMutationResponse, error) {
 	body, err := json.Marshal(backendCreateThreadPayload{
-		DocumentID:    prepared.DocumentID,
-		Title:         prepared.Title,
-		Body:          prepared.Body,
-		Kind:          prepared.Kind,
-		RelativeStart: prepared.RelativeStart,
-		RelativeEnd:   prepared.RelativeEnd,
-		Excerpt:       prepared.Excerpt,
+		DocumentID:        payload.DocumentID,
+		ClientOperationID: payload.ClientOperationID,
+		Title:             payload.Title,
+		Body:              payload.Body,
+		Kind:              payload.Kind,
+		RelativeStart:     payload.RelativeStart,
+		RelativeEnd:       payload.RelativeEnd,
+		Excerpt:           payload.Excerpt,
 	})
 	if err != nil {
 		return nil, err
@@ -401,6 +469,9 @@ func (s *Service) createThreadAsRun(ctx context.Context, run *agentRun, payload 
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if strings.TrimSpace(idempotencyKey) != "" {
+		req.Header.Set("X-Notty-Idempotency-Key", strings.TrimSpace(idempotencyKey))
+	}
 	res, err := s.client.Do(req)
 	if err != nil {
 		return nil, err

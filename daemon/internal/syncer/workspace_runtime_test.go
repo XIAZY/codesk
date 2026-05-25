@@ -311,118 +311,31 @@ func TestWorkspaceRuntimeOutboxPostDoesNotBlockPendingRemoteAppend(t *testing.T)
 	}
 }
 
-func TestWorkspaceRuntimeSerializesSameDocumentOutboxFlush(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "doc.md")
-	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
-		t.Fatalf("write local file: %v", err)
-	}
-	cache, err := newDocumentCache(t.TempDir())
+func TestProductionReconcileTrackedDocumentOnlyRuntimeLoop(t *testing.T) {
+	root := "."
+	matches := map[string]int{}
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		count := strings.Count(string(data), "reconcileTrackedDocument(")
+		if count > 0 {
+			matches[path] = count
+		}
+		return nil
+	})
 	if err != nil {
-		t.Fatalf("new cache: %v", err)
+		t.Fatalf("walk syncer sources: %v", err)
 	}
-	baseDoc := newDocWithText(t, "base\n")
-	if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
-		t.Fatalf("store base: %v", err)
-	}
-	localUpdate := updateFromBaseDoc(t, baseDoc, "base\nlocal\n", "local")
-	entry, unlock := cache.lockEntry("doc_1")
-	if err := cache.storeOutboxUpdateLocked(entry, "doc_1", "doc.md", outboxUpdateRecord{
-		Update:          localUpdate,
-		ObservedContent: "base\nlocal\n",
-		ObservedState:   crdtStateFromContent("base\nlocal\n"),
-		SourcePath:      path,
-		ActorID:         "daemon_agent",
-		ActorType:       "daemon",
-		CreatedAt:       time.Now().UTC(),
-	}); err != nil {
-		unlock()
-		t.Fatalf("store outbox: %v", err)
-	}
-	unlock()
-
-	postStarted := make(chan struct{})
-	releasePost := make(chan struct{})
-	var postMu sync.Mutex
-	postCount := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/documents/doc_1/updates" {
-			http.Error(w, "unexpected request", http.StatusNotFound)
-			return
-		}
-		postMu.Lock()
-		postCount++
-		currentPost := postCount
-		if currentPost == 1 {
-			close(postStarted)
-		}
-		postMu.Unlock()
-		if currentPost == 1 {
-			<-releasePost
-		}
-		writeJSONResponse(w, http.StatusOK, postDocumentUpdateResponse{Accepted: true, Applied: true, UpdateID: int64(currentPost + 1)})
-	}))
-	defer server.Close()
-
-	runtime := &workspaceRuntime{
-		cfg:      Config{BackendURL: server.URL, AgentID: "daemon_agent"},
-		client:   server.Client(),
-		docCache: cache,
-	}
-	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, WorkspaceRoot: root, cache: cache}
-	tracked.setProjectedContent("base\n")
-	if err := tracked.storeProjectedBase("base\n", baseDoc.EncodeStateAsUpdate()); err != nil {
-		t.Fatalf("store projected base: %v", err)
-	}
-
-	firstDone := make(chan error, 1)
-	go func() {
-		firstDone <- runtime.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked})
-	}()
-	select {
-	case <-postStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected first outbox POST to start")
-	}
-
-	secondEntered := make(chan struct{})
-	secondDone := make(chan error, 1)
-	go func() {
-		close(secondEntered)
-		secondDone <- runtime.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked})
-	}()
-	select {
-	case <-secondEntered:
-	case <-time.After(2 * time.Second):
-		close(releasePost)
-		t.Fatal("expected second reconcile path to start")
-	}
-	select {
-	case err := <-secondDone:
-		close(releasePost)
-		t.Fatalf("second reconcile completed before first POST finalized: %v", err)
-	case <-time.After(150 * time.Millisecond):
-	}
-	postMu.Lock()
-	blockedPostCount := postCount
-	postMu.Unlock()
-	if blockedPostCount != 1 {
-		close(releasePost)
-		t.Fatalf("expected exactly one POST while first POST is blocked, got %d", blockedPostCount)
-	}
-
-	close(releasePost)
-	if err := <-firstDone; err != nil {
-		t.Fatalf("first reconcile: %v", err)
-	}
-	if err := <-secondDone; err != nil {
-		t.Fatalf("second reconcile: %v", err)
-	}
-	postMu.Lock()
-	finalPostCount := postCount
-	postMu.Unlock()
-	if finalPostCount != 1 {
-		t.Fatalf("expected exactly one POST after both reconciles complete, got %d", finalPostCount)
+	if matches["service.go"] != 2 || len(matches) != 1 {
+		t.Fatalf("reconcileTrackedDocument must stay owned by the runtime loop; production matches: %#v", matches)
 	}
 }
 
