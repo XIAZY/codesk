@@ -51,6 +51,33 @@ export function buildDaemonInstallCommand(input: {
   ].join("\n");
 }
 
+export function buildDaemonReinstallCommand(input: {
+  backendUrl: string;
+  workspaceId: string;
+  staticBaseUrl?: string;
+}) {
+  const backendUrl = input.backendUrl.trim().replace(/\/+$/, "");
+  const staticBaseUrl = (input.staticBaseUrl?.trim() || `${backendUrl}/daemons`).replace(/\/+$/, "");
+  return [
+    "set -eu",
+    `workspace_id=${shellQuote(input.workspaceId)}`,
+    `static_base=${shellQuote(staticBaseUrl)}`,
+    'data_dir="${NOTTY_DATA_DIR:-$HOME/.notty}"',
+    'daemon_name="$(printf \'%s\' "$workspace_id" | sed \'s/[^A-Za-z0-9_.-]/-/g\')"',
+    'env_file="$data_dir/daemons/$daemon_name/daemon.env"',
+    '[ -f "$env_file" ] || { echo "Notty daemon config not found: $env_file" >&2; exit 1; }',
+    '. "$env_file"',
+    'daemon_token="${NOTTY_DAEMON_TOKEN:-}"',
+    '[ -n "$daemon_token" ] || { echo "NOTTY_DAEMON_TOKEN is missing from $env_file" >&2; exit 1; }',
+    'curl -fsSL "$static_base/uninstall.sh" | sh -s -- --all',
+    'curl -fsSL "$static_base/install.sh" | sh -s -- \\',
+    `  --backend-url ${shellQuote(backendUrl)} \\`,
+    `  --workspace-id ${shellQuote(input.workspaceId)} \\`,
+    '  --daemon-token "$daemon_token" \\',
+    '  --static-base "$static_base"',
+  ].join("\n");
+}
+
 export function buildDaemonUninstallCommand(input: { staticBaseUrl: string }) {
   const staticBaseUrl = input.staticBaseUrl.trim().replace(/\/+$/, "");
   const lines = [

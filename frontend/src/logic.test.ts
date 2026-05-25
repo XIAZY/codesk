@@ -7,6 +7,7 @@ import {
   agentsByDaemon,
   applyReplaceToYText,
   buildDaemonInstallCommand,
+  buildDaemonReinstallCommand,
   buildDaemonUninstallCommand,
   buildLineThreads,
   computeReplace,
@@ -219,5 +220,38 @@ describe("daemon uninstall command", () => {
     });
 
     expect(command).not.toContain("--workspace-id");
+  });
+});
+
+describe("daemon reinstall command", () => {
+  it("builds a host-side reinstall script that reuses the local daemon token", () => {
+    const command = buildDaemonReinstallCommand({
+      backendUrl: "https://notty.example.com/",
+      workspaceId: "ws_123",
+      staticBaseUrl: "https://static.example.com/daemons/",
+    });
+
+    expect(command).toContain("env_file=\"$data_dir/daemons/$daemon_name/daemon.env\"");
+    expect(command).toContain(". \"$env_file\"");
+    expect(command).toContain("daemon_token=\"${NOTTY_DAEMON_TOKEN:-}\"");
+    expect(command).toContain("curl -fsSL \"$static_base/uninstall.sh\" | sh -s -- --all");
+    expect(command).toContain("curl -fsSL \"$static_base/install.sh\" | sh -s -- \\");
+    expect(command).toContain("--backend-url https://notty.example.com \\");
+    expect(command).toContain("--workspace-id ws_123 \\");
+    expect(command).toContain("--daemon-token \"$daemon_token\" \\");
+    expect(command).not.toContain("nottyd_");
+  });
+
+  it("shell-quotes unsafe reinstall values", () => {
+    const command = buildDaemonReinstallCommand({
+      backendUrl: "https://notty.example.com/app path",
+      workspaceId: "ws bad'id",
+      staticBaseUrl: "https://static.example.com/daemon files",
+    });
+
+    expect(command).toContain("workspace_id='ws bad'\\''id'");
+    expect(command).toContain("static_base='https://static.example.com/daemon files'");
+    expect(command).toContain("--backend-url 'https://notty.example.com/app path' \\");
+    expect(command).toContain("--workspace-id 'ws bad'\\''id' \\");
   });
 });

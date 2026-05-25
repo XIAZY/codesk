@@ -7,6 +7,7 @@ import {
   agentStatus,
   agentsByDaemon,
   buildDaemonInstallCommand,
+  buildDaemonReinstallCommand,
   buildDaemonUninstallCommand,
   daemonStatus,
   isMarkdownDocumentPath,
@@ -1336,18 +1337,12 @@ function CreateDaemonModal({ api, workspaceId, onClose, onDone }: { api: ApiClie
     daemonToken: token || "nottyd_...",
     staticBaseUrl: daemonStaticBase,
   });
-  const uninstallCommand = buildDaemonUninstallCommand({
-    staticBaseUrl: daemonStaticBase,
-  });
   return (
     <Modal title={token ? `${name} created` : "New daemon"} onClose={onClose}>
       {token ? (
         <div className="token-reveal">
-          <ShellScriptBlock title="Install or reinstall daemon" badge="Host native" command={command}>
+          <ShellScriptBlock title="Install daemon" badge="Host native" command={command}>
             <p className="small muted">This downloads the release bundle, installs the daemon and agent helper, writes daemon config, and starts a local service. Docker Compose is only for local development.</p>
-          </ShellScriptBlock>
-          <ShellScriptBlock title="Uninstall daemon" badge="Global" command={uninstallCommand}>
-            <p className="small muted">Run this on the daemon host to remove the local Notty daemon installation. This uses the global uninstall script because workspace-specific uninstall is not supported yet.</p>
           </ShellScriptBlock>
           <div className="row between">
             <span className="chip"><StatusDot tone="stale" />Waiting for daemon to check in…</span>
@@ -1451,6 +1446,11 @@ function AgentDetailModal({ api, workspaceId, agent, daemons, runs, onClose, onC
 }
 
 function DaemonDetailModal({ api, workspaceId, daemon, agents, runs, onClose, onChanged }: { api: ApiClient; workspaceId: string; daemon: Daemon; agents: Agent[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; onClose: () => void; onChanged: () => void }) {
+  const reinstallCommand = buildDaemonReinstallCommand({
+    backendUrl: apiBase,
+    workspaceId,
+    staticBaseUrl: daemonStaticBase,
+  });
   const uninstallCommand = buildDaemonUninstallCommand({
     staticBaseUrl: daemonStaticBase,
   });
@@ -1467,6 +1467,9 @@ function DaemonDetailModal({ api, workspaceId, daemon, agents, runs, onClose, on
           <p className="small muted">Agents: {agents.length}</p>
           {agents.map((agent) => <p className="small" key={agent.id}>@{agent.handle} · {visibleAgentStatus(agent, runs, [daemon])}</p>)}
         </div>
+        <ShellScriptBlock title="Reinstall daemon" badge="Host native" command={reinstallCommand}>
+          <p className="small muted">Run this on the daemon host to remove the current local install, read the existing daemon token from local config, and install the latest daemon again for this workspace.</p>
+        </ShellScriptBlock>
         <ShellScriptBlock title="Uninstall daemon" badge="Global" command={uninstallCommand}>
           <p className="small muted">Run this on the daemon host to remove the local Notty daemon installation. This uses the global uninstall script because workspace-specific uninstall is not supported yet.</p>
         </ShellScriptBlock>
