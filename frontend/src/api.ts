@@ -113,6 +113,12 @@ export class ApiClient {
     });
   }
 
+  async createDaemonReinstallToken(workspaceId: string, daemonId: string) {
+    return this.request<{ daemon: Daemon; token: string }>(workspacePath(workspaceId, `/daemons/${encodeURIComponent(daemonId)}/reinstall-token`), {
+      method: "POST",
+    });
+  }
+
   async deleteDaemon(workspaceId: string, daemonId: string) {
     return this.request<{ daemon: Daemon }>(workspacePath(workspaceId, `/daemons/${encodeURIComponent(daemonId)}`), {
       method: "DELETE",

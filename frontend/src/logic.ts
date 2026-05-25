@@ -51,15 +51,31 @@ export function buildDaemonInstallCommand(input: {
   ].join("\n");
 }
 
-export function buildDaemonUninstallCommand(input: {
-  workspaceId?: string;
-  staticBaseUrl: string;
-  all?: boolean;
+export function buildDaemonReinstallCommand(input: {
+  backendUrl: string;
+  workspaceId: string;
+  daemonToken: string;
+  staticBaseUrl?: string;
 }) {
+  const backendUrl = input.backendUrl.trim().replace(/\/+$/, "");
+  const staticBaseUrl = (input.staticBaseUrl?.trim() || `${backendUrl}/daemons`).replace(/\/+$/, "");
+  return [
+    "set -e",
+    `curl -fsSL ${shellQuote(`${staticBaseUrl}/uninstall.sh`)} | sh -s -- \\`,
+    "  --all",
+    `curl -fsSL ${shellQuote(`${staticBaseUrl}/install.sh`)} | sh -s -- \\`,
+    `  --backend-url ${shellQuote(backendUrl)} \\`,
+    `  --workspace-id ${shellQuote(input.workspaceId)} \\`,
+    `  --daemon-token ${shellQuote(input.daemonToken)} \\`,
+    `  --static-base ${shellQuote(staticBaseUrl)}`,
+  ].join("\n");
+}
+
+export function buildDaemonUninstallCommand(input: { staticBaseUrl: string }) {
   const staticBaseUrl = input.staticBaseUrl.trim().replace(/\/+$/, "");
   const lines = [
     `curl -fsSL ${shellQuote(`${staticBaseUrl}/uninstall.sh`)} | sh -s -- \\`,
-    input.all ? "  --all" : `  --workspace-id ${shellQuote(input.workspaceId ?? "")}`,
+    "  --all",
   ];
   return lines.join("\n");
 }

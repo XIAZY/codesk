@@ -3,14 +3,12 @@ set -eu
 
 install_dir="${NOTTY_INSTALL_DIR:-$HOME/.notty/bin}"
 data_dir="${NOTTY_DATA_DIR:-$HOME/.notty}"
-workspace_id=""
 keep_binaries=0
 uninstall_all=0
 
 usage() {
 	cat <<'EOF'
-Usage: uninstall.sh --workspace-id <id> [options]
-       uninstall.sh --all [options]
+Usage: uninstall.sh --all [options]
 
 Options:
   --all                 Uninstall every local Notty daemon and remove all local Notty-managed data.
@@ -33,10 +31,6 @@ need_value() {
 	esac
 }
 
-safe_name() {
-	printf '%s' "$1" | sed 's/[^A-Za-z0-9_.-]/-/g'
-}
-
 remove_empty_dir() {
 	rmdir "$1" >/dev/null 2>&1 || true
 }
@@ -46,11 +40,6 @@ while [ "$#" -gt 0 ]; do
 		--all)
 			uninstall_all=1
 			shift
-			;;
-		--workspace-id)
-			need_value "$1" "${2:-}"
-			workspace_id="$2"
-			shift 2
 			;;
 		--install-dir)
 			need_value "$1" "${2:-}"
@@ -76,8 +65,7 @@ while [ "$#" -gt 0 ]; do
 	esac
 done
 
-[ "$uninstall_all" -eq 0 ] || [ -z "$workspace_id" ] || die "--all cannot be combined with --workspace-id"
-[ "$uninstall_all" -eq 1 ] || [ -n "$workspace_id" ] || die "--workspace-id is required unless --all is used"
+[ "$uninstall_all" -eq 1 ] || die "--all is required"
 
 stop_launchd() {
 	daemon_name="$1"
@@ -122,14 +110,6 @@ remove_binaries() {
 	remove_empty_dir "$install_dir"
 }
 
-remove_binaries_if_unused() {
-	[ "$keep_binaries" -eq 0 ] || return 0
-	if [ -d "$data_dir/daemons" ] && find "$data_dir/daemons" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | grep -q .; then
-		return 0
-	fi
-	remove_binaries
-}
-
 uninstall_one() {
 	daemon_name="$1"
 	daemon_dir="$data_dir/daemons/$daemon_name"
@@ -144,30 +124,16 @@ uninstall_one() {
 	rm -rf "$daemon_dir" "$workspace_dir" "$agent_workspace_root"
 }
 
-if [ "$uninstall_all" -eq 1 ]; then
-	if [ -d "$data_dir/daemons" ]; then
-		for daemon_dir in "$data_dir"/daemons/*; do
-			[ -d "$daemon_dir" ] || continue
-			uninstall_one "$(basename "$daemon_dir")"
-		done
-	fi
-
-	rm -rf "$data_dir/daemons" "$data_dir/runtime" "$HOME/Notty/workspaces" "$HOME/Notty/agents"
-	[ "$keep_binaries" -eq 1 ] || remove_binaries
-	remove_empty_dir "$data_dir"
-	remove_empty_dir "$HOME/Notty"
-	printf 'Notty daemon uninstall complete for all workspaces.\n'
-	exit 0
+if [ -d "$data_dir/daemons" ]; then
+	for daemon_dir in "$data_dir"/daemons/*; do
+		[ -d "$daemon_dir" ] || continue
+		uninstall_one "$(basename "$daemon_dir")"
+	done
 fi
 
-daemon_name="$(safe_name "$workspace_id")"
-uninstall_one "$daemon_name"
-remove_empty_dir "$data_dir/daemons"
-remove_empty_dir "$data_dir/runtime"
-remove_binaries_if_unused
+rm -rf "$data_dir/daemons" "$data_dir/runtime" "$HOME/Notty/workspaces" "$HOME/Notty/agents"
+[ "$keep_binaries" -eq 1 ] || remove_binaries
 remove_empty_dir "$data_dir"
-remove_empty_dir "$HOME/Notty/workspaces"
-remove_empty_dir "$HOME/Notty/agents"
 remove_empty_dir "$HOME/Notty"
 
-printf 'Notty daemon uninstall complete for workspace %s.\n' "$workspace_id"
+printf 'Notty daemon uninstall complete.\n'

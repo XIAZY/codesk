@@ -7,6 +7,7 @@ import {
   agentStatus,
   agentsByDaemon,
   buildDaemonInstallCommand,
+  buildDaemonReinstallCommand,
   buildDaemonUninstallCommand,
   daemonStatus,
   isMarkdownDocumentPath,
@@ -1302,6 +1303,31 @@ function RenameDocumentModal({ api, workspaceId, document, onClose, onDone }: { 
   );
 }
 
+function ShellScriptBlock({ title, badge, command, children }: { title: string; badge?: string; command: string; children?: ReactNode }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    if (!command || typeof navigator === "undefined" || !navigator.clipboard) {
+      return;
+    }
+    await navigator.clipboard.writeText(command);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <div className="deploy-block">
+      <div className="row between">
+        <b className="small">{title}</b>
+        <div className="row gap-6">
+          {badge ? <span className="chip sm">{badge}</span> : null}
+          <button type="button" className="btn sm" onClick={copy} disabled={!command}>{copied ? "Copied" : "Copy script"}</button>
+        </div>
+      </div>
+      <pre className="code">{command}</pre>
+      {children}
+    </div>
+  );
+}
+
 function CreateDaemonModal({ api, workspaceId, onClose, onDone }: { api: ApiClient; workspaceId: string; onClose: () => void; onDone: () => void }) {
   const [name, setName] = useState("Local daemon");
   const [token, setToken] = useState("");
@@ -1315,24 +1341,9 @@ function CreateDaemonModal({ api, workspaceId, onClose, onDone }: { api: ApiClie
     <Modal title={token ? `${name} created` : "New daemon"} onClose={onClose}>
       {token ? (
         <div className="token-reveal">
-          <div className="token-warning">
-            <div className="row gap-8">
-              <div className="avi sm daemon">D</div>
-              <b>Save this token now. You won't see it again.</b>
-            </div>
-            <p className="small muted">The backend stores only the token hash. If you lose it, rotate the daemon token later.</p>
-            <div className="row gap-6">
-              <code className="token-block">{token}</code>
-            </div>
-          </div>
-          <div className="deploy-block">
-            <div className="row between">
-              <b className="small">Install daemon</b>
-              <span className="chip sm">Host native</span>
-            </div>
-            <pre className="code">{command}</pre>
+          <ShellScriptBlock title="Install daemon" badge="Host native" command={command}>
             <p className="small muted">This downloads the release bundle, installs the daemon and agent helper, writes daemon config, and starts a local service. Docker Compose is only for local development.</p>
-          </div>
+          </ShellScriptBlock>
           <div className="row between">
             <span className="chip"><StatusDot tone="stale" />Waiting for daemon to check in…</span>
             <button className="btn accent" onClick={onClose}>Done</button>
@@ -1435,40 +1446,82 @@ function AgentDetailModal({ api, workspaceId, agent, daemons, runs, onClose, onC
 }
 
 function DaemonDetailModal({ api, workspaceId, daemon, agents, runs, onClose, onChanged }: { api: ApiClient; workspaceId: string; daemon: Daemon; agents: Agent[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; onClose: () => void; onChanged: () => void }) {
-  const uninstallCommand = buildDaemonUninstallCommand({
+  const [reinstallOpen, setReinstallOpen] = useState(false);
+  const [reinstallToken, setReinstallToken] = useState("");
+  const [reinstallError, setReinstallError] = useState("");
+  const [reinstallLoading, setReinstallLoading] = useState(false);
+  const prepareReinstall = async () => {
+    setReinstallOpen(true);
+    setReinstallToken("");
+    setReinstallError("");
+    setReinstallLoading(true);
+    try {
+      const response = await api.createDaemonReinstallToken(workspaceId, daemon.id);
+      setReinstallToken(response.token);
+    } catch (error) {
+      setReinstallError(error instanceof Error ? error.message : "Could not prepare reinstall script");
+    } finally {
+      setReinstallLoading(false);
+    }
+  };
+  const reinstallCommand = reinstallToken ? buildDaemonReinstallCommand({
+    backendUrl: apiBase,
     workspaceId,
+    daemonToken: reinstallToken,
     staticBaseUrl: daemonStaticBase,
-  });
-  const uninstallAllCommand = buildDaemonUninstallCommand({
+  }) : "";
+  const uninstallCommand = buildDaemonUninstallCommand({
     staticBaseUrl: daemonStaticBase,
-    all: true,
   });
   return (
-    <Modal title={daemon.name} onClose={onClose}>
-      <div className="form-stack">
-        <p><StatusDot tone={daemonStatus(daemon)} /> {daemonStatus(daemon)}</p>
-        <p className="tiny muted mono">ID: {daemon.id}</p>
-        <h3 className="modal-title">Agents on this daemon</h3>
-        {agents.map((agent) => <p className="small" key={agent.id}>@{agent.handle} · {visibleAgentStatus(agent, runs, [daemon])}</p>)}
-        <div className="deploy-block">
-          <div className="row between">
-            <b className="small">Uninstall local daemon</b>
-            <span className="chip sm">Run on host</span>
+    <>
+      <Modal title={daemon.name} onClose={onClose}>
+        <div className="form-stack">
+          <div className="deploy-block">
+            <div className="row between">
+              <b className="small">Status</b>
+              <span className={`chip sm ${daemonStatus(daemon)}`}><StatusDot tone={daemonStatus(daemon)} />{daemonStatus(daemon)}</span>
+            </div>
+            <p className="tiny muted mono">ID: {daemon.id}</p>
+            <p className="small muted">Last seen: {daemon.lastSeenAt ? new Date(daemon.lastSeenAt).toLocaleString() : "Never"}</p>
+            <p className="small muted">Agents: {agents.length}</p>
+            {agents.map((agent) => <p className="small" key={agent.id}>@{agent.handle} · {visibleAgentStatus(agent, runs, [daemon])}</p>)}
           </div>
-          <pre className="code">{uninstallCommand}</pre>
-          <p className="small muted">Run this on the machine where the daemon was installed. It stops the local service and removes daemon config, runtime, workspace, agent files, and unused Notty binaries. Delete the daemon record here after local uninstall.</p>
+          <button className="btn accent full" onClick={() => void prepareReinstall()} disabled={reinstallLoading}>Reinstall daemon</button>
+          <ShellScriptBlock title="Uninstall daemon" badge="Global" command={uninstallCommand}>
+            <p className="small muted">Run this on the daemon host to remove the local Notty daemon installation. This uses the global uninstall script because workspace-specific uninstall is not supported yet.</p>
+          </ShellScriptBlock>
+          <button className="btn danger full" onClick={async () => { await api.deleteDaemon(workspaceId, daemon.id); onChanged(); onClose(); }}>Delete daemon record</button>
         </div>
-        <div className="deploy-block">
-          <div className="row between">
-            <b className="small">Uninstall all local daemons</b>
-            <span className="chip sm danger">Destructive</span>
+      </Modal>
+      {reinstallOpen ? (
+        <Modal title="Reinstall daemon" onClose={() => setReinstallOpen(false)}>
+          <div className="form-stack">
+            {reinstallLoading ? (
+              <div className="deploy-block">
+                <div className="row between">
+                  <b className="small">Reinstall script</b>
+                  <span className="chip sm">Preparing</span>
+                </div>
+                <p className="small muted">Preparing a fresh daemon token and reinstall script.</p>
+              </div>
+            ) : reinstallError ? (
+              <div className="deploy-block">
+                <div className="row between">
+                  <b className="small">Reinstall script</b>
+                  <span className="chip sm danger">Unavailable</span>
+                </div>
+                <p className="small muted">{reinstallError}</p>
+              </div>
+            ) : (
+              <ShellScriptBlock title="Reinstall daemon" badge="Host native" command={reinstallCommand}>
+                <p className="small muted">Run this on the daemon host to remove the current local install and install the latest daemon again using the fresh daemon token below.</p>
+              </ShellScriptBlock>
+            )}
           </div>
-          <pre className="code">{uninstallAllCommand}</pre>
-          <p className="small muted">Use this when you want zero local residue on that machine. It removes every Notty daemon service, config, runtime, synced workspace, agent workspace, and local Notty binary.</p>
-        </div>
-        <button className="btn danger full" onClick={async () => { await api.deleteDaemon(workspaceId, daemon.id); onChanged(); }}>Delete daemon</button>
-      </div>
-    </Modal>
+        </Modal>
+      ) : null}
+    </>
   );
 }
 

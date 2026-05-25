@@ -7,6 +7,7 @@ import {
   agentsByDaemon,
   applyReplaceToYText,
   buildDaemonInstallCommand,
+  buildDaemonReinstallCommand,
   buildDaemonUninstallCommand,
   buildLineThreads,
   computeReplace,
@@ -203,34 +204,55 @@ describe("daemon install command", () => {
 });
 
 describe("daemon uninstall command", () => {
-  it("builds a hosted uninstaller command for the current workspace-scoped install layout", () => {
+  it("builds a hosted global uninstaller command", () => {
     const command = buildDaemonUninstallCommand({
-      workspaceId: "ws_123",
       staticBaseUrl: "https://static.example.com/daemons/",
     });
 
     expect(command).toContain("curl -fsSL https://static.example.com/daemons/uninstall.sh | sh -s --");
-    expect(command).toContain("--workspace-id ws_123");
+    expect(command).toContain("--all");
     expect(command).not.toContain("--daemon-token");
   });
 
-  it("shell-quotes unsafe workspace ids", () => {
+  it("does not expose a workspace-scoped uninstall command", () => {
     const command = buildDaemonUninstallCommand({
-      workspaceId: "ws bad'id",
       staticBaseUrl: "https://static.example.com/daemons",
     });
 
-    expect(command).toContain("--workspace-id 'ws bad'\\''id'");
+    expect(command).not.toContain("--workspace-id");
+  });
+});
+
+describe("daemon reinstall command", () => {
+  it("builds a reinstall script that reuses the daemon token", () => {
+    const command = buildDaemonReinstallCommand({
+      backendUrl: "https://notty.example.com/",
+      workspaceId: "ws_123",
+      daemonToken: "nottyd_abc",
+      staticBaseUrl: "https://static.example.com/daemons/",
+    });
+
+    expect(command.startsWith("set -e\n")).toBe(true);
+    expect(command).toContain("curl -fsSL https://static.example.com/daemons/uninstall.sh | sh -s -- \\");
+    expect(command).toContain("--all");
+    expect(command).toContain("curl -fsSL https://static.example.com/daemons/install.sh | sh -s -- \\");
+    expect(command).toContain("--backend-url https://notty.example.com \\");
+    expect(command).toContain("--workspace-id ws_123 \\");
+    expect(command).toContain("--daemon-token nottyd_abc \\");
+    expect(command).toContain("--static-base https://static.example.com/daemons");
   });
 
-  it("builds an all-workspaces uninstaller command without requiring a workspace id", () => {
-    const command = buildDaemonUninstallCommand({
-      staticBaseUrl: "https://static.example.com/daemons",
-      all: true,
+  it("shell-quotes unsafe reinstall values", () => {
+    const command = buildDaemonReinstallCommand({
+      backendUrl: "https://notty.example.com/app path",
+      workspaceId: "ws bad'id",
+      daemonToken: "nottyd token",
+      staticBaseUrl: "https://static.example.com/daemon files",
     });
 
-    expect(command).toContain("curl -fsSL https://static.example.com/daemons/uninstall.sh | sh -s --");
-    expect(command).toContain("--all");
-    expect(command).not.toContain("--workspace-id");
+    expect(command).toContain("--backend-url 'https://notty.example.com/app path' \\");
+    expect(command).toContain("--workspace-id 'ws bad'\\''id' \\");
+    expect(command).toContain("--daemon-token 'nottyd token' \\");
+    expect(command).toContain("--static-base 'https://static.example.com/daemon files'");
   });
 });

@@ -185,6 +185,22 @@ func (s *Server) handleCreateDaemon(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, CreateDaemonResponse{Daemon: daemon, Token: token})
 }
 
+func (s *Server) handleCreateDaemonReinstallToken(w http.ResponseWriter, r *http.Request) {
+	if !s.requireHumanPrincipal(w, r) {
+		return
+	}
+	daemon, token, err := createDaemonReinstallToken(s.store.db, s.requestWorkspaceID(r), chi.URLParam(r, "daemonID"))
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, CreateDaemonResponse{Daemon: daemon, Token: token})
+}
+
 func (s *Server) handleDeleteDaemon(w http.ResponseWriter, r *http.Request) {
 	if !s.requireHumanPrincipal(w, r) {
 		return
