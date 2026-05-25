@@ -2,7 +2,8 @@ package syncer
 
 import (
 	"context"
-	"os"
+	"reflect"
+	"strings"
 	"testing"
 
 	crdt "notty/internal/ycrdt"
@@ -34,9 +35,7 @@ func TestDocumentCacheMaterializesCachedStateWithoutBackendFetch(t *testing.T) {
 	if got := materialized.Doc.GetText("content").ToString(); got != "alpha" {
 		t.Fatalf("unexpected cached content: %q", got)
 	}
-	if _, err := os.Stat(cache.statePath("doc_1")); err != nil {
-		t.Fatalf("expected cache state on disk: %v", err)
-	}
+	assertSQLiteTableExists(t, cache, "crdt_updates")
 }
 
 func TestDocumentCacheMaterializesIndependentMutableDocs(t *testing.T) {
@@ -79,15 +78,11 @@ func TestDocumentCacheReportsUnknownContentWithoutCacheState(t *testing.T) {
 		t.Fatalf("materialize missing state: %v", err)
 	}
 	if materialized.ContentKnown {
-		t.Fatal("missing state.bin must not be treated as materialized document content")
+		t.Fatal("missing CRDT update rows must not be treated as materialized document content")
 	}
 	if got := materialized.Doc.GetText("content").ToString(); got != "" {
 		t.Fatalf("expected empty placeholder doc, got %q", got)
 	}
-	if _, err := os.Stat(cache.statePath("doc_1")); !os.IsNotExist(err) {
-		t.Fatalf("missing state must not initialize state.bin, stat err=%v", err)
-	}
-
 	text := materialized.Doc.GetText("content")
 	materialized.Doc.Transact(func(txn *crdt.Transaction) {
 		text.Insert(txn, 0, "after websocket sync", nil)
@@ -110,7 +105,8 @@ func TestDocumentCacheDedupesPendingRemoteUpdatesAfterReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
-	update := []byte{1, 2, 3, 4}
+	updateDoc := newDocWithText(t, "remote")
+	update := updateDoc.EncodeStateAsUpdate()
 	appended, err := cache.appendPendingRemoteUpdate("doc_1", "docs/spec.md", update)
 	if err != nil {
 		t.Fatalf("append first pending update: %v", err)
@@ -139,7 +135,7 @@ func TestDocumentCacheDedupesPendingRemoteUpdatesAfterReopen(t *testing.T) {
 	}
 }
 
-func TestDocumentCacheDropsCorruptCachedState(t *testing.T) {
+func TestDocumentCacheDoesNotCreateFileBackedState(t *testing.T) {
 	cache, err := newDocumentCache(t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
@@ -147,21 +143,54 @@ func TestDocumentCacheDropsCorruptCachedState(t *testing.T) {
 	if err := cache.storeDoc("doc_1", "docs/spec.md", 1, newDocWithText(t, "cached")); err != nil {
 		t.Fatalf("store cached doc: %v", err)
 	}
-	if err := os.WriteFile(cache.statePath("doc_1"), []byte("not a crdt update"), 0o644); err != nil {
-		t.Fatalf("corrupt cached state: %v", err)
-	}
 
 	doc, _, state, err := cache.loadBaseDoc("doc_1", "docs/spec.md")
 	if err != nil {
-		t.Fatalf("load corrupt cached state: %v", err)
+		t.Fatalf("load cached state: %v", err)
 	}
-	if len(state) != 0 {
-		t.Fatalf("expected corrupt state to be dropped, got %d bytes", len(state))
+	if len(state) == 0 {
+		t.Fatal("expected sqlite-backed state")
 	}
-	if got := doc.GetText("content").ToString(); got != "" {
-		t.Fatalf("expected empty doc after dropping corrupt cache, got %q", got)
+	if got := doc.GetText("content").ToString(); got != "cached" {
+		t.Fatalf("expected cached doc, got %q", got)
 	}
-	if _, err := os.Stat(cache.statePath("doc_1")); !os.IsNotExist(err) {
-		t.Fatalf("expected corrupt state file to be removed, stat err=%v", err)
+}
+
+func TestWorkspaceStoreSchemaUsesAgreedDurableTables(t *testing.T) {
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	rows, err := cache.db.Query(`select name from sqlite_master where type = 'table' and name not like 'sqlite_%' order by name`)
+	if err != nil {
+		t.Fatalf("list tables: %v", err)
+	}
+	defer rows.Close()
+	var tables []string
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			t.Fatalf("scan table: %v", err)
+		}
+		tables = append(tables, table)
+	}
+	want := []string{"content_outbox", "crdt_updates", "documents", "thread_outbox"}
+	if !reflect.DeepEqual(tables, want) {
+		t.Fatalf("sqlite schema tables = %#v, want %#v", tables, want)
+	}
+	var seqSQL string
+	if err := cache.db.QueryRow(`select sql from sqlite_master where type = 'table' and name = 'crdt_updates'`).Scan(&seqSQL); err != nil {
+		t.Fatalf("load crdt schema: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(seqSQL), "seq integer primary key autoincrement") {
+		t.Fatalf("crdt_updates must use autoincrement seq, schema=%s", seqSQL)
+	}
+}
+
+func assertSQLiteTableExists(t *testing.T, cache *documentCache, table string) {
+	t.Helper()
+	var name string
+	if err := cache.db.QueryRow(`select name from sqlite_master where type = 'table' and name = ?`, table).Scan(&name); err != nil {
+		t.Fatalf("expected sqlite table %s: %v", table, err)
 	}
 }

@@ -39,7 +39,7 @@ func TestReconcileQueueWakeCoalescesSignals(t *testing.T) {
 	}
 }
 
-func TestWorkspaceRuntimeDocumentStateDirsArePerLocalWorkspace(t *testing.T) {
+func TestWorkspaceRuntimeSyncDBsArePerLocalWorkspace(t *testing.T) {
 	cfg := Config{WorkspaceDir: filepath.Join(t.TempDir(), "primary"), AgentWorkspaceRoot: filepath.Join(t.TempDir(), "agents"), AgentID: "daemon_agent"}
 
 	primary, err := newWorkspaceRuntime(cfg, http.DefaultClient, cfg.WorkspaceDir, cfg.AgentID, "daemon")
@@ -58,21 +58,21 @@ func TestWorkspaceRuntimeDocumentStateDirsArePerLocalWorkspace(t *testing.T) {
 	if primary.docCache == nil || agent.docCache == nil {
 		t.Fatal("expected both runtimes to have document caches")
 	}
-	if primary.docCache.root == agent.docCache.root {
-		t.Fatalf("runtime caches must be isolated, both used %s", primary.docCache.root)
+	if primary.docCache.path == agent.docCache.path {
+		t.Fatalf("runtime caches must be isolated, both used %s", primary.docCache.path)
 	}
-	if primary.docCache.root != filepath.Join(cfg.WorkspaceDir, ".notty", "documents") {
-		t.Fatalf("primary cache root = %s, want workspace-local documents dir", primary.docCache.root)
+	if primary.docCache.path != filepath.Join(cfg.WorkspaceDir, ".notty", "sync.db") {
+		t.Fatalf("primary cache path = %s, want workspace-local sync db", primary.docCache.path)
 	}
-	if agent.docCache.root != filepath.Join(agentRoot, ".notty", "documents") {
-		t.Fatalf("agent cache root = %s, want agent-local documents dir", agent.docCache.root)
+	if agent.docCache.path != filepath.Join(agentRoot, ".notty", "sync.db") {
+		t.Fatalf("agent cache path = %s, want agent-local sync db", agent.docCache.path)
 	}
 
 	if err := primary.docCache.storeDoc("doc_1", "doc.md", 1, newDocWithText(t, "primary")); err != nil {
 		t.Fatalf("store primary doc: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(agent.docCache.root, safeDocumentCacheName("doc_1"), "state.bin")); !os.IsNotExist(err) {
-		t.Fatalf("agent cache should not contain primary state, stat err=%v", err)
+	if got := agent.docCache.localStateVector("doc_1"); len(got) != 0 {
+		t.Fatalf("agent cache should not contain primary state, got vector %v", got)
 	}
 }
 

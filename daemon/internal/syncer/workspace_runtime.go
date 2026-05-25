@@ -61,7 +61,7 @@ func newWorkspaceRuntime(cfg Config, client *http.Client, rootDir, actorID, acto
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
-	cache, err := newDocumentCache(workspaceDocumentStateDir(rootDir))
+	cache, err := newDocumentCache(workspaceSyncDBPath(rootDir))
 	if err != nil {
 		return nil, err
 	}
@@ -93,12 +93,12 @@ func (r *workspaceRuntime) markLocalCreate(candidate localCreateCandidate) {
 	r.markDocumentDirty(localCreateReconcileWake)
 }
 
-func workspaceDocumentStateDir(root string) string {
+func workspaceSyncDBPath(root string) string {
 	root = strings.TrimSpace(root)
 	if root == "" {
 		return ""
 	}
-	return filepath.Join(root, ".notty", "documents")
+	return filepath.Join(root, ".notty", "sync.db")
 }
 
 func (r *workspaceRuntime) Run(ctx context.Context) error {
@@ -111,6 +111,7 @@ func (r *workspaceRuntime) Run(ctx context.Context) error {
 		}
 		r.initialWorkspace = nil
 	}
+	r.enqueueStartupStoreWork()
 
 	replicaCtx, cancelReplica := context.WithCancel(ctx)
 	defer cancelReplica()
@@ -128,6 +129,23 @@ func (r *workspaceRuntime) Run(ctx context.Context) error {
 	cancelReplica()
 	r.closeDocumentSyncs()
 	return nil
+}
+
+func (r *workspaceRuntime) enqueueStartupStoreWork() {
+	if r == nil || r.docCache == nil {
+		return
+	}
+	documentIDs, wakeDelivery, err := r.docCache.documentsNeedingReconcile()
+	if err != nil {
+		log.Printf("%s startup store recovery error: %v", r.actorID(), err)
+		return
+	}
+	for _, documentID := range documentIDs {
+		r.markDocumentDirty(documentID)
+	}
+	if wakeDelivery {
+		r.wakeThreadDelivery()
+	}
 }
 
 func (r *workspaceRuntime) presenceLoop(ctx context.Context) {

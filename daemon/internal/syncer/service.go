@@ -635,6 +635,7 @@ func (s *workspaceRuntime) createDocumentFromLocalCandidate(ctx context.Context,
 		Path:          candidate.Path,
 		WorkspaceRoot: candidate.Root,
 		FS:            fs,
+		cache:         s.docCache,
 	}
 	if err := tracked.storeProjectedBase("", crdtStateFromContent("")); err != nil {
 		return nil, err
@@ -919,7 +920,7 @@ func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documen
 			return nil
 		}
 
-		baseDoc, metadata, baseState, err := cache.loadBaseDocLocked(entry, documentID, documentPath)
+		baseDoc, _, baseState, err := cache.loadBaseDocLocked(entry, documentID, documentPath)
 		if err != nil {
 			return err
 		}
@@ -1000,28 +1001,10 @@ func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documen
 
 		pendingRemoteCount, err := cache.pendingRemoteUpdateCountLocked(entry, documentID)
 		if err != nil {
-			if errors.Is(err, errPendingUpdateLogHashMismatch) {
-				if clearErr := cache.clearPendingRemoteUpdatesLocked(entry, documentID); clearErr != nil {
-					return fmt.Errorf("clear corrupt pending remote updates for %s: %w", documentID, clearErr)
-				}
-				pendingRemoteCount = 0
-			} else {
-				return err
-			}
+			return err
 		}
 		if pendingRemoteCount > 0 {
 			if err := applyPendingRemoteUpdatesLocked(cache, entry, documentID, baseDoc); err != nil {
-				return err
-			}
-			metadata.DocumentID = documentID
-			if metadata.Path == "" {
-				metadata.Path = documentPath
-			}
-			metadata.UpdatedAt = time.Now().UTC()
-			if err := cache.storeDocLocked(entry, metadata, baseDoc); err != nil {
-				return err
-			}
-			if err := cache.clearPendingRemoteUpdatesLocked(entry, documentID); err != nil {
 				return err
 			}
 			baseState = baseDoc.EncodeStateAsUpdate()
@@ -1307,15 +1290,15 @@ func (s *workspaceRuntime) deleteRemoteDocument(ctx context.Context, tracked *tr
 func (s *workspaceRuntime) flushOutboxUpdates(ctx context.Context, cache *documentCache, documentID, documentPath string, trackedFiles []*trackedFile, records []outboxUpdateRecord) error {
 	for len(records) > 0 {
 		record := records[0]
-		if _, err := s.postDocumentUpdate(ctx, documentID, &record); err != nil {
+		response, err := s.postDocumentUpdate(ctx, documentID, &record)
+		if err != nil {
 			return err
 		}
 		entry, unlock := cache.lockEntry(documentID)
-		if err := finalizeAcceptedOutbox(cache, entry, documentID, documentPath, trackedFiles, &record); err != nil {
+		if err := finalizeAcceptedOutbox(cache, entry, documentID, documentPath, trackedFiles, &record, response.UpdateID); err != nil {
 			unlock()
 			return err
 		}
-		var err error
 		records, err = cache.loadOutboxUpdatesLocked(entry, documentID)
 		unlock()
 		if err != nil {
@@ -1325,8 +1308,8 @@ func (s *workspaceRuntime) flushOutboxUpdates(ctx context.Context, cache *docume
 	return nil
 }
 
-func finalizeAcceptedOutbox(cache *documentCache, entry *documentCacheEntry, documentID, documentPath string, trackedFiles []*trackedFile, record *outboxUpdateRecord) error {
-	baseDoc, metadata, _, err := cache.loadBaseDocLocked(entry, documentID, documentPath)
+func finalizeAcceptedOutbox(cache *documentCache, entry *documentCacheEntry, documentID, documentPath string, trackedFiles []*trackedFile, record *outboxUpdateRecord, backendUpdateID int64) error {
+	baseDoc, _, _, err := cache.loadBaseDocLocked(entry, documentID, documentPath)
 	if err != nil {
 		return err
 	}
@@ -1337,15 +1320,7 @@ func finalizeAcceptedOutbox(cache *documentCache, entry *documentCacheEntry, doc
 	if err := crdt.ApplyUpdateV1(baseDoc, record.Update, "local-reconcile"); err != nil {
 		return err
 	}
-	metadata.DocumentID = documentID
-	if metadata.Path == "" {
-		metadata.Path = documentPath
-	}
-	metadata.UpdatedAt = time.Now().UTC()
-	if err := cache.storeDocLocked(entry, metadata, baseDoc); err != nil {
-		return err
-	}
-	if err := cache.dropFirstOutboxUpdateLocked(entry, documentID); err != nil {
+	if err := cache.acceptOutboxUpdateLocked(entry, documentID, documentPath, record, backendUpdateID); err != nil {
 		return err
 	}
 
@@ -1388,18 +1363,8 @@ func applyPendingRemoteUpdatesLocked(cache *documentCache, entry *documentCacheE
 	if cache == nil || doc == nil {
 		return nil
 	}
-	if err := cache.forEachPendingRemoteUpdateLocked(entry, documentID, func(update []byte) error {
-		if len(update) == 0 {
-			return nil
-		}
-		return crdt.ApplyUpdateV1(doc, update, "remote-reconcile")
-	}); err != nil {
-		if clearErr := cache.clearPendingRemoteUpdatesLocked(entry, documentID); clearErr != nil {
-			return fmt.Errorf("apply pending remote update for %s: %w; clear corrupt pending log: %v", documentID, err, clearErr)
-		}
-		return fmt.Errorf("cleared corrupt pending remote updates for %s: %w", documentID, err)
-	}
-	return nil
+	_, err := cache.applyPendingRemoteUpdatesLocked(entry, documentID, doc)
+	return err
 }
 
 func collectTrackedReconcileStates(trackedFiles []*trackedFile) ([]trackedReconcileState, error) {
@@ -1800,56 +1765,23 @@ func (t *trackedFile) storeProjectedBase(content string, states ...[]byte) error
 	if len(state) == 0 {
 		state = crdtStateFromContent(content)
 	}
-	dir := t.projectionDir()
-	if dir == "" {
+	if t.cache == nil {
 		return nil
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
+	if !projectedStateMatchesContent(state, content) {
+		return nil
 	}
-	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte(content), 0o644); err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(dir, "base.state.bin"), state, 0o644)
+	return t.cache.storeProjectedBase(t.DocumentID, content, state)
 }
 
 func (t *trackedFile) loadProjectedBase() (string, []byte, bool, error) {
 	if t == nil || t.DocumentID == "" {
 		return "", nil, false, nil
 	}
-	dir := t.projectionDir()
-	if dir == "" {
+	if t.cache == nil {
 		return "", nil, false, nil
 	}
-	content, err := os.ReadFile(filepath.Join(dir, "base.txt"))
-	if errors.Is(err, os.ErrNotExist) {
-		return "", nil, false, nil
-	}
-	if err != nil {
-		return "", nil, false, err
-	}
-	state, err := os.ReadFile(filepath.Join(dir, "base.state.bin"))
-	if errors.Is(err, os.ErrNotExist) {
-		return "", nil, false, nil
-	}
-	if err != nil {
-		return "", nil, false, err
-	}
-	if !projectedStateMatchesContent(state, string(content)) {
-		return "", nil, false, nil
-	}
-	return string(content), state, true, nil
-}
-
-func (t *trackedFile) projectionDir() string {
-	root := t.WorkspaceRoot
-	if root == "" {
-		root = workspaceRootForDocumentPath(t.Path, t.DocumentPath)
-	}
-	if root == "" {
-		return ""
-	}
-	return filepath.Join(workspaceDocumentStateDir(root), safeDocumentCacheName(t.DocumentID))
+	return t.cache.loadProjectedBase(t.DocumentID)
 }
 
 func (t *trackedFile) workspaceFS() *WorkspaceFS {
