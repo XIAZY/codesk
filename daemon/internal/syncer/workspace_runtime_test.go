@@ -39,6 +39,127 @@ func TestReconcileQueueWakeCoalescesSignals(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRuntimeStartupRecoveryQueuesDurableSQLiteWork(t *testing.T) {
+	root := t.TempDir()
+	cache, err := newDocumentCache(root)
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+
+	baseDoc := newDocWithText(t, "base")
+	if err := cache.storeDoc("doc_incoming", "incoming.md", 1, baseDoc); err != nil {
+		t.Fatalf("store incoming base: %v", err)
+	}
+	remoteUpdate := updateFromBaseDoc(t, baseDoc, "base\nremote", "remote")
+	if appended, err := cache.appendPendingRemoteUpdate("doc_incoming", "incoming.md", remoteUpdate); err != nil {
+		t.Fatalf("append pending incoming: %v", err)
+	} else if !appended {
+		t.Fatal("expected pending incoming to append")
+	}
+
+	if err := cache.storeDoc("doc_outbox", "outbox.md", 1, baseDoc); err != nil {
+		t.Fatalf("store outbox base: %v", err)
+	}
+	localUpdate := updateFromBaseDoc(t, baseDoc, "base\nlocal", "local")
+	entry, unlock := cache.lockEntry("doc_outbox")
+	if err := cache.storeOutboxUpdateLocked(entry, "doc_outbox", "outbox.md", outboxUpdateRecord{
+		Update:          localUpdate,
+		ObservedContent: "base\nlocal",
+		ObservedState:   crdtStateFromContent("base\nlocal"),
+		SourcePath:      filepath.Join(root, "outbox.md"),
+		ActorID:         "daemon_agent",
+		ActorType:       "daemon",
+		CreatedAt:       time.Now().UTC(),
+	}); err != nil {
+		unlock()
+		t.Fatalf("store content outbox: %v", err)
+	}
+	unlock()
+
+	if err := cache.appendThreadIntent("doc_thread_pending", threadOutboxIntent{
+		IntentID:       "intent_pending",
+		IdempotencyKey: "intent_pending",
+		DocumentID:     "doc_thread_pending",
+		DocumentPath:   "pending.md",
+		ActorID:        "agent_1",
+		ActorType:      "agent",
+		Request: createThreadPayload{
+			DocumentID: "doc_thread_pending",
+			Body:       "Please check this.",
+			Quote:      "target",
+		},
+		Status:    threadIntentPending,
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("append pending thread intent: %v", err)
+	}
+	if err := cache.appendThreadIntent("doc_thread_ready", threadOutboxIntent{
+		IntentID:       "intent_ready",
+		IdempotencyKey: "intent_ready",
+		DocumentID:     "doc_thread_ready",
+		DocumentPath:   "ready.md",
+		ActorID:        "agent_1",
+		ActorType:      "agent",
+		Request: createThreadPayload{
+			DocumentID:    "doc_thread_ready",
+			Body:          "Please check this.",
+			RelativeStart: "start",
+			RelativeEnd:   "end",
+		},
+		Resolved: &backendCreateThreadPayload{
+			DocumentID:        "doc_thread_ready",
+			ClientOperationID: "intent_ready",
+			Body:              "Please check this.",
+			Kind:              "text-range",
+			RelativeStart:     "start",
+			RelativeEnd:       "end",
+		},
+		Status:    threadIntentReady,
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("append ready thread intent: %v", err)
+	}
+	if err := cache.db.Close(); err != nil {
+		t.Fatalf("close cache: %v", err)
+	}
+
+	reopened, err := newDocumentCache(root)
+	if err != nil {
+		t.Fatalf("reopen cache: %v", err)
+	}
+	queue := newReconcileQueue()
+	runtime := &workspaceRuntime{
+		docCache:           reopened,
+		reconcileQueue:     queue,
+		threadDeliveryWake: make(chan struct{}, 1),
+	}
+	runtime.enqueueStartupStoreWork()
+
+	dirty := queue.Drain()
+	for _, documentID := range []string{"doc_incoming", "doc_outbox", "doc_thread_pending"} {
+		if !containsString(dirty, documentID) {
+			t.Fatalf("expected startup recovery to queue %s, got %#v", documentID, dirty)
+		}
+	}
+	if containsString(dirty, "doc_thread_ready") {
+		t.Fatalf("ready thread delivery must not dirty the document, got %#v", dirty)
+	}
+	select {
+	case <-runtime.threadDeliveryWake:
+	default:
+		t.Fatal("expected ready thread intent to wake delivery on startup")
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestWorkspaceRuntimeSyncDBsArePerLocalWorkspace(t *testing.T) {
 	cfg := Config{WorkspaceDir: filepath.Join(t.TempDir(), "primary"), AgentWorkspaceRoot: filepath.Join(t.TempDir(), "agents"), AgentID: "daemon_agent"}
 
