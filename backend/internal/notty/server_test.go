@@ -439,6 +439,8 @@ func TestCreateThreadIsIdempotentByClientOperationID(t *testing.T) {
 	server, store := newTestServer(t)
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "alpha bravo charlie")
 	router := server.Routes()
+	events, unsubscribe := server.subscribers.Subscribe()
+	defer unsubscribe()
 	body, err := json.Marshal(CreateThreadRequest{
 		DocumentID:    documentID,
 		Body:          "Please review this section.",
@@ -470,7 +472,14 @@ func TestCreateThreadIsIdempotentByClientOperationID(t *testing.T) {
 	}
 
 	first := post()
+	firstEventTypes := drainBrokerEventTypes(events)
+	if len(firstEventTypes) != 2 || firstEventTypes[0] != "thread.created" || firstEventTypes[1] != "thread.message.created" {
+		t.Fatalf("expected first create to publish one thread creation and message event, got %#v", firstEventTypes)
+	}
 	second := post()
+	if duplicateEventTypes := drainBrokerEventTypes(events); len(duplicateEventTypes) != 0 {
+		t.Fatalf("idempotent replay should not publish duplicate thread events, got %#v", duplicateEventTypes)
+	}
 	if first["id"] != second["id"] {
 		t.Fatalf("expected idempotent repeat to return same thread, got %v and %v", first["id"], second["id"])
 	}
@@ -483,6 +492,18 @@ func TestCreateThreadIsIdempotentByClientOperationID(t *testing.T) {
 	}
 	if threads[0].ClientOperationID != "intent_123" {
 		t.Fatalf("expected client operation ID to persist, got %q", threads[0].ClientOperationID)
+	}
+}
+
+func drainBrokerEventTypes(events <-chan EventEnvelope) []string {
+	var types []string
+	for {
+		select {
+		case event := <-events:
+			types = append(types, event.Type)
+		default:
+			return types
+		}
 	}
 }
 
