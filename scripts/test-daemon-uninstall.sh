@@ -29,9 +29,13 @@ assert_exists() {
 	[ -e "$1" ] || fail "expected existing: $1"
 }
 
-mkdir -p "$fake_bin" "$install_dir" "$data_dir/daemons/$daemon_name" "$data_dir/runtime/$daemon_name"
-mkdir -p "$tmp_home/Notty/workspaces/$daemon_name" "$tmp_home/Notty/agents/$daemon_name"
-mkdir -p "$tmp_home/Library/LaunchAgents" "$tmp_home/.config/systemd/user"
+assert_fails() {
+	if "$@" >/dev/null 2>&1; then
+		fail "expected command to fail: $*"
+	fi
+}
+
+mkdir -p "$fake_bin" "$install_dir" "$tmp_home/Library/LaunchAgents" "$tmp_home/.config/systemd/user"
 
 cat > "$fake_bin/launchctl" <<'EOF'
 #!/usr/bin/env sh
@@ -43,39 +47,14 @@ exit 0
 EOF
 chmod +x "$fake_bin/launchctl" "$fake_bin/systemctl"
 
-touch "$install_dir/notty-daemon" "$install_dir/notty-agent-tool"
-touch "$data_dir/daemons/$daemon_name/run.sh"
-touch "$tmp_home/Library/LaunchAgents/com.notty.daemon.$daemon_name.plist"
-touch "$tmp_home/.config/systemd/user/notty-daemon-$daemon_name.service"
-touch "$tmp_home/Notty/workspaces/$daemon_name/file.md"
-touch "$tmp_home/Notty/agents/$daemon_name/agent.log"
+HOME="$tmp_home" PATH="$fake_bin:$PATH" assert_fails sh "$root_dir/deploy/daemons/uninstall.sh" \
+	--install-dir "$install_dir" \
+	--data-dir "$data_dir"
 
-HOME="$tmp_home" PATH="$fake_bin:$PATH" sh "$root_dir/deploy/daemons/uninstall.sh" \
+HOME="$tmp_home" PATH="$fake_bin:$PATH" assert_fails sh "$root_dir/deploy/daemons/uninstall.sh" \
 	--workspace-id "$workspace_id" \
 	--install-dir "$install_dir" \
-	--data-dir "$data_dir" >/dev/null
-
-assert_missing "$data_dir/daemons/$daemon_name"
-assert_missing "$data_dir/runtime/$daemon_name"
-assert_missing "$tmp_home/Notty/workspaces/$daemon_name"
-assert_missing "$tmp_home/Notty/agents/$daemon_name"
-assert_missing "$tmp_home/Library/LaunchAgents/com.notty.daemon.$daemon_name.plist"
-assert_missing "$tmp_home/.config/systemd/user/notty-daemon-$daemon_name.service"
-assert_missing "$install_dir/notty-daemon"
-assert_missing "$install_dir/notty-agent-tool"
-
-mkdir -p "$install_dir" "$data_dir/daemons/$daemon_name" "$data_dir/runtime/$daemon_name" "$data_dir/daemons/other"
-touch "$install_dir/notty-daemon" "$install_dir/notty-agent-tool" "$data_dir/daemons/$daemon_name/run.sh"
-
-HOME="$tmp_home" PATH="$fake_bin:$PATH" sh "$root_dir/deploy/daemons/uninstall.sh" \
-	--workspace-id "$workspace_id" \
-	--install-dir "$install_dir" \
-	--data-dir "$data_dir" >/dev/null
-
-assert_missing "$data_dir/daemons/$daemon_name"
-assert_exists "$data_dir/daemons/other"
-assert_exists "$install_dir/notty-daemon"
-assert_exists "$install_dir/notty-agent-tool"
+	--data-dir "$data_dir"
 
 mkdir -p "$data_dir/daemons/$daemon_name" "$data_dir/runtime/$daemon_name"
 mkdir -p "$data_dir/daemons/$second_daemon_name" "$data_dir/runtime/$second_daemon_name"
@@ -103,5 +82,19 @@ assert_missing "$tmp_home/.config/systemd/user/notty-daemon-$daemon_name.service
 assert_missing "$tmp_home/.config/systemd/user/notty-daemon-$second_daemon_name.service"
 assert_missing "$install_dir/notty-daemon"
 assert_missing "$install_dir/notty-agent-tool"
+
+mkdir -p "$install_dir" "$data_dir/daemons/$daemon_name" "$tmp_home/Notty/workspaces/$daemon_name"
+touch "$install_dir/notty-daemon" "$install_dir/notty-agent-tool" "$data_dir/daemons/$daemon_name/run.sh"
+
+HOME="$tmp_home" PATH="$fake_bin:$PATH" sh "$root_dir/deploy/daemons/uninstall.sh" \
+	--all \
+	--keep-binaries \
+	--install-dir "$install_dir" \
+	--data-dir "$data_dir" >/dev/null
+
+assert_missing "$data_dir/daemons"
+assert_missing "$tmp_home/Notty/workspaces"
+assert_exists "$install_dir/notty-daemon"
+assert_exists "$install_dir/notty-agent-tool"
 
 printf 'daemon uninstall script test passed\n'
