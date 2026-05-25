@@ -135,6 +135,132 @@ func TestDocumentCacheDedupesPendingRemoteUpdatesAfterReopen(t *testing.T) {
 	}
 }
 
+func TestDocumentCacheFoldsPendingRemoteUpdatesOnceAfterReopen(t *testing.T) {
+	root := t.TempDir()
+	cache, err := newDocumentCache(root)
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base")
+	if err := cache.storeDoc("doc_1", "docs/spec.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+
+	remoteDoc := crdt.New()
+	if err := crdt.ApplyUpdateV1(remoteDoc, baseDoc.EncodeStateAsUpdate(), "base"); err != nil {
+		t.Fatalf("apply base to remote doc: %v", err)
+	}
+	updates := map[string][]byte{}
+	unsubscribe := remoteDoc.OnUpdate(func(update []byte, origin any) {
+		key, _ := origin.(string)
+		if key == "remote1" || key == "remote2" {
+			updates[key] = append([]byte(nil), update...)
+		}
+	})
+	updateDocText(t, remoteDoc, "base\nremote one", "remote1")
+	updateDocText(t, remoteDoc, "base\nremote one\nremote two", "remote2")
+	unsubscribe()
+	for _, key := range []string{"remote1", "remote2"} {
+		if len(updates[key]) == 0 {
+			t.Fatalf("expected captured update %s", key)
+		}
+		appended, err := cache.appendPendingRemoteUpdate("doc_1", "docs/spec.md", updates[key])
+		if err != nil {
+			t.Fatalf("append pending update %s: %v", key, err)
+		}
+		if !appended {
+			t.Fatalf("expected pending update %s to append", key)
+		}
+	}
+	if err := cache.db.Close(); err != nil {
+		t.Fatalf("close cache: %v", err)
+	}
+
+	reopened, err := newDocumentCache(root)
+	if err != nil {
+		t.Fatalf("reopen cache: %v", err)
+	}
+	count, err := reopened.pendingRemoteUpdateCount("doc_1")
+	if err != nil {
+		t.Fatalf("pending count after reopen: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected two durable pending updates after reopen, got %d", count)
+	}
+
+	doc, _, _, err := reopened.loadBaseDoc("doc_1", "docs/spec.md")
+	if err != nil {
+		t.Fatalf("load base doc: %v", err)
+	}
+	entry := reopened.entryFor("doc_1")
+	entry.mu.Lock()
+	applied, err := reopened.applyPendingRemoteUpdatesLocked(entry, "doc_1", doc)
+	entry.mu.Unlock()
+	if err != nil {
+		t.Fatalf("apply pending updates: %v", err)
+	}
+	if applied != 2 {
+		t.Fatalf("expected two applied pending updates, got %d", applied)
+	}
+
+	count, err = reopened.pendingRemoteUpdateCount("doc_1")
+	if err != nil {
+		t.Fatalf("pending count after apply: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected pending inbox to be empty after apply, got %d", count)
+	}
+	gotDoc, _, _, err := reopened.loadBaseDoc("doc_1", "docs/spec.md")
+	if err != nil {
+		t.Fatalf("reload folded doc: %v", err)
+	}
+	if got := gotDoc.GetText("content").ToString(); got != "base\nremote one\nremote two" {
+		t.Fatalf("unexpected folded content: %q", got)
+	}
+
+	rows, err := reopened.db.Query(`select update_sha256 from crdt_updates where document_id = ? and source = 'remote' order by seq`, "doc_1")
+	if err != nil {
+		t.Fatalf("load folded remote hashes: %v", err)
+	}
+	defer rows.Close()
+	var foldedHashes []string
+	for rows.Next() {
+		var hash string
+		if err := rows.Scan(&hash); err != nil {
+			t.Fatalf("scan folded remote hash: %v", err)
+		}
+		foldedHashes = append(foldedHashes, hash)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate folded remote hashes: %v", err)
+	}
+	wantHashes := []string{sha256Hex(updates["remote1"]), sha256Hex(updates["remote2"])}
+	if !reflect.DeepEqual(foldedHashes, wantHashes) {
+		t.Fatalf("folded remote hashes = %#v, want %#v", foldedHashes, wantHashes)
+	}
+
+	doc, _, _, err = reopened.loadBaseDoc("doc_1", "docs/spec.md")
+	if err != nil {
+		t.Fatalf("reload doc before no-op apply: %v", err)
+	}
+	entry.mu.Lock()
+	applied, err = reopened.applyPendingRemoteUpdatesLocked(entry, "doc_1", doc)
+	entry.mu.Unlock()
+	if err != nil {
+		t.Fatalf("second apply pending updates: %v", err)
+	}
+	if applied != 0 {
+		t.Fatalf("expected second apply to be no-op, got %d", applied)
+	}
+	var foldedCount int
+	if err := reopened.db.QueryRow(`select count(*) from crdt_updates where document_id = ?`, "doc_1").Scan(&foldedCount); err != nil {
+		t.Fatalf("count folded updates: %v", err)
+	}
+	if foldedCount != 3 {
+		t.Fatalf("second apply must not duplicate folded updates, got %d rows", foldedCount)
+	}
+}
+
 func TestDocumentCacheDoesNotCreateFileBackedState(t *testing.T) {
 	cache, err := newDocumentCache(t.TempDir())
 	if err != nil {
