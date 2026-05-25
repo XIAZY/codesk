@@ -361,7 +361,7 @@ Edge cases:
 Implementation:
 
 - Main daemon workspace and agent workspace replicas each track projected files.
-- Per-document state, pending/outbox data, and projected bases live together under each workspace root’s `.notty/documents`.
+- Per-document state, pending/outbox data, and projected bases live in each workspace root’s `.notty/sync.db`.
 - Dot paths are ignored by daemon workspace scanning.
 - Agent logs remain regular synced workspace files.
 

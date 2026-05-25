@@ -315,13 +315,17 @@ func TestReconcileDirtyDocumentsDoesNotDropLaterIDsAfterError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
-	if err := os.MkdirAll(cache.documentDir("doc_bad"), 0o755); err != nil {
-		t.Fatalf("mkdir corrupt outbox dir: %v", err)
+	entry, unlock := cache.lockEntry("doc_bad")
+	if err := cache.storeOutboxUpdateLocked(entry, "doc_bad", "bad.md", outboxUpdateRecord{
+		Update:          []byte{1, 2, 3},
+		ObservedContent: "bad",
+		SourcePath:      filepath.Join(t.TempDir(), "bad.md"),
+	}); err != nil {
+		unlock()
+		t.Fatalf("store bad outbox: %v", err)
 	}
-	if err := os.WriteFile(cache.outboxPath("doc_bad"), []byte("{"), 0o644); err != nil {
-		t.Fatalf("write corrupt outbox: %v", err)
-	}
-	entry, unlock := cache.lockEntry("doc_retry")
+	unlock()
+	entry, unlock = cache.lockEntry("doc_retry")
 	if err := cache.storeOutboxUpdateLocked(entry, "doc_retry", "retry.md", outboxUpdateRecord{
 		Update:          []byte{4, 5, 6},
 		ObservedContent: "retry",
@@ -352,10 +356,10 @@ func TestReconcileDirtyDocumentsDoesNotDropLaterIDsAfterError(t *testing.T) {
 	}}
 
 	if err := service.reconcileDirtyDocuments(context.Background()); err == nil {
-		t.Fatal("expected corrupt outbox error")
+		t.Fatal("expected backend send error")
 	}
-	if attempts != 1 {
-		t.Fatalf("expected later dirty document to be attempted once, got %d", attempts)
+	if attempts != 2 {
+		t.Fatalf("expected both dirty documents to be attempted, got %d", attempts)
 	}
 	if got := queue.Drain(); !reflect.DeepEqual(got, []string{"doc_bad", "doc_retry"}) {
 		t.Fatalf("expected failed and still-pending documents to be requeued, got %#v", got)
@@ -546,7 +550,6 @@ func TestInitialRefreshFailsFastOnAgentStartupError(t *testing.T) {
 			BackendURL:         "http://backend.test",
 			WorkspaceDir:       t.TempDir(),
 			AgentWorkspaceRoot: t.TempDir(),
-			RuntimeDir:         t.TempDir(),
 			AgentID:            "daemon_agent",
 		},
 		client:        client,
@@ -680,30 +683,31 @@ func TestApplyProjectedContentDoesNotOverwriteDivergedDiskState(t *testing.T) {
 	}
 }
 
-func TestProjectedBaseLivesUnderWorkspaceNottyWithCRDTState(t *testing.T) {
+func TestProjectedBaseLivesInWorkspaceSQLiteWithCRDTState(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "docs", "doc.md")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
+	cache, err := newDocumentCache(workspaceSyncDBPath(root))
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
 	doc := newDocWithText(t, "base")
+	if err := cache.storeDoc("doc_1", "docs/doc.md", 1, doc); err != nil {
+		t.Fatalf("store doc: %v", err)
+	}
 	tracked := &trackedFile{
 		DocumentID:   "doc_1",
 		DocumentPath: "docs/doc.md",
 		Path:         path,
+		cache:        cache,
 	}
 
 	if err := tracked.storeProjectedBase("base", doc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)
 	}
-
-	projectionDir := filepath.Join(root, ".notty", "documents", "doc_1")
-	if _, err := os.Stat(filepath.Join(projectionDir, "base.txt")); err != nil {
-		t.Fatalf("expected workspace projection text: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(projectionDir, "base.state.bin")); err != nil {
-		t.Fatalf("expected workspace projection state: %v", err)
-	}
+	assertSQLiteTableExists(t, cache, "documents")
 	content, state, known, err := tracked.loadProjectedBase()
 	if err != nil {
 		t.Fatalf("load projected base: %v", err)
@@ -742,7 +746,7 @@ func TestReconcileTrackedDocumentNoopsWithoutDirtyOrPendingRemote(t *testing.T) 
 	}
 }
 
-func TestReconcileArchivesCorruptProjectedBaseInsteadOfDiffing(t *testing.T) {
+func TestReconcileArchivesUnknownProjectedBaseInsteadOfDiffing(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "doc.md")
 	if err := os.WriteFile(path, []byte("base"), 0o644); err != nil {
@@ -766,8 +770,8 @@ func TestReconcileArchivesCorruptProjectedBaseInsteadOfDiffing(t *testing.T) {
 	if err := tracked.storeProjectedBase("base", baseDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(tracked.projectionDir(), "base.state.bin"), []byte{0xff, 0xff, 0xff}, 0o644); err != nil {
-		t.Fatalf("corrupt projection state: %v", err)
+	if _, err := cache.db.Exec(`update documents set projection_known = 0 where document_id = ?`, "doc_1"); err != nil {
+		t.Fatalf("clear projection state: %v", err)
 	}
 	tracked.markLocalDirty()
 
@@ -776,7 +780,7 @@ func TestReconcileArchivesCorruptProjectedBaseInsteadOfDiffing(t *testing.T) {
 		return postDocumentUpdateResponse{}, http.StatusInternalServerError
 	})
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
-		t.Fatalf("reconcile corrupt projected base: %v", err)
+		t.Fatalf("reconcile unknown projected base: %v", err)
 	}
 	if tracked.isLocalDirty() {
 		t.Fatal("expected clean rebuilt projection after archiving unknown local base")
@@ -960,32 +964,18 @@ func TestDocumentSyncInitialSyncUsesOnlyVerifiedLocalCacheState(t *testing.T) {
 	}
 }
 
-func TestDocumentCacheLocalStateVectorRequiresStateFile(t *testing.T) {
+func TestDocumentCacheLocalStateVectorRequiresAppliedCRDTRows(t *testing.T) {
 	cache, err := newDocumentCache(t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
-	metadata := map[string]any{
-		"documentId": "doc_1",
-		"path":       "doc.md",
-	}
-	if err := os.MkdirAll(cache.documentDir("doc_1"), 0o755); err != nil {
-		t.Fatalf("create cache dir: %v", err)
-	}
-	payload, err := json.Marshal(metadata)
-	if err != nil {
-		t.Fatalf("marshal metadata: %v", err)
-	}
-	if err := os.WriteFile(cache.metadataPath("doc_1"), payload, 0o644); err != nil {
-		t.Fatalf("write metadata: %v", err)
+	if _, err := cache.ensureDocument("doc_1", "doc.md"); err != nil {
+		t.Fatalf("ensure document: %v", err)
 	}
 
 	stateVector := cache.localStateVector("doc_1")
 	if len(stateVector) != 0 {
 		t.Fatalf("metadata-only cache must not advertise local state, got %v", stateVector)
-	}
-	if _, err := os.Stat(cache.statePath("doc_1")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("metadata-only cache must not initialize state.bin, stat err=%v", err)
 	}
 }
 
@@ -1107,12 +1097,6 @@ func TestReconcileTrackedDocumentDefersLocalUpdateWhenProjectedBaseMissingCRDTSt
 		cache:        cache,
 	}
 	tracked.setProjectedContent("already synced\n")
-	if err := os.MkdirAll(tracked.projectionDir(), 0o755); err != nil {
-		t.Fatalf("create projection dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(tracked.projectionDir(), "base.txt"), []byte("already synced\n"), 0o644); err != nil {
-		t.Fatalf("write projection text without state: %v", err)
-	}
 	tracked.markLocalDirty()
 
 	service := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
@@ -1199,6 +1183,7 @@ func TestMaterializeExistingLocalFileUsesCachedBaseAsProjection(t *testing.T) {
 		DocumentPath:  "append.txt",
 		Path:          path,
 		WorkspaceRoot: root,
+		cache:         cache,
 	}).storeProjectedBase(baseContent, baseDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)
 	}
@@ -1477,21 +1462,31 @@ func TestReconcileRebasesAppendFromStaleWorkspaceBase(t *testing.T) {
 		t.Fatalf("new cache: %v", err)
 	}
 	projectedDoc := newDocWithText(t, "1\n")
+	if err := cache.storeDoc("doc_append", "append.txt", 1, projectedDoc); err != nil {
+		t.Fatalf("store projected doc: %v", err)
+	}
 	remoteUpdate := updateFromBaseDoc(t, projectedDoc, "1\n2\n", "remote")
-	sharedDoc := crdt.New()
-	if err := crdt.ApplyUpdateV1(sharedDoc, projectedDoc.EncodeStateAsUpdate(), "projected"); err != nil {
-		t.Fatalf("apply projected state: %v", err)
-	}
-	if err := crdt.ApplyUpdateV1(sharedDoc, remoteUpdate, "remote"); err != nil {
-		t.Fatalf("apply remote update: %v", err)
-	}
-	if err := cache.storeDoc("doc_append", "append.txt", 1, sharedDoc); err != nil {
-		t.Fatalf("store shared doc: %v", err)
-	}
 	serverDoc := crdt.New()
-	if err := crdt.ApplyUpdateV1(serverDoc, sharedDoc.EncodeStateAsUpdate(), "server-base"); err != nil {
-		t.Fatalf("apply server base: %v", err)
+	if err := crdt.ApplyUpdateV1(serverDoc, projectedDoc.EncodeStateAsUpdate(), "server-base"); err != nil {
+		t.Fatalf("apply server projected base: %v", err)
 	}
+	if err := crdt.ApplyUpdateV1(serverDoc, remoteUpdate, "remote"); err != nil {
+		t.Fatalf("apply server remote: %v", err)
+	}
+	if _, err := cache.appendPendingRemoteUpdate("doc_append", "append.txt", remoteUpdate); err != nil {
+		t.Fatalf("append pending remote: %v", err)
+	}
+	entry, unlock := cache.lockEntry("doc_append")
+	baseDoc, _, _, err := cache.loadBaseDocLocked(entry, "doc_append", "append.txt")
+	if err != nil {
+		unlock()
+		t.Fatalf("load base doc: %v", err)
+	}
+	if err := applyPendingRemoteUpdatesLocked(cache, entry, "doc_append", baseDoc); err != nil {
+		unlock()
+		t.Fatalf("apply pending remote: %v", err)
+	}
+	unlock()
 	tracked := &trackedFile{
 		DocumentID:   "doc_append",
 		DocumentPath: "append.txt",
@@ -1578,7 +1573,7 @@ func TestReconcileSendsLocalEditBeforeApplyingPendingRemoteUpdate(t *testing.T) 
 		t.Fatalf("load cached doc after local finalize: %v", err)
 	}
 	if got := cachedDoc.GetText("content").ToString(); got != "base\nlocal\n" {
-		t.Fatalf("expected cache to contain local-after-outgoing state before inbox, got %q", got)
+		t.Fatalf("expected accepted local update to be visible before pending incoming folds, got %q", got)
 	}
 
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
@@ -1601,7 +1596,7 @@ func TestReconcileSendsLocalEditBeforeApplyingPendingRemoteUpdate(t *testing.T) 
 	}
 }
 
-func TestReconcileTrackedDocumentClearsCorruptPendingRemoteLog(t *testing.T) {
+func TestDocumentCacheRejectsInvalidRemoteUpdate(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "doc.md")
 	if err := os.WriteFile(path, []byte("base"), 0o644); err != nil {
@@ -1625,31 +1620,19 @@ func TestReconcileTrackedDocumentClearsCorruptPendingRemoteLog(t *testing.T) {
 	if err := tracked.storeProjectedBase("base"); err != nil {
 		t.Fatalf("store projected base: %v", err)
 	}
-	if _, err := cache.appendPendingRemoteUpdate("doc_1", "doc.md", []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}); err != nil {
-		t.Fatalf("append corrupt pending remote: %v", err)
-	}
-
-	service := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
-		t.Fatalf("must not send update while pending remote log is corrupt")
-		return postDocumentUpdateResponse{}, http.StatusInternalServerError
-	})
-	err = service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked})
-	if err == nil || !strings.Contains(err.Error(), "doc_1") {
-		t.Fatalf("expected document-scoped corrupt pending error, got %v", err)
+	if _, err := cache.appendPendingRemoteUpdate("doc_1", "doc.md", []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}); err == nil {
+		t.Fatal("expected invalid remote update to be rejected before it enters sqlite log")
 	}
 	count, err := cache.pendingRemoteUpdateCount("doc_1")
 	if err != nil {
 		t.Fatalf("pending count: %v", err)
 	}
 	if count != 0 {
-		t.Fatalf("expected corrupt pending log to be cleared, got %d pending updates", count)
-	}
-	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
-		t.Fatalf("expected second reconcile after clearing corrupt log to be clean, got %v", err)
+		t.Fatalf("invalid remote update must not be durable, got %d pending updates", count)
 	}
 }
 
-func TestReconcileTrackedDocumentClearsPendingMetadataHashMismatch(t *testing.T) {
+func TestReconcileTrackedDocumentAppliesPendingRemoteFromSQLiteLog(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "doc.md")
 	if err := os.WriteFile(path, []byte("base"), 0o644); err != nil {
@@ -1668,23 +1651,6 @@ func TestReconcileTrackedDocumentClearsPendingMetadataHashMismatch(t *testing.T)
 	if _, err := cache.appendPendingRemoteUpdate("doc_1", "doc.md", update); err != nil {
 		t.Fatalf("append pending remote: %v", err)
 	}
-	metadataPath := cache.metadataPath("doc_1")
-	var metadata documentCacheMetadata
-	payload, err := os.ReadFile(metadataPath)
-	if err != nil {
-		t.Fatalf("read metadata: %v", err)
-	}
-	if err := json.Unmarshal(payload, &metadata); err != nil {
-		t.Fatalf("decode metadata: %v", err)
-	}
-	metadata.PendingSHA256 = "stale-hash"
-	nextPayload, err := json.Marshal(metadata)
-	if err != nil {
-		t.Fatalf("encode metadata: %v", err)
-	}
-	if err := os.WriteFile(metadataPath, nextPayload, 0o644); err != nil {
-		t.Fatalf("write stale metadata: %v", err)
-	}
 	cache, err = newDocumentCache(cacheRoot)
 	if err != nil {
 		t.Fatalf("reopen cache: %v", err)
@@ -1702,18 +1668,18 @@ func TestReconcileTrackedDocumentClearsPendingMetadataHashMismatch(t *testing.T)
 	}
 
 	service := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
-		t.Fatalf("must not send local update while clearing stale pending metadata")
+		t.Fatalf("must not send local update while applying pending remote")
 		return postDocumentUpdateResponse{}, http.StatusInternalServerError
 	})
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
-		t.Fatalf("expected stale pending metadata to be cleared without failing reconcile: %v", err)
+		t.Fatalf("expected pending remote to apply without failing reconcile: %v", err)
 	}
 	count, err := cache.pendingRemoteUpdateCount("doc_1")
 	if err != nil {
 		t.Fatalf("pending count: %v", err)
 	}
 	if count != 0 {
-		t.Fatalf("expected stale pending log to be cleared, got %d pending updates", count)
+		t.Fatalf("expected pending remote to be applied, got %d pending updates", count)
 	}
 }
 
@@ -2070,7 +2036,7 @@ func TestReconcileArchivesUnknownWorkingCopyWithoutCacheContent(t *testing.T) {
 	}
 }
 
-func TestReconcileUsesProjectedBaseEvenWhenDaemonCacheMissing(t *testing.T) {
+func TestReconcileUsesSQLiteProjectedBase(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "doc.md")
 	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
@@ -2081,6 +2047,9 @@ func TestReconcileUsesProjectedBaseEvenWhenDaemonCacheMissing(t *testing.T) {
 		t.Fatalf("new document cache: %v", err)
 	}
 	baseDoc := newDocWithText(t, "base\n")
+	if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base doc: %v", err)
+	}
 	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache}
 	tracked.setProjectedContent("base\n")
 	if err := tracked.storeProjectedBase("base\n", baseDoc.EncodeStateAsUpdate()); err != nil {
@@ -2527,7 +2496,11 @@ func TestLocalCreateCreatesEmptyDocumentAndKeepsLocalBytesDirty(t *testing.T) {
 		_, _ = w.Write([]byte(`{"id":"doc_created","path":"docs/new.md","updateId":1}`))
 	}))
 	defer server.Close()
-	service := &workspaceRuntime{cfg: Config{BackendURL: server.URL, AgentID: "daemon_agent"}, client: server.Client()}
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	service := &workspaceRuntime{cfg: Config{BackendURL: server.URL, AgentID: "daemon_agent"}, client: server.Client(), docCache: cache}
 
 	created, err := service.createDocumentFromLocalCandidate(context.Background(), localCreateCandidate{Root: root, Path: path, ActorID: "daemon_agent", ActorType: "daemon"}, "docs/new.md")
 	if err != nil {
@@ -2546,7 +2519,7 @@ func TestLocalCreateCreatesEmptyDocumentAndKeepsLocalBytesDirty(t *testing.T) {
 	if string(after) != content {
 		t.Fatalf("local create must not rewrite the working file, got %q", after)
 	}
-	tracked := &trackedFile{DocumentID: "doc_created", DocumentPath: "docs/new.md", Path: path, WorkspaceRoot: root}
+	tracked := &trackedFile{DocumentID: "doc_created", DocumentPath: "docs/new.md", Path: path, WorkspaceRoot: root, cache: cache}
 	base, _, known, err := tracked.loadProjectedBase()
 	if err != nil {
 		t.Fatalf("load projected base: %v", err)

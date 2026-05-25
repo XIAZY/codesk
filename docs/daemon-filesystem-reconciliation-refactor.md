@@ -98,7 +98,7 @@ Local filesystem event:
 Remote websocket update:
 
 1. `documentSync` receives a Yjs update.
-2. It appends the update bytes to `pending_remote.log` for that `documentID`.
+2. It appends the update bytes to the SQLite `incoming_updates` inbox for that `documentID`.
 3. It enqueues `documentID`.
 4. It does not apply projections.
 5. It does not generate outgoing updates.
@@ -317,7 +317,7 @@ The current file locking uses `flock` on the data file. That is insufficient whe
 The filesystem abstraction should use logical path locks:
 
 ```text
-<workspace>/.notty/locks/<hash-of-relative-path>.lock
+<workspace>/.notty/path_locks.db
 ```
 
 This protects a path across atomic rename. It also gives all Notty-owned readers and writers one coordination mechanism.
@@ -326,13 +326,13 @@ Data file locks can still be used, but they should not be the primary safety mec
 
 ### Path Lock Lifecycle
 
-Path lock files under `.notty/locks` should be treated as operational metadata, not document state.
+Path leases in `.notty/path_locks.db` should be treated as operational metadata, not document state.
 
 Recommended behavior:
 
-- Keep lock files small and reusable.
-- Do not delete a lock file while the daemon process is running, because another goroutine may be about to use the same logical path.
-- On daemon startup, remove stale lock files before watchers and reconciliation begin.
+- Keep path leases short-lived and scoped to a logical workspace path.
+- Do not use path locks as durable document state.
+- On daemon startup, expire stale leases before watchers and reconciliation begin.
 - Optionally run periodic best-effort cleanup for lock files whose target path no longer exists and whose lock can be acquired non-blockingly.
 
 This intentionally allows bounded temporary accumulation during one daemon process lifetime. It avoids unsafe deletion races while keeping disk usage negligible. Lock files are not CRDT state, not synced content, and not part of correctness recovery.
@@ -437,41 +437,42 @@ This keeps policy in the reconciler while keeping the main flow readable.
 
 ## Projected Base Model
 
-Each workspace copy should keep all per-document local state under:
+Each workspace copy should keep durable sync state in:
 
 ```text
-<workspace>/.notty/documents/<documentID>/
+<workspace>/.notty/sync.db
 ```
 
-Required files:
+Required lifecycle tables:
 
 ```text
-state.bin
-metadata.json
-pending_remote.log
-outbox_update.json
-base.txt
-base.state.bin
+documents
+crdt_updates
+incoming_updates
+content_outbox
+thread_outbox
 ```
 
-Recommended metadata:
+Recommended `documents` metadata:
 
-```json
-{
-  "documentId": "doc_...",
-  "documentPath": "docs/spec.md",
-  "contentSha256": "...",
-  "stateSha256": "...",
-  "updatedAt": "..."
-}
+```text
+document_id
+path
+applied_seq
+projected_seq
+projected_text_sha256
+projected_text_len
+projection_known
+updated_at
 ```
 
 Rules:
 
-- `base.txt` and `base.state.bin` must agree.
-- If either is missing, projected base is unknown.
-- If hash validation fails, projected base is unknown.
-- If CRDT state materializes to different text than `base.txt`, projected base is unknown.
+- `crdt_updates` is folded/current replay history only.
+- `incoming_updates` is the durable pending remote inbox.
+- `content_outbox` is durable outgoing local content work not yet accepted by the backend.
+- `thread_outbox` is durable thread intent and delivery work.
+- If projection metadata is missing or hash validation fails, projected base is unknown.
 - Unknown projected base means no outgoing diff can be generated.
 - Existing unknown working files should be archived and reconstructed.
 
@@ -532,7 +533,7 @@ Startup has an unavoidable ambiguity:
 
 ```text
 foo.md exists locally
-foo.md has no .notty/documents/<documentID>/metadata.json
+foo.md has no matching durable document/projection state in .notty/sync.db
 ```
 
 This could be:
@@ -626,20 +627,17 @@ This is slightly less efficient, but correct. Logs are high-churn, but correctne
 
 ## Document Cache Changes
 
-The daemon cache should remain document-ID keyed:
+The daemon cache should remain document-ID keyed inside workspace SQLite:
 
 ```text
-<cache>/<documentID>/state.bin
-<cache>/<documentID>/metadata.json
-<cache>/<documentID>/pending_remote.log
-<cache>/<documentID>/outbox_update.json
+<workspace>/.notty/sync.db
 ```
 
 Recommended cleanups:
 
-- Normalize invalid state cleanup: if `state.bin` is missing/corrupt/hash-mismatched, clear state metadata in the same operation.
-- Keep pending remote updates as append-only framed bytes.
-- Keep outgoing outbox as one durable update record.
+- Normalize invalid state cleanup by updating `documents` metadata transactionally with replay history changes.
+- Keep pending remote updates in `incoming_updates`.
+- Keep outgoing content work in `content_outbox`.
 - Do not infer empty document from missing cache.
 - Do not use path as cache identity.
 

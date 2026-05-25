@@ -40,12 +40,9 @@ services:
       NOTTY_WORKSPACE_DIR: /workspace/notty/${NOTTY_WORKSPACE_ID:-default}
       NOTTY_AGENT_WORKSPACE_ROOT: /workspace/agents/${NOTTY_WORKSPACE_ID:-default}
       NOTTY_AGENT_ID: daemon_agent
-      NOTTY_RUNTIME_DIR: /runtime/notty
     volumes:
       - daemon_workspace:/workspace
-      - daemon_runtime:/runtime
 
 volumes:
   postgres_data:
   daemon_workspace:
-  daemon_runtime:

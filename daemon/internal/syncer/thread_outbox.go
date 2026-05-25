@@ -1,12 +1,7 @@
 package syncer
 
 import (
-	"encoding/json"
-	"errors"
-	"os"
-	"path/filepath"
-	"sort"
-	"strings"
+	"database/sql"
 	"time"
 )
 
@@ -36,7 +31,7 @@ type threadOutboxIntent struct {
 	UpdatedAt      time.Time                   `json:"updatedAt"`
 }
 
-func (c *documentCache) appendThreadIntent(documentID string, intent threadOutboxIntent) error {
+func (c *workspaceStore) appendThreadIntent(documentID string, intent threadOutboxIntent) error {
 	if c == nil || documentID == "" {
 		return nil
 	}
@@ -46,14 +41,21 @@ func (c *documentCache) appendThreadIntent(documentID string, intent threadOutbo
 	return c.writeThreadIntentLocked(documentID, intent)
 }
 
-func (c *documentCache) loadThreadIntentsLocked(_ *documentCacheEntry, documentID string) ([]threadOutboxIntent, error) {
+func (c *workspaceStore) loadThreadIntentsLocked(_ *documentCacheEntry, documentID string) ([]threadOutboxIntent, error) {
 	if c == nil || documentID == "" {
 		return nil, nil
 	}
-	return c.loadThreadIntentsFromDir(c.threadOutboxDir(documentID))
+	rows, err := c.db.Query(`select intent_id, document_id, status, idempotency_key, request_json, resolved_payload_json,
+			actor_id, actor_type, run_id, attempts, next_attempt_at, last_attempt_at, last_status_code, last_error, created_at, updated_at
+		from thread_outbox where document_id = ? order by created_at, intent_id`, documentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanThreadIntents(rows)
 }
 
-func (c *documentCache) pendingThreadIntentCountLocked(entry *documentCacheEntry, documentID string) (int, error) {
+func (c *workspaceStore) pendingThreadIntentCountLocked(entry *documentCacheEntry, documentID string) (int, error) {
 	intents, err := c.loadThreadIntentsLocked(entry, documentID)
 	if err != nil {
 		return 0, err
@@ -67,13 +69,13 @@ func (c *documentCache) pendingThreadIntentCountLocked(entry *documentCacheEntry
 	return count, nil
 }
 
-func (c *documentCache) materializableThreadIntentCountLocked(entry *documentCacheEntry, documentID string) (int, error) {
+func (c *workspaceStore) materializableThreadIntentCountLocked(entry *documentCacheEntry, documentID string) (int, error) {
 	intents, err := c.loadThreadIntentsLocked(entry, documentID)
 	if err != nil {
 		return 0, err
 	}
-	stateExists := false
-	stateChecked := false
+	contentKnown := false
+	contentChecked := false
 	count := 0
 	for _, intent := range intents {
 		if intent.Status != threadIntentPending {
@@ -83,100 +85,51 @@ func (c *documentCache) materializableThreadIntentCountLocked(entry *documentCac
 			count++
 			continue
 		}
-		if !stateChecked {
-			if _, err := os.Stat(c.statePath(documentID)); err == nil {
-				stateExists = true
-			} else if !errors.Is(err, os.ErrNotExist) {
+		if !contentChecked {
+			contentKnown, err = c.documentContentKnown(documentID)
+			if err != nil {
 				return 0, err
 			}
-			stateChecked = true
+			contentChecked = true
 		}
-		if stateExists {
+		if contentKnown {
 			count++
 		}
 	}
 	return count, nil
 }
 
-func (c *documentCache) loadDueReadyThreadIntents(now time.Time) ([]threadOutboxIntent, error) {
-	if c == nil || strings.TrimSpace(c.root) == "" {
+func (c *workspaceStore) loadDueReadyThreadIntents(now time.Time) ([]threadOutboxIntent, error) {
+	if c == nil {
 		return nil, nil
 	}
-	docDirs, err := os.ReadDir(c.root)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
+	rows, err := c.db.Query(`select intent_id, document_id, status, idempotency_key, request_json, resolved_payload_json,
+			actor_id, actor_type, run_id, attempts, next_attempt_at, last_attempt_at, last_status_code, last_error, created_at, updated_at
+		from thread_outbox
+		where status = ? and resolved_payload_json is not null and (next_attempt_at is null or next_attempt_at <= ?)
+		order by created_at, intent_id`, threadIntentReady, unixNano(now))
 	if err != nil {
 		return nil, err
 	}
-	var due []threadOutboxIntent
-	for _, docDir := range docDirs {
-		if !docDir.IsDir() {
-			continue
-		}
-		intents, err := c.loadThreadIntentsFromDir(filepath.Join(c.root, docDir.Name(), "thread_outbox"))
-		if err != nil {
-			return nil, err
-		}
-		for _, intent := range intents {
-			if intent.Status != threadIntentReady || intent.Resolved == nil {
-				continue
-			}
-			if !intent.NextAttemptAt.IsZero() && now.Before(intent.NextAttemptAt) {
-				continue
-			}
-			due = append(due, intent)
-		}
-	}
-	sort.Slice(due, func(i, j int) bool {
-		if due[i].CreatedAt.Equal(due[j].CreatedAt) {
-			return due[i].IntentID < due[j].IntentID
-		}
-		return due[i].CreatedAt.Before(due[j].CreatedAt)
-	})
-	return due, nil
+	defer rows.Close()
+	return scanThreadIntents(rows)
 }
 
-func (c *documentCache) nextThreadIntentAttemptAt(now time.Time) (time.Time, bool, error) {
-	if c == nil || strings.TrimSpace(c.root) == "" {
+func (c *workspaceStore) nextThreadIntentAttemptAt(now time.Time) (time.Time, bool, error) {
+	if c == nil {
 		return time.Time{}, false, nil
 	}
-	docDirs, err := os.ReadDir(c.root)
-	if errors.Is(err, os.ErrNotExist) {
-		return time.Time{}, false, nil
-	}
-	if err != nil {
+	var next sql.NullInt64
+	if err := c.db.QueryRow(`select min(coalesce(next_attempt_at, ?)) from thread_outbox where status = ? and resolved_payload_json is not null`, unixNano(now), threadIntentReady).Scan(&next); err != nil {
 		return time.Time{}, false, err
 	}
-	var next time.Time
-	for _, docDir := range docDirs {
-		if !docDir.IsDir() {
-			continue
-		}
-		intents, err := c.loadThreadIntentsFromDir(filepath.Join(c.root, docDir.Name(), "thread_outbox"))
-		if err != nil {
-			return time.Time{}, false, err
-		}
-		for _, intent := range intents {
-			if intent.Status != threadIntentReady || intent.Resolved == nil {
-				continue
-			}
-			candidate := intent.NextAttemptAt
-			if candidate.IsZero() || candidate.Before(now) {
-				candidate = now
-			}
-			if next.IsZero() || candidate.Before(next) {
-				next = candidate
-			}
-		}
-	}
-	if next.IsZero() {
+	if !next.Valid {
 		return time.Time{}, false, nil
 	}
-	return next, true, nil
+	return time.Unix(0, next.Int64).UTC(), true, nil
 }
 
-func (c *documentCache) updateThreadIntent(intent threadOutboxIntent) error {
+func (c *workspaceStore) updateThreadIntent(intent threadOutboxIntent) error {
 	if c == nil || intent.DocumentID == "" {
 		return nil
 	}
@@ -186,55 +139,18 @@ func (c *documentCache) updateThreadIntent(intent threadOutboxIntent) error {
 	return c.writeThreadIntentLocked(intent.DocumentID, intent)
 }
 
-func (c *documentCache) deleteThreadIntent(intent threadOutboxIntent) error {
+func (c *workspaceStore) deleteThreadIntent(intent threadOutboxIntent) error {
 	if c == nil || intent.DocumentID == "" || intent.IntentID == "" {
 		return nil
 	}
 	entry := c.entryFor(intent.DocumentID)
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
-	if err := os.Remove(c.threadIntentPath(intent.DocumentID, intent.IntentID)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
+	_, err := c.db.Exec(`delete from thread_outbox where intent_id = ?`, intent.IntentID)
+	return err
 }
 
-func (c *documentCache) loadThreadIntentsFromDir(dir string) ([]threadOutboxIntent, error) {
-	files, err := os.ReadDir(dir)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	intents := make([]threadOutboxIntent, 0, len(files))
-	for _, file := range files {
-		if file.IsDir() || filepath.Ext(file.Name()) != ".json" {
-			continue
-		}
-		payload, err := os.ReadFile(filepath.Join(dir, file.Name()))
-		if err != nil {
-			return nil, err
-		}
-		var intent threadOutboxIntent
-		if err := json.Unmarshal(payload, &intent); err != nil {
-			return nil, err
-		}
-		if intent.IntentID == "" || intent.DocumentID == "" {
-			continue
-		}
-		intents = append(intents, intent)
-	}
-	sort.Slice(intents, func(i, j int) bool {
-		if intents[i].CreatedAt.Equal(intents[j].CreatedAt) {
-			return intents[i].IntentID < intents[j].IntentID
-		}
-		return intents[i].CreatedAt.Before(intents[j].CreatedAt)
-	})
-	return intents, nil
-}
-
-func (c *documentCache) writeThreadIntentLocked(documentID string, intent threadOutboxIntent) error {
+func (c *workspaceStore) writeThreadIntentLocked(documentID string, intent threadOutboxIntent) error {
 	if c == nil || documentID == "" || intent.IntentID == "" {
 		return nil
 	}
@@ -249,25 +165,100 @@ func (c *documentCache) writeThreadIntentLocked(documentID string, intent thread
 	if intent.DocumentID == "" {
 		intent.DocumentID = documentID
 	}
-	if err := os.MkdirAll(c.threadOutboxDir(documentID), 0o755); err != nil {
-		return err
-	}
-	payload, err := json.MarshalIndent(intent, "", "  ")
+	requestJSON, err := marshalJSON(intent.Request)
 	if err != nil {
 		return err
 	}
-	path := c.threadIntentPath(documentID, intent.IntentID)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, payload, 0o644); err != nil {
-		return err
+	resolvedJSON := any(nil)
+	if intent.Resolved != nil {
+		value, err := marshalJSON(intent.Resolved)
+		if err != nil {
+			return err
+		}
+		resolvedJSON = value
 	}
-	return os.Rename(tmp, path)
+	return c.withTx(func(tx *sql.Tx) error {
+		if _, err := c.ensureDocumentTx(tx, documentID, intent.DocumentPath, now); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`insert into thread_outbox (
+				intent_id, document_id, status, idempotency_key, request_json, resolved_payload_json,
+				actor_id, actor_type, run_id, attempts, next_attempt_at, last_attempt_at,
+				last_status_code, last_error, created_at, updated_at
+			) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			on conflict(intent_id) do update set
+				status = excluded.status,
+				request_json = excluded.request_json,
+				resolved_payload_json = excluded.resolved_payload_json,
+				actor_id = excluded.actor_id,
+				actor_type = excluded.actor_type,
+				run_id = excluded.run_id,
+				attempts = excluded.attempts,
+				next_attempt_at = excluded.next_attempt_at,
+				last_attempt_at = excluded.last_attempt_at,
+				last_status_code = excluded.last_status_code,
+				last_error = excluded.last_error,
+				updated_at = excluded.updated_at`,
+			intent.IntentID, intent.DocumentID, intent.Status, intent.IdempotencyKey, requestJSON, resolvedJSON,
+			intent.ActorID, intent.ActorType, intent.RunID, intent.Attempts, nullableUnixNano(intent.NextAttemptAt), nullableUnixNano(intent.LastAttemptAt),
+			nullableInt(intent.LastStatusCode), nullableString(intent.LastError), unixNano(intent.CreatedAt), unixNano(intent.UpdatedAt))
+		return err
+	})
 }
 
-func (c *documentCache) threadOutboxDir(documentID string) string {
-	return filepath.Join(c.documentDir(documentID), "thread_outbox")
+func scanThreadIntents(rows *sql.Rows) ([]threadOutboxIntent, error) {
+	intents := []threadOutboxIntent{}
+	for rows.Next() {
+		var intent threadOutboxIntent
+		var requestJSON string
+		var resolvedJSON sql.NullString
+		var actorID, actorType, runID, lastError sql.NullString
+		var nextAttemptAt, lastAttemptAt, lastStatusCode sql.NullInt64
+		var createdAt, updatedAt int64
+		if err := rows.Scan(&intent.IntentID, &intent.DocumentID, &intent.Status, &intent.IdempotencyKey, &requestJSON, &resolvedJSON,
+			&actorID, &actorType, &runID, &intent.Attempts, &nextAttemptAt, &lastAttemptAt, &lastStatusCode, &lastError, &createdAt, &updatedAt); err != nil {
+			return nil, err
+		}
+		if err := unmarshalJSON(requestJSON, &intent.Request); err != nil {
+			return nil, err
+		}
+		if resolvedJSON.Valid && resolvedJSON.String != "" {
+			var resolved backendCreateThreadPayload
+			if err := unmarshalJSON(resolvedJSON.String, &resolved); err != nil {
+				return nil, err
+			}
+			intent.Resolved = &resolved
+		}
+		intent.ActorID = actorID.String
+		intent.ActorType = actorType.String
+		intent.RunID = runID.String
+		intent.NextAttemptAt = timeFromNullable(nextAttemptAt)
+		intent.LastAttemptAt = timeFromNullable(lastAttemptAt)
+		if lastStatusCode.Valid {
+			intent.LastStatusCode = int(lastStatusCode.Int64)
+		}
+		intent.LastError = lastError.String
+		intent.CreatedAt = time.Unix(0, createdAt).UTC()
+		intent.UpdatedAt = time.Unix(0, updatedAt).UTC()
+		intents = append(intents, intent)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sortThreadIntents(intents)
+	return intents, nil
 }
 
-func (c *documentCache) threadIntentPath(documentID, intentID string) string {
-	return filepath.Join(c.threadOutboxDir(documentID), safeDocumentCacheName(intentID)+".json")
+func nullableString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func nullableInt(value int) any {
+	if value == 0 {
+		return nil
+	}
+	return value
 }

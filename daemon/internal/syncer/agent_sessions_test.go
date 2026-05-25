@@ -176,7 +176,6 @@ func TestAgentSessionStartsThreadWithDeveloperInstructions(t *testing.T) {
 	}
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: t.TempDir(),
-		RuntimeDir:         t.TempDir(),
 	}, updater, factory.new)
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Handle: "swe", Kind: "codex", SystemPrompt: "shared prompt"}
@@ -211,7 +210,6 @@ func TestAgentSessionReconcileReturnsStartupError(t *testing.T) {
 	}
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: t.TempDir(),
-		RuntimeDir:         t.TempDir(),
 	}, updater, factory.new)
 	defer supervisor.Shutdown()
 
@@ -234,7 +232,6 @@ func TestAgentSessionReconcileReturnsThreadStartError(t *testing.T) {
 	factory.threadStartErr = errors.New("thread start failed")
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: t.TempDir(),
-		RuntimeDir:         t.TempDir(),
 	}, nil, factory.new)
 	defer supervisor.Shutdown()
 
@@ -258,7 +255,6 @@ func TestAgentSessionConcurrentEnsureStartsOneAppServer(t *testing.T) {
 	factory.startRelease = make(chan struct{})
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: t.TempDir(),
-		RuntimeDir:         t.TempDir(),
 	}, nil, factory.new)
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Handle: "swe", Kind: "codex", SystemPrompt: "shared prompt"}
@@ -298,7 +294,6 @@ func TestAgentSessionIgnoresEventsFromStaleAppServer(t *testing.T) {
 	factory := newFakeAppServerFactory()
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: t.TempDir(),
-		RuntimeDir:         t.TempDir(),
 	}, nil, factory.new)
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
@@ -335,7 +330,6 @@ func TestAgentSessionResumesExistingThread(t *testing.T) {
 	factory := newFakeAppServerFactory()
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: t.TempDir(),
-		RuntimeDir:         t.TempDir(),
 	}, nil, factory.new)
 	defer supervisor.Shutdown()
 
@@ -355,7 +349,6 @@ func TestAgentSessionIdleNotificationStartsOncePerInboxSignature(t *testing.T) {
 	factory := newFakeAppServerFactory()
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: t.TempDir(),
-		RuntimeDir:         t.TempDir(),
 	}, nil, factory.new)
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
@@ -386,7 +379,6 @@ func TestAgentSessionBusyForMeSteersOnceAndQueuesFollowup(t *testing.T) {
 	factory := newFakeAppServerFactory()
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: t.TempDir(),
-		RuntimeDir:         t.TempDir(),
 	}, nil, factory.new)
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
@@ -424,7 +416,6 @@ func TestAgentSessionBusyGeneralQueuesFollowupWithoutSteer(t *testing.T) {
 	factory := newFakeAppServerFactory()
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: t.TempDir(),
-		RuntimeDir:         t.TempDir(),
 	}, nil, factory.new)
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
@@ -457,7 +448,6 @@ func TestAgentSessionBusyGeneralCoalescesFollowupLogAndKeepsLatestSignature(t *t
 	workspaceRoot := t.TempDir()
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: workspaceRoot,
-		RuntimeDir:         t.TempDir(),
 	}, nil, factory.new)
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex", Handle: "tester"}
@@ -499,7 +489,6 @@ func TestAgentSessionFailedTurnDoesNotMarkInboxSignatureDelivered(t *testing.T) 
 	factory := newFakeAppServerFactory()
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: t.TempDir(),
-		RuntimeDir:         t.TempDir(),
 	}, nil, factory.new)
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
@@ -521,7 +510,6 @@ func TestAgentSessionBusyForMeSteersEachChangedInboxSignature(t *testing.T) {
 	factory := newFakeAppServerFactory()
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: t.TempDir(),
-		RuntimeDir:         t.TempDir(),
 	}, nil, factory.new)
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
@@ -546,7 +534,6 @@ func TestAgentSessionNoActiveTurnSteerErrorIsNotFatal(t *testing.T) {
 	factory.turnSteerErr = fmt.Errorf("app-server turn/steer failed: no active turn to steer")
 	supervisor := newAgentSessionSupervisor(Config{
 		AgentWorkspaceRoot: t.TempDir(),
-		RuntimeDir:         t.TempDir(),
 	}, nil, factory.new)
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}

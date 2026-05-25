@@ -234,14 +234,13 @@ package_dir="$tmp_dir/notty-daemon_${version}_${os}_${arch}"
 
 daemon_name="$(safe_name "$workspace_id")"
 daemon_dir="$data_dir/daemons/$daemon_name"
-runtime_dir="$data_dir/runtime/$daemon_name"
 workspace_dir="$HOME/Notty/workspaces/$daemon_name"
 agent_workspace_root="$HOME/Notty/agents/$daemon_name"
 log_file="$daemon_dir/daemon.log"
 env_file="$daemon_dir/daemon.env"
 run_script="$daemon_dir/run.sh"
 
-mkdir -p "$install_dir" "$daemon_dir" "$runtime_dir" "$workspace_dir" "$agent_workspace_root"
+mkdir -p "$install_dir" "$daemon_dir" "$workspace_dir" "$agent_workspace_root"
 cp "$package_dir/bin/notty-daemon" "$install_dir/.notty-daemon.$$"
 cp "$package_dir/bin/notty-agent-tool" "$install_dir/.notty-agent-tool.$$"
 chmod +x "$install_dir/.notty-daemon.$$" "$install_dir/.notty-agent-tool.$$"
@@ -254,7 +253,6 @@ mv "$install_dir/.notty-agent-tool.$$" "$install_dir/notty-agent-tool"
 	printf 'export NOTTY_DAEMON_TOKEN=%s\n' "$(shell_quote "$daemon_token")"
 	printf 'export NOTTY_WORKSPACE_DIR=%s\n' "$(shell_quote "$workspace_dir")"
 	printf 'export NOTTY_AGENT_WORKSPACE_ROOT=%s\n' "$(shell_quote "$agent_workspace_root")"
-	printf 'export NOTTY_RUNTIME_DIR=%s\n' "$(shell_quote "$runtime_dir")"
 	printf 'export NOTTY_CODEX_COMMAND=%s\n' "$(shell_quote "$codex_command")"
 	printf 'export PATH=%s\n' "$(shell_quote "$daemon_path")"
 } > "$env_file"
@@ -264,7 +262,7 @@ chmod 600 "$env_file"
 	printf '#!/usr/bin/env sh\n'
 	printf 'set -eu\n'
 	printf '. %s\n' "$(shell_quote "$env_file")"
-	printf 'export NOTTY_BACKEND_URL NOTTY_WORKSPACE_ID NOTTY_DAEMON_TOKEN NOTTY_WORKSPACE_DIR NOTTY_AGENT_WORKSPACE_ROOT NOTTY_RUNTIME_DIR NOTTY_CODEX_COMMAND PATH\n'
+	printf 'export NOTTY_BACKEND_URL NOTTY_WORKSPACE_ID NOTTY_DAEMON_TOKEN NOTTY_WORKSPACE_DIR NOTTY_AGENT_WORKSPACE_ROOT NOTTY_CODEX_COMMAND PATH\n'
 	printf 'export PATH=%s:"$PATH"\n' "$(shell_quote "$install_dir")"
 	printf 'exec %s\n' "$(shell_quote "$install_dir/notty-daemon")"
 } > "$run_script"

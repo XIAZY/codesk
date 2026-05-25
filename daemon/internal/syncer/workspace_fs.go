@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -64,9 +63,12 @@ func (fs *WorkspaceFS) CleanupStaleLocks() error {
 	if fs == nil || fs.Root == "" {
 		return nil
 	}
-	lockRoot := fs.lockRoot()
-	if err := os.RemoveAll(lockRoot); err != nil {
-		return &FSError{Op: "cleanup-locks", Path: lockRoot, Err: err}
+	store, err := pathLockStoreForRoot(fs.Root)
+	if err != nil {
+		return &FSError{Op: "cleanup-locks", Path: fs.Root, Err: err}
+	}
+	if err := store.cleanupExpired(time.Now().UTC()); err != nil {
+		return &FSError{Op: "cleanup-locks", Path: fs.Root, Err: err}
 	}
 	return nil
 }
@@ -291,58 +293,31 @@ func (fs *WorkspaceFS) lockPaths(paths ...string) (func(), error) {
 	if fs == nil || fs.Root == "" || len(paths) == 0 {
 		return func() {}, nil
 	}
-	locks := make([]string, 0, len(paths))
+	lockPaths := make([]string, 0, len(paths))
 	seen := map[string]struct{}{}
 	for _, path := range paths {
 		rel, err := filepath.Rel(fs.Root, path)
 		if err != nil {
 			return nil, &FSError{Op: "lock", Path: path, Err: err}
 		}
-		lockPath := filepath.Join(fs.lockRoot(), safeDocumentCacheName(sha256Hex([]byte(filepath.ToSlash(rel))))+".lock")
-		if _, ok := seen[lockPath]; ok {
+		keyPath := filepath.ToSlash(rel)
+		if _, ok := seen[keyPath]; ok {
 			continue
 		}
-		seen[lockPath] = struct{}{}
-		locks = append(locks, lockPath)
+		seen[keyPath] = struct{}{}
+		lockPaths = append(lockPaths, keyPath)
 	}
-	sort.Strings(locks)
-	files := make([]*os.File, 0, len(locks))
-	for _, lockPath := range locks {
-		if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
-			for _, file := range files {
-				unlockFile(file)
-				_ = file.Close()
-			}
-			return nil, &FSError{Op: "lock", Path: lockPath, Err: err}
-		}
-		file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
-		if err != nil {
-			for _, file := range files {
-				unlockFile(file)
-				_ = file.Close()
-			}
-			return nil, &FSError{Op: "lock", Path: lockPath, Err: err}
-		}
-		if err := lockFile(file, syscall.LOCK_EX); err != nil {
-			_ = file.Close()
-			for _, file := range files {
-				unlockFile(file)
-				_ = file.Close()
-			}
-			return nil, &FSError{Op: "lock", Path: lockPath, Err: err}
-		}
-		files = append(files, file)
+	store, err := pathLockStoreForRoot(fs.Root)
+	if err != nil {
+		return nil, &FSError{Op: "lock", Path: fs.Root, Err: err}
+	}
+	leases, err := store.lock(lockPaths)
+	if err != nil {
+		return nil, &FSError{Op: "lock", Path: fs.Root, Err: err}
 	}
 	return func() {
-		for i := len(files) - 1; i >= 0; i-- {
-			unlockFile(files[i])
-			_ = files[i].Close()
-		}
+		_ = store.release(leases)
 	}, nil
-}
-
-func (fs *WorkspaceFS) lockRoot() string {
-	return filepath.Join(fs.Root, ".notty", "locks")
 }
 
 func (fs *WorkspaceFS) archivePath(path, reason string, attempt int) string {

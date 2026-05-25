@@ -39,7 +39,128 @@ func TestReconcileQueueWakeCoalescesSignals(t *testing.T) {
 	}
 }
 
-func TestWorkspaceRuntimeDocumentStateDirsArePerLocalWorkspace(t *testing.T) {
+func TestWorkspaceRuntimeStartupRecoveryQueuesDurableSQLiteWork(t *testing.T) {
+	root := t.TempDir()
+	cache, err := newDocumentCache(root)
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+
+	baseDoc := newDocWithText(t, "base")
+	if err := cache.storeDoc("doc_incoming", "incoming.md", 1, baseDoc); err != nil {
+		t.Fatalf("store incoming base: %v", err)
+	}
+	remoteUpdate := updateFromBaseDoc(t, baseDoc, "base\nremote", "remote")
+	if appended, err := cache.appendPendingRemoteUpdate("doc_incoming", "incoming.md", remoteUpdate); err != nil {
+		t.Fatalf("append pending incoming: %v", err)
+	} else if !appended {
+		t.Fatal("expected pending incoming to append")
+	}
+
+	if err := cache.storeDoc("doc_outbox", "outbox.md", 1, baseDoc); err != nil {
+		t.Fatalf("store outbox base: %v", err)
+	}
+	localUpdate := updateFromBaseDoc(t, baseDoc, "base\nlocal", "local")
+	entry, unlock := cache.lockEntry("doc_outbox")
+	if err := cache.storeOutboxUpdateLocked(entry, "doc_outbox", "outbox.md", outboxUpdateRecord{
+		Update:          localUpdate,
+		ObservedContent: "base\nlocal",
+		ObservedState:   crdtStateFromContent("base\nlocal"),
+		SourcePath:      filepath.Join(root, "outbox.md"),
+		ActorID:         "daemon_agent",
+		ActorType:       "daemon",
+		CreatedAt:       time.Now().UTC(),
+	}); err != nil {
+		unlock()
+		t.Fatalf("store content outbox: %v", err)
+	}
+	unlock()
+
+	if err := cache.appendThreadIntent("doc_thread_pending", threadOutboxIntent{
+		IntentID:       "intent_pending",
+		IdempotencyKey: "intent_pending",
+		DocumentID:     "doc_thread_pending",
+		DocumentPath:   "pending.md",
+		ActorID:        "agent_1",
+		ActorType:      "agent",
+		Request: createThreadPayload{
+			DocumentID: "doc_thread_pending",
+			Body:       "Please check this.",
+			Quote:      "target",
+		},
+		Status:    threadIntentPending,
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("append pending thread intent: %v", err)
+	}
+	if err := cache.appendThreadIntent("doc_thread_ready", threadOutboxIntent{
+		IntentID:       "intent_ready",
+		IdempotencyKey: "intent_ready",
+		DocumentID:     "doc_thread_ready",
+		DocumentPath:   "ready.md",
+		ActorID:        "agent_1",
+		ActorType:      "agent",
+		Request: createThreadPayload{
+			DocumentID:    "doc_thread_ready",
+			Body:          "Please check this.",
+			RelativeStart: "start",
+			RelativeEnd:   "end",
+		},
+		Resolved: &backendCreateThreadPayload{
+			DocumentID:        "doc_thread_ready",
+			ClientOperationID: "intent_ready",
+			Body:              "Please check this.",
+			Kind:              "text-range",
+			RelativeStart:     "start",
+			RelativeEnd:       "end",
+		},
+		Status:    threadIntentReady,
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("append ready thread intent: %v", err)
+	}
+	if err := cache.db.Close(); err != nil {
+		t.Fatalf("close cache: %v", err)
+	}
+
+	reopened, err := newDocumentCache(root)
+	if err != nil {
+		t.Fatalf("reopen cache: %v", err)
+	}
+	queue := newReconcileQueue()
+	runtime := &workspaceRuntime{
+		docCache:           reopened,
+		reconcileQueue:     queue,
+		threadDeliveryWake: make(chan struct{}, 1),
+	}
+	runtime.enqueueStartupStoreWork()
+
+	dirty := queue.Drain()
+	for _, documentID := range []string{"doc_incoming", "doc_outbox", "doc_thread_pending"} {
+		if !containsString(dirty, documentID) {
+			t.Fatalf("expected startup recovery to queue %s, got %#v", documentID, dirty)
+		}
+	}
+	if containsString(dirty, "doc_thread_ready") {
+		t.Fatalf("ready thread delivery must not dirty the document, got %#v", dirty)
+	}
+	select {
+	case <-runtime.threadDeliveryWake:
+	default:
+		t.Fatal("expected ready thread intent to wake delivery on startup")
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestWorkspaceRuntimeSyncDBsArePerLocalWorkspace(t *testing.T) {
 	cfg := Config{WorkspaceDir: filepath.Join(t.TempDir(), "primary"), AgentWorkspaceRoot: filepath.Join(t.TempDir(), "agents"), AgentID: "daemon_agent"}
 
 	primary, err := newWorkspaceRuntime(cfg, http.DefaultClient, cfg.WorkspaceDir, cfg.AgentID, "daemon")
@@ -58,21 +179,21 @@ func TestWorkspaceRuntimeDocumentStateDirsArePerLocalWorkspace(t *testing.T) {
 	if primary.docCache == nil || agent.docCache == nil {
 		t.Fatal("expected both runtimes to have document caches")
 	}
-	if primary.docCache.root == agent.docCache.root {
-		t.Fatalf("runtime caches must be isolated, both used %s", primary.docCache.root)
+	if primary.docCache.path == agent.docCache.path {
+		t.Fatalf("runtime caches must be isolated, both used %s", primary.docCache.path)
 	}
-	if primary.docCache.root != filepath.Join(cfg.WorkspaceDir, ".notty", "documents") {
-		t.Fatalf("primary cache root = %s, want workspace-local documents dir", primary.docCache.root)
+	if primary.docCache.path != filepath.Join(cfg.WorkspaceDir, ".notty", "sync.db") {
+		t.Fatalf("primary cache path = %s, want workspace-local sync db", primary.docCache.path)
 	}
-	if agent.docCache.root != filepath.Join(agentRoot, ".notty", "documents") {
-		t.Fatalf("agent cache root = %s, want agent-local documents dir", agent.docCache.root)
+	if agent.docCache.path != filepath.Join(agentRoot, ".notty", "sync.db") {
+		t.Fatalf("agent cache path = %s, want agent-local sync db", agent.docCache.path)
 	}
 
 	if err := primary.docCache.storeDoc("doc_1", "doc.md", 1, newDocWithText(t, "primary")); err != nil {
 		t.Fatalf("store primary doc: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(agent.docCache.root, safeDocumentCacheName("doc_1"), "state.bin")); !os.IsNotExist(err) {
-		t.Fatalf("agent cache should not contain primary state, stat err=%v", err)
+	if got := agent.docCache.localStateVector("doc_1"); len(got) != 0 {
+		t.Fatalf("agent cache should not contain primary state, got vector %v", got)
 	}
 }
 

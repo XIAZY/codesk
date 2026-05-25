@@ -10,13 +10,11 @@ type Config struct {
 	AgentWorkspaceRoot string
 	AgentID            string
 	CodexCommand       string
-	RuntimeDir         string
 	AgentToolBaseURL   string
 	PprofAddr          string
 }
 
 func LoadConfig() Config {
-	runtimeDir := getenv("NOTTY_RUNTIME_DIR", "/runtime/notty")
 	return Config{
 		BackendURL:         getenv("NOTTY_BACKEND_URL", "http://backend:8080"),
 		WorkspaceID:        getenv("NOTTY_WORKSPACE_ID", ""),
@@ -25,7 +23,6 @@ func LoadConfig() Config {
 		AgentWorkspaceRoot: getenv("NOTTY_AGENT_WORKSPACE_ROOT", "/workspace/agents"),
 		AgentID:            getenv("NOTTY_AGENT_ID", "daemon_agent"),
 		CodexCommand:       getenv("NOTTY_CODEX_COMMAND", "codex"),
-		RuntimeDir:         runtimeDir,
 		AgentToolBaseURL:   getenv("NOTTY_AGENT_TOOL_BASE_URL", "http://127.0.0.1:7778"),
 		PprofAddr:          getenv("NOTTY_PPROF_ADDR", ""),
 	}
