@@ -376,9 +376,6 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 
 func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agent) error {
 	workdir := s.workspacePath(current)
-	if err := os.MkdirAll(s.cfg.RuntimeDir, 0o755); err != nil {
-		return err
-	}
 	if err := os.MkdirAll(workdir, 0o755); err != nil {
 		return err
 	}

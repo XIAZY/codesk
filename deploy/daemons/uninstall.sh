@@ -133,7 +133,6 @@ remove_binaries_if_unused() {
 uninstall_one() {
 	daemon_name="$1"
 	daemon_dir="$data_dir/daemons/$daemon_name"
-	runtime_dir="$data_dir/runtime/$daemon_name"
 	workspace_dir="$HOME/Notty/workspaces/$daemon_name"
 	agent_workspace_root="$HOME/Notty/agents/$daemon_name"
 	run_script="$daemon_dir/run.sh"
@@ -142,7 +141,7 @@ uninstall_one() {
 	stop_systemd_user "$daemon_name"
 	stop_background_process "$run_script"
 
-	rm -rf "$daemon_dir" "$runtime_dir" "$workspace_dir" "$agent_workspace_root"
+	rm -rf "$daemon_dir" "$workspace_dir" "$agent_workspace_root"
 }
 
 if [ "$uninstall_all" -eq 1 ]; then

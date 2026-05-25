@@ -550,7 +550,6 @@ func TestInitialRefreshFailsFastOnAgentStartupError(t *testing.T) {
 			BackendURL:         "http://backend.test",
 			WorkspaceDir:       t.TempDir(),
 			AgentWorkspaceRoot: t.TempDir(),
-			RuntimeDir:         t.TempDir(),
 			AgentID:            "daemon_agent",
 		},
 		client:        client,

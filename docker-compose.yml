@@ -70,15 +70,12 @@ services:
       NOTTY_WORKSPACE_DIR: /workspace/notty/${NOTTY_WORKSPACE_ID:-default}
       NOTTY_AGENT_WORKSPACE_ROOT: /workspace/agents/${NOTTY_WORKSPACE_ID:-default}
       NOTTY_AGENT_ID: daemon_agent
-      NOTTY_RUNTIME_DIR: /runtime/notty
       NOTTY_PPROF_ADDR: 127.0.0.1:6060
     volumes:
       - daemon_workspace:/workspace
-      - daemon_runtime:/runtime
       - ${HOME}/.codex:/root/.codex
 
 volumes:
   postgres_data:
   frontend_node_modules:
   daemon_workspace:
-  daemon_runtime:

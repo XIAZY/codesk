@@ -395,7 +395,6 @@ func newAutomationTestService(t *testing.T, factory *fakeAppServerFactory) *Serv
 			BackendURL:         "http://backend.test",
 			WorkspaceDir:       filepath.Join(t.TempDir(), "workspace"),
 			AgentWorkspaceRoot: filepath.Join(t.TempDir(), "agents"),
-			RuntimeDir:         filepath.Join(t.TempDir(), "runtime"),
 			AgentID:            "daemon_agent",
 		},
 	}
