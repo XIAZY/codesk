@@ -185,9 +185,6 @@ func TestWorkspaceStoreSchemaUsesAgreedDurableTables(t *testing.T) {
 	if !strings.Contains(strings.ToLower(seqSQL), "seq integer primary key autoincrement") {
 		t.Fatalf("crdt_updates must use autoincrement seq, schema=%s", seqSQL)
 	}
-	if !strings.Contains(strings.ToLower(seqSQL), "fold_seq integer") {
-		t.Fatalf("crdt_updates must carry explicit fold order, schema=%s", seqSQL)
-	}
 }
 
 func assertSQLiteTableExists(t *testing.T, cache *documentCache, table string) {

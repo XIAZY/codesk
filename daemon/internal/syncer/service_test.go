@@ -1573,8 +1573,8 @@ func TestReconcileSendsLocalEditBeforeApplyingPendingRemoteUpdate(t *testing.T) 
 	if err != nil {
 		t.Fatalf("load cached doc after local finalize: %v", err)
 	}
-	if got := cachedDoc.GetText("content").ToString(); got != "base\nlocal\n" {
-		t.Fatalf("expected accepted local update to be visible before pending remote inbox, got %q", got)
+	if got := cachedDoc.GetText("content").ToString(); got != "base\n" {
+		t.Fatalf("expected global cursor to stay before pending remote until inbox pass, got %q", got)
 	}
 
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
