@@ -165,6 +165,38 @@ func TestDaemonTokenIsWorkspaceScopedAndCanActAsWorkspaceAgent(t *testing.T) {
 	authTestStatus(t, router, http.MethodGet, "/api/workspaces/"+workspace.ID+"/workspace", daemonResponse.Token, nil, http.StatusForbidden)
 }
 
+func TestDaemonReinstallTokenDoesNotBreakCurrentDaemonUntilUsed(t *testing.T) {
+	router := newAuthTestRouter(t)
+
+	owner := authTestRegister(t, router, "daemon-reinstall-owner@example.com", "owner-pass", "Daemon Reinstall Owner")
+	workspace := authTestCreateWorkspace(t, router, owner.Token, "Daemon Reinstall Tenant")
+
+	var daemonResponse CreateDaemonResponse
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons", owner.Token, CreateDaemonRequest{Name: "Local daemon"}, http.StatusCreated, &daemonResponse)
+	if daemonResponse.Token == "" || daemonResponse.Daemon == nil {
+		t.Fatalf("expected daemon token and daemon, got %#v", daemonResponse)
+	}
+
+	var reinstallResponse CreateDaemonResponse
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+daemonResponse.Daemon.ID+"/reinstall-token", owner.Token, nil, http.StatusOK, &reinstallResponse)
+	if reinstallResponse.Token == "" {
+		t.Fatal("expected reinstall token")
+	}
+	if reinstallResponse.Token == daemonResponse.Token {
+		t.Fatal("expected reinstall token to differ from original token")
+	}
+	if reinstallResponse.Daemon.ID != daemonResponse.Daemon.ID {
+		t.Fatalf("expected reinstall token for same daemon, got %#v", reinstallResponse.Daemon)
+	}
+
+	authTestStatus(t, router, http.MethodGet, "/api/workspaces/"+workspace.ID+"/workspace", daemonResponse.Token, nil, http.StatusOK)
+	authTestStatus(t, router, http.MethodGet, "/api/workspaces/"+workspace.ID+"/workspace", reinstallResponse.Token, nil, http.StatusOK)
+	authTestStatus(t, router, http.MethodGet, "/api/workspaces/"+workspace.ID+"/workspace", daemonResponse.Token, nil, http.StatusForbidden)
+	authTestStatus(t, router, http.MethodGet, "/api/workspaces/"+workspace.ID+"/workspace", reinstallResponse.Token, nil, http.StatusOK)
+
+	authTestStatus(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+daemonResponse.Daemon.ID+"/reinstall-token", reinstallResponse.Token, nil, http.StatusForbidden)
+}
+
 func TestDaemonTokenDocumentUpdateRouteAttributesActingAgent(t *testing.T) {
 	server, router := newAuthTestServer(t)
 

@@ -645,6 +645,38 @@ func createDaemon(db *sql.DB, workspaceID string, name string) (*Daemon, string,
 	return daemon, token, nil
 }
 
+func createDaemonReinstallToken(db *sql.DB, workspaceID string, daemonID string) (*Daemon, string, error) {
+	if db == nil {
+		return nil, "", errors.New("database is required")
+	}
+	token, err := randomToken("nottyd_")
+	if err != nil {
+		return nil, "", err
+	}
+	now := time.Now().UTC()
+	daemon := &Daemon{}
+	err = db.QueryRow(
+		`UPDATE daemons
+		    SET pending_token_hash = $1
+		  WHERE id = $2
+		    AND workspace_id = $3
+		    AND status = 'active'
+		    AND deleted_at IS NULL
+		  RETURNING id, workspace_id, name, status, COALESCE(last_seen_at, '0001-01-01T00:00:00Z'::timestamptz), created_at, COALESCE(deleted_at, '0001-01-01T00:00:00Z'::timestamptz)`,
+		tokenHash(token),
+		strings.TrimSpace(daemonID),
+		strings.TrimSpace(workspaceID),
+	).Scan(&daemon.ID, &daemon.WorkspaceID, &daemon.Name, &daemon.Status, &daemon.LastSeenAt, &daemon.CreatedAt, &daemon.DeletedAt)
+	if err == sql.ErrNoRows {
+		return nil, "", ErrNotFound
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	applyDaemonLiveness(daemon, now)
+	return daemon, token, nil
+}
+
 func listDaemons(db *sql.DB, workspaceID string) ([]*Daemon, error) {
 	now := time.Now().UTC()
 	rows, err := db.Query(
@@ -733,17 +765,20 @@ func deleteDaemon(db *sql.DB, workspaceID string, daemonID string) (*Daemon, err
 
 func authenticateDaemonToken(db *sql.DB, token string, workspaceID string) (*Daemon, error) {
 	now := time.Now().UTC()
+	hash := tokenHash(token)
 	daemon := &Daemon{}
 	err := db.QueryRow(
 		`UPDATE daemons
-		    SET last_seen_at = $1
-		  WHERE token_hash = $2
+		    SET last_seen_at = $1,
+		        token_hash = CASE WHEN pending_token_hash = $2 THEN pending_token_hash ELSE token_hash END,
+		        pending_token_hash = CASE WHEN pending_token_hash = $2 THEN NULL ELSE pending_token_hash END
+		  WHERE (token_hash = $2 OR pending_token_hash = $2)
 		    AND workspace_id = $3
 		    AND status = 'active'
 		    AND deleted_at IS NULL
 		  RETURNING id, workspace_id, name, status, COALESCE(last_seen_at, '0001-01-01T00:00:00Z'::timestamptz), created_at, COALESCE(deleted_at, '0001-01-01T00:00:00Z'::timestamptz)`,
 		now,
-		tokenHash(token),
+		hash,
 		workspaceID,
 	).Scan(&daemon.ID, &daemon.WorkspaceID, &daemon.Name, &daemon.Status, &daemon.LastSeenAt, &daemon.CreatedAt, &daemon.DeletedAt)
 	if err == sql.ErrNoRows {

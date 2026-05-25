@@ -21,10 +21,6 @@ import "./styles.css";
 const tokenStorageKey = "notty.auth.token";
 const workspaceStorageKey = "notty.workspace.id";
 
-function daemonTokenStorageKey(workspaceId: string, daemonId: string) {
-  return `notty.daemon.token.${workspaceId}.${daemonId}`;
-}
-
 function initials(value?: string) {
   const source = (value || "N").trim();
   const words = source.split(/[\s@._/-]+/).filter(Boolean);
@@ -1360,9 +1356,6 @@ function CreateDaemonModal({ api, workspaceId, onClose, onDone }: { api: ApiClie
             event.preventDefault();
             const response = await api.createDaemon(workspaceId, name);
             setToken(response.token);
-            if (response.daemon?.id && response.token) {
-              localStorage.setItem(daemonTokenStorageKey(workspaceId, response.daemon.id), response.token);
-            }
             onDone();
           }}
         >
@@ -1453,48 +1446,82 @@ function AgentDetailModal({ api, workspaceId, agent, daemons, runs, onClose, onC
 }
 
 function DaemonDetailModal({ api, workspaceId, daemon, agents, runs, onClose, onChanged }: { api: ApiClient; workspaceId: string; daemon: Daemon; agents: Agent[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; onClose: () => void; onChanged: () => void }) {
-  const daemonToken = localStorage.getItem(daemonTokenStorageKey(workspaceId, daemon.id)) ?? "";
-  const reinstallCommand = daemonToken ? buildDaemonReinstallCommand({
+  const [reinstallOpen, setReinstallOpen] = useState(false);
+  const [reinstallToken, setReinstallToken] = useState("");
+  const [reinstallError, setReinstallError] = useState("");
+  const [reinstallLoading, setReinstallLoading] = useState(false);
+  const prepareReinstall = async () => {
+    setReinstallOpen(true);
+    setReinstallToken("");
+    setReinstallError("");
+    setReinstallLoading(true);
+    try {
+      const response = await api.createDaemonReinstallToken(workspaceId, daemon.id);
+      setReinstallToken(response.token);
+    } catch (error) {
+      setReinstallError(error instanceof Error ? error.message : "Could not prepare reinstall script");
+    } finally {
+      setReinstallLoading(false);
+    }
+  };
+  const reinstallCommand = reinstallToken ? buildDaemonReinstallCommand({
     backendUrl: apiBase,
     workspaceId,
-    daemonToken,
+    daemonToken: reinstallToken,
     staticBaseUrl: daemonStaticBase,
   }) : "";
   const uninstallCommand = buildDaemonUninstallCommand({
     staticBaseUrl: daemonStaticBase,
   });
   return (
-    <Modal title={daemon.name} onClose={onClose}>
-      <div className="form-stack">
-        <div className="deploy-block">
-          <div className="row between">
-            <b className="small">Status</b>
-            <span className={`chip sm ${daemonStatus(daemon)}`}><StatusDot tone={daemonStatus(daemon)} />{daemonStatus(daemon)}</span>
-          </div>
-          <p className="tiny muted mono">ID: {daemon.id}</p>
-          <p className="small muted">Last seen: {daemon.lastSeenAt ? new Date(daemon.lastSeenAt).toLocaleString() : "Never"}</p>
-          <p className="small muted">Agents: {agents.length}</p>
-          {agents.map((agent) => <p className="small" key={agent.id}>@{agent.handle} · {visibleAgentStatus(agent, runs, [daemon])}</p>)}
-        </div>
-        {daemonToken ? (
-          <ShellScriptBlock title="Reinstall daemon" badge="Host native" command={reinstallCommand}>
-            <p className="small muted">Run this on the daemon host to remove the current local install and install the latest daemon again using the same daemon token.</p>
-          </ShellScriptBlock>
-        ) : (
+    <>
+      <Modal title={daemon.name} onClose={onClose}>
+        <div className="form-stack">
           <div className="deploy-block">
             <div className="row between">
-              <b className="small">Reinstall daemon</b>
-              <span className="chip sm">Token unavailable</span>
+              <b className="small">Status</b>
+              <span className={`chip sm ${daemonStatus(daemon)}`}><StatusDot tone={daemonStatus(daemon)} />{daemonStatus(daemon)}</span>
             </div>
-            <p className="small muted">This browser does not have the original daemon token, so it cannot build a self-contained reinstall script for this existing daemon.</p>
+            <p className="tiny muted mono">ID: {daemon.id}</p>
+            <p className="small muted">Last seen: {daemon.lastSeenAt ? new Date(daemon.lastSeenAt).toLocaleString() : "Never"}</p>
+            <p className="small muted">Agents: {agents.length}</p>
+            {agents.map((agent) => <p className="small" key={agent.id}>@{agent.handle} · {visibleAgentStatus(agent, runs, [daemon])}</p>)}
           </div>
-        )}
-        <ShellScriptBlock title="Uninstall daemon" badge="Global" command={uninstallCommand}>
-          <p className="small muted">Run this on the daemon host to remove the local Notty daemon installation. This uses the global uninstall script because workspace-specific uninstall is not supported yet.</p>
-        </ShellScriptBlock>
-        <button className="btn danger full" onClick={async () => { await api.deleteDaemon(workspaceId, daemon.id); onChanged(); onClose(); }}>Delete daemon record</button>
-      </div>
-    </Modal>
+          <button className="btn accent full" onClick={() => void prepareReinstall()} disabled={reinstallLoading}>Reinstall daemon</button>
+          <ShellScriptBlock title="Uninstall daemon" badge="Global" command={uninstallCommand}>
+            <p className="small muted">Run this on the daemon host to remove the local Notty daemon installation. This uses the global uninstall script because workspace-specific uninstall is not supported yet.</p>
+          </ShellScriptBlock>
+          <button className="btn danger full" onClick={async () => { await api.deleteDaemon(workspaceId, daemon.id); onChanged(); onClose(); }}>Delete daemon record</button>
+        </div>
+      </Modal>
+      {reinstallOpen ? (
+        <Modal title="Reinstall daemon" onClose={() => setReinstallOpen(false)}>
+          <div className="form-stack">
+            {reinstallLoading ? (
+              <div className="deploy-block">
+                <div className="row between">
+                  <b className="small">Reinstall script</b>
+                  <span className="chip sm">Preparing</span>
+                </div>
+                <p className="small muted">Preparing a fresh daemon token and reinstall script.</p>
+              </div>
+            ) : reinstallError ? (
+              <div className="deploy-block">
+                <div className="row between">
+                  <b className="small">Reinstall script</b>
+                  <span className="chip sm danger">Unavailable</span>
+                </div>
+                <p className="small muted">{reinstallError}</p>
+              </div>
+            ) : (
+              <ShellScriptBlock title="Reinstall daemon" badge="Host native" command={reinstallCommand}>
+                <p className="small muted">Run this on the daemon host to remove the current local install and install the latest daemon again using the fresh daemon token below.</p>
+              </ShellScriptBlock>
+            )}
+          </div>
+        </Modal>
+      ) : null}
+    </>
   );
 }
 

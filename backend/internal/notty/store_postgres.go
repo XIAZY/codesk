@@ -58,13 +58,16 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			workspace_id TEXT NOT NULL,
 			name TEXT NOT NULL,
 			token_hash TEXT NOT NULL UNIQUE,
+			pending_token_hash TEXT,
 			status TEXT NOT NULL DEFAULT 'active',
 			last_seen_at TIMESTAMPTZ,
 			created_at TIMESTAMPTZ NOT NULL,
 			deleted_at TIMESTAMPTZ
 		)
 		`,
+		`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS pending_token_hash TEXT`,
 		`CREATE INDEX IF NOT EXISTS idx_daemons_workspace ON daemons (workspace_id, status)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_daemons_pending_token_hash ON daemons (pending_token_hash) WHERE pending_token_hash IS NOT NULL`,
 		`
 		CREATE TABLE IF NOT EXISTS documents (
 			workspace_id TEXT NOT NULL,
