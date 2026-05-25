@@ -892,15 +892,17 @@ func (s *workspaceRuntime) documentNeedsReconcile(documentID string, trackedFile
 		return true
 	}
 	count, err := s.docCache.pendingRemoteUpdateCountLocked(entry, documentID)
-	return err != nil || count > 0
+	if err != nil || count > 0 {
+		return true
+	}
+	threadCount, err := s.docCache.materializableThreadIntentCountLocked(entry, documentID)
+	return err != nil || threadCount > 0
 }
 
 func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documentID string, trackedFiles []*trackedFile) error {
 	if s == nil || s.docCache == nil || documentID == "" || len(trackedFiles) == 0 {
 		return nil
 	}
-	unlockReconcile := s.lockDocumentReconcile(documentID)
-	defer unlockReconcile()
 	cache := s.docCache
 	documentPath := trackedFiles[0].DocumentPath
 	var flushRecords []outboxUpdateRecord
@@ -986,6 +988,14 @@ func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documen
 			}
 			flushRecords = records
 			return nil
+		}
+
+		readyThreads, err := s.materializeThreadIntentsLocked(ctx, cache, entry, documentID, documentPath, baseDoc, cacheContentKnown)
+		if err != nil {
+			return err
+		}
+		if readyThreads > 0 {
+			s.wakeThreadDelivery()
 		}
 
 		pendingRemoteCount, err := cache.pendingRemoteUpdateCountLocked(entry, documentID)
@@ -1316,17 +1326,6 @@ func (s *workspaceRuntime) flushOutboxUpdates(ctx context.Context, cache *docume
 }
 
 func finalizeAcceptedOutbox(cache *documentCache, entry *documentCacheEntry, documentID, documentPath string, trackedFiles []*trackedFile, record *outboxUpdateRecord) error {
-	pendingRemoteCount, err := cache.pendingRemoteUpdateCountLocked(entry, documentID)
-	if err != nil {
-		if errors.Is(err, errPendingUpdateLogHashMismatch) {
-			if clearErr := cache.clearPendingRemoteUpdatesLocked(entry, documentID); clearErr != nil {
-				return fmt.Errorf("clear corrupt pending remote updates for %s: %w", documentID, clearErr)
-			}
-			pendingRemoteCount = 0
-		} else {
-			return err
-		}
-	}
 	baseDoc, metadata, _, err := cache.loadBaseDocLocked(entry, documentID, documentPath)
 	if err != nil {
 		return err
@@ -1334,11 +1333,6 @@ func finalizeAcceptedOutbox(cache *documentCache, entry *documentCacheEntry, doc
 	states, err := collectTrackedReconcileStates(trackedFiles)
 	if err != nil {
 		return err
-	}
-	if pendingRemoteCount > 0 {
-		if err := applyPendingRemoteUpdatesLocked(cache, entry, documentID, baseDoc); err != nil {
-			return err
-		}
 	}
 	if err := crdt.ApplyUpdateV1(baseDoc, record.Update, "local-reconcile"); err != nil {
 		return err
@@ -1349,9 +1343,6 @@ func finalizeAcceptedOutbox(cache *documentCache, entry *documentCacheEntry, doc
 	}
 	metadata.UpdatedAt = time.Now().UTC()
 	if err := cache.storeDocLocked(entry, metadata, baseDoc); err != nil {
-		return err
-	}
-	if err := cache.clearPendingRemoteUpdatesLocked(entry, documentID); err != nil {
 		return err
 	}
 	if err := cache.dropFirstOutboxUpdateLocked(entry, documentID); err != nil {
