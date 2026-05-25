@@ -232,6 +232,7 @@ describe("daemon reinstall command", () => {
       staticBaseUrl: "https://static.example.com/daemons/",
     });
 
+    expect(command.startsWith("set -e\n")).toBe(true);
     expect(command).toContain("curl -fsSL https://static.example.com/daemons/uninstall.sh | sh -s -- \\");
     expect(command).toContain("--all");
     expect(command).toContain("curl -fsSL https://static.example.com/daemons/install.sh | sh -s -- \\");

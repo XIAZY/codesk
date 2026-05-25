@@ -60,6 +60,7 @@ export function buildDaemonReinstallCommand(input: {
   const backendUrl = input.backendUrl.trim().replace(/\/+$/, "");
   const staticBaseUrl = (input.staticBaseUrl?.trim() || `${backendUrl}/daemons`).replace(/\/+$/, "");
   return [
+    "set -e",
     `curl -fsSL ${shellQuote(`${staticBaseUrl}/uninstall.sh`)} | sh -s -- \\`,
     "  --all",
     `curl -fsSL ${shellQuote(`${staticBaseUrl}/install.sh`)} | sh -s -- \\`,
