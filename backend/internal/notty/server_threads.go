@@ -13,9 +13,12 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if req.ClientOperationID == "" {
+		req.ClientOperationID = r.Header.Get("X-Notty-Idempotency-Key")
+	}
 	auth, _ := authFromContext(r.Context())
 	meta := operationMetaFromAuth(auth, "thread-create", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
-	thread, message, err := s.requestStore(r).CreateThread(req, meta)
+	thread, message, created, err := s.requestStore(r).CreateThread(req, meta)
 	if err != nil {
 		status := http.StatusBadRequest
 		if err == ErrNotFound {
@@ -24,9 +27,11 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
-	s.requestBroker(r).Publish(EventEnvelope{Type: "thread.created", Data: thread})
-	s.requestBroker(r).Publish(EventEnvelope{Type: "thread.message.created", Data: message})
-	s.publishAgentInboxChanges(r)
+	if created {
+		s.requestBroker(r).Publish(EventEnvelope{Type: "thread.created", Data: thread})
+		s.requestBroker(r).Publish(EventEnvelope{Type: "thread.message.created", Data: message})
+		s.publishAgentInboxChanges(r)
+	}
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"thread":  thread,
 		"message": message,

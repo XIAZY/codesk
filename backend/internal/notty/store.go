@@ -1750,41 +1750,54 @@ func (s *Store) ReplaceDocumentText(documentID string, nextText string, meta Ope
 	return cloneDocument(document), update, nil
 }
 
-func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thread, *ThreadMessage, error) {
+func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thread, *ThreadMessage, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	document, ok := s.state.Documents[req.DocumentID]
 	if !ok {
-		return nil, nil, ErrNotFound
+		return nil, nil, false, ErrNotFound
 	}
 	body := strings.TrimSpace(req.Body)
 	if body == "" {
-		return nil, nil, errors.New("thread body is required")
+		return nil, nil, false, errors.New("thread body is required")
 	}
 	author, err := s.resolvePrincipalLocked(meta.ActorID, meta.ActorType)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
+	}
+	clientOperationID := strings.TrimSpace(req.ClientOperationID)
+	if clientOperationID != "" {
+		for _, thread := range s.state.Threads {
+			if thread == nil {
+				continue
+			}
+			if thread.ClientOperationID == clientOperationID && thread.CreatedByID == author.ID && thread.CreatedByType == author.Type {
+				message := firstThreadMessage(thread)
+				return cloneThread(thread), cloneThreadMessage(message), false, nil
+			}
+		}
 	}
 	now := time.Now().UTC()
 	anchor, err := buildThreadAnchorFromRequest(req)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	thread := &Thread{
-		ID:              "thread_" + uuid.NewString(),
-		DocumentID:      document.ID,
-		Title:           firstNonEmptyString(strings.TrimSpace(req.Title), inferThreadTitleFromRequest(document, req)),
-		Status:          "open",
-		Anchor:          anchor,
-		CreatedByID:     author.ID,
-		CreatedByType:   author.Type,
-		CreatedByHandle: author.Handle,
-		CreatedByName:   author.Name,
-		ParticipantIDs:  []string{author.ID},
-		Messages:        []*ThreadMessage{},
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		ID:                "thread_" + uuid.NewString(),
+		DocumentID:        document.ID,
+		ClientOperationID: clientOperationID,
+		Title:             firstNonEmptyString(strings.TrimSpace(req.Title), inferThreadTitleFromRequest(document, req)),
+		Status:            "open",
+		Anchor:            anchor,
+		CreatedByID:       author.ID,
+		CreatedByType:     author.Type,
+		CreatedByHandle:   author.Handle,
+		CreatedByName:     author.Name,
+		ParticipantIDs:    []string{author.ID},
+		Messages:          []*ThreadMessage{},
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 	message := &ThreadMessage{
 		ID:           "threadmsg_" + uuid.NewString(),
@@ -1814,9 +1827,16 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 		Provenance: meta,
 	})
 	if err := s.persistLocked(); err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
-	return cloneThread(thread), cloneThreadMessage(message), nil
+	return cloneThread(thread), cloneThreadMessage(message), true, nil
+}
+
+func firstThreadMessage(thread *Thread) *ThreadMessage {
+	if thread == nil || len(thread.Messages) == 0 {
+		return nil
+	}
+	return thread.Messages[0]
 }
 
 func (s *Store) ReplyThread(id string, req ReplyThreadRequest, meta OperationMeta) (*Thread, *ThreadMessage, error) {

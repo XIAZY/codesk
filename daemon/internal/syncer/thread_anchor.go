@@ -20,7 +20,7 @@ type resolvedThreadTarget struct {
 	excerpt string
 }
 
-func (s *Service) prepareCreateThreadPayload(ctx context.Context, run *agentRun, payload createThreadPayload) (createThreadPayload, error) {
+func (s *Service) prepareDocumentThreadPayload(ctx context.Context, payload createThreadPayload) (createThreadPayload, error) {
 	if strings.TrimSpace(payload.Body) == "" {
 		return payload, fmt.Errorf("thread body is required")
 	}
@@ -31,60 +31,18 @@ func (s *Service) prepareCreateThreadPayload(ctx context.Context, run *agentRun,
 	payload.DocumentID = document.ID
 	payload.Path = ""
 
-	if payload.Document {
-		if hasThreadRangeTarget(payload) || strings.TrimSpace(payload.Quote) != "" {
-			return payload, fmt.Errorf("--document cannot be combined with line, range, quote, or offset anchors")
-		}
-		payload.Kind = "document"
-		payload.RelativeStart = ""
-		payload.RelativeEnd = ""
-		payload.Start = 0
-		payload.End = 0
-		payload.Line = 0
-		payload.Excerpt = ""
-		return payload, nil
+	if hasThreadRangeTarget(payload) || strings.TrimSpace(payload.Quote) != "" ||
+		strings.TrimSpace(payload.RelativeStart) != "" || strings.TrimSpace(payload.RelativeEnd) != "" {
+		return payload, fmt.Errorf("--document cannot be combined with line, range, quote, offset, or relative anchors")
 	}
-
-	if strings.TrimSpace(payload.RelativeStart) != "" || strings.TrimSpace(payload.RelativeEnd) != "" {
-		if strings.TrimSpace(payload.RelativeStart) == "" || strings.TrimSpace(payload.RelativeEnd) == "" {
-			return payload, fmt.Errorf("relativeStart and relativeEnd must be provided together")
-		}
-		payload.Kind = "text-range"
-		return payload, nil
-	}
-
-	runtime := s.runtimeForThreadAnchor(run)
-	if runtime == nil {
-		return payload, fmt.Errorf("workspace runtime is unavailable")
-	}
-	doc, state, err := runtime.loadThreadAnchorDocument(ctx, document)
-	if err != nil {
-		return payload, err
-	}
-	if len(state) == 0 && document.UpdateID != 0 {
-		return payload, fmt.Errorf("document %s is not available in daemon CRDT cache yet", document.Path)
-	}
-	text := doc.GetText("content")
-	content := text.ToString()
-	target, err := resolveThreadTarget(content, payload)
-	if err != nil {
-		return payload, err
-	}
-	if target.start < 0 || target.end < target.start || target.end > text.Len() {
-		return payload, fmt.Errorf("resolved thread range [%d,%d] is outside document length %d", target.start, target.end, text.Len())
-	}
-	payload.RelativeStart = encodeRelativeAnchor(text, target.start)
-	payload.RelativeEnd = encodeRelativeAnchor(text, target.end)
-	payload.Kind = "text-range"
-	payload.Start = target.start
-	payload.End = target.end
-	payload.Line = target.line
-	payload.Excerpt = target.excerpt
-	payload.Quote = ""
-	payload.StartLine = 0
-	payload.StartColumn = 0
-	payload.EndLine = 0
-	payload.EndColumn = 0
+	payload.Document = true
+	payload.Kind = "document"
+	payload.RelativeStart = ""
+	payload.RelativeEnd = ""
+	payload.Start = 0
+	payload.End = 0
+	payload.Line = 0
+	payload.Excerpt = ""
 	return payload, nil
 }
 
@@ -182,48 +140,6 @@ func (s *Service) fetchDocumentByPath(ctx context.Context, path string) (*docume
 		return nil, fmt.Errorf("document path %q not found", path)
 	}
 	return response.Document, nil
-}
-
-func (r *workspaceRuntime) loadThreadAnchorDocument(ctx context.Context, document *document) (*crdt.Doc, []byte, error) {
-	if document == nil || document.ID == "" {
-		return nil, nil, fmt.Errorf("document is required")
-	}
-	if err := r.reconcileDocumentForThreadAnchor(ctx, document.ID); err != nil {
-		return nil, nil, err
-	}
-	doc, _, state, err := r.docCache.loadBaseDoc(document.ID, document.Path)
-	if err != nil {
-		return nil, nil, err
-	}
-	return doc, state, nil
-}
-
-func (r *workspaceRuntime) reconcileDocumentForThreadAnchor(ctx context.Context, documentID string) error {
-	if r == nil || r.docCache == nil {
-		return fmt.Errorf("document CRDT cache is unavailable")
-	}
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	tracked := r.collectTrackedByDocument()[documentID]
-	if len(tracked) > 0 {
-		if err := r.reconcileTrackedDocument(ctx, documentID, tracked); err != nil {
-			return err
-		}
-		for _, file := range tracked {
-			if file != nil && file.isLocalDirty() {
-				return fmt.Errorf("document %s has pending local edits; wait for sync before creating an anchored thread", file.DocumentPath)
-			}
-		}
-	}
-	pending, err := r.docCache.pendingRemoteUpdateCount(documentID)
-	if err != nil {
-		return err
-	}
-	if pending > 0 {
-		return fmt.Errorf("document has %d pending remote update(s); wait for reconciliation before creating an anchored thread", pending)
-	}
-	return nil
 }
 
 func resolveThreadTarget(content string, payload createThreadPayload) (resolvedThreadTarget, error) {

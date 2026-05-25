@@ -435,6 +435,78 @@ func TestThreadEndpointsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCreateThreadIsIdempotentByClientOperationID(t *testing.T) {
+	server, store := newTestServer(t)
+	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "alpha bravo charlie")
+	router := server.Routes()
+	events, unsubscribe := server.subscribers.Subscribe()
+	defer unsubscribe()
+	body, err := json.Marshal(CreateThreadRequest{
+		DocumentID:    documentID,
+		Body:          "Please review this section.",
+		Kind:          "text-range",
+		RelativeStart: "browser-relative-start",
+		RelativeEnd:   "browser-relative-end",
+	})
+	if err != nil {
+		t.Fatalf("marshal create thread request: %v", err)
+	}
+	post := func() map[string]any {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/api/threads?actor=owner&actor_type=human", bytes.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-Notty-Idempotency-Key", "intent_123")
+		router.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusCreated {
+			t.Fatalf("create thread status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+		var response map[string]any
+		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		thread, ok := response["thread"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected thread object, got %#v", response["thread"])
+		}
+		return thread
+	}
+
+	first := post()
+	firstEventTypes := drainBrokerEventTypes(events)
+	if len(firstEventTypes) != 2 || firstEventTypes[0] != "thread.created" || firstEventTypes[1] != "thread.message.created" {
+		t.Fatalf("expected first create to publish one thread creation and message event, got %#v", firstEventTypes)
+	}
+	second := post()
+	if duplicateEventTypes := drainBrokerEventTypes(events); len(duplicateEventTypes) != 0 {
+		t.Fatalf("idempotent replay should not publish duplicate thread events, got %#v", duplicateEventTypes)
+	}
+	if first["id"] != second["id"] {
+		t.Fatalf("expected idempotent repeat to return same thread, got %v and %v", first["id"], second["id"])
+	}
+	threads, err := store.ListThreadsForDocument(documentID)
+	if err != nil {
+		t.Fatalf("list threads: %v", err)
+	}
+	if len(threads) != 1 {
+		t.Fatalf("expected one stored thread after duplicate POST, got %d", len(threads))
+	}
+	if threads[0].ClientOperationID != "intent_123" {
+		t.Fatalf("expected client operation ID to persist, got %q", threads[0].ClientOperationID)
+	}
+}
+
+func drainBrokerEventTypes(events <-chan EventEnvelope) []string {
+	var types []string
+	for {
+		select {
+		case event := <-events:
+			types = append(types, event.Type)
+		default:
+			return types
+		}
+	}
+}
+
 func TestHandleDocumentProtocolMessageBroadcastsSyncUpdateToPeers(t *testing.T) {
 	server, store := newTestServer(t)
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "alpha")

@@ -18,17 +18,16 @@ const workspaceReconcileMinInterval = 2 * time.Second
 const localCreateReconcileWake = "__local_create__"
 
 type workspaceRuntime struct {
-	cfg              Config
-	client           *http.Client
-	mu               sync.Mutex
-	replica          *workspaceReplica
-	docCache         *documentCache
-	reconcileQueue   *reconcileQueue
-	localCreates     *localCreateQueue
-	documentSyncs    map[string]*managedDocumentSync
-	reconcileLocksMu sync.Mutex
-	reconcileLocks   map[string]*sync.Mutex
-	initialWorkspace *workspaceResponse
+	cfg                Config
+	client             *http.Client
+	mu                 sync.Mutex
+	replica            *workspaceReplica
+	docCache           *documentCache
+	reconcileQueue     *reconcileQueue
+	localCreates       *localCreateQueue
+	documentSyncs      map[string]*managedDocumentSync
+	threadDeliveryWake chan struct{}
+	initialWorkspace   *workspaceResponse
 }
 
 func (r *workspaceRuntime) fetchWorkspace(ctx context.Context) (*workspaceResponse, error) {
@@ -69,12 +68,13 @@ func newWorkspaceRuntime(cfg Config, client *http.Client, rootDir, actorID, acto
 	queue := newReconcileQueue()
 	localCreates := newLocalCreateQueue()
 	runtime := &workspaceRuntime{
-		cfg:            cfg,
-		client:         client,
-		docCache:       cache,
-		reconcileQueue: queue,
-		localCreates:   localCreates,
-		documentSyncs:  map[string]*managedDocumentSync{},
+		cfg:                cfg,
+		client:             client,
+		docCache:           cache,
+		reconcileQueue:     queue,
+		localCreates:       localCreates,
+		documentSyncs:      map[string]*managedDocumentSync{},
+		threadDeliveryWake: make(chan struct{}, 1),
 	}
 	replica, err := newWorkspaceReplica(cfg, rootDir, actorID, actorType, runtime.markDocumentDirty, runtime.markLocalCreate)
 	if err != nil {
@@ -83,21 +83,6 @@ func newWorkspaceRuntime(cfg Config, client *http.Client, rootDir, actorID, acto
 	replica.docCache = cache
 	runtime.replica = replica
 	return runtime, nil
-}
-
-func (r *workspaceRuntime) lockDocumentReconcile(documentID string) func() {
-	r.reconcileLocksMu.Lock()
-	if r.reconcileLocks == nil {
-		r.reconcileLocks = map[string]*sync.Mutex{}
-	}
-	lock := r.reconcileLocks[documentID]
-	if lock == nil {
-		lock = &sync.Mutex{}
-		r.reconcileLocks[documentID] = lock
-	}
-	r.reconcileLocksMu.Unlock()
-	lock.Lock()
-	return lock.Unlock
 }
 
 func (r *workspaceRuntime) markLocalCreate(candidate localCreateCandidate) {
@@ -136,6 +121,7 @@ func (r *workspaceRuntime) Run(ctx context.Context) error {
 	}()
 
 	go r.reconcileLoop(ctx)
+	go r.threadDeliveryLoop(ctx)
 	go r.presenceLoop(ctx)
 
 	<-ctx.Done()

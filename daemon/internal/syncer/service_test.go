@@ -1069,6 +1069,9 @@ func TestReconcileTrackedDocumentMergesLocalEditWithPendingRemoteUpdate(t *testi
 	if len(sentLocalUpdate) == 0 {
 		t.Fatal("expected local CRDT update to be sent")
 	}
+	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("reconcile pending remote: %v", err)
+	}
 	content, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read projected merge: %v", err)
@@ -1566,11 +1569,30 @@ func TestReconcileSendsLocalEditBeforeApplyingPendingRemoteUpdate(t *testing.T) 
 	if err != nil {
 		t.Fatalf("pending count: %v", err)
 	}
-	if count != 0 {
-		t.Fatalf("expected accepted local update to drain pending remote updates during finalize, got %d", count)
+	if count != 1 {
+		t.Fatalf("expected accepted local update to leave pending remote updates for the next pass, got %d", count)
 	}
 
 	cachedDoc, _, _, err := cache.loadBaseDoc("doc_1", "doc.md")
+	if err != nil {
+		t.Fatalf("load cached doc after local finalize: %v", err)
+	}
+	if got := cachedDoc.GetText("content").ToString(); got != "base\nlocal\n" {
+		t.Fatalf("expected cache to contain local-after-outgoing state before inbox, got %q", got)
+	}
+
+	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	count, err = cache.pendingRemoteUpdateCount("doc_1")
+	if err != nil {
+		t.Fatalf("pending count after second reconcile: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected second reconcile to drain pending remote updates, got %d", count)
+	}
+
+	cachedDoc, _, _, err = cache.loadBaseDoc("doc_1", "doc.md")
 	if err != nil {
 		t.Fatalf("load cached doc: %v", err)
 	}

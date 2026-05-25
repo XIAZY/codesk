@@ -54,7 +54,7 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "# notty\n\n")
-	thread, _, err := store.CreateThread(CreateThreadRequest{
+	thread, _, _, err := store.CreateThread(CreateThreadRequest{
 		DocumentID:    documentID,
 		Title:         "Persistence check",
 		Body:          "Looks durable. Please review this @pg-reviewer",
@@ -938,7 +938,7 @@ func TestPostgresAgentInboxSkipsLogDocumentUpdatesButKeepsThreadMentions(t *test
 		t.Fatalf("expected log document update to stay out of inbox, got %#v", items)
 	}
 
-	thread, message, err := store.CreateThread(CreateThreadRequest{
+	thread, message, _, err := store.CreateThread(CreateThreadRequest{
 		DocumentID:    logDocumentID,
 		Title:         "Log question",
 		Body:          "Please inspect @reviewer",
