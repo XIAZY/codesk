@@ -165,7 +165,7 @@ func TestDaemonTokenIsWorkspaceScopedAndCanActAsWorkspaceAgent(t *testing.T) {
 	authTestStatus(t, router, http.MethodGet, "/api/workspaces/"+workspace.ID+"/workspace", daemonResponse.Token, nil, http.StatusForbidden)
 }
 
-func TestDaemonReinstallTokenDoesNotBreakCurrentDaemonUntilUsed(t *testing.T) {
+func TestDaemonReinstallTokenRotatesDaemonToken(t *testing.T) {
 	router := newAuthTestRouter(t)
 
 	owner := authTestRegister(t, router, "daemon-reinstall-owner@example.com", "owner-pass", "Daemon Reinstall Owner")
@@ -189,7 +189,6 @@ func TestDaemonReinstallTokenDoesNotBreakCurrentDaemonUntilUsed(t *testing.T) {
 		t.Fatalf("expected reinstall token for same daemon, got %#v", reinstallResponse.Daemon)
 	}
 
-	authTestStatus(t, router, http.MethodGet, "/api/workspaces/"+workspace.ID+"/workspace", daemonResponse.Token, nil, http.StatusOK)
 	authTestStatus(t, router, http.MethodGet, "/api/workspaces/"+workspace.ID+"/workspace", reinstallResponse.Token, nil, http.StatusOK)
 	authTestStatus(t, router, http.MethodGet, "/api/workspaces/"+workspace.ID+"/workspace", daemonResponse.Token, nil, http.StatusForbidden)
 	authTestStatus(t, router, http.MethodGet, "/api/workspaces/"+workspace.ID+"/workspace", reinstallResponse.Token, nil, http.StatusOK)
