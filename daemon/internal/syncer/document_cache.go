@@ -142,6 +142,7 @@ func (c *workspaceStore) initSchema() error {
 		)`,
 		`create table if not exists crdt_updates (
 			seq integer primary key autoincrement,
+			fold_seq integer,
 			document_id text not null,
 			update_sha256 text not null,
 			update_bytes blob not null,
@@ -153,6 +154,7 @@ func (c *workspaceStore) initSchema() error {
 			unique (document_id, update_sha256)
 		)`,
 		`create index if not exists crdt_updates_by_doc_seq on crdt_updates(document_id, seq)`,
+		`create unique index if not exists crdt_updates_by_doc_fold_seq on crdt_updates(document_id, fold_seq) where fold_seq is not null`,
 		`create index if not exists crdt_updates_backend_id on crdt_updates(document_id, backend_update_id)`,
 		`create table if not exists content_outbox (
 			id text primary key,
@@ -248,18 +250,18 @@ func (c *workspaceStore) storeDocLocked(entry *documentCacheEntry, metadata docu
 		if _, err := c.ensureDocumentTx(tx, metadata.DocumentID, metadata.Path, metadata.UpdateID, now); err != nil {
 			return err
 		}
-		seq, _, err := c.insertCRDTUpdateTx(tx, metadata.DocumentID, state, "local", metadata.UpdateID, "", "", now)
+		foldSeq, _, err := c.insertFoldedCRDTUpdateTx(tx, metadata.DocumentID, state, "local", metadata.UpdateID, "", "", now)
 		if err != nil {
 			return err
 		}
-		if seq > 0 {
+		if foldSeq > 0 {
 			if _, err := tx.Exec(`update documents
 				set applied_seq = max(applied_seq, ?),
 					updated_at = ?
-				where document_id = ?`, seq, unixNano(now), metadata.DocumentID); err != nil {
+				where document_id = ?`, foldSeq, unixNano(now), metadata.DocumentID); err != nil {
 				return err
 			}
-			metadata.AppliedSeq = seq
+			metadata.AppliedSeq = foldSeq
 		}
 		metadata.UpdatedAt = now
 		if entry != nil {
@@ -344,12 +346,8 @@ func (c *workspaceStore) pendingRemoteUpdateCountLocked(_ *documentCacheEntry, d
 	if c == nil || documentID == "" {
 		return 0, nil
 	}
-	row, err := c.ensureDocument(documentID, "", 0)
-	if err != nil {
-		return 0, err
-	}
 	var count int
-	err = c.db.QueryRow(`select count(*) from crdt_updates where document_id = ? and source = 'remote' and seq > ?`, documentID, row.AppliedSeq).Scan(&count)
+	err := c.db.QueryRow(`select count(*) from crdt_updates where document_id = ? and source = 'remote' and fold_seq is null`, documentID).Scan(&count)
 	return count, err
 }
 
@@ -371,17 +369,20 @@ func (c *workspaceStore) applyPendingRemoteUpdatesLocked(_ *documentCacheEntry, 
 	if err != nil {
 		return 0, err
 	}
-	rows, err := c.db.Query(`select seq, update_bytes from crdt_updates where document_id = ? and seq > ? order by seq`, documentID, row.AppliedSeq)
+	rows, err := c.db.Query(`select update_sha256, update_bytes from crdt_updates where document_id = ? and source = 'remote' and fold_seq is null order by seq`, documentID)
 	if err != nil {
 		return 0, err
 	}
 	defer rows.Close()
-	maxSeq := row.AppliedSeq
+	type pendingUpdate struct {
+		hash string
+	}
+	var pending []pendingUpdate
 	count := 0
 	for rows.Next() {
-		var seq int64
+		var hash string
 		var update []byte
-		if err := rows.Scan(&seq, &update); err != nil {
+		if err := rows.Scan(&hash, &update); err != nil {
 			return count, err
 		}
 		if len(update) == 0 {
@@ -390,9 +391,7 @@ func (c *workspaceStore) applyPendingRemoteUpdatesLocked(_ *documentCacheEntry, 
 		if err := crdt.ApplyUpdateV1(doc, update, "remote-reconcile"); err != nil {
 			return count, err
 		}
-		if seq > maxSeq {
-			maxSeq = seq
-		}
+		pending = append(pending, pendingUpdate{hash: hash})
 		count++
 	}
 	if err := rows.Err(); err != nil {
@@ -401,7 +400,21 @@ func (c *workspaceStore) applyPendingRemoteUpdatesLocked(_ *documentCacheEntry, 
 	if count == 0 {
 		return 0, nil
 	}
-	_, err = c.db.Exec(`update documents set applied_seq = ?, updated_at = ? where document_id = ?`, maxSeq, unixNano(time.Now().UTC()), documentID)
+	maxFoldSeq := row.AppliedSeq
+	now := time.Now().UTC()
+	err = c.withTx(func(tx *sql.Tx) error {
+		for _, update := range pending {
+			foldSeq, err := c.foldCRDTUpdateTx(tx, documentID, update.hash)
+			if err != nil {
+				return err
+			}
+			if foldSeq > maxFoldSeq {
+				maxFoldSeq = foldSeq
+			}
+		}
+		_, err := tx.Exec(`update documents set applied_seq = ?, updated_at = ? where document_id = ?`, maxFoldSeq, unixNano(now), documentID)
+		return err
+	})
 	return count, err
 }
 
@@ -514,31 +527,19 @@ func (c *workspaceStore) acceptOutboxUpdateLocked(_ *documentCacheEntry, documen
 	}
 	now := time.Now().UTC()
 	return c.withTx(func(tx *sql.Tx) error {
-		row, err := c.ensureDocumentTx(tx, documentID, path, backendUpdateID, now)
+		if _, err := c.ensureDocumentTx(tx, documentID, path, backendUpdateID, now); err != nil {
+			return err
+		}
+		foldSeq, _, err := c.insertFoldedCRDTUpdateTx(tx, documentID, record.Update, "local", backendUpdateID, record.ActorID, record.ActorType, now)
 		if err != nil {
 			return err
 		}
-		seq, _, err := c.insertCRDTUpdateTx(tx, documentID, record.Update, "local", backendUpdateID, record.ActorID, record.ActorType, now)
-		if err != nil {
-			return err
-		}
-		if seq > 0 {
-			var gapCount int
-			if err := tx.QueryRow(`select count(*) from crdt_updates where document_id = ? and seq > ? and seq < ?`, documentID, row.AppliedSeq, seq).Scan(&gapCount); err != nil {
-				return err
-			}
-			if gapCount == 0 {
-				if _, err := tx.Exec(`update documents
-					set applied_seq = max(applied_seq, ?),
-						backend_update_id = case when ? > backend_update_id then ? else backend_update_id end,
-						updated_at = ?
-					where document_id = ?`, seq, backendUpdateID, backendUpdateID, unixNano(now), documentID); err != nil {
-					return err
-				}
-			} else if _, err := tx.Exec(`update documents
-				set backend_update_id = case when ? > backend_update_id then ? else backend_update_id end,
+		if foldSeq > 0 {
+			if _, err := tx.Exec(`update documents
+				set applied_seq = max(applied_seq, ?),
+					backend_update_id = case when ? > backend_update_id then ? else backend_update_id end,
 					updated_at = ?
-				where document_id = ?`, backendUpdateID, backendUpdateID, unixNano(now), documentID); err != nil {
+				where document_id = ?`, foldSeq, backendUpdateID, backendUpdateID, unixNano(now), documentID); err != nil {
 				return err
 			}
 		}
@@ -617,7 +618,7 @@ func (c *workspaceStore) findProjectedSeq(documentID, content string, state []by
 		return 0, false, nil
 	}
 	targetStateHash := sha256Hex(state)
-	rows, err := c.db.Query(`select seq, update_bytes from crdt_updates where document_id = ? order by seq`, documentID)
+	rows, err := c.db.Query(`select fold_seq, update_bytes from crdt_updates where document_id = ? and fold_seq is not null order by fold_seq`, documentID)
 	if err != nil {
 		return 0, false, err
 	}
@@ -625,9 +626,9 @@ func (c *workspaceStore) findProjectedSeq(documentID, content string, state []by
 	doc := crdt.New()
 	defer doc.Close()
 	for rows.Next() {
-		var seq int64
+		var foldSeq int64
 		var update []byte
-		if err := rows.Scan(&seq, &update); err != nil {
+		if err := rows.Scan(&foldSeq, &update); err != nil {
 			return 0, false, err
 		}
 		if len(update) == 0 {
@@ -637,7 +638,7 @@ func (c *workspaceStore) findProjectedSeq(documentID, content string, state []by
 			return 0, false, err
 		}
 		if doc.GetText("content").ToString() == content && sha256Hex(doc.EncodeStateAsUpdate()) == targetStateHash {
-			return seq, true, nil
+			return foldSeq, true, nil
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -688,7 +689,7 @@ func (c *workspaceStore) documentsNeedingReconcile() ([]string, bool, error) {
 		select document_id from documents
 		where exists (select 1 from content_outbox where content_outbox.document_id = documents.document_id)
 		   or exists (select 1 from thread_outbox where thread_outbox.document_id = documents.document_id and status = 'pending')
-		   or exists (select 1 from crdt_updates where crdt_updates.document_id = documents.document_id and crdt_updates.source = 'remote' and crdt_updates.seq > documents.applied_seq)
+		   or exists (select 1 from crdt_updates where crdt_updates.document_id = documents.document_id and crdt_updates.source = 'remote' and crdt_updates.fold_seq is null)
 		order by document_id`)
 	if err != nil {
 		return nil, false, err
@@ -777,6 +778,15 @@ func (c *workspaceStore) loadDocumentRowTx(tx *sql.Tx, documentID string) (docum
 	return row, nil
 }
 
+func (c *workspaceStore) insertFoldedCRDTUpdateTx(tx *sql.Tx, documentID string, update []byte, source string, backendUpdateID int64, actorID, actorType string, now time.Time) (int64, bool, error) {
+	_, inserted, err := c.insertCRDTUpdateTx(tx, documentID, update, source, backendUpdateID, actorID, actorType, now)
+	if err != nil {
+		return 0, false, err
+	}
+	foldSeq, err := c.foldCRDTUpdateTx(tx, documentID, sha256Hex(update))
+	return foldSeq, inserted, err
+}
+
 func (c *workspaceStore) insertCRDTUpdateTx(tx *sql.Tx, documentID string, update []byte, source string, backendUpdateID int64, actorID, actorType string, now time.Time) (int64, bool, error) {
 	if len(update) == 0 {
 		return 0, false, nil
@@ -802,6 +812,20 @@ func (c *workspaceStore) insertCRDTUpdateTx(tx *sql.Tx, documentID string, updat
 		if err := tx.QueryRow(`select seq from crdt_updates where document_id = ? and update_sha256 = ?`, documentID, updateHash).Scan(&seq); err != nil {
 			return 0, false, err
 		}
+		if backendUpdateID > 0 || actorID != "" || actorType != "" {
+			_, err := tx.Exec(`update crdt_updates
+				set backend_update_id = case
+						when ? > coalesce(backend_update_id, 0) then ?
+						else backend_update_id
+					end,
+					actor_id = case when coalesce(actor_id, '') = '' then ? else actor_id end,
+					actor_type = case when coalesce(actor_type, '') = '' then ? else actor_type end
+				where document_id = ? and update_sha256 = ?`,
+				backendUpdateID, backendUpdateID, actorID, actorType, documentID, updateHash)
+			if err != nil {
+				return 0, false, err
+			}
+		}
 		return seq, false, nil
 	}
 	if err := tx.QueryRow(`select last_insert_rowid()`).Scan(&seq); err != nil {
@@ -810,12 +834,40 @@ func (c *workspaceStore) insertCRDTUpdateTx(tx *sql.Tx, documentID string, updat
 	return seq, true, nil
 }
 
+func (c *workspaceStore) foldCRDTUpdateTx(tx *sql.Tx, documentID, updateHash string) (int64, error) {
+	var existing sql.NullInt64
+	if err := tx.QueryRow(`select fold_seq from crdt_updates where document_id = ? and update_sha256 = ?`, documentID, updateHash).Scan(&existing); err != nil {
+		return 0, err
+	}
+	if existing.Valid && existing.Int64 > 0 {
+		return existing.Int64, nil
+	}
+	var foldSeq int64
+	if err := tx.QueryRow(`select coalesce(max(fold_seq), 0) + 1 from crdt_updates where document_id = ?`, documentID).Scan(&foldSeq); err != nil {
+		return 0, err
+	}
+	res, err := tx.Exec(`update crdt_updates set fold_seq = ? where document_id = ? and update_sha256 = ? and fold_seq is null`, foldSeq, documentID, updateHash)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if affected == 0 {
+		if err := tx.QueryRow(`select fold_seq from crdt_updates where document_id = ? and update_sha256 = ?`, documentID, updateHash).Scan(&foldSeq); err != nil {
+			return 0, err
+		}
+	}
+	return foldSeq, nil
+}
+
 func (c *workspaceStore) loadDocAtSeq(documentID string, seq int64) (*crdt.Doc, []byte, bool, error) {
 	doc := crdt.New()
 	if c == nil || documentID == "" || seq <= 0 {
 		return doc, nil, false, nil
 	}
-	rows, err := c.db.Query(`select update_bytes from crdt_updates where document_id = ? and seq <= ? order by seq`, documentID, seq)
+	rows, err := c.db.Query(`select update_bytes from crdt_updates where document_id = ? and fold_seq is not null and fold_seq <= ? order by fold_seq`, documentID, seq)
 	if err != nil {
 		doc.Close()
 		return nil, nil, false, err
