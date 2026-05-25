@@ -178,7 +178,7 @@ func (c *workspaceStore) writeThreadIntentLocked(documentID string, intent threa
 		resolvedJSON = value
 	}
 	return c.withTx(func(tx *sql.Tx) error {
-		if _, err := c.ensureDocumentTx(tx, documentID, intent.DocumentPath, 0, now); err != nil {
+		if _, err := c.ensureDocumentTx(tx, documentID, intent.DocumentPath, now); err != nil {
 			return err
 		}
 		_, err := tx.Exec(`insert into thread_outbox (

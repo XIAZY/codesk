@@ -174,7 +174,7 @@ func TestWorkspaceStoreSchemaUsesAgreedDurableTables(t *testing.T) {
 		}
 		tables = append(tables, table)
 	}
-	want := []string{"content_outbox", "crdt_updates", "documents", "thread_outbox"}
+	want := []string{"content_outbox", "crdt_updates", "documents", "incoming_updates", "thread_outbox"}
 	if !reflect.DeepEqual(tables, want) {
 		t.Fatalf("sqlite schema tables = %#v, want %#v", tables, want)
 	}
@@ -184,6 +184,16 @@ func TestWorkspaceStoreSchemaUsesAgreedDurableTables(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(seqSQL), "seq integer primary key autoincrement") {
 		t.Fatalf("crdt_updates must use autoincrement seq, schema=%s", seqSQL)
+	}
+	if strings.Contains(strings.ToLower(seqSQL), "backend_update_id") {
+		t.Fatalf("crdt_updates must not persist backend_update_id, schema=%s", seqSQL)
+	}
+	var documentsSQL string
+	if err := cache.db.QueryRow(`select sql from sqlite_master where type = 'table' and name = 'documents'`).Scan(&documentsSQL); err != nil {
+		t.Fatalf("load documents schema: %v", err)
+	}
+	if strings.Contains(strings.ToLower(documentsSQL), "backend_update_id") {
+		t.Fatalf("documents must not persist backend_update_id, schema=%s", documentsSQL)
 	}
 }
 

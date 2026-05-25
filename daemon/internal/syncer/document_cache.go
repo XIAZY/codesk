@@ -39,7 +39,6 @@ type documentCacheEntry struct {
 type documentCacheMetadata struct {
 	DocumentID   string
 	Path         string
-	UpdateID     int64
 	AppliedSeq   int64
 	ProjectedSeq int64
 	UpdatedAt    time.Time
@@ -70,7 +69,6 @@ type materializedCachedDocument struct {
 type documentRow struct {
 	DocumentID          string
 	Path                string
-	BackendUpdateID     int64
 	AppliedSeq          int64
 	ProjectedSeq        int64
 	ProjectedTextSHA256 string
@@ -132,7 +130,6 @@ func (c *workspaceStore) initSchema() error {
 		`create table if not exists documents (
 			document_id text primary key,
 			path text not null,
-			backend_update_id integer not null default 0,
 			applied_seq integer not null default 0,
 			projected_seq integer not null default 0,
 			projected_text_sha256 text,
@@ -145,15 +142,22 @@ func (c *workspaceStore) initSchema() error {
 			document_id text not null,
 			update_sha256 text not null,
 			update_bytes blob not null,
-			source text not null check (source in ('local', 'remote')),
-			backend_update_id integer,
+			source text not null check (source in ('base', 'local', 'remote')),
 			actor_id text,
 			actor_type text,
 			created_at integer not null,
 			unique (document_id, update_sha256)
 		)`,
 		`create index if not exists crdt_updates_by_doc_seq on crdt_updates(document_id, seq)`,
-		`create index if not exists crdt_updates_backend_id on crdt_updates(document_id, backend_update_id)`,
+		`create table if not exists incoming_updates (
+			incoming_seq integer primary key autoincrement,
+			document_id text not null,
+			update_sha256 text not null,
+			update_bytes blob not null,
+			received_at integer not null,
+			unique (document_id, update_sha256)
+		)`,
+		`create index if not exists incoming_updates_by_doc_seq on incoming_updates(document_id, incoming_seq)`,
 		`create table if not exists content_outbox (
 			id text primary key,
 			document_id text not null,
@@ -223,18 +227,18 @@ func (c *workspaceStore) materialize(ctx context.Context, meta *document) (*mate
 		DocMu:        &sync.Mutex{},
 		Entry:        entry,
 		ContentKnown: len(state) > 0,
-		UpdateID:     metadata.UpdateID,
+		UpdateID:     meta.UpdateID,
 	}, nil
 }
 
-func (c *workspaceStore) storeDoc(documentID, path string, updateID int64, doc *crdt.Doc) error {
+func (c *workspaceStore) storeDoc(documentID, path string, _ int64, doc *crdt.Doc) error {
 	if c == nil || documentID == "" || doc == nil {
 		return nil
 	}
 	entry := c.entryFor(documentID)
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
-	metadata := documentCacheMetadata{DocumentID: documentID, Path: path, UpdateID: updateID, UpdatedAt: time.Now().UTC()}
+	metadata := documentCacheMetadata{DocumentID: documentID, Path: path, UpdatedAt: time.Now().UTC()}
 	return c.storeDocLocked(entry, metadata, doc)
 }
 
@@ -245,10 +249,10 @@ func (c *workspaceStore) storeDocLocked(entry *documentCacheEntry, metadata docu
 	state := doc.EncodeStateAsUpdate()
 	now := time.Now().UTC()
 	return c.withTx(func(tx *sql.Tx) error {
-		if _, err := c.ensureDocumentTx(tx, metadata.DocumentID, metadata.Path, metadata.UpdateID, now); err != nil {
+		if _, err := c.ensureDocumentTx(tx, metadata.DocumentID, metadata.Path, now); err != nil {
 			return err
 		}
-		seq, _, err := c.insertCRDTUpdateTx(tx, metadata.DocumentID, state, "local", metadata.UpdateID, "", "", now)
+		seq, _, err := c.insertCRDTUpdateTx(tx, metadata.DocumentID, state, "base", "", "", now)
 		if err != nil {
 			return err
 		}
@@ -300,10 +304,10 @@ func (c *workspaceStore) appendPendingRemoteUpdate(documentID, path string, upda
 	now := time.Now().UTC()
 	inserted := false
 	err := c.withTx(func(tx *sql.Tx) error {
-		if _, err := c.ensureDocumentTx(tx, documentID, path, 0, now); err != nil {
+		if _, err := c.ensureDocumentTx(tx, documentID, path, now); err != nil {
 			return err
 		}
-		_, ok, err := c.insertCRDTUpdateTx(tx, documentID, update, "remote", 0, "", "", now)
+		_, ok, err := c.insertIncomingUpdateTx(tx, documentID, update, now)
 		if err != nil {
 			return err
 		}
@@ -311,6 +315,35 @@ func (c *workspaceStore) appendPendingRemoteUpdate(documentID, path string, upda
 		return nil
 	})
 	return inserted, err
+}
+
+func (c *workspaceStore) insertIncomingUpdateTx(tx *sql.Tx, documentID string, update []byte, now time.Time) (int64, bool, error) {
+	if len(update) == 0 {
+		return 0, false, nil
+	}
+	updateHash := sha256Hex(update)
+	res, err := tx.Exec(`insert or ignore into incoming_updates (
+			document_id, update_sha256, update_bytes, received_at
+		) values (?, ?, ?, ?)`,
+		documentID, updateHash, update, unixNano(now))
+	if err != nil {
+		return 0, false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return 0, false, err
+	}
+	var seq int64
+	if affected == 0 {
+		if err := tx.QueryRow(`select incoming_seq from incoming_updates where document_id = ? and update_sha256 = ?`, documentID, updateHash).Scan(&seq); err != nil {
+			return 0, false, err
+		}
+		return seq, false, nil
+	}
+	if err := tx.QueryRow(`select last_insert_rowid()`).Scan(&seq); err != nil {
+		return 0, false, err
+	}
+	return seq, true, nil
 }
 
 func (c *workspaceStore) loadBaseDoc(documentID, path string) (*crdt.Doc, documentCacheMetadata, []byte, error) {
@@ -325,7 +358,7 @@ func (c *workspaceStore) loadBaseDoc(documentID, path string) (*crdt.Doc, docume
 }
 
 func (c *workspaceStore) loadBaseDocLocked(entry *documentCacheEntry, documentID, path string) (*crdt.Doc, documentCacheMetadata, []byte, error) {
-	row, err := c.ensureDocument(documentID, path, 0)
+	row, err := c.ensureDocument(documentID, path)
 	if err != nil {
 		return nil, documentCacheMetadata{DocumentID: documentID, Path: path}, nil, err
 	}
@@ -344,12 +377,8 @@ func (c *workspaceStore) pendingRemoteUpdateCountLocked(_ *documentCacheEntry, d
 	if c == nil || documentID == "" {
 		return 0, nil
 	}
-	row, err := c.ensureDocument(documentID, "", 0)
-	if err != nil {
-		return 0, err
-	}
 	var count int
-	err = c.db.QueryRow(`select count(*) from crdt_updates where document_id = ? and source = 'remote' and seq > ?`, documentID, row.AppliedSeq).Scan(&count)
+	err := c.db.QueryRow(`select count(*) from incoming_updates where document_id = ?`, documentID).Scan(&count)
 	return count, err
 }
 
@@ -367,21 +396,25 @@ func (c *workspaceStore) applyPendingRemoteUpdatesLocked(_ *documentCacheEntry, 
 	if c == nil || doc == nil || documentID == "" {
 		return 0, nil
 	}
-	row, err := c.ensureDocument(documentID, "", 0)
+	row, err := c.ensureDocument(documentID, "")
 	if err != nil {
 		return 0, err
 	}
-	rows, err := c.db.Query(`select seq, update_bytes from crdt_updates where document_id = ? and seq > ? order by seq`, documentID, row.AppliedSeq)
+	rows, err := c.db.Query(`select incoming_seq, update_bytes from incoming_updates where document_id = ? order by incoming_seq`, documentID)
 	if err != nil {
 		return 0, err
 	}
 	defer rows.Close()
-	maxSeq := row.AppliedSeq
+	type incomingUpdate struct {
+		seq    int64
+		update []byte
+	}
+	var incoming []incomingUpdate
 	count := 0
 	for rows.Next() {
-		var seq int64
+		var incomingSeq int64
 		var update []byte
-		if err := rows.Scan(&seq, &update); err != nil {
+		if err := rows.Scan(&incomingSeq, &update); err != nil {
 			return count, err
 		}
 		if len(update) == 0 {
@@ -390,9 +423,7 @@ func (c *workspaceStore) applyPendingRemoteUpdatesLocked(_ *documentCacheEntry, 
 		if err := crdt.ApplyUpdateV1(doc, update, "remote-reconcile"); err != nil {
 			return count, err
 		}
-		if seq > maxSeq {
-			maxSeq = seq
-		}
+		incoming = append(incoming, incomingUpdate{seq: incomingSeq, update: update})
 		count++
 	}
 	if err := rows.Err(); err != nil {
@@ -401,7 +432,24 @@ func (c *workspaceStore) applyPendingRemoteUpdatesLocked(_ *documentCacheEntry, 
 	if count == 0 {
 		return 0, nil
 	}
-	_, err = c.db.Exec(`update documents set applied_seq = ?, updated_at = ? where document_id = ?`, maxSeq, unixNano(time.Now().UTC()), documentID)
+	maxSeq := row.AppliedSeq
+	now := time.Now().UTC()
+	err = c.withTx(func(tx *sql.Tx) error {
+		for _, item := range incoming {
+			seq, _, err := c.insertCRDTUpdateTx(tx, documentID, item.update, "remote", "", "", now)
+			if err != nil {
+				return err
+			}
+			if seq > maxSeq {
+				maxSeq = seq
+			}
+			if _, err := tx.Exec(`delete from incoming_updates where document_id = ? and incoming_seq = ?`, documentID, item.seq); err != nil {
+				return err
+			}
+		}
+		_, err := tx.Exec(`update documents set applied_seq = ?, updated_at = ? where document_id = ?`, maxSeq, unixNano(now), documentID)
+		return err
+	})
 	return count, err
 }
 
@@ -466,7 +514,7 @@ func (c *workspaceStore) storeOutboxUpdatesLocked(entry *documentCacheEntry, doc
 	}
 	now := time.Now().UTC()
 	return c.withTx(func(tx *sql.Tx) error {
-		row, err := c.ensureDocumentTx(tx, documentID, path, 0, now)
+		row, err := c.ensureDocumentTx(tx, documentID, path, now)
 		if err != nil {
 			return err
 		}
@@ -508,37 +556,24 @@ func (c *workspaceStore) storeOutboxUpdatesLocked(entry *documentCacheEntry, doc
 	})
 }
 
-func (c *workspaceStore) acceptOutboxUpdateLocked(_ *documentCacheEntry, documentID, path string, record *outboxUpdateRecord, backendUpdateID int64) error {
+func (c *workspaceStore) acceptOutboxUpdateLocked(_ *documentCacheEntry, documentID, path string, record *outboxUpdateRecord, _ int64) error {
 	if c == nil || documentID == "" || record == nil || len(record.Update) == 0 {
 		return nil
 	}
 	now := time.Now().UTC()
 	return c.withTx(func(tx *sql.Tx) error {
-		row, err := c.ensureDocumentTx(tx, documentID, path, backendUpdateID, now)
-		if err != nil {
+		if _, err := c.ensureDocumentTx(tx, documentID, path, now); err != nil {
 			return err
 		}
-		seq, _, err := c.insertCRDTUpdateTx(tx, documentID, record.Update, "local", backendUpdateID, record.ActorID, record.ActorType, now)
+		seq, _, err := c.insertCRDTUpdateTx(tx, documentID, record.Update, "local", record.ActorID, record.ActorType, now)
 		if err != nil {
 			return err
 		}
 		if seq > 0 {
-			var gapCount int
-			if err := tx.QueryRow(`select count(*) from crdt_updates where document_id = ? and seq > ? and seq < ?`, documentID, row.AppliedSeq, seq).Scan(&gapCount); err != nil {
-				return err
-			}
-			if gapCount == 0 {
-				if _, err := tx.Exec(`update documents
-					set applied_seq = max(applied_seq, ?),
-						backend_update_id = case when ? > backend_update_id then ? else backend_update_id end,
-						updated_at = ?
-					where document_id = ?`, seq, backendUpdateID, backendUpdateID, unixNano(now), documentID); err != nil {
-					return err
-				}
-			} else if _, err := tx.Exec(`update documents
-				set backend_update_id = case when ? > backend_update_id then ? else backend_update_id end,
+			if _, err := tx.Exec(`update documents
+				set applied_seq = max(applied_seq, ?),
 					updated_at = ?
-				where document_id = ?`, backendUpdateID, backendUpdateID, unixNano(now), documentID); err != nil {
+				where document_id = ?`, seq, unixNano(now), documentID); err != nil {
 				return err
 			}
 		}
@@ -561,6 +596,7 @@ func (c *workspaceStore) removeDocumentLocked(entry *documentCacheEntry, documen
 		for _, stmt := range []string{
 			`delete from thread_outbox where document_id = ?`,
 			`delete from content_outbox where document_id = ?`,
+			`delete from incoming_updates where document_id = ?`,
 			`delete from crdt_updates where document_id = ?`,
 			`delete from documents where document_id = ?`,
 		} {
@@ -589,7 +625,7 @@ func (c *workspaceStore) storeProjectedBase(documentID, content string, states .
 	if c == nil || documentID == "" {
 		return nil
 	}
-	row, err := c.ensureDocument(documentID, "", 0)
+	row, err := c.ensureDocument(documentID, "")
 	if err != nil {
 		return err
 	}
@@ -650,7 +686,7 @@ func (c *workspaceStore) loadProjectedBase(documentID string) (string, []byte, b
 	if c == nil || documentID == "" {
 		return "", nil, false, nil
 	}
-	row, err := c.ensureDocument(documentID, "", 0)
+	row, err := c.ensureDocument(documentID, "")
 	if err != nil {
 		return "", nil, false, err
 	}
@@ -673,7 +709,7 @@ func (c *workspaceStore) loadProjectedBase(documentID string) (string, []byte, b
 }
 
 func (c *workspaceStore) documentContentKnown(documentID string) (bool, error) {
-	row, err := c.ensureDocument(documentID, "", 0)
+	row, err := c.ensureDocument(documentID, "")
 	if err != nil {
 		return false, err
 	}
@@ -688,7 +724,7 @@ func (c *workspaceStore) documentsNeedingReconcile() ([]string, bool, error) {
 		select document_id from documents
 		where exists (select 1 from content_outbox where content_outbox.document_id = documents.document_id)
 		   or exists (select 1 from thread_outbox where thread_outbox.document_id = documents.document_id and status = 'pending')
-		   or exists (select 1 from crdt_updates where crdt_updates.document_id = documents.document_id and crdt_updates.source = 'remote' and crdt_updates.seq > documents.applied_seq)
+		   or exists (select 1 from incoming_updates where incoming_updates.document_id = documents.document_id)
 		order by document_id`)
 	if err != nil {
 		return nil, false, err
@@ -721,14 +757,14 @@ func (c *workspaceStore) withTx(fn func(*sql.Tx) error) error {
 	return tx.Commit()
 }
 
-func (c *workspaceStore) ensureDocument(documentID, path string, updateID int64) (documentRow, error) {
+func (c *workspaceStore) ensureDocument(documentID, path string) (documentRow, error) {
 	if c == nil || documentID == "" {
 		return documentRow{DocumentID: documentID, Path: path}, nil
 	}
 	var row documentRow
 	now := time.Now().UTC()
 	err := c.withTx(func(tx *sql.Tx) error {
-		next, err := c.ensureDocumentTx(tx, documentID, path, updateID, now)
+		next, err := c.ensureDocumentTx(tx, documentID, path, now)
 		if err != nil {
 			return err
 		}
@@ -738,17 +774,16 @@ func (c *workspaceStore) ensureDocument(documentID, path string, updateID int64)
 	return row, err
 }
 
-func (c *workspaceStore) ensureDocumentTx(tx *sql.Tx, documentID, path string, updateID int64, now time.Time) (documentRow, error) {
+func (c *workspaceStore) ensureDocumentTx(tx *sql.Tx, documentID, path string, now time.Time) (documentRow, error) {
 	if documentID == "" {
 		return documentRow{}, errors.New("document id is required")
 	}
-	if _, err := tx.Exec(`insert into documents (document_id, path, backend_update_id, updated_at)
-		values (?, ?, ?, ?)
+	if _, err := tx.Exec(`insert into documents (document_id, path, updated_at)
+		values (?, ?, ?)
 		on conflict(document_id) do update set
 			path = case when excluded.path != '' then excluded.path else documents.path end,
-			backend_update_id = case when excluded.backend_update_id > documents.backend_update_id then excluded.backend_update_id else documents.backend_update_id end,
 			updated_at = excluded.updated_at`,
-		documentID, path, updateID, unixNano(now)); err != nil {
+		documentID, path, unixNano(now)); err != nil {
 		return documentRow{}, err
 	}
 	return c.loadDocumentRowTx(tx, documentID)
@@ -760,9 +795,9 @@ func (c *workspaceStore) loadDocumentRowTx(tx *sql.Tx, documentID string) (docum
 	var projectedLen sql.NullInt64
 	var updatedAt int64
 	var projectionKnown int
-	err := tx.QueryRow(`select document_id, path, backend_update_id, applied_seq, projected_seq, projected_text_sha256, projected_text_len, projection_known, updated_at
+	err := tx.QueryRow(`select document_id, path, applied_seq, projected_seq, projected_text_sha256, projected_text_len, projection_known, updated_at
 		from documents where document_id = ?`, documentID).Scan(
-		&row.DocumentID, &row.Path, &row.BackendUpdateID, &row.AppliedSeq, &row.ProjectedSeq,
+		&row.DocumentID, &row.Path, &row.AppliedSeq, &row.ProjectedSeq,
 		&projectedHash, &projectedLen, &projectionKnown, &updatedAt,
 	)
 	if err != nil {
@@ -777,19 +812,15 @@ func (c *workspaceStore) loadDocumentRowTx(tx *sql.Tx, documentID string) (docum
 	return row, nil
 }
 
-func (c *workspaceStore) insertCRDTUpdateTx(tx *sql.Tx, documentID string, update []byte, source string, backendUpdateID int64, actorID, actorType string, now time.Time) (int64, bool, error) {
+func (c *workspaceStore) insertCRDTUpdateTx(tx *sql.Tx, documentID string, update []byte, source string, actorID, actorType string, now time.Time) (int64, bool, error) {
 	if len(update) == 0 {
 		return 0, false, nil
 	}
 	updateHash := sha256Hex(update)
-	var backend any
-	if backendUpdateID > 0 {
-		backend = backendUpdateID
-	}
 	res, err := tx.Exec(`insert or ignore into crdt_updates (
-			document_id, update_sha256, update_bytes, source, backend_update_id, actor_id, actor_type, created_at
-		) values (?, ?, ?, ?, ?, ?, ?, ?)`,
-		documentID, updateHash, update, source, backend, actorID, actorType, unixNano(now))
+			document_id, update_sha256, update_bytes, source, actor_id, actor_type, created_at
+		) values (?, ?, ?, ?, ?, ?, ?)`,
+		documentID, updateHash, update, source, actorID, actorType, unixNano(now))
 	if err != nil {
 		return 0, false, err
 	}
@@ -862,7 +893,6 @@ func (r documentRow) metadata() documentCacheMetadata {
 	return documentCacheMetadata{
 		DocumentID:   r.DocumentID,
 		Path:         r.Path,
-		UpdateID:     r.BackendUpdateID,
 		AppliedSeq:   r.AppliedSeq,
 		ProjectedSeq: r.ProjectedSeq,
 		UpdatedAt:    r.UpdatedAt,

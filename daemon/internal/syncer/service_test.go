@@ -970,7 +970,7 @@ func TestDocumentCacheLocalStateVectorRequiresAppliedCRDTRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
-	if _, err := cache.ensureDocument("doc_1", "doc.md", 0); err != nil {
+	if _, err := cache.ensureDocument("doc_1", "doc.md"); err != nil {
 		t.Fatalf("ensure document: %v", err)
 	}
 
@@ -1573,8 +1573,8 @@ func TestReconcileSendsLocalEditBeforeApplyingPendingRemoteUpdate(t *testing.T) 
 	if err != nil {
 		t.Fatalf("load cached doc after local finalize: %v", err)
 	}
-	if got := cachedDoc.GetText("content").ToString(); got != "base\n" {
-		t.Fatalf("expected global cursor to stay before pending remote until inbox pass, got %q", got)
+	if got := cachedDoc.GetText("content").ToString(); got != "base\nlocal\n" {
+		t.Fatalf("expected accepted local update to be visible before pending incoming folds, got %q", got)
 	}
 
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
