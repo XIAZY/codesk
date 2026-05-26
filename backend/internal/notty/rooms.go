@@ -14,8 +14,14 @@ type DocumentRooms struct {
 
 type DocumentRoom struct {
 	mu        sync.Mutex
-	conns     map[*DocumentConn]struct{}
+	conns     map[documentSubscriber]struct{}
 	awareness map[uint64]yproto.AwarenessState
+}
+
+type documentSubscriber interface {
+	sendDocument(documentID string, payload []byte) bool
+	trySendDocument(documentID string, payload []byte) bool
+	close()
 }
 
 type DocumentConn struct {
@@ -48,6 +54,18 @@ func (c *DocumentConn) Close() {
 
 func (c *DocumentConn) Done() <-chan struct{} {
 	return c.done
+}
+
+func (c *DocumentConn) close() {
+	c.Close()
+}
+
+func (c *DocumentConn) sendDocument(_ string, payload []byte) bool {
+	return c.Enqueue(payload)
+}
+
+func (c *DocumentConn) trySendDocument(_ string, payload []byte) bool {
+	return c.TryEnqueue(payload)
 }
 
 func (c *DocumentConn) Enqueue(payload []byte) bool {
@@ -95,45 +113,55 @@ func (r *DocumentRooms) ForDocument(documentID string) *DocumentRoom {
 		return room
 	}
 	room := &DocumentRoom{
-		conns:     map[*DocumentConn]struct{}{},
+		conns:     map[documentSubscriber]struct{}{},
 		awareness: map[uint64]yproto.AwarenessState{},
 	}
 	r.rooms[documentID] = room
 	return room
 }
 
-func (r *DocumentRoom) Add(conn *DocumentConn) {
+func (r *DocumentRoom) Add(conn documentSubscriber) {
+	if conn == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.conns[conn] = struct{}{}
 }
 
-func (r *DocumentRoom) Remove(conn *DocumentConn) {
+func (r *DocumentRoom) Remove(conn documentSubscriber) {
+	if conn == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.conns, conn)
 }
 
-func (r *DocumentRoom) BroadcastBestEffort(payload []byte, skip *DocumentConn) {
+func (r *DocumentRoom) BroadcastBestEffort(payload []byte, skip documentSubscriber) {
+	r.BroadcastDocumentBestEffort("", payload, skip)
+}
+
+func (r *DocumentRoom) BroadcastDocumentBestEffort(documentID string, payload []byte, skip documentSubscriber) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for conn := range r.conns {
 		if conn == skip {
 			continue
 		}
-		conn.TryEnqueue(payload)
+		conn.trySendDocument(documentID, payload)
 	}
 }
 
-func (r *DocumentRoom) BroadcastSyncUpdate(payload []byte, skip *DocumentConn) {
+func (r *DocumentRoom) BroadcastSyncUpdate(documentID string, payload []byte, skip documentSubscriber) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for conn := range r.conns {
 		if conn == skip {
 			continue
 		}
-		if !conn.TryEnqueue(payload) {
-			conn.Close()
+		if !conn.trySendDocument(documentID, payload) {
+			conn.close()
 		}
 	}
 }

@@ -74,6 +74,7 @@ func (s *Server) Routes() http.Handler {
 		router.Use(s.requireWorkspace)
 		router.Get("/ws/workspaces/{workspaceID}", s.handleWebsocket)
 		router.Get("/ws/workspaces/{workspaceID}/documents/{id}", s.handleDocumentWebsocket)
+		router.Get("/ws/workspaces/{workspaceID}/documents-sync", s.handleWorkspaceDocumentSyncWebsocket)
 	})
 
 	if !s.authEnabled() {
@@ -111,6 +112,7 @@ func (s *Server) Routes() http.Handler {
 		router.Post("/api/agents/{id}/documents/{documentID}/viewed", s.handleMarkAgentDocumentViewed)
 		router.Get("/ws", s.handleWebsocket)
 		router.Get("/ws/documents/{id}", s.handleDocumentWebsocket)
+		router.Get("/ws/documents-sync", s.handleWorkspaceDocumentSyncWebsocket)
 	}
 
 	return router

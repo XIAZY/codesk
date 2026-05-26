@@ -201,7 +201,6 @@ func TestWorkspaceRuntimeLocalCreateWakesReconcileQueue(t *testing.T) {
 	runtime := &workspaceRuntime{
 		localCreates:     newLocalCreateQueue(),
 		reconcileQueue:   newReconcileQueue(),
-		documentSyncs:    map[string]*managedDocumentSync{},
 		initialWorkspace: nil,
 	}
 
@@ -236,7 +235,6 @@ func TestWorkspaceRuntimeCreateEditDeleteMultipleFilesRegression(t *testing.T) {
 	defer runtime.replica.watcher.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	defer runtime.closeDocumentSyncs()
 
 	initial := map[string]string{
 		"docs/a.md":  "alpha\n",
@@ -329,7 +327,6 @@ func TestWorkspaceRuntimeDropsStaleLocalCreateCandidates(t *testing.T) {
 		t.Fatalf("new runtime: %v", err)
 	}
 	defer runtime.replica.watcher.Close()
-	defer runtime.closeDocumentSyncs()
 	tracked := &trackedFile{DocumentID: "doc_tracked", DocumentPath: "docs/tracked.md", Path: trackedPath, WorkspaceRoot: root}
 	runtime.replica.projectedByPath[trackedPath] = tracked
 	runtime.replica.projectedByID[tracked.DocumentID] = tracked
@@ -460,6 +457,40 @@ func TestProductionReconcileTrackedDocumentOnlyRuntimeLoop(t *testing.T) {
 	}
 }
 
+func TestProductionDocumentSyncUsesWorkspaceMuxSocketOnly(t *testing.T) {
+	forbidden := []string{
+		"/ws/documents/",
+		"managedDocumentSync",
+		"documentSyncs",
+	}
+	matches := map[string][]string{}
+	err := filepath.WalkDir(".", func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		text := string(data)
+		for _, token := range forbidden {
+			if strings.Contains(text, token) {
+				matches[path] = append(matches[path], token)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk syncer sources: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("daemon document sync must use the workspace mux socket only; production matches: %#v", matches)
+	}
+}
+
 func TestWorkspaceRuntimeRunReconcilesLocalCreateEvents(t *testing.T) {
 	root := t.TempDir()
 	cfg := Config{
@@ -487,7 +518,6 @@ func TestWorkspaceRuntimeRunReconcilesLocalCreateEvents(t *testing.T) {
 	}()
 	t.Cleanup(func() {
 		cancel()
-		runtime.closeDocumentSyncs()
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):

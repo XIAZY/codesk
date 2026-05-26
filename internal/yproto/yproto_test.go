@@ -1,6 +1,7 @@
 package yproto
 
 import (
+	"bytes"
 	"testing"
 
 	crdt "notty/internal/ycrdt"
@@ -108,5 +109,40 @@ func TestBuildAndDecodeAwarenessUpdateRoundTrip(t *testing.T) {
 	}
 	if got := string(state.State); got != `{"actorId":"owner"}` {
 		t.Fatalf("unexpected awareness payload: %q", got)
+	}
+}
+
+func TestBuildAndDecodeDocumentMessageRoundTrip(t *testing.T) {
+	inner := BuildSyncStep1FromStateVector([]byte{1, 2, 3})
+	payload := BuildDocumentMessage("doc_123", inner)
+
+	documentID, decoded, err := DecodeDocumentMessage(payload)
+	if err != nil {
+		t.Fatalf("decode document message: %v", err)
+	}
+	if documentID != "doc_123" {
+		t.Fatalf("document id = %q, want doc_123", documentID)
+	}
+	if !bytes.Equal(decoded, inner) {
+		t.Fatal("decoded payload did not preserve y-protocol bytes")
+	}
+}
+
+func TestDecodeDocumentMessageRejectsInvalidEnvelope(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload []byte
+	}{
+		{name: "raw sync", payload: BuildSyncStep1FromStateVector(nil)},
+		{name: "empty document id", payload: BuildDocumentMessage("", BuildSyncStep1FromStateVector(nil))},
+		{name: "empty payload", payload: BuildDocumentMessage("doc_123", nil)},
+		{name: "trailing bytes", payload: append(BuildDocumentMessage("doc_123", BuildSyncStep1FromStateVector(nil)), 99)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, _, err := DecodeDocumentMessage(tt.payload); err == nil {
+				t.Fatal("expected decode error")
+			}
+		})
 	}
 }
