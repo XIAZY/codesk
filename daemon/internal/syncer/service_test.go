@@ -802,7 +802,7 @@ func TestReconcileArchivesUnknownProjectedBaseInsteadOfDiffing(t *testing.T) {
 	}
 }
 
-func TestDocumentSyncAppendsIncomingUpdateToPendingLog(t *testing.T) {
+func TestWorkspaceDocumentSocketAppendsIncomingUpdateToPendingLog(t *testing.T) {
 	cache, err := newDocumentCache(t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
@@ -810,15 +810,15 @@ func TestDocumentSyncAppendsIncomingUpdateToPendingLog(t *testing.T) {
 	if err := cache.storeDoc("doc_1", "doc.md", 1, newDocWithText(t, "cached local projection")); err != nil {
 		t.Fatalf("store cached doc: %v", err)
 	}
-	var marked []string
-	sync := newDocumentSync(Config{AgentID: "daemon_agent"}, cache, &document{
-		ID:   "doc_1",
-		Path: "doc.md",
-	}, func(documentID string) {
-		marked = append(marked, documentID)
-	})
+	runtime := &workspaceRuntime{
+		cfg:            Config{AgentID: "daemon_agent"},
+		docCache:       cache,
+		reconcileQueue: newReconcileQueue(),
+	}
+	runtime.documentSocket = newWorkspaceDocumentSocket(runtime)
+	runtime.documentSocket.SetDesiredDocuments([]*document{{ID: "doc_1", Path: "doc.md"}, {ID: "doc_2", Path: "other.md"}})
 	remoteUpdate := updateFromBaseContent(t, "cached local projection", "cached local projection\nremote\n", "remote")
-	if err := sync.handleMessage(yproto.BuildSyncUpdate(remoteUpdate)); err != nil {
+	if err := runtime.handleDocumentSyncMessage("doc_1", yproto.BuildSyncUpdate(remoteUpdate)); err != nil {
 		t.Fatalf("handle incoming update: %v", err)
 	}
 	count, err := cache.pendingRemoteUpdateCount("doc_1")
@@ -828,12 +828,24 @@ func TestDocumentSyncAppendsIncomingUpdateToPendingLog(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("expected one pending remote update, got %d", count)
 	}
-	if !reflect.DeepEqual(marked, []string{"doc_1"}) {
-		t.Fatalf("expected dirty mark for document, got %#v", marked)
+	otherCount, err := cache.pendingRemoteUpdateCount("doc_2")
+	if err != nil {
+		t.Fatalf("other pending count: %v", err)
+	}
+	if otherCount != 0 {
+		t.Fatalf("expected no pending updates for doc_2, got %d", otherCount)
+	}
+	select {
+	case <-runtime.reconcileQueue.Wake():
+		if got := runtime.reconcileQueue.Drain(); !reflect.DeepEqual(got, []string{"doc_1"}) {
+			t.Fatalf("expected dirty mark for doc_1, got %#v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected dirty mark for document")
 	}
 }
 
-func TestDocumentSyncIgnoresServerSyncStep1(t *testing.T) {
+func TestWorkspaceDocumentSocketIgnoresServerSyncStep1(t *testing.T) {
 	cache, err := newDocumentCache(t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
@@ -841,15 +853,15 @@ func TestDocumentSyncIgnoresServerSyncStep1(t *testing.T) {
 	if err := cache.storeDoc("doc_1", "doc.md", 1, newDocWithText(t, "cached local projection")); err != nil {
 		t.Fatalf("store cached doc: %v", err)
 	}
-	var marked []string
-	sync := newDocumentSync(Config{AgentID: "daemon_agent"}, cache, &document{
-		ID:   "doc_1",
-		Path: "doc.md",
-	}, func(documentID string) {
-		marked = append(marked, documentID)
-	})
+	runtime := &workspaceRuntime{
+		cfg:            Config{AgentID: "daemon_agent"},
+		docCache:       cache,
+		reconcileQueue: newReconcileQueue(),
+	}
+	runtime.documentSocket = newWorkspaceDocumentSocket(runtime)
+	runtime.documentSocket.SetDesiredDocuments([]*document{{ID: "doc_1", Path: "doc.md"}})
 
-	if err := sync.handleMessage(yproto.BuildSyncStep1FromStateVector(nil)); err != nil {
+	if err := runtime.handleDocumentSyncMessage("doc_1", yproto.BuildSyncStep1FromStateVector(nil)); err != nil {
 		t.Fatalf("handle server sync step 1: %v", err)
 	}
 	count, err := cache.pendingRemoteUpdateCount("doc_1")
@@ -859,12 +871,14 @@ func TestDocumentSyncIgnoresServerSyncStep1(t *testing.T) {
 	if count != 0 {
 		t.Fatalf("server sync step 1 should not append pending updates, got %d", count)
 	}
-	if len(marked) != 0 {
-		t.Fatalf("server sync step 1 should not mark dirty, got %#v", marked)
+	select {
+	case documentID := <-runtime.reconcileQueue.Wake():
+		t.Fatalf("server sync step 1 should not mark dirty, got %q", documentID)
+	default:
 	}
 }
 
-func TestDocumentSyncRunOnceStopsWhenContextCancelsIdleWebsocket(t *testing.T) {
+func TestWorkspaceDocumentSocketRunOnceStopsWhenContextCancelsIdleWebsocket(t *testing.T) {
 	initialRead := make(chan struct{})
 	clientClosed := make(chan struct{})
 	handlerErr := make(chan error, 1)
@@ -872,7 +886,7 @@ func TestDocumentSyncRunOnceStopsWhenContextCancelsIdleWebsocket(t *testing.T) {
 	var closedOnce sync.Once
 	upgrader := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/ws/documents/doc_1" {
+		if r.URL.Path != "/ws/documents-sync" {
 			http.NotFound(w, r)
 			return
 		}
@@ -886,8 +900,31 @@ func TestDocumentSyncRunOnceStopsWhenContextCancelsIdleWebsocket(t *testing.T) {
 		}
 		defer conn.Close()
 		for {
-			if _, _, err := conn.ReadMessage(); err != nil {
+			_, payload, err := conn.ReadMessage()
+			if err != nil {
 				closedOnce.Do(func() { close(clientClosed) })
+				return
+			}
+			documentID, inner, err := yproto.DecodeDocumentMessage(payload)
+			if err != nil {
+				select {
+				case handlerErr <- err:
+				default:
+				}
+				return
+			}
+			if documentID != "doc_1" {
+				select {
+				case handlerErr <- fmt.Errorf("unexpected document id %q", documentID):
+				default:
+				}
+				return
+			}
+			if topLevel, _, err := yproto.DecodeProtocolMessage(inner); err != nil || topLevel != yproto.MessageSync {
+				select {
+				case handlerErr <- fmt.Errorf("unexpected sync payload top=%d err=%v", topLevel, err):
+				default:
+				}
 				return
 			}
 			initialOnce.Do(func() { close(initialRead) })
@@ -897,13 +934,16 @@ func TestDocumentSyncRunOnceStopsWhenContextCancelsIdleWebsocket(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	sync := newDocumentSync(Config{BackendURL: server.URL, AgentID: "daemon_agent"}, nil, &document{
-		ID:   "doc_1",
-		Path: "doc.md",
-	}, nil)
+	runtime := &workspaceRuntime{
+		cfg:            Config{BackendURL: server.URL, AgentID: "daemon_agent"},
+		docCache:       nil,
+		reconcileQueue: newReconcileQueue(),
+	}
+	runtime.documentSocket = newWorkspaceDocumentSocket(runtime)
+	runtime.documentSocket.SetDesiredDocuments([]*document{{ID: "doc_1", Path: "doc.md"}})
 	done := make(chan error, 1)
 	go func() {
-		done <- sync.runOnce(ctx)
+		done <- runtime.documentSocket.runOnce(ctx)
 	}()
 
 	select {
@@ -911,7 +951,7 @@ func TestDocumentSyncRunOnceStopsWhenContextCancelsIdleWebsocket(t *testing.T) {
 	case err := <-handlerErr:
 		t.Fatalf("websocket handler error: %v", err)
 	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for document sync to send initial sync message")
+		t.Fatal("timed out waiting for document socket to send initial sync message")
 	}
 
 	cancel()
@@ -919,7 +959,7 @@ func TestDocumentSyncRunOnceStopsWhenContextCancelsIdleWebsocket(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("document sync did not exit after context cancellation")
+		t.Fatal("document socket did not exit after context cancellation")
 	}
 	select {
 	case <-clientClosed:
@@ -928,23 +968,107 @@ func TestDocumentSyncRunOnceStopsWhenContextCancelsIdleWebsocket(t *testing.T) {
 	}
 }
 
-func TestDocumentSyncInitialSyncDoesNotAdvertiseMissingCacheState(t *testing.T) {
+func TestWorkspaceDocumentSocketRunOnceSendsSyncStep1ForDesiredDocuments(t *testing.T) {
+	received := make(chan string, 2)
+	handlerErr := make(chan error, 1)
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ws/documents-sync" {
+			http.NotFound(w, r)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			select {
+			case handlerErr <- err:
+			default:
+			}
+			return
+		}
+		defer conn.Close()
+		for i := 0; i < 2; i++ {
+			_, payload, err := conn.ReadMessage()
+			if err != nil {
+				select {
+				case handlerErr <- err:
+				default:
+				}
+				return
+			}
+			documentID, inner, err := yproto.DecodeDocumentMessage(payload)
+			if err != nil {
+				select {
+				case handlerErr <- err:
+				default:
+				}
+				return
+			}
+			if syncType := decodeInitialSyncType(t, inner); syncType != yproto.SyncStep1 {
+				select {
+				case handlerErr <- fmt.Errorf("sync type = %d, want SyncStep1", syncType):
+				default:
+				}
+				return
+			}
+			received <- documentID
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runtime := &workspaceRuntime{
+		cfg:            Config{BackendURL: server.URL, AgentID: "daemon_agent"},
+		reconcileQueue: newReconcileQueue(),
+	}
+	runtime.documentSocket = newWorkspaceDocumentSocket(runtime)
+	runtime.documentSocket.SetDesiredDocuments([]*document{
+		{ID: "doc_b", Path: "b.md"},
+		{ID: "doc_a", Path: "a.md"},
+	})
+	done := make(chan error, 1)
+	go func() {
+		done <- runtime.documentSocket.runOnce(ctx)
+	}()
+
+	got := []string{}
+	for len(got) < 2 {
+		select {
+		case documentID := <-received:
+			got = append(got, documentID)
+		case err := <-handlerErr:
+			t.Fatalf("websocket handler error: %v", err)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for sync steps, got %#v", got)
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("document socket did not stop after cancel")
+	}
+	if !reflect.DeepEqual(got, []string{"doc_a", "doc_b"}) {
+		t.Fatalf("sync steps sent for %#v, want sorted doc_a/doc_b", got)
+	}
+}
+
+func TestWorkspaceDocumentSocketInitialSyncDoesNotAdvertiseMissingCacheState(t *testing.T) {
 	cache, err := newDocumentCache(t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
-	sync := newDocumentSync(Config{AgentID: "daemon_agent"}, cache, &document{
-		ID:   "doc_1",
-		Path: "doc.md",
-	}, nil)
+	runtime := &workspaceRuntime{cfg: Config{AgentID: "daemon_agent"}, docCache: cache}
+	runtime.documentSocket = newWorkspaceDocumentSocket(runtime)
 
-	stateVector := decodeInitialSyncStateVector(t, sync.initialSyncStep(sync.currentDocument()))
+	stateVector := decodeInitialSyncStateVector(t, runtime.documentSocket.initialSyncStep(&document{ID: "doc_1", Path: "doc.md"}))
 	if len(stateVector) != 0 {
 		t.Fatalf("fresh daemon must not advertise missing local cache state, got %v", stateVector)
 	}
 }
 
-func TestDocumentSyncInitialSyncUsesOnlyVerifiedLocalCacheState(t *testing.T) {
+func TestWorkspaceDocumentSocketInitialSyncUsesOnlyVerifiedLocalCacheState(t *testing.T) {
 	cache, err := newDocumentCache(t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
@@ -953,12 +1077,10 @@ func TestDocumentSyncInitialSyncUsesOnlyVerifiedLocalCacheState(t *testing.T) {
 	if err := cache.storeDoc("doc_1", "doc.md", 1, cachedDoc); err != nil {
 		t.Fatalf("store cached doc: %v", err)
 	}
-	sync := newDocumentSync(Config{AgentID: "daemon_agent"}, cache, &document{
-		ID:   "doc_1",
-		Path: "doc.md",
-	}, nil)
+	runtime := &workspaceRuntime{cfg: Config{AgentID: "daemon_agent"}, docCache: cache}
+	runtime.documentSocket = newWorkspaceDocumentSocket(runtime)
 
-	stateVector := decodeInitialSyncStateVector(t, sync.initialSyncStep(sync.currentDocument()))
+	stateVector := decodeInitialSyncStateVector(t, runtime.documentSocket.initialSyncStep(&document{ID: "doc_1", Path: "doc.md"}))
 	if !bytes.Equal(stateVector, crdt.EncodeStateVectorV1(cachedDoc)) {
 		t.Fatalf("expected daemon to advertise cached local state vector, got %v", stateVector)
 	}
@@ -996,6 +1118,22 @@ func decodeInitialSyncStateVector(t *testing.T, payload []byte) []byte {
 		t.Fatalf("expected sync step 1, got %d", syncType)
 	}
 	return stateVector
+}
+
+func decodeInitialSyncType(t *testing.T, payload []byte) uint64 {
+	t.Helper()
+	messageType, reader, err := yproto.DecodeProtocolMessage(payload)
+	if err != nil {
+		t.Fatalf("decode protocol message: %v", err)
+	}
+	if messageType != yproto.MessageSync {
+		t.Fatalf("expected sync message, got %d", messageType)
+	}
+	syncType, _, err := yproto.DecodeSyncMessage(reader)
+	if err != nil {
+		t.Fatalf("decode sync message: %v", err)
+	}
+	return syncType
 }
 
 func TestReconcileTrackedDocumentMergesLocalEditWithPendingRemoteUpdate(t *testing.T) {

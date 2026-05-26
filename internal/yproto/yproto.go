@@ -7,8 +7,9 @@ import (
 )
 
 const (
-	MessageSync      = 0
-	MessageAwareness = 1
+	MessageSync          = 0
+	MessageAwareness     = 1
+	MessageNottyDocument = 42
 )
 
 const (
@@ -82,6 +83,39 @@ func decodeVarString(reader *bytes.Reader) (string, error) {
 		return "", err
 	}
 	return string(value), nil
+}
+
+func BuildDocumentMessage(documentID string, payload []byte) []byte {
+	message := append(encodeVarUint(MessageNottyDocument), encodeVarString(documentID)...)
+	return append(message, encodeVarBytes(payload)...)
+}
+
+func DecodeDocumentMessage(payload []byte) (string, []byte, error) {
+	messageType, reader, err := DecodeProtocolMessage(payload)
+	if err != nil {
+		return "", nil, err
+	}
+	if messageType != MessageNottyDocument {
+		return "", nil, errors.New("unexpected document message type")
+	}
+	documentID, err := decodeVarString(reader)
+	if err != nil {
+		return "", nil, err
+	}
+	if documentID == "" {
+		return "", nil, errors.New("document id is required")
+	}
+	documentPayload, err := decodeVarBytes(reader)
+	if err != nil {
+		return "", nil, err
+	}
+	if len(documentPayload) == 0 {
+		return "", nil, errors.New("document payload is required")
+	}
+	if reader.Len() != 0 {
+		return "", nil, errors.New("document message has trailing bytes")
+	}
+	return documentID, documentPayload, nil
 }
 
 func BuildSyncStep1FromStateVector(stateVector []byte) []byte {

@@ -6,11 +6,14 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/gorilla/websocket"
 	crdt "notty/internal/ycrdt"
 	"notty/internal/yproto"
 )
@@ -267,6 +270,164 @@ func TestHTTPDocumentUpdateAcceptsCanonicalEmptyUpdateWithoutMutation(t *testing
 	}
 	if after.UpdateID != before.UpdateID {
 		t.Fatalf("empty update changed document version: before=%d after=%d", before.UpdateID, after.UpdateID)
+	}
+}
+
+func TestWorkspaceDocumentSyncWebsocketRoutesMultipleDocuments(t *testing.T) {
+	server, store := newTestServer(t)
+	docA := mustCreateTestDocument(t, store, "docs/a.md", "alpha")
+	docB := mustCreateTestDocument(t, store, "docs/b.md", "bravo")
+	httpServer := httptest.NewServer(server.Routes())
+	defer httpServer.Close()
+
+	conn := dialDocumentWebsocketForTest(t, httpServer.URL, "/ws/documents-sync")
+	defer conn.Close()
+
+	if err := conn.WriteMessage(websocket.BinaryMessage, yproto.BuildDocumentMessage(docA, buildSyncStep1ForTest(crdt.New(crdt.WithClientID(101))))); err != nil {
+		t.Fatalf("write docA sync step1: %v", err)
+	}
+	frameA := readDocumentWebsocketFrameForTest(t, conn)
+	if frameA.documentID != docA {
+		t.Fatalf("first response document = %q, want %q", frameA.documentID, docA)
+	}
+	assertSyncPayloadForTest(t, frameA.payload)
+
+	if err := conn.WriteMessage(websocket.BinaryMessage, yproto.BuildDocumentMessage(docB, buildSyncStep1ForTest(crdt.New(crdt.WithClientID(202))))); err != nil {
+		t.Fatalf("write docB sync step1: %v", err)
+	}
+	frameB := readDocumentWebsocketFrameForTest(t, conn)
+	for frameB.documentID == docA {
+		frameB = readDocumentWebsocketFrameForTest(t, conn)
+	}
+	if frameB.documentID != docB {
+		t.Fatalf("second document response = %q, want %q", frameB.documentID, docB)
+	}
+	assertSyncPayloadForTest(t, frameB.payload)
+}
+
+func TestRawDocumentWebsocketStillUsesRawYProtocolFrames(t *testing.T) {
+	server, store := newTestServer(t)
+	documentID := mustCreateTestDocument(t, store, "docs/raw.md", "alpha")
+	httpServer := httptest.NewServer(server.Routes())
+	defer httpServer.Close()
+
+	conn := dialDocumentWebsocketForTest(t, httpServer.URL, "/ws/documents/"+documentID)
+	defer conn.Close()
+	if err := conn.WriteMessage(websocket.BinaryMessage, buildSyncStep1ForTest(crdt.New(crdt.WithClientID(303)))); err != nil {
+		t.Fatalf("write raw sync step1: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	messageType, payload, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read raw websocket response: %v", err)
+	}
+	if messageType != websocket.BinaryMessage {
+		t.Fatalf("raw websocket response type = %d, want binary", messageType)
+	}
+	assertSyncPayloadForTest(t, payload)
+	if _, _, err := yproto.DecodeDocumentMessage(payload); err == nil {
+		t.Fatal("raw websocket response must not be wrapped as a routed document message")
+	}
+}
+
+func TestRawDocumentUpdateBroadcastsToMuxSubscriber(t *testing.T) {
+	server, store := newTestServer(t)
+	documentID := mustCreateTestDocument(t, store, "docs/mux-broadcast.md", "alpha")
+	httpServer := httptest.NewServer(server.Routes())
+	defer httpServer.Close()
+
+	conn := dialDocumentWebsocketForTest(t, httpServer.URL, "/ws/documents-sync")
+	defer conn.Close()
+	subscribePayload := yproto.BuildAwarenessUpdate(map[uint64]yproto.AwarenessState{
+		11: {Clock: 1, State: []byte(`{"actorId":"daemon"}`)},
+	}, []uint64{11})
+	if err := conn.WriteMessage(websocket.BinaryMessage, yproto.BuildDocumentMessage(documentID, subscribePayload)); err != nil {
+		t.Fatalf("write mux awareness subscription: %v", err)
+	}
+	roomKey := store.Snapshot().WorkspaceID + ":" + documentID
+	waitDocumentRoomSubscriberCount(t, server.rooms.ForDocument(roomKey), 1)
+
+	peerDoc := syncDocumentToDocForTest(t, store, documentID, 77)
+	text := peerDoc.GetText("content")
+	update := captureDocUpdate(t, peerDoc, "http-edit", func(txn *crdt.Transaction) {
+		text.Insert(txn, text.LenInTxn(txn), " beta", nil)
+	})
+	res, err := http.Post(httpServer.URL+"/api/documents/"+documentID+"/updates", "application/octet-stream", bytes.NewReader(update))
+	if err != nil {
+		t.Fatalf("post document update: %v", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("post document update status = %d", res.StatusCode)
+	}
+
+	frame := readDocumentWebsocketFrameForTest(t, conn)
+	if frame.documentID != documentID {
+		t.Fatalf("broadcast document = %q, want %q", frame.documentID, documentID)
+	}
+	messageType, reader, err := yproto.DecodeProtocolMessage(frame.payload)
+	if err != nil {
+		t.Fatalf("decode broadcast protocol: %v", err)
+	}
+	if messageType != yproto.MessageSync {
+		t.Fatalf("broadcast top-level = %d, want sync", messageType)
+	}
+	syncType, data, err := yproto.DecodeSyncMessage(reader)
+	if err != nil {
+		t.Fatalf("decode broadcast sync: %v", err)
+	}
+	if syncType != yproto.SyncUpdate {
+		t.Fatalf("broadcast sync type = %d, want update", syncType)
+	}
+	if !bytes.Equal(data, update) {
+		t.Fatal("broadcast update bytes did not match raw HTTP update")
+	}
+}
+
+func TestWorkspaceDocumentSyncWebsocketCloseRemovesAllSubscriptions(t *testing.T) {
+	server, store := newTestServer(t)
+	docA := mustCreateTestDocument(t, store, "docs/cleanup-a.md", "alpha")
+	docB := mustCreateTestDocument(t, store, "docs/cleanup-b.md", "bravo")
+	httpServer := httptest.NewServer(server.Routes())
+	defer httpServer.Close()
+
+	conn := dialDocumentWebsocketForTest(t, httpServer.URL, "/ws/documents-sync")
+	awareness := yproto.BuildAwarenessUpdate(map[uint64]yproto.AwarenessState{
+		11: {Clock: 1, State: []byte(`{"actorId":"daemon"}`)},
+	}, []uint64{11})
+	for _, documentID := range []string{docA, docB} {
+		if err := conn.WriteMessage(websocket.BinaryMessage, yproto.BuildDocumentMessage(documentID, awareness)); err != nil {
+			t.Fatalf("write subscription for %s: %v", documentID, err)
+		}
+	}
+	roomA := server.rooms.ForDocument(store.Snapshot().WorkspaceID + ":" + docA)
+	roomB := server.rooms.ForDocument(store.Snapshot().WorkspaceID + ":" + docB)
+	waitDocumentRoomSubscriberCount(t, roomA, 1)
+	waitDocumentRoomSubscriberCount(t, roomB, 1)
+
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close websocket: %v", err)
+	}
+	waitDocumentRoomSubscriberCount(t, roomA, 0)
+	waitDocumentRoomSubscriberCount(t, roomB, 0)
+}
+
+func TestBackendMuxTransportDoesNotOwnYProtocolSemantics(t *testing.T) {
+	data, err := os.ReadFile("server_documents.go")
+	if err != nil {
+		t.Fatalf("read server_documents.go: %v", err)
+	}
+	source := string(data)
+	if count := strings.Count(source, "yproto.DecodeSyncMessage"); count != 1 {
+		t.Fatalf("y-protocol sync semantics must stay in the canonical handler; DecodeSyncMessage count=%d", count)
+	}
+	if count := strings.Count(source, "yproto.DecodeDocumentMessage"); count != 1 {
+		t.Fatalf("document routing decode should only happen at the frame boundary; count=%d", count)
+	}
+	if count := strings.Count(source, "yproto.BuildDocumentMessage"); count != 1 {
+		t.Fatalf("document routing encode should only happen at the frame boundary; count=%d", count)
 	}
 }
 
@@ -1005,6 +1166,64 @@ func syncClientFromServer(t *testing.T, server *Server, room *DocumentRoom, conn
 			t.Fatalf("expected protocol sync message %d", i)
 		}
 	}
+}
+
+func dialDocumentWebsocketForTest(t *testing.T, serverURL, path string) *websocket.Conn {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(serverURL, "http") + path
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket %s: %v", path, err)
+	}
+	return conn
+}
+
+func readDocumentWebsocketFrameForTest(t *testing.T, conn *websocket.Conn) documentFrame {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set websocket read deadline: %v", err)
+	}
+	messageType, payload, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read websocket message: %v", err)
+	}
+	if messageType != websocket.BinaryMessage {
+		t.Fatalf("websocket message type = %d, want binary", messageType)
+	}
+	documentID, inner, err := yproto.DecodeDocumentMessage(payload)
+	if err != nil {
+		t.Fatalf("decode routed document message: %v", err)
+	}
+	return documentFrame{documentID: documentID, payload: inner}
+}
+
+func assertSyncPayloadForTest(t *testing.T, payload []byte) {
+	t.Helper()
+	messageType, _, err := yproto.DecodeProtocolMessage(payload)
+	if err != nil {
+		t.Fatalf("decode sync payload: %v", err)
+	}
+	if messageType != yproto.MessageSync {
+		t.Fatalf("payload top-level = %d, want sync", messageType)
+	}
+}
+
+func waitDocumentRoomSubscriberCount(t *testing.T, room *DocumentRoom, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		room.mu.Lock()
+		got := len(room.conns)
+		room.mu.Unlock()
+		if got == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	room.mu.Lock()
+	got := len(room.conns)
+	room.mu.Unlock()
+	t.Fatalf("room subscriber count = %d, want %d", got, want)
 }
 
 func newTestServer(t *testing.T) (*Server, *Store) {

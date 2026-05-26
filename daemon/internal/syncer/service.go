@@ -57,11 +57,6 @@ type managedAgentWorker struct {
 	wake   chan struct{}
 }
 
-type managedDocumentSync struct {
-	sync   *documentSync
-	cancel context.CancelFunc
-}
-
 type trackedFile struct {
 	DocumentID            string
 	DocumentPath          string
@@ -247,9 +242,6 @@ func (s *Service) Run(ctx context.Context) error {
 		return err
 	}
 	if err := s.refreshInitialWorkspace(ctx); err != nil {
-		if s.primaryRuntime != nil {
-			s.primaryRuntime.closeDocumentSyncs()
-		}
 		s.closeAgentWorkers()
 		s.closeAgentRuntimes()
 		if s.sessions != nil {

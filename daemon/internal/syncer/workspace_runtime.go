@@ -25,7 +25,7 @@ type workspaceRuntime struct {
 	docCache           *documentCache
 	reconcileQueue     *reconcileQueue
 	localCreates       *localCreateQueue
-	documentSyncs      map[string]*managedDocumentSync
+	documentSocket     *workspaceDocumentSocket
 	threadDeliveryWake chan struct{}
 	initialWorkspace   *workspaceResponse
 }
@@ -73,9 +73,9 @@ func newWorkspaceRuntime(cfg Config, client *http.Client, rootDir, actorID, acto
 		docCache:           cache,
 		reconcileQueue:     queue,
 		localCreates:       localCreates,
-		documentSyncs:      map[string]*managedDocumentSync{},
 		threadDeliveryWake: make(chan struct{}, 1),
 	}
+	runtime.documentSocket = newWorkspaceDocumentSocket(runtime)
 	replica, err := newWorkspaceReplica(cfg, rootDir, actorID, actorType, runtime.markDocumentDirty, runtime.markLocalCreate)
 	if err != nil {
 		return nil, err
@@ -124,10 +124,12 @@ func (r *workspaceRuntime) Run(ctx context.Context) error {
 	go r.reconcileLoop(ctx)
 	go r.threadDeliveryLoop(ctx)
 	go r.presenceLoop(ctx)
+	if r.documentSocket != nil {
+		go r.documentSocket.Run(ctx)
+	}
 
 	<-ctx.Done()
 	cancelReplica()
-	r.closeDocumentSyncs()
 	return nil
 }
 
@@ -221,8 +223,8 @@ func (r *workspaceRuntime) applyWorkspace(ctx context.Context, workspace *worksp
 	if workspace != nil {
 		documents = workspace.Documents
 	}
-	if err := r.reconcileDocumentSyncs(ctx, documents); err != nil {
-		return err
+	if r.documentSocket != nil {
+		r.documentSocket.SetDesiredDocuments(documents)
 	}
 	for _, document := range documents {
 		if document != nil && document.ID != "" && !isIgnoredDocumentPath(document.Path) {
