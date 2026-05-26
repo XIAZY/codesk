@@ -117,6 +117,14 @@ esac
 download_to() {
 	url="$1"
 	dest="$2"
+	case "$url" in
+		http://*|https://*)
+			case "$url" in
+				*\?*) url="$url&notty_cache_bust=$(date +%s).$$" ;;
+				*) url="$url?notty_cache_bust=$(date +%s).$$" ;;
+			esac
+			;;
+	esac
 	if command -v curl >/dev/null 2>&1; then
 		curl -fsSL "$url" -o "$dest"
 	elif command -v wget >/dev/null 2>&1; then

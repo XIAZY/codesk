@@ -1,4 +1,4 @@
-VERSION ?= dev
+VERSION ?= $(shell git rev-parse --short HEAD 2>/dev/null || printf dev)
 DIST_DIR ?= dist/static/daemons
 GO_BUILD_FLAGS ?= -trimpath
 GO_LDFLAGS ?= -s -w

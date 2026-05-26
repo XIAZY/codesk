@@ -174,4 +174,51 @@ assert_file "$tmp_dir/data-fallback/daemons/ws-fallback/daemon.env"
 grep -q "NOTTY_CODEX_COMMAND='codex'" "$tmp_dir/data-fallback/daemons/ws-fallback/daemon.env" || fail "fallback install did not preserve bare Codex command"
 grep -q "$fallback_home/.local/bin" "$tmp_dir/data-fallback/daemons/ws-fallback/daemon.env" || fail "fallback install did not persist common Codex path"
 
+http_bin="$tmp_dir/http-bin"
+mkdir -p "$http_bin"
+cat > "$http_bin/curl" <<EOF
+#!/usr/bin/env sh
+set -eu
+url=""
+dest=""
+while [ "\$#" -gt 0 ]; do
+	case "\$1" in
+		-o)
+			dest="\$2"
+			shift 2
+			;;
+		http://static.test/*)
+			url="\$1"
+			shift
+			;;
+		*)
+			shift
+			;;
+	esac
+done
+[ -n "\$url" ] || exit 2
+[ -n "\$dest" ] || exit 2
+printf '%s\n' "\$url" >> "$tmp_dir/curl.urls"
+path="\${url#http://static.test/}"
+path="\${path%%\\?*}"
+cp "$static_root/\$path" "\$dest"
+EOF
+chmod +x "$http_bin/curl"
+
+PATH="$http_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+	NOTTY_CODEX_COMMAND="$ok_codex" \
+	HOME="$tmp_dir/home-http" \
+	NOTTY_INSTALL_DIR="$tmp_dir/install-http" \
+	NOTTY_DATA_DIR="$tmp_dir/data-http" \
+	sh "$installer" \
+	--backend-url http://127.0.0.1:8080 \
+	--workspace-id ws-http \
+	--daemon-token nottyd_test \
+	--static-base http://static.test \
+	--no-service > "$tmp_dir/http.out" 2> "$tmp_dir/http.err"
+assert_executable "$tmp_dir/install-http/notty-daemon"
+grep -q 'latest/manifest.json?notty_cache_bust=' "$tmp_dir/curl.urls" || fail "http manifest download did not bypass cache"
+grep -q 'SHA256SUMS?notty_cache_bust=' "$tmp_dir/curl.urls" || fail "http checksum download did not bypass cache"
+grep -q "$package.tar.gz?notty_cache_bust=" "$tmp_dir/curl.urls" || fail "http artifact download did not bypass cache"
+
 printf 'daemon installer tests passed\n'

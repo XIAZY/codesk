@@ -165,12 +165,18 @@ if [ "$target" = "all" ] || [ "$target" = "daemons" ]; then
 	[ -f "$daemon_dist_dir/$version/manifest.json" ] || die "missing daemon manifest for $version"
 
 	daemon_dest="$(s3_uri "$R2_DAEMONS_BUCKET" "$daemons_prefix")"
+	release_cache_control="${DAEMON_RELEASE_CACHE_CONTROL:-public, max-age=31536000, immutable}"
+	case "$version" in
+		dev|latest)
+			release_cache_control="${DAEMON_RELEASE_CACHE_CONTROL:-public, max-age=60}"
+			;;
+	esac
 
 	printf 'Publishing daemon release %s to %s/%s\n' "$version" "$daemon_dest" "$version"
 	if [ "$uploader" = "aws" ]; then
-		aws_s3 sync "$daemon_dist_dir/$version/" "$daemon_dest/$version/"
+		aws_s3 sync "$daemon_dist_dir/$version/" "$daemon_dest/$version/" --cache-control "$release_cache_control"
 	else
-		wrangler_upload_dir "$daemon_dist_dir/$version" "$R2_DAEMONS_BUCKET" "$(join_key "$daemons_prefix" "$version")" "public, max-age=31536000, immutable"
+		wrangler_upload_dir "$daemon_dist_dir/$version" "$R2_DAEMONS_BUCKET" "$(join_key "$daemons_prefix" "$version")" "$release_cache_control"
 	fi
 
 	if [ -f "$daemon_dist_dir/install.sh" ]; then
