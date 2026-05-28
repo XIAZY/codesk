@@ -9,6 +9,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgx/v5 v5.7.2
 	github.com/mattn/go-sqlite3 v1.14.44
+	github.com/sergi/go-diff v1.4.0
 	golang.org/x/crypto v0.31.0
 )
 

@@ -951,6 +951,11 @@ func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documen
 			localContent := state.localContent
 			update, observedState, err := buildLocalUpdateFromBase(state.baseState, state.baseContent, localContent)
 			if err != nil {
+				if errors.Is(err, errUnsupportedTextContent) {
+					log.Printf("document reconcile skipped unsupported text content: document_id=%s document_path=%q local_path=%q reason=%s", state.tracked.DocumentID, state.tracked.DocumentPath, state.tracked.Path, unsupportedTextContentReason(err))
+					state.tracked.markLocalDirty()
+					continue
+				}
 				if !errors.Is(err, errProjectedBaseDoesNotMatchCRDTState) {
 					return err
 				}
@@ -1431,24 +1436,35 @@ func buildLocalUpdateFromBase(baseState []byte, baseContent, localContent string
 	if text.ToString() != baseContent {
 		return nil, nil, errProjectedBaseDoesNotMatchCRDTState
 	}
-	replace := computeReplace(baseContent, localContent)
-	currentLength := text.Len()
-	var update []byte
-	unsubscribe := doc.OnUpdate(func(next []byte, origin any) {
-		if origin == "daemon-local-reconcile" {
-			update = append([]byte(nil), next...)
+	edits, err := computeLocalTextEdits(baseContent, localContent)
+	if err != nil {
+		return nil, nil, err
+	}
+	update, err := doc.Update(func(txn *crdt.Transaction) error {
+		for _, edit := range edits {
+			switch edit.Kind {
+			case localTextEditDelete:
+				if edit.Length > 0 {
+					if err := text.DeleteRange(txn, edit.Start, edit.Length); err != nil {
+						return err
+					}
+				}
+			case localTextEditInsert:
+				if edit.Text != "" {
+					if err := text.InsertValue(txn, edit.Start, edit.Text); err != nil {
+						if errors.Is(err, crdt.ErrInvalidYTextString) {
+							return unsupportedTextContent(err.Error())
+						}
+						return err
+					}
+				}
+			}
 		}
-	})
-	doc.Transact(func(txn *crdt.Transaction) {
-		start, deleteLength := clampReplace(currentLength, replace)
-		if deleteLength > 0 {
-			text.Delete(txn, start, deleteLength)
-		}
-		if replace.Text != "" {
-			text.Insert(txn, start, replace.Text, nil)
-		}
+		return nil
 	}, "daemon-local-reconcile")
-	unsubscribe()
+	if err != nil {
+		return nil, nil, err
+	}
 	return update, doc.EncodeStateAsUpdate(), nil
 }
 
@@ -1963,41 +1979,6 @@ func (t *trackedFile) isRemoteDeleted() bool {
 	t.stateMu.Lock()
 	defer t.stateMu.Unlock()
 	return t.remoteDeleted
-}
-
-type replaceOp struct {
-	Start int
-	End   int
-	Text  string
-}
-
-func computeReplace(before, after string) replaceOp {
-	start := 0
-	for start < len(before) && start < len(after) && before[start] == after[start] {
-		start++
-	}
-	beforeEnd := len(before)
-	afterEnd := len(after)
-	for beforeEnd > start && afterEnd > start && before[beforeEnd-1] == after[afterEnd-1] {
-		beforeEnd--
-		afterEnd--
-	}
-	return replaceOp{Start: start, End: beforeEnd, Text: strings.Clone(after[start:afterEnd])}
-}
-
-func clampReplace(contentLength int, replace replaceOp) (int, int) {
-	start := replace.Start
-	if start > contentLength {
-		start = contentLength
-	}
-	end := replace.End
-	if end > contentLength {
-		end = contentLength
-	}
-	if end < start {
-		end = start
-	}
-	return start, end - start
 }
 
 func workspaceRootForDocumentPath(absolutePath, documentPath string) string {

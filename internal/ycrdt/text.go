@@ -8,8 +8,13 @@ import "C"
 
 import (
 	"errors"
+	"fmt"
+	"strings"
+	"unicode/utf8"
 	"unsafe"
 )
+
+var ErrInvalidYTextString = errors.New("invalid ytext string")
 
 func (t *YText) ToString() string {
 	value, _ := t.String()
@@ -76,6 +81,12 @@ func (t *YText) Insert(txn *Transaction, index int, value string, attrs any) {
 func (t *YText) InsertValue(txn *Transaction, index int, value string) error {
 	if txn == nil || txn.ptr == nil || !txn.write {
 		return errors.New("insert requires a write transaction")
+	}
+	if !utf8.ValidString(value) {
+		return fmt.Errorf("%w: value is not valid UTF-8", ErrInvalidYTextString)
+	}
+	if strings.IndexByte(value, 0) >= 0 {
+		return fmt.Errorf("%w: value contains NUL byte", ErrInvalidYTextString)
 	}
 	if index < 0 {
 		return errors.New("insert index is negative")

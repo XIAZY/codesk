@@ -2,6 +2,7 @@ package ycrdt
 
 import (
 	"encoding/hex"
+	"errors"
 	"testing"
 )
 
@@ -160,6 +161,22 @@ func TestYCRDTUTF16Offsets(t *testing.T) {
 	}
 	if got := doc.GetText("content").ToString(); got != "a🙂Xb" {
 		t.Fatalf("got %q want a🙂Xb", got)
+	}
+}
+
+func TestYTextInsertValueRejectsInvalidUTF8(t *testing.T) {
+	doc := New(WithClientID(1))
+	defer doc.Close()
+	text := doc.GetText("content")
+
+	_, err := doc.Update(func(txn *Transaction) error {
+		return text.InsertValue(txn, 0, string([]byte{0xff}))
+	}, "invalid")
+	if !errors.Is(err, ErrInvalidYTextString) {
+		t.Fatalf("expected invalid ytext string error, got %v", err)
+	}
+	if got := text.ToString(); got != "" {
+		t.Fatalf("invalid insert should not change text, got %q", got)
 	}
 }
 
