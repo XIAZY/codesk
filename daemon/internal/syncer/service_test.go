@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -78,17 +79,134 @@ func newApplyingDocumentUpdateHTTPTestService(t *testing.T, cache *documentCache
 	})
 }
 
-func TestComputeReplaceFindsInnerSpan(t *testing.T) {
-	op := computeReplace("hello world", "hello brave world")
-	if op != (replaceOp{Start: 6, End: 6, Text: "brave "}) {
-		t.Fatalf("unexpected op: %#v", op)
+func TestComputeLocalTextEditsUsesUTF16Cursor(t *testing.T) {
+	edits, err := computeLocalTextEdits("a🙂b", "a🙂Xb")
+	if err != nil {
+		t.Fatalf("compute edits: %v", err)
+	}
+	if len(edits) != 1 {
+		t.Fatalf("expected one edit, got %#v", edits)
+	}
+	if edit := edits[0]; edit.Text != "X" || edit.Start != 3 || edit.Length != 1 {
+		t.Fatalf("expected UTF-16 insert at 3, got %#v", edit)
 	}
 }
 
-func TestComputeReplaceHandlesReplacement(t *testing.T) {
-	op := computeReplace("alpha beta gamma", "alpha zeta gamma")
-	if op.Start != 6 || op.End != 7 || op.Text != "z" {
-		t.Fatalf("unexpected op: %#v", op)
+func TestBuildLocalUpdateFromBaseHandlesChineseTextDiff(t *testing.T) {
+	const baseContent = "已完成\n"
+	const localContent = "己完成\n"
+	doc := newDocWithText(t, baseContent)
+	update, _, err := buildLocalUpdateFromBase(doc.EncodeStateAsUpdate(), baseContent, localContent)
+	if err != nil {
+		t.Fatalf("build local update: %v", err)
+	}
+	if len(update) == 0 {
+		t.Fatal("expected local CRDT update")
+	}
+	if err := crdt.ApplyUpdateV1(doc, update, "local"); err != nil {
+		t.Fatalf("apply local update: %v", err)
+	}
+	if got := doc.GetText("content").ToString(); got != localContent {
+		t.Fatalf("content mismatch: got %q want %q", got, localContent)
+	}
+}
+
+func TestBuildLocalUpdateFromBaseHandlesMultipleTextEdits(t *testing.T) {
+	const baseContent = "alpha\nbeta\ngamma\n"
+	const localContent = "ALPHA\nbeta\nGAMMA\n"
+	doc := newDocWithText(t, baseContent)
+	update, _, err := buildLocalUpdateFromBase(doc.EncodeStateAsUpdate(), baseContent, localContent)
+	if err != nil {
+		t.Fatalf("build local update: %v", err)
+	}
+	if err := crdt.ApplyUpdateV1(doc, update, "local"); err != nil {
+		t.Fatalf("apply local update: %v", err)
+	}
+	if got := doc.GetText("content").ToString(); got != localContent {
+		t.Fatalf("content mismatch: got %q want %q", got, localContent)
+	}
+}
+
+func TestBuildLocalUpdateFromBaseReturnsNoUpdateForUnchangedContent(t *testing.T) {
+	const baseContent = "base\n"
+	update, observedState, err := buildLocalUpdateFromBase(crdtStateFromContent(baseContent), baseContent, baseContent)
+	if err != nil {
+		t.Fatalf("build local update: %v", err)
+	}
+	if len(update) != 0 {
+		t.Fatalf("unchanged content should not produce update, got %v", update)
+	}
+	if len(observedState) == 0 {
+		t.Fatal("expected observed CRDT state")
+	}
+}
+
+func TestBuildLocalUpdateFromBaseRejectsInvalidUTF8Content(t *testing.T) {
+	_, _, err := buildLocalUpdateFromBase(crdtStateFromContent("base"), "base", string([]byte{'b', 0xff, 'd'}))
+	if !errors.Is(err, errUnsupportedTextContent) {
+		t.Fatalf("expected unsupported text error, got %v", err)
+	}
+}
+
+func TestReconcileTrackedDocumentSkipsInvalidUTF8LocalFile(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "doc.md")
+	if err := os.WriteFile(path, []byte{'b', 0xff, 'd'}, 0o644); err != nil {
+		t.Fatalf("write invalid local file: %v", err)
+	}
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base")
+	if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	tracked := &trackedFile{
+		DocumentID:   "doc_1",
+		DocumentPath: "doc.md",
+		Path:         path,
+		cache:        cache,
+	}
+	tracked.setProjectedContent("base")
+	if err := tracked.storeProjectedBase("base", baseDoc.EncodeStateAsUpdate()); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+	tracked.markLocalDirty()
+	var logBuf bytes.Buffer
+	oldLogWriter := log.Writer()
+	oldLogFlags := log.Flags()
+	oldLogPrefix := log.Prefix()
+	log.SetOutput(&logBuf)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	t.Cleanup(func() {
+		log.SetOutput(oldLogWriter)
+		log.SetFlags(oldLogFlags)
+		log.SetPrefix(oldLogPrefix)
+	})
+
+	service := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
+		t.Fatalf("must not send update for invalid UTF-8 local file; update bytes=%d", len(update))
+		return postDocumentUpdateResponse{}, http.StatusInternalServerError
+	})
+	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("invalid local file should be skipped, got error: %v", err)
+	}
+	if !tracked.isLocalDirty() {
+		t.Fatal("invalid local file should remain dirty for a later valid edit")
+	}
+	logged := logBuf.String()
+	for _, want := range []string{
+		"document reconcile skipped unsupported text content",
+		"document_id=doc_1",
+		`document_path="doc.md"`,
+		fmt.Sprintf("local_path=%q", path),
+		"reason=local file is not valid UTF-8",
+	} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("expected log to contain %q, got %q", want, logged)
+		}
 	}
 }
 
