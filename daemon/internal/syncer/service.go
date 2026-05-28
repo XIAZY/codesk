@@ -1440,6 +1440,9 @@ func buildLocalUpdateFromBase(baseState []byte, baseContent, localContent string
 	if err != nil {
 		return nil, nil, err
 	}
+	if len(edits) == 0 {
+		return nil, doc.EncodeStateAsUpdate(), nil
+	}
 	update, err := doc.Update(func(txn *crdt.Transaction) error {
 		for _, edit := range edits {
 			switch edit.Kind {

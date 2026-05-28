@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -126,6 +127,20 @@ func TestBuildLocalUpdateFromBaseHandlesMultipleTextEdits(t *testing.T) {
 	}
 }
 
+func TestBuildLocalUpdateFromBaseReturnsNoUpdateForUnchangedContent(t *testing.T) {
+	const baseContent = "base\n"
+	update, observedState, err := buildLocalUpdateFromBase(crdtStateFromContent(baseContent), baseContent, baseContent)
+	if err != nil {
+		t.Fatalf("build local update: %v", err)
+	}
+	if len(update) != 0 {
+		t.Fatalf("unchanged content should not produce update, got %v", update)
+	}
+	if len(observedState) == 0 {
+		t.Fatal("expected observed CRDT state")
+	}
+}
+
 func TestBuildLocalUpdateFromBaseRejectsInvalidUTF8Content(t *testing.T) {
 	_, _, err := buildLocalUpdateFromBase(crdtStateFromContent("base"), "base", string([]byte{'b', 0xff, 'd'}))
 	if !errors.Is(err, errUnsupportedTextContent) {
@@ -158,6 +173,18 @@ func TestReconcileTrackedDocumentSkipsInvalidUTF8LocalFile(t *testing.T) {
 		t.Fatalf("store projected base: %v", err)
 	}
 	tracked.markLocalDirty()
+	var logBuf bytes.Buffer
+	oldLogWriter := log.Writer()
+	oldLogFlags := log.Flags()
+	oldLogPrefix := log.Prefix()
+	log.SetOutput(&logBuf)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	t.Cleanup(func() {
+		log.SetOutput(oldLogWriter)
+		log.SetFlags(oldLogFlags)
+		log.SetPrefix(oldLogPrefix)
+	})
 
 	service := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
 		t.Fatalf("must not send update for invalid UTF-8 local file; update bytes=%d", len(update))
@@ -168,6 +195,18 @@ func TestReconcileTrackedDocumentSkipsInvalidUTF8LocalFile(t *testing.T) {
 	}
 	if !tracked.isLocalDirty() {
 		t.Fatal("invalid local file should remain dirty for a later valid edit")
+	}
+	logged := logBuf.String()
+	for _, want := range []string{
+		"document reconcile skipped unsupported text content",
+		"document_id=doc_1",
+		`document_path="doc.md"`,
+		fmt.Sprintf("local_path=%q", path),
+		"reason=local file is not valid UTF-8",
+	} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("expected log to contain %q, got %q", want, logged)
+		}
 	}
 }
 

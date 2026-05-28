@@ -164,19 +164,29 @@ func TestYCRDTUTF16Offsets(t *testing.T) {
 	}
 }
 
-func TestYTextInsertValueRejectsInvalidUTF8(t *testing.T) {
-	doc := New(WithClientID(1))
-	defer doc.Close()
-	text := doc.GetText("content")
+func TestYTextInsertValueRejectsInvalidStrings(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{name: "invalid_utf8", value: string([]byte{0xff})},
+		{name: "nul", value: "bad\x00content"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := New(WithClientID(1))
+			defer doc.Close()
+			text := doc.GetText("content")
 
-	_, err := doc.Update(func(txn *Transaction) error {
-		return text.InsertValue(txn, 0, string([]byte{0xff}))
-	}, "invalid")
-	if !errors.Is(err, ErrInvalidYTextString) {
-		t.Fatalf("expected invalid ytext string error, got %v", err)
-	}
-	if got := text.ToString(); got != "" {
-		t.Fatalf("invalid insert should not change text, got %q", got)
+			_, err := doc.Update(func(txn *Transaction) error {
+				return text.InsertValue(txn, 0, tc.value)
+			}, "invalid")
+			if !errors.Is(err, ErrInvalidYTextString) {
+				t.Fatalf("expected invalid ytext string error, got %v", err)
+			}
+			if got := text.ToString(); got != "" {
+				t.Fatalf("invalid insert should not change text, got %q", got)
+			}
+		})
 	}
 }
 
