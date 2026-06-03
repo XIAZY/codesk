@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -25,57 +26,49 @@ import (
 	"notty/internal/yproto"
 )
 
-func newDocumentUpdateHTTPTestService(t *testing.T, cache *documentCache, handler func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int)) *workspaceRuntime {
+type documentUpdateTestResponse struct {
+	Accepted bool  `json:"accepted"`
+	Applied  bool  `json:"applied"`
+	UpdateID int64 `json:"updateId"`
+}
+
+func newDocumentUpdateWebsocketTestRuntime(t *testing.T, cache *documentCache, handler func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int)) *workspaceRuntime {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
-			return
-		}
-		const prefix = "/api/documents/"
-		const suffix = "/updates"
-		if !strings.HasPrefix(r.URL.Path, prefix) || !strings.HasSuffix(r.URL.Path, suffix) {
-			http.Error(w, "unexpected path", http.StatusNotFound)
-			return
-		}
-		documentID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, prefix), suffix)
-		update, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		response, status := handler(documentID, update, r)
+	runtime := &workspaceRuntime{
+		cfg:      Config{BackendURL: "http://document-update.test", AgentID: "daemon_agent"},
+		client:   http.DefaultClient,
+		docCache: cache,
+	}
+	runtime.sendDocumentUpdate = func(ctx context.Context, documentID string, record outboxUpdateRecord) error {
+		req := httptest.NewRequest(http.MethodGet, "/ws/documents-sync?actor="+url.QueryEscape(firstNonEmptyText(record.ActorID, runtime.cfg.AgentID))+"&actor_type="+url.QueryEscape(firstNonEmptyText(record.ActorType, "daemon")), bytes.NewReader(record.Update))
+		req = req.WithContext(ctx)
+		response, status := handler(documentID, record.Update, req)
 		if status == 0 {
 			status = http.StatusOK
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(status)
 		if status >= http.StatusBadRequest {
-			_, _ = w.Write([]byte(`{"error":"test failure"}`))
-			return
+			return &backendStatusError{Method: "WS", URL: "/ws/documents-sync", StatusCode: status, Body: "test failure"}
 		}
-		_ = json.NewEncoder(w).Encode(response)
-	}))
-	t.Cleanup(server.Close)
-	return &workspaceRuntime{
-		cfg:      Config{BackendURL: server.URL, AgentID: "daemon_agent"},
-		client:   server.Client(),
-		docCache: cache,
+		if !response.Accepted {
+			return errors.New("document update was not accepted")
+		}
+		return nil
 	}
+	return runtime
 }
 
-func newApplyingDocumentUpdateHTTPTestService(t *testing.T, cache *documentCache, serverDoc *crdt.Doc, sent *int) *workspaceRuntime {
+func newApplyingDocumentUpdateWebsocketTestRuntime(t *testing.T, cache *documentCache, serverDoc *crdt.Doc, sent *int) *workspaceRuntime {
 	t.Helper()
-	return newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
+	return newDocumentUpdateWebsocketTestRuntime(t, cache, func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int) {
 		if sent != nil {
 			*sent = *sent + 1
 		}
 		if serverDoc != nil {
 			if err := crdt.ApplyUpdateV1(serverDoc, update, "server"); err != nil {
-				t.Fatalf("apply HTTP update to server doc: %v", err)
+				t.Fatalf("apply websocket update to server doc: %v", err)
 			}
 		}
-		return postDocumentUpdateResponse{Accepted: true, Applied: true, UpdateID: int64(1)}, http.StatusOK
+		return documentUpdateTestResponse{Accepted: true, Applied: true, UpdateID: int64(1)}, http.StatusOK
 	})
 }
 
@@ -186,9 +179,9 @@ func TestReconcileTrackedDocumentSkipsInvalidUTF8LocalFile(t *testing.T) {
 		log.SetPrefix(oldLogPrefix)
 	})
 
-	service := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
+	service := newDocumentUpdateWebsocketTestRuntime(t, cache, func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int) {
 		t.Fatalf("must not send update for invalid UTF-8 local file; update bytes=%d", len(update))
-		return postDocumentUpdateResponse{}, http.StatusInternalServerError
+		return documentUpdateTestResponse{}, http.StatusInternalServerError
 	})
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("invalid local file should be skipped, got error: %v", err)
@@ -405,12 +398,12 @@ func TestReconcileDirtyDocumentsRequeuesOutboxAfterHTTPError(t *testing.T) {
 		Path:         filepath.Join(t.TempDir(), "doc.md"),
 	}
 	attempts := 0
-	service := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
+	service := newDocumentUpdateWebsocketTestRuntime(t, cache, func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int) {
 		attempts++
 		if documentID != "doc_1" {
 			t.Fatalf("unexpected document id %q", documentID)
 		}
-		return postDocumentUpdateResponse{}, http.StatusServiceUnavailable
+		return documentUpdateTestResponse{}, http.StatusServiceUnavailable
 	})
 	service.reconcileQueue = queue
 	service.replica = &workspaceReplica{
@@ -421,7 +414,7 @@ func TestReconcileDirtyDocumentsRequeuesOutboxAfterHTTPError(t *testing.T) {
 		t.Fatal("expected reconcile dirty documents to report backend send failure")
 	}
 	if attempts != 1 {
-		t.Fatalf("expected one HTTP send attempt, got %d", attempts)
+		t.Fatalf("expected one websocket send attempt, got %d", attempts)
 	}
 	if got := queue.Drain(); !reflect.DeepEqual(got, []string{"doc_1"}) {
 		t.Fatalf("expected failed outbox to be requeued, got %#v", got)
@@ -463,9 +456,9 @@ func TestReconcileDirtyDocumentsDoesNotDropLaterIDsAfterError(t *testing.T) {
 		DocumentPath: "retry.md",
 	}
 	attempts := 0
-	service := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
+	service := newDocumentUpdateWebsocketTestRuntime(t, cache, func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int) {
 		attempts++
-		return postDocumentUpdateResponse{}, http.StatusServiceUnavailable
+		return documentUpdateTestResponse{}, http.StatusServiceUnavailable
 	})
 	service.reconcileQueue = queue
 	service.replica = &workspaceReplica{projectedByID: map[string]*trackedFile{
@@ -855,9 +848,9 @@ func TestReconcileTrackedDocumentNoopsWithoutDirtyOrPendingRemote(t *testing.T) 
 	}
 	tracked.setProjectedContent("base")
 
-	service := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
+	service := newDocumentUpdateWebsocketTestRuntime(t, cache, func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int) {
 		t.Fatalf("must not send update during no-op reconcile; update bytes=%d", len(update))
-		return postDocumentUpdateResponse{}, http.StatusInternalServerError
+		return documentUpdateTestResponse{}, http.StatusInternalServerError
 	})
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("no-op reconcile should not touch disk or CRDT state: %v", err)
@@ -893,9 +886,9 @@ func TestReconcileArchivesUnknownProjectedBaseInsteadOfDiffing(t *testing.T) {
 	}
 	tracked.markLocalDirty()
 
-	service := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
+	service := newDocumentUpdateWebsocketTestRuntime(t, cache, func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int) {
 		t.Fatalf("must not send update for dirty flag caused by projected write; update bytes=%d", len(update))
-		return postDocumentUpdateResponse{}, http.StatusInternalServerError
+		return documentUpdateTestResponse{}, http.StatusInternalServerError
 	})
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("reconcile unknown projected base: %v", err)
@@ -1288,7 +1281,7 @@ func TestReconcileTrackedDocumentMergesLocalEditWithPendingRemoteUpdate(t *testi
 		t.Fatalf("apply server remote: %v", err)
 	}
 	var sentLocalUpdate []byte
-	service := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
+	service := newDocumentUpdateWebsocketTestRuntime(t, cache, func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int) {
 		if documentID != "doc_1" {
 			t.Fatalf("unexpected document id: %s", documentID)
 		}
@@ -1296,7 +1289,7 @@ func TestReconcileTrackedDocumentMergesLocalEditWithPendingRemoteUpdate(t *testi
 		if err := crdt.ApplyUpdateV1(serverDoc, update, "server-local"); err != nil {
 			t.Fatalf("apply local update to server doc: %v", err)
 		}
-		return postDocumentUpdateResponse{Accepted: true, Applied: true, UpdateID: 2}, http.StatusOK
+		return documentUpdateTestResponse{Accepted: true, Applied: true, UpdateID: 2}, http.StatusOK
 	})
 
 	if _, err := cache.appendPendingRemoteUpdate("doc_1", "doc.md", remoteUpdate); err != nil {
@@ -1355,9 +1348,9 @@ func TestReconcileTrackedDocumentDefersLocalUpdateWhenProjectedBaseMissingCRDTSt
 	tracked.setProjectedContent("already synced\n")
 	tracked.markLocalDirty()
 
-	service := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
+	service := newDocumentUpdateWebsocketTestRuntime(t, cache, func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int) {
 		t.Fatalf("must not send a full-file update when cached CRDT state is missing; update bytes=%d", len(update))
-		return postDocumentUpdateResponse{}, http.StatusInternalServerError
+		return documentUpdateTestResponse{}, http.StatusInternalServerError
 	})
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("reconcile document: %v", err)
@@ -1390,9 +1383,9 @@ func TestReconcileTrackedDocumentArchivesLocalUpdateWithoutProjectedBase(t *test
 	tracked.setProjectedContent("large existing local file\n")
 	tracked.markLocalDirty()
 
-	service := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
+	service := newDocumentUpdateWebsocketTestRuntime(t, cache, func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int) {
 		t.Fatalf("must not send local update before a projected base is established; update bytes=%d", len(update))
-		return postDocumentUpdateResponse{}, http.StatusInternalServerError
+		return documentUpdateTestResponse{}, http.StatusInternalServerError
 	})
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("reconcile document: %v", err)
@@ -1470,7 +1463,7 @@ func TestMaterializeExistingLocalFileUsesCachedBaseAsProjection(t *testing.T) {
 		t.Fatalf("apply server base: %v", err)
 	}
 	sentUpdates := 0
-	service := newApplyingDocumentUpdateHTTPTestService(t, cache, serverDoc, &sentUpdates)
+	service := newApplyingDocumentUpdateWebsocketTestRuntime(t, cache, serverDoc, &sentUpdates)
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_append", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("reconcile document: %v", err)
 	}
@@ -1512,9 +1505,9 @@ func TestReconcileArchivesUnknownLocalFileAfterPendingRemoteEstablishesBase(t *t
 	}
 
 	sentUpdates := 0
-	service := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
+	service := newDocumentUpdateWebsocketTestRuntime(t, cache, func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int) {
 		sentUpdates++
-		return postDocumentUpdateResponse{Accepted: true, Applied: true}, http.StatusOK
+		return documentUpdateTestResponse{Accepted: true, Applied: true}, http.StatusOK
 	})
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_append", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -1587,7 +1580,7 @@ func TestSingleWriterAppendPressureReconcilesIncrementalBatches(t *testing.T) {
 	serverDoc := newDocWithText(t, "")
 	sentUpdates := 0
 	maxUpdateBytes := 0
-	service := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
+	service := newDocumentUpdateWebsocketTestRuntime(t, cache, func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int) {
 		sentUpdates++
 		if len(update) > maxUpdateBytes {
 			maxUpdateBytes = len(update)
@@ -1595,7 +1588,7 @@ func TestSingleWriterAppendPressureReconcilesIncrementalBatches(t *testing.T) {
 		if err := crdt.ApplyUpdateV1(serverDoc, update, "server"); err != nil {
 			t.Fatalf("apply server update: %v", err)
 		}
-		return postDocumentUpdateResponse{Accepted: true, Applied: true}, http.StatusOK
+		return documentUpdateTestResponse{Accepted: true, Applied: true}, http.StatusOK
 	})
 
 	var expected strings.Builder
@@ -1672,7 +1665,7 @@ func TestReconcileCapturesSequentialLocalAppendsAcrossCycles(t *testing.T) {
 		t.Fatalf("store projected base: %v", err)
 	}
 	tracked.markLocalDirty()
-	service := newApplyingDocumentUpdateHTTPTestService(t, cache, serverDoc, nil)
+	service := newApplyingDocumentUpdateWebsocketTestRuntime(t, cache, serverDoc, nil)
 
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_append", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("first reconcile: %v", err)
@@ -1755,7 +1748,7 @@ func TestReconcileRebasesAppendFromStaleWorkspaceBase(t *testing.T) {
 	}
 	tracked.markLocalDirty()
 	sentUpdates := 0
-	service := newApplyingDocumentUpdateHTTPTestService(t, cache, serverDoc, &sentUpdates)
+	service := newApplyingDocumentUpdateWebsocketTestRuntime(t, cache, serverDoc, &sentUpdates)
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_append", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -1807,8 +1800,8 @@ func TestReconcileSendsLocalEditBeforeApplyingPendingRemoteUpdate(t *testing.T) 
 		t.Fatalf("store projected base: %v", err)
 	}
 
-	service := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
-		return postDocumentUpdateResponse{Accepted: true, Applied: true, UpdateID: 2}, http.StatusOK
+	service := newDocumentUpdateWebsocketTestRuntime(t, cache, func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int) {
+		return documentUpdateTestResponse{Accepted: true, Applied: true, UpdateID: 2}, http.StatusOK
 	})
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("first reconcile: %v", err)
@@ -1923,9 +1916,9 @@ func TestReconcileTrackedDocumentAppliesPendingRemoteFromSQLiteLog(t *testing.T)
 		t.Fatalf("store projected base: %v", err)
 	}
 
-	service := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
+	service := newDocumentUpdateWebsocketTestRuntime(t, cache, func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int) {
 		t.Fatalf("must not send local update while applying pending remote")
-		return postDocumentUpdateResponse{}, http.StatusInternalServerError
+		return documentUpdateTestResponse{}, http.StatusInternalServerError
 	})
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("expected pending remote to apply without failing reconcile: %v", err)
@@ -2070,8 +2063,8 @@ func TestReconcileKeepsIncomingPendingWhenOutgoingSendFails(t *testing.T) {
 	}
 	tracked.markLocalDirty()
 
-	service := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
-		return postDocumentUpdateResponse{}, http.StatusServiceUnavailable
+	service := newDocumentUpdateWebsocketTestRuntime(t, cache, func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int) {
+		return documentUpdateTestResponse{}, http.StatusServiceUnavailable
 	})
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err == nil {
 		t.Fatal("expected local outgoing update to remain queued when backend send fails")
@@ -2110,7 +2103,7 @@ func TestReconcileKeepsIncomingPendingWhenOutgoingSendFails(t *testing.T) {
 	if err := crdt.ApplyUpdateV1(serverDoc, remoteUpdate, "server-remote"); err != nil {
 		t.Fatalf("apply server remote: %v", err)
 	}
-	service = newApplyingDocumentUpdateHTTPTestService(t, cache, serverDoc, nil)
+	service = newApplyingDocumentUpdateWebsocketTestRuntime(t, cache, serverDoc, nil)
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -2174,9 +2167,9 @@ func TestReconcileProjectsMissingFileFromSharedCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("materialize tracked file: %v", err)
 	}
-	service := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
+	service := newDocumentUpdateWebsocketTestRuntime(t, cache, func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int) {
 		t.Fatalf("must not send update while initializing missing projection")
-		return postDocumentUpdateResponse{}, http.StatusInternalServerError
+		return documentUpdateTestResponse{}, http.StatusInternalServerError
 	})
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -2223,9 +2216,9 @@ func TestReconcileArchivesUnknownWorkingCopyBeforeProjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("materialize tracked file: %v", err)
 	}
-	service := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
+	service := newDocumentUpdateWebsocketTestRuntime(t, cache, func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int) {
 		t.Fatalf("must not upload an unknown working copy; bytes=%d", len(update))
-		return postDocumentUpdateResponse{}, http.StatusInternalServerError
+		return documentUpdateTestResponse{}, http.StatusInternalServerError
 	})
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -2269,9 +2262,9 @@ func TestReconcileArchivesUnknownWorkingCopyWithoutCacheContent(t *testing.T) {
 	}
 	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache}
 	tracked.markLocalDirty()
-	service := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
+	service := newDocumentUpdateWebsocketTestRuntime(t, cache, func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int) {
 		t.Fatalf("must not send local update without projected base; bytes=%d", len(update))
-		return postDocumentUpdateResponse{}, http.StatusInternalServerError
+		return documentUpdateTestResponse{}, http.StatusInternalServerError
 	})
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("reconcile unknown local edit: %v", err)
@@ -2317,7 +2310,7 @@ func TestReconcileUsesSQLiteProjectedBase(t *testing.T) {
 		t.Fatalf("apply server base: %v", err)
 	}
 	sends := 0
-	service := newApplyingDocumentUpdateHTTPTestService(t, cache, serverDoc, &sends)
+	service := newApplyingDocumentUpdateWebsocketTestRuntime(t, cache, serverDoc, &sends)
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -2634,30 +2627,42 @@ func TestCentralReconcilePublishesQueuedCleanMove(t *testing.T) {
 	}
 	tracked.markLocalMoved()
 
-	var patchedPath string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPatch || r.URL.Path != "/api/documents/doc_1" {
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+	service := &workspaceRuntime{
+		cfg:            Config{BackendURL: "http://backend.test", AgentID: "daemon_agent"},
+		client:         http.DefaultClient,
+		docCache:       cache,
+		rootDocumentID: "doc_root_test",
+	}
+	var rootUpdates int
+	service.sendDocumentUpdate = func(ctx context.Context, documentID string, record outboxUpdateRecord) error {
+		if documentID != service.rootDocumentID {
+			t.Fatalf("unexpected document update: %s", documentID)
 		}
-		var payload updateDocumentRequest
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			t.Fatalf("decode patch: %v", err)
-		}
-		patchedPath = payload.Path
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"doc_1","path":"docs/new.md"}`))
-	}))
-	defer server.Close()
-	service := &workspaceRuntime{cfg: Config{BackendURL: server.URL, AgentID: "daemon_agent"}, client: server.Client(), docCache: cache}
+		rootUpdates++
+		return cache.clearOutboxUpdates(documentID)
+	}
 
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("reconcile move: %v", err)
 	}
-	if patchedPath != "docs/new.md" {
-		t.Fatalf("expected backend path patch to docs/new.md, got %q", patchedPath)
+	if rootUpdates != 1 {
+		t.Fatalf("expected one root websocket update, got %d", rootUpdates)
+	}
+	rootDoc, _, _, err := cache.loadBaseDoc(service.rootDocumentID, rootDocumentPath)
+	if err != nil {
+		t.Fatalf("load root doc: %v", err)
+	}
+	defer rootDoc.Close()
+	entries, err := decodeRootEntries(rootDoc)
+	if err != nil {
+		t.Fatalf("decode root entries: %v", err)
+	}
+	entry := entries[rootEntryIDForDocument("doc_1")]
+	if entry.desiredPath() != "docs/new.md" || entry.Deleted {
+		t.Fatalf("expected root entry move to docs/new.md, got %#v", entry)
 	}
 	if tracked.isLocalMoved() || tracked.isLocalDirty() {
-		t.Fatal("expected clean move markers to clear after backend patch")
+		t.Fatal("expected clean move markers to clear after root update")
 	}
 	if tracked.DocumentPath != "docs/new.md" {
 		t.Fatalf("expected tracked document path to advance, got %q", tracked.DocumentPath)
@@ -2807,7 +2812,7 @@ func TestOutgoingOutboxKeepsLocalUpdateWhenBackendSendFails(t *testing.T) {
 	tracked.markLocalDirty()
 
 	sendAttempts := 0
-	service := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
+	service := newDocumentUpdateWebsocketTestRuntime(t, cache, func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int) {
 		sendAttempts++
 		if got := r.URL.Query().Get("actor"); got != "agent_1" {
 			t.Fatalf("expected actor query agent_1, got %q", got)
@@ -2815,7 +2820,7 @@ func TestOutgoingOutboxKeepsLocalUpdateWhenBackendSendFails(t *testing.T) {
 		if got := r.URL.Query().Get("actor_type"); got != "agent" {
 			t.Fatalf("expected actor_type query agent, got %q", got)
 		}
-		return postDocumentUpdateResponse{}, http.StatusServiceUnavailable
+		return documentUpdateTestResponse{}, http.StatusServiceUnavailable
 	})
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err == nil {
 		t.Fatal("expected first reconcile to fail while backend is disconnected")
@@ -2843,7 +2848,7 @@ func TestOutgoingOutboxKeepsLocalUpdateWhenBackendSendFails(t *testing.T) {
 	if err := crdt.ApplyUpdateV1(serverDoc, baseDoc.EncodeStateAsUpdate(), "server-base"); err != nil {
 		t.Fatalf("apply server base: %v", err)
 	}
-	service = newApplyingDocumentUpdateHTTPTestService(t, cache, serverDoc, &sendAttempts)
+	service = newApplyingDocumentUpdateWebsocketTestRuntime(t, cache, serverDoc, &sendAttempts)
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("retry reconcile: %v", err)
 	}
@@ -2892,8 +2897,8 @@ func TestOutgoingOutboxStoresAllDirtyWorkspacesWithActorAttribution(t *testing.T
 		}
 		tracked.markLocalDirty()
 	}
-	service := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
-		return postDocumentUpdateResponse{}, http.StatusServiceUnavailable
+	service := newDocumentUpdateWebsocketTestRuntime(t, cache, func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int) {
+		return documentUpdateTestResponse{}, http.StatusServiceUnavailable
 	})
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{primaryTracked, agentTracked}); err == nil {
 		t.Fatal("expected backend failure to keep multi-workspace outbox")
@@ -2941,12 +2946,12 @@ func TestOutgoingOutboxClearsOnHTTPAcceptance(t *testing.T) {
 	}
 	tracked.markLocalDirty()
 	sends := 0
-	service := newApplyingDocumentUpdateHTTPTestService(t, cache, serverDoc, &sends)
+	service := newApplyingDocumentUpdateWebsocketTestRuntime(t, cache, serverDoc, &sends)
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	if sends != 1 {
-		t.Fatalf("expected one HTTP update, got %d", sends)
+		t.Fatalf("expected one websocket update, got %d", sends)
 	}
 	if tracked.isLocalDirty() {
 		t.Fatal("expected dirty flag to clear after backend acceptance")
@@ -2987,8 +2992,8 @@ func TestOutgoingOutboxSurvivesCacheReopenAndResendsIdempotently(t *testing.T) {
 		t.Fatalf("store projected base: %v", err)
 	}
 	tracked.markLocalDirty()
-	service := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
-		return postDocumentUpdateResponse{}, http.StatusServiceUnavailable
+	service := newDocumentUpdateWebsocketTestRuntime(t, cache, func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int) {
+		return documentUpdateTestResponse{}, http.StatusServiceUnavailable
 	})
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err == nil {
 		t.Fatal("expected first reconcile to keep outbox after backend failure")
@@ -3002,7 +3007,7 @@ func TestOutgoingOutboxSurvivesCacheReopenAndResendsIdempotently(t *testing.T) {
 	restarted.setProjectedContent("base\n")
 	restarted.markLocalDirty()
 	duplicateSends := 0
-	service = newApplyingDocumentUpdateHTTPTestService(t, reopened, serverDoc, &duplicateSends)
+	service = newApplyingDocumentUpdateWebsocketTestRuntime(t, reopened, serverDoc, &duplicateSends)
 	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{restarted}); err != nil {
 		t.Fatalf("restarted reconcile: %v", err)
 	}

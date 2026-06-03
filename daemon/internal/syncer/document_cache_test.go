@@ -300,7 +300,7 @@ func TestWorkspaceStoreSchemaUsesAgreedDurableTables(t *testing.T) {
 		}
 		tables = append(tables, table)
 	}
-	want := []string{"content_outbox", "crdt_updates", "documents", "incoming_updates", "thread_outbox"}
+	want := []string{"content_outbox", "crdt_updates", "documents", "incoming_updates", "root_projection_entries", "thread_outbox"}
 	if !reflect.DeepEqual(tables, want) {
 		t.Fatalf("sqlite schema tables = %#v, want %#v", tables, want)
 	}

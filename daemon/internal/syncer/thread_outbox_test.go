@@ -32,9 +32,6 @@ func TestThreadOutboxPipelineQueuesMaterializesDeliversAndDeletesIntent(t *testi
 	documentUpdates := make(chan struct{}, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/documents/doc_1/updates":
-			documentUpdates <- struct{}{}
-			writeJSONResponse(w, http.StatusOK, postDocumentUpdateResponse{Accepted: true, Applied: true, UpdateID: 2})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/threads":
 			var payload backendCreateThreadPayload
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -60,6 +57,13 @@ func TestThreadOutboxPipelineQueuesMaterializesDeliversAndDeletesIntent(t *testi
 		client:         server.Client(),
 		docCache:       cache,
 		reconcileQueue: newReconcileQueue(),
+	}
+	runtime.sendDocumentUpdate = func(ctx context.Context, documentID string, record outboxUpdateRecord) error {
+		if documentID != "doc_1" {
+			t.Fatalf("unexpected websocket document update: %s", documentID)
+		}
+		documentUpdates <- struct{}{}
+		return cache.clearOutboxUpdates(documentID)
 	}
 	service := newToolGatewayTestService(&agent{ID: "agent_1", Handle: "reviewer", Kind: "codex"}, "token_123")
 	service.primaryRuntime = runtime
@@ -112,7 +116,7 @@ func TestThreadOutboxPipelineQueuesMaterializesDeliversAndDeletesIntent(t *testi
 	select {
 	case <-documentUpdates:
 	case <-time.After(2 * time.Second):
-		t.Fatal("expected content outbox POST before thread materialization")
+		t.Fatal("expected content outbox websocket send before thread materialization")
 	}
 
 	if err := runtime.reconcileDocumentIDsWithTracked(ctx, []string{"doc_1"}, trackedByDocument); err != nil {
@@ -246,11 +250,11 @@ func TestWorkspaceRuntimeMaterializesThreadIntentAfterAcceptedLocalBeforePending
 	}
 	tracked.markLocalDirty()
 
-	runtime := newDocumentUpdateHTTPTestService(t, cache, func(documentID string, update []byte, r *http.Request) (postDocumentUpdateResponse, int) {
+	runtime := newDocumentUpdateWebsocketTestRuntime(t, cache, func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int) {
 		if documentID != "doc_1" {
 			t.Fatalf("unexpected document update for %s", documentID)
 		}
-		return postDocumentUpdateResponse{Accepted: true, Applied: true, UpdateID: 2}, http.StatusOK
+		return documentUpdateTestResponse{Accepted: true, Applied: true, UpdateID: 2}, http.StatusOK
 	})
 	if err := runtime.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
 		t.Fatalf("first reconcile content outbox: %v", err)

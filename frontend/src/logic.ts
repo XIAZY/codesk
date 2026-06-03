@@ -83,6 +83,7 @@ export function buildDaemonUninstallCommand(input: { staticBaseUrl: string }) {
 export function emptyWorkspace(): WorkspaceState {
   return {
     workspaceId: "",
+    rootDocumentId: "",
     name: "",
     documents: [],
     users: [],

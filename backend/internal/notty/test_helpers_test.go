@@ -69,7 +69,28 @@ func mustCreateTestDocument(t *testing.T, store *Store, path string, content str
 	if err != nil {
 		t.Fatalf("create test document: %v", err)
 	}
+	if content != "" {
+		if _, _, err := store.ReplaceDocumentText(document.ID, content, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test-seed-content"}); err != nil {
+			t.Fatalf("seed test document content: %v", err)
+		}
+	}
 	return document.ID
+}
+
+func syncedDocumentTextForTest(t *testing.T, store *Store, documentID string) string {
+	t.Helper()
+	doc := crdt.New()
+	defer doc.Close()
+	_, updates, err := store.EncodeDocumentSyncUpdates(documentID, nil)
+	if err != nil {
+		t.Fatalf("sync document %s: %v", documentID, err)
+	}
+	for _, update := range updates {
+		if err := crdt.ApplyUpdateV1(doc, update, "test-sync"); err != nil {
+			t.Fatalf("apply sync update for %s: %v", documentID, err)
+		}
+	}
+	return doc.GetText("content").ToString()
 }
 
 func captureDocUpdate(t *testing.T, doc *crdt.Doc, origin string, mutate func(*crdt.Transaction)) []byte {

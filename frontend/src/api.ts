@@ -79,19 +79,6 @@ export class ApiClient {
     });
   }
 
-  async renameDocument(workspaceId: string, documentId: string, path: string) {
-    return this.request<DocumentItem>(workspacePath(workspaceId, `/documents/${encodeURIComponent(documentId)}`), {
-      method: "PATCH",
-      body: JSON.stringify({ path }),
-    });
-  }
-
-  async deleteDocument(workspaceId: string, documentId: string) {
-    return this.request<{ status: string }>(workspacePath(workspaceId, `/documents/${encodeURIComponent(documentId)}`), {
-      method: "DELETE",
-    });
-  }
-
   async createThread(workspaceId: string, input: Record<string, unknown>) {
     return this.request<{ thread: ThreadItem }>(workspacePath(workspaceId, "/threads"), {
       method: "POST",

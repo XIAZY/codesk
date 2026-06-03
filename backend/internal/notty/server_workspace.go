@@ -18,6 +18,7 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"workspaceId":     state.WorkspaceID,
+		"rootDocumentId":  state.RootDocumentID,
 		"currentUserId":   currentUserID,
 		"currentDaemonId": currentDaemonID,
 		"name":            state.Name,
@@ -72,15 +73,16 @@ func (s *Server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	if err := conn.WriteJSON(EventEnvelope{
 		Type: "workspace.snapshot",
 		Data: map[string]interface{}{
-			"documents":   SortedSyncDocuments(snapshot),
-			"users":       SortedUsers(snapshot),
-			"daemons":     s.daemonsForWorkspace(r, snapshot),
-			"agents":      visibleAgentsForAuth(snapshot, auth),
-			"agentRuns":   SortedWorkspaceAgentRuns(snapshot),
-			"threads":     SortedThreads(snapshot),
-			"agentEvents": SortedAgentEvents(snapshot),
-			"presences":   snapshot.Presences,
-			"activities":  snapshot.Activities,
+			"rootDocumentId": snapshot.RootDocumentID,
+			"documents":      SortedSyncDocuments(snapshot),
+			"users":          SortedUsers(snapshot),
+			"daemons":        s.daemonsForWorkspace(r, snapshot),
+			"agents":         visibleAgentsForAuth(snapshot, auth),
+			"agentRuns":      SortedWorkspaceAgentRuns(snapshot),
+			"threads":        SortedThreads(snapshot),
+			"agentEvents":    SortedAgentEvents(snapshot),
+			"presences":      snapshot.Presences,
+			"activities":     snapshot.Activities,
 		},
 	}); err != nil {
 		return

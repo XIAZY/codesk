@@ -149,6 +149,7 @@ export type PresenceItem = {
 
 export type WorkspaceState = {
   workspaceId: string;
+  rootDocumentId: string;
   currentUserId?: string;
   currentDaemonId?: string;
   name: string;

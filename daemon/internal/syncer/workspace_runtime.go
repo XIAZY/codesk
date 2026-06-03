@@ -16,6 +16,7 @@ import (
 
 const workspaceReconcileMinInterval = 2 * time.Second
 const localCreateReconcileWake = "__local_create__"
+const rootDocumentPath = ".notty/root"
 
 type workspaceRuntime struct {
 	cfg                Config
@@ -28,6 +29,9 @@ type workspaceRuntime struct {
 	documentSocket     *workspaceDocumentSocket
 	threadDeliveryWake chan struct{}
 	initialWorkspace   *workspaceResponse
+	rootDocumentID     string
+	workspaceDocuments []*document
+	sendDocumentUpdate func(context.Context, string, outboxUpdateRecord) error
 }
 
 func (r *workspaceRuntime) fetchWorkspace(ctx context.Context) (*workspaceResponse, error) {
@@ -214,22 +218,32 @@ func (r *workspaceRuntime) applyWorkspace(ctx context.Context, workspace *worksp
 	if r == nil {
 		return nil
 	}
-	if r.replica != nil {
+	documents := []*document(nil)
+	if workspace != nil {
+		r.rootDocumentID = strings.TrimSpace(workspace.RootDocumentID)
+		documents = workspace.Documents
+	}
+	r.workspaceDocuments = cloneDocuments(documents)
+	if r.replica != nil && r.rootDocumentID == "" {
 		if err := r.replica.applyWorkspace(ctx, workspace); err != nil {
 			return err
 		}
 	}
-	documents := []*document(nil)
-	if workspace != nil {
-		documents = workspace.Documents
+	desiredDocuments := make([]*document, 0, len(documents)+1)
+	if r.rootDocumentID != "" {
+		desiredDocuments = append(desiredDocuments, &document{ID: r.rootDocumentID, Path: rootDocumentPath})
 	}
+	desiredDocuments = append(desiredDocuments, documents...)
 	if r.documentSocket != nil {
-		r.documentSocket.SetDesiredDocuments(documents)
+		r.documentSocket.SetDesiredDocuments(desiredDocuments)
 	}
 	for _, document := range documents {
 		if document != nil && document.ID != "" && !isIgnoredDocumentPath(document.Path) {
 			r.markDocumentDirty(document.ID)
 		}
+	}
+	if r.rootDocumentID != "" {
+		r.markDocumentDirty(r.rootDocumentID)
 	}
 	return nil
 }

@@ -71,11 +71,14 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			id TEXT PRIMARY KEY,
 			path TEXT NOT NULL,
 			title TEXT NOT NULL,
+			hidden BOOLEAN NOT NULL DEFAULT false,
 			client_id_seed BIGINT NOT NULL,
 			updated_at TIMESTAMPTZ NOT NULL
 		)
 		`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_workspace_path ON documents (workspace_id, path)`,
+		`ALTER TABLE documents ADD COLUMN IF NOT EXISTS hidden BOOLEAN NOT NULL DEFAULT false`,
+		`DROP INDEX IF EXISTS idx_documents_workspace_path`,
+		`DROP INDEX IF EXISTS idx_documents_workspace_visible_path`,
 		`
 		CREATE TABLE IF NOT EXISTS document_heads (
 			workspace_id TEXT NOT NULL,
@@ -498,20 +501,9 @@ func (s *Store) persistDocumentMutationPostgresLocked() error {
 }
 
 func (s *Store) pendingDocumentMutationIDsLocked() []string {
-	seen := map[string]struct{}{}
-	ids := make([]string, 0, len(s.dirtyDocuments)+len(s.deletedDocuments))
+	ids := make([]string, 0, len(s.dirtyDocuments))
 	for documentID := range s.dirtyDocuments {
 		if documentID == "" {
-			continue
-		}
-		seen[documentID] = struct{}{}
-		ids = append(ids, documentID)
-	}
-	for documentID := range s.deletedDocuments {
-		if documentID == "" {
-			continue
-		}
-		if _, ok := seen[documentID]; ok {
 			continue
 		}
 		ids = append(ids, documentID)
@@ -521,37 +513,21 @@ func (s *Store) pendingDocumentMutationIDsLocked() []string {
 }
 
 func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) error {
-	for documentID := range s.deletedDocuments {
-		if _, err := tx.Exec(`DELETE FROM agent_document_views WHERE workspace_id = $1 AND document_id = $2`, s.state.WorkspaceID, documentID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`DELETE FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2`, s.state.WorkspaceID, documentID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`DELETE FROM document_updates WHERE workspace_id = $1 AND document_id = $2`, s.state.WorkspaceID, documentID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`DELETE FROM document_heads WHERE workspace_id = $1 AND document_id = $2`, s.state.WorkspaceID, documentID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`DELETE FROM documents WHERE workspace_id = $1 AND id = $2`, s.state.WorkspaceID, documentID); err != nil {
-			return err
-		}
-	}
 	for documentID := range s.dirtyDocuments {
 		document := s.state.Documents[documentID]
 		if document == nil {
 			continue
 		}
 		if _, err := tx.Exec(
-			`INSERT INTO documents (workspace_id, id, path, title, client_id_seed, updated_at)
-			 VALUES ($1, $2, $3, $4, $5, $6)
+			`INSERT INTO documents (workspace_id, id, path, title, hidden, client_id_seed, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)
 			 ON CONFLICT (id)
-			 DO UPDATE SET path = EXCLUDED.path, title = EXCLUDED.title, client_id_seed = EXCLUDED.client_id_seed, updated_at = EXCLUDED.updated_at`,
+			 DO UPDATE SET path = EXCLUDED.path, title = EXCLUDED.title, hidden = EXCLUDED.hidden, client_id_seed = EXCLUDED.client_id_seed, updated_at = EXCLUDED.updated_at`,
 			s.state.WorkspaceID,
 			document.ID,
 			document.Path,
 			document.Title,
+			document.Hidden,
 			int64(document.ClientIDSeed),
 			document.UpdatedAt,
 		); err != nil {
@@ -647,7 +623,6 @@ func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) error {
 		}
 	}
 	s.dirtyDocuments = map[string]struct{}{}
-	s.deletedDocuments = map[string]struct{}{}
 	s.pendingDocumentEvents = []documentUpdateRecord{}
 	return nil
 }
@@ -1783,6 +1758,7 @@ func (s *Store) loadDocumentsPostgresLocked() error {
 		`SELECT d.id,
 		        d.path,
 		        d.title,
+		        d.hidden,
 		        COALESCE(NULLIF(h.state_vector, ''), checkpoint.state_vector, '') AS state_vector,
 		        h.update_id,
 		        d.updated_at,
@@ -1815,6 +1791,7 @@ func (s *Store) loadDocumentsPostgresLocked() error {
 			&document.ID,
 			&document.Path,
 			&document.Title,
+			&document.Hidden,
 			&document.StateVector,
 			&document.UpdateID,
 			&document.UpdatedAt,

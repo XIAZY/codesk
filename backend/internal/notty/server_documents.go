@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -15,14 +14,6 @@ import (
 	"github.com/gorilla/websocket"
 	"notty/internal/yproto"
 )
-
-const maxRawDocumentUpdateBytes = 32 << 20
-
-type postDocumentUpdateResponse struct {
-	Accepted bool  `json:"accepted"`
-	Applied  bool  `json:"applied"`
-	UpdateID int64 `json:"updateId"`
-}
 
 func (s *Server) handleDocumentByPath(w http.ResponseWriter, r *http.Request) {
 	document, err := s.requestStore(r).GetDocumentMetadataByPath(r.URL.Query().Get("path"))
@@ -75,95 +66,6 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 	s.requestBroker(r).Publish(event)
 	s.publishAgentInboxChanges(r)
 	writeJSON(w, http.StatusCreated, documentMetadata(document))
-}
-
-func (s *Server) handleMoveDocument(w http.ResponseWriter, r *http.Request) {
-	var req UpdateDocumentRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	auth, _ := authFromContext(r.Context())
-	meta := operationMetaFromAuth(auth, "document-move", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
-	document, oldPath, err := s.requestStore(r).MoveDocument(chi.URLParam(r, "id"), req.Path, meta)
-	if err != nil {
-		status := http.StatusBadRequest
-		if err == ErrNotFound {
-			status = http.StatusNotFound
-		}
-		writeError(w, status, err.Error())
-		return
-	}
-	s.requestBroker(r).Publish(EventEnvelope{Type: "document.moved", Data: DocumentLifecycleEvent{
-		DocumentID: document.ID,
-		Path:       document.Path,
-		OldPath:    oldPath,
-		Title:      document.Title,
-		UpdatedAt:  document.UpdatedAt,
-		ActorID:    meta.ActorID,
-	}})
-	writeJSON(w, http.StatusOK, documentMetadata(document))
-}
-
-func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
-	auth, _ := authFromContext(r.Context())
-	meta := operationMetaFromAuth(auth, "document-delete", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
-	document, err := s.requestStore(r).DeleteDocument(chi.URLParam(r, "id"), meta)
-	if err != nil {
-		status := http.StatusBadRequest
-		if err == ErrNotFound {
-			status = http.StatusNotFound
-		}
-		writeError(w, status, err.Error())
-		return
-	}
-	s.requestBroker(r).Publish(EventEnvelope{Type: "document.deleted", Data: DocumentLifecycleEvent{
-		DocumentID: document.ID,
-		Path:       document.Path,
-		Title:      document.Title,
-		UpdatedAt:  time.Now().UTC(),
-		ActorID:    meta.ActorID,
-	}})
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
-}
-
-func (s *Server) handlePostDocumentUpdate(w http.ResponseWriter, r *http.Request) {
-	documentID := chi.URLParam(r, "id")
-	store := s.requestStore(r)
-	if !store.HasDocument(documentID) {
-		writeError(w, http.StatusNotFound, ErrNotFound.Error())
-		return
-	}
-	payload, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRawDocumentUpdateBytes))
-	if err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			writeError(w, http.StatusRequestEntityTooLarge, "document update is too large")
-			return
-		}
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if len(payload) == 0 {
-		writeError(w, http.StatusBadRequest, "document update is required")
-		return
-	}
-	auth, _ := authFromContext(r.Context())
-	meta := operationMetaFromAuth(auth, "document-update", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
-	meta.Source = "http"
-	meta.Trigger = "daemon outgoing update"
-	meta.Confidence = "high"
-	room := s.rooms.ForDocument(s.requestWorkspaceID(r) + ":" + documentID)
-	result, err := s.applyAndPublishDocumentUpdate(r, room, nil, documentID, payload, meta)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, postDocumentUpdateResponse{
-		Accepted: true,
-		Applied:  result.Applied,
-		UpdateID: result.Document.UpdateID,
-	})
 }
 
 type documentFrame struct {
@@ -476,6 +378,17 @@ func (s *Server) handleDocumentProtocolMessageWithStore(store *Store, broker *Br
 				return err
 			}
 			log.Printf("document ws apply result doc=%s actor=%s actor_type=%s sync_type=%s bytes=%d applied=%t update_id=%d", documentID, meta.ActorID, meta.ActorType, documentSyncTypeLabel(syncType), len(data), result.Applied, result.Document.UpdateID)
+			if result.Applied {
+				if document, _, err := store.EncodeDocumentSyncUpdates(documentID, nil); err != nil {
+					return err
+				} else if document.StateVector != "" {
+					stateVector, decodeErr := base64.StdEncoding.DecodeString(document.StateVector)
+					if decodeErr != nil {
+						return decodeErr
+					}
+					sendDocumentPayload(session, documentID, yproto.BuildSyncStep1FromStateVector(stateVector))
+				}
+			}
 		}
 	case yproto.MessageAwareness:
 		updates, err := yproto.DecodeAwarenessUpdate(reader)
@@ -523,7 +436,7 @@ func applyAndPublishDocumentUpdate(store *Store, broker *Broker, room *DocumentR
 	if room != nil {
 		room.BroadcastSyncUpdate(documentID, yproto.BuildSyncUpdate(update), exclude)
 	}
-	if broker != nil {
+	if broker != nil && !updated.Hidden {
 		broker.Publish(EventEnvelope{Type: "document.updated", Data: DocumentUpdateEvent{
 			DocumentID: updated.ID,
 			UpdateID:   updated.UpdateID,

@@ -52,6 +52,12 @@ type YText struct {
 	branch *C.Branch
 }
 
+type YMap struct {
+	doc    *Doc
+	name   string
+	branch *C.Branch
+}
+
 func New(opts ...Option) *Doc {
 	cfg := options{}
 	for _, opt := range opts {
@@ -101,6 +107,17 @@ func (d *Doc) GetText(name string) *YText {
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 	return &YText{doc: d, name: name, branch: C.ytext(d.ptr, cName)}
+}
+
+func (d *Doc) GetMap(name string) *YMap {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed || d.ptr == nil {
+		return &YMap{doc: d, name: name}
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	return &YMap{doc: d, name: name, branch: C.ymap(d.ptr, cName)}
 }
 
 func (d *Doc) Transact(fn func(*Transaction), origin ...any) {

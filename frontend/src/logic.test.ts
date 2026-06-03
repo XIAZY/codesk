@@ -24,6 +24,7 @@ import type { Agent, Daemon, WorkspaceState } from "./types";
 function baseWorkspace(): WorkspaceState {
   return {
     workspaceId: "ws",
+    rootDocumentId: "doc_root_ws",
     name: "Workspace",
     documents: [],
     users: [],

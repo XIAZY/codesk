@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
-	crdt "notty/internal/ycrdt"
 )
 
 func TestAuthenticatedWorkspaceRoutesIsolateTenantsAndIgnoreSpoofedActor(t *testing.T) {
@@ -196,8 +195,8 @@ func TestDaemonReinstallTokenRotatesDaemonToken(t *testing.T) {
 	authTestStatus(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+daemonResponse.Daemon.ID+"/reinstall-token", reinstallResponse.Token, nil, http.StatusForbidden)
 }
 
-func TestDaemonTokenDocumentUpdateRouteAttributesActingAgent(t *testing.T) {
-	server, router := newAuthTestServer(t)
+func TestDaemonTokenDocumentUpdateHTTPRouteRemoved(t *testing.T) {
+	_, router := newAuthTestServer(t)
 
 	owner := authTestRegister(t, router, "daemon-document-owner@example.com", "owner-pass", "Daemon Document Owner")
 	workspace := authTestCreateWorkspace(t, router, owner.Token, "Daemon Document Tenant")
@@ -214,57 +213,17 @@ func TestDaemonTokenDocumentUpdateRouteAttributesActingAgent(t *testing.T) {
 		Kind:   "codex",
 	}, http.StatusCreated, &agent)
 
-	workspaceStore, err := server.workspaceStore(workspace.ID)
-	if err != nil {
-		t.Fatalf("get workspace store: %v", err)
-	}
-	peerDoc := syncDocumentToDocForTest(t, workspaceStore, document.ID, 404)
-	text := peerDoc.GetText("content")
-	update := captureDocUpdate(t, peerDoc, "daemon-edit", func(txn *crdt.Transaction) {
-		text.Insert(txn, text.LenInTxn(txn), " beta", nil)
-	})
-
-	events, unsubscribe := server.workspaceBroker(workspace.ID).Subscribe()
-	defer unsubscribe()
-
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/documents/"+document.ID+"/updates", bytes.NewReader(update))
+	request := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/documents/"+document.ID+"/updates", bytes.NewReader([]byte{0, 0}))
 	request.Header.Set("Authorization", "Bearer "+daemonResponse.Token)
 	request.Header.Set("Content-Type", "application/octet-stream")
 	request.Header.Set("X-Notty-Acting-Agent-ID", agent.ID)
 	router.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("expected authenticated document update status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusNotFound && recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected removed authenticated document update route, got %d body=%s", recorder.Code, recorder.Body.String())
 	}
-	var response postDocumentUpdateResponse
-	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-		t.Fatalf("decode document update response: %v body=%s", err, recorder.Body.String())
-	}
-	if !response.Accepted || !response.Applied || response.UpdateID == 0 {
-		t.Fatalf("unexpected document update response: %#v", response)
-	}
-	if got := currentDocumentContentForTest(t, workspaceStore, document.ID); got != "alpha beta" {
-		t.Fatalf("unexpected document content after authenticated daemon update: %q", got)
-	}
-
-	select {
-	case event := <-events:
-		if event.Type != "document.updated" {
-			t.Fatalf("expected document.updated event, got %#v", event)
-		}
-		payload, ok := event.Data.(DocumentUpdateEvent)
-		if !ok {
-			t.Fatalf("expected document update payload, got %#v", event.Data)
-		}
-		if payload.ActorID != agent.ID {
-			t.Fatalf("expected actor attribution %q, got %#v", agent.ID, payload)
-		}
-	default:
-		t.Fatal("expected document.updated event")
-	}
-	if got := countAgentEvents(workspaceStore.Snapshot(), agent.ID, "document.updated"); got != 0 {
-		t.Fatalf("acting agent should not receive its own daemon document update, got %d inbox events", got)
-	}
+	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/documents/"+document.ID, owner.Token, map[string]string{"path": "docs/renamed.md"}, http.StatusNotFound)
+	authTestStatus(t, router, http.MethodDelete, "/api/workspaces/"+workspace.ID+"/documents/"+document.ID, owner.Token, nil, http.StatusNotFound)
 }
 
 type authTestWorkspace struct {

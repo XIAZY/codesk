@@ -197,6 +197,19 @@ func (c *workspaceStore) initSchema() error {
 		)`,
 		`create index if not exists thread_outbox_materialize on thread_outbox(document_id, status, created_at)`,
 		`create index if not exists thread_outbox_due on thread_outbox(status, next_attempt_at, created_at)`,
+		`create table if not exists root_projection_entries (
+			root_document_id text not null,
+			entry_id text not null,
+			kind text not null,
+			content_document_id text not null,
+			desired_path text not null,
+			materialized_path text not null,
+			active integer not null,
+			projected_seq integer not null,
+			updated_at integer not null,
+			primary key (root_document_id, entry_id)
+		)`,
+		`create index if not exists root_projection_entries_by_content on root_projection_entries(root_document_id, content_document_id)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := c.db.Exec(stmt); err != nil {
@@ -286,6 +299,21 @@ func (c *workspaceStore) localStateVector(documentID string) []byte {
 		return nil
 	}
 	return crdt.EncodeStateVectorV1(doc)
+}
+
+func (c *workspaceStore) localStateDiff(documentID, path string, remoteStateVector []byte) ([]byte, error) {
+	if c == nil || documentID == "" {
+		return nil, nil
+	}
+	doc, _, state, err := c.loadBaseDoc(documentID, path)
+	if err != nil {
+		return nil, err
+	}
+	defer doc.Close()
+	if len(state) == 0 {
+		return nil, nil
+	}
+	return doc.EncodeStateAsUpdateV1(remoteStateVector)
 }
 
 func (c *workspaceStore) appendPendingRemoteUpdate(documentID, path string, update []byte) (bool, error) {
@@ -556,7 +584,7 @@ func (c *workspaceStore) storeOutboxUpdatesLocked(entry *documentCacheEntry, doc
 	})
 }
 
-func (c *workspaceStore) acceptOutboxUpdateLocked(_ *documentCacheEntry, documentID, path string, record *outboxUpdateRecord, _ int64) error {
+func (c *workspaceStore) applyOutboxUpdateLocked(_ *documentCacheEntry, documentID, path string, record *outboxUpdateRecord) error {
 	if c == nil || documentID == "" || record == nil || len(record.Update) == 0 {
 		return nil
 	}
@@ -577,15 +605,27 @@ func (c *workspaceStore) acceptOutboxUpdateLocked(_ *documentCacheEntry, documen
 				return err
 			}
 		}
-		if record.ID != "" {
-			_, err = tx.Exec(`delete from content_outbox where id = ?`, record.ID)
-		} else {
-			_, err = tx.Exec(`delete from content_outbox where id = (
-				select id from content_outbox where document_id = ? order by created_at, id limit 1
-			)`, documentID)
-		}
-		return err
+		return nil
 	})
+}
+
+func (c *workspaceStore) clearOutboxUpdates(documentID string) error {
+	if c == nil || documentID == "" {
+		return nil
+	}
+	_, err := c.db.Exec(`delete from content_outbox where document_id = ?`, documentID)
+	return err
+}
+
+func (c *workspaceStore) clearOutboxUpdate(documentID, id string) error {
+	if c == nil || documentID == "" {
+		return nil
+	}
+	if strings.TrimSpace(id) == "" {
+		return c.clearOutboxUpdates(documentID)
+	}
+	_, err := c.db.Exec(`delete from content_outbox where document_id = ? and id = ?`, documentID, id)
+	return err
 }
 
 func (c *workspaceStore) removeDocumentLocked(entry *documentCacheEntry, documentID string) error {
@@ -646,6 +686,84 @@ func (c *workspaceStore) storeProjectedBase(documentID, content string, states .
 			updated_at = ?
 		where document_id = ?`, projectedSeq, sha256Hex([]byte(content)), len(content), unixNano(now), documentID)
 	return err
+}
+
+func (c *workspaceStore) documentAppliedSeq(documentID string) (int64, error) {
+	if c == nil || documentID == "" {
+		return 0, nil
+	}
+	row, err := c.ensureDocument(documentID, "")
+	if err != nil {
+		return 0, err
+	}
+	return row.AppliedSeq, nil
+}
+
+func (c *workspaceStore) storeProjectedSeq(documentID string, projectedSeq int64) error {
+	if c == nil || documentID == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	_, err := c.db.Exec(`update documents
+		set projected_seq = ?,
+			projection_known = 1,
+			updated_at = ?
+		where document_id = ?`, projectedSeq, unixNano(now), documentID)
+	return err
+}
+
+func (c *workspaceStore) loadRootProjectionEntries(rootDocumentID string) (map[string]rootProjectionEntry, error) {
+	result := map[string]rootProjectionEntry{}
+	if c == nil || rootDocumentID == "" {
+		return result, nil
+	}
+	rows, err := c.db.Query(`select entry_id, kind, content_document_id, desired_path, materialized_path, active, projected_seq
+		from root_projection_entries where root_document_id = ?`, rootDocumentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var entry rootProjectionEntry
+		var active int
+		if err := rows.Scan(&entry.EntryID, &entry.Kind, &entry.ContentDocumentID, &entry.DesiredPath, &entry.MaterializedPath, &active, &entry.ProjectedSeq); err != nil {
+			return nil, err
+		}
+		entry.Active = active != 0
+		result[entry.EntryID] = entry
+	}
+	return result, rows.Err()
+}
+
+func (c *workspaceStore) storeRootProjectionEntries(rootDocumentID string, entries []rootProjectionEntry) error {
+	if c == nil || rootDocumentID == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	return c.withTx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`delete from root_projection_entries where root_document_id = ?`, rootDocumentID); err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			if entry.EntryID == "" || entry.ContentDocumentID == "" {
+				continue
+			}
+			active := 0
+			if entry.Active {
+				active = 1
+			}
+			if _, err := tx.Exec(`insert into root_projection_entries (
+					root_document_id, entry_id, kind, content_document_id, desired_path,
+					materialized_path, active, projected_seq, updated_at
+				) values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				rootDocumentID, entry.EntryID, firstNonEmptyText(entry.Kind, rootEntryKindFile),
+				entry.ContentDocumentID, entry.DesiredPath, entry.MaterializedPath, active,
+				entry.ProjectedSeq, unixNano(now)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (c *workspaceStore) findProjectedSeq(documentID, content string, state []byte) (int64, bool, error) {
