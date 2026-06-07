@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 	crdt "notty/internal/ycrdt"
@@ -41,6 +42,39 @@ func TestCloneThreadPreservesEmptyArrays(t *testing.T) {
 		if len(values) != 0 {
 			t.Fatalf("expected %s to be empty, got %#v", key, values)
 		}
+	}
+}
+
+func TestBackendTextTruncationPreservesUTF8(t *testing.T) {
+	input := strings.Repeat("a", 238) + "可见多"
+	got := truncateText(input, 240)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncateText returned invalid UTF-8: % x", []byte(got))
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("expected truncateText to append ellipsis, got %q", got)
+	}
+	if strings.ContainsRune(got, utf8.RuneError) {
+		t.Fatalf("truncateText split a valid UTF-8 rune: %q", got)
+	}
+
+	fixed := truncateString(input, 240)
+	if !utf8.ValidString(fixed) {
+		t.Fatalf("truncateString returned invalid UTF-8: % x", []byte(fixed))
+	}
+	if runeCount(fixed) > 240 {
+		t.Fatalf("expected fixed-width truncation to stay within limit, got %d runes", runeCount(fixed))
+	}
+}
+
+func TestBackendTextTruncationSanitizesInvalidUTF8(t *testing.T) {
+	input := "prefix " + string([]byte{0xe5, 0x8f}) + " suffix"
+	got := truncateText(input, 240)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncateText returned invalid UTF-8: % x", []byte(got))
+	}
+	if !strings.ContainsRune(got, utf8.RuneError) {
+		t.Fatalf("expected invalid bytes to be replaced, got %q", got)
 	}
 }
 

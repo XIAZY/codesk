@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	crdt "notty/internal/ycrdt"
@@ -1000,6 +1001,66 @@ func TestPostgresAgentInboxSkipsLogDocumentUpdatesButKeepsThreadMentions(t *test
 	}
 	if len(items) != 1 {
 		t.Fatalf("expected normal document update in inbox, got %#v", items)
+	}
+}
+
+func TestPostgresPersistsUTF8SafeTruncatedAgentEventPrompt(t *testing.T) {
+	dsn := postgresTestDSN(t)
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+	if err := initPostgresSchema(db); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+	if err := clearNottyTables(db); err != nil {
+		t.Fatalf("clear tables: %v", err)
+	}
+
+	store, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	agent, err := store.CreateAgent(CreateAgentRequest{
+		Handle: "reviewer",
+		Name:   "Reviewer",
+		Role:   "Reviews documents",
+		Kind:   "codex",
+	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "start\n")
+	body := strings.Repeat("a", 238) + "可见 @reviewer"
+	if _, _, _, err := store.CreateThread(CreateThreadRequest{
+		DocumentID:    documentID,
+		Title:         "UTF-8 prompt",
+		Body:          body,
+		RelativeStart: "test-relative-start",
+		RelativeEnd:   "test-relative-end",
+	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"}); err != nil {
+		t.Fatalf("create thread with long UTF-8 mention body: %v", err)
+	}
+	if err := store.load(); err != nil {
+		t.Fatalf("reload store after UTF-8 mention prompt: %v", err)
+	}
+	items, err := store.ListAgentInbox(agent.ID, "for-me", "pending")
+	if err != nil {
+		t.Fatalf("list inbox: %v", err)
+	}
+	mention := findAgentEventByType(items, "thread.mentioned")
+	if mention == nil {
+		t.Fatalf("expected thread mention, got %s", formatAgentEvents(items))
+	}
+	if !utf8.ValidString(mention.Prompt) {
+		t.Fatalf("mention prompt is invalid UTF-8: % x", []byte(mention.Prompt))
+	}
+	if !strings.Contains(mention.Prompt, "...") {
+		t.Fatalf("expected prompt to include truncated body, got %q", mention.Prompt)
 	}
 }
 

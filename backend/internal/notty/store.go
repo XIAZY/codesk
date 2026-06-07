@@ -2462,10 +2462,7 @@ func summarizePrompt(prompt string) string {
 	if trimmed == "" {
 		return ""
 	}
-	if len(trimmed) > 72 {
-		return trimmed[:72] + "..."
-	}
-	return trimmed
+	return truncateText(trimmed, 72)
 }
 
 func summarizeLogTail(lines []string) []string {
@@ -2484,13 +2481,14 @@ func summarizeLogTail(lines []string) []string {
 }
 
 func truncateString(value string, limit int) string {
-	if limit <= 0 || len(value) <= limit {
+	value = strings.ToValidUTF8(value, "\uFFFD")
+	if limit <= 0 || runeCount(value) <= limit {
 		return value
 	}
 	if limit <= 3 {
-		return value[:limit]
+		return firstRunes(value, limit)
 	}
-	return value[:limit-3] + "..."
+	return firstRunes(value, limit-3) + "..."
 }
 
 func describeAgentRunStatus(run *AgentRun) string {
@@ -3000,8 +2998,34 @@ func containsText(items []string, target string) bool {
 }
 
 func truncateText(value string, limit int) string {
-	if len(value) <= limit {
+	value = strings.ToValidUTF8(value, "\uFFFD")
+	if limit < 0 {
+		limit = 0
+	}
+	if runeCount(value) <= limit {
 		return value
 	}
-	return value[:limit] + "..."
+	return firstRunes(value, limit) + "..."
+}
+
+func firstRunes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	count := 0
+	for idx := range value {
+		if count == limit {
+			return value[:idx]
+		}
+		count++
+	}
+	return value
+}
+
+func runeCount(value string) int {
+	count := 0
+	for range value {
+		count++
+	}
+	return count
 }
