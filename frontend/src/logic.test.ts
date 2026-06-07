@@ -26,7 +26,6 @@ function baseWorkspace(): WorkspaceState {
     workspaceId: "ws",
     rootDocumentId: "doc_root_ws",
     name: "Workspace",
-    documents: [],
     users: [],
     daemons: [],
     agents: [],
@@ -73,15 +72,21 @@ describe("Yjs editor helpers", () => {
 });
 
 describe("workspace reduction", () => {
-  it("updates document metadata without requiring document content", () => {
+  it("does not keep document namespace state from workspace events", () => {
     const state = reduceWorkspaceEvent(baseWorkspace(), {
+      type: "workspace.snapshot",
+      data: {
+        documents: [{ id: "doc", path: "legacy/spec.md", title: "legacy" }],
+        threads: [],
+      },
+    });
+    const next = reduceWorkspaceEvent(state, {
       type: "document.updated",
       data: { documentId: "doc", path: "docs/spec.md", title: "spec.md", updateId: 42, updatedAt: "now" },
     });
 
-    expect(state.documents).toEqual([
-      { id: "doc", path: "docs/spec.md", title: "spec.md", updateId: 42, updatedAt: "now" },
-    ]);
+    expect("documents" in state).toBe(false);
+    expect("documents" in next).toBe(false);
   });
 
   it("attaches thread messages without duplicating repeated events", () => {

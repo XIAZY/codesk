@@ -140,6 +140,51 @@ func TestWorkspaceExposesRootDocumentIDAndHidesRootDocument(t *testing.T) {
 	assertNonOK(t, server.Routes(), http.MethodGet, "/api/documents/by-path?path="+rootDocumentPath, nil)
 }
 
+func TestWorkspaceEventSocketSnapshotOmitsDocumentList(t *testing.T) {
+	server, store := newTestServer(t)
+	_ = mustCreateTestDocument(t, store, "docs/spec.md", "hello")
+	httpServer := httptest.NewServer(server.Routes())
+	defer httpServer.Close()
+
+	conn := dialDocumentWebsocketForTest(t, httpServer.URL, "/ws")
+	defer conn.Close()
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set websocket read deadline: %v", err)
+	}
+	var event EventEnvelope
+	if err := conn.ReadJSON(&event); err != nil {
+		t.Fatalf("read workspace event snapshot: %v", err)
+	}
+	if event.Type != "workspace.snapshot" {
+		t.Fatalf("workspace event type = %q, want workspace.snapshot", event.Type)
+	}
+	data, ok := event.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("workspace snapshot data = %#v, want object", event.Data)
+	}
+	if _, ok := data["documents"]; ok {
+		t.Fatalf("workspace event socket snapshot must not carry documents: %#v", data["documents"])
+	}
+	if data["rootDocumentId"] != store.Snapshot().RootDocumentID {
+		t.Fatalf("rootDocumentId = %#v, want %q", data["rootDocumentId"], store.Snapshot().RootDocumentID)
+	}
+}
+
+func TestRootDocumentBootstrapsLegacyVisibleDocumentsOnReload(t *testing.T) {
+	_, store := newTestServer(t)
+	documentID := mustCreateTestDocument(t, store, "docs/legacy.md", "legacy")
+	if err := store.Reload(); err != nil {
+		t.Fatalf("reload store: %v", err)
+	}
+
+	rootID := store.Snapshot().RootDocumentID
+	rootDoc := syncDocumentToDocForTest(t, store, rootID, 909)
+	path, deleted := rootEntryForDocumentForTest(t, rootDoc, documentID)
+	if path != "docs/legacy.md" || deleted {
+		t.Fatalf("root entry for %s = path %q deleted %v, want docs/legacy.md false", documentID, path, deleted)
+	}
+}
+
 func TestCreateDocumentAllocatesEmptyStreamAndAllowsDuplicatePathHints(t *testing.T) {
 	_, store := newTestServer(t)
 	first, err := store.CreateDocument(CreateDocumentRequest{Path: "docs/same.md", Content: "client writes this later"}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
@@ -1319,6 +1364,63 @@ func readDocumentWebsocketFrameForTest(t *testing.T, conn *websocket.Conn) docum
 		t.Fatalf("decode routed document message: %v", err)
 	}
 	return documentFrame{documentID: documentID, payload: inner}
+}
+
+func rootEntryForDocumentForTest(t *testing.T, doc *crdt.Doc, documentID string) (string, bool) {
+	t.Helper()
+	root := doc.GetMap(rootMapName)
+	var path string
+	var deleted bool
+	if err := doc.Read(func(txn *crdt.Transaction) error {
+		entries, ok, err := root.GetMap(txn, rootEntriesMapName)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			t.Fatalf("missing %s map", rootEntriesMapName)
+		}
+		entry, ok, err := entries.GetMap(txn, documentID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			t.Fatalf("missing root entry for %s", documentID)
+		}
+		contentDocumentID, ok, err := entry.GetString(txn, "contentDocumentId")
+		if err != nil {
+			return err
+		}
+		if !ok || contentDocumentID != documentID {
+			t.Fatalf("contentDocumentId = %q, want %q", contentDocumentID, documentID)
+		}
+		locValue, ok, err := entry.GetString(txn, "loc")
+		if err != nil {
+			return err
+		}
+		if !ok {
+			t.Fatal("missing root entry loc")
+		}
+		var loc struct {
+			ParentID string `json:"parentId"`
+			Name     string `json:"name"`
+		}
+		if err := json.Unmarshal([]byte(locValue), &loc); err != nil {
+			return err
+		}
+		path = loc.Name
+		if loc.ParentID != "" {
+			path = loc.ParentID + "/" + loc.Name
+		}
+		deletedValue, ok, err := entry.GetString(txn, "deleted")
+		if err != nil {
+			return err
+		}
+		deleted = ok && strings.EqualFold(deletedValue, "true")
+		return nil
+	}); err != nil {
+		t.Fatalf("read root entry: %v", err)
+	}
+	return path, deleted
 }
 
 func assertSyncPayloadForTest(t *testing.T, payload []byte) {

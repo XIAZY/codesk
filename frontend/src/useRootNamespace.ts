@@ -5,14 +5,12 @@ import {
   tombstoneRootFileEntry,
   upsertRootFileEntry,
 } from "./rootNamespace";
-import type { DocumentItem } from "./types";
 import { useYDocSync } from "./useYDocSync";
 
 export function useRootNamespace(input: {
   workspaceId: string;
   token: string;
   rootDocumentId: string;
-  streamDocuments: DocumentItem[];
 }) {
   const { ydoc, ready, connected } = useYDocSync({
     workspaceId: input.workspaceId,
@@ -31,8 +29,8 @@ export function useRootNamespace(input: {
   }, [ydoc]);
 
   const documents = useMemo(
-    () => projectRootDocuments(ydoc, input.streamDocuments),
-    [input.streamDocuments, version, ydoc],
+    () => projectRootDocuments(ydoc),
+    [version, ydoc],
   );
 
   const upsertFile = useCallback(

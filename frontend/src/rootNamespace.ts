@@ -58,20 +58,14 @@ export function decodeRootEntries(doc: Y.Doc): RootFileEntry[] {
   return result.sort((left, right) => left.path.localeCompare(right.path) || left.contentDocumentId.localeCompare(right.contentDocumentId));
 }
 
-export function projectRootDocuments(doc: Y.Doc, streamDocuments: DocumentItem[]): DocumentItem[] {
-  const streamById = new Map(streamDocuments.map((document) => [document.id, document]));
+export function projectRootDocuments(doc: Y.Doc): DocumentItem[] {
   return decodeRootEntries(doc)
     .filter((entry) => !entry.deleted && entry.path)
     .map((entry) => {
-      const stream = streamById.get(entry.contentDocumentId);
       return {
         id: entry.contentDocumentId,
         path: entry.path,
         title: titleFromPath(entry.path),
-        stateVector: stream?.stateVector,
-        updateId: stream?.updateId,
-        updatedAt: stream?.updatedAt ?? "",
-        clientIdSeed: stream?.clientIdSeed,
       };
     });
 }

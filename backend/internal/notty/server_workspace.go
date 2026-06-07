@@ -74,7 +74,6 @@ func (s *Server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 		Type: "workspace.snapshot",
 		Data: map[string]interface{}{
 			"rootDocumentId": snapshot.RootDocumentID,
-			"documents":      SortedSyncDocuments(snapshot),
 			"users":          SortedUsers(snapshot),
 			"daemons":        s.daemonsForWorkspace(r, snapshot),
 			"agents":         visibleAgentsForAuth(snapshot, auth),

@@ -7,25 +7,20 @@ import {
   tombstoneRootFileEntry,
   upsertRootFileEntry,
 } from "./rootNamespace";
-import type { DocumentItem } from "./types";
 
 describe("root namespace projection", () => {
-  it("projects active root entries with supplemental stream metadata", () => {
+  it("projects active root entries from the root CRDT document", () => {
     const doc = new Y.Doc();
     upsertRootFileEntry(doc, "doc_1", "docs/spec.md");
 
-    const projected = projectRootDocuments(doc, [
-      streamDocument({ id: "doc_1", path: "legacy/path.md", title: "legacy", updateId: 7, updatedAt: "2026-06-01T00:00:00Z" }),
-    ]);
+    const projected = projectRootDocuments(doc);
 
     expect(projected).toEqual([
-      expect.objectContaining({
+      {
         id: "doc_1",
         path: "docs/spec.md",
         title: "spec.md",
-        updateId: 7,
-        updatedAt: "2026-06-01T00:00:00Z",
-      }),
+      },
     ]);
   });
 
@@ -43,7 +38,7 @@ describe("root namespace projection", () => {
     expect(decodeRootEntries(doc)).toEqual([
       expect.objectContaining({ contentDocumentId: "doc_1", path: "notes/spec.md", deleted: true }),
     ]);
-    expect(projectRootDocuments(doc, [streamDocument({ id: "doc_1" })])).toEqual([]);
+    expect(projectRootDocuments(doc)).toEqual([]);
   });
 
   it("converges root entry updates across Yjs replicas", () => {
@@ -55,7 +50,7 @@ describe("root namespace projection", () => {
     moveRootFileEntry(remote, "doc_1", "docs/renamed.md");
     Y.applyUpdate(local, Y.encodeStateAsUpdate(remote));
 
-    expect(projectRootDocuments(local, [streamDocument({ id: "doc_1" })])).toEqual([
+    expect(projectRootDocuments(local)).toEqual([
       expect.objectContaining({ id: "doc_1", path: "docs/renamed.md" }),
     ]);
   });
@@ -72,18 +67,6 @@ describe("root namespace projection", () => {
     root.set("entriesById", entries);
 
     expect(decodeRootEntries(doc)).toEqual([]);
-    expect(projectRootDocuments(doc, [])).toEqual([]);
+    expect(projectRootDocuments(doc)).toEqual([]);
   });
 });
-
-function streamDocument(input: Partial<DocumentItem> & { id: string }): DocumentItem {
-  return {
-    id: input.id,
-    path: input.path ?? "legacy.md",
-    title: input.title ?? "legacy.md",
-    updatedAt: input.updatedAt ?? "",
-    updateId: input.updateId,
-    stateVector: input.stateVector,
-    clientIdSeed: input.clientIdSeed,
-  };
-}

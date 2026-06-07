@@ -1,5 +1,5 @@
 import * as Y from "yjs";
-import type { Agent, AgentRun, Daemon, DocumentItem, ThreadAnchor, ThreadItem, WorkspaceEvent, WorkspaceState } from "./types";
+import type { Agent, AgentRun, Daemon, ThreadAnchor, ThreadItem, WorkspaceEvent, WorkspaceState } from "./types";
 
 export type ReplaceOp = {
   start: number;
@@ -85,7 +85,6 @@ export function emptyWorkspace(): WorkspaceState {
     workspaceId: "",
     rootDocumentId: "",
     name: "",
-    documents: [],
     users: [],
     daemons: [],
     agents: [],
@@ -198,20 +197,8 @@ export function agentsByDaemon(agents: Agent[], daemons: Daemon[]) {
 
 export function reduceWorkspaceEvent(state: WorkspaceState, event: WorkspaceEvent): WorkspaceState {
   if (event.type === "workspace.snapshot") {
-    return { ...state, ...(event.data as Partial<WorkspaceState>) };
-  }
-  if (event.type === "document.created" || event.type === "document.moved" || event.type === "document.updated") {
-    const { documentId, ...data } = event.data as Partial<DocumentItem> & { documentId?: string };
-    const id = data.id ?? documentId;
-    if (!id) {
-      return state;
-    }
-    const nextDoc = { ...(state.documents.find((doc) => doc.id === id) ?? {}), ...data, id } as DocumentItem;
-    return { ...state, documents: upsertById(state.documents, nextDoc) };
-  }
-  if (event.type === "document.deleted") {
-    const data = event.data as { documentId?: string };
-    return { ...state, documents: state.documents.filter((doc) => doc.id !== data.documentId) };
+    const { documents: _documents, ...data } = event.data as Partial<WorkspaceState> & { documents?: unknown };
+    return { ...state, ...data };
   }
   if (event.type === "thread.created" || event.type === "thread.updated") {
     return { ...state, threads: upsertById(state.threads, event.data as ThreadItem) };

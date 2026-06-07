@@ -14,10 +14,6 @@ export type DocumentItem = {
   id: string;
   path: string;
   title: string;
-  stateVector?: string;
-  updateId?: number;
-  updatedAt: string;
-  clientIdSeed?: number;
 };
 
 export type UserItem = {
@@ -153,7 +149,6 @@ export type WorkspaceState = {
   currentUserId?: string;
   currentDaemonId?: string;
   name: string;
-  documents: DocumentItem[];
   users: UserItem[];
   daemons: Daemon[];
   agents: Agent[];

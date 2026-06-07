@@ -361,9 +361,8 @@ function WorkspaceApp({
     workspaceId,
     token,
     rootDocumentId: workspace.rootDocumentId,
-    streamDocuments: workspace.documents,
   });
-  const rootDocuments = rootNamespace.ready || rootNamespace.documents.length ? rootNamespace.documents : workspace.documents;
+  const rootDocuments = rootNamespace.documents;
   const [activeDocumentId, setActiveDocumentId] = useState("");
   const [centerView, setCenterView] = useState<"document" | "daemons" | "agents">("document");
   const [rightTab, setRightTab] = useState<"threads" | "activity" | "people">("threads");
@@ -478,7 +477,8 @@ function WorkspaceApp({
               </div>
             </div>
           ))}
-          {!rootDocuments.length ? <p className="tiny muted empty-note">No documents yet.</p> : null}
+          {!rootNamespace.ready ? <p className="tiny muted empty-note">Syncing documents...</p> : null}
+          {rootNamespace.ready && !rootDocuments.length ? <p className="tiny muted empty-note">No documents yet.</p> : null}
         </section>
 
         <div className="divider" />
@@ -530,7 +530,6 @@ function WorkspaceApp({
             <span>{centerView === "document" ? activeFolder : "Operations"}</span>
             <Icon name="chevron" />
             <b>{centerView === "daemons" ? "Daemons" : centerView === "agents" ? "Agents" : activeDocument ? fileName(activeDocument.path) : "No document selected"}</b>
-            {centerView === "document" && activeDocument?.updateId ? <span className="chip sm">v {activeDocument.updateId}</span> : null}
             <span className={`chip sm ${connected ? "ok" : "warn"}`}>{connected ? "workspace live" : "workspace offline"}</span>
           </div>
           <div className="row gap-6">
@@ -988,7 +987,6 @@ function DocumentEditor({
         <div className="doc-meta-row">
           <span className="chip">Document</span>
           <span className="chip outline">Owner · {account?.displayName ?? account?.email ?? "You"}</span>
-          <span className="chip outline">Updated {shortTime(document.updatedAt)} ago</span>
           <span className={`chip outline ${connected ? "ok" : "warn"}`}>{connected ? "Live" : "Reconnecting"}</span>
         </div>
 

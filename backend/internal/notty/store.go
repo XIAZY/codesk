@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -34,6 +35,10 @@ const (
 	maxDiffResponseBytes     = 1024 * 1024
 	rootDocumentPath         = ".notty/root"
 	rootDocumentTitle        = "Workspace Root"
+	rootMapName              = "root"
+	rootEntriesMapName       = "entriesById"
+	rootEntryKindFile        = "file"
+	rootDeletedFalse         = "false"
 )
 
 type Store struct {
@@ -128,7 +133,9 @@ func (s *Store) load() error {
 	}
 	s.ensureMaps()
 	needsPersist := false
-	if s.ensureRootDocumentLocked() {
+	if changed, err := s.ensureRootDocumentLocked(); err != nil {
+		return err
+	} else if changed {
 		needsPersist = true
 	}
 	if s.refreshAgentSystemPromptsLocked() {
@@ -277,10 +284,11 @@ func rootDocumentID(workspaceID string) string {
 	return "doc_root_" + workspaceID
 }
 
-func (s *Store) ensureRootDocumentLocked() bool {
+func (s *Store) ensureRootDocumentLocked() (bool, error) {
 	s.ensureMaps()
 	rootID := rootDocumentID(s.state.WorkspaceID)
 	s.state.RootDocumentID = rootID
+	legacyFiles := s.rootBootstrapFilesLocked(rootID)
 	if existing := s.state.Documents[rootID]; existing != nil {
 		changed := false
 		if existing.Path != rootDocumentPath {
@@ -299,13 +307,27 @@ func (s *Store) ensureRootDocumentLocked() bool {
 			existing.UpdatedAt = time.Now().UTC()
 			s.markDocumentDirtyLocked(existing.ID)
 		}
-		return changed
+		if len(legacyFiles) > 0 {
+			bootstrapped, err := s.bootstrapEmptyRootDocumentLocked(existing, legacyFiles)
+			if err != nil {
+				return false, err
+			}
+			if bootstrapped {
+				changed = true
+			}
+		}
+		return changed, nil
 	}
 
 	now := time.Now().UTC()
 	clientIDSeed := s.nextClientIDSeedLocked()
 	doc := crdt.New(crdt.WithClientID(crdt.ClientID(clientIDSeed)))
 	defer doc.Close()
+	if len(legacyFiles) > 0 {
+		if _, err := applyRootBootstrapFiles(doc, legacyFiles); err != nil {
+			return false, err
+		}
+	}
 	document := &Document{
 		ID:           rootID,
 		Path:         rootDocumentPath,
@@ -324,7 +346,133 @@ func (s *Store) ensureRootDocumentLocked() bool {
 		Source:    "root-document-bootstrap",
 	}, now)
 	s.state.UpdatedAt = now
-	return true
+	return true, nil
+}
+
+type rootBootstrapFile struct {
+	DocumentID string
+	Path       string
+}
+
+func (s *Store) rootBootstrapFilesLocked(rootID string) []rootBootstrapFile {
+	documents := SortedDocuments(s.state)
+	files := make([]rootBootstrapFile, 0, len(documents))
+	for _, document := range documents {
+		if document == nil || document.ID == rootID || document.Path == rootDocumentPath {
+			continue
+		}
+		path, err := normalizeDocumentPath(document.Path)
+		if err != nil || path == "" {
+			continue
+		}
+		files = append(files, rootBootstrapFile{DocumentID: document.ID, Path: path})
+	}
+	return files
+}
+
+func (s *Store) bootstrapEmptyRootDocumentLocked(rootDocument *Document, files []rootBootstrapFile) (bool, error) {
+	if rootDocument == nil || len(files) == 0 {
+		return false, nil
+	}
+	doc, err := s.restoreDocumentDocPostgresLocked(rootDocument)
+	if err != nil {
+		return false, err
+	}
+	hasEntries, err := rootDocumentHasEntries(doc)
+	if err != nil || hasEntries {
+		return false, err
+	}
+	update, err := applyRootBootstrapFiles(doc, files)
+	if err != nil {
+		return false, err
+	}
+	if len(update) == 0 {
+		return false, nil
+	}
+	now := time.Now().UTC()
+	rootDocument.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
+	rootDocument.UpdatedAt = now
+	s.state.UpdatedAt = now
+	s.markDocumentDirtyLocked(rootDocument.ID)
+	s.appendIncrementalDocumentUpdateLocked(rootDocument.ID, update, OperationMeta{
+		ActorID:   "system",
+		ActorType: "system",
+		Source:    "root-document-legacy-bootstrap",
+	}, now)
+	return true, nil
+}
+
+func rootDocumentHasEntries(doc *crdt.Doc) (bool, error) {
+	if doc == nil {
+		return false, nil
+	}
+	root := doc.GetMap(rootMapName)
+	hasEntries := false
+	err := doc.Read(func(txn *crdt.Transaction) error {
+		entriesMap, ok, err := root.GetMap(txn, rootEntriesMapName)
+		if err != nil || !ok {
+			return err
+		}
+		entries, err := entriesMap.Entries(txn)
+		if err != nil {
+			return err
+		}
+		hasEntries = len(entries) > 0
+		return nil
+	})
+	return hasEntries, err
+}
+
+func applyRootBootstrapFiles(doc *crdt.Doc, files []rootBootstrapFile) ([]byte, error) {
+	if doc == nil || len(files) == 0 {
+		return nil, nil
+	}
+	root := doc.GetMap(rootMapName)
+	return doc.Update(func(txn *crdt.Transaction) error {
+		entriesMap, ok, err := root.GetMap(txn, rootEntriesMapName)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			entriesMap, err = root.SetMap(txn, rootEntriesMapName)
+			if err != nil {
+				return err
+			}
+		}
+		for _, file := range files {
+			if strings.TrimSpace(file.DocumentID) == "" || strings.TrimSpace(file.Path) == "" {
+				continue
+			}
+			entryMap, ok, err := entriesMap.GetMap(txn, file.DocumentID)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				entryMap, err = entriesMap.SetMap(txn, file.DocumentID)
+				if err != nil {
+					return err
+				}
+			}
+			if err := entryMap.SetString(txn, "kind", rootEntryKindFile); err != nil {
+				return err
+			}
+			if err := entryMap.SetString(txn, "contentDocumentId", file.DocumentID); err != nil {
+				return err
+			}
+			if err := entryMap.SetString(txn, "loc", rootEntryPathLoc(file.Path)); err != nil {
+				return err
+			}
+			if err := entryMap.SetString(txn, "deleted", rootDeletedFalse); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, "root-document-legacy-bootstrap")
+}
+
+func rootEntryPathLoc(path string) string {
+	encoded, _ := json.Marshal(map[string]string{"name": path})
+	return string(encoded)
 }
 
 func newSeedDocument(id string, clientID uint64, path string, title string, content string, now time.Time) (*Document, []byte) {
