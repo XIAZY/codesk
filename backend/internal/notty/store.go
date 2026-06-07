@@ -370,46 +370,6 @@ func (s *Store) ListDocuments() []*Document {
 	return SortedDocuments(s.state)
 }
 
-func (s *Store) GetDocumentByPath(path string) (*Document, error) {
-	normalized, err := normalizeDocumentPath(path)
-	if err != nil {
-		return nil, err
-	}
-	s.mu.Lock()
-	for _, document := range s.state.Documents {
-		if document.Hidden {
-			continue
-		}
-		if document.Path == normalized {
-			documentLock := s.documentLockLocked(document.ID)
-			documentLock.RLock()
-			s.mu.Unlock()
-			defer documentLock.RUnlock()
-			return cloneDocument(document), nil
-		}
-	}
-	s.mu.Unlock()
-	return nil, ErrNotFound
-}
-
-func (s *Store) GetDocumentMetadataByPath(path string) (*DocumentMetadata, error) {
-	normalized, err := normalizeDocumentPath(path)
-	if err != nil {
-		return nil, err
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, document := range s.state.Documents {
-		if document.Hidden {
-			continue
-		}
-		if document.Path == normalized {
-			return documentMetadata(document), nil
-		}
-	}
-	return nil, ErrNotFound
-}
-
 func (s *Store) HasDocument(id string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

@@ -668,44 +668,10 @@ Response `201`:
 }
 ```
 
-Resolve by path:
-
-```http
-GET /api/workspaces/{workspaceID}/documents/by-path?path=docs/spec.md
-Authorization: Bearer <jwt-or-daemon-token>
-```
-
-Response:
-
-```json
-{"document": {"id":"doc_...","path":"docs/spec.md","title":"spec.md","updateId":1}}
-```
-
-Move/rename:
-
-```http
-PATCH /api/workspaces/{workspaceID}/documents/{documentID}
-Authorization: Bearer <jwt-or-daemon-token>
-```
-
-Request:
-
-```json
-{"path":"docs/new-name.md"}
-```
-
-Delete:
-
-```http
-DELETE /api/workspaces/{workspaceID}/documents/{documentID}
-Authorization: Bearer <jwt-or-daemon-token>
-```
-
-Response:
-
-```json
-{"status":"deleted"}
-```
+The returned path is a creation hint. Current visible paths, moves, deletes, and
+path conflicts are represented in the workspace root CRDT document and projected
+by clients/daemons. The backend does not expose a current-path lookup or
+move/delete document API.
 
 ### 10. Frontend Syncs Active Document Text
 
@@ -1205,11 +1171,8 @@ AgentEvent:
 | `POST` | `/api/workspaces/{workspaceID}/daemons` | human | `CreateDaemonRequest` | `{daemon, token}` | daemon setup |
 | `DELETE` | `/api/workspaces/{workspaceID}/daemons/{daemonID}` | human | none | `{daemon}` | daemon deletion |
 | `POST` | `/api/workspaces/{workspaceID}/daemons/{daemonID}/agents` | human | `CreateAgentRequest` without `daemonId` | `Agent` | preferred agent creation |
-| `GET` | `/api/workspaces/{workspaceID}/documents/by-path?path=...` | human or daemon | none | `{document}` | document lookup |
-| `POST` | `/api/workspaces/{workspaceID}/documents` | human or daemon | `CreateDocumentRequest` | `DocumentMetadata` | create file |
+| `POST` | `/api/workspaces/{workspaceID}/documents` | human or daemon | `CreateDocumentRequest` | `DocumentMetadata` | create empty document stream |
 | `GET` | `/api/workspaces/{workspaceID}/documents/{id}/threads` | human or daemon | none | `{threads}` | document thread list |
-| `PATCH` | `/api/workspaces/{workspaceID}/documents/{id}` | human or daemon | `UpdateDocumentRequest` | `DocumentMetadata` | move/rename file |
-| `DELETE` | `/api/workspaces/{workspaceID}/documents/{id}` | human or daemon | none | `{"status":"deleted"}` | delete file |
 | `POST` | `/api/workspaces/{workspaceID}/users` | human or daemon | `CreateUserRequest` | `User` | legacy/internal user records |
 | `PATCH` | `/api/workspaces/{workspaceID}/users/{id}` | human or daemon | `UpdateUserRequest` | `User` | legacy/internal user records |
 | `DELETE` | `/api/workspaces/{workspaceID}/users/{id}` | human or daemon | none | `{"status":"deleted"}` | legacy/internal user records |

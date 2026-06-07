@@ -48,6 +48,13 @@ type rootIntent struct {
 	TargetPath        string
 }
 
+type rootProjectionPlan struct {
+	Previous map[string]rootProjectionEntry
+	Next     []rootProjectionEntry
+	Removed  []rootProjectionEntry
+	Upserts  []rootProjectionEntry
+}
+
 type rootLoc struct {
 	ParentID string `json:"parentId"`
 	Name     string `json:"name"`
@@ -84,40 +91,6 @@ func normalizeRootPath(path string) string {
 		return ""
 	}
 	return clean
-}
-
-func decodeRootEntries(doc *crdt.Doc) (map[string]rootEntry, error) {
-	entries := map[string]rootEntry{}
-	if doc == nil {
-		return entries, nil
-	}
-	root := doc.GetMap(rootMapName)
-	if err := doc.Read(func(txn *crdt.Transaction) error {
-		entriesMap, ok, err := root.GetMap(txn, rootEntriesMapName)
-		if err != nil || !ok {
-			return err
-		}
-		items, err := entriesMap.Entries(txn)
-		if err != nil {
-			return err
-		}
-		for _, item := range items {
-			if item.ValueKind != crdt.YMapEntryMap || item.MapValue == nil {
-				continue
-			}
-			entry, ok, err := decodeRootEntryMap(txn, item.Key, item.MapValue)
-			if err != nil {
-				return err
-			}
-			if ok {
-				entries[entry.EntryID] = entry
-			}
-		}
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	return entries, nil
 }
 
 func decodeRootEntryMap(txn *crdt.Transaction, entryID string, entryMap *crdt.YMap) (rootEntry, bool, error) {
@@ -196,7 +169,45 @@ func setRootFileEntry(txn *crdt.Transaction, entriesMap *crdt.YMap, entry rootEn
 	return entryMap.SetString(txn, "deleted", rootDeletedFalse)
 }
 
-func (s *workspaceRuntime) mutateRootEntries(ctx context.Context, actorID, actorType string, mutate func(*crdt.Transaction, *crdt.YMap) error) error {
+func (s *workspaceRuntime) flushRootOutbox(ctx context.Context) error {
+	if s == nil || s.docCache == nil || strings.TrimSpace(s.rootDocumentID) == "" {
+		return nil
+	}
+	cache := s.docCache
+	entry, unlock := cache.lockEntry(s.rootDocumentID)
+	outboxes, err := cache.loadOutboxUpdatesLocked(entry, s.rootDocumentID)
+	unlock()
+	if err != nil || len(outboxes) == 0 {
+		return err
+	}
+	return s.flushOutboxUpdates(ctx, cache, s.rootDocumentID, rootDocumentPath, nil, outboxes)
+}
+
+func (s *workspaceRuntime) upsertRootFileEntry(ctx context.Context, contentDocumentID, path, actorID, actorType string) error {
+	contentDocumentID = strings.TrimSpace(contentDocumentID)
+	if contentDocumentID == "" {
+		return nil
+	}
+	path, err := normalizeVisibleRootPath(path)
+	if err != nil {
+		return err
+	}
+	return s.mutateRootDoc(ctx, actorID, actorType, func(doc *crdt.Doc) ([]byte, error) {
+		return UpsertRootFile(doc, contentDocumentID, path, rootMutationActor{ID: actorID, Kind: actorType})
+	})
+}
+
+func (s *workspaceRuntime) tombstoneRootFileEntry(ctx context.Context, contentDocumentID, actorID, actorType string) error {
+	contentDocumentID = strings.TrimSpace(contentDocumentID)
+	if contentDocumentID == "" {
+		return nil
+	}
+	return s.mutateRootDoc(ctx, actorID, actorType, func(doc *crdt.Doc) ([]byte, error) {
+		return TombstoneRootFile(doc, contentDocumentID, rootMutationActor{ID: actorID, Kind: actorType})
+	})
+}
+
+func (s *workspaceRuntime) mutateRootDoc(ctx context.Context, actorID, actorType string, mutate func(*crdt.Doc) ([]byte, error)) error {
 	if s == nil || s.docCache == nil || strings.TrimSpace(s.rootDocumentID) == "" || mutate == nil {
 		return nil
 	}
@@ -221,20 +232,7 @@ func (s *workspaceRuntime) mutateRootEntries(ctx context.Context, actorID, actor
 		return err
 	}
 	defer doc.Close()
-	root := doc.GetMap(rootMapName)
-	update, err := doc.Update(func(txn *crdt.Transaction) error {
-		entriesMap, ok, err := root.GetMap(txn, rootEntriesMapName)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			entriesMap, err = root.SetMap(txn, rootEntriesMapName)
-			if err != nil {
-				return err
-			}
-		}
-		return mutate(txn, entriesMap)
-	}, "daemon-root-namespace")
+	update, err := mutate(doc)
 	if err != nil {
 		unlock()
 		return err
@@ -258,64 +256,6 @@ func (s *workspaceRuntime) mutateRootEntries(ctx context.Context, actorID, actor
 	return s.flushOutboxUpdates(ctx, cache, s.rootDocumentID, rootDocumentPath, nil, []outboxUpdateRecord{record})
 }
 
-func (s *workspaceRuntime) flushRootOutbox(ctx context.Context) error {
-	if s == nil || s.docCache == nil || strings.TrimSpace(s.rootDocumentID) == "" {
-		return nil
-	}
-	cache := s.docCache
-	entry, unlock := cache.lockEntry(s.rootDocumentID)
-	outboxes, err := cache.loadOutboxUpdatesLocked(entry, s.rootDocumentID)
-	unlock()
-	if err != nil || len(outboxes) == 0 {
-		return err
-	}
-	return s.flushOutboxUpdates(ctx, cache, s.rootDocumentID, rootDocumentPath, nil, outboxes)
-}
-
-func (s *workspaceRuntime) upsertRootFileEntry(ctx context.Context, contentDocumentID, path, actorID, actorType string) error {
-	contentDocumentID = strings.TrimSpace(contentDocumentID)
-	path = normalizeRootPath(path)
-	if contentDocumentID == "" || path == "" {
-		return nil
-	}
-	return s.mutateRootEntries(ctx, actorID, actorType, func(txn *crdt.Transaction, entriesMap *crdt.YMap) error {
-		return setRootFileEntry(txn, entriesMap, rootEntry{
-			EntryID:           rootEntryIDForDocument(contentDocumentID),
-			Kind:              rootEntryKindFile,
-			ContentDocumentID: contentDocumentID,
-			Name:              path,
-			Deleted:           false,
-		})
-	})
-}
-
-func (s *workspaceRuntime) tombstoneRootFileEntry(ctx context.Context, contentDocumentID, actorID, actorType string) error {
-	contentDocumentID = strings.TrimSpace(contentDocumentID)
-	if contentDocumentID == "" {
-		return nil
-	}
-	return s.mutateRootEntries(ctx, actorID, actorType, func(txn *crdt.Transaction, entriesMap *crdt.YMap) error {
-		entryID := rootEntryIDForDocument(contentDocumentID)
-		entryMap, ok, err := entriesMap.GetMap(txn, entryID)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			entryMap, err = entriesMap.SetMap(txn, entryID)
-			if err != nil {
-				return err
-			}
-			if err := entryMap.SetString(txn, "kind", rootEntryKindFile); err != nil {
-				return err
-			}
-			if err := entryMap.SetString(txn, "contentDocumentId", contentDocumentID); err != nil {
-				return err
-			}
-		}
-		return entryMap.SetString(txn, "deleted", rootDeletedTrue)
-	})
-}
-
 func (s *workspaceRuntime) ensureRootEntriesForVisibleDocuments(ctx context.Context, documents []*document) error {
 	if s == nil || s.docCache == nil || s.rootDocumentID == "" || len(documents) == 0 {
 		return nil
@@ -327,29 +267,29 @@ func (s *workspaceRuntime) ensureRootEntriesForVisibleDocuments(ctx context.Cont
 	if err != nil {
 		return err
 	}
-	entries, err := decodeRootEntries(doc)
+	tree, err := DecodeRootTree(doc)
 	doc.Close()
 	if err != nil {
 		return err
 	}
-	if len(entries) > 0 {
+	if len(tree.Entries) > 0 {
 		return nil
 	}
-	return s.mutateRootEntries(ctx, s.actorID(), s.actorKind(), func(txn *crdt.Transaction, entriesMap *crdt.YMap) error {
-		for _, document := range documents {
-			if document == nil || document.ID == "" || isIgnoredDocumentPath(document.Path) {
-				continue
-			}
-			if err := setRootFileEntry(txn, entriesMap, rootEntry{
-				EntryID:           rootEntryIDForDocument(document.ID),
-				Kind:              rootEntryKindFile,
-				ContentDocumentID: document.ID,
-				Name:              document.Path,
-			}); err != nil {
-				return err
-			}
+	files := make([]RootFile, 0, len(documents))
+	for _, document := range documents {
+		if document == nil || document.ID == "" || isIgnoredDocumentPath(document.Path) {
+			continue
 		}
+		files = append(files, RootFile{
+			ContentDocumentID: document.ID,
+			DesiredPath:       document.Path,
+		})
+	}
+	if len(files) == 0 {
 		return nil
+	}
+	return s.mutateRootDoc(ctx, s.actorID(), s.actorKind(), func(doc *crdt.Doc) ([]byte, error) {
+		return UpsertRootFiles(doc, files, rootMutationActor{ID: s.actorID(), Kind: s.actorKind()})
 	})
 }
 
@@ -386,7 +326,7 @@ func (s *workspaceRuntime) reconcileRootNamespace(ctx context.Context) error {
 			return err
 		}
 	}
-	entries, err := decodeRootEntries(doc)
+	tree, err := DecodeRootTree(doc)
 	doc.Close()
 	if err != nil {
 		unlock()
@@ -402,29 +342,58 @@ func (s *workspaceRuntime) reconcileRootNamespace(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	next := allocateRootProjectionEntries(entries, projectedSeq)
-	if err := s.projectRootProjectionEntries(ctx, previous, next); err != nil {
+	plan := PlanRootProjection(previous, tree, projectedSeq)
+	if err := s.applyRootProjection(ctx, plan); err != nil {
 		return err
 	}
-	if err := cache.storeRootProjectionEntries(s.rootDocumentID, next); err != nil {
+	if err := cache.storeRootProjectionEntries(s.rootDocumentID, plan.Next); err != nil {
 		return err
 	}
 	return cache.storeProjectedSeq(s.rootDocumentID, projectedSeq)
 }
 
 func (s *workspaceRuntime) projectRootProjectionEntries(ctx context.Context, previous map[string]rootProjectionEntry, next []rootProjectionEntry) error {
+	return s.applyRootProjection(ctx, buildRootProjectionPlan(previous, next))
+}
+
+func (s *workspaceRuntime) applyRootProjection(ctx context.Context, plan rootProjectionPlan) error {
 	if s == nil || s.replica == nil {
 		return nil
 	}
+	for _, projected := range plan.Removed {
+		if err := s.projectRootRemovedEntry(projected); err != nil {
+			return err
+		}
+	}
+	for _, projected := range plan.Upserts {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err := s.replica.ensureTracked(ctx, &document{ID: projected.ContentDocumentID, Path: projected.MaterializedPath}); err != nil {
+			return err
+		}
+		s.markDocumentDirty(projected.ContentDocumentID)
+	}
+	return nil
+}
+
+func PlanRootProjection(previous map[string]rootProjectionEntry, tree RootTree, projectedSeq int64) rootProjectionPlan {
+	return buildRootProjectionPlan(previous, allocateRootProjectionEntries(tree.Entries, projectedSeq))
+}
+
+func buildRootProjectionPlan(previous map[string]rootProjectionEntry, next []rootProjectionEntry) rootProjectionPlan {
 	activeByEntry := map[string]rootProjectionEntry{}
 	activeByContent := map[string]rootProjectionEntry{}
+	upserts := []rootProjectionEntry{}
 	for _, entry := range next {
 		if !entry.Active || entry.ContentDocumentID == "" || entry.MaterializedPath == "" {
 			continue
 		}
 		activeByEntry[entry.EntryID] = entry
 		activeByContent[entry.ContentDocumentID] = entry
+		upserts = append(upserts, entry)
 	}
+	removed := []rootProjectionEntry{}
 	for entryID, projected := range previous {
 		if !projected.Active {
 			continue
@@ -435,23 +404,16 @@ func (s *workspaceRuntime) projectRootProjectionEntries(ctx context.Context, pre
 		if replacement, ok := activeByContent[projected.ContentDocumentID]; ok && replacement.Active {
 			continue
 		}
-		if err := s.projectRootRemovedEntry(projected); err != nil {
-			return err
-		}
+		removed = append(removed, projected)
 	}
-	for _, projected := range next {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if !projected.Active || projected.ContentDocumentID == "" || projected.MaterializedPath == "" {
-			continue
-		}
-		if err := s.replica.ensureTracked(ctx, &document{ID: projected.ContentDocumentID, Path: projected.MaterializedPath}); err != nil {
-			return err
-		}
-		s.markDocumentDirty(projected.ContentDocumentID)
+	sort.Slice(removed, func(i, j int) bool { return removed[i].EntryID < removed[j].EntryID })
+	sort.Slice(upserts, func(i, j int) bool { return upserts[i].EntryID < upserts[j].EntryID })
+	return rootProjectionPlan{
+		Previous: previous,
+		Next:     next,
+		Removed:  removed,
+		Upserts:  upserts,
 	}
-	return nil
 }
 
 func (s *workspaceRuntime) projectRootRemovedEntry(projected rootProjectionEntry) error {
@@ -494,9 +456,12 @@ func (s *workspaceRuntime) projectRootRemovedEntry(projected rootProjectionEntry
 func allocateRootProjectionEntries(entries map[string]rootEntry, projectedSeq int64) []rootProjectionEntry {
 	active := make([]rootEntry, 0, len(entries))
 	for _, entry := range entries {
-		if entry.Deleted || entry.ContentDocumentID == "" || entry.desiredPath() == "" {
+		path, err := normalizeVisibleRootPath(entry.desiredPath())
+		if entry.Deleted || entry.ContentDocumentID == "" || err != nil {
 			continue
 		}
+		entry.Name = path
+		entry.ParentID = ""
 		active = append(active, entry)
 	}
 	sort.Slice(active, func(i, j int) bool {

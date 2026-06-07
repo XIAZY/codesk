@@ -15,19 +15,6 @@ import (
 	"notty/internal/yproto"
 )
 
-func (s *Server) handleDocumentByPath(w http.ResponseWriter, r *http.Request) {
-	document, err := s.requestStore(r).GetDocumentMetadataByPath(r.URL.Query().Get("path"))
-	if err != nil {
-		status := http.StatusBadRequest
-		if err == ErrNotFound {
-			status = http.StatusNotFound
-		}
-		writeError(w, status, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"document": document})
-}
-
 func (s *Server) handleDocumentThreads(w http.ResponseWriter, r *http.Request) {
 	threads, err := s.requestStore(r).ListThreadsForDocument(chi.URLParam(r, "id"))
 	if err != nil {

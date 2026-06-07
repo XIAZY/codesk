@@ -297,17 +297,31 @@ func TestToolGatewayRejectsUnknownToken(t *testing.T) {
 
 func TestToolGatewayGetsDocumentByPathAsAuthorizedAgent(t *testing.T) {
 	service := newToolGatewayTestService(&agent{ID: "agent_1", Handle: "reviewer", Kind: "codex"}, "token_123")
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new document cache: %v", err)
+	}
+	rootID := "doc_root_test"
+	if err := cache.storeRootProjectionEntries(rootID, []rootProjectionEntry{{
+		EntryID:           "doc_spec",
+		ContentDocumentID: "doc_spec",
+		DesiredPath:       "docs/original.md",
+		MaterializedPath:  "docs/spec.md",
+		Active:            true,
+	}}); err != nil {
+		t.Fatalf("store root projection: %v", err)
+	}
+	service.primaryRuntime = &workspaceRuntime{
+		rootDocumentID: rootID,
+		docCache:       cache,
+		workspaceDocuments: []*document{
+			{ID: "doc_spec", Path: "legacy/path-hint.md", UpdateID: 1},
+		},
+	}
 	service.client = &http.Client{
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			if r.Method != http.MethodGet || r.URL.Path != "/api/documents/by-path" {
-				t.Fatalf("unexpected backend request: %s %s", r.Method, r.URL.String())
-			}
-			if got := r.URL.Query().Get("path"); got != "docs/spec.md" {
-				t.Fatalf("unexpected path query: %q", got)
-			}
-			return jsonResponse(t, http.StatusOK, toolDocumentResponse{
-				Document: &document{ID: "doc_spec", Path: "docs/spec.md"},
-			}), nil
+			t.Fatalf("get-document-by-path should use local root projection, not backend: %s %s", r.Method, r.URL.String())
+			return nil, nil
 		}),
 	}
 

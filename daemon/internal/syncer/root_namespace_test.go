@@ -2,12 +2,164 @@ package syncer
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
 	crdt "notty/internal/ycrdt"
 )
+
+func TestRootTreeUpsertMoveAndTombstoneUseDocumentIDIdentity(t *testing.T) {
+	doc := crdt.New()
+	defer doc.Close()
+
+	if update, err := UpsertRootFile(doc, "doc_1", "docs/old.md", rootMutationActor{ID: "agent", Kind: "daemon"}); err != nil || len(update) == 0 {
+		t.Fatalf("upsert old: update=%d err=%v", len(update), err)
+	}
+	tree, err := DecodeRootTree(doc)
+	if err != nil {
+		t.Fatalf("decode root tree: %v", err)
+	}
+	if got, ok := ResolveRootPath(tree, "docs/old.md"); !ok || got != "doc_1" {
+		t.Fatalf("old path resolved to %q ok=%v", got, ok)
+	}
+
+	if update, err := UpsertRootFile(doc, "doc_1", "docs/new.md", rootMutationActor{ID: "agent", Kind: "daemon"}); err != nil || len(update) == 0 {
+		t.Fatalf("move: update=%d err=%v", len(update), err)
+	}
+	tree, err = DecodeRootTree(doc)
+	if err != nil {
+		t.Fatalf("decode moved root tree: %v", err)
+	}
+	files := ListVisibleRootFiles(tree)
+	if len(files) != 1 {
+		t.Fatalf("visible files after move = %#v", files)
+	}
+	if files[0].ContentDocumentID != "doc_1" || files[0].DesiredPath != "docs/new.md" {
+		t.Fatalf("visible file after move = %#v", files[0])
+	}
+	if _, ok := ResolveRootPath(tree, "docs/old.md"); ok {
+		t.Fatal("old path should not resolve after moving same document id")
+	}
+
+	if update, err := TombstoneRootFile(doc, "doc_1", rootMutationActor{ID: "agent", Kind: "daemon"}); err != nil || len(update) == 0 {
+		t.Fatalf("tombstone: update=%d err=%v", len(update), err)
+	}
+	tree, err = DecodeRootTree(doc)
+	if err != nil {
+		t.Fatalf("decode tombstoned root tree: %v", err)
+	}
+	if files := ListVisibleRootFiles(tree); len(files) != 0 {
+		t.Fatalf("tombstoned entry should not be visible: %#v", files)
+	}
+}
+
+func TestRootTreeDuplicateDesiredPathsStaySeparate(t *testing.T) {
+	doc := crdt.New()
+	defer doc.Close()
+
+	if _, err := UpsertRootFile(doc, "doc_a", "docs/same.md", rootMutationActor{}); err != nil {
+		t.Fatalf("upsert doc_a: %v", err)
+	}
+	if _, err := UpsertRootFile(doc, "doc_b", "docs/same.md", rootMutationActor{}); err != nil {
+		t.Fatalf("upsert doc_b: %v", err)
+	}
+	tree, err := DecodeRootTree(doc)
+	if err != nil {
+		t.Fatalf("decode root tree: %v", err)
+	}
+	files := ListVisibleRootFiles(tree)
+	if len(files) != 2 {
+		t.Fatalf("visible files = %#v", files)
+	}
+	if _, ok := ResolveRootPath(tree, "docs/same.md"); ok {
+		t.Fatal("duplicate desired path should be ambiguous, not merged")
+	}
+	plan := PlanRootProjection(nil, tree, 11)
+	byDoc := map[string]rootProjectionEntry{}
+	for _, entry := range plan.Next {
+		byDoc[entry.ContentDocumentID] = entry
+	}
+	if got := byDoc["doc_a"].MaterializedPath; got != "docs/same.md" {
+		t.Fatalf("doc_a materialized path = %q", got)
+	}
+	if got := byDoc["doc_b"].MaterializedPath; got != "docs/same (doc_b).md" {
+		t.Fatalf("doc_b materialized path = %q", got)
+	}
+}
+
+func TestRootTreeRejectsInvalidVisiblePaths(t *testing.T) {
+	doc := crdt.New()
+	defer doc.Close()
+
+	for _, path := range []string{"", "../outside.md", "/abs.md", ".notty/root", "docs/.secret.md"} {
+		if _, err := UpsertRootFile(doc, "doc_1", path, rootMutationActor{}); !errors.Is(err, errInvalidRootPath) {
+			t.Fatalf("UpsertRootFile(%q) err=%v, want errInvalidRootPath", path, err)
+		}
+	}
+	if _, err := UpsertRootFile(doc, "doc_1", "docs//ok.md", rootMutationActor{}); err != nil {
+		t.Fatalf("valid normalized path rejected: %v", err)
+	}
+	tree, err := DecodeRootTree(doc)
+	if err != nil {
+		t.Fatalf("decode root tree: %v", err)
+	}
+	if got, ok := ResolveRootPath(tree, "docs/ok.md"); !ok || got != "doc_1" {
+		t.Fatalf("normalized path resolved to %q ok=%v", got, ok)
+	}
+}
+
+func TestPlanRootProjectionSeparatesCreateDeleteAndConflict(t *testing.T) {
+	tree := RootTree{Entries: map[string]rootEntry{
+		"doc_a": {
+			EntryID:           "doc_a",
+			Kind:              rootEntryKindFile,
+			ContentDocumentID: "doc_a",
+			Name:              "docs/same.md",
+		},
+		"doc_b": {
+			EntryID:           "doc_b",
+			Kind:              rootEntryKindFile,
+			ContentDocumentID: "doc_b",
+			Name:              "docs/same.md",
+		},
+		"doc_old": {
+			EntryID:           "doc_old",
+			Kind:              rootEntryKindFile,
+			ContentDocumentID: "doc_old",
+			Name:              "docs/old.md",
+			Deleted:           true,
+		},
+	}}
+	previous := map[string]rootProjectionEntry{
+		"doc_old": {
+			EntryID:           "doc_old",
+			ContentDocumentID: "doc_old",
+			DesiredPath:       "docs/old.md",
+			MaterializedPath:  "docs/old.md",
+			Active:            true,
+		},
+	}
+
+	plan := PlanRootProjection(previous, tree, 42)
+	if len(plan.Removed) != 1 || plan.Removed[0].ContentDocumentID != "doc_old" {
+		t.Fatalf("removed projection entries = %#v", plan.Removed)
+	}
+	if len(plan.Upserts) != 2 {
+		t.Fatalf("upsert projection entries = %#v", plan.Upserts)
+	}
+	byDoc := map[string]rootProjectionEntry{}
+	for _, entry := range plan.Upserts {
+		byDoc[entry.ContentDocumentID] = entry
+		if entry.ProjectedSeq != 42 {
+			t.Fatalf("projected seq = %d, want 42", entry.ProjectedSeq)
+		}
+	}
+	if byDoc["doc_a"].MaterializedPath != "docs/same.md" || byDoc["doc_b"].MaterializedPath != "docs/same (doc_b).md" {
+		t.Fatalf("conflict materialization = %#v", byDoc)
+	}
+}
 
 func TestAllocateRootProjectionEntriesUsesDeterministicConflictPaths(t *testing.T) {
 	entries := map[string]rootEntry{

@@ -64,17 +64,9 @@ func TestWorkspaceEndpointsOmitDocumentPayloads(t *testing.T) {
 		t.Fatal("expected /api/workspace to retain document state vector")
 	}
 
-	byPath := performJSONRequest(t, router, http.MethodGet, "/api/documents/by-path?path=docs/spec.md", nil)
-	byPathDocument := byPath["document"].(map[string]any)
-	if _, ok := byPathDocument["crdtState"]; ok {
-		t.Fatal("expected /api/documents/by-path document metadata to omit crdtState")
-	}
-	if _, ok := byPathDocument["content"]; ok {
-		t.Fatal("expected /api/documents/by-path document metadata to omit content")
-	}
-
 	assertNonOK(t, router, http.MethodGet, "/api/workspace/sync", nil)
 	assertNonOK(t, router, http.MethodGet, "/api/documents", nil)
+	assertNonOK(t, router, http.MethodGet, "/api/documents/by-path?path=docs/spec.md", nil)
 	assertNonOK(t, router, http.MethodGet, "/api/documents/"+documentID, nil)
 	assertNonOK(t, router, http.MethodPost, "/api/documents/"+documentID+"/sync", []byte(`{"stateVector":""}`))
 	assertNonOK(t, router, http.MethodPost, "/api/proposals", []byte(`{}`))
@@ -111,10 +103,7 @@ func TestWorkspaceExposesRootDocumentIDAndHidesRootDocument(t *testing.T) {
 		}
 	}
 
-	byPath := performJSONRequest(t, server.Routes(), http.MethodGet, "/api/documents/by-path?path="+rootDocumentPath, nil)
-	if byPath["error"] == nil {
-		t.Fatalf("expected root by-path lookup to fail, got %#v", byPath)
-	}
+	assertNonOK(t, server.Routes(), http.MethodGet, "/api/documents/by-path?path="+rootDocumentPath, nil)
 }
 
 func TestCreateDocumentAllocatesEmptyStreamAndAllowsDuplicatePathHints(t *testing.T) {
@@ -357,12 +346,23 @@ func TestHTTPDocumentUpdateRouteRemoved(t *testing.T) {
 	server, store := newTestServer(t)
 	documentID := mustCreateTestDocument(t, store, "docs/removed-http-update.md", "alpha")
 
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/documents/"+documentID+"/updates?actor=agent_1&actor_type=agent", bytes.NewReader([]byte{0, 0}))
-	request.Header.Set("Content-Type", "application/octet-stream")
-	server.Routes().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusNotFound && recorder.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected removed HTTP update route, got %d body=%s", recorder.Code, recorder.Body.String())
+	routes := []struct {
+		method string
+		target string
+		body   []byte
+	}{
+		{method: http.MethodPost, target: "/api/documents/" + documentID + "/updates?actor=agent_1&actor_type=agent", body: []byte{0, 0}},
+		{method: http.MethodPatch, target: "/api/documents/" + documentID, body: []byte(`{"path":"docs/moved.md"}`)},
+		{method: http.MethodDelete, target: "/api/documents/" + documentID},
+	}
+	for _, route := range routes {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(route.method, route.target, bytes.NewReader(route.body))
+		request.Header.Set("Content-Type", "application/json")
+		server.Routes().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusNotFound && recorder.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("expected removed HTTP lifecycle route %s %s, got %d body=%s", route.method, route.target, recorder.Code, recorder.Body.String())
+		}
 	}
 }
 

@@ -77,12 +77,13 @@ func (s *Service) handleListDocumentsTool(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Service) handleGetDocumentByPathTool(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.authorizeToolRequest(r); !ok {
+	run, ok := s.authorizeToolRequest(r)
+	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	path := r.URL.Query().Get("path")
-	response, err := s.getDocumentByPathForRun(r.Context(), path)
+	response, err := s.getDocumentByPathForRun(r.Context(), run, path)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

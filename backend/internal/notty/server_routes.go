@@ -38,7 +38,6 @@ func (s *Server) Routes() http.Handler {
 		router.Post("/daemons/{daemonID}/reinstall-token", s.handleCreateDaemonReinstallToken)
 		router.Delete("/daemons/{daemonID}", s.handleDeleteDaemon)
 		router.Post("/daemons/{daemonID}/agents", s.handleCreateDaemonAgent)
-		router.Get("/documents/by-path", s.handleDocumentByPath)
 		router.Post("/documents", s.handleCreateDocument)
 		router.Get("/documents/{id}/threads", s.handleDocumentThreads)
 		router.Post("/users", s.handleCreateUser)
@@ -76,7 +75,6 @@ func (s *Server) Routes() http.Handler {
 
 	if !s.authEnabled() {
 		router.Get("/api/workspace", s.handleWorkspace)
-		router.Get("/api/documents/by-path", s.handleDocumentByPath)
 		router.Post("/api/documents", s.handleCreateDocument)
 		router.Get("/api/documents/{id}/threads", s.handleDocumentThreads)
 		router.Post("/api/users", s.handleCreateUser)
