@@ -989,6 +989,58 @@ func TestWorkspaceDocumentSocketIgnoresServerSyncStep1(t *testing.T) {
 	}
 }
 
+func TestWorkspaceDocumentSocketServerSyncStep1PreservesDurableOutbox(t *testing.T) {
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base\n")
+	if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
+		t.Fatalf("store cached doc: %v", err)
+	}
+	localUpdate := updateFromBaseContent(t, "base\n", "base\nlocal\n", "local")
+	entry, unlock := cache.lockEntry("doc_1")
+	err = cache.storeOutboxUpdateLocked(entry, "doc_1", "doc.md", outboxUpdateRecord{
+		Update:          localUpdate,
+		ObservedContent: "base\nlocal\n",
+		ObservedState:   crdtStateFromContent("base\nlocal\n"),
+		SourcePath:      filepath.Join(t.TempDir(), "doc.md"),
+		ActorID:         "daemon_agent",
+		ActorType:       "daemon",
+		CreatedAt:       time.Now().UTC(),
+	})
+	unlock()
+	if err != nil {
+		t.Fatalf("store durable outbox: %v", err)
+	}
+	runtime := &workspaceRuntime{
+		cfg:            Config{AgentID: "daemon_agent"},
+		docCache:       cache,
+		reconcileQueue: newReconcileQueue(),
+	}
+	runtime.documentSocket = newWorkspaceDocumentSocket(runtime)
+	runtime.documentSocket.SetDesiredDocuments([]*document{{ID: "doc_1", Path: "doc.md"}})
+
+	stateVector := crdt.EncodeStateVectorV1(baseDoc)
+	if err := runtime.handleDocumentSyncMessage("doc_1", yproto.BuildSyncStep1FromStateVector(stateVector)); err != nil {
+		t.Fatalf("handle server sync step 1: %v", err)
+	}
+	entry, unlock = cache.lockEntry("doc_1")
+	outbox, err := cache.loadOutboxUpdateLocked(entry, "doc_1")
+	unlock()
+	if err != nil {
+		t.Fatalf("load outbox: %v", err)
+	}
+	if outbox == nil || !bytes.Equal(outbox.Update, localUpdate) {
+		t.Fatal("server sync step 1 should not clear durable content outbox")
+	}
+	select {
+	case documentID := <-runtime.reconcileQueue.Wake():
+		t.Fatalf("server sync step 1 should not mark dirty, got %q", documentID)
+	default:
+	}
+}
+
 func TestWorkspaceDocumentSocketRunOnceStopsWhenContextCancelsIdleWebsocket(t *testing.T) {
 	initialRead := make(chan struct{})
 	clientClosed := make(chan struct{})

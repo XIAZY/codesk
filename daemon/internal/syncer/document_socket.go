@@ -373,7 +373,7 @@ func (r *workspaceRuntime) handleDocumentSyncMessage(documentID string, payload 
 			return err
 		}
 		if isCanonicalEmptyUpdate(diff) {
-			return r.docCache.clearOutboxUpdates(document.ID)
+			return nil
 		}
 		return r.documentSocket.QueueProtocolMessage(document.ID, yproto.BuildSyncStep2FromUpdate(diff))
 	case yproto.SyncStep2, yproto.SyncUpdate:
