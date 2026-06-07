@@ -343,6 +343,246 @@ func TestWorkspaceRuntimeProjectsRemoteClientLifecycleToFilesystem(t *testing.T)
 	assertRuntimeUntracked(t, runtime, documentID)
 }
 
+func TestReconcileStateCleanRemoteRenameMovesWithoutContentOutbox(t *testing.T) {
+	root := t.TempDir()
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base\n")
+	baseState := baseDoc.EncodeStateAsUpdate()
+	if err := cache.storeDoc("doc_clean_rename", "docs/new.md", 1, baseDoc); err != nil {
+		t.Fatalf("store doc: %v", err)
+	}
+	oldPath := filepath.Join(root, "docs", "old.md")
+	if err := os.MkdirAll(filepath.Dir(oldPath), 0o755); err != nil {
+		t.Fatalf("mkdir old path: %v", err)
+	}
+	if err := os.WriteFile(oldPath, []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write old path: %v", err)
+	}
+	tracked := newTrackedFileForStateTest(t, root, cache, "doc_clean_rename", "docs/new.md", oldPath, "base\n", baseState)
+	runtime := &workspaceRuntime{
+		cfg:      Config{AgentID: "daemon_agent"},
+		docCache: cache,
+		sendDocumentUpdate: func(ctx context.Context, documentID string, record outboxUpdateRecord) error {
+			t.Fatalf("clean rename should not send content outbox for %s", documentID)
+			return nil
+		},
+	}
+
+	if err := runtime.reconcileTrackedDocument(context.Background(), "doc_clean_rename", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("reconcile clean rename: %v", err)
+	}
+	assertWorkspaceFileMissing(t, root, "docs/old.md")
+	assertWorkspaceFileContent(t, root, "docs/new.md", "base\n")
+	if tracked.Path != filepath.Join(root, "docs", "new.md") {
+		t.Fatalf("tracked path = %s, want new path", tracked.Path)
+	}
+	assertSQLiteOutboxEmpty(t, cache, "doc_clean_rename")
+}
+
+func TestReconcileStateDirtyRemoteRenameSendsLocalEditBeforeMovingPath(t *testing.T) {
+	root := t.TempDir()
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base\n")
+	baseState := baseDoc.EncodeStateAsUpdate()
+	if err := cache.storeDoc("doc_rename", "docs/new.md", 1, baseDoc); err != nil {
+		t.Fatalf("store doc: %v", err)
+	}
+	oldPath := filepath.Join(root, "docs", "old.md")
+	if err := os.MkdirAll(filepath.Dir(oldPath), 0o755); err != nil {
+		t.Fatalf("mkdir old path: %v", err)
+	}
+	if err := os.WriteFile(oldPath, []byte("base\nlocal\n"), 0o644); err != nil {
+		t.Fatalf("write dirty old path: %v", err)
+	}
+
+	tracked := newTrackedFileForStateTest(t, root, cache, "doc_rename", "docs/new.md", oldPath, "base\n", baseState)
+	tracked.markLocalDirty()
+	var sent []outboxUpdateRecord
+	runtime := &workspaceRuntime{
+		cfg:      Config{AgentID: "daemon_agent"},
+		docCache: cache,
+		sendDocumentUpdate: func(ctx context.Context, documentID string, record outboxUpdateRecord) error {
+			if documentID != "doc_rename" {
+				t.Fatalf("sent document ID = %s", documentID)
+			}
+			sent = append(sent, record)
+			return nil
+		},
+	}
+
+	if err := runtime.reconcileTrackedDocument(context.Background(), "doc_rename", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("reconcile dirty rename content: %v", err)
+	}
+	if len(sent) != 1 || sent[0].ObservedContent != "base\nlocal\n" {
+		t.Fatalf("expected one local edit send before move, got %#v", sent)
+	}
+	assertWorkspaceFileContent(t, root, "docs/old.md", "base\nlocal\n")
+	assertWorkspaceFileMissing(t, root, "docs/new.md")
+
+	if err := runtime.reconcileTrackedDocument(context.Background(), "doc_rename", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("reconcile dirty rename path: %v", err)
+	}
+	assertWorkspaceFileMissing(t, root, "docs/old.md")
+	assertWorkspaceFileContent(t, root, "docs/new.md", "base\nlocal\n")
+	if tracked.Path != filepath.Join(root, "docs", "new.md") {
+		t.Fatalf("tracked path = %s, want new path", tracked.Path)
+	}
+	assertSQLiteOutboxEmpty(t, cache, "doc_rename")
+}
+
+func TestReconcileStateRemoteRenameWithDestinationCollisionPreservesCollidingBytes(t *testing.T) {
+	root := t.TempDir()
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base\n")
+	baseState := baseDoc.EncodeStateAsUpdate()
+	if err := cache.storeDoc("doc_collision", "docs/new.md", 1, baseDoc); err != nil {
+		t.Fatalf("store doc: %v", err)
+	}
+	oldPath := filepath.Join(root, "docs", "old.md")
+	newPath := filepath.Join(root, "docs", "new.md")
+	if err := os.MkdirAll(filepath.Dir(oldPath), 0o755); err != nil {
+		t.Fatalf("mkdir old path: %v", err)
+	}
+	if err := os.WriteFile(oldPath, []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write old path: %v", err)
+	}
+	if err := os.WriteFile(newPath, []byte("collision\n"), 0o644); err != nil {
+		t.Fatalf("write colliding path: %v", err)
+	}
+	tracked := newTrackedFileForStateTest(t, root, cache, "doc_collision", "docs/new.md", oldPath, "base\n", baseState)
+	runtime := &workspaceRuntime{cfg: Config{AgentID: "daemon_agent"}, docCache: cache}
+
+	if err := runtime.reconcileTrackedDocument(context.Background(), "doc_collision", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("reconcile collision rename: %v", err)
+	}
+	assertWorkspaceFileMissing(t, root, "docs/old.md")
+	assertWorkspaceFileContent(t, root, "docs/new.md", "base\n")
+	assertRecoveredContent(t, root, "doc_collision_collision", "collision\n")
+}
+
+func TestReconcileStateRemoteDeleteCleanAndDirtyOutputs(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		localContent      string
+		expectFileDeleted bool
+		expectArchived    bool
+	}{
+		{name: "clean", localContent: "base\n", expectFileDeleted: true},
+		{name: "dirty", localContent: "base\nlocal\n", expectFileDeleted: true, expectArchived: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			cache, err := newDocumentCache(t.TempDir())
+			if err != nil {
+				t.Fatalf("new cache: %v", err)
+			}
+			baseDoc := newDocWithText(t, "base\n")
+			baseState := baseDoc.EncodeStateAsUpdate()
+			if err := cache.storeDoc("doc_delete_"+tc.name, "docs/delete.md", 1, baseDoc); err != nil {
+				t.Fatalf("store doc: %v", err)
+			}
+			path := filepath.Join(root, "docs", "delete.md")
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatalf("mkdir path: %v", err)
+			}
+			if err := os.WriteFile(path, []byte(tc.localContent), 0o644); err != nil {
+				t.Fatalf("write path: %v", err)
+			}
+			documentID := "doc_delete_" + tc.name
+			tracked := newTrackedFileForStateTest(t, root, cache, documentID, "docs/delete.md", path, "base\n", baseState)
+			runtime := &workspaceRuntime{
+				cfg:            Config{AgentID: "daemon_agent"},
+				docCache:       cache,
+				reconcileQueue: newReconcileQueue(),
+			}
+			replica, err := newWorkspaceReplica(Config{}, root, "daemon_agent", "daemon", runtime.markDocumentDirty, runtime.markLocalCreate)
+			if err != nil {
+				t.Fatalf("new replica: %v", err)
+			}
+			defer replica.watcher.Close()
+			runtime.replica = replica
+			addTrackedForStateTest(runtime, tracked)
+
+			if err := runtime.projectRootRemovedEntry(rootProjectionEntry{ContentDocumentID: documentID}); err != nil {
+				t.Fatalf("project root removed entry: %v", err)
+			}
+			if tc.expectFileDeleted {
+				assertWorkspaceFileMissing(t, root, "docs/delete.md")
+			}
+			assertRuntimeUntracked(t, runtime, documentID)
+			if tc.expectArchived {
+				assertRecoveredContent(t, root, documentID, tc.localContent)
+			}
+		})
+	}
+}
+
+func TestReconcileStateDuplicateMaterializedPathsRouteEditsByDocumentID(t *testing.T) {
+	root := t.TempDir()
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	docA := newDocWithText(t, "alpha\n")
+	docB := newDocWithText(t, "bravo\n")
+	if err := cache.storeDoc("doc_a", "docs/same.md", 1, docA); err != nil {
+		t.Fatalf("store doc_a: %v", err)
+	}
+	if err := cache.storeDoc("doc_b", "docs/same (doc_b).md", 1, docB); err != nil {
+		t.Fatalf("store doc_b: %v", err)
+	}
+	pathA := filepath.Join(root, "docs", "same.md")
+	pathB := filepath.Join(root, "docs", "same (doc_b).md")
+	for path, content := range map[string]string{
+		pathA: "alpha edit\n",
+		pathB: "bravo edit\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	trackedA := newTrackedFileForStateTest(t, root, cache, "doc_a", "docs/same.md", pathA, "alpha\n", docA.EncodeStateAsUpdate())
+	trackedB := newTrackedFileForStateTest(t, root, cache, "doc_b", "docs/same (doc_b).md", pathB, "bravo\n", docB.EncodeStateAsUpdate())
+	trackedA.markLocalDirty()
+	trackedB.markLocalDirty()
+	sent := map[string]string{}
+	runtime := &workspaceRuntime{
+		cfg:      Config{AgentID: "daemon_agent"},
+		docCache: cache,
+		sendDocumentUpdate: func(ctx context.Context, documentID string, record outboxUpdateRecord) error {
+			sent[documentID] = record.ObservedContent
+			return nil
+		},
+	}
+
+	if err := runtime.reconcileTrackedDocument(context.Background(), "doc_a", []*trackedFile{trackedA}); err != nil {
+		t.Fatalf("reconcile doc_a: %v", err)
+	}
+	if err := runtime.reconcileTrackedDocument(context.Background(), "doc_b", []*trackedFile{trackedB}); err != nil {
+		t.Fatalf("reconcile doc_b: %v", err)
+	}
+	if got := sent["doc_a"]; got != "alpha edit\n" {
+		t.Fatalf("doc_a sent content = %q", got)
+	}
+	if got := sent["doc_b"]; got != "bravo edit\n" {
+		t.Fatalf("doc_b sent content = %q", got)
+	}
+	assertSQLiteOutboxEmpty(t, cache, "doc_a")
+	assertSQLiteOutboxEmpty(t, cache, "doc_b")
+}
+
 func TestWorkspaceRuntimeDropsStaleLocalCreateCandidates(t *testing.T) {
 	root := t.TempDir()
 	desiredPath := filepath.Join(root, "docs", "desired.md")
@@ -1063,6 +1303,32 @@ func reconcileRuntimeDocumentIDs(t *testing.T, ctx context.Context, runtime *wor
 	}
 }
 
+func newTrackedFileForStateTest(t *testing.T, root string, cache *documentCache, documentID, documentPath, absolutePath, baseContent string, baseState []byte) *trackedFile {
+	t.Helper()
+	tracked := &trackedFile{
+		DocumentID:    documentID,
+		DocumentPath:  documentPath,
+		Path:          absolutePath,
+		WorkspaceRoot: root,
+		FS:            NewWorkspaceFS(root),
+		cache:         cache,
+	}
+	tracked.setProjectedContent(baseContent)
+	if err := tracked.storeProjectedBase(baseContent, baseState); err != nil {
+		t.Fatalf("store projected base for %s: %v", documentID, err)
+	}
+	return tracked
+}
+
+func addTrackedForStateTest(runtime *workspaceRuntime, tracked *trackedFile) {
+	runtime.replica.mu.Lock()
+	defer runtime.replica.mu.Unlock()
+	tracked.Owner = runtime.replica
+	tracked.FS = runtime.replica.fs
+	runtime.replica.projectedByID[tracked.DocumentID] = tracked
+	runtime.replica.projectedByPath[tracked.Path] = tracked
+}
+
 func assertWorkspaceFileContent(t *testing.T, root, rel, want string) {
 	t.Helper()
 	path := filepath.Join(root, filepath.FromSlash(rel))
@@ -1082,6 +1348,34 @@ func assertWorkspaceFileMissing(t *testing.T, root, rel string) {
 		t.Fatalf("workspace file %s still exists", rel)
 	} else if !os.IsNotExist(err) {
 		t.Fatalf("stat workspace file %s: %v", rel, err)
+	}
+}
+
+func assertRecoveredContent(t *testing.T, root, reason, want string) {
+	t.Helper()
+	recoveredRoot := filepath.Join(root, ".notty", "recovered", safeDocumentCacheName(reason))
+	var matches []string
+	err := filepath.WalkDir(recoveredRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if string(data) == want {
+			matches = append(matches, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("read recovered files under %s: %v", recoveredRoot, err)
+	}
+	if len(matches) == 0 {
+		t.Fatalf("no recovered file under %s had content %q", recoveredRoot, want)
 	}
 }
 
