@@ -16,6 +16,14 @@ export type DocumentItem = {
   title: string;
 };
 
+export type DocumentMetadata = {
+  id: string;
+  stateVector?: string;
+  updateId?: number;
+  updatedAt: string;
+  clientIdSeed?: number;
+};
+
 export type UserItem = {
   id: string;
   handle: string;

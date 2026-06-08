@@ -646,7 +646,7 @@ function WorkspaceApp({
         <CreateDocumentModal
           onClose={() => setModal(null)}
           onCreate={async ({ path, content }) => {
-            const doc = await api.createDocument(workspaceId, { path, content: "" });
+            const doc = await api.createDocument(workspaceId);
             rootNamespace.upsertFile(doc.id, path);
             const update = buildContentInsertUpdate(content);
             if (update.length > 0) {

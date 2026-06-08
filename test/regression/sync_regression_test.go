@@ -1379,7 +1379,7 @@ func (s *regressionStack) createDocument(t *testing.T, path string, content stri
 	var document struct {
 		ID string `json:"id"`
 	}
-	s.postJSON(t, s.workspaceAPIPath("/documents"), s.authToken, map[string]string{"path": path, "content": content}, http.StatusCreated, &document)
+	s.postJSON(t, s.workspaceAPIPath("/documents"), s.authToken, map[string]any{}, http.StatusCreated, &document)
 	if document.ID == "" {
 		t.Fatal("created document has empty id")
 	}
