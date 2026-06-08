@@ -321,6 +321,57 @@ func TestRootDocumentSyncsOverMuxWebsocket(t *testing.T) {
 	}
 }
 
+func TestRootDocumentUpdatesStreamToRawRootSubscriber(t *testing.T) {
+	server, store := newTestServer(t)
+	rootID := store.Snapshot().RootDocumentID
+	httpServer := httptest.NewServer(server.Routes())
+	defer httpServer.Close()
+
+	reader := dialDocumentWebsocketForTest(t, httpServer.URL, "/ws/documents/"+rootID)
+	defer reader.Close()
+	rootRoom := server.rooms.ForDocument(store.Snapshot().WorkspaceID + ":" + rootID)
+	waitDocumentRoomSubscriberCount(t, rootRoom, 1)
+
+	writer := dialDocumentWebsocketForTest(t, httpServer.URL, "/ws/documents-sync")
+	defer writer.Close()
+
+	writerDoc := crdt.New(crdt.WithClientID(808))
+	defer writerDoc.Close()
+	readerDoc := crdt.New(crdt.WithClientID(909))
+	defer readerDoc.Close()
+	documentID := "doc_streamed_root"
+
+	upsert, err := applyRootBootstrapFiles(writerDoc, []rootBootstrapFile{{DocumentID: documentID, Path: "docs/a.md"}})
+	if err != nil {
+		t.Fatalf("build root upsert update: %v", err)
+	}
+	writeMuxRootUpdateForTest(t, writer, rootID, upsert)
+	applyRawRootStreamUpdateForTest(t, reader, readerDoc)
+	if path, deleted := rootEntryForDocumentForTest(t, readerDoc, documentID); path != "docs/a.md" || deleted {
+		t.Fatalf("projected root entry after upsert = path %q deleted %v, want docs/a.md false", path, deleted)
+	}
+
+	move, err := applyRootBootstrapFiles(writerDoc, []rootBootstrapFile{{DocumentID: documentID, Path: "docs/b.md"}})
+	if err != nil {
+		t.Fatalf("build root move update: %v", err)
+	}
+	writeMuxRootUpdateForTest(t, writer, rootID, move)
+	applyRawRootStreamUpdateForTest(t, reader, readerDoc)
+	if path, deleted := rootEntryForDocumentForTest(t, readerDoc, documentID); path != "docs/b.md" || deleted {
+		t.Fatalf("projected root entry after move = path %q deleted %v, want docs/b.md false", path, deleted)
+	}
+
+	tombstone, err := tombstoneRootEntryForTest(writerDoc, documentID)
+	if err != nil {
+		t.Fatalf("build root tombstone update: %v", err)
+	}
+	writeMuxRootUpdateForTest(t, writer, rootID, tombstone)
+	applyRawRootStreamUpdateForTest(t, reader, readerDoc)
+	if _, deleted := rootEntryForDocumentForTest(t, readerDoc, documentID); !deleted {
+		t.Fatal("projected root entry should be tombstoned after delete update")
+	}
+}
+
 func TestAgentDocumentDiffEndpointRejectsLargeDiff(t *testing.T) {
 	server, store := newTestServer(t)
 	documentID := mustCreateTestDocument(t, store, "docs/large-api-diff.md", numberedLines(2001))
@@ -1283,6 +1334,47 @@ func applySyncPayloadToDoc(t *testing.T, doc *crdt.Doc, payload []byte, origin a
 	return reply
 }
 
+func writeMuxRootUpdateForTest(t *testing.T, conn *websocket.Conn, rootID string, update []byte) {
+	t.Helper()
+	if len(update) == 0 {
+		t.Fatal("root update must not be empty")
+	}
+	if err := conn.WriteMessage(websocket.BinaryMessage, yproto.BuildDocumentMessage(rootID, yproto.BuildSyncUpdate(update))); err != nil {
+		t.Fatalf("write mux root update: %v", err)
+	}
+}
+
+func applyRawRootStreamUpdateForTest(t *testing.T, conn *websocket.Conn, doc *crdt.Doc) {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set raw root read deadline: %v", err)
+	}
+	messageType, payload, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read raw root stream update: %v", err)
+	}
+	if messageType != websocket.BinaryMessage {
+		t.Fatalf("raw root stream message type = %d, want binary", messageType)
+	}
+	protocolType, reader, err := yproto.DecodeProtocolMessage(payload)
+	if err != nil {
+		t.Fatalf("decode raw root stream payload: %v", err)
+	}
+	if protocolType != yproto.MessageSync {
+		t.Fatalf("raw root stream protocol = %d, want sync", protocolType)
+	}
+	syncType, data, err := yproto.DecodeSyncMessage(reader)
+	if err != nil {
+		t.Fatalf("decode raw root stream sync payload: %v", err)
+	}
+	if syncType != yproto.SyncUpdate {
+		t.Fatalf("raw root stream sync type = %d, want update", syncType)
+	}
+	if err := crdt.ApplyUpdateV1(doc, data, "root-stream"); err != nil {
+		t.Fatalf("apply raw root stream update: %v", err)
+	}
+}
+
 func buildSyncStep1ForTest(doc *crdt.Doc) []byte {
 	return yproto.BuildSyncStep1FromStateVector(crdt.EncodeStateVectorV1(doc))
 }
@@ -1421,6 +1513,27 @@ func rootEntryForDocumentForTest(t *testing.T, doc *crdt.Doc, documentID string)
 		t.Fatalf("read root entry: %v", err)
 	}
 	return path, deleted
+}
+
+func tombstoneRootEntryForTest(doc *crdt.Doc, documentID string) ([]byte, error) {
+	root := doc.GetMap(rootMapName)
+	return doc.Update(func(txn *crdt.Transaction) error {
+		entries, ok, err := root.GetMap(txn, rootEntriesMapName)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("missing root entries map")
+		}
+		entry, ok, err := entries.GetMap(txn, documentID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("missing root entry")
+		}
+		return entry.SetString(txn, "deleted", "true")
+	}, "root-stream-tombstone")
 }
 
 func assertSyncPayloadForTest(t *testing.T, payload []byte) {
