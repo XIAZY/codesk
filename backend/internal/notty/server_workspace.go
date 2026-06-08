@@ -22,7 +22,6 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		"currentUserId":   currentUserID,
 		"currentDaemonId": currentDaemonID,
 		"name":            state.Name,
-		"documents":       SortedSyncDocuments(state),
 		"users":           SortedUsers(state),
 		"daemons":         s.daemonsForWorkspace(r, state),
 		"agents":          visibleAgentsForAuth(state, auth),

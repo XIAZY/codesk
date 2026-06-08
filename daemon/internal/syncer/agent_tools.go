@@ -86,24 +86,16 @@ type toolDocumentViewResponse struct {
 	View any `json:"view"`
 }
 
-func (s *Service) listDocumentsForRun(ctx context.Context) (*toolDocumentsResponse, error) {
-	req, err := s.newBackendRequest(ctx, http.MethodGet, "/api/workspace", nil)
+func (s *Service) listDocumentsForRun(ctx context.Context, run *agentRun) (*toolDocumentsResponse, error) {
+	runtime := s.runtimeForThreadAnchor(run)
+	if runtime == nil {
+		return nil, fmt.Errorf("workspace runtime is unavailable")
+	}
+	documents, err := runtime.documentsFromRootProjection()
 	if err != nil {
 		return nil, err
 	}
-	res, err := s.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-	if res.StatusCode >= http.StatusBadRequest {
-		return nil, fmt.Errorf("list documents failed: %s", res.Status)
-	}
-	var response toolDocumentsResponse
-	if err := json.NewDecoder(res.Body).Decode(&response); err != nil {
-		return nil, err
-	}
-	return &response, nil
+	return &toolDocumentsResponse{Documents: documents}, nil
 }
 
 func (s *Service) getDocumentByPathForRun(ctx context.Context, run *agentRun, path string) (*toolDocumentResponse, error) {

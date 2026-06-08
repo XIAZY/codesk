@@ -892,7 +892,7 @@ func TestPostgresApplyCRDTUpdatePersistsWithoutWorkspaceSnapshot(t *testing.T) {
 	}
 }
 
-func TestPostgresAgentInboxSkipsLogDocumentUpdatesButKeepsThreadMentions(t *testing.T) {
+func TestPostgresAgentInboxTracksDocumentUpdatesAndThreadMentions(t *testing.T) {
 	dsn := postgresTestDSN(t)
 
 	db, err := sql.Open("pgx", dsn)
@@ -933,10 +933,11 @@ func TestPostgresAgentInboxSkipsLogDocumentUpdatesButKeepsThreadMentions(t *test
 	}
 	items, err := store.ListAgentInbox(agent.ID, "general", "pending")
 	if err != nil {
-		t.Fatalf("list inbox after log update: %v", err)
+		t.Fatalf("list inbox after document update: %v", err)
 	}
-	if len(items) != 0 {
-		t.Fatalf("expected log document update to stay out of inbox, got %#v", items)
+	update := findAgentEventByType(items, "document.updated")
+	if update == nil || update.DocumentID != logDocumentID {
+		t.Fatalf("expected document update in general inbox, got %#v", items)
 	}
 
 	thread, message, _, err := store.CreateThread(CreateThreadRequest{

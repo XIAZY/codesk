@@ -256,52 +256,11 @@ func (s *workspaceRuntime) mutateRootDoc(ctx context.Context, actorID, actorType
 	return s.flushOutboxUpdates(ctx, cache, s.rootDocumentID, rootDocumentPath, nil, []outboxUpdateRecord{record})
 }
 
-func (s *workspaceRuntime) ensureRootEntriesForVisibleDocuments(ctx context.Context, documents []*document) error {
-	if s == nil || s.docCache == nil || s.rootDocumentID == "" || len(documents) == 0 {
-		return nil
-	}
-	cache := s.docCache
-	entry, unlock := cache.lockEntry(s.rootDocumentID)
-	doc, _, _, err := cache.loadBaseDocLocked(entry, s.rootDocumentID, rootDocumentPath)
-	unlock()
-	if err != nil {
-		return err
-	}
-	tree, err := DecodeRootTree(doc)
-	doc.Close()
-	if err != nil {
-		return err
-	}
-	if len(tree.Entries) > 0 {
-		return nil
-	}
-	files := make([]RootFile, 0, len(documents))
-	for _, document := range documents {
-		if document == nil || document.ID == "" || isIgnoredDocumentPath(document.Path) {
-			continue
-		}
-		files = append(files, RootFile{
-			ContentDocumentID: document.ID,
-			DesiredPath:       document.Path,
-		})
-	}
-	if len(files) == 0 {
-		return nil
-	}
-	return s.mutateRootDoc(ctx, s.actorID(), s.actorKind(), func(doc *crdt.Doc) ([]byte, error) {
-		return UpsertRootFiles(doc, files, rootMutationActor{ID: s.actorID(), Kind: s.actorKind()})
-	})
-}
-
 func (s *workspaceRuntime) reconcileRootNamespace(ctx context.Context) error {
 	if s == nil || s.docCache == nil || s.rootDocumentID == "" {
 		return nil
 	}
 	if err := s.flushRootOutbox(ctx); err != nil {
-		s.markDocumentDirty(s.rootDocumentID)
-		return err
-	}
-	if err := s.ensureRootEntriesForVisibleDocuments(ctx, s.workspaceDocuments); err != nil {
 		s.markDocumentDirty(s.rootDocumentID)
 		return err
 	}
@@ -349,7 +308,101 @@ func (s *workspaceRuntime) reconcileRootNamespace(ctx context.Context) error {
 	if err := cache.storeRootProjectionEntries(s.rootDocumentID, plan.Next); err != nil {
 		return err
 	}
+	if err := s.setDesiredDocumentsFromRootProjection(plan.Next); err != nil {
+		return err
+	}
 	return cache.storeProjectedSeq(s.rootDocumentID, projectedSeq)
+}
+
+func (s *workspaceRuntime) updateDesiredDocumentsFromRootProjection() error {
+	if s == nil || s.docCache == nil || s.rootDocumentID == "" {
+		if s != nil && s.documentSocket != nil {
+			s.documentSocket.SetDesiredDocuments(nil)
+		}
+		return nil
+	}
+	projection, err := s.docCache.loadRootProjectionEntries(s.rootDocumentID)
+	if err != nil {
+		return err
+	}
+	entries := make([]rootProjectionEntry, 0, len(projection))
+	for _, entry := range projection {
+		entries = append(entries, entry)
+	}
+	return s.setDesiredDocumentsFromRootProjection(entries)
+}
+
+func (s *workspaceRuntime) setDesiredDocumentsFromRootProjection(entries []rootProjectionEntry) error {
+	if s == nil || s.documentSocket == nil {
+		return nil
+	}
+	desired := []*document(nil)
+	if s.rootDocumentID != "" {
+		desired = append(desired, &document{ID: s.rootDocumentID, Path: rootDocumentPath})
+	}
+	for _, entry := range entries {
+		if !entry.Active || strings.TrimSpace(entry.ContentDocumentID) == "" || strings.TrimSpace(entry.MaterializedPath) == "" {
+			continue
+		}
+		desired = append(desired, &document{
+			ID:   entry.ContentDocumentID,
+			Path: entry.MaterializedPath,
+		})
+	}
+	sort.Slice(desired, func(i, j int) bool {
+		if desired[i].ID != desired[j].ID {
+			return desired[i].ID < desired[j].ID
+		}
+		return desired[i].Path < desired[j].Path
+	})
+	s.documentSocket.SetDesiredDocuments(desired)
+	return nil
+}
+
+func (s *workspaceRuntime) currentRootDesiredPaths() (map[string]struct{}, error) {
+	paths := map[string]struct{}{}
+	if s == nil || s.docCache == nil || s.rootDocumentID == "" {
+		return paths, nil
+	}
+	projection, err := s.docCache.loadRootProjectionEntries(s.rootDocumentID)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range projection {
+		if !entry.Active || strings.TrimSpace(entry.MaterializedPath) == "" {
+			continue
+		}
+		path, err := normalizeVisibleRootPath(entry.MaterializedPath)
+		if err != nil {
+			continue
+		}
+		paths[path] = struct{}{}
+	}
+	return paths, nil
+}
+
+func (s *workspaceRuntime) documentsFromRootProjection() ([]*document, error) {
+	if s == nil || s.docCache == nil || s.rootDocumentID == "" {
+		return nil, nil
+	}
+	projection, err := s.docCache.loadRootProjectionEntries(s.rootDocumentID)
+	if err != nil {
+		return nil, err
+	}
+	documents := make([]*document, 0, len(projection))
+	for _, entry := range projection {
+		if !entry.Active || strings.TrimSpace(entry.ContentDocumentID) == "" || strings.TrimSpace(entry.MaterializedPath) == "" {
+			continue
+		}
+		documents = append(documents, &document{ID: entry.ContentDocumentID, Path: entry.MaterializedPath})
+	}
+	sort.Slice(documents, func(i, j int) bool {
+		if documents[i].Path != documents[j].Path {
+			return documents[i].Path < documents[j].Path
+		}
+		return documents[i].ID < documents[j].ID
+	})
+	return documents, nil
 }
 
 func (s *workspaceRuntime) projectRootProjectionEntries(ctx context.Context, previous map[string]rootProjectionEntry, next []rootProjectionEntry) error {

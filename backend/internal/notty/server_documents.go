@@ -43,15 +43,6 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	event := EventEnvelope{Type: "document.created", Data: DocumentLifecycleEvent{
-		DocumentID: document.ID,
-		Path:       document.Path,
-		Title:      document.Title,
-		UpdatedAt:  document.UpdatedAt,
-		ActorID:    meta.ActorID,
-	}}
-	s.requestBroker(r).Publish(event)
-	s.publishAgentInboxChanges(r)
 	writeJSON(w, http.StatusCreated, documentMetadata(document))
 }
 
@@ -424,13 +415,6 @@ func applyAndPublishDocumentUpdate(store *Store, broker *Broker, room *DocumentR
 		room.BroadcastSyncUpdate(documentID, yproto.BuildSyncUpdate(update), exclude)
 	}
 	if broker != nil && !updated.Hidden {
-		broker.Publish(EventEnvelope{Type: "document.updated", Data: DocumentUpdateEvent{
-			DocumentID: updated.ID,
-			UpdateID:   updated.UpdateID,
-			Path:       updated.Path,
-			UpdatedAt:  updated.UpdatedAt,
-			ActorID:    meta.ActorID,
-		}})
 		publishAgentInboxChanges(store, broker)
 	}
 	return result, nil

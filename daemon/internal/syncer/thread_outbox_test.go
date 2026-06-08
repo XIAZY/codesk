@@ -66,8 +66,18 @@ func TestThreadOutboxPipelineQueuesMaterializesDeliversAndDeletesIntent(t *testi
 		return cache.clearOutboxUpdates(documentID)
 	}
 	service := newToolGatewayTestService(&agent{ID: "agent_1", Handle: "reviewer", Kind: "codex"}, "token_123")
+	rootID := "doc_root_test"
+	if err := cache.storeRootProjectionEntries(rootID, []rootProjectionEntry{{
+		EntryID:           "doc_1",
+		ContentDocumentID: "doc_1",
+		DesiredPath:       "doc.md",
+		MaterializedPath:  "doc.md",
+		Active:            true,
+	}}); err != nil {
+		t.Fatalf("store root projection: %v", err)
+	}
+	runtime.rootDocumentID = rootID
 	service.primaryRuntime = runtime
-	service.latestWorkspace = &workspaceResponse{Documents: []*document{{ID: "doc_1", Path: "doc.md", UpdateID: 1}}}
 	service.client = &http.Client{
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			t.Fatalf("tool path should not call backend directly, got %s %s", r.Method, r.URL.String())

@@ -114,7 +114,6 @@ func (e *backendStatusError) Error() string {
 type workspaceResponse struct {
 	CurrentDaemonID string        `json:"currentDaemonId"`
 	RootDocumentID  string        `json:"rootDocumentId"`
-	Documents       []*document   `json:"documents"`
 	Agents          []*agent      `json:"agents"`
 	AgentRuns       []*agentRun   `json:"agentRuns"`
 	Threads         []*thread     `json:"threads"`
@@ -133,11 +132,6 @@ type upsertPresenceRequest struct {
 	FilePath  string `json:"filePath"`
 	Mode      string `json:"mode"`
 	Activity  string `json:"activity"`
-}
-
-type createDocumentRequest struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
 }
 
 type localCreateCandidate struct {
@@ -380,7 +374,7 @@ func parseAgentInboxChangedEvent(event workspaceEventEnvelope) (agentInboxChange
 
 func shouldWakeAgentWorkersForEvent(eventType string) bool {
 	switch strings.TrimSpace(eventType) {
-	case "workspace.snapshot", "presence.updated", "agent.run.updated", "document.updated", "thread.created", "thread.updated", "thread.message.created", "agent.event.updated":
+	case "workspace.snapshot", "presence.updated", "agent.run.updated", "thread.created", "thread.updated", "thread.message.created", "agent.event.updated":
 		return false
 	default:
 		return true
@@ -389,7 +383,7 @@ func shouldWakeAgentWorkersForEvent(eventType string) bool {
 
 func shouldRefreshForEvent(eventType string) bool {
 	switch strings.TrimSpace(eventType) {
-	case "workspace.snapshot", "presence.updated", "document.updated", "agent.run.updated":
+	case "workspace.snapshot", "presence.updated", "agent.run.updated":
 		return false
 	default:
 		return true
@@ -483,9 +477,12 @@ func (s *workspaceRuntime) processLocalCreates(ctx context.Context) error {
 			return err
 		}
 	}
-	desiredPaths := desiredDocumentPaths(workspace.Documents)
-	if s.rootDocumentID != "" {
-		desiredPaths = map[string]struct{}{}
+	desiredPaths, err := s.currentRootDesiredPaths()
+	if err != nil {
+		for _, candidate := range candidates {
+			s.markLocalCreate(candidate)
+		}
+		return err
 	}
 	created := false
 	var firstErr error
@@ -518,7 +515,6 @@ func (s *workspaceRuntime) processLocalCreates(ctx context.Context) error {
 		}
 		if document != nil {
 			created = true
-			desiredPaths[document.Path] = struct{}{}
 			if s.rootDocumentID != "" {
 				if err := s.upsertRootFileEntry(ctx, document.ID, relativePath, candidate.ActorID, candidate.ActorType); err != nil {
 					s.markLocalCreate(candidate)
@@ -534,27 +530,11 @@ func (s *workspaceRuntime) processLocalCreates(ctx context.Context) error {
 		}
 	}
 	if created {
-		workspace, err := s.fetchWorkspace(ctx)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-		} else if err := s.applyWorkspace(ctx, workspace); err != nil && firstErr == nil {
+		if err := s.reconcileRootNamespace(ctx); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
-}
-
-func desiredDocumentPaths(documents []*document) map[string]struct{} {
-	paths := make(map[string]struct{}, len(documents))
-	for _, document := range documents {
-		if document == nil || strings.TrimSpace(document.Path) == "" {
-			continue
-		}
-		paths[document.Path] = struct{}{}
-	}
-	return paths
 }
 
 func (s *workspaceRuntime) validateLocalCreateCandidate(candidate localCreateCandidate, desiredPaths map[string]struct{}) (string, bool, error) {
@@ -598,14 +578,7 @@ func (s *workspaceRuntime) validateLocalCreateCandidate(candidate localCreateCan
 
 func (s *workspaceRuntime) createDocumentFromLocalCandidate(ctx context.Context, candidate localCreateCandidate, relativePath string) (*document, error) {
 	fs := NewWorkspaceFS(candidate.Root)
-	payload, err := json.Marshal(createDocumentRequest{
-		Path:    relativePath,
-		Content: "",
-	})
-	if err != nil {
-		return nil, err
-	}
-	req, err := s.newBackendRequest(ctx, http.MethodPost, "/api/documents", bytes.NewReader(payload))
+	req, err := s.newBackendRequest(ctx, http.MethodPost, "/api/documents", bytes.NewReader([]byte("{}")))
 	if err != nil {
 		return nil, err
 	}
@@ -626,6 +599,7 @@ func (s *workspaceRuntime) createDocumentFromLocalCandidate(ctx context.Context,
 	if err := json.NewDecoder(res.Body).Decode(&created); err != nil {
 		return nil, err
 	}
+	created.Path = relativePath
 	if s != nil && s.docCache != nil {
 		doc := crdt.New()
 		if err := s.docCache.storeDoc(created.ID, created.Path, created.UpdateID, doc); err != nil {

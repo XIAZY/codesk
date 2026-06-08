@@ -88,10 +88,7 @@ if (!workspaceId) {
 const document = await request(`/api/workspaces/${workspaceId}/documents`, {
   method: 'POST',
   headers: authHeaders(auth.token),
-  body: JSON.stringify({
-    path: 'docs/live-smoke.md',
-    content: '# Live smoke\n'
-  })
+  body: JSON.stringify({})
 });
 if (!document.id) {
   throw new Error(`document create response did not include id: ${JSON.stringify(document)}`);
@@ -100,8 +97,11 @@ if (!document.id) {
 const workspace = await request(`/api/workspaces/${workspaceId}/workspace`, {
   headers: { authorization: `Bearer ${auth.token}` }
 });
-if (!Array.isArray(workspace.documents) || !workspace.documents.some((item) => item.id === document.id)) {
-  throw new Error('workspace snapshot did not include created document');
+if (!workspace.rootDocumentId) {
+  throw new Error('workspace snapshot did not include rootDocumentId');
+}
+if ('documents' in workspace) {
+  throw new Error('workspace snapshot unexpectedly exposed documents');
 }
 
 console.log(`live smoke passed: ${workspaceId}`);

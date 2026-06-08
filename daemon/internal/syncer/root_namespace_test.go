@@ -317,7 +317,6 @@ func TestRootLocalMoveSendsBeforeApplyingPendingIncomingRoot(t *testing.T) {
 		t.Fatalf("local move should not apply pending incoming root, got %d pending", pending)
 	}
 
-	service.workspaceDocuments = []*document{{ID: "doc_1", Path: "docs/old.md", UpdateID: 1}}
 	if err := service.reconcileDocumentIDs(context.Background(), []string{rootID}); err != nil {
 		t.Fatalf("reconcile root: %v", err)
 	}

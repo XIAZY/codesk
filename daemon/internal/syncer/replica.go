@@ -29,11 +29,9 @@ type workspaceReplica struct {
 	watchMu  sync.Mutex
 	watched  map[string]struct{}
 
-	mu               sync.Mutex
-	applyMu          sync.Mutex
-	projectedByPath  map[string]*trackedFile
-	projectedByID    map[string]*trackedFile
-	initialWorkspace *workspaceResponse
+	mu              sync.Mutex
+	projectedByPath map[string]*trackedFile
+	projectedByID   map[string]*trackedFile
 }
 
 func newWorkspaceReplica(_ Config, rootDir, actorID, actorType string, markDirty func(string), markCreate func(localCreateCandidate)) (*workspaceReplica, error) {
@@ -87,12 +85,6 @@ func (r *workspaceReplica) Run(ctx context.Context) error {
 	if err := r.ensureDirectoryWatches(); err != nil {
 		log.Printf("%s workspace watch refresh error: %v", r.actorID, err)
 	}
-	if r.initialWorkspace != nil {
-		if err := r.applyWorkspace(ctx, r.initialWorkspace); err != nil {
-			return err
-		}
-		r.initialWorkspace = nil
-	}
 	if err := r.reconcileLocalWorkspace(ctx); err != nil {
 		log.Printf("%s initial local reconcile error: %v", r.actorID, err)
 	}
@@ -133,45 +125,6 @@ func (r *workspaceReplica) Run(ctx context.Context) error {
 			}
 		}
 	}
-}
-
-func (r *workspaceReplica) applyWorkspace(ctx context.Context, workspace *workspaceResponse) error {
-	if workspace == nil {
-		return nil
-	}
-	r.applyMu.Lock()
-	defer r.applyMu.Unlock()
-	activeIDs := make(map[string]struct{}, len(workspace.Documents))
-	for _, document := range workspace.Documents {
-		if document == nil || isIgnoredDocumentPath(document.Path) {
-			continue
-		}
-		activeIDs[document.ID] = struct{}{}
-		if err := r.ensureTracked(ctx, document); err != nil {
-			return err
-		}
-	}
-	return r.removeMissingTracked(activeIDs)
-}
-
-func (r *workspaceReplica) removeMissingTracked(activeIDs map[string]struct{}) error {
-	r.mu.Lock()
-	missing := make([]*trackedFile, 0)
-	for documentID, tracked := range r.projectedByID {
-		if _, ok := activeIDs[documentID]; ok {
-			continue
-		}
-		if isIgnoredDocumentPath(tracked.DocumentPath) || isIgnoredWorkspaceAbsolutePath(r.rootDir, tracked.Path) {
-			continue
-		}
-		tracked.markRemoteDeleted()
-		missing = append(missing, tracked)
-	}
-	r.mu.Unlock()
-	for _, tracked := range missing {
-		r.markDocumentDirty(tracked.DocumentID)
-	}
-	return nil
 }
 
 func (r *workspaceReplica) ensureTracked(ctx context.Context, document *document) error {

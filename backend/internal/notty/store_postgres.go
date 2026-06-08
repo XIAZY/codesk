@@ -561,7 +561,7 @@ func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) error {
 	for documentID, updateID := range latestUpdateByDocument {
 		if document := s.state.Documents[documentID]; document != nil {
 			document.UpdateID = updateID
-			s.enqueueDocumentUpdateEventsLocked(document, latestMetaByDocument[documentID])
+			s.enqueueDocumentInboxEventsLocked(document, latestMetaByDocument[documentID])
 		}
 	}
 	for documentID := range s.dirtyDocuments {

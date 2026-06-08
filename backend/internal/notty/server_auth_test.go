@@ -310,10 +310,7 @@ func authTestAddMember(t *testing.T, router http.Handler, token string, workspac
 func authTestCreateDocument(t *testing.T, router http.Handler, token string, workspaceID string, path string, content string) DocumentMetadata {
 	t.Helper()
 	var document DocumentMetadata
-	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspaceID+"/documents", token, CreateDocumentRequest{
-		Path:    path,
-		Content: content,
-	}, http.StatusCreated, &document)
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspaceID+"/documents", token, CreateDocumentRequest{}, http.StatusCreated, &document)
 	if document.ID == "" {
 		t.Fatalf("expected document response, got %#v", document)
 	}

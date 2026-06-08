@@ -320,10 +320,6 @@ func TestWorkspaceRuntimeProjectsRemoteClientLifecycleToFilesystem(t *testing.T)
 	sendRemoteClientUpdateToDaemon(t, runtime, client.rootDocumentID, client.upsertRootFile(t, documentID, "docs/client-created.md"))
 	reconcileRuntimeDocumentIDs(t, ctx, runtime, []string{client.rootDocumentID})
 
-	workspace.Documents = []*document{{ID: documentID, Path: "legacy/path-hint.md", UpdateID: 1}}
-	if err := runtime.applyWorkspace(ctx, workspace); err != nil {
-		t.Fatalf("apply workspace after client create: %v", err)
-	}
 	sendRemoteClientUpdateToDaemon(t, runtime, documentID, client.replaceContent(t, documentID, "client create\n"))
 	reconcileRuntimeUntilIdle(t, ctx, runtime)
 	assertWorkspaceFileContent(t, root, "docs/client-created.md", "client create\n")
@@ -597,10 +593,11 @@ func TestWorkspaceRuntimeDropsStaleLocalCreateCandidates(t *testing.T) {
 	}
 
 	var createAttempts int
+	rootID := "doc_root_test"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/workspace":
-			writeJSONResponse(w, http.StatusOK, &workspaceResponse{Documents: []*document{{ID: "doc_desired", Path: "docs/desired.md", UpdateID: 1}}})
+			writeJSONResponse(w, http.StatusOK, &workspaceResponse{RootDocumentID: rootID})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/documents":
 			createAttempts++
 			http.Error(w, "stale local create should have been dropped", http.StatusInternalServerError)
@@ -616,6 +613,24 @@ func TestWorkspaceRuntimeDropsStaleLocalCreateCandidates(t *testing.T) {
 		t.Fatalf("new runtime: %v", err)
 	}
 	defer runtime.replica.watcher.Close()
+	seedRoot := crdt.New()
+	seedRootMap := seedRoot.GetMap(rootMapName)
+	if _, err := seedRoot.Update(func(txn *crdt.Transaction) error {
+		entriesMap, err := seedRootMap.SetMap(txn, rootEntriesMapName)
+		if err != nil {
+			return err
+		}
+		return setRootFileEntry(txn, entriesMap, rootEntry{
+			EntryID:           rootEntryIDForDocument("doc_desired"),
+			ContentDocumentID: "doc_desired",
+			Name:              "docs/desired.md",
+		})
+	}, "seed-root"); err != nil {
+		t.Fatalf("seed root: %v", err)
+	}
+	if err := runtime.docCache.storeDoc(rootID, rootDocumentPath, 1, seedRoot); err != nil {
+		t.Fatalf("store root: %v", err)
+	}
 	tracked := &trackedFile{DocumentID: "doc_tracked", DocumentPath: "docs/tracked.md", Path: trackedPath, WorkspaceRoot: root}
 	runtime.replica.projectedByPath[trackedPath] = tracked
 	runtime.replica.projectedByID[tracked.DocumentID] = tracked
@@ -778,6 +793,41 @@ func TestProductionDocumentSyncUsesWorkspaceMuxSocketOnly(t *testing.T) {
 	}
 }
 
+func TestProductionDocumentNamespaceUsesRootProjectionOnly(t *testing.T) {
+	forbidden := []string{
+		"workspace.Documents",
+		"workspaceDocuments",
+		"ensureRootEntriesForVisibleDocuments",
+		"desiredDocumentPaths",
+	}
+	matches := map[string][]string{}
+	err := filepath.WalkDir(".", func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		text := string(data)
+		for _, token := range forbidden {
+			if strings.Contains(text, token) {
+				matches[path] = append(matches[path], token)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk syncer sources: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("daemon document namespace must come from root projection only; production matches: %#v", matches)
+	}
+}
+
 func TestWorkspaceRuntimeRunReconcilesLocalCreateEvents(t *testing.T) {
 	root := t.TempDir()
 	cfg := Config{
@@ -848,6 +898,10 @@ func TestWorkspaceRuntimeFilesystemLifecycleRecordsSQLiteAndDaemonCalls(t *testi
 	server.installDocumentUpdateHook(t, runtime)
 	defer runtime.replica.watcher.Close()
 	ctx := context.Background()
+	emptyRoot := crdt.New()
+	if err := runtime.docCache.storeDoc(server.rootDocumentID, rootDocumentPath, 1, emptyRoot); err != nil {
+		t.Fatalf("store empty root: %v", err)
+	}
 
 	initialPath := filepath.Join(root, "docs", "lifecycle.md")
 	if err := os.MkdirAll(filepath.Dir(initialPath), 0o755); err != nil {
@@ -920,7 +974,7 @@ func TestWorkspaceRuntimeFilesystemLifecycleRecordsSQLiteAndDaemonCalls(t *testi
 		t.Fatalf("handle moved edit: %v", err)
 	}
 	reconcileRuntimeUntilIdle(t, ctx, runtime)
-	server.assertContents(t, map[string]string{"docs/lifecycle.md": editAfterMove})
+	server.assertContents(t, map[string]string{"renamed/lifecycle.md": editAfterMove})
 	server.assertSyncUpdateCount(t, documentID, 3)
 	assertSQLiteDocumentContent(t, runtime.docCache, documentID, editAfterMove)
 	assertSQLiteDocumentRowPath(t, runtime.docCache, documentID, "renamed/lifecycle.md")
@@ -987,9 +1041,13 @@ func (s *workspaceRuntimeRegressionServer) handle(w http.ResponseWriter, r *http
 
 	switch {
 	case r.Method == http.MethodPost && r.URL.Path == "/api/documents":
-		var req createDocumentRequest
+		var req map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if len(req) != 0 {
+			http.Error(w, "document create request must not carry namespace/content fields", http.StatusBadRequest)
 			return
 		}
 		s.nextID++
@@ -1002,26 +1060,13 @@ func (s *workspaceRuntimeRegressionServer) handle(w http.ResponseWriter, r *http
 			id = "doc_c"
 		}
 		doc := crdt.New()
-		if req.Content != "" {
-			text := doc.GetText("content")
-			doc.Transact(func(txn *crdt.Transaction) {
-				text.Insert(txn, 0, req.Content, nil)
-			}, "server-create")
-		}
-		meta := &document{ID: id, Path: req.Path, UpdateID: 1}
+		meta := &document{ID: id, UpdateID: 1}
 		s.byID[id] = &regressionDocument{meta: meta, doc: doc}
-		s.byPath[req.Path] = id
-		delete(s.deleted, req.Path)
 		writeJSONResponse(w, http.StatusCreated, meta)
 		return
 
 	case r.Method == http.MethodGet && r.URL.Path == "/api/workspace":
-		documents := make([]*document, 0, len(s.byID))
-		for _, current := range s.byID {
-			copy := *current.meta
-			documents = append(documents, &copy)
-		}
-		writeJSONResponse(w, http.StatusOK, &workspaceResponse{RootDocumentID: s.rootDocumentID, Documents: documents})
+		writeJSONResponse(w, http.StatusOK, &workspaceResponse{RootDocumentID: s.rootDocumentID})
 		return
 	}
 
@@ -1061,6 +1106,26 @@ func (s *workspaceRuntimeRegressionServer) installDocumentUpdateHook(t *testing.
 			if err := crdt.ApplyUpdateV1(s.rootDoc, record.Update, "server-root-update"); err != nil {
 				return err
 			}
+			entries, err := decodeRootEntries(s.rootDoc)
+			if err != nil {
+				return err
+			}
+			s.byPath = map[string]string{}
+			s.deleted = map[string]struct{}{}
+			for _, entry := range entries {
+				path := entry.desiredPath()
+				if path == "" {
+					continue
+				}
+				if entry.Deleted {
+					s.deleted[path] = struct{}{}
+					continue
+				}
+				s.byPath[path] = entry.ContentDocumentID
+				if current := s.byID[entry.ContentDocumentID]; current != nil {
+					current.meta.Path = path
+				}
+			}
 		} else {
 			current := s.byID[documentID]
 			if current == nil {
@@ -1081,7 +1146,8 @@ func (s *workspaceRuntimeRegressionServer) documentIDForPath(t *testing.T, path 
 	defer s.mu.Unlock()
 	documentID := s.byPath[path]
 	if documentID == "" {
-		t.Fatalf("missing backend document path %s; byPath=%#v", path, s.byPath)
+		entries, _ := decodeRootEntries(s.rootDoc)
+		t.Fatalf("missing backend document path %s; byPath=%#v requests=%#v syncUpdates=%#v rootEntries=%#v", path, s.byPath, s.requests, s.syncUpdates, entries)
 	}
 	return documentID
 }

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -37,8 +36,6 @@ const (
 	rootDocumentTitle        = "Workspace Root"
 	rootMapName              = "root"
 	rootEntriesMapName       = "entriesById"
-	rootEntryKindFile        = "file"
-	rootDeletedFalse         = "false"
 )
 
 type Store struct {
@@ -288,7 +285,6 @@ func (s *Store) ensureRootDocumentLocked() (bool, error) {
 	s.ensureMaps()
 	rootID := rootDocumentID(s.state.WorkspaceID)
 	s.state.RootDocumentID = rootID
-	legacyFiles := s.rootBootstrapFilesLocked(rootID)
 	if existing := s.state.Documents[rootID]; existing != nil {
 		changed := false
 		if existing.Path != rootDocumentPath {
@@ -307,15 +303,6 @@ func (s *Store) ensureRootDocumentLocked() (bool, error) {
 			existing.UpdatedAt = time.Now().UTC()
 			s.markDocumentDirtyLocked(existing.ID)
 		}
-		if len(legacyFiles) > 0 {
-			bootstrapped, err := s.bootstrapEmptyRootDocumentLocked(existing, legacyFiles)
-			if err != nil {
-				return false, err
-			}
-			if bootstrapped {
-				changed = true
-			}
-		}
 		return changed, nil
 	}
 
@@ -323,11 +310,6 @@ func (s *Store) ensureRootDocumentLocked() (bool, error) {
 	clientIDSeed := s.nextClientIDSeedLocked()
 	doc := crdt.New(crdt.WithClientID(crdt.ClientID(clientIDSeed)))
 	defer doc.Close()
-	if len(legacyFiles) > 0 {
-		if _, err := applyRootBootstrapFiles(doc, legacyFiles); err != nil {
-			return false, err
-		}
-	}
 	document := &Document{
 		ID:           rootID,
 		Path:         rootDocumentPath,
@@ -347,132 +329,6 @@ func (s *Store) ensureRootDocumentLocked() (bool, error) {
 	}, now)
 	s.state.UpdatedAt = now
 	return true, nil
-}
-
-type rootBootstrapFile struct {
-	DocumentID string
-	Path       string
-}
-
-func (s *Store) rootBootstrapFilesLocked(rootID string) []rootBootstrapFile {
-	documents := SortedDocuments(s.state)
-	files := make([]rootBootstrapFile, 0, len(documents))
-	for _, document := range documents {
-		if document == nil || document.ID == rootID || document.Path == rootDocumentPath {
-			continue
-		}
-		path, err := normalizeDocumentPath(document.Path)
-		if err != nil || path == "" {
-			continue
-		}
-		files = append(files, rootBootstrapFile{DocumentID: document.ID, Path: path})
-	}
-	return files
-}
-
-func (s *Store) bootstrapEmptyRootDocumentLocked(rootDocument *Document, files []rootBootstrapFile) (bool, error) {
-	if rootDocument == nil || len(files) == 0 {
-		return false, nil
-	}
-	doc, err := s.restoreDocumentDocPostgresLocked(rootDocument)
-	if err != nil {
-		return false, err
-	}
-	hasEntries, err := rootDocumentHasEntries(doc)
-	if err != nil || hasEntries {
-		return false, err
-	}
-	update, err := applyRootBootstrapFiles(doc, files)
-	if err != nil {
-		return false, err
-	}
-	if len(update) == 0 {
-		return false, nil
-	}
-	now := time.Now().UTC()
-	rootDocument.StateVector = base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
-	rootDocument.UpdatedAt = now
-	s.state.UpdatedAt = now
-	s.markDocumentDirtyLocked(rootDocument.ID)
-	s.appendIncrementalDocumentUpdateLocked(rootDocument.ID, update, OperationMeta{
-		ActorID:   "system",
-		ActorType: "system",
-		Source:    "root-document-legacy-bootstrap",
-	}, now)
-	return true, nil
-}
-
-func rootDocumentHasEntries(doc *crdt.Doc) (bool, error) {
-	if doc == nil {
-		return false, nil
-	}
-	root := doc.GetMap(rootMapName)
-	hasEntries := false
-	err := doc.Read(func(txn *crdt.Transaction) error {
-		entriesMap, ok, err := root.GetMap(txn, rootEntriesMapName)
-		if err != nil || !ok {
-			return err
-		}
-		entries, err := entriesMap.Entries(txn)
-		if err != nil {
-			return err
-		}
-		hasEntries = len(entries) > 0
-		return nil
-	})
-	return hasEntries, err
-}
-
-func applyRootBootstrapFiles(doc *crdt.Doc, files []rootBootstrapFile) ([]byte, error) {
-	if doc == nil || len(files) == 0 {
-		return nil, nil
-	}
-	root := doc.GetMap(rootMapName)
-	return doc.Update(func(txn *crdt.Transaction) error {
-		entriesMap, ok, err := root.GetMap(txn, rootEntriesMapName)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			entriesMap, err = root.SetMap(txn, rootEntriesMapName)
-			if err != nil {
-				return err
-			}
-		}
-		for _, file := range files {
-			if strings.TrimSpace(file.DocumentID) == "" || strings.TrimSpace(file.Path) == "" {
-				continue
-			}
-			entryMap, ok, err := entriesMap.GetMap(txn, file.DocumentID)
-			if err != nil {
-				return err
-			}
-			if !ok {
-				entryMap, err = entriesMap.SetMap(txn, file.DocumentID)
-				if err != nil {
-					return err
-				}
-			}
-			if err := entryMap.SetString(txn, "kind", rootEntryKindFile); err != nil {
-				return err
-			}
-			if err := entryMap.SetString(txn, "contentDocumentId", file.DocumentID); err != nil {
-				return err
-			}
-			if err := entryMap.SetString(txn, "loc", rootEntryPathLoc(file.Path)); err != nil {
-				return err
-			}
-			if err := entryMap.SetString(txn, "deleted", rootDeletedFalse); err != nil {
-				return err
-			}
-		}
-		return nil
-	}, "root-document-legacy-bootstrap")
-}
-
-func rootEntryPathLoc(path string) string {
-	encoded, _ := json.Marshal(map[string]string{"name": path})
-	return string(encoded)
 }
 
 func newSeedDocument(id string, clientID uint64, path string, title string, content string, now time.Time) (*Document, []byte) {
@@ -510,12 +366,6 @@ func (s *Store) GetDocument(id string) (*Document, error) {
 	s.mu.Unlock()
 	defer documentLock.RUnlock()
 	return cloneDocument(document), nil
-}
-
-func (s *Store) ListDocuments() []*Document {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return SortedDocuments(s.state)
 }
 
 func (s *Store) HasDocument(id string) bool {
@@ -607,9 +457,6 @@ func (s *Store) ListAgentNotifications(agentID string, statuses ...string) ([]*A
 		if event == nil || event.AgentID != resolvedAgentID {
 			continue
 		}
-		if s.eventBelongsToLogDocumentLocked(event) {
-			continue
-		}
 		if len(allowed) > 0 {
 			if _, ok := allowed[event.Status]; !ok {
 				continue
@@ -656,9 +503,6 @@ func (s *Store) ListAgentInbox(agentID string, box string, statuses ...string) (
 	seen := map[string]struct{}{}
 	for _, event := range s.state.AgentEvents {
 		if event == nil || event.AgentID != resolvedAgentID {
-			continue
-		}
-		if s.eventBelongsToLogDocumentLocked(event) {
 			continue
 		}
 		if normalizeInboxBox(event.Box) != box {
@@ -911,24 +755,10 @@ func inboxDedupKey(event *AgentEvent) string {
 	return event.ID
 }
 
-func (s *Store) eventBelongsToLogDocumentLocked(event *AgentEvent) bool {
-	if event == nil || event.DocumentID == "" {
-		return false
-	}
-	if !strings.HasPrefix(event.Type, "document.") {
-		return false
-	}
-	document := s.state.Documents[event.DocumentID]
-	return document != nil && isLogDocumentPath(document.Path)
-}
-
 func (s *Store) computedDocumentInboxLocked(agentID string) []*AgentEvent {
 	items := make([]*AgentEvent, 0)
 	for _, document := range s.state.Documents {
-		if document == nil || document.UpdateID <= 0 {
-			continue
-		}
-		if isLogDocumentPath(document.Path) {
+		if document == nil || document.Hidden || document.UpdateID <= 0 {
 			continue
 		}
 		if s.documentInboxHandledLocked(agentID, document) {
@@ -953,8 +783,8 @@ func (s *Store) computedDocumentInboxLocked(agentID string) []*AgentEvent {
 			DocumentID:   document.ID,
 			FromUpdateID: fromUpdateID,
 			ToUpdateID:   document.UpdateID,
-			Summary:      fmt.Sprintf("%s changed from version %d to %d", document.Path, fromUpdateID, document.UpdateID),
-			Prompt:       fmt.Sprintf("Review %s with notty-agent-tool diff-document --document-id %s --from %d --to %d. Act only if you have useful feedback or edits.", document.Path, document.ID, fromUpdateID, document.UpdateID),
+			Summary:      fmt.Sprintf("%s changed from version %d to %d", documentLabel(document), fromUpdateID, document.UpdateID),
+			Prompt:       fmt.Sprintf("Review %s with notty-agent-tool diff-document --document-id %s --from %d --to %d. Act only if you have useful feedback or edits.", documentLabel(document), document.ID, fromUpdateID, document.UpdateID),
 			AvailableAt:  document.UpdatedAt,
 			CreatedAt:    document.UpdatedAt,
 			UpdatedAt:    document.UpdatedAt,
@@ -1226,15 +1056,11 @@ func (s *Store) CreateDocument(req CreateDocumentRequest, meta OperationMeta) (*
 	rollbackState := cloneState(s.state)
 	rollbackDirtyDocuments := cloneStringSet(s.dirtyDocuments)
 	rollbackPendingDocumentEvents := append([]documentUpdateRecord(nil), s.pendingDocumentEvents...)
-	path, err := normalizeDocumentPath(req.Path)
-	if err != nil {
-		return nil, err
-	}
 
 	now := time.Now().UTC()
 	clientIDSeed := s.nextClientIDSeedLocked()
 	id := "doc_" + uuid.NewString()
-	document, initialUpdate := newSeedDocument(id, clientIDSeed, path, titleFromPath(path), "", now)
+	document, initialUpdate := newSeedDocument(id, clientIDSeed, "", "", "", now)
 	s.state.Documents[id] = document
 	_ = s.documentLockLocked(document.ID)
 	s.markDocumentDirtyLocked(document.ID)
@@ -1245,7 +1071,7 @@ func (s *Store) CreateDocument(req CreateDocumentRequest, meta OperationMeta) (*
 		DocumentID: document.ID,
 		ActorID:    meta.ActorID,
 		ActorType:  meta.ActorType,
-		Summary:    fmt.Sprintf("%s created %s", meta.ActorID, document.Path),
+		Summary:    fmt.Sprintf("%s created document %s", meta.ActorID, document.ID),
 		OccurredAt: now,
 		Provenance: meta,
 	})
@@ -1859,7 +1685,7 @@ func (s *Store) ReplaceDocumentText(documentID string, nextText string, meta Ope
 		DocumentID: document.ID,
 		ActorID:    meta.ActorID,
 		ActorType:  meta.ActorType,
-		Summary:    fmt.Sprintf("%s replaced %s", meta.ActorID, document.Path),
+		Summary:    fmt.Sprintf("%s replaced %s", meta.ActorID, documentLabel(document)),
 		OccurredAt: document.UpdatedAt,
 		Provenance: meta,
 	})
@@ -1942,7 +1768,7 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 		DocumentID: document.ID,
 		ActorID:    meta.ActorID,
 		ActorType:  meta.ActorType,
-		Summary:    fmt.Sprintf("%s started a thread on %s", meta.ActorID, document.Path),
+		Summary:    fmt.Sprintf("%s started a thread on %s", meta.ActorID, documentLabel(document)),
 		OccurredAt: now,
 		Provenance: meta,
 	})
@@ -2259,30 +2085,6 @@ func SortedDaemons(state WorkspaceState) []*Daemon {
 	return daemons
 }
 
-func SortedDocuments(state WorkspaceState) []*Document {
-	docs := make([]*Document, 0, len(state.Documents))
-	for _, doc := range state.Documents {
-		if doc.Hidden {
-			continue
-		}
-		docs = append(docs, cloneDocument(doc))
-	}
-	sort.Slice(docs, func(i, j int) bool { return docs[i].Path < docs[j].Path })
-	return docs
-}
-
-func SortedSyncDocuments(state WorkspaceState) []*DocumentMetadata {
-	docs := make([]*DocumentMetadata, 0, len(state.Documents))
-	for _, doc := range state.Documents {
-		if doc.Hidden {
-			continue
-		}
-		docs = append(docs, documentMetadata(doc))
-	}
-	sort.Slice(docs, func(i, j int) bool { return docs[i].Path < docs[j].Path })
-	return docs
-}
-
 func isPostgresDSN(value string) bool {
 	trimmed := strings.ToLower(strings.TrimSpace(value))
 	return strings.HasPrefix(trimmed, "postgres://") || strings.HasPrefix(trimmed, "postgresql://")
@@ -2307,27 +2109,11 @@ func normalizeDocumentPath(value string) (string, error) {
 	return cleaned, nil
 }
 
-func isLogDocumentPath(path string) bool {
-	return strings.EqualFold(filepath.Ext(strings.TrimSpace(path)), ".log")
-}
-
-func titleFromPath(path string) string {
-	base := filepath.Base(path)
-	ext := filepath.Ext(base)
-	name := strings.TrimSuffix(base, ext)
-	name = strings.ReplaceAll(name, "-", " ")
-	name = strings.ReplaceAll(name, "_", " ")
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return "Untitled"
+func documentLabel(document *Document) string {
+	if document == nil || strings.TrimSpace(document.ID) == "" {
+		return "document"
 	}
-	parts := strings.Fields(name)
-	for index, part := range parts {
-		runes := []rune(strings.ToLower(part))
-		runes[0] = []rune(strings.ToUpper(string(runes[0])))[0]
-		parts[index] = string(runes)
-	}
-	return strings.Join(parts, " ")
+	return "document " + document.ID
 }
 
 func buildUser(name, handle, role string) (*User, error) {
@@ -2691,11 +2477,6 @@ func SortedThreads(state WorkspaceState) []*Thread {
 func SortedAgentEvents(state WorkspaceState) []*AgentEvent {
 	events := make([]*AgentEvent, 0, len(state.AgentEvents))
 	for _, event := range state.AgentEvents {
-		if event != nil && event.DocumentID != "" && strings.HasPrefix(event.Type, "document.") {
-			if document := state.Documents[event.DocumentID]; document != nil && isLogDocumentPath(document.Path) {
-				continue
-			}
-		}
 		events = append(events, cloneAgentEvent(event))
 	}
 	sort.Slice(events, func(i, j int) bool {
@@ -2820,7 +2601,7 @@ func inferThreadTitleFromRequest(document *Document, req CreateThreadRequest) st
 		return truncateText(excerpt, 72)
 	}
 	if document != nil {
-		return fmt.Sprintf("Discussion on %s", document.Title)
+		return fmt.Sprintf("Discussion on %s", documentLabel(document))
 	}
 	return "Discussion"
 }
@@ -2912,15 +2693,8 @@ func (s *Store) extractMentionPrincipalIDsLocked(content string) []string {
 	return ids
 }
 
-func (s *Store) enqueueDocumentThreadEventsLocked(document *Document, meta OperationMeta) {
-	if document == nil {
-		return
-	}
-	s.enqueueDocumentUpdateEventsLocked(document, meta)
-}
-
-func (s *Store) enqueueDocumentUpdateEventsLocked(document *Document, meta OperationMeta) {
-	if document == nil || isLogDocumentPath(document.Path) || document.UpdateID <= 1 {
+func (s *Store) enqueueDocumentInboxEventsLocked(document *Document, meta OperationMeta) {
+	if document == nil || document.Hidden || document.UpdateID <= 1 {
 		return
 	}
 	for _, agent := range s.state.Agents {
@@ -2958,11 +2732,11 @@ func (s *Store) upsertDocumentInboxEventLocked(agent *Agent, document *Document,
 	}
 	box = normalizeInboxBox(box)
 	now := time.Now().UTC()
-	summary := fmt.Sprintf("%s changed from version %d to %d", document.Path, fromUpdateID, toUpdateID)
-	prompt := fmt.Sprintf("Review %s with notty-agent-tool diff-document --document-id %s --from %d --to %d. Act only if you have useful feedback or edits.", document.Path, document.ID, fromUpdateID, toUpdateID)
+	summary := fmt.Sprintf("%s changed from version %d to %d", documentLabel(document), fromUpdateID, toUpdateID)
+	prompt := fmt.Sprintf("Review %s with notty-agent-tool diff-document --document-id %s --from %d --to %d. Act only if you have useful feedback or edits.", documentLabel(document), document.ID, fromUpdateID, toUpdateID)
 	if threadID != "" {
-		summary = fmt.Sprintf("%s changed near thread %s", document.Path, firstNonEmptyString(threadTitle, threadID))
-		prompt = fmt.Sprintf("Document %s changed near thread %q. Review the latest edits and continue the discussion if needed.", document.Path, firstNonEmptyString(threadTitle, threadID))
+		summary = fmt.Sprintf("%s changed near thread %s", documentLabel(document), firstNonEmptyString(threadTitle, threadID))
+		prompt = fmt.Sprintf("Document %s changed near thread %q. Review the latest edits and continue the discussion if needed.", documentLabel(document), firstNonEmptyString(threadTitle, threadID))
 	}
 	for _, current := range s.state.AgentEvents {
 		if current == nil || current.AgentID != agent.ID || current.DocumentID != document.ID || !strings.HasPrefix(current.Type, "document.") {

@@ -87,15 +87,8 @@ func TestWorkspaceEndpointsOmitDocumentPayloads(t *testing.T) {
 	if _, ok := payload["proposals"]; ok {
 		t.Fatal("expected /api/workspace to omit removed proposals state")
 	}
-	document := findDocumentPayload(t, payload, documentID)
-	if _, ok := document["crdtState"]; ok {
-		t.Fatal("expected /api/workspace document metadata to omit crdtState")
-	}
-	if _, ok := document["content"]; ok {
-		t.Fatal("expected /api/workspace document metadata to omit content")
-	}
-	if got := document["stateVector"].(string); got == "" {
-		t.Fatal("expected /api/workspace to retain document state vector")
+	if _, ok := payload["documents"]; ok {
+		t.Fatal("expected /api/workspace to omit backend document list")
 	}
 
 	assertNonOK(t, router, http.MethodGet, "/api/workspace/sync", nil)
@@ -121,20 +114,15 @@ func TestWorkspaceExposesRootDocumentIDAndHidesRootDocument(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("workspace status = %d body=%s", recorder.Code, recorder.Body.String())
 	}
-	var payload struct {
-		RootDocumentID string             `json:"rootDocumentId"`
-		Documents      []DocumentMetadata `json:"documents"`
-	}
+	var payload map[string]any
 	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode workspace: %v", err)
 	}
-	if payload.RootDocumentID != rootID {
-		t.Fatalf("rootDocumentId = %q, want %q", payload.RootDocumentID, rootID)
+	if payload["rootDocumentId"] != rootID {
+		t.Fatalf("rootDocumentId = %#v, want %q", payload["rootDocumentId"], rootID)
 	}
-	for _, document := range payload.Documents {
-		if document.ID == rootID || document.Path == rootDocumentPath {
-			t.Fatalf("hidden root leaked into visible documents: %#v", document)
-		}
+	if _, ok := payload["documents"]; ok {
+		t.Fatalf("workspace REST response must not expose document namespace: %#v", payload["documents"])
 	}
 
 	assertNonOK(t, server.Routes(), http.MethodGet, "/api/documents/by-path?path="+rootDocumentPath, nil)
@@ -170,7 +158,7 @@ func TestWorkspaceEventSocketSnapshotOmitsDocumentList(t *testing.T) {
 	}
 }
 
-func TestRootDocumentBootstrapsLegacyVisibleDocumentsOnReload(t *testing.T) {
+func TestRootDocumentDoesNotBootstrapLegacyVisibleDocumentsOnReload(t *testing.T) {
 	_, store := newTestServer(t)
 	documentID := mustCreateTestDocument(t, store, "docs/legacy.md", "legacy")
 	if err := store.Reload(); err != nil {
@@ -179,24 +167,26 @@ func TestRootDocumentBootstrapsLegacyVisibleDocumentsOnReload(t *testing.T) {
 
 	rootID := store.Snapshot().RootDocumentID
 	rootDoc := syncDocumentToDocForTest(t, store, rootID, 909)
-	path, deleted := rootEntryForDocumentForTest(t, rootDoc, documentID)
-	if path != "docs/legacy.md" || deleted {
-		t.Fatalf("root entry for %s = path %q deleted %v, want docs/legacy.md false", documentID, path, deleted)
+	if rootEntryExistsForDocumentForTest(t, rootDoc, documentID) {
+		t.Fatalf("legacy backend document path for %s must not bootstrap a root entry", documentID)
 	}
 }
 
-func TestCreateDocumentAllocatesEmptyStreamAndAllowsDuplicatePathHints(t *testing.T) {
+func TestCreateDocumentAllocatesEmptyPathlessStream(t *testing.T) {
 	_, store := newTestServer(t)
-	first, err := store.CreateDocument(CreateDocumentRequest{Path: "docs/same.md", Content: "client writes this later"}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+	first, err := store.CreateDocument(CreateDocumentRequest{}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create first document: %v", err)
 	}
-	second, err := store.CreateDocument(CreateDocumentRequest{Path: "docs/same.md", Content: "also ignored"}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+	second, err := store.CreateDocument(CreateDocumentRequest{}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
 	if err != nil {
-		t.Fatalf("create second document with duplicate path hint: %v", err)
+		t.Fatalf("create second document: %v", err)
 	}
 	if first.ID == second.ID {
-		t.Fatalf("duplicate path hints must allocate different streams: %q", first.ID)
+		t.Fatalf("pathless document creates must allocate different streams: %q", first.ID)
+	}
+	if first.Path != "" || first.Title != "" || second.Path != "" || second.Title != "" {
+		t.Fatalf("created streams must not persist backend path/title metadata: first=%#v second=%#v", first, second)
 	}
 	if got := syncedDocumentTextForTest(t, store, first.ID); got != "" {
 		t.Fatalf("created stream should start empty, got %q", got)
@@ -341,7 +331,7 @@ func TestRootDocumentUpdatesStreamToRawRootSubscriber(t *testing.T) {
 	defer readerDoc.Close()
 	documentID := "doc_streamed_root"
 
-	upsert, err := applyRootBootstrapFiles(writerDoc, []rootBootstrapFile{{DocumentID: documentID, Path: "docs/a.md"}})
+	upsert, err := upsertRootEntryForTest(writerDoc, documentID, "docs/a.md")
 	if err != nil {
 		t.Fatalf("build root upsert update: %v", err)
 	}
@@ -351,7 +341,7 @@ func TestRootDocumentUpdatesStreamToRawRootSubscriber(t *testing.T) {
 		t.Fatalf("projected root entry after upsert = path %q deleted %v, want docs/a.md false", path, deleted)
 	}
 
-	move, err := applyRootBootstrapFiles(writerDoc, []rootBootstrapFile{{DocumentID: documentID, Path: "docs/b.md"}})
+	move, err := upsertRootEntryForTest(writerDoc, documentID, "docs/b.md")
 	if err != nil {
 		t.Fatalf("build root move update: %v", err)
 	}
@@ -432,7 +422,7 @@ func TestDocumentProtocolSyncReturnsMissingCRDTUpdate(t *testing.T) {
 	}
 }
 
-func TestDocumentProtocolUpdatePublishesMetadataOnlyWorkspaceEvent(t *testing.T) {
+func TestDocumentProtocolUpdateDoesNotPublishDocumentNamespaceEvent(t *testing.T) {
 	server, store := newTestServer(t)
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "alpha")
 	peerDoc := syncDocumentToDocForTest(t, store, documentID, 77)
@@ -452,23 +442,15 @@ func TestDocumentProtocolUpdatePublishesMetadataOnlyWorkspaceEvent(t *testing.T)
 		t.Fatalf("handle document protocol message: %v", err)
 	}
 
-	select {
-	case event := <-events:
-		if event.Type != "document.updated" {
-			t.Fatalf("expected document.updated event, got %#v", event)
+	for {
+		select {
+		case event := <-events:
+			if strings.HasPrefix(event.Type, "document.") {
+				t.Fatalf("document namespace event must not be published for content update: %#v", event)
+			}
+		default:
+			return
 		}
-		payload, ok := event.Data.(DocumentUpdateEvent)
-		if !ok {
-			t.Fatalf("expected document update payload, got %#v", event.Data)
-		}
-		if payload.Update != "" {
-			t.Fatalf("expected workspace update event to omit raw CRDT update, got %d bytes", len(payload.Update))
-		}
-		if payload.UpdateID == 0 || payload.Path != "docs/spec.md" {
-			t.Fatalf("expected workspace update event to keep metadata, got %#v", payload)
-		}
-	default:
-		t.Fatal("expected document.updated event to be published")
 	}
 }
 
@@ -648,6 +630,56 @@ func TestBackendMuxTransportDoesNotOwnYProtocolSemantics(t *testing.T) {
 	}
 	if count := strings.Count(source, "yproto.BuildDocumentMessage"); count != 1 {
 		t.Fatalf("document routing encode should only happen at the frame boundary; count=%d", count)
+	}
+}
+
+func TestBackendDoesNotExposeLegacyDocumentNamespaceSurface(t *testing.T) {
+	checks := map[string][]string{
+		"server_workspace.go": {
+			`"documents"`,
+			"SortedSyncDocuments",
+		},
+		"server_documents.go": {
+			"DocumentLifecycleEvent",
+			"DocumentUpdateEvent",
+			`Type: "document.created"`,
+			`Type: "document.updated"`,
+		},
+		"types.go": {
+			"DocumentLifecycleEvent",
+			"DocumentUpdateEvent",
+		},
+		"store.go": {
+			"SortedSyncDocuments",
+			"rootBootstrap",
+			"root-document-legacy-bootstrap",
+		},
+	}
+	matches := map[string][]string{}
+	for path, forbidden := range checks {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		text := string(data)
+		for _, token := range forbidden {
+			if strings.Contains(text, token) {
+				matches[path] = append(matches[path], token)
+			}
+		}
+		if path == "types.go" {
+			source := string(data)
+			metadataBlock := source[strings.Index(source, "type DocumentMetadata struct {"):strings.Index(source, "type ThreadAnchor struct {")]
+			if strings.Contains(metadataBlock, "Path") || strings.Contains(metadataBlock, "Title") {
+				matches[path] = append(matches[path], "DocumentMetadata path/title")
+			}
+			if !strings.Contains(source, "type CreateDocumentRequest struct{}") {
+				matches[path] = append(matches[path], "CreateDocumentRequest must be empty")
+			}
+		}
+	}
+	if len(matches) != 0 {
+		t.Fatalf("backend must not expose legacy document namespace surface: %#v", matches)
 	}
 }
 
@@ -1299,7 +1331,7 @@ func TestHandleDocumentProtocolMessageDoesNotPublishDocumentMentionMetadataChang
 		t.Fatalf("handle document protocol message: %v", err)
 	}
 
-	sawDocumentUpdate := false
+	sawInboxChange := false
 	for {
 		select {
 		case event := <-events:
@@ -1307,11 +1339,14 @@ func TestHandleDocumentProtocolMessageDoesNotPublishDocumentMentionMetadataChang
 				t.Fatalf("document text mentions must not publish metadata change event: %#v", event)
 			}
 			if event.Type == "document.updated" {
-				sawDocumentUpdate = true
+				t.Fatalf("document update must not publish backend document namespace event: %#v", event)
+			}
+			if event.Type == "agent.inbox.changed" {
+				sawInboxChange = true
 			}
 		default:
-			if !sawDocumentUpdate {
-				t.Fatal("expected document update event to be published")
+			if !sawInboxChange {
+				t.Fatal("expected agent inbox change event to be published")
 			}
 			return
 		}
@@ -1515,6 +1550,63 @@ func rootEntryForDocumentForTest(t *testing.T, doc *crdt.Doc, documentID string)
 	return path, deleted
 }
 
+func rootEntryExistsForDocumentForTest(t *testing.T, doc *crdt.Doc, documentID string) bool {
+	t.Helper()
+	root := doc.GetMap(rootMapName)
+	exists := false
+	if err := doc.Read(func(txn *crdt.Transaction) error {
+		entries, ok, err := root.GetMap(txn, rootEntriesMapName)
+		if err != nil || !ok {
+			return err
+		}
+		_, exists, err = entries.GetMap(txn, documentID)
+		return err
+	}); err != nil {
+		t.Fatalf("read root entry existence: %v", err)
+	}
+	return exists
+}
+
+func upsertRootEntryForTest(doc *crdt.Doc, documentID, path string) ([]byte, error) {
+	root := doc.GetMap(rootMapName)
+	return doc.Update(func(txn *crdt.Transaction) error {
+		entries, ok, err := root.GetMap(txn, rootEntriesMapName)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			entries, err = root.SetMap(txn, rootEntriesMapName)
+			if err != nil {
+				return err
+			}
+		}
+		entry, ok, err := entries.GetMap(txn, documentID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			entry, err = entries.SetMap(txn, documentID)
+			if err != nil {
+				return err
+			}
+		}
+		loc, err := json.Marshal(map[string]string{"name": path})
+		if err != nil {
+			return err
+		}
+		if err := entry.SetString(txn, "kind", "file"); err != nil {
+			return err
+		}
+		if err := entry.SetString(txn, "contentDocumentId", documentID); err != nil {
+			return err
+		}
+		if err := entry.SetString(txn, "loc", string(loc)); err != nil {
+			return err
+		}
+		return entry.SetString(txn, "deleted", "false")
+	}, "root-stream-upsert")
+}
+
 func tombstoneRootEntryForTest(doc *crdt.Doc, documentID string) ([]byte, error) {
 	root := doc.GetMap(rootMapName)
 	return doc.Update(func(txn *crdt.Transaction) error {
@@ -1630,24 +1722,5 @@ func findRunPayload(t *testing.T, payload map[string]any, runID string) map[stri
 		}
 	}
 	t.Fatalf("run %q not found in %#v", runID, rawRuns)
-	return nil
-}
-
-func findDocumentPayload(t *testing.T, payload map[string]any, documentID string) map[string]any {
-	t.Helper()
-	rawDocuments, ok := payload["documents"].([]any)
-	if !ok {
-		t.Fatalf("expected documents array, got %#v", payload["documents"])
-	}
-	for _, rawDocument := range rawDocuments {
-		document, ok := rawDocument.(map[string]any)
-		if !ok {
-			t.Fatalf("expected document object, got %#v", rawDocument)
-		}
-		if document["id"] == documentID {
-			return document
-		}
-	}
-	t.Fatalf("document %q not found in %#v", documentID, rawDocuments)
 	return nil
 }

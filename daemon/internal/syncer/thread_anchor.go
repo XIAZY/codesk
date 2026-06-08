@@ -70,39 +70,16 @@ func (s *Service) resolveThreadDocument(ctx context.Context, run *agentRun, payl
 	if path != "" {
 		return s.lookupDocumentByRootProjection(ctx, run, path)
 	}
-	if doc := s.findLatestDocument(documentID, path); doc != nil {
-		return doc, nil
+	runtime := s.runtimeForThreadAnchor(run)
+	if runtime == nil {
+		return nil, fmt.Errorf("workspace runtime is unavailable")
 	}
-	if err := s.refreshLatestWorkspaceForLookup(ctx); err != nil {
+	if doc, ok, err := runtime.documentForIDLookup(documentID); err != nil {
 		return nil, err
-	}
-	if doc := s.findLatestDocument(documentID, path); doc != nil {
+	} else if ok {
 		return doc, nil
 	}
 	return nil, fmt.Errorf("document %s not found", documentID)
-}
-
-func (s *Service) findLatestDocument(documentID, path string) *document {
-	s.mu.Lock()
-	workspace := s.latestWorkspace
-	s.mu.Unlock()
-	if workspace == nil {
-		return nil
-	}
-	for _, doc := range workspace.Documents {
-		if doc == nil {
-			continue
-		}
-		if documentID != "" && doc.ID == documentID {
-			copy := *doc
-			return &copy
-		}
-		if path != "" && doc.Path == path {
-			copy := *doc
-			return &copy
-		}
-	}
-	return nil
 }
 
 func (s *Service) lookupDocumentByRootProjection(ctx context.Context, run *agentRun, path string) (*document, error) {
@@ -120,15 +97,6 @@ func (s *Service) lookupDocumentByRootProjection(ctx context.Context, run *agent
 			return runtime.documentForPathLookup(documentID, path), nil
 		}
 		return nil, fmt.Errorf("document path %q not found in root projection", path)
-	}
-	if doc := s.findLatestDocument("", path); doc != nil {
-		return doc, nil
-	}
-	if err := s.refreshLatestWorkspaceForLookup(ctx); err != nil {
-		return nil, err
-	}
-	if doc := s.findLatestDocument("", path); doc != nil {
-		return doc, nil
 	}
 	return nil, fmt.Errorf("document path %q not found", path)
 }
@@ -178,26 +146,31 @@ func (r *workspaceRuntime) documentForPathLookup(documentID, path string) *docum
 	if r == nil || documentID == "" {
 		return nil
 	}
-	for _, doc := range r.workspaceDocuments {
-		if doc == nil || doc.ID != documentID {
-			continue
-		}
-		copy := *doc
-		copy.Path = path
-		return &copy
-	}
 	return &document{ID: documentID, Path: path}
 }
 
-func (s *Service) refreshLatestWorkspaceForLookup(ctx context.Context) error {
-	workspace, err := s.fetchWorkspace(ctx)
-	if err != nil {
-		return err
+func (r *workspaceRuntime) documentForIDLookup(documentID string) (*document, bool, error) {
+	if r == nil || strings.TrimSpace(documentID) == "" {
+		return nil, false, nil
 	}
-	s.mu.Lock()
-	s.latestWorkspace = workspace
-	s.mu.Unlock()
-	return nil
+	documentID = strings.TrimSpace(documentID)
+	if documentID == r.rootDocumentID {
+		return &document{ID: documentID, Path: rootDocumentPath}, true, nil
+	}
+	if r.docCache == nil || r.rootDocumentID == "" {
+		return &document{ID: documentID}, true, nil
+	}
+	projection, err := r.docCache.loadRootProjectionEntries(r.rootDocumentID)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, entry := range projection {
+		if !entry.Active || entry.ContentDocumentID != documentID {
+			continue
+		}
+		return &document{ID: documentID, Path: entry.MaterializedPath}, true, nil
+	}
+	return nil, false, nil
 }
 
 func resolveThreadTarget(content string, payload createThreadPayload) (resolvedThreadTarget, error) {

@@ -2797,7 +2797,7 @@ func TestLocalCreateCreatesEmptyDocumentAndKeepsLocalBytesDirty(t *testing.T) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write local create: %v", err)
 	}
-	var seen createDocumentRequest
+	var seen map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/api/documents" {
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -2806,7 +2806,7 @@ func TestLocalCreateCreatesEmptyDocumentAndKeepsLocalBytesDirty(t *testing.T) {
 			t.Fatalf("decode create: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"doc_created","path":"docs/new.md","updateId":1}`))
+		_, _ = w.Write([]byte(`{"id":"doc_created","updateId":1}`))
 	}))
 	defer server.Close()
 	cache, err := newDocumentCache(t.TempDir())
@@ -2822,7 +2822,7 @@ func TestLocalCreateCreatesEmptyDocumentAndKeepsLocalBytesDirty(t *testing.T) {
 	if created == nil || created.ID != "doc_created" {
 		t.Fatalf("unexpected created doc: %#v", created)
 	}
-	if seen.Path != "docs/new.md" || seen.Content != "" {
+	if len(seen) != 0 {
 		t.Fatalf("unexpected create payload: %#v", seen)
 	}
 	after, err := os.ReadFile(path)
@@ -3074,10 +3074,7 @@ func TestOutgoingOutboxSurvivesCacheReopenAndResendsIdempotently(t *testing.T) {
 	}
 }
 
-func TestShouldWakeAgentWorkersForEventIncludesDocumentUpdates(t *testing.T) {
-	if shouldWakeAgentWorkersForEvent("document.updated") {
-		t.Fatal("document.updated should not be the agent wake source; agent.inbox.changed should")
-	}
+func TestShouldWakeAgentWorkersForEventUsesAgentInboxChanged(t *testing.T) {
 	if shouldWakeAgentWorkersForEvent("thread.message.created") {
 		t.Fatal("thread.message.created should not be the agent wake source; agent.inbox.changed should")
 	}
