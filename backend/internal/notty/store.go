@@ -32,8 +32,6 @@ const (
 	maxDiffLinesPerSide      = 20000
 	maxDiffLineProduct       = 2000000
 	maxDiffResponseBytes     = 1024 * 1024
-	rootDocumentPath         = ".notty/root"
-	rootDocumentTitle        = "Workspace Root"
 	rootMapName              = "root"
 	rootEntriesMapName       = "entriesById"
 )
@@ -149,8 +147,8 @@ func (s *Store) load() error {
 }
 
 func (s *Store) ensureMaps() {
-	if s.state.Documents == nil {
-		s.state.Documents = map[string]*Document{}
+	if s.state.ContentDocuments == nil {
+		s.state.ContentDocuments = map[string]*Document{}
 	}
 	if s.state.Users == nil {
 		s.state.Users = map[string]*User{}
@@ -244,10 +242,10 @@ func seedWorkspaceFor(workspaceID string, workspaceName string) WorkspaceState {
 		workspaceName = workspaceID
 	}
 	return WorkspaceState{
-		WorkspaceID:    workspaceID,
-		Name:           workspaceName,
-		RootDocumentID: rootDocumentID(workspaceID),
-		Documents:      map[string]*Document{},
+		WorkspaceID:      workspaceID,
+		Name:             workspaceName,
+		RootDocumentID:   rootDocumentID(workspaceID),
+		ContentDocuments: map[string]*Document{},
 		Users: map[string]*User{
 			"user_owner": {
 				ID:        "user_owner",
@@ -285,16 +283,8 @@ func (s *Store) ensureRootDocumentLocked() (bool, error) {
 	s.ensureMaps()
 	rootID := rootDocumentID(s.state.WorkspaceID)
 	s.state.RootDocumentID = rootID
-	if existing := s.state.Documents[rootID]; existing != nil {
+	if existing := s.state.ContentDocuments[rootID]; existing != nil {
 		changed := false
-		if existing.Path != rootDocumentPath {
-			existing.Path = rootDocumentPath
-			changed = true
-		}
-		if existing.Title != rootDocumentTitle {
-			existing.Title = rootDocumentTitle
-			changed = true
-		}
 		if !existing.Hidden {
 			existing.Hidden = true
 			changed = true
@@ -312,14 +302,12 @@ func (s *Store) ensureRootDocumentLocked() (bool, error) {
 	defer doc.Close()
 	document := &Document{
 		ID:           rootID,
-		Path:         rootDocumentPath,
-		Title:        rootDocumentTitle,
 		Hidden:       true,
 		UpdatedAt:    now,
 		ClientIDSeed: clientIDSeed,
 		StateVector:  base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc)),
 	}
-	s.state.Documents[rootID] = document
+	s.state.ContentDocuments[rootID] = document
 	_ = s.documentLockLocked(rootID)
 	s.markDocumentDirtyLocked(rootID)
 	s.appendIncrementalDocumentUpdateLocked(rootID, doc.EncodeStateAsUpdate(), OperationMeta{
@@ -331,7 +319,7 @@ func (s *Store) ensureRootDocumentLocked() (bool, error) {
 	return true, nil
 }
 
-func newSeedDocument(id string, clientID uint64, path string, title string, content string, now time.Time) (*Document, []byte) {
+func newSeedDocument(id string, clientID uint64, content string, now time.Time) (*Document, []byte) {
 	doc := crdt.New(crdt.WithClientID(crdt.ClientID(clientID)))
 	text := doc.GetText("content")
 	doc.Transact(func(txn *crdt.Transaction) {
@@ -339,8 +327,6 @@ func newSeedDocument(id string, clientID uint64, path string, title string, cont
 	}, "seed")
 	document := &Document{
 		ID:           id,
-		Path:         path,
-		Title:        title,
 		UpdatedAt:    now,
 		ClientIDSeed: clientID,
 	}
@@ -356,7 +342,7 @@ func (s *Store) Snapshot() WorkspaceState {
 
 func (s *Store) GetDocument(id string) (*Document, error) {
 	s.mu.Lock()
-	document, ok := s.state.Documents[id]
+	document, ok := s.state.ContentDocuments[id]
 	if !ok {
 		s.mu.Unlock()
 		return nil, ErrNotFound
@@ -371,13 +357,13 @@ func (s *Store) GetDocument(id string) (*Document, error) {
 func (s *Store) HasDocument(id string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	_, ok := s.state.Documents[id]
+	_, ok := s.state.ContentDocuments[id]
 	return ok
 }
 
 func (s *Store) EncodeDocumentSyncUpdates(documentID string, stateVector []byte) (*DocumentMetadata, [][]byte, error) {
 	s.mu.Lock()
-	document, ok := s.state.Documents[documentID]
+	document, ok := s.state.ContentDocuments[documentID]
 	if !ok {
 		s.mu.Unlock()
 		return nil, nil, ErrNotFound
@@ -420,7 +406,7 @@ func (s *Store) GetThread(id string) (*Thread, error) {
 func (s *Store) ListThreadsForDocument(documentID string) ([]*Thread, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if document := s.state.Documents[documentID]; document == nil || document.Hidden {
+	if document := s.state.ContentDocuments[documentID]; document == nil || document.Hidden {
 		return nil, ErrNotFound
 	}
 	threads := make([]*Thread, 0)
@@ -608,7 +594,7 @@ func (s *Store) MarkDocumentViewed(agentID, documentID string, req MarkDocumentV
 		s.mu.Unlock()
 		return nil, err
 	}
-	document, ok := s.state.Documents[strings.TrimSpace(documentID)]
+	document, ok := s.state.ContentDocuments[strings.TrimSpace(documentID)]
 	if !ok {
 		s.mu.Unlock()
 		return nil, ErrNotFound
@@ -671,7 +657,7 @@ func (s *Store) DiffDocument(agentID, documentID, fromSpec, toSpec string) (*Doc
 		s.mu.RUnlock()
 		return nil, err
 	}
-	document, ok := s.state.Documents[strings.TrimSpace(documentID)]
+	document, ok := s.state.ContentDocuments[strings.TrimSpace(documentID)]
 	if !ok || document.Hidden {
 		s.mu.RUnlock()
 		return nil, ErrNotFound
@@ -757,7 +743,7 @@ func inboxDedupKey(event *AgentEvent) string {
 
 func (s *Store) computedDocumentInboxLocked(agentID string) []*AgentEvent {
 	items := make([]*AgentEvent, 0)
-	for _, document := range s.state.Documents {
+	for _, document := range s.state.ContentDocuments {
 		if document == nil || document.Hidden || document.UpdateID <= 0 {
 			continue
 		}
@@ -1060,8 +1046,8 @@ func (s *Store) CreateDocument(req CreateDocumentRequest, meta OperationMeta) (*
 	now := time.Now().UTC()
 	clientIDSeed := s.nextClientIDSeedLocked()
 	id := "doc_" + uuid.NewString()
-	document, initialUpdate := newSeedDocument(id, clientIDSeed, "", "", "", now)
-	s.state.Documents[id] = document
+	document, initialUpdate := newSeedDocument(id, clientIDSeed, "", now)
+	s.state.ContentDocuments[id] = document
 	_ = s.documentLockLocked(document.ID)
 	s.markDocumentDirtyLocked(document.ID)
 	s.appendIncrementalDocumentUpdateLocked(document.ID, initialUpdate, meta, now)
@@ -1235,7 +1221,7 @@ func (s *Store) CreateAgent(req CreateAgentRequest, meta OperationMeta) (*Agent,
 	agent.WorkspaceRoot = "agents/" + agent.ID
 	agent.UpdatedAt = time.Now().UTC()
 	s.state.Agents[agent.ID] = agent
-	for _, document := range s.state.Documents {
+	for _, document := range s.state.ContentDocuments {
 		if document == nil {
 			continue
 		}
@@ -1601,7 +1587,7 @@ func (s *Store) ApplyCRDTUpdateWithResult(documentID string, update []byte, meta
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	document, ok := s.state.Documents[documentID]
+	document, ok := s.state.ContentDocuments[documentID]
 	if !ok {
 		return nil, ErrNotFound
 	}
@@ -1644,7 +1630,7 @@ func (s *Store) ReplaceDocumentText(documentID string, nextText string, meta Ope
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	document, ok := s.state.Documents[documentID]
+	document, ok := s.state.ContentDocuments[documentID]
 	if !ok {
 		return nil, nil, ErrNotFound
 	}
@@ -1700,7 +1686,7 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	document, ok := s.state.Documents[req.DocumentID]
+	document, ok := s.state.ContentDocuments[req.DocumentID]
 	if !ok || document.Hidden {
 		return nil, nil, false, ErrNotFound
 	}
@@ -1932,7 +1918,7 @@ func (s *Store) persistDocumentMutationLocked() error {
 
 func (s *Store) nextClientIDSeedLocked() uint64 {
 	var next uint64 = 1001
-	for _, document := range s.state.Documents {
+	for _, document := range s.state.ContentDocuments {
 		if document.ClientIDSeed >= next {
 			next = document.ClientIDSeed + 1
 		}
@@ -1949,9 +1935,9 @@ func (s *Store) appendActivityLocked(event *ActivityEvent) {
 
 func cloneState(state WorkspaceState) WorkspaceState {
 	copyState := state
-	copyState.Documents = map[string]*Document{}
-	for key, doc := range state.Documents {
-		copyState.Documents[key] = cloneDocument(doc)
+	copyState.ContentDocuments = map[string]*Document{}
+	for key, doc := range state.ContentDocuments {
+		copyState.ContentDocuments[key] = cloneDocument(doc)
 	}
 	copyState.Users = map[string]*User{}
 	for key, user := range state.Users {

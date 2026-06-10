@@ -60,41 +60,18 @@ func assertSharedAgentPrompt(t *testing.T, prompt, name, handle, role string) {
 	}
 }
 
-func mustCreateTestDocument(t *testing.T, store *Store, path string, content string) string {
+func mustCreateTestDocument(t *testing.T, store *Store, _ string, content string) string {
 	t.Helper()
 	document, err := store.CreateDocument(CreateDocumentRequest{}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create test document: %v", err)
 	}
-	setTestDocumentPath(t, store, document.ID, path)
 	if content != "" {
 		if _, _, err := store.ReplaceDocumentText(document.ID, content, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test-seed-content"}); err != nil {
 			t.Fatalf("seed test document content: %v", err)
 		}
 	}
 	return document.ID
-}
-
-func setTestDocumentPath(t *testing.T, store *Store, documentID, path string) {
-	t.Helper()
-	if strings.TrimSpace(path) == "" {
-		return
-	}
-	normalized, err := normalizeDocumentPath(path)
-	if err != nil {
-		t.Fatalf("normalize test document path: %v", err)
-	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	document := store.state.Documents[documentID]
-	if document == nil {
-		t.Fatalf("document %s not found", documentID)
-	}
-	document.Path = normalized
-	store.markDocumentDirtyLocked(document.ID)
-	if err := store.persistDocumentMutationLocked(); err != nil {
-		t.Fatalf("persist test document path: %v", err)
-	}
 }
 
 func syncedDocumentTextForTest(t *testing.T, store *Store, documentID string) string {

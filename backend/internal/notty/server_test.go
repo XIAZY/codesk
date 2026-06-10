@@ -125,7 +125,7 @@ func TestWorkspaceExposesRootDocumentIDAndHidesRootDocument(t *testing.T) {
 		t.Fatalf("workspace REST response must not expose document namespace: %#v", payload["documents"])
 	}
 
-	assertNonOK(t, server.Routes(), http.MethodGet, "/api/documents/by-path?path="+rootDocumentPath, nil)
+	assertNonOK(t, server.Routes(), http.MethodGet, "/api/documents/by-path?path=.notty/root", nil)
 }
 
 func TestWorkspaceEventSocketSnapshotOmitsDocumentList(t *testing.T) {
@@ -184,9 +184,6 @@ func TestCreateDocumentAllocatesEmptyPathlessStream(t *testing.T) {
 	}
 	if first.ID == second.ID {
 		t.Fatalf("pathless document creates must allocate different streams: %q", first.ID)
-	}
-	if first.Path != "" || first.Title != "" || second.Path != "" || second.Title != "" {
-		t.Fatalf("created streams must not persist backend path/title metadata: first=%#v second=%#v", first, second)
 	}
 	if got := syncedDocumentTextForTest(t, store, first.ID); got != "" {
 		t.Fatalf("created stream should start empty, got %q", got)
@@ -669,6 +666,10 @@ func TestBackendDoesNotExposeLegacyDocumentNamespaceSurface(t *testing.T) {
 		}
 		if path == "types.go" {
 			source := string(data)
+			documentBlock := source[strings.Index(source, "type Document struct {"):strings.Index(source, "type DocumentMetadata struct {")]
+			if strings.Contains(documentBlock, "Path") || strings.Contains(documentBlock, "Title") {
+				matches[path] = append(matches[path], "Document path/title")
+			}
 			metadataBlock := source[strings.Index(source, "type DocumentMetadata struct {"):strings.Index(source, "type ThreadAnchor struct {")]
 			if strings.Contains(metadataBlock, "Path") || strings.Contains(metadataBlock, "Title") {
 				matches[path] = append(matches[path], "DocumentMetadata path/title")

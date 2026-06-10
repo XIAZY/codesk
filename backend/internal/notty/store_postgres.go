@@ -16,6 +16,21 @@ import (
 const postgresCheckpointInterval = 100
 const postgresCheckpointTailLimit = postgresCheckpointInterval
 
+const (
+	legacyRootDocumentPath  = ".notty/root"
+	legacyRootDocumentTitle = "Workspace Root"
+)
+
+func legacyDocumentPathTitleForPersistence(workspaceID string, document *Document) (string, string) {
+	if document == nil {
+		return "", ""
+	}
+	if document.ID == rootDocumentID(workspaceID) {
+		return legacyRootDocumentPath, legacyRootDocumentTitle
+	}
+	return "", ""
+}
+
 func initPostgresSchemaTables(db *sql.DB) error {
 	statements := []string{
 		`
@@ -387,7 +402,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 }
 
 func (s *Store) loadNormalizedPostgresLocked() error {
-	s.state.Documents = map[string]*Document{}
+	s.state.ContentDocuments = map[string]*Document{}
 	s.state.Users = map[string]*User{}
 	s.state.Daemons = map[string]*Daemon{}
 	s.state.Agents = map[string]*Agent{}
@@ -514,19 +529,20 @@ func (s *Store) pendingDocumentMutationIDsLocked() []string {
 
 func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) error {
 	for documentID := range s.dirtyDocuments {
-		document := s.state.Documents[documentID]
+		document := s.state.ContentDocuments[documentID]
 		if document == nil {
 			continue
 		}
+		legacyPath, legacyTitle := legacyDocumentPathTitleForPersistence(s.state.WorkspaceID, document)
 		if _, err := tx.Exec(
 			`INSERT INTO documents (workspace_id, id, path, title, hidden, client_id_seed, updated_at)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7)
-			 ON CONFLICT (id)
+			ON CONFLICT (id)
 			 DO UPDATE SET path = EXCLUDED.path, title = EXCLUDED.title, hidden = EXCLUDED.hidden, client_id_seed = EXCLUDED.client_id_seed, updated_at = EXCLUDED.updated_at`,
 			s.state.WorkspaceID,
 			document.ID,
-			document.Path,
-			document.Title,
+			legacyPath,
+			legacyTitle,
 			document.Hidden,
 			int64(document.ClientIDSeed),
 			document.UpdatedAt,
@@ -559,13 +575,13 @@ func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) error {
 		}
 	}
 	for documentID, updateID := range latestUpdateByDocument {
-		if document := s.state.Documents[documentID]; document != nil {
+		if document := s.state.ContentDocuments[documentID]; document != nil {
 			document.UpdateID = updateID
 			s.enqueueDocumentInboxEventsLocked(document, latestMetaByDocument[documentID])
 		}
 	}
 	for documentID := range s.dirtyDocuments {
-		document := s.state.Documents[documentID]
+		document := s.state.ContentDocuments[documentID]
 		if document == nil {
 			continue
 		}
@@ -1104,14 +1120,6 @@ func claimAgentEventPostgres(db *sql.DB, workspaceID string, agentID string, age
 			   AND available_at <= $3
 			   AND status NOT IN ('completed', 'dismissed')
 			   AND NOT (status = 'processing' AND claimed_at > $4)
-			   AND NOT EXISTS (
-			    SELECT 1
-			      FROM documents
-			     WHERE documents.workspace_id = agent_events.workspace_id
-			       AND documents.id = agent_events.document_id
-			       AND agent_events.type LIKE 'document.%'
-			       AND LOWER(documents.path) LIKE '%.log'
-			   )
 			 ORDER BY created_at ASC
 			 LIMIT 1
 			 FOR UPDATE SKIP LOCKED
@@ -1377,7 +1385,7 @@ func (s *Store) ensurePostgresCheckpointsLocked() error {
 		  WHERE d.workspace_id = $1
 		    AND h.update_id > 0
 		    AND (checkpoint.update_id IS NULL OR h.update_id - checkpoint.update_id > $2)
-		  ORDER BY d.path ASC`,
+		  ORDER BY d.id ASC`,
 		s.state.WorkspaceID,
 		postgresCheckpointTailLimit,
 	)
@@ -1756,8 +1764,6 @@ func (s *Store) loadActivitiesPostgresLocked() error {
 func (s *Store) loadDocumentsPostgresLocked() error {
 	rows, err := s.db.Query(
 		`SELECT d.id,
-		        d.path,
-		        d.title,
 		        d.hidden,
 		        COALESCE(NULLIF(h.state_vector, ''), checkpoint.state_vector, '') AS state_vector,
 		        h.update_id,
@@ -1776,7 +1782,7 @@ func (s *Store) loadDocumentsPostgresLocked() error {
 		        LIMIT 1
 		   ) checkpoint ON TRUE
 		  WHERE d.workspace_id = $1
-		  ORDER BY d.path ASC`,
+		  ORDER BY d.id ASC`,
 		s.state.WorkspaceID,
 	)
 	if err != nil {
@@ -1789,8 +1795,6 @@ func (s *Store) loadDocumentsPostgresLocked() error {
 		var clientIDSeed int64
 		if err := rows.Scan(
 			&document.ID,
-			&document.Path,
-			&document.Title,
 			&document.Hidden,
 			&document.StateVector,
 			&document.UpdateID,
@@ -1800,7 +1804,7 @@ func (s *Store) loadDocumentsPostgresLocked() error {
 			return err
 		}
 		document.ClientIDSeed = uint64(clientIDSeed)
-		s.state.Documents[document.ID] = document
+		s.state.ContentDocuments[document.ID] = document
 	}
 	return rows.Err()
 }

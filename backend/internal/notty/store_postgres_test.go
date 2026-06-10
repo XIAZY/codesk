@@ -118,7 +118,7 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	defer reloaded.Close()
 
 	snapshot := reloaded.Snapshot()
-	if got := snapshot.Documents[documentID]; got == nil || got.Path != "docs/spec.md" {
+	if got := snapshot.ContentDocuments[documentID]; got == nil {
 		t.Fatalf("expected document after reload, got %#v", got)
 	}
 	if got := snapshot.Users[user.ID]; got == nil || got.Handle != "adaproof" {
