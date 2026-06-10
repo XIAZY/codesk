@@ -207,7 +207,7 @@ func (r *workspaceReplica) handleWatcherEvent(event fsnotify.Event, now time.Tim
 			return nil
 		}
 		if tracked != nil {
-			r.changes.recordIdentity(path, identity)
+			r.changes.markTrackedPresent(tracked.DocumentID, path, identity)
 			if err := markTrackedLocalDirty(tracked, path); err != nil {
 				return err
 			}
@@ -227,15 +227,35 @@ func (r *workspaceReplica) handleWatcherEvent(event fsnotify.Event, now time.Tim
 		return nil
 	}
 
-	if event.Op&fsnotify.Write != 0 && tracked != nil {
-		r.changes.recordIdentity(path, statFileIdentity(path))
-		if err := markTrackedLocalDirty(tracked, path); err != nil {
+	if event.Op&fsnotify.Write != 0 {
+		if tracked != nil {
+			r.changes.markTrackedPresent(tracked.DocumentID, path, statFileIdentity(path))
+			if err := markTrackedLocalDirty(tracked, path); err != nil {
+				return err
+			}
+			if tracked.isLocalDirty() {
+				r.changes.markDirtyDocument(tracked.DocumentID)
+				r.markDocumentDirty(localPathChangeReconcileWake)
+			}
+			return nil
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
 			return err
 		}
-		if tracked.isLocalDirty() {
-			r.changes.markDirtyDocument(tracked.DocumentID)
-			r.markDocumentDirty(localPathChangeReconcileWake)
+		if info.IsDir() {
+			return nil
 		}
+		r.changes.markLocalCreate(localCreateCandidate{
+			Root:      r.rootDir,
+			Path:      path,
+			ActorID:   r.actorID,
+			ActorType: r.actorKind(),
+		}, fileIdentityForInfo(info))
+		r.markDocumentDirty(localPathChangeReconcileWake)
 	}
 	return nil
 }

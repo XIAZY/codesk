@@ -135,6 +135,20 @@ func (c *workspaceChangeIndex) markPendingMissing(documentID, path string, now t
 	c.mu.Unlock()
 }
 
+func (c *workspaceChangeIndex) markTrackedPresent(documentID, path string, identity fileIdentity) {
+	if c == nil || strings.TrimSpace(documentID) == "" || strings.TrimSpace(path) == "" {
+		return
+	}
+	c.mu.Lock()
+	if missing, ok := c.missing[documentID]; ok && missing.path == path {
+		delete(c.missing, documentID)
+	}
+	if identity.valid {
+		c.identities[path] = identity
+	}
+	c.mu.Unlock()
+}
+
 func (c *workspaceChangeIndex) markDiscoverDir(path string) {
 	if c == nil || strings.TrimSpace(path) == "" {
 		return

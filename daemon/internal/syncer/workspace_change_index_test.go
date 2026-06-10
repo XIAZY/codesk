@@ -307,6 +307,118 @@ func TestWorkspaceReplicaEventPathExpiresUnmatchedDelete(t *testing.T) {
 	}
 }
 
+func TestWorkspaceReplicaEventPathTrackedReplaceAtSamePathCancelsMissing(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "docs", "tracked.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+
+	var dirty []string
+	replica := &workspaceReplica{
+		rootDir:   root,
+		actorID:   "daemon_agent",
+		actorType: "daemon",
+		markDirty: func(documentID string) {
+			dirty = append(dirty, documentID)
+		},
+		fs:              NewWorkspaceFS(root),
+		projectedByPath: map[string]*trackedFile{},
+		projectedByID:   map[string]*trackedFile{},
+		changes:         newWorkspaceChangeIndex(),
+	}
+	tracked := &trackedFile{
+		DocumentID:    "doc_replace",
+		DocumentPath:  "docs/tracked.md",
+		Path:          path,
+		WorkspaceRoot: root,
+		FS:            replica.fs,
+		Owner:         replica,
+	}
+	tracked.setProjectedContent("base\n")
+	replica.projectedByPath[path] = tracked
+	replica.projectedByID[tracked.DocumentID] = tracked
+	replica.recordTrackedIdentity(path)
+
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove base: %v", err)
+	}
+	now := time.Now()
+	if err := replica.handleWatcherEvent(fsnotify.Event{Name: path, Op: fsnotify.Remove}, now); err != nil {
+		t.Fatalf("handle remove: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("replacement\n"), 0o644); err != nil {
+		t.Fatalf("write replacement: %v", err)
+	}
+	if err := replica.handleWatcherEvent(fsnotify.Event{Name: path, Op: fsnotify.Create}, now.Add(time.Millisecond)); err != nil {
+		t.Fatalf("handle replacement create: %v", err)
+	}
+	if pending, err := replica.drainPathChanges(context.Background(), now.Add(workspaceMissingPathDelay+time.Millisecond)); err != nil {
+		t.Fatalf("drain same-path replacement: %v", err)
+	} else if pending {
+		t.Fatal("same-path replacement should not leave pending missing work")
+	}
+	if tracked.isLocalDeleted() {
+		t.Fatal("same-path replacement should not become local delete")
+	}
+	if !tracked.isLocalDirty() {
+		t.Fatal("same-path replacement should mark tracked file dirty")
+	}
+	if !containsTestString(dirty, "doc_replace") {
+		t.Fatalf("same-path replacement did not mark document dirty: %#v", dirty)
+	}
+}
+
+func TestWorkspaceReplicaEventPathTreatsUntrackedWriteAsLocalCreate(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "docs", "new.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("new\n"), 0o644); err != nil {
+		t.Fatalf("write new file: %v", err)
+	}
+
+	var creates []localCreateCandidate
+	replica := &workspaceReplica{
+		rootDir:   root,
+		actorID:   "daemon_agent",
+		actorType: "daemon",
+		markDirty: func(string) {},
+		markCreate: func(candidate localCreateCandidate) {
+			creates = append(creates, candidate)
+		},
+		fs:              NewWorkspaceFS(root),
+		projectedByPath: map[string]*trackedFile{},
+		projectedByID:   map[string]*trackedFile{},
+		changes:         newWorkspaceChangeIndex(),
+	}
+
+	var scans atomic.Int32
+	previousScan := scanWorkspaceFilesForReconcile
+	scanWorkspaceFilesForReconcile = func(root string) (map[string]string, error) {
+		scans.Add(1)
+		return previousScan(root)
+	}
+	defer func() { scanWorkspaceFilesForReconcile = previousScan }()
+
+	if err := replica.handleWatcherEvent(fsnotify.Event{Name: path, Op: fsnotify.Write}, time.Now()); err != nil {
+		t.Fatalf("handle untracked write: %v", err)
+	}
+	if _, err := replica.drainPathChanges(context.Background(), time.Now()); err != nil {
+		t.Fatalf("drain untracked write: %v", err)
+	}
+	if scans.Load() != 0 {
+		t.Fatalf("untracked write called full workspace scan %d time(s)", scans.Load())
+	}
+	if len(creates) != 1 || creates[0].Path != path {
+		t.Fatalf("local creates after untracked write = %#v", creates)
+	}
+}
+
 func TestWorkspaceReplicaDirectoryCreateDiscoversOnlySubtree(t *testing.T) {
 	root := t.TempDir()
 	newDir := filepath.Join(root, "created")
