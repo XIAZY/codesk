@@ -448,6 +448,13 @@ func (s *Service) fetchWorkspace(ctx context.Context) (*workspaceResponse, error
 	return &workspace, nil
 }
 
+func (s *workspaceRuntime) processPathChanges(ctx context.Context) (bool, error) {
+	if s == nil || s.replica == nil {
+		return false, nil
+	}
+	return s.replica.drainPathChanges(ctx, time.Now())
+}
+
 func (s *workspaceRuntime) processLocalCreates(ctx context.Context) error {
 	if s == nil || s.localCreates == nil {
 		return nil
@@ -780,11 +787,6 @@ var errDocumentRemovedDuringReconcile = errors.New("document removed during reco
 func (s *workspaceRuntime) reconcileDirtyDocuments(ctx context.Context) error {
 	if s.reconcileQueue == nil {
 		return nil
-	}
-	if s.replica != nil && strings.TrimSpace(s.replica.rootDir) != "" {
-		if err := s.replica.reconcileLocalWorkspace(ctx); err != nil {
-			return err
-		}
 	}
 	return s.reconcileDocumentIDs(ctx, s.reconcileQueue.Drain())
 }
@@ -1670,6 +1672,8 @@ func scanWorkspaceFiles(root string) (map[string]string, error) {
 	})
 	return files, err
 }
+
+var scanWorkspaceFilesForReconcile = scanWorkspaceFiles
 
 func isIgnoredDocumentPath(documentPath string) bool {
 	return isIgnoredWorkspaceRelativePath(documentPath)

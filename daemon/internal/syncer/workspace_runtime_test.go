@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	crdt "notty/internal/ycrdt"
 	"notty/internal/yproto"
 )
@@ -952,9 +953,17 @@ func TestWorkspaceRuntimeFilesystemLifecycleRecordsSQLiteAndDaemonCalls(t *testi
 	if err := os.Rename(initialPath, movedPath); err != nil {
 		t.Fatalf("move file: %v", err)
 	}
-	runtime.markDocumentDirty(documentID)
-	if err := runtime.reconcileDirtyDocuments(ctx); err != nil {
-		t.Fatalf("reconcile dirty document after local move: %v", err)
+	moveTime := time.Now()
+	if err := runtime.replica.handleWatcherEvent(fsnotify.Event{Name: initialPath, Op: fsnotify.Rename}, moveTime); err != nil {
+		t.Fatalf("handle old-path rename event: %v", err)
+	}
+	if err := runtime.replica.handleWatcherEvent(fsnotify.Event{Name: movedPath, Op: fsnotify.Create}, moveTime.Add(time.Millisecond)); err != nil {
+		t.Fatalf("handle new-path create event: %v", err)
+	}
+	if pending, err := runtime.replica.drainPathChanges(ctx, moveTime.Add(time.Millisecond)); err != nil {
+		t.Fatalf("drain local move path changes: %v", err)
+	} else if pending {
+		t.Fatal("matched local move should not leave pending path changes")
 	}
 	reconcileRuntimeUntilIdle(t, ctx, runtime)
 	server.assertRootEntry(t, documentID, "renamed/lifecycle.md", false)
@@ -983,8 +992,14 @@ func TestWorkspaceRuntimeFilesystemLifecycleRecordsSQLiteAndDaemonCalls(t *testi
 	if err := os.Remove(movedPath); err != nil {
 		t.Fatalf("remove moved file: %v", err)
 	}
-	if err := runtime.replica.reconcileLocalWorkspace(ctx); err != nil {
-		t.Fatalf("detect local delete: %v", err)
+	removeTime := time.Now()
+	if err := runtime.replica.handleWatcherEvent(fsnotify.Event{Name: movedPath, Op: fsnotify.Remove}, removeTime); err != nil {
+		t.Fatalf("handle local delete event: %v", err)
+	}
+	if pending, err := runtime.replica.drainPathChanges(ctx, removeTime.Add(workspaceMissingPathDelay+time.Millisecond)); err != nil {
+		t.Fatalf("drain local delete path changes: %v", err)
+	} else if pending {
+		t.Fatal("expired local delete should not leave pending path changes")
 	}
 	reconcileRuntimeUntilIdle(t, ctx, runtime)
 	server.assertRootEntry(t, documentID, "renamed/lifecycle.md", true)

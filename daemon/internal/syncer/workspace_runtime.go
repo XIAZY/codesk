@@ -16,6 +16,7 @@ import (
 
 const workspaceReconcileMinInterval = 2 * time.Second
 const localCreateReconcileWake = "__local_create__"
+const localPathChangeReconcileWake = "__local_path_change__"
 const rootDocumentPath = ".notty/root"
 
 type workspaceRuntime struct {
@@ -280,6 +281,11 @@ func (r *workspaceRuntime) reconcileLoop(ctx context.Context) {
 		}
 		stopTimer()
 		lastRun = now
+		requeuePathChanges := false
+		requeuePathChanges, pathChangeErr := r.processPathChanges(ctx)
+		if pathChangeErr != nil && ctx.Err() == nil {
+			fmt.Printf("path change reconcile error: %v\n", pathChangeErr)
+		}
 		localCreateErr := r.processLocalCreates(ctx)
 		if localCreateErr != nil && ctx.Err() == nil {
 			fmt.Printf("local create reconcile error: %v\n", localCreateErr)
@@ -289,6 +295,12 @@ func (r *workspaceRuntime) reconcileLoop(ctx context.Context) {
 		}
 		if localCreateErr != nil && ctx.Err() == nil {
 			r.markDocumentDirty(localCreateReconcileWake)
+		}
+		if pathChangeErr != nil && ctx.Err() == nil {
+			r.markDocumentDirty(localPathChangeReconcileWake)
+		}
+		if requeuePathChanges {
+			r.markDocumentDirty(localPathChangeReconcileWake)
 		}
 		if r.reconcileQueue.Len() > 0 {
 			arm(workspaceReconcileMinInterval)
