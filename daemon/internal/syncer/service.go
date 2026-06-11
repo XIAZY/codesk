@@ -607,6 +607,7 @@ func (s *workspaceRuntime) createDocumentFromLocalCandidate(ctx context.Context,
 		return nil, err
 	}
 	created.Path = relativePath
+	projectedSeq := int64(0)
 	if s != nil && s.docCache != nil {
 		doc := crdt.New()
 		if err := s.docCache.storeDoc(created.ID, created.Path, created.UpdateID, doc); err != nil {
@@ -614,6 +615,11 @@ func (s *workspaceRuntime) createDocumentFromLocalCandidate(ctx context.Context,
 			return nil, err
 		}
 		doc.Close()
+		seq, err := s.docCache.documentAppliedSeq(created.ID)
+		if err != nil {
+			return nil, err
+		}
+		projectedSeq = seq
 	}
 	tracked := &trackedFile{
 		DocumentID:    created.ID,
@@ -623,7 +629,7 @@ func (s *workspaceRuntime) createDocumentFromLocalCandidate(ctx context.Context,
 		FS:            fs,
 		cache:         s.docCache,
 	}
-	if err := tracked.storeProjectedBase("", crdtStateFromContent("")); err != nil {
+	if err := tracked.storeProjectedBaseAtSeq("", crdtStateFromContent(""), projectedSeq); err != nil {
 		return nil, err
 	}
 	return &created, nil
@@ -1740,24 +1746,6 @@ func nextAwarenessClientID() uint64 {
 	return 10_000_000 + awarenessClientCounter.Add(1)
 }
 
-func (t *trackedFile) storeProjectedBase(content string, states ...[]byte) error {
-	if t == nil || t.DocumentID == "" {
-		return nil
-	}
-	if t.cache == nil {
-		return nil
-	}
-	var state []byte
-	if len(states) > 0 {
-		state = states[0]
-	}
-	projectedSeq, err := t.cache.documentAppliedSeq(t.DocumentID)
-	if err != nil {
-		return err
-	}
-	return t.storeProjectedBaseAtSeq(content, state, projectedSeq)
-}
-
 func (t *trackedFile) storeProjectedBaseAtSeq(content string, state []byte, projectedSeq int64) error {
 	if t == nil || t.DocumentID == "" {
 		return nil
@@ -1977,16 +1965,6 @@ func workspaceRootForDocumentPath(absolutePath, documentPath string) string {
 		}
 	}
 	return filepath.Dir(absolutePath)
-}
-
-func projectedStateMatchesContent(state []byte, content string) bool {
-	doc := crdt.New()
-	if len(state) > 0 {
-		if err := crdt.ApplyUpdateV1(doc, state, "projection-check"); err != nil {
-			return false
-		}
-	}
-	return doc.GetText("content").ToString() == content
 }
 
 func crdtStateFromContent(content string) []byte {

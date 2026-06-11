@@ -829,7 +829,8 @@ func TestProductionDocumentNamespaceUsesRootProjectionOnly(t *testing.T) {
 	}
 }
 
-func TestProductionProjectionDoesNotReplayHistoryToFindProjectedSeq(t *testing.T) {
+func TestProductionProjectionDoesNotReplayHistoryForProjectionSeq(t *testing.T) {
+	forbidden := "find" + "Projected" + "Seq"
 	matches := map[string]int{}
 	err := filepath.WalkDir(".", func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -842,7 +843,7 @@ func TestProductionProjectionDoesNotReplayHistoryToFindProjectedSeq(t *testing.T
 		if err != nil {
 			return err
 		}
-		if count := strings.Count(string(data), "findProjectedSeq"); count > 0 {
+		if count := strings.Count(string(data), forbidden); count > 0 {
 			matches[path] = count
 		}
 		return nil

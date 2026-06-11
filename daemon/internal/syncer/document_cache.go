@@ -591,12 +591,17 @@ func (c *workspaceStore) applyOutboxUpdateLocked(_ *documentCacheEntry, document
 	now := time.Now().UTC()
 	var appliedSeq int64
 	err := c.withTx(func(tx *sql.Tx) error {
-		if _, err := c.ensureDocumentTx(tx, documentID, path, now); err != nil {
+		row, err := c.ensureDocumentTx(tx, documentID, path, now)
+		if err != nil {
 			return err
 		}
+		appliedSeq = row.AppliedSeq
 		seq, _, err := c.insertCRDTUpdateTx(tx, documentID, record.Update, "local", record.ActorID, record.ActorType, now)
 		if err != nil {
 			return err
+		}
+		if seq > appliedSeq {
+			appliedSeq = seq
 		}
 		if seq > 0 {
 			if _, err := tx.Exec(`update documents
@@ -606,7 +611,6 @@ func (c *workspaceStore) applyOutboxUpdateLocked(_ *documentCacheEntry, document
 				return err
 			}
 		}
-		appliedSeq = seq
 		return nil
 	})
 	return appliedSeq, err

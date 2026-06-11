@@ -388,6 +388,34 @@ func TestWorkspaceStoreApplyDuplicateOutboxUpdateReturnsExistingSeq(t *testing.T
 	if row.AppliedSeq != firstSeq {
 		t.Fatalf("applied seq = %d, want %d after duplicate", row.AppliedSeq, firstSeq)
 	}
+
+	currentDoc, _, _, err := cache.loadBaseDoc("doc_1", "docs/spec.md")
+	if err != nil {
+		t.Fatalf("load current doc: %v", err)
+	}
+	remoteUpdate := updateFromBaseDoc(t, currentDoc, "base\nlocal\nremote\n", "remote")
+	if _, err := cache.appendPendingRemoteUpdate("doc_1", "docs/spec.md", remoteUpdate); err != nil {
+		t.Fatalf("append remote update: %v", err)
+	}
+	entry.mu.Lock()
+	_, remoteSeq, err := cache.applyPendingRemoteUpdatesLocked(entry, "doc_1", currentDoc)
+	entry.mu.Unlock()
+	if err != nil {
+		t.Fatalf("apply remote update: %v", err)
+	}
+	if remoteSeq <= firstSeq {
+		t.Fatalf("remote seq %d must be after local seq %d", remoteSeq, firstSeq)
+	}
+
+	entry.mu.Lock()
+	boundarySeq, err := cache.applyOutboxUpdateLocked(entry, "doc_1", "docs/spec.md", record)
+	entry.mu.Unlock()
+	if err != nil {
+		t.Fatalf("apply duplicate outbox after later boundary: %v", err)
+	}
+	if boundarySeq != remoteSeq {
+		t.Fatalf("duplicate after later boundary returned seq %d, want boundary %d", boundarySeq, remoteSeq)
+	}
 }
 
 func TestDocumentCacheDoesNotCreateFileBackedState(t *testing.T) {

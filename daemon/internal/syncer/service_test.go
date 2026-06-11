@@ -891,8 +891,12 @@ func TestProjectedBaseLivesInWorkspaceSQLiteWithCRDTState(t *testing.T) {
 	if !known || content != "base" {
 		t.Fatalf("unexpected projected base known=%v content=%q", known, content)
 	}
-	if !projectedStateMatchesContent(state, "base") {
-		t.Fatal("projected CRDT state does not materialize to projected text")
+	projectedDoc := crdt.New()
+	if err := crdt.ApplyUpdateV1(projectedDoc, state, "projection-check"); err != nil {
+		t.Fatalf("apply projected state: %v", err)
+	}
+	if got := projectedDoc.GetText("content").ToString(); got != "base" {
+		t.Fatalf("projected CRDT state materialized to %q, want base", got)
 	}
 }
 
@@ -3161,6 +3165,93 @@ func TestOutgoingOutboxFinalizeConflictStoresAcceptedLocalProjectedSeq(t *testin
 	}
 }
 
+func TestOutgoingOutboxFinalizeDuplicateDoesNotRegressProjectedSeq(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "doc.md")
+	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base\n")
+	if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	localUpdate := updateFromBaseDoc(t, baseDoc, "base\nlocal\n", "local")
+	localDoc := crdt.New()
+	if err := crdt.ApplyUpdateV1(localDoc, baseDoc.EncodeStateAsUpdate(), "base"); err != nil {
+		t.Fatalf("apply base to local doc: %v", err)
+	}
+	if err := crdt.ApplyUpdateV1(localDoc, localUpdate, "local"); err != nil {
+		t.Fatalf("apply local update: %v", err)
+	}
+	record := &outboxUpdateRecord{
+		ID:              "dup_local",
+		Update:          localUpdate,
+		ObservedContent: "base\nlocal\n",
+		ObservedState:   localDoc.EncodeStateAsUpdate(),
+		SourcePath:      path,
+		ActorID:         "agent_1",
+		ActorType:       "agent",
+	}
+	entry := cache.entryFor("doc_1")
+	entry.mu.Lock()
+	localSeq, err := cache.applyOutboxUpdateLocked(entry, "doc_1", "doc.md", record)
+	entry.mu.Unlock()
+	if err != nil {
+		t.Fatalf("apply first local update: %v", err)
+	}
+
+	currentDoc, _, _, err := cache.loadBaseDoc("doc_1", "doc.md")
+	if err != nil {
+		t.Fatalf("load current doc: %v", err)
+	}
+	remoteUpdate := updateFromBaseDoc(t, currentDoc, "base\nlocal\nremote\n", "remote")
+	if _, err := cache.appendPendingRemoteUpdate("doc_1", "doc.md", remoteUpdate); err != nil {
+		t.Fatalf("append remote update: %v", err)
+	}
+	entry.mu.Lock()
+	_, remoteSeq, err := cache.applyPendingRemoteUpdatesLocked(entry, "doc_1", currentDoc)
+	entry.mu.Unlock()
+	if err != nil {
+		t.Fatalf("apply remote update: %v", err)
+	}
+	if remoteSeq <= localSeq {
+		t.Fatalf("remote seq %d must be after local seq %d", remoteSeq, localSeq)
+	}
+	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache}
+	tracked.setProjectedContent("base\nlocal\n")
+	if err := tracked.storeProjectedBaseAtSeq("base\nlocal\n", record.ObservedState, localSeq); err != nil {
+		t.Fatalf("store local projected base: %v", err)
+	}
+
+	entry, unlock := cache.lockEntry("doc_1")
+	err = finalizeSentOutbox(cache, entry, "doc_1", "doc.md", []*trackedFile{tracked}, record)
+	unlock()
+	if err != nil {
+		t.Fatalf("finalize duplicate outbox: %v", err)
+	}
+	row, err := cache.ensureDocument("doc_1", "doc.md")
+	if err != nil {
+		t.Fatalf("reload row: %v", err)
+	}
+	if row.AppliedSeq != remoteSeq {
+		t.Fatalf("applied seq = %d, want remote seq %d", row.AppliedSeq, remoteSeq)
+	}
+	if row.ProjectedSeq != remoteSeq {
+		t.Fatalf("projected seq regressed to %d, want remote seq %d", row.ProjectedSeq, remoteSeq)
+	}
+	projectedBase, _, known, err := tracked.loadProjectedBase()
+	if err != nil {
+		t.Fatalf("load projected base: %v", err)
+	}
+	if !known || projectedBase != "base\nlocal\nremote\n" {
+		t.Fatalf("projected base = known %v content %q, want merged remote content", known, projectedBase)
+	}
+}
+
 func TestOutgoingOutboxSurvivesCacheReopenAndResendsIdempotently(t *testing.T) {
 	root := t.TempDir()
 	cacheRoot := t.TempDir()
@@ -3235,6 +3326,21 @@ func newDocWithText(t *testing.T, content string) *crdt.Doc {
 	doc := crdt.New()
 	updateDocText(t, doc, content, "test")
 	return doc
+}
+
+func (t *trackedFile) storeProjectedBase(content string, states ...[]byte) error {
+	if t == nil || t.DocumentID == "" || t.cache == nil {
+		return nil
+	}
+	var state []byte
+	if len(states) > 0 {
+		state = states[0]
+	}
+	projectedSeq, err := t.cache.documentAppliedSeq(t.DocumentID)
+	if err != nil {
+		return err
+	}
+	return t.storeProjectedBaseAtSeq(content, state, projectedSeq)
 }
 
 func updateDocText(t *testing.T, doc *crdt.Doc, content string, origin any) {
