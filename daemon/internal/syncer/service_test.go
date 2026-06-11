@@ -730,7 +730,7 @@ func TestApplyProjectedContentUpdatesSnapshotBeforeWriting(t *testing.T) {
 	tracked := &trackedFile{Path: path}
 	tracked.setProjectedContent("old")
 
-	clean, err := applyProjectedContent(tracked, "new")
+	clean, err := applyProjectedContent(tracked, "new", nil, 0)
 	if err != nil {
 		t.Fatalf("apply projected content: %v", err)
 	}
@@ -758,7 +758,7 @@ func TestApplyProjectedContentRollsBackOnWriteFailure(t *testing.T) {
 	tracked := &trackedFile{Path: path}
 	tracked.setProjectedContent("old")
 
-	if _, err := applyProjectedContent(tracked, "new"); err == nil {
+	if _, err := applyProjectedContent(tracked, "new", nil, 0); err == nil {
 		t.Fatal("expected projected write failure")
 	}
 
@@ -775,7 +775,7 @@ func TestApplyProjectedContentDoesNotOverwriteDivergedDiskState(t *testing.T) {
 	tracked := &trackedFile{Path: path}
 	tracked.setProjectedContent("old")
 
-	clean, err := applyProjectedContent(tracked, "remote update")
+	clean, err := applyProjectedContent(tracked, "remote update", nil, 0)
 	if err != nil {
 		t.Fatalf("apply projected content: %v", err)
 	}
@@ -791,6 +791,71 @@ func TestApplyProjectedContentDoesNotOverwriteDivergedDiskState(t *testing.T) {
 	}
 	if !tracked.matchesProjectedString("old") {
 		t.Fatal("expected projected content hash to roll back after divergence")
+	}
+}
+
+func TestApplyProjectedContentConflictDoesNotAdvanceProjectedSeq(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "doc.md")
+	if err := os.WriteFile(path, []byte("old plus local edit"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "old")
+	if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	baseRow, err := cache.ensureDocument("doc_1", "doc.md")
+	if err != nil {
+		t.Fatalf("load base row: %v", err)
+	}
+	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache}
+	tracked.setProjectedContent("old")
+	if err := tracked.storeProjectedBaseAtSeq("old", baseDoc.EncodeStateAsUpdate(), baseRow.AppliedSeq); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+
+	remoteUpdate := updateFromBaseDoc(t, baseDoc, "remote update", "remote")
+	if _, err := cache.appendPendingRemoteUpdate("doc_1", "doc.md", remoteUpdate); err != nil {
+		t.Fatalf("append pending remote: %v", err)
+	}
+	doc, _, _, err := cache.loadBaseDoc("doc_1", "doc.md")
+	if err != nil {
+		t.Fatalf("load base doc: %v", err)
+	}
+	entry := cache.entryFor("doc_1")
+	entry.mu.Lock()
+	applied, remoteSeq, err := cache.applyPendingRemoteUpdatesLocked(entry, "doc_1", doc)
+	entry.mu.Unlock()
+	if err != nil {
+		t.Fatalf("apply remote update: %v", err)
+	}
+	if applied != 1 {
+		t.Fatalf("expected one remote update, got %d", applied)
+	}
+	if remoteSeq <= baseRow.AppliedSeq {
+		t.Fatalf("expected remote seq %d after base seq %d", remoteSeq, baseRow.AppliedSeq)
+	}
+
+	clean, err := applyProjectedContent(tracked, "remote update", doc.EncodeStateAsUpdate(), remoteSeq)
+	if err != nil {
+		t.Fatalf("apply projected content: %v", err)
+	}
+	if clean {
+		t.Fatal("expected diverged disk to remain dirty")
+	}
+	row, err := cache.ensureDocument("doc_1", "doc.md")
+	if err != nil {
+		t.Fatalf("reload row: %v", err)
+	}
+	if row.AppliedSeq != remoteSeq {
+		t.Fatalf("applied seq = %d, want remote seq %d", row.AppliedSeq, remoteSeq)
+	}
+	if row.ProjectedSeq != baseRow.AppliedSeq {
+		t.Fatalf("projected seq advanced to %d despite write conflict, want base seq %d", row.ProjectedSeq, baseRow.AppliedSeq)
 	}
 }
 
@@ -1766,6 +1831,10 @@ func TestReconcileRebasesAppendFromStaleWorkspaceBase(t *testing.T) {
 	if err := cache.storeDoc("doc_append", "append.txt", 1, projectedDoc); err != nil {
 		t.Fatalf("store projected doc: %v", err)
 	}
+	projectedRow, err := cache.ensureDocument("doc_append", "append.txt")
+	if err != nil {
+		t.Fatalf("load projected row: %v", err)
+	}
 	remoteUpdate := updateFromBaseDoc(t, projectedDoc, "1\n2\n", "remote")
 	serverDoc := crdt.New()
 	if err := crdt.ApplyUpdateV1(serverDoc, projectedDoc.EncodeStateAsUpdate(), "server-base"); err != nil {
@@ -1783,7 +1852,7 @@ func TestReconcileRebasesAppendFromStaleWorkspaceBase(t *testing.T) {
 		unlock()
 		t.Fatalf("load base doc: %v", err)
 	}
-	if err := applyPendingRemoteUpdatesLocked(cache, entry, "doc_append", baseDoc); err != nil {
+	if _, err := applyPendingRemoteUpdatesLocked(cache, entry, "doc_append", baseDoc); err != nil {
 		unlock()
 		t.Fatalf("apply pending remote: %v", err)
 	}
@@ -1795,7 +1864,7 @@ func TestReconcileRebasesAppendFromStaleWorkspaceBase(t *testing.T) {
 		cache:        cache,
 	}
 	tracked.setProjectedContent("1\n")
-	if err := tracked.storeProjectedBase("1\n", projectedDoc.EncodeStateAsUpdate()); err != nil {
+	if err := tracked.storeProjectedBaseAtSeq("1\n", projectedDoc.EncodeStateAsUpdate(), projectedRow.AppliedSeq); err != nil {
 		t.Fatalf("store projected base: %v", err)
 	}
 	tracked.markLocalDirty()
@@ -2395,7 +2464,7 @@ func TestHandleLocalChangeIgnoresProjectedWrite(t *testing.T) {
 	}
 
 	updateDocText(t, doc, "hello world", "remote")
-	if _, err := applyProjectedContent(tracked, "hello world"); err != nil {
+	if _, err := applyProjectedContent(tracked, "hello world", nil, 0); err != nil {
 		t.Fatalf("apply projected content: %v", err)
 	}
 
@@ -2427,7 +2496,7 @@ func TestWorkspaceReplicaHandleLocalChangeIgnoresProjectedWrite(t *testing.T) {
 	}
 
 	updateDocText(t, doc, "hello world", "remote")
-	if _, err := applyProjectedContent(tracked, "hello world"); err != nil {
+	if _, err := applyProjectedContent(tracked, "hello world", nil, 0); err != nil {
 		t.Fatalf("apply projected content: %v", err)
 	}
 
@@ -3016,6 +3085,79 @@ func TestOutgoingOutboxClearsOnHTTPAcceptance(t *testing.T) {
 	}
 	if outbox != nil {
 		t.Fatal("expected outbox to clear after backend acceptance")
+	}
+}
+
+func TestOutgoingOutboxFinalizeConflictStoresAcceptedLocalProjectedSeq(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "doc.md")
+	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base\n")
+	if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	baseRow, err := cache.ensureDocument("doc_1", "doc.md")
+	if err != nil {
+		t.Fatalf("load base row: %v", err)
+	}
+	serverDoc := crdt.New()
+	if err := crdt.ApplyUpdateV1(serverDoc, baseDoc.EncodeStateAsUpdate(), "server-base"); err != nil {
+		t.Fatalf("apply server base: %v", err)
+	}
+	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache}
+	tracked.setProjectedContent("base\n")
+	if err := tracked.storeProjectedBaseAtSeq("base\n", baseDoc.EncodeStateAsUpdate(), baseRow.AppliedSeq); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+	tracked.markLocalDirty()
+
+	service := newDocumentUpdateWebsocketTestRuntime(t, cache, func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int) {
+		if err := crdt.ApplyUpdateV1(serverDoc, update, "server-local"); err != nil {
+			t.Fatalf("apply local update to server doc: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("base\nlocal\nsecond edit\n"), 0o644); err != nil {
+			t.Fatalf("write concurrent local edit: %v", err)
+		}
+		return documentUpdateTestResponse{Accepted: true, Applied: true, UpdateID: 2}, http.StatusOK
+	})
+	if err := service.reconcileTrackedDocument(context.Background(), "doc_1", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if !tracked.isLocalDirty() {
+		t.Fatal("concurrent local edit should keep file dirty")
+	}
+	if got := serverDoc.GetText("content").ToString(); got != "base\nlocal\n" {
+		t.Fatalf("server content = %q, want accepted local content", got)
+	}
+	row, err := cache.ensureDocument("doc_1", "doc.md")
+	if err != nil {
+		t.Fatalf("reload row: %v", err)
+	}
+	if row.AppliedSeq <= baseRow.AppliedSeq {
+		t.Fatalf("expected accepted local update to advance applied seq beyond %d, got %d", baseRow.AppliedSeq, row.AppliedSeq)
+	}
+	if row.ProjectedSeq != row.AppliedSeq {
+		t.Fatalf("projected seq = %d, want accepted local seq %d", row.ProjectedSeq, row.AppliedSeq)
+	}
+	projectedBase, _, known, err := tracked.loadProjectedBase()
+	if err != nil {
+		t.Fatalf("load projected base: %v", err)
+	}
+	if !known || projectedBase != "base\nlocal\n" {
+		t.Fatalf("projected base = known %v content %q, want accepted local content", known, projectedBase)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read local file: %v", err)
+	}
+	if string(content) != "base\nlocal\nsecond edit\n" {
+		t.Fatalf("reconcile overwrote concurrent edit: %q", content)
 	}
 }
 

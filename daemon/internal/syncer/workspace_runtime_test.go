@@ -829,6 +829,32 @@ func TestProductionDocumentNamespaceUsesRootProjectionOnly(t *testing.T) {
 	}
 }
 
+func TestProductionProjectionDoesNotReplayHistoryToFindProjectedSeq(t *testing.T) {
+	matches := map[string]int{}
+	err := filepath.WalkDir(".", func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if count := strings.Count(string(data), "findProjectedSeq"); count > 0 {
+			matches[path] = count
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk syncer sources: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("projection must carry explicit seq instead of replaying history; production matches: %#v", matches)
+	}
+}
+
 func TestWorkspaceRuntimeRunReconcilesLocalCreateEvents(t *testing.T) {
 	root := t.TempDir()
 	cfg := Config{

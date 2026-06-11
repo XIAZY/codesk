@@ -420,17 +420,17 @@ func (c *workspaceStore) pendingRemoteUpdateCount(documentID string) (int, error
 	return c.pendingRemoteUpdateCountLocked(entry, documentID)
 }
 
-func (c *workspaceStore) applyPendingRemoteUpdatesLocked(_ *documentCacheEntry, documentID string, doc *crdt.Doc) (int, error) {
+func (c *workspaceStore) applyPendingRemoteUpdatesLocked(_ *documentCacheEntry, documentID string, doc *crdt.Doc) (int, int64, error) {
 	if c == nil || doc == nil || documentID == "" {
-		return 0, nil
+		return 0, 0, nil
 	}
 	row, err := c.ensureDocument(documentID, "")
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	rows, err := c.db.Query(`select incoming_seq, update_bytes from incoming_updates where document_id = ? order by incoming_seq`, documentID)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer rows.Close()
 	type incomingUpdate struct {
@@ -443,22 +443,22 @@ func (c *workspaceStore) applyPendingRemoteUpdatesLocked(_ *documentCacheEntry, 
 		var incomingSeq int64
 		var update []byte
 		if err := rows.Scan(&incomingSeq, &update); err != nil {
-			return count, err
+			return count, row.AppliedSeq, err
 		}
 		if len(update) == 0 {
 			continue
 		}
 		if err := crdt.ApplyUpdateV1(doc, update, "remote-reconcile"); err != nil {
-			return count, err
+			return count, row.AppliedSeq, err
 		}
 		incoming = append(incoming, incomingUpdate{seq: incomingSeq, update: update})
 		count++
 	}
 	if err := rows.Err(); err != nil {
-		return count, err
+		return count, row.AppliedSeq, err
 	}
 	if count == 0 {
-		return 0, nil
+		return 0, row.AppliedSeq, nil
 	}
 	maxSeq := row.AppliedSeq
 	now := time.Now().UTC()
@@ -478,7 +478,7 @@ func (c *workspaceStore) applyPendingRemoteUpdatesLocked(_ *documentCacheEntry, 
 		_, err := tx.Exec(`update documents set applied_seq = ?, updated_at = ? where document_id = ?`, maxSeq, unixNano(now), documentID)
 		return err
 	})
-	return count, err
+	return count, maxSeq, err
 }
 
 func (c *workspaceStore) loadOutboxUpdateLocked(entry *documentCacheEntry, documentID string) (*outboxUpdateRecord, error) {
@@ -584,12 +584,13 @@ func (c *workspaceStore) storeOutboxUpdatesLocked(entry *documentCacheEntry, doc
 	})
 }
 
-func (c *workspaceStore) applyOutboxUpdateLocked(_ *documentCacheEntry, documentID, path string, record *outboxUpdateRecord) error {
+func (c *workspaceStore) applyOutboxUpdateLocked(_ *documentCacheEntry, documentID, path string, record *outboxUpdateRecord) (int64, error) {
 	if c == nil || documentID == "" || record == nil || len(record.Update) == 0 {
-		return nil
+		return 0, nil
 	}
 	now := time.Now().UTC()
-	return c.withTx(func(tx *sql.Tx) error {
+	var appliedSeq int64
+	err := c.withTx(func(tx *sql.Tx) error {
 		if _, err := c.ensureDocumentTx(tx, documentID, path, now); err != nil {
 			return err
 		}
@@ -605,8 +606,10 @@ func (c *workspaceStore) applyOutboxUpdateLocked(_ *documentCacheEntry, document
 				return err
 			}
 		}
+		appliedSeq = seq
 		return nil
 	})
+	return appliedSeq, err
 }
 
 func (c *workspaceStore) clearOutboxUpdates(documentID string) error {
@@ -661,24 +664,15 @@ func (c *workspaceStore) lockEntry(documentID string) (*documentCacheEntry, func
 	return entry, entry.mu.Unlock
 }
 
-func (c *workspaceStore) storeProjectedBase(documentID, content string, states ...[]byte) error {
+func (c *workspaceStore) storeProjectedBase(documentID, content string, _ []byte, projectedSeq int64) error {
 	if c == nil || documentID == "" {
 		return nil
 	}
-	row, err := c.ensureDocument(documentID, "")
-	if err != nil {
+	now := time.Now().UTC()
+	if _, err := c.ensureDocument(documentID, ""); err != nil {
 		return err
 	}
-	projectedSeq := row.AppliedSeq
-	if len(states) > 0 && len(states[0]) > 0 {
-		if seq, ok, err := c.findProjectedSeq(documentID, content, states[0]); err != nil {
-			return err
-		} else if ok {
-			projectedSeq = seq
-		}
-	}
-	now := time.Now().UTC()
-	_, err = c.db.Exec(`update documents
+	_, err := c.db.Exec(`update documents
 		set projected_seq = ?,
 			projected_text_sha256 = ?,
 			projected_text_len = ?,
@@ -764,40 +758,6 @@ func (c *workspaceStore) storeRootProjectionEntries(rootDocumentID string, entri
 		}
 		return nil
 	})
-}
-
-func (c *workspaceStore) findProjectedSeq(documentID, content string, state []byte) (int64, bool, error) {
-	if c == nil || documentID == "" || len(state) == 0 {
-		return 0, false, nil
-	}
-	targetStateHash := sha256Hex(state)
-	rows, err := c.db.Query(`select seq, update_bytes from crdt_updates where document_id = ? order by seq`, documentID)
-	if err != nil {
-		return 0, false, err
-	}
-	defer rows.Close()
-	doc := crdt.New()
-	defer doc.Close()
-	for rows.Next() {
-		var seq int64
-		var update []byte
-		if err := rows.Scan(&seq, &update); err != nil {
-			return 0, false, err
-		}
-		if len(update) == 0 {
-			continue
-		}
-		if err := crdt.ApplyUpdateV1(doc, update, "projection-seq"); err != nil {
-			return 0, false, err
-		}
-		if doc.GetText("content").ToString() == content && sha256Hex(doc.EncodeStateAsUpdate()) == targetStateHash {
-			return seq, true, nil
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return 0, false, err
-	}
-	return 0, false, nil
 }
 
 func (c *workspaceStore) loadProjectedBase(documentID string) (string, []byte, bool, error) {

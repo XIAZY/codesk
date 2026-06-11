@@ -279,7 +279,7 @@ func (s *workspaceRuntime) reconcileRootNamespace(ctx context.Context) error {
 		return err
 	}
 	if pending > 0 {
-		if err := applyPendingRemoteUpdatesLocked(cache, entry, s.rootDocumentID, doc); err != nil {
+		if _, err := applyPendingRemoteUpdatesLocked(cache, entry, s.rootDocumentID, doc); err != nil {
 			doc.Close()
 			unlock()
 			return err

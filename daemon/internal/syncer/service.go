@@ -940,11 +940,12 @@ func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documen
 			return nil
 		}
 
-		baseDoc, _, baseState, err := cache.loadBaseDocLocked(entry, documentID, documentPath)
+		baseDoc, baseMetadata, baseState, err := cache.loadBaseDocLocked(entry, documentID, documentPath)
 		if err != nil {
 			return err
 		}
 		cacheContentKnown := baseState != nil
+		projectedSeq := baseMetadata.AppliedSeq
 		baseContent := baseDoc.GetText("content").ToString()
 		states, err := collectTrackedReconcileStates(trackedFiles)
 		if err != nil {
@@ -1029,9 +1030,11 @@ func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documen
 			return err
 		}
 		if pendingRemoteCount > 0 {
-			if err := applyPendingRemoteUpdatesLocked(cache, entry, documentID, baseDoc); err != nil {
+			nextProjectedSeq, err := applyPendingRemoteUpdatesLocked(cache, entry, documentID, baseDoc)
+			if err != nil {
 				return err
 			}
+			projectedSeq = nextProjectedSeq
 			baseState = baseDoc.EncodeStateAsUpdate()
 			cacheContentKnown = baseState != nil
 			baseContent = baseDoc.GetText("content").ToString()
@@ -1073,7 +1076,7 @@ func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documen
 				}
 				state.tracked.setProjectedSnapshot(projectedContentHash{}, false)
 				if cacheContentKnown {
-					clean, err := applyProjectedContent(state.tracked, finalContent, finalState)
+					clean, err := applyProjectedContent(state.tracked, finalContent, finalState, projectedSeq)
 					if err != nil {
 						return err
 					}
@@ -1088,7 +1091,7 @@ func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documen
 				continue
 			}
 			if _, ok := projectOnlyDirty[state.tracked]; ok {
-				clean, err := applyProjectedContent(state.tracked, finalContent, finalState)
+				clean, err := applyProjectedContent(state.tracked, finalContent, finalState, projectedSeq)
 				if err != nil {
 					return err
 				}
@@ -1103,7 +1106,7 @@ func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documen
 				state.tracked.markLocalDirty()
 				continue
 			}
-			clean, err := applyProjectedContent(state.tracked, finalContent, finalState)
+			clean, err := applyProjectedContent(state.tracked, finalContent, finalState, projectedSeq)
 			if err != nil {
 				return err
 			}
@@ -1329,7 +1332,8 @@ func finalizeSentOutbox(cache *documentCache, entry *documentCacheEntry, documen
 	if err := crdt.ApplyUpdateV1(baseDoc, record.Update, "local-reconcile"); err != nil {
 		return err
 	}
-	if err := cache.applyOutboxUpdateLocked(entry, documentID, documentPath, record); err != nil {
+	projectedSeq, err := cache.applyOutboxUpdateLocked(entry, documentID, documentPath, record)
+	if err != nil {
 		return err
 	}
 	if err := cache.clearOutboxUpdate(documentID, record.ID); err != nil {
@@ -1343,7 +1347,7 @@ func finalizeSentOutbox(cache *documentCache, entry *documentCacheEntry, documen
 			continue
 		}
 		if state.tracked.Path == record.SourcePath {
-			clean, err := projectMergedContentOverLocalDisk(state.tracked, record.ObservedContent, record.ObservedState, finalContent, finalState)
+			clean, err := projectMergedContentOverLocalDisk(state.tracked, record.ObservedContent, record.ObservedState, projectedSeq, finalContent, finalState, projectedSeq)
 			if err != nil {
 				return err
 			}
@@ -1358,7 +1362,7 @@ func finalizeSentOutbox(cache *documentCache, entry *documentCacheEntry, documen
 			state.tracked.markLocalDirty()
 			continue
 		}
-		clean, err := applyProjectedContent(state.tracked, finalContent, finalState)
+		clean, err := applyProjectedContent(state.tracked, finalContent, finalState, projectedSeq)
 		if err != nil {
 			return err
 		}
@@ -1371,12 +1375,12 @@ func finalizeSentOutbox(cache *documentCache, entry *documentCacheEntry, documen
 	return nil
 }
 
-func applyPendingRemoteUpdatesLocked(cache *documentCache, entry *documentCacheEntry, documentID string, doc *crdt.Doc) error {
+func applyPendingRemoteUpdatesLocked(cache *documentCache, entry *documentCacheEntry, documentID string, doc *crdt.Doc) (int64, error) {
 	if cache == nil || doc == nil {
-		return nil
+		return 0, nil
 	}
-	_, err := cache.applyPendingRemoteUpdatesLocked(entry, documentID, doc)
-	return err
+	_, projectedSeq, err := cache.applyPendingRemoteUpdatesLocked(entry, documentID, doc)
+	return projectedSeq, err
 }
 
 func collectTrackedReconcileStates(trackedFiles []*trackedFile) ([]trackedReconcileState, error) {
@@ -1486,11 +1490,7 @@ func buildLocalUpdateFromBase(baseState []byte, baseContent, localContent string
 	return update, doc.EncodeStateAsUpdate(), nil
 }
 
-func applyProjectedContent(tracked *trackedFile, nextContent string, nextStates ...[]byte) (bool, error) {
-	var nextState []byte
-	if len(nextStates) > 0 {
-		nextState = nextStates[0]
-	}
+func applyProjectedContent(tracked *trackedFile, nextContent string, nextState []byte, projectedSeq int64) (bool, error) {
 	previousHash, previousKnown := tracked.projectedSnapshot()
 	tracked.beginProjection()
 	defer tracked.endProjection()
@@ -1503,7 +1503,7 @@ func applyProjectedContent(tracked *trackedFile, nextContent string, nextStates 
 		tracked.setProjectedSnapshot(previousHash, previousKnown)
 		return false, err
 	}
-	if err := tracked.storeProjectedBase(nextContent, nextState); err != nil {
+	if err := tracked.storeProjectedBaseAtSeq(nextContent, nextState, projectedSeq); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -1523,7 +1523,7 @@ func markTrackedLocalDirty(tracked *trackedFile, _ string) error {
 	return nil
 }
 
-func projectMergedContentOverLocalDisk(tracked *trackedFile, currentDiskContent string, currentDiskState []byte, mergedContent string, mergedState []byte) (bool, error) {
+func projectMergedContentOverLocalDisk(tracked *trackedFile, currentDiskContent string, currentDiskState []byte, currentDiskSeq int64, mergedContent string, mergedState []byte, mergedSeq int64) (bool, error) {
 	previousHash, previousKnown := tracked.projectedSnapshot()
 	tracked.beginProjection()
 	defer tracked.endProjection()
@@ -1533,7 +1533,7 @@ func projectMergedContentOverLocalDisk(tracked *trackedFile, currentDiskContent 
 			if len(currentDiskState) == 0 {
 				currentDiskState = crdtStateFromContent(currentDiskContent)
 			}
-			if baseErr := tracked.storeProjectedBase(currentDiskContent, currentDiskState); baseErr != nil {
+			if baseErr := tracked.storeProjectedBaseAtSeq(currentDiskContent, currentDiskState, currentDiskSeq); baseErr != nil {
 				tracked.setProjectedSnapshot(previousHash, previousKnown)
 				return false, baseErr
 			}
@@ -1543,7 +1543,7 @@ func projectMergedContentOverLocalDisk(tracked *trackedFile, currentDiskContent 
 		tracked.setProjectedSnapshot(previousHash, previousKnown)
 		return false, err
 	}
-	if err := tracked.storeProjectedBase(mergedContent, mergedState); err != nil {
+	if err := tracked.storeProjectedBaseAtSeq(mergedContent, mergedState, mergedSeq); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -1744,20 +1744,28 @@ func (t *trackedFile) storeProjectedBase(content string, states ...[]byte) error
 	if t == nil || t.DocumentID == "" {
 		return nil
 	}
+	if t.cache == nil {
+		return nil
+	}
 	var state []byte
 	if len(states) > 0 {
 		state = states[0]
 	}
-	if len(state) == 0 {
-		state = crdtStateFromContent(content)
+	projectedSeq, err := t.cache.documentAppliedSeq(t.DocumentID)
+	if err != nil {
+		return err
+	}
+	return t.storeProjectedBaseAtSeq(content, state, projectedSeq)
+}
+
+func (t *trackedFile) storeProjectedBaseAtSeq(content string, state []byte, projectedSeq int64) error {
+	if t == nil || t.DocumentID == "" {
+		return nil
 	}
 	if t.cache == nil {
 		return nil
 	}
-	if !projectedStateMatchesContent(state, content) {
-		return nil
-	}
-	return t.cache.storeProjectedBase(t.DocumentID, content, state)
+	return t.cache.storeProjectedBase(t.DocumentID, content, state, projectedSeq)
 }
 
 func (t *trackedFile) loadProjectedBase() (string, []byte, bool, error) {

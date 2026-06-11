@@ -194,7 +194,7 @@ func TestDocumentCacheFoldsPendingRemoteUpdatesOnceAfterReopen(t *testing.T) {
 	}
 	entry := reopened.entryFor("doc_1")
 	entry.mu.Lock()
-	applied, err := reopened.applyPendingRemoteUpdatesLocked(entry, "doc_1", doc)
+	applied, projectedSeq, err := reopened.applyPendingRemoteUpdatesLocked(entry, "doc_1", doc)
 	entry.mu.Unlock()
 	if err != nil {
 		t.Fatalf("apply pending updates: %v", err)
@@ -202,6 +202,10 @@ func TestDocumentCacheFoldsPendingRemoteUpdatesOnceAfterReopen(t *testing.T) {
 	if applied != 2 {
 		t.Fatalf("expected two applied pending updates, got %d", applied)
 	}
+	if projectedSeq == 0 {
+		t.Fatal("expected apply pending updates to return folded projected seq")
+	}
+	firstProjectedSeq := projectedSeq
 
 	count, err = reopened.pendingRemoteUpdateCount("doc_1")
 	if err != nil {
@@ -244,7 +248,7 @@ func TestDocumentCacheFoldsPendingRemoteUpdatesOnceAfterReopen(t *testing.T) {
 		t.Fatalf("reload doc before no-op apply: %v", err)
 	}
 	entry.mu.Lock()
-	applied, err = reopened.applyPendingRemoteUpdatesLocked(entry, "doc_1", doc)
+	applied, projectedSeq, err = reopened.applyPendingRemoteUpdatesLocked(entry, "doc_1", doc)
 	entry.mu.Unlock()
 	if err != nil {
 		t.Fatalf("second apply pending updates: %v", err)
@@ -252,12 +256,137 @@ func TestDocumentCacheFoldsPendingRemoteUpdatesOnceAfterReopen(t *testing.T) {
 	if applied != 0 {
 		t.Fatalf("expected second apply to be no-op, got %d", applied)
 	}
+	if projectedSeq == 0 {
+		t.Fatal("expected no-op apply to return current applied seq")
+	}
+	if projectedSeq != firstProjectedSeq {
+		t.Fatalf("second apply returned projected seq %d, want unchanged %d", projectedSeq, firstProjectedSeq)
+	}
 	var foldedCount int
 	if err := reopened.db.QueryRow(`select count(*) from crdt_updates where document_id = ?`, "doc_1").Scan(&foldedCount); err != nil {
 		t.Fatalf("count folded updates: %v", err)
 	}
 	if foldedCount != 3 {
 		t.Fatalf("second apply must not duplicate folded updates, got %d rows", foldedCount)
+	}
+}
+
+func TestWorkspaceStoreStoreProjectedBaseUsesExplicitSeq(t *testing.T) {
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base")
+	if err := cache.storeDoc("doc_1", "docs/spec.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	baseRow, err := cache.ensureDocument("doc_1", "docs/spec.md")
+	if err != nil {
+		t.Fatalf("load base row: %v", err)
+	}
+	baseSeq := baseRow.AppliedSeq
+	baseState := baseDoc.EncodeStateAsUpdate()
+
+	remoteDoc := crdt.New()
+	if err := crdt.ApplyUpdateV1(remoteDoc, baseState, "base"); err != nil {
+		t.Fatalf("apply base to remote doc: %v", err)
+	}
+	var remoteUpdate []byte
+	unsubscribe := remoteDoc.OnUpdate(func(update []byte, origin any) {
+		if origin == "remote" {
+			remoteUpdate = append([]byte(nil), update...)
+		}
+	})
+	updateDocText(t, remoteDoc, "base\nremote", "remote")
+	unsubscribe()
+	if len(remoteUpdate) == 0 {
+		t.Fatal("expected remote update")
+	}
+	if _, err := cache.appendPendingRemoteUpdate("doc_1", "docs/spec.md", remoteUpdate); err != nil {
+		t.Fatalf("append remote update: %v", err)
+	}
+	doc, _, _, err := cache.loadBaseDoc("doc_1", "docs/spec.md")
+	if err != nil {
+		t.Fatalf("load base doc: %v", err)
+	}
+	entry := cache.entryFor("doc_1")
+	entry.mu.Lock()
+	applied, remoteSeq, err := cache.applyPendingRemoteUpdatesLocked(entry, "doc_1", doc)
+	entry.mu.Unlock()
+	if err != nil {
+		t.Fatalf("apply remote update: %v", err)
+	}
+	if applied != 1 {
+		t.Fatalf("expected one remote update, got %d", applied)
+	}
+	if remoteSeq <= baseSeq {
+		t.Fatalf("expected remote seq %d to be after base seq %d", remoteSeq, baseSeq)
+	}
+
+	if err := cache.storeProjectedBase("doc_1", "base", baseState, baseSeq); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+	row, err := cache.ensureDocument("doc_1", "docs/spec.md")
+	if err != nil {
+		t.Fatalf("reload row: %v", err)
+	}
+	if row.AppliedSeq != remoteSeq {
+		t.Fatalf("store projected base changed applied seq to %d, want %d", row.AppliedSeq, remoteSeq)
+	}
+	if row.ProjectedSeq != baseSeq {
+		t.Fatalf("projected seq = %d, want explicit base seq %d", row.ProjectedSeq, baseSeq)
+	}
+	projected, _, known, err := cache.loadProjectedBase("doc_1")
+	if err != nil {
+		t.Fatalf("load projected base: %v", err)
+	}
+	if !known || projected != "base" {
+		t.Fatalf("projected base = known %v content %q, want base", known, projected)
+	}
+}
+
+func TestWorkspaceStoreApplyDuplicateOutboxUpdateReturnsExistingSeq(t *testing.T) {
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base\n")
+	if err := cache.storeDoc("doc_1", "docs/spec.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	baseRow, err := cache.ensureDocument("doc_1", "docs/spec.md")
+	if err != nil {
+		t.Fatalf("load base row: %v", err)
+	}
+	update := updateFromBaseDoc(t, baseDoc, "base\nlocal\n", "local")
+	record := &outboxUpdateRecord{Update: update, ActorID: "agent_1", ActorType: "agent"}
+
+	entry := cache.entryFor("doc_1")
+	entry.mu.Lock()
+	firstSeq, err := cache.applyOutboxUpdateLocked(entry, "doc_1", "docs/spec.md", record)
+	entry.mu.Unlock()
+	if err != nil {
+		t.Fatalf("apply first outbox update: %v", err)
+	}
+	if firstSeq <= baseRow.AppliedSeq {
+		t.Fatalf("first local seq %d must be after base seq %d", firstSeq, baseRow.AppliedSeq)
+	}
+
+	entry.mu.Lock()
+	duplicateSeq, err := cache.applyOutboxUpdateLocked(entry, "doc_1", "docs/spec.md", record)
+	entry.mu.Unlock()
+	if err != nil {
+		t.Fatalf("apply duplicate outbox update: %v", err)
+	}
+	if duplicateSeq != firstSeq {
+		t.Fatalf("duplicate local update seq = %d, want existing seq %d", duplicateSeq, firstSeq)
+	}
+	row, err := cache.ensureDocument("doc_1", "docs/spec.md")
+	if err != nil {
+		t.Fatalf("reload row: %v", err)
+	}
+	if row.AppliedSeq != firstSeq {
+		t.Fatalf("applied seq = %d, want %d after duplicate", row.AppliedSeq, firstSeq)
 	}
 }
 
