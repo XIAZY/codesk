@@ -72,13 +72,23 @@ func newApplyingDocumentUpdateWebsocketTestRuntime(t *testing.T, cache *document
 	})
 }
 
-func withTrackedProjectedBaseCacheMaxBytes(t *testing.T, maxBytes int) {
+func withTrackedProjectedBaseCacheBudgetBytes(t *testing.T, budgetBytes int) {
 	t.Helper()
-	previous := trackedProjectedBaseCacheMaxBytes
-	trackedProjectedBaseCacheMaxBytes = maxBytes
+	previous := trackedProjectedBaseCacheBudgetBytes
+	trackedProjectedBaseCacheBudgetBytes = budgetBytes
+	resetTrackedProjectedBaseCacheForTest()
 	t.Cleanup(func() {
-		trackedProjectedBaseCacheMaxBytes = previous
+		resetTrackedProjectedBaseCacheForTest()
+		trackedProjectedBaseCacheBudgetBytes = previous
 	})
+}
+
+func resetTrackedProjectedBaseCacheForTest() {
+	trackedProjectedBaseCache.Lock()
+	defer trackedProjectedBaseCache.Unlock()
+	trackedProjectedBaseCache.order = nil
+	trackedProjectedBaseCache.sizes = map[*trackedFile]int{}
+	trackedProjectedBaseCache.used = 0
 }
 
 func TestComputeLocalTextEditsUsesUTF16Cursor(t *testing.T) {
@@ -237,7 +247,7 @@ func TestCollectTrackedReconcileStatesUsesInMemoryProjectedBaseForDirtyFile(t *t
 }
 
 func TestTrackedProjectedBaseCacheEvictsLargeBase(t *testing.T) {
-	withTrackedProjectedBaseCacheMaxBytes(t, 16)
+	withTrackedProjectedBaseCacheBudgetBytes(t, 16)
 	cache, err := newDocumentCache(t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
@@ -276,6 +286,70 @@ func TestTrackedProjectedBaseCacheEvictsLargeBase(t *testing.T) {
 	}
 	if _, _, known := tracked.projectedBase(); known {
 		t.Fatal("large projected base should stay evicted after fallback load")
+	}
+}
+
+func TestTrackedProjectedBaseCacheKeepsOnlyBudgetedHotBases(t *testing.T) {
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	trackedA := &trackedFile{
+		DocumentID:   "doc_a",
+		DocumentPath: "a.log",
+		cache:        cache,
+	}
+	trackedB := &trackedFile{
+		DocumentID:   "doc_b",
+		DocumentPath: "b.log",
+		cache:        cache,
+	}
+	contentA := strings.Repeat("a", 128)
+	contentB := strings.Repeat("b", 128)
+	docA := newDocWithText(t, contentA)
+	docB := newDocWithText(t, contentB)
+	stateA := docA.EncodeStateAsUpdate()
+	stateB := docB.EncodeStateAsUpdate()
+	if err := cache.storeDoc("doc_a", "a.log", 1, docA); err != nil {
+		t.Fatalf("store doc a: %v", err)
+	}
+	if err := cache.storeDoc("doc_b", "b.log", 1, docB); err != nil {
+		t.Fatalf("store doc b: %v", err)
+	}
+	budget := max(len(contentA)+len(stateA), len(contentB)+len(stateB))
+	withTrackedProjectedBaseCacheBudgetBytes(t, budget)
+
+	if err := trackedA.storeProjectedBaseAtSeq(contentA, stateA, 1); err != nil {
+		t.Fatalf("store projected base a: %v", err)
+	}
+	if _, _, known := trackedA.projectedBase(); !known {
+		t.Fatal("first projected base should be retained within budget")
+	}
+	if err := trackedB.storeProjectedBaseAtSeq(contentB, stateB, 1); err != nil {
+		t.Fatalf("store projected base b: %v", err)
+	}
+	if _, _, known := trackedB.projectedBase(); !known {
+		t.Fatal("new hot projected base should be retained")
+	}
+	if _, _, known := trackedA.projectedBase(); known {
+		t.Fatal("old projected base should be evicted to stay within budget")
+	}
+
+	loads := 0
+	withDocumentProjectedBaseLoadHook(t, func(documentID string) {
+		if documentID == "doc_a" {
+			loads++
+		}
+	})
+	gotContent, gotState, known, err := trackedA.loadProjectedBase()
+	if err != nil {
+		t.Fatalf("load evicted projected base: %v", err)
+	}
+	if !known || gotContent != contentA || len(gotState) == 0 {
+		t.Fatalf("evicted projected base = known %v content %q state %d", known, gotContent, len(gotState))
+	}
+	if loads != 1 {
+		t.Fatalf("expected durable fallback load for evicted base, got %d", loads)
 	}
 }
 

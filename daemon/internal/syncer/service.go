@@ -80,6 +80,7 @@ type trackedFile struct {
 	projectedContentKnown bool
 	projectedContent      string
 	projectedState        []byte
+	projectedCacheBytes   int
 }
 
 type projectedContentHash struct {
@@ -91,7 +92,14 @@ var projectedHashSeed = maphash.MakeSeed()
 var awarenessClientCounter atomic.Uint64
 var documentConnectMu sync.Mutex
 var nextDocumentConnect time.Time
-var trackedProjectedBaseCacheMaxBytes = 8 * 1024 * 1024
+var trackedProjectedBaseCacheBudgetBytes = 96 * 1024 * 1024
+
+var trackedProjectedBaseCache = struct {
+	sync.Mutex
+	order []*trackedFile
+	sizes map[*trackedFile]int
+	used  int
+}{sizes: map[*trackedFile]int{}}
 
 const documentConnectInterval = 100 * time.Millisecond
 const backendErrorBodyLimit = 4096
@@ -1864,6 +1872,7 @@ func (t *trackedFile) untrack() {
 	if t == nil {
 		return
 	}
+	unregisterTrackedProjectedBaseCache(t)
 	if t.Owner != nil {
 		t.Owner.untrack(t)
 		return
@@ -1888,11 +1897,18 @@ func (t *trackedFile) projectedSnapshot() (projectedContentHash, bool) {
 
 func (t *trackedFile) projectedBase() (string, []byte, bool) {
 	t.stateMu.Lock()
-	defer t.stateMu.Unlock()
 	if !t.projectedContentKnown || len(t.projectedState) == 0 {
+		t.stateMu.Unlock()
 		return "", nil, false
 	}
-	return t.projectedContent, append([]byte(nil), t.projectedState...), true
+	content := t.projectedContent
+	state := append([]byte(nil), t.projectedState...)
+	cacheBytes := t.projectedCacheBytes
+	t.stateMu.Unlock()
+	if cacheBytes > 0 {
+		touchTrackedProjectedBaseCache(t)
+	}
+	return content, state, true
 }
 
 func (t *trackedFile) hasProjectedContent() bool {
@@ -1902,42 +1918,144 @@ func (t *trackedFile) hasProjectedContent() bool {
 }
 
 func (t *trackedFile) setProjectedContent(content string) {
+	unregisterTrackedProjectedBaseCache(t)
 	t.stateMu.Lock()
 	defer t.stateMu.Unlock()
 	t.projectedContentKnown = true
 	t.hash = projectedHashString(content)
 	t.projectedContent = ""
 	t.projectedState = nil
+	t.projectedCacheBytes = 0
 }
 
 func (t *trackedFile) setProjectedBase(content string, state []byte) {
+	unregisterTrackedProjectedBaseCache(t)
+	cacheBytes := len(content) + len(state)
+	retain := len(state) > 0 && reserveTrackedProjectedBaseCache(t, cacheBytes)
 	t.stateMu.Lock()
 	defer t.stateMu.Unlock()
 	t.projectedContentKnown = true
 	t.hash = projectedHashString(content)
-	if len(state) == 0 || len(content)+len(state) > trackedProjectedBaseCacheMaxBytes {
+	if !retain {
 		t.projectedContent = ""
 		t.projectedState = nil
+		t.projectedCacheBytes = 0
 		return
 	}
 	t.projectedContent = content
 	t.projectedState = append([]byte(nil), state...)
+	t.projectedCacheBytes = cacheBytes
 }
 
 func (t *trackedFile) setProjectedSnapshot(hash projectedContentHash, known bool) {
+	unregisterTrackedProjectedBaseCache(t)
 	t.stateMu.Lock()
 	defer t.stateMu.Unlock()
 	t.hash = hash
 	t.projectedContentKnown = known
-	if !known {
-		t.projectedContent = ""
-		t.projectedState = nil
+	t.projectedContent = ""
+	t.projectedState = nil
+	t.projectedCacheBytes = 0
+}
+
+func reserveTrackedProjectedBaseCache(t *trackedFile, size int) bool {
+	if t == nil || size <= 0 {
+		return false
+	}
+	budget := trackedProjectedBaseCacheBudgetBytes
+	if budget <= 0 || size > budget {
+		return false
+	}
+	trackedProjectedBaseCache.Lock()
+	defer trackedProjectedBaseCache.Unlock()
+	if trackedProjectedBaseCache.sizes == nil {
+		trackedProjectedBaseCache.sizes = map[*trackedFile]int{}
+	}
+	if oldSize, ok := removeTrackedProjectedBaseCacheLocked(t); ok {
+		clearTrackedProjectedBaseCacheEntry(t, oldSize)
+	}
+	for trackedProjectedBaseCache.used+size > budget && len(trackedProjectedBaseCache.order) > 0 {
+		victim := trackedProjectedBaseCache.order[0]
+		trackedProjectedBaseCache.order = trackedProjectedBaseCache.order[1:]
+		victimSize, ok := trackedProjectedBaseCache.sizes[victim]
+		if !ok {
+			continue
+		}
+		delete(trackedProjectedBaseCache.sizes, victim)
+		trackedProjectedBaseCache.used -= victimSize
+		clearTrackedProjectedBaseCacheEntry(victim, victimSize)
+	}
+	if trackedProjectedBaseCache.used+size > budget {
+		return false
+	}
+	trackedProjectedBaseCache.sizes[t] = size
+	trackedProjectedBaseCache.order = append(trackedProjectedBaseCache.order, t)
+	trackedProjectedBaseCache.used += size
+	return true
+}
+
+func unregisterTrackedProjectedBaseCache(t *trackedFile) {
+	if t == nil {
 		return
 	}
-	if t.projectedContent == "" || hash != projectedHashString(t.projectedContent) {
-		t.projectedContent = ""
-		t.projectedState = nil
+	trackedProjectedBaseCache.Lock()
+	size, ok := removeTrackedProjectedBaseCacheLocked(t)
+	if ok {
+		clearTrackedProjectedBaseCacheEntry(t, size)
 	}
+	trackedProjectedBaseCache.Unlock()
+}
+
+func touchTrackedProjectedBaseCache(t *trackedFile) {
+	if t == nil {
+		return
+	}
+	trackedProjectedBaseCache.Lock()
+	defer trackedProjectedBaseCache.Unlock()
+	if _, ok := trackedProjectedBaseCache.sizes[t]; !ok {
+		return
+	}
+	for i, candidate := range trackedProjectedBaseCache.order {
+		if candidate == t {
+			copy(trackedProjectedBaseCache.order[i:], trackedProjectedBaseCache.order[i+1:])
+			trackedProjectedBaseCache.order[len(trackedProjectedBaseCache.order)-1] = t
+			return
+		}
+	}
+	trackedProjectedBaseCache.order = append(trackedProjectedBaseCache.order, t)
+}
+
+func removeTrackedProjectedBaseCacheLocked(t *trackedFile) (int, bool) {
+	if t == nil || trackedProjectedBaseCache.sizes == nil {
+		return 0, false
+	}
+	size, ok := trackedProjectedBaseCache.sizes[t]
+	if !ok {
+		return 0, false
+	}
+	delete(trackedProjectedBaseCache.sizes, t)
+	trackedProjectedBaseCache.used -= size
+	for i, candidate := range trackedProjectedBaseCache.order {
+		if candidate == t {
+			trackedProjectedBaseCache.order = append(trackedProjectedBaseCache.order[:i], trackedProjectedBaseCache.order[i+1:]...)
+			break
+		}
+	}
+	return size, true
+}
+
+func clearTrackedProjectedBaseCacheEntry(t *trackedFile, size int) {
+	if t == nil {
+		return
+	}
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
+	if t.projectedCacheBytes != size {
+		return
+	}
+	t.projectedContent = ""
+	t.projectedState = nil
+	t.projectedCacheBytes = 0
 }
 
 func (t *trackedFile) matchesProjectedString(content string) bool {
