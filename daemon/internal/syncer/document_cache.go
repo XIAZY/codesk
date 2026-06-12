@@ -34,6 +34,8 @@ var documentSnapshotEveryUpdates int64 = 100
 
 var documentReplayHook func(documentID string, fromSeq, toSeq int64, rows int)
 
+var documentSnapshotStoreHook func(documentID string, seq int64) error
+
 type documentCacheEntry struct {
 	mu         sync.Mutex
 	documentID string
@@ -723,9 +725,6 @@ func (c *workspaceStore) storeProjectedBase(documentID, content string, state []
 			where document_id = ?`, projectedSeq, sha256Hex([]byte(content)), len(content), unixNano(now), documentID); err != nil {
 			return err
 		}
-		if projectedSeq > 0 && len(state) > 0 {
-			return c.storeDocumentSnapshotTx(tx, documentID, projectedSeq, state, content, now)
-		}
 		return nil
 	})
 }
@@ -833,11 +832,6 @@ func (c *workspaceStore) loadProjectedBase(documentID string) (string, []byte, b
 	content := doc.GetText("content").ToString()
 	if row.ProjectedTextSHA256 != "" && row.ProjectedTextSHA256 != sha256Hex([]byte(content)) {
 		return "", nil, false, nil
-	}
-	if row.ProjectedSeq > 0 && len(state) > 0 {
-		if err := c.storeDocumentSnapshot(documentID, row.ProjectedSeq, state, content); err != nil {
-			return "", nil, false, err
-		}
 	}
 	return content, state, true, nil
 }
@@ -989,6 +983,11 @@ func (c *workspaceStore) storeDocumentSnapshotTx(tx *sql.Tx, documentID string, 
 	if tx == nil || documentID == "" || seq <= 0 || len(state) == 0 {
 		return nil
 	}
+	if documentSnapshotStoreHook != nil {
+		if err := documentSnapshotStoreHook(documentID, seq); err != nil {
+			return err
+		}
+	}
 	_, err := tx.Exec(`insert into document_snapshots (
 			document_id, seq, state_update, content_text, content_sha256, state_sha256, created_at
 		) values (?, ?, ?, ?, ?, ?, ?)
@@ -1008,7 +1007,7 @@ func (c *workspaceStore) maybeCreateDocumentSnapshot(documentID string, seq int6
 	}
 	latestSeq, ok, err := c.latestDocumentSnapshotSeq(documentID)
 	if err != nil {
-		return err
+		return nil
 	}
 	if ok && seq-latestSeq < documentSnapshotEveryUpdates {
 		return nil
@@ -1017,7 +1016,8 @@ func (c *workspaceStore) maybeCreateDocumentSnapshot(documentID string, seq int6
 	if len(state) == 0 {
 		return nil
 	}
-	return c.storeDocumentSnapshot(documentID, seq, state, doc.GetText("content").ToString())
+	_ = c.storeDocumentSnapshot(documentID, seq, state, doc.GetText("content").ToString())
+	return nil
 }
 
 func (c *workspaceStore) latestDocumentSnapshotSeq(documentID string) (int64, bool, error) {
@@ -1047,9 +1047,10 @@ func (c *workspaceStore) loadLatestSnapshotBeforeOrAt(documentID string, seq int
 	if c == nil || documentID == "" || seq <= 0 {
 		return documentSnapshotRow{}, false, nil
 	}
-	for {
+	upperSeq := seq
+	for upperSeq > 0 {
 		row, ok, err := c.loadDocumentSnapshotByQuery(`select document_id, seq, state_update, content_text, content_sha256, state_sha256, created_at
-			from document_snapshots where document_id = ? and seq <= ? order by seq desc limit 1`, documentID, seq)
+			from document_snapshots where document_id = ? and seq <= ? order by seq desc limit 1`, documentID, upperSeq)
 		if err != nil || !ok {
 			return row, ok, err
 		}
@@ -1062,10 +1063,10 @@ func (c *workspaceStore) loadLatestSnapshotBeforeOrAt(documentID string, seq int
 		} else if valid {
 			return row, true, nil
 		}
-		if err := c.deleteDocumentSnapshot(row.DocumentID, row.Seq); err != nil {
-			return documentSnapshotRow{}, false, err
-		}
+		_ = c.deleteDocumentSnapshot(row.DocumentID, row.Seq)
+		upperSeq = row.Seq - 1
 	}
+	return documentSnapshotRow{}, false, nil
 }
 
 func (c *workspaceStore) loadDocumentSnapshotByQuery(query string, args ...any) (documentSnapshotRow, bool, error) {
@@ -1091,15 +1092,13 @@ func (c *workspaceStore) loadProjectedBaseSnapshot(row documentRow) (string, []b
 	}
 	snapshot, ok, err := c.loadDocumentSnapshotAt(row.DocumentID, row.ProjectedSeq)
 	if err != nil || !ok {
-		return "", nil, false, err
+		return "", nil, false, nil
 	}
 	if !snapshot.hashesValid() ||
 		!snapshot.stateDecodes() ||
 		(row.ProjectedTextSHA256 != "" && row.ProjectedTextSHA256 != sha256Hex([]byte(snapshot.ContentText))) ||
 		(row.ProjectedTextLen != 0 && row.ProjectedTextLen != len(snapshot.ContentText)) {
-		if err := c.deleteDocumentSnapshot(snapshot.DocumentID, snapshot.Seq); err != nil {
-			return "", nil, false, err
-		}
+		_ = c.deleteDocumentSnapshot(snapshot.DocumentID, snapshot.Seq)
 		return "", nil, false, nil
 	}
 	return snapshot.ContentText, append([]byte(nil), snapshot.StateUpdate...), true, nil
@@ -1223,10 +1222,7 @@ func (c *workspaceStore) loadDocAtSeq(documentID string, seq int64) (*crdt.Doc, 
 	}
 	state := doc.EncodeStateAsUpdate()
 	if snapshotKnown && startSeq < seq || !snapshotKnown {
-		if err := c.maybeCreateDocumentSnapshot(documentID, seq, doc); err != nil {
-			doc.Close()
-			return nil, nil, false, err
-		}
+		_ = c.maybeCreateDocumentSnapshot(documentID, seq, doc)
 	}
 	return doc, state, true, nil
 }

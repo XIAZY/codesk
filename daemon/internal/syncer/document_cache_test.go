@@ -2,6 +2,7 @@ package syncer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -531,8 +532,41 @@ func TestDocumentCacheProjectedBaseUsesExactSnapshotWithoutReplay(t *testing.T) 
 	}
 }
 
-func TestDocumentCacheProjectedBaseFallsBackAndRepairsCorruptSnapshot(t *testing.T) {
+func TestDocumentCacheStoreProjectedBaseDoesNotBypassSnapshotInterval(t *testing.T) {
 	withDocumentSnapshotEveryUpdates(t, 1000)
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base")
+	if err := cache.storeDoc("doc_1", "docs/spec.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	remoteDoc := crdt.New()
+	if err := crdt.ApplyUpdateV1(remoteDoc, baseDoc.EncodeStateAsUpdate(), "base"); err != nil {
+		t.Fatalf("apply base to remote doc: %v", err)
+	}
+	projectedSeq := appendAndApplyRemoteText(t, cache, remoteDoc, "doc_1", "docs/spec.md", "remote", "remote")
+	if err := cache.storeProjectedBase("doc_1", "remote", remoteDoc.EncodeStateAsUpdate(), projectedSeq); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+	if seqs := loadDocumentSnapshotSeqs(t, cache, "doc_1"); !reflect.DeepEqual(seqs, []int64{1}) {
+		t.Fatalf("projected-base store bypassed snapshot interval, snapshot seqs=%#v", seqs)
+	}
+	content, _, known, err := cache.loadProjectedBase("doc_1")
+	if err != nil {
+		t.Fatalf("load projected base: %v", err)
+	}
+	if !known || content != "remote" {
+		t.Fatalf("projected base = known %v content %q, want fallback reconstruction", known, content)
+	}
+	if seqs := loadDocumentSnapshotSeqs(t, cache, "doc_1"); !reflect.DeepEqual(seqs, []int64{1}) {
+		t.Fatalf("projected-base fallback bypassed snapshot interval, snapshot seqs=%#v", seqs)
+	}
+}
+
+func TestDocumentCacheProjectedBaseFallsBackAndRepairsCorruptSnapshot(t *testing.T) {
+	withDocumentSnapshotEveryUpdates(t, 1)
 	cache, err := newDocumentCache(t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
@@ -576,6 +610,46 @@ func TestDocumentCacheProjectedBaseFallsBackAndRepairsCorruptSnapshot(t *testing
 	}
 	if !ok || !snapshot.hashesValid() || snapshot.ContentText != "remote" {
 		t.Fatalf("expected repaired valid snapshot at projected seq, ok=%v snapshot=%#v", ok, snapshot)
+	}
+}
+
+func TestDocumentCacheSnapshotFailureDoesNotFailRemoteFoldOrLoad(t *testing.T) {
+	withDocumentSnapshotEveryUpdates(t, 1)
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base")
+	if err := cache.storeDoc("doc_1", "docs/spec.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	remoteDoc := crdt.New()
+	if err := crdt.ApplyUpdateV1(remoteDoc, baseDoc.EncodeStateAsUpdate(), "base"); err != nil {
+		t.Fatalf("apply base to remote doc: %v", err)
+	}
+	storeErr := errors.New("snapshot insert failed")
+	withDocumentSnapshotStoreHook(t, func(documentID string, seq int64) error {
+		return storeErr
+	})
+	projectedSeq := appendAndApplyRemoteText(t, cache, remoteDoc, "doc_1", "docs/spec.md", "remote", "remote")
+
+	count, err := cache.pendingRemoteUpdateCount("doc_1")
+	if err != nil {
+		t.Fatalf("pending count: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("snapshot failure must not leave remote inbox pending, got %d", count)
+	}
+	doc, state, known, err := cache.loadDocAtSeq("doc_1", projectedSeq)
+	if err != nil {
+		t.Fatalf("load doc after snapshot failure: %v", err)
+	}
+	defer doc.Close()
+	if !known || len(state) == 0 || doc.GetText("content").ToString() != "remote" {
+		t.Fatalf("loaded doc after snapshot failure = known %v state %d content %q", known, len(state), doc.GetText("content").ToString())
+	}
+	if seqs := loadDocumentSnapshotSeqs(t, cache, "doc_1"); !reflect.DeepEqual(seqs, []int64{1}) {
+		t.Fatalf("snapshot failure should leave only the pre-existing base snapshot, got %#v", seqs)
 	}
 }
 
@@ -705,6 +779,15 @@ func withDocumentReplayHook(t *testing.T, hook func(documentID string, fromSeq, 
 	documentReplayHook = hook
 	t.Cleanup(func() {
 		documentReplayHook = previous
+	})
+}
+
+func withDocumentSnapshotStoreHook(t *testing.T, hook func(documentID string, seq int64) error) {
+	t.Helper()
+	previous := documentSnapshotStoreHook
+	documentSnapshotStoreHook = hook
+	t.Cleanup(func() {
+		documentSnapshotStoreHook = previous
 	})
 }
 

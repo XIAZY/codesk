@@ -3098,6 +3098,7 @@ func TestOutgoingOutboxClearsOnHTTPAcceptance(t *testing.T) {
 }
 
 func TestOutgoingOutboxFinalizeConflictStoresAcceptedLocalProjectedSeq(t *testing.T) {
+	withDocumentSnapshotEveryUpdates(t, 1)
 	root := t.TempDir()
 	path := filepath.Join(root, "doc.md")
 	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
@@ -3172,6 +3173,7 @@ func TestOutgoingOutboxFinalizeConflictStoresAcceptedLocalProjectedSeq(t *testin
 }
 
 func TestOutgoingOutboxFinalizeDuplicateDoesNotRegressProjectedSeq(t *testing.T) {
+	withDocumentSnapshotEveryUpdates(t, 1)
 	root := t.TempDir()
 	path := filepath.Join(root, "doc.md")
 	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
@@ -3257,6 +3259,82 @@ func TestOutgoingOutboxFinalizeDuplicateDoesNotRegressProjectedSeq(t *testing.T)
 		t.Fatalf("projected base = known %v content %q, want merged remote content", known, projectedBase)
 	}
 	assertDocumentSnapshotContent(t, cache, "doc_1", remoteSeq, "base\nlocal\nremote\n")
+}
+
+func TestFinalizeSentOutboxIgnoresSnapshotFailureAndClearsOutbox(t *testing.T) {
+	withDocumentSnapshotEveryUpdates(t, 1)
+	root := t.TempDir()
+	path := filepath.Join(root, "doc.md")
+	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base\n")
+	if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	baseRow, err := cache.ensureDocument("doc_1", "doc.md")
+	if err != nil {
+		t.Fatalf("load base row: %v", err)
+	}
+	localUpdate := updateFromBaseDoc(t, baseDoc, "base\nlocal\n", "local")
+	localDoc := crdt.New()
+	if err := crdt.ApplyUpdateV1(localDoc, baseDoc.EncodeStateAsUpdate(), "base"); err != nil {
+		t.Fatalf("apply base to local doc: %v", err)
+	}
+	if err := crdt.ApplyUpdateV1(localDoc, localUpdate, "local"); err != nil {
+		t.Fatalf("apply local update: %v", err)
+	}
+	record := outboxUpdateRecord{
+		ID:              "snapshot_fail",
+		Update:          localUpdate,
+		ObservedContent: "base\nlocal\n",
+		ObservedState:   localDoc.EncodeStateAsUpdate(),
+		SourcePath:      path,
+		ActorID:         "agent_1",
+		ActorType:       "agent",
+	}
+	entry := cache.entryFor("doc_1")
+	entry.mu.Lock()
+	if err := cache.storeOutboxUpdateLocked(entry, "doc_1", "doc.md", record); err != nil {
+		entry.mu.Unlock()
+		t.Fatalf("store outbox: %v", err)
+	}
+	entry.mu.Unlock()
+	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache}
+	tracked.setProjectedContent("base\n")
+	if err := tracked.storeProjectedBaseAtSeq("base\n", baseDoc.EncodeStateAsUpdate(), baseRow.AppliedSeq); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+	withDocumentSnapshotStoreHook(t, func(documentID string, seq int64) error {
+		return errors.New("snapshot insert failed")
+	})
+
+	entry, unlock := cache.lockEntry("doc_1")
+	err = finalizeSentOutbox(cache, entry, "doc_1", "doc.md", []*trackedFile{tracked}, &record)
+	unlock()
+	if err != nil {
+		t.Fatalf("finalize outbox with snapshot failure: %v", err)
+	}
+	entry, unlock = cache.lockEntry("doc_1")
+	outbox, err := cache.loadOutboxUpdateLocked(entry, "doc_1")
+	unlock()
+	if err != nil {
+		t.Fatalf("load outbox after finalize: %v", err)
+	}
+	if outbox != nil {
+		t.Fatal("snapshot failure must not prevent durable outbox clear")
+	}
+	projectedBase, _, known, err := tracked.loadProjectedBase()
+	if err != nil {
+		t.Fatalf("load projected base: %v", err)
+	}
+	if !known || projectedBase != "base\nlocal\n" {
+		t.Fatalf("projected base = known %v content %q, want local content", known, projectedBase)
+	}
 }
 
 func TestOutgoingOutboxSurvivesCacheReopenAndResendsIdempotently(t *testing.T) {

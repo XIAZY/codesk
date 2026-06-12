@@ -1342,9 +1342,7 @@ func finalizeSentOutbox(cache *documentCache, entry *documentCacheEntry, documen
 	if err != nil {
 		return err
 	}
-	if err := cache.maybeCreateDocumentSnapshot(documentID, projectedSeq, baseDoc); err != nil {
-		return err
-	}
+	_ = cache.maybeCreateDocumentSnapshot(documentID, projectedSeq, baseDoc)
 	if err := cache.clearOutboxUpdate(documentID, record.ID); err != nil {
 		return err
 	}
