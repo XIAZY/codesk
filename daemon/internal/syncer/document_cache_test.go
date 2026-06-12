@@ -520,6 +520,10 @@ func TestDocumentCacheProjectedBaseUsesExactSnapshotWithoutReplay(t *testing.T) 
 	withDocumentReplayHook(t, func(documentID string, fromSeq, toSeq int64, rows int) {
 		replayCalls++
 	})
+	decodeCalls := 0
+	withDocumentSnapshotDecodeHook(t, func(documentID string, seq int64) {
+		decodeCalls++
+	})
 	content, state, known, err := cache.loadProjectedBase("doc_1")
 	if err != nil {
 		t.Fatalf("load projected base: %v", err)
@@ -529,6 +533,9 @@ func TestDocumentCacheProjectedBaseUsesExactSnapshotWithoutReplay(t *testing.T) 
 	}
 	if replayCalls != 0 {
 		t.Fatalf("exact projected-base snapshot should not replay crdt rows, got %d replay calls", replayCalls)
+	}
+	if decodeCalls != 0 {
+		t.Fatalf("exact projected-base snapshot should not decode snapshot state, got %d decode calls", decodeCalls)
 	}
 }
 
@@ -584,7 +591,7 @@ func TestDocumentCacheProjectedBaseFallsBackAndRepairsCorruptSnapshot(t *testing
 		t.Fatalf("store projected base: %v", err)
 	}
 	badState := []byte{1, 2, 3}
-	if _, err := cache.db.Exec(`update document_snapshots set state_update = ?, state_sha256 = ? where document_id = ? and seq = ?`, badState, sha256Hex(badState), "doc_1", projectedSeq); err != nil {
+	if _, err := cache.db.Exec(`update document_snapshots set state_update = ? where document_id = ? and seq = ?`, badState, "doc_1", projectedSeq); err != nil {
 		t.Fatalf("corrupt projected snapshot: %v", err)
 	}
 
@@ -610,6 +617,52 @@ func TestDocumentCacheProjectedBaseFallsBackAndRepairsCorruptSnapshot(t *testing
 	}
 	if !ok || !snapshot.hashesValid() || snapshot.ContentText != "remote" {
 		t.Fatalf("expected repaired valid snapshot at projected seq, ok=%v snapshot=%#v", ok, snapshot)
+	}
+}
+
+func TestDocumentCacheLoadDocAtSeqDeletesInvalidSnapshotStateAndFallsBack(t *testing.T) {
+	withDocumentSnapshotEveryUpdates(t, 1)
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base")
+	if err := cache.storeDoc("doc_1", "docs/spec.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	remoteDoc := crdt.New()
+	if err := crdt.ApplyUpdateV1(remoteDoc, baseDoc.EncodeStateAsUpdate(), "base"); err != nil {
+		t.Fatalf("apply base to remote doc: %v", err)
+	}
+	appliedSeq := appendAndApplyRemoteText(t, cache, remoteDoc, "doc_1", "docs/spec.md", "remote", "remote")
+	badState := []byte{1, 2, 3}
+	if _, err := cache.db.Exec(`update document_snapshots set state_update = ?, state_sha256 = ? where document_id = ? and seq = ?`, badState, sha256Hex(badState), "doc_1", appliedSeq); err != nil {
+		t.Fatalf("corrupt snapshot state: %v", err)
+	}
+
+	var decoded []int64
+	withDocumentSnapshotDecodeHook(t, func(documentID string, seq int64) {
+		if documentID == "doc_1" {
+			decoded = append(decoded, seq)
+		}
+	})
+	doc, state, known, err := cache.loadDocAtSeq("doc_1", appliedSeq)
+	if err != nil {
+		t.Fatalf("load doc: %v", err)
+	}
+	defer doc.Close()
+	if !known || len(state) == 0 || doc.GetText("content").ToString() != "remote" {
+		t.Fatalf("loaded doc = known %v state %d content %q", known, len(state), doc.GetText("content").ToString())
+	}
+	if len(decoded) < 2 || decoded[0] != appliedSeq {
+		t.Fatalf("expected first decode to try corrupt exact snapshot before fallback, decoded=%#v", decoded)
+	}
+	snapshot, ok, err := cache.loadDocumentSnapshotAt("doc_1", appliedSeq)
+	if err != nil {
+		t.Fatalf("load repaired snapshot: %v", err)
+	}
+	if !ok || !snapshot.hashesValid() || snapshot.ContentText != "remote" {
+		t.Fatalf("expected repaired valid snapshot at applied seq, ok=%v snapshot=%#v", ok, snapshot)
 	}
 }
 
@@ -788,6 +841,15 @@ func withDocumentSnapshotStoreHook(t *testing.T, hook func(documentID string, se
 	documentSnapshotStoreHook = hook
 	t.Cleanup(func() {
 		documentSnapshotStoreHook = previous
+	})
+}
+
+func withDocumentSnapshotDecodeHook(t *testing.T, hook func(documentID string, seq int64)) {
+	t.Helper()
+	previous := documentSnapshotDecodeHook
+	documentSnapshotDecodeHook = hook
+	t.Cleanup(func() {
+		documentSnapshotDecodeHook = previous
 	})
 }
 

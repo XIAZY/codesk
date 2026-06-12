@@ -36,6 +36,8 @@ var documentReplayHook func(documentID string, fromSeq, toSeq int64, rows int)
 
 var documentSnapshotStoreHook func(documentID string, seq int64) error
 
+var documentSnapshotDecodeHook func(documentID string, seq int64)
+
 type documentCacheEntry struct {
 	mu         sync.Mutex
 	documentID string
@@ -1054,13 +1056,7 @@ func (c *workspaceStore) loadLatestSnapshotBeforeOrAt(documentID string, seq int
 		if err != nil || !ok {
 			return row, ok, err
 		}
-		doc, valid, err := c.docFromSnapshot(row)
-		if doc != nil {
-			doc.Close()
-		}
-		if err != nil {
-			return documentSnapshotRow{}, false, err
-		} else if valid {
+		if row.hashesValid() {
 			return row, true, nil
 		}
 		_ = c.deleteDocumentSnapshot(row.DocumentID, row.Seq)
@@ -1095,7 +1091,6 @@ func (c *workspaceStore) loadProjectedBaseSnapshot(row documentRow) (string, []b
 		return "", nil, false, nil
 	}
 	if !snapshot.hashesValid() ||
-		!snapshot.stateDecodes() ||
 		(row.ProjectedTextSHA256 != "" && row.ProjectedTextSHA256 != sha256Hex([]byte(snapshot.ContentText))) ||
 		(row.ProjectedTextLen != 0 && row.ProjectedTextLen != len(snapshot.ContentText)) {
 		_ = c.deleteDocumentSnapshot(snapshot.DocumentID, snapshot.Seq)
@@ -1120,25 +1115,15 @@ func (row documentSnapshotRow) hashesValid() bool {
 		row.StateSHA256 == sha256Hex(row.StateUpdate)
 }
 
-func (row documentSnapshotRow) stateDecodes() bool {
-	if !row.hashesValid() {
-		return false
-	}
-	doc := crdt.New()
-	defer doc.Close()
-	return crdt.ApplyUpdateV1(doc, row.StateUpdate, "sqlite-snapshot-validate") == nil
-}
-
 func (c *workspaceStore) docFromSnapshot(row documentSnapshotRow) (*crdt.Doc, bool, error) {
 	doc := crdt.New()
 	if !row.hashesValid() {
 		return doc, false, nil
 	}
-	if err := crdt.ApplyUpdateV1(doc, row.StateUpdate, "sqlite-snapshot"); err != nil {
-		doc.Close()
-		return nil, false, nil
+	if documentSnapshotDecodeHook != nil {
+		documentSnapshotDecodeHook(row.DocumentID, row.Seq)
 	}
-	if sha256Hex([]byte(doc.GetText("content").ToString())) != row.ContentSHA256 {
+	if err := crdt.ApplyUpdateV1(doc, row.StateUpdate, "sqlite-snapshot"); err != nil {
 		doc.Close()
 		return nil, false, nil
 	}
