@@ -141,6 +141,92 @@ func TestBuildLocalUpdateFromBaseRejectsInvalidUTF8Content(t *testing.T) {
 	}
 }
 
+func TestCollectTrackedReconcileStatesSkipsProjectedBaseLoadForCleanFile(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "log.txt")
+	if err := os.WriteFile(path, []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	tracked := &trackedFile{
+		DocumentID:    "doc_1",
+		DocumentPath:  "log.txt",
+		Path:          path,
+		WorkspaceRoot: root,
+		FS:            NewWorkspaceFS(root),
+		cache:         cache,
+	}
+	tracked.setProjectedContent("base\n")
+
+	loads := 0
+	withDocumentProjectedBaseLoadHook(t, func(documentID string) {
+		loads++
+	})
+	states, err := collectTrackedReconcileStates([]*trackedFile{tracked})
+	if err != nil {
+		t.Fatalf("collect states: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("expected one state, got %d", len(states))
+	}
+	if states[0].localDirty {
+		t.Fatal("expected clean projected file to clear local dirty state")
+	}
+	if loads != 0 {
+		t.Fatalf("clean projected file should not load projected base from sqlite, got %d loads", loads)
+	}
+}
+
+func TestCollectTrackedReconcileStatesUsesInMemoryProjectedBaseForDirtyFile(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "codex-agent.log")
+	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseState := crdtStateFromContent("base\n")
+	tracked := &trackedFile{
+		DocumentID:    "doc_1",
+		DocumentPath:  "codex-agent.log",
+		Path:          path,
+		WorkspaceRoot: root,
+		FS:            NewWorkspaceFS(root),
+		cache:         cache,
+	}
+	if err := tracked.storeProjectedBaseAtSeq("base\n", baseState, 1); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+	tracked.markLocalDirty()
+
+	loads := 0
+	withDocumentProjectedBaseLoadHook(t, func(documentID string) {
+		loads++
+	})
+	states, err := collectTrackedReconcileStates([]*trackedFile{tracked})
+	if err != nil {
+		t.Fatalf("collect states: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("expected one state, got %d", len(states))
+	}
+	state := states[0]
+	if !state.localDirty || !state.baseKnown || state.baseContent != "base\n" || state.localContent != "base\nlocal\n" {
+		t.Fatalf("unexpected dirty state: %#v", state)
+	}
+	if !bytes.Equal(state.baseState, baseState) {
+		t.Fatal("expected in-memory projected base state")
+	}
+	if loads != 0 {
+		t.Fatalf("dirty projected file should use in-memory projected base, got %d sqlite loads", loads)
+	}
+}
+
 func TestReconcileTrackedDocumentSkipsInvalidUTF8LocalFile(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "doc.md")

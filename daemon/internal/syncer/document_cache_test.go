@@ -868,6 +868,15 @@ func withDocumentSnapshotHashValidationHook(t *testing.T, hook func(documentID s
 	})
 }
 
+func withDocumentProjectedBaseLoadHook(t *testing.T, hook func(documentID string)) {
+	t.Helper()
+	previous := documentProjectedBaseLoadHook
+	documentProjectedBaseLoadHook = hook
+	t.Cleanup(func() {
+		documentProjectedBaseLoadHook = previous
+	})
+}
+
 func appendAndApplyRemoteText(t *testing.T, cache *documentCache, remoteDoc *crdt.Doc, documentID, path, content string, origin any) int64 {
 	t.Helper()
 	update := captureDocTextUpdate(t, remoteDoc, content, origin)

@@ -78,6 +78,8 @@ type trackedFile struct {
 	remoteDeleted         bool
 	hash                  projectedContentHash
 	projectedContentKnown bool
+	projectedContent      string
+	projectedState        []byte
 }
 
 type projectedContentHash struct {
@@ -945,14 +947,18 @@ func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documen
 			flushRecords = outboxes
 			return nil
 		}
-
-		baseDoc, baseMetadata, baseState, err := cache.loadBaseDocLocked(entry, documentID, documentPath)
+		pendingRemoteCount, err := cache.pendingRemoteUpdateCountLocked(entry, documentID)
 		if err != nil {
 			return err
 		}
-		cacheContentKnown := baseState != nil
-		projectedSeq := baseMetadata.AppliedSeq
-		baseContent := baseDoc.GetText("content").ToString()
+		pendingThreadCount, err := cache.pendingThreadIntentCountLocked(entry, documentID)
+		if err != nil {
+			return err
+		}
+		if pendingRemoteCount == 0 && pendingThreadCount == 0 && !trackedFilesHaveLocalReconcileWork(trackedFiles) {
+			return nil
+		}
+
 		states, err := collectTrackedReconcileStates(trackedFiles)
 		if err != nil {
 			return err
@@ -977,10 +983,6 @@ func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documen
 				continue
 			}
 			if !state.localDirty {
-				continue
-			}
-			if state.baseContent == state.localContent && state.baseContent != baseContent {
-				projectOnlyDirty[state.tracked] = struct{}{}
 				continue
 			}
 			localContent := state.localContent
@@ -1023,6 +1025,12 @@ func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documen
 			return nil
 		}
 
+		baseDoc, baseMetadata, baseState, err := cache.loadBaseDocLocked(entry, documentID, documentPath)
+		if err != nil {
+			return err
+		}
+		cacheContentKnown := baseState != nil
+		projectedSeq := baseMetadata.AppliedSeq
 		readyThreads, err := s.materializeThreadIntentsLocked(ctx, cache, entry, documentID, documentPath, baseDoc, cacheContentKnown)
 		if err != nil {
 			return err
@@ -1031,10 +1039,6 @@ func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documen
 			s.wakeThreadDelivery()
 		}
 
-		pendingRemoteCount, err := cache.pendingRemoteUpdateCountLocked(entry, documentID)
-		if err != nil {
-			return err
-		}
 		if pendingRemoteCount > 0 {
 			nextProjectedSeq, err := applyPendingRemoteUpdatesLocked(cache, entry, documentID, baseDoc)
 			if err != nil {
@@ -1043,7 +1047,6 @@ func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documen
 			projectedSeq = nextProjectedSeq
 			baseState = baseDoc.EncodeStateAsUpdate()
 			cacheContentKnown = baseState != nil
-			baseContent = baseDoc.GetText("content").ToString()
 		}
 
 		hasReconcileWork := pendingRemoteCount > 0 || len(missingBase) > 0 || len(projectOnlyDirty) > 0
@@ -1401,26 +1404,20 @@ func collectTrackedReconcileStates(trackedFiles []*trackedFile) ([]trackedReconc
 			states = append(states, state)
 			continue
 		}
-		baseContent, baseState, known, err := tracked.loadProjectedBase()
-		if err != nil {
-			return nil, err
-		}
-		if known {
-			state.baseContent = baseContent
-			state.baseState = baseState
-			state.baseKnown = true
-			if !tracked.hasProjectedContent() {
-				tracked.setProjectedContent(baseContent)
-			}
-		} else {
-			state.baseMissing = true
-			if !tracked.isLocalDirty() {
-				states = append(states, state)
-				continue
-			}
-		}
+		cleanTracked := !tracked.isLocalDirty() && !tracked.isLocalDeleted() && !tracked.isLocalMoved() && !tracked.isRemoteDeleted()
 		snapshot, err := tracked.workspaceFS().Read(tracked.Path)
 		if err == nil && !snapshot.Exists {
+			baseContent, baseState, known, loadErr := tracked.loadProjectedBase()
+			if loadErr != nil {
+				return nil, loadErr
+			}
+			if known {
+				state.baseContent = baseContent
+				state.baseState = baseState
+				state.baseKnown = true
+			} else {
+				state.baseMissing = true
+			}
 			states = append(states, state)
 			continue
 		}
@@ -1429,6 +1426,35 @@ func collectTrackedReconcileStates(trackedFiles []*trackedFile) ([]trackedReconc
 		}
 		state.fileExists = true
 		state.localContent = string(snapshot.Bytes)
+		matchesProjected := tracked.hasProjectedContent() && tracked.matchesProjectedBytes(snapshot.Bytes)
+		desiredPath := tracked.desiredPath()
+		if cleanTracked && matchesProjected && (desiredPath == "" || desiredPath == tracked.Path) {
+			tracked.clearLocalDirty()
+			states = append(states, state)
+			continue
+		}
+		var baseContent string
+		var baseState []byte
+		var known bool
+		if matchesProjected {
+			baseContent, baseState, known, err = tracked.loadProjectedBaseFromStore()
+		} else {
+			baseContent, baseState, known, err = tracked.loadProjectedBase()
+		}
+		if err != nil {
+			return nil, err
+		}
+		if known {
+			state.baseContent = baseContent
+			state.baseState = baseState
+			state.baseKnown = true
+		} else {
+			state.baseMissing = true
+			if !tracked.isLocalDirty() {
+				states = append(states, state)
+				continue
+			}
+		}
 		if state.baseMissing {
 			state.localDirty = true
 			states = append(states, state)
@@ -1443,6 +1469,21 @@ func collectTrackedReconcileStates(trackedFiles []*trackedFile) ([]trackedReconc
 		states = append(states, state)
 	}
 	return states, nil
+}
+
+func trackedFilesHaveLocalReconcileWork(trackedFiles []*trackedFile) bool {
+	for _, tracked := range trackedFiles {
+		if tracked == nil {
+			continue
+		}
+		if tracked.isLocalDirty() || tracked.isLocalDeleted() || tracked.isLocalMoved() || tracked.isRemoteDeleted() {
+			return true
+		}
+		if desiredPath := tracked.desiredPath(); desiredPath != "" && desiredPath != tracked.Path {
+			return true
+		}
+	}
+	return false
 }
 
 func buildLocalUpdateFromBase(baseState []byte, baseContent, localContent string) ([]byte, []byte, error) {
@@ -1752,19 +1793,39 @@ func (t *trackedFile) storeProjectedBaseAtSeq(content string, state []byte, proj
 		return nil
 	}
 	if t.cache == nil {
+		t.setProjectedBase(content, state)
 		return nil
 	}
-	return t.cache.storeProjectedBase(t.DocumentID, content, state, projectedSeq)
+	if err := t.cache.storeProjectedBase(t.DocumentID, content, state, projectedSeq); err != nil {
+		return err
+	}
+	t.setProjectedBase(content, state)
+	return nil
 }
 
 func (t *trackedFile) loadProjectedBase() (string, []byte, bool, error) {
 	if t == nil || t.DocumentID == "" {
 		return "", nil, false, nil
 	}
+	if content, state, known := t.projectedBase(); known {
+		return content, state, true, nil
+	}
+	return t.loadProjectedBaseFromStore()
+}
+
+func (t *trackedFile) loadProjectedBaseFromStore() (string, []byte, bool, error) {
+	if t == nil || t.DocumentID == "" {
+		return "", nil, false, nil
+	}
 	if t.cache == nil {
 		return "", nil, false, nil
 	}
-	return t.cache.loadProjectedBase(t.DocumentID)
+	content, state, known, err := t.cache.loadProjectedBase(t.DocumentID)
+	if err != nil || !known {
+		return content, state, known, err
+	}
+	t.setProjectedBase(content, state)
+	return content, state, true, nil
 }
 
 func (t *trackedFile) workspaceFS() *WorkspaceFS {
@@ -1826,6 +1887,15 @@ func (t *trackedFile) projectedSnapshot() (projectedContentHash, bool) {
 	return t.hash, t.projectedContentKnown
 }
 
+func (t *trackedFile) projectedBase() (string, []byte, bool) {
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
+	if !t.projectedContentKnown || len(t.projectedState) == 0 {
+		return "", nil, false
+	}
+	return t.projectedContent, append([]byte(nil), t.projectedState...), true
+}
+
 func (t *trackedFile) hasProjectedContent() bool {
 	t.stateMu.Lock()
 	defer t.stateMu.Unlock()
@@ -1837,6 +1907,17 @@ func (t *trackedFile) setProjectedContent(content string) {
 	defer t.stateMu.Unlock()
 	t.projectedContentKnown = true
 	t.hash = projectedHashString(content)
+	t.projectedContent = content
+	t.projectedState = nil
+}
+
+func (t *trackedFile) setProjectedBase(content string, state []byte) {
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
+	t.projectedContentKnown = true
+	t.hash = projectedHashString(content)
+	t.projectedContent = content
+	t.projectedState = append([]byte(nil), state...)
 }
 
 func (t *trackedFile) setProjectedSnapshot(hash projectedContentHash, known bool) {
@@ -1844,6 +1925,15 @@ func (t *trackedFile) setProjectedSnapshot(hash projectedContentHash, known bool
 	defer t.stateMu.Unlock()
 	t.hash = hash
 	t.projectedContentKnown = known
+	if !known {
+		t.projectedContent = ""
+		t.projectedState = nil
+		return
+	}
+	if hash != projectedHashString(t.projectedContent) {
+		t.projectedContent = ""
+		t.projectedState = nil
+	}
 }
 
 func (t *trackedFile) matchesProjectedString(content string) bool {
