@@ -353,6 +353,68 @@ func TestTrackedProjectedBaseCacheKeepsOnlyBudgetedHotBases(t *testing.T) {
 	}
 }
 
+func TestTrackedProjectedBaseCacheInstallBlocksConcurrentEviction(t *testing.T) {
+	trackedA := &trackedFile{DocumentID: "doc_a", DocumentPath: "a.log"}
+	trackedB := &trackedFile{DocumentID: "doc_b", DocumentPath: "b.log"}
+	contentA := strings.Repeat("a", 128)
+	contentB := strings.Repeat("b", 128)
+	stateA := newDocWithText(t, contentA).EncodeStateAsUpdate()
+	stateB := newDocWithText(t, contentB).EncodeStateAsUpdate()
+	budget := max(len(contentA)+len(stateA), len(contentB)+len(stateB))
+	withTrackedProjectedBaseCacheBudgetBytes(t, budget)
+
+	trackedA.stateMu.Lock()
+	doneA := make(chan struct{})
+	go func() {
+		trackedA.setProjectedBase(contentA, stateA)
+		close(doneA)
+	}()
+	waitForTrackedProjectedBaseCacheLock(t)
+
+	doneB := make(chan struct{})
+	go func() {
+		trackedB.setProjectedBase(contentB, stateB)
+		close(doneB)
+	}()
+	select {
+	case <-doneB:
+		t.Fatal("second cache install completed while first install held the cache lock")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	trackedA.stateMu.Unlock()
+	select {
+	case <-doneA:
+	case <-time.After(time.Second):
+		t.Fatal("first cache install did not finish")
+	}
+	select {
+	case <-doneB:
+	case <-time.After(time.Second):
+		t.Fatal("second cache install did not finish")
+	}
+	if _, _, known := trackedB.projectedBase(); !known {
+		t.Fatal("second projected base should be retained")
+	}
+	if _, _, known := trackedA.projectedBase(); known {
+		t.Fatal("first projected base should be evicted after second install")
+	}
+}
+
+func waitForTrackedProjectedBaseCacheLock(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if trackedProjectedBaseCache.TryLock() {
+			trackedProjectedBaseCache.Unlock()
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		return
+	}
+	t.Fatal("projected base cache lock was not acquired")
+}
+
 func TestReconcileTrackedDocumentSkipsInvalidUTF8LocalFile(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "doc.md")

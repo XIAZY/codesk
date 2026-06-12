@@ -1929,13 +1929,32 @@ func (t *trackedFile) setProjectedContent(content string) {
 }
 
 func (t *trackedFile) setProjectedBase(content string, state []byte) {
-	unregisterTrackedProjectedBaseCache(t)
 	cacheBytes := len(content) + len(state)
-	retain := len(state) > 0 && reserveTrackedProjectedBaseCache(t, cacheBytes)
+	hash := projectedHashString(content)
+	trackedProjectedBaseCache.Lock()
+	defer trackedProjectedBaseCache.Unlock()
+	if oldSize, ok := removeTrackedProjectedBaseCacheLocked(t); ok {
+		clearTrackedProjectedBaseCacheEntry(t, oldSize)
+	}
+	retain := len(state) > 0 && cacheBytes <= trackedProjectedBaseCacheBudgetBytes
+	for retain && trackedProjectedBaseCache.used+cacheBytes > trackedProjectedBaseCacheBudgetBytes && len(trackedProjectedBaseCache.order) > 0 {
+		victim := trackedProjectedBaseCache.order[0]
+		trackedProjectedBaseCache.order = trackedProjectedBaseCache.order[1:]
+		victimSize, ok := trackedProjectedBaseCache.sizes[victim]
+		if !ok {
+			continue
+		}
+		delete(trackedProjectedBaseCache.sizes, victim)
+		trackedProjectedBaseCache.used -= victimSize
+		clearTrackedProjectedBaseCacheEntry(victim, victimSize)
+	}
+	if retain && trackedProjectedBaseCache.used+cacheBytes > trackedProjectedBaseCacheBudgetBytes {
+		retain = false
+	}
 	t.stateMu.Lock()
 	defer t.stateMu.Unlock()
 	t.projectedContentKnown = true
-	t.hash = projectedHashString(content)
+	t.hash = hash
 	if !retain {
 		t.projectedContent = ""
 		t.projectedState = nil
@@ -1945,6 +1964,12 @@ func (t *trackedFile) setProjectedBase(content string, state []byte) {
 	t.projectedContent = content
 	t.projectedState = append([]byte(nil), state...)
 	t.projectedCacheBytes = cacheBytes
+	if trackedProjectedBaseCache.sizes == nil {
+		trackedProjectedBaseCache.sizes = map[*trackedFile]int{}
+	}
+	trackedProjectedBaseCache.sizes[t] = cacheBytes
+	trackedProjectedBaseCache.order = append(trackedProjectedBaseCache.order, t)
+	trackedProjectedBaseCache.used += cacheBytes
 }
 
 func (t *trackedFile) setProjectedSnapshot(hash projectedContentHash, known bool) {
@@ -1956,42 +1981,6 @@ func (t *trackedFile) setProjectedSnapshot(hash projectedContentHash, known bool
 	t.projectedContent = ""
 	t.projectedState = nil
 	t.projectedCacheBytes = 0
-}
-
-func reserveTrackedProjectedBaseCache(t *trackedFile, size int) bool {
-	if t == nil || size <= 0 {
-		return false
-	}
-	budget := trackedProjectedBaseCacheBudgetBytes
-	if budget <= 0 || size > budget {
-		return false
-	}
-	trackedProjectedBaseCache.Lock()
-	defer trackedProjectedBaseCache.Unlock()
-	if trackedProjectedBaseCache.sizes == nil {
-		trackedProjectedBaseCache.sizes = map[*trackedFile]int{}
-	}
-	if oldSize, ok := removeTrackedProjectedBaseCacheLocked(t); ok {
-		clearTrackedProjectedBaseCacheEntry(t, oldSize)
-	}
-	for trackedProjectedBaseCache.used+size > budget && len(trackedProjectedBaseCache.order) > 0 {
-		victim := trackedProjectedBaseCache.order[0]
-		trackedProjectedBaseCache.order = trackedProjectedBaseCache.order[1:]
-		victimSize, ok := trackedProjectedBaseCache.sizes[victim]
-		if !ok {
-			continue
-		}
-		delete(trackedProjectedBaseCache.sizes, victim)
-		trackedProjectedBaseCache.used -= victimSize
-		clearTrackedProjectedBaseCacheEntry(victim, victimSize)
-	}
-	if trackedProjectedBaseCache.used+size > budget {
-		return false
-	}
-	trackedProjectedBaseCache.sizes[t] = size
-	trackedProjectedBaseCache.order = append(trackedProjectedBaseCache.order, t)
-	trackedProjectedBaseCache.used += size
-	return true
 }
 
 func unregisterTrackedProjectedBaseCache(t *trackedFile) {
