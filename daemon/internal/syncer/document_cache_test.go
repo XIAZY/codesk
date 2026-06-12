@@ -524,6 +524,10 @@ func TestDocumentCacheProjectedBaseUsesExactSnapshotWithoutReplay(t *testing.T) 
 	withDocumentSnapshotDecodeHook(t, func(documentID string, seq int64) {
 		decodeCalls++
 	})
+	hashValidationCalls := 0
+	withDocumentSnapshotHashValidationHook(t, func(documentID string, seq int64) {
+		hashValidationCalls++
+	})
 	content, state, known, err := cache.loadProjectedBase("doc_1")
 	if err != nil {
 		t.Fatalf("load projected base: %v", err)
@@ -536,6 +540,9 @@ func TestDocumentCacheProjectedBaseUsesExactSnapshotWithoutReplay(t *testing.T) 
 	}
 	if decodeCalls != 0 {
 		t.Fatalf("exact projected-base snapshot should not decode snapshot state, got %d decode calls", decodeCalls)
+	}
+	if hashValidationCalls != 0 {
+		t.Fatalf("exact projected-base snapshot should not rehash snapshot blobs, got %d hash validation calls", hashValidationCalls)
 	}
 }
 
@@ -590,9 +597,8 @@ func TestDocumentCacheProjectedBaseFallsBackAndRepairsCorruptSnapshot(t *testing
 	if err := cache.storeProjectedBase("doc_1", "remote", remoteDoc.EncodeStateAsUpdate(), projectedSeq); err != nil {
 		t.Fatalf("store projected base: %v", err)
 	}
-	badState := []byte{1, 2, 3}
-	if _, err := cache.db.Exec(`update document_snapshots set state_update = ? where document_id = ? and seq = ?`, badState, "doc_1", projectedSeq); err != nil {
-		t.Fatalf("corrupt projected snapshot: %v", err)
+	if _, err := cache.db.Exec(`update document_snapshots set content_sha256 = ? where document_id = ? and seq = ?`, "bad-content-hash", "doc_1", projectedSeq); err != nil {
+		t.Fatalf("corrupt projected snapshot metadata: %v", err)
 	}
 
 	var replayRows int
@@ -850,6 +856,15 @@ func withDocumentSnapshotDecodeHook(t *testing.T, hook func(documentID string, s
 	documentSnapshotDecodeHook = hook
 	t.Cleanup(func() {
 		documentSnapshotDecodeHook = previous
+	})
+}
+
+func withDocumentSnapshotHashValidationHook(t *testing.T, hook func(documentID string, seq int64)) {
+	t.Helper()
+	previous := documentSnapshotHashValidationHook
+	documentSnapshotHashValidationHook = hook
+	t.Cleanup(func() {
+		documentSnapshotHashValidationHook = previous
 	})
 }
 

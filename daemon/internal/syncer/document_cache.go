@@ -38,6 +38,8 @@ var documentSnapshotStoreHook func(documentID string, seq int64) error
 
 var documentSnapshotDecodeHook func(documentID string, seq int64)
 
+var documentSnapshotHashValidationHook func(documentID string, seq int64)
+
 type documentCacheEntry struct {
 	mu         sync.Mutex
 	documentID string
@@ -1056,7 +1058,7 @@ func (c *workspaceStore) loadLatestSnapshotBeforeOrAt(documentID string, seq int
 		if err != nil || !ok {
 			return row, ok, err
 		}
-		if row.hashesValid() {
+		if row.metadataValid() {
 			return row, true, nil
 		}
 		_ = c.deleteDocumentSnapshot(row.DocumentID, row.Seq)
@@ -1090,8 +1092,8 @@ func (c *workspaceStore) loadProjectedBaseSnapshot(row documentRow) (string, []b
 	if err != nil || !ok {
 		return "", nil, false, nil
 	}
-	if !snapshot.hashesValid() ||
-		(row.ProjectedTextSHA256 != "" && row.ProjectedTextSHA256 != sha256Hex([]byte(snapshot.ContentText))) ||
+	if !snapshot.metadataValid() ||
+		(row.ProjectedTextSHA256 != "" && row.ProjectedTextSHA256 != snapshot.ContentSHA256) ||
 		(row.ProjectedTextLen != 0 && row.ProjectedTextLen != len(snapshot.ContentText)) {
 		_ = c.deleteDocumentSnapshot(snapshot.DocumentID, snapshot.Seq)
 		return "", nil, false, nil
@@ -1108,6 +1110,9 @@ func (c *workspaceStore) deleteDocumentSnapshot(documentID string, seq int64) er
 }
 
 func (row documentSnapshotRow) hashesValid() bool {
+	if documentSnapshotHashValidationHook != nil {
+		documentSnapshotHashValidationHook(row.DocumentID, row.Seq)
+	}
 	return row.DocumentID != "" &&
 		row.Seq > 0 &&
 		len(row.StateUpdate) > 0 &&
@@ -1115,9 +1120,17 @@ func (row documentSnapshotRow) hashesValid() bool {
 		row.StateSHA256 == sha256Hex(row.StateUpdate)
 }
 
+func (row documentSnapshotRow) metadataValid() bool {
+	return row.DocumentID != "" &&
+		row.Seq > 0 &&
+		len(row.StateUpdate) > 0 &&
+		row.ContentSHA256 != "" &&
+		row.StateSHA256 != ""
+}
+
 func (c *workspaceStore) docFromSnapshot(row documentSnapshotRow) (*crdt.Doc, bool, error) {
 	doc := crdt.New()
-	if !row.hashesValid() {
+	if !row.metadataValid() {
 		return doc, false, nil
 	}
 	if documentSnapshotDecodeHook != nil {
