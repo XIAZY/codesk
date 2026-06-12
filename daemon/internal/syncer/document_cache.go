@@ -30,6 +30,10 @@ type workspaceStore struct {
 
 type documentCache = workspaceStore
 
+var documentSnapshotEveryUpdates int64 = 100
+
+var documentReplayHook func(documentID string, fromSeq, toSeq int64, rows int)
+
 type documentCacheEntry struct {
 	mu         sync.Mutex
 	documentID string
@@ -75,6 +79,16 @@ type documentRow struct {
 	ProjectedTextLen    int
 	ProjectionKnown     bool
 	UpdatedAt           time.Time
+}
+
+type documentSnapshotRow struct {
+	DocumentID    string
+	Seq           int64
+	StateUpdate   []byte
+	ContentText   string
+	ContentSHA256 string
+	StateSHA256   string
+	CreatedAt     time.Time
 }
 
 func newDocumentCache(path string) (*documentCache, error) {
@@ -149,6 +163,17 @@ func (c *workspaceStore) initSchema() error {
 			unique (document_id, update_sha256)
 		)`,
 		`create index if not exists crdt_updates_by_doc_seq on crdt_updates(document_id, seq)`,
+		`create table if not exists document_snapshots (
+			document_id text not null,
+			seq integer not null,
+			state_update blob not null,
+			content_text text not null,
+			content_sha256 text not null,
+			state_sha256 text not null,
+			created_at integer not null,
+			primary key (document_id, seq)
+		)`,
+		`create index if not exists document_snapshots_by_doc_seq on document_snapshots(document_id, seq desc)`,
 		`create table if not exists incoming_updates (
 			incoming_seq integer primary key autoincrement,
 			document_id text not null,
@@ -261,7 +286,8 @@ func (c *workspaceStore) storeDocLocked(entry *documentCacheEntry, metadata docu
 	}
 	state := doc.EncodeStateAsUpdate()
 	now := time.Now().UTC()
-	return c.withTx(func(tx *sql.Tx) error {
+	var appliedSeq int64
+	if err := c.withTx(func(tx *sql.Tx) error {
 		if _, err := c.ensureDocumentTx(tx, metadata.DocumentID, metadata.Path, now); err != nil {
 			return err
 		}
@@ -277,13 +303,20 @@ func (c *workspaceStore) storeDocLocked(entry *documentCacheEntry, metadata docu
 				return err
 			}
 			metadata.AppliedSeq = seq
+			appliedSeq = seq
 		}
 		metadata.UpdatedAt = now
 		if entry != nil {
 			entry.metadata = metadata
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	if appliedSeq > 0 {
+		return c.maybeCreateDocumentSnapshot(metadata.DocumentID, appliedSeq, doc)
+	}
+	return nil
 }
 
 func (c *workspaceStore) localStateVector(documentID string) []byte {
@@ -478,6 +511,9 @@ func (c *workspaceStore) applyPendingRemoteUpdatesLocked(_ *documentCacheEntry, 
 		_, err := tx.Exec(`update documents set applied_seq = ?, updated_at = ? where document_id = ?`, maxSeq, unixNano(now), documentID)
 		return err
 	})
+	if err == nil {
+		err = c.maybeCreateDocumentSnapshot(documentID, maxSeq, doc)
+	}
 	return count, maxSeq, err
 }
 
@@ -641,6 +677,7 @@ func (c *workspaceStore) removeDocumentLocked(entry *documentCacheEntry, documen
 	}
 	err := c.withTx(func(tx *sql.Tx) error {
 		for _, stmt := range []string{
+			`delete from document_snapshots where document_id = ?`,
 			`delete from thread_outbox where document_id = ?`,
 			`delete from content_outbox where document_id = ?`,
 			`delete from incoming_updates where document_id = ?`,
@@ -668,22 +705,29 @@ func (c *workspaceStore) lockEntry(documentID string) (*documentCacheEntry, func
 	return entry, entry.mu.Unlock
 }
 
-func (c *workspaceStore) storeProjectedBase(documentID, content string, _ []byte, projectedSeq int64) error {
+func (c *workspaceStore) storeProjectedBase(documentID, content string, state []byte, projectedSeq int64) error {
 	if c == nil || documentID == "" {
 		return nil
 	}
 	now := time.Now().UTC()
-	if _, err := c.ensureDocument(documentID, ""); err != nil {
-		return err
-	}
-	_, err := c.db.Exec(`update documents
-		set projected_seq = ?,
-			projected_text_sha256 = ?,
-			projected_text_len = ?,
-			projection_known = 1,
-			updated_at = ?
-		where document_id = ?`, projectedSeq, sha256Hex([]byte(content)), len(content), unixNano(now), documentID)
-	return err
+	return c.withTx(func(tx *sql.Tx) error {
+		if _, err := c.ensureDocumentTx(tx, documentID, "", now); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`update documents
+			set projected_seq = ?,
+				projected_text_sha256 = ?,
+				projected_text_len = ?,
+				projection_known = 1,
+				updated_at = ?
+			where document_id = ?`, projectedSeq, sha256Hex([]byte(content)), len(content), unixNano(now), documentID); err != nil {
+			return err
+		}
+		if projectedSeq > 0 && len(state) > 0 {
+			return c.storeDocumentSnapshotTx(tx, documentID, projectedSeq, state, content, now)
+		}
+		return nil
+	})
 }
 
 func (c *workspaceStore) documentAppliedSeq(documentID string) (int64, error) {
@@ -775,6 +819,9 @@ func (c *workspaceStore) loadProjectedBase(documentID string) (string, []byte, b
 	if !row.ProjectionKnown {
 		return "", nil, false, nil
 	}
+	if content, state, known, err := c.loadProjectedBaseSnapshot(row); err != nil || known {
+		return content, state, known, err
+	}
 	doc, state, known, err := c.loadDocAtSeq(documentID, row.ProjectedSeq)
 	if err != nil {
 		return "", nil, false, err
@@ -786,6 +833,11 @@ func (c *workspaceStore) loadProjectedBase(documentID string) (string, []byte, b
 	content := doc.GetText("content").ToString()
 	if row.ProjectedTextSHA256 != "" && row.ProjectedTextSHA256 != sha256Hex([]byte(content)) {
 		return "", nil, false, nil
+	}
+	if row.ProjectedSeq > 0 && len(state) > 0 {
+		if err := c.storeDocumentSnapshot(documentID, row.ProjectedSeq, state, content); err != nil {
+			return "", nil, false, err
+		}
 	}
 	return content, state, true, nil
 }
@@ -923,41 +975,260 @@ func (c *workspaceStore) insertCRDTUpdateTx(tx *sql.Tx, documentID string, updat
 	return seq, true, nil
 }
 
-func (c *workspaceStore) loadDocAtSeq(documentID string, seq int64) (*crdt.Doc, []byte, bool, error) {
-	doc := crdt.New()
-	if c == nil || documentID == "" || seq <= 0 {
-		return doc, nil, false, nil
+func (c *workspaceStore) storeDocumentSnapshot(documentID string, seq int64, state []byte, content string) error {
+	if c == nil || documentID == "" || seq <= 0 || len(state) == 0 {
+		return nil
 	}
-	rows, err := c.db.Query(`select update_bytes from crdt_updates where document_id = ? and seq <= ? order by seq`, documentID, seq)
+	now := time.Now().UTC()
+	return c.withTx(func(tx *sql.Tx) error {
+		return c.storeDocumentSnapshotTx(tx, documentID, seq, state, content, now)
+	})
+}
+
+func (c *workspaceStore) storeDocumentSnapshotTx(tx *sql.Tx, documentID string, seq int64, state []byte, content string, now time.Time) error {
+	if tx == nil || documentID == "" || seq <= 0 || len(state) == 0 {
+		return nil
+	}
+	_, err := tx.Exec(`insert into document_snapshots (
+			document_id, seq, state_update, content_text, content_sha256, state_sha256, created_at
+		) values (?, ?, ?, ?, ?, ?, ?)
+		on conflict(document_id, seq) do update set
+			state_update = excluded.state_update,
+			content_text = excluded.content_text,
+			content_sha256 = excluded.content_sha256,
+			state_sha256 = excluded.state_sha256,
+			created_at = excluded.created_at`,
+		documentID, seq, state, content, sha256Hex([]byte(content)), sha256Hex(state), unixNano(now))
+	return err
+}
+
+func (c *workspaceStore) maybeCreateDocumentSnapshot(documentID string, seq int64, doc *crdt.Doc) error {
+	if c == nil || documentID == "" || seq <= 0 || doc == nil {
+		return nil
+	}
+	latestSeq, ok, err := c.latestDocumentSnapshotSeq(documentID)
 	if err != nil {
+		return err
+	}
+	if ok && seq-latestSeq < documentSnapshotEveryUpdates {
+		return nil
+	}
+	state := doc.EncodeStateAsUpdate()
+	if len(state) == 0 {
+		return nil
+	}
+	return c.storeDocumentSnapshot(documentID, seq, state, doc.GetText("content").ToString())
+}
+
+func (c *workspaceStore) latestDocumentSnapshotSeq(documentID string) (int64, bool, error) {
+	if c == nil || documentID == "" {
+		return 0, false, nil
+	}
+	var seq int64
+	err := c.db.QueryRow(`select seq from document_snapshots where document_id = ? order by seq desc limit 1`, documentID).Scan(&seq)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return seq, true, nil
+}
+
+func (c *workspaceStore) loadDocumentSnapshotAt(documentID string, seq int64) (documentSnapshotRow, bool, error) {
+	if c == nil || documentID == "" || seq <= 0 {
+		return documentSnapshotRow{}, false, nil
+	}
+	return c.loadDocumentSnapshotByQuery(`select document_id, seq, state_update, content_text, content_sha256, state_sha256, created_at
+		from document_snapshots where document_id = ? and seq = ?`, documentID, seq)
+}
+
+func (c *workspaceStore) loadLatestSnapshotBeforeOrAt(documentID string, seq int64) (documentSnapshotRow, bool, error) {
+	if c == nil || documentID == "" || seq <= 0 {
+		return documentSnapshotRow{}, false, nil
+	}
+	for {
+		row, ok, err := c.loadDocumentSnapshotByQuery(`select document_id, seq, state_update, content_text, content_sha256, state_sha256, created_at
+			from document_snapshots where document_id = ? and seq <= ? order by seq desc limit 1`, documentID, seq)
+		if err != nil || !ok {
+			return row, ok, err
+		}
+		doc, valid, err := c.docFromSnapshot(row)
+		if doc != nil {
+			doc.Close()
+		}
+		if err != nil {
+			return documentSnapshotRow{}, false, err
+		} else if valid {
+			return row, true, nil
+		}
+		if err := c.deleteDocumentSnapshot(row.DocumentID, row.Seq); err != nil {
+			return documentSnapshotRow{}, false, err
+		}
+	}
+}
+
+func (c *workspaceStore) loadDocumentSnapshotByQuery(query string, args ...any) (documentSnapshotRow, bool, error) {
+	var row documentSnapshotRow
+	var createdAt int64
+	err := c.db.QueryRow(query, args...).Scan(
+		&row.DocumentID, &row.Seq, &row.StateUpdate, &row.ContentText,
+		&row.ContentSHA256, &row.StateSHA256, &createdAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return row, false, nil
+	}
+	if err != nil {
+		return row, false, err
+	}
+	row.CreatedAt = time.Unix(0, createdAt).UTC()
+	return row, true, nil
+}
+
+func (c *workspaceStore) loadProjectedBaseSnapshot(row documentRow) (string, []byte, bool, error) {
+	if c == nil || row.DocumentID == "" || row.ProjectedSeq <= 0 {
+		return "", nil, false, nil
+	}
+	snapshot, ok, err := c.loadDocumentSnapshotAt(row.DocumentID, row.ProjectedSeq)
+	if err != nil || !ok {
+		return "", nil, false, err
+	}
+	if !snapshot.hashesValid() ||
+		!snapshot.stateDecodes() ||
+		(row.ProjectedTextSHA256 != "" && row.ProjectedTextSHA256 != sha256Hex([]byte(snapshot.ContentText))) ||
+		(row.ProjectedTextLen != 0 && row.ProjectedTextLen != len(snapshot.ContentText)) {
+		if err := c.deleteDocumentSnapshot(snapshot.DocumentID, snapshot.Seq); err != nil {
+			return "", nil, false, err
+		}
+		return "", nil, false, nil
+	}
+	return snapshot.ContentText, append([]byte(nil), snapshot.StateUpdate...), true, nil
+}
+
+func (c *workspaceStore) deleteDocumentSnapshot(documentID string, seq int64) error {
+	if c == nil || documentID == "" || seq <= 0 {
+		return nil
+	}
+	_, err := c.db.Exec(`delete from document_snapshots where document_id = ? and seq = ?`, documentID, seq)
+	return err
+}
+
+func (row documentSnapshotRow) hashesValid() bool {
+	return row.DocumentID != "" &&
+		row.Seq > 0 &&
+		len(row.StateUpdate) > 0 &&
+		row.ContentSHA256 == sha256Hex([]byte(row.ContentText)) &&
+		row.StateSHA256 == sha256Hex(row.StateUpdate)
+}
+
+func (row documentSnapshotRow) stateDecodes() bool {
+	if !row.hashesValid() {
+		return false
+	}
+	doc := crdt.New()
+	defer doc.Close()
+	return crdt.ApplyUpdateV1(doc, row.StateUpdate, "sqlite-snapshot-validate") == nil
+}
+
+func (c *workspaceStore) docFromSnapshot(row documentSnapshotRow) (*crdt.Doc, bool, error) {
+	doc := crdt.New()
+	if !row.hashesValid() {
+		return doc, false, nil
+	}
+	if err := crdt.ApplyUpdateV1(doc, row.StateUpdate, "sqlite-snapshot"); err != nil {
 		doc.Close()
-		return nil, nil, false, err
+		return nil, false, nil
+	}
+	if sha256Hex([]byte(doc.GetText("content").ToString())) != row.ContentSHA256 {
+		doc.Close()
+		return nil, false, nil
+	}
+	return doc, true, nil
+}
+
+func (c *workspaceStore) replayCRDTUpdates(doc *crdt.Doc, documentID string, fromExclusiveSeq, targetSeq int64) (bool, int, error) {
+	if c == nil || doc == nil || documentID == "" || targetSeq <= fromExclusiveSeq {
+		return false, 0, nil
+	}
+	rows, err := c.db.Query(`select update_bytes from crdt_updates where document_id = ? and seq > ? and seq <= ? order by seq`, documentID, fromExclusiveSeq, targetSeq)
+	if err != nil {
+		return false, 0, err
 	}
 	defer rows.Close()
 	known := false
+	count := 0
 	for rows.Next() {
 		var update []byte
 		if err := rows.Scan(&update); err != nil {
-			doc.Close()
-			return nil, nil, false, err
+			return known, count, err
 		}
 		if len(update) == 0 {
 			continue
 		}
 		if err := crdt.ApplyUpdateV1(doc, update, "sqlite-load"); err != nil {
-			doc.Close()
-			return nil, nil, false, err
+			return known, count, err
 		}
 		known = true
+		count++
 	}
 	if err := rows.Err(); err != nil {
+		return known, count, err
+	}
+	if documentReplayHook != nil {
+		documentReplayHook(documentID, fromExclusiveSeq, targetSeq, count)
+	}
+	return known, count, nil
+}
+
+func (c *workspaceStore) loadDocAtSeq(documentID string, seq int64) (*crdt.Doc, []byte, bool, error) {
+	if c == nil || documentID == "" || seq <= 0 {
+		doc := crdt.New()
+		return doc, nil, false, nil
+	}
+	snapshot, snapshotKnown, err := c.loadLatestSnapshotBeforeOrAt(documentID, seq)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	doc := crdt.New()
+	startSeq := int64(0)
+	known := false
+	if snapshotKnown {
+		doc.Close()
+		doc, known, err = c.docFromSnapshot(snapshot)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		if !known {
+			if doc != nil {
+				doc.Close()
+			}
+			if err := c.deleteDocumentSnapshot(snapshot.DocumentID, snapshot.Seq); err != nil {
+				return nil, nil, false, err
+			}
+			return c.loadDocAtSeq(documentID, seq)
+		}
+		startSeq = snapshot.Seq
+		if startSeq == seq {
+			return doc, append([]byte(nil), snapshot.StateUpdate...), true, nil
+		}
+	}
+	tailKnown, _, err := c.replayCRDTUpdates(doc, documentID, startSeq, seq)
+	if err != nil {
 		doc.Close()
 		return nil, nil, false, err
 	}
+	known = known || tailKnown
 	if !known {
 		return doc, nil, false, nil
 	}
-	return doc, doc.EncodeStateAsUpdate(), true, nil
+	state := doc.EncodeStateAsUpdate()
+	if snapshotKnown && startSeq < seq || !snapshotKnown {
+		if err := c.maybeCreateDocumentSnapshot(documentID, seq, doc); err != nil {
+			doc.Close()
+			return nil, nil, false, err
+		}
+	}
+	return doc, state, true, nil
 }
 
 func (c *workspaceStore) entryFor(documentID string) *documentCacheEntry {

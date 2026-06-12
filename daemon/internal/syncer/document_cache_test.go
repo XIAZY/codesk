@@ -2,6 +2,7 @@ package syncer
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -418,6 +419,207 @@ func TestWorkspaceStoreApplyDuplicateOutboxUpdateReturnsExistingSeq(t *testing.T
 	}
 }
 
+func TestDocumentCacheCreatesSnapshotsAtConfiguredUpdateInterval(t *testing.T) {
+	withDocumentSnapshotEveryUpdates(t, 2)
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "v0")
+	if err := cache.storeDoc("doc_1", "docs/spec.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	remoteDoc := crdt.New()
+	if err := crdt.ApplyUpdateV1(remoteDoc, baseDoc.EncodeStateAsUpdate(), "base"); err != nil {
+		t.Fatalf("apply base to remote doc: %v", err)
+	}
+
+	appendAndApplyRemoteText(t, cache, remoteDoc, "doc_1", "docs/spec.md", "v1", "remote1")
+	seqs := loadDocumentSnapshotSeqs(t, cache, "doc_1")
+	if !reflect.DeepEqual(seqs, []int64{1}) {
+		t.Fatalf("snapshot seqs after one remote update = %#v, want only initial snapshot", seqs)
+	}
+	appendAndApplyRemoteText(t, cache, remoteDoc, "doc_1", "docs/spec.md", "v2", "remote2")
+	seqs = loadDocumentSnapshotSeqs(t, cache, "doc_1")
+	if !reflect.DeepEqual(seqs, []int64{1, 3}) {
+		t.Fatalf("snapshot seqs after threshold = %#v, want initial plus threshold snapshot", seqs)
+	}
+}
+
+func TestDocumentCacheLoadDocAtSeqUsesNearestSnapshotTailReplay(t *testing.T) {
+	withDocumentSnapshotEveryUpdates(t, 1000)
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "v0")
+	if err := cache.storeDoc("doc_1", "docs/spec.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	remoteDoc := crdt.New()
+	if err := crdt.ApplyUpdateV1(remoteDoc, baseDoc.EncodeStateAsUpdate(), "base"); err != nil {
+		t.Fatalf("apply base to remote doc: %v", err)
+	}
+	var appliedSeq int64
+	for i := 1; i <= 3; i++ {
+		appliedSeq = appendAndApplyRemoteText(t, cache, remoteDoc, "doc_1", "docs/spec.md", fmt.Sprintf("v%d", i), fmt.Sprintf("remote%d", i))
+	}
+
+	var calls []struct {
+		from int64
+		to   int64
+		rows int
+	}
+	withDocumentReplayHook(t, func(documentID string, fromSeq, toSeq int64, rows int) {
+		if documentID == "doc_1" {
+			calls = append(calls, struct {
+				from int64
+				to   int64
+				rows int
+			}{from: fromSeq, to: toSeq, rows: rows})
+		}
+	})
+	doc, state, known, err := cache.loadDocAtSeq("doc_1", appliedSeq)
+	if err != nil {
+		t.Fatalf("load doc: %v", err)
+	}
+	defer doc.Close()
+	if !known || len(state) == 0 {
+		t.Fatalf("expected loaded doc to be known with state, known=%v state=%d", known, len(state))
+	}
+	if got := doc.GetText("content").ToString(); got != "v3" {
+		t.Fatalf("loaded content = %q, want v3", got)
+	}
+	if len(calls) != 1 || calls[0].from != 1 || calls[0].to != appliedSeq || calls[0].rows != 3 {
+		t.Fatalf("replay calls = %#v, want one tail replay from snapshot seq 1 with 3 rows", calls)
+	}
+}
+
+func TestDocumentCacheProjectedBaseUsesExactSnapshotWithoutReplay(t *testing.T) {
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base")
+	if err := cache.storeDoc("doc_1", "docs/spec.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	row, err := cache.ensureDocument("doc_1", "docs/spec.md")
+	if err != nil {
+		t.Fatalf("load row: %v", err)
+	}
+	if err := cache.storeProjectedBase("doc_1", "base", baseDoc.EncodeStateAsUpdate(), row.AppliedSeq); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+	if _, err := cache.db.Exec(`delete from crdt_updates where document_id = ?`, "doc_1"); err != nil {
+		t.Fatalf("delete folded updates: %v", err)
+	}
+
+	replayCalls := 0
+	withDocumentReplayHook(t, func(documentID string, fromSeq, toSeq int64, rows int) {
+		replayCalls++
+	})
+	content, state, known, err := cache.loadProjectedBase("doc_1")
+	if err != nil {
+		t.Fatalf("load projected base: %v", err)
+	}
+	if !known || content != "base" || len(state) == 0 {
+		t.Fatalf("projected base = known %v content %q state %d, want exact snapshot hit", known, content, len(state))
+	}
+	if replayCalls != 0 {
+		t.Fatalf("exact projected-base snapshot should not replay crdt rows, got %d replay calls", replayCalls)
+	}
+}
+
+func TestDocumentCacheProjectedBaseFallsBackAndRepairsCorruptSnapshot(t *testing.T) {
+	withDocumentSnapshotEveryUpdates(t, 1000)
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base")
+	if err := cache.storeDoc("doc_1", "docs/spec.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	remoteDoc := crdt.New()
+	if err := crdt.ApplyUpdateV1(remoteDoc, baseDoc.EncodeStateAsUpdate(), "base"); err != nil {
+		t.Fatalf("apply base to remote doc: %v", err)
+	}
+	projectedSeq := appendAndApplyRemoteText(t, cache, remoteDoc, "doc_1", "docs/spec.md", "remote", "remote")
+	if err := cache.storeProjectedBase("doc_1", "remote", remoteDoc.EncodeStateAsUpdate(), projectedSeq); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+	badState := []byte{1, 2, 3}
+	if _, err := cache.db.Exec(`update document_snapshots set state_update = ?, state_sha256 = ? where document_id = ? and seq = ?`, badState, sha256Hex(badState), "doc_1", projectedSeq); err != nil {
+		t.Fatalf("corrupt projected snapshot: %v", err)
+	}
+
+	var replayRows int
+	withDocumentReplayHook(t, func(documentID string, fromSeq, toSeq int64, rows int) {
+		if documentID == "doc_1" {
+			replayRows += rows
+		}
+	})
+	content, state, known, err := cache.loadProjectedBase("doc_1")
+	if err != nil {
+		t.Fatalf("load projected base: %v", err)
+	}
+	if !known || content != "remote" || len(state) == 0 {
+		t.Fatalf("projected base = known %v content %q state %d, want fallback replay", known, content, len(state))
+	}
+	if replayRows != 1 {
+		t.Fatalf("fallback should replay one row after base snapshot, got %d", replayRows)
+	}
+	snapshot, ok, err := cache.loadDocumentSnapshotAt("doc_1", projectedSeq)
+	if err != nil {
+		t.Fatalf("reload repaired snapshot: %v", err)
+	}
+	if !ok || !snapshot.hashesValid() || snapshot.ContentText != "remote" {
+		t.Fatalf("expected repaired valid snapshot at projected seq, ok=%v snapshot=%#v", ok, snapshot)
+	}
+}
+
+func TestDocumentCacheProjectedBaseSnapshotSurvivesReopen(t *testing.T) {
+	root := t.TempDir()
+	cache, err := newDocumentCache(root)
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base")
+	if err := cache.storeDoc("doc_1", "docs/spec.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	row, err := cache.ensureDocument("doc_1", "docs/spec.md")
+	if err != nil {
+		t.Fatalf("load row: %v", err)
+	}
+	if err := cache.storeProjectedBase("doc_1", "base", baseDoc.EncodeStateAsUpdate(), row.AppliedSeq); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+	if err := cache.db.Close(); err != nil {
+		t.Fatalf("close cache: %v", err)
+	}
+
+	reopened, err := newDocumentCache(root)
+	if err != nil {
+		t.Fatalf("reopen cache: %v", err)
+	}
+	replayCalls := 0
+	withDocumentReplayHook(t, func(documentID string, fromSeq, toSeq int64, rows int) {
+		replayCalls++
+	})
+	content, _, known, err := reopened.loadProjectedBase("doc_1")
+	if err != nil {
+		t.Fatalf("load projected base after reopen: %v", err)
+	}
+	if !known || content != "base" {
+		t.Fatalf("projected base after reopen = known %v content %q, want snapshot", known, content)
+	}
+	if replayCalls != 0 {
+		t.Fatalf("reopen exact snapshot should not replay crdt rows, got %d replay calls", replayCalls)
+	}
+}
+
 func TestDocumentCacheDoesNotCreateFileBackedState(t *testing.T) {
 	cache, err := newDocumentCache(t.TempDir())
 	if err != nil {
@@ -457,7 +659,7 @@ func TestWorkspaceStoreSchemaUsesAgreedDurableTables(t *testing.T) {
 		}
 		tables = append(tables, table)
 	}
-	want := []string{"content_outbox", "crdt_updates", "documents", "incoming_updates", "root_projection_entries", "thread_outbox"}
+	want := []string{"content_outbox", "crdt_updates", "document_snapshots", "documents", "incoming_updates", "root_projection_entries", "thread_outbox"}
 	if !reflect.DeepEqual(tables, want) {
 		t.Fatalf("sqlite schema tables = %#v, want %#v", tables, want)
 	}
@@ -485,5 +687,105 @@ func assertSQLiteTableExists(t *testing.T, cache *documentCache, table string) {
 	var name string
 	if err := cache.db.QueryRow(`select name from sqlite_master where type = 'table' and name = ?`, table).Scan(&name); err != nil {
 		t.Fatalf("expected sqlite table %s: %v", table, err)
+	}
+}
+
+func withDocumentSnapshotEveryUpdates(t *testing.T, interval int64) {
+	t.Helper()
+	previous := documentSnapshotEveryUpdates
+	documentSnapshotEveryUpdates = interval
+	t.Cleanup(func() {
+		documentSnapshotEveryUpdates = previous
+	})
+}
+
+func withDocumentReplayHook(t *testing.T, hook func(documentID string, fromSeq, toSeq int64, rows int)) {
+	t.Helper()
+	previous := documentReplayHook
+	documentReplayHook = hook
+	t.Cleanup(func() {
+		documentReplayHook = previous
+	})
+}
+
+func appendAndApplyRemoteText(t *testing.T, cache *documentCache, remoteDoc *crdt.Doc, documentID, path, content string, origin any) int64 {
+	t.Helper()
+	update := captureDocTextUpdate(t, remoteDoc, content, origin)
+	appended, err := cache.appendPendingRemoteUpdate(documentID, path, update)
+	if err != nil {
+		t.Fatalf("append pending remote update: %v", err)
+	}
+	if !appended {
+		t.Fatal("expected pending remote update to append")
+	}
+	doc, _, _, err := cache.loadBaseDoc(documentID, path)
+	if err != nil {
+		t.Fatalf("load base doc: %v", err)
+	}
+	entry := cache.entryFor(documentID)
+	entry.mu.Lock()
+	applied, projectedSeq, err := cache.applyPendingRemoteUpdatesLocked(entry, documentID, doc)
+	entry.mu.Unlock()
+	doc.Close()
+	if err != nil {
+		t.Fatalf("apply pending remote update: %v", err)
+	}
+	if applied != 1 {
+		t.Fatalf("expected one pending remote update to apply, got %d", applied)
+	}
+	return projectedSeq
+}
+
+func captureDocTextUpdate(t *testing.T, doc *crdt.Doc, content string, origin any) []byte {
+	t.Helper()
+	var update []byte
+	unsubscribe := doc.OnUpdate(func(next []byte, observedOrigin any) {
+		if observedOrigin == origin {
+			update = append([]byte(nil), next...)
+		}
+	})
+	updateDocText(t, doc, content, origin)
+	unsubscribe()
+	if len(update) == 0 {
+		t.Fatal("expected CRDT update")
+	}
+	return update
+}
+
+func loadDocumentSnapshotSeqs(t *testing.T, cache *documentCache, documentID string) []int64 {
+	t.Helper()
+	rows, err := cache.db.Query(`select seq from document_snapshots where document_id = ? order by seq`, documentID)
+	if err != nil {
+		t.Fatalf("load snapshot seqs: %v", err)
+	}
+	defer rows.Close()
+	var seqs []int64
+	for rows.Next() {
+		var seq int64
+		if err := rows.Scan(&seq); err != nil {
+			t.Fatalf("scan snapshot seq: %v", err)
+		}
+		seqs = append(seqs, seq)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate snapshot seqs: %v", err)
+	}
+	return seqs
+}
+
+func assertDocumentSnapshotContent(t *testing.T, cache *documentCache, documentID string, seq int64, content string) {
+	t.Helper()
+	snapshot, ok, err := cache.loadDocumentSnapshotAt(documentID, seq)
+	if err != nil {
+		t.Fatalf("load snapshot %s/%d: %v", documentID, seq, err)
+	}
+	if !ok {
+		t.Fatalf("expected snapshot %s/%d", documentID, seq)
+	}
+	if !snapshot.hashesValid() {
+		t.Fatalf("snapshot %s/%d has invalid hashes: %#v", documentID, seq, snapshot)
+	}
+	if snapshot.ContentText != content {
+		t.Fatalf("snapshot %s/%d content = %q, want %q", documentID, seq, snapshot.ContentText, content)
 	}
 }

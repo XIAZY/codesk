@@ -857,6 +857,11 @@ func TestApplyProjectedContentConflictDoesNotAdvanceProjectedSeq(t *testing.T) {
 	if row.ProjectedSeq != baseRow.AppliedSeq {
 		t.Fatalf("projected seq advanced to %d despite write conflict, want base seq %d", row.ProjectedSeq, baseRow.AppliedSeq)
 	}
+	if _, ok, err := cache.loadDocumentSnapshotAt("doc_1", remoteSeq); err != nil {
+		t.Fatalf("load remote snapshot: %v", err)
+	} else if ok {
+		t.Fatal("write conflict must not store projected snapshot at the unprojected remote seq")
+	}
 }
 
 func TestProjectedBaseLivesInWorkspaceSQLiteWithCRDTState(t *testing.T) {
@@ -3156,6 +3161,7 @@ func TestOutgoingOutboxFinalizeConflictStoresAcceptedLocalProjectedSeq(t *testin
 	if !known || projectedBase != "base\nlocal\n" {
 		t.Fatalf("projected base = known %v content %q, want accepted local content", known, projectedBase)
 	}
+	assertDocumentSnapshotContent(t, cache, "doc_1", row.AppliedSeq, "base\nlocal\n")
 	content, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read local file: %v", err)
@@ -3250,6 +3256,7 @@ func TestOutgoingOutboxFinalizeDuplicateDoesNotRegressProjectedSeq(t *testing.T)
 	if !known || projectedBase != "base\nlocal\nremote\n" {
 		t.Fatalf("projected base = known %v content %q, want merged remote content", known, projectedBase)
 	}
+	assertDocumentSnapshotContent(t, cache, "doc_1", remoteSeq, "base\nlocal\nremote\n")
 }
 
 func TestOutgoingOutboxSurvivesCacheReopenAndResendsIdempotently(t *testing.T) {
