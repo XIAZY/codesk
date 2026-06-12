@@ -72,6 +72,25 @@ func newApplyingDocumentUpdateWebsocketTestRuntime(t *testing.T, cache *document
 	})
 }
 
+func withTrackedProjectedBaseCacheBudgetBytes(t *testing.T, budgetBytes int) {
+	t.Helper()
+	previous := trackedProjectedBaseCacheBudgetBytes
+	trackedProjectedBaseCacheBudgetBytes = budgetBytes
+	resetTrackedProjectedBaseCacheForTest()
+	t.Cleanup(func() {
+		resetTrackedProjectedBaseCacheForTest()
+		trackedProjectedBaseCacheBudgetBytes = previous
+	})
+}
+
+func resetTrackedProjectedBaseCacheForTest() {
+	trackedProjectedBaseCache.Lock()
+	defer trackedProjectedBaseCache.Unlock()
+	trackedProjectedBaseCache.order = nil
+	trackedProjectedBaseCache.sizes = map[*trackedFile]int{}
+	trackedProjectedBaseCache.used = 0
+}
+
 func TestComputeLocalTextEditsUsesUTF16Cursor(t *testing.T) {
 	edits, err := computeLocalTextEdits("a🙂b", "a🙂Xb")
 	if err != nil {
@@ -139,6 +158,261 @@ func TestBuildLocalUpdateFromBaseRejectsInvalidUTF8Content(t *testing.T) {
 	if !errors.Is(err, errUnsupportedTextContent) {
 		t.Fatalf("expected unsupported text error, got %v", err)
 	}
+}
+
+func TestCollectTrackedReconcileStatesSkipsProjectedBaseLoadForCleanFile(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "log.txt")
+	if err := os.WriteFile(path, []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	tracked := &trackedFile{
+		DocumentID:    "doc_1",
+		DocumentPath:  "log.txt",
+		Path:          path,
+		WorkspaceRoot: root,
+		FS:            NewWorkspaceFS(root),
+		cache:         cache,
+	}
+	tracked.setProjectedContent("base\n")
+
+	loads := 0
+	withDocumentProjectedBaseLoadHook(t, func(documentID string) {
+		loads++
+	})
+	states, err := collectTrackedReconcileStates([]*trackedFile{tracked})
+	if err != nil {
+		t.Fatalf("collect states: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("expected one state, got %d", len(states))
+	}
+	if states[0].localDirty {
+		t.Fatal("expected clean projected file to clear local dirty state")
+	}
+	if loads != 0 {
+		t.Fatalf("clean projected file should not load projected base from sqlite, got %d loads", loads)
+	}
+}
+
+func TestCollectTrackedReconcileStatesUsesInMemoryProjectedBaseForDirtyFile(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "codex-agent.log")
+	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseState := crdtStateFromContent("base\n")
+	tracked := &trackedFile{
+		DocumentID:    "doc_1",
+		DocumentPath:  "codex-agent.log",
+		Path:          path,
+		WorkspaceRoot: root,
+		FS:            NewWorkspaceFS(root),
+		cache:         cache,
+	}
+	if err := tracked.storeProjectedBaseAtSeq("base\n", baseState, 1); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+	tracked.markLocalDirty()
+
+	loads := 0
+	withDocumentProjectedBaseLoadHook(t, func(documentID string) {
+		loads++
+	})
+	states, err := collectTrackedReconcileStates([]*trackedFile{tracked})
+	if err != nil {
+		t.Fatalf("collect states: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("expected one state, got %d", len(states))
+	}
+	state := states[0]
+	if !state.localDirty || !state.baseKnown || state.baseContent != "base\n" || state.localContent != "base\nlocal\n" {
+		t.Fatalf("unexpected dirty state: %#v", state)
+	}
+	if !bytes.Equal(state.baseState, baseState) {
+		t.Fatal("expected in-memory projected base state")
+	}
+	if loads != 0 {
+		t.Fatalf("dirty projected file should use in-memory projected base, got %d sqlite loads", loads)
+	}
+}
+
+func TestTrackedProjectedBaseCacheEvictsLargeBase(t *testing.T) {
+	withTrackedProjectedBaseCacheBudgetBytes(t, 16)
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	tracked := &trackedFile{
+		DocumentID:   "doc_1",
+		DocumentPath: "log.txt",
+		cache:        cache,
+	}
+	content := "base content larger than cache\n"
+	doc := newDocWithText(t, content)
+	state := doc.EncodeStateAsUpdate()
+	if err := cache.storeDoc("doc_1", "log.txt", 1, doc); err != nil {
+		t.Fatalf("store doc: %v", err)
+	}
+	if err := tracked.storeProjectedBaseAtSeq(content, state, 1); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+	if _, _, known := tracked.projectedBase(); known {
+		t.Fatal("large projected base should not be retained in memory")
+	}
+
+	loads := 0
+	withDocumentProjectedBaseLoadHook(t, func(documentID string) {
+		loads++
+	})
+	gotContent, gotState, known, err := tracked.loadProjectedBase()
+	if err != nil {
+		t.Fatalf("load projected base: %v", err)
+	}
+	if !known || gotContent != content || len(gotState) == 0 {
+		t.Fatalf("projected base = known %v content %q state %d", known, gotContent, len(gotState))
+	}
+	if loads != 1 {
+		t.Fatalf("expected sqlite fallback load for evicted large base, got %d loads", loads)
+	}
+	if _, _, known := tracked.projectedBase(); known {
+		t.Fatal("large projected base should stay evicted after fallback load")
+	}
+}
+
+func TestTrackedProjectedBaseCacheKeepsOnlyBudgetedHotBases(t *testing.T) {
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	trackedA := &trackedFile{
+		DocumentID:   "doc_a",
+		DocumentPath: "a.log",
+		cache:        cache,
+	}
+	trackedB := &trackedFile{
+		DocumentID:   "doc_b",
+		DocumentPath: "b.log",
+		cache:        cache,
+	}
+	contentA := strings.Repeat("a", 128)
+	contentB := strings.Repeat("b", 128)
+	docA := newDocWithText(t, contentA)
+	docB := newDocWithText(t, contentB)
+	stateA := docA.EncodeStateAsUpdate()
+	stateB := docB.EncodeStateAsUpdate()
+	if err := cache.storeDoc("doc_a", "a.log", 1, docA); err != nil {
+		t.Fatalf("store doc a: %v", err)
+	}
+	if err := cache.storeDoc("doc_b", "b.log", 1, docB); err != nil {
+		t.Fatalf("store doc b: %v", err)
+	}
+	budget := max(len(contentA)+len(stateA), len(contentB)+len(stateB))
+	withTrackedProjectedBaseCacheBudgetBytes(t, budget)
+
+	if err := trackedA.storeProjectedBaseAtSeq(contentA, stateA, 1); err != nil {
+		t.Fatalf("store projected base a: %v", err)
+	}
+	if _, _, known := trackedA.projectedBase(); !known {
+		t.Fatal("first projected base should be retained within budget")
+	}
+	if err := trackedB.storeProjectedBaseAtSeq(contentB, stateB, 1); err != nil {
+		t.Fatalf("store projected base b: %v", err)
+	}
+	if _, _, known := trackedB.projectedBase(); !known {
+		t.Fatal("new hot projected base should be retained")
+	}
+	if _, _, known := trackedA.projectedBase(); known {
+		t.Fatal("old projected base should be evicted to stay within budget")
+	}
+
+	loads := 0
+	withDocumentProjectedBaseLoadHook(t, func(documentID string) {
+		if documentID == "doc_a" {
+			loads++
+		}
+	})
+	gotContent, gotState, known, err := trackedA.loadProjectedBase()
+	if err != nil {
+		t.Fatalf("load evicted projected base: %v", err)
+	}
+	if !known || gotContent != contentA || len(gotState) == 0 {
+		t.Fatalf("evicted projected base = known %v content %q state %d", known, gotContent, len(gotState))
+	}
+	if loads != 1 {
+		t.Fatalf("expected durable fallback load for evicted base, got %d", loads)
+	}
+}
+
+func TestTrackedProjectedBaseCacheInstallBlocksConcurrentEviction(t *testing.T) {
+	trackedA := &trackedFile{DocumentID: "doc_a", DocumentPath: "a.log"}
+	trackedB := &trackedFile{DocumentID: "doc_b", DocumentPath: "b.log"}
+	contentA := strings.Repeat("a", 128)
+	contentB := strings.Repeat("b", 128)
+	stateA := newDocWithText(t, contentA).EncodeStateAsUpdate()
+	stateB := newDocWithText(t, contentB).EncodeStateAsUpdate()
+	budget := max(len(contentA)+len(stateA), len(contentB)+len(stateB))
+	withTrackedProjectedBaseCacheBudgetBytes(t, budget)
+
+	trackedA.stateMu.Lock()
+	doneA := make(chan struct{})
+	go func() {
+		trackedA.setProjectedBase(contentA, stateA)
+		close(doneA)
+	}()
+	waitForTrackedProjectedBaseCacheLock(t)
+
+	doneB := make(chan struct{})
+	go func() {
+		trackedB.setProjectedBase(contentB, stateB)
+		close(doneB)
+	}()
+	select {
+	case <-doneB:
+		t.Fatal("second cache install completed while first install held the cache lock")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	trackedA.stateMu.Unlock()
+	select {
+	case <-doneA:
+	case <-time.After(time.Second):
+		t.Fatal("first cache install did not finish")
+	}
+	select {
+	case <-doneB:
+	case <-time.After(time.Second):
+		t.Fatal("second cache install did not finish")
+	}
+	if _, _, known := trackedB.projectedBase(); !known {
+		t.Fatal("second projected base should be retained")
+	}
+	if _, _, known := trackedA.projectedBase(); known {
+		t.Fatal("first projected base should be evicted after second install")
+	}
+}
+
+func waitForTrackedProjectedBaseCacheLock(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if trackedProjectedBaseCache.TryLock() {
+			trackedProjectedBaseCache.Unlock()
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		return
+	}
+	t.Fatal("projected base cache lock was not acquired")
 }
 
 func TestReconcileTrackedDocumentSkipsInvalidUTF8LocalFile(t *testing.T) {

@@ -40,6 +40,8 @@ var documentSnapshotDecodeHook func(documentID string, seq int64)
 
 var documentSnapshotHashValidationHook func(documentID string, seq int64)
 
+var documentProjectedBaseLoadHook func(documentID string)
+
 type documentCacheEntry struct {
 	mu         sync.Mutex
 	documentID string
@@ -814,6 +816,9 @@ func (c *workspaceStore) storeRootProjectionEntries(rootDocumentID string, entri
 func (c *workspaceStore) loadProjectedBase(documentID string) (string, []byte, bool, error) {
 	if c == nil || documentID == "" {
 		return "", nil, false, nil
+	}
+	if documentProjectedBaseLoadHook != nil {
+		documentProjectedBaseLoadHook(documentID)
 	}
 	row, err := c.ensureDocument(documentID, "")
 	if err != nil {
