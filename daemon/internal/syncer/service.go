@@ -91,6 +91,7 @@ var projectedHashSeed = maphash.MakeSeed()
 var awarenessClientCounter atomic.Uint64
 var documentConnectMu sync.Mutex
 var nextDocumentConnect time.Time
+var trackedProjectedBaseCacheMaxBytes = 8 * 1024 * 1024
 
 const documentConnectInterval = 100 * time.Millisecond
 const backendErrorBodyLimit = 4096
@@ -1585,7 +1586,6 @@ func projectMergedContentOverLocalDisk(tracked *trackedFile, currentDiskContent 
 				tracked.setProjectedSnapshot(previousHash, previousKnown)
 				return false, baseErr
 			}
-			tracked.setProjectedContent(currentDiskContent)
 			return false, nil
 		}
 		tracked.setProjectedSnapshot(previousHash, previousKnown)
@@ -1621,12 +1621,11 @@ func materializeTrackedFile(ctx context.Context, cache *documentCache, document 
 			materialized.Doc.Close()
 		}
 
-		baseContent, _, baseKnown, err := tracked.loadProjectedBase()
+		_, _, baseKnown, err := tracked.loadProjectedBase()
 		if err != nil {
 			return nil, err
 		}
 		if baseKnown {
-			tracked.setProjectedContent(baseContent)
 			snapshot, readErr := tracked.workspaceFS().Read(absolutePath)
 			if readErr == nil && snapshot.Exists {
 				if !tracked.matchesProjectedBytes(snapshot.Bytes) {
@@ -1907,7 +1906,7 @@ func (t *trackedFile) setProjectedContent(content string) {
 	defer t.stateMu.Unlock()
 	t.projectedContentKnown = true
 	t.hash = projectedHashString(content)
-	t.projectedContent = content
+	t.projectedContent = ""
 	t.projectedState = nil
 }
 
@@ -1916,6 +1915,11 @@ func (t *trackedFile) setProjectedBase(content string, state []byte) {
 	defer t.stateMu.Unlock()
 	t.projectedContentKnown = true
 	t.hash = projectedHashString(content)
+	if len(state) == 0 || len(content)+len(state) > trackedProjectedBaseCacheMaxBytes {
+		t.projectedContent = ""
+		t.projectedState = nil
+		return
+	}
 	t.projectedContent = content
 	t.projectedState = append([]byte(nil), state...)
 }
@@ -1930,7 +1934,7 @@ func (t *trackedFile) setProjectedSnapshot(hash projectedContentHash, known bool
 		t.projectedState = nil
 		return
 	}
-	if hash != projectedHashString(t.projectedContent) {
+	if t.projectedContent == "" || hash != projectedHashString(t.projectedContent) {
 		t.projectedContent = ""
 		t.projectedState = nil
 	}

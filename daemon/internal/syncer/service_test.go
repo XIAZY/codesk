@@ -72,6 +72,15 @@ func newApplyingDocumentUpdateWebsocketTestRuntime(t *testing.T, cache *document
 	})
 }
 
+func withTrackedProjectedBaseCacheMaxBytes(t *testing.T, maxBytes int) {
+	t.Helper()
+	previous := trackedProjectedBaseCacheMaxBytes
+	trackedProjectedBaseCacheMaxBytes = maxBytes
+	t.Cleanup(func() {
+		trackedProjectedBaseCacheMaxBytes = previous
+	})
+}
+
 func TestComputeLocalTextEditsUsesUTF16Cursor(t *testing.T) {
 	edits, err := computeLocalTextEdits("a🙂b", "a🙂Xb")
 	if err != nil {
@@ -224,6 +233,49 @@ func TestCollectTrackedReconcileStatesUsesInMemoryProjectedBaseForDirtyFile(t *t
 	}
 	if loads != 0 {
 		t.Fatalf("dirty projected file should use in-memory projected base, got %d sqlite loads", loads)
+	}
+}
+
+func TestTrackedProjectedBaseCacheEvictsLargeBase(t *testing.T) {
+	withTrackedProjectedBaseCacheMaxBytes(t, 16)
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	tracked := &trackedFile{
+		DocumentID:   "doc_1",
+		DocumentPath: "log.txt",
+		cache:        cache,
+	}
+	content := "base content larger than cache\n"
+	doc := newDocWithText(t, content)
+	state := doc.EncodeStateAsUpdate()
+	if err := cache.storeDoc("doc_1", "log.txt", 1, doc); err != nil {
+		t.Fatalf("store doc: %v", err)
+	}
+	if err := tracked.storeProjectedBaseAtSeq(content, state, 1); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+	if _, _, known := tracked.projectedBase(); known {
+		t.Fatal("large projected base should not be retained in memory")
+	}
+
+	loads := 0
+	withDocumentProjectedBaseLoadHook(t, func(documentID string) {
+		loads++
+	})
+	gotContent, gotState, known, err := tracked.loadProjectedBase()
+	if err != nil {
+		t.Fatalf("load projected base: %v", err)
+	}
+	if !known || gotContent != content || len(gotState) == 0 {
+		t.Fatalf("projected base = known %v content %q state %d", known, gotContent, len(gotState))
+	}
+	if loads != 1 {
+		t.Fatalf("expected sqlite fallback load for evicted large base, got %d loads", loads)
+	}
+	if _, _, known := tracked.projectedBase(); known {
+		t.Fatal("large projected base should stay evicted after fallback load")
 	}
 }
 
