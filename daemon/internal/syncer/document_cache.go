@@ -1058,7 +1058,21 @@ func (c *workspaceStore) backfillProjectedBase(documentID, content string, state
 	if c == nil || documentID == "" || projectedSeq <= 0 || len(state) == 0 {
 		return
 	}
-	_ = c.storeProjectedBase(documentID, content, state, projectedSeq)
+	now := time.Now().UTC()
+	_ = c.withTx(func(tx *sql.Tx) error {
+		var projectionKnown int
+		err := tx.QueryRow(`select projection_known from documents where document_id = ? and projected_seq = ?`, documentID, projectedSeq).Scan(&projectionKnown)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if projectionKnown == 0 {
+			return nil
+		}
+		return c.storeProjectedBaseTx(tx, documentID, content, state, projectedSeq, now)
+	})
 }
 
 func (c *workspaceStore) deleteProjectedBase(documentID string) error {

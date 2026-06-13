@@ -643,6 +643,71 @@ func TestDocumentCacheProjectedBaseFallsBackAndBackfillsStaleRow(t *testing.T) {
 	}
 }
 
+func TestDocumentCacheProjectedBaseBackfillDoesNotMoveProjectionBackward(t *testing.T) {
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base")
+	if err := cache.storeDoc("doc_1", "docs/spec.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	baseRow, err := cache.ensureDocument("doc_1", "docs/spec.md")
+	if err != nil {
+		t.Fatalf("load base row: %v", err)
+	}
+	baseSeq := baseRow.AppliedSeq
+	if err := cache.storeProjectedBase("doc_1", "base", baseDoc.EncodeStateAsUpdate(), baseSeq); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+
+	remoteDoc := crdt.New()
+	if err := crdt.ApplyUpdateV1(remoteDoc, baseDoc.EncodeStateAsUpdate(), "base"); err != nil {
+		t.Fatalf("apply base to remote doc: %v", err)
+	}
+	remoteSeq := appendAndApplyRemoteText(t, cache, remoteDoc, "doc_1", "docs/spec.md", "base\nremote", "remote")
+	if remoteSeq <= baseSeq {
+		t.Fatalf("remote seq = %d, want after base seq %d", remoteSeq, baseSeq)
+	}
+	if _, err := cache.db.Exec(`delete from projected_bases where document_id = ?`, "doc_1"); err != nil {
+		t.Fatalf("delete projected base: %v", err)
+	}
+
+	var advanced bool
+	withProjectedBaseFallbackHook(t, func(documentID string, projectedSeq int64) {
+		if documentID != "doc_1" {
+			return
+		}
+		if projectedSeq != baseSeq {
+			t.Fatalf("fallback seq = %d, want old base seq %d", projectedSeq, baseSeq)
+		}
+		if err := cache.storeProjectedSeq(documentID, remoteSeq); err != nil {
+			t.Fatalf("advance projected seq before backfill: %v", err)
+		}
+		advanced = true
+	})
+	content, state, known, err := cache.loadProjectedBase("doc_1")
+	if err != nil {
+		t.Fatalf("load projected base: %v", err)
+	}
+	if !advanced {
+		t.Fatal("expected projected-base fallback hook to advance projection")
+	}
+	if !known || content != "base" || len(state) == 0 {
+		t.Fatalf("projected base = known %v content %q state %d, want reconstructed old base returned to caller", known, content, len(state))
+	}
+	row, err := cache.ensureDocument("doc_1", "docs/spec.md")
+	if err != nil {
+		t.Fatalf("reload row: %v", err)
+	}
+	if row.ProjectedSeq != remoteSeq {
+		t.Fatalf("fallback backfill moved projected seq to %d, want newer seq %d", row.ProjectedSeq, remoteSeq)
+	}
+	if base, ok, err := cache.loadProjectedBaseRowByDocumentID("doc_1"); err != nil || ok {
+		t.Fatalf("guarded backfill must not install old projected base after cursor advanced, ok=%v base=%#v err=%v", ok, base, err)
+	}
+}
+
 func TestDocumentCacheProjectedBaseFallbackBackfillFailureIsNonFatal(t *testing.T) {
 	cache, err := newDocumentCache(t.TempDir())
 	if err != nil {
