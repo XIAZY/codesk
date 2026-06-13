@@ -5,7 +5,8 @@ import "time"
 type WorkspaceState struct {
 	WorkspaceID         string                         `json:"workspaceId"`
 	Name                string                         `json:"name"`
-	Documents           map[string]*Document           `json:"documents"`
+	RootDocumentID      string                         `json:"rootDocumentId"`
+	ContentDocuments    map[string]*Document           `json:"contentDocuments"`
 	Users               map[string]*User               `json:"users"`
 	Daemons             map[string]*Daemon             `json:"daemons"`
 	Agents              map[string]*Agent              `json:"agents"`
@@ -21,8 +22,7 @@ type WorkspaceState struct {
 
 type Document struct {
 	ID           string    `json:"id"`
-	Path         string    `json:"path"`
-	Title        string    `json:"title"`
+	Hidden       bool      `json:"hidden,omitempty"`
 	StateVector  string    `json:"stateVector,omitempty"`
 	UpdateID     int64     `json:"updateId,omitempty"`
 	UpdatedAt    time.Time `json:"updatedAt"`
@@ -31,8 +31,6 @@ type Document struct {
 
 type DocumentMetadata struct {
 	ID           string    `json:"id"`
-	Path         string    `json:"path"`
-	Title        string    `json:"title"`
 	StateVector  string    `json:"stateVector,omitempty"`
 	UpdateID     int64     `json:"updateId,omitempty"`
 	UpdatedAt    time.Time `json:"updatedAt"`
@@ -325,14 +323,7 @@ type ReplyThreadRequest struct {
 	Kind   string `json:"kind"`
 }
 
-type CreateDocumentRequest struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
-}
-
-type UpdateDocumentRequest struct {
-	Path string `json:"path"`
-}
+type CreateDocumentRequest struct{}
 
 type UpsertPresenceRequest struct {
 	ActorID    string `json:"actorId"`
@@ -426,24 +417,6 @@ type EventEnvelope struct {
 	Data interface{} `json:"data"`
 }
 
-type DocumentUpdateEvent struct {
-	DocumentID string    `json:"documentId"`
-	UpdateID   int64     `json:"updateId,omitempty"`
-	Update     string    `json:"update"`
-	Path       string    `json:"path"`
-	UpdatedAt  time.Time `json:"updatedAt"`
-	ActorID    string    `json:"actorId"`
-}
-
-type DocumentLifecycleEvent struct {
-	DocumentID string    `json:"documentId"`
-	Path       string    `json:"path"`
-	OldPath    string    `json:"oldPath,omitempty"`
-	Title      string    `json:"title"`
-	UpdatedAt  time.Time `json:"updatedAt"`
-	ActorID    string    `json:"actorId"`
-}
-
 type AgentInboxChangedEvent struct {
 	WorkspaceID      string `json:"workspaceId"`
 	DaemonID         string `json:"daemonId,omitempty"`
@@ -464,8 +437,6 @@ func documentMetadata(document *Document) *DocumentMetadata {
 	}
 	return &DocumentMetadata{
 		ID:           document.ID,
-		Path:         document.Path,
-		Title:        document.Title,
 		StateVector:  document.StateVector,
 		UpdateID:     document.UpdateID,
 		UpdatedAt:    document.UpdatedAt,

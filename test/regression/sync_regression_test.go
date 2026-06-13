@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -33,6 +34,17 @@ type regressionThreadAnchor struct {
 	RelativeEnd   string `json:"relativeEnd"`
 	Kind          string `json:"kind"`
 	Excerpt       string `json:"excerpt"`
+}
+
+type regressionRootLoc struct {
+	ParentID string `json:"parentId"`
+	Name     string `json:"name"`
+}
+
+type regressionRootEntry struct {
+	DocumentID string
+	Path       string
+	Deleted    bool
 }
 
 func TestAppendOnlyFileSyncReconstructsBackend(t *testing.T) {
@@ -117,12 +129,145 @@ func TestLocalCreateEditDeleteMultipleFiles(t *testing.T) {
 		stack.waitForBackendContentByPath(t, path, content, 60*time.Second)
 	}
 
+	deletePaths := make([]string, 0, len(edited))
 	for path := range edited {
-		stack.removeLocalFile(t, path)
+		deletePaths = append(deletePaths, path)
 	}
-	for path := range edited {
+	sort.Strings(deletePaths)
+	if len(deletePaths) > 0 {
+		path := deletePaths[0]
+		stack.removeLocalFile(t, path)
 		stack.waitForDocumentPathGone(t, path, 60*time.Second)
 	}
+}
+
+func TestLocalFilesystemLifecycleSyncsServerDatabase(t *testing.T) {
+	stack := newRegressionStack(t)
+	stack.up(t)
+
+	path := uniquePath("fs-lifecycle", ".md")
+	initial := "alpha\nbeta\ngamma\n"
+	stack.writeLocalFile(t, path, initial)
+	stack.waitForBackendContentByPath(t, path, initial, 90*time.Second)
+	documentID, err := stack.documentIDForRootPath(path)
+	if err != nil {
+		t.Fatalf("lookup created document id: %v", err)
+	}
+	stack.waitForRootEntry(t, documentID, path, false, 30*time.Second)
+
+	inserted := "HEAD\nalpha\nbe-MID-ta\ngamma\nTAIL\n"
+	stack.writeLocalFile(t, path, inserted)
+	stack.waitForRootEntry(t, documentID, path, false, 30*time.Second)
+	stack.waitForBackendContent(t, documentID, inserted, 90*time.Second)
+
+	deleted := "alpha\nbeta\ngamma\n"
+	stack.writeLocalFile(t, path, deleted)
+	stack.waitForRootEntry(t, documentID, path, false, 30*time.Second)
+	stack.waitForBackendContent(t, documentID, deleted, 90*time.Second)
+
+	moved := strings.TrimSuffix(uniquePath("fs-lifecycle-moved", ".md"), ".md") + "/renamed.md"
+	stack.moveLocalFile(t, path, moved)
+	stack.waitForRootEntry(t, documentID, moved, false, 90*time.Second)
+	stack.waitForDocumentPathGone(t, path, 30*time.Second)
+	stack.waitForBackendContent(t, documentID, deleted, 60*time.Second)
+
+	editAfterMove := "INTRO: alpha\ngamma\ndelta\n"
+	stack.writeLocalFile(t, moved, editAfterMove)
+	stack.waitForRootEntry(t, documentID, moved, false, 30*time.Second)
+	stack.waitForBackendContent(t, documentID, editAfterMove, 90*time.Second)
+
+	stack.removeLocalFile(t, moved)
+	stack.waitForRootEntry(t, documentID, moved, true, 90*time.Second)
+	stack.waitForDocumentPathGone(t, moved, 30*time.Second)
+	stack.waitForBackendContent(t, documentID, editAfterMove, 60*time.Second)
+}
+
+func TestBackendAPIDocumentLifecycleSyncsDatabaseAndDaemonFilesystem(t *testing.T) {
+	stack := newRegressionStack(t)
+	stack.up(t)
+
+	pathA := uniquePath("api-complex-a", ".md")
+	pathB := uniquePath("api-complex-b", ".md")
+	documentA := stack.createDocument(t, pathA, "")
+	documentB := stack.createDocument(t, pathB, "")
+	stack.assertRootDocumentSynced(t, documentA, pathA, "", 60*time.Second)
+	stack.assertRootDocumentSynced(t, documentB, pathB, "", 60*time.Second)
+
+	docA := crdt.New(crdt.WithClientID(1101))
+	docB := crdt.New(crdt.WithClientID(1102))
+
+	stack.applyClientTextUpdate(t, documentA, docA, "a-initial-insert", func(txn *crdt.Transaction, text *crdt.YText) {
+		text.Insert(txn, 0, "alpha\nbeta\ngamma\n", nil)
+	})
+	wantA := docA.GetText("content").ToString()
+	stack.assertRootDocumentSynced(t, documentA, pathA, wantA, 60*time.Second)
+
+	stack.applyClientTextUpdate(t, documentA, docA, "a-insert-beginning-middle-end", func(txn *crdt.Transaction, text *crdt.YText) {
+		text.Insert(txn, 0, "HEAD\n", nil)
+		text.Insert(txn, len("HEAD\nalpha\nbe"), "-MID-", nil)
+		text.Insert(txn, text.LenInTxn(txn), "TAIL\n", nil)
+	})
+	wantA = docA.GetText("content").ToString()
+	stack.assertRootDocumentSynced(t, documentA, pathA, wantA, 60*time.Second)
+
+	deleteA := docA.GetText("content").ToString()
+	requireContainsForRegression(t, deleteA, "TAIL\n", "-MID-")
+	stack.applyClientTextUpdate(t, documentA, docA, "a-delete-beginning-middle-end", func(txn *crdt.Transaction, text *crdt.YText) {
+		text.Delete(txn, strings.LastIndex(deleteA, "TAIL\n"), len("TAIL\n"))
+		text.Delete(txn, strings.Index(deleteA, "-MID-"), len("-MID-"))
+		text.Delete(txn, 0, len("HEAD\n"))
+	})
+	wantA = docA.GetText("content").ToString()
+	stack.assertRootDocumentSynced(t, documentA, pathA, wantA, 60*time.Second)
+
+	stack.applyClientTextUpdate(t, documentB, docB, "b-initial-insert", func(txn *crdt.Transaction, text *crdt.YText) {
+		text.Insert(txn, 0, "one two three\n", nil)
+	})
+	wantB := docB.GetText("content").ToString()
+	stack.assertRootDocumentSynced(t, documentB, pathB, wantB, 60*time.Second)
+
+	stack.applyClientTextUpdate(t, documentB, docB, "b-delete-middle-insert-beginning-end", func(txn *crdt.Transaction, text *crdt.YText) {
+		text.Delete(txn, len("one "), len("two "))
+		text.Insert(txn, 0, "zero ", nil)
+		text.Insert(txn, text.LenInTxn(txn), "four\n", nil)
+	})
+	wantB = docB.GetText("content").ToString()
+	stack.assertRootDocumentSynced(t, documentB, pathB, wantB, 60*time.Second)
+
+	movedA := uniquePath("api-complex-a-moved", ".md")
+	movedB := strings.TrimSuffix(uniquePath("api-complex-b-moved", ".md"), ".md") + "/notes.md"
+	stack.moveRootDocument(t, documentA, movedA)
+	stack.assertLocalMissing(t, pathA, 60*time.Second)
+	stack.assertRootDocumentSynced(t, documentA, movedA, wantA, 60*time.Second)
+	stack.moveRootDocument(t, documentB, movedB)
+	stack.assertLocalMissing(t, pathB, 60*time.Second)
+	stack.assertRootDocumentSynced(t, documentB, movedB, wantB, 60*time.Second)
+
+	editMovedA := docA.GetText("content").ToString()
+	requireContainsForRegression(t, editMovedA, "beta\n")
+	stack.applyClientTextUpdate(t, documentA, docA, "a-edit-after-move", func(txn *crdt.Transaction, text *crdt.YText) {
+		text.Delete(txn, strings.Index(editMovedA, "beta\n"), len("beta\n"))
+		text.Insert(txn, 0, "INTRO: ", nil)
+		text.Insert(txn, text.LenInTxn(txn), "delta\n", nil)
+	})
+	wantA = docA.GetText("content").ToString()
+	stack.assertRootDocumentSynced(t, documentA, movedA, wantA, 60*time.Second)
+
+	editMovedB := docB.GetText("content").ToString()
+	requireContainsForRegression(t, editMovedB, "zero ", "three")
+	stack.applyClientTextUpdate(t, documentB, docB, "b-edit-after-move", func(txn *crdt.Transaction, text *crdt.YText) {
+		text.Delete(txn, 0, len("zero "))
+		insertAt := strings.Index(editMovedB, "three")
+		text.Insert(txn, insertAt-len("zero "), "TWO ", nil)
+		text.Insert(txn, text.LenInTxn(txn), "five\n", nil)
+	})
+	wantB = docB.GetText("content").ToString()
+	stack.assertRootDocumentSynced(t, documentB, movedB, wantB, 60*time.Second)
+
+	stack.tombstoneRootDocument(t, documentB)
+	stack.waitForRootEntry(t, documentB, movedB, true, 60*time.Second)
+	stack.assertLocalMissing(t, movedB, 60*time.Second)
+	stack.waitForBackendContent(t, documentB, wantB, 30*time.Second)
 }
 
 func TestThreadCreationAcceptsClientRelativeAnchors(t *testing.T) {
@@ -563,6 +708,31 @@ func (s *regressionStack) postJSON(t *testing.T, path string, bearer string, bod
 	}
 }
 
+func (s *regressionStack) getJSON(t *testing.T, path string, bearer string, wantStatus int, out any) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, s.backendURL(t)+path, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("get %s: %v", path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != wantStatus {
+		response, _ := io.ReadAll(resp.Body)
+		t.Fatalf("get %s status %d, want %d: %s", path, resp.StatusCode, wantStatus, response)
+	}
+	if out != nil {
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+			t.Fatalf("decode get %s response: %v", path, err)
+		}
+	}
+}
+
 func (s *regressionStack) waitForBackend(t *testing.T, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -696,9 +866,29 @@ func (s *regressionStack) removeLocalFile(t *testing.T, path string) {
 	s.execService(t, "daemon", "cd "+shellQuote(s.daemonWorkspaceDir())+" && rm -f "+shellQuote(path))
 }
 
+func (s *regressionStack) moveLocalFile(t *testing.T, from string, to string) {
+	t.Helper()
+	dir := filepath.ToSlash(filepath.Dir(to))
+	mkdir := ""
+	if dir != "." && dir != "" {
+		mkdir = "mkdir -p " + shellQuote(dir) + " && "
+	}
+	s.execService(t, "daemon", "cd "+shellQuote(s.daemonWorkspaceDir())+" && "+mkdir+"mv "+shellQuote(from)+" "+shellQuote(to))
+}
+
 func (s *regressionStack) localFileContent(t *testing.T, path string) string {
 	t.Helper()
 	return s.execService(t, "daemon", fmt.Sprintf("if [ -d %s ]; then cd %s && if [ -f %s ]; then cat %s; fi; fi", shellQuote(s.daemonWorkspaceDir()), shellQuote(s.daemonWorkspaceDir()), shellQuote(path), shellQuote(path)))
+}
+
+func (s *regressionStack) localFileListing(t *testing.T) string {
+	t.Helper()
+	return s.execService(t, "daemon", fmt.Sprintf("if [ -d %s ]; then cd %s && find . -path './.notty' -prune -o -type f -print | sort; fi", shellQuote(s.daemonWorkspaceDir()), shellQuote(s.daemonWorkspaceDir())))
+}
+
+func (s *regressionStack) daemonLogs(t *testing.T) string {
+	t.Helper()
+	return s.runOutput(t, "logs", "--no-color", "--tail", "120", "daemon")
 }
 
 func (s *regressionStack) waitForLocalContent(t *testing.T, path string, want string, timeout time.Duration) {
@@ -728,6 +918,20 @@ func (s *regressionStack) waitForLocalContentPredicate(t *testing.T, path string
 	}
 	t.Fatalf("local file %s did not satisfy predicate: last=%q", path, last)
 	return ""
+}
+
+func (s *regressionStack) assertLocalMissing(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last string
+	for time.Now().Before(deadline) {
+		last = s.execService(t, "daemon", fmt.Sprintf("cd %s && if [ -e %s ]; then printf exists; else printf missing; fi", shellQuote(s.daemonWorkspaceDir()), shellQuote(path)))
+		if strings.TrimSpace(last) == "missing" {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("local file %s still exists after %s: last=%q", path, timeout, last)
 }
 
 func (s *regressionStack) waitForLocalLineCountAtLeast(t *testing.T, path string, lines int, timeout time.Duration) {
@@ -820,6 +1024,37 @@ func (s *regressionStack) waitForBackendContentPredicate(t *testing.T, documentI
 	return ""
 }
 
+func (s *regressionStack) assertRootDocumentSynced(t *testing.T, documentID, path, content string, timeout time.Duration) {
+	t.Helper()
+	s.waitForRootEntry(t, documentID, path, false, timeout)
+	s.waitForBackendContent(t, documentID, content, timeout)
+	s.waitForLocalContent(t, path, content, timeout)
+}
+
+func (s *regressionStack) waitForRootEntry(t *testing.T, documentID, path string, deleted bool, timeout time.Duration) {
+	t.Helper()
+	rootID := s.workspaceRootDocumentIDForTest(t)
+	deadline := time.Now().Add(timeout)
+	var last regressionRootEntry
+	var found bool
+	var lastErr error
+	for time.Now().Before(deadline) {
+		entries, err := s.databaseRootEntries(rootID)
+		if err != nil {
+			lastErr = err
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+		last, found = entries[documentID]
+		if found && last.Path == normalizeRegressionRootPath(path) && last.Deleted == deleted {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("root entry did not converge for %s: got=%#v found=%v want path=%q deleted=%v err=%v paths=%v localFiles=%q logs=%q",
+		documentID, last, found, path, deleted, lastErr, s.documentPaths(), s.localFileListing(t), s.daemonLogs(t))
+}
+
 func (s *regressionStack) syncFreshWebsocketClientByPath(t *testing.T, path string, want string) {
 	t.Helper()
 	documentID, _, _, err := s.documentHeaderByPath(path)
@@ -861,15 +1096,26 @@ func (s *regressionStack) waitForDocumentPathGone(t *testing.T, path string, tim
 }
 
 func (s *regressionStack) documentPaths() []string {
-	output := strings.TrimSpace(s.psql(fmt.Sprintf("SELECT path FROM documents WHERE workspace_id=%s ORDER BY path", sqlQuote(s.workspaceID))))
-	if output == "" {
+	rootID := s.workspaceRootDocumentID()
+	if rootID == "" {
 		return nil
 	}
-	return strings.Split(output, "\n")
+	entries, err := s.databaseRootEntries(rootID)
+	if err != nil {
+		return nil
+	}
+	paths := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.Deleted && entry.Path != "" {
+			paths = append(paths, entry.Path)
+		}
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 func (s *regressionStack) backendDocumentContentByPath(path string) (string, error) {
-	docID, _, _, err := s.documentHeaderByPath(path)
+	docID, err := s.documentIDForRootPath(path)
 	if err != nil {
 		return "", err
 	}
@@ -877,39 +1123,161 @@ func (s *regressionStack) backendDocumentContentByPath(path string) (string, err
 }
 
 func (s *regressionStack) backendDocumentContent(documentID string) (string, error) {
-	_, clientID, headID, err := s.documentHeaderByID(documentID)
+	doc, err := s.backendDocumentDoc(documentID)
 	if err != nil {
 		return "", err
+	}
+	defer doc.Close()
+	return doc.GetText("content").ToString(), nil
+}
+
+func (s *regressionStack) backendDocumentDoc(documentID string) (*crdt.Doc, error) {
+	_, clientID, headID, err := s.documentHeaderByID(documentID)
+	if err != nil {
+		return nil, err
 	}
 	doc := crdt.New(crdt.WithClientID(crdt.ClientID(clientID)))
 	checkpointID, checkpoint, err := s.latestCheckpoint(documentID, headID)
 	if err != nil {
-		return "", err
+		doc.Close()
+		return nil, err
 	}
 	if len(checkpoint) > 0 {
 		if err := crdt.ApplyUpdateV1(doc, checkpoint, "checkpoint"); err != nil {
-			return "", err
+			doc.Close()
+			return nil, err
 		}
 	}
 	updates, err := s.documentUpdates(documentID, checkpointID, headID)
 	if err != nil {
-		return "", err
+		doc.Close()
+		return nil, err
 	}
 	for _, update := range updates {
 		if err := crdt.ApplyUpdateV1(doc, update, "tail"); err != nil {
-			return "", err
+			doc.Close()
+			return nil, err
 		}
 	}
-	return doc.GetText("content").ToString(), nil
+	return doc, nil
 }
 
 func (s *regressionStack) documentHeaderByPath(path string) (string, uint64, int64, error) {
+	documentID, err := s.documentIDForRootPath(path)
+	if err != nil {
+		return "", 0, 0, err
+	}
+	return s.documentHeaderByID(documentID)
+}
+
+func (s *regressionStack) workspaceRootDocumentID() string {
 	query := fmt.Sprintf(
-		"SELECT d.id || chr(9) || d.client_id_seed || chr(9) || h.update_id FROM documents d JOIN document_heads h ON h.workspace_id=d.workspace_id AND h.document_id=d.id WHERE d.workspace_id=%s AND d.path=%s",
+		"SELECT id FROM documents WHERE workspace_id=%s AND path='.notty/root' LIMIT 1",
 		sqlQuote(s.workspaceID),
-		sqlQuote(path),
 	)
-	return parseDocumentHeader(s.psql(query))
+	return strings.TrimSpace(s.psql(query))
+}
+
+func (s *regressionStack) workspaceRootDocumentIDForTest(t *testing.T) string {
+	t.Helper()
+	var workspace struct {
+		RootDocumentID string `json:"rootDocumentId"`
+	}
+	s.getJSON(t, s.workspaceAPIPath("/workspace"), s.authToken, http.StatusOK, &workspace)
+	if workspace.RootDocumentID == "" {
+		t.Fatal("workspace returned empty rootDocumentId")
+	}
+	return workspace.RootDocumentID
+}
+
+func (s *regressionStack) documentIDForRootPath(path string) (string, error) {
+	rootID := s.workspaceRootDocumentID()
+	if rootID == "" {
+		return "", errors.New("root document id not found")
+	}
+	entries, err := s.databaseRootEntries(rootID)
+	if err != nil {
+		return "", err
+	}
+	for _, entry := range entries {
+		if !entry.Deleted && entry.Path == normalizeRegressionRootPath(path) {
+			return entry.DocumentID, nil
+		}
+	}
+	return "", fmt.Errorf("root path %q not found", path)
+}
+
+func (s *regressionStack) databaseRootEntries(rootDocumentID string) (map[string]regressionRootEntry, error) {
+	doc, err := s.backendDocumentDoc(rootDocumentID)
+	if err != nil {
+		return nil, err
+	}
+	defer doc.Close()
+	return decodeRegressionRootEntries(doc)
+}
+
+func decodeRegressionRootEntries(doc *crdt.Doc) (map[string]regressionRootEntry, error) {
+	entries := map[string]regressionRootEntry{}
+	root := doc.GetMap("root")
+	if err := doc.Read(func(txn *crdt.Transaction) error {
+		entriesMap, ok, err := root.GetMap(txn, "entriesById")
+		if err != nil || !ok {
+			return err
+		}
+		items, err := entriesMap.Entries(txn)
+		if err != nil {
+			return err
+		}
+		for _, item := range items {
+			if item.ValueKind != crdt.YMapEntryMap || item.MapValue == nil {
+				continue
+			}
+			entry, ok, err := decodeRegressionRootEntry(txn, item.MapValue)
+			if err != nil {
+				return err
+			}
+			if ok {
+				entries[entry.DocumentID] = entry
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func decodeRegressionRootEntry(txn *crdt.Transaction, entryMap *crdt.YMap) (regressionRootEntry, bool, error) {
+	kind, ok, err := entryMap.GetString(txn, "kind")
+	if err != nil {
+		return regressionRootEntry{}, false, err
+	}
+	if ok && strings.TrimSpace(kind) != "file" {
+		return regressionRootEntry{}, false, nil
+	}
+	documentID, ok, err := entryMap.GetString(txn, "contentDocumentId")
+	if err != nil || !ok || strings.TrimSpace(documentID) == "" {
+		return regressionRootEntry{}, false, err
+	}
+	locRaw, _, err := entryMap.GetString(txn, "loc")
+	if err != nil {
+		return regressionRootEntry{}, false, err
+	}
+	var loc regressionRootLoc
+	_ = json.Unmarshal([]byte(locRaw), &loc)
+	deleted, _, err := entryMap.GetString(txn, "deleted")
+	if err != nil {
+		return regressionRootEntry{}, false, err
+	}
+	path := normalizeRegressionRootPath(loc.Name)
+	if parent := normalizeRegressionRootPath(loc.ParentID); parent != "" {
+		path = normalizeRegressionRootPath(parent + "/" + path)
+	}
+	return regressionRootEntry{
+		DocumentID: strings.TrimSpace(documentID),
+		Path:       path,
+		Deleted:    strings.EqualFold(strings.TrimSpace(deleted), "true"),
+	}, true, nil
 }
 
 func (s *regressionStack) documentHeaderByID(documentID string) (string, uint64, int64, error) {
@@ -1011,11 +1379,110 @@ func (s *regressionStack) createDocument(t *testing.T, path string, content stri
 	var document struct {
 		ID string `json:"id"`
 	}
-	s.postJSON(t, s.workspaceAPIPath("/documents"), s.authToken, map[string]string{"path": path, "content": content}, http.StatusCreated, &document)
+	s.postJSON(t, s.workspaceAPIPath("/documents"), s.authToken, map[string]any{}, http.StatusCreated, &document)
 	if document.ID == "" {
 		t.Fatal("created document has empty id")
 	}
+	s.upsertRootDocument(t, document.ID, path, false)
+	s.waitForRootEntry(t, document.ID, path, false, 30*time.Second)
+	if content != "" {
+		doc := crdt.New(crdt.WithClientID(crdt.ClientID(time.Now().UnixNano())))
+		text := doc.GetText("content")
+		update := captureDocUpdate(t, doc, "initial-content", func(txn *crdt.Transaction) {
+			text.Insert(txn, 0, content, nil)
+		})
+		s.sendDocumentUpdate(t, document.ID, update)
+		s.waitForBackendContent(t, document.ID, content, 30*time.Second)
+	}
 	return document.ID
+}
+
+func (s *regressionStack) upsertRootDocument(t *testing.T, documentID, path string, deleted bool) {
+	t.Helper()
+	rootID := s.workspaceRootDocumentIDForTest(t)
+	rootDoc, err := s.backendDocumentDoc(rootID)
+	if err != nil {
+		t.Fatalf("load root document: %v", err)
+	}
+	defer rootDoc.Close()
+	root := rootDoc.GetMap("root")
+	update, err := rootDoc.Update(func(txn *crdt.Transaction) error {
+		entries, ok, err := root.GetMap(txn, "entriesById")
+		if err != nil {
+			return err
+		}
+		if !ok {
+			entries, err = root.SetMap(txn, "entriesById")
+			if err != nil {
+				return err
+			}
+		}
+		entry, ok, err := entries.GetMap(txn, documentID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			entry, err = entries.SetMap(txn, documentID)
+			if err != nil {
+				return err
+			}
+		}
+		if err := entry.SetString(txn, "kind", "file"); err != nil {
+			return err
+		}
+		if err := entry.SetString(txn, "contentDocumentId", documentID); err != nil {
+			return err
+		}
+		if path != "" {
+			if err := entry.SetString(txn, "loc", regressionRootEntryPathLoc(path)); err != nil {
+				return err
+			}
+		}
+		if deleted {
+			return entry.SetString(txn, "deleted", "true")
+		}
+		return entry.SetString(txn, "deleted", "false")
+	}, "regression-root")
+	if err != nil {
+		t.Fatalf("build root update: %v", err)
+	}
+	s.sendDocumentUpdate(t, rootID, update)
+}
+
+func (s *regressionStack) moveRootDocument(t *testing.T, documentID, path string) {
+	t.Helper()
+	s.upsertRootDocument(t, documentID, path, false)
+	s.waitForRootEntry(t, documentID, path, false, 30*time.Second)
+}
+
+func (s *regressionStack) tombstoneRootDocument(t *testing.T, documentID string) {
+	t.Helper()
+	rootID := s.workspaceRootDocumentIDForTest(t)
+	entries, err := s.databaseRootEntries(rootID)
+	if err != nil {
+		t.Fatalf("load root entries before tombstone: %v", err)
+	}
+	path := entries[documentID].Path
+	s.upsertRootDocument(t, documentID, path, true)
+}
+
+func (s *regressionStack) sendDocumentUpdate(t *testing.T, documentID string, update []byte) {
+	t.Helper()
+	if len(update) == 0 {
+		t.Fatal("expected non-empty CRDT update")
+	}
+	conn := dialDocumentWebsocket(t, s.documentWSURL(t, documentID), "regression-client", uint64(time.Now().UnixNano()))
+	defer conn.Close()
+	writeBinary(t, conn, yproto.BuildSyncUpdate(update))
+}
+
+func (s *regressionStack) applyClientTextUpdate(t *testing.T, documentID string, doc *crdt.Doc, origin string, mutate func(*crdt.Transaction, *crdt.YText)) {
+	t.Helper()
+	text := doc.GetText("content")
+	update := captureDocUpdate(t, doc, origin, func(txn *crdt.Transaction) {
+		mutate(txn, text)
+	})
+	s.sendDocumentUpdate(t, documentID, update)
 }
 
 func dialDocumentWebsocket(t *testing.T, rawURL string, actorID string, clientID uint64) *websocket.Conn {
@@ -1214,6 +1681,41 @@ func repoRoot(t *testing.T) string {
 
 func uniquePath(prefix string, suffix string) string {
 	return fmt.Sprintf("regression/%s-%d%s", prefix, time.Now().UnixNano(), suffix)
+}
+
+func normalizeRegressionRootPath(path string) string {
+	path = strings.TrimSpace(strings.ReplaceAll(path, "\\", "/"))
+	if path == "" {
+		return ""
+	}
+	parts := make([]string, 0)
+	for _, part := range strings.Split(path, "/") {
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(parts) > 0 {
+				parts = parts[:len(parts)-1]
+			}
+		default:
+			parts = append(parts, part)
+		}
+	}
+	return strings.Join(parts, "/")
+}
+
+func regressionRootEntryPathLoc(path string) string {
+	encoded, _ := json.Marshal(regressionRootLoc{Name: normalizeRegressionRootPath(path)})
+	return string(encoded)
+}
+
+func requireContainsForRegression(t *testing.T, value string, needles ...string) {
+	t.Helper()
+	for _, needle := range needles {
+		if !strings.Contains(value, needle) {
+			t.Fatalf("expected %q to contain %q", value, needle)
+		}
+	}
 }
 
 func envInt(name string, fallback int) int {

@@ -14,6 +14,10 @@ export type DocumentItem = {
   id: string;
   path: string;
   title: string;
+};
+
+export type DocumentMetadata = {
+  id: string;
   stateVector?: string;
   updateId?: number;
   updatedAt: string;
@@ -149,10 +153,10 @@ export type PresenceItem = {
 
 export type WorkspaceState = {
   workspaceId: string;
+  rootDocumentId: string;
   currentUserId?: string;
   currentDaemonId?: string;
   name: string;
-  documents: DocumentItem[];
   users: UserItem[];
   daemons: Daemon[];
   agents: Agent[];

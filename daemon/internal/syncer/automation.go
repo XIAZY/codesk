@@ -142,15 +142,6 @@ func findThreadMessageByID(messages []*threadMessage, messageID string) *threadM
 	return nil
 }
 
-func findDocumentByID(documents []*document, documentID string) *document {
-	for _, current := range documents {
-		if current != nil && current.ID == documentID {
-			return current
-		}
-	}
-	return nil
-}
-
 func findAgentByID(agents []*agent, agentID string) *agent {
 	for _, current := range agents {
 		if current != nil && current.ID == agentID {
@@ -231,11 +222,6 @@ func summarizeNotification(notification *agentEvent, workspace *workspaceRespons
 	}
 	if notification.Type != "" {
 		parts = append(parts, notification.Type)
-	}
-	if workspace != nil {
-		if doc := findDocumentByID(workspace.Documents, notification.DocumentID); doc != nil {
-			parts = append(parts, doc.Path)
-		}
 	}
 	if workspace != nil {
 		if thread := findThreadByID(workspace.Threads, notification.ThreadID); thread != nil {

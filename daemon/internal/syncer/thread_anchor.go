@@ -3,10 +3,7 @@ package syncer
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/url"
 	"strings"
 	"unicode/utf16"
 
@@ -20,11 +17,11 @@ type resolvedThreadTarget struct {
 	excerpt string
 }
 
-func (s *Service) prepareDocumentThreadPayload(ctx context.Context, payload createThreadPayload) (createThreadPayload, error) {
+func (s *Service) prepareDocumentThreadPayload(ctx context.Context, run *agentRun, payload createThreadPayload) (createThreadPayload, error) {
 	if strings.TrimSpace(payload.Body) == "" {
 		return payload, fmt.Errorf("thread body is required")
 	}
-	document, err := s.resolveThreadDocument(ctx, payload)
+	document, err := s.resolveThreadDocument(ctx, run, payload)
 	if err != nil {
 		return payload, err
 	}
@@ -61,7 +58,7 @@ func (s *Service) runtimeForThreadAnchor(run *agentRun) *workspaceRuntime {
 	return s.primaryRuntime
 }
 
-func (s *Service) resolveThreadDocument(ctx context.Context, payload createThreadPayload) (*document, error) {
+func (s *Service) resolveThreadDocument(ctx context.Context, run *agentRun, payload createThreadPayload) (*document, error) {
 	documentID := strings.TrimSpace(payload.DocumentID)
 	path := strings.TrimSpace(payload.Path)
 	if documentID == "" && path == "" {
@@ -70,76 +67,110 @@ func (s *Service) resolveThreadDocument(ctx context.Context, payload createThrea
 	if documentID != "" && path != "" {
 		return nil, fmt.Errorf("provide only one of document-id or path")
 	}
-	if doc := s.findLatestDocument(documentID, path); doc != nil {
-		return doc, nil
-	}
-	if err := s.refreshLatestWorkspaceForLookup(ctx); err != nil {
-		return nil, err
-	}
-	if doc := s.findLatestDocument(documentID, path); doc != nil {
-		return doc, nil
-	}
 	if path != "" {
-		return s.fetchDocumentByPath(ctx, path)
+		return s.lookupDocumentByRootProjection(ctx, run, path)
+	}
+	runtime := s.runtimeForThreadAnchor(run)
+	if runtime == nil {
+		return nil, fmt.Errorf("workspace runtime is unavailable")
+	}
+	if doc, ok, err := runtime.documentForIDLookup(documentID); err != nil {
+		return nil, err
+	} else if ok {
+		return doc, nil
 	}
 	return nil, fmt.Errorf("document %s not found", documentID)
 }
 
-func (s *Service) findLatestDocument(documentID, path string) *document {
-	s.mu.Lock()
-	workspace := s.latestWorkspace
-	s.mu.Unlock()
-	if workspace == nil {
-		return nil
+func (s *Service) lookupDocumentByRootProjection(ctx context.Context, run *agentRun, path string) (*document, error) {
+	path, err := normalizeVisibleRootPath(path)
+	if err != nil {
+		return nil, err
 	}
-	for _, doc := range workspace.Documents {
-		if doc == nil {
+	runtime := s.runtimeForThreadAnchor(run)
+	if runtime != nil && runtime.rootDocumentID != "" && runtime.docCache != nil {
+		documentID, ok, err := runtime.resolveDocumentIDByProjectedPath(path)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			return runtime.documentForPathLookup(documentID, path), nil
+		}
+		return nil, fmt.Errorf("document path %q not found in root projection", path)
+	}
+	return nil, fmt.Errorf("document path %q not found", path)
+}
+
+func (r *workspaceRuntime) resolveDocumentIDByProjectedPath(path string) (string, bool, error) {
+	if r == nil || r.docCache == nil || r.rootDocumentID == "" {
+		return "", false, nil
+	}
+	path, err := normalizeVisibleRootPath(path)
+	if err != nil {
+		return "", false, err
+	}
+	projection, err := r.docCache.loadRootProjectionEntries(r.rootDocumentID)
+	if err != nil {
+		return "", false, err
+	}
+	matches := []string{}
+	for _, entry := range projection {
+		materialized, err := normalizeVisibleRootPath(entry.MaterializedPath)
+		if err != nil || !entry.Active || materialized != path || entry.ContentDocumentID == "" {
 			continue
 		}
-		if documentID != "" && doc.ID == documentID {
-			copy := *doc
-			return &copy
-		}
-		if path != "" && doc.Path == path {
-			copy := *doc
-			return &copy
-		}
+		matches = append(matches, entry.ContentDocumentID)
 	}
-	return nil
+	if len(matches) > 1 {
+		return "", false, fmt.Errorf("document path %q is ambiguous", path)
+	}
+	if len(matches) == 1 {
+		return matches[0], true, nil
+	}
+	entry, unlock := r.docCache.lockEntry(r.rootDocumentID)
+	doc, _, _, err := r.docCache.loadBaseDocLocked(entry, r.rootDocumentID, rootDocumentPath)
+	unlock()
+	if err != nil {
+		return "", false, err
+	}
+	tree, err := DecodeRootTree(doc)
+	doc.Close()
+	if err != nil {
+		return "", false, err
+	}
+	documentID, ok := ResolveRootPath(tree, path)
+	return documentID, ok, nil
 }
 
-func (s *Service) refreshLatestWorkspaceForLookup(ctx context.Context) error {
-	workspace, err := s.fetchWorkspace(ctx)
-	if err != nil {
-		return err
+func (r *workspaceRuntime) documentForPathLookup(documentID, path string) *document {
+	if r == nil || documentID == "" {
+		return nil
 	}
-	s.mu.Lock()
-	s.latestWorkspace = workspace
-	s.mu.Unlock()
-	return nil
+	return &document{ID: documentID, Path: path}
 }
 
-func (s *Service) fetchDocumentByPath(ctx context.Context, path string) (*document, error) {
-	req, err := s.newBackendRequest(ctx, http.MethodGet, "/api/documents/by-path?path="+url.QueryEscape(path), nil)
+func (r *workspaceRuntime) documentForIDLookup(documentID string) (*document, bool, error) {
+	if r == nil || strings.TrimSpace(documentID) == "" {
+		return nil, false, nil
+	}
+	documentID = strings.TrimSpace(documentID)
+	if documentID == r.rootDocumentID {
+		return &document{ID: documentID, Path: rootDocumentPath}, true, nil
+	}
+	if r.docCache == nil || r.rootDocumentID == "" {
+		return &document{ID: documentID}, true, nil
+	}
+	projection, err := r.docCache.loadRootProjectionEntries(r.rootDocumentID)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	res, err := s.client.Do(req)
-	if err != nil {
-		return nil, err
+	for _, entry := range projection {
+		if !entry.Active || entry.ContentDocumentID != documentID {
+			continue
+		}
+		return &document{ID: documentID, Path: entry.MaterializedPath}, true, nil
 	}
-	defer res.Body.Close()
-	if res.StatusCode >= http.StatusBadRequest {
-		return nil, fmt.Errorf("get document by path failed: %s", res.Status)
-	}
-	var response toolDocumentResponse
-	if err := json.NewDecoder(res.Body).Decode(&response); err != nil {
-		return nil, err
-	}
-	if response.Document == nil {
-		return nil, fmt.Errorf("document path %q not found", path)
-	}
-	return response.Document, nil
+	return nil, false, nil
 }
 
 func resolveThreadTarget(content string, payload createThreadPayload) (resolvedThreadTarget, error) {

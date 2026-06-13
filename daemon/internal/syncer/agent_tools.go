@@ -86,48 +86,28 @@ type toolDocumentViewResponse struct {
 	View any `json:"view"`
 }
 
-func (s *Service) listDocumentsForRun(ctx context.Context) (*toolDocumentsResponse, error) {
-	req, err := s.newBackendRequest(ctx, http.MethodGet, "/api/workspace", nil)
+func (s *Service) listDocumentsForRun(ctx context.Context, run *agentRun) (*toolDocumentsResponse, error) {
+	runtime := s.runtimeForThreadAnchor(run)
+	if runtime == nil {
+		return nil, fmt.Errorf("workspace runtime is unavailable")
+	}
+	documents, err := runtime.documentsFromRootProjection()
 	if err != nil {
 		return nil, err
 	}
-	res, err := s.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-	if res.StatusCode >= http.StatusBadRequest {
-		return nil, fmt.Errorf("list documents failed: %s", res.Status)
-	}
-	var response toolDocumentsResponse
-	if err := json.NewDecoder(res.Body).Decode(&response); err != nil {
-		return nil, err
-	}
-	return &response, nil
+	return &toolDocumentsResponse{Documents: documents}, nil
 }
 
-func (s *Service) getDocumentByPathForRun(ctx context.Context, path string) (*toolDocumentResponse, error) {
+func (s *Service) getDocumentByPathForRun(ctx context.Context, run *agentRun, path string) (*toolDocumentResponse, error) {
 	trimmed := strings.TrimSpace(path)
 	if trimmed == "" {
 		return nil, fmt.Errorf("document path is required")
 	}
-	req, err := s.newBackendRequest(ctx, http.MethodGet, "/api/documents/by-path?path="+url.QueryEscape(trimmed), nil)
+	document, err := s.lookupDocumentByRootProjection(ctx, run, trimmed)
 	if err != nil {
 		return nil, err
 	}
-	res, err := s.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-	if res.StatusCode >= http.StatusBadRequest {
-		return nil, fmt.Errorf("get document by path failed: %s", res.Status)
-	}
-	var response toolDocumentResponse
-	if err := json.NewDecoder(res.Body).Decode(&response); err != nil {
-		return nil, err
-	}
-	return &response, nil
+	return &toolDocumentResponse{Document: document}, nil
 }
 
 func (s *Service) getThreadForRun(ctx context.Context, threadID string) (*toolThreadResponse, error) {
@@ -387,7 +367,7 @@ func (s *Service) createThreadAsRun(ctx context.Context, run *agentRun, payload 
 		return nil, fmt.Errorf("missing agent run context")
 	}
 	if payload.Document {
-		prepared, err := s.prepareDocumentThreadPayload(ctx, payload)
+		prepared, err := s.prepareDocumentThreadPayload(ctx, run, payload)
 		if err != nil {
 			return nil, err
 		}
@@ -410,7 +390,7 @@ func (s *Service) queueThreadCreateAsRun(ctx context.Context, run *agentRun, pay
 	if strings.TrimSpace(payload.Body) == "" {
 		return "", fmt.Errorf("thread body is required")
 	}
-	document, err := s.resolveThreadDocument(ctx, payload)
+	document, err := s.resolveThreadDocument(ctx, run, payload)
 	if err != nil {
 		return "", err
 	}

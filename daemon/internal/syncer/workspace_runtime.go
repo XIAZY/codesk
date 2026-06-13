@@ -16,6 +16,8 @@ import (
 
 const workspaceReconcileMinInterval = 2 * time.Second
 const localCreateReconcileWake = "__local_create__"
+const localPathChangeReconcileWake = "__local_path_change__"
+const rootDocumentPath = ".notty/root"
 
 type workspaceRuntime struct {
 	cfg                Config
@@ -28,6 +30,8 @@ type workspaceRuntime struct {
 	documentSocket     *workspaceDocumentSocket
 	threadDeliveryWake chan struct{}
 	initialWorkspace   *workspaceResponse
+	rootDocumentID     string
+	sendDocumentUpdate func(context.Context, string, outboxUpdateRecord) error
 }
 
 func (r *workspaceRuntime) fetchWorkspace(ctx context.Context) (*workspaceResponse, error) {
@@ -214,22 +218,14 @@ func (r *workspaceRuntime) applyWorkspace(ctx context.Context, workspace *worksp
 	if r == nil {
 		return nil
 	}
-	if r.replica != nil {
-		if err := r.replica.applyWorkspace(ctx, workspace); err != nil {
-			return err
-		}
-	}
-	documents := []*document(nil)
 	if workspace != nil {
-		documents = workspace.Documents
+		r.rootDocumentID = strings.TrimSpace(workspace.RootDocumentID)
 	}
-	if r.documentSocket != nil {
-		r.documentSocket.SetDesiredDocuments(documents)
+	if err := r.updateDesiredDocumentsFromRootProjection(); err != nil {
+		return err
 	}
-	for _, document := range documents {
-		if document != nil && document.ID != "" && !isIgnoredDocumentPath(document.Path) {
-			r.markDocumentDirty(document.ID)
-		}
+	if r.rootDocumentID != "" {
+		r.markDocumentDirty(r.rootDocumentID)
 	}
 	return nil
 }
@@ -285,6 +281,11 @@ func (r *workspaceRuntime) reconcileLoop(ctx context.Context) {
 		}
 		stopTimer()
 		lastRun = now
+		requeuePathChanges := false
+		requeuePathChanges, pathChangeErr := r.processPathChanges(ctx)
+		if pathChangeErr != nil && ctx.Err() == nil {
+			fmt.Printf("path change reconcile error: %v\n", pathChangeErr)
+		}
 		localCreateErr := r.processLocalCreates(ctx)
 		if localCreateErr != nil && ctx.Err() == nil {
 			fmt.Printf("local create reconcile error: %v\n", localCreateErr)
@@ -294,6 +295,12 @@ func (r *workspaceRuntime) reconcileLoop(ctx context.Context) {
 		}
 		if localCreateErr != nil && ctx.Err() == nil {
 			r.markDocumentDirty(localCreateReconcileWake)
+		}
+		if pathChangeErr != nil && ctx.Err() == nil {
+			r.markDocumentDirty(localPathChangeReconcileWake)
+		}
+		if requeuePathChanges {
+			r.markDocumentDirty(localPathChangeReconcileWake)
 		}
 		if r.reconcileQueue.Len() > 0 {
 			arm(workspaceReconcileMinInterval)

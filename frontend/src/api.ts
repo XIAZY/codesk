@@ -2,7 +2,7 @@ import type {
   Agent,
   AuthResponse,
   Daemon,
-  DocumentItem,
+  DocumentMetadata,
   ThreadItem,
   WorkspaceState,
   WorkspaceSummary,
@@ -72,23 +72,10 @@ export class ApiClient {
     return this.request<WorkspaceState>(workspacePath(workspaceId, "/workspace"));
   }
 
-  async createDocument(workspaceId: string, input: { path: string; content?: string }) {
-    return this.request<DocumentItem>(workspacePath(workspaceId, "/documents"), {
+  async createDocument(workspaceId: string) {
+    return this.request<DocumentMetadata>(workspacePath(workspaceId, "/documents"), {
       method: "POST",
-      body: JSON.stringify(input),
-    });
-  }
-
-  async renameDocument(workspaceId: string, documentId: string, path: string) {
-    return this.request<DocumentItem>(workspacePath(workspaceId, `/documents/${encodeURIComponent(documentId)}`), {
-      method: "PATCH",
-      body: JSON.stringify({ path }),
-    });
-  }
-
-  async deleteDocument(workspaceId: string, documentId: string) {
-    return this.request<{ status: string }>(workspacePath(workspaceId, `/documents/${encodeURIComponent(documentId)}`), {
-      method: "DELETE",
+      body: JSON.stringify({}),
     });
   }
 

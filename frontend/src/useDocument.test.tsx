@@ -46,7 +46,6 @@ function document(id: string, path = `${id}.md`): DocumentItem {
     id,
     path,
     title: path,
-    updatedAt: "now",
   };
 }
 

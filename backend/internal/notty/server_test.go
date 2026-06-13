@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 	crdt "notty/internal/ycrdt"
@@ -44,6 +45,39 @@ func TestCloneThreadPreservesEmptyArrays(t *testing.T) {
 	}
 }
 
+func TestBackendTextTruncationPreservesUTF8(t *testing.T) {
+	input := strings.Repeat("a", 238) + "可见多"
+	got := truncateText(input, 240)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncateText returned invalid UTF-8: % x", []byte(got))
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("expected truncateText to append ellipsis, got %q", got)
+	}
+	if strings.ContainsRune(got, utf8.RuneError) {
+		t.Fatalf("truncateText split a valid UTF-8 rune: %q", got)
+	}
+
+	fixed := truncateString(input, 240)
+	if !utf8.ValidString(fixed) {
+		t.Fatalf("truncateString returned invalid UTF-8: % x", []byte(fixed))
+	}
+	if runeCount(fixed) > 240 {
+		t.Fatalf("expected fixed-width truncation to stay within limit, got %d runes", runeCount(fixed))
+	}
+}
+
+func TestBackendTextTruncationSanitizesInvalidUTF8(t *testing.T) {
+	input := "prefix " + string([]byte{0xe5, 0x8f}) + " suffix"
+	got := truncateText(input, 240)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncateText returned invalid UTF-8: % x", []byte(got))
+	}
+	if !strings.ContainsRune(got, utf8.RuneError) {
+		t.Fatalf("expected invalid bytes to be replaced, got %q", got)
+	}
+}
+
 func TestWorkspaceEndpointsOmitDocumentPayloads(t *testing.T) {
 	server, store := newTestServer(t)
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "sync me")
@@ -53,31 +87,276 @@ func TestWorkspaceEndpointsOmitDocumentPayloads(t *testing.T) {
 	if _, ok := payload["proposals"]; ok {
 		t.Fatal("expected /api/workspace to omit removed proposals state")
 	}
-	document := findDocumentPayload(t, payload, documentID)
-	if _, ok := document["crdtState"]; ok {
-		t.Fatal("expected /api/workspace document metadata to omit crdtState")
-	}
-	if _, ok := document["content"]; ok {
-		t.Fatal("expected /api/workspace document metadata to omit content")
-	}
-	if got := document["stateVector"].(string); got == "" {
-		t.Fatal("expected /api/workspace to retain document state vector")
-	}
-
-	byPath := performJSONRequest(t, router, http.MethodGet, "/api/documents/by-path?path=docs/spec.md", nil)
-	byPathDocument := byPath["document"].(map[string]any)
-	if _, ok := byPathDocument["crdtState"]; ok {
-		t.Fatal("expected /api/documents/by-path document metadata to omit crdtState")
-	}
-	if _, ok := byPathDocument["content"]; ok {
-		t.Fatal("expected /api/documents/by-path document metadata to omit content")
+	if _, ok := payload["documents"]; ok {
+		t.Fatal("expected /api/workspace to omit backend document list")
 	}
 
 	assertNonOK(t, router, http.MethodGet, "/api/workspace/sync", nil)
 	assertNonOK(t, router, http.MethodGet, "/api/documents", nil)
+	assertNonOK(t, router, http.MethodGet, "/api/documents/by-path?path=docs/spec.md", nil)
 	assertNonOK(t, router, http.MethodGet, "/api/documents/"+documentID, nil)
 	assertNonOK(t, router, http.MethodPost, "/api/documents/"+documentID+"/sync", []byte(`{"stateVector":""}`))
 	assertNonOK(t, router, http.MethodPost, "/api/proposals", []byte(`{}`))
+}
+
+func TestWorkspaceExposesRootDocumentIDAndHidesRootDocument(t *testing.T) {
+	server, store := newTestServer(t)
+	rootID := store.Snapshot().RootDocumentID
+	if rootID == "" {
+		t.Fatal("expected root document id")
+	}
+	if !store.HasDocument(rootID) {
+		t.Fatalf("root document %q is not syncable", rootID)
+	}
+
+	recorder := httptest.NewRecorder()
+	server.Routes().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/workspace", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("workspace status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode workspace: %v", err)
+	}
+	if payload["rootDocumentId"] != rootID {
+		t.Fatalf("rootDocumentId = %#v, want %q", payload["rootDocumentId"], rootID)
+	}
+	if _, ok := payload["documents"]; ok {
+		t.Fatalf("workspace REST response must not expose document namespace: %#v", payload["documents"])
+	}
+
+	assertNonOK(t, server.Routes(), http.MethodGet, "/api/documents/by-path?path=.notty/root", nil)
+}
+
+func TestWorkspaceEventSocketSnapshotOmitsDocumentList(t *testing.T) {
+	server, store := newTestServer(t)
+	_ = mustCreateTestDocument(t, store, "docs/spec.md", "hello")
+	httpServer := httptest.NewServer(server.Routes())
+	defer httpServer.Close()
+
+	conn := dialDocumentWebsocketForTest(t, httpServer.URL, "/ws")
+	defer conn.Close()
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set websocket read deadline: %v", err)
+	}
+	var event EventEnvelope
+	if err := conn.ReadJSON(&event); err != nil {
+		t.Fatalf("read workspace event snapshot: %v", err)
+	}
+	if event.Type != "workspace.snapshot" {
+		t.Fatalf("workspace event type = %q, want workspace.snapshot", event.Type)
+	}
+	data, ok := event.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("workspace snapshot data = %#v, want object", event.Data)
+	}
+	if _, ok := data["documents"]; ok {
+		t.Fatalf("workspace event socket snapshot must not carry documents: %#v", data["documents"])
+	}
+	if data["rootDocumentId"] != store.Snapshot().RootDocumentID {
+		t.Fatalf("rootDocumentId = %#v, want %q", data["rootDocumentId"], store.Snapshot().RootDocumentID)
+	}
+}
+
+func TestRootDocumentDoesNotBootstrapLegacyVisibleDocumentsOnReload(t *testing.T) {
+	_, store := newTestServer(t)
+	documentID := mustCreateTestDocument(t, store, "docs/legacy.md", "legacy")
+	if err := store.Reload(); err != nil {
+		t.Fatalf("reload store: %v", err)
+	}
+
+	rootID := store.Snapshot().RootDocumentID
+	rootDoc := syncDocumentToDocForTest(t, store, rootID, 909)
+	if rootEntryExistsForDocumentForTest(t, rootDoc, documentID) {
+		t.Fatalf("legacy backend document path for %s must not bootstrap a root entry", documentID)
+	}
+}
+
+func TestCreateDocumentAllocatesEmptyPathlessStream(t *testing.T) {
+	_, store := newTestServer(t)
+	first, err := store.CreateDocument(CreateDocumentRequest{}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create first document: %v", err)
+	}
+	second, err := store.CreateDocument(CreateDocumentRequest{}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create second document: %v", err)
+	}
+	if first.ID == second.ID {
+		t.Fatalf("pathless document creates must allocate different streams: %q", first.ID)
+	}
+	if got := syncedDocumentTextForTest(t, store, first.ID); got != "" {
+		t.Fatalf("created stream should start empty, got %q", got)
+	}
+	if got := syncedDocumentTextForTest(t, store, second.ID); got != "" {
+		t.Fatalf("second created stream should start empty, got %q", got)
+	}
+}
+
+func TestDocumentNamespaceMutationHTTPRoutesRemoved(t *testing.T) {
+	server, store := newTestServer(t)
+	documentID := mustCreateTestDocument(t, store, "docs/route.md", "content")
+	router := server.Routes()
+	for _, target := range []string{"/api/documents/" + documentID, "/api/workspaces/" + store.Snapshot().WorkspaceID + "/documents/" + documentID} {
+		assertNonOK(t, router, http.MethodPatch, target, []byte(`{"path":"docs/next.md"}`))
+		assertNonOK(t, router, http.MethodDelete, target, nil)
+	}
+}
+
+func TestApplyCRDTUpdateDoesNotPersistIdempotentUpdate(t *testing.T) {
+	_, store := newTestServer(t)
+	documentID := mustCreateTestDocument(t, store, "docs/idempotent.md", "")
+	peer := crdt.New()
+	defer peer.Close()
+	text := peer.GetText("content")
+	update := captureDocUpdate(t, peer, "peer", func(txn *crdt.Transaction) {
+		text.Insert(txn, 0, "alpha", nil)
+	})
+
+	first, err := store.ApplyCRDTUpdateWithResult(documentID, update, OperationMeta{ActorID: "peer", ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("apply first update: %v", err)
+	}
+	if !first.Applied {
+		t.Fatal("expected first update to apply")
+	}
+	second, err := store.ApplyCRDTUpdateWithResult(documentID, update, OperationMeta{ActorID: "peer", ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("apply duplicate update: %v", err)
+	}
+	if second.Applied {
+		t.Fatal("expected duplicate update to be ignored")
+	}
+	if second.Document.UpdateID != first.Document.UpdateID {
+		t.Fatalf("duplicate update advanced update id: got %d want %d", second.Document.UpdateID, first.Document.UpdateID)
+	}
+}
+
+func TestApplyCRDTUpdatePersistsDeleteOnlyUpdate(t *testing.T) {
+	_, store := newTestServer(t)
+	documentID := mustCreateTestDocument(t, store, "docs/delete-only.md", "")
+	peer := crdt.New()
+	defer peer.Close()
+	text := peer.GetText("content")
+	insertUpdate := captureDocUpdate(t, peer, "peer-insert", func(txn *crdt.Transaction) {
+		text.Insert(txn, 0, "HEAD\nalpha\nbe-MID-ta\ngamma\nTAIL\n", nil)
+	})
+	inserted, err := store.ApplyCRDTUpdateWithResult(documentID, insertUpdate, OperationMeta{ActorID: "peer", ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("apply insert update: %v", err)
+	}
+	if !inserted.Applied {
+		t.Fatal("expected insert update to apply")
+	}
+
+	deleteUpdate := captureDocUpdate(t, peer, "peer-delete", func(txn *crdt.Transaction) {
+		text.Delete(txn, len("HEAD\nalpha\nbe-MID-ta\ngamma\n"), len("TAIL\n"))
+		text.Delete(txn, len("HEAD\nalpha\nbe"), len("-MID-"))
+		text.Delete(txn, 0, len("HEAD\n"))
+	})
+	deleted, err := store.ApplyCRDTUpdateWithResult(documentID, deleteUpdate, OperationMeta{ActorID: "peer", ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("apply delete-only update: %v", err)
+	}
+	if !deleted.Applied {
+		t.Fatal("expected delete-only update to apply")
+	}
+	if got := currentDocumentContentForTest(t, store, documentID); got != "alpha\nbeta\ngamma\n" {
+		t.Fatalf("delete-only update content = %q", got)
+	}
+
+	replayed, err := store.ApplyCRDTUpdateWithResult(documentID, deleteUpdate, OperationMeta{ActorID: "peer", ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("replay delete-only update: %v", err)
+	}
+	if replayed.Applied {
+		t.Fatal("expected replayed delete-only update to be ignored")
+	}
+	if replayed.Document.UpdateID != deleted.Document.UpdateID {
+		t.Fatalf("replayed delete-only update advanced update id: got %d want %d", replayed.Document.UpdateID, deleted.Document.UpdateID)
+	}
+}
+
+func TestRootDocumentSyncsOverMuxWebsocket(t *testing.T) {
+	server, store := newTestServer(t)
+	rootID := store.Snapshot().RootDocumentID
+	httpServer := httptest.NewServer(server.Routes())
+	defer httpServer.Close()
+
+	conn := dialDocumentWebsocketForTest(t, httpServer.URL, "/ws/documents-sync")
+	defer conn.Close()
+	if err := conn.WriteMessage(websocket.BinaryMessage, yproto.BuildDocumentMessage(rootID, buildSyncStep1ForTest(crdt.New(crdt.WithClientID(707))))); err != nil {
+		t.Fatalf("write root sync step1: %v", err)
+	}
+	frame := readDocumentWebsocketFrameForTest(t, conn)
+	if frame.documentID != rootID {
+		t.Fatalf("root sync response document = %q, want %q", frame.documentID, rootID)
+	}
+	messageType, reader, err := yproto.DecodeProtocolMessage(frame.payload)
+	if err != nil {
+		t.Fatalf("decode root sync response: %v", err)
+	}
+	if messageType != yproto.MessageSync {
+		t.Fatalf("root sync top-level = %d, want sync", messageType)
+	}
+	syncType, _, err := yproto.DecodeSyncMessage(reader)
+	if err != nil {
+		t.Fatalf("decode root sync message: %v", err)
+	}
+	if syncType != yproto.SyncStep2 && syncType != yproto.SyncStep1 {
+		t.Fatalf("root sync type = %d, want step2 or step1", syncType)
+	}
+}
+
+func TestRootDocumentUpdatesStreamToRawRootSubscriber(t *testing.T) {
+	server, store := newTestServer(t)
+	rootID := store.Snapshot().RootDocumentID
+	httpServer := httptest.NewServer(server.Routes())
+	defer httpServer.Close()
+
+	reader := dialDocumentWebsocketForTest(t, httpServer.URL, "/ws/documents/"+rootID)
+	defer reader.Close()
+	rootRoom := server.rooms.ForDocument(store.Snapshot().WorkspaceID + ":" + rootID)
+	waitDocumentRoomSubscriberCount(t, rootRoom, 1)
+
+	writer := dialDocumentWebsocketForTest(t, httpServer.URL, "/ws/documents-sync")
+	defer writer.Close()
+
+	writerDoc := crdt.New(crdt.WithClientID(808))
+	defer writerDoc.Close()
+	readerDoc := crdt.New(crdt.WithClientID(909))
+	defer readerDoc.Close()
+	documentID := "doc_streamed_root"
+
+	upsert, err := upsertRootEntryForTest(writerDoc, documentID, "docs/a.md")
+	if err != nil {
+		t.Fatalf("build root upsert update: %v", err)
+	}
+	writeMuxRootUpdateForTest(t, writer, rootID, upsert)
+	applyRawRootStreamUpdateForTest(t, reader, readerDoc)
+	if path, deleted := rootEntryForDocumentForTest(t, readerDoc, documentID); path != "docs/a.md" || deleted {
+		t.Fatalf("projected root entry after upsert = path %q deleted %v, want docs/a.md false", path, deleted)
+	}
+
+	move, err := upsertRootEntryForTest(writerDoc, documentID, "docs/b.md")
+	if err != nil {
+		t.Fatalf("build root move update: %v", err)
+	}
+	writeMuxRootUpdateForTest(t, writer, rootID, move)
+	applyRawRootStreamUpdateForTest(t, reader, readerDoc)
+	if path, deleted := rootEntryForDocumentForTest(t, readerDoc, documentID); path != "docs/b.md" || deleted {
+		t.Fatalf("projected root entry after move = path %q deleted %v, want docs/b.md false", path, deleted)
+	}
+
+	tombstone, err := tombstoneRootEntryForTest(writerDoc, documentID)
+	if err != nil {
+		t.Fatalf("build root tombstone update: %v", err)
+	}
+	writeMuxRootUpdateForTest(t, writer, rootID, tombstone)
+	applyRawRootStreamUpdateForTest(t, reader, readerDoc)
+	if _, deleted := rootEntryForDocumentForTest(t, readerDoc, documentID); !deleted {
+		t.Fatal("projected root entry should be tombstoned after delete update")
+	}
 }
 
 func TestAgentDocumentDiffEndpointRejectsLargeDiff(t *testing.T) {
@@ -140,7 +419,7 @@ func TestDocumentProtocolSyncReturnsMissingCRDTUpdate(t *testing.T) {
 	}
 }
 
-func TestDocumentProtocolUpdatePublishesMetadataOnlyWorkspaceEvent(t *testing.T) {
+func TestDocumentProtocolUpdateDoesNotPublishDocumentNamespaceEvent(t *testing.T) {
 	server, store := newTestServer(t)
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "alpha")
 	peerDoc := syncDocumentToDocForTest(t, store, documentID, 77)
@@ -160,116 +439,39 @@ func TestDocumentProtocolUpdatePublishesMetadataOnlyWorkspaceEvent(t *testing.T)
 		t.Fatalf("handle document protocol message: %v", err)
 	}
 
-	select {
-	case event := <-events:
-		if event.Type != "document.updated" {
-			t.Fatalf("expected document.updated event, got %#v", event)
+	for {
+		select {
+		case event := <-events:
+			if strings.HasPrefix(event.Type, "document.") {
+				t.Fatalf("document namespace event must not be published for content update: %#v", event)
+			}
+		default:
+			return
 		}
-		payload, ok := event.Data.(DocumentUpdateEvent)
-		if !ok {
-			t.Fatalf("expected document update payload, got %#v", event.Data)
-		}
-		if payload.Update != "" {
-			t.Fatalf("expected workspace update event to omit raw CRDT update, got %d bytes", len(payload.Update))
-		}
-		if payload.UpdateID == 0 || payload.Path != "docs/spec.md" {
-			t.Fatalf("expected workspace update event to keep metadata, got %#v", payload)
-		}
-	default:
-		t.Fatal("expected document.updated event to be published")
 	}
 }
 
-func TestHTTPDocumentUpdatePersistsBroadcastsAndAttributesActor(t *testing.T) {
+func TestHTTPDocumentUpdateRouteRemoved(t *testing.T) {
 	server, store := newTestServer(t)
-	documentID := mustCreateTestDocument(t, store, "docs/http-update.md", "alpha")
-	peerDoc := syncDocumentToDocForTest(t, store, documentID, 77)
-	text := peerDoc.GetText("content")
-	update := captureDocUpdate(t, peerDoc, "agent-edit", func(txn *crdt.Transaction) {
-		text.Insert(txn, text.LenInTxn(txn), " beta", nil)
-	})
+	documentID := mustCreateTestDocument(t, store, "docs/removed-http-update.md", "alpha")
 
-	events, unsubscribe := server.subscribers.Subscribe()
-	defer unsubscribe()
-	room := server.rooms.ForDocument(store.Snapshot().WorkspaceID + ":" + documentID)
-	viewer := &DocumentConn{send: make(chan []byte, 4)}
-	room.Add(viewer)
-	defer room.Remove(viewer)
-	broadcastDoc := syncDocumentToDocForTest(t, store, documentID, 88)
-
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/documents/"+documentID+"/updates?actor=agent_1&actor_type=agent", bytes.NewReader(update))
-	request.Header.Set("Content-Type", "application/octet-stream")
-	server.Routes().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("expected HTTP update status 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	routes := []struct {
+		method string
+		target string
+		body   []byte
+	}{
+		{method: http.MethodPost, target: "/api/documents/" + documentID + "/updates?actor=agent_1&actor_type=agent", body: []byte{0, 0}},
+		{method: http.MethodPatch, target: "/api/documents/" + documentID, body: []byte(`{"path":"docs/moved.md"}`)},
+		{method: http.MethodDelete, target: "/api/documents/" + documentID},
 	}
-	var response postDocumentUpdateResponse
-	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-		t.Fatalf("decode update response: %v", err)
-	}
-	if !response.Accepted || !response.Applied || response.UpdateID == 0 {
-		t.Fatalf("unexpected update response: %#v", response)
-	}
-	if got := currentDocumentContentForTest(t, store, documentID); got != "alpha beta" {
-		t.Fatalf("unexpected document content after HTTP update: %q", got)
-	}
-
-	select {
-	case payload := <-viewer.send:
-		applySyncPayloadToDoc(t, broadcastDoc, payload, "http-broadcast")
-		if got := broadcastDoc.GetText("content").ToString(); got != "alpha beta" {
-			t.Fatalf("unexpected broadcast content: %q", got)
+	for _, route := range routes {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(route.method, route.target, bytes.NewReader(route.body))
+		request.Header.Set("Content-Type", "application/json")
+		server.Routes().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusNotFound && recorder.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("expected removed HTTP lifecycle route %s %s, got %d body=%s", route.method, route.target, recorder.Code, recorder.Body.String())
 		}
-	default:
-		t.Fatal("expected HTTP update to broadcast sync update")
-	}
-
-	select {
-	case event := <-events:
-		if event.Type != "document.updated" {
-			t.Fatalf("expected document.updated event, got %#v", event)
-		}
-		payload, ok := event.Data.(DocumentUpdateEvent)
-		if !ok {
-			t.Fatalf("expected document update payload, got %#v", event.Data)
-		}
-		if payload.ActorID != "agent_1" {
-			t.Fatalf("expected actor attribution agent_1, got %#v", payload)
-		}
-	default:
-		t.Fatal("expected document.updated event")
-	}
-}
-
-func TestHTTPDocumentUpdateAcceptsCanonicalEmptyUpdateWithoutMutation(t *testing.T) {
-	server, store := newTestServer(t)
-	documentID := mustCreateTestDocument(t, store, "docs/http-empty-update.md", "alpha")
-	before, err := store.GetDocument(documentID)
-	if err != nil {
-		t.Fatalf("get before document: %v", err)
-	}
-
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/documents/"+documentID+"/updates?actor=agent_1&actor_type=agent", bytes.NewReader([]byte{0, 0}))
-	request.Header.Set("Content-Type", "application/octet-stream")
-	server.Routes().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("expected HTTP empty update status 200, got %d body=%s", recorder.Code, recorder.Body.String())
-	}
-	var response postDocumentUpdateResponse
-	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-		t.Fatalf("decode update response: %v", err)
-	}
-	if !response.Accepted || response.Applied || response.UpdateID != before.UpdateID {
-		t.Fatalf("unexpected empty update response: %#v before=%d", response, before.UpdateID)
-	}
-	after, err := store.GetDocument(documentID)
-	if err != nil {
-		t.Fatalf("get after document: %v", err)
-	}
-	if after.UpdateID != before.UpdateID {
-		t.Fatalf("empty update changed document version: before=%d after=%d", before.UpdateID, after.UpdateID)
 	}
 }
 
@@ -332,7 +534,7 @@ func TestRawDocumentWebsocketStillUsesRawYProtocolFrames(t *testing.T) {
 	}
 }
 
-func TestRawDocumentUpdateBroadcastsToMuxSubscriber(t *testing.T) {
+func TestWebsocketDocumentUpdateBroadcastsToMuxSubscriber(t *testing.T) {
 	server, store := newTestServer(t)
 	documentID := mustCreateTestDocument(t, store, "docs/mux-broadcast.md", "alpha")
 	httpServer := httptest.NewServer(server.Routes())
@@ -351,16 +553,13 @@ func TestRawDocumentUpdateBroadcastsToMuxSubscriber(t *testing.T) {
 
 	peerDoc := syncDocumentToDocForTest(t, store, documentID, 77)
 	text := peerDoc.GetText("content")
-	update := captureDocUpdate(t, peerDoc, "http-edit", func(txn *crdt.Transaction) {
+	update := captureDocUpdate(t, peerDoc, "websocket-edit", func(txn *crdt.Transaction) {
 		text.Insert(txn, text.LenInTxn(txn), " beta", nil)
 	})
-	res, err := http.Post(httpServer.URL+"/api/documents/"+documentID+"/updates", "application/octet-stream", bytes.NewReader(update))
-	if err != nil {
-		t.Fatalf("post document update: %v", err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("post document update status = %d", res.StatusCode)
+	writer := dialDocumentWebsocketForTest(t, httpServer.URL, "/ws/documents/"+documentID)
+	defer writer.Close()
+	if err := writer.WriteMessage(websocket.BinaryMessage, yproto.BuildSyncUpdate(update)); err != nil {
+		t.Fatalf("write websocket update: %v", err)
 	}
 
 	frame := readDocumentWebsocketFrameForTest(t, conn)
@@ -382,7 +581,7 @@ func TestRawDocumentUpdateBroadcastsToMuxSubscriber(t *testing.T) {
 		t.Fatalf("broadcast sync type = %d, want update", syncType)
 	}
 	if !bytes.Equal(data, update) {
-		t.Fatal("broadcast update bytes did not match raw HTTP update")
+		t.Fatal("broadcast update bytes did not match websocket update")
 	}
 }
 
@@ -428,6 +627,60 @@ func TestBackendMuxTransportDoesNotOwnYProtocolSemantics(t *testing.T) {
 	}
 	if count := strings.Count(source, "yproto.BuildDocumentMessage"); count != 1 {
 		t.Fatalf("document routing encode should only happen at the frame boundary; count=%d", count)
+	}
+}
+
+func TestBackendDoesNotExposeLegacyDocumentNamespaceSurface(t *testing.T) {
+	checks := map[string][]string{
+		"server_workspace.go": {
+			`"documents"`,
+			"SortedSyncDocuments",
+		},
+		"server_documents.go": {
+			"DocumentLifecycleEvent",
+			"DocumentUpdateEvent",
+			`Type: "document.created"`,
+			`Type: "document.updated"`,
+		},
+		"types.go": {
+			"DocumentLifecycleEvent",
+			"DocumentUpdateEvent",
+		},
+		"store.go": {
+			"SortedSyncDocuments",
+			"rootBootstrap",
+			"root-document-legacy-bootstrap",
+		},
+	}
+	matches := map[string][]string{}
+	for path, forbidden := range checks {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		text := string(data)
+		for _, token := range forbidden {
+			if strings.Contains(text, token) {
+				matches[path] = append(matches[path], token)
+			}
+		}
+		if path == "types.go" {
+			source := string(data)
+			documentBlock := source[strings.Index(source, "type Document struct {"):strings.Index(source, "type DocumentMetadata struct {")]
+			if strings.Contains(documentBlock, "Path") || strings.Contains(documentBlock, "Title") {
+				matches[path] = append(matches[path], "Document path/title")
+			}
+			metadataBlock := source[strings.Index(source, "type DocumentMetadata struct {"):strings.Index(source, "type ThreadAnchor struct {")]
+			if strings.Contains(metadataBlock, "Path") || strings.Contains(metadataBlock, "Title") {
+				matches[path] = append(matches[path], "DocumentMetadata path/title")
+			}
+			if !strings.Contains(source, "type CreateDocumentRequest struct{}") {
+				matches[path] = append(matches[path], "CreateDocumentRequest must be empty")
+			}
+		}
+	}
+	if len(matches) != 0 {
+		t.Fatalf("backend must not expose legacy document namespace surface: %#v", matches)
 	}
 }
 
@@ -1079,7 +1332,7 @@ func TestHandleDocumentProtocolMessageDoesNotPublishDocumentMentionMetadataChang
 		t.Fatalf("handle document protocol message: %v", err)
 	}
 
-	sawDocumentUpdate := false
+	sawInboxChange := false
 	for {
 		select {
 		case event := <-events:
@@ -1087,11 +1340,14 @@ func TestHandleDocumentProtocolMessageDoesNotPublishDocumentMentionMetadataChang
 				t.Fatalf("document text mentions must not publish metadata change event: %#v", event)
 			}
 			if event.Type == "document.updated" {
-				sawDocumentUpdate = true
+				t.Fatalf("document update must not publish backend document namespace event: %#v", event)
+			}
+			if event.Type == "agent.inbox.changed" {
+				sawInboxChange = true
 			}
 		default:
-			if !sawDocumentUpdate {
-				t.Fatal("expected document update event to be published")
+			if !sawInboxChange {
+				t.Fatal("expected agent inbox change event to be published")
 			}
 			return
 		}
@@ -1112,6 +1368,47 @@ func applySyncPayloadToDoc(t *testing.T, doc *crdt.Doc, payload []byte, origin a
 		t.Fatalf("apply sync payload: %v", err)
 	}
 	return reply
+}
+
+func writeMuxRootUpdateForTest(t *testing.T, conn *websocket.Conn, rootID string, update []byte) {
+	t.Helper()
+	if len(update) == 0 {
+		t.Fatal("root update must not be empty")
+	}
+	if err := conn.WriteMessage(websocket.BinaryMessage, yproto.BuildDocumentMessage(rootID, yproto.BuildSyncUpdate(update))); err != nil {
+		t.Fatalf("write mux root update: %v", err)
+	}
+}
+
+func applyRawRootStreamUpdateForTest(t *testing.T, conn *websocket.Conn, doc *crdt.Doc) {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set raw root read deadline: %v", err)
+	}
+	messageType, payload, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read raw root stream update: %v", err)
+	}
+	if messageType != websocket.BinaryMessage {
+		t.Fatalf("raw root stream message type = %d, want binary", messageType)
+	}
+	protocolType, reader, err := yproto.DecodeProtocolMessage(payload)
+	if err != nil {
+		t.Fatalf("decode raw root stream payload: %v", err)
+	}
+	if protocolType != yproto.MessageSync {
+		t.Fatalf("raw root stream protocol = %d, want sync", protocolType)
+	}
+	syncType, data, err := yproto.DecodeSyncMessage(reader)
+	if err != nil {
+		t.Fatalf("decode raw root stream sync payload: %v", err)
+	}
+	if syncType != yproto.SyncUpdate {
+		t.Fatalf("raw root stream sync type = %d, want update", syncType)
+	}
+	if err := crdt.ApplyUpdateV1(doc, data, "root-stream"); err != nil {
+		t.Fatalf("apply raw root stream update: %v", err)
+	}
 }
 
 func buildSyncStep1ForTest(doc *crdt.Doc) []byte {
@@ -1195,6 +1492,141 @@ func readDocumentWebsocketFrameForTest(t *testing.T, conn *websocket.Conn) docum
 		t.Fatalf("decode routed document message: %v", err)
 	}
 	return documentFrame{documentID: documentID, payload: inner}
+}
+
+func rootEntryForDocumentForTest(t *testing.T, doc *crdt.Doc, documentID string) (string, bool) {
+	t.Helper()
+	root := doc.GetMap(rootMapName)
+	var path string
+	var deleted bool
+	if err := doc.Read(func(txn *crdt.Transaction) error {
+		entries, ok, err := root.GetMap(txn, rootEntriesMapName)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			t.Fatalf("missing %s map", rootEntriesMapName)
+		}
+		entry, ok, err := entries.GetMap(txn, documentID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			t.Fatalf("missing root entry for %s", documentID)
+		}
+		contentDocumentID, ok, err := entry.GetString(txn, "contentDocumentId")
+		if err != nil {
+			return err
+		}
+		if !ok || contentDocumentID != documentID {
+			t.Fatalf("contentDocumentId = %q, want %q", contentDocumentID, documentID)
+		}
+		locValue, ok, err := entry.GetString(txn, "loc")
+		if err != nil {
+			return err
+		}
+		if !ok {
+			t.Fatal("missing root entry loc")
+		}
+		var loc struct {
+			ParentID string `json:"parentId"`
+			Name     string `json:"name"`
+		}
+		if err := json.Unmarshal([]byte(locValue), &loc); err != nil {
+			return err
+		}
+		path = loc.Name
+		if loc.ParentID != "" {
+			path = loc.ParentID + "/" + loc.Name
+		}
+		deletedValue, ok, err := entry.GetString(txn, "deleted")
+		if err != nil {
+			return err
+		}
+		deleted = ok && strings.EqualFold(deletedValue, "true")
+		return nil
+	}); err != nil {
+		t.Fatalf("read root entry: %v", err)
+	}
+	return path, deleted
+}
+
+func rootEntryExistsForDocumentForTest(t *testing.T, doc *crdt.Doc, documentID string) bool {
+	t.Helper()
+	root := doc.GetMap(rootMapName)
+	exists := false
+	if err := doc.Read(func(txn *crdt.Transaction) error {
+		entries, ok, err := root.GetMap(txn, rootEntriesMapName)
+		if err != nil || !ok {
+			return err
+		}
+		_, exists, err = entries.GetMap(txn, documentID)
+		return err
+	}); err != nil {
+		t.Fatalf("read root entry existence: %v", err)
+	}
+	return exists
+}
+
+func upsertRootEntryForTest(doc *crdt.Doc, documentID, path string) ([]byte, error) {
+	root := doc.GetMap(rootMapName)
+	return doc.Update(func(txn *crdt.Transaction) error {
+		entries, ok, err := root.GetMap(txn, rootEntriesMapName)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			entries, err = root.SetMap(txn, rootEntriesMapName)
+			if err != nil {
+				return err
+			}
+		}
+		entry, ok, err := entries.GetMap(txn, documentID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			entry, err = entries.SetMap(txn, documentID)
+			if err != nil {
+				return err
+			}
+		}
+		loc, err := json.Marshal(map[string]string{"name": path})
+		if err != nil {
+			return err
+		}
+		if err := entry.SetString(txn, "kind", "file"); err != nil {
+			return err
+		}
+		if err := entry.SetString(txn, "contentDocumentId", documentID); err != nil {
+			return err
+		}
+		if err := entry.SetString(txn, "loc", string(loc)); err != nil {
+			return err
+		}
+		return entry.SetString(txn, "deleted", "false")
+	}, "root-stream-upsert")
+}
+
+func tombstoneRootEntryForTest(doc *crdt.Doc, documentID string) ([]byte, error) {
+	root := doc.GetMap(rootMapName)
+	return doc.Update(func(txn *crdt.Transaction) error {
+		entries, ok, err := root.GetMap(txn, rootEntriesMapName)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("missing root entries map")
+		}
+		entry, ok, err := entries.GetMap(txn, documentID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("missing root entry")
+		}
+		return entry.SetString(txn, "deleted", "true")
+	}, "root-stream-tombstone")
 }
 
 func assertSyncPayloadForTest(t *testing.T, payload []byte) {
@@ -1291,24 +1723,5 @@ func findRunPayload(t *testing.T, payload map[string]any, runID string) map[stri
 		}
 	}
 	t.Fatalf("run %q not found in %#v", runID, rawRuns)
-	return nil
-}
-
-func findDocumentPayload(t *testing.T, payload map[string]any, documentID string) map[string]any {
-	t.Helper()
-	rawDocuments, ok := payload["documents"].([]any)
-	if !ok {
-		t.Fatalf("expected documents array, got %#v", payload["documents"])
-	}
-	for _, rawDocument := range rawDocuments {
-		document, ok := rawDocument.(map[string]any)
-		if !ok {
-			t.Fatalf("expected document object, got %#v", rawDocument)
-		}
-		if document["id"] == documentID {
-			return document
-		}
-	}
-	t.Fatalf("document %q not found in %#v", documentID, rawDocuments)
 	return nil
 }

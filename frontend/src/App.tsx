@@ -13,7 +13,9 @@ import {
   isMarkdownDocumentPath,
   type LineThreadGroup,
 } from "./logic";
+import { useRootNamespace } from "./useRootNamespace";
 import { useDocumentSync } from "./useDocument";
+import { buildContentInsertUpdate, sendYjsUpdateOnce } from "./syncOnce";
 import { useWorkspace } from "./useWorkspace";
 import type { Account, Agent, Daemon, DocumentItem, ThreadItem, WorkspaceSummary } from "./types";
 import "./styles.css";
@@ -355,6 +357,12 @@ function WorkspaceApp({
   onSignOut: () => void;
 }) {
   const { workspace, connected, loading, error, reload } = useWorkspace(workspaceId, token);
+  const rootNamespace = useRootNamespace({
+    workspaceId,
+    token,
+    rootDocumentId: workspace.rootDocumentId,
+  });
+  const rootDocuments = rootNamespace.documents;
   const [activeDocumentId, setActiveDocumentId] = useState("");
   const [centerView, setCenterView] = useState<"document" | "daemons" | "agents">("document");
   const [rightTab, setRightTab] = useState<"threads" | "activity" | "people">("threads");
@@ -364,7 +372,7 @@ function WorkspaceApp({
   const [selectedThreadId, setSelectedThreadId] = useState("");
   const [focusThreadId, setFocusThreadId] = useState("");
 
-  const activeDocument = workspace.documents.find((document) => document.id === activeDocumentId) ?? workspace.documents[0] ?? null;
+  const activeDocument = rootDocuments.find((document) => document.id === activeDocumentId) ?? rootDocuments[0] ?? null;
   const documentId = activeDocument?.id ?? "";
   useEffect(() => {
     if (documentId && documentId !== activeDocumentId) {
@@ -374,7 +382,7 @@ function WorkspaceApp({
 
   const documentThreads = workspace.threads.filter((thread) => thread.documentId === activeDocument?.id);
   const groupedAgents = agentsByDaemon(workspace.agents, workspace.daemons);
-  const documentGroups = byFolder(workspace.documents);
+  const documentGroups = byFolder(rootDocuments);
   const activeFolder = folderName(activeDocument?.path);
   const activeWorkspace = workspaces.find((item) => item.id === workspaceId);
   const onlineAgents = workspace.agents.filter((agent) => visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons) !== "disconnected").length;
@@ -469,7 +477,8 @@ function WorkspaceApp({
               </div>
             </div>
           ))}
-          {!workspace.documents.length ? <p className="tiny muted empty-note">No documents yet.</p> : null}
+          {!rootNamespace.ready ? <p className="tiny muted empty-note">Syncing documents...</p> : null}
+          {rootNamespace.ready && !rootDocuments.length ? <p className="tiny muted empty-note">No documents yet.</p> : null}
         </section>
 
         <div className="divider" />
@@ -521,7 +530,6 @@ function WorkspaceApp({
             <span>{centerView === "document" ? activeFolder : "Operations"}</span>
             <Icon name="chevron" />
             <b>{centerView === "daemons" ? "Daemons" : centerView === "agents" ? "Agents" : activeDocument ? fileName(activeDocument.path) : "No document selected"}</b>
-            {centerView === "document" && activeDocument?.updateId ? <span className="chip sm">v {activeDocument.updateId}</span> : null}
             <span className={`chip sm ${connected ? "ok" : "warn"}`}>{connected ? "workspace live" : "workspace offline"}</span>
           </div>
           <div className="row gap-6">
@@ -634,8 +642,38 @@ function WorkspaceApp({
         ) : null}
       </aside>
 
-      {modal === "document" ? <CreateDocumentModal api={api} workspaceId={workspaceId} onClose={() => setModal(null)} onCreated={(doc) => { setActiveDocumentId(doc.id); setModal(null); void reload(); }} /> : null}
-      {modal === "rename" && activeDocument ? <RenameDocumentModal api={api} workspaceId={workspaceId} document={activeDocument} onClose={() => setModal(null)} onDone={() => { setModal(null); void reload(); }} /> : null}
+      {modal === "document" ? (
+        <CreateDocumentModal
+          onClose={() => setModal(null)}
+          onCreate={async ({ path, content }) => {
+            const doc = await api.createDocument(workspaceId);
+            rootNamespace.upsertFile(doc.id, path);
+            const update = buildContentInsertUpdate(content);
+            if (update.length > 0) {
+              await sendYjsUpdateOnce({ workspaceId, token, documentId: doc.id, update });
+            }
+            setActiveDocumentId(doc.id);
+            setCenterView("document");
+            setModal(null);
+            void reload();
+          }}
+        />
+      ) : null}
+      {modal === "rename" && activeDocument ? (
+        <RenameDocumentModal
+          document={activeDocument}
+          onClose={() => setModal(null)}
+          onRename={async (path) => {
+            rootNamespace.moveFile(activeDocument.id, path);
+            setModal(null);
+          }}
+          onDelete={async () => {
+            rootNamespace.tombstoneFile(activeDocument.id);
+            setActiveDocumentId("");
+            setModal(null);
+          }}
+        />
+      ) : null}
       {modal === "daemon" ? <CreateDaemonModal api={api} workspaceId={workspaceId} onClose={() => setModal(null)} onDone={() => void reload()} /> : null}
       {modal === "agent" ? <CreateAgentModal api={api} workspaceId={workspaceId} daemons={workspace.daemons} onClose={() => setModal(null)} onDone={() => { setModal(null); void reload(); }} /> : null}
       {modal === "agent-detail" && selectedAgent ? <AgentDetailModal api={api} workspaceId={workspaceId} agent={selectedAgent} daemons={workspace.daemons} runs={workspace.agentRuns} onClose={() => setModal(null)} onChanged={() => void reload()} /> : null}
@@ -949,7 +987,6 @@ function DocumentEditor({
         <div className="doc-meta-row">
           <span className="chip">Document</span>
           <span className="chip outline">Owner · {account?.displayName ?? account?.email ?? "You"}</span>
-          <span className="chip outline">Updated {shortTime(document.updatedAt)} ago</span>
           <span className={`chip outline ${connected ? "ok" : "warn"}`}>{connected ? "Live" : "Reconnecting"}</span>
         </div>
 
@@ -1264,40 +1301,79 @@ function PeoplePanel({
   );
 }
 
-function CreateDocumentModal({ api, workspaceId, onClose, onCreated }: { api: ApiClient; workspaceId: string; onClose: () => void; onCreated: (document: DocumentItem) => void }) {
+function CreateDocumentModal({ onClose, onCreate }: { onClose: () => void; onCreate: (input: { path: string; content: string }) => Promise<void> }) {
   const [path, setPath] = useState("docs/untitled.md");
   const [content, setContent] = useState("# Untitled\n");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
   return (
     <Modal title="New document" onClose={onClose}>
       <form
         className="form-stack"
         onSubmit={async (event) => {
           event.preventDefault();
-          onCreated(await api.createDocument(workspaceId, { path, content }));
+          setBusy(true);
+          setError("");
+          try {
+            await onCreate({ path, content });
+          } catch (err) {
+            setError(err instanceof Error ? err.message : String(err));
+          } finally {
+            setBusy(false);
+          }
         }}
       >
         <label className="field"><span className="lab">Path</span><input value={path} onChange={(event) => setPath(event.target.value)} required /></label>
         <label className="field"><span className="lab">Initial content</span><textarea value={content} onChange={(event) => setContent(event.target.value)} /></label>
-        <button className="btn accent full">Create document</button>
+        {error ? <p className="error-text">{error}</p> : null}
+        <button className="btn accent full" disabled={busy}>{busy ? "Creating..." : "Create document"}</button>
       </form>
     </Modal>
   );
 }
 
-function RenameDocumentModal({ api, workspaceId, document, onClose, onDone }: { api: ApiClient; workspaceId: string; document: DocumentItem; onClose: () => void; onDone: () => void }) {
+function RenameDocumentModal({ document, onClose, onRename, onDelete }: { document: DocumentItem; onClose: () => void; onRename: (path: string) => Promise<void>; onDelete: () => Promise<void> }) {
   const [path, setPath] = useState(document.path);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
   return (
-    <Modal title="Rename document" onClose={onClose}>
+    <Modal title="Document options" onClose={onClose}>
       <form
         className="form-stack"
         onSubmit={async (event) => {
           event.preventDefault();
-          await api.renameDocument(workspaceId, document.id, path);
-          onDone();
+          setBusy(true);
+          setError("");
+          try {
+            await onRename(path);
+          } catch (err) {
+            setError(err instanceof Error ? err.message : String(err));
+          } finally {
+            setBusy(false);
+          }
         }}
       >
         <label className="field"><span className="lab">Path</span><input value={path} onChange={(event) => setPath(event.target.value)} required /></label>
-        <button className="btn accent full">Save path</button>
+        {error ? <p className="error-text">{error}</p> : null}
+        <button className="btn accent full" disabled={busy}>Save path</button>
+        <button
+          className="btn danger full"
+          disabled={busy}
+          type="button"
+          onClick={async () => {
+            setBusy(true);
+            setError("");
+            try {
+              await onDelete();
+            } catch (err) {
+              setError(err instanceof Error ? err.message : String(err));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          Delete document
+        </button>
       </form>
     </Modal>
   );

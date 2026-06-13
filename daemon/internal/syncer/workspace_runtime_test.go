@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,7 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	crdt "notty/internal/ycrdt"
+	"notty/internal/yproto"
 )
 
 func TestReconcileQueueWakeCoalescesSignals(t *testing.T) {
@@ -232,6 +233,7 @@ func TestWorkspaceRuntimeCreateEditDeleteMultipleFilesRegression(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
+	server.installDocumentUpdateHook(t, runtime)
 	defer runtime.replica.watcher.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -291,7 +293,291 @@ func TestWorkspaceRuntimeCreateEditDeleteMultipleFilesRegression(t *testing.T) {
 	if err := runtime.reconcileDirtyDocuments(ctx); err != nil {
 		t.Fatalf("reconcile deletes: %v", err)
 	}
-	server.assertDeleted(t, "docs/a.md", "docs/b.md", "notes/c.md")
+	server.assertRootDeleted(t, "docs/a.md", "docs/b.md", "notes/c.md")
+}
+
+func TestWorkspaceRuntimeProjectsRemoteClientLifecycleToFilesystem(t *testing.T) {
+	root := t.TempDir()
+	cfg := Config{
+		WorkspaceDir:       root,
+		AgentWorkspaceRoot: filepath.Join(t.TempDir(), "agents"),
+		AgentID:            "daemon_agent",
+	}
+	runtime, err := newWorkspaceRuntime(cfg, http.DefaultClient, root, cfg.AgentID, "daemon")
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	defer runtime.replica.watcher.Close()
+	ctx := context.Background()
+
+	client := newRemoteLifecycleClientForTest("doc_root_remote")
+	workspace := &workspaceResponse{RootDocumentID: client.rootDocumentID}
+	if err := runtime.applyWorkspace(ctx, workspace); err != nil {
+		t.Fatalf("apply initial workspace: %v", err)
+	}
+	reconcileRuntimeUntilIdle(t, ctx, runtime)
+
+	const documentID = "doc_remote_1"
+	sendRemoteClientUpdateToDaemon(t, runtime, client.rootDocumentID, client.upsertRootFile(t, documentID, "docs/client-created.md"))
+	reconcileRuntimeDocumentIDs(t, ctx, runtime, []string{client.rootDocumentID})
+
+	sendRemoteClientUpdateToDaemon(t, runtime, documentID, client.replaceContent(t, documentID, "client create\n"))
+	reconcileRuntimeUntilIdle(t, ctx, runtime)
+	assertWorkspaceFileContent(t, root, "docs/client-created.md", "client create\n")
+
+	sendRemoteClientUpdateToDaemon(t, runtime, client.rootDocumentID, client.upsertRootFile(t, documentID, "docs/client-renamed.md"))
+	reconcileRuntimeUntilIdle(t, ctx, runtime)
+	assertWorkspaceFileMissing(t, root, "docs/client-created.md")
+	assertWorkspaceFileContent(t, root, "docs/client-renamed.md", "client create\n")
+
+	sendRemoteClientUpdateToDaemon(t, runtime, documentID, client.replaceContent(t, documentID, "client edit after rename\n"))
+	reconcileRuntimeUntilIdle(t, ctx, runtime)
+	assertWorkspaceFileContent(t, root, "docs/client-renamed.md", "client edit after rename\n")
+
+	sendRemoteClientUpdateToDaemon(t, runtime, client.rootDocumentID, client.tombstoneRootFile(t, documentID, "docs/client-renamed.md"))
+	reconcileRuntimeUntilIdle(t, ctx, runtime)
+	assertWorkspaceFileMissing(t, root, "docs/client-renamed.md")
+	assertRuntimeUntracked(t, runtime, documentID)
+}
+
+func TestReconcileStateCleanRemoteRenameMovesWithoutContentOutbox(t *testing.T) {
+	root := t.TempDir()
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base\n")
+	baseState := baseDoc.EncodeStateAsUpdate()
+	if err := cache.storeDoc("doc_clean_rename", "docs/new.md", 1, baseDoc); err != nil {
+		t.Fatalf("store doc: %v", err)
+	}
+	oldPath := filepath.Join(root, "docs", "old.md")
+	if err := os.MkdirAll(filepath.Dir(oldPath), 0o755); err != nil {
+		t.Fatalf("mkdir old path: %v", err)
+	}
+	if err := os.WriteFile(oldPath, []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write old path: %v", err)
+	}
+	tracked := newTrackedFileForStateTest(t, root, cache, "doc_clean_rename", "docs/new.md", oldPath, "base\n", baseState)
+	runtime := &workspaceRuntime{
+		cfg:      Config{AgentID: "daemon_agent"},
+		docCache: cache,
+		sendDocumentUpdate: func(ctx context.Context, documentID string, record outboxUpdateRecord) error {
+			t.Fatalf("clean rename should not send content outbox for %s", documentID)
+			return nil
+		},
+	}
+
+	if err := runtime.reconcileTrackedDocument(context.Background(), "doc_clean_rename", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("reconcile clean rename: %v", err)
+	}
+	assertWorkspaceFileMissing(t, root, "docs/old.md")
+	assertWorkspaceFileContent(t, root, "docs/new.md", "base\n")
+	if tracked.Path != filepath.Join(root, "docs", "new.md") {
+		t.Fatalf("tracked path = %s, want new path", tracked.Path)
+	}
+	assertSQLiteOutboxEmpty(t, cache, "doc_clean_rename")
+}
+
+func TestReconcileStateDirtyRemoteRenameSendsLocalEditBeforeMovingPath(t *testing.T) {
+	root := t.TempDir()
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base\n")
+	baseState := baseDoc.EncodeStateAsUpdate()
+	if err := cache.storeDoc("doc_rename", "docs/new.md", 1, baseDoc); err != nil {
+		t.Fatalf("store doc: %v", err)
+	}
+	oldPath := filepath.Join(root, "docs", "old.md")
+	if err := os.MkdirAll(filepath.Dir(oldPath), 0o755); err != nil {
+		t.Fatalf("mkdir old path: %v", err)
+	}
+	if err := os.WriteFile(oldPath, []byte("base\nlocal\n"), 0o644); err != nil {
+		t.Fatalf("write dirty old path: %v", err)
+	}
+
+	tracked := newTrackedFileForStateTest(t, root, cache, "doc_rename", "docs/new.md", oldPath, "base\n", baseState)
+	tracked.markLocalDirty()
+	var sent []outboxUpdateRecord
+	runtime := &workspaceRuntime{
+		cfg:      Config{AgentID: "daemon_agent"},
+		docCache: cache,
+		sendDocumentUpdate: func(ctx context.Context, documentID string, record outboxUpdateRecord) error {
+			if documentID != "doc_rename" {
+				t.Fatalf("sent document ID = %s", documentID)
+			}
+			sent = append(sent, record)
+			return nil
+		},
+	}
+
+	if err := runtime.reconcileTrackedDocument(context.Background(), "doc_rename", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("reconcile dirty rename content: %v", err)
+	}
+	if len(sent) != 1 || sent[0].ObservedContent != "base\nlocal\n" {
+		t.Fatalf("expected one local edit send before move, got %#v", sent)
+	}
+	assertWorkspaceFileContent(t, root, "docs/old.md", "base\nlocal\n")
+	assertWorkspaceFileMissing(t, root, "docs/new.md")
+
+	if err := runtime.reconcileTrackedDocument(context.Background(), "doc_rename", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("reconcile dirty rename path: %v", err)
+	}
+	assertWorkspaceFileMissing(t, root, "docs/old.md")
+	assertWorkspaceFileContent(t, root, "docs/new.md", "base\nlocal\n")
+	if tracked.Path != filepath.Join(root, "docs", "new.md") {
+		t.Fatalf("tracked path = %s, want new path", tracked.Path)
+	}
+	assertSQLiteOutboxEmpty(t, cache, "doc_rename")
+}
+
+func TestReconcileStateRemoteRenameWithDestinationCollisionPreservesCollidingBytes(t *testing.T) {
+	root := t.TempDir()
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base\n")
+	baseState := baseDoc.EncodeStateAsUpdate()
+	if err := cache.storeDoc("doc_collision", "docs/new.md", 1, baseDoc); err != nil {
+		t.Fatalf("store doc: %v", err)
+	}
+	oldPath := filepath.Join(root, "docs", "old.md")
+	newPath := filepath.Join(root, "docs", "new.md")
+	if err := os.MkdirAll(filepath.Dir(oldPath), 0o755); err != nil {
+		t.Fatalf("mkdir old path: %v", err)
+	}
+	if err := os.WriteFile(oldPath, []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write old path: %v", err)
+	}
+	if err := os.WriteFile(newPath, []byte("collision\n"), 0o644); err != nil {
+		t.Fatalf("write colliding path: %v", err)
+	}
+	tracked := newTrackedFileForStateTest(t, root, cache, "doc_collision", "docs/new.md", oldPath, "base\n", baseState)
+	runtime := &workspaceRuntime{cfg: Config{AgentID: "daemon_agent"}, docCache: cache}
+
+	if err := runtime.reconcileTrackedDocument(context.Background(), "doc_collision", []*trackedFile{tracked}); err != nil {
+		t.Fatalf("reconcile collision rename: %v", err)
+	}
+	assertWorkspaceFileMissing(t, root, "docs/old.md")
+	assertWorkspaceFileContent(t, root, "docs/new.md", "base\n")
+	assertRecoveredContent(t, root, "doc_collision_collision", "collision\n")
+}
+
+func TestReconcileStateRemoteDeleteCleanAndDirtyOutputs(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		localContent      string
+		expectFileDeleted bool
+		expectArchived    bool
+	}{
+		{name: "clean", localContent: "base\n", expectFileDeleted: true},
+		{name: "dirty", localContent: "base\nlocal\n", expectFileDeleted: true, expectArchived: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			cache, err := newDocumentCache(t.TempDir())
+			if err != nil {
+				t.Fatalf("new cache: %v", err)
+			}
+			baseDoc := newDocWithText(t, "base\n")
+			baseState := baseDoc.EncodeStateAsUpdate()
+			if err := cache.storeDoc("doc_delete_"+tc.name, "docs/delete.md", 1, baseDoc); err != nil {
+				t.Fatalf("store doc: %v", err)
+			}
+			path := filepath.Join(root, "docs", "delete.md")
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatalf("mkdir path: %v", err)
+			}
+			if err := os.WriteFile(path, []byte(tc.localContent), 0o644); err != nil {
+				t.Fatalf("write path: %v", err)
+			}
+			documentID := "doc_delete_" + tc.name
+			tracked := newTrackedFileForStateTest(t, root, cache, documentID, "docs/delete.md", path, "base\n", baseState)
+			runtime := &workspaceRuntime{
+				cfg:            Config{AgentID: "daemon_agent"},
+				docCache:       cache,
+				reconcileQueue: newReconcileQueue(),
+			}
+			replica, err := newWorkspaceReplica(Config{}, root, "daemon_agent", "daemon", runtime.markDocumentDirty, runtime.markLocalCreate)
+			if err != nil {
+				t.Fatalf("new replica: %v", err)
+			}
+			defer replica.watcher.Close()
+			runtime.replica = replica
+			addTrackedForStateTest(runtime, tracked)
+
+			if err := runtime.projectRootRemovedEntry(rootProjectionEntry{ContentDocumentID: documentID}); err != nil {
+				t.Fatalf("project root removed entry: %v", err)
+			}
+			if tc.expectFileDeleted {
+				assertWorkspaceFileMissing(t, root, "docs/delete.md")
+			}
+			assertRuntimeUntracked(t, runtime, documentID)
+			if tc.expectArchived {
+				assertRecoveredContent(t, root, documentID, tc.localContent)
+			}
+		})
+	}
+}
+
+func TestReconcileStateDuplicateMaterializedPathsRouteEditsByDocumentID(t *testing.T) {
+	root := t.TempDir()
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	docA := newDocWithText(t, "alpha\n")
+	docB := newDocWithText(t, "bravo\n")
+	if err := cache.storeDoc("doc_a", "docs/same.md", 1, docA); err != nil {
+		t.Fatalf("store doc_a: %v", err)
+	}
+	if err := cache.storeDoc("doc_b", "docs/same (doc_b).md", 1, docB); err != nil {
+		t.Fatalf("store doc_b: %v", err)
+	}
+	pathA := filepath.Join(root, "docs", "same.md")
+	pathB := filepath.Join(root, "docs", "same (doc_b).md")
+	for path, content := range map[string]string{
+		pathA: "alpha edit\n",
+		pathB: "bravo edit\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	trackedA := newTrackedFileForStateTest(t, root, cache, "doc_a", "docs/same.md", pathA, "alpha\n", docA.EncodeStateAsUpdate())
+	trackedB := newTrackedFileForStateTest(t, root, cache, "doc_b", "docs/same (doc_b).md", pathB, "bravo\n", docB.EncodeStateAsUpdate())
+	trackedA.markLocalDirty()
+	trackedB.markLocalDirty()
+	sent := map[string]string{}
+	runtime := &workspaceRuntime{
+		cfg:      Config{AgentID: "daemon_agent"},
+		docCache: cache,
+		sendDocumentUpdate: func(ctx context.Context, documentID string, record outboxUpdateRecord) error {
+			sent[documentID] = record.ObservedContent
+			return nil
+		},
+	}
+
+	if err := runtime.reconcileTrackedDocument(context.Background(), "doc_a", []*trackedFile{trackedA}); err != nil {
+		t.Fatalf("reconcile doc_a: %v", err)
+	}
+	if err := runtime.reconcileTrackedDocument(context.Background(), "doc_b", []*trackedFile{trackedB}); err != nil {
+		t.Fatalf("reconcile doc_b: %v", err)
+	}
+	if got := sent["doc_a"]; got != "alpha edit\n" {
+		t.Fatalf("doc_a sent content = %q", got)
+	}
+	if got := sent["doc_b"]; got != "bravo edit\n" {
+		t.Fatalf("doc_b sent content = %q", got)
+	}
+	assertSQLiteOutboxEmpty(t, cache, "doc_a")
+	assertSQLiteOutboxEmpty(t, cache, "doc_b")
 }
 
 func TestWorkspaceRuntimeDropsStaleLocalCreateCandidates(t *testing.T) {
@@ -308,10 +594,11 @@ func TestWorkspaceRuntimeDropsStaleLocalCreateCandidates(t *testing.T) {
 	}
 
 	var createAttempts int
+	rootID := "doc_root_test"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/workspace":
-			writeJSONResponse(w, http.StatusOK, &workspaceResponse{Documents: []*document{{ID: "doc_desired", Path: "docs/desired.md", UpdateID: 1}}})
+			writeJSONResponse(w, http.StatusOK, &workspaceResponse{RootDocumentID: rootID})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/documents":
 			createAttempts++
 			http.Error(w, "stale local create should have been dropped", http.StatusInternalServerError)
@@ -327,6 +614,24 @@ func TestWorkspaceRuntimeDropsStaleLocalCreateCandidates(t *testing.T) {
 		t.Fatalf("new runtime: %v", err)
 	}
 	defer runtime.replica.watcher.Close()
+	seedRoot := crdt.New()
+	seedRootMap := seedRoot.GetMap(rootMapName)
+	if _, err := seedRoot.Update(func(txn *crdt.Transaction) error {
+		entriesMap, err := seedRootMap.SetMap(txn, rootEntriesMapName)
+		if err != nil {
+			return err
+		}
+		return setRootFileEntry(txn, entriesMap, rootEntry{
+			EntryID:           rootEntryIDForDocument("doc_desired"),
+			ContentDocumentID: "doc_desired",
+			Name:              "docs/desired.md",
+		})
+	}, "seed-root"); err != nil {
+		t.Fatalf("seed root: %v", err)
+	}
+	if err := runtime.docCache.storeDoc(rootID, rootDocumentPath, 1, seedRoot); err != nil {
+		t.Fatalf("store root: %v", err)
+	}
 	tracked := &trackedFile{DocumentID: "doc_tracked", DocumentPath: "docs/tracked.md", Path: trackedPath, WorkspaceRoot: root}
 	runtime.replica.projectedByPath[trackedPath] = tracked
 	runtime.replica.projectedByID[tracked.DocumentID] = tracked
@@ -376,21 +681,19 @@ func TestWorkspaceRuntimeOutboxPostDoesNotBlockPendingRemoteAppend(t *testing.T)
 
 	postStarted := make(chan struct{})
 	releasePost := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/documents/doc_1/updates" {
-			http.Error(w, "unexpected request", http.StatusNotFound)
-			return
+
+	runtime := &workspaceRuntime{
+		cfg:      Config{BackendURL: "http://backend.test", AgentID: "daemon_agent"},
+		client:   http.DefaultClient,
+		docCache: cache,
+	}
+	runtime.sendDocumentUpdate = func(ctx context.Context, documentID string, record outboxUpdateRecord) error {
+		if documentID != "doc_1" {
+			t.Fatalf("unexpected websocket document update: %s", documentID)
 		}
 		close(postStarted)
 		<-releasePost
-		writeJSONResponse(w, http.StatusOK, postDocumentUpdateResponse{Accepted: true, Applied: true, UpdateID: 2})
-	}))
-	defer server.Close()
-
-	runtime := &workspaceRuntime{
-		cfg:      Config{BackendURL: server.URL, AgentID: "daemon_agent"},
-		client:   server.Client(),
-		docCache: cache,
+		return nil
 	}
 	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, WorkspaceRoot: root, cache: cache}
 	tracked.setProjectedContent("base\n")
@@ -405,7 +708,7 @@ func TestWorkspaceRuntimeOutboxPostDoesNotBlockPendingRemoteAppend(t *testing.T)
 	select {
 	case <-postStarted:
 	case <-time.After(2 * time.Second):
-		t.Fatal("expected outbox POST to start")
+		t.Fatal("expected websocket outbox send to start")
 	}
 
 	remoteUpdate := updateFromBaseDoc(t, baseDoc, "base\nremote\n", "remote")
@@ -421,7 +724,7 @@ func TestWorkspaceRuntimeOutboxPostDoesNotBlockPendingRemoteAppend(t *testing.T)
 		}
 	case <-time.After(250 * time.Millisecond):
 		close(releasePost)
-		t.Fatal("pending remote append was blocked by slow outbox POST")
+		t.Fatal("pending remote append was blocked by slow websocket send")
 	}
 	close(releasePost)
 	if err := <-reconcileDone; err != nil {
@@ -491,6 +794,68 @@ func TestProductionDocumentSyncUsesWorkspaceMuxSocketOnly(t *testing.T) {
 	}
 }
 
+func TestProductionDocumentNamespaceUsesRootProjectionOnly(t *testing.T) {
+	forbidden := []string{
+		"workspace.Documents",
+		"workspaceDocuments",
+		"ensureRootEntriesForVisibleDocuments",
+		"desiredDocumentPaths",
+	}
+	matches := map[string][]string{}
+	err := filepath.WalkDir(".", func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		text := string(data)
+		for _, token := range forbidden {
+			if strings.Contains(text, token) {
+				matches[path] = append(matches[path], token)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk syncer sources: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("daemon document namespace must come from root projection only; production matches: %#v", matches)
+	}
+}
+
+func TestProductionProjectionDoesNotReplayHistoryForProjectionSeq(t *testing.T) {
+	forbidden := "find" + "Projected" + "Seq"
+	matches := map[string]int{}
+	err := filepath.WalkDir(".", func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if count := strings.Count(string(data), forbidden); count > 0 {
+			matches[path] = count
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk syncer sources: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("projection must carry explicit seq instead of replaying history; production matches: %#v", matches)
+	}
+}
+
 func TestWorkspaceRuntimeRunReconcilesLocalCreateEvents(t *testing.T) {
 	root := t.TempDir()
 	cfg := Config{
@@ -507,6 +872,7 @@ func TestWorkspaceRuntimeRunReconcilesLocalCreateEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
+	server.installDocumentUpdateHook(t, runtime)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
@@ -541,14 +907,148 @@ func TestWorkspaceRuntimeRunReconcilesLocalCreateEvents(t *testing.T) {
 	server.waitForContents(t, initial, 15*time.Second)
 }
 
+func TestWorkspaceRuntimeFilesystemLifecycleRecordsSQLiteAndDaemonCalls(t *testing.T) {
+	root := t.TempDir()
+	cfg := Config{
+		WorkspaceDir:       root,
+		AgentWorkspaceRoot: filepath.Join(t.TempDir(), "agents"),
+		AgentID:            "daemon_agent",
+	}
+
+	server := newWorkspaceRuntimeRegressionServer(t)
+	defer server.Close()
+	cfg.BackendURL = server.URL
+
+	runtime, err := newWorkspaceRuntime(cfg, server.Client(), root, cfg.AgentID, "daemon")
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	server.installDocumentUpdateHook(t, runtime)
+	defer runtime.replica.watcher.Close()
+	ctx := context.Background()
+	emptyRoot := crdt.New()
+	if err := runtime.docCache.storeDoc(server.rootDocumentID, rootDocumentPath, 1, emptyRoot); err != nil {
+		t.Fatalf("store empty root: %v", err)
+	}
+
+	initialPath := filepath.Join(root, "docs", "lifecycle.md")
+	if err := os.MkdirAll(filepath.Dir(initialPath), 0o755); err != nil {
+		t.Fatalf("mkdir initial path: %v", err)
+	}
+	if err := os.WriteFile(initialPath, []byte("alpha\n"), 0o644); err != nil {
+		t.Fatalf("write initial file: %v", err)
+	}
+	if err := runtime.replica.reconcileLocalWorkspace(ctx); err != nil {
+		t.Fatalf("detect local create: %v", err)
+	}
+	if err := runtime.processLocalCreates(ctx); err != nil {
+		t.Fatalf("process local create: %v", err)
+	}
+	reconcileRuntimeUntilIdle(t, ctx, runtime)
+
+	documentID := server.documentIDForPath(t, "docs/lifecycle.md")
+	server.assertContents(t, map[string]string{"docs/lifecycle.md": "alpha\n"})
+	server.assertRootEntry(t, documentID, "docs/lifecycle.md", false)
+	server.assertSyncUpdateCount(t, server.rootDocumentID, 1)
+	server.assertSyncUpdateCount(t, documentID, 1)
+	assertSQLiteDocumentContent(t, runtime.docCache, documentID, "alpha\n")
+	assertSQLiteDocumentRowPath(t, runtime.docCache, documentID, "docs/lifecycle.md")
+	assertSQLiteRootEntry(t, runtime.docCache, server.rootDocumentID, documentID, "docs/lifecycle.md", false)
+	assertSQLiteRootProjectionEntry(t, runtime.docCache, server.rootDocumentID, documentID, "docs/lifecycle.md", true)
+	assertSQLiteOutboxEmpty(t, runtime.docCache, documentID)
+	assertSQLiteOutboxEmpty(t, runtime.docCache, server.rootDocumentID)
+
+	editedContent := "HEAD\nalpha\nomega\n"
+	if err := os.WriteFile(initialPath, []byte(editedContent), 0o644); err != nil {
+		t.Fatalf("write edited file: %v", err)
+	}
+	if err := runtime.replica.handleLocalChange(initialPath); err != nil {
+		t.Fatalf("handle local edit: %v", err)
+	}
+	reconcileRuntimeUntilIdle(t, ctx, runtime)
+	server.assertContents(t, map[string]string{"docs/lifecycle.md": editedContent})
+	server.assertSyncUpdateCount(t, documentID, 2)
+	assertSQLiteDocumentContent(t, runtime.docCache, documentID, editedContent)
+	assertSQLiteDocumentRowPath(t, runtime.docCache, documentID, "docs/lifecycle.md")
+	assertSQLiteRootProjectionEntry(t, runtime.docCache, server.rootDocumentID, documentID, "docs/lifecycle.md", true)
+	assertSQLiteOutboxEmpty(t, runtime.docCache, documentID)
+
+	movedPath := filepath.Join(root, "renamed", "lifecycle.md")
+	if err := os.MkdirAll(filepath.Dir(movedPath), 0o755); err != nil {
+		t.Fatalf("mkdir moved path: %v", err)
+	}
+	if err := os.Rename(initialPath, movedPath); err != nil {
+		t.Fatalf("move file: %v", err)
+	}
+	moveTime := time.Now()
+	if err := runtime.replica.handleWatcherEvent(fsnotify.Event{Name: initialPath, Op: fsnotify.Rename}, moveTime); err != nil {
+		t.Fatalf("handle old-path rename event: %v", err)
+	}
+	if err := runtime.replica.handleWatcherEvent(fsnotify.Event{Name: movedPath, Op: fsnotify.Create}, moveTime.Add(time.Millisecond)); err != nil {
+		t.Fatalf("handle new-path create event: %v", err)
+	}
+	if pending, err := runtime.replica.drainPathChanges(ctx, moveTime.Add(time.Millisecond)); err != nil {
+		t.Fatalf("drain local move path changes: %v", err)
+	} else if pending {
+		t.Fatal("matched local move should not leave pending path changes")
+	}
+	reconcileRuntimeUntilIdle(t, ctx, runtime)
+	server.assertRootEntry(t, documentID, "renamed/lifecycle.md", false)
+	server.assertSyncUpdateCount(t, server.rootDocumentID, 2)
+	assertSQLiteDocumentContent(t, runtime.docCache, documentID, editedContent)
+	assertSQLiteDocumentRowPath(t, runtime.docCache, documentID, "renamed/lifecycle.md")
+	assertSQLiteRootEntry(t, runtime.docCache, server.rootDocumentID, documentID, "renamed/lifecycle.md", false)
+	assertSQLiteRootProjectionEntry(t, runtime.docCache, server.rootDocumentID, documentID, "renamed/lifecycle.md", true)
+	assertWorkspaceFileMissing(t, root, "docs/lifecycle.md")
+	assertWorkspaceFileContent(t, root, "renamed/lifecycle.md", editedContent)
+
+	editAfterMove := "alpha\nomega\nTAIL\n"
+	if err := os.WriteFile(movedPath, []byte(editAfterMove), 0o644); err != nil {
+		t.Fatalf("write moved edit: %v", err)
+	}
+	if err := runtime.replica.handleLocalChange(movedPath); err != nil {
+		t.Fatalf("handle moved edit: %v", err)
+	}
+	reconcileRuntimeUntilIdle(t, ctx, runtime)
+	server.assertContents(t, map[string]string{"renamed/lifecycle.md": editAfterMove})
+	server.assertSyncUpdateCount(t, documentID, 3)
+	assertSQLiteDocumentContent(t, runtime.docCache, documentID, editAfterMove)
+	assertSQLiteDocumentRowPath(t, runtime.docCache, documentID, "renamed/lifecycle.md")
+	assertSQLiteRootProjectionEntry(t, runtime.docCache, server.rootDocumentID, documentID, "renamed/lifecycle.md", true)
+
+	if err := os.Remove(movedPath); err != nil {
+		t.Fatalf("remove moved file: %v", err)
+	}
+	removeTime := time.Now()
+	if err := runtime.replica.handleWatcherEvent(fsnotify.Event{Name: movedPath, Op: fsnotify.Remove}, removeTime); err != nil {
+		t.Fatalf("handle local delete event: %v", err)
+	}
+	if pending, err := runtime.replica.drainPathChanges(ctx, removeTime.Add(workspaceMissingPathDelay+time.Millisecond)); err != nil {
+		t.Fatalf("drain local delete path changes: %v", err)
+	} else if pending {
+		t.Fatal("expired local delete should not leave pending path changes")
+	}
+	reconcileRuntimeUntilIdle(t, ctx, runtime)
+	server.assertRootEntry(t, documentID, "renamed/lifecycle.md", true)
+	server.assertSyncUpdateCount(t, server.rootDocumentID, 3)
+	assertSQLiteDocumentContent(t, runtime.docCache, documentID, editAfterMove)
+	assertSQLiteRootEntry(t, runtime.docCache, server.rootDocumentID, documentID, "renamed/lifecycle.md", true)
+	assertSQLiteRootProjectionEntry(t, runtime.docCache, server.rootDocumentID, documentID, "renamed/lifecycle.md", false)
+	assertSQLiteOutboxEmpty(t, runtime.docCache, server.rootDocumentID)
+	assertRuntimeUntracked(t, runtime, documentID)
+}
+
 type workspaceRuntimeRegressionServer struct {
 	*httptest.Server
-	mu       sync.Mutex
-	nextID   int
-	byID     map[string]*regressionDocument
-	byPath   map[string]string
-	deleted  map[string]struct{}
-	requests []string
+	mu             sync.Mutex
+	nextID         int
+	rootDocumentID string
+	rootDoc        *crdt.Doc
+	byID           map[string]*regressionDocument
+	byPath         map[string]string
+	deleted        map[string]struct{}
+	requests       []string
+	syncUpdates    []regressionSyncUpdate
 }
 
 type regressionDocument struct {
@@ -556,12 +1056,20 @@ type regressionDocument struct {
 	doc  *crdt.Doc
 }
 
+type regressionSyncUpdate struct {
+	DocumentID string
+	ActorID    string
+	ActorType  string
+}
+
 func newWorkspaceRuntimeRegressionServer(t *testing.T) *workspaceRuntimeRegressionServer {
 	t.Helper()
 	regression := &workspaceRuntimeRegressionServer{
-		byID:    map[string]*regressionDocument{},
-		byPath:  map[string]string{},
-		deleted: map[string]struct{}{},
+		rootDocumentID: "doc_root_test",
+		rootDoc:        crdt.New(),
+		byID:           map[string]*regressionDocument{},
+		byPath:         map[string]string{},
+		deleted:        map[string]struct{}{},
 	}
 	server := httptest.NewServer(http.HandlerFunc(regression.handle))
 	regression.Server = server
@@ -575,9 +1083,13 @@ func (s *workspaceRuntimeRegressionServer) handle(w http.ResponseWriter, r *http
 
 	switch {
 	case r.Method == http.MethodPost && r.URL.Path == "/api/documents":
-		var req createDocumentRequest
+		var req map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if len(req) != 0 {
+			http.Error(w, "document create request must not carry namespace/content fields", http.StatusBadRequest)
 			return
 		}
 		s.nextID++
@@ -590,59 +1102,13 @@ func (s *workspaceRuntimeRegressionServer) handle(w http.ResponseWriter, r *http
 			id = "doc_c"
 		}
 		doc := crdt.New()
-		if req.Content != "" {
-			text := doc.GetText("content")
-			doc.Transact(func(txn *crdt.Transaction) {
-				text.Insert(txn, 0, req.Content, nil)
-			}, "server-create")
-		}
-		meta := &document{ID: id, Path: req.Path, UpdateID: 1}
+		meta := &document{ID: id, UpdateID: 1}
 		s.byID[id] = &regressionDocument{meta: meta, doc: doc}
-		s.byPath[req.Path] = id
-		delete(s.deleted, req.Path)
 		writeJSONResponse(w, http.StatusCreated, meta)
 		return
 
 	case r.Method == http.MethodGet && r.URL.Path == "/api/workspace":
-		documents := make([]*document, 0, len(s.byID))
-		for _, current := range s.byID {
-			copy := *current.meta
-			documents = append(documents, &copy)
-		}
-		writeJSONResponse(w, http.StatusOK, &workspaceResponse{Documents: documents})
-		return
-
-	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/documents/") && strings.HasSuffix(r.URL.Path, "/updates"):
-		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/documents/"), "/updates")
-		current := s.byID[id]
-		if current == nil {
-			http.Error(w, "missing document", http.StatusNotFound)
-			return
-		}
-		update, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := crdt.ApplyUpdateV1(current.doc, update, "server-update"); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		current.meta.UpdateID++
-		writeJSONResponse(w, http.StatusOK, postDocumentUpdateResponse{Accepted: true, Applied: true, UpdateID: current.meta.UpdateID})
-		return
-
-	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/documents/"):
-		id := strings.TrimPrefix(r.URL.Path, "/api/documents/")
-		current := s.byID[id]
-		if current == nil {
-			http.Error(w, "missing document", http.StatusNotFound)
-			return
-		}
-		delete(s.byID, id)
-		delete(s.byPath, current.meta.Path)
-		s.deleted[current.meta.Path] = struct{}{}
-		writeJSONResponse(w, http.StatusOK, map[string]string{"status": "deleted"})
+		writeJSONResponse(w, http.StatusOK, &workspaceResponse{RootDocumentID: s.rootDocumentID})
 		return
 	}
 
@@ -665,6 +1131,98 @@ func (s *workspaceRuntimeRegressionServer) assertContents(t *testing.T, want map
 		if got := current.doc.GetText("content").ToString(); got != content {
 			t.Fatalf("backend content for %s = %q, want %q", path, got, content)
 		}
+	}
+}
+
+func (s *workspaceRuntimeRegressionServer) installDocumentUpdateHook(t *testing.T, runtime *workspaceRuntime) {
+	t.Helper()
+	runtime.sendDocumentUpdate = func(ctx context.Context, documentID string, record outboxUpdateRecord) error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.syncUpdates = append(s.syncUpdates, regressionSyncUpdate{
+			DocumentID: documentID,
+			ActorID:    record.ActorID,
+			ActorType:  record.ActorType,
+		})
+		if documentID == s.rootDocumentID {
+			if err := crdt.ApplyUpdateV1(s.rootDoc, record.Update, "server-root-update"); err != nil {
+				return err
+			}
+			entries, err := decodeRootEntries(s.rootDoc)
+			if err != nil {
+				return err
+			}
+			s.byPath = map[string]string{}
+			s.deleted = map[string]struct{}{}
+			for _, entry := range entries {
+				path := entry.desiredPath()
+				if path == "" {
+					continue
+				}
+				if entry.Deleted {
+					s.deleted[path] = struct{}{}
+					continue
+				}
+				s.byPath[path] = entry.ContentDocumentID
+				if current := s.byID[entry.ContentDocumentID]; current != nil {
+					current.meta.Path = path
+				}
+			}
+		} else {
+			current := s.byID[documentID]
+			if current == nil {
+				t.Fatalf("missing backend document %s", documentID)
+			}
+			if err := crdt.ApplyUpdateV1(current.doc, record.Update, "server-update"); err != nil {
+				return err
+			}
+			current.meta.UpdateID++
+		}
+		return nil
+	}
+}
+
+func (s *workspaceRuntimeRegressionServer) documentIDForPath(t *testing.T, path string) string {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	documentID := s.byPath[path]
+	if documentID == "" {
+		entries, _ := decodeRootEntries(s.rootDoc)
+		t.Fatalf("missing backend document path %s; byPath=%#v requests=%#v syncUpdates=%#v rootEntries=%#v", path, s.byPath, s.requests, s.syncUpdates, entries)
+	}
+	return documentID
+}
+
+func (s *workspaceRuntimeRegressionServer) assertRootEntry(t *testing.T, documentID, path string, deleted bool) {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entries, err := decodeRootEntries(s.rootDoc)
+	if err != nil {
+		t.Fatalf("decode root entries: %v", err)
+	}
+	entry, ok := entries[rootEntryIDForDocument(documentID)]
+	if !ok {
+		t.Fatalf("missing root entry for %s: %#v", documentID, entries)
+	}
+	if got := entry.desiredPath(); got != path || entry.Deleted != deleted {
+		t.Fatalf("root entry for %s = path %q deleted %v, want path %q deleted %v", documentID, got, entry.Deleted, path, deleted)
+	}
+}
+
+func (s *workspaceRuntimeRegressionServer) assertSyncUpdateCount(t *testing.T, documentID string, want int) {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	got := 0
+	for _, update := range s.syncUpdates {
+		if update.DocumentID == documentID {
+			got++
+		}
+	}
+	if got != want {
+		t.Fatalf("sync update count for %s = %d, want %d; updates=%#v", documentID, got, want, s.syncUpdates)
 	}
 }
 
@@ -703,16 +1261,27 @@ func (s *workspaceRuntimeRegressionServer) contents() map[string]string {
 	return result
 }
 
-func (s *workspaceRuntimeRegressionServer) assertDeleted(t *testing.T, paths ...string) {
+func (s *workspaceRuntimeRegressionServer) assertRootDeleted(t *testing.T, paths ...string) {
 	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	entries, err := decodeRootEntries(s.rootDoc)
+	if err != nil {
+		t.Fatalf("decode root entries: %v", err)
+	}
 	for _, path := range paths {
-		if _, ok := s.deleted[path]; !ok {
-			t.Fatalf("expected %s to be deleted; deleted=%#v", path, s.deleted)
+		var found bool
+		for _, entry := range entries {
+			if entry.desiredPath() != path {
+				continue
+			}
+			found = true
+			if !entry.Deleted {
+				t.Fatalf("expected root entry for %s to be tombstoned, got %#v", path, entry)
+			}
 		}
-		if id := s.byPath[path]; id != "" {
-			t.Fatalf("expected %s to be removed from byPath, still mapped to %s", path, id)
+		if !found {
+			t.Fatalf("expected tombstoned root entry for %s, entries=%#v", path, entries)
 		}
 	}
 }
@@ -721,4 +1290,283 @@ func writeJSONResponse(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+type remoteLifecycleClientForTest struct {
+	rootDocumentID string
+	rootDoc        *crdt.Doc
+	contentDocs    map[string]*crdt.Doc
+}
+
+func newRemoteLifecycleClientForTest(rootDocumentID string) *remoteLifecycleClientForTest {
+	return &remoteLifecycleClientForTest{
+		rootDocumentID: rootDocumentID,
+		rootDoc:        crdt.New(),
+		contentDocs:    map[string]*crdt.Doc{},
+	}
+}
+
+func (c *remoteLifecycleClientForTest) upsertRootFile(t *testing.T, documentID, path string) []byte {
+	t.Helper()
+	return c.updateRoot(t, func(txn *crdt.Transaction, entriesMap *crdt.YMap) error {
+		return setRootFileEntry(txn, entriesMap, rootEntry{
+			EntryID:           rootEntryIDForDocument(documentID),
+			Kind:              rootEntryKindFile,
+			ContentDocumentID: documentID,
+			Name:              path,
+			Deleted:           false,
+		})
+	})
+}
+
+func (c *remoteLifecycleClientForTest) tombstoneRootFile(t *testing.T, documentID, path string) []byte {
+	t.Helper()
+	return c.updateRoot(t, func(txn *crdt.Transaction, entriesMap *crdt.YMap) error {
+		return setRootFileEntry(txn, entriesMap, rootEntry{
+			EntryID:           rootEntryIDForDocument(documentID),
+			Kind:              rootEntryKindFile,
+			ContentDocumentID: documentID,
+			Name:              path,
+			Deleted:           true,
+		})
+	})
+}
+
+func (c *remoteLifecycleClientForTest) updateRoot(t *testing.T, mutate func(*crdt.Transaction, *crdt.YMap) error) []byte {
+	t.Helper()
+	rootMap := c.rootDoc.GetMap(rootMapName)
+	update, err := c.rootDoc.Update(func(txn *crdt.Transaction) error {
+		entriesMap, ok, err := rootMap.GetMap(txn, rootEntriesMapName)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			entriesMap, err = rootMap.SetMap(txn, rootEntriesMapName)
+			if err != nil {
+				return err
+			}
+		}
+		return mutate(txn, entriesMap)
+	}, "remote-client-root")
+	if err != nil {
+		t.Fatalf("build remote root update: %v", err)
+	}
+	if len(update) == 0 {
+		t.Fatal("expected non-empty remote root update")
+	}
+	return update
+}
+
+func (c *remoteLifecycleClientForTest) replaceContent(t *testing.T, documentID, content string) []byte {
+	t.Helper()
+	doc := c.contentDocs[documentID]
+	if doc == nil {
+		doc = crdt.New()
+		c.contentDocs[documentID] = doc
+	}
+	text := doc.GetText("content")
+	update, err := doc.Update(func(txn *crdt.Transaction) error {
+		if length := text.LenInTxn(txn); length > 0 {
+			if err := text.DeleteRange(txn, 0, length); err != nil {
+				return err
+			}
+		}
+		if content == "" {
+			return nil
+		}
+		return text.InsertValue(txn, 0, content)
+	}, "remote-client-content")
+	if err != nil {
+		t.Fatalf("build remote content update: %v", err)
+	}
+	if len(update) == 0 {
+		t.Fatal("expected non-empty remote content update")
+	}
+	return update
+}
+
+func sendRemoteClientUpdateToDaemon(t *testing.T, runtime *workspaceRuntime, documentID string, update []byte) {
+	t.Helper()
+	if err := runtime.handleDocumentSyncMessage(documentID, yproto.BuildSyncUpdate(update)); err != nil {
+		t.Fatalf("handle remote client update for %s: %v", documentID, err)
+	}
+}
+
+func reconcileRuntimeUntilIdle(t *testing.T, ctx context.Context, runtime *workspaceRuntime) {
+	t.Helper()
+	for attempt := 0; attempt < 12; attempt++ {
+		documentIDs := runtime.reconcileQueue.Drain()
+		if len(documentIDs) == 0 {
+			return
+		}
+		reconcileRuntimeDocumentIDs(t, ctx, runtime, documentIDs)
+	}
+	t.Fatalf("runtime reconcile queue did not drain; remaining=%#v", runtime.reconcileQueue.Drain())
+}
+
+func reconcileRuntimeDocumentIDs(t *testing.T, ctx context.Context, runtime *workspaceRuntime, documentIDs []string) {
+	t.Helper()
+	if err := runtime.reconcileDocumentIDs(ctx, documentIDs); err != nil {
+		t.Fatalf("reconcile documents %v: %v", documentIDs, err)
+	}
+}
+
+func newTrackedFileForStateTest(t *testing.T, root string, cache *documentCache, documentID, documentPath, absolutePath, baseContent string, baseState []byte) *trackedFile {
+	t.Helper()
+	tracked := &trackedFile{
+		DocumentID:    documentID,
+		DocumentPath:  documentPath,
+		Path:          absolutePath,
+		WorkspaceRoot: root,
+		FS:            NewWorkspaceFS(root),
+		cache:         cache,
+	}
+	tracked.setProjectedContent(baseContent)
+	if err := tracked.storeProjectedBase(baseContent, baseState); err != nil {
+		t.Fatalf("store projected base for %s: %v", documentID, err)
+	}
+	return tracked
+}
+
+func addTrackedForStateTest(runtime *workspaceRuntime, tracked *trackedFile) {
+	runtime.replica.mu.Lock()
+	defer runtime.replica.mu.Unlock()
+	tracked.Owner = runtime.replica
+	tracked.FS = runtime.replica.fs
+	runtime.replica.projectedByID[tracked.DocumentID] = tracked
+	runtime.replica.projectedByPath[tracked.Path] = tracked
+}
+
+func assertWorkspaceFileContent(t *testing.T, root, rel, want string) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read workspace file %s: %v", rel, err)
+	}
+	if got := string(data); got != want {
+		t.Fatalf("workspace file %s = %q, want %q", rel, got, want)
+	}
+}
+
+func assertWorkspaceFileMissing(t *testing.T, root, rel string) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	if _, err := os.Stat(path); err == nil {
+		t.Fatalf("workspace file %s still exists", rel)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat workspace file %s: %v", rel, err)
+	}
+}
+
+func assertRecoveredContent(t *testing.T, root, reason, want string) {
+	t.Helper()
+	recoveredRoot := filepath.Join(root, ".notty", "recovered", safeDocumentCacheName(reason))
+	var matches []string
+	err := filepath.WalkDir(recoveredRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if string(data) == want {
+			matches = append(matches, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("read recovered files under %s: %v", recoveredRoot, err)
+	}
+	if len(matches) == 0 {
+		t.Fatalf("no recovered file under %s had content %q", recoveredRoot, want)
+	}
+}
+
+func assertRuntimeUntracked(t *testing.T, runtime *workspaceRuntime, documentID string) {
+	t.Helper()
+	runtime.replica.mu.Lock()
+	defer runtime.replica.mu.Unlock()
+	if tracked := runtime.replica.projectedByID[documentID]; tracked != nil {
+		t.Fatalf("document %s remained tracked after root tombstone: %#v", documentID, tracked)
+	}
+}
+
+func assertSQLiteDocumentContent(t *testing.T, cache *documentCache, documentID, want string) {
+	t.Helper()
+	doc, _, _, err := cache.loadBaseDoc(documentID, "")
+	if err != nil {
+		t.Fatalf("load sqlite document %s: %v", documentID, err)
+	}
+	defer doc.Close()
+	if got := doc.GetText("content").ToString(); got != want {
+		t.Fatalf("sqlite content for %s = %q, want %q", documentID, got, want)
+	}
+}
+
+func assertSQLiteDocumentRowPath(t *testing.T, cache *documentCache, documentID, want string) {
+	t.Helper()
+	var got string
+	if err := cache.db.QueryRow(`select path from documents where document_id = ?`, documentID).Scan(&got); err != nil {
+		t.Fatalf("load sqlite document row %s: %v", documentID, err)
+	}
+	if got != want {
+		t.Fatalf("sqlite document path for %s = %q, want %q", documentID, got, want)
+	}
+}
+
+func assertSQLiteRootEntry(t *testing.T, cache *documentCache, rootDocumentID, documentID, path string, deleted bool) {
+	t.Helper()
+	rootDoc, _, _, err := cache.loadBaseDoc(rootDocumentID, rootDocumentPath)
+	if err != nil {
+		t.Fatalf("load sqlite root document: %v", err)
+	}
+	defer rootDoc.Close()
+	entries, err := decodeRootEntries(rootDoc)
+	if err != nil {
+		t.Fatalf("decode sqlite root entries: %v", err)
+	}
+	entry, ok := entries[rootEntryIDForDocument(documentID)]
+	if !ok {
+		t.Fatalf("missing sqlite root entry for %s: %#v", documentID, entries)
+	}
+	if got := entry.desiredPath(); got != path || entry.Deleted != deleted {
+		t.Fatalf("sqlite root entry for %s = path %q deleted %v, want path %q deleted %v", documentID, got, entry.Deleted, path, deleted)
+	}
+}
+
+func assertSQLiteRootProjectionEntry(t *testing.T, cache *documentCache, rootDocumentID, documentID, path string, active bool) {
+	t.Helper()
+	entries, err := cache.loadRootProjectionEntries(rootDocumentID)
+	if err != nil {
+		t.Fatalf("load sqlite root projection entries: %v", err)
+	}
+	entry, ok := entries[rootEntryIDForDocument(documentID)]
+	if !ok {
+		t.Fatalf("missing sqlite root projection for %s: %#v", documentID, entries)
+	}
+	if entry.Active != active {
+		t.Fatalf("sqlite root projection active for %s = %v, want %v; entry=%#v", documentID, entry.Active, active, entry)
+	}
+	if entry.DesiredPath != path {
+		t.Fatalf("sqlite root projection desired path for %s = %q, want %q; entry=%#v", documentID, entry.DesiredPath, path, entry)
+	}
+	if active && entry.MaterializedPath != path {
+		t.Fatalf("sqlite root projection materialized path for %s = %q, want %q; entry=%#v", documentID, entry.MaterializedPath, path, entry)
+	}
+}
+
+func assertSQLiteOutboxEmpty(t *testing.T, cache *documentCache, documentID string) {
+	t.Helper()
+	var count int
+	if err := cache.db.QueryRow(`select count(*) from content_outbox where document_id = ?`, documentID).Scan(&count); err != nil {
+		t.Fatalf("count sqlite outbox for %s: %v", documentID, err)
+	}
+	if count != 0 {
+		t.Fatalf("sqlite outbox for %s has %d rows, want empty", documentID, count)
+	}
 }

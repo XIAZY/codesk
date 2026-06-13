@@ -19,6 +19,10 @@ The suite uses a dedicated Docker Compose project and random localhost ports, so
 
 Delete/backspace coverage is included at both levels: a CRDT-only regression verifies partial delete ranges inside larger text items, and a websocket regression verifies peer propagation plus backend persistence.
 
+Root-native lifecycle coverage includes a backend-API-driven regression that allocates documents with `POST /documents`, writes root entries over the root CRDT stream, performs repeated content inserts/deletes over document websockets, moves documents through root CRDT updates, and verifies after each step that Postgres CRDT reconstruction and the daemon-managed filesystem match.
+
+Daemon filesystem lifecycle coverage includes a local-filesystem-driven regression that creates a file in the daemon workspace, performs repeated inserts/deletes by rewriting the local file, moves the file, edits it after the move, deletes it, and verifies after each operation that Postgres root/content CRDT reconstruction matches the expected state.
+
 Thread integrity coverage verifies that clients can create document threads with Yjs relative anchors, that the backend preserves those caller-supplied anchors without materializing document text, and that raw-offset text-range thread creation is rejected.
 
 Known gap: the backend-restart append test is opt-in because it currently reproduces a lost-write/reconnect problem. During a 1000-line reduced run, backend reconstruction stopped at 143 lines after restart, indicating websocket write success is being treated as persistence without a server-level acknowledgement.

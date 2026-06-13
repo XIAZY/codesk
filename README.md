@@ -66,7 +66,7 @@ A workspace user is the account's in-workspace collaborator identity. It has a h
 
 ### Document
 
-A document is a file-like object with an ID, path, title, update ID, state vector, and Yjs CRDT history. The frontend should treat document text as live CRDT state, not as a REST string payload.
+A content document is a CRDT text stream with an ID, update ID, state vector, and Yjs CRDT history. File-like namespace data such as path, move, and delete state lives in the workspace root CRDT document. The frontend should treat document text as live CRDT state, not as a REST string payload.
 
 ### Thread
 
@@ -162,7 +162,7 @@ Important tables:
 - `daemons`: workspace daemon records and token hashes.
 - `agents`: daemon-owned agent records.
 - `agent_runs`: agent process/run status.
-- `documents`: document metadata.
+- `documents`: content document identity and CRDT stream metadata. Visible paths live in the root CRDT document, not in this table as workspace namespace state.
 - `document_heads`: current document `state_vector` and `update_id`, not full content.
 - `document_updates`: CRDT binary update log.
 - `document_checkpoints`: periodic compacted CRDT checkpoints.
@@ -419,7 +419,6 @@ Response:
   "currentUserId": "user_...",
   "currentDaemonId": "",
   "name": "Product Workspace",
-  "documents": [],
   "users": [],
   "daemons": [],
   "agents": [],
@@ -434,7 +433,7 @@ Response:
 
 Notes:
 
-- `documents` is an array of `DocumentMetadata`, not full document content.
+- The workspace response does not expose a visible document list. Clients read the workspace root CRDT document to derive files, moves, and deletes.
 - Human callers see all agents in the workspace.
 - Daemon callers only see agents owned by that daemon.
 
@@ -636,9 +635,9 @@ Response:
 {"status":"deleted"}
 ```
 
-### 9. Human Creates, Moves, Deletes Documents
+### 9. Human Creates Content Streams And Updates The Root
 
-Create:
+Create an empty content document stream:
 
 ```http
 POST /api/workspaces/{workspaceID}/documents
@@ -648,10 +647,7 @@ Authorization: Bearer <jwt>
 Request:
 
 ```json
-{
-  "path": "docs/spec.md",
-  "content": "# Spec\n"
-}
+{}
 ```
 
 Response `201`:
@@ -659,8 +655,6 @@ Response `201`:
 ```json
 {
   "id": "doc_...",
-  "path": "docs/spec.md",
-  "title": "spec.md",
   "stateVector": "...",
   "updateId": 1,
   "updatedAt": "...",
@@ -668,44 +662,10 @@ Response `201`:
 }
 ```
 
-Resolve by path:
-
-```http
-GET /api/workspaces/{workspaceID}/documents/by-path?path=docs/spec.md
-Authorization: Bearer <jwt-or-daemon-token>
-```
-
-Response:
-
-```json
-{"document": {"id":"doc_...","path":"docs/spec.md","title":"spec.md","updateId":1}}
-```
-
-Move/rename:
-
-```http
-PATCH /api/workspaces/{workspaceID}/documents/{documentID}
-Authorization: Bearer <jwt-or-daemon-token>
-```
-
-Request:
-
-```json
-{"path":"docs/new-name.md"}
-```
-
-Delete:
-
-```http
-DELETE /api/workspaces/{workspaceID}/documents/{documentID}
-Authorization: Bearer <jwt-or-daemon-token>
-```
-
-Response:
-
-```json
-{"status":"deleted"}
-```
+The backend creates only the content stream. Current visible paths, moves,
+deletes, and path conflicts are represented in the workspace root CRDT document
+and projected by clients/daemons. The backend does not expose a current-path
+lookup or move/delete document API.
 
 ### 10. Frontend Syncs Active Document Text
 
@@ -722,7 +682,7 @@ Protocol:
 - `MessageAwareness` carries awareness/presence state for document peers.
 - Backend persists applied CRDT updates.
 - Backend broadcasts applied updates to other sessions in the document room.
-- Backend publishes a workspace event of type `document.updated`.
+- Backend publishes `agent.inbox.changed` when an applied content update creates or changes agent inbox work.
 
 Notes:
 
@@ -1155,7 +1115,7 @@ WorkspaceMember:
 DocumentMetadata:
 
 ```json
-{"id":"doc_...","path":"docs/spec.md","title":"spec.md","stateVector":"...","updateId":12,"updatedAt":"...","clientIdSeed":123}
+{"id":"doc_...","stateVector":"...","updateId":12,"updatedAt":"...","clientIdSeed":123}
 ```
 
 Daemon:
@@ -1205,11 +1165,8 @@ AgentEvent:
 | `POST` | `/api/workspaces/{workspaceID}/daemons` | human | `CreateDaemonRequest` | `{daemon, token}` | daemon setup |
 | `DELETE` | `/api/workspaces/{workspaceID}/daemons/{daemonID}` | human | none | `{daemon}` | daemon deletion |
 | `POST` | `/api/workspaces/{workspaceID}/daemons/{daemonID}/agents` | human | `CreateAgentRequest` without `daemonId` | `Agent` | preferred agent creation |
-| `GET` | `/api/workspaces/{workspaceID}/documents/by-path?path=...` | human or daemon | none | `{document}` | document lookup |
-| `POST` | `/api/workspaces/{workspaceID}/documents` | human or daemon | `CreateDocumentRequest` | `DocumentMetadata` | create file |
+| `POST` | `/api/workspaces/{workspaceID}/documents` | human or daemon | `CreateDocumentRequest` | `DocumentMetadata` | create empty document stream |
 | `GET` | `/api/workspaces/{workspaceID}/documents/{id}/threads` | human or daemon | none | `{threads}` | document thread list |
-| `PATCH` | `/api/workspaces/{workspaceID}/documents/{id}` | human or daemon | `UpdateDocumentRequest` | `DocumentMetadata` | move/rename file |
-| `DELETE` | `/api/workspaces/{workspaceID}/documents/{id}` | human or daemon | none | `{"status":"deleted"}` | delete file |
 | `POST` | `/api/workspaces/{workspaceID}/users` | human or daemon | `CreateUserRequest` | `User` | legacy/internal user records |
 | `PATCH` | `/api/workspaces/{workspaceID}/users/{id}` | human or daemon | `UpdateUserRequest` | `User` | legacy/internal user records |
 | `DELETE` | `/api/workspaces/{workspaceID}/users/{id}` | human or daemon | none | `{"status":"deleted"}` | legacy/internal user records |
@@ -1267,14 +1224,7 @@ type CreateDaemonRequest = {
   name: string;
 };
 
-type CreateDocumentRequest = {
-  path: string;
-  content?: string;
-};
-
-type UpdateDocumentRequest = {
-  path: string;
-};
+type CreateDocumentRequest = {};
 
 type CreateThreadRequest = {
   documentId: string;
@@ -1363,7 +1313,7 @@ GET /ws/workspaces/{workspaceID}?token=<jwt>
 Initial message:
 
 ```json
-{"type":"workspace.snapshot","data":{"documents":[],"users":[],"daemons":[],"agents":[],"agentRuns":[],"threads":[],"agentEvents":[],"presences":{},"activities":[]}}
+{"type":"workspace.snapshot","data":{"users":[],"daemons":[],"agents":[],"agentRuns":[],"threads":[],"agentEvents":[],"presences":{},"activities":[]}}
 ```
 
 Event envelope:
@@ -1375,10 +1325,6 @@ Event envelope:
 Known event types:
 
 - `workspace.snapshot`
-- `document.created`
-- `document.moved`
-- `document.deleted`
-- `document.updated`
 - `thread.created`
 - `thread.updated`
 - `thread.message.created`

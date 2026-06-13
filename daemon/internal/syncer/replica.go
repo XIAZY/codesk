@@ -2,15 +2,20 @@ package syncer
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
+
+const workspaceLocalScanInterval = 5 * time.Second
 
 type workspaceReplica struct {
 	rootDir    string
@@ -22,12 +27,13 @@ type workspaceReplica struct {
 	watcher  *fsnotify.Watcher
 	docCache *documentCache
 	fs       *WorkspaceFS
+	watchMu  sync.Mutex
+	watched  map[string]struct{}
+	changes  *workspaceChangeIndex
 
-	mu               sync.Mutex
-	applyMu          sync.Mutex
-	projectedByPath  map[string]*trackedFile
-	projectedByID    map[string]*trackedFile
-	initialWorkspace *workspaceResponse
+	mu              sync.Mutex
+	projectedByPath map[string]*trackedFile
+	projectedByID   map[string]*trackedFile
 }
 
 func newWorkspaceReplica(_ Config, rootDir, actorID, actorType string, markDirty func(string), markCreate func(localCreateCandidate)) (*workspaceReplica, error) {
@@ -46,6 +52,8 @@ func newWorkspaceReplica(_ Config, rootDir, actorID, actorType string, markDirty
 		markCreate:      markCreate,
 		watcher:         watcher,
 		fs:              NewWorkspaceFS(rootDir),
+		watched:         map[string]struct{}{},
+		changes:         newWorkspaceChangeIndex(),
 		projectedByPath: map[string]*trackedFile{},
 		projectedByID:   map[string]*trackedFile{},
 	}, nil
@@ -74,20 +82,17 @@ func (r *workspaceReplica) Run(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := r.watcher.Add(r.rootDir); err != nil {
+	if err := r.addWatchDir(r.rootDir); err != nil {
 		return err
 	}
-	if r.initialWorkspace != nil {
-		if err := r.applyWorkspace(ctx, r.initialWorkspace); err != nil {
-			return err
-		}
-		r.initialWorkspace = nil
+	if err := r.ensureDirectoryWatches(); err != nil {
+		log.Printf("%s workspace watch refresh error: %v", r.actorID, err)
 	}
 	if err := r.reconcileLocalWorkspace(ctx); err != nil {
 		log.Printf("%s initial local reconcile error: %v", r.actorID, err)
 	}
 
-	ticker := time.NewTicker(60 * time.Second)
+	ticker := time.NewTicker(workspaceLocalScanInterval)
 	defer ticker.Stop()
 
 	for {
@@ -95,23 +100,8 @@ func (r *workspaceReplica) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case event := <-r.watcher.Events:
-			if isIgnoredWorkspaceAbsolutePath(r.rootDir, event.Name) {
-				continue
-			}
-			if event.Op&fsnotify.Create != 0 {
-				if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
-					_ = r.watcher.Add(event.Name)
-				}
-			}
-			if event.Op&fsnotify.Write != 0 {
-				if err := r.handleLocalChange(event.Name); err != nil {
-					log.Printf("%s local change error for %s: %v", r.actorID, event.Name, err)
-				}
-			}
-			if event.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0 {
-				if err := r.reconcileLocalWorkspace(ctx); err != nil {
-					log.Printf("%s local reconcile error: %v", r.actorID, err)
-				}
+			if err := r.handleWatcherEvent(event, time.Now()); err != nil {
+				log.Printf("%s local event error for %s: %v", r.actorID, event.Name, err)
 			}
 		case err := <-r.watcher.Errors:
 			if err != nil {
@@ -125,45 +115,6 @@ func (r *workspaceReplica) Run(ctx context.Context) error {
 	}
 }
 
-func (r *workspaceReplica) applyWorkspace(ctx context.Context, workspace *workspaceResponse) error {
-	if workspace == nil {
-		return nil
-	}
-	r.applyMu.Lock()
-	defer r.applyMu.Unlock()
-	activeIDs := make(map[string]struct{}, len(workspace.Documents))
-	for _, document := range workspace.Documents {
-		if document == nil || isIgnoredDocumentPath(document.Path) {
-			continue
-		}
-		activeIDs[document.ID] = struct{}{}
-		if err := r.ensureTracked(ctx, document); err != nil {
-			return err
-		}
-	}
-	return r.removeMissingTracked(activeIDs)
-}
-
-func (r *workspaceReplica) removeMissingTracked(activeIDs map[string]struct{}) error {
-	r.mu.Lock()
-	missing := make([]*trackedFile, 0)
-	for documentID, tracked := range r.projectedByID {
-		if _, ok := activeIDs[documentID]; ok {
-			continue
-		}
-		if isIgnoredDocumentPath(tracked.DocumentPath) || isIgnoredWorkspaceAbsolutePath(r.rootDir, tracked.Path) {
-			continue
-		}
-		tracked.markRemoteDeleted()
-		missing = append(missing, tracked)
-	}
-	r.mu.Unlock()
-	for _, tracked := range missing {
-		r.markDocumentDirty(tracked.DocumentID)
-	}
-	return nil
-}
-
 func (r *workspaceReplica) ensureTracked(ctx context.Context, document *document) error {
 	if document == nil || isIgnoredDocumentPath(document.Path) {
 		return nil
@@ -175,9 +126,7 @@ func (r *workspaceReplica) ensureTracked(ctx context.Context, document *document
 	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
 		return err
 	}
-	if r.watcher != nil {
-		_ = r.watcher.Add(filepath.Dir(absolutePath))
-	}
+	_ = r.addWatchDir(filepath.Dir(absolutePath))
 
 	r.mu.Lock()
 	tracked, exists := r.projectedByID[document.ID]
@@ -218,6 +167,96 @@ func (r *workspaceReplica) ensureTracked(ctx context.Context, document *document
 	if tracked.isLocalDirty() {
 		r.markDocumentDirty(tracked.DocumentID)
 	}
+	r.recordTrackedIdentity(absolutePath)
+	return nil
+}
+
+func (r *workspaceReplica) handleWatcherEvent(event fsnotify.Event, now time.Time) error {
+	path := filepath.Clean(event.Name)
+	if isIgnoredWorkspaceAbsolutePath(r.rootDir, path) {
+		return nil
+	}
+	if r.changes == nil {
+		r.changes = newWorkspaceChangeIndex()
+	}
+	r.mu.Lock()
+	tracked := r.projectedByPath[path]
+	r.mu.Unlock()
+
+	if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+		if tracked != nil {
+			r.changes.markPendingMissing(tracked.DocumentID, path, now)
+			r.markDocumentDirty(localPathChangeReconcileWake)
+		}
+		return nil
+	}
+
+	if event.Op&fsnotify.Create != 0 {
+		info, err := os.Stat(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		identity := fileIdentityForInfo(info)
+		if info.IsDir() {
+			_ = r.addWatchDir(path)
+			r.changes.markDiscoverDir(path)
+			r.markDocumentDirty(localPathChangeReconcileWake)
+			return nil
+		}
+		if tracked != nil {
+			r.changes.markTrackedPresent(tracked.DocumentID, path, identity)
+			if err := markTrackedLocalDirty(tracked, path); err != nil {
+				return err
+			}
+			if tracked.isLocalDirty() {
+				r.changes.markDirtyDocument(tracked.DocumentID)
+				r.markDocumentDirty(localPathChangeReconcileWake)
+			}
+			return nil
+		}
+		r.changes.markLocalCreate(localCreateCandidate{
+			Root:      r.rootDir,
+			Path:      path,
+			ActorID:   r.actorID,
+			ActorType: r.actorKind(),
+		}, identity)
+		r.markDocumentDirty(localPathChangeReconcileWake)
+		return nil
+	}
+
+	if event.Op&fsnotify.Write != 0 {
+		if tracked != nil {
+			r.changes.markTrackedPresent(tracked.DocumentID, path, statFileIdentity(path))
+			if err := markTrackedLocalDirty(tracked, path); err != nil {
+				return err
+			}
+			if tracked.isLocalDirty() {
+				r.changes.markDirtyDocument(tracked.DocumentID)
+				r.markDocumentDirty(localPathChangeReconcileWake)
+			}
+			return nil
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		r.changes.markLocalCreate(localCreateCandidate{
+			Root:      r.rootDir,
+			Path:      path,
+			ActorID:   r.actorID,
+			ActorType: r.actorKind(),
+		}, fileIdentityForInfo(info))
+		r.markDocumentDirty(localPathChangeReconcileWake)
+	}
 	return nil
 }
 
@@ -234,6 +273,9 @@ func (r *workspaceReplica) handleLocalChange(path string) error {
 	if err := markTrackedLocalDirty(tracked, path); err != nil {
 		return err
 	}
+	if r.changes != nil {
+		r.changes.recordIdentity(path, statFileIdentity(path))
+	}
 	if tracked.isLocalDirty() {
 		r.markDocumentDirty(tracked.DocumentID)
 	}
@@ -241,7 +283,7 @@ func (r *workspaceReplica) handleLocalChange(path string) error {
 }
 
 func (r *workspaceReplica) reconcileLocalWorkspace(ctx context.Context) error {
-	actualFiles, err := scanWorkspaceFiles(r.rootDir)
+	actualFiles, err := scanWorkspaceFilesForReconcile(r.rootDir)
 	if err != nil {
 		return err
 	}
@@ -285,6 +327,7 @@ func (r *workspaceReplica) reconcileLocalWorkspace(ctx context.Context) error {
 			tracked.markLocalMoved()
 			delete(remaining, nextPath)
 			r.markDocumentDirty(tracked.DocumentID)
+			r.recordTrackedIdentity(nextPath)
 			continue
 		}
 		tracked.markLocalDeleted()
@@ -306,6 +349,150 @@ func (r *workspaceReplica) reconcileLocalWorkspace(ctx context.Context) error {
 			})
 		}
 	}
+	if err := r.ensureDirectoryWatches(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *workspaceReplica) drainPathChanges(ctx context.Context, now time.Time) (bool, error) {
+	if r == nil || r.changes == nil {
+		return false, nil
+	}
+	for _, dir := range r.changes.drainDiscoverDirs() {
+		if ctx.Err() != nil {
+			return true, ctx.Err()
+		}
+		if err := r.discoverLocalCreatesInDir(dir); err != nil {
+			r.changes.markDiscoverDir(dir)
+			return true, err
+		}
+	}
+	changes, hasPending := r.changes.drain(now)
+	for _, move := range changes.LocalMoves {
+		r.mu.Lock()
+		tracked := r.projectedByID[move.DocumentID]
+		r.mu.Unlock()
+		if tracked == nil || tracked.isProjecting() {
+			continue
+		}
+		r.updateTrackedPath(tracked, move.NewPath)
+		tracked.markLocalMoved()
+		r.markDocumentDirty(tracked.DocumentID)
+		r.recordTrackedIdentity(move.NewPath)
+	}
+	for _, deletion := range changes.LocalDeletes {
+		r.mu.Lock()
+		tracked := r.projectedByID[deletion.DocumentID]
+		r.mu.Unlock()
+		if tracked == nil || tracked.isProjecting() {
+			continue
+		}
+		tracked.markLocalDeleted()
+		r.markDocumentDirty(tracked.DocumentID)
+		if r.changes != nil {
+			r.changes.removeIdentity(deletion.Path)
+		}
+	}
+	for _, candidate := range changes.LocalCreates {
+		if r.markCreate != nil {
+			r.markCreate(candidate)
+		}
+	}
+	for _, documentID := range changes.DirtyDocumentIDs {
+		r.markDocumentDirty(documentID)
+	}
+	return hasPending, nil
+}
+
+func (r *workspaceReplica) discoverLocalCreatesInDir(dir string) error {
+	if r == nil || strings.TrimSpace(dir) == "" {
+		return nil
+	}
+	dir = filepath.Clean(dir)
+	return filepath.WalkDir(dir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if errors.Is(walkErr, os.ErrNotExist) {
+				return nil
+			}
+			return walkErr
+		}
+		if path != r.rootDir && isIgnoredWorkspaceAbsolutePath(r.rootDir, path) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.IsDir() {
+			return r.addWatchDir(path)
+		}
+		r.mu.Lock()
+		_, tracked := r.projectedByPath[path]
+		r.mu.Unlock()
+		if tracked {
+			r.recordTrackedIdentity(path)
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if r.changes != nil {
+			r.changes.markLocalCreate(localCreateCandidate{
+				Root:      r.rootDir,
+				Path:      path,
+				ActorID:   r.actorID,
+				ActorType: r.actorKind(),
+			}, fileIdentityForInfo(info))
+		}
+		return nil
+	})
+}
+
+func (r *workspaceReplica) ensureDirectoryWatches() error {
+	if r == nil || r.watcher == nil || r.rootDir == "" {
+		return nil
+	}
+	return filepath.WalkDir(r.rootDir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if errors.Is(walkErr, os.ErrNotExist) {
+				return nil
+			}
+			return walkErr
+		}
+		if !entry.IsDir() {
+			return nil
+		}
+		if path != r.rootDir && isIgnoredWorkspaceAbsolutePath(r.rootDir, path) {
+			return filepath.SkipDir
+		}
+		if err := r.addWatchDir(path); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		return nil
+	})
+}
+
+func (r *workspaceReplica) addWatchDir(path string) error {
+	if r == nil || r.watcher == nil || strings.TrimSpace(path) == "" {
+		return nil
+	}
+	path = filepath.Clean(path)
+	r.watchMu.Lock()
+	defer r.watchMu.Unlock()
+	if _, ok := r.watched[path]; ok {
+		return nil
+	}
+	if err := r.watcher.Add(path); err != nil {
+		return err
+	}
+	r.watched[path] = struct{}{}
 	return nil
 }
 
@@ -317,13 +504,17 @@ func (r *workspaceReplica) setTrackedPath(tracked *trackedFile, nextPath string)
 	if r == nil || tracked == nil || nextPath == "" {
 		return
 	}
+	oldPath := tracked.Path
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.projectedByPath, tracked.Path)
+	delete(r.projectedByPath, oldPath)
 	tracked.Path = nextPath
 	tracked.WorkspaceRoot = r.rootDir
 	tracked.FS = r.fs
 	r.projectedByPath[nextPath] = tracked
+	if r.changes != nil {
+		r.changes.moveIdentity(oldPath, nextPath, statFileIdentity(nextPath))
+	}
 }
 
 func (r *workspaceReplica) untrack(tracked *trackedFile) {
@@ -338,8 +529,37 @@ func (r *workspaceReplica) untrack(tracked *trackedFile) {
 	if current := r.projectedByPath[tracked.Path]; current == tracked {
 		delete(r.projectedByPath, tracked.Path)
 	}
+	if r.changes != nil {
+		r.changes.removeIdentity(tracked.Path)
+	}
 	tracked.clearLocalDirty()
 	tracked.clearLocalDeleted()
 	tracked.clearLocalMoved()
 	tracked.clearRemoteDeleted()
+}
+
+func (r *workspaceReplica) recordTrackedIdentity(path string) {
+	if r == nil || r.changes == nil || strings.TrimSpace(path) == "" {
+		return
+	}
+	r.changes.recordIdentity(path, statFileIdentity(path))
+}
+
+func statFileIdentity(path string) fileIdentity {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fileIdentity{}
+	}
+	return fileIdentityForInfo(info)
+}
+
+func fileIdentityForInfo(info os.FileInfo) fileIdentity {
+	if info == nil {
+		return fileIdentity{}
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat == nil {
+		return fileIdentity{}
+	}
+	return fileIdentity{dev: uint64(stat.Dev), ino: uint64(stat.Ino), valid: stat.Ino != 0}
 }

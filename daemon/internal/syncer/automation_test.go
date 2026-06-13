@@ -66,8 +66,7 @@ func TestDriveAgentAutomationStartsNotificationTurnFromInbox(t *testing.T) {
 		}),
 	}
 	workspace := &workspaceResponse{
-		Documents: []*document{{ID: "doc_spec", Path: "docs/spec.md"}},
-		Agents:    []*agent{{ID: "agent_1", Handle: "reviewer", Name: "Reviewer", Role: "Review docs", Kind: "codex"}},
+		Agents: []*agent{{ID: "agent_1", Handle: "reviewer", Name: "Reviewer", Role: "Review docs", Kind: "codex"}},
 	}
 
 	if err := service.driveAgentAutomation(context.Background(), workspace); err != nil {
@@ -80,7 +79,7 @@ func TestDriveAgentAutomationStartsNotificationTurnFromInbox(t *testing.T) {
 	if !strings.Contains(app.turnStarts[0].prompt, "You have new items in your notification center.") {
 		t.Fatalf("unexpected prompt: %q", app.turnStarts[0].prompt)
 	}
-	if !strings.Contains(app.turnStarts[0].prompt, "docs/spec.md") {
+	if !strings.Contains(app.turnStarts[0].prompt, "mentioned in spec") {
 		t.Fatalf("expected document summary in prompt, got %q", app.turnStarts[0].prompt)
 	}
 }
@@ -124,7 +123,6 @@ func TestBuildNotificationPromptUsesTriggeringThreadMessage(t *testing.T) {
 		}},
 		nil,
 		&workspaceResponse{
-			Documents: []*document{{ID: "doc_log", Path: "codex-agent.log"}},
 			Threads: []*thread{{
 				ID:         "thread_log",
 				DocumentID: "doc_log",
@@ -162,7 +160,6 @@ func TestBuildNotificationPromptDoesNotUseStaleLatestThreadMessageForEvent(t *te
 		}},
 		nil,
 		&workspaceResponse{
-			Documents: []*document{{ID: "doc_log", Path: "codex-agent.log"}},
 			Threads: []*thread{{
 				ID:         "thread_log",
 				DocumentID: "doc_log",
@@ -222,10 +219,17 @@ func TestToolGatewayCreateThreadQueuesPathQuoteIntent(t *testing.T) {
 		t.Fatalf("new document cache: %v", err)
 	}
 	queue := newReconcileQueue()
-	service.primaryRuntime = &workspaceRuntime{docCache: cache, reconcileQueue: queue}
-	service.latestWorkspace = &workspaceResponse{
-		Documents: []*document{{ID: "doc_spec", Path: "docs/spec.md", UpdateID: 1}},
+	rootID := "doc_root_test"
+	if err := cache.storeRootProjectionEntries(rootID, []rootProjectionEntry{{
+		EntryID:           "doc_spec",
+		ContentDocumentID: "doc_spec",
+		DesiredPath:       "docs/spec.md",
+		MaterializedPath:  "docs/spec.md",
+		Active:            true,
+	}}); err != nil {
+		t.Fatalf("store root projection: %v", err)
 	}
+	service.primaryRuntime = &workspaceRuntime{rootDocumentID: rootID, docCache: cache, reconcileQueue: queue}
 	doc := crdt.New(crdt.WithClientID(771))
 	text := doc.GetText("content")
 	doc.Transact(func(txn *crdt.Transaction) {
@@ -297,17 +301,28 @@ func TestToolGatewayRejectsUnknownToken(t *testing.T) {
 
 func TestToolGatewayGetsDocumentByPathAsAuthorizedAgent(t *testing.T) {
 	service := newToolGatewayTestService(&agent{ID: "agent_1", Handle: "reviewer", Kind: "codex"}, "token_123")
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new document cache: %v", err)
+	}
+	rootID := "doc_root_test"
+	if err := cache.storeRootProjectionEntries(rootID, []rootProjectionEntry{{
+		EntryID:           "doc_spec",
+		ContentDocumentID: "doc_spec",
+		DesiredPath:       "docs/original.md",
+		MaterializedPath:  "docs/spec.md",
+		Active:            true,
+	}}); err != nil {
+		t.Fatalf("store root projection: %v", err)
+	}
+	service.primaryRuntime = &workspaceRuntime{
+		rootDocumentID: rootID,
+		docCache:       cache,
+	}
 	service.client = &http.Client{
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			if r.Method != http.MethodGet || r.URL.Path != "/api/documents/by-path" {
-				t.Fatalf("unexpected backend request: %s %s", r.Method, r.URL.String())
-			}
-			if got := r.URL.Query().Get("path"); got != "docs/spec.md" {
-				t.Fatalf("unexpected path query: %q", got)
-			}
-			return jsonResponse(t, http.StatusOK, toolDocumentResponse{
-				Document: &document{ID: "doc_spec", Path: "docs/spec.md"},
-			}), nil
+			t.Fatalf("get-document-by-path should use local root projection, not backend: %s %s", r.Method, r.URL.String())
+			return nil, nil
 		}),
 	}
 

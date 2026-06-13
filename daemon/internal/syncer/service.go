@@ -113,7 +113,7 @@ func (e *backendStatusError) Error() string {
 
 type workspaceResponse struct {
 	CurrentDaemonID string        `json:"currentDaemonId"`
-	Documents       []*document   `json:"documents"`
+	RootDocumentID  string        `json:"rootDocumentId"`
 	Agents          []*agent      `json:"agents"`
 	AgentRuns       []*agentRun   `json:"agentRuns"`
 	Threads         []*thread     `json:"threads"`
@@ -132,21 +132,6 @@ type upsertPresenceRequest struct {
 	FilePath  string `json:"filePath"`
 	Mode      string `json:"mode"`
 	Activity  string `json:"activity"`
-}
-
-type createDocumentRequest struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
-}
-
-type updateDocumentRequest struct {
-	Path string `json:"path"`
-}
-
-type postDocumentUpdateResponse struct {
-	Accepted bool  `json:"accepted"`
-	Applied  bool  `json:"applied"`
-	UpdateID int64 `json:"updateId"`
 }
 
 type localCreateCandidate struct {
@@ -389,7 +374,7 @@ func parseAgentInboxChangedEvent(event workspaceEventEnvelope) (agentInboxChange
 
 func shouldWakeAgentWorkersForEvent(eventType string) bool {
 	switch strings.TrimSpace(eventType) {
-	case "workspace.snapshot", "presence.updated", "agent.run.updated", "document.updated", "thread.created", "thread.updated", "thread.message.created", "agent.event.updated":
+	case "workspace.snapshot", "presence.updated", "agent.run.updated", "thread.created", "thread.updated", "thread.message.created", "agent.event.updated":
 		return false
 	default:
 		return true
@@ -398,7 +383,7 @@ func shouldWakeAgentWorkersForEvent(eventType string) bool {
 
 func shouldRefreshForEvent(eventType string) bool {
 	switch strings.TrimSpace(eventType) {
-	case "workspace.snapshot", "presence.updated", "document.updated", "agent.run.updated":
+	case "workspace.snapshot", "presence.updated", "agent.run.updated":
 		return false
 	default:
 		return true
@@ -463,6 +448,13 @@ func (s *Service) fetchWorkspace(ctx context.Context) (*workspaceResponse, error
 	return &workspace, nil
 }
 
+func (s *workspaceRuntime) processPathChanges(ctx context.Context) (bool, error) {
+	if s == nil || s.replica == nil {
+		return false, nil
+	}
+	return s.replica.drainPathChanges(ctx, time.Now())
+}
+
 func (s *workspaceRuntime) processLocalCreates(ctx context.Context) error {
 	if s == nil || s.localCreates == nil {
 		return nil
@@ -484,7 +476,21 @@ func (s *workspaceRuntime) processLocalCreates(ctx context.Context) error {
 		}
 		return err
 	}
-	desiredPaths := desiredDocumentPaths(workspace.Documents)
+	if s.rootDocumentID != "" {
+		if err := s.reconcileRootNamespace(ctx); err != nil {
+			for _, candidate := range candidates {
+				s.markLocalCreate(candidate)
+			}
+			return err
+		}
+	}
+	desiredPaths, err := s.currentRootDesiredPaths()
+	if err != nil {
+		for _, candidate := range candidates {
+			s.markLocalCreate(candidate)
+		}
+		return err
+	}
 	created := false
 	var firstErr error
 	for _, candidate := range candidates {
@@ -516,32 +522,26 @@ func (s *workspaceRuntime) processLocalCreates(ctx context.Context) error {
 		}
 		if document != nil {
 			created = true
-			desiredPaths[document.Path] = struct{}{}
+			if s.rootDocumentID != "" {
+				if err := s.upsertRootFileEntry(ctx, document.ID, relativePath, candidate.ActorID, candidate.ActorType); err != nil {
+					s.markLocalCreate(candidate)
+					if firstErr == nil {
+						firstErr = err
+					}
+					continue
+				}
+				desiredPaths[relativePath] = struct{}{}
+				s.markDocumentDirty(s.rootDocumentID)
+			}
 			s.markDocumentDirty(document.ID)
 		}
 	}
 	if created {
-		workspace, err := s.fetchWorkspace(ctx)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-		} else if err := s.applyWorkspace(ctx, workspace); err != nil && firstErr == nil {
+		if err := s.reconcileRootNamespace(ctx); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
-}
-
-func desiredDocumentPaths(documents []*document) map[string]struct{} {
-	paths := make(map[string]struct{}, len(documents))
-	for _, document := range documents {
-		if document == nil || strings.TrimSpace(document.Path) == "" {
-			continue
-		}
-		paths[document.Path] = struct{}{}
-	}
-	return paths
 }
 
 func (s *workspaceRuntime) validateLocalCreateCandidate(candidate localCreateCandidate, desiredPaths map[string]struct{}) (string, bool, error) {
@@ -585,14 +585,7 @@ func (s *workspaceRuntime) validateLocalCreateCandidate(candidate localCreateCan
 
 func (s *workspaceRuntime) createDocumentFromLocalCandidate(ctx context.Context, candidate localCreateCandidate, relativePath string) (*document, error) {
 	fs := NewWorkspaceFS(candidate.Root)
-	payload, err := json.Marshal(createDocumentRequest{
-		Path:    relativePath,
-		Content: "",
-	})
-	if err != nil {
-		return nil, err
-	}
-	req, err := s.newBackendRequest(ctx, http.MethodPost, "/api/documents", bytes.NewReader(payload))
+	req, err := s.newBackendRequest(ctx, http.MethodPost, "/api/documents", bytes.NewReader([]byte("{}")))
 	if err != nil {
 		return nil, err
 	}
@@ -613,6 +606,8 @@ func (s *workspaceRuntime) createDocumentFromLocalCandidate(ctx context.Context,
 	if err := json.NewDecoder(res.Body).Decode(&created); err != nil {
 		return nil, err
 	}
+	created.Path = relativePath
+	projectedSeq := int64(0)
 	if s != nil && s.docCache != nil {
 		doc := crdt.New()
 		if err := s.docCache.storeDoc(created.ID, created.Path, created.UpdateID, doc); err != nil {
@@ -620,6 +615,11 @@ func (s *workspaceRuntime) createDocumentFromLocalCandidate(ctx context.Context,
 			return nil, err
 		}
 		doc.Close()
+		seq, err := s.docCache.documentAppliedSeq(created.ID)
+		if err != nil {
+			return nil, err
+		}
+		projectedSeq = seq
 	}
 	tracked := &trackedFile{
 		DocumentID:    created.ID,
@@ -629,7 +629,7 @@ func (s *workspaceRuntime) createDocumentFromLocalCandidate(ctx context.Context,
 		FS:            fs,
 		cache:         s.docCache,
 	}
-	if err := tracked.storeProjectedBase("", crdtStateFromContent("")); err != nil {
+	if err := tracked.storeProjectedBaseAtSeq("", crdtStateFromContent(""), projectedSeq); err != nil {
 		return nil, err
 	}
 	return &created, nil
@@ -816,13 +816,36 @@ func (s *workspaceRuntime) reconcileDocumentIDs(ctx context.Context, documentIDs
 	}
 	trackedByDocument := s.collectTrackedByDocument()
 	sort.Strings(documentIDs)
+	documentIDs = s.rootFirstDocumentIDs(documentIDs)
 	return s.reconcileDocumentIDsWithTracked(ctx, documentIDs, trackedByDocument)
+}
+
+func (s *workspaceRuntime) rootFirstDocumentIDs(documentIDs []string) []string {
+	if s == nil || s.rootDocumentID == "" || len(documentIDs) < 2 {
+		return documentIDs
+	}
+	rootIndex := -1
+	for index, documentID := range documentIDs {
+		if documentID == s.rootDocumentID {
+			rootIndex = index
+			break
+		}
+	}
+	if rootIndex <= 0 {
+		return documentIDs
+	}
+	ordered := make([]string, 0, len(documentIDs))
+	ordered = append(ordered, documentIDs[rootIndex])
+	ordered = append(ordered, documentIDs[:rootIndex]...)
+	ordered = append(ordered, documentIDs[rootIndex+1:]...)
+	return ordered
 }
 
 func (s *workspaceRuntime) reconcileDocumentIDsWithTracked(ctx context.Context, documentIDs []string, trackedByDocument map[string][]*trackedFile) error {
 	if s.docCache == nil || len(documentIDs) == 0 {
 		return nil
 	}
+	documentIDs = s.rootFirstDocumentIDs(documentIDs)
 	var firstErr error
 	for index, documentID := range documentIDs {
 		if ctx.Err() != nil {
@@ -830,6 +853,17 @@ func (s *workspaceRuntime) reconcileDocumentIDsWithTracked(ctx context.Context, 
 				s.markDocumentDirty(remainingID)
 			}
 			return ctx.Err()
+		}
+		if s.rootDocumentID != "" && documentID == s.rootDocumentID {
+			if err := s.reconcileRootNamespace(ctx); err != nil {
+				s.markDocumentDirty(documentID)
+				if firstErr == nil {
+					firstErr = fmt.Errorf("%s: %w", documentID, err)
+				}
+			} else {
+				trackedByDocument = s.collectTrackedByDocument()
+			}
+			continue
 		}
 		tracked := trackedByDocument[documentID]
 		if len(tracked) == 0 {
@@ -872,7 +906,7 @@ func (s *workspaceRuntime) documentNeedsReconcile(documentID string, trackedFile
 	if documentID == "" {
 		return false
 	}
-	if hasTrackedLocalDirty(trackedFiles) {
+	if hasTrackedLocalDirty(trackedFiles) || hasTrackedLocalMetadataWork(trackedFiles) {
 		return true
 	}
 	if s == nil || s.docCache == nil {
@@ -912,11 +946,12 @@ func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documen
 			return nil
 		}
 
-		baseDoc, _, baseState, err := cache.loadBaseDocLocked(entry, documentID, documentPath)
+		baseDoc, baseMetadata, baseState, err := cache.loadBaseDocLocked(entry, documentID, documentPath)
 		if err != nil {
 			return err
 		}
 		cacheContentKnown := baseState != nil
+		projectedSeq := baseMetadata.AppliedSeq
 		baseContent := baseDoc.GetText("content").ToString()
 		states, err := collectTrackedReconcileStates(trackedFiles)
 		if err != nil {
@@ -1001,9 +1036,11 @@ func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documen
 			return err
 		}
 		if pendingRemoteCount > 0 {
-			if err := applyPendingRemoteUpdatesLocked(cache, entry, documentID, baseDoc); err != nil {
+			nextProjectedSeq, err := applyPendingRemoteUpdatesLocked(cache, entry, documentID, baseDoc)
+			if err != nil {
 				return err
 			}
+			projectedSeq = nextProjectedSeq
 			baseState = baseDoc.EncodeStateAsUpdate()
 			cacheContentKnown = baseState != nil
 			baseContent = baseDoc.GetText("content").ToString()
@@ -1014,6 +1051,12 @@ func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documen
 			if !state.fileExists && state.baseKnown {
 				hasReconcileWork = true
 				break
+			}
+			if state.tracked != nil {
+				if desiredPath := state.tracked.desiredPath(); desiredPath != "" && desiredPath != state.tracked.Path {
+					hasReconcileWork = true
+					break
+				}
 			}
 		}
 		if !hasReconcileWork {
@@ -1039,7 +1082,7 @@ func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documen
 				}
 				state.tracked.setProjectedSnapshot(projectedContentHash{}, false)
 				if cacheContentKnown {
-					clean, err := applyProjectedContent(state.tracked, finalContent, finalState)
+					clean, err := applyProjectedContent(state.tracked, finalContent, finalState, projectedSeq)
 					if err != nil {
 						return err
 					}
@@ -1054,7 +1097,7 @@ func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documen
 				continue
 			}
 			if _, ok := projectOnlyDirty[state.tracked]; ok {
-				clean, err := applyProjectedContent(state.tracked, finalContent, finalState)
+				clean, err := applyProjectedContent(state.tracked, finalContent, finalState, projectedSeq)
 				if err != nil {
 					return err
 				}
@@ -1069,7 +1112,7 @@ func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documen
 				state.tracked.markLocalDirty()
 				continue
 			}
-			clean, err := applyProjectedContent(state.tracked, finalContent, finalState)
+			clean, err := applyProjectedContent(state.tracked, finalContent, finalState, projectedSeq)
 			if err != nil {
 				return err
 			}
@@ -1110,17 +1153,20 @@ func (s *workspaceRuntime) reconcileLocalMetadataOperations(ctx context.Context,
 			tracked.clearLocalDirty()
 			continue
 		}
-		if err := s.deleteRemoteDocument(ctx, tracked); err != nil {
+		actorID, actorType := s.actorForTracked(tracked)
+		if err := s.tombstoneRootFileEntry(ctx, tracked.DocumentID, actorID, actorType); err != nil {
 			return false, err
 		}
-		if err := cleanupRemovedDocument(cache, entry, documentID, states); err != nil {
-			return false, err
-		}
+		tracked.untrack()
+		s.markDocumentDirty(s.rootDocumentID)
 		return true, errDocumentRemovedDuringReconcile
 	}
 	for _, state := range states {
 		tracked := state.tracked
-		if tracked == nil || !tracked.isLocalMoved() || state.localDirty {
+		if tracked == nil || !tracked.isLocalMoved() {
+			continue
+		}
+		if state.localDirty && state.localContent != state.baseContent {
 			continue
 		}
 		nextPath := workspaceRelativePath(tracked.WorkspaceRoot, tracked.Path)
@@ -1128,12 +1174,19 @@ func (s *workspaceRuntime) reconcileLocalMetadataOperations(ctx context.Context,
 			tracked.clearLocalMoved()
 			continue
 		}
-		if err := s.updateRemoteDocumentPath(ctx, tracked, nextPath); err != nil {
+		actorID, actorType := s.actorForTracked(tracked)
+		if err := s.upsertRootFileEntry(ctx, tracked.DocumentID, nextPath, actorID, actorType); err != nil {
 			return false, err
 		}
 		tracked.DocumentPath = nextPath
+		if cache != nil {
+			if _, err := cache.ensureDocument(tracked.DocumentID, nextPath); err != nil {
+				return false, err
+			}
+		}
 		tracked.clearLocalMoved()
 		tracked.clearLocalDirty()
+		s.markDocumentDirty(s.rootDocumentID)
 		return true, nil
 	}
 	return false, nil
@@ -1214,6 +1267,15 @@ func hasTrackedLocalDirty(trackedFiles []*trackedFile) bool {
 	return false
 }
 
+func hasTrackedLocalMetadataWork(trackedFiles []*trackedFile) bool {
+	for _, tracked := range trackedFiles {
+		if tracked != nil && (tracked.isLocalMoved() || tracked.isLocalDeleted() || tracked.isRemoteDeleted()) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *workspaceRuntime) actorForTracked(tracked *trackedFile) (string, string) {
 	actorID := ""
 	actorType := ""
@@ -1233,79 +1295,38 @@ func (s *workspaceRuntime) actorForTracked(tracked *trackedFile) (string, string
 	return actorID, actorType
 }
 
-func (s *workspaceRuntime) updateRemoteDocumentPath(ctx context.Context, tracked *trackedFile, path string) error {
-	if tracked == nil || tracked.DocumentID == "" {
-		return nil
-	}
-	payload, err := json.Marshal(updateDocumentRequest{Path: path})
-	if err != nil {
-		return err
-	}
-	req, err := s.newBackendRequest(ctx, http.MethodPatch, "/api/documents/"+tracked.DocumentID, bytes.NewReader(payload))
-	if err != nil {
-		return err
-	}
-	if tracked.ActorType == "agent" && strings.TrimSpace(tracked.ActorID) != "" {
-		applyBackendAuth(req.Header, s.cfg, tracked.ActorID)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	res, err := s.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	if res.StatusCode >= http.StatusBadRequest {
-		body, _ := io.ReadAll(io.LimitReader(res.Body, backendErrorBodyLimit))
-		return &backendStatusError{Method: req.Method, URL: req.URL.String(), StatusCode: res.StatusCode, Body: string(body)}
-	}
-	return nil
-}
-
-func (s *workspaceRuntime) deleteRemoteDocument(ctx context.Context, tracked *trackedFile) error {
-	if tracked == nil || tracked.DocumentID == "" {
-		return nil
-	}
-	req, err := s.newBackendRequest(ctx, http.MethodDelete, "/api/documents/"+tracked.DocumentID, nil)
-	if err != nil {
-		return err
-	}
-	if tracked.ActorType == "agent" && strings.TrimSpace(tracked.ActorID) != "" {
-		applyBackendAuth(req.Header, s.cfg, tracked.ActorID)
-	}
-	res, err := s.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	if res.StatusCode >= http.StatusBadRequest {
-		body, _ := io.ReadAll(io.LimitReader(res.Body, backendErrorBodyLimit))
-		return &backendStatusError{Method: req.Method, URL: req.URL.String(), StatusCode: res.StatusCode, Body: string(body)}
-	}
-	return nil
-}
-
 func (s *workspaceRuntime) flushOutboxUpdates(ctx context.Context, cache *documentCache, documentID, documentPath string, trackedFiles []*trackedFile, records []outboxUpdateRecord) error {
-	for len(records) > 0 {
-		record := records[0]
-		response, err := s.postDocumentUpdate(ctx, documentID, &record)
-		if err != nil {
+	for _, record := range records {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err := s.sendDocumentCRDTUpdate(ctx, documentID, record); err != nil {
 			return err
 		}
 		entry, unlock := cache.lockEntry(documentID)
-		if err := finalizeAcceptedOutbox(cache, entry, documentID, documentPath, trackedFiles, &record, response.UpdateID); err != nil {
+		if err := finalizeSentOutbox(cache, entry, documentID, documentPath, trackedFiles, &record); err != nil {
 			unlock()
 			return err
 		}
-		records, err = cache.loadOutboxUpdatesLocked(entry, documentID)
 		unlock()
-		if err != nil {
-			return err
-		}
 	}
 	return nil
 }
 
-func finalizeAcceptedOutbox(cache *documentCache, entry *documentCacheEntry, documentID, documentPath string, trackedFiles []*trackedFile, record *outboxUpdateRecord, backendUpdateID int64) error {
+func (s *workspaceRuntime) sendDocumentCRDTUpdate(ctx context.Context, documentID string, record outboxUpdateRecord) error {
+	if record.Update == nil || len(record.Update) == 0 {
+		return nil
+	}
+	if s.sendDocumentUpdate != nil {
+		return s.sendDocumentUpdate(ctx, documentID, record)
+	}
+	if s.documentSocket == nil {
+		s.documentSocket = newWorkspaceDocumentSocket(s)
+	}
+	return s.documentSocket.SendSyncUpdate(ctx, documentID, record.Update)
+}
+
+func finalizeSentOutbox(cache *documentCache, entry *documentCacheEntry, documentID, documentPath string, trackedFiles []*trackedFile, record *outboxUpdateRecord) error {
 	baseDoc, _, _, err := cache.loadBaseDocLocked(entry, documentID, documentPath)
 	if err != nil {
 		return err
@@ -1317,7 +1338,12 @@ func finalizeAcceptedOutbox(cache *documentCache, entry *documentCacheEntry, doc
 	if err := crdt.ApplyUpdateV1(baseDoc, record.Update, "local-reconcile"); err != nil {
 		return err
 	}
-	if err := cache.acceptOutboxUpdateLocked(entry, documentID, documentPath, record, backendUpdateID); err != nil {
+	projectedSeq, err := cache.applyOutboxUpdateLocked(entry, documentID, documentPath, record)
+	if err != nil {
+		return err
+	}
+	_ = cache.maybeCreateDocumentSnapshot(documentID, projectedSeq, baseDoc)
+	if err := cache.clearOutboxUpdate(documentID, record.ID); err != nil {
 		return err
 	}
 
@@ -1328,7 +1354,7 @@ func finalizeAcceptedOutbox(cache *documentCache, entry *documentCacheEntry, doc
 			continue
 		}
 		if state.tracked.Path == record.SourcePath {
-			clean, err := projectMergedContentOverLocalDisk(state.tracked, record.ObservedContent, record.ObservedState, finalContent, finalState)
+			clean, err := projectMergedContentOverLocalDisk(state.tracked, record.ObservedContent, record.ObservedState, projectedSeq, finalContent, finalState, projectedSeq)
 			if err != nil {
 				return err
 			}
@@ -1343,7 +1369,7 @@ func finalizeAcceptedOutbox(cache *documentCache, entry *documentCacheEntry, doc
 			state.tracked.markLocalDirty()
 			continue
 		}
-		clean, err := applyProjectedContent(state.tracked, finalContent, finalState)
+		clean, err := applyProjectedContent(state.tracked, finalContent, finalState, projectedSeq)
 		if err != nil {
 			return err
 		}
@@ -1356,12 +1382,12 @@ func finalizeAcceptedOutbox(cache *documentCache, entry *documentCacheEntry, doc
 	return nil
 }
 
-func applyPendingRemoteUpdatesLocked(cache *documentCache, entry *documentCacheEntry, documentID string, doc *crdt.Doc) error {
+func applyPendingRemoteUpdatesLocked(cache *documentCache, entry *documentCacheEntry, documentID string, doc *crdt.Doc) (int64, error) {
 	if cache == nil || doc == nil {
-		return nil
+		return 0, nil
 	}
-	_, err := cache.applyPendingRemoteUpdatesLocked(entry, documentID, doc)
-	return err
+	_, projectedSeq, err := cache.applyPendingRemoteUpdatesLocked(entry, documentID, doc)
+	return projectedSeq, err
 }
 
 func collectTrackedReconcileStates(trackedFiles []*trackedFile) ([]trackedReconcileState, error) {
@@ -1471,11 +1497,7 @@ func buildLocalUpdateFromBase(baseState []byte, baseContent, localContent string
 	return update, doc.EncodeStateAsUpdate(), nil
 }
 
-func applyProjectedContent(tracked *trackedFile, nextContent string, nextStates ...[]byte) (bool, error) {
-	var nextState []byte
-	if len(nextStates) > 0 {
-		nextState = nextStates[0]
-	}
+func applyProjectedContent(tracked *trackedFile, nextContent string, nextState []byte, projectedSeq int64) (bool, error) {
 	previousHash, previousKnown := tracked.projectedSnapshot()
 	tracked.beginProjection()
 	defer tracked.endProjection()
@@ -1488,7 +1510,7 @@ func applyProjectedContent(tracked *trackedFile, nextContent string, nextStates 
 		tracked.setProjectedSnapshot(previousHash, previousKnown)
 		return false, err
 	}
-	if err := tracked.storeProjectedBase(nextContent, nextState); err != nil {
+	if err := tracked.storeProjectedBaseAtSeq(nextContent, nextState, projectedSeq); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -1508,7 +1530,7 @@ func markTrackedLocalDirty(tracked *trackedFile, _ string) error {
 	return nil
 }
 
-func projectMergedContentOverLocalDisk(tracked *trackedFile, currentDiskContent string, currentDiskState []byte, mergedContent string, mergedState []byte) (bool, error) {
+func projectMergedContentOverLocalDisk(tracked *trackedFile, currentDiskContent string, currentDiskState []byte, currentDiskSeq int64, mergedContent string, mergedState []byte, mergedSeq int64) (bool, error) {
 	previousHash, previousKnown := tracked.projectedSnapshot()
 	tracked.beginProjection()
 	defer tracked.endProjection()
@@ -1518,7 +1540,7 @@ func projectMergedContentOverLocalDisk(tracked *trackedFile, currentDiskContent 
 			if len(currentDiskState) == 0 {
 				currentDiskState = crdtStateFromContent(currentDiskContent)
 			}
-			if baseErr := tracked.storeProjectedBase(currentDiskContent, currentDiskState); baseErr != nil {
+			if baseErr := tracked.storeProjectedBaseAtSeq(currentDiskContent, currentDiskState, currentDiskSeq); baseErr != nil {
 				tracked.setProjectedSnapshot(previousHash, previousKnown)
 				return false, baseErr
 			}
@@ -1528,7 +1550,7 @@ func projectMergedContentOverLocalDisk(tracked *trackedFile, currentDiskContent 
 		tracked.setProjectedSnapshot(previousHash, previousKnown)
 		return false, err
 	}
-	if err := tracked.storeProjectedBase(mergedContent, mergedState); err != nil {
+	if err := tracked.storeProjectedBaseAtSeq(mergedContent, mergedState, mergedSeq); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -1633,48 +1655,6 @@ func (s *Service) updateRemoteAgentSession(ctx context.Context, agentID string, 
 	return nil
 }
 
-func (s *workspaceRuntime) postDocumentUpdate(ctx context.Context, documentID string, record *outboxUpdateRecord) (*postDocumentUpdateResponse, error) {
-	if record == nil || len(record.Update) == 0 {
-		return &postDocumentUpdateResponse{Accepted: true}, nil
-	}
-	req, err := s.newBackendRequest(ctx, http.MethodPost, "/api/documents/"+documentID+"/updates", bytes.NewReader(record.Update))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/octet-stream")
-	if record.ActorType == "agent" && strings.TrimSpace(record.ActorID) != "" {
-		applyBackendAuth(req.Header, s.cfg, record.ActorID)
-	}
-	if strings.TrimSpace(s.cfg.DaemonToken) == "" {
-		query := req.URL.Query()
-		query.Set("actor", firstNonEmptyText(record.ActorID, s.cfg.AgentID))
-		query.Set("actor_type", firstNonEmptyText(record.ActorType, "daemon"))
-		req.URL.RawQuery = query.Encode()
-	}
-	res, err := s.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(res.Body, backendErrorBodyLimit))
-		return nil, &backendStatusError{
-			Method:     req.Method,
-			URL:        req.URL.String(),
-			StatusCode: res.StatusCode,
-			Body:       string(body),
-		}
-	}
-	var response postDocumentUpdateResponse
-	if err := json.NewDecoder(res.Body).Decode(&response); err != nil {
-		return nil, err
-	}
-	if !response.Accepted {
-		return nil, errors.New("document update was not accepted")
-	}
-	return &response, nil
-}
-
 func scanWorkspaceFiles(root string) (map[string]string, error) {
 	files := map[string]string{}
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
@@ -1699,6 +1679,8 @@ func scanWorkspaceFiles(root string) (map[string]string, error) {
 	})
 	return files, err
 }
+
+var scanWorkspaceFilesForReconcile = scanWorkspaceFiles
 
 func isIgnoredDocumentPath(documentPath string) bool {
 	return isIgnoredWorkspaceRelativePath(documentPath)
@@ -1765,24 +1747,14 @@ func nextAwarenessClientID() uint64 {
 	return 10_000_000 + awarenessClientCounter.Add(1)
 }
 
-func (t *trackedFile) storeProjectedBase(content string, states ...[]byte) error {
+func (t *trackedFile) storeProjectedBaseAtSeq(content string, state []byte, projectedSeq int64) error {
 	if t == nil || t.DocumentID == "" {
 		return nil
-	}
-	var state []byte
-	if len(states) > 0 {
-		state = states[0]
-	}
-	if len(state) == 0 {
-		state = crdtStateFromContent(content)
 	}
 	if t.cache == nil {
 		return nil
 	}
-	if !projectedStateMatchesContent(state, content) {
-		return nil
-	}
-	return t.cache.storeProjectedBase(t.DocumentID, content, state)
+	return t.cache.storeProjectedBase(t.DocumentID, content, state, projectedSeq)
 }
 
 func (t *trackedFile) loadProjectedBase() (string, []byte, bool, error) {
@@ -1994,16 +1966,6 @@ func workspaceRootForDocumentPath(absolutePath, documentPath string) string {
 		}
 	}
 	return filepath.Dir(absolutePath)
-}
-
-func projectedStateMatchesContent(state []byte, content string) bool {
-	doc := crdt.New()
-	if len(state) > 0 {
-		if err := crdt.ApplyUpdateV1(doc, state, "projection-check"); err != nil {
-			return false
-		}
-	}
-	return doc.GetText("content").ToString() == content
 }
 
 func crdtStateFromContent(content string) []byte {

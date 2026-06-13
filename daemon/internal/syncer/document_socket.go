@@ -1,6 +1,7 @@
 package syncer
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -28,7 +29,10 @@ type workspaceDocumentSocket struct {
 type outboundDocumentMessage struct {
 	documentID string
 	payload    []byte
+	result     chan error
 }
+
+const documentSocketSendTimeout = 30 * time.Second
 
 func newWorkspaceDocumentSocket(runtime *workspaceRuntime) *workspaceDocumentSocket {
 	return &workspaceDocumentSocket{
@@ -47,8 +51,13 @@ func (s *workspaceDocumentSocket) SetDesiredDocuments(documents []*document) {
 	}
 	next := map[string]*document{}
 	for _, document := range documents {
-		if document == nil || document.ID == "" || isIgnoredDocumentPath(document.Path) {
+		if document == nil || document.ID == "" {
 			continue
+		}
+		if s.runtime == nil || document.ID != s.runtime.rootDocumentID {
+			if isIgnoredDocumentPath(document.Path) {
+				continue
+			}
 		}
 		next[document.ID] = cloneSyncDocument(document)
 	}
@@ -89,6 +98,52 @@ func (s *workspaceDocumentSocket) wakeWriter() {
 	select {
 	case s.wake <- struct{}{}:
 	default:
+	}
+}
+
+func (s *workspaceDocumentSocket) SendSyncUpdate(ctx context.Context, documentID string, update []byte) error {
+	if s == nil || documentID == "" || len(update) == 0 {
+		return nil
+	}
+	return s.SendProtocolMessage(ctx, documentID, yproto.BuildSyncUpdate(update))
+}
+
+func (s *workspaceDocumentSocket) SendProtocolMessage(ctx context.Context, documentID string, payload []byte) error {
+	if s == nil || documentID == "" || len(payload) == 0 {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, documentSocketSendTimeout)
+	defer cancel()
+	result := make(chan error, 1)
+	msg := outboundDocumentMessage{documentID: documentID, payload: payload, result: result}
+	select {
+	case s.send <- msg:
+		s.wakeWriter()
+	case <-sendCtx.Done():
+		return sendCtx.Err()
+	}
+	select {
+	case err := <-result:
+		return err
+	case <-sendCtx.Done():
+		return sendCtx.Err()
+	}
+}
+
+func (s *workspaceDocumentSocket) QueueProtocolMessage(documentID string, payload []byte) error {
+	if s == nil || documentID == "" || len(payload) == 0 {
+		return nil
+	}
+	msg := outboundDocumentMessage{documentID: documentID, payload: payload}
+	select {
+	case s.send <- msg:
+		s.wakeWriter()
+		return nil
+	default:
+		return fmt.Errorf("document socket send queue is full for %s", documentID)
 	}
 }
 
@@ -250,9 +305,16 @@ func (s *workspaceDocumentSocket) writeLoop(ctx context.Context, conn *websocket
 		case <-s.wake:
 		case msg := <-s.send:
 			if msg.documentID == "" || len(msg.payload) == 0 {
+				if msg.result != nil {
+					msg.result <- nil
+				}
 				continue
 			}
-			if err := conn.WriteMessage(websocket.BinaryMessage, yproto.BuildDocumentMessage(msg.documentID, msg.payload)); err != nil {
+			err := conn.WriteMessage(websocket.BinaryMessage, yproto.BuildDocumentMessage(msg.documentID, msg.payload))
+			if msg.result != nil {
+				msg.result <- err
+			}
+			if err != nil {
 				return err
 			}
 		}
@@ -303,7 +365,17 @@ func (r *workspaceRuntime) handleDocumentSyncMessage(documentID string, payload 
 	}
 	switch syncType {
 	case yproto.SyncStep1:
-		return nil
+		if r.docCache == nil {
+			return nil
+		}
+		diff, err := r.docCache.localStateDiff(document.ID, document.Path, data)
+		if err != nil {
+			return err
+		}
+		if isCanonicalEmptyUpdate(diff) {
+			return nil
+		}
+		return r.documentSocket.QueueProtocolMessage(document.ID, yproto.BuildSyncStep2FromUpdate(diff))
 	case yproto.SyncStep2, yproto.SyncUpdate:
 		if len(data) == 0 || r.docCache == nil {
 			return nil
@@ -319,10 +391,28 @@ func (r *workspaceRuntime) handleDocumentSyncMessage(documentID string, payload 
 	return nil
 }
 
+func isCanonicalEmptyUpdate(update []byte) bool {
+	return len(update) == 0 || bytes.Equal(update, []byte{0, 0})
+}
+
 func cloneSyncDocument(document *document) *document {
 	if document == nil {
 		return nil
 	}
 	clone := *document
 	return &clone
+}
+
+func cloneDocuments(documents []*document) []*document {
+	if len(documents) == 0 {
+		return nil
+	}
+	clone := make([]*document, 0, len(documents))
+	for _, document := range documents {
+		if document == nil {
+			continue
+		}
+		clone = append(clone, cloneSyncDocument(document))
+	}
+	return clone
 }
