@@ -338,6 +338,16 @@ func TestWorkspaceStoreStoreProjectedBaseUsesExplicitSeq(t *testing.T) {
 	if row.ProjectedSeq != baseSeq {
 		t.Fatalf("projected seq = %d, want explicit base seq %d", row.ProjectedSeq, baseSeq)
 	}
+	base, ok, err := cache.loadProjectedBaseRowByDocumentID("doc_1")
+	if err != nil {
+		t.Fatalf("load projected base row: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected projected_bases row")
+	}
+	if base.ProjectedSeq != baseSeq || base.ContentText != "base" || base.ContentLen != len("base") || len(base.StateUpdate) == 0 {
+		t.Fatalf("projected_bases row = %#v, want explicit seq/content/state", base)
+	}
 	projected, _, known, err := cache.loadProjectedBase("doc_1")
 	if err != nil {
 		t.Fatalf("load projected base: %v", err)
@@ -496,7 +506,7 @@ func TestDocumentCacheLoadDocAtSeqUsesNearestSnapshotTailReplay(t *testing.T) {
 	}
 }
 
-func TestDocumentCacheProjectedBaseUsesExactSnapshotWithoutReplay(t *testing.T) {
+func TestDocumentCacheProjectedBaseUsesMaterializedRowWithoutReconstruction(t *testing.T) {
 	cache, err := newDocumentCache(t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
@@ -516,6 +526,10 @@ func TestDocumentCacheProjectedBaseUsesExactSnapshotWithoutReplay(t *testing.T) 
 		t.Fatalf("delete folded updates: %v", err)
 	}
 
+	fallbackCalls := 0
+	withProjectedBaseFallbackHook(t, func(documentID string, projectedSeq int64) {
+		fallbackCalls++
+	})
 	replayCalls := 0
 	withDocumentReplayHook(t, func(documentID string, fromSeq, toSeq int64, rows int) {
 		replayCalls++
@@ -533,16 +547,19 @@ func TestDocumentCacheProjectedBaseUsesExactSnapshotWithoutReplay(t *testing.T) 
 		t.Fatalf("load projected base: %v", err)
 	}
 	if !known || content != "base" || len(state) == 0 {
-		t.Fatalf("projected base = known %v content %q state %d, want exact snapshot hit", known, content, len(state))
+		t.Fatalf("projected base = known %v content %q state %d, want materialized row hit", known, content, len(state))
+	}
+	if fallbackCalls != 0 {
+		t.Fatalf("projected_bases hit should not call loadDocAtSeq fallback, got %d fallback calls", fallbackCalls)
 	}
 	if replayCalls != 0 {
-		t.Fatalf("exact projected-base snapshot should not replay crdt rows, got %d replay calls", replayCalls)
+		t.Fatalf("projected_bases hit should not replay crdt rows, got %d replay calls", replayCalls)
 	}
 	if decodeCalls != 0 {
-		t.Fatalf("exact projected-base snapshot should not decode snapshot state, got %d decode calls", decodeCalls)
+		t.Fatalf("projected_bases hit should not decode snapshot state, got %d decode calls", decodeCalls)
 	}
 	if hashValidationCalls != 0 {
-		t.Fatalf("exact projected-base snapshot should not rehash snapshot blobs, got %d hash validation calls", hashValidationCalls)
+		t.Fatalf("projected_bases hit should not rehash snapshot blobs, got %d hash validation calls", hashValidationCalls)
 	}
 }
 
@@ -579,7 +596,7 @@ func TestDocumentCacheStoreProjectedBaseDoesNotBypassSnapshotInterval(t *testing
 	}
 }
 
-func TestDocumentCacheProjectedBaseFallsBackAndRepairsCorruptSnapshot(t *testing.T) {
+func TestDocumentCacheProjectedBaseFallsBackAndBackfillsStaleRow(t *testing.T) {
 	withDocumentSnapshotEveryUpdates(t, 1)
 	cache, err := newDocumentCache(t.TempDir())
 	if err != nil {
@@ -597,14 +614,14 @@ func TestDocumentCacheProjectedBaseFallsBackAndRepairsCorruptSnapshot(t *testing
 	if err := cache.storeProjectedBase("doc_1", "remote", remoteDoc.EncodeStateAsUpdate(), projectedSeq); err != nil {
 		t.Fatalf("store projected base: %v", err)
 	}
-	if _, err := cache.db.Exec(`update document_snapshots set content_sha256 = ? where document_id = ? and seq = ?`, "bad-content-hash", "doc_1", projectedSeq); err != nil {
-		t.Fatalf("corrupt projected snapshot metadata: %v", err)
+	if _, err := cache.db.Exec(`update projected_bases set content_len = ? where document_id = ?`, 999, "doc_1"); err != nil {
+		t.Fatalf("stale projected base metadata: %v", err)
 	}
 
-	var replayRows int
-	withDocumentReplayHook(t, func(documentID string, fromSeq, toSeq int64, rows int) {
+	var fallbackCalls int
+	withProjectedBaseFallbackHook(t, func(documentID string, projectedSeq int64) {
 		if documentID == "doc_1" {
-			replayRows += rows
+			fallbackCalls++
 		}
 	})
 	content, state, known, err := cache.loadProjectedBase("doc_1")
@@ -614,15 +631,74 @@ func TestDocumentCacheProjectedBaseFallsBackAndRepairsCorruptSnapshot(t *testing
 	if !known || content != "remote" || len(state) == 0 {
 		t.Fatalf("projected base = known %v content %q state %d, want fallback replay", known, content, len(state))
 	}
-	if replayRows != 1 {
-		t.Fatalf("fallback should replay one row after base snapshot, got %d", replayRows)
+	if fallbackCalls != 1 {
+		t.Fatalf("expected one projected-base fallback, got %d", fallbackCalls)
 	}
-	snapshot, ok, err := cache.loadDocumentSnapshotAt("doc_1", projectedSeq)
+	base, ok, err := cache.loadProjectedBaseRowByDocumentID("doc_1")
 	if err != nil {
-		t.Fatalf("reload repaired snapshot: %v", err)
+		t.Fatalf("reload backfilled projected base: %v", err)
 	}
-	if !ok || !snapshot.hashesValid() || snapshot.ContentText != "remote" {
-		t.Fatalf("expected repaired valid snapshot at projected seq, ok=%v snapshot=%#v", ok, snapshot)
+	if !ok || !base.metadataValid() || base.ContentText != "remote" || base.ProjectedSeq != projectedSeq {
+		t.Fatalf("expected backfilled valid projected base at projected seq, ok=%v base=%#v", ok, base)
+	}
+}
+
+func TestDocumentCacheProjectedBaseFallbackBackfillFailureIsNonFatal(t *testing.T) {
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base")
+	if err := cache.storeDoc("doc_1", "docs/spec.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	row, err := cache.ensureDocument("doc_1", "docs/spec.md")
+	if err != nil {
+		t.Fatalf("load row: %v", err)
+	}
+	if err := cache.storeProjectedBase("doc_1", "base", baseDoc.EncodeStateAsUpdate(), row.AppliedSeq); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+	if _, err := cache.db.Exec(`delete from projected_bases where document_id = ?`, "doc_1"); err != nil {
+		t.Fatalf("delete projected base: %v", err)
+	}
+	storeErr := errors.New("projected base backfill failed")
+	withProjectedBaseStoreHook(t, func(documentID string, projectedSeq int64) error {
+		return storeErr
+	})
+	content, state, known, err := cache.loadProjectedBase("doc_1")
+	if err != nil {
+		t.Fatalf("load projected base: %v", err)
+	}
+	if !known || content != "base" || len(state) == 0 {
+		t.Fatalf("projected base = known %v content %q state %d, want fallback success", known, content, len(state))
+	}
+	if _, ok, err := cache.loadProjectedBaseRowByDocumentID("doc_1"); err != nil || ok {
+		t.Fatalf("backfill failure should leave projected_bases missing, ok=%v err=%v", ok, err)
+	}
+}
+
+func TestDocumentCacheStoreProjectedSeqClearsProjectedBaseRow(t *testing.T) {
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base")
+	if err := cache.storeDoc("doc_1", "docs/spec.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	row, err := cache.ensureDocument("doc_1", "docs/spec.md")
+	if err != nil {
+		t.Fatalf("load row: %v", err)
+	}
+	if err := cache.storeProjectedBase("doc_1", "base", baseDoc.EncodeStateAsUpdate(), row.AppliedSeq); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+	if err := cache.storeProjectedSeq("doc_1", row.AppliedSeq); err != nil {
+		t.Fatalf("store projected seq: %v", err)
+	}
+	if _, ok, err := cache.loadProjectedBaseRowByDocumentID("doc_1"); err != nil || ok {
+		t.Fatalf("storeProjectedSeq should clear projected_bases row, ok=%v err=%v", ok, err)
 	}
 }
 
@@ -712,7 +788,7 @@ func TestDocumentCacheSnapshotFailureDoesNotFailRemoteFoldOrLoad(t *testing.T) {
 	}
 }
 
-func TestDocumentCacheProjectedBaseSnapshotSurvivesReopen(t *testing.T) {
+func TestDocumentCacheProjectedBaseRowSurvivesReopen(t *testing.T) {
 	root := t.TempDir()
 	cache, err := newDocumentCache(root)
 	if err != nil {
@@ -737,6 +813,10 @@ func TestDocumentCacheProjectedBaseSnapshotSurvivesReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen cache: %v", err)
 	}
+	fallbackCalls := 0
+	withProjectedBaseFallbackHook(t, func(documentID string, projectedSeq int64) {
+		fallbackCalls++
+	})
 	replayCalls := 0
 	withDocumentReplayHook(t, func(documentID string, fromSeq, toSeq int64, rows int) {
 		replayCalls++
@@ -746,10 +826,13 @@ func TestDocumentCacheProjectedBaseSnapshotSurvivesReopen(t *testing.T) {
 		t.Fatalf("load projected base after reopen: %v", err)
 	}
 	if !known || content != "base" {
-		t.Fatalf("projected base after reopen = known %v content %q, want snapshot", known, content)
+		t.Fatalf("projected base after reopen = known %v content %q, want materialized row", known, content)
+	}
+	if fallbackCalls != 0 {
+		t.Fatalf("reopen projected base row should not use fallback, got %d fallback calls", fallbackCalls)
 	}
 	if replayCalls != 0 {
-		t.Fatalf("reopen exact snapshot should not replay crdt rows, got %d replay calls", replayCalls)
+		t.Fatalf("reopen projected base row should not replay crdt rows, got %d replay calls", replayCalls)
 	}
 }
 
@@ -792,7 +875,7 @@ func TestWorkspaceStoreSchemaUsesAgreedDurableTables(t *testing.T) {
 		}
 		tables = append(tables, table)
 	}
-	want := []string{"content_outbox", "crdt_updates", "document_snapshots", "documents", "incoming_updates", "root_projection_entries", "thread_outbox"}
+	want := []string{"content_outbox", "crdt_updates", "document_snapshots", "documents", "incoming_updates", "projected_bases", "root_projection_entries", "thread_outbox"}
 	if !reflect.DeepEqual(tables, want) {
 		t.Fatalf("sqlite schema tables = %#v, want %#v", tables, want)
 	}
@@ -812,6 +895,9 @@ func TestWorkspaceStoreSchemaUsesAgreedDurableTables(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(documentsSQL), "backend_update_id") {
 		t.Fatalf("documents must not persist backend_update_id, schema=%s", documentsSQL)
+	}
+	if strings.Contains(strings.ToLower(documentsSQL), "projected_text") {
+		t.Fatalf("documents must not own projected base text metadata, schema=%s", documentsSQL)
 	}
 }
 
@@ -865,6 +951,24 @@ func withDocumentSnapshotHashValidationHook(t *testing.T, hook func(documentID s
 	documentSnapshotHashValidationHook = hook
 	t.Cleanup(func() {
 		documentSnapshotHashValidationHook = previous
+	})
+}
+
+func withProjectedBaseStoreHook(t *testing.T, hook func(documentID string, projectedSeq int64) error) {
+	t.Helper()
+	previous := projectedBaseStoreHook
+	projectedBaseStoreHook = hook
+	t.Cleanup(func() {
+		projectedBaseStoreHook = previous
+	})
+}
+
+func withProjectedBaseFallbackHook(t *testing.T, hook func(documentID string, projectedSeq int64)) {
+	t.Helper()
+	previous := projectedBaseFallbackHook
+	projectedBaseFallbackHook = hook
+	t.Cleanup(func() {
+		projectedBaseFallbackHook = previous
 	})
 }
 

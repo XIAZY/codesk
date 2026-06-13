@@ -40,6 +40,10 @@ var documentSnapshotDecodeHook func(documentID string, seq int64)
 
 var documentSnapshotHashValidationHook func(documentID string, seq int64)
 
+var projectedBaseStoreHook func(documentID string, projectedSeq int64) error
+
+var projectedBaseFallbackHook func(documentID string, projectedSeq int64)
+
 type documentCacheEntry struct {
 	mu         sync.Mutex
 	documentID string
@@ -77,14 +81,12 @@ type materializedCachedDocument struct {
 }
 
 type documentRow struct {
-	DocumentID          string
-	Path                string
-	AppliedSeq          int64
-	ProjectedSeq        int64
-	ProjectedTextSHA256 string
-	ProjectedTextLen    int
-	ProjectionKnown     bool
-	UpdatedAt           time.Time
+	DocumentID      string
+	Path            string
+	AppliedSeq      int64
+	ProjectedSeq    int64
+	ProjectionKnown bool
+	UpdatedAt       time.Time
 }
 
 type documentSnapshotRow struct {
@@ -95,6 +97,17 @@ type documentSnapshotRow struct {
 	ContentSHA256 string
 	StateSHA256   string
 	CreatedAt     time.Time
+}
+
+type projectedBaseRow struct {
+	DocumentID    string
+	ProjectedSeq  int64
+	StateUpdate   []byte
+	ContentText   string
+	ContentSHA256 string
+	ContentLen    int
+	StateSHA256   string
+	UpdatedAt     time.Time
 }
 
 func newDocumentCache(path string) (*documentCache, error) {
@@ -152,8 +165,6 @@ func (c *workspaceStore) initSchema() error {
 			path text not null,
 			applied_seq integer not null default 0,
 			projected_seq integer not null default 0,
-			projected_text_sha256 text,
-			projected_text_len integer,
 			projection_known integer not null default 0,
 			updated_at integer not null
 		)`,
@@ -180,6 +191,16 @@ func (c *workspaceStore) initSchema() error {
 			primary key (document_id, seq)
 		)`,
 		`create index if not exists document_snapshots_by_doc_seq on document_snapshots(document_id, seq desc)`,
+		`create table if not exists projected_bases (
+			document_id text primary key,
+			projected_seq integer not null,
+			state_update blob not null,
+			content_text text not null,
+			content_sha256 text not null,
+			content_len integer not null,
+			state_sha256 text not null,
+			updated_at integer not null
+		)`,
 		`create table if not exists incoming_updates (
 			incoming_seq integer primary key autoincrement,
 			document_id text not null,
@@ -683,6 +704,7 @@ func (c *workspaceStore) removeDocumentLocked(entry *documentCacheEntry, documen
 	}
 	err := c.withTx(func(tx *sql.Tx) error {
 		for _, stmt := range []string{
+			`delete from projected_bases where document_id = ?`,
 			`delete from document_snapshots where document_id = ?`,
 			`delete from thread_outbox where document_id = ?`,
 			`delete from content_outbox where document_id = ?`,
@@ -722,14 +744,12 @@ func (c *workspaceStore) storeProjectedBase(documentID, content string, state []
 		}
 		if _, err := tx.Exec(`update documents
 			set projected_seq = ?,
-				projected_text_sha256 = ?,
-				projected_text_len = ?,
 				projection_known = 1,
 				updated_at = ?
-			where document_id = ?`, projectedSeq, sha256Hex([]byte(content)), len(content), unixNano(now), documentID); err != nil {
+			where document_id = ?`, projectedSeq, unixNano(now), documentID); err != nil {
 			return err
 		}
-		return nil
+		return c.storeProjectedBaseTx(tx, documentID, content, state, projectedSeq, now)
 	})
 }
 
@@ -749,12 +769,17 @@ func (c *workspaceStore) storeProjectedSeq(documentID string, projectedSeq int64
 		return nil
 	}
 	now := time.Now().UTC()
-	_, err := c.db.Exec(`update documents
-		set projected_seq = ?,
-			projection_known = 1,
-			updated_at = ?
-		where document_id = ?`, projectedSeq, unixNano(now), documentID)
-	return err
+	return c.withTx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`update documents
+			set projected_seq = ?,
+				projection_known = 1,
+				updated_at = ?
+			where document_id = ?`, projectedSeq, unixNano(now), documentID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`delete from projected_bases where document_id = ?`, documentID)
+		return err
+	})
 }
 
 func (c *workspaceStore) loadRootProjectionEntries(rootDocumentID string) (map[string]rootProjectionEntry, error) {
@@ -822,8 +847,11 @@ func (c *workspaceStore) loadProjectedBase(documentID string) (string, []byte, b
 	if !row.ProjectionKnown {
 		return "", nil, false, nil
 	}
-	if content, state, known, err := c.loadProjectedBaseSnapshot(row); err != nil || known {
+	if content, state, known, err := c.loadProjectedBaseRow(row); err != nil || known {
 		return content, state, known, err
+	}
+	if projectedBaseFallbackHook != nil {
+		projectedBaseFallbackHook(documentID, row.ProjectedSeq)
 	}
 	doc, state, known, err := c.loadDocAtSeq(documentID, row.ProjectedSeq)
 	if err != nil {
@@ -834,9 +862,7 @@ func (c *workspaceStore) loadProjectedBase(documentID string) (string, []byte, b
 		return "", nil, false, nil
 	}
 	content := doc.GetText("content").ToString()
-	if row.ProjectedTextSHA256 != "" && row.ProjectedTextSHA256 != sha256Hex([]byte(content)) {
-		return "", nil, false, nil
-	}
+	c.backfillProjectedBase(documentID, content, state, row.ProjectedSeq)
 	return content, state, true, nil
 }
 
@@ -923,21 +949,15 @@ func (c *workspaceStore) ensureDocumentTx(tx *sql.Tx, documentID, path string, n
 
 func (c *workspaceStore) loadDocumentRowTx(tx *sql.Tx, documentID string) (documentRow, error) {
 	var row documentRow
-	var projectedHash sql.NullString
-	var projectedLen sql.NullInt64
 	var updatedAt int64
 	var projectionKnown int
-	err := tx.QueryRow(`select document_id, path, applied_seq, projected_seq, projected_text_sha256, projected_text_len, projection_known, updated_at
+	err := tx.QueryRow(`select document_id, path, applied_seq, projected_seq, projection_known, updated_at
 		from documents where document_id = ?`, documentID).Scan(
 		&row.DocumentID, &row.Path, &row.AppliedSeq, &row.ProjectedSeq,
-		&projectedHash, &projectedLen, &projectionKnown, &updatedAt,
+		&projectionKnown, &updatedAt,
 	)
 	if err != nil {
 		return row, err
-	}
-	row.ProjectedTextSHA256 = projectedHash.String
-	if projectedLen.Valid {
-		row.ProjectedTextLen = int(projectedLen.Int64)
 	}
 	row.ProjectionKnown = projectionKnown != 0
 	row.UpdatedAt = time.Unix(0, updatedAt).UTC()
@@ -971,6 +991,82 @@ func (c *workspaceStore) insertCRDTUpdateTx(tx *sql.Tx, documentID string, updat
 		return 0, false, err
 	}
 	return seq, true, nil
+}
+
+func (c *workspaceStore) storeProjectedBaseTx(tx *sql.Tx, documentID, content string, state []byte, projectedSeq int64, now time.Time) error {
+	if tx == nil || documentID == "" {
+		return nil
+	}
+	if projectedSeq <= 0 || len(state) == 0 {
+		_, err := tx.Exec(`delete from projected_bases where document_id = ?`, documentID)
+		return err
+	}
+	if projectedBaseStoreHook != nil {
+		if err := projectedBaseStoreHook(documentID, projectedSeq); err != nil {
+			return err
+		}
+	}
+	_, err := tx.Exec(`insert into projected_bases (
+			document_id, projected_seq, state_update, content_text, content_sha256, content_len, state_sha256, updated_at
+		) values (?, ?, ?, ?, ?, ?, ?, ?)
+		on conflict(document_id) do update set
+			projected_seq = excluded.projected_seq,
+			state_update = excluded.state_update,
+			content_text = excluded.content_text,
+			content_sha256 = excluded.content_sha256,
+			content_len = excluded.content_len,
+			state_sha256 = excluded.state_sha256,
+			updated_at = excluded.updated_at`,
+		documentID, projectedSeq, state, content, sha256Hex([]byte(content)), len(content), sha256Hex(state), unixNano(now))
+	return err
+}
+
+func (c *workspaceStore) loadProjectedBaseRow(document documentRow) (string, []byte, bool, error) {
+	if c == nil || document.DocumentID == "" || document.ProjectedSeq <= 0 {
+		return "", nil, false, nil
+	}
+	row, ok, err := c.loadProjectedBaseRowByDocumentID(document.DocumentID)
+	if err != nil || !ok {
+		return "", nil, false, err
+	}
+	if row.ProjectedSeq != document.ProjectedSeq || !row.metadataValid() {
+		_ = c.deleteProjectedBase(document.DocumentID)
+		return "", nil, false, nil
+	}
+	return row.ContentText, append([]byte(nil), row.StateUpdate...), true, nil
+}
+
+func (c *workspaceStore) loadProjectedBaseRowByDocumentID(documentID string) (projectedBaseRow, bool, error) {
+	var row projectedBaseRow
+	var updatedAt int64
+	err := c.db.QueryRow(`select document_id, projected_seq, state_update, content_text, content_sha256, content_len, state_sha256, updated_at
+		from projected_bases where document_id = ?`, documentID).Scan(
+		&row.DocumentID, &row.ProjectedSeq, &row.StateUpdate, &row.ContentText,
+		&row.ContentSHA256, &row.ContentLen, &row.StateSHA256, &updatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return row, false, nil
+	}
+	if err != nil {
+		return row, false, err
+	}
+	row.UpdatedAt = time.Unix(0, updatedAt).UTC()
+	return row, true, nil
+}
+
+func (c *workspaceStore) backfillProjectedBase(documentID, content string, state []byte, projectedSeq int64) {
+	if c == nil || documentID == "" || projectedSeq <= 0 || len(state) == 0 {
+		return
+	}
+	_ = c.storeProjectedBase(documentID, content, state, projectedSeq)
+}
+
+func (c *workspaceStore) deleteProjectedBase(documentID string) error {
+	if c == nil || documentID == "" {
+		return nil
+	}
+	_, err := c.db.Exec(`delete from projected_bases where document_id = ?`, documentID)
+	return err
 }
 
 func (c *workspaceStore) storeDocumentSnapshot(documentID string, seq int64, state []byte, content string) error {
@@ -1084,23 +1180,6 @@ func (c *workspaceStore) loadDocumentSnapshotByQuery(query string, args ...any) 
 	return row, true, nil
 }
 
-func (c *workspaceStore) loadProjectedBaseSnapshot(row documentRow) (string, []byte, bool, error) {
-	if c == nil || row.DocumentID == "" || row.ProjectedSeq <= 0 {
-		return "", nil, false, nil
-	}
-	snapshot, ok, err := c.loadDocumentSnapshotAt(row.DocumentID, row.ProjectedSeq)
-	if err != nil || !ok {
-		return "", nil, false, nil
-	}
-	if !snapshot.metadataValid() ||
-		(row.ProjectedTextSHA256 != "" && row.ProjectedTextSHA256 != snapshot.ContentSHA256) ||
-		(row.ProjectedTextLen != 0 && row.ProjectedTextLen != len(snapshot.ContentText)) {
-		_ = c.deleteDocumentSnapshot(snapshot.DocumentID, snapshot.Seq)
-		return "", nil, false, nil
-	}
-	return snapshot.ContentText, append([]byte(nil), snapshot.StateUpdate...), true, nil
-}
-
 func (c *workspaceStore) deleteDocumentSnapshot(documentID string, seq int64) error {
 	if c == nil || documentID == "" || seq <= 0 {
 		return nil
@@ -1125,6 +1204,15 @@ func (row documentSnapshotRow) metadataValid() bool {
 		row.Seq > 0 &&
 		len(row.StateUpdate) > 0 &&
 		row.ContentSHA256 != "" &&
+		row.StateSHA256 != ""
+}
+
+func (row projectedBaseRow) metadataValid() bool {
+	return row.DocumentID != "" &&
+		row.ProjectedSeq > 0 &&
+		len(row.StateUpdate) > 0 &&
+		row.ContentSHA256 != "" &&
+		row.ContentLen == len(row.ContentText) &&
 		row.StateSHA256 != ""
 }
 
