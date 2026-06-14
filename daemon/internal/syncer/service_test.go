@@ -3016,6 +3016,130 @@ func TestLocalCreateIntentRetriesWithStableDocumentAndOperationID(t *testing.T) 
 	}
 }
 
+func TestLocalCreateIntentKeepsClaimedPathAfterRootUpsertRestart(t *testing.T) {
+	root := t.TempDir()
+	localPath := filepath.Join(root, "docs", "local.md")
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	localBytes := []byte("local bytes\n")
+	if err := os.WriteFile(localPath, localBytes, 0o644); err != nil {
+		t.Fatalf("write local create: %v", err)
+	}
+
+	intent := newLocalCreateIntent("docs/local.md", "daemon_agent", "daemon", sha256Hex(localBytes), time.Now().UnixNano())
+	rootID := "doc_root_restart"
+	remoteID := "doc_remote"
+	var createPayloads []map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/workspace":
+			writeJSONResponse(w, http.StatusOK, &workspaceResponse{RootDocumentID: rootID})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/documents":
+			var payload map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode create payload: %v", err)
+			}
+			createPayloads = append(createPayloads, payload)
+			if payload["documentId"] != intent.DocumentID || payload["clientOperationId"] != intent.ClientOperationID {
+				t.Fatalf("unexpected create payload: %#v want doc=%s op=%s", payload, intent.DocumentID, intent.ClientOperationID)
+			}
+			writeJSONResponse(w, http.StatusOK, &document{ID: intent.DocumentID, UpdateID: 1})
+		default:
+			http.Error(w, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	rootDoc := crdt.New()
+	if _, err := UpsertRootFile(rootDoc, remoteID, "docs/local.md", rootMutationActor{}); err != nil {
+		t.Fatalf("upsert remote root entry: %v", err)
+	}
+	if _, err := UpsertRootFile(rootDoc, intent.DocumentID, intent.WorkspaceRelativePath, rootMutationActor{}); err != nil {
+		t.Fatalf("upsert local root entry: %v", err)
+	}
+	if err := cache.storeDoc(rootID, rootDocumentPath, 1, rootDoc); err != nil {
+		t.Fatalf("store root doc: %v", err)
+	}
+	rootDoc.Close()
+	localDoc := crdt.New()
+	if err := cache.storeDoc(intent.DocumentID, intent.WorkspaceRelativePath, 1, localDoc); err != nil {
+		t.Fatalf("store local content doc: %v", err)
+	}
+	localDoc.Close()
+	remoteDoc := crdt.New()
+	if err := cache.storeDoc(remoteID, "docs/local.md", 1, remoteDoc); err != nil {
+		t.Fatalf("store remote content doc: %v", err)
+	}
+	remoteDoc.Close()
+	if err := cache.storeLocalNamespaceIntent(intent); err != nil {
+		t.Fatalf("store pending local intent: %v", err)
+	}
+
+	runtime := &workspaceRuntime{
+		cfg:          Config{BackendURL: server.URL, AgentID: "daemon_agent"},
+		client:       server.Client(),
+		docCache:     cache,
+		localCreates: newLocalCreateQueue(),
+		replica: &workspaceReplica{
+			rootDir:         root,
+			projectedByPath: map[string]*trackedFile{},
+			projectedByID:   map[string]*trackedFile{},
+			fs:              NewWorkspaceFS(root),
+			markDirty: func(string) {
+			},
+		},
+	}
+	runtime.sendDocumentUpdate = func(ctx context.Context, documentID string, record outboxUpdateRecord) error {
+		return nil
+	}
+
+	if err := runtime.processLocalCreates(context.Background()); err != nil {
+		t.Fatalf("process restart local create intent: %v", err)
+	}
+	if len(createPayloads) != 1 {
+		t.Fatalf("create payloads = %#v", createPayloads)
+	}
+	pending, err := cache.loadPendingLocalNamespaceIntents()
+	if err != nil {
+		t.Fatalf("load pending intents: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending intents after resolution = %#v", pending)
+	}
+	projection, err := cache.loadRootProjectionEntries(rootID)
+	if err != nil {
+		t.Fatalf("load root projection: %v", err)
+	}
+	localProjection := projection[rootEntryIDForDocument(intent.DocumentID)]
+	if localProjection.MaterializedPath != "docs/local.md" {
+		t.Fatalf("local materialized path = %q, want docs/local.md; projection=%#v", localProjection.MaterializedPath, projection)
+	}
+	remoteProjection := projection[rootEntryIDForDocument(remoteID)]
+	if remoteProjection.MaterializedPath != "docs/local (doc_remote).md" {
+		t.Fatalf("remote materialized path = %q, want docs/local (doc_remote).md; projection=%#v", remoteProjection.MaterializedPath, projection)
+	}
+	runtime.replica.mu.Lock()
+	localTracked := runtime.replica.projectedByID[intent.DocumentID]
+	remoteTracked := runtime.replica.projectedByID[remoteID]
+	_, localPathTracked := runtime.replica.projectedByPath[localPath]
+	runtime.replica.mu.Unlock()
+	if localTracked == nil || localTracked.Path != localPath || !localPathTracked {
+		t.Fatalf("local tracked path = %#v localPathTracked=%v, want %s", localTracked, localPathTracked, localPath)
+	}
+	remoteConflictPath := filepath.Join(root, "docs", "local (doc_remote).md")
+	if remoteTracked == nil || remoteTracked.Path != remoteConflictPath {
+		t.Fatalf("remote tracked path = %#v, want %s", remoteTracked, remoteConflictPath)
+	}
+	if got, err := os.ReadFile(localPath); err != nil || string(got) != string(localBytes) {
+		t.Fatalf("local bytes changed: content=%q err=%v", string(got), err)
+	}
+}
+
 func TestOutgoingOutboxKeepsLocalUpdateWhenBackendSendFails(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "doc.md")

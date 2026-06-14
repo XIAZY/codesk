@@ -264,6 +264,122 @@ func TestRootProjectionPlannerReservesPendingLocalClaims(t *testing.T) {
 	}
 }
 
+func TestRootProjectionPlannerDoesNotReserveLocalClaimAgainstOwner(t *testing.T) {
+	mirror := RootCRDTMirror{Entries: map[string]rootEntry{
+		"doc_local": {
+			EntryID:           "doc_local",
+			Kind:              rootEntryKindFile,
+			ContentDocumentID: "doc_local",
+			Name:              "docs/local.md",
+		},
+	}}
+	plan := RootProjectionPlanner{}.Plan(RootProjectionPlannerInput{
+		Mirror: mirror,
+		LocalClaims: []localNamespaceClaim{{
+			Path:       "docs/local.md",
+			DocumentID: "doc_local",
+			Kind:       localNamespaceIntentKindCreate,
+		}},
+		ProjectedSeq: 10,
+	})
+	if len(plan.Upserts) != 1 {
+		t.Fatalf("upserts = %#v", plan.Upserts)
+	}
+	got := plan.Upserts[0]
+	if got.MaterializedPath != "docs/local.md" {
+		t.Fatalf("owner claim materialized path = %q, want docs/local.md", got.MaterializedPath)
+	}
+}
+
+func TestRootProjectionPlannerPrefersResolvedLocalClaimOwner(t *testing.T) {
+	mirror := RootCRDTMirror{Entries: map[string]rootEntry{
+		"doc_remote": {
+			EntryID:           "doc_remote",
+			Kind:              rootEntryKindFile,
+			ContentDocumentID: "doc_remote",
+			Name:              "docs/local.md",
+		},
+		"doc_local": {
+			EntryID:           "doc_local",
+			Kind:              rootEntryKindFile,
+			ContentDocumentID: "doc_local",
+			Name:              "docs/local.md",
+		},
+	}}
+	plan := RootProjectionPlanner{}.Plan(RootProjectionPlannerInput{
+		Mirror: mirror,
+		LocalClaims: []localNamespaceClaim{{
+			Path:       "docs/local.md",
+			DocumentID: "doc_local",
+			Kind:       localNamespaceIntentKindCreate,
+			Status:     localNamespaceIntentResolved,
+		}},
+		ProjectedSeq: 11,
+	})
+	byDoc := map[string]rootProjectionEntry{}
+	for _, entry := range plan.Upserts {
+		byDoc[entry.ContentDocumentID] = entry
+	}
+	if got := byDoc["doc_local"].MaterializedPath; got != "docs/local.md" {
+		t.Fatalf("local materialized path = %q, want docs/local.md", got)
+	}
+	if got := byDoc["doc_remote"].MaterializedPath; got != "docs/local (doc_remote).md" {
+		t.Fatalf("remote materialized path = %q, want docs/local (doc_remote).md", got)
+	}
+}
+
+func TestRootProjectionPlannerPreservesPreviousConflictOwnerAfterClaimResolution(t *testing.T) {
+	mirror := RootCRDTMirror{Entries: map[string]rootEntry{
+		"doc_remote": {
+			EntryID:           "doc_remote",
+			Kind:              rootEntryKindFile,
+			ContentDocumentID: "doc_remote",
+			Name:              "docs/local.md",
+		},
+		"doc_local": {
+			EntryID:           "doc_local",
+			Kind:              rootEntryKindFile,
+			ContentDocumentID: "doc_local",
+			Name:              "docs/local.md",
+		},
+	}}
+	previous := map[string]rootProjectionEntry{
+		"doc_remote": {
+			EntryID:           "doc_remote",
+			Kind:              rootEntryKindFile,
+			ContentDocumentID: "doc_remote",
+			DesiredPath:       "docs/local.md",
+			MaterializedPath:  "docs/local (doc_remote).md",
+			Active:            true,
+			ProjectedSeq:      10,
+		},
+		"doc_local": {
+			EntryID:           "doc_local",
+			Kind:              rootEntryKindFile,
+			ContentDocumentID: "doc_local",
+			DesiredPath:       "docs/local.md",
+			MaterializedPath:  "docs/local.md",
+			Active:            true,
+			ProjectedSeq:      10,
+		},
+	}
+	plan := RootProjectionPlanner{}.Plan(RootProjectionPlannerInput{
+		Previous:     previous,
+		Mirror:       mirror,
+		ProjectedSeq: 12,
+	})
+	byDoc := map[string]rootProjectionEntry{}
+	for _, entry := range plan.Upserts {
+		byDoc[entry.ContentDocumentID] = entry
+	}
+	if got := byDoc["doc_local"].MaterializedPath; got != "docs/local.md" {
+		t.Fatalf("local materialized path = %q, want docs/local.md", got)
+	}
+	if got := byDoc["doc_remote"].MaterializedPath; got != "docs/local (doc_remote).md" {
+		t.Fatalf("remote materialized path = %q, want docs/local (doc_remote).md", got)
+	}
+}
+
 func TestRootProjectionPlannerStaysPureStructural(t *testing.T) {
 	sourceBytes, err := os.ReadFile("root_namespace.go")
 	if err != nil {
@@ -302,7 +418,7 @@ func TestAllocateRootProjectionEntriesUsesDeterministicConflictPaths(t *testing.
 		},
 	}
 
-	projected := allocateRootProjectionEntries(entries, 7, nil)
+	projected := allocateRootProjectionEntries(nil, entries, 7, nil)
 	if len(projected) != 2 {
 		t.Fatalf("projected entries = %#v", projected)
 	}

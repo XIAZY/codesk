@@ -314,7 +314,7 @@ func (s *workspaceRuntime) reconcileRootNamespace(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	claims, err := cache.loadPendingLocalNamespaceClaims()
+	claims, err := cache.loadLocalNamespaceProjectionClaims()
 	if err != nil {
 		return err
 	}
@@ -406,6 +406,7 @@ func (s *workspaceRuntime) currentRootDesiredPaths() (map[string]struct{}, error
 	if err != nil {
 		return nil, err
 	}
+	defer doc.Close()
 	mirror, err := DecodeRootCRDTMirror(doc)
 	if err != nil {
 		return nil, err
@@ -486,7 +487,7 @@ func PlanRootProjection(previous map[string]rootProjectionEntry, mirror RootCRDT
 }
 
 func (RootProjectionPlanner) Plan(input RootProjectionPlannerInput) rootProjectionPlan {
-	return buildRootProjectionPlan(input.Previous, allocateRootProjectionEntries(input.Mirror.Entries, input.ProjectedSeq, input.LocalClaims))
+	return buildRootProjectionPlan(input.Previous, allocateRootProjectionEntries(input.Previous, input.Mirror.Entries, input.ProjectedSeq, input.LocalClaims))
 }
 
 func buildRootProjectionPlan(previous map[string]rootProjectionEntry, next []rootProjectionEntry) rootProjectionPlan {
@@ -561,7 +562,7 @@ func (s *workspaceRuntime) projectRootRemovedEntry(projected rootProjectionEntry
 	return nil
 }
 
-func allocateRootProjectionEntries(entries map[string]rootEntry, projectedSeq int64, claims []localNamespaceClaim) []rootProjectionEntry {
+func allocateRootProjectionEntries(previous map[string]rootProjectionEntry, entries map[string]rootEntry, projectedSeq int64, claims []localNamespaceClaim) []rootProjectionEntry {
 	active := make([]rootEntry, 0, len(entries))
 	for _, entry := range entries {
 		path, err := normalizeVisibleRootPath(entry.desiredPath())
@@ -583,7 +584,12 @@ func allocateRootProjectionEntries(entries map[string]rootEntry, projectedSeq in
 		}
 		return active[i].EntryID < active[j].EntryID
 	})
+	activePathByDocument := map[string]string{}
+	for _, entry := range active {
+		activePathByDocument[entry.ContentDocumentID] = entry.desiredPath()
+	}
 	used := map[string]struct{}{}
+	claimedByPath := map[string]map[string]struct{}{}
 	for _, claim := range claims {
 		if claim.Kind != "" && claim.Kind != localNamespaceIntentKindCreate {
 			continue
@@ -592,12 +598,36 @@ func allocateRootProjectionEntries(entries map[string]rootEntry, projectedSeq in
 		if err != nil || path == "" {
 			continue
 		}
-		used[path] = struct{}{}
+		documentID := strings.TrimSpace(claim.DocumentID)
+		if documentID == "" {
+			used[path] = struct{}{}
+			continue
+		}
+		status := strings.TrimSpace(claim.Status)
+		if status == "" {
+			status = localNamespaceIntentPending
+		}
+		if status == localNamespaceIntentResolved && activePathByDocument[documentID] != path {
+			continue
+		}
+		if claimedByPath[path] == nil {
+			claimedByPath[path] = map[string]struct{}{}
+		}
+		claimedByPath[path][documentID] = struct{}{}
+	}
+	previousByDocument := map[string]rootProjectionEntry{}
+	for _, projected := range previous {
+		if projected.Active && strings.TrimSpace(projected.ContentDocumentID) != "" {
+			previousByDocument[projected.ContentDocumentID] = projected
+		}
 	}
 	result := make([]rootProjectionEntry, 0, len(entries))
 	for _, entry := range active {
 		desired := entry.desiredPath()
-		materialized := allocateMaterializedRootPath(desired, entry.ContentDocumentID, used)
+		materialized := previousMaterializedRootPath(entry, desired, previousByDocument, used, claimedByPath)
+		if materialized == "" {
+			materialized = allocateMaterializedRootPath(desired, entry.ContentDocumentID, used, claimedByPath)
+		}
 		used[materialized] = struct{}{}
 		result = append(result, rootProjectionEntry{
 			EntryID:           entry.EntryID,
@@ -626,12 +656,30 @@ func allocateRootProjectionEntries(entries map[string]rootEntry, projectedSeq in
 	return result
 }
 
-func allocateMaterializedRootPath(desiredPath, contentDocumentID string, used map[string]struct{}) string {
+func previousMaterializedRootPath(entry rootEntry, desired string, previousByDocument map[string]rootProjectionEntry, used map[string]struct{}, claimedByPath map[string]map[string]struct{}) string {
+	previous := previousByDocument[entry.ContentDocumentID]
+	if !previous.Active || previous.ContentDocumentID == "" {
+		return ""
+	}
+	if previous.DesiredPath != desired || strings.TrimSpace(previous.MaterializedPath) == "" {
+		return ""
+	}
+	materialized, err := normalizeVisibleRootPath(previous.MaterializedPath)
+	if err != nil || materialized == "" {
+		return ""
+	}
+	if rootMaterializedPathTaken(materialized, entry.ContentDocumentID, used, claimedByPath) {
+		return ""
+	}
+	return materialized
+}
+
+func allocateMaterializedRootPath(desiredPath, contentDocumentID string, used map[string]struct{}, claimedByPath map[string]map[string]struct{}) string {
 	desiredPath = normalizeRootPath(desiredPath)
 	if desiredPath == "" {
 		desiredPath = "untitled"
 	}
-	if _, exists := used[desiredPath]; !exists {
+	if !rootMaterializedPathTaken(desiredPath, contentDocumentID, used, claimedByPath) {
 		return desiredPath
 	}
 	base := strings.TrimSuffix(desiredPath, filepath.Ext(desiredPath))
@@ -645,8 +693,20 @@ func allocateMaterializedRootPath(desiredPath, contentDocumentID string, used ma
 		if index > 1 {
 			candidate = normalizeRootPath(base + " (" + suffix + "-" + strconv.Itoa(index) + ")" + ext)
 		}
-		if _, exists := used[candidate]; !exists {
+		if !rootMaterializedPathTaken(candidate, contentDocumentID, used, claimedByPath) {
 			return candidate
 		}
 	}
+}
+
+func rootMaterializedPathTaken(path, contentDocumentID string, used map[string]struct{}, claimedByPath map[string]map[string]struct{}) bool {
+	if _, exists := used[path]; exists {
+		return true
+	}
+	claimOwners := claimedByPath[path]
+	if len(claimOwners) == 0 {
+		return false
+	}
+	_, ownClaim := claimOwners[contentDocumentID]
+	return !ownClaim || len(claimOwners) > 1
 }

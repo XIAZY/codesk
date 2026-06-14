@@ -2,6 +2,7 @@ package syncer
 
 import (
 	"database/sql"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -36,6 +37,7 @@ type localNamespaceClaim struct {
 	DocumentID        string
 	ClientOperationID string
 	Kind              string
+	Status            string
 }
 
 func newLocalCreateIntent(relativePath, actorID, actorType, observedHash string, observedMTime int64) localNamespaceIntent {
@@ -100,20 +102,10 @@ func (c *workspaceStore) storeLocalNamespaceIntent(intent localNamespaceIntent) 
 }
 
 func (c *workspaceStore) loadPendingLocalNamespaceIntents() ([]localNamespaceIntent, error) {
-	if c == nil {
-		return nil, nil
-	}
-	rows, err := c.db.Query(`select
-			id, workspace_relative_path, kind, status, document_id, client_operation_id,
-			observed_file_identity, observed_content_hash, observed_mtime,
-			actor_id, actor_type, created_at, updated_at
-		from local_namespace_intents
-		where status = ?
-		order by created_at, id`, localNamespaceIntentPending)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+	return c.loadLocalNamespaceIntentsByStatus(localNamespaceIntentPending)
+}
+
+func scanLocalNamespaceIntents(rows *sql.Rows) ([]localNamespaceIntent, error) {
 	var intents []localNamespaceIntent
 	for rows.Next() {
 		var intent localNamespaceIntent
@@ -142,8 +134,8 @@ func (c *workspaceStore) loadPendingLocalNamespaceIntents() ([]localNamespaceInt
 	return intents, rows.Err()
 }
 
-func (c *workspaceStore) loadPendingLocalNamespaceClaims() ([]localNamespaceClaim, error) {
-	intents, err := c.loadPendingLocalNamespaceIntents()
+func (c *workspaceStore) loadLocalNamespaceProjectionClaims() ([]localNamespaceClaim, error) {
+	intents, err := c.loadLocalNamespaceIntentsByStatus(localNamespaceIntentPending, localNamespaceIntentResolved)
 	if err != nil {
 		return nil, err
 	}
@@ -154,9 +146,41 @@ func (c *workspaceStore) loadPendingLocalNamespaceClaims() ([]localNamespaceClai
 			DocumentID:        intent.DocumentID,
 			ClientOperationID: intent.ClientOperationID,
 			Kind:              intent.Kind,
+			Status:            intent.Status,
 		})
 	}
 	return claims, nil
+}
+
+func (c *workspaceStore) loadLocalNamespaceIntentsByStatus(statuses ...string) ([]localNamespaceIntent, error) {
+	if c == nil || len(statuses) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, 0, len(statuses))
+	args := make([]any, 0, len(statuses))
+	for _, status := range statuses {
+		if status == "" {
+			continue
+		}
+		placeholders = append(placeholders, "?")
+		args = append(args, status)
+	}
+	if len(args) == 0 {
+		return nil, nil
+	}
+	query := `select
+			id, workspace_relative_path, kind, status, document_id, client_operation_id,
+			observed_file_identity, observed_content_hash, observed_mtime,
+			actor_id, actor_type, created_at, updated_at
+		from local_namespace_intents
+		where status in (` + strings.Join(placeholders, ",") + `)
+		order by created_at, id`
+	rows, err := c.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanLocalNamespaceIntents(rows)
 }
 
 func (c *workspaceStore) updateLocalNamespaceIntentStatus(id, status string) error {
