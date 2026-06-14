@@ -5,19 +5,20 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	crdt "notty/internal/ycrdt"
 )
 
-func TestRootTreeUpsertMoveAndTombstoneUseDocumentIDIdentity(t *testing.T) {
+func TestRootCRDTMirrorUpsertMoveAndTombstoneUseDocumentIDIdentity(t *testing.T) {
 	doc := crdt.New()
 	defer doc.Close()
 
 	if update, err := UpsertRootFile(doc, "doc_1", "docs/old.md", rootMutationActor{ID: "agent", Kind: "daemon"}); err != nil || len(update) == 0 {
 		t.Fatalf("upsert old: update=%d err=%v", len(update), err)
 	}
-	tree, err := DecodeRootTree(doc)
+	tree, err := DecodeRootCRDTMirror(doc)
 	if err != nil {
 		t.Fatalf("decode root tree: %v", err)
 	}
@@ -28,7 +29,7 @@ func TestRootTreeUpsertMoveAndTombstoneUseDocumentIDIdentity(t *testing.T) {
 	if update, err := UpsertRootFile(doc, "doc_1", "docs/new.md", rootMutationActor{ID: "agent", Kind: "daemon"}); err != nil || len(update) == 0 {
 		t.Fatalf("move: update=%d err=%v", len(update), err)
 	}
-	tree, err = DecodeRootTree(doc)
+	tree, err = DecodeRootCRDTMirror(doc)
 	if err != nil {
 		t.Fatalf("decode moved root tree: %v", err)
 	}
@@ -46,7 +47,7 @@ func TestRootTreeUpsertMoveAndTombstoneUseDocumentIDIdentity(t *testing.T) {
 	if update, err := TombstoneRootFile(doc, "doc_1", rootMutationActor{ID: "agent", Kind: "daemon"}); err != nil || len(update) == 0 {
 		t.Fatalf("tombstone: update=%d err=%v", len(update), err)
 	}
-	tree, err = DecodeRootTree(doc)
+	tree, err = DecodeRootCRDTMirror(doc)
 	if err != nil {
 		t.Fatalf("decode tombstoned root tree: %v", err)
 	}
@@ -55,7 +56,7 @@ func TestRootTreeUpsertMoveAndTombstoneUseDocumentIDIdentity(t *testing.T) {
 	}
 }
 
-func TestRootTreeDuplicateDesiredPathsStaySeparate(t *testing.T) {
+func TestRootCRDTMirrorDuplicateDesiredPathsStaySeparate(t *testing.T) {
 	doc := crdt.New()
 	defer doc.Close()
 
@@ -65,7 +66,7 @@ func TestRootTreeDuplicateDesiredPathsStaySeparate(t *testing.T) {
 	if _, err := UpsertRootFile(doc, "doc_b", "docs/same.md", rootMutationActor{}); err != nil {
 		t.Fatalf("upsert doc_b: %v", err)
 	}
-	tree, err := DecodeRootTree(doc)
+	tree, err := DecodeRootCRDTMirror(doc)
 	if err != nil {
 		t.Fatalf("decode root tree: %v", err)
 	}
@@ -89,7 +90,7 @@ func TestRootTreeDuplicateDesiredPathsStaySeparate(t *testing.T) {
 	}
 }
 
-func TestRootTreeRejectsInvalidVisiblePaths(t *testing.T) {
+func TestRootCRDTMirrorRejectsInvalidVisiblePaths(t *testing.T) {
 	doc := crdt.New()
 	defer doc.Close()
 
@@ -101,7 +102,7 @@ func TestRootTreeRejectsInvalidVisiblePaths(t *testing.T) {
 	if _, err := UpsertRootFile(doc, "doc_1", "docs//ok.md", rootMutationActor{}); err != nil {
 		t.Fatalf("valid normalized path rejected: %v", err)
 	}
-	tree, err := DecodeRootTree(doc)
+	tree, err := DecodeRootCRDTMirror(doc)
 	if err != nil {
 		t.Fatalf("decode root tree: %v", err)
 	}
@@ -110,8 +111,77 @@ func TestRootTreeRejectsInvalidVisiblePaths(t *testing.T) {
 	}
 }
 
+func TestRootCRDTMirrorStateMachinePreservesInodeLikeIdentity(t *testing.T) {
+	doc := crdt.New()
+	defer doc.Close()
+
+	steps := []struct {
+		name        string
+		apply       func() error
+		wantPath    string
+		wantDeleted bool
+		wantVisible bool
+	}{
+		{
+			name: "create",
+			apply: func() error {
+				_, err := UpsertRootFile(doc, "doc_state", "docs/a.md", rootMutationActor{})
+				return err
+			},
+			wantPath:    "docs/a.md",
+			wantVisible: true,
+		},
+		{
+			name: "rename",
+			apply: func() error {
+				_, err := UpsertRootFile(doc, "doc_state", "docs/b.md", rootMutationActor{})
+				return err
+			},
+			wantPath:    "docs/b.md",
+			wantVisible: true,
+		},
+		{
+			name: "tombstone",
+			apply: func() error {
+				_, err := TombstoneRootFile(doc, "doc_state", rootMutationActor{})
+				return err
+			},
+			wantPath:    "docs/b.md",
+			wantDeleted: true,
+			wantVisible: false,
+		},
+	}
+
+	for _, step := range steps {
+		if err := step.apply(); err != nil {
+			t.Fatalf("%s: apply: %v", step.name, err)
+		}
+		mirror, err := DecodeRootCRDTMirror(doc)
+		if err != nil {
+			t.Fatalf("%s: decode mirror: %v", step.name, err)
+		}
+		entry, ok := mirror.Entries[rootEntryIDForDocument("doc_state")]
+		if !ok {
+			t.Fatalf("%s: missing root entry", step.name)
+		}
+		if entry.EntryID != "doc_state" || entry.ContentDocumentID != "doc_state" {
+			t.Fatalf("%s: identity changed: %#v", step.name, entry)
+		}
+		if got := entry.desiredPath(); got != step.wantPath {
+			t.Fatalf("%s: path = %q, want %q", step.name, got, step.wantPath)
+		}
+		if entry.Deleted != step.wantDeleted {
+			t.Fatalf("%s: deleted = %t, want %t", step.name, entry.Deleted, step.wantDeleted)
+		}
+		_, visible := ResolveRootPath(mirror, step.wantPath)
+		if visible != step.wantVisible {
+			t.Fatalf("%s: visible = %t, want %t", step.name, visible, step.wantVisible)
+		}
+	}
+}
+
 func TestPlanRootProjectionSeparatesCreateDeleteAndConflict(t *testing.T) {
-	tree := RootTree{Entries: map[string]rootEntry{
+	tree := RootCRDTMirror{Entries: map[string]rootEntry{
 		"doc_a": {
 			EntryID:           "doc_a",
 			Kind:              rootEntryKindFile,
@@ -161,6 +231,61 @@ func TestPlanRootProjectionSeparatesCreateDeleteAndConflict(t *testing.T) {
 	}
 }
 
+func TestRootProjectionPlannerReservesPendingLocalClaims(t *testing.T) {
+	mirror := RootCRDTMirror{Entries: map[string]rootEntry{
+		"doc_remote": {
+			EntryID:           "doc_remote",
+			Kind:              rootEntryKindFile,
+			ContentDocumentID: "doc_remote",
+			Name:              "docs/local.md",
+		},
+	}}
+	plan := RootProjectionPlanner{}.Plan(RootProjectionPlannerInput{
+		Mirror: mirror,
+		LocalClaims: []localNamespaceClaim{{
+			Path:       "docs/local.md",
+			DocumentID: "doc_local",
+			Kind:       localNamespaceIntentKindCreate,
+		}},
+		ProjectedSeq: 9,
+	})
+	if len(plan.Upserts) != 1 {
+		t.Fatalf("upserts = %#v", plan.Upserts)
+	}
+	got := plan.Upserts[0]
+	if got.DesiredPath != "docs/local.md" {
+		t.Fatalf("desired path = %q", got.DesiredPath)
+	}
+	if got.MaterializedPath == "docs/local.md" {
+		t.Fatalf("pending local claim should reserve docs/local.md, got %#v", got)
+	}
+	if got.MaterializedPath != "docs/local (doc_remote).md" {
+		t.Fatalf("materialized path = %q", got.MaterializedPath)
+	}
+}
+
+func TestRootProjectionPlannerStaysPureStructural(t *testing.T) {
+	sourceBytes, err := os.ReadFile("root_namespace.go")
+	if err != nil {
+		t.Fatalf("read root_namespace.go: %v", err)
+	}
+	source := string(sourceBytes)
+	start := strings.Index(source, "func (RootProjectionPlanner) Plan")
+	end := strings.Index(source, "func buildRootProjectionPlan")
+	if start < 0 || end < 0 || end <= start {
+		t.Fatalf("could not locate planner body")
+	}
+	planner := source[start:end]
+	for _, forbidden := range []string{"WorkspaceFS", ".Exec(", ".Query(", ".QueryRow(", "os.", "http."} {
+		if strings.Contains(planner, forbidden) {
+			t.Fatalf("root projection planner must stay pure; found %q in:\n%s", forbidden, planner)
+		}
+	}
+	if strings.Contains(source, "RootTree") || strings.Contains(source, "DecodeRootTree") {
+		t.Fatalf("obsolete RootTree naming should not be reintroduced")
+	}
+}
+
 func TestAllocateRootProjectionEntriesUsesDeterministicConflictPaths(t *testing.T) {
 	entries := map[string]rootEntry{
 		"entry_b": {
@@ -177,7 +302,7 @@ func TestAllocateRootProjectionEntriesUsesDeterministicConflictPaths(t *testing.
 		},
 	}
 
-	projected := allocateRootProjectionEntries(entries, 7)
+	projected := allocateRootProjectionEntries(entries, 7, nil)
 	if len(projected) != 2 {
 		t.Fatalf("projected entries = %#v", projected)
 	}

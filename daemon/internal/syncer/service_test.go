@@ -2891,7 +2891,12 @@ func TestLocalCreateCreatesEmptyDocumentAndKeepsLocalBytesDirty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
-	service := &workspaceRuntime{cfg: Config{BackendURL: server.URL, AgentID: "daemon_agent"}, client: server.Client(), docCache: cache}
+	service := &workspaceRuntime{
+		cfg:      Config{BackendURL: server.URL, AgentID: "daemon_agent"},
+		client:   server.Client(),
+		docCache: cache,
+		replica:  &workspaceReplica{rootDir: root},
+	}
 
 	created, err := service.createDocumentFromLocalCandidate(context.Background(), localCreateCandidate{Root: root, Path: path, ActorID: "daemon_agent", ActorType: "daemon"}, "docs/new.md")
 	if err != nil {
@@ -2900,8 +2905,8 @@ func TestLocalCreateCreatesEmptyDocumentAndKeepsLocalBytesDirty(t *testing.T) {
 	if created == nil || created.ID != "doc_created" {
 		t.Fatalf("unexpected created doc: %#v", created)
 	}
-	if len(seen) != 0 {
-		t.Fatalf("unexpected create payload: %#v", seen)
+	if seen["documentId"] == "" || seen["clientOperationId"] == "" {
+		t.Fatalf("expected stable document/op IDs in create payload: %#v", seen)
 	}
 	after, err := os.ReadFile(path)
 	if err != nil {
@@ -2917,6 +2922,97 @@ func TestLocalCreateCreatesEmptyDocumentAndKeepsLocalBytesDirty(t *testing.T) {
 	}
 	if !known || base != "" {
 		t.Fatalf("expected empty projected base so local bytes reconcile as first update, known=%v base=%q", known, base)
+	}
+}
+
+func TestLocalCreateIntentRetriesWithStableDocumentAndOperationID(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "docs", "new.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("local bytes\n"), 0o644); err != nil {
+		t.Fatalf("write local create: %v", err)
+	}
+
+	rootID := "doc_root_retry"
+	var createPayloads []map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/workspace":
+			writeJSONResponse(w, http.StatusOK, &workspaceResponse{RootDocumentID: rootID})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/documents":
+			var payload map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode create payload: %v", err)
+			}
+			createPayloads = append(createPayloads, payload)
+			if len(createPayloads) == 1 {
+				http.Error(w, "temporary backend failure", http.StatusInternalServerError)
+				return
+			}
+			writeJSONResponse(w, http.StatusCreated, &document{ID: payload["documentId"], UpdateID: 1})
+		default:
+			http.Error(w, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	rootDoc := crdt.New()
+	if err := cache.storeDoc(rootID, rootDocumentPath, 1, rootDoc); err != nil {
+		t.Fatalf("store root doc: %v", err)
+	}
+	rootDoc.Close()
+	runtime := &workspaceRuntime{
+		cfg:          Config{BackendURL: server.URL, AgentID: "daemon_agent"},
+		client:       server.Client(),
+		docCache:     cache,
+		localCreates: newLocalCreateQueue(),
+		replica: &workspaceReplica{
+			rootDir:         root,
+			projectedByPath: map[string]*trackedFile{},
+			projectedByID:   map[string]*trackedFile{},
+		},
+	}
+	runtime.sendDocumentUpdate = func(ctx context.Context, documentID string, record outboxUpdateRecord) error {
+		return cache.clearOutboxUpdates(documentID)
+	}
+
+	runtime.localCreates.Mark(localCreateCandidate{Root: root, Path: path, ActorID: "daemon_agent", ActorType: "daemon"})
+	if err := runtime.processLocalCreates(context.Background()); err == nil {
+		t.Fatal("first local create pass should surface backend failure")
+	}
+	pending, err := cache.loadPendingLocalNamespaceIntents()
+	if err != nil {
+		t.Fatalf("load pending intents: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending intents after failure = %#v", pending)
+	}
+
+	if err := runtime.processLocalCreates(context.Background()); err != nil {
+		t.Fatalf("retry local create: %v", err)
+	}
+	if len(createPayloads) != 2 {
+		t.Fatalf("create attempts = %#v", createPayloads)
+	}
+	if createPayloads[0]["documentId"] == "" || createPayloads[0]["clientOperationId"] == "" {
+		t.Fatalf("first create payload missing stable IDs: %#v", createPayloads[0])
+	}
+	if createPayloads[0]["documentId"] != createPayloads[1]["documentId"] ||
+		createPayloads[0]["clientOperationId"] != createPayloads[1]["clientOperationId"] {
+		t.Fatalf("retry used different identity: %#v", createPayloads)
+	}
+	pending, err = cache.loadPendingLocalNamespaceIntents()
+	if err != nil {
+		t.Fatalf("reload pending intents: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending intents after success = %#v", pending)
 	}
 }
 

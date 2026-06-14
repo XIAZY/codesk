@@ -460,61 +460,68 @@ func (s *workspaceRuntime) processLocalCreates(ctx context.Context) error {
 		return nil
 	}
 	candidates := s.localCreates.Drain()
-	if len(candidates) == 0 {
+	workspaceLoaded := false
+	loadWorkspace := func() error {
+		if workspaceLoaded {
+			return nil
+		}
+		workspace, err := s.fetchWorkspace(ctx)
+		if err != nil {
+			return err
+		}
+		if err := s.applyWorkspace(ctx, workspace); err != nil {
+			return err
+		}
+		workspaceLoaded = true
 		return nil
 	}
-	workspace, err := s.fetchWorkspace(ctx)
-	if err != nil {
-		for _, candidate := range candidates {
-			s.markLocalCreate(candidate)
-		}
-		return err
-	}
-	if err := s.applyWorkspace(ctx, workspace); err != nil {
-		for _, candidate := range candidates {
-			s.markLocalCreate(candidate)
-		}
-		return err
-	}
-	if s.rootDocumentID != "" {
-		if err := s.reconcileRootNamespace(ctx); err != nil {
+	if len(candidates) > 0 {
+		if err := loadWorkspace(); err != nil {
 			for _, candidate := range candidates {
 				s.markLocalCreate(candidate)
 			}
 			return err
 		}
 	}
-	desiredPaths, err := s.currentRootDesiredPaths()
-	if err != nil {
+	if err := s.persistLocalCreateCandidates(candidates); err != nil {
 		for _, candidate := range candidates {
 			s.markLocalCreate(candidate)
 		}
 		return err
 	}
+	pending, err := s.docCache.loadPendingLocalNamespaceIntents()
+	if err != nil || len(pending) == 0 {
+		return err
+	}
+	if err := loadWorkspace(); err != nil {
+		return err
+	}
+	if s.rootDocumentID != "" {
+		if err := s.reconcileRootNamespace(ctx); err != nil {
+			return err
+		}
+	}
 	created := false
 	var firstErr error
-	for _, candidate := range candidates {
+	for _, intent := range pending {
 		if ctx.Err() != nil {
-			s.markLocalCreate(candidate)
-			if firstErr == nil {
-				firstErr = ctx.Err()
-			}
-			continue
+			return ctx.Err()
 		}
-		relativePath, valid, err := s.validateLocalCreateCandidate(candidate, desiredPaths)
+		valid, err := s.validateLocalNamespaceIntent(intent)
 		if err != nil {
-			s.markLocalCreate(candidate)
 			if firstErr == nil {
 				firstErr = err
 			}
 			continue
 		}
 		if !valid {
+			if err := s.docCache.updateLocalNamespaceIntentStatus(intent.ID, localNamespaceIntentFailed); err != nil && firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
-		document, err := s.createDocumentFromLocalCandidate(ctx, candidate, relativePath)
+		document, err := s.createDocumentFromLocalIntent(ctx, intent)
 		if err != nil {
-			s.markLocalCreate(candidate)
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -523,17 +530,20 @@ func (s *workspaceRuntime) processLocalCreates(ctx context.Context) error {
 		if document != nil {
 			created = true
 			if s.rootDocumentID != "" {
-				if err := s.upsertRootFileEntry(ctx, document.ID, relativePath, candidate.ActorID, candidate.ActorType); err != nil {
-					s.markLocalCreate(candidate)
+				if err := s.upsertRootFileEntry(ctx, document.ID, intent.WorkspaceRelativePath, intent.ActorID, intent.ActorType); err != nil {
 					if firstErr == nil {
 						firstErr = err
 					}
 					continue
 				}
-				desiredPaths[relativePath] = struct{}{}
-				s.markDocumentDirty(s.rootDocumentID)
+			}
+			if err := s.docCache.updateLocalNamespaceIntentStatus(intent.ID, localNamespaceIntentResolved); err != nil && firstErr == nil {
+				firstErr = err
 			}
 			s.markDocumentDirty(document.ID)
+			if s.rootDocumentID != "" {
+				s.markDocumentDirty(s.rootDocumentID)
+			}
 		}
 	}
 	if created {
@@ -542,6 +552,34 @@ func (s *workspaceRuntime) processLocalCreates(ctx context.Context) error {
 		}
 	}
 	return firstErr
+}
+
+func (s *workspaceRuntime) persistLocalCreateCandidates(candidates []localCreateCandidate) error {
+	if s == nil || s.docCache == nil || len(candidates) == 0 {
+		return nil
+	}
+	desiredPaths, err := s.currentRootDesiredPaths()
+	if err != nil {
+		return err
+	}
+	for _, candidate := range candidates {
+		relativePath, valid, err := s.validateLocalCreateCandidate(candidate, desiredPaths)
+		if err != nil {
+			return err
+		}
+		if !valid {
+			continue
+		}
+		intent, err := s.localCreateIntentFromCandidate(candidate, relativePath)
+		if err != nil {
+			return err
+		}
+		if err := s.docCache.storeLocalNamespaceIntent(intent); err != nil {
+			return err
+		}
+		desiredPaths[relativePath] = struct{}{}
+	}
+	return nil
 }
 
 func (s *workspaceRuntime) validateLocalCreateCandidate(candidate localCreateCandidate, desiredPaths map[string]struct{}) (string, bool, error) {
@@ -583,14 +621,79 @@ func (s *workspaceRuntime) validateLocalCreateCandidate(candidate localCreateCan
 	return relativePath, true, nil
 }
 
-func (s *workspaceRuntime) createDocumentFromLocalCandidate(ctx context.Context, candidate localCreateCandidate, relativePath string) (*document, error) {
+func (s *workspaceRuntime) localCreateIntentFromCandidate(candidate localCreateCandidate, relativePath string) (localNamespaceIntent, error) {
 	fs := NewWorkspaceFS(candidate.Root)
-	req, err := s.newBackendRequest(ctx, http.MethodPost, "/api/documents", bytes.NewReader([]byte("{}")))
+	snapshot, err := fs.Read(candidate.Path)
+	if err != nil {
+		return localNamespaceIntent{}, err
+	}
+	if !snapshot.Exists {
+		return localNamespaceIntent{}, os.ErrNotExist
+	}
+	var mtime int64
+	if info, err := os.Stat(candidate.Path); err == nil {
+		mtime = info.ModTime().UnixNano()
+	}
+	return newLocalCreateIntent(
+		relativePath,
+		candidate.ActorID,
+		candidate.ActorType,
+		sha256Hex(snapshot.Bytes),
+		mtime,
+	), nil
+}
+
+func (s *workspaceRuntime) validateLocalNamespaceIntent(intent localNamespaceIntent) (bool, error) {
+	if s == nil || s.replica == nil || intent.Kind != localNamespaceIntentKindCreate {
+		return false, nil
+	}
+	relativePath, err := normalizeVisibleRootPath(intent.WorkspaceRelativePath)
+	if err != nil {
+		return false, nil
+	}
+	absolutePath := filepath.Join(s.replica.rootDir, filepath.FromSlash(relativePath))
+	fs := NewWorkspaceFS(s.replica.rootDir)
+	snapshot, err := fs.Read(absolutePath)
+	if err != nil {
+		return false, err
+	}
+	if !snapshot.Exists {
+		return false, nil
+	}
+	if intent.ObservedContentHash != "" && sha256Hex(snapshot.Bytes) != intent.ObservedContentHash {
+		// The claim still protects local bytes, even if an editor changed them after
+		// the original observation. Content reconciliation will diff the current
+		// bytes against the empty projected base after the document exists.
+		return true, nil
+	}
+	return true, nil
+}
+
+func (s *workspaceRuntime) createDocumentFromLocalCandidate(ctx context.Context, candidate localCreateCandidate, relativePath string) (*document, error) {
+	intent, err := s.localCreateIntentFromCandidate(candidate, relativePath)
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(candidate.ActorType) == "agent" && strings.TrimSpace(candidate.ActorID) != "" {
-		applyBackendAuth(req.Header, s.cfg, candidate.ActorID)
+	return s.createDocumentFromLocalIntent(ctx, intent)
+}
+
+func (s *workspaceRuntime) createDocumentFromLocalIntent(ctx context.Context, intent localNamespaceIntent) (*document, error) {
+	if s == nil || s.replica == nil {
+		return nil, nil
+	}
+	body, err := json.Marshal(map[string]string{
+		"documentId":        intent.DocumentID,
+		"clientOperationId": intent.ClientOperationID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	req, err := s.newBackendRequest(ctx, http.MethodPost, "/api/documents", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(intent.ActorType) == "agent" && strings.TrimSpace(intent.ActorID) != "" {
+		applyBackendAuth(req.Header, s.cfg, intent.ActorID)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	res, err := s.client.Do(req)
@@ -606,7 +709,7 @@ func (s *workspaceRuntime) createDocumentFromLocalCandidate(ctx context.Context,
 	if err := json.NewDecoder(res.Body).Decode(&created); err != nil {
 		return nil, err
 	}
-	created.Path = relativePath
+	created.Path = intent.WorkspaceRelativePath
 	projectedSeq := int64(0)
 	if s != nil && s.docCache != nil {
 		doc := crdt.New()
@@ -621,11 +724,13 @@ func (s *workspaceRuntime) createDocumentFromLocalCandidate(ctx context.Context,
 		}
 		projectedSeq = seq
 	}
+	absolutePath := filepath.Join(s.replica.rootDir, filepath.FromSlash(intent.WorkspaceRelativePath))
+	fs := NewWorkspaceFS(s.replica.rootDir)
 	tracked := &trackedFile{
 		DocumentID:    created.ID,
 		DocumentPath:  created.Path,
-		Path:          candidate.Path,
-		WorkspaceRoot: candidate.Root,
+		Path:          absolutePath,
+		WorkspaceRoot: s.replica.rootDir,
 		FS:            fs,
 		cache:         s.docCache,
 	}

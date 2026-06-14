@@ -16,7 +16,7 @@ type rootMutationActor struct {
 	Kind string
 }
 
-type RootTree struct {
+type RootCRDTMirror struct {
 	Entries map[string]rootEntry
 }
 
@@ -26,10 +26,10 @@ type RootFile struct {
 	DesiredPath       string
 }
 
-func DecodeRootTree(doc *crdt.Doc) (RootTree, error) {
+func DecodeRootCRDTMirror(doc *crdt.Doc) (RootCRDTMirror, error) {
 	entries := map[string]rootEntry{}
 	if doc == nil {
-		return RootTree{Entries: entries}, nil
+		return RootCRDTMirror{Entries: entries}, nil
 	}
 	root := doc.GetMap(rootMapName)
 	if err := doc.Read(func(txn *crdt.Transaction) error {
@@ -55,13 +55,13 @@ func DecodeRootTree(doc *crdt.Doc) (RootTree, error) {
 		}
 		return nil
 	}); err != nil {
-		return RootTree{}, err
+		return RootCRDTMirror{}, err
 	}
-	return RootTree{Entries: entries}, nil
+	return RootCRDTMirror{Entries: entries}, nil
 }
 
 func decodeRootEntries(doc *crdt.Doc) (map[string]rootEntry, error) {
-	tree, err := DecodeRootTree(doc)
+	tree, err := DecodeRootCRDTMirror(doc)
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +155,7 @@ func TombstoneRootFile(rootDoc *crdt.Doc, documentID string, actor rootMutationA
 	}, rootMutationOrigin(actor))
 }
 
-func ResolveRootPath(tree RootTree, desiredPath string) (string, bool) {
+func ResolveRootPath(tree RootCRDTMirror, desiredPath string) (string, bool) {
 	path, err := normalizeVisibleRootPath(desiredPath)
 	if err != nil {
 		return "", false
@@ -173,7 +173,7 @@ func ResolveRootPath(tree RootTree, desiredPath string) (string, bool) {
 	return match, match != ""
 }
 
-func ListVisibleRootFiles(tree RootTree) []RootFile {
+func ListVisibleRootFiles(tree RootCRDTMirror) []RootFile {
 	files := make([]RootFile, 0, len(tree.Entries))
 	for _, entry := range tree.Entries {
 		if entry.Deleted || entry.Kind != rootEntryKindFile || strings.TrimSpace(entry.ContentDocumentID) == "" {

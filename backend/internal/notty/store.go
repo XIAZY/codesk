@@ -279,6 +279,21 @@ func rootDocumentID(workspaceID string) string {
 	return "doc_root_" + workspaceID
 }
 
+func normalizeCreateDocumentID(id string) (string, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", nil
+	}
+	const prefix = "doc_"
+	if !strings.HasPrefix(id, prefix) {
+		return "", fmt.Errorf("document id must use %q prefix", prefix)
+	}
+	if _, err := uuid.Parse(strings.TrimPrefix(id, prefix)); err != nil {
+		return "", fmt.Errorf("invalid document id: %w", err)
+	}
+	return id, nil
+}
+
 func (s *Store) ensureRootDocumentLocked() (bool, error) {
 	s.ensureMaps()
 	rootID := rootDocumentID(s.state.WorkspaceID)
@@ -1039,6 +1054,23 @@ func (s *Store) CreateDocument(req CreateDocumentRequest, meta OperationMeta) (*
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	requestedID, err := normalizeCreateDocumentID(req.DocumentID)
+	if err != nil {
+		return nil, err
+	}
+	clientOperationID := strings.TrimSpace(req.ClientOperationID)
+	if requestedID != "" {
+		if existing := s.state.ContentDocuments[requestedID]; existing != nil {
+			if existing.CreateClientOperationID != "" && clientOperationID != "" && existing.CreateClientOperationID == clientOperationID {
+				return cloneDocument(existing), nil
+			}
+			if existing.CreateClientOperationID == "" && clientOperationID == "" {
+				return cloneDocument(existing), nil
+			}
+			return nil, fmt.Errorf("document id %s already exists for a different create operation", requestedID)
+		}
+	}
+
 	rollbackState := cloneState(s.state)
 	rollbackDirtyDocuments := cloneStringSet(s.dirtyDocuments)
 	rollbackPendingDocumentEvents := append([]documentUpdateRecord(nil), s.pendingDocumentEvents...)
@@ -1046,7 +1078,11 @@ func (s *Store) CreateDocument(req CreateDocumentRequest, meta OperationMeta) (*
 	now := time.Now().UTC()
 	clientIDSeed := s.nextClientIDSeedLocked()
 	id := "doc_" + uuid.NewString()
+	if requestedID != "" {
+		id = requestedID
+	}
 	document, initialUpdate := newSeedDocument(id, clientIDSeed, "", now)
+	document.CreateClientOperationID = clientOperationID
 	s.state.ContentDocuments[id] = document
 	_ = s.documentLockLocked(document.ID)
 	s.markDocumentDirtyLocked(document.ID)

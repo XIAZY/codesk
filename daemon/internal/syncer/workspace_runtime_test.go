@@ -3,7 +3,6 @@ package syncer
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1083,23 +1082,23 @@ func (s *workspaceRuntimeRegressionServer) handle(w http.ResponseWriter, r *http
 
 	switch {
 	case r.Method == http.MethodPost && r.URL.Path == "/api/documents":
-		var req map[string]any
+		var req map[string]string
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if len(req) != 0 {
-			http.Error(w, "document create request must not carry namespace/content fields", http.StatusBadRequest)
+		id := strings.TrimSpace(req["documentId"])
+		if id == "" {
+			http.Error(w, "document id is required", http.StatusBadRequest)
 			return
 		}
-		s.nextID++
-		id := fmt.Sprintf("doc_%d", s.nextID)
-		if s.nextID == 1 {
-			id = "doc_a"
-		} else if s.nextID == 2 {
-			id = "doc_b"
-		} else if s.nextID == 3 {
-			id = "doc_c"
+		if strings.TrimSpace(req["clientOperationId"]) == "" {
+			http.Error(w, "client operation id is required", http.StatusBadRequest)
+			return
+		}
+		if current := s.byID[id]; current != nil {
+			writeJSONResponse(w, http.StatusOK, current.meta)
+			return
 		}
 		doc := crdt.New()
 		meta := &document{ID: id, UpdateID: 1}

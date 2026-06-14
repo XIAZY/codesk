@@ -55,6 +55,19 @@ type rootProjectionPlan struct {
 	Upserts  []rootProjectionEntry
 }
 
+type RootProjectionPlanner struct{}
+
+type RootProjectionPlannerInput struct {
+	Previous     map[string]rootProjectionEntry
+	Mirror       RootCRDTMirror
+	LocalClaims  []localNamespaceClaim
+	ProjectedSeq int64
+}
+
+type ProjectionExecutor struct {
+	runtime *workspaceRuntime
+}
+
 type rootLoc struct {
 	ParentID string `json:"parentId"`
 	Name     string `json:"name"`
@@ -285,7 +298,7 @@ func (s *workspaceRuntime) reconcileRootNamespace(ctx context.Context) error {
 			return err
 		}
 	}
-	tree, err := DecodeRootTree(doc)
+	mirror, err := DecodeRootCRDTMirror(doc)
 	doc.Close()
 	if err != nil {
 		unlock()
@@ -301,7 +314,16 @@ func (s *workspaceRuntime) reconcileRootNamespace(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	plan := PlanRootProjection(previous, tree, projectedSeq)
+	claims, err := cache.loadPendingLocalNamespaceClaims()
+	if err != nil {
+		return err
+	}
+	plan := RootProjectionPlanner{}.Plan(RootProjectionPlannerInput{
+		Previous:     previous,
+		Mirror:       mirror,
+		LocalClaims:  claims,
+		ProjectedSeq: projectedSeq,
+	})
 	if err := s.applyRootProjection(ctx, plan); err != nil {
 		return err
 	}
@@ -378,6 +400,26 @@ func (s *workspaceRuntime) currentRootDesiredPaths() (map[string]struct{}, error
 		}
 		paths[path] = struct{}{}
 	}
+	entry, unlock := s.docCache.lockEntry(s.rootDocumentID)
+	defer unlock()
+	doc, _, _, err := s.docCache.loadBaseDocLocked(entry, s.rootDocumentID, rootDocumentPath)
+	if err != nil {
+		return nil, err
+	}
+	mirror, err := DecodeRootCRDTMirror(doc)
+	if err != nil {
+		return nil, err
+	}
+	for _, rootEntry := range mirror.Entries {
+		if rootEntry.Deleted || strings.TrimSpace(rootEntry.ContentDocumentID) == "" {
+			continue
+		}
+		path, err := normalizeVisibleRootPath(rootEntry.desiredPath())
+		if err != nil {
+			continue
+		}
+		paths[path] = struct{}{}
+	}
 	return paths, nil
 }
 
@@ -410,6 +452,11 @@ func (s *workspaceRuntime) projectRootProjectionEntries(ctx context.Context, pre
 }
 
 func (s *workspaceRuntime) applyRootProjection(ctx context.Context, plan rootProjectionPlan) error {
+	return ProjectionExecutor{runtime: s}.Apply(ctx, plan)
+}
+
+func (e ProjectionExecutor) Apply(ctx context.Context, plan rootProjectionPlan) error {
+	s := e.runtime
 	if s == nil || s.replica == nil {
 		return nil
 	}
@@ -430,8 +477,16 @@ func (s *workspaceRuntime) applyRootProjection(ctx context.Context, plan rootPro
 	return nil
 }
 
-func PlanRootProjection(previous map[string]rootProjectionEntry, tree RootTree, projectedSeq int64) rootProjectionPlan {
-	return buildRootProjectionPlan(previous, allocateRootProjectionEntries(tree.Entries, projectedSeq))
+func PlanRootProjection(previous map[string]rootProjectionEntry, mirror RootCRDTMirror, projectedSeq int64) rootProjectionPlan {
+	return RootProjectionPlanner{}.Plan(RootProjectionPlannerInput{
+		Previous:     previous,
+		Mirror:       mirror,
+		ProjectedSeq: projectedSeq,
+	})
+}
+
+func (RootProjectionPlanner) Plan(input RootProjectionPlannerInput) rootProjectionPlan {
+	return buildRootProjectionPlan(input.Previous, allocateRootProjectionEntries(input.Mirror.Entries, input.ProjectedSeq, input.LocalClaims))
 }
 
 func buildRootProjectionPlan(previous map[string]rootProjectionEntry, next []rootProjectionEntry) rootProjectionPlan {
@@ -506,7 +561,7 @@ func (s *workspaceRuntime) projectRootRemovedEntry(projected rootProjectionEntry
 	return nil
 }
 
-func allocateRootProjectionEntries(entries map[string]rootEntry, projectedSeq int64) []rootProjectionEntry {
+func allocateRootProjectionEntries(entries map[string]rootEntry, projectedSeq int64, claims []localNamespaceClaim) []rootProjectionEntry {
 	active := make([]rootEntry, 0, len(entries))
 	for _, entry := range entries {
 		path, err := normalizeVisibleRootPath(entry.desiredPath())
@@ -529,6 +584,16 @@ func allocateRootProjectionEntries(entries map[string]rootEntry, projectedSeq in
 		return active[i].EntryID < active[j].EntryID
 	})
 	used := map[string]struct{}{}
+	for _, claim := range claims {
+		if claim.Kind != "" && claim.Kind != localNamespaceIntentKindCreate {
+			continue
+		}
+		path, err := normalizeVisibleRootPath(claim.Path)
+		if err != nil || path == "" {
+			continue
+		}
+		used[path] = struct{}{}
+	}
 	result := make([]rootProjectionEntry, 0, len(entries))
 	for _, entry := range active {
 		desired := entry.desiredPath()
