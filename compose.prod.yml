@@ -40,6 +40,8 @@ services:
     restart: unless-stopped
     expose:
       - "8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       NOTTY_PORT: "8080"
       NOTTY_DATABASE_URL: ${NOTTY_DATABASE_URL:?NOTTY_DATABASE_URL is required}
