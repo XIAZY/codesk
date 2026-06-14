@@ -328,6 +328,43 @@ func TestRootProjectionPlannerPrefersResolvedLocalClaimOwner(t *testing.T) {
 	}
 }
 
+func TestRootProjectionPlannerIgnoresStaleResolvedLocalClaim(t *testing.T) {
+	mirror := RootCRDTMirror{Entries: map[string]rootEntry{
+		"doc_remote": {
+			EntryID:           "doc_remote",
+			Kind:              rootEntryKindFile,
+			ContentDocumentID: "doc_remote",
+			Name:              "docs/local.md",
+		},
+		"doc_local": {
+			EntryID:           "doc_local",
+			Kind:              rootEntryKindFile,
+			ContentDocumentID: "doc_local",
+			Name:              "docs/renamed.md",
+		},
+	}}
+	plan := RootProjectionPlanner{}.Plan(RootProjectionPlannerInput{
+		Mirror: mirror,
+		LocalClaims: []localNamespaceClaim{{
+			Path:       "docs/local.md",
+			DocumentID: "doc_local",
+			Kind:       localNamespaceIntentKindCreate,
+			Status:     localNamespaceIntentResolved,
+		}},
+		ProjectedSeq: 12,
+	})
+	byDoc := map[string]rootProjectionEntry{}
+	for _, entry := range plan.Upserts {
+		byDoc[entry.ContentDocumentID] = entry
+	}
+	if got := byDoc["doc_remote"].MaterializedPath; got != "docs/local.md" {
+		t.Fatalf("remote materialized path = %q, want docs/local.md", got)
+	}
+	if got := byDoc["doc_local"].MaterializedPath; got != "docs/renamed.md" {
+		t.Fatalf("local materialized path = %q, want docs/renamed.md", got)
+	}
+}
+
 func TestRootProjectionPlannerPreservesPreviousConflictOwnerAfterClaimResolution(t *testing.T) {
 	mirror := RootCRDTMirror{Entries: map[string]rootEntry{
 		"doc_remote": {
