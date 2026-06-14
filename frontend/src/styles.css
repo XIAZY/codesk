@@ -675,22 +675,62 @@ svg.i.sm {
 }
 
 .nav-item .car {
-  width: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
   color: var(--ink-4);
-  text-align: center;
+}
+
+.nav-item .car .caret-icon {
+  width: 13px;
+  height: 13px;
+  transition: transform 0.12s ease;
+}
+
+.nav-item .car.open .caret-icon {
+  transform: rotate(90deg);
+}
+
+.nav-item .car.leaf {
+  /* keeps file rows aligned with their sibling folder rows */
+}
+
+.folder-row {
+  color: var(--ink-2);
+}
+
+.folder-row:hover .car {
+  color: var(--ink-2);
+}
+
+.folder-row .ct {
+  background: transparent;
+  color: var(--ink-4);
 }
 
 .group-label {
   color: var(--ink-3);
 }
 
+/* Nested folders indent and draw a hairline guide so depth reads clearly. */
 .tree-children {
-  padding-left: 16px;
+  margin-left: 7px;
+  padding-left: 4px;
+  border-left: 1px solid var(--border);
 }
 
 .doc-tree {
   overflow: auto;
   padding-bottom: 12px;
+}
+
+.doc-tree-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
 }
 
 .empty-note {

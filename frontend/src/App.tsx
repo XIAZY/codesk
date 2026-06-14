@@ -37,11 +37,78 @@ function fileName(path?: string) {
   return path.split("/").filter(Boolean).pop() || path;
 }
 
-function folderName(path?: string) {
-  if (!path || !path.includes("/")) {
+function folderBreadcrumb(path?: string) {
+  const parts = (path || "").split("/").filter(Boolean);
+  if (parts.length <= 1) {
     return "Workspace";
   }
-  return path.split("/").filter(Boolean)[0] || "Workspace";
+  return parts.slice(0, -1).join(" / ");
+}
+
+type DocTreeFile = { kind: "file"; name: string; path: string; document: DocumentItem };
+type DocTreeFolder = { kind: "folder"; name: string; path: string; children: DocTreeNode[]; fileCount: number };
+type DocTreeNode = DocTreeFile | DocTreeFolder;
+
+function sortDocNodes(nodes: DocTreeNode[]): DocTreeNode[] {
+  for (const node of nodes) {
+    if (node.kind === "folder") {
+      sortDocNodes(node.children);
+      node.fileCount = node.children.reduce(
+        (sum, child) => sum + (child.kind === "file" ? 1 : child.fileCount),
+        0,
+      );
+    }
+  }
+  return nodes.sort((left, right) => {
+    if (left.kind !== right.kind) {
+      return left.kind === "folder" ? -1 : 1;
+    }
+    return left.name.localeCompare(right.name);
+  });
+}
+
+// Builds a real nested tree from document paths. Root-level files sit at the top
+// level (no synthetic folder), and intermediate path segments become folders so
+// that e.g. docs/api/auth.md nests under docs › api.
+function buildDocumentTree(documents: DocumentItem[]): DocTreeNode[] {
+  const root: DocTreeFolder = { kind: "folder", name: "", path: "", children: [], fileCount: 0 };
+  const folderIndex = new Map<string, DocTreeFolder>([["", root]]);
+
+  const ensureFolder = (segments: string[]) => {
+    let current = root;
+    let prefix = "";
+    for (const segment of segments) {
+      prefix = prefix ? `${prefix}/${segment}` : segment;
+      let next = folderIndex.get(prefix);
+      if (!next) {
+        next = { kind: "folder", name: segment, path: prefix, children: [], fileCount: 0 };
+        folderIndex.set(prefix, next);
+        current.children.push(next);
+      }
+      current = next;
+    }
+    return current;
+  };
+
+  for (const document of documents) {
+    const segments = (document.path || "").split("/").filter(Boolean);
+    const name = segments.length ? segments[segments.length - 1] : document.title || "Untitled";
+    const parent = ensureFolder(segments.slice(0, -1));
+    parent.children.push({ kind: "file", name, path: document.path, document });
+  }
+
+  return sortDocNodes(root.children);
+}
+
+function folderAncestors(path?: string) {
+  const parts = (path || "").split("/").filter(Boolean);
+  const ancestors: string[] = [];
+  let prefix = "";
+  for (const segment of parts.slice(0, -1)) {
+    prefix = prefix ? `${prefix}/${segment}` : segment;
+    ancestors.push(prefix);
+  }
+  return ancestors;
 }
 
 function shortTime(value?: string) {
@@ -63,15 +130,6 @@ function shortTime(value?: string) {
     return `${Math.round(seconds / 3600)}h`;
   }
   return `${Math.round(seconds / 86400)}d`;
-}
-
-function byFolder(documents: DocumentItem[]) {
-  const groups = new Map<string, DocumentItem[]>();
-  for (const document of documents) {
-    const group = folderName(document.path);
-    groups.set(group, [...(groups.get(group) ?? []), document]);
-  }
-  return Array.from(groups.entries()).sort(([left], [right]) => left.localeCompare(right));
 }
 
 function visibleAgentStatus(agent: Agent, runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"], daemons: Daemon[]) {
@@ -371,6 +429,7 @@ function WorkspaceApp({
   const [selectedDaemon, setSelectedDaemon] = useState<Daemon | null>(null);
   const [selectedThreadId, setSelectedThreadId] = useState("");
   const [focusThreadId, setFocusThreadId] = useState("");
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(() => new Set());
 
   const activeDocument = rootDocuments.find((document) => document.id === activeDocumentId) ?? rootDocuments[0] ?? null;
   const documentId = activeDocument?.id ?? "";
@@ -382,9 +441,47 @@ function WorkspaceApp({
 
   const documentThreads = workspace.threads.filter((thread) => thread.documentId === activeDocument?.id);
   const groupedAgents = agentsByDaemon(workspace.agents, workspace.daemons);
-  const documentGroups = byFolder(rootDocuments);
-  const activeFolder = folderName(activeDocument?.path);
+  const documentTree = useMemo(() => buildDocumentTree(rootDocuments), [rootDocuments]);
+  const threadCountByDocument = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const thread of workspace.threads) {
+      counts.set(thread.documentId, (counts.get(thread.documentId) ?? 0) + 1);
+    }
+    return counts;
+  }, [workspace.threads]);
+  const activeFolder = folderBreadcrumb(activeDocument?.path);
   const activeWorkspace = workspaces.find((item) => item.id === workspaceId);
+
+  const toggleFolder = (path: string) => {
+    setCollapsedFolders((current) => {
+      const next = new Set(current);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
+  };
+
+  // Reveal the active document by expanding any collapsed ancestor folders.
+  const activeDocumentPath = activeDocument?.path;
+  useEffect(() => {
+    const ancestors = folderAncestors(activeDocumentPath);
+    if (!ancestors.length) {
+      return;
+    }
+    setCollapsedFolders((current) => {
+      if (!ancestors.some((path) => current.has(path))) {
+        return current;
+      }
+      const next = new Set(current);
+      for (const path of ancestors) {
+        next.delete(path);
+      }
+      return next;
+    });
+  }, [activeDocumentPath]);
   const onlineAgents = workspace.agents.filter((agent) => visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons) !== "disconnected").length;
 
   useEffect(() => {
@@ -447,36 +544,19 @@ function WorkspaceApp({
               <Icon name="plus" />
             </button>
           </div>
-          {documentGroups.map(([folder, documents]) => (
-            <div key={folder}>
-              <div className="nav-item group-label">
-                <span className="car">{folder === activeFolder ? "▾" : "▸"}</span>
-                <Icon name="stack" />
-                <span>{folder}</span>
-              </div>
-              <div className="tree-children">
-                {documents.map((document) => {
-                  const threadCount = workspace.threads.filter((thread) => thread.documentId === document.id).length;
-                  return (
-                    <button
-                      className={`nav-item ${document.id === activeDocument?.id ? "on" : ""}`}
-                      key={document.id}
-                      type="button"
-                      onClick={() => {
-                        setActiveDocumentId(document.id);
-                        setCenterView("document");
-                      }}
-                    >
-                      <span className="car">·</span>
-                      <Icon name="doc" />
-                      <span className="truncate">{fileName(document.path)}</span>
-                      {threadCount ? <span className="ct has">{threadCount}</span> : null}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
+          <div className="doc-tree-body">
+            <DocumentTree
+              nodes={documentTree}
+              activeDocumentId={activeDocument?.id ?? ""}
+              collapsedFolders={collapsedFolders}
+              onToggleFolder={toggleFolder}
+              threadCountFor={(id) => threadCountByDocument.get(id) ?? 0}
+              onSelectDocument={(id) => {
+                setActiveDocumentId(id);
+                setCenterView("document");
+              }}
+            />
+          </div>
           {!rootNamespace.ready ? <p className="tiny muted empty-note">Syncing documents...</p> : null}
           {rootNamespace.ready && !rootDocuments.length ? <p className="tiny muted empty-note">No documents yet.</p> : null}
         </section>
@@ -679,6 +759,61 @@ function WorkspaceApp({
       {modal === "agent-detail" && selectedAgent ? <AgentDetailModal api={api} workspaceId={workspaceId} agent={selectedAgent} daemons={workspace.daemons} runs={workspace.agentRuns} onClose={() => setModal(null)} onChanged={() => void reload()} /> : null}
       {modal === "daemon-detail" && selectedDaemon ? <DaemonDetailModal api={api} workspaceId={workspaceId} daemon={selectedDaemon} agents={workspace.agents.filter((agent) => agent.daemonId === selectedDaemon.id)} runs={workspace.agentRuns} onClose={() => setModal(null)} onChanged={() => { setModal(null); void reload(); }} /> : null}
     </main>
+  );
+}
+
+function DocumentTree(props: {
+  nodes: DocTreeNode[];
+  activeDocumentId: string;
+  collapsedFolders: Set<string>;
+  onToggleFolder: (path: string) => void;
+  threadCountFor: (documentId: string) => number;
+  onSelectDocument: (documentId: string) => void;
+}) {
+  const { nodes, activeDocumentId, collapsedFolders, onToggleFolder, threadCountFor, onSelectDocument } = props;
+  return (
+    <>
+      {nodes.map((node) => {
+        if (node.kind === "folder") {
+          const expanded = !collapsedFolders.has(node.path);
+          return (
+            <div className="tree-group" key={`folder:${node.path}`}>
+              <button
+                className="nav-item folder-row"
+                type="button"
+                onClick={() => onToggleFolder(node.path)}
+                aria-expanded={expanded}
+              >
+                <span className={`car ${expanded ? "open" : ""}`}>
+                  <Icon name="caret" />
+                </span>
+                <span className="truncate">{node.name}</span>
+                <span className="ct">{node.fileCount}</span>
+              </button>
+              {expanded && node.children.length ? (
+                <div className="tree-children">
+                  <DocumentTree {...props} nodes={node.children} />
+                </div>
+              ) : null}
+            </div>
+          );
+        }
+        const threadCount = threadCountFor(node.document.id);
+        const active = node.document.id === activeDocumentId;
+        return (
+          <button
+            className={`nav-item file-row ${active ? "on" : ""}`}
+            key={`file:${node.document.id}`}
+            type="button"
+            onClick={() => onSelectDocument(node.document.id)}
+          >
+            <span className="car leaf" />
+            <span className="truncate">{node.name}</span>
+            {threadCount ? <span className="ct has">{threadCount}</span> : null}
+          </button>
+        );
+      })}
+    </>
   );
 }
 
@@ -1673,6 +1808,8 @@ function Icon({ name }: { name: string }) {
       return <svg className="i sm" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" /><path d="M14 3v5h5" /></svg>;
     case "chevron":
       return <svg className="i sm muted" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6" /></svg>;
+    case "caret":
+      return <svg className="i sm caret-icon" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6" /></svg>;
     case "daemon":
       return <svg className="i sm" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1.5" /><rect x="3" y="14" width="18" height="6" rx="1.5" /><circle cx="7" cy="7" r="0.6" /><circle cx="7" cy="17" r="0.6" /></svg>;
     case "agent":
