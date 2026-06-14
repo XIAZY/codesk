@@ -262,6 +262,22 @@ func (c *workspaceStore) initSchema() error {
 			primary key (root_document_id, entry_id)
 		)`,
 		`create index if not exists root_projection_entries_by_content on root_projection_entries(root_document_id, content_document_id)`,
+		`create table if not exists local_namespace_intents (
+			id text primary key,
+			workspace_relative_path text not null,
+			kind text not null check (kind in ('local_create')),
+			status text not null check (status in ('pending', 'resolved', 'failed')),
+			document_id text not null,
+			client_operation_id text not null,
+			observed_file_identity text,
+			observed_content_hash text,
+			observed_mtime integer,
+			actor_id text,
+			actor_type text,
+			created_at integer not null,
+			updated_at integer not null
+		)`,
+		`create index if not exists local_namespace_intents_pending on local_namespace_intents(status, workspace_relative_path, created_at)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := c.db.Exec(stmt); err != nil {
@@ -899,6 +915,13 @@ func (c *workspaceStore) documentsNeedingReconcile() ([]string, bool, error) {
 	var readyCount int
 	if err := c.db.QueryRow(`select count(*) from thread_outbox where status = 'ready'`).Scan(&readyCount); err != nil {
 		return nil, false, err
+	}
+	var namespaceIntentCount int
+	if err := c.db.QueryRow(`select count(*) from local_namespace_intents where status = ?`, localNamespaceIntentPending).Scan(&namespaceIntentCount); err != nil {
+		return nil, false, err
+	}
+	if namespaceIntentCount > 0 {
+		ids = append(ids, localCreateReconcileWake)
 	}
 	return ids, readyCount > 0, rows.Err()
 }

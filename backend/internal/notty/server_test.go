@@ -193,6 +193,38 @@ func TestCreateDocumentAllocatesEmptyPathlessStream(t *testing.T) {
 	}
 }
 
+func TestCreateDocumentAcceptsClientDocumentIDIdempotently(t *testing.T) {
+	_, store := newTestServer(t)
+	documentID := "doc_11111111-1111-4111-8111-111111111111"
+	req := CreateDocumentRequest{
+		DocumentID:        documentID,
+		ClientOperationID: "local-create-1",
+	}
+	first, err := store.CreateDocument(req, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create client document: %v", err)
+	}
+	second, err := store.CreateDocument(req, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("replay client document create: %v", err)
+	}
+	if first.ID != documentID || second.ID != documentID {
+		t.Fatalf("document IDs = %q/%q, want %q", first.ID, second.ID, documentID)
+	}
+	if first.ClientIDSeed != second.ClientIDSeed {
+		t.Fatalf("idempotent replay allocated a new stream: %d vs %d", first.ClientIDSeed, second.ClientIDSeed)
+	}
+	if _, err := store.CreateDocument(CreateDocumentRequest{
+		DocumentID:        documentID,
+		ClientOperationID: "different-local-create",
+	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"}); err == nil {
+		t.Fatal("same document ID with a different operation should be rejected")
+	}
+	if _, err := store.CreateDocument(CreateDocumentRequest{DocumentID: "doc_not-a-uuid"}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"}); err == nil {
+		t.Fatal("invalid client document ID should be rejected")
+	}
+}
+
 func TestDocumentNamespaceMutationHTTPRoutesRemoved(t *testing.T) {
 	server, store := newTestServer(t)
 	documentID := mustCreateTestDocument(t, store, "docs/route.md", "content")
@@ -673,9 +705,6 @@ func TestBackendDoesNotExposeLegacyDocumentNamespaceSurface(t *testing.T) {
 			metadataBlock := source[strings.Index(source, "type DocumentMetadata struct {"):strings.Index(source, "type ThreadAnchor struct {")]
 			if strings.Contains(metadataBlock, "Path") || strings.Contains(metadataBlock, "Title") {
 				matches[path] = append(matches[path], "DocumentMetadata path/title")
-			}
-			if !strings.Contains(source, "type CreateDocumentRequest struct{}") {
-				matches[path] = append(matches[path], "CreateDocumentRequest must be empty")
 			}
 		}
 	}

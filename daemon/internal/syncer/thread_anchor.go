@@ -133,7 +133,7 @@ func (r *workspaceRuntime) resolveDocumentIDByProjectedPath(path string) (string
 	if err != nil {
 		return "", false, err
 	}
-	tree, err := DecodeRootTree(doc)
+	tree, err := DecodeRootCRDTMirror(doc)
 	doc.Close()
 	if err != nil {
 		return "", false, err

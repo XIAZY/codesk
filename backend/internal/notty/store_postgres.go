@@ -88,10 +88,12 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			title TEXT NOT NULL,
 			hidden BOOLEAN NOT NULL DEFAULT false,
 			client_id_seed BIGINT NOT NULL,
+			create_client_operation_id TEXT NOT NULL DEFAULT '',
 			updated_at TIMESTAMPTZ NOT NULL
 		)
 		`,
 		`ALTER TABLE documents ADD COLUMN IF NOT EXISTS hidden BOOLEAN NOT NULL DEFAULT false`,
+		`ALTER TABLE documents ADD COLUMN IF NOT EXISTS create_client_operation_id TEXT NOT NULL DEFAULT ''`,
 		`DROP INDEX IF EXISTS idx_documents_workspace_path`,
 		`DROP INDEX IF EXISTS idx_documents_workspace_visible_path`,
 		`
@@ -535,16 +537,22 @@ func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) error {
 		}
 		legacyPath, legacyTitle := legacyDocumentPathTitleForPersistence(s.state.WorkspaceID, document)
 		if _, err := tx.Exec(
-			`INSERT INTO documents (workspace_id, id, path, title, hidden, client_id_seed, updated_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7)
+			`INSERT INTO documents (workspace_id, id, path, title, hidden, client_id_seed, create_client_operation_id, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 			ON CONFLICT (id)
-			 DO UPDATE SET path = EXCLUDED.path, title = EXCLUDED.title, hidden = EXCLUDED.hidden, client_id_seed = EXCLUDED.client_id_seed, updated_at = EXCLUDED.updated_at`,
+			 DO UPDATE SET path = EXCLUDED.path,
+			               title = EXCLUDED.title,
+			               hidden = EXCLUDED.hidden,
+			               client_id_seed = EXCLUDED.client_id_seed,
+			               create_client_operation_id = EXCLUDED.create_client_operation_id,
+			               updated_at = EXCLUDED.updated_at`,
 			s.state.WorkspaceID,
 			document.ID,
 			legacyPath,
 			legacyTitle,
 			document.Hidden,
 			int64(document.ClientIDSeed),
+			document.CreateClientOperationID,
 			document.UpdatedAt,
 		); err != nil {
 			return err
@@ -1768,7 +1776,8 @@ func (s *Store) loadDocumentsPostgresLocked() error {
 		        COALESCE(NULLIF(h.state_vector, ''), checkpoint.state_vector, '') AS state_vector,
 		        h.update_id,
 		        d.updated_at,
-		        d.client_id_seed
+		        d.client_id_seed,
+		        d.create_client_operation_id
 		   FROM documents d
 		   JOIN document_heads h
 		     ON h.workspace_id = d.workspace_id AND h.document_id = d.id
@@ -1800,6 +1809,7 @@ func (s *Store) loadDocumentsPostgresLocked() error {
 			&document.UpdateID,
 			&document.UpdatedAt,
 			&clientIDSeed,
+			&document.CreateClientOperationID,
 		); err != nil {
 			return err
 		}

@@ -21,20 +21,22 @@ type WorkspaceState struct {
 }
 
 type Document struct {
-	ID           string    `json:"id"`
-	Hidden       bool      `json:"hidden,omitempty"`
-	StateVector  string    `json:"stateVector,omitempty"`
-	UpdateID     int64     `json:"updateId,omitempty"`
-	UpdatedAt    time.Time `json:"updatedAt"`
-	ClientIDSeed uint64    `json:"clientIdSeed,omitempty"`
+	ID                      string    `json:"id"`
+	Hidden                  bool      `json:"hidden,omitempty"`
+	StateVector             string    `json:"stateVector,omitempty"`
+	UpdateID                int64     `json:"updateId,omitempty"`
+	UpdatedAt               time.Time `json:"updatedAt"`
+	ClientIDSeed            uint64    `json:"clientIdSeed,omitempty"`
+	CreateClientOperationID string    `json:"createClientOperationId,omitempty"`
 }
 
 type DocumentMetadata struct {
-	ID           string    `json:"id"`
-	StateVector  string    `json:"stateVector,omitempty"`
-	UpdateID     int64     `json:"updateId,omitempty"`
-	UpdatedAt    time.Time `json:"updatedAt"`
-	ClientIDSeed uint64    `json:"clientIdSeed,omitempty"`
+	ID                      string    `json:"id"`
+	StateVector             string    `json:"stateVector,omitempty"`
+	UpdateID                int64     `json:"updateId,omitempty"`
+	UpdatedAt               time.Time `json:"updatedAt"`
+	ClientIDSeed            uint64    `json:"clientIdSeed,omitempty"`
+	CreateClientOperationID string    `json:"createClientOperationId,omitempty"`
 }
 
 type ThreadAnchor struct {
@@ -323,7 +325,10 @@ type ReplyThreadRequest struct {
 	Kind   string `json:"kind"`
 }
 
-type CreateDocumentRequest struct{}
+type CreateDocumentRequest struct {
+	DocumentID        string `json:"documentId,omitempty"`
+	ClientOperationID string `json:"clientOperationId,omitempty"`
+}
 
 type UpsertPresenceRequest struct {
 	ActorID    string `json:"actorId"`
@@ -436,10 +441,11 @@ func documentMetadata(document *Document) *DocumentMetadata {
 		return nil
 	}
 	return &DocumentMetadata{
-		ID:           document.ID,
-		StateVector:  document.StateVector,
-		UpdateID:     document.UpdateID,
-		UpdatedAt:    document.UpdatedAt,
-		ClientIDSeed: document.ClientIDSeed,
+		ID:                      document.ID,
+		StateVector:             document.StateVector,
+		UpdateID:                document.UpdateID,
+		UpdatedAt:               document.UpdatedAt,
+		ClientIDSeed:            document.ClientIDSeed,
+		CreateClientOperationID: document.CreateClientOperationID,
 	}
 }

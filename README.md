@@ -1224,7 +1224,10 @@ type CreateDaemonRequest = {
   name: string;
 };
 
-type CreateDocumentRequest = {};
+type CreateDocumentRequest = {
+  documentId?: string;
+  clientOperationId?: string;
+};
 
 type CreateThreadRequest = {
   documentId: string;
