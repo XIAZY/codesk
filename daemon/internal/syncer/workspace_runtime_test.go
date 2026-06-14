@@ -119,6 +119,9 @@ func TestWorkspaceRuntimeStartupRecoveryQueuesDurableSQLiteWork(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("append ready thread intent: %v", err)
 	}
+	if err := cache.storeLocalNamespaceIntent(newLocalCreateIntent("local-create.md", "daemon_agent", "daemon", "local-create-hash", time.Now().UnixNano())); err != nil {
+		t.Fatalf("store local namespace intent: %v", err)
+	}
 	if err := cache.db.Close(); err != nil {
 		t.Fatalf("close cache: %v", err)
 	}
@@ -140,6 +143,9 @@ func TestWorkspaceRuntimeStartupRecoveryQueuesDurableSQLiteWork(t *testing.T) {
 		if !containsString(dirty, documentID) {
 			t.Fatalf("expected startup recovery to queue %s, got %#v", documentID, dirty)
 		}
+	}
+	if !containsString(dirty, localCreateReconcileWake) {
+		t.Fatalf("expected startup recovery to queue pending local create work, got %#v", dirty)
 	}
 	if containsString(dirty, "doc_thread_ready") {
 		t.Fatalf("ready thread delivery must not dirty the document, got %#v", dirty)
