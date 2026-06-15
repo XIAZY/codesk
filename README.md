@@ -147,7 +147,7 @@ Responsibilities:
 - Apply remote CRDT updates back to local files.
 - Start, resume, and supervise Codex sessions for agents.
 - Expose `notty-agent-tool` to running agents.
-- Write agent logs as normal workspace files.
+- Write generated agent runtime logs under daemon-local data storage.
 
 ### Postgres
 
@@ -215,7 +215,7 @@ The frontend should not use workspace metadata as a full document content API.
 
 The daemon receives document updates, reconciles them with local filesystem changes, and projects canonical document state to files. Agent workspaces are separate local copies managed by the daemon.
 
-Daemon internal caches belong in daemon-controlled paths, not as product documents. Agent logs such as `codex-agent.log` are intentionally regular synced files for debugging.
+Daemon internal caches and generated agent runtime logs belong in daemon-controlled paths, not as product documents. User-authored workspace files, including ordinary `.log` files, continue to sync unless they match the ignored dot-path policy.
 
 ## Authentication And Identity
 

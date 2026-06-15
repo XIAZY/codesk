@@ -36,7 +36,7 @@ The user-visible result is a Markdown editor that feels more like a document edi
   Evidence: `frontend/src/DocumentSurface.test.tsx` includes a 50,000-line regression asserting the editor does not render one DOM node per document line.
 
 - Observation: Applying live-preview Markdown parsing to every file is not first-principle-compliant because `.log` and non-Markdown files do not benefit from Markdown styling but can be large and high-churn.
-  Evidence: Browser verification initially opened `codex-agent.log`; the UI did not need Markdown preview there, and the product requirement is specifically Markdown WYSIWYG behavior. The implementation now enables the preview extension only for `.md` and `.markdown` paths.
+  Evidence: Browser verification initially opened a large log document; the UI did not need Markdown preview there, and the product requirement is specifically Markdown WYSIWYG behavior. The implementation now enables the preview extension only for `.md` and `.markdown` paths.
 
 - Observation: GFM task items are parsed as a `ListMark` plus a `TaskMarker`, not as a single checkbox node. The list marker should be hidden for inactive task lines and the task marker should become the visible checkbox.
   Evidence: Parser inspection showed `ListMark 42-43 "-"` followed by `TaskMarker 44-47 "[ ]"` for `- [ ] nested todo`.

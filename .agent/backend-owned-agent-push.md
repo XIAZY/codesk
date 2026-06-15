@@ -22,8 +22,8 @@ Agents should wake because the backend created or updated durable notification s
 
 ## Surprises & Discoveries
 
-- Observation: The daemon currently wakes all workers for most workspace events, then each worker polls its inbox.
-  Evidence: `daemon/internal/syncer/service.go` has `shouldWakeAgentWorkersForEvent` returning true for most events and `wakeAllAgentWorkers`.
+- Observation: At the time this plan was written, the daemon still had a broad generic workspace-event wake fallback, so targeted inbox push was not the only wake source.
+  Evidence: This was later cleaned up so `agent.inbox.changed` is the targeted agent wake path and the broad fallback no longer exists in production code.
 - Observation: Busy for-me notifications are intentionally suppressed after one steer per active turn.
   Evidence: `daemon/internal/syncer/agent_sessions.go` checks `session.steeredForMeTurn != session.activeTurn`, and `TestAgentSessionBusyForMeSteersAtMostOncePerActiveTurn` asserts one steer.
 - Observation: Document update inbox items are currently partly synthetic: `ListAgentInbox` computes one pending item per changed document from document head versions and per-agent viewed versions.

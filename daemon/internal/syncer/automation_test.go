@@ -408,6 +408,7 @@ func newAutomationTestService(t *testing.T, factory *fakeAppServerFactory) *Serv
 	service := &Service{
 		cfg: Config{
 			BackendURL:         "http://backend.test",
+			DataDir:            t.TempDir(),
 			WorkspaceDir:       filepath.Join(t.TempDir(), "workspace"),
 			AgentWorkspaceRoot: filepath.Join(t.TempDir(), "agents"),
 			AgentID:            "daemon_agent",

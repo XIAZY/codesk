@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -58,7 +59,7 @@ func newFakeAppServerFactory() *fakeAppServerFactory {
 	return &fakeAppServerFactory{}
 }
 
-func (f *fakeAppServerFactory) new(cfg Config, workdir string, toolToken string, logName string) appServerClient {
+func (f *fakeAppServerFactory) new(cfg Config, workdir string, toolToken string, agentID string) appServerClient {
 	app := &fakeAppServer{
 		events:         make(chan appServerEvent, 16),
 		startEntered:   f.startEntered,
@@ -71,6 +72,15 @@ func (f *fakeAppServerFactory) new(cfg Config, workdir string, toolToken string,
 	f.apps = append(f.apps, app)
 	f.mu.Unlock()
 	return app
+}
+
+func agentSessionTestConfig(t *testing.T, workspaceRoot string) Config {
+	t.Helper()
+	return Config{
+		DataDir:            t.TempDir(),
+		WorkspaceID:        "workspace:test",
+		AgentWorkspaceRoot: workspaceRoot,
+	}
 }
 
 func (f *fakeAppServerFactory) only(t *testing.T) *fakeAppServer {
@@ -174,9 +184,7 @@ func TestAgentSessionStartsThreadWithDeveloperInstructions(t *testing.T) {
 		updates <- statusUpdate{agentID: agentID, payload: payload}
 		return nil
 	}
-	supervisor := newAgentSessionSupervisor(Config{
-		AgentWorkspaceRoot: t.TempDir(),
-	}, updater, factory.new)
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), updater, factory.new)
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Handle: "swe", Kind: "codex", SystemPrompt: "shared prompt"}
 
@@ -208,9 +216,7 @@ func TestAgentSessionReconcileReturnsStartupError(t *testing.T) {
 		updates <- statusUpdate{agentID: agentID, payload: payload}
 		return nil
 	}
-	supervisor := newAgentSessionSupervisor(Config{
-		AgentWorkspaceRoot: t.TempDir(),
-	}, updater, factory.new)
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), updater, factory.new)
 	defer supervisor.Shutdown()
 
 	err := supervisor.Reconcile(context.Background(), []*agent{{ID: "agent_1", Handle: "swe", Kind: "codex"}})
@@ -230,9 +236,7 @@ func TestAgentSessionReconcileReturnsStartupError(t *testing.T) {
 func TestAgentSessionReconcileReturnsThreadStartError(t *testing.T) {
 	factory := newFakeAppServerFactory()
 	factory.threadStartErr = errors.New("thread start failed")
-	supervisor := newAgentSessionSupervisor(Config{
-		AgentWorkspaceRoot: t.TempDir(),
-	}, nil, factory.new)
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, factory.new)
 	defer supervisor.Shutdown()
 
 	err := supervisor.Reconcile(context.Background(), []*agent{{ID: "agent_1", Handle: "swe", Kind: "codex"}})
@@ -253,9 +257,7 @@ func TestAgentSessionConcurrentEnsureStartsOneAppServer(t *testing.T) {
 	factory := newFakeAppServerFactory()
 	factory.startEntered = make(chan struct{}, 1)
 	factory.startRelease = make(chan struct{})
-	supervisor := newAgentSessionSupervisor(Config{
-		AgentWorkspaceRoot: t.TempDir(),
-	}, nil, factory.new)
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, factory.new)
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Handle: "swe", Kind: "codex", SystemPrompt: "shared prompt"}
 
@@ -292,9 +294,7 @@ func TestAgentSessionConcurrentEnsureStartsOneAppServer(t *testing.T) {
 
 func TestAgentSessionIgnoresEventsFromStaleAppServer(t *testing.T) {
 	factory := newFakeAppServerFactory()
-	supervisor := newAgentSessionSupervisor(Config{
-		AgentWorkspaceRoot: t.TempDir(),
-	}, nil, factory.new)
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, factory.new)
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
 	if err := supervisor.ensureSession(context.Background(), current); err != nil {
@@ -328,9 +328,7 @@ func TestAgentSessionIgnoresEventsFromStaleAppServer(t *testing.T) {
 
 func TestAgentSessionResumesExistingThread(t *testing.T) {
 	factory := newFakeAppServerFactory()
-	supervisor := newAgentSessionSupervisor(Config{
-		AgentWorkspaceRoot: t.TempDir(),
-	}, nil, factory.new)
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, factory.new)
 	defer supervisor.Shutdown()
 
 	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex", CodexThreadID: "thread_existing"}); err != nil {
@@ -347,9 +345,7 @@ func TestAgentSessionResumesExistingThread(t *testing.T) {
 
 func TestAgentSessionIdleNotificationStartsOncePerInboxSignature(t *testing.T) {
 	factory := newFakeAppServerFactory()
-	supervisor := newAgentSessionSupervisor(Config{
-		AgentWorkspaceRoot: t.TempDir(),
-	}, nil, factory.new)
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, factory.new)
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
 
@@ -377,9 +373,7 @@ func TestAgentSessionIdleNotificationStartsOncePerInboxSignature(t *testing.T) {
 
 func TestAgentSessionBusyForMeSteersOnceAndQueuesFollowup(t *testing.T) {
 	factory := newFakeAppServerFactory()
-	supervisor := newAgentSessionSupervisor(Config{
-		AgentWorkspaceRoot: t.TempDir(),
-	}, nil, factory.new)
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, factory.new)
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
 
@@ -414,9 +408,7 @@ func TestAgentSessionBusyForMeSteersOnceAndQueuesFollowup(t *testing.T) {
 
 func TestAgentSessionBusyGeneralQueuesFollowupWithoutSteer(t *testing.T) {
 	factory := newFakeAppServerFactory()
-	supervisor := newAgentSessionSupervisor(Config{
-		AgentWorkspaceRoot: t.TempDir(),
-	}, nil, factory.new)
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, factory.new)
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
 
@@ -446,9 +438,8 @@ func TestAgentSessionBusyGeneralQueuesFollowupWithoutSteer(t *testing.T) {
 func TestAgentSessionBusyGeneralCoalescesFollowupLogAndKeepsLatestSignature(t *testing.T) {
 	factory := newFakeAppServerFactory()
 	workspaceRoot := t.TempDir()
-	supervisor := newAgentSessionSupervisor(Config{
-		AgentWorkspaceRoot: workspaceRoot,
-	}, nil, factory.new)
+	cfg := agentSessionTestConfig(t, workspaceRoot)
+	supervisor := newAgentSessionSupervisor(cfg, nil, factory.new)
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex", Handle: "tester"}
 
@@ -476,7 +467,7 @@ func TestAgentSessionBusyGeneralCoalescesFollowupLogAndKeepsLatestSignature(t *t
 		t.Fatalf("expected latest general followup signature, got %q", followupGeneralSig)
 	}
 
-	logBytes, err := os.ReadFile(agentLogPath(supervisor.workspacePath(current), agentLogName(current)))
+	logBytes, err := os.ReadFile(agentLogPath(cfg, current.ID))
 	if err != nil {
 		t.Fatalf("read agent log: %v", err)
 	}
@@ -487,9 +478,7 @@ func TestAgentSessionBusyGeneralCoalescesFollowupLogAndKeepsLatestSignature(t *t
 
 func TestAgentSessionFailedTurnDoesNotMarkInboxSignatureDelivered(t *testing.T) {
 	factory := newFakeAppServerFactory()
-	supervisor := newAgentSessionSupervisor(Config{
-		AgentWorkspaceRoot: t.TempDir(),
-	}, nil, factory.new)
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, factory.new)
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
 
@@ -508,9 +497,7 @@ func TestAgentSessionFailedTurnDoesNotMarkInboxSignatureDelivered(t *testing.T) 
 
 func TestAgentSessionBusyForMeSteersEachChangedInboxSignature(t *testing.T) {
 	factory := newFakeAppServerFactory()
-	supervisor := newAgentSessionSupervisor(Config{
-		AgentWorkspaceRoot: t.TempDir(),
-	}, nil, factory.new)
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, factory.new)
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
 
@@ -532,9 +519,7 @@ func TestAgentSessionBusyForMeSteersEachChangedInboxSignature(t *testing.T) {
 func TestAgentSessionNoActiveTurnSteerErrorIsNotFatal(t *testing.T) {
 	factory := newFakeAppServerFactory()
 	factory.turnSteerErr = fmt.Errorf("app-server turn/steer failed: no active turn to steer")
-	supervisor := newAgentSessionSupervisor(Config{
-		AgentWorkspaceRoot: t.TempDir(),
-	}, nil, factory.new)
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, factory.new)
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
 
@@ -576,8 +561,11 @@ func sessionState(supervisor *agentSessionSupervisor, agentID string) (string, s
 }
 
 func TestCodexAppServerReadLoopRoutesResponsesNotificationsAndServerRequests(t *testing.T) {
-	workdir := t.TempDir()
-	logger, err := openAgentLog(workdir, "agent-name")
+	cfg := Config{
+		DataDir:     t.TempDir(),
+		WorkspaceID: "workspace:test",
+	}
+	logger, err := openAgentLog(cfg, "agent_1")
 	if err != nil {
 		t.Fatalf("open agent log: %v", err)
 	}
@@ -618,13 +606,42 @@ func TestCodexAppServerReadLoopRoutesResponsesNotificationsAndServerRequests(t *
 		t.Fatalf("unexpected event: %#v", event)
 	}
 	client.log.Close()
-	logBytes, err := os.ReadFile(agentLogPath(workdir, "agent-name"))
+	logBytes, err := os.ReadFile(agentLogPath(cfg, "agent_1"))
 	if err != nil {
 		t.Fatalf("read agent log: %v", err)
 	}
 	logText := string(logBytes)
 	if !strings.Contains(logText, "jsonrpc recv") || !strings.Contains(logText, "jsonrpc send") {
 		t.Fatalf("expected protocol traffic in agent log, got %q", logText)
+	}
+}
+
+func TestCodexAppServerStartHandlesAgentLogOpenFailure(t *testing.T) {
+	dataFile := filepath.Join(t.TempDir(), "notty-data-file")
+	if err := os.WriteFile(dataFile, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("write data file: %v", err)
+	}
+	client := &codexAppServer{
+		cfg: Config{
+			CodexCommand: filepath.Join(t.TempDir(), "missing-codex"),
+			DataDir:      dataFile,
+			WorkspaceID:  "workspace:test",
+		},
+		workdir:   t.TempDir(),
+		agentID:   "agent_1",
+		toolToken: "tool_token",
+		pending:   map[int64]chan appServerResponse{},
+		events:    make(chan appServerEvent, 1),
+		done:      make(chan error, 1),
+	}
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("Start should return a normal error when agent log open fails, panicked with %v", recovered)
+		}
+	}()
+	if err := client.Start(context.Background()); err == nil {
+		t.Fatal("expected missing Codex command error")
 	}
 }
 
