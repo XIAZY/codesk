@@ -75,7 +75,7 @@ type appServerResponse struct {
 func (c *codexAppServer) Start(ctx context.Context) error {
 	if agentLog, err := openAgentLog(c.cfg, c.agentID); err == nil {
 		c.log = agentLog
-		c.log.Printf("starting codex app-server command=%s agent=%s workdir=%s", c.cfg.CodexCommand, c.agentID, c.workdir)
+		c.logf("starting codex app-server command=%s agent=%s workdir=%s", c.cfg.CodexCommand, c.agentID, c.workdir)
 	} else {
 		log.Printf("agent log open failed agent=%s data_dir=%s err=%v", c.agentID, c.cfg.DataDir, err)
 	}
@@ -85,35 +85,35 @@ func (c *codexAppServer) Start(ctx context.Context) error {
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		c.log.Printf("stdin pipe failed err=%v", err)
-		c.log.Close()
+		c.logf("stdin pipe failed err=%v", err)
+		c.closeLog()
 		return err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		c.log.Printf("stdout pipe failed err=%v", err)
-		c.log.Close()
+		c.logf("stdout pipe failed err=%v", err)
+		c.closeLog()
 		return err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		c.log.Printf("stderr pipe failed err=%v", err)
-		c.log.Close()
+		c.logf("stderr pipe failed err=%v", err)
+		c.closeLog()
 		return err
 	}
 	if err := cmd.Start(); err != nil {
-		c.log.Printf("codex app-server start failed err=%v", err)
-		c.log.Close()
+		c.logf("codex app-server start failed err=%v", err)
+		c.closeLog()
 		return err
 	}
 	c.cmd = cmd
 	c.stdin = stdin
-	c.log.Printf("codex app-server started pid=%d", cmd.Process.Pid)
+	c.logf("codex app-server started pid=%d", cmd.Process.Pid)
 	go c.readLoop(stdout)
 	go c.stderrLoop(stderr)
 	go func() {
 		err := cmd.Wait()
-		c.log.Printf("codex app-server exited err=%v", err)
+		c.logf("codex app-server exited err=%v", err)
 		c.done <- err
 		close(c.events)
 	}()
@@ -135,12 +135,26 @@ func (c *codexAppServer) Start(ctx context.Context) error {
 	return nil
 }
 
+func (c *codexAppServer) logf(format string, args ...any) {
+	if c == nil || c.log == nil {
+		return
+	}
+	c.log.Printf(format, args...)
+}
+
+func (c *codexAppServer) closeLog() {
+	if c == nil || c.log == nil {
+		return
+	}
+	c.log.Close()
+}
+
 func (c *codexAppServer) Stop() error {
 	if c.cmd == nil || c.cmd.Process == nil {
 		return nil
 	}
-	c.log.Printf("stopping codex app-server pid=%d", c.cmd.Process.Pid)
-	defer c.log.Close()
+	c.logf("stopping codex app-server pid=%d", c.cmd.Process.Pid)
+	defer c.closeLog()
 	_ = c.stdin.Close()
 	return c.cmd.Process.Kill()
 }
@@ -260,7 +274,7 @@ func (c *codexAppServer) write(payload map[string]any) error {
 	if _, err := c.stdin.Write(append(bytes, '\n')); err != nil {
 		return err
 	}
-	c.log.Printf("jsonrpc send %s", string(bytes))
+	c.logf("jsonrpc send %s", string(bytes))
 	return nil
 }
 
@@ -269,10 +283,10 @@ func (c *codexAppServer) readLoop(stdout io.Reader) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	for scanner.Scan() {
 		line := append([]byte(nil), scanner.Bytes()...)
-		c.log.Printf("jsonrpc recv %s", string(line))
+		c.logf("jsonrpc recv %s", string(line))
 		var raw map[string]json.RawMessage
 		if err := json.Unmarshal(line, &raw); err != nil {
-			c.log.Printf("jsonrpc recv malformed bytes=%d", len(line))
+			c.logf("jsonrpc recv malformed bytes=%d", len(line))
 			continue
 		}
 		if idRaw, ok := raw["id"]; ok {
@@ -308,7 +322,7 @@ func (c *codexAppServer) readLoop(stdout io.Reader) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		c.log.Printf("jsonrpc stdout scan error err=%v", err)
+		c.logf("jsonrpc stdout scan error err=%v", err)
 	}
 }
 
@@ -316,10 +330,10 @@ func (c *codexAppServer) stderrLoop(stderr io.Reader) {
 	scanner := bufio.NewScanner(stderr)
 	scanner.Buffer(make([]byte, 0, 16*1024), 1024*1024)
 	for scanner.Scan() {
-		c.log.Printf("stderr %s", scanner.Text())
+		c.logf("stderr %s", scanner.Text())
 	}
 	if err := scanner.Err(); err != nil {
-		c.log.Printf("stderr scan error err=%v", err)
+		c.logf("stderr scan error err=%v", err)
 	}
 }
 
@@ -399,7 +413,7 @@ func (c *codexAppServer) writeRawResponse(id json.RawMessage, result any, respon
 	if _, err := c.stdin.Write(append(bytes, '\n')); err != nil {
 		return err
 	}
-	c.log.Printf("jsonrpc send %s", string(bytes))
+	c.logf("jsonrpc send %s", string(bytes))
 	return nil
 }
 

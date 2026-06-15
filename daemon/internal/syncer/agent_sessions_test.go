@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -612,6 +613,35 @@ func TestCodexAppServerReadLoopRoutesResponsesNotificationsAndServerRequests(t *
 	logText := string(logBytes)
 	if !strings.Contains(logText, "jsonrpc recv") || !strings.Contains(logText, "jsonrpc send") {
 		t.Fatalf("expected protocol traffic in agent log, got %q", logText)
+	}
+}
+
+func TestCodexAppServerStartHandlesAgentLogOpenFailure(t *testing.T) {
+	dataFile := filepath.Join(t.TempDir(), "notty-data-file")
+	if err := os.WriteFile(dataFile, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("write data file: %v", err)
+	}
+	client := &codexAppServer{
+		cfg: Config{
+			CodexCommand: filepath.Join(t.TempDir(), "missing-codex"),
+			DataDir:      dataFile,
+			WorkspaceID:  "workspace:test",
+		},
+		workdir:   t.TempDir(),
+		agentID:   "agent_1",
+		toolToken: "tool_token",
+		pending:   map[int64]chan appServerResponse{},
+		events:    make(chan appServerEvent, 1),
+		done:      make(chan error, 1),
+	}
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("Start should return a normal error when agent log open fails, panicked with %v", recovered)
+		}
+	}()
+	if err := client.Start(context.Background()); err == nil {
+		t.Fatal("expected missing Codex command error")
 	}
 }
 
