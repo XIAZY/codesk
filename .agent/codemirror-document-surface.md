@@ -6,7 +6,7 @@ This plan follows `.agent/PLANS.md` in this repository. A future contributor sho
 
 ## Purpose / Big Picture
 
-Notty currently renders the whole document as React markdown preview nodes. A large log document such as `codex-agent.log` turned about 75 MB of text into about 1.45 million DOM elements and about 2.25 GB of browser JavaScript heap. After this change, the frontend will render the document through CodeMirror 6, an editor toolkit that only keeps visible lines in the DOM. Users should be able to open normal markdown files and very large log/text files without the tab running out of memory, while keeping collaborative Yjs sync and anchored threads.
+Notty currently renders the whole document as React markdown preview nodes. A large workspace log document turned about 75 MB of text into about 1.45 million DOM elements and about 2.25 GB of browser JavaScript heap. After this change, the frontend will render the document through CodeMirror 6, an editor toolkit that only keeps visible lines in the DOM. Users should be able to open normal markdown files and very large log/text files without the tab running out of memory, while keeping collaborative Yjs sync and anchored threads.
 
 The observable outcome is that opening the existing large log file no longer creates hundreds of thousands of DOM nodes. The document remains editable, threads can be created from selections, thread markers appear in the editor gutter, and clicking a thread scrolls to its current CRDT-relative anchor.
 
@@ -29,7 +29,7 @@ The observable outcome is that opening the existing large log file no longer cre
   Evidence: Browser inspection reported `.markdown-preview` had about 730,541 direct children and about 75 MB of body text.
 
 - Observation: The post-change large log document no longer renders proportional DOM.
-  Evidence: Browser inspection on `codex-agent.log` after the refactor reported about 217 total DOM elements, 17 visible CodeMirror lines, about 2,237 characters of rendered body text, and about 313 MB used JS heap.
+  Evidence: Browser inspection on the large workspace log after the refactor reported about 217 total DOM elements, 17 visible CodeMirror lines, about 2,237 characters of rendered body text, and about 313 MB used JS heap.
 
 - Observation: The CodeMirror editor path sends local edits through the existing Yjs websocket path.
   Evidence: Browser verification typed `cm-check` into `notes/untitled.md`, saw the document version advance, then used undo and saw the text revert with another version advance.
@@ -53,7 +53,7 @@ The observable outcome is that opening the existing large log file no longer cre
 
 ## Outcomes & Retrospective
 
-Complete for this implementation pass. The document surface now uses CodeMirror instead of full React markdown rendering. The large local `codex-agent.log` no longer creates a million-node DOM, and the existing thread marker workflow is still visible on a small anchored document. Remaining future work is product-level polish: if Notty needs rich rendered markdown, it should be implemented as a separate bounded preview mode rather than reintroducing full-document React rendering.
+Complete for this implementation pass. The document surface now uses CodeMirror instead of full React markdown rendering. A large local log document no longer creates a million-node DOM, and the existing thread marker workflow is still visible on a small anchored document. Remaining future work is product-level polish: if Notty needs rich rendered markdown, it should be implemented as a separate bounded preview mode rather than reintroducing full-document React rendering.
 
 ## Context and Orientation
 
@@ -75,7 +75,7 @@ Thread rendering will move into CodeMirror. The app will resolve each thread's r
 
 `DocumentEditor` in `frontend/src/App.tsx` will keep the document metadata row and thread drafter UI, but remove `renderMarkdownPreview()`, `renderInlineText()`, the textarea edit mode, and full-document React rendering. It will pass callbacks and thread data into `DocumentSurface`. Thread creation will use the current CodeMirror selection and encode relative anchors immediately.
 
-Tests will focus on fragile behavior, not getters and setters. Pure logic tests will continue covering relative anchors. A component regression test will mount the CodeMirror surface with a large generated document and assert the DOM node count stays bounded. Browser verification will log in locally, open the large `codex-agent.log`, and confirm the DOM is no longer proportional to the file size.
+Tests will focus on fragile behavior, not getters and setters. Pure logic tests will continue covering relative anchors. A component regression test will mount the CodeMirror surface with a large generated document and assert the DOM node count stays bounded. Browser verification will log in locally, open a large text/log document, and confirm the DOM is no longer proportional to the file size.
 
 ## Concrete Steps
 
