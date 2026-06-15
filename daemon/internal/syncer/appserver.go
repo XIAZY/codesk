@@ -32,14 +32,14 @@ type appServerClient interface {
 	PID() int
 }
 
-type appServerFactory func(cfg Config, workdir string, toolToken string, logName string) appServerClient
+type appServerFactory func(cfg Config, workdir string, toolToken string, agentID string) appServerClient
 
-func newCodexAppServer(cfg Config, workdir string, toolToken string, logName string) appServerClient {
+func newCodexAppServer(cfg Config, workdir string, toolToken string, agentID string) appServerClient {
 	return &codexAppServer{
 		cfg:       cfg,
 		workdir:   workdir,
 		toolToken: toolToken,
-		logName:   logName,
+		agentID:   agentID,
 		pending:   map[int64]chan appServerResponse{},
 		events:    make(chan appServerEvent, 128),
 		done:      make(chan error, 1),
@@ -50,7 +50,7 @@ type codexAppServer struct {
 	cfg       Config
 	workdir   string
 	toolToken string
-	logName   string
+	agentID   string
 
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
@@ -73,11 +73,11 @@ type appServerResponse struct {
 }
 
 func (c *codexAppServer) Start(ctx context.Context) error {
-	if agentLog, err := openAgentLog(c.workdir, c.logName); err == nil {
+	if agentLog, err := openAgentLog(c.cfg, c.agentID); err == nil {
 		c.log = agentLog
-		c.log.Printf("starting codex app-server command=%s workdir=%s", c.cfg.CodexCommand, c.workdir)
+		c.log.Printf("starting codex app-server command=%s agent=%s workdir=%s", c.cfg.CodexCommand, c.agentID, c.workdir)
 	} else {
-		log.Printf("agent log open failed workdir=%s err=%v", c.workdir, err)
+		log.Printf("agent log open failed agent=%s data_dir=%s err=%v", c.agentID, c.cfg.DataDir, err)
 	}
 	cmd := exec.CommandContext(ctx, c.cfg.CodexCommand, "app-server")
 	cmd.Dir = c.workdir

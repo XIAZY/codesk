@@ -236,7 +236,7 @@ func TestIgnoredWorkspacePathPolicy(t *testing.T) {
 		path    string
 		ignored bool
 	}{
-		{path: filepath.Join(root, ".notty", "codex-agent.log"), ignored: true},
+		{path: filepath.Join(root, ".notty", "cache", "state.txt"), ignored: true},
 		{path: filepath.Join(root, ".env"), ignored: true},
 		{path: filepath.Join(root, "docs", ".cache", "state.bin"), ignored: true},
 		{path: filepath.Join(root, "docs", ".draft.md"), ignored: true},
@@ -256,7 +256,7 @@ func TestScanWorkspaceFilesIgnoresDotPaths(t *testing.T) {
 	files := map[string]string{
 		"visible.md":               "visible",
 		"docs/spec.md":             "spec",
-		".notty/codex-agent.log":   "internal",
+		".notty/cache/state.txt":   "internal",
 		".env":                     "secret",
 		"docs/.cache/state.bin":    "cache",
 		"docs/.draft.md":           "draft",
@@ -307,7 +307,7 @@ func TestNextAwarenessClientIDIsSafeForYjsClients(t *testing.T) {
 
 func TestHandleLocalChangeIgnoresDotPaths(t *testing.T) {
 	root := t.TempDir()
-	hiddenPath := filepath.Join(root, ".notty", "codex-agent.log")
+	hiddenPath := filepath.Join(root, ".notty", "cache", "state.txt")
 	visiblePath := filepath.Join(root, "doc.md")
 	hidden := &trackedFile{Path: hiddenPath}
 	hidden.setProjectedContent("hidden")
@@ -591,6 +591,7 @@ func TestRefreshSharesFetchedWorkspaceWithWorkersAndReplicas(t *testing.T) {
 	service := &Service{
 		cfg: Config{
 			BackendURL:         "http://backend.test",
+			DataDir:            t.TempDir(),
 			WorkspaceDir:       t.TempDir(),
 			AgentWorkspaceRoot: t.TempDir(),
 			AgentID:            "daemon_agent",
@@ -659,6 +660,7 @@ func TestInitialRefreshFailsFastOnAgentStartupError(t *testing.T) {
 	service := &Service{
 		cfg: Config{
 			BackendURL:         "http://backend.test",
+			DataDir:            t.TempDir(),
 			WorkspaceDir:       t.TempDir(),
 			AgentWorkspaceRoot: t.TempDir(),
 			AgentID:            "daemon_agent",
@@ -3612,17 +3614,29 @@ func TestOutgoingOutboxSurvivesCacheReopenAndResendsIdempotently(t *testing.T) {
 	}
 }
 
-func TestShouldWakeAgentWorkersForEventUsesAgentInboxChanged(t *testing.T) {
-	if shouldWakeAgentWorkersForEvent("thread.message.created") {
-		t.Fatal("thread.message.created should not be the agent wake source; agent.inbox.changed should")
-	}
-	if !shouldWakeAgentWorkersForEvent("agent.inbox.changed") {
-		t.Fatal("agent.inbox.changed should wake agent workers")
-	}
+func TestParseAgentInboxChangedEventTargetsOneAgent(t *testing.T) {
 	payload := json.RawMessage(`{"agentId":"agent_1","eventId":"aevt_1","box":"for_me","notificationType":"thread.mentioned"}`)
 	change, ok := parseAgentInboxChangedEvent(workspaceEventEnvelope{Type: "agent.inbox.changed", Data: payload})
 	if !ok || change.AgentID != "agent_1" || change.EventID != "aevt_1" {
 		t.Fatalf("failed to parse inbox change: ok=%v change=%#v", ok, change)
+	}
+	if _, ok := parseAgentInboxChangedEvent(workspaceEventEnvelope{Type: "thread.message.created", Data: payload}); ok {
+		t.Fatal("non-inbox workspace events must not wake agent workers")
+	}
+	if _, ok := parseAgentInboxChangedEvent(workspaceEventEnvelope{Type: "agent.inbox.changed", Data: json.RawMessage(`{"eventId":"aevt_1"}`)}); ok {
+		t.Fatal("inbox change without agent id must not wake agent workers")
+	}
+}
+
+func TestServiceSourceHasNoBroadAgentWakeFallback(t *testing.T) {
+	source, err := os.ReadFile("service.go")
+	if err != nil {
+		t.Fatalf("read service source: %v", err)
+	}
+	for _, forbidden := range []string{"wake" + "AllAgentWorkers", "should" + "WakeAgentWorkersForEvent"} {
+		if strings.Contains(string(source), forbidden) {
+			t.Fatalf("service.go still contains broad agent wake fallback %q", forbidden)
+		}
 	}
 }
 

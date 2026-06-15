@@ -72,7 +72,6 @@ type managedAgentSession struct {
 	agent     *agent
 	app       appServerClient
 	toolToken string
-	logName   string
 	workdir   string
 	threadID  string
 
@@ -379,13 +378,12 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 	if err := os.MkdirAll(workdir, 0o755); err != nil {
 		return err
 	}
-	logName := agentLogName(current)
-	appendAgentLog(workdir, logName, "ensuring resident agent session agent=%s handle=%s", current.ID, current.Handle)
+	appendAgentLog(s.cfg, current.ID, "ensuring resident agent session agent=%s handle=%s", current.ID, current.Handle)
 	toolToken, err := newToolToken()
 	if err != nil {
 		return err
 	}
-	app := s.factory(s.cfg, workdir, toolToken, logName)
+	app := s.factory(s.cfg, workdir, toolToken, current.ID)
 	if err := app.Start(ctx); err != nil {
 		return err
 	}
@@ -398,25 +396,24 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 	threadID := firstNonEmptyText(current.CodexThreadID, current.SessionID)
 	if threadID != "" {
 		if err := app.ThreadResume(ctx, threadID, workdir, current.SystemPrompt); err != nil {
-			appendAgentLog(workdir, logName, "thread resume failed thread=%s err=%v; starting new thread", threadID, err)
+			appendAgentLog(s.cfg, current.ID, "thread resume failed thread=%s err=%v; starting new thread", threadID, err)
 			threadID = ""
 		} else {
-			appendAgentLog(workdir, logName, "thread resumed thread=%s", threadID)
+			appendAgentLog(s.cfg, current.ID, "thread resumed thread=%s", threadID)
 		}
 	}
 	if threadID == "" {
 		threadID, err = app.ThreadStart(ctx, workdir, current.SystemPrompt)
 		if err != nil {
-			appendAgentLog(workdir, logName, "thread start failed err=%v", err)
+			appendAgentLog(s.cfg, current.ID, "thread start failed err=%v", err)
 			return err
 		}
-		appendAgentLog(workdir, logName, "thread started thread=%s", threadID)
+		appendAgentLog(s.cfg, current.ID, "thread started thread=%s", threadID)
 	}
 	session := &managedAgentSession{
 		agent:     cloneAgentValue(current),
 		app:       app,
 		toolToken: toolToken,
-		logName:   logName,
 		workdir:   workdir,
 		threadID:  threadID,
 		state:     "idle",
@@ -424,7 +421,7 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 	s.mu.Lock()
 	if existing := s.sessions[current.ID]; existing != nil {
 		s.mu.Unlock()
-		appendAgentLog(workdir, logName, "discarding duplicate app-server because session already exists")
+		appendAgentLog(s.cfg, current.ID, "discarding duplicate app-server because session already exists")
 		return nil
 	}
 	s.sessions[current.ID] = session
@@ -477,16 +474,15 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 		app := session.app
 		threadID := session.threadID
 		turnID := session.activeTurn
-		workdir := session.workdir
-		logName := session.logName
+		agentID := current.ID
 		if shouldSteer {
 			session.steeredForMeSig = forMeSig
 		}
 		s.mu.Unlock()
 		if shouldSteer {
-			appendAgentLog(workdir, logName, "steering active turn thread=%s turn=%s reason=for_me_notification", threadID, turnID)
+			appendAgentLog(s.cfg, agentID, "steering active turn thread=%s turn=%s reason=for_me_notification", threadID, turnID)
 			if err := app.TurnSteer(ctx, threadID, turnID, forMeSteerMessage); err != nil {
-				appendAgentLog(workdir, logName, "turn steer failed thread=%s turn=%s err=%v", threadID, turnID, err)
+				appendAgentLog(s.cfg, agentID, "turn steer failed thread=%s turn=%s err=%v", threadID, turnID, err)
 				if isNoActiveTurnToSteerError(err) {
 					return nil
 				}
@@ -495,7 +491,7 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 			return nil
 		}
 		if queuedFollowupForMe || queuedFollowupGeneral {
-			appendAgentLog(workdir, logName, "queued notification follow-up while busy for_me=%t general=%t", queuedFollowupForMe, queuedFollowupGeneral)
+			appendAgentLog(s.cfg, agentID, "queued notification follow-up while busy for_me=%t general=%t", queuedFollowupForMe, queuedFollowupGeneral)
 		}
 		return nil
 	}
@@ -504,10 +500,9 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 		return nil
 	}
 	if (!hasForMe || forMeSig == session.deliveredForMeSig) && (!hasGeneral || generalSig == session.deliveredGeneralSig) {
-		workdir := session.workdir
-		logName := session.logName
+		agentID := current.ID
 		s.mu.Unlock()
-		appendAgentLog(workdir, logName, "skipping unchanged notification inbox signatures for_me=%t general=%t", hasForMe, hasGeneral)
+		appendAgentLog(s.cfg, agentID, "skipping unchanged notification inbox signatures for_me=%t general=%t", hasForMe, hasGeneral)
 		return nil
 	}
 	session.state = "working"
@@ -523,7 +518,7 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 	app := session.app
 	threadID := session.threadID
 	workdir := session.workdir
-	logName := session.logName
+	agentID := current.ID
 	s.mu.Unlock()
 
 	turnID, err := app.TurnStart(ctx, threadID, prompt, workdir)
@@ -535,7 +530,7 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 			currentSession.activeGeneralSig = ""
 		}
 		s.mu.Unlock()
-		appendAgentLog(workdir, logName, "turn start failed thread=%s err=%v", threadID, err)
+		appendAgentLog(s.cfg, agentID, "turn start failed thread=%s err=%v", threadID, err)
 		return err
 	}
 	s.mu.Lock()
@@ -551,7 +546,7 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 		CurrentActivity: "Working",
 		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
-	appendAgentLog(workdir, logName, "turn started thread=%s turn=%s for_me=%t general=%t", threadID, turnID, hasForMe, hasGeneral)
+	appendAgentLog(s.cfg, agentID, "turn started thread=%s turn=%s for_me=%t general=%t", threadID, turnID, hasForMe, hasGeneral)
 	return nil
 }
 
@@ -623,7 +618,7 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, app appServerClie
 	if restartAgent == nil {
 		return
 	}
-	appendAgentLog(s.workspacePath(restartAgent), agentLogName(restartAgent), "app-server event stream closed; marking session disconnected")
+	appendAgentLog(s.cfg, agentID, "app-server event stream closed; marking session disconnected")
 	s.publish(agentID, updateAgentSessionRequest{
 		Status:          "disconnected",
 		CurrentTurnID:   "",
@@ -634,7 +629,7 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, app appServerClie
 		time.Sleep(2 * time.Second)
 		if err := s.ensureSession(context.Background(), restartAgent); err != nil {
 			fmt.Printf("agent session %s restart error: %v\n", agentID, err)
-			appendAgentLog(s.workspacePath(restartAgent), agentLogName(restartAgent), "session restart failed err=%v", err)
+			appendAgentLog(s.cfg, agentID, "session restart failed err=%v", err)
 		}
 	}()
 }
@@ -651,12 +646,8 @@ func (s *agentSessionSupervisor) markWorking(agentID string, app appServerClient
 		session.activeTurn = turnID
 	}
 	threadID := ""
-	workdir := ""
-	logName := ""
 	if session != nil {
 		threadID = session.threadID
-		workdir = session.workdir
-		logName = session.logName
 	}
 	s.mu.Unlock()
 	s.publish(agentID, updateAgentSessionRequest{
@@ -666,9 +657,7 @@ func (s *agentSessionSupervisor) markWorking(agentID string, app appServerClient
 		CurrentActivity: "Working",
 		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
-	if workdir != "" {
-		appendAgentLog(workdir, logName, "event turn/started turn=%s", turnID)
-	}
+	appendAgentLog(s.cfg, agentID, "event turn/started turn=%s", turnID)
 }
 
 func (s *agentSessionSupervisor) markIdle(agentID string, app appServerClient, delivered bool) {
@@ -679,8 +668,6 @@ func (s *agentSessionSupervisor) markIdle(agentID string, app appServerClient, d
 		return
 	}
 	threadID := ""
-	workdir := ""
-	logName := ""
 	if session != nil {
 		session.state = "idle"
 		session.activeTurn = ""
@@ -694,8 +681,6 @@ func (s *agentSessionSupervisor) markIdle(agentID string, app appServerClient, d
 		session.activeGeneralSig = ""
 		session.steeredForMeSig = ""
 		threadID = session.threadID
-		workdir = session.workdir
-		logName = session.logName
 	}
 	s.mu.Unlock()
 	s.publish(agentID, updateAgentSessionRequest{
@@ -705,9 +690,7 @@ func (s *agentSessionSupervisor) markIdle(agentID string, app appServerClient, d
 		CurrentActivity: "Idle",
 		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
-	if workdir != "" {
-		appendAgentLog(workdir, logName, "event turn finished delivered=%t", delivered)
-	}
+	appendAgentLog(s.cfg, agentID, "event turn finished delivered=%t", delivered)
 	s.mu.Lock()
 	wake := s.wakeAgent
 	s.mu.Unlock()

@@ -132,7 +132,9 @@ assert_executable "$tmp_dir/install/notty-daemon"
 assert_executable "$tmp_dir/install/notty-agent-tool"
 assert_file "$tmp_dir/data/daemons/ws-test/daemon.env"
 grep -q "NOTTY_CODEX_COMMAND='$ok_codex'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "env file did not preserve configured Codex command"
+grep -q "NOTTY_DATA_DIR='$tmp_dir/data'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "env file did not preserve daemon data dir"
 grep -q "^export PATH='" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "env file did not persist daemon PATH"
+grep -q "NOTTY_DATA_DIR NOTTY_WORKSPACE_DIR" "$tmp_dir/data/daemons/ws-test/run.sh" || fail "run script did not export daemon data dir"
 grep -q "NOTTY_CODEX_COMMAND PATH" "$tmp_dir/data/daemons/ws-test/run.sh" || fail "run script did not export daemon PATH"
 grep -q "export PATH='$tmp_dir/install':\"\$PATH\"" "$tmp_dir/data/daemons/ws-test/run.sh" || fail "run script did not prepend install directory to PATH"
 
@@ -153,6 +155,7 @@ PATH="$fake_path:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$tmp_dir/home-path" \
 assert_executable "$tmp_dir/install-path/notty-daemon"
 assert_file "$tmp_dir/data-path/daemons/ws-path/daemon.env"
 grep -q "NOTTY_CODEX_COMMAND='codex'" "$tmp_dir/data-path/daemons/ws-path/daemon.env" || fail "env file did not preserve bare Codex command"
+grep -q "NOTTY_DATA_DIR='$tmp_dir/data-path'" "$tmp_dir/data-path/daemons/ws-path/daemon.env" || fail "env file did not preserve configured data dir"
 grep -q "$fake_path" "$tmp_dir/data-path/daemons/ws-path/daemon.env" || fail "env file did not persist install shell PATH"
 
 fallback_home="$tmp_dir/home-fallback"

@@ -350,10 +350,6 @@ func (s *Service) runWorkspaceEventStream(ctx context.Context) error {
 		}
 		if change, ok := parseAgentInboxChangedEvent(event); ok {
 			s.wakeAgentWorker(change.AgentID)
-			continue
-		}
-		if shouldWakeAgentWorkersForEvent(event.Type) {
-			s.wakeAllAgentWorkers()
 		}
 	}
 }
@@ -370,15 +366,6 @@ func parseAgentInboxChangedEvent(event workspaceEventEnvelope) (agentInboxChange
 		return agentInboxChangedEvent{}, false
 	}
 	return change, true
-}
-
-func shouldWakeAgentWorkersForEvent(eventType string) bool {
-	switch strings.TrimSpace(eventType) {
-	case "workspace.snapshot", "presence.updated", "agent.run.updated", "thread.created", "thread.updated", "thread.message.created", "agent.event.updated":
-		return false
-	default:
-		return true
-	}
 }
 
 func shouldRefreshForEvent(eventType string) bool {
@@ -852,21 +839,6 @@ func (s *Service) wakeAgentWorker(agentID string) {
 	select {
 	case worker.wake <- struct{}{}:
 	default:
-	}
-}
-
-func (s *Service) wakeAllAgentWorkers() {
-	s.mu.Lock()
-	workers := make([]*managedAgentWorker, 0, len(s.agentWorkers))
-	for _, worker := range s.agentWorkers {
-		workers = append(workers, worker)
-	}
-	s.mu.Unlock()
-	for _, worker := range workers {
-		select {
-		case worker.wake <- struct{}{}:
-		default:
-		}
 	}
 }
 

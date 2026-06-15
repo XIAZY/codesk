@@ -87,13 +87,13 @@ func TestAppendOnlyFileSyncSurvivesBackendRestart(t *testing.T) {
 	stack.waitForBackendSequence(t, path, lines, 120*time.Second)
 }
 
-func TestDotPathsIgnoredWhileRootLogsSync(t *testing.T) {
+func TestDotPathsIgnoredWhileOrdinaryRootLogFilesSync(t *testing.T) {
 	stack := newRegressionStack(t)
 	stack.up(t)
 
-	stack.execService(t, "daemon", "mkdir -p "+shellQuote(stack.daemonWorkspaceDir())+" && cd "+shellQuote(stack.daemonWorkspaceDir())+" && mkdir -p .notty/cache && printf 'internal\\n' > .notty/cache/state.txt && printf 'hidden\\n' > .hidden.txt && printf 'line one\\nline two\\n' > codex-agent.log")
+	stack.execService(t, "daemon", "mkdir -p "+shellQuote(stack.daemonWorkspaceDir())+" && cd "+shellQuote(stack.daemonWorkspaceDir())+" && mkdir -p .notty/cache && printf 'internal\\n' > .notty/cache/state.txt && printf 'hidden\\n' > .hidden.txt && printf 'line one\\nline two\\n' > notes.log")
 
-	stack.waitForDocumentPath(t, "codex-agent.log", 30*time.Second)
+	stack.waitForDocumentPath(t, "notes.log", 30*time.Second)
 	paths := stack.documentPaths()
 	if contains(paths, ".hidden.txt") {
 		t.Fatalf("dotfile was incorrectly synced as a document: %v", paths)
@@ -101,7 +101,7 @@ func TestDotPathsIgnoredWhileRootLogsSync(t *testing.T) {
 	if contains(paths, ".notty/cache/state.txt") {
 		t.Fatalf(".notty cache file was incorrectly synced as a document: %v", paths)
 	}
-	stack.waitForBackendContentByPath(t, "codex-agent.log", "line one\nline two\n", 30*time.Second)
+	stack.waitForBackendContentByPath(t, "notes.log", "line one\nline two\n", 30*time.Second)
 }
 
 func TestLocalCreateEditDeleteMultipleFiles(t *testing.T) {
