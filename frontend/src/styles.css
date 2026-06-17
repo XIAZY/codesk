@@ -319,6 +319,13 @@ svg.i.sm {
   font-weight: 500;
 }
 
+/* text-overflow: ellipsis only works on block boxes, not flex containers;
+   a chip that truncates must drop inline-flex so its text node can ellipsize. */
+.chip.truncate {
+  display: inline-block;
+  min-width: 0;
+}
+
 .chip.ok {
   background: var(--daemon-50);
   color: var(--ok);
@@ -1127,6 +1134,7 @@ svg.i.sm {
 
 .titem {
   width: 100%;
+  min-width: 0;
   display: flex;
   align-items: flex-start;
   gap: 8px;
