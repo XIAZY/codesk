@@ -16,7 +16,6 @@ type agent struct {
 	Kind            string `json:"kind"`
 	SystemPrompt    string `json:"systemPrompt"`
 	WorkspaceRoot   string `json:"workspaceRoot"`
-	CodexThreadID   string `json:"codexThreadId"`
 	CurrentTurnID   string `json:"currentTurnId"`
 	SessionID       string `json:"sessionId"`
 	Status          string `json:"status"`

@@ -35,7 +35,7 @@ func jsonResponse(t *testing.T, status int, payload any) *http.Response {
 }
 
 func TestDriveAgentAutomationStartsNotificationTurnFromInbox(t *testing.T) {
-	factory := newFakeAppServerFactory()
+	factory := newFakeRuntimeDriver()
 	service := newAutomationTestService(t, factory)
 	service.client = &http.Client{
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -72,15 +72,16 @@ func TestDriveAgentAutomationStartsNotificationTurnFromInbox(t *testing.T) {
 	if err := service.driveAgentAutomation(context.Background(), workspace); err != nil {
 		t.Fatalf("drive agent automation: %v", err)
 	}
-	app := factory.only(t)
-	if len(app.turnStarts) != 1 {
-		t.Fatalf("expected one notification turn, got %d", len(app.turnStarts))
+	process := factory.only(t)
+	starts := process.inputsByKind(RuntimeInputStartTurn)
+	if len(starts) != 1 {
+		t.Fatalf("expected one notification turn, got %d", len(starts))
 	}
-	if !strings.Contains(app.turnStarts[0].prompt, "You have new items in your notification center.") {
-		t.Fatalf("unexpected prompt: %q", app.turnStarts[0].prompt)
+	if !strings.Contains(starts[0].Text, "You have new items in your notification center.") {
+		t.Fatalf("unexpected prompt: %q", starts[0].Text)
 	}
-	if !strings.Contains(app.turnStarts[0].prompt, "mentioned in spec") {
-		t.Fatalf("expected document summary in prompt, got %q", app.turnStarts[0].prompt)
+	if !strings.Contains(starts[0].Text, "mentioned in spec") {
+		t.Fatalf("expected document summary in prompt, got %q", starts[0].Text)
 	}
 }
 
@@ -403,7 +404,7 @@ func TestToolGatewayDiffDocumentUsesVersionQuery(t *testing.T) {
 	}
 }
 
-func newAutomationTestService(t *testing.T, factory *fakeAppServerFactory) *Service {
+func newAutomationTestService(t *testing.T, factory *fakeRuntimeDriver) *Service {
 	t.Helper()
 	service := &Service{
 		cfg: Config{
@@ -414,7 +415,7 @@ func newAutomationTestService(t *testing.T, factory *fakeAppServerFactory) *Serv
 			AgentID:            "daemon_agent",
 		},
 	}
-	service.sessions = newAgentSessionSupervisor(service.cfg, nil, factory.new)
+	service.sessions = newAgentSessionSupervisor(service.cfg, nil, newFakeRuntimeRegistry(factory))
 	return service
 }
 

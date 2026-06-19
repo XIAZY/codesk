@@ -2,7 +2,6 @@ package syncer
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -17,7 +16,7 @@ const agentStatusUpdateTimeout = 30 * time.Second
 
 type updateAgentSessionRequest struct {
 	Status          string `json:"status"`
-	CodexThreadID   string `json:"codexThreadId,omitempty"`
+	SessionID       string `json:"sessionId,omitempty"`
 	CurrentTurnID   string `json:"currentTurnId,omitempty"`
 	CurrentActivity string `json:"currentActivity,omitempty"`
 	LastHeartbeatAt string `json:"lastHeartbeatAt,omitempty"`
@@ -28,7 +27,7 @@ type agentSessionUpdater func(context.Context, string, updateAgentSessionRequest
 type agentSessionSupervisor struct {
 	cfg       Config
 	status    *agentStatusSyncer
-	factory   appServerFactory
+	runtimes  *runtimeRegistry
 	wakeAgent func(string)
 
 	mu       sync.Mutex
@@ -70,10 +69,10 @@ func (e *agentSessionStartupError) Unwrap() error {
 
 type managedAgentSession struct {
 	agent     *agent
-	app       appServerClient
+	process   RuntimeProcess
 	toolToken string
 	workdir   string
-	threadID  string
+	sessionID string
 
 	activeTurn string
 	state      string
@@ -251,9 +250,9 @@ func (w *agentStatusWorker) waitRetryOrUpdate(delay time.Duration) bool {
 	}
 }
 
-func newAgentSessionSupervisor(cfg Config, updater agentSessionUpdater, factory appServerFactory) *agentSessionSupervisor {
-	if factory == nil {
-		factory = newCodexAppServer
+func newAgentSessionSupervisor(cfg Config, updater agentSessionUpdater, runtimes *runtimeRegistry) *agentSessionSupervisor {
+	if runtimes == nil {
+		runtimes = defaultRuntimeRegistry(cfg)
 	}
 	if updater == nil {
 		updater = func(context.Context, string, updateAgentSessionRequest) error { return nil }
@@ -261,7 +260,7 @@ func newAgentSessionSupervisor(cfg Config, updater agentSessionUpdater, factory 
 	return &agentSessionSupervisor{
 		cfg:      cfg,
 		status:   newAgentStatusSyncer(updater),
-		factory:  factory,
+		runtimes: runtimes,
 		sessions: map[string]*managedAgentSession{},
 		starting: map[string]*agentSessionStart{},
 	}
@@ -308,7 +307,7 @@ func (s *agentSessionSupervisor) Reconcile(ctx context.Context, agents []*agent)
 	}
 	s.mu.Unlock()
 	for _, session := range stale {
-		_ = session.app.Stop()
+		_ = session.process.Stop()
 	}
 	return errors.Join(errs...)
 }
@@ -322,7 +321,7 @@ func (s *agentSessionSupervisor) Shutdown() {
 	s.sessions = map[string]*managedAgentSession{}
 	s.mu.Unlock()
 	for _, session := range sessions {
-		_ = session.app.Stop()
+		_ = session.process.Stop()
 	}
 	s.status.Stop()
 }
@@ -337,7 +336,7 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 			if session.state == "disconnected" {
 				delete(s.sessions, current.ID)
 				s.mu.Unlock()
-				_ = session.app.Stop()
+				_ = session.process.Stop()
 				continue
 			}
 			session.agent = cloneAgentValue(current)
@@ -379,49 +378,83 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 		return err
 	}
 	appendAgentLog(s.cfg, current.ID, "ensuring resident agent session agent=%s handle=%s", current.ID, current.Handle)
+	driver, detection, ok := s.runtimes.Lookup(current.Kind)
+	if !ok || !detection.Available {
+		reason := strings.TrimSpace(detection.Reason)
+		if reason == "" {
+			reason = "runtime is unavailable"
+		}
+		activity := fmt.Sprintf("%s runtime unavailable: %s", firstNonEmptyText(strings.TrimSpace(current.Kind), "agent"), reason)
+		appendAgentLog(s.cfg, current.ID, "runtime unavailable kind=%s reason=%s", current.Kind, reason)
+		s.publish(current.ID, updateAgentSessionRequest{
+			Status:          "disconnected",
+			CurrentTurnID:   "",
+			CurrentActivity: activity,
+			LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
+		})
+		return nil
+	}
 	toolToken, err := newToolToken()
 	if err != nil {
 		return err
 	}
-	app := s.factory(s.cfg, workdir, toolToken, current.ID)
-	if err := app.Start(ctx); err != nil {
+	process, err := driver.Spawn(ctx, RuntimeSpawnSpec{
+		AgentID:      current.ID,
+		Workdir:      workdir,
+		ToolToken:    toolToken,
+		Instructions: current.SystemPrompt,
+	})
+	if err != nil {
+		return err
+	}
+	if err := process.Start(ctx); err != nil {
 		return err
 	}
 	started := true
 	defer func() {
 		if started {
-			_ = app.Stop()
+			_ = process.Stop()
 		}
 	}()
-	threadID := firstNonEmptyText(current.CodexThreadID, current.SessionID)
-	if threadID != "" {
-		if err := app.ThreadResume(ctx, threadID, workdir, current.SystemPrompt); err != nil {
-			appendAgentLog(s.cfg, current.ID, "thread resume failed thread=%s err=%v; starting new thread", threadID, err)
-			threadID = ""
+	sessionID := strings.TrimSpace(current.SessionID)
+	if sessionID != "" {
+		if _, err := process.WriteStdin(ctx, RuntimeInput{
+			Kind:         RuntimeInputResumeSession,
+			SessionID:    sessionID,
+			CWD:          workdir,
+			Instructions: current.SystemPrompt,
+		}); err != nil {
+			appendAgentLog(s.cfg, current.ID, "runtime session resume failed session=%s err=%v; starting new session", sessionID, err)
+			sessionID = ""
 		} else {
-			appendAgentLog(s.cfg, current.ID, "thread resumed thread=%s", threadID)
+			appendAgentLog(s.cfg, current.ID, "runtime session resumed session=%s", sessionID)
 		}
 	}
-	if threadID == "" {
-		threadID, err = app.ThreadStart(ctx, workdir, current.SystemPrompt)
+	if sessionID == "" {
+		result, err := process.WriteStdin(ctx, RuntimeInput{
+			Kind:         RuntimeInputStartSession,
+			CWD:          workdir,
+			Instructions: current.SystemPrompt,
+		})
 		if err != nil {
-			appendAgentLog(s.cfg, current.ID, "thread start failed err=%v", err)
+			appendAgentLog(s.cfg, current.ID, "runtime session start failed err=%v", err)
 			return err
 		}
-		appendAgentLog(s.cfg, current.ID, "thread started thread=%s", threadID)
+		sessionID = strings.TrimSpace(result.SessionID)
+		appendAgentLog(s.cfg, current.ID, "runtime session started session=%s", sessionID)
 	}
 	session := &managedAgentSession{
 		agent:     cloneAgentValue(current),
-		app:       app,
+		process:   process,
 		toolToken: toolToken,
 		workdir:   workdir,
-		threadID:  threadID,
+		sessionID: sessionID,
 		state:     "idle",
 	}
 	s.mu.Lock()
 	if existing := s.sessions[current.ID]; existing != nil {
 		s.mu.Unlock()
-		appendAgentLog(s.cfg, current.ID, "discarding duplicate app-server because session already exists")
+		appendAgentLog(s.cfg, current.ID, "discarding duplicate runtime process because session already exists")
 		return nil
 	}
 	s.sessions[current.ID] = session
@@ -429,12 +462,12 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 	started = false
 	s.publish(current.ID, updateAgentSessionRequest{
 		Status:          "idle",
-		CodexThreadID:   threadID,
+		SessionID:       sessionID,
 		CurrentTurnID:   "",
 		CurrentActivity: "Idle",
 		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
-	go s.consumeEvents(current.ID, app)
+	go s.consumeEvents(current.ID, process)
 	return nil
 }
 
@@ -471,8 +504,8 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 			session.followupGeneralSig = generalSig
 		}
 		shouldSteer := hasForMe && session.activeTurn != "" && forMeSig != session.activeForMeSig && forMeSig != session.steeredForMeSig
-		app := session.app
-		threadID := session.threadID
+		process := session.process
+		sessionID := session.sessionID
 		turnID := session.activeTurn
 		agentID := current.ID
 		if shouldSteer {
@@ -480,9 +513,15 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 		}
 		s.mu.Unlock()
 		if shouldSteer {
-			appendAgentLog(s.cfg, agentID, "steering active turn thread=%s turn=%s reason=for_me_notification", threadID, turnID)
-			if err := app.TurnSteer(ctx, threadID, turnID, forMeSteerMessage); err != nil {
-				appendAgentLog(s.cfg, agentID, "turn steer failed thread=%s turn=%s err=%v", threadID, turnID, err)
+			appendAgentLog(s.cfg, agentID, "steering active turn session=%s turn=%s reason=for_me_notification", sessionID, turnID)
+			if _, err := process.WriteStdin(ctx, RuntimeInput{
+				Kind:       RuntimeInputSteerTurn,
+				Importance: RuntimeImportanceImportant,
+				SessionID:  sessionID,
+				TurnID:     turnID,
+				Text:       forMeSteerMessage,
+			}); err != nil {
+				appendAgentLog(s.cfg, agentID, "turn steer failed session=%s turn=%s err=%v", sessionID, turnID, err)
 				if isNoActiveTurnToSteerError(err) {
 					return nil
 				}
@@ -515,13 +554,19 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 	if session.followupGeneralSig == generalSig {
 		session.followupGeneralSig = ""
 	}
-	app := session.app
-	threadID := session.threadID
+	process := session.process
+	sessionID := session.sessionID
 	workdir := session.workdir
 	agentID := current.ID
 	s.mu.Unlock()
 
-	turnID, err := app.TurnStart(ctx, threadID, prompt, workdir)
+	result, err := process.WriteStdin(ctx, RuntimeInput{
+		Kind:       RuntimeInputStartTurn,
+		Importance: RuntimeImportanceNormal,
+		SessionID:  sessionID,
+		CWD:        workdir,
+		Text:       prompt,
+	})
 	if err != nil {
 		s.mu.Lock()
 		if currentSession := s.sessions[current.ID]; currentSession != nil {
@@ -530,9 +575,10 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 			currentSession.activeGeneralSig = ""
 		}
 		s.mu.Unlock()
-		appendAgentLog(s.cfg, agentID, "turn start failed thread=%s err=%v", threadID, err)
+		appendAgentLog(s.cfg, agentID, "turn start failed session=%s err=%v", sessionID, err)
 		return err
 	}
+	turnID := strings.TrimSpace(result.TurnID)
 	s.mu.Lock()
 	if currentSession := s.sessions[current.ID]; currentSession != nil {
 		currentSession.activeTurn = turnID
@@ -541,12 +587,12 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 	s.mu.Unlock()
 	s.publish(current.ID, updateAgentSessionRequest{
 		Status:          "working",
-		CodexThreadID:   threadID,
+		SessionID:       sessionID,
 		CurrentTurnID:   turnID,
 		CurrentActivity: "Working",
 		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
-	appendAgentLog(s.cfg, agentID, "turn started thread=%s turn=%s for_me=%t general=%t", threadID, turnID, hasForMe, hasGeneral)
+	appendAgentLog(s.cfg, agentID, "turn started session=%s turn=%s for_me=%t general=%t", sessionID, turnID, hasForMe, hasGeneral)
 	return nil
 }
 
@@ -584,41 +630,39 @@ func (s *agentSessionSupervisor) agentByToolToken(token string) *agentRun {
 	return nil
 }
 
-func (s *agentSessionSupervisor) consumeEvents(agentID string, app appServerClient) {
-	for event := range app.Events() {
-		switch event.Method {
-		case "turn/started":
-			if turnID := turnIDFromEvent(event); turnID != "" {
-				s.markWorking(agentID, app, turnID)
+func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimeProcess) {
+	for event := range process.Events() {
+		switch event.Kind {
+		case RuntimeEventTurnStarted:
+			if strings.TrimSpace(event.TurnID) != "" {
+				s.markWorking(agentID, process, event.TurnID)
 			}
-		case "turn/completed":
-			s.markIdle(agentID, app, true)
-		case "turn/failed":
-			s.markIdle(agentID, app, false)
-		case "thread/status/changed":
-			if threadStatusTypeFromEvent(event) == "idle" {
-				s.markIdle(agentID, app, true)
-			}
+		case RuntimeEventTurnCompleted:
+			s.markIdle(agentID, process, true)
+		case RuntimeEventTurnFailed:
+			s.markIdle(agentID, process, false)
+		case RuntimeEventIdle:
+			s.markIdle(agentID, process, true)
 		}
 	}
 	var restartAgent *agent
 	s.mu.Lock()
-	if session := s.sessions[agentID]; session != nil && session.app == app {
+	if session := s.sessions[agentID]; session != nil && session.process == process {
 		session.state = "disconnected"
 		session.activeTurn = ""
 		session.activeForMeSig = ""
 		session.activeGeneralSig = ""
 		session.steeredForMeSig = ""
 		restartAgent = cloneAgentValue(session.agent)
-		if restartAgent != nil && restartAgent.CodexThreadID == "" {
-			restartAgent.CodexThreadID = session.threadID
+		if restartAgent != nil {
+			restartAgent.SessionID = session.sessionID
 		}
 	}
 	s.mu.Unlock()
 	if restartAgent == nil {
 		return
 	}
-	appendAgentLog(s.cfg, agentID, "app-server event stream closed; marking session disconnected")
+	appendAgentLog(s.cfg, agentID, "runtime event stream closed; marking session disconnected")
 	s.publish(agentID, updateAgentSessionRequest{
 		Status:          "disconnected",
 		CurrentTurnID:   "",
@@ -634,10 +678,10 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, app appServerClie
 	}()
 }
 
-func (s *agentSessionSupervisor) markWorking(agentID string, app appServerClient, turnID string) {
+func (s *agentSessionSupervisor) markWorking(agentID string, process RuntimeProcess, turnID string) {
 	s.mu.Lock()
 	session := s.sessions[agentID]
-	if session == nil || session.app != app {
+	if session == nil || session.process != process {
 		s.mu.Unlock()
 		return
 	}
@@ -645,29 +689,29 @@ func (s *agentSessionSupervisor) markWorking(agentID string, app appServerClient
 		session.state = "working"
 		session.activeTurn = turnID
 	}
-	threadID := ""
+	sessionID := ""
 	if session != nil {
-		threadID = session.threadID
+		sessionID = session.sessionID
 	}
 	s.mu.Unlock()
 	s.publish(agentID, updateAgentSessionRequest{
 		Status:          "working",
-		CodexThreadID:   threadID,
+		SessionID:       sessionID,
 		CurrentTurnID:   turnID,
 		CurrentActivity: "Working",
 		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
-	appendAgentLog(s.cfg, agentID, "event turn/started turn=%s", turnID)
+	appendAgentLog(s.cfg, agentID, "event turn started turn=%s", turnID)
 }
 
-func (s *agentSessionSupervisor) markIdle(agentID string, app appServerClient, delivered bool) {
+func (s *agentSessionSupervisor) markIdle(agentID string, process RuntimeProcess, delivered bool) {
 	s.mu.Lock()
 	session := s.sessions[agentID]
-	if session == nil || session.app != app {
+	if session == nil || session.process != process {
 		s.mu.Unlock()
 		return
 	}
-	threadID := ""
+	sessionID := ""
 	if session != nil {
 		session.state = "idle"
 		session.activeTurn = ""
@@ -680,12 +724,12 @@ func (s *agentSessionSupervisor) markIdle(agentID string, app appServerClient, d
 		session.activeForMeSig = ""
 		session.activeGeneralSig = ""
 		session.steeredForMeSig = ""
-		threadID = session.threadID
+		sessionID = session.sessionID
 	}
 	s.mu.Unlock()
 	s.publish(agentID, updateAgentSessionRequest{
 		Status:          "idle",
-		CodexThreadID:   threadID,
+		SessionID:       sessionID,
 		CurrentTurnID:   "",
 		CurrentActivity: "Idle",
 		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
@@ -723,26 +767,6 @@ func cloneAgentValue(current *agent) *agent {
 	}
 	clone := *current
 	return &clone
-}
-
-func turnIDFromEvent(event appServerEvent) string {
-	var payload struct {
-		Turn struct {
-			ID string `json:"id"`
-		} `json:"turn"`
-	}
-	_ = json.Unmarshal(event.Params, &payload)
-	return payload.Turn.ID
-}
-
-func threadStatusTypeFromEvent(event appServerEvent) string {
-	var payload struct {
-		Status struct {
-			Type string `json:"type"`
-		} `json:"status"`
-	}
-	_ = json.Unmarshal(event.Params, &payload)
-	return payload.Status.Type
 }
 
 func isNoActiveTurnToSteerError(err error) bool {

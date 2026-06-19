@@ -20,21 +20,7 @@ type appServerEvent struct {
 	Params json.RawMessage
 }
 
-type appServerClient interface {
-	Start(ctx context.Context) error
-	Stop() error
-	ThreadStart(ctx context.Context, cwd string, instructions string) (string, error)
-	ThreadResume(ctx context.Context, threadID string, cwd string, instructions string) error
-	TurnStart(ctx context.Context, threadID string, prompt string, cwd string) (string, error)
-	TurnSteer(ctx context.Context, threadID string, turnID string, message string) error
-	TurnInterrupt(ctx context.Context, threadID string, turnID string) error
-	Events() <-chan appServerEvent
-	PID() int
-}
-
-type appServerFactory func(cfg Config, workdir string, toolToken string, agentID string) appServerClient
-
-func newCodexAppServer(cfg Config, workdir string, toolToken string, agentID string) appServerClient {
+func newCodexAppServer(cfg Config, workdir string, toolToken string, agentID string) *codexAppServer {
 	return &codexAppServer{
 		cfg:       cfg,
 		workdir:   workdir,

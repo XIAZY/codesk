@@ -858,6 +858,26 @@ Response:
 
 ### 15. Daemon Updates Agent Runtime State
 
+Update daemon status and runtime availability:
+
+```http
+PATCH /api/workspaces/{workspaceID}/daemon/status
+Authorization: Bearer <daemon-token>
+```
+
+Request:
+
+```json
+{
+  "version": "0.62.0",
+  "os": "linux",
+  "arch": "arm64",
+  "status": "online",
+  "lastHeartbeatAt": "2026-05-10T12:00:00Z",
+  "runtimes": [{"kind":"codex","available":true,"version":"codex 0.134.0","path":"/usr/local/bin/codex"}]
+}
+```
+
 Update agent session:
 
 ```http
@@ -871,7 +891,7 @@ Request:
 ```json
 {
   "status": "working",
-  "codexThreadId": "019...",
+  "sessionId": "session_...",
   "currentTurnId": "turn_...",
   "currentActivity": "Reviewing notifications",
   "lastHeartbeatAt": "2026-05-10T12:00:00Z"
@@ -1121,13 +1141,13 @@ DocumentMetadata:
 Daemon:
 
 ```json
-{"id":"daemon_...","workspaceId":"ws_...","name":"Local daemon","status":"active","connectionStatus":"online","lastSeenAt":"...","lastSeenAgeSeconds":4,"createdAt":"...","deletedAt":"..."}
+{"id":"daemon_...","workspaceId":"ws_...","name":"Local daemon","status":"active","connectionStatus":"online","version":"0.62.0","os":"linux","arch":"arm64","runtimes":[{"kind":"codex","available":true,"version":"codex 0.134.0","path":"/usr/local/bin/codex"}],"lastSeenAt":"...","lastSeenAgeSeconds":4,"createdAt":"...","deletedAt":"..."}
 ```
 
 Agent:
 
 ```json
-{"id":"agent_...","daemonId":"daemon_...","handle":"codex-agent","name":"Codex Agent","role":"...","kind":"codex","systemPrompt":"...","workspaceRoot":"agents/agent_...","codexThreadId":"...","currentTurnId":"...","sessionId":"...","status":"idle","currentTask":"","currentActivity":"","currentRunId":"","lastHeartbeatAt":"...","lastRunCompleted":"...","updatedAt":"..."}
+{"id":"agent_...","daemonId":"daemon_...","handle":"codex-agent","name":"Codex Agent","role":"...","kind":"codex","systemPrompt":"...","workspaceRoot":"agents/agent_...","currentTurnId":"...","sessionId":"...","status":"idle","currentTask":"","currentActivity":"","currentRunId":"","lastHeartbeatAt":"...","lastRunCompleted":"...","updatedAt":"..."}
 ```
 
 Thread:
@@ -1264,7 +1284,7 @@ type UpdateAgentRequest = {
 
 type UpdateAgentSessionRequest = {
   status?: string;
-  codexThreadId?: string;
+  sessionId?: string;
   currentTurnId?: string;
   currentActivity?: string;
   lastHeartbeatAt?: string;

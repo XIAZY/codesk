@@ -149,6 +149,7 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	}
 	assertNoActivityMaterializedContentColumn(t, db)
 	assertNoProposalTable(t, db)
+	assertNoAgentCodexThreadIDColumn(t, db)
 
 	var snapshotTable sql.NullString
 	if err := db.QueryRow(`SELECT to_regclass('public.workspace_snapshots')`).Scan(&snapshotTable); err != nil {
@@ -323,7 +324,7 @@ func TestPostgresUpdateAgentSessionPersistsTargetAgent(t *testing.T) {
 	}
 	if _, err := store.UpdateAgentSession(agent.ID, UpdateAgentSessionRequest{
 		Status:          "working",
-		CodexThreadID:   "thread_pg",
+		SessionID:       "thread_pg",
 		CurrentTurnID:   "turn_pg",
 		CurrentActivity: "Handling notifications",
 	}, OperationMeta{ActorID: "daemon_agent", ActorType: "agent", Source: "test"}); err != nil {
@@ -339,7 +340,7 @@ func TestPostgresUpdateAgentSessionPersistsTargetAgent(t *testing.T) {
 	}
 	defer reloaded.Close()
 	got := reloaded.Snapshot().Agents[agent.ID]
-	if got == nil || got.Status != "working" || got.CodexThreadID != "thread_pg" || got.CurrentTurnID != "turn_pg" {
+	if got == nil || got.Status != "working" || got.SessionID != "thread_pg" || got.CurrentTurnID != "turn_pg" {
 		t.Fatalf("expected targeted session fields to persist, got %#v", got)
 	}
 }
@@ -1047,6 +1048,22 @@ func assertNoActivityMaterializedContentColumn(t *testing.T, db *sql.DB) {
 	}
 	if count != 0 {
 		t.Fatal("activities must not materialize document content in new_content")
+	}
+}
+
+func assertNoAgentCodexThreadIDColumn(t *testing.T, db *sql.DB) {
+	t.Helper()
+	var count int
+	if err := db.QueryRow(
+		`SELECT COUNT(*)
+		   FROM information_schema.columns
+		  WHERE table_name = 'agents'
+		    AND column_name = 'codex_thread_id'`,
+	).Scan(&count); err != nil {
+		t.Fatalf("query agents columns: %v", err)
+	}
+	if count != 0 {
+		t.Fatal("agents must not persist runtime-specific codex_thread_id")
 	}
 }
 

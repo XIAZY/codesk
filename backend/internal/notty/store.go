@@ -1565,9 +1565,8 @@ func (s *Store) UpdateAgentSession(id string, req UpdateAgentSessionRequest, met
 			return nil, fmt.Errorf("unsupported agent status %q", status)
 		}
 	}
-	if threadID := strings.TrimSpace(req.CodexThreadID); threadID != "" {
-		agent.CodexThreadID = threadID
-		agent.SessionID = threadID
+	if sessionID := strings.TrimSpace(req.SessionID); sessionID != "" {
+		agent.SessionID = sessionID
 	}
 	if turnID := strings.TrimSpace(req.CurrentTurnID); turnID != "" || agent.Status != "working" {
 		agent.CurrentTurnID = turnID

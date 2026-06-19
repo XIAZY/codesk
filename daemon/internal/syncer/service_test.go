@@ -615,7 +615,7 @@ func TestRefreshSharesFetchedWorkspaceWithWorkersAndReplicas(t *testing.T) {
 }
 
 func TestInitialRefreshFailsFastOnAgentStartupError(t *testing.T) {
-	factory := newFakeAppServerFactory()
+	factory := newFakeRuntimeDriver()
 	factory.startErr = errors.New("codex missing")
 	var workspaceRequests atomic.Int32
 	workspace := workspaceResponse{
@@ -669,7 +669,7 @@ func TestInitialRefreshFailsFastOnAgentStartupError(t *testing.T) {
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 		agentWorkers:  map[string]*managedAgentWorker{},
 	}
-	service.sessions = newAgentSessionSupervisor(service.cfg, nil, factory.new)
+	service.sessions = newAgentSessionSupervisor(service.cfg, nil, newFakeRuntimeRegistry(factory))
 	defer service.sessions.Shutdown()
 	defer service.closeAgentWorkers()
 	defer service.closeAgentRuntimes()
