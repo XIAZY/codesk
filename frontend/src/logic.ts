@@ -181,21 +181,30 @@ export function agentStatus(agent: Agent, runs: AgentRun[]) {
   return "idle";
 }
 
+const terminalRunStatuses = new Set(["completed", "failed", "stopped"]);
+
 export function currentAgentRun(agent: Agent, runs: AgentRun[]) {
+  const current = agent.currentRunId ? runs.find((run) => run.id === agent.currentRunId && run.agentId === agent.id) : undefined;
   if (agent.currentRunId) {
-    const current = runs.find((run) => run.id === agent.currentRunId);
-    if (current) {
+    if (current && !terminalRunStatuses.has(current.status)) {
       return current;
     }
   }
-  return runs.find((run) => run.agentId === agent.id && !["completed", "failed", "stopped"].includes(run.status));
+  const fallback = runs.find((run) => run.agentId === agent.id && !terminalRunStatuses.has(run.status));
+  if (fallback) {
+    return fallback;
+  }
+  if (agent.currentRunId) {
+    return current;
+  }
+  return undefined;
 }
 
 export function agentLifecycleAction(agent: Agent, daemon: Daemon | undefined, runs: AgentRun[]) {
   const run = currentAgentRun(agent, runs);
   const daemonTone = daemon ? daemonStatus(daemon) : "disconnected";
   const offline = daemonTone === "disconnected" || daemonTone === "deleted" || daemonTone === "stale";
-  const runPending = Boolean(run && !["completed", "failed", "stopped"].includes(run.status));
+  const runPending = Boolean(run && !terminalRunStatuses.has(run.status));
   if (runPending && offline) {
     return {
       run,

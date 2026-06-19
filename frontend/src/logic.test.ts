@@ -210,6 +210,44 @@ describe("agent lifecycle actions", () => {
     });
   });
 
+  it("falls back to any non-terminal run when currentRunId is stale", () => {
+    const daemon: Daemon = { id: "daemon", workspaceId: "ws", name: "Local", status: "active", connectionStatus: "online", createdAt: "now" };
+    const staleAgent = { ...agent, currentRunId: "missing" };
+
+    expect(agentLifecycleAction(staleAgent, daemon, [run])).toMatchObject({
+      run,
+      canStart: false,
+      canDelete: false,
+      canStop: true,
+    });
+  });
+
+  it("falls back to owned non-terminal runs when currentRunId belongs to another agent", () => {
+    const daemon: Daemon = { id: "daemon", workspaceId: "ws", name: "Local", status: "active", connectionStatus: "online", createdAt: "now" };
+    const otherRun = { ...run, id: "other-run", agentId: "other-agent" };
+    const staleAgent = { ...agent, currentRunId: otherRun.id };
+
+    expect(agentLifecycleAction(staleAgent, daemon, [otherRun, run])).toMatchObject({
+      run,
+      canStart: false,
+      canDelete: false,
+      canStop: true,
+    });
+  });
+
+  it("prefers a non-terminal fallback over a terminal currentRunId", () => {
+    const daemon: Daemon = { id: "daemon", workspaceId: "ws", name: "Local", status: "active", connectionStatus: "online", createdAt: "now" };
+    const terminalCurrent = { ...run, id: "old-run", status: "completed", desiredStatus: "stopped" };
+    const staleAgent = { ...agent, currentRunId: terminalCurrent.id };
+
+    expect(agentLifecycleAction(staleAgent, daemon, [terminalCurrent, run])).toMatchObject({
+      run,
+      canStart: false,
+      canDelete: false,
+      canStop: true,
+    });
+  });
+
   it("shows explicit offline removal for stale active runs", () => {
     const daemon: Daemon = { id: "daemon", workspaceId: "ws", name: "Local", status: "active", connectionStatus: "stale", createdAt: "now" };
 

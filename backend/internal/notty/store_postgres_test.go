@@ -163,13 +163,20 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 func TestPostgresDeleteAgentWithActiveRunRequiresStopOnlyWhenDaemonOnline(t *testing.T) {
 	dsn := postgresTestDSN(t)
 	now := time.Now().UTC()
+	blankRunID := ""
+	staleRunID := "run_missing"
 	cases := []struct {
-		name         string
-		lastSeen     time.Time
-		removeDaemon bool
-		wantError    bool
+		name                 string
+		lastSeen             time.Time
+		overrideCurrentRunID *string
+		mismatchedCurrentRun bool
+		removeDaemon         bool
+		wantError            bool
 	}{
 		{name: "online daemon blocks delete", lastSeen: now, wantError: true},
+		{name: "online daemon blocks delete when current run is blank", lastSeen: now, overrideCurrentRunID: &blankRunID, wantError: true},
+		{name: "online daemon blocks delete when current run is stale", lastSeen: now, overrideCurrentRunID: &staleRunID, wantError: true},
+		{name: "online daemon blocks delete when current run belongs to another agent", lastSeen: now, mismatchedCurrentRun: true, wantError: true},
 		{name: "stale daemon allows offline removal", lastSeen: now.Add(-daemonOnlineWindow - time.Second)},
 		{name: "disconnected daemon allows offline removal"},
 		{name: "missing daemon allows offline removal", removeDaemon: true},
@@ -213,6 +220,32 @@ func TestPostgresDeleteAgentWithActiveRunRequiresStopOnlyWhenDaemonOnline(t *tes
 			if !tc.lastSeen.IsZero() {
 				store.mu.Lock()
 				store.state.Daemons[agent.DaemonID].LastSeenAt = tc.lastSeen
+				store.mu.Unlock()
+			}
+			if tc.overrideCurrentRunID != nil {
+				store.mu.Lock()
+				store.state.Agents[agent.ID].CurrentRunID = *tc.overrideCurrentRunID
+				store.mu.Unlock()
+			}
+			if tc.mismatchedCurrentRun {
+				otherAgent, err := store.CreateAgent(CreateAgentRequest{
+					Handle: "other-runner",
+					Name:   "Other Runner",
+					Role:   "Runs other tasks",
+					Kind:   "codex",
+				}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+				if err != nil {
+					t.Fatalf("create other agent: %v", err)
+				}
+				_, otherRun, err := store.StartAgentRun(StartAgentRunRequest{
+					AgentID: otherAgent.ID,
+					Prompt:  "other running",
+				}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+				if err != nil {
+					t.Fatalf("start other run: %v", err)
+				}
+				store.mu.Lock()
+				store.state.Agents[agent.ID].CurrentRunID = otherRun.ID
 				store.mu.Unlock()
 			}
 			if tc.removeDaemon {
