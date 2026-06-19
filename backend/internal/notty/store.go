@@ -1245,7 +1245,14 @@ func (s *Store) CreateAgent(req CreateAgentRequest, meta OperationMeta) (*Agent,
 	if daemon == nil || daemon.Status != "active" || !daemon.DeletedAt.IsZero() {
 		return nil, ErrNotFound
 	}
-	agent, err := buildAgent(req.Handle, req.Name, req.Role, req.Kind)
+	kind, err := normalizeAgentRuntimeKind(req.Kind)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateDaemonRuntimeKind(daemon, kind); err != nil {
+		return nil, err
+	}
+	agent, err := buildAgent(req.Handle, req.Name, req.Role, kind)
 	if err != nil {
 		return nil, err
 	}
@@ -2160,12 +2167,9 @@ func buildUser(name, handle, role string) (*User, error) {
 }
 
 func buildAgent(handle, name, role, kind string) (*Agent, error) {
-	trimmedKind := strings.TrimSpace(strings.ToLower(kind))
-	if trimmedKind == "" {
-		trimmedKind = "codex"
-	}
-	if trimmedKind != "codex" {
-		return nil, fmt.Errorf("unsupported agent kind %q", trimmedKind)
+	trimmedKind, err := normalizeAgentRuntimeKind(kind)
+	if err != nil {
+		return nil, err
 	}
 	normalizedHandle, err := normalizeHandle(handle)
 	if err != nil {
@@ -2188,6 +2192,50 @@ func buildAgent(handle, name, role, kind string) (*Agent, error) {
 	}
 	agent.SystemPrompt = sharedAgentSystemPrompt(agent)
 	return agent, nil
+}
+
+func normalizeAgentRuntimeKind(kind string) (string, error) {
+	trimmed := strings.TrimSpace(strings.ToLower(kind))
+	if trimmed == "" {
+		return "", errors.New("agent kind is required")
+	}
+	for i, r := range trimmed {
+		if r >= 'a' && r <= 'z' {
+			continue
+		}
+		if i > 0 && r >= '0' && r <= '9' {
+			continue
+		}
+		if i > 0 && (r == '-' || r == '_') {
+			continue
+		}
+		return "", fmt.Errorf("invalid agent kind %q", strings.TrimSpace(kind))
+	}
+	return trimmed, nil
+}
+
+func validateDaemonRuntimeKind(daemon *Daemon, kind string) error {
+	if daemon == nil {
+		return ErrNotFound
+	}
+	if len(daemon.Runtimes) == 0 {
+		return fmt.Errorf("daemon %q has not reported runtime availability", daemon.ID)
+	}
+	for _, runtime := range daemon.Runtimes {
+		runtimeKind, err := normalizeAgentRuntimeKind(runtime.Kind)
+		if err != nil || runtimeKind != kind {
+			continue
+		}
+		if runtime.Available {
+			return nil
+		}
+		reason := strings.TrimSpace(runtime.Reason)
+		if reason != "" {
+			return fmt.Errorf("runtime %q is unavailable on daemon %q: %s", kind, daemon.ID, reason)
+		}
+		return fmt.Errorf("runtime %q is unavailable on daemon %q", kind, daemon.ID)
+	}
+	return fmt.Errorf("runtime %q is not reported by daemon %q", kind, daemon.ID)
 }
 
 func sharedAgentSystemPrompt(agent *Agent) string {

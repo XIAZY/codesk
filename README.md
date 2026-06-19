@@ -592,10 +592,11 @@ This accepts the same request plus `"daemonId": "daemon_..."`. The frontend prod
 
 Notes:
 
-- Agent kind currently supports `codex`.
+- Agent kind is a runtime kind reported by the selected daemon in its daemon status `runtimes` payload.
+- Agent creation rejects malformed kinds, daemons that have not reported runtime availability, and kinds that are not reported as available by the selected daemon.
 - Agent system prompts are derived by the backend from the shared prompt template plus name, handle, kind, and role.
 - End users should not customize the system prompt directly.
-- The frontend should expose one `New agent` action and ask the user to select a daemon.
+- The frontend should expose one `New agent` action and ask the user to select a daemon and one of that daemon's available runtimes.
 
 ### 8. Human Edits An Agent
 
@@ -1269,7 +1270,7 @@ type CreateAgentRequest = {
   handle: string;
   name: string;
   role?: string;
-  kind?: "codex";
+  kind: string;
   systemPrompt?: string;
 };
 
