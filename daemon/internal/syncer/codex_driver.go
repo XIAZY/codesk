@@ -14,12 +14,28 @@ type codexDriver struct {
 	factory codexAppServerFactory
 }
 
-type codexAppServerFactory func(cfg Config, workdir string, toolToken string, agentID string) *codexAppServer
+type codexAppServerFactory func(cfg Config, workdir string, toolToken string, agentID string) codexRuntimeApp
+
+type codexRuntimeApp interface {
+	Start(context.Context) error
+	Stop() error
+	Events() <-chan appServerEvent
+	PID() int
+	ThreadResume(context.Context, string, string, string) error
+	ThreadStart(context.Context, string, string) (string, error)
+	TurnStart(context.Context, string, string, string) (string, error)
+	TurnSteer(context.Context, string, string, string) error
+	TurnInterrupt(context.Context, string, string) error
+}
+
+func newCodexRuntimeApp(cfg Config, workdir string, toolToken string, agentID string) codexRuntimeApp {
+	return newCodexAppServer(cfg, workdir, toolToken, agentID)
+}
 
 func newCodexDriver(cfg Config) RuntimeDriver {
 	return &codexDriver{
 		cfg:     cfg,
-		factory: newCodexAppServer,
+		factory: newCodexRuntimeApp,
 	}
 }
 
@@ -49,7 +65,7 @@ func (d *codexDriver) Spawn(ctx context.Context, spec RuntimeSpawnSpec) (Runtime
 	_ = ctx
 	factory := d.factory
 	if factory == nil {
-		factory = newCodexAppServer
+		factory = newCodexRuntimeApp
 	}
 	app := factory(d.cfg, spec.Workdir, spec.ToolToken, spec.AgentID)
 	return &codexRuntimeProcess{
@@ -60,7 +76,7 @@ func (d *codexDriver) Spawn(ctx context.Context, spec RuntimeSpawnSpec) (Runtime
 }
 
 type codexRuntimeProcess struct {
-	app          *codexAppServer
+	app          codexRuntimeApp
 	instructions string
 	events       chan RuntimeEvent
 }
