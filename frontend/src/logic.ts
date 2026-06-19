@@ -181,6 +181,55 @@ export function agentStatus(agent: Agent, runs: AgentRun[]) {
   return "idle";
 }
 
+export function currentAgentRun(agent: Agent, runs: AgentRun[]) {
+  if (agent.currentRunId) {
+    const current = runs.find((run) => run.id === agent.currentRunId);
+    if (current) {
+      return current;
+    }
+  }
+  return runs.find((run) => run.agentId === agent.id && !["completed", "failed", "stopped"].includes(run.status));
+}
+
+export function agentLifecycleAction(agent: Agent, daemon: Daemon | undefined, runs: AgentRun[]) {
+  const run = currentAgentRun(agent, runs);
+  const daemonTone = daemon ? daemonStatus(daemon) : "disconnected";
+  const offline = daemonTone === "disconnected" || daemonTone === "deleted" || daemonTone === "stale";
+  const runPending = Boolean(run && !["completed", "failed", "stopped"].includes(run.status));
+  if (runPending && offline) {
+    return {
+      run,
+      canStart: false,
+      canDelete: true,
+      deleteLabel: "Remove offline agent",
+      deleteHelp: "Removes this offline agent and stops tracking its current run.",
+      confirmDelete: true,
+      canStop: false,
+    };
+  }
+  if (runPending) {
+    const stopRequested = run?.desiredStatus === "stopped";
+    return {
+      run,
+      canStart: false,
+      canDelete: false,
+      deleteLabel: "Delete agent",
+      deleteHelp: stopRequested ? "Waiting for the daemon to stop the current run before deleting this agent." : "Stop the current run before deleting this agent.",
+      confirmDelete: false,
+      canStop: !stopRequested,
+    };
+  }
+  return {
+    run,
+    canStart: true,
+    canDelete: true,
+    deleteLabel: "Delete agent",
+    deleteHelp: "",
+    confirmDelete: false,
+    canStop: false,
+  };
+}
+
 export function agentsByDaemon(agents: Agent[], daemons: Daemon[]) {
   const names = new Map(daemons.map((daemon) => [daemon.id, daemon.name]));
   return agents.reduce<Array<{ daemonId: string; daemonName: string; agents: Agent[] }>>((groups, agent) => {

@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import {
   agentStatus,
+  agentLifecycleAction,
   agentsByDaemon,
   applyReplaceToYText,
   buildDaemonInstallCommand,
@@ -19,7 +20,7 @@ import {
   resolveThreadAnchorLive,
   selectionLabel,
 } from "./logic";
-import type { Agent, Daemon, WorkspaceState } from "./types";
+import type { Agent, AgentRun, Daemon, WorkspaceState } from "./types";
 
 function baseWorkspace(): WorkspaceState {
   return {
@@ -164,6 +165,90 @@ describe("presentation grouping", () => {
     expect(daemonStatus(daemon)).toBe("stale");
     expect(agentStatus(agent, [{ id: "run", agentId: "agent", agentHandle: "codex", agentName: "Codex", agentKind: "codex", workspaceRoot: "", workingDirectory: "", prompt: "", status: "running", desiredStatus: "running", updatedAt: "now" }])).toBe("working");
     expect(agentsByDaemon([agent], [daemon])[0].daemonName).toBe("Local");
+  });
+});
+
+describe("agent lifecycle actions", () => {
+  const agent: Agent = {
+    id: "agent",
+    daemonId: "daemon",
+    handle: "codex",
+    name: "Codex",
+    role: "Review",
+    kind: "codex",
+    workspaceRoot: "agents/agent",
+    status: "idle",
+    currentTask: "",
+    currentActivity: "",
+    currentRunId: "run",
+    updatedAt: "now",
+  };
+  const run: AgentRun = {
+    id: "run",
+    agentId: "agent",
+    agentHandle: "codex",
+    agentName: "Codex",
+    agentKind: "codex",
+    workspaceRoot: "",
+    workingDirectory: "",
+    prompt: "Review",
+    status: "running",
+    desiredStatus: "running",
+    updatedAt: "now",
+  };
+
+  it("requires stopping an active run before deleting an online agent", () => {
+    const daemon: Daemon = { id: "daemon", workspaceId: "ws", name: "Local", status: "active", connectionStatus: "online", createdAt: "now" };
+
+    expect(agentLifecycleAction(agent, daemon, [run])).toMatchObject({
+      canStart: false,
+      canDelete: false,
+      canStop: true,
+      confirmDelete: false,
+      deleteLabel: "Delete agent",
+      deleteHelp: "Stop the current run before deleting this agent.",
+    });
+  });
+
+  it("shows explicit offline removal for stale active runs", () => {
+    const daemon: Daemon = { id: "daemon", workspaceId: "ws", name: "Local", status: "active", connectionStatus: "stale", createdAt: "now" };
+
+    expect(agentLifecycleAction(agent, daemon, [run])).toMatchObject({
+      canStart: false,
+      canDelete: true,
+      canStop: false,
+      confirmDelete: true,
+      deleteLabel: "Remove offline agent",
+      deleteHelp: "Removes this offline agent and stops tracking its current run.",
+    });
+  });
+
+  it("waits for terminal status after stop is requested on an online daemon", () => {
+    const daemon: Daemon = { id: "daemon", workspaceId: "ws", name: "Local", status: "active", connectionStatus: "online", createdAt: "now" };
+    const stoppingRun = { ...run, desiredStatus: "stopped" };
+
+    expect(agentLifecycleAction(agent, daemon, [stoppingRun])).toMatchObject({
+      canStart: false,
+      canDelete: false,
+      canStop: false,
+      confirmDelete: false,
+      deleteLabel: "Delete agent",
+      deleteHelp: "Waiting for the daemon to stop the current run before deleting this agent.",
+    });
+  });
+
+  it("uses normal delete for idle agents", () => {
+    const daemon: Daemon = { id: "daemon", workspaceId: "ws", name: "Local", status: "active", connectionStatus: "online", createdAt: "now" };
+    const completedRun = { ...run, status: "completed", desiredStatus: "stopped" };
+
+    expect(agentLifecycleAction(agent, daemon, [completedRun])).toMatchObject({
+      canStart: true,
+      canDelete: true,
+      canStop: false,
+      confirmDelete: false,
+      deleteLabel: "Delete agent",
+      deleteHelp: "",
+    });
   });
 });
 

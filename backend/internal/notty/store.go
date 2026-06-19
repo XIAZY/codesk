@@ -1335,9 +1335,12 @@ func (s *Store) DeleteAgent(id string, meta OperationMeta) (*Agent, error) {
 	if !ok {
 		return nil, ErrNotFound
 	}
+	now := time.Now().UTC()
 	if agent.CurrentRunID != "" {
 		if run, ok := s.state.AgentRuns[agent.CurrentRunID]; ok && !isTerminalRunStatus(run.Status) {
-			return nil, errors.New("stop the active run before deleting this agent")
+			if daemon := daemonWithLiveness(s.state.Daemons[agent.DaemonID], now); daemon != nil && daemon.ConnectionStatus == "online" {
+				return nil, errors.New("stop the active run before deleting this agent")
+			}
 		}
 	}
 	delete(s.state.Agents, id)
@@ -1355,7 +1358,6 @@ func (s *Store) DeleteAgent(id string, meta OperationMeta) (*Agent, error) {
 		thread.ParticipantIDs = removeString(thread.ParticipantIDs, id)
 	}
 	s.refreshThreadParticipantsLocked()
-	now := time.Now().UTC()
 	s.state.UpdatedAt = now
 	s.appendActivityLocked(&ActivityEvent{
 		Type:       "agent.deleted",
