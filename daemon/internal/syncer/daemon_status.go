@@ -17,12 +17,10 @@ type daemonStatusReporter struct {
 }
 
 type daemonStatusUpdate struct {
-	Version         string             `json:"version,omitempty"`
-	OS              string             `json:"os,omitempty"`
-	Arch            string             `json:"arch,omitempty"`
-	Status          string             `json:"status,omitempty"`
-	LastHeartbeatAt string             `json:"lastHeartbeatAt,omitempty"`
-	Runtimes        []RuntimeDetection `json:"runtimes,omitempty"`
+	Version  string             `json:"version,omitempty"`
+	OS       string             `json:"os,omitempty"`
+	Arch     string             `json:"arch,omitempty"`
+	Runtimes []RuntimeDetection `json:"runtimes,omitempty"`
 }
 
 func newDaemonStatusReporter(cfg Config, client *http.Client) *daemonStatusReporter {
@@ -37,12 +35,10 @@ func (r *daemonStatusReporter) Report(ctx context.Context, detections []RuntimeD
 		return nil
 	}
 	payload := daemonStatusUpdate{
-		Version:         firstNonEmptyText(strings.TrimSpace(r.cfg.DaemonVersion), "dev"),
-		OS:              runtime.GOOS,
-		Arch:            runtime.GOARCH,
-		Status:          "online",
-		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
-		Runtimes:        detections,
+		Version:  firstNonEmptyText(strings.TrimSpace(r.cfg.DaemonVersion), "dev"),
+		OS:       runtime.GOOS,
+		Arch:     runtime.GOARCH,
+		Runtimes: detections,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

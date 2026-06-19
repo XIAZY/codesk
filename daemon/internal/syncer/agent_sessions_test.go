@@ -287,6 +287,33 @@ func TestAgentSessionMissingRuntimePublishesDisconnectedWithoutSpawn(t *testing.
 	}
 }
 
+func TestAgentSessionUnregisteredRuntimePublishesDisconnectedWithoutSpawn(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	updates := make(chan agentSessionStatusUpdate, 4)
+	updater := func(ctx context.Context, agentID string, payload updateAgentSessionRequest) error {
+		_ = ctx
+		updates <- agentSessionStatusUpdate{agentID: agentID, payload: payload}
+		return nil
+	}
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), updater, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	if err := supervisor.Reconcile(context.Background(), []*agent{{ID: "agent_1", Handle: "swe", Kind: "python"}}); err != nil {
+		t.Fatalf("unregistered runtime should not fail reconcile: %v", err)
+	}
+	factory.mu.Lock()
+	processCount := len(factory.processes)
+	factory.mu.Unlock()
+	if processCount != 0 {
+		t.Fatalf("unregistered runtime should not spawn a process, got %d", processCount)
+	}
+	update := waitAgentSessionStatus(t, updates, "agent_1", "disconnected")
+	if !strings.Contains(update.payload.CurrentActivity, "python runtime unavailable") ||
+		!strings.Contains(update.payload.CurrentActivity, "runtime driver is not registered") {
+		t.Fatalf("unexpected disconnected activity: %#v", update.payload)
+	}
+}
+
 func TestAgentSessionReconcileReturnsSessionStartError(t *testing.T) {
 	factory := newFakeRuntimeDriver()
 	factory.startSessionErr = errors.New("session start failed")

@@ -57,11 +57,8 @@ func TestDaemonStatusReporterSendsRuntimeDetections(t *testing.T) {
 	if gotAuth != "Bearer daemon_token" {
 		t.Fatalf("expected daemon bearer auth, got %q", gotAuth)
 	}
-	if gotPayload.Version != "0.62.0" || gotPayload.OS != runtime.GOOS || gotPayload.Arch != runtime.GOARCH || gotPayload.Status != "online" {
+	if gotPayload.Version != "0.62.0" || gotPayload.OS != runtime.GOOS || gotPayload.Arch != runtime.GOARCH {
 		t.Fatalf("unexpected daemon status payload: %#v", gotPayload)
-	}
-	if gotPayload.LastHeartbeatAt == "" {
-		t.Fatalf("expected heartbeat timestamp in payload: %#v", gotPayload)
 	}
 	if len(gotPayload.Runtimes) != 1 || gotPayload.Runtimes[0].Kind != RuntimeCodex || !gotPayload.Runtimes[0].Available {
 		t.Fatalf("unexpected runtime detections: %#v", gotPayload.Runtimes)

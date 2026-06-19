@@ -421,12 +421,10 @@ type UpdateAgentSessionRequest struct {
 }
 
 type UpdateDaemonStatusRequest struct {
-	Version         string             `json:"version,omitempty"`
-	OS              string             `json:"os,omitempty"`
-	Arch            string             `json:"arch,omitempty"`
-	Status          string             `json:"status,omitempty"`
-	LastHeartbeatAt string             `json:"lastHeartbeatAt,omitempty"`
-	Runtimes        []RuntimeDetection `json:"runtimes,omitempty"`
+	Version  string             `json:"version,omitempty"`
+	OS       string             `json:"os,omitempty"`
+	Arch     string             `json:"arch,omitempty"`
+	Runtimes []RuntimeDetection `json:"runtimes,omitempty"`
 }
 
 type UpdateAgentNotificationRequest struct {

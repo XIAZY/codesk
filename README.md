@@ -872,8 +872,6 @@ Request:
   "version": "0.62.0",
   "os": "linux",
   "arch": "arm64",
-  "status": "online",
-  "lastHeartbeatAt": "2026-05-10T12:00:00Z",
   "runtimes": [{"kind":"codex","available":true,"version":"codex 0.134.0","path":"/usr/local/bin/codex"}]
 }
 ```
@@ -1707,6 +1705,7 @@ Important daemon environment variables:
 - `NOTTY_BACKEND_URL`: backend URL.
 - `NOTTY_WORKSPACE_ID`: workspace the daemon belongs to.
 - `NOTTY_DAEMON_TOKEN`: one-time daemon token from backend.
+- `NOTTY_DAEMON_VERSION`: installed daemon version reported to the backend.
 - `NOTTY_WORKSPACE_DIR`: local canonical workspace projection.
 - `NOTTY_AGENT_WORKSPACE_ROOT`: parent directory for per-agent workspaces.
 - `NOTTY_CODEX_COMMAND`: Codex executable, default `codex`.

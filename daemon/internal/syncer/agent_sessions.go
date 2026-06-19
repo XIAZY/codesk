@@ -280,9 +280,6 @@ func (s *agentSessionSupervisor) Reconcile(ctx context.Context, agents []*agent)
 			continue
 		}
 		desired[current.ID] = current
-		if strings.ToLower(current.Kind) != "codex" {
-			continue
-		}
 		if err := s.ensureSession(ctx, current); err != nil {
 			fmt.Printf("agent session %s error: %v\n", current.ID, err)
 			errs = append(errs, &agentSessionStartupError{
