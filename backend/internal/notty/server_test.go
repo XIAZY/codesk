@@ -393,6 +393,7 @@ func TestRootDocumentUpdatesStreamToRawRootSubscriber(t *testing.T) {
 
 func TestAgentDocumentDiffEndpointRejectsLargeDiff(t *testing.T) {
 	server, store := newTestServer(t)
+	seedCodexDaemonRuntime(t, store)
 	documentID := mustCreateTestDocument(t, store, "docs/large-api-diff.md", numberedLines(2001))
 	agent, err := store.CreateAgent(CreateAgentRequest{
 		Handle: "reviewer",
@@ -748,6 +749,7 @@ func TestDocumentProtocolIgnoresCanonicalEmptyYjsUpdate(t *testing.T) {
 
 func TestWorkspaceEndpointsTrimHistoricalAgentRunPayloads(t *testing.T) {
 	server, store := newTestServer(t)
+	seedCodexDaemonRuntime(t, store)
 	agent, err := store.CreateAgent(CreateAgentRequest{
 		Handle: "payload-agent",
 		Name:   "Payload Agent",
@@ -1334,6 +1336,7 @@ func TestHandleDocumentProtocolMessageConcurrentSyncAndUpdates(t *testing.T) {
 
 func TestHandleDocumentProtocolMessageDoesNotPublishDocumentMentionMetadataChange(t *testing.T) {
 	server, store := newTestServer(t)
+	seedCodexDaemonRuntime(t, store)
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "Draft.\n")
 	if _, err := store.CreateAgent(CreateAgentRequest{
 		Handle: "codex-agent",

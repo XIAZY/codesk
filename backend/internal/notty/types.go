@@ -117,15 +117,27 @@ type WorkspaceMember struct {
 }
 
 type Daemon struct {
-	ID                 string    `json:"id"`
-	WorkspaceID        string    `json:"workspaceId"`
-	Name               string    `json:"name"`
-	Status             string    `json:"status"`
-	ConnectionStatus   string    `json:"connectionStatus"`
-	LastSeenAt         time.Time `json:"lastSeenAt,omitempty"`
-	LastSeenAgeSeconds int64     `json:"lastSeenAgeSeconds"`
-	CreatedAt          time.Time `json:"createdAt"`
-	DeletedAt          time.Time `json:"deletedAt,omitempty"`
+	ID                 string             `json:"id"`
+	WorkspaceID        string             `json:"workspaceId"`
+	Name               string             `json:"name"`
+	Status             string             `json:"status"`
+	ConnectionStatus   string             `json:"connectionStatus"`
+	Version            string             `json:"version,omitempty"`
+	OS                 string             `json:"os,omitempty"`
+	Arch               string             `json:"arch,omitempty"`
+	Runtimes           []RuntimeDetection `json:"runtimes,omitempty"`
+	LastSeenAt         time.Time          `json:"lastSeenAt,omitempty"`
+	LastSeenAgeSeconds int64              `json:"lastSeenAgeSeconds"`
+	CreatedAt          time.Time          `json:"createdAt"`
+	DeletedAt          time.Time          `json:"deletedAt,omitempty"`
+}
+
+type RuntimeDetection struct {
+	Kind      string `json:"kind"`
+	Available bool   `json:"available"`
+	Version   string `json:"version,omitempty"`
+	Path      string `json:"path,omitempty"`
+	Reason    string `json:"reason,omitempty"`
 }
 
 type Presence struct {
@@ -148,7 +160,6 @@ type Agent struct {
 	Kind             string    `json:"kind"`
 	SystemPrompt     string    `json:"systemPrompt"`
 	WorkspaceRoot    string    `json:"workspaceRoot"`
-	CodexThreadID    string    `json:"codexThreadId,omitempty"`
 	CurrentTurnID    string    `json:"currentTurnId,omitempty"`
 	SessionID        string    `json:"sessionId,omitempty"`
 	Status           string    `json:"status"`
@@ -403,10 +414,17 @@ type UpdateAgentRunRequest struct {
 
 type UpdateAgentSessionRequest struct {
 	Status          string `json:"status"`
-	CodexThreadID   string `json:"codexThreadId,omitempty"`
+	SessionID       string `json:"sessionId,omitempty"`
 	CurrentTurnID   string `json:"currentTurnId,omitempty"`
 	CurrentActivity string `json:"currentActivity,omitempty"`
 	LastHeartbeatAt string `json:"lastHeartbeatAt,omitempty"`
+}
+
+type UpdateDaemonStatusRequest struct {
+	Version  string             `json:"version,omitempty"`
+	OS       string             `json:"os,omitempty"`
+	Arch     string             `json:"arch,omitempty"`
+	Runtimes []RuntimeDetection `json:"runtimes,omitempty"`
 }
 
 type UpdateAgentNotificationRequest struct {

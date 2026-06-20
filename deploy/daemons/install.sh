@@ -23,7 +23,7 @@ Options:
   -h, --help            Show this help.
 
 Environment:
-  NOTTY_CODEX_COMMAND   Codex executable to use. Defaults to codex.
+  NOTTY_CODEX_COMMAND   Optional Codex executable to use. Defaults to codex.
 EOF
 }
 
@@ -195,15 +195,27 @@ append_codex_search_paths
 check_codex() {
 	case "$codex_command" in
 		*/*)
-			[ -x "$codex_command" ] || die "Codex CLI is required before installing the daemon. $codex_command is not executable. Install Codex or set NOTTY_CODEX_COMMAND to the Codex executable path."
+			if [ ! -x "$codex_command" ]; then
+				warn "Codex runtime unavailable: $codex_command is not executable. Install Codex later or set NOTTY_CODEX_COMMAND to the Codex executable path."
+				return 0
+			fi
 			;;
 		*)
-			PATH="$daemon_path" command -v "$codex_command" >/dev/null 2>&1 || die "Codex CLI is required before installing the daemon. '$codex_command' was not found on PATH. Install Codex or set NOTTY_CODEX_COMMAND to the Codex executable path."
+			if ! PATH="$daemon_path" command -v "$codex_command" >/dev/null 2>&1; then
+				warn "Codex runtime unavailable: '$codex_command' was not found on PATH. Install Codex later or set NOTTY_CODEX_COMMAND to the Codex executable path."
+				return 0
+			fi
 			;;
 	esac
 
-	PATH="$daemon_path" "$codex_command" --version >/dev/null 2>&1 || die "Codex CLI was found but did not run successfully with --version. Fix Codex before installing the daemon."
-	PATH="$daemon_path" "$codex_command" app-server --help >/dev/null 2>&1 || die "Codex CLI was found but does not support 'app-server'. Upgrade Codex before installing the daemon."
+	if ! PATH="$daemon_path" "$codex_command" --version >/dev/null 2>&1; then
+		warn "Codex runtime unavailable: '$codex_command --version' did not run successfully. Fix Codex later to enable Codex agents."
+		return 0
+	fi
+	if ! PATH="$daemon_path" "$codex_command" app-server --help >/dev/null 2>&1; then
+		warn "Codex runtime unavailable: '$codex_command' does not support 'app-server'. Upgrade Codex later to enable Codex agents."
+		return 0
+	fi
 }
 
 check_codex
@@ -259,6 +271,7 @@ mv "$install_dir/.notty-agent-tool.$$" "$install_dir/notty-agent-tool"
 	printf 'export NOTTY_BACKEND_URL=%s\n' "$(shell_quote "$backend_url")"
 	printf 'export NOTTY_WORKSPACE_ID=%s\n' "$(shell_quote "$workspace_id")"
 	printf 'export NOTTY_DAEMON_TOKEN=%s\n' "$(shell_quote "$daemon_token")"
+	printf 'export NOTTY_DAEMON_VERSION=%s\n' "$(shell_quote "$version")"
 	printf 'export NOTTY_DATA_DIR=%s\n' "$(shell_quote "$data_dir")"
 	printf 'export NOTTY_WORKSPACE_DIR=%s\n' "$(shell_quote "$workspace_dir")"
 	printf 'export NOTTY_AGENT_WORKSPACE_ROOT=%s\n' "$(shell_quote "$agent_workspace_root")"
@@ -271,7 +284,7 @@ chmod 600 "$env_file"
 	printf '#!/usr/bin/env sh\n'
 	printf 'set -eu\n'
 	printf '. %s\n' "$(shell_quote "$env_file")"
-	printf 'export NOTTY_BACKEND_URL NOTTY_WORKSPACE_ID NOTTY_DAEMON_TOKEN NOTTY_DATA_DIR NOTTY_WORKSPACE_DIR NOTTY_AGENT_WORKSPACE_ROOT NOTTY_CODEX_COMMAND PATH\n'
+	printf 'export NOTTY_BACKEND_URL NOTTY_WORKSPACE_ID NOTTY_DAEMON_TOKEN NOTTY_DAEMON_VERSION NOTTY_DATA_DIR NOTTY_WORKSPACE_DIR NOTTY_AGENT_WORKSPACE_ROOT NOTTY_CODEX_COMMAND PATH\n'
 	printf 'export PATH=%s:"$PATH"\n' "$(shell_quote "$install_dir")"
 	printf 'exec %s\n' "$(shell_quote "$install_dir/notty-daemon")"
 } > "$run_script"

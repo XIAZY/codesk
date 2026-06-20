@@ -516,7 +516,7 @@ Response `201`:
 
 Frontend should display the token once and provide a hosted installer command. The frontend, backend, and static origins are environment-driven so local development can use localhost while production uses the public domains.
 
-The installer requires a working Codex CLI before it writes daemon files or starts a service. It keeps `NOTTY_CODEX_COMMAND` as configured, defaulting to `codex`, and writes an explicit daemon `PATH` based on the install shell plus common Codex locations such as Homebrew, `/usr/local/bin`, system bin directories, `~/.local/bin`, `~/.npm-global/bin`, and the npm prefix bin. It aborts if that daemon environment cannot run `codex --version` and `codex app-server --help`.
+The installer does not require Codex. It keeps `NOTTY_CODEX_COMMAND` as configured, defaulting to `codex`, and writes an explicit daemon `PATH` based on the install shell plus common Codex locations such as Homebrew, `/usr/local/bin`, system bin directories, `~/.local/bin`, `~/.npm-global/bin`, and the npm prefix bin. If Codex is missing, broken, or too old for `app-server`, the installer prints a warning and still installs the daemon; the daemon reports Codex as an unavailable runtime until Codex is installed or fixed.
 
 ```sh
 curl -fsSL https://static.nottyai.co/daemons/install.sh | sh -s -- \
@@ -592,10 +592,11 @@ This accepts the same request plus `"daemonId": "daemon_..."`. The frontend prod
 
 Notes:
 
-- Agent kind currently supports `codex`.
+- Agent kind is a runtime kind reported by the selected daemon in its daemon status `runtimes` payload.
+- Agent creation rejects malformed kinds, daemons that have not reported runtime availability, and kinds that are not reported as available by the selected daemon.
 - Agent system prompts are derived by the backend from the shared prompt template plus name, handle, kind, and role.
 - End users should not customize the system prompt directly.
-- The frontend should expose one `New agent` action and ask the user to select a daemon.
+- The frontend should expose one `New agent` action and ask the user to select a daemon and one of that daemon's available runtimes.
 
 ### 8. Human Edits An Agent
 
@@ -858,6 +859,24 @@ Response:
 
 ### 15. Daemon Updates Agent Runtime State
 
+Update daemon status and runtime availability:
+
+```http
+PATCH /api/workspaces/{workspaceID}/daemon/status
+Authorization: Bearer <daemon-token>
+```
+
+Request:
+
+```json
+{
+  "version": "0.62.0",
+  "os": "linux",
+  "arch": "arm64",
+  "runtimes": [{"kind":"codex","available":true,"version":"codex 0.134.0","path":"/usr/local/bin/codex"}]
+}
+```
+
 Update agent session:
 
 ```http
@@ -871,7 +890,7 @@ Request:
 ```json
 {
   "status": "working",
-  "codexThreadId": "019...",
+  "sessionId": "session_...",
   "currentTurnId": "turn_...",
   "currentActivity": "Reviewing notifications",
   "lastHeartbeatAt": "2026-05-10T12:00:00Z"
@@ -1121,13 +1140,13 @@ DocumentMetadata:
 Daemon:
 
 ```json
-{"id":"daemon_...","workspaceId":"ws_...","name":"Local daemon","status":"active","connectionStatus":"online","lastSeenAt":"...","lastSeenAgeSeconds":4,"createdAt":"...","deletedAt":"..."}
+{"id":"daemon_...","workspaceId":"ws_...","name":"Local daemon","status":"active","connectionStatus":"online","version":"0.62.0","os":"linux","arch":"arm64","runtimes":[{"kind":"codex","available":true,"version":"codex 0.134.0","path":"/usr/local/bin/codex"}],"lastSeenAt":"...","lastSeenAgeSeconds":4,"createdAt":"...","deletedAt":"..."}
 ```
 
 Agent:
 
 ```json
-{"id":"agent_...","daemonId":"daemon_...","handle":"codex-agent","name":"Codex Agent","role":"...","kind":"codex","systemPrompt":"...","workspaceRoot":"agents/agent_...","codexThreadId":"...","currentTurnId":"...","sessionId":"...","status":"idle","currentTask":"","currentActivity":"","currentRunId":"","lastHeartbeatAt":"...","lastRunCompleted":"...","updatedAt":"..."}
+{"id":"agent_...","daemonId":"daemon_...","handle":"codex-agent","name":"Codex Agent","role":"...","kind":"codex","systemPrompt":"...","workspaceRoot":"agents/agent_...","currentTurnId":"...","sessionId":"...","status":"idle","currentTask":"","currentActivity":"","currentRunId":"","lastHeartbeatAt":"...","lastRunCompleted":"...","updatedAt":"..."}
 ```
 
 Thread:
@@ -1251,7 +1270,7 @@ type CreateAgentRequest = {
   handle: string;
   name: string;
   role?: string;
-  kind?: "codex";
+  kind: string;
   systemPrompt?: string;
 };
 
@@ -1264,7 +1283,7 @@ type UpdateAgentRequest = {
 
 type UpdateAgentSessionRequest = {
   status?: string;
-  codexThreadId?: string;
+  sessionId?: string;
   currentTurnId?: string;
   currentActivity?: string;
   lastHeartbeatAt?: string;
@@ -1687,9 +1706,10 @@ Important daemon environment variables:
 - `NOTTY_BACKEND_URL`: backend URL.
 - `NOTTY_WORKSPACE_ID`: workspace the daemon belongs to.
 - `NOTTY_DAEMON_TOKEN`: one-time daemon token from backend.
+- `NOTTY_DAEMON_VERSION`: installed daemon version reported to the backend.
 - `NOTTY_WORKSPACE_DIR`: local canonical workspace projection.
 - `NOTTY_AGENT_WORKSPACE_ROOT`: parent directory for per-agent workspaces.
-- `NOTTY_CODEX_COMMAND`: Codex executable, default `codex`.
+- `NOTTY_CODEX_COMMAND`: optional Codex executable used for Codex runtime detection, default `codex`.
 - `NOTTY_AGENT_TOOL_BASE_URL`: local agent helper gateway URL.
 - `NOTTY_PPROF_ADDR`: optional daemon pprof bind address.
 

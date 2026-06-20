@@ -39,6 +39,8 @@ type Service struct {
 	cfg             Config
 	client          *http.Client
 	sessions        *agentSessionSupervisor
+	runtimes        *runtimeRegistry
+	daemonStatus    *daemonStatusReporter
 	toolServer      *http.Server
 	mu              sync.Mutex
 	primaryRuntime  *workspaceRuntime
@@ -176,6 +178,7 @@ func (q *localCreateQueue) Drain() []localCreateCandidate {
 
 func New(cfg Config) (*Service, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
+	runtimes := defaultRuntimeRegistry(cfg)
 	primaryRuntime, err := newWorkspaceRuntime(cfg, client, cfg.WorkspaceDir, cfg.AgentID, "daemon")
 	if err != nil {
 		return nil, err
@@ -183,11 +186,13 @@ func New(cfg Config) (*Service, error) {
 	service := &Service{
 		cfg:            cfg,
 		client:         client,
+		runtimes:       runtimes,
+		daemonStatus:   newDaemonStatusReporter(cfg, client),
 		primaryRuntime: primaryRuntime,
 		agentRuntimes:  map[string]*managedWorkspaceRuntime{},
 		agentWorkers:   map[string]*managedAgentWorker{},
 	}
-	service.sessions = newAgentSessionSupervisor(cfg, service.updateRemoteAgentSession, nil)
+	service.sessions = newAgentSessionSupervisor(cfg, service.updateRemoteAgentSession, runtimes)
 	service.sessions.SetIdleWake(service.wakeAgentWorker)
 	return service, nil
 }
@@ -226,6 +231,7 @@ func (s *Service) Run(ctx context.Context) error {
 		_ = shutdownToolGateway(context.Background(), s.toolServer)
 		return err
 	}
+	s.reportDaemonStatus(ctx, true)
 	if err := s.refreshInitialWorkspace(ctx); err != nil {
 		s.closeAgentWorkers()
 		s.closeAgentRuntimes()
@@ -259,10 +265,31 @@ func (s *Service) Run(ctx context.Context) error {
 			_ = shutdownToolGateway(context.Background(), s.toolServer)
 			return nil
 		case <-ticker.C:
+			s.reportDaemonStatus(ctx, false)
 			if err := s.refresh(ctx); err != nil {
 				fmt.Printf("workspace refresh error: %v\n", err)
 			}
 		}
+	}
+}
+
+func (s *Service) reportDaemonStatus(ctx context.Context, refreshDetections bool) {
+	if s == nil || s.daemonStatus == nil {
+		return
+	}
+	detections := []RuntimeDetection(nil)
+	if s.runtimes != nil {
+		if refreshDetections {
+			detections = s.runtimes.DetectAll(ctx)
+		} else {
+			detections = s.runtimes.cachedDetections()
+			if len(detections) == 0 {
+				detections = s.runtimes.DetectAll(ctx)
+			}
+		}
+	}
+	if err := s.daemonStatus.Report(ctx, detections); err != nil && ctx.Err() == nil {
+		log.Printf("daemon status report failed: %v", err)
 	}
 }
 

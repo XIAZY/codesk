@@ -96,17 +96,17 @@ common_args="
 --no-service
 "
 
-if NOTTY_CODEX_COMMAND="$tmp_dir/missing-codex" HOME="$tmp_dir/home-missing" sh "$installer" $common_args > "$tmp_dir/missing.out" 2> "$tmp_dir/missing.err"; then
-	fail "installer succeeded without codex"
-fi
-grep -q "Codex CLI is required" "$tmp_dir/missing.err" || fail "missing codex error did not explain requirement"
-assert_missing "$tmp_dir/data"
+NOTTY_CODEX_COMMAND="$tmp_dir/missing-codex" HOME="$tmp_dir/home-missing" sh "$installer" $common_args > "$tmp_dir/missing.out" 2> "$tmp_dir/missing.err"
+grep -q "Codex runtime unavailable" "$tmp_dir/missing.err" || fail "missing codex warning did not explain runtime availability"
+assert_executable "$tmp_dir/install/notty-daemon"
+assert_file "$tmp_dir/data/daemons/ws-test/daemon.env"
+grep -q "NOTTY_CODEX_COMMAND='$tmp_dir/missing-codex'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "missing codex install did not preserve configured command"
 
-if NOTTY_CODEX_COMMAND="$bad_codex" HOME="$tmp_dir/home-bad" sh "$installer" $common_args > "$tmp_dir/bad.out" 2> "$tmp_dir/bad.err"; then
-	fail "installer succeeded with failing codex"
-fi
-grep -q "did not run successfully" "$tmp_dir/bad.err" || fail "bad codex error did not explain failed smoke test"
-assert_missing "$tmp_dir/data"
+NOTTY_CODEX_COMMAND="$bad_codex" HOME="$tmp_dir/home-bad" sh "$installer" $common_args > "$tmp_dir/bad.out" 2> "$tmp_dir/bad.err"
+grep -q "did not run successfully" "$tmp_dir/bad.err" || fail "bad codex warning did not explain failed smoke test"
+assert_executable "$tmp_dir/install/notty-daemon"
+assert_file "$tmp_dir/data/daemons/ws-test/daemon.env"
+grep -q "NOTTY_CODEX_COMMAND='$bad_codex'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "bad codex install did not preserve configured command"
 
 old_codex="$tmp_dir/codex-old"
 cat > "$old_codex" <<'EOF'
@@ -121,19 +121,21 @@ exit 2
 EOF
 chmod +x "$old_codex"
 
-if NOTTY_CODEX_COMMAND="$old_codex" HOME="$tmp_dir/home-old" sh "$installer" $common_args > "$tmp_dir/old.out" 2> "$tmp_dir/old.err"; then
-	fail "installer succeeded with codex missing app-server"
-fi
-grep -q "does not support 'app-server'" "$tmp_dir/old.err" || fail "old codex error did not explain app-server requirement"
-assert_missing "$tmp_dir/data"
+NOTTY_CODEX_COMMAND="$old_codex" HOME="$tmp_dir/home-old" sh "$installer" $common_args > "$tmp_dir/old.out" 2> "$tmp_dir/old.err"
+grep -q "does not support 'app-server'" "$tmp_dir/old.err" || fail "old codex warning did not explain app-server availability"
+assert_executable "$tmp_dir/install/notty-daemon"
+assert_file "$tmp_dir/data/daemons/ws-test/daemon.env"
+grep -q "NOTTY_CODEX_COMMAND='$old_codex'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "old codex install did not preserve configured command"
 
 NOTTY_CODEX_COMMAND="$ok_codex" HOME="$tmp_dir/home-ok" sh "$installer" $common_args > "$tmp_dir/ok.out" 2> "$tmp_dir/ok.err"
 assert_executable "$tmp_dir/install/notty-daemon"
 assert_executable "$tmp_dir/install/notty-agent-tool"
 assert_file "$tmp_dir/data/daemons/ws-test/daemon.env"
 grep -q "NOTTY_CODEX_COMMAND='$ok_codex'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "env file did not preserve configured Codex command"
+grep -q "NOTTY_DAEMON_VERSION='$version'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "env file did not preserve daemon version"
 grep -q "NOTTY_DATA_DIR='$tmp_dir/data'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "env file did not preserve daemon data dir"
 grep -q "^export PATH='" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "env file did not persist daemon PATH"
+grep -q "NOTTY_DAEMON_VERSION NOTTY_DATA_DIR" "$tmp_dir/data/daemons/ws-test/run.sh" || fail "run script did not export daemon version"
 grep -q "NOTTY_DATA_DIR NOTTY_WORKSPACE_DIR" "$tmp_dir/data/daemons/ws-test/run.sh" || fail "run script did not export daemon data dir"
 grep -q "NOTTY_CODEX_COMMAND PATH" "$tmp_dir/data/daemons/ws-test/run.sh" || fail "run script did not export daemon PATH"
 grep -q "export PATH='$tmp_dir/install':\"\$PATH\"" "$tmp_dir/data/daemons/ws-test/run.sh" || fail "run script did not prepend install directory to PATH"

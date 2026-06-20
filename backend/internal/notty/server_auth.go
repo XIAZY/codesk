@@ -185,6 +185,33 @@ func (s *Server) handleCreateDaemon(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, CreateDaemonResponse{Daemon: daemon, Token: token})
 }
 
+func (s *Server) handleUpdateDaemonStatus(w http.ResponseWriter, r *http.Request) {
+	auth, ok := authFromContext(r.Context())
+	if !ok || auth == nil || auth.PrincipalKind != "daemon" || strings.TrimSpace(auth.DaemonID) == "" {
+		writeError(w, http.StatusForbidden, "daemon authentication is required")
+		return
+	}
+	var req UpdateDaemonStatusRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	daemon, err := updateDaemonStatus(s.store.db, s.requestWorkspaceID(r), auth.DaemonID, req)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	if store, err := s.workspaceStore(s.requestWorkspaceID(r)); err == nil && store != nil {
+		_ = store.Reload()
+	}
+	s.requestBroker(r).Publish(EventEnvelope{Type: "daemon.updated", Data: daemon})
+	writeJSON(w, http.StatusOK, map[string]any{"daemon": daemon})
+}
+
 func (s *Server) handleCreateDaemonReinstallToken(w http.ResponseWriter, r *http.Request) {
 	if !s.requireHumanPrincipal(w, r) {
 		return

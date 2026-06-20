@@ -35,6 +35,7 @@ func (s *Server) Routes() http.Handler {
 		router.Post("/members", s.handleAddWorkspaceMember)
 		router.Get("/daemons", s.handleListDaemons)
 		router.Post("/daemons", s.handleCreateDaemon)
+		router.Patch("/daemon/status", s.handleUpdateDaemonStatus)
 		router.Post("/daemons/{daemonID}/reinstall-token", s.handleCreateDaemonReinstallToken)
 		router.Delete("/daemons/{daemonID}", s.handleDeleteDaemon)
 		router.Post("/daemons/{daemonID}/agents", s.handleCreateDaemonAgent)

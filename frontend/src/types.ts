@@ -40,10 +40,22 @@ export type Daemon = {
   name: string;
   status: string;
   connectionStatus?: "online" | "stale" | "disconnected" | string;
+  version?: string;
+  os?: string;
+  arch?: string;
+  runtimes?: RuntimeDetection[];
   lastSeenAt?: string;
   lastSeenAgeSeconds?: number;
   createdAt: string;
   deletedAt?: string;
+};
+
+export type RuntimeDetection = {
+  kind: string;
+  available: boolean;
+  version?: string;
+  path?: string;
+  reason?: string;
 };
 
 export type Agent = {
@@ -55,7 +67,6 @@ export type Agent = {
   kind: string;
   systemPrompt?: string;
   workspaceRoot: string;
-  codexThreadId?: string;
   currentTurnId?: string;
   sessionId?: string;
   status: string;

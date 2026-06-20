@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -98,6 +99,18 @@ func TestDaemonTokenIsWorkspaceScopedAndCanActAsWorkspaceAgent(t *testing.T) {
 		t.Fatalf("new daemon should start disconnected until it checks in, got %q", daemonResponse.Daemon.ConnectionStatus)
 	}
 
+	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/daemon/status", daemonResponse.Token, UpdateDaemonStatusRequest{
+		Version: "0.62.0",
+		OS:      "linux",
+		Arch:    "arm64",
+		Runtimes: []RuntimeDetection{{
+			Kind:      "codex",
+			Available: true,
+			Version:   "codex-cli 0.134.0",
+			Path:      "/usr/local/bin/codex",
+		}},
+	}, http.StatusOK)
+
 	var agent Agent
 	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+daemonResponse.Daemon.ID+"/agents", owner.Token, CreateAgentRequest{
 		Handle: "codex-agent",
@@ -111,7 +124,7 @@ func TestDaemonTokenIsWorkspaceScopedAndCanActAsWorkspaceAgent(t *testing.T) {
 
 	authTestStatusWithHeaders(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/agents/"+agent.ID+"/session", daemonResponse.Token, map[string]string{
 		"X-Notty-Acting-Agent-ID": agent.ID,
-	}, UpdateAgentSessionRequest{Status: "idle", CodexThreadID: "thread-1"}, http.StatusOK)
+	}, UpdateAgentSessionRequest{Status: "idle", SessionID: "thread-1"}, http.StatusOK)
 	var daemonList struct {
 		Daemons []*Daemon `json:"daemons"`
 	}
@@ -121,8 +134,38 @@ func TestDaemonTokenIsWorkspaceScopedAndCanActAsWorkspaceAgent(t *testing.T) {
 	}
 	authTestStatus(t, router, http.MethodGet, "/api/workspaces/"+otherWorkspace.ID+"/workspace", daemonResponse.Token, nil, http.StatusForbidden)
 
+	var statusResponse struct {
+		Daemon Daemon `json:"daemon"`
+	}
+	authTestJSON(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/daemon/status", daemonResponse.Token, UpdateDaemonStatusRequest{
+		Version: "0.62.0",
+		OS:      "linux",
+		Arch:    "arm64",
+		Runtimes: []RuntimeDetection{{
+			Kind:      "codex",
+			Available: true,
+			Version:   "codex-cli 0.134.0",
+			Path:      "/usr/local/bin/codex",
+		}},
+	}, http.StatusOK, &statusResponse)
+	if statusResponse.Daemon.ID != daemonResponse.Daemon.ID || statusResponse.Daemon.Version != "0.62.0" || len(statusResponse.Daemon.Runtimes) != 1 || !statusResponse.Daemon.Runtimes[0].Available {
+		t.Fatalf("expected daemon status to update authenticated daemon, got %#v", statusResponse.Daemon)
+	}
+	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/daemon/status", owner.Token, UpdateDaemonStatusRequest{Version: "human"}, http.StatusForbidden)
+
 	var otherDaemonResponse CreateDaemonResponse
 	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons", owner.Token, CreateDaemonRequest{Name: "Other daemon"}, http.StatusCreated, &otherDaemonResponse)
+	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/daemon/status", otherDaemonResponse.Token, UpdateDaemonStatusRequest{
+		Version: "0.62.0",
+		OS:      "linux",
+		Arch:    "arm64",
+		Runtimes: []RuntimeDetection{{
+			Kind:      "codex",
+			Available: true,
+			Version:   "codex-cli 0.134.0",
+			Path:      "/usr/local/bin/codex",
+		}},
+	}, http.StatusOK)
 	var otherAgent Agent
 	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+otherDaemonResponse.Daemon.ID+"/agents", owner.Token, CreateAgentRequest{
 		Handle: "other-agent",
@@ -132,9 +175,14 @@ func TestDaemonTokenIsWorkspaceScopedAndCanActAsWorkspaceAgent(t *testing.T) {
 	}, http.StatusCreated, &otherAgent)
 	authTestStatusWithHeaders(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/agents/"+otherAgent.ID+"/session", daemonResponse.Token, map[string]string{
 		"X-Notty-Acting-Agent-ID": otherAgent.ID,
-	}, UpdateAgentSessionRequest{Status: "idle", CodexThreadID: "wrong-daemon"}, http.StatusForbidden)
-	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/agents/"+otherAgent.ID+"/session", daemonResponse.Token, UpdateAgentSessionRequest{Status: "idle", CodexThreadID: "wrong-daemon-no-header"}, http.StatusForbidden)
+	}, UpdateAgentSessionRequest{Status: "idle", SessionID: "wrong-daemon"}, http.StatusForbidden)
+	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/agents/"+otherAgent.ID+"/session", daemonResponse.Token, UpdateAgentSessionRequest{Status: "idle", SessionID: "wrong-daemon-no-header"}, http.StatusForbidden)
 	authTestStatus(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons", daemonResponse.Token, CreateDaemonRequest{Name: "daemon-created-daemon"}, http.StatusForbidden)
+
+	authTestJSON(t, router, http.MethodGet, "/api/workspaces/"+workspace.ID+"/daemons", owner.Token, nil, http.StatusOK, &daemonList)
+	if len(daemonList.Daemons) < 1 || daemonList.Daemons[0].Version != "0.62.0" || len(daemonList.Daemons[0].Runtimes) != 1 {
+		t.Fatalf("expected daemon list to include runtime status, got %#v", daemonList.Daemons)
+	}
 
 	authTestStatusWithHeaders(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/threads", daemonResponse.Token, map[string]string{
 		"X-Notty-Acting-Agent-ID": agent.Handle,
@@ -162,6 +210,147 @@ func TestDaemonTokenIsWorkspaceScopedAndCanActAsWorkspaceAgent(t *testing.T) {
 
 	authTestStatus(t, router, http.MethodDelete, "/api/workspaces/"+workspace.ID+"/daemons/"+daemonResponse.Daemon.ID, owner.Token, nil, http.StatusOK)
 	authTestStatus(t, router, http.MethodGet, "/api/workspaces/"+workspace.ID+"/workspace", daemonResponse.Token, nil, http.StatusForbidden)
+}
+
+func TestCreateDaemonAgentValidatesReportedRuntimeKind(t *testing.T) {
+	cases := []struct {
+		name        string
+		kind        string
+		runtimes    []RuntimeDetection
+		wantStatus  int
+		wantKind    string
+		wantErrText []string
+	}{
+		{
+			name:        "malformed kind",
+			kind:        "bad kind",
+			runtimes:    []RuntimeDetection{{Kind: "codex", Available: true}},
+			wantStatus:  http.StatusBadRequest,
+			wantErrText: []string{"invalid agent kind"},
+		},
+		{
+			name:        "no runtime report",
+			kind:        "codex",
+			wantStatus:  http.StatusBadRequest,
+			wantErrText: []string{"has not reported runtime availability"},
+		},
+		{
+			name:        "runtime unavailable",
+			kind:        "codex",
+			runtimes:    []RuntimeDetection{{Kind: "codex", Available: false, Reason: "codex command not found"}},
+			wantStatus:  http.StatusBadRequest,
+			wantErrText: []string{"runtime \"codex\" is unavailable", "codex command not found"},
+		},
+		{
+			name:        "different runtime reported",
+			kind:        "claude-code",
+			runtimes:    []RuntimeDetection{{Kind: "codex", Available: true}},
+			wantStatus:  http.StatusBadRequest,
+			wantErrText: []string{"runtime \"claude-code\" is not reported"},
+		},
+		{
+			name:       "runtime available",
+			kind:       "Claude-Code",
+			runtimes:   []RuntimeDetection{{Kind: "claude-code", Available: true, Version: "claude test"}},
+			wantStatus: http.StatusCreated,
+			wantKind:   "claude-code",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			router := newAuthTestRouter(t)
+			emailSuffix := strings.ReplaceAll(tc.name, " ", "-")
+			owner := authTestRegister(t, router, "runtime-"+emailSuffix+"@example.com", "owner-pass", "Runtime Owner")
+			workspace := authTestCreateWorkspace(t, router, owner.Token, "Runtime Tenant "+tc.name)
+			var daemonResponse CreateDaemonResponse
+			authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons", owner.Token, CreateDaemonRequest{Name: "Runtime daemon"}, http.StatusCreated, &daemonResponse)
+			if tc.runtimes != nil {
+				authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/daemon/status", daemonResponse.Token, UpdateDaemonStatusRequest{
+					Version:  "0.62.0",
+					OS:       "linux",
+					Arch:     "arm64",
+					Runtimes: tc.runtimes,
+				}, http.StatusOK)
+			}
+			recorder := authTestRequest(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+daemonResponse.Daemon.ID+"/agents", owner.Token, nil, CreateAgentRequest{
+				Handle: "runtime-agent",
+				Name:   "Runtime Agent",
+				Role:   "Exercises runtime validation",
+				Kind:   tc.kind,
+			})
+			if recorder.Code != tc.wantStatus {
+				t.Fatalf("expected status %d, got %d body=%s", tc.wantStatus, recorder.Code, recorder.Body.String())
+			}
+			if len(tc.wantErrText) > 0 {
+				var errorResponse struct {
+					Error string `json:"error"`
+				}
+				if err := json.Unmarshal(recorder.Body.Bytes(), &errorResponse); err != nil {
+					t.Fatalf("decode error response: %v body=%s", err, recorder.Body.String())
+				}
+				for _, want := range tc.wantErrText {
+					if !strings.Contains(errorResponse.Error, want) {
+						t.Fatalf("expected error %q to contain %q", errorResponse.Error, want)
+					}
+				}
+			}
+			if tc.wantStatus != http.StatusCreated {
+				return
+			}
+			var agent Agent
+			if err := json.Unmarshal(recorder.Body.Bytes(), &agent); err != nil {
+				t.Fatalf("decode agent response: %v body=%s", err, recorder.Body.String())
+			}
+			if agent.Kind != tc.wantKind {
+				t.Fatalf("expected agent kind %q, got %#v", tc.wantKind, agent)
+			}
+		})
+	}
+}
+
+func TestCreateDaemonAgentAppearsInDaemonWorkspaceSnapshot(t *testing.T) {
+	router := newAuthTestRouter(t)
+
+	owner := authTestRegister(t, router, "runtime-snapshot-owner@example.com", "owner-pass", "Runtime Snapshot Owner")
+	workspace := authTestCreateWorkspace(t, router, owner.Token, "Runtime Snapshot Tenant")
+	var daemonResponse CreateDaemonResponse
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons", owner.Token, CreateDaemonRequest{Name: "Runtime daemon"}, http.StatusCreated, &daemonResponse)
+	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/daemon/status", daemonResponse.Token, UpdateDaemonStatusRequest{
+		Version: "0.62.0",
+		OS:      "linux",
+		Arch:    "arm64",
+		Runtimes: []RuntimeDetection{{
+			Kind:      "codex",
+			Available: true,
+			Version:   "codex test",
+			Path:      "/usr/local/bin/codex",
+		}},
+	}, http.StatusOK)
+
+	var created Agent
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+daemonResponse.Daemon.ID+"/agents", owner.Token, CreateAgentRequest{
+		Handle: "runtime-agent",
+		Name:   "Runtime Agent",
+		Role:   "Exercises daemon pickup",
+		Kind:   "codex",
+	}, http.StatusCreated, &created)
+
+	var snapshot struct {
+		CurrentDaemonID string   `json:"currentDaemonId"`
+		Agents          []*Agent `json:"agents"`
+	}
+	authTestJSON(t, router, http.MethodGet, "/api/workspaces/"+workspace.ID+"/workspace", daemonResponse.Token, nil, http.StatusOK, &snapshot)
+	if snapshot.CurrentDaemonID != daemonResponse.Daemon.ID {
+		t.Fatalf("expected current daemon %q, got %q", daemonResponse.Daemon.ID, snapshot.CurrentDaemonID)
+	}
+	if len(snapshot.Agents) != 1 {
+		t.Fatalf("expected daemon workspace snapshot to include one agent, got %#v", snapshot.Agents)
+	}
+	got := snapshot.Agents[0]
+	if got.ID != created.ID || got.DaemonID != daemonResponse.Daemon.ID || got.Kind != "codex" {
+		t.Fatalf("expected created runtime agent in daemon snapshot, got %#v created=%#v daemon=%#v", got, created, daemonResponse.Daemon)
+	}
 }
 
 func TestDaemonReinstallTokenRotatesDaemonToken(t *testing.T) {
@@ -204,6 +393,17 @@ func TestDaemonTokenDocumentUpdateHTTPRouteRemoved(t *testing.T) {
 
 	var daemonResponse CreateDaemonResponse
 	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons", owner.Token, CreateDaemonRequest{Name: "Local daemon"}, http.StatusCreated, &daemonResponse)
+	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/daemon/status", daemonResponse.Token, UpdateDaemonStatusRequest{
+		Version: "0.62.0",
+		OS:      "linux",
+		Arch:    "arm64",
+		Runtimes: []RuntimeDetection{{
+			Kind:      "codex",
+			Available: true,
+			Version:   "codex-cli 0.134.0",
+			Path:      "/usr/local/bin/codex",
+		}},
+	}, http.StatusOK)
 
 	var agent Agent
 	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+daemonResponse.Daemon.ID+"/agents", owner.Token, CreateAgentRequest{

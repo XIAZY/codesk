@@ -10,68 +10,80 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
-type fakeAppServerFactory struct {
-	mu             sync.Mutex
-	apps           []*fakeAppServer
-	startEntered   chan struct{}
-	startRelease   chan struct{}
-	startErr       error
-	threadStartErr error
-	turnSteerErr   error
+type agentSessionStatusUpdate struct {
+	agentID string
+	payload updateAgentSessionRequest
 }
 
-type fakeTurnStart struct {
-	threadID string
-	prompt   string
-	cwd      string
+type fakeRuntimeDriver struct {
+	mu              sync.Mutex
+	processes       []*fakeRuntimeProcess
+	detection       RuntimeDetection
+	startEntered    chan struct{}
+	startRelease    chan struct{}
+	startErr        error
+	startSessionErr error
+	steerErr        error
+	failResume      bool
 }
 
-type fakeTurnSteer struct {
-	threadID string
-	turnID   string
-	message  string
-}
-
-type fakeAppServer struct {
+type fakeRuntimeProcess struct {
 	mu sync.Mutex
 
-	events chan appServerEvent
+	events chan RuntimeEvent
 
-	started            bool
-	stopped            bool
-	threadStartCount   int
-	threadResumeIDs    []string
-	threadInstructions []string
-	failResume         bool
-	turnStarts         []fakeTurnStart
-	turnSteers         []fakeTurnSteer
-	nextTurn           int
-	startEntered       chan struct{}
-	startRelease       chan struct{}
-	startErr           error
-	threadStartErr     error
-	turnSteerErr       error
+	started         bool
+	stopped         bool
+	inputs          []RuntimeInput
+	nextTurn        int
+	startEntered    chan struct{}
+	startRelease    chan struct{}
+	startErr        error
+	startSessionErr error
+	steerErr        error
+	failResume      bool
 }
 
-func newFakeAppServerFactory() *fakeAppServerFactory {
-	return &fakeAppServerFactory{}
+func newFakeRuntimeDriver() *fakeRuntimeDriver {
+	return &fakeRuntimeDriver{detection: RuntimeDetection{Kind: RuntimeCodex, Available: true}}
 }
 
-func (f *fakeAppServerFactory) new(cfg Config, workdir string, toolToken string, agentID string) appServerClient {
-	app := &fakeAppServer{
-		events:         make(chan appServerEvent, 16),
-		startEntered:   f.startEntered,
-		startRelease:   f.startRelease,
-		startErr:       f.startErr,
-		threadStartErr: f.threadStartErr,
-		turnSteerErr:   f.turnSteerErr,
+func newFakeRuntimeRegistry(driver *fakeRuntimeDriver) *runtimeRegistry {
+	registry := newRuntimeRegistry(driver)
+	registry.detections[driver.Kind()] = driver.detection
+	return registry
+}
+
+func (f *fakeRuntimeDriver) Kind() RuntimeKind {
+	return RuntimeCodex
+}
+
+func (f *fakeRuntimeDriver) Detect(ctx context.Context) RuntimeDetection {
+	_ = ctx
+	if f.detection.Kind == "" {
+		f.detection.Kind = RuntimeCodex
+	}
+	return f.detection
+}
+
+func (f *fakeRuntimeDriver) Spawn(ctx context.Context, spec RuntimeSpawnSpec) (RuntimeProcess, error) {
+	_ = ctx
+	process := &fakeRuntimeProcess{
+		events:          make(chan RuntimeEvent, 16),
+		startEntered:    f.startEntered,
+		startRelease:    f.startRelease,
+		startErr:        f.startErr,
+		startSessionErr: f.startSessionErr,
+		steerErr:        f.steerErr,
+		failResume:      f.failResume,
 	}
 	f.mu.Lock()
-	f.apps = append(f.apps, app)
+	f.processes = append(f.processes, process)
 	f.mu.Unlock()
-	return app
+	return process, nil
 }
 
 func agentSessionTestConfig(t *testing.T, workspaceRoot string) Config {
@@ -83,98 +95,111 @@ func agentSessionTestConfig(t *testing.T, workspaceRoot string) Config {
 	}
 }
 
-func (f *fakeAppServerFactory) only(t *testing.T) *fakeAppServer {
+func (f *fakeRuntimeDriver) only(t *testing.T) *fakeRuntimeProcess {
 	t.Helper()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.apps) != 1 {
-		t.Fatalf("expected one app server, got %d", len(f.apps))
+	if len(f.processes) != 1 {
+		t.Fatalf("expected one runtime process, got %d", len(f.processes))
 	}
-	return f.apps[0]
+	return f.processes[0]
 }
 
-func (a *fakeAppServer) Start(ctx context.Context) error {
-	a.mu.Lock()
-	a.started = true
-	a.mu.Unlock()
-	if a.startEntered != nil {
+func (p *fakeRuntimeProcess) Start(ctx context.Context) error {
+	p.mu.Lock()
+	p.started = true
+	p.mu.Unlock()
+	if p.startEntered != nil {
 		select {
-		case a.startEntered <- struct{}{}:
+		case p.startEntered <- struct{}{}:
 		default:
 		}
 	}
-	if a.startRelease != nil {
+	if p.startRelease != nil {
 		select {
-		case <-a.startRelease:
+		case <-p.startRelease:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
-	if a.startErr != nil {
-		return a.startErr
+	if p.startErr != nil {
+		return p.startErr
 	}
 	return nil
 }
 
-func (a *fakeAppServer) Stop() error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.stopped = true
+func (p *fakeRuntimeProcess) Stop() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.stopped = true
 	return nil
 }
 
-func (a *fakeAppServer) ThreadStart(ctx context.Context, cwd string, instructions string) (string, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.threadStartCount++
-	a.threadInstructions = append(a.threadInstructions, instructions)
-	if a.threadStartErr != nil {
-		return "", a.threadStartErr
+func (p *fakeRuntimeProcess) WriteStdin(ctx context.Context, input RuntimeInput) (RuntimeWriteResult, error) {
+	_ = ctx
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.inputs = append(p.inputs, input)
+	switch input.Kind {
+	case RuntimeInputResumeSession:
+		if p.failResume {
+			return RuntimeWriteResult{}, fmt.Errorf("resume failed")
+		}
+		return RuntimeWriteResult{SessionID: input.SessionID}, nil
+	case RuntimeInputStartSession:
+		if p.startSessionErr != nil {
+			return RuntimeWriteResult{}, p.startSessionErr
+		}
+		return RuntimeWriteResult{SessionID: "thread_new"}, nil
+	case RuntimeInputStartTurn:
+		p.nextTurn++
+		return RuntimeWriteResult{TurnID: fmt.Sprintf("turn_%d", p.nextTurn)}, nil
+	case RuntimeInputSteerTurn:
+		return RuntimeWriteResult{}, p.steerErr
+	case RuntimeInputInterruptTurn:
+		return RuntimeWriteResult{}, nil
+	default:
+		return RuntimeWriteResult{}, fmt.Errorf("unexpected input kind %q", input.Kind)
 	}
-	return "thread_new", nil
 }
 
-func (a *fakeAppServer) ThreadResume(ctx context.Context, threadID string, cwd string, instructions string) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.threadResumeIDs = append(a.threadResumeIDs, threadID)
-	a.threadInstructions = append(a.threadInstructions, instructions)
-	if a.failResume {
-		return fmt.Errorf("resume failed")
-	}
-	return nil
+func (p *fakeRuntimeProcess) Events() <-chan RuntimeEvent {
+	return p.events
 }
 
-func (a *fakeAppServer) TurnStart(ctx context.Context, threadID string, prompt string, cwd string) (string, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.nextTurn++
-	turnID := fmt.Sprintf("turn_%d", a.nextTurn)
-	a.turnStarts = append(a.turnStarts, fakeTurnStart{threadID: threadID, prompt: prompt, cwd: cwd})
-	return turnID, nil
-}
-
-func (a *fakeAppServer) TurnSteer(ctx context.Context, threadID string, turnID string, message string) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.turnSteers = append(a.turnSteers, fakeTurnSteer{threadID: threadID, turnID: turnID, message: message})
-	return a.turnSteerErr
-}
-
-func (a *fakeAppServer) TurnInterrupt(ctx context.Context, threadID string, turnID string) error {
-	return nil
-}
-
-func (a *fakeAppServer) Events() <-chan appServerEvent {
-	return a.events
-}
-
-func (a *fakeAppServer) PID() int {
+func (p *fakeRuntimeProcess) PID() int {
 	return 123
 }
 
+func (p *fakeRuntimeProcess) inputsByKind(kind RuntimeInputKind) []RuntimeInput {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var inputs []RuntimeInput
+	for _, input := range p.inputs {
+		if input.Kind == kind {
+			inputs = append(inputs, input)
+		}
+	}
+	return inputs
+}
+
+func waitAgentSessionStatus(t *testing.T, updates <-chan agentSessionStatusUpdate, agentID string, status string) agentSessionStatusUpdate {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case update := <-updates:
+			if update.agentID == agentID && update.payload.Status == status {
+				return update
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for agent %s status %s", agentID, status)
+		}
+	}
+}
+
 func TestAgentSessionStartsThreadWithDeveloperInstructions(t *testing.T) {
-	factory := newFakeAppServerFactory()
+	factory := newFakeRuntimeDriver()
 	type statusUpdate struct {
 		agentID string
 		payload updateAgentSessionRequest
@@ -184,28 +209,29 @@ func TestAgentSessionStartsThreadWithDeveloperInstructions(t *testing.T) {
 		updates <- statusUpdate{agentID: agentID, payload: payload}
 		return nil
 	}
-	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), updater, factory.new)
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), updater, newFakeRuntimeRegistry(factory))
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Handle: "swe", Kind: "codex", SystemPrompt: "shared prompt"}
 
 	if err := supervisor.ensureSession(context.Background(), current); err != nil {
 		t.Fatalf("ensure session: %v", err)
 	}
-	app := factory.only(t)
-	if !app.started || app.threadStartCount != 1 {
-		t.Fatalf("expected app start and thread start, app=%#v", app)
+	process := factory.only(t)
+	starts := process.inputsByKind(RuntimeInputStartSession)
+	if !process.started || len(starts) != 1 {
+		t.Fatalf("expected process start and session start, process=%#v inputs=%#v", process, starts)
 	}
-	if len(app.threadInstructions) != 1 || app.threadInstructions[0] != "shared prompt" {
-		t.Fatalf("expected shared prompt in thread instructions, got %#v", app.threadInstructions)
+	if starts[0].Instructions != "shared prompt" {
+		t.Fatalf("expected shared prompt in session instructions, got %#v", starts[0])
 	}
 	update := <-updates
-	if update.agentID != "agent_1" || update.payload.Status != "idle" || update.payload.CodexThreadID != "thread_new" {
+	if update.agentID != "agent_1" || update.payload.Status != "idle" || update.payload.SessionID != "thread_new" {
 		t.Fatalf("unexpected session update: %#v", update)
 	}
 }
 
 func TestAgentSessionReconcileReturnsStartupError(t *testing.T) {
-	factory := newFakeAppServerFactory()
+	factory := newFakeRuntimeDriver()
 	factory.startErr = errors.New("codex missing")
 	type statusUpdate struct {
 		agentID string
@@ -216,7 +242,7 @@ func TestAgentSessionReconcileReturnsStartupError(t *testing.T) {
 		updates <- statusUpdate{agentID: agentID, payload: payload}
 		return nil
 	}
-	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), updater, factory.new)
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), updater, newFakeRuntimeRegistry(factory))
 	defer supervisor.Shutdown()
 
 	err := supervisor.Reconcile(context.Background(), []*agent{{ID: "agent_1", Handle: "swe", Kind: "codex"}})
@@ -233,31 +259,86 @@ func TestAgentSessionReconcileReturnsStartupError(t *testing.T) {
 	}
 }
 
-func TestAgentSessionReconcileReturnsThreadStartError(t *testing.T) {
-	factory := newFakeAppServerFactory()
-	factory.threadStartErr = errors.New("thread start failed")
-	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, factory.new)
+func TestAgentSessionMissingRuntimePublishesDisconnectedWithoutSpawn(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.detection = RuntimeDetection{Kind: RuntimeCodex, Available: false, Reason: "codex command not found"}
+	updates := make(chan agentSessionStatusUpdate, 4)
+	updater := func(ctx context.Context, agentID string, payload updateAgentSessionRequest) error {
+		_ = ctx
+		updates <- agentSessionStatusUpdate{agentID: agentID, payload: payload}
+		return nil
+	}
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), updater, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	if err := supervisor.Reconcile(context.Background(), []*agent{{ID: "agent_1", Handle: "swe", Kind: "codex"}}); err != nil {
+		t.Fatalf("missing runtime should not fail reconcile: %v", err)
+	}
+	factory.mu.Lock()
+	processCount := len(factory.processes)
+	factory.mu.Unlock()
+	if processCount != 0 {
+		t.Fatalf("missing runtime should not spawn a process, got %d", processCount)
+	}
+	update := waitAgentSessionStatus(t, updates, "agent_1", "disconnected")
+	if !strings.Contains(update.payload.CurrentActivity, "codex runtime unavailable") ||
+		!strings.Contains(update.payload.CurrentActivity, "codex command not found") {
+		t.Fatalf("unexpected disconnected activity: %#v", update.payload)
+	}
+}
+
+func TestAgentSessionUnregisteredRuntimePublishesDisconnectedWithoutSpawn(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	updates := make(chan agentSessionStatusUpdate, 4)
+	updater := func(ctx context.Context, agentID string, payload updateAgentSessionRequest) error {
+		_ = ctx
+		updates <- agentSessionStatusUpdate{agentID: agentID, payload: payload}
+		return nil
+	}
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), updater, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	if err := supervisor.Reconcile(context.Background(), []*agent{{ID: "agent_1", Handle: "swe", Kind: "python"}}); err != nil {
+		t.Fatalf("unregistered runtime should not fail reconcile: %v", err)
+	}
+	factory.mu.Lock()
+	processCount := len(factory.processes)
+	factory.mu.Unlock()
+	if processCount != 0 {
+		t.Fatalf("unregistered runtime should not spawn a process, got %d", processCount)
+	}
+	update := waitAgentSessionStatus(t, updates, "agent_1", "disconnected")
+	if !strings.Contains(update.payload.CurrentActivity, "python runtime unavailable") ||
+		!strings.Contains(update.payload.CurrentActivity, "runtime driver is not registered") {
+		t.Fatalf("unexpected disconnected activity: %#v", update.payload)
+	}
+}
+
+func TestAgentSessionReconcileReturnsSessionStartError(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.startSessionErr = errors.New("session start failed")
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
 	defer supervisor.Shutdown()
 
 	err := supervisor.Reconcile(context.Background(), []*agent{{ID: "agent_1", Handle: "swe", Kind: "codex"}})
 	if err == nil {
-		t.Fatal("expected reconcile thread start error")
+		t.Fatal("expected reconcile session start error")
 	}
 	var startupErr *agentSessionStartupError
-	if !errors.As(err, &startupErr) || !strings.Contains(startupErr.Err.Error(), "thread start failed") {
-		t.Fatalf("expected wrapped thread start error, got %T %v", err, err)
+	if !errors.As(err, &startupErr) || !strings.Contains(startupErr.Err.Error(), "session start failed") {
+		t.Fatalf("expected wrapped session start error, got %T %v", err, err)
 	}
-	app := factory.only(t)
-	if !app.stopped {
-		t.Fatal("failed thread start should stop the app server")
+	process := factory.only(t)
+	if !process.stopped {
+		t.Fatal("failed session start should stop the runtime process")
 	}
 }
 
 func TestAgentSessionConcurrentEnsureStartsOneAppServer(t *testing.T) {
-	factory := newFakeAppServerFactory()
+	factory := newFakeRuntimeDriver()
 	factory.startEntered = make(chan struct{}, 1)
 	factory.startRelease = make(chan struct{})
-	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, factory.new)
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Handle: "swe", Kind: "codex", SystemPrompt: "shared prompt"}
 
@@ -273,10 +354,10 @@ func TestAgentSessionConcurrentEnsureStartsOneAppServer(t *testing.T) {
 	}
 	<-factory.startEntered
 	factory.mu.Lock()
-	startedBeforeRelease := len(factory.apps)
+	startedBeforeRelease := len(factory.processes)
 	factory.mu.Unlock()
 	if startedBeforeRelease != 1 {
-		t.Fatalf("expected one in-flight app server before release, got %d", startedBeforeRelease)
+		t.Fatalf("expected one in-flight runtime process before release, got %d", startedBeforeRelease)
 	}
 	close(factory.startRelease)
 	wg.Wait()
@@ -286,22 +367,22 @@ func TestAgentSessionConcurrentEnsureStartsOneAppServer(t *testing.T) {
 			t.Fatalf("ensure session returned error: %v", err)
 		}
 	}
-	app := factory.only(t)
-	if !app.started || app.threadStartCount != 1 {
-		t.Fatalf("expected one app start and one thread start, app=%#v", app)
+	process := factory.only(t)
+	if !process.started || len(process.inputsByKind(RuntimeInputStartSession)) != 1 {
+		t.Fatalf("expected one process start and one session start, process=%#v", process)
 	}
 }
 
-func TestAgentSessionIgnoresEventsFromStaleAppServer(t *testing.T) {
-	factory := newFakeAppServerFactory()
-	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, factory.new)
+func TestAgentSessionIgnoresEventsFromStaleRuntimeProcess(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
 	if err := supervisor.ensureSession(context.Background(), current); err != nil {
 		t.Fatalf("ensure session: %v", err)
 	}
 	active := factory.only(t)
-	stale := &fakeAppServer{events: make(chan appServerEvent, 1)}
+	stale := &fakeRuntimeProcess{events: make(chan RuntimeEvent, 1)}
 
 	supervisor.markWorking("agent_1", stale, "turn_stale")
 	state, turn := sessionState(supervisor, "agent_1")
@@ -326,62 +407,93 @@ func TestAgentSessionIgnoresEventsFromStaleAppServer(t *testing.T) {
 	}
 }
 
-func TestAgentSessionResumesExistingThread(t *testing.T) {
-	factory := newFakeAppServerFactory()
-	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, factory.new)
+func TestAgentSessionResumesExistingSession(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
 	defer supervisor.Shutdown()
 
-	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex", CodexThreadID: "thread_existing"}); err != nil {
+	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex", SessionID: "thread_existing"}); err != nil {
 		t.Fatalf("ensure session: %v", err)
 	}
-	app := factory.only(t)
-	if len(app.threadResumeIDs) != 1 || app.threadResumeIDs[0] != "thread_existing" {
-		t.Fatalf("expected thread resume, got %#v", app.threadResumeIDs)
+	process := factory.only(t)
+	resumes := process.inputsByKind(RuntimeInputResumeSession)
+	if len(resumes) != 1 || resumes[0].SessionID != "thread_existing" {
+		t.Fatalf("expected session resume, got %#v", resumes)
 	}
-	if app.threadStartCount != 0 {
-		t.Fatalf("expected no new thread when resume succeeds")
+	if len(process.inputsByKind(RuntimeInputStartSession)) != 0 {
+		t.Fatalf("expected no new session when resume succeeds")
+	}
+}
+
+func TestAgentSessionResumeFailureStartsNewSession(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.failResume = true
+	updates := make(chan agentSessionStatusUpdate, 4)
+	updater := func(ctx context.Context, agentID string, payload updateAgentSessionRequest) error {
+		_ = ctx
+		updates <- agentSessionStatusUpdate{agentID: agentID, payload: payload}
+		return nil
+	}
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), updater, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex", SessionID: "thread_existing"}); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	resumes := process.inputsByKind(RuntimeInputResumeSession)
+	if len(resumes) != 1 || resumes[0].SessionID != "thread_existing" {
+		t.Fatalf("expected one failed resume attempt, got %#v", resumes)
+	}
+	starts := process.inputsByKind(RuntimeInputStartSession)
+	if len(starts) != 1 {
+		t.Fatalf("expected fallback new session start, got %#v", starts)
+	}
+	update := waitAgentSessionStatus(t, updates, "agent_1", "idle")
+	if update.payload.SessionID != "thread_new" {
+		t.Fatalf("expected fallback session id to be published, got %#v", update.payload)
 	}
 }
 
 func TestAgentSessionIdleNotificationStartsOncePerInboxSignature(t *testing.T) {
-	factory := newFakeAppServerFactory()
-	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, factory.new)
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
 
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "first", "for-me:v1", ""); err != nil {
 		t.Fatalf("schedule first: %v", err)
 	}
-	app := factory.only(t)
-	if len(app.turnStarts) != 1 {
-		t.Fatalf("expected first turn start, got %d", len(app.turnStarts))
+	process := factory.only(t)
+	if len(process.inputsByKind(RuntimeInputStartTurn)) != 1 {
+		t.Fatalf("expected first turn start, got %d", len(process.inputsByKind(RuntimeInputStartTurn)))
 	}
-	supervisor.markIdle("agent_1", app, true)
+	supervisor.markIdle("agent_1", process, true)
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "same", "for-me:v1", ""); err != nil {
 		t.Fatalf("schedule same: %v", err)
 	}
-	if len(app.turnStarts) != 1 {
-		t.Fatalf("expected same inbox signature to be suppressed, got %d starts", len(app.turnStarts))
+	if len(process.inputsByKind(RuntimeInputStartTurn)) != 1 {
+		t.Fatalf("expected same inbox signature to be suppressed, got %d starts", len(process.inputsByKind(RuntimeInputStartTurn)))
 	}
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "changed", "for-me:v2", ""); err != nil {
 		t.Fatalf("schedule changed: %v", err)
 	}
-	if len(app.turnStarts) != 2 {
-		t.Fatalf("expected changed signature to start another turn, got %d", len(app.turnStarts))
+	if len(process.inputsByKind(RuntimeInputStartTurn)) != 2 {
+		t.Fatalf("expected changed signature to start another turn, got %d", len(process.inputsByKind(RuntimeInputStartTurn)))
 	}
 }
 
 func TestAgentSessionBusyForMeSteersOnceAndQueuesFollowup(t *testing.T) {
-	factory := newFakeAppServerFactory()
-	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, factory.new)
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
 
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "active", "", "general:v1"); err != nil {
 		t.Fatalf("schedule active: %v", err)
 	}
-	app := factory.only(t)
-	if len(app.turnStarts) != 1 {
+	process := factory.only(t)
+	if len(process.inputsByKind(RuntimeInputStartTurn)) != 1 {
 		t.Fatalf("expected active turn start")
 	}
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "for-me", "for-me:v1", "general:v1"); err != nil {
@@ -390,56 +502,63 @@ func TestAgentSessionBusyForMeSteersOnceAndQueuesFollowup(t *testing.T) {
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "for-me duplicate", "for-me:v1", "general:v1"); err != nil {
 		t.Fatalf("schedule duplicate for-me while busy: %v", err)
 	}
-	if len(app.turnSteers) != 1 {
-		t.Fatalf("expected exactly one steer for same for-me signature, got %d", len(app.turnSteers))
+	if len(process.inputsByKind(RuntimeInputSteerTurn)) != 1 {
+		t.Fatalf("expected exactly one steer for same for-me signature, got %d", len(process.inputsByKind(RuntimeInputSteerTurn)))
+	}
+	steers := process.inputsByKind(RuntimeInputSteerTurn)
+	if steers[0].Importance != RuntimeImportanceImportant ||
+		steers[0].SessionID != "thread_new" ||
+		steers[0].TurnID != "turn_1" ||
+		steers[0].Text != forMeSteerMessage {
+		t.Fatalf("unexpected important steer input: %#v", steers[0])
 	}
 	forMePending, generalPending := supervisor.Pending("agent_1")
 	if !forMePending || generalPending {
 		t.Fatalf("expected for-me followup only, got forMe=%v general=%v", forMePending, generalPending)
 	}
-	supervisor.markIdle("agent_1", app, true)
+	supervisor.markIdle("agent_1", process, true)
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "followup", "for-me:v1", "general:v1"); err != nil {
 		t.Fatalf("schedule followup: %v", err)
 	}
-	if len(app.turnStarts) != 2 {
-		t.Fatalf("expected follow-up turn after busy for-me change, got %d starts", len(app.turnStarts))
+	if len(process.inputsByKind(RuntimeInputStartTurn)) != 2 {
+		t.Fatalf("expected follow-up turn after busy for-me change, got %d starts", len(process.inputsByKind(RuntimeInputStartTurn)))
 	}
 }
 
 func TestAgentSessionBusyGeneralQueuesFollowupWithoutSteer(t *testing.T) {
-	factory := newFakeAppServerFactory()
-	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, factory.new)
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
 
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "active", "for-me:v1", ""); err != nil {
 		t.Fatalf("schedule active: %v", err)
 	}
-	app := factory.only(t)
+	process := factory.only(t)
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "general", "for-me:v1", "general:v1"); err != nil {
 		t.Fatalf("schedule general while busy: %v", err)
 	}
-	if len(app.turnSteers) != 0 {
-		t.Fatalf("expected no steer for general-only change, got %d", len(app.turnSteers))
+	if len(process.inputsByKind(RuntimeInputSteerTurn)) != 0 {
+		t.Fatalf("expected no steer for general-only change, got %d", len(process.inputsByKind(RuntimeInputSteerTurn)))
 	}
 	forMePending, generalPending := supervisor.Pending("agent_1")
 	if forMePending || !generalPending {
 		t.Fatalf("expected general followup only, got forMe=%v general=%v", forMePending, generalPending)
 	}
-	supervisor.markIdle("agent_1", app, true)
+	supervisor.markIdle("agent_1", process, true)
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "followup", "for-me:v1", "general:v1"); err != nil {
 		t.Fatalf("schedule followup: %v", err)
 	}
-	if len(app.turnStarts) != 2 {
-		t.Fatalf("expected follow-up turn after busy general change, got %d starts", len(app.turnStarts))
+	if len(process.inputsByKind(RuntimeInputStartTurn)) != 2 {
+		t.Fatalf("expected follow-up turn after busy general change, got %d starts", len(process.inputsByKind(RuntimeInputStartTurn)))
 	}
 }
 
 func TestAgentSessionBusyGeneralCoalescesFollowupLogAndKeepsLatestSignature(t *testing.T) {
-	factory := newFakeAppServerFactory()
+	factory := newFakeRuntimeDriver()
 	workspaceRoot := t.TempDir()
 	cfg := agentSessionTestConfig(t, workspaceRoot)
-	supervisor := newAgentSessionSupervisor(cfg, nil, factory.new)
+	supervisor := newAgentSessionSupervisor(cfg, nil, newFakeRuntimeRegistry(factory))
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex", Handle: "tester"}
 
@@ -477,49 +596,49 @@ func TestAgentSessionBusyGeneralCoalescesFollowupLogAndKeepsLatestSignature(t *t
 }
 
 func TestAgentSessionFailedTurnDoesNotMarkInboxSignatureDelivered(t *testing.T) {
-	factory := newFakeAppServerFactory()
-	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, factory.new)
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
 
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "first", "for-me:v1", ""); err != nil {
 		t.Fatalf("schedule first: %v", err)
 	}
-	app := factory.only(t)
-	supervisor.markIdle("agent_1", app, false)
+	process := factory.only(t)
+	supervisor.markIdle("agent_1", process, false)
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "retry", "for-me:v1", ""); err != nil {
 		t.Fatalf("schedule retry: %v", err)
 	}
-	if len(app.turnStarts) != 2 {
-		t.Fatalf("expected failed turn signature to be retried, got %d starts", len(app.turnStarts))
+	if len(process.inputsByKind(RuntimeInputStartTurn)) != 2 {
+		t.Fatalf("expected failed turn signature to be retried, got %d starts", len(process.inputsByKind(RuntimeInputStartTurn)))
 	}
 }
 
 func TestAgentSessionBusyForMeSteersEachChangedInboxSignature(t *testing.T) {
-	factory := newFakeAppServerFactory()
-	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, factory.new)
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
 
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "active", "", "general:v1"); err != nil {
 		t.Fatalf("schedule active: %v", err)
 	}
-	app := factory.only(t)
+	process := factory.only(t)
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "for-me v1", "for-me:v1", "general:v1"); err != nil {
 		t.Fatalf("schedule first for-me while busy: %v", err)
 	}
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "for-me v2", "for-me:v2", "general:v1"); err != nil {
 		t.Fatalf("schedule second for-me while busy: %v", err)
 	}
-	if len(app.turnSteers) != 2 {
-		t.Fatalf("expected a steer for each changed for-me inbox signature, got %d", len(app.turnSteers))
+	if len(process.inputsByKind(RuntimeInputSteerTurn)) != 2 {
+		t.Fatalf("expected a steer for each changed for-me inbox signature, got %d", len(process.inputsByKind(RuntimeInputSteerTurn)))
 	}
 }
 
 func TestAgentSessionNoActiveTurnSteerErrorIsNotFatal(t *testing.T) {
-	factory := newFakeAppServerFactory()
-	factory.turnSteerErr = fmt.Errorf("app-server turn/steer failed: no active turn to steer")
-	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, factory.new)
+	factory := newFakeRuntimeDriver()
+	factory.steerErr = fmt.Errorf("runtime steer failed: no active turn to steer")
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
 
@@ -528,6 +647,58 @@ func TestAgentSessionNoActiveTurnSteerErrorIsNotFatal(t *testing.T) {
 	}
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "for-me", "for-me:v1", "general:v1"); err != nil {
 		t.Fatalf("no-active-turn steer should not fail automation: %v", err)
+	}
+}
+
+func TestAgentSessionRuntimeEventsPublishGenericStatus(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	updates := make(chan agentSessionStatusUpdate, 8)
+	updater := func(ctx context.Context, agentID string, payload updateAgentSessionRequest) error {
+		_ = ctx
+		updates <- agentSessionStatusUpdate{agentID: agentID, payload: payload}
+		return nil
+	}
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), updater, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	current := &agent{ID: "agent_1", Kind: "codex"}
+
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	process.events <- RuntimeEvent{Kind: RuntimeEventTurnStarted, TurnID: "turn_event"}
+	working := waitAgentSessionStatus(t, updates, "agent_1", "working")
+	if working.payload.SessionID != "thread_new" || working.payload.CurrentTurnID != "turn_event" {
+		t.Fatalf("unexpected working update: %#v", working.payload)
+	}
+	process.events <- RuntimeEvent{Kind: RuntimeEventTurnCompleted}
+	idle := waitAgentSessionStatus(t, updates, "agent_1", "idle")
+	if idle.payload.SessionID != "thread_new" || idle.payload.CurrentTurnID != "" {
+		t.Fatalf("unexpected idle update: %#v", idle.payload)
+	}
+}
+
+func TestAgentSessionSupervisorDoesNotUseCodexWireMethods(t *testing.T) {
+	body, err := os.ReadFile("agent_sessions.go")
+	if err != nil {
+		t.Fatalf("read agent_sessions.go: %v", err)
+	}
+	text := string(body)
+	for _, forbidden := range []string{
+		"CodexThreadID",
+		"codexThreadId",
+		"thread/start",
+		"thread/resume",
+		"turn/start",
+		"turn/steer",
+		"turn/interrupt",
+		"turn/started",
+		"codexAppServer",
+		"appServerEvent",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("agent session supervisor should not contain Codex wire term %q", forbidden)
+		}
 	}
 }
 

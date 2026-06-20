@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -33,6 +34,7 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
+	seedCodexDaemonRuntime(t, store)
 
 	agent, err := store.CreateAgent(CreateAgentRequest{
 		Handle:       "pg-reviewer",
@@ -149,6 +151,7 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	}
 	assertNoActivityMaterializedContentColumn(t, db)
 	assertNoProposalTable(t, db)
+	assertNoAgentCodexThreadIDColumn(t, db)
 
 	var snapshotTable sql.NullString
 	if err := db.QueryRow(`SELECT to_regclass('public.workspace_snapshots')`).Scan(&snapshotTable); err != nil {
@@ -260,6 +263,7 @@ func TestPostgresDocumentAtHandleTextDoesNotCreateMentionEvent(t *testing.T) {
 		t.Fatalf("new store: %v", err)
 	}
 	defer store.Close()
+	seedCodexDaemonRuntime(t, store)
 
 	agent, err := store.CreateAgent(CreateAgentRequest{
 		Handle: "codex-agent",
@@ -312,6 +316,7 @@ func TestPostgresUpdateAgentSessionPersistsTargetAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
+	seedCodexDaemonRuntime(t, store)
 	agent, err := store.CreateAgent(CreateAgentRequest{
 		Handle: "session-agent",
 		Name:   "Session Agent",
@@ -323,7 +328,7 @@ func TestPostgresUpdateAgentSessionPersistsTargetAgent(t *testing.T) {
 	}
 	if _, err := store.UpdateAgentSession(agent.ID, UpdateAgentSessionRequest{
 		Status:          "working",
-		CodexThreadID:   "thread_pg",
+		SessionID:       "thread_pg",
 		CurrentTurnID:   "turn_pg",
 		CurrentActivity: "Handling notifications",
 	}, OperationMeta{ActorID: "daemon_agent", ActorType: "agent", Source: "test"}); err != nil {
@@ -339,7 +344,7 @@ func TestPostgresUpdateAgentSessionPersistsTargetAgent(t *testing.T) {
 	}
 	defer reloaded.Close()
 	got := reloaded.Snapshot().Agents[agent.ID]
-	if got == nil || got.Status != "working" || got.CodexThreadID != "thread_pg" || got.CurrentTurnID != "turn_pg" {
+	if got == nil || got.Status != "working" || got.SessionID != "thread_pg" || got.CurrentTurnID != "turn_pg" {
 		t.Fatalf("expected targeted session fields to persist, got %#v", got)
 	}
 }
@@ -688,6 +693,7 @@ func TestPostgresAgentInboxTracksDocumentUpdatesAndThreadMentions(t *testing.T) 
 		t.Fatalf("new store: %v", err)
 	}
 	defer store.Close()
+	seedCodexDaemonRuntime(t, store)
 
 	logDocumentID := mustCreateTestDocument(t, store, "agent.log", "start\n")
 	normalDocumentID := mustCreateTestDocument(t, store, "docs/spec.md", "start\n")
@@ -801,6 +807,7 @@ func TestPostgresPersistsUTF8SafeTruncatedAgentEventPrompt(t *testing.T) {
 		t.Fatalf("new store: %v", err)
 	}
 	defer store.Close()
+	seedCodexDaemonRuntime(t, store)
 
 	agent, err := store.CreateAgent(CreateAgentRequest{
 		Handle: "reviewer",
@@ -860,6 +867,7 @@ func TestPostgresDiffDocumentReconstructsAcrossCheckpointsAfterReload(t *testing
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
+	seedCodexDaemonRuntime(t, store)
 	documentID := mustCreateTestDocument(t, store, "docs/history.md", "v000\n")
 	agent, err := store.CreateAgent(CreateAgentRequest{
 		Handle: "historian",
@@ -927,6 +935,101 @@ func TestPostgresDiffDocumentReconstructsAcrossCheckpointsAfterReload(t *testing
 	}
 }
 
+func TestPostgresCreateAgentValidatesDaemonRuntimeReport(t *testing.T) {
+	dsn := postgresTestDSN(t)
+	cases := []struct {
+		name        string
+		kind        string
+		runtimes    []RuntimeDetection
+		wantKind    string
+		wantErrText []string
+	}{
+		{
+			name:        "malformed kind",
+			kind:        "bad kind",
+			runtimes:    []RuntimeDetection{{Kind: "codex", Available: true}},
+			wantErrText: []string{"invalid agent kind"},
+		},
+		{
+			name:        "no runtime report",
+			kind:        "codex",
+			wantErrText: []string{"has not reported runtime availability"},
+		},
+		{
+			name:        "runtime unavailable",
+			kind:        "codex",
+			runtimes:    []RuntimeDetection{{Kind: "codex", Available: false, Reason: "codex command not found"}},
+			wantErrText: []string{"runtime \"codex\" is unavailable", "codex command not found"},
+		},
+		{
+			name:        "different runtime reported",
+			kind:        "claude-code",
+			runtimes:    []RuntimeDetection{{Kind: "codex", Available: true}},
+			wantErrText: []string{"runtime \"claude-code\" is not reported"},
+		},
+		{
+			name:     "requested runtime available",
+			kind:     "Claude-Code",
+			runtimes: []RuntimeDetection{{Kind: "claude-code", Available: true, Version: "claude test"}},
+			wantKind: "claude-code",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := sql.Open("pgx", dsn)
+			if err != nil {
+				t.Fatalf("open postgres: %v", err)
+			}
+			defer db.Close()
+			if err := initPostgresSchema(db); err != nil {
+				t.Fatalf("init schema: %v", err)
+			}
+			if err := clearNottyTables(db); err != nil {
+				t.Fatalf("clear tables: %v", err)
+			}
+			store, err := NewStore(dsn)
+			if err != nil {
+				t.Fatalf("new store: %v", err)
+			}
+			defer store.Close()
+			daemonID := seedStoreDaemonRuntime(t, store, "daemon_runtime_test", tc.runtimes...)
+
+			agent, err := store.CreateAgent(CreateAgentRequest{
+				DaemonID: daemonID,
+				Handle:   "runtime-agent",
+				Name:     "Runtime Agent",
+				Role:     "Exercises runtime validation",
+				Kind:     tc.kind,
+			}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+			if len(tc.wantErrText) > 0 {
+				if err == nil {
+					t.Fatalf("expected create agent error, got agent %#v", agent)
+				}
+				for _, want := range tc.wantErrText {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("expected error %q to contain %q", err.Error(), want)
+					}
+				}
+				var agentCount int
+				if err := db.QueryRow(`SELECT COUNT(*) FROM agents WHERE workspace_id = $1`, store.state.WorkspaceID).Scan(&agentCount); err != nil {
+					t.Fatalf("count agents: %v", err)
+				}
+				if agentCount != 0 {
+					t.Fatalf("failed create should not persist agent rows, got %d", agentCount)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("create agent: %v", err)
+			}
+			if agent.Kind != tc.wantKind {
+				t.Fatalf("expected persisted kind %q, got %#v", tc.wantKind, agent)
+			}
+		})
+	}
+}
+
 func postgresTestDSN(t *testing.T) string {
 	t.Helper()
 	dsn := os.Getenv("NOTTY_DATABASE_TEST_URL")
@@ -944,6 +1047,41 @@ func postgresTestDSN(t *testing.T) string {
 		t.Fatalf("refusing to run destructive Postgres tests against database %q; expected disposable database notty_test", dbName)
 	}
 	return dsn
+}
+
+func seedStoreDaemonRuntime(t *testing.T, store *Store, daemonID string, runtimes ...RuntimeDetection) string {
+	t.Helper()
+	if store == nil {
+		t.Fatal("store is required")
+	}
+	daemonID = strings.TrimSpace(daemonID)
+	if daemonID == "" {
+		daemonID = "daemon_test"
+	}
+	now := time.Now().UTC()
+	store.mu.Lock()
+	store.ensureMaps()
+	store.state.Daemons[daemonID] = &Daemon{
+		ID:          daemonID,
+		WorkspaceID: store.state.WorkspaceID,
+		Name:        "Test daemon",
+		Status:      "active",
+		Runtimes:    append([]RuntimeDetection(nil), runtimes...),
+		LastSeenAt:  now,
+		CreatedAt:   now,
+	}
+	applyDaemonLiveness(store.state.Daemons[daemonID], now)
+	err := store.persistLocked()
+	store.mu.Unlock()
+	if err != nil {
+		t.Fatalf("persist test daemon runtime: %v", err)
+	}
+	return daemonID
+}
+
+func seedCodexDaemonRuntime(t *testing.T, store *Store) string {
+	t.Helper()
+	return seedStoreDaemonRuntime(t, store, "", RuntimeDetection{Kind: "codex", Available: true, Version: "codex test"})
 }
 
 func clearNottyTables(db *sql.DB) error {
@@ -1047,6 +1185,22 @@ func assertNoActivityMaterializedContentColumn(t *testing.T, db *sql.DB) {
 	}
 	if count != 0 {
 		t.Fatal("activities must not materialize document content in new_content")
+	}
+}
+
+func assertNoAgentCodexThreadIDColumn(t *testing.T, db *sql.DB) {
+	t.Helper()
+	var count int
+	if err := db.QueryRow(
+		`SELECT COUNT(*)
+		   FROM information_schema.columns
+		  WHERE table_name = 'agents'
+		    AND column_name = 'codex_thread_id'`,
+	).Scan(&count); err != nil {
+		t.Fatalf("query agents columns: %v", err)
+	}
+	if count != 0 {
+		t.Fatal("agents must not persist runtime-specific codex_thread_id")
 	}
 }
 
