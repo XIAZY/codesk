@@ -55,8 +55,13 @@ func (d *codexDriver) Detect(ctx context.Context) RuntimeDetection {
 	version := ""
 	detectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if output, err := exec.CommandContext(detectCtx, path, "--version").CombinedOutput(); err == nil {
-		version = strings.TrimSpace(string(output))
+	output, err := exec.CommandContext(detectCtx, path, "--version").CombinedOutput()
+	if err != nil {
+		return RuntimeDetection{Kind: RuntimeCodex, Available: false, Path: path, Reason: "codex --version failed"}
+	}
+	version = strings.TrimSpace(string(output))
+	if _, err := exec.CommandContext(detectCtx, path, "app-server", "--help").CombinedOutput(); err != nil {
+		return RuntimeDetection{Kind: RuntimeCodex, Available: false, Version: version, Path: path, Reason: "codex app-server is not available"}
 	}
 	return RuntimeDetection{Kind: RuntimeCodex, Available: true, Version: version, Path: path}
 }

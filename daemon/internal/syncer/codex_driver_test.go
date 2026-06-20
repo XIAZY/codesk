@@ -3,6 +3,8 @@ package syncer
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -36,6 +38,47 @@ func newFakeCodexRuntimeApp() *fakeCodexRuntimeApp {
 		threadStartID: "thread_new",
 		turnStartID:   "turn_new",
 	}
+}
+
+func TestCodexDriverDetectRequiresAppServer(t *testing.T) {
+	codexPath := writeFakeCodex(t, `#!/bin/sh
+if [ "$1" = "--version" ]; then
+	echo "codex 0.1.0"
+	exit 0
+fi
+if [ "$1" = "app-server" ]; then
+	exit 2
+fi
+exit 2
+`)
+	driver := newCodexDriver(Config{CodexCommand: codexPath})
+
+	detection := driver.Detect(context.Background())
+
+	if detection.Kind != RuntimeCodex {
+		t.Fatalf("expected codex runtime detection, got %#v", detection)
+	}
+	if detection.Available {
+		t.Fatalf("expected old Codex without app-server to be unavailable, got %#v", detection)
+	}
+	if detection.Path != codexPath {
+		t.Fatalf("expected codex path %q, got %q", codexPath, detection.Path)
+	}
+	if detection.Version != "codex 0.1.0" {
+		t.Fatalf("expected version from --version probe, got %q", detection.Version)
+	}
+	if !strings.Contains(detection.Reason, "app-server") {
+		t.Fatalf("expected app-server unavailable reason, got %#v", detection)
+	}
+}
+
+func writeFakeCodex(t *testing.T, script string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	return path
 }
 
 func (f *fakeCodexRuntimeApp) Start(ctx context.Context) error {
