@@ -23,7 +23,7 @@ Options:
   -h, --help            Show this help.
 
 Environment:
-  NOTTY_CODEX_COMMAND   Codex executable to use. Defaults to codex.
+  NOTTY_CODEX_COMMAND   Optional Codex executable to use. Defaults to codex.
 EOF
 }
 
@@ -195,15 +195,27 @@ append_codex_search_paths
 check_codex() {
 	case "$codex_command" in
 		*/*)
-			[ -x "$codex_command" ] || die "Codex CLI is required before installing the daemon. $codex_command is not executable. Install Codex or set NOTTY_CODEX_COMMAND to the Codex executable path."
+			if [ ! -x "$codex_command" ]; then
+				warn "Codex runtime unavailable: $codex_command is not executable. Install Codex later or set NOTTY_CODEX_COMMAND to the Codex executable path."
+				return 0
+			fi
 			;;
 		*)
-			PATH="$daemon_path" command -v "$codex_command" >/dev/null 2>&1 || die "Codex CLI is required before installing the daemon. '$codex_command' was not found on PATH. Install Codex or set NOTTY_CODEX_COMMAND to the Codex executable path."
+			if ! PATH="$daemon_path" command -v "$codex_command" >/dev/null 2>&1; then
+				warn "Codex runtime unavailable: '$codex_command' was not found on PATH. Install Codex later or set NOTTY_CODEX_COMMAND to the Codex executable path."
+				return 0
+			fi
 			;;
 	esac
 
-	PATH="$daemon_path" "$codex_command" --version >/dev/null 2>&1 || die "Codex CLI was found but did not run successfully with --version. Fix Codex before installing the daemon."
-	PATH="$daemon_path" "$codex_command" app-server --help >/dev/null 2>&1 || die "Codex CLI was found but does not support 'app-server'. Upgrade Codex before installing the daemon."
+	if ! PATH="$daemon_path" "$codex_command" --version >/dev/null 2>&1; then
+		warn "Codex runtime unavailable: '$codex_command --version' did not run successfully. Fix Codex later to enable Codex agents."
+		return 0
+	fi
+	if ! PATH="$daemon_path" "$codex_command" app-server --help >/dev/null 2>&1; then
+		warn "Codex runtime unavailable: '$codex_command' does not support 'app-server'. Upgrade Codex later to enable Codex agents."
+		return 0
+	fi
 }
 
 check_codex

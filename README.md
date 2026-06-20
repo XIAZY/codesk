@@ -516,7 +516,7 @@ Response `201`:
 
 Frontend should display the token once and provide a hosted installer command. The frontend, backend, and static origins are environment-driven so local development can use localhost while production uses the public domains.
 
-The installer requires a working Codex CLI before it writes daemon files or starts a service. It keeps `NOTTY_CODEX_COMMAND` as configured, defaulting to `codex`, and writes an explicit daemon `PATH` based on the install shell plus common Codex locations such as Homebrew, `/usr/local/bin`, system bin directories, `~/.local/bin`, `~/.npm-global/bin`, and the npm prefix bin. It aborts if that daemon environment cannot run `codex --version` and `codex app-server --help`.
+The installer does not require Codex. It keeps `NOTTY_CODEX_COMMAND` as configured, defaulting to `codex`, and writes an explicit daemon `PATH` based on the install shell plus common Codex locations such as Homebrew, `/usr/local/bin`, system bin directories, `~/.local/bin`, `~/.npm-global/bin`, and the npm prefix bin. If Codex is missing, broken, or too old for `app-server`, the installer prints a warning and still installs the daemon; the daemon reports Codex as an unavailable runtime until Codex is installed or fixed.
 
 ```sh
 curl -fsSL https://static.nottyai.co/daemons/install.sh | sh -s -- \
@@ -1709,7 +1709,7 @@ Important daemon environment variables:
 - `NOTTY_DAEMON_VERSION`: installed daemon version reported to the backend.
 - `NOTTY_WORKSPACE_DIR`: local canonical workspace projection.
 - `NOTTY_AGENT_WORKSPACE_ROOT`: parent directory for per-agent workspaces.
-- `NOTTY_CODEX_COMMAND`: Codex executable, default `codex`.
+- `NOTTY_CODEX_COMMAND`: optional Codex executable used for Codex runtime detection, default `codex`.
 - `NOTTY_AGENT_TOOL_BASE_URL`: local agent helper gateway URL.
 - `NOTTY_PPROF_ADDR`: optional daemon pprof bind address.
 
