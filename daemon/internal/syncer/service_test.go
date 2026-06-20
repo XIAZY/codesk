@@ -691,6 +691,87 @@ func TestInitialRefreshFailsFastOnAgentStartupError(t *testing.T) {
 	}
 }
 
+func TestRefreshStartsAgentSessionFromWorkspaceSnapshot(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	var workspaceRequests atomic.Int32
+	workspace := workspaceResponse{
+		Agents: []*agent{{
+			ID:           "agent_1",
+			Handle:       "agent-one",
+			Name:         "Agent One",
+			Kind:         "codex",
+			SystemPrompt: "runtime instructions",
+		}},
+	}
+	client := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/workspace":
+				workspaceRequests.Add(1)
+				body, err := json.Marshal(workspace)
+				if err != nil {
+					return nil, err
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(bytes.NewReader(body)),
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+				}, nil
+			case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agents/"):
+				body, err := json.Marshal(toolInboxResponse{Items: []*agentEvent{}})
+				if err != nil {
+					return nil, err
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(bytes.NewReader(body)),
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+				}, nil
+			default:
+				t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+				return nil, nil
+			}
+		}),
+	}
+	service := &Service{
+		cfg: Config{
+			BackendURL:         "http://backend.test",
+			DataDir:            t.TempDir(),
+			WorkspaceDir:       t.TempDir(),
+			AgentWorkspaceRoot: t.TempDir(),
+			AgentID:            "daemon_agent",
+		},
+		client:        client,
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
+		agentWorkers:  map[string]*managedAgentWorker{},
+	}
+	service.sessions = newAgentSessionSupervisor(service.cfg, nil, newFakeRuntimeRegistry(factory))
+	defer service.sessions.Shutdown()
+	defer service.closeAgentWorkers()
+	defer service.closeAgentRuntimes()
+
+	if err := service.refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if got := workspaceRequests.Load(); got != 1 {
+		t.Fatalf("expected one workspace request, got %d", got)
+	}
+	process := factory.only(t)
+	process.mu.Lock()
+	started := process.started
+	process.mu.Unlock()
+	if !started {
+		t.Fatal("expected daemon refresh to start runtime process for workspace agent")
+	}
+	starts := process.inputsByKind(RuntimeInputStartSession)
+	if len(starts) != 1 {
+		t.Fatalf("expected one runtime start session input, got %#v", starts)
+	}
+	if starts[0].Instructions != "runtime instructions" {
+		t.Fatalf("expected workspace agent system prompt to reach runtime, got %#v", starts[0])
+	}
+}
+
 func TestInitialRefreshFailsFastOnUnauthorizedBackend(t *testing.T) {
 	var requests atomic.Int32
 	client := &http.Client{

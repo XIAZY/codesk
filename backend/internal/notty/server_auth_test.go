@@ -309,6 +309,50 @@ func TestCreateDaemonAgentValidatesReportedRuntimeKind(t *testing.T) {
 	}
 }
 
+func TestCreateDaemonAgentAppearsInDaemonWorkspaceSnapshot(t *testing.T) {
+	router := newAuthTestRouter(t)
+
+	owner := authTestRegister(t, router, "runtime-snapshot-owner@example.com", "owner-pass", "Runtime Snapshot Owner")
+	workspace := authTestCreateWorkspace(t, router, owner.Token, "Runtime Snapshot Tenant")
+	var daemonResponse CreateDaemonResponse
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons", owner.Token, CreateDaemonRequest{Name: "Runtime daemon"}, http.StatusCreated, &daemonResponse)
+	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/daemon/status", daemonResponse.Token, UpdateDaemonStatusRequest{
+		Version: "0.62.0",
+		OS:      "linux",
+		Arch:    "arm64",
+		Runtimes: []RuntimeDetection{{
+			Kind:      "codex",
+			Available: true,
+			Version:   "codex test",
+			Path:      "/usr/local/bin/codex",
+		}},
+	}, http.StatusOK)
+
+	var created Agent
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+daemonResponse.Daemon.ID+"/agents", owner.Token, CreateAgentRequest{
+		Handle: "runtime-agent",
+		Name:   "Runtime Agent",
+		Role:   "Exercises daemon pickup",
+		Kind:   "codex",
+	}, http.StatusCreated, &created)
+
+	var snapshot struct {
+		CurrentDaemonID string   `json:"currentDaemonId"`
+		Agents          []*Agent `json:"agents"`
+	}
+	authTestJSON(t, router, http.MethodGet, "/api/workspaces/"+workspace.ID+"/workspace", daemonResponse.Token, nil, http.StatusOK, &snapshot)
+	if snapshot.CurrentDaemonID != daemonResponse.Daemon.ID {
+		t.Fatalf("expected current daemon %q, got %q", daemonResponse.Daemon.ID, snapshot.CurrentDaemonID)
+	}
+	if len(snapshot.Agents) != 1 {
+		t.Fatalf("expected daemon workspace snapshot to include one agent, got %#v", snapshot.Agents)
+	}
+	got := snapshot.Agents[0]
+	if got.ID != created.ID || got.DaemonID != daemonResponse.Daemon.ID || got.Kind != "codex" {
+		t.Fatalf("expected created runtime agent in daemon snapshot, got %#v created=%#v daemon=%#v", got, created, daemonResponse.Daemon)
+	}
+}
+
 func TestDaemonReinstallTokenRotatesDaemonToken(t *testing.T) {
 	router := newAuthTestRouter(t)
 
