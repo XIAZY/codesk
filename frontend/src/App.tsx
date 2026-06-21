@@ -5,6 +5,7 @@ import { DocumentSurface, type LiveThread, type SurfaceSelection } from "./Docum
 import type { MarkdownPreviewCommandName } from "./markdownLivePreview";
 import {
   agentStatus,
+  agentLifecycleAction,
   agentsByDaemon,
   buildDaemonInstallCommand,
   buildDaemonReinstallCommand,
@@ -136,7 +137,7 @@ function shortTime(value?: string) {
 function visibleAgentStatus(agent: Agent, runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"], daemons: Daemon[]) {
   const daemon = daemons.find((item) => item.id === agent.daemonId);
   const owningDaemonStatus = daemon ? daemonStatus(daemon) : "disconnected";
-  if (owningDaemonStatus === "disconnected" || owningDaemonStatus === "deleted") {
+  if (owningDaemonStatus === "disconnected" || owningDaemonStatus === "stale" || owningDaemonStatus === "deleted") {
     return "disconnected";
   }
   return agentStatus(agent, runs);
@@ -1904,8 +1905,32 @@ function ClockIcon() {
 
 function AgentDetailModal({ api, workspaceId, agent, daemons, runs, onClose, onChanged }: { api: ApiClient; workspaceId: string; agent: Agent; daemons: Daemon[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; onClose: () => void; onChanged: () => void }) {
   const [prompt, setPrompt] = useState("Review the current workspace and respond if you have useful feedback.");
+  const [error, setError] = useState("");
+  const [busyAction, setBusyAction] = useState<"start" | "stop" | "delete" | "">("");
   const daemon = daemons.find((item) => item.id === agent.daemonId);
   const status = visibleAgentStatus(agent, runs, daemons);
+  const lifecycle = agentLifecycleAction(agent, daemon, runs);
+  const runSummary = lifecycle.run ? `${lifecycle.run.status}${lifecycle.run.desiredStatus !== lifecycle.run.status ? ` -> ${lifecycle.run.desiredStatus}` : ""}` : "";
+  const runBusy = busyAction !== "";
+  const runAction = async (action: "start" | "stop" | "delete", fn: () => Promise<void>) => {
+    setError("");
+    setBusyAction(action);
+    try {
+      await fn();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyAction("");
+    }
+  };
+  const deleteAgent = async () => {
+    if (lifecycle.confirmDelete && !window.confirm("Remove this offline agent? This stops tracking its current run and removes the agent from this workspace.")) {
+      return;
+    }
+    await api.deleteAgent(workspaceId, agent.id);
+    onChanged();
+    onClose();
+  };
   return (
     <Modal title={`@${agent.handle}`} onClose={onClose}>
       <div className="form-stack">
@@ -1917,9 +1942,21 @@ function AgentDetailModal({ api, workspaceId, agent, daemons, runs, onClose, onC
           </div>
         </div>
         <p className="small"><strong>Role:</strong> {agent.role}</p>
+        {lifecycle.run ? <p className="small muted">Current run: {runSummary}</p> : null}
         <label className="field"><span className="lab">One-off instruction</span><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} /></label>
-        <button className="btn accent full" onClick={async () => { await api.startAgent(workspaceId, agent.id, prompt); onChanged(); }}>Start run</button>
-        <button className="btn danger full" onClick={async () => { await api.deleteAgent(workspaceId, agent.id); onChanged(); onClose(); }}>Delete agent</button>
+        {error ? <p className="error-text">{error}</p> : null}
+        <button className="btn accent full" disabled={runBusy || !lifecycle.canStart} onClick={() => void runAction("start", async () => { await api.startAgent(workspaceId, agent.id, prompt); onChanged(); })}>
+          {busyAction === "start" ? "Starting..." : "Start run"}
+        </button>
+        {lifecycle.canStop && lifecycle.run ? (
+          <button className="btn full" disabled={runBusy} onClick={() => void runAction("stop", async () => { await api.stopAgentRun(workspaceId, lifecycle.run!.id); onChanged(); })}>
+            {busyAction === "stop" ? "Stopping..." : "Stop current run"}
+          </button>
+        ) : null}
+        {lifecycle.deleteHelp ? <p className="small muted">{lifecycle.deleteHelp}</p> : null}
+        <button className="btn danger full" disabled={runBusy || !lifecycle.canDelete} onClick={() => void runAction("delete", deleteAgent)}>
+          {busyAction === "delete" ? "Removing..." : lifecycle.deleteLabel}
+        </button>
       </div>
     </Modal>
   );

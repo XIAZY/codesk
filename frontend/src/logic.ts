@@ -181,6 +181,64 @@ export function agentStatus(agent: Agent, runs: AgentRun[]) {
   return "idle";
 }
 
+const terminalRunStatuses = new Set(["completed", "failed", "stopped"]);
+
+export function currentAgentRun(agent: Agent, runs: AgentRun[]) {
+  const current = agent.currentRunId ? runs.find((run) => run.id === agent.currentRunId && run.agentId === agent.id) : undefined;
+  if (agent.currentRunId) {
+    if (current && !terminalRunStatuses.has(current.status)) {
+      return current;
+    }
+  }
+  const fallback = runs.find((run) => run.agentId === agent.id && !terminalRunStatuses.has(run.status));
+  if (fallback) {
+    return fallback;
+  }
+  if (agent.currentRunId) {
+    return current;
+  }
+  return undefined;
+}
+
+export function agentLifecycleAction(agent: Agent, daemon: Daemon | undefined, runs: AgentRun[]) {
+  const run = currentAgentRun(agent, runs);
+  const daemonTone = daemon ? daemonStatus(daemon) : "disconnected";
+  const offline = daemonTone === "disconnected" || daemonTone === "deleted" || daemonTone === "stale";
+  const runPending = Boolean(run && !terminalRunStatuses.has(run.status));
+  if (runPending && offline) {
+    return {
+      run,
+      canStart: false,
+      canDelete: true,
+      deleteLabel: "Remove offline agent",
+      deleteHelp: "Removes this offline agent and stops tracking its current run.",
+      confirmDelete: true,
+      canStop: false,
+    };
+  }
+  if (runPending) {
+    const stopRequested = run?.desiredStatus === "stopped";
+    return {
+      run,
+      canStart: false,
+      canDelete: false,
+      deleteLabel: "Delete agent",
+      deleteHelp: stopRequested ? "Waiting for the daemon to stop the current run before deleting this agent." : "Stop the current run before deleting this agent.",
+      confirmDelete: false,
+      canStop: !stopRequested,
+    };
+  }
+  return {
+    run,
+    canStart: true,
+    canDelete: true,
+    deleteLabel: "Delete agent",
+    deleteHelp: "",
+    confirmDelete: false,
+    canStop: false,
+  };
+}
+
 export function agentsByDaemon(agents: Agent[], daemons: Daemon[]) {
   const names = new Map(daemons.map((daemon) => [daemon.id, daemon.name]));
   return agents.reduce<Array<{ daemonId: string; daemonName: string; agents: Agent[] }>>((groups, agent) => {

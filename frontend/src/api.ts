@@ -1,5 +1,6 @@
 import type {
   Agent,
+  AgentRun,
   AuthResponse,
   Daemon,
   DocumentMetadata,
@@ -136,6 +137,12 @@ export class ApiClient {
     return this.request<Record<string, unknown>>(workspacePath(workspaceId, `/agents/${encodeURIComponent(agentId)}/runs`), {
       method: "POST",
       body: JSON.stringify({ prompt }),
+    });
+  }
+
+  async stopAgentRun(workspaceId: string, runId: string) {
+    return this.request<AgentRun>(workspacePath(workspaceId, `/agent-runs/${encodeURIComponent(runId)}/stop`), {
+      method: "POST",
     });
   }
 

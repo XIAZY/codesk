@@ -1342,8 +1342,9 @@ func (s *Store) DeleteAgent(id string, meta OperationMeta) (*Agent, error) {
 	if !ok {
 		return nil, ErrNotFound
 	}
-	if agent.CurrentRunID != "" {
-		if run, ok := s.state.AgentRuns[agent.CurrentRunID]; ok && !isTerminalRunStatus(run.Status) {
+	now := time.Now().UTC()
+	if run := s.activeAgentRunLocked(agent); run != nil {
+		if daemon := daemonWithLiveness(s.state.Daemons[agent.DaemonID], now); daemon != nil && daemon.ConnectionStatus == "online" {
 			return nil, errors.New("stop the active run before deleting this agent")
 		}
 	}
@@ -1362,7 +1363,6 @@ func (s *Store) DeleteAgent(id string, meta OperationMeta) (*Agent, error) {
 		thread.ParticipantIDs = removeString(thread.ParticipantIDs, id)
 	}
 	s.refreshThreadParticipantsLocked()
-	now := time.Now().UTC()
 	s.state.UpdatedAt = now
 	s.appendActivityLocked(&ActivityEvent{
 		Type:       "agent.deleted",
@@ -1376,6 +1376,23 @@ func (s *Store) DeleteAgent(id string, meta OperationMeta) (*Agent, error) {
 		return nil, err
 	}
 	return cloneAgent(agent), nil
+}
+
+func (s *Store) activeAgentRunLocked(agent *Agent) *AgentRun {
+	if agent == nil {
+		return nil
+	}
+	if agent.CurrentRunID != "" {
+		if run, ok := s.state.AgentRuns[agent.CurrentRunID]; ok && run.AgentID == agent.ID && !isTerminalRunStatus(run.Status) {
+			return run
+		}
+	}
+	for _, run := range s.state.AgentRuns {
+		if run.AgentID == agent.ID && !isTerminalRunStatus(run.Status) {
+			return run
+		}
+	}
+	return nil
 }
 
 func (s *Store) StartAgentRun(req StartAgentRunRequest, meta OperationMeta) (*Agent, *AgentRun, error) {

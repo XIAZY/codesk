@@ -162,6 +162,125 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	}
 }
 
+func TestPostgresDeleteAgentWithActiveRunRequiresStopOnlyWhenDaemonOnline(t *testing.T) {
+	dsn := postgresTestDSN(t)
+	now := time.Now().UTC()
+	blankRunID := ""
+	staleRunID := "run_missing"
+	cases := []struct {
+		name                 string
+		lastSeen             time.Time
+		overrideCurrentRunID *string
+		mismatchedCurrentRun bool
+		removeDaemon         bool
+		wantError            bool
+	}{
+		{name: "online daemon blocks delete", lastSeen: now, wantError: true},
+		{name: "online daemon blocks delete when current run is blank", lastSeen: now, overrideCurrentRunID: &blankRunID, wantError: true},
+		{name: "online daemon blocks delete when current run is stale", lastSeen: now, overrideCurrentRunID: &staleRunID, wantError: true},
+		{name: "online daemon blocks delete when current run belongs to another agent", lastSeen: now, mismatchedCurrentRun: true, wantError: true},
+		{name: "stale daemon allows offline removal", lastSeen: now.Add(-daemonOnlineWindow - time.Second)},
+		{name: "disconnected daemon allows offline removal"},
+		{name: "missing daemon allows offline removal", removeDaemon: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := sql.Open("pgx", dsn)
+			if err != nil {
+				t.Fatalf("open postgres: %v", err)
+			}
+			defer db.Close()
+			if err := initPostgresSchema(db); err != nil {
+				t.Fatalf("init schema: %v", err)
+			}
+			if err := clearNottyTables(db); err != nil {
+				t.Fatalf("clear tables: %v", err)
+			}
+			store, err := NewStore(dsn)
+			if err != nil {
+				t.Fatalf("new store: %v", err)
+			}
+			defer store.Close()
+
+			agent, err := store.CreateAgent(CreateAgentRequest{
+				Handle: "runner",
+				Name:   "Runner",
+				Role:   "Runs tasks",
+				Kind:   "codex",
+			}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+			if err != nil {
+				t.Fatalf("create agent: %v", err)
+			}
+			_, run, err := store.StartAgentRun(StartAgentRunRequest{
+				AgentID: agent.ID,
+				Prompt:  "keep running",
+			}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+			if err != nil {
+				t.Fatalf("start run: %v", err)
+			}
+			if !tc.lastSeen.IsZero() {
+				store.mu.Lock()
+				store.state.Daemons[agent.DaemonID].LastSeenAt = tc.lastSeen
+				store.mu.Unlock()
+			}
+			if tc.overrideCurrentRunID != nil {
+				store.mu.Lock()
+				store.state.Agents[agent.ID].CurrentRunID = *tc.overrideCurrentRunID
+				store.mu.Unlock()
+			}
+			if tc.mismatchedCurrentRun {
+				otherAgent, err := store.CreateAgent(CreateAgentRequest{
+					Handle: "other-runner",
+					Name:   "Other Runner",
+					Role:   "Runs other tasks",
+					Kind:   "codex",
+				}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+				if err != nil {
+					t.Fatalf("create other agent: %v", err)
+				}
+				_, otherRun, err := store.StartAgentRun(StartAgentRunRequest{
+					AgentID: otherAgent.ID,
+					Prompt:  "other running",
+				}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+				if err != nil {
+					t.Fatalf("start other run: %v", err)
+				}
+				store.mu.Lock()
+				store.state.Agents[agent.ID].CurrentRunID = otherRun.ID
+				store.mu.Unlock()
+			}
+			if tc.removeDaemon {
+				store.mu.Lock()
+				delete(store.state.Daemons, agent.DaemonID)
+				store.mu.Unlock()
+			}
+
+			deleted, err := store.DeleteAgent(agent.ID, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+			if tc.wantError {
+				if err == nil {
+					t.Fatalf("expected active online run delete to fail, got deleted agent %#v", deleted)
+				}
+				if !strings.Contains(err.Error(), "stop the active run") {
+					t.Fatalf("expected stop-first error, got %v", err)
+				}
+				snapshot := store.Snapshot()
+				if snapshot.Agents[agent.ID] == nil || snapshot.AgentRuns[run.ID] == nil {
+					t.Fatalf("failed delete should keep agent and run, got agent=%#v run=%#v", snapshot.Agents[agent.ID], snapshot.AgentRuns[run.ID])
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("delete offline agent: %v", err)
+			}
+			snapshot := store.Snapshot()
+			if snapshot.Agents[agent.ID] != nil || snapshot.AgentRuns[run.ID] != nil {
+				t.Fatalf("offline removal should remove agent and run, got agent=%#v run=%#v", snapshot.Agents[agent.ID], snapshot.AgentRuns[run.ID])
+			}
+		})
+	}
+}
+
 func TestPostgresLoadRegeneratesMissingCheckpointBeforeSync(t *testing.T) {
 	dsn := postgresTestDSN(t)
 
