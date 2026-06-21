@@ -297,6 +297,13 @@ start_background() {
 	printf 'Started daemon in background. Log: %s\n' "$log_file"
 }
 
+print_foreground_start() {
+	printf 'Installed daemon binaries and config.\n'
+	printf 'Start the daemon in the foreground with:\n'
+	printf '  %s\n' "$run_script"
+	printf 'Use that command as the foreground process when running under Docker or another supervisor.\n'
+}
+
 install_launchd() {
 	label="com.notty.daemon.$daemon_name"
 	plist="$HOME/Library/LaunchAgents/$label.plist"
@@ -348,13 +355,16 @@ EOF
 	if systemctl --user daemon-reload >/dev/null 2>&1 && systemctl --user enable --now "$service_name" >/dev/null 2>&1; then
 		printf 'Installed systemd user service %s. Log: %s\n' "$service_name" "$log_file"
 	else
-		warn "systemd user service start failed; falling back to background process"
-		start_background
+		systemctl --user disable --now "$service_name" >/dev/null 2>&1 || true
+		rm -f "$service_file"
+		systemctl --user daemon-reload >/dev/null 2>&1 || true
+		warn "systemd user service start failed; daemon was not started"
+		print_foreground_start
 	fi
 }
 
 if [ "$no_service" -eq 1 ]; then
-	printf 'Installed daemon binaries and config. Start manually with: %s\n' "$run_script"
+	print_foreground_start
 else
 	case "$os" in
 		darwin)
@@ -368,7 +378,8 @@ else
 			if command -v systemctl >/dev/null 2>&1; then
 				install_systemd_user
 			else
-				start_background
+				warn "systemd is unavailable; daemon was not started"
+				print_foreground_start
 			fi
 			;;
 	esac

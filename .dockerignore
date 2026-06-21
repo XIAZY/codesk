@@ -3,6 +3,7 @@
 .vendor
 bin
 dist
+third_party/y-crdt/target
 tmp
 node_modules
 frontend/node_modules
