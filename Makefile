@@ -8,13 +8,14 @@ HOST_OS := $(if $(filter darwin,$(UNAME_S)),darwin,$(if $(filter linux,$(UNAME_S
 HOST_ARCH := $(if $(filter x86_64 amd64,$(UNAME_M)),amd64,$(if $(filter arm64 aarch64,$(UNAME_M)),arm64,$(UNAME_M)))
 HOST_PLATFORM := $(HOST_OS)/$(HOST_ARCH)
 PLATFORMS ?= $(HOST_PLATFORM)
+DAEMON_ALL_PLATFORMS ?= all
 
 .PHONY: dev dev-down \
 	test tests test-unit test-go test-frontend test-postgres test-regression test-live \
 	build build-yffi build-go build-frontend build-daemon build-static build-static-local build-backend-image \
 	publish publish-backend publish-frontend publish-static \
 	deploy deploy-backend deploy-frontend deploy-static \
-	prod-config-check static-build static-build-local static-publish backend-image daemon-build daemon-release daemon-checksums daemon-clean daemon-installer-check daemon-uninstall-test
+	prod-config-check static-build static-build-local static-publish backend-image daemon-build daemon-release daemon-release-all release-daemons daemon-checksums daemon-clean daemon-installer-check daemon-uninstall-test
 
 dev: static-build-local
 	docker compose --env-file deploy/env/dev.server.env up --build
@@ -63,6 +64,11 @@ daemon-build: build-daemon
 
 daemon-release:
 	VERSION="$(VERSION)" DIST_DIR="$(DIST_DIR)" PLATFORMS="$(PLATFORMS)" scripts/build-daemon-release.sh "$(VERSION)" "$(DIST_DIR)"
+
+daemon-release-all:
+	VERSION="$(VERSION)" DIST_DIR="$(DIST_DIR)" PLATFORMS="$(DAEMON_ALL_PLATFORMS)" scripts/build-daemon-release.sh "$(VERSION)" "$(DIST_DIR)"
+
+release-daemons: daemon-release-all
 
 build-static:
 	VERSION="$(VERSION)" scripts/build-static.sh

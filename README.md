@@ -1571,14 +1571,15 @@ Focused build targets:
 - `make build-static-local`: build local host-platform daemon artifacts into `dist/static/daemons`.
 - `make build-backend-image`: build the backend Docker image locally without pushing.
 - `make build-static VERSION=v0.1.0`: build the full production static tree.
+- `make daemon-release-all VERSION=v0.1.0`: build daemon release tarballs for every supported target.
 
-Build daemon release artifacts for static hosting:
+Build daemon release artifacts for every supported target:
 
 ```sh
-make daemon-release VERSION=v0.1.0
+make daemon-release-all VERSION=v0.1.0
 ```
 
-This creates `dist/static/daemons/install.sh`, `dist/static/daemons/latest/manifest.json`, `dist/static/daemons/latest/SHA256SUMS`, and versioned tarballs containing `notty-daemon` and `notty-agent-tool`.
+This creates `dist/static/daemons/install.sh`, `dist/static/daemons/latest/manifest.json`, `dist/static/daemons/latest/SHA256SUMS`, and versioned tarballs containing `notty-daemon` and `notty-agent-tool`. Use `make daemon-release VERSION=v0.1.0 PLATFORMS=linux/arm64` for a focused one-platform release.
 
 Publish artifacts without changing the running backend:
 
@@ -1678,6 +1679,7 @@ Important deployment environment variables in `deploy/env/prod.deploy.env`:
 - `NOTTY_DEPLOY_SSH_HOST`: SSH host used by `scripts/deploy-backend.sh`, default `notty`.
 - `NOTTY_REMOTE_DIR`: remote deploy directory, default `/opt/notty`.
 - `DOCKER_REPO` and `DOCKER_PLATFORMS`: backend image repository and build platforms.
+- `DAEMON_PLATFORMS`: comma- or space-separated daemon release platforms, or `all` for every supported target. Production builds Darwin host artifacts locally and uses native Rust/Go cross-compilation for Linux release artifacts and non-host Darwin targets. Linux builds require installed Rust musl targets plus `zig`, or `CC_LINUX_AMD64`/`CC_LINUX_ARM64` pointing at target C compilers. Darwin cross builds on macOS use `xcrun clang -arch`; Darwin cross builds from Linux require installed Rust targets plus `CC_DARWIN_AMD64`/`CC_DARWIN_ARM64` pointing at Darwin-capable compilers such as osxcross clang with an Apple SDK.
 - `CLOUDFLARE_ACCOUNT_ID`, `R2_ENDPOINT_URL`, `R2_*_BUCKET`, and `R2_*_PREFIX`: static publish targets.
 
 Important production server defaults in `deploy/env/prod.server.env`:
