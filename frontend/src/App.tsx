@@ -1667,6 +1667,7 @@ function CreateAgentModal({ api, workspaceId, daemons, onClose, onDone }: { api:
   // Only show the install/help panel while its runtime is still unavailable here.
   const explainTile = runtimeTiles.find(
     (tile) =>
+      selectedDaemon &&
       tile.entry.kind === explainKind &&
       (tile.availability === "not_installed" || tile.availability === "update_required"),
   );
@@ -1780,6 +1781,7 @@ function CreateAgentModal({ api, workspaceId, daemons, onClose, onDone }: { api:
                     key={tile.entry.kind}
                     tile={tile}
                     selected={tile.entry.kind === runtimeKind}
+                    daemonSelected={Boolean(selectedDaemon)}
                     onSelect={() => setRuntimeKind(tile.entry.kind)}
                     onExplain={() => setExplainKind((current) => (current === tile.entry.kind ? null : tile.entry.kind))}
                   />
@@ -1827,7 +1829,7 @@ function CreateAgentModal({ api, workspaceId, daemons, onClose, onDone }: { api:
   );
 }
 
-function RuntimeOption({ tile, selected, onSelect, onExplain }: { tile: RuntimeTile; selected: boolean; onSelect: () => void; onExplain: () => void }) {
+function RuntimeOption({ tile, selected, daemonSelected, onSelect, onExplain }: { tile: RuntimeTile; selected: boolean; daemonSelected: boolean; onSelect: () => void; onExplain: () => void }) {
   const { entry, availability, meta } = tile;
   const tileClass = `rt-tile${entry.tile ? ` ${entry.tile}` : ""}`;
 
@@ -1849,18 +1851,22 @@ function RuntimeOption({ tile, selected, onSelect, onExplain }: { tile: RuntimeT
       <div className="rt off" aria-disabled="true">
         <div className="rt-top">
           <div className={tileClass}>{entry.monogram}</div>
-          <button
-            type="button"
-            className="rt-help-btn"
-            onClick={onExplain}
-            aria-label={`Why is ${entry.label} unavailable, and how to install it`}
-            title="Why isn't this available?"
-          >
-            <HelpIcon />
-          </button>
+          {daemonSelected ? (
+            <button
+              type="button"
+              className="rt-help-btn"
+              onClick={onExplain}
+              aria-label={`Why is ${entry.label} unavailable, and how to install it`}
+              title="Why isn't this available?"
+            >
+              <HelpIcon />
+            </button>
+          ) : null}
         </div>
         <div className="rt-name">{entry.label}</div>
-        <div className={`rt-meta${availability === "update_required" ? " warn-text" : ""}`}>{meta}</div>
+        <div className={`rt-meta${availability === "update_required" ? " warn-text" : ""}`}>
+          {daemonSelected ? meta : "Select a daemon to check"}
+        </div>
       </div>
     );
   }
