@@ -116,7 +116,7 @@ const documentPaneTheme = EditorView.theme({
   ".cm-content": {
     boxSizing: "border-box",
     minHeight: "100%",
-    padding: "56px max(32px, calc((100% - 740px) / 2 + 18px)) 140px",
+    padding: "8px max(32px, calc((100% - 740px) / 2 + 18px)) 140px",
   },
   ".cm-line": {
     padding: "0 4px",

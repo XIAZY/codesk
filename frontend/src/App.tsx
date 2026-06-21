@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { ApiClient, apiBase, daemonStaticBase } from "./api";
 import { DocumentSurface, type LiveThread, type SurfaceSelection } from "./DocumentSurface";
@@ -15,7 +15,6 @@ import {
 } from "./logic";
 import { useRootNamespace } from "./useRootNamespace";
 import { useDocumentSync } from "./useDocument";
-import { buildContentInsertUpdate, sendYjsUpdateOnce } from "./syncOnce";
 import { useWorkspace } from "./useWorkspace";
 import type { Account, Agent, Daemon, DocumentItem, ThreadItem, WorkspaceSummary } from "./types";
 import { resolveRuntimeTiles, selectableRuntimeKinds, type RuntimeTile } from "./runtimes";
@@ -23,6 +22,8 @@ import "./styles.css";
 
 const tokenStorageKey = "notty.auth.token";
 const workspaceStorageKey = "notty.workspace.id";
+const portableFileNameIllegalChars = /[\u0000-\u001F<>:"\/\\|?*]/g;
+const windowsReservedBaseName = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 
 function initials(value?: string) {
   const source = (value || "N").trim();
@@ -36,6 +37,102 @@ function fileName(path?: string) {
     return "Untitled";
   }
   return path.split("/").filter(Boolean).pop() || path;
+}
+
+function parentPath(path?: string) {
+  const parts = (path || "").split("/").filter(Boolean);
+  if (parts.length <= 1) {
+    return "";
+  }
+  return parts.slice(0, -1).join("/");
+}
+
+function documentExtension(path?: string) {
+  const name = fileName(path);
+  const dotIndex = name.lastIndexOf(".");
+  if (dotIndex > 0 && dotIndex < name.length - 1) {
+    return name.slice(dotIndex);
+  }
+  return ".md";
+}
+
+function documentStem(path?: string) {
+  const name = fileName(path);
+  const extension = documentExtension(path);
+  return name.endsWith(extension) ? name.slice(0, -extension.length) || "Untitled" : name || "Untitled";
+}
+
+function editableFileStem(name: string) {
+  const extension = documentExtension(name);
+  return name.endsWith(extension) ? name.slice(0, -extension.length) : name;
+}
+
+function splitVisibleFileName(name: string) {
+  const dotIndex = name.lastIndexOf(".");
+  if (dotIndex > 0) {
+    return { stem: name.slice(0, dotIndex), extension: name.slice(dotIndex) };
+  }
+  return { stem: name, extension: "" };
+}
+
+function filterDocumentFileNameInput(value: string) {
+  return value.replace(portableFileNameIllegalChars, "").slice(0, 160);
+}
+
+function normalizeDocumentFileName(value: string, fallbackExtension: string) {
+  const fallback = `Untitled${fallbackExtension}`;
+  const trimmed = filterDocumentFileNameInput(value).trim().replace(/[. ]+$/g, "");
+  if (!trimmed) {
+    return fallback;
+  }
+  const { stem, extension } = splitVisibleFileName(trimmed);
+  if (windowsReservedBaseName.test(stem || trimmed)) {
+    return `${stem || trimmed}-file${extension}`;
+  }
+  return trimmed;
+}
+
+function joinDocumentPath(folder: string, name: string) {
+  return folder ? `${folder}/${name}` : name;
+}
+
+function uniqueDocumentPath(documents: DocumentItem[], path: string, currentDocumentId = "") {
+  const occupied = new Set(
+    documents
+      .filter((document) => document.id !== currentDocumentId)
+      .map((document) => document.path.toLowerCase()),
+  );
+  if (!occupied.has(path.toLowerCase())) {
+    return path;
+  }
+  const folder = parentPath(path);
+  const extension = documentExtension(path);
+  const stem = documentStem(path);
+  for (let suffix = 2; suffix < 10_000; suffix += 1) {
+    const candidate = joinDocumentPath(folder, `${stem}-${suffix}${extension}`);
+    if (!occupied.has(candidate.toLowerCase())) {
+      return candidate;
+    }
+  }
+  return joinDocumentPath(folder, `${stem}-${Date.now()}${extension}`);
+}
+
+function untitledDocumentPath(documents: DocumentItem[], activePath?: string) {
+  const folder = parentPath(activePath);
+  return uniqueDocumentPath(documents, joinDocumentPath(folder, "Untitled.md"));
+}
+
+function documentPathFromFileName(document: DocumentItem, documents: DocumentItem[], draftFileName: string) {
+  const name = normalizeDocumentFileName(draftFileName, documentExtension(document.path));
+  const nextPath = joinDocumentPath(parentPath(document.path), name);
+  return uniqueDocumentPath(documents, nextPath, document.id);
+}
+
+function displayFileName(document: DocumentItem, renamingDocumentId: string, titleDraft: string) {
+  if (document.id === renamingDocumentId) {
+    return filterDocumentFileNameInput(titleDraft) || `Untitled${documentExtension(document.path)}`;
+  }
+  return fileName(document.path);
 }
 
 function folderBreadcrumb(path?: string) {
@@ -425,12 +522,17 @@ function WorkspaceApp({
   const [activeDocumentId, setActiveDocumentId] = useState("");
   const [centerView, setCenterView] = useState<"document" | "daemons" | "agents">("document");
   const [rightTab, setRightTab] = useState<"threads" | "activity" | "people">("threads");
-  const [modal, setModal] = useState<"daemon" | "agent" | "document" | "rename" | "agent-detail" | "daemon-detail" | null>(null);
+  const [modal, setModal] = useState<"daemon" | "agent" | "rename" | "agent-detail" | "daemon-detail" | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
   const [selectedDaemon, setSelectedDaemon] = useState<Daemon | null>(null);
   const [selectedThreadId, setSelectedThreadId] = useState("");
   const [focusThreadId, setFocusThreadId] = useState("");
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(() => new Set());
+  const [creatingDocument, setCreatingDocument] = useState(false);
+  const [createError, setCreateError] = useState("");
+  const [renamingDocumentId, setRenamingDocumentId] = useState("");
+  const [freshDocumentId, setFreshDocumentId] = useState("");
+  const [titleDraft, setTitleDraft] = useState("");
 
   const activeDocument = rootDocuments.find((document) => document.id === activeDocumentId) ?? rootDocuments[0] ?? null;
   const documentId = activeDocument?.id ?? "";
@@ -452,6 +554,64 @@ function WorkspaceApp({
   }, [workspace.threads]);
   const activeFolder = folderBreadcrumb(activeDocument?.path);
   const activeWorkspace = workspaces.find((item) => item.id === workspaceId);
+
+  const startRenamingDocument = useCallback((document: DocumentItem) => {
+    setRenamingDocumentId(document.id);
+    setTitleDraft(fileName(document.path));
+  }, []);
+
+  const cancelRenamingDocument = useCallback(() => {
+    setRenamingDocumentId("");
+    setFreshDocumentId("");
+    setTitleDraft("");
+  }, []);
+
+  const commitDocumentTitle = useCallback(
+    (document: DocumentItem, draft: string) => {
+      const nextPath = documentPathFromFileName(document, rootDocuments, draft);
+      if (nextPath !== document.path) {
+        rootNamespace.moveFile(document.id, nextPath);
+      }
+      setRenamingDocumentId("");
+      setFreshDocumentId("");
+      setTitleDraft("");
+    },
+    [rootDocuments, rootNamespace],
+  );
+
+  const createDocument = useCallback(async () => {
+    if (creatingDocument || !workspace.rootDocumentId) {
+      return;
+    }
+    setCreatingDocument(true);
+    setCreateError("");
+    try {
+      const doc = await api.createDocument(workspaceId);
+      const path = untitledDocumentPath(rootDocuments, activeDocument?.path);
+      rootNamespace.upsertFile(doc.id, path);
+      setActiveDocumentId(doc.id);
+      setCenterView("document");
+      setRightTab("threads");
+      setSelectedThreadId("");
+      setRenamingDocumentId(doc.id);
+      setFreshDocumentId(doc.id);
+      setTitleDraft(fileName(path));
+      void reload();
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCreatingDocument(false);
+    }
+  }, [
+    activeDocument?.path,
+    api,
+    creatingDocument,
+    reload,
+    rootDocuments,
+    rootNamespace,
+    workspace.rootDocumentId,
+    workspaceId,
+  ]);
 
   const toggleFolder = (path: string) => {
     setCollapsedFolders((current) => {
@@ -490,6 +650,25 @@ function WorkspaceApp({
       setSelectedThreadId("");
     }
   }, [documentThreads, selectedThreadId]);
+
+  useEffect(() => {
+    if (renamingDocumentId && !rootDocuments.some((document) => document.id === renamingDocumentId)) {
+      cancelRenamingDocument();
+    }
+  }, [cancelRenamingDocument, renamingDocumentId, rootDocuments]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        void createDocument();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [createDocument]);
 
   return (
     <main className={`shell ${centerView === "document" ? "" : "management-shell"}`}>
@@ -541,7 +720,13 @@ function WorkspaceApp({
         <section className="sb-section flex-1 doc-tree">
           <div className="lab">
             <span className="label">Documents</span>
-            <button className="btn ghost icon sm" title="New doc" type="button" onClick={() => setModal("document")}>
+            <button
+              className="btn ghost icon sm"
+              title="New doc"
+              type="button"
+              onClick={() => void createDocument()}
+              disabled={creatingDocument || !workspace.rootDocumentId}
+            >
               <Icon name="plus" />
             </button>
           </div>
@@ -550,6 +735,9 @@ function WorkspaceApp({
               nodes={documentTree}
               activeDocumentId={activeDocument?.id ?? ""}
               collapsedFolders={collapsedFolders}
+              renamingDocumentId={renamingDocumentId}
+              freshDocumentId={freshDocumentId}
+              renamingDraft={titleDraft}
               onToggleFolder={toggleFolder}
               threadCountFor={(id) => threadCountByDocument.get(id) ?? 0}
               onSelectDocument={(id) => {
@@ -607,10 +795,21 @@ function WorkspaceApp({
 
       <section className="doc-area">
         <header className="doc-toolbar">
-          <div className="breadcrumb">
-            <span>{centerView === "document" ? activeFolder : "Operations"}</span>
-            <Icon name="chevron" />
-            <b>{centerView === "daemons" ? "Daemons" : centerView === "agents" ? "Agents" : activeDocument ? fileName(activeDocument.path) : "No document selected"}</b>
+          <div className="breadcrumb document-breadcrumb">
+            {centerView === "document" && activeDocument ? (
+              <DocumentPathBar
+                document={activeDocument}
+                workspaceName={workspace.name || activeWorkspace?.name || "Workspace"}
+                draft={renamingDocumentId === activeDocument.id ? titleDraft : fileName(activeDocument.path)}
+                editing={renamingDocumentId === activeDocument.id}
+              />
+            ) : (
+              <>
+                <span>{centerView === "document" ? activeFolder : "Operations"}</span>
+                <Icon name="chevron" />
+                <b>{centerView === "daemons" ? "Daemons" : centerView === "agents" ? "Agents" : "No document selected"}</b>
+              </>
+            )}
             <span className={`chip sm ${connected ? "ok" : "warn"}`}>{connected ? "workspace live" : "workspace offline"}</span>
           </div>
           <div className="row gap-6">
@@ -636,6 +835,7 @@ function WorkspaceApp({
         </header>
         {loading ? <div className="notice compact">Loading workspace...</div> : null}
         {error ? <div className="notice error compact">{error}</div> : null}
+        {createError ? <div className="notice error compact">{createError}</div> : null}
         {centerView === "daemons" ? (
           <DaemonsManagement
             workspace={workspace}
@@ -675,9 +875,20 @@ function WorkspaceApp({
               setSelectedThreadId(threadId);
               void reload();
             }}
+            titleEditing={renamingDocumentId === activeDocument.id}
+            titleDraft={renamingDocumentId === activeDocument.id ? titleDraft : fileName(activeDocument.path)}
+            onTitleEditStart={() => startRenamingDocument(activeDocument)}
+            onTitleDraftChange={setTitleDraft}
+            onTitleEditCancel={cancelRenamingDocument}
+            onTitleCommit={(draft) => commitDocumentTitle(activeDocument, draft)}
           />
         ) : (
-          <EmptyWorkspace onCreateDocument={() => setModal("document")} onCreateDaemon={() => setModal("daemon")} />
+          <EmptyWorkspace
+            onCreateDocument={() => void createDocument()}
+            onCreateDaemon={() => setModal("daemon")}
+            creatingDocument={creatingDocument}
+            canCreateDocument={Boolean(workspace.rootDocumentId)}
+          />
         )}
       </section>
 
@@ -723,23 +934,6 @@ function WorkspaceApp({
         ) : null}
       </aside>
 
-      {modal === "document" ? (
-        <CreateDocumentModal
-          onClose={() => setModal(null)}
-          onCreate={async ({ path, content }) => {
-            const doc = await api.createDocument(workspaceId);
-            rootNamespace.upsertFile(doc.id, path);
-            const update = buildContentInsertUpdate(content);
-            if (update.length > 0) {
-              await sendYjsUpdateOnce({ workspaceId, token, documentId: doc.id, update });
-            }
-            setActiveDocumentId(doc.id);
-            setCenterView("document");
-            setModal(null);
-            void reload();
-          }}
-        />
-      ) : null}
       {modal === "rename" && activeDocument ? (
         <RenameDocumentModal
           document={activeDocument}
@@ -763,15 +957,163 @@ function WorkspaceApp({
   );
 }
 
+function DocumentPathBar({
+  document,
+  workspaceName,
+  editing,
+  draft,
+}: {
+  document: DocumentItem;
+  workspaceName: string;
+  editing: boolean;
+  draft: string;
+}) {
+  const folder = parentPath(document.path);
+  const folderSegments = folder.split("/").filter(Boolean);
+  const file = editing ? displayFileName(document, document.id, draft) : fileName(document.path);
+  const extensionIndex = file.lastIndexOf(".");
+  const fileStem = extensionIndex > 0 ? file.slice(0, extensionIndex) : file;
+  const fileExtension = extensionIndex > 0 ? file.slice(extensionIndex) : "";
+
+  return (
+    <div className="docpath-title">
+      <span className="docpath-seg">{workspaceName}</span>
+      {folderSegments.map((segment, index) => (
+        <span className="docpath-part" key={`${segment}:${index}`}>
+          <span className="docpath-sep">/</span>
+          <span className="docpath-seg">{segment}</span>
+        </span>
+      ))}
+      <span className="docpath-sep">/</span>
+      <span className="docpath-file">
+        <span className="docpath-file-stem">{fileStem}</span>
+        {fileExtension ? <span className="docpath-file-ext">{fileExtension}</span> : null}
+      </span>
+    </div>
+  );
+}
+
+function DocumentTitleEditor({
+  document,
+  editing,
+  draft,
+  onStartEdit,
+  onDraftChange,
+  onCancel,
+  onCommit,
+}: {
+  document: DocumentItem;
+  editing: boolean;
+  draft: string;
+  onStartEdit: () => void;
+  onDraftChange: (value: string) => void;
+  onCancel: () => void;
+  onCommit: (value: string) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const skipBlurCommitRef = useRef(false);
+  const value = editing ? draft : fileName(document.path);
+  const visibleName = splitVisibleFileName(value);
+
+  const focusStem = () => {
+    window.setTimeout(() => {
+      const input = inputRef.current;
+      if (!input) {
+        return;
+      }
+      input.focus();
+      input.setSelectionRange(0, editableFileStem(input.value).length);
+    }, 0);
+  };
+
+  useEffect(() => {
+    if (!editing) {
+      return;
+    }
+    focusStem();
+  }, [document.id, editing]);
+
+  return (
+    <div
+      className={`document-title-field ${editing ? "editing" : ""}`}
+      onMouseDown={(event) => {
+        if (window.document.activeElement === inputRef.current) {
+          return;
+        }
+        event.preventDefault();
+        onStartEdit();
+        focusStem();
+      }}
+    >
+      <span className="document-title-mirror" aria-hidden="true">
+        <span className={`document-title-mirror-stem ${visibleName.stem ? "" : "placeholder"}`}>
+          {visibleName.stem || "Untitled"}
+        </span>
+        {visibleName.extension ? <span className="document-title-mirror-ext">{visibleName.extension}</span> : null}
+      </span>
+      <input
+        ref={inputRef}
+        className="document-title-input"
+        aria-label="Document title"
+        value={value}
+        placeholder="Untitled"
+        onFocus={() => {
+          onStartEdit();
+          const input = inputRef.current;
+          input?.setSelectionRange(0, editableFileStem(input.value).length);
+        }}
+        onChange={(event) => onDraftChange(filterDocumentFileNameInput(event.target.value))}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            skipBlurCommitRef.current = true;
+            onCommit(event.currentTarget.value || `Untitled${documentExtension(document.path)}`);
+            event.currentTarget.blur();
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            skipBlurCommitRef.current = true;
+            onDraftChange(fileName(document.path));
+            onCancel();
+            event.currentTarget.blur();
+          }
+        }}
+        onBlur={(event) => {
+          if (skipBlurCommitRef.current) {
+            skipBlurCommitRef.current = false;
+          return;
+        }
+        if (editing) {
+          onCommit(event.currentTarget.value || `Untitled${documentExtension(document.path)}`);
+        }
+      }}
+      />
+    </div>
+  );
+}
+
 function DocumentTree(props: {
   nodes: DocTreeNode[];
   activeDocumentId: string;
   collapsedFolders: Set<string>;
+  renamingDocumentId: string;
+  freshDocumentId: string;
+  renamingDraft: string;
   onToggleFolder: (path: string) => void;
   threadCountFor: (documentId: string) => number;
   onSelectDocument: (documentId: string) => void;
 }) {
-  const { nodes, activeDocumentId, collapsedFolders, onToggleFolder, threadCountFor, onSelectDocument } = props;
+  const {
+    nodes,
+    activeDocumentId,
+    collapsedFolders,
+    renamingDocumentId,
+    freshDocumentId,
+    renamingDraft,
+    onToggleFolder,
+    threadCountFor,
+    onSelectDocument,
+  } = props;
   return (
     <>
       {nodes.map((node) => {
@@ -801,15 +1143,17 @@ function DocumentTree(props: {
         }
         const threadCount = threadCountFor(node.document.id);
         const active = node.document.id === activeDocumentId;
+        const renaming = node.document.id === renamingDocumentId;
         return (
           <button
-            className={`nav-item file-row ${active ? "on" : ""}`}
+            className={`nav-item file-row ${active ? "on" : ""} ${renaming ? "renaming-row" : ""}`}
             key={`file:${node.document.id}`}
             type="button"
             onClick={() => onSelectDocument(node.document.id)}
           >
             <span className="car leaf" />
-            <span className="truncate">{node.name}</span>
+            <span className="truncate">{renaming ? displayFileName(node.document, renamingDocumentId, renamingDraft) : node.name}</span>
+            {node.document.id === freshDocumentId ? <span className="chip sm accent">new</span> : null}
             {threadCount ? <span className="ct has">{threadCount}</span> : null}
           </button>
         );
@@ -1026,6 +1370,12 @@ function DocumentEditor({
   onFocusThreadHandled,
   onThreadSelected,
   onThreadCreated,
+  titleEditing,
+  titleDraft,
+  onTitleEditStart,
+  onTitleDraftChange,
+  onTitleEditCancel,
+  onTitleCommit,
 }: {
   api: ApiClient;
   token: string;
@@ -1037,6 +1387,12 @@ function DocumentEditor({
   onFocusThreadHandled: () => void;
   onThreadSelected: (threadId: string) => void;
   onThreadCreated: (threadId: string) => void;
+  titleEditing: boolean;
+  titleDraft: string;
+  onTitleEditStart: () => void;
+  onTitleDraftChange: (value: string) => void;
+  onTitleEditCancel: () => void;
+  onTitleCommit: (value: string) => void;
 }) {
   const draftRef = useRef<HTMLTextAreaElement | null>(null);
   const [selection, setSelection] = useState<SurfaceSelection | null>(null);
@@ -1120,6 +1476,18 @@ function DocumentEditor({
   return (
     <div className="doc-canvas">
       <div className="doc-inner editor-body">
+        <div className="document-title-row">
+          <DocumentTitleEditor
+            document={document}
+            editing={titleEditing}
+            draft={titleDraft}
+            onStartEdit={onTitleEditStart}
+            onDraftChange={onTitleDraftChange}
+            onCancel={onTitleEditCancel}
+            onCommit={onTitleCommit}
+          />
+        </div>
+
         <div className="doc-meta-row">
           <span className="chip">Document</span>
           <span className="chip outline">Owner · {account?.displayName ?? account?.email ?? "You"}</span>
@@ -1434,37 +1802,6 @@ function PeoplePanel({
         </section>
       ))}
     </div>
-  );
-}
-
-function CreateDocumentModal({ onClose, onCreate }: { onClose: () => void; onCreate: (input: { path: string; content: string }) => Promise<void> }) {
-  const [path, setPath] = useState("docs/untitled.md");
-  const [content, setContent] = useState("# Untitled\n");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  return (
-    <Modal title="New document" onClose={onClose}>
-      <form
-        className="form-stack"
-        onSubmit={async (event) => {
-          event.preventDefault();
-          setBusy(true);
-          setError("");
-          try {
-            await onCreate({ path, content });
-          } catch (err) {
-            setError(err instanceof Error ? err.message : String(err));
-          } finally {
-            setBusy(false);
-          }
-        }}
-      >
-        <label className="field"><span className="lab">Path</span><input value={path} onChange={(event) => setPath(event.target.value)} required /></label>
-        <label className="field"><span className="lab">Initial content</span><textarea value={content} onChange={(event) => setContent(event.target.value)} /></label>
-        {error ? <p className="error-text">{error}</p> : null}
-        <button className="btn accent full" disabled={busy}>{busy ? "Creating..." : "Create document"}</button>
-      </form>
-    </Modal>
   );
 }
 
@@ -2005,7 +2342,17 @@ function DaemonDetailModal({ api, workspaceId, daemon, agents, runs, onClose, on
   );
 }
 
-function EmptyWorkspace({ onCreateDocument, onCreateDaemon }: { onCreateDocument: () => void; onCreateDaemon: () => void }) {
+function EmptyWorkspace({
+  onCreateDocument,
+  onCreateDaemon,
+  creatingDocument,
+  canCreateDocument,
+}: {
+  onCreateDocument: () => void;
+  onCreateDaemon: () => void;
+  creatingDocument: boolean;
+  canCreateDocument: boolean;
+}) {
   return (
     <section className="doc-canvas">
       <div className="doc-inner empty-state">
@@ -2016,9 +2363,9 @@ function EmptyWorkspace({ onCreateDocument, onCreateDaemon }: { onCreateDocument
             <div className="row gap-8"><div className="avi sm daemon">D</div><b>Deploy a daemon</b></div>
             <span className="small muted">Bring docs to local disk and enable agents.</span>
           </button>
-          <button className="card p-20 empty-choice" onClick={onCreateDocument}>
+          <button className="card p-20 empty-choice" onClick={onCreateDocument} disabled={!canCreateDocument || creatingDocument}>
             <div className="row gap-8"><Icon name="doc" /><b>Create your first doc</b></div>
-            <span className="small muted">Markdown or plaintext. Threads and agents come along.</span>
+            <span className="small muted">{creatingDocument ? "Creating..." : "Markdown or plaintext. Threads and agents come along."}</span>
           </button>
         </div>
       </div>
