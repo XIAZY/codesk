@@ -1598,6 +1598,302 @@ pre.code {
   margin-left: auto;
 }
 
+/* The global `.field input` rule stretches inputs to full width; reset the radio
+   so it renders as a compact control inside the row instead of a large box. */
+.daemon-choice input[type="radio"] {
+  width: auto;
+  min-height: 0;
+  flex: none;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  accent-color: var(--accent);
+}
+
+.daemon-choice .col {
+  flex: 1;
+}
+
+/* ── New agent modal ── */
+.modal-card.wide {
+  width: min(760px, calc(100vw - 36px));
+}
+
+.new-agent-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.new-agent-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+}
+
+.new-agent-col {
+  min-width: 0;
+}
+
+.gap-14 {
+  gap: 14px;
+}
+
+.hint {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--ink-4);
+}
+
+.hint b {
+  color: var(--ink-3);
+  font-weight: 600;
+}
+
+.hint.err-text {
+  color: var(--err);
+}
+
+.new-agent-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.binding-summary.wrap {
+  flex-wrap: wrap;
+}
+
+.form-error {
+  margin: 0;
+  color: var(--err);
+  font-size: 13px;
+}
+
+.status-dot.daemon {
+  background: var(--daemon);
+}
+
+/* ── Runtime picker ── */
+.runtime-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.rt {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 11px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--paper);
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s, box-shadow 0.12s;
+}
+
+.rt:hover {
+  background: var(--paper-2);
+}
+
+.rt-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.rt-tile {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 12px;
+  font-family: var(--mono);
+  background: var(--paper-3);
+  color: var(--ink-2);
+}
+
+.rt-tile.codex {
+  background: #1f1d17;
+  color: #f4ecde;
+}
+
+.rt-tile.claude {
+  background: var(--accent-50);
+  color: var(--accent-700);
+}
+
+.rt-tile.gemini {
+  background: var(--daemon-50);
+  color: var(--daemon);
+}
+
+.rt-tile.pi {
+  background: var(--agent-50);
+  color: var(--agent);
+}
+
+.rt-name {
+  font-weight: 600;
+  font-size: 13px;
+  line-height: 1.1;
+}
+
+.rt-meta {
+  font-size: 11px;
+  color: var(--ink-4);
+}
+
+.rt-meta.warn-text {
+  color: var(--warn);
+}
+
+.rt-check {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-strong);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: transparent;
+}
+
+.rt-check .i {
+  width: 12px;
+  height: 12px;
+  stroke-width: 2.5;
+}
+
+.rt.sel {
+  border-color: var(--accent);
+  background: var(--accent-50);
+  box-shadow: 0 0 0 3px var(--accent-50);
+}
+
+.rt.sel .rt-check {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.rt.off {
+  opacity: 0.6;
+  cursor: not-allowed;
+  background: var(--paper-2);
+}
+
+.rt.off:hover {
+  background: var(--paper-2);
+}
+
+.rt-help-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--ink-4);
+  cursor: pointer;
+  border-radius: 50%;
+}
+
+.rt-help-btn:hover {
+  color: var(--accent-700);
+}
+
+.rt-help-btn .i {
+  width: 16px;
+  height: 16px;
+}
+
+.rt-help {
+  display: grid;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--paper-2);
+}
+
+.rt-help p {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.rt-help-cmd {
+  border-radius: 8px;
+  background: var(--ink);
+  color: var(--paper);
+  padding: 9px 11px;
+  overflow-x: auto;
+}
+
+.rt-help-cmd code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: nowrap;
+  user-select: all;
+}
+
+.rt.soon {
+  border-style: dashed;
+  cursor: default;
+  background: var(--paper);
+}
+
+.rt.soon:hover {
+  background: var(--paper);
+}
+
+.rt.soon .rt-tile {
+  filter: grayscale(0.5);
+  opacity: 0.7;
+}
+
+.rt.soon .rt-name {
+  color: var(--ink-3);
+}
+
+.rt-soon {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  background: var(--paper-3);
+  color: var(--ink-3);
+  border: 1px solid var(--border-strong);
+  white-space: nowrap;
+}
+
+.rt-soon .i {
+  width: 11px;
+  height: 11px;
+}
+
+@media (max-width: 720px) {
+  .new-agent-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 900px) {
   body {
     min-width: 0;

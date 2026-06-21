@@ -18,6 +18,7 @@ import { useDocumentSync } from "./useDocument";
 import { buildContentInsertUpdate, sendYjsUpdateOnce } from "./syncOnce";
 import { useWorkspace } from "./useWorkspace";
 import type { Account, Agent, Daemon, DocumentItem, ThreadItem, WorkspaceSummary } from "./types";
+import { resolveRuntimeTiles, selectableRuntimeKinds, type RuntimeTile } from "./runtimes";
 import "./styles.css";
 
 const tokenStorageKey = "notty.auth.token";
@@ -1578,88 +1579,321 @@ function CreateDaemonModal({ api, workspaceId, onClose, onDone }: { api: ApiClie
   );
 }
 
+function isDaemonOffline(daemon: Daemon) {
+  const status = daemonStatus(daemon);
+  return status === "disconnected" || status === "deleted";
+}
+
+// Handles allow lowercase letters, numbers, hyphen, and underscore (matches the
+// backend's normalizeHandle), capped at 32 chars.
+function sanitizeHandle(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 32);
+}
+
+// Derive a handle from a display name: lowercase, runs of disallowed characters
+// (spaces, punctuation) collapse to a single hyphen, trimmed at the edges.
+function handleFromName(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 32);
+}
+
+// Example agent personas. One is picked at random per modal open to seed the
+// name/handle/role placeholders, so users see what each field is for.
+const EXAMPLE_PERSONAS: Array<{ name: string; role: string }> = [
+  {
+    name: "Mira",
+    role: "Mira is a sharp editor who tightens loose prose, cuts filler, and keeps your voice intact. She flags sentences that don't quite land and suggests cleaner phrasing instead of rewriting everything herself.",
+  },
+  {
+    name: "Leo",
+    role: "Leo is a brainstorming partner for essays, stories, and posts. He asks the questions that get you unstuck, offers angles you hadn't considered, and never lets a blank page win.",
+  },
+  {
+    name: "Priya",
+    role: "Priya is a careful researcher who gathers sources, pulls out the key points, and lays them out so you can write with confidence. She keeps a running note of what's solid and what still needs checking.",
+  },
+  {
+    name: "Professor Adler",
+    role: "Professor Adler reads for facts and sound logic. He checks claims against what's actually supported, points out leaps in reasoning, and tells you where an argument needs evidence before a careful reader will believe it.",
+  },
+  {
+    name: "Devi",
+    role: "Devi is a product manager with a deep feel for user experience. She reads your draft as the person it's meant for, points out where it confuses, drags, or assumes too much, and always asks what the reader is supposed to do next.",
+  },
+];
+
+function randomPersona() {
+  return EXAMPLE_PERSONAS[Math.floor(Math.random() * EXAMPLE_PERSONAS.length)];
+}
+
 function CreateAgentModal({ api, workspaceId, daemons, onClose, onDone }: { api: ApiClient; workspaceId: string; daemons: Daemon[]; onClose: () => void; onDone: () => void }) {
   const activeDaemons = daemons.filter((daemon) => daemon.status !== "deleted");
-  const [daemonId, setDaemonId] = useState(activeDaemons[0]?.id ?? "");
-  const [handle, setHandle] = useState("codex-agent");
-  const [name, setName] = useState("Codex Agent");
-  const [role, setRole] = useState("Review workspace changes and provide constructive engineering feedback.");
+  const [daemonId, setDaemonId] = useState(() => {
+    const online = activeDaemons.find((daemon) => daemonStatus(daemon) === "online");
+    if (online) {
+      return online.id;
+    }
+    // Offline daemons aren't selectable, so never default onto one — leave it empty.
+    return activeDaemons.find((daemon) => !isDaemonOffline(daemon))?.id ?? "";
+  });
+  const [handle, setHandle] = useState("");
+  const [handleEdited, setHandleEdited] = useState(false);
+  const [name, setName] = useState("");
+  const [role, setRole] = useState("");
+  const [example] = useState(randomPersona);
+  const namePlaceholder = example.name;
+  const handlePlaceholder = handleFromName(example.name);
+  const rolePlaceholder = example.role;
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const selectedDaemon = activeDaemons.find((daemon) => daemon.id === daemonId);
-  const availableRuntimes = useMemo(
-    () => (selectedDaemon?.runtimes ?? []).filter((runtime) => runtime.available && runtime.kind.trim()),
-    [selectedDaemon],
-  );
+
+  const runtimeTiles = useMemo(() => resolveRuntimeTiles(selectedDaemon), [selectedDaemon]);
+  const selectableKinds = useMemo(() => selectableRuntimeKinds(runtimeTiles), [runtimeTiles]);
   const [runtimeKind, setRuntimeKind] = useState("");
   useEffect(() => {
-    const firstKind = availableRuntimes[0]?.kind ?? "";
-    if (!availableRuntimes.some((runtime) => runtime.kind === runtimeKind)) {
-      setRuntimeKind(firstKind);
+    if (!selectableKinds.includes(runtimeKind)) {
+      setRuntimeKind(selectableKinds[0] ?? "");
     }
-  }, [availableRuntimes, runtimeKind]);
-  const canCreate = Boolean(selectedDaemon && runtimeKind);
+  }, [selectableKinds, runtimeKind]);
+
+  const selectedRuntime = runtimeTiles.find((tile) => tile.entry.kind === runtimeKind);
+  const noReachableDaemon = activeDaemons.length > 0 && activeDaemons.every(isDaemonOffline);
+  const [explainKind, setExplainKind] = useState<string | null>(null);
+  // Only show the install/help panel while its runtime is still unavailable here.
+  const explainTile = runtimeTiles.find(
+    (tile) =>
+      tile.entry.kind === explainKind &&
+      (tile.availability === "not_installed" || tile.availability === "update_required"),
+  );
+  const canCreate = Boolean(
+    name.trim() &&
+      handle.trim() &&
+      role.trim() &&
+      selectedDaemon &&
+      !isDaemonOffline(selectedDaemon) &&
+      runtimeKind &&
+      selectableKinds.includes(runtimeKind) &&
+      !submitting,
+  );
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!canCreate || !selectedDaemon) {
+      return;
+    }
+    setSubmitting(true);
+    setError("");
+    try {
+      await api.createAgent(workspaceId, daemonId, { handle, name, role, kind: runtimeKind });
+      onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not create agent");
+      setSubmitting(false);
+    }
+  };
+
   return (
-    <Modal title="New agent" onClose={onClose}>
-      <form
-        className="form-stack"
-        onSubmit={async (event) => {
-          event.preventDefault();
-          if (!canCreate) {
-            return;
-          }
-          await api.createAgent(workspaceId, daemonId, { handle, name, role, kind: runtimeKind });
-          onDone();
-        }}
-      >
-        <label className="field"><span className="lab">Display name</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label>
-        <label className="field"><span className="lab">Handle</span><input value={handle} onChange={(event) => setHandle(event.target.value)} required /></label>
-        <label className="field"><span className="lab">Role</span><textarea value={role} onChange={(event) => setRole(event.target.value)} required /></label>
-        <div className="field">
-          <span className="lab">Owning daemon</span>
-          <div className="daemon-choice-list">
-            {activeDaemons.map((daemon) => {
-              const status = daemonStatus(daemon);
-              return (
-                <label className={`daemon-choice ${daemonId === daemon.id ? "selected" : ""}`} key={daemon.id}>
-                  <input
-                    type="radio"
-                    checked={daemonId === daemon.id}
-                    onChange={() => setDaemonId(daemon.id)}
+    <Modal title="New agent" onClose={onClose} wide>
+      <form className="new-agent-form" onSubmit={submit}>
+        <div className="new-agent-grid">
+          <div className="col gap-14 new-agent-col">
+            <label className="field">
+              <span className="lab">Display name</span>
+              <input
+                value={name}
+                placeholder={namePlaceholder}
+                onChange={(event) => {
+                  const next = event.target.value;
+                  setName(next);
+                  if (!handleEdited) {
+                    setHandle(handleFromName(next));
+                  }
+                }}
+                required
+              />
+            </label>
+            <label className="field">
+              <span className="lab">Handle</span>
+              <input
+                value={handle}
+                placeholder={handlePlaceholder}
+                maxLength={32}
+                onChange={(event) => {
+                  const next = sanitizeHandle(event.target.value);
+                  setHandle(next);
+                  // Re-enable auto-fill from the display name once the field is cleared.
+                  setHandleEdited(next.length > 0);
+                }}
+                required
+              />
+              <span className="hint">Alphanumeric, hyphen, or underscore (lowercased). Auto-filled from the display name; edit to override. Unique in this workspace.</span>
+            </label>
+            <label className="field"><span className="lab">Role</span><textarea value={role} placeholder={rolePlaceholder} onChange={(event) => setRole(event.target.value)} required /></label>
+            <div className="divider" />
+            <div className="field">
+              <span className="lab">Owning daemon</span>
+              <div className="daemon-choice-list">
+                {activeDaemons.map((daemon) => {
+                  const status = daemonStatus(daemon);
+                  const offline = isDaemonOffline(daemon);
+                  const runtimeCount = (daemon.runtimes ?? []).filter((runtime) => runtime.available).length;
+                  return (
+                    <label className={`daemon-choice ${daemonId === daemon.id ? "selected" : ""} ${offline ? "disabled" : ""}`} key={daemon.id}>
+                      <input
+                        type="radio"
+                        name="owning-daemon"
+                        checked={daemonId === daemon.id}
+                        disabled={offline}
+                        onChange={() => setDaemonId(daemon.id)}
+                      />
+                      <div className="avi sm daemon">{initials(daemon.name)}</div>
+                      <div className="col gap-0 min-0">
+                        <b className="small truncate">{daemon.name}</b>
+                        <span className="tiny muted truncate">{runtimeCount} runtime{runtimeCount === 1 ? "" : "s"}</span>
+                      </div>
+                      <span className={`chip sm ${status}`}><StatusDot tone={status} />{status}</span>
+                    </label>
+                  );
+                })}
+                {!activeDaemons.length ? <p className="small muted">Create a daemon before adding agents.</p> : null}
+              </div>
+              {noReachableDaemon ? (
+                <span className="hint err-text">Every daemon is offline. Bring one online to host a new agent.</span>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="col gap-14 new-agent-col">
+            <div className="field">
+              <div className="between">
+                <span className="lab">Runtime</span>
+                {selectedDaemon ? <span className="tiny muted truncate">detected on {selectedDaemon.name}</span> : null}
+              </div>
+              <div className="runtime-grid">
+                {runtimeTiles.map((tile) => (
+                  <RuntimeOption
+                    key={tile.entry.kind}
+                    tile={tile}
+                    selected={tile.entry.kind === runtimeKind}
+                    onSelect={() => setRuntimeKind(tile.entry.kind)}
+                    onExplain={() => setExplainKind((current) => (current === tile.entry.kind ? null : tile.entry.kind))}
                   />
-                  <div className="avi sm daemon">{initials(daemon.name)}</div>
-                  <div className="col gap-0 min-0">
-                    <b className="small truncate">{daemon.name}</b>
-                    <span className="tiny muted truncate">{daemon.id}</span>
+                ))}
+              </div>
+              {explainTile ? (
+                <div className="rt-help">
+                  <div className="between">
+                    <b className="small">{explainTile.entry.label} isn’t available here</b>
+                    <button type="button" className="btn ghost icon sm" onClick={() => setExplainKind(null)} aria-label="Close">×</button>
                   </div>
-                  <span className={`chip sm ${status}`}><StatusDot tone={status} />{status}</span>
-                </label>
-              );
-            })}
-            {!activeDaemons.length ? <p className="small muted">Create a daemon before adding agents.</p> : null}
+                  <p className="tiny muted">
+                    {explainTile.availability === "update_required"
+                      ? `The Codex CLI on ${selectedDaemon?.name ?? "this daemon"}’s host is below the version notty supports (${explainTile.meta}).`
+                      : `Codex isn’t installed on ${selectedDaemon?.name ?? "this daemon"}’s host.`}{" "}
+                    Install it on that machine, then reconnect the daemon so notty can re-scan its runtimes.
+                  </p>
+                  <div className="rt-help-cmd"><code>curl -fsSL https://chatgpt.com/codex/install.sh | sh</code></div>
+                  <p className="tiny muted">Codex needs an active ChatGPT subscription or API (usage-based) billing to run.</p>
+                </div>
+              ) : selectedDaemon && selectableKinds.length === 0 ? (
+                <span className="hint err-text">No supported runtime is available on this daemon. notty currently supports Codex — install the Codex CLI on this host, then re-scan.</span>
+              ) : null}
+            </div>
+            <p className="small muted">Model and reasoning effort are taken from the runtime. System prompts are generated by the backend shared prompt and are not user-editable.</p>
           </div>
         </div>
-        <label className="field">
-          <span className="lab">Runtime</span>
-          <select
-            value={runtimeKind}
-            onChange={(event) => setRuntimeKind(event.target.value)}
-            disabled={!selectedDaemon || availableRuntimes.length === 0}
-            required
-          >
-            {availableRuntimes.map((runtime) => (
-              <option key={runtime.kind} value={runtime.kind}>
-                {runtime.kind}{runtime.version ? ` · ${runtime.version}` : ""}
-              </option>
-            ))}
-          </select>
-          {selectedDaemon && availableRuntimes.length === 0 ? (
-            <span className="tiny muted">Selected daemon has not reported an available runtime.</span>
-          ) : null}
-        </label>
-        <p className="small muted">System prompts are generated by the backend shared prompt and are not user-editable.</p>
-        <button className="btn accent full" disabled={!canCreate}>Create agent</button>
+
+        {error ? <p className="form-error">{error}</p> : null}
+
+        <div className="new-agent-foot">
+          <div className="small muted row gap-6 wrap binding-summary">
+            <StatusDot tone="daemon" />
+            Runs on <b>{selectedDaemon?.name ?? "—"}</b>
+            <span className="faint">·</span>
+            <span>{selectedRuntime ? selectedRuntime.entry.label : "No runtime selected"}</span>
+          </div>
+          <div className="row gap-6">
+            <button type="button" className="btn" onClick={onClose}>Cancel</button>
+            <button type="submit" className="btn accent" disabled={!canCreate}>Create agent</button>
+          </div>
+        </div>
       </form>
     </Modal>
   );
+}
+
+function RuntimeOption({ tile, selected, onSelect, onExplain }: { tile: RuntimeTile; selected: boolean; onSelect: () => void; onExplain: () => void }) {
+  const { entry, availability, meta } = tile;
+  const tileClass = `rt-tile${entry.tile ? ` ${entry.tile}` : ""}`;
+
+  if (availability === "coming_soon") {
+    return (
+      <div className="rt soon" aria-disabled="true">
+        <div className="rt-top">
+          <div className={tileClass}>{entry.monogram}</div>
+          <span className="rt-soon"><ClockIcon />Soon</span>
+        </div>
+        <div className="rt-name">{entry.label}</div>
+        <div className="rt-meta">{meta}</div>
+      </div>
+    );
+  }
+
+  if (availability !== "available") {
+    return (
+      <div className="rt off" aria-disabled="true">
+        <div className="rt-top">
+          <div className={tileClass}>{entry.monogram}</div>
+          <button
+            type="button"
+            className="rt-help-btn"
+            onClick={onExplain}
+            aria-label={`Why is ${entry.label} unavailable, and how to install it`}
+            title="Why isn't this available?"
+          >
+            <HelpIcon />
+          </button>
+        </div>
+        <div className="rt-name">{entry.label}</div>
+        <div className={`rt-meta${availability === "update_required" ? " warn-text" : ""}`}>{meta}</div>
+      </div>
+    );
+  }
+
+  return (
+    <label className={`rt ${selected ? "sel" : ""}`}>
+      <input type="radio" name="runtime" checked={selected} onChange={onSelect} hidden />
+      <div className="rt-top">
+        <div className={tileClass}>{entry.monogram}</div>
+        <span className="rt-check"><CheckIcon /></span>
+      </div>
+      <div className="rt-name">{entry.label}</div>
+      <div className="rt-meta">{meta}</div>
+    </label>
+  );
+}
+
+function CheckIcon() {
+  return <svg className="i" viewBox="0 0 24 24"><path d="M5 12l5 5L20 7" /></svg>;
+}
+
+function HelpIcon() {
+  return (
+    <svg className="i" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M9.6 9.2a2.5 2.5 0 1 1 3.6 2.4c-.8.5-1.2 1-1.2 1.9" />
+      <path d="M12 17h.01" />
+    </svg>
+  );
+}
+
+function ClockIcon() {
+  return <svg className="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 8v4l3 2" /></svg>;
 }
 
 function AgentDetailModal({ api, workspaceId, agent, daemons, runs, onClose, onChanged }: { api: ApiClient; workspaceId: string; agent: Agent; daemons: Daemon[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; onClose: () => void; onChanged: () => void }) {
@@ -1786,10 +2020,10 @@ function EmptyWorkspace({ onCreateDocument, onCreateDaemon }: { onCreateDocument
   );
 }
 
-function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
+function Modal({ title, children, onClose, wide }: { title: string; children: ReactNode; onClose: () => void; wide?: boolean }) {
   return (
     <div className="modal-backdrop">
-      <section className="modal-card card lifted">
+      <section className={`modal-card card lifted${wide ? " wide" : ""}`}>
         <header className="modal-header">
           <h2 className="modal-title">{title}</h2>
           <button className="btn ghost icon sm" onClick={onClose}>×</button>
