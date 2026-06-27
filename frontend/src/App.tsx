@@ -11,6 +11,7 @@ import {
   buildDaemonUninstallCommand,
   daemonStatus,
   isMarkdownDocumentPath,
+  selectWorkspaceAfterAuth,
   type LineThreadGroup,
 } from "./logic";
 import { useRootNamespace } from "./useRootNamespace";
@@ -258,7 +259,11 @@ export function App() {
     setAccount(nextAccount);
     setWorkspaces(safeWorkspaces);
     const preferred = localStorage.getItem(workspaceStorageKey);
-    setWorkspaceId(preferred && safeWorkspaces.some((workspace) => workspace.id === preferred) ? preferred : safeWorkspaces[0]?.id ?? "");
+    const selected = selectWorkspaceAfterAuth(safeWorkspaces, preferred);
+    if (!selected || selected !== preferred) {
+      localStorage.removeItem(workspaceStorageKey);
+    }
+    setWorkspaceId(selected);
   };
 
   const signOut = () => {
@@ -286,12 +291,11 @@ export function App() {
         setAccount(response.account);
         setWorkspaces(safeWorkspaces);
         const preferred = localStorage.getItem(workspaceStorageKey);
-        if (preferred && safeWorkspaces.some((workspace) => workspace.id === preferred)) {
-          setWorkspaceId(preferred);
-        } else {
+        const selected = selectWorkspaceAfterAuth(safeWorkspaces, preferred);
+        if (!selected || selected !== preferred) {
           localStorage.removeItem(workspaceStorageKey);
-          setWorkspaceId(safeWorkspaces[0]?.id ?? "");
         }
+        setWorkspaceId(selected);
       })
       .catch(() => {
         if (!disposed) {
@@ -418,7 +422,7 @@ function AuthScreen({ api, onAuth }: { api: ApiClient; onAuth: (token: string, a
   );
 }
 
-function WorkspacePicker({
+export function WorkspaceOnboarding({
   api,
   account,
   workspaces,
@@ -426,15 +430,76 @@ function WorkspacePicker({
   onSelect,
   onSignOut,
 }: {
-  api: ApiClient;
+  api: Pick<ApiClient, "createWorkspace">;
   account: Account | null;
   workspaces: WorkspaceSummary[];
   onWorkspaces: (workspaces: WorkspaceSummary[]) => void;
   onSelect: (id: string) => void;
   onSignOut: () => void;
 }) {
+  const [mode, setMode] = useState<"create" | "join">("create");
+  const initialHandle = account?.email.split("@")[0] ?? "owner";
+
+  return (
+    <main className="auth-screen picker-screen">
+      <section className="card p-24 picker-panel">
+        <div className="row between gap-12">
+          <Logo />
+          <button className="btn ghost sm" onClick={onSignOut}>Sign out</button>
+        </div>
+        <div className="picker-head">
+          <h1 className="auth-title">Start by joining or creating a workspace</h1>
+          <p className="small muted">Workspaces are where documents, daemons, agents, and members live.</p>
+        </div>
+        <div className="onboarding-actions">
+          <button className={`btn lg ${mode === "create" ? "accent" : ""}`} onClick={() => setMode("create")}>
+            Create a workspace
+          </button>
+          <button className={`btn lg ${mode === "join" ? "accent" : ""}`} onClick={() => setMode("join")}>
+            Join with invite link
+          </button>
+        </div>
+        {mode === "create" ? (
+          <CreateWorkspaceForm
+            api={api}
+            initialHandle={initialHandle}
+            workspaces={workspaces}
+            onWorkspaces={onWorkspaces}
+            onSelect={onSelect}
+          />
+        ) : (
+          <div className="form-stack create-workspace-card">
+            <div>
+              <h2 className="modal-title">Join with invite link</h2>
+              <p className="small muted">Invite links are coming next.</p>
+            </div>
+            <label className="field">
+              <span className="lab">Invite link</span>
+              <input value="" placeholder="https://notty.example.com/invite/..." disabled readOnly />
+            </label>
+            <button className="btn full lg" disabled>Join workspace</button>
+          </div>
+        )}
+      </section>
+    </main>
+  );
+}
+
+function CreateWorkspaceForm({
+  api,
+  initialHandle,
+  workspaces,
+  onWorkspaces,
+  onSelect,
+}: {
+  api: Pick<ApiClient, "createWorkspace">;
+  initialHandle: string;
+  workspaces: WorkspaceSummary[];
+  onWorkspaces: (workspaces: WorkspaceSummary[]) => void;
+  onSelect: (id: string) => void;
+}) {
   const [name, setName] = useState("Product Workspace");
-  const [handle, setHandle] = useState(account?.email.split("@")[0] ?? "owner");
+  const [handle, setHandle] = useState(initialHandle);
   const [error, setError] = useState("");
 
   const createWorkspace = async (event: FormEvent) => {
@@ -451,6 +516,55 @@ function WorkspacePicker({
   };
 
   return (
+    <form onSubmit={createWorkspace} className="form-stack create-workspace-card">
+      <div>
+        <h2 className="modal-title">Create workspace</h2>
+        <p className="small muted">You will become the workspace owner.</p>
+      </div>
+      <label className="field">
+        <span className="lab">Workspace name</span>
+        <input value={name} onChange={(event) => setName(event.target.value)} required />
+      </label>
+      <label className="field">
+        <span className="lab">Your handle in this workspace</span>
+        <input value={handle} onChange={(event) => setHandle(event.target.value)} required />
+      </label>
+      {error ? <p className="error-text">{error}</p> : null}
+      <button className="btn accent full lg">Create and enter</button>
+    </form>
+  );
+}
+
+function WorkspacePicker({
+  api,
+  account,
+  workspaces,
+  onWorkspaces,
+  onSelect,
+  onSignOut,
+}: {
+  api: Pick<ApiClient, "createWorkspace">;
+  account: Account | null;
+  workspaces: WorkspaceSummary[];
+  onWorkspaces: (workspaces: WorkspaceSummary[]) => void;
+  onSelect: (id: string) => void;
+  onSignOut: () => void;
+}) {
+  if (workspaces.length === 0) {
+    return (
+      <WorkspaceOnboarding
+        api={api}
+        account={account}
+        workspaces={workspaces}
+        onWorkspaces={onWorkspaces}
+        onSelect={onSelect}
+        onSignOut={onSignOut}
+      />
+    );
+  }
+  const initialHandle = account?.email.split("@")[0] ?? "owner";
+
+  return (
     <main className="auth-screen picker-screen">
       <section className="card p-24 picker-panel">
         <div className="row between gap-12">
@@ -461,35 +575,24 @@ function WorkspacePicker({
           <h1 className="auth-title">Choose a workspace</h1>
           <p className="small muted">Pick a tenant or create a new workspace-scoped home for documents, daemons, and agents.</p>
         </div>
-        {workspaces.length ? (
-          <div className="workspace-grid">
-            {workspaces.map((workspace) => (
-              <button className="workspace-tile card" key={workspace.id} onClick={() => onSelect(workspace.id)}>
-                <div className="avi">{initials(workspace.name)}</div>
-                <div className="col gap-2">
-                  <strong className="small">{workspace.name}</strong>
-                  <span className="tiny muted">{workspace.slug}</span>
-                </div>
-              </button>
-            ))}
-          </div>
-        ) : null}
-        <form onSubmit={createWorkspace} className="form-stack create-workspace-card">
-          <div>
-            <h2 className="modal-title">Create workspace</h2>
-            <p className="small muted">You will become the workspace owner.</p>
-          </div>
-          <label className="field">
-            <span className="lab">Workspace name</span>
-            <input value={name} onChange={(event) => setName(event.target.value)} required />
-          </label>
-          <label className="field">
-            <span className="lab">Your workspace handle</span>
-            <input value={handle} onChange={(event) => setHandle(event.target.value)} required />
-          </label>
-          {error ? <p className="error-text">{error}</p> : null}
-          <button className="btn accent full lg">Create and enter</button>
-        </form>
+        <div className="workspace-grid">
+          {workspaces.map((workspace) => (
+            <button className="workspace-tile card" key={workspace.id} onClick={() => onSelect(workspace.id)}>
+              <div className="avi">{initials(workspace.name)}</div>
+              <div className="col gap-2">
+                <strong className="small">{workspace.name}</strong>
+                <span className="tiny muted">{workspace.slug}</span>
+              </div>
+            </button>
+          ))}
+        </div>
+        <CreateWorkspaceForm
+          api={api}
+          initialHandle={initialHandle}
+          workspaces={workspaces}
+          onWorkspaces={onWorkspaces}
+          onSelect={onSelect}
+        />
       </section>
     </main>
   );

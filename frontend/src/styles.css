@@ -530,6 +530,13 @@ svg.i.sm {
   margin: 0 0 16px;
 }
 
+.onboarding-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
 .workspace-tile {
   display: flex;
   align-items: center;

@@ -1,5 +1,5 @@
 import * as Y from "yjs";
-import type { Agent, AgentRun, Daemon, ThreadAnchor, ThreadItem, WorkspaceEvent, WorkspaceState } from "./types";
+import type { Agent, AgentRun, Daemon, ThreadAnchor, ThreadItem, WorkspaceEvent, WorkspaceState, WorkspaceSummary } from "./types";
 
 export type ReplaceOp = {
   start: number;
@@ -93,6 +93,14 @@ export function emptyWorkspace(): WorkspaceState {
     agentEvents: [],
     presences: {},
   };
+}
+
+export function selectWorkspaceAfterAuth(workspaces: WorkspaceSummary[], preferredWorkspaceId?: string | null) {
+  const safeWorkspaces = Array.isArray(workspaces) ? workspaces : [];
+  if (preferredWorkspaceId && safeWorkspaces.some((workspace) => workspace.id === preferredWorkspaceId)) {
+    return preferredWorkspaceId;
+  }
+  return safeWorkspaces[0]?.id ?? "";
 }
 
 export function computeReplace(before: string, after: string): ReplaceOp {

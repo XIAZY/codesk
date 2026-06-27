@@ -52,6 +52,35 @@ func TestAuthenticatedWorkspaceRoutesIsolateTenantsAndIgnoreSpoofedActor(t *test
 	}
 }
 
+func TestRegisterAccountCreatesNoImplicitWorkspaceRows(t *testing.T) {
+	server, router := newAuthTestServer(t)
+
+	auth := authTestRegister(t, router, "zero-workspace@example.com", "owner-pass", "Zero Workspace")
+	if len(auth.Workspaces) != 0 {
+		t.Fatalf("registration should return zero workspaces, got %#v", auth.Workspaces)
+	}
+
+	var workspaceCount int
+	if err := server.store.db.QueryRow(`SELECT COUNT(*) FROM workspaces`).Scan(&workspaceCount); err != nil {
+		t.Fatalf("count workspaces: %v", err)
+	}
+	var memberCount int
+	if err := server.store.db.QueryRow(`SELECT COUNT(*) FROM workspace_members`).Scan(&memberCount); err != nil {
+		t.Fatalf("count workspace members: %v", err)
+	}
+	if workspaceCount != 0 || memberCount != 0 {
+		t.Fatalf("registration should not create workspace rows, workspaces=%d members=%d", workspaceCount, memberCount)
+	}
+
+	var list struct {
+		Workspaces []*Workspace `json:"workspaces"`
+	}
+	authTestJSON(t, router, http.MethodGet, "/api/workspaces", auth.Token, nil, http.StatusOK, &list)
+	if len(list.Workspaces) != 0 {
+		t.Fatalf("workspace list should be empty for zero-workspace account, got %#v", list.Workspaces)
+	}
+}
+
 func TestCreateWorkspaceAllocatesUniqueSlugForRepeatedNames(t *testing.T) {
 	router := newAuthTestRouter(t)
 

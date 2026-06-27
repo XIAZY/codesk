@@ -17,6 +17,7 @@ import {
   lineStartsForText,
   reduceWorkspaceEvent,
   resolveThreadAnchorLive,
+  selectWorkspaceAfterAuth,
   selectionLabel,
 } from "./logic";
 import type { Agent, Daemon, WorkspaceState } from "./types";
@@ -72,6 +73,20 @@ describe("Yjs editor helpers", () => {
 });
 
 describe("workspace reduction", () => {
+  it("keeps zero-workspace accounts in onboarding instead of selecting a workspace", () => {
+    expect(selectWorkspaceAfterAuth([], "workspace_a")).toBe("");
+  });
+
+  it("prefers a still-valid workspace and otherwise falls back to the first membership", () => {
+    const workspaces = [
+      { id: "workspace_a", slug: "alpha", name: "Alpha" },
+      { id: "workspace_b", slug: "beta", name: "Beta" },
+    ];
+
+    expect(selectWorkspaceAfterAuth(workspaces, "workspace_b")).toBe("workspace_b");
+    expect(selectWorkspaceAfterAuth(workspaces, "missing")).toBe("workspace_a");
+  });
+
   it("does not keep document namespace state from workspace events", () => {
     const state = reduceWorkspaceEvent(baseWorkspace(), {
       type: "workspace.snapshot",
