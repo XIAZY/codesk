@@ -176,16 +176,6 @@ func TestWorkspaceMemberAndAgentIdentifiersAreValidatedAndImmutable(t *testing.T
 		t.Fatalf("re-adding existing member should not create a replacement user, got %d users", userCount)
 	}
 
-	var updatedUser User
-	authTestJSON(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/users/"+member.UserID, owner.Token, UpdateUserRequest{
-		Name:   "Renamed Member",
-		Handle: "renamed_member",
-		Role:   "Reviewed but keeps handle",
-	}, http.StatusOK, &updatedUser)
-	if updatedUser.Handle != "member_one" || updatedUser.Name != "Renamed Member" {
-		t.Fatalf("user update should mutate profile fields but keep handle, got %#v", updatedUser)
-	}
-
 	var daemonResponse CreateDaemonResponse
 	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons", owner.Token, CreateDaemonRequest{Name: "Runtime daemon"}, http.StatusCreated, &daemonResponse)
 	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/daemon/status", daemonResponse.Token, UpdateDaemonStatusRequest{
@@ -242,6 +232,23 @@ func TestWorkspaceMemberAndAgentIdentifiersAreValidatedAndImmutable(t *testing.T
 	if updatedAgent.Handle != "agent_one" || updatedAgent.Name != "Renamed Agent" {
 		t.Fatalf("agent update should mutate profile fields but keep handle, got %#v", updatedAgent)
 	}
+}
+
+func TestAuthenticatedWorkspaceUserMutationEndpointsAreUnavailable(t *testing.T) {
+	router := newAuthTestRouter(t)
+
+	owner := authTestRegister(t, router, "no-user-endpoints@example.com", "owner-pass", "Owner")
+	workspace := authTestCreateWorkspace(t, router, owner.Token, "No User Endpoints Tenant")
+
+	authTestStatus(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/users", owner.Token, CreateUserRequest{
+		Name:   "Blocked User",
+		Handle: "blocked_user",
+		Role:   "Blocked",
+	}, http.StatusNotFound)
+	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/users/user-blocked", owner.Token, UpdateUserRequest{
+		Name: "Blocked User",
+	}, http.StatusNotFound)
+	authTestStatus(t, router, http.MethodDelete, "/api/workspaces/"+workspace.ID+"/users/user-blocked", owner.Token, nil, http.StatusNotFound)
 }
 
 func TestDaemonTokenIsWorkspaceScopedAndCanActAsWorkspaceAgent(t *testing.T) {
