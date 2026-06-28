@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -79,16 +80,17 @@ func TestBackendTextTruncationSanitizesInvalidUTF8(t *testing.T) {
 }
 
 func TestWorkspaceEndpointsOmitDocumentPayloads(t *testing.T) {
-	server, store := newTestServer(t)
-	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "sync me")
+	fixture := newWorkspaceRouteTestFixture(t)
+	documentID := mustCreateTestDocument(t, fixture.store, "docs/spec.md", "sync me")
 
-	router := server.Routes()
-	payload := performJSONRequest(t, router, http.MethodGet, "/api/workspace", nil)
+	router := fixture.router
+	var payload map[string]any
+	authTestJSON(t, router, http.MethodGet, fixture.workspaceAPIPath("/workspace"), fixture.token, nil, http.StatusOK, &payload)
 	if _, ok := payload["proposals"]; ok {
-		t.Fatal("expected /api/workspace to omit removed proposals state")
+		t.Fatal("expected workspace endpoint to omit removed proposals state")
 	}
 	if _, ok := payload["documents"]; ok {
-		t.Fatal("expected /api/workspace to omit backend document list")
+		t.Fatal("expected workspace endpoint to omit backend document list")
 	}
 
 	assertNonOK(t, router, http.MethodGet, "/api/workspace/sync", nil)
@@ -100,7 +102,9 @@ func TestWorkspaceEndpointsOmitDocumentPayloads(t *testing.T) {
 }
 
 func TestWorkspaceExposesRootDocumentIDAndHidesRootDocument(t *testing.T) {
-	server, store := newTestServer(t)
+	fixture := newWorkspaceRouteTestFixture(t)
+	server := fixture.server
+	store := fixture.store
 	rootID := store.Snapshot().RootDocumentID
 	if rootID == "" {
 		t.Fatal("expected root document id")
@@ -109,15 +113,8 @@ func TestWorkspaceExposesRootDocumentIDAndHidesRootDocument(t *testing.T) {
 		t.Fatalf("root document %q is not syncable", rootID)
 	}
 
-	recorder := httptest.NewRecorder()
-	server.Routes().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/workspace", nil))
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("workspace status = %d body=%s", recorder.Code, recorder.Body.String())
-	}
 	var payload map[string]any
-	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("decode workspace: %v", err)
-	}
+	authTestJSON(t, fixture.router, http.MethodGet, fixture.workspaceAPIPath("/workspace"), fixture.token, nil, http.StatusOK, &payload)
 	if payload["rootDocumentId"] != rootID {
 		t.Fatalf("rootDocumentId = %#v, want %q", payload["rootDocumentId"], rootID)
 	}
@@ -129,12 +126,14 @@ func TestWorkspaceExposesRootDocumentIDAndHidesRootDocument(t *testing.T) {
 }
 
 func TestWorkspaceEventSocketSnapshotOmitsDocumentList(t *testing.T) {
-	server, store := newTestServer(t)
+	fixture := newWorkspaceRouteTestFixture(t)
+	server := fixture.server
+	store := fixture.store
 	_ = mustCreateTestDocument(t, store, "docs/spec.md", "hello")
 	httpServer := httptest.NewServer(server.Routes())
 	defer httpServer.Close()
 
-	conn := dialDocumentWebsocketForTest(t, httpServer.URL, "/ws")
+	conn := dialDocumentWebsocketForTest(t, httpServer.URL, fixture.workspaceWSPath(""), fixture.token)
 	defer conn.Close()
 	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		t.Fatalf("set websocket read deadline: %v", err)
@@ -226,12 +225,20 @@ func TestCreateDocumentAcceptsClientDocumentIDIdempotently(t *testing.T) {
 }
 
 func TestDocumentNamespaceMutationHTTPRoutesRemoved(t *testing.T) {
-	server, store := newTestServer(t)
+	fixture := newWorkspaceRouteTestFixture(t)
+	server := fixture.server
+	store := fixture.store
 	documentID := mustCreateTestDocument(t, store, "docs/route.md", "content")
 	router := server.Routes()
 	for _, target := range []string{"/api/documents/" + documentID, "/api/workspaces/" + store.Snapshot().WorkspaceID + "/documents/" + documentID} {
-		assertNonOK(t, router, http.MethodPatch, target, []byte(`{"path":"docs/next.md"}`))
-		assertNonOK(t, router, http.MethodDelete, target, nil)
+		recorder := authTestRequest(t, router, http.MethodPatch, target, fixture.token, nil, map[string]string{"path": "docs/next.md"})
+		if recorder.Code == http.StatusOK {
+			t.Fatalf("expected PATCH %s to be unavailable, got status 200 body=%s", target, recorder.Body.String())
+		}
+		recorder = authTestRequest(t, router, http.MethodDelete, target, fixture.token, nil, nil)
+		if recorder.Code == http.StatusOK {
+			t.Fatalf("expected DELETE %s to be unavailable, got status 200 body=%s", target, recorder.Body.String())
+		}
 	}
 }
 
@@ -310,12 +317,14 @@ func TestApplyCRDTUpdatePersistsDeleteOnlyUpdate(t *testing.T) {
 }
 
 func TestRootDocumentSyncsOverMuxWebsocket(t *testing.T) {
-	server, store := newTestServer(t)
+	fixture := newWorkspaceRouteTestFixture(t)
+	server := fixture.server
+	store := fixture.store
 	rootID := store.Snapshot().RootDocumentID
 	httpServer := httptest.NewServer(server.Routes())
 	defer httpServer.Close()
 
-	conn := dialDocumentWebsocketForTest(t, httpServer.URL, "/ws/documents-sync")
+	conn := dialDocumentWebsocketForTest(t, httpServer.URL, fixture.workspaceWSPath("/documents-sync"), fixture.token)
 	defer conn.Close()
 	if err := conn.WriteMessage(websocket.BinaryMessage, yproto.BuildDocumentMessage(rootID, buildSyncStep1ForTest(crdt.New(crdt.WithClientID(707))))); err != nil {
 		t.Fatalf("write root sync step1: %v", err)
@@ -341,17 +350,19 @@ func TestRootDocumentSyncsOverMuxWebsocket(t *testing.T) {
 }
 
 func TestRootDocumentUpdatesStreamToRawRootSubscriber(t *testing.T) {
-	server, store := newTestServer(t)
+	fixture := newWorkspaceRouteTestFixture(t)
+	server := fixture.server
+	store := fixture.store
 	rootID := store.Snapshot().RootDocumentID
 	httpServer := httptest.NewServer(server.Routes())
 	defer httpServer.Close()
 
-	reader := dialDocumentWebsocketForTest(t, httpServer.URL, "/ws/documents/"+rootID)
+	reader := dialDocumentWebsocketForTest(t, httpServer.URL, fixture.workspaceWSPath("/documents/"+rootID), fixture.token)
 	defer reader.Close()
 	rootRoom := server.rooms.ForDocument(store.Snapshot().WorkspaceID + ":" + rootID)
 	waitDocumentRoomSubscriberCount(t, rootRoom, 1)
 
-	writer := dialDocumentWebsocketForTest(t, httpServer.URL, "/ws/documents-sync")
+	writer := dialDocumentWebsocketForTest(t, httpServer.URL, fixture.workspaceWSPath("/documents-sync"), fixture.token)
 	defer writer.Close()
 
 	writerDoc := crdt.New(crdt.WithClientID(808))
@@ -392,7 +403,9 @@ func TestRootDocumentUpdatesStreamToRawRootSubscriber(t *testing.T) {
 }
 
 func TestAgentDocumentDiffEndpointRejectsLargeDiff(t *testing.T) {
-	server, store := newTestServer(t)
+	fixture := newWorkspaceRouteTestFixture(t)
+	server := fixture.server
+	store := fixture.store
 	seedCodexDaemonRuntime(t, store)
 	documentID := mustCreateTestDocument(t, store, "docs/large-api-diff.md", numberedLines(2001))
 	agent, err := store.CreateAgent(CreateAgentRequest{
@@ -416,9 +429,10 @@ func TestAgentDocumentDiffEndpointRejectsLargeDiff(t *testing.T) {
 		t.Fatalf("get current document: %v", err)
 	}
 
-	target := "/api/agents/" + agent.ID + "/documents/" + documentID + "/diff?from=" + strconv.FormatInt(initial.UpdateID, 10) + "&to=" + strconv.FormatInt(current.UpdateID, 10)
+	target := fixture.workspaceAPIPath("/agents/" + agent.ID + "/documents/" + documentID + "/diff?from=" + strconv.FormatInt(initial.UpdateID, 10) + "&to=" + strconv.FormatInt(current.UpdateID, 10))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, target, nil)
+	request.Header.Set("Authorization", "Bearer "+fixture.token)
 	server.Routes().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("expected 413 for large diff, got status %d body=%s", recorder.Code, recorder.Body.String())
@@ -509,13 +523,15 @@ func TestHTTPDocumentUpdateRouteRemoved(t *testing.T) {
 }
 
 func TestWorkspaceDocumentSyncWebsocketRoutesMultipleDocuments(t *testing.T) {
-	server, store := newTestServer(t)
+	fixture := newWorkspaceRouteTestFixture(t)
+	server := fixture.server
+	store := fixture.store
 	docA := mustCreateTestDocument(t, store, "docs/a.md", "alpha")
 	docB := mustCreateTestDocument(t, store, "docs/b.md", "bravo")
 	httpServer := httptest.NewServer(server.Routes())
 	defer httpServer.Close()
 
-	conn := dialDocumentWebsocketForTest(t, httpServer.URL, "/ws/documents-sync")
+	conn := dialDocumentWebsocketForTest(t, httpServer.URL, fixture.workspaceWSPath("/documents-sync"), fixture.token)
 	defer conn.Close()
 
 	if err := conn.WriteMessage(websocket.BinaryMessage, yproto.BuildDocumentMessage(docA, buildSyncStep1ForTest(crdt.New(crdt.WithClientID(101))))); err != nil {
@@ -541,12 +557,14 @@ func TestWorkspaceDocumentSyncWebsocketRoutesMultipleDocuments(t *testing.T) {
 }
 
 func TestRawDocumentWebsocketStillUsesRawYProtocolFrames(t *testing.T) {
-	server, store := newTestServer(t)
+	fixture := newWorkspaceRouteTestFixture(t)
+	server := fixture.server
+	store := fixture.store
 	documentID := mustCreateTestDocument(t, store, "docs/raw.md", "alpha")
 	httpServer := httptest.NewServer(server.Routes())
 	defer httpServer.Close()
 
-	conn := dialDocumentWebsocketForTest(t, httpServer.URL, "/ws/documents/"+documentID)
+	conn := dialDocumentWebsocketForTest(t, httpServer.URL, fixture.workspaceWSPath("/documents/"+documentID), fixture.token)
 	defer conn.Close()
 	if err := conn.WriteMessage(websocket.BinaryMessage, buildSyncStep1ForTest(crdt.New(crdt.WithClientID(303)))); err != nil {
 		t.Fatalf("write raw sync step1: %v", err)
@@ -568,12 +586,14 @@ func TestRawDocumentWebsocketStillUsesRawYProtocolFrames(t *testing.T) {
 }
 
 func TestWebsocketDocumentUpdateBroadcastsToMuxSubscriber(t *testing.T) {
-	server, store := newTestServer(t)
+	fixture := newWorkspaceRouteTestFixture(t)
+	server := fixture.server
+	store := fixture.store
 	documentID := mustCreateTestDocument(t, store, "docs/mux-broadcast.md", "alpha")
 	httpServer := httptest.NewServer(server.Routes())
 	defer httpServer.Close()
 
-	conn := dialDocumentWebsocketForTest(t, httpServer.URL, "/ws/documents-sync")
+	conn := dialDocumentWebsocketForTest(t, httpServer.URL, fixture.workspaceWSPath("/documents-sync"), fixture.token)
 	defer conn.Close()
 	subscribePayload := yproto.BuildAwarenessUpdate(map[uint64]yproto.AwarenessState{
 		11: {Clock: 1, State: []byte(`{"actorId":"daemon"}`)},
@@ -589,7 +609,7 @@ func TestWebsocketDocumentUpdateBroadcastsToMuxSubscriber(t *testing.T) {
 	update := captureDocUpdate(t, peerDoc, "websocket-edit", func(txn *crdt.Transaction) {
 		text.Insert(txn, text.LenInTxn(txn), " beta", nil)
 	})
-	writer := dialDocumentWebsocketForTest(t, httpServer.URL, "/ws/documents/"+documentID)
+	writer := dialDocumentWebsocketForTest(t, httpServer.URL, fixture.workspaceWSPath("/documents/"+documentID), fixture.token)
 	defer writer.Close()
 	if err := writer.WriteMessage(websocket.BinaryMessage, yproto.BuildSyncUpdate(update)); err != nil {
 		t.Fatalf("write websocket update: %v", err)
@@ -619,13 +639,15 @@ func TestWebsocketDocumentUpdateBroadcastsToMuxSubscriber(t *testing.T) {
 }
 
 func TestWorkspaceDocumentSyncWebsocketCloseRemovesAllSubscriptions(t *testing.T) {
-	server, store := newTestServer(t)
+	fixture := newWorkspaceRouteTestFixture(t)
+	server := fixture.server
+	store := fixture.store
 	docA := mustCreateTestDocument(t, store, "docs/cleanup-a.md", "alpha")
 	docB := mustCreateTestDocument(t, store, "docs/cleanup-b.md", "bravo")
 	httpServer := httptest.NewServer(server.Routes())
 	defer httpServer.Close()
 
-	conn := dialDocumentWebsocketForTest(t, httpServer.URL, "/ws/documents-sync")
+	conn := dialDocumentWebsocketForTest(t, httpServer.URL, fixture.workspaceWSPath("/documents-sync"), fixture.token)
 	awareness := yproto.BuildAwarenessUpdate(map[uint64]yproto.AwarenessState{
 		11: {Clock: 1, State: []byte(`{"actorId":"daemon"}`)},
 	}, []uint64{11})
@@ -748,7 +770,8 @@ func TestDocumentProtocolIgnoresCanonicalEmptyYjsUpdate(t *testing.T) {
 }
 
 func TestWorkspaceEndpointsTrimHistoricalAgentRunPayloads(t *testing.T) {
-	server, store := newTestServer(t)
+	fixture := newWorkspaceRouteTestFixture(t)
+	store := fixture.store
 	seedCodexDaemonRuntime(t, store)
 	agent, err := store.CreateAgent(CreateAgentRequest{
 		Handle: "payload-agent",
@@ -778,8 +801,10 @@ func TestWorkspaceEndpointsTrimHistoricalAgentRunPayloads(t *testing.T) {
 		t.Fatalf("update run log: %v", err)
 	}
 
-	router := server.Routes()
-	workspaceRun := findRunPayload(t, performJSONRequest(t, router, http.MethodGet, "/api/workspace", nil), run.ID)
+	router := fixture.router
+	var workspacePayload map[string]any
+	authTestJSON(t, router, http.MethodGet, fixture.workspaceAPIPath("/workspace"), fixture.token, nil, http.StatusOK, &workspacePayload)
+	workspaceRun := findRunPayload(t, workspacePayload, run.ID)
 	if got := workspaceRun["prompt"].(string); len(got) >= len(longPrompt) {
 		t.Fatalf("expected /api/workspace to trim prompt, got %d bytes", len(got))
 	}
@@ -801,7 +826,9 @@ func TestWorkspaceEndpointsTrimHistoricalAgentRunPayloads(t *testing.T) {
 		t.Fatalf("complete run: %v", err)
 	}
 
-	terminalRun := findRunPayload(t, performJSONRequest(t, router, http.MethodGet, "/api/workspace", nil), run.ID)
+	var terminalPayload map[string]any
+	authTestJSON(t, router, http.MethodGet, fixture.workspaceAPIPath("/workspace"), fixture.token, nil, http.StatusOK, &terminalPayload)
+	terminalRun := findRunPayload(t, terminalPayload, run.ID)
 	if got := terminalRun["prompt"].(string); len(got) >= len(longPrompt) {
 		t.Fatalf("expected /api/workspace to trim terminal prompt, got %d bytes", len(got))
 	}
@@ -814,10 +841,11 @@ func TestWorkspaceEndpointsTrimHistoricalAgentRunPayloads(t *testing.T) {
 }
 
 func TestThreadEndpointsRoundTrip(t *testing.T) {
-	server, store := newTestServer(t)
+	fixture := newWorkspaceRouteTestFixture(t)
+	store := fixture.store
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "alpha bravo charlie")
 
-	router := server.Routes()
+	router := fixture.router
 	body, err := json.Marshal(CreateThreadRequest{
 		DocumentID:    documentID,
 		Title:         "Question",
@@ -831,8 +859,9 @@ func TestThreadEndpointsRoundTrip(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/threads?actor=owner&actor_type=human", bytes.NewReader(body))
+	request := httptest.NewRequest(http.MethodPost, fixture.workspaceAPIPath("/threads?actor=owner&actor_type=human"), bytes.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+fixture.token)
 	router.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("create thread status = %d, body = %s", recorder.Code, recorder.Body.String())
@@ -870,7 +899,8 @@ func TestThreadEndpointsRoundTrip(t *testing.T) {
 		t.Fatalf("documentId is already on the thread and should not be duplicated in anchor: %#v", anchorMap)
 	}
 
-	fetched := performJSONRequest(t, router, http.MethodGet, "/api/threads/"+threadID, nil)
+	var fetched map[string]any
+	authTestJSON(t, router, http.MethodGet, fixture.workspaceAPIPath("/threads/"+threadID), fixture.token, nil, http.StatusOK, &fetched)
 	gotThread, ok := fetched["thread"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected fetched thread object, got %#v", fetched["thread"])
@@ -881,10 +911,12 @@ func TestThreadEndpointsRoundTrip(t *testing.T) {
 }
 
 func TestCreateThreadIsIdempotentByClientOperationID(t *testing.T) {
-	server, store := newTestServer(t)
+	fixture := newWorkspaceRouteTestFixture(t)
+	server := fixture.server
+	store := fixture.store
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "alpha bravo charlie")
-	router := server.Routes()
-	events, unsubscribe := server.subscribers.Subscribe()
+	router := fixture.router
+	events, unsubscribe := server.workspaceBroker(fixture.workspaceID).Subscribe()
 	defer unsubscribe()
 	body, err := json.Marshal(CreateThreadRequest{
 		DocumentID:    documentID,
@@ -898,9 +930,10 @@ func TestCreateThreadIsIdempotentByClientOperationID(t *testing.T) {
 	}
 	post := func() map[string]any {
 		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodPost, "/api/threads?actor=owner&actor_type=human", bytes.NewReader(body))
+		request := httptest.NewRequest(http.MethodPost, fixture.workspaceAPIPath("/threads?actor=owner&actor_type=human"), bytes.NewReader(body))
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("X-Notty-Idempotency-Key", "intent_123")
+		request.Header.Set("Authorization", "Bearer "+fixture.token)
 		router.ServeHTTP(recorder, request)
 		if recorder.Code != http.StatusCreated {
 			t.Fatalf("create thread status = %d, body = %s", recorder.Code, recorder.Body.String())
@@ -1497,9 +1530,16 @@ func syncClientFromServer(t *testing.T, server *Server, room *DocumentRoom, conn
 	}
 }
 
-func dialDocumentWebsocketForTest(t *testing.T, serverURL, path string) *websocket.Conn {
+func dialDocumentWebsocketForTest(t *testing.T, serverURL, path string, tokens ...string) *websocket.Conn {
 	t.Helper()
 	wsURL := "ws" + strings.TrimPrefix(serverURL, "http") + path
+	if len(tokens) > 0 && strings.TrimSpace(tokens[0]) != "" {
+		separator := "?"
+		if strings.Contains(wsURL, "?") {
+			separator = "&"
+		}
+		wsURL += separator + "token=" + url.QueryEscape(tokens[0])
+	}
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial websocket %s: %v", path, err)
@@ -1706,6 +1746,43 @@ func newTestServer(t *testing.T) (*Server, *Store) {
 		_ = store.Close()
 	})
 	return NewServer(Config{}, store), store
+}
+
+type workspaceRouteTestFixture struct {
+	server      *Server
+	router      http.Handler
+	store       *Store
+	workspaceID string
+	token       string
+}
+
+func newWorkspaceRouteTestFixture(t *testing.T) workspaceRouteTestFixture {
+	t.Helper()
+	server, router := newAuthTestServer(t)
+	owner := authTestRegister(t, router, "route-owner@example.com", "owner-pass", "Route Owner")
+	workspace := authTestCreateWorkspace(t, router, owner.Token, "Route Test Tenant")
+	store, err := server.workspaceStore(workspace.ID)
+	if err != nil {
+		t.Fatalf("open workspace store: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+	return workspaceRouteTestFixture{
+		server:      server,
+		router:      router,
+		store:       store,
+		workspaceID: workspace.ID,
+		token:       owner.Token,
+	}
+}
+
+func (f workspaceRouteTestFixture) workspaceAPIPath(path string) string {
+	return "/api/workspaces/" + f.workspaceID + path
+}
+
+func (f workspaceRouteTestFixture) workspaceWSPath(path string) string {
+	return "/ws/workspaces/" + f.workspaceID + path
 }
 
 func assertNonOK(t *testing.T, handler http.Handler, method, target string, body []byte) {

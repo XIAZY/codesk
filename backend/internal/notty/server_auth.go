@@ -127,12 +127,16 @@ func (s *Server) handleAddWorkspaceMember(w http.ResponseWriter, r *http.Request
 	if !s.requireHumanPrincipal(w, r) {
 		return
 	}
+	auth, _ := authFromContext(r.Context())
+	if err := requirePermission(auth, ActionInviteMembers); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
 	var req AddWorkspaceMemberRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	auth, _ := authFromContext(r.Context())
 	invitedBy := ""
 	if auth != nil {
 		invitedBy = auth.UserID
@@ -166,6 +170,11 @@ func (s *Server) handleListDaemons(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateDaemon(w http.ResponseWriter, r *http.Request) {
 	if !s.requireHumanPrincipal(w, r) {
+		return
+	}
+	auth, _ := authFromContext(r.Context())
+	if err := requirePermission(auth, ActionManageDaemons); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
 	var req CreateDaemonRequest
@@ -216,6 +225,11 @@ func (s *Server) handleCreateDaemonReinstallToken(w http.ResponseWriter, r *http
 	if !s.requireHumanPrincipal(w, r) {
 		return
 	}
+	auth, _ := authFromContext(r.Context())
+	if err := requirePermission(auth, ActionManageDaemons); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
 	daemon, token, err := createDaemonReinstallToken(s.store.db, s.requestWorkspaceID(r), chi.URLParam(r, "daemonID"))
 	if err != nil {
 		status := http.StatusBadRequest
@@ -230,6 +244,11 @@ func (s *Server) handleCreateDaemonReinstallToken(w http.ResponseWriter, r *http
 
 func (s *Server) handleDeleteDaemon(w http.ResponseWriter, r *http.Request) {
 	if !s.requireHumanPrincipal(w, r) {
+		return
+	}
+	auth, _ := authFromContext(r.Context())
+	if err := requirePermission(auth, ActionManageDaemons); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
 	daemon, err := deleteDaemon(s.store.db, s.requestWorkspaceID(r), chi.URLParam(r, "daemonID"))
@@ -249,9 +268,6 @@ func (s *Server) handleDeleteDaemon(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) requireHuman(next http.Handler) http.Handler {
-	if !s.authEnabled() {
-		return next
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth, err := s.authenticateHumanRequest(r)
 		if err != nil {
@@ -263,20 +279,6 @@ func (s *Server) requireHuman(next http.Handler) http.Handler {
 }
 
 func (s *Server) requireWorkspace(next http.Handler) http.Handler {
-	if !s.authEnabled() {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			workspaceID := firstNonEmptyString(chi.URLParam(r, "workspaceID"), s.store.Snapshot().WorkspaceID)
-			store, err := s.workspaceStore(workspaceID)
-			if err != nil {
-				writeError(w, http.StatusNotFound, err.Error())
-				return
-			}
-			ctx := contextWithWorkspaceID(r.Context(), workspaceID)
-			ctx = contextWithRequestStore(ctx, store)
-			ctx = contextWithRequestBroker(ctx, s.workspaceBroker(workspaceID))
-			next.ServeHTTP(w, r.WithContext(ctx))
-		})
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		workspaceID := strings.TrimSpace(chi.URLParam(r, "workspaceID"))
 		if workspaceID == "" {
@@ -340,6 +342,11 @@ func (s *Server) authenticateWorkspaceRequest(r *http.Request, workspaceID strin
 			return nil, err
 		}
 		base.WorkspaceID = workspaceID
+		base.MembershipRole = member.MembershipRole
+		// Guard against legacy/corrupt membership_role data in the workspace_members table.
+		if err := validateMembershipRole(base.MembershipRole); err != nil {
+			return nil, err
+		}
 		base.UserID = member.UserID
 		base.UserHandle = member.UserHandle
 		base.UserName = member.UserName

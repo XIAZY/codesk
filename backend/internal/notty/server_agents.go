@@ -10,9 +10,6 @@ import (
 )
 
 func (s *Server) requireHumanPrincipal(w http.ResponseWriter, r *http.Request) bool {
-	if !s.authEnabled() {
-		return true
-	}
 	auth, ok := authFromContext(r.Context())
 	if ok && auth.PrincipalKind == "human" {
 		return true
@@ -22,9 +19,6 @@ func (s *Server) requireHumanPrincipal(w http.ResponseWriter, r *http.Request) b
 }
 
 func (s *Server) requireAgentEndpointAccess(w http.ResponseWriter, r *http.Request, agentID string) bool {
-	if !s.authEnabled() {
-		return true
-	}
 	auth, ok := authFromContext(r.Context())
 	if !ok || auth == nil || auth.PrincipalKind == "human" {
 		return true
@@ -55,9 +49,6 @@ func (s *Server) requireAgentEndpointAccess(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) requireAgentEventEndpointAccess(w http.ResponseWriter, r *http.Request, eventID string) bool {
-	if !s.authEnabled() {
-		return true
-	}
 	auth, ok := authFromContext(r.Context())
 	if !ok || auth == nil || auth.PrincipalKind == "human" {
 		return true
@@ -74,9 +65,6 @@ func (s *Server) requireAgentEventEndpointAccess(w http.ResponseWriter, r *http.
 }
 
 func (s *Server) requireAgentRunEndpointAccess(w http.ResponseWriter, r *http.Request, runID string) bool {
-	if !s.authEnabled() {
-		return true
-	}
 	auth, ok := authFromContext(r.Context())
 	if !ok || auth == nil || auth.PrincipalKind == "human" {
 		return true
@@ -303,6 +291,11 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	if !s.requireHumanPrincipal(w, r) {
 		return
 	}
+	auth, _ := authFromContext(r.Context())
+	if err := requirePermission(auth, ActionManageAgents); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
 	var req CreateAgentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -312,7 +305,6 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "daemon id is required")
 		return
 	}
-	auth, _ := authFromContext(r.Context())
 	meta := operationMetaFromAuth(auth, "agent-create", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
 	agent, err := s.requestStore(r).CreateAgent(req, meta)
 	if err != nil {
@@ -327,13 +319,17 @@ func (s *Server) handleCreateDaemonAgent(w http.ResponseWriter, r *http.Request)
 	if !s.requireHumanPrincipal(w, r) {
 		return
 	}
+	auth, _ := authFromContext(r.Context())
+	if err := requirePermission(auth, ActionManageAgents); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
 	var req CreateAgentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	req.DaemonID = chi.URLParam(r, "daemonID")
-	auth, _ := authFromContext(r.Context())
 	meta := operationMetaFromAuth(auth, "daemon-agent-create", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
 	agent, err := s.requestStore(r).CreateAgent(req, meta)
 	if err != nil {
@@ -352,12 +348,16 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if !s.requireHumanPrincipal(w, r) {
 		return
 	}
+	auth, _ := authFromContext(r.Context())
+	if err := requirePermission(auth, ActionManageAgents); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
 	var req UpdateAgentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	auth, _ := authFromContext(r.Context())
 	meta := operationMetaFromAuth(auth, "agent-update", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
 	agent, err := s.requestStore(r).UpdateAgent(chi.URLParam(r, "id"), req, meta)
 	if err != nil {
@@ -401,6 +401,10 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	auth, _ := authFromContext(r.Context())
+	if err := requirePermission(auth, ActionManageAgents); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
 	meta := operationMetaFromAuth(auth, "agent-delete", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
 	agent, err := s.requestStore(r).DeleteAgent(chi.URLParam(r, "id"), meta)
 	if err != nil {

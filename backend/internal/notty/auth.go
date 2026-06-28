@@ -33,6 +33,7 @@ type AuthContext struct {
 	UserID         string
 	UserHandle     string
 	UserName       string
+	MembershipRole string
 	DaemonID       string
 	ActingAgentID  string
 	ActingAgentRef string
@@ -396,7 +397,7 @@ func createWorkspaceForAccount(db *sql.DB, account *Account, req CreateWorkspace
 		UserID:         user.ID,
 		UserHandle:     user.Handle,
 		UserName:       user.Name,
-		MembershipRole: "owner",
+		MembershipRole: MembershipRoleOwner,
 		Status:         "active",
 		CreatedAt:      now,
 		AcceptedAt:     now,
@@ -493,7 +494,7 @@ func addWorkspaceMember(db *sql.DB, workspaceID string, req AddWorkspaceMemberRe
 		UserID:         user.ID,
 		UserHandle:     user.Handle,
 		UserName:       user.Name,
-		MembershipRole: "member",
+		MembershipRole: MembershipRoleMember,
 		Status:         "active",
 		InvitedBy:      strings.TrimSpace(invitedBy),
 		CreatedAt:      now,

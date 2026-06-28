@@ -1108,97 +1108,6 @@ func (s *Store) CreateDocument(req CreateDocumentRequest, meta OperationMeta) (*
 	return created, nil
 }
 
-func (s *Store) CreateUser(req CreateUserRequest, meta OperationMeta) (*User, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	user, err := buildUser(req.Name, req.Handle, req.Role)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.ensureHandleAvailableLocked(user.Handle, "", ""); err != nil {
-		return nil, err
-	}
-	user.ID = "user_" + uuid.NewString()
-	user.CreatedAt = time.Now().UTC()
-	user.UpdatedAt = user.CreatedAt
-	s.state.Users[user.ID] = user
-	s.refreshThreadParticipantsLocked()
-	s.state.UpdatedAt = user.UpdatedAt
-	s.appendActivityLocked(&ActivityEvent{
-		Type:       "user.created",
-		ActorID:    meta.ActorID,
-		ActorType:  meta.ActorType,
-		Summary:    fmt.Sprintf("%s created user @%s", meta.ActorID, user.Handle),
-		OccurredAt: user.UpdatedAt,
-		Provenance: meta,
-	})
-	if err := s.persistLocked(); err != nil {
-		return nil, err
-	}
-	return cloneUser(user), nil
-}
-
-func (s *Store) UpdateUser(id string, req UpdateUserRequest, meta OperationMeta) (*User, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	user, ok := s.state.Users[id]
-	if !ok {
-		return nil, ErrNotFound
-	}
-	if name := strings.TrimSpace(req.Name); name != "" {
-		user.Name = name
-	}
-	if role := strings.TrimSpace(req.Role); role != "" {
-		user.Role = role
-	}
-	user.UpdatedAt = time.Now().UTC()
-	s.refreshThreadParticipantsLocked()
-	s.state.UpdatedAt = user.UpdatedAt
-	s.appendActivityLocked(&ActivityEvent{
-		Type:       "user.updated",
-		ActorID:    meta.ActorID,
-		ActorType:  meta.ActorType,
-		Summary:    fmt.Sprintf("%s updated user @%s", meta.ActorID, user.Handle),
-		OccurredAt: user.UpdatedAt,
-		Provenance: meta,
-	})
-	if err := s.persistLocked(); err != nil {
-		return nil, err
-	}
-	return cloneUser(user), nil
-}
-
-func (s *Store) DeleteUser(id string, meta OperationMeta) (*User, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	user, ok := s.state.Users[id]
-	if !ok {
-		return nil, ErrNotFound
-	}
-	if len(s.state.Users) == 1 {
-		return nil, errors.New("workspace must keep at least one human user")
-	}
-	delete(s.state.Users, id)
-	s.refreshThreadParticipantsLocked()
-	now := time.Now().UTC()
-	s.state.UpdatedAt = now
-	s.appendActivityLocked(&ActivityEvent{
-		Type:       "user.deleted",
-		ActorID:    meta.ActorID,
-		ActorType:  meta.ActorType,
-		Summary:    fmt.Sprintf("%s deleted user @%s", meta.ActorID, user.Handle),
-		OccurredAt: now,
-		Provenance: meta,
-	})
-	if err := s.persistLocked(); err != nil {
-		return nil, err
-	}
-	return cloneUser(user), nil
-}
-
 func (s *Store) CreateAgent(req CreateAgentRequest, meta OperationMeta) (*Agent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2122,28 +2031,6 @@ func documentLabel(document *Document) string {
 		return "document"
 	}
 	return "document " + document.ID
-}
-
-func buildUser(name, handle, role string) (*User, error) {
-	trimmedName := strings.TrimSpace(name)
-	if trimmedName == "" {
-		return nil, errors.New("user name is required")
-	}
-	validHandle, err := validateHandle(handle)
-	if err != nil {
-		return nil, err
-	}
-	trimmedRole := strings.TrimSpace(role)
-	if trimmedRole == "" {
-		trimmedRole = "Collaborates in the shared workspace"
-	}
-	return &User{
-		Handle: validHandle,
-		Name:   trimmedName,
-		Role:   trimmedRole,
-		Kind:   "human",
-		Status: "active",
-	}, nil
 }
 
 func buildAgent(handle, name, role, kind string) (*Agent, error) {

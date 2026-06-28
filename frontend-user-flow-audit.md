@@ -171,7 +171,7 @@ The current shape follows the earlier performance principle: workspace metadata 
 
 Edge cases:
 
-- `reduceWorkspaceEvent` ignores `user.created`, `user.updated`, and `user.deleted`, even though the backend publishes those events.
+- Direct user mutation events are not part of the current workspace API surface.
 - `workspace.activities` is included in backend snapshots and types, but the frontend Activity panel renders `agentEvents`, not `activities`.
 - Workspace websocket snapshot shape differs from HTTP workspace shape.
 

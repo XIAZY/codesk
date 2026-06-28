@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -176,16 +177,6 @@ func TestWorkspaceMemberAndAgentIdentifiersAreValidatedAndImmutable(t *testing.T
 		t.Fatalf("re-adding existing member should not create a replacement user, got %d users", userCount)
 	}
 
-	var updatedUser User
-	authTestJSON(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/users/"+member.UserID, owner.Token, UpdateUserRequest{
-		Name:   "Renamed Member",
-		Handle: "renamed_member",
-		Role:   "Reviewed but keeps handle",
-	}, http.StatusOK, &updatedUser)
-	if updatedUser.Handle != "member_one" || updatedUser.Name != "Renamed Member" {
-		t.Fatalf("user update should mutate profile fields but keep handle, got %#v", updatedUser)
-	}
-
 	var daemonResponse CreateDaemonResponse
 	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons", owner.Token, CreateDaemonRequest{Name: "Runtime daemon"}, http.StatusCreated, &daemonResponse)
 	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/daemon/status", daemonResponse.Token, UpdateDaemonStatusRequest{
@@ -241,6 +232,155 @@ func TestWorkspaceMemberAndAgentIdentifiersAreValidatedAndImmutable(t *testing.T
 	}, http.StatusOK, &updatedAgent)
 	if updatedAgent.Handle != "agent_one" || updatedAgent.Name != "Renamed Agent" {
 		t.Fatalf("agent update should mutate profile fields but keep handle, got %#v", updatedAgent)
+	}
+}
+
+func TestAuthenticatedWorkspaceUserMutationEndpointsAreUnavailable(t *testing.T) {
+	router := newAuthTestRouter(t)
+
+	owner := authTestRegister(t, router, "no-user-endpoints@example.com", "owner-pass", "Owner")
+	workspace := authTestCreateWorkspace(t, router, owner.Token, "No User Endpoints Tenant")
+
+	authTestStatus(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/users", owner.Token, map[string]string{
+		"name":   "Blocked User",
+		"handle": "blocked_user",
+		"role":   "Blocked",
+	}, http.StatusNotFound)
+	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/users/user-blocked", owner.Token, map[string]string{
+		"name": "Blocked User",
+	}, http.StatusNotFound)
+	authTestStatus(t, router, http.MethodDelete, "/api/workspaces/"+workspace.ID+"/users/user-blocked", owner.Token, nil, http.StatusNotFound)
+}
+
+func TestRouteTableMatchesAuthenticatedWorkspaceAllowlist(t *testing.T) {
+	server := NewServer(Config{JWTSecret: "test-secret"}, nil)
+	routes, ok := server.Routes().(chi.Routes)
+	if !ok {
+		t.Fatal("server routes should expose chi route table")
+	}
+
+	public := map[string]bool{
+		"GET /healthz":            true,
+		"POST /api/auth/register": true,
+		"POST /api/auth/login":    true,
+	}
+	human := map[string]bool{
+		"GET /api/auth/me":     true,
+		"GET /api/workspaces":  true,
+		"POST /api/workspaces": true,
+	}
+	workspaceAPI := map[string]bool{
+		"GET /api/workspaces/{workspaceID}/workspace":                                  true,
+		"GET /api/workspaces/{workspaceID}/members":                                    true,
+		"POST /api/workspaces/{workspaceID}/members":                                   true,
+		"GET /api/workspaces/{workspaceID}/daemons":                                    true,
+		"POST /api/workspaces/{workspaceID}/daemons":                                   true,
+		"PATCH /api/workspaces/{workspaceID}/daemon/status":                            true,
+		"POST /api/workspaces/{workspaceID}/daemons/{daemonID}/reinstall-token":        true,
+		"DELETE /api/workspaces/{workspaceID}/daemons/{daemonID}":                      true,
+		"POST /api/workspaces/{workspaceID}/daemons/{daemonID}/agents":                 true,
+		"POST /api/workspaces/{workspaceID}/documents":                                 true,
+		"GET /api/workspaces/{workspaceID}/documents/{id}/threads":                     true,
+		"POST /api/workspaces/{workspaceID}/agents":                                    true,
+		"PATCH /api/workspaces/{workspaceID}/agents/{id}":                              true,
+		"PATCH /api/workspaces/{workspaceID}/agents/{id}/session":                      true,
+		"DELETE /api/workspaces/{workspaceID}/agents/{id}":                             true,
+		"POST /api/workspaces/{workspaceID}/agents/{id}/runs":                          true,
+		"POST /api/workspaces/{workspaceID}/threads":                                   true,
+		"GET /api/workspaces/{workspaceID}/threads/{id}":                               true,
+		"POST /api/workspaces/{workspaceID}/threads/{id}/messages":                     true,
+		"POST /api/workspaces/{workspaceID}/presence":                                  true,
+		"POST /api/workspaces/{workspaceID}/agent-runs":                                true,
+		"PATCH /api/workspaces/{workspaceID}/agent-runs/{id}":                          true,
+		"POST /api/workspaces/{workspaceID}/agent-runs/{id}/stop":                      true,
+		"POST /api/workspaces/{workspaceID}/agent-events/claim":                        true,
+		"PATCH /api/workspaces/{workspaceID}/agent-events/{id}":                        true,
+		"GET /api/workspaces/{workspaceID}/agents/{id}/notifications":                  true,
+		"GET /api/workspaces/{workspaceID}/agent-notifications/{id}":                   true,
+		"PATCH /api/workspaces/{workspaceID}/agent-notifications/{id}":                 true,
+		"GET /api/workspaces/{workspaceID}/agents/{id}/inbox":                          true,
+		"GET /api/workspaces/{workspaceID}/agent-inbox/{id}":                           true,
+		"PATCH /api/workspaces/{workspaceID}/agent-inbox/{id}":                         true,
+		"GET /api/workspaces/{workspaceID}/agents/{id}/documents/{documentID}/diff":    true,
+		"POST /api/workspaces/{workspaceID}/agents/{id}/documents/{documentID}/viewed": true,
+	}
+	workspaceWS := map[string]bool{
+		"GET /ws/workspaces/{workspaceID}":                true,
+		"GET /ws/workspaces/{workspaceID}/documents/{id}": true,
+		"GET /ws/workspaces/{workspaceID}/documents-sync": true,
+	}
+	expected := map[string]string{}
+	addExpectedRoutes := func(kind string, routes map[string]bool) {
+		for route := range routes {
+			expected[route] = kind
+		}
+	}
+	addExpectedRoutes("public", public)
+	addExpectedRoutes("human", human)
+	addExpectedRoutes("workspace API", workspaceAPI)
+	addExpectedRoutes("workspace websocket", workspaceWS)
+
+	seen := map[string]string{}
+	if err := chi.Walk(routes, func(method string, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		key := method + " " + route
+		kind, ok := expected[key]
+		if !ok {
+			t.Fatalf("unexpected registered route %s", key)
+		}
+		switch kind {
+		case "public":
+			if !public[key] {
+				t.Fatalf("public route allowlist mismatch for %s", key)
+			}
+		case "human":
+			if !human[key] || strings.HasPrefix(route, "/api/workspaces/{workspaceID}") {
+				t.Fatalf("human-auth route allowlist mismatch for %s", key)
+			}
+		case "workspace API":
+			if !strings.HasPrefix(route, "/api/workspaces/{workspaceID}/") {
+				t.Fatalf("workspace API route must be workspace scoped, got %s", key)
+			}
+		case "workspace websocket":
+			if !strings.HasPrefix(route, "/ws/workspaces/{workspaceID}") {
+				t.Fatalf("websocket route must be workspace scoped, got %s", key)
+			}
+		default:
+			t.Fatalf("unclassified expected route %s kind %q", key, kind)
+		}
+		seen[key] = kind
+		return nil
+	}); err != nil {
+		t.Fatalf("walk routes: %v", err)
+	}
+	for key := range expected {
+		if _, ok := seen[key]; !ok {
+			t.Fatalf("expected route %s was not registered", key)
+		}
+	}
+}
+
+func TestLegacyNoAuthRoutesAreNotRegistered(t *testing.T) {
+	router := newAuthTestRouter(t)
+
+	cases := []struct {
+		method string
+		path   string
+		body   any
+	}{
+		{method: http.MethodGet, path: "/api/workspace"},
+		{method: http.MethodPost, path: "/api/documents", body: map[string]string{}},
+		{method: http.MethodPost, path: "/api/users", body: map[string]string{"name": "Blocked", "handle": "blocked"}},
+		{method: http.MethodPost, path: "/api/agents", body: map[string]string{"handle": "blocked", "name": "Blocked", "kind": "codex"}},
+		{method: http.MethodPost, path: "/api/threads", body: map[string]string{"documentId": "doc_missing"}},
+		{method: http.MethodPost, path: "/api/presence", body: map[string]string{"actorId": "user_missing"}},
+		{method: http.MethodPost, path: "/api/agent-runs", body: map[string]string{"agentId": "agent_missing"}},
+		{method: http.MethodGet, path: "/ws"},
+		{method: http.MethodGet, path: "/ws/documents/doc_missing"},
+		{method: http.MethodGet, path: "/ws/documents-sync"},
+	}
+
+	for _, tc := range cases {
+		authTestStatus(t, router, tc.method, tc.path, "", tc.body, http.StatusNotFound)
 	}
 }
 
@@ -586,6 +726,112 @@ func TestDaemonTokenDocumentUpdateHTTPRouteRemoved(t *testing.T) {
 	}
 	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/documents/"+document.ID, owner.Token, map[string]string{"path": "docs/renamed.md"}, http.StatusNotFound)
 	authTestStatus(t, router, http.MethodDelete, "/api/workspaces/"+workspace.ID+"/documents/"+document.ID, owner.Token, nil, http.StatusNotFound)
+}
+
+func TestWorkspaceInviteRouteRequiresManagementRole(t *testing.T) {
+	server, router := newAuthTestServer(t)
+
+	owner := authTestRegister(t, router, "invite-owner@example.com", "owner-pass", "Invite Owner")
+	workspace := authTestCreateWorkspace(t, router, owner.Token, "Invite Workspace")
+
+	member := authTestRegister(t, router, "invite-member@example.com", "owner-pass", "Invite Member")
+	authTestAddMember(t, router, owner.Token, workspace.ID, member.Account.Email, "member-handle")
+
+	invitedByMember := authTestRegister(t, router, "invite-member-target@example.com", "owner-pass", "Invite Member Target")
+	authTestStatus(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/members", member.Token, AddWorkspaceMemberRequest{
+		Email:  invitedByMember.Account.Email,
+		Handle: "blocked-member",
+	}, http.StatusForbidden)
+
+	admin := authTestRegister(t, router, "invite-admin@example.com", "owner-pass", "Invite Admin")
+	authTestAddMember(t, router, owner.Token, workspace.ID, admin.Account.Email, "admin-handle")
+	if _, err := server.store.db.Exec(
+		`UPDATE workspace_members SET membership_role = $1 WHERE workspace_id = $2 AND account_id = $3`,
+		MembershipRoleAdmin, workspace.ID, admin.Account.ID,
+	); err != nil {
+		t.Fatalf("promote member to admin: %v", err)
+	}
+	adminInviteTarget := authTestRegister(t, router, "invite-admin-target@example.com", "owner-pass", "Invite Admin Target")
+	authTestStatus(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/members", admin.Token, AddWorkspaceMemberRequest{
+		Email:  adminInviteTarget.Account.Email,
+		Handle: "admin-invite",
+	}, http.StatusCreated)
+
+	ownerInviteTarget := authTestRegister(t, router, "invite-owner-target@example.com", "owner-pass", "Invite Owner Target")
+	authTestStatus(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/members", owner.Token, AddWorkspaceMemberRequest{
+		Email:  ownerInviteTarget.Account.Email,
+		Handle: "owner-invite",
+	}, http.StatusCreated)
+}
+
+func TestWorkspaceAdminOnlyActionsRejectMembersAndAllowAdmins(t *testing.T) {
+	server, router := newAuthTestServer(t)
+
+	owner := authTestRegister(t, router, "admin-only-owner@example.com", "owner-pass", "Admin Only Owner")
+	workspace := authTestCreateWorkspace(t, router, owner.Token, "Admin Only Workspace")
+
+	admin := authTestRegister(t, router, "admin-only-admin@example.com", "owner-pass", "Admin Only Admin")
+	authTestAddMember(t, router, owner.Token, workspace.ID, admin.Account.Email, "admin-handle")
+	if _, err := server.store.db.Exec(
+		`UPDATE workspace_members SET membership_role = $1 WHERE workspace_id = $2 AND account_id = $3`,
+		MembershipRoleAdmin, workspace.ID, admin.Account.ID,
+	); err != nil {
+		t.Fatalf("promote member to admin: %v", err)
+	}
+
+	member := authTestRegister(t, router, "admin-only-member@example.com", "owner-pass", "Admin Only Member")
+	authTestAddMember(t, router, owner.Token, workspace.ID, member.Account.Email, "member-handle")
+
+	authTestStatus(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons", member.Token, CreateDaemonRequest{
+		Name: "member-daemon",
+	}, http.StatusForbidden)
+
+	var ownerDaemon CreateDaemonResponse
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons", owner.Token, CreateDaemonRequest{
+		Name: "owner-daemon",
+	}, http.StatusCreated, &ownerDaemon)
+
+	var ownerAgent Agent
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+ownerDaemon.Daemon.ID+"/agents", owner.Token, CreateAgentRequest{
+		Handle: "owner-agent",
+		Name:   "Owner Agent",
+		Role:   "Owner runs admin-only actions",
+		Kind:   "codex",
+	}, http.StatusCreated, &ownerAgent)
+
+	authTestStatus(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+ownerDaemon.Daemon.ID+"/agents", member.Token, CreateAgentRequest{
+		Handle: "member-agent",
+		Name:   "Member Agent",
+		Role:   "Blocked",
+		Kind:   "codex",
+	}, http.StatusForbidden)
+
+	authTestStatus(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/agents", member.Token, CreateAgentRequest{
+		DaemonID: ownerDaemon.Daemon.ID,
+		Handle:   "member-agent-2",
+		Name:     "Member Agent 2",
+		Role:     "Blocked",
+		Kind:     "codex",
+	}, http.StatusForbidden)
+
+	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/agents/"+ownerAgent.ID, member.Token, UpdateAgentRequest{
+		Name: "Blocked patch",
+	}, http.StatusForbidden)
+
+	authTestStatus(t, router, http.MethodDelete, "/api/workspaces/"+workspace.ID+"/agents/"+ownerAgent.ID, member.Token, nil, http.StatusForbidden)
+	authTestStatus(t, router, http.MethodDelete, "/api/workspaces/"+workspace.ID+"/daemons/"+ownerDaemon.Daemon.ID, member.Token, nil, http.StatusForbidden)
+
+	var adminDaemon CreateDaemonResponse
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons", admin.Token, CreateDaemonRequest{
+		Name: "admin-daemon",
+	}, http.StatusCreated, &adminDaemon)
+
+	authTestStatus(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+adminDaemon.Daemon.ID+"/agents", admin.Token, CreateAgentRequest{
+		Handle: "admin-agent",
+		Name:   "Admin Agent",
+		Role:   "Allowed",
+		Kind:   "codex",
+	}, http.StatusCreated)
 }
 
 type authTestWorkspace struct {
