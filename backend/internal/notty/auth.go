@@ -440,6 +440,11 @@ func addWorkspaceMember(db *sql.DB, workspaceID string, req AddWorkspaceMemberRe
 	if _, err := getWorkspace(db, workspaceID); err != nil {
 		return nil, err
 	}
+	if existing, err := workspaceMemberForAccount(db, workspaceID, account.ID); err == nil {
+		return existing, nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
 	now := time.Now().UTC()
 	handle, err := validateHandle(req.Handle)
 	if err != nil {
@@ -496,14 +501,17 @@ func addWorkspaceMember(db *sql.DB, workspaceID string, req AddWorkspaceMemberRe
 	}
 	if _, err = tx.Exec(
 		`INSERT INTO workspace_members (workspace_id, account_id, user_id, membership_role, status, invited_by, created_at, accepted_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		 ON CONFLICT (workspace_id, account_id)
-		 DO UPDATE SET user_id = EXCLUDED.user_id,
-		               membership_role = EXCLUDED.membership_role,
-		               status = 'active',
-		               accepted_at = EXCLUDED.accepted_at`,
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 		member.WorkspaceID, member.AccountID, member.UserID, member.MembershipRole, member.Status, member.InvitedBy, member.CreatedAt, member.AcceptedAt,
 	); err != nil {
+		if isUniqueViolation(err) {
+			_ = tx.Rollback()
+			err = nil
+			if existing, existingErr := workspaceMemberForAccount(db, workspaceID, account.ID); existingErr == nil {
+				return existing, nil
+			}
+			return nil, errors.New("Account is already a workspace member.")
+		}
 		return nil, err
 	}
 	if err = tx.Commit(); err != nil {

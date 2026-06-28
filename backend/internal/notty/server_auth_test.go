@@ -96,6 +96,11 @@ func TestCreateWorkspaceRequiresExplicitValidSlugAndHandle(t *testing.T) {
 		Slug:   "Product Workspace",
 		Handle: "owner-one",
 	}, http.StatusBadRequest, "Workspace slug can only contain lowercase letters, numbers, underscores, and dashes.")
+	authTestErrorContains(t, router, http.MethodPost, "/api/workspaces", owner.Token, CreateWorkspaceRequest{
+		Name:   "Product Workspace",
+		Slug:   " product-workspace ",
+		Handle: "owner-one",
+	}, http.StatusBadRequest, "Workspace slug can only contain lowercase letters, numbers, underscores, and dashes.")
 
 	authTestErrorContains(t, router, http.MethodPost, "/api/workspaces", owner.Token, CreateWorkspaceRequest{
 		Name: "Product Workspace",
@@ -106,6 +111,11 @@ func TestCreateWorkspaceRequiresExplicitValidSlugAndHandle(t *testing.T) {
 		Name:   "Product Workspace",
 		Slug:   "product-workspace",
 		Handle: "Owner One",
+	}, http.StatusBadRequest, "Handle can only contain lowercase letters, numbers, underscores, and dashes.")
+	authTestErrorContains(t, router, http.MethodPost, "/api/workspaces", owner.Token, CreateWorkspaceRequest{
+		Name:   "Product Workspace",
+		Slug:   "product-workspace",
+		Handle: " owner-one ",
 	}, http.StatusBadRequest, "Handle can only contain lowercase letters, numbers, underscores, and dashes.")
 
 	var first struct {
@@ -129,7 +139,7 @@ func TestCreateWorkspaceRequiresExplicitValidSlugAndHandle(t *testing.T) {
 }
 
 func TestWorkspaceMemberAndAgentIdentifiersAreValidatedAndImmutable(t *testing.T) {
-	router := newAuthTestRouter(t)
+	server, router := newAuthTestServer(t)
 
 	owner := authTestRegister(t, router, "identifier-owner@example.com", "owner-pass", "Identifier Owner")
 	workspace := authTestCreateWorkspace(t, router, owner.Token, "Identifier Tenant")
@@ -142,8 +152,30 @@ func TestWorkspaceMemberAndAgentIdentifiersAreValidatedAndImmutable(t *testing.T
 		Email:  "identifier-member@example.com",
 		Handle: "Member One",
 	}, http.StatusBadRequest, "Handle can only contain lowercase letters, numbers, underscores, and dashes.")
+	authTestErrorContains(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/members", owner.Token, AddWorkspaceMemberRequest{
+		Email:  "identifier-member@example.com",
+		Handle: " member_one ",
+	}, http.StatusBadRequest, "Handle can only contain lowercase letters, numbers, underscores, and dashes.")
 
 	member := authTestAddMember(t, router, owner.Token, workspace.ID, "identifier-member@example.com", "member_one")
+	var repeatedAdd struct {
+		Member WorkspaceMember `json:"member"`
+	}
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/members", owner.Token, AddWorkspaceMemberRequest{
+		Email:  "identifier-member@example.com",
+		Handle: "other_member",
+	}, http.StatusCreated, &repeatedAdd)
+	if repeatedAdd.Member.UserID != member.UserID || repeatedAdd.Member.UserHandle != member.UserHandle {
+		t.Fatalf("re-adding existing member should return original user identity, first=%#v repeated=%#v", member, repeatedAdd.Member)
+	}
+	var userCount int
+	if err := server.store.db.QueryRow(`SELECT COUNT(*) FROM users WHERE workspace_id = $1`, workspace.ID).Scan(&userCount); err != nil {
+		t.Fatalf("count users: %v", err)
+	}
+	if userCount != 2 {
+		t.Fatalf("re-adding existing member should not create a replacement user, got %d users", userCount)
+	}
+
 	var updatedUser User
 	authTestJSON(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/users/"+member.UserID, owner.Token, UpdateUserRequest{
 		Name:   "Renamed Member",
@@ -170,6 +202,12 @@ func TestWorkspaceMemberAndAgentIdentifiersAreValidatedAndImmutable(t *testing.T
 
 	authTestErrorContains(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+daemonResponse.Daemon.ID+"/agents", owner.Token, CreateAgentRequest{
 		Handle: "Agent One",
+		Name:   "Agent One",
+		Role:   "Review changes",
+		Kind:   "codex",
+	}, http.StatusBadRequest, "Handle can only contain lowercase letters, numbers, underscores, and dashes.")
+	authTestErrorContains(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+daemonResponse.Daemon.ID+"/agents", owner.Token, CreateAgentRequest{
+		Handle: " agent_one ",
 		Name:   "Agent One",
 		Role:   "Review changes",
 		Kind:   "codex",
