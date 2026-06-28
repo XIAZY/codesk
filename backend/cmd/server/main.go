@@ -26,6 +26,9 @@ func main() {
 	if cfg.DatabaseURL == "" {
 		log.Fatal("NOTTY_DATABASE_URL is required")
 	}
+	if cfg.JWTSecret == "" {
+		log.Fatal("NOTTY_JWT_SECRET is required")
+	}
 	store, err := notty.NewStore(cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("create store: %v", err)

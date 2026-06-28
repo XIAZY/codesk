@@ -229,7 +229,7 @@ Humans authenticate with email/password:
 - Frontend sends `Authorization: Bearer <jwt>` on HTTP requests.
 - Browser websockets may pass the JWT as `?token=<jwt>` because browser WebSocket APIs cannot set arbitrary headers.
 
-JWTs are signed with `NOTTY_JWT_SECRET`. Auth is enabled when both `NOTTY_JWT_SECRET` and Postgres are configured.
+JWTs are signed with `NOTTY_JWT_SECRET`. The backend requires both `NOTTY_JWT_SECRET` and Postgres.
 
 ### Daemon Authentication
 
@@ -1186,9 +1186,6 @@ AgentEvent:
 | `POST` | `/api/workspaces/{workspaceID}/daemons/{daemonID}/agents` | human | `CreateAgentRequest` without `daemonId` | `Agent` | preferred agent creation |
 | `POST` | `/api/workspaces/{workspaceID}/documents` | human or daemon | `CreateDocumentRequest` | `DocumentMetadata` | create empty document stream |
 | `GET` | `/api/workspaces/{workspaceID}/documents/{id}/threads` | human or daemon | none | `{threads}` | document thread list |
-| `POST` | `/api/workspaces/{workspaceID}/users` | human or daemon | `CreateUserRequest` | `User` | legacy/internal user records |
-| `PATCH` | `/api/workspaces/{workspaceID}/users/{id}` | human or daemon | `UpdateUserRequest` | `User` | legacy/internal user records |
-| `DELETE` | `/api/workspaces/{workspaceID}/users/{id}` | human or daemon | none | `{"status":"deleted"}` | legacy/internal user records |
 | `POST` | `/api/workspaces/{workspaceID}/agents` | human | `CreateAgentRequest` with `daemonId` | `Agent` | alternate agent creation |
 | `PATCH` | `/api/workspaces/{workspaceID}/agents/{id}` | human | `UpdateAgentRequest` | `Agent` | edit agent |
 | `PATCH` | `/api/workspaces/{workspaceID}/agents/{id}/session` | agent/daemon scoped | `UpdateAgentSessionRequest` | `Agent` | daemon runtime status |
@@ -1358,9 +1355,6 @@ Known event types:
 - `agent.deleted`
 - `agent.run.updated`
 - `agent.event.updated`
-- `user.created`
-- `user.updated`
-- `user.deleted`
 
 Document websocket:
 
@@ -1671,7 +1665,7 @@ Important backend environment variables:
 
 - `NOTTY_PORT`: backend port, default `8080`.
 - `NOTTY_DATABASE_URL`: Postgres DSN.
-- `NOTTY_JWT_SECRET`: enables JWT auth when Postgres is configured.
+- `NOTTY_JWT_SECRET`: required JWT signing secret.
 - `NOTTY_PPROF_ADDR`: optional pprof bind address.
 
 Important deployment environment variables in `deploy/env/prod.deploy.env`:

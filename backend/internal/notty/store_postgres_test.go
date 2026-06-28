@@ -47,14 +47,11 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 		t.Fatalf("create agent: %v", err)
 	}
 	assertSharedAgentPrompt(t, agent.SystemPrompt, "PG Reviewer", "pg-reviewer", "Reviews threaded work")
-	user, err := store.CreateUser(CreateUserRequest{
-		Name:   "Ada Proof",
-		Handle: "adaproof",
-		Role:   "Database validation user",
-	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
-	if err != nil {
-		t.Fatalf("create user: %v", err)
+	users := SortedUsers(store.Snapshot())
+	if len(users) == 0 {
+		t.Fatal("expected seeded workspace user")
 	}
+	user := users[0]
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "# notty\n\n")
 	thread, _, _, err := store.CreateThread(CreateThreadRequest{
 		DocumentID:    documentID,

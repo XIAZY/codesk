@@ -33,10 +33,6 @@ func NewServer(cfg Config, store *Store) *Server {
 	}
 }
 
-func (s *Server) authEnabled() bool {
-	return strings.TrimSpace(s.cfg.JWTSecret) != "" && s.store != nil && s.store.db != nil
-}
-
 func (s *Server) workspaceStore(workspaceID string) (*Store, error) {
 	workspaceID = strings.TrimSpace(workspaceID)
 	if workspaceID == "" {

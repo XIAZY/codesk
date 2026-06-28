@@ -240,15 +240,40 @@ func TestAuthenticatedWorkspaceUserMutationEndpointsAreUnavailable(t *testing.T)
 	owner := authTestRegister(t, router, "no-user-endpoints@example.com", "owner-pass", "Owner")
 	workspace := authTestCreateWorkspace(t, router, owner.Token, "No User Endpoints Tenant")
 
-	authTestStatus(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/users", owner.Token, CreateUserRequest{
-		Name:   "Blocked User",
-		Handle: "blocked_user",
-		Role:   "Blocked",
+	authTestStatus(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/users", owner.Token, map[string]string{
+		"name":   "Blocked User",
+		"handle": "blocked_user",
+		"role":   "Blocked",
 	}, http.StatusNotFound)
-	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/users/user-blocked", owner.Token, UpdateUserRequest{
-		Name: "Blocked User",
+	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/users/user-blocked", owner.Token, map[string]string{
+		"name": "Blocked User",
 	}, http.StatusNotFound)
 	authTestStatus(t, router, http.MethodDelete, "/api/workspaces/"+workspace.ID+"/users/user-blocked", owner.Token, nil, http.StatusNotFound)
+}
+
+func TestLegacyNoAuthRoutesAreNotRegistered(t *testing.T) {
+	router := newAuthTestRouter(t)
+
+	cases := []struct {
+		method string
+		path   string
+		body   any
+	}{
+		{method: http.MethodGet, path: "/api/workspace"},
+		{method: http.MethodPost, path: "/api/documents", body: map[string]string{}},
+		{method: http.MethodPost, path: "/api/users", body: map[string]string{"name": "Blocked", "handle": "blocked"}},
+		{method: http.MethodPost, path: "/api/agents", body: map[string]string{"handle": "blocked", "name": "Blocked", "kind": "codex"}},
+		{method: http.MethodPost, path: "/api/threads", body: map[string]string{"documentId": "doc_missing"}},
+		{method: http.MethodPost, path: "/api/presence", body: map[string]string{"actorId": "user_missing"}},
+		{method: http.MethodPost, path: "/api/agent-runs", body: map[string]string{"agentId": "agent_missing"}},
+		{method: http.MethodGet, path: "/ws"},
+		{method: http.MethodGet, path: "/ws/documents/doc_missing"},
+		{method: http.MethodGet, path: "/ws/documents-sync"},
+	}
+
+	for _, tc := range cases {
+		authTestStatus(t, router, tc.method, tc.path, "", tc.body, http.StatusNotFound)
+	}
 }
 
 func TestDaemonTokenIsWorkspaceScopedAndCanActAsWorkspaceAgent(t *testing.T) {

@@ -363,18 +363,6 @@ type UpdateAgentEventRequest struct {
 	LastError string `json:"lastError"`
 }
 
-type CreateUserRequest struct {
-	Name   string `json:"name"`
-	Handle string `json:"handle"`
-	Role   string `json:"role"`
-}
-
-type UpdateUserRequest struct {
-	Name   string `json:"name"`
-	Handle string `json:"handle"`
-	Role   string `json:"role"`
-}
-
 type StartAgentRunRequest struct {
 	AgentID         string `json:"agentId"`
 	AgentName       string `json:"agentName"`

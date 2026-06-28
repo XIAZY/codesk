@@ -10,9 +10,6 @@ import (
 )
 
 func (s *Server) requireHumanPrincipal(w http.ResponseWriter, r *http.Request) bool {
-	if !s.authEnabled() {
-		return true
-	}
 	auth, ok := authFromContext(r.Context())
 	if ok && auth.PrincipalKind == "human" {
 		return true
@@ -22,9 +19,6 @@ func (s *Server) requireHumanPrincipal(w http.ResponseWriter, r *http.Request) b
 }
 
 func (s *Server) requireAgentEndpointAccess(w http.ResponseWriter, r *http.Request, agentID string) bool {
-	if !s.authEnabled() {
-		return true
-	}
 	auth, ok := authFromContext(r.Context())
 	if !ok || auth == nil || auth.PrincipalKind == "human" {
 		return true
@@ -55,9 +49,6 @@ func (s *Server) requireAgentEndpointAccess(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) requireAgentEventEndpointAccess(w http.ResponseWriter, r *http.Request, eventID string) bool {
-	if !s.authEnabled() {
-		return true
-	}
 	auth, ok := authFromContext(r.Context())
 	if !ok || auth == nil || auth.PrincipalKind == "human" {
 		return true
@@ -74,9 +65,6 @@ func (s *Server) requireAgentEventEndpointAccess(w http.ResponseWriter, r *http.
 }
 
 func (s *Server) requireAgentRunEndpointAccess(w http.ResponseWriter, r *http.Request, runID string) bool {
-	if !s.authEnabled() {
-		return true
-	}
 	auth, ok := authFromContext(r.Context())
 	if !ok || auth == nil || auth.PrincipalKind == "human" {
 		return true

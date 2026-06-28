@@ -268,9 +268,6 @@ func (s *Server) handleDeleteDaemon(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) requireHuman(next http.Handler) http.Handler {
-	if !s.authEnabled() {
-		return next
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth, err := s.authenticateHumanRequest(r)
 		if err != nil {
@@ -282,20 +279,6 @@ func (s *Server) requireHuman(next http.Handler) http.Handler {
 }
 
 func (s *Server) requireWorkspace(next http.Handler) http.Handler {
-	if !s.authEnabled() {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			workspaceID := firstNonEmptyString(chi.URLParam(r, "workspaceID"), s.store.Snapshot().WorkspaceID)
-			store, err := s.workspaceStore(workspaceID)
-			if err != nil {
-				writeError(w, http.StatusNotFound, err.Error())
-				return
-			}
-			ctx := contextWithWorkspaceID(r.Context(), workspaceID)
-			ctx = contextWithRequestStore(ctx, store)
-			ctx = contextWithRequestBroker(ctx, s.workspaceBroker(workspaceID))
-			next.ServeHTTP(w, r.WithContext(ctx))
-		})
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		workspaceID := strings.TrimSpace(chi.URLParam(r, "workspaceID"))
 		if workspaceID == "" {
