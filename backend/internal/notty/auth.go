@@ -402,9 +402,6 @@ func createWorkspaceForAccount(db *sql.DB, account *Account, req CreateWorkspace
 		CreatedAt:      now,
 		AcceptedAt:     now,
 	}
-	if err := validateMembershipRole(member.MembershipRole); err != nil {
-		return nil, nil, err
-	}
 	if _, err = tx.Exec(
 		`INSERT INTO workspace_members (workspace_id, account_id, user_id, membership_role, status, invited_by, created_at, accepted_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
@@ -502,9 +499,6 @@ func addWorkspaceMember(db *sql.DB, workspaceID string, req AddWorkspaceMemberRe
 		InvitedBy:      strings.TrimSpace(invitedBy),
 		CreatedAt:      now,
 		AcceptedAt:     now,
-	}
-	if err := validateMembershipRole(member.MembershipRole); err != nil {
-		return nil, err
 	}
 	if _, err = tx.Exec(
 		`INSERT INTO workspace_members (workspace_id, account_id, user_id, membership_role, status, invited_by, created_at, accepted_at)

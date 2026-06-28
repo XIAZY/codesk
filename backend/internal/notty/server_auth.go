@@ -360,6 +360,7 @@ func (s *Server) authenticateWorkspaceRequest(r *http.Request, workspaceID strin
 		}
 		base.WorkspaceID = workspaceID
 		base.MembershipRole = member.MembershipRole
+		// Guard against legacy/corrupt membership_role data in the workspace_members table.
 		if err := validateMembershipRole(base.MembershipRole); err != nil {
 			return nil, err
 		}
