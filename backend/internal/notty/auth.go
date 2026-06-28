@@ -33,6 +33,7 @@ type AuthContext struct {
 	UserID         string
 	UserHandle     string
 	UserName       string
+	MembershipRole string
 	DaemonID       string
 	ActingAgentID  string
 	ActingAgentRef string
@@ -396,10 +397,13 @@ func createWorkspaceForAccount(db *sql.DB, account *Account, req CreateWorkspace
 		UserID:         user.ID,
 		UserHandle:     user.Handle,
 		UserName:       user.Name,
-		MembershipRole: "owner",
+		MembershipRole: MembershipRoleOwner,
 		Status:         "active",
 		CreatedAt:      now,
 		AcceptedAt:     now,
+	}
+	if err := validateMembershipRole(member.MembershipRole); err != nil {
+		return nil, nil, err
 	}
 	if _, err = tx.Exec(
 		`INSERT INTO workspace_members (workspace_id, account_id, user_id, membership_role, status, invited_by, created_at, accepted_at)
@@ -493,11 +497,14 @@ func addWorkspaceMember(db *sql.DB, workspaceID string, req AddWorkspaceMemberRe
 		UserID:         user.ID,
 		UserHandle:     user.Handle,
 		UserName:       user.Name,
-		MembershipRole: "member",
+		MembershipRole: MembershipRoleMember,
 		Status:         "active",
 		InvitedBy:      strings.TrimSpace(invitedBy),
 		CreatedAt:      now,
 		AcceptedAt:     now,
+	}
+	if err := validateMembershipRole(member.MembershipRole); err != nil {
+		return nil, err
 	}
 	if _, err = tx.Exec(
 		`INSERT INTO workspace_members (workspace_id, account_id, user_id, membership_role, status, invited_by, created_at, accepted_at)

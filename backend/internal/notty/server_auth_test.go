@@ -588,6 +588,112 @@ func TestDaemonTokenDocumentUpdateHTTPRouteRemoved(t *testing.T) {
 	authTestStatus(t, router, http.MethodDelete, "/api/workspaces/"+workspace.ID+"/documents/"+document.ID, owner.Token, nil, http.StatusNotFound)
 }
 
+func TestWorkspaceInviteRouteRequiresManagementRole(t *testing.T) {
+	server, router := newAuthTestServer(t)
+
+	owner := authTestRegister(t, router, "invite-owner@example.com", "owner-pass", "Invite Owner")
+	workspace := authTestCreateWorkspace(t, router, owner.Token, "Invite Workspace")
+
+	member := authTestRegister(t, router, "invite-member@example.com", "owner-pass", "Invite Member")
+	authTestAddMember(t, router, owner.Token, workspace.ID, member.Account.Email, "member-handle")
+
+	invitedByMember := authTestRegister(t, router, "invite-member-target@example.com", "owner-pass", "Invite Member Target")
+	authTestStatus(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/members", member.Token, AddWorkspaceMemberRequest{
+		Email:  invitedByMember.Account.Email,
+		Handle: "blocked-member",
+	}, http.StatusForbidden)
+
+	admin := authTestRegister(t, router, "invite-admin@example.com", "owner-pass", "Invite Admin")
+	authTestAddMember(t, router, owner.Token, workspace.ID, admin.Account.Email, "admin-handle")
+	if _, err := server.store.db.Exec(
+		`UPDATE workspace_members SET membership_role = $1 WHERE workspace_id = $2 AND account_id = $3`,
+		MembershipRoleAdmin, workspace.ID, admin.Account.ID,
+	); err != nil {
+		t.Fatalf("promote member to admin: %v", err)
+	}
+	adminInviteTarget := authTestRegister(t, router, "invite-admin-target@example.com", "owner-pass", "Invite Admin Target")
+	authTestStatus(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/members", admin.Token, AddWorkspaceMemberRequest{
+		Email:  adminInviteTarget.Account.Email,
+		Handle: "admin-invite",
+	}, http.StatusCreated)
+
+	ownerInviteTarget := authTestRegister(t, router, "invite-owner-target@example.com", "owner-pass", "Invite Owner Target")
+	authTestStatus(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/members", owner.Token, AddWorkspaceMemberRequest{
+		Email:  ownerInviteTarget.Account.Email,
+		Handle: "owner-invite",
+	}, http.StatusCreated)
+}
+
+func TestWorkspaceAdminOnlyActionsRejectMembersAndAllowAdmins(t *testing.T) {
+	server, router := newAuthTestServer(t)
+
+	owner := authTestRegister(t, router, "admin-only-owner@example.com", "owner-pass", "Admin Only Owner")
+	workspace := authTestCreateWorkspace(t, router, owner.Token, "Admin Only Workspace")
+
+	admin := authTestRegister(t, router, "admin-only-admin@example.com", "owner-pass", "Admin Only Admin")
+	authTestAddMember(t, router, owner.Token, workspace.ID, admin.Account.Email, "admin-handle")
+	if _, err := server.store.db.Exec(
+		`UPDATE workspace_members SET membership_role = $1 WHERE workspace_id = $2 AND account_id = $3`,
+		MembershipRoleAdmin, workspace.ID, admin.Account.ID,
+	); err != nil {
+		t.Fatalf("promote member to admin: %v", err)
+	}
+
+	member := authTestRegister(t, router, "admin-only-member@example.com", "owner-pass", "Admin Only Member")
+	authTestAddMember(t, router, owner.Token, workspace.ID, member.Account.Email, "member-handle")
+
+	authTestStatus(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons", member.Token, CreateDaemonRequest{
+		Name: "member-daemon",
+	}, http.StatusForbidden)
+
+	var ownerDaemon CreateDaemonResponse
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons", owner.Token, CreateDaemonRequest{
+		Name: "owner-daemon",
+	}, http.StatusCreated, &ownerDaemon)
+
+	var ownerAgent Agent
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+ownerDaemon.Daemon.ID+"/agents", owner.Token, CreateAgentRequest{
+		Handle: "owner-agent",
+		Name:   "Owner Agent",
+		Role:   "Owner runs admin-only actions",
+		Kind:   "codex",
+	}, http.StatusCreated, &ownerAgent)
+
+	authTestStatus(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+ownerDaemon.Daemon.ID+"/agents", member.Token, CreateAgentRequest{
+		Handle: "member-agent",
+		Name:   "Member Agent",
+		Role:   "Blocked",
+		Kind:   "codex",
+	}, http.StatusForbidden)
+
+	authTestStatus(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/agents", member.Token, CreateAgentRequest{
+		DaemonID: ownerDaemon.Daemon.ID,
+		Handle:   "member-agent-2",
+		Name:     "Member Agent 2",
+		Role:     "Blocked",
+		Kind:     "codex",
+	}, http.StatusForbidden)
+
+	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/agents/"+ownerAgent.ID, member.Token, UpdateAgentRequest{
+		Name: "Blocked patch",
+	}, http.StatusForbidden)
+
+	authTestStatus(t, router, http.MethodDelete, "/api/workspaces/"+workspace.ID+"/agents/"+ownerAgent.ID, member.Token, nil, http.StatusForbidden)
+	authTestStatus(t, router, http.MethodDelete, "/api/workspaces/"+workspace.ID+"/daemons/"+ownerDaemon.Daemon.ID, member.Token, nil, http.StatusForbidden)
+
+	var adminDaemon CreateDaemonResponse
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons", admin.Token, CreateDaemonRequest{
+		Name: "admin-daemon",
+	}, http.StatusCreated, &adminDaemon)
+
+	authTestStatus(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+adminDaemon.Daemon.ID+"/agents", admin.Token, CreateAgentRequest{
+		Handle: "admin-agent",
+		Name:   "Admin Agent",
+		Role:   "Allowed",
+		Kind:   "codex",
+	}, http.StatusCreated)
+}
+
 type authTestWorkspace struct {
 	ID          string
 	OwnerUserID string
