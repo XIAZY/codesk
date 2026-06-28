@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -249,6 +250,113 @@ func TestAuthenticatedWorkspaceUserMutationEndpointsAreUnavailable(t *testing.T)
 		"name": "Blocked User",
 	}, http.StatusNotFound)
 	authTestStatus(t, router, http.MethodDelete, "/api/workspaces/"+workspace.ID+"/users/user-blocked", owner.Token, nil, http.StatusNotFound)
+}
+
+func TestRouteTableMatchesAuthenticatedWorkspaceAllowlist(t *testing.T) {
+	server := NewServer(Config{JWTSecret: "test-secret"}, nil)
+	routes, ok := server.Routes().(chi.Routes)
+	if !ok {
+		t.Fatal("server routes should expose chi route table")
+	}
+
+	public := map[string]bool{
+		"GET /healthz":            true,
+		"POST /api/auth/register": true,
+		"POST /api/auth/login":    true,
+	}
+	human := map[string]bool{
+		"GET /api/auth/me":     true,
+		"GET /api/workspaces":  true,
+		"POST /api/workspaces": true,
+	}
+	workspaceAPI := map[string]bool{
+		"GET /api/workspaces/{workspaceID}/workspace":                                  true,
+		"GET /api/workspaces/{workspaceID}/members":                                    true,
+		"POST /api/workspaces/{workspaceID}/members":                                   true,
+		"GET /api/workspaces/{workspaceID}/daemons":                                    true,
+		"POST /api/workspaces/{workspaceID}/daemons":                                   true,
+		"PATCH /api/workspaces/{workspaceID}/daemon/status":                            true,
+		"POST /api/workspaces/{workspaceID}/daemons/{daemonID}/reinstall-token":        true,
+		"DELETE /api/workspaces/{workspaceID}/daemons/{daemonID}":                      true,
+		"POST /api/workspaces/{workspaceID}/daemons/{daemonID}/agents":                 true,
+		"POST /api/workspaces/{workspaceID}/documents":                                 true,
+		"GET /api/workspaces/{workspaceID}/documents/{id}/threads":                     true,
+		"POST /api/workspaces/{workspaceID}/agents":                                    true,
+		"PATCH /api/workspaces/{workspaceID}/agents/{id}":                              true,
+		"PATCH /api/workspaces/{workspaceID}/agents/{id}/session":                      true,
+		"DELETE /api/workspaces/{workspaceID}/agents/{id}":                             true,
+		"POST /api/workspaces/{workspaceID}/agents/{id}/runs":                          true,
+		"POST /api/workspaces/{workspaceID}/threads":                                   true,
+		"GET /api/workspaces/{workspaceID}/threads/{id}":                               true,
+		"POST /api/workspaces/{workspaceID}/threads/{id}/messages":                     true,
+		"POST /api/workspaces/{workspaceID}/presence":                                  true,
+		"POST /api/workspaces/{workspaceID}/agent-runs":                                true,
+		"PATCH /api/workspaces/{workspaceID}/agent-runs/{id}":                          true,
+		"POST /api/workspaces/{workspaceID}/agent-runs/{id}/stop":                      true,
+		"POST /api/workspaces/{workspaceID}/agent-events/claim":                        true,
+		"PATCH /api/workspaces/{workspaceID}/agent-events/{id}":                        true,
+		"GET /api/workspaces/{workspaceID}/agents/{id}/notifications":                  true,
+		"GET /api/workspaces/{workspaceID}/agent-notifications/{id}":                   true,
+		"PATCH /api/workspaces/{workspaceID}/agent-notifications/{id}":                 true,
+		"GET /api/workspaces/{workspaceID}/agents/{id}/inbox":                          true,
+		"GET /api/workspaces/{workspaceID}/agent-inbox/{id}":                           true,
+		"PATCH /api/workspaces/{workspaceID}/agent-inbox/{id}":                         true,
+		"GET /api/workspaces/{workspaceID}/agents/{id}/documents/{documentID}/diff":    true,
+		"POST /api/workspaces/{workspaceID}/agents/{id}/documents/{documentID}/viewed": true,
+	}
+	workspaceWS := map[string]bool{
+		"GET /ws/workspaces/{workspaceID}":                true,
+		"GET /ws/workspaces/{workspaceID}/documents/{id}": true,
+		"GET /ws/workspaces/{workspaceID}/documents-sync": true,
+	}
+	expected := map[string]string{}
+	addExpectedRoutes := func(kind string, routes map[string]bool) {
+		for route := range routes {
+			expected[route] = kind
+		}
+	}
+	addExpectedRoutes("public", public)
+	addExpectedRoutes("human", human)
+	addExpectedRoutes("workspace API", workspaceAPI)
+	addExpectedRoutes("workspace websocket", workspaceWS)
+
+	seen := map[string]string{}
+	if err := chi.Walk(routes, func(method string, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		key := method + " " + route
+		kind, ok := expected[key]
+		if !ok {
+			t.Fatalf("unexpected registered route %s", key)
+		}
+		switch kind {
+		case "public":
+			if !public[key] {
+				t.Fatalf("public route allowlist mismatch for %s", key)
+			}
+		case "human":
+			if !human[key] || strings.HasPrefix(route, "/api/workspaces/{workspaceID}") {
+				t.Fatalf("human-auth route allowlist mismatch for %s", key)
+			}
+		case "workspace API":
+			if !strings.HasPrefix(route, "/api/workspaces/{workspaceID}/") {
+				t.Fatalf("workspace API route must be workspace scoped, got %s", key)
+			}
+		case "workspace websocket":
+			if !strings.HasPrefix(route, "/ws/workspaces/{workspaceID}") {
+				t.Fatalf("websocket route must be workspace scoped, got %s", key)
+			}
+		default:
+			t.Fatalf("unclassified expected route %s kind %q", key, kind)
+		}
+		seen[key] = kind
+		return nil
+	}); err != nil {
+		t.Fatalf("walk routes: %v", err)
+	}
+	for key := range expected {
+		if _, ok := seen[key]; !ok {
+			t.Fatalf("expected route %s was not registered", key)
+		}
+	}
 }
 
 func TestLegacyNoAuthRoutesAreNotRegistered(t *testing.T) {
