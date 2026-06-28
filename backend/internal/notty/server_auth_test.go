@@ -201,6 +201,12 @@ func TestWorkspaceMemberAndAgentIdentifiersAreValidatedAndImmutable(t *testing.T
 	}, http.StatusOK)
 
 	authTestErrorContains(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+daemonResponse.Daemon.ID+"/agents", owner.Token, CreateAgentRequest{
+		Handle: "member_one",
+		Name:   "Agent One",
+		Role:   "Review changes",
+		Kind:   "codex",
+	}, http.StatusBadRequest, "Handle is already taken.")
+	authTestErrorContains(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+daemonResponse.Daemon.ID+"/agents", owner.Token, CreateAgentRequest{
 		Handle: "Agent One",
 		Name:   "Agent One",
 		Role:   "Review changes",
@@ -220,6 +226,12 @@ func TestWorkspaceMemberAndAgentIdentifiersAreValidatedAndImmutable(t *testing.T
 		Role:   "Review changes",
 		Kind:   "codex",
 	}, http.StatusCreated, &agent)
+
+	_ = authTestRegister(t, router, "identifier-other-member@example.com", "member-pass", "Identifier Other Member")
+	authTestErrorContains(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/members", owner.Token, AddWorkspaceMemberRequest{
+		Email:  "identifier-other-member@example.com",
+		Handle: "agent_one",
+	}, http.StatusBadRequest, "Handle is already taken.")
 
 	var updatedAgent Agent
 	authTestJSON(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/agents/"+agent.ID, owner.Token, UpdateAgentRequest{
