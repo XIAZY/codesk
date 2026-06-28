@@ -1,6 +1,13 @@
 import * as Y from "yjs";
 import type { Agent, AgentRun, Daemon, ThreadAnchor, ThreadItem, WorkspaceEvent, WorkspaceState, WorkspaceSummary } from "./types";
 
+export const identifierPattern = "[a-z0-9_-]+";
+export const identifierHelpText = "Only lowercase letters, numbers, underscores, and dashes.";
+export const workspaceSlugMinLength = 2;
+export const workspaceSlugMaxLength = 64;
+export const handleMinLength = 2;
+export const handleMaxLength = 32;
+
 export type ReplaceOp = {
   start: number;
   end: number;
@@ -101,6 +108,16 @@ export function selectWorkspaceAfterAuth(workspaces: WorkspaceSummary[], preferr
     return preferredWorkspaceId;
   }
   return safeWorkspaces[0]?.id ?? "";
+}
+
+export function identifierFromName(value: string, maxLength: number) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, maxLength);
 }
 
 export function computeReplace(before: string, after: string): ReplaceOp {

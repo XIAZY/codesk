@@ -13,6 +13,8 @@ import {
   computeReplace,
   daemonStatus,
   encodeRelativeAnchor,
+  handleMaxLength,
+  identifierFromName,
   lineForOffset,
   lineStartsForText,
   reduceWorkspaceEvent,
@@ -85,6 +87,12 @@ describe("workspace reduction", () => {
 
     expect(selectWorkspaceAfterAuth(workspaces, "workspace_b")).toBe("workspace_b");
     expect(selectWorkspaceAfterAuth(workspaces, "missing")).toBe("workspace_a");
+  });
+
+  it("derives lowercase identifier suggestions without preserving invalid characters", () => {
+    expect(identifierFromName("Product Workspace!", 64)).toBe("product-workspace");
+    expect(identifierFromName("Mira Editor", handleMaxLength)).toBe("mira-editor");
+    expect(identifierFromName("  Already_valid-01  ", 64)).toBe("already_valid-01");
   });
 
   it("does not keep document namespace state from workspace events", () => {

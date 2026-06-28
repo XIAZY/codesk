@@ -10,8 +10,15 @@ import {
   buildDaemonReinstallCommand,
   buildDaemonUninstallCommand,
   daemonStatus,
+  handleMaxLength,
+  handleMinLength,
+  identifierFromName,
+  identifierHelpText,
+  identifierPattern,
   isMarkdownDocumentPath,
   selectWorkspaceAfterAuth,
+  workspaceSlugMaxLength,
+  workspaceSlugMinLength,
   type LineThreadGroup,
 } from "./logic";
 import { useRootNamespace } from "./useRootNamespace";
@@ -438,7 +445,7 @@ export function WorkspaceOnboarding({
   onSignOut: () => void;
 }) {
   const [mode, setMode] = useState<"create" | "join">("create");
-  const initialHandle = account?.email.split("@")[0] ?? "owner";
+  const initialHandle = identifierFromName(account?.email.split("@")[0] ?? "owner", handleMaxLength) || "owner";
 
   return (
     <main className="auth-screen picker-screen">
@@ -499,6 +506,8 @@ function CreateWorkspaceForm({
   onSelect: (id: string) => void;
 }) {
   const [name, setName] = useState("Product Workspace");
+  const [slug, setSlug] = useState(() => identifierFromName("Product Workspace", workspaceSlugMaxLength));
+  const [slugEdited, setSlugEdited] = useState(false);
   const [handle, setHandle] = useState(initialHandle);
   const [error, setError] = useState("");
 
@@ -506,7 +515,7 @@ function CreateWorkspaceForm({
     event.preventDefault();
     setError("");
     try {
-      const response = await api.createWorkspace({ name, handle });
+      const response = await api.createWorkspace({ name, slug, handle });
       const next = [...workspaces, response.workspace];
       onWorkspaces(next);
       onSelect(response.workspace.id);
@@ -523,11 +532,48 @@ function CreateWorkspaceForm({
       </div>
       <label className="field">
         <span className="lab">Workspace name</span>
-        <input value={name} onChange={(event) => setName(event.target.value)} required />
+        <input
+          value={name}
+          onChange={(event) => {
+            const next = event.target.value;
+            setName(next);
+            if (!slugEdited) {
+              setSlug(identifierFromName(next, workspaceSlugMaxLength));
+            }
+          }}
+          required
+        />
+      </label>
+      <label className="field">
+        <span className="lab">Workspace slug</span>
+        <input
+          aria-label="Workspace slug"
+          value={slug}
+          onChange={(event) => {
+            setSlug(event.target.value);
+            setSlugEdited(true);
+          }}
+          pattern={identifierPattern}
+          minLength={workspaceSlugMinLength}
+          maxLength={workspaceSlugMaxLength}
+          title={identifierHelpText}
+          required
+        />
+        <span className="hint">{identifierHelpText}</span>
       </label>
       <label className="field">
         <span className="lab">Your handle in this workspace</span>
-        <input value={handle} onChange={(event) => setHandle(event.target.value)} required />
+        <input
+          aria-label="Your handle in this workspace"
+          value={handle}
+          onChange={(event) => setHandle(event.target.value)}
+          pattern={identifierPattern}
+          minLength={handleMinLength}
+          maxLength={handleMaxLength}
+          title={identifierHelpText}
+          required
+        />
+        <span className="hint">{identifierHelpText}</span>
       </label>
       {error ? <p className="error-text">{error}</p> : null}
       <button className="btn accent full lg">Create and enter</button>
@@ -562,7 +608,7 @@ function WorkspacePicker({
       />
     );
   }
-  const initialHandle = account?.email.split("@")[0] ?? "owner";
+  const initialHandle = identifierFromName(account?.email.split("@")[0] ?? "owner", handleMaxLength) || "owner";
 
   return (
     <main className="auth-screen picker-screen">
@@ -2024,23 +2070,6 @@ function isDaemonOffline(daemon: Daemon) {
   return status === "disconnected" || status === "deleted";
 }
 
-// Handles allow lowercase letters, numbers, hyphen, and underscore (matches the
-// backend's normalizeHandle), capped at 32 chars.
-function sanitizeHandle(value: string) {
-  return value.toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 32);
-}
-
-// Derive a handle from a display name: lowercase, runs of disallowed characters
-// (spaces, punctuation) collapse to a single hyphen, trimmed at the edges.
-function handleFromName(value: string) {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 32);
-}
-
 // Example agent personas. One is picked at random per modal open to seed the
 // name/handle/role placeholders, so users see what each field is for.
 const EXAMPLE_PERSONAS: Array<{ name: string; role: string }> = [
@@ -2086,7 +2115,7 @@ function CreateAgentModal({ api, workspaceId, daemons, onClose, onDone }: { api:
   const [role, setRole] = useState("");
   const [example] = useState(randomPersona);
   const namePlaceholder = example.name;
-  const handlePlaceholder = handleFromName(example.name);
+  const handlePlaceholder = identifierFromName(example.name, handleMaxLength);
   const rolePlaceholder = example.role;
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -2152,7 +2181,7 @@ function CreateAgentModal({ api, workspaceId, daemons, onClose, onDone }: { api:
                   const next = event.target.value;
                   setName(next);
                   if (!handleEdited) {
-                    setHandle(handleFromName(next));
+                    setHandle(identifierFromName(next, handleMaxLength));
                   }
                 }}
                 required
@@ -2161,18 +2190,22 @@ function CreateAgentModal({ api, workspaceId, daemons, onClose, onDone }: { api:
             <label className="field">
               <span className="lab">Handle</span>
               <input
+                aria-label="Handle"
                 value={handle}
                 placeholder={handlePlaceholder}
-                maxLength={32}
+                pattern={identifierPattern}
+                minLength={handleMinLength}
+                maxLength={handleMaxLength}
+                title={identifierHelpText}
                 onChange={(event) => {
-                  const next = sanitizeHandle(event.target.value);
+                  const next = event.target.value;
                   setHandle(next);
                   // Re-enable auto-fill from the display name once the field is cleared.
                   setHandleEdited(next.length > 0);
                 }}
                 required
               />
-              <span className="hint">Alphanumeric, hyphen, or underscore (lowercased). Auto-filled from the display name; edit to override. Unique in this workspace.</span>
+              <span className="hint">{identifierHelpText} Auto-filled from the display name; edit to override. Unique in this workspace.</span>
             </label>
             <label className="field"><span className="lab">Role</span><textarea value={role} placeholder={rolePlaceholder} onChange={(event) => setRole(event.target.value)} required /></label>
             <div className="divider" />

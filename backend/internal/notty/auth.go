@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
@@ -47,8 +46,6 @@ type jwtClaims struct {
 	ExpiresAt   int64  `json:"exp"`
 	Issuer      string `json:"iss"`
 }
-
-var workspaceSlugPattern = regexp.MustCompile(`[^a-z0-9-]+`)
 
 func authFromContext(ctx context.Context) (*AuthContext, bool) {
 	auth, ok := ctx.Value(authContextKey{}).(*AuthContext)
@@ -211,71 +208,6 @@ func normalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }
 
-func normalizeWorkspaceSlug(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	value = workspaceSlugPattern.ReplaceAllString(value, "-")
-	value = strings.Trim(value, "-")
-	if value == "" {
-		value = "workspace"
-	}
-	return value
-}
-
-func suggestedHandle(value string, fallback string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	value = workspaceSlugPattern.ReplaceAllString(value, "-")
-	value = strings.Trim(value, "-")
-	if value == "" {
-		value = fallback
-	}
-	if value == "" {
-		value = "member"
-	}
-	return value
-}
-
-func uniqueWorkspaceHandle(db *sql.DB, workspaceID string, base string) (string, error) {
-	handle := suggestedHandle(base, "member")
-	for attempt := 0; attempt < 1000; attempt++ {
-		candidate := handle
-		if attempt > 0 {
-			candidate = fmt.Sprintf("%s-%d", handle, attempt+1)
-		}
-		var count int
-		if err := db.QueryRow(
-			`SELECT
-				(SELECT COUNT(*) FROM users WHERE workspace_id = $1 AND handle = $2) +
-				(SELECT COUNT(*) FROM agents WHERE workspace_id = $1 AND handle = $2)`,
-			workspaceID,
-			candidate,
-		).Scan(&count); err != nil {
-			return "", err
-		}
-		if count == 0 {
-			return candidate, nil
-		}
-	}
-	return "", fmt.Errorf("could not allocate unique handle for %q", handle)
-}
-
-func uniqueWorkspaceSlug(db *sql.DB, base string) (string, error) {
-	slug := normalizeWorkspaceSlug(base)
-	for attempt := 0; attempt < 1000; attempt++ {
-		candidate := slug
-		if attempt > 0 {
-			candidate = fmt.Sprintf("%s-%d", slug, attempt+1)
-		}
-		var count int
-		if err := db.QueryRow(`SELECT COUNT(*) FROM workspaces WHERE slug = $1`, candidate).Scan(&count); err != nil {
-			return "", err
-		}
-		if count == 0 {
-			return candidate, nil
-		}
-	}
-	return "", fmt.Errorf("could not allocate unique workspace slug for %q", slug)
-}
-
 func accountFromRow(row *sql.Row) (*Account, error) {
 	account := &Account{}
 	if err := row.Scan(&account.ID, &account.Email, &account.DisplayName, &account.CreatedAt, &account.UpdatedAt); err != nil {
@@ -402,9 +334,16 @@ func createWorkspaceForAccount(db *sql.DB, account *Account, req CreateWorkspace
 	}
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
-		name = "Untitled workspace"
+		return nil, nil, errors.New("Workspace name is required.")
 	}
-	slug, err := uniqueWorkspaceSlug(db, firstNonEmptyString(req.Slug, name))
+	slug, err := validateWorkspaceSlug(req.Slug)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := ensureWorkspaceSlugAvailable(db, slug); err != nil {
+		return nil, nil, err
+	}
+	handle, err := validateHandle(req.Handle)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -415,10 +354,6 @@ func createWorkspaceForAccount(db *sql.DB, account *Account, req CreateWorkspace
 		Name:      name,
 		CreatedAt: now,
 		UpdatedAt: now,
-	}
-	handle, err := uniqueWorkspaceHandle(db, workspace.ID, suggestedHandle(req.Handle, strings.Split(account.Email, "@")[0]))
-	if err != nil {
-		return nil, nil, err
 	}
 	user := &User{
 		ID:        "user_" + uuid.NewString(),
@@ -443,6 +378,9 @@ func createWorkspaceForAccount(db *sql.DB, account *Account, req CreateWorkspace
 		`INSERT INTO workspaces (id, slug, name, created_at, updated_at) VALUES ($1, $2, $3, $4, $5)`,
 		workspace.ID, workspace.Slug, workspace.Name, workspace.CreatedAt, workspace.UpdatedAt,
 	); err != nil {
+		if isUniqueViolation(err) {
+			return nil, nil, errors.New("Workspace slug is already taken.")
+		}
 		return nil, nil, err
 	}
 	if _, err = tx.Exec(
@@ -476,6 +414,17 @@ func createWorkspaceForAccount(db *sql.DB, account *Account, req CreateWorkspace
 	return workspace, member, nil
 }
 
+func ensureWorkspaceSlugAvailable(db *sql.DB, slug string) error {
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workspaces WHERE slug = $1`, slug).Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return errors.New("Workspace slug is already taken.")
+	}
+	return nil
+}
+
 func addWorkspaceMember(db *sql.DB, workspaceID string, req AddWorkspaceMemberRequest, invitedBy string) (*WorkspaceMember, error) {
 	if db == nil {
 		return nil, errors.New("database is required")
@@ -492,8 +441,11 @@ func addWorkspaceMember(db *sql.DB, workspaceID string, req AddWorkspaceMemberRe
 		return nil, err
 	}
 	now := time.Now().UTC()
-	handle, err := uniqueWorkspaceHandle(db, workspaceID, suggestedHandle(req.Handle, strings.Split(account.Email, "@")[0]))
+	handle, err := validateHandle(req.Handle)
 	if err != nil {
+		return nil, err
+	}
+	if err := ensurePostgresWorkspaceHandleAvailable(db, workspaceID, handle); err != nil {
 		return nil, err
 	}
 	name := firstNonEmptyString(req.DisplayName, account.DisplayName, account.Email)
@@ -525,6 +477,9 @@ func addWorkspaceMember(db *sql.DB, workspaceID string, req AddWorkspaceMemberRe
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 		workspaceID, user.ID, user.Handle, user.Name, user.Role, user.Kind, user.Status, user.CreatedAt, user.UpdatedAt,
 	); err != nil {
+		if isUniqueViolation(err) {
+			return nil, errors.New("Handle is already taken.")
+		}
 		return nil, err
 	}
 	member := &WorkspaceMember{
@@ -555,6 +510,31 @@ func addWorkspaceMember(db *sql.DB, workspaceID string, req AddWorkspaceMemberRe
 		return nil, err
 	}
 	return member, nil
+}
+
+func ensurePostgresWorkspaceHandleAvailable(db *sql.DB, workspaceID string, handle string) error {
+	var count int
+	if err := db.QueryRow(
+		`SELECT
+			(SELECT COUNT(*) FROM users WHERE workspace_id = $1 AND handle = $2) +
+			(SELECT COUNT(*) FROM agents WHERE workspace_id = $1 AND handle = $2)`,
+		strings.TrimSpace(workspaceID),
+		handle,
+	).Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return errors.New("Handle is already taken.")
+	}
+	return nil
+}
+
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "duplicate key") || strings.Contains(message, "SQLSTATE 23505")
 }
 
 func getAccountByEmail(db *sql.DB, email string) (*Account, error) {
