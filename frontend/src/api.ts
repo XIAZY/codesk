@@ -61,7 +61,7 @@ export class ApiClient {
     return this.request<{ workspaces: WorkspaceSummary[] }>("/api/workspaces");
   }
 
-  async createWorkspace(input: { name: string; slug?: string; handle: string }) {
+  async createWorkspace(input: { name: string; slug: string; handle: string }) {
     return this.request<{ workspace: WorkspaceSummary }>("/api/workspaces", {
       method: "POST",
       body: JSON.stringify(input),
@@ -149,13 +149,26 @@ export class ApiClient {
     }
     const response = await fetch(`${apiBase}${path}`, { ...init, headers });
     if (!response.ok) {
-      throw new ApiError(response.status, await response.text());
+      throw new ApiError(response.status, await responseErrorText(response));
     }
     if (response.status === 204) {
       return undefined as T;
     }
     return response.json() as Promise<T>;
   }
+}
+
+async function responseErrorText(response: Response) {
+  const text = await response.text();
+  try {
+    const payload = JSON.parse(text) as { error?: unknown };
+    if (typeof payload.error === "string" && payload.error.trim()) {
+      return payload.error;
+    }
+  } catch {
+    // Fall back to raw text below.
+  }
+  return text;
 }
 
 export function workspacePath(workspaceId: string, path: string) {

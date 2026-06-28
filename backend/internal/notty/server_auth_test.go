@@ -52,33 +52,195 @@ func TestAuthenticatedWorkspaceRoutesIsolateTenantsAndIgnoreSpoofedActor(t *test
 	}
 }
 
-func TestCreateWorkspaceAllocatesUniqueSlugForRepeatedNames(t *testing.T) {
+func TestRegisterAccountCreatesNoImplicitWorkspaceRows(t *testing.T) {
+	server, router := newAuthTestServer(t)
+
+	auth := authTestRegister(t, router, "zero-workspace@example.com", "owner-pass", "Zero Workspace")
+	if len(auth.Workspaces) != 0 {
+		t.Fatalf("registration should return zero workspaces, got %#v", auth.Workspaces)
+	}
+
+	var workspaceCount int
+	if err := server.store.db.QueryRow(`SELECT COUNT(*) FROM workspaces`).Scan(&workspaceCount); err != nil {
+		t.Fatalf("count workspaces: %v", err)
+	}
+	var memberCount int
+	if err := server.store.db.QueryRow(`SELECT COUNT(*) FROM workspace_members`).Scan(&memberCount); err != nil {
+		t.Fatalf("count workspace members: %v", err)
+	}
+	if workspaceCount != 0 || memberCount != 0 {
+		t.Fatalf("registration should not create workspace rows, workspaces=%d members=%d", workspaceCount, memberCount)
+	}
+
+	var list struct {
+		Workspaces []*Workspace `json:"workspaces"`
+	}
+	authTestJSON(t, router, http.MethodGet, "/api/workspaces", auth.Token, nil, http.StatusOK, &list)
+	if len(list.Workspaces) != 0 {
+		t.Fatalf("workspace list should be empty for zero-workspace account, got %#v", list.Workspaces)
+	}
+}
+
+func TestCreateWorkspaceRequiresExplicitValidSlugAndHandle(t *testing.T) {
 	router := newAuthTestRouter(t)
 
-	firstOwner := authTestRegister(t, router, "workspace-slug-one@example.com", "owner-pass", "Owner One")
-	secondOwner := authTestRegister(t, router, "workspace-slug-two@example.com", "owner-pass", "Owner Two")
+	owner := authTestRegister(t, router, "workspace-slug-one@example.com", "owner-pass", "Owner One")
+
+	authTestErrorContains(t, router, http.MethodPost, "/api/workspaces", owner.Token, CreateWorkspaceRequest{
+		Name:   "Product Workspace",
+		Handle: "owner-one",
+	}, http.StatusBadRequest, "Workspace slug is required.")
+
+	authTestErrorContains(t, router, http.MethodPost, "/api/workspaces", owner.Token, CreateWorkspaceRequest{
+		Name:   "Product Workspace",
+		Slug:   "Product Workspace",
+		Handle: "owner-one",
+	}, http.StatusBadRequest, "Workspace slug can only contain lowercase letters, numbers, underscores, and dashes.")
+	authTestErrorContains(t, router, http.MethodPost, "/api/workspaces", owner.Token, CreateWorkspaceRequest{
+		Name:   "Product Workspace",
+		Slug:   " product-workspace ",
+		Handle: "owner-one",
+	}, http.StatusBadRequest, "Workspace slug can only contain lowercase letters, numbers, underscores, and dashes.")
+
+	authTestErrorContains(t, router, http.MethodPost, "/api/workspaces", owner.Token, CreateWorkspaceRequest{
+		Name: "Product Workspace",
+		Slug: "product-workspace",
+	}, http.StatusBadRequest, "Handle is required.")
+
+	authTestErrorContains(t, router, http.MethodPost, "/api/workspaces", owner.Token, CreateWorkspaceRequest{
+		Name:   "Product Workspace",
+		Slug:   "product-workspace",
+		Handle: "Owner One",
+	}, http.StatusBadRequest, "Handle can only contain lowercase letters, numbers, underscores, and dashes.")
+	authTestErrorContains(t, router, http.MethodPost, "/api/workspaces", owner.Token, CreateWorkspaceRequest{
+		Name:   "Product Workspace",
+		Slug:   "product-workspace",
+		Handle: " owner-one ",
+	}, http.StatusBadRequest, "Handle can only contain lowercase letters, numbers, underscores, and dashes.")
 
 	var first struct {
 		Workspace Workspace `json:"workspace"`
 	}
-	authTestJSON(t, router, http.MethodPost, "/api/workspaces", firstOwner.Token, CreateWorkspaceRequest{
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces", owner.Token, CreateWorkspaceRequest{
 		Name:   "Product Workspace",
+		Slug:   "product-workspace",
 		Handle: "owner-one",
 	}, http.StatusCreated, &first)
-
-	var second struct {
-		Workspace Workspace `json:"workspace"`
+	if first.Workspace.Slug != "product-workspace" {
+		t.Fatalf("expected exact submitted slug, got %#v", first.Workspace)
 	}
-	authTestJSON(t, router, http.MethodPost, "/api/workspaces", secondOwner.Token, CreateWorkspaceRequest{
+
+	secondOwner := authTestRegister(t, router, "workspace-slug-two@example.com", "owner-pass", "Owner Two")
+	authTestErrorContains(t, router, http.MethodPost, "/api/workspaces", secondOwner.Token, CreateWorkspaceRequest{
 		Name:   "Product Workspace",
+		Slug:   "product-workspace",
 		Handle: "owner-two",
-	}, http.StatusCreated, &second)
+	}, http.StatusBadRequest, "Workspace slug is already taken.")
+}
 
-	if first.Workspace.Slug == "" || second.Workspace.Slug == "" {
-		t.Fatalf("expected slugs to be allocated, got first=%#v second=%#v", first.Workspace, second.Workspace)
+func TestWorkspaceMemberAndAgentIdentifiersAreValidatedAndImmutable(t *testing.T) {
+	server, router := newAuthTestServer(t)
+
+	owner := authTestRegister(t, router, "identifier-owner@example.com", "owner-pass", "Identifier Owner")
+	workspace := authTestCreateWorkspace(t, router, owner.Token, "Identifier Tenant")
+	_ = authTestRegister(t, router, "identifier-member@example.com", "member-pass", "Identifier Member")
+
+	authTestErrorContains(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/members", owner.Token, AddWorkspaceMemberRequest{
+		Email: "identifier-member@example.com",
+	}, http.StatusBadRequest, "Handle is required.")
+	authTestErrorContains(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/members", owner.Token, AddWorkspaceMemberRequest{
+		Email:  "identifier-member@example.com",
+		Handle: "Member One",
+	}, http.StatusBadRequest, "Handle can only contain lowercase letters, numbers, underscores, and dashes.")
+	authTestErrorContains(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/members", owner.Token, AddWorkspaceMemberRequest{
+		Email:  "identifier-member@example.com",
+		Handle: " member_one ",
+	}, http.StatusBadRequest, "Handle can only contain lowercase letters, numbers, underscores, and dashes.")
+
+	member := authTestAddMember(t, router, owner.Token, workspace.ID, "identifier-member@example.com", "member_one")
+	var repeatedAdd struct {
+		Member WorkspaceMember `json:"member"`
 	}
-	if first.Workspace.Slug == second.Workspace.Slug {
-		t.Fatalf("expected repeated workspace names to get unique slugs, got %q", first.Workspace.Slug)
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/members", owner.Token, AddWorkspaceMemberRequest{
+		Email:  "identifier-member@example.com",
+		Handle: "other_member",
+	}, http.StatusCreated, &repeatedAdd)
+	if repeatedAdd.Member.UserID != member.UserID || repeatedAdd.Member.UserHandle != member.UserHandle {
+		t.Fatalf("re-adding existing member should return original user identity, first=%#v repeated=%#v", member, repeatedAdd.Member)
+	}
+	var userCount int
+	if err := server.store.db.QueryRow(`SELECT COUNT(*) FROM users WHERE workspace_id = $1`, workspace.ID).Scan(&userCount); err != nil {
+		t.Fatalf("count users: %v", err)
+	}
+	if userCount != 2 {
+		t.Fatalf("re-adding existing member should not create a replacement user, got %d users", userCount)
+	}
+
+	var updatedUser User
+	authTestJSON(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/users/"+member.UserID, owner.Token, UpdateUserRequest{
+		Name:   "Renamed Member",
+		Handle: "renamed_member",
+		Role:   "Reviewed but keeps handle",
+	}, http.StatusOK, &updatedUser)
+	if updatedUser.Handle != "member_one" || updatedUser.Name != "Renamed Member" {
+		t.Fatalf("user update should mutate profile fields but keep handle, got %#v", updatedUser)
+	}
+
+	var daemonResponse CreateDaemonResponse
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons", owner.Token, CreateDaemonRequest{Name: "Runtime daemon"}, http.StatusCreated, &daemonResponse)
+	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/daemon/status", daemonResponse.Token, UpdateDaemonStatusRequest{
+		Version: "0.62.0",
+		OS:      "linux",
+		Arch:    "arm64",
+		Runtimes: []RuntimeDetection{{
+			Kind:      "codex",
+			Available: true,
+			Version:   "codex-cli 0.134.0",
+			Path:      "/usr/local/bin/codex",
+		}},
+	}, http.StatusOK)
+
+	authTestErrorContains(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+daemonResponse.Daemon.ID+"/agents", owner.Token, CreateAgentRequest{
+		Handle: "member_one",
+		Name:   "Agent One",
+		Role:   "Review changes",
+		Kind:   "codex",
+	}, http.StatusBadRequest, "Handle is already taken.")
+	authTestErrorContains(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+daemonResponse.Daemon.ID+"/agents", owner.Token, CreateAgentRequest{
+		Handle: "Agent One",
+		Name:   "Agent One",
+		Role:   "Review changes",
+		Kind:   "codex",
+	}, http.StatusBadRequest, "Handle can only contain lowercase letters, numbers, underscores, and dashes.")
+	authTestErrorContains(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+daemonResponse.Daemon.ID+"/agents", owner.Token, CreateAgentRequest{
+		Handle: " agent_one ",
+		Name:   "Agent One",
+		Role:   "Review changes",
+		Kind:   "codex",
+	}, http.StatusBadRequest, "Handle can only contain lowercase letters, numbers, underscores, and dashes.")
+
+	var agent Agent
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+daemonResponse.Daemon.ID+"/agents", owner.Token, CreateAgentRequest{
+		Handle: "agent_one",
+		Name:   "Agent One",
+		Role:   "Review changes",
+		Kind:   "codex",
+	}, http.StatusCreated, &agent)
+
+	_ = authTestRegister(t, router, "identifier-other-member@example.com", "member-pass", "Identifier Other Member")
+	authTestErrorContains(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/members", owner.Token, AddWorkspaceMemberRequest{
+		Email:  "identifier-other-member@example.com",
+		Handle: "agent_one",
+	}, http.StatusBadRequest, "Handle is already taken.")
+
+	var updatedAgent Agent
+	authTestJSON(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/agents/"+agent.ID, owner.Token, UpdateAgentRequest{
+		Handle: "renamed_agent",
+		Name:   "Renamed Agent",
+		Role:   "Still reviews changes",
+	}, http.StatusOK, &updatedAgent)
+	if updatedAgent.Handle != "agent_one" || updatedAgent.Name != "Renamed Agent" {
+		t.Fatalf("agent update should mutate profile fields but keep handle, got %#v", updatedAgent)
 	}
 }
 
@@ -485,11 +647,42 @@ func authTestCreateWorkspace(t *testing.T, router http.Handler, token string, na
 		Workspace Workspace       `json:"workspace"`
 		Member    WorkspaceMember `json:"member"`
 	}
-	authTestJSON(t, router, http.MethodPost, "/api/workspaces", token, CreateWorkspaceRequest{Name: name}, http.StatusCreated, &response)
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces", token, CreateWorkspaceRequest{
+		Name:   name,
+		Slug:   authTestIdentifierFromName(name, 64),
+		Handle: "owner",
+	}, http.StatusCreated, &response)
 	if response.Workspace.ID == "" || response.Member.UserID == "" {
 		t.Fatalf("expected workspace response, got %#v", response)
 	}
 	return authTestWorkspace{ID: response.Workspace.ID, OwnerUserID: response.Member.UserID}
+}
+
+func authTestIdentifierFromName(name string, maxLen int) string {
+	value := strings.ToLower(strings.TrimSpace(name))
+	var builder strings.Builder
+	lastSeparator := false
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			builder.WriteRune(r)
+			lastSeparator = false
+			continue
+		}
+		if r == '_' || r == '-' || r == ' ' {
+			if !lastSeparator && builder.Len() > 0 {
+				builder.WriteByte('-')
+				lastSeparator = true
+			}
+		}
+	}
+	identifier := strings.Trim(builder.String(), "-")
+	if len(identifier) > maxLen {
+		identifier = strings.Trim(identifier[:maxLen], "-")
+	}
+	if len(identifier) < 2 {
+		return "ws"
+	}
+	return identifier
 }
 
 func authTestAddMember(t *testing.T, router http.Handler, token string, workspaceID string, email string, handle string) WorkspaceMember {
@@ -545,6 +738,17 @@ func authTestJSONWithHeaders(t *testing.T, router http.Handler, method string, t
 		if err := json.Unmarshal(recorder.Body.Bytes(), out); err != nil {
 			t.Fatalf("decode response for %s %s: %v body=%s", method, target, err, recorder.Body.String())
 		}
+	}
+}
+
+func authTestErrorContains(t *testing.T, router http.Handler, method string, target string, token string, body any, want int, wantError string) {
+	t.Helper()
+	var response struct {
+		Error string `json:"error"`
+	}
+	authTestJSON(t, router, method, target, token, body, want, &response)
+	if !strings.Contains(response.Error, wantError) {
+		t.Fatalf("%s %s expected error containing %q, got %q", method, target, wantError, response.Error)
 	}
 }
 

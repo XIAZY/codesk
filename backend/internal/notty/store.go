@@ -1153,16 +1153,6 @@ func (s *Store) UpdateUser(id string, req UpdateUserRequest, meta OperationMeta)
 	if role := strings.TrimSpace(req.Role); role != "" {
 		user.Role = role
 	}
-	if req.Handle != "" {
-		handle, err := normalizeHandle(req.Handle)
-		if err != nil {
-			return nil, err
-		}
-		if err := s.ensureHandleAvailableLocked(handle, id, ""); err != nil {
-			return nil, err
-		}
-		user.Handle = handle
-	}
 	user.UpdatedAt = time.Now().UTC()
 	s.refreshThreadParticipantsLocked()
 	s.state.UpdatedAt = user.UpdatedAt
@@ -1305,16 +1295,6 @@ func (s *Store) UpdateAgent(id string, req UpdateAgentRequest, meta OperationMet
 	}
 	if role := strings.TrimSpace(req.Role); role != "" {
 		agent.Role = role
-	}
-	if req.Handle != "" {
-		handle, err := normalizeHandle(req.Handle)
-		if err != nil {
-			return nil, err
-		}
-		if err := s.ensureHandleAvailableLocked(handle, "", id); err != nil {
-			return nil, err
-		}
-		agent.Handle = handle
 	}
 	agent.SystemPrompt = sharedAgentSystemPrompt(agent)
 	agent.UpdatedAt = time.Now().UTC()
@@ -2149,7 +2129,7 @@ func buildUser(name, handle, role string) (*User, error) {
 	if trimmedName == "" {
 		return nil, errors.New("user name is required")
 	}
-	normalizedHandle, err := normalizeHandle(handle)
+	validHandle, err := validateHandle(handle)
 	if err != nil {
 		return nil, err
 	}
@@ -2158,7 +2138,7 @@ func buildUser(name, handle, role string) (*User, error) {
 		trimmedRole = "Collaborates in the shared workspace"
 	}
 	return &User{
-		Handle: normalizedHandle,
+		Handle: validHandle,
 		Name:   trimmedName,
 		Role:   trimmedRole,
 		Kind:   "human",
@@ -2171,7 +2151,7 @@ func buildAgent(handle, name, role, kind string) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	normalizedHandle, err := normalizeHandle(handle)
+	validHandle, err := validateHandle(handle)
 	if err != nil {
 		return nil, err
 	}
@@ -2184,7 +2164,7 @@ func buildAgent(handle, name, role, kind string) (*Agent, error) {
 		trimmedRole = "Execute tasks inside the mounted workspace"
 	}
 	agent := &Agent{
-		Handle: normalizedHandle,
+		Handle: validHandle,
 		Name:   trimmedName,
 		Role:   trimmedRole,
 		Kind:   trimmedKind,
@@ -2288,23 +2268,6 @@ func (s *Store) refreshAgentSystemPromptsLocked() bool {
 	return changed
 }
 
-func normalizeHandle(value string) (string, error) {
-	trimmed := strings.ToLower(strings.TrimSpace(value))
-	if trimmed == "" {
-		return "", errors.New("handle is required")
-	}
-	for _, r := range trimmed {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
-			continue
-		}
-		return "", errors.New("handle may only use lowercase letters, numbers, hyphen, or underscore")
-	}
-	if len(trimmed) < 2 || len(trimmed) > 32 {
-		return "", errors.New("handle must be between 2 and 32 characters")
-	}
-	return trimmed, nil
-}
-
 func normalizeWorkspaceRelativePath(value string) (string, error) {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" || trimmed == "." {
@@ -2387,7 +2350,7 @@ func (s *Store) ensureHandleAvailableLocked(handle, exceptUserID, exceptAgentID 
 			continue
 		}
 		if user.Handle == handle {
-			return fmt.Errorf("handle @%s is already in use", handle)
+			return errors.New("Handle is already taken.")
 		}
 	}
 	for id, agent := range s.state.Agents {
@@ -2395,7 +2358,7 @@ func (s *Store) ensureHandleAvailableLocked(handle, exceptUserID, exceptAgentID 
 			continue
 		}
 		if agent.Handle == handle {
-			return fmt.Errorf("handle @%s is already in use", handle)
+			return errors.New("Handle is already taken.")
 		}
 	}
 	return nil

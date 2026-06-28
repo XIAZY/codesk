@@ -10,7 +10,15 @@ import {
   buildDaemonReinstallCommand,
   buildDaemonUninstallCommand,
   daemonStatus,
+  handleMaxLength,
+  handleMinLength,
+  identifierFromName,
+  identifierHelpText,
+  identifierPattern,
   isMarkdownDocumentPath,
+  selectWorkspaceAfterAuth,
+  workspaceSlugMaxLength,
+  workspaceSlugMinLength,
   type LineThreadGroup,
 } from "./logic";
 import { useRootNamespace } from "./useRootNamespace";
@@ -258,7 +266,11 @@ export function App() {
     setAccount(nextAccount);
     setWorkspaces(safeWorkspaces);
     const preferred = localStorage.getItem(workspaceStorageKey);
-    setWorkspaceId(preferred && safeWorkspaces.some((workspace) => workspace.id === preferred) ? preferred : safeWorkspaces[0]?.id ?? "");
+    const selected = selectWorkspaceAfterAuth(safeWorkspaces, preferred);
+    if (!selected || selected !== preferred) {
+      localStorage.removeItem(workspaceStorageKey);
+    }
+    setWorkspaceId(selected);
   };
 
   const signOut = () => {
@@ -286,12 +298,11 @@ export function App() {
         setAccount(response.account);
         setWorkspaces(safeWorkspaces);
         const preferred = localStorage.getItem(workspaceStorageKey);
-        if (preferred && safeWorkspaces.some((workspace) => workspace.id === preferred)) {
-          setWorkspaceId(preferred);
-        } else {
+        const selected = selectWorkspaceAfterAuth(safeWorkspaces, preferred);
+        if (!selected || selected !== preferred) {
           localStorage.removeItem(workspaceStorageKey);
-          setWorkspaceId(safeWorkspaces[0]?.id ?? "");
         }
+        setWorkspaceId(selected);
       })
       .catch(() => {
         if (!disposed) {
@@ -418,6 +429,158 @@ function AuthScreen({ api, onAuth }: { api: ApiClient; onAuth: (token: string, a
   );
 }
 
+export function WorkspaceOnboarding({
+  api,
+  account,
+  workspaces,
+  onWorkspaces,
+  onSelect,
+  onSignOut,
+}: {
+  api: Pick<ApiClient, "createWorkspace">;
+  account: Account | null;
+  workspaces: WorkspaceSummary[];
+  onWorkspaces: (workspaces: WorkspaceSummary[]) => void;
+  onSelect: (id: string) => void;
+  onSignOut: () => void;
+}) {
+  const [mode, setMode] = useState<"create" | "join">("create");
+  const initialHandle = identifierFromName(account?.email.split("@")[0] ?? "owner", handleMaxLength) || "owner";
+
+  return (
+    <main className="auth-screen picker-screen">
+      <section className="card p-24 picker-panel">
+        <div className="row between gap-12">
+          <Logo />
+          <button className="btn ghost sm" onClick={onSignOut}>Sign out</button>
+        </div>
+        <div className="picker-head">
+          <h1 className="auth-title">Start by joining or creating a workspace</h1>
+          <p className="small muted">Workspaces are where documents, daemons, agents, and members live.</p>
+        </div>
+        <div className="onboarding-actions">
+          <button className={`btn lg ${mode === "create" ? "accent" : ""}`} onClick={() => setMode("create")}>
+            Create a workspace
+          </button>
+          <button className={`btn lg ${mode === "join" ? "accent" : ""}`} onClick={() => setMode("join")}>
+            Join with invite link
+          </button>
+        </div>
+        {mode === "create" ? (
+          <CreateWorkspaceForm
+            api={api}
+            initialHandle={initialHandle}
+            workspaces={workspaces}
+            onWorkspaces={onWorkspaces}
+            onSelect={onSelect}
+          />
+        ) : (
+          <div className="form-stack create-workspace-card">
+            <div>
+              <h2 className="modal-title">Join with invite link</h2>
+              <p className="small muted">Invite links are coming next.</p>
+            </div>
+            <label className="field">
+              <span className="lab">Invite link</span>
+              <input value="" placeholder="https://notty.example.com/invite/..." disabled readOnly />
+            </label>
+            <button className="btn full lg" disabled>Join workspace</button>
+          </div>
+        )}
+      </section>
+    </main>
+  );
+}
+
+function CreateWorkspaceForm({
+  api,
+  initialHandle,
+  workspaces,
+  onWorkspaces,
+  onSelect,
+}: {
+  api: Pick<ApiClient, "createWorkspace">;
+  initialHandle: string;
+  workspaces: WorkspaceSummary[];
+  onWorkspaces: (workspaces: WorkspaceSummary[]) => void;
+  onSelect: (id: string) => void;
+}) {
+  const [name, setName] = useState("Product Workspace");
+  const [slug, setSlug] = useState(() => identifierFromName("Product Workspace", workspaceSlugMaxLength));
+  const [slugEdited, setSlugEdited] = useState(false);
+  const [handle, setHandle] = useState(initialHandle);
+  const [error, setError] = useState("");
+
+  const createWorkspace = async (event: FormEvent) => {
+    event.preventDefault();
+    setError("");
+    try {
+      const response = await api.createWorkspace({ name, slug, handle });
+      const next = [...workspaces, response.workspace];
+      onWorkspaces(next);
+      onSelect(response.workspace.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  return (
+    <form onSubmit={createWorkspace} className="form-stack create-workspace-card">
+      <div>
+        <h2 className="modal-title">Create workspace</h2>
+        <p className="small muted">You will become the workspace owner.</p>
+      </div>
+      <label className="field">
+        <span className="lab">Workspace name</span>
+        <input
+          value={name}
+          onChange={(event) => {
+            const next = event.target.value;
+            setName(next);
+            if (!slugEdited) {
+              setSlug(identifierFromName(next, workspaceSlugMaxLength));
+            }
+          }}
+          required
+        />
+      </label>
+      <label className="field">
+        <span className="lab">Workspace slug</span>
+        <input
+          aria-label="Workspace slug"
+          value={slug}
+          onChange={(event) => {
+            setSlug(event.target.value);
+            setSlugEdited(true);
+          }}
+          pattern={identifierPattern}
+          minLength={workspaceSlugMinLength}
+          maxLength={workspaceSlugMaxLength}
+          title={identifierHelpText}
+          required
+        />
+        <span className="hint">{identifierHelpText}</span>
+      </label>
+      <label className="field">
+        <span className="lab">Your handle in this workspace</span>
+        <input
+          aria-label="Your handle in this workspace"
+          value={handle}
+          onChange={(event) => setHandle(event.target.value)}
+          pattern={identifierPattern}
+          minLength={handleMinLength}
+          maxLength={handleMaxLength}
+          title={identifierHelpText}
+          required
+        />
+        <span className="hint">{identifierHelpText}</span>
+      </label>
+      {error ? <p className="error-text">{error}</p> : null}
+      <button className="btn accent full lg">Create and enter</button>
+    </form>
+  );
+}
+
 function WorkspacePicker({
   api,
   account,
@@ -426,29 +589,26 @@ function WorkspacePicker({
   onSelect,
   onSignOut,
 }: {
-  api: ApiClient;
+  api: Pick<ApiClient, "createWorkspace">;
   account: Account | null;
   workspaces: WorkspaceSummary[];
   onWorkspaces: (workspaces: WorkspaceSummary[]) => void;
   onSelect: (id: string) => void;
   onSignOut: () => void;
 }) {
-  const [name, setName] = useState("Product Workspace");
-  const [handle, setHandle] = useState(account?.email.split("@")[0] ?? "owner");
-  const [error, setError] = useState("");
-
-  const createWorkspace = async (event: FormEvent) => {
-    event.preventDefault();
-    setError("");
-    try {
-      const response = await api.createWorkspace({ name, handle });
-      const next = [...workspaces, response.workspace];
-      onWorkspaces(next);
-      onSelect(response.workspace.id);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  };
+  if (workspaces.length === 0) {
+    return (
+      <WorkspaceOnboarding
+        api={api}
+        account={account}
+        workspaces={workspaces}
+        onWorkspaces={onWorkspaces}
+        onSelect={onSelect}
+        onSignOut={onSignOut}
+      />
+    );
+  }
+  const initialHandle = identifierFromName(account?.email.split("@")[0] ?? "owner", handleMaxLength) || "owner";
 
   return (
     <main className="auth-screen picker-screen">
@@ -461,41 +621,30 @@ function WorkspacePicker({
           <h1 className="auth-title">Choose a workspace</h1>
           <p className="small muted">Pick a tenant or create a new workspace-scoped home for documents, daemons, and agents.</p>
         </div>
-        {workspaces.length ? (
-          <div className="workspace-grid">
-            {workspaces.map((workspace) => (
-              <button className="workspace-tile card" key={workspace.id} onClick={() => onSelect(workspace.id)}>
-                <div className="avi">{initials(workspace.name)}</div>
-                <div className="col gap-2">
-                  <strong className="small">{workspace.name}</strong>
-                  <span className="tiny muted">{workspace.slug}</span>
-                </div>
-              </button>
-            ))}
-          </div>
-        ) : null}
-        <form onSubmit={createWorkspace} className="form-stack create-workspace-card">
-          <div>
-            <h2 className="modal-title">Create workspace</h2>
-            <p className="small muted">You will become the workspace owner.</p>
-          </div>
-          <label className="field">
-            <span className="lab">Workspace name</span>
-            <input value={name} onChange={(event) => setName(event.target.value)} required />
-          </label>
-          <label className="field">
-            <span className="lab">Your workspace handle</span>
-            <input value={handle} onChange={(event) => setHandle(event.target.value)} required />
-          </label>
-          {error ? <p className="error-text">{error}</p> : null}
-          <button className="btn accent full lg">Create and enter</button>
-        </form>
+        <div className="workspace-grid">
+          {workspaces.map((workspace) => (
+            <button className="workspace-tile card" key={workspace.id} onClick={() => onSelect(workspace.id)}>
+              <div className="avi">{initials(workspace.name)}</div>
+              <div className="col gap-2">
+                <strong className="small">{workspace.name}</strong>
+                <span className="tiny muted">{workspace.slug}</span>
+              </div>
+            </button>
+          ))}
+        </div>
+        <CreateWorkspaceForm
+          api={api}
+          initialHandle={initialHandle}
+          workspaces={workspaces}
+          onWorkspaces={onWorkspaces}
+          onSelect={onSelect}
+        />
       </section>
     </main>
   );
 }
 
-function WorkspaceApp({
+export function WorkspaceApp({
   api,
   token,
   workspaceId,
@@ -554,6 +703,9 @@ function WorkspaceApp({
   }, [workspace.threads]);
   const activeFolder = folderBreadcrumb(activeDocument?.path);
   const activeWorkspace = workspaces.find((item) => item.id === workspaceId);
+  const currentWorkspaceUser = workspace.users.find((user) => user.id === workspace.currentUserId) ?? null;
+  const currentWorkspaceUserHandle = currentWorkspaceUser?.handle ? `@${currentWorkspaceUser.handle}` : "Workspace user";
+  const currentWorkspaceUserIdentity = currentWorkspaceUser?.handle || currentWorkspaceUser?.name || "Workspace user";
 
   const startRenamingDocument = useCallback((document: DocumentItem) => {
     setRenamingDocumentId(document.id);
@@ -678,7 +830,7 @@ function WorkspaceApp({
             <div className="avi workspace-avi">{initials(activeWorkspace?.name ?? workspace.name)}</div>
             <div className="col gap-0 min-0">
               <b className="small truncate">{workspace.name || activeWorkspace?.name || "Workspace"}</b>
-              <span className="tiny muted truncate">@{account?.email.split("@")[0] ?? "you"}</span>
+              <span className="tiny muted truncate">{currentWorkspaceUserHandle}</span>
             </div>
           </div>
           <select aria-label="Workspace" value={workspaceId} onChange={(event) => onWorkspaceChange(event.target.value)}>
@@ -785,8 +937,8 @@ function WorkspaceApp({
         <footer className="account-footer">
           <div className="row between">
             <div className="row gap-8 min-0">
-              <div className="avi sm you">{initials(account?.displayName ?? account?.email)}</div>
-              <span className="small truncate">{account?.displayName ?? account?.email ?? "Signed in"}</span>
+              <div className="avi sm you">{initials(currentWorkspaceUserIdentity)}</div>
+              <span className="small truncate">{currentWorkspaceUserHandle}</span>
             </div>
             <button className="btn ghost sm" onClick={onSignOut}>Sign out</button>
           </div>
@@ -814,7 +966,7 @@ function WorkspaceApp({
           </div>
           <div className="row gap-6">
             <div className="avi-stack" aria-label="Workspace presence">
-              <div className="avi sm you" title="You">{initials(account?.displayName ?? account?.email)}</div>
+              <div className="avi sm you" title={currentWorkspaceUserHandle}>{initials(currentWorkspaceUserIdentity)}</div>
               {workspace.agents.slice(0, 2).map((agent) => (
                 <div className="avi sm agent" title={`@${agent.handle}`} key={agent.id}>{initials(agent.handle)}</div>
               ))}
@@ -861,7 +1013,8 @@ function WorkspaceApp({
             api={api}
             token={token}
             workspaceId={workspaceId}
-            account={account}
+            actorName={currentWorkspaceUser?.name || currentWorkspaceUserHandle}
+            actorLabel={currentWorkspaceUserHandle}
             document={activeDocument}
             threads={documentThreads}
             focusThreadId={focusThreadId}
@@ -1363,7 +1516,8 @@ function DocumentEditor({
   api,
   token,
   workspaceId,
-  account,
+  actorName,
+  actorLabel,
   document,
   threads,
   focusThreadId,
@@ -1380,7 +1534,8 @@ function DocumentEditor({
   api: ApiClient;
   token: string;
   workspaceId: string;
-  account: Account | null;
+  actorName: string;
+  actorLabel: string;
   document: DocumentItem;
   threads: ThreadItem[];
   focusThreadId: string;
@@ -1406,7 +1561,7 @@ function DocumentEditor({
     workspaceId,
     token,
     document,
-    actorName: account?.displayName ?? account?.email ?? "Human",
+    actorName,
   });
   const hasRangeSelection = Boolean(selection);
   const toolbarPoint = {
@@ -1490,7 +1645,7 @@ function DocumentEditor({
 
         <div className="doc-meta-row">
           <span className="chip">Document</span>
-          <span className="chip outline">Owner · {account?.displayName ?? account?.email ?? "You"}</span>
+          <span className="chip outline">You · {actorLabel}</span>
           <span className={`chip outline ${connected ? "ok" : "warn"}`}>{connected ? "Live" : "Reconnecting"}</span>
         </div>
 
@@ -1921,23 +2076,6 @@ function isDaemonOffline(daemon: Daemon) {
   return status === "disconnected" || status === "deleted";
 }
 
-// Handles allow lowercase letters, numbers, hyphen, and underscore (matches the
-// backend's normalizeHandle), capped at 32 chars.
-function sanitizeHandle(value: string) {
-  return value.toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 32);
-}
-
-// Derive a handle from a display name: lowercase, runs of disallowed characters
-// (spaces, punctuation) collapse to a single hyphen, trimmed at the edges.
-function handleFromName(value: string) {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 32);
-}
-
 // Example agent personas. One is picked at random per modal open to seed the
 // name/handle/role placeholders, so users see what each field is for.
 const EXAMPLE_PERSONAS: Array<{ name: string; role: string }> = [
@@ -1983,7 +2121,7 @@ function CreateAgentModal({ api, workspaceId, daemons, onClose, onDone }: { api:
   const [role, setRole] = useState("");
   const [example] = useState(randomPersona);
   const namePlaceholder = example.name;
-  const handlePlaceholder = handleFromName(example.name);
+  const handlePlaceholder = identifierFromName(example.name, handleMaxLength);
   const rolePlaceholder = example.role;
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -2049,7 +2187,7 @@ function CreateAgentModal({ api, workspaceId, daemons, onClose, onDone }: { api:
                   const next = event.target.value;
                   setName(next);
                   if (!handleEdited) {
-                    setHandle(handleFromName(next));
+                    setHandle(identifierFromName(next, handleMaxLength));
                   }
                 }}
                 required
@@ -2058,18 +2196,22 @@ function CreateAgentModal({ api, workspaceId, daemons, onClose, onDone }: { api:
             <label className="field">
               <span className="lab">Handle</span>
               <input
+                aria-label="Handle"
                 value={handle}
                 placeholder={handlePlaceholder}
-                maxLength={32}
+                pattern={identifierPattern}
+                minLength={handleMinLength}
+                maxLength={handleMaxLength}
+                title={identifierHelpText}
                 onChange={(event) => {
-                  const next = sanitizeHandle(event.target.value);
+                  const next = event.target.value;
                   setHandle(next);
                   // Re-enable auto-fill from the display name once the field is cleared.
                   setHandleEdited(next.length > 0);
                 }}
                 required
               />
-              <span className="hint">Alphanumeric, hyphen, or underscore (lowercased). Auto-filled from the display name; edit to override. Unique in this workspace.</span>
+              <span className="hint">{identifierHelpText} Auto-filled from the display name; edit to override. Unique in this workspace.</span>
             </label>
             <label className="field"><span className="lab">Role</span><textarea value={role} placeholder={rolePlaceholder} onChange={(event) => setRole(event.target.value)} required /></label>
             <div className="divider" />

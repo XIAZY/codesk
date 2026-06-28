@@ -26,3 +26,26 @@ describe("ApiClient document create", () => {
     expect(init?.body).toBe("{}");
   });
 });
+
+describe("ApiClient workspace create", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("surfaces backend JSON error messages", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: "Workspace slug is already taken." }), {
+        status: 409,
+        headers: { "Content-Type": "application/json" },
+      })
+    );
+
+    await expect(
+      new ApiClient("token").createWorkspace({
+        name: "Product Workspace",
+        slug: "product-workspace",
+        handle: "owner",
+      })
+    ).rejects.toThrow("Workspace slug is already taken.");
+  });
+});
