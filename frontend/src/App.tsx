@@ -644,7 +644,7 @@ function WorkspacePicker({
   );
 }
 
-function WorkspaceApp({
+export function WorkspaceApp({
   api,
   token,
   workspaceId,
@@ -703,6 +703,9 @@ function WorkspaceApp({
   }, [workspace.threads]);
   const activeFolder = folderBreadcrumb(activeDocument?.path);
   const activeWorkspace = workspaces.find((item) => item.id === workspaceId);
+  const currentWorkspaceUser = workspace.users.find((user) => user.id === workspace.currentUserId) ?? null;
+  const currentWorkspaceUserHandle = currentWorkspaceUser?.handle ? `@${currentWorkspaceUser.handle}` : "Workspace user";
+  const currentWorkspaceUserIdentity = currentWorkspaceUser?.handle || currentWorkspaceUser?.name || "Workspace user";
 
   const startRenamingDocument = useCallback((document: DocumentItem) => {
     setRenamingDocumentId(document.id);
@@ -827,7 +830,7 @@ function WorkspaceApp({
             <div className="avi workspace-avi">{initials(activeWorkspace?.name ?? workspace.name)}</div>
             <div className="col gap-0 min-0">
               <b className="small truncate">{workspace.name || activeWorkspace?.name || "Workspace"}</b>
-              <span className="tiny muted truncate">@{account?.email.split("@")[0] ?? "you"}</span>
+              <span className="tiny muted truncate">{currentWorkspaceUserHandle}</span>
             </div>
           </div>
           <select aria-label="Workspace" value={workspaceId} onChange={(event) => onWorkspaceChange(event.target.value)}>
@@ -934,8 +937,8 @@ function WorkspaceApp({
         <footer className="account-footer">
           <div className="row between">
             <div className="row gap-8 min-0">
-              <div className="avi sm you">{initials(account?.displayName ?? account?.email)}</div>
-              <span className="small truncate">{account?.displayName ?? account?.email ?? "Signed in"}</span>
+              <div className="avi sm you">{initials(currentWorkspaceUserIdentity)}</div>
+              <span className="small truncate">{currentWorkspaceUserHandle}</span>
             </div>
             <button className="btn ghost sm" onClick={onSignOut}>Sign out</button>
           </div>
@@ -963,7 +966,7 @@ function WorkspaceApp({
           </div>
           <div className="row gap-6">
             <div className="avi-stack" aria-label="Workspace presence">
-              <div className="avi sm you" title="You">{initials(account?.displayName ?? account?.email)}</div>
+              <div className="avi sm you" title={currentWorkspaceUserHandle}>{initials(currentWorkspaceUserIdentity)}</div>
               {workspace.agents.slice(0, 2).map((agent) => (
                 <div className="avi sm agent" title={`@${agent.handle}`} key={agent.id}>{initials(agent.handle)}</div>
               ))}
@@ -1010,7 +1013,8 @@ function WorkspaceApp({
             api={api}
             token={token}
             workspaceId={workspaceId}
-            account={account}
+            actorName={currentWorkspaceUser?.name || currentWorkspaceUserHandle}
+            actorLabel={currentWorkspaceUserHandle}
             document={activeDocument}
             threads={documentThreads}
             focusThreadId={focusThreadId}
@@ -1512,7 +1516,8 @@ function DocumentEditor({
   api,
   token,
   workspaceId,
-  account,
+  actorName,
+  actorLabel,
   document,
   threads,
   focusThreadId,
@@ -1529,7 +1534,8 @@ function DocumentEditor({
   api: ApiClient;
   token: string;
   workspaceId: string;
-  account: Account | null;
+  actorName: string;
+  actorLabel: string;
   document: DocumentItem;
   threads: ThreadItem[];
   focusThreadId: string;
@@ -1555,7 +1561,7 @@ function DocumentEditor({
     workspaceId,
     token,
     document,
-    actorName: account?.displayName ?? account?.email ?? "Human",
+    actorName,
   });
   const hasRangeSelection = Boolean(selection);
   const toolbarPoint = {
@@ -1639,7 +1645,7 @@ function DocumentEditor({
 
         <div className="doc-meta-row">
           <span className="chip">Document</span>
-          <span className="chip outline">Owner · {account?.displayName ?? account?.email ?? "You"}</span>
+          <span className="chip outline">You · {actorLabel}</span>
           <span className={`chip outline ${connected ? "ok" : "warn"}`}>{connected ? "Live" : "Reconnecting"}</span>
         </div>
 
