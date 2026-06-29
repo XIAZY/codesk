@@ -322,7 +322,7 @@ export function App() {
       resolveRoot({ authenticated: Boolean(token), workspaces }, localStorage.getItem(workspaceSlugStorageKey)),
       { replace: true },
     );
-  }, [account, restoringSession, route, token, workspaces]);
+  }, [account, route, token, workspaces]);
 
   useEffect(() => {
     if (route.kind !== "login" && route.kind !== "register") {
@@ -335,7 +335,7 @@ export function App() {
       resolveRoot({ authenticated: true, workspaces }, localStorage.getItem(workspaceSlugStorageKey)),
       { replace: true },
     );
-  }, [account, restoringSession, route, token, workspaces]);
+  }, [account, route, token, workspaces]);
 
   useEffect(() => {
     if (route.kind !== "workspace" || route.view.kind !== "home") {
@@ -1104,6 +1104,9 @@ export function WorkspaceApp({
             selectedThreadId={selectedThreadId}
             onSelectThread={setSelectedThreadId}
             onJumpToThread={(threadId) => {
+              if (activeDocument) {
+                navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "document", documentId: activeDocument.id } });
+              }
               setFocusThreadId(threadId);
             }}
             onReply={() => void reload()}
