@@ -79,6 +79,13 @@ export class ApiClient {
     });
   }
 
+  async updateLastAccessed(workspaceId: string, input: { documentId?: string } = {}) {
+    return this.request<{ status: string }>(workspacePath(workspaceId, "/last-accessed"), {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
+  }
+
   async createThread(workspaceId: string, input: Record<string, unknown>) {
     return this.request<{ thread: ThreadItem }>(workspacePath(workspaceId, "/threads"), {
       method: "POST",

@@ -16,11 +16,12 @@ import {
   identifierHelpText,
   identifierPattern,
   isMarkdownDocumentPath,
-  selectWorkspaceAfterAuth,
   workspaceSlugMaxLength,
   workspaceSlugMinLength,
   type LineThreadGroup,
 } from "./logic";
+import { resolveRoot, resolveWorkspace, type WorkspaceView } from "./routes";
+import { navigate, useRoute } from "./useRoute";
 import { useRootNamespace } from "./useRootNamespace";
 import { useDocumentSync } from "./useDocument";
 import { useWorkspace } from "./useWorkspace";
@@ -29,9 +30,20 @@ import { resolveRuntimeTiles, selectableRuntimeKinds, type RuntimeTile } from ".
 import "./styles.css";
 
 const tokenStorageKey = "notty.auth.token";
-const workspaceStorageKey = "notty.workspace.id";
 const portableFileNameIllegalChars = /[\u0000-\u001F<>:"\/\\|?*]/g;
 const windowsReservedBaseName = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+
+function clearLegacyRoutePersistence() {
+  for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+    const key = localStorage.key(index);
+    if (!key) {
+      continue;
+    }
+    if (key === "notty.workspace.id" || key === "notty.document.id" || key === "notty.activeDocumentId" || key.startsWith("notty.workspace.")) {
+      localStorage.removeItem(key);
+    }
+  }
+}
 
 function initials(value?: string) {
   const source = (value || "N").trim();
@@ -252,34 +264,57 @@ function clamp(value: number, min: number, max: number) {
 }
 
 export function App() {
+  const route = useRoute();
   const [token, setToken] = useState(() => localStorage.getItem(tokenStorageKey) ?? "");
   const [account, setAccount] = useState<Account | null>(null);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
-  const [workspaceId, setWorkspaceId] = useState(() => localStorage.getItem(workspaceStorageKey) ?? "");
   const [restoringSession, setRestoringSession] = useState(false);
   const api = useMemo(() => new ApiClient(token), [token]);
 
+  const rememberWorkspaceAccess = useCallback((workspaceId: string, documentId = "") => {
+    setAccount((current) => {
+      if (!current || current.lastAccessedWorkspaceId === workspaceId) {
+        return current;
+      }
+      return { ...current, lastAccessedWorkspaceId: workspaceId };
+    });
+    if (!documentId) {
+      return;
+    }
+    setWorkspaces((current) => {
+      let changed = false;
+      const next = current.map((workspace) => {
+        if (workspace.id !== workspaceId || workspace.lastAccessedDocumentId === documentId) {
+          return workspace;
+        }
+        changed = true;
+        return { ...workspace, lastAccessedDocumentId: documentId };
+      });
+      return changed ? next : current;
+    });
+  }, []);
+
   const saveAuth = (nextToken: string, nextAccount: Account, nextWorkspaces: WorkspaceSummary[] = []) => {
     const safeWorkspaces = Array.isArray(nextWorkspaces) ? nextWorkspaces : [];
+    clearLegacyRoutePersistence();
     localStorage.setItem(tokenStorageKey, nextToken);
     setToken(nextToken);
     setAccount(nextAccount);
     setWorkspaces(safeWorkspaces);
-    const preferred = localStorage.getItem(workspaceStorageKey);
-    const selected = selectWorkspaceAfterAuth(safeWorkspaces, preferred);
-    if (!selected || selected !== preferred) {
-      localStorage.removeItem(workspaceStorageKey);
+    if (route.kind === "root" || route.kind === "login" || route.kind === "register") {
+      navigate(resolveRoot({ authenticated: true, account: nextAccount, workspaces: safeWorkspaces }), {
+        replace: true,
+      });
     }
-    setWorkspaceId(selected);
   };
 
   const signOut = () => {
     localStorage.removeItem(tokenStorageKey);
-    localStorage.removeItem(workspaceStorageKey);
+    clearLegacyRoutePersistence();
     setToken("");
     setAccount(null);
     setWorkspaces([]);
-    setWorkspaceId("");
+    navigate({ kind: "login" }, { replace: true });
   };
 
   useEffect(() => {
@@ -295,14 +330,9 @@ export function App() {
           return;
         }
         const safeWorkspaces = response.workspaces ?? [];
+        clearLegacyRoutePersistence();
         setAccount(response.account);
         setWorkspaces(safeWorkspaces);
-        const preferred = localStorage.getItem(workspaceStorageKey);
-        const selected = selectWorkspaceAfterAuth(safeWorkspaces, preferred);
-        if (!selected || selected !== preferred) {
-          localStorage.removeItem(workspaceStorageKey);
-        }
-        setWorkspaceId(selected);
       })
       .catch(() => {
         if (!disposed) {
@@ -319,34 +349,80 @@ export function App() {
     };
   }, [token]);
 
-  if (!token) {
-    return <AuthScreen api={api} onAuth={saveAuth} />;
-  }
+  useEffect(() => {
+    if (!token && (route.kind === "workspace" || route.kind === "newWorkspace")) {
+      navigate({ kind: "login" }, { replace: true });
+      return;
+    }
+  }, [route, token]);
 
-  if (restoringSession && !account) {
-    return (
-      <main className="auth-screen">
-        <section className="card p-24 auth-panel">
-          <Logo />
-          <h1 className="auth-title">Restoring your session</h1>
-          <p className="small muted">Loading account and workspace membership.</p>
-        </section>
-      </main>
+  useEffect(() => {
+    if (route.kind !== "root") {
+      return;
+    }
+    if (token && !account) {
+      return;
+    }
+    navigate(
+      resolveRoot({ authenticated: Boolean(token), account, workspaces }),
+      { replace: true },
     );
+  }, [account, route, token, workspaces]);
+
+  useEffect(() => {
+    if (route.kind !== "login" && route.kind !== "register") {
+      return;
+    }
+    if (!token || !account) {
+      return;
+    }
+    navigate(
+      resolveRoot({ authenticated: true, account, workspaces }),
+      { replace: true },
+    );
+  }, [account, route, token, workspaces]);
+
+  const routeWorkspace = route.kind === "workspace" ? workspaces.find((workspace) => workspace.slug === route.slug) ?? null : null;
+
+  if (!token) {
+    if (route.kind === "notFound") {
+      return <RouteMessageScreen title="Page not found" body="That link does not match a notty route." />;
+    }
+    return <AuthScreen api={api} mode={route.kind === "register" ? "register" : "login"} onAuth={saveAuth} />;
   }
 
-  if (!workspaceId) {
+  if (!account) {
+    return <RestoringSessionScreen />;
+  }
+
+  if (route.kind === "root" || route.kind === "login" || route.kind === "register") {
+    return <RestoringSessionScreen />;
+  }
+
+  if (route.kind === "notFound") {
+    return <RouteMessageScreen title="Page not found" body="That link does not match a notty route." />;
+  }
+
+  if (route.kind === "newWorkspace") {
     return (
-      <WorkspacePicker
+      <WorkspaceOnboarding
         api={api}
         account={account}
         workspaces={workspaces}
         onWorkspaces={setWorkspaces}
-        onSelect={(id) => {
-          localStorage.setItem(workspaceStorageKey, id);
-          setWorkspaceId(id);
+        onSelect={(workspace) => {
+          navigate({ kind: "workspace", slug: workspace.slug, view: { kind: "home" } }, { replace: true });
         }}
         onSignOut={signOut}
+      />
+    );
+  }
+
+  if (!routeWorkspace) {
+    return (
+      <RouteMessageScreen
+        title="Workspace not found"
+        body="This workspace is unavailable for the signed-in account."
       />
     );
   }
@@ -355,20 +431,56 @@ export function App() {
     <WorkspaceApp
       api={api}
       token={token}
-      workspaceId={workspaceId}
+      workspaceId={routeWorkspace.id}
+      workspaceSlug={routeWorkspace.slug}
+      view={route.view}
       account={account}
       workspaces={workspaces}
-      onWorkspaceChange={(id) => {
-        localStorage.setItem(workspaceStorageKey, id);
-        setWorkspaceId(id);
+      onAccess={rememberWorkspaceAccess}
+      onWorkspaceChange={(slug) => {
+        navigate({ kind: "workspace", slug, view: { kind: "home" } });
       }}
       onSignOut={signOut}
     />
   );
 }
 
-function AuthScreen({ api, onAuth }: { api: ApiClient; onAuth: (token: string, account: Account, workspaces: WorkspaceSummary[]) => void }) {
-  const [mode, setMode] = useState<"login" | "register">("login");
+function RestoringSessionScreen() {
+  return (
+    <main className="auth-screen">
+      <section className="card p-24 auth-panel">
+        <Logo />
+        <h1 className="auth-title">Restoring your session</h1>
+        <p className="small muted">Loading account and workspace membership.</p>
+      </section>
+    </main>
+  );
+}
+
+function RouteMessageScreen({ title, body }: { title: string; body: string }) {
+  return (
+    <main className="auth-screen">
+      <section className="card p-24 auth-panel">
+        <Logo />
+        <h1 className="auth-title">{title}</h1>
+        <p className="small muted auth-copy">{body}</p>
+        <button className="btn accent full lg" type="button" onClick={() => navigate({ kind: "root" })}>
+          Go home
+        </button>
+      </section>
+    </main>
+  );
+}
+
+function AuthScreen({
+  api,
+  mode,
+  onAuth,
+}: {
+  api: ApiClient;
+  mode: "login" | "register";
+  onAuth: (token: string, account: Account, workspaces: WorkspaceSummary[]) => void;
+}) {
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -420,7 +532,10 @@ function AuthScreen({ api, onAuth }: { api: ApiClient; onAuth: (token: string, a
         </form>
         <div className="auth-switch">
           {mode === "login" ? "No account?" : "Already have an account?"}
-          <button className="btn-link" onClick={() => setMode(mode === "login" ? "register" : "login")}>
+          <button
+            className="btn-link"
+            onClick={() => navigate({ kind: mode === "login" ? "register" : "login" })}
+          >
             {mode === "login" ? "Create one" : "Log in"}
           </button>
         </div>
@@ -441,10 +556,9 @@ export function WorkspaceOnboarding({
   account: Account | null;
   workspaces: WorkspaceSummary[];
   onWorkspaces: (workspaces: WorkspaceSummary[]) => void;
-  onSelect: (id: string) => void;
+  onSelect: (workspace: WorkspaceSummary) => void;
   onSignOut: () => void;
 }) {
-  const [mode, setMode] = useState<"create" | "join">("create");
   const initialHandle = identifierFromName(account?.email.split("@")[0] ?? "owner", handleMaxLength) || "owner";
 
   return (
@@ -455,38 +569,16 @@ export function WorkspaceOnboarding({
           <button className="btn ghost sm" onClick={onSignOut}>Sign out</button>
         </div>
         <div className="picker-head">
-          <h1 className="auth-title">Start by joining or creating a workspace</h1>
+          <h1 className="auth-title">Create a workspace</h1>
           <p className="small muted">Workspaces are where documents, daemons, agents, and members live.</p>
         </div>
-        <div className="onboarding-actions">
-          <button className={`btn lg ${mode === "create" ? "accent" : ""}`} onClick={() => setMode("create")}>
-            Create a workspace
-          </button>
-          <button className={`btn lg ${mode === "join" ? "accent" : ""}`} onClick={() => setMode("join")}>
-            Join with invite link
-          </button>
-        </div>
-        {mode === "create" ? (
-          <CreateWorkspaceForm
-            api={api}
-            initialHandle={initialHandle}
-            workspaces={workspaces}
-            onWorkspaces={onWorkspaces}
-            onSelect={onSelect}
-          />
-        ) : (
-          <div className="form-stack create-workspace-card">
-            <div>
-              <h2 className="modal-title">Join with invite link</h2>
-              <p className="small muted">Invite links are coming next.</p>
-            </div>
-            <label className="field">
-              <span className="lab">Invite link</span>
-              <input value="" placeholder="https://notty.example.com/invite/..." disabled readOnly />
-            </label>
-            <button className="btn full lg" disabled>Join workspace</button>
-          </div>
-        )}
+        <CreateWorkspaceForm
+          api={api}
+          initialHandle={initialHandle}
+          workspaces={workspaces}
+          onWorkspaces={onWorkspaces}
+          onSelect={onSelect}
+        />
       </section>
     </main>
   );
@@ -503,7 +595,7 @@ function CreateWorkspaceForm({
   initialHandle: string;
   workspaces: WorkspaceSummary[];
   onWorkspaces: (workspaces: WorkspaceSummary[]) => void;
-  onSelect: (id: string) => void;
+  onSelect: (workspace: WorkspaceSummary) => void;
 }) {
   const [name, setName] = useState("Product Workspace");
   const [slug, setSlug] = useState(() => identifierFromName("Product Workspace", workspaceSlugMaxLength));
@@ -518,7 +610,7 @@ function CreateWorkspaceForm({
       const response = await api.createWorkspace({ name, slug, handle });
       const next = [...workspaces, response.workspace];
       onWorkspaces(next);
-      onSelect(response.workspace.id);
+      onSelect(response.workspace);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -581,84 +673,27 @@ function CreateWorkspaceForm({
   );
 }
 
-function WorkspacePicker({
-  api,
-  account,
-  workspaces,
-  onWorkspaces,
-  onSelect,
-  onSignOut,
-}: {
-  api: Pick<ApiClient, "createWorkspace">;
-  account: Account | null;
-  workspaces: WorkspaceSummary[];
-  onWorkspaces: (workspaces: WorkspaceSummary[]) => void;
-  onSelect: (id: string) => void;
-  onSignOut: () => void;
-}) {
-  if (workspaces.length === 0) {
-    return (
-      <WorkspaceOnboarding
-        api={api}
-        account={account}
-        workspaces={workspaces}
-        onWorkspaces={onWorkspaces}
-        onSelect={onSelect}
-        onSignOut={onSignOut}
-      />
-    );
-  }
-  const initialHandle = identifierFromName(account?.email.split("@")[0] ?? "owner", handleMaxLength) || "owner";
-
-  return (
-    <main className="auth-screen picker-screen">
-      <section className="card p-24 picker-panel">
-        <div className="row between gap-12">
-          <Logo />
-          <button className="btn ghost sm" onClick={onSignOut}>Sign out</button>
-        </div>
-        <div className="picker-head">
-          <h1 className="auth-title">Choose a workspace</h1>
-          <p className="small muted">Pick a tenant or create a new workspace-scoped home for documents, daemons, and agents.</p>
-        </div>
-        <div className="workspace-grid">
-          {workspaces.map((workspace) => (
-            <button className="workspace-tile card" key={workspace.id} onClick={() => onSelect(workspace.id)}>
-              <div className="avi">{initials(workspace.name)}</div>
-              <div className="col gap-2">
-                <strong className="small">{workspace.name}</strong>
-                <span className="tiny muted">{workspace.slug}</span>
-              </div>
-            </button>
-          ))}
-        </div>
-        <CreateWorkspaceForm
-          api={api}
-          initialHandle={initialHandle}
-          workspaces={workspaces}
-          onWorkspaces={onWorkspaces}
-          onSelect={onSelect}
-        />
-      </section>
-    </main>
-  );
-}
-
 export function WorkspaceApp({
   api,
   token,
   workspaceId,
+  workspaceSlug,
+  view,
   account,
   workspaces,
+  onAccess,
   onWorkspaceChange,
   onSignOut,
 }: {
   api: ApiClient;
   token: string;
   workspaceId: string;
+  workspaceSlug: string;
+  view: WorkspaceView;
   account: Account | null;
   workspaces: WorkspaceSummary[];
-  onWorkspaceChange: (id: string) => void;
+  onAccess: (workspaceId: string, documentId?: string) => void;
+  onWorkspaceChange: (slug: string) => void;
   onSignOut: () => void;
 }) {
   const { workspace, connected, loading, error, reload } = useWorkspace(workspaceId, token);
@@ -668,8 +703,6 @@ export function WorkspaceApp({
     rootDocumentId: workspace.rootDocumentId,
   });
   const rootDocuments = rootNamespace.documents;
-  const [activeDocumentId, setActiveDocumentId] = useState("");
-  const [centerView, setCenterView] = useState<"document" | "daemons" | "agents">("document");
   const [rightTab, setRightTab] = useState<"threads" | "activity" | "people">("threads");
   const [modal, setModal] = useState<"daemon" | "agent" | "rename" | "agent-detail" | "daemon-detail" | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
@@ -682,16 +715,13 @@ export function WorkspaceApp({
   const [renamingDocumentId, setRenamingDocumentId] = useState("");
   const [freshDocumentId, setFreshDocumentId] = useState("");
   const [titleDraft, setTitleDraft] = useState("");
+  const lastAccessUpdateKeyRef = useRef("");
 
-  const activeDocument = rootDocuments.find((document) => document.id === activeDocumentId) ?? rootDocuments[0] ?? null;
-  const documentId = activeDocument?.id ?? "";
-  useEffect(() => {
-    if (documentId && documentId !== activeDocumentId) {
-      setActiveDocumentId(documentId);
-    }
-  }, [activeDocumentId, documentId]);
-
-  const documentThreads = workspace.threads.filter((thread) => thread.documentId === activeDocument?.id);
+  const centerView = view.kind === "daemons" ? "daemons" : view.kind === "agents" ? "agents" : "document";
+  const requestedDocumentId = view.kind === "document" ? view.documentId : "";
+  const activeDocument = requestedDocumentId ? rootDocuments.find((document) => document.id === requestedDocumentId) ?? null : null;
+  const documentMissing = view.kind === "document" && rootNamespace.ready && !activeDocument;
+  const documentThreads = activeDocument ? workspace.threads.filter((thread) => thread.documentId === activeDocument.id) : [];
   const groupedAgents = agentsByDaemon(workspace.agents, workspace.daemons);
   const documentTree = useMemo(() => buildDocumentTree(rootDocuments), [rootDocuments]);
   const threadCountByDocument = useMemo(() => {
@@ -706,6 +736,30 @@ export function WorkspaceApp({
   const currentWorkspaceUser = workspace.users.find((user) => user.id === workspace.currentUserId) ?? null;
   const currentWorkspaceUserHandle = currentWorkspaceUser?.handle ? `@${currentWorkspaceUser.handle}` : "Workspace user";
   const currentWorkspaceUserIdentity = currentWorkspaceUser?.handle || currentWorkspaceUser?.name || "Workspace user";
+
+  useEffect(() => {
+    if (view.kind !== "home" || !rootNamespace.ready || !activeWorkspace) {
+      return;
+    }
+    const resolved = resolveWorkspace(activeWorkspace, rootDocuments);
+    if (resolved.kind === "workspace" && resolved.view.kind === "document") {
+      navigate(resolved, { replace: true });
+    }
+  }, [activeWorkspace, rootDocuments, rootNamespace.ready, view.kind]);
+
+  useEffect(() => {
+    const documentId = view.kind === "document" ? activeDocument?.id ?? "" : "";
+    if (view.kind === "document" && !documentId) {
+      return;
+    }
+    const accessKey = `${workspaceId}\0${documentId}`;
+    if (lastAccessUpdateKeyRef.current === accessKey) {
+      return;
+    }
+    lastAccessUpdateKeyRef.current = accessKey;
+    onAccess(workspaceId, documentId);
+    void api.updateLastAccessed(workspaceId, documentId ? { documentId } : {}).catch(() => {});
+  }, [activeDocument, api, onAccess, view.kind, workspaceId]);
 
   const startRenamingDocument = useCallback((document: DocumentItem) => {
     setRenamingDocumentId(document.id);
@@ -741,8 +795,7 @@ export function WorkspaceApp({
       const doc = await api.createDocument(workspaceId);
       const path = untitledDocumentPath(rootDocuments, activeDocument?.path);
       rootNamespace.upsertFile(doc.id, path);
-      setActiveDocumentId(doc.id);
-      setCenterView("document");
+      navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "document", documentId: doc.id } });
       setRightTab("threads");
       setSelectedThreadId("");
       setRenamingDocumentId(doc.id);
@@ -763,6 +816,7 @@ export function WorkspaceApp({
     rootNamespace,
     workspace.rootDocumentId,
     workspaceId,
+    workspaceSlug,
   ]);
 
   const toggleFolder = (path: string) => {
@@ -833,9 +887,9 @@ export function WorkspaceApp({
               <span className="tiny muted truncate">{currentWorkspaceUserHandle}</span>
             </div>
           </div>
-          <select aria-label="Workspace" value={workspaceId} onChange={(event) => onWorkspaceChange(event.target.value)}>
+          <select aria-label="Workspace" value={workspaceSlug} onChange={(event) => onWorkspaceChange(event.target.value)}>
             {workspaces.map((workspace) => (
-              <option value={workspace.id} key={workspace.id}>{workspace.name}</option>
+              <option value={workspace.slug} key={workspace.id}>{workspace.name}</option>
             ))}
           </select>
         </div>
@@ -851,10 +905,6 @@ export function WorkspaceApp({
         </div>
 
         <nav className="sb-section">
-          <button className="nav-item on" type="button">
-            <Icon name="home" />
-            <span>Home</span>
-          </button>
           <button className="nav-item" type="button" onClick={() => setRightTab("activity")}>
             <Icon name="activity" />
             <span>Activity</span>
@@ -893,8 +943,7 @@ export function WorkspaceApp({
               onToggleFolder={toggleFolder}
               threadCountFor={(id) => threadCountByDocument.get(id) ?? 0}
               onSelectDocument={(id) => {
-                setActiveDocumentId(id);
-                setCenterView("document");
+                navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "document", documentId: id } });
               }}
             />
           </div>
@@ -972,11 +1021,19 @@ export function WorkspaceApp({
               ))}
             </div>
             <span className="divider-v" />
-            <button className={`btn sm ${centerView === "daemons" ? "selected" : ""}`} type="button" onClick={() => setCenterView("daemons")}>
+            <button
+              className={`btn sm ${centerView === "daemons" ? "selected" : ""}`}
+              type="button"
+              onClick={() => navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "daemons" } })}
+            >
               <Icon name="daemon" />
               Daemons
             </button>
-            <button className={`btn sm ${centerView === "agents" ? "selected" : ""}`} type="button" onClick={() => setCenterView("agents")}>
+            <button
+              className={`btn sm ${centerView === "agents" ? "selected" : ""}`}
+              type="button"
+              onClick={() => navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "agents" } })}
+            >
               <Icon name="agent" />
               Agents
             </button>
@@ -1008,6 +1065,12 @@ export function WorkspaceApp({
               setModal("agent-detail");
             }}
           />
+        ) : documentMissing ? (
+          <DocumentNotFound
+            onBackToWorkspace={() => {
+              navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "home" } }, { replace: true });
+            }}
+          />
         ) : activeDocument ? (
           <DocumentEditor
             api={api}
@@ -1035,6 +1098,8 @@ export function WorkspaceApp({
             onTitleEditCancel={cancelRenamingDocument}
             onTitleCommit={(draft) => commitDocumentTitle(activeDocument, draft)}
           />
+        ) : rootNamespace.ready && rootDocuments.length ? (
+          <div className="notice compact">Opening document...</div>
         ) : (
           <EmptyWorkspace
             onCreateDocument={() => void createDocument()}
@@ -1064,7 +1129,9 @@ export function WorkspaceApp({
             selectedThreadId={selectedThreadId}
             onSelectThread={setSelectedThreadId}
             onJumpToThread={(threadId) => {
-              setCenterView("document");
+              if (activeDocument) {
+                navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "document", documentId: activeDocument.id } });
+              }
               setFocusThreadId(threadId);
             }}
             onReply={() => void reload()}
@@ -1097,7 +1164,7 @@ export function WorkspaceApp({
           }}
           onDelete={async () => {
             rootNamespace.tombstoneFile(activeDocument.id);
-            setActiveDocumentId("");
+            navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "home" } }, { replace: true });
             setModal(null);
           }}
         />
@@ -2510,6 +2577,20 @@ function EmptyWorkspace({
             <span className="small muted">{creatingDocument ? "Creating..." : "Markdown or plaintext. Threads and agents come along."}</span>
           </button>
         </div>
+      </div>
+    </section>
+  );
+}
+
+function DocumentNotFound({ onBackToWorkspace }: { onBackToWorkspace: () => void }) {
+  return (
+    <section className="doc-canvas">
+      <div className="doc-inner empty-state">
+        <h2 className="display">Document not found</h2>
+        <p className="small muted">This document is not available in the current workspace.</p>
+        <button className="btn accent lg" type="button" onClick={onBackToWorkspace}>
+          Back to workspace
+        </button>
       </div>
     </section>
   );

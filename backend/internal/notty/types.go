@@ -88,19 +88,21 @@ type User struct {
 }
 
 type Account struct {
-	ID          string    `json:"id"`
-	Email       string    `json:"email"`
-	DisplayName string    `json:"displayName"`
-	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+	ID                      string    `json:"id"`
+	Email                   string    `json:"email"`
+	DisplayName             string    `json:"displayName"`
+	LastAccessedWorkspaceID string    `json:"lastAccessedWorkspaceId,omitempty"`
+	CreatedAt               time.Time `json:"createdAt"`
+	UpdatedAt               time.Time `json:"updatedAt"`
 }
 
 type Workspace struct {
-	ID        string    `json:"id"`
-	Slug      string    `json:"slug"`
-	Name      string    `json:"name"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	ID                     string    `json:"id"`
+	Slug                   string    `json:"slug"`
+	Name                   string    `json:"name"`
+	LastAccessedDocumentID string    `json:"lastAccessedDocumentId,omitempty"`
+	CreatedAt              time.Time `json:"createdAt"`
+	UpdatedAt              time.Time `json:"updatedAt"`
 }
 
 type WorkspaceMember struct {
@@ -339,6 +341,10 @@ type ReplyThreadRequest struct {
 type CreateDocumentRequest struct {
 	DocumentID        string `json:"documentId,omitempty"`
 	ClientOperationID string `json:"clientOperationId,omitempty"`
+}
+
+type UpdateLastAccessedRequest struct {
+	DocumentID string `json:"documentId,omitempty"`
 }
 
 type UpsertPresenceRequest struct {

@@ -211,7 +211,14 @@ func normalizeEmail(email string) string {
 
 func accountFromRow(row *sql.Row) (*Account, error) {
 	account := &Account{}
-	if err := row.Scan(&account.ID, &account.Email, &account.DisplayName, &account.CreatedAt, &account.UpdatedAt); err != nil {
+	if err := row.Scan(
+		&account.ID,
+		&account.Email,
+		&account.DisplayName,
+		&account.LastAccessedWorkspaceID,
+		&account.CreatedAt,
+		&account.UpdatedAt,
+	); err != nil {
 		return nil, err
 	}
 	return account, nil
@@ -235,19 +242,21 @@ func registerAccount(db *sql.DB, req RegisterRequest) (*Account, error) {
 	}
 	now := time.Now().UTC()
 	account := &Account{
-		ID:          "account_" + uuid.NewString(),
-		Email:       email,
-		DisplayName: displayName,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:                      "account_" + uuid.NewString(),
+		Email:                   email,
+		DisplayName:             displayName,
+		LastAccessedWorkspaceID: "",
+		CreatedAt:               now,
+		UpdatedAt:               now,
 	}
 	_, err = db.Exec(
-		`INSERT INTO accounts (id, email, display_name, password_hash, password_updated_at, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		`INSERT INTO accounts (id, email, display_name, password_hash, last_accessed_workspace_id, password_updated_at, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 		account.ID,
 		account.Email,
 		account.DisplayName,
 		passwordHash,
+		account.LastAccessedWorkspaceID,
 		now,
 		now,
 		now,
@@ -266,11 +275,19 @@ func authenticateAccount(db *sql.DB, req LoginRequest) (*Account, error) {
 	var account Account
 	var passwordHash string
 	err := db.QueryRow(
-		`SELECT id, email, display_name, password_hash, created_at, updated_at
+		`SELECT id, email, display_name, password_hash, last_accessed_workspace_id, created_at, updated_at
 		   FROM accounts
 		  WHERE email = $1`,
 		email,
-	).Scan(&account.ID, &account.Email, &account.DisplayName, &passwordHash, &account.CreatedAt, &account.UpdatedAt)
+	).Scan(
+		&account.ID,
+		&account.Email,
+		&account.DisplayName,
+		&passwordHash,
+		&account.LastAccessedWorkspaceID,
+		&account.CreatedAt,
+		&account.UpdatedAt,
+	)
 	if err == sql.ErrNoRows {
 		return nil, errors.New("invalid email or password")
 	}
@@ -285,14 +302,14 @@ func authenticateAccount(db *sql.DB, req LoginRequest) (*Account, error) {
 
 func getAccountByID(db *sql.DB, accountID string) (*Account, error) {
 	return accountFromRow(db.QueryRow(
-		`SELECT id, email, display_name, created_at, updated_at FROM accounts WHERE id = $1`,
+		`SELECT id, email, display_name, last_accessed_workspace_id, created_at, updated_at FROM accounts WHERE id = $1`,
 		strings.TrimSpace(accountID),
 	))
 }
 
 func listWorkspacesForAccount(db *sql.DB, accountID string) ([]*Workspace, error) {
 	rows, err := db.Query(
-		`SELECT w.id, w.slug, w.name, w.created_at, w.updated_at
+		`SELECT w.id, w.slug, w.name, m.last_accessed_document_id, w.created_at, w.updated_at
 		   FROM workspaces w
 		   JOIN workspace_members m ON m.workspace_id = w.id
 		  WHERE m.account_id = $1 AND m.status = 'active'
@@ -306,12 +323,61 @@ func listWorkspacesForAccount(db *sql.DB, accountID string) ([]*Workspace, error
 	workspaces := []*Workspace{}
 	for rows.Next() {
 		workspace := &Workspace{}
-		if err := rows.Scan(&workspace.ID, &workspace.Slug, &workspace.Name, &workspace.CreatedAt, &workspace.UpdatedAt); err != nil {
+		if err := rows.Scan(
+			&workspace.ID,
+			&workspace.Slug,
+			&workspace.Name,
+			&workspace.LastAccessedDocumentID,
+			&workspace.CreatedAt,
+			&workspace.UpdatedAt,
+		); err != nil {
 			return nil, err
 		}
 		workspaces = append(workspaces, workspace)
 	}
 	return workspaces, rows.Err()
+}
+
+func updateLastAccessedWorkspace(db *sql.DB, accountID string, workspaceID string, documentID string) error {
+	accountID = strings.TrimSpace(accountID)
+	workspaceID = strings.TrimSpace(workspaceID)
+	documentID = strings.TrimSpace(documentID)
+	if db == nil {
+		return errors.New("database is required")
+	}
+	if accountID == "" || workspaceID == "" {
+		return errors.New("account and workspace are required")
+	}
+	now := time.Now().UTC()
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err = tx.Exec(
+		`UPDATE accounts SET last_accessed_workspace_id = $1, updated_at = $2 WHERE id = $3`,
+		workspaceID, now, accountID,
+	); err != nil {
+		return err
+	}
+	if documentID != "" {
+		if _, err = tx.Exec(
+			`UPDATE workspace_members
+			    SET last_accessed_document_id = $1
+			  WHERE workspace_id = $2 AND account_id = $3 AND status = 'active'`,
+			documentID, workspaceID, accountID,
+		); err != nil {
+			return err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func getWorkspace(db *sql.DB, workspaceID string) (*Workspace, error) {
@@ -409,6 +475,13 @@ func createWorkspaceForAccount(db *sql.DB, account *Account, req CreateWorkspace
 	); err != nil {
 		return nil, nil, err
 	}
+	if _, err = tx.Exec(
+		`UPDATE accounts SET last_accessed_workspace_id = $1, updated_at = $2 WHERE id = $3`,
+		workspace.ID, now, account.ID,
+	); err != nil {
+		return nil, nil, err
+	}
+	account.LastAccessedWorkspaceID = workspace.ID
 	if err = tx.Commit(); err != nil {
 		return nil, nil, err
 	}
@@ -549,9 +622,9 @@ func isUniqueViolation(err error) bool {
 func getAccountByEmail(db *sql.DB, email string) (*Account, error) {
 	account := &Account{}
 	err := db.QueryRow(
-		`SELECT id, email, display_name, created_at, updated_at FROM accounts WHERE email = $1`,
+		`SELECT id, email, display_name, last_accessed_workspace_id, created_at, updated_at FROM accounts WHERE email = $1`,
 		normalizeEmail(email),
-	).Scan(&account.ID, &account.Email, &account.DisplayName, &account.CreatedAt, &account.UpdatedAt)
+	).Scan(&account.ID, &account.Email, &account.DisplayName, &account.LastAccessedWorkspaceID, &account.CreatedAt, &account.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
 	}

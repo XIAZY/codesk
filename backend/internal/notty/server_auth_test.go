@@ -82,6 +82,44 @@ func TestRegisterAccountCreatesNoImplicitWorkspaceRows(t *testing.T) {
 	}
 }
 
+func TestLastAccessedWorkspaceAndDocumentPersistPerAccountMembership(t *testing.T) {
+	router := newAuthTestRouter(t)
+
+	owner := authTestRegister(t, router, "last-access-owner@example.com", "owner-pass", "Owner")
+	workspace := authTestCreateWorkspace(t, router, owner.Token, "Last Access Tenant")
+	document := authTestCreateDocument(t, router, owner.Token, workspace.ID, "docs/route.md", "# Route\n")
+	otherDocument := authTestCreateDocument(t, router, owner.Token, workspace.ID, "docs/other.md", "# Other\n")
+	memberAuth := authTestRegister(t, router, "last-access-member@example.com", "member-pass", "Member")
+	_ = authTestAddMember(t, router, owner.Token, workspace.ID, "last-access-member@example.com", "member")
+
+	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/last-accessed", owner.Token, UpdateLastAccessedRequest{
+		DocumentID: document.ID,
+	}, http.StatusOK)
+	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/last-accessed", memberAuth.Token, UpdateLastAccessedRequest{
+		DocumentID: otherDocument.ID,
+	}, http.StatusOK)
+	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/last-accessed", owner.Token, UpdateLastAccessedRequest{
+		DocumentID: "doc_missing",
+	}, http.StatusNotFound)
+
+	var response AuthResponse
+	authTestJSON(t, router, http.MethodGet, "/api/auth/me", owner.Token, nil, http.StatusOK, &response)
+	if response.Account == nil || response.Account.LastAccessedWorkspaceID != workspace.ID {
+		t.Fatalf("expected last accessed workspace %q, got %#v", workspace.ID, response.Account)
+	}
+	if len(response.Workspaces) != 1 || response.Workspaces[0].LastAccessedDocumentID != document.ID {
+		t.Fatalf("expected last accessed document %q, got %#v", document.ID, response.Workspaces)
+	}
+	var memberResponse AuthResponse
+	authTestJSON(t, router, http.MethodGet, "/api/auth/me", memberAuth.Token, nil, http.StatusOK, &memberResponse)
+	if memberResponse.Account == nil || memberResponse.Account.LastAccessedWorkspaceID != workspace.ID {
+		t.Fatalf("expected member last accessed workspace %q, got %#v", workspace.ID, memberResponse.Account)
+	}
+	if len(memberResponse.Workspaces) != 1 || memberResponse.Workspaces[0].LastAccessedDocumentID != otherDocument.ID {
+		t.Fatalf("expected member last accessed document %q, got %#v", otherDocument.ID, memberResponse.Workspaces)
+	}
+}
+
 func TestCreateWorkspaceRequiresExplicitValidSlugAndHandle(t *testing.T) {
 	router := newAuthTestRouter(t)
 
@@ -271,6 +309,7 @@ func TestRouteTableMatchesAuthenticatedWorkspaceAllowlist(t *testing.T) {
 	}
 	workspaceAPI := map[string]bool{
 		"GET /api/workspaces/{workspaceID}/workspace":                                  true,
+		"PATCH /api/workspaces/{workspaceID}/last-accessed":                            true,
 		"GET /api/workspaces/{workspaceID}/members":                                    true,
 		"POST /api/workspaces/{workspaceID}/members":                                   true,
 		"GET /api/workspaces/{workspaceID}/daemons":                                    true,

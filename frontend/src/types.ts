@@ -2,12 +2,14 @@ export type Account = {
   id: string;
   email: string;
   displayName: string;
+  lastAccessedWorkspaceId?: string;
 };
 
 export type WorkspaceSummary = {
   id: string;
   slug: string;
   name: string;
+  lastAccessedDocumentId?: string;
 };
 
 export type DocumentItem = {

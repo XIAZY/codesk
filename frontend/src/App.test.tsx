@@ -20,8 +20,7 @@ function account(): Account {
 }
 
 describe("WorkspaceOnboarding", () => {
-  it("shows explicit create and invite choices for zero-workspace accounts", async () => {
-    const user = userEvent.setup();
+  it("shows the create workspace flow without the deferred invite branch", () => {
     render(
       <WorkspaceOnboarding
         api={{ createWorkspace: vi.fn() }}
@@ -33,12 +32,8 @@ describe("WorkspaceOnboarding", () => {
       />
     );
 
-    expect(screen.getByRole("heading", { name: "Start by joining or creating a workspace" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Create a workspace" })).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Join with invite link" }));
-
-    expect(screen.getByRole("heading", { name: "Join with invite link" })).toBeTruthy();
-    expect((screen.getByRole("button", { name: "Join workspace" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole("heading", { name: "Create a workspace" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Join with invite link" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "Choose a workspace" })).toBeNull();
   });
 
@@ -98,7 +93,7 @@ describe("WorkspaceOnboarding", () => {
 
     await waitFor(() => expect(createWorkspace).toHaveBeenCalledWith({ name: "Product Workspace", slug: "product-workspace", handle: "owner" }));
     expect(onWorkspaces).toHaveBeenCalledWith([created]);
-    expect(onSelect).toHaveBeenCalledWith("workspace_new");
+    expect(onSelect).toHaveBeenCalledWith(created);
   });
 
   it("shows backend creation errors inline without selecting a workspace", async () => {
