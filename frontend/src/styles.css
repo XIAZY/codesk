@@ -523,12 +523,25 @@ svg.i.sm {
   margin-bottom: 18px;
 }
 
-.create-workspace-card {
+.create-workspace-card,
+.invite-link-card {
   margin-top: 8px;
   border: 1px solid var(--border);
   border-radius: var(--r-3);
   background: var(--paper-2);
   padding: 14px;
+}
+
+.invite-preview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-3);
+  background: var(--paper-2);
+  padding: 12px;
 }
 
 .shell {

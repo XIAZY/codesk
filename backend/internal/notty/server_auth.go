@@ -3,6 +3,7 @@ package notty
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -182,6 +183,77 @@ func (s *Server) handleAddWorkspaceMember(w http.ResponseWriter, r *http.Request
 		_ = store.Reload()
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"member": member})
+}
+
+func (s *Server) handleCreateWorkspaceInvite(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil || s.store.db == nil {
+		writeError(w, http.StatusServiceUnavailable, "database auth is not available")
+		return
+	}
+	if !s.requireHumanPrincipal(w, r) {
+		return
+	}
+	auth, _ := authFromContext(r.Context())
+	if err := requirePermission(auth, ActionInviteMembers); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	invite, token, err := createWorkspaceInvite(s.store.db, s.requestWorkspaceID(r), auth.UserID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, CreateWorkspaceInviteResponse{
+		Invite: invite,
+		URL:    "/invite/" + token,
+	})
+}
+
+func (s *Server) handleWorkspaceInvitePreview(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil || s.store.db == nil {
+		writeError(w, http.StatusServiceUnavailable, "database auth is not available")
+		return
+	}
+	preview, err := workspaceInvitePreview(s.store.db, chi.URLParam(r, "token"))
+	if err != nil {
+		writeError(w, workspaceInviteErrorStatus(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, preview)
+}
+
+func (s *Server) handleAcceptWorkspaceInvite(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil || s.store.db == nil {
+		writeError(w, http.StatusServiceUnavailable, "database auth is not available")
+		return
+	}
+	auth, ok := authFromContext(r.Context())
+	if !ok || auth.AccountID == "" {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var req AcceptWorkspaceInviteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	workspace, err := acceptWorkspaceInvite(s.store.db, chi.URLParam(r, "token"), auth.AccountID, req)
+	if err != nil {
+		writeError(w, workspaceInviteErrorStatus(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, AcceptWorkspaceInviteResponse{Workspace: workspace})
+}
+
+func workspaceInviteErrorStatus(err error) int {
+	switch {
+	case errors.Is(err, errInvalidInvite), errors.Is(err, ErrNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, errExpiredInvite):
+		return http.StatusGone
+	default:
+		return http.StatusBadRequest
+	}
 }
 
 func (s *Server) handleListDaemons(w http.ResponseWriter, r *http.Request) {

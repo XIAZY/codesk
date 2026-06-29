@@ -91,6 +91,7 @@ export function emptyWorkspace(): WorkspaceState {
   return {
     workspaceId: "",
     rootDocumentId: "",
+    currentMembershipRole: "",
     name: "",
     users: [],
     daemons: [],

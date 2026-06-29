@@ -75,12 +75,14 @@ function workspaceState(workspaceId = "workspace_team"): WorkspaceState {
   const workspaceNames: Record<string, string> = {
     workspace_alpha: "Alpha Workspace",
     workspace_created: "Product Workspace",
+    workspace_invited: "Invited Workspace",
     workspace_team: "Team Workspace",
   };
   return {
     workspaceId,
     rootDocumentId: "root_doc",
     currentUserId: "user_owner",
+    currentMembershipRole: "owner",
     name: workspaceNames[workspaceId] ?? "Team Workspace",
     users: [
       {
@@ -104,6 +106,10 @@ function workspaceState(workspaceId = "workspace_team"): WorkspaceState {
 
 function jsonResponse(payload: unknown) {
   return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { "Content-Type": "application/json" } }));
+}
+
+function jsonErrorResponse(status: number, error: string) {
+  return Promise.resolve(new Response(JSON.stringify({ error }), { status, headers: { "Content-Type": "application/json" } }));
 }
 
 function patchLastAccessed(path: string, init: RequestInit | undefined) {
@@ -143,6 +149,28 @@ beforeEach(() => {
     }
     if (path.endsWith("/api/auth/login") && init?.method === "POST") {
       return jsonResponse({ token: "token", account: mocks.authAccount, workspaces: mocks.authWorkspaces });
+    }
+    if (path.endsWith("/api/invites/nottyinvite_new") && !init?.method) {
+      return jsonResponse({ workspace: { name: "Invited Workspace", slug: "invited" }, expiresAt: "2026-07-06T00:00:00Z" });
+    }
+    if (path.endsWith("/api/invites/nottyinvite_new/accept") && init?.method === "POST") {
+      const workspace = { id: "workspace_invited", slug: "invited", name: "Invited Workspace" };
+      mocks.authAccount = mocks.authAccount ? { ...mocks.authAccount, lastAccessedWorkspaceId: workspace.id } : mocks.authAccount;
+      mocks.authWorkspaces = [workspace];
+      mocks.workspace = workspaceState(workspace.id);
+      return jsonResponse({ workspace });
+    }
+    if (path.endsWith("/api/invites/nottyinvite_team") && !init?.method) {
+      return jsonResponse({ workspace: { name: "Team Workspace", slug: "team" }, expiresAt: "2026-07-06T00:00:00Z" });
+    }
+    if (path.endsWith("/api/invites/nottyinvite_expired") && !init?.method) {
+      return jsonErrorResponse(410, "This invite link has expired. Ask the workspace admin for a new one.");
+    }
+    if (path.endsWith("/api/workspaces/workspace_team/invites") && init?.method === "POST") {
+      return jsonResponse({
+        invite: { id: "invite_1", workspaceId: "workspace_team", expiresAt: "2026-07-06T00:00:00Z", createdAt: "2026-06-29T00:00:00Z" },
+        url: "/invite/nottyinvite_team_created",
+      });
     }
     if (path.endsWith("/api/workspaces") && init?.method === "POST") {
       const workspace = { id: "workspace_created", slug: "product-workspace", name: "Product Workspace" };
@@ -246,6 +274,77 @@ describe("App URL routing", () => {
     expect(screen.getByRole("heading", { name: "Welcome back" })).toBeTruthy();
     await waitFor(() => expect(window.location.pathname).toBe("/login"));
     expect(window.location.search).toBe("");
+  });
+
+  it("preserves an unauthenticated invite URL through login and joins the workspace", async () => {
+    const user = userEvent.setup();
+    mocks.authAccount = { ...account, lastAccessedWorkspaceId: "" };
+    mocks.authWorkspaces = [];
+    mocks.documents = [];
+    mocks.workspace = workspaceState("workspace_invited");
+    window.history.replaceState(null, "", "/invite/nottyinvite_new");
+
+    render(<App />);
+
+    expect(await screen.findByText("Invited Workspace")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Join workspace" })).toBeTruthy();
+    expect(window.location.pathname).toBe("/invite/nottyinvite_new");
+
+    await user.type(screen.getByLabelText("Email"), "owner@example.com");
+    await user.type(screen.getByLabelText("Password"), "password123");
+    await user.click(screen.getByRole("button", { name: "Log in" }));
+
+    await waitFor(() => expect(screen.getByLabelText("Your handle in this workspace")).toBeTruthy());
+    expect(window.location.pathname).toBe("/invite/nottyinvite_new");
+    await user.click(screen.getByRole("button", { name: "Join workspace" }));
+
+    await waitFor(() => expect(window.location.pathname).toBe("/w/invited"));
+  });
+
+  it("renders expired invite links without redirecting to login", async () => {
+    window.history.replaceState(null, "", "/invite/nottyinvite_expired");
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Invite unavailable" })).toBeTruthy();
+    expect(screen.getByText(/expired/)).toBeTruthy();
+    expect(window.location.pathname).toBe("/invite/nottyinvite_expired");
+  });
+
+  it("lets existing members open the workspace from an invite link", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("notty.auth.token", "token");
+    window.history.replaceState(null, "", "/invite/nottyinvite_team");
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "You are already in this workspace" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Open workspace" }));
+
+    await waitFor(() => expect(window.location.pathname.startsWith("/w/team")).toBe(true));
+  });
+
+  it("shows share-link controls only to workspace owners and admins", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("notty.auth.token", "token");
+    window.history.replaceState(null, "", "/w/team/d/doc_1");
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_1"));
+    await user.click(screen.getByRole("button", { name: /people/i }));
+    await user.click(screen.getByRole("button", { name: "Share" }));
+
+    expect(await screen.findByDisplayValue(`${window.location.origin}/invite/nottyinvite_team_created`)).toBeTruthy();
+
+    cleanup();
+    mocks.workspace = { ...workspaceState(), currentMembershipRole: "member" };
+    window.history.replaceState(null, "", "/w/team/d/doc_1");
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_1"));
+    await user.click(screen.getByRole("button", { name: /people/i }));
+    expect(screen.queryByRole("button", { name: "Share" })).toBeNull();
   });
 
   it("routes from backend account state after login from an invalid protected workspace URL", async () => {

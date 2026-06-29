@@ -48,6 +48,11 @@ type jwtClaims struct {
 	Issuer      string `json:"iss"`
 }
 
+var (
+	errInvalidInvite = errors.New("Invalid invite link.")
+	errExpiredInvite = errors.New("This invite link has expired. Ask the workspace admin for a new one.")
+)
+
 func authFromContext(ctx context.Context) (*AuthContext, bool) {
 	auth, ok := ctx.Value(authContextKey{}).(*AuthContext)
 	return auth, ok && auth != nil
@@ -546,8 +551,9 @@ func addWorkspaceMember(db *sql.DB, workspaceID string, req AddWorkspaceMemberRe
 	if err != nil {
 		return nil, err
 	}
+	committed := false
 	defer func() {
-		if err != nil {
+		if !committed {
 			_ = tx.Rollback()
 		}
 	}()
@@ -591,12 +597,226 @@ func addWorkspaceMember(db *sql.DB, workspaceID string, req AddWorkspaceMemberRe
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
+	committed = true
 	return member, nil
+}
+
+func createWorkspaceInvite(db *sql.DB, workspaceID string, createdByUserID string) (*WorkspaceInvite, string, error) {
+	if db == nil {
+		return nil, "", errors.New("database is required")
+	}
+	workspaceID = strings.TrimSpace(workspaceID)
+	createdByUserID = strings.TrimSpace(createdByUserID)
+	if workspaceID == "" || createdByUserID == "" {
+		return nil, "", errors.New("workspace and creator are required")
+	}
+	token, err := randomToken("nottyinvite_")
+	if err != nil {
+		return nil, "", err
+	}
+	now := time.Now().UTC()
+	invite := &WorkspaceInvite{
+		ID:              "invite_" + uuid.NewString(),
+		WorkspaceID:     workspaceID,
+		CreatedByUserID: createdByUserID,
+		ExpiresAt:       now.Add(7 * 24 * time.Hour),
+		CreatedAt:       now,
+	}
+	if _, err := db.Exec(
+		`INSERT INTO workspace_invites (id, workspace_id, token_hash, created_by_user_id, expires_at, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		invite.ID, invite.WorkspaceID, tokenHash(token), invite.CreatedByUserID, invite.ExpiresAt, invite.CreatedAt,
+	); err != nil {
+		return nil, "", err
+	}
+	return invite, token, nil
+}
+
+func workspaceInvitePreview(db *sql.DB, token string) (*WorkspaceInvitePreviewResponse, error) {
+	if db == nil {
+		return nil, errors.New("database is required")
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil, errInvalidInvite
+	}
+	var workspace WorkspaceInvitePreview
+	var expiresAt time.Time
+	err := db.QueryRow(
+		`SELECT w.name, w.slug, i.expires_at
+		   FROM workspace_invites i
+		   JOIN workspaces w ON w.id = i.workspace_id
+		  WHERE i.token_hash = $1`,
+		tokenHash(token),
+	).Scan(&workspace.Name, &workspace.Slug, &expiresAt)
+	if err == sql.ErrNoRows {
+		return nil, errInvalidInvite
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !expiresAt.After(time.Now().UTC()) {
+		return nil, errExpiredInvite
+	}
+	return &WorkspaceInvitePreviewResponse{Workspace: &workspace, ExpiresAt: expiresAt}, nil
+}
+
+func acceptWorkspaceInvite(db *sql.DB, token string, accountID string, req AcceptWorkspaceInviteRequest) (*Workspace, error) {
+	if db == nil {
+		return nil, errors.New("database is required")
+	}
+	token = strings.TrimSpace(token)
+	accountID = strings.TrimSpace(accountID)
+	if token == "" {
+		return nil, errInvalidInvite
+	}
+	if accountID == "" {
+		return nil, errors.New("account is required")
+	}
+	now := time.Now().UTC()
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var workspace Workspace
+	var createdByUserID string
+	var expiresAt time.Time
+	err = tx.QueryRow(
+		`SELECT w.id, w.slug, w.name, w.created_at, w.updated_at, i.created_by_user_id, i.expires_at
+		   FROM workspace_invites i
+		   JOIN workspaces w ON w.id = i.workspace_id
+		  WHERE i.token_hash = $1
+		  FOR UPDATE OF i`,
+		tokenHash(token),
+	).Scan(&workspace.ID, &workspace.Slug, &workspace.Name, &workspace.CreatedAt, &workspace.UpdatedAt, &createdByUserID, &expiresAt)
+	if err == sql.ErrNoRows {
+		return nil, errInvalidInvite
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !expiresAt.After(now) {
+		return nil, errExpiredInvite
+	}
+
+	var existingStatus string
+	err = tx.QueryRow(
+		`SELECT status
+		   FROM workspace_members
+		  WHERE workspace_id = $1 AND account_id = $2`,
+		workspace.ID, accountID,
+	).Scan(&existingStatus)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, err
+	}
+	if err == nil && existingStatus == "active" {
+		if _, err = tx.Exec(
+			`UPDATE accounts SET last_accessed_workspace_id = $1, updated_at = $2 WHERE id = $3`,
+			workspace.ID, now, accountID,
+		); err != nil {
+			return nil, err
+		}
+		if err = tx.Commit(); err != nil {
+			return nil, err
+		}
+		committed = true
+		return &workspace, nil
+	}
+	if err == nil {
+		return nil, errors.New("Account is already associated with this workspace.")
+	}
+
+	handle, err := validateHandle(req.Handle)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureWorkspaceHandleAvailableTx(tx, workspace.ID, handle); err != nil {
+		return nil, err
+	}
+
+	var account Account
+	if err = tx.QueryRow(
+		`SELECT id, email, display_name, last_accessed_workspace_id, created_at, updated_at
+		   FROM accounts
+		  WHERE id = $1`,
+		accountID,
+	).Scan(&account.ID, &account.Email, &account.DisplayName, &account.LastAccessedWorkspaceID, &account.CreatedAt, &account.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	user := &User{
+		ID:        "user_" + uuid.NewString(),
+		Handle:    handle,
+		Name:      firstNonEmptyString(account.DisplayName, account.Email),
+		Role:      "Workspace member",
+		Kind:      "human",
+		Status:    "active",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if _, err = tx.Exec(
+		`INSERT INTO users (workspace_id, id, handle, name, role, kind, status, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		workspace.ID, user.ID, user.Handle, user.Name, user.Role, user.Kind, user.Status, user.CreatedAt, user.UpdatedAt,
+	); err != nil {
+		if isUniqueViolation(err) {
+			return nil, errors.New("Handle is already taken.")
+		}
+		return nil, err
+	}
+	if _, err = tx.Exec(
+		`INSERT INTO workspace_members (workspace_id, account_id, user_id, membership_role, status, invited_by, created_at, accepted_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		workspace.ID, accountID, user.ID, MembershipRoleMember, "active", strings.TrimSpace(createdByUserID), now, now,
+	); err != nil {
+		if isUniqueViolation(err) {
+			return nil, errors.New("Account is already a workspace member.")
+		}
+		return nil, err
+	}
+	if _, err = tx.Exec(
+		`UPDATE accounts SET last_accessed_workspace_id = $1, updated_at = $2 WHERE id = $3`,
+		workspace.ID, now, accountID,
+	); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	committed = true
+	return &workspace, nil
 }
 
 func ensurePostgresWorkspaceHandleAvailable(db *sql.DB, workspaceID string, handle string) error {
 	var count int
 	if err := db.QueryRow(
+		`SELECT
+			(SELECT COUNT(*) FROM users WHERE workspace_id = $1 AND handle = $2) +
+			(SELECT COUNT(*) FROM agents WHERE workspace_id = $1 AND handle = $2)`,
+		strings.TrimSpace(workspaceID),
+		handle,
+	).Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return errors.New("Handle is already taken.")
+	}
+	return nil
+}
+
+func ensureWorkspaceHandleAvailableTx(tx *sql.Tx, workspaceID string, handle string) error {
+	var count int
+	if err := tx.QueryRow(
 		`SELECT
 			(SELECT COUNT(*) FROM users WHERE workspace_id = $1 AND handle = $2) +
 			(SELECT COUNT(*) FROM agents WHERE workspace_id = $1 AND handle = $2)`,

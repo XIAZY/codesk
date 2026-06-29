@@ -21,11 +21,13 @@ func (s *Server) Routes() http.Handler {
 
 	router.Post("/api/auth/register", s.handleRegister)
 	router.Post("/api/auth/login", s.handleLogin)
+	router.Get("/api/invites/{token}", s.handleWorkspaceInvitePreview)
 	router.Group(func(router chi.Router) {
 		router.Use(s.requireHuman)
 		router.Get("/api/auth/me", s.handleMe)
 		router.Get("/api/workspaces", s.handleListWorkspaces)
 		router.Post("/api/workspaces", s.handleCreateWorkspace)
+		router.Post("/api/invites/{token}/accept", s.handleAcceptWorkspaceInvite)
 	})
 
 	router.Route("/api/workspaces/{workspaceID}", func(router chi.Router) {
@@ -34,6 +36,7 @@ func (s *Server) Routes() http.Handler {
 		router.Patch("/last-accessed", s.handleUpdateLastAccessed)
 		router.Get("/members", s.handleListWorkspaceMembers)
 		router.Post("/members", s.handleAddWorkspaceMember)
+		router.Post("/invites", s.handleCreateWorkspaceInvite)
 		router.Get("/daemons", s.handleListDaemons)
 		router.Post("/daemons", s.handleCreateDaemon)
 		router.Patch("/daemon/status", s.handleUpdateDaemonStatus)

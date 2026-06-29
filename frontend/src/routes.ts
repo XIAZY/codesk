@@ -10,6 +10,7 @@ export type AppRoute =
   | { kind: "root" }
   | { kind: "login" }
   | { kind: "register" }
+  | { kind: "invite"; token: string }
   | { kind: "newWorkspace" }
   | { kind: "workspace"; slug: string; view: WorkspaceView }
   | { kind: "notFound" };
@@ -30,6 +31,10 @@ export function parseRoute(pathname: string): AppRoute {
   }
 
   const segments = path.split("/").filter(Boolean);
+  if (segments[0] === "invite" && segments.length === 2) {
+    const token = decodePathSegment(segments[1]);
+    return token ? { kind: "invite", token } : { kind: "notFound" };
+  }
   if (segments[0] !== "w" || segments.length < 2) {
     return { kind: "notFound" };
   }
@@ -62,6 +67,8 @@ export function routePath(route: AppRoute): string {
       return "/login";
     case "register":
       return "/register";
+    case "invite":
+      return `/invite/${encodeURIComponent(route.token)}`;
     case "newWorkspace":
       return "/new";
     case "workspace": {

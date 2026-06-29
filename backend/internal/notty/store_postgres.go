@@ -72,6 +72,17 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		`ALTER TABLE workspace_members ADD COLUMN IF NOT EXISTS last_accessed_document_id TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_workspace_members_account ON workspace_members (account_id, status, workspace_id)`,
 		`
+		CREATE TABLE IF NOT EXISTS workspace_invites (
+			id TEXT PRIMARY KEY,
+			workspace_id TEXT NOT NULL,
+			token_hash TEXT UNIQUE NOT NULL,
+			created_by_user_id TEXT NOT NULL,
+			expires_at TIMESTAMPTZ NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL
+		)
+		`,
+		`CREATE INDEX IF NOT EXISTS idx_workspace_invites_workspace ON workspace_invites (workspace_id)`,
+		`
 		CREATE TABLE IF NOT EXISTS daemons (
 			id TEXT PRIMARY KEY,
 			workspace_id TEXT NOT NULL,

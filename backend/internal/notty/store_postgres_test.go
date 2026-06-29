@@ -1096,6 +1096,7 @@ func clearNottyTables(db *sql.DB) error {
 		`DELETE FROM presences`,
 		`DELETE FROM activities`,
 		`DELETE FROM agents`,
+		`DELETE FROM workspace_invites`,
 		`DELETE FROM users`,
 		`DELETE FROM daemons`,
 		`DELETE FROM workspace_members`,

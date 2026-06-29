@@ -20,7 +20,7 @@ function account(): Account {
 }
 
 describe("WorkspaceOnboarding", () => {
-  it("shows the create workspace flow without the deferred invite branch", () => {
+  it("shows create workspace and invite-link entry points", () => {
     render(
       <WorkspaceOnboarding
         api={{ createWorkspace: vi.fn() }}
@@ -33,8 +33,30 @@ describe("WorkspaceOnboarding", () => {
     );
 
     expect(screen.getByRole("heading", { name: "Create a workspace" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Join with invite link" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Join with invite link" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Join with invite link" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Choose a workspace" })).toBeNull();
+  });
+
+  it("opens an invite route from a pasted invite link", async () => {
+    const user = userEvent.setup();
+    window.history.replaceState(null, "", "/new");
+
+    render(
+      <WorkspaceOnboarding
+        api={{ createWorkspace: vi.fn() }}
+        account={account()}
+        workspaces={[]}
+        onWorkspaces={vi.fn()}
+        onSelect={vi.fn()}
+        onSignOut={vi.fn()}
+      />
+    );
+
+    await user.type(screen.getByLabelText("Invite link"), "https://notty.example/invite/nottyinvite_abc123");
+    await user.click(screen.getByRole("button", { name: "Join with invite link" }));
+
+    expect(window.location.pathname).toBe("/invite/nottyinvite_abc123");
   });
 
   it("auto-fills workspace slug until the slug is manually edited", async () => {
