@@ -26,17 +26,19 @@ export function useYDocSync(input: {
   documentId: string;
   awareness?: AwarenessInput | null;
 }) {
-  const [ready, setReady] = useState(false);
+  const syncKey = `${input.workspaceId}\0${input.documentId}`;
+  const [readyKey, setReadyKey] = useState("");
   const [connected, setConnected] = useState(false);
-  const ydoc = useMemo(() => new Y.Doc(), [input.documentId]);
+  const ydoc = useMemo(() => new Y.Doc(), [input.workspaceId, input.documentId]);
   const awarenessRef = useRef<Awareness | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const pendingUpdatesRef = useRef<Uint8Array[]>([]);
 
   useEffect(() => {
-    setReady(false);
+    setReadyKey("");
+    setConnected(false);
     pendingUpdatesRef.current = [];
-  }, [input.documentId]);
+  }, [input.documentId, input.workspaceId]);
 
   useEffect(() => {
     if (!input.documentId || !input.workspaceId || !input.token) {
@@ -95,7 +97,7 @@ export function useYDocSync(input: {
           if (reply && ws.readyState === WebSocket.OPEN) {
             ws.send(reply);
           }
-          setReady(true);
+          setReadyKey(syncKey);
         }
         if (messageType === messageAwareness && awareness) {
           handleAwarenessPayload(awareness, payload);
@@ -125,7 +127,7 @@ export function useYDocSync(input: {
       awareness?.destroy();
       awarenessRef.current = null;
     };
-  }, [input.awareness, input.documentId, input.token, input.workspaceId, ydoc]);
+  }, [input.awareness, input.documentId, input.token, input.workspaceId, syncKey, ydoc]);
 
   useEffect(() => {
     return () => {
@@ -133,5 +135,5 @@ export function useYDocSync(input: {
     };
   }, [ydoc]);
 
-  return { ydoc, ready, connected };
+  return { ydoc, ready: readyKey === syncKey && Boolean(input.workspaceId && input.documentId), connected };
 }

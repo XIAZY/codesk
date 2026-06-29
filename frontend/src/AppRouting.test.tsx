@@ -10,6 +10,7 @@ import type { Account, DocumentItem, WorkspaceState, WorkspaceSummary } from "./
 const mocks = vi.hoisted(() => ({
   workspace: null as WorkspaceState | null,
   documents: [] as DocumentItem[],
+  rootReady: true,
   authAccount: null as Account | null,
   authWorkspaces: [] as WorkspaceSummary[],
 }));
@@ -42,8 +43,8 @@ vi.mock("./useWorkspace", () => ({
 
 vi.mock("./useRootNamespace", () => ({
   useRootNamespace: () => ({
-    documents: mocks.documents,
-    ready: true,
+    documents: mocks.rootReady ? mocks.documents : [],
+    ready: mocks.rootReady,
     connected: true,
     upsertFile: vi.fn((id: string, path: string) => {
       const title = path.split("/").filter(Boolean).pop() || path;
@@ -74,6 +75,7 @@ const workspaces: WorkspaceSummary[] = [
 function workspaceState(workspaceId = "workspace_team"): WorkspaceState {
   const workspaceNames: Record<string, string> = {
     workspace_alpha: "Alpha Workspace",
+    workspace_beta: "Beta Workspace",
     workspace_created: "Product Workspace",
     workspace_invited: "Invited Workspace",
     workspace_team: "Team Workspace",
@@ -140,6 +142,7 @@ beforeEach(() => {
   window.history.replaceState(null, "", "/");
   mocks.workspace = workspaceState();
   mocks.documents = [{ id: "doc_1", path: "docs/spec.md", title: "spec.md" }];
+  mocks.rootReady = true;
   mocks.authAccount = { ...account, lastAccessedWorkspaceId: "workspace_team" };
   mocks.authWorkspaces = workspaces;
   vi.spyOn(globalThis, "fetch").mockImplementation((url, init) => {
@@ -201,6 +204,28 @@ describe("App URL routing", () => {
 
     await waitFor(() => expect(window.location.pathname).toBe("/w/team/d/doc_1"));
     expect(screen.getByTestId("document-surface").textContent).toBe("doc_1");
+  });
+
+  it("does not resolve workspace home through stale root docs from another workspace", async () => {
+    localStorage.setItem("notty.auth.token", "token");
+    window.history.replaceState(null, "", "/w/beta");
+    mocks.authAccount = { ...account, lastAccessedWorkspaceId: "workspace_beta" };
+    mocks.authWorkspaces = [{ id: "workspace_beta", slug: "beta", name: "Beta Workspace", lastAccessedDocumentId: "doc_beta" }];
+    mocks.workspace = workspaceState("workspace_beta");
+    mocks.documents = [{ id: "doc_alpha", path: "alpha.md", title: "alpha.md" }];
+    mocks.rootReady = false;
+
+    const { rerender } = render(<App />);
+
+    await waitFor(() => expect(window.location.pathname).toBe("/w/beta"));
+    expect(screen.queryByTestId("document-surface")).toBeNull();
+
+    mocks.documents = [{ id: "doc_beta", path: "beta.md", title: "beta.md" }];
+    mocks.rootReady = true;
+    rerender(<App />);
+
+    await waitFor(() => expect(window.location.pathname).toBe("/w/beta/d/doc_beta"));
+    expect(screen.getByTestId("document-surface").textContent).toBe("doc_beta");
   });
 
   it("ignores legacy route storage when restoring a different account", async () => {
