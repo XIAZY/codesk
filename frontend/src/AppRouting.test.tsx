@@ -11,6 +11,7 @@ import type { Account, DocumentItem, WorkspaceState, WorkspaceSummary } from "./
 const mocks = vi.hoisted(() => ({
   workspace: null as WorkspaceState | null,
   documents: [] as DocumentItem[],
+  authWorkspaces: [] as WorkspaceSummary[],
 }));
 
 vi.mock("./DocumentSurface", () => ({
@@ -44,7 +45,16 @@ vi.mock("./useRootNamespace", () => ({
     documents: mocks.documents,
     ready: true,
     connected: true,
-    upsertFile: vi.fn(),
+    upsertFile: vi.fn((id: string, path: string) => {
+      const title = path.split("/").filter(Boolean).pop() || path;
+      const existing = mocks.documents.find((document) => document.id === id);
+      if (existing) {
+        existing.path = path;
+        existing.title = title;
+        return;
+      }
+      mocks.documents = [...mocks.documents, { id, path, title }];
+    }),
     moveFile: vi.fn(),
     tombstoneFile: vi.fn(),
   }),
@@ -62,11 +72,16 @@ const workspaces: WorkspaceSummary[] = [
 ];
 
 function workspaceState(workspaceId = "workspace_team"): WorkspaceState {
+  const workspaceNames: Record<string, string> = {
+    workspace_alpha: "Alpha Workspace",
+    workspace_created: "Product Workspace",
+    workspace_team: "Team Workspace",
+  };
   return {
     workspaceId,
     rootDocumentId: "root_doc",
     currentUserId: "user_owner",
-    name: workspaceId === "workspace_alpha" ? "Alpha Workspace" : "Team Workspace",
+    name: workspaceNames[workspaceId] ?? "Team Workspace",
     users: [
       {
         id: "user_owner",
@@ -96,13 +111,23 @@ beforeEach(() => {
   window.history.replaceState(null, "", "/");
   mocks.workspace = workspaceState();
   mocks.documents = [{ id: "doc_1", path: "docs/spec.md", title: "spec.md" }];
+  mocks.authWorkspaces = workspaces;
   vi.spyOn(globalThis, "fetch").mockImplementation((url, init) => {
     const path = String(url);
     if (path.endsWith("/api/auth/me")) {
-      return jsonResponse({ account, workspaces });
+      return jsonResponse({ account, workspaces: mocks.authWorkspaces });
     }
     if (path.endsWith("/api/auth/login") && init?.method === "POST") {
-      return jsonResponse({ token: "token", account, workspaces });
+      return jsonResponse({ token: "token", account, workspaces: mocks.authWorkspaces });
+    }
+    if (path.endsWith("/api/workspaces") && init?.method === "POST") {
+      const workspace = { id: "workspace_created", slug: "product-workspace", name: "Product Workspace" };
+      mocks.authWorkspaces = [workspace];
+      mocks.workspace = workspaceState(workspace.id);
+      return jsonResponse({ workspace });
+    }
+    if (path.endsWith("/api/workspaces/workspace_created/documents") && init?.method === "POST") {
+      return jsonResponse({ id: "doc_created", updatedAt: "2026-06-29T00:00:00Z" });
     }
     throw new Error(`Unexpected fetch ${path}`);
   });
@@ -192,5 +217,31 @@ describe("App URL routing", () => {
     window.history.back();
     await waitFor(() => expect(window.location.pathname).toBe("/w/team/daemons"));
     expect(screen.getAllByText("Daemons").length).toBeGreaterThan(0);
+  });
+
+  it("opens a document URL after creating the workspace and document", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("notty.auth.token", "token");
+    mocks.authWorkspaces = [];
+    mocks.documents = [];
+    mocks.workspace = workspaceState("workspace_created");
+    window.history.replaceState(null, "", "/new");
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Create a workspace" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Create and enter" }));
+    await waitFor(() => expect(window.location.pathname).toBe("/w/product-workspace"));
+
+    await user.click(screen.getByRole("button", { name: /Create your first doc/ }));
+    await waitFor(() => expect(window.location.pathname).toBe("/w/product-workspace/d/doc_created"));
+    expect(screen.getByTestId("document-surface").textContent).toBe("doc_created");
+
+    cleanup();
+    window.history.replaceState(null, "", "/w/product-workspace/d/doc_created");
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_created"));
+    expect(window.location.pathname).toBe("/w/product-workspace/d/doc_created");
   });
 });
