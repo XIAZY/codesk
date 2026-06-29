@@ -3,15 +3,60 @@ package notty
 import (
 	"bytes"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
+
+func TestJWTIssuerUsesCodeskAndRejectsLegacyNottyIssuer(t *testing.T) {
+	secret := "issuer-secret"
+	account := &Account{ID: "acct_issuer", Email: "issuer@example.com", DisplayName: "Issuer"}
+	token, err := issueJWT(secret, account, time.Hour)
+	if err != nil {
+		t.Fatalf("issue jwt: %v", err)
+	}
+	claims, err := verifyJWT(secret, token)
+	if err != nil {
+		t.Fatalf("verify codesk jwt: %v", err)
+	}
+	if claims.Issuer != "codesk" {
+		t.Fatalf("expected codesk issuer, got %q", claims.Issuer)
+	}
+
+	legacyToken := signedAuthTestJWT(t, secret, jwtClaims{
+		Subject:     account.ID,
+		Email:       account.Email,
+		DisplayName: account.DisplayName,
+		IssuedAt:    time.Now().UTC().Unix(),
+		ExpiresAt:   time.Now().UTC().Add(time.Hour).Unix(),
+		Issuer:      "notty",
+	})
+	_, err = verifyJWT(secret, legacyToken)
+	if err == nil || !strings.Contains(err.Error(), "invalid jwt issuer") {
+		t.Fatalf("expected legacy issuer rejection, got %v", err)
+	}
+}
+
+func signedAuthTestJWT(t *testing.T, secret string, claims jwtClaims) string {
+	t.Helper()
+	header, err := json.Marshal(map[string]string{"alg": "HS256", "typ": "JWT"})
+	if err != nil {
+		t.Fatalf("marshal header: %v", err)
+	}
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatalf("marshal claims: %v", err)
+	}
+	unsigned := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(payload)
+	return unsigned + "." + signJWT([]byte(secret), unsigned)
+}
 
 func TestAuthenticatedWorkspaceRoutesIsolateTenantsAndIgnoreSpoofedActor(t *testing.T) {
 	router := newAuthTestRouter(t)

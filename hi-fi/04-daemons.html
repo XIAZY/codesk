@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>notty hi-fi · 04 Daemons</title>
+<title>Codesk hi-fi · 04 Daemons</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -52,7 +52,7 @@
     </div>
 
     <div class="frame" style="height: 560px;">
-      <div class="frame-bar"><div class="dots"><span></span><span></span><span></span></div><span style="margin-left:8px">notty.app/w/studio-reyes/daemons</span></div>
+      <div class="frame-bar"><div class="dots"><span></span><span></span><span></span></div><span style="margin-left:8px">codesk.app/w/studio-reyes/daemons</span></div>
       <div style="padding: 28px 36px; background: var(--paper); height: calc(100% - 32px); overflow:auto">
         <div class="between" style="margin-bottom: 20px;">
           <div class="col" style="gap:2px">
@@ -234,7 +234,7 @@
               </div>
               <pre class="code">
 <span class="cmt"># 1. drop into a directory you'll keep around</span>
-<span class="k">curl</span> -O <span class="s">https://notty.app/install/compose.yml</span>
+<span class="k">curl</span> -O <span class="s">https://codesk.app/install/compose.yml</span>
 
 <span class="cmt"># 2. set env</span>
 <span class="k">export</span> NOTTY_WORKSPACE_ID=<span class="s">ws_studio-reyes</span>
@@ -447,7 +447,7 @@
 
       <div class="k">Daemon auth</div>
       <div>
-        Daemons authenticate with the workspace-scoped opaque token. Backend stores only SHA-256 hash. Token rotation invalidates the old hash atomically. Daemons send their acting agent's UUID via <code>X-Notty-Acting-Agent-ID</code> on requests made on behalf of an agent.
+        Daemons authenticate with the workspace-scoped opaque token. Backend stores only SHA-256 hash. Token rotation invalidates the old hash atomically. Daemons send their acting agent's UUID via <code>X-Codesk-Acting-Agent-ID</code> on requests made on behalf of an agent.
       </div>
 
       <div class="k">Liveness model</div>
