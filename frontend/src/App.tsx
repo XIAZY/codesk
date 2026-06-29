@@ -314,6 +314,7 @@ export function App() {
     setToken("");
     setAccount(null);
     setWorkspaces([]);
+    navigate({ kind: "login" }, { replace: true });
   };
 
   useEffect(() => {
@@ -347,6 +348,13 @@ export function App() {
       disposed = true;
     };
   }, [token]);
+
+  useEffect(() => {
+    if (!token && (route.kind === "workspace" || route.kind === "newWorkspace")) {
+      navigate({ kind: "login" }, { replace: true });
+      return;
+    }
+  }, [route, token]);
 
   useEffect(() => {
     if (route.kind !== "root") {
@@ -707,6 +715,7 @@ export function WorkspaceApp({
   const [renamingDocumentId, setRenamingDocumentId] = useState("");
   const [freshDocumentId, setFreshDocumentId] = useState("");
   const [titleDraft, setTitleDraft] = useState("");
+  const lastAccessUpdateKeyRef = useRef("");
 
   const centerView = view.kind === "daemons" ? "daemons" : view.kind === "agents" ? "agents" : "document";
   const requestedDocumentId = view.kind === "document" ? view.documentId : "";
@@ -739,15 +748,17 @@ export function WorkspaceApp({
   }, [activeWorkspace, rootDocuments, rootNamespace.ready, view.kind]);
 
   useEffect(() => {
-    if (view.kind === "document" && activeDocument) {
-      onAccess(workspaceId, activeDocument.id);
-      void api.updateLastAccessed(workspaceId, { documentId: activeDocument.id }).catch(() => {});
+    const documentId = view.kind === "document" ? activeDocument?.id ?? "" : "";
+    if (view.kind === "document" && !documentId) {
       return;
     }
-    if (view.kind !== "document") {
-      onAccess(workspaceId);
-      void api.updateLastAccessed(workspaceId).catch(() => {});
+    const accessKey = `${workspaceId}\0${documentId}`;
+    if (lastAccessUpdateKeyRef.current === accessKey) {
+      return;
     }
+    lastAccessUpdateKeyRef.current = accessKey;
+    onAccess(workspaceId, documentId);
+    void api.updateLastAccessed(workspaceId, documentId ? { documentId } : {}).catch(() => {});
   }, [activeDocument, api, onAccess, view.kind, workspaceId]);
 
   const startRenamingDocument = useCallback((document: DocumentItem) => {

@@ -15,7 +15,7 @@ export function useRoute() {
 
 export function navigate(route: AppRoute, options: { replace?: boolean } = {}) {
   const path = routePath(route);
-  if (window.location.pathname === path) {
+  if (`${window.location.pathname}${window.location.search}` === path) {
     return;
   }
   if (options.replace) {

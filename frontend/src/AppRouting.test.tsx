@@ -123,6 +123,12 @@ function patchLastAccessed(path: string, init: RequestInit | undefined) {
   return true;
 }
 
+function lastAccessedPatchBodies() {
+  return vi.mocked(globalThis.fetch).mock.calls
+    .filter(([url, init]) => String(url).endsWith("/last-accessed") && init?.method === "PATCH")
+    .map(([, init]) => String(init?.body ?? ""));
+}
+
 beforeEach(() => {
   localStorage.clear();
   window.history.replaceState(null, "", "/");
@@ -186,30 +192,78 @@ describe("App URL routing", () => {
     expect(localStorage.getItem("notty.workspace.team.lastDoc")).toBeNull();
   });
 
-  it("keeps a protected deep link URL through login and then renders the workspace", async () => {
+  it("clears stale workspace URL intent on signout before the next account logs in", async () => {
     const user = userEvent.setup();
+    localStorage.setItem("notty.auth.token", "token");
     window.history.replaceState(null, "", "/w/team/d/doc_1");
 
     render(<App />);
 
+    await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_1"));
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    expect(window.location.pathname).toBe("/login");
+
+    mocks.authAccount = { ...account, id: "account_2", lastAccessedWorkspaceId: "workspace_alpha" };
+    mocks.authWorkspaces = [{ id: "workspace_alpha", slug: "alpha", name: "Alpha Workspace", lastAccessedDocumentId: "doc_alpha" }];
+    mocks.workspace = workspaceState("workspace_alpha");
+    mocks.documents = [{ id: "doc_alpha", path: "alpha.md", title: "alpha.md" }];
+
+    await user.type(screen.getByLabelText("Email"), "other@example.com");
+    await user.type(screen.getByLabelText("Password"), "password123");
+    await user.click(screen.getByRole("button", { name: "Log in" }));
+
+    await waitFor(() => expect(window.location.pathname).toBe("/w/alpha/d/doc_alpha"));
+    expect(screen.getByTestId("document-surface").textContent).toBe("doc_alpha");
+  });
+
+  it("redirects a protected deep link to login and then routes from backend account state", async () => {
+    const user = userEvent.setup();
+    window.history.replaceState(null, "", "/w/team/d/doc_1");
+    mocks.authAccount = { ...account, lastAccessedWorkspaceId: "workspace_alpha" };
+    mocks.authWorkspaces = [{ id: "workspace_alpha", slug: "alpha", name: "Alpha Workspace", lastAccessedDocumentId: "doc_alpha" }];
+    mocks.workspace = workspaceState("workspace_alpha");
+    mocks.documents = [{ id: "doc_alpha", path: "alpha.md", title: "alpha.md" }];
+
+    render(<App />);
+
     expect(screen.getByRole("heading", { name: "Welcome back" })).toBeTruthy();
-    expect(window.location.pathname).toBe("/w/team/d/doc_1");
+    await waitFor(() => expect(window.location.pathname).toBe("/login"));
+    expect(window.location.search).toBe("");
 
     await user.type(screen.getByLabelText("Email"), "owner@example.com");
     await user.type(screen.getByLabelText("Password"), "password123");
     await user.click(screen.getByRole("button", { name: "Log in" }));
 
-    await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_1"));
-    expect(window.location.pathname).toBe("/w/team/d/doc_1");
+    await waitFor(() => expect(window.location.pathname).toBe("/w/alpha/d/doc_alpha"));
+    expect(screen.getByTestId("document-surface").textContent).toBe("doc_alpha");
   });
 
-  it("does not rewrite unauthenticated workspace URLs from route preference state", () => {
+  it("redirects unauthenticated workspace URLs to login", async () => {
     window.history.replaceState(null, "", "/w/team");
 
     render(<App />);
 
     expect(screen.getByRole("heading", { name: "Welcome back" })).toBeTruthy();
-    expect(window.location.pathname).toBe("/w/team");
+    await waitFor(() => expect(window.location.pathname).toBe("/login"));
+    expect(window.location.search).toBe("");
+  });
+
+  it("routes from backend account state after login from an invalid protected workspace URL", async () => {
+    const user = userEvent.setup();
+    window.history.replaceState(null, "", "/w/what-the-fuck-workspace");
+
+    render(<App />);
+
+    await waitFor(() => expect(window.location.pathname).toBe("/login"));
+    expect(window.location.search).toBe("");
+
+    await user.type(screen.getByLabelText("Email"), "owner@example.com");
+    await user.type(screen.getByLabelText("Password"), "password123");
+    await user.click(screen.getByRole("button", { name: "Log in" }));
+
+    await waitFor(() => expect(window.location.pathname).toBe("/w/team/d/doc_1"));
+    expect(screen.queryByRole("heading", { name: "Workspace not found" })).toBeNull();
+    expect(screen.getByTestId("document-surface").textContent).toBe("doc_1");
   });
 
   it("renders bad workspace slugs as not found and clears legacy route storage", async () => {
@@ -253,6 +307,7 @@ describe("App URL routing", () => {
     window.history.back();
     await waitFor(() => expect(window.location.pathname).toBe("/w/team/daemons"));
     expect(screen.getAllByText("Daemons").length).toBeGreaterThan(0);
+    expect(lastAccessedPatchBodies().filter((body) => body === JSON.stringify({}))).toHaveLength(1);
   });
 
   it("opens a document URL after creating the workspace and document", async () => {
