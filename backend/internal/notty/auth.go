@@ -610,7 +610,7 @@ func createWorkspaceInvite(db *sql.DB, workspaceID string, createdByUserID strin
 	if workspaceID == "" || createdByUserID == "" {
 		return nil, "", errors.New("workspace and creator are required")
 	}
-	token, err := randomToken("nottyinvite_")
+	token, err := randomToken("")
 	if err != nil {
 		return nil, "", err
 	}

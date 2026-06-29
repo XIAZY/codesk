@@ -53,10 +53,10 @@ describe("WorkspaceOnboarding", () => {
       />
     );
 
-    await user.type(screen.getByLabelText("Invite link"), "https://notty.example/invite/nottyinvite_abc123");
+    await user.type(screen.getByLabelText("Invite link"), "https://notty.example/invite/abc123");
     await user.click(screen.getByRole("button", { name: "Join with invite link" }));
 
-    expect(window.location.pathname).toBe("/invite/nottyinvite_abc123");
+    expect(window.location.pathname).toBe("/invite/abc123");
   });
 
   it("auto-fills workspace slug until the slug is manually edited", async () => {

@@ -57,7 +57,7 @@ describe("ApiClient workspace invites", () => {
 
   it("uses the workspace API to create invite links", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ invite: { id: "invite_1", workspaceId: "workspace/1", expiresAt: "2026-07-06T00:00:00Z", createdAt: "2026-06-29T00:00:00Z" }, url: "/invite/nottyinvite_abc" }), {
+      new Response(JSON.stringify({ invite: { id: "invite_1", workspaceId: "workspace/1", expiresAt: "2026-07-06T00:00:00Z", createdAt: "2026-06-29T00:00:00Z" }, url: "/invite/abc123" }), {
         status: 201,
         headers: { "Content-Type": "application/json" },
       })
@@ -65,7 +65,7 @@ describe("ApiClient workspace invites", () => {
 
     const response = await new ApiClient("token").createWorkspaceInvite("workspace/1");
 
-    expect(response.url).toBe("/invite/nottyinvite_abc");
+    expect(response.url).toBe("/invite/abc123");
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0];
     expect(String(url)).toContain("/api/workspaces/workspace%2F1/invites");
@@ -87,13 +87,13 @@ describe("ApiClient workspace invites", () => {
         })
       );
 
-    await new ApiClient("").previewWorkspaceInvite("nottyinvite/a");
-    await new ApiClient("token").acceptWorkspaceInvite("nottyinvite/a", { handle: "member" });
+    await new ApiClient("").previewWorkspaceInvite("abc/a");
+    await new ApiClient("token").acceptWorkspaceInvite("abc/a", { handle: "member" });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(String(fetchMock.mock.calls[0][0])).toContain("/api/invites/nottyinvite%2Fa");
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/api/invites/abc%2Fa");
     expect(fetchMock.mock.calls[0][1]?.method).toBeUndefined();
-    expect(String(fetchMock.mock.calls[1][0])).toContain("/api/invites/nottyinvite%2Fa/accept");
+    expect(String(fetchMock.mock.calls[1][0])).toContain("/api/invites/abc%2Fa/accept");
     expect(fetchMock.mock.calls[1][1]?.method).toBe("POST");
     expect(fetchMock.mock.calls[1][1]?.body).toBe(JSON.stringify({ handle: "member" }));
   });

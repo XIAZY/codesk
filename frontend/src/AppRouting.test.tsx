@@ -150,26 +150,26 @@ beforeEach(() => {
     if (path.endsWith("/api/auth/login") && init?.method === "POST") {
       return jsonResponse({ token: "token", account: mocks.authAccount, workspaces: mocks.authWorkspaces });
     }
-    if (path.endsWith("/api/invites/nottyinvite_new") && !init?.method) {
+    if (path.endsWith("/api/invites/new123") && !init?.method) {
       return jsonResponse({ workspace: { name: "Invited Workspace", slug: "invited" }, expiresAt: "2026-07-06T00:00:00Z" });
     }
-    if (path.endsWith("/api/invites/nottyinvite_new/accept") && init?.method === "POST") {
+    if (path.endsWith("/api/invites/new123/accept") && init?.method === "POST") {
       const workspace = { id: "workspace_invited", slug: "invited", name: "Invited Workspace" };
       mocks.authAccount = mocks.authAccount ? { ...mocks.authAccount, lastAccessedWorkspaceId: workspace.id } : mocks.authAccount;
       mocks.authWorkspaces = [workspace];
       mocks.workspace = workspaceState(workspace.id);
       return jsonResponse({ workspace });
     }
-    if (path.endsWith("/api/invites/nottyinvite_team") && !init?.method) {
+    if (path.endsWith("/api/invites/team456") && !init?.method) {
       return jsonResponse({ workspace: { name: "Team Workspace", slug: "team" }, expiresAt: "2026-07-06T00:00:00Z" });
     }
-    if (path.endsWith("/api/invites/nottyinvite_expired") && !init?.method) {
+    if (path.endsWith("/api/invites/expired789") && !init?.method) {
       return jsonErrorResponse(410, "This invite link has expired. Ask the workspace admin for a new one.");
     }
     if (path.endsWith("/api/workspaces/workspace_team/invites") && init?.method === "POST") {
       return jsonResponse({
         invite: { id: "invite_1", workspaceId: "workspace_team", expiresAt: "2026-07-06T00:00:00Z", createdAt: "2026-06-29T00:00:00Z" },
-        url: "/invite/nottyinvite_team_created",
+        url: "/invite/created321",
       });
     }
     if (path.endsWith("/api/workspaces") && init?.method === "POST") {
@@ -282,39 +282,39 @@ describe("App URL routing", () => {
     mocks.authWorkspaces = [];
     mocks.documents = [];
     mocks.workspace = workspaceState("workspace_invited");
-    window.history.replaceState(null, "", "/invite/nottyinvite_new");
+    window.history.replaceState(null, "", "/invite/new123");
 
     render(<App />);
 
     expect(await screen.findByText("Invited Workspace")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Join workspace" })).toBeTruthy();
-    expect(window.location.pathname).toBe("/invite/nottyinvite_new");
+    expect(window.location.pathname).toBe("/invite/new123");
 
     await user.type(screen.getByLabelText("Email"), "owner@example.com");
     await user.type(screen.getByLabelText("Password"), "password123");
     await user.click(screen.getByRole("button", { name: "Log in" }));
 
     await waitFor(() => expect(screen.getByLabelText("Your handle in this workspace")).toBeTruthy());
-    expect(window.location.pathname).toBe("/invite/nottyinvite_new");
+    expect(window.location.pathname).toBe("/invite/new123");
     await user.click(screen.getByRole("button", { name: "Join workspace" }));
 
     await waitFor(() => expect(window.location.pathname).toBe("/w/invited"));
   });
 
   it("renders expired invite links without redirecting to login", async () => {
-    window.history.replaceState(null, "", "/invite/nottyinvite_expired");
+    window.history.replaceState(null, "", "/invite/expired789");
 
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Invite unavailable" })).toBeTruthy();
     expect(screen.getByText(/expired/)).toBeTruthy();
-    expect(window.location.pathname).toBe("/invite/nottyinvite_expired");
+    expect(window.location.pathname).toBe("/invite/expired789");
   });
 
   it("lets existing members open the workspace from an invite link", async () => {
     const user = userEvent.setup();
     localStorage.setItem("notty.auth.token", "token");
-    window.history.replaceState(null, "", "/invite/nottyinvite_team");
+    window.history.replaceState(null, "", "/invite/team456");
 
     render(<App />);
 
@@ -335,7 +335,7 @@ describe("App URL routing", () => {
     await user.click(screen.getByRole("button", { name: /people/i }));
     await user.click(screen.getByRole("button", { name: "Share" }));
 
-    expect(await screen.findByDisplayValue(`${window.location.origin}/invite/nottyinvite_team_created`)).toBeTruthy();
+    expect(await screen.findByDisplayValue(`${window.location.origin}/invite/created321`)).toBeTruthy();
 
     cleanup();
     mocks.workspace = { ...workspaceState(), currentMembershipRole: "member" };

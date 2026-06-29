@@ -904,7 +904,7 @@ function JoinInviteLinkForm() {
             setValue(event.target.value);
             setError("");
           }}
-          placeholder={`${publicOrigin}/invite/nottyinvite_...`}
+          placeholder={`${publicOrigin}/invite/abc123...`}
         />
       </label>
       {error ? <p className="error-text">{error}</p> : null}

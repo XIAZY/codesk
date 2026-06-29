@@ -1064,6 +1064,7 @@ func TestWorkspaceAdminOnlyActionsRejectMembersAndAllowAdmins(t *testing.T) {
 	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons", owner.Token, CreateDaemonRequest{
 		Name: "owner-daemon",
 	}, http.StatusCreated, &ownerDaemon)
+	authTestReportCodexRuntime(t, router, workspace.ID, ownerDaemon.Token)
 
 	var ownerAgent Agent
 	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+ownerDaemon.Daemon.ID+"/agents", owner.Token, CreateAgentRequest{
@@ -1099,6 +1100,7 @@ func TestWorkspaceAdminOnlyActionsRejectMembersAndAllowAdmins(t *testing.T) {
 	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons", admin.Token, CreateDaemonRequest{
 		Name: "admin-daemon",
 	}, http.StatusCreated, &adminDaemon)
+	authTestReportCodexRuntime(t, router, workspace.ID, adminDaemon.Token)
 
 	authTestStatus(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons/"+adminDaemon.Daemon.ID+"/agents", admin.Token, CreateAgentRequest{
 		Handle: "admin-agent",
@@ -1232,6 +1234,21 @@ func authTestCreateInvite(t *testing.T, router http.Handler, token string, works
 		t.Fatalf("expected invite URL with raw token, got %q", response.URL)
 	}
 	return response, rawToken
+}
+
+func authTestReportCodexRuntime(t *testing.T, router http.Handler, workspaceID string, daemonToken string) {
+	t.Helper()
+	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspaceID+"/daemon/status", daemonToken, UpdateDaemonStatusRequest{
+		Version: "0.62.0",
+		OS:      "linux",
+		Arch:    "arm64",
+		Runtimes: []RuntimeDetection{{
+			Kind:      "codex",
+			Available: true,
+			Version:   "codex-cli 0.134.0",
+			Path:      "/usr/local/bin/codex",
+		}},
+	}, http.StatusOK)
 }
 
 func authTestCreateDocument(t *testing.T, router http.Handler, token string, workspaceID string, path string, content string) DocumentMetadata {
