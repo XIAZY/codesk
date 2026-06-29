@@ -242,6 +242,11 @@ func (s *Server) handleAcceptWorkspaceInvite(w http.ResponseWriter, r *http.Requ
 		writeError(w, workspaceInviteErrorStatus(err), err.Error())
 		return
 	}
+	if workspace != nil {
+		if store, err := s.workspaceStore(workspace.ID); err == nil && store != nil {
+			_ = store.Reload()
+		}
+	}
 	writeJSON(w, http.StatusOK, AcceptWorkspaceInviteResponse{Workspace: workspace})
 }
 

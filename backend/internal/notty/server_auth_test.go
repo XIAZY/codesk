@@ -775,6 +775,13 @@ func TestWorkspaceInviteLinkCreatePreviewAndAccept(t *testing.T) {
 
 	owner := authTestRegister(t, router, "invite-link-owner@example.com", "owner-pass", "Invite Link Owner")
 	workspace := authTestCreateWorkspace(t, router, owner.Token, "Invite Link Workspace")
+	store, err := server.workspaceStore(workspace.ID)
+	if err != nil {
+		t.Fatalf("open workspace store: %v", err)
+	}
+	if _, ok := store.Snapshot().Users[workspace.OwnerUserID]; !ok {
+		t.Fatalf("expected owner user in loaded workspace store")
+	}
 
 	invite, token := authTestCreateInvite(t, router, owner.Token, workspace.ID)
 	if invite.Invite == nil || invite.Invite.ID == "" || invite.Invite.WorkspaceID != workspace.ID {
@@ -822,16 +829,20 @@ func TestWorkspaceInviteLinkCreatePreviewAndAccept(t *testing.T) {
 
 	var memberCount int
 	var role string
+	var joinedUserID string
 	if err := server.store.db.QueryRow(
-		`SELECT COUNT(*), COALESCE(MAX(membership_role), '')
+		`SELECT COUNT(*), COALESCE(MAX(membership_role), ''), COALESCE(MAX(user_id), '')
 		   FROM workspace_members
 		  WHERE workspace_id = $1 AND account_id = $2 AND status = 'active'`,
 		workspace.ID, joiner.Account.ID,
-	).Scan(&memberCount, &role); err != nil {
+	).Scan(&memberCount, &role, &joinedUserID); err != nil {
 		t.Fatalf("count joined membership: %v", err)
 	}
 	if memberCount != 1 || role != MembershipRoleMember {
 		t.Fatalf("expected one active member role, got count=%d role=%q", memberCount, role)
+	}
+	if user := store.Snapshot().Users[joinedUserID]; user == nil || user.Handle != "joiner" {
+		t.Fatalf("accept should reload workspace store with joined user, got userID=%q snapshot=%#v", joinedUserID, store.Snapshot().Users)
 	}
 	var userCount int
 	if err := server.store.db.QueryRow(
@@ -867,6 +878,61 @@ func TestWorkspaceInviteLinkCreatePreviewAndAccept(t *testing.T) {
 	}
 	if memberCount != 1 {
 		t.Fatalf("idempotent accept should not duplicate memberships, got %d", memberCount)
+	}
+}
+
+func TestWorkspaceInviteAcceptReactivatesInactiveMembership(t *testing.T) {
+	server, router := newAuthTestServer(t)
+
+	owner := authTestRegister(t, router, "invite-reactivate-owner@example.com", "owner-pass", "Invite Reactivate Owner")
+	workspace := authTestCreateWorkspace(t, router, owner.Token, "Invite Reactivate Workspace")
+	member := authTestRegister(t, router, "invite-reactivate-member@example.com", "member-pass", "Invite Reactivate Member")
+	added := authTestAddMember(t, router, owner.Token, workspace.ID, member.Account.Email, "reactivate-member")
+	if _, err := server.store.db.Exec(
+		`UPDATE workspace_members SET status = 'removed', membership_role = $1 WHERE workspace_id = $2 AND account_id = $3`,
+		MembershipRoleAdmin, workspace.ID, member.Account.ID,
+	); err != nil {
+		t.Fatalf("mark membership removed: %v", err)
+	}
+	if _, err := server.store.db.Exec(
+		`UPDATE users SET status = 'removed' WHERE workspace_id = $1 AND id = $2`,
+		workspace.ID, added.UserID,
+	); err != nil {
+		t.Fatalf("mark user removed: %v", err)
+	}
+
+	_, token := authTestCreateInvite(t, router, owner.Token, workspace.ID)
+	var accepted AcceptWorkspaceInviteResponse
+	authTestJSON(t, router, http.MethodPost, "/api/invites/"+token+"/accept", member.Token, AcceptWorkspaceInviteRequest{Handle: "ignored-new-handle"}, http.StatusOK, &accepted)
+	if accepted.Workspace == nil || accepted.Workspace.ID != workspace.ID {
+		t.Fatalf("expected accepted workspace %q, got %#v", workspace.ID, accepted)
+	}
+
+	var memberCount int
+	var userID, membershipRole, memberStatus, userHandle, userStatus string
+	if err := server.store.db.QueryRow(
+		`SELECT COUNT(*), COALESCE(MAX(m.user_id), ''), COALESCE(MAX(m.membership_role), ''), COALESCE(MAX(m.status), ''), COALESCE(MAX(u.handle), ''), COALESCE(MAX(u.status), '')
+		   FROM workspace_members m
+		   JOIN users u ON u.workspace_id = m.workspace_id AND u.id = m.user_id
+		  WHERE m.workspace_id = $1 AND m.account_id = $2`,
+		workspace.ID, member.Account.ID,
+	).Scan(&memberCount, &userID, &membershipRole, &memberStatus, &userHandle, &userStatus); err != nil {
+		t.Fatalf("load reactivated member: %v", err)
+	}
+	if memberCount != 1 {
+		t.Fatalf("reactivated invite should keep one membership row, got %d", memberCount)
+	}
+	if userID != added.UserID || userHandle != added.UserHandle {
+		t.Fatalf("reactivated invite should preserve existing user identity, got userID=%q handle=%q want userID=%q handle=%q", userID, userHandle, added.UserID, added.UserHandle)
+	}
+	if membershipRole != MembershipRoleMember || memberStatus != "active" || userStatus != "active" {
+		t.Fatalf("expected active member reactivation, got role=%q memberStatus=%q userStatus=%q", membershipRole, memberStatus, userStatus)
+	}
+
+	var me AuthResponse
+	authTestJSON(t, router, http.MethodGet, "/api/auth/me", member.Token, nil, http.StatusOK, &me)
+	if me.Account == nil || me.Account.LastAccessedWorkspaceID != workspace.ID || len(me.Workspaces) != 1 || me.Workspaces[0].ID != workspace.ID {
+		t.Fatalf("reactivated invite should restore workspace auth state, got account=%#v workspaces=%#v", me.Account, me.Workspaces)
 	}
 }
 
@@ -931,6 +997,7 @@ func TestWorkspaceInviteAcceptValidatesHandle(t *testing.T) {
 	joiner := authTestRegister(t, router, "invite-handle-joiner@example.com", "join-pass", "Invite Handle Joiner")
 	_, token := authTestCreateInvite(t, router, owner.Token, workspace.ID)
 
+	authTestErrorContains(t, router, http.MethodPost, "/api/invites/"+token+"/accept", joiner.Token, nil, http.StatusBadRequest, "Handle is required.")
 	authTestErrorContains(t, router, http.MethodPost, "/api/invites/"+token+"/accept", joiner.Token, AcceptWorkspaceInviteRequest{Handle: "Bad Handle"}, http.StatusBadRequest, "Handle can only contain lowercase letters")
 	authTestErrorContains(t, router, http.MethodPost, "/api/invites/"+token+"/accept", joiner.Token, AcceptWorkspaceInviteRequest{Handle: "taken-handle"}, http.StatusBadRequest, "Handle is already taken.")
 }

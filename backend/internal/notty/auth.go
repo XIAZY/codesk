@@ -706,13 +706,15 @@ func acceptWorkspaceInvite(db *sql.DB, token string, accountID string, req Accep
 		return nil, errExpiredInvite
 	}
 
+	var existingUserID string
 	var existingStatus string
 	err = tx.QueryRow(
-		`SELECT status
+		`SELECT user_id, status
 		   FROM workspace_members
-		  WHERE workspace_id = $1 AND account_id = $2`,
+		  WHERE workspace_id = $1 AND account_id = $2
+		  FOR UPDATE`,
 		workspace.ID, accountID,
-	).Scan(&existingStatus)
+	).Scan(&existingUserID, &existingStatus)
 	if err != nil && err != sql.ErrNoRows {
 		return nil, err
 	}
@@ -730,7 +732,20 @@ func acceptWorkspaceInvite(db *sql.DB, token string, accountID string, req Accep
 		return &workspace, nil
 	}
 	if err == nil {
-		return nil, errors.New("Account is already associated with this workspace.")
+		if err := reactivateWorkspaceInviteMemberTx(tx, workspace.ID, accountID, existingUserID, strings.TrimSpace(createdByUserID), now); err != nil {
+			return nil, err
+		}
+		if _, err = tx.Exec(
+			`UPDATE accounts SET last_accessed_workspace_id = $1, updated_at = $2 WHERE id = $3`,
+			workspace.ID, now, accountID,
+		); err != nil {
+			return nil, err
+		}
+		if err = tx.Commit(); err != nil {
+			return nil, err
+		}
+		committed = true
+		return &workspace, nil
 	}
 
 	handle, err := validateHandle(req.Handle)
@@ -795,6 +810,48 @@ func acceptWorkspaceInvite(db *sql.DB, token string, accountID string, req Accep
 	}
 	committed = true
 	return &workspace, nil
+}
+
+func reactivateWorkspaceInviteMemberTx(tx *sql.Tx, workspaceID string, accountID string, existingUserID string, invitedBy string, now time.Time) error {
+	existingUserID = strings.TrimSpace(existingUserID)
+	if existingUserID == "" {
+		return ErrNotFound
+	}
+
+	result, err := tx.Exec(
+		`UPDATE users
+		    SET status = 'active', updated_at = $1
+		  WHERE workspace_id = $2 AND id = $3`,
+		now, workspaceID, existingUserID,
+	)
+	if err != nil {
+		return err
+	}
+	if rows, err := result.RowsAffected(); err != nil {
+		return err
+	} else if rows != 1 {
+		return ErrNotFound
+	}
+
+	result, err = tx.Exec(
+		`UPDATE workspace_members
+		    SET user_id = $1,
+		        membership_role = $2,
+		        status = 'active',
+		        invited_by = $3,
+		        accepted_at = $4
+		  WHERE workspace_id = $5 AND account_id = $6`,
+		existingUserID, MembershipRoleMember, invitedBy, now, workspaceID, accountID,
+	)
+	if err != nil {
+		return err
+	}
+	if rows, err := result.RowsAffected(); err != nil {
+		return err
+	} else if rows != 1 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func ensurePostgresWorkspaceHandleAvailable(db *sql.DB, workspaceID string, handle string) error {
