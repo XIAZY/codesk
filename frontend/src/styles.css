@@ -1483,23 +1483,6 @@ svg.i.sm {
   text-align: left;
 }
 
-.workspace-home-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 10px;
-  max-width: 760px;
-  margin: 0 auto 24px;
-}
-
-.workspace-home-doc {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-  color: inherit;
-  text-align: left;
-}
-
 .management-canvas {
   flex: 1;
   min-height: 0;

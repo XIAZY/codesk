@@ -29,31 +29,36 @@ describe("routes", () => {
 
   it("resolves root from auth and workspace membership state", () => {
     const workspaces = [
-      { slug: "alpha" },
-      { slug: "beta" },
+      { id: "workspace_alpha", slug: "alpha" },
+      { id: "workspace_beta", slug: "beta" },
     ];
 
-    expect(resolveRoot({ authenticated: false, workspaces }, "beta")).toEqual({ kind: "login" });
-    expect(resolveRoot({ authenticated: true, workspaces: [] }, "beta")).toEqual({ kind: "newWorkspace" });
-    expect(resolveRoot({ authenticated: true, workspaces }, "beta")).toEqual({
+    expect(resolveRoot({ authenticated: false, account: { lastAccessedWorkspaceId: "workspace_beta" }, workspaces })).toEqual({ kind: "login" });
+    expect(resolveRoot({ authenticated: true, account: { lastAccessedWorkspaceId: "workspace_beta" }, workspaces: [] })).toEqual({ kind: "newWorkspace" });
+    expect(resolveRoot({ authenticated: true, account: { lastAccessedWorkspaceId: "workspace_beta" }, workspaces })).toEqual({
       kind: "workspace",
       slug: "beta",
       view: { kind: "home" },
     });
-    expect(resolveRoot({ authenticated: true, workspaces }, "missing")).toEqual({
+    expect(resolveRoot({ authenticated: true, account: { lastAccessedWorkspaceId: "workspace_missing" }, workspaces })).toEqual({
       kind: "workspace",
       slug: "alpha",
       view: { kind: "home" },
     });
   });
 
-  it("resolves a workspace home route from saved document state only", () => {
-    expect(resolveWorkspace("team", "doc_1")).toEqual({
+  it("resolves a workspace home route from membership document state", () => {
+    const documents = [{ id: "doc_1" }, { id: "doc_2" }];
+    expect(resolveWorkspace({ slug: "team", lastAccessedDocumentId: "doc_2" }, documents)).toEqual({
+      kind: "workspace",
+      slug: "team",
+      view: { kind: "document", documentId: "doc_2" },
+    });
+    expect(resolveWorkspace({ slug: "team", lastAccessedDocumentId: "doc_missing" }, documents)).toEqual({
       kind: "workspace",
       slug: "team",
       view: { kind: "document", documentId: "doc_1" },
     });
-    expect(resolveWorkspace("team", "")).toEqual({ kind: "workspace", slug: "team", view: { kind: "home" } });
-    expect(resolveWorkspace("team", null)).toEqual({ kind: "workspace", slug: "team", view: { kind: "home" } });
+    expect(resolveWorkspace({ slug: "team" }, [])).toEqual({ kind: "workspace", slug: "team", view: { kind: "home" } });
   });
 });

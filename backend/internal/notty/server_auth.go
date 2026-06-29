@@ -111,6 +111,34 @@ func (s *Server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"workspace": workspace, "member": member})
 }
 
+func (s *Server) handleUpdateLastAccessed(w http.ResponseWriter, r *http.Request) {
+	if !s.requireHumanPrincipal(w, r) {
+		return
+	}
+	var req UpdateLastAccessedRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	documentID := strings.TrimSpace(req.DocumentID)
+	if documentID != "" {
+		if _, err := s.requestStore(r).GetDocument(documentID); err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err.Error())
+			return
+		}
+	}
+	auth, _ := authFromContext(r.Context())
+	if err := updateLastAccessedWorkspace(s.store.db, auth.AccountID, s.requestWorkspaceID(r), documentID); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func (s *Server) handleListWorkspaceMembers(w http.ResponseWriter, r *http.Request) {
 	if !s.requireHumanPrincipal(w, r) {
 		return

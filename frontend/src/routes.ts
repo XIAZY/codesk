@@ -1,6 +1,4 @@
-import type { WorkspaceSummary } from "./types";
-
-export const workspaceSlugStorageKey = "notty.workspace.slug";
+import type { Account, DocumentItem, WorkspaceSummary } from "./types";
 
 export type WorkspaceView =
   | { kind: "home" }
@@ -15,10 +13,6 @@ export type AppRoute =
   | { kind: "newWorkspace" }
   | { kind: "workspace"; slug: string; view: WorkspaceView }
   | { kind: "notFound" };
-
-export function workspaceLastDocumentStorageKey(slug: string) {
-  return `notty.workspace.${slug}.lastDoc`;
-}
 
 export function parseRoute(pathname: string): AppRoute {
   const path = normalizePathname(pathname);
@@ -91,8 +85,7 @@ export function routePath(route: AppRoute): string {
 }
 
 export function resolveRoot(
-  auth: { authenticated: boolean; workspaces: Pick<WorkspaceSummary, "slug">[] },
-  savedSlug: string | null,
+  auth: { authenticated: boolean; account?: Pick<Account, "lastAccessedWorkspaceId"> | null; workspaces: Pick<WorkspaceSummary, "id" | "slug">[] },
 ): AppRoute {
   if (!auth.authenticated) {
     return { kind: "login" };
@@ -100,16 +93,21 @@ export function resolveRoot(
   if (auth.workspaces.length === 0) {
     return { kind: "newWorkspace" };
   }
-  const savedWorkspace = savedSlug ? auth.workspaces.find((workspace) => workspace.slug === savedSlug) : null;
-  return { kind: "workspace", slug: (savedWorkspace ?? auth.workspaces[0]).slug, view: { kind: "home" } };
+  const lastWorkspaceId = auth.account?.lastAccessedWorkspaceId?.trim() ?? "";
+  const lastWorkspace = lastWorkspaceId ? auth.workspaces.find((workspace) => workspace.id === lastWorkspaceId) : null;
+  return { kind: "workspace", slug: (lastWorkspace ?? auth.workspaces[0]).slug, view: { kind: "home" } };
 }
 
-export function resolveWorkspace(slug: string, savedDocId: string | null): AppRoute {
-  const documentId = savedDocId?.trim();
-  if (documentId) {
-    return { kind: "workspace", slug, view: { kind: "document", documentId } };
+export function resolveWorkspace(
+  workspace: Pick<WorkspaceSummary, "slug" | "lastAccessedDocumentId">,
+  documents: Pick<DocumentItem, "id">[],
+): AppRoute {
+  const lastDocumentId = workspace.lastAccessedDocumentId?.trim() ?? "";
+  const document = (lastDocumentId ? documents.find((item) => item.id === lastDocumentId) : null) ?? documents[0] ?? null;
+  if (document) {
+    return { kind: "workspace", slug: workspace.slug, view: { kind: "document", documentId: document.id } };
   }
-  return { kind: "workspace", slug, view: { kind: "home" } };
+  return { kind: "workspace", slug: workspace.slug, view: { kind: "home" } };
 }
 
 function normalizePathname(pathname: string) {

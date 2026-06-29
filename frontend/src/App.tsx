@@ -20,7 +20,7 @@ import {
   workspaceSlugMinLength,
   type LineThreadGroup,
 } from "./logic";
-import { resolveRoot, resolveWorkspace, workspaceLastDocumentStorageKey, workspaceSlugStorageKey, type WorkspaceView } from "./routes";
+import { resolveRoot, resolveWorkspace, type WorkspaceView } from "./routes";
 import { navigate, useRoute } from "./useRoute";
 import { useRootNamespace } from "./useRootNamespace";
 import { useDocumentSync } from "./useDocument";
@@ -32,6 +32,18 @@ import "./styles.css";
 const tokenStorageKey = "notty.auth.token";
 const portableFileNameIllegalChars = /[\u0000-\u001F<>:"\/\\|?*]/g;
 const windowsReservedBaseName = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+
+function clearLegacyRoutePersistence() {
+  for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+    const key = localStorage.key(index);
+    if (!key) {
+      continue;
+    }
+    if (key === "notty.workspace.id" || key === "notty.document.id" || key === "notty.activeDocumentId" || key.startsWith("notty.workspace.")) {
+      localStorage.removeItem(key);
+    }
+  }
+}
 
 function initials(value?: string) {
   const source = (value || "N").trim();
@@ -259,14 +271,38 @@ export function App() {
   const [restoringSession, setRestoringSession] = useState(false);
   const api = useMemo(() => new ApiClient(token), [token]);
 
+  const rememberWorkspaceAccess = useCallback((workspaceId: string, documentId = "") => {
+    setAccount((current) => {
+      if (!current || current.lastAccessedWorkspaceId === workspaceId) {
+        return current;
+      }
+      return { ...current, lastAccessedWorkspaceId: workspaceId };
+    });
+    if (!documentId) {
+      return;
+    }
+    setWorkspaces((current) => {
+      let changed = false;
+      const next = current.map((workspace) => {
+        if (workspace.id !== workspaceId || workspace.lastAccessedDocumentId === documentId) {
+          return workspace;
+        }
+        changed = true;
+        return { ...workspace, lastAccessedDocumentId: documentId };
+      });
+      return changed ? next : current;
+    });
+  }, []);
+
   const saveAuth = (nextToken: string, nextAccount: Account, nextWorkspaces: WorkspaceSummary[] = []) => {
     const safeWorkspaces = Array.isArray(nextWorkspaces) ? nextWorkspaces : [];
+    clearLegacyRoutePersistence();
     localStorage.setItem(tokenStorageKey, nextToken);
     setToken(nextToken);
     setAccount(nextAccount);
     setWorkspaces(safeWorkspaces);
     if (route.kind === "root" || route.kind === "login" || route.kind === "register") {
-      navigate(resolveRoot({ authenticated: true, workspaces: safeWorkspaces }, localStorage.getItem(workspaceSlugStorageKey)), {
+      navigate(resolveRoot({ authenticated: true, account: nextAccount, workspaces: safeWorkspaces }), {
         replace: true,
       });
     }
@@ -274,7 +310,7 @@ export function App() {
 
   const signOut = () => {
     localStorage.removeItem(tokenStorageKey);
-    localStorage.removeItem(workspaceSlugStorageKey);
+    clearLegacyRoutePersistence();
     setToken("");
     setAccount(null);
     setWorkspaces([]);
@@ -293,6 +329,7 @@ export function App() {
           return;
         }
         const safeWorkspaces = response.workspaces ?? [];
+        clearLegacyRoutePersistence();
         setAccount(response.account);
         setWorkspaces(safeWorkspaces);
       })
@@ -319,7 +356,7 @@ export function App() {
       return;
     }
     navigate(
-      resolveRoot({ authenticated: Boolean(token), workspaces }, localStorage.getItem(workspaceSlugStorageKey)),
+      resolveRoot({ authenticated: Boolean(token), account, workspaces }),
       { replace: true },
     );
   }, [account, route, token, workspaces]);
@@ -332,31 +369,12 @@ export function App() {
       return;
     }
     navigate(
-      resolveRoot({ authenticated: true, workspaces }, localStorage.getItem(workspaceSlugStorageKey)),
+      resolveRoot({ authenticated: true, account, workspaces }),
       { replace: true },
     );
   }, [account, route, token, workspaces]);
 
-  useEffect(() => {
-    if (route.kind !== "workspace" || route.view.kind !== "home") {
-      return;
-    }
-    if (!token || !account || !workspaces.some((workspace) => workspace.slug === route.slug)) {
-      return;
-    }
-    const resolved = resolveWorkspace(route.slug, localStorage.getItem(workspaceLastDocumentStorageKey(route.slug)));
-    if (resolved.kind === "workspace" && resolved.view.kind === "document") {
-      navigate(resolved, { replace: true });
-    }
-  }, [account, route, token, workspaces]);
-
   const routeWorkspace = route.kind === "workspace" ? workspaces.find((workspace) => workspace.slug === route.slug) ?? null : null;
-
-  useEffect(() => {
-    if (routeWorkspace) {
-      localStorage.setItem(workspaceSlugStorageKey, routeWorkspace.slug);
-    }
-  }, [routeWorkspace]);
 
   if (!token) {
     if (route.kind === "notFound") {
@@ -385,7 +403,6 @@ export function App() {
         workspaces={workspaces}
         onWorkspaces={setWorkspaces}
         onSelect={(workspace) => {
-          localStorage.setItem(workspaceSlugStorageKey, workspace.slug);
           navigate({ kind: "workspace", slug: workspace.slug, view: { kind: "home" } }, { replace: true });
         }}
         onSignOut={signOut}
@@ -411,8 +428,8 @@ export function App() {
       view={route.view}
       account={account}
       workspaces={workspaces}
+      onAccess={rememberWorkspaceAccess}
       onWorkspaceChange={(slug) => {
-        localStorage.setItem(workspaceSlugStorageKey, slug);
         navigate({ kind: "workspace", slug, view: { kind: "home" } });
       }}
       onSignOut={signOut}
@@ -656,6 +673,7 @@ export function WorkspaceApp({
   view,
   account,
   workspaces,
+  onAccess,
   onWorkspaceChange,
   onSignOut,
 }: {
@@ -666,6 +684,7 @@ export function WorkspaceApp({
   view: WorkspaceView;
   account: Account | null;
   workspaces: WorkspaceSummary[];
+  onAccess: (workspaceId: string, documentId?: string) => void;
   onWorkspaceChange: (slug: string) => void;
   onSignOut: () => void;
 }) {
@@ -710,10 +729,26 @@ export function WorkspaceApp({
   const currentWorkspaceUserIdentity = currentWorkspaceUser?.handle || currentWorkspaceUser?.name || "Workspace user";
 
   useEffect(() => {
-    if (view.kind === "document" && activeDocument) {
-      localStorage.setItem(workspaceLastDocumentStorageKey(workspaceSlug), activeDocument.id);
+    if (view.kind !== "home" || !rootNamespace.ready || !activeWorkspace) {
+      return;
     }
-  }, [activeDocument, view.kind, workspaceSlug]);
+    const resolved = resolveWorkspace(activeWorkspace, rootDocuments);
+    if (resolved.kind === "workspace" && resolved.view.kind === "document") {
+      navigate(resolved, { replace: true });
+    }
+  }, [activeWorkspace, rootDocuments, rootNamespace.ready, view.kind]);
+
+  useEffect(() => {
+    if (view.kind === "document" && activeDocument) {
+      onAccess(workspaceId, activeDocument.id);
+      void api.updateLastAccessed(workspaceId, { documentId: activeDocument.id }).catch(() => {});
+      return;
+    }
+    if (view.kind !== "document") {
+      onAccess(workspaceId);
+      void api.updateLastAccessed(workspaceId).catch(() => {});
+    }
+  }, [activeDocument, api, onAccess, view.kind, workspaceId]);
 
   const startRenamingDocument = useCallback((document: DocumentItem) => {
     setRenamingDocumentId(document.id);
@@ -749,7 +784,6 @@ export function WorkspaceApp({
       const doc = await api.createDocument(workspaceId);
       const path = untitledDocumentPath(rootDocuments, activeDocument?.path);
       rootNamespace.upsertFile(doc.id, path);
-      localStorage.setItem(workspaceLastDocumentStorageKey(workspaceSlug), doc.id);
       navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "document", documentId: doc.id } });
       setRightTab("threads");
       setSelectedThreadId("");
@@ -860,17 +894,6 @@ export function WorkspaceApp({
         </div>
 
         <nav className="sb-section">
-          <button
-            className={`nav-item ${view.kind === "home" ? "on" : ""}`}
-            type="button"
-            onClick={() => {
-              localStorage.removeItem(workspaceLastDocumentStorageKey(workspaceSlug));
-              navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "home" } });
-            }}
-          >
-            <Icon name="home" />
-            <span>Home</span>
-          </button>
           <button className="nav-item" type="button" onClick={() => setRightTab("activity")}>
             <Icon name="activity" />
             <span>Activity</span>
@@ -909,7 +932,6 @@ export function WorkspaceApp({
               onToggleFolder={toggleFolder}
               threadCountFor={(id) => threadCountByDocument.get(id) ?? 0}
               onSelectDocument={(id) => {
-                localStorage.setItem(workspaceLastDocumentStorageKey(workspaceSlug), id);
                 navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "document", documentId: id } });
               }}
             />
@@ -1035,7 +1057,6 @@ export function WorkspaceApp({
         ) : documentMissing ? (
           <DocumentNotFound
             onBackToWorkspace={() => {
-              localStorage.removeItem(workspaceLastDocumentStorageKey(workspaceSlug));
               navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "home" } }, { replace: true });
             }}
           />
@@ -1067,14 +1088,7 @@ export function WorkspaceApp({
             onTitleCommit={(draft) => commitDocumentTitle(activeDocument, draft)}
           />
         ) : rootNamespace.ready && rootDocuments.length ? (
-          <WorkspaceHome
-            documents={rootDocuments}
-            onOpenDocument={(documentId) => {
-              localStorage.setItem(workspaceLastDocumentStorageKey(workspaceSlug), documentId);
-              navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "document", documentId } });
-            }}
-            onCreateDocument={() => void createDocument()}
-          />
+          <div className="notice compact">Opening document...</div>
         ) : (
           <EmptyWorkspace
             onCreateDocument={() => void createDocument()}
@@ -1139,7 +1153,6 @@ export function WorkspaceApp({
           }}
           onDelete={async () => {
             rootNamespace.tombstoneFile(activeDocument.id);
-            localStorage.removeItem(workspaceLastDocumentStorageKey(workspaceSlug));
             navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "home" } }, { replace: true });
             setModal(null);
           }}
@@ -2553,37 +2566,6 @@ function EmptyWorkspace({
             <span className="small muted">{creatingDocument ? "Creating..." : "Markdown or plaintext. Threads and agents come along."}</span>
           </button>
         </div>
-      </div>
-    </section>
-  );
-}
-
-function WorkspaceHome({
-  documents,
-  onOpenDocument,
-  onCreateDocument,
-}: {
-  documents: DocumentItem[];
-  onOpenDocument: (documentId: string) => void;
-  onCreateDocument: () => void;
-}) {
-  return (
-    <section className="doc-canvas">
-      <div className="doc-inner empty-state">
-        <h2 className="display">Workspace home</h2>
-        <p className="small muted">Open a document from the list or create a new one.</p>
-        <div className="workspace-home-list">
-          {documents.slice(0, 12).map((document) => (
-            <button className="card p-12 workspace-home-doc" type="button" key={document.id} onClick={() => onOpenDocument(document.id)}>
-              <Icon name="doc" />
-              <span className="truncate">{document.path || document.title || "Untitled"}</span>
-            </button>
-          ))}
-        </div>
-        <button className="btn accent lg" type="button" onClick={onCreateDocument}>
-          <Icon name="plus" />
-          New document
-        </button>
       </div>
     </section>
   );

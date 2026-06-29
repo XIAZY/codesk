@@ -31,6 +31,7 @@ func (s *Server) Routes() http.Handler {
 	router.Route("/api/workspaces/{workspaceID}", func(router chi.Router) {
 		router.Use(s.requireWorkspace)
 		router.Get("/workspace", s.handleWorkspace)
+		router.Patch("/last-accessed", s.handleUpdateLastAccessed)
 		router.Get("/members", s.handleListWorkspaceMembers)
 		router.Post("/members", s.handleAddWorkspaceMember)
 		router.Get("/daemons", s.handleListDaemons)

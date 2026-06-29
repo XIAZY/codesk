@@ -48,11 +48,13 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			email TEXT UNIQUE NOT NULL,
 			display_name TEXT NOT NULL,
 			password_hash TEXT NOT NULL,
+			last_accessed_workspace_id TEXT NOT NULL DEFAULT '',
 			password_updated_at TIMESTAMPTZ,
 			created_at TIMESTAMPTZ NOT NULL,
 			updated_at TIMESTAMPTZ NOT NULL
 		)
 		`,
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_accessed_workspace_id TEXT NOT NULL DEFAULT ''`,
 		`
 		CREATE TABLE IF NOT EXISTS workspace_members (
 			workspace_id TEXT NOT NULL,
@@ -61,11 +63,13 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			membership_role TEXT NOT NULL DEFAULT 'member',
 			status TEXT NOT NULL DEFAULT 'active',
 			invited_by TEXT NOT NULL DEFAULT '',
+			last_accessed_document_id TEXT NOT NULL DEFAULT '',
 			created_at TIMESTAMPTZ NOT NULL,
 			accepted_at TIMESTAMPTZ,
 			PRIMARY KEY (workspace_id, account_id)
 		)
 		`,
+		`ALTER TABLE workspace_members ADD COLUMN IF NOT EXISTS last_accessed_document_id TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_workspace_members_account ON workspace_members (account_id, status, workspace_id)`,
 		`
 		CREATE TABLE IF NOT EXISTS daemons (

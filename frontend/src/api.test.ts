@@ -49,3 +49,26 @@ describe("ApiClient workspace create", () => {
     ).rejects.toThrow("Workspace slug is already taken.");
   });
 });
+
+describe("ApiClient last-accessed route state", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("updates workspace document preference through the workspace API", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ status: "ok" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    );
+
+    await new ApiClient("token").updateLastAccessed("workspace/1", { documentId: "doc_1" });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("/api/workspaces/workspace%2F1/last-accessed");
+    expect(init?.method).toBe("PATCH");
+    expect(init?.body).toBe(JSON.stringify({ documentId: "doc_1" }));
+  });
+});

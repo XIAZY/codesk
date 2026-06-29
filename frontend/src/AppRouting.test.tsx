@@ -5,12 +5,12 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { App } from "./App";
-import { workspaceLastDocumentStorageKey, workspaceSlugStorageKey } from "./routes";
 import type { Account, DocumentItem, WorkspaceState, WorkspaceSummary } from "./types";
 
 const mocks = vi.hoisted(() => ({
   workspace: null as WorkspaceState | null,
   documents: [] as DocumentItem[],
+  authAccount: null as Account | null,
   authWorkspaces: [] as WorkspaceSummary[],
 }));
 
@@ -68,7 +68,7 @@ const account: Account = {
 
 const workspaces: WorkspaceSummary[] = [
   { id: "workspace_alpha", slug: "alpha", name: "Alpha Workspace" },
-  { id: "workspace_team", slug: "team", name: "Team Workspace" },
+  { id: "workspace_team", slug: "team", name: "Team Workspace", lastAccessedDocumentId: "doc_1" },
 ];
 
 function workspaceState(workspaceId = "workspace_team"): WorkspaceState {
@@ -106,19 +106,37 @@ function jsonResponse(payload: unknown) {
   return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { "Content-Type": "application/json" } }));
 }
 
+function patchLastAccessed(path: string, init: RequestInit | undefined) {
+  if (!path.includes("/api/workspaces/") || !path.endsWith("/last-accessed") || init?.method !== "PATCH") {
+    return false;
+  }
+  const [, workspaceID = ""] = path.match(/\/api\/workspaces\/([^/]+)\/last-accessed$/) ?? [];
+  const body = typeof init.body === "string" && init.body ? JSON.parse(init.body) as { documentId?: string } : {};
+  if (mocks.authAccount) {
+    mocks.authAccount = { ...mocks.authAccount, lastAccessedWorkspaceId: decodeURIComponent(workspaceID) };
+  }
+  if (body.documentId) {
+    mocks.authWorkspaces = mocks.authWorkspaces.map((workspace) => (
+      workspace.id === decodeURIComponent(workspaceID) ? { ...workspace, lastAccessedDocumentId: body.documentId } : workspace
+    ));
+  }
+  return true;
+}
+
 beforeEach(() => {
   localStorage.clear();
   window.history.replaceState(null, "", "/");
   mocks.workspace = workspaceState();
   mocks.documents = [{ id: "doc_1", path: "docs/spec.md", title: "spec.md" }];
+  mocks.authAccount = { ...account, lastAccessedWorkspaceId: "workspace_team" };
   mocks.authWorkspaces = workspaces;
   vi.spyOn(globalThis, "fetch").mockImplementation((url, init) => {
     const path = String(url);
     if (path.endsWith("/api/auth/me")) {
-      return jsonResponse({ account, workspaces: mocks.authWorkspaces });
+      return jsonResponse({ account: mocks.authAccount, workspaces: mocks.authWorkspaces });
     }
     if (path.endsWith("/api/auth/login") && init?.method === "POST") {
-      return jsonResponse({ token: "token", account, workspaces: mocks.authWorkspaces });
+      return jsonResponse({ token: "token", account: mocks.authAccount, workspaces: mocks.authWorkspaces });
     }
     if (path.endsWith("/api/workspaces") && init?.method === "POST") {
       const workspace = { id: "workspace_created", slug: "product-workspace", name: "Product Workspace" };
@@ -128,6 +146,9 @@ beforeEach(() => {
     }
     if (path.endsWith("/api/workspaces/workspace_created/documents") && init?.method === "POST") {
       return jsonResponse({ id: "doc_created", updatedAt: "2026-06-29T00:00:00Z" });
+    }
+    if (patchLastAccessed(path, init)) {
+      return jsonResponse({ status: "ok" });
     }
     throw new Error(`Unexpected fetch ${path}`);
   });
@@ -139,15 +160,30 @@ afterEach(() => {
 });
 
 describe("App URL routing", () => {
-  it("resolves root through saved workspace and saved document state", async () => {
+  it("resolves root through backend last-accessed workspace and document state", async () => {
     localStorage.setItem("notty.auth.token", "token");
-    localStorage.setItem(workspaceSlugStorageKey, "team");
-    localStorage.setItem(workspaceLastDocumentStorageKey("team"), "doc_1");
 
     render(<App />);
 
     await waitFor(() => expect(window.location.pathname).toBe("/w/team/d/doc_1"));
     expect(screen.getByTestId("document-surface").textContent).toBe("doc_1");
+  });
+
+  it("ignores legacy route storage when restoring a different account", async () => {
+    localStorage.setItem("notty.auth.token", "token");
+    localStorage.setItem("notty.workspace.slug", "team");
+    localStorage.setItem("notty.workspace.team.lastDoc", "doc_old");
+    mocks.authAccount = { ...account, id: "account_2", lastAccessedWorkspaceId: "workspace_alpha" };
+    mocks.authWorkspaces = [{ id: "workspace_alpha", slug: "alpha", name: "Alpha Workspace", lastAccessedDocumentId: "doc_alpha" }];
+    mocks.workspace = workspaceState("workspace_alpha");
+    mocks.documents = [{ id: "doc_alpha", path: "alpha.md", title: "alpha.md" }];
+
+    render(<App />);
+
+    await waitFor(() => expect(window.location.pathname).toBe("/w/alpha/d/doc_alpha"));
+    expect(screen.getByTestId("document-surface").textContent).toBe("doc_alpha");
+    expect(localStorage.getItem("notty.workspace.slug")).toBeNull();
+    expect(localStorage.getItem("notty.workspace.team.lastDoc")).toBeNull();
   });
 
   it("keeps a protected deep link URL through login and then renders the workspace", async () => {
@@ -167,8 +203,7 @@ describe("App URL routing", () => {
     expect(window.location.pathname).toBe("/w/team/d/doc_1");
   });
 
-  it("does not rewrite unauthenticated workspace URLs from saved last-document state", () => {
-    localStorage.setItem(workspaceLastDocumentStorageKey("team"), "doc_1");
+  it("does not rewrite unauthenticated workspace URLs from route preference state", () => {
     window.history.replaceState(null, "", "/w/team");
 
     render(<App />);
@@ -177,15 +212,17 @@ describe("App URL routing", () => {
     expect(window.location.pathname).toBe("/w/team");
   });
 
-  it("renders bad workspace slugs as not found without touching saved workspace state", async () => {
+  it("renders bad workspace slugs as not found and clears legacy route storage", async () => {
     localStorage.setItem("notty.auth.token", "token");
-    localStorage.setItem(workspaceSlugStorageKey, "alpha");
+    localStorage.setItem("notty.workspace.slug", "alpha");
+    localStorage.setItem("notty.workspace.alpha.lastDoc", "old_doc");
     window.history.replaceState(null, "", "/w/missing");
 
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Workspace not found" })).toBeTruthy();
-    expect(localStorage.getItem(workspaceSlugStorageKey)).toBe("alpha");
+    expect(localStorage.getItem("notty.workspace.slug")).toBeNull();
+    expect(localStorage.getItem("notty.workspace.alpha.lastDoc")).toBeNull();
     expect(window.location.pathname).toBe("/w/missing");
   });
 
@@ -197,8 +234,7 @@ describe("App URL routing", () => {
 
     expect(await screen.findByRole("heading", { name: "Document not found" })).toBeTruthy();
     expect(screen.queryByTestId("document-surface")).toBeNull();
-    expect(localStorage.getItem(workspaceLastDocumentStorageKey("team"))).toBeNull();
-    expect(screen.getByRole("button", { name: "Home" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Back to workspace" })).toBeTruthy();
   });
 
   it("updates URL from workspace navigation and responds to browser history", async () => {
@@ -223,6 +259,7 @@ describe("App URL routing", () => {
     const user = userEvent.setup();
     localStorage.setItem("notty.auth.token", "token");
     mocks.authWorkspaces = [];
+    mocks.authAccount = { ...account, lastAccessedWorkspaceId: "" };
     mocks.documents = [];
     mocks.workspace = workspaceState("workspace_created");
     window.history.replaceState(null, "", "/new");

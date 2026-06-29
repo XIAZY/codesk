@@ -76,13 +76,14 @@ describe("WorkspaceApp identity display", () => {
 
     render(
       <WorkspaceApp
-        api={{} as never}
+        api={{ updateLastAccessed: vi.fn().mockResolvedValue({ status: "ok" }) } as never}
         token="token"
         workspaceId="workspace_1"
         workspaceSlug="product-workspace"
         view={{ kind: "home" }}
         account={account()}
         workspaces={workspaces}
+        onAccess={vi.fn()}
         onWorkspaceChange={vi.fn()}
         onSignOut={vi.fn()}
       />
