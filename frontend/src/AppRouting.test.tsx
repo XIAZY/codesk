@@ -197,8 +197,18 @@ afterEach(() => {
 });
 
 describe("App URL routing", () => {
+  it("ignores and clears legacy Notty auth tokens", async () => {
+    localStorage.setItem("notty.auth.token", "legacy-token");
+
+    render(<App />);
+
+    expect(screen.getByRole("heading", { name: "Welcome back" })).toBeTruthy();
+    await waitFor(() => expect(localStorage.getItem("notty.auth.token")).toBeNull());
+    expect(localStorage.getItem("codesk.auth.token")).toBeNull();
+  });
+
   it("resolves root through backend last-accessed workspace and document state", async () => {
-    localStorage.setItem("notty.auth.token", "token");
+    localStorage.setItem("codesk.auth.token", "token");
 
     render(<App />);
 
@@ -229,7 +239,7 @@ describe("App URL routing", () => {
   });
 
   it("ignores legacy route storage when restoring a different account", async () => {
-    localStorage.setItem("notty.auth.token", "token");
+    localStorage.setItem("codesk.auth.token", "token");
     localStorage.setItem("notty.workspace.slug", "team");
     localStorage.setItem("notty.workspace.team.lastDoc", "doc_old");
     mocks.authAccount = { ...account, id: "account_2", lastAccessedWorkspaceId: "workspace_alpha" };
@@ -247,7 +257,7 @@ describe("App URL routing", () => {
 
   it("clears stale workspace URL intent on signout before the next account logs in", async () => {
     const user = userEvent.setup();
-    localStorage.setItem("notty.auth.token", "token");
+    localStorage.setItem("codesk.auth.token", "token");
     window.history.replaceState(null, "", "/w/team/d/doc_1");
 
     render(<App />);
@@ -391,7 +401,7 @@ describe("App URL routing", () => {
   });
 
   it("renders bad workspace slugs as not found and clears legacy route storage", async () => {
-    localStorage.setItem("notty.auth.token", "token");
+    localStorage.setItem("codesk.auth.token", "token");
     localStorage.setItem("notty.workspace.slug", "alpha");
     localStorage.setItem("notty.workspace.alpha.lastDoc", "old_doc");
     window.history.replaceState(null, "", "/w/missing");
@@ -405,7 +415,7 @@ describe("App URL routing", () => {
   });
 
   it("renders a missing document inside the workspace shell without falling back to another document", async () => {
-    localStorage.setItem("notty.auth.token", "token");
+    localStorage.setItem("codesk.auth.token", "token");
     window.history.replaceState(null, "", "/w/team/d/missing");
 
     render(<App />);
@@ -417,7 +427,7 @@ describe("App URL routing", () => {
 
   it("updates URL from workspace navigation and responds to browser history", async () => {
     const user = userEvent.setup();
-    localStorage.setItem("notty.auth.token", "token");
+    localStorage.setItem("codesk.auth.token", "token");
     window.history.replaceState(null, "", "/w/team/d/doc_1");
 
     render(<App />);
@@ -436,7 +446,7 @@ describe("App URL routing", () => {
 
   it("opens a document URL after creating the workspace and document", async () => {
     const user = userEvent.setup();
-    localStorage.setItem("notty.auth.token", "token");
+    localStorage.setItem("codesk.auth.token", "token");
     mocks.authWorkspaces = [];
     mocks.authAccount = { ...account, lastAccessedWorkspaceId: "" };
     mocks.documents = [];

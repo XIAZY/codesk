@@ -144,7 +144,7 @@ func issueJWT(secret string, account *Account, ttl time.Duration) (string, error
 		DisplayName: account.DisplayName,
 		IssuedAt:    now.Unix(),
 		ExpiresAt:   now.Add(ttl).Unix(),
-		Issuer:      "notty",
+		Issuer:      "codesk",
 	}
 	header, err := json.Marshal(map[string]string{"alg": "HS256", "typ": "JWT"})
 	if err != nil {
@@ -182,7 +182,7 @@ func verifyJWT(secret string, token string) (*jwtClaims, error) {
 	if err := json.Unmarshal(payload, &claims); err != nil {
 		return nil, err
 	}
-	if claims.Issuer != "notty" {
+	if claims.Issuer != "codesk" {
 		return nil, errors.New("invalid jwt issuer")
 	}
 	if claims.Subject == "" || claims.ExpiresAt <= time.Now().UTC().Unix() {

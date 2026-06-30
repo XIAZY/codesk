@@ -1,9 +1,9 @@
 import type { Daemon } from "./types";
 
-// notty's supported-runtime registry. A runtime is "supported" when notty knows
+// Codesk's supported-runtime registry. A runtime is "supported" when Codesk knows
 // how to drive it; only those can actually host an agent. Everything else is a
 // roadmap entry shown as "coming soon" — independent of any individual daemon.
-// Today notty only integrates Codex.
+// Today Codesk only integrates Codex.
 export type RuntimeRegistryEntry = {
   kind: string;
   label: string;
@@ -19,10 +19,10 @@ export const SUPPORTED_RUNTIME_REGISTRY: RuntimeRegistryEntry[] = [
   { kind: "opencode", label: "opencode", monogram: "oc", supported: false },
 ];
 
-// available     — supported by notty and installed/available on the selected daemon (selectable)
-// not_installed — supported by notty but the daemon's host doesn't have the CLI (host-fixable)
+// available     — supported by Codesk and installed/available on the selected daemon (selectable)
+// not_installed — supported by Codesk but the daemon's host doesn't have the CLI (host-fixable)
 // update_required — supported, present, but the CLI is below the supported floor (host-fixable)
-// coming_soon   — not yet supported by notty; same on every daemon
+// coming_soon   — not yet supported by Codesk; same on every daemon
 export type RuntimeAvailability = "available" | "not_installed" | "update_required" | "coming_soon";
 
 export type RuntimeTile = {
@@ -41,7 +41,7 @@ export function resolveRuntimeTiles(daemon?: Daemon): RuntimeTile[] {
 
   const tiles: RuntimeTile[] = SUPPORTED_RUNTIME_REGISTRY.map((entry) => {
     if (!entry.supported) {
-      return { entry, availability: "coming_soon", meta: "Coming soon to notty" };
+      return { entry, availability: "coming_soon", meta: "Coming soon to Codesk" };
     }
     const detection = detections.find((runtime) => normalizeRuntimeKind(runtime.kind) === entry.kind);
     if (detection?.available) {
@@ -54,7 +54,7 @@ export function resolveRuntimeTiles(daemon?: Daemon): RuntimeTile[] {
     return { entry, availability: "not_installed", meta: reason || "Not installed on host" };
   });
 
-  // Surface any runtimes the daemon reports that notty doesn't support yet, so an
+  // Surface any runtimes the daemon reports that Codesk doesn't support yet, so an
   // operator who installed e.g. a CLI we don't integrate understands why it's unavailable.
   for (const detection of detections) {
     const kind = normalizeRuntimeKind(detection.kind);
@@ -65,7 +65,7 @@ export function resolveRuntimeTiles(daemon?: Daemon): RuntimeTile[] {
     tiles.push({
       entry: { kind, label: detection.kind.trim(), monogram: kind.slice(0, 2), supported: false },
       availability: "coming_soon",
-      meta: "Coming soon to notty",
+      meta: "Coming soon to Codesk",
     });
   }
 

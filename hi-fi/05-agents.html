@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>notty hi-fi · 05 Agents</title>
+<title>Codesk hi-fi · 05 Agents</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -51,7 +51,7 @@
     </div>
 
     <div class="frame" style="height: 600px;">
-      <div class="frame-bar"><div class="dots"><span></span><span></span><span></span></div><span style="margin-left:8px">notty.app/w/studio-reyes/agents</span></div>
+      <div class="frame-bar"><div class="dots"><span></span><span></span><span></span></div><span style="margin-left:8px">codesk.app/w/studio-reyes/agents</span></div>
       <div style="height: calc(100% - 32px); padding: 24px 32px; overflow:auto; background: var(--paper);">
         <div class="between" style="margin-bottom: 16px;">
           <div class="col" style="gap:2px">
@@ -256,7 +256,7 @@
 
               <div class="field">
                 <div class="lab">Workspace root</div>
-                <div class="input"><span class="mono small">~/notty/studio-reyes</span></div>
+                <div class="input"><span class="mono small">~/codesk/studio-reyes</span></div>
                 <div class="hint">Daemon-local path for this agent's projected copy.</div>
               </div>
 
@@ -480,7 +480,7 @@
 
       <div class="k">Identity</div>
       <div>
-        Backend identity is UUID; handle is renameable. Daemon-acting requests pass <code>X-Notty-Acting-Agent-ID: &lt;uuid&gt;</code>. Handles are unique within a workspace, scoped to <em>both</em> users and agents (no <code>@foo</code> collision).
+        Backend identity is UUID; handle is renameable. Daemon-acting requests pass <code>X-Codesk-Acting-Agent-ID: &lt;uuid&gt;</code>. Handles are unique within a workspace, scoped to <em>both</em> users and agents (no <code>@foo</code> collision).
       </div>
 
       <div class="k">Daemon ownership</div>

@@ -8,29 +8,36 @@ services:
     ports:
       - "${NOTTY_HTTP_BIND:-0.0.0.0}:${NOTTY_HTTP_PORT:-80}:80"
       - "${NOTTY_HTTPS_BIND:-0.0.0.0}:${NOTTY_HTTPS_PORT:-443}:443"
-    environment:
-      NOTTY_API_HOST: ${NOTTY_API_HOST:-api.nottyai.co}
-      NOTTY_FRONTEND_ORIGIN: ${NOTTY_FRONTEND_ORIGIN:-https://app.nottyai.co}
-      NOTTY_HOMEPAGE_ORIGIN: ${NOTTY_HOMEPAGE_ORIGIN:-https://nottyai.co}
-      NOTTY_WWW_HOMEPAGE_ORIGIN: ${NOTTY_WWW_HOMEPAGE_ORIGIN:-https://www.nottyai.co}
-      NOTTY_TLS_CERT_FILE: ${NOTTY_TLS_CERT_FILE:-/opt/notty/cert.pem}
-      NOTTY_TLS_KEY_FILE: ${NOTTY_TLS_KEY_FILE:-/opt/notty/private.pem}
     volumes:
       - ./notty-api.nginx.conf:/etc/nginx/templates/default.conf.template:ro
+      # api.nottyai.co (legacy) TLS material.
       - type: bind
-        source: ${NOTTY_TLS_CERT_FILE:-/opt/notty/cert.pem}
-        target: ${NOTTY_TLS_CERT_FILE:-/opt/notty/cert.pem}
+        source: /opt/notty/cert.pem
+        target: /opt/notty/cert.pem
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: ${NOTTY_TLS_KEY_FILE:-/opt/notty/private.pem}
-        target: ${NOTTY_TLS_KEY_FILE:-/opt/notty/private.pem}
+        source: /opt/notty/private.pem
+        target: /opt/notty/private.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      # api.getcodesk.com (current) TLS material.
+      - type: bind
+        source: /opt/notty/codesk_origin.pem
+        target: /opt/notty/codesk_origin.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /opt/notty/codesk_private.pem
+        target: /opt/notty/codesk_private.pem
         read_only: true
         bind:
           create_host_path: false
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- --no-check-certificate --header='Host: ${NOTTY_API_HOST:-api.nottyai.co}' https://127.0.0.1/healthz >/dev/null 2>&1"]
+      test: ["CMD-SHELL", "wget -qO- --no-check-certificate --header='Host: ${NOTTY_API_HOST:-api.getcodesk.com}' https://127.0.0.1/healthz >/dev/null 2>&1"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -46,7 +53,7 @@ services:
       NOTTY_PORT: "8080"
       NOTTY_DATABASE_URL: ${NOTTY_DATABASE_URL:?NOTTY_DATABASE_URL is required}
       NOTTY_JWT_SECRET: ${NOTTY_JWT_SECRET:?NOTTY_JWT_SECRET is required}
-      NOTTY_PUBLIC_ORIGIN: ${NOTTY_PUBLIC_ORIGIN:-${NOTTY_FRONTEND_ORIGIN:-https://app.nottyai.co}}
+      NOTTY_PUBLIC_ORIGIN: ${NOTTY_PUBLIC_ORIGIN:-https://app.getcodesk.com}
       NOTTY_PPROF_ADDR: ${NOTTY_PPROF_ADDR:-}
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1"]
