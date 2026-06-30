@@ -11,26 +11,29 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	state := s.requestStore(r).Snapshot()
 	currentUserID := ""
 	currentDaemonID := ""
+	currentMembershipRole := ""
 	auth, _ := authFromContext(r.Context())
 	if auth != nil {
 		currentUserID = auth.UserID
 		currentDaemonID = auth.DaemonID
+		currentMembershipRole = auth.MembershipRole
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"workspaceId":     state.WorkspaceID,
-		"rootDocumentId":  state.RootDocumentID,
-		"currentUserId":   currentUserID,
-		"currentDaemonId": currentDaemonID,
-		"name":            state.Name,
-		"users":           SortedUsers(state),
-		"daemons":         s.daemonsForWorkspace(r, state),
-		"agents":          visibleAgentsForAuth(state, auth),
-		"agentRuns":       SortedWorkspaceAgentRuns(state),
-		"threads":         SortedThreads(state),
-		"agentEvents":     SortedAgentEvents(state),
-		"presences":       state.Presences,
-		"activities":      state.Activities,
-		"updatedAt":       state.UpdatedAt,
+		"workspaceId":           state.WorkspaceID,
+		"rootDocumentId":        state.RootDocumentID,
+		"currentUserId":         currentUserID,
+		"currentDaemonId":       currentDaemonID,
+		"currentMembershipRole": currentMembershipRole,
+		"name":                  state.Name,
+		"users":                 SortedUsers(state),
+		"daemons":               s.daemonsForWorkspace(r, state),
+		"agents":                visibleAgentsForAuth(state, auth),
+		"agentRuns":             SortedWorkspaceAgentRuns(state),
+		"threads":               SortedThreads(state),
+		"agentEvents":           SortedAgentEvents(state),
+		"presences":             state.Presences,
+		"activities":            state.Activities,
+		"updatedAt":             state.UpdatedAt,
 	})
 }
 
@@ -69,18 +72,23 @@ func (s *Server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 
 	snapshot := s.requestStore(r).Snapshot()
 	auth, _ := authFromContext(r.Context())
+	currentMembershipRole := ""
+	if auth != nil {
+		currentMembershipRole = auth.MembershipRole
+	}
 	if err := conn.WriteJSON(EventEnvelope{
 		Type: "workspace.snapshot",
 		Data: map[string]interface{}{
-			"rootDocumentId": snapshot.RootDocumentID,
-			"users":          SortedUsers(snapshot),
-			"daemons":        s.daemonsForWorkspace(r, snapshot),
-			"agents":         visibleAgentsForAuth(snapshot, auth),
-			"agentRuns":      SortedWorkspaceAgentRuns(snapshot),
-			"threads":        SortedThreads(snapshot),
-			"agentEvents":    SortedAgentEvents(snapshot),
-			"presences":      snapshot.Presences,
-			"activities":     snapshot.Activities,
+			"rootDocumentId":        snapshot.RootDocumentID,
+			"currentMembershipRole": currentMembershipRole,
+			"users":                 SortedUsers(snapshot),
+			"daemons":               s.daemonsForWorkspace(r, snapshot),
+			"agents":                visibleAgentsForAuth(snapshot, auth),
+			"agentRuns":             SortedWorkspaceAgentRuns(snapshot),
+			"threads":               SortedThreads(snapshot),
+			"agentEvents":           SortedAgentEvents(snapshot),
+			"presences":             snapshot.Presences,
+			"activities":            snapshot.Activities,
 		},
 	}); err != nil {
 		return

@@ -105,6 +105,14 @@ type Workspace struct {
 	UpdatedAt              time.Time `json:"updatedAt"`
 }
 
+type WorkspaceInvite struct {
+	ID              string    `json:"id"`
+	WorkspaceID     string    `json:"workspaceId"`
+	CreatedByUserID string    `json:"-"`
+	ExpiresAt       time.Time `json:"expiresAt"`
+	CreatedAt       time.Time `json:"createdAt"`
+}
+
 type WorkspaceMember struct {
 	WorkspaceID    string    `json:"workspaceId"`
 	AccountID      string    `json:"accountId"`
@@ -310,6 +318,29 @@ type AddWorkspaceMemberRequest struct {
 	DisplayName string `json:"displayName"`
 	Handle      string `json:"handle"`
 	Role        string `json:"role"`
+}
+
+type CreateWorkspaceInviteResponse struct {
+	Invite *WorkspaceInvite `json:"invite"`
+	URL    string           `json:"url"`
+}
+
+type WorkspaceInvitePreview struct {
+	Name string `json:"name"`
+	Slug string `json:"slug"`
+}
+
+type WorkspaceInvitePreviewResponse struct {
+	Workspace *WorkspaceInvitePreview `json:"workspace"`
+	ExpiresAt time.Time               `json:"expiresAt"`
+}
+
+type AcceptWorkspaceInviteRequest struct {
+	Handle string `json:"handle"`
+}
+
+type AcceptWorkspaceInviteResponse struct {
+	Workspace *Workspace `json:"workspace"`
 }
 
 type CreateDaemonRequest struct {

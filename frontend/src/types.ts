@@ -12,6 +12,21 @@ export type WorkspaceSummary = {
   lastAccessedDocumentId?: string;
 };
 
+export type WorkspaceInvite = {
+  id: string;
+  workspaceId: string;
+  expiresAt: string;
+  createdAt: string;
+};
+
+export type WorkspaceInvitePreview = {
+  workspace: {
+    name: string;
+    slug: string;
+  };
+  expiresAt: string;
+};
+
 export type DocumentItem = {
   id: string;
   path: string;
@@ -169,6 +184,7 @@ export type WorkspaceState = {
   rootDocumentId: string;
   currentUserId?: string;
   currentDaemonId?: string;
+  currentMembershipRole?: "owner" | "admin" | "member" | string;
   name: string;
   users: UserItem[];
   daemons: Daemon[];

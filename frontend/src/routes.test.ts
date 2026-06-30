@@ -5,6 +5,7 @@ const routeCases: AppRoute[] = [
   { kind: "root" },
   { kind: "login" },
   { kind: "register" },
+  { kind: "invite", token: "abc123" },
   { kind: "newWorkspace" },
   { kind: "workspace", slug: "team", view: { kind: "home" } },
   { kind: "workspace", slug: "team", view: { kind: "document", documentId: "doc_1" } },

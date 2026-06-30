@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { ApiClient, apiBase, daemonStaticBase } from "./api";
+import { ApiClient, apiBase, daemonStaticBase, publicOrigin } from "./api";
 import { DocumentSurface, type LiveThread, type SurfaceSelection } from "./DocumentSurface";
 import type { MarkdownPreviewCommandName } from "./markdownLivePreview";
 import {
@@ -25,7 +25,7 @@ import { navigate, useRoute } from "./useRoute";
 import { useRootNamespace } from "./useRootNamespace";
 import { useDocumentSync } from "./useDocument";
 import { useWorkspace } from "./useWorkspace";
-import type { Account, Agent, Daemon, DocumentItem, ThreadItem, WorkspaceSummary } from "./types";
+import type { Account, Agent, Daemon, DocumentItem, ThreadItem, WorkspaceInvitePreview, WorkspaceSummary } from "./types";
 import { resolveRuntimeTiles, selectableRuntimeKinds, type RuntimeTile } from "./runtimes";
 import "./styles.css";
 
@@ -317,6 +317,25 @@ export function App() {
     navigate({ kind: "login" }, { replace: true });
   };
 
+  const acceptInviteWorkspace = useCallback(
+    async (workspace: WorkspaceSummary) => {
+      try {
+        const response = await api.me();
+        const safeWorkspaces = response.workspaces ?? [];
+        setAccount(response.account);
+        setWorkspaces(safeWorkspaces);
+      } catch {
+        setAccount((current) => current ? { ...current, lastAccessedWorkspaceId: workspace.id } : current);
+        setWorkspaces((current) => {
+          const exists = current.some((item) => item.id === workspace.id);
+          return exists ? current.map((item) => (item.id === workspace.id ? { ...item, ...workspace } : item)) : [...current, workspace];
+        });
+      }
+      navigate({ kind: "workspace", slug: workspace.slug, view: { kind: "home" } }, { replace: true });
+    },
+    [api],
+  );
+
   useEffect(() => {
     if (!token) {
       return;
@@ -385,6 +404,9 @@ export function App() {
   const routeWorkspace = route.kind === "workspace" ? workspaces.find((workspace) => workspace.slug === route.slug) ?? null : null;
 
   if (!token) {
+    if (route.kind === "invite") {
+      return <InvitePage api={api} inviteToken={route.token} account={null} workspaces={[]} onAuth={saveAuth} onAccepted={acceptInviteWorkspace} />;
+    }
     if (route.kind === "notFound") {
       return <RouteMessageScreen title="Page not found" body="That link does not match a notty route." />;
     }
@@ -397,6 +419,10 @@ export function App() {
 
   if (route.kind === "root" || route.kind === "login" || route.kind === "register") {
     return <RestoringSessionScreen />;
+  }
+
+  if (route.kind === "invite") {
+    return <InvitePage api={api} inviteToken={route.token} account={account} workspaces={workspaces} onAuth={saveAuth} onAccepted={acceptInviteWorkspace} />;
   }
 
   if (route.kind === "notFound") {
@@ -472,20 +498,189 @@ function RouteMessageScreen({ title, body }: { title: string; body: string }) {
   );
 }
 
+function InvitePage({
+  api,
+  inviteToken,
+  account,
+  workspaces,
+  onAuth,
+  onAccepted,
+}: {
+  api: ApiClient;
+  inviteToken: string;
+  account: Account | null;
+  workspaces: WorkspaceSummary[];
+  onAuth: (token: string, account: Account, workspaces: WorkspaceSummary[]) => void;
+  onAccepted: (workspace: WorkspaceSummary) => Promise<void>;
+}) {
+  const [preview, setPreview] = useState<WorkspaceInvitePreview | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [handle, setHandle] = useState(() => defaultWorkspaceHandle(account));
+  const [joining, setJoining] = useState(false);
+  const [joinError, setJoinError] = useState("");
+
+  useEffect(() => {
+    setHandle(defaultWorkspaceHandle(account));
+  }, [account]);
+
+  useEffect(() => {
+    let disposed = false;
+    setLoading(true);
+    setError("");
+    setPreview(null);
+    api.previewWorkspaceInvite(inviteToken)
+      .then((response) => {
+        if (!disposed) {
+          setPreview(response);
+        }
+      })
+      .catch((err) => {
+        if (!disposed) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      })
+      .finally(() => {
+        if (!disposed) {
+          setLoading(false);
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [api, inviteToken]);
+
+  if (loading) {
+    return <RouteMessageScreen title="Opening invite" body="Checking this workspace invite." />;
+  }
+  if (error || !preview?.workspace) {
+    return <RouteMessageScreen title="Invite unavailable" body={error || "This invite link is no longer available."} />;
+  }
+
+  const existingWorkspace = workspaces.find((workspace) => workspace.slug === preview.workspace.slug) ?? null;
+  const previewCard = <InvitePreviewCard preview={preview} />;
+
+  if (!account) {
+    return (
+      <AuthScreen
+        api={api}
+        mode="login"
+        onAuth={onAuth}
+        title="Join workspace"
+        copy="Log in or create an account to accept this invite."
+        preserveRoute
+      >
+        {previewCard}
+      </AuthScreen>
+    );
+  }
+
+  if (existingWorkspace) {
+    return (
+      <main className="auth-screen">
+        <section className="card p-24 auth-panel">
+          <Logo />
+          {previewCard}
+          <h1 className="auth-title">You are already in this workspace</h1>
+          <button className="btn accent full lg" type="button" onClick={() => navigate({ kind: "workspace", slug: existingWorkspace.slug, view: { kind: "home" } }, { replace: true })}>
+            Open workspace
+          </button>
+        </section>
+      </main>
+    );
+  }
+
+  const accept = async (event: FormEvent) => {
+    event.preventDefault();
+    setJoining(true);
+    setJoinError("");
+    try {
+      const response = await api.acceptWorkspaceInvite(inviteToken, { handle });
+      await onAccepted(response.workspace);
+    } catch (err) {
+      setJoinError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setJoining(false);
+    }
+  };
+
+  return (
+    <main className="auth-screen">
+      <section className="card p-24 auth-panel">
+        <Logo />
+        {previewCard}
+        <h1 className="auth-title">Join workspace</h1>
+        <form onSubmit={accept} className="form-stack">
+          <label className="field">
+            <span className="lab">Your handle in this workspace</span>
+            <input
+              aria-label="Your handle in this workspace"
+              value={handle}
+              onChange={(event) => setHandle(event.target.value)}
+              pattern={identifierPattern}
+              minLength={handleMinLength}
+              maxLength={handleMaxLength}
+              title={identifierHelpText}
+              required
+            />
+            <span className="hint">{identifierHelpText}</span>
+          </label>
+          {joinError ? <p className="error-text">{joinError}</p> : null}
+          <button className="btn accent full lg" disabled={joining}>{joining ? "Joining..." : "Join workspace"}</button>
+        </form>
+      </section>
+    </main>
+  );
+}
+
+function InvitePreviewCard({ preview }: { preview: WorkspaceInvitePreview }) {
+  return (
+    <div className="invite-preview">
+      <div className="avi workspace-avi">{initials(preview.workspace.name)}</div>
+      <div className="col gap-2 min-0">
+        <b className="truncate">{preview.workspace.name}</b>
+        <span className="tiny muted truncate">/{preview.workspace.slug} · expires {formatInviteDate(preview.expiresAt)}</span>
+      </div>
+    </div>
+  );
+}
+
+function defaultWorkspaceHandle(account: Account | null) {
+  return identifierFromName(account?.email.split("@")[0] ?? account?.displayName ?? "member", handleMaxLength) || "member";
+}
+
+function formatInviteDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) {
+    return "soon";
+  }
+  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date);
+}
+
 function AuthScreen({
   api,
   mode,
   onAuth,
+  title,
+  copy,
+  children,
+  preserveRoute = false,
 }: {
   api: ApiClient;
   mode: "login" | "register";
   onAuth: (token: string, account: Account, workspaces: WorkspaceSummary[]) => void;
+  title?: string;
+  copy?: string;
+  children?: ReactNode;
+  preserveRoute?: boolean;
 }) {
+  const [localMode, setLocalMode] = useState(mode);
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const activeMode = preserveRoute ? localMode : mode;
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -493,7 +688,7 @@ function AuthScreen({
     setError("");
     try {
       const response =
-        mode === "register"
+        activeMode === "register"
           ? await api.register({ email, password, displayName })
           : await api.login({ email, password });
       onAuth(response.token, response.account, response.workspaces ?? []);
@@ -508,12 +703,13 @@ function AuthScreen({
     <main className="auth-screen">
       <section className="card p-24 auth-panel">
         <Logo />
-        <h1 className="auth-title">{mode === "login" ? "Welcome back" : "Create your account"}</h1>
+        {children}
+        <h1 className="auth-title">{title ?? (activeMode === "login" ? "Welcome back" : "Create your account")}</h1>
         <p className="small muted auth-copy">
-          {mode === "login" ? "Log in to your workspaces." : "You'll set up your workspace next."}
+          {copy ?? (activeMode === "login" ? "Log in to your workspaces." : "You'll set up your workspace next.")}
         </p>
         <form onSubmit={submit} className="form-stack">
-          {mode === "register" ? (
+          {activeMode === "register" ? (
             <label className="field">
               <span className="lab">Display name</span>
               <input value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="Ada Lovelace" required />
@@ -528,15 +724,21 @@ function AuthScreen({
             <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 8 characters" required />
           </label>
           {error ? <p className="error-text">{error}</p> : null}
-          <button className="btn accent full lg" disabled={busy}>{busy ? "Working..." : mode === "login" ? "Log in" : "Create account"}</button>
+          <button className="btn accent full lg" disabled={busy}>{busy ? "Working..." : activeMode === "login" ? "Log in" : "Create account"}</button>
         </form>
         <div className="auth-switch">
-          {mode === "login" ? "No account?" : "Already have an account?"}
+          {activeMode === "login" ? "No account?" : "Already have an account?"}
           <button
             className="btn-link"
-            onClick={() => navigate({ kind: mode === "login" ? "register" : "login" })}
+            onClick={() => {
+              if (preserveRoute) {
+                setLocalMode(activeMode === "login" ? "register" : "login");
+                return;
+              }
+              navigate({ kind: activeMode === "login" ? "register" : "login" });
+            }}
           >
-            {mode === "login" ? "Create one" : "Log in"}
+            {activeMode === "login" ? "Create one" : "Log in"}
           </button>
         </div>
       </section>
@@ -579,6 +781,8 @@ export function WorkspaceOnboarding({
           onWorkspaces={onWorkspaces}
           onSelect={onSelect}
         />
+        <div className="divider" />
+        <JoinInviteLinkForm />
       </section>
     </main>
   );
@@ -673,6 +877,71 @@ function CreateWorkspaceForm({
   );
 }
 
+function JoinInviteLinkForm() {
+  const [value, setValue] = useState("");
+  const [error, setError] = useState("");
+
+  const openInvite = (event: FormEvent) => {
+    event.preventDefault();
+    const token = inviteTokenFromInput(value);
+    if (!token) {
+      setError("Enter a valid invite link.");
+      return;
+    }
+    navigate({ kind: "invite", token });
+  };
+
+  return (
+    <form onSubmit={openInvite} className="form-stack invite-link-card">
+      <div>
+        <h2 className="modal-title">Join with invite link</h2>
+      </div>
+      <label className="field">
+        <span className="lab">Invite link</span>
+        <input
+          value={value}
+          onChange={(event) => {
+            setValue(event.target.value);
+            setError("");
+          }}
+          placeholder={`${publicOrigin}/invite/abc123...`}
+        />
+      </label>
+      {error ? <p className="error-text">{error}</p> : null}
+      <button className="btn full lg" type="submit">Join with invite link</button>
+    </form>
+  );
+}
+
+function inviteTokenFromInput(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+  const pathToken = tokenFromInvitePath(trimmed);
+  if (pathToken) {
+    return pathToken;
+  }
+  try {
+    const url = new URL(trimmed);
+    return tokenFromInvitePath(url.pathname);
+  } catch {
+    return /^[^\s/]+$/.test(trimmed) ? trimmed : "";
+  }
+}
+
+function tokenFromInvitePath(value: string) {
+  const parts = value.split(/[?#]/, 1)[0].split("/").filter(Boolean);
+  if (parts.length === 2 && parts[0] === "invite") {
+    try {
+      return decodeURIComponent(parts[1]);
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
 export function WorkspaceApp({
   api,
   token,
@@ -704,7 +973,7 @@ export function WorkspaceApp({
   });
   const rootDocuments = rootNamespace.documents;
   const [rightTab, setRightTab] = useState<"threads" | "activity" | "people">("threads");
-  const [modal, setModal] = useState<"daemon" | "agent" | "rename" | "agent-detail" | "daemon-detail" | null>(null);
+  const [modal, setModal] = useState<"daemon" | "agent" | "rename" | "share" | "agent-detail" | "daemon-detail" | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
   const [selectedDaemon, setSelectedDaemon] = useState<Daemon | null>(null);
   const [selectedThreadId, setSelectedThreadId] = useState("");
@@ -736,6 +1005,7 @@ export function WorkspaceApp({
   const currentWorkspaceUser = workspace.users.find((user) => user.id === workspace.currentUserId) ?? null;
   const currentWorkspaceUserHandle = currentWorkspaceUser?.handle ? `@${currentWorkspaceUser.handle}` : "Workspace user";
   const currentWorkspaceUserIdentity = currentWorkspaceUser?.handle || currentWorkspaceUser?.name || "Workspace user";
+  const canInviteMembers = workspace.currentMembershipRole === "owner" || workspace.currentMembershipRole === "admin";
 
   useEffect(() => {
     if (view.kind !== "home" || !rootNamespace.ready || !activeWorkspace) {
@@ -1142,6 +1412,8 @@ export function WorkspaceApp({
           <PeoplePanel
             workspace={workspace}
             groupedAgents={groupedAgents}
+            canInviteMembers={canInviteMembers}
+            onShare={() => setModal("share")}
             onAgent={(agent) => {
               setSelectedAgent(agent);
               setModal("agent-detail");
@@ -1171,6 +1443,7 @@ export function WorkspaceApp({
       ) : null}
       {modal === "daemon" ? <CreateDaemonModal api={api} workspaceId={workspaceId} onClose={() => setModal(null)} onDone={() => void reload()} /> : null}
       {modal === "agent" ? <CreateAgentModal api={api} workspaceId={workspaceId} daemons={workspace.daemons} onClose={() => setModal(null)} onDone={() => { setModal(null); void reload(); }} /> : null}
+      {modal === "share" ? <ShareWorkspaceModal api={api} workspaceId={workspaceId} onClose={() => setModal(null)} /> : null}
       {modal === "agent-detail" && selectedAgent ? <AgentDetailModal api={api} workspaceId={workspaceId} agent={selectedAgent} daemons={workspace.daemons} runs={workspace.agentRuns} onClose={() => setModal(null)} onChanged={() => void reload()} /> : null}
       {modal === "daemon-detail" && selectedDaemon ? <DaemonDetailModal api={api} workspaceId={workspaceId} daemon={selectedDaemon} agents={workspace.agents.filter((agent) => agent.daemonId === selectedDaemon.id)} runs={workspace.agentRuns} onClose={() => setModal(null)} onChanged={() => { setModal(null); void reload(); }} /> : null}
     </main>
@@ -1977,17 +2250,43 @@ function ActivityPanel({ workspace }: { workspace: ReturnType<typeof useWorkspac
 function PeoplePanel({
   workspace,
   groupedAgents,
+  canInviteMembers,
+  onShare,
   onAgent,
   onDaemon,
 }: {
   workspace: ReturnType<typeof useWorkspace>["workspace"];
   groupedAgents: Array<{ daemonId: string; daemonName: string; agents: Agent[] }>;
+  canInviteMembers: boolean;
+  onShare: () => void;
   onAgent: (agent: Agent) => void;
   onDaemon: (daemon: Daemon) => void;
 }) {
+  const humans = workspace.users.filter((user) => user.kind === "human");
   return (
     <div className="ctx-body people-pane">
       <div className="row between ctx-head">
+        <span className="label">People</span>
+        {canInviteMembers ? (
+          <button className="btn sm" type="button" onClick={onShare}>
+            <Icon name="share" />
+            Share
+          </button>
+        ) : (
+          <span className="chip sm">{humans.length}</span>
+        )}
+      </div>
+      {humans.map((user) => (
+        <article className="agent-card" key={user.id}>
+          <div className="avi you">{initials(user.handle || user.name)}</div>
+          <div className="col gap-2 min-0">
+            <strong className="small truncate">@{user.handle}</strong>
+            <span className="tiny muted truncate">{user.role || "Workspace member"}</span>
+          </div>
+        </article>
+      ))}
+      {!humans.length ? <p className="empty-note">Workspace members will appear here.</p> : null}
+      <div className="row between ctx-head with-space">
         <span className="label">Daemons</span>
         <span className="chip sm">{workspace.daemons.length}</span>
       </div>
@@ -2596,6 +2895,64 @@ function DocumentNotFound({ onBackToWorkspace }: { onBackToWorkspace: () => void
   );
 }
 
+function ShareWorkspaceModal({ api, workspaceId, onClose }: { api: ApiClient; workspaceId: string; onClose: () => void }) {
+  const [link, setLink] = useState("");
+  const [expiresAt, setExpiresAt] = useState("");
+  const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    let disposed = false;
+    setError("");
+    setLink("");
+    setExpiresAt("");
+    api.createWorkspaceInvite(workspaceId)
+      .then((response) => {
+        if (disposed) {
+          return;
+        }
+        setLink(new URL(response.url, publicOrigin).toString());
+        setExpiresAt(response.invite.expiresAt);
+      })
+      .catch((err) => {
+        if (!disposed) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [api, workspaceId]);
+
+  const copy = async () => {
+    if (!link) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopied(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  return (
+    <Modal title="Share workspace" onClose={onClose}>
+      <div className="form-stack">
+        {error ? <p className="error-text">{error}</p> : null}
+        <label className="field">
+          <span className="lab">Invite link</span>
+          <input readOnly value={link || "Creating invite link..."} onFocus={(event) => event.currentTarget.select()} />
+        </label>
+        {expiresAt ? <p className="tiny muted">Expires {formatInviteDate(expiresAt)}</p> : null}
+        <button className="btn accent full" type="button" onClick={() => void copy()} disabled={!link}>
+          {copied ? "Copied" : "Copy invite link"}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
 function Modal({ title, children, onClose, wide }: { title: string; children: ReactNode; onClose: () => void; wide?: boolean }) {
   return (
     <div className="modal-backdrop">
@@ -2653,6 +3010,8 @@ function Icon({ name }: { name: string }) {
       return <svg className="i sm" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1.5" /><rect x="3" y="14" width="18" height="6" rx="1.5" /><circle cx="7" cy="7" r="0.6" /><circle cx="7" cy="17" r="0.6" /></svg>;
     case "agent":
       return <svg className="i sm" viewBox="0 0 24 24"><path d="M12 3l7 4v6c0 4-3 7-7 8-4-1-7-4-7-8V7l7-4z" /><path d="M9 12h6M9 16h6" /></svg>;
+    case "share":
+      return <svg className="i sm" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3" /><circle cx="6" cy="12" r="3" /><circle cx="18" cy="19" r="3" /><path d="M8.6 10.6l6.8-4.2M8.6 13.4l6.8 4.2" /></svg>;
     case "more":
       return <svg className="i sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1.5" /><circle cx="19" cy="12" r="1.5" /><circle cx="5" cy="12" r="1.5" /></svg>;
     default:

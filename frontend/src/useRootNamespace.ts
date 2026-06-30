@@ -29,8 +29,8 @@ export function useRootNamespace(input: {
   }, [ydoc]);
 
   const documents = useMemo(
-    () => projectRootDocuments(ydoc),
-    [version, ydoc],
+    () => ready ? projectRootDocuments(ydoc) : [],
+    [ready, version, ydoc],
   );
 
   const upsertFile = useCallback(

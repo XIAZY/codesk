@@ -3,6 +3,8 @@ import type {
   AuthResponse,
   Daemon,
   DocumentMetadata,
+  WorkspaceInvite,
+  WorkspaceInvitePreview,
   ThreadItem,
   WorkspaceState,
   WorkspaceSummary,
@@ -63,6 +65,23 @@ export class ApiClient {
 
   async createWorkspace(input: { name: string; slug: string; handle: string }) {
     return this.request<{ workspace: WorkspaceSummary }>("/api/workspaces", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  async createWorkspaceInvite(workspaceId: string) {
+    return this.request<{ invite: WorkspaceInvite; url: string }>(workspacePath(workspaceId, "/invites"), {
+      method: "POST",
+    });
+  }
+
+  async previewWorkspaceInvite(token: string) {
+    return this.request<WorkspaceInvitePreview>(`/api/invites/${encodeURIComponent(token)}`);
+  }
+
+  async acceptWorkspaceInvite(token: string, input: { handle: string }) {
+    return this.request<{ workspace: WorkspaceSummary }>(`/api/invites/${encodeURIComponent(token)}/accept`, {
       method: "POST",
       body: JSON.stringify(input),
     });

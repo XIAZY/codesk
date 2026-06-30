@@ -119,7 +119,7 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	if got := snapshot.ContentDocuments[documentID]; got == nil {
 		t.Fatalf("expected document after reload, got %#v", got)
 	}
-	if got := snapshot.Users[user.ID]; got == nil || got.Handle != "adaproof" {
+	if got := snapshot.Users[user.ID]; got == nil || got.Handle != user.Handle {
 		t.Fatalf("expected user after reload, got %#v", got)
 	}
 	if got := snapshot.Agents[agent.ID]; got == nil || got.Handle != "pg-reviewer" {
@@ -1096,6 +1096,7 @@ func clearNottyTables(db *sql.DB) error {
 		`DELETE FROM presences`,
 		`DELETE FROM activities`,
 		`DELETE FROM agents`,
+		`DELETE FROM workspace_invites`,
 		`DELETE FROM users`,
 		`DELETE FROM daemons`,
 		`DELETE FROM workspace_members`,
