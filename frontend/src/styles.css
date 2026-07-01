@@ -1,36 +1,40 @@
-@import url("https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&family=Archivo:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap");
 
 :root {
-  --ink: #171512;
-  --ink-2: #302d27;
-  --ink-3: #686257;
-  --ink-4: #918a7d;
-  --paper: #fffdf8;
-  --paper-2: #f7f4ec;
-  --paper-3: #ede8dc;
-  --border: #ded6c6;
-  --border-strong: #cfc3b1;
-  --accent: #d97842;
-  --accent-50: #fff3ea;
-  --accent-100: #fbe1cd;
-  --accent-700: #9a4725;
-  --agent: #6658c9;
-  --agent-50: #f1efff;
-  --agent-100: #dfdcfb;
+  --ink: #1B1A17;
+  --ink-2: #29261F;
+  --ink-3: #76726A;
+  --ink-4: #A6A29A;
+  --paper: #FCFBF7;
+  --paper-2: #F3F1EA;
+  --paper-3: #ECE8DD;
+  --border: #E6E2D8;
+  --border-strong: #D7D2C5;
+  --accent: #E3A15B;
+  --accent-50: #FFF5EA;
+  --accent-100: #F7DEC0;
+  --accent-700: #8B5422;
+  --agent: #7FC1D6;
+  --agent-50: #EEF8FB;
+  --agent-100: #CFEDF4;
+  --iris: #8E79D6;
+  --iris-50: #F2EFFB;
+  --iris-700: #4F3C99;
   --daemon: #2f7b67;
   --daemon-50: #eaf6f1;
   --ok: #2f7d55;
   --warn: #b98222;
   --err: #b94737;
-  --display: "Instrument Serif", Georgia, serif;
-  --sans: Inter, ui-sans-serif, system-ui, sans-serif;
+  --display: "Newsreader", Georgia, serif;
+  --sans: "Archivo", ui-sans-serif, system-ui, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-sans: var(--sans);
   --r-1: 8px;
-  --r-2: 12px;
+  --r-2: 10px;
   --r-3: 18px;
-  --r-4: 28px;
-  --shadow: 0 18px 60px rgba(27, 24, 18, 0.12);
-  --shadow-2: 0 30px 90px rgba(27, 24, 18, 0.22);
+  --r-4: 24px;
+  --shadow: 0 1px 0 rgba(20, 18, 12, 0.02), 0 24px 60px -42px rgba(20, 18, 12, 0.22);
+  --shadow-2: 0 1px 0 rgba(20, 18, 12, 0.02), 0 30px 70px -44px rgba(20, 18, 12, 0.26);
   font-family: var(--sans);
   color: var(--ink);
   background: var(--paper);
@@ -46,10 +50,10 @@ body,
 }
 
 body {
-  min-width: 1120px;
-  background:
-    radial-gradient(circle at 18% 8%, rgba(217, 120, 66, 0.18), transparent 28rem),
-    linear-gradient(180deg, #fffaf1 0%, var(--paper-2) 100%);
+  min-width: 0;
+  background: linear-gradient(180deg, var(--paper) 0%, var(--paper-2) 100%);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 button,
@@ -114,8 +118,8 @@ svg.i.sm {
 
 .display {
   font-family: var(--display);
-  font-weight: 500;
-  letter-spacing: -0.025em;
+  font-weight: 400;
+  letter-spacing: -0.004em;
 }
 
 .small {
@@ -171,7 +175,7 @@ svg.i.sm {
   justify-content: center;
   gap: 6px;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--r-2);
   background: var(--paper);
   color: var(--ink);
   padding: 0 11px;
@@ -182,7 +186,8 @@ svg.i.sm {
 }
 
 .btn:hover {
-  border-color: var(--accent);
+  border-color: var(--border-strong);
+  background: var(--paper-2);
 }
 
 .btn:active {
@@ -220,9 +225,14 @@ svg.i.sm {
 }
 
 .btn.accent {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fffdf8;
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--paper);
+}
+
+.btn.accent:hover {
+  background: #2A251F;
+  border-color: #2A251F;
 }
 
 .btn.danger {
@@ -259,7 +269,7 @@ svg.i.sm {
 .field select:focus,
 .reply-form textarea:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(217, 120, 66, 0.14);
+  box-shadow: 0 0 0 3px rgba(227, 161, 91, 0.18);
 }
 
 .field {
@@ -391,8 +401,8 @@ svg.i.sm {
 }
 
 .avi.agent {
-  background: linear-gradient(140deg, var(--agent-100), #b7aff4);
-  color: #332793;
+  background: linear-gradient(140deg, var(--agent-100), var(--agent));
+  color: #08323C;
 }
 
 .avi.daemon {
@@ -450,48 +460,64 @@ svg.i.sm {
   min-height: 100vh;
   display: grid;
   place-items: center;
-  padding: 24px;
+  padding: 32px 24px;
+  background:
+    linear-gradient(rgba(27, 26, 23, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(27, 26, 23, 0.035) 1px, transparent 1px),
+    linear-gradient(180deg, var(--paper) 0%, var(--paper-2) 100%);
+  background-size: 28px 28px, 28px 28px, auto;
 }
 
 .auth-panel {
-  width: 360px;
+  width: min(420px, calc(100vw - 48px));
+  padding: 34px 36px 30px;
+  border-radius: var(--r-3);
+  background: rgba(252, 251, 247, 0.96);
+  box-shadow: var(--shadow-2);
 }
 
 .picker-panel {
   width: min(760px, calc(100vw - 48px));
+  padding: 30px 32px 32px;
+  border-radius: var(--r-3);
+  background: rgba(252, 251, 247, 0.96);
+  box-shadow: var(--shadow-2);
 }
 
 .logo-row {
-  margin-bottom: 20px;
+  gap: 14px;
+  margin-bottom: 28px;
 }
 
 .logo-mark {
-  width: 24px;
-  height: 24px;
-  display: grid;
-  place-items: center;
-  border-radius: 7px;
-  background: var(--ink);
-  color: #fff;
-  font-family: var(--display);
-  font-size: 14px;
-  font-style: italic;
-  font-weight: 500;
+  width: 58px;
+  height: 44px;
+  display: block;
+  color: var(--ink);
+  overflow: visible;
 }
 
 .logo-type {
-  font-size: 18px;
+  color: var(--ink);
+  font-size: 36px;
+  line-height: 1;
 }
 
 .auth-title {
-  margin: 0 0 4px;
-  font-size: 20px;
-  font-weight: 650;
-  letter-spacing: -0.01em;
+  margin: 0 0 8px;
+  font-family: var(--display);
+  font-size: 42px;
+  font-weight: 400;
+  letter-spacing: -0.018em;
+  line-height: 1.02;
 }
 
 .auth-copy {
-  margin-bottom: 20px;
+  max-width: 32rem;
+  margin-bottom: 24px;
+  color: var(--ink-3);
+  font-size: 14px;
+  line-height: 1.55;
 }
 
 .form-stack {
@@ -504,7 +530,7 @@ svg.i.sm {
   align-items: center;
   justify-content: center;
   gap: 4px;
-  margin-top: 14px;
+  margin-top: 16px;
   color: var(--ink-3);
   font-size: 12.5px;
 }
@@ -520,16 +546,16 @@ svg.i.sm {
 }
 
 .picker-head {
-  margin-bottom: 18px;
+  margin: 8px 0 20px;
 }
 
 .create-workspace-card,
 .invite-link-card {
   margin-top: 8px;
   border: 1px solid var(--border);
-  border-radius: var(--r-3);
+  border-radius: 14px;
   background: var(--paper-2);
-  padding: 14px;
+  padding: 18px;
 }
 
 .invite-preview {
@@ -539,13 +565,14 @@ svg.i.sm {
   min-width: 0;
   margin-bottom: 16px;
   border: 1px solid var(--border);
-  border-radius: var(--r-3);
+  border-radius: 14px;
   background: var(--paper-2);
   padding: 12px;
 }
 
 .shell {
   height: 100vh;
+  min-width: 1120px;
   display: grid;
   grid-template-columns: 248px minmax(560px, 1fr) 320px;
   overflow: hidden;

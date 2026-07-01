@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>codesk — OXO design language</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta name="design_doc_mode" content="canvas" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500&family=Archivo:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#FCFBF7; --paper-2:#F3F1EA; --ink:#1B1A17; --ink-soft:#76726A;
+    --ink-faint:#A6A29A; --line:#E6E2D8; --line-strong:#D7D2C5;
+    --mono:'JetBrains Mono',ui-monospace,Menlo,monospace;
+    --human:oklch(0.82 0.125 62); --ai:oklch(0.77 0.12 207); --iris:oklch(0.56 0.16 296);
+    --op:var(--ink);            /* the connector — ink on light, flips to paper on dark */
+    --op-light:#F4F2EA;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:'Archivo',system-ui,sans-serif;color:var(--ink);}
+  .frame{ position:absolute; background:var(--paper); border:1px solid var(--line); border-radius:18px;
+    box-shadow:0 1px 0 rgba(20,18,12,.02), 0 30px 60px -40px rgba(20,18,12,.22); }
+  .titleblock{ position:absolute; }
+  .cap{ font-family:var(--mono); font-size:10.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-faint); }
+  .lede{ font-family:'Newsreader',serif; }
+  .wm{ line-height:1; white-space:nowrap; font-family:'Newsreader',serif; font-weight:400; letter-spacing:-.004em; color:var(--ink); }
+  .mark{ display:block; overflow:visible; color:var(--op); }
+  .sect{ border-top:1px solid var(--line); }
+  .hd{ font-family:'Archivo'; font-weight:600; font-size:15px; letter-spacing:-.01em; }
+  .ico-sq{ border-radius:23%; display:flex; align-items:center; justify-content:center; }
+  .ink-sq{ background:#16151A; }
+  .paper-sq{ background:var(--paper-2); }
+
+  /* icon family grid */
+  .igrid{ display:grid; grid-template-columns:repeat(6,1fr); gap:6px 6px; }
+  .icell{ display:flex; flex-direction:column; align-items:center; gap:11px; padding:24px 8px 18px; border-radius:13px; transition:background .15s; }
+  .icell:hover{ background:var(--paper-2); }
+  .iname{ font-family:'Archivo'; font-weight:600; font-size:12.5px; }
+  .idesc{ font-family:var(--mono); font-size:9px; letter-spacing:.05em; color:var(--ink-faint); text-transform:uppercase; }
+
+  .tok{ display:flex; align-items:center; gap:14px; padding:13px 0; }
+  .tok .sw{ width:40px; height:40px; border-radius:9px; flex:none; border:1px solid rgba(20,18,12,.08); }
+  .tok .tn{ font-family:'Archivo'; font-weight:600; font-size:14px; }
+  .tok .tv{ font-family:var(--mono); font-size:10.5px; color:var(--ink-soft); margin-top:2px; }
+
+  .darkpanel{ background:#101015; border:1px solid #262630; border-radius:14px; --op:var(--op-light); }
+  .urow{ display:flex; align-items:center; gap:14px; padding:13px 16px; border-radius:10px; }
+  .urow:hover{ background:rgba(255,255,255,.04); }
+  .urow .ut{ color:#EDEAE1; font-size:14px; font-weight:500; }
+  .urow .us{ margin-left:auto; font-family:var(--mono); font-size:10px; color:#6f6b7a; letter-spacing:.06em; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <!-- ========== OXO operator family ==========
+         constant: human dot (apricot, left) + agent dot (cyan, right)
+         variable: the violet operator between them                    -->
+    <g id="dots"></g>
+
+    <symbol id="op-collab" viewBox="0 0 100 100">
+      <circle cx="20" cy="50" r="8" fill="var(--human)"/><circle cx="80" cy="50" r="8" fill="var(--ai)"/>
+      <line x1="43" y1="43" x2="57" y2="57" stroke="var(--ink)" stroke-width="6" stroke-linecap="round"/>
+      <line x1="57" y1="43" x2="43" y2="57" stroke="var(--ink)" stroke-width="6" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="op-connect" viewBox="0 0 100 100">
+      <circle cx="20" cy="50" r="8" fill="var(--human)"/><circle cx="80" cy="50" r="8" fill="var(--ai)"/>
+      <line x1="42" y1="50" x2="58" y2="50" stroke="var(--ink)" stroke-width="6" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="op-merge" viewBox="0 0 100 100">
+      <circle cx="20" cy="50" r="8" fill="var(--human)"/><circle cx="80" cy="50" r="8" fill="var(--ai)"/>
+      <line x1="50" y1="42" x2="50" y2="58" stroke="var(--ink)" stroke-width="6" stroke-linecap="round"/>
+      <line x1="42" y1="50" x2="58" y2="50" stroke="var(--ink)" stroke-width="6" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="op-handoff" viewBox="0 0 100 100">
+      <circle cx="20" cy="50" r="8" fill="var(--human)"/><circle cx="80" cy="50" r="8" fill="var(--ai)"/>
+      <line x1="41" y1="50" x2="55" y2="50" stroke="var(--ink)" stroke-width="6" stroke-linecap="round"/>
+      <path d="M60 50 L52 45 L52 55 Z" fill="var(--ink)"/>
+    </symbol>
+    <symbol id="op-sync" viewBox="0 0 100 100">
+      <circle cx="20" cy="50" r="8" fill="var(--human)"/><circle cx="80" cy="50" r="8" fill="var(--ai)"/>
+      <path d="M43 45 A9 9 0 0 1 58 44" fill="none" stroke="var(--ink)" stroke-width="5" stroke-linecap="round"/>
+      <path d="M58 39 L59 46 L52 45 Z" fill="var(--ink)"/>
+      <path d="M57 55 A9 9 0 0 1 42 56" fill="none" stroke="var(--ink)" stroke-width="5" stroke-linecap="round"/>
+      <path d="M42 61 L41 54 L48 55 Z" fill="var(--ink)"/>
+    </symbol>
+    <symbol id="op-prompt" viewBox="0 0 100 100">
+      <circle cx="20" cy="50" r="8" fill="var(--human)"/><circle cx="80" cy="50" r="8" fill="var(--ai)"/>
+      <circle cx="42" cy="50" r="3" fill="var(--ink)"/><circle cx="50" cy="50" r="3" fill="var(--ink)"/><circle cx="58" cy="50" r="3" fill="var(--ink)"/>
+    </symbol>
+    <symbol id="op-code" viewBox="0 0 100 100">
+      <circle cx="20" cy="50" r="8" fill="var(--human)"/><circle cx="80" cy="50" r="8" fill="var(--ai)"/>
+      <path d="M47 43 L41 50 L47 57" fill="none" stroke="var(--ink)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M53 43 L59 50 L53 57" fill="none" stroke="var(--ink)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="op-review" viewBox="0 0 100 100">
+      <circle cx="20" cy="50" r="8" fill="var(--human)"/><circle cx="80" cy="50" r="8" fill="var(--ai)"/>
+      <path d="M42 51 L47.5 57 L59 43" fill="none" stroke="var(--ink)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="op-generate" viewBox="0 0 100 100">
+      <circle cx="20" cy="50" r="8" fill="var(--human)"/><circle cx="80" cy="50" r="8" fill="var(--ai)"/>
+      <path d="M50 40 C51.4 47 52.8 48.6 60 50 C52.8 51.4 51.4 53 50 60 C48.6 53 47.2 51.4 40 50 C47.2 48.6 48.6 47 50 40 Z" fill="var(--ink)"/>
+    </symbol>
+    <symbol id="op-build" viewBox="0 0 100 100">
+      <circle cx="20" cy="50" r="8" fill="var(--human)"/><circle cx="80" cy="50" r="8" fill="var(--ai)"/>
+      <path d="M42 51 L50 43 L58 51" fill="none" stroke="var(--ink)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M42 60 L50 52 L58 60" fill="none" stroke="var(--ink)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="op-result" viewBox="0 0 100 100">
+      <circle cx="20" cy="50" r="8" fill="var(--human)"/><circle cx="80" cy="50" r="8" fill="var(--ai)"/>
+      <path d="M50 41 L59 50 L50 59 L41 50 Z" fill="var(--ink)"/>
+    </symbol>
+    <symbol id="op-metrics" viewBox="0 0 100 100">
+      <circle cx="20" cy="50" r="8" fill="var(--human)"/><circle cx="80" cy="50" r="8" fill="var(--ai)"/>
+      <rect x="41" y="52" width="4.4" height="8" rx="2.2" fill="var(--ink)"/>
+      <rect x="47.8" y="44" width="4.4" height="16" rx="2.2" fill="var(--ink)"/>
+      <rect x="54.6" y="48" width="4.4" height="12" rx="2.2" fill="var(--ink)"/>
+    </symbol>
+
+    <!-- the mark itself (collab, used as logo) -->
+    <symbol id="oxo" viewBox="0 0 100 100">
+      <circle cx="24" cy="50" r="9" fill="var(--human)"/><circle cx="76" cy="50" r="9" fill="var(--ai)"/>
+      <line x1="42" y1="42" x2="58" y2="58" stroke="var(--ink)" stroke-width="6" stroke-linecap="round"/>
+      <line x1="58" y1="42" x2="42" y2="58" stroke="var(--ink)" stroke-width="6" stroke-linecap="round"/>
+    </symbol>
+
+    <!-- white-connector variants for dark surfaces -->
+    <symbol id="oxo-w" viewBox="0 0 100 100">
+      <circle cx="24" cy="50" r="9" fill="var(--human)"/><circle cx="76" cy="50" r="9" fill="var(--ai)"/>
+      <line x1="42" y1="42" x2="58" y2="58" stroke="#F4F2EA" stroke-width="6" stroke-linecap="round"/>
+      <line x1="58" y1="42" x2="42" y2="58" stroke="#F4F2EA" stroke-width="6" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="op-collab-w" viewBox="0 0 100 100">
+      <circle cx="20" cy="50" r="8" fill="var(--human)"/><circle cx="80" cy="50" r="8" fill="var(--ai)"/>
+      <line x1="43" y1="43" x2="57" y2="57" stroke="#F4F2EA" stroke-width="6" stroke-linecap="round"/>
+      <line x1="57" y1="43" x2="43" y2="57" stroke="#F4F2EA" stroke-width="6" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="op-connect-w" viewBox="0 0 100 100">
+      <circle cx="20" cy="50" r="8" fill="var(--human)"/><circle cx="80" cy="50" r="8" fill="var(--ai)"/>
+      <line x1="42" y1="50" x2="58" y2="50" stroke="#F4F2EA" stroke-width="6" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="op-merge-w" viewBox="0 0 100 100">
+      <circle cx="20" cy="50" r="8" fill="var(--human)"/><circle cx="80" cy="50" r="8" fill="var(--ai)"/>
+      <line x1="50" y1="42" x2="50" y2="58" stroke="#F4F2EA" stroke-width="6" stroke-linecap="round"/>
+      <line x1="42" y1="50" x2="58" y2="50" stroke="#F4F2EA" stroke-width="6" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="op-handoff-w" viewBox="0 0 100 100">
+      <circle cx="20" cy="50" r="8" fill="var(--human)"/><circle cx="80" cy="50" r="8" fill="var(--ai)"/>
+      <line x1="41" y1="50" x2="55" y2="50" stroke="#F4F2EA" stroke-width="6" stroke-linecap="round"/>
+      <path d="M60 50 L52 45 L52 55 Z" fill="#F4F2EA"/>
+    </symbol>
+    <symbol id="op-sync-w" viewBox="0 0 100 100">
+      <circle cx="20" cy="50" r="8" fill="var(--human)"/><circle cx="80" cy="50" r="8" fill="var(--ai)"/>
+      <path d="M43 45 A9 9 0 0 1 58 44" fill="none" stroke="#F4F2EA" stroke-width="5" stroke-linecap="round"/>
+      <path d="M58 39 L59 46 L52 45 Z" fill="#F4F2EA"/>
+      <path d="M57 55 A9 9 0 0 1 42 56" fill="none" stroke="#F4F2EA" stroke-width="5" stroke-linecap="round"/>
+      <path d="M42 61 L41 54 L48 55 Z" fill="#F4F2EA"/>
+    </symbol>
+    <symbol id="op-prompt-w" viewBox="0 0 100 100">
+      <circle cx="20" cy="50" r="8" fill="var(--human)"/><circle cx="80" cy="50" r="8" fill="var(--ai)"/>
+      <circle cx="42" cy="50" r="3" fill="#F4F2EA"/><circle cx="50" cy="50" r="3" fill="#F4F2EA"/><circle cx="58" cy="50" r="3" fill="#F4F2EA"/>
+    </symbol>
+    <symbol id="op-code-w" viewBox="0 0 100 100">
+      <circle cx="20" cy="50" r="8" fill="var(--human)"/><circle cx="80" cy="50" r="8" fill="var(--ai)"/>
+      <path d="M47 43 L41 50 L47 57" fill="none" stroke="#F4F2EA" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M53 43 L59 50 L53 57" fill="none" stroke="#F4F2EA" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="op-review-w" viewBox="0 0 100 100">
+      <circle cx="20" cy="50" r="8" fill="var(--human)"/><circle cx="80" cy="50" r="8" fill="var(--ai)"/>
+      <path d="M42 51 L47.5 57 L59 43" fill="none" stroke="#F4F2EA" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="op-generate-w" viewBox="0 0 100 100">
+      <circle cx="20" cy="50" r="8" fill="var(--human)"/><circle cx="80" cy="50" r="8" fill="var(--ai)"/>
+      <path d="M50 40 C51.4 47 52.8 48.6 60 50 C52.8 51.4 51.4 53 50 60 C48.6 53 47.2 51.4 40 50 C47.2 48.6 48.6 47 50 40 Z" fill="#F4F2EA"/>
+    </symbol>
+    <symbol id="op-build-w" viewBox="0 0 100 100">
+      <circle cx="20" cy="50" r="8" fill="var(--human)"/><circle cx="80" cy="50" r="8" fill="var(--ai)"/>
+      <path d="M42 51 L50 43 L58 51" fill="none" stroke="#F4F2EA" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M42 60 L50 52 L58 60" fill="none" stroke="#F4F2EA" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="op-result-w" viewBox="0 0 100 100">
+      <circle cx="20" cy="50" r="8" fill="var(--human)"/><circle cx="80" cy="50" r="8" fill="var(--ai)"/>
+      <path d="M50 41 L59 50 L50 59 L41 50 Z" fill="#F4F2EA"/>
+    </symbol>
+    <symbol id="op-metrics-w" viewBox="0 0 100 100">
+      <circle cx="20" cy="50" r="8" fill="var(--human)"/><circle cx="80" cy="50" r="8" fill="var(--ai)"/>
+      <rect x="41" y="52" width="4.4" height="8" rx="2.2" fill="#F4F2EA"/>
+      <rect x="47.8" y="44" width="4.4" height="16" rx="2.2" fill="#F4F2EA"/>
+      <rect x="54.6" y="48" width="4.4" height="12" rx="2.2" fill="#F4F2EA"/>
+    </symbol>
+  </defs>
+</svg>
+
+<!-- ===== TITLE ===== -->
+<div class="titleblock" style="left:80px; top:56px; width:1200px;">
+  <div class="cap" style="margin-bottom:14px;">Design language · OXO · human × agent</div>
+  <div style="display:flex; align-items:center; gap:22px;">
+    <svg class="mark" width="78" height="78"><use href="#oxo"/></svg>
+    <div style="font-family:'Newsreader',serif; font-size:66px; line-height:1; letter-spacing:-.02em;">codesk</div>
+  </div>
+  <div class="lede" style="font-size:21px; color:var(--ink-soft); margin-top:18px; max-width:900px; line-height:1.45;">
+    The mark is a sentence: a <span style="color:var(--human)">human</span>, a piece of <b>work</b>, an <span style="color:var(--ai)">agent</span> — <b>O&#8202;X&#8202;O</b>. The two dots carry the colour; the connector stays neutral — black on light, white on dark — so the mark sits on anything.
+  </div>
+</div>
+
+<!-- ===== THE MARK ===== -->
+<div class="frame" style="left:80px; top:300px; width:760px;">
+  <div style="padding:34px 38px 30px;">
+    <div class="cap" style="color:var(--ink-soft);">01 · The mark &amp; lockups</div>
+    <div style="background:var(--paper-2); border-radius:13px; padding:48px; margin-top:18px; display:flex; align-items:center; justify-content:center; gap:22px;">
+      <svg class="mark" width="84" height="84"><use href="#oxo"/></svg>
+      <span class="wm" style="font-size:58px;">codesk</span>
+    </div>
+    <div style="display:flex; gap:20px; margin-top:20px;">
+      <div style="flex:1; background:var(--paper-2); border-radius:13px; padding:30px; display:flex; flex-direction:column; align-items:center; gap:12px;">
+        <svg class="mark" width="58" height="58"><use href="#oxo"/></svg>
+        <span class="wm" style="font-size:30px;">codesk</span>
+        <span class="cap" style="margin-top:4px;">stacked</span>
+      </div>
+      <div style="flex:1; background:#101015; border-radius:13px; padding:30px; display:flex; align-items:center; justify-content:center; gap:16px; --op:var(--op-light);">
+        <svg class="mark" width="48" height="48"><use href="#oxo-w"/></svg>
+        <span class="wm" style="font-size:34px; color:#F4F2EA;">codesk</span>
+      </div>
+    </div>
+  </div>
+  <div class="sect" style="padding:30px 38px;">
+    <div class="cap" style="margin-bottom:20px;">Anatomy</div>
+    <div style="display:flex; align-items:center; gap:34px;">
+      <svg class="mark" width="150" height="150" style="flex:none;"><use href="#oxo"/></svg>
+      <div style="display:flex; flex-direction:column; gap:16px;">
+        <div style="display:flex; align-items:center; gap:12px;"><span style="width:14px;height:14px;border-radius:50%;background:var(--human);"></span><div><div class="hd">Human</div><div class="lede" style="font-size:13px;color:var(--ink-soft);">warm apricot · the person</div></div></div>
+        <div style="display:flex; align-items:center; gap:12px;"><span style="width:14px;height:14px;background:linear-gradient(135deg,var(--ink) 0 50%,#fff 50% 100%);border:1px solid var(--line-strong);transform:rotate(45deg);"></span><div><div class="hd">The work · ✕</div><div class="lede" style="font-size:13px;color:var(--ink-soft);">ink on light · white on dark</div></div></div>
+        <div style="display:flex; align-items:center; gap:12px;"><span style="width:14px;height:14px;border-radius:50%;background:var(--ai);"></span><div><div class="hd">Agent</div><div class="lede" style="font-size:13px;color:var(--ink-soft);">cool cyan · the AI</div></div></div>
+      </div>
+    </div>
+  </div>
+  <div class="sect" style="padding:26px 38px 34px;">
+    <div class="cap" style="margin-bottom:18px;">Scale · holds to 16px</div>
+    <div style="display:flex; align-items:center; gap:30px;">
+      <svg class="mark" width="56" height="56"><use href="#oxo"/></svg>
+      <svg class="mark" width="32" height="32"><use href="#oxo"/></svg>
+      <svg class="mark" width="22" height="22"><use href="#oxo"/></svg>
+      <svg class="mark" width="16" height="16"><use href="#oxo"/></svg>
+      <span class="cap">56 · 32 · 22 · 16</span>
+    </div>
+  </div>
+</div>
+
+<!-- ===== PALETTE ===== -->
+<div class="frame" style="left:880px; top:300px; width:460px;">
+  <div style="padding:34px 36px 30px;">
+    <div class="cap" style="color:var(--ink-soft);">02 · Palette</div>
+    <div style="margin-top:14px;">
+      <div class="tok"><span class="sw" style="background:var(--human);"></span><div><div class="tn">Human</div><div class="tv">oklch(.82 .125 62) · apricot</div></div></div>
+      <div class="tok"><span class="sw" style="background:linear-gradient(135deg,#1B1A17 0 50%,#fff 50% 100%);"></span><div><div class="tn">Connector</div><div class="tv">ink on light · white on dark</div></div></div>
+      <div class="tok"><span class="sw" style="background:var(--ai);"></span><div><div class="tn">Agent</div><div class="tv">oklch(.77 .12 207) · cyan</div></div></div>
+      <div class="tok" style="border-top:1px solid var(--line);"><span class="sw" style="background:var(--ink);"></span><div><div class="tn">Ink</div><div class="tv">#1B1A17 · text &amp; structure</div></div></div>
+      <div class="tok"><span class="sw" style="background:var(--paper);"></span><div><div class="tn">Paper</div><div class="tv">#FCFBF7 · ground</div></div></div>
+    </div>
+  </div>
+  <div class="sect" style="padding:26px 36px 32px;">
+    <div class="cap" style="margin-bottom:16px;">Principle</div>
+    <div class="lede" style="font-size:15px; color:var(--ink-soft); line-height:1.5;">
+      Warm is always the human, cool is always the agent. The connector between them stays neutral — <b>black on light, white on dark</b> — so the dots keep all the colour and the mark reads on any surface.
+    </div>
+  </div>
+</div>
+
+<!-- ===== APP ICONS ===== -->
+<div class="frame" style="left:1380px; top:300px; width:430px;">
+  <div style="padding:34px 36px 32px;">
+    <div class="cap" style="color:var(--ink-soft);">03 · App icon</div>
+    <div style="display:flex; gap:18px; margin-top:20px;">
+      <div class="ico-sq paper-sq" style="width:92px;height:92px;"><svg class="mark" width="58" height="58"><use href="#oxo"/></svg></div>
+      <div class="ico-sq ink-sq" style="width:92px;height:92px;--op:var(--op-light);"><svg class="mark" width="56" height="56"><use href="#oxo-w"/></svg></div>
+    </div>
+    <div style="display:flex; gap:18px; margin-top:18px; align-items:center;">
+      <div class="ico-sq" style="width:92px;height:92px;background:#22201C;--op:var(--op-light);"><svg class="mark" width="56" height="56"><use href="#oxo-w"/></svg></div>
+      <div style="display:flex; flex-direction:column; gap:14px;">
+        <div style="display:flex; align-items:center; gap:14px;"><svg class="mark" width="22" height="22"><use href="#oxo"/></svg><svg class="mark" width="16" height="16"><use href="#oxo"/></svg><span class="cap">favicon</span></div>
+        <div class="lede" style="font-size:13px;color:var(--ink-soft);line-height:1.45;max-width:200px;">Mark stays centered with generous padding at any size.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== OPERATOR ICON FAMILY ===== -->
+<div class="frame" style="left:80px; top:840px; width:1730px;">
+  <div style="padding:34px 40px 16px;">
+    <div style="display:flex; align-items:baseline; gap:16px;">
+      <div class="cap" style="color:var(--ink-soft);">04 · The operator system</div>
+      <div class="lede" style="font-size:16px; color:var(--ink-soft);">One structure, twelve meanings — swap the violet glyph between the two dots.</div>
+    </div>
+  </div>
+  <div style="padding:8px 28px 30px;">
+    <div class="igrid">
+      <div class="icell"><svg class="mark" width="64" height="64"><use href="#op-collab"/></svg><div class="iname">Collaborate</div><div class="idesc">the mark · ✕</div></div>
+      <div class="icell"><svg class="mark" width="64" height="64"><use href="#op-connect"/></svg><div class="iname">Connect</div><div class="idesc">pair · —</div></div>
+      <div class="icell"><svg class="mark" width="64" height="64"><use href="#op-merge"/></svg><div class="iname">Merge</div><div class="idesc">combine · +</div></div>
+      <div class="icell"><svg class="mark" width="64" height="64"><use href="#op-handoff"/></svg><div class="iname">Handoff</div><div class="idesc">delegate · →</div></div>
+      <div class="icell"><svg class="mark" width="64" height="64"><use href="#op-sync"/></svg><div class="iname">Sync</div><div class="idesc">in step · ⟲</div></div>
+      <div class="icell"><svg class="mark" width="64" height="64"><use href="#op-prompt"/></svg><div class="iname">Prompt</div><div class="idesc">ask · ⋯</div></div>
+      <div class="icell"><svg class="mark" width="64" height="64"><use href="#op-code"/></svg><div class="iname">Code</div><div class="idesc">build · ‹›</div></div>
+      <div class="icell"><svg class="mark" width="64" height="64"><use href="#op-review"/></svg><div class="iname">Review</div><div class="idesc">approve · ✓</div></div>
+      <div class="icell"><svg class="mark" width="64" height="64"><use href="#op-generate"/></svg><div class="iname">Generate</div><div class="idesc">create · ✦</div></div>
+      <div class="icell"><svg class="mark" width="64" height="64"><use href="#op-build"/></svg><div class="iname">Deploy</div><div class="idesc">ship · ⌃</div></div>
+      <div class="icell"><svg class="mark" width="64" height="64"><use href="#op-result"/></svg><div class="iname">Result</div><div class="idesc">value · ◆</div></div>
+      <div class="icell"><svg class="mark" width="64" height="64"><use href="#op-metrics"/></svg><div class="iname">Metrics</div><div class="idesc">measure · ▕</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== IN USE ===== -->
+<div class="frame" style="left:80px; top:1430px; width:1730px;">
+  <div style="padding:34px 40px 20px;">
+    <div class="cap" style="color:var(--ink-soft);">05 · In use</div>
+  </div>
+  <div style="padding:4px 40px 38px; display:flex; gap:26px; align-items:stretch;">
+
+    <!-- product menu using the family -->
+    <div class="darkpanel" style="width:420px; padding:20px 14px;">
+      <div style="display:flex; align-items:center; gap:12px; padding:6px 12px 16px;">
+        <svg class="mark" width="26" height="26"><use href="#oxo-w"/></svg>
+        <span style="font-family:'Newsreader',serif; font-size:22px; color:#F4F2EA;">codesk</span>
+      </div>
+      <div class="urow"><svg class="mark" width="26" height="26"><use href="#op-prompt-w"/></svg><span class="ut">New prompt</span><span class="us">⌘K</span></div>
+      <div class="urow"><svg class="mark" width="26" height="26"><use href="#op-handoff-w"/></svg><span class="ut">Hand off to agent</span><span class="us">⌘↵</span></div>
+      <div class="urow"><svg class="mark" width="26" height="26"><use href="#op-review-w"/></svg><span class="ut">Review changes</span><span class="us">⌘R</span></div>
+      <div class="urow"><svg class="mark" width="26" height="26"><use href="#op-merge-w"/></svg><span class="ut">Merge &amp; ship</span><span class="us">⌘M</span></div>
+    </div>
+
+    <!-- buttons / chips -->
+    <div style="flex:1; display:flex; flex-direction:column; gap:18px;">
+      <div class="cap">Buttons &amp; chips</div>
+      <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
+        <span style="display:inline-flex; align-items:center; gap:9px; background:var(--ink); color:var(--paper); padding:11px 18px 11px 13px; border-radius:11px; font-weight:600; font-size:14px;"><svg class="mark" width="22" height="22" style="--op:var(--op-light);"><use href="#op-collab-w"/></svg>Start a session</span>
+        <span style="display:inline-flex; align-items:center; gap:8px; background:var(--paper-2); padding:10px 16px; border-radius:11px; font-weight:600; font-size:13px;"><svg class="mark" width="20" height="20"><use href="#op-handoff"/></svg>Handoff</span>
+        <span style="display:inline-flex; align-items:center; gap:8px; background:var(--paper-2); padding:10px 16px; border-radius:11px; font-weight:600; font-size:13px;"><svg class="mark" width="20" height="20"><use href="#op-generate"/></svg>Generate</span>
+      </div>
+      <div class="cap" style="margin-top:6px;">Presence</div>
+      <div style="display:flex; gap:22px; align-items:center;">
+        <span style="display:inline-flex;align-items:center;gap:9px;"><span style="width:20px;height:20px;border-radius:50%;background:var(--human);box-shadow:0 0 0 3px color-mix(in oklab,var(--human) 28%,transparent);"></span><span style="font-size:13px;color:var(--ink-soft);">You</span></span>
+        <span style="display:inline-flex;align-items:center;gap:9px;"><span style="width:20px;height:20px;border-radius:50%;background:var(--ai);box-shadow:0 0 0 3px color-mix(in oklab,var(--ai) 28%,transparent);"></span><span style="font-size:13px;color:var(--ink-soft);">Agent · working</span></span>
+      </div>
+      <div class="cap" style="margin-top:6px;">Pattern</div>
+      <div style="height:70px; border-radius:12px; overflow:hidden; background:var(--paper-2); display:flex; align-items:center; gap:34px; padding:0 26px;">
+        <svg class="mark" width="34" height="34" style="opacity:.9"><use href="#op-collab"/></svg>
+        <svg class="mark" width="34" height="34" style="opacity:.9"><use href="#op-connect"/></svg>
+        <svg class="mark" width="34" height="34" style="opacity:.9"><use href="#op-handoff"/></svg>
+        <svg class="mark" width="34" height="34" style="opacity:.9"><use href="#op-sync"/></svg>
+        <svg class="mark" width="34" height="34" style="opacity:.9"><use href="#op-merge"/></svg>
+        <svg class="mark" width="34" height="34" style="opacity:.9"><use href="#op-result"/></svg>
+        <svg class="mark" width="34" height="34" style="opacity:.9"><use href="#op-collab"/></svg>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
