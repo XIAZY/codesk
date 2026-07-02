@@ -32,9 +32,6 @@ func main() {
 	if err := cfg.ValidateEmailConfig(); err != nil {
 		log.Fatal(err)
 	}
-	if !cfg.MailgunConfigured() {
-		log.Print("WARNING: email sender is not configured; verification and password reset emails will not be delivered. Set NOTTY_MAILGUN_DOMAIN, NOTTY_MAILGUN_API_KEY, and NOTTY_MAILGUN_FROM, or set NOTTY_REQUIRE_EMAIL=1 to fail startup when email is unavailable.")
-	}
 	store, err := notty.NewStore(cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("create store: %v", err)

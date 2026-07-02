@@ -18,7 +18,7 @@ func TestEmailSenderFromConfigDefaultsToNoopWhenMailgunMissing(t *testing.T) {
 
 func TestValidateEmailConfigRequiresMailgunWhenStrict(t *testing.T) {
 	if err := (Config{}).ValidateEmailConfig(); err != nil {
-		t.Fatalf("default config should allow noop email sender: %v", err)
+		t.Fatalf("direct test config should allow injected noop email sender: %v", err)
 	}
 
 	err := (Config{RequireEmail: true}).ValidateEmailConfig()
@@ -37,6 +37,49 @@ func TestValidateEmailConfigRequiresMailgunWhenStrict(t *testing.T) {
 	}
 	if err := cfg.ValidateEmailConfig(); err != nil {
 		t.Fatalf("strict config should accept complete Mailgun settings: %v", err)
+	}
+}
+
+func TestLoadConfigRequiresEmailByDefault(t *testing.T) {
+	t.Setenv("NOTTY_REQUIRE_EMAIL", "")
+	t.Setenv("NOTTY_MAILGUN_DOMAIN", "")
+	t.Setenv("NOTTY_MAILGUN_API_KEY", "")
+	t.Setenv("NOTTY_MAILGUN_FROM", "")
+
+	cfg := LoadConfig()
+	if !cfg.RequireEmail {
+		t.Fatalf("LoadConfig RequireEmail = false, want true by default")
+	}
+	err := cfg.ValidateEmailConfig()
+	if err == nil {
+		t.Fatalf("expected default loaded config to require Mailgun settings")
+	}
+	if !strings.Contains(err.Error(), "NOTTY_REQUIRE_EMAIL") {
+		t.Fatalf("expected default strict config error to mention NOTTY_REQUIRE_EMAIL, got %q", err.Error())
+	}
+
+	t.Setenv("NOTTY_MAILGUN_DOMAIN", "mg.example.com")
+	t.Setenv("NOTTY_MAILGUN_API_KEY", "key")
+	t.Setenv("NOTTY_MAILGUN_FROM", "codesk <noreply@example.com>")
+	cfg = LoadConfig()
+	if err := cfg.ValidateEmailConfig(); err != nil {
+		t.Fatalf("expected default strict config to accept complete Mailgun settings: %v", err)
+	}
+}
+
+func TestValidateEmailConfigRejectsExplicitFalseRequireEmailFlag(t *testing.T) {
+	t.Setenv("NOTTY_REQUIRE_EMAIL", "false")
+	t.Setenv("NOTTY_MAILGUN_DOMAIN", "mg.example.com")
+	t.Setenv("NOTTY_MAILGUN_API_KEY", "key")
+	t.Setenv("NOTTY_MAILGUN_FROM", "codesk <noreply@example.com>")
+
+	cfg := LoadConfig()
+	err := cfg.ValidateEmailConfig()
+	if err == nil {
+		t.Fatalf("expected explicit false NOTTY_REQUIRE_EMAIL to fail validation")
+	}
+	if !strings.Contains(err.Error(), "NOTTY_REQUIRE_EMAIL=false") {
+		t.Fatalf("expected explicit false error to mention NOTTY_REQUIRE_EMAIL=false, got %q", err.Error())
 	}
 }
 

@@ -1497,6 +1497,8 @@ The backend generates a shared system prompt for agents. Product-level behavior:
 Start the local development stack:
 
 ```sh
+cp deploy/env/local.email.env.example deploy/env/local.email.env
+# Edit deploy/env/local.email.env with local Mailgun test credentials.
 make dev
 ```
 
@@ -1505,6 +1507,11 @@ Equivalent direct command if static artifacts were already generated:
 ```sh
 docker compose --env-file deploy/env/dev.server.env up --build
 ```
+
+The local Compose backend service loads the git-ignored
+`deploy/env/local.email.env` file for Mailgun settings. The server requires
+working email configuration by default so registration, account activation, and
+password reset can be tested locally.
 
 Open:
 
@@ -1622,6 +1629,7 @@ Non-secret deployment defaults are split by consumer:
 - `deploy/env/prod.deploy.env`: local deploy-machine defaults for Docker image tags, R2 publishing, static build origins, SSH host, and remote directory.
 - `deploy/env/prod.server.env`: production backend runtime defaults copied to `/opt/notty/notty.server.env`.
 - `deploy/env/dev.server.env`: local Docker Compose defaults for the development server.
+- `deploy/env/local.email.env`: ignored local Docker Compose backend email secrets, copied from `deploy/env/local.email.env.example`.
 
 Deployment scripts load `deploy/env/prod.deploy.env` automatically. Use
 `NOTTY_DEPLOY_ENV_FILE=/path/to/env` to test another set of deploy-machine
@@ -1671,7 +1679,7 @@ Important backend environment variables:
 - `NOTTY_MAILGUN_DOMAIN`: Mailgun sending domain.
 - `NOTTY_MAILGUN_API_KEY`: Mailgun API key.
 - `NOTTY_MAILGUN_FROM`: sender address used for verification and password reset emails.
-- `NOTTY_REQUIRE_EMAIL`: set to `1` in production so startup fails if Mailgun config is missing or invalid.
+- `NOTTY_REQUIRE_EMAIL`: defaults to `1`; startup fails if Mailgun config is missing or invalid, and explicit `false` is rejected.
 - `NOTTY_PPROF_ADDR`: optional pprof bind address.
 
 Important deployment environment variables in `deploy/env/prod.deploy.env`:
@@ -1692,7 +1700,7 @@ Important production server defaults in `deploy/env/prod.server.env`:
 - `NOTTY_TLS_CERT_FILE` and `NOTTY_TLS_KEY_FILE`: TLS certificate and private key paths on the production host. Defaults are `/opt/notty/cert.pem` and `/opt/notty/private.pem`.
 - `NOTTY_PUBLIC_ORIGIN`: public frontend origin used by backend-generated links.
 - `NOTTY_PPROF_ADDR`: optional pprof bind address.
-- `NOTTY_REQUIRE_EMAIL`: production default `1`; keep Mailgun secrets in `/opt/notty/.env`.
+- `NOTTY_REQUIRE_EMAIL`: production default `1`; explicit `false` is rejected. Keep Mailgun secrets in `/opt/notty/.env`.
 
 Important frontend environment variables:
 

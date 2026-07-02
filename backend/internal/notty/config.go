@@ -19,11 +19,12 @@ type Config struct {
 	MailgunFrom      string
 	RequireEmail     bool
 
+	requireEmailSet bool
 	requireEmailErr error
 }
 
 func LoadConfig() Config {
-	requireEmail, requireEmailErr := getenvBool("NOTTY_REQUIRE_EMAIL", false)
+	requireEmail, requireEmailSet, requireEmailErr := getenvBool("NOTTY_REQUIRE_EMAIL", true)
 	return Config{
 		Port:             getenv("NOTTY_PORT", "8080"),
 		DatabaseURL:      getenv("NOTTY_DATABASE_URL", ""),
@@ -35,6 +36,7 @@ func LoadConfig() Config {
 		MailgunAPIKey:    getenv("NOTTY_MAILGUN_API_KEY", ""),
 		MailgunFrom:      getenv("NOTTY_MAILGUN_FROM", ""),
 		RequireEmail:     requireEmail,
+		requireEmailSet:  requireEmailSet,
 		requireEmailErr:  requireEmailErr,
 	}
 }
@@ -49,6 +51,9 @@ func (cfg Config) ValidateEmailConfig() error {
 	if cfg.requireEmailErr != nil {
 		return cfg.requireEmailErr
 	}
+	if cfg.requireEmailSet && !cfg.RequireEmail {
+		return errors.New("NOTTY_REQUIRE_EMAIL=false is not supported; email delivery is required")
+	}
 	if cfg.RequireEmail && !cfg.MailgunConfigured() {
 		return errors.New("NOTTY_REQUIRE_EMAIL requires NOTTY_MAILGUN_DOMAIN, NOTTY_MAILGUN_API_KEY, and NOTTY_MAILGUN_FROM")
 	}
@@ -62,17 +67,17 @@ func getenv(key, fallback string) string {
 	return fallback
 }
 
-func getenvBool(key string, fallback bool) (bool, error) {
+func getenvBool(key string, fallback bool) (bool, bool, error) {
 	value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
 	switch value {
 	case "":
-		return fallback, nil
+		return fallback, false, nil
 	case "1", "true", "t", "yes", "y", "on":
-		return true, nil
+		return true, true, nil
 	case "0", "false", "f", "no", "n", "off":
-		return false, nil
+		return false, true, nil
 	default:
-		return false, fmt.Errorf("%s must be a boolean value: use 1/true/yes/on or 0/false/no/off", key)
+		return false, true, fmt.Errorf("%s must be a boolean value: use 1/true/yes/on or 0/false/no/off", key)
 	}
 }
 
