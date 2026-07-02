@@ -2,7 +2,6 @@ package notty
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -29,12 +28,6 @@ func (noopEmailSender) SendEmail(context.Context, EmailMessage) error {
 	return nil
 }
 
-type disabledEmailSender struct{}
-
-func (disabledEmailSender) SendEmail(context.Context, EmailMessage) error {
-	return errors.New("email sender is not configured")
-}
-
 type mailgunEmailSender struct {
 	domain     string
 	apiKey     string
@@ -47,7 +40,7 @@ func emailSenderFromConfig(cfg Config) EmailSender {
 	apiKey := strings.TrimSpace(cfg.MailgunAPIKey)
 	from := strings.TrimSpace(cfg.MailgunFrom)
 	if domain == "" || apiKey == "" || from == "" {
-		return disabledEmailSender{}
+		return noopEmailSender{}
 	}
 	return &mailgunEmailSender{
 		domain: domain,
@@ -61,7 +54,7 @@ func emailSenderFromConfig(cfg Config) EmailSender {
 
 func (s *mailgunEmailSender) SendEmail(ctx context.Context, message EmailMessage) error {
 	if s == nil {
-		return errors.New("email sender is not configured")
+		return fmt.Errorf("email sender is not configured")
 	}
 	form := url.Values{}
 	form.Set("from", s.from)

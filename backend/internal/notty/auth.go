@@ -365,7 +365,7 @@ func createAccountEmailToken(db *sql.DB, accountID string, purpose string, ttl t
 			return "", false, nil
 		}
 	}
-	token, err := randomToken("account_")
+	token, err := randomToken("")
 	if err != nil {
 		return "", false, err
 	}
@@ -442,7 +442,7 @@ func resetAccountPasswordWithToken(db *sql.DB, rawToken string, password string)
 	if err != nil {
 		return err
 	}
-	now := time.Now().UTC()
+	now := time.Now().UTC().Truncate(time.Second)
 	result, err := tx.Exec(
 		`UPDATE accounts
 		    SET password_hash = $1, password_updated_at = $2, updated_at = $2

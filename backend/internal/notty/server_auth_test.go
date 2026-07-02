@@ -47,9 +47,8 @@ func TestJWTIssuerUsesCodeskAndRejectsLegacyNottyIssuer(t *testing.T) {
 }
 
 func TestRegisterCreatesUnverifiedAccountAndRequiresEmailVerification(t *testing.T) {
-	server, router := newAuthTestServer(t)
-	sender := &authTestEmailSender{}
-	server.emailSender = sender
+	_, router := newAuthTestServer(t)
+	sender := authTestEmailSenderForRouter(t, router)
 
 	var register AuthResponse
 	authTestJSON(t, router, http.MethodPost, "/api/auth/register", "", RegisterRequest{
@@ -98,9 +97,8 @@ func TestRegisterCreatesUnverifiedAccountAndRequiresEmailVerification(t *testing
 }
 
 func TestForgotAndResetPasswordRequireVerifiedAccountAndInvalidateExistingJWT(t *testing.T) {
-	server, router := newAuthTestServer(t)
-	sender := &authTestEmailSender{}
-	server.emailSender = sender
+	_, router := newAuthTestServer(t)
+	sender := authTestEmailSenderForRouter(t, router)
 	unverified := "reset-unverified@example.com"
 	verified := "reset-verified@example.com"
 
@@ -145,12 +143,16 @@ func TestForgotAndResetPasswordRequireVerifiedAccountAndInvalidateExistingJWT(t 
 		t.Fatalf("expected login token after password reset")
 	}
 	authTestStatus(t, router, http.MethodGet, "/api/auth/me", auth.Token, nil, http.StatusUnauthorized)
+	var me AuthResponse
+	authTestJSON(t, router, http.MethodGet, "/api/auth/me", login.Token, nil, http.StatusOK, &me)
+	if me.Account == nil || me.Account.Email != verified {
+		t.Fatalf("expected new token to authenticate reset account, got %#v", me)
+	}
 }
 
 func TestAccountEmailTokensArePurposeScopedAndSingleUse(t *testing.T) {
-	server, router := newAuthTestServer(t)
-	sender := &authTestEmailSender{}
-	server.emailSender = sender
+	_, router := newAuthTestServer(t)
+	sender := authTestEmailSenderForRouter(t, router)
 
 	authTestJSON(t, router, http.MethodPost, "/api/auth/register", "", RegisterRequest{
 		Email:       "token-scope@example.com",
@@ -1362,6 +1364,11 @@ type authTestEmailSender struct {
 	messages []EmailMessage
 }
 
+type authTestRouter struct {
+	http.Handler
+	emailSender *authTestEmailSender
+}
+
 func (s *authTestEmailSender) SendEmail(_ context.Context, message EmailMessage) error {
 	s.messages = append(s.messages, message)
 	return nil
@@ -1386,6 +1393,15 @@ func authTestEmailToken(t *testing.T, message EmailMessage) string {
 	}
 	t.Fatalf("email message did not include token link: %#v", message)
 	return ""
+}
+
+func authTestEmailSenderForRouter(t *testing.T, router http.Handler) *authTestEmailSender {
+	t.Helper()
+	testRouter, ok := router.(*authTestRouter)
+	if !ok || testRouter.emailSender == nil {
+		t.Fatalf("expected auth test router with email sender")
+	}
+	return testRouter.emailSender
 }
 
 func newAuthTestRouter(t *testing.T) http.Handler {
@@ -1419,38 +1435,52 @@ func newAuthTestServer(t *testing.T) (*Server, http.Handler) {
 		_ = store.Close()
 	})
 	server := NewServer(Config{DatabaseURL: dsn, JWTSecret: "test-secret"}, store)
-	server.emailSender = noopEmailSender{}
-	return server, server.Routes()
+	emailSender := &authTestEmailSender{}
+	server.emailSender = emailSender
+	return server, &authTestRouter{
+		Handler:     server.Routes(),
+		emailSender: emailSender,
+	}
 }
 
 func authTestRegister(t *testing.T, router http.Handler, email string, password string, name string) AuthResponse {
 	t.Helper()
+	sender := authTestEmailSenderForRouter(t, router)
+	initialMessages := len(sender.messages)
 	var response AuthResponse
 	authTestJSON(t, router, http.MethodPost, "/api/auth/register", "", RegisterRequest{
 		Email:       email,
 		Password:    password,
 		DisplayName: name,
 	}, http.StatusCreated, &response)
-	if response.Token == "" || response.Account == nil {
-		db, err := sql.Open("pgx", postgresTestDSN(t))
-		if err != nil {
-			t.Fatalf("open postgres: %v", err)
-		}
-		defer db.Close()
-		if _, err := db.Exec(`UPDATE accounts SET email_verified = TRUE WHERE email = $1`, normalizeEmail(email)); err != nil {
-			t.Fatalf("verify auth test account: %v", err)
-		}
-		var loginResponse AuthResponse
-		authTestJSON(t, router, http.MethodPost, "/api/auth/login", "", LoginRequest{
-			Email:    email,
-			Password: password,
-		}, http.StatusOK, &loginResponse)
-		if loginResponse.Token == "" || loginResponse.Account == nil {
-			t.Fatalf("expected login auth response, got %#v", loginResponse)
-		}
-		return loginResponse
+	if response.Account == nil {
+		t.Fatalf("expected register account response, got %#v", response)
 	}
-	return response
+	if response.Token != "" {
+		return response
+	}
+	if len(sender.messages) <= initialMessages {
+		t.Fatalf("register did not send verification email")
+	}
+	verifyToken := authTestEmailToken(t, sender.messages[len(sender.messages)-1])
+	var verifyResponse struct {
+		Account *Account `json:"account"`
+	}
+	authTestJSON(t, router, http.MethodPost, "/api/auth/verify-email", "", VerifyEmailRequest{
+		Token: verifyToken,
+	}, http.StatusOK, &verifyResponse)
+	if verifyResponse.Account == nil || !verifyResponse.Account.EmailVerified {
+		t.Fatalf("expected verified auth test account, got %#v", verifyResponse.Account)
+	}
+	var loginResponse AuthResponse
+	authTestJSON(t, router, http.MethodPost, "/api/auth/login", "", LoginRequest{
+		Email:    email,
+		Password: password,
+	}, http.StatusOK, &loginResponse)
+	if loginResponse.Token == "" || loginResponse.Account == nil {
+		t.Fatalf("expected login auth response, got %#v", loginResponse)
+	}
+	return loginResponse
 }
 
 func authTestCreateWorkspace(t *testing.T, router http.Handler, token string, name string) authTestWorkspace {
