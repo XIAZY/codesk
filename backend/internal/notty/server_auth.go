@@ -538,7 +538,7 @@ func (s *Server) authenticateHumanRequest(r *http.Request) (*AuthContext, error)
 	if !account.EmailVerified {
 		return nil, errEmailNotVerified
 	}
-	if !account.PasswordUpdatedAt.IsZero() && time.Unix(claims.IssuedAt, 0).Before(account.PasswordUpdatedAt) {
+	if !jwtMatchesAccountSessionVersion(claims, account) {
 		return nil, errors.New("token is no longer valid")
 	}
 	return &AuthContext{
