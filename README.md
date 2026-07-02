@@ -1676,9 +1676,9 @@ Important backend environment variables:
 - `NOTTY_PORT`: backend port, default `8080`.
 - `NOTTY_DATABASE_URL`: Postgres DSN.
 - `NOTTY_JWT_SECRET`: required JWT signing secret.
-- `NOTTY_MAILGUN_DOMAIN`: Mailgun sending domain.
+- `NOTTY_MAILGUN_DOMAIN`: Mailgun sending domain, default `mail.getcodesk.com`.
 - `NOTTY_MAILGUN_API_KEY`: Mailgun API key.
-- `NOTTY_MAILGUN_FROM`: sender address used for verification and password reset emails.
+- `NOTTY_MAILGUN_FROM`: sender address used for verification and password reset emails, default `noreply@mail.getcodesk.com`.
 - `NOTTY_REQUIRE_EMAIL`: defaults to `1`; startup fails if Mailgun config is missing or invalid, and explicit `false` is rejected.
 - `NOTTY_PPROF_ADDR`: optional pprof bind address.
 
@@ -1698,13 +1698,13 @@ Important production server defaults in `deploy/env/prod.server.env`:
 - `NOTTY_FRONTEND_ORIGIN`, `NOTTY_BACKEND_ORIGIN`, and `NOTTY_STATIC_ORIGIN`: public production origins for app, API, and static artifacts.
 - `NOTTY_API_HOST`: nginx host match for the backend API.
 - `NOTTY_TLS_CERT_FILE` and `NOTTY_TLS_KEY_FILE`: TLS certificate and private key paths on the production host. Defaults are `/opt/notty/cert.pem` and `/opt/notty/private.pem`.
-- `NOTTY_PUBLIC_ORIGIN`: public frontend origin used by backend-generated links.
+- `NOTTY_PUBLIC_ORIGIN`: public frontend origin used by backend-generated links, default `https://app.getcodesk.com`.
 - `NOTTY_PPROF_ADDR`: optional pprof bind address.
 - `NOTTY_REQUIRE_EMAIL`: production default `1`; explicit `false` is rejected. Keep Mailgun secrets in `/opt/notty/.env`.
 
 Important frontend environment variables:
 
-- `NOTTY_FRONTEND_ORIGIN`: public frontend origin, local default `http://localhost:5173`, production default `https://app.nottyai.co`.
+- `NOTTY_FRONTEND_ORIGIN`: public frontend origin, local default `http://localhost:5173`, production default `https://app.getcodesk.com`.
 - `NOTTY_BACKEND_ORIGIN`: frontend API/websocket origin, local default `http://localhost:8080`, production default `https://api.nottyai.co`.
 - `NOTTY_STATIC_ORIGIN`: static artifact origin, local default `http://localhost:5173`, production default `https://static.nottyai.co`.
 - `NOTTY_FRONTEND_PORT`: loopback-only frontend dev port, default `5173`.

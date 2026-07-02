@@ -33,10 +33,10 @@ func LoadConfig() Config {
 		MaxLiveEditBytes: getenvInt("NOTTY_MAX_LIVE_EDIT_BYTES", 1500),
 		PprofAddr:        getenv("NOTTY_PPROF_ADDR", ""),
 		JWTSecret:        getenv("NOTTY_JWT_SECRET", ""),
-		PublicOrigin:     getenv("NOTTY_PUBLIC_ORIGIN", getenv("NOTTY_FRONTEND_ORIGIN", "http://localhost:5173")),
-		MailgunDomain:    getenv("NOTTY_MAILGUN_DOMAIN", ""),
+		PublicOrigin:     getenv("NOTTY_PUBLIC_ORIGIN", getenv("NOTTY_FRONTEND_ORIGIN", "https://app.getcodesk.com")),
+		MailgunDomain:    getenv("NOTTY_MAILGUN_DOMAIN", "mail.getcodesk.com"),
 		MailgunAPIKey:    getenv("NOTTY_MAILGUN_API_KEY", ""),
-		MailgunFrom:      getenv("NOTTY_MAILGUN_FROM", ""),
+		MailgunFrom:      getenv("NOTTY_MAILGUN_FROM", "noreply@mail.getcodesk.com"),
 		RequireEmail:     requireEmail,
 		requireEmailErr:  requireEmailErr,
 	}

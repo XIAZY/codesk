@@ -42,6 +42,8 @@ func TestValidateEmailConfigRequiresMailgunWhenStrict(t *testing.T) {
 
 func TestLoadConfigRequiresEmailByDefault(t *testing.T) {
 	t.Setenv("NOTTY_REQUIRE_EMAIL", "")
+	t.Setenv("NOTTY_PUBLIC_ORIGIN", "")
+	t.Setenv("NOTTY_FRONTEND_ORIGIN", "")
 	t.Setenv("NOTTY_MAILGUN_DOMAIN", "")
 	t.Setenv("NOTTY_MAILGUN_API_KEY", "")
 	t.Setenv("NOTTY_MAILGUN_FROM", "")
@@ -49,6 +51,15 @@ func TestLoadConfigRequiresEmailByDefault(t *testing.T) {
 	cfg := LoadConfig()
 	if !cfg.RequireEmail {
 		t.Fatalf("LoadConfig RequireEmail = false, want true by default")
+	}
+	if cfg.PublicOrigin != "https://app.getcodesk.com" {
+		t.Fatalf("LoadConfig PublicOrigin = %q, want app.getcodesk.com default", cfg.PublicOrigin)
+	}
+	if cfg.MailgunDomain != "mail.getcodesk.com" {
+		t.Fatalf("LoadConfig MailgunDomain = %q, want mail.getcodesk.com default", cfg.MailgunDomain)
+	}
+	if cfg.MailgunFrom != "noreply@mail.getcodesk.com" {
+		t.Fatalf("LoadConfig MailgunFrom = %q, want noreply@mail.getcodesk.com default", cfg.MailgunFrom)
 	}
 	err := cfg.ValidateEmailConfig()
 	if err == nil {
