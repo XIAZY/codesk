@@ -35,6 +35,20 @@ type mailgunEmailSender struct {
 	httpClient *http.Client
 }
 
+const accountEmailLogoHTML = `<table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+  <tr>
+    <td style="width:58px;vertical-align:middle;">
+      <svg width="58" height="44" viewBox="14 31 72 38" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" style="display:block;overflow:visible;">
+        <circle cx="24" cy="50" r="9" fill="#E3A15B"></circle>
+        <circle cx="76" cy="50" r="9" fill="#7FC1D6"></circle>
+        <line x1="39.6" y1="39.6" x2="60.4" y2="60.4" stroke="#1B1A17" stroke-width="7.8" stroke-linecap="round"></line>
+        <line x1="60.4" y1="39.6" x2="39.6" y2="60.4" stroke="#1B1A17" stroke-width="7.8" stroke-linecap="round"></line>
+      </svg>
+    </td>
+    <td style="padding-left:14px;vertical-align:middle;font-family:Georgia,serif;font-size:34px;line-height:1;color:#1B1A17;">codesk</td>
+  </tr>
+</table>`
+
 func emailSenderFromConfig(cfg Config) EmailSender {
 	if !cfg.MailgunConfigured() {
 		return noopEmailSender{}
@@ -126,7 +140,7 @@ func buildAccountEmail(to string, subject string, eyebrow string, heading string
   <div style="padding:40px 24px;">
     <div style="max-width:600px;margin:0 auto;background:#FCFBF7;border:1px solid #E6E2D8;border-radius:16px;overflow:hidden;">
       <div style="padding:40px 44px;">
-        <div style="font-family:Georgia,serif;font-size:21px;color:#1B1A17;">codesk</div>
+        %s
         <div style="margin-top:36px;font-family:monospace;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#A6A29A;">%s</div>
         <h1 style="font-family:Georgia,serif;font-weight:400;font-size:28px;line-height:1.2;margin:12px 0 0;color:#1B1A17;">%s</h1>
         <p style="font-size:15px;line-height:1.6;color:#6F6B62;margin:14px 0 0;max-width:44ch;">%s</p>
@@ -143,7 +157,7 @@ func buildAccountEmail(to string, subject string, eyebrow string, heading string
     </div>
   </div>
 </body>
-</html>`, escapedSubject, escapedEyebrow, escapedHeading, escapedBody, escapedLink, escapedButton, escapedLink, escapedFooter)
+</html>`, escapedSubject, accountEmailLogoHTML, escapedEyebrow, escapedHeading, escapedBody, escapedLink, escapedButton, escapedLink, escapedFooter)
 	textBody := fmt.Sprintf("%s\n\n%s\n\n%s\n\nThis link expires in 1 hour.", heading, body, link)
 	return EmailMessage{To: to, Subject: subject, Text: textBody, HTML: htmlBody}
 }
