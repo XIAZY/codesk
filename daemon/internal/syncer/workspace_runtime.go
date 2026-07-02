@@ -118,40 +118,18 @@ func (r *workspaceRuntime) Run(ctx context.Context) error {
 	r.enqueueStartupStoreWork()
 
 	replicaCtx, cancelReplica := context.WithCancel(ctx)
-	var wg sync.WaitGroup
-	defer func() {
-		cancelReplica()
-		wg.Wait()
-	}()
-	wg.Add(1)
+	defer cancelReplica()
 	go func() {
-		defer wg.Done()
 		if err := r.replica.Run(replicaCtx); err != nil && replicaCtx.Err() == nil {
 			log.Printf("%s workspace replica error: %v", r.replica.actorID, err)
 		}
 	}()
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		r.reconcileLoop(ctx)
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		r.threadDeliveryLoop(ctx)
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		r.presenceLoop(ctx)
-	}()
+	go r.reconcileLoop(ctx)
+	go r.threadDeliveryLoop(ctx)
+	go r.presenceLoop(ctx)
 	if r.documentSocket != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			r.documentSocket.Run(ctx)
-		}()
+		go r.documentSocket.Run(ctx)
 	}
 
 	<-ctx.Done()

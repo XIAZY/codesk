@@ -52,7 +52,6 @@ type Service struct {
 type managedWorkspaceRuntime struct {
 	runtime *workspaceRuntime
 	cancel  context.CancelFunc
-	done    <-chan struct{}
 }
 
 type managedAgentWorker struct {

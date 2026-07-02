@@ -43,10 +43,8 @@ func (s *Service) syncAgentRuntimes(ctx context.Context, workspace *workspaceRes
 		}
 		runtime.initialWorkspace = workspace
 		runtimeCtx, cancel := context.WithCancel(ctx)
-		done := make(chan struct{})
-		s.agentRuntimes[agentID] = &managedWorkspaceRuntime{runtime: runtime, cancel: cancel, done: done}
+		s.agentRuntimes[agentID] = &managedWorkspaceRuntime{runtime: runtime, cancel: cancel}
 		go func() {
-			defer close(done)
 			_ = runtime.Run(runtimeCtx)
 		}()
 	}
@@ -74,7 +72,6 @@ func (s *Service) syncAgentRuntimes(ctx context.Context, workspace *workspaceRes
 		if stale[index] != nil && stale[index].cancel != nil {
 			stale[index].cancel()
 		}
-		waitManagedWorkspaceRuntime(stale[index])
 		_ = os.RemoveAll(filepath.Join(s.cfg.AgentWorkspaceRoot, safeAgentWorkspaceName(agentID)))
 	}
 	return nil
@@ -93,14 +90,4 @@ func (s *Service) closeAgentRuntimes() {
 			runtime.cancel()
 		}
 	}
-	for _, runtime := range runtimes {
-		waitManagedWorkspaceRuntime(runtime)
-	}
-}
-
-func waitManagedWorkspaceRuntime(runtime *managedWorkspaceRuntime) {
-	if runtime == nil || runtime.done == nil {
-		return
-	}
-	<-runtime.done
 }
