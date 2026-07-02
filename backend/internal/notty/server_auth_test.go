@@ -53,6 +53,17 @@ func TestJWTSessionVersionRejectsOldTokenFromSameSecondReset(t *testing.T) {
 	resetSecond := time.Unix(1700000000, 0).UTC()
 	currentAccount := &Account{ID: "acct_reset", SessionVersion: 2}
 
+	legacyClaims := &jwtClaims{
+		Subject:  currentAccount.ID,
+		IssuedAt: resetSecond.Unix(),
+	}
+	if !jwtMatchesAccountSessionVersion(legacyClaims, &Account{ID: "acct_reset", SessionVersion: 1}) {
+		t.Fatalf("legacy token without session version should match account version 1")
+	}
+	if jwtMatchesAccountSessionVersion(legacyClaims, currentAccount) {
+		t.Fatalf("legacy token without session version matched reset account version")
+	}
+
 	oldClaims := &jwtClaims{
 		Subject:        currentAccount.ID,
 		IssuedAt:       resetSecond.Unix(),

@@ -213,7 +213,11 @@ func jwtMatchesAccountSessionVersion(claims *jwtClaims, account *Account) bool {
 	if claims == nil || account == nil {
 		return false
 	}
-	return claims.SessionVersion == accountSessionVersion(account)
+	tokenVersion := claims.SessionVersion
+	if tokenVersion <= 0 {
+		tokenVersion = 1
+	}
+	return tokenVersion == accountSessionVersion(account)
 }
 
 func signJWT(secret []byte, unsigned string) string {
