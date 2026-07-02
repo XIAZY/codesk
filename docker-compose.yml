@@ -22,8 +22,8 @@ services:
     env_file:
       - path: deploy/env/dev.server.env
         required: true
-      - path: secrets.env
-        required: true
+      - path: ${NOTTY_SECRETS_ENV_FILE:-secrets.env}
+        required: false
     depends_on:
       postgres:
         condition: service_healthy

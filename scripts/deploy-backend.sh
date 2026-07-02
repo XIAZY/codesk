@@ -46,13 +46,13 @@ ssh "$ssh_host" "cd $quoted_remote_dir && \
 	grep -Eq '^NOTTY_DATABASE_URL=.' secrets.env || { echo 'missing NOTTY_DATABASE_URL in $remote_dir/secrets.env' >&2; exit 1; } && \
 	grep -Eq '^NOTTY_JWT_SECRET=.' secrets.env || { echo 'missing NOTTY_JWT_SECRET in $remote_dir/secrets.env' >&2; exit 1; } && \
 	grep -Eq '^NOTTY_MAILGUN_API_KEY=.' secrets.env || { echo 'missing NOTTY_MAILGUN_API_KEY in $remote_dir/secrets.env' >&2; exit 1; } && \
-	NOTTY_SERVER_ENV_FILE=notty.server.env NOTTY_BACKEND_IMAGE=$quoted_backend_image docker compose -f compose.prod.yml --env-file notty.server.env config >/tmp/notty-compose-config.yml && \
+	NOTTY_SERVER_ENV_FILE=notty.server.env NOTTY_SECRETS_ENV_FILE=secrets.env NOTTY_BACKEND_IMAGE=$quoted_backend_image docker compose -f compose.prod.yml --env-file notty.server.env config >/tmp/notty-compose-config.yml && \
 	test -f /opt/notty/cert.pem || { echo 'missing TLS certificate /opt/notty/cert.pem' >&2; exit 1; } && \
 	test -f /opt/notty/private.pem || { echo 'missing TLS private key /opt/notty/private.pem' >&2; exit 1; } && \
 	test -f /opt/notty/codesk_origin.pem || { echo 'missing TLS certificate /opt/notty/codesk_origin.pem' >&2; exit 1; } && \
 	test -f /opt/notty/codesk_private.pem || { echo 'missing TLS private key /opt/notty/codesk_private.pem' >&2; exit 1; } && \
-	NOTTY_SERVER_ENV_FILE=notty.server.env NOTTY_BACKEND_IMAGE=$quoted_backend_image docker compose -f compose.prod.yml --env-file notty.server.env pull && \
-	NOTTY_SERVER_ENV_FILE=notty.server.env NOTTY_BACKEND_IMAGE=$quoted_backend_image docker compose -f compose.prod.yml --env-file notty.server.env up -d --remove-orphans && \
-	NOTTY_SERVER_ENV_FILE=notty.server.env NOTTY_BACKEND_IMAGE=$quoted_backend_image docker compose -f compose.prod.yml --env-file notty.server.env ps"
+	NOTTY_SERVER_ENV_FILE=notty.server.env NOTTY_SECRETS_ENV_FILE=secrets.env NOTTY_BACKEND_IMAGE=$quoted_backend_image docker compose -f compose.prod.yml --env-file notty.server.env pull && \
+	NOTTY_SERVER_ENV_FILE=notty.server.env NOTTY_SECRETS_ENV_FILE=secrets.env NOTTY_BACKEND_IMAGE=$quoted_backend_image docker compose -f compose.prod.yml --env-file notty.server.env up -d --remove-orphans && \
+	NOTTY_SERVER_ENV_FILE=notty.server.env NOTTY_SECRETS_ENV_FILE=secrets.env NOTTY_BACKEND_IMAGE=$quoted_backend_image docker compose -f compose.prod.yml --env-file notty.server.env ps"
 
 printf 'Backend deploy complete: %s\n' "$backend_image"

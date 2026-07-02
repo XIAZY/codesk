@@ -1635,6 +1635,11 @@ Non-secret deployment defaults are split by consumer:
 - `deploy/env/dev.server.env`: local Docker Compose defaults for the development server.
 - `secrets.env`: git-ignored local Docker Compose secrets. On production, keep the same file name at `/opt/notty/secrets.env`.
 
+Compose reads secrets from `NOTTY_SECRETS_ENV_FILE` when set, otherwise from
+`secrets.env`. The `dev-config-check` and `prod-config-check` targets use a
+temporary placeholder secrets file so clean checkouts and CI can render Compose
+config without real credentials.
+
 Deployment scripts load `deploy/env/prod.deploy.env` automatically. Use
 `NOTTY_DEPLOY_ENV_FILE=/path/to/env` to test another set of deploy-machine
 defaults. Keep secrets outside git: set `CLOUDFLARE_API_TOKEN` or

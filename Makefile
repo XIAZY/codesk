@@ -10,7 +10,7 @@ HOST_PLATFORM := $(HOST_OS)/$(HOST_ARCH)
 PLATFORMS ?= $(HOST_PLATFORM)
 DAEMON_ALL_PLATFORMS ?= all
 
-.PHONY: dev dev-down \
+.PHONY: dev dev-down dev-config-check prod-config-check \
 	test tests test-unit test-go test-frontend test-postgres test-regression test-live \
 	build build-yffi build-go build-frontend build-daemon build-static build-static-local build-backend-image \
 	publish publish-backend publish-frontend publish-static \
@@ -22,6 +22,16 @@ dev: static-build-local
 
 dev-down:
 	docker compose --env-file deploy/env/dev.server.env down
+
+dev-config-check:
+	tmp_secrets="$$(mktemp)" && \
+	trap 'rm -f "$$tmp_secrets"' EXIT && \
+	{ \
+		printf '%s\n' 'NOTTY_DATABASE_URL=postgres://notty:notty@postgres:5432/notty?sslmode=disable'; \
+		printf '%s\n' 'NOTTY_JWT_SECRET=notty-test-secret'; \
+		printf '%s\n' 'NOTTY_MAILGUN_API_KEY=notty-test-mailgun-key'; \
+	} > "$$tmp_secrets" && \
+	NOTTY_SECRETS_ENV_FILE="$$tmp_secrets" docker compose --env-file deploy/env/dev.server.env config >/dev/null
 
 test: tests
 
@@ -112,7 +122,14 @@ deploy-static:
 	VERSION="$(VERSION)" scripts/deploy-static.sh
 
 prod-config-check:
-	docker compose -f compose.prod.yml --env-file deploy/env/prod.server.env config >/dev/null
+	tmp_secrets="$$(mktemp)" && \
+	trap 'rm -f "$$tmp_secrets"' EXIT && \
+	{ \
+		printf '%s\n' 'NOTTY_DATABASE_URL=postgres://notty:notty@postgres:5432/notty?sslmode=disable'; \
+		printf '%s\n' 'NOTTY_JWT_SECRET=notty-test-secret'; \
+		printf '%s\n' 'NOTTY_MAILGUN_API_KEY=notty-test-mailgun-key'; \
+	} > "$$tmp_secrets" && \
+	NOTTY_SECRETS_ENV_FILE="$$tmp_secrets" docker compose -f compose.prod.yml --env-file deploy/env/prod.server.env config >/dev/null
 
 daemon-checksums:
 	cd "$(DIST_DIR)/$(VERSION)" && shasum -a 256 *.tar.gz > SHA256SUMS
