@@ -13,6 +13,7 @@ type Server struct {
 	store            *Store
 	subscribers      *Broker
 	rooms            *DocumentRooms
+	emailSender      EmailSender
 	upgrader         websocket.Upgrader
 	mu               sync.Mutex
 	workspaceStores  map[string]*Store
@@ -25,6 +26,7 @@ func NewServer(cfg Config, store *Store) *Server {
 		store:       store,
 		subscribers: NewBroker(),
 		rooms:       NewDocumentRooms(),
+		emailSender: emailSenderFromConfig(cfg),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},

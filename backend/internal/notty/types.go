@@ -91,7 +91,9 @@ type Account struct {
 	ID                      string    `json:"id"`
 	Email                   string    `json:"email"`
 	DisplayName             string    `json:"displayName"`
+	EmailVerified           bool      `json:"emailVerified"`
 	LastAccessedWorkspaceID string    `json:"lastAccessedWorkspaceId,omitempty"`
+	PasswordUpdatedAt       time.Time `json:"-"`
 	CreatedAt               time.Time `json:"createdAt"`
 	UpdatedAt               time.Time `json:"updatedAt"`
 }
@@ -302,9 +304,26 @@ type LoginRequest struct {
 }
 
 type AuthResponse struct {
-	Token      string       `json:"token"`
+	Token      string       `json:"token,omitempty"`
 	Account    *Account     `json:"account"`
 	Workspaces []*Workspace `json:"workspaces,omitempty"`
+}
+
+type VerifyEmailRequest struct {
+	Token string `json:"token"`
+}
+
+type ResendVerificationRequest struct {
+	Email string `json:"email"`
+}
+
+type ForgotPasswordRequest struct {
+	Email string `json:"email"`
+}
+
+type ResetPasswordRequest struct {
+	Token    string `json:"token"`
+	Password string `json:"password"`
 }
 
 type CreateWorkspaceRequest struct {

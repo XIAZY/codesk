@@ -2,10 +2,10 @@ import { useEffect, useState } from "react";
 import { type AppRoute, parseRoute, routePath } from "./routes";
 
 export function useRoute() {
-  const [route, setRoute] = useState<AppRoute>(() => parseRoute(window.location.pathname));
+  const [route, setRoute] = useState<AppRoute>(() => parseRoute(`${window.location.pathname}${window.location.search}`));
 
   useEffect(() => {
-    const syncRoute = () => setRoute(parseRoute(window.location.pathname));
+    const syncRoute = () => setRoute(parseRoute(`${window.location.pathname}${window.location.search}`));
     window.addEventListener("popstate", syncRoute);
     return () => window.removeEventListener("popstate", syncRoute);
   }, []);

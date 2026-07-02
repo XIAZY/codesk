@@ -2,11 +2,13 @@ package notty
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -41,6 +43,198 @@ func TestJWTIssuerUsesCodeskAndRejectsLegacyNottyIssuer(t *testing.T) {
 	_, err = verifyJWT(secret, legacyToken)
 	if err == nil || !strings.Contains(err.Error(), "invalid jwt issuer") {
 		t.Fatalf("expected legacy issuer rejection, got %v", err)
+	}
+}
+
+func TestRegisterCreatesUnverifiedAccountAndRequiresEmailVerification(t *testing.T) {
+	server, router := newAuthTestServer(t)
+	sender := &authTestEmailSender{}
+	server.emailSender = sender
+
+	var register AuthResponse
+	authTestJSON(t, router, http.MethodPost, "/api/auth/register", "", RegisterRequest{
+		Email:       "verify-flow@example.com",
+		Password:    "verify-pass",
+		DisplayName: "Verify Flow",
+	}, http.StatusCreated, &register)
+	if register.Token != "" {
+		t.Fatalf("register returned token for unverified account: %q", register.Token)
+	}
+	if register.Account == nil || register.Account.EmailVerified {
+		t.Fatalf("expected unverified account, got %#v", register.Account)
+	}
+	if len(sender.messages) != 1 {
+		t.Fatalf("verification emails sent = %d, want 1", len(sender.messages))
+	}
+
+	var loginError map[string]string
+	authTestJSON(t, router, http.MethodPost, "/api/auth/login", "", LoginRequest{
+		Email:    "verify-flow@example.com",
+		Password: "verify-pass",
+	}, http.StatusForbidden, &loginError)
+	if loginError["error"] != errEmailNotVerified.Error() {
+		t.Fatalf("login error = %#v, want email_not_verified", loginError)
+	}
+
+	verifyToken := authTestEmailToken(t, sender.messages[0])
+	var verifyResponse struct {
+		Account *Account `json:"account"`
+	}
+	authTestJSON(t, router, http.MethodPost, "/api/auth/verify-email", "", VerifyEmailRequest{
+		Token: verifyToken,
+	}, http.StatusOK, &verifyResponse)
+	if verifyResponse.Account == nil || !verifyResponse.Account.EmailVerified {
+		t.Fatalf("expected verified account, got %#v", verifyResponse.Account)
+	}
+
+	var login AuthResponse
+	authTestJSON(t, router, http.MethodPost, "/api/auth/login", "", LoginRequest{
+		Email:    "verify-flow@example.com",
+		Password: "verify-pass",
+	}, http.StatusOK, &login)
+	if login.Token == "" || login.Account == nil || !login.Account.EmailVerified {
+		t.Fatalf("expected verified login response, got %#v", login)
+	}
+}
+
+func TestForgotAndResetPasswordRequireVerifiedAccountAndInvalidateExistingJWT(t *testing.T) {
+	server, router := newAuthTestServer(t)
+	sender := &authTestEmailSender{}
+	server.emailSender = sender
+	unverified := "reset-unverified@example.com"
+	verified := "reset-verified@example.com"
+
+	var register AuthResponse
+	authTestJSON(t, router, http.MethodPost, "/api/auth/register", "", RegisterRequest{
+		Email:       unverified,
+		Password:    "old-pass",
+		DisplayName: "Reset Unverified",
+	}, http.StatusCreated, &register)
+	initialMessages := len(sender.messages)
+	authTestJSON(t, router, http.MethodPost, "/api/auth/forgot-password", "", ForgotPasswordRequest{
+		Email: unverified,
+	}, http.StatusOK, nil)
+	if len(sender.messages) != initialMessages {
+		t.Fatalf("forgot-password sent reset email for unverified account")
+	}
+
+	auth := authTestRegister(t, router, verified, "old-pass", "Reset Verified")
+	initialMessages = len(sender.messages)
+	authTestJSON(t, router, http.MethodPost, "/api/auth/forgot-password", "", ForgotPasswordRequest{
+		Email: verified,
+	}, http.StatusOK, nil)
+	if len(sender.messages) != initialMessages+1 {
+		t.Fatalf("forgot-password emails sent = %d, want %d", len(sender.messages), initialMessages+1)
+	}
+	resetToken := authTestEmailToken(t, sender.messages[len(sender.messages)-1])
+	authTestJSON(t, router, http.MethodPost, "/api/auth/reset-password", "", ResetPasswordRequest{
+		Token:    resetToken,
+		Password: "new-pass",
+	}, http.StatusOK, nil)
+
+	authTestStatus(t, router, http.MethodPost, "/api/auth/login", "", LoginRequest{
+		Email:    verified,
+		Password: "old-pass",
+	}, http.StatusUnauthorized)
+	var login AuthResponse
+	authTestJSON(t, router, http.MethodPost, "/api/auth/login", "", LoginRequest{
+		Email:    verified,
+		Password: "new-pass",
+	}, http.StatusOK, &login)
+	if login.Token == "" {
+		t.Fatalf("expected login token after password reset")
+	}
+	authTestStatus(t, router, http.MethodGet, "/api/auth/me", auth.Token, nil, http.StatusUnauthorized)
+}
+
+func TestAccountEmailTokensArePurposeScopedAndSingleUse(t *testing.T) {
+	server, router := newAuthTestServer(t)
+	sender := &authTestEmailSender{}
+	server.emailSender = sender
+
+	authTestJSON(t, router, http.MethodPost, "/api/auth/register", "", RegisterRequest{
+		Email:       "token-scope@example.com",
+		Password:    "token-pass",
+		DisplayName: "Token Scope",
+	}, http.StatusCreated, nil)
+	verifyToken := authTestEmailToken(t, sender.messages[0])
+
+	authTestJSON(t, router, http.MethodPost, "/api/auth/reset-password", "", ResetPasswordRequest{
+		Token:    verifyToken,
+		Password: "new-pass",
+	}, http.StatusBadRequest, nil)
+	authTestJSON(t, router, http.MethodPost, "/api/auth/verify-email", "", VerifyEmailRequest{
+		Token: verifyToken,
+	}, http.StatusOK, nil)
+	authTestJSON(t, router, http.MethodPost, "/api/auth/verify-email", "", VerifyEmailRequest{
+		Token: verifyToken,
+	}, http.StatusBadRequest, nil)
+}
+
+func TestEmailVerifiedMigrationBackfillsExistingAccountsButFutureDefaultIsFalse(t *testing.T) {
+	db, err := sql.Open("pgx", postgresTestDSN(t))
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`DROP TABLE IF EXISTS account_email_tokens`); err != nil {
+		t.Fatalf("drop email tokens: %v", err)
+	}
+	if _, err := db.Exec(`DROP TABLE IF EXISTS accounts`); err != nil {
+		t.Fatalf("drop accounts: %v", err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE accounts (
+			id TEXT PRIMARY KEY,
+			email TEXT UNIQUE NOT NULL,
+			display_name TEXT NOT NULL,
+			password_hash TEXT NOT NULL,
+			last_accessed_workspace_id TEXT NOT NULL DEFAULT '',
+			password_updated_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL
+		)`); err != nil {
+		t.Fatalf("create legacy accounts: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := db.Exec(
+		`INSERT INTO accounts (id, email, display_name, password_hash, last_accessed_workspace_id, password_updated_at, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, '', $5, $5, $5)`,
+		"account_legacy",
+		"legacy-verified@example.com",
+		"Legacy",
+		"hash",
+		now,
+	); err != nil {
+		t.Fatalf("insert legacy account: %v", err)
+	}
+	if err := initPostgresSchemaTables(db); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+	var existingVerified bool
+	if err := db.QueryRow(`SELECT email_verified FROM accounts WHERE id = $1`, "account_legacy").Scan(&existingVerified); err != nil {
+		t.Fatalf("select existing email_verified: %v", err)
+	}
+	if !existingVerified {
+		t.Fatalf("existing account was not backfilled as verified")
+	}
+	if _, err := db.Exec(
+		`INSERT INTO accounts (id, email, display_name, password_hash, last_accessed_workspace_id, password_updated_at, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, '', $5, $5, $5)`,
+		"account_future",
+		"future-unverified@example.com",
+		"Future",
+		"hash",
+		now,
+	); err != nil {
+		t.Fatalf("insert future account: %v", err)
+	}
+	var futureVerified bool
+	if err := db.QueryRow(`SELECT email_verified FROM accounts WHERE id = $1`, "account_future").Scan(&futureVerified); err != nil {
+		t.Fatalf("select future email_verified: %v", err)
+	}
+	if futureVerified {
+		t.Fatalf("future account defaulted to verified")
 	}
 }
 
@@ -343,10 +537,14 @@ func TestRouteTableMatchesAuthenticatedWorkspaceAllowlist(t *testing.T) {
 	}
 
 	public := map[string]bool{
-		"GET /healthz":             true,
-		"POST /api/auth/register":  true,
-		"POST /api/auth/login":     true,
-		"GET /api/invites/{token}": true,
+		"GET /healthz":                       true,
+		"POST /api/auth/register":            true,
+		"POST /api/auth/login":               true,
+		"POST /api/auth/verify-email":        true,
+		"POST /api/auth/resend-verification": true,
+		"POST /api/auth/forgot-password":     true,
+		"POST /api/auth/reset-password":      true,
+		"GET /api/invites/{token}":           true,
 	}
 	human := map[string]bool{
 		"GET /api/auth/me":                 true,
@@ -1160,6 +1358,36 @@ type authTestWorkspace struct {
 	OwnerUserID string
 }
 
+type authTestEmailSender struct {
+	messages []EmailMessage
+}
+
+func (s *authTestEmailSender) SendEmail(_ context.Context, message EmailMessage) error {
+	s.messages = append(s.messages, message)
+	return nil
+}
+
+func authTestEmailToken(t *testing.T, message EmailMessage) string {
+	t.Helper()
+	for _, line := range strings.Split(message.Text, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.Contains(line, "token=") {
+			continue
+		}
+		parsed, err := url.Parse(line)
+		if err != nil {
+			t.Fatalf("parse email link %q: %v", line, err)
+		}
+		token := parsed.Query().Get("token")
+		if token == "" {
+			t.Fatalf("email link %q did not include token", line)
+		}
+		return token
+	}
+	t.Fatalf("email message did not include token link: %#v", message)
+	return ""
+}
+
 func newAuthTestRouter(t *testing.T) http.Handler {
 	t.Helper()
 	_, router := newAuthTestServer(t)
@@ -1191,6 +1419,7 @@ func newAuthTestServer(t *testing.T) (*Server, http.Handler) {
 		_ = store.Close()
 	})
 	server := NewServer(Config{DatabaseURL: dsn, JWTSecret: "test-secret"}, store)
+	server.emailSender = noopEmailSender{}
 	return server, server.Routes()
 }
 
@@ -1203,7 +1432,23 @@ func authTestRegister(t *testing.T, router http.Handler, email string, password 
 		DisplayName: name,
 	}, http.StatusCreated, &response)
 	if response.Token == "" || response.Account == nil {
-		t.Fatalf("expected auth response, got %#v", response)
+		db, err := sql.Open("pgx", postgresTestDSN(t))
+		if err != nil {
+			t.Fatalf("open postgres: %v", err)
+		}
+		defer db.Close()
+		if _, err := db.Exec(`UPDATE accounts SET email_verified = TRUE WHERE email = $1`, normalizeEmail(email)); err != nil {
+			t.Fatalf("verify auth test account: %v", err)
+		}
+		var loginResponse AuthResponse
+		authTestJSON(t, router, http.MethodPost, "/api/auth/login", "", LoginRequest{
+			Email:    email,
+			Password: password,
+		}, http.StatusOK, &loginResponse)
+		if loginResponse.Token == "" || loginResponse.Account == nil {
+			t.Fatalf("expected login auth response, got %#v", loginResponse)
+		}
+		return loginResponse
 	}
 	return response
 }

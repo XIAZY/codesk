@@ -150,8 +150,28 @@ beforeEach(() => {
     if (path.endsWith("/api/auth/me")) {
       return jsonResponse({ account: mocks.authAccount, workspaces: mocks.authWorkspaces });
     }
+    if (path.endsWith("/api/auth/register") && init?.method === "POST") {
+      const body = typeof init.body === "string" ? JSON.parse(init.body) as { email: string; displayName: string } : { email: "", displayName: "" };
+      return jsonResponse({ account: { id: "account_new", email: body.email, displayName: body.displayName, emailVerified: false } });
+    }
     if (path.endsWith("/api/auth/login") && init?.method === "POST") {
+      const body = typeof init.body === "string" ? JSON.parse(init.body) as { email: string } : { email: "" };
+      if (body.email === "unverified@example.com") {
+        return jsonErrorResponse(403, "email_not_verified");
+      }
       return jsonResponse({ token: "token", account: mocks.authAccount, workspaces: mocks.authWorkspaces });
+    }
+    if (path.endsWith("/api/auth/verify-email") && init?.method === "POST") {
+      return jsonResponse({ account: { ...account, emailVerified: true } });
+    }
+    if (path.endsWith("/api/auth/resend-verification") && init?.method === "POST") {
+      return jsonResponse({ status: "ok" });
+    }
+    if (path.endsWith("/api/auth/forgot-password") && init?.method === "POST") {
+      return jsonResponse({ status: "ok" });
+    }
+    if (path.endsWith("/api/auth/reset-password") && init?.method === "POST") {
+      return jsonResponse({ status: "ok" });
     }
     if (path.endsWith("/api/invites/new123") && !init?.method) {
       return jsonResponse({ workspace: { name: "Invited Workspace", slug: "invited" }, expiresAt: "2026-07-06T00:00:00Z" });
@@ -217,7 +237,7 @@ describe("App URL routing", () => {
   });
 
   it("does not resolve workspace home through stale root docs from another workspace", async () => {
-    localStorage.setItem("notty.auth.token", "token");
+    localStorage.setItem("codesk.auth.token", "token");
     window.history.replaceState(null, "", "/w/beta");
     mocks.authAccount = { ...account, lastAccessedWorkspaceId: "workspace_beta" };
     mocks.authWorkspaces = [{ id: "workspace_beta", slug: "beta", name: "Beta Workspace", lastAccessedDocumentId: "doc_beta" }];
@@ -311,6 +331,60 @@ describe("App URL routing", () => {
     expect(window.location.search).toBe("");
   });
 
+  it("registers without storing a token and shows the verification resend state", async () => {
+    const user = userEvent.setup();
+    window.history.replaceState(null, "", "/register");
+
+    render(<App />);
+
+    await user.type(screen.getByLabelText("Display name"), "New User");
+    await user.type(screen.getByLabelText("Email"), "new@example.com");
+    await user.type(screen.getByLabelText("Password"), "password123");
+    await user.click(screen.getByRole("button", { name: "Create account" }));
+
+    expect(await screen.findByRole("heading", { name: "Check your email" })).toBeTruthy();
+    expect(localStorage.getItem("codesk.auth.token")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Resend verification email" }));
+    expect(await screen.findByText("Verification email sent.")).toBeTruthy();
+  });
+
+  it("shows the verification state instead of storing a token for unverified login", async () => {
+    const user = userEvent.setup();
+    window.history.replaceState(null, "", "/login");
+
+    render(<App />);
+
+    await user.type(screen.getByLabelText("Email"), "unverified@example.com");
+    await user.type(screen.getByLabelText("Password"), "password123");
+    await user.click(screen.getByRole("button", { name: "Log in" }));
+
+    expect(await screen.findByRole("heading", { name: "Check your email" })).toBeTruthy();
+    expect(localStorage.getItem("codesk.auth.token")).toBeNull();
+  });
+
+  it("verifies an email link and returns to login", async () => {
+    const user = userEvent.setup();
+    window.history.replaceState(null, "", "/account/verify-email?token=verify123");
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Email verified" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Log in" }));
+    expect(window.location.pathname).toBe("/login");
+  });
+
+  it("resets a password from a tokenized link", async () => {
+    const user = userEvent.setup();
+    window.history.replaceState(null, "", "/account/reset-password?token=reset123");
+
+    render(<App />);
+
+    await user.type(screen.getByLabelText("New password"), "newpassword");
+    await user.click(screen.getByRole("button", { name: "Reset password" }));
+
+    expect(await screen.findByRole("heading", { name: "Password reset" })).toBeTruthy();
+  });
+
   it("preserves an unauthenticated invite URL through login and joins the workspace", async () => {
     const user = userEvent.setup();
     mocks.authAccount = { ...account, lastAccessedWorkspaceId: "" };
@@ -348,7 +422,7 @@ describe("App URL routing", () => {
 
   it("lets existing members open the workspace from an invite link", async () => {
     const user = userEvent.setup();
-    localStorage.setItem("notty.auth.token", "token");
+    localStorage.setItem("codesk.auth.token", "token");
     window.history.replaceState(null, "", "/invite/team456");
 
     render(<App />);
@@ -361,7 +435,7 @@ describe("App URL routing", () => {
 
   it("shows share-link controls only to workspace owners and admins", async () => {
     const user = userEvent.setup();
-    localStorage.setItem("notty.auth.token", "token");
+    localStorage.setItem("codesk.auth.token", "token");
     window.history.replaceState(null, "", "/w/team/d/doc_1");
 
     render(<App />);

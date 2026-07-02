@@ -10,13 +10,18 @@ export type AppRoute =
   | { kind: "root" }
   | { kind: "login" }
   | { kind: "register" }
+  | { kind: "verifyEmail"; token: string }
+  | { kind: "forgotPassword" }
+  | { kind: "resetPassword"; token: string }
   | { kind: "invite"; token: string }
   | { kind: "newWorkspace" }
   | { kind: "workspace"; slug: string; view: WorkspaceView }
   | { kind: "notFound" };
 
 export function parseRoute(pathname: string): AppRoute {
-  const path = normalizePathname(pathname);
+  const [rawPath, rawQuery = ""] = pathname.split("?", 2);
+  const path = normalizePathname(rawPath);
+  const query = new URLSearchParams(rawQuery);
   if (path === "/") {
     return { kind: "root" };
   }
@@ -25,6 +30,15 @@ export function parseRoute(pathname: string): AppRoute {
   }
   if (path === "/register") {
     return { kind: "register" };
+  }
+  if (path === "/account/verify-email") {
+    return { kind: "verifyEmail", token: query.get("token") ?? "" };
+  }
+  if (path === "/account/forgot-password") {
+    return { kind: "forgotPassword" };
+  }
+  if (path === "/account/reset-password") {
+    return { kind: "resetPassword", token: query.get("token") ?? "" };
   }
   if (path === "/new") {
     return { kind: "newWorkspace" };
@@ -67,6 +81,12 @@ export function routePath(route: AppRoute): string {
       return "/login";
     case "register":
       return "/register";
+    case "verifyEmail":
+      return `/account/verify-email?token=${encodeURIComponent(route.token)}`;
+    case "forgotPassword":
+      return "/account/forgot-password";
+    case "resetPassword":
+      return `/account/reset-password?token=${encodeURIComponent(route.token)}`;
     case "invite":
       return `/invite/${encodeURIComponent(route.token)}`;
     case "newWorkspace":

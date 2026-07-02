@@ -2,6 +2,7 @@ export type Account = {
   id: string;
   email: string;
   displayName: string;
+  emailVerified?: boolean;
   lastAccessedWorkspaceId?: string;
 };
 
@@ -198,9 +199,9 @@ export type WorkspaceState = {
 };
 
 export type AuthResponse = {
-  token: string;
+  token?: string;
   account: Account;
-  workspaces: WorkspaceSummary[];
+  workspaces?: WorkspaceSummary[];
 };
 
 export type WorkspaceEvent = {

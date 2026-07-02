@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -26,13 +27,19 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	token, err := issueJWT(s.cfg.JWTSecret, account, 7*24*time.Hour)
+	rawToken, created, err := requestEmailVerification(s.store.db, account, 0)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	workspaces, _ := listWorkspacesForAccount(s.store.db, account.ID)
-	writeJSON(w, http.StatusCreated, AuthResponse{Token: token, Account: account, Workspaces: workspaces})
+	if created {
+		link := s.accountURL("/account/verify-email", rawToken)
+		if err := s.emailSender.SendEmail(r.Context(), buildVerificationEmail(account.Email, link)); err != nil {
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+	}
+	writeJSON(w, http.StatusCreated, AuthResponse{Account: account})
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -50,6 +57,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
+	if !account.EmailVerified {
+		writeError(w, http.StatusForbidden, errEmailNotVerified.Error())
+		return
+	}
 	token, err := issueJWT(s.cfg.JWTSecret, account, 7*24*time.Hour)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -57,6 +68,105 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	workspaces, _ := listWorkspacesForAccount(s.store.db, account.ID)
 	writeJSON(w, http.StatusOK, AuthResponse{Token: token, Account: account, Workspaces: workspaces})
+}
+
+func (s *Server) handleVerifyEmail(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil || s.store.db == nil {
+		writeError(w, http.StatusServiceUnavailable, "database auth is not available")
+		return
+	}
+	var req VerifyEmailRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	account, err := verifyAccountEmailWithToken(s.store.db, req.Token)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"account": account})
+}
+
+func (s *Server) handleResendVerification(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil || s.store.db == nil {
+		writeError(w, http.StatusServiceUnavailable, "database auth is not available")
+		return
+	}
+	var req ResendVerificationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	account, err := getAccountByEmail(s.store.db, req.Email)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err == nil && account != nil && !account.EmailVerified {
+		rawToken, created, err := requestEmailVerification(s.store.db, account, accountEmailTokenCooldown)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if created {
+			link := s.accountURL("/account/verify-email", rawToken)
+			if err := s.emailSender.SendEmail(r.Context(), buildVerificationEmail(account.Email, link)); err != nil {
+				writeError(w, http.StatusBadGateway, err.Error())
+				return
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil || s.store.db == nil {
+		writeError(w, http.StatusServiceUnavailable, "database auth is not available")
+		return
+	}
+	var req ForgotPasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	account, err := getAccountByEmail(s.store.db, req.Email)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err == nil && account != nil && account.EmailVerified {
+		rawToken, created, err := requestPasswordReset(s.store.db, account, accountEmailTokenCooldown)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if created {
+			link := s.accountURL("/account/reset-password", rawToken)
+			if err := s.emailSender.SendEmail(r.Context(), buildPasswordResetEmail(account.Email, link)); err != nil {
+				writeError(w, http.StatusBadGateway, err.Error())
+				return
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil || s.store.db == nil {
+		writeError(w, http.StatusServiceUnavailable, "database auth is not available")
+		return
+	}
+	var req ResetPasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := resetAccountPasswordWithToken(s.store.db, req.Token, req.Password); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
@@ -425,11 +535,27 @@ func (s *Server) authenticateHumanRequest(r *http.Request) (*AuthContext, error)
 	if err != nil {
 		return nil, err
 	}
+	if !account.EmailVerified {
+		return nil, errEmailNotVerified
+	}
+	if !account.PasswordUpdatedAt.IsZero() && time.Unix(claims.IssuedAt, 0).Before(account.PasswordUpdatedAt) {
+		return nil, errors.New("token is no longer valid")
+	}
 	return &AuthContext{
 		PrincipalID:   account.ID,
 		PrincipalKind: "human",
 		AccountID:     account.ID,
 	}, nil
+}
+
+func (s *Server) accountURL(path string, token string) string {
+	origin := strings.TrimRight(strings.TrimSpace(s.cfg.PublicOrigin), "/")
+	if origin == "" {
+		origin = "http://localhost:5173"
+	}
+	values := url.Values{}
+	values.Set("token", token)
+	return origin + path + "?" + values.Encode()
 }
 
 func (s *Server) authenticateWorkspaceRequest(r *http.Request, workspaceID string) (*AuthContext, error) {
