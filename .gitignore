@@ -16,4 +16,4 @@ tmp/
 
 deploy/slock-agent/.env
 deploy/slock-agent/.env.local
-deploy/env/local.email.env
+secrets.env

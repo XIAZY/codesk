@@ -112,7 +112,7 @@ deploy-static:
 	VERSION="$(VERSION)" scripts/deploy-static.sh
 
 prod-config-check:
-	docker compose -f compose.prod.yml --env-file deploy/env/prod.server.env --env-file .env.example config >/dev/null
+	docker compose -f compose.prod.yml --env-file deploy/env/prod.server.env config >/dev/null
 
 daemon-checksums:
 	cd "$(DIST_DIR)/$(VERSION)" && shasum -a 256 *.tar.gz > SHA256SUMS

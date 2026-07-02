@@ -49,16 +49,11 @@ services:
       - "8080"
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    environment:
-      NOTTY_PORT: "8080"
-      NOTTY_DATABASE_URL: ${NOTTY_DATABASE_URL:?NOTTY_DATABASE_URL is required}
-      NOTTY_JWT_SECRET: ${NOTTY_JWT_SECRET:?NOTTY_JWT_SECRET is required}
-      NOTTY_PUBLIC_ORIGIN: ${NOTTY_PUBLIC_ORIGIN:-https://app.getcodesk.com}
-      NOTTY_PPROF_ADDR: ${NOTTY_PPROF_ADDR:-}
-      NOTTY_MAILGUN_DOMAIN: ${NOTTY_MAILGUN_DOMAIN:?NOTTY_MAILGUN_DOMAIN is required}
-      NOTTY_MAILGUN_API_KEY: ${NOTTY_MAILGUN_API_KEY:?NOTTY_MAILGUN_API_KEY is required}
-      NOTTY_MAILGUN_FROM: ${NOTTY_MAILGUN_FROM:?NOTTY_MAILGUN_FROM is required}
-      NOTTY_REQUIRE_EMAIL: ${NOTTY_REQUIRE_EMAIL:-1}
+    env_file:
+      - path: ${NOTTY_SERVER_ENV_FILE:-deploy/env/prod.server.env}
+        required: true
+      - path: secrets.env
+        required: true
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1"]
       interval: 10s
