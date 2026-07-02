@@ -1626,8 +1626,10 @@ Non-secret deployment defaults are split by consumer:
 Deployment scripts load `deploy/env/prod.deploy.env` automatically. Use
 `NOTTY_DEPLOY_ENV_FILE=/path/to/env` to test another set of deploy-machine
 defaults. Keep secrets outside git: set `CLOUDFLARE_API_TOKEN` or
-`NOTTY_CLOUDFLARE_TOKEN` locally for R2 publishing, and store only
-`NOTTY_DATABASE_URL` plus `NOTTY_JWT_SECRET` in `/opt/notty/.env` on the server.
+`NOTTY_CLOUDFLARE_TOKEN` locally for R2 publishing, and store backend secrets
+such as `NOTTY_DATABASE_URL`, `NOTTY_JWT_SECRET`, `NOTTY_MAILGUN_DOMAIN`,
+`NOTTY_MAILGUN_API_KEY`, and `NOTTY_MAILGUN_FROM` in `/opt/notty/.env` on the
+server.
 
 `R2_ENDPOINT_URL` is the account endpoint only. Do not include the bucket name in
 that URL; bucket names are supplied through `R2_HOMEPAGE_BUCKET`,
@@ -1644,7 +1646,7 @@ rule, `scripts/publish-static-r2.sh` uploads each root `index.html` twice when
 the bucket prefix is empty: once as `index.html`, and once as the empty object
 key. Daemon artifacts stay under `daemons/` so installer URLs remain stable.
 
-Production backend deployment uses `compose.prod.yml`. The remote server should keep `/opt/notty/.env` outside git with only secrets such as `NOTTY_DATABASE_URL` and `NOTTY_JWT_SECRET`. `scripts/deploy-backend.sh` calls `scripts/publish-backend.sh` to build and push `alphatoad/notty:backend-<version>`, uploads `compose.prod.yml`, `deploy/env/prod.server.env`, and the Compose-mounted nginx config to SSH host `notty`, then restarts the production Compose stack:
+Production backend deployment uses `compose.prod.yml`. The remote server should keep `/opt/notty/.env` outside git with only secrets such as `NOTTY_DATABASE_URL`, `NOTTY_JWT_SECRET`, and Mailgun credentials. `scripts/deploy-backend.sh` calls `scripts/publish-backend.sh` to build and push `alphatoad/notty:backend-<version>`, uploads `compose.prod.yml`, `deploy/env/prod.server.env`, and the Compose-mounted nginx config to SSH host `notty`, then restarts the production Compose stack:
 
 ```sh
 make deploy-backend VERSION=v0.1.0
@@ -1659,13 +1661,17 @@ Production API traffic is routed by the Compose-managed nginx service. The nginx
 - Websocket upgrades for `/ws/...`.
 - Hiding backend `Access-Control-*` headers so production responses do not contain duplicate CORS headers.
 
-Do not store production database credentials in git. Use `.env.example` only as the server secrets template.
+Do not store production database, JWT, or Mailgun credentials in git. Use `.env.example` only as the server secrets template.
 
 Important backend environment variables:
 
 - `NOTTY_PORT`: backend port, default `8080`.
 - `NOTTY_DATABASE_URL`: Postgres DSN.
 - `NOTTY_JWT_SECRET`: required JWT signing secret.
+- `NOTTY_MAILGUN_DOMAIN`: Mailgun sending domain.
+- `NOTTY_MAILGUN_API_KEY`: Mailgun API key.
+- `NOTTY_MAILGUN_FROM`: sender address used for verification and password reset emails.
+- `NOTTY_REQUIRE_EMAIL`: set to `1` in production so startup fails if Mailgun config is missing or invalid.
 - `NOTTY_PPROF_ADDR`: optional pprof bind address.
 
 Important deployment environment variables in `deploy/env/prod.deploy.env`:
@@ -1686,6 +1692,7 @@ Important production server defaults in `deploy/env/prod.server.env`:
 - `NOTTY_TLS_CERT_FILE` and `NOTTY_TLS_KEY_FILE`: TLS certificate and private key paths on the production host. Defaults are `/opt/notty/cert.pem` and `/opt/notty/private.pem`.
 - `NOTTY_PUBLIC_ORIGIN`: public frontend origin used by backend-generated links.
 - `NOTTY_PPROF_ADDR`: optional pprof bind address.
+- `NOTTY_REQUIRE_EMAIL`: production default `1`; keep Mailgun secrets in `/opt/notty/.env`.
 
 Important frontend environment variables:
 
