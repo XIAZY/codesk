@@ -82,6 +82,10 @@ func (s *Server) handleVerifyEmail(w http.ResponseWriter, r *http.Request) {
 	}
 	account, err := verifyAccountEmailWithToken(s.store.db, req.Token)
 	if err != nil {
+		if errors.Is(err, errConsumedAccountToken) {
+			writeError(w, http.StatusBadRequest, "email_already_verified")
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}

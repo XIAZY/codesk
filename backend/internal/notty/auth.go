@@ -49,10 +49,11 @@ type jwtClaims struct {
 }
 
 var (
-	errInvalidInvite       = errors.New("Invalid invite link.")
-	errExpiredInvite       = errors.New("This invite link has expired. Ask the workspace admin for a new one.")
-	errEmailNotVerified    = errors.New("email_not_verified")
-	errInvalidAccountToken = errors.New("invalid or expired token")
+	errInvalidInvite        = errors.New("Invalid invite link.")
+	errExpiredInvite        = errors.New("This invite link has expired. Ask the workspace admin for a new one.")
+	errEmailNotVerified     = errors.New("email_not_verified")
+	errInvalidAccountToken  = errors.New("invalid or expired token")
+	errConsumedAccountToken = errors.New("consumed token")
 )
 
 const (
@@ -493,7 +494,10 @@ func consumeAccountEmailTokenTx(tx *sql.Tx, rawToken string, purpose string) (st
 	if err != nil {
 		return "", err
 	}
-	if consumedAt.Valid || !expiresAt.After(now) {
+	if consumedAt.Valid {
+		return "", errConsumedAccountToken
+	}
+	if !expiresAt.After(now) {
 		return "", errInvalidAccountToken
 	}
 	if _, err = tx.Exec(

@@ -180,9 +180,9 @@ func TestAccountEmailTokensArePurposeScopedAndSingleUse(t *testing.T) {
 	authTestJSON(t, router, http.MethodPost, "/api/auth/verify-email", "", VerifyEmailRequest{
 		Token: verifyToken,
 	}, http.StatusOK, nil)
-	authTestJSON(t, router, http.MethodPost, "/api/auth/verify-email", "", VerifyEmailRequest{
+	authTestErrorContains(t, router, http.MethodPost, "/api/auth/verify-email", "", VerifyEmailRequest{
 		Token: verifyToken,
-	}, http.StatusBadRequest, nil)
+	}, http.StatusBadRequest, "email_already_verified")
 }
 
 func TestAccountEmailTokensRejectExpiredVerificationAndResetTokens(t *testing.T) {

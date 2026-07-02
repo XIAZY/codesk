@@ -852,6 +852,10 @@ function VerifyEmailPage({ api, token }: { api: ApiClient; token: string }) {
       })
       .catch((err) => {
         if (!disposed) {
+          if (err instanceof Error && err.message === "email_already_verified") {
+            setStatus("verified");
+            return;
+          }
           setStatus("error");
           setError(err instanceof Error ? err.message : String(err));
         }

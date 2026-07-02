@@ -162,6 +162,10 @@ beforeEach(() => {
       return jsonResponse({ token: "token", account: mocks.authAccount, workspaces: mocks.authWorkspaces });
     }
     if (path.endsWith("/api/auth/verify-email") && init?.method === "POST") {
+      const body = typeof init.body === "string" ? JSON.parse(init.body) as { token?: string } : {};
+      if (body.token === "already-used") {
+        return jsonErrorResponse(400, "email_already_verified");
+      }
       return jsonResponse({ account: { ...account, emailVerified: true } });
     }
     if (path.endsWith("/api/auth/resend-verification") && init?.method === "POST") {
@@ -369,6 +373,18 @@ describe("App URL routing", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Email verified" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Log in" }));
+    expect(window.location.pathname).toBe("/login");
+  });
+
+  it("shows success for an already-used verification link", async () => {
+    const user = userEvent.setup();
+    window.history.replaceState(null, "", "/account/verify-email?token=already-used");
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Email verified" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Verification failed" })).toBeNull();
     await user.click(screen.getByRole("button", { name: "Log in" }));
     expect(window.location.pathname).toBe("/login");
   });
