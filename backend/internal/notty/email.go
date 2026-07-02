@@ -104,7 +104,22 @@ func buildVerificationEmail(to string, link string) EmailMessage {
 		"Click below to verify your email and activate your codesk account.",
 		"Verify email",
 		link,
+		"This link expires in 1 hour.",
 		"Didn't sign up? You can ignore this email.",
+	)
+}
+
+func buildWelcomeEmail(to string, link string) EmailMessage {
+	return buildAccountEmail(
+		to,
+		"Welcome to codesk",
+		"Welcome to codesk",
+		"Welcome to codesk",
+		"Your email is verified. Open codesk to create or join a workspace and start working with your agents.",
+		"Open codesk",
+		link,
+		"",
+		"If you didn't sign up, you can ignore this email.",
 	)
 }
 
@@ -117,18 +132,24 @@ func buildPasswordResetEmail(to string, link string) EmailMessage {
 		"We got a request to reset the password for your codesk account. Click below to choose a new one.",
 		"Reset password",
 		link,
+		"This link expires in 1 hour.",
 		"Didn't request this? You can ignore this email.",
 	)
 }
 
-func buildAccountEmail(to string, subject string, eyebrow string, heading string, body string, button string, link string, footer string) EmailMessage {
+func buildAccountEmail(to string, subject string, eyebrow string, heading string, body string, button string, link string, linkNote string, footer string) EmailMessage {
 	escapedLink := html.EscapeString(link)
 	escapedSubject := html.EscapeString(subject)
 	escapedEyebrow := html.EscapeString(eyebrow)
 	escapedHeading := html.EscapeString(heading)
 	escapedBody := html.EscapeString(body)
 	escapedButton := html.EscapeString(button)
+	escapedLinkNote := html.EscapeString(strings.TrimSpace(linkNote))
 	escapedFooter := html.EscapeString(footer)
+	linkNoteHTML := ""
+	if escapedLinkNote != "" {
+		linkNoteHTML = fmt.Sprintf(`<div style="margin-top:16px;font-size:13px;color:#A6A29A;">%s</div>`, escapedLinkNote)
+	}
 	htmlBody := fmt.Sprintf(`<!doctype html>
 <html lang="en">
 <head>
@@ -147,7 +168,7 @@ func buildAccountEmail(to string, subject string, eyebrow string, heading string
         <div style="margin-top:26px;">
           <a href="%s" style="display:inline-block;background:#1B1A17;color:#FCFBF7;font-weight:600;font-size:15px;padding:13px 26px;border-radius:24px;text-decoration:none;">%s</a>
         </div>
-        <div style="margin-top:16px;font-size:13px;color:#A6A29A;">This link expires in 1 hour.</div>
+        %s
         <div style="margin-top:26px;padding-top:20px;border-top:1px solid #E6E2D8;">
           <div style="font-size:12.5px;color:#A6A29A;margin-bottom:8px;">Or paste this link into your browser:</div>
           <div style="font-family:monospace;font-size:12px;color:#6F6B62;background:#F3F1EA;border:1px solid #E6E2D8;border-radius:8px;padding:10px 12px;word-break:break-all;">%s</div>
@@ -157,7 +178,11 @@ func buildAccountEmail(to string, subject string, eyebrow string, heading string
     </div>
   </div>
 </body>
-</html>`, escapedSubject, accountEmailLogoHTML, escapedEyebrow, escapedHeading, escapedBody, escapedLink, escapedButton, escapedLink, escapedFooter)
-	textBody := fmt.Sprintf("%s\n\n%s\n\n%s\n\nThis link expires in 1 hour.", heading, body, link)
+</html>`, escapedSubject, accountEmailLogoHTML, escapedEyebrow, escapedHeading, escapedBody, escapedLink, escapedButton, linkNoteHTML, escapedLink, escapedFooter)
+	textParts := []string{heading, body, link}
+	if strings.TrimSpace(linkNote) != "" {
+		textParts = append(textParts, strings.TrimSpace(linkNote))
+	}
+	textBody := strings.Join(textParts, "\n\n")
 	return EmailMessage{To: to, Subject: subject, Text: textBody, HTML: htmlBody}
 }

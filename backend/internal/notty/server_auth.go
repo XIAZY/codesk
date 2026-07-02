@@ -1,9 +1,11 @@
 package notty
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -34,10 +36,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	if created {
 		link := s.accountURL("/account/verify-email", rawToken)
-		if err := s.emailSender.SendEmail(r.Context(), buildVerificationEmail(account.Email, link)); err != nil {
-			writeError(w, http.StatusBadGateway, err.Error())
-			return
-		}
+		s.sendAccountEmailAsync("verification", account, buildVerificationEmail(account.Email, link))
 	}
 	writeJSON(w, http.StatusCreated, AuthResponse{Account: account})
 }
@@ -89,6 +88,7 @@ func (s *Server) handleVerifyEmail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	s.sendAccountEmailAsync("welcome", account, buildWelcomeEmail(account.Email, s.accountAppURL()))
 	writeJSON(w, http.StatusOK, map[string]any{"account": account})
 }
 
@@ -115,10 +115,7 @@ func (s *Server) handleResendVerification(w http.ResponseWriter, r *http.Request
 		}
 		if created {
 			link := s.accountURL("/account/verify-email", rawToken)
-			if err := s.emailSender.SendEmail(r.Context(), buildVerificationEmail(account.Email, link)); err != nil {
-				writeError(w, http.StatusBadGateway, err.Error())
-				return
-			}
+			s.sendAccountEmailAsync("verification", account, buildVerificationEmail(account.Email, link))
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -147,13 +144,28 @@ func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
 		}
 		if created {
 			link := s.accountURL("/account/reset-password", rawToken)
-			if err := s.emailSender.SendEmail(r.Context(), buildPasswordResetEmail(account.Email, link)); err != nil {
-				writeError(w, http.StatusBadGateway, err.Error())
-				return
-			}
+			s.sendAccountEmailAsync("password_reset", account, buildPasswordResetEmail(account.Email, link))
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) sendAccountEmailAsync(emailType string, account *Account, message EmailMessage) {
+	if s.emailSender == nil {
+		return
+	}
+	accountID := ""
+	if account != nil {
+		accountID = account.ID
+	}
+	recipient := strings.TrimSpace(message.To)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.emailSender.SendEmail(ctx, message); err != nil {
+			log.Printf("account email send failed type=%s account=%s to=%s subject=%q err=%v", emailType, accountID, recipient, message.Subject, err)
+		}
+	}()
 }
 
 func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
@@ -550,13 +562,18 @@ func (s *Server) authenticateHumanRequest(r *http.Request) (*AuthContext, error)
 }
 
 func (s *Server) accountURL(path string, token string) string {
+	origin := s.accountAppURL()
+	values := url.Values{}
+	values.Set("token", token)
+	return origin + path + "?" + values.Encode()
+}
+
+func (s *Server) accountAppURL() string {
 	origin := strings.TrimRight(strings.TrimSpace(s.cfg.PublicOrigin), "/")
 	if origin == "" {
 		origin = "http://localhost:5173"
 	}
-	values := url.Values{}
-	values.Set("token", token)
-	return origin + path + "?" + values.Encode()
+	return origin
 }
 
 func (s *Server) authenticateWorkspaceRequest(r *http.Request, workspaceID string) (*AuthContext, error) {

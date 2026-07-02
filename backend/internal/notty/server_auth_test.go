@@ -6,10 +6,13 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -62,8 +65,12 @@ func TestRegisterCreatesUnverifiedAccountAndRequiresEmailVerification(t *testing
 	if register.Account == nil || register.Account.EmailVerified {
 		t.Fatalf("expected unverified account, got %#v", register.Account)
 	}
-	if len(sender.messages) != 1 {
-		t.Fatalf("verification emails sent = %d, want 1", len(sender.messages))
+	messages := authTestWaitForEmailCount(t, sender, 1)
+	if len(messages) != 1 {
+		t.Fatalf("registration emails sent = %d, want 1", len(messages))
+	}
+	if messages[0].Subject != "Verify your email to finish signing up" {
+		t.Fatalf("registration email should verify the account, got subject %q", messages[0].Subject)
 	}
 
 	var loginError map[string]string
@@ -75,7 +82,7 @@ func TestRegisterCreatesUnverifiedAccountAndRequiresEmailVerification(t *testing
 		t.Fatalf("login error = %#v, want email_not_verified", loginError)
 	}
 
-	verifyToken := authTestEmailToken(t, sender.messages[0], "/account/verify-email")
+	verifyToken := authTestEmailToken(t, messages[0], "/account/verify-email")
 	var verifyResponse struct {
 		Account *Account `json:"account"`
 	}
@@ -85,6 +92,23 @@ func TestRegisterCreatesUnverifiedAccountAndRequiresEmailVerification(t *testing
 	if verifyResponse.Account == nil || !verifyResponse.Account.EmailVerified {
 		t.Fatalf("expected verified account, got %#v", verifyResponse.Account)
 	}
+	messages = authTestWaitForEmailCount(t, sender, 2)
+	if len(messages) != 2 {
+		t.Fatalf("verification should send welcome email, got %d messages", len(messages))
+	}
+	if messages[1].Subject != "Welcome to codesk" {
+		t.Fatalf("post-verification email should welcome the user, got subject %q", messages[1].Subject)
+	}
+	if strings.Contains(messages[1].Text, "token=") {
+		t.Fatalf("welcome email should not carry an account token: %q", messages[1].Text)
+	}
+	authTestErrorContains(t, router, http.MethodPost, "/api/auth/verify-email", "", VerifyEmailRequest{
+		Token: verifyToken,
+	}, http.StatusBadRequest, "email_already_verified")
+	messages = sender.snapshot()
+	if len(messages) != 2 {
+		t.Fatalf("verification replay should not send another welcome email, got %d messages", len(messages))
+	}
 
 	var login AuthResponse
 	authTestJSON(t, router, http.MethodPost, "/api/auth/login", "", LoginRequest{
@@ -93,6 +117,168 @@ func TestRegisterCreatesUnverifiedAccountAndRequiresEmailVerification(t *testing
 	}, http.StatusOK, &login)
 	if login.Token == "" || login.Account == nil || !login.Account.EmailVerified {
 		t.Fatalf("expected verified login response, got %#v", login)
+	}
+}
+
+func TestVerifyEmailDoesNotBlockOnWelcomeEmailFailure(t *testing.T) {
+	_, router := newAuthTestServer(t)
+	sender := authTestEmailSenderForRouter(t, router)
+	sender.failBySubject = map[string]error{
+		"Welcome to codesk": errors.New("welcome email failed"),
+	}
+	logs := authTestCaptureLogs(t)
+
+	var register AuthResponse
+	authTestJSON(t, router, http.MethodPost, "/api/auth/register", "", RegisterRequest{
+		Email:       "welcome-failure@example.com",
+		Password:    "verify-pass",
+		DisplayName: "Welcome Failure",
+	}, http.StatusCreated, &register)
+	if register.Token != "" {
+		t.Fatalf("register returned token for unverified account: %q", register.Token)
+	}
+	if register.Account == nil || register.Account.EmailVerified {
+		t.Fatalf("expected unverified account, got %#v", register.Account)
+	}
+	messages := authTestWaitForEmailCount(t, sender, 1)
+	if len(messages) != 1 {
+		t.Fatalf("registration should send verification email only, got %d messages", len(messages))
+	}
+	verifyToken := authTestEmailToken(t, messages[0], "/account/verify-email")
+	var verifyResponse struct {
+		Account *Account `json:"account"`
+	}
+	authTestJSON(t, router, http.MethodPost, "/api/auth/verify-email", "", VerifyEmailRequest{
+		Token: verifyToken,
+	}, http.StatusOK, &verifyResponse)
+	if verifyResponse.Account == nil || !verifyResponse.Account.EmailVerified {
+		t.Fatalf("expected verified account despite welcome failure, got %#v", verifyResponse.Account)
+	}
+	_ = authTestWaitForEmailFailure(t, sender, "Welcome to codesk")
+	messages = sender.snapshot()
+	if len(messages) != 1 {
+		t.Fatalf("failed welcome email should not be retained by fake sender, got %d messages", len(messages))
+	}
+	if got := logs.waitContains(t, "account email send failed type=welcome", register.Account.ID); strings.Contains(got, "token=") {
+		t.Fatalf("welcome failure log leaked account token/link: %q", got)
+	}
+}
+
+func TestRegisterStartsVerificationEmailAsyncAndIgnoresSendFailure(t *testing.T) {
+	_, router := newAuthTestServer(t)
+	sender := authTestEmailSenderForRouter(t, router)
+	release := make(chan struct{})
+	released := false
+	closeRelease := func() {
+		if !released {
+			close(release)
+			released = true
+		}
+	}
+	t.Cleanup(closeRelease)
+	sender.blockUntil = release
+	sender.failBySubject = map[string]error{
+		"Verify your email to finish signing up": errors.New("mailgun unavailable"),
+	}
+	logs := authTestCaptureLogs(t)
+
+	done := make(chan authTestHTTPResult, 1)
+	go func() {
+		var register AuthResponse
+		result := authTestServeJSONNoFatal(router, http.MethodPost, "/api/auth/register", RegisterRequest{
+			Email:       "async-register@example.com",
+			Password:    "verify-pass",
+			DisplayName: "Async Register",
+		}, &register)
+		done <- result
+	}()
+
+	var register AuthResponse
+	select {
+	case result := <-done:
+		if result.err != nil {
+			t.Fatalf("decode register response: %v body=%s", result.err, result.body)
+		}
+		if result.code != http.StatusCreated {
+			t.Fatalf("register expected status %d, got %d body=%s", http.StatusCreated, result.code, result.body)
+		}
+		if err := json.Unmarshal([]byte(result.body), &register); err != nil {
+			t.Fatalf("decode register response: %v body=%s", err, result.body)
+		}
+	case <-time.After(time.Second):
+		closeRelease()
+		t.Fatalf("register response waited for email send completion")
+	}
+	if register.Token != "" || register.Account == nil || register.Account.EmailVerified {
+		t.Fatalf("expected unverified registration response without token, got %#v", register)
+	}
+	attempt := authTestWaitForEmailAttempt(t, sender, "Verify your email to finish signing up")
+	authTestAssertAsyncEmailContext(t, attempt)
+	if messages := sender.snapshot(); len(messages) != 0 {
+		t.Fatalf("blocked async email should not be recorded yet, got %#v", messages)
+	}
+	closeRelease()
+	failure := authTestWaitForEmailFailure(t, sender, "Verify your email to finish signing up")
+	if failure.Err == nil || !strings.Contains(failure.Err.Error(), "mailgun unavailable") {
+		t.Fatalf("expected async verification send failure, got %#v", failure)
+	}
+	if got := logs.waitContains(t, "account email send failed type=verification", register.Account.ID); strings.Contains(got, "token=") || strings.Contains(got, "/account/verify-email") {
+		t.Fatalf("verification failure log leaked account token/link: %q", got)
+	}
+}
+
+func TestForgotPasswordStartsResetEmailAsyncAndIgnoresSendFailure(t *testing.T) {
+	_, router := newAuthTestServer(t)
+	sender := authTestEmailSenderForRouter(t, router)
+	auth := authTestRegister(t, router, "async-reset@example.com", "old-pass", "Async Reset")
+	initialMessages := sender.count()
+
+	release := make(chan struct{})
+	released := false
+	closeRelease := func() {
+		if !released {
+			close(release)
+			released = true
+		}
+	}
+	t.Cleanup(closeRelease)
+	sender.blockUntil = release
+	sender.failBySubject = map[string]error{
+		"Reset your codesk password": errors.New("mailgun unavailable"),
+	}
+	logs := authTestCaptureLogs(t)
+
+	done := make(chan authTestHTTPResult, 1)
+	go func() {
+		done <- authTestServeJSONNoFatal(router, http.MethodPost, "/api/auth/forgot-password", ForgotPasswordRequest{
+			Email: "async-reset@example.com",
+		}, nil)
+	}()
+
+	select {
+	case result := <-done:
+		if result.err != nil {
+			t.Fatalf("forgot-password request failed: %v body=%s", result.err, result.body)
+		}
+		if result.code != http.StatusOK {
+			t.Fatalf("forgot-password expected status %d, got %d body=%s", http.StatusOK, result.code, result.body)
+		}
+	case <-time.After(time.Second):
+		closeRelease()
+		t.Fatalf("forgot-password response waited for email send completion")
+	}
+	attempt := authTestWaitForEmailAttempt(t, sender, "Reset your codesk password")
+	authTestAssertAsyncEmailContext(t, attempt)
+	if messages := sender.snapshot(); len(messages) != initialMessages {
+		t.Fatalf("blocked async reset email should not be recorded yet, got %d messages, want %d", len(messages), initialMessages)
+	}
+	closeRelease()
+	failure := authTestWaitForEmailFailure(t, sender, "Reset your codesk password")
+	if failure.Err == nil || !strings.Contains(failure.Err.Error(), "mailgun unavailable") {
+		t.Fatalf("expected async reset send failure, got %#v", failure)
+	}
+	if got := logs.waitContains(t, "account email send failed type=password_reset", auth.Account.ID); strings.Contains(got, "token=") || strings.Contains(got, "/account/reset-password") {
+		t.Fatalf("reset failure log leaked account token/link: %q", got)
 	}
 }
 
@@ -108,23 +294,25 @@ func TestForgotAndResetPasswordRequireVerifiedAccountAndKeepExistingJWTStateless
 		Password:    "old-pass",
 		DisplayName: "Reset Unverified",
 	}, http.StatusCreated, &register)
-	initialMessages := len(sender.messages)
+	authTestWaitForEmailCount(t, sender, 1)
+	initialMessages := sender.count()
 	authTestJSON(t, router, http.MethodPost, "/api/auth/forgot-password", "", ForgotPasswordRequest{
 		Email: unverified,
 	}, http.StatusOK, nil)
-	if len(sender.messages) != initialMessages {
+	if sender.count() != initialMessages {
 		t.Fatalf("forgot-password sent reset email for unverified account")
 	}
 
 	auth := authTestRegister(t, router, verified, "old-pass", "Reset Verified")
-	initialMessages = len(sender.messages)
+	initialMessages = sender.count()
 	authTestJSON(t, router, http.MethodPost, "/api/auth/forgot-password", "", ForgotPasswordRequest{
 		Email: verified,
 	}, http.StatusOK, nil)
-	if len(sender.messages) != initialMessages+1 {
-		t.Fatalf("forgot-password emails sent = %d, want %d", len(sender.messages), initialMessages+1)
+	messages := authTestWaitForEmailCount(t, sender, initialMessages+1)
+	if len(messages) != initialMessages+1 {
+		t.Fatalf("forgot-password emails sent = %d, want %d", len(messages), initialMessages+1)
 	}
-	resetToken := authTestEmailToken(t, sender.messages[len(sender.messages)-1], "/account/reset-password")
+	resetToken := authTestEmailToken(t, messages[len(messages)-1], "/account/reset-password")
 	authTestJSON(t, router, http.MethodPost, "/api/auth/reset-password", "", ResetPasswordRequest{
 		Token:    resetToken,
 		Password: "new-pass",
@@ -171,7 +359,8 @@ func TestAccountEmailTokensArePurposeScopedAndSingleUse(t *testing.T) {
 		Password:    "token-pass",
 		DisplayName: "Token Scope",
 	}, http.StatusCreated, nil)
-	verifyToken := authTestEmailToken(t, sender.messages[0], "/account/verify-email")
+	messages := authTestWaitForEmailCount(t, sender, 1)
+	verifyToken := authTestEmailToken(t, messages[0], "/account/verify-email")
 
 	authTestJSON(t, router, http.MethodPost, "/api/auth/reset-password", "", ResetPasswordRequest{
 		Token:    verifyToken,
@@ -198,25 +387,31 @@ func TestAccountEmailTokensRejectExpiredVerificationAndResetTokens(t *testing.T)
 	if register.Account == nil || register.Account.EmailVerified {
 		t.Fatalf("expected unverified account response, got %#v", register.Account)
 	}
-	verifyToken := authTestEmailToken(t, sender.messages[len(sender.messages)-1], "/account/verify-email")
+	messages := authTestWaitForEmailCount(t, sender, 1)
+	verifyToken := authTestLatestEmailToken(t, messages, 0, "/account/verify-email")
 	authTestExpireAccountEmailToken(t, server.store.db, verifyToken, accountEmailTokenPurposeVerifyEmail)
 	authTestJSON(t, router, http.MethodPost, "/api/auth/verify-email", "", VerifyEmailRequest{
 		Token: verifyToken,
 	}, http.StatusBadRequest, nil)
+	messages = sender.snapshot()
+	if len(messages) != 1 {
+		t.Fatalf("expired verification should not send welcome email, got %d messages", len(messages))
+	}
 	authTestStatus(t, router, http.MethodPost, "/api/auth/login", "", LoginRequest{
 		Email:    "expired-verify@example.com",
 		Password: "verify-pass",
 	}, http.StatusForbidden)
 
 	authTestRegister(t, router, "expired-reset@example.com", "old-pass", "Expired Reset")
-	initialMessages := len(sender.messages)
+	initialMessages := sender.count()
 	authTestJSON(t, router, http.MethodPost, "/api/auth/forgot-password", "", ForgotPasswordRequest{
 		Email: "expired-reset@example.com",
 	}, http.StatusOK, nil)
-	if len(sender.messages) != initialMessages+1 {
-		t.Fatalf("forgot-password emails sent = %d, want %d", len(sender.messages), initialMessages+1)
+	messages = authTestWaitForEmailCount(t, sender, initialMessages+1)
+	if len(messages) != initialMessages+1 {
+		t.Fatalf("forgot-password emails sent = %d, want %d", len(messages), initialMessages+1)
 	}
-	resetToken := authTestEmailToken(t, sender.messages[len(sender.messages)-1], "/account/reset-password")
+	resetToken := authTestEmailToken(t, messages[len(messages)-1], "/account/reset-password")
 	authTestExpireAccountEmailToken(t, server.store.db, resetToken, accountEmailTokenPurposeResetPassword)
 	authTestJSON(t, router, http.MethodPost, "/api/auth/reset-password", "", ResetPasswordRequest{
 		Token:    resetToken,
@@ -237,59 +432,71 @@ func TestVerificationAndPasswordResetRequestsRespectNoopAndCooldownStates(t *tes
 	if register.Account == nil || register.Account.EmailVerified {
 		t.Fatalf("expected unverified account response, got %#v", register.Account)
 	}
-	if len(sender.messages) != 1 {
-		t.Fatalf("verification emails sent = %d, want 1", len(sender.messages))
+	messages := authTestWaitForEmailCount(t, sender, 1)
+	if len(messages) != 1 {
+		t.Fatalf("registration emails sent = %d, want 1", len(messages))
 	}
-	firstVerifyToken := authTestEmailToken(t, sender.messages[0], "/account/verify-email")
+	firstVerifyToken := authTestEmailToken(t, messages[0], "/account/verify-email")
 
 	authTestJSON(t, router, http.MethodPost, "/api/auth/resend-verification", "", ResendVerificationRequest{
 		Email: "resend-state@example.com",
 	}, http.StatusOK, nil)
-	if len(sender.messages) != 1 {
-		t.Fatalf("resend inside cooldown sent email count = %d, want 1", len(sender.messages))
+	messages = sender.snapshot()
+	if len(messages) != 1 {
+		t.Fatalf("resend inside cooldown sent email count = %d, want 1", len(messages))
 	}
 
 	authTestBackdateAccountEmailToken(t, server.store.db, firstVerifyToken, accountEmailTokenPurposeVerifyEmail, accountEmailTokenCooldown+time.Minute)
 	authTestJSON(t, router, http.MethodPost, "/api/auth/resend-verification", "", ResendVerificationRequest{
 		Email: "resend-state@example.com",
 	}, http.StatusOK, nil)
-	if len(sender.messages) != 2 {
-		t.Fatalf("resend after cooldown sent email count = %d, want 2", len(sender.messages))
+	messages = authTestWaitForEmailCount(t, sender, 2)
+	if len(messages) != 2 {
+		t.Fatalf("resend after cooldown sent email count = %d, want 2", len(messages))
 	}
-	secondVerifyToken := authTestEmailToken(t, sender.messages[1], "/account/verify-email")
+	secondVerifyToken := authTestEmailToken(t, messages[1], "/account/verify-email")
 	authTestJSON(t, router, http.MethodPost, "/api/auth/verify-email", "", VerifyEmailRequest{
 		Token: firstVerifyToken,
 	}, http.StatusBadRequest, nil)
 	authTestJSON(t, router, http.MethodPost, "/api/auth/verify-email", "", VerifyEmailRequest{
 		Token: secondVerifyToken,
 	}, http.StatusOK, nil)
+	messages = authTestWaitForEmailCount(t, sender, 3)
+	if len(messages) != 3 {
+		t.Fatalf("successful verification should send welcome email count = %d, want 3", len(messages))
+	}
+	if messages[2].Subject != "Welcome to codesk" {
+		t.Fatalf("successful verification should send welcome email, got subject %q", messages[2].Subject)
+	}
 
 	authTestJSON(t, router, http.MethodPost, "/api/auth/resend-verification", "", ResendVerificationRequest{
 		Email: "resend-state@example.com",
 	}, http.StatusOK, nil)
-	if len(sender.messages) != 2 {
-		t.Fatalf("resend for verified account sent email count = %d, want 2", len(sender.messages))
+	messages = sender.snapshot()
+	if len(messages) != 3 {
+		t.Fatalf("resend for verified account sent email count = %d, want 3", len(messages))
 	}
 
 	authTestRegister(t, router, "reset-cooldown@example.com", "old-pass", "Reset Cooldown")
-	initialMessages := len(sender.messages)
+	initialMessages := sender.count()
 	authTestJSON(t, router, http.MethodPost, "/api/auth/forgot-password", "", ForgotPasswordRequest{
 		Email: "reset-cooldown@example.com",
 	}, http.StatusOK, nil)
-	if len(sender.messages) != initialMessages+1 {
-		t.Fatalf("forgot-password emails sent = %d, want %d", len(sender.messages), initialMessages+1)
+	messages = authTestWaitForEmailCount(t, sender, initialMessages+1)
+	if len(messages) != initialMessages+1 {
+		t.Fatalf("forgot-password emails sent = %d, want %d", len(messages), initialMessages+1)
 	}
 	authTestJSON(t, router, http.MethodPost, "/api/auth/forgot-password", "", ForgotPasswordRequest{
 		Email: "reset-cooldown@example.com",
 	}, http.StatusOK, nil)
-	if len(sender.messages) != initialMessages+1 {
-		t.Fatalf("forgot-password inside cooldown sent email count = %d, want %d", len(sender.messages), initialMessages+1)
+	if sender.count() != initialMessages+1 {
+		t.Fatalf("forgot-password inside cooldown sent email count = %d, want %d", sender.count(), initialMessages+1)
 	}
 	authTestJSON(t, router, http.MethodPost, "/api/auth/forgot-password", "", ForgotPasswordRequest{
 		Email: "missing-reset@example.com",
 	}, http.StatusOK, nil)
-	if len(sender.messages) != initialMessages+1 {
-		t.Fatalf("forgot-password for nonexistent account sent email count = %d, want %d", len(sender.messages), initialMessages+1)
+	if sender.count() != initialMessages+1 {
+		t.Fatalf("forgot-password for nonexistent account sent email count = %d, want %d", sender.count(), initialMessages+1)
 	}
 }
 
@@ -1500,7 +1707,25 @@ type authTestWorkspace struct {
 }
 
 type authTestEmailSender struct {
-	messages []EmailMessage
+	mu            sync.Mutex
+	messages      []EmailMessage
+	failBySubject map[string]error
+	blockUntil    <-chan struct{}
+	attempts      chan authTestEmailAttempt
+	sent          chan EmailMessage
+	failures      chan authTestEmailFailure
+}
+
+type authTestEmailAttempt struct {
+	Message     EmailMessage
+	HasDeadline bool
+	Deadline    time.Time
+	ErrAtStart  error
+}
+
+type authTestEmailFailure struct {
+	Message EmailMessage
+	Err     error
 }
 
 type authTestRouter struct {
@@ -1508,9 +1733,169 @@ type authTestRouter struct {
 	emailSender *authTestEmailSender
 }
 
-func (s *authTestEmailSender) SendEmail(_ context.Context, message EmailMessage) error {
-	s.messages = append(s.messages, message)
+func newAuthTestEmailSender() *authTestEmailSender {
+	return &authTestEmailSender{
+		attempts: make(chan authTestEmailAttempt, 1024),
+		sent:     make(chan EmailMessage, 1024),
+		failures: make(chan authTestEmailFailure, 1024),
+	}
+}
+
+func (s *authTestEmailSender) SendEmail(ctx context.Context, message EmailMessage) error {
+	deadline, hasDeadline := ctx.Deadline()
+	s.attempts <- authTestEmailAttempt{
+		Message:     message,
+		HasDeadline: hasDeadline,
+		Deadline:    deadline,
+		ErrAtStart:  ctx.Err(),
+	}
+	if s.blockUntil != nil {
+		<-s.blockUntil
+	}
+	s.mu.Lock()
+	err := s.failBySubject[message.Subject]
+	if err == nil {
+		s.messages = append(s.messages, message)
+	}
+	s.mu.Unlock()
+	if err != nil {
+		s.failures <- authTestEmailFailure{Message: message, Err: err}
+		return err
+	}
+	s.sent <- message
 	return nil
+}
+
+func (s *authTestEmailSender) snapshot() []EmailMessage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]EmailMessage(nil), s.messages...)
+}
+
+func (s *authTestEmailSender) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.messages)
+}
+
+func authTestWaitForEmailCount(t *testing.T, sender *authTestEmailSender, want int) []EmailMessage {
+	t.Helper()
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for {
+		messages := sender.snapshot()
+		if len(messages) >= want {
+			return messages
+		}
+		select {
+		case <-sender.sent:
+		case <-deadline.C:
+			t.Fatalf("email messages sent = %d, want at least %d", len(messages), want)
+		}
+	}
+}
+
+func authTestWaitForEmailAttempt(t *testing.T, sender *authTestEmailSender, subject string) authTestEmailAttempt {
+	t.Helper()
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for {
+		select {
+		case attempt := <-sender.attempts:
+			if attempt.Message.Subject == subject {
+				return attempt
+			}
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for email attempt with subject %q", subject)
+		}
+	}
+}
+
+func authTestWaitForEmailFailure(t *testing.T, sender *authTestEmailSender, subject string) authTestEmailFailure {
+	t.Helper()
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for {
+		select {
+		case failure := <-sender.failures:
+			if failure.Message.Subject == subject {
+				return failure
+			}
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for email failure with subject %q", subject)
+		}
+	}
+}
+
+func authTestAssertAsyncEmailContext(t *testing.T, attempt authTestEmailAttempt) {
+	t.Helper()
+	if attempt.ErrAtStart != nil {
+		t.Fatalf("email context was already canceled before send: %v", attempt.ErrAtStart)
+	}
+	if !attempt.HasDeadline {
+		t.Fatalf("email send context has no deadline")
+	}
+	if remaining := time.Until(attempt.Deadline); remaining <= 0 || remaining > 11*time.Second {
+		t.Fatalf("email send deadline remaining = %v, want fresh bounded timeout", remaining)
+	}
+}
+
+type authTestLogBuffer struct {
+	mu     sync.Mutex
+	text   strings.Builder
+	writes chan struct{}
+}
+
+func authTestCaptureLogs(t *testing.T) *authTestLogBuffer {
+	t.Helper()
+	buffer := &authTestLogBuffer{writes: make(chan struct{}, 128)}
+	previousLogOutput := log.Writer()
+	log.SetOutput(buffer)
+	t.Cleanup(func() {
+		log.SetOutput(previousLogOutput)
+	})
+	return buffer
+}
+
+func (b *authTestLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	_, _ = b.text.Write(p)
+	b.mu.Unlock()
+	select {
+	case b.writes <- struct{}{}:
+	default:
+	}
+	return len(p), nil
+}
+
+func (b *authTestLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.text.String()
+}
+
+func (b *authTestLogBuffer) waitContains(t *testing.T, want ...string) string {
+	t.Helper()
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for {
+		got := b.String()
+		all := true
+		for _, value := range want {
+			if !strings.Contains(got, value) {
+				all = false
+				break
+			}
+		}
+		if all {
+			return got
+		}
+		select {
+		case <-b.writes:
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for log fields %v; got %q", want, got)
+		}
+	}
 }
 
 func authTestEmailToken(t *testing.T, message EmailMessage, wantPath ...string) string {
@@ -1538,6 +1923,44 @@ func authTestEmailToken(t *testing.T, message EmailMessage, wantPath ...string) 
 	}
 	t.Fatalf("email message did not include token link: %#v", message)
 	return ""
+}
+
+func authTestLatestEmailToken(t *testing.T, messages []EmailMessage, start int, wantPath string) string {
+	t.Helper()
+	if start < 0 || start > len(messages) {
+		t.Fatalf("invalid email message start index %d for %d messages", start, len(messages))
+	}
+	for i := len(messages) - 1; i >= start; i-- {
+		token, ok := authTestEmailTokenForPath(t, messages[i], wantPath)
+		if ok {
+			return token
+		}
+	}
+	t.Fatalf("email messages[%d:] did not include token link for path %q: %#v", start, wantPath, messages[start:])
+	return ""
+}
+
+func authTestEmailTokenForPath(t *testing.T, message EmailMessage, wantPath string) (string, bool) {
+	t.Helper()
+	for _, line := range strings.Split(message.Text, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.Contains(line, "token=") {
+			continue
+		}
+		parsed, err := url.Parse(line)
+		if err != nil {
+			t.Fatalf("parse email link %q: %v", line, err)
+		}
+		if parsed.Path != wantPath {
+			continue
+		}
+		token := parsed.Query().Get("token")
+		if token == "" {
+			t.Fatalf("email link %q did not include token", line)
+		}
+		return token, true
+	}
+	return "", false
 }
 
 func authTestExpireAccountEmailToken(t *testing.T, db *sql.DB, rawToken string, purpose string) {
@@ -1611,7 +2034,7 @@ func newAuthTestServer(t *testing.T) (*Server, http.Handler) {
 		_ = store.Close()
 	})
 	server := NewServer(Config{DatabaseURL: dsn, JWTSecret: "test-secret"}, store)
-	emailSender := &authTestEmailSender{}
+	emailSender := newAuthTestEmailSender()
 	server.emailSender = emailSender
 	return server, &authTestRouter{
 		Handler:     server.Routes(),
@@ -1622,7 +2045,7 @@ func newAuthTestServer(t *testing.T) (*Server, http.Handler) {
 func authTestRegister(t *testing.T, router http.Handler, email string, password string, name string) AuthResponse {
 	t.Helper()
 	sender := authTestEmailSenderForRouter(t, router)
-	initialMessages := len(sender.messages)
+	initialMessages := sender.count()
 	var response AuthResponse
 	authTestJSON(t, router, http.MethodPost, "/api/auth/register", "", RegisterRequest{
 		Email:       email,
@@ -1635,10 +2058,11 @@ func authTestRegister(t *testing.T, router http.Handler, email string, password 
 	if response.Token != "" {
 		return response
 	}
-	if len(sender.messages) <= initialMessages {
+	messages := authTestWaitForEmailCount(t, sender, initialMessages+1)
+	if len(messages) <= initialMessages {
 		t.Fatalf("register did not send verification email")
 	}
-	verifyToken := authTestEmailToken(t, sender.messages[len(sender.messages)-1], "/account/verify-email")
+	verifyToken := authTestLatestEmailToken(t, messages, initialMessages, "/account/verify-email")
 	var verifyResponse struct {
 		Account *Account `json:"account"`
 	}
@@ -1648,6 +2072,7 @@ func authTestRegister(t *testing.T, router http.Handler, email string, password 
 	if verifyResponse.Account == nil || !verifyResponse.Account.EmailVerified {
 		t.Fatalf("expected verified auth test account, got %#v", verifyResponse.Account)
 	}
+	authTestWaitForEmailCount(t, sender, initialMessages+2)
 	var loginResponse AuthResponse
 	authTestJSON(t, router, http.MethodPost, "/api/auth/login", "", LoginRequest{
 		Email:    email,
@@ -1797,6 +2222,36 @@ func authTestErrorContains(t *testing.T, router http.Handler, method string, tar
 	if !strings.Contains(response.Error, wantError) {
 		t.Fatalf("%s %s expected error containing %q, got %q", method, target, wantError, response.Error)
 	}
+}
+
+type authTestHTTPResult struct {
+	code int
+	body string
+	err  error
+}
+
+func authTestServeJSONNoFatal(router http.Handler, method string, target string, body any, out any) authTestHTTPResult {
+	payload := []byte(nil)
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return authTestHTTPResult{err: err}
+		}
+		payload = encoded
+	}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(method, target, bytes.NewReader(payload))
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	router.ServeHTTP(recorder, request)
+	result := authTestHTTPResult{code: recorder.Code, body: recorder.Body.String()}
+	if out != nil {
+		if err := json.Unmarshal(recorder.Body.Bytes(), out); err != nil {
+			result.err = err
+		}
+	}
+	return result
 }
 
 func authTestRequest(t *testing.T, router http.Handler, method string, target string, token string, headers map[string]string, body any) *httptest.ResponseRecorder {

@@ -2,6 +2,10 @@ package notty
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -36,6 +40,134 @@ func TestBuildAccountEmailIncludesCodeskLogo(t *testing.T) {
 	if !strings.Contains(message.Text, "https://app.getcodesk.com/account/verify-email?token=verify-token") {
 		t.Fatalf("plain-text email missing verification link: %q", message.Text)
 	}
+}
+
+func TestBuildWelcomeEmailUsesAppLinkWithoutExpiry(t *testing.T) {
+	message := buildWelcomeEmail("person@example.com", "https://app.getcodesk.com")
+
+	if message.Subject != "Welcome to codesk" {
+		t.Fatalf("welcome email subject = %q", message.Subject)
+	}
+	for _, want := range []string{
+		"Welcome to codesk",
+		"Your email is verified.",
+		"https://app.getcodesk.com",
+	} {
+		if !strings.Contains(message.Text, want) {
+			t.Fatalf("welcome text missing %q: %q", want, message.Text)
+		}
+		if !strings.Contains(message.HTML, want) {
+			t.Fatalf("welcome HTML missing %q:\n%s", want, message.HTML)
+		}
+	}
+	for _, unwanted := range []string{"token=", "This link expires in 1 hour."} {
+		if strings.Contains(message.Text, unwanted) || strings.Contains(message.HTML, unwanted) {
+			t.Fatalf("welcome email should not contain %q:\ntext=%q\nhtml=%s", unwanted, message.Text, message.HTML)
+		}
+	}
+}
+
+func TestMailgunEmailSenderSendsExpectedMessageRequest(t *testing.T) {
+	var sawRequest bool
+	sender := &mailgunEmailSender{
+		domain: "mail.getcodesk.com",
+		apiKey: "mailgun-key",
+		from:   "codesk <noreply@mail.getcodesk.com>",
+		httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			sawRequest = true
+			if req.Method != http.MethodPost {
+				t.Fatalf("method = %s, want POST", req.Method)
+			}
+			if req.URL.Scheme != "https" || req.URL.Host != "api.mailgun.net" || req.URL.Path != "/v3/mail.getcodesk.com/messages" {
+				t.Fatalf("unexpected Mailgun URL: %s", req.URL.String())
+			}
+			user, pass, ok := req.BasicAuth()
+			if !ok || user != "api" || pass != "mailgun-key" {
+				t.Fatalf("basic auth = user %q pass %q ok %t", user, pass, ok)
+			}
+			if got := req.Header.Get("Content-Type"); got != "application/x-www-form-urlencoded" {
+				t.Fatalf("content type = %q", got)
+			}
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatalf("read body: %v", err)
+			}
+			values, err := url.ParseQuery(string(body))
+			if err != nil {
+				t.Fatalf("parse body: %v", err)
+			}
+			want := map[string]string{
+				"from":    "codesk <noreply@mail.getcodesk.com>",
+				"to":      "person@example.com",
+				"subject": "Welcome to codesk",
+				"text":    "plain body",
+				"html":    "<p>html body</p>",
+			}
+			for key, wantValue := range want {
+				if got := values.Get(key); got != wantValue {
+					t.Fatalf("form field %s = %q, want %q", key, got, wantValue)
+				}
+			}
+			return &http.Response{
+				StatusCode: http.StatusAccepted,
+				Body:       io.NopCloser(strings.NewReader("queued")),
+			}, nil
+		})},
+	}
+
+	err := sender.SendEmail(context.Background(), EmailMessage{
+		To:      " person@example.com ",
+		Subject: " Welcome to codesk ",
+		Text:    "plain body",
+		HTML:    "<p>html body</p>",
+	})
+	if err != nil {
+		t.Fatalf("send email: %v", err)
+	}
+	if !sawRequest {
+		t.Fatalf("Mailgun request was not sent")
+	}
+}
+
+func TestMailgunEmailSenderReturnsSendFailures(t *testing.T) {
+	t.Run("non_2xx", func(t *testing.T) {
+		sender := &mailgunEmailSender{
+			domain: "mail.getcodesk.com",
+			apiKey: "mailgun-key",
+			from:   "noreply@mail.getcodesk.com",
+			httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusTooManyRequests,
+					Body:       io.NopCloser(strings.NewReader("rate limited")),
+				}, nil
+			})},
+		}
+		err := sender.SendEmail(context.Background(), EmailMessage{To: "person@example.com"})
+		if err == nil || !strings.Contains(err.Error(), "status=429") || !strings.Contains(err.Error(), "rate limited") {
+			t.Fatalf("expected non-2xx error with response body, got %v", err)
+		}
+	})
+
+	t.Run("transport_error", func(t *testing.T) {
+		sender := &mailgunEmailSender{
+			domain: "mail.getcodesk.com",
+			apiKey: "mailgun-key",
+			from:   "noreply@mail.getcodesk.com",
+			httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("dial failed")
+			})},
+		}
+		err := sender.SendEmail(context.Background(), EmailMessage{To: "person@example.com"})
+		if err == nil || !strings.Contains(err.Error(), "dial failed") {
+			t.Fatalf("expected transport error, got %v", err)
+		}
+	})
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func TestValidateEmailConfigRequiresMailgunWhenStrict(t *testing.T) {
