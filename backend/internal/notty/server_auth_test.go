@@ -19,7 +19,7 @@ import (
 
 func TestJWTIssuerUsesCodeskAndRejectsLegacyNottyIssuer(t *testing.T) {
 	secret := "issuer-secret"
-	account := &Account{ID: "acct_issuer", Email: "issuer@example.com", DisplayName: "Issuer", SessionVersion: 7}
+	account := &Account{ID: "acct_issuer", Email: "issuer@example.com", DisplayName: "Issuer"}
 	token, err := issueJWT(secret, account, time.Hour)
 	if err != nil {
 		t.Fatalf("issue jwt: %v", err)
@@ -30,9 +30,6 @@ func TestJWTIssuerUsesCodeskAndRejectsLegacyNottyIssuer(t *testing.T) {
 	}
 	if claims.Issuer != "codesk" {
 		t.Fatalf("expected codesk issuer, got %q", claims.Issuer)
-	}
-	if claims.SessionVersion != accountSessionVersion(account) {
-		t.Fatalf("expected session version %d, got %d", accountSessionVersion(account), claims.SessionVersion)
 	}
 
 	legacyToken := signedAuthTestJWT(t, secret, jwtClaims{
@@ -46,40 +43,6 @@ func TestJWTIssuerUsesCodeskAndRejectsLegacyNottyIssuer(t *testing.T) {
 	_, err = verifyJWT(secret, legacyToken)
 	if err == nil || !strings.Contains(err.Error(), "invalid jwt issuer") {
 		t.Fatalf("expected legacy issuer rejection, got %v", err)
-	}
-}
-
-func TestJWTSessionVersionRejectsOldTokenFromSameSecondReset(t *testing.T) {
-	resetSecond := time.Unix(1700000000, 0).UTC()
-	currentAccount := &Account{ID: "acct_reset", SessionVersion: 2}
-
-	legacyClaims := &jwtClaims{
-		Subject:  currentAccount.ID,
-		IssuedAt: resetSecond.Unix(),
-	}
-	if !jwtMatchesAccountSessionVersion(legacyClaims, &Account{ID: "acct_reset", SessionVersion: 1}) {
-		t.Fatalf("legacy token without session version should match account version 1")
-	}
-	if jwtMatchesAccountSessionVersion(legacyClaims, currentAccount) {
-		t.Fatalf("legacy token without session version matched reset account version")
-	}
-
-	oldClaims := &jwtClaims{
-		Subject:        currentAccount.ID,
-		IssuedAt:       resetSecond.Unix(),
-		SessionVersion: 1,
-	}
-	if jwtMatchesAccountSessionVersion(oldClaims, currentAccount) {
-		t.Fatalf("old token with previous session version matched current account")
-	}
-
-	newClaims := &jwtClaims{
-		Subject:        currentAccount.ID,
-		IssuedAt:       resetSecond.Unix(),
-		SessionVersion: 2,
-	}
-	if !jwtMatchesAccountSessionVersion(newClaims, currentAccount) {
-		t.Fatalf("new token with current session version did not match account")
 	}
 }
 
@@ -133,7 +96,7 @@ func TestRegisterCreatesUnverifiedAccountAndRequiresEmailVerification(t *testing
 	}
 }
 
-func TestForgotAndResetPasswordRequireVerifiedAccountAndInvalidateExistingJWT(t *testing.T) {
+func TestForgotAndResetPasswordRequireVerifiedAccountAndKeepExistingJWTStateless(t *testing.T) {
 	_, router := newAuthTestServer(t)
 	sender := authTestEmailSenderForRouter(t, router)
 	unverified := "reset-unverified@example.com"
@@ -179,7 +142,11 @@ func TestForgotAndResetPasswordRequireVerifiedAccountAndInvalidateExistingJWT(t 
 	if login.Token == "" {
 		t.Fatalf("expected login token after password reset")
 	}
-	authTestStatus(t, router, http.MethodGet, "/api/auth/me", auth.Token, nil, http.StatusUnauthorized)
+	var oldTokenMe AuthResponse
+	authTestJSON(t, router, http.MethodGet, "/api/auth/me", auth.Token, nil, http.StatusOK, &oldTokenMe)
+	if oldTokenMe.Account == nil || oldTokenMe.Account.Email != verified {
+		t.Fatalf("expected existing stateless token to remain valid after reset, got %#v", oldTokenMe)
+	}
 	var me AuthResponse
 	authTestJSON(t, router, http.MethodGet, "/api/auth/me", login.Token, nil, http.StatusOK, &me)
 	if me.Account == nil || me.Account.Email != verified {
@@ -378,15 +345,11 @@ func TestEmailVerifiedMigrationBackfillsExistingAccountsButFutureDefaultIsFalse(
 		t.Fatalf("init schema: %v", err)
 	}
 	var existingVerified bool
-	var existingSessionVersion int64
-	if err := db.QueryRow(`SELECT email_verified, session_version FROM accounts WHERE id = $1`, "account_legacy").Scan(&existingVerified, &existingSessionVersion); err != nil {
+	if err := db.QueryRow(`SELECT email_verified FROM accounts WHERE id = $1`, "account_legacy").Scan(&existingVerified); err != nil {
 		t.Fatalf("select existing email_verified: %v", err)
 	}
 	if !existingVerified {
 		t.Fatalf("existing account was not backfilled as verified")
-	}
-	if existingSessionVersion != 1 {
-		t.Fatalf("existing account session version = %d, want 1", existingSessionVersion)
 	}
 	if _, err := db.Exec(
 		`INSERT INTO accounts (id, email, display_name, password_hash, last_accessed_workspace_id, password_updated_at, created_at, updated_at)
@@ -400,15 +363,11 @@ func TestEmailVerifiedMigrationBackfillsExistingAccountsButFutureDefaultIsFalse(
 		t.Fatalf("insert future account: %v", err)
 	}
 	var futureVerified bool
-	var futureSessionVersion int64
-	if err := db.QueryRow(`SELECT email_verified, session_version FROM accounts WHERE id = $1`, "account_future").Scan(&futureVerified, &futureSessionVersion); err != nil {
+	if err := db.QueryRow(`SELECT email_verified FROM accounts WHERE id = $1`, "account_future").Scan(&futureVerified); err != nil {
 		t.Fatalf("select future email_verified: %v", err)
 	}
 	if futureVerified {
 		t.Fatalf("future account defaulted to verified")
-	}
-	if futureSessionVersion != 1 {
-		t.Fatalf("future account session version = %d, want 1", futureSessionVersion)
 	}
 }
 

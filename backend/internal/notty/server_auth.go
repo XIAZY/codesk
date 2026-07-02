@@ -538,9 +538,6 @@ func (s *Server) authenticateHumanRequest(r *http.Request) (*AuthContext, error)
 	if !account.EmailVerified {
 		return nil, errEmailNotVerified
 	}
-	if !jwtMatchesAccountSessionVersion(claims, account) {
-		return nil, errors.New("token is no longer valid")
-	}
 	return &AuthContext{
 		PrincipalID:   account.ID,
 		PrincipalKind: "human",

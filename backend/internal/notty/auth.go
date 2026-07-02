@@ -40,13 +40,12 @@ type AuthContext struct {
 }
 
 type jwtClaims struct {
-	Subject        string `json:"sub"`
-	Email          string `json:"email"`
-	DisplayName    string `json:"name"`
-	IssuedAt       int64  `json:"iat"`
-	SessionVersion int64  `json:"session_version"`
-	ExpiresAt      int64  `json:"exp"`
-	Issuer         string `json:"iss"`
+	Subject     string `json:"sub"`
+	Email       string `json:"email"`
+	DisplayName string `json:"name"`
+	IssuedAt    int64  `json:"iat"`
+	ExpiresAt   int64  `json:"exp"`
+	Issuer      string `json:"iss"`
 }
 
 var (
@@ -149,13 +148,12 @@ func issueJWT(secret string, account *Account, ttl time.Duration) (string, error
 	}
 	now := time.Now().UTC()
 	claims := jwtClaims{
-		Subject:        account.ID,
-		Email:          account.Email,
-		DisplayName:    account.DisplayName,
-		IssuedAt:       now.Unix(),
-		SessionVersion: accountSessionVersion(account),
-		ExpiresAt:      now.Add(ttl).Unix(),
-		Issuer:         "codesk",
+		Subject:     account.ID,
+		Email:       account.Email,
+		DisplayName: account.DisplayName,
+		IssuedAt:    now.Unix(),
+		ExpiresAt:   now.Add(ttl).Unix(),
+		Issuer:      "codesk",
 	}
 	header, err := json.Marshal(map[string]string{"alg": "HS256", "typ": "JWT"})
 	if err != nil {
@@ -202,24 +200,6 @@ func verifyJWT(secret string, token string) (*jwtClaims, error) {
 	return &claims, nil
 }
 
-func accountSessionVersion(account *Account) int64 {
-	if account == nil || account.SessionVersion <= 0 {
-		return 1
-	}
-	return account.SessionVersion
-}
-
-func jwtMatchesAccountSessionVersion(claims *jwtClaims, account *Account) bool {
-	if claims == nil || account == nil {
-		return false
-	}
-	tokenVersion := claims.SessionVersion
-	if tokenVersion <= 0 {
-		tokenVersion = 1
-	}
-	return tokenVersion == accountSessionVersion(account)
-}
-
 func signJWT(secret []byte, unsigned string) string {
 	mac := hmac.New(sha256.New, secret)
 	_, _ = mac.Write([]byte(unsigned))
@@ -251,7 +231,6 @@ func accountFromRow(row *sql.Row) (*Account, error) {
 		&account.DisplayName,
 		&account.EmailVerified,
 		&account.LastAccessedWorkspaceID,
-		&account.SessionVersion,
 		&account.CreatedAt,
 		&account.UpdatedAt,
 	); err != nil {
@@ -283,20 +262,18 @@ func registerAccount(db *sql.DB, req RegisterRequest) (*Account, error) {
 		DisplayName:             displayName,
 		EmailVerified:           false,
 		LastAccessedWorkspaceID: "",
-		SessionVersion:          1,
 		CreatedAt:               now,
 		UpdatedAt:               now,
 	}
 	_, err = db.Exec(
-		`INSERT INTO accounts (id, email, display_name, password_hash, email_verified, last_accessed_workspace_id, session_version, password_updated_at, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		`INSERT INTO accounts (id, email, display_name, password_hash, email_verified, last_accessed_workspace_id, password_updated_at, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 		account.ID,
 		account.Email,
 		account.DisplayName,
 		passwordHash,
 		account.EmailVerified,
 		account.LastAccessedWorkspaceID,
-		account.SessionVersion,
 		now,
 		now,
 		now,
@@ -315,7 +292,7 @@ func authenticateAccount(db *sql.DB, req LoginRequest) (*Account, error) {
 	var account Account
 	var passwordHash string
 	err := db.QueryRow(
-		`SELECT id, email, display_name, password_hash, email_verified, last_accessed_workspace_id, session_version, created_at, updated_at
+		`SELECT id, email, display_name, password_hash, email_verified, last_accessed_workspace_id, created_at, updated_at
 		   FROM accounts
 		  WHERE email = $1`,
 		email,
@@ -326,7 +303,6 @@ func authenticateAccount(db *sql.DB, req LoginRequest) (*Account, error) {
 		&passwordHash,
 		&account.EmailVerified,
 		&account.LastAccessedWorkspaceID,
-		&account.SessionVersion,
 		&account.CreatedAt,
 		&account.UpdatedAt,
 	)
@@ -344,7 +320,7 @@ func authenticateAccount(db *sql.DB, req LoginRequest) (*Account, error) {
 
 func getAccountByID(db *sql.DB, accountID string) (*Account, error) {
 	return accountFromRow(db.QueryRow(
-		`SELECT id, email, display_name, email_verified, last_accessed_workspace_id, session_version, created_at, updated_at FROM accounts WHERE id = $1`,
+		`SELECT id, email, display_name, email_verified, last_accessed_workspace_id, created_at, updated_at FROM accounts WHERE id = $1`,
 		strings.TrimSpace(accountID),
 	))
 }
@@ -458,7 +434,7 @@ func resetAccountPasswordWithToken(db *sql.DB, rawToken string, password string)
 	now := time.Now().UTC()
 	result, err := tx.Exec(
 		`UPDATE accounts
-		    SET password_hash = $1, session_version = session_version + 1, password_updated_at = $2, updated_at = $2
+		    SET password_hash = $1, password_updated_at = $2, updated_at = $2
 		  WHERE id = $3 AND email_verified = TRUE`,
 		passwordHash,
 		now,
@@ -1130,7 +1106,7 @@ func isUniqueViolation(err error) bool {
 
 func getAccountByEmail(db *sql.DB, email string) (*Account, error) {
 	account, err := accountFromRow(db.QueryRow(
-		`SELECT id, email, display_name, email_verified, last_accessed_workspace_id, session_version, created_at, updated_at FROM accounts WHERE email = $1`,
+		`SELECT id, email, display_name, email_verified, last_accessed_workspace_id, created_at, updated_at FROM accounts WHERE email = $1`,
 		normalizeEmail(email),
 	))
 	if err == sql.ErrNoRows {

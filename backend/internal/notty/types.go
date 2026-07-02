@@ -93,7 +93,6 @@ type Account struct {
 	DisplayName             string    `json:"displayName"`
 	EmailVerified           bool      `json:"emailVerified"`
 	LastAccessedWorkspaceID string    `json:"lastAccessedWorkspaceId,omitempty"`
-	SessionVersion          int64     `json:"-"`
 	CreatedAt               time.Time `json:"createdAt"`
 	UpdatedAt               time.Time `json:"updatedAt"`
 }

@@ -50,7 +50,6 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			password_hash TEXT NOT NULL,
 			email_verified BOOLEAN NOT NULL DEFAULT FALSE,
 			last_accessed_workspace_id TEXT NOT NULL DEFAULT '',
-			session_version BIGINT NOT NULL DEFAULT 1,
 			password_updated_at TIMESTAMPTZ,
 			created_at TIMESTAMPTZ NOT NULL,
 			updated_at TIMESTAMPTZ NOT NULL
@@ -59,7 +58,6 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT TRUE`,
 		`ALTER TABLE accounts ALTER COLUMN email_verified SET DEFAULT FALSE`,
 		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_accessed_workspace_id TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS session_version BIGINT NOT NULL DEFAULT 1`,
 		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS password_updated_at TIMESTAMPTZ`,
 		`
 		CREATE TABLE IF NOT EXISTS account_email_tokens (
