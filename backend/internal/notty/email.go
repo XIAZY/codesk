@@ -36,12 +36,12 @@ type mailgunEmailSender struct {
 }
 
 func emailSenderFromConfig(cfg Config) EmailSender {
+	if !cfg.MailgunConfigured() {
+		return noopEmailSender{}
+	}
 	domain := strings.TrimSpace(cfg.MailgunDomain)
 	apiKey := strings.TrimSpace(cfg.MailgunAPIKey)
 	from := strings.TrimSpace(cfg.MailgunFrom)
-	if domain == "" || apiKey == "" || from == "" {
-		return noopEmailSender{}
-	}
 	return &mailgunEmailSender{
 		domain: domain,
 		apiKey: apiKey,
