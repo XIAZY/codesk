@@ -1,21 +1,32 @@
 package notty
 
 import (
+	"bytes"
 	"context"
+	_ "embed"
 	"fmt"
 	"html"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"strings"
 	"time"
 )
 
 type EmailMessage struct {
-	To      string
-	Subject string
-	Text    string
-	HTML    string
+	To                string
+	Subject           string
+	Text              string
+	HTML              string
+	InlineAttachments []EmailInlineAttachment
+}
+
+type EmailInlineAttachment struct {
+	Filename    string
+	ContentType string
+	Data        []byte
 }
 
 type EmailSender interface {
@@ -35,19 +46,27 @@ type mailgunEmailSender struct {
 	httpClient *http.Client
 }
 
+const accountEmailLogoFilename = "codesk-oxo.png"
+
+//go:embed codesk-oxo.png
+var accountEmailLogoPNG []byte
+
 const accountEmailLogoHTML = `<table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
   <tr>
     <td style="width:58px;vertical-align:middle;">
-      <svg width="58" height="44" viewBox="14 31 72 38" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" style="display:block;overflow:visible;">
-        <circle cx="24" cy="50" r="9" fill="#E3A15B"></circle>
-        <circle cx="76" cy="50" r="9" fill="#7FC1D6"></circle>
-        <line x1="39.6" y1="39.6" x2="60.4" y2="60.4" stroke="#1B1A17" stroke-width="7.8" stroke-linecap="round"></line>
-        <line x1="60.4" y1="39.6" x2="39.6" y2="60.4" stroke="#1B1A17" stroke-width="7.8" stroke-linecap="round"></line>
-      </svg>
+      <img src="cid:codesk-oxo.png" width="58" height="44" alt="codesk" style="display:block;border:0;outline:none;text-decoration:none;">
     </td>
     <td style="padding-left:14px;vertical-align:middle;font-family:Georgia,serif;font-size:34px;line-height:1;color:#1B1A17;">codesk</td>
   </tr>
 </table>`
+
+func accountEmailLogoInlineAttachments() []EmailInlineAttachment {
+	return []EmailInlineAttachment{{
+		Filename:    accountEmailLogoFilename,
+		ContentType: "image/png",
+		Data:        accountEmailLogoPNG,
+	}}
+}
 
 func emailSenderFromConfig(cfg Config) EmailSender {
 	if !cfg.MailgunConfigured() {
@@ -70,19 +89,13 @@ func (s *mailgunEmailSender) SendEmail(ctx context.Context, message EmailMessage
 	if s == nil {
 		return fmt.Errorf("email sender is not configured")
 	}
-	form := url.Values{}
-	form.Set("from", s.from)
-	form.Set("to", strings.TrimSpace(message.To))
-	form.Set("subject", strings.TrimSpace(message.Subject))
-	form.Set("text", message.Text)
-	form.Set("html", message.HTML)
 	endpoint := "https://api.mailgun.net/v3/" + url.PathEscape(s.domain) + "/messages"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+
+	req, err := s.newMessageRequest(ctx, endpoint, message)
 	if err != nil {
 		return err
 	}
 	req.SetBasicAuth("api", s.apiKey)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -93,6 +106,80 @@ func (s *mailgunEmailSender) SendEmail(ctx context.Context, message EmailMessage
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 	return fmt.Errorf("mailgun send failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+}
+
+func (s *mailgunEmailSender) newMessageRequest(ctx context.Context, endpoint string, message EmailMessage) (*http.Request, error) {
+	fields := mailgunMessageFields(s.from, message)
+	if len(message.InlineAttachments) == 0 {
+		form := url.Values{}
+		for key, value := range fields {
+			form.Set(key, value)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		return req, nil
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for key, value := range fields {
+		if err := writer.WriteField(key, value); err != nil {
+			return nil, err
+		}
+	}
+	for _, attachment := range message.InlineAttachments {
+		filename := strings.TrimSpace(attachment.Filename)
+		if filename == "" {
+			return nil, fmt.Errorf("inline attachment filename is required")
+		}
+		if len(attachment.Data) == 0 {
+			return nil, fmt.Errorf("inline attachment %q is empty", filename)
+		}
+		contentType := strings.TrimSpace(attachment.ContentType)
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		part, err := writer.CreatePart(multipartFileHeader("inline", filename, contentType))
+		if err != nil {
+			return nil, err
+		}
+		if _, err := part.Write(attachment.Data); err != nil {
+			return nil, err
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, &body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	return req, nil
+}
+
+func mailgunMessageFields(from string, message EmailMessage) map[string]string {
+	return map[string]string{
+		"from":    from,
+		"to":      strings.TrimSpace(message.To),
+		"subject": strings.TrimSpace(message.Subject),
+		"text":    message.Text,
+		"html":    message.HTML,
+	}
+}
+
+func multipartFileHeader(fieldName string, filename string, contentType string) textproto.MIMEHeader {
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", fmt.Sprintf(`form-data; name="%s"; filename="%s"`, escapeMultipartParam(fieldName), escapeMultipartParam(filename)))
+	header.Set("Content-Type", contentType)
+	return header
+}
+
+func escapeMultipartParam(value string) string {
+	return strings.NewReplacer("\\", "\\\\", `"`, "\\\"").Replace(value)
 }
 
 func buildVerificationEmail(to string, link string) EmailMessage {
@@ -184,5 +271,5 @@ func buildAccountEmail(to string, subject string, eyebrow string, heading string
 		textParts = append(textParts, strings.TrimSpace(linkNote))
 	}
 	textBody := strings.Join(textParts, "\n\n")
-	return EmailMessage{To: to, Subject: subject, Text: textBody, HTML: htmlBody}
+	return EmailMessage{To: to, Subject: subject, Text: textBody, HTML: htmlBody, InlineAttachments: accountEmailLogoInlineAttachments()}
 }
