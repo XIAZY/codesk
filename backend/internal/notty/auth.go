@@ -49,8 +49,18 @@ type jwtClaims struct {
 }
 
 var (
-	errInvalidInvite = errors.New("Invalid invite link.")
-	errExpiredInvite = errors.New("This invite link has expired. Ask the workspace admin for a new one.")
+	errInvalidInvite        = errors.New("Invalid invite link.")
+	errExpiredInvite        = errors.New("This invite link has expired. Ask the workspace admin for a new one.")
+	errEmailNotVerified     = errors.New("email_not_verified")
+	errInvalidAccountToken  = errors.New("invalid or expired token")
+	errConsumedAccountToken = errors.New("consumed token")
+)
+
+const (
+	accountEmailTokenPurposeVerifyEmail   = "verify_email"
+	accountEmailTokenPurposeResetPassword = "reset_password"
+	accountEmailTokenTTL                  = time.Hour
+	accountEmailTokenCooldown             = 2 * time.Minute
 )
 
 func authFromContext(ctx context.Context) (*AuthContext, bool) {
@@ -220,6 +230,7 @@ func accountFromRow(row *sql.Row) (*Account, error) {
 		&account.ID,
 		&account.Email,
 		&account.DisplayName,
+		&account.EmailVerified,
 		&account.LastAccessedWorkspaceID,
 		&account.CreatedAt,
 		&account.UpdatedAt,
@@ -250,17 +261,19 @@ func registerAccount(db *sql.DB, req RegisterRequest) (*Account, error) {
 		ID:                      "account_" + uuid.NewString(),
 		Email:                   email,
 		DisplayName:             displayName,
+		EmailVerified:           false,
 		LastAccessedWorkspaceID: "",
 		CreatedAt:               now,
 		UpdatedAt:               now,
 	}
 	_, err = db.Exec(
-		`INSERT INTO accounts (id, email, display_name, password_hash, last_accessed_workspace_id, password_updated_at, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		`INSERT INTO accounts (id, email, display_name, password_hash, email_verified, last_accessed_workspace_id, password_updated_at, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 		account.ID,
 		account.Email,
 		account.DisplayName,
 		passwordHash,
+		account.EmailVerified,
 		account.LastAccessedWorkspaceID,
 		now,
 		now,
@@ -280,7 +293,7 @@ func authenticateAccount(db *sql.DB, req LoginRequest) (*Account, error) {
 	var account Account
 	var passwordHash string
 	err := db.QueryRow(
-		`SELECT id, email, display_name, password_hash, last_accessed_workspace_id, created_at, updated_at
+		`SELECT id, email, display_name, password_hash, email_verified, last_accessed_workspace_id, created_at, updated_at
 		   FROM accounts
 		  WHERE email = $1`,
 		email,
@@ -289,6 +302,7 @@ func authenticateAccount(db *sql.DB, req LoginRequest) (*Account, error) {
 		&account.Email,
 		&account.DisplayName,
 		&passwordHash,
+		&account.EmailVerified,
 		&account.LastAccessedWorkspaceID,
 		&account.CreatedAt,
 		&account.UpdatedAt,
@@ -307,9 +321,207 @@ func authenticateAccount(db *sql.DB, req LoginRequest) (*Account, error) {
 
 func getAccountByID(db *sql.DB, accountID string) (*Account, error) {
 	return accountFromRow(db.QueryRow(
-		`SELECT id, email, display_name, last_accessed_workspace_id, created_at, updated_at FROM accounts WHERE id = $1`,
+		`SELECT id, email, display_name, email_verified, last_accessed_workspace_id, created_at, updated_at FROM accounts WHERE id = $1`,
 		strings.TrimSpace(accountID),
 	))
+}
+
+func createAccountEmailToken(db *sql.DB, accountID string, purpose string, ttl time.Duration, cooldown time.Duration) (string, bool, error) {
+	if db == nil {
+		return "", false, errors.New("database is required")
+	}
+	accountID = strings.TrimSpace(accountID)
+	purpose = strings.TrimSpace(purpose)
+	if accountID == "" || purpose == "" {
+		return "", false, errors.New("account and token purpose are required")
+	}
+	now := time.Now().UTC()
+	if cooldown > 0 {
+		var createdAt time.Time
+		err := db.QueryRow(
+			`SELECT created_at
+			   FROM account_email_tokens
+			  WHERE account_id = $1 AND purpose = $2 AND consumed_at IS NULL AND expires_at > $3
+			  ORDER BY created_at DESC
+			  LIMIT 1`,
+			accountID,
+			purpose,
+			now,
+		).Scan(&createdAt)
+		if err != nil && err != sql.ErrNoRows {
+			return "", false, err
+		}
+		if err == nil && now.Sub(createdAt) < cooldown {
+			return "", false, nil
+		}
+	}
+	token, err := randomToken("")
+	if err != nil {
+		return "", false, err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return "", false, err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(
+		`UPDATE account_email_tokens
+		    SET consumed_at = $1
+		  WHERE account_id = $2 AND purpose = $3 AND consumed_at IS NULL`,
+		now,
+		accountID,
+		purpose,
+	); err != nil {
+		return "", false, err
+	}
+	if _, err = tx.Exec(
+		`INSERT INTO account_email_tokens (id, account_id, purpose, token_hash, expires_at, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		"account_email_token_"+uuid.NewString(),
+		accountID,
+		purpose,
+		tokenHash(token),
+		now.Add(ttl),
+		now,
+	); err != nil {
+		return "", false, err
+	}
+	if err = tx.Commit(); err != nil {
+		return "", false, err
+	}
+	return token, true, nil
+}
+
+func verifyAccountEmailWithToken(db *sql.DB, rawToken string) (*Account, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	accountID, err := consumeAccountEmailTokenTx(tx, rawToken, accountEmailTokenPurposeVerifyEmail)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	if _, err := tx.Exec(
+		`UPDATE accounts
+		    SET email_verified = TRUE, updated_at = $1
+		  WHERE id = $2`,
+		now,
+		accountID,
+	); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return getAccountByID(db, accountID)
+}
+
+func resetAccountPasswordWithToken(db *sql.DB, rawToken string, password string) error {
+	passwordHash, err := hashPassword(password)
+	if err != nil {
+		return err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	accountID, err := consumeAccountEmailTokenTx(tx, rawToken, accountEmailTokenPurposeResetPassword)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	result, err := tx.Exec(
+		`UPDATE accounts
+		    SET password_hash = $1, password_updated_at = $2, updated_at = $2
+		  WHERE id = $3 AND email_verified = TRUE`,
+		passwordHash,
+		now,
+		accountID,
+	)
+	if err != nil {
+		return err
+	}
+	if count, err := result.RowsAffected(); err != nil || count == 0 {
+		return errInvalidAccountToken
+	}
+	return tx.Commit()
+}
+
+func consumeAccountEmailToken(db *sql.DB, rawToken string, purpose string) (string, error) {
+	if db == nil {
+		return "", errors.New("database is required")
+	}
+	rawToken = strings.TrimSpace(rawToken)
+	purpose = strings.TrimSpace(purpose)
+	if rawToken == "" || purpose == "" {
+		return "", errInvalidAccountToken
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	accountID, err := consumeAccountEmailTokenTx(tx, rawToken, purpose)
+	if err != nil {
+		return "", err
+	}
+	if err = tx.Commit(); err != nil {
+		return "", err
+	}
+	return accountID, nil
+}
+
+func consumeAccountEmailTokenTx(tx *sql.Tx, rawToken string, purpose string) (string, error) {
+	now := time.Now().UTC()
+	var id string
+	var accountID string
+	var expiresAt time.Time
+	var consumedAt sql.NullTime
+	err := tx.QueryRow(
+		`SELECT id, account_id, expires_at, consumed_at
+		   FROM account_email_tokens
+		  WHERE token_hash = $1 AND purpose = $2
+		  FOR UPDATE`,
+		tokenHash(rawToken),
+		purpose,
+	).Scan(&id, &accountID, &expiresAt, &consumedAt)
+	if err == sql.ErrNoRows {
+		return "", errInvalidAccountToken
+	}
+	if err != nil {
+		return "", err
+	}
+	if consumedAt.Valid {
+		return "", errConsumedAccountToken
+	}
+	if !expiresAt.After(now) {
+		return "", errInvalidAccountToken
+	}
+	if _, err = tx.Exec(
+		`UPDATE account_email_tokens SET consumed_at = $1 WHERE id = $2`,
+		now,
+		id,
+	); err != nil {
+		return "", err
+	}
+	return accountID, nil
+}
+
+func requestEmailVerification(db *sql.DB, account *Account, cooldown time.Duration) (string, bool, error) {
+	if account == nil || account.EmailVerified {
+		return "", false, nil
+	}
+	return createAccountEmailToken(db, account.ID, accountEmailTokenPurposeVerifyEmail, accountEmailTokenTTL, cooldown)
+}
+
+func requestPasswordReset(db *sql.DB, account *Account, cooldown time.Duration) (string, bool, error) {
+	if account == nil || !account.EmailVerified {
+		return "", false, nil
+	}
+	return createAccountEmailToken(db, account.ID, accountEmailTokenPurposeResetPassword, accountEmailTokenTTL, cooldown)
 }
 
 func listWorkspacesForAccount(db *sql.DB, accountID string) ([]*Workspace, error) {
@@ -897,11 +1109,10 @@ func isUniqueViolation(err error) bool {
 }
 
 func getAccountByEmail(db *sql.DB, email string) (*Account, error) {
-	account := &Account{}
-	err := db.QueryRow(
-		`SELECT id, email, display_name, last_accessed_workspace_id, created_at, updated_at FROM accounts WHERE email = $1`,
+	account, err := accountFromRow(db.QueryRow(
+		`SELECT id, email, display_name, email_verified, last_accessed_workspace_id, created_at, updated_at FROM accounts WHERE email = $1`,
 		normalizeEmail(email),
-	).Scan(&account.ID, &account.Email, &account.DisplayName, &account.LastAccessedWorkspaceID, &account.CreatedAt, &account.UpdatedAt)
+	))
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
 	}

@@ -48,13 +48,29 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			email TEXT UNIQUE NOT NULL,
 			display_name TEXT NOT NULL,
 			password_hash TEXT NOT NULL,
+			email_verified BOOLEAN NOT NULL DEFAULT FALSE,
 			last_accessed_workspace_id TEXT NOT NULL DEFAULT '',
 			password_updated_at TIMESTAMPTZ,
 			created_at TIMESTAMPTZ NOT NULL,
 			updated_at TIMESTAMPTZ NOT NULL
 		)
 		`,
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT TRUE`,
+		`ALTER TABLE accounts ALTER COLUMN email_verified SET DEFAULT FALSE`,
 		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_accessed_workspace_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS password_updated_at TIMESTAMPTZ`,
+		`
+		CREATE TABLE IF NOT EXISTS account_email_tokens (
+			id TEXT PRIMARY KEY,
+			account_id TEXT NOT NULL,
+			purpose TEXT NOT NULL,
+			token_hash TEXT UNIQUE NOT NULL,
+			expires_at TIMESTAMPTZ NOT NULL,
+			consumed_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL
+		)
+		`,
+		`CREATE INDEX IF NOT EXISTS idx_account_email_tokens_account_purpose_created ON account_email_tokens (account_id, purpose, created_at DESC)`,
 		`
 		CREATE TABLE IF NOT EXISTS workspace_members (
 			workspace_id TEXT NOT NULL,

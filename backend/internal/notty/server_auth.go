@@ -1,10 +1,13 @@
 package notty
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -26,13 +29,16 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	token, err := issueJWT(s.cfg.JWTSecret, account, 7*24*time.Hour)
+	rawToken, created, err := requestEmailVerification(s.store.db, account, 0)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	workspaces, _ := listWorkspacesForAccount(s.store.db, account.ID)
-	writeJSON(w, http.StatusCreated, AuthResponse{Token: token, Account: account, Workspaces: workspaces})
+	if created {
+		link := s.accountURL("/account/verify-email", rawToken)
+		s.sendAccountEmailAsync("verification", account, buildVerificationEmail(account.Email, link))
+	}
+	writeJSON(w, http.StatusCreated, AuthResponse{Account: account})
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -50,6 +56,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
+	if !account.EmailVerified {
+		writeError(w, http.StatusForbidden, errEmailNotVerified.Error())
+		return
+	}
 	token, err := issueJWT(s.cfg.JWTSecret, account, 7*24*time.Hour)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -57,6 +67,122 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	workspaces, _ := listWorkspacesForAccount(s.store.db, account.ID)
 	writeJSON(w, http.StatusOK, AuthResponse{Token: token, Account: account, Workspaces: workspaces})
+}
+
+func (s *Server) handleVerifyEmail(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil || s.store.db == nil {
+		writeError(w, http.StatusServiceUnavailable, "database auth is not available")
+		return
+	}
+	var req VerifyEmailRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	account, err := verifyAccountEmailWithToken(s.store.db, req.Token)
+	if err != nil {
+		if errors.Is(err, errConsumedAccountToken) {
+			writeError(w, http.StatusBadRequest, "email_already_verified")
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.sendAccountEmailAsync("welcome", account, buildWelcomeEmail(account.Email, s.accountAppURL()))
+	writeJSON(w, http.StatusOK, map[string]any{"account": account})
+}
+
+func (s *Server) handleResendVerification(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil || s.store.db == nil {
+		writeError(w, http.StatusServiceUnavailable, "database auth is not available")
+		return
+	}
+	var req ResendVerificationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	account, err := getAccountByEmail(s.store.db, req.Email)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err == nil && account != nil && !account.EmailVerified {
+		rawToken, created, err := requestEmailVerification(s.store.db, account, accountEmailTokenCooldown)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if created {
+			link := s.accountURL("/account/verify-email", rawToken)
+			s.sendAccountEmailAsync("verification", account, buildVerificationEmail(account.Email, link))
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil || s.store.db == nil {
+		writeError(w, http.StatusServiceUnavailable, "database auth is not available")
+		return
+	}
+	var req ForgotPasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	account, err := getAccountByEmail(s.store.db, req.Email)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err == nil && account != nil && account.EmailVerified {
+		rawToken, created, err := requestPasswordReset(s.store.db, account, accountEmailTokenCooldown)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if created {
+			link := s.accountURL("/account/reset-password", rawToken)
+			s.sendAccountEmailAsync("password_reset", account, buildPasswordResetEmail(account.Email, link))
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) sendAccountEmailAsync(emailType string, account *Account, message EmailMessage) {
+	if s.emailSender == nil {
+		return
+	}
+	accountID := ""
+	if account != nil {
+		accountID = account.ID
+	}
+	recipient := strings.TrimSpace(message.To)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.emailSender.SendEmail(ctx, message); err != nil {
+			log.Printf("account email send failed type=%s account=%s to=%s subject=%q err=%v", emailType, accountID, recipient, message.Subject, err)
+		}
+	}()
+}
+
+func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil || s.store.db == nil {
+		writeError(w, http.StatusServiceUnavailable, "database auth is not available")
+		return
+	}
+	var req ResetPasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := resetAccountPasswordWithToken(s.store.db, req.Token, req.Password); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
@@ -425,11 +551,29 @@ func (s *Server) authenticateHumanRequest(r *http.Request) (*AuthContext, error)
 	if err != nil {
 		return nil, err
 	}
+	if !account.EmailVerified {
+		return nil, errEmailNotVerified
+	}
 	return &AuthContext{
 		PrincipalID:   account.ID,
 		PrincipalKind: "human",
 		AccountID:     account.ID,
 	}, nil
+}
+
+func (s *Server) accountURL(path string, token string) string {
+	origin := s.accountAppURL()
+	values := url.Values{}
+	values.Set("token", token)
+	return origin + path + "?" + values.Encode()
+}
+
+func (s *Server) accountAppURL() string {
+	origin := strings.TrimRight(strings.TrimSpace(s.cfg.PublicOrigin), "/")
+	if origin == "" {
+		origin = "http://localhost:5173"
+	}
+	return origin
 }
 
 func (s *Server) authenticateWorkspaceRequest(r *http.Request, workspaceID string) (*AuthContext, error) {

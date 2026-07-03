@@ -19,16 +19,16 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+    env_file:
+      - path: deploy/env/dev.server.env
+        required: true
+      - path: ${NOTTY_SECRETS_ENV_FILE:-secrets.env}
+        required: false
     depends_on:
       postgres:
         condition: service_healthy
     ports:
       - "127.0.0.1:${NOTTY_BACKEND_PORT:-8080}:8080"
-    environment:
-      NOTTY_PORT: "8080"
-      NOTTY_DATABASE_URL: postgres://notty:notty@postgres:5432/notty?sslmode=disable
-      NOTTY_PPROF_ADDR: 127.0.0.1:6061
-      NOTTY_JWT_SECRET: dev-notty-jwt-secret-change-me
 
   frontend:
     build:

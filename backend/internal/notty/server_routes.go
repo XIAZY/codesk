@@ -21,6 +21,10 @@ func (s *Server) Routes() http.Handler {
 
 	router.Post("/api/auth/register", s.handleRegister)
 	router.Post("/api/auth/login", s.handleLogin)
+	router.Post("/api/auth/verify-email", s.handleVerifyEmail)
+	router.Post("/api/auth/resend-verification", s.handleResendVerification)
+	router.Post("/api/auth/forgot-password", s.handleForgotPassword)
+	router.Post("/api/auth/reset-password", s.handleResetPassword)
 	router.Get("/api/invites/{token}", s.handleWorkspaceInvitePreview)
 	router.Group(func(router chi.Router) {
 		router.Use(s.requireHuman)

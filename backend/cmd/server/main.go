@@ -29,6 +29,9 @@ func main() {
 	if cfg.JWTSecret == "" {
 		log.Fatal("NOTTY_JWT_SECRET is required")
 	}
+	if err := cfg.ValidateEmailConfig(); err != nil {
+		log.Fatal(err)
+	}
 	store, err := notty.NewStore(cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("create store: %v", err)

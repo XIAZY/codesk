@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { ApiClient, apiBase, daemonStaticBase, publicOrigin } from "./api";
+import { ApiClient, ApiError, apiBase, daemonStaticBase, publicOrigin } from "./api";
 import { DocumentSurface, type LiveThread, type SurfaceSelection } from "./DocumentSurface";
 import type { MarkdownPreviewCommandName } from "./markdownLivePreview";
 import {
@@ -413,6 +413,16 @@ export function App() {
 
   const routeWorkspace = route.kind === "workspace" ? workspaces.find((workspace) => workspace.slug === route.slug) ?? null : null;
 
+  if (route.kind === "verifyEmail") {
+    return <VerifyEmailPage api={api} token={route.token} />;
+  }
+  if (route.kind === "forgotPassword") {
+    return <ForgotPasswordPage api={api} />;
+  }
+  if (route.kind === "resetPassword") {
+    return <ResetPasswordPage api={api} token={route.token} />;
+  }
+
   if (!token) {
     if (route.kind === "invite") {
       return <InvitePage api={api} inviteToken={route.token} account={null} workspaces={[]} onAuth={saveAuth} onAccepted={acceptInviteWorkspace} />;
@@ -689,7 +699,10 @@ function AuthScreen({
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [verificationEmail, setVerificationEmail] = useState("");
+  const [resendNotice, setResendNotice] = useState("");
   const [busy, setBusy] = useState(false);
+  const [resending, setResending] = useState(false);
   const activeMode = preserveRoute ? localMode : mode;
 
   const submit = async (event: FormEvent) => {
@@ -701,13 +714,72 @@ function AuthScreen({
         activeMode === "register"
           ? await api.register({ email, password, displayName })
           : await api.login({ email, password });
+      if (!response.token) {
+        setVerificationEmail(response.account?.email ?? email);
+        setResendNotice("");
+        return;
+      }
       onAuth(response.token, response.account, response.workspaces ?? []);
     } catch (err) {
+      if (err instanceof ApiError && err.status === 403 && err.details === "email_not_verified") {
+        setVerificationEmail(email);
+        setResendNotice("");
+        return;
+      }
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
   };
+
+  const resendVerification = async () => {
+    setResending(true);
+    setError("");
+    setResendNotice("");
+    try {
+      await api.resendVerification(verificationEmail || email);
+      setResendNotice("Verification email sent.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setResending(false);
+    }
+  };
+
+  if (verificationEmail) {
+    return (
+      <main className="auth-screen">
+        <section className="card p-24 auth-panel">
+          <Logo />
+          {children}
+          <h1 className="auth-title">Check your email</h1>
+          <p className="small muted auth-copy">
+            We sent a verification link to {verificationEmail}. Verify your email before logging in.
+          </p>
+          {error ? <p className="error-text">{error}</p> : null}
+          {resendNotice ? <p className="small muted">{resendNotice}</p> : null}
+          <div className="form-stack">
+            <button className="btn accent full lg" onClick={resendVerification} disabled={resending}>
+              {resending ? "Sending..." : "Resend verification email"}
+            </button>
+            <button
+              className="btn ghost full"
+              onClick={() => {
+                setVerificationEmail("");
+                setResendNotice("");
+                setError("");
+                if (!preserveRoute) {
+                  navigate({ kind: "login" });
+                }
+              }}
+            >
+              Back to login
+            </button>
+          </div>
+        </section>
+      </main>
+    );
+  }
 
   return (
     <main className="auth-screen">
@@ -751,6 +823,175 @@ function AuthScreen({
             {activeMode === "login" ? "Create one" : "Log in"}
           </button>
         </div>
+        {activeMode === "login" ? (
+          <div className="auth-switch">
+            <button className="btn-link" onClick={() => navigate({ kind: "forgotPassword" })}>
+              Forgot password?
+            </button>
+          </div>
+        ) : null}
+      </section>
+    </main>
+  );
+}
+
+function VerifyEmailPage({ api, token }: { api: ApiClient; token: string }) {
+  const [status, setStatus] = useState<"verifying" | "verified" | "error">(token ? "verifying" : "error");
+  const [error, setError] = useState(token ? "" : "This verification link is missing a token.");
+
+  useEffect(() => {
+    if (!token) {
+      return;
+    }
+    let disposed = false;
+    api.verifyEmail(token)
+      .then(() => {
+        if (!disposed) {
+          setStatus("verified");
+        }
+      })
+      .catch((err) => {
+        if (!disposed) {
+          if (err instanceof Error && err.message === "email_already_verified") {
+            setStatus("verified");
+            return;
+          }
+          setStatus("error");
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [api, token]);
+
+  return (
+    <AccountFlowScreen
+      title={status === "verified" ? "Email verified" : status === "verifying" ? "Verifying email" : "Verification failed"}
+      body={status === "verified" ? "Your account is active. You can log in now." : status === "verifying" ? "Checking your verification link." : error}
+      actionLabel={status === "verified" ? "Log in" : "Back to login"}
+      onAction={() => navigate({ kind: "login" }, { replace: status === "verified" })}
+    />
+  );
+}
+
+function ForgotPasswordPage({ api }: { api: ApiClient }) {
+  const [email, setEmail] = useState("");
+  const [sent, setSent] = useState(false);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      await api.forgotPassword(email);
+      setSent(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (sent) {
+    return (
+      <AccountFlowScreen
+        title="Check your email"
+        body="If that account can reset its password, a reset link has been sent."
+        actionLabel="Back to login"
+        onAction={() => navigate({ kind: "login" })}
+      />
+    );
+  }
+
+  return (
+    <main className="auth-screen">
+      <section className="card p-24 auth-panel">
+        <Logo />
+        <h1 className="auth-title">Reset your password</h1>
+        <p className="small muted auth-copy">Enter your email and we will send a reset link if the account is eligible.</p>
+        <form onSubmit={submit} className="form-stack">
+          <label className="field">
+            <span className="lab">Email</span>
+            <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" required />
+          </label>
+          {error ? <p className="error-text">{error}</p> : null}
+          <button className="btn accent full lg" disabled={busy}>{busy ? "Sending..." : "Send reset link"}</button>
+        </form>
+        <div className="auth-switch">
+          <button className="btn-link" onClick={() => navigate({ kind: "login" })}>Back to login</button>
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function ResetPasswordPage({ api, token }: { api: ApiClient; token: string }) {
+  const [password, setPassword] = useState("");
+  const [done, setDone] = useState(false);
+  const [error, setError] = useState(token ? "" : "This reset link is missing a token.");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!token) {
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      await api.resetPassword(token, password);
+      setDone(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (done) {
+    return (
+      <AccountFlowScreen
+        title="Password reset"
+        body="Your password has been updated. Log in with the new password."
+        actionLabel="Log in"
+        onAction={() => navigate({ kind: "login" }, { replace: true })}
+      />
+    );
+  }
+
+  return (
+    <main className="auth-screen">
+      <section className="card p-24 auth-panel">
+        <Logo />
+        <h1 className="auth-title">Choose a new password</h1>
+        <p className="small muted auth-copy">Use at least 6 characters.</p>
+        <form onSubmit={submit} className="form-stack">
+          <label className="field">
+            <span className="lab">New password</span>
+            <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 6 characters" required />
+          </label>
+          {error ? <p className="error-text">{error}</p> : null}
+          <button className="btn accent full lg" disabled={busy || !token}>{busy ? "Saving..." : "Reset password"}</button>
+        </form>
+        <div className="auth-switch">
+          <button className="btn-link" onClick={() => navigate({ kind: "login" })}>Back to login</button>
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function AccountFlowScreen({ title, body, actionLabel, onAction }: { title: string; body: string; actionLabel: string; onAction: () => void }) {
+  return (
+    <main className="auth-screen">
+      <section className="card p-24 auth-panel">
+        <Logo />
+        <h1 className="auth-title">{title}</h1>
+        <p className="small muted auth-copy">{body}</p>
+        <button className="btn accent full lg" onClick={onAction}>{actionLabel}</button>
       </section>
     </main>
   );

@@ -12,3 +12,4 @@ frontend/.test-dist
 archive.tar.gz
 *.log
 .DS_Store
+secrets.env
