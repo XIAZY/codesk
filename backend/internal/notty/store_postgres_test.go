@@ -159,6 +159,63 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	}
 }
 
+func TestPostgresBackfillsBlankWorkspaceRootDocumentID(t *testing.T) {
+	dsn := postgresTestDSN(t)
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+	if err := initPostgresSchema(db); err != nil {
+		t.Fatalf("init schema: %v", err)
+	}
+	if err := clearNottyTables(db); err != nil {
+		t.Fatalf("clear tables: %v", err)
+	}
+
+	workspaceID := "ws_legacy_root"
+	now := time.Now().UTC()
+	if _, err := db.Exec(
+		`INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		workspaceID,
+		"legacy-root",
+		"Legacy Root",
+		"",
+		now,
+		now,
+	); err != nil {
+		t.Fatalf("insert legacy workspace row: %v", err)
+	}
+
+	store, err := NewStoreForWorkspace(dsn, workspaceID, "fallback name")
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer store.Close()
+
+	wantRootID := legacyRootDocumentID(workspaceID)
+	snapshot := store.Snapshot()
+	if snapshot.Name != "Legacy Root" {
+		t.Fatalf("workspace name = %q, want row name", snapshot.Name)
+	}
+	if snapshot.RootDocumentID != wantRootID {
+		t.Fatalf("root document ID = %q, want backfilled %q", snapshot.RootDocumentID, wantRootID)
+	}
+	if !store.HasDocument(wantRootID) {
+		t.Fatalf("backfilled root document %q is not syncable", wantRootID)
+	}
+
+	var storedRootID string
+	if err := db.QueryRow(`SELECT root_document_id FROM workspaces WHERE id = $1`, workspaceID).Scan(&storedRootID); err != nil {
+		t.Fatalf("select backfilled root document ID: %v", err)
+	}
+	if storedRootID != wantRootID {
+		t.Fatalf("stored root document ID = %q, want %q", storedRootID, wantRootID)
+	}
+}
+
 func TestPostgresLoadRegeneratesMissingCheckpointBeforeSync(t *testing.T) {
 	dsn := postgresTestDSN(t)
 

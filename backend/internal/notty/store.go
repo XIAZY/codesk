@@ -123,6 +123,9 @@ func (s *Store) load() error {
 	defer s.mu.Unlock()
 
 	s.state = seedWorkspaceFor(s.workspaceID, s.workspaceName)
+	if err := s.loadWorkspaceMetadataPostgresLocked(); err != nil {
+		return err
+	}
 	if err := s.loadNormalizedPostgresLocked(); err != nil {
 		return err
 	}
@@ -244,7 +247,6 @@ func seedWorkspaceFor(workspaceID string, workspaceName string) WorkspaceState {
 	return WorkspaceState{
 		WorkspaceID:      workspaceID,
 		Name:             workspaceName,
-		RootDocumentID:   rootDocumentID(workspaceID),
 		ContentDocuments: map[string]*Document{},
 		Users: map[string]*User{
 			"user_owner": {
@@ -271,7 +273,11 @@ func seedWorkspaceFor(workspaceID string, workspaceName string) WorkspaceState {
 	}
 }
 
-func rootDocumentID(workspaceID string) string {
+func newRootDocumentID() string {
+	return "doc_" + uuid.NewString()
+}
+
+func legacyRootDocumentID(workspaceID string) string {
 	workspaceID = strings.TrimSpace(workspaceID)
 	if workspaceID == "" {
 		workspaceID = "ws_notty"
@@ -296,7 +302,10 @@ func normalizeCreateDocumentID(id string) (string, error) {
 
 func (s *Store) ensureRootDocumentLocked() (bool, error) {
 	s.ensureMaps()
-	rootID := rootDocumentID(s.state.WorkspaceID)
+	rootID := strings.TrimSpace(s.state.RootDocumentID)
+	if rootID == "" {
+		rootID = legacyRootDocumentID(s.state.WorkspaceID)
+	}
 	s.state.RootDocumentID = rootID
 	if existing := s.state.ContentDocuments[rootID]; existing != nil {
 		changed := false

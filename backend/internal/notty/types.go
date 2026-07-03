@@ -101,6 +101,7 @@ type Workspace struct {
 	ID                     string    `json:"id"`
 	Slug                   string    `json:"slug"`
 	Name                   string    `json:"name"`
+	RootDocumentID         string    `json:"rootDocumentId,omitempty"`
 	LastAccessedDocumentID string    `json:"lastAccessedDocumentId,omitempty"`
 	CreatedAt              time.Time `json:"createdAt"`
 	UpdatedAt              time.Time `json:"updatedAt"`
