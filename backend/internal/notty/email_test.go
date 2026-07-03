@@ -24,18 +24,25 @@ func TestBuildAccountEmailIncludesCodeskLogo(t *testing.T) {
 	message := buildVerificationEmail("person@example.com", "https://app.getcodesk.com/account/verify-email?token=verify-token")
 
 	for _, want := range []string{
-		`<svg width="58" height="44" viewBox="14 31 72 38"`,
-		`<circle cx="24" cy="50" r="9" fill="#E3A15B">`,
-		`<circle cx="76" cy="50" r="9" fill="#7FC1D6">`,
-		`stroke="#1B1A17"`,
+		`position:relative;width:58px;height:44px`,
+		`border-radius:50%;background:#E3A15B`,
+		`border-radius:50%;background:#7FC1D6`,
+		`background:#1B1A17`,
+		`transform:rotate(45deg)`,
+		`transform:rotate(-45deg)`,
 		`>codesk</td>`,
 	} {
 		if !strings.Contains(message.HTML, want) {
 			t.Fatalf("email HTML missing logo fragment %q:\n%s", want, message.HTML)
 		}
 	}
-	if strings.Contains(message.Text, "<svg") {
-		t.Fatalf("plain-text email should not include logo markup: %q", message.Text)
+	for _, unwanted := range []string{"<svg", "<circle", "<line"} {
+		if strings.Contains(message.HTML, unwanted) {
+			t.Fatalf("email HTML should render the logo without SVG fragment %q:\n%s", unwanted, message.HTML)
+		}
+		if strings.Contains(message.Text, unwanted) {
+			t.Fatalf("plain-text email should not include logo markup %q: %q", unwanted, message.Text)
+		}
 	}
 	if !strings.Contains(message.Text, "https://app.getcodesk.com/account/verify-email?token=verify-token") {
 		t.Fatalf("plain-text email missing verification link: %q", message.Text)

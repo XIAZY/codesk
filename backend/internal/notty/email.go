@@ -38,12 +38,12 @@ type mailgunEmailSender struct {
 const accountEmailLogoHTML = `<table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
   <tr>
     <td style="width:58px;vertical-align:middle;">
-      <svg width="58" height="44" viewBox="14 31 72 38" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" style="display:block;overflow:visible;">
-        <circle cx="24" cy="50" r="9" fill="#E3A15B"></circle>
-        <circle cx="76" cy="50" r="9" fill="#7FC1D6"></circle>
-        <line x1="39.6" y1="39.6" x2="60.4" y2="60.4" stroke="#1B1A17" stroke-width="7.8" stroke-linecap="round"></line>
-        <line x1="60.4" y1="39.6" x2="39.6" y2="60.4" stroke="#1B1A17" stroke-width="7.8" stroke-linecap="round"></line>
-      </svg>
+      <div aria-hidden="true" style="position:relative;width:58px;height:44px;line-height:44px;">
+        <span style="position:absolute;left:0;top:13px;width:18px;height:18px;border-radius:50%;background:#E3A15B;display:block;font-size:0;line-height:0;">&nbsp;</span>
+        <span style="position:absolute;left:40px;top:13px;width:18px;height:18px;border-radius:50%;background:#7FC1D6;display:block;font-size:0;line-height:0;">&nbsp;</span>
+        <span style="position:absolute;left:20px;top:18px;width:25px;height:8px;border-radius:8px;background:#1B1A17;display:block;font-size:0;line-height:0;transform:rotate(45deg);">&nbsp;</span>
+        <span style="position:absolute;left:20px;top:18px;width:25px;height:8px;border-radius:8px;background:#1B1A17;display:block;font-size:0;line-height:0;transform:rotate(-45deg);">&nbsp;</span>
+      </div>
     </td>
     <td style="padding-left:14px;vertical-align:middle;font-family:Georgia,serif;font-size:34px;line-height:1;color:#1B1A17;">codesk</td>
   </tr>
