@@ -5,12 +5,14 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	crdt "notty/internal/ycrdt"
 )
 
@@ -542,18 +544,18 @@ func deleteLegacyScaffoldingRows(db *sql.DB) error {
 	if totalDeleted > 0 {
 		log.Printf("legacy cleanup: deleted %d total scaffolding rows", totalDeleted)
 	}
-	if _, err := db.Exec("UPDATE accounts SET last_accessed_workspace_id = NULL WHERE last_accessed_workspace_id::text = 'ws_notty'"); err != nil && !isUUIDTypeMismatch(err) {
+	if _, err := db.Exec("UPDATE accounts SET last_accessed_workspace_id = '' WHERE last_accessed_workspace_id::text = 'ws_notty'"); err != nil && !isUUIDTypeMismatch(err) {
 		return fmt.Errorf("clear legacy workspace reference in accounts: %w", err)
 	}
 	return assertNoLegacyScaffoldingRows(db)
 }
 
 func isUUIDTypeMismatch(err error) bool {
-	if err == nil {
-		return false
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "22P02" || pgErr.Code == "42883"
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "22P02") || strings.Contains(msg, "42883")
+	return false
 }
 
 func assertNoLegacyScaffoldingRows(db *sql.DB) error {
