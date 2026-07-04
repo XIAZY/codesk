@@ -559,6 +559,65 @@ func TestUUIDGroup1MigrationPreservesCrossEntityRefs(t *testing.T) {
 	}
 }
 
+func TestUUIDGroup1MigrationClearsStagingResidue(t *testing.T) {
+	dsn := postgresTestDSN(t)
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+	resetUUIDGroup1MigrationTables(t, db)
+	createLegacyUUIDGroup1Schema(t, db)
+	fixture := seedLegacyUUIDGroup1Graph(t, db)
+	old := fixture.old
+
+	// Staging residue 1: orphaned agent_document_views row (agent deleted from agents table).
+	orphanAgentID := "agent_99999999-9999-9999-9999-999999999999"
+	mustExec(t, db, `INSERT INTO agent_document_views (workspace_id, agent_id, document_id, update_id, state_vector) VALUES ($1, $2, $3, $4, $5)`,
+		old["workspace"], orphanAgentID, fixture.documentID, int64(1), "orphan-sv")
+
+	// Staging residue 2: dead columns that exist in staging but not in code.
+	// In production, initPostgresSchema drops these before migration runs.
+	mustExec(t, db, `ALTER TABLE daemons ADD COLUMN IF NOT EXISTS pending_token_hash TEXT NOT NULL DEFAULT ''`)
+	mustExec(t, db, `ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS root_stream_id TEXT NOT NULL DEFAULT ''`)
+	for _, col := range []struct{ table, column string }{
+		{"daemons", "pending_token_hash"},
+		{"workspaces", "root_stream_id"},
+	} {
+		var exists bool
+		db.QueryRow(`SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2)`,
+			col.table, col.column).Scan(&exists)
+		if !exists {
+			t.Fatalf("precondition: dead column %s.%s should exist before drop", col.table, col.column)
+		}
+	}
+	mustExec(t, db, `ALTER TABLE daemons DROP COLUMN IF EXISTS pending_token_hash`)
+	mustExec(t, db, `ALTER TABLE workspaces DROP COLUMN IF EXISTS root_stream_id`)
+	for _, col := range []struct{ table, column string }{
+		{"daemons", "pending_token_hash"},
+		{"workspaces", "root_stream_id"},
+	} {
+		var exists bool
+		db.QueryRow(`SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2)`,
+			col.table, col.column).Scan(&exists)
+		if exists {
+			t.Fatalf("dead column %s.%s should have been dropped", col.table, col.column)
+		}
+	}
+
+	if err := RunUUIDGroup1Migration(t.Context(), db); err != nil {
+		t.Fatalf("run migration: %v", err)
+	}
+
+	// Orphaned view row deleted, valid view row survives.
+	assertScalar(t, db, `SELECT COUNT(*) FROM agent_document_views WHERE agent_id = $1::uuid`, int64(1), fixture.ids["agent"])
+	assertScalar(t, db, `SELECT COUNT(*) FROM agent_document_views`, int64(1))
+
+	if err := VerifyUUIDGroup1Deep(t.Context(), db); err != nil {
+		t.Fatalf("deep verify: %v", err)
+	}
+}
+
 func TestInitPostgresSchemaMigratesLegacyDocumentHeadsIntoCheckpoints(t *testing.T) {
 	dsn := postgresTestDSN(t)
 	db, err := sql.Open("pgx", dsn)
