@@ -486,6 +486,27 @@ func deleteLegacyScaffoldingRows(db *sql.DB) error {
 		{"presences", "actor_id = $1", []any{"user_owner"}},
 		{"users", "id = $1", []any{"user_owner"}},
 	}
+	// Clear dangling references before deleting the rows they point at.
+	type legacyUpdate struct {
+		table string
+		set   string
+		where string
+	}
+	updates := []legacyUpdate{
+		{"accounts", "last_accessed_workspace_id = ''", "last_accessed_workspace_id = 'ws_notty'"},
+		{"agent_events", "claimed_by = ''", "claimed_by IN (SELECT id FROM agents WHERE daemon_id = 'daemon_local')"},
+		{"agent_events", "claimed_by = ''", "claimed_by = 'daemon_local'"},
+	}
+	for _, u := range updates {
+		result, err := db.Exec("UPDATE " + u.table + " SET " + u.set + " WHERE " + u.where)
+		if err != nil {
+			return fmt.Errorf("clear legacy reference in %s: %w", u.table, err)
+		}
+		if n, _ := result.RowsAffected(); n > 0 {
+			log.Printf("legacy cleanup: cleared %d reference rows in %s where %s", n, u.table, u.where)
+		}
+	}
+
 	var totalDeleted int64
 	for _, d := range deletes {
 		result, err := db.Exec("DELETE FROM "+d.table+" WHERE "+d.where, d.args...)
@@ -500,11 +521,6 @@ func deleteLegacyScaffoldingRows(db *sql.DB) error {
 	}
 	if totalDeleted > 0 {
 		log.Printf("legacy cleanup: deleted %d total scaffolding rows", totalDeleted)
-	}
-	if result, err := db.Exec(`UPDATE accounts SET last_accessed_workspace_id = '' WHERE last_accessed_workspace_id = 'ws_notty'`); err != nil {
-		return fmt.Errorf("clear legacy workspace reference in accounts: %w", err)
-	} else if n, _ := result.RowsAffected(); n > 0 {
-		log.Printf("legacy cleanup: cleared ws_notty reference from %d account rows", n)
 	}
 	return assertNoLegacyScaffoldingRows(db)
 }
@@ -534,6 +550,7 @@ func assertNoLegacyScaffoldingRows(db *sql.DB) error {
 		{"presences", "actor_id", "user_owner"},
 		{"daemons", "id", "daemon_local"},
 		{"agents", "daemon_id", "daemon_local"},
+		{"agent_events", "claimed_by", "daemon_local"},
 	}
 	for _, p := range probes {
 		var count int
