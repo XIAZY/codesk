@@ -21,6 +21,7 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	db := database.DB
 	store := newPostgresTestWorkspaceStore(t, database)
 	seedCodexDaemonRuntime(t, store)
+	user := seedTestUser(t, store)
 
 	agent, err := store.CreateAgent(CreateAgentRequest{
 		Handle:       "pg-reviewer",
@@ -28,16 +29,11 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 		Role:         "Reviews threaded work",
 		Kind:         "codex",
 		SystemPrompt: "Stay attached to thread context.",
-	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
 	assertSharedAgentPrompt(t, agent.SystemPrompt, "PG Reviewer", "pg-reviewer", "Reviews threaded work")
-	users := SortedUsers(store.Snapshot())
-	if len(users) == 0 {
-		t.Fatal("expected seeded workspace user")
-	}
-	user := users[0]
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "# notty\n\n")
 	thread, _, _, err := store.CreateThread(CreateThreadRequest{
 		DocumentID:    documentID,
@@ -46,7 +42,7 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 		RelativeStart: "pg-relative-start",
 		RelativeEnd:   "pg-relative-end",
 		Excerpt:       "# notty",
-	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
 	}
@@ -67,7 +63,7 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	_, run, err := store.StartAgentRun(StartAgentRunRequest{
 		AgentID: agent.ID,
 		Prompt:  "Inspect the thread and leave notes.",
-	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("start run: %v", err)
 	}
@@ -585,6 +581,7 @@ func TestPostgresAgentInboxTracksDocumentUpdatesAndThreadMentions(t *testing.T) 
 	database := newPostgresTestDatabase(t)
 	store := newPostgresTestWorkspaceStore(t, database)
 	seedCodexDaemonRuntime(t, store)
+	user := seedTestUser(t, store)
 
 	logDocumentID := mustCreateTestDocument(t, store, "agent.log", "start\n")
 	normalDocumentID := mustCreateTestDocument(t, store, "docs/spec.md", "start\n")
@@ -593,7 +590,7 @@ func TestPostgresAgentInboxTracksDocumentUpdatesAndThreadMentions(t *testing.T) 
 		Name:   "Reviewer",
 		Role:   "Reviews documents",
 		Kind:   "codex",
-	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
@@ -619,7 +616,7 @@ func TestPostgresAgentInboxTracksDocumentUpdatesAndThreadMentions(t *testing.T) 
 		Body:          "Please inspect @reviewer",
 		RelativeStart: "test-relative-start",
 		RelativeEnd:   "test-relative-end",
-	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create log thread: %v", err)
 	}
@@ -663,7 +660,7 @@ func TestPostgresAgentInboxTracksDocumentUpdatesAndThreadMentions(t *testing.T) 
 	}
 
 	if _, _, err := store.ReplaceDocumentText(normalDocumentID, "start\nsemantic update\n", OperationMeta{
-		ActorID:   "owner",
+		ActorID:   user.ID,
 		ActorType: "human",
 		Source:    "test",
 	}); err != nil {
@@ -682,13 +679,14 @@ func TestPostgresPersistsUTF8SafeTruncatedAgentEventPrompt(t *testing.T) {
 	database := newPostgresTestDatabase(t)
 	store := newPostgresTestWorkspaceStore(t, database)
 	seedCodexDaemonRuntime(t, store)
+	user := seedTestUser(t, store)
 
 	agent, err := store.CreateAgent(CreateAgentRequest{
 		Handle: "reviewer",
 		Name:   "Reviewer",
 		Role:   "Reviews documents",
 		Kind:   "codex",
-	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"})
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
@@ -700,7 +698,7 @@ func TestPostgresPersistsUTF8SafeTruncatedAgentEventPrompt(t *testing.T) {
 		Body:          body,
 		RelativeStart: "test-relative-start",
 		RelativeEnd:   "test-relative-end",
-	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"}); err != nil {
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"}); err != nil {
 		t.Fatalf("create thread with long UTF-8 mention body: %v", err)
 	}
 	if err := store.load(); err != nil {
@@ -951,6 +949,30 @@ func newPostgresTestWorkspaceStore(t *testing.T, database *Database) *Store {
 	return store
 }
 
+func seedTestUser(t *testing.T, store *Store) *User {
+	t.Helper()
+	now := time.Now().UTC()
+	user := &User{
+		ID:        "user_" + uuid.NewString(),
+		Handle:    "owner",
+		Name:      "Test Owner",
+		Role:      "owner",
+		Kind:      "human",
+		Status:    "active",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	store.mu.Lock()
+	store.ensureMaps()
+	store.state.Users[user.ID] = user
+	err := store.persistLocked()
+	store.mu.Unlock()
+	if err != nil {
+		t.Fatalf("persist test user: %v", err)
+	}
+	return user
+}
+
 func seedStoreDaemonRuntime(t *testing.T, store *Store, daemonID string, runtimes ...RuntimeDetection) string {
 	t.Helper()
 	if store == nil {
@@ -1169,8 +1191,8 @@ func TestLegacyScaffoldingRowsDeletedOnStartup(t *testing.T) {
 		t.Fatalf("insert legacy user_owner: %v", err)
 	}
 	if _, err := db.Exec(
-		`INSERT INTO daemons (workspace_id, id, name, status, created_at) VALUES ($1, $2, $3, $4, $5)`,
-		"ws_notty", "daemon_local", "Local daemon", "active", now,
+		`INSERT INTO daemons (workspace_id, id, name, token_hash, status, created_at) VALUES ($1, $2, $3, $4, $5, $6)`,
+		"ws_notty", "daemon_local", "Local daemon", "legacy_placeholder", "active", now,
 	); err != nil {
 		t.Fatalf("insert legacy daemon_local: %v", err)
 	}
