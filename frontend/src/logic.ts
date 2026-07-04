@@ -199,6 +199,10 @@ export function agentStatus(agent: Agent, runs: AgentRun[]) {
   return "idle";
 }
 
+export function coworkerCount(workspace: Pick<WorkspaceState, "agents" | "users">) {
+  return workspace.agents.length + workspace.users.length;
+}
+
 export function agentsByDaemon(agents: Agent[], daemons: Daemon[]) {
   const names = new Map(daemons.map((daemon) => [daemon.id, daemon.name]));
   return agents.reduce<Array<{ daemonId: string; daemonName: string; agents: Agent[] }>>((groups, agent) => {

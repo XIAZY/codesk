@@ -1,11 +1,60 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WorkspaceOnboarding } from "./App";
-import { identifierHelpText, identifierPattern } from "./logic";
+import { WorkspaceApp, WorkspaceOnboarding } from "./App";
+import { emptyWorkspace, identifierHelpText, identifierPattern } from "./logic";
 import type { Account, WorkspaceSummary } from "./types";
+
+vi.mock("./useWorkspace", () => ({
+  useWorkspace: () => ({
+    workspace: {
+      ...emptyWorkspace(),
+      workspaceId: "ws",
+      rootDocumentId: "doc_root",
+      name: "Workspace",
+      currentUserId: "user_1",
+      users: [
+        { id: "user_1", handle: "ada", name: "Ada", role: "", kind: "human", status: "active", updatedAt: "now" },
+        { id: "user_2", handle: "grace", name: "Grace", role: "", kind: "human", status: "active", updatedAt: "now" },
+      ],
+      daemons: [
+        { id: "daemon_1", workspaceId: "ws", name: "Local", status: "active", connectionStatus: "online", createdAt: "now" },
+      ],
+      agents: [
+        {
+          id: "agent_1",
+          daemonId: "daemon_1",
+          handle: "codex",
+          name: "Codex",
+          role: "Review",
+          kind: "codex",
+          workspaceRoot: "agents/agent_1",
+          status: "idle",
+          currentTask: "",
+          currentActivity: "",
+          currentRunId: "",
+          updatedAt: "now",
+        },
+      ],
+    },
+    connected: true,
+    loading: false,
+    error: "",
+    reload: vi.fn(),
+  }),
+}));
+
+vi.mock("./useRootNamespace", () => ({
+  useRootNamespace: () => ({
+    documents: [],
+    ready: true,
+    upsertFile: vi.fn(),
+    moveFile: vi.fn(),
+    tombstoneFile: vi.fn(),
+  }),
+}));
 
 afterEach(() => {
   cleanup();
@@ -138,5 +187,41 @@ describe("WorkspaceOnboarding", () => {
 
     expect(await screen.findByText("Workspace slug is already taken.")).toBeTruthy();
     expect(onSelect).not.toHaveBeenCalled();
+  });
+});
+
+describe("WorkspaceApp coworkers rail", () => {
+  it("renames people to coworkers, counts humans plus agents, and keeps agents flat", async () => {
+    render(
+      <WorkspaceApp
+        api={{ updateLastAccessed: vi.fn().mockResolvedValue({}) } as never}
+        token="token"
+        workspaceId="ws"
+        workspaceSlug="workspace"
+        view={{ kind: "home" }}
+        account={{ id: "account_1", email: "you@example.com", displayName: "You" }}
+        workspaces={[{ id: "ws", slug: "workspace", name: "Workspace" }]}
+        onAccess={vi.fn()}
+        onWorkspaceChange={vi.fn()}
+        onSignOut={vi.fn()}
+      />,
+    );
+
+    const tab = screen.getByRole("button", { name: /coworkers/i });
+    expect(within(tab).getByText("3")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /people/i })).toBeNull();
+
+    fireEvent.click(tab);
+
+    await waitFor(() => expect(document.querySelector(".ctx-body.people-pane")).toBeTruthy());
+    const coworkersPanel = document.querySelector(".ctx-body.people-pane") as HTMLElement;
+    expect(within(coworkersPanel).getByText("People")).toBeTruthy();
+    expect(within(coworkersPanel).getByText("@ada")).toBeTruthy();
+    expect(within(coworkersPanel).getByText("@grace")).toBeTruthy();
+    expect(within(coworkersPanel).getByText("Agents")).toBeTruthy();
+    expect(within(coworkersPanel).queryByText("Daemons")).toBeNull();
+    expect(coworkersPanel.querySelector(".grp-head")).toBeNull();
+    expect(within(coworkersPanel).getByRole("button", { name: /@codex/i })).toBeTruthy();
+    expect(within(coworkersPanel).queryByText("Local")).toBeNull();
   });
 });

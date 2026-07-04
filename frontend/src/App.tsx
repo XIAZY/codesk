@@ -9,6 +9,7 @@ import {
   buildDaemonInstallCommand,
   buildDaemonReinstallCommand,
   buildDaemonUninstallCommand,
+  coworkerCount,
   daemonStatus,
   handleMaxLength,
   handleMinLength,
@@ -1223,7 +1224,7 @@ export function WorkspaceApp({
     rootDocumentId: workspace.rootDocumentId,
   });
   const rootDocuments = rootNamespace.documents;
-  const [rightTab, setRightTab] = useState<"threads" | "activity" | "people">("threads");
+  const [rightTab, setRightTab] = useState<"threads" | "activity" | "coworkers">("threads");
   const [modal, setModal] = useState<"daemon" | "agent" | "rename" | "share" | "agent-detail" | "daemon-detail" | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
   const [selectedDaemon, setSelectedDaemon] = useState<Daemon | null>(null);
@@ -1370,7 +1371,7 @@ export function WorkspaceApp({
       return next;
     });
   }, [activeDocumentPath]);
-  const onlineAgents = workspace.agents.filter((agent) => visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons) !== "disconnected").length;
+  const coworkers = coworkerCount(workspace);
 
   useEffect(() => {
     if (selectedThreadId && !documentThreads.some((thread) => thread.id === selectedThreadId)) {
@@ -1633,12 +1634,12 @@ export function WorkspaceApp({
 
       <aside className={`ctx ${centerView === "document" ? "" : "hidden"}`}>
         <div className="ctx-tabs">
-          {(["threads", "activity", "people"] as const).map((tab) => (
+          {(["threads", "activity", "coworkers"] as const).map((tab) => (
             <button key={tab} className={`btn sm ${rightTab === tab ? "selected" : "ghost"}`} onClick={() => setRightTab(tab)}>
               <Icon name={tab === "threads" ? "thread" : tab === "activity" ? "activity" : "people"} />
               {tab}
               {tab === "threads" ? <span className="muted">{documentThreads.length}</span> : null}
-              {tab === "people" ? <span className="muted">{onlineAgents}</span> : null}
+              {tab === "coworkers" ? <span className="muted">{coworkers}</span> : null}
             </button>
           ))}
         </div>
@@ -1659,19 +1660,14 @@ export function WorkspaceApp({
           />
         ) : null}
         {rightTab === "activity" ? <ActivityPanel workspace={workspace} /> : null}
-        {rightTab === "people" ? (
-          <PeoplePanel
+        {rightTab === "coworkers" ? (
+          <CoworkersPanel
             workspace={workspace}
-            groupedAgents={groupedAgents}
             canInviteMembers={canInviteMembers}
             onShare={() => setModal("share")}
             onAgent={(agent) => {
               setSelectedAgent(agent);
               setModal("agent-detail");
-            }}
-            onDaemon={(daemon) => {
-              setSelectedDaemon(daemon);
-              setModal("daemon-detail");
             }}
           />
         ) : null}
@@ -2498,20 +2494,16 @@ function ActivityPanel({ workspace }: { workspace: ReturnType<typeof useWorkspac
   );
 }
 
-function PeoplePanel({
+function CoworkersPanel({
   workspace,
-  groupedAgents,
   canInviteMembers,
   onShare,
   onAgent,
-  onDaemon,
 }: {
   workspace: ReturnType<typeof useWorkspace>["workspace"];
-  groupedAgents: Array<{ daemonId: string; daemonName: string; agents: Agent[] }>;
   canInviteMembers: boolean;
   onShare: () => void;
   onAgent: (agent: Agent) => void;
-  onDaemon: (daemon: Daemon) => void;
 }) {
   const humans = workspace.users.filter((user) => user.kind === "human");
   return (
@@ -2538,40 +2530,18 @@ function PeoplePanel({
       ))}
       {!humans.length ? <p className="empty-note">Workspace members will appear here.</p> : null}
       <div className="row between ctx-head with-space">
-        <span className="label">Daemons</span>
-        <span className="chip sm">{workspace.daemons.length}</span>
-      </div>
-      {workspace.daemons.map((daemon) => (
-        <button className="daemon-card card" key={daemon.id} onClick={() => onDaemon(daemon)}>
-          <div className="avi sm daemon">{initials(daemon.name)}</div>
-          <div className="col gap-2 min-0">
-            <strong className="small truncate">{daemon.name}</strong>
-            <span className="tiny muted truncate">{daemon.id}</span>
-          </div>
-          <span className={`chip sm ${daemonStatus(daemon)}`}>{daemonStatus(daemon)}</span>
-        </button>
-      ))}
-      <div className="row between ctx-head with-space">
         <span className="label">Agents</span>
         <span className="chip sm">{workspace.agents.length}</span>
       </div>
-      {groupedAgents.map((group) => (
-        <section className="agent-group" key={group.daemonId}>
-          <div className="grp-head">
-            <span>{group.daemonName}</span>
-            <span>{group.agents.length}</span>
+      {workspace.agents.map((agent) => (
+        <button key={agent.id} className="agent-card" onClick={() => onAgent(agent)}>
+          <div className="avi agent">{initials(agent.handle)}</div>
+          <div className="col gap-2 min-0">
+            <strong className="small truncate">@{agent.handle}</strong>
+            <span className="tiny muted truncate">{agent.currentActivity || agent.role}</span>
           </div>
-          {group.agents.map((agent) => (
-            <button key={agent.id} className="agent-card" onClick={() => onAgent(agent)}>
-              <div className="avi agent">{initials(agent.handle)}</div>
-              <div className="col gap-2 min-0">
-                <strong className="small truncate">@{agent.handle}</strong>
-                <span className="tiny muted truncate">{agent.currentActivity || agent.role}</span>
-              </div>
-              <StatusDot tone={visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons)} />
-            </button>
-          ))}
-        </section>
+          <StatusDot tone={visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons)} />
+        </button>
       ))}
     </div>
   );
