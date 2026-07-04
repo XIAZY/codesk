@@ -455,7 +455,13 @@ func TestUUIDGroup1MigrationPreservesPostgresAPIsAndCreatesBareUUIDs(t *testing.
 		t.Fatalf("member user ID = %q, want %q", member.UserID, fixture.ids["user"])
 	}
 
-	database3 := &Database{DB: db, URL: dsn}
+	db.Close()
+	db2, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("reopen postgres: %v", err)
+	}
+	defer db2.Close()
+	database3 := &Database{DB: db2, URL: dsn}
 	store, err := NewWorkspaceStore(database3, fixture.ids["workspace"], "Migrated Workspace")
 	if err != nil {
 		t.Fatalf("new store: %v", err)
@@ -492,7 +498,7 @@ func TestUUIDGroup1MigrationPreservesPostgresAPIsAndCreatesBareUUIDs(t *testing.
 	}
 
 	account := &Account{ID: fixture.ids["account"], Email: "owner@example.test", DisplayName: "Owner"}
-	freshWorkspace, freshMember, err := createWorkspaceForAccount(db, account, CreateWorkspaceRequest{
+	freshWorkspace, freshMember, err := createWorkspaceForAccount(db2, account, CreateWorkspaceRequest{
 		Name:   "Fresh UUID Workspace",
 		Slug:   "fresh-uuid-workspace",
 		Handle: "freshowner",

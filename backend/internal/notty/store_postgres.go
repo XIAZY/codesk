@@ -513,10 +513,24 @@ func deleteLegacyScaffoldingRows(db *sql.DB) error {
 		{"presences", "actor_id = $1", []any{"user_owner"}},
 		{"users", "id = $1", []any{"user_owner"}},
 	}
+	// Clear dangling claimed_by references before deleting the agents they point at.
+	preUpdates := []string{
+		"UPDATE agent_events SET claimed_by = '' WHERE claimed_by IN (SELECT id FROM agents WHERE daemon_id = 'daemon_local')",
+		"UPDATE agent_events SET claimed_by = '' WHERE claimed_by = 'daemon_local'",
+	}
+	for _, stmt := range preUpdates {
+		if _, err := db.Exec(stmt); err != nil && !isUUIDTypeMismatch(err) {
+			return fmt.Errorf("pre-delete update: %w", err)
+		}
+	}
+
 	var totalDeleted int64
 	for _, d := range deletes {
 		result, err := db.Exec("DELETE FROM "+d.table+" WHERE "+d.where, d.args...)
 		if err != nil {
+			if isUUIDTypeMismatch(err) {
+				continue
+			}
 			return fmt.Errorf("delete legacy rows from %s: %w", d.table, err)
 		}
 		n, _ := result.RowsAffected()
@@ -528,12 +542,18 @@ func deleteLegacyScaffoldingRows(db *sql.DB) error {
 	if totalDeleted > 0 {
 		log.Printf("legacy cleanup: deleted %d total scaffolding rows", totalDeleted)
 	}
-	if result, err := db.Exec(`UPDATE accounts SET last_accessed_workspace_id = '' WHERE last_accessed_workspace_id = 'ws_notty'`); err != nil {
+	if _, err := db.Exec("UPDATE accounts SET last_accessed_workspace_id = NULL WHERE last_accessed_workspace_id::text = 'ws_notty'"); err != nil && !isUUIDTypeMismatch(err) {
 		return fmt.Errorf("clear legacy workspace reference in accounts: %w", err)
-	} else if n, _ := result.RowsAffected(); n > 0 {
-		log.Printf("legacy cleanup: cleared ws_notty reference from %d account rows", n)
 	}
 	return assertNoLegacyScaffoldingRows(db)
+}
+
+func isUUIDTypeMismatch(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "22P02") || strings.Contains(msg, "42883")
 }
 
 func assertNoLegacyScaffoldingRows(db *sql.DB) error {
@@ -564,7 +584,9 @@ func assertNoLegacyScaffoldingRows(db *sql.DB) error {
 	}
 	for _, p := range probes {
 		var count int
-		if err := db.QueryRow("SELECT COUNT(*) FROM "+p.table+" WHERE "+p.column+" = $1", p.value).Scan(&count); err != nil {
+		if err := db.QueryRow("SELECT COUNT(*) FROM "+p.table+" WHERE "+p.column+" = $1", p.value).Scan(&count); isUUIDTypeMismatch(err) {
+			continue
+		} else if err != nil {
 			return fmt.Errorf("legacy probe %s.%s=%s: %w", p.table, p.column, p.value, err)
 		}
 		if count > 0 {
