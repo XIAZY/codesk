@@ -616,6 +616,28 @@ func TestUUIDGroup1MigrationClearsStagingResidue(t *testing.T) {
 	if err := VerifyUUIDGroup1Deep(t.Context(), db); err != nil {
 		t.Fatalf("deep verify: %v", err)
 	}
+
+	// Staging residue 3: data-bearing orphan fails closed.
+	// A thread_messages.author_id pointing to a deleted user should be adopted
+	// (prefix stripped, added to map) but fail at deep verify because the target
+	// entity row doesn't exist.
+	db2, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer db2.Close()
+	resetUUIDGroup1MigrationTables(t, db2)
+	createLegacyUUIDGroup1Schema(t, db2)
+	fixture = seedLegacyUUIDGroup1Graph(t, db2)
+	missingUser := "user_99999999-9999-9999-9999-999999999999"
+	mustExec(t, db2, `UPDATE thread_messages SET author_id = $1, author_type = 'human' WHERE id = $2`, missingUser, fixture.old["message"])
+	err = RunUUIDGroup1Migration(t.Context(), db2)
+	if err == nil {
+		t.Fatal("expected data-bearing orphan to fail closed")
+	}
+	if !strings.Contains(err.Error(), "thread_messages.author_id has") {
+		t.Fatalf("migration error = %v, want thread_messages.author_id unresolved reference", err)
+	}
 }
 
 func TestInitPostgresSchemaMigratesLegacyDocumentHeadsIntoCheckpoints(t *testing.T) {
