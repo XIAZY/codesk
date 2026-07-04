@@ -87,12 +87,10 @@ func runVerify(args []string) {
 		}
 		mappings = append(mappings, tableMappings...)
 	}
-	issues := notty.VerifyUUIDMigrationSnapshots(before, after, mappings)
-	databaseIssues, err := notty.VerifyUUIDMigrationDatabase(ctx, db)
-	if err != nil {
-		log.Fatalf("verify database: %v", err)
+	if err := notty.VerifyUUIDGroup1Deep(ctx, db); err != nil {
+		log.Fatalf("verify group1 deep: %v", err)
 	}
-	issues = append(issues, databaseIssues...)
+	issues := notty.VerifyUUIDMigrationSnapshots(before, after, mappings)
 	if *checkOpaquePayloads {
 		opaqueIssues, err := notty.VerifyUUIDMigrationJSONPayloads(ctx, db)
 		if err != nil {
@@ -172,6 +170,7 @@ func usage() {
   uuidverify verify --database-url "$NOTTY_DATABASE_URL" --before before.json --mapping-table uuid_migration_map
 
 The mapping table must expose entity_type, old_id, and new_id columns.
+verify always runs the Group 1 deep database verifier before snapshot checks.
 Opaque JSON/log payloads are not hard-gated by default; pass --check-opaque-payloads
 when deliberately scrubbing them in the migration window.
 `)

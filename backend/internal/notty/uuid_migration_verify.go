@@ -494,15 +494,17 @@ func VerifyUUIDMigrationSnapshots(before, after *UUIDMigrationSnapshot, mappings
 	}
 	for entity, ids := range before.EntityIDs {
 		entityMap := byEntity[entity]
-		afterIDs := setOf(after.EntityIDs[entity])
+		afterIDs := uuidMigrationSetOf(after.EntityIDs[entity])
 		for _, oldID := range ids {
-			newID := entityMap[oldID]
+			newID := mappedOrStableUUIDMigrationID(entityMap, afterIDs, oldID)
 			if strings.TrimSpace(newID) == "" {
 				issues = append(issues, UUIDMigrationIssue{Kind: "missing_mapping", ID: oldID, Message: fmt.Sprintf("missing %s mapping for %q", entity, oldID)})
 				continue
 			}
-			if _, err := uuid.Parse(newID); err != nil {
-				issues = append(issues, UUIDMigrationIssue{Kind: "mapped_id_not_uuid", ID: newID, Message: fmt.Sprintf("%s mapping for %q points to non-UUID %q", entity, oldID, newID)})
+			if entity != "document" {
+				if _, err := uuid.Parse(newID); err != nil {
+					issues = append(issues, UUIDMigrationIssue{Kind: "mapped_id_not_uuid", ID: newID, Message: fmt.Sprintf("%s mapping for %q points to non-UUID %q", entity, oldID, newID)})
+				}
 			}
 			if !afterIDs[newID] {
 				issues = append(issues, UUIDMigrationIssue{Kind: "mapped_id_missing_after", ID: newID, Message: fmt.Sprintf("%s mapping for %q points to absent after ID %q", entity, oldID, newID)})
@@ -519,7 +521,7 @@ func VerifyUUIDMigrationSnapshots(before, after *UUIDMigrationSnapshot, mappings
 		afterDocs[doc.DocumentID] = doc
 	}
 	for oldID, beforeDoc := range beforeDocs {
-		newID := documentMap[oldID]
+		newID := mappedOrStableUUIDMigrationID(documentMap, uuidMigrationDocumentIDSet(afterDocs), oldID)
 		if newID == "" {
 			continue
 		}
@@ -533,6 +535,24 @@ func VerifyUUIDMigrationSnapshots(before, after *UUIDMigrationSnapshot, mappings
 	}
 	issues = append(issues, verifyRootSnapshots(before.RootDocuments, after.RootDocuments, byEntity)...)
 	return issues
+}
+
+func mappedOrStableUUIDMigrationID(entityMap map[string]string, afterIDs map[string]bool, oldID string) string {
+	if newID := strings.TrimSpace(entityMap[oldID]); newID != "" {
+		return newID
+	}
+	if afterIDs[oldID] {
+		return oldID
+	}
+	return ""
+}
+
+func uuidMigrationDocumentIDSet(documents map[string]UUIDMigrationDocumentSnapshot) map[string]bool {
+	ids := make(map[string]bool, len(documents))
+	for id := range documents {
+		ids[id] = true
+	}
+	return ids
 }
 
 func captureUUIDMigrationDocumentSnapshots(ctx context.Context, db *sql.DB) ([]UUIDMigrationDocumentSnapshot, []UUIDMigrationRootDocumentSnapshot, error) {
@@ -783,7 +803,7 @@ func isUUIDMigrationRootDocument(workspaceID, documentID, path, title string, hi
 	}
 	return strings.TrimSpace(path) == legacyRootDocumentPath ||
 		strings.TrimSpace(title) == legacyRootDocumentTitle ||
-		strings.TrimSpace(documentID) == rootDocumentID(workspaceID) ||
+		strings.TrimSpace(documentID) == legacyRootDocumentID(workspaceID) ||
 		(hidden && strings.Contains(strings.TrimSpace(documentID), "root"))
 }
 
@@ -806,12 +826,14 @@ func verifyRootSnapshots(beforeRoots, afterRoots []UUIDMigrationRootDocumentSnap
 			issues = append(issues, UUIDMigrationIssue{Kind: "root_missing_after", ID: beforeRoot.DocumentID, Message: fmt.Sprintf("missing root document after migration for workspace %q -> %q", beforeRoot.WorkspaceID, newWorkspaceID)})
 			continue
 		}
+		afterContentDocumentIDs := map[string]bool{}
 		afterEntries := map[string]UUIDMigrationRootEntrySnapshot{}
 		for _, entry := range afterRoot.Entries {
+			afterContentDocumentIDs[entry.ContentDocumentID] = true
 			afterEntries[entry.ContentDocumentID] = entry
 		}
 		for _, beforeEntry := range beforeRoot.Entries {
-			newDocumentID := documentMap[beforeEntry.ContentDocumentID]
+			newDocumentID := mappedOrStableUUIDMigrationID(documentMap, afterContentDocumentIDs, beforeEntry.ContentDocumentID)
 			if newDocumentID == "" {
 				issues = append(issues, UUIDMigrationIssue{Kind: "root_entry_mapping_missing", ID: beforeEntry.ContentDocumentID, Message: fmt.Sprintf("missing document mapping for root entry %q", beforeEntry.ContentDocumentID)})
 				continue
@@ -932,13 +954,44 @@ func mappingByEntity(mappings []UUIDMigrationMapping) map[string]map[string]stri
 }
 
 func normalizeUUIDMigrationMapping(mapping UUIDMigrationMapping) UUIDMigrationMapping {
-	mapping.Entity = strings.TrimSpace(mapping.Entity)
+	mapping.Entity = canonicalUUIDMigrationMappingEntity(strings.TrimSpace(mapping.Entity))
 	mapping.OldID = strings.TrimSpace(mapping.OldID)
 	mapping.NewID = strings.TrimSpace(mapping.NewID)
 	return mapping
 }
 
-func setOf(values []string) map[string]bool {
+func canonicalUUIDMigrationMappingEntity(entity string) string {
+	switch entity {
+	case "accounts":
+		return "account"
+	case "account_email_tokens":
+		return "account_email_token"
+	case "workspaces":
+		return "workspace"
+	case "workspace_invites":
+		return "workspace_invite"
+	case "daemons":
+		return "daemon"
+	case "documents":
+		return "document"
+	case "users":
+		return "user"
+	case "agents":
+		return "agent"
+	case "agent_runs":
+		return "agent_run"
+	case "threads":
+		return "thread"
+	case "thread_messages":
+		return "thread_message"
+	case "agent_events":
+		return "agent_event"
+	default:
+		return entity
+	}
+}
+
+func uuidMigrationSetOf(values []string) map[string]bool {
 	set := make(map[string]bool, len(values))
 	for _, value := range values {
 		set[value] = true
