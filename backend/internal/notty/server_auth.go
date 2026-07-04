@@ -522,6 +522,9 @@ func (s *Server) requireWorkspace(next http.Handler) http.Handler {
 			if errors.Is(err, ErrNotFound) {
 				status = http.StatusForbidden
 			}
+			if errors.Is(err, errWorkspaceMigrated) {
+				status = http.StatusGone
+			}
 			writeError(w, status, err.Error())
 			return
 		}
@@ -581,6 +584,12 @@ func (s *Server) authenticateWorkspaceRequest(r *http.Request, workspaceID strin
 	if token == "" {
 		return nil, errors.New("missing bearer token")
 	}
+	if !isUUIDString(workspaceID) {
+		if isMigratedWorkspaceID(r.Context(), s.store.db, workspaceID) {
+			return nil, errWorkspaceMigrated
+		}
+		return nil, ErrNotFound
+	}
 	if isLikelyJWT(token) {
 		base, err := s.authenticateHumanRequest(r)
 		if err != nil {
@@ -604,6 +613,9 @@ func (s *Server) authenticateWorkspaceRequest(r *http.Request, workspaceID strin
 	}
 	daemon, err := authenticateDaemonToken(s.store.db, token, workspaceID)
 	if err != nil {
+		if errors.Is(err, ErrNotFound) && isMigratedWorkspaceID(r.Context(), s.store.db, workspaceID) {
+			return nil, errWorkspaceMigrated
+		}
 		return nil, err
 	}
 	auth := &AuthContext{
