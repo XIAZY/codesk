@@ -576,7 +576,29 @@ func TestUUIDGroup1MigrationClearsStagingResidue(t *testing.T) {
 	mustExec(t, db, `INSERT INTO agent_document_views (workspace_id, agent_id, document_id, update_id, state_vector) VALUES ($1, $2, $3, $4, $5)`,
 		old["workspace"], orphanAgentID, fixture.documentID, int64(1), "orphan-sv")
 
-	// Staging residue 2: dead columns that exist in staging but not in code.
+	// Staging residue 2: reachable thread content authored by a deleted agent.
+	// The denormalized handle/name snapshots are the display attribution; the
+	// missing back-reference should clear rather than deleting visible content.
+	deletedAuthorID := "agent_88888888-8888-8888-8888-888888888888"
+	mustExec(t, db, `
+		UPDATE threads
+		   SET created_by_id = $1,
+		       created_by_type = 'agent',
+		       created_by_handle = 'deleted-agent',
+		       created_by_name = 'Deleted Agent'
+		 WHERE id = $2`,
+		deletedAuthorID, old["thread"])
+	mustExec(t, db, `
+		UPDATE thread_messages
+		   SET author_id = $1,
+		       author_type = 'agent',
+		       author_handle = 'deleted-agent',
+		       author_name = 'Deleted Agent',
+		       body = 'kept message'
+		 WHERE id = $2`,
+		deletedAuthorID, old["message"])
+
+	// Staging residue 3: dead columns that exist in staging but not in code.
 	mustExec(t, db, `ALTER TABLE daemons ADD COLUMN IF NOT EXISTS pending_token_hash TEXT NOT NULL DEFAULT ''`)
 	mustExec(t, db, `ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS root_stream_id TEXT NOT NULL DEFAULT ''`)
 
@@ -608,31 +630,39 @@ func TestUUIDGroup1MigrationClearsStagingResidue(t *testing.T) {
 	defer db2.Close()
 	assertScalar(t, db2, `SELECT COUNT(*) FROM agent_document_views WHERE agent_id = $1::uuid`, int64(1), fixture.ids["agent"])
 	assertScalar(t, db2, `SELECT COUNT(*) FROM agent_document_views`, int64(1))
+	assertScalar(t, db2, `SELECT COUNT(*) FROM threads WHERE id = $1::uuid`, int64(1), fixture.ids["thread"])
+	assertScalar(t, db2, `SELECT created_by_id IS NULL FROM threads WHERE id = $1::uuid`, true, fixture.ids["thread"])
+	assertScalar(t, db2, `SELECT created_by_handle FROM threads WHERE id = $1::uuid`, "deleted-agent", fixture.ids["thread"])
+	assertScalar(t, db2, `SELECT created_by_name FROM threads WHERE id = $1::uuid`, "Deleted Agent", fixture.ids["thread"])
+	assertScalar(t, db2, `SELECT COUNT(*) FROM thread_messages WHERE id = $1::uuid`, int64(1), fixture.ids["message"])
+	assertScalar(t, db2, `SELECT author_id IS NULL FROM thread_messages WHERE id = $1::uuid`, true, fixture.ids["message"])
+	assertScalar(t, db2, `SELECT author_handle FROM thread_messages WHERE id = $1::uuid`, "deleted-agent", fixture.ids["message"])
+	assertScalar(t, db2, `SELECT author_name FROM thread_messages WHERE id = $1::uuid`, "Deleted Agent", fixture.ids["message"])
+	assertScalar(t, db2, `SELECT body FROM thread_messages WHERE id = $1::uuid`, "kept message", fixture.ids["message"])
 
 	if err := VerifyUUIDGroup1Deep(t.Context(), db2); err != nil {
 		t.Fatalf("deep verify: %v", err)
 	}
 
-	// Staging residue 3: data-bearing orphan fails closed.
-	// A thread_messages.author_id pointing to a deleted user should be adopted
-	// (prefix stripped, added to map) but fail at deep verify because the target
-	// entity row doesn't exist.
-	db3, err := sql.Open("pgx", dsn)
+	database := &Database{DB: db2, URL: dsn}
+	store, err := NewWorkspaceStore(database, fixture.ids["workspace"], "Migrated Workspace")
 	if err != nil {
-		t.Fatalf("reopen: %v", err)
+		t.Fatalf("load migrated store with orphan author IDs cleared: %v", err)
 	}
-	defer db3.Close()
-	resetUUIDGroup1MigrationTables(t, db3)
-	createLegacyUUIDGroup1Schema(t, db3)
-	fixture = seedLegacyUUIDGroup1Graph(t, db3)
-	missingUser := "user_99999999-9999-9999-9999-999999999999"
-	mustExec(t, db3, `UPDATE thread_messages SET author_id = $1, author_type = 'human' WHERE id = $2`, missingUser, fixture.old["message"])
-	err = RunUUIDGroup1Migration(t.Context(), db3)
-	if err == nil {
-		t.Fatal("expected data-bearing orphan to fail closed")
+	snapshot := store.Snapshot()
+	thread := snapshot.Threads[fixture.ids["thread"]]
+	if thread == nil {
+		t.Fatalf("snapshot missing migrated thread %q", fixture.ids["thread"])
 	}
-	if !strings.Contains(err.Error(), "thread_messages.author_id has") {
-		t.Fatalf("migration error = %v, want thread_messages.author_id unresolved reference", err)
+	if thread.CreatedByID != "" || thread.CreatedByHandle != "deleted-agent" || thread.CreatedByName != "Deleted Agent" {
+		t.Fatalf("thread author snapshot = id:%q handle:%q name:%q", thread.CreatedByID, thread.CreatedByHandle, thread.CreatedByName)
+	}
+	if len(thread.Messages) != 1 {
+		t.Fatalf("thread message count = %d, want 1", len(thread.Messages))
+	}
+	message := thread.Messages[0]
+	if message.AuthorID != "" || message.AuthorHandle != "deleted-agent" || message.AuthorName != "Deleted Agent" || message.Body != "kept message" {
+		t.Fatalf("message author snapshot = id:%q handle:%q name:%q body:%q", message.AuthorID, message.AuthorHandle, message.AuthorName, message.Body)
 	}
 }
 

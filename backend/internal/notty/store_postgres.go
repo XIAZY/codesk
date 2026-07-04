@@ -334,7 +334,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			anchor_relative_end TEXT NOT NULL DEFAULT '',
 			anchor_kind TEXT NOT NULL DEFAULT '',
 			anchor_excerpt TEXT NOT NULL DEFAULT '',
-			created_by_id UUID NOT NULL,
+			created_by_id UUID,
 			created_by_type TEXT NOT NULL,
 			created_by_handle TEXT NOT NULL,
 			created_by_name TEXT NOT NULL,
@@ -343,6 +343,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		)
 		`,
 		`ALTER TABLE threads ADD COLUMN IF NOT EXISTS client_operation_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE threads ALTER COLUMN created_by_id DROP NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_threads_workspace_document_updated ON threads (workspace_id, document_id, updated_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_threads_workspace_actor_operation ON threads (workspace_id, created_by_id, created_by_type, client_operation_id) WHERE client_operation_id <> ''`,
 		`DROP TABLE IF EXISTS workspace_snapshots`,
@@ -359,7 +360,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			workspace_id UUID NOT NULL,
 			id UUID PRIMARY KEY,
 			thread_id UUID NOT NULL,
-			author_id UUID NOT NULL,
+			author_id UUID,
 			author_type TEXT NOT NULL,
 			author_handle TEXT NOT NULL,
 			author_name TEXT NOT NULL,
@@ -368,6 +369,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			created_at TIMESTAMPTZ NOT NULL
 		)
 		`,
+		`ALTER TABLE thread_messages ALTER COLUMN author_id DROP NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_thread_messages_workspace_thread_created ON thread_messages (workspace_id, thread_id, created_at ASC)`,
 		`
 		CREATE TABLE IF NOT EXISTS thread_participants (
@@ -554,7 +556,7 @@ func deleteLegacyScaffoldingRows(db *sql.DB) error {
 // are deleted. Runs before primary entity deletes so subqueries can still resolve.
 func sweepLegacyReferencesFromInventory(db *sql.DB) error {
 	legacyIDs := map[string][]string{
-		"users":  {"user_owner"},
+		"users":   {"user_owner"},
 		"daemons": {"daemon_local"},
 	}
 
@@ -667,7 +669,7 @@ func assertNoLegacyScaffoldingRows(db *sql.DB) error {
 	}
 	// Inventory-derived probes: every reference column that could hold a legacy value.
 	legacyIDs := map[string][]string{
-		"users":  {"user_owner"},
+		"users":   {"user_owner"},
 		"daemons": {"daemon_local"},
 	}
 	for _, ref := range uuidGroup1References() {
@@ -1348,7 +1350,7 @@ func (s *Store) replaceThreadsPostgresLocked(tx *sql.Tx) error {
 			thread.Anchor.RelativeEnd,
 			thread.Anchor.Kind,
 			thread.Anchor.Excerpt,
-			thread.CreatedByID,
+			uuidStringOrNil(thread.CreatedByID),
 			thread.CreatedByType,
 			thread.CreatedByHandle,
 			thread.CreatedByName,
@@ -1379,7 +1381,7 @@ func (s *Store) replaceThreadsPostgresLocked(tx *sql.Tx) error {
 				s.state.WorkspaceID,
 				message.ID,
 				thread.ID,
-				message.AuthorID,
+				uuidStringOrNil(message.AuthorID),
 				message.AuthorType,
 				message.AuthorHandle,
 				message.AuthorName,
@@ -2223,7 +2225,7 @@ func (s *Store) restoreDocumentDocPostgresLocked(document *Document) (*crdt.Doc,
 func (s *Store) loadThreadsPostgresLocked() error {
 	rows, err := s.db.Query(
 		`SELECT id::text, document_id, client_operation_id, title, status, anchor_relative_start, anchor_relative_end,
-		        anchor_kind, anchor_excerpt, created_by_id::text, created_by_type,
+		        anchor_kind, anchor_excerpt, COALESCE(created_by_id::text, ''), created_by_type,
 		        created_by_handle, created_by_name, created_at, updated_at
 		   FROM threads
 		  WHERE workspace_id = $1`,
@@ -2272,7 +2274,7 @@ func (s *Store) loadThreadsPostgresLocked() error {
 	}
 
 	messages, err := s.db.Query(
-		`SELECT id::text, thread_id::text, author_id::text, author_type, author_handle, author_name, body, kind, created_at
+		`SELECT id::text, thread_id::text, COALESCE(author_id::text, ''), author_type, author_handle, author_name, body, kind, created_at
 		   FROM thread_messages
 		  WHERE workspace_id = $1
 		  ORDER BY created_at ASC, id ASC`,
