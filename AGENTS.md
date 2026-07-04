@@ -33,6 +33,7 @@ Schema migrations run at backend startup, in order: schema tables → legacy cle
 - Cross-component behavior (daemon ↔ backend) needs regressions at the boundary; unit-green on both sides proves nothing about the seam.
 - Every dangerous path fixed in review gets a committed regression. Temporary QA probes must be promoted into the suite before merge.
 - Hand-offs state exactly what was validated (compile/unit vs live-Postgres vs cross-component) with the commands run.
+- Major changes (migrations, identity/schema changes, anything startup-blocking) run the ENTIRE suite — backend, daemon, and frontend (`npm test`/`npm run build`) — regardless of which surfaces the diff touches. Diff-scoped validation is for minor changes only.
 
 # Process
 
