@@ -177,18 +177,21 @@ func TestUUIDGroup1MigrationFailsClosedOnInvalidLegacyData(t *testing.T) {
 				mustExec(t, db, `INSERT INTO documents (workspace_id, id, path, title) VALUES ($1, $2, $3, $4)`,
 					"ws_bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "doc_unmapped", "docs/unmapped.md", "Unmapped")
 			},
-			wantErr: "documents.workspace_id has unmapped references",
+			wantErr: "documents.workspace_id has 1 unresolved references to workspaces",
 		},
 		{
 			name: "unknown polymorphic actor type",
 			seed: func(t *testing.T, db *sql.DB) {
 				oldWorkspaceID := "ws_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+				userID := "user_11111111-1111-1111-1111-111111111111"
 				mustExec(t, db, `INSERT INTO workspaces (id, slug, name, root_document_id) VALUES ($1, $2, $3, $4)`,
 					oldWorkspaceID, "unknown-actor", "Unknown Actor", "doc_root_unknown")
+				mustExec(t, db, `INSERT INTO users (workspace_id, id, handle, name) VALUES ($1, $2, $3, $4)`,
+					oldWorkspaceID, userID, "ghost", "Ghost")
 				mustExec(t, db, `INSERT INTO documents (workspace_id, id, path, title) VALUES ($1, $2, $3, $4)`,
 					oldWorkspaceID, "doc_unknown_actor", "docs/actor.md", "Actor")
 				mustExec(t, db, `INSERT INTO document_updates (workspace_id, document_id, update, actor_id, actor_type) VALUES ($1, $2, $3, $4, $5)`,
-					oldWorkspaceID, "doc_unknown_actor", []byte{0x01}, "user_11111111-1111-1111-1111-111111111111", "robot")
+					oldWorkspaceID, "doc_unknown_actor", []byte{0x01}, userID, "robot")
 			},
 			wantErr: "document_updates.actor_id has unknown actor_type values",
 		},

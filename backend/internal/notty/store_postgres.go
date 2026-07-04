@@ -49,6 +49,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		`ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS root_document_id TEXT NOT NULL DEFAULT ''`,
 		`UPDATE workspaces SET root_document_id = 'doc_root_' || id::text WHERE root_document_id = ''`,
 		`ALTER TABLE workspaces ALTER COLUMN root_document_id DROP DEFAULT`,
+		`ALTER TABLE workspaces DROP COLUMN IF EXISTS root_stream_id`,
 		`
 		CREATE TABLE IF NOT EXISTS accounts (
 			id UUID PRIMARY KEY,
@@ -126,6 +127,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS os TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS arch TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS runtime_detections JSONB NOT NULL DEFAULT '[]'::jsonb`,
+		`ALTER TABLE daemons DROP COLUMN IF EXISTS pending_token_hash`,
 		`
 		CREATE TABLE IF NOT EXISTS documents (
 			workspace_id UUID NOT NULL,

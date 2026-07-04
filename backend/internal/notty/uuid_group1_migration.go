@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"sort"
 	"strings"
@@ -348,11 +349,17 @@ func RunUUIDGroup1Migration(ctx context.Context, db *sql.DB) error {
 	if err = populateUUIDMigrationMap(ctx, tx); err != nil {
 		return fmt.Errorf("populate uuid migration map: %w", err)
 	}
+	if err = adoptOrphanedReferences(ctx, tx); err != nil {
+		return fmt.Errorf("adopt orphaned references: %w", err)
+	}
 	if err = rewriteUUIDGroup1References(ctx, tx); err != nil {
 		return fmt.Errorf("rewrite uuid group1 references: %w", err)
 	}
 	if err = rewriteUUIDGroup1EntityIDs(ctx, tx); err != nil {
 		return fmt.Errorf("rewrite uuid group1 entity ids: %w", err)
+	}
+	if err = resolveOrphanedReferences(ctx, tx); err != nil {
+		return fmt.Errorf("resolve orphaned references: %w", err)
 	}
 	if err = convertUUIDGroup1Columns(ctx, tx); err != nil {
 		return fmt.Errorf("convert uuid group1 columns: %w", err)
@@ -514,6 +521,208 @@ func populateUUIDMigrationMap(ctx context.Context, tx *sql.Tx) error {
 		}
 	}
 	return nil
+}
+
+func entityPrefixMap() map[string]string {
+	m := map[string]string{}
+	for _, spec := range uuidGroup1Entities() {
+		m[spec.entity] = spec.prefix
+	}
+	return m
+}
+
+func adoptOrphanedReferences(ctx context.Context, tx *sql.Tx) error {
+	prefixes := entityPrefixMap()
+
+	adoptColumn := func(table, column, entity string) error {
+		dataType, err := columnDataType(ctx, tx, table, column)
+		if err != nil {
+			return err
+		}
+		if dataType == "uuid" {
+			return nil
+		}
+		prefix, ok := prefixes[entity]
+		if !ok {
+			return nil
+		}
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+			`SELECT DISTINCT target.%s::text
+			   FROM %s AS target
+			   LEFT JOIN uuid_migration_map AS map
+			     ON map.entity_type = $1
+			    AND target.%s = map.old_id
+			  WHERE target.%s IS NOT NULL
+			    AND target.%s <> ''
+			    AND target.%s LIKE $2
+			    AND map.old_id IS NULL`,
+			quoteIdent(column), quoteIdent(table), quoteIdent(column),
+			quoteIdent(column), quoteIdent(column), quoteIdent(column),
+		), entity, prefix+"%")
+		if err != nil {
+			return err
+		}
+		var orphans []string
+		for rows.Next() {
+			var oldID string
+			if err := rows.Scan(&oldID); err != nil {
+				rows.Close()
+				return err
+			}
+			orphans = append(orphans, oldID)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		var adopted int
+		for _, oldID := range orphans {
+			newID, err := stripPrefixedUUID(oldID, prefix)
+			if err != nil {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO uuid_migration_map (entity_type, old_id, new_id)
+				 VALUES ($1, $2, $3)
+				 ON CONFLICT (entity_type, old_id) DO NOTHING`,
+				entity, oldID, newID); err != nil {
+				return err
+			}
+			adopted++
+		}
+		if adopted > 0 {
+			log.Printf("uuid migration: adopted %d orphaned %s refs in %s.%s", adopted, entity, table, column)
+		}
+		return nil
+	}
+
+	for _, ref := range uuidGroup1References() {
+		if err := adoptColumn(ref.table, ref.column, ref.entity); err != nil {
+			return fmt.Errorf("adopt %s.%s: %w", ref.table, ref.column, err)
+		}
+	}
+	for _, ref := range uuidGroup1UnionReferences() {
+		for _, entity := range ref.entities {
+			if err := adoptColumn(ref.table, ref.column, entity); err != nil {
+				return fmt.Errorf("adopt %s.%s: %w", ref.table, ref.column, err)
+			}
+		}
+	}
+	for _, ref := range uuidGroup1PolymorphicReferences() {
+		for _, entity := range ref.typeEntity {
+			if err := adoptColumn(ref.table, ref.column, entity); err != nil {
+				return fmt.Errorf("adopt %s.%s: %w", ref.table, ref.column, err)
+			}
+		}
+	}
+	return nil
+}
+
+var disposableTables = map[string]bool{
+	"agent_document_views": true,
+	"thread_participants":  true,
+	"presences":            true,
+}
+
+func resolveOrphanedReferences(ctx context.Context, tx *sql.Tx) error {
+	resolveRef := func(table, column, entity string, nullable bool) error {
+		target := entityTable(entity)
+		if target == "" {
+			return nil
+		}
+		refType, err := columnDataType(ctx, tx, table, column)
+		if err != nil {
+			return nil
+		}
+		if refType == "uuid" {
+			return nil
+		}
+		targetType, err := columnDataType(ctx, tx, target, "id")
+		if err != nil {
+			return nil
+		}
+		if targetType != refType {
+			return nil
+		}
+		if nullable {
+			result, err := tx.ExecContext(ctx, fmt.Sprintf(
+				`UPDATE %s AS t SET %s = ''
+				  WHERE t.%s <> ''
+				    AND NOT EXISTS (SELECT 1 FROM %s AS e WHERE e.id = t.%s)`,
+				quoteIdent(table), quoteIdent(column),
+				quoteIdent(column), quoteIdent(target), quoteIdent(column),
+			))
+			if err != nil {
+				return err
+			}
+			if n, _ := result.RowsAffected(); n > 0 {
+				log.Printf("uuid migration: nulled %d orphaned %s refs in %s.%s", n, entity, table, column)
+			}
+			return nil
+		}
+		if disposableTables[table] {
+			result, err := tx.ExecContext(ctx, fmt.Sprintf(
+				`DELETE FROM %s AS t
+				  WHERE NOT EXISTS (SELECT 1 FROM %s AS e WHERE e.id = t.%s)`,
+				quoteIdent(table), quoteIdent(target), quoteIdent(column),
+			))
+			if err != nil {
+				return err
+			}
+			if n, _ := result.RowsAffected(); n > 0 {
+				log.Printf("uuid migration: deleted %d orphaned rows from %s (missing %s in %s)", n, table, column, target)
+			}
+			return nil
+		}
+		return nil
+	}
+
+	const maxPasses = 5
+	for pass := 0; pass < maxPasses; pass++ {
+		changed := false
+		for _, ref := range uuidGroup1References() {
+			before := countRows(ctx, tx, ref.table)
+			if err := resolveRef(ref.table, ref.column, ref.entity, ref.nullable); err != nil {
+				return fmt.Errorf("resolve %s.%s: %w", ref.table, ref.column, err)
+			}
+			if countRows(ctx, tx, ref.table) != before {
+				changed = true
+			}
+		}
+		for _, ref := range uuidGroup1UnionReferences() {
+			for _, entity := range ref.entities {
+				before := countRows(ctx, tx, ref.table)
+				if err := resolveRef(ref.table, ref.column, entity, ref.nullable); err != nil {
+					return fmt.Errorf("resolve %s.%s: %w", ref.table, ref.column, err)
+				}
+				if countRows(ctx, tx, ref.table) != before {
+					changed = true
+				}
+			}
+		}
+		for _, ref := range uuidGroup1PolymorphicReferences() {
+			for _, entity := range ref.typeEntity {
+				before := countRows(ctx, tx, ref.table)
+				if err := resolveRef(ref.table, ref.column, entity, ref.nullable); err != nil {
+					return fmt.Errorf("resolve %s.%s: %w", ref.table, ref.column, err)
+				}
+				if countRows(ctx, tx, ref.table) != before {
+					changed = true
+				}
+			}
+		}
+		if !changed {
+			return nil
+		}
+	}
+	return fmt.Errorf("orphaned reference resolution did not converge after %d passes", maxPasses)
+}
+
+func countRows(ctx context.Context, tx *sql.Tx, table string) int64 {
+	var n int64
+	tx.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", quoteIdent(table))).Scan(&n)
+	return n
 }
 
 func rewriteUUIDGroup1References(ctx context.Context, tx *sql.Tx) error {
