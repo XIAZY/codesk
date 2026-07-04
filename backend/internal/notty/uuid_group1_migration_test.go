@@ -94,11 +94,46 @@ func TestUUIDGroup1MigrationStripsPrefixesAndLeavesDocumentIDs(t *testing.T) {
 		want := strings.TrimPrefix(oldID, prefixForOldID(oldID))
 		assertScalar(t, db, `SELECT new_id::text FROM uuid_migration_map WHERE entity_type = $1 AND old_id = $2`, want, entity, oldID)
 	}
-	if err := VerifyUUIDGroup1Migration(t.Context(), db); err != nil {
+	if err := VerifyUUIDGroup1Deep(t.Context(), db); err != nil {
 		t.Fatalf("verify migration: %v", err)
 	}
 	if !isMigratedWorkspaceID(t.Context(), db, old["workspace"]) {
 		t.Fatalf("expected old workspace ID %q to be recognized as migrated", old["workspace"])
+	}
+}
+
+func TestUUIDGroup1AlreadyMigratedStartupUsesBootShapeVerification(t *testing.T) {
+	dsn := postgresTestDSN(t)
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+	resetUUIDGroup1MigrationTables(t, db)
+	createLegacyUUIDGroup1Schema(t, db)
+	fixture := seedLegacyUUIDGroup1Graph(t, db)
+
+	if err := RunUUIDGroup1Migration(t.Context(), db); err != nil {
+		t.Fatalf("run migration: %v", err)
+	}
+	if err := VerifyUUIDGroup1Deep(t.Context(), db); err != nil {
+		t.Fatalf("verify migrated fixture: %v", err)
+	}
+
+	orphanWorkspaceID := uuid.NewString()
+	mustExec(t, db, `UPDATE documents SET workspace_id = $1 WHERE id = $2`, orphanWorkspaceID, fixture.documentID)
+	if err := RunUUIDGroup1Migration(t.Context(), db); err != nil {
+		t.Fatalf("already-migrated startup should only require boot shape: %v", err)
+	}
+	if err := VerifyUUIDGroup1BootShape(t.Context(), db); err != nil {
+		t.Fatalf("boot-shape verifier: %v", err)
+	}
+	err = VerifyUUIDGroup1Deep(t.Context(), db)
+	if err == nil {
+		t.Fatal("expected deep verifier to fail unresolved document workspace reference")
+	}
+	if !strings.Contains(err.Error(), "documents.workspace_id has") {
+		t.Fatalf("deep verifier error = %v, want documents.workspace_id unresolved reference", err)
 	}
 }
 
@@ -220,7 +255,7 @@ func TestUUIDGroup1MigrationIsIdempotent(t *testing.T) {
 	if err := RunUUIDGroup1Migration(t.Context(), db); err != nil {
 		t.Fatalf("second migration: %v", err)
 	}
-	if err := VerifyUUIDGroup1Migration(t.Context(), db); err != nil {
+	if err := VerifyUUIDGroup1Deep(t.Context(), db); err != nil {
 		t.Fatalf("verify migration: %v", err)
 	}
 	assertScalar(t, db, `SELECT COUNT(*) FROM uuid_migration_map`, 11)
@@ -258,7 +293,7 @@ func TestUUIDGroup1MigrationConcurrentRunsSerialize(t *testing.T) {
 			t.Fatalf("concurrent migration: %v", err)
 		}
 	}
-	if err := VerifyUUIDGroup1Migration(t.Context(), db); err != nil {
+	if err := VerifyUUIDGroup1Deep(t.Context(), db); err != nil {
 		t.Fatalf("verify migration: %v", err)
 	}
 	assertScalar(t, db, `SELECT COUNT(*) FROM uuid_migration_map`, 11)
@@ -278,12 +313,11 @@ func TestUUIDGroup1MigrationOldWorkspaceRoutesReturnGone(t *testing.T) {
 		t.Fatalf("run migration: %v", err)
 	}
 
-	store, err := NewStoreForWorkspace(dsn, fixture.ids["workspace"], "Migrated Workspace")
-	if err != nil {
+	database := &Database{DB: db, URL: dsn}
+	if _, err := NewWorkspaceStore(database, fixture.ids["workspace"], "Migrated Workspace"); err != nil {
 		t.Fatalf("new store: %v", err)
 	}
-	defer store.Close()
-	server := NewServer(Config{DatabaseURL: dsn, JWTSecret: "test-secret"}, store)
+	server := NewServer(Config{DatabaseURL: dsn, JWTSecret: "test-secret"}, database)
 	account := &Account{ID: fixture.ids["account"], Email: "owner@example.test", DisplayName: "Owner", EmailVerified: true}
 	humanToken, err := issueJWT("test-secret", account, time.Hour)
 	if err != nil {
@@ -323,12 +357,12 @@ func TestUUIDGroup1MigrationClaimRouteDoesNotPoisonVerifier(t *testing.T) {
 		t.Fatalf("run migration: %v", err)
 	}
 
-	store, err := NewStoreForWorkspace(dsn, fixture.ids["workspace"], "Migrated Workspace")
+	database2 := &Database{DB: db, URL: dsn}
+	store, err := NewWorkspaceStore(database2, fixture.ids["workspace"], "Migrated Workspace")
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
-	defer store.Close()
-	router := NewServer(Config{DatabaseURL: dsn, JWTSecret: "test-secret"}, store).Routes()
+	router := NewServer(Config{DatabaseURL: dsn, JWTSecret: "test-secret"}, database2).Routes()
 	account := &Account{ID: fixture.ids["account"], Email: "owner@example.test", DisplayName: "Owner", EmailVerified: true}
 	humanToken, err := issueJWT("test-secret", account, time.Hour)
 	if err != nil {
@@ -355,7 +389,7 @@ func TestUUIDGroup1MigrationClaimRouteDoesNotPoisonVerifier(t *testing.T) {
 				t.Fatalf("claim status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
 			}
 			assertScalar(t, db, `SELECT claimed_by::text FROM agent_events WHERE id = $1`, tt.wantClaim, eventID)
-			if err := VerifyUUIDGroup1Migration(t.Context(), db); err != nil {
+			if err := VerifyUUIDGroup1Deep(t.Context(), db); err != nil {
 				t.Fatalf("verify after claim: %v", err)
 			}
 		})
@@ -368,8 +402,27 @@ func TestUUIDGroup1MigrationClaimRouteDoesNotPoisonVerifier(t *testing.T) {
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("human claimed_by=user status = %d, want %d; body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
 	}
-	if err := VerifyUUIDGroup1Migration(t.Context(), db); err != nil {
+	if err := VerifyUUIDGroup1Deep(t.Context(), db); err != nil {
 		t.Fatalf("verify after rejected human claim: %v", err)
+	}
+
+	otherAgentID := seedMigratedAgent(t, db, fixture, "other-agent")
+	if err := store.Reload(); err != nil {
+		t.Fatalf("reload store after seeding other agent: %v", err)
+	}
+	seedMigratedPendingAgentEvent(t, db, fixture, "claim-as-other-agent")
+	recorder = authTestRequest(t, router, http.MethodPost, "/api/workspaces/"+fixture.ids["workspace"]+"/agent-events/claim", humanToken, nil, ClaimAgentEventRequest{
+		AgentID:   fixture.ids["agent"],
+		ClaimedBy: otherAgentID,
+	})
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("claimed_by=other-agent status = %d, want %d; body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+	if _, err := store.DeleteAgent(otherAgentID, OperationMeta{ActorID: fixture.ids["user"], ActorType: "human", Source: "test"}); err != nil {
+		t.Fatalf("delete other agent: %v", err)
+	}
+	if err := VerifyUUIDGroup1Deep(t.Context(), db); err != nil {
+		t.Fatalf("verify after rejected cross-agent claim and delete: %v", err)
 	}
 }
 
@@ -402,11 +455,11 @@ func TestUUIDGroup1MigrationPreservesPostgresAPIsAndCreatesBareUUIDs(t *testing.
 		t.Fatalf("member user ID = %q, want %q", member.UserID, fixture.ids["user"])
 	}
 
-	store, err := NewStoreForWorkspace(dsn, fixture.ids["workspace"], "Migrated Workspace")
+	database3 := &Database{DB: db, URL: dsn}
+	store, err := NewWorkspaceStore(database3, fixture.ids["workspace"], "Migrated Workspace")
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
-	defer store.Close()
 	snapshot := store.Snapshot()
 	if snapshot.ContentDocuments[fixture.documentID] == nil {
 		t.Fatalf("snapshot missing migrated document %q", fixture.documentID)
@@ -578,6 +631,20 @@ func seedMigratedPendingAgentEvent(t *testing.T, db *sql.DB, fixture legacyUUIDG
 		fixture.documentID, "claim smoke", "claim smoke", "claim-"+strings.ReplaceAll(dedup, " ", "-"), "",
 	)
 	return eventID
+}
+
+func seedMigratedAgent(t *testing.T, db *sql.DB, fixture legacyUUIDGroup1Fixture, handle string) string {
+	t.Helper()
+	agentID := uuid.NewString()
+	mustExec(t, db, `
+		INSERT INTO agents (
+			workspace_id, id, daemon_id, handle, name, role, kind, system_prompt,
+			workspace_root, status, current_task, current_activity, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())`,
+		fixture.ids["workspace"], agentID, fixture.ids["daemon"], handle, "Other Agent", "Assistant",
+		"codex", "", "agents/"+agentID, "idle", "", "",
+	)
+	return agentID
 }
 
 func createLegacyUUIDGroup1Schema(t *testing.T, db *sql.DB) {

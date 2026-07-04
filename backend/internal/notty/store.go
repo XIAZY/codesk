@@ -1712,15 +1712,25 @@ func (s *Store) ClaimAgentEvent(req ClaimAgentEventRequest) (*AgentEvent, error)
 		return nil, err
 	}
 	workspaceID := s.state.WorkspaceID
+	targetAgent := s.state.Agents[agentID]
+	if targetAgent == nil {
+		s.mu.Unlock()
+		return nil, ErrNotFound
+	}
 	claimedBy := strings.TrimSpace(req.ClaimedBy)
+	targetDaemonID := strings.TrimSpace(targetAgent.DaemonID)
 	switch claimedBy {
 	case "", "daemon", "system":
 		claimedBy = agentID
-	default:
-		if s.state.Agents[claimedBy] == nil && s.state.Daemons[claimedBy] == nil {
+	case agentID:
+	case targetDaemonID:
+		if targetDaemonID == "" || s.state.Daemons[targetDaemonID] == nil {
 			s.mu.Unlock()
-			return nil, errors.New("claimed_by must be an agent or daemon ID")
+			return nil, errors.New("claimed_by must be the target agent or its daemon")
 		}
+	default:
+		s.mu.Unlock()
+		return nil, errors.New("claimed_by must be the target agent or its daemon")
 	}
 	s.mu.Unlock()
 	event, err := claimAgentEventPostgres(s.db, workspaceID, agentID, agentHandle, claimedBy)
