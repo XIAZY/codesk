@@ -336,34 +336,34 @@ func RunUUIDGroup1Migration(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if migrated {
-		if err = VerifyUUIDGroup1MigrationTx(ctx, tx); err != nil {
+		if err = verifyUUIDGroup1BootShapeTx(ctx, tx); err != nil {
 			return err
 		}
 		return tx.Commit()
 	}
 
 	if err = ensureUUIDMigrationMap(ctx, tx); err != nil {
-		return err
+		return fmt.Errorf("ensure uuid migration map: %w", err)
 	}
 	if err = populateUUIDMigrationMap(ctx, tx); err != nil {
-		return err
+		return fmt.Errorf("populate uuid migration map: %w", err)
 	}
 	if err = rewriteUUIDGroup1References(ctx, tx); err != nil {
-		return err
+		return fmt.Errorf("rewrite uuid group1 references: %w", err)
 	}
 	if err = rewriteUUIDGroup1EntityIDs(ctx, tx); err != nil {
-		return err
+		return fmt.Errorf("rewrite uuid group1 entity ids: %w", err)
 	}
 	if err = convertUUIDGroup1Columns(ctx, tx); err != nil {
-		return err
+		return fmt.Errorf("convert uuid group1 columns: %w", err)
 	}
-	if err = VerifyUUIDGroup1MigrationTx(ctx, tx); err != nil {
-		return err
+	if err = verifyUUIDGroup1DeepTx(ctx, tx); err != nil {
+		return fmt.Errorf("verify uuid group1 deep: %w", err)
 	}
 	return tx.Commit()
 }
 
-func VerifyUUIDGroup1Migration(ctx context.Context, db *sql.DB) error {
+func VerifyUUIDGroup1BootShape(ctx context.Context, db *sql.DB) error {
 	if db == nil {
 		return errors.New("database is required")
 	}
@@ -372,10 +372,22 @@ func VerifyUUIDGroup1Migration(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	defer tx.Rollback()
-	return VerifyUUIDGroup1MigrationTx(ctx, tx)
+	return verifyUUIDGroup1BootShapeTx(ctx, tx)
 }
 
-func VerifyUUIDGroup1MigrationTx(ctx context.Context, tx *sql.Tx) error {
+func VerifyUUIDGroup1Deep(ctx context.Context, db *sql.DB) error {
+	if db == nil {
+		return errors.New("database is required")
+	}
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	return verifyUUIDGroup1DeepTx(ctx, tx)
+}
+
+func verifyUUIDGroup1BootShapeTx(ctx context.Context, tx *sql.Tx) error {
 	for _, spec := range appendUUIDEntityAndReferenceColumns() {
 		dataType, err := columnDataType(ctx, tx, spec.table, spec.column)
 		if err != nil {
@@ -389,6 +401,13 @@ func VerifyUUIDGroup1MigrationTx(ctx context.Context, tx *sql.Tx) error {
 		return err
 	}
 	if err := verifyNoPrefixedValuesInUUIDColumns(ctx, tx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func verifyUUIDGroup1DeepTx(ctx context.Context, tx *sql.Tx) error {
+	if err := verifyUUIDGroup1BootShapeTx(ctx, tx); err != nil {
 		return err
 	}
 	if err := verifyUUIDGroup1ReferencesResolve(ctx, tx); err != nil {
@@ -413,11 +432,16 @@ func appendUUIDEntityAndReferenceColumns() []uuidReferenceSpec {
 }
 
 func uuidGroup1AlreadyMigrated(ctx context.Context, tx *sql.Tx) (bool, error) {
-	dataType, err := columnDataType(ctx, tx, "workspaces", "id")
-	if err != nil {
-		return false, err
+	for _, spec := range appendUUIDEntityAndReferenceColumns() {
+		dataType, err := columnDataType(ctx, tx, spec.table, spec.column)
+		if err != nil {
+			return false, err
+		}
+		if dataType != "uuid" {
+			return false, nil
+		}
 	}
-	return dataType == "uuid", nil
+	return true, nil
 }
 
 func ensureUUIDMigrationMap(ctx context.Context, tx *sql.Tx) error {
@@ -436,6 +460,10 @@ func ensureUUIDMigrationMap(ctx context.Context, tx *sql.Tx) error {
 
 func populateUUIDMigrationMap(ctx context.Context, tx *sql.Tx) error {
 	for _, spec := range uuidGroup1Entities() {
+		dataType, err := columnDataType(ctx, tx, spec.table, spec.column)
+		if err != nil {
+			return err
+		}
 		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
 			`SELECT %s::text FROM %s ORDER BY %s::text`,
 			quoteIdent(spec.column), quoteIdent(spec.table), quoteIdent(spec.column),
@@ -453,10 +481,15 @@ func populateUUIDMigrationMap(ctx context.Context, tx *sql.Tx) error {
 				rows.Close()
 				return err
 			}
-			newID, err := stripPrefixedUUID(oldID, spec.prefix)
-			if err != nil {
-				rows.Close()
-				return fmt.Errorf("%s.%s %q: %w", spec.table, spec.column, oldID, err)
+			newID := oldID
+			if dataType == "uuid" {
+				oldID = spec.prefix + oldID
+			} else {
+				newID, err = stripPrefixedUUID(oldID, spec.prefix)
+				if err != nil {
+					rows.Close()
+					return fmt.Errorf("%s.%s %q: %w", spec.table, spec.column, oldID, err)
+				}
 			}
 			mappings = append(mappings, struct {
 				oldID string
@@ -600,7 +633,14 @@ func rewritePolymorphicReference(ctx context.Context, tx *sql.Tx, ref uuidPolymo
 
 func rewriteUUIDGroup1EntityIDs(ctx context.Context, tx *sql.Tx) error {
 	for _, spec := range uuidGroup1Entities() {
-		_, err := tx.ExecContext(ctx, fmt.Sprintf(
+		dataType, err := columnDataType(ctx, tx, spec.table, spec.column)
+		if err != nil {
+			return err
+		}
+		if dataType == "uuid" {
+			continue
+		}
+		_, err = tx.ExecContext(ctx, fmt.Sprintf(
 			`UPDATE %s AS target
 			    SET %s = map.new_id::text
 			   FROM uuid_migration_map AS map

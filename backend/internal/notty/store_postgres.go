@@ -464,9 +464,9 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		)
 		`,
 	}
-	for _, statement := range statements {
+	for index, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {
-			return err
+			return fmt.Errorf("init postgres schema statement %d: %w", index+1, err)
 		}
 	}
 	return nil
