@@ -446,7 +446,7 @@ func TestDocumentProtocolSyncReturnsMissingCRDTUpdate(t *testing.T) {
 
 	clientDoc := crdt.New()
 	clientConn := &DocumentConn{send: make(chan []byte, 4)}
-	syncClientFromServer(t, server, room, clientConn, documentID, clientDoc)
+	syncClientFromServer(t, server, store, room, clientConn, documentID, clientDoc)
 	if got := clientDoc.GetText("content").ToString(); got != "alpha" {
 		t.Fatalf("unexpected initial sync content: %q", got)
 	}
@@ -460,7 +460,7 @@ func TestDocumentProtocolSyncReturnsMissingCRDTUpdate(t *testing.T) {
 		t.Fatalf("apply server peer update: %v", err)
 	}
 
-	syncClientFromServer(t, server, room, clientConn, documentID, clientDoc)
+	syncClientFromServer(t, server, store, room, clientConn, documentID, clientDoc)
 	if got := clientDoc.GetText("content").ToString(); got != "alpha beta" {
 		t.Fatalf("delta sync diverged: got %q want %q", got, "alpha beta")
 	}
@@ -475,10 +475,10 @@ func TestDocumentProtocolUpdateDoesNotPublishDocumentNamespaceEvent(t *testing.T
 		text.Insert(txn, text.LenInTxn(txn), " beta", nil)
 	})
 
-	events, unsubscribe := server.subscribers.Subscribe()
+	events, unsubscribe := server.workspaceBroker(store.Snapshot().WorkspaceID).Subscribe()
 	defer unsubscribe()
 	source := &DocumentConn{send: make(chan []byte, 4)}
-	if err := server.handleDocumentProtocolMessage(server.rooms.ForDocument(documentID), source, documentID, yproto.BuildSyncUpdate(update), OperationMeta{
+	if err := handleDocumentProtocolMessageForTest(t, server, store, server.rooms.ForDocument(documentID), source, documentID, yproto.BuildSyncUpdate(update), OperationMeta{
 		ActorID:   "owner",
 		ActorType: "human",
 		Source:    "test",
@@ -744,10 +744,10 @@ func TestDocumentProtocolIgnoresCanonicalEmptyYjsUpdate(t *testing.T) {
 		t.Fatalf("get document before empty update: %v", err)
 	}
 
-	events, unsubscribe := server.subscribers.Subscribe()
+	events, unsubscribe := server.workspaceBroker(store.Snapshot().WorkspaceID).Subscribe()
 	defer unsubscribe()
 	source := &DocumentConn{send: make(chan []byte, 4)}
-	if err := server.handleDocumentProtocolMessage(server.rooms.ForDocument(documentID), source, documentID, yproto.BuildSyncUpdate([]byte{0, 0}), OperationMeta{
+	if err := handleDocumentProtocolMessageForTest(t, server, store, server.rooms.ForDocument(documentID), source, documentID, yproto.BuildSyncUpdate([]byte{0, 0}), OperationMeta{
 		ActorID:   "owner",
 		ActorType: "human",
 		Source:    "test",
@@ -1013,7 +1013,7 @@ func TestHandleDocumentProtocolMessageBroadcastsSyncUpdateToPeers(t *testing.T) 
 	defer room.Remove(source)
 	defer room.Remove(peerConn)
 
-	err := server.handleDocumentProtocolMessage(room, source, documentID, yproto.BuildSyncUpdate(update), OperationMeta{
+	err := handleDocumentProtocolMessageForTest(t, server, store, room, source, documentID, yproto.BuildSyncUpdate(update), OperationMeta{
 		ActorID:   "peer",
 		ActorType: "human",
 		Source:    "test",
@@ -1079,7 +1079,7 @@ func TestHandleDocumentProtocolMessageClosesSlowPeerOnSyncUpdateOverflow(t *test
 	defer room.Remove(source)
 	defer room.Remove(slowPeer)
 
-	err := server.handleDocumentProtocolMessage(room, source, documentID, yproto.BuildSyncUpdate(update), OperationMeta{
+	err := handleDocumentProtocolMessageForTest(t, server, store, room, source, documentID, yproto.BuildSyncUpdate(update), OperationMeta{
 		ActorID:   "peer",
 		ActorType: "human",
 		Source:    "test",
@@ -1141,7 +1141,7 @@ func TestHandleDocumentProtocolMessageBroadcastsDeleteOnlySyncUpdate(t *testing.
 	insertUpdate := captureDocUpdate(t, peer, "peer-insert", func(txn *crdt.Transaction) {
 		text.Insert(txn, text.LenInTxn(txn), "d", nil)
 	})
-	if err := server.handleDocumentProtocolMessage(room, source, documentID, yproto.BuildSyncUpdate(insertUpdate), OperationMeta{
+	if err := handleDocumentProtocolMessageForTest(t, server, store, room, source, documentID, yproto.BuildSyncUpdate(insertUpdate), OperationMeta{
 		ActorID:   "peer",
 		ActorType: "human",
 		Source:    "test",
@@ -1157,7 +1157,7 @@ func TestHandleDocumentProtocolMessageBroadcastsDeleteOnlySyncUpdate(t *testing.
 	deleteUpdate := captureDocUpdate(t, peer, "peer-delete", func(txn *crdt.Transaction) {
 		text.Delete(txn, text.LenInTxn(txn)-1, 1)
 	})
-	if err := server.handleDocumentProtocolMessage(room, source, documentID, yproto.BuildSyncUpdate(deleteUpdate), OperationMeta{
+	if err := handleDocumentProtocolMessageForTest(t, server, store, room, source, documentID, yproto.BuildSyncUpdate(deleteUpdate), OperationMeta{
 		ActorID:   "peer",
 		ActorType: "human",
 		Source:    "test",
@@ -1198,7 +1198,7 @@ func TestHandleDocumentProtocolMessageRespondsToSyncStep1(t *testing.T) {
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "alpha bravo")
 
 	source := &DocumentConn{send: make(chan []byte, 2)}
-	err := server.handleDocumentProtocolMessage(server.rooms.ForDocument(documentID), source, documentID, buildSyncStep1ForTest(crdt.New(crdt.WithClientID(77))), OperationMeta{
+	err := handleDocumentProtocolMessageForTest(t, server, store, server.rooms.ForDocument(documentID), source, documentID, buildSyncStep1ForTest(crdt.New(crdt.WithClientID(77))), OperationMeta{
 		ActorID:   "peer",
 		ActorType: "human",
 		Source:    "test",
@@ -1237,7 +1237,7 @@ func TestHandleDocumentProtocolMessageIgnoresClosedSessionDuringSyncStep1(t *tes
 			t.Fatalf("closed websocket session must not panic while sync replies are being built: %v", recovered)
 		}
 	}()
-	if err := server.handleDocumentProtocolMessage(room, source, documentID, buildSyncStep1ForTest(crdt.New(crdt.WithClientID(77))), OperationMeta{
+	if err := handleDocumentProtocolMessageForTest(t, server, store, room, source, documentID, buildSyncStep1ForTest(crdt.New(crdt.WithClientID(77))), OperationMeta{
 		ActorID:   "peer",
 		ActorType: "human",
 		Source:    "test",
@@ -1259,7 +1259,7 @@ func TestHandleDocumentProtocolMessageReconnectMergesServerAndClientEdits(t *tes
 	})
 	room := server.rooms.ForDocument(documentID)
 	serverPeer := &DocumentConn{send: make(chan []byte, 4)}
-	if err := server.handleDocumentProtocolMessage(room, serverPeer, documentID, yproto.BuildSyncUpdate(serverUpdate), OperationMeta{
+	if err := handleDocumentProtocolMessageForTest(t, server, store, room, serverPeer, documentID, yproto.BuildSyncUpdate(serverUpdate), OperationMeta{
 		ActorID:   "server-peer",
 		ActorType: "human",
 		Source:    "test",
@@ -1273,7 +1273,7 @@ func TestHandleDocumentProtocolMessageReconnectMergesServerAndClientEdits(t *tes
 	})
 
 	reconnected := &DocumentConn{send: make(chan []byte, 4)}
-	if err := server.handleDocumentProtocolMessage(room, reconnected, documentID, buildSyncStep1ForTest(clientDoc), OperationMeta{
+	if err := handleDocumentProtocolMessageForTest(t, server, store, room, reconnected, documentID, buildSyncStep1ForTest(clientDoc), OperationMeta{
 		ActorID:   "client",
 		ActorType: "human",
 		Source:    "test",
@@ -1286,7 +1286,7 @@ func TestHandleDocumentProtocolMessageReconnectMergesServerAndClientEdits(t *tes
 		case payload := <-reconnected.send:
 			reply := applySyncPayloadToDoc(t, clientDoc, payload, "server-reconnect")
 			if len(reply) > 0 {
-				if err := server.handleDocumentProtocolMessage(room, reconnected, documentID, reply, OperationMeta{
+				if err := handleDocumentProtocolMessageForTest(t, server, store, room, reconnected, documentID, reply, OperationMeta{
 					ActorID:   "client",
 					ActorType: "human",
 					Source:    "test",
@@ -1328,7 +1328,7 @@ func TestHandleDocumentProtocolMessageConcurrentSyncAndUpdates(t *testing.T) {
 				update := captureDocUpdate(t, peer, "writer", func(txn *crdt.Transaction) {
 					text.Insert(txn, text.LenInTxn(txn), "x", nil)
 				})
-				if err := server.handleDocumentProtocolMessage(room, conn, documentID, yproto.BuildSyncUpdate(update), OperationMeta{
+				if err := handleDocumentProtocolMessageForTest(t, server, store, room, conn, documentID, yproto.BuildSyncUpdate(update), OperationMeta{
 					ActorID:   "writer",
 					ActorType: "human",
 					Source:    "test",
@@ -1347,7 +1347,7 @@ func TestHandleDocumentProtocolMessageConcurrentSyncAndUpdates(t *testing.T) {
 			peer := crdt.New(crdt.WithClientID(crdt.ClientID(700 + worker)))
 			conn := &DocumentConn{send: make(chan []byte, 1024)}
 			for i := 0; i < 40; i++ {
-				if err := server.handleDocumentProtocolMessage(room, conn, documentID, buildSyncStep1ForTest(peer), OperationMeta{
+				if err := handleDocumentProtocolMessageForTest(t, server, store, room, conn, documentID, buildSyncStep1ForTest(peer), OperationMeta{
 					ActorID:   "syncer",
 					ActorType: "human",
 					Source:    "test",
@@ -1385,11 +1385,11 @@ func TestHandleDocumentProtocolMessageDoesNotPublishDocumentMentionMetadataChang
 		text.Insert(txn, text.LenInTxn(txn), "Ping @codex-agent.\n", nil)
 	})
 
-	events, unsubscribe := server.subscribers.Subscribe()
+	events, unsubscribe := server.workspaceBroker(store.Snapshot().WorkspaceID).Subscribe()
 	defer unsubscribe()
 
 	source := &DocumentConn{send: make(chan []byte, 4)}
-	if err := server.handleDocumentProtocolMessage(server.rooms.ForDocument(documentID), source, documentID, yproto.BuildSyncUpdate(update), OperationMeta{
+	if err := handleDocumentProtocolMessageForTest(t, server, store, server.rooms.ForDocument(documentID), source, documentID, yproto.BuildSyncUpdate(update), OperationMeta{
 		ActorID:   "owner",
 		ActorType: "human",
 		Source:    "ws",
@@ -1502,9 +1502,9 @@ func readSyncMessageForTest(reader *bytes.Reader, doc *crdt.Doc, origin any) ([]
 	}
 }
 
-func syncClientFromServer(t *testing.T, server *Server, room *DocumentRoom, conn *DocumentConn, documentID string, doc *crdt.Doc) {
+func syncClientFromServer(t *testing.T, server *Server, store *Store, room *DocumentRoom, conn *DocumentConn, documentID string, doc *crdt.Doc) {
 	t.Helper()
-	if err := server.handleDocumentProtocolMessage(room, conn, documentID, buildSyncStep1ForTest(doc), OperationMeta{
+	if err := handleDocumentProtocolMessageForTest(t, server, store, room, conn, documentID, buildSyncStep1ForTest(doc), OperationMeta{
 		ActorID:   "client",
 		ActorType: "human",
 		Source:    "test",
@@ -1516,7 +1516,7 @@ func syncClientFromServer(t *testing.T, server *Server, room *DocumentRoom, conn
 		case payload := <-conn.send:
 			reply := applySyncPayloadToDoc(t, doc, payload, "server-sync")
 			if len(reply) > 0 {
-				if err := server.handleDocumentProtocolMessage(room, conn, documentID, reply, OperationMeta{
+				if err := handleDocumentProtocolMessageForTest(t, server, store, room, conn, documentID, reply, OperationMeta{
 					ActorID:   "client",
 					ActorType: "human",
 					Source:    "test",
@@ -1730,22 +1730,19 @@ func waitDocumentRoomSubscriberCount(t *testing.T, room *DocumentRoom, want int)
 	t.Fatalf("room subscriber count = %d, want %d", got, want)
 }
 
+func handleDocumentProtocolMessageForTest(t *testing.T, server *Server, store *Store, room *DocumentRoom, session documentSubscriber, documentID string, payload []byte, meta OperationMeta) error {
+	t.Helper()
+	if server == nil || store == nil {
+		t.Fatal("server and store are required")
+	}
+	return server.handleDocumentProtocolMessageWithStore(store, server.workspaceBroker(store.Snapshot().WorkspaceID), room, session, documentID, payload, meta)
+}
+
 func newTestServer(t *testing.T) (*Server, *Store) {
 	t.Helper()
-	store, err := NewStore(postgresTestDSN(t))
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	if err := clearNottyTables(store.db); err != nil {
-		t.Fatalf("clear postgres tables: %v", err)
-	}
-	if err := store.Reload(); err != nil {
-		t.Fatalf("reload clean store: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = store.Close()
-	})
-	return NewServer(Config{}, store), store
+	database := newPostgresTestDatabase(t)
+	store := newPostgresTestWorkspaceStore(t, database)
+	return NewServer(Config{}, database), store
 }
 
 type workspaceRouteTestFixture struct {
@@ -1765,9 +1762,6 @@ func newWorkspaceRouteTestFixture(t *testing.T) workspaceRouteTestFixture {
 	if err != nil {
 		t.Fatalf("open workspace store: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = store.Close()
-	})
 	return workspaceRouteTestFixture{
 		server:      server,
 		router:      router,

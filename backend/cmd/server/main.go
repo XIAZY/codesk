@@ -32,12 +32,12 @@ func main() {
 	if err := cfg.ValidateEmailConfig(); err != nil {
 		log.Fatal(err)
 	}
-	store, err := notty.NewStore(cfg.DatabaseURL)
+	db, err := notty.OpenDatabase(cfg.DatabaseURL)
 	if err != nil {
-		log.Fatalf("create store: %v", err)
+		log.Fatalf("open database: %v", err)
 	}
-	defer store.Close()
-	server := notty.NewServer(cfg, store)
+	defer db.Close()
+	server := notty.NewServer(cfg, db)
 	httpServer := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           server.Routes(),

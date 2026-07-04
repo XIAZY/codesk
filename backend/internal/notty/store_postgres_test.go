@@ -10,30 +10,16 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	crdt "notty/internal/ycrdt"
 	"notty/internal/yproto"
 )
 
 func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
-	dsn := postgresTestDSN(t)
-
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("open postgres: %v", err)
-	}
-	defer db.Close()
-	if err := initPostgresSchema(db); err != nil {
-		t.Fatalf("init schema: %v", err)
-	}
-	if err := clearNottyTables(db); err != nil {
-		t.Fatalf("clear tables: %v", err)
-	}
-
-	store, err := NewStore(dsn)
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
+	database := newPostgresTestDatabase(t)
+	db := database.DB
+	store := newPostgresTestWorkspaceStore(t, database)
 	seedCodexDaemonRuntime(t, store)
 
 	agent, err := store.CreateAgent(CreateAgentRequest{
@@ -105,15 +91,11 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	}, OperationMeta{ActorID: "daemon", ActorType: "agent", Source: "test"}); err != nil {
 		t.Fatalf("complete event: %v", err)
 	}
-	if err := store.Close(); err != nil {
-		t.Fatalf("close store: %v", err)
-	}
-
-	reloaded, err := NewStore(dsn)
+	workspace := store.Snapshot()
+	reloaded, err := NewWorkspaceStore(database, workspace.WorkspaceID, workspace.Name)
 	if err != nil {
 		t.Fatalf("reload store: %v", err)
 	}
-	defer reloaded.Close()
 
 	snapshot := reloaded.Snapshot()
 	if got := snapshot.ContentDocuments[documentID]; got == nil {
@@ -160,19 +142,8 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 }
 
 func TestPostgresBackfillsBlankWorkspaceRootDocumentID(t *testing.T) {
-	dsn := postgresTestDSN(t)
-
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("open postgres: %v", err)
-	}
-	defer db.Close()
-	if err := initPostgresSchema(db); err != nil {
-		t.Fatalf("init schema: %v", err)
-	}
-	if err := clearNottyTables(db); err != nil {
-		t.Fatalf("clear tables: %v", err)
-	}
+	database := newPostgresTestDatabase(t)
+	db := database.DB
 
 	workspaceID := "ws_legacy_root"
 	now := time.Now().UTC()
@@ -189,11 +160,10 @@ func TestPostgresBackfillsBlankWorkspaceRootDocumentID(t *testing.T) {
 		t.Fatalf("insert legacy workspace row: %v", err)
 	}
 
-	store, err := NewStoreForWorkspace(dsn, workspaceID, "fallback name")
+	store, err := NewWorkspaceStore(database, workspaceID, "fallback name")
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
-	defer store.Close()
 
 	wantRootID := legacyRootDocumentID(workspaceID)
 	snapshot := store.Snapshot()
@@ -217,24 +187,9 @@ func TestPostgresBackfillsBlankWorkspaceRootDocumentID(t *testing.T) {
 }
 
 func TestPostgresLoadRegeneratesMissingCheckpointBeforeSync(t *testing.T) {
-	dsn := postgresTestDSN(t)
-
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("open postgres: %v", err)
-	}
-	defer db.Close()
-	if err := initPostgresSchema(db); err != nil {
-		t.Fatalf("init schema: %v", err)
-	}
-	if err := clearNottyTables(db); err != nil {
-		t.Fatalf("clear tables: %v", err)
-	}
-
-	store, err := NewStore(dsn)
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
+	database := newPostgresTestDatabase(t)
+	db := database.DB
+	store := newPostgresTestWorkspaceStore(t, database)
 	documentID := mustCreateTestDocument(t, store, "docs/missing-checkpoint.md", "")
 	peer := syncDocumentToDocForTest(t, store, documentID, 77)
 	text := peer.GetText("content")
@@ -250,21 +205,18 @@ func TestPostgresLoadRegeneratesMissingCheckpointBeforeSync(t *testing.T) {
 			t.Fatalf("apply update %q: %v", value, err)
 		}
 	}
-	if _, err := db.Exec(`DELETE FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2`, "ws_notty", documentID); err != nil {
+	workspace := store.Snapshot()
+	if _, err := db.Exec(`DELETE FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2`, workspace.WorkspaceID, documentID); err != nil {
 		t.Fatalf("delete checkpoints: %v", err)
 	}
-	if _, err := db.Exec(`UPDATE document_heads SET state_vector = '' WHERE workspace_id = $1 AND document_id = $2`, "ws_notty", documentID); err != nil {
+	if _, err := db.Exec(`UPDATE document_heads SET state_vector = '' WHERE workspace_id = $1 AND document_id = $2`, workspace.WorkspaceID, documentID); err != nil {
 		t.Fatalf("clear head state vector: %v", err)
 	}
-	if err := store.Close(); err != nil {
-		t.Fatalf("close store: %v", err)
-	}
 
-	reloaded, err := NewStore(dsn)
+	reloaded, err := NewWorkspaceStore(database, workspace.WorkspaceID, workspace.Name)
 	if err != nil {
 		t.Fatalf("reload store: %v", err)
 	}
-	defer reloaded.Close()
 	reloadedDocument, err := reloaded.GetDocument(documentID)
 	if err != nil {
 		t.Fatalf("get reloaded document: %v", err)
@@ -274,7 +226,7 @@ func TestPostgresLoadRegeneratesMissingCheckpointBeforeSync(t *testing.T) {
 	}
 
 	var checkpointCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2 AND update_id = $3`, "ws_notty", documentID, reloadedDocument.UpdateID).Scan(&checkpointCount); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2 AND update_id = $3`, workspace.WorkspaceID, documentID, reloadedDocument.UpdateID).Scan(&checkpointCount); err != nil {
 		t.Fatalf("count regenerated checkpoint: %v", err)
 	}
 	if checkpointCount != 1 {
@@ -298,25 +250,8 @@ func TestPostgresLoadRegeneratesMissingCheckpointBeforeSync(t *testing.T) {
 }
 
 func TestPostgresDocumentAtHandleTextDoesNotCreateMentionEvent(t *testing.T) {
-	dsn := postgresTestDSN(t)
-
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("open postgres: %v", err)
-	}
-	defer db.Close()
-	if err := initPostgresSchema(db); err != nil {
-		t.Fatalf("init schema: %v", err)
-	}
-	if err := clearNottyTables(db); err != nil {
-		t.Fatalf("clear tables: %v", err)
-	}
-
-	store, err := NewStore(dsn)
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	defer store.Close()
+	database := newPostgresTestDatabase(t)
+	store := newPostgresTestWorkspaceStore(t, database)
 	seedCodexDaemonRuntime(t, store)
 
 	agent, err := store.CreateAgent(CreateAgentRequest{
@@ -352,24 +287,8 @@ func TestPostgresDocumentAtHandleTextDoesNotCreateMentionEvent(t *testing.T) {
 }
 
 func TestPostgresUpdateAgentSessionPersistsTargetAgent(t *testing.T) {
-	dsn := postgresTestDSN(t)
-
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("open postgres: %v", err)
-	}
-	defer db.Close()
-	if err := initPostgresSchema(db); err != nil {
-		t.Fatalf("init schema: %v", err)
-	}
-	if err := clearNottyTables(db); err != nil {
-		t.Fatalf("clear tables: %v", err)
-	}
-
-	store, err := NewStore(dsn)
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
+	database := newPostgresTestDatabase(t)
+	store := newPostgresTestWorkspaceStore(t, database)
 	seedCodexDaemonRuntime(t, store)
 	agent, err := store.CreateAgent(CreateAgentRequest{
 		Handle: "session-agent",
@@ -388,15 +307,11 @@ func TestPostgresUpdateAgentSessionPersistsTargetAgent(t *testing.T) {
 	}, OperationMeta{ActorID: "daemon_agent", ActorType: "agent", Source: "test"}); err != nil {
 		t.Fatalf("update agent session: %v", err)
 	}
-	if err := store.Close(); err != nil {
-		t.Fatalf("close store: %v", err)
-	}
-
-	reloaded, err := NewStore(dsn)
+	workspace := store.Snapshot()
+	reloaded, err := NewWorkspaceStore(database, workspace.WorkspaceID, workspace.Name)
 	if err != nil {
 		t.Fatalf("reload store: %v", err)
 	}
-	defer reloaded.Close()
 	got := reloaded.Snapshot().Agents[agent.ID]
 	if got == nil || got.Status != "working" || got.SessionID != "thread_pg" || got.CurrentTurnID != "turn_pg" {
 		t.Fatalf("expected targeted session fields to persist, got %#v", got)
@@ -404,25 +319,10 @@ func TestPostgresUpdateAgentSessionPersistsTargetAgent(t *testing.T) {
 }
 
 func TestPostgresDocumentUpdatesPersistWithoutWorkspaceSnapshot(t *testing.T) {
-	dsn := postgresTestDSN(t)
-
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("open postgres: %v", err)
-	}
-	defer db.Close()
-	if err := initPostgresSchema(db); err != nil {
-		t.Fatalf("init schema: %v", err)
-	}
-	if err := clearNottyTables(db); err != nil {
-		t.Fatalf("clear tables: %v", err)
-	}
-
-	store, err := NewStore(dsn)
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	defer store.Close()
+	database := newPostgresTestDatabase(t)
+	db := database.DB
+	store := newPostgresTestWorkspaceStore(t, database)
+	workspaceID := store.Snapshot().WorkspaceID
 
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "# before\n")
 
@@ -437,13 +337,13 @@ func TestPostgresDocumentUpdatesPersistWithoutWorkspaceSnapshot(t *testing.T) {
 	if len(update) == 0 {
 		t.Fatal("expected incremental document update bytes")
 	}
-	if got, err := documentContentAtUpdatePostgres(db, "ws_notty", updated, updated.UpdateID); err != nil || got != "# after\n" {
+	if got, err := documentContentAtUpdatePostgres(db, workspaceID, updated, updated.UpdateID); err != nil || got != "# after\n" {
 		t.Fatalf("unexpected reconstructed updated content: %q err=%v", got, err)
 	}
 
 	var headUpdateID int64
 	var headStateVector string
-	if err := db.QueryRow(`SELECT update_id, state_vector FROM document_heads WHERE workspace_id = $1 AND document_id = $2`, "ws_notty", documentID).Scan(&headUpdateID, &headStateVector); err != nil {
+	if err := db.QueryRow(`SELECT update_id, state_vector FROM document_heads WHERE workspace_id = $1 AND document_id = $2`, workspaceID, documentID).Scan(&headUpdateID, &headStateVector); err != nil {
 		t.Fatalf("query document head: %v", err)
 	}
 	if headUpdateID == 0 || headStateVector == "" {
@@ -452,14 +352,14 @@ func TestPostgresDocumentUpdatesPersistWithoutWorkspaceSnapshot(t *testing.T) {
 	assertNoDocumentHeadMaterializationColumns(t, db)
 
 	var updateCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM document_updates WHERE workspace_id = $1 AND document_id = $2`, "ws_notty", documentID).Scan(&updateCount); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM document_updates WHERE workspace_id = $1 AND document_id = $2`, workspaceID, documentID).Scan(&updateCount); err != nil {
 		t.Fatalf("query document updates: %v", err)
 	}
 	if updateCount == 0 {
 		t.Fatal("expected document update log entry")
 	}
 	var checkpointCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2`, "ws_notty", documentID).Scan(&checkpointCount); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2`, workspaceID, documentID).Scan(&checkpointCount); err != nil {
 		t.Fatalf("query document checkpoints: %v", err)
 	}
 	if checkpointCount == 0 {
@@ -468,24 +368,10 @@ func TestPostgresDocumentUpdatesPersistWithoutWorkspaceSnapshot(t *testing.T) {
 }
 
 func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testing.T) {
-	dsn := postgresTestDSN(t)
-
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("open postgres: %v", err)
-	}
-	defer db.Close()
-	if err := initPostgresSchema(db); err != nil {
-		t.Fatalf("init schema: %v", err)
-	}
-	if err := clearNottyTables(db); err != nil {
-		t.Fatalf("clear tables: %v", err)
-	}
-
-	store, err := NewStore(dsn)
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
+	database := newPostgresTestDatabase(t)
+	db := database.DB
+	store := newPostgresTestWorkspaceStore(t, database)
+	workspaceID := store.Snapshot().WorkspaceID
 
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "version 0\n")
 	for index := 1; index <= 105; index++ {
@@ -502,7 +388,7 @@ func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testin
 	if err != nil {
 		t.Fatalf("get document head: %v", err)
 	}
-	headContent, err := documentContentAtUpdatePostgres(db, "ws_notty", head, head.UpdateID)
+	headContent, err := documentContentAtUpdatePostgres(db, workspaceID, head, head.UpdateID)
 	if err != nil {
 		t.Fatalf("reconstruct document head: %v", err)
 	}
@@ -513,7 +399,7 @@ func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testin
 		  WHERE workspace_id = $1 AND document_id = $2 AND update_id <= $3
 		  ORDER BY update_id DESC
 		  LIMIT 1`,
-		"ws_notty",
+		workspaceID,
 		documentID,
 		head.UpdateID,
 	).Scan(&checkpointUpdateID); err != nil {
@@ -524,7 +410,7 @@ func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testin
 		`SELECT COUNT(*)
 		   FROM document_updates
 		  WHERE workspace_id = $1 AND document_id = $2 AND id > $3 AND id <= $4`,
-		"ws_notty",
+		workspaceID,
 		documentID,
 		checkpointUpdateID,
 		head.UpdateID,
@@ -534,20 +420,18 @@ func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testin
 	if tailCount == 0 {
 		t.Fatalf("test setup expected tail updates after checkpoint, checkpoint=%d head=%d", checkpointUpdateID, head.UpdateID)
 	}
-	if err := store.Close(); err != nil {
-		t.Fatalf("close store before cold bootstrap: %v", err)
-	}
-
-	store, err = NewStore(dsn)
+	workspace := store.Snapshot()
+	store, err = NewWorkspaceStore(database, workspace.WorkspaceID, workspace.Name)
 	if err != nil {
 		t.Fatalf("reload store for cold bootstrap: %v", err)
 	}
-	defer store.Close()
-	server := NewServer(Config{}, store)
+	server := NewServer(Config{}, database)
+	broker := server.workspaceBroker(workspaceID)
+	room := server.rooms.ForDocument(workspaceID + ":" + documentID)
 
 	clientDoc := crdt.New()
 	conn := &DocumentConn{send: make(chan []byte, 128)}
-	if err := server.handleDocumentProtocolMessage(server.rooms.ForDocument(documentID), conn, documentID, buildSyncStep1ForTest(clientDoc), OperationMeta{
+	if err := server.handleDocumentProtocolMessageWithStore(store, broker, room, conn, documentID, buildSyncStep1ForTest(clientDoc), OperationMeta{
 		ActorID:   "client",
 		ActorType: "human",
 		Source:    "test",
@@ -562,7 +446,7 @@ func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testin
 			syncTypes = append(syncTypes, decodeSyncTypeForTest(t, payload))
 			reply := applySyncPayloadToDoc(t, clientDoc, payload, "server-cold-bootstrap")
 			if len(reply) > 0 {
-				if err := server.handleDocumentProtocolMessage(server.rooms.ForDocument(documentID), conn, documentID, reply, OperationMeta{
+				if err := server.handleDocumentProtocolMessageWithStore(store, broker, room, conn, documentID, reply, OperationMeta{
 					ActorID:   "client",
 					ActorType: "human",
 					Source:    "test",
@@ -583,25 +467,10 @@ func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testin
 }
 
 func TestPostgresApplyCRDTUpdateCreatesPeriodicCheckpointFromHistory(t *testing.T) {
-	dsn := postgresTestDSN(t)
-
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("open postgres: %v", err)
-	}
-	defer db.Close()
-	if err := initPostgresSchema(db); err != nil {
-		t.Fatalf("init schema: %v", err)
-	}
-	if err := clearNottyTables(db); err != nil {
-		t.Fatalf("clear tables: %v", err)
-	}
-
-	store, err := NewStore(dsn)
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	defer store.Close()
+	database := newPostgresTestDatabase(t)
+	db := database.DB
+	store := newPostgresTestWorkspaceStore(t, database)
+	workspaceID := store.Snapshot().WorkspaceID
 
 	documentID := mustCreateTestDocument(t, store, "docs/periodic-checkpoint.md", "")
 	peer := syncDocumentToDocForTest(t, store, documentID, 77)
@@ -633,7 +502,7 @@ func TestPostgresApplyCRDTUpdateCreatesPeriodicCheckpointFromHistory(t *testing.
 		  WHERE workspace_id = $1 AND document_id = $2
 		  ORDER BY update_id DESC
 		  LIMIT 1`,
-		"ws_notty",
+		workspaceID,
 		documentID,
 	).Scan(&latestCheckpointUpdateID); err != nil {
 		t.Fatalf("query latest checkpoint: %v", err)
@@ -661,25 +530,10 @@ func TestPostgresApplyCRDTUpdateCreatesPeriodicCheckpointFromHistory(t *testing.
 }
 
 func TestPostgresApplyCRDTUpdatePersistsWithoutWorkspaceSnapshot(t *testing.T) {
-	dsn := postgresTestDSN(t)
-
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("open postgres: %v", err)
-	}
-	defer db.Close()
-	if err := initPostgresSchema(db); err != nil {
-		t.Fatalf("init schema: %v", err)
-	}
-	if err := clearNottyTables(db); err != nil {
-		t.Fatalf("clear tables: %v", err)
-	}
-
-	store, err := NewStore(dsn)
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	defer store.Close()
+	database := newPostgresTestDatabase(t)
+	db := database.DB
+	store := newPostgresTestWorkspaceStore(t, database)
+	workspaceID := store.Snapshot().WorkspaceID
 
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "# before\n")
 
@@ -705,12 +559,12 @@ func TestPostgresApplyCRDTUpdatePersistsWithoutWorkspaceSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply crdt update: %v", err)
 	}
-	if got, err := documentContentAtUpdatePostgres(db, "ws_notty", updated, updated.UpdateID); err != nil || got != "# before\nmore\n" {
+	if got, err := documentContentAtUpdatePostgres(db, workspaceID, updated, updated.UpdateID); err != nil || got != "# before\nmore\n" {
 		t.Fatalf("unexpected reconstructed updated content: %q err=%v", got, err)
 	}
 
 	var headUpdateID int64
-	if err := db.QueryRow(`SELECT update_id FROM document_heads WHERE workspace_id = $1 AND document_id = $2`, "ws_notty", documentID).Scan(&headUpdateID); err != nil {
+	if err := db.QueryRow(`SELECT update_id FROM document_heads WHERE workspace_id = $1 AND document_id = $2`, workspaceID, documentID).Scan(&headUpdateID); err != nil {
 		t.Fatalf("query document head: %v", err)
 	}
 	if headUpdateID == 0 {
@@ -719,7 +573,7 @@ func TestPostgresApplyCRDTUpdatePersistsWithoutWorkspaceSnapshot(t *testing.T) {
 	assertNoDocumentHeadMaterializationColumns(t, db)
 
 	var updateCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM document_updates WHERE workspace_id = $1 AND document_id = $2`, "ws_notty", documentID).Scan(&updateCount); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM document_updates WHERE workspace_id = $1 AND document_id = $2`, workspaceID, documentID).Scan(&updateCount); err != nil {
 		t.Fatalf("query document updates: %v", err)
 	}
 	if updateCount == 0 {
@@ -728,25 +582,8 @@ func TestPostgresApplyCRDTUpdatePersistsWithoutWorkspaceSnapshot(t *testing.T) {
 }
 
 func TestPostgresAgentInboxTracksDocumentUpdatesAndThreadMentions(t *testing.T) {
-	dsn := postgresTestDSN(t)
-
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("open postgres: %v", err)
-	}
-	defer db.Close()
-	if err := initPostgresSchema(db); err != nil {
-		t.Fatalf("init schema: %v", err)
-	}
-	if err := clearNottyTables(db); err != nil {
-		t.Fatalf("clear tables: %v", err)
-	}
-
-	store, err := NewStore(dsn)
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	defer store.Close()
+	database := newPostgresTestDatabase(t)
+	store := newPostgresTestWorkspaceStore(t, database)
 	seedCodexDaemonRuntime(t, store)
 
 	logDocumentID := mustCreateTestDocument(t, store, "agent.log", "start\n")
@@ -842,25 +679,8 @@ func TestPostgresAgentInboxTracksDocumentUpdatesAndThreadMentions(t *testing.T) 
 }
 
 func TestPostgresPersistsUTF8SafeTruncatedAgentEventPrompt(t *testing.T) {
-	dsn := postgresTestDSN(t)
-
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("open postgres: %v", err)
-	}
-	defer db.Close()
-	if err := initPostgresSchema(db); err != nil {
-		t.Fatalf("init schema: %v", err)
-	}
-	if err := clearNottyTables(db); err != nil {
-		t.Fatalf("clear tables: %v", err)
-	}
-
-	store, err := NewStore(dsn)
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	defer store.Close()
+	database := newPostgresTestDatabase(t)
+	store := newPostgresTestWorkspaceStore(t, database)
 	seedCodexDaemonRuntime(t, store)
 
 	agent, err := store.CreateAgent(CreateAgentRequest{
@@ -903,24 +723,10 @@ func TestPostgresPersistsUTF8SafeTruncatedAgentEventPrompt(t *testing.T) {
 }
 
 func TestPostgresDiffDocumentReconstructsAcrossCheckpointsAfterReload(t *testing.T) {
-	dsn := postgresTestDSN(t)
-
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("open postgres: %v", err)
-	}
-	defer db.Close()
-	if err := initPostgresSchema(db); err != nil {
-		t.Fatalf("init schema: %v", err)
-	}
-	if err := clearNottyTables(db); err != nil {
-		t.Fatalf("clear tables: %v", err)
-	}
-
-	store, err := NewStore(dsn)
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
+	database := newPostgresTestDatabase(t)
+	db := database.DB
+	store := newPostgresTestWorkspaceStore(t, database)
+	workspaceID := store.Snapshot().WorkspaceID
 	seedCodexDaemonRuntime(t, store)
 	documentID := mustCreateTestDocument(t, store, "docs/history.md", "v000\n")
 	agent, err := store.CreateAgent(CreateAgentRequest{
@@ -955,19 +761,16 @@ func TestPostgresDiffDocumentReconstructsAcrossCheckpointsAfterReload(t *testing
 		t.Fatalf("get final document: %v", err)
 	}
 	finalVersion := final.UpdateID
-	finalContent, err := documentContentAtUpdatePostgres(db, "ws_notty", final, finalVersion)
+	finalContent, err := documentContentAtUpdatePostgres(db, workspaceID, final, finalVersion)
 	if err != nil {
 		t.Fatalf("reconstruct final document: %v", err)
 	}
-	if err := store.Close(); err != nil {
-		t.Fatalf("close store: %v", err)
-	}
 
-	reloaded, err := NewStore(dsn)
+	workspace := store.Snapshot()
+	reloaded, err := NewWorkspaceStore(database, workspace.WorkspaceID, workspace.Name)
 	if err != nil {
 		t.Fatalf("reload store: %v", err)
 	}
-	defer reloaded.Close()
 
 	diff, err := reloaded.DiffDocument(agent.ID, documentID, strconv.FormatInt(midVersion, 10), strconv.FormatInt(finalVersion, 10))
 	if err != nil {
@@ -981,7 +784,7 @@ func TestPostgresDiffDocumentReconstructsAcrossCheckpointsAfterReload(t *testing
 	}
 
 	var checkpointCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2`, "ws_notty", documentID).Scan(&checkpointCount); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2`, workspaceID, documentID).Scan(&checkpointCount); err != nil {
 		t.Fatalf("count checkpoints: %v", err)
 	}
 	if checkpointCount < 2 {
@@ -990,7 +793,6 @@ func TestPostgresDiffDocumentReconstructsAcrossCheckpointsAfterReload(t *testing
 }
 
 func TestPostgresCreateAgentValidatesDaemonRuntimeReport(t *testing.T) {
-	dsn := postgresTestDSN(t)
 	cases := []struct {
 		name        string
 		kind        string
@@ -1031,22 +833,9 @@ func TestPostgresCreateAgentValidatesDaemonRuntimeReport(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			db, err := sql.Open("pgx", dsn)
-			if err != nil {
-				t.Fatalf("open postgres: %v", err)
-			}
-			defer db.Close()
-			if err := initPostgresSchema(db); err != nil {
-				t.Fatalf("init schema: %v", err)
-			}
-			if err := clearNottyTables(db); err != nil {
-				t.Fatalf("clear tables: %v", err)
-			}
-			store, err := NewStore(dsn)
-			if err != nil {
-				t.Fatalf("new store: %v", err)
-			}
-			defer store.Close()
+			database := newPostgresTestDatabase(t)
+			db := database.DB
+			store := newPostgresTestWorkspaceStore(t, database)
 			daemonID := seedStoreDaemonRuntime(t, store, "daemon_runtime_test", tc.runtimes...)
 
 			agent, err := store.CreateAgent(CreateAgentRequest{
@@ -1101,6 +890,65 @@ func postgresTestDSN(t *testing.T) string {
 		t.Fatalf("refusing to run destructive Postgres tests against database %q; expected disposable database notty_test", dbName)
 	}
 	return dsn
+}
+
+func newPostgresTestDatabase(t *testing.T) *Database {
+	t.Helper()
+	database, err := OpenDatabase(postgresTestDSN(t))
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	if err := clearNottyTables(database.DB); err != nil {
+		_ = database.Close()
+		t.Fatalf("clear tables: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = database.Close()
+	})
+	return database
+}
+
+func insertPostgresTestWorkspace(t *testing.T, database *Database, name string) *Workspace {
+	t.Helper()
+	if database == nil || database.DB == nil {
+		t.Fatal("database is required")
+	}
+	now := time.Now().UTC()
+	suffix := strings.ReplaceAll(uuid.NewString(), "-", "")
+	workspace := &Workspace{
+		ID:             "ws_" + uuid.NewString(),
+		Slug:           "test-" + suffix,
+		Name:           strings.TrimSpace(name),
+		RootDocumentID: newRootDocumentID(),
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if workspace.Name == "" {
+		workspace.Name = "Test Workspace"
+	}
+	if _, err := database.DB.Exec(
+		`INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		workspace.ID,
+		workspace.Slug,
+		workspace.Name,
+		workspace.RootDocumentID,
+		workspace.CreatedAt,
+		workspace.UpdatedAt,
+	); err != nil {
+		t.Fatalf("insert test workspace: %v", err)
+	}
+	return workspace
+}
+
+func newPostgresTestWorkspaceStore(t *testing.T, database *Database) *Store {
+	t.Helper()
+	workspace := insertPostgresTestWorkspace(t, database, "Test Workspace")
+	store, err := NewWorkspaceStore(database, workspace.ID, workspace.Name)
+	if err != nil {
+		t.Fatalf("new workspace store: %v", err)
+	}
+	return store
 }
 
 func seedStoreDaemonRuntime(t *testing.T, store *Store, daemonID string, runtimes ...RuntimeDetection) string {
@@ -1268,5 +1116,104 @@ func assertNoProposalTable(t *testing.T, db *sql.DB) {
 	}
 	if table.Valid {
 		t.Fatalf("proposals table should be removed, got %q", table.String)
+	}
+}
+
+func TestNewWorkspaceStartsWithNoSyntheticUsers(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	store := newPostgresTestWorkspaceStore(t, database)
+	snapshot := store.Snapshot()
+	for id, user := range snapshot.Users {
+		if id == "user_owner" || (user != nil && user.Handle == "owner" && user.Name == "Workspace Owner") {
+			t.Fatalf("workspace should not contain synthetic user_owner, found %q: %+v", id, user)
+		}
+	}
+}
+
+func TestCreateAgentRequiresDaemon(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	store := newPostgresTestWorkspaceStore(t, database)
+	_, err := store.CreateAgent(CreateAgentRequest{
+		Handle: "test-agent",
+		Name:   "Test Agent",
+		Role:   "test",
+		Kind:   "codex",
+	}, OperationMeta{ActorID: "test", ActorType: "human", Source: "test"})
+	if err == nil {
+		t.Fatalf("expected error when creating agent without any daemons")
+	}
+	if !strings.Contains(err.Error(), "daemon") {
+		t.Fatalf("expected daemon-related error, got: %v", err)
+	}
+	snapshot := store.Snapshot()
+	if _, exists := snapshot.Daemons["daemon_local"]; exists {
+		t.Fatalf("daemon_local should not be synthesized")
+	}
+}
+
+func TestLegacyScaffoldingRowsDeletedOnStartup(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	db := database.DB
+	now := time.Now().UTC()
+
+	if _, err := db.Exec(
+		`INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6)`,
+		"ws_notty", "notty", "notty", "doc_root_ws_notty", now, now,
+	); err != nil {
+		t.Fatalf("insert legacy workspace: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO users (workspace_id, id, handle, name, role, kind, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		"ws_notty", "user_owner", "owner", "Workspace Owner", "test", "human", "active", now, now,
+	); err != nil {
+		t.Fatalf("insert legacy user_owner: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO daemons (workspace_id, id, name, status, created_at) VALUES ($1, $2, $3, $4, $5)`,
+		"ws_notty", "daemon_local", "Local daemon", "active", now,
+	); err != nil {
+		t.Fatalf("insert legacy daemon_local: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO accounts (id, email, display_name, password_hash, created_at, updated_at, last_accessed_workspace_id) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		"acc_legacy", "legacy@example.com", "Legacy", "hash", now, now, "ws_notty",
+	); err != nil {
+		t.Fatalf("insert legacy account: %v", err)
+	}
+
+	if err := deleteLegacyScaffoldingRows(db); err != nil {
+		t.Fatalf("delete legacy rows: %v", err)
+	}
+
+	var workspaceCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workspaces WHERE id = 'ws_notty'`).Scan(&workspaceCount); err != nil {
+		t.Fatalf("count ws_notty: %v", err)
+	}
+	if workspaceCount != 0 {
+		t.Fatalf("ws_notty workspace should be deleted, found %d rows", workspaceCount)
+	}
+
+	var userCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM users WHERE id = 'user_owner'`).Scan(&userCount); err != nil {
+		t.Fatalf("count user_owner: %v", err)
+	}
+	if userCount != 0 {
+		t.Fatalf("user_owner should be deleted, found %d rows", userCount)
+	}
+
+	var daemonCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM daemons WHERE id = 'daemon_local'`).Scan(&daemonCount); err != nil {
+		t.Fatalf("count daemon_local: %v", err)
+	}
+	if daemonCount != 0 {
+		t.Fatalf("daemon_local should be deleted, found %d rows", daemonCount)
+	}
+
+	var lastAccessed string
+	if err := db.QueryRow(`SELECT last_accessed_workspace_id FROM accounts WHERE id = 'acc_legacy'`).Scan(&lastAccessed); err != nil {
+		t.Fatalf("check account last_accessed: %v", err)
+	}
+	if lastAccessed != "" {
+		t.Fatalf("account last_accessed_workspace_id should be cleared, got %q", lastAccessed)
 	}
 }

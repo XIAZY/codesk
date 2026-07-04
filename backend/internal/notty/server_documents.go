@@ -298,16 +298,9 @@ func (c *documentWebsocketConn) closeAndUnsubscribeAll() {
 	log.Printf("document ws closed multiplexed=%t doc=%s actor=%s client=%d", c.multiplexed, c.fixedDocumentID, c.actorID, c.clientID)
 }
 
-func (s *Server) handleDocumentProtocolMessage(room *DocumentRoom, session documentSubscriber, documentID string, payload []byte, meta OperationMeta) error {
-	return s.handleDocumentProtocolMessageWithStore(s.store, s.subscribers, room, session, documentID, payload, meta)
-}
-
 func (s *Server) handleDocumentProtocolMessageWithStore(store *Store, broker *Broker, room *DocumentRoom, session documentSubscriber, documentID string, payload []byte, meta OperationMeta) error {
 	if store == nil {
-		store = s.store
-	}
-	if broker == nil {
-		broker = s.subscribers
+		return errors.New("workspace store is required")
 	}
 	messageType, reader, err := yproto.DecodeProtocolMessage(payload)
 	if err != nil {

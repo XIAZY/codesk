@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	_ "github.com/jackc/pgx/v5/stdlib"
 	crdt "notty/internal/ycrdt"
 )
 
@@ -40,7 +39,6 @@ type Store struct {
 	mu            sync.RWMutex
 	state         WorkspaceState
 	db            *sql.DB
-	databaseURL   string
 	workspaceID   string
 	workspaceName string
 
@@ -71,47 +69,27 @@ type principalRef struct {
 	Kind   string
 }
 
-func NewStore(databaseURL string) (*Store, error) {
-	return NewStoreForWorkspace(databaseURL, "ws_notty", "notty")
-}
-
-func NewStoreForWorkspace(databaseURL string, workspaceID string, workspaceName string) (*Store, error) {
-	store := &Store{}
-	store.workspaceID = strings.TrimSpace(workspaceID)
-	if store.workspaceID == "" {
-		store.workspaceID = "ws_notty"
+func NewWorkspaceStore(database *Database, workspaceID string, workspaceName string) (*Store, error) {
+	if database == nil || database.DB == nil {
+		return nil, errors.New("database is required")
 	}
-	store.workspaceName = strings.TrimSpace(workspaceName)
-	if store.workspaceName == "" {
-		store.workspaceName = store.workspaceID
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		return nil, errors.New("workspace id is required")
 	}
-	databaseURL = strings.TrimSpace(databaseURL)
-	if !isPostgresDSN(databaseURL) {
-		return nil, fmt.Errorf("Postgres database URL is required")
+	workspaceName = strings.TrimSpace(workspaceName)
+	if workspaceName == "" {
+		workspaceName = workspaceID
 	}
-	db, err := sql.Open("pgx", databaseURL)
-	if err != nil {
-		return nil, err
+	store := &Store{
+		db:            database.DB,
+		workspaceID:   workspaceID,
+		workspaceName: workspaceName,
 	}
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	if err := initPostgresSchema(db); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	store.db = db
-	store.databaseURL = databaseURL
 	if err := store.load(); err != nil {
-		_ = store.db.Close()
 		return nil, err
 	}
 	return store, nil
-}
-
-func (s *Store) Close() error {
-	return s.db.Close()
 }
 
 func (s *Store) Reload() error {
@@ -192,19 +170,6 @@ func (s *Store) ensureMaps() {
 	if s.pendingDocumentEvents == nil {
 		s.pendingDocumentEvents = []documentUpdateRecord{}
 	}
-	if len(s.state.Users) == 0 {
-		now := time.Now().UTC()
-		s.state.Users["user_owner"] = &User{
-			ID:        "user_owner",
-			Handle:    "owner",
-			Name:      "Workspace Owner",
-			Role:      "Coordinates the shared workspace",
-			Kind:      "human",
-			Status:    "active",
-			CreatedAt: now,
-			UpdatedAt: now,
-		}
-	}
 }
 
 func (s *Store) documentLockLocked(documentID string) *sync.RWMutex {
@@ -230,16 +195,9 @@ func cloneStringSet(values map[string]struct{}) map[string]struct{} {
 	return clone
 }
 
-func seedWorkspace() WorkspaceState {
-	return seedWorkspaceFor("ws_notty", "notty")
-}
-
 func seedWorkspaceFor(workspaceID string, workspaceName string) WorkspaceState {
 	now := time.Now().UTC()
 	workspaceID = strings.TrimSpace(workspaceID)
-	if workspaceID == "" {
-		workspaceID = "ws_notty"
-	}
 	workspaceName = strings.TrimSpace(workspaceName)
 	if workspaceName == "" {
 		workspaceName = workspaceID
@@ -248,18 +206,7 @@ func seedWorkspaceFor(workspaceID string, workspaceName string) WorkspaceState {
 		WorkspaceID:      workspaceID,
 		Name:             workspaceName,
 		ContentDocuments: map[string]*Document{},
-		Users: map[string]*User{
-			"user_owner": {
-				ID:        "user_owner",
-				Handle:    "owner",
-				Name:      "Workspace Owner",
-				Role:      "Coordinates the shared workspace",
-				Kind:      "human",
-				Status:    "active",
-				CreatedAt: now,
-				UpdatedAt: now,
-			},
-		},
+		Users: map[string]*User{},
 		Daemons:             map[string]*Daemon{},
 		Agents:              map[string]*Agent{},
 		AgentRuns:           map[string]*AgentRun{},
@@ -279,9 +226,6 @@ func newRootDocumentID() string {
 
 func legacyRootDocumentID(workspaceID string) string {
 	workspaceID = strings.TrimSpace(workspaceID)
-	if workspaceID == "" {
-		workspaceID = "ws_notty"
-	}
 	return "doc_root_" + workspaceID
 }
 
@@ -1130,19 +1074,6 @@ func (s *Store) CreateAgent(req CreateAgentRequest, meta OperationMeta) (*Agent,
 					break
 				}
 				daemonID = id
-			}
-		}
-		if daemonID == "" && len(s.state.Daemons) == 0 {
-			daemonID = "daemon_local"
-			if s.state.Daemons[daemonID] == nil {
-				now := time.Now().UTC()
-				s.state.Daemons[daemonID] = &Daemon{
-					ID:          daemonID,
-					WorkspaceID: s.state.WorkspaceID,
-					Name:        "Local daemon",
-					Status:      "active",
-					CreatedAt:   now,
-				}
 			}
 		}
 	}
@@ -2017,7 +1948,10 @@ func isPostgresDSN(value string) bool {
 }
 
 func initPostgresSchema(db *sql.DB) error {
-	return initPostgresSchemaTables(db)
+	if err := initPostgresSchemaTables(db); err != nil {
+		return err
+	}
+	return deleteLegacyScaffoldingRows(db)
 }
 
 func normalizeDocumentPath(value string) (string, error) {

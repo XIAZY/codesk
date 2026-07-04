@@ -52,8 +52,8 @@ func visibleAgentsForAuth(state WorkspaceState, auth *AuthContext) []*Agent {
 }
 
 func (s *Server) daemonsForWorkspace(r *http.Request, state WorkspaceState) []*Daemon {
-	if s.store != nil && s.store.db != nil {
-		if daemons, err := listDaemons(s.store.db, s.requestWorkspaceID(r)); err == nil {
+	if s.sqlDB() != nil {
+		if daemons, err := listDaemons(s.sqlDB(), s.requestWorkspaceID(r)); err == nil {
 			return daemons
 		}
 	}

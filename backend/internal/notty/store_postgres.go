@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -445,6 +446,58 @@ func initPostgresSchemaTables(db *sql.DB) error {
 	return nil
 }
 
+func deleteLegacyScaffoldingRows(db *sql.DB) error {
+	type legacyDelete struct {
+		table string
+		where string
+		args  []any
+	}
+	deletes := []legacyDelete{
+		{"presences", "workspace_id = $1", []any{"ws_notty"}},
+		{"agent_document_views", "workspace_id = $1", []any{"ws_notty"}},
+		{"agent_events", "workspace_id = $1", []any{"ws_notty"}},
+		{"agent_runs", "workspace_id = $1", []any{"ws_notty"}},
+		{"agents", "workspace_id = $1", []any{"ws_notty"}},
+		{"activities", "workspace_id = $1", []any{"ws_notty"}},
+		{"thread_messages", "workspace_id = $1", []any{"ws_notty"}},
+		{"thread_participants", "workspace_id = $1", []any{"ws_notty"}},
+		{"threads", "workspace_id = $1", []any{"ws_notty"}},
+		{"document_checkpoints", "workspace_id = $1", []any{"ws_notty"}},
+		{"document_updates", "workspace_id = $1", []any{"ws_notty"}},
+		{"document_heads", "workspace_id = $1", []any{"ws_notty"}},
+		{"documents", "workspace_id = $1", []any{"ws_notty"}},
+		{"daemons", "workspace_id = $1", []any{"ws_notty"}},
+		{"users", "workspace_id = $1", []any{"ws_notty"}},
+		{"workspace_members", "workspace_id = $1", []any{"ws_notty"}},
+		{"workspace_invites", "workspace_id = $1", []any{"ws_notty"}},
+		{"workspaces", "id = $1", []any{"ws_notty"}},
+		{"users", "id = $1", []any{"user_owner"}},
+		{"daemons", "id = $1", []any{"daemon_local"}},
+		{"agents", "daemon_id = $1", []any{"daemon_local"}},
+	}
+	var totalDeleted int64
+	for _, d := range deletes {
+		result, err := db.Exec("DELETE FROM "+d.table+" WHERE "+d.where, d.args...)
+		if err != nil {
+			return fmt.Errorf("delete legacy rows from %s: %w", d.table, err)
+		}
+		n, _ := result.RowsAffected()
+		if n > 0 {
+			log.Printf("legacy cleanup: deleted %d rows from %s where %s", n, d.table, d.where)
+			totalDeleted += n
+		}
+	}
+	if totalDeleted > 0 {
+		log.Printf("legacy cleanup: deleted %d total scaffolding rows", totalDeleted)
+	}
+	if result, err := db.Exec(`UPDATE accounts SET last_accessed_workspace_id = '' WHERE last_accessed_workspace_id = 'ws_notty'`); err != nil {
+		return fmt.Errorf("clear legacy workspace reference in accounts: %w", err)
+	} else if n, _ := result.RowsAffected(); n > 0 {
+		log.Printf("legacy cleanup: cleared ws_notty reference from %d account rows", n)
+	}
+	return nil
+}
+
 func (s *Store) loadNormalizedPostgresLocked() error {
 	s.state.ContentDocuments = map[string]*Document{}
 	s.state.Users = map[string]*User{}
@@ -502,8 +555,7 @@ func (s *Store) loadWorkspaceMetadataPostgresLocked() error {
 		s.state.WorkspaceID,
 	).Scan(&name, &rootDocumentID)
 	if err == sql.ErrNoRows {
-		s.state.RootDocumentID = legacyRootDocumentID(s.state.WorkspaceID)
-		return nil
+		return ErrNotFound
 	}
 	if err != nil {
 		return err
