@@ -21,6 +21,8 @@ import {
   reduceWorkspaceEvent,
   resolveThreadAnchorLive,
   selectionLabel,
+  threadReplyCount,
+  threadReplyLabel,
 } from "./logic";
 import type { Agent, Daemon, WorkspaceState } from "./types";
 
@@ -129,6 +131,19 @@ describe("workspace reduction", () => {
 });
 
 describe("presentation grouping", () => {
+  it("counts replies after the starter message", () => {
+    expect(threadReplyCount({ messages: [] })).toBe(0);
+    expect(threadReplyCount({ messages: [{ id: "starter" }] })).toBe(0);
+    expect(threadReplyCount({ messages: [{ id: "starter" }, { id: "reply" }] })).toBe(1);
+  });
+
+  it("labels thread replies without calling a starter message a reply", () => {
+    expect(threadReplyLabel({ messages: [] })).toBe("No replies");
+    expect(threadReplyLabel({ messages: [{ id: "starter" }] })).toBe("No replies");
+    expect(threadReplyLabel({ messages: [{ id: "starter" }, { id: "reply" }] })).toBe("1 reply");
+    expect(threadReplyLabel({ messages: [{ id: "starter" }, { id: "reply" }, { id: "reply2" }] })).toBe("2 replies");
+  });
+
   it("groups all threads on a line so the UI can show all of them", () => {
     const groups = buildLineThreads([
       { id: "b", anchor: { line: 3 } },

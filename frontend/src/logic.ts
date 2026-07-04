@@ -203,6 +203,18 @@ export function coworkerCount(workspace: Pick<WorkspaceState, "agents" | "users"
   return workspace.agents.length + workspace.users.length;
 }
 
+export function threadReplyCount(thread: { messages: readonly unknown[] }) {
+  return Math.max(0, thread.messages.length - 1);
+}
+
+export function threadReplyLabel(thread: { messages: readonly unknown[] }) {
+  const count = threadReplyCount(thread);
+  if (count === 0) {
+    return "No replies";
+  }
+  return `${count} ${count === 1 ? "reply" : "replies"}`;
+}
+
 export function agentsByDaemon(agents: Agent[], daemons: Daemon[]) {
   const names = new Map(daemons.map((daemon) => [daemon.id, daemon.name]));
   return agents.reduce<Array<{ daemonId: string; daemonName: string; agents: Agent[] }>>((groups, agent) => {
