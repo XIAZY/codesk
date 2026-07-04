@@ -8,6 +8,7 @@ frontend/dist/
 frontend/.test-dist/
 
 .runtime/
+.direnv/
 .vendor/
 .wrangler/
 bin/
