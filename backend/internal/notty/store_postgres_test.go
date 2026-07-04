@@ -137,11 +137,12 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	}
 }
 
-func TestPostgresBackfillsBlankWorkspaceRootDocumentID(t *testing.T) {
+func TestPostgresCreatesWorkspaceRootDocumentFromStoredRootID(t *testing.T) {
 	database := newPostgresTestDatabase(t)
 	db := database.DB
 
 	workspaceID := "11111111-1111-1111-1111-111111111111"
+	rootDocumentID := "22222222-2222-4222-8222-222222222222"
 	now := time.Now().UTC()
 	if _, err := db.Exec(
 		`INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at)
@@ -149,11 +150,11 @@ func TestPostgresBackfillsBlankWorkspaceRootDocumentID(t *testing.T) {
 		workspaceID,
 		"legacy-root",
 		"Legacy Root",
-		"",
+		rootDocumentID,
 		now,
 		now,
 	); err != nil {
-		t.Fatalf("insert legacy workspace row: %v", err)
+		t.Fatalf("insert workspace row: %v", err)
 	}
 
 	store, err := NewWorkspaceStore(database, workspaceID, "fallback name")
@@ -161,24 +162,23 @@ func TestPostgresBackfillsBlankWorkspaceRootDocumentID(t *testing.T) {
 		t.Fatalf("new store: %v", err)
 	}
 
-	wantRootID := legacyRootDocumentID(workspaceID)
 	snapshot := store.Snapshot()
 	if snapshot.Name != "Legacy Root" {
 		t.Fatalf("workspace name = %q, want row name", snapshot.Name)
 	}
-	if snapshot.RootDocumentID != wantRootID {
-		t.Fatalf("root document ID = %q, want backfilled %q", snapshot.RootDocumentID, wantRootID)
+	if snapshot.RootDocumentID != rootDocumentID {
+		t.Fatalf("root document ID = %q, want stored %q", snapshot.RootDocumentID, rootDocumentID)
 	}
-	if !store.HasDocument(wantRootID) {
-		t.Fatalf("backfilled root document %q is not syncable", wantRootID)
+	if !store.HasDocument(rootDocumentID) {
+		t.Fatalf("stored root document %q is not syncable", rootDocumentID)
 	}
 
 	var storedRootID string
-	if err := db.QueryRow(`SELECT root_document_id FROM workspaces WHERE id = $1`, workspaceID).Scan(&storedRootID); err != nil {
-		t.Fatalf("select backfilled root document ID: %v", err)
+	if err := db.QueryRow(`SELECT root_document_id::text FROM workspaces WHERE id = $1`, workspaceID).Scan(&storedRootID); err != nil {
+		t.Fatalf("select stored root document ID: %v", err)
 	}
-	if storedRootID != wantRootID {
-		t.Fatalf("stored root document ID = %q, want %q", storedRootID, wantRootID)
+	if storedRootID != rootDocumentID {
+		t.Fatalf("stored root document ID = %q, want %q", storedRootID, rootDocumentID)
 	}
 }
 

@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	crdt "notty/internal/ycrdt"
 	"notty/internal/yproto"
@@ -3117,6 +3118,10 @@ func TestLocalCreateIntentRetriesWithStableDocumentAndOperationID(t *testing.T) 
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				t.Fatalf("decode create payload: %v", err)
 			}
+			if _, err := uuid.Parse(payload["documentId"]); err != nil {
+				http.Error(w, "document id must be a bare uuid", http.StatusBadRequest)
+				return
+			}
 			createPayloads = append(createPayloads, payload)
 			if len(createPayloads) == 1 {
 				http.Error(w, "temporary backend failure", http.StatusInternalServerError)
@@ -3173,6 +3178,9 @@ func TestLocalCreateIntentRetriesWithStableDocumentAndOperationID(t *testing.T) 
 	}
 	if createPayloads[0]["documentId"] == "" || createPayloads[0]["clientOperationId"] == "" {
 		t.Fatalf("first create payload missing stable IDs: %#v", createPayloads[0])
+	}
+	if _, err := uuid.Parse(createPayloads[0]["documentId"]); err != nil {
+		t.Fatalf("local create document ID should be a bare UUID, got %q: %v", createPayloads[0]["documentId"], err)
 	}
 	if createPayloads[0]["documentId"] != createPayloads[1]["documentId"] ||
 		createPayloads[0]["clientOperationId"] != createPayloads[1]["clientOperationId"] {
