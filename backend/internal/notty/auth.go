@@ -531,7 +531,7 @@ func requestPasswordReset(db *sql.DB, account *Account, cooldown time.Duration) 
 
 func listWorkspacesForAccount(db *sql.DB, accountID string) ([]*Workspace, error) {
 	rows, err := db.Query(
-		`SELECT w.id::text, w.slug, w.name, w.root_document_id, m.last_accessed_document_id, w.created_at, w.updated_at
+		`SELECT w.id::text, w.slug, w.name, w.root_document_id::text, COALESCE(m.last_accessed_document_id::text, ''), w.created_at, w.updated_at
 		   FROM workspaces w
 		   JOIN workspace_members m ON m.workspace_id = w.id
 		  WHERE m.account_id = $1 AND m.status = 'active'
@@ -592,7 +592,7 @@ func updateLastAccessedWorkspace(db *sql.DB, accountID string, workspaceID strin
 			`UPDATE workspace_members
 			    SET last_accessed_document_id = $1
 			  WHERE workspace_id = $2 AND account_id = $3 AND status = 'active'`,
-			documentID, workspaceID, accountID,
+			uuidStringOrNil(documentID), workspaceID, accountID,
 		); err != nil {
 			return err
 		}
@@ -609,7 +609,7 @@ func getWorkspace(db *sql.DB, workspaceID string) (*Workspace, error) {
 	}
 	workspace := &Workspace{}
 	err := db.QueryRow(
-		`SELECT id::text, slug, name, root_document_id, created_at, updated_at FROM workspaces WHERE id = $1`,
+		`SELECT id::text, slug, name, root_document_id::text, created_at, updated_at FROM workspaces WHERE id = $1`,
 		strings.TrimSpace(workspaceID),
 	).Scan(&workspace.ID, &workspace.Slug, &workspace.Name, &workspace.RootDocumentID, &workspace.CreatedAt, &workspace.UpdatedAt)
 	if err == sql.ErrNoRows {

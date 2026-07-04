@@ -42,7 +42,7 @@ type localNamespaceClaim struct {
 
 func newLocalCreateIntent(relativePath, actorID, actorType, observedHash string, observedMTime int64) localNamespaceIntent {
 	id := "nsintent_" + uuid.NewString()
-	documentID := "doc_" + uuid.NewString()
+	documentID := uuid.NewString()
 	return localNamespaceIntent{
 		ID:                    id,
 		WorkspaceRelativePath: relativePath,

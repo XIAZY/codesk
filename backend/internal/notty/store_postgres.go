@@ -47,7 +47,18 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		)
 		`,
 		`ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS root_document_id TEXT NOT NULL DEFAULT ''`,
-		`UPDATE workspaces SET root_document_id = 'doc_root_' || id::text WHERE root_document_id = ''`,
+		`DO $$
+		BEGIN
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns
+				 WHERE table_schema = 'public'
+				   AND table_name = 'workspaces'
+				   AND column_name = 'root_document_id'
+				   AND data_type = 'text'
+			) THEN
+				UPDATE workspaces SET root_document_id = 'doc_root_' || id::text WHERE root_document_id = '';
+			END IF;
+		END $$`,
 		`ALTER TABLE workspaces ALTER COLUMN root_document_id DROP DEFAULT`,
 		`ALTER TABLE workspaces DROP COLUMN IF EXISTS root_stream_id`,
 		`
@@ -554,7 +565,7 @@ func deleteLegacyScaffoldingRows(db *sql.DB) error {
 // are deleted. Runs before primary entity deletes so subqueries can still resolve.
 func sweepLegacyReferencesFromInventory(db *sql.DB) error {
 	legacyIDs := map[string][]string{
-		"users":  {"user_owner"},
+		"users":   {"user_owner"},
 		"daemons": {"daemon_local"},
 	}
 
@@ -667,7 +678,7 @@ func assertNoLegacyScaffoldingRows(db *sql.DB) error {
 	}
 	// Inventory-derived probes: every reference column that could hold a legacy value.
 	legacyIDs := map[string][]string{
-		"users":  {"user_owner"},
+		"users":   {"user_owner"},
 		"daemons": {"daemon_local"},
 	}
 	for _, ref := range uuidGroup1References() {
@@ -724,37 +735,37 @@ func (s *Store) loadNormalizedPostgresLocked() error {
 	s.state.DocumentCheckpoints = map[string]*DocumentCheckpoint{}
 
 	if err := s.ensurePostgresCheckpointsLocked(); err != nil {
-		return err
+		return fmt.Errorf("ensure checkpoints: %w", err)
 	}
 	if err := s.loadDocumentsPostgresLocked(); err != nil {
-		return err
+		return fmt.Errorf("load documents: %w", err)
 	}
 	if err := s.loadUsersPostgresLocked(); err != nil {
-		return err
+		return fmt.Errorf("load users: %w", err)
 	}
 	if err := s.loadDaemonsPostgresLocked(); err != nil {
-		return err
+		return fmt.Errorf("load daemons: %w", err)
 	}
 	if err := s.loadAgentsPostgresLocked(); err != nil {
-		return err
+		return fmt.Errorf("load agents: %w", err)
 	}
 	if err := s.loadAgentRunsPostgresLocked(); err != nil {
-		return err
+		return fmt.Errorf("load agent runs: %w", err)
 	}
 	if err := s.loadPresencesPostgresLocked(); err != nil {
-		return err
+		return fmt.Errorf("load presences: %w", err)
 	}
 	if err := s.loadActivitiesPostgresLocked(); err != nil {
-		return err
+		return fmt.Errorf("load activities: %w", err)
 	}
 	if err := s.loadThreadsPostgresLocked(); err != nil {
-		return err
+		return fmt.Errorf("load threads: %w", err)
 	}
 	if err := s.loadAgentEventsPostgresLocked(); err != nil {
-		return err
+		return fmt.Errorf("load agent events: %w", err)
 	}
 	if err := s.loadAgentDocumentViewsPostgresLocked(); err != nil {
-		return err
+		return fmt.Errorf("load agent document views: %w", err)
 	}
 	return nil
 }
@@ -763,7 +774,7 @@ func (s *Store) loadWorkspaceMetadataPostgresLocked() error {
 	var name string
 	var rootDocumentID string
 	err := s.db.QueryRow(
-		`SELECT name, root_document_id FROM workspaces WHERE id = $1`,
+		`SELECT name, root_document_id::text FROM workspaces WHERE id::text = $1`,
 		s.state.WorkspaceID,
 	).Scan(&name, &rootDocumentID)
 	if err == sql.ErrNoRows {
@@ -779,7 +790,7 @@ func (s *Store) loadWorkspaceMetadataPostgresLocked() error {
 	if rootDocumentID == "" {
 		rootDocumentID = legacyRootDocumentID(s.state.WorkspaceID)
 		if _, err := s.db.Exec(
-			`UPDATE workspaces SET root_document_id = $1 WHERE id = $2 AND root_document_id = ''`,
+			`UPDATE workspaces SET root_document_id = $1 WHERE id::text = $2 AND root_document_id = ''`,
 			rootDocumentID,
 			s.state.WorkspaceID,
 		); err != nil {
@@ -938,7 +949,7 @@ func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) error {
 				    SET state_vector = $1,
 				        update_id = $2,
 				        updated_at = $3
-				  WHERE workspace_id = $4 AND document_id = $5`,
+				  WHERE workspace_id::text = $4 AND document_id::text = $5`,
 				document.StateVector,
 				document.UpdateID,
 				document.UpdatedAt,
@@ -997,7 +1008,7 @@ func (s *Store) maybeInsertDocumentCheckpointPostgresLocked(tx *sql.Tx, document
 	err := tx.QueryRow(
 		`SELECT COALESCE(MAX(update_id), 0)
 		   FROM document_checkpoints
-		  WHERE workspace_id = $1 AND document_id = $2`,
+		  WHERE workspace_id::text = $1 AND document_id::text = $2`,
 		s.state.WorkspaceID,
 		document.ID,
 	).Scan(&lastCheckpointID)
@@ -1016,7 +1027,7 @@ func (s *Store) maybeInsertDocumentCheckpointPostgresLocked(tx *sql.Tx, document
 }
 
 func (s *Store) replaceUsersPostgresLocked(tx *sql.Tx) error {
-	if _, err := tx.Exec(`DELETE FROM users WHERE workspace_id = $1`, s.state.WorkspaceID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM users WHERE workspace_id::text = $1`, s.state.WorkspaceID); err != nil {
 		return err
 	}
 	for _, user := range s.state.Users {
@@ -1040,7 +1051,7 @@ func (s *Store) replaceUsersPostgresLocked(tx *sql.Tx) error {
 }
 
 func (s *Store) replaceAgentsPostgresLocked(tx *sql.Tx) error {
-	if _, err := tx.Exec(`DELETE FROM agents WHERE workspace_id = $1`, s.state.WorkspaceID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM agents WHERE workspace_id::text = $1`, s.state.WorkspaceID); err != nil {
 		return err
 	}
 	for _, agent := range s.state.Agents {
@@ -1141,7 +1152,7 @@ func insertAgentPostgres(tx *sql.Tx, workspaceID string, agent *Agent) error {
 }
 
 func (s *Store) replaceAgentRunsPostgresLocked(tx *sql.Tx) error {
-	if _, err := tx.Exec(`DELETE FROM agent_runs WHERE workspace_id = $1`, s.state.WorkspaceID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM agent_runs WHERE workspace_id::text = $1`, s.state.WorkspaceID); err != nil {
 		return err
 	}
 	for _, run := range s.state.AgentRuns {
@@ -1192,7 +1203,7 @@ func (s *Store) replaceAgentRunsPostgresLocked(tx *sql.Tx) error {
 }
 
 func (s *Store) replacePresencesPostgresLocked(tx *sql.Tx) error {
-	if _, err := tx.Exec(`DELETE FROM presences WHERE workspace_id = $1`, s.state.WorkspaceID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM presences WHERE workspace_id::text = $1`, s.state.WorkspaceID); err != nil {
 		return err
 	}
 	for _, presence := range s.state.Presences {
@@ -1270,10 +1281,18 @@ func upsertPresencePostgres(db *sql.DB, workspaceID string, presence *Presence) 
 }
 
 func (s *Store) replaceActivitiesPostgresLocked(tx *sql.Tx) error {
-	if _, err := tx.Exec(`DELETE FROM activities WHERE workspace_id = $1`, s.state.WorkspaceID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM activities WHERE workspace_id::text = $1`, s.state.WorkspaceID); err != nil {
+		return err
+	}
+	documentIDColumnType, err := columnDataType(context.Background(), tx, "activities", "document_id")
+	if err != nil {
 		return err
 	}
 	for _, activity := range s.state.Activities {
+		documentID := any(strings.TrimSpace(activity.DocumentID))
+		if documentIDColumnType == "uuid" {
+			documentID = uuidStringOrNil(activity.DocumentID)
+		}
 		if _, err := tx.Exec(
 			`INSERT INTO activities (
 				workspace_id, type, document_id, actor_id, actor_type, summary, occurred_at,
@@ -1290,7 +1309,7 @@ func (s *Store) replaceActivitiesPostgresLocked(tx *sql.Tx) error {
 				)`,
 			s.state.WorkspaceID,
 			activity.Type,
-			activity.DocumentID,
+			documentID,
 			actorUUIDOrNil(activity.ActorID, activity.ActorType),
 			activity.ActorType,
 			activity.Summary,
@@ -1316,13 +1335,13 @@ func (s *Store) replaceActivitiesPostgresLocked(tx *sql.Tx) error {
 }
 
 func (s *Store) replaceThreadsPostgresLocked(tx *sql.Tx) error {
-	if _, err := tx.Exec(`DELETE FROM thread_messages WHERE workspace_id = $1`, s.state.WorkspaceID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM thread_messages WHERE workspace_id::text = $1`, s.state.WorkspaceID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM thread_participants WHERE workspace_id = $1`, s.state.WorkspaceID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM thread_participants WHERE workspace_id::text = $1`, s.state.WorkspaceID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM threads WHERE workspace_id = $1`, s.state.WorkspaceID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM threads WHERE workspace_id::text = $1`, s.state.WorkspaceID); err != nil {
 		return err
 	}
 	for _, thread := range s.state.Threads {
@@ -1395,10 +1414,18 @@ func (s *Store) replaceThreadsPostgresLocked(tx *sql.Tx) error {
 }
 
 func (s *Store) replaceAgentEventsPostgresLocked(tx *sql.Tx) error {
-	if _, err := tx.Exec(`DELETE FROM agent_events WHERE workspace_id = $1`, s.state.WorkspaceID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM agent_events WHERE workspace_id::text = $1`, s.state.WorkspaceID); err != nil {
+		return err
+	}
+	documentIDColumnType, err := columnDataType(context.Background(), tx, "agent_events", "document_id")
+	if err != nil {
 		return err
 	}
 	for _, event := range s.state.AgentEvents {
+		documentID := any(strings.TrimSpace(event.DocumentID))
+		if documentIDColumnType == "uuid" {
+			documentID = uuidStringOrNil(event.DocumentID)
+		}
 		if _, err := tx.Exec(
 			`INSERT INTO agent_events (
 				workspace_id, id, agent_id, agent_handle, type, box, status, document_id,
@@ -1418,7 +1445,7 @@ func (s *Store) replaceAgentEventsPostgresLocked(tx *sql.Tx) error {
 			event.Type,
 			normalizeInboxBox(event.Box),
 			event.Status,
-			event.DocumentID,
+			documentID,
 			uuidStringOrNil(event.ThreadID),
 			uuidStringOrNil(event.ThreadMessageID),
 			event.FromUpdateID,
@@ -1477,7 +1504,7 @@ func claimAgentEventPostgres(db *sql.DB, workspaceID string, agentID string, age
 		  FROM next
 		 WHERE agent_events.id = next.id
 			RETURNING agent_events.id::text, agent_events.agent_id::text, agent_events.agent_handle, agent_events.type,
-			          agent_events.box, agent_events.status, agent_events.document_id, COALESCE(agent_events.thread_id::text, ''),
+			          agent_events.box, agent_events.status, COALESCE(agent_events.document_id::text, ''), COALESCE(agent_events.thread_id::text, ''),
 			          COALESCE(agent_events.thread_message_id::text, ''), agent_events.from_update_id, agent_events.to_update_id, agent_events.summary,
 			          agent_events.prompt, agent_events.dedup_key,
 			          COALESCE(agent_events.claimed_by::text, ''), COALESCE(agent_events.run_id::text, ''), agent_events.last_error,
@@ -1529,7 +1556,7 @@ func updateAgentEventPostgres(db *sql.DB, workspaceID string, id string, req Upd
 		        updated_at = $5
 		  WHERE workspace_id = $7
 		    AND id = $8
-		RETURNING id::text, agent_id::text, agent_handle, type, box, status, document_id, COALESCE(thread_id::text, ''),
+		RETURNING id::text, agent_id::text, agent_handle, type, box, status, COALESCE(document_id::text, ''), COALESCE(thread_id::text, ''),
 		          COALESCE(thread_message_id::text, ''), from_update_id, to_update_id,
 		          summary, prompt, dedup_key, COALESCE(claimed_by::text, ''), COALESCE(run_id::text, ''), last_error, attempt_count,
 		          available_at, claimed_at, completed_at, created_at, updated_at`,
@@ -1559,7 +1586,7 @@ func updateAgentEventPostgres(db *sql.DB, workspaceID string, id string, req Upd
 }
 
 func (s *Store) replaceAgentDocumentViewsPostgresLocked(tx *sql.Tx) error {
-	if _, err := tx.Exec(`DELETE FROM agent_document_views WHERE workspace_id = $1`, s.state.WorkspaceID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM agent_document_views WHERE workspace_id::text = $1`, s.state.WorkspaceID); err != nil {
 		return err
 	}
 	for _, view := range s.state.AgentDocumentViews {
@@ -1626,9 +1653,9 @@ func completeDocumentInboxEventsPostgres(db *sql.DB, workspaceID string, agentID
 
 func (s *Store) loadAgentDocumentViewsPostgresLocked() error {
 	rows, err := s.db.Query(
-		`SELECT agent_id::text, document_id, update_id, state_vector, viewed_at
+		`SELECT agent_id::text, document_id::text, update_id, state_vector, viewed_at
 		   FROM agent_document_views
-		  WHERE workspace_id = $1`,
+		  WHERE workspace_id::text = $1`,
 		s.state.WorkspaceID,
 	)
 	if err != nil {
@@ -1656,7 +1683,7 @@ func documentContentAtUpdatePostgres(db *sql.DB, workspaceID string, document *D
 	err := db.QueryRow(
 		`SELECT update_id, crdt_state
 		   FROM document_checkpoints
-		  WHERE workspace_id = $1 AND document_id = $2 AND update_id <= $3
+		  WHERE workspace_id::text = $1 AND document_id::text = $2 AND update_id <= $3
 		  ORDER BY update_id DESC
 		  LIMIT 1`,
 		workspaceID,
@@ -1678,8 +1705,8 @@ func documentContentAtUpdatePostgres(db *sql.DB, workspaceID string, document *D
 	rows, err := db.Query(
 		`SELECT update
 		   FROM document_updates
-		  WHERE workspace_id = $1
-		    AND document_id = $2
+		  WHERE workspace_id::text = $1
+		    AND document_id::text = $2
 		    AND id > $3
 		    AND id <= $4
 		  ORDER BY id ASC`,
@@ -1709,23 +1736,23 @@ func documentContentAtUpdatePostgres(db *sql.DB, workspaceID string, document *D
 
 func (s *Store) ensurePostgresCheckpointsLocked() error {
 	rows, err := s.db.Query(
-		`SELECT d.id,
+		`SELECT d.id::text,
 		        d.client_id_seed,
 		        h.update_id,
 		        COALESCE(checkpoint.update_id, 0) AS checkpoint_update_id
 		   FROM documents d
 		   JOIN document_heads h
-		     ON h.workspace_id = d.workspace_id AND h.document_id = d.id
+		     ON h.workspace_id::text = d.workspace_id::text AND h.document_id::text = d.id::text
 		   LEFT JOIN LATERAL (
 		       SELECT update_id
 		         FROM document_checkpoints c
-		        WHERE c.workspace_id = d.workspace_id
-		          AND c.document_id = d.id
+		        WHERE c.workspace_id::text = d.workspace_id::text
+		          AND c.document_id::text = d.id::text
 		          AND c.update_id <= h.update_id
 		        ORDER BY c.update_id DESC
 		        LIMIT 1
 		   ) checkpoint ON TRUE
-		  WHERE d.workspace_id = $1
+		  WHERE d.workspace_id::text = $1
 		    AND h.update_id > 0
 		    AND (checkpoint.update_id IS NULL OR h.update_id - checkpoint.update_id > $2)
 		  ORDER BY d.id ASC`,
@@ -1784,7 +1811,7 @@ func (s *Store) insertPostgresCheckpointAtHeadTxLocked(tx *sql.Tx, documentID st
 	err := tx.QueryRow(
 		`SELECT update_id, crdt_state
 		   FROM document_checkpoints
-		  WHERE workspace_id = $1 AND document_id = $2 AND update_id <= $3
+		  WHERE workspace_id::text = $1 AND document_id::text = $2 AND update_id <= $3
 		  ORDER BY update_id DESC
 		  LIMIT 1`,
 		s.state.WorkspaceID,
@@ -1808,8 +1835,8 @@ func (s *Store) insertPostgresCheckpointAtHeadTxLocked(tx *sql.Tx, documentID st
 	rows, err := tx.Query(
 		`SELECT update
 		   FROM document_updates
-		  WHERE workspace_id = $1
-		    AND document_id = $2
+		  WHERE workspace_id::text = $1
+		    AND document_id::text = $2
 		    AND id > $3
 		    AND id <= $4
 		  ORDER BY id ASC`,
@@ -1871,7 +1898,7 @@ func (s *Store) loadUsersPostgresLocked() error {
 	rows, err := s.db.Query(
 		`SELECT id::text, handle, name, role, kind, status, created_at, updated_at
 		   FROM users
-		  WHERE workspace_id = $1`,
+		  WHERE workspace_id::text = $1`,
 		s.state.WorkspaceID,
 	)
 	if err != nil {
@@ -1902,7 +1929,7 @@ func (s *Store) loadDaemonsPostgresLocked() error {
 	rows, err := s.db.Query(
 		`SELECT id::text, workspace_id::text, name, status, daemon_version, os, arch, runtime_detections::text, last_seen_at, created_at, deleted_at
 		   FROM daemons
-		  WHERE workspace_id = $1
+		  WHERE workspace_id::text = $1
 		    AND status <> 'deleted'`,
 		s.state.WorkspaceID,
 	)
@@ -1948,7 +1975,7 @@ func (s *Store) loadAgentsPostgresLocked() error {
 		        current_task, current_activity, COALESCE(current_run_id::text, ''), last_heartbeat_at,
 		        last_run_completed, updated_at
 		   FROM agents
-		  WHERE workspace_id = $1`,
+		  WHERE workspace_id::text = $1`,
 		s.state.WorkspaceID,
 	)
 	if err != nil {
@@ -2002,7 +2029,7 @@ func (s *Store) loadAgentRunsPostgresLocked() error {
 		        launch_time, last_heartbeat_at, completed_at, exit_code, last_message,
 		        log_tail, error, assigned_task_ref, updated_at
 		   FROM agent_runs
-		  WHERE workspace_id = $1`,
+		  WHERE workspace_id::text = $1`,
 		s.state.WorkspaceID,
 	)
 	if err != nil {
@@ -2023,9 +2050,9 @@ func (s *Store) loadAgentRunsPostgresLocked() error {
 
 func (s *Store) loadPresencesPostgresLocked() error {
 	rows, err := s.db.Query(
-		`SELECT actor_id::text, actor_type, document_id, file_path, mode, selection_start, selection_end, activity, updated_at
+		`SELECT actor_id::text, actor_type, document_id::text, file_path, mode, selection_start, selection_end, activity, updated_at
 		   FROM presences
-		  WHERE workspace_id = $1`,
+		  WHERE workspace_id::text = $1`,
 		s.state.WorkspaceID,
 	)
 	if err != nil {
@@ -2058,14 +2085,14 @@ func (s *Store) loadPresencesPostgresLocked() error {
 
 func (s *Store) loadActivitiesPostgresLocked() error {
 	rows, err := s.db.Query(
-		`SELECT type, document_id, COALESCE(actor_id::text, ''), actor_type, summary, occurred_at,
+		`SELECT type, COALESCE(document_id::text, ''), COALESCE(actor_id::text, ''), actor_type, summary, occurred_at,
 		        COALESCE(provenance_actor_id::text, ''), provenance_actor_type, provenance_execution_id,
 		        provenance_tool, provenance_trigger, provenance_autonomous,
 		        provenance_confidence, provenance_requested_by, provenance_source,
 		        provenance_intended_scope, provenance_read_set_summary,
 		        presence_ref
 		   FROM activities
-		  WHERE workspace_id = $1
+		  WHERE workspace_id::text = $1
 		  ORDER BY occurred_at DESC, id DESC
 		  LIMIT 100`,
 		s.state.WorkspaceID,
@@ -2106,7 +2133,7 @@ func (s *Store) loadActivitiesPostgresLocked() error {
 
 func (s *Store) loadDocumentsPostgresLocked() error {
 	rows, err := s.db.Query(
-		`SELECT d.id,
+		`SELECT d.id::text,
 		        d.hidden,
 		        COALESCE(NULLIF(h.state_vector, ''), checkpoint.state_vector, '') AS state_vector,
 		        h.update_id,
@@ -2115,17 +2142,17 @@ func (s *Store) loadDocumentsPostgresLocked() error {
 		        d.create_client_operation_id
 		   FROM documents d
 		   JOIN document_heads h
-		     ON h.workspace_id = d.workspace_id AND h.document_id = d.id
+		     ON h.workspace_id::text = d.workspace_id::text AND h.document_id::text = d.id::text
 		   LEFT JOIN LATERAL (
 		       SELECT state_vector
 		         FROM document_checkpoints c
-		        WHERE c.workspace_id = d.workspace_id
-		          AND c.document_id = d.id
+		        WHERE c.workspace_id::text = d.workspace_id::text
+		          AND c.document_id::text = d.id::text
 		          AND c.update_id <= h.update_id
 		        ORDER BY c.update_id DESC
 		        LIMIT 1
 		   ) checkpoint ON TRUE
-		  WHERE d.workspace_id = $1
+		  WHERE d.workspace_id::text = $1
 		  ORDER BY d.id ASC`,
 		s.state.WorkspaceID,
 	)
@@ -2162,7 +2189,7 @@ func (s *Store) restoreDocumentDocPostgresLocked(document *Document) (*crdt.Doc,
 	err := s.db.QueryRow(
 		`SELECT update_id, crdt_state
 		   FROM document_checkpoints
-		  WHERE workspace_id = $1 AND document_id = $2 AND update_id <= $3
+		  WHERE workspace_id::text = $1 AND document_id::text = $2 AND update_id <= $3
 		  ORDER BY update_id DESC
 		  LIMIT 1`,
 		s.state.WorkspaceID,
@@ -2191,8 +2218,8 @@ func (s *Store) restoreDocumentDocPostgresLocked(document *Document) (*crdt.Doc,
 	updateRows, err := s.db.Query(
 		`SELECT update
 		   FROM document_updates
-		  WHERE workspace_id = $1
-		    AND document_id = $2
+		  WHERE workspace_id::text = $1
+		    AND document_id::text = $2
 		    AND id > $3
 		    AND id <= $4
 		  ORDER BY id ASC`,
@@ -2222,11 +2249,11 @@ func (s *Store) restoreDocumentDocPostgresLocked(document *Document) (*crdt.Doc,
 
 func (s *Store) loadThreadsPostgresLocked() error {
 	rows, err := s.db.Query(
-		`SELECT id::text, document_id, client_operation_id, title, status, anchor_relative_start, anchor_relative_end,
+		`SELECT id::text, document_id::text, client_operation_id, title, status, anchor_relative_start, anchor_relative_end,
 		        anchor_kind, anchor_excerpt, created_by_id::text, created_by_type,
 		        created_by_handle, created_by_name, created_at, updated_at
 		   FROM threads
-		  WHERE workspace_id = $1`,
+		  WHERE workspace_id::text = $1`,
 		s.state.WorkspaceID,
 	)
 	if err != nil {
@@ -2248,7 +2275,7 @@ func (s *Store) loadThreadsPostgresLocked() error {
 	participants, err := s.db.Query(
 		`SELECT thread_id::text, participant_id::text
 		   FROM thread_participants
-		  WHERE workspace_id = $1
+		  WHERE workspace_id::text = $1
 		  ORDER BY thread_id, participant_id`,
 		s.state.WorkspaceID,
 	)
@@ -2274,7 +2301,7 @@ func (s *Store) loadThreadsPostgresLocked() error {
 	messages, err := s.db.Query(
 		`SELECT id::text, thread_id::text, author_id::text, author_type, author_handle, author_name, body, kind, created_at
 		   FROM thread_messages
-		  WHERE workspace_id = $1
+		  WHERE workspace_id::text = $1
 		  ORDER BY created_at ASC, id ASC`,
 		s.state.WorkspaceID,
 	)
@@ -2298,12 +2325,12 @@ func (s *Store) loadThreadsPostgresLocked() error {
 
 func (s *Store) loadAgentEventsPostgresLocked() error {
 	rows, err := s.db.Query(
-		`SELECT id::text, agent_id::text, agent_handle, type, box, status, document_id, COALESCE(thread_id::text, ''),
+		`SELECT id::text, agent_id::text, agent_handle, type, box, status, COALESCE(document_id::text, ''), COALESCE(thread_id::text, ''),
 		        COALESCE(thread_message_id::text, ''), from_update_id, to_update_id,
 		        summary, prompt, dedup_key, COALESCE(claimed_by::text, ''), COALESCE(run_id::text, ''), last_error, attempt_count,
 		        available_at, claimed_at, completed_at, created_at, updated_at
 		   FROM agent_events
-		  WHERE workspace_id = $1`,
+		  WHERE workspace_id::text = $1`,
 		s.state.WorkspaceID,
 	)
 	if err != nil {

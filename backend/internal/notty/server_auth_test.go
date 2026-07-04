@@ -681,7 +681,7 @@ func TestCreateWorkspaceStoresIndependentRootDocumentID(t *testing.T) {
 	}
 
 	var storedRootID string
-	if err := server.sqlDB().QueryRow(`SELECT root_document_id FROM workspaces WHERE id = $1`, workspace.ID).Scan(&storedRootID); err != nil {
+	if err := server.sqlDB().QueryRow(`SELECT root_document_id::text FROM workspaces WHERE id = $1`, workspace.ID).Scan(&storedRootID); err != nil {
 		t.Fatalf("load stored root document ID: %v", err)
 	}
 	if storedRootID != workspace.RootDocumentID {
