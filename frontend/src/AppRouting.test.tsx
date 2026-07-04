@@ -457,7 +457,7 @@ describe("App URL routing", () => {
     render(<App />);
 
     await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_1"));
-    await user.click(screen.getByRole("button", { name: /people/i }));
+    await user.click(screen.getByRole("button", { name: /coworkers/i }));
     await user.click(screen.getByRole("button", { name: "Share" }));
 
     expect(await screen.findByDisplayValue(`${window.location.origin}/invite/created321`)).toBeTruthy();
@@ -468,7 +468,7 @@ describe("App URL routing", () => {
     render(<App />);
 
     await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_1"));
-    await user.click(screen.getByRole("button", { name: /people/i }));
+    await user.click(screen.getByRole("button", { name: /coworkers/i }));
     expect(screen.queryByRole("button", { name: "Share" })).toBeNull();
   });
 

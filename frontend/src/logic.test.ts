@@ -11,6 +11,7 @@ import {
   buildDaemonUninstallCommand,
   buildLineThreads,
   computeReplace,
+  coworkerCount,
   daemonStatus,
   encodeRelativeAnchor,
   handleMaxLength,
@@ -172,6 +173,45 @@ describe("presentation grouping", () => {
     expect(daemonStatus(daemon)).toBe("stale");
     expect(agentStatus(agent, [{ id: "run", agentId: "agent", agentHandle: "codex", agentName: "Codex", agentKind: "codex", workspaceRoot: "", workingDirectory: "", prompt: "", status: "running", desiredStatus: "running", updatedAt: "now" }])).toBe("working");
     expect(agentsByDaemon([agent], [daemon])[0].daemonName).toBe("Local");
+  });
+
+  it("counts humans and agents as coworkers", () => {
+    const workspace = {
+      ...baseWorkspace(),
+      users: [{ id: "user_1", handle: "ada", name: "Ada", role: "", kind: "human", status: "active", updatedAt: "now" }],
+      agents: [
+        {
+          id: "agent_1",
+          daemonId: "daemon_1",
+          handle: "codex",
+          name: "Codex",
+          role: "Review",
+          kind: "codex",
+          workspaceRoot: "agents/agent_1",
+          status: "idle",
+          currentTask: "",
+          currentActivity: "",
+          currentRunId: "",
+          updatedAt: "now",
+        },
+        {
+          id: "agent_2",
+          daemonId: "daemon_1",
+          handle: "scribe",
+          name: "Scribe",
+          role: "Draft",
+          kind: "codex",
+          workspaceRoot: "agents/agent_2",
+          status: "disconnected",
+          currentTask: "",
+          currentActivity: "",
+          currentRunId: "",
+          updatedAt: "now",
+        },
+      ],
+    };
+
+    expect(coworkerCount(workspace)).toBe(3);
   });
 });
 
