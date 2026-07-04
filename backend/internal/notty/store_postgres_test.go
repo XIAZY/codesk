@@ -141,7 +141,7 @@ func TestPostgresBackfillsBlankWorkspaceRootDocumentID(t *testing.T) {
 	database := newPostgresTestDatabase(t)
 	db := database.DB
 
-	workspaceID := "ws_legacy_root"
+	workspaceID := "11111111-1111-1111-1111-111111111111"
 	now := time.Now().UTC()
 	if _, err := db.Exec(
 		`INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at)
@@ -206,6 +206,7 @@ func TestPostgresLoadRegeneratesMissingCheckpointBeforeSync(t *testing.T) {
 		t.Fatalf("delete checkpoints: %v", err)
 	}
 	if _, err := db.Exec(`UPDATE document_heads SET state_vector = '' WHERE workspace_id = $1 AND document_id = $2`, workspace.WorkspaceID, documentID); err != nil {
+
 		t.Fatalf("clear head state vector: %v", err)
 	}
 
@@ -223,6 +224,7 @@ func TestPostgresLoadRegeneratesMissingCheckpointBeforeSync(t *testing.T) {
 
 	var checkpointCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2 AND update_id = $3`, workspace.WorkspaceID, documentID, reloadedDocument.UpdateID).Scan(&checkpointCount); err != nil {
+
 		t.Fatalf("count regenerated checkpoint: %v", err)
 	}
 	if checkpointCount != 1 {
@@ -334,12 +336,14 @@ func TestPostgresDocumentUpdatesPersistWithoutWorkspaceSnapshot(t *testing.T) {
 		t.Fatal("expected incremental document update bytes")
 	}
 	if got, err := documentContentAtUpdatePostgres(db, workspaceID, updated, updated.UpdateID); err != nil || got != "# after\n" {
+
 		t.Fatalf("unexpected reconstructed updated content: %q err=%v", got, err)
 	}
 
 	var headUpdateID int64
 	var headStateVector string
 	if err := db.QueryRow(`SELECT update_id, state_vector FROM document_heads WHERE workspace_id = $1 AND document_id = $2`, workspaceID, documentID).Scan(&headUpdateID, &headStateVector); err != nil {
+
 		t.Fatalf("query document head: %v", err)
 	}
 	if headUpdateID == 0 || headStateVector == "" {
@@ -349,6 +353,7 @@ func TestPostgresDocumentUpdatesPersistWithoutWorkspaceSnapshot(t *testing.T) {
 
 	var updateCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM document_updates WHERE workspace_id = $1 AND document_id = $2`, workspaceID, documentID).Scan(&updateCount); err != nil {
+
 		t.Fatalf("query document updates: %v", err)
 	}
 	if updateCount == 0 {
@@ -356,6 +361,7 @@ func TestPostgresDocumentUpdatesPersistWithoutWorkspaceSnapshot(t *testing.T) {
 	}
 	var checkpointCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2`, workspaceID, documentID).Scan(&checkpointCount); err != nil {
+
 		t.Fatalf("query document checkpoints: %v", err)
 	}
 	if checkpointCount == 0 {
@@ -385,6 +391,7 @@ func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testin
 		t.Fatalf("get document head: %v", err)
 	}
 	headContent, err := documentContentAtUpdatePostgres(db, workspaceID, head, head.UpdateID)
+
 	if err != nil {
 		t.Fatalf("reconstruct document head: %v", err)
 	}
@@ -396,6 +403,7 @@ func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testin
 		  ORDER BY update_id DESC
 		  LIMIT 1`,
 		workspaceID,
+
 		documentID,
 		head.UpdateID,
 	).Scan(&checkpointUpdateID); err != nil {
@@ -407,6 +415,7 @@ func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testin
 		   FROM document_updates
 		  WHERE workspace_id = $1 AND document_id = $2 AND id > $3 AND id <= $4`,
 		workspaceID,
+
 		documentID,
 		checkpointUpdateID,
 		head.UpdateID,
@@ -499,6 +508,7 @@ func TestPostgresApplyCRDTUpdateCreatesPeriodicCheckpointFromHistory(t *testing.
 		  ORDER BY update_id DESC
 		  LIMIT 1`,
 		workspaceID,
+
 		documentID,
 	).Scan(&latestCheckpointUpdateID); err != nil {
 		t.Fatalf("query latest checkpoint: %v", err)
@@ -556,11 +566,13 @@ func TestPostgresApplyCRDTUpdatePersistsWithoutWorkspaceSnapshot(t *testing.T) {
 		t.Fatalf("apply crdt update: %v", err)
 	}
 	if got, err := documentContentAtUpdatePostgres(db, workspaceID, updated, updated.UpdateID); err != nil || got != "# before\nmore\n" {
+
 		t.Fatalf("unexpected reconstructed updated content: %q err=%v", got, err)
 	}
 
 	var headUpdateID int64
 	if err := db.QueryRow(`SELECT update_id FROM document_heads WHERE workspace_id = $1 AND document_id = $2`, workspaceID, documentID).Scan(&headUpdateID); err != nil {
+
 		t.Fatalf("query document head: %v", err)
 	}
 	if headUpdateID == 0 {
@@ -570,6 +582,7 @@ func TestPostgresApplyCRDTUpdatePersistsWithoutWorkspaceSnapshot(t *testing.T) {
 
 	var updateCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM document_updates WHERE workspace_id = $1 AND document_id = $2`, workspaceID, documentID).Scan(&updateCount); err != nil {
+
 		t.Fatalf("query document updates: %v", err)
 	}
 	if updateCount == 0 {
@@ -760,6 +773,7 @@ func TestPostgresDiffDocumentReconstructsAcrossCheckpointsAfterReload(t *testing
 	}
 	finalVersion := final.UpdateID
 	finalContent, err := documentContentAtUpdatePostgres(db, workspaceID, final, finalVersion)
+
 	if err != nil {
 		t.Fatalf("reconstruct final document: %v", err)
 	}
@@ -783,6 +797,7 @@ func TestPostgresDiffDocumentReconstructsAcrossCheckpointsAfterReload(t *testing
 
 	var checkpointCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2`, workspaceID, documentID).Scan(&checkpointCount); err != nil {
+
 		t.Fatalf("count checkpoints: %v", err)
 	}
 	if checkpointCount < 2 {
@@ -914,7 +929,7 @@ func insertPostgresTestWorkspace(t *testing.T, database *Database, name string) 
 	now := time.Now().UTC()
 	suffix := strings.ReplaceAll(uuid.NewString(), "-", "")
 	workspace := &Workspace{
-		ID:             "ws_" + uuid.NewString(),
+		ID:             uuid.NewString(),
 		Slug:           "test-" + suffix,
 		Name:           strings.TrimSpace(name),
 		RootDocumentID: newRootDocumentID(),
@@ -953,7 +968,7 @@ func seedTestUser(t *testing.T, store *Store) *User {
 	t.Helper()
 	now := time.Now().UTC()
 	user := &User{
-		ID:        "user_" + uuid.NewString(),
+		ID:        uuid.NewString(),
 		Handle:    "owner",
 		Name:      "Test Owner",
 		Role:      "owner",
@@ -979,8 +994,8 @@ func seedStoreDaemonRuntime(t *testing.T, store *Store, daemonID string, runtime
 		t.Fatal("store is required")
 	}
 	daemonID = strings.TrimSpace(daemonID)
-	if daemonID == "" {
-		daemonID = "daemon_test"
+	if _, err := uuid.Parse(daemonID); err != nil {
+		daemonID = uuid.NewString()
 	}
 	now := time.Now().UTC()
 	store.mu.Lock()
@@ -1174,73 +1189,85 @@ func TestCreateAgentRequiresDaemon(t *testing.T) {
 }
 
 func TestLegacyScaffoldingRowsDeletedOnStartup(t *testing.T) {
-	database := newPostgresTestDatabase(t)
-	db := database.DB
+	dsn := postgresTestDSN(t)
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+	resetUUIDGroup1MigrationTables(t, db)
+	createLegacyUUIDGroup1Schema(t, db)
+
+	// Make last_accessed_workspace_id NOT NULL DEFAULT '' to match legacy production schema.
+	mustExec(t, db, `UPDATE accounts SET last_accessed_workspace_id = '' WHERE last_accessed_workspace_id IS NULL`)
+	mustExec(t, db, `ALTER TABLE accounts ALTER COLUMN last_accessed_workspace_id SET NOT NULL`)
+	mustExec(t, db, `ALTER TABLE accounts ALTER COLUMN last_accessed_workspace_id SET DEFAULT ''`)
+
 	now := time.Now().UTC()
+	realWS := "ws_" + uuid.NewString()
+	realAccount := "account_" + uuid.NewString()
+	realUser := "user_" + uuid.NewString()
 
-	// Insert a real workspace so daemon_local agents outside ws_notty are tested.
-	realWS := insertPostgresTestWorkspace(t, database, "Real Workspace")
+	mustExec(t, db, `INSERT INTO workspaces (id, slug, name, root_document_id) VALUES ($1, $2, $3, $4)`,
+		"ws_notty", "notty", "notty", "doc_root_ws_notty")
+	mustExec(t, db, `INSERT INTO workspaces (id, slug, name, root_document_id) VALUES ($1, $2, $3, $4)`,
+		realWS, "real", "Real Workspace", "doc_root_"+realWS)
+	mustExec(t, db, `INSERT INTO users (workspace_id, id, handle, name, role, kind, status) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		"ws_notty", "user_owner", "owner", "Workspace Owner", "owner", "human", "active")
+	mustExec(t, db, `INSERT INTO users (workspace_id, id, handle, name, role, kind, status) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		realWS, realUser, "dev", "Developer", "member", "human", "active")
+	mustExec(t, db, `INSERT INTO daemons (id, workspace_id, name, token_hash, status) VALUES ($1, $2, $3, $4, $5)`,
+		"daemon_local", "ws_notty", "Local daemon", "legacy_placeholder", "active")
+	mustExec(t, db, `INSERT INTO agents (workspace_id, id, daemon_id, handle, name, role, kind, status, current_task, current_activity) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		realWS, "agent_"+uuid.NewString(), "daemon_local", "legacy-bot", "Legacy Bot", "assistant", "codex", "idle", "", "")
+	mustExec(t, db, `INSERT INTO agent_runs (workspace_id, id, agent_id, agent_handle, agent_name, agent_kind, status, desired_status) VALUES ($1, $2, (SELECT id FROM agents WHERE workspace_id = $1 LIMIT 1), $3, $4, $5, $6, $7)`,
+		realWS, "run_"+uuid.NewString(), "legacy-bot", "Legacy Bot", "codex", "completed", "completed")
+	mustExec(t, db, `INSERT INTO accounts (id, email, display_name, password_hash, last_accessed_workspace_id, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		realAccount, "legacy@example.com", "Legacy", "hash", "ws_notty", now, now)
+	mustExec(t, db, `INSERT INTO workspace_members (workspace_id, account_id, user_id, membership_role, created_at) VALUES ($1, $2, $3, $4, $5)`,
+		realWS, realAccount, "user_owner", "member", now)
+	// Regression: user_owner leaked into polymorphic actor ref (document_updates) in real workspace.
+	mustExec(t, db, `INSERT INTO documents (workspace_id, id, path, title, client_id_seed) VALUES ($1, $2, $3, $4, $5)`,
+		realWS, "doc_"+uuid.NewString(), "test.md", "Test", int64(1))
+	mustExec(t, db, `INSERT INTO document_heads (workspace_id, document_id, state_vector, update_id) VALUES ($1, (SELECT id FROM documents WHERE workspace_id = $1 LIMIT 1), $2, $3)`,
+		realWS, "", int64(1))
+	mustExec(t, db, `INSERT INTO document_updates (workspace_id, document_id, update, actor_id, actor_type) VALUES ($1, (SELECT id FROM documents WHERE workspace_id = $1 LIMIT 1), $2, $3, $4)`,
+		realWS, []byte{0x01}, "user_owner", "human")
+	// Regression: user_owner leaked into union ref (thread_participants) in real workspace.
+	realThread := "thread_" + uuid.NewString()
+	mustExec(t, db, `INSERT INTO threads (workspace_id, id, document_id, created_by_id, created_by_type, title, status, created_by_handle, created_by_name) VALUES ($1, $2, (SELECT id FROM documents WHERE workspace_id = $1 LIMIT 1), $3, $4, $5, $6, $7, $8)`,
+		realWS, realThread, realUser, "human", "Test Thread", "open", "dev", "Developer")
+	mustExec(t, db, `INSERT INTO thread_participants (workspace_id, thread_id, participant_id) VALUES ($1, $2, $3)`,
+		realWS, realThread, "user_owner")
 
-	if _, err := db.Exec(
-		`INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6)`,
-		"ws_notty", "notty", "notty", "doc_root_ws_notty", now, now,
-	); err != nil {
-		t.Fatalf("insert legacy workspace: %v", err)
-	}
-	if _, err := db.Exec(
-		`INSERT INTO users (workspace_id, id, handle, name, role, kind, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		"ws_notty", "user_owner", "owner", "Workspace Owner", "test", "human", "active", now, now,
-	); err != nil {
-		t.Fatalf("insert legacy user_owner: %v", err)
-	}
-	if _, err := db.Exec(
-		`INSERT INTO workspace_members (workspace_id, account_id, user_id, membership_role, created_at) VALUES ($1, $2, $3, $4, $5)`,
-		realWS.ID, "acc_legacy_member", "user_owner", "member", now,
-	); err != nil {
-		t.Fatalf("insert legacy user_owner membership: %v", err)
-	}
-	if _, err := db.Exec(
-		`INSERT INTO daemons (workspace_id, id, name, token_hash, status, created_at) VALUES ($1, $2, $3, $4, $5, $6)`,
-		"ws_notty", "daemon_local", "Local daemon", "legacy_placeholder", "active", now,
-	); err != nil {
-		t.Fatalf("insert legacy daemon_local: %v", err)
-	}
-	// Agent in a real workspace that references daemon_local (the cascade target).
-	if _, err := db.Exec(
-		`INSERT INTO agents (workspace_id, id, daemon_id, handle, name, role, kind, system_prompt, workspace_root, status, current_task, current_activity, current_run_id, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
-		realWS.ID, "agent_legacy", "daemon_local", "legacy-bot", "Legacy Bot", "test", "codex", "", "agents/agent_legacy", "active", "", "", "", now,
-	); err != nil {
-		t.Fatalf("insert legacy daemon_local agent: %v", err)
-	}
-	if _, err := db.Exec(
-		`INSERT INTO agent_runs (workspace_id, id, agent_id, agent_handle, agent_name, agent_kind, system_prompt, workspace_root, working_dir, prompt, status, desired_status, last_message, error, assigned_task_ref, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
-		realWS.ID, "run_legacy", "agent_legacy", "legacy-bot", "Legacy Bot", "codex", "", "", "", "", "completed", "", "", "", "", now,
-	); err != nil {
-		t.Fatalf("insert legacy agent run: %v", err)
-	}
-	if _, err := db.Exec(
-		`INSERT INTO accounts (id, email, display_name, password_hash, created_at, updated_at, last_accessed_workspace_id) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		"acc_legacy", "legacy@example.com", "Legacy", "hash", now, now, "ws_notty",
-	); err != nil {
-		t.Fatalf("insert legacy account: %v", err)
+	if err := initPostgresSchema(db); err != nil {
+		t.Fatalf("legacy boot initPostgresSchema: %v", err)
 	}
 
-	if err := deleteLegacyScaffoldingRows(db); err != nil {
-		t.Fatalf("delete legacy rows: %v", err)
+	// Legacy scaffolding rows must be gone.
+	var wsCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workspaces WHERE id::text = 'ws_notty'`).Scan(&wsCount); err != nil {
+		t.Fatalf("check ws_notty: %v", err)
+	}
+	if wsCount != 0 {
+		t.Fatal("ws_notty should have been deleted by legacy cleanup")
 	}
 
-	var lastAccessed string
-	if err := db.QueryRow(`SELECT last_accessed_workspace_id FROM accounts WHERE id = 'acc_legacy'`).Scan(&lastAccessed); err != nil {
-		t.Fatalf("check account last_accessed: %v", err)
+	// Account's last_accessed_workspace_id should be cleared (not ws_notty).
+	var lastAccessed sql.NullString
+	if err := db.QueryRow(`SELECT last_accessed_workspace_id::text FROM accounts WHERE id::text LIKE $1`, "%"+strings.TrimPrefix(realAccount, "account_")+"%").Scan(&lastAccessed); err != nil {
+		t.Fatalf("check account: %v", err)
 	}
-	if lastAccessed != "" {
-		t.Fatalf("account last_accessed_workspace_id should be cleared, got %q", lastAccessed)
+	if lastAccessed.Valid && lastAccessed.String == "ws_notty" {
+		t.Fatal("account last_accessed_workspace_id should have been cleared")
 	}
 
-	// The terminal assertion already ran inside deleteLegacyScaffoldingRows;
-	// verify it's callable independently for re-runs.
+	// Surviving workspace should be migrated to native UUID.
+	assertColumnType(t, db, "workspaces", "id", "uuid")
+	assertColumnType(t, db, "users", "id", "uuid")
+	assertColumnType(t, db, "agents", "id", "uuid")
+
+	// Terminal scan should pass.
 	if err := assertNoLegacyScaffoldingRows(db); err != nil {
 		t.Fatalf("terminal legacy scan: %v", err)
 	}
