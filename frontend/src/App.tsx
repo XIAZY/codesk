@@ -17,6 +17,7 @@ import {
   identifierHelpText,
   identifierPattern,
   isMarkdownDocumentPath,
+  threadReplyLabel,
   workspaceSlugMaxLength,
   workspaceSlugMinLength,
   type LineThreadGroup,
@@ -2328,7 +2329,7 @@ function DocumentEditor({
                       <b>{thread.createdByHandle ? `@${thread.createdByHandle}` : thread.createdByName || "Someone"}</b>{" "}
                       {thread.messages[0]?.body || thread.title}
                     </div>
-                    <div className="tiny muted">{shortTime(thread.updatedAt)} · {thread.messages.length} replies</div>
+                    <div className="tiny muted">{shortTime(thread.updatedAt)} · {threadReplyLabel(thread)}</div>
                   </div>
                 </button>
               ))}
@@ -2395,7 +2396,7 @@ function ThreadsPanel({
                 <Icon name="back" />
               </button>
               <b>Thread</b>
-              <span className="chip sm">{selected.messages.length} replies</span>
+              <span className="chip sm">{threadReplyLabel(selected)}</span>
             </div>
             <div className="quoted-range">
               <div className="tiny mono muted">{selected.anchor.kind === "document" ? "document thread" : "anchored range"}</div>
@@ -2461,7 +2462,7 @@ function ThreadsPanel({
                 </span>
               </div>
               <div className="row gap-4 tiny muted">
-                <span>{thread.messages.length} replies</span>
+                <span>{threadReplyLabel(thread)}</span>
                 <span>·</span>
                 <span>{thread.anchor.kind === "document" ? "document" : "anchored"}</span>
               </div>
