@@ -21,11 +21,11 @@ const (
 	legacyRootDocumentTitle = "Workspace Root"
 )
 
-func legacyDocumentPathTitleForPersistence(workspaceID string, document *Document) (string, string) {
+func legacyDocumentPathTitleForPersistence(rootDocumentID string, document *Document) (string, string) {
 	if document == nil {
 		return "", ""
 	}
-	if document.ID == rootDocumentID(workspaceID) {
+	if document.ID == rootDocumentID {
 		return legacyRootDocumentPath, legacyRootDocumentTitle
 	}
 	return "", ""
@@ -38,10 +38,14 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			id TEXT PRIMARY KEY,
 			slug TEXT UNIQUE NOT NULL,
 			name TEXT NOT NULL,
+			root_document_id TEXT NOT NULL,
 			created_at TIMESTAMPTZ NOT NULL,
 			updated_at TIMESTAMPTZ NOT NULL
 		)
 		`,
+		`ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS root_document_id TEXT NOT NULL DEFAULT ''`,
+		`UPDATE workspaces SET root_document_id = 'doc_root_' || id WHERE root_document_id = ''`,
+		`ALTER TABLE workspaces ALTER COLUMN root_document_id DROP DEFAULT`,
 		`
 		CREATE TABLE IF NOT EXISTS accounts (
 			id TEXT PRIMARY KEY,
@@ -490,6 +494,38 @@ func (s *Store) loadNormalizedPostgresLocked() error {
 	return nil
 }
 
+func (s *Store) loadWorkspaceMetadataPostgresLocked() error {
+	var name string
+	var rootDocumentID string
+	err := s.db.QueryRow(
+		`SELECT name, root_document_id FROM workspaces WHERE id = $1`,
+		s.state.WorkspaceID,
+	).Scan(&name, &rootDocumentID)
+	if err == sql.ErrNoRows {
+		s.state.RootDocumentID = legacyRootDocumentID(s.state.WorkspaceID)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(name) != "" {
+		s.state.Name = name
+	}
+	rootDocumentID = strings.TrimSpace(rootDocumentID)
+	if rootDocumentID == "" {
+		rootDocumentID = legacyRootDocumentID(s.state.WorkspaceID)
+		if _, err := s.db.Exec(
+			`UPDATE workspaces SET root_document_id = $1 WHERE id = $2 AND root_document_id = ''`,
+			rootDocumentID,
+			s.state.WorkspaceID,
+		); err != nil {
+			return err
+		}
+	}
+	s.state.RootDocumentID = rootDocumentID
+	return nil
+}
+
 func (s *Store) persistPostgresLocked() error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -573,7 +609,7 @@ func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) error {
 		if document == nil {
 			continue
 		}
-		legacyPath, legacyTitle := legacyDocumentPathTitleForPersistence(s.state.WorkspaceID, document)
+		legacyPath, legacyTitle := legacyDocumentPathTitleForPersistence(s.state.RootDocumentID, document)
 		if _, err := tx.Exec(
 			`INSERT INTO documents (workspace_id, id, path, title, hidden, client_id_seed, create_client_operation_id, updated_at)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)

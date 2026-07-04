@@ -669,6 +669,45 @@ func TestRegisterAccountCreatesNoImplicitWorkspaceRows(t *testing.T) {
 	}
 }
 
+func TestCreateWorkspaceStoresIndependentRootDocumentID(t *testing.T) {
+	server, router := newAuthTestServer(t)
+
+	owner := authTestRegister(t, router, "root-id-owner@example.com", "owner-pass", "Root ID Owner")
+	workspace := authTestCreateWorkspace(t, router, owner.Token, "Root ID Tenant")
+	if workspace.RootDocumentID == "" {
+		t.Fatalf("expected workspace creation to return root document ID")
+	}
+	if legacy := legacyRootDocumentID(workspace.ID); workspace.RootDocumentID == legacy {
+		t.Fatalf("root document ID must be stored independently, got derived legacy ID %q", workspace.RootDocumentID)
+	}
+
+	var storedRootID string
+	if err := server.store.db.QueryRow(`SELECT root_document_id FROM workspaces WHERE id = $1`, workspace.ID).Scan(&storedRootID); err != nil {
+		t.Fatalf("load stored root document ID: %v", err)
+	}
+	if storedRootID != workspace.RootDocumentID {
+		t.Fatalf("stored root document ID = %q, want %q", storedRootID, workspace.RootDocumentID)
+	}
+
+	store, err := server.workspaceStore(workspace.ID)
+	if err != nil {
+		t.Fatalf("open workspace store: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+	snapshot := store.Snapshot()
+	if snapshot.RootDocumentID != workspace.RootDocumentID {
+		t.Fatalf("workspace store root document ID = %q, want %q", snapshot.RootDocumentID, workspace.RootDocumentID)
+	}
+	if !store.HasDocument(workspace.RootDocumentID) {
+		t.Fatalf("stored root document %q is not syncable", workspace.RootDocumentID)
+	}
+	if store.HasDocument(legacyRootDocumentID(workspace.ID)) {
+		t.Fatalf("workspace store created legacy derived root document %q", legacyRootDocumentID(workspace.ID))
+	}
+}
+
 func TestLastAccessedWorkspaceAndDocumentPersistPerAccountMembership(t *testing.T) {
 	router := newAuthTestRouter(t)
 
@@ -1702,8 +1741,9 @@ func TestWorkspaceAdminOnlyActionsRejectMembersAndAllowAdmins(t *testing.T) {
 }
 
 type authTestWorkspace struct {
-	ID          string
-	OwnerUserID string
+	ID             string
+	RootDocumentID string
+	OwnerUserID    string
 }
 
 type authTestEmailSender struct {
@@ -2098,7 +2138,7 @@ func authTestCreateWorkspace(t *testing.T, router http.Handler, token string, na
 	if response.Workspace.ID == "" || response.Member.UserID == "" {
 		t.Fatalf("expected workspace response, got %#v", response)
 	}
-	return authTestWorkspace{ID: response.Workspace.ID, OwnerUserID: response.Member.UserID}
+	return authTestWorkspace{ID: response.Workspace.ID, RootDocumentID: response.Workspace.RootDocumentID, OwnerUserID: response.Member.UserID}
 }
 
 func authTestIdentifierFromName(name string, maxLen int) string {
