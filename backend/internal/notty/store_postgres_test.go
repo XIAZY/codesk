@@ -1178,6 +1178,9 @@ func TestLegacyScaffoldingRowsDeletedOnStartup(t *testing.T) {
 	db := database.DB
 	now := time.Now().UTC()
 
+	// Insert a real workspace so daemon_local agents outside ws_notty are tested.
+	realWS := insertPostgresTestWorkspace(t, database, "Real Workspace")
+
 	if _, err := db.Exec(
 		`INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6)`,
 		"ws_notty", "notty", "notty", "doc_root_ws_notty", now, now,
@@ -1191,10 +1194,31 @@ func TestLegacyScaffoldingRowsDeletedOnStartup(t *testing.T) {
 		t.Fatalf("insert legacy user_owner: %v", err)
 	}
 	if _, err := db.Exec(
+		`INSERT INTO workspace_members (workspace_id, account_id, user_id, membership_role, created_at) VALUES ($1, $2, $3, $4, $5)`,
+		realWS.ID, "acc_legacy_member", "user_owner", "member", now,
+	); err != nil {
+		t.Fatalf("insert legacy user_owner membership: %v", err)
+	}
+	if _, err := db.Exec(
 		`INSERT INTO daemons (workspace_id, id, name, token_hash, status, created_at) VALUES ($1, $2, $3, $4, $5, $6)`,
 		"ws_notty", "daemon_local", "Local daemon", "legacy_placeholder", "active", now,
 	); err != nil {
 		t.Fatalf("insert legacy daemon_local: %v", err)
+	}
+	// Agent in a real workspace that references daemon_local (the cascade target).
+	if _, err := db.Exec(
+		`INSERT INTO agents (workspace_id, id, daemon_id, handle, name, role, kind, system_prompt, workspace_root, status, current_task, current_activity, current_run_id, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+		realWS.ID, "agent_legacy", "daemon_local", "legacy-bot", "Legacy Bot", "test", "codex", "", "agents/agent_legacy", "active", "", "", "", now,
+	); err != nil {
+		t.Fatalf("insert legacy daemon_local agent: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO agent_runs (workspace_id, id, agent_id, agent_handle, agent_name, agent_kind, system_prompt, workspace_root, working_dir, prompt, status, desired_status, last_message, error, assigned_task_ref, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+		realWS.ID, "run_legacy", "agent_legacy", "legacy-bot", "Legacy Bot", "codex", "", "", "", "", "completed", "", "", "", "", now,
+	); err != nil {
+		t.Fatalf("insert legacy agent run: %v", err)
 	}
 	if _, err := db.Exec(
 		`INSERT INTO accounts (id, email, display_name, password_hash, created_at, updated_at, last_accessed_workspace_id) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
@@ -1207,35 +1231,17 @@ func TestLegacyScaffoldingRowsDeletedOnStartup(t *testing.T) {
 		t.Fatalf("delete legacy rows: %v", err)
 	}
 
-	var workspaceCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM workspaces WHERE id = 'ws_notty'`).Scan(&workspaceCount); err != nil {
-		t.Fatalf("count ws_notty: %v", err)
-	}
-	if workspaceCount != 0 {
-		t.Fatalf("ws_notty workspace should be deleted, found %d rows", workspaceCount)
-	}
-
-	var userCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM users WHERE id = 'user_owner'`).Scan(&userCount); err != nil {
-		t.Fatalf("count user_owner: %v", err)
-	}
-	if userCount != 0 {
-		t.Fatalf("user_owner should be deleted, found %d rows", userCount)
-	}
-
-	var daemonCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM daemons WHERE id = 'daemon_local'`).Scan(&daemonCount); err != nil {
-		t.Fatalf("count daemon_local: %v", err)
-	}
-	if daemonCount != 0 {
-		t.Fatalf("daemon_local should be deleted, found %d rows", daemonCount)
-	}
-
 	var lastAccessed string
 	if err := db.QueryRow(`SELECT last_accessed_workspace_id FROM accounts WHERE id = 'acc_legacy'`).Scan(&lastAccessed); err != nil {
 		t.Fatalf("check account last_accessed: %v", err)
 	}
 	if lastAccessed != "" {
 		t.Fatalf("account last_accessed_workspace_id should be cleared, got %q", lastAccessed)
+	}
+
+	// The terminal assertion already ran inside deleteLegacyScaffoldingRows;
+	// verify it's callable independently for re-runs.
+	if err := assertNoLegacyScaffoldingRows(db); err != nil {
+		t.Fatalf("terminal legacy scan: %v", err)
 	}
 }
