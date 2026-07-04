@@ -89,13 +89,6 @@ func (s *Server) handleClaimAgentEvent(w http.ResponseWriter, r *http.Request) {
 			req.AgentID = auth.ActingAgentID
 		}
 	}
-	if strings.TrimSpace(req.ClaimedBy) == "" {
-		if auth, ok := authFromContext(r.Context()); ok {
-			if auth.PrincipalKind == "agent" || auth.PrincipalKind == "daemon" {
-				req.ClaimedBy = auth.PrincipalID
-			}
-		}
-	}
 	if !s.requireAgentEndpointAccess(w, r, req.AgentID) {
 		return
 	}

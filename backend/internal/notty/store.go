@@ -2,7 +2,6 @@ package notty
 
 import (
 	"bytes"
-	"context"
 	"database/sql"
 	"encoding/base64"
 	"errors"
@@ -65,11 +64,6 @@ type ApplyCRDTUpdateResult struct {
 	Applied  bool
 }
 
-const (
-	defaultWorkspaceID = "00000000-0000-0000-0000-000000000001"
-	defaultOwnerUserID = "00000000-0000-0000-0000-000000000002"
-)
-
 type principalRef struct {
 	UserID string
 	Handle string
@@ -78,14 +72,14 @@ type principalRef struct {
 }
 
 func NewStore(databaseURL string) (*Store, error) {
-	return NewStoreForWorkspace(databaseURL, defaultWorkspaceID, "notty")
+	return NewStoreForWorkspace(databaseURL, "ws_notty", "notty")
 }
 
 func NewStoreForWorkspace(databaseURL string, workspaceID string, workspaceName string) (*Store, error) {
 	store := &Store{}
 	store.workspaceID = strings.TrimSpace(workspaceID)
 	if store.workspaceID == "" {
-		store.workspaceID = defaultWorkspaceID
+		store.workspaceID = "ws_notty"
 	}
 	store.workspaceName = strings.TrimSpace(workspaceName)
 	if store.workspaceName == "" {
@@ -200,8 +194,8 @@ func (s *Store) ensureMaps() {
 	}
 	if len(s.state.Users) == 0 {
 		now := time.Now().UTC()
-		s.state.Users[defaultOwnerUserID] = &User{
-			ID:        defaultOwnerUserID,
+		s.state.Users["user_owner"] = &User{
+			ID:        "user_owner",
 			Handle:    "owner",
 			Name:      "Workspace Owner",
 			Role:      "Coordinates the shared workspace",
@@ -237,14 +231,14 @@ func cloneStringSet(values map[string]struct{}) map[string]struct{} {
 }
 
 func seedWorkspace() WorkspaceState {
-	return seedWorkspaceFor(defaultWorkspaceID, "notty")
+	return seedWorkspaceFor("ws_notty", "notty")
 }
 
 func seedWorkspaceFor(workspaceID string, workspaceName string) WorkspaceState {
 	now := time.Now().UTC()
 	workspaceID = strings.TrimSpace(workspaceID)
 	if workspaceID == "" {
-		workspaceID = defaultWorkspaceID
+		workspaceID = "ws_notty"
 	}
 	workspaceName = strings.TrimSpace(workspaceName)
 	if workspaceName == "" {
@@ -255,8 +249,8 @@ func seedWorkspaceFor(workspaceID string, workspaceName string) WorkspaceState {
 		Name:             workspaceName,
 		ContentDocuments: map[string]*Document{},
 		Users: map[string]*User{
-			defaultOwnerUserID: {
-				ID:        defaultOwnerUserID,
+			"user_owner": {
+				ID:        "user_owner",
 				Handle:    "owner",
 				Name:      "Workspace Owner",
 				Role:      "Coordinates the shared workspace",
@@ -286,7 +280,7 @@ func newRootDocumentID() string {
 func legacyRootDocumentID(workspaceID string) string {
 	workspaceID = strings.TrimSpace(workspaceID)
 	if workspaceID == "" {
-		workspaceID = defaultWorkspaceID
+		workspaceID = "ws_notty"
 	}
 	return "doc_root_" + workspaceID
 }
@@ -1139,7 +1133,7 @@ func (s *Store) CreateAgent(req CreateAgentRequest, meta OperationMeta) (*Agent,
 			}
 		}
 		if daemonID == "" && len(s.state.Daemons) == 0 {
-			daemonID = uuid.NewString()
+			daemonID = "daemon_local"
 			if s.state.Daemons[daemonID] == nil {
 				now := time.Now().UTC()
 				s.state.Daemons[daemonID] = &Daemon{
@@ -1173,7 +1167,7 @@ func (s *Store) CreateAgent(req CreateAgentRequest, meta OperationMeta) (*Agent,
 	if err := s.ensureHandleAvailableLocked(agent.Handle, "", ""); err != nil {
 		return nil, err
 	}
-	agent.ID = uuid.NewString()
+	agent.ID = "agent_" + uuid.NewString()
 	agent.DaemonID = daemonID
 	agent.WorkspaceRoot = "agents/" + agent.ID
 	agent.UpdatedAt = time.Now().UTC()
@@ -1303,7 +1297,7 @@ func (s *Store) StartAgentRun(req StartAgentRunRequest, meta OperationMeta) (*Ag
 	}
 	now := time.Now().UTC()
 	run := &AgentRun{
-		ID:              uuid.NewString(),
+		ID:              "run_" + uuid.NewString(),
 		AgentID:         agentID,
 		AgentHandle:     agent.Handle,
 		AgentName:       agent.Name,
@@ -1662,7 +1656,7 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 		return nil, nil, false, err
 	}
 	thread := &Thread{
-		ID:                uuid.NewString(),
+		ID:                "thread_" + uuid.NewString(),
 		DocumentID:        document.ID,
 		ClientOperationID: clientOperationID,
 		Title:             firstNonEmptyString(strings.TrimSpace(req.Title), inferThreadTitleFromRequest(document, req)),
@@ -1678,7 +1672,7 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 		UpdatedAt:         now,
 	}
 	message := &ThreadMessage{
-		ID:           uuid.NewString(),
+		ID:           "threadmsg_" + uuid.NewString(),
 		ThreadID:     thread.ID,
 		AuthorID:     author.ID,
 		AuthorType:   author.Type,
@@ -1739,7 +1733,7 @@ func (s *Store) ReplyThread(id string, req ReplyThreadRequest, meta OperationMet
 		kind = "comment"
 	}
 	message := &ThreadMessage{
-		ID:           uuid.NewString(),
+		ID:           "threadmsg_" + uuid.NewString(),
 		ThreadID:     thread.ID,
 		AuthorID:     author.ID,
 		AuthorType:   author.Type,
@@ -1781,26 +1775,7 @@ func (s *Store) ClaimAgentEvent(req ClaimAgentEventRequest) (*AgentEvent, error)
 		return nil, err
 	}
 	workspaceID := s.state.WorkspaceID
-	targetAgent := s.state.Agents[agentID]
-	if targetAgent == nil {
-		s.mu.Unlock()
-		return nil, ErrNotFound
-	}
-	claimedBy := strings.TrimSpace(req.ClaimedBy)
-	targetDaemonID := strings.TrimSpace(targetAgent.DaemonID)
-	switch claimedBy {
-	case "", "daemon", "system":
-		claimedBy = agentID
-	case agentID:
-	case targetDaemonID:
-		if targetDaemonID == "" || s.state.Daemons[targetDaemonID] == nil {
-			s.mu.Unlock()
-			return nil, errors.New("claimed_by must be the target agent or its daemon")
-		}
-	default:
-		s.mu.Unlock()
-		return nil, errors.New("claimed_by must be the target agent or its daemon")
-	}
+	claimedBy := stringsOr(req.ClaimedBy, "daemon")
 	s.mu.Unlock()
 	event, err := claimAgentEventPostgres(s.db, workspaceID, agentID, agentHandle, claimedBy)
 	if err != nil {
@@ -2042,10 +2017,7 @@ func isPostgresDSN(value string) bool {
 }
 
 func initPostgresSchema(db *sql.DB) error {
-	if err := initPostgresSchemaTables(db); err != nil {
-		return err
-	}
-	return RunUUIDGroup1Migration(context.Background(), db)
+	return initPostgresSchemaTables(db)
 }
 
 func normalizeDocumentPath(value string) (string, error) {
@@ -2718,7 +2690,7 @@ func (s *Store) upsertDocumentInboxEventLocked(agent *Agent, document *Document,
 		return
 	}
 	event := &AgentEvent{
-		ID:           uuid.NewString(),
+		ID:           "aevt_" + uuid.NewString(),
 		AgentID:      agent.ID,
 		AgentHandle:  agent.Handle,
 		Type:         "document.updated",
@@ -2830,7 +2802,7 @@ func (s *Store) ensureAgentEventLocked(agentID, agentHandle, eventType, dedupKey
 	}
 	now := time.Now().UTC()
 	event := &AgentEvent{
-		ID:          uuid.NewString(),
+		ID:          "aevt_" + uuid.NewString(),
 		AgentID:     agentID,
 		AgentHandle: agentHandle,
 		Type:        eventType,
