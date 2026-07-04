@@ -35,7 +35,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 	statements := []string{
 		`
 		CREATE TABLE IF NOT EXISTS workspaces (
-			id TEXT PRIMARY KEY,
+			id UUID PRIMARY KEY,
 			slug TEXT UNIQUE NOT NULL,
 			name TEXT NOT NULL,
 			root_document_id TEXT NOT NULL,
@@ -44,16 +44,16 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		)
 		`,
 		`ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS root_document_id TEXT NOT NULL DEFAULT ''`,
-		`UPDATE workspaces SET root_document_id = 'doc_root_' || id WHERE root_document_id = ''`,
+		`UPDATE workspaces SET root_document_id = 'doc_root_' || id::text WHERE root_document_id = ''`,
 		`ALTER TABLE workspaces ALTER COLUMN root_document_id DROP DEFAULT`,
 		`
 		CREATE TABLE IF NOT EXISTS accounts (
-			id TEXT PRIMARY KEY,
+			id UUID PRIMARY KEY,
 			email TEXT UNIQUE NOT NULL,
 			display_name TEXT NOT NULL,
 			password_hash TEXT NOT NULL,
 			email_verified BOOLEAN NOT NULL DEFAULT FALSE,
-			last_accessed_workspace_id TEXT NOT NULL DEFAULT '',
+			last_accessed_workspace_id UUID,
 			password_updated_at TIMESTAMPTZ,
 			created_at TIMESTAMPTZ NOT NULL,
 			updated_at TIMESTAMPTZ NOT NULL
@@ -61,12 +61,12 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		`,
 		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT TRUE`,
 		`ALTER TABLE accounts ALTER COLUMN email_verified SET DEFAULT FALSE`,
-		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_accessed_workspace_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_accessed_workspace_id UUID`,
 		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS password_updated_at TIMESTAMPTZ`,
 		`
 		CREATE TABLE IF NOT EXISTS account_email_tokens (
-			id TEXT PRIMARY KEY,
-			account_id TEXT NOT NULL,
+			id UUID PRIMARY KEY,
+			account_id UUID NOT NULL,
 			purpose TEXT NOT NULL,
 			token_hash TEXT UNIQUE NOT NULL,
 			expires_at TIMESTAMPTZ NOT NULL,
@@ -77,12 +77,12 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_account_email_tokens_account_purpose_created ON account_email_tokens (account_id, purpose, created_at DESC)`,
 		`
 		CREATE TABLE IF NOT EXISTS workspace_members (
-			workspace_id TEXT NOT NULL,
-			account_id TEXT NOT NULL,
-			user_id TEXT NOT NULL,
+			workspace_id UUID NOT NULL,
+			account_id UUID NOT NULL,
+			user_id UUID NOT NULL,
 			membership_role TEXT NOT NULL DEFAULT 'member',
 			status TEXT NOT NULL DEFAULT 'active',
-			invited_by TEXT NOT NULL DEFAULT '',
+			invited_by UUID,
 			last_accessed_document_id TEXT NOT NULL DEFAULT '',
 			created_at TIMESTAMPTZ NOT NULL,
 			accepted_at TIMESTAMPTZ,
@@ -93,10 +93,10 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_workspace_members_account ON workspace_members (account_id, status, workspace_id)`,
 		`
 		CREATE TABLE IF NOT EXISTS workspace_invites (
-			id TEXT PRIMARY KEY,
-			workspace_id TEXT NOT NULL,
+			id UUID PRIMARY KEY,
+			workspace_id UUID NOT NULL,
 			token_hash TEXT UNIQUE NOT NULL,
-			created_by_user_id TEXT NOT NULL,
+			created_by_user_id UUID NOT NULL,
 			expires_at TIMESTAMPTZ NOT NULL,
 			created_at TIMESTAMPTZ NOT NULL
 		)
@@ -104,8 +104,8 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_workspace_invites_workspace ON workspace_invites (workspace_id)`,
 		`
 		CREATE TABLE IF NOT EXISTS daemons (
-			id TEXT PRIMARY KEY,
-			workspace_id TEXT NOT NULL,
+			id UUID PRIMARY KEY,
+			workspace_id UUID NOT NULL,
 			name TEXT NOT NULL,
 			token_hash TEXT NOT NULL UNIQUE,
 			status TEXT NOT NULL DEFAULT 'active',
@@ -125,7 +125,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS runtime_detections JSONB NOT NULL DEFAULT '[]'::jsonb`,
 		`
 		CREATE TABLE IF NOT EXISTS documents (
-			workspace_id TEXT NOT NULL,
+			workspace_id UUID NOT NULL,
 			id TEXT PRIMARY KEY,
 			path TEXT NOT NULL,
 			title TEXT NOT NULL,
@@ -141,7 +141,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		`DROP INDEX IF EXISTS idx_documents_workspace_visible_path`,
 		`
 		CREATE TABLE IF NOT EXISTS document_heads (
-			workspace_id TEXT NOT NULL,
+			workspace_id UUID NOT NULL,
 			document_id TEXT PRIMARY KEY,
 			state_vector TEXT NOT NULL DEFAULT '',
 			update_id BIGINT NOT NULL DEFAULT 0,
@@ -153,34 +153,61 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		`
 		CREATE TABLE IF NOT EXISTS document_updates (
 			id BIGSERIAL PRIMARY KEY,
-			workspace_id TEXT NOT NULL,
+			workspace_id UUID NOT NULL,
 			document_id TEXT NOT NULL,
 			update BYTEA NOT NULL,
-			actor_id TEXT NOT NULL,
+			actor_id UUID,
 			actor_type TEXT NOT NULL,
 			created_at TIMESTAMPTZ NOT NULL
 		)
 		`,
 		`CREATE INDEX IF NOT EXISTS idx_document_updates_workspace_document_created ON document_updates (workspace_id, document_id, created_at ASC, id ASC)`,
 		`CREATE INDEX IF NOT EXISTS idx_document_updates_workspace_document_id ON document_updates (workspace_id, document_id, id ASC)`,
-		`
-		CREATE TABLE IF NOT EXISTS document_checkpoints (
-			id BIGSERIAL PRIMARY KEY,
-			workspace_id TEXT NOT NULL,
-			document_id TEXT NOT NULL,
-			update_id BIGINT NOT NULL,
-			crdt_state TEXT NOT NULL,
-			state_vector TEXT NOT NULL,
-			created_at TIMESTAMPTZ NOT NULL,
-			UNIQUE (workspace_id, document_id, update_id)
-		)
-		`,
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM information_schema.tables
+				 WHERE table_schema = 'public' AND table_name = 'document_checkpoints'
+			) THEN
+				IF EXISTS (
+					SELECT 1 FROM information_schema.columns
+					 WHERE table_schema = 'public'
+					   AND table_name = 'document_heads'
+					   AND column_name = 'workspace_id'
+					   AND data_type = 'text'
+				) THEN
+					EXECUTE '
+						CREATE TABLE document_checkpoints (
+							id BIGSERIAL PRIMARY KEY,
+							workspace_id TEXT NOT NULL,
+							document_id TEXT NOT NULL,
+							update_id BIGINT NOT NULL,
+							crdt_state TEXT NOT NULL,
+							state_vector TEXT NOT NULL,
+							created_at TIMESTAMPTZ NOT NULL,
+							UNIQUE (workspace_id, document_id, update_id)
+						)';
+				ELSE
+					EXECUTE '
+						CREATE TABLE document_checkpoints (
+							id BIGSERIAL PRIMARY KEY,
+							workspace_id UUID NOT NULL,
+							document_id TEXT NOT NULL,
+							update_id BIGINT NOT NULL,
+							crdt_state TEXT NOT NULL,
+							state_vector TEXT NOT NULL,
+							created_at TIMESTAMPTZ NOT NULL,
+							UNIQUE (workspace_id, document_id, update_id)
+						)';
+				END IF;
+			END IF;
+		END $$`,
 		`CREATE INDEX IF NOT EXISTS idx_document_checkpoints_workspace_document_update ON document_checkpoints (workspace_id, document_id, update_id DESC)`,
 		`UPDATE document_heads h
 		    SET update_id = COALESCE((
 			    SELECT MAX(u.id)
 			      FROM document_updates u
-			     WHERE u.workspace_id = h.workspace_id AND u.document_id = h.document_id
+			     WHERE u.workspace_id::text = h.workspace_id::text AND u.document_id = h.document_id
 		    ), 0)
 		  WHERE h.update_id = 0`,
 		`DO $$
@@ -221,8 +248,8 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		`DROP TABLE IF EXISTS document_mentions`,
 		`
 		CREATE TABLE IF NOT EXISTS users (
-			workspace_id TEXT NOT NULL,
-			id TEXT PRIMARY KEY,
+			workspace_id UUID NOT NULL,
+			id UUID PRIMARY KEY,
 			handle TEXT NOT NULL,
 			name TEXT NOT NULL,
 			role TEXT NOT NULL,
@@ -236,9 +263,9 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_workspace_handle ON users (workspace_id, handle)`,
 		`
 		CREATE TABLE IF NOT EXISTS agents (
-			workspace_id TEXT NOT NULL,
-			id TEXT PRIMARY KEY,
-			daemon_id TEXT NOT NULL DEFAULT '',
+			workspace_id UUID NOT NULL,
+			id UUID PRIMARY KEY,
+			daemon_id UUID,
 			handle TEXT NOT NULL,
 			name TEXT NOT NULL,
 			role TEXT NOT NULL,
@@ -250,21 +277,21 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			status TEXT NOT NULL,
 			current_task TEXT NOT NULL,
 			current_activity TEXT NOT NULL,
-			current_run_id TEXT NOT NULL,
+			current_run_id UUID,
 			last_heartbeat_at TIMESTAMPTZ,
 			last_run_completed TIMESTAMPTZ,
 			updated_at TIMESTAMPTZ NOT NULL
 		)
 		`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_workspace_handle ON agents (workspace_id, handle)`,
-		`ALTER TABLE agents ADD COLUMN IF NOT EXISTS daemon_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE agents ADD COLUMN IF NOT EXISTS daemon_id UUID`,
 		`ALTER TABLE agents DROP COLUMN IF EXISTS codex_thread_id`,
 		`ALTER TABLE agents ADD COLUMN IF NOT EXISTS current_turn_id TEXT NOT NULL DEFAULT ''`,
 		`
 		CREATE TABLE IF NOT EXISTS agent_runs (
-			workspace_id TEXT NOT NULL,
-			id TEXT PRIMARY KEY,
-			agent_id TEXT NOT NULL,
+			workspace_id UUID NOT NULL,
+			id UUID PRIMARY KEY,
+			agent_id UUID NOT NULL,
 			agent_handle TEXT NOT NULL,
 			agent_name TEXT NOT NULL,
 			agent_kind TEXT NOT NULL,
@@ -292,8 +319,8 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		`ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT ''`,
 		`
 		CREATE TABLE IF NOT EXISTS threads (
-			workspace_id TEXT NOT NULL,
-			id TEXT PRIMARY KEY,
+			workspace_id UUID NOT NULL,
+			id UUID PRIMARY KEY,
 			document_id TEXT NOT NULL,
 			client_operation_id TEXT NOT NULL DEFAULT '',
 			title TEXT NOT NULL,
@@ -302,7 +329,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			anchor_relative_end TEXT NOT NULL DEFAULT '',
 			anchor_kind TEXT NOT NULL DEFAULT '',
 			anchor_excerpt TEXT NOT NULL DEFAULT '',
-			created_by_id TEXT NOT NULL,
+			created_by_id UUID NOT NULL,
 			created_by_type TEXT NOT NULL,
 			created_by_handle TEXT NOT NULL,
 			created_by_name TEXT NOT NULL,
@@ -324,10 +351,10 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		`ALTER TABLE threads ADD COLUMN IF NOT EXISTS anchor_excerpt TEXT NOT NULL DEFAULT ''`,
 		`
 		CREATE TABLE IF NOT EXISTS thread_messages (
-			workspace_id TEXT NOT NULL,
-			id TEXT PRIMARY KEY,
-			thread_id TEXT NOT NULL,
-			author_id TEXT NOT NULL,
+			workspace_id UUID NOT NULL,
+			id UUID PRIMARY KEY,
+			thread_id UUID NOT NULL,
+			author_id UUID NOT NULL,
 			author_type TEXT NOT NULL,
 			author_handle TEXT NOT NULL,
 			author_name TEXT NOT NULL,
@@ -339,16 +366,16 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_thread_messages_workspace_thread_created ON thread_messages (workspace_id, thread_id, created_at ASC)`,
 		`
 		CREATE TABLE IF NOT EXISTS thread_participants (
-			workspace_id TEXT NOT NULL,
-			thread_id TEXT NOT NULL,
-			participant_id TEXT NOT NULL,
+			workspace_id UUID NOT NULL,
+			thread_id UUID NOT NULL,
+			participant_id UUID NOT NULL,
 			PRIMARY KEY (workspace_id, thread_id, participant_id)
 		)
 		`,
 		`
 		CREATE TABLE IF NOT EXISTS presences (
-			workspace_id TEXT NOT NULL,
-			actor_id TEXT NOT NULL,
+			workspace_id UUID NOT NULL,
+			actor_id UUID NOT NULL,
 			actor_type TEXT NOT NULL,
 			document_id TEXT NOT NULL,
 			file_path TEXT NOT NULL,
@@ -364,14 +391,14 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		`
 			CREATE TABLE IF NOT EXISTS activities (
 			id BIGSERIAL PRIMARY KEY,
-			workspace_id TEXT NOT NULL,
+			workspace_id UUID NOT NULL,
 			type TEXT NOT NULL,
 			document_id TEXT NOT NULL,
-			actor_id TEXT NOT NULL,
+			actor_id UUID,
 			actor_type TEXT NOT NULL,
 			summary TEXT NOT NULL,
 			occurred_at TIMESTAMPTZ NOT NULL,
-			provenance_actor_id TEXT NOT NULL,
+			provenance_actor_id UUID,
 			provenance_actor_type TEXT NOT NULL,
 			provenance_execution_id TEXT NOT NULL,
 			provenance_tool TEXT NOT NULL,
@@ -392,23 +419,23 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		`ALTER TABLE activities DROP COLUMN IF EXISTS new_content`,
 		`
 		CREATE TABLE IF NOT EXISTS agent_events (
-			workspace_id TEXT NOT NULL,
-			id TEXT PRIMARY KEY,
-			agent_id TEXT NOT NULL,
+			workspace_id UUID NOT NULL,
+			id UUID PRIMARY KEY,
+			agent_id UUID NOT NULL,
 			agent_handle TEXT NOT NULL,
 			type TEXT NOT NULL,
 			box TEXT NOT NULL DEFAULT 'for_me',
 			status TEXT NOT NULL,
 			document_id TEXT NOT NULL,
-			thread_id TEXT NOT NULL,
-			thread_message_id TEXT NOT NULL,
+			thread_id UUID,
+			thread_message_id UUID,
 			from_update_id BIGINT NOT NULL DEFAULT 0,
 			to_update_id BIGINT NOT NULL DEFAULT 0,
 			summary TEXT NOT NULL,
 			prompt TEXT NOT NULL,
 			dedup_key TEXT NOT NULL,
-			claimed_by TEXT NOT NULL,
-			run_id TEXT NOT NULL,
+			claimed_by UUID,
+			run_id UUID,
 			last_error TEXT NOT NULL,
 			attempt_count INTEGER NOT NULL,
 			available_at TIMESTAMPTZ NOT NULL,
@@ -427,8 +454,8 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_agent_events_workspace_agent_box_status ON agent_events (workspace_id, agent_id, box, status, created_at)`,
 		`
 		CREATE TABLE IF NOT EXISTS agent_document_views (
-			workspace_id TEXT NOT NULL,
-			agent_id TEXT NOT NULL,
+			workspace_id UUID NOT NULL,
+			agent_id UUID NOT NULL,
 			document_id TEXT NOT NULL,
 			update_id BIGINT NOT NULL,
 			state_vector TEXT NOT NULL,
@@ -643,7 +670,7 @@ func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) error {
 			s.state.WorkspaceID,
 			event.DocumentID,
 			event.Update,
-			event.ActorID,
+			actorUUIDOrNil(event.ActorID, event.ActorType),
 			event.ActorType,
 			event.CreatedAt,
 		).Scan(&updateID); err != nil {
@@ -820,7 +847,7 @@ func upsertAgentPostgres(db *sql.DB, workspaceID string, agent *Agent) error {
 		              updated_at = EXCLUDED.updated_at`,
 		workspaceID,
 		agent.ID,
-		agent.DaemonID,
+		uuidStringOrNil(agent.DaemonID),
 		agent.Handle,
 		agent.Name,
 		agent.Role,
@@ -832,7 +859,7 @@ func upsertAgentPostgres(db *sql.DB, workspaceID string, agent *Agent) error {
 		agent.Status,
 		agent.CurrentTask,
 		agent.CurrentActivity,
-		agent.CurrentRunID,
+		uuidStringOrNil(agent.CurrentRunID),
 		nullTime(agent.LastHeartbeatAt),
 		nullTime(agent.LastRunCompleted),
 		agent.UpdatedAt,
@@ -856,7 +883,7 @@ func insertAgentPostgres(tx *sql.Tx, workspaceID string, agent *Agent) error {
 		)`,
 		workspaceID,
 		agent.ID,
-		agent.DaemonID,
+		uuidStringOrNil(agent.DaemonID),
 		agent.Handle,
 		agent.Name,
 		agent.Role,
@@ -868,7 +895,7 @@ func insertAgentPostgres(tx *sql.Tx, workspaceID string, agent *Agent) error {
 		agent.Status,
 		agent.CurrentTask,
 		agent.CurrentActivity,
-		agent.CurrentRunID,
+		uuidStringOrNil(agent.CurrentRunID),
 		nullTime(agent.LastHeartbeatAt),
 		nullTime(agent.LastRunCompleted),
 		agent.UpdatedAt,
@@ -1027,11 +1054,11 @@ func (s *Store) replaceActivitiesPostgresLocked(tx *sql.Tx) error {
 			s.state.WorkspaceID,
 			activity.Type,
 			activity.DocumentID,
-			activity.ActorID,
+			actorUUIDOrNil(activity.ActorID, activity.ActorType),
 			activity.ActorType,
 			activity.Summary,
 			activity.OccurredAt,
-			activity.Provenance.ActorID,
+			actorUUIDOrNil(activity.Provenance.ActorID, activity.Provenance.ActorType),
 			activity.Provenance.ActorType,
 			activity.Provenance.ExecutionID,
 			activity.Provenance.Tool,
@@ -1155,15 +1182,15 @@ func (s *Store) replaceAgentEventsPostgresLocked(tx *sql.Tx) error {
 			normalizeInboxBox(event.Box),
 			event.Status,
 			event.DocumentID,
-			event.ThreadID,
-			event.ThreadMessageID,
+			uuidStringOrNil(event.ThreadID),
+			uuidStringOrNil(event.ThreadMessageID),
 			event.FromUpdateID,
 			event.ToUpdateID,
 			event.Summary,
 			event.Prompt,
 			event.DedupKey,
-			event.ClaimedBy,
-			event.RunID,
+			uuidStringOrNil(event.ClaimedBy),
+			uuidStringOrNil(event.RunID),
 			event.LastError,
 			event.AttemptCount,
 			event.AvailableAt,
@@ -1212,11 +1239,11 @@ func claimAgentEventPostgres(db *sql.DB, workspaceID string, agentID string, age
 		       updated_at = $3
 		  FROM next
 		 WHERE agent_events.id = next.id
-			RETURNING agent_events.id, agent_events.agent_id, agent_events.agent_handle, agent_events.type,
-			          agent_events.box, agent_events.status, agent_events.document_id, agent_events.thread_id,
-			          agent_events.thread_message_id, agent_events.from_update_id, agent_events.to_update_id, agent_events.summary,
+			RETURNING agent_events.id::text, agent_events.agent_id::text, agent_events.agent_handle, agent_events.type,
+			          agent_events.box, agent_events.status, agent_events.document_id, COALESCE(agent_events.thread_id::text, ''),
+			          COALESCE(agent_events.thread_message_id::text, ''), agent_events.from_update_id, agent_events.to_update_id, agent_events.summary,
 			          agent_events.prompt, agent_events.dedup_key,
-			          agent_events.claimed_by, agent_events.run_id, agent_events.last_error,
+			          COALESCE(agent_events.claimed_by::text, ''), COALESCE(agent_events.run_id::text, ''), agent_events.last_error,
 			          agent_events.attempt_count, agent_events.available_at, agent_events.claimed_at,
 			          agent_events.completed_at, agent_events.created_at, agent_events.updated_at`,
 		workspaceID,
@@ -1224,7 +1251,7 @@ func claimAgentEventPostgres(db *sql.DB, workspaceID string, agentID string, age
 		now,
 		now.Add(-30*time.Second),
 		agentHandle,
-		claimedBy,
+		uuidStringOrNil(claimedBy),
 	)
 	event, scanErr := scanAgentEvent(row)
 	if scanErr != nil {
@@ -1257,17 +1284,17 @@ func updateAgentEventPostgres(db *sql.DB, workspaceID string, id string, req Upd
 	row := tx.QueryRow(
 		`UPDATE agent_events
 		    SET status = CASE WHEN $1 <> '' THEN $1 ELSE status END,
-		        thread_id = CASE WHEN $2 <> '' THEN $2 ELSE thread_id END,
-		        run_id = CASE WHEN $3 <> '' THEN $3 ELSE run_id END,
+		        thread_id = COALESCE(NULLIF($2, '')::uuid, thread_id),
+		        run_id = COALESCE(NULLIF($3, '')::uuid, run_id),
 		        last_error = CASE WHEN $4 <> '' THEN $4 ELSE last_error END,
 		        completed_at = CASE WHEN $1 = 'completed' THEN $5 ELSE completed_at END,
 		        available_at = CASE WHEN $1 = 'pending' AND available_at < $5 THEN $6 ELSE available_at END,
 		        updated_at = $5
 		  WHERE workspace_id = $7
 		    AND id = $8
-		RETURNING id, agent_id, agent_handle, type, box, status, document_id, thread_id,
-		          thread_message_id, from_update_id, to_update_id,
-		          summary, prompt, dedup_key, claimed_by, run_id, last_error, attempt_count,
+		RETURNING id::text, agent_id::text, agent_handle, type, box, status, document_id, COALESCE(thread_id::text, ''),
+		          COALESCE(thread_message_id::text, ''), from_update_id, to_update_id,
+		          summary, prompt, dedup_key, COALESCE(claimed_by::text, ''), COALESCE(run_id::text, ''), last_error, attempt_count,
 		          available_at, claimed_at, completed_at, created_at, updated_at`,
 		strings.TrimSpace(req.Status),
 		strings.TrimSpace(req.ThreadID),
@@ -1362,7 +1389,7 @@ func completeDocumentInboxEventsPostgres(db *sql.DB, workspaceID string, agentID
 
 func (s *Store) loadAgentDocumentViewsPostgresLocked() error {
 	rows, err := s.db.Query(
-		`SELECT agent_id, document_id, update_id, state_vector, viewed_at
+		`SELECT agent_id::text, document_id, update_id, state_vector, viewed_at
 		   FROM agent_document_views
 		  WHERE workspace_id = $1`,
 		s.state.WorkspaceID,
@@ -1605,7 +1632,7 @@ func (s *Store) insertPostgresCheckpointAtHeadTxLocked(tx *sql.Tx, documentID st
 
 func (s *Store) loadUsersPostgresLocked() error {
 	rows, err := s.db.Query(
-		`SELECT id, handle, name, role, kind, status, created_at, updated_at
+		`SELECT id::text, handle, name, role, kind, status, created_at, updated_at
 		   FROM users
 		  WHERE workspace_id = $1`,
 		s.state.WorkspaceID,
@@ -1636,7 +1663,7 @@ func (s *Store) loadUsersPostgresLocked() error {
 
 func (s *Store) loadDaemonsPostgresLocked() error {
 	rows, err := s.db.Query(
-		`SELECT id, workspace_id, name, status, daemon_version, os, arch, runtime_detections::text, last_seen_at, created_at, deleted_at
+		`SELECT id::text, workspace_id::text, name, status, daemon_version, os, arch, runtime_detections::text, last_seen_at, created_at, deleted_at
 		   FROM daemons
 		  WHERE workspace_id = $1
 		    AND status <> 'deleted'`,
@@ -1679,9 +1706,9 @@ func (s *Store) loadDaemonsPostgresLocked() error {
 
 func (s *Store) loadAgentsPostgresLocked() error {
 	rows, err := s.db.Query(
-		`SELECT id, daemon_id, handle, name, role, kind, system_prompt, workspace_root,
+		`SELECT id::text, COALESCE(daemon_id::text, ''), handle, name, role, kind, system_prompt, workspace_root,
 		        current_turn_id, session_id, status,
-		        current_task, current_activity, current_run_id, last_heartbeat_at,
+		        current_task, current_activity, COALESCE(current_run_id::text, ''), last_heartbeat_at,
 		        last_run_completed, updated_at
 		   FROM agents
 		  WHERE workspace_id = $1`,
@@ -1733,7 +1760,7 @@ func (s *Store) loadAgentsPostgresLocked() error {
 
 func (s *Store) loadAgentRunsPostgresLocked() error {
 	rows, err := s.db.Query(
-		`SELECT id, agent_id, agent_handle, agent_name, agent_kind, system_prompt, session_id,
+		`SELECT id::text, agent_id::text, agent_handle, agent_name, agent_kind, system_prompt, session_id,
 		        workspace_root, working_dir, prompt, status, desired_status, process_id,
 		        launch_time, last_heartbeat_at, completed_at, exit_code, last_message,
 		        log_tail, error, assigned_task_ref, updated_at
@@ -1759,7 +1786,7 @@ func (s *Store) loadAgentRunsPostgresLocked() error {
 
 func (s *Store) loadPresencesPostgresLocked() error {
 	rows, err := s.db.Query(
-		`SELECT actor_id, actor_type, document_id, file_path, mode, selection_start, selection_end, activity, updated_at
+		`SELECT actor_id::text, actor_type, document_id, file_path, mode, selection_start, selection_end, activity, updated_at
 		   FROM presences
 		  WHERE workspace_id = $1`,
 		s.state.WorkspaceID,
@@ -1794,8 +1821,8 @@ func (s *Store) loadPresencesPostgresLocked() error {
 
 func (s *Store) loadActivitiesPostgresLocked() error {
 	rows, err := s.db.Query(
-		`SELECT type, document_id, actor_id, actor_type, summary, occurred_at,
-		        provenance_actor_id, provenance_actor_type, provenance_execution_id,
+		`SELECT type, document_id, COALESCE(actor_id::text, ''), actor_type, summary, occurred_at,
+		        COALESCE(provenance_actor_id::text, ''), provenance_actor_type, provenance_execution_id,
 		        provenance_tool, provenance_trigger, provenance_autonomous,
 		        provenance_confidence, provenance_requested_by, provenance_source,
 		        provenance_intended_scope, provenance_read_set_summary,
@@ -1958,8 +1985,8 @@ func (s *Store) restoreDocumentDocPostgresLocked(document *Document) (*crdt.Doc,
 
 func (s *Store) loadThreadsPostgresLocked() error {
 	rows, err := s.db.Query(
-		`SELECT id, document_id, client_operation_id, title, status, anchor_relative_start, anchor_relative_end,
-		        anchor_kind, anchor_excerpt, created_by_id, created_by_type,
+		`SELECT id::text, document_id, client_operation_id, title, status, anchor_relative_start, anchor_relative_end,
+		        anchor_kind, anchor_excerpt, created_by_id::text, created_by_type,
 		        created_by_handle, created_by_name, created_at, updated_at
 		   FROM threads
 		  WHERE workspace_id = $1`,
@@ -1982,7 +2009,7 @@ func (s *Store) loadThreadsPostgresLocked() error {
 	}
 
 	participants, err := s.db.Query(
-		`SELECT thread_id, participant_id
+		`SELECT thread_id::text, participant_id::text
 		   FROM thread_participants
 		  WHERE workspace_id = $1
 		  ORDER BY thread_id, participant_id`,
@@ -2008,7 +2035,7 @@ func (s *Store) loadThreadsPostgresLocked() error {
 	}
 
 	messages, err := s.db.Query(
-		`SELECT id, thread_id, author_id, author_type, author_handle, author_name, body, kind, created_at
+		`SELECT id::text, thread_id::text, author_id::text, author_type, author_handle, author_name, body, kind, created_at
 		   FROM thread_messages
 		  WHERE workspace_id = $1
 		  ORDER BY created_at ASC, id ASC`,
@@ -2034,9 +2061,9 @@ func (s *Store) loadThreadsPostgresLocked() error {
 
 func (s *Store) loadAgentEventsPostgresLocked() error {
 	rows, err := s.db.Query(
-		`SELECT id, agent_id, agent_handle, type, box, status, document_id, thread_id,
-		        thread_message_id, from_update_id, to_update_id,
-		        summary, prompt, dedup_key, claimed_by, run_id, last_error, attempt_count,
+		`SELECT id::text, agent_id::text, agent_handle, type, box, status, document_id, COALESCE(thread_id::text, ''),
+		        COALESCE(thread_message_id::text, ''), from_update_id, to_update_id,
+		        summary, prompt, dedup_key, COALESCE(claimed_by::text, ''), COALESCE(run_id::text, ''), last_error, attempt_count,
 		        available_at, claimed_at, completed_at, created_at, updated_at
 		   FROM agent_events
 		  WHERE workspace_id = $1`,

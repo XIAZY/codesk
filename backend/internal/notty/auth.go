@@ -226,17 +226,19 @@ func normalizeEmail(email string) string {
 
 func accountFromRow(row *sql.Row) (*Account, error) {
 	account := &Account{}
+	var lastAccessedWorkspaceID sql.NullString
 	if err := row.Scan(
 		&account.ID,
 		&account.Email,
 		&account.DisplayName,
 		&account.EmailVerified,
-		&account.LastAccessedWorkspaceID,
+		&lastAccessedWorkspaceID,
 		&account.CreatedAt,
 		&account.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
+	account.LastAccessedWorkspaceID = stringFromNull(lastAccessedWorkspaceID)
 	return account, nil
 }
 
@@ -258,7 +260,7 @@ func registerAccount(db *sql.DB, req RegisterRequest) (*Account, error) {
 	}
 	now := time.Now().UTC()
 	account := &Account{
-		ID:                      "account_" + uuid.NewString(),
+		ID:                      uuid.NewString(),
 		Email:                   email,
 		DisplayName:             displayName,
 		EmailVerified:           false,
@@ -274,7 +276,7 @@ func registerAccount(db *sql.DB, req RegisterRequest) (*Account, error) {
 		account.DisplayName,
 		passwordHash,
 		account.EmailVerified,
-		account.LastAccessedWorkspaceID,
+		uuidStringOrNil(account.LastAccessedWorkspaceID),
 		now,
 		now,
 		now,
@@ -293,7 +295,7 @@ func authenticateAccount(db *sql.DB, req LoginRequest) (*Account, error) {
 	var account Account
 	var passwordHash string
 	err := db.QueryRow(
-		`SELECT id, email, display_name, password_hash, email_verified, last_accessed_workspace_id, created_at, updated_at
+		`SELECT id::text, email, display_name, password_hash, email_verified, COALESCE(last_accessed_workspace_id::text, ''), created_at, updated_at
 		   FROM accounts
 		  WHERE email = $1`,
 		email,
@@ -320,8 +322,11 @@ func authenticateAccount(db *sql.DB, req LoginRequest) (*Account, error) {
 }
 
 func getAccountByID(db *sql.DB, accountID string) (*Account, error) {
+	if !isUUIDString(accountID) {
+		return nil, ErrNotFound
+	}
 	return accountFromRow(db.QueryRow(
-		`SELECT id, email, display_name, email_verified, last_accessed_workspace_id, created_at, updated_at FROM accounts WHERE id = $1`,
+		`SELECT id::text, email, display_name, email_verified, COALESCE(last_accessed_workspace_id::text, ''), created_at, updated_at FROM accounts WHERE id = $1`,
 		strings.TrimSpace(accountID),
 	))
 }
@@ -377,7 +382,7 @@ func createAccountEmailToken(db *sql.DB, accountID string, purpose string, ttl t
 	if _, err = tx.Exec(
 		`INSERT INTO account_email_tokens (id, account_id, purpose, token_hash, expires_at, created_at)
 		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		"account_email_token_"+uuid.NewString(),
+		uuid.NewString(),
 		accountID,
 		purpose,
 		tokenHash(token),
@@ -481,7 +486,7 @@ func consumeAccountEmailTokenTx(tx *sql.Tx, rawToken string, purpose string) (st
 	var expiresAt time.Time
 	var consumedAt sql.NullTime
 	err := tx.QueryRow(
-		`SELECT id, account_id, expires_at, consumed_at
+		`SELECT id::text, account_id::text, expires_at, consumed_at
 		   FROM account_email_tokens
 		  WHERE token_hash = $1 AND purpose = $2
 		  FOR UPDATE`,
@@ -526,7 +531,7 @@ func requestPasswordReset(db *sql.DB, account *Account, cooldown time.Duration) 
 
 func listWorkspacesForAccount(db *sql.DB, accountID string) ([]*Workspace, error) {
 	rows, err := db.Query(
-		`SELECT w.id, w.slug, w.name, w.root_document_id, m.last_accessed_document_id, w.created_at, w.updated_at
+		`SELECT w.id::text, w.slug, w.name, w.root_document_id, m.last_accessed_document_id, w.created_at, w.updated_at
 		   FROM workspaces w
 		   JOIN workspace_members m ON m.workspace_id = w.id
 		  WHERE m.account_id = $1 AND m.status = 'active'
@@ -599,9 +604,12 @@ func updateLastAccessedWorkspace(db *sql.DB, accountID string, workspaceID strin
 }
 
 func getWorkspace(db *sql.DB, workspaceID string) (*Workspace, error) {
+	if !isUUIDString(workspaceID) {
+		return nil, ErrNotFound
+	}
 	workspace := &Workspace{}
 	err := db.QueryRow(
-		`SELECT id, slug, name, root_document_id, created_at, updated_at FROM workspaces WHERE id = $1`,
+		`SELECT id::text, slug, name, root_document_id, created_at, updated_at FROM workspaces WHERE id = $1`,
 		strings.TrimSpace(workspaceID),
 	).Scan(&workspace.ID, &workspace.Slug, &workspace.Name, &workspace.RootDocumentID, &workspace.CreatedAt, &workspace.UpdatedAt)
 	if err == sql.ErrNoRows {
@@ -634,7 +642,7 @@ func createWorkspaceForAccount(db *sql.DB, account *Account, req CreateWorkspace
 	}
 	now := time.Now().UTC()
 	workspace := &Workspace{
-		ID:             "ws_" + uuid.NewString(),
+		ID:             uuid.NewString(),
 		Slug:           slug,
 		Name:           name,
 		RootDocumentID: newRootDocumentID(),
@@ -642,7 +650,7 @@ func createWorkspaceForAccount(db *sql.DB, account *Account, req CreateWorkspace
 		UpdatedAt:      now,
 	}
 	user := &User{
-		ID:        "user_" + uuid.NewString(),
+		ID:        uuid.NewString(),
 		Handle:    handle,
 		Name:      firstNonEmptyString(account.DisplayName, account.Email),
 		Role:      "Workspace owner",
@@ -690,7 +698,7 @@ func createWorkspaceForAccount(db *sql.DB, account *Account, req CreateWorkspace
 	if _, err = tx.Exec(
 		`INSERT INTO workspace_members (workspace_id, account_id, user_id, membership_role, status, invited_by, created_at, accepted_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		member.WorkspaceID, member.AccountID, member.UserID, member.MembershipRole, member.Status, member.InvitedBy, member.CreatedAt, member.AcceptedAt,
+		member.WorkspaceID, member.AccountID, member.UserID, member.MembershipRole, member.Status, uuidStringOrNil(member.InvitedBy), member.CreatedAt, member.AcceptedAt,
 	); err != nil {
 		return nil, nil, err
 	}
@@ -752,7 +760,7 @@ func addWorkspaceMember(db *sql.DB, workspaceID string, req AddWorkspaceMemberRe
 		role = "Workspace member"
 	}
 	user := &User{
-		ID:        "user_" + uuid.NewString(),
+		ID:        uuid.NewString(),
 		Handle:    handle,
 		Name:      name,
 		Role:      role,
@@ -796,7 +804,7 @@ func addWorkspaceMember(db *sql.DB, workspaceID string, req AddWorkspaceMemberRe
 	if _, err = tx.Exec(
 		`INSERT INTO workspace_members (workspace_id, account_id, user_id, membership_role, status, invited_by, created_at, accepted_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		member.WorkspaceID, member.AccountID, member.UserID, member.MembershipRole, member.Status, member.InvitedBy, member.CreatedAt, member.AcceptedAt,
+		member.WorkspaceID, member.AccountID, member.UserID, member.MembershipRole, member.Status, uuidStringOrNil(member.InvitedBy), member.CreatedAt, member.AcceptedAt,
 	); err != nil {
 		if isUniqueViolation(err) {
 			_ = tx.Rollback()
@@ -830,7 +838,7 @@ func createWorkspaceInvite(db *sql.DB, workspaceID string, createdByUserID strin
 	}
 	now := time.Now().UTC()
 	invite := &WorkspaceInvite{
-		ID:              "invite_" + uuid.NewString(),
+		ID:              uuid.NewString(),
 		WorkspaceID:     workspaceID,
 		CreatedByUserID: createdByUserID,
 		ExpiresAt:       now.Add(7 * 24 * time.Hour),
@@ -903,7 +911,7 @@ func acceptWorkspaceInvite(db *sql.DB, token string, accountID string, req Accep
 	var createdByUserID string
 	var expiresAt time.Time
 	err = tx.QueryRow(
-		`SELECT w.id, w.slug, w.name, w.created_at, w.updated_at, i.created_by_user_id, i.expires_at
+		`SELECT w.id::text, w.slug, w.name, w.created_at, w.updated_at, i.created_by_user_id::text, i.expires_at
 		   FROM workspace_invites i
 		   JOIN workspaces w ON w.id = i.workspace_id
 		  WHERE i.token_hash = $1
@@ -923,7 +931,7 @@ func acceptWorkspaceInvite(db *sql.DB, token string, accountID string, req Accep
 	var existingUserID string
 	var existingStatus string
 	err = tx.QueryRow(
-		`SELECT user_id, status
+		`SELECT user_id::text, status
 		   FROM workspace_members
 		  WHERE workspace_id = $1 AND account_id = $2
 		  FOR UPDATE`,
@@ -972,7 +980,7 @@ func acceptWorkspaceInvite(db *sql.DB, token string, accountID string, req Accep
 
 	var account Account
 	if err = tx.QueryRow(
-		`SELECT id, email, display_name, last_accessed_workspace_id, created_at, updated_at
+		`SELECT id::text, email, display_name, COALESCE(last_accessed_workspace_id::text, ''), created_at, updated_at
 		   FROM accounts
 		  WHERE id = $1`,
 		accountID,
@@ -984,7 +992,7 @@ func acceptWorkspaceInvite(db *sql.DB, token string, accountID string, req Accep
 	}
 
 	user := &User{
-		ID:        "user_" + uuid.NewString(),
+		ID:        uuid.NewString(),
 		Handle:    handle,
 		Name:      firstNonEmptyString(account.DisplayName, account.Email),
 		Role:      "Workspace member",
@@ -1006,7 +1014,7 @@ func acceptWorkspaceInvite(db *sql.DB, token string, accountID string, req Accep
 	if _, err = tx.Exec(
 		`INSERT INTO workspace_members (workspace_id, account_id, user_id, membership_role, status, invited_by, created_at, accepted_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		workspace.ID, accountID, user.ID, MembershipRoleMember, "active", strings.TrimSpace(createdByUserID), now, now,
+		workspace.ID, accountID, user.ID, MembershipRoleMember, "active", uuidStringOrNil(createdByUserID), now, now,
 	); err != nil {
 		if isUniqueViolation(err) {
 			return nil, errors.New("Account is already a workspace member.")
@@ -1055,7 +1063,7 @@ func reactivateWorkspaceInviteMemberTx(tx *sql.Tx, workspaceID string, accountID
 		        invited_by = $3,
 		        accepted_at = $4
 		  WHERE workspace_id = $5 AND account_id = $6`,
-		existingUserID, MembershipRoleMember, invitedBy, now, workspaceID, accountID,
+		existingUserID, MembershipRoleMember, uuidStringOrNil(invitedBy), now, workspaceID, accountID,
 	)
 	if err != nil {
 		return err
@@ -1112,7 +1120,7 @@ func isUniqueViolation(err error) bool {
 
 func getAccountByEmail(db *sql.DB, email string) (*Account, error) {
 	account, err := accountFromRow(db.QueryRow(
-		`SELECT id, email, display_name, email_verified, last_accessed_workspace_id, created_at, updated_at FROM accounts WHERE email = $1`,
+		`SELECT id::text, email, display_name, email_verified, COALESCE(last_accessed_workspace_id::text, ''), created_at, updated_at FROM accounts WHERE email = $1`,
 		normalizeEmail(email),
 	))
 	if err == sql.ErrNoRows {
@@ -1125,9 +1133,12 @@ func getAccountByEmail(db *sql.DB, email string) (*Account, error) {
 }
 
 func workspaceMemberForAccount(db *sql.DB, workspaceID string, accountID string) (*WorkspaceMember, error) {
+	if !isUUIDString(workspaceID) || !isUUIDString(accountID) {
+		return nil, ErrNotFound
+	}
 	member := &WorkspaceMember{}
 	err := db.QueryRow(
-		`SELECT m.workspace_id, m.account_id, m.user_id, u.handle, u.name, m.membership_role, m.status, m.invited_by, m.created_at, COALESCE(m.accepted_at, '0001-01-01T00:00:00Z'::timestamptz)
+		`SELECT m.workspace_id::text, m.account_id::text, m.user_id::text, u.handle, u.name, m.membership_role, m.status, COALESCE(m.invited_by::text, ''), m.created_at, COALESCE(m.accepted_at, '0001-01-01T00:00:00Z'::timestamptz)
 		   FROM workspace_members m
 		   JOIN users u ON u.workspace_id = m.workspace_id AND u.id = m.user_id
 		  WHERE m.workspace_id = $1 AND m.account_id = $2 AND m.status = 'active'`,
@@ -1145,7 +1156,7 @@ func workspaceMemberForAccount(db *sql.DB, workspaceID string, accountID string)
 
 func listWorkspaceMembers(db *sql.DB, workspaceID string) ([]*WorkspaceMember, error) {
 	rows, err := db.Query(
-		`SELECT m.workspace_id, m.account_id, m.user_id, u.handle, u.name, m.membership_role, m.status, m.invited_by, m.created_at, COALESCE(m.accepted_at, '0001-01-01T00:00:00Z'::timestamptz)
+		`SELECT m.workspace_id::text, m.account_id::text, m.user_id::text, u.handle, u.name, m.membership_role, m.status, COALESCE(m.invited_by::text, ''), m.created_at, COALESCE(m.accepted_at, '0001-01-01T00:00:00Z'::timestamptz)
 		   FROM workspace_members m
 		   JOIN users u ON u.workspace_id = m.workspace_id AND u.id = m.user_id
 		  WHERE m.workspace_id = $1
@@ -1180,7 +1191,7 @@ func createDaemon(db *sql.DB, workspaceID string, name string) (*Daemon, string,
 	}
 	now := time.Now().UTC()
 	daemon := &Daemon{
-		ID:          "daemon_" + uuid.NewString(),
+		ID:          uuid.NewString(),
 		WorkspaceID: workspaceID,
 		Name:        firstNonEmptyString(strings.TrimSpace(name), "Daemon"),
 		Status:      "active",
@@ -1214,7 +1225,7 @@ func createDaemonReinstallToken(db *sql.DB, workspaceID string, daemonID string)
 		    AND workspace_id = $3
 		    AND status = 'active'
 		    AND deleted_at IS NULL
-		  RETURNING id, workspace_id, name, status, daemon_version, os, arch, runtime_detections::text, COALESCE(last_seen_at, '0001-01-01T00:00:00Z'::timestamptz), created_at, COALESCE(deleted_at, '0001-01-01T00:00:00Z'::timestamptz)`,
+		  RETURNING id::text, workspace_id::text, name, status, daemon_version, os, arch, runtime_detections::text, COALESCE(last_seen_at, '0001-01-01T00:00:00Z'::timestamptz), created_at, COALESCE(deleted_at, '0001-01-01T00:00:00Z'::timestamptz)`,
 		tokenHash(token),
 		strings.TrimSpace(daemonID),
 		strings.TrimSpace(workspaceID),
@@ -1232,7 +1243,7 @@ func createDaemonReinstallToken(db *sql.DB, workspaceID string, daemonID string)
 func listDaemons(db *sql.DB, workspaceID string) ([]*Daemon, error) {
 	now := time.Now().UTC()
 	rows, err := db.Query(
-		`SELECT id, workspace_id, name, status, daemon_version, os, arch, runtime_detections::text, last_seen_at, created_at, deleted_at
+		`SELECT id::text, workspace_id::text, name, status, daemon_version, os, arch, runtime_detections::text, last_seen_at, created_at, deleted_at
 		   FROM daemons
 		  WHERE workspace_id = $1
 		    AND status <> 'deleted'
@@ -1315,7 +1326,7 @@ func updateDaemonStatus(db *sql.DB, workspaceID string, daemonID string, req Upd
 		    AND workspace_id = $7
 		    AND status = 'active'
 		    AND deleted_at IS NULL
-		  RETURNING id, workspace_id, name, status, daemon_version, os, arch, runtime_detections::text, COALESCE(last_seen_at, '0001-01-01T00:00:00Z'::timestamptz), created_at, COALESCE(deleted_at, '0001-01-01T00:00:00Z'::timestamptz)`,
+		  RETURNING id::text, workspace_id::text, name, status, daemon_version, os, arch, runtime_detections::text, COALESCE(last_seen_at, '0001-01-01T00:00:00Z'::timestamptz), created_at, COALESCE(deleted_at, '0001-01-01T00:00:00Z'::timestamptz)`,
 		now,
 		strings.TrimSpace(req.Version),
 		strings.TrimSpace(req.OS),
@@ -1353,7 +1364,7 @@ func deleteDaemon(db *sql.DB, workspaceID string, daemonID string) (*Daemon, err
 		  WHERE id = $2
 		    AND workspace_id = $3
 		    AND status <> 'deleted'
-		  RETURNING id, workspace_id, name, status, daemon_version, os, arch, runtime_detections::text, COALESCE(last_seen_at, '0001-01-01T00:00:00Z'::timestamptz), created_at, COALESCE(deleted_at, '0001-01-01T00:00:00Z'::timestamptz)`,
+		  RETURNING id::text, workspace_id::text, name, status, daemon_version, os, arch, runtime_detections::text, COALESCE(last_seen_at, '0001-01-01T00:00:00Z'::timestamptz), created_at, COALESCE(deleted_at, '0001-01-01T00:00:00Z'::timestamptz)`,
 		now,
 		strings.TrimSpace(daemonID),
 		strings.TrimSpace(workspaceID),
@@ -1369,7 +1380,7 @@ func deleteDaemon(db *sql.DB, workspaceID string, daemonID string) (*Daemon, err
 		    SET status = 'disconnected',
 		        current_activity = 'Daemon deleted',
 		        current_turn_id = '',
-		        current_run_id = '',
+		        current_run_id = NULL,
 		        updated_at = $1
 		  WHERE workspace_id = $2
 		    AND daemon_id = $3`,
@@ -1387,6 +1398,9 @@ func deleteDaemon(db *sql.DB, workspaceID string, daemonID string) (*Daemon, err
 }
 
 func authenticateDaemonToken(db *sql.DB, token string, workspaceID string) (*Daemon, error) {
+	if !isUUIDString(workspaceID) {
+		return nil, ErrNotFound
+	}
 	now := time.Now().UTC()
 	daemon := &Daemon{}
 	err := db.QueryRow(
@@ -1396,7 +1410,7 @@ func authenticateDaemonToken(db *sql.DB, token string, workspaceID string) (*Dae
 		    AND workspace_id = $3
 		    AND status = 'active'
 		    AND deleted_at IS NULL
-		  RETURNING id, workspace_id, name, status, daemon_version, os, arch, runtime_detections::text, COALESCE(last_seen_at, '0001-01-01T00:00:00Z'::timestamptz), created_at, COALESCE(deleted_at, '0001-01-01T00:00:00Z'::timestamptz)`,
+		  RETURNING id::text, workspace_id::text, name, status, daemon_version, os, arch, runtime_detections::text, COALESCE(last_seen_at, '0001-01-01T00:00:00Z'::timestamptz), created_at, COALESCE(deleted_at, '0001-01-01T00:00:00Z'::timestamptz)`,
 		now,
 		tokenHash(token),
 		workspaceID,
