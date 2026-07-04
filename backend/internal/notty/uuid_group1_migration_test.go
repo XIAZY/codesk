@@ -520,6 +520,45 @@ func TestUUIDGroup1MigrationPreservesPostgresAPIsAndCreatesBareUUIDs(t *testing.
 	}
 }
 
+func TestUUIDGroup1MigrationPreservesCrossEntityRefs(t *testing.T) {
+	dsn := postgresTestDSN(t)
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+	resetUUIDGroup1MigrationTables(t, db)
+	createLegacyUUIDGroup1Schema(t, db)
+	fixture := seedLegacyUUIDGroup1Graph(t, db)
+	old := fixture.old
+
+	// Seed additional cross-entity rows:
+	// 1. A second document_update by the agent (polymorphic: actor_type=agent).
+	mustExec(t, db, `INSERT INTO document_updates (workspace_id, document_id, update, actor_id, actor_type) VALUES ($1, $2, $3, $4, $5)`,
+		old["workspace"], fixture.documentID, []byte{0xaa}, old["agent"], "agent")
+	// 2. A third document_update by the user (polymorphic: actor_type=human).
+	mustExec(t, db, `INSERT INTO document_updates (workspace_id, document_id, update, actor_id, actor_type) VALUES ($1, $2, $3, $4, $5)`,
+		old["workspace"], fixture.documentID, []byte{0xbb}, old["user"], "human")
+	// 3. Agent-claimed event (union: claimed_by → daemons|agents).
+	mustExec(t, db, `UPDATE agent_events SET claimed_by = $1 WHERE id = $2`, old["agent"], old["event"])
+
+	if err := RunUUIDGroup1Migration(t.Context(), db); err != nil {
+		t.Fatalf("run migration: %v", err)
+	}
+
+	// Union: both user and agent thread participants must survive.
+	assertScalar(t, db, `SELECT COUNT(*) FROM thread_participants WHERE thread_id = $1::uuid`, int64(2), fixture.ids["thread"])
+	// Polymorphic: agent and human document_updates actors must survive with correct refs.
+	assertScalar(t, db, `SELECT actor_id::text FROM document_updates WHERE actor_type = 'agent'`, fixture.ids["agent"])
+	assertScalar(t, db, `SELECT actor_id::text FROM document_updates WHERE actor_type = 'human'`, fixture.ids["user"])
+	// Union: agent_events.claimed_by must point to the agent.
+	assertScalar(t, db, `SELECT claimed_by::text FROM agent_events WHERE id = $1::uuid`, fixture.ids["agent"], fixture.ids["event"])
+
+	if err := VerifyUUIDGroup1Deep(t.Context(), db); err != nil {
+		t.Fatalf("deep verify after migration: %v", err)
+	}
+}
+
 func TestInitPostgresSchemaMigratesLegacyDocumentHeadsIntoCheckpoints(t *testing.T) {
 	dsn := postgresTestDSN(t)
 	db, err := sql.Open("pgx", dsn)

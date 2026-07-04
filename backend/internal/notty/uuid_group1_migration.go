@@ -626,104 +626,174 @@ var disposableTables = map[string]bool{
 }
 
 func resolveOrphanedReferences(ctx context.Context, tx *sql.Tx) error {
-	resolveRef := func(table, column, entity string, nullable bool) error {
-		target := entityTable(entity)
-		if target == "" {
-			return nil
-		}
+	canResolve := func(table, column string) bool {
 		refType, err := columnDataType(ctx, tx, table, column)
+		if err != nil || refType == "uuid" {
+			return false
+		}
+		return true
+	}
+
+	typesMatch := func(table, column, targetTable string) bool {
+		refType, _ := columnDataType(ctx, tx, table, column)
+		targetType, _ := columnDataType(ctx, tx, targetTable, "id")
+		return refType == targetType
+	}
+
+	execResolve := func(query string, args ...any) (int64, error) {
+		result, err := tx.ExecContext(ctx, query, args...)
 		if err != nil {
-			return nil
+			return 0, err
 		}
-		if refType == "uuid" {
-			return nil
-		}
-		targetType, err := columnDataType(ctx, tx, target, "id")
-		if err != nil {
-			return nil
-		}
-		if targetType != refType {
-			return nil
-		}
-		if nullable {
-			result, err := tx.ExecContext(ctx, fmt.Sprintf(
-				`UPDATE %s AS t SET %s = ''
-				  WHERE t.%s <> ''
-				    AND NOT EXISTS (SELECT 1 FROM %s AS e WHERE e.id = t.%s)`,
-				quoteIdent(table), quoteIdent(column),
-				quoteIdent(column), quoteIdent(target), quoteIdent(column),
-			))
-			if err != nil {
-				return err
+		n, _ := result.RowsAffected()
+		return n, nil
+	}
+
+	// Build NOT EXISTS clauses for union refs (value must not exist in ANY target).
+	unionNotExists := func(column string, entities []string) string {
+		clauses := make([]string, 0, len(entities))
+		for _, entity := range entities {
+			target := entityTable(entity)
+			if target == "" {
+				continue
 			}
-			if n, _ := result.RowsAffected(); n > 0 {
-				log.Printf("uuid migration: nulled %d orphaned %s refs in %s.%s", n, entity, table, column)
-			}
-			return nil
+			clauses = append(clauses, fmt.Sprintf(
+				"NOT EXISTS (SELECT 1 FROM %s AS e WHERE e.id = t.%s)",
+				quoteIdent(target), quoteIdent(column)))
 		}
-		if disposableTables[table] {
-			result, err := tx.ExecContext(ctx, fmt.Sprintf(
-				`DELETE FROM %s AS t
-				  WHERE NOT EXISTS (SELECT 1 FROM %s AS e WHERE e.id = t.%s)`,
-				quoteIdent(table), quoteIdent(target), quoteIdent(column),
-			))
-			if err != nil {
-				return err
-			}
-			if n, _ := result.RowsAffected(); n > 0 {
-				log.Printf("uuid migration: deleted %d orphaned rows from %s (missing %s in %s)", n, table, column, target)
-			}
-			return nil
-		}
-		return nil
+		return strings.Join(clauses, " AND ")
 	}
 
 	const maxPasses = 5
 	for pass := 0; pass < maxPasses; pass++ {
-		changed := false
+		var totalAffected int64
+
+		// Direct references: one entity per column.
 		for _, ref := range uuidGroup1References() {
-			before := countRows(ctx, tx, ref.table)
-			if err := resolveRef(ref.table, ref.column, ref.entity, ref.nullable); err != nil {
-				return fmt.Errorf("resolve %s.%s: %w", ref.table, ref.column, err)
+			if !canResolve(ref.table, ref.column) {
+				continue
 			}
-			if countRows(ctx, tx, ref.table) != before {
-				changed = true
+			target := entityTable(ref.entity)
+			if target == "" || !typesMatch(ref.table, ref.column, target) {
+				continue
+			}
+			if ref.nullable {
+				n, err := execResolve(fmt.Sprintf(
+					`UPDATE %s AS t SET %s = ''
+					  WHERE t.%s <> ''
+					    AND NOT EXISTS (SELECT 1 FROM %s AS e WHERE e.id = t.%s)`,
+					quoteIdent(ref.table), quoteIdent(ref.column),
+					quoteIdent(ref.column), quoteIdent(target), quoteIdent(ref.column)))
+				if err != nil {
+					return fmt.Errorf("resolve %s.%s: %w", ref.table, ref.column, err)
+				}
+				if n > 0 {
+					log.Printf("uuid migration: nulled %d orphaned %s refs in %s.%s", n, ref.entity, ref.table, ref.column)
+				}
+				totalAffected += n
+			} else if disposableTables[ref.table] {
+				n, err := execResolve(fmt.Sprintf(
+					`DELETE FROM %s AS t
+					  WHERE NOT EXISTS (SELECT 1 FROM %s AS e WHERE e.id = t.%s)`,
+					quoteIdent(ref.table), quoteIdent(target), quoteIdent(ref.column)))
+				if err != nil {
+					return fmt.Errorf("resolve %s.%s: %w", ref.table, ref.column, err)
+				}
+				if n > 0 {
+					log.Printf("uuid migration: deleted %d orphaned rows from %s (missing %s in %s)", n, ref.table, ref.column, target)
+				}
+				totalAffected += n
 			}
 		}
+
+		// Union references: orphaned only if value exists in NONE of the targets.
 		for _, ref := range uuidGroup1UnionReferences() {
-			for _, entity := range ref.entities {
-				before := countRows(ctx, tx, ref.table)
-				if err := resolveRef(ref.table, ref.column, entity, ref.nullable); err != nil {
+			if !canResolve(ref.table, ref.column) {
+				continue
+			}
+			notExists := unionNotExists(ref.column, ref.entities)
+			if notExists == "" {
+				continue
+			}
+			if ref.nullable {
+				n, err := execResolve(fmt.Sprintf(
+					`UPDATE %s AS t SET %s = '' WHERE t.%s <> '' AND %s`,
+					quoteIdent(ref.table), quoteIdent(ref.column),
+					quoteIdent(ref.column), notExists))
+				if err != nil {
 					return fmt.Errorf("resolve %s.%s: %w", ref.table, ref.column, err)
 				}
-				if countRows(ctx, tx, ref.table) != before {
-					changed = true
+				if n > 0 {
+					log.Printf("uuid migration: nulled %d orphaned union refs in %s.%s", n, ref.table, ref.column)
 				}
+				totalAffected += n
+			} else if disposableTables[ref.table] {
+				n, err := execResolve(fmt.Sprintf(
+					`DELETE FROM %s AS t WHERE %s`,
+					quoteIdent(ref.table), notExists))
+				if err != nil {
+					return fmt.Errorf("resolve %s.%s: %w", ref.table, ref.column, err)
+				}
+				if n > 0 {
+					log.Printf("uuid migration: deleted %d orphaned rows from %s (unresolved %s)", n, ref.table, ref.column)
+				}
+				totalAffected += n
 			}
 		}
+
+		// Polymorphic references: per-entity with type filter.
 		for _, ref := range uuidGroup1PolymorphicReferences() {
-			for _, entity := range ref.typeEntity {
-				before := countRows(ctx, tx, ref.table)
-				if err := resolveRef(ref.table, ref.column, entity, ref.nullable); err != nil {
-					return fmt.Errorf("resolve %s.%s: %w", ref.table, ref.column, err)
+			if !canResolve(ref.table, ref.column) {
+				continue
+			}
+			for actorType, entity := range ref.typeEntity {
+				target := entityTable(entity)
+				if target == "" || !typesMatch(ref.table, ref.column, target) {
+					continue
 				}
-				if countRows(ctx, tx, ref.table) != before {
-					changed = true
+				if ref.nullable {
+					n, err := execResolve(fmt.Sprintf(
+						`UPDATE %s AS t SET %s = ''
+						  WHERE t.%s <> ''
+						    AND t.%s = $1
+						    AND NOT EXISTS (SELECT 1 FROM %s AS e WHERE e.id = t.%s)`,
+						quoteIdent(ref.table), quoteIdent(ref.column),
+						quoteIdent(ref.column), quoteIdent(ref.typeColumn),
+						quoteIdent(target), quoteIdent(ref.column)),
+						actorType)
+					if err != nil {
+						return fmt.Errorf("resolve %s.%s: %w", ref.table, ref.column, err)
+					}
+					if n > 0 {
+						log.Printf("uuid migration: nulled %d orphaned %s/%s refs in %s.%s", n, actorType, entity, ref.table, ref.column)
+					}
+					totalAffected += n
+				} else if disposableTables[ref.table] {
+					n, err := execResolve(fmt.Sprintf(
+						`DELETE FROM %s AS t
+						  WHERE t.%s = $1
+						    AND NOT EXISTS (SELECT 1 FROM %s AS e WHERE e.id = t.%s)`,
+						quoteIdent(ref.table), quoteIdent(ref.typeColumn),
+						quoteIdent(target), quoteIdent(ref.column)),
+						actorType)
+					if err != nil {
+						return fmt.Errorf("resolve %s.%s: %w", ref.table, ref.column, err)
+					}
+					if n > 0 {
+						log.Printf("uuid migration: deleted %d orphaned %s rows from %s (missing %s in %s)", n, actorType, ref.table, ref.column, target)
+					}
+					totalAffected += n
 				}
 			}
 		}
-		if !changed {
+
+		if totalAffected == 0 {
 			return nil
 		}
 	}
 	return fmt.Errorf("orphaned reference resolution did not converge after %d passes", maxPasses)
 }
 
-func countRows(ctx context.Context, tx *sql.Tx, table string) int64 {
-	var n int64
-	tx.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", quoteIdent(table))).Scan(&n)
-	return n
-}
 
 func rewriteUUIDGroup1References(ctx context.Context, tx *sql.Tx) error {
 	for _, ref := range uuidGroup1References() {
