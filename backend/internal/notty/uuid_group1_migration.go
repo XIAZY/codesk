@@ -224,8 +224,8 @@ func UUIDGroup1ColumnInventory() []UUIDGroup1Column {
 		{"daemons", "daemon_version", UUIDGroup1OperationalText},
 		{"daemons", "os", UUIDGroup1OperationalText},
 		{"daemons", "arch", UUIDGroup1OperationalText},
-		{"documents", "path", UUIDGroup1DocumentID},
-		{"documents", "title", UUIDGroup1DocumentID},
+		{"documents", "path", UUIDGroup1OperationalText},
+		{"documents", "title", UUIDGroup1HumanText},
 		{"documents", "create_client_operation_id", UUIDGroup1OperationalText},
 		{"document_heads", "state_vector", UUIDGroup1OperationalText},
 		{"document_checkpoints", "crdt_state", UUIDGroup1OperationalText},
@@ -276,7 +276,7 @@ func UUIDGroup1ColumnInventory() []UUIDGroup1Column {
 		{"thread_messages", "body", UUIDGroup1HumanText},
 		{"thread_messages", "kind", UUIDGroup1OperationalText},
 		{"presences", "actor_type", UUIDGroup1OperationalText},
-		{"presences", "file_path", UUIDGroup1DocumentID},
+		{"presences", "file_path", UUIDGroup1OperationalText},
 		{"presences", "mode", UUIDGroup1OperationalText},
 		{"presences", "activity", UUIDGroup1HumanText},
 		{"activities", "type", UUIDGroup1OperationalText},
@@ -794,7 +794,6 @@ func resolveOrphanedReferences(ctx context.Context, tx *sql.Tx) error {
 	return fmt.Errorf("orphaned reference resolution did not converge after %d passes", maxPasses)
 }
 
-
 func rewriteUUIDGroup1References(ctx context.Context, tx *sql.Tx) error {
 	for _, ref := range uuidGroup1References() {
 		if err := rewriteSingleReference(ctx, tx, ref); err != nil {
@@ -1138,8 +1137,8 @@ func verifyDocumentColumnsRemainText(ctx context.Context, tx *sql.Tx) error {
 		if err != nil {
 			return err
 		}
-		if dataType != "text" {
-			return fmt.Errorf("%s.%s type = %s, want text for Group 2", column.Table, column.Column, dataType)
+		if dataType != "text" && dataType != "uuid" {
+			return fmt.Errorf("%s.%s type = %s, want text before Group 2 or uuid after Group 2", column.Table, column.Column, dataType)
 		}
 	}
 	return nil

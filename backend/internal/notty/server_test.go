@@ -184,6 +184,11 @@ func TestCreateDocumentAllocatesEmptyPathlessStream(t *testing.T) {
 	if first.ID == second.ID {
 		t.Fatalf("pathless document creates must allocate different streams: %q", first.ID)
 	}
+	for _, document := range []*Document{first, second} {
+		if !isUUIDString(document.ID) || strings.HasPrefix(document.ID, "doc_") {
+			t.Fatalf("pathless document ID = %q, want bare UUID", document.ID)
+		}
+	}
 	if got := syncedDocumentTextForTest(t, store, first.ID); got != "" {
 		t.Fatalf("created stream should start empty, got %q", got)
 	}
@@ -194,7 +199,7 @@ func TestCreateDocumentAllocatesEmptyPathlessStream(t *testing.T) {
 
 func TestCreateDocumentAcceptsClientDocumentIDIdempotently(t *testing.T) {
 	_, store := newTestServer(t)
-	documentID := "doc_11111111-1111-4111-8111-111111111111"
+	documentID := "11111111-1111-4111-8111-111111111111"
 	req := CreateDocumentRequest{
 		DocumentID:        documentID,
 		ClientOperationID: "local-create-1",
@@ -219,7 +224,7 @@ func TestCreateDocumentAcceptsClientDocumentIDIdempotently(t *testing.T) {
 	}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"}); err == nil {
 		t.Fatal("same document ID with a different operation should be rejected")
 	}
-	if _, err := store.CreateDocument(CreateDocumentRequest{DocumentID: "doc_not-a-uuid"}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"}); err == nil {
+	if _, err := store.CreateDocument(CreateDocumentRequest{DocumentID: "not-a-uuid"}, OperationMeta{ActorID: "owner", ActorType: "human", Source: "test"}); err == nil {
 		t.Fatal("invalid client document ID should be rejected")
 	}
 }
