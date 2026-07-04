@@ -1226,6 +1226,19 @@ func TestLegacyScaffoldingRowsDeletedOnStartup(t *testing.T) {
 		realAccount, "legacy@example.com", "Legacy", "hash", "ws_notty", now, now)
 	mustExec(t, db, `INSERT INTO workspace_members (workspace_id, account_id, user_id, membership_role, created_at) VALUES ($1, $2, $3, $4, $5)`,
 		realWS, realAccount, "user_owner", "member", now)
+	// Regression: user_owner leaked into polymorphic actor ref (document_updates) in real workspace.
+	mustExec(t, db, `INSERT INTO documents (workspace_id, id, path, title, client_id_seed) VALUES ($1, $2, $3, $4, $5)`,
+		realWS, "doc_"+uuid.NewString(), "test.md", "Test", int64(1))
+	mustExec(t, db, `INSERT INTO document_heads (workspace_id, document_id, state_vector, update_id) VALUES ($1, (SELECT id FROM documents WHERE workspace_id = $1 LIMIT 1), $2, $3)`,
+		realWS, "", int64(1))
+	mustExec(t, db, `INSERT INTO document_updates (workspace_id, document_id, update, actor_id, actor_type) VALUES ($1, (SELECT id FROM documents WHERE workspace_id = $1 LIMIT 1), $2, $3, $4)`,
+		realWS, []byte{0x01}, "user_owner", "human")
+	// Regression: user_owner leaked into union ref (thread_participants) in real workspace.
+	realThread := "thread_" + uuid.NewString()
+	mustExec(t, db, `INSERT INTO threads (workspace_id, id, document_id, created_by_id, created_by_type, title, status, created_by_handle, created_by_name) VALUES ($1, $2, (SELECT id FROM documents WHERE workspace_id = $1 LIMIT 1), $3, $4, $5, $6, $7, $8)`,
+		realWS, realThread, realUser, "human", "Test Thread", "open", "dev", "Developer")
+	mustExec(t, db, `INSERT INTO thread_participants (workspace_id, thread_id, participant_id) VALUES ($1, $2, $3)`,
+		realWS, realThread, "user_owner")
 
 	if err := initPostgresSchema(db); err != nil {
 		t.Fatalf("legacy boot initPostgresSchema: %v", err)

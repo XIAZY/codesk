@@ -476,6 +476,13 @@ func initPostgresSchemaTables(db *sql.DB) error {
 }
 
 func deleteLegacyScaffoldingRows(db *sql.DB) error {
+	// Phase 1: Sweep ALL inventory-listed references to legacy entities.
+	// Derived from the Group 1 migration inventory so both share one source of truth.
+	if err := sweepLegacyReferencesFromInventory(db); err != nil {
+		return err
+	}
+
+	// Phase 2: Delete primary entity rows and workspace-scoped children.
 	type legacyDelete struct {
 		table string
 		where string
@@ -502,7 +509,7 @@ func deleteLegacyScaffoldingRows(db *sql.DB) error {
 		{"workspace_invites", "workspace_id = $1", []any{"ws_notty"}},
 		{"workspaces", "id = $1", []any{"ws_notty"}},
 
-		// daemon_local agents and their dependents (any workspace).
+		// daemon_local and its dependents (any workspace).
 		{"presences", "actor_id IN (SELECT id FROM agents WHERE daemon_id = $1)", []any{"daemon_local"}},
 		{"agent_document_views", "agent_id IN (SELECT id FROM agents WHERE daemon_id = $1)", []any{"daemon_local"}},
 		{"agent_events", "agent_id IN (SELECT id FROM agents WHERE daemon_id = $1)", []any{"daemon_local"}},
@@ -510,22 +517,9 @@ func deleteLegacyScaffoldingRows(db *sql.DB) error {
 		{"agents", "daemon_id = $1", []any{"daemon_local"}},
 		{"daemons", "id = $1", []any{"daemon_local"}},
 
-		// user_owner and its references (any workspace).
-		{"workspace_members", "user_id = $1", []any{"user_owner"}},
-		{"presences", "actor_id = $1", []any{"user_owner"}},
+		// user_owner primary row (references already swept in phase 1).
 		{"users", "id = $1", []any{"user_owner"}},
 	}
-	// Clear dangling claimed_by references before deleting the agents they point at.
-	preUpdates := []string{
-		"UPDATE agent_events SET claimed_by = '' WHERE claimed_by IN (SELECT id FROM agents WHERE daemon_id = 'daemon_local')",
-		"UPDATE agent_events SET claimed_by = '' WHERE claimed_by = 'daemon_local'",
-	}
-	for _, stmt := range preUpdates {
-		if _, err := db.Exec(stmt); err != nil && !isUUIDTypeMismatch(err) {
-			return fmt.Errorf("pre-delete update: %w", err)
-		}
-	}
-
 	var totalDeleted int64
 	for _, d := range deletes {
 		result, err := db.Exec("DELETE FROM "+d.table+" WHERE "+d.where, d.args...)
@@ -544,10 +538,97 @@ func deleteLegacyScaffoldingRows(db *sql.DB) error {
 	if totalDeleted > 0 {
 		log.Printf("legacy cleanup: deleted %d total scaffolding rows", totalDeleted)
 	}
+
+	// Phase 3: Clear workspace refs in accounts.
 	if _, err := db.Exec("UPDATE accounts SET last_accessed_workspace_id = '' WHERE last_accessed_workspace_id::text = 'ws_notty'"); err != nil && !isUUIDTypeMismatch(err) {
 		return fmt.Errorf("clear legacy workspace reference in accounts: %w", err)
 	}
 	return assertNoLegacyScaffoldingRows(db)
+}
+
+// sweepLegacyReferencesFromInventory clears references to legacy placeholder
+// entities (user_owner, daemon_local) from every column listed in the Group 1
+// migration inventory. Nullable columns are blanked; non-nullable join/data rows
+// are deleted. Runs before primary entity deletes so subqueries can still resolve.
+func sweepLegacyReferencesFromInventory(db *sql.DB) error {
+	legacyIDs := map[string][]string{
+		"users":  {"user_owner"},
+		"daemons": {"daemon_local"},
+	}
+
+	execOrSkip := func(query string, args ...any) error {
+		if _, err := db.Exec(query, args...); err != nil && !isUUIDTypeMismatch(err) {
+			return err
+		}
+		return nil
+	}
+
+	// Direct references (uuidGroup1References).
+	for _, ref := range uuidGroup1References() {
+		vals, ok := legacyIDs[ref.entity]
+		if !ok {
+			continue
+		}
+		for _, val := range vals {
+			if ref.nullable {
+				if err := execOrSkip(fmt.Sprintf("UPDATE %s SET %s = '' WHERE %s = $1", ref.table, ref.column, ref.column), val); err != nil {
+					return fmt.Errorf("sweep %s.%s: %w", ref.table, ref.column, err)
+				}
+			} else {
+				if err := execOrSkip(fmt.Sprintf("DELETE FROM %s WHERE %s = $1", ref.table, ref.column), val); err != nil {
+					return fmt.Errorf("sweep %s.%s: %w", ref.table, ref.column, err)
+				}
+			}
+		}
+	}
+
+	// Union references (uuidGroup1UnionReferences).
+	for _, ref := range uuidGroup1UnionReferences() {
+		for _, entity := range ref.entities {
+			vals, ok := legacyIDs[entity]
+			if !ok {
+				continue
+			}
+			for _, val := range vals {
+				if ref.nullable {
+					if err := execOrSkip(fmt.Sprintf("UPDATE %s SET %s = '' WHERE %s = $1", ref.table, ref.column, ref.column), val); err != nil {
+						return fmt.Errorf("sweep %s.%s: %w", ref.table, ref.column, err)
+					}
+				} else {
+					if err := execOrSkip(fmt.Sprintf("DELETE FROM %s WHERE %s = $1", ref.table, ref.column), val); err != nil {
+						return fmt.Errorf("sweep %s.%s: %w", ref.table, ref.column, err)
+					}
+				}
+			}
+		}
+	}
+
+	// Polymorphic references (uuidGroup1PolymorphicReferences).
+	for _, ref := range uuidGroup1PolymorphicReferences() {
+		for actorType, entity := range ref.typeEntity {
+			vals, ok := legacyIDs[entity]
+			if !ok {
+				continue
+			}
+			for _, val := range vals {
+				if ref.nullable {
+					if err := execOrSkip(fmt.Sprintf(
+						"UPDATE %s SET %s = '' WHERE %s = $1 AND %s = $2",
+						ref.table, ref.column, ref.column, ref.typeColumn), val, actorType); err != nil {
+						return fmt.Errorf("sweep %s.%s: %w", ref.table, ref.column, err)
+					}
+				} else {
+					if err := execOrSkip(fmt.Sprintf(
+						"DELETE FROM %s WHERE %s = $1 AND %s = $2",
+						ref.table, ref.column, ref.typeColumn), val, actorType); err != nil {
+						return fmt.Errorf("sweep %s.%s: %w", ref.table, ref.column, err)
+					}
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 func isUUIDTypeMismatch(err error) bool {
@@ -564,6 +645,7 @@ func assertNoLegacyScaffoldingRows(db *sql.DB) error {
 		column string
 		value  string
 	}
+	// Static probes for workspace-scoped and primary entity rows.
 	probes := []probe{
 		{"workspaces", "id", "ws_notty"},
 		{"workspace_members", "workspace_id", "ws_notty"},
@@ -579,11 +661,39 @@ func assertNoLegacyScaffoldingRows(db *sql.DB) error {
 		{"activities", "workspace_id", "ws_notty"},
 		{"accounts", "last_accessed_workspace_id", "ws_notty"},
 		{"users", "id", "user_owner"},
-		{"workspace_members", "user_id", "user_owner"},
-		{"presences", "actor_id", "user_owner"},
 		{"daemons", "id", "daemon_local"},
-		{"agents", "daemon_id", "daemon_local"},
 	}
+	// Inventory-derived probes: every reference column that could hold a legacy value.
+	legacyIDs := map[string][]string{
+		"users":  {"user_owner"},
+		"daemons": {"daemon_local"},
+	}
+	for _, ref := range uuidGroup1References() {
+		if vals, ok := legacyIDs[ref.entity]; ok {
+			for _, val := range vals {
+				probes = append(probes, probe{ref.table, ref.column, val})
+			}
+		}
+	}
+	for _, ref := range uuidGroup1UnionReferences() {
+		for _, entity := range ref.entities {
+			if vals, ok := legacyIDs[entity]; ok {
+				for _, val := range vals {
+					probes = append(probes, probe{ref.table, ref.column, val})
+				}
+			}
+		}
+	}
+	for _, ref := range uuidGroup1PolymorphicReferences() {
+		for _, entity := range ref.typeEntity {
+			if vals, ok := legacyIDs[entity]; ok {
+				for _, val := range vals {
+					probes = append(probes, probe{ref.table, ref.column, val})
+				}
+			}
+		}
+	}
+
 	for _, p := range probes {
 		var count int
 		if err := db.QueryRow("SELECT COUNT(*) FROM "+p.table+" WHERE "+p.column+" = $1", p.value).Scan(&count); isUUIDTypeMismatch(err) {
