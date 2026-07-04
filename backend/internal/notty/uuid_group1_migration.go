@@ -443,6 +443,10 @@ func populateUUIDMigrationMap(ctx context.Context, tx *sql.Tx) error {
 		if err != nil {
 			return err
 		}
+		mappings := []struct {
+			oldID string
+			newID string
+		}{}
 		for rows.Next() {
 			var oldID string
 			if err := rows.Scan(&oldID); err != nil {
@@ -454,22 +458,27 @@ func populateUUIDMigrationMap(ctx context.Context, tx *sql.Tx) error {
 				rows.Close()
 				return fmt.Errorf("%s.%s %q: %w", spec.table, spec.column, oldID, err)
 			}
-			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO uuid_migration_map (entity_type, old_id, new_id)
-				 VALUES ($1, $2, $3)
-				 ON CONFLICT (entity_type, old_id)
-				 DO UPDATE SET new_id = EXCLUDED.new_id`,
-				spec.entity, oldID, newID,
-			); err != nil {
-				rows.Close()
-				return err
-			}
+			mappings = append(mappings, struct {
+				oldID string
+				newID string
+			}{oldID: oldID, newID: newID})
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
 			return err
 		}
 		rows.Close()
+		for _, mapping := range mappings {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO uuid_migration_map (entity_type, old_id, new_id)
+				 VALUES ($1, $2, $3)
+				 ON CONFLICT (entity_type, old_id)
+				 DO UPDATE SET new_id = EXCLUDED.new_id`,
+				spec.entity, mapping.oldID, mapping.newID,
+			); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }

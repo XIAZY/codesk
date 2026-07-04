@@ -424,7 +424,6 @@ func TestUUIDGroup1MigrationPreservesPostgresAPIsAndCreatesBareUUIDs(t *testing.
 	thread, message, created, err := store.CreateThread(CreateThreadRequest{
 		DocumentID: fixture.documentID,
 		Body:       "migration smoke thread",
-		Kind:       "comment",
 	}, OperationMeta{ActorID: fixture.ids["user"], ActorType: "human", Source: "test"})
 	if err != nil {
 		t.Fatalf("create migrated thread: %v", err)
@@ -554,7 +553,7 @@ func seedLegacyUUIDGroup1Graph(t *testing.T, db *sql.DB) legacyUUIDGroup1Fixture
 	mustExec(t, db, `INSERT INTO thread_participants (workspace_id, thread_id, participant_id) VALUES ($1, $2, $3), ($1, $2, $4)`, old["workspace"], old["thread"], old["user"], old["agent"])
 	mustExec(t, db, `INSERT INTO presences (workspace_id, actor_id, actor_type, document_id, file_path, mode, activity) VALUES ($1, $2, $3, $4, $5, $6, $7)`, old["workspace"], old["daemon"], "daemon", documentID, "docs/spec.md", "editing", "active")
 	mustExec(t, db, `INSERT INTO activities (workspace_id, type, document_id, actor_id, actor_type, summary, provenance_actor_id, provenance_actor_type, provenance_requested_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, old["workspace"], "document.updated", documentID, old["user"], "human", "updated", old["agent"], "agent", "opaque-requester")
-	mustExec(t, db, `INSERT INTO agent_events (workspace_id, id, agent_id, agent_handle, type, status, document_id, thread_id, thread_message_id, claimed_by, run_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`, old["workspace"], old["event"], old["agent"], "agent", "message", "done", documentID, old["thread"], old["message"], old["daemon"], old["run"])
+	mustExec(t, db, `INSERT INTO agent_events (workspace_id, id, agent_id, agent_handle, type, status, document_id, thread_id, thread_message_id, claimed_by, run_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`, old["workspace"], old["event"], old["agent"], "agent", "message", "completed", documentID, old["thread"], old["message"], old["daemon"], old["run"])
 	mustExec(t, db, `INSERT INTO agent_document_views (workspace_id, agent_id, document_id, update_id, state_vector) VALUES ($1, $2, $3, $4, $5)`, old["workspace"], old["agent"], documentID, int64(1), "view-sv")
 	mustExec(t, db, `INSERT INTO workspace_members (workspace_id, account_id, user_id, membership_role, status, invited_by, last_accessed_document_id) VALUES ($1, $2, $3, $4, $5, $3, $6)`, old["workspace"], old["account"], old["user"], MembershipRoleOwner, "active", documentID)
 
