@@ -146,8 +146,8 @@ func uuidGroup1PolymorphicReferences() []uuidPolymorphicReferenceSpec {
 	nullSystem := setOf("", "system")
 	return []uuidPolymorphicReferenceSpec{
 		{table: "document_updates", column: "actor_id", typeColumn: "actor_type", typeEntity: actorTypes, nullTypes: nullSystem, nullable: true},
-		{table: "threads", column: "created_by_id", typeColumn: "created_by_type", typeEntity: map[string]string{"human": "users", "agent": "agents"}},
-		{table: "thread_messages", column: "author_id", typeColumn: "author_type", typeEntity: map[string]string{"human": "users", "agent": "agents"}},
+		{table: "threads", column: "created_by_id", typeColumn: "created_by_type", typeEntity: map[string]string{"human": "users", "agent": "agents"}, nullable: true},
+		{table: "thread_messages", column: "author_id", typeColumn: "author_type", typeEntity: map[string]string{"human": "users", "agent": "agents"}, nullable: true},
 		{table: "presences", column: "actor_id", typeColumn: "actor_type", typeEntity: actorTypes},
 		{table: "activities", column: "actor_id", typeColumn: "actor_type", typeEntity: actorTypes, nullTypes: nullSystem, nullable: true},
 		{table: "activities", column: "provenance_actor_id", typeColumn: "provenance_actor_type", typeEntity: actorTypes, nullTypes: nullSystem, nullable: true},
@@ -793,7 +793,6 @@ func resolveOrphanedReferences(ctx context.Context, tx *sql.Tx) error {
 	}
 	return fmt.Errorf("orphaned reference resolution did not converge after %d passes", maxPasses)
 }
-
 
 func rewriteUUIDGroup1References(ctx context.Context, tx *sql.Tx) error {
 	for _, ref := range uuidGroup1References() {
