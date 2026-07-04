@@ -141,7 +141,7 @@ func TestPostgresBackfillsBlankWorkspaceRootDocumentID(t *testing.T) {
 	database := newPostgresTestDatabase(t)
 	db := database.DB
 
-	workspaceID := "ws_legacy_root"
+	workspaceID := "11111111-1111-1111-1111-111111111111"
 	now := time.Now().UTC()
 	if _, err := db.Exec(
 		`INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at)
@@ -206,6 +206,7 @@ func TestPostgresLoadRegeneratesMissingCheckpointBeforeSync(t *testing.T) {
 		t.Fatalf("delete checkpoints: %v", err)
 	}
 	if _, err := db.Exec(`UPDATE document_heads SET state_vector = '' WHERE workspace_id = $1 AND document_id = $2`, workspace.WorkspaceID, documentID); err != nil {
+
 		t.Fatalf("clear head state vector: %v", err)
 	}
 
@@ -223,6 +224,7 @@ func TestPostgresLoadRegeneratesMissingCheckpointBeforeSync(t *testing.T) {
 
 	var checkpointCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2 AND update_id = $3`, workspace.WorkspaceID, documentID, reloadedDocument.UpdateID).Scan(&checkpointCount); err != nil {
+
 		t.Fatalf("count regenerated checkpoint: %v", err)
 	}
 	if checkpointCount != 1 {
@@ -334,12 +336,14 @@ func TestPostgresDocumentUpdatesPersistWithoutWorkspaceSnapshot(t *testing.T) {
 		t.Fatal("expected incremental document update bytes")
 	}
 	if got, err := documentContentAtUpdatePostgres(db, workspaceID, updated, updated.UpdateID); err != nil || got != "# after\n" {
+
 		t.Fatalf("unexpected reconstructed updated content: %q err=%v", got, err)
 	}
 
 	var headUpdateID int64
 	var headStateVector string
 	if err := db.QueryRow(`SELECT update_id, state_vector FROM document_heads WHERE workspace_id = $1 AND document_id = $2`, workspaceID, documentID).Scan(&headUpdateID, &headStateVector); err != nil {
+
 		t.Fatalf("query document head: %v", err)
 	}
 	if headUpdateID == 0 || headStateVector == "" {
@@ -349,6 +353,7 @@ func TestPostgresDocumentUpdatesPersistWithoutWorkspaceSnapshot(t *testing.T) {
 
 	var updateCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM document_updates WHERE workspace_id = $1 AND document_id = $2`, workspaceID, documentID).Scan(&updateCount); err != nil {
+
 		t.Fatalf("query document updates: %v", err)
 	}
 	if updateCount == 0 {
@@ -356,6 +361,7 @@ func TestPostgresDocumentUpdatesPersistWithoutWorkspaceSnapshot(t *testing.T) {
 	}
 	var checkpointCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2`, workspaceID, documentID).Scan(&checkpointCount); err != nil {
+
 		t.Fatalf("query document checkpoints: %v", err)
 	}
 	if checkpointCount == 0 {
@@ -385,6 +391,7 @@ func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testin
 		t.Fatalf("get document head: %v", err)
 	}
 	headContent, err := documentContentAtUpdatePostgres(db, workspaceID, head, head.UpdateID)
+
 	if err != nil {
 		t.Fatalf("reconstruct document head: %v", err)
 	}
@@ -396,6 +403,7 @@ func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testin
 		  ORDER BY update_id DESC
 		  LIMIT 1`,
 		workspaceID,
+
 		documentID,
 		head.UpdateID,
 	).Scan(&checkpointUpdateID); err != nil {
@@ -407,6 +415,7 @@ func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testin
 		   FROM document_updates
 		  WHERE workspace_id = $1 AND document_id = $2 AND id > $3 AND id <= $4`,
 		workspaceID,
+
 		documentID,
 		checkpointUpdateID,
 		head.UpdateID,
@@ -499,6 +508,7 @@ func TestPostgresApplyCRDTUpdateCreatesPeriodicCheckpointFromHistory(t *testing.
 		  ORDER BY update_id DESC
 		  LIMIT 1`,
 		workspaceID,
+
 		documentID,
 	).Scan(&latestCheckpointUpdateID); err != nil {
 		t.Fatalf("query latest checkpoint: %v", err)
@@ -556,11 +566,13 @@ func TestPostgresApplyCRDTUpdatePersistsWithoutWorkspaceSnapshot(t *testing.T) {
 		t.Fatalf("apply crdt update: %v", err)
 	}
 	if got, err := documentContentAtUpdatePostgres(db, workspaceID, updated, updated.UpdateID); err != nil || got != "# before\nmore\n" {
+
 		t.Fatalf("unexpected reconstructed updated content: %q err=%v", got, err)
 	}
 
 	var headUpdateID int64
 	if err := db.QueryRow(`SELECT update_id FROM document_heads WHERE workspace_id = $1 AND document_id = $2`, workspaceID, documentID).Scan(&headUpdateID); err != nil {
+
 		t.Fatalf("query document head: %v", err)
 	}
 	if headUpdateID == 0 {
@@ -570,6 +582,7 @@ func TestPostgresApplyCRDTUpdatePersistsWithoutWorkspaceSnapshot(t *testing.T) {
 
 	var updateCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM document_updates WHERE workspace_id = $1 AND document_id = $2`, workspaceID, documentID).Scan(&updateCount); err != nil {
+
 		t.Fatalf("query document updates: %v", err)
 	}
 	if updateCount == 0 {
@@ -760,6 +773,7 @@ func TestPostgresDiffDocumentReconstructsAcrossCheckpointsAfterReload(t *testing
 	}
 	finalVersion := final.UpdateID
 	finalContent, err := documentContentAtUpdatePostgres(db, workspaceID, final, finalVersion)
+
 	if err != nil {
 		t.Fatalf("reconstruct final document: %v", err)
 	}
@@ -783,6 +797,7 @@ func TestPostgresDiffDocumentReconstructsAcrossCheckpointsAfterReload(t *testing
 
 	var checkpointCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2`, workspaceID, documentID).Scan(&checkpointCount); err != nil {
+
 		t.Fatalf("count checkpoints: %v", err)
 	}
 	if checkpointCount < 2 {
@@ -979,8 +994,8 @@ func seedStoreDaemonRuntime(t *testing.T, store *Store, daemonID string, runtime
 		t.Fatal("store is required")
 	}
 	daemonID = strings.TrimSpace(daemonID)
-	if daemonID == "" {
-		daemonID = "daemon_test"
+	if _, err := uuid.Parse(daemonID); err != nil {
+		daemonID = uuid.NewString()
 	}
 	now := time.Now().UTC()
 	store.mu.Lock()
