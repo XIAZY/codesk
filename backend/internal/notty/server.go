@@ -1,6 +1,8 @@
 package notty
 
 import (
+	"database/sql"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -10,8 +12,7 @@ import (
 
 type Server struct {
 	cfg              Config
-	store            *Store
-	subscribers      *Broker
+	db               *Database
 	rooms            *DocumentRooms
 	emailSender      EmailSender
 	upgrader         websocket.Upgrader
@@ -20,11 +21,10 @@ type Server struct {
 	workspaceBrokers map[string]*Broker
 }
 
-func NewServer(cfg Config, store *Store) *Server {
+func NewServer(cfg Config, database *Database) *Server {
 	return &Server{
 		cfg:         cfg,
-		store:       store,
-		subscribers: NewBroker(),
+		db:          database,
 		rooms:       NewDocumentRooms(),
 		emailSender: emailSenderFromConfig(cfg),
 		upgrader: websocket.Upgrader{
@@ -35,13 +35,17 @@ func NewServer(cfg Config, store *Store) *Server {
 	}
 }
 
+func (s *Server) sqlDB() *sql.DB {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	return s.db.DB
+}
+
 func (s *Server) workspaceStore(workspaceID string) (*Store, error) {
 	workspaceID = strings.TrimSpace(workspaceID)
 	if workspaceID == "" {
-		workspaceID = s.store.Snapshot().WorkspaceID
-	}
-	if s.store != nil && s.store.Snapshot().WorkspaceID == workspaceID {
-		return s.store, nil
+		return nil, errors.New("workspace id is required")
 	}
 	s.mu.Lock()
 	if store := s.workspaceStores[workspaceID]; store != nil {
@@ -49,25 +53,20 @@ func (s *Server) workspaceStore(workspaceID string) (*Store, error) {
 		return store, nil
 	}
 	s.mu.Unlock()
-	if s.store == nil {
-		return s.store, nil
+	if s.db == nil || s.db.DB == nil {
+		return nil, errors.New("database is required")
 	}
-	workspace, err := getWorkspace(s.store.db, workspaceID)
+	workspace, err := getWorkspace(s.db.DB, workspaceID)
 	if err != nil {
 		return nil, err
 	}
-	dataSource := s.cfg.DatabaseURL
-	if dataSource == "" {
-		dataSource = s.store.databaseURL
-	}
-	store, err := NewStoreForWorkspace(dataSource, workspace.ID, workspace.Name)
+	store, err := NewWorkspaceStore(s.db, workspace.ID, workspace.Name)
 	if err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
 	if existing := s.workspaceStores[workspaceID]; existing != nil {
 		s.mu.Unlock()
-		_ = store.Close()
 		return existing, nil
 	}
 	s.workspaceStores[workspaceID] = store
@@ -77,8 +76,8 @@ func (s *Server) workspaceStore(workspaceID string) (*Store, error) {
 
 func (s *Server) workspaceBroker(workspaceID string) *Broker {
 	workspaceID = strings.TrimSpace(workspaceID)
-	if workspaceID == "" || (s.store != nil && workspaceID == s.store.Snapshot().WorkspaceID) {
-		return s.subscribers
+	if workspaceID == "" {
+		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -94,22 +93,19 @@ func (s *Server) requestStore(r *http.Request) *Store {
 	if store, ok := requestStoreFromContext(r.Context()); ok {
 		return store
 	}
-	return s.store
+	return nil
 }
 
 func (s *Server) requestBroker(r *http.Request) *Broker {
 	if broker, ok := requestBrokerFromContext(r.Context()); ok {
 		return broker
 	}
-	return s.subscribers
+	return nil
 }
 
 func (s *Server) requestWorkspaceID(r *http.Request) string {
 	if id := workspaceIDFromContext(r.Context()); id != "" {
 		return id
 	}
-	if s.store == nil {
-		return ""
-	}
-	return s.store.Snapshot().WorkspaceID
+	return ""
 }

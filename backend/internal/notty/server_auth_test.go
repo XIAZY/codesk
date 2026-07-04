@@ -389,7 +389,7 @@ func TestAccountEmailTokensRejectExpiredVerificationAndResetTokens(t *testing.T)
 	}
 	messages := authTestWaitForEmailCount(t, sender, 1)
 	verifyToken := authTestLatestEmailToken(t, messages, 0, "/account/verify-email")
-	authTestExpireAccountEmailToken(t, server.store.db, verifyToken, accountEmailTokenPurposeVerifyEmail)
+	authTestExpireAccountEmailToken(t, server.sqlDB(), verifyToken, accountEmailTokenPurposeVerifyEmail)
 	authTestJSON(t, router, http.MethodPost, "/api/auth/verify-email", "", VerifyEmailRequest{
 		Token: verifyToken,
 	}, http.StatusBadRequest, nil)
@@ -412,7 +412,7 @@ func TestAccountEmailTokensRejectExpiredVerificationAndResetTokens(t *testing.T)
 		t.Fatalf("forgot-password emails sent = %d, want %d", len(messages), initialMessages+1)
 	}
 	resetToken := authTestEmailToken(t, messages[len(messages)-1], "/account/reset-password")
-	authTestExpireAccountEmailToken(t, server.store.db, resetToken, accountEmailTokenPurposeResetPassword)
+	authTestExpireAccountEmailToken(t, server.sqlDB(), resetToken, accountEmailTokenPurposeResetPassword)
 	authTestJSON(t, router, http.MethodPost, "/api/auth/reset-password", "", ResetPasswordRequest{
 		Token:    resetToken,
 		Password: "new-pass",
@@ -446,7 +446,7 @@ func TestVerificationAndPasswordResetRequestsRespectNoopAndCooldownStates(t *tes
 		t.Fatalf("resend inside cooldown sent email count = %d, want 1", len(messages))
 	}
 
-	authTestBackdateAccountEmailToken(t, server.store.db, firstVerifyToken, accountEmailTokenPurposeVerifyEmail, accountEmailTokenCooldown+time.Minute)
+	authTestBackdateAccountEmailToken(t, server.sqlDB(), firstVerifyToken, accountEmailTokenPurposeVerifyEmail, accountEmailTokenCooldown+time.Minute)
 	authTestJSON(t, router, http.MethodPost, "/api/auth/resend-verification", "", ResendVerificationRequest{
 		Email: "resend-state@example.com",
 	}, http.StatusOK, nil)
@@ -649,11 +649,11 @@ func TestRegisterAccountCreatesNoImplicitWorkspaceRows(t *testing.T) {
 	}
 
 	var workspaceCount int
-	if err := server.store.db.QueryRow(`SELECT COUNT(*) FROM workspaces`).Scan(&workspaceCount); err != nil {
+	if err := server.sqlDB().QueryRow(`SELECT COUNT(*) FROM workspaces`).Scan(&workspaceCount); err != nil {
 		t.Fatalf("count workspaces: %v", err)
 	}
 	var memberCount int
-	if err := server.store.db.QueryRow(`SELECT COUNT(*) FROM workspace_members`).Scan(&memberCount); err != nil {
+	if err := server.sqlDB().QueryRow(`SELECT COUNT(*) FROM workspace_members`).Scan(&memberCount); err != nil {
 		t.Fatalf("count workspace members: %v", err)
 	}
 	if workspaceCount != 0 || memberCount != 0 {
@@ -682,7 +682,7 @@ func TestCreateWorkspaceStoresIndependentRootDocumentID(t *testing.T) {
 	}
 
 	var storedRootID string
-	if err := server.store.db.QueryRow(`SELECT root_document_id FROM workspaces WHERE id = $1`, workspace.ID).Scan(&storedRootID); err != nil {
+	if err := server.sqlDB().QueryRow(`SELECT root_document_id FROM workspaces WHERE id = $1`, workspace.ID).Scan(&storedRootID); err != nil {
 		t.Fatalf("load stored root document ID: %v", err)
 	}
 	if storedRootID != workspace.RootDocumentID {
@@ -693,9 +693,6 @@ func TestCreateWorkspaceStoresIndependentRootDocumentID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open workspace store: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = store.Close()
-	})
 	snapshot := store.Snapshot()
 	if snapshot.RootDocumentID != workspace.RootDocumentID {
 		t.Fatalf("workspace store root document ID = %q, want %q", snapshot.RootDocumentID, workspace.RootDocumentID)
@@ -834,7 +831,7 @@ func TestWorkspaceMemberAndAgentIdentifiersAreValidatedAndImmutable(t *testing.T
 		t.Fatalf("re-adding existing member should return original user identity, first=%#v repeated=%#v", member, repeatedAdd.Member)
 	}
 	var userCount int
-	if err := server.store.db.QueryRow(`SELECT COUNT(*) FROM users WHERE workspace_id = $1`, workspace.ID).Scan(&userCount); err != nil {
+	if err := server.sqlDB().QueryRow(`SELECT COUNT(*) FROM users WHERE workspace_id = $1`, workspace.ID).Scan(&userCount); err != nil {
 		t.Fatalf("count users: %v", err)
 	}
 	if userCount != 2 {
@@ -1419,14 +1416,14 @@ func TestWorkspaceInviteLinkCreatePreviewAndAccept(t *testing.T) {
 	}
 
 	var tokenHashCount int
-	if err := server.store.db.QueryRow(`SELECT COUNT(*) FROM workspace_invites WHERE token_hash = $1`, tokenHash(token)).Scan(&tokenHashCount); err != nil {
+	if err := server.sqlDB().QueryRow(`SELECT COUNT(*) FROM workspace_invites WHERE token_hash = $1`, tokenHash(token)).Scan(&tokenHashCount); err != nil {
 		t.Fatalf("count token hash: %v", err)
 	}
 	if tokenHashCount != 1 {
 		t.Fatalf("expected one hashed invite token row, got %d", tokenHashCount)
 	}
 	var rawTokenCount int
-	if err := server.store.db.QueryRow(`SELECT COUNT(*) FROM workspace_invites WHERE token_hash = $1`, token).Scan(&rawTokenCount); err != nil {
+	if err := server.sqlDB().QueryRow(`SELECT COUNT(*) FROM workspace_invites WHERE token_hash = $1`, token).Scan(&rawTokenCount); err != nil {
 		t.Fatalf("count raw token: %v", err)
 	}
 	if rawTokenCount != 0 {
@@ -1460,7 +1457,7 @@ func TestWorkspaceInviteLinkCreatePreviewAndAccept(t *testing.T) {
 	var memberCount int
 	var role string
 	var joinedUserID string
-	if err := server.store.db.QueryRow(
+	if err := server.sqlDB().QueryRow(
 		`SELECT COUNT(*), COALESCE(MAX(membership_role), ''), COALESCE(MAX(user_id), '')
 		   FROM workspace_members
 		  WHERE workspace_id = $1 AND account_id = $2 AND status = 'active'`,
@@ -1475,7 +1472,7 @@ func TestWorkspaceInviteLinkCreatePreviewAndAccept(t *testing.T) {
 		t.Fatalf("accept should reload workspace store with joined user, got userID=%q snapshot=%#v", joinedUserID, store.Snapshot().Users)
 	}
 	var userCount int
-	if err := server.store.db.QueryRow(
+	if err := server.sqlDB().QueryRow(
 		`SELECT COUNT(*)
 		   FROM users u
 		   JOIN workspace_members m ON m.user_id = u.id AND m.workspace_id = u.workspace_id
@@ -1498,7 +1495,7 @@ func TestWorkspaceInviteLinkCreatePreviewAndAccept(t *testing.T) {
 	}
 
 	authTestStatus(t, router, http.MethodPost, "/api/invites/"+token+"/accept", joiner.Token, nil, http.StatusOK)
-	if err := server.store.db.QueryRow(
+	if err := server.sqlDB().QueryRow(
 		`SELECT COUNT(*)
 		   FROM workspace_members
 		  WHERE workspace_id = $1 AND account_id = $2`,
@@ -1518,13 +1515,13 @@ func TestWorkspaceInviteAcceptReactivatesInactiveMembership(t *testing.T) {
 	workspace := authTestCreateWorkspace(t, router, owner.Token, "Invite Reactivate Workspace")
 	member := authTestRegister(t, router, "invite-reactivate-member@example.com", "member-pass", "Invite Reactivate Member")
 	added := authTestAddMember(t, router, owner.Token, workspace.ID, member.Account.Email, "reactivate-member")
-	if _, err := server.store.db.Exec(
+	if _, err := server.sqlDB().Exec(
 		`UPDATE workspace_members SET status = 'removed', membership_role = $1 WHERE workspace_id = $2 AND account_id = $3`,
 		MembershipRoleAdmin, workspace.ID, member.Account.ID,
 	); err != nil {
 		t.Fatalf("mark membership removed: %v", err)
 	}
-	if _, err := server.store.db.Exec(
+	if _, err := server.sqlDB().Exec(
 		`UPDATE users SET status = 'removed' WHERE workspace_id = $1 AND id = $2`,
 		workspace.ID, added.UserID,
 	); err != nil {
@@ -1540,7 +1537,7 @@ func TestWorkspaceInviteAcceptReactivatesInactiveMembership(t *testing.T) {
 
 	var memberCount int
 	var userID, membershipRole, memberStatus, userHandle, userStatus string
-	if err := server.store.db.QueryRow(
+	if err := server.sqlDB().QueryRow(
 		`SELECT COUNT(*), COALESCE(MAX(m.user_id), ''), COALESCE(MAX(m.membership_role), ''), COALESCE(MAX(m.status), ''), COALESCE(MAX(u.handle), ''), COALESCE(MAX(u.status), '')
 		   FROM workspace_members m
 		   JOIN users u ON u.workspace_id = m.workspace_id AND u.id = m.user_id
@@ -1584,7 +1581,7 @@ func TestWorkspaceInviteCreateRequiresInvitePermission(t *testing.T) {
 
 	admin := authTestRegister(t, router, "invite-permission-admin@example.com", "owner-pass", "Invite Permission Admin")
 	authTestAddMember(t, router, owner.Token, workspace.ID, admin.Account.Email, "invite-admin")
-	if _, err := server.store.db.Exec(
+	if _, err := server.sqlDB().Exec(
 		`UPDATE workspace_members SET membership_role = $1 WHERE workspace_id = $2 AND account_id = $3`,
 		MembershipRoleAdmin, workspace.ID, admin.Account.ID,
 	); err != nil {
@@ -1604,7 +1601,7 @@ func TestWorkspaceInvitePreviewAndAcceptRejectInvalidExpiredTokens(t *testing.T)
 	authTestErrorContains(t, router, http.MethodPost, "/api/invites/not-a-real-token/accept", joiner.Token, AcceptWorkspaceInviteRequest{Handle: "joiner"}, http.StatusNotFound, "Invalid invite link.")
 
 	invite, token := authTestCreateInvite(t, router, owner.Token, workspace.ID)
-	if _, err := server.store.db.Exec(`UPDATE workspace_invites SET expires_at = NOW() - INTERVAL '1 hour' WHERE id = $1`, invite.Invite.ID); err != nil {
+	if _, err := server.sqlDB().Exec(`UPDATE workspace_invites SET expires_at = NOW() - INTERVAL '1 hour' WHERE id = $1`, invite.Invite.ID); err != nil {
 		t.Fatalf("expire invite: %v", err)
 	}
 	previewRecorder := authTestRequest(t, router, http.MethodGet, "/api/invites/"+token, "", nil, nil)
@@ -1649,7 +1646,7 @@ func TestWorkspaceInviteRouteRequiresManagementRole(t *testing.T) {
 
 	admin := authTestRegister(t, router, "invite-admin@example.com", "owner-pass", "Invite Admin")
 	authTestAddMember(t, router, owner.Token, workspace.ID, admin.Account.Email, "admin-handle")
-	if _, err := server.store.db.Exec(
+	if _, err := server.sqlDB().Exec(
 		`UPDATE workspace_members SET membership_role = $1 WHERE workspace_id = $2 AND account_id = $3`,
 		MembershipRoleAdmin, workspace.ID, admin.Account.ID,
 	); err != nil {
@@ -1676,7 +1673,7 @@ func TestWorkspaceAdminOnlyActionsRejectMembersAndAllowAdmins(t *testing.T) {
 
 	admin := authTestRegister(t, router, "admin-only-admin@example.com", "owner-pass", "Admin Only Admin")
 	authTestAddMember(t, router, owner.Token, workspace.ID, admin.Account.Email, "admin-handle")
-	if _, err := server.store.db.Exec(
+	if _, err := server.sqlDB().Exec(
 		`UPDATE workspace_members SET membership_role = $1 WHERE workspace_id = $2 AND account_id = $3`,
 		MembershipRoleAdmin, workspace.ID, admin.Account.ID,
 	); err != nil {
@@ -2051,29 +2048,8 @@ func newAuthTestRouter(t *testing.T) http.Handler {
 
 func newAuthTestServer(t *testing.T) (*Server, http.Handler) {
 	t.Helper()
-	dsn := postgresTestDSN(t)
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("open postgres: %v", err)
-	}
-	if err := initPostgresSchema(db); err != nil {
-		_ = db.Close()
-		t.Fatalf("init schema: %v", err)
-	}
-	if err := clearNottyTables(db); err != nil {
-		_ = db.Close()
-		t.Fatalf("clear tables: %v", err)
-	}
-	_ = db.Close()
-
-	store, err := NewStore(dsn)
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = store.Close()
-	})
-	server := NewServer(Config{DatabaseURL: dsn, JWTSecret: "test-secret"}, store)
+	database := newPostgresTestDatabase(t)
+	server := NewServer(Config{DatabaseURL: database.URL, JWTSecret: "test-secret"}, database)
 	emailSender := newAuthTestEmailSender()
 	server.emailSender = emailSender
 	return server, &authTestRouter{

@@ -15,7 +15,7 @@ import (
 )
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	if s.store == nil || s.store.db == nil {
+	if s.sqlDB() == nil {
 		writeError(w, http.StatusServiceUnavailable, "database auth is not available")
 		return
 	}
@@ -24,12 +24,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	account, err := registerAccount(s.store.db, req)
+	account, err := registerAccount(s.sqlDB(), req)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	rawToken, created, err := requestEmailVerification(s.store.db, account, 0)
+	rawToken, created, err := requestEmailVerification(s.sqlDB(), account, 0)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -42,7 +42,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if s.store == nil || s.store.db == nil {
+	if s.sqlDB() == nil {
 		writeError(w, http.StatusServiceUnavailable, "database auth is not available")
 		return
 	}
@@ -51,7 +51,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	account, err := authenticateAccount(s.store.db, req)
+	account, err := authenticateAccount(s.sqlDB(), req)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, err.Error())
 		return
@@ -65,12 +65,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	workspaces, _ := listWorkspacesForAccount(s.store.db, account.ID)
+	workspaces, _ := listWorkspacesForAccount(s.sqlDB(), account.ID)
 	writeJSON(w, http.StatusOK, AuthResponse{Token: token, Account: account, Workspaces: workspaces})
 }
 
 func (s *Server) handleVerifyEmail(w http.ResponseWriter, r *http.Request) {
-	if s.store == nil || s.store.db == nil {
+	if s.sqlDB() == nil {
 		writeError(w, http.StatusServiceUnavailable, "database auth is not available")
 		return
 	}
@@ -79,7 +79,7 @@ func (s *Server) handleVerifyEmail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	account, err := verifyAccountEmailWithToken(s.store.db, req.Token)
+	account, err := verifyAccountEmailWithToken(s.sqlDB(), req.Token)
 	if err != nil {
 		if errors.Is(err, errConsumedAccountToken) {
 			writeError(w, http.StatusBadRequest, "email_already_verified")
@@ -93,7 +93,7 @@ func (s *Server) handleVerifyEmail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleResendVerification(w http.ResponseWriter, r *http.Request) {
-	if s.store == nil || s.store.db == nil {
+	if s.sqlDB() == nil {
 		writeError(w, http.StatusServiceUnavailable, "database auth is not available")
 		return
 	}
@@ -102,13 +102,13 @@ func (s *Server) handleResendVerification(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	account, err := getAccountByEmail(s.store.db, req.Email)
+	account, err := getAccountByEmail(s.sqlDB(), req.Email)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err == nil && account != nil && !account.EmailVerified {
-		rawToken, created, err := requestEmailVerification(s.store.db, account, accountEmailTokenCooldown)
+		rawToken, created, err := requestEmailVerification(s.sqlDB(), account, accountEmailTokenCooldown)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -122,7 +122,7 @@ func (s *Server) handleResendVerification(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
-	if s.store == nil || s.store.db == nil {
+	if s.sqlDB() == nil {
 		writeError(w, http.StatusServiceUnavailable, "database auth is not available")
 		return
 	}
@@ -131,13 +131,13 @@ func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	account, err := getAccountByEmail(s.store.db, req.Email)
+	account, err := getAccountByEmail(s.sqlDB(), req.Email)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err == nil && account != nil && account.EmailVerified {
-		rawToken, created, err := requestPasswordReset(s.store.db, account, accountEmailTokenCooldown)
+		rawToken, created, err := requestPasswordReset(s.sqlDB(), account, accountEmailTokenCooldown)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -169,7 +169,7 @@ func (s *Server) sendAccountEmailAsync(emailType string, account *Account, messa
 }
 
 func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
-	if s.store == nil || s.store.db == nil {
+	if s.sqlDB() == nil {
 		writeError(w, http.StatusServiceUnavailable, "database auth is not available")
 		return
 	}
@@ -178,7 +178,7 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := resetAccountPasswordWithToken(s.store.db, req.Token, req.Password); err != nil {
+	if err := resetAccountPasswordWithToken(s.sqlDB(), req.Token, req.Password); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -191,12 +191,12 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	account, err := getAccountByID(s.store.db, auth.AccountID)
+	account, err := getAccountByID(s.sqlDB(), auth.AccountID)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	workspaces, _ := listWorkspacesForAccount(s.store.db, account.ID)
+	workspaces, _ := listWorkspacesForAccount(s.sqlDB(), account.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"account": account, "workspaces": workspaces})
 }
 
@@ -206,7 +206,7 @@ func (s *Server) handleListWorkspaces(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	workspaces, err := listWorkspacesForAccount(s.store.db, auth.AccountID)
+	workspaces, err := listWorkspacesForAccount(s.sqlDB(), auth.AccountID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -220,7 +220,7 @@ func (s *Server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	account, err := getAccountByID(s.store.db, auth.AccountID)
+	account, err := getAccountByID(s.sqlDB(), auth.AccountID)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
@@ -230,7 +230,7 @@ func (s *Server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	workspace, member, err := createWorkspaceForAccount(s.store.db, account, req)
+	workspace, member, err := createWorkspaceForAccount(s.sqlDB(), account, req)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -259,7 +259,7 @@ func (s *Server) handleUpdateLastAccessed(w http.ResponseWriter, r *http.Request
 		}
 	}
 	auth, _ := authFromContext(r.Context())
-	if err := updateLastAccessedWorkspace(s.store.db, auth.AccountID, s.requestWorkspaceID(r), documentID); err != nil {
+	if err := updateLastAccessedWorkspace(s.sqlDB(), auth.AccountID, s.requestWorkspaceID(r), documentID); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -270,7 +270,7 @@ func (s *Server) handleListWorkspaceMembers(w http.ResponseWriter, r *http.Reque
 	if !s.requireHumanPrincipal(w, r) {
 		return
 	}
-	members, err := listWorkspaceMembers(s.store.db, s.requestWorkspaceID(r))
+	members, err := listWorkspaceMembers(s.sqlDB(), s.requestWorkspaceID(r))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -296,7 +296,7 @@ func (s *Server) handleAddWorkspaceMember(w http.ResponseWriter, r *http.Request
 	if auth != nil {
 		invitedBy = auth.UserID
 	}
-	member, err := addWorkspaceMember(s.store.db, s.requestWorkspaceID(r), req, invitedBy)
+	member, err := addWorkspaceMember(s.sqlDB(), s.requestWorkspaceID(r), req, invitedBy)
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, ErrNotFound) {
@@ -312,7 +312,7 @@ func (s *Server) handleAddWorkspaceMember(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleCreateWorkspaceInvite(w http.ResponseWriter, r *http.Request) {
-	if s.store == nil || s.store.db == nil {
+	if s.sqlDB() == nil {
 		writeError(w, http.StatusServiceUnavailable, "database auth is not available")
 		return
 	}
@@ -324,7 +324,7 @@ func (s *Server) handleCreateWorkspaceInvite(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
-	invite, token, err := createWorkspaceInvite(s.store.db, s.requestWorkspaceID(r), auth.UserID)
+	invite, token, err := createWorkspaceInvite(s.sqlDB(), s.requestWorkspaceID(r), auth.UserID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -336,11 +336,11 @@ func (s *Server) handleCreateWorkspaceInvite(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handleWorkspaceInvitePreview(w http.ResponseWriter, r *http.Request) {
-	if s.store == nil || s.store.db == nil {
+	if s.sqlDB() == nil {
 		writeError(w, http.StatusServiceUnavailable, "database auth is not available")
 		return
 	}
-	preview, err := workspaceInvitePreview(s.store.db, chi.URLParam(r, "token"))
+	preview, err := workspaceInvitePreview(s.sqlDB(), chi.URLParam(r, "token"))
 	if err != nil {
 		writeError(w, workspaceInviteErrorStatus(err), err.Error())
 		return
@@ -349,7 +349,7 @@ func (s *Server) handleWorkspaceInvitePreview(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Server) handleAcceptWorkspaceInvite(w http.ResponseWriter, r *http.Request) {
-	if s.store == nil || s.store.db == nil {
+	if s.sqlDB() == nil {
 		writeError(w, http.StatusServiceUnavailable, "database auth is not available")
 		return
 	}
@@ -363,7 +363,7 @@ func (s *Server) handleAcceptWorkspaceInvite(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	workspace, err := acceptWorkspaceInvite(s.store.db, chi.URLParam(r, "token"), auth.AccountID, req)
+	workspace, err := acceptWorkspaceInvite(s.sqlDB(), chi.URLParam(r, "token"), auth.AccountID, req)
 	if err != nil {
 		writeError(w, workspaceInviteErrorStatus(err), err.Error())
 		return
@@ -391,7 +391,7 @@ func (s *Server) handleListDaemons(w http.ResponseWriter, r *http.Request) {
 	if !s.requireHumanPrincipal(w, r) {
 		return
 	}
-	daemons, err := listDaemons(s.store.db, s.requestWorkspaceID(r))
+	daemons, err := listDaemons(s.sqlDB(), s.requestWorkspaceID(r))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -413,7 +413,7 @@ func (s *Server) handleCreateDaemon(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	daemon, token, err := createDaemon(s.store.db, s.requestWorkspaceID(r), req.Name)
+	daemon, token, err := createDaemon(s.sqlDB(), s.requestWorkspaceID(r), req.Name)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -436,7 +436,7 @@ func (s *Server) handleUpdateDaemonStatus(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	daemon, err := updateDaemonStatus(s.store.db, s.requestWorkspaceID(r), auth.DaemonID, req)
+	daemon, err := updateDaemonStatus(s.sqlDB(), s.requestWorkspaceID(r), auth.DaemonID, req)
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, ErrNotFound) {
@@ -461,7 +461,7 @@ func (s *Server) handleCreateDaemonReinstallToken(w http.ResponseWriter, r *http
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
-	daemon, token, err := createDaemonReinstallToken(s.store.db, s.requestWorkspaceID(r), chi.URLParam(r, "daemonID"))
+	daemon, token, err := createDaemonReinstallToken(s.sqlDB(), s.requestWorkspaceID(r), chi.URLParam(r, "daemonID"))
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, ErrNotFound) {
@@ -482,7 +482,7 @@ func (s *Server) handleDeleteDaemon(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
-	daemon, err := deleteDaemon(s.store.db, s.requestWorkspaceID(r), chi.URLParam(r, "daemonID"))
+	daemon, err := deleteDaemon(s.sqlDB(), s.requestWorkspaceID(r), chi.URLParam(r, "daemonID"))
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, ErrNotFound) {
@@ -539,6 +539,10 @@ func (s *Server) requireWorkspace(next http.Handler) http.Handler {
 }
 
 func (s *Server) authenticateHumanRequest(r *http.Request) (*AuthContext, error) {
+	db := s.sqlDB()
+	if db == nil {
+		return nil, errors.New("database auth is not available")
+	}
 	token := bearerToken(r)
 	if token == "" {
 		return nil, errors.New("missing bearer token")
@@ -547,7 +551,7 @@ func (s *Server) authenticateHumanRequest(r *http.Request) (*AuthContext, error)
 	if err != nil {
 		return nil, err
 	}
-	account, err := getAccountByID(s.store.db, claims.Subject)
+	account, err := getAccountByID(db, claims.Subject)
 	if err != nil {
 		return nil, err
 	}
@@ -577,6 +581,10 @@ func (s *Server) accountAppURL() string {
 }
 
 func (s *Server) authenticateWorkspaceRequest(r *http.Request, workspaceID string) (*AuthContext, error) {
+	db := s.sqlDB()
+	if db == nil {
+		return nil, errors.New("database auth is not available")
+	}
 	token := bearerToken(r)
 	if token == "" {
 		return nil, errors.New("missing bearer token")
@@ -586,7 +594,7 @@ func (s *Server) authenticateWorkspaceRequest(r *http.Request, workspaceID strin
 		if err != nil {
 			return nil, err
 		}
-		member, err := workspaceMemberForAccount(s.store.db, workspaceID, base.AccountID)
+		member, err := workspaceMemberForAccount(db, workspaceID, base.AccountID)
 		if err != nil {
 			return nil, err
 		}
@@ -602,7 +610,7 @@ func (s *Server) authenticateWorkspaceRequest(r *http.Request, workspaceID strin
 		base.PrincipalID = member.UserID
 		return base, nil
 	}
-	daemon, err := authenticateDaemonToken(s.store.db, token, workspaceID)
+	daemon, err := authenticateDaemonToken(db, token, workspaceID)
 	if err != nil {
 		return nil, err
 	}
