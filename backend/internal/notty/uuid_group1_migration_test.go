@@ -577,22 +577,16 @@ func TestUUIDGroup1MigrationClearsStagingResidue(t *testing.T) {
 		old["workspace"], orphanAgentID, fixture.documentID, int64(1), "orphan-sv")
 
 	// Staging residue 2: dead columns that exist in staging but not in code.
-	// In production, initPostgresSchema drops these before migration runs.
 	mustExec(t, db, `ALTER TABLE daemons ADD COLUMN IF NOT EXISTS pending_token_hash TEXT NOT NULL DEFAULT ''`)
 	mustExec(t, db, `ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS root_stream_id TEXT NOT NULL DEFAULT ''`)
-	for _, col := range []struct{ table, column string }{
-		{"daemons", "pending_token_hash"},
-		{"workspaces", "root_stream_id"},
-	} {
-		var exists bool
-		db.QueryRow(`SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2)`,
-			col.table, col.column).Scan(&exists)
-		if !exists {
-			t.Fatalf("precondition: dead column %s.%s should exist before drop", col.table, col.column)
-		}
+
+	// Run the full production startup path: initPostgresSchema drops dead
+	// columns, sweeps legacy rows, then runs the UUID migration.
+	if err := initPostgresSchema(db); err != nil {
+		t.Fatalf("init schema: %v", err)
 	}
-	mustExec(t, db, `ALTER TABLE daemons DROP COLUMN IF EXISTS pending_token_hash`)
-	mustExec(t, db, `ALTER TABLE workspaces DROP COLUMN IF EXISTS root_stream_id`)
+
+	// Dead columns dropped by initPostgresSchemaTables.
 	for _, col := range []struct{ table, column string }{
 		{"daemons", "pending_token_hash"},
 		{"workspaces", "root_stream_id"},
@@ -601,19 +595,21 @@ func TestUUIDGroup1MigrationClearsStagingResidue(t *testing.T) {
 		db.QueryRow(`SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2)`,
 			col.table, col.column).Scan(&exists)
 		if exists {
-			t.Fatalf("dead column %s.%s should have been dropped", col.table, col.column)
+			t.Fatalf("dead column %s.%s should have been dropped by startup", col.table, col.column)
 		}
 	}
 
-	if err := RunUUIDGroup1Migration(t.Context(), db); err != nil {
-		t.Fatalf("run migration: %v", err)
-	}
-
 	// Orphaned view row deleted, valid view row survives.
-	assertScalar(t, db, `SELECT COUNT(*) FROM agent_document_views WHERE agent_id = $1::uuid`, int64(1), fixture.ids["agent"])
-	assertScalar(t, db, `SELECT COUNT(*) FROM agent_document_views`, int64(1))
+	// Reconnect to clear pgx statement cache after ALTER TABLE.
+	db2, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer db2.Close()
+	assertScalar(t, db2, `SELECT COUNT(*) FROM agent_document_views WHERE agent_id = $1::uuid`, int64(1), fixture.ids["agent"])
+	assertScalar(t, db2, `SELECT COUNT(*) FROM agent_document_views`, int64(1))
 
-	if err := VerifyUUIDGroup1Deep(t.Context(), db); err != nil {
+	if err := VerifyUUIDGroup1Deep(t.Context(), db2); err != nil {
 		t.Fatalf("deep verify: %v", err)
 	}
 
@@ -621,17 +617,17 @@ func TestUUIDGroup1MigrationClearsStagingResidue(t *testing.T) {
 	// A thread_messages.author_id pointing to a deleted user should be adopted
 	// (prefix stripped, added to map) but fail at deep verify because the target
 	// entity row doesn't exist.
-	db2, err := sql.Open("pgx", dsn)
+	db3, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	defer db2.Close()
-	resetUUIDGroup1MigrationTables(t, db2)
-	createLegacyUUIDGroup1Schema(t, db2)
-	fixture = seedLegacyUUIDGroup1Graph(t, db2)
+	defer db3.Close()
+	resetUUIDGroup1MigrationTables(t, db3)
+	createLegacyUUIDGroup1Schema(t, db3)
+	fixture = seedLegacyUUIDGroup1Graph(t, db3)
 	missingUser := "user_99999999-9999-9999-9999-999999999999"
-	mustExec(t, db2, `UPDATE thread_messages SET author_id = $1, author_type = 'human' WHERE id = $2`, missingUser, fixture.old["message"])
-	err = RunUUIDGroup1Migration(t.Context(), db2)
+	mustExec(t, db3, `UPDATE thread_messages SET author_id = $1, author_type = 'human' WHERE id = $2`, missingUser, fixture.old["message"])
+	err = RunUUIDGroup1Migration(t.Context(), db3)
 	if err == nil {
 		t.Fatal("expected data-bearing orphan to fail closed")
 	}
