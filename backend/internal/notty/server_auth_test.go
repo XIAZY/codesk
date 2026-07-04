@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -526,8 +525,12 @@ func TestEmailVerifiedMigrationBackfillsExistingAccountsButFutureDefaultIsFalse(
 		t.Fatalf("open postgres: %v", err)
 	}
 	defer db.Close()
-	resetUUIDGroup1MigrationTables(t, db)
-	defer resetUUIDGroup1MigrationTables(t, db)
+	if _, err := db.Exec(`DROP TABLE IF EXISTS account_email_tokens`); err != nil {
+		t.Fatalf("drop email tokens: %v", err)
+	}
+	if _, err := db.Exec(`DROP TABLE IF EXISTS accounts`); err != nil {
+		t.Fatalf("drop accounts: %v", err)
+	}
 	if _, err := db.Exec(`
 		CREATE TABLE accounts (
 			id TEXT PRIMARY KEY,
@@ -542,11 +545,10 @@ func TestEmailVerifiedMigrationBackfillsExistingAccountsButFutureDefaultIsFalse(
 		t.Fatalf("create legacy accounts: %v", err)
 	}
 	now := time.Now().UTC()
-	legacyAccountID := uuid.NewString()
 	if _, err := db.Exec(
 		`INSERT INTO accounts (id, email, display_name, password_hash, last_accessed_workspace_id, password_updated_at, created_at, updated_at)
 		 VALUES ($1, $2, $3, $4, '', $5, $5, $5)`,
-		"account_"+legacyAccountID,
+		"account_legacy",
 		"legacy-verified@example.com",
 		"Legacy",
 		"hash",
@@ -554,21 +556,20 @@ func TestEmailVerifiedMigrationBackfillsExistingAccountsButFutureDefaultIsFalse(
 	); err != nil {
 		t.Fatalf("insert legacy account: %v", err)
 	}
-	if err := initPostgresSchema(db); err != nil {
+	if err := initPostgresSchemaTables(db); err != nil {
 		t.Fatalf("init schema: %v", err)
 	}
 	var existingVerified bool
-	if err := db.QueryRow(`SELECT email_verified FROM accounts WHERE id = $1`, legacyAccountID).Scan(&existingVerified); err != nil {
+	if err := db.QueryRow(`SELECT email_verified FROM accounts WHERE id = $1`, "account_legacy").Scan(&existingVerified); err != nil {
 		t.Fatalf("select existing email_verified: %v", err)
 	}
 	if !existingVerified {
 		t.Fatalf("existing account was not backfilled as verified")
 	}
-	futureAccountID := uuid.NewString()
 	if _, err := db.Exec(
-		`INSERT INTO accounts (id, email, display_name, password_hash, password_updated_at, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $5, $5)`,
-		futureAccountID,
+		`INSERT INTO accounts (id, email, display_name, password_hash, last_accessed_workspace_id, password_updated_at, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, '', $5, $5, $5)`,
+		"account_future",
 		"future-unverified@example.com",
 		"Future",
 		"hash",
@@ -577,7 +578,7 @@ func TestEmailVerifiedMigrationBackfillsExistingAccountsButFutureDefaultIsFalse(
 		t.Fatalf("insert future account: %v", err)
 	}
 	var futureVerified bool
-	if err := db.QueryRow(`SELECT email_verified FROM accounts WHERE id = $1`, futureAccountID).Scan(&futureVerified); err != nil {
+	if err := db.QueryRow(`SELECT email_verified FROM accounts WHERE id = $1`, "account_future").Scan(&futureVerified); err != nil {
 		t.Fatalf("select future email_verified: %v", err)
 	}
 	if futureVerified {
@@ -1459,17 +1460,12 @@ func TestWorkspaceInviteLinkCreatePreviewAndAccept(t *testing.T) {
 	var memberCount int
 	var role string
 	var joinedUserID string
-	err = server.store.db.QueryRow(
-		`SELECT COUNT(*) OVER (), membership_role, user_id::text
+	if err := server.store.db.QueryRow(
+		`SELECT COUNT(*), COALESCE(MAX(membership_role), ''), COALESCE(MAX(user_id), '')
 		   FROM workspace_members
-		  WHERE workspace_id = $1 AND account_id = $2 AND status = 'active'
-		  ORDER BY user_id::text
-		  LIMIT 1`,
+		  WHERE workspace_id = $1 AND account_id = $2 AND status = 'active'`,
 		workspace.ID, joiner.Account.ID,
-	).Scan(&memberCount, &role, &joinedUserID)
-	if err == sql.ErrNoRows {
-		memberCount = 0
-	} else if err != nil {
+	).Scan(&memberCount, &role, &joinedUserID); err != nil {
 		t.Fatalf("count joined membership: %v", err)
 	}
 	if memberCount != 1 || role != MembershipRoleMember {
@@ -1544,18 +1540,13 @@ func TestWorkspaceInviteAcceptReactivatesInactiveMembership(t *testing.T) {
 
 	var memberCount int
 	var userID, membershipRole, memberStatus, userHandle, userStatus string
-	err := server.store.db.QueryRow(
-		`SELECT COUNT(*) OVER (), m.user_id::text, m.membership_role, m.status, u.handle, u.status
+	if err := server.store.db.QueryRow(
+		`SELECT COUNT(*), COALESCE(MAX(m.user_id), ''), COALESCE(MAX(m.membership_role), ''), COALESCE(MAX(m.status), ''), COALESCE(MAX(u.handle), ''), COALESCE(MAX(u.status), '')
 		   FROM workspace_members m
 		   JOIN users u ON u.workspace_id = m.workspace_id AND u.id = m.user_id
-		  WHERE m.workspace_id = $1 AND m.account_id = $2
-		  ORDER BY m.user_id::text
-		  LIMIT 1`,
+		  WHERE m.workspace_id = $1 AND m.account_id = $2`,
 		workspace.ID, member.Account.ID,
-	).Scan(&memberCount, &userID, &membershipRole, &memberStatus, &userHandle, &userStatus)
-	if err == sql.ErrNoRows {
-		memberCount = 0
-	} else if err != nil {
+	).Scan(&memberCount, &userID, &membershipRole, &memberStatus, &userHandle, &userStatus); err != nil {
 		t.Fatalf("load reactivated member: %v", err)
 	}
 	if memberCount != 1 {
