@@ -1781,7 +1781,16 @@ func (s *Store) ClaimAgentEvent(req ClaimAgentEventRequest) (*AgentEvent, error)
 		return nil, err
 	}
 	workspaceID := s.state.WorkspaceID
-	claimedBy := stringsOr(req.ClaimedBy, agentID)
+	claimedBy := strings.TrimSpace(req.ClaimedBy)
+	switch claimedBy {
+	case "", "daemon", "system":
+		claimedBy = agentID
+	default:
+		if s.state.Agents[claimedBy] == nil && s.state.Daemons[claimedBy] == nil {
+			s.mu.Unlock()
+			return nil, errors.New("claimed_by must be an agent or daemon ID")
+		}
+	}
 	s.mu.Unlock()
 	event, err := claimAgentEventPostgres(s.db, workspaceID, agentID, agentHandle, claimedBy)
 	if err != nil {

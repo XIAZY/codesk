@@ -91,7 +91,9 @@ func (s *Server) handleClaimAgentEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.TrimSpace(req.ClaimedBy) == "" {
 		if auth, ok := authFromContext(r.Context()); ok {
-			req.ClaimedBy = auth.PrincipalID
+			if auth.PrincipalKind == "agent" || auth.PrincipalKind == "daemon" {
+				req.ClaimedBy = auth.PrincipalID
+			}
 		}
 	}
 	if !s.requireAgentEndpointAccess(w, r, req.AgentID) {
