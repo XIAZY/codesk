@@ -344,6 +344,44 @@ func TestUUIDGroup2DeletedParentCleanupKeepsLegacyThreadRefToNativeDocument(t *t
 	assertScalar(t, db, `SELECT COUNT(*) FROM thread_participants WHERE thread_id::text = $1`, int64(0), orphanThreadID)
 }
 
+func TestUUIDGroup2DeletedParentCleanupKeepsBareThreadRefToLegacyDocument(t *testing.T) {
+	dsn := postgresTestDSN(t)
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+	resetUUIDGroup1MigrationTables(t, db)
+	createLegacyUUIDGroup1Schema(t, db)
+	fixture := seedLegacyUUIDGroup1Graph(t, db)
+	if err := RunUUIDGroup1Migration(t.Context(), db); err != nil {
+		t.Fatalf("run group1 migration: %v", err)
+	}
+
+	bareDocumentID := strings.TrimPrefix(fixture.documentID, "doc_")
+	mustExec(t, db,
+		`UPDATE threads
+		    SET document_id = $1
+		  WHERE id::text = $2`,
+		bareDocumentID, fixture.ids["thread"])
+
+	tx, err := db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("begin cleanup tx: %v", err)
+	}
+	if err := deleteUUIDGroup2DeletedParentThreadSubtrees(t.Context(), tx); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("deleted-parent cleanup: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit cleanup tx: %v", err)
+	}
+
+	assertScalar(t, db, `SELECT COUNT(*) FROM threads WHERE id::text = $1 AND document_id = $2`, int64(1), fixture.ids["thread"], bareDocumentID)
+	assertScalar(t, db, `SELECT COUNT(*) FROM thread_messages WHERE thread_id::text = $1`, int64(1), fixture.ids["thread"])
+	assertScalar(t, db, `SELECT COUNT(*) FROM thread_participants WHERE thread_id::text = $1`, int64(2), fixture.ids["thread"])
+}
+
 func TestUUIDGroup2MigrationFailsClosedOnExistingDocumentMappingConflict(t *testing.T) {
 	dsn := postgresTestDSN(t)
 	db, err := sql.Open("pgx", dsn)

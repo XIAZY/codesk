@@ -594,11 +594,6 @@ func deleteUUIDGroup2DeletedParentThreadSubtrees(ctx context.Context, tx *sql.Tx
 	if dataType == "uuid" {
 		return nil
 	}
-	documentIDType, err := columnDataType(ctx, tx, "documents", "id")
-	if err != nil {
-		return err
-	}
-
 	rows, err := tx.QueryContext(ctx,
 		`SELECT t.workspace_id::text,
 		        t.id::text,
@@ -637,7 +632,7 @@ func deleteUUIDGroup2DeletedParentThreadSubtrees(ctx context.Context, tx *sql.Tx
 	}
 
 	for _, thread := range threads {
-		exists, err := uuidGroup2DocumentRowExistsForRef(ctx, tx, documentIDType, thread.workspaceID, thread.documentID)
+		exists, err := uuidGroup2DocumentRowExistsForRef(ctx, tx, thread.workspaceID, thread.documentID)
 		if err != nil {
 			return err
 		}
@@ -685,10 +680,6 @@ type uuidGroup2DeletedParentDocumentStorage struct {
 }
 
 func deleteUUIDGroup2DeletedParentDocumentStorage(ctx context.Context, tx *sql.Tx) error {
-	documentIDType, err := columnDataType(ctx, tx, "documents", "id")
-	if err != nil {
-		return err
-	}
 	rows, err := tx.QueryContext(ctx,
 		`WITH storage AS (
 			SELECT workspace_id::text AS workspace_id,
@@ -750,7 +741,7 @@ func deleteUUIDGroup2DeletedParentDocumentStorage(ctx context.Context, tx *sql.T
 	}
 
 	for _, item := range storageRows {
-		exists, err := uuidGroup2DocumentRowExistsForRef(ctx, tx, documentIDType, item.workspaceID, item.documentID)
+		exists, err := uuidGroup2DocumentRowExistsForRef(ctx, tx, item.workspaceID, item.documentID)
 		if err != nil {
 			return err
 		}
@@ -789,16 +780,18 @@ func deleteUUIDGroup2DeletedParentDocumentStorage(ctx context.Context, tx *sql.T
 	return nil
 }
 
-func uuidGroup2DocumentRowExistsForRef(ctx context.Context, tx *sql.Tx, documentsIDType, workspaceID, documentID string) (bool, error) {
+func uuidGroup2DocumentRowExistsForRef(ctx context.Context, tx *sql.Tx, workspaceID, documentID string) (bool, error) {
 	workspaceID = strings.TrimSpace(workspaceID)
 	documentID = strings.TrimSpace(documentID)
 	if workspaceID == "" || documentID == "" {
 		return false, nil
 	}
-	if documentsIDType == "uuid" {
-		if stripped, err := stripPrefixedUUID(documentID, "doc_"); err == nil {
-			documentID = stripped
-		}
+
+	candidates := []string{documentID}
+	if stripped, err := stripPrefixedUUID(documentID, "doc_"); err == nil {
+		candidates = append(candidates, stripped)
+	} else if isUUIDString(documentID) {
+		candidates = append(candidates, "doc_"+uuid.MustParse(documentID).String())
 	}
 
 	var exists bool
@@ -807,9 +800,9 @@ func uuidGroup2DocumentRowExistsForRef(ctx context.Context, tx *sql.Tx, document
 			SELECT 1
 			  FROM documents AS d
 			 WHERE d.workspace_id::text = $1
-			   AND d.id::text = $2
+			   AND (d.id::text = $2 OR d.id::text = $3)
 		)`,
-		workspaceID, documentID,
+		workspaceID, candidates[0], candidates[len(candidates)-1],
 	).Scan(&exists)
 	return exists, err
 }
