@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/google/uuid"
 	crdt "notty/internal/ycrdt"
 	"notty/internal/yproto"
 )
@@ -952,6 +953,9 @@ func TestWorkspaceRuntimeFilesystemLifecycleRecordsSQLiteAndDaemonCalls(t *testi
 	reconcileRuntimeUntilIdle(t, ctx, runtime)
 
 	documentID := server.documentIDForPath(t, "docs/lifecycle.md")
+	if _, err := uuid.Parse(documentID); err != nil {
+		t.Fatalf("local filesystem create document ID should be a bare UUID, got %q: %v", documentID, err)
+	}
 	server.assertContents(t, map[string]string{"docs/lifecycle.md": "alpha\n"})
 	server.assertRootEntry(t, documentID, "docs/lifecycle.md", false)
 	server.assertSyncUpdateCount(t, server.rootDocumentID, 1)
@@ -1096,6 +1100,10 @@ func (s *workspaceRuntimeRegressionServer) handle(w http.ResponseWriter, r *http
 		id := strings.TrimSpace(req["documentId"])
 		if id == "" {
 			http.Error(w, "document id is required", http.StatusBadRequest)
+			return
+		}
+		if _, err := uuid.Parse(id); err != nil {
+			http.Error(w, "document id must be a bare uuid", http.StatusBadRequest)
 			return
 		}
 		if strings.TrimSpace(req["clientOperationId"]) == "" {

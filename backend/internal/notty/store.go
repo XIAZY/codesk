@@ -108,15 +108,15 @@ func (s *Store) load() error {
 
 	s.state = seedWorkspaceFor(s.workspaceID, s.workspaceName)
 	if err := s.loadWorkspaceMetadataPostgresLocked(); err != nil {
-		return err
+		return fmt.Errorf("load workspace metadata: %w", err)
 	}
 	if err := s.loadNormalizedPostgresLocked(); err != nil {
-		return err
+		return fmt.Errorf("load normalized workspace state: %w", err)
 	}
 	s.ensureMaps()
 	needsPersist := false
 	if changed, err := s.ensureRootDocumentLocked(); err != nil {
-		return err
+		return fmt.Errorf("ensure root document: %w", err)
 	} else if changed {
 		needsPersist = true
 	}
@@ -128,7 +128,9 @@ func (s *Store) load() error {
 		needsPersist = true
 	}
 	if needsPersist {
-		return s.persistLocked()
+		if err := s.persistLocked(); err != nil {
+			return fmt.Errorf("persist normalized workspace state: %w", err)
+		}
 	}
 	return nil
 }
@@ -209,10 +211,10 @@ func seedWorkspaceFor(workspaceID string, workspaceName string) WorkspaceState {
 		workspaceName = workspaceID
 	}
 	return WorkspaceState{
-		WorkspaceID:      workspaceID,
-		Name:             workspaceName,
-		ContentDocuments: map[string]*Document{},
-		Users: map[string]*User{},
+		WorkspaceID:         workspaceID,
+		Name:                workspaceName,
+		ContentDocuments:    map[string]*Document{},
+		Users:               map[string]*User{},
 		Daemons:             map[string]*Daemon{},
 		Agents:              map[string]*Agent{},
 		AgentRuns:           map[string]*AgentRun{},
@@ -227,7 +229,7 @@ func seedWorkspaceFor(workspaceID string, workspaceName string) WorkspaceState {
 }
 
 func newRootDocumentID() string {
-	return "doc_" + uuid.NewString()
+	return uuid.NewString()
 }
 
 func legacyRootDocumentID(workspaceID string) string {
@@ -240,11 +242,7 @@ func normalizeCreateDocumentID(id string) (string, error) {
 	if id == "" {
 		return "", nil
 	}
-	const prefix = "doc_"
-	if !strings.HasPrefix(id, prefix) {
-		return "", fmt.Errorf("document id must use %q prefix", prefix)
-	}
-	if _, err := uuid.Parse(strings.TrimPrefix(id, prefix)); err != nil {
+	if _, err := uuid.Parse(id); err != nil {
 		return "", fmt.Errorf("invalid document id: %w", err)
 	}
 	return id, nil
@@ -1036,7 +1034,7 @@ func (s *Store) CreateDocument(req CreateDocumentRequest, meta OperationMeta) (*
 
 	now := time.Now().UTC()
 	clientIDSeed := s.nextClientIDSeedLocked()
-	id := "doc_" + uuid.NewString()
+	id := uuid.NewString()
 	if requestedID != "" {
 		id = requestedID
 	}
@@ -1979,7 +1977,10 @@ func initPostgresSchema(db *sql.DB) error {
 	if err := deleteLegacyScaffoldingRows(db); err != nil {
 		return err
 	}
-	return RunUUIDGroup1Migration(context.Background(), db)
+	if err := RunUUIDGroup1Migration(context.Background(), db); err != nil {
+		return err
+	}
+	return RunUUIDGroup2Migration(context.Background(), db)
 }
 
 func normalizeDocumentPath(value string) (string, error) {

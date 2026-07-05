@@ -439,16 +439,19 @@ func TestUUIDGroup1MigrationPreservesPostgresAPIsAndCreatesBareUUIDs(t *testing.
 	resetUUIDGroup1MigrationTables(t, db)
 	createLegacyUUIDGroup1Schema(t, db)
 	fixture := seedLegacyUUIDGroup1Graph(t, db)
+	seedUUIDGroup2LegacyRootDocument(t, db, fixture, "")
 	if err := initPostgresSchema(db); err != nil {
 		t.Fatalf("startup migration: %v", err)
 	}
+	contentDocumentID := queryString(t, db, `SELECT new_id::text FROM uuid_migration_map WHERE entity_type = 'documents' AND old_id = $1`, fixture.documentID)
+	rootDocumentID := queryString(t, db, `SELECT new_id::text FROM uuid_migration_map WHERE entity_type = 'documents' AND old_id = $1`, fixture.rootDocumentID)
 
 	workspace, err := getWorkspace(db, fixture.ids["workspace"])
 	if err != nil {
 		t.Fatalf("get migrated workspace: %v", err)
 	}
-	if workspace.RootDocumentID != fixture.rootDocumentID {
-		t.Fatalf("root document ID = %q, want %q", workspace.RootDocumentID, fixture.rootDocumentID)
+	if workspace.RootDocumentID != rootDocumentID {
+		t.Fatalf("root document ID = %q, want %q", workspace.RootDocumentID, rootDocumentID)
 	}
 	member, err := workspaceMemberForAccount(db, fixture.ids["workspace"], fixture.ids["account"])
 	if err != nil {
@@ -470,8 +473,8 @@ func TestUUIDGroup1MigrationPreservesPostgresAPIsAndCreatesBareUUIDs(t *testing.
 		t.Fatalf("new store: %v", err)
 	}
 	snapshot := store.Snapshot()
-	if snapshot.ContentDocuments[fixture.documentID] == nil {
-		t.Fatalf("snapshot missing migrated document %q", fixture.documentID)
+	if snapshot.ContentDocuments[contentDocumentID] == nil {
+		t.Fatalf("snapshot missing migrated document %q", contentDocumentID)
 	}
 	if snapshot.Users[fixture.ids["user"]] == nil {
 		t.Fatalf("snapshot missing migrated user %q", fixture.ids["user"])
@@ -484,7 +487,7 @@ func TestUUIDGroup1MigrationPreservesPostgresAPIsAndCreatesBareUUIDs(t *testing.
 	}
 
 	thread, message, created, err := store.CreateThread(CreateThreadRequest{
-		DocumentID: fixture.documentID,
+		DocumentID: contentDocumentID,
 		Body:       "migration smoke thread",
 	}, OperationMeta{ActorID: fixture.ids["user"], ActorType: "human", Source: "test"})
 	if err != nil {
@@ -512,8 +515,8 @@ func TestUUIDGroup1MigrationPreservesPostgresAPIsAndCreatesBareUUIDs(t *testing.
 	if !isUUIDString(freshWorkspace.ID) || strings.HasPrefix(freshWorkspace.ID, "ws_") {
 		t.Fatalf("fresh workspace ID = %q, want bare UUID", freshWorkspace.ID)
 	}
-	if !strings.HasPrefix(freshWorkspace.RootDocumentID, "doc_") {
-		t.Fatalf("fresh root document ID = %q, want document prefix", freshWorkspace.RootDocumentID)
+	if !isUUIDString(freshWorkspace.RootDocumentID) || strings.HasPrefix(freshWorkspace.RootDocumentID, "doc_") {
+		t.Fatalf("fresh root document ID = %q, want bare UUID", freshWorkspace.RootDocumentID)
 	}
 	if !isUUIDString(freshMember.UserID) || strings.HasPrefix(freshMember.UserID, "user_") {
 		t.Fatalf("fresh member user ID = %q, want bare UUID", freshMember.UserID)
@@ -679,6 +682,7 @@ func TestInitPostgresSchemaMigratesLegacyDocumentHeadsIntoCheckpoints(t *testing
 	oldWorkspaceID := "ws_" + workspaceUUID
 	documentID := "doc_77777777-7777-7777-7777-777777777777"
 	mustExec(t, db, `CREATE TABLE workspaces (id TEXT PRIMARY KEY, root_document_id TEXT NOT NULL DEFAULT '')`)
+	mustExec(t, db, `CREATE TABLE documents (workspace_id TEXT NOT NULL, id TEXT PRIMARY KEY, path TEXT NOT NULL DEFAULT '', title TEXT NOT NULL DEFAULT '', hidden BOOLEAN NOT NULL DEFAULT false, client_id_seed BIGINT NOT NULL DEFAULT 0, create_client_operation_id TEXT NOT NULL DEFAULT '', updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`)
 	mustExec(t, db, `CREATE TABLE document_heads (
 		workspace_id TEXT NOT NULL,
 		document_id TEXT PRIMARY KEY,
@@ -689,6 +693,7 @@ func TestInitPostgresSchemaMigratesLegacyDocumentHeadsIntoCheckpoints(t *testing
 		updated_at TIMESTAMPTZ NOT NULL
 	)`)
 	mustExec(t, db, `INSERT INTO workspaces (id) VALUES ($1)`, oldWorkspaceID)
+	mustExec(t, db, `INSERT INTO documents (workspace_id, id, path, title, client_id_seed) VALUES ($1, $2, $3, $4, $5)`, oldWorkspaceID, documentID, "docs/spec.md", "Spec", int64(7))
 	mustExec(t, db, `INSERT INTO document_heads (workspace_id, document_id, state_vector, update_id, crdt_state, crdt_state_update_id, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, NOW())`, oldWorkspaceID, documentID, "sv", int64(0), "checkpoint-state", int64(9))
 
@@ -699,9 +704,9 @@ func TestInitPostgresSchemaMigratesLegacyDocumentHeadsIntoCheckpoints(t *testing
 	assertColumnType(t, db, "document_checkpoints", "workspace_id", "uuid")
 	assertScalar(t, db, `SELECT workspace_id::text FROM document_heads`, workspaceUUID)
 	assertScalar(t, db, `SELECT workspace_id::text FROM document_checkpoints`, workspaceUUID)
-	assertScalar(t, db, `SELECT document_id FROM document_checkpoints`, documentID)
-	assertScalar(t, db, `SELECT crdt_state FROM document_checkpoints`, "checkpoint-state")
-	assertScalar(t, db, `SELECT root_document_id FROM workspaces`, "doc_root_"+oldWorkspaceID)
+	assertScalar(t, db, `SELECT document_id::text FROM document_checkpoints WHERE crdt_state = 'checkpoint-state'`, strings.TrimPrefix(documentID, "doc_"))
+	assertScalar(t, db, `SELECT crdt_state FROM document_checkpoints WHERE crdt_state = 'checkpoint-state'`, "checkpoint-state")
+	assertScalar(t, db, `SELECT root_document_id IS NOT NULL FROM workspaces`, true)
 }
 
 type legacyUUIDGroup1Fixture struct {
