@@ -95,6 +95,16 @@ func TestUUIDGroup2MigrationFailsClosedOnMalformedDocumentID(t *testing.T) {
 	}
 	mustExec(t, db, `INSERT INTO documents (workspace_id, id, path, title, client_id_seed) VALUES ($1::uuid, $2, $3, $4, $5)`,
 		fixture.ids["workspace"], "doc_not-a-uuid", "bad.md", "Bad", int64(77))
+	malformedUpdate := []byte{0xba, 0xdd, 0x0c}
+	var malformedUpdateID int64
+	if err := db.QueryRow(`INSERT INTO document_updates (workspace_id, document_id, update, actor_id, actor_type) VALUES ($1::uuid, $2, $3, NULL, 'system') RETURNING id`,
+		fixture.ids["workspace"], "doc_not-a-uuid", malformedUpdate).Scan(&malformedUpdateID); err != nil {
+		t.Fatalf("insert malformed document update: %v", err)
+	}
+	mustExec(t, db, `INSERT INTO document_heads (workspace_id, document_id, state_vector, update_id) VALUES ($1::uuid, $2, $3, $4)`,
+		fixture.ids["workspace"], "doc_not-a-uuid", "malformed-head", malformedUpdateID)
+	mustExec(t, db, `INSERT INTO document_checkpoints (workspace_id, document_id, update_id, crdt_state, state_vector) VALUES ($1::uuid, $2, $3, $4, $5)`,
+		fixture.ids["workspace"], "doc_not-a-uuid", malformedUpdateID, "malformed-checkpoint", "malformed-csv")
 
 	err = RunUUIDGroup2Migration(t.Context(), db)
 	if err == nil {
@@ -105,6 +115,9 @@ func TestUUIDGroup2MigrationFailsClosedOnMalformedDocumentID(t *testing.T) {
 	}
 	assertColumnType(t, db, "documents", "id", "text")
 	assertScalar(t, db, `SELECT COUNT(*) FROM documents WHERE id = 'doc_not-a-uuid'`, 1)
+	assertBytes(t, db, `SELECT update FROM document_updates WHERE document_id = 'doc_not-a-uuid'`, malformedUpdate)
+	assertScalar(t, db, `SELECT state_vector FROM document_heads WHERE document_id = 'doc_not-a-uuid'`, "malformed-head")
+	assertScalar(t, db, `SELECT crdt_state FROM document_checkpoints WHERE document_id = 'doc_not-a-uuid'`, "malformed-checkpoint")
 }
 
 func TestUUIDGroup2MigrationFailsClosedOnMalformedRootDocumentID(t *testing.T) {
@@ -215,6 +228,64 @@ func TestUUIDGroup2MigrationDeletesDeletedParentThreadSubtree(t *testing.T) {
 	assertScalar(t, db, `SELECT COUNT(*) FROM thread_messages WHERE thread_id::text = $1`, int64(0), orphanThreadUUID)
 	assertScalar(t, db, `SELECT COUNT(*) FROM thread_participants WHERE thread_id::text = $1`, int64(0), orphanThreadUUID)
 	assertScalar(t, db, `SELECT COUNT(*) FROM threads WHERE document_id::text = $1`, int64(1), strings.TrimPrefix(fixture.documentID, "doc_"))
+	if err := VerifyUUIDGroup2Deep(t.Context(), db); err != nil {
+		t.Fatalf("verify group2 deep: %v", err)
+	}
+}
+
+func TestUUIDGroup2MigrationDeletesDeletedParentDocumentStorage(t *testing.T) {
+	dsn := postgresTestDSN(t)
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+	resetUUIDGroup1MigrationTables(t, db)
+	createLegacyUUIDGroup1Schema(t, db)
+	fixture := seedLegacyUUIDGroup1Graph(t, db)
+	seedUUIDGroup2LegacyRootDocument(t, db, fixture, "")
+
+	liveUpdateBefore := queryBytes(t, db, `SELECT update FROM document_updates WHERE document_id = $1 ORDER BY id LIMIT 1`, fixture.documentID)
+	liveHeadBefore := queryString(t, db, `SELECT state_vector FROM document_heads WHERE document_id = $1`, fixture.documentID)
+	liveCheckpointBefore := queryString(t, db, `SELECT crdt_state FROM document_checkpoints WHERE document_id = $1`, fixture.documentID)
+
+	deletedDocumentID := "doc_3dfd24a0-4eb1-4332-927b-69a710afa49a"
+	var deletedUpdateAID int64
+	if err := db.QueryRow(`INSERT INTO document_updates (workspace_id, document_id, update, actor_id, actor_type) VALUES ($1, $2, $3, NULL, 'system') RETURNING id`,
+		fixture.old["workspace"], deletedDocumentID, []byte{0xde, 0xad, 0x01}).Scan(&deletedUpdateAID); err != nil {
+		t.Fatalf("insert deleted-parent update A: %v", err)
+	}
+	var deletedUpdateBID int64
+	if err := db.QueryRow(`INSERT INTO document_updates (workspace_id, document_id, update, actor_id, actor_type) VALUES ($1, $2, $3, NULL, 'system') RETURNING id`,
+		fixture.old["workspace"], deletedDocumentID, []byte{0xde, 0xad, 0x02}).Scan(&deletedUpdateBID); err != nil {
+		t.Fatalf("insert deleted-parent update B: %v", err)
+	}
+	mustExec(t, db, `INSERT INTO document_heads (workspace_id, document_id, state_vector, update_id) VALUES ($1, $2, $3, $4)`,
+		fixture.old["workspace"], deletedDocumentID, "deleted-head", deletedUpdateBID)
+	mustExec(t, db, `INSERT INTO document_checkpoints (workspace_id, document_id, update_id, crdt_state, state_vector) VALUES ($1, $2, $3, $4, $5)`,
+		fixture.old["workspace"], deletedDocumentID, deletedUpdateAID, "deleted-checkpoint", "deleted-csv")
+
+	logs := authTestCaptureLogs(t)
+	if err := initPostgresSchema(db); err != nil {
+		t.Fatalf("startup migration: %v", err)
+	}
+
+	logs.waitContains(t,
+		"uuid group2 deleting deleted-parent document storage",
+		"workspace_id="+fixture.ids["workspace"],
+		"document_id="+deletedDocumentID,
+		"update_count=2",
+		"head_count=1",
+		"checkpoint_count=1",
+	)
+	assertScalar(t, db, `SELECT COUNT(*) FROM document_updates WHERE document_id::text = $1`, int64(0), deletedDocumentID)
+	assertScalar(t, db, `SELECT COUNT(*) FROM document_heads WHERE document_id::text = $1`, int64(0), deletedDocumentID)
+	assertScalar(t, db, `SELECT COUNT(*) FROM document_checkpoints WHERE document_id::text = $1`, int64(0), deletedDocumentID)
+
+	contentDocumentID := strings.TrimPrefix(fixture.documentID, "doc_")
+	assertBytes(t, db, `SELECT update FROM document_updates WHERE document_id::text = $1 ORDER BY id LIMIT 1`, liveUpdateBefore, contentDocumentID)
+	assertScalar(t, db, `SELECT state_vector FROM document_heads WHERE document_id::text = $1`, liveHeadBefore, contentDocumentID)
+	assertScalar(t, db, `SELECT crdt_state FROM document_checkpoints WHERE document_id::text = $1`, liveCheckpointBefore, contentDocumentID)
 	if err := VerifyUUIDGroup2Deep(t.Context(), db); err != nil {
 		t.Fatalf("verify group2 deep: %v", err)
 	}
