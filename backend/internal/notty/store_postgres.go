@@ -626,15 +626,15 @@ func initPostgresSchemaConstraints(db *sql.DB) error {
 		`DO $$ BEGIN ALTER TABLE agent_document_views ADD CONSTRAINT fk_agent_document_views_document FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`ALTER TABLE agent_document_views VALIDATE CONSTRAINT fk_agent_document_views_document`,
 
-		// SET NULL FKs for optional document refs use simple (non-composite) keys to avoid
-		// nulling workspace_id when the document is deleted (composite SET NULL nulls all columns).
-		`DO $$ BEGIN ALTER TABLE workspace_members ADD CONSTRAINT fk_workspace_members_last_doc FOREIGN KEY (last_accessed_document_id) REFERENCES documents(id) ON DELETE SET NULL NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		// SET NULL FKs for optional document refs use composite keys with column-list SET NULL
+		// (Postgres 15+) to null only the ref column, not workspace_id.
+		`DO $$ BEGIN ALTER TABLE workspace_members ADD CONSTRAINT fk_workspace_members_last_doc FOREIGN KEY (workspace_id, last_accessed_document_id) REFERENCES documents(workspace_id, id) ON DELETE SET NULL (last_accessed_document_id) NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`ALTER TABLE workspace_members VALIDATE CONSTRAINT fk_workspace_members_last_doc`,
 
-		`DO $$ BEGIN ALTER TABLE activities ADD CONSTRAINT fk_activities_document FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE SET NULL NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`DO $$ BEGIN ALTER TABLE activities ADD CONSTRAINT fk_activities_document FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id) ON DELETE SET NULL (document_id) NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`ALTER TABLE activities VALIDATE CONSTRAINT fk_activities_document`,
 
-		`DO $$ BEGIN ALTER TABLE agent_events ADD CONSTRAINT fk_agent_events_document FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE SET NULL NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`DO $$ BEGIN ALTER TABLE agent_events ADD CONSTRAINT fk_agent_events_document FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id) ON DELETE SET NULL (document_id) NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`ALTER TABLE agent_events VALIDATE CONSTRAINT fk_agent_events_document`,
 
 		// ── Threads/messages (composite same-workspace enforcement) ──
@@ -645,11 +645,11 @@ func initPostgresSchemaConstraints(db *sql.DB) error {
 		`DO $$ BEGIN ALTER TABLE thread_participants ADD CONSTRAINT fk_thread_participants_thread FOREIGN KEY (workspace_id, thread_id) REFERENCES threads(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`ALTER TABLE thread_participants VALIDATE CONSTRAINT fk_thread_participants_thread`,
 
-		// SET NULL FKs for optional thread/message refs use simple keys (same reasoning as above).
-		`DO $$ BEGIN ALTER TABLE agent_events ADD CONSTRAINT fk_agent_events_thread FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE SET NULL NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		// SET NULL FKs for optional thread/message refs use composite keys with column-list SET NULL.
+		`DO $$ BEGIN ALTER TABLE agent_events ADD CONSTRAINT fk_agent_events_thread FOREIGN KEY (workspace_id, thread_id) REFERENCES threads(workspace_id, id) ON DELETE SET NULL (thread_id) NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`ALTER TABLE agent_events VALIDATE CONSTRAINT fk_agent_events_thread`,
 
-		`DO $$ BEGIN ALTER TABLE agent_events ADD CONSTRAINT fk_agent_events_thread_message FOREIGN KEY (thread_message_id) REFERENCES thread_messages(id) ON DELETE SET NULL NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`DO $$ BEGIN ALTER TABLE agent_events ADD CONSTRAINT fk_agent_events_thread_message FOREIGN KEY (workspace_id, thread_message_id) REFERENCES thread_messages(workspace_id, id) ON DELETE SET NULL (thread_message_id) NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`ALTER TABLE agent_events VALIDATE CONSTRAINT fk_agent_events_thread_message`,
 
 		// ── Polymorphic constraint triggers ──
@@ -667,19 +667,19 @@ func initPostgresSchemaConstraints(db *sql.DB) error {
 				RETURN NEW;
 			END IF;
 			IF ref_type = 'human' THEN
-				PERFORM 1 FROM users WHERE id = ref_id;
+				PERFORM 1 FROM users WHERE id = ref_id AND workspace_id = NEW.workspace_id;
 				IF NOT FOUND THEN
-					RAISE EXCEPTION 'actor_id % references missing user', ref_id;
+					RAISE EXCEPTION 'actor_id % references missing user in workspace %', ref_id, NEW.workspace_id;
 				END IF;
 			ELSIF ref_type = 'agent' THEN
-				PERFORM 1 FROM agents WHERE id = ref_id;
+				PERFORM 1 FROM agents WHERE id = ref_id AND workspace_id = NEW.workspace_id;
 				IF NOT FOUND THEN
-					RAISE EXCEPTION 'actor_id % references missing agent', ref_id;
+					RAISE EXCEPTION 'actor_id % references missing agent in workspace %', ref_id, NEW.workspace_id;
 				END IF;
 			ELSIF ref_type = 'daemon' THEN
-				PERFORM 1 FROM daemons WHERE id = ref_id;
+				PERFORM 1 FROM daemons WHERE id = ref_id AND workspace_id = NEW.workspace_id;
 				IF NOT FOUND THEN
-					RAISE EXCEPTION 'actor_id % references missing daemon', ref_id;
+					RAISE EXCEPTION 'actor_id % references missing daemon in workspace %', ref_id, NEW.workspace_id;
 				END IF;
 			END IF;
 			RETURN NEW;
@@ -709,14 +709,14 @@ func initPostgresSchemaConstraints(db *sql.DB) error {
 				RETURN NEW;
 			END IF;
 			IF NEW.created_by_type = 'human' THEN
-				PERFORM 1 FROM users WHERE id = NEW.created_by_id;
+				PERFORM 1 FROM users WHERE id = NEW.created_by_id AND workspace_id = NEW.workspace_id;
 				IF NOT FOUND THEN
-					RAISE EXCEPTION 'created_by_id % references missing user', NEW.created_by_id;
+					RAISE EXCEPTION 'created_by_id % references missing user in workspace %', NEW.created_by_id, NEW.workspace_id;
 				END IF;
 			ELSIF NEW.created_by_type = 'agent' THEN
-				PERFORM 1 FROM agents WHERE id = NEW.created_by_id;
+				PERFORM 1 FROM agents WHERE id = NEW.created_by_id AND workspace_id = NEW.workspace_id;
 				IF NOT FOUND THEN
-					RAISE EXCEPTION 'created_by_id % references missing agent', NEW.created_by_id;
+					RAISE EXCEPTION 'created_by_id % references missing agent in workspace %', NEW.created_by_id, NEW.workspace_id;
 				END IF;
 			END IF;
 			RETURN NEW;
@@ -736,14 +736,14 @@ func initPostgresSchemaConstraints(db *sql.DB) error {
 				RETURN NEW;
 			END IF;
 			IF NEW.author_type = 'human' THEN
-				PERFORM 1 FROM users WHERE id = NEW.author_id;
+				PERFORM 1 FROM users WHERE id = NEW.author_id AND workspace_id = NEW.workspace_id;
 				IF NOT FOUND THEN
-					RAISE EXCEPTION 'author_id % references missing user', NEW.author_id;
+					RAISE EXCEPTION 'author_id % references missing user in workspace %', NEW.author_id, NEW.workspace_id;
 				END IF;
 			ELSIF NEW.author_type = 'agent' THEN
-				PERFORM 1 FROM agents WHERE id = NEW.author_id;
+				PERFORM 1 FROM agents WHERE id = NEW.author_id AND workspace_id = NEW.workspace_id;
 				IF NOT FOUND THEN
-					RAISE EXCEPTION 'author_id % references missing agent', NEW.author_id;
+					RAISE EXCEPTION 'author_id % references missing agent in workspace %', NEW.author_id, NEW.workspace_id;
 				END IF;
 			END IF;
 			RETURN NEW;
@@ -763,19 +763,19 @@ func initPostgresSchemaConstraints(db *sql.DB) error {
 				RETURN NEW;
 			END IF;
 			IF NEW.provenance_actor_type = 'human' THEN
-				PERFORM 1 FROM users WHERE id = NEW.provenance_actor_id;
+				PERFORM 1 FROM users WHERE id = NEW.provenance_actor_id AND workspace_id = NEW.workspace_id;
 				IF NOT FOUND THEN
-					RAISE EXCEPTION 'provenance_actor_id % references missing user', NEW.provenance_actor_id;
+					RAISE EXCEPTION 'provenance_actor_id % references missing user in workspace %', NEW.provenance_actor_id, NEW.workspace_id;
 				END IF;
 			ELSIF NEW.provenance_actor_type = 'agent' THEN
-				PERFORM 1 FROM agents WHERE id = NEW.provenance_actor_id;
+				PERFORM 1 FROM agents WHERE id = NEW.provenance_actor_id AND workspace_id = NEW.workspace_id;
 				IF NOT FOUND THEN
-					RAISE EXCEPTION 'provenance_actor_id % references missing agent', NEW.provenance_actor_id;
+					RAISE EXCEPTION 'provenance_actor_id % references missing agent in workspace %', NEW.provenance_actor_id, NEW.workspace_id;
 				END IF;
 			ELSIF NEW.provenance_actor_type = 'daemon' THEN
-				PERFORM 1 FROM daemons WHERE id = NEW.provenance_actor_id;
+				PERFORM 1 FROM daemons WHERE id = NEW.provenance_actor_id AND workspace_id = NEW.workspace_id;
 				IF NOT FOUND THEN
-					RAISE EXCEPTION 'provenance_actor_id % references missing daemon', NEW.provenance_actor_id;
+					RAISE EXCEPTION 'provenance_actor_id % references missing daemon in workspace %', NEW.provenance_actor_id, NEW.workspace_id;
 				END IF;
 			END IF;
 			RETURN NEW;
@@ -791,11 +791,11 @@ func initPostgresSchemaConstraints(db *sql.DB) error {
 		`CREATE OR REPLACE FUNCTION check_participant_ref()
 		RETURNS TRIGGER AS $fn$
 		BEGIN
-			PERFORM 1 FROM users WHERE id = NEW.participant_id;
+			PERFORM 1 FROM users WHERE id = NEW.participant_id AND workspace_id = NEW.workspace_id;
 			IF FOUND THEN RETURN NEW; END IF;
-			PERFORM 1 FROM agents WHERE id = NEW.participant_id;
+			PERFORM 1 FROM agents WHERE id = NEW.participant_id AND workspace_id = NEW.workspace_id;
 			IF FOUND THEN RETURN NEW; END IF;
-			RAISE EXCEPTION 'participant_id % not found in users or agents', NEW.participant_id;
+			RAISE EXCEPTION 'participant_id % not found in users or agents in workspace %', NEW.participant_id, NEW.workspace_id;
 		END;
 		$fn$ LANGUAGE plpgsql`,
 
@@ -816,9 +816,7 @@ func initPostgresSchemaConstraints(db *sql.DB) error {
 			END IF;
 			PERFORM 1 FROM agents WHERE id = NEW.agent_id AND daemon_id = NEW.claimed_by;
 			IF FOUND THEN RETURN NEW; END IF;
-			PERFORM 1 FROM daemons WHERE id = NEW.claimed_by;
-			IF FOUND THEN RETURN NEW; END IF;
-			RAISE EXCEPTION 'claimed_by % is not the event agent or its daemon', NEW.claimed_by;
+			RAISE EXCEPTION 'claimed_by % is not the event agent % or its daemon', NEW.claimed_by, NEW.agent_id;
 		END;
 		$fn$ LANGUAGE plpgsql`,
 

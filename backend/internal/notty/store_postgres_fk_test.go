@@ -738,12 +738,67 @@ func TestConstraintTriggersExist(t *testing.T) {
 	}
 }
 
-// uuidStringOrNil is used by tests to pass nullable UUID values.
-// It is already defined in the main package for non-test code.
-func fkTestUuidOrNil(s string) interface{} {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return nil
+func TestPolymorphicTriggerRejectsCrossWorkspaceRef(t *testing.T) {
+	f := newFKTestFixture(t)
+
+	// Create a second workspace with its own user.
+	wsB := uuid.NewString()
+	rootDocB := uuid.NewString()
+	mustExecFK(t, f.db, `INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		wsB, "ws-b-"+wsB[:8], "Workspace B", rootDocB, f.now, f.now)
+	mustExecFK(t, f.db, `INSERT INTO documents (workspace_id, id, path, title, hidden, client_id_seed, updated_at)
+		VALUES ($1, $2, '', '', TRUE, 1000, $3)`,
+		wsB, rootDocB, f.now)
+	userB := uuid.NewString()
+	mustExecFK(t, f.db, `INSERT INTO users (workspace_id, id, handle, name, role, kind, status, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 'member', 'human', 'active', $5, $6)`,
+		wsB, userB, "user-b", "User B", f.now, f.now)
+
+	// Insert a document in workspace A.
+	docA := uuid.NewString()
+	f.insertDocument(t, docA)
+
+	// Attempt to insert a document_update in workspace A referencing user from workspace B.
+	_, err := f.db.Exec(`INSERT INTO document_updates (workspace_id, document_id, update, actor_id, actor_type, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		f.workspaceID, docA, []byte{0}, userB, "human", f.now)
+	if err == nil {
+		t.Fatal("expected cross-workspace actor ref to be rejected")
 	}
-	return s
+	if !strings.Contains(err.Error(), "references missing user in workspace") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestAgentEventClaimedByRejectsUnrelatedDaemon(t *testing.T) {
+	f := newFKTestFixture(t)
+
+	daemonA := uuid.NewString()
+	daemonB := uuid.NewString()
+	agentID := uuid.NewString()
+
+	f.insertDaemon(t, daemonA)
+	f.insertDaemon(t, daemonB)
+	f.insertAgent(t, agentID, daemonA)
+
+	// claimed_by = daemonA (agent's daemon) should succeed.
+	eventOK := uuid.NewString()
+	mustExecFK(t, f.db, `INSERT INTO agent_events (workspace_id, id, agent_id, agent_handle, type, status,
+		summary, prompt, dedup_key, last_error, attempt_count, claimed_by, available_at, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 'test', 'claimed', '', '', '', '', 0, $5, $6, $7, $8)`,
+		f.workspaceID, eventOK, agentID, "agent-"+agentID[:8], daemonA, f.now, f.now, f.now)
+
+	// claimed_by = daemonB (unrelated daemon) should fail.
+	eventBad := uuid.NewString()
+	_, err := f.db.Exec(`INSERT INTO agent_events (workspace_id, id, agent_id, agent_handle, type, status,
+		summary, prompt, dedup_key, last_error, attempt_count, claimed_by, available_at, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 'test', 'claimed', '', '', '', '', 0, $5, $6, $7, $8)`,
+		f.workspaceID, eventBad, agentID, "agent-"+agentID[:8], daemonB, f.now, f.now, f.now)
+	if err == nil {
+		t.Fatal("expected unrelated daemon claimed_by to be rejected")
+	}
+	if !strings.Contains(err.Error(), "is not the event agent") {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }
