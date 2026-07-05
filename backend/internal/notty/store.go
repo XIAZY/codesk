@@ -1980,7 +1980,10 @@ func initPostgresSchema(db *sql.DB) error {
 	if err := RunUUIDGroup1Migration(context.Background(), db); err != nil {
 		return err
 	}
-	return RunUUIDGroup2Migration(context.Background(), db)
+	if err := RunUUIDGroup2Migration(context.Background(), db); err != nil {
+		return err
+	}
+	return initPostgresSchemaConstraints(db)
 }
 
 func normalizeDocumentPath(value string) (string, error) {
