@@ -130,6 +130,9 @@ func RunUUIDGroup2Migration(ctx context.Context, db *sql.DB) error {
 	if err = deleteUUIDGroup2DeletedParentThreadSubtrees(ctx, tx); err != nil {
 		return fmt.Errorf("delete deleted-parent thread subtrees: %w", err)
 	}
+	if err = deleteUUIDGroup2DeletedParentDocumentStorage(ctx, tx); err != nil {
+		return fmt.Errorf("delete deleted-parent document storage: %w", err)
+	}
 	if err = resolveUUIDGroup2DisposableRefs(ctx, tx); err != nil {
 		return fmt.Errorf("resolve disposable document refs: %w", err)
 	}
@@ -666,6 +669,119 @@ func deleteUUIDGroup2DeletedParentThreadSubtrees(ctx context.Context, tx *sql.Tx
 			  WHERE workspace_id::text = $1
 			    AND id::text = $2`,
 			thread.workspaceID, thread.threadID,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type uuidGroup2DeletedParentDocumentStorage struct {
+	workspaceID     string
+	documentID      string
+	updateCount     int
+	headCount       int
+	checkpointCount int
+}
+
+func deleteUUIDGroup2DeletedParentDocumentStorage(ctx context.Context, tx *sql.Tx) error {
+	documentIDType, err := columnDataType(ctx, tx, "documents", "id")
+	if err != nil {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx,
+		`WITH storage AS (
+			SELECT workspace_id::text AS workspace_id,
+			       document_id::text AS document_id,
+			       COUNT(*)::bigint AS update_count,
+			       0::bigint AS head_count,
+			       0::bigint AS checkpoint_count
+			  FROM document_updates
+			 WHERE document_id IS NOT NULL
+			   AND document_id::text <> ''
+			 GROUP BY workspace_id::text, document_id::text
+			UNION ALL
+			SELECT workspace_id::text AS workspace_id,
+			       document_id::text AS document_id,
+			       0::bigint AS update_count,
+			       COUNT(*)::bigint AS head_count,
+			       0::bigint AS checkpoint_count
+			  FROM document_heads
+			 WHERE document_id IS NOT NULL
+			   AND document_id::text <> ''
+			 GROUP BY workspace_id::text, document_id::text
+			UNION ALL
+			SELECT workspace_id::text AS workspace_id,
+			       document_id::text AS document_id,
+			       0::bigint AS update_count,
+			       0::bigint AS head_count,
+			       COUNT(*)::bigint AS checkpoint_count
+			  FROM document_checkpoints
+			 WHERE document_id IS NOT NULL
+			   AND document_id::text <> ''
+			 GROUP BY workspace_id::text, document_id::text
+		)
+		SELECT workspace_id,
+		       document_id,
+		       SUM(update_count)::bigint AS update_count,
+		       SUM(head_count)::bigint AS head_count,
+		       SUM(checkpoint_count)::bigint AS checkpoint_count
+		  FROM storage
+		 GROUP BY workspace_id, document_id
+		 ORDER BY workspace_id, document_id`)
+	if err != nil {
+		return err
+	}
+	storageRows := []uuidGroup2DeletedParentDocumentStorage{}
+	for rows.Next() {
+		var item uuidGroup2DeletedParentDocumentStorage
+		if err := rows.Scan(&item.workspaceID, &item.documentID, &item.updateCount, &item.headCount, &item.checkpointCount); err != nil {
+			rows.Close()
+			return err
+		}
+		storageRows = append(storageRows, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	for _, item := range storageRows {
+		exists, err := uuidGroup2DocumentRowExistsForRef(ctx, tx, documentIDType, item.workspaceID, item.documentID)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		log.Printf(
+			"uuid group2 deleting deleted-parent document storage workspace_id=%s document_id=%s update_count=%d head_count=%d checkpoint_count=%d",
+			item.workspaceID, item.documentID, item.updateCount, item.headCount, item.checkpointCount,
+		)
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM document_checkpoints
+			  WHERE workspace_id::text = $1
+			    AND document_id::text = $2`,
+			item.workspaceID, item.documentID,
+		); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM document_heads
+			  WHERE workspace_id::text = $1
+			    AND document_id::text = $2`,
+			item.workspaceID, item.documentID,
+		); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM document_updates
+			  WHERE workspace_id::text = $1
+			    AND document_id::text = $2`,
+			item.workspaceID, item.documentID,
 		); err != nil {
 			return err
 		}
