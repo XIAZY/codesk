@@ -1084,10 +1084,13 @@ func TestCompositeKeyIntrospection(t *testing.T) {
 	t.Logf("verified %d workspace-scoped FKs use exact (workspace_id, ref) -> (workspace_id, id) column pairs", checked)
 }
 
+// TestPolymorphicTriggerRejectsCrossWorkspaceRef is table-driven over all 8
+// trigger-guarded polymorphic surfaces, each asserting a workspace-A row with
+// a workspace-B principal rejects.
 func TestPolymorphicTriggerRejectsCrossWorkspaceRef(t *testing.T) {
 	f := newFKTestFixture(t)
 
-	// Create a second workspace with its own user.
+	// Create workspace B entities.
 	wsB := uuid.NewString()
 	rootDocB := uuid.NewString()
 	mustExecFK(t, f.db, `INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at)
@@ -1100,20 +1103,191 @@ func TestPolymorphicTriggerRejectsCrossWorkspaceRef(t *testing.T) {
 	mustExecFK(t, f.db, `INSERT INTO users (workspace_id, id, handle, name, role, kind, status, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, 'member', 'human', 'active', $5, $6)`,
 		wsB, userB, "user-b", "User B", f.now, f.now)
+	daemonB := uuid.NewString()
+	runtimes2, _ := json.Marshal([]RuntimeDetection{{Kind: "codex", Available: true}})
+	mustExecFK(t, f.db, `INSERT INTO daemons (id, workspace_id, name, token_hash, status, runtime_detections, created_at)
+		VALUES ($1, $2, 'Daemon B', $3, 'active', $4, $5)`,
+		daemonB, wsB, "token_b2", runtimes2, f.now)
+	agentB := uuid.NewString()
+	mustExecFK(t, f.db, `INSERT INTO agents (workspace_id, id, daemon_id, handle, name, role, kind, system_prompt, workspace_root,
+		current_turn_id, session_id, status, current_task, current_activity, updated_at)
+		VALUES ($1, $2, $3, $4, $5, 'assistant', 'codex', '', '', '', '', 'idle', '', '', $6)`,
+		wsB, agentB, daemonB, "agent-b2", "Agent B", f.now)
 
-	// Insert a document in workspace A.
+	// Workspace A entities.
 	docA := uuid.NewString()
 	f.insertDocument(t, docA)
+	userA := uuid.NewString()
+	f.insertUser(t, userA)
+	daemonA := uuid.NewString()
+	f.insertDaemon(t, daemonA)
+	agentA := uuid.NewString()
+	f.insertAgent(t, agentA, daemonA)
+	threadA := uuid.NewString()
+	f.insertThread(t, threadA, docA)
 
-	// Attempt to insert a document_update in workspace A referencing user from workspace B.
-	_, err := f.db.Exec(`INSERT INTO document_updates (workspace_id, document_id, update, actor_id, actor_type, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6)`,
-		f.workspaceID, docA, []byte{0}, userB, "human", f.now)
-	if err == nil {
-		t.Fatal("expected cross-workspace actor ref to be rejected")
+	tests := []struct {
+		name  string
+		query string
+		args  []any
+	}{
+		// document_updates.actor_id — human
+		{
+			"document_updates.actor_id/human",
+			`INSERT INTO document_updates (workspace_id, document_id, update, actor_id, actor_type, created_at)
+			 VALUES ($1, $2, $3, $4, 'human', $5)`,
+			[]any{f.workspaceID, docA, []byte{0}, userB, f.now},
+		},
+		// document_updates.actor_id — agent
+		{
+			"document_updates.actor_id/agent",
+			`INSERT INTO document_updates (workspace_id, document_id, update, actor_id, actor_type, created_at)
+			 VALUES ($1, $2, $3, $4, 'agent', $5)`,
+			[]any{f.workspaceID, docA, []byte{0}, agentB, f.now},
+		},
+		// document_updates.actor_id — daemon
+		{
+			"document_updates.actor_id/daemon",
+			`INSERT INTO document_updates (workspace_id, document_id, update, actor_id, actor_type, created_at)
+			 VALUES ($1, $2, $3, $4, 'daemon', $5)`,
+			[]any{f.workspaceID, docA, []byte{0}, daemonB, f.now},
+		},
+		// threads.created_by_id — human
+		{
+			"threads.created_by_id/human",
+			`INSERT INTO threads (workspace_id, id, document_id, title, status,
+				created_by_id, created_by_type, created_by_handle, created_by_name, created_at, updated_at)
+			 VALUES ($1, $2, $3, 'Test', 'open', $4, 'human', 'u', 'U', $5, $6)`,
+			[]any{f.workspaceID, uuid.NewString(), docA, userB, f.now, f.now},
+		},
+		// threads.created_by_id — agent
+		{
+			"threads.created_by_id/agent",
+			`INSERT INTO threads (workspace_id, id, document_id, title, status,
+				created_by_id, created_by_type, created_by_handle, created_by_name, created_at, updated_at)
+			 VALUES ($1, $2, $3, 'Test', 'open', $4, 'agent', 'a', 'A', $5, $6)`,
+			[]any{f.workspaceID, uuid.NewString(), docA, agentB, f.now, f.now},
+		},
+		// thread_messages.author_id — human
+		{
+			"thread_messages.author_id/human",
+			`INSERT INTO thread_messages (workspace_id, id, thread_id, author_id, author_type,
+				author_handle, author_name, body, kind, created_at)
+			 VALUES ($1, $2, $3, $4, 'human', 'u', 'U', 'body', 'message', $5)`,
+			[]any{f.workspaceID, uuid.NewString(), threadA, userB, f.now},
+		},
+		// thread_messages.author_id — agent
+		{
+			"thread_messages.author_id/agent",
+			`INSERT INTO thread_messages (workspace_id, id, thread_id, author_id, author_type,
+				author_handle, author_name, body, kind, created_at)
+			 VALUES ($1, $2, $3, $4, 'agent', 'a', 'A', 'body', 'message', $5)`,
+			[]any{f.workspaceID, uuid.NewString(), threadA, agentB, f.now},
+		},
+		// thread_participants.participant_id — user from workspace B
+		{
+			"thread_participants.participant_id/user",
+			`INSERT INTO thread_participants (workspace_id, thread_id, participant_id)
+			 VALUES ($1, $2, $3)`,
+			[]any{f.workspaceID, threadA, userB},
+		},
+		// thread_participants.participant_id — agent from workspace B
+		{
+			"thread_participants.participant_id/agent",
+			`INSERT INTO thread_participants (workspace_id, thread_id, participant_id)
+			 VALUES ($1, $2, $3)`,
+			[]any{f.workspaceID, threadA, agentB},
+		},
+		// presences.actor_id — human
+		{
+			"presences.actor_id/human",
+			`INSERT INTO presences (workspace_id, actor_id, actor_type, document_id, file_path, mode, activity, updated_at)
+			 VALUES ($1, $2, 'human', $3, '', 'editing', '', $4)`,
+			[]any{f.workspaceID, userB, docA, f.now},
+		},
+		// presences.actor_id — agent
+		{
+			"presences.actor_id/agent",
+			`INSERT INTO presences (workspace_id, actor_id, actor_type, document_id, file_path, mode, activity, updated_at)
+			 VALUES ($1, $2, 'agent', $3, '', 'editing', '', $4)`,
+			[]any{f.workspaceID, agentB, docA, f.now},
+		},
+		// presences.actor_id — daemon
+		{
+			"presences.actor_id/daemon",
+			`INSERT INTO presences (workspace_id, actor_id, actor_type, document_id, file_path, mode, activity, updated_at)
+			 VALUES ($1, $2, 'daemon', $3, '', 'editing', '', $4)`,
+			[]any{f.workspaceID, daemonB, docA, f.now},
+		},
+		// activities.actor_id — human
+		{
+			"activities.actor_id/human",
+			`INSERT INTO activities (workspace_id, type, actor_id, actor_type, summary, occurred_at,
+				provenance_actor_type, provenance_execution_id, provenance_tool, provenance_trigger,
+				provenance_autonomous, provenance_confidence, provenance_requested_by,
+				provenance_source, provenance_intended_scope, provenance_read_set_summary,
+				comment_id, presence_ref)
+			 VALUES ($1, 'test', $2, 'human', '', $3,
+				'', '', '', '', FALSE, '', '', '', '', '', '', '')`,
+			[]any{f.workspaceID, userB, f.now},
+		},
+		// activities.actor_id — agent
+		{
+			"activities.actor_id/agent",
+			`INSERT INTO activities (workspace_id, type, actor_id, actor_type, summary, occurred_at,
+				provenance_actor_type, provenance_execution_id, provenance_tool, provenance_trigger,
+				provenance_autonomous, provenance_confidence, provenance_requested_by,
+				provenance_source, provenance_intended_scope, provenance_read_set_summary,
+				comment_id, presence_ref)
+			 VALUES ($1, 'test', $2, 'agent', '', $3,
+				'', '', '', '', FALSE, '', '', '', '', '', '', '')`,
+			[]any{f.workspaceID, agentB, f.now},
+		},
+		// activities.provenance_actor_id — human
+		{
+			"activities.provenance_actor_id/human",
+			`INSERT INTO activities (workspace_id, type, actor_type, summary, occurred_at,
+				provenance_actor_id, provenance_actor_type,
+				provenance_execution_id, provenance_tool, provenance_trigger,
+				provenance_autonomous, provenance_confidence, provenance_requested_by,
+				provenance_source, provenance_intended_scope, provenance_read_set_summary,
+				comment_id, presence_ref)
+			 VALUES ($1, 'test', 'system', '', $2,
+				$3, 'human',
+				'', '', '', FALSE, '', '', '', '', '', '', '')`,
+			[]any{f.workspaceID, f.now, userB},
+		},
+		// activities.provenance_actor_id — agent
+		{
+			"activities.provenance_actor_id/agent",
+			`INSERT INTO activities (workspace_id, type, actor_type, summary, occurred_at,
+				provenance_actor_id, provenance_actor_type,
+				provenance_execution_id, provenance_tool, provenance_trigger,
+				provenance_autonomous, provenance_confidence, provenance_requested_by,
+				provenance_source, provenance_intended_scope, provenance_read_set_summary,
+				comment_id, presence_ref)
+			 VALUES ($1, 'test', 'system', '', $2,
+				$3, 'agent',
+				'', '', '', FALSE, '', '', '', '', '', '', '')`,
+			[]any{f.workspaceID, f.now, agentB},
+		},
+		// agent_events.claimed_by — cross-workspace daemon
+		{
+			"agent_events.claimed_by/cross-workspace",
+			`INSERT INTO agent_events (workspace_id, id, agent_id, agent_handle, type, status,
+				summary, prompt, dedup_key, last_error, attempt_count, claimed_by, available_at, created_at, updated_at)
+			 VALUES ($1, $2, $3, $4, 'test', 'claimed', '', '', '', '', 0, $5, $6, $7, $8)`,
+			[]any{f.workspaceID, uuid.NewString(), agentA, "agent-a", daemonB, f.now, f.now, f.now},
+		},
 	}
-	if !strings.Contains(err.Error(), "references missing user in workspace") {
-		t.Fatalf("unexpected error: %v", err)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := f.db.Exec(tc.query, tc.args...)
+			if err == nil {
+				t.Fatalf("expected cross-workspace polymorphic ref to be rejected")
+			}
+		})
 	}
 }
 
@@ -1135,7 +1309,7 @@ func TestAgentEventClaimedByRejectsUnrelatedDaemon(t *testing.T) {
 		VALUES ($1, $2, $3, $4, 'test', 'claimed', '', '', '', '', 0, $5, $6, $7, $8)`,
 		f.workspaceID, eventOK, agentID, "agent-"+agentID[:8], daemonA, f.now, f.now, f.now)
 
-	// claimed_by = daemonB (unrelated daemon) should fail.
+	// claimed_by = daemonB (unrelated same-workspace daemon) should fail.
 	eventBad := uuid.NewString()
 	_, err := f.db.Exec(`INSERT INTO agent_events (workspace_id, id, agent_id, agent_handle, type, status,
 		summary, prompt, dedup_key, last_error, attempt_count, claimed_by, available_at, created_at, updated_at)
