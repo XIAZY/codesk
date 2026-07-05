@@ -654,34 +654,31 @@ func initPostgresSchemaConstraints(db *sql.DB) error {
 
 		// ── Polymorphic constraint triggers ──
 
-		// Trigger function: validate polymorphic actor reference.
-		`CREATE OR REPLACE FUNCTION check_polymorphic_actor_ref()
+		// Generic workspace-scoped polymorphic ref guard.
+		// TG_ARGV[0] = id column, TG_ARGV[1] = type column,
+		// TG_ARGV[2..N] = pairs of (type_value, parent_table).
+		`CREATE OR REPLACE FUNCTION check_workspace_ref()
 		RETURNS TRIGGER AS $fn$
 		DECLARE
 			ref_id UUID;
 			ref_type TEXT;
+			found_row BOOLEAN;
 		BEGIN
-			ref_id   := NEW.actor_id;
-			ref_type := NEW.actor_type;
+			EXECUTE format('SELECT ($1).%I, ($1).%I', TG_ARGV[0], TG_ARGV[1])
+				INTO ref_id, ref_type USING NEW;
 			IF ref_id IS NULL OR ref_type IS NULL OR ref_type = '' OR ref_type = 'system' THEN
 				RETURN NEW;
 			END IF;
-			IF ref_type = 'human' THEN
-				PERFORM 1 FROM users WHERE id = ref_id AND workspace_id = NEW.workspace_id;
-				IF NOT FOUND THEN
-					RAISE EXCEPTION 'actor_id % references missing user in workspace %', ref_id, NEW.workspace_id;
+			FOR i IN 2 .. TG_NARGS-1 BY 2 LOOP
+				IF ref_type = TG_ARGV[i] THEN
+					EXECUTE format('SELECT EXISTS(SELECT 1 FROM %I WHERE id = $1 AND workspace_id = $2)', TG_ARGV[i+1])
+						INTO found_row USING ref_id, NEW.workspace_id;
+					IF NOT found_row THEN
+						RAISE EXCEPTION '% % references missing % in workspace %', TG_ARGV[0], ref_id, TG_ARGV[i], NEW.workspace_id;
+					END IF;
+					RETURN NEW;
 				END IF;
-			ELSIF ref_type = 'agent' THEN
-				PERFORM 1 FROM agents WHERE id = ref_id AND workspace_id = NEW.workspace_id;
-				IF NOT FOUND THEN
-					RAISE EXCEPTION 'actor_id % references missing agent in workspace %', ref_id, NEW.workspace_id;
-				END IF;
-			ELSIF ref_type = 'daemon' THEN
-				PERFORM 1 FROM daemons WHERE id = ref_id AND workspace_id = NEW.workspace_id;
-				IF NOT FOUND THEN
-					RAISE EXCEPTION 'actor_id % references missing daemon in workspace %', ref_id, NEW.workspace_id;
-				END IF;
-			END IF;
+			END LOOP;
 			RETURN NEW;
 		END;
 		$fn$ LANGUAGE plpgsql`,
@@ -689,105 +686,34 @@ func initPostgresSchemaConstraints(db *sql.DB) error {
 		`DROP TRIGGER IF EXISTS trg_document_updates_actor_ref ON document_updates`,
 		`CREATE TRIGGER trg_document_updates_actor_ref
 			BEFORE INSERT OR UPDATE ON document_updates
-			FOR EACH ROW EXECUTE FUNCTION check_polymorphic_actor_ref()`,
+			FOR EACH ROW EXECUTE FUNCTION check_workspace_ref('actor_id', 'actor_type', 'human', 'users', 'agent', 'agents', 'daemon', 'daemons')`,
 
 		`DROP TRIGGER IF EXISTS trg_presences_actor_ref ON presences`,
 		`CREATE TRIGGER trg_presences_actor_ref
 			BEFORE INSERT OR UPDATE ON presences
-			FOR EACH ROW EXECUTE FUNCTION check_polymorphic_actor_ref()`,
+			FOR EACH ROW EXECUTE FUNCTION check_workspace_ref('actor_id', 'actor_type', 'human', 'users', 'agent', 'agents', 'daemon', 'daemons')`,
 
 		`DROP TRIGGER IF EXISTS trg_activities_actor_ref ON activities`,
 		`CREATE TRIGGER trg_activities_actor_ref
 			BEFORE INSERT OR UPDATE ON activities
-			FOR EACH ROW EXECUTE FUNCTION check_polymorphic_actor_ref()`,
-
-		// Trigger function: validate thread created_by reference (human/agent only).
-		`CREATE OR REPLACE FUNCTION check_thread_created_by_ref()
-		RETURNS TRIGGER AS $fn$
-		BEGIN
-			IF NEW.created_by_id IS NULL OR NEW.created_by_type IS NULL OR NEW.created_by_type = '' OR NEW.created_by_type = 'system' THEN
-				RETURN NEW;
-			END IF;
-			IF NEW.created_by_type = 'human' THEN
-				PERFORM 1 FROM users WHERE id = NEW.created_by_id AND workspace_id = NEW.workspace_id;
-				IF NOT FOUND THEN
-					RAISE EXCEPTION 'created_by_id % references missing user in workspace %', NEW.created_by_id, NEW.workspace_id;
-				END IF;
-			ELSIF NEW.created_by_type = 'agent' THEN
-				PERFORM 1 FROM agents WHERE id = NEW.created_by_id AND workspace_id = NEW.workspace_id;
-				IF NOT FOUND THEN
-					RAISE EXCEPTION 'created_by_id % references missing agent in workspace %', NEW.created_by_id, NEW.workspace_id;
-				END IF;
-			END IF;
-			RETURN NEW;
-		END;
-		$fn$ LANGUAGE plpgsql`,
+			FOR EACH ROW EXECUTE FUNCTION check_workspace_ref('actor_id', 'actor_type', 'human', 'users', 'agent', 'agents', 'daemon', 'daemons')`,
 
 		`DROP TRIGGER IF EXISTS trg_threads_author_ref ON threads`,
 		`CREATE TRIGGER trg_threads_author_ref
 			BEFORE INSERT OR UPDATE ON threads
-			FOR EACH ROW EXECUTE FUNCTION check_thread_created_by_ref()`,
-
-		// Trigger function: validate thread_messages author reference (human/agent only).
-		`CREATE OR REPLACE FUNCTION check_thread_message_author_ref()
-		RETURNS TRIGGER AS $fn$
-		BEGIN
-			IF NEW.author_id IS NULL OR NEW.author_type IS NULL OR NEW.author_type = '' OR NEW.author_type = 'system' THEN
-				RETURN NEW;
-			END IF;
-			IF NEW.author_type = 'human' THEN
-				PERFORM 1 FROM users WHERE id = NEW.author_id AND workspace_id = NEW.workspace_id;
-				IF NOT FOUND THEN
-					RAISE EXCEPTION 'author_id % references missing user in workspace %', NEW.author_id, NEW.workspace_id;
-				END IF;
-			ELSIF NEW.author_type = 'agent' THEN
-				PERFORM 1 FROM agents WHERE id = NEW.author_id AND workspace_id = NEW.workspace_id;
-				IF NOT FOUND THEN
-					RAISE EXCEPTION 'author_id % references missing agent in workspace %', NEW.author_id, NEW.workspace_id;
-				END IF;
-			END IF;
-			RETURN NEW;
-		END;
-		$fn$ LANGUAGE plpgsql`,
+			FOR EACH ROW EXECUTE FUNCTION check_workspace_ref('created_by_id', 'created_by_type', 'human', 'users', 'agent', 'agents')`,
 
 		`DROP TRIGGER IF EXISTS trg_thread_messages_author_ref ON thread_messages`,
 		`CREATE TRIGGER trg_thread_messages_author_ref
 			BEFORE INSERT OR UPDATE ON thread_messages
-			FOR EACH ROW EXECUTE FUNCTION check_thread_message_author_ref()`,
-
-		// Trigger function: validate activities provenance actor reference.
-		`CREATE OR REPLACE FUNCTION check_provenance_actor_ref()
-		RETURNS TRIGGER AS $fn$
-		BEGIN
-			IF NEW.provenance_actor_id IS NULL OR NEW.provenance_actor_type IS NULL OR NEW.provenance_actor_type = '' OR NEW.provenance_actor_type = 'system' THEN
-				RETURN NEW;
-			END IF;
-			IF NEW.provenance_actor_type = 'human' THEN
-				PERFORM 1 FROM users WHERE id = NEW.provenance_actor_id AND workspace_id = NEW.workspace_id;
-				IF NOT FOUND THEN
-					RAISE EXCEPTION 'provenance_actor_id % references missing user in workspace %', NEW.provenance_actor_id, NEW.workspace_id;
-				END IF;
-			ELSIF NEW.provenance_actor_type = 'agent' THEN
-				PERFORM 1 FROM agents WHERE id = NEW.provenance_actor_id AND workspace_id = NEW.workspace_id;
-				IF NOT FOUND THEN
-					RAISE EXCEPTION 'provenance_actor_id % references missing agent in workspace %', NEW.provenance_actor_id, NEW.workspace_id;
-				END IF;
-			ELSIF NEW.provenance_actor_type = 'daemon' THEN
-				PERFORM 1 FROM daemons WHERE id = NEW.provenance_actor_id AND workspace_id = NEW.workspace_id;
-				IF NOT FOUND THEN
-					RAISE EXCEPTION 'provenance_actor_id % references missing daemon in workspace %', NEW.provenance_actor_id, NEW.workspace_id;
-				END IF;
-			END IF;
-			RETURN NEW;
-		END;
-		$fn$ LANGUAGE plpgsql`,
+			FOR EACH ROW EXECUTE FUNCTION check_workspace_ref('author_id', 'author_type', 'human', 'users', 'agent', 'agents')`,
 
 		`DROP TRIGGER IF EXISTS trg_activities_provenance_ref ON activities`,
 		`CREATE TRIGGER trg_activities_provenance_ref
 			BEFORE INSERT OR UPDATE ON activities
-			FOR EACH ROW EXECUTE FUNCTION check_provenance_actor_ref()`,
+			FOR EACH ROW EXECUTE FUNCTION check_workspace_ref('provenance_actor_id', 'provenance_actor_type', 'human', 'users', 'agent', 'agents', 'daemon', 'daemons')`,
 
-		// Trigger function: validate thread_participants.participant_id exists in users OR agents.
+		// Union ref guard: participant_id must exist in users OR agents (no type column).
 		`CREATE OR REPLACE FUNCTION check_participant_ref()
 		RETURNS TRIGGER AS $fn$
 		BEGIN
@@ -804,7 +730,7 @@ func initPostgresSchemaConstraints(db *sql.DB) error {
 			BEFORE INSERT OR UPDATE ON thread_participants
 			FOR EACH ROW EXECUTE FUNCTION check_participant_ref()`,
 
-		// Trigger function: validate agent_events.claimed_by is the event's agent or that agent's daemon, or NULL.
+		// Relationship guard: claimed_by must be the event's agent or that agent's daemon.
 		`CREATE OR REPLACE FUNCTION check_agent_event_claimed_by()
 		RETURNS TRIGGER AS $fn$
 		BEGIN
@@ -827,16 +753,17 @@ func initPostgresSchemaConstraints(db *sql.DB) error {
 
 		// ── Cleanup triggers for polymorphic ON DELETE behavior ──
 
-		// When a user is deleted: null out polymorphic actor_id refs, delete presences and participants.
-		`CREATE OR REPLACE FUNCTION on_user_delete()
+		// Generic actor cleanup: nulls polymorphic refs and removes presences/participants.
+		// TG_ARGV[0] = actor_type value used in type columns.
+		`CREATE OR REPLACE FUNCTION on_actor_delete()
 		RETURNS TRIGGER AS $fn$
 		BEGIN
-			UPDATE document_updates SET actor_id = NULL WHERE actor_type = 'human' AND actor_id = OLD.id;
-			UPDATE threads SET created_by_id = NULL WHERE created_by_type = 'human' AND created_by_id = OLD.id;
-			UPDATE thread_messages SET author_id = NULL WHERE author_type = 'human' AND author_id = OLD.id;
-			UPDATE activities SET actor_id = NULL WHERE actor_type = 'human' AND actor_id = OLD.id;
-			UPDATE activities SET provenance_actor_id = NULL WHERE provenance_actor_type = 'human' AND provenance_actor_id = OLD.id;
-			DELETE FROM presences WHERE actor_type = 'human' AND actor_id = OLD.id;
+			UPDATE document_updates SET actor_id = NULL WHERE actor_type = TG_ARGV[0] AND actor_id = OLD.id;
+			UPDATE threads SET created_by_id = NULL WHERE created_by_type = TG_ARGV[0] AND created_by_id = OLD.id;
+			UPDATE thread_messages SET author_id = NULL WHERE author_type = TG_ARGV[0] AND author_id = OLD.id;
+			UPDATE activities SET actor_id = NULL WHERE actor_type = TG_ARGV[0] AND actor_id = OLD.id;
+			UPDATE activities SET provenance_actor_id = NULL WHERE provenance_actor_type = TG_ARGV[0] AND provenance_actor_id = OLD.id;
+			DELETE FROM presences WHERE actor_type = TG_ARGV[0] AND actor_id = OLD.id;
 			DELETE FROM thread_participants WHERE participant_id = OLD.id;
 			RETURN OLD;
 		END;
@@ -845,29 +772,14 @@ func initPostgresSchemaConstraints(db *sql.DB) error {
 		`DROP TRIGGER IF EXISTS trg_user_delete_cleanup ON users`,
 		`CREATE TRIGGER trg_user_delete_cleanup
 			BEFORE DELETE ON users
-			FOR EACH ROW EXECUTE FUNCTION on_user_delete()`,
-
-		// When an agent is deleted: null out polymorphic actor_id refs, delete presences and participants.
-		`CREATE OR REPLACE FUNCTION on_agent_delete()
-		RETURNS TRIGGER AS $fn$
-		BEGIN
-			UPDATE document_updates SET actor_id = NULL WHERE actor_type = 'agent' AND actor_id = OLD.id;
-			UPDATE threads SET created_by_id = NULL WHERE created_by_type = 'agent' AND created_by_id = OLD.id;
-			UPDATE thread_messages SET author_id = NULL WHERE author_type = 'agent' AND author_id = OLD.id;
-			UPDATE activities SET actor_id = NULL WHERE actor_type = 'agent' AND actor_id = OLD.id;
-			UPDATE activities SET provenance_actor_id = NULL WHERE provenance_actor_type = 'agent' AND provenance_actor_id = OLD.id;
-			DELETE FROM presences WHERE actor_type = 'agent' AND actor_id = OLD.id;
-			DELETE FROM thread_participants WHERE participant_id = OLD.id;
-			RETURN OLD;
-		END;
-		$fn$ LANGUAGE plpgsql`,
+			FOR EACH ROW EXECUTE FUNCTION on_actor_delete('human')`,
 
 		`DROP TRIGGER IF EXISTS trg_agent_delete_cleanup ON agents`,
 		`CREATE TRIGGER trg_agent_delete_cleanup
 			BEFORE DELETE ON agents
-			FOR EACH ROW EXECUTE FUNCTION on_agent_delete()`,
+			FOR EACH ROW EXECUTE FUNCTION on_actor_delete('agent')`,
 
-		// When a daemon is deleted: null out polymorphic actor_id refs, delete presences.
+		// Daemon cleanup: subset policy (no threads/thread_messages/participants).
 		`CREATE OR REPLACE FUNCTION on_daemon_delete()
 		RETURNS TRIGGER AS $fn$
 		BEGIN
