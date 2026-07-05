@@ -972,56 +972,111 @@ func TestFKConstraintsRejectCrossWorkspaceRefs(t *testing.T) {
 	}
 }
 
-// TestCompositeKeyIntrospection verifies that all workspace-scoped FK constraints
-// use composite (workspace_id, <ref>) columns, not simple single-column refs.
+// TestCompositeKeyIntrospection auto-discovers every FK referencing a table that
+// has a (workspace_id, id) composite unique index, and asserts the FK itself uses
+// the composite column pair. A future plain REFERENCES table(id) FK fails this
+// automatically without anyone adding it to a list.
 func TestCompositeKeyIntrospection(t *testing.T) {
 	database := newPostgresTestDatabase(t)
 	db := database.DB
 
-	// Every FK whose parent table has a composite unique on (workspace_id, id)
-	// must itself be composite (include workspace_id in the FK column list).
-	// account_email_tokens and accounts refs are excluded — accounts is not workspace-scoped.
-	workspaceScopedFKs := []string{
-		"fk_workspace_members_user",
-		"fk_workspace_members_invited_by",
-		"fk_workspace_invites_created_by",
-		"fk_agents_daemon",
-		"fk_agent_runs_agent",
-		"fk_agents_current_run",
-		"fk_agent_events_agent",
-		"fk_agent_events_run",
-		"fk_agent_document_views_agent",
-		"fk_document_heads_document",
-		"fk_document_updates_document",
-		"fk_document_checkpoints_document",
-		"fk_threads_document",
-		"fk_presences_document",
-		"fk_agent_document_views_document",
-		"fk_workspace_members_last_doc",
-		"fk_activities_document",
-		"fk_agent_events_document",
-		"fk_thread_messages_thread",
-		"fk_thread_participants_thread",
-		"fk_agent_events_thread",
-		"fk_agent_events_thread_message",
+	// Tables that are NOT workspace-scoped (no workspace_id column or no composite unique).
+	// FKs referencing these are allowed to be simple single-column.
+	nonWorkspaceTables := map[string]bool{
+		"accounts":   true,
+		"workspaces": true,
 	}
 
-	for _, fkName := range workspaceScopedFKs {
-		var hasWorkspaceCol bool
-		err := db.QueryRow(`
-			SELECT EXISTS (
-				SELECT 1 FROM information_schema.key_column_usage
-				WHERE constraint_name = $1
-				  AND constraint_schema = 'public'
-				  AND column_name = 'workspace_id'
-			)`, fkName).Scan(&hasWorkspaceCol)
-		if err != nil {
-			t.Fatalf("query FK columns for %s: %v", fkName, err)
-		}
-		if !hasWorkspaceCol {
-			t.Errorf("FK %s must include workspace_id in its column list (composite key) but does not", fkName)
-		}
+	// Find all tables that have a composite unique index on (workspace_id, id).
+	compositeParents := map[string]bool{}
+	rows, err := db.Query(`
+		SELECT t.relname
+		FROM pg_index i
+		JOIN pg_class t ON t.oid = i.indrelid
+		JOIN pg_namespace n ON n.oid = t.relnamespace
+		WHERE n.nspname = 'public'
+		  AND i.indisunique
+		  AND array_length(i.indkey, 1) = 2
+		  AND EXISTS (
+			SELECT 1 FROM pg_attribute a
+			WHERE a.attrelid = t.oid AND a.attnum = i.indkey[0] AND a.attname = 'workspace_id'
+		  )
+		  AND EXISTS (
+			SELECT 1 FROM pg_attribute a
+			WHERE a.attrelid = t.oid AND a.attnum = i.indkey[1] AND a.attname = 'id'
+		  )`)
+	if err != nil {
+		t.Fatalf("query composite parents: %v", err)
 	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan composite parent: %v", err)
+		}
+		compositeParents[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate composite parents: %v", err)
+	}
+	if len(compositeParents) == 0 {
+		t.Fatal("expected at least one table with (workspace_id, id) composite unique")
+	}
+
+	// For every FK in the schema, if it references a composite-parent table,
+	// assert the FK includes workspace_id in its source columns.
+	fkRows, err := db.Query(`
+		SELECT
+			tc.constraint_name,
+			tc.table_name,
+			ccu.table_name AS ref_table,
+			string_agg(kcu.column_name, ',' ORDER BY kcu.ordinal_position) AS source_cols
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.key_column_usage kcu
+			ON kcu.constraint_name = tc.constraint_name
+			AND kcu.constraint_schema = tc.constraint_schema
+		JOIN information_schema.constraint_column_usage ccu
+			ON ccu.constraint_name = tc.constraint_name
+			AND ccu.constraint_schema = tc.constraint_schema
+		WHERE tc.constraint_type = 'FOREIGN KEY'
+			AND tc.table_schema = 'public'
+		GROUP BY tc.constraint_name, tc.table_name, ccu.table_name
+		ORDER BY tc.constraint_name`)
+	if err != nil {
+		t.Fatalf("query all FKs: %v", err)
+	}
+	defer fkRows.Close()
+
+	checked := 0
+	for fkRows.Next() {
+		var name, table, refTable, sourceColsStr string
+		if err := fkRows.Scan(&name, &table, &refTable, &sourceColsStr); err != nil {
+			t.Fatalf("scan FK: %v", err)
+		}
+		if nonWorkspaceTables[refTable] || !compositeParents[refTable] {
+			continue
+		}
+		sourceCols := strings.Split(sourceColsStr, ",")
+		hasWorkspaceID := false
+		for _, col := range sourceCols {
+			if col == "workspace_id" {
+				hasWorkspaceID = true
+				break
+			}
+		}
+		if !hasWorkspaceID {
+			t.Errorf("FK %s on %s -> %s uses simple ref [%s]; must include workspace_id for same-workspace enforcement",
+				name, table, refTable, sourceColsStr)
+		}
+		checked++
+	}
+	if err := fkRows.Err(); err != nil {
+		t.Fatalf("iterate FKs: %v", err)
+	}
+	if checked == 0 {
+		t.Fatal("expected to check at least one workspace-scoped FK")
+	}
+	t.Logf("verified %d workspace-scoped FKs use composite (workspace_id, ref) columns", checked)
 }
 
 func TestPolymorphicTriggerRejectsCrossWorkspaceRef(t *testing.T) {
