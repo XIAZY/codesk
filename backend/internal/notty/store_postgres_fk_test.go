@@ -1023,25 +1023,29 @@ func TestCompositeKeyIntrospection(t *testing.T) {
 		t.Fatal("expected at least one table with (workspace_id, id) composite unique")
 	}
 
-	// For every FK in the schema, if it references a composite-parent table,
-	// assert the FK includes workspace_id in its source columns.
+	// For every FK referencing a composite-parent table, assert exact column pairs:
+	// source columns = (workspace_id, <ref>), referenced columns = (workspace_id, id).
+	// Uses pg_constraint + pg_attribute for positional column access.
 	fkRows, err := db.Query(`
 		SELECT
-			tc.constraint_name,
-			tc.table_name,
-			ccu.table_name AS ref_table,
-			string_agg(kcu.column_name, ',' ORDER BY kcu.ordinal_position) AS source_cols
-		FROM information_schema.table_constraints tc
-		JOIN information_schema.key_column_usage kcu
-			ON kcu.constraint_name = tc.constraint_name
-			AND kcu.constraint_schema = tc.constraint_schema
-		JOIN information_schema.constraint_column_usage ccu
-			ON ccu.constraint_name = tc.constraint_name
-			AND ccu.constraint_schema = tc.constraint_schema
-		WHERE tc.constraint_type = 'FOREIGN KEY'
-			AND tc.table_schema = 'public'
-		GROUP BY tc.constraint_name, tc.table_name, ccu.table_name
-		ORDER BY tc.constraint_name`)
+			c.conname,
+			src.relname AS source_table,
+			ref.relname AS ref_table,
+			(SELECT string_agg(a.attname, ',' ORDER BY ord.n)
+			 FROM unnest(c.conkey) WITH ORDINALITY AS ord(attnum, n)
+			 JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ord.attnum
+			) AS source_cols,
+			(SELECT string_agg(a.attname, ',' ORDER BY ord.n)
+			 FROM unnest(c.confkey) WITH ORDINALITY AS ord(attnum, n)
+			 JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = ord.attnum
+			) AS ref_cols
+		FROM pg_constraint c
+		JOIN pg_class src ON src.oid = c.conrelid
+		JOIN pg_class ref ON ref.oid = c.confrelid
+		JOIN pg_namespace n ON n.oid = src.relnamespace
+		WHERE c.contype = 'f'
+		  AND n.nspname = 'public'
+		ORDER BY c.conname`)
 	if err != nil {
 		t.Fatalf("query all FKs: %v", err)
 	}
@@ -1049,24 +1053,25 @@ func TestCompositeKeyIntrospection(t *testing.T) {
 
 	checked := 0
 	for fkRows.Next() {
-		var name, table, refTable, sourceColsStr string
-		if err := fkRows.Scan(&name, &table, &refTable, &sourceColsStr); err != nil {
+		var name, table, refTable, sourceColsStr, refColsStr string
+		if err := fkRows.Scan(&name, &table, &refTable, &sourceColsStr, &refColsStr); err != nil {
 			t.Fatalf("scan FK: %v", err)
 		}
 		if nonWorkspaceTables[refTable] || !compositeParents[refTable] {
 			continue
 		}
 		sourceCols := strings.Split(sourceColsStr, ",")
-		hasWorkspaceID := false
-		for _, col := range sourceCols {
-			if col == "workspace_id" {
-				hasWorkspaceID = true
-				break
-			}
-		}
-		if !hasWorkspaceID {
-			t.Errorf("FK %s on %s -> %s uses simple ref [%s]; must include workspace_id for same-workspace enforcement",
+		refCols := strings.Split(refColsStr, ",")
+
+		// Source must be exactly (workspace_id, <something>).
+		if len(sourceCols) != 2 || sourceCols[0] != "workspace_id" {
+			t.Errorf("FK %s on %s -> %s: source columns [%s] must be (workspace_id, <ref>)",
 				name, table, refTable, sourceColsStr)
+		}
+		// Referenced must be exactly (workspace_id, id).
+		if len(refCols) != 2 || refCols[0] != "workspace_id" || refCols[1] != "id" {
+			t.Errorf("FK %s on %s -> %s: referenced columns [%s] must be (workspace_id, id)",
+				name, table, refTable, refColsStr)
 		}
 		checked++
 	}
@@ -1076,7 +1081,7 @@ func TestCompositeKeyIntrospection(t *testing.T) {
 	if checked == 0 {
 		t.Fatal("expected to check at least one workspace-scoped FK")
 	}
-	t.Logf("verified %d workspace-scoped FKs use composite (workspace_id, ref) columns", checked)
+	t.Logf("verified %d workspace-scoped FKs use exact (workspace_id, ref) -> (workspace_id, id) column pairs", checked)
 }
 
 func TestPolymorphicTriggerRejectsCrossWorkspaceRef(t *testing.T) {
