@@ -679,7 +679,7 @@ func initPostgresSchemaConstraints(db *sql.DB) error {
 					RETURN NEW;
 				END IF;
 			END LOOP;
-			RETURN NEW;
+			RAISE EXCEPTION '% has unrecognized type "%" for %', TG_ARGV[0], ref_type, TG_ARGV[1];
 		END;
 		$fn$ LANGUAGE plpgsql`,
 

@@ -1279,6 +1279,57 @@ func TestPolymorphicTriggerRejectsCrossWorkspaceRef(t *testing.T) {
 			 VALUES ($1, $2, $3, $4, 'test', 'claimed', '', '', '', '', 0, $5, $6, $7, $8)`,
 			[]any{f.workspaceID, uuid.NewString(), agentA, "agent-a", daemonB, f.now, f.now, f.now},
 		},
+		// unknown type — must fail closed on every type-dispatched surface
+		{
+			"document_updates.actor_type/unknown_rejects",
+			`INSERT INTO document_updates (workspace_id, document_id, update, actor_id, actor_type, created_at)
+			 VALUES ($1, $2, $3, $4, 'banana', $5)`,
+			[]any{f.workspaceID, docA, []byte{0}, userA, f.now},
+		},
+		{
+			"threads.created_by_type/unknown_rejects",
+			`INSERT INTO threads (workspace_id, id, document_id, title, status,
+				created_by_id, created_by_type, created_by_handle, created_by_name, created_at, updated_at)
+			 VALUES ($1, $2, $3, 'Test', 'open', $4, 'banana', 'u', 'U', $5, $6)`,
+			[]any{f.workspaceID, uuid.NewString(), docA, userA, f.now, f.now},
+		},
+		{
+			"thread_messages.author_type/unknown_rejects",
+			`INSERT INTO thread_messages (workspace_id, id, thread_id, author_id, author_type,
+				author_handle, author_name, body, kind, created_at)
+			 VALUES ($1, $2, $3, $4, 'banana', 'u', 'U', 'body', 'message', $5)`,
+			[]any{f.workspaceID, uuid.NewString(), threadA, userA, f.now},
+		},
+		{
+			"presences.actor_type/unknown_rejects",
+			`INSERT INTO presences (workspace_id, actor_id, actor_type, document_id, file_path, mode, activity, updated_at)
+			 VALUES ($1, $2, 'banana', $3, '', 'editing', '', $4)`,
+			[]any{f.workspaceID, userA, docA, f.now},
+		},
+		{
+			"activities.actor_type/unknown_rejects",
+			`INSERT INTO activities (workspace_id, type, actor_id, actor_type, summary, occurred_at,
+				provenance_actor_type, provenance_execution_id, provenance_tool, provenance_trigger,
+				provenance_autonomous, provenance_confidence, provenance_requested_by,
+				provenance_source, provenance_intended_scope, provenance_read_set_summary,
+				comment_id, presence_ref)
+			 VALUES ($1, 'test', $2, 'banana', '', $3,
+				'', '', '', '', FALSE, '', '', '', '', '', '', '')`,
+			[]any{f.workspaceID, userA, f.now},
+		},
+		{
+			"activities.provenance_actor_type/unknown_rejects",
+			`INSERT INTO activities (workspace_id, type, actor_type, summary, occurred_at,
+				provenance_actor_id, provenance_actor_type,
+				provenance_execution_id, provenance_tool, provenance_trigger,
+				provenance_autonomous, provenance_confidence, provenance_requested_by,
+				provenance_source, provenance_intended_scope, provenance_read_set_summary,
+				comment_id, presence_ref)
+			 VALUES ($1, 'test', 'system', '', $2,
+				$3, 'banana',
+				'', '', '', FALSE, '', '', '', '', '', '', '')`,
+			[]any{f.workspaceID, f.now, userA},
+		},
 	}
 
 	for _, tc := range tests {
