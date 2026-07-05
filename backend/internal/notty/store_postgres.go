@@ -569,35 +569,35 @@ func initPostgresSchemaConstraints(db *sql.DB) error {
 		`DO $$ BEGIN ALTER TABLE workspace_members ADD CONSTRAINT fk_workspace_members_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`ALTER TABLE workspace_members VALIDATE CONSTRAINT fk_workspace_members_account`,
 
-		// ── Membership/invite ──
+		// ── Membership/invite (composite same-workspace enforcement) ──
 
-		`DO $$ BEGIN ALTER TABLE workspace_members ADD CONSTRAINT fk_workspace_members_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`DO $$ BEGIN ALTER TABLE workspace_members ADD CONSTRAINT fk_workspace_members_user FOREIGN KEY (workspace_id, user_id) REFERENCES users(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`ALTER TABLE workspace_members VALIDATE CONSTRAINT fk_workspace_members_user`,
 
-		`DO $$ BEGIN ALTER TABLE workspace_members ADD CONSTRAINT fk_workspace_members_invited_by FOREIGN KEY (invited_by) REFERENCES users(id) ON DELETE SET NULL NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`DO $$ BEGIN ALTER TABLE workspace_members ADD CONSTRAINT fk_workspace_members_invited_by FOREIGN KEY (workspace_id, invited_by) REFERENCES users(workspace_id, id) ON DELETE SET NULL (invited_by) NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`ALTER TABLE workspace_members VALIDATE CONSTRAINT fk_workspace_members_invited_by`,
 
-		`DO $$ BEGIN ALTER TABLE workspace_invites ADD CONSTRAINT fk_workspace_invites_created_by FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`DO $$ BEGIN ALTER TABLE workspace_invites ADD CONSTRAINT fk_workspace_invites_created_by FOREIGN KEY (workspace_id, created_by_user_id) REFERENCES users(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`ALTER TABLE workspace_invites VALIDATE CONSTRAINT fk_workspace_invites_created_by`,
 
-		// ── Daemon/agent/run ──
+		// ── Daemon/agent/run (composite same-workspace enforcement) ──
 
-		`DO $$ BEGIN ALTER TABLE agents ADD CONSTRAINT fk_agents_daemon FOREIGN KEY (daemon_id) REFERENCES daemons(id) ON DELETE SET NULL NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`DO $$ BEGIN ALTER TABLE agents ADD CONSTRAINT fk_agents_daemon FOREIGN KEY (workspace_id, daemon_id) REFERENCES daemons(workspace_id, id) ON DELETE SET NULL (daemon_id) NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`ALTER TABLE agents VALIDATE CONSTRAINT fk_agents_daemon`,
 
-		`DO $$ BEGIN ALTER TABLE agent_runs ADD CONSTRAINT fk_agent_runs_agent FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`DO $$ BEGIN ALTER TABLE agent_runs ADD CONSTRAINT fk_agent_runs_agent FOREIGN KEY (workspace_id, agent_id) REFERENCES agents(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`ALTER TABLE agent_runs VALIDATE CONSTRAINT fk_agent_runs_agent`,
 
-		`DO $$ BEGIN ALTER TABLE agents ADD CONSTRAINT fk_agents_current_run FOREIGN KEY (current_run_id) REFERENCES agent_runs(id) ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`DO $$ BEGIN ALTER TABLE agents ADD CONSTRAINT fk_agents_current_run FOREIGN KEY (workspace_id, current_run_id) REFERENCES agent_runs(workspace_id, id) ON DELETE SET NULL (current_run_id) DEFERRABLE INITIALLY DEFERRED NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`ALTER TABLE agents VALIDATE CONSTRAINT fk_agents_current_run`,
 
-		`DO $$ BEGIN ALTER TABLE agent_events ADD CONSTRAINT fk_agent_events_agent FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`DO $$ BEGIN ALTER TABLE agent_events ADD CONSTRAINT fk_agent_events_agent FOREIGN KEY (workspace_id, agent_id) REFERENCES agents(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`ALTER TABLE agent_events VALIDATE CONSTRAINT fk_agent_events_agent`,
 
-		`DO $$ BEGIN ALTER TABLE agent_events ADD CONSTRAINT fk_agent_events_run FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE SET NULL NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`DO $$ BEGIN ALTER TABLE agent_events ADD CONSTRAINT fk_agent_events_run FOREIGN KEY (workspace_id, run_id) REFERENCES agent_runs(workspace_id, id) ON DELETE SET NULL (run_id) NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`ALTER TABLE agent_events VALIDATE CONSTRAINT fk_agent_events_run`,
 
-		`DO $$ BEGIN ALTER TABLE agent_document_views ADD CONSTRAINT fk_agent_document_views_agent FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`DO $$ BEGIN ALTER TABLE agent_document_views ADD CONSTRAINT fk_agent_document_views_agent FOREIGN KEY (workspace_id, agent_id) REFERENCES agents(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
 		`ALTER TABLE agent_document_views VALIDATE CONSTRAINT fk_agent_document_views_agent`,
 
 		// ── Documents (composite same-workspace enforcement) ──

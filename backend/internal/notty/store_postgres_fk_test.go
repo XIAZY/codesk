@@ -738,6 +738,101 @@ func TestConstraintTriggersExist(t *testing.T) {
 	}
 }
 
+func TestFKConstraintsRejectCrossWorkspaceRefs(t *testing.T) {
+	f := newFKTestFixture(t)
+
+	// Create workspace B with its own entities.
+	wsB := uuid.NewString()
+	rootDocB := uuid.NewString()
+	mustExecFK(t, f.db, `INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		wsB, "ws-b-"+wsB[:8], "Workspace B", rootDocB, f.now, f.now)
+	mustExecFK(t, f.db, `INSERT INTO documents (workspace_id, id, path, title, hidden, client_id_seed, updated_at)
+		VALUES ($1, $2, '', '', TRUE, 1000, $3)`,
+		wsB, rootDocB, f.now)
+	userB := uuid.NewString()
+	mustExecFK(t, f.db, `INSERT INTO users (workspace_id, id, handle, name, role, kind, status, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 'member', 'human', 'active', $5, $6)`,
+		wsB, userB, "user-b", "User B", f.now, f.now)
+	daemonB := uuid.NewString()
+	runtimesB, _ := json.Marshal([]RuntimeDetection{{Kind: "codex", Available: true}})
+	mustExecFK(t, f.db, `INSERT INTO daemons (id, workspace_id, name, token_hash, status, runtime_detections, created_at)
+		VALUES ($1, $2, 'Daemon B', $3, 'active', $4, $5)`,
+		daemonB, wsB, "token_b", runtimesB, f.now)
+	agentB := uuid.NewString()
+	mustExecFK(t, f.db, `INSERT INTO agents (workspace_id, id, daemon_id, handle, name, role, kind, system_prompt, workspace_root,
+		current_turn_id, session_id, status, current_task, current_activity, updated_at)
+		VALUES ($1, $2, $3, $4, $5, 'assistant', 'codex', '', '', '', '', 'idle', '', '', $6)`,
+		wsB, agentB, daemonB, "agent-b", "Agent B", f.now)
+
+	// Create workspace A entities for FK sources.
+	accountA := uuid.NewString()
+	f.insertAccount(t, accountA)
+	userA := uuid.NewString()
+	f.insertUser(t, userA)
+	daemonA := uuid.NewString()
+	f.insertDaemon(t, daemonA)
+	agentA := uuid.NewString()
+	f.insertAgent(t, agentA, daemonA)
+
+	tests := []struct {
+		name  string
+		query string
+		args  []any
+	}{
+		{
+			"workspace_members user_id cross-workspace",
+			`INSERT INTO workspace_members (workspace_id, account_id, user_id, membership_role, status, created_at)
+			 VALUES ($1, $2, $3, 'member', 'active', $4)`,
+			[]any{f.workspaceID, accountA, userB, f.now},
+		},
+		{
+			"workspace_invites created_by cross-workspace",
+			`INSERT INTO workspace_invites (id, workspace_id, token_hash, created_by_user_id, expires_at, created_at)
+			 VALUES ($1, $2, $3, $4, $5, $6)`,
+			[]any{uuid.NewString(), f.workspaceID, "hash_x", userB, f.now.Add(24 * time.Hour), f.now},
+		},
+		{
+			"agents daemon_id cross-workspace",
+			`INSERT INTO agents (workspace_id, id, daemon_id, handle, name, role, kind, system_prompt, workspace_root,
+				current_turn_id, session_id, status, current_task, current_activity, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, 'assistant', 'codex', '', '', '', '', 'idle', '', '', $6)`,
+			[]any{f.workspaceID, uuid.NewString(), daemonB, "agent-cross", "Cross Agent", f.now},
+		},
+		{
+			"agent_runs agent_id cross-workspace",
+			`INSERT INTO agent_runs (workspace_id, id, agent_id, agent_handle, agent_name, agent_kind,
+				system_prompt, workspace_root, working_dir, prompt, status, desired_status,
+				last_message, log_tail, error, assigned_task_ref, updated_at)
+			 VALUES ($1, $2, $3, $4, 'Agent', 'codex', '', '', '.', 'test', 'running', 'running',
+				'', '[]'::jsonb, '', '', $5)`,
+			[]any{f.workspaceID, uuid.NewString(), agentB, "agent-b", f.now},
+		},
+		{
+			"agent_events agent_id cross-workspace",
+			`INSERT INTO agent_events (workspace_id, id, agent_id, agent_handle, type, status,
+				summary, prompt, dedup_key, last_error, attempt_count, available_at, created_at, updated_at)
+			 VALUES ($1, $2, $3, $4, 'test', 'pending', '', '', '', '', 0, $5, $6, $7)`,
+			[]any{f.workspaceID, uuid.NewString(), agentB, "agent-b", f.now, f.now, f.now},
+		},
+		{
+			"agent_document_views agent_id cross-workspace",
+			`INSERT INTO agent_document_views (workspace_id, agent_id, document_id, update_id, state_vector, viewed_at)
+			 VALUES ($1, $2, $3, 0, '', $4)`,
+			[]any{f.workspaceID, agentB, f.rootDocID, f.now},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := f.db.Exec(tc.query, tc.args...)
+			if err == nil {
+				t.Fatalf("expected cross-workspace ref to be rejected")
+			}
+		})
+	}
+}
+
 func TestPolymorphicTriggerRejectsCrossWorkspaceRef(t *testing.T) {
 	f := newFKTestFixture(t)
 
