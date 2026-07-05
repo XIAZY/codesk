@@ -481,10 +481,414 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			PRIMARY KEY (workspace_id, agent_id, document_id)
 		)
 		`,
+
 	}
 	for index, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {
 			return fmt.Errorf("init postgres schema statement %d: %w", index+1, err)
+		}
+	}
+	return nil
+}
+
+// initPostgresSchemaConstraints adds FK constraints, composite unique indexes,
+// and constraint triggers. Called AFTER UUID migrations so all columns are native UUID.
+func initPostgresSchemaConstraints(db *sql.DB) error {
+	statements := []string{
+		// ── Composite unique indexes for same-workspace enforcement ──
+
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_documents_workspace_id ON documents (workspace_id, id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_users_workspace_id ON users (workspace_id, id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_agents_workspace_id ON agents (workspace_id, id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_daemons_workspace_id ON daemons (workspace_id, id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_threads_workspace_id ON threads (workspace_id, id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_thread_messages_workspace_id ON thread_messages (workspace_id, id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_runs_workspace_id ON agent_runs (workspace_id, id)`,
+
+		// ── Workspace ownership (CASCADE) ──
+
+		`DO $$ BEGIN ALTER TABLE workspace_members ADD CONSTRAINT fk_workspace_members_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE workspace_members VALIDATE CONSTRAINT fk_workspace_members_workspace`,
+
+		`DO $$ BEGIN ALTER TABLE workspace_invites ADD CONSTRAINT fk_workspace_invites_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE workspace_invites VALIDATE CONSTRAINT fk_workspace_invites_workspace`,
+
+		`DO $$ BEGIN ALTER TABLE daemons ADD CONSTRAINT fk_daemons_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE daemons VALIDATE CONSTRAINT fk_daemons_workspace`,
+
+		`DO $$ BEGIN ALTER TABLE documents ADD CONSTRAINT fk_documents_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE documents VALIDATE CONSTRAINT fk_documents_workspace`,
+
+		`DO $$ BEGIN ALTER TABLE document_heads ADD CONSTRAINT fk_document_heads_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE document_heads VALIDATE CONSTRAINT fk_document_heads_workspace`,
+
+		`DO $$ BEGIN ALTER TABLE document_updates ADD CONSTRAINT fk_document_updates_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE document_updates VALIDATE CONSTRAINT fk_document_updates_workspace`,
+
+		`DO $$ BEGIN ALTER TABLE document_checkpoints ADD CONSTRAINT fk_document_checkpoints_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE document_checkpoints VALIDATE CONSTRAINT fk_document_checkpoints_workspace`,
+
+		`DO $$ BEGIN ALTER TABLE users ADD CONSTRAINT fk_users_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE users VALIDATE CONSTRAINT fk_users_workspace`,
+
+		`DO $$ BEGIN ALTER TABLE agents ADD CONSTRAINT fk_agents_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE agents VALIDATE CONSTRAINT fk_agents_workspace`,
+
+		`DO $$ BEGIN ALTER TABLE agent_runs ADD CONSTRAINT fk_agent_runs_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE agent_runs VALIDATE CONSTRAINT fk_agent_runs_workspace`,
+
+		`DO $$ BEGIN ALTER TABLE threads ADD CONSTRAINT fk_threads_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE threads VALIDATE CONSTRAINT fk_threads_workspace`,
+
+		`DO $$ BEGIN ALTER TABLE thread_messages ADD CONSTRAINT fk_thread_messages_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE thread_messages VALIDATE CONSTRAINT fk_thread_messages_workspace`,
+
+		`DO $$ BEGIN ALTER TABLE thread_participants ADD CONSTRAINT fk_thread_participants_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE thread_participants VALIDATE CONSTRAINT fk_thread_participants_workspace`,
+
+		`DO $$ BEGIN ALTER TABLE presences ADD CONSTRAINT fk_presences_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE presences VALIDATE CONSTRAINT fk_presences_workspace`,
+
+		`DO $$ BEGIN ALTER TABLE activities ADD CONSTRAINT fk_activities_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE activities VALIDATE CONSTRAINT fk_activities_workspace`,
+
+		`DO $$ BEGIN ALTER TABLE agent_events ADD CONSTRAINT fk_agent_events_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE agent_events VALIDATE CONSTRAINT fk_agent_events_workspace`,
+
+		`DO $$ BEGIN ALTER TABLE agent_document_views ADD CONSTRAINT fk_agent_document_views_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE agent_document_views VALIDATE CONSTRAINT fk_agent_document_views_workspace`,
+
+		// ── Account/auth ──
+
+		`DO $$ BEGIN ALTER TABLE account_email_tokens ADD CONSTRAINT fk_account_email_tokens_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE account_email_tokens VALIDATE CONSTRAINT fk_account_email_tokens_account`,
+
+		`DO $$ BEGIN ALTER TABLE accounts ADD CONSTRAINT fk_accounts_last_workspace FOREIGN KEY (last_accessed_workspace_id) REFERENCES workspaces(id) ON DELETE SET NULL NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE accounts VALIDATE CONSTRAINT fk_accounts_last_workspace`,
+
+		`DO $$ BEGIN ALTER TABLE workspace_members ADD CONSTRAINT fk_workspace_members_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE workspace_members VALIDATE CONSTRAINT fk_workspace_members_account`,
+
+		// ── Membership/invite ──
+
+		`DO $$ BEGIN ALTER TABLE workspace_members ADD CONSTRAINT fk_workspace_members_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE workspace_members VALIDATE CONSTRAINT fk_workspace_members_user`,
+
+		`DO $$ BEGIN ALTER TABLE workspace_members ADD CONSTRAINT fk_workspace_members_invited_by FOREIGN KEY (invited_by) REFERENCES users(id) ON DELETE SET NULL NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE workspace_members VALIDATE CONSTRAINT fk_workspace_members_invited_by`,
+
+		`DO $$ BEGIN ALTER TABLE workspace_invites ADD CONSTRAINT fk_workspace_invites_created_by FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE workspace_invites VALIDATE CONSTRAINT fk_workspace_invites_created_by`,
+
+		// ── Daemon/agent/run ──
+
+		`DO $$ BEGIN ALTER TABLE agents ADD CONSTRAINT fk_agents_daemon FOREIGN KEY (daemon_id) REFERENCES daemons(id) ON DELETE SET NULL NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE agents VALIDATE CONSTRAINT fk_agents_daemon`,
+
+		`DO $$ BEGIN ALTER TABLE agent_runs ADD CONSTRAINT fk_agent_runs_agent FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE agent_runs VALIDATE CONSTRAINT fk_agent_runs_agent`,
+
+		`DO $$ BEGIN ALTER TABLE agents ADD CONSTRAINT fk_agents_current_run FOREIGN KEY (current_run_id) REFERENCES agent_runs(id) ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE agents VALIDATE CONSTRAINT fk_agents_current_run`,
+
+		`DO $$ BEGIN ALTER TABLE agent_events ADD CONSTRAINT fk_agent_events_agent FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE agent_events VALIDATE CONSTRAINT fk_agent_events_agent`,
+
+		`DO $$ BEGIN ALTER TABLE agent_events ADD CONSTRAINT fk_agent_events_run FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE SET NULL NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE agent_events VALIDATE CONSTRAINT fk_agent_events_run`,
+
+		`DO $$ BEGIN ALTER TABLE agent_document_views ADD CONSTRAINT fk_agent_document_views_agent FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE agent_document_views VALIDATE CONSTRAINT fk_agent_document_views_agent`,
+
+		// ── Documents (composite same-workspace enforcement) ──
+
+		// NOTE: workspaces(id, root_document_id) -> documents(workspace_id, id) FK is
+		// deferred to a future phase. The current workspace creation flow inserts the
+		// workspace row and creates the root document in a separate step (ensureRootDocument),
+		// so a FK constraint would fail even with DEFERRABLE INITIALLY DEFERRED since the
+		// document is created outside the workspace insert transaction.
+
+		`DO $$ BEGIN ALTER TABLE document_heads ADD CONSTRAINT fk_document_heads_document FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE document_heads VALIDATE CONSTRAINT fk_document_heads_document`,
+
+		`DO $$ BEGIN ALTER TABLE document_updates ADD CONSTRAINT fk_document_updates_document FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE document_updates VALIDATE CONSTRAINT fk_document_updates_document`,
+
+		`DO $$ BEGIN ALTER TABLE document_checkpoints ADD CONSTRAINT fk_document_checkpoints_document FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE document_checkpoints VALIDATE CONSTRAINT fk_document_checkpoints_document`,
+
+		`DO $$ BEGIN ALTER TABLE threads ADD CONSTRAINT fk_threads_document FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE threads VALIDATE CONSTRAINT fk_threads_document`,
+
+		`DO $$ BEGIN ALTER TABLE presences ADD CONSTRAINT fk_presences_document FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE presences VALIDATE CONSTRAINT fk_presences_document`,
+
+		`DO $$ BEGIN ALTER TABLE agent_document_views ADD CONSTRAINT fk_agent_document_views_document FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE agent_document_views VALIDATE CONSTRAINT fk_agent_document_views_document`,
+
+		// SET NULL FKs for optional document refs use simple (non-composite) keys to avoid
+		// nulling workspace_id when the document is deleted (composite SET NULL nulls all columns).
+		`DO $$ BEGIN ALTER TABLE workspace_members ADD CONSTRAINT fk_workspace_members_last_doc FOREIGN KEY (last_accessed_document_id) REFERENCES documents(id) ON DELETE SET NULL NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE workspace_members VALIDATE CONSTRAINT fk_workspace_members_last_doc`,
+
+		`DO $$ BEGIN ALTER TABLE activities ADD CONSTRAINT fk_activities_document FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE SET NULL NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE activities VALIDATE CONSTRAINT fk_activities_document`,
+
+		`DO $$ BEGIN ALTER TABLE agent_events ADD CONSTRAINT fk_agent_events_document FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE SET NULL NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE agent_events VALIDATE CONSTRAINT fk_agent_events_document`,
+
+		// ── Threads/messages (composite same-workspace enforcement) ──
+
+		`DO $$ BEGIN ALTER TABLE thread_messages ADD CONSTRAINT fk_thread_messages_thread FOREIGN KEY (workspace_id, thread_id) REFERENCES threads(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE thread_messages VALIDATE CONSTRAINT fk_thread_messages_thread`,
+
+		`DO $$ BEGIN ALTER TABLE thread_participants ADD CONSTRAINT fk_thread_participants_thread FOREIGN KEY (workspace_id, thread_id) REFERENCES threads(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE thread_participants VALIDATE CONSTRAINT fk_thread_participants_thread`,
+
+		// SET NULL FKs for optional thread/message refs use simple keys (same reasoning as above).
+		`DO $$ BEGIN ALTER TABLE agent_events ADD CONSTRAINT fk_agent_events_thread FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE SET NULL NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE agent_events VALIDATE CONSTRAINT fk_agent_events_thread`,
+
+		`DO $$ BEGIN ALTER TABLE agent_events ADD CONSTRAINT fk_agent_events_thread_message FOREIGN KEY (thread_message_id) REFERENCES thread_messages(id) ON DELETE SET NULL NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+		`ALTER TABLE agent_events VALIDATE CONSTRAINT fk_agent_events_thread_message`,
+
+		// ── Polymorphic constraint triggers ──
+
+		// Trigger function: validate polymorphic actor reference.
+		`CREATE OR REPLACE FUNCTION check_polymorphic_actor_ref()
+		RETURNS TRIGGER AS $fn$
+		DECLARE
+			ref_id UUID;
+			ref_type TEXT;
+		BEGIN
+			ref_id   := NEW.actor_id;
+			ref_type := NEW.actor_type;
+			IF ref_id IS NULL OR ref_type IS NULL OR ref_type = '' OR ref_type = 'system' THEN
+				RETURN NEW;
+			END IF;
+			IF ref_type = 'human' THEN
+				PERFORM 1 FROM users WHERE id = ref_id;
+				IF NOT FOUND THEN
+					RAISE EXCEPTION 'actor_id % references missing user', ref_id;
+				END IF;
+			ELSIF ref_type = 'agent' THEN
+				PERFORM 1 FROM agents WHERE id = ref_id;
+				IF NOT FOUND THEN
+					RAISE EXCEPTION 'actor_id % references missing agent', ref_id;
+				END IF;
+			ELSIF ref_type = 'daemon' THEN
+				PERFORM 1 FROM daemons WHERE id = ref_id;
+				IF NOT FOUND THEN
+					RAISE EXCEPTION 'actor_id % references missing daemon', ref_id;
+				END IF;
+			END IF;
+			RETURN NEW;
+		END;
+		$fn$ LANGUAGE plpgsql`,
+
+		`DROP TRIGGER IF EXISTS trg_document_updates_actor_ref ON document_updates`,
+		`CREATE TRIGGER trg_document_updates_actor_ref
+			BEFORE INSERT OR UPDATE ON document_updates
+			FOR EACH ROW EXECUTE FUNCTION check_polymorphic_actor_ref()`,
+
+		`DROP TRIGGER IF EXISTS trg_presences_actor_ref ON presences`,
+		`CREATE TRIGGER trg_presences_actor_ref
+			BEFORE INSERT OR UPDATE ON presences
+			FOR EACH ROW EXECUTE FUNCTION check_polymorphic_actor_ref()`,
+
+		`DROP TRIGGER IF EXISTS trg_activities_actor_ref ON activities`,
+		`CREATE TRIGGER trg_activities_actor_ref
+			BEFORE INSERT OR UPDATE ON activities
+			FOR EACH ROW EXECUTE FUNCTION check_polymorphic_actor_ref()`,
+
+		// Trigger function: validate thread created_by reference (human/agent only).
+		`CREATE OR REPLACE FUNCTION check_thread_created_by_ref()
+		RETURNS TRIGGER AS $fn$
+		BEGIN
+			IF NEW.created_by_id IS NULL OR NEW.created_by_type IS NULL OR NEW.created_by_type = '' OR NEW.created_by_type = 'system' THEN
+				RETURN NEW;
+			END IF;
+			IF NEW.created_by_type = 'human' THEN
+				PERFORM 1 FROM users WHERE id = NEW.created_by_id;
+				IF NOT FOUND THEN
+					RAISE EXCEPTION 'created_by_id % references missing user', NEW.created_by_id;
+				END IF;
+			ELSIF NEW.created_by_type = 'agent' THEN
+				PERFORM 1 FROM agents WHERE id = NEW.created_by_id;
+				IF NOT FOUND THEN
+					RAISE EXCEPTION 'created_by_id % references missing agent', NEW.created_by_id;
+				END IF;
+			END IF;
+			RETURN NEW;
+		END;
+		$fn$ LANGUAGE plpgsql`,
+
+		`DROP TRIGGER IF EXISTS trg_threads_author_ref ON threads`,
+		`CREATE TRIGGER trg_threads_author_ref
+			BEFORE INSERT OR UPDATE ON threads
+			FOR EACH ROW EXECUTE FUNCTION check_thread_created_by_ref()`,
+
+		// Trigger function: validate thread_messages author reference (human/agent only).
+		`CREATE OR REPLACE FUNCTION check_thread_message_author_ref()
+		RETURNS TRIGGER AS $fn$
+		BEGIN
+			IF NEW.author_id IS NULL OR NEW.author_type IS NULL OR NEW.author_type = '' OR NEW.author_type = 'system' THEN
+				RETURN NEW;
+			END IF;
+			IF NEW.author_type = 'human' THEN
+				PERFORM 1 FROM users WHERE id = NEW.author_id;
+				IF NOT FOUND THEN
+					RAISE EXCEPTION 'author_id % references missing user', NEW.author_id;
+				END IF;
+			ELSIF NEW.author_type = 'agent' THEN
+				PERFORM 1 FROM agents WHERE id = NEW.author_id;
+				IF NOT FOUND THEN
+					RAISE EXCEPTION 'author_id % references missing agent', NEW.author_id;
+				END IF;
+			END IF;
+			RETURN NEW;
+		END;
+		$fn$ LANGUAGE plpgsql`,
+
+		`DROP TRIGGER IF EXISTS trg_thread_messages_author_ref ON thread_messages`,
+		`CREATE TRIGGER trg_thread_messages_author_ref
+			BEFORE INSERT OR UPDATE ON thread_messages
+			FOR EACH ROW EXECUTE FUNCTION check_thread_message_author_ref()`,
+
+		// Trigger function: validate activities provenance actor reference.
+		`CREATE OR REPLACE FUNCTION check_provenance_actor_ref()
+		RETURNS TRIGGER AS $fn$
+		BEGIN
+			IF NEW.provenance_actor_id IS NULL OR NEW.provenance_actor_type IS NULL OR NEW.provenance_actor_type = '' OR NEW.provenance_actor_type = 'system' THEN
+				RETURN NEW;
+			END IF;
+			IF NEW.provenance_actor_type = 'human' THEN
+				PERFORM 1 FROM users WHERE id = NEW.provenance_actor_id;
+				IF NOT FOUND THEN
+					RAISE EXCEPTION 'provenance_actor_id % references missing user', NEW.provenance_actor_id;
+				END IF;
+			ELSIF NEW.provenance_actor_type = 'agent' THEN
+				PERFORM 1 FROM agents WHERE id = NEW.provenance_actor_id;
+				IF NOT FOUND THEN
+					RAISE EXCEPTION 'provenance_actor_id % references missing agent', NEW.provenance_actor_id;
+				END IF;
+			ELSIF NEW.provenance_actor_type = 'daemon' THEN
+				PERFORM 1 FROM daemons WHERE id = NEW.provenance_actor_id;
+				IF NOT FOUND THEN
+					RAISE EXCEPTION 'provenance_actor_id % references missing daemon', NEW.provenance_actor_id;
+				END IF;
+			END IF;
+			RETURN NEW;
+		END;
+		$fn$ LANGUAGE plpgsql`,
+
+		`DROP TRIGGER IF EXISTS trg_activities_provenance_ref ON activities`,
+		`CREATE TRIGGER trg_activities_provenance_ref
+			BEFORE INSERT OR UPDATE ON activities
+			FOR EACH ROW EXECUTE FUNCTION check_provenance_actor_ref()`,
+
+		// Trigger function: validate thread_participants.participant_id exists in users OR agents.
+		`CREATE OR REPLACE FUNCTION check_participant_ref()
+		RETURNS TRIGGER AS $fn$
+		BEGIN
+			PERFORM 1 FROM users WHERE id = NEW.participant_id;
+			IF FOUND THEN RETURN NEW; END IF;
+			PERFORM 1 FROM agents WHERE id = NEW.participant_id;
+			IF FOUND THEN RETURN NEW; END IF;
+			RAISE EXCEPTION 'participant_id % not found in users or agents', NEW.participant_id;
+		END;
+		$fn$ LANGUAGE plpgsql`,
+
+		`DROP TRIGGER IF EXISTS trg_thread_participants_ref ON thread_participants`,
+		`CREATE TRIGGER trg_thread_participants_ref
+			BEFORE INSERT OR UPDATE ON thread_participants
+			FOR EACH ROW EXECUTE FUNCTION check_participant_ref()`,
+
+		// Trigger function: validate agent_events.claimed_by is the event's agent or that agent's daemon, or NULL.
+		`CREATE OR REPLACE FUNCTION check_agent_event_claimed_by()
+		RETURNS TRIGGER AS $fn$
+		BEGIN
+			IF NEW.claimed_by IS NULL THEN
+				RETURN NEW;
+			END IF;
+			IF NEW.claimed_by = NEW.agent_id THEN
+				RETURN NEW;
+			END IF;
+			PERFORM 1 FROM agents WHERE id = NEW.agent_id AND daemon_id = NEW.claimed_by;
+			IF FOUND THEN RETURN NEW; END IF;
+			PERFORM 1 FROM daemons WHERE id = NEW.claimed_by;
+			IF FOUND THEN RETURN NEW; END IF;
+			RAISE EXCEPTION 'claimed_by % is not the event agent or its daemon', NEW.claimed_by;
+		END;
+		$fn$ LANGUAGE plpgsql`,
+
+		`DROP TRIGGER IF EXISTS trg_agent_events_claimed_by ON agent_events`,
+		`CREATE TRIGGER trg_agent_events_claimed_by
+			BEFORE INSERT OR UPDATE ON agent_events
+			FOR EACH ROW EXECUTE FUNCTION check_agent_event_claimed_by()`,
+
+		// ── Cleanup triggers for polymorphic ON DELETE behavior ──
+
+		// When a user is deleted: null out polymorphic actor_id refs, delete presences and participants.
+		`CREATE OR REPLACE FUNCTION on_user_delete()
+		RETURNS TRIGGER AS $fn$
+		BEGIN
+			UPDATE document_updates SET actor_id = NULL WHERE actor_type = 'human' AND actor_id = OLD.id;
+			UPDATE threads SET created_by_id = NULL WHERE created_by_type = 'human' AND created_by_id = OLD.id;
+			UPDATE thread_messages SET author_id = NULL WHERE author_type = 'human' AND author_id = OLD.id;
+			UPDATE activities SET actor_id = NULL WHERE actor_type = 'human' AND actor_id = OLD.id;
+			UPDATE activities SET provenance_actor_id = NULL WHERE provenance_actor_type = 'human' AND provenance_actor_id = OLD.id;
+			DELETE FROM presences WHERE actor_type = 'human' AND actor_id = OLD.id;
+			DELETE FROM thread_participants WHERE participant_id = OLD.id;
+			RETURN OLD;
+		END;
+		$fn$ LANGUAGE plpgsql`,
+
+		`DROP TRIGGER IF EXISTS trg_user_delete_cleanup ON users`,
+		`CREATE TRIGGER trg_user_delete_cleanup
+			BEFORE DELETE ON users
+			FOR EACH ROW EXECUTE FUNCTION on_user_delete()`,
+
+		// When an agent is deleted: null out polymorphic actor_id refs, delete presences and participants.
+		`CREATE OR REPLACE FUNCTION on_agent_delete()
+		RETURNS TRIGGER AS $fn$
+		BEGIN
+			UPDATE document_updates SET actor_id = NULL WHERE actor_type = 'agent' AND actor_id = OLD.id;
+			UPDATE threads SET created_by_id = NULL WHERE created_by_type = 'agent' AND created_by_id = OLD.id;
+			UPDATE thread_messages SET author_id = NULL WHERE author_type = 'agent' AND author_id = OLD.id;
+			UPDATE activities SET actor_id = NULL WHERE actor_type = 'agent' AND actor_id = OLD.id;
+			UPDATE activities SET provenance_actor_id = NULL WHERE provenance_actor_type = 'agent' AND provenance_actor_id = OLD.id;
+			DELETE FROM presences WHERE actor_type = 'agent' AND actor_id = OLD.id;
+			DELETE FROM thread_participants WHERE participant_id = OLD.id;
+			RETURN OLD;
+		END;
+		$fn$ LANGUAGE plpgsql`,
+
+		`DROP TRIGGER IF EXISTS trg_agent_delete_cleanup ON agents`,
+		`CREATE TRIGGER trg_agent_delete_cleanup
+			BEFORE DELETE ON agents
+			FOR EACH ROW EXECUTE FUNCTION on_agent_delete()`,
+
+		// When a daemon is deleted: null out polymorphic actor_id refs, delete presences.
+		`CREATE OR REPLACE FUNCTION on_daemon_delete()
+		RETURNS TRIGGER AS $fn$
+		BEGIN
+			UPDATE document_updates SET actor_id = NULL WHERE actor_type = 'daemon' AND actor_id = OLD.id;
+			UPDATE activities SET actor_id = NULL WHERE actor_type = 'daemon' AND actor_id = OLD.id;
+			UPDATE activities SET provenance_actor_id = NULL WHERE provenance_actor_type = 'daemon' AND provenance_actor_id = OLD.id;
+			DELETE FROM presences WHERE actor_type = 'daemon' AND actor_id = OLD.id;
+			RETURN OLD;
+		END;
+		$fn$ LANGUAGE plpgsql`,
+
+		`DROP TRIGGER IF EXISTS trg_daemon_delete_cleanup ON daemons`,
+		`CREATE TRIGGER trg_daemon_delete_cleanup
+			BEFORE DELETE ON daemons
+			FOR EACH ROW EXECUTE FUNCTION on_daemon_delete()`,
+	}
+	for index, statement := range statements {
+		if _, err := db.Exec(statement); err != nil {
+			return fmt.Errorf("init postgres schema constraint %d: %w", index+1, err)
 		}
 	}
 	return nil
@@ -1029,13 +1433,18 @@ func (s *Store) maybeInsertDocumentCheckpointPostgresLocked(tx *sql.Tx, document
 }
 
 func (s *Store) replaceUsersPostgresLocked(tx *sql.Tx) error {
-	if _, err := tx.Exec(`DELETE FROM users WHERE workspace_id::text = $1`, s.state.WorkspaceID); err != nil {
-		return err
-	}
+	// Upsert current users.
 	for _, user := range s.state.Users {
 		if _, err := tx.Exec(
 			`INSERT INTO users (workspace_id, id, handle, name, role, kind, status, created_at, updated_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			 ON CONFLICT (id)
+			 DO UPDATE SET handle = EXCLUDED.handle,
+			               name = EXCLUDED.name,
+			               role = EXCLUDED.role,
+			               kind = EXCLUDED.kind,
+			               status = EXCLUDED.status,
+			               updated_at = EXCLUDED.updated_at`,
 			s.state.WorkspaceID,
 			user.ID,
 			user.Handle,
@@ -1049,19 +1458,58 @@ func (s *Store) replaceUsersPostgresLocked(tx *sql.Tx) error {
 			return err
 		}
 	}
-	return nil
+	// Remove users that are no longer in the in-memory state.
+	ids := make([]string, 0, len(s.state.Users))
+	for id := range s.state.Users {
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		_, err := tx.Exec(`DELETE FROM users WHERE workspace_id::text = $1`, s.state.WorkspaceID)
+		return err
+	}
+	// Build a VALUES list for the keep set.
+	keepQuery := `DELETE FROM users WHERE workspace_id::text = $1 AND id NOT IN (`
+	args := []any{s.state.WorkspaceID}
+	for i, id := range ids {
+		if i > 0 {
+			keepQuery += ","
+		}
+		keepQuery += fmt.Sprintf("$%d", i+2)
+		args = append(args, id)
+	}
+	keepQuery += ")"
+	_, err := tx.Exec(keepQuery, args...)
+	return err
 }
 
 func (s *Store) replaceAgentsPostgresLocked(tx *sql.Tx) error {
-	if _, err := tx.Exec(`DELETE FROM agents WHERE workspace_id::text = $1`, s.state.WorkspaceID); err != nil {
-		return err
-	}
+	// Upsert current agents.
 	for _, agent := range s.state.Agents {
-		if err := insertAgentPostgres(tx, s.state.WorkspaceID, agent); err != nil {
+		if err := upsertAgentPostgresTx(tx, s.state.WorkspaceID, agent); err != nil {
 			return err
 		}
 	}
-	return nil
+	// Remove agents no longer in state.
+	ids := make([]string, 0, len(s.state.Agents))
+	for id := range s.state.Agents {
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		_, err := tx.Exec(`DELETE FROM agents WHERE workspace_id::text = $1`, s.state.WorkspaceID)
+		return err
+	}
+	keepQuery := `DELETE FROM agents WHERE workspace_id::text = $1 AND id NOT IN (`
+	args := []any{s.state.WorkspaceID}
+	for i, id := range ids {
+		if i > 0 {
+			keepQuery += ","
+		}
+		keepQuery += fmt.Sprintf("$%d", i+2)
+		args = append(args, id)
+	}
+	keepQuery += ")"
+	_, err := tx.Exec(keepQuery, args...)
+	return err
 }
 
 func upsertAgentPostgres(db *sql.DB, workspaceID string, agent *Agent) error {
@@ -1153,10 +1601,60 @@ func insertAgentPostgres(tx *sql.Tx, workspaceID string, agent *Agent) error {
 	return err
 }
 
-func (s *Store) replaceAgentRunsPostgresLocked(tx *sql.Tx) error {
-	if _, err := tx.Exec(`DELETE FROM agent_runs WHERE workspace_id::text = $1`, s.state.WorkspaceID); err != nil {
-		return err
+func upsertAgentPostgresTx(tx *sql.Tx, workspaceID string, agent *Agent) error {
+	if agent == nil {
+		return nil
 	}
+	_, err := tx.Exec(
+		`INSERT INTO agents (
+			workspace_id, id, daemon_id, handle, name, role, kind, system_prompt, workspace_root,
+			current_turn_id, session_id, status, current_task, current_activity,
+			current_run_id, last_heartbeat_at, last_run_completed, updated_at
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8, $9,
+			$10, $11, $12, $13, $14,
+			$15, $16, $17, $18
+		)
+		ON CONFLICT (id)
+		DO UPDATE SET daemon_id = EXCLUDED.daemon_id,
+		              handle = EXCLUDED.handle,
+		              name = EXCLUDED.name,
+		              role = EXCLUDED.role,
+		              kind = EXCLUDED.kind,
+		              system_prompt = EXCLUDED.system_prompt,
+		              workspace_root = EXCLUDED.workspace_root,
+		              current_turn_id = EXCLUDED.current_turn_id,
+		              session_id = EXCLUDED.session_id,
+		              status = EXCLUDED.status,
+		              current_task = EXCLUDED.current_task,
+		              current_activity = EXCLUDED.current_activity,
+		              current_run_id = EXCLUDED.current_run_id,
+		              last_heartbeat_at = EXCLUDED.last_heartbeat_at,
+		              last_run_completed = EXCLUDED.last_run_completed,
+		              updated_at = EXCLUDED.updated_at`,
+		workspaceID,
+		agent.ID,
+		uuidStringOrNil(agent.DaemonID),
+		agent.Handle,
+		agent.Name,
+		agent.Role,
+		agent.Kind,
+		agent.SystemPrompt,
+		agent.WorkspaceRoot,
+		agent.CurrentTurnID,
+		agent.SessionID,
+		agent.Status,
+		agent.CurrentTask,
+		agent.CurrentActivity,
+		uuidStringOrNil(agent.CurrentRunID),
+		nullTime(agent.LastHeartbeatAt),
+		nullTime(agent.LastRunCompleted),
+		agent.UpdatedAt,
+	)
+	return err
+}
+
+func (s *Store) replaceAgentRunsPostgresLocked(tx *sql.Tx) error {
 	for _, run := range s.state.AgentRuns {
 		logTail, err := json.Marshal(run.LogTail)
 		if err != nil {
@@ -1173,7 +1671,20 @@ func (s *Store) replaceAgentRunsPostgresLocked(tx *sql.Tx) error {
 				$8, $9, $10, $11, $12, $13, $14,
 				$15, $16, $17, $18, $19,
 				$20::jsonb, $21, $22, $23
-			)`,
+			)
+			ON CONFLICT (id)
+			DO UPDATE SET status = EXCLUDED.status,
+			              desired_status = EXCLUDED.desired_status,
+			              process_id = EXCLUDED.process_id,
+			              launch_time = EXCLUDED.launch_time,
+			              last_heartbeat_at = EXCLUDED.last_heartbeat_at,
+			              completed_at = EXCLUDED.completed_at,
+			              exit_code = EXCLUDED.exit_code,
+			              last_message = EXCLUDED.last_message,
+			              log_tail = EXCLUDED.log_tail,
+			              error = EXCLUDED.error,
+			              session_id = EXCLUDED.session_id,
+			              updated_at = EXCLUDED.updated_at`,
 			s.state.WorkspaceID,
 			run.ID,
 			run.AgentID,
@@ -1201,7 +1712,27 @@ func (s *Store) replaceAgentRunsPostgresLocked(tx *sql.Tx) error {
 			return err
 		}
 	}
-	return nil
+	// Remove agent runs no longer in state.
+	ids := make([]string, 0, len(s.state.AgentRuns))
+	for id := range s.state.AgentRuns {
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		_, err := tx.Exec(`DELETE FROM agent_runs WHERE workspace_id::text = $1`, s.state.WorkspaceID)
+		return err
+	}
+	keepQuery := `DELETE FROM agent_runs WHERE workspace_id::text = $1 AND id NOT IN (`
+	args := []any{s.state.WorkspaceID}
+	for i, id := range ids {
+		if i > 0 {
+			keepQuery += ","
+		}
+		keepQuery += fmt.Sprintf("$%d", i+2)
+		args = append(args, id)
+	}
+	keepQuery += ")"
+	_, err := tx.Exec(keepQuery, args...)
+	return err
 }
 
 func (s *Store) replacePresencesPostgresLocked(tx *sql.Tx) error {

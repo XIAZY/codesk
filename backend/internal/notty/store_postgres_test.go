@@ -2,6 +2,7 @@ package notty
 
 import (
 	"database/sql"
+	"encoding/json"
 	"net/url"
 	"os"
 	"strconv"
@@ -907,7 +908,16 @@ func postgresTestDSN(t *testing.T) string {
 
 func newPostgresTestDatabase(t *testing.T) *Database {
 	t.Helper()
-	database, err := OpenDatabase(postgresTestDSN(t))
+	dsn := postgresTestDSN(t)
+	// Truncate stale data before OpenDatabase runs migrations, which fail on leftover rows.
+	rawDB, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open raw db for pre-clean: %v", err)
+	}
+	_ = clearNottyTables(rawDB)
+	rawDB.Close()
+
+	database, err := OpenDatabase(dsn)
 	if err != nil {
 		t.Fatalf("open test database: %v", err)
 	}
@@ -998,6 +1008,19 @@ func seedStoreDaemonRuntime(t *testing.T, store *Store, daemonID string, runtime
 		daemonID = uuid.NewString()
 	}
 	now := time.Now().UTC()
+	runtimesJSON, _ := json.Marshal(runtimes)
+	tokenHash := "test_token_" + daemonID
+	if _, err := store.db.Exec(
+		`INSERT INTO daemons (id, workspace_id, name, token_hash, status, daemon_version, os, arch, runtime_detections, last_seen_at, created_at)
+		 VALUES ($1, $2, $3, $4, $5, '', '', '', $6, $7, $8)
+		 ON CONFLICT (id) DO UPDATE SET
+			status = EXCLUDED.status,
+			runtime_detections = EXCLUDED.runtime_detections,
+			last_seen_at = EXCLUDED.last_seen_at`,
+		daemonID, store.workspaceID, "Test daemon", tokenHash, "active", runtimesJSON, now, now,
+	); err != nil {
+		t.Fatalf("insert test daemon: %v", err)
+	}
 	store.mu.Lock()
 	store.ensureMaps()
 	store.state.Daemons[daemonID] = &Daemon{
@@ -1010,11 +1033,7 @@ func seedStoreDaemonRuntime(t *testing.T, store *Store, daemonID string, runtime
 		CreatedAt:   now,
 	}
 	applyDaemonLiveness(store.state.Daemons[daemonID], now)
-	err := store.persistLocked()
 	store.mu.Unlock()
-	if err != nil {
-		t.Fatalf("persist test daemon runtime: %v", err)
-	}
 	return daemonID
 }
 
@@ -1024,33 +1043,32 @@ func seedCodexDaemonRuntime(t *testing.T, store *Store) string {
 }
 
 func clearNottyTables(db *sql.DB) error {
-	statements := []string{
-		`DELETE FROM agent_document_views`,
-		`DELETE FROM document_checkpoints`,
-		`DELETE FROM document_updates`,
-		`DELETE FROM document_heads`,
-		`DELETE FROM documents`,
-		`DELETE FROM thread_messages`,
-		`DELETE FROM thread_participants`,
-		`DELETE FROM threads`,
-		`DELETE FROM agent_events`,
-		`DELETE FROM agent_runs`,
-		`DELETE FROM presences`,
-		`DELETE FROM activities`,
-		`DELETE FROM agents`,
-		`DELETE FROM account_email_tokens`,
-		`DELETE FROM workspace_invites`,
-		`DELETE FROM users`,
-		`DELETE FROM daemons`,
-		`DELETE FROM workspace_members`,
-		`DELETE FROM accounts`,
-		`DELETE FROM workspaces`,
+	if _, err := db.Exec(`TRUNCATE TABLE
+		agent_document_views,
+		document_checkpoints,
+		document_updates,
+		document_heads,
+		documents,
+		thread_messages,
+		thread_participants,
+		threads,
+		agent_events,
+		agent_runs,
+		presences,
+		activities,
+		agents,
+		account_email_tokens,
+		workspace_invites,
+		users,
+		daemons,
+		workspace_members,
+		accounts,
+		workspaces
+		CASCADE`); err != nil {
+		return err
 	}
-	for _, statement := range statements {
-		if _, err := db.Exec(statement); err != nil {
-			return err
-		}
-	}
+	// Clear migration map to prevent stale mappings from previous test runs.
+	_, _ = db.Exec(`TRUNCATE TABLE uuid_migration_map`)
 	return nil
 }
 
