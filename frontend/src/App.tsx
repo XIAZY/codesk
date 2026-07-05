@@ -493,7 +493,7 @@ export function App() {
   );
 }
 
-function RestoringSessionScreen() {
+export function RestoringSessionScreen() {
   return (
     <main className="auth-screen">
       <section className="card p-24 auth-panel">
@@ -505,7 +505,7 @@ function RestoringSessionScreen() {
   );
 }
 
-function RouteMessageScreen({ title, body }: { title: string; body: string }) {
+export function RouteMessageScreen({ title, body }: { title: string; body: string }) {
   return (
     <main className="auth-screen">
       <section className="card p-24 auth-panel">
@@ -655,7 +655,7 @@ function InvitePage({
   );
 }
 
-function InvitePreviewCard({ preview }: { preview: WorkspaceInvitePreview }) {
+export function InvitePreviewCard({ preview }: { preview: WorkspaceInvitePreview }) {
   return (
     <div className="invite-preview">
       <div className="avi workspace-avi">{initials(preview.workspace.name)}</div>
@@ -679,7 +679,7 @@ function formatInviteDate(value: string) {
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date);
 }
 
-function AuthScreen({
+export function AuthScreen({
   api,
   mode,
   onAuth,
@@ -986,7 +986,7 @@ function ResetPasswordPage({ api, token }: { api: ApiClient; token: string }) {
   );
 }
 
-function AccountFlowScreen({ title, body, actionLabel, onAction }: { title: string; body: string; actionLabel: string; onAction: () => void }) {
+export function AccountFlowScreen({ title, body, actionLabel, onAction }: { title: string; body: string; actionLabel: string; onAction: () => void }) {
   return (
     <main className="auth-screen">
       <section className="card p-24 auth-panel">
@@ -1698,7 +1698,7 @@ export function WorkspaceApp({
   );
 }
 
-function DocumentPathBar({
+export function DocumentPathBar({
   document,
   workspaceName,
   editing,
@@ -1833,7 +1833,7 @@ function DocumentTitleEditor({
   );
 }
 
-function DocumentTree(props: {
+export function DocumentTree(props: {
   nodes: DocTreeNode[];
   activeDocumentId: string;
   collapsedFolders: Set<string>;
@@ -2091,7 +2091,7 @@ function AgentsManagement({
   );
 }
 
-function MetricCard({ label, value, tone }: { label: string; value: number; tone?: "ok" | "warn" | "err" }) {
+export function MetricCard({ label, value, tone }: { label: string; value: number; tone?: "ok" | "warn" | "err" }) {
   return (
     <div className="card p-12 metric-card">
       <div className="label">{label}</div>
@@ -2595,7 +2595,7 @@ function RenameDocumentModal({ document, onClose, onRename, onDelete }: { docume
   );
 }
 
-function ShellScriptBlock({ title, badge, command, children }: { title: string; badge?: string; command: string; children?: ReactNode }) {
+export function ShellScriptBlock({ title, badge, command, children }: { title: string; badge?: string; command: string; children?: ReactNode }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
     if (!command || typeof navigator === "undefined" || !navigator.clipboard) {
@@ -2896,7 +2896,7 @@ function CreateAgentModal({ api, workspaceId, daemons, onClose, onDone }: { api:
   );
 }
 
-function RuntimeOption({ tile, selected, daemonSelected, onSelect, onExplain }: { tile: RuntimeTile; selected: boolean; daemonSelected: boolean; onSelect: () => void; onExplain: () => void }) {
+export function RuntimeOption({ tile, selected, daemonSelected, onSelect, onExplain }: { tile: RuntimeTile; selected: boolean; daemonSelected: boolean; onSelect: () => void; onExplain: () => void }) {
   const { entry, availability, meta } = tile;
   const tileClass = `rt-tile${entry.tile ? ` ${entry.tile}` : ""}`;
 
@@ -3072,7 +3072,7 @@ function DaemonDetailModal({ api, workspaceId, daemon, agents, runs, onClose, on
   );
 }
 
-function EmptyWorkspace({
+export function EmptyWorkspace({
   onCreateDocument,
   onCreateDaemon,
   creatingDocument,
@@ -3103,7 +3103,7 @@ function EmptyWorkspace({
   );
 }
 
-function DocumentNotFound({ onBackToWorkspace }: { onBackToWorkspace: () => void }) {
+export function DocumentNotFound({ onBackToWorkspace }: { onBackToWorkspace: () => void }) {
   return (
     <section className="doc-canvas">
       <div className="doc-inner empty-state">
@@ -3175,7 +3175,7 @@ function ShareWorkspaceModal({ api, workspaceId, onClose }: { api: ApiClient; wo
   );
 }
 
-function Modal({ title, children, onClose, wide }: { title: string; children: ReactNode; onClose: () => void; wide?: boolean }) {
+export function Modal({ title, children, onClose, wide }: { title: string; children: ReactNode; onClose: () => void; wide?: boolean }) {
   return (
     <div className="modal-backdrop">
       <section className={`modal-card card lifted${wide ? " wide" : ""}`}>
@@ -3189,11 +3189,11 @@ function Modal({ title, children, onClose, wide }: { title: string; children: Re
   );
 }
 
-function StatusDot({ tone }: { tone: string }) {
+export function StatusDot({ tone }: { tone: string }) {
   return <span className={`status-dot ${tone}`} />;
 }
 
-function Logo() {
+export function Logo() {
   return (
     <div className="row gap-8 logo-row">
       <svg className="logo-mark" viewBox="14 31 72 38" aria-hidden="true">
@@ -3207,7 +3207,7 @@ function Logo() {
   );
 }
 
-function Icon({ name }: { name: string }) {
+export function Icon({ name }: { name: string }) {
   switch (name) {
     case "home":
       return <svg className="i sm" viewBox="0 0 24 24"><path d="M3 12l9-9 9 9M5 10v10h14V10" /></svg>;

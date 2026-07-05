@@ -1,0 +1,39 @@
+{
+  "projectId": "75cef552-8e6c-4c35-8be5-ebbbd34211f3",
+  "pkg": "codesk-frontend",
+  "globalName": "Codesk",
+  "shape": "package",
+  "readmeHeader": ".design-sync/conventions.md",
+  "tsconfig": "tsconfig.json",
+  "cssEntry": "src/styles.css",
+  "overrides": {
+    "Modal": { "cardMode": "single", "viewport": "800x680" },
+    "AccountFlowScreen": { "cardMode": "column" },
+    "AuthScreen": { "cardMode": "column" },
+    "DocumentPathBar": { "cardMode": "column" },
+    "InvitePreviewCard": { "cardMode": "column" },
+    "RouteMessageScreen": { "cardMode": "column" }
+  },
+  "componentSrcMap": {
+    "App": null,
+    "WorkspaceApp": null,
+    "WorkspaceOnboarding": null,
+    "DocumentSurface": null,
+    "RestoringSessionScreen": "src/App.tsx",
+    "RouteMessageScreen": "src/App.tsx",
+    "InvitePreviewCard": "src/App.tsx",
+    "AuthScreen": "src/App.tsx",
+    "AccountFlowScreen": "src/App.tsx",
+    "DocumentPathBar": "src/App.tsx",
+    "DocumentTree": "src/App.tsx",
+    "MetricCard": "src/App.tsx",
+    "ShellScriptBlock": "src/App.tsx",
+    "RuntimeOption": "src/App.tsx",
+    "EmptyWorkspace": "src/App.tsx",
+    "DocumentNotFound": "src/App.tsx",
+    "Modal": "src/App.tsx",
+    "StatusDot": "src/App.tsx",
+    "Logo": "src/App.tsx",
+    "Icon": "src/App.tsx"
+  }
+}
