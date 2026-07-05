@@ -19,10 +19,10 @@ func TestPostgresSchemaForeignKeyConstraints(t *testing.T) {
 	db := database.DB
 
 	type fkExpectation struct {
-		constraintName string
-		table          string
+		constraintName  string
+		table           string
 		referencedTable string
-		onDelete       string
+		onDelete        string
 	}
 
 	expected := []fkExpectation{
@@ -105,9 +105,9 @@ func TestPostgresSchemaForeignKeyConstraints(t *testing.T) {
 	defer rows.Close()
 
 	type foundFK struct {
-		table          string
+		table           string
 		referencedTable string
-		onDelete       string
+		onDelete        string
 	}
 	found := map[string]foundFK{}
 	for rows.Next() {
@@ -145,6 +145,12 @@ type fkTestFixture struct {
 	workspaceID string
 	rootDocID   string
 	now         time.Time
+}
+
+type fkActorIDs struct {
+	userID   string
+	daemonID string
+	agentID  string
 }
 
 func newFKTestFixture(t *testing.T) *fkTestFixture {
@@ -223,6 +229,49 @@ func (f *fkTestFixture) insertAgent(t *testing.T, agentID, daemonID string) {
 		current_turn_id, session_id, status, current_task, current_activity, updated_at)
 		VALUES ($1, $2, $3, $4, $5, 'assistant', 'codex', '', '', '', '', 'idle', '', '', $6)`,
 		f.workspaceID, agentID, daemonID, "agent-"+agentID[:8], "Test Agent", f.now)
+}
+
+func (f *fkTestFixture) insertActors(t *testing.T) fkActorIDs {
+	t.Helper()
+	actors := fkActorIDs{
+		userID:   uuid.NewString(),
+		daemonID: uuid.NewString(),
+		agentID:  uuid.NewString(),
+	}
+	f.insertUser(t, actors.userID)
+	f.insertDaemon(t, actors.daemonID)
+	f.insertAgent(t, actors.agentID, actors.daemonID)
+	return actors
+}
+
+func (f *fkTestFixture) insertForeignActors(t *testing.T) fkActorIDs {
+	t.Helper()
+	wsID := uuid.NewString()
+	rootDocID := uuid.NewString()
+	mustExecFK(t, f.db, `INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		wsID, "foreign-"+wsID[:8], "Foreign Workspace", rootDocID, f.now, f.now)
+	mustExecFK(t, f.db, `INSERT INTO documents (workspace_id, id, path, title, hidden, client_id_seed, updated_at)
+		VALUES ($1, $2, '', '', TRUE, 1000, $3)`,
+		wsID, rootDocID, f.now)
+
+	actors := fkActorIDs{
+		userID:   uuid.NewString(),
+		daemonID: uuid.NewString(),
+		agentID:  uuid.NewString(),
+	}
+	mustExecFK(t, f.db, `INSERT INTO users (workspace_id, id, handle, name, role, kind, status, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 'member', 'human', 'active', $5, $6)`,
+		wsID, actors.userID, "user-"+actors.userID[:8], "Foreign User", f.now, f.now)
+	runtimes, _ := json.Marshal([]RuntimeDetection{{Kind: "codex", Available: true}})
+	mustExecFK(t, f.db, `INSERT INTO daemons (id, workspace_id, name, token_hash, status, runtime_detections, created_at)
+		VALUES ($1, $2, 'Foreign Daemon', $3, 'active', $4, $5)`,
+		actors.daemonID, wsID, "token_"+actors.daemonID[:8], runtimes, f.now)
+	mustExecFK(t, f.db, `INSERT INTO agents (workspace_id, id, daemon_id, handle, name, role, kind, system_prompt, workspace_root,
+		current_turn_id, session_id, status, current_task, current_activity, updated_at)
+		VALUES ($1, $2, $3, $4, $5, 'assistant', 'codex', '', '', '', '', 'idle', '', '', $6)`,
+		wsID, actors.agentID, actors.daemonID, "agent-"+actors.agentID[:8], "Foreign Agent", f.now)
+	return actors
 }
 
 func (f *fkTestFixture) insertAgentRun(t *testing.T, runID, agentID string) {
@@ -389,6 +438,22 @@ func mustExecFK(t *testing.T, db *sql.DB, query string, args ...any) {
 	if _, err := db.Exec(query, args...); err != nil {
 		t.Fatalf("exec: %v\nquery: %s\nargs: %v", err, query, args)
 	}
+}
+
+func expectExecErrorFK(t *testing.T, db *sql.DB, query string, args ...any) {
+	t.Helper()
+	if _, err := db.Exec(query, args...); err == nil {
+		t.Fatalf("expected exec error\nquery: %s\nargs: %v", query, args)
+	}
+}
+
+func countMatchingFK(t *testing.T, db *sql.DB, table, where string, args ...any) int {
+	t.Helper()
+	var count int
+	if err := db.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE %s`, table, where), args...).Scan(&count); err != nil {
+		t.Fatalf("count %s where %s: %v", table, where, err)
+	}
+	return count
 }
 
 func strPtr(s string) *string { return &s }
@@ -1386,4 +1451,422 @@ func TestAgentEventClaimedByRejectsUnrelatedDaemon(t *testing.T) {
 	if !strings.Contains(err.Error(), "is not the event agent") {
 		t.Fatalf("unexpected error: %v", err)
 	}
+}
+
+func TestPolymorphicWorkspaceRefStateMachine(t *testing.T) {
+	f := newFKTestFixture(t)
+
+	docID := uuid.NewString()
+	f.insertDocument(t, docID)
+	threadID := uuid.NewString()
+	f.insertThread(t, threadID, docID)
+	actors := f.insertActors(t)
+	foreign := f.insertForeignActors(t)
+
+	sameWorkspaceID := map[string]string{
+		"human":  actors.userID,
+		"agent":  actors.agentID,
+		"daemon": actors.daemonID,
+	}
+	foreignID := map[string]string{
+		"human":  foreign.userID,
+		"agent":  foreign.agentID,
+		"daemon": foreign.daemonID,
+	}
+
+	type polymorphicSurface struct {
+		name            string
+		configuredTypes []string
+		nullableID      bool
+		insert          func(actorID any, actorType string) (string, []any)
+	}
+
+	surfaces := []polymorphicSurface{
+		{
+			name:            "document_updates.actor_id",
+			configuredTypes: []string{"human", "agent", "daemon"},
+			nullableID:      true,
+			insert: func(actorID any, actorType string) (string, []any) {
+				return `INSERT INTO document_updates (workspace_id, document_id, update, actor_id, actor_type, created_at)
+					VALUES ($1, $2, $3, $4, $5, $6)`,
+					[]any{f.workspaceID, docID, []byte{0}, actorID, actorType, f.now}
+			},
+		},
+		{
+			name:            "threads.created_by_id",
+			configuredTypes: []string{"human", "agent"},
+			nullableID:      true,
+			insert: func(actorID any, actorType string) (string, []any) {
+				return `INSERT INTO threads (workspace_id, id, document_id, title, status,
+					created_by_id, created_by_type, created_by_handle, created_by_name, created_at, updated_at)
+					VALUES ($1, $2, $3, 'State Thread', 'open', $4, $5, 'h', 'n', $6, $7)`,
+					[]any{f.workspaceID, uuid.NewString(), docID, actorID, actorType, f.now, f.now}
+			},
+		},
+		{
+			name:            "thread_messages.author_id",
+			configuredTypes: []string{"human", "agent"},
+			nullableID:      true,
+			insert: func(actorID any, actorType string) (string, []any) {
+				return `INSERT INTO thread_messages (workspace_id, id, thread_id, author_id, author_type,
+					author_handle, author_name, body, kind, created_at)
+					VALUES ($1, $2, $3, $4, $5, 'h', 'n', 'body', 'message', $6)`,
+					[]any{f.workspaceID, uuid.NewString(), threadID, actorID, actorType, f.now}
+			},
+		},
+		{
+			name:            "presences.actor_id",
+			configuredTypes: []string{"human", "agent", "daemon"},
+			insert: func(actorID any, actorType string) (string, []any) {
+				return `INSERT INTO presences (workspace_id, actor_id, actor_type, document_id, file_path, mode, activity, updated_at)
+					VALUES ($1, $2, $3, $4, '', 'editing', '', $5)`,
+					[]any{f.workspaceID, actorID, actorType, docID, f.now}
+			},
+		},
+		{
+			name:            "activities.actor_id",
+			configuredTypes: []string{"human", "agent", "daemon"},
+			nullableID:      true,
+			insert: func(actorID any, actorType string) (string, []any) {
+				return `INSERT INTO activities (workspace_id, type, document_id, actor_id, actor_type, summary, occurred_at,
+					provenance_actor_type, provenance_execution_id, provenance_tool, provenance_trigger,
+					provenance_autonomous, provenance_confidence, provenance_requested_by,
+					provenance_source, provenance_intended_scope, provenance_read_set_summary,
+					comment_id, presence_ref)
+					VALUES ($1, 'test', $2, $3, $4, '', $5,
+					'', '', '', '', FALSE, '', '', '', '', '', '', '')`,
+					[]any{f.workspaceID, docID, actorID, actorType, f.now}
+			},
+		},
+		{
+			name:            "activities.provenance_actor_id",
+			configuredTypes: []string{"human", "agent", "daemon"},
+			nullableID:      true,
+			insert: func(actorID any, actorType string) (string, []any) {
+				return `INSERT INTO activities (workspace_id, type, document_id, actor_type, summary, occurred_at,
+					provenance_actor_id, provenance_actor_type,
+					provenance_execution_id, provenance_tool, provenance_trigger,
+					provenance_autonomous, provenance_confidence, provenance_requested_by,
+					provenance_source, provenance_intended_scope, provenance_read_set_summary,
+					comment_id, presence_ref)
+					VALUES ($1, 'test', $2, 'system', '', $3, $4, $5,
+					'', '', '', FALSE, '', '', '', '', '', '', '')`,
+					[]any{f.workspaceID, docID, f.now, actorID, actorType}
+			},
+		},
+	}
+
+	for _, surface := range surfaces {
+		surface := surface
+		t.Run(surface.name, func(t *testing.T) {
+			if surface.nullableID {
+				query, args := surface.insert(nil, surface.configuredTypes[0])
+				mustExecFK(t, f.db, query, args...)
+			}
+
+			for _, sentinelType := range []string{"", "system"} {
+				query, args := surface.insert(uuid.NewString(), sentinelType)
+				mustExecFK(t, f.db, query, args...)
+			}
+
+			for _, actorType := range surface.configuredTypes {
+				t.Run(actorType+"/same_workspace_accepts", func(t *testing.T) {
+					query, args := surface.insert(sameWorkspaceID[actorType], actorType)
+					mustExecFK(t, f.db, query, args...)
+				})
+				t.Run(actorType+"/missing_rejects", func(t *testing.T) {
+					query, args := surface.insert(uuid.NewString(), actorType)
+					expectExecErrorFK(t, f.db, query, args...)
+				})
+				t.Run(actorType+"/cross_workspace_rejects", func(t *testing.T) {
+					query, args := surface.insert(foreignID[actorType], actorType)
+					expectExecErrorFK(t, f.db, query, args...)
+				})
+			}
+
+			query, args := surface.insert(sameWorkspaceID[surface.configuredTypes[0]], "banana")
+			expectExecErrorFK(t, f.db, query, args...)
+
+			if !containsStringFK(surface.configuredTypes, "daemon") {
+				query, args := surface.insert(sameWorkspaceID["daemon"], "daemon")
+				expectExecErrorFK(t, f.db, query, args...)
+			}
+		})
+	}
+}
+
+func TestPolymorphicWorkspaceRefRejectsCrossWorkspaceUpdate(t *testing.T) {
+	f := newFKTestFixture(t)
+
+	docID := uuid.NewString()
+	f.insertDocument(t, docID)
+	actors := f.insertActors(t)
+	foreign := f.insertForeignActors(t)
+
+	activityID := f.insertActivity(t, strPtr(actors.userID), "human", docID)
+	expectExecErrorFK(t, f.db,
+		`UPDATE activities SET actor_id = $1, actor_type = 'agent' WHERE id = $2`,
+		foreign.agentID, activityID)
+
+	threadID := uuid.NewString()
+	mustExecFK(t, f.db, `INSERT INTO threads (workspace_id, id, document_id, title, status,
+		created_by_id, created_by_type, created_by_handle, created_by_name, created_at, updated_at)
+		VALUES ($1, $2, $3, 'State Thread', 'open', $4, 'human', 'h', 'n', $5, $6)`,
+		f.workspaceID, threadID, docID, actors.userID, f.now, f.now)
+	expectExecErrorFK(t, f.db,
+		`UPDATE threads SET created_by_id = $1, created_by_type = 'daemon' WHERE id = $2`,
+		actors.daemonID, threadID)
+}
+
+func TestParticipantRefStateMachine(t *testing.T) {
+	f := newFKTestFixture(t)
+
+	docID := uuid.NewString()
+	f.insertDocument(t, docID)
+	threadID := uuid.NewString()
+	f.insertThread(t, threadID, docID)
+	actors := f.insertActors(t)
+	foreign := f.insertForeignActors(t)
+
+	mustExecFK(t, f.db, `INSERT INTO thread_participants (workspace_id, thread_id, participant_id)
+		VALUES ($1, $2, $3)`, f.workspaceID, threadID, actors.userID)
+	mustExecFK(t, f.db, `INSERT INTO thread_participants (workspace_id, thread_id, participant_id)
+		VALUES ($1, $2, $3)`, f.workspaceID, threadID, actors.agentID)
+
+	expectExecErrorFK(t, f.db, `INSERT INTO thread_participants (workspace_id, thread_id, participant_id)
+		VALUES ($1, $2, $3)`, f.workspaceID, threadID, uuid.NewString())
+	expectExecErrorFK(t, f.db, `INSERT INTO thread_participants (workspace_id, thread_id, participant_id)
+		VALUES ($1, $2, $3)`, f.workspaceID, threadID, foreign.userID)
+	expectExecErrorFK(t, f.db, `INSERT INTO thread_participants (workspace_id, thread_id, participant_id)
+		VALUES ($1, $2, $3)`, f.workspaceID, threadID, foreign.agentID)
+	expectExecErrorFK(t, f.db, `UPDATE thread_participants
+		SET participant_id = $1
+		WHERE workspace_id = $2 AND thread_id = $3 AND participant_id = $4`,
+		foreign.agentID, f.workspaceID, threadID, actors.userID)
+}
+
+func TestAgentEventClaimedByStateMachine(t *testing.T) {
+	f := newFKTestFixture(t)
+
+	daemonID := uuid.NewString()
+	unrelatedDaemonID := uuid.NewString()
+	agentID := uuid.NewString()
+	f.insertDaemon(t, daemonID)
+	f.insertDaemon(t, unrelatedDaemonID)
+	f.insertAgent(t, agentID, daemonID)
+	foreign := f.insertForeignActors(t)
+
+	insertEvent := func(t *testing.T, claimedBy any) {
+		t.Helper()
+		mustExecFK(t, f.db, `INSERT INTO agent_events (workspace_id, id, agent_id, agent_handle, type, status,
+			summary, prompt, dedup_key, last_error, attempt_count, claimed_by, available_at, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, 'test', 'claimed', '', '', '', '', 0, $5, $6, $7, $8)`,
+			f.workspaceID, uuid.NewString(), agentID, "agent-"+agentID[:8], claimedBy, f.now, f.now, f.now)
+	}
+	expectEventError := func(t *testing.T, claimedBy any) {
+		t.Helper()
+		expectExecErrorFK(t, f.db, `INSERT INTO agent_events (workspace_id, id, agent_id, agent_handle, type, status,
+			summary, prompt, dedup_key, last_error, attempt_count, claimed_by, available_at, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, 'test', 'claimed', '', '', '', '', 0, $5, $6, $7, $8)`,
+			f.workspaceID, uuid.NewString(), agentID, "agent-"+agentID[:8], claimedBy, f.now, f.now, f.now)
+	}
+
+	t.Run("null_accepts", func(t *testing.T) { insertEvent(t, nil) })
+	t.Run("event_agent_accepts", func(t *testing.T) { insertEvent(t, agentID) })
+	t.Run("agent_daemon_accepts", func(t *testing.T) { insertEvent(t, daemonID) })
+	t.Run("unrelated_same_workspace_daemon_rejects", func(t *testing.T) { expectEventError(t, unrelatedDaemonID) })
+	t.Run("cross_workspace_daemon_rejects", func(t *testing.T) { expectEventError(t, foreign.daemonID) })
+	t.Run("unknown_claimant_rejects", func(t *testing.T) { expectEventError(t, uuid.NewString()) })
+	t.Run("update_rejects", func(t *testing.T) {
+		eventID := uuid.NewString()
+		mustExecFK(t, f.db, `INSERT INTO agent_events (workspace_id, id, agent_id, agent_handle, type, status,
+			summary, prompt, dedup_key, last_error, attempt_count, available_at, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, 'test', 'pending', '', '', '', '', 0, $5, $6, $7)`,
+			f.workspaceID, eventID, agentID, "agent-"+agentID[:8], f.now, f.now, f.now)
+		expectExecErrorFK(t, f.db, `UPDATE agent_events SET claimed_by = $1 WHERE id = $2`, unrelatedDaemonID, eventID)
+	})
+}
+
+func TestActorDeleteCleanupStateMachine(t *testing.T) {
+	t.Run("user_delete_only_cleans_human_refs", func(t *testing.T) {
+		f := newFKTestFixture(t)
+		docID := uuid.NewString()
+		f.insertDocument(t, docID)
+		actors := f.insertActors(t)
+
+		humanThreadID := uuid.NewString()
+		agentThreadID := uuid.NewString()
+		humanMsgID := uuid.NewString()
+		agentMsgID := uuid.NewString()
+		mustExecFK(t, f.db, `INSERT INTO threads (workspace_id, id, document_id, title, status,
+			created_by_id, created_by_type, created_by_handle, created_by_name, created_at, updated_at)
+			VALUES ($1, $2, $3, 'Human Thread', 'open', $4, 'human', 'h', 'Human', $5, $6)`,
+			f.workspaceID, humanThreadID, docID, actors.userID, f.now, f.now)
+		mustExecFK(t, f.db, `INSERT INTO threads (workspace_id, id, document_id, title, status,
+			created_by_id, created_by_type, created_by_handle, created_by_name, created_at, updated_at)
+			VALUES ($1, $2, $3, 'Agent Thread', 'open', $4, 'agent', 'a', 'Agent', $5, $6)`,
+			f.workspaceID, agentThreadID, docID, actors.agentID, f.now, f.now)
+		f.insertThreadMessageByUser(t, humanMsgID, humanThreadID, actors.userID)
+		f.insertThreadMessageByAgent(t, agentMsgID, agentThreadID, actors.agentID)
+		f.insertThreadParticipant(t, humanThreadID, actors.userID)
+		f.insertThreadParticipant(t, agentThreadID, actors.agentID)
+		f.insertPresence(t, actors.userID, "human", docID)
+		f.insertPresence(t, actors.agentID, "agent", docID)
+		f.insertDocumentUpdate(t, docID, strPtr(actors.userID), "human")
+		f.insertDocumentUpdate(t, docID, strPtr(actors.agentID), "agent")
+
+		mustExecFK(t, f.db, `DELETE FROM users WHERE id = $1`, actors.userID)
+
+		if got := countMatchingFK(t, f.db, "document_updates", `workspace_id = $1 AND actor_type = 'human' AND actor_id IS NULL`, f.workspaceID); got != 1 {
+			t.Fatalf("human document_updates nulled = %d, want 1", got)
+		}
+		if got := countMatchingFK(t, f.db, "document_updates", `workspace_id = $1 AND actor_type = 'agent' AND actor_id = $2`, f.workspaceID, actors.agentID); got != 1 {
+			t.Fatalf("agent document_updates preserved = %d, want 1", got)
+		}
+		if f.threadCreatedByID(t, humanThreadID) != nil {
+			t.Fatal("human thread created_by_id should be NULL")
+		}
+		if got := f.threadCreatedByID(t, agentThreadID); got == nil || *got != actors.agentID {
+			t.Fatalf("agent thread created_by_id = %v, want %s", got, actors.agentID)
+		}
+		if f.threadMessageAuthorID(t, humanMsgID) != nil {
+			t.Fatal("human thread_message author_id should be NULL")
+		}
+		if got := f.threadMessageAuthorID(t, agentMsgID); got == nil || *got != actors.agentID {
+			t.Fatalf("agent thread_message author_id = %v, want %s", got, actors.agentID)
+		}
+		if got := countMatchingFK(t, f.db, "presences", `workspace_id = $1 AND actor_id = $2`, f.workspaceID, actors.userID); got != 0 {
+			t.Fatalf("human presence count = %d, want 0", got)
+		}
+		if got := countMatchingFK(t, f.db, "presences", `workspace_id = $1 AND actor_id = $2`, f.workspaceID, actors.agentID); got != 1 {
+			t.Fatalf("agent presence count = %d, want 1", got)
+		}
+		if got := countMatchingFK(t, f.db, "thread_participants", `workspace_id = $1 AND participant_id = $2`, f.workspaceID, actors.userID); got != 0 {
+			t.Fatalf("human participant count = %d, want 0", got)
+		}
+		if got := countMatchingFK(t, f.db, "thread_participants", `workspace_id = $1 AND participant_id = $2`, f.workspaceID, actors.agentID); got != 1 {
+			t.Fatalf("agent participant count = %d, want 1", got)
+		}
+	})
+
+	t.Run("agent_delete_only_cleans_agent_refs", func(t *testing.T) {
+		f := newFKTestFixture(t)
+		docID := uuid.NewString()
+		f.insertDocument(t, docID)
+		actors := f.insertActors(t)
+
+		humanThreadID := uuid.NewString()
+		agentThreadID := uuid.NewString()
+		humanMsgID := uuid.NewString()
+		agentMsgID := uuid.NewString()
+		mustExecFK(t, f.db, `INSERT INTO threads (workspace_id, id, document_id, title, status,
+			created_by_id, created_by_type, created_by_handle, created_by_name, created_at, updated_at)
+			VALUES ($1, $2, $3, 'Human Thread', 'open', $4, 'human', 'h', 'Human', $5, $6)`,
+			f.workspaceID, humanThreadID, docID, actors.userID, f.now, f.now)
+		mustExecFK(t, f.db, `INSERT INTO threads (workspace_id, id, document_id, title, status,
+			created_by_id, created_by_type, created_by_handle, created_by_name, created_at, updated_at)
+			VALUES ($1, $2, $3, 'Agent Thread', 'open', $4, 'agent', 'a', 'Agent', $5, $6)`,
+			f.workspaceID, agentThreadID, docID, actors.agentID, f.now, f.now)
+		f.insertThreadMessageByUser(t, humanMsgID, humanThreadID, actors.userID)
+		f.insertThreadMessageByAgent(t, agentMsgID, agentThreadID, actors.agentID)
+		f.insertThreadParticipant(t, humanThreadID, actors.userID)
+		f.insertThreadParticipant(t, agentThreadID, actors.agentID)
+		f.insertPresence(t, actors.userID, "human", docID)
+		f.insertPresence(t, actors.agentID, "agent", docID)
+		f.insertDocumentUpdate(t, docID, strPtr(actors.userID), "human")
+		f.insertDocumentUpdate(t, docID, strPtr(actors.agentID), "agent")
+
+		mustExecFK(t, f.db, `DELETE FROM agents WHERE id = $1`, actors.agentID)
+
+		if got := countMatchingFK(t, f.db, "document_updates", `workspace_id = $1 AND actor_type = 'agent' AND actor_id IS NULL`, f.workspaceID); got != 1 {
+			t.Fatalf("agent document_updates nulled = %d, want 1", got)
+		}
+		if got := countMatchingFK(t, f.db, "document_updates", `workspace_id = $1 AND actor_type = 'human' AND actor_id = $2`, f.workspaceID, actors.userID); got != 1 {
+			t.Fatalf("human document_updates preserved = %d, want 1", got)
+		}
+		if got := f.threadCreatedByID(t, humanThreadID); got == nil || *got != actors.userID {
+			t.Fatalf("human thread created_by_id = %v, want %s", got, actors.userID)
+		}
+		if f.threadCreatedByID(t, agentThreadID) != nil {
+			t.Fatal("agent thread created_by_id should be NULL")
+		}
+		if got := f.threadMessageAuthorID(t, humanMsgID); got == nil || *got != actors.userID {
+			t.Fatalf("human thread_message author_id = %v, want %s", got, actors.userID)
+		}
+		if f.threadMessageAuthorID(t, agentMsgID) != nil {
+			t.Fatal("agent thread_message author_id should be NULL")
+		}
+		if got := countMatchingFK(t, f.db, "presences", `workspace_id = $1 AND actor_id = $2`, f.workspaceID, actors.agentID); got != 0 {
+			t.Fatalf("agent presence count = %d, want 0", got)
+		}
+		if got := countMatchingFK(t, f.db, "presences", `workspace_id = $1 AND actor_id = $2`, f.workspaceID, actors.userID); got != 1 {
+			t.Fatalf("human presence count = %d, want 1", got)
+		}
+		if got := countMatchingFK(t, f.db, "thread_participants", `workspace_id = $1 AND participant_id = $2`, f.workspaceID, actors.agentID); got != 0 {
+			t.Fatalf("agent participant count = %d, want 0", got)
+		}
+		if got := countMatchingFK(t, f.db, "thread_participants", `workspace_id = $1 AND participant_id = $2`, f.workspaceID, actors.userID); got != 1 {
+			t.Fatalf("human participant count = %d, want 1", got)
+		}
+	})
+
+	t.Run("daemon_delete_only_cleans_daemon_refs", func(t *testing.T) {
+		f := newFKTestFixture(t)
+		docID := uuid.NewString()
+		f.insertDocument(t, docID)
+		actors := f.insertActors(t)
+		threadID := uuid.NewString()
+		msgID := uuid.NewString()
+		mustExecFK(t, f.db, `INSERT INTO threads (workspace_id, id, document_id, title, status,
+			created_by_id, created_by_type, created_by_handle, created_by_name, created_at, updated_at)
+			VALUES ($1, $2, $3, 'Agent Thread', 'open', $4, 'agent', 'a', 'Agent', $5, $6)`,
+			f.workspaceID, threadID, docID, actors.agentID, f.now, f.now)
+		f.insertThreadMessageByAgent(t, msgID, threadID, actors.agentID)
+		f.insertThreadParticipant(t, threadID, actors.agentID)
+		f.insertPresence(t, actors.daemonID, "daemon", docID)
+		f.insertDocumentUpdate(t, docID, strPtr(actors.daemonID), "daemon")
+		f.insertActivity(t, strPtr(actors.daemonID), "daemon", docID)
+		mustExecFK(t, f.db, `INSERT INTO activities (workspace_id, type, document_id, actor_type, summary, occurred_at,
+			provenance_actor_id, provenance_actor_type,
+			provenance_execution_id, provenance_tool, provenance_trigger,
+			provenance_autonomous, provenance_confidence, provenance_requested_by,
+			provenance_source, provenance_intended_scope, provenance_read_set_summary,
+			comment_id, presence_ref)
+			VALUES ($1, 'test', $2, 'system', '', $3, $4, 'daemon',
+			'', '', '', FALSE, '', '', '', '', '', '', '')`,
+			f.workspaceID, docID, f.now, actors.daemonID)
+
+		mustExecFK(t, f.db, `DELETE FROM daemons WHERE id = $1`, actors.daemonID)
+
+		if got := countMatchingFK(t, f.db, "document_updates", `workspace_id = $1 AND actor_type = 'daemon' AND actor_id IS NULL`, f.workspaceID); got != 1 {
+			t.Fatalf("daemon document_updates nulled = %d, want 1", got)
+		}
+		if got := countMatchingFK(t, f.db, "activities", `workspace_id = $1 AND actor_type = 'daemon' AND actor_id IS NULL`, f.workspaceID); got != 1 {
+			t.Fatalf("daemon activity actor refs nulled = %d, want 1", got)
+		}
+		if got := countMatchingFK(t, f.db, "activities", `workspace_id = $1 AND provenance_actor_type = 'daemon' AND provenance_actor_id IS NULL`, f.workspaceID); got != 1 {
+			t.Fatalf("daemon activity provenance refs nulled = %d, want 1", got)
+		}
+		if got := countMatchingFK(t, f.db, "presences", `workspace_id = $1 AND actor_id = $2`, f.workspaceID, actors.daemonID); got != 0 {
+			t.Fatalf("daemon presence count = %d, want 0", got)
+		}
+		if got := f.threadCreatedByID(t, threadID); got == nil || *got != actors.agentID {
+			t.Fatalf("agent thread created_by_id = %v, want %s", got, actors.agentID)
+		}
+		if got := f.threadMessageAuthorID(t, msgID); got == nil || *got != actors.agentID {
+			t.Fatalf("agent thread_message author_id = %v, want %s", got, actors.agentID)
+		}
+		if got := countMatchingFK(t, f.db, "thread_participants", `workspace_id = $1 AND participant_id = $2`, f.workspaceID, actors.agentID); got != 1 {
+			t.Fatalf("agent participant count = %d, want 1", got)
+		}
+	})
+}
+
+func containsStringFK(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
 }
