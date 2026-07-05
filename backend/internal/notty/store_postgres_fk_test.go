@@ -341,6 +341,26 @@ func (f *fkTestFixture) insertActivity(t *testing.T, actorID *string, actorType,
 	return id
 }
 
+func (f *fkTestFixture) insertActivityProvenance(t *testing.T, actorID string, actorType, docID string) int64 {
+	t.Helper()
+	var id int64
+	err := f.db.QueryRow(`INSERT INTO activities (workspace_id, type, document_id, actor_type, summary, occurred_at,
+		provenance_actor_id, provenance_actor_type,
+		provenance_execution_id, provenance_tool, provenance_trigger,
+		provenance_autonomous, provenance_confidence, provenance_requested_by,
+		provenance_source, provenance_intended_scope, provenance_read_set_summary,
+		comment_id, presence_ref)
+		VALUES ($1, 'test', $2, 'system', '', $3,
+		$4, $5,
+		'', '', '', FALSE, '', '', '', '', '', '', '')
+		RETURNING id`,
+		f.workspaceID, docID, f.now, actorID, actorType).Scan(&id)
+	if err != nil {
+		t.Fatalf("insert activity provenance: %v", err)
+	}
+	return id
+}
+
 func (f *fkTestFixture) insertAgentEvent(t *testing.T, eventID, agentID string, docID, threadID, threadMsgID, runID *string) {
 	t.Helper()
 	mustExecFK(t, f.db, `INSERT INTO agent_events (workspace_id, id, agent_id, agent_handle, type, status,
@@ -1714,6 +1734,10 @@ func TestActorDeleteCleanupStateMachine(t *testing.T) {
 		f.insertPresence(t, actors.agentID, "agent", docID)
 		f.insertDocumentUpdate(t, docID, strPtr(actors.userID), "human")
 		f.insertDocumentUpdate(t, docID, strPtr(actors.agentID), "agent")
+		humanActivityID := f.insertActivity(t, strPtr(actors.userID), "human", docID)
+		agentActivityID := f.insertActivity(t, strPtr(actors.agentID), "agent", docID)
+		humanProvenanceID := f.insertActivityProvenance(t, actors.userID, "human", docID)
+		agentProvenanceID := f.insertActivityProvenance(t, actors.agentID, "agent", docID)
 
 		mustExecFK(t, f.db, `DELETE FROM users WHERE id = $1`, actors.userID)
 
@@ -1722,6 +1746,18 @@ func TestActorDeleteCleanupStateMachine(t *testing.T) {
 		}
 		if got := countMatchingFK(t, f.db, "document_updates", `workspace_id = $1 AND actor_type = 'agent' AND actor_id = $2`, f.workspaceID, actors.agentID); got != 1 {
 			t.Fatalf("agent document_updates preserved = %d, want 1", got)
+		}
+		if got := countMatchingFK(t, f.db, "activities", `id = $1 AND actor_type = 'human' AND actor_id IS NULL`, humanActivityID); got != 1 {
+			t.Fatalf("human activity actor ref nulled = %d, want 1", got)
+		}
+		if got := countMatchingFK(t, f.db, "activities", `id = $1 AND actor_type = 'agent' AND actor_id = $2`, agentActivityID, actors.agentID); got != 1 {
+			t.Fatalf("agent activity actor ref preserved = %d, want 1", got)
+		}
+		if got := countMatchingFK(t, f.db, "activities", `id = $1 AND provenance_actor_type = 'human' AND provenance_actor_id IS NULL`, humanProvenanceID); got != 1 {
+			t.Fatalf("human activity provenance ref nulled = %d, want 1", got)
+		}
+		if got := countMatchingFK(t, f.db, "activities", `id = $1 AND provenance_actor_type = 'agent' AND provenance_actor_id = $2`, agentProvenanceID, actors.agentID); got != 1 {
+			t.Fatalf("agent activity provenance ref preserved = %d, want 1", got)
 		}
 		if f.threadCreatedByID(t, humanThreadID) != nil {
 			t.Fatal("human thread created_by_id should be NULL")
@@ -1775,6 +1811,10 @@ func TestActorDeleteCleanupStateMachine(t *testing.T) {
 		f.insertPresence(t, actors.agentID, "agent", docID)
 		f.insertDocumentUpdate(t, docID, strPtr(actors.userID), "human")
 		f.insertDocumentUpdate(t, docID, strPtr(actors.agentID), "agent")
+		humanActivityID := f.insertActivity(t, strPtr(actors.userID), "human", docID)
+		agentActivityID := f.insertActivity(t, strPtr(actors.agentID), "agent", docID)
+		humanProvenanceID := f.insertActivityProvenance(t, actors.userID, "human", docID)
+		agentProvenanceID := f.insertActivityProvenance(t, actors.agentID, "agent", docID)
 
 		mustExecFK(t, f.db, `DELETE FROM agents WHERE id = $1`, actors.agentID)
 
@@ -1783,6 +1823,18 @@ func TestActorDeleteCleanupStateMachine(t *testing.T) {
 		}
 		if got := countMatchingFK(t, f.db, "document_updates", `workspace_id = $1 AND actor_type = 'human' AND actor_id = $2`, f.workspaceID, actors.userID); got != 1 {
 			t.Fatalf("human document_updates preserved = %d, want 1", got)
+		}
+		if got := countMatchingFK(t, f.db, "activities", `id = $1 AND actor_type = 'agent' AND actor_id IS NULL`, agentActivityID); got != 1 {
+			t.Fatalf("agent activity actor ref nulled = %d, want 1", got)
+		}
+		if got := countMatchingFK(t, f.db, "activities", `id = $1 AND actor_type = 'human' AND actor_id = $2`, humanActivityID, actors.userID); got != 1 {
+			t.Fatalf("human activity actor ref preserved = %d, want 1", got)
+		}
+		if got := countMatchingFK(t, f.db, "activities", `id = $1 AND provenance_actor_type = 'agent' AND provenance_actor_id IS NULL`, agentProvenanceID); got != 1 {
+			t.Fatalf("agent activity provenance ref nulled = %d, want 1", got)
+		}
+		if got := countMatchingFK(t, f.db, "activities", `id = $1 AND provenance_actor_type = 'human' AND provenance_actor_id = $2`, humanProvenanceID, actors.userID); got != 1 {
+			t.Fatalf("human activity provenance ref preserved = %d, want 1", got)
 		}
 		if got := f.threadCreatedByID(t, humanThreadID); got == nil || *got != actors.userID {
 			t.Fatalf("human thread created_by_id = %v, want %s", got, actors.userID)
