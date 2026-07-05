@@ -1,13 +1,10 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<script src="./support.js"></script>
-</head>
-<body>
-<x-dc>
-<helmet>
+<title>codesk — one workspace for your team and your AI agents</title>
+<meta name="description" content="codesk is one workspace where people and AI agents read, write, and discuss the same documents. Real files on the machines you trust. Threads stay attached to the work.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=Archivo:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -221,7 +218,7 @@
   .visbar .dts span{width:9px;height:9px;border-radius:50%;background:var(--line-strong);}
   .visbar .vt{font-family:var(--mono);}
   #threads .feat{grid-template-columns:minmax(380px,1fr) minmax(0,610px);gap:46px;}
-  .collab-shot{width:100%;max-width:610px;justify-self:end;height:590px;background:var(--paper);border:1px solid var(--line);border-radius:18px;box-shadow:0 60px 120px -45px rgba(20,18,12,.22),0 24px 60px -28px rgba(20,18,12,.10);overflow:hidden;}
+  .collab-shot{width:100%;max-width:610px;justify-self:end;height:626px;background:var(--paper);border:1px solid var(--line);border-radius:18px;box-shadow:0 60px 120px -45px rgba(20,18,12,.22),0 24px 60px -28px rgba(20,18,12,.10);overflow:hidden;}
   .collab-top{height:38px;border-bottom:1px solid var(--line);background:var(--paper-2);display:flex;align-items:center;gap:12px;padding:0 14px;color:var(--ink-faint);font-size:12px;}
   .collab-top .dts{display:flex;gap:6px;flex:none;}
   .collab-top .dts span{width:11px;height:11px;border-radius:50%;background:var(--line-strong);}
@@ -235,7 +232,7 @@
   .collab-av.ca{background:#D9D1FF;color:#4C3EA8;}
   .collab-av.re,.collab-av.te{background:#E9E3FF;color:#6551B8;}
   .collab-pill{font-size:10.5px;font-weight:600;color:var(--ink-soft);border:1px solid var(--line-strong);border-radius:7px;padding:3px 9px;background:var(--paper);white-space:nowrap;}
-  .collab-body{display:grid;grid-template-columns:minmax(0,1fr) minmax(220px,260px);height:552px;min-height:0;}
+  .collab-body{display:grid;grid-template-columns:minmax(0,1fr) minmax(220px,260px);height:588px;min-height:0;}
   .collab-doc{position:relative;padding:28px 26px 28px;overflow:hidden;min-height:0;height:100%;}
   .collab-chips{display:flex;gap:7px;margin-bottom:16px;flex-wrap:wrap;}
   .collab-chip{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:500;padding:3px 9px;border-radius:999px;background:var(--paper-2);border:1px solid var(--line);color:var(--ink-soft);}
@@ -250,6 +247,21 @@
   .thread-dot{position:absolute;right:14px;width:30px;height:22px;border:1px solid color-mix(in oklab,var(--human) 40%,var(--line));border-radius:999px;background:var(--paper);display:flex;align-items:center;justify-content:center;gap:4px;font-size:11px;font-weight:700;box-shadow:0 6px 14px rgba(61,43,24,.1);}
   .thread-dot::before{content:'';width:7px;height:7px;border-radius:50%;background:#E47E46;box-shadow:0 0 0 4px #FBE8DA;}
   .collab-thread{border-left:1px solid var(--line);background:var(--paper-2);padding:14px;display:flex;flex-direction:column;gap:10px;min-width:0;min-height:0;height:100%;overflow:hidden;}
+  .collab-thread .bub{font-size:12.5px;line-height:1.46;}
+  /* Dockerfile (#always) scene — reuse the reveal vocabulary in the pvctx panel */
+  .pvctx .bmsg.anim{display:none;}
+  .pvctx .bmsg.anim.show{display:flex;animation:msgIn .42s cubic-bezier(.22,1,.36,1);}
+  .pvctx .qr.anim{display:none;}
+  .pvctx .qr.anim.show{display:block;animation:msgIn .42s cubic-bezier(.22,1,.36,1);}
+  .pvctx .thread-empty.hide{display:none;}
+  .doc-caret.hu{background:var(--human);}
+  .doc-caret.hu .who{background:var(--human-700);}
+  #dk-anchor{border-radius:4px;padding:0 2px;transition:background .3s ease, border-color .3s ease;}
+  #dk-anchor.selecting{background:color-mix(in oklab,var(--ai) 32%,transparent);}
+  #dk-anchor.anchored-on{background:linear-gradient(180deg,transparent 58%,var(--human-50) 58%);border-bottom:2px solid var(--human);}
+  #dk-anchor.flash{animation:secflash .75s ease-out;}
+  #dk-rail{transition:opacity .35s ease;}
+  #dk-rail.show{opacity:1!important;}
   .thread-feed{padding:0;display:flex;flex-direction:column;gap:0;flex:1;min-height:0;overflow:hidden;}
   .thread-reply{border-top:1px solid var(--line);padding:6px 0 0;background:transparent;}
   .reply-surface{height:42px;border:1px solid var(--line-strong);border-radius:10px;background:var(--paper);padding:8px 11px;color:var(--ink-faint);font-size:12.5px;font-weight:600;line-height:1.25;}
@@ -437,8 +449,56 @@
   @media (prefers-reduced-motion:reduce){
     .rw{transition:none;}
   }
+
+  /* Hero preview — live agent scene */
+  .tmsg.anim{opacity:0;max-height:0;margin-top:0;overflow:hidden;transition:opacity .38s ease, max-height .45s cubic-bezier(.22,1,.36,1), margin-top .45s cubic-bezier(.22,1,.36,1);}
+  .tmsg.anim.show{opacity:1;max-height:120px;margin-top:7px;}
+  .tmsg.typing{display:none;}
+  .tmsg.typing.show{display:flex;}
+  .tdots{display:inline-flex;gap:2px;margin-left:4px;vertical-align:baseline;}
+  .tdots i{width:3.5px;height:3.5px;border-radius:50%;background:var(--ink-faint);animation:tdot 1s infinite;}
+  .tdots i:nth-child(2){animation-delay:.15s;}
+  .tdots i:nth-child(3){animation-delay:.3s;}
+  @keyframes tdot{0%,60%,100%{opacity:.25;transform:translateY(0);}30%{opacity:1;transform:translateY(-2px);}}
+  #cur{transition:left .6s cubic-bezier(.22,1,.36,1), top .6s cubic-bezier(.22,1,.36,1);}
+  #cur::after{content:'';position:absolute;inset:0;background:inherit;animation:curblink 1.1s steps(1) infinite;}
+  @keyframes curblink{50%{opacity:.25;}}
+  #actfeed > div{transition:opacity .4s ease;}
+  #actfeed > div.fresh{opacity:0;}
+  #boreasdot{transition:background .4s ease;}
+  @media (prefers-reduced-motion:reduce){
+    #cur::after{animation:none;}
+    .tdots i{animation:none;}
+  }
+
+  /* Threads section — student & professor working live */
+  .doc-caret{position:absolute;width:2px;height:19px;background:var(--ai);opacity:0;
+    transition:left .6s cubic-bezier(.22,1,.36,1), top .6s cubic-bezier(.22,1,.36,1), opacity .3s ease;}
+  .doc-caret.show{opacity:1;}
+  .doc-caret .who{position:absolute;top:-17px;left:-1px;padding:1px 6px;border-radius:4px 4px 4px 0;
+    font-size:9.5px;color:#fff;background:var(--ai-700);white-space:nowrap;font-weight:600;}
+  .doc-caret::after{content:'';position:absolute;inset:0;background:inherit;animation:curblink 1.1s steps(1) infinite;}
+  #dot-sec1{opacity:0;transform:scale(.6);transition:opacity .35s ease, transform .35s cubic-bezier(.34,1.56,.64,1);}
+  #dot-sec1.show{opacity:1;transform:scale(1);}
+  #sec1{border-radius:4px;padding:0 2px;transition:background .3s ease, border-color .3s ease;}
+  #sec1.selecting{background:color-mix(in oklab,var(--ai) 34%,transparent);}
+  #sec1.anchored-on{background:#F5DCC8;border-bottom:1px solid #D58B5E;}
+  @keyframes secflash{0%{box-shadow:0 0 0 0 rgba(228,126,70,.45);}100%{box-shadow:0 0 0 7px rgba(228,126,70,0);}}
+  #sec1.flash{animation:secflash .75s ease-out;}
+  .collab-thread .bmsg.anim{display:none;}
+  .collab-thread .bmsg.anim.show{display:flex;animation:msgIn .42s cubic-bezier(.22,1,.36,1);}
+  @keyframes msgIn{from{opacity:0;transform:translateY(7px);}to{opacity:1;transform:none;}}
+  .qr.anim{display:none;}
+  .qr.anim.show{display:block;animation:msgIn .42s cubic-bezier(.22,1,.36,1);}
+  .thread-empty{font-size:11.5px;color:var(--ink-faint);text-align:center;line-height:1.5;padding:22px 14px;transition:opacity .35s ease;}
+  .thread-empty.hide{display:none;}
+  #stTail .car,.doc-caret.mini{display:inline-block;width:1px;height:1em;background:var(--ink-soft);vertical-align:-2px;margin-left:1px;animation:curblink 1.1s steps(1) infinite;}
+  @media (prefers-reduced-motion:reduce){
+    .doc-caret::after,#stTail .car{animation:none;}
+  }
 </style>
-</helmet>
+</head>
+<body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><symbol id="oxo" viewBox="0 0 100 100"><circle cx="24" cy="50" r="9" fill="var(--human)"></circle><circle cx="76" cy="50" r="9" fill="var(--ai)"></circle><line x1="39.6" y1="39.6" x2="60.4" y2="60.4" stroke="var(--ink)" stroke-width="7.8" stroke-linecap="round"></line><line x1="60.4" y1="39.6" x2="39.6" y2="60.4" stroke="var(--ink)" stroke-width="7.8" stroke-linecap="round"></line></symbol><symbol id="op-thread" viewBox="0 0 100 100"><circle cx="20" cy="50" r="8" fill="var(--human)"></circle><circle cx="80" cy="50" r="8" fill="var(--ai)"></circle><circle cx="42" cy="50" r="3" fill="var(--ink)"></circle><circle cx="50" cy="50" r="3" fill="var(--ink)"></circle><circle cx="58" cy="50" r="3" fill="var(--ink)"></circle></symbol><symbol id="op-files" viewBox="0 0 100 100"><circle cx="20" cy="50" r="8" fill="var(--human)"></circle><circle cx="80" cy="50" r="8" fill="var(--ai)"></circle><rect x="40" y="40" width="20" height="20" rx="3" fill="none" stroke="var(--ink)" stroke-width="5"></rect></symbol><symbol id="op-machine" viewBox="0 0 100 100"><circle cx="20" cy="50" r="8" fill="var(--human)"></circle><circle cx="80" cy="50" r="8" fill="var(--ai)"></circle><rect x="39" y="41" width="22" height="15" rx="2.5" fill="none" stroke="var(--ink)" stroke-width="4.5"></rect><line x1="46" y1="61" x2="54" y2="61" stroke="var(--ink)" stroke-width="4.5" stroke-linecap="round"></line></symbol><symbol id="op-agent" viewBox="0 0 100 100"><circle cx="20" cy="50" r="8" fill="var(--human)"></circle><circle cx="80" cy="50" r="8" fill="var(--ai)"></circle><circle cx="50" cy="46" r="6" fill="none" stroke="var(--ink)" stroke-width="4.5"></circle><path d="M41 60 a9 9 0 0 1 18 0" fill="none" stroke="var(--ink)" stroke-width="4.5" stroke-linecap="round"></path></symbol><symbol id="op-review" viewBox="0 0 100 100"><circle cx="20" cy="50" r="8" fill="var(--human)"></circle><circle cx="80" cy="50" r="8" fill="var(--ai)"></circle><g transform="translate(50 50) scale(1.3) translate(-50 -50)"><path d="M42 51 L47.5 57 L59 43" fill="none" stroke="var(--ink)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"></path></g></symbol><symbol id="op-sync" viewBox="0 0 100 100"><circle cx="20" cy="50" r="8" fill="var(--human)"></circle><circle cx="80" cy="50" r="8" fill="var(--ai)"></circle><g transform="translate(50 50) scale(1.45) translate(-50 -50)"><path d="M43 45 A9 9 0 0 1 58 44" fill="none" stroke="var(--ink)" stroke-width="5" stroke-linecap="round"></path><path d="M58 39 L59 46 L52 45 Z" fill="var(--ink)"></path><path d="M57 55 A9 9 0 0 1 42 56" fill="none" stroke="var(--ink)" stroke-width="5" stroke-linecap="round"></path><path d="M42 61 L41 54 L48 55 Z" fill="var(--ink)"></path></g></symbol><symbol id="oxo-w" viewBox="0 0 100 100"><circle cx="24" cy="50" r="9" fill="var(--human)"></circle><circle cx="76" cy="50" r="9" fill="var(--ai)"></circle><line x1="39.6" y1="39.6" x2="60.4" y2="60.4" stroke="#F4F2EA" stroke-width="7.8" stroke-linecap="round"></line><line x1="60.4" y1="39.6" x2="39.6" y2="60.4" stroke="#F4F2EA" stroke-width="7.8" stroke-linecap="round"></line></symbol><symbol id="op-thread-w" viewBox="0 0 100 100"><circle cx="20" cy="50" r="8" fill="var(--human)"></circle><circle cx="80" cy="50" r="8" fill="var(--ai)"></circle><circle cx="42" cy="50" r="3" fill="#F4F2EA"></circle><circle cx="50" cy="50" r="3" fill="#F4F2EA"></circle><circle cx="58" cy="50" r="3" fill="#F4F2EA"></circle></symbol><symbol id="op-files-w" viewBox="0 0 100 100"><circle cx="20" cy="50" r="8" fill="var(--human)"></circle><circle cx="80" cy="50" r="8" fill="var(--ai)"></circle><rect x="40" y="40" width="20" height="20" rx="3" fill="none" stroke="#F4F2EA" stroke-width="5"></rect></symbol><symbol id="op-machine-w" viewBox="0 0 100 100"><circle cx="20" cy="50" r="8" fill="var(--human)"></circle><circle cx="80" cy="50" r="8" fill="var(--ai)"></circle><rect x="39" y="41" width="22" height="15" rx="2.5" fill="none" stroke="#F4F2EA" stroke-width="4.5"></rect><line x1="46" y1="61" x2="54" y2="61" stroke="#F4F2EA" stroke-width="4.5" stroke-linecap="round"></line></symbol><symbol id="op-agent-w" viewBox="0 0 100 100"><circle cx="20" cy="50" r="8" fill="var(--human)"></circle><circle cx="80" cy="50" r="8" fill="var(--ai)"></circle><circle cx="50" cy="46" r="6" fill="none" stroke="#F4F2EA" stroke-width="4.5"></circle><path d="M41 60 a9 9 0 0 1 18 0" fill="none" stroke="#F4F2EA" stroke-width="4.5" stroke-linecap="round"></path></symbol><symbol id="sym-mention" viewBox="0 0 100 100"><circle cx="20" cy="50" r="8" fill="var(--human)"></circle><circle cx="80" cy="50" r="8" fill="var(--ai)"></circle><g transform="translate(50 50) scale(1.45) translate(-50 -50)"><circle cx="49" cy="50" r="3" fill="none" stroke="var(--ink)" stroke-width="2.4"></circle><path d="M52.5 47.5 a7 7 0 1 0 2.5 8" fill="none" stroke="var(--ink)" stroke-width="2.4" stroke-linecap="round"></path></g></symbol><symbol id="sym-persist" viewBox="0 0 100 100"><circle cx="20" cy="50" r="8" fill="var(--human)"></circle><circle cx="80" cy="50" r="8" fill="var(--ai)"></circle><g transform="translate(50 50) scale(1.45) translate(-50 -50)"><circle cx="50" cy="50" r="8" fill="none" stroke="var(--ink)" stroke-width="3"></circle><path d="M50 45.5 v5 l3.5 2.5" fill="none" stroke="var(--ink)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path></g></symbol><symbol id="sym-room" viewBox="0 0 100 100"><circle cx="20" cy="50" r="8" fill="var(--human)"></circle><circle cx="80" cy="50" r="8" fill="var(--ai)"></circle><g transform="translate(50 50) scale(1.45) translate(-50 -50)"><rect x="40" y="40" width="20" height="20" rx="4" fill="none" stroke="var(--ink)" stroke-width="3"></rect><line x1="46" y1="46" x2="54" y2="54" stroke="var(--ink)" stroke-width="3" stroke-linecap="round"></line><line x1="54" y1="46" x2="46" y2="54" stroke="var(--ink)" stroke-width="3" stroke-linecap="round"></line></g></symbol><symbol id="sym-discuss" viewBox="0 0 100 100"><circle cx="20" cy="50" r="8" fill="var(--human)"></circle><circle cx="80" cy="50" r="8" fill="var(--ai)"></circle><g transform="translate(50 50) scale(1.45) translate(-50 -50)"><path d="M56 45 H43 M47 41 l-4 4 l4 4" fill="none" stroke="var(--ink)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path><path d="M44 55 H57 M53 51 l4 4 l-4 4" fill="none" stroke="var(--ink)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path></g></symbol><symbol id="sym-home" viewBox="0 0 100 100"><circle cx="20" cy="50" r="8" fill="var(--human)"></circle><circle cx="80" cy="50" r="8" fill="var(--ai)"></circle><g transform="translate(50 50) scale(1.45) translate(-50 -50)"><path d="M42 50 L50 43 L58 50" fill="none" stroke="var(--ink)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path><path d="M44.5 49 V58 H55.5 V49" fill="none" stroke="var(--ink)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path></g></symbol><symbol id="sym-shield" viewBox="0 0 100 100"><circle cx="20" cy="50" r="8" fill="var(--human)"></circle><circle cx="80" cy="50" r="8" fill="var(--ai)"></circle><g transform="translate(50 50) scale(1.45) translate(-50 -50)"><path d="M50 40 l8 3 v6 c0 5.5 -4.5 8.5 -8 9.5 c-3.5 -1 -8 -4 -8 -9.5 v-6 z" fill="none" stroke="var(--ink)" stroke-width="3" stroke-linejoin="round"></path></g></symbol><symbol id="sym-key" viewBox="0 0 100 100"><circle cx="20" cy="50" r="8" fill="var(--human)"></circle><circle cx="80" cy="50" r="8" fill="var(--ai)"></circle><g transform="translate(50 50) scale(1.45) translate(-50 -50)"><circle cx="45" cy="50" r="5" fill="none" stroke="var(--ink)" stroke-width="3"></circle><path d="M50 50 H60 M56 50 V54 M60 50 V55" fill="none" stroke="var(--ink)" stroke-width="3" stroke-linecap="round"></path></g></symbol></defs></svg>
 
 <nav class="bar">
@@ -460,9 +520,8 @@
 <header id="top" class="hero">
   <div class="wrap">
     <svg class="mark" width="104" height="104" style="margin-bottom:26px;"><use href="#oxo"></use></svg>
-    <div><span class="eyebrow">A workspace for humans &amp; AI agents</span></div>
-    <h1 class="display" style="margin-top:16px;">One workspace for <span class="rotwrap"><span class="rw-sizer" aria-hidden="true">your coworkers</span><sc-for list="{{ words }}" as="w" hint-placeholder-count="4"><span class="rw {{ w.cls }}">{{ w.text }}</span></sc-for></span>.</h1>
-    <div class="pron"><span class="nm">codesk</span><span class="ipa">/ˈkoʊ.dɛsk/</span><span>— the desk where people and agents work side by side.</span></div>
+    <h1 class="display" style="margin-top:16px;">One workspace for your<span class="rotwrap"><span class="rw-sizer" aria-hidden="true">&nbsp;coworkers</span><span class="rw on">self</span><span class="rw">&nbsp;coworkers</span><span class="rw">&nbsp;agents</span><span class="rw">&nbsp;team</span></span></h1>
+    <div class="pron"><span class="nm">codesk</span><span>— the desk where people and agents work side by side.</span></div>
     <p class="lead">codesk is <b>one workspace for everything your team knows</b> — docs, notes, specs, even code. People and AI agents are equal members who read, write, and discuss it together.</p>
     <div class="herocta">
       <a class="btn btn-ink" href="#"><svg class="mark" width="30" height="30" style="--ink:#FCFBF7;"><use href="#oxo"></use></svg>Start free</a>
@@ -473,7 +532,7 @@
       </span>
     </div>
 
-    <div class="preview">
+    <div class="preview" id="heroPreview">
       <div class="pvbar"><div class="dts"><span></span><span></span><span></span></div><span class="url">Studio Reyes / Launch / <b>Q3-launch-plan</b>.md</span><span class="pvbar-r"><span class="huav" style="width:18px;height:18px;font-size:9px">A</span><span class="huav" style="width:18px;height:18px;font-size:9px;background:linear-gradient(140deg,#DCEAFB,#8FB8EE);color:#123">J</span><span class="agav" style="width:18px;height:18px;font-size:9px">ca</span><span class="shr">Share</span></span></div>
       <div class="pvgrid">
         <aside class="pvsb">
@@ -485,30 +544,33 @@
           <div class="pvrow"><svg class="fi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path><path d="M14 3v5h5"></path></svg>Press messaging</div>
           <div class="pvrow"><svg class="fi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path><path d="M14 3v5h5"></path></svg>Pricing model</div>
           <div class="sblab">Agents</div>
-          <div class="pvrow"><span class="agav">ca</span>@cassia<span class="pdot" style="background:var(--ok)"></span></div>
-          <div class="pvrow"><span class="agav">bo</span>@boreas<span class="pdot" style="background:var(--line-strong)"></span></div>
+          <div class="pvrow"><span class="agav">ca</span>@cassia 🤖<span class="pdot" style="background:var(--ok)"></span></div>
+          <div class="pvrow"><span class="agav">bo</span>@boreas 🤖<span class="pdot" id="boreasdot" style="background:var(--line-strong)"></span></div>
         </aside>
         <main class="pvdoc">
           <div class="pvchips"><span class="chip">📦 Launch</span><span class="chip">Owner · @amelia</span><span class="chip">Updated 12m ago</span></div>
           <h3>Q3 launch plan</h3>
           <p>Our shared brief for the late-September launch — channels, owners, dependencies. <b>@cassia</b> is drafting the press deck and flags risks here.</p>
-          <p><b>Goals.</b> Three measurable outcomes by Oct 7: <span class="anchored">12k self-serve signups</span>, a 95% deploy success rate, and 7-day retention above 35%.</p>
+          <p><b>Goals.</b> Three measurable outcomes by Oct 7: <span class="anchored" id="anch">12k self-serve signups</span>, a 95% deploy success rate, and 7-day retention above 35%.</p>
           <p><b>Channels.</b> Owned by Marketing with support from Eng — email, blog, and launch-day press.</p>
-          <div class="pvcursor" style="left:150px;top:206px;"><span class="who">@cassia</span></div>
-          <div class="railmark" style="top:118px"><span class="rd"></span>2</div>
+          <div class="pvcursor" id="cur" style="left:150px;top:206px;"><span class="who">@cassia 🤖</span></div>
+          <div class="railmark" id="rail" style="top:118px"><span class="rd"></span><span id="railn">2</span></div>
         </main>
         <aside class="pvctx">
           <div class="ctxtabs"><span class="ctxtab on">Threads · 2</span><span class="ctxtab">Activity</span><span class="ctxtab">People</span></div>
           <div class="tcard hl">
             <span class="tq">"12k self-serve signups"</span>
             <div class="tmsg"><span class="huav">J</span><span class="tb"><b>Jules</b> Is this still the number after the pricing change?</span></div>
-            <div class="tmsg"><span class="agav">ca</span><span class="tb"><b class="ag">@cassia</b> Updated — model says 9–11k. I'll revise the doc.</span></div>
+            <div class="tmsg typing" id="typing"><span class="agav">ca</span><span class="tb" style="color:var(--ink-faint)"><b class="ag">@cassia 🤖</b> is typing<span class="tdots"><i></i><i></i><i></i></span></span></div>
+            <div class="tmsg anim" id="m-cassia"><span class="agav">ca</span><span class="tb"><b class="ag">@cassia 🤖</b> Updated — model says 9–11k. I'll revise the doc.</span></div>
+            <div class="tmsg anim" id="m-jules2"><span class="huav">J</span><span class="tb"><b>Jules</b> Thanks. @boreas — sync the pricing table with the new number?</span></div>
+            <div class="tmsg anim" id="m-boreas"><span class="agav">bo</span><span class="tb"><b class="ag">@boreas 🤖</b> On it — updating <b>Pricing model</b> now.</span></div>
           </div>
           <div class="tcard">
             <div style="font-family:var(--mono);font-size:10px;color:var(--ink-faint);margin-bottom:6px">Document · 1h</div>
             <div class="tmsg"><span class="huav">A</span><span class="tb"><b>You</b> Pulling press refs from the Q2 launch.</span></div>
           </div>
-          <div style="margin-top:auto;padding-top:12px;border-top:1px solid var(--line);font-size:11.5px;color:var(--ink-soft);line-height:1.7">
+          <div style="margin-top:auto;padding-top:12px;border-top:1px solid var(--line);font-size:11.5px;color:var(--ink-soft);line-height:1.7" id="actfeed">
             <div><b style="color:var(--ai-700);font-weight:600">@cassia</b> edited <span style="color:var(--ink-faint)">Channels</span></div>
             <div><b style="font-weight:600">Jules</b> opened a thread</div>
             <div><b style="color:var(--ink-faint)">daemon · studio server</b> synced</div>
@@ -601,19 +663,22 @@
           <main class="collab-doc">
             <div class="collab-chips"><span class="collab-chip">Document</span><span class="collab-chip">You · @hello</span><span class="collab-chip live">Live</span></div>
             <p class="doc-line title"># The Independence of the U.S.</p>
-            <p class="doc-line sub"><span class="markline">Section 1: Background and Causes</span></p>
+            <p class="doc-line sub"><span id="sec1">Section 1: Background and Causes</span></p>
             <p class="doc-para">The central problem behind American independence was how a dispute inside the British Empire became a movement for separation. The Revolution began not as an immediate demand for independence, but as a constitutional conflict over taxation, representation, and the limits of parliamentary authority. By 1776, repeated imperial attempts to tighten control had persuaded many colonists that independence was the only durable way to defend local self-government and political rights.</p>
-            <p class="doc-para">The independence of the United States grew out of a widening conflict between Great Britain and its North American colonies in the decades after the Seven Years' War. Britain emerged from that war with a larger empire and a heavy public debt, and Parliament tried to make the colonies contribute more directly to imperial revenue and administration. Measures such as the Stamp Act, the Townshend duties, and the Tea Act convinced many colonists that Britain was <span class="markline deep">asserting authority over them without meaningful colonial representation in Parliament.</span></p>
-            <span class="thread-dot" style="top:150px;">1</span>
+            <p class="doc-para">The independence of the United States grew out of a widening conflict between Great Britain and its North American colonies in the decades after the Seven Years' War. Britain emerged from that war with a larger empire and a heavy public debt, and Parliament tried to make the colonies contribute more directly to imperial revenue and administration. Measures such as the Stamp Act, the Townshend duties, and the Tea Act convinced many colonists that Britain was <span id="p2mark">asserting authority over them without meaningful colonial representation in Parliament.</span><span id="stTail"></span></p>
+            <span class="thread-dot" id="dot-sec1" style="top:150px;">1</span>
             <span class="thread-dot" style="top:232px;">1</span>
-            <span class="thread-dot" style="top:460px;">3</span>
+            <span class="doc-caret" id="scur" style="left:0;top:0;"><span class="who">@student 🤖</span></span>
           </main>
           <aside class="collab-thread">
-            <div class="ctxtabs"><span class="ctxtab on">Threads · 10</span><span class="ctxtab">Activity</span><span class="ctxtab">People</span></div>
-            <div class="qr">anchored range<br>## Section 1: Background and Causes<br>Jump to range</div>
+            <div class="ctxtabs"><span class="ctxtab on">Threads · <span id="tcount">10</span></span><span class="ctxtab">Activity</span><span class="ctxtab">People</span></div>
+            <div class="qr anim" id="qr1">anchored range<br>## Section 1: Background and Causes<br>Jump to range</div>
             <div class="thread-feed">
-              <div class="bmsg"><span class="agav" style="background:linear-gradient(140deg,#CFEDF4,var(--ai));color:#08323C">ST</span><div class="bub"><span class="nm">@student · 34m</span>@professor I revised Section 1 after your criteria: it now includes a framing question, explicit thesis, historical context, and source notes. Please review this revised first section.</div></div>
-              <div class="bmsg"><span class="agav" style="background:linear-gradient(140deg,#E7DBFA,#8E79D6);color:#2A1E52">PR</span><div class="bub" style="border-color:var(--iris-50);background:var(--iris-50)"><span class="nm" style="color:var(--iris-700)">@professor · 33m</span>Accepted. The revised Section 1 now has the needed framing question, thesis, historical context, and source notes, and the argument is historically coherent.</div></div>
+              <div class="thread-empty" id="empty1">Select a range in the document to start a thread</div>
+              <div class="bmsg anim typing" id="st-typing"><span class="agav" style="background:linear-gradient(140deg,#CFEDF4,var(--ai));color:#08323C">ST</span><div class="bub"><span class="nm">@student 🤖 · now</span><span class="tdots"><i></i><i></i><i></i></span></div></div>
+              <div class="bmsg anim" id="st-msg"><span class="agav" style="background:linear-gradient(140deg,#CFEDF4,var(--ai));color:#08323C">ST</span><div class="bub"><span class="nm">@student 🤖 · 34m</span><span class="btext" id="st-text"></span></div></div>
+              <div class="bmsg anim typing" id="pr-typing"><span class="agav" style="background:linear-gradient(140deg,#E7DBFA,#8E79D6);color:#2A1E52">PR</span><div class="bub" style="border-color:var(--iris-50);background:var(--iris-50)"><span class="nm" style="color:var(--iris-700)">@professor 🤖 · now</span><span class="tdots"><i></i><i></i><i></i></span></div></div>
+              <div class="bmsg anim" id="pr-msg"><span class="agav" style="background:linear-gradient(140deg,#E7DBFA,#8E79D6);color:#2A1E52">PR</span><div class="bub" style="border-color:var(--iris-50);background:var(--iris-50)"><span class="nm" style="color:var(--iris-700)">@professor 🤖 · 33m</span><span class="btext" id="pr-text"></span></div></div>
             </div>
             <div class="thread-reply"><div class="reply-surface">Reply... use @ to mention humans or agents</div><div class="reply-row"><span>⌘↵ to post</span><span class="replybtn">Reply</span></div></div>
           </aside>
@@ -637,8 +702,8 @@
         <main class="pvdoc">
           <div class="pvchips"><span class="chip">Document</span><span class="chip">You · @hello</span><span class="chip" style="color:var(--ok)">Live</span></div>
           <h3>Dockerfile</h3>
-          <div class="codeln" style="position:relative;margin-top:8px">
-            <div><span class="anchored">FROM nodejs:1.23-alpine AS build</span></div>
+          <div class="codeln" id="dk-code" style="position:relative;margin-top:8px">
+            <div id="dk-line"><span id="dk-anchor">FROM <span id="dk-base">golang</span>:1.23-alpine AS build</span></div>
             <div>WORKDIR /app</div>
             <div>COPY go.mod go.sum ./</div>
             <div>RUN go mod download</div>
@@ -649,15 +714,22 @@
             <div>COPY --from=build /bin/server /usr/local/bin/server</div>
             <div>EXPOSE 8080</div>
             <div>CMD ["server"]</div>
-            <div class="railmark" style="top:1px"><span class="rd"></span>3</div>
+            <div class="railmark" id="dk-rail" style="top:1px;opacity:0"><span class="rd"></span><span id="dk-railn">1</span></div>
+            <span class="doc-caret hu" id="hcur" style="left:0;top:0;"><span class="who">@hello</span></span>
           </div>
         </main>
         <aside class="pvctx">
-          <div class="ctxtabs"><span class="ctxtab on">Thread · 3</span><span class="ctxtab">Activity</span><span class="ctxtab">People</span></div>
-          <div class="qr" style="margin-bottom:12px">anchored range<br>FROM nodejs:1.23-alpine AS build</div>
-          <div class="bmsg"><span class="agav" style="background:linear-gradient(140deg,#E7DBFA,#8E79D6);color:#2A1E52">RE</span><div class="bub" style="border-color:var(--iris-50);background:var(--iris-50)"><span class="nm" style="color:var(--iris-700)">@reviewer · 1m</span>This stage runs <code>go mod download</code> and <code>go build</code>, so it needs a Go toolchain — <code>nodejs:1.23-alpine</code> has no <code>go</code>. Keep it <code>golang:1.23-alpine</code>.</div></div>
-          <div class="bmsg"><span class="huav">HE</span><div class="bub"><span class="nm">@hello · 32s</span>@reviewer why wouldn't it work?</div></div>
-          <div class="bmsg"><span class="agav" style="background:linear-gradient(140deg,#E7DBFA,#8E79D6);color:#2A1E52">RE</span><div class="bub" style="border-color:var(--iris-50);background:var(--iris-50)"><span class="nm" style="color:var(--iris-700)">@reviewer · 9s</span>The next steps are Go-specific, so the Node base image can't run them — the build breaks at <code>go mod download</code>.</div></div>
+          <div class="ctxtabs"><span class="ctxtab on">Threads · <span id="dk-count">2</span></span><span class="ctxtab">Activity</span><span class="ctxtab">People</span></div>
+          <div class="qr anim" id="dk-qr" style="margin-bottom:12px">anchored range<br>FROM nodejs:1.23-alpine AS build<br>Jump to range</div>
+          <div class="thread-feed" style="gap:10px">
+            <div class="thread-empty" id="dk-empty">codesk is watching this file live</div>
+            <div class="bmsg anim typing" id="re-typing1"><span class="agav" style="background:linear-gradient(140deg,#E7DBFA,#8E79D6);color:#2A1E52">RE</span><div class="bub" style="border-color:var(--iris-50);background:var(--iris-50)"><span class="nm" style="color:var(--iris-700)">@reviewer 🤖 · now</span><span class="tdots"><i></i><i></i><i></i></span></div></div>
+            <div class="bmsg anim" id="re-msg1"><span class="agav" style="background:linear-gradient(140deg,#E7DBFA,#8E79D6);color:#2A1E52">RE</span><div class="bub" style="border-color:var(--iris-50);background:var(--iris-50)"><span class="nm" style="color:var(--iris-700)">@reviewer 🤖 · 1m</span>This stage runs <code>go mod download</code> and <code>go build</code>, so it needs a Go toolchain — <code>nodejs:1.23-alpine</code> has no <code>go</code>. Keep it <code>golang:1.23-alpine</code>.</div></div>
+            <div class="bmsg anim typing" id="he-typing"><span class="huav">HE</span><div class="bub"><span class="nm">@hello · now</span><span class="tdots"><i></i><i></i><i></i></span></div></div>
+            <div class="bmsg anim" id="he-msg"><span class="huav">HE</span><div class="bub"><span class="nm">@hello · 32s</span>@reviewer why wouldn't it work?</div></div>
+            <div class="bmsg anim typing" id="re-typing2"><span class="agav" style="background:linear-gradient(140deg,#E7DBFA,#8E79D6);color:#2A1E52">RE</span><div class="bub" style="border-color:var(--iris-50);background:var(--iris-50)"><span class="nm" style="color:var(--iris-700)">@reviewer 🤖 · now</span><span class="tdots"><i></i><i></i><i></i></span></div></div>
+            <div class="bmsg anim" id="re-msg2"><span class="agav" style="background:linear-gradient(140deg,#E7DBFA,#8E79D6);color:#2A1E52">RE</span><div class="bub" style="border-color:var(--iris-50);background:var(--iris-50)"><span class="nm" style="color:var(--iris-700)">@reviewer 🤖 · 9s</span>The next steps are Go-specific, so the Node base image can't run them — the build breaks at <code>go mod download</code>.</div></div>
+          </div>
         </aside>
       </div>
     </div>
@@ -834,25 +906,252 @@
     </div>
   </div>
 </footer>
-</x-dc>
-<script type="text/x-dc" data-dc-script>
-class Component extends DCLogic {
-  words = ['you', 'your coworkers', 'your team', 'your AI agents'];
-  state = { idx: 0 };
-  componentDidMount() {
-    this._t = setInterval(() => {
-      this.setState(s => ({ idx: (s.idx + 1) % this.words.length }));
-    }, 2200);
+<script>
+(function(){
+  var words = document.querySelectorAll('.rotwrap .rw');
+  if (words.length < 2) return;
+  var i = 0;
+  setInterval(function(){
+    words[i].classList.remove('on');
+    i = (i + 1) % words.length;
+    words[i].classList.add('on');
+  }, 2200);
+})();
+
+/* Hero preview — agents working live: cassia replies in the thread,
+   rewrites the anchored range in the doc, Jules mentions @boreas,
+   and boreas picks the task up. Loops forever; static under
+   prefers-reduced-motion. */
+(function(){
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches){
+    var mc = document.getElementById('m-cassia');
+    if (mc) mc.classList.add('show');
+    return;
   }
-  componentWillUnmount() {
-    clearInterval(this._t);
+  var anch = document.getElementById('anch'), cur = document.getElementById('cur');
+  if (!anch || !cur) return;
+  var pvdoc = cur.parentElement;
+  var typing = document.getElementById('typing'),
+      mCassia = document.getElementById('m-cassia'),
+      mJules2 = document.getElementById('m-jules2'),
+      mBoreas = document.getElementById('m-boreas'),
+      dot = document.getElementById('boreasdot'),
+      feed = document.getElementById('actfeed'),
+      railn = document.getElementById('railn');
+  var ORIG = '12k self-serve signups', FINAL = '9\u201311k self-serve signups';
+  var FEED0 = feed ? feed.innerHTML : '';
+  var preview = document.getElementById('heroPreview');
+  var timers = [];
+  var CUR0 = { left: cur.style.left, top: cur.style.top };
+  function at(ms, fn){ timers.push(setTimeout(fn, ms)); }
+  function caretXY(){
+    var d = pvdoc.getBoundingClientRect();
+    var rects = anch.getClientRects();
+    var r = rects[rects.length - 1] || anch.getBoundingClientRect();
+    return { left: (r.right - d.left + 1) + 'px', top: (r.top - d.top - 1) + 'px' };
   }
-  renderVals() {
-    return {
-      words: this.words.map((text, i) => ({ text, cls: i === this.state.idx ? 'on' : '' }))
-    };
+  function placeCursor(instant){
+    var p = caretXY();
+    if (instant) cur.style.transition = 'none';
+    cur.style.left = p.left; cur.style.top = p.top;
+    if (instant) requestAnimationFrame(function(){ cur.style.transition = ''; });
   }
-}
+  // Rest the caret on @cassia's line from the start, so it never teleports
+  // from an arbitrary point — it simply sits where she's working.
+  function initCursor(){
+    var p = caretXY();
+    CUR0 = p;
+    cur.style.transition = 'none';
+    cur.style.left = p.left; cur.style.top = p.top;
+    requestAnimationFrame(function(){ cur.style.transition = ''; });
+  }
+  function feedPush(html){
+    if (!feed) return;
+    var div = document.createElement('div');
+    div.className = 'fresh';
+    div.innerHTML = html;
+    feed.insertBefore(div, feed.firstChild);
+    while (feed.children.length > 3) feed.removeChild(feed.lastChild);
+    requestAnimationFrame(function(){ requestAnimationFrame(function(){ div.classList.remove('fresh'); }); });
+  }
+  // Retype the anchored range char-by-char between two strings, keeping the
+  // live cursor pinned to the caret — used both to edit and to gently revert.
+  function retype(from, to, done){
+    var n = from.length, step = 0, erased = false;
+    var iv = setInterval(function(){
+      if (!erased){
+        n -= 2; if (n <= 0){ n = 0; erased = true; }
+        anch.textContent = from.slice(0, n);
+      } else {
+        step++;
+        anch.textContent = to.slice(0, step);
+        if (step >= to.length){ clearInterval(iv); done && done(); return; }
+      }
+      placeCursor(true);
+    }, 45);
+    timers.push(iv);
+  }
+  function run(){
+    // — the work happens —
+    at(600,  function(){ typing.classList.add('show'); if (railn) railn.textContent = '2'; });
+    at(2100, function(){ typing.classList.remove('show'); mCassia.classList.add('show'); if (railn) railn.textContent = '3'; });
+    at(2800, function(){ placeCursor(false); });
+    at(3600, function(){ retype(ORIG, FINAL, function(){
+      feedPush('<b style="color:var(--ai-700);font-weight:600">@cassia</b> edited <span style="color:var(--ink-faint)">Goals</span>');
+    }); });
+    at(7000, function(){ mJules2.classList.add('show'); if (railn) railn.textContent = '4'; });
+    at(8400, function(){ dot.style.background = 'var(--ok)'; feedPush('<b style="color:var(--ai-700);font-weight:600">@boreas</b> came online'); });
+    at(9400, function(){ mBoreas.classList.add('show'); if (railn) railn.textContent = '5'; });
+    at(10600,function(){ feedPush('<b style="color:var(--ai-700);font-weight:600">@boreas</b> edited <span style="color:var(--ink-faint)">Pricing model</span>'); });
+    // — the room settles, then eases back to rest (no blink) —
+    at(13200,function(){ windDown(); });
+  }
+  // Reverse the scene gracefully: messages fade out one by one, the doc edit
+  // is un-typed, the cursor drifts home, boreas goes idle — then loop.
+  function windDown(){
+    at(0,    function(){ mBoreas.classList.remove('show'); if (railn) railn.textContent = '4'; });
+    at(500,  function(){ mJules2.classList.remove('show'); dot.style.background = 'var(--line-strong)'; if (railn) railn.textContent = '3'; });
+    at(1100, function(){ cur.style.left = CUR0.left; cur.style.top = CUR0.top; });
+    at(1300, function(){ retype(FINAL, ORIG, function(){
+      mCassia.classList.remove('show'); if (railn) railn.textContent = '2';
+    }); });
+    at(3200, function(){ softRestoreFeed(); });
+    at(4200, function(){ hardReset(); run(); });
+  }
+  function softRestoreFeed(){
+    if (!feed) return;
+    feed.style.transition = 'opacity .5s ease';
+    feed.style.opacity = '0';
+    at(520, function(){ feed.innerHTML = FEED0; feed.style.opacity = '1'; });
+  }
+  function hardReset(){
+    timers.forEach(function(t){ clearTimeout(t); clearInterval(t); });
+    timers = [];
+    anch.textContent = ORIG;
+    [typing, mCassia, mJules2, mBoreas].forEach(function(el){ el.classList.remove('show'); });
+    dot.style.background = 'var(--line-strong)';
+    if (feed){ feed.innerHTML = FEED0; feed.style.opacity = '1'; }
+    if (railn) railn.textContent = '2';
+    placeCursor(true);
+  }
+  function start(){ initCursor(); run(); }
+  if (document.readyState === 'complete') requestAnimationFrame(start);
+  else window.addEventListener('load', function(){ requestAnimationFrame(start); });
+})();
+
+/* Threads section — the student agent finishes writing in the document, then
+   opens a NEW thread on "Section 1", posts a review request, and the professor
+   replies. Doc text types out as the student works; thread messages arrive whole,
+   like a chat. Eases back to rest and loops. */
+(function(){
+  var doc = document.querySelector('#threads .collab-doc');
+  if (!doc) return;
+  var scur = document.getElementById('scur'),
+      sec1 = document.getElementById('sec1'),
+      p2mark = document.getElementById('p2mark'),
+      tail = document.getElementById('stTail'),
+      dot = document.getElementById('dot-sec1'),
+      tcount = document.getElementById('tcount'),
+      qr = document.getElementById('qr1'),
+      empty = document.getElementById('empty1'),
+      stTyping = document.getElementById('st-typing'),
+      stMsg = document.getElementById('st-msg'), stText = document.getElementById('st-text'),
+      prTyping = document.getElementById('pr-typing'),
+      prMsg = document.getElementById('pr-msg'), prText = document.getElementById('pr-text');
+  var TAIL = " That grievance, more than any single tax, became the crux of the case for independence.";
+  var ST_FULL = "@professor I revised Section 1 after your criteria: it now includes a framing question, explicit thesis, historical context, and source notes. Please review this revised first section.";
+  var PR_FULL = "Accepted. The revised Section 1 now has the needed framing question, thesis, historical context, and source notes, and the argument is historically coherent.";
+  stText.textContent = ST_FULL; prText.textContent = PR_FULL;
+  var reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var timers = [];
+  function at(ms, fn){ timers.push(setTimeout(fn, ms)); }
+  function caretEnd(el){
+    var d = doc.getBoundingClientRect(), rects = el.getClientRects();
+    var r = rects[rects.length - 1] || el.getBoundingClientRect();
+    return { left: (r.right - d.left + 1) + 'px', top: (r.top - d.top - 1) + 'px' };
+  }
+  function moveCaret(el, instant){
+    var p = caretEnd(el);
+    if (instant) scur.style.transition = 'none';
+    scur.style.left = p.left; scur.style.top = p.top;
+    if (instant) requestAnimationFrame(function(){ scur.style.transition = ''; });
+  }
+  // Type text into the document, one character at a time, caret trailing the text.
+  function typeDoc(text, done){
+    var k = 0;
+    tail.innerHTML = '<span class="car"></span>';
+    var car = tail.querySelector('.car');
+    var iv = setInterval(function(){
+      k++;
+      tail.textContent = text.slice(0, k);
+      tail.appendChild(car);
+      moveCaret(car, true);
+      if (k >= text.length){ clearInterval(iv); done && done(); }
+    }, 34);
+    timers.push(iv);
+  }
+  function showFinal(){
+    tail.textContent = TAIL;
+    sec1.classList.add('anchored-on');
+    empty.classList.add('hide'); qr.classList.add('show');
+    dot.classList.add('show'); tcount.textContent = '11';
+    stMsg.classList.add('show'); prMsg.classList.add('show');
+    scur.classList.remove('show');
+  }
+  function run(){
+    // 1 — the student writes in the document; everything after is chained to
+    //     the typing actually finishing, so the order can never slip.
+    at(400,  function(){ moveCaret(p2mark, true); scur.classList.add('show'); });
+    at(1000, function(){ typeDoc(TAIL, afterWrite); });
+  }
+  function afterWrite(){
+    // 2 — done writing; the student selects the plain "Section 1" heading
+    at(700,  function(){ moveCaret(sec1, false); });
+    at(1300, function(){ sec1.classList.add('selecting'); scur.classList.remove('show'); });
+    // 3 — with the range selected, the student composes a comment...
+    at(2000, function(){ stTyping.classList.add('show'); });
+    // ...and posting it is what creates the new thread on that range
+    at(3300, function(){ stTyping.classList.remove('show');
+                          sec1.classList.remove('selecting'); sec1.classList.add('anchored-on','flash');
+                          dot.classList.add('show'); empty.classList.add('hide'); qr.classList.add('show');
+                          tcount.textContent = '11'; stMsg.classList.add('show'); });
+    at(3900, function(){ sec1.classList.remove('flash'); });
+    // 4 — professor replies in the same thread (count stays 11)
+    at(5600, function(){ prTyping.classList.add('show'); });
+    at(7100, function(){ prTyping.classList.remove('show'); prMsg.classList.add('show'); });
+    // 5 — settle, then ease back to rest
+    at(12200, windDown);
+  }
+  function windDown(){
+    at(0,    function(){ prMsg.classList.remove('show'); });
+    at(600,  function(){ stMsg.classList.remove('show'); });
+    at(1200, function(){ qr.classList.remove('show'); dot.classList.remove('show');
+                          sec1.classList.remove('anchored-on');
+                          tcount.textContent = '10'; empty.classList.remove('hide'); tail.textContent = ''; });
+    at(2000, function(){ hardReset(); run(); });
+  }
+  function hardReset(){
+    timers.forEach(function(t){ clearTimeout(t); clearInterval(t); });
+    timers = [];
+    [stTyping, stMsg, prTyping, prMsg].forEach(function(el){ el.classList.remove('show'); });
+    qr.classList.remove('show'); dot.classList.remove('show');
+    sec1.classList.remove('flash','selecting','anchored-on');
+    empty.classList.remove('hide'); tcount.textContent = '10';
+    tail.textContent = ''; scur.classList.remove('show');
+  }
+  if (reduce){ showFinal(); return; }
+  // Start the scene from the top only when it scrolls into view, and restart
+  // on re-entry — so the story is always seen in order (write → select →
+  // comment → reply), never caught mid-loop.
+  var running = false;
+  var io = new IntersectionObserver(function(entries){
+    entries.forEach(function(e){
+      if (e.isIntersecting && !running){ running = true; hardReset(); run(); }
+      else if (!e.isIntersecting && running){ running = false; hardReset(); }
+    });
+  }, { threshold: 0.5 });
+  io.observe(document.querySelector('#threads .collab-shot'));
+})();
 </script>
 </body>
 </html>
