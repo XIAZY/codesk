@@ -1271,6 +1271,20 @@ func TestPolymorphicTriggerRejectsCrossWorkspaceRef(t *testing.T) {
 				'', '', '', FALSE, '', '', '', '', '', '', '')`,
 			[]any{f.workspaceID, f.now, agentB},
 		},
+		// activities.provenance_actor_id — daemon
+		{
+			"activities.provenance_actor_id/daemon",
+			`INSERT INTO activities (workspace_id, type, actor_type, summary, occurred_at,
+				provenance_actor_id, provenance_actor_type,
+				provenance_execution_id, provenance_tool, provenance_trigger,
+				provenance_autonomous, provenance_confidence, provenance_requested_by,
+				provenance_source, provenance_intended_scope, provenance_read_set_summary,
+				comment_id, presence_ref)
+			 VALUES ($1, 'test', 'system', '', $2,
+				$3, 'daemon',
+				'', '', '', FALSE, '', '', '', '', '', '', '')`,
+			[]any{f.workspaceID, f.now, daemonB},
+		},
 		// agent_events.claimed_by — cross-workspace daemon
 		{
 			"agent_events.claimed_by/cross-workspace",
