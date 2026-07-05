@@ -741,7 +741,7 @@ func TestConstraintTriggersExist(t *testing.T) {
 func TestFKConstraintsRejectCrossWorkspaceRefs(t *testing.T) {
 	f := newFKTestFixture(t)
 
-	// Create workspace B with its own entities.
+	// Create workspace B with a full entity graph.
 	wsB := uuid.NewString()
 	rootDocB := uuid.NewString()
 	mustExecFK(t, f.db, `INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at)
@@ -750,6 +750,10 @@ func TestFKConstraintsRejectCrossWorkspaceRefs(t *testing.T) {
 	mustExecFK(t, f.db, `INSERT INTO documents (workspace_id, id, path, title, hidden, client_id_seed, updated_at)
 		VALUES ($1, $2, '', '', TRUE, 1000, $3)`,
 		wsB, rootDocB, f.now)
+	docB := uuid.NewString()
+	mustExecFK(t, f.db, `INSERT INTO documents (workspace_id, id, path, title, hidden, client_id_seed, updated_at)
+		VALUES ($1, $2, 'b/doc', 'Doc B', FALSE, 1001, $3)`,
+		wsB, docB, f.now)
 	userB := uuid.NewString()
 	mustExecFK(t, f.db, `INSERT INTO users (workspace_id, id, handle, name, role, kind, status, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, 'member', 'human', 'active', $5, $6)`,
@@ -764,6 +768,23 @@ func TestFKConstraintsRejectCrossWorkspaceRefs(t *testing.T) {
 		current_turn_id, session_id, status, current_task, current_activity, updated_at)
 		VALUES ($1, $2, $3, $4, $5, 'assistant', 'codex', '', '', '', '', 'idle', '', '', $6)`,
 		wsB, agentB, daemonB, "agent-b", "Agent B", f.now)
+	runB := uuid.NewString()
+	mustExecFK(t, f.db, `INSERT INTO agent_runs (workspace_id, id, agent_id, agent_handle, agent_name, agent_kind,
+		system_prompt, workspace_root, working_dir, prompt, status, desired_status,
+		last_message, log_tail, error, assigned_task_ref, updated_at)
+		VALUES ($1, $2, $3, $4, 'Agent B', 'codex', '', '', '.', 'test', 'running', 'running',
+		'', '[]'::jsonb, '', '', $5)`,
+		wsB, runB, agentB, "agent-b", f.now)
+	threadB := uuid.NewString()
+	mustExecFK(t, f.db, `INSERT INTO threads (workspace_id, id, document_id, title, status,
+		created_by_type, created_by_handle, created_by_name, created_at, updated_at)
+		VALUES ($1, $2, $3, 'Thread B', 'open', 'system', '', '', $4, $5)`,
+		wsB, threadB, docB, f.now, f.now)
+	msgB := uuid.NewString()
+	mustExecFK(t, f.db, `INSERT INTO thread_messages (workspace_id, id, thread_id, author_type,
+		author_handle, author_name, body, kind, created_at)
+		VALUES ($1, $2, $3, 'system', '', '', 'body', 'message', $4)`,
+		wsB, msgB, threadB, f.now)
 
 	// Create workspace A entities for FK sources.
 	accountA := uuid.NewString()
@@ -774,33 +795,49 @@ func TestFKConstraintsRejectCrossWorkspaceRefs(t *testing.T) {
 	f.insertDaemon(t, daemonA)
 	agentA := uuid.NewString()
 	f.insertAgent(t, agentA, daemonA)
+	runA := uuid.NewString()
+	f.insertAgentRun(t, runA, agentA)
+	docA := uuid.NewString()
+	f.insertDocument(t, docA)
+	threadA := uuid.NewString()
+	f.insertThread(t, threadA, docA)
+	msgA := uuid.NewString()
+	f.insertThreadMessage(t, msgA, threadA)
 
 	tests := []struct {
 		name  string
 		query string
 		args  []any
 	}{
+		// ── Membership/invite refs ──
 		{
-			"workspace_members user_id cross-workspace",
+			"workspace_members.user_id",
 			`INSERT INTO workspace_members (workspace_id, account_id, user_id, membership_role, status, created_at)
 			 VALUES ($1, $2, $3, 'member', 'active', $4)`,
 			[]any{f.workspaceID, accountA, userB, f.now},
 		},
 		{
-			"workspace_invites created_by cross-workspace",
+			"workspace_members.invited_by",
+			`INSERT INTO workspace_members (workspace_id, account_id, user_id, invited_by, membership_role, status, created_at)
+			 VALUES ($1, $2, $3, $4, 'member', 'active', $5)`,
+			[]any{f.workspaceID, accountA, userA, userB, f.now},
+		},
+		{
+			"workspace_invites.created_by_user_id",
 			`INSERT INTO workspace_invites (id, workspace_id, token_hash, created_by_user_id, expires_at, created_at)
 			 VALUES ($1, $2, $3, $4, $5, $6)`,
 			[]any{uuid.NewString(), f.workspaceID, "hash_x", userB, f.now.Add(24 * time.Hour), f.now},
 		},
+		// ── Daemon/agent/run refs ──
 		{
-			"agents daemon_id cross-workspace",
+			"agents.daemon_id",
 			`INSERT INTO agents (workspace_id, id, daemon_id, handle, name, role, kind, system_prompt, workspace_root,
 				current_turn_id, session_id, status, current_task, current_activity, updated_at)
 			 VALUES ($1, $2, $3, $4, $5, 'assistant', 'codex', '', '', '', '', 'idle', '', '', $6)`,
 			[]any{f.workspaceID, uuid.NewString(), daemonB, "agent-cross", "Cross Agent", f.now},
 		},
 		{
-			"agent_runs agent_id cross-workspace",
+			"agent_runs.agent_id",
 			`INSERT INTO agent_runs (workspace_id, id, agent_id, agent_handle, agent_name, agent_kind,
 				system_prompt, workspace_root, working_dir, prompt, status, desired_status,
 				last_message, log_tail, error, assigned_task_ref, updated_at)
@@ -809,17 +846,119 @@ func TestFKConstraintsRejectCrossWorkspaceRefs(t *testing.T) {
 			[]any{f.workspaceID, uuid.NewString(), agentB, "agent-b", f.now},
 		},
 		{
-			"agent_events agent_id cross-workspace",
+			"agents.current_run_id",
+			`UPDATE agents SET current_run_id = $1 WHERE id = $2`,
+			[]any{runB, agentA},
+		},
+		{
+			"agent_events.agent_id",
 			`INSERT INTO agent_events (workspace_id, id, agent_id, agent_handle, type, status,
 				summary, prompt, dedup_key, last_error, attempt_count, available_at, created_at, updated_at)
 			 VALUES ($1, $2, $3, $4, 'test', 'pending', '', '', '', '', 0, $5, $6, $7)`,
 			[]any{f.workspaceID, uuid.NewString(), agentB, "agent-b", f.now, f.now, f.now},
 		},
 		{
-			"agent_document_views agent_id cross-workspace",
+			"agent_events.run_id",
+			`INSERT INTO agent_events (workspace_id, id, agent_id, agent_handle, type, status,
+				summary, prompt, dedup_key, last_error, attempt_count, run_id, available_at, created_at, updated_at)
+			 VALUES ($1, $2, $3, $4, 'test', 'pending', '', '', '', '', 0, $5, $6, $7, $8)`,
+			[]any{f.workspaceID, uuid.NewString(), agentA, "agent-a", runB, f.now, f.now, f.now},
+		},
+		{
+			"agent_document_views.agent_id",
 			`INSERT INTO agent_document_views (workspace_id, agent_id, document_id, update_id, state_vector, viewed_at)
 			 VALUES ($1, $2, $3, 0, '', $4)`,
 			[]any{f.workspaceID, agentB, f.rootDocID, f.now},
+		},
+		// ── Document refs ──
+		{
+			"document_heads.document_id",
+			`INSERT INTO document_heads (workspace_id, document_id, state_vector, update_id, updated_at)
+			 VALUES ($1, $2, '', 0, $3)`,
+			[]any{f.workspaceID, docB, f.now},
+		},
+		{
+			"document_updates.document_id",
+			`INSERT INTO document_updates (workspace_id, document_id, update, actor_type, created_at)
+			 VALUES ($1, $2, $3, 'system', $4)`,
+			[]any{f.workspaceID, docB, []byte{0}, f.now},
+		},
+		{
+			"document_checkpoints.document_id",
+			`INSERT INTO document_checkpoints (workspace_id, document_id, update_id, crdt_state, state_vector, created_at)
+			 VALUES ($1, $2, 0, '', '', $3)`,
+			[]any{f.workspaceID, docB, f.now},
+		},
+		{
+			"threads.document_id",
+			`INSERT INTO threads (workspace_id, id, document_id, title, status,
+				created_by_type, created_by_handle, created_by_name, created_at, updated_at)
+			 VALUES ($1, $2, $3, 'Cross Thread', 'open', 'system', '', '', $4, $5)`,
+			[]any{f.workspaceID, uuid.NewString(), docB, f.now, f.now},
+		},
+		{
+			"presences.document_id",
+			`INSERT INTO presences (workspace_id, actor_id, actor_type, document_id, file_path, mode, activity, updated_at)
+			 VALUES ($1, $2, 'human', $3, '', 'editing', '', $4)`,
+			[]any{f.workspaceID, userA, docB, f.now},
+		},
+		{
+			"agent_document_views.document_id",
+			`INSERT INTO agent_document_views (workspace_id, agent_id, document_id, update_id, state_vector, viewed_at)
+			 VALUES ($1, $2, $3, 0, '', $4)`,
+			[]any{f.workspaceID, agentA, docB, f.now},
+		},
+		{
+			"activities.document_id",
+			`INSERT INTO activities (workspace_id, type, document_id, actor_type, summary, occurred_at,
+				provenance_actor_type, provenance_execution_id, provenance_tool, provenance_trigger,
+				provenance_autonomous, provenance_confidence, provenance_requested_by,
+				provenance_source, provenance_intended_scope, provenance_read_set_summary,
+				comment_id, presence_ref)
+			 VALUES ($1, 'test', $2, 'system', '', $3,
+				'', '', '', '', FALSE, '', '', '', '', '', '', '')`,
+			[]any{f.workspaceID, docB, f.now},
+		},
+		{
+			"agent_events.document_id",
+			`INSERT INTO agent_events (workspace_id, id, agent_id, agent_handle, type, status,
+				document_id, summary, prompt, dedup_key, last_error, attempt_count, available_at, created_at, updated_at)
+			 VALUES ($1, $2, $3, $4, 'test', 'pending', $5, '', '', '', '', 0, $6, $7, $8)`,
+			[]any{f.workspaceID, uuid.NewString(), agentA, "agent-a", docB, f.now, f.now, f.now},
+		},
+		// ── Thread/message refs ──
+		{
+			"thread_messages.thread_id",
+			`INSERT INTO thread_messages (workspace_id, id, thread_id, author_type,
+				author_handle, author_name, body, kind, created_at)
+			 VALUES ($1, $2, $3, 'system', '', '', 'body', 'message', $4)`,
+			[]any{f.workspaceID, uuid.NewString(), threadB, f.now},
+		},
+		{
+			"thread_participants.thread_id",
+			`INSERT INTO thread_participants (workspace_id, thread_id, participant_id)
+			 VALUES ($1, $2, $3)`,
+			[]any{f.workspaceID, threadB, userA},
+		},
+		{
+			"agent_events.thread_id",
+			`INSERT INTO agent_events (workspace_id, id, agent_id, agent_handle, type, status,
+				thread_id, summary, prompt, dedup_key, last_error, attempt_count, available_at, created_at, updated_at)
+			 VALUES ($1, $2, $3, $4, 'test', 'pending', $5, '', '', '', '', 0, $6, $7, $8)`,
+			[]any{f.workspaceID, uuid.NewString(), agentA, "agent-a", threadB, f.now, f.now, f.now},
+		},
+		{
+			"agent_events.thread_message_id",
+			`INSERT INTO agent_events (workspace_id, id, agent_id, agent_handle, type, status,
+				thread_message_id, summary, prompt, dedup_key, last_error, attempt_count, available_at, created_at, updated_at)
+			 VALUES ($1, $2, $3, $4, 'test', 'pending', $5, '', '', '', '', 0, $6, $7, $8)`,
+			[]any{f.workspaceID, uuid.NewString(), agentA, "agent-a", msgB, f.now, f.now, f.now},
+		},
+		{
+			"workspace_members.last_accessed_document_id",
+			`INSERT INTO workspace_members (workspace_id, account_id, user_id, last_accessed_document_id, membership_role, status, created_at)
+			 VALUES ($1, $2, $3, $4, 'member', 'active', $5)`,
+			[]any{f.workspaceID, accountA, userA, docB, f.now},
 		},
 	}
 
@@ -830,6 +969,58 @@ func TestFKConstraintsRejectCrossWorkspaceRefs(t *testing.T) {
 				t.Fatalf("expected cross-workspace ref to be rejected")
 			}
 		})
+	}
+}
+
+// TestCompositeKeyIntrospection verifies that all workspace-scoped FK constraints
+// use composite (workspace_id, <ref>) columns, not simple single-column refs.
+func TestCompositeKeyIntrospection(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	db := database.DB
+
+	// Every FK whose parent table has a composite unique on (workspace_id, id)
+	// must itself be composite (include workspace_id in the FK column list).
+	// account_email_tokens and accounts refs are excluded — accounts is not workspace-scoped.
+	workspaceScopedFKs := []string{
+		"fk_workspace_members_user",
+		"fk_workspace_members_invited_by",
+		"fk_workspace_invites_created_by",
+		"fk_agents_daemon",
+		"fk_agent_runs_agent",
+		"fk_agents_current_run",
+		"fk_agent_events_agent",
+		"fk_agent_events_run",
+		"fk_agent_document_views_agent",
+		"fk_document_heads_document",
+		"fk_document_updates_document",
+		"fk_document_checkpoints_document",
+		"fk_threads_document",
+		"fk_presences_document",
+		"fk_agent_document_views_document",
+		"fk_workspace_members_last_doc",
+		"fk_activities_document",
+		"fk_agent_events_document",
+		"fk_thread_messages_thread",
+		"fk_thread_participants_thread",
+		"fk_agent_events_thread",
+		"fk_agent_events_thread_message",
+	}
+
+	for _, fkName := range workspaceScopedFKs {
+		var hasWorkspaceCol bool
+		err := db.QueryRow(`
+			SELECT EXISTS (
+				SELECT 1 FROM information_schema.key_column_usage
+				WHERE constraint_name = $1
+				  AND constraint_schema = 'public'
+				  AND column_name = 'workspace_id'
+			)`, fkName).Scan(&hasWorkspaceCol)
+		if err != nil {
+			t.Fatalf("query FK columns for %s: %v", fkName, err)
+		}
+		if !hasWorkspaceCol {
+			t.Errorf("FK %s must include workspace_id in its column list (composite key) but does not", fkName)
+		}
 	}
 }
 
