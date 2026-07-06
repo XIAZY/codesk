@@ -297,6 +297,79 @@ export function coworkerCount(workspace: Pick<WorkspaceState, "agents" | "users"
   return workspace.agents.length + workspace.users.length;
 }
 
+export type DocumentParticipant = {
+  id: string;
+  handle: string;
+  name: string;
+  kind: "you" | "agent" | "collaborator";
+  online: boolean;
+};
+
+// The durable participant set for a document: the current user, everyone in a
+// thread on the document, and every agent that has emitted an event on it —
+// all queryable from the workspace payload. Presence is NOT membership; it only
+// decorates the set with a live ring, and only for a fresh presence row that
+// points at this same document (workspace-level presence is not "here").
+export function documentParticipants(
+  workspace: Pick<WorkspaceState, "currentUserId" | "agents" | "users" | "threads" | "agentEvents" | "presences">,
+  documentId: string | undefined,
+): DocumentParticipant[] {
+  const currentUserId = workspace.currentUserId;
+  const agentsById = new Map(workspace.agents.map((agent) => [agent.id, agent]));
+  const usersById = new Map(workspace.users.map((user) => [user.id, user]));
+
+  const ids = new Set<string>();
+  if (currentUserId) {
+    ids.add(currentUserId);
+  }
+  if (documentId) {
+    for (const thread of workspace.threads) {
+      if (thread.documentId === documentId) {
+        for (const participantId of thread.participantIds) {
+          ids.add(participantId);
+        }
+      }
+    }
+    for (const event of workspace.agentEvents) {
+      if (event.documentId === documentId && event.agentId) {
+        ids.add(event.agentId);
+      }
+    }
+  }
+
+  const isOnline = (id: string) => {
+    if (!documentId) {
+      return false;
+    }
+    return workspace.presences[id]?.documentId === documentId;
+  };
+
+  const participants: DocumentParticipant[] = [];
+  for (const id of ids) {
+    const agent = agentsById.get(id);
+    if (agent) {
+      participants.push({ id, handle: agent.handle, name: agent.name, kind: "agent", online: isOnline(id) });
+      continue;
+    }
+    const user = usersById.get(id);
+    if (!user) {
+      continue; // an actor id we cannot resolve to a known user or agent — cannot render it
+    }
+    participants.push({
+      id,
+      handle: user.handle,
+      name: user.name,
+      kind: id === currentUserId ? "you" : "collaborator",
+      online: isOnline(id),
+    });
+  }
+
+  // You first, then online-in-this-document, then the rest; stable by handle.
+  const rank = (participant: DocumentParticipant) => (participant.kind === "you" ? 0 : participant.online ? 1 : 2);
+  participants.sort((a, b) => rank(a) - rank(b) || a.handle.localeCompare(b.handle));
+  return participants;
+}
+
 export function threadReplyCount(thread: { messages: readonly unknown[] }) {
   return Math.max(0, thread.messages.length - 1);
 }

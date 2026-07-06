@@ -260,8 +260,8 @@ describe("WorkspaceOnboarding", () => {
   });
 });
 
-describe("WorkspaceApp coworkers rail", () => {
-  it("renames people to coworkers, counts humans plus agents, and keeps agents flat", async () => {
+describe("WorkspaceApp participants rail", () => {
+  it("renames to Participants and narrows to the current document's participants", async () => {
     render(
       <WorkspaceApp
         api={{ updateLastAccessed: vi.fn().mockResolvedValue({}) } as never}
@@ -277,22 +277,24 @@ describe("WorkspaceApp coworkers rail", () => {
       />,
     );
 
-    const tab = screen.getByRole("button", { name: /coworkers/i });
-    expect(within(tab).getByText("3")).toBeTruthy();
+    const tab = screen.getByRole("button", { name: /participants/i });
+    expect(within(tab).getByText("1")).toBeTruthy(); // only You, with no active document
     expect(screen.queryByRole("button", { name: /people/i })).toBeNull();
 
     fireEvent.click(tab);
 
     await waitFor(() => expect(document.querySelector(".ctx-body.people-pane")).toBeTruthy());
-    const coworkersPanel = document.querySelector(".ctx-body.people-pane") as HTMLElement;
-    expect(within(coworkersPanel).getByText("People")).toBeTruthy();
-    expect(within(coworkersPanel).getByText("@ada")).toBeTruthy();
-    expect(within(coworkersPanel).getByText("@grace")).toBeTruthy();
-    expect(within(coworkersPanel).getByText("Agents")).toBeTruthy();
-    expect(within(coworkersPanel).queryByText("Daemons")).toBeNull();
-    expect(coworkersPanel.querySelector(".grp-head")).toBeNull();
-    expect(within(coworkersPanel).getByRole("button", { name: /@codex/i })).toBeTruthy();
-    expect(within(coworkersPanel).queryByText("Local")).toBeNull();
+    const panel = document.querySelector(".ctx-body.people-pane") as HTMLElement;
+    expect(within(panel).getByText("Participants")).toBeTruthy();
+    expect(within(panel).getByText("@ada")).toBeTruthy(); // the current user
+    expect(within(panel).getByText("You")).toBeTruthy();
+    // workspace members/agents who don't participate in the current document do not leak in
+    expect(within(panel).queryByText("@grace")).toBeNull();
+    expect(within(panel).queryByText("@codex")).toBeNull();
+    expect(within(panel).queryByText("Agents")).toBeNull();
+    expect(within(panel).getByText("No other participants yet.")).toBeTruthy();
+    // membership management no longer lives in this tab
+    expect(within(panel).queryByRole("button", { name: "Share" })).toBeNull();
   });
 });
 

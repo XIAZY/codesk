@@ -423,6 +423,11 @@ svg.i.sm {
   color: var(--accent-700);
 }
 
+/* Online-in-this-document ring (Participants). Presence-driven, doc-level only. */
+.avi.online {
+  box-shadow: 0 0 0 2px var(--paper), 0 0 0 3.5px var(--ok);
+}
+
 .avi-stack {
   display: flex;
   align-items: center;

@@ -12,6 +12,7 @@ import {
   buildLineThreads,
   computeReplace,
   coworkerCount,
+  documentParticipants,
   daemonStatus,
   daemonLiveStatus,
   stampDaemonReceipt,
@@ -34,7 +35,7 @@ import {
   threadReplyLabel,
 } from "./logic";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
-import type { Agent, Daemon, WorkspaceState } from "./types";
+import type { Agent, AgentEvent, Daemon, PresenceItem, ThreadItem, UserItem, WorkspaceState } from "./types";
 
 function baseWorkspace(): WorkspaceState {
   return {
@@ -283,6 +284,60 @@ describe("presentation grouping", () => {
     };
 
     expect(coworkerCount(workspace)).toBe(3);
+  });
+});
+
+describe("documentParticipants", () => {
+  const ws = (over: Partial<WorkspaceState>): WorkspaceState => ({ ...baseWorkspace(), ...over });
+  const user = (id: string, handle: string): UserItem => ({ id, handle, name: handle, role: "", kind: "human", status: "", updatedAt: "now" });
+  const agent = (id: string, handle: string): Agent => ({
+    id, daemonId: "d1", handle, name: handle, role: "", kind: "agent", workspaceRoot: "",
+    status: "idle", currentTask: "", currentActivity: "", currentRunId: "", updatedAt: "now",
+  });
+  const thread = (documentId: string, participantIds: string[]): ThreadItem => ({
+    id: `t_${documentId}_${participantIds.join("_")}`, documentId, title: "", status: "open",
+    anchor: { kind: "line" }, participantIds, participantHandles: [], messages: [], createdAt: "now", updatedAt: "now",
+  });
+  const event = (agentId: string, documentId: string): AgentEvent => ({
+    id: `e_${agentId}_${documentId}`, agentId, agentHandle: agentId, type: "change", status: "done",
+    summary: "", documentId, createdAt: "now", updatedAt: "now",
+  });
+  const presence = (actorId: string, documentId: string | undefined): PresenceItem => ({
+    actorId, actorType: "human", documentId, activity: "editing", updatedAt: "now",
+  });
+
+  it("builds the durable current-document set with a doc-level online ring", () => {
+    const workspace = ws({
+      currentUserId: "u_me",
+      users: [user("u_me", "me"), user("u_alice", "alice"), user("u_bob", "bob")],
+      agents: [agent("a_writer", "writer"), agent("a_other", "other")],
+      threads: [thread("doc1", ["u_alice"]), thread("doc2", ["u_bob"])],
+      agentEvents: [event("a_writer", "doc1"), event("a_other", "doc2")],
+      presences: {
+        u_alice: presence("u_alice", "doc1"), // online in this doc -> ring
+        u_me: presence("u_me", "docX"), // present in another doc -> no ring
+        a_writer: presence("a_writer", undefined), // workspace-level -> no ring
+      },
+    });
+
+    const result = documentParticipants(workspace, "doc1");
+
+    // durable set = me + alice (thread) + writer (event); bob/other are on doc2, excluded
+    expect(result.map((p) => p.id)).toEqual(["u_me", "u_alice", "a_writer"]);
+    expect(result.map((p) => p.kind)).toEqual(["you", "collaborator", "agent"]);
+    expect(result.find((p) => p.id === "u_alice")?.online).toBe(true);
+    expect(result.find((p) => p.id === "u_me")?.online).toBe(false);
+    expect(result.find((p) => p.id === "a_writer")?.online).toBe(false);
+  });
+
+  it("keeps the current user with no document and never derives membership from presence", () => {
+    const workspace = ws({
+      currentUserId: "u_me",
+      users: [user("u_me", "me")],
+      presences: { u_ghost: presence("u_ghost", "doc1") }, // presence for a non-member is ignored
+    });
+    expect(documentParticipants(workspace, undefined).map((p) => p.id)).toEqual(["u_me"]);
+    expect(documentParticipants(workspace, "doc1").map((p) => p.id)).toEqual(["u_me"]);
   });
 });
 

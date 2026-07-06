@@ -9,7 +9,7 @@ import {
   buildDaemonInstallCommand,
   buildDaemonReinstallCommand,
   buildDaemonUninstallCommand,
-  coworkerCount,
+  documentParticipants,
   daemonStatus,
   daemonLiveStatus,
   handleMaxLength,
@@ -22,6 +22,7 @@ import {
   threadReplyLabel,
   workspaceSlugMaxLength,
   workspaceSlugMinLength,
+  type DocumentParticipant,
   type LineThreadGroup,
 } from "./logic";
 import { resolveRoot, resolveWorkspace, type WorkspaceView } from "./routes";
@@ -34,6 +35,7 @@ import { resolveRuntimeTiles, selectableRuntimeKinds, type RuntimeTile } from ".
 import "./styles.css";
 
 const tokenStorageKey = "codesk.auth.token";
+const rightTabLabels = { threads: "Threads", activity: "Activity", coworkers: "Participants" } as const;
 const portableFileNameIllegalChars = /[\u0000-\u001F<>:"\/\\|?*]/g;
 const windowsReservedBaseName = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 
@@ -1395,7 +1397,7 @@ export function WorkspaceApp({
       return next;
     });
   }, [activeDocumentPath]);
-  const coworkers = coworkerCount(workspace);
+  const documentParticipantList = documentParticipants(workspace, activeDocument?.id);
 
   useEffect(() => {
     if (selectedThreadId && !documentThreads.some((thread) => thread.id === selectedThreadId)) {
@@ -1566,6 +1568,12 @@ export function WorkspaceApp({
                 <div className="avi sm agent" title={`@${agent.handle}`} key={agent.id}>{initials(agent.handle)}</div>
               ))}
             </div>
+            {canInviteMembers ? (
+              <button className="btn sm ghost" type="button" onClick={() => setModal("share")} title="Invite people to this workspace">
+                <Icon name="share" />
+                Invite
+              </button>
+            ) : null}
             <span className="divider-v" />
             <button
               className={`btn sm ${centerView === "daemons" ? "selected" : ""}`}
@@ -1661,9 +1669,9 @@ export function WorkspaceApp({
           {(["threads", "activity", "coworkers"] as const).map((tab) => (
             <button key={tab} className={`btn sm ${rightTab === tab ? "selected" : "ghost"}`} onClick={() => setRightTab(tab)}>
               <Icon name={tab === "threads" ? "thread" : tab === "activity" ? "activity" : "people"} />
-              {tab}
+              {rightTabLabels[tab]}
               {tab === "threads" ? <span className="muted">{documentThreads.length}</span> : null}
-              {tab === "coworkers" ? <span className="muted">{coworkers}</span> : null}
+              {tab === "coworkers" ? <span className="muted">{documentParticipantList.length}</span> : null}
             </button>
           ))}
         </div>
@@ -1685,10 +1693,9 @@ export function WorkspaceApp({
         ) : null}
         {rightTab === "activity" ? <ActivityPanel workspace={workspace} /> : null}
         {rightTab === "coworkers" ? (
-          <CoworkersPanel
-            workspace={workspace}
-            canInviteMembers={canInviteMembers}
-            onShare={() => setModal("share")}
+          <ParticipantsPanel
+            participants={documentParticipantList}
+            agents={workspace.agents}
             onAgent={(agent) => {
               setSelectedAgentId(agent.id);
               setModal("agent-detail");
@@ -2535,55 +2542,56 @@ function ActivityPanel({ workspace }: { workspace: ReturnType<typeof useWorkspac
   );
 }
 
-function CoworkersPanel({
-  workspace,
-  canInviteMembers,
-  onShare,
+const participantRoleTag = { you: "You", agent: "Agent", collaborator: "Collaborator" } as const;
+
+// Current-document participants (presence-read-only): the durable set from
+// documentParticipants(), rendered with a doc-level online ring. Membership
+// management lives in Manage → Members, not here.
+function ParticipantsPanel({
+  participants,
+  agents,
   onAgent,
 }: {
-  workspace: ReturnType<typeof useWorkspace>["workspace"];
-  canInviteMembers: boolean;
-  onShare: () => void;
+  participants: DocumentParticipant[];
+  agents: Agent[];
   onAgent: (agent: Agent) => void;
 }) {
-  const humans = workspace.users.filter((user) => user.kind === "human");
+  const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
   return (
     <div className="ctx-body people-pane">
       <div className="row between ctx-head">
-        <span className="label">People</span>
-        {canInviteMembers ? (
-          <button className="btn sm" type="button" onClick={onShare}>
-            <Icon name="share" />
-            Share
+        <span className="label">Participants</span>
+        <span className="chip sm">{participants.length}</span>
+      </div>
+      {participants.map((participant) => {
+        const agent = participant.kind === "agent" ? agentsById.get(participant.id) : undefined;
+        const avatar = (
+          <div
+            className={`avi ${participant.kind === "agent" ? "agent" : "you"}${participant.online ? " online" : ""}`}
+            title={participant.online ? "Online in this document" : undefined}
+          >
+            {initials(participant.handle || participant.name)}
+          </div>
+        );
+        const body = (
+          <div className="col gap-2 min-0">
+            <strong className="small truncate">@{participant.handle}</strong>
+            <span className="tiny muted truncate">{participantRoleTag[participant.kind]}</span>
+          </div>
+        );
+        return agent ? (
+          <button key={participant.id} className="agent-card" onClick={() => onAgent(agent)}>
+            {avatar}
+            {body}
           </button>
         ) : (
-          <span className="chip sm">{humans.length}</span>
-        )}
-      </div>
-      {humans.map((user) => (
-        <article className="agent-card" key={user.id}>
-          <div className="avi you">{initials(user.handle || user.name)}</div>
-          <div className="col gap-2 min-0">
-            <strong className="small truncate">@{user.handle}</strong>
-            <span className="tiny muted truncate">{user.role || "Workspace member"}</span>
-          </div>
-        </article>
-      ))}
-      {!humans.length ? <p className="empty-note">Workspace members will appear here.</p> : null}
-      <div className="row between ctx-head with-space">
-        <span className="label">Agents</span>
-        <span className="chip sm">{workspace.agents.length}</span>
-      </div>
-      {workspace.agents.map((agent) => (
-        <button key={agent.id} className="agent-card" onClick={() => onAgent(agent)}>
-          <div className="avi agent">{initials(agent.handle)}</div>
-          <div className="col gap-2 min-0">
-            <strong className="small truncate">@{agent.handle}</strong>
-            <span className="tiny muted truncate">{agent.currentActivity || agent.role}</span>
-          </div>
-          <StatusDot tone={visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons)} />
-        </button>
-      ))}
+          <article key={participant.id} className="agent-card">
+            {avatar}
+            {body}
+          </article>
+        );
+      })}
+      {participants.length <= 1 ? <p className="empty-note">No other participants yet.</p> : null}
     </div>
   );
 }
