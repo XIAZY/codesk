@@ -12,6 +12,7 @@ type Config struct {
 	AgentWorkspaceRoot string
 	AgentID            string
 	CodexCommand       string
+	ClaudeCommand      string
 	AgentToolBaseURL   string
 	PprofAddr          string
 }
@@ -27,6 +28,7 @@ func LoadConfig() Config {
 		AgentWorkspaceRoot: getenv("NOTTY_AGENT_WORKSPACE_ROOT", "/workspace/agents"),
 		AgentID:            getenv("NOTTY_AGENT_ID", ""),
 		CodexCommand:       getenv("NOTTY_CODEX_COMMAND", "codex"),
+		ClaudeCommand:      getenv("NOTTY_CLAUDE_COMMAND", "claude"),
 		AgentToolBaseURL:   getenv("NOTTY_AGENT_TOOL_BASE_URL", "http://127.0.0.1:7778"),
 		PprofAddr:          getenv("NOTTY_PPROF_ADDR", ""),
 	}

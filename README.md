@@ -1739,6 +1739,7 @@ Important daemon environment variables:
 - `NOTTY_WORKSPACE_DIR`: local canonical workspace projection.
 - `NOTTY_AGENT_WORKSPACE_ROOT`: parent directory for per-agent workspaces.
 - `NOTTY_CODEX_COMMAND`: optional Codex executable used for Codex runtime detection, default `codex`.
+- `NOTTY_CLAUDE_COMMAND`: optional Claude Code executable used for Claude Code runtime detection, default `claude`.
 - `NOTTY_AGENT_TOOL_BASE_URL`: local agent helper gateway URL.
 - `NOTTY_PPROF_ADDR`: optional daemon pprof bind address.
 

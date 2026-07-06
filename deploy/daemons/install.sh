@@ -24,6 +24,7 @@ Options:
 
 Environment:
   NOTTY_CODEX_COMMAND   Optional Codex executable to use. Defaults to codex.
+  NOTTY_CLAUDE_COMMAND  Optional Claude Code executable to use. Defaults to claude.
 EOF
 }
 
@@ -153,6 +154,7 @@ safe_name() {
 }
 
 codex_command="${NOTTY_CODEX_COMMAND:-codex}"
+claude_command="${NOTTY_CLAUDE_COMMAND:-claude}"
 daemon_path="${PATH:-}"
 
 path_has_dir() {
@@ -220,6 +222,30 @@ check_codex() {
 
 check_codex
 
+check_claude() {
+	case "$claude_command" in
+		*/*)
+			if [ ! -x "$claude_command" ]; then
+				warn "Claude Code runtime unavailable: $claude_command is not executable. Install Claude Code later or set NOTTY_CLAUDE_COMMAND to the Claude Code executable path."
+				return 0
+			fi
+			;;
+		*)
+			if ! PATH="$daemon_path" command -v "$claude_command" >/dev/null 2>&1; then
+				warn "Claude Code runtime unavailable: '$claude_command' was not found on PATH. Install Claude Code later or set NOTTY_CLAUDE_COMMAND to the Claude Code executable path."
+				return 0
+			fi
+			;;
+	esac
+
+	if ! PATH="$daemon_path" "$claude_command" --version >/dev/null 2>&1; then
+		warn "Claude Code runtime unavailable: '$claude_command --version' did not run successfully. Fix Claude Code later to enable Claude Code agents."
+		return 0
+	fi
+}
+
+check_claude
+
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/notty-install.XXXXXX")"
 cleanup() {
 	rm -rf "$tmp_dir"
@@ -276,6 +302,7 @@ mv "$install_dir/.notty-agent-tool.$$" "$install_dir/notty-agent-tool"
 	printf 'export NOTTY_WORKSPACE_DIR=%s\n' "$(shell_quote "$workspace_dir")"
 	printf 'export NOTTY_AGENT_WORKSPACE_ROOT=%s\n' "$(shell_quote "$agent_workspace_root")"
 	printf 'export NOTTY_CODEX_COMMAND=%s\n' "$(shell_quote "$codex_command")"
+	printf 'export NOTTY_CLAUDE_COMMAND=%s\n' "$(shell_quote "$claude_command")"
 	printf 'export PATH=%s\n' "$(shell_quote "$daemon_path")"
 } > "$env_file"
 chmod 600 "$env_file"
@@ -284,7 +311,7 @@ chmod 600 "$env_file"
 	printf '#!/usr/bin/env sh\n'
 	printf 'set -eu\n'
 	printf '. %s\n' "$(shell_quote "$env_file")"
-	printf 'export NOTTY_BACKEND_URL NOTTY_WORKSPACE_ID NOTTY_DAEMON_TOKEN NOTTY_DAEMON_VERSION NOTTY_DATA_DIR NOTTY_WORKSPACE_DIR NOTTY_AGENT_WORKSPACE_ROOT NOTTY_CODEX_COMMAND PATH\n'
+	printf 'export NOTTY_BACKEND_URL NOTTY_WORKSPACE_ID NOTTY_DAEMON_TOKEN NOTTY_DAEMON_VERSION NOTTY_DATA_DIR NOTTY_WORKSPACE_DIR NOTTY_AGENT_WORKSPACE_ROOT NOTTY_CODEX_COMMAND NOTTY_CLAUDE_COMMAND PATH\n'
 	printf 'export PATH=%s:"$PATH"\n' "$(shell_quote "$install_dir")"
 	printf 'exec %s\n' "$(shell_quote "$install_dir/notty-daemon")"
 } > "$run_script"

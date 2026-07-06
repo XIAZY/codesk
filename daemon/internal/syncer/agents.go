@@ -52,7 +52,9 @@ type agentRun struct {
 	UpdatedAt       time.Time `json:"updatedAt"`
 }
 
-func buildCodexEnv(cfg Config, toolToken string) []string {
+// buildAgentToolEnv exposes the daemon's tool callback endpoint to a spawned
+// runtime, regardless of which runtime it is.
+func buildAgentToolEnv(cfg Config, toolToken string) []string {
 	values := []string{}
 	if cfg.AgentToolBaseURL != "" {
 		values = append(values, "NOTTY_AGENT_TOOL_BASE_URL="+cfg.AgentToolBaseURL)
