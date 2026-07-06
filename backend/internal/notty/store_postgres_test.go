@@ -116,8 +116,8 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	if got := snapshot.AgentRuns[run.ID]; got == nil || got.SessionID != "session_pg_123" {
 		t.Fatalf("expected persisted run session id after reload, got %#v", got)
 	}
-	if got := snapshot.AgentEvents[claimed.ID]; got == nil || got.Status != "completed" || got.RunID != run.ID {
-		t.Fatalf("expected completed event after reload, got %#v", got)
+	if got, err := getAgentEventPostgres(db, snapshot.WorkspaceID, claimed.ID); err != nil || got == nil || got.Status != "completed" || got.RunID != run.ID {
+		t.Fatalf("expected completed event after reload, got %#v (err: %v)", got, err)
 	}
 	if got := snapshot.Presences[user.ID]; got == nil || got.FilePath != "docs/spec.md" || len(got.Selection) != 2 {
 		t.Fatalf("expected presence after reload, got %#v", got)
@@ -242,10 +242,6 @@ func TestPostgresSnapshotPersistPreservesDatabaseOnlyRows(t *testing.T) {
 	if staleStore.state.Presences[user.ID] != nil {
 		staleStore.mu.Unlock()
 		t.Fatalf("stale store unexpectedly contains database-only presence")
-	}
-	if staleStore.state.AgentEvents[eventID] != nil {
-		staleStore.mu.Unlock()
-		t.Fatalf("stale store unexpectedly contains database-only agent event")
 	}
 	if staleStore.state.AgentDocumentViews[agentDocumentViewKey(agent.ID, documentID)] != nil {
 		staleStore.mu.Unlock()
@@ -844,28 +840,8 @@ func TestPostgresAgentInboxTracksDocumentUpdatesAndThreadMentions(t *testing.T) 
 		t.Fatalf("expected log thread mention in for-me inbox, got %s", formatAgentEvents(items))
 	}
 
-	store.mu.Lock()
-	store.state.AgentEvents = map[string]*AgentEvent{}
-	if err := store.persistLocked(); err != nil {
-		store.mu.Unlock()
-		t.Fatalf("persist missing log thread mention: %v", err)
-	}
-	store.mu.Unlock()
-	if err := store.load(); err != nil {
-		t.Fatalf("reload store with missing log thread mention: %v", err)
-	}
-	items, err = store.ListAgentInbox(agent.ID, "for-me", "pending")
-	if err != nil {
-		t.Fatalf("list reconciled inbox after reload: %v", err)
-	}
-	mention = findAgentEventByType(items, "thread.mentioned")
-	if mention == nil || mention.ThreadID != thread.ID || mention.ThreadMessageID != message.ID {
-		t.Fatalf("expected missing log thread mention to reconcile after reload, got %s", formatAgentEvents(items))
-	}
-
-	// Under upsert-only persistence, the document.updated event also survives
-	// in Postgres (clearing memory does not delete DB rows). Drain it first so
-	// the next claim returns the reconciled thread.mentioned event.
+	// The document.updated event also lives in Postgres. Drain it first so
+	// the next claim returns the thread.mentioned event.
 	claimed, err := store.ClaimAgentEvent(ClaimAgentEventRequest{AgentID: agent.ID, ClaimedBy: "daemon"})
 	if err != nil {
 		t.Fatalf("claim first event: %v", err)
@@ -944,6 +920,99 @@ func TestPostgresPersistsUTF8SafeTruncatedAgentEventPrompt(t *testing.T) {
 	}
 	if !strings.Contains(mention.Prompt, "...") {
 		t.Fatalf("expected prompt to include truncated body, got %q", mention.Prompt)
+	}
+}
+
+func TestPostgresPendingAgentEventsSurviveFailedCommit(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	db := database.DB
+	store := newPostgresTestWorkspaceStore(t, database)
+	seedCodexDaemonRuntime(t, store)
+	user := seedTestUser(t, store)
+	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "start\n")
+	workspaceID := store.Snapshot().WorkspaceID
+	agent, err := store.CreateAgent(CreateAgentRequest{
+		Handle: "watcher",
+		Name:   "Watcher",
+		Role:   "Watches documents",
+		Kind:   "codex",
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	dedupKey := "test-survive-failed-commit:" + agent.ID
+	now := time.Now().UTC()
+
+	store.mu.Lock()
+	store.pendingAgentEvents = []*AgentEvent{{
+		ID:          uuid.NewString(),
+		AgentID:     agent.ID,
+		AgentHandle: agent.Handle,
+		Type:        "thread.mentioned",
+		Box:         "for_me",
+		Status:      "pending",
+		DocumentID:  documentID,
+		DedupKey:    dedupKey,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		AvailableAt: now,
+	}}
+	// Inject an invalid AgentDocumentView to cause upsertAgentDocumentViewsPostgresLocked
+	// to fail AFTER flushPendingAgentEventsPostgresLocked succeeds, rolling back the tx.
+	bogusViewKey := agentDocumentViewKey(agent.ID, "00000000-0000-0000-0000-000000000000")
+	store.state.AgentDocumentViews[bogusViewKey] = &AgentDocumentView{
+		AgentID:    agent.ID,
+		DocumentID: "00000000-0000-0000-0000-000000000000",
+		UpdateID:   1,
+		ViewedAt:   now,
+	}
+	err = store.persistLocked()
+	store.mu.Unlock()
+	if err == nil {
+		t.Fatal("expected persist to fail due to invalid document view FK")
+	}
+
+	// Buffer must survive the failed transaction
+	store.mu.Lock()
+	remaining := len(store.pendingAgentEvents)
+	store.mu.Unlock()
+	if remaining != 1 {
+		t.Fatalf("expected pending event to survive failed persist, got %d", remaining)
+	}
+
+	// Postgres must have zero rows for the dedup key (transaction rolled back)
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM agent_events WHERE workspace_id = $1 AND dedup_key = $2`, workspaceID, dedupKey).Scan(&count); err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 events in Postgres after rollback, got %d", count)
+	}
+
+	// Remove the invalid view, retry persist
+	store.mu.Lock()
+	delete(store.state.AgentDocumentViews, bogusViewKey)
+	err = store.persistLocked()
+	store.mu.Unlock()
+	if err != nil {
+		t.Fatalf("retry persist: %v", err)
+	}
+
+	// Buffer must be cleared after successful commit
+	store.mu.Lock()
+	remaining = len(store.pendingAgentEvents)
+	store.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("expected buffer cleared after successful retry, got %d pending", remaining)
+	}
+
+	// Event must exist exactly once in Postgres
+	if err := db.QueryRow(`SELECT COUNT(*) FROM agent_events WHERE workspace_id = $1 AND dedup_key = $2`, workspaceID, dedupKey).Scan(&count); err != nil {
+		t.Fatalf("count events after retry: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly 1 event after retry, got %d", count)
 	}
 }
 

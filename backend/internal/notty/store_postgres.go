@@ -486,6 +486,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_events_workspace_agent_claim ON agent_events (workspace_id, agent_id, status, available_at, created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_events_workspace_agent_box_status ON agent_events (workspace_id, agent_id, box, status, created_at)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_events_active_dedup ON agent_events (workspace_id, dedup_key) WHERE status NOT IN ('completed', 'dismissed')`,
 		`
 		CREATE TABLE IF NOT EXISTS agent_document_views (
 			workspace_id UUID NOT NULL,
@@ -697,7 +698,6 @@ func (s *Store) loadNormalizedPostgresLocked() error {
 	s.state.Presences = map[string]*Presence{}
 	s.state.Activities = []*ActivityEvent{}
 	s.state.Threads = map[string]*Thread{}
-	s.state.AgentEvents = map[string]*AgentEvent{}
 	s.state.AgentDocumentViews = map[string]*AgentDocumentView{}
 	s.state.DocumentCheckpoints = map[string]*DocumentCheckpoint{}
 
@@ -727,9 +727,6 @@ func (s *Store) loadNormalizedPostgresLocked() error {
 	}
 	if err := s.loadThreadsPostgresLocked(); err != nil {
 		return fmt.Errorf("load threads: %w", err)
-	}
-	if err := s.loadAgentEventsPostgresLocked(); err != nil {
-		return fmt.Errorf("load agent events: %w", err)
 	}
 	if err := s.loadAgentDocumentViewsPostgresLocked(); err != nil {
 		return fmt.Errorf("load agent document views: %w", err)
@@ -790,7 +787,7 @@ func (s *Store) persistPostgresLocked() error {
 	if err = s.upsertThreadsPostgresLocked(tx); err != nil {
 		return err
 	}
-	if err = s.upsertAgentEventsPostgresLocked(tx); err != nil {
+	if err = s.flushPendingAgentEventsPostgresLocked(tx); err != nil {
 		return err
 	}
 	if err = s.upsertAgentDocumentViewsPostgresLocked(tx); err != nil {
@@ -799,12 +796,12 @@ func (s *Store) persistPostgresLocked() error {
 	if err = tx.Commit(); err != nil {
 		return err
 	}
+	s.pendingAgentEvents = nil
 	for _, insert := range activityInserts {
 		if insert.activity != nil {
 			insert.activity.ID = insert.id
 		}
 	}
-	s.dirtyAgentEvents = false
 	return nil
 }
 
@@ -822,15 +819,9 @@ func (s *Store) persistDocumentMutationPostgresLocked() error {
 	if err = s.persistDocumentsPostgresLocked(tx); err != nil {
 		return err
 	}
-	if s.dirtyAgentEvents {
-		if err = s.upsertAgentEventsPostgresLocked(tx); err != nil {
-			return err
-		}
-	}
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	s.dirtyAgentEvents = false
 	return nil
 }
 
@@ -1531,76 +1522,6 @@ func (s *Store) upsertThreadsPostgresLocked(tx *sql.Tx) error {
 	return nil
 }
 
-func (s *Store) upsertAgentEventsPostgresLocked(tx *sql.Tx) error {
-	for _, event := range s.state.AgentEvents {
-		if event == nil {
-			continue
-		}
-		if _, err := tx.Exec(
-			`INSERT INTO agent_events (
-				workspace_id, id, agent_id, agent_handle, type, box, status, document_id,
-				thread_id, thread_message_id, from_update_id, to_update_id, summary,
-				prompt, dedup_key, claimed_by, run_id, last_error, attempt_count,
-				available_at, claimed_at, completed_at, created_at, updated_at
-			) VALUES (
-				$1, $2, $3, $4, $5, $6, $7, $8,
-				$9, $10, $11, $12, $13,
-				$14, $15, $16, $17, $18, $19,
-				$20, $21, $22, $23, $24
-			)
-			ON CONFLICT (id)
-			DO UPDATE SET
-				agent_id = EXCLUDED.agent_id,
-				agent_handle = EXCLUDED.agent_handle,
-				type = EXCLUDED.type,
-				box = EXCLUDED.box,
-				status = EXCLUDED.status,
-				document_id = EXCLUDED.document_id,
-				thread_id = EXCLUDED.thread_id,
-				thread_message_id = EXCLUDED.thread_message_id,
-				from_update_id = EXCLUDED.from_update_id,
-				to_update_id = EXCLUDED.to_update_id,
-				summary = EXCLUDED.summary,
-				prompt = EXCLUDED.prompt,
-				dedup_key = EXCLUDED.dedup_key,
-				claimed_by = EXCLUDED.claimed_by,
-				run_id = EXCLUDED.run_id,
-				last_error = EXCLUDED.last_error,
-				attempt_count = EXCLUDED.attempt_count,
-				available_at = EXCLUDED.available_at,
-				claimed_at = EXCLUDED.claimed_at,
-				completed_at = EXCLUDED.completed_at,
-				updated_at = EXCLUDED.updated_at`,
-			s.state.WorkspaceID,
-			event.ID,
-			event.AgentID,
-			event.AgentHandle,
-			event.Type,
-			normalizeInboxBox(event.Box),
-			event.Status,
-			uuidStringOrNil(event.DocumentID),
-			uuidStringOrNil(event.ThreadID),
-			uuidStringOrNil(event.ThreadMessageID),
-			event.FromUpdateID,
-			event.ToUpdateID,
-			event.Summary,
-			event.Prompt,
-			event.DedupKey,
-			uuidStringOrNil(event.ClaimedBy),
-			uuidStringOrNil(event.RunID),
-			event.LastError,
-			event.AttemptCount,
-			event.AvailableAt,
-			nullTime(event.ClaimedAt),
-			nullTime(event.CompletedAt),
-			event.CreatedAt,
-			event.UpdatedAt,
-		); err != nil {
-			return err
-		}
-	}
-	return nil
-}
 
 func claimAgentEventPostgres(db *sql.DB, workspaceID string, agentID string, agentHandle string, claimedBy string) (*AgentEvent, error) {
 	now := time.Now().UTC()
@@ -1783,6 +1704,265 @@ func completeDocumentInboxEventsPostgres(db *sql.DB, workspaceID string, agentID
 		completedAt,
 	)
 	return err
+}
+
+func getAgentEventPostgres(db *sql.DB, workspaceID, id string) (*AgentEvent, error) {
+	row := db.QueryRow(
+		`SELECT id::text, agent_id::text, agent_handle, type, box, status,
+		        COALESCE(document_id::text, ''), COALESCE(thread_id::text, ''),
+		        COALESCE(thread_message_id::text, ''), from_update_id, to_update_id,
+		        summary, prompt, dedup_key, COALESCE(claimed_by::text, ''),
+		        COALESCE(run_id::text, ''), last_error, attempt_count,
+		        available_at, claimed_at, completed_at, created_at, updated_at
+		   FROM agent_events
+		  WHERE workspace_id = $1::uuid AND id = $2::uuid`,
+		workspaceID, id,
+	)
+	event, err := scanAgentEvent(row)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	return event, err
+}
+
+func listAgentEventsPostgres(db *sql.DB, workspaceID, agentID string, box string, statuses []string) ([]*AgentEvent, error) {
+	query := `SELECT id::text, agent_id::text, agent_handle, type, box, status,
+	                 COALESCE(document_id::text, ''), COALESCE(thread_id::text, ''),
+	                 COALESCE(thread_message_id::text, ''), from_update_id, to_update_id,
+	                 summary, prompt, dedup_key, COALESCE(claimed_by::text, ''),
+	                 COALESCE(run_id::text, ''), last_error, attempt_count,
+	                 available_at, claimed_at, completed_at, created_at, updated_at
+	            FROM agent_events
+	           WHERE workspace_id = $1::uuid AND agent_id = $2::uuid`
+	args := []any{workspaceID, agentID}
+	argN := 3
+	if box != "" {
+		query += fmt.Sprintf(` AND box = $%d`, argN)
+		args = append(args, box)
+		argN++
+	}
+	if len(statuses) > 0 {
+		query += fmt.Sprintf(` AND status IN (`)
+		for i, s := range statuses {
+			if i > 0 {
+				query += ","
+			}
+			query += fmt.Sprintf("$%d", argN)
+			args = append(args, s)
+			argN++
+		}
+		query += ")"
+	}
+	query += ` ORDER BY created_at ASC, id ASC`
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	events := make([]*AgentEvent, 0)
+	for rows.Next() {
+		event, err := scanAgentEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+func listAllAgentEventsPostgres(db *sql.DB, workspaceID string) ([]*AgentEvent, error) {
+	rows, err := db.Query(
+		`SELECT id::text, agent_id::text, agent_handle, type, box, status,
+		        COALESCE(document_id::text, ''), COALESCE(thread_id::text, ''),
+		        COALESCE(thread_message_id::text, ''), from_update_id, to_update_id,
+		        summary, prompt, dedup_key, COALESCE(claimed_by::text, ''),
+		        COALESCE(run_id::text, ''), last_error, attempt_count,
+		        available_at, claimed_at, completed_at, created_at, updated_at
+		   FROM agent_events
+		  WHERE workspace_id = $1::uuid
+		  ORDER BY created_at ASC, id ASC`,
+		workspaceID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	events := make([]*AgentEvent, 0)
+	for rows.Next() {
+		event, err := scanAgentEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+func insertAgentEventPostgres(db *sql.DB, workspaceID string, event *AgentEvent) error {
+	_, err := db.Exec(
+		`INSERT INTO agent_events (
+			workspace_id, id, agent_id, agent_handle, type, box, status, document_id,
+			thread_id, thread_message_id, from_update_id, to_update_id, summary,
+			prompt, dedup_key, claimed_by, run_id, last_error, attempt_count,
+			available_at, claimed_at, completed_at, created_at, updated_at
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8,
+			$9, $10, $11, $12, $13,
+			$14, $15, $16, $17, $18, $19,
+			$20, $21, $22, $23, $24
+		)
+		ON CONFLICT (workspace_id, dedup_key) WHERE status NOT IN ('completed', 'dismissed')
+		DO NOTHING`,
+		workspaceID,
+		event.ID,
+		event.AgentID,
+		event.AgentHandle,
+		event.Type,
+		normalizeInboxBox(event.Box),
+		event.Status,
+		uuidStringOrNil(event.DocumentID),
+		uuidStringOrNil(event.ThreadID),
+		uuidStringOrNil(event.ThreadMessageID),
+		event.FromUpdateID,
+		event.ToUpdateID,
+		event.Summary,
+		event.Prompt,
+		event.DedupKey,
+		uuidStringOrNil(event.ClaimedBy),
+		uuidStringOrNil(event.RunID),
+		event.LastError,
+		event.AttemptCount,
+		event.AvailableAt,
+		nullTime(event.ClaimedAt),
+		nullTime(event.CompletedAt),
+		event.CreatedAt,
+		event.UpdatedAt,
+	)
+	return err
+}
+
+func (s *Store) flushPendingAgentEventsPostgresLocked(tx *sql.Tx) error {
+	for _, event := range s.pendingAgentEvents {
+		if event == nil {
+			continue
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO agent_events (
+				workspace_id, id, agent_id, agent_handle, type, box, status, document_id,
+				thread_id, thread_message_id, from_update_id, to_update_id, summary,
+				prompt, dedup_key, claimed_by, run_id, last_error, attempt_count,
+				available_at, claimed_at, completed_at, created_at, updated_at
+			) VALUES (
+				$1, $2, $3, $4, $5, $6, $7, $8,
+				$9, $10, $11, $12, $13,
+				$14, $15, $16, $17, $18, $19,
+				$20, $21, $22, $23, $24
+			)
+			ON CONFLICT (workspace_id, dedup_key) WHERE status NOT IN ('completed', 'dismissed')
+			DO NOTHING`,
+			s.state.WorkspaceID,
+			event.ID,
+			event.AgentID,
+			event.AgentHandle,
+			event.Type,
+			normalizeInboxBox(event.Box),
+			event.Status,
+			uuidStringOrNil(event.DocumentID),
+			uuidStringOrNil(event.ThreadID),
+			uuidStringOrNil(event.ThreadMessageID),
+			event.FromUpdateID,
+			event.ToUpdateID,
+			event.Summary,
+			event.Prompt,
+			event.DedupKey,
+			uuidStringOrNil(event.ClaimedBy),
+			uuidStringOrNil(event.RunID),
+			event.LastError,
+			event.AttemptCount,
+			event.AvailableAt,
+			nullTime(event.ClaimedAt),
+			nullTime(event.CompletedAt),
+			event.CreatedAt,
+			event.UpdatedAt,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func upsertDocumentInboxEventPostgres(db *sql.DB, workspaceID string, event *AgentEvent) (*AgentEvent, error) {
+	row := db.QueryRow(
+		`INSERT INTO agent_events (
+			workspace_id, id, agent_id, agent_handle, type, box, status, document_id,
+			thread_id, thread_message_id, from_update_id, to_update_id, summary,
+			prompt, dedup_key, claimed_by, run_id, last_error, attempt_count,
+			available_at, claimed_at, completed_at, created_at, updated_at
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8,
+			$9, $10, $11, $12, $13,
+			$14, $15, $16, $17, $18, $19,
+			$20, $21, $22, $23, $24
+		)
+		ON CONFLICT (workspace_id, dedup_key) WHERE status NOT IN ('completed', 'dismissed')
+		DO UPDATE SET
+			agent_handle = EXCLUDED.agent_handle,
+			thread_id = EXCLUDED.thread_id,
+			from_update_id = LEAST(EXCLUDED.from_update_id, agent_events.from_update_id),
+			to_update_id = GREATEST(EXCLUDED.to_update_id, agent_events.to_update_id),
+			summary = EXCLUDED.summary,
+			prompt = EXCLUDED.prompt,
+			available_at = EXCLUDED.available_at,
+			updated_at = EXCLUDED.updated_at
+		RETURNING id::text, agent_id::text, agent_handle, type, box, status,
+		          COALESCE(document_id::text, ''), COALESCE(thread_id::text, ''),
+		          COALESCE(thread_message_id::text, ''), from_update_id, to_update_id,
+		          summary, prompt, dedup_key, COALESCE(claimed_by::text, ''),
+		          COALESCE(run_id::text, ''), last_error, attempt_count,
+		          available_at, claimed_at, completed_at, created_at, updated_at`,
+		workspaceID,
+		event.ID,
+		event.AgentID,
+		event.AgentHandle,
+		event.Type,
+		normalizeInboxBox(event.Box),
+		event.Status,
+		uuidStringOrNil(event.DocumentID),
+		uuidStringOrNil(event.ThreadID),
+		uuidStringOrNil(event.ThreadMessageID),
+		event.FromUpdateID,
+		event.ToUpdateID,
+		event.Summary,
+		event.Prompt,
+		event.DedupKey,
+		uuidStringOrNil(event.ClaimedBy),
+		uuidStringOrNil(event.RunID),
+		event.LastError,
+		event.AttemptCount,
+		event.AvailableAt,
+		nullTime(event.ClaimedAt),
+		nullTime(event.CompletedAt),
+		event.CreatedAt,
+		event.UpdatedAt,
+	)
+	return scanAgentEvent(row)
+}
+
+func documentInboxHandledPostgres(db *sql.DB, workspaceID, agentID, documentID string, updateID int64, updatedAt time.Time) (bool, error) {
+	var exists bool
+	err := db.QueryRow(
+		`SELECT EXISTS(
+			SELECT 1 FROM agent_events
+			 WHERE workspace_id = $1::uuid
+			   AND agent_id = $2::uuid
+			   AND document_id = $3::uuid
+			   AND type LIKE 'document.%'
+			   AND status IN ('completed', 'dismissed')
+			   AND (to_update_id >= $4 OR (to_update_id = 0 AND updated_at >= $5))
+		)`,
+		workspaceID, agentID, documentID, updateID, updatedAt,
+	).Scan(&exists)
+	return exists, err
 }
 
 func (s *Store) loadAgentDocumentViewsPostgresLocked() error {
@@ -2455,30 +2635,6 @@ func (s *Store) loadThreadsPostgresLocked() error {
 	return messages.Err()
 }
 
-func (s *Store) loadAgentEventsPostgresLocked() error {
-	rows, err := s.db.Query(
-		`SELECT id::text, agent_id::text, agent_handle, type, box, status, COALESCE(document_id::text, ''), COALESCE(thread_id::text, ''),
-		        COALESCE(thread_message_id::text, ''), from_update_id, to_update_id,
-		        summary, prompt, dedup_key, COALESCE(claimed_by::text, ''), COALESCE(run_id::text, ''), last_error, attempt_count,
-		        available_at, claimed_at, completed_at, created_at, updated_at
-		   FROM agent_events
-		  WHERE workspace_id = $1::uuid`,
-		s.state.WorkspaceID,
-	)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		event, err := scanAgentEvent(rows)
-		if err != nil {
-			return err
-		}
-		s.state.AgentEvents[event.ID] = event
-	}
-	return rows.Err()
-}
 
 func scanAgentRun(scanner interface{ Scan(...any) error }) (*AgentRun, error) {
 	run := &AgentRun{}

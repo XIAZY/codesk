@@ -54,8 +54,8 @@ func (s *Server) requireAgentEventEndpointAccess(w http.ResponseWriter, r *http.
 		return true
 	}
 	eventID = strings.TrimSpace(eventID)
-	snapshot := s.requestStore(r).Snapshot()
-	if event := snapshot.AgentEvents[eventID]; event != nil {
+	store := s.requestStore(r)
+	if event, err := getAgentEventPostgres(store.db, store.state.WorkspaceID, eventID); err == nil && event != nil {
 		return s.requireAgentEndpointAccess(w, r, event.AgentID)
 	}
 	if spec, ok := parseSyntheticDocumentInboxID(eventID); ok {

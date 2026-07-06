@@ -30,7 +30,7 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		"agents":                visibleAgentsForAuth(state, auth),
 		"agentRuns":             SortedWorkspaceAgentRuns(state),
 		"threads":               SortedThreads(state),
-		"agentEvents":           SortedAgentEvents(state),
+		"agentEvents":           s.agentEventsForWorkspace(r, state),
 		"presences":             state.Presences,
 		"activities":            state.Activities,
 		"updatedAt":             state.UpdatedAt,
@@ -49,6 +49,15 @@ func visibleAgentsForAuth(state WorkspaceState, auth *AuthContext) []*Agent {
 		}
 	}
 	return filtered
+}
+
+func (s *Server) agentEventsForWorkspace(r *http.Request, state WorkspaceState) []*AgentEvent {
+	if s.sqlDB() != nil {
+		if events, err := listAllAgentEventsPostgres(s.sqlDB(), state.WorkspaceID); err == nil {
+			return events
+		}
+	}
+	return nil
 }
 
 func (s *Server) daemonsForWorkspace(r *http.Request, state WorkspaceState) []*Daemon {
@@ -86,7 +95,7 @@ func (s *Server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 			"agents":                visibleAgentsForAuth(snapshot, auth),
 			"agentRuns":             SortedWorkspaceAgentRuns(snapshot),
 			"threads":               SortedThreads(snapshot),
-			"agentEvents":           SortedAgentEvents(snapshot),
+			"agentEvents":           s.agentEventsForWorkspace(r, snapshot),
 			"presences":             snapshot.Presences,
 			"activities":            snapshot.Activities,
 		},

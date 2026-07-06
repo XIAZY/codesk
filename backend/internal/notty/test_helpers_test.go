@@ -17,15 +17,6 @@ func containsString(items []string, target string) bool {
 	return false
 }
 
-func countAgentEvents(state WorkspaceState, agentID string, eventType string) int {
-	count := 0
-	for _, event := range state.AgentEvents {
-		if event != nil && event.AgentID == agentID && event.Type == eventType {
-			count++
-		}
-	}
-	return count
-}
 
 func numberedLines(count int) string {
 	var builder strings.Builder

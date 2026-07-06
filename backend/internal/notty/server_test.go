@@ -444,6 +444,201 @@ func TestAgentDocumentDiffEndpointRejectsLargeDiff(t *testing.T) {
 	}
 }
 
+func TestAgentEventsAPISeamThroughHandlers(t *testing.T) {
+	fixture := newWorkspaceRouteTestFixture(t)
+	store := fixture.store
+	router := fixture.router
+	token := fixture.token
+	seedCodexDaemonRuntime(t, store)
+	ownerID := "owner"
+
+	agent, err := store.CreateAgent(CreateAgentRequest{
+		Handle: "seam-agent",
+		Name:   "Seam Agent",
+		Role:   "Tests handler seams",
+		Kind:   "codex",
+	}, OperationMeta{ActorID: ownerID, ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	documentID := mustCreateTestDocument(t, store, "docs/seam.md", "start\n")
+
+	thread, message, _, err := store.CreateThread(CreateThreadRequest{
+		DocumentID:    documentID,
+		Title:         "Seam thread",
+		Body:          "Hey @seam-agent check this",
+		RelativeStart: "test-start",
+		RelativeEnd:   "test-end",
+	}, OperationMeta{ActorID: ownerID, ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+
+	t.Run("list_notifications", func(t *testing.T) {
+		var resp struct {
+			Notifications []*AgentEvent `json:"notifications"`
+		}
+		authTestJSON(t, router, http.MethodGet, fixture.workspaceAPIPath("/agents/"+agent.ID+"/notifications?status=pending"), token, nil, http.StatusOK, &resp)
+		mention := findAgentEventByType(resp.Notifications, "thread.mentioned")
+		if mention == nil || mention.ThreadID != thread.ID {
+			t.Fatalf("expected thread.mentioned notification, got %s", formatAgentEvents(resp.Notifications))
+		}
+	})
+
+	t.Run("list_inbox", func(t *testing.T) {
+		var resp struct {
+			Items []*AgentEvent `json:"items"`
+		}
+		authTestJSON(t, router, http.MethodGet, fixture.workspaceAPIPath("/agents/"+agent.ID+"/inbox?box=for-me&status=pending"), token, nil, http.StatusOK, &resp)
+		mention := findAgentEventByType(resp.Items, "thread.mentioned")
+		if mention == nil || mention.ThreadID != thread.ID {
+			t.Fatalf("expected thread.mentioned in inbox, got %s", formatAgentEvents(resp.Items))
+		}
+	})
+
+	var claimedID string
+	t.Run("claim", func(t *testing.T) {
+		var resp struct {
+			Event *AgentEvent `json:"event"`
+		}
+		authTestJSON(t, router, http.MethodPost, fixture.workspaceAPIPath("/agent-events/claim"), token, map[string]string{
+			"agentId": agent.ID,
+		}, http.StatusOK, &resp)
+		if resp.Event == nil || resp.Event.Status != "processing" {
+			t.Fatalf("expected processing event, got %#v", resp.Event)
+		}
+		claimedID = resp.Event.ID
+	})
+
+	t.Run("get_notification", func(t *testing.T) {
+		if claimedID == "" {
+			t.Skip("no claimed event")
+		}
+		var resp struct {
+			Notification *AgentEvent `json:"notification"`
+		}
+		authTestJSON(t, router, http.MethodGet, fixture.workspaceAPIPath("/agent-notifications/"+claimedID), token, nil, http.StatusOK, &resp)
+		if resp.Notification == nil || resp.Notification.ID != claimedID || resp.Notification.Status != "processing" {
+			t.Fatalf("expected processing notification, got %#v", resp.Notification)
+		}
+	})
+
+	t.Run("get_inbox_item", func(t *testing.T) {
+		if claimedID == "" {
+			t.Skip("no claimed event")
+		}
+		var resp struct {
+			Item *AgentEvent `json:"item"`
+		}
+		authTestJSON(t, router, http.MethodGet, fixture.workspaceAPIPath("/agent-inbox/"+claimedID), token, nil, http.StatusOK, &resp)
+		if resp.Item == nil || resp.Item.ID != claimedID {
+			t.Fatalf("expected inbox item, got %#v", resp.Item)
+		}
+	})
+
+	t.Run("update_event", func(t *testing.T) {
+		if claimedID == "" {
+			t.Skip("no claimed event")
+		}
+		var resp AgentEvent
+		authTestJSON(t, router, http.MethodPatch, fixture.workspaceAPIPath("/agent-events/"+claimedID), token, map[string]string{
+			"status": "completed",
+		}, http.StatusOK, &resp)
+		if resp.Status != "completed" {
+			t.Fatalf("expected completed event, got %#v", resp)
+		}
+	})
+
+	t.Run("workspace_includes_events", func(t *testing.T) {
+		var payload map[string]any
+		authTestJSON(t, router, http.MethodGet, fixture.workspaceAPIPath("/workspace"), token, nil, http.StatusOK, &payload)
+		events, ok := payload["agentEvents"].([]any)
+		if !ok {
+			t.Fatalf("expected agentEvents array in workspace response, got %T", payload["agentEvents"])
+		}
+		found := false
+		for _, raw := range events {
+			evt, _ := raw.(map[string]any)
+			if evt != nil && evt["threadMessageId"] == message.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected thread mention event in workspace agentEvents")
+		}
+	})
+}
+
+func TestAgentEventContendedClaimPostgres(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	db := database.DB
+	store := newPostgresTestWorkspaceStore(t, database)
+	seedCodexDaemonRuntime(t, store)
+	user := seedTestUser(t, store)
+	documentID := mustCreateTestDocument(t, store, "docs/contention.md", "start\n")
+	workspaceID := store.Snapshot().WorkspaceID
+
+	agent, err := store.CreateAgent(CreateAgentRequest{
+		Handle: "contention-agent",
+		Name:   "Contention Agent",
+		Role:   "Tests contended claims",
+		Kind:   "codex",
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	_, _, _, err = store.CreateThread(CreateThreadRequest{
+		DocumentID:    documentID,
+		Title:         "Contention thread",
+		Body:          "Hey @contention-agent",
+		RelativeStart: "start",
+		RelativeEnd:   "end",
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+
+	const goroutines = 10
+	results := make(chan *AgentEvent, goroutines)
+	errs := make(chan error, goroutines)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for range goroutines {
+		go func() {
+			defer wg.Done()
+			<-start
+			event, err := claimAgentEventPostgres(db, workspaceID, agent.ID, agent.Handle, agent.ID)
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- event
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	winners := 0
+	for event := range results {
+		if event != nil {
+			winners++
+		}
+	}
+	for err := range errs {
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("expected exactly 1 winner from %d contenders, got %d", goroutines, winners)
+	}
+}
+
 func TestDocumentProtocolSyncReturnsMissingCRDTUpdate(t *testing.T) {
 	server, store := newTestServer(t)
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "alpha")
