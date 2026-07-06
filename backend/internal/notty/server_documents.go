@@ -43,6 +43,7 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	s.publishActivityChanges(r)
 	writeJSON(w, http.StatusCreated, documentMetadata(document))
 }
 
@@ -407,8 +408,11 @@ func applyAndPublishDocumentUpdate(store *Store, broker *Broker, room *DocumentR
 	if room != nil {
 		room.BroadcastSyncUpdate(documentID, yproto.BuildSyncUpdate(update), exclude)
 	}
-	if broker != nil && !updated.Hidden {
-		publishAgentInboxChanges(store, broker)
+	if broker != nil {
+		publishActivityChanges(store, broker)
+		if !updated.Hidden {
+			publishAgentInboxChanges(store, broker)
+		}
 	}
 	return result, nil
 }

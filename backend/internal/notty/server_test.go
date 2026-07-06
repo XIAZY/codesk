@@ -229,6 +229,31 @@ func TestCreateDocumentAcceptsClientDocumentIDIdempotently(t *testing.T) {
 	}
 }
 
+func TestCreateDocumentPublishesActivityCreated(t *testing.T) {
+	fixture := newWorkspaceRouteTestFixture(t)
+	fixture.store.DrainActivityChanges()
+	events, unsubscribe := fixture.server.workspaceBroker(fixture.workspaceID).Subscribe()
+	defer unsubscribe()
+
+	var document DocumentMetadata
+	authTestJSON(t, fixture.router, http.MethodPost, fixture.workspaceAPIPath("/documents"), fixture.token, CreateDocumentRequest{}, http.StatusCreated, &document)
+	if document.ID == "" {
+		t.Fatalf("expected created document response, got %#v", document)
+	}
+
+	published := drainBrokerEvents(events)
+	if len(published) != 1 || published[0].Type != "activity.created" {
+		t.Fatalf("document create should publish exactly activity.created, got %#v", eventTypes(published))
+	}
+	activity, ok := published[0].Data.(*ActivityEvent)
+	if !ok {
+		t.Fatalf("activity.created payload = %T, want *ActivityEvent", published[0].Data)
+	}
+	if activity.Type != "document.created" || activity.DocumentID != document.ID {
+		t.Fatalf("activity payload = type %q document %q, want document.created for %q", activity.Type, activity.DocumentID, document.ID)
+	}
+}
+
 func TestDocumentNamespaceMutationHTTPRoutesRemoved(t *testing.T) {
 	fixture := newWorkspaceRouteTestFixture(t)
 	server := fixture.server
@@ -473,6 +498,7 @@ func TestAgentEventsAPISeamThroughHandlers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
 	}
+	fixture.store.DrainActivityChanges()
 
 	t.Run("list_notifications", func(t *testing.T) {
 		var resp struct {
@@ -540,6 +566,8 @@ func TestAgentEventsAPISeamThroughHandlers(t *testing.T) {
 		if claimedID == "" {
 			t.Skip("no claimed event")
 		}
+		events, unsubscribe := fixture.server.workspaceBroker(fixture.workspaceID).Subscribe()
+		defer unsubscribe()
 		var resp AgentEvent
 		authTestJSON(t, router, http.MethodPatch, fixture.workspaceAPIPath("/agent-events/"+claimedID), token, map[string]string{
 			"status": "completed",
@@ -547,6 +575,7 @@ func TestAgentEventsAPISeamThroughHandlers(t *testing.T) {
 		if resp.Status != "completed" {
 			t.Fatalf("expected completed event, got %#v", resp)
 		}
+		requireBrokerEventTypes(t, events, "agent.event.updated", "activity.created")
 	})
 
 	t.Run("workspace_includes_events", func(t *testing.T) {
@@ -1164,6 +1193,7 @@ func TestCreateThreadIsIdempotentByClientOperationID(t *testing.T) {
 	store := fixture.store
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "alpha bravo charlie")
 	router := fixture.router
+	fixture.store.DrainActivityChanges()
 	events, unsubscribe := server.workspaceBroker(fixture.workspaceID).Subscribe()
 	defer unsubscribe()
 	body, err := json.Marshal(CreateThreadRequest{
@@ -1199,8 +1229,8 @@ func TestCreateThreadIsIdempotentByClientOperationID(t *testing.T) {
 
 	first := post()
 	firstEventTypes := drainBrokerEventTypes(events)
-	if len(firstEventTypes) != 2 || firstEventTypes[0] != "thread.created" || firstEventTypes[1] != "thread.message.created" {
-		t.Fatalf("expected first create to publish one thread creation and message event, got %#v", firstEventTypes)
+	if !equalStrings(firstEventTypes, []string{"thread.created", "thread.message.created", "activity.created"}) {
+		t.Fatalf("expected first create to publish thread, message, and activity events, got %#v", firstEventTypes)
 	}
 	second := post()
 	if duplicateEventTypes := drainBrokerEventTypes(events); len(duplicateEventTypes) != 0 {
@@ -1222,14 +1252,46 @@ func TestCreateThreadIsIdempotentByClientOperationID(t *testing.T) {
 }
 
 func drainBrokerEventTypes(events <-chan EventEnvelope) []string {
-	var types []string
+	return eventTypes(drainBrokerEvents(events))
+}
+
+func drainBrokerEvents(events <-chan EventEnvelope) []EventEnvelope {
+	var drained []EventEnvelope
 	for {
 		select {
 		case event := <-events:
-			types = append(types, event.Type)
+			drained = append(drained, event)
 		default:
-			return types
+			return drained
 		}
+	}
+}
+
+func eventTypes(events []EventEnvelope) []string {
+	var types []string
+	for _, event := range events {
+		types = append(types, event.Type)
+	}
+	return types
+}
+
+func equalStrings(got []string, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func requireBrokerEventTypes(t *testing.T, events <-chan EventEnvelope, want ...string) {
+	t.Helper()
+	got := drainBrokerEventTypes(events)
+	if !equalStrings(got, want) {
+		t.Fatalf("broker event types = %#v, want %#v", got, want)
 	}
 }
 

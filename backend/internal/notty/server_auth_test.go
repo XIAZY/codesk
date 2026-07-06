@@ -1049,9 +1049,12 @@ func TestDaemonTokenIsWorkspaceScopedAndCanActAsWorkspaceAgent(t *testing.T) {
 		t.Fatalf("expected agent daemon id %q, got %q", daemonResponse.Daemon.ID, agent.DaemonID)
 	}
 
+	events, unsubscribe := server.workspaceBroker(workspace.ID).Subscribe()
+	defer unsubscribe()
 	authTestStatusWithHeaders(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/agents/"+agent.ID+"/session", daemonResponse.Token, map[string]string{
 		"X-Notty-Acting-Agent-ID": agent.ID,
 	}, UpdateAgentSessionRequest{Status: "idle", SessionID: "thread-1"}, http.StatusOK)
+	requireBrokerEventTypes(t, events, "agent.updated", "activity.created")
 	activities, err := listActivitiesPostgres(server.sqlDB(), workspace.ID)
 	if err != nil {
 		t.Fatalf("list activities: %v", err)

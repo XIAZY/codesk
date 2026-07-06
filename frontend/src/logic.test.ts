@@ -144,6 +144,19 @@ describe("workspace reduction", () => {
     expect("documents" in next).toBe(false);
   });
 
+  it("prepends live activity.created events while keeping the activity window bounded", () => {
+    const existing = Array.from({ length: 50 }, (_, index) => ({ type: `old-${index}` }));
+    const nextActivity = { type: "document.created", summary: "created" };
+    const next = reduceWorkspaceEvent({ ...baseWorkspace(), activities: existing }, {
+      type: "activity.created",
+      data: nextActivity,
+    });
+
+    expect(next.activities).toHaveLength(50);
+    expect(next.activities?.[0]).toBe(nextActivity);
+    expect(next.activities?.[49]).toEqual({ type: "old-48" });
+  });
+
   it("attaches thread messages without duplicating repeated events", () => {
     const state = {
       ...baseWorkspace(),

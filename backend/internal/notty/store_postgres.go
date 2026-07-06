@@ -766,6 +766,7 @@ func (s *Store) persistPostgresLocked() error {
 	if err = tx.Commit(); err != nil {
 		return err
 	}
+	s.recordActivitiesCreatedLocked(s.pendingActivities)
 	s.dirtyDocuments = map[string]struct{}{}
 	s.pendingDocumentEvents = []documentUpdateRecord{}
 	s.pendingActivities = nil
@@ -798,6 +799,7 @@ func (s *Store) persistDocumentMutationPostgresLocked() error {
 	if err = tx.Commit(); err != nil {
 		return err
 	}
+	s.recordActivitiesCreatedLocked(s.pendingActivities)
 	s.dirtyDocuments = map[string]struct{}{}
 	s.pendingDocumentEvents = []documentUpdateRecord{}
 	s.pendingActivities = nil
@@ -2967,10 +2969,10 @@ func createThreadPostgres(db *sql.DB, workspaceID string, thread *Thread, messag
 	return committed, true, nil
 }
 
-func replyThreadPostgres(db *sql.DB, workspaceID string, threadID string, message *ThreadMessage, meta OperationMeta) (*Thread, []*AgentEvent, error) {
+func replyThreadPostgres(db *sql.DB, workspaceID string, threadID string, message *ThreadMessage, meta OperationMeta) (*Thread, []*AgentEvent, *ActivityEvent, error) {
 	tx, err := db.Begin()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	defer func() {
 		if err != nil {
@@ -2986,10 +2988,10 @@ func replyThreadPostgres(db *sql.DB, workspaceID string, threadID string, messag
 	).Scan(&foundID)
 	if err == sql.ErrNoRows {
 		_ = tx.Rollback()
-		return nil, nil, ErrNotFound
+		return nil, nil, nil, ErrNotFound
 	}
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	if _, err = tx.Exec(
@@ -3011,12 +3013,12 @@ func replyThreadPostgres(db *sql.DB, workspaceID string, threadID string, messag
 		message.Kind,
 		message.CreatedAt,
 	); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	mentionedIDs, err := extractMentionPrincipalIDsPostgres(tx, workspaceID, message.Body)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	participantIDs := append([]string{message.AuthorID}, mentionedIDs...)
 	for _, pid := range participantIDs {
@@ -3026,26 +3028,26 @@ func replyThreadPostgres(db *sql.DB, workspaceID string, threadID string, messag
 			 ON CONFLICT (workspace_id, thread_id, participant_id) DO NOTHING`,
 			workspaceID, threadID, pid,
 		); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
 
 	thread, err := getThreadPostgres(tx, workspaceID, threadID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	mentionEvents, err := collectThreadMentionEventsPostgres(tx, workspaceID, thread, message, meta)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	replyEvents, err := collectThreadReplyEventsPostgres(tx, workspaceID, thread, message, meta, mentionedIDs...)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	events := append(mentionEvents, replyEvents...)
 	for _, event := range events {
 		if err = insertAgentEventTx(tx, workspaceID, event); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
 
@@ -3059,18 +3061,18 @@ func replyThreadPostgres(db *sql.DB, workspaceID string, threadID string, messag
 		Provenance: meta,
 	}
 	if err = insertActivityPostgres(tx, workspaceID, activity); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	result, err := getThreadPostgres(tx, workspaceID, threadID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	if err = tx.Commit(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return result, events, nil
+	return result, events, activity, nil
 }
 
 func findThreadByClientOperationPostgres(db *sql.DB, workspaceID string, clientOperationID string, createdByID string, createdByType string) (*Thread, error) {

@@ -30,6 +30,7 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request) {
 	if created {
 		s.requestBroker(r).Publish(EventEnvelope{Type: "thread.created", Data: thread})
 		s.requestBroker(r).Publish(EventEnvelope{Type: "thread.message.created", Data: message})
+		s.publishActivityChanges(r)
 		s.publishAgentInboxChanges(r)
 	}
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
@@ -57,6 +58,7 @@ func (s *Server) handleReplyThread(w http.ResponseWriter, r *http.Request) {
 	}
 	s.requestBroker(r).Publish(EventEnvelope{Type: "thread.updated", Data: thread})
 	s.requestBroker(r).Publish(EventEnvelope{Type: "thread.message.created", Data: message})
+	s.publishActivityChanges(r)
 	s.publishAgentInboxChanges(r)
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"thread":  thread,

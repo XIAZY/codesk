@@ -328,6 +328,10 @@ export function reduceWorkspaceEvent(state: WorkspaceState, event: WorkspaceEven
     const { documents: _documents, ...data } = event.data as Partial<WorkspaceState> & { documents?: unknown };
     return { ...state, ...data };
   }
+  if (event.type === "activity.created") {
+    const activities = Array.isArray(state.activities) ? state.activities : [];
+    return { ...state, activities: [event.data, ...activities].slice(0, 50) };
+  }
   if (event.type === "thread.created" || event.type === "thread.updated") {
     return { ...state, threads: upsertById(state.threads, event.data as ThreadItem) };
   }
