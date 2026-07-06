@@ -106,8 +106,6 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS documents (
 			workspace_id UUID NOT NULL,
 			id UUID PRIMARY KEY,
-			path TEXT NOT NULL,
-			title TEXT NOT NULL,
 			hidden BOOLEAN NOT NULL DEFAULT false,
 			client_id_seed BIGINT NOT NULL,
 			create_client_operation_id TEXT NOT NULL DEFAULT '',
@@ -119,6 +117,11 @@ func initPostgresSchemaTables(db *sql.DB) error {
 				ON DELETE CASCADE
 		)
 		`,
+		// Temporary one-deploy scaffolding: prod still has these NOT NULL
+		// file-path-era columns, and the new insert shape cannot coexist with
+		// them. Delete after prod has booted past this version.
+		`ALTER TABLE documents DROP COLUMN IF EXISTS path`,
+		`ALTER TABLE documents DROP COLUMN IF EXISTS title`,
 		`
 		CREATE TABLE IF NOT EXISTS document_heads (
 			workspace_id UUID NOT NULL,
@@ -850,19 +853,15 @@ func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) error {
 			continue
 		}
 		if _, err := tx.Exec(
-			`INSERT INTO documents (workspace_id, id, path, title, hidden, client_id_seed, create_client_operation_id, updated_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			`INSERT INTO documents (workspace_id, id, hidden, client_id_seed, create_client_operation_id, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, $6)
 			ON CONFLICT (id)
-			 DO UPDATE SET path = EXCLUDED.path,
-			               title = EXCLUDED.title,
-			               hidden = EXCLUDED.hidden,
+			 DO UPDATE SET hidden = EXCLUDED.hidden,
 			               client_id_seed = EXCLUDED.client_id_seed,
 			               create_client_operation_id = EXCLUDED.create_client_operation_id,
 			               updated_at = EXCLUDED.updated_at`,
 			s.state.WorkspaceID,
 			document.ID,
-			"",
-			"",
 			document.Hidden,
 			int64(document.ClientIDSeed),
 			document.CreateClientOperationID,

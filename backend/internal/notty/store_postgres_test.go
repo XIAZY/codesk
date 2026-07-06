@@ -1349,6 +1349,41 @@ func assertNoDocumentHeadMaterializationColumns(t *testing.T, db *sql.DB) {
 	}
 }
 
+func assertNoDocumentPathTitleColumns(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if columns := documentPathTitleColumns(t, db); len(columns) != 0 {
+		t.Fatalf("documents must not retain legacy file-path columns, found: %v", columns)
+	}
+}
+
+func documentPathTitleColumns(t *testing.T, db *sql.DB) []string {
+	t.Helper()
+	rows, err := db.Query(
+		`SELECT column_name
+		   FROM information_schema.columns
+		  WHERE table_name = 'documents'
+		    AND column_name IN ('path', 'title')
+		  ORDER BY column_name`,
+	)
+	if err != nil {
+		t.Fatalf("query documents legacy columns: %v", err)
+	}
+	defer rows.Close()
+
+	var columns []string
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&column); err != nil {
+			t.Fatalf("scan documents legacy column: %v", err)
+		}
+		columns = append(columns, column)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate documents legacy columns: %v", err)
+	}
+	return columns
+}
+
 func assertNoActivityMaterializedContentColumn(t *testing.T, db *sql.DB) {
 	t.Helper()
 	var count int
