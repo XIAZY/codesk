@@ -26,8 +26,12 @@ function markdownState(doc: string, selection = EditorSelection.cursor(doc.lengt
   // is parsed so far — correct for the live editor's viewport, but under CPU load the parse can halt
   // mid-document in a test, dropping tokens for later lines (the observed flake: the ordered "1."
   // list marker, and everything after it, went missing). ensureSyntaxTree parses to the document end
-  // deterministically, so token collection no longer races the parser's wall-clock budget.
-  ensureSyntaxTree(state, doc.length, 5000);
+  // deterministically, so token collection no longer races the parser's wall-clock budget. It returns
+  // null if it can't finish within the budget — fail loudly rather than silently falling back to the
+  // flaky partial-parse path.
+  if (!ensureSyntaxTree(state, doc.length, 5000)) {
+    throw new Error("markdown live preview test: syntax tree did not fully parse within the budget");
+  }
   return state;
 }
 
