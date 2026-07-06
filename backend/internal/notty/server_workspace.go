@@ -24,6 +24,11 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	threads, err := s.threadsForWorkspace(state)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"workspaceId":           state.WorkspaceID,
 		"rootDocumentId":        state.RootDocumentID,
@@ -35,7 +40,7 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		"daemons":               s.daemonsForWorkspace(r, state),
 		"agents":                visibleAgentsForAuth(state, auth),
 		"agentRuns":             SortedWorkspaceAgentRuns(state),
-		"threads":               SortedThreads(state),
+		"threads":               threads,
 		"agentEvents":           s.agentEventsForWorkspace(r, state),
 		"presences":             presences,
 		"activities":            s.activitiesForWorkspace(state),
@@ -82,6 +87,13 @@ func (s *Server) activitiesForWorkspace(state WorkspaceState) []*ActivityEvent {
 	return nil
 }
 
+func (s *Server) threadsForWorkspace(state WorkspaceState) ([]*Thread, error) {
+	if s.sqlDB() != nil {
+		return listThreadsPostgres(s.sqlDB(), state.WorkspaceID)
+	}
+	return nil, nil
+}
+
 func (s *Server) daemonsForWorkspace(r *http.Request, state WorkspaceState) []*Daemon {
 	if s.sqlDB() != nil {
 		if daemons, err := listDaemons(s.sqlDB(), s.requestWorkspaceID(r)); err == nil {
@@ -111,6 +123,10 @@ func (s *Server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("list presences for websocket snapshot: %v", err)
 	}
+	wsThreads, err := s.threadsForWorkspace(snapshot)
+	if err != nil {
+		log.Printf("list threads for websocket snapshot: %v", err)
+	}
 	if err := conn.WriteJSON(EventEnvelope{
 		Type: "workspace.snapshot",
 		Data: map[string]interface{}{
@@ -120,7 +136,7 @@ func (s *Server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 			"daemons":               s.daemonsForWorkspace(r, snapshot),
 			"agents":                visibleAgentsForAuth(snapshot, auth),
 			"agentRuns":             SortedWorkspaceAgentRuns(snapshot),
-			"threads":               SortedThreads(snapshot),
+			"threads":               wsThreads,
 			"agentEvents":           s.agentEventsForWorkspace(r, snapshot),
 			"presences":             wsPresences,
 			"activities":            s.activitiesForWorkspace(snapshot),

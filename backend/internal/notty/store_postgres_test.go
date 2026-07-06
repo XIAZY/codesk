@@ -107,8 +107,8 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	if got := snapshot.Agents[agent.ID]; got == nil || got.SessionID != "session_pg_123" {
 		t.Fatalf("expected agent session id after reload, got %#v", got)
 	}
-	if got := snapshot.Threads[thread.ID]; got == nil || len(got.Messages) != 1 || got.Anchor.RelativeStart != "pg-relative-start" || got.Anchor.RelativeEnd != "pg-relative-end" {
-		t.Fatalf("expected thread messages after reload, got %#v", got)
+	if got, err := getThreadPostgres(db, snapshot.WorkspaceID, thread.ID); err != nil || got == nil || len(got.Messages) != 1 || got.Anchor.RelativeStart != "pg-relative-start" || got.Anchor.RelativeEnd != "pg-relative-end" {
+		t.Fatalf("expected thread messages after reload, got %#v (err: %v)", got, err)
 	}
 	if got := snapshot.AgentRuns[run.ID]; got == nil || got.Status != "completed" {
 		t.Fatalf("expected completed run after reload, got %#v", got)
@@ -150,45 +150,86 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	}
 }
 
-func TestPostgresThreadPersistPreservesDatabaseOnlyThreads(t *testing.T) {
+func TestPostgresThreadCreatedDirectlyInPostgres(t *testing.T) {
 	database := newPostgresTestDatabase(t)
-	staleStore := newPostgresTestWorkspaceStore(t, database)
-	user := seedTestUser(t, staleStore)
-	documentID := mustCreateTestDocument(t, staleStore, "docs/thread-preserve.md", "keep the thread\n")
-	workspace := staleStore.Snapshot()
+	db := database.DB
+	store := newPostgresTestWorkspaceStore(t, database)
+	user := seedTestUser(t, store)
+	documentID := mustCreateTestDocument(t, store, "docs/thread-preserve.md", "keep the thread\n")
+	workspace := store.Snapshot()
 
-	freshStore, err := NewWorkspaceStore(database, workspace.WorkspaceID, workspace.Name)
-	if err != nil {
-		t.Fatalf("new fresh workspace store: %v", err)
-	}
-	thread, _, _, err := freshStore.CreateThread(CreateThreadRequest{
+	thread, _, _, err := store.CreateThread(CreateThreadRequest{
 		DocumentID: documentID,
-		Title:      "Preserve me",
-		Body:       "This row only exists in the fresher store snapshot.",
+		Title:      "Direct write",
+		Body:       "This thread goes straight to Postgres.",
 	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
 	if err != nil {
-		t.Fatalf("create thread from fresh store: %v", err)
+		t.Fatalf("create thread: %v", err)
 	}
 
-	staleStore.mu.Lock()
-	staleStore.ensureMaps()
-	if _, ok := staleStore.state.Threads[thread.ID]; ok {
-		staleStore.mu.Unlock()
-		t.Fatalf("stale store unexpectedly contains thread %s", thread.ID)
-	}
-	err = staleStore.persistLocked()
-	staleStore.mu.Unlock()
+	got, err := getThreadPostgres(db, workspace.WorkspaceID, thread.ID)
 	if err != nil {
-		t.Fatalf("persist stale store: %v", err)
+		t.Fatalf("get thread from Postgres: %v", err)
 	}
-
-	reloaded, err := NewWorkspaceStore(database, workspace.WorkspaceID, workspace.Name)
-	if err != nil {
-		t.Fatalf("reload workspace store: %v", err)
-	}
-	got := reloaded.Snapshot().Threads[thread.ID]
 	if got == nil || len(got.Messages) != 1 {
-		t.Fatalf("expected database-only thread and message to survive stale persist, got %#v", got)
+		t.Fatalf("expected thread with 1 message in Postgres, got %#v", got)
+	}
+	if !containsString(got.ParticipantIDs, user.ID) {
+		t.Fatalf("expected user as participant, got %v", got.ParticipantIDs)
+	}
+}
+
+func TestPostgresThreadHandlesAfterActorDeletion(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	db := database.DB
+	store := newPostgresTestWorkspaceStore(t, database)
+	seedCodexDaemonRuntime(t, store)
+	user := seedTestUser(t, store)
+	workspace := store.Snapshot()
+	documentID := mustCreateTestDocument(t, store, "docs/actor-delete.md", "test\n")
+
+	agent, err := store.CreateAgent(CreateAgentRequest{
+		Handle: "ephemeral-agent",
+		Name:   "Ephemeral Agent",
+		Role:   "Gets deleted after posting",
+		Kind:   "codex",
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	thread, _, _, err := store.CreateThread(CreateThreadRequest{
+		DocumentID: documentID,
+		Title:      "Thread by ephemeral agent",
+		Body:       "This message survives the author's deletion.",
+	}, OperationMeta{ActorID: agent.ID, ActorType: "agent", Source: "test"})
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+
+	// Delete the agent via SQL to trigger on_actor_delete without hitting
+	// the agent_document_views persist race (a pre-existing issue outside
+	// the scope of this conversion).
+	mustExec(t, db, `DELETE FROM agents WHERE id = $1`, agent.ID)
+
+	got, err := getThreadPostgres(db, workspace.WorkspaceID, thread.ID)
+	if err != nil {
+		t.Fatalf("get thread after deletion: %v", err)
+	}
+	if got.CreatedByHandle != "ephemeral-agent" {
+		t.Fatalf("expected denormalized handle to survive deletion, got %q", got.CreatedByHandle)
+	}
+	if len(got.Messages) != 1 || got.Messages[0].AuthorHandle != "ephemeral-agent" {
+		t.Fatalf("expected message author handle to survive deletion, got %#v", got.Messages)
+	}
+	if len(got.ParticipantIDs) != 0 {
+		t.Fatalf("expected zero participants after agent deletion (trigger cleans up), got %v", got.ParticipantIDs)
+	}
+	if got.ParticipantHandles == nil {
+		t.Fatalf("expected ParticipantHandles to be [] (not nil), got nil")
+	}
+	if len(got.ParticipantHandles) != 0 {
+		t.Fatalf("expected zero participant handles after agent deletion, got %v", got.ParticipantHandles)
 	}
 }
 
@@ -336,9 +377,9 @@ func TestPostgresThreadSurvivesUUIDTurnSessionPersist(t *testing.T) {
 	if gotAgent == nil || gotAgent.CurrentTurnID != turnID || gotAgent.CurrentRunID != "" {
 		t.Fatalf("expected turn id without run-id mirror after reload, got %#v", gotAgent)
 	}
-	gotThread := snapshot.Threads[thread.ID]
-	if gotThread == nil || len(gotThread.Messages) != 1 || !containsString(gotThread.ParticipantIDs, user.ID) {
-		t.Fatalf("expected thread/message/participant after reload, got %#v", gotThread)
+	gotThread, err := getThreadPostgres(db, snapshot.WorkspaceID, thread.ID)
+	if err != nil || gotThread == nil || len(gotThread.Messages) != 1 || !containsString(gotThread.ParticipantIDs, user.ID) {
+		t.Fatalf("expected thread/message/participant after reload, got %#v (err: %v)", gotThread, err)
 	}
 }
 
@@ -886,7 +927,7 @@ func TestPostgresPersistsUTF8SafeTruncatedAgentEventPrompt(t *testing.T) {
 	}
 }
 
-func TestPostgresPendingAgentEventsSurviveFailedCommit(t *testing.T) {
+func TestPostgresAgentEventsInsertedDirectlyToPostgres(t *testing.T) {
 	database := newPostgresTestDatabase(t)
 	db := database.DB
 	store := newPostgresTestWorkspaceStore(t, database)
@@ -904,11 +945,9 @@ func TestPostgresPendingAgentEventsSurviveFailedCommit(t *testing.T) {
 		t.Fatalf("create agent: %v", err)
 	}
 
-	dedupKey := "test-survive-failed-commit:" + agent.ID
+	dedupKey := "test-direct-insert:" + agent.ID
 	now := time.Now().UTC()
-
-	store.mu.Lock()
-	store.pendingAgentEvents = []*AgentEvent{{
+	event := &AgentEvent{
 		ID:          uuid.NewString(),
 		AgentID:     agent.ID,
 		AgentHandle: agent.Handle,
@@ -920,62 +959,218 @@ func TestPostgresPendingAgentEventsSurviveFailedCommit(t *testing.T) {
 		CreatedAt:   now,
 		UpdatedAt:   now,
 		AvailableAt: now,
-	}}
-	// Inject an invalid AgentDocumentView to cause upsertAgentDocumentViewsPostgresLocked
-	// to fail AFTER flushPendingAgentEventsPostgresLocked succeeds, rolling back the tx.
-	bogusViewKey := agentDocumentViewKey(agent.ID, "00000000-0000-0000-0000-000000000000")
-	store.state.AgentDocumentViews[bogusViewKey] = &AgentDocumentView{
-		AgentID:    agent.ID,
-		DocumentID: "00000000-0000-0000-0000-000000000000",
-		UpdateID:   1,
-		ViewedAt:   now,
 	}
-	err = store.persistLocked()
-	store.mu.Unlock()
-	if err == nil {
-		t.Fatal("expected persist to fail due to invalid document view FK")
+	insertEvent := func(ev *AgentEvent) {
+		t.Helper()
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatalf("begin tx: %v", err)
+		}
+		if err := insertAgentEventTx(tx, workspaceID, ev); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("insert agent event: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
 	}
+	insertEvent(event)
 
-	// Buffer must survive the failed transaction
-	store.mu.Lock()
-	remaining := len(store.pendingAgentEvents)
-	store.mu.Unlock()
-	if remaining != 1 {
-		t.Fatalf("expected pending event to survive failed persist, got %d", remaining)
-	}
-
-	// Postgres must have zero rows for the dedup key (transaction rolled back)
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM agent_events WHERE workspace_id = $1 AND dedup_key = $2`, workspaceID, dedupKey).Scan(&count); err != nil {
 		t.Fatalf("count events: %v", err)
 	}
-	if count != 0 {
-		t.Fatalf("expected 0 events in Postgres after rollback, got %d", count)
+	if count != 1 {
+		t.Fatalf("expected exactly 1 event in Postgres, got %d", count)
 	}
 
-	// Remove the invalid view, retry persist
-	store.mu.Lock()
-	delete(store.state.AgentDocumentViews, bogusViewKey)
-	err = store.persistLocked()
-	store.mu.Unlock()
-	if err != nil {
-		t.Fatalf("retry persist: %v", err)
-	}
-
-	// Buffer must be cleared after successful commit
-	store.mu.Lock()
-	remaining = len(store.pendingAgentEvents)
-	store.mu.Unlock()
-	if remaining != 0 {
-		t.Fatalf("expected buffer cleared after successful retry, got %d pending", remaining)
-	}
-
-	// Event must exist exactly once in Postgres
+	// Dedup: inserting again with same key should not create a second row
+	insertEvent(event)
 	if err := db.QueryRow(`SELECT COUNT(*) FROM agent_events WHERE workspace_id = $1 AND dedup_key = $2`, workspaceID, dedupKey).Scan(&count); err != nil {
-		t.Fatalf("count events after retry: %v", err)
+		t.Fatalf("count after dedup: %v", err)
 	}
 	if count != 1 {
-		t.Fatalf("expected exactly 1 event after retry, got %d", count)
+		t.Fatalf("expected dedup to prevent duplicate, got %d", count)
+	}
+}
+
+func TestPostgresConcurrentThreadCreateIdempotency(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	db := database.DB
+	seedStore := newPostgresTestWorkspaceStore(t, database)
+	user := seedTestUser(t, seedStore)
+	documentID := mustCreateTestDocument(t, seedStore, "docs/concurrent.md", "race\n")
+	snapshot := seedStore.Snapshot()
+	workspaceID := snapshot.WorkspaceID
+	workspaceName := snapshot.Name
+
+	const n = 10
+	stores := make([]*Store, n)
+	for i := 0; i < n; i++ {
+		s, err := NewWorkspaceStore(database, workspaceID, workspaceName)
+		if err != nil {
+			t.Fatalf("create store %d: %v", i, err)
+		}
+		stores[i] = s
+	}
+
+	clientOpID := "idempotent-op-" + uuid.NewString()
+	type result struct {
+		thread  *Thread
+		created bool
+		err     error
+	}
+	results := make(chan result, n)
+
+	for i := 0; i < n; i++ {
+		s := stores[i]
+		go func() {
+			th, _, created, err := s.CreateThread(CreateThreadRequest{
+				DocumentID:        documentID,
+				ClientOperationID: clientOpID,
+				Title:             "Concurrent thread",
+				Body:              "Only one should win.",
+			}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
+			results <- result{thread: th, created: created, err: err}
+		}()
+	}
+
+	var winners, dupes int
+	var winnerID string
+	for i := 0; i < n; i++ {
+		r := <-results
+		if r.err != nil {
+			t.Fatalf("goroutine error: %v", r.err)
+		}
+		if r.created {
+			winners++
+			winnerID = r.thread.ID
+		} else {
+			dupes++
+		}
+		if winnerID == "" {
+			winnerID = r.thread.ID
+		}
+		if r.thread.ID != winnerID {
+			t.Fatalf("expected all goroutines to converge on same thread, got %s vs %s", r.thread.ID, winnerID)
+		}
+	}
+
+	if winners != 1 {
+		t.Fatalf("expected exactly 1 winner, got %d winners and %d dupes", winners, dupes)
+	}
+
+	var count int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM threads WHERE workspace_id = $1 AND client_operation_id = $2`,
+		workspaceID, clientOpID,
+	).Scan(&count); err != nil {
+		t.Fatalf("count threads: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly 1 thread in Postgres, got %d", count)
+	}
+
+	got, err := getThreadPostgres(db, workspaceID, winnerID)
+	if err != nil {
+		t.Fatalf("re-read winner: %v", err)
+	}
+	if len(got.Messages) != 1 {
+		t.Fatalf("winner should have 1 message, got %d", len(got.Messages))
+	}
+}
+
+func TestPostgresCreateThreadRollsBackOnPoisonedEvent(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	db := database.DB
+	store := newPostgresTestWorkspaceStore(t, database)
+	user := seedTestUser(t, store)
+	documentID := mustCreateTestDocument(t, store, "docs/rollback.md", "tx test\n")
+	workspaceID := store.Snapshot().WorkspaceID
+
+	now := time.Now().UTC()
+	thread := &Thread{
+		ID:            uuid.NewString(),
+		DocumentID:    documentID,
+		Title:         "Should not survive",
+		Status:        "open",
+		CreatedByID:   user.ID,
+		CreatedByType: "human",
+		ParticipantIDs: []string{user.ID},
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	message := &ThreadMessage{
+		ID:        uuid.NewString(),
+		ThreadID:  thread.ID,
+		AuthorID:  user.ID,
+		AuthorType: "human",
+		Body:      "rollback test",
+		Kind:      "comment",
+		CreatedAt: now,
+	}
+	poisonedEvent := &AgentEvent{
+		ID:          uuid.NewString(),
+		AgentID:     uuid.NewString(), // non-existent agent → FK violation
+		AgentHandle: "ghost",
+		Type:        "thread.mentioned",
+		Box:         "for_me",
+		Status:      "pending",
+		DedupKey:    "poison:" + uuid.NewString(),
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		AvailableAt: now,
+	}
+	activity := &ActivityEvent{
+		Type:       "thread.created",
+		DocumentID: documentID,
+		ActorID:    user.ID,
+		ActorType:  "human",
+		Summary:    "rollback test",
+		OccurredAt: now,
+	}
+
+	_, _, err := createThreadPostgres(db, workspaceID, thread, message, []*AgentEvent{poisonedEvent}, activity)
+	if err == nil {
+		t.Fatal("expected FK violation from poisoned event, got nil")
+	}
+
+	// Assert no thread, message, or activity row survived the rollback.
+	var threadCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM threads WHERE id = $1`, thread.ID).Scan(&threadCount); err != nil {
+		t.Fatalf("count threads: %v", err)
+	}
+	if threadCount != 0 {
+		t.Fatalf("thread row survived rollback: got %d", threadCount)
+	}
+	var msgCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM thread_messages WHERE id = $1`, message.ID).Scan(&msgCount); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if msgCount != 0 {
+		t.Fatalf("message row survived rollback: got %d", msgCount)
+	}
+	var actCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM activities WHERE workspace_id = $1 AND type = 'thread.created' AND document_id = $2::uuid`, workspaceID, documentID).Scan(&actCount); err != nil {
+		t.Fatalf("count activities: %v", err)
+	}
+	if actCount != 0 {
+		t.Fatalf("activity row survived rollback: got %d", actCount)
+	}
+
+	// Retry without the poisoned event succeeds.
+	committed, created, err := createThreadPostgres(db, workspaceID, thread, message, nil, activity)
+	if err != nil {
+		t.Fatalf("retry after rollback: %v", err)
+	}
+	if !created {
+		t.Fatal("retry should have created the thread")
+	}
+	if committed.ID != thread.ID {
+		t.Fatalf("retry thread ID mismatch: got %s, want %s", committed.ID, thread.ID)
+	}
+	if len(committed.Messages) != 1 {
+		t.Fatalf("retry thread should have 1 message, got %d", len(committed.Messages))
 	}
 }
 
