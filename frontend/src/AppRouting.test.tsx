@@ -546,6 +546,7 @@ describe("App URL routing", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Create a workspace" })).toBeTruthy();
+    await user.type(screen.getByLabelText("Workspace name"), "Product Workspace");
     await user.click(screen.getByRole("button", { name: "Create and enter" }));
     await waitFor(() => expect(window.location.pathname).toBe("/w/product-workspace"));
 

@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CreateDaemonModal, DaemonDetailModal, DaemonsManagement, WorkspaceApp, WorkspaceOnboarding } from "./App";
-import { emptyWorkspace, identifierHelpText, identifierPattern } from "./logic";
+import { emptyWorkspace, identifierFromName, identifierHelpText, identifierPattern, workspaceSlugMaxLength } from "./logic";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
 import type { Account, Daemon, WorkspaceSummary } from "./types";
 
@@ -126,13 +126,13 @@ describe("WorkspaceOnboarding", () => {
     const slug = screen.getByLabelText("Workspace slug") as HTMLInputElement;
     const handle = screen.getByLabelText("Your handle in this workspace") as HTMLInputElement;
 
-    expect(slug.value).toBe("product-workspace");
+    expect(name.value).toBe("");
+    expect(slug.value).toBe("");
     expect(slug.getAttribute("pattern")).toBe(identifierPattern);
     expect(slug.getAttribute("title")).toBe(identifierHelpText);
     expect(handle.getAttribute("pattern")).toBe(identifierPattern);
     expect(handle.getAttribute("title")).toBe(identifierHelpText);
 
-    await user.clear(name);
     await user.type(name, "Research Lab!");
     expect(slug.value).toBe("research-lab");
 
@@ -145,7 +145,7 @@ describe("WorkspaceOnboarding", () => {
 
   it("creates the first workspace and selects it from onboarding", async () => {
     const user = userEvent.setup();
-    const created: WorkspaceSummary = { id: "workspace_new", slug: "product-workspace", name: "Product Workspace" };
+    const created: WorkspaceSummary = { id: "workspace_new", slug: "research-lab", name: "Research Lab" };
     const createWorkspace = vi.fn().mockResolvedValue({ workspace: created });
     const onWorkspaces = vi.fn();
     const onSelect = vi.fn();
@@ -161,9 +161,10 @@ describe("WorkspaceOnboarding", () => {
       />
     );
 
+    await user.type(screen.getByLabelText("Workspace name"), "Research Lab");
     await user.click(screen.getByRole("button", { name: "Create and enter" }));
 
-    await waitFor(() => expect(createWorkspace).toHaveBeenCalledWith({ name: "Product Workspace", slug: "product-workspace", handle: "owner" }));
+    await waitFor(() => expect(createWorkspace).toHaveBeenCalledWith({ name: "Research Lab", slug: "research-lab", handle: "owner" }));
     expect(onWorkspaces).toHaveBeenCalledWith([created]);
     expect(onSelect).toHaveBeenCalledWith(created);
   });
@@ -184,10 +185,78 @@ describe("WorkspaceOnboarding", () => {
       />
     );
 
+    await user.type(screen.getByLabelText("Workspace name"), "Research Lab");
     await user.click(screen.getByRole("button", { name: "Create and enter" }));
 
     expect(await screen.findByText("Workspace slug is already taken.")).toBeTruthy();
     expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("randomizing the name fills a non-empty name and auto-derives a matching slug", async () => {
+    const user = userEvent.setup();
+    render(
+      <WorkspaceOnboarding
+        api={{ createWorkspace: vi.fn() }}
+        account={account()}
+        workspaces={[]}
+        onWorkspaces={vi.fn()}
+        onSelect={vi.fn()}
+        onSignOut={vi.fn()}
+      />
+    );
+
+    const name = screen.getByLabelText("Workspace name") as HTMLInputElement;
+    const slug = screen.getByLabelText("Workspace slug") as HTMLInputElement;
+
+    await user.click(screen.getByLabelText("Generate a random name"));
+
+    expect(name.value.length).toBeGreaterThan(0);
+    expect(slug.value.length).toBeGreaterThan(0);
+    expect(slug.value).toBe(identifierFromName(name.value, workspaceSlugMaxLength));
+  });
+
+  it("randomizing the name does not clobber a hand-edited slug", async () => {
+    const user = userEvent.setup();
+    render(
+      <WorkspaceOnboarding
+        api={{ createWorkspace: vi.fn() }}
+        account={account()}
+        workspaces={[]}
+        onWorkspaces={vi.fn()}
+        onSelect={vi.fn()}
+        onSignOut={vi.fn()}
+      />
+    );
+
+    const slug = screen.getByLabelText("Workspace slug") as HTMLInputElement;
+
+    await user.type(slug, "custom_slug");
+    await user.click(screen.getByLabelText("Generate a random name"));
+
+    expect(slug.value).toBe("custom_slug");
+  });
+
+  it("cannot submit a blank form because the name is required", async () => {
+    const user = userEvent.setup();
+    const createWorkspace = vi.fn();
+    render(
+      <WorkspaceOnboarding
+        api={{ createWorkspace }}
+        account={account()}
+        workspaces={[]}
+        onWorkspaces={vi.fn()}
+        onSelect={vi.fn()}
+        onSignOut={vi.fn()}
+      />
+    );
+
+    const name = screen.getByLabelText("Workspace name") as HTMLInputElement;
+    expect(name.value).toBe("");
+    expect(name.hasAttribute("required")).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "Create and enter" }));
+
+    expect(createWorkspace).not.toHaveBeenCalled();
   });
 });
 
