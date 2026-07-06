@@ -25,7 +25,7 @@ func LoadConfig() Config {
 		DataDir:            getenv("NOTTY_DATA_DIR", defaultNottyDataDir()),
 		WorkspaceDir:       getenv("NOTTY_WORKSPACE_DIR", "/workspace/notty"),
 		AgentWorkspaceRoot: getenv("NOTTY_AGENT_WORKSPACE_ROOT", "/workspace/agents"),
-		AgentID:            getenv("NOTTY_AGENT_ID", "daemon_agent"),
+		AgentID:            getenv("NOTTY_AGENT_ID", ""),
 		CodexCommand:       getenv("NOTTY_CODEX_COMMAND", "codex"),
 		AgentToolBaseURL:   getenv("NOTTY_AGENT_TOOL_BASE_URL", "http://127.0.0.1:7778"),
 		PprofAddr:          getenv("NOTTY_PPROF_ADDR", ""),

@@ -17,7 +17,7 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request) {
 		req.ClientOperationID = r.Header.Get("X-Notty-Idempotency-Key")
 	}
 	auth, _ := authFromContext(r.Context())
-	meta := operationMetaFromAuth(auth, "thread-create", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
+	meta := operationMetaFromAuth(auth, "thread-create", "system", "system")
 	thread, message, created, err := s.requestStore(r).CreateThread(req, meta)
 	if err != nil {
 		status := http.StatusBadRequest
@@ -45,7 +45,7 @@ func (s *Server) handleReplyThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	auth, _ := authFromContext(r.Context())
-	meta := operationMetaFromAuth(auth, "thread-reply", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
+	meta := operationMetaFromAuth(auth, "thread-reply", "system", "system")
 	thread, message, err := s.requestStore(r).ReplyThread(chi.URLParam(r, "id"), req, meta)
 	if err != nil {
 		status := http.StatusBadRequest

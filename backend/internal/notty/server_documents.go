@@ -37,7 +37,7 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	auth, _ := authFromContext(r.Context())
-	meta := operationMetaFromAuth(auth, "document-create", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
+	meta := operationMetaFromAuth(auth, "document-create", "system", "system")
 	document, err := s.requestStore(r).CreateDocument(req, meta)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())

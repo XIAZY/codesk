@@ -1010,7 +1010,7 @@ func TestLegacyNoAuthRoutesAreNotRegistered(t *testing.T) {
 }
 
 func TestDaemonTokenIsWorkspaceScopedAndCanActAsWorkspaceAgent(t *testing.T) {
-	router := newAuthTestRouter(t)
+	server, router := newAuthTestServer(t)
 
 	owner := authTestRegister(t, router, "daemon-owner@example.com", "owner-pass", "Daemon Owner")
 	workspace := authTestCreateWorkspace(t, router, owner.Token, "Daemon Tenant")
@@ -1052,6 +1052,26 @@ func TestDaemonTokenIsWorkspaceScopedAndCanActAsWorkspaceAgent(t *testing.T) {
 	authTestStatusWithHeaders(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/agents/"+agent.ID+"/session", daemonResponse.Token, map[string]string{
 		"X-Notty-Acting-Agent-ID": agent.ID,
 	}, UpdateAgentSessionRequest{Status: "idle", SessionID: "thread-1"}, http.StatusOK)
+	store, err := server.workspaceStore(workspace.ID)
+	if err != nil {
+		t.Fatalf("open workspace store: %v", err)
+	}
+	var sessionActivity *ActivityEvent
+	for _, activity := range store.Snapshot().Activities {
+		if activity.Type == "agent.session.updated" {
+			sessionActivity = activity
+			break
+		}
+	}
+	if sessionActivity == nil {
+		t.Fatalf("expected agent session activity")
+	}
+	if sessionActivity.ActorID != agent.ID || sessionActivity.ActorType != "agent" {
+		t.Fatalf("expected session activity actor to be acting agent %q, got id=%q type=%q", agent.ID, sessionActivity.ActorID, sessionActivity.ActorType)
+	}
+	if sessionActivity.Provenance.ActorID != agent.ID || sessionActivity.Provenance.ActorType != "agent" {
+		t.Fatalf("expected session provenance actor to be acting agent %q, got id=%q type=%q", agent.ID, sessionActivity.Provenance.ActorID, sessionActivity.Provenance.ActorType)
+	}
 	var daemonList struct {
 		Daemons []*Daemon `json:"daemons"`
 	}
