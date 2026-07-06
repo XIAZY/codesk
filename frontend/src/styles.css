@@ -1826,6 +1826,8 @@ pre.code {
   font-size: 11.5px;
   line-height: 1.45;
   color: var(--ink-4);
+  /* Match .lab's horizontal padding so helper text lines up under its label, app-wide. */
+  padding: 0 8px;
 }
 
 .name-row {
