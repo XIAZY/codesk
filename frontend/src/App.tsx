@@ -1444,12 +1444,11 @@ export function WorkspaceApp({
         </div>
 
         <div className="sb-search">
-          <div className="input search-box">
+          <div className="input search-box coming-soon" aria-disabled="true" title="Coming soon">
             <div className="row gap-6">
               <Icon name="search" />
-              <span>Search or jump…</span>
+              <span>Search — coming soon</span>
             </div>
-            <span className="kbd">⌘K</span>
           </div>
         </div>
 
@@ -2071,10 +2070,6 @@ function AgentsManagement({
             <div className="small muted">Codex collaborators in this workspace. Each is owned by a daemon.</div>
           </div>
           <div className="row gap-6">
-            <div className="input roster-filter">
-              <Icon name="search" />
-              <span>Filter agents…</span>
-            </div>
             <button className="btn accent" type="button" onClick={onNew}>
               <Icon name="plus" />
               New agent

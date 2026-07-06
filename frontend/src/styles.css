@@ -661,6 +661,12 @@ svg.i.sm {
   padding: 0 8px;
 }
 
+/* Honest disabled affordance for not-yet-built controls (2a-2). */
+.coming-soon {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .sb-section {
   padding: 4px 8px;
 }
@@ -1620,16 +1626,6 @@ svg.i.sm {
 
 .ds-table tbody tr:hover td {
   background: var(--paper-2);
-}
-
-.roster-filter {
-  width: 180px;
-  min-height: 32px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--ink-4);
-  font-size: 12.5px;
 }
 
 .roster-group-head {

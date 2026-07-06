@@ -298,6 +298,30 @@ describe("WorkspaceApp participants rail", () => {
   });
 });
 
+describe("WorkspaceApp coming-soon controls", () => {
+  it("shows the sidebar search as a non-actionable Coming soon affordance", () => {
+    render(
+      <WorkspaceApp
+        api={{ updateLastAccessed: vi.fn().mockResolvedValue({}) } as never}
+        token="token"
+        workspaceId="ws"
+        workspaceSlug="workspace"
+        view={{ kind: "home" }}
+        account={{ id: "account_1", email: "you@example.com", displayName: "You" }}
+        workspaces={[{ id: "ws", slug: "workspace", name: "Workspace" }]}
+        onAccess={vi.fn()}
+        onWorkspaceChange={vi.fn()}
+        onSignOut={vi.fn()}
+      />,
+    );
+
+    const label = screen.getByText("Search — coming soon");
+    expect(label.closest("[aria-disabled='true']")).toBeTruthy();
+    expect(screen.queryByText("Search or jump…")).toBeNull(); // old placeholder gone
+    expect(screen.queryByText("⌘K")).toBeNull(); // no fake keyboard shortcut
+  });
+});
+
 describe("CreateDaemonModal install status", () => {
   it("flips the install chip from waiting to connected when the daemon checks in live", async () => {
     const user = userEvent.setup();
