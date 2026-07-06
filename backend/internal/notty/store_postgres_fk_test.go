@@ -394,9 +394,9 @@ func (f *fkTestFixture) insertActivity(t *testing.T, actorID *string, actorType,
 		provenance_actor_type, provenance_execution_id, provenance_tool, provenance_trigger,
 		provenance_autonomous, provenance_confidence, provenance_requested_by,
 		provenance_source, provenance_intended_scope, provenance_read_set_summary,
-		comment_id, presence_ref)
+		presence_ref)
 		VALUES ($1, 'test', $2, $3, $4, 'test', $5,
-		'', '', '', '', FALSE, '', '', '', '', '', '', '')
+		'', '', '', '', FALSE, '', '', '', '', '', '')
 		RETURNING id`,
 		f.workspaceID, uuidStringOrNil(docID), actorID, actorType, f.now).Scan(&id)
 	if err != nil {
@@ -413,10 +413,10 @@ func (f *fkTestFixture) insertActivityProvenance(t *testing.T, actorID string, a
 		provenance_execution_id, provenance_tool, provenance_trigger,
 		provenance_autonomous, provenance_confidence, provenance_requested_by,
 		provenance_source, provenance_intended_scope, provenance_read_set_summary,
-		comment_id, presence_ref)
+		presence_ref)
 		VALUES ($1, 'test', $2, 'system', '', $3,
 		$4, $5,
-		'', '', '', FALSE, '', '', '', '', '', '', '')
+		'', '', '', FALSE, '', '', '', '', '', '')
 		RETURNING id`,
 		f.workspaceID, docID, f.now, actorID, actorType).Scan(&id)
 	if err != nil {
@@ -1058,9 +1058,9 @@ func TestFKConstraintsRejectCrossWorkspaceRefs(t *testing.T) {
 				provenance_actor_type, provenance_execution_id, provenance_tool, provenance_trigger,
 				provenance_autonomous, provenance_confidence, provenance_requested_by,
 				provenance_source, provenance_intended_scope, provenance_read_set_summary,
-				comment_id, presence_ref)
+				presence_ref)
 			 VALUES ($1, 'test', $2, 'system', '', $3,
-				'', '', '', '', FALSE, '', '', '', '', '', '', '')`,
+				'', '', '', '', FALSE, '', '', '', '', '', '')`,
 			[]any{f.workspaceID, docB, f.now},
 		},
 		{
@@ -1371,9 +1371,9 @@ func TestPolymorphicTriggerRejectsCrossWorkspaceRef(t *testing.T) {
 				provenance_actor_type, provenance_execution_id, provenance_tool, provenance_trigger,
 				provenance_autonomous, provenance_confidence, provenance_requested_by,
 				provenance_source, provenance_intended_scope, provenance_read_set_summary,
-				comment_id, presence_ref)
+				presence_ref)
 			 VALUES ($1, 'test', $2, 'human', '', $3,
-				'', '', '', '', FALSE, '', '', '', '', '', '', '')`,
+				'', '', '', '', FALSE, '', '', '', '', '', '')`,
 			[]any{f.workspaceID, userB, f.now},
 		},
 		// activities.actor_id — agent
@@ -1383,9 +1383,9 @@ func TestPolymorphicTriggerRejectsCrossWorkspaceRef(t *testing.T) {
 				provenance_actor_type, provenance_execution_id, provenance_tool, provenance_trigger,
 				provenance_autonomous, provenance_confidence, provenance_requested_by,
 				provenance_source, provenance_intended_scope, provenance_read_set_summary,
-				comment_id, presence_ref)
+				presence_ref)
 			 VALUES ($1, 'test', $2, 'agent', '', $3,
-				'', '', '', '', FALSE, '', '', '', '', '', '', '')`,
+				'', '', '', '', FALSE, '', '', '', '', '', '')`,
 			[]any{f.workspaceID, agentB, f.now},
 		},
 		// activities.provenance_actor_id — human
@@ -1396,10 +1396,10 @@ func TestPolymorphicTriggerRejectsCrossWorkspaceRef(t *testing.T) {
 				provenance_execution_id, provenance_tool, provenance_trigger,
 				provenance_autonomous, provenance_confidence, provenance_requested_by,
 				provenance_source, provenance_intended_scope, provenance_read_set_summary,
-				comment_id, presence_ref)
+				presence_ref)
 			 VALUES ($1, 'test', 'system', '', $2,
 				$3, 'human',
-				'', '', '', FALSE, '', '', '', '', '', '', '')`,
+				'', '', '', FALSE, '', '', '', '', '', '')`,
 			[]any{f.workspaceID, f.now, userB},
 		},
 		// activities.provenance_actor_id — agent
@@ -1410,10 +1410,10 @@ func TestPolymorphicTriggerRejectsCrossWorkspaceRef(t *testing.T) {
 				provenance_execution_id, provenance_tool, provenance_trigger,
 				provenance_autonomous, provenance_confidence, provenance_requested_by,
 				provenance_source, provenance_intended_scope, provenance_read_set_summary,
-				comment_id, presence_ref)
+				presence_ref)
 			 VALUES ($1, 'test', 'system', '', $2,
 				$3, 'agent',
-				'', '', '', FALSE, '', '', '', '', '', '', '')`,
+				'', '', '', FALSE, '', '', '', '', '', '')`,
 			[]any{f.workspaceID, f.now, agentB},
 		},
 		// activities.provenance_actor_id — daemon
@@ -1424,10 +1424,10 @@ func TestPolymorphicTriggerRejectsCrossWorkspaceRef(t *testing.T) {
 				provenance_execution_id, provenance_tool, provenance_trigger,
 				provenance_autonomous, provenance_confidence, provenance_requested_by,
 				provenance_source, provenance_intended_scope, provenance_read_set_summary,
-				comment_id, presence_ref)
+				presence_ref)
 			 VALUES ($1, 'test', 'system', '', $2,
 				$3, 'daemon',
-				'', '', '', FALSE, '', '', '', '', '', '', '')`,
+				'', '', '', FALSE, '', '', '', '', '', '')`,
 			[]any{f.workspaceID, f.now, daemonB},
 		},
 		// agent_events.claimed_by — cross-workspace daemon
@@ -1471,9 +1471,9 @@ func TestPolymorphicTriggerRejectsCrossWorkspaceRef(t *testing.T) {
 				provenance_actor_type, provenance_execution_id, provenance_tool, provenance_trigger,
 				provenance_autonomous, provenance_confidence, provenance_requested_by,
 				provenance_source, provenance_intended_scope, provenance_read_set_summary,
-				comment_id, presence_ref)
+				presence_ref)
 			 VALUES ($1, 'test', $2, 'banana', '', $3,
-				'', '', '', '', FALSE, '', '', '', '', '', '', '')`,
+				'', '', '', '', FALSE, '', '', '', '', '', '')`,
 			[]any{f.workspaceID, userA, f.now},
 		},
 		{
@@ -1483,10 +1483,10 @@ func TestPolymorphicTriggerRejectsCrossWorkspaceRef(t *testing.T) {
 				provenance_execution_id, provenance_tool, provenance_trigger,
 				provenance_autonomous, provenance_confidence, provenance_requested_by,
 				provenance_source, provenance_intended_scope, provenance_read_set_summary,
-				comment_id, presence_ref)
+				presence_ref)
 			 VALUES ($1, 'test', 'system', '', $2,
 				$3, 'banana',
-				'', '', '', FALSE, '', '', '', '', '', '', '')`,
+				'', '', '', FALSE, '', '', '', '', '', '')`,
 			[]any{f.workspaceID, f.now, userA},
 		},
 	}
@@ -1612,9 +1612,9 @@ func TestPolymorphicWorkspaceRefStateMachine(t *testing.T) {
 					provenance_actor_type, provenance_execution_id, provenance_tool, provenance_trigger,
 					provenance_autonomous, provenance_confidence, provenance_requested_by,
 					provenance_source, provenance_intended_scope, provenance_read_set_summary,
-					comment_id, presence_ref)
+					presence_ref)
 					VALUES ($1, 'test', $2, $3, $4, '', $5,
-					'', '', '', '', FALSE, '', '', '', '', '', '', '')`,
+					'', '', '', '', FALSE, '', '', '', '', '', '')`,
 					[]any{f.workspaceID, docID, actorID, actorType, f.now}
 			},
 		},
@@ -1628,9 +1628,9 @@ func TestPolymorphicWorkspaceRefStateMachine(t *testing.T) {
 					provenance_execution_id, provenance_tool, provenance_trigger,
 					provenance_autonomous, provenance_confidence, provenance_requested_by,
 					provenance_source, provenance_intended_scope, provenance_read_set_summary,
-					comment_id, presence_ref)
+					presence_ref)
 					VALUES ($1, 'test', $2, 'system', '', $3, $4, $5,
-					'', '', '', FALSE, '', '', '', '', '', '', '')`,
+					'', '', '', FALSE, '', '', '', '', '', '')`,
 					[]any{f.workspaceID, docID, f.now, actorID, actorType}
 			},
 		},
@@ -1945,9 +1945,9 @@ func TestActorDeleteCleanupStateMachine(t *testing.T) {
 			provenance_execution_id, provenance_tool, provenance_trigger,
 			provenance_autonomous, provenance_confidence, provenance_requested_by,
 			provenance_source, provenance_intended_scope, provenance_read_set_summary,
-			comment_id, presence_ref)
+			presence_ref)
 			VALUES ($1, 'test', $2, 'system', '', $3, $4, 'daemon',
-			'', '', '', FALSE, '', '', '', '', '', '', '')`,
+			'', '', '', FALSE, '', '', '', '', '', '')`,
 			f.workspaceID, docID, f.now, actors.daemonID)
 
 		mustExecFK(t, f.db, `DELETE FROM daemons WHERE id = $1`, actors.daemonID)
