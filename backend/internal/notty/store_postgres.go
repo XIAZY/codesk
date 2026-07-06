@@ -3078,4 +3078,3 @@ func documentHasOpenThreadForParticipantPostgres(q querier, workspaceID string, 
 	}
 	return true, threadID, threadTitle, nil
 }
-
