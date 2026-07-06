@@ -3277,8 +3277,8 @@ export function Logo() {
   return (
     <div className="row gap-8 logo-row">
       <svg className="logo-mark" viewBox="14 31 72 38" aria-hidden="true">
-        <circle cx="24" cy="50" r="9" fill="#E3A15B" />
-        <circle cx="76" cy="50" r="9" fill="#7FC1D6" />
+        <circle cx="24" cy="50" r="9" fill="var(--accent)" />
+        <circle cx="76" cy="50" r="9" fill="var(--agent)" />
         <line x1="39.6" y1="39.6" x2="60.4" y2="60.4" stroke="currentColor" strokeWidth="7.8" strokeLinecap="round" />
         <line x1="60.4" y1="39.6" x2="39.6" y2="60.4" stroke="currentColor" strokeWidth="7.8" strokeLinecap="round" />
       </svg>

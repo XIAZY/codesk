@@ -20,14 +20,19 @@
   --agent: oklch(0.62 0.08 230);
   --agent-50: oklch(0.965 0.018 230);
   --agent-100: oklch(0.90 0.035 230);
+  --agent-700: oklch(0.40 0.06 230);
   --iris: oklch(0.55 0.09 285);
   --iris-50: oklch(0.965 0.018 285);
   --iris-700: oklch(0.42 0.09 285);
   --daemon: oklch(0.60 0.08 155);
   --daemon-50: oklch(0.955 0.018 155);
+  --daemon-700: oklch(0.40 0.06 155);
   --ok: oklch(0.60 0.08 155);
   --warn: oklch(0.74 0.10 80);
+  --warn-50: oklch(0.97 0.02 80);
   --err: oklch(0.58 0.16 25);
+  --err-50: oklch(0.965 0.02 25);
+  --err-100: oklch(0.85 0.05 25);
   --display: "Newsreader", Georgia, serif;
   --sans: "Archivo", ui-sans-serif, system-ui, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -239,8 +244,8 @@ svg.i.sm {
 }
 
 .btn.danger {
-  background: #fff4f1;
-  border-color: #efc1b8;
+  background: var(--err-50);
+  border-color: var(--err-100);
   color: var(--err);
 }
 
@@ -357,13 +362,13 @@ svg.i.sm {
 }
 
 .chip.warn {
-  background: #fff7e4;
+  background: var(--warn-50);
   color: var(--warn);
 }
 
 .chip.stale,
 .chip.queued {
-  background: #fff7e4;
+  background: var(--warn-50);
   color: var(--warn);
 }
 
@@ -376,7 +381,7 @@ svg.i.sm {
 .chip.deleted,
 .chip.failed,
 .chip.err {
-  background: #fff4f1;
+  background: var(--err-50);
   color: var(--err);
 }
 
@@ -388,8 +393,8 @@ svg.i.sm {
   justify-content: center;
   border: 1px solid rgba(0, 0, 0, 0.06);
   border-radius: 11px;
-  background: linear-gradient(140deg, #fcdec5, #f0a875);
-  color: #6b330c;
+  background: var(--accent-100);
+  color: var(--accent-700);
   font-size: 11px;
   font-weight: 800;
   text-transform: uppercase;
@@ -404,18 +409,18 @@ svg.i.sm {
 }
 
 .avi.agent {
-  background: linear-gradient(140deg, var(--agent-100), var(--agent));
-  color: #08323C;
+  background: var(--agent-100);
+  color: var(--agent-700);
 }
 
 .avi.daemon {
-  background: linear-gradient(140deg, var(--daemon-50), #99cdbb);
-  color: #125240;
+  background: var(--daemon-50);
+  color: var(--daemon-700);
 }
 
 .avi.you {
-  background: linear-gradient(140deg, #ffe6c8, #f4bf75);
-  color: #684111;
+  background: var(--accent-100);
+  color: var(--accent-700);
 }
 
 .avi-stack {
@@ -540,9 +545,9 @@ svg.i.sm {
 
 .error-text {
   margin: 0;
-  border: 1px solid #efc1b8;
+  border: 1px solid var(--err-100);
   border-radius: var(--r-2);
-  background: #fff4f1;
+  background: var(--err-50);
   color: var(--err);
   padding: 8px 10px;
   font-size: 12.5px;
@@ -693,7 +698,7 @@ svg.i.sm {
 }
 
 .nav-item.renaming-row {
-  border-color: rgba(217, 120, 66, 0.28);
+  border-color: color-mix(in oklab, var(--accent) 28%, transparent);
   background: var(--accent-50);
 }
 
@@ -916,8 +921,8 @@ svg.i.sm {
 }
 
 .notice.error {
-  border-color: #efc1b8;
-  background: #fff4f1;
+  border-color: var(--err-100);
+  background: var(--err-50);
   color: var(--err);
 }
 
@@ -980,7 +985,7 @@ svg.i.sm {
 .document-title-field.editing,
 .document-title-field:focus-within {
   background: var(--paper);
-  box-shadow: inset 0 0 0 1px var(--accent), 0 0 0 3px rgba(217, 120, 66, 0.14);
+  box-shadow: inset 0 0 0 1px var(--accent), 0 0 0 3px color-mix(in oklab, var(--accent) 14%, transparent);
 }
 
 .document-title-mirror {
@@ -1234,7 +1239,7 @@ svg.i.sm {
 
 .thread-drafter textarea:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(217, 120, 66, 0.14);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 14%, transparent);
 }
 
 .thread-popover {
