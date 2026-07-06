@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CreateDaemonModal, WorkspaceApp, WorkspaceOnboarding } from "./App";
+import { CreateDaemonModal, DaemonDetailModal, DaemonsManagement, WorkspaceApp, WorkspaceOnboarding } from "./App";
 import { emptyWorkspace, identifierHelpText, identifierPattern } from "./logic";
-import type { Account, WorkspaceSummary } from "./types";
+import type { Account, Daemon, WorkspaceSummary } from "./types";
 
 vi.mock("./useWorkspace", () => ({
   useWorkspace: () => ({
@@ -250,5 +250,71 @@ describe("CreateDaemonModal install status", () => {
 
     expect(screen.getByText("Daemon connected")).toBeTruthy();
     expect(screen.queryByText("Waiting for daemon to check in…")).toBeNull();
+  });
+});
+
+describe("DaemonsManagement liveness decay", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("decays a silent daemon online -> stale -> disconnected with no further events", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-06T00:00:00Z"));
+    const start = Date.now();
+    const daemon: Daemon = {
+      id: "d1", workspaceId: "ws", name: "Local", status: "active",
+      connectionStatus: "online", lastSeenAgeSeconds: 0, receivedAtMs: start,
+      lastSeenAt: new Date(start).toISOString(), createdAt: "now",
+    };
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws", daemons: [daemon] };
+    const { container } = render(
+      <DaemonsManagement workspace={workspace as never} onRefresh={vi.fn()} onNew={vi.fn()} onDaemon={vi.fn()} />
+    );
+    const statusChip = () => container.querySelector("td .chip.sm")?.textContent ?? "";
+
+    expect(statusChip()).toContain("online");
+
+    // No events arrive; only time passes. The ticker (12s cadence) must re-derive the status
+    // once elapsed crosses each window — advance past a tick boundary beyond the threshold.
+    act(() => { vi.advanceTimersByTime(36_000); });
+    expect(statusChip()).toContain("stale");
+
+    act(() => { vi.advanceTimersByTime(120_000); });
+    expect(statusChip()).toContain("disconnected");
+  });
+});
+
+describe("DaemonDetailModal live status", () => {
+  it("reflects live daemon updates on the open modal instead of a click-time snapshot", () => {
+    const nowMs = Date.now();
+    const online: Daemon = {
+      id: "d1", workspaceId: "ws", name: "Local", status: "active",
+      connectionStatus: "online", lastSeenAgeSeconds: 0, receivedAtMs: nowMs, createdAt: "now",
+    };
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], onClose: vi.fn(), onChanged: vi.fn() };
+    const { container, rerender } = render(<DaemonDetailModal {...props} daemons={[online]} />);
+    const statusChip = () => container.querySelector(".deploy-block .chip.sm")?.textContent ?? "";
+
+    expect(statusChip()).toContain("online");
+
+    // A daemon.updated event lands reporting the daemon long-silent — the open modal must move.
+    const silent: Daemon = { ...online, lastSeenAgeSeconds: 300, receivedAtMs: Date.now() };
+    rerender(<DaemonDetailModal {...props} daemons={[silent]} />);
+    expect(statusChip()).toContain("disconnected");
+  });
+
+  it("closes itself when the selected daemon is deleted while open", () => {
+    const onClose = vi.fn();
+    const daemon: Daemon = {
+      id: "d1", workspaceId: "ws", name: "Local", status: "active",
+      connectionStatus: "online", lastSeenAgeSeconds: 0, receivedAtMs: Date.now(), createdAt: "now",
+    };
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], onChanged: vi.fn() };
+    const { rerender } = render(<DaemonDetailModal {...props} daemons={[daemon]} onClose={onClose} />);
+    expect(onClose).not.toHaveBeenCalled();
+
+    rerender(<DaemonDetailModal {...props} daemons={[]} onClose={onClose} />);
+    expect(onClose).toHaveBeenCalled();
   });
 });

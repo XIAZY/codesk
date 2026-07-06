@@ -66,6 +66,10 @@ export type Daemon = {
   lastSeenAgeSeconds?: number;
   createdAt: string;
   deletedAt?: string;
+  // Client-only: wall-clock ms when this payload was received, stamped at the socket/snapshot
+  // boundary. Combined with lastSeenAgeSeconds to decay liveness on a timer without trusting the
+  // client clock against the server's lastSeenAt. Never sent by the backend.
+  receivedAtMs?: number;
 };
 
 export type RuntimeDetection = {

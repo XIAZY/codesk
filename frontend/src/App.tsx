@@ -11,6 +11,7 @@ import {
   buildDaemonUninstallCommand,
   coworkerCount,
   daemonStatus,
+  daemonLiveStatus,
   handleMaxLength,
   handleMinLength,
   identifierFromName,
@@ -1228,7 +1229,7 @@ export function WorkspaceApp({
   const [rightTab, setRightTab] = useState<"threads" | "activity" | "coworkers">("threads");
   const [modal, setModal] = useState<"daemon" | "agent" | "rename" | "share" | "agent-detail" | "daemon-detail" | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
-  const [selectedDaemon, setSelectedDaemon] = useState<Daemon | null>(null);
+  const [selectedDaemonId, setSelectedDaemonId] = useState<string | null>(null);
   const [selectedThreadId, setSelectedThreadId] = useState("");
   const [focusThreadId, setFocusThreadId] = useState("");
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(() => new Set());
@@ -1574,7 +1575,7 @@ export function WorkspaceApp({
             onRefresh={() => void reload()}
             onNew={() => setModal("daemon")}
             onDaemon={(daemon) => {
-              setSelectedDaemon(daemon);
+              setSelectedDaemonId(daemon.id);
               setModal("daemon-detail");
             }}
           />
@@ -1693,7 +1694,7 @@ export function WorkspaceApp({
       {modal === "agent" ? <CreateAgentModal api={api} workspaceId={workspaceId} daemons={workspace.daemons} onClose={() => setModal(null)} onDone={() => { setModal(null); void reload(); }} /> : null}
       {modal === "share" ? <ShareWorkspaceModal api={api} workspaceId={workspaceId} onClose={() => setModal(null)} /> : null}
       {modal === "agent-detail" && selectedAgent ? <AgentDetailModal api={api} workspaceId={workspaceId} agent={selectedAgent} daemons={workspace.daemons} runs={workspace.agentRuns} onClose={() => setModal(null)} onChanged={() => void reload()} /> : null}
-      {modal === "daemon-detail" && selectedDaemon ? <DaemonDetailModal api={api} workspaceId={workspaceId} daemon={selectedDaemon} agents={workspace.agents.filter((agent) => agent.daemonId === selectedDaemon.id)} runs={workspace.agentRuns} onClose={() => setModal(null)} onChanged={() => { setModal(null); void reload(); }} /> : null}
+      {modal === "daemon-detail" && selectedDaemonId ? <DaemonDetailModal api={api} workspaceId={workspaceId} daemonId={selectedDaemonId} daemons={workspace.daemons} agents={workspace.agents} runs={workspace.agentRuns} onClose={() => setModal(null)} onChanged={() => { setModal(null); void reload(); }} /> : null}
     </main>
   );
 }
@@ -1903,7 +1904,23 @@ export function DocumentTree(props: {
   );
 }
 
-function DaemonsManagement({
+// Coarse re-render cadence so a daemon that stops checking in decays online -> stale ->
+// disconnected on its own. 12s is ample against the 30s online window; it only recomputes from
+// state — no polling, no network.
+const DAEMON_LIVENESS_TICK_MS = 12_000;
+
+// Returns a wall-clock timestamp that advances every intervalMs, so time-derived UI (liveness
+// decay, "last check-in … ago") re-renders without any new data.
+function useNowTicker(intervalMs: number) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), intervalMs);
+    return () => window.clearInterval(id);
+  }, [intervalMs]);
+  return now;
+}
+
+export function DaemonsManagement({
   workspace,
   onRefresh,
   onNew,
@@ -1914,8 +1931,9 @@ function DaemonsManagement({
   onNew: () => void;
   onDaemon: (daemon: Daemon) => void;
 }) {
+  const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
   const visibleDaemons = workspace.daemons.filter((daemon) => daemon.status !== "deleted");
-  const countByStatus = (status: string) => visibleDaemons.filter((daemon) => daemonStatus(daemon) === status).length;
+  const countByStatus = (status: string) => visibleDaemons.filter((daemon) => daemonLiveStatus(daemon, now) === status).length;
   const agentsForDaemon = (daemonId: string) => workspace.agents.filter((agent) => agent.daemonId === daemonId);
 
   return (
@@ -1962,7 +1980,7 @@ function DaemonsManagement({
             </thead>
             <tbody>
               {visibleDaemons.map((daemon) => {
-                const status = daemonStatus(daemon);
+                const status = daemonLiveStatus(daemon, now);
                 return (
                   <tr key={daemon.id} onClick={() => onDaemon(daemon)}>
                     <td>
@@ -3003,11 +3021,26 @@ function AgentDetailModal({ api, workspaceId, agent, daemons, runs, onClose, onC
   );
 }
 
-function DaemonDetailModal({ api, workspaceId, daemon, agents, runs, onClose, onChanged }: { api: ApiClient; workspaceId: string; daemon: Daemon; agents: Agent[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; onClose: () => void; onChanged: () => void }) {
+export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents, runs, onClose, onChanged }: { api: ApiClient; workspaceId: string; daemonId: string; daemons: Daemon[]; agents: Agent[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; onClose: () => void; onChanged: () => void }) {
+  const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
   const [reinstallOpen, setReinstallOpen] = useState(false);
   const [reinstallToken, setReinstallToken] = useState("");
   const [reinstallError, setReinstallError] = useState("");
   const [reinstallLoading, setReinstallLoading] = useState(false);
+  // Derive the live daemon from workspace state every render, so daemon.updated events and the
+  // liveness tick reach the open modal instead of a frozen snapshot captured at click time.
+  const daemon = daemons.find((item) => item.id === daemonId);
+  useEffect(() => {
+    // Daemon deleted while the modal is open — nothing to show, close it.
+    if (!daemon) {
+      onClose();
+    }
+  }, [daemon, onClose]);
+  if (!daemon) {
+    return null;
+  }
+  const status = daemonLiveStatus(daemon, now);
+  const daemonAgents = agents.filter((agent) => agent.daemonId === daemon.id);
   const prepareReinstall = async () => {
     setReinstallOpen(true);
     setReinstallToken("");
@@ -3038,12 +3071,12 @@ function DaemonDetailModal({ api, workspaceId, daemon, agents, runs, onClose, on
           <div className="deploy-block">
             <div className="row between">
               <b className="small">Status</b>
-              <span className={`chip sm ${daemonStatus(daemon)}`}><StatusDot tone={daemonStatus(daemon)} />{daemonStatus(daemon)}</span>
+              <span className={`chip sm ${status}`}><StatusDot tone={status} />{status}</span>
             </div>
             <p className="tiny muted mono">ID: {daemon.id}</p>
             <p className="small muted">Last seen: {daemon.lastSeenAt ? new Date(daemon.lastSeenAt).toLocaleString() : "Never"}</p>
-            <p className="small muted">Agents: {agents.length}</p>
-            {agents.map((agent) => <p className="small" key={agent.id}>@{agent.handle} · {visibleAgentStatus(agent, runs, [daemon])}</p>)}
+            <p className="small muted">Agents: {daemonAgents.length}</p>
+            {daemonAgents.map((agent) => <p className="small" key={agent.id}>@{agent.handle} · {visibleAgentStatus(agent, runs, [daemon])}</p>)}
           </div>
           <button className="btn accent full" onClick={() => void prepareReinstall()} disabled={reinstallLoading}>Reinstall daemon</button>
           <ShellScriptBlock title="Uninstall daemon" badge="Global" command={uninstallCommand}>

@@ -13,6 +13,10 @@ import {
   computeReplace,
   coworkerCount,
   daemonStatus,
+  daemonLiveStatus,
+  stampDaemonReceipt,
+  DAEMON_ONLINE_WINDOW_MS,
+  DAEMON_STALE_WINDOW_MS,
   encodeRelativeAnchor,
   handleMaxLength,
   identifierFromName,
@@ -242,6 +246,58 @@ describe("presentation grouping", () => {
     };
 
     expect(coworkerCount(workspace)).toBe(3);
+  });
+});
+
+describe("daemon liveness decay", () => {
+  const daemon = (overrides: Partial<Daemon>): Daemon => ({
+    id: "d1",
+    workspaceId: "ws",
+    name: "Local",
+    status: "active",
+    connectionStatus: "online",
+    lastSeenAgeSeconds: 0,
+    receivedAtMs: 1_000_000,
+    createdAt: "now",
+    ...overrides,
+  });
+
+  it("stays online up to the online window and decays past it — matching backend <= semantics", () => {
+    const base = daemon({ lastSeenAgeSeconds: 0, receivedAtMs: 1_000_000 });
+    // exactly the online window (30s) since receipt → still online
+    expect(daemonLiveStatus(base, 1_000_000 + DAEMON_ONLINE_WINDOW_MS)).toBe("online");
+    // one ms past the online window → stale
+    expect(daemonLiveStatus(base, 1_000_000 + DAEMON_ONLINE_WINDOW_MS + 1)).toBe("stale");
+    // exactly the stale window (2m) → still stale
+    expect(daemonLiveStatus(base, 1_000_000 + DAEMON_STALE_WINDOW_MS)).toBe("stale");
+    // past the stale window → disconnected
+    expect(daemonLiveStatus(base, 1_000_000 + DAEMON_STALE_WINDOW_MS + 1)).toBe("disconnected");
+  });
+
+  it("folds the server-reported age into the elapsed time", () => {
+    // Payload already 25s old at receipt; 6s later the effective age is 31s → stale.
+    const base = daemon({ lastSeenAgeSeconds: 25, receivedAtMs: 1_000_000 });
+    expect(daemonLiveStatus(base, 1_000_000)).toBe("online");
+    expect(daemonLiveStatus(base, 1_000_000 + 6_000)).toBe("stale");
+  });
+
+  it("falls back to the server snapshot when age/receipt are absent, and honors deleted", () => {
+    expect(daemonLiveStatus(daemon({ lastSeenAgeSeconds: undefined, receivedAtMs: undefined, connectionStatus: "stale" }), 9e9)).toBe("stale");
+    expect(daemonLiveStatus(daemon({ lastSeenAgeSeconds: undefined, receivedAtMs: undefined, connectionStatus: undefined }), 9e9)).toBe("disconnected");
+    expect(daemonLiveStatus(daemon({ status: "deleted" }), 1_000_000)).toBe("deleted");
+  });
+});
+
+describe("stampDaemonReceipt", () => {
+  it("stamps the receipt time on daemon events and every daemon in a snapshot, and passes others through", () => {
+    const updated = stampDaemonReceipt({ type: "daemon.updated", data: { id: "d1", workspaceId: "ws", name: "Local", status: "active", createdAt: "now" } }, 42);
+    expect((updated.data as Daemon).receivedAtMs).toBe(42);
+
+    const snapshot = stampDaemonReceipt({ type: "workspace.snapshot", data: { daemons: [{ id: "d1", workspaceId: "ws", name: "Local", status: "active", createdAt: "now" }] } }, 99);
+    expect((snapshot.data as { daemons: Daemon[] }).daemons[0].receivedAtMs).toBe(99);
+
+    const other = { type: "agent.updated", data: { id: "a1" } } as const;
+    expect(stampDaemonReceipt(other, 7)).toBe(other);
   });
 });
 
