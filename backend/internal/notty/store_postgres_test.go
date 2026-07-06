@@ -138,6 +138,206 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	}
 }
 
+func TestPostgresThreadPersistPreservesDatabaseOnlyThreads(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	staleStore := newPostgresTestWorkspaceStore(t, database)
+	user := seedTestUser(t, staleStore)
+	documentID := mustCreateTestDocument(t, staleStore, "docs/thread-preserve.md", "keep the thread\n")
+	workspace := staleStore.Snapshot()
+
+	freshStore, err := NewWorkspaceStore(database, workspace.WorkspaceID, workspace.Name)
+	if err != nil {
+		t.Fatalf("new fresh workspace store: %v", err)
+	}
+	thread, _, _, err := freshStore.CreateThread(CreateThreadRequest{
+		DocumentID: documentID,
+		Title:      "Preserve me",
+		Body:       "This row only exists in the fresher store snapshot.",
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create thread from fresh store: %v", err)
+	}
+
+	staleStore.mu.Lock()
+	staleStore.ensureMaps()
+	if _, ok := staleStore.state.Threads[thread.ID]; ok {
+		staleStore.mu.Unlock()
+		t.Fatalf("stale store unexpectedly contains thread %s", thread.ID)
+	}
+	err = staleStore.persistLocked()
+	staleStore.mu.Unlock()
+	if err != nil {
+		t.Fatalf("persist stale store: %v", err)
+	}
+
+	reloaded, err := NewWorkspaceStore(database, workspace.WorkspaceID, workspace.Name)
+	if err != nil {
+		t.Fatalf("reload workspace store: %v", err)
+	}
+	got := reloaded.Snapshot().Threads[thread.ID]
+	if got == nil || len(got.Messages) != 1 {
+		t.Fatalf("expected database-only thread and message to survive stale persist, got %#v", got)
+	}
+}
+
+func TestPostgresSnapshotPersistPreservesDatabaseOnlyRows(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	db := database.DB
+	staleStore := newPostgresTestWorkspaceStore(t, database)
+	seedCodexDaemonRuntime(t, staleStore)
+	user := seedTestUser(t, staleStore)
+	agent, err := staleStore.CreateAgent(CreateAgentRequest{
+		Handle: "db-only-agent",
+		Name:   "DB Only Agent",
+		Role:   "Checks stale snapshots",
+		Kind:   "codex",
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	documentID := mustCreateTestDocument(t, staleStore, "docs/db-only.md", "keep rows\n")
+	document, err := staleStore.GetDocument(documentID)
+	if err != nil {
+		t.Fatalf("get document: %v", err)
+	}
+	workspace := staleStore.Snapshot()
+	now := time.Now().UTC()
+	eventID := uuid.NewString()
+
+	mustExec(t, db, `INSERT INTO presences (
+			workspace_id, actor_id, actor_type, document_id, file_path, mode,
+			selection_start, selection_end, activity, updated_at
+		) VALUES ($1, $2, 'human', $3, 'docs/db-only.md', 'editing', 0, 4, 'db-only', $4)`,
+		workspace.WorkspaceID, user.ID, documentID, now)
+	var activityID int64
+	if err := db.QueryRow(`INSERT INTO activities (
+			workspace_id, type, document_id, actor_id, actor_type, summary, occurred_at,
+			provenance_actor_type, provenance_execution_id, provenance_tool, provenance_trigger,
+			provenance_autonomous, provenance_confidence, provenance_requested_by,
+			provenance_source, provenance_intended_scope, provenance_read_set_summary,
+			comment_id, presence_ref
+		) VALUES (
+			$1, 'db_only', $2, $3, 'human', 'db-only activity', $4,
+			'', '', '', '', FALSE, '', '', '', '', '', '', ''
+		) RETURNING id`,
+		workspace.WorkspaceID, documentID, user.ID, now).Scan(&activityID); err != nil {
+		t.Fatalf("insert database-only activity: %v", err)
+	}
+	mustExec(t, db, `INSERT INTO agent_events (
+			workspace_id, id, agent_id, agent_handle, type, box, status, document_id,
+			from_update_id, to_update_id, summary, prompt, dedup_key, last_error,
+			attempt_count, available_at, created_at, updated_at
+		) VALUES (
+			$1, $2, $3, $4, 'db.only', 'for_me', 'pending', $5,
+			0, 0, 'db-only event', '', $6, '', 0, $7, $7, $7
+		)`,
+		workspace.WorkspaceID, eventID, agent.ID, agent.Handle, documentID, "db-only-"+eventID, now)
+	mustExec(t, db, `INSERT INTO agent_document_views (
+			workspace_id, agent_id, document_id, update_id, state_vector, viewed_at
+		) VALUES ($1, $2, $3, $4, $5, $6)`,
+		workspace.WorkspaceID, agent.ID, documentID, document.UpdateID, document.StateVector, now)
+
+	staleStore.mu.Lock()
+	staleStore.ensureMaps()
+	if staleStore.state.Presences[user.ID] != nil {
+		staleStore.mu.Unlock()
+		t.Fatalf("stale store unexpectedly contains database-only presence")
+	}
+	if staleStore.state.AgentEvents[eventID] != nil {
+		staleStore.mu.Unlock()
+		t.Fatalf("stale store unexpectedly contains database-only agent event")
+	}
+	if staleStore.state.AgentDocumentViews[agentDocumentViewKey(agent.ID, documentID)] != nil {
+		staleStore.mu.Unlock()
+		t.Fatalf("stale store unexpectedly contains database-only agent document view")
+	}
+	err = staleStore.persistLocked()
+	staleStore.mu.Unlock()
+	if err != nil {
+		t.Fatalf("persist stale store: %v", err)
+	}
+
+	assertRowCount := func(table string, where string, args ...any) {
+		t.Helper()
+		var count int
+		query := "SELECT COUNT(*) FROM " + table + " WHERE " + where
+		if err := db.QueryRow(query, args...).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if count != 1 {
+			t.Fatalf("expected one %s row matching %q, got %d", table, where, count)
+		}
+	}
+	assertRowCount("presences", "workspace_id = $1 AND actor_id = $2", workspace.WorkspaceID, user.ID)
+	assertRowCount("activities", "id = $1", activityID)
+	assertRowCount("agent_events", "workspace_id = $1 AND id = $2", workspace.WorkspaceID, eventID)
+	assertRowCount("agent_document_views", "workspace_id = $1 AND agent_id = $2 AND document_id = $3", workspace.WorkspaceID, agent.ID, documentID)
+}
+
+func TestPostgresThreadSurvivesUUIDTurnSessionPersist(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	db := database.DB
+	store := newPostgresTestWorkspaceStore(t, database)
+	seedCodexDaemonRuntime(t, store)
+	user := seedTestUser(t, store)
+	agent, err := store.CreateAgent(CreateAgentRequest{
+		Handle: "thread-session-agent",
+		Name:   "Thread Session Agent",
+		Role:   "Keeps thread writes durable",
+		Kind:   "codex",
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	documentID := mustCreateTestDocument(t, store, "docs/thread-session.md", "durable\n")
+	turnID := uuid.NewString()
+	if _, err := store.UpdateAgentSession(agent.ID, UpdateAgentSessionRequest{
+		Status:          "working",
+		SessionID:       "session-thread-survival",
+		CurrentTurnID:   turnID,
+		CurrentActivity: "Writing a thread",
+	}, OperationMeta{ActorID: "daemon_agent", ActorType: "agent", Source: "test"}); err != nil {
+		t.Fatalf("update agent session: %v", err)
+	}
+	thread, _, _, err := store.CreateThread(CreateThreadRequest{
+		DocumentID: documentID,
+		Title:      "Survive restart",
+		Body:       "This thread must survive after a UUID-shaped turn id session update.",
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	store.mu.Lock()
+	err = store.persistLocked()
+	store.mu.Unlock()
+	if err != nil {
+		t.Fatalf("persist store after session update and thread create: %v", err)
+	}
+
+	var currentRunID sql.NullString
+	if err := db.QueryRow(`SELECT current_run_id::text FROM agents WHERE workspace_id = $1 AND id = $2`, store.workspaceID, agent.ID).Scan(&currentRunID); err != nil {
+		t.Fatalf("select current_run_id: %v", err)
+	}
+	if currentRunID.Valid {
+		t.Fatalf("current_run_id was poisoned by turn id: %q", currentRunID.String)
+	}
+
+	workspace := store.Snapshot()
+	reloaded, err := NewWorkspaceStore(database, workspace.WorkspaceID, workspace.Name)
+	if err != nil {
+		t.Fatalf("reload store: %v", err)
+	}
+	snapshot := reloaded.Snapshot()
+	gotAgent := snapshot.Agents[agent.ID]
+	if gotAgent == nil || gotAgent.CurrentTurnID != turnID || gotAgent.CurrentRunID != "" {
+		t.Fatalf("expected turn id without run-id mirror after reload, got %#v", gotAgent)
+	}
+	gotThread := snapshot.Threads[thread.ID]
+	if gotThread == nil || len(gotThread.Messages) != 1 || !containsString(gotThread.ParticipantIDs, user.ID) {
+		t.Fatalf("expected thread/message/participant after reload, got %#v", gotThread)
+	}
+}
+
 func TestPostgresCreatesWorkspaceRootDocumentFromStoredRootID(t *testing.T) {
 	database := newPostgresTestDatabase(t)
 	db := database.DB
@@ -298,10 +498,11 @@ func TestPostgresUpdateAgentSessionPersistsTargetAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
+	turnID := uuid.NewString()
 	if _, err := store.UpdateAgentSession(agent.ID, UpdateAgentSessionRequest{
 		Status:          "working",
 		SessionID:       "thread_pg",
-		CurrentTurnID:   "turn_pg",
+		CurrentTurnID:   turnID,
 		CurrentActivity: "Handling notifications",
 	}, OperationMeta{ActorID: "daemon_agent", ActorType: "agent", Source: "test"}); err != nil {
 		t.Fatalf("update agent session: %v", err)
@@ -312,7 +513,7 @@ func TestPostgresUpdateAgentSessionPersistsTargetAgent(t *testing.T) {
 		t.Fatalf("reload store: %v", err)
 	}
 	got := reloaded.Snapshot().Agents[agent.ID]
-	if got == nil || got.Status != "working" || got.SessionID != "thread_pg" || got.CurrentTurnID != "turn_pg" {
+	if got == nil || got.Status != "working" || got.SessionID != "thread_pg" || got.CurrentTurnID != turnID || got.CurrentRunID != "" {
 		t.Fatalf("expected targeted session fields to persist, got %#v", got)
 	}
 }
@@ -662,9 +863,21 @@ func TestPostgresAgentInboxTracksDocumentUpdatesAndThreadMentions(t *testing.T) 
 		t.Fatalf("expected missing log thread mention to reconcile after reload, got %s", formatAgentEvents(items))
 	}
 
+	// Under upsert-only persistence, the document.updated event also survives
+	// in Postgres (clearing memory does not delete DB rows). Drain it first so
+	// the next claim returns the reconciled thread.mentioned event.
 	claimed, err := store.ClaimAgentEvent(ClaimAgentEventRequest{AgentID: agent.ID, ClaimedBy: "daemon"})
 	if err != nil {
-		t.Fatalf("claim log thread mention: %v", err)
+		t.Fatalf("claim first event: %v", err)
+	}
+	if claimed.Type == "document.updated" {
+		if _, err := store.UpdateAgentEvent(claimed.ID, UpdateAgentEventRequest{Status: "completed"}, OperationMeta{ActorID: "daemon", ActorType: "agent", Source: "test"}); err != nil {
+			t.Fatalf("complete document.updated: %v", err)
+		}
+		claimed, err = store.ClaimAgentEvent(ClaimAgentEventRequest{AgentID: agent.ID, ClaimedBy: "daemon"})
+		if err != nil {
+			t.Fatalf("claim thread mention after draining document.updated: %v", err)
+		}
 	}
 	if claimed.Type != "thread.mentioned" || claimed.ThreadID != thread.ID || claimed.ThreadMessageID != message.ID {
 		t.Fatalf("unexpected claimed log thread mention: %#v", claimed)
@@ -1040,6 +1253,13 @@ func seedStoreDaemonRuntime(t *testing.T, store *Store, daemonID string, runtime
 func seedCodexDaemonRuntime(t *testing.T, store *Store) string {
 	t.Helper()
 	return seedStoreDaemonRuntime(t, store, "", RuntimeDetection{Kind: "codex", Available: true, Version: "codex test"})
+}
+
+func mustExec(t *testing.T, db *sql.DB, query string, args ...any) {
+	t.Helper()
+	if _, err := db.Exec(query, args...); err != nil {
+		t.Fatalf("exec: %v", err)
+	}
 }
 
 func clearNottyTables(db *sql.DB) error {

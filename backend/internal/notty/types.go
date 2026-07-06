@@ -268,6 +268,7 @@ type DocumentDiffHunk struct {
 }
 
 type ActivityEvent struct {
+	ID          int64         `json:"-"`
 	Type        string        `json:"type"`
 	DocumentID  string        `json:"documentId,omitempty"`
 	ActorID     string        `json:"actorId"`
