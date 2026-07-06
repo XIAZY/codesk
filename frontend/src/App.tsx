@@ -1105,7 +1105,7 @@ function CreateWorkspaceForm({
             required
           />
           <button
-            className="btn ghost icon sm"
+            className="btn icon"
             type="button"
             aria-label="Generate a random name"
             title="Generate a random name"

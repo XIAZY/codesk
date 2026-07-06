@@ -1838,6 +1838,11 @@ pre.code {
   flex: 1;
 }
 
+.name-row .btn.icon {
+  min-height: 36px;
+  width: 36px;
+}
+
 .hint b {
   color: var(--ink-3);
   font-weight: 600;
