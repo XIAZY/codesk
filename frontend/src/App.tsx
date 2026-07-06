@@ -9,8 +9,8 @@ import {
   buildDaemonInstallCommand,
   buildDaemonReinstallCommand,
   buildDaemonUninstallCommand,
-  documentParticipants,
-  participantOnline,
+  workspacePeople,
+  personOnline,
   documentActivity,
   activityCategory,
   relativeTime,
@@ -27,7 +27,7 @@ import {
   workspaceSlugMaxLength,
   workspaceSlugMinLength,
   type ActivityCategory,
-  type DocumentParticipant,
+  type WorkspacePerson,
   type LineThreadGroup,
 } from "./logic";
 import { resolveRoot, resolveWorkspace, type WorkspaceView } from "./routes";
@@ -40,7 +40,7 @@ import { resolveRuntimeTiles, selectableRuntimeKinds, type RuntimeTile } from ".
 import "./styles.css";
 
 const tokenStorageKey = "codesk.auth.token";
-const rightTabLabels = { threads: "Threads", activity: "Document Activity", coworkers: "Participants" } as const;
+const rightTabLabels = { threads: "Threads", activity: "Document Activity", coworkers: "People" } as const;
 const portableFileNameIllegalChars = /[\u0000-\u001F<>:"\/\\|?*]/g;
 const windowsReservedBaseName = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 
@@ -1402,7 +1402,7 @@ export function WorkspaceApp({
       return next;
     });
   }, [activeDocumentPath]);
-  const documentParticipantList = documentParticipants(workspace, activeDocument?.id);
+  const workspacePeopleList = workspacePeople(workspace);
   const documentActivityList = documentActivity(workspace, activeDocument?.id);
   // Unread = new since you last opened the tab (snapshot delta — honest for
   // snapshot-fresh activity; not a live stream). Marked seen when the tab opens.
@@ -1586,12 +1586,6 @@ export function WorkspaceApp({
             <span className={`chip sm ${connected ? "ok" : "warn"}`}>{connected ? "workspace live" : "workspace offline"}</span>
           </div>
           <div className="row gap-6">
-            <div className="avi-stack" aria-label="Workspace presence">
-              <div className="avi sm you" title={currentWorkspaceUserHandle}>{initials(currentWorkspaceUserIdentity)}</div>
-              {workspace.agents.slice(0, 2).map((agent) => (
-                <div className="avi sm agent" title={`@${agent.handle}`} key={agent.id}>{initials(agent.handle)}</div>
-              ))}
-            </div>
             {canInviteMembers ? (
               <button className="btn sm ghost" type="button" onClick={() => setModal("share")} title="Invite people to this workspace">
                 <Icon name="share" />
@@ -1695,7 +1689,7 @@ export function WorkspaceApp({
               <Icon name={tab === "threads" ? "thread" : tab === "activity" ? "activity" : "people"} />
               {rightTabLabels[tab]}
               {tab === "threads" ? <span className="muted">{documentThreads.length}</span> : null}
-              {tab === "coworkers" ? <span className="muted">{documentParticipantList.length}</span> : null}
+              {tab === "coworkers" ? <span className="muted">{workspacePeopleList.length}</span> : null}
               {tab === "activity" && activityUnread ? <span className="unread-dot" aria-label="New activity" /> : null}
             </button>
           ))}
@@ -1718,8 +1712,8 @@ export function WorkspaceApp({
         ) : null}
         {rightTab === "activity" ? <ActivityPanel activities={documentActivityList} hasDocument={!!activeDocument} actorLabel={activityActorLabel} /> : null}
         {rightTab === "coworkers" ? (
-          <ParticipantsPanel
-            participants={documentParticipantList}
+          <PeoplePanel
+            people={workspacePeopleList}
             agents={workspace.agents}
             onAgent={(agent) => {
               setSelectedAgentId(agent.id);
@@ -2602,63 +2596,62 @@ function ActivityPanel({
   );
 }
 
-const participantRoleTag = { you: "You", agent: "Agent", collaborator: "Collaborator" } as const;
+const personRoleTag = { you: "You", agent: "Agent", collaborator: "Collaborator" } as const;
 
-// Current-document participants (presence-read-only): the durable set from
-// documentParticipants(), decorated with a doc-level online ring that decays
-// after the freshness window (a 12s now-ticker, like daemon liveness) so a
-// closed laptop drops the ring instead of lying. Membership lives in Manage.
-function ParticipantsPanel({
-  participants,
+// Everyone in the workspace — humans + agents. Soft avatars, role tag, and a
+// workspace-level online ring driven by real presence that decays on a 12s
+// now-ticker (like daemon liveness) so it never shows a stale "online".
+function PeoplePanel({
+  people,
   agents,
   onAgent,
 }: {
-  participants: DocumentParticipant[];
+  people: WorkspacePerson[];
   agents: Agent[];
   onAgent: (agent: Agent) => void;
 }) {
   const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
   const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
-  const rank = (row: { participant: DocumentParticipant; online: boolean }) =>
-    row.participant.kind === "you" ? 0 : row.online ? 1 : 2;
-  const rows = participants
-    .map((participant) => ({ participant, online: participantOnline(participant, now) }))
-    .sort((a, b) => rank(a) - rank(b) || a.participant.handle.localeCompare(b.participant.handle));
+  const rank = (row: { person: WorkspacePerson; online: boolean }) =>
+    row.person.kind === "you" ? 0 : row.online ? 1 : 2;
+  const rows = people
+    .map((person) => ({ person, online: personOnline(person, now) }))
+    .sort((a, b) => rank(a) - rank(b) || a.person.handle.localeCompare(b.person.handle));
   return (
     <div className="ctx-body people-pane">
       <div className="row between ctx-head">
-        <span className="label">Participants</span>
-        <span className="chip sm">{participants.length}</span>
+        <span className="label">People</span>
+        <span className="chip sm">{people.length}</span>
       </div>
-      {rows.map(({ participant, online }) => {
-        const agent = participant.kind === "agent" ? agentsById.get(participant.id) : undefined;
+      {rows.map(({ person, online }) => {
+        const agent = person.kind === "agent" ? agentsById.get(person.id) : undefined;
         const avatar = (
           <div
-            className={`avi ${participant.kind === "agent" ? "agent" : "you"}${online ? " online" : ""}`}
-            title={online ? "Online in this document" : undefined}
+            className={`avi ${person.kind === "agent" ? "agent" : "you"}${online ? " online" : ""}`}
+            title={online ? "Online" : undefined}
           >
-            {initials(participant.handle || participant.name)}
+            {initials(person.handle || person.name)}
           </div>
         );
         const body = (
           <div className="col gap-2 min-0">
-            <strong className="small truncate">@{participant.handle}</strong>
-            <span className="tiny muted truncate">{participantRoleTag[participant.kind]}</span>
+            <strong className="small truncate">@{person.handle}</strong>
+            <span className="tiny muted truncate">{personRoleTag[person.kind]}</span>
           </div>
         );
         return agent ? (
-          <button key={participant.id} className="agent-card" onClick={() => onAgent(agent)}>
+          <button key={person.id} className="agent-card" onClick={() => onAgent(agent)}>
             {avatar}
             {body}
           </button>
         ) : (
-          <article key={participant.id} className="agent-card">
+          <article key={person.id} className="agent-card">
             {avatar}
             {body}
           </article>
         );
       })}
-      {participants.length <= 1 ? <p className="empty-note">No other participants yet.</p> : null}
+      {!people.length ? <p className="empty-note">No people in this workspace yet.</p> : null}
     </div>
   );
 }

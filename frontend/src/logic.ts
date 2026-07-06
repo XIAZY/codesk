@@ -301,92 +301,59 @@ export function coworkerCount(workspace: Pick<WorkspaceState, "agents" | "users"
 // client-side ring window agrees with what the server would still serve.
 export const PRESENCE_ONLINE_WINDOW_MS = 120_000;
 
-export type DocumentParticipant = {
+export type WorkspacePerson = {
   id: string;
   handle: string;
   name: string;
   kind: "you" | "agent" | "collaborator";
-  // updatedAt of a presence row that points at THIS document, if any. Whether
-  // that counts as *online* is a freshness decision left to participantOnline,
-  // so the ring can decay client-side instead of lying after the backend window.
+  // updatedAt of this actor's most recent presence row (any document =
+  // workspace-level). Whether it counts as *online* is a freshness decision
+  // left to personOnline, so the ring decays instead of lying after the window.
   presentAt?: string;
 };
 
-// The durable participant set for a document: the current user, everyone in a
-// thread on the document, and every agent that has emitted an event on it —
-// all queryable from the workspace payload. Presence is NOT membership; it only
-// records presentAt for a presence row that points at this same document
-// (workspace-level presence is not "here"), which the ring then decays live.
-export function documentParticipants(
-  workspace: Pick<WorkspaceState, "currentUserId" | "agents" | "users" | "threads" | "agentEvents" | "presences">,
-  documentId: string | undefined,
-): DocumentParticipant[] {
+// Everyone in the workspace — humans + agents — for the People panel. The online
+// ring is workspace-level: presentAt is the actor's presence row (any document),
+// and personOnline decays it on the same 2-minute window. Presence is never
+// fabricated: no row means no ring.
+export function workspacePeople(
+  workspace: Pick<WorkspaceState, "currentUserId" | "agents" | "users" | "presences">,
+): WorkspacePerson[] {
   const currentUserId = workspace.currentUserId;
-  const agentsById = new Map(workspace.agents.map((agent) => [agent.id, agent]));
-  const usersById = new Map(workspace.users.map((user) => [user.id, user]));
+  const presentAt = (id: string) => workspace.presences[id]?.updatedAt;
 
-  const ids = new Set<string>();
-  if (currentUserId) {
-    ids.add(currentUserId);
-  }
-  if (documentId) {
-    for (const thread of workspace.threads) {
-      if (thread.documentId === documentId) {
-        for (const participantId of thread.participantIds) {
-          ids.add(participantId);
-        }
-      }
-    }
-    for (const event of workspace.agentEvents) {
-      if (event.documentId === documentId && event.agentId) {
-        ids.add(event.agentId);
-      }
-    }
-  }
-
-  const presentAt = (id: string) => {
-    if (!documentId) {
-      return undefined;
-    }
-    const presence = workspace.presences[id];
-    return presence && presence.documentId === documentId ? presence.updatedAt : undefined;
-  };
-
-  const participants: DocumentParticipant[] = [];
-  for (const id of ids) {
-    const agent = agentsById.get(id);
-    if (agent) {
-      participants.push({ id, handle: agent.handle, name: agent.name, kind: "agent", presentAt: presentAt(id) });
+  const people: WorkspacePerson[] = [];
+  for (const user of workspace.users) {
+    if (user.kind !== "human") {
       continue;
     }
-    const user = usersById.get(id);
-    if (!user) {
-      continue; // an actor id we cannot resolve to a known user or agent — cannot render it
-    }
-    participants.push({
-      id,
+    people.push({
+      id: user.id,
       handle: user.handle,
       name: user.name,
-      kind: id === currentUserId ? "you" : "collaborator",
-      presentAt: presentAt(id),
+      kind: user.id === currentUserId ? "you" : "collaborator",
+      presentAt: presentAt(user.id),
     });
+  }
+  for (const agent of workspace.agents) {
+    people.push({ id: agent.id, handle: agent.handle, name: agent.name, kind: "agent", presentAt: presentAt(agent.id) });
   }
 
   // Deterministic base order — You first, then by handle. The panel re-orders
-  // online-first using a live freshness check (participantOnline).
-  const rank = (participant: DocumentParticipant) => (participant.kind === "you" ? 0 : 1);
-  participants.sort((a, b) => rank(a) - rank(b) || a.handle.localeCompare(b.handle));
-  return participants;
+  // online-first using a live freshness check (personOnline).
+  const rank = (person: WorkspacePerson) => (person.kind === "you" ? 0 : 1);
+  people.sort((a, b) => rank(a) - rank(b) || a.handle.localeCompare(b.handle));
+  return people;
 }
 
-// A participant is online only when a presence row points at the current
-// document AND is still within the freshness window at nowMs — the same decay
-// daemon liveness uses, so a closed laptop drops the ring instead of lying.
-export function participantOnline(participant: Pick<DocumentParticipant, "presentAt">, nowMs: number): boolean {
-  if (!participant.presentAt) {
+// Online only when the actor has a presence row still within the freshness
+// window at nowMs — the same decay daemon liveness uses, so a closed laptop
+// drops the ring instead of lying. Workspace-level: any document counts.
+export function personOnline(person: Pick<WorkspacePerson, "presentAt">, nowMs: number): boolean {
+  if (!person.presentAt) {
     return false;
   }
-  const presentMs = Date.parse(participant.presentAt);
+  const presentMs = Date.parse(person.presentAt);
   return !Number.isNaN(presentMs) && nowMs - presentMs <= PRESENCE_ONLINE_WINDOW_MS;
 }
 

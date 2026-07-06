@@ -12,8 +12,8 @@ import {
   buildLineThreads,
   computeReplace,
   coworkerCount,
-  documentParticipants,
-  participantOnline,
+  workspacePeople,
+  personOnline,
   documentActivity,
   activityCategory,
   relativeTime,
@@ -39,7 +39,7 @@ import {
   threadReplyLabel,
 } from "./logic";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
-import type { ActivityEvent, Agent, AgentEvent, Daemon, PresenceItem, ThreadItem, UserItem, WorkspaceState } from "./types";
+import type { ActivityEvent, Agent, Daemon, PresenceItem, UserItem, WorkspaceState } from "./types";
 
 function baseWorkspace(): WorkspaceState {
   return {
@@ -291,66 +291,42 @@ describe("presentation grouping", () => {
   });
 });
 
-describe("documentParticipants", () => {
+describe("workspacePeople", () => {
   const ws = (over: Partial<WorkspaceState>): WorkspaceState => ({ ...baseWorkspace(), ...over });
-  const user = (id: string, handle: string): UserItem => ({ id, handle, name: handle, role: "", kind: "human", status: "", updatedAt: "now" });
+  const user = (id: string, handle: string, kind = "human"): UserItem => ({ id, handle, name: handle, role: "", kind, status: "", updatedAt: "now" });
   const agent = (id: string, handle: string): Agent => ({
     id, daemonId: "d1", handle, name: handle, role: "", kind: "agent", workspaceRoot: "",
     status: "idle", currentTask: "", currentActivity: "", currentRunId: "", updatedAt: "now",
-  });
-  const thread = (documentId: string, participantIds: string[]): ThreadItem => ({
-    id: `t_${documentId}_${participantIds.join("_")}`, documentId, title: "", status: "open",
-    anchor: { kind: "line" }, participantIds, participantHandles: [], messages: [], createdAt: "now", updatedAt: "now",
-  });
-  const event = (agentId: string, documentId: string): AgentEvent => ({
-    id: `e_${agentId}_${documentId}`, agentId, agentHandle: agentId, type: "change", status: "done",
-    summary: "", documentId, createdAt: "now", updatedAt: "now",
   });
   const presence = (actorId: string, documentId: string | undefined): PresenceItem => ({
     actorId, actorType: "human", documentId, activity: "editing", updatedAt: "now",
   });
 
-  it("builds the durable current-document set with a doc-level online ring", () => {
+  it("lists all workspace humans + agents with a workspace-level presence ring", () => {
     const workspace = ws({
       currentUserId: "u_me",
-      users: [user("u_me", "me"), user("u_alice", "alice"), user("u_bob", "bob")],
-      agents: [agent("a_writer", "writer"), agent("a_other", "other")],
-      threads: [thread("doc1", ["u_alice"]), thread("doc2", ["u_bob"])],
-      agentEvents: [event("a_writer", "doc1"), event("a_other", "doc2")],
-      presences: {
-        u_alice: presence("u_alice", "doc1"), // online in this doc -> ring
-        u_me: presence("u_me", "docX"), // present in another doc -> no ring
-        a_writer: presence("a_writer", undefined), // workspace-level -> no ring
-      },
+      users: [user("u_me", "me"), user("u_alice", "alice"), user("d_bot", "bot", "daemon")],
+      agents: [agent("a_writer", "writer")],
+      presences: { u_alice: presence("u_alice", "docX") }, // present in some doc -> workspace-level ring
     });
 
-    const result = documentParticipants(workspace, "doc1");
+    const result = workspacePeople(workspace);
 
-    // durable set = me + alice (thread) + writer (event); bob/other are on doc2, excluded
+    // all humans (me, alice) + the agent; the non-human user (bot) is filtered out
     expect(result.map((p) => p.id)).toEqual(["u_me", "u_alice", "a_writer"]);
     expect(result.map((p) => p.kind)).toEqual(["you", "collaborator", "agent"]);
-    expect(result.find((p) => p.id === "u_alice")?.presentAt).toBe("now"); // fresh doc-level presence
-    expect(result.find((p) => p.id === "u_me")?.presentAt).toBeUndefined(); // present in another document
-    expect(result.find((p) => p.id === "a_writer")?.presentAt).toBeUndefined(); // workspace-level presence, not here
+    // presentAt is any-document presence (workspace-level), not scoped to a current doc
+    expect(result.find((p) => p.id === "u_alice")?.presentAt).toBe("now");
+    expect(result.find((p) => p.id === "u_me")?.presentAt).toBeUndefined();
   });
 
-  it("participantOnline shows the ring only for fresh presence and decays after the window", () => {
+  it("personOnline shows the ring only for fresh presence and decays after the window", () => {
     const nowMs = Date.parse("2026-07-06T12:00:00Z");
     const iso = (offsetMs: number) => new Date(nowMs - offsetMs).toISOString();
-    expect(participantOnline({ presentAt: iso(60_000) }, nowMs)).toBe(true); // 1 min ago -> online
-    expect(participantOnline({ presentAt: iso(3 * 60_000) }, nowMs)).toBe(false); // 3 min ago -> decayed
-    expect(participantOnline({ presentAt: undefined }, nowMs)).toBe(false);
-    expect(participantOnline({ presentAt: "not-a-date" }, nowMs)).toBe(false);
-  });
-
-  it("keeps the current user with no document and never derives membership from presence", () => {
-    const workspace = ws({
-      currentUserId: "u_me",
-      users: [user("u_me", "me")],
-      presences: { u_ghost: presence("u_ghost", "doc1") }, // presence for a non-member is ignored
-    });
-    expect(documentParticipants(workspace, undefined).map((p) => p.id)).toEqual(["u_me"]);
-    expect(documentParticipants(workspace, "doc1").map((p) => p.id)).toEqual(["u_me"]);
+    expect(personOnline({ presentAt: iso(60_000) }, nowMs)).toBe(true); // 1 min ago -> online
+    expect(personOnline({ presentAt: iso(3 * 60_000) }, nowMs)).toBe(false); // 3 min ago -> decayed
+    expect(personOnline({ presentAt: undefined }, nowMs)).toBe(false);
+    expect(personOnline({ presentAt: "not-a-date" }, nowMs)).toBe(false);
   });
 });
 

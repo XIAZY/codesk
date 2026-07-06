@@ -260,8 +260,8 @@ describe("WorkspaceOnboarding", () => {
   });
 });
 
-describe("WorkspaceApp participants rail", () => {
-  it("renames to Participants and narrows to the current document's participants", async () => {
+describe("WorkspaceApp people rail", () => {
+  it("lists the whole workspace's people and agents (not doc-scoped)", async () => {
     render(
       <WorkspaceApp
         api={{ updateLastAccessed: vi.fn().mockResolvedValue({}) } as never}
@@ -277,23 +277,21 @@ describe("WorkspaceApp participants rail", () => {
       />,
     );
 
-    const tab = screen.getByRole("button", { name: /participants/i });
-    expect(within(tab).getByText("1")).toBeTruthy(); // only You, with no active document
-    expect(screen.queryByRole("button", { name: /people/i })).toBeNull();
+    const tab = screen.getByRole("button", { name: /people/i });
+    expect(within(tab).getByText("3")).toBeTruthy(); // 2 humans + 1 agent, workspace-wide
 
     fireEvent.click(tab);
 
     await waitFor(() => expect(document.querySelector(".ctx-body.people-pane")).toBeTruthy());
     const panel = document.querySelector(".ctx-body.people-pane") as HTMLElement;
-    expect(within(panel).getByText("Participants")).toBeTruthy();
-    expect(within(panel).getByText("@ada")).toBeTruthy(); // the current user
+    expect(within(panel).getByText("People")).toBeTruthy();
+    expect(within(panel).getByText("@ada")).toBeTruthy();
     expect(within(panel).getByText("You")).toBeTruthy();
-    // workspace members/agents who don't participate in the current document do not leak in
-    expect(within(panel).queryByText("@grace")).toBeNull();
-    expect(within(panel).queryByText("@codex")).toBeNull();
-    expect(within(panel).queryByText("Agents")).toBeNull();
-    expect(within(panel).getByText("No other participants yet.")).toBeTruthy();
-    // membership management no longer lives in this tab
+    // workspace-wide: everyone shows, not just the current document's participants
+    expect(within(panel).getByText("@grace")).toBeTruthy();
+    expect(within(panel).getByText("@codex")).toBeTruthy();
+    expect(within(panel).getByText("Agent")).toBeTruthy();
+    // membership management does not live in this tab
     expect(within(panel).queryByRole("button", { name: "Share" })).toBeNull();
   });
 });
