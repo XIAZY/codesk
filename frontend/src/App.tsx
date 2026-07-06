@@ -1250,7 +1250,7 @@ export function WorkspaceApp({
   const rootDocuments = rootNamespace.documents;
   const [rightTab, setRightTab] = useState<"threads" | "activity" | "coworkers">("threads");
   const [modal, setModal] = useState<"daemon" | "agent" | "rename" | "share" | "agent-detail" | "daemon-detail" | null>(null);
-  const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [selectedDaemonId, setSelectedDaemonId] = useState<string | null>(null);
   const [selectedThreadId, setSelectedThreadId] = useState("");
   const [focusThreadId, setFocusThreadId] = useState("");
@@ -1515,7 +1515,7 @@ export function WorkspaceApp({
                   className="agent-mini row gap-8"
                   type="button"
                   onClick={() => {
-                    setSelectedAgent(agent);
+                    setSelectedAgentId(agent.id);
                     setModal("agent-detail");
                   }}
                 >
@@ -1607,7 +1607,7 @@ export function WorkspaceApp({
             groupedAgents={groupedAgents}
             onNew={() => setModal("agent")}
             onAgent={(agent) => {
-              setSelectedAgent(agent);
+              setSelectedAgentId(agent.id);
               setModal("agent-detail");
             }}
           />
@@ -1690,7 +1690,7 @@ export function WorkspaceApp({
             canInviteMembers={canInviteMembers}
             onShare={() => setModal("share")}
             onAgent={(agent) => {
-              setSelectedAgent(agent);
+              setSelectedAgentId(agent.id);
               setModal("agent-detail");
             }}
           />
@@ -1715,7 +1715,7 @@ export function WorkspaceApp({
       {modal === "daemon" ? <CreateDaemonModal api={api} workspaceId={workspaceId} daemons={workspace.daemons} onClose={() => setModal(null)} onDone={() => void reload()} /> : null}
       {modal === "agent" ? <CreateAgentModal api={api} workspaceId={workspaceId} daemons={workspace.daemons} onClose={() => setModal(null)} onDone={() => { setModal(null); void reload(); }} /> : null}
       {modal === "share" ? <ShareWorkspaceModal api={api} workspaceId={workspaceId} onClose={() => setModal(null)} /> : null}
-      {modal === "agent-detail" && selectedAgent ? <AgentDetailModal api={api} workspaceId={workspaceId} agent={selectedAgent} daemons={workspace.daemons} runs={workspace.agentRuns} onClose={() => setModal(null)} onChanged={() => void reload()} /> : null}
+      {modal === "agent-detail" && selectedAgentId ? <AgentDetailModal api={api} workspaceId={workspaceId} agentId={selectedAgentId} agents={workspace.agents} daemons={workspace.daemons} runs={workspace.agentRuns} onClose={() => setModal(null)} onChanged={() => void reload()} /> : null}
       {modal === "daemon-detail" && selectedDaemonId ? <DaemonDetailModal api={api} workspaceId={workspaceId} daemonId={selectedDaemonId} daemons={workspace.daemons} agents={workspace.agents} runs={workspace.agentRuns} onClose={() => setModal(null)} onChanged={() => { setModal(null); void reload(); }} /> : null}
     </main>
   );
@@ -3020,8 +3020,20 @@ function ClockIcon() {
   return <svg className="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 8v4l3 2" /></svg>;
 }
 
-function AgentDetailModal({ api, workspaceId, agent, daemons, runs, onClose, onChanged }: { api: ApiClient; workspaceId: string; agent: Agent; daemons: Daemon[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; onClose: () => void; onChanged: () => void }) {
+export function AgentDetailModal({ api, workspaceId, agentId, agents, daemons, runs, onClose, onChanged }: { api: ApiClient; workspaceId: string; agentId: string; agents: Agent[]; daemons: Daemon[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; onClose: () => void; onChanged: () => void }) {
   const [prompt, setPrompt] = useState("Review the current workspace and respond if you have useful feedback.");
+  // Derive the live agent from workspace state every render, so agent.updated / agent.run.updated
+  // events reach the open modal instead of a frozen snapshot captured at click time. A deleted agent
+  // is removed from the array by the reducer, so it drops out here and the effect closes the modal.
+  const agent = agents.find((item) => item.id === agentId);
+  useEffect(() => {
+    if (!agent) {
+      onClose();
+    }
+  }, [agent, onClose]);
+  if (!agent) {
+    return null;
+  }
   const daemon = daemons.find((item) => item.id === agent.daemonId);
   const status = visibleAgentStatus(agent, runs, daemons);
   return (

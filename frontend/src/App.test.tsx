@@ -3,10 +3,10 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CreateDaemonModal, DaemonDetailModal, DaemonsManagement, WorkspaceApp, WorkspaceOnboarding } from "./App";
+import { AgentDetailModal, CreateDaemonModal, DaemonDetailModal, DaemonsManagement, WorkspaceApp, WorkspaceOnboarding } from "./App";
 import { emptyWorkspace, identifierFromName, identifierHelpText, identifierPattern, workspaceSlugMaxLength } from "./logic";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
-import type { Account, Daemon, WorkspaceSummary } from "./types";
+import type { Account, Agent, AgentRun, Daemon, WorkspaceSummary } from "./types";
 
 vi.mock("./useWorkspace", () => ({
   useWorkspace: () => ({
@@ -451,6 +451,51 @@ describe("DaemonDetailModal live status", () => {
     expect(onClose).not.toHaveBeenCalled();
 
     rerender(<DaemonDetailModal {...props} daemons={[]} onClose={onClose} />);
+    expect(onClose).toHaveBeenCalled();
+  });
+});
+
+describe("AgentDetailModal live status", () => {
+  // Online daemon (from the canonical fixture) so visibleAgentStatus falls through to agentStatus
+  // rather than forcing "disconnected".
+  const daemon: Daemon = { ...daemonFixtures.justSeen, id: "d1" };
+  const baseAgent: Agent = {
+    id: "a1", daemonId: "d1", handle: "codex", name: "Codex", role: "Review", kind: "codex",
+    workspaceRoot: "agents/a1", status: "idle", currentTask: "", currentActivity: "", currentRunId: "run1", updatedAt: "now",
+  };
+  const run = (status: string): AgentRun => ({
+    id: "run1", agentId: "a1", agentHandle: "codex", agentName: "Codex", agentKind: "codex",
+    workspaceRoot: "", workingDirectory: "", prompt: "", status, desiredStatus: "running", updatedAt: "now",
+  });
+  const props = { api: {} as never, workspaceId: "ws", agentId: "a1", daemons: [daemon], onChanged: vi.fn() };
+  const modalStatus = (container: HTMLElement) => (container.querySelector(".modal-identity .col span")?.textContent ?? "").trim();
+
+  it("reflects a live agent.updated status change on the open modal instead of a click-time snapshot", () => {
+    // No active run, so the agent's own status field drives visibleAgentStatus.
+    const { container, rerender } = render(<AgentDetailModal {...props} agents={[baseAgent]} runs={[]} onClose={vi.fn()} />);
+    expect(modalStatus(container)).toContain("idle");
+
+    // An agent.updated event flips the agent's own status — the open modal must move.
+    rerender(<AgentDetailModal {...props} agents={[{ ...baseAgent, status: "disconnected" }]} runs={[]} onClose={vi.fn()} />);
+    expect(modalStatus(container)).toContain("disconnected");
+  });
+
+  it("reflects a live agentRuns change — a run finishing while the modal is open moves the status", () => {
+    const { container, rerender } = render(<AgentDetailModal {...props} agents={[baseAgent]} runs={[run("running")]} onClose={vi.fn()} />);
+    expect(modalStatus(container)).toContain("working");
+
+    // The run completes in live state (no agent.updated). Status derives from runs too, so it moves to idle.
+    rerender(<AgentDetailModal {...props} agents={[baseAgent]} runs={[run("completed")]} onClose={vi.fn()} />);
+    expect(modalStatus(container)).toContain("idle");
+  });
+
+  it("closes when the agent is removed from the array (the reducer's agent.deleted shape)", () => {
+    const onClose = vi.fn();
+    const { rerender } = render(<AgentDetailModal {...props} agents={[baseAgent]} runs={[run("running")]} onClose={onClose} />);
+    expect(onClose).not.toHaveBeenCalled();
+
+    // agent.deleted FILTERS the agent out of workspace.agents (unlike daemons' soft-delete upsert).
+    rerender(<AgentDetailModal {...props} agents={[]} runs={[run("running")]} onClose={onClose} />);
     expect(onClose).toHaveBeenCalled();
   });
 });
