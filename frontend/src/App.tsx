@@ -11,6 +11,9 @@ import {
   buildDaemonUninstallCommand,
   documentParticipants,
   participantOnline,
+  documentActivity,
+  activityCategory,
+  relativeTime,
   daemonStatus,
   daemonLiveStatus,
   handleMaxLength,
@@ -23,6 +26,7 @@ import {
   threadReplyLabel,
   workspaceSlugMaxLength,
   workspaceSlugMinLength,
+  type ActivityCategory,
   type DocumentParticipant,
   type LineThreadGroup,
 } from "./logic";
@@ -31,12 +35,12 @@ import { navigate, useRoute } from "./useRoute";
 import { useRootNamespace } from "./useRootNamespace";
 import { useDocumentSync } from "./useDocument";
 import { useWorkspace } from "./useWorkspace";
-import type { Account, Agent, Daemon, DocumentItem, ThreadItem, WorkspaceInvitePreview, WorkspaceSummary } from "./types";
+import type { Account, ActivityEvent, Agent, Daemon, DocumentItem, ThreadItem, WorkspaceInvitePreview, WorkspaceSummary } from "./types";
 import { resolveRuntimeTiles, selectableRuntimeKinds, type RuntimeTile } from "./runtimes";
 import "./styles.css";
 
 const tokenStorageKey = "codesk.auth.token";
-const rightTabLabels = { threads: "Threads", activity: "Activity", coworkers: "Participants" } as const;
+const rightTabLabels = { threads: "Threads", activity: "Document Activity", coworkers: "Participants" } as const;
 const portableFileNameIllegalChars = /[\u0000-\u001F<>:"\/\\|?*]/g;
 const windowsReservedBaseName = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 
@@ -1399,6 +1403,24 @@ export function WorkspaceApp({
     });
   }, [activeDocumentPath]);
   const documentParticipantList = documentParticipants(workspace, activeDocument?.id);
+  const documentActivityList = documentActivity(workspace, activeDocument?.id);
+  // Unread = new since you last opened the tab (snapshot delta — honest for
+  // snapshot-fresh activity; not a live stream). Marked seen when the tab opens.
+  const [activitySeenAt, setActivitySeenAt] = useState("");
+  const newestActivityAt = documentActivityList[0]?.occurredAt ?? "";
+  const activityUnread = rightTab !== "activity" && newestActivityAt !== "" && newestActivityAt > activitySeenAt;
+  useEffect(() => {
+    if (rightTab === "activity" && newestActivityAt) {
+      setActivitySeenAt(newestActivityAt);
+    }
+  }, [rightTab, newestActivityAt]);
+  const activityActorLabel: Record<string, string> = {};
+  for (const user of workspace.users) {
+    activityActorLabel[user.id] = user.handle;
+  }
+  for (const agent of workspace.agents) {
+    activityActorLabel[agent.id] = agent.handle;
+  }
 
   useEffect(() => {
     if (selectedThreadId && !documentThreads.some((thread) => thread.id === selectedThreadId)) {
@@ -1672,6 +1694,7 @@ export function WorkspaceApp({
               {rightTabLabels[tab]}
               {tab === "threads" ? <span className="muted">{documentThreads.length}</span> : null}
               {tab === "coworkers" ? <span className="muted">{documentParticipantList.length}</span> : null}
+              {tab === "activity" && activityUnread ? <span className="unread-dot" aria-label="New activity" /> : null}
             </button>
           ))}
         </div>
@@ -1691,7 +1714,7 @@ export function WorkspaceApp({
             onReply={() => void reload()}
           />
         ) : null}
-        {rightTab === "activity" ? <ActivityPanel workspace={workspace} /> : null}
+        {rightTab === "activity" ? <ActivityPanel activities={documentActivityList} hasDocument={!!activeDocument} actorLabel={activityActorLabel} /> : null}
         {rightTab === "coworkers" ? (
           <ParticipantsPanel
             participants={documentParticipantList}
@@ -2517,23 +2540,62 @@ function ThreadsPanel({
   );
 }
 
-function ActivityPanel({ workspace }: { workspace: ReturnType<typeof useWorkspace>["workspace"] }) {
+// Color lands only on the dot; the glyph stays monochrome (currentColor).
+const activityDotColor: Record<ActivityCategory, string> = {
+  "human-edit": "var(--accent)",
+  comment: "var(--iris)",
+  "agent-change": "var(--agent)",
+  done: "var(--ok)",
+  neutral: "var(--ink-3)",
+};
+const activityGlyph: Record<ActivityCategory, string> = {
+  "human-edit": "doc",
+  comment: "thread",
+  "agent-change": "agent",
+  done: "activity",
+  neutral: "activity",
+};
+
+// Current-document activity, snapshot-fresh (NOT a live stream). Each row shows
+// a semantic color dot for its category + a monochrome glyph; relative time is
+// derived from the real occurredAt. Membership/summary IDs are resolved to
+// handles where we can.
+function ActivityPanel({
+  activities,
+  hasDocument,
+  actorLabel,
+}: {
+  activities: ActivityEvent[];
+  hasDocument: boolean;
+  actorLabel: Record<string, string>;
+}) {
+  const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
   return (
     <div className="ctx-body">
       <div className="row between ctx-head">
-        <span className="label">Recent activity</span>
-        <span className="chip sm">{workspace.agentEvents.length}</span>
+        <span className="label">Document Activity</span>
+        <span className="chip sm">{activities.length}</span>
       </div>
-      {workspace.agentEvents.slice(0, 12).map((event) => (
-        <article className="activity-row" key={event.id}>
-          <div className="avi sm agent">{initials(event.agentHandle || event.agentId)}</div>
-          <div className="col gap-2 min-0">
-            <div className="small truncate"><b>@{event.agentHandle || event.agentId}</b> {event.type}</div>
-            <p className="tiny muted">{event.summary}</p>
-          </div>
-        </article>
-      ))}
-      {!workspace.agentEvents.length ? <p className="empty-note">Workspace activity will appear here.</p> : null}
+      {activities.map((activity, index) => {
+        const category = activityCategory(activity.type, activity.actorType);
+        const label = actorLabel[activity.actorId];
+        const text = label ? activity.summary.split(activity.actorId).join(`@${label}`) : activity.summary;
+        return (
+          <article className="activity-row" key={`${activity.occurredAt}-${activity.actorId}-${index}`}>
+            <span className="activity-mark">
+              <span className="activity-dot" style={{ background: activityDotColor[category] }} />
+              <Icon name={activityGlyph[category]} />
+            </span>
+            <div className="col gap-2 min-0">
+              <div className="small truncate">{text || activity.type}</div>
+              <p className="tiny muted">{relativeTime(activity.occurredAt, now)}</p>
+            </div>
+          </article>
+        );
+      })}
+      {!activities.length ? (
+        <p className="empty-note">{hasDocument ? "No activity on this document yet." : "Open a document to see its activity."}</p>
+      ) : null}
     </div>
   );
 }

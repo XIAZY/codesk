@@ -1,5 +1,5 @@
 import * as Y from "yjs";
-import type { Agent, AgentRun, Daemon, ThreadAnchor, ThreadItem, WorkspaceEvent, WorkspaceState } from "./types";
+import type { ActivityEvent, Agent, AgentRun, Daemon, ThreadAnchor, ThreadItem, WorkspaceEvent, WorkspaceState } from "./types";
 
 export const identifierPattern = "[a-z0-9_-]+";
 export const identifierHelpText = "Only lowercase letters, numbers, underscores, and dashes.";
@@ -388,6 +388,67 @@ export function participantOnline(participant: Pick<DocumentParticipant, "presen
   }
   const presentMs = Date.parse(participant.presentAt);
   return !Number.isNaN(presentMs) && nowMs - presentMs <= PRESENCE_ONLINE_WINDOW_MS;
+}
+
+export type ActivityCategory = "human-edit" | "comment" | "agent-change" | "done" | "neutral";
+
+// Map a Document Activity event to one of 2a-3's semantic categories from its
+// type + actor. Only the known shapes get a color; anything else is neutral
+// (no guessed color). No completion activity type exists yet, so the "done"
+// category stays dormant until one does — we don't fabricate it.
+export function activityCategory(type: string, actorType: string): ActivityCategory {
+  if (type.startsWith("thread.")) {
+    return "comment";
+  }
+  if (type.startsWith("document.")) {
+    return actorType === "agent" ? "agent-change" : "human-edit";
+  }
+  if (type.startsWith("agent.")) {
+    return "agent-change";
+  }
+  return "neutral";
+}
+
+// The current document's activity, newest first. Snapshot-fresh: reflects
+// workspace.activities as of the last snapshot — there is no per-event live
+// update yet (tracked separately), so the renderer must not imply live.
+export function documentActivity(
+  workspace: Pick<WorkspaceState, "activities">,
+  documentId: string | undefined,
+  limit = 12,
+): ActivityEvent[] {
+  if (!documentId) {
+    return [];
+  }
+  return (workspace.activities ?? [])
+    .filter((activity) => activity.documentId === documentId)
+    .slice()
+    .sort((a, b) => (a.occurredAt < b.occurredAt ? 1 : a.occurredAt > b.occurredAt ? -1 : 0))
+    .slice(0, limit);
+}
+
+const relativeTimeFormat = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+
+// Human relative time for an ISO timestamp, e.g. "5 minutes ago". Empty for an
+// unparseable timestamp so a bad value never renders a misleading "now".
+export function relativeTime(iso: string, nowMs: number): string {
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) {
+    return "";
+  }
+  const diffSec = Math.round((ms - nowMs) / 1000);
+  if (Math.abs(diffSec) < 60) {
+    return relativeTimeFormat.format(diffSec, "second");
+  }
+  const diffMin = Math.round(diffSec / 60);
+  if (Math.abs(diffMin) < 60) {
+    return relativeTimeFormat.format(diffMin, "minute");
+  }
+  const diffHour = Math.round(diffSec / 3600);
+  if (Math.abs(diffHour) < 24) {
+    return relativeTimeFormat.format(diffHour, "hour");
+  }
+  return relativeTimeFormat.format(Math.round(diffSec / 86400), "day");
 }
 
 export function threadReplyCount(thread: { messages: readonly unknown[] }) {

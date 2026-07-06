@@ -1480,6 +1480,33 @@ svg.i.sm {
   margin: 0;
 }
 
+/* Document Activity: color lands only on the dot; the glyph stays monochrome. */
+.activity-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  align-self: flex-start;
+  margin-top: 2px;
+  color: var(--ink-3);
+}
+
+.activity-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+}
+
+.unread-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  display: inline-block;
+  flex: 0 0 auto;
+}
+
 .people-pane {
   display: block;
 }

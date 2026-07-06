@@ -14,6 +14,9 @@ import {
   coworkerCount,
   documentParticipants,
   participantOnline,
+  documentActivity,
+  activityCategory,
+  relativeTime,
   daemonStatus,
   daemonLiveStatus,
   stampDaemonReceipt,
@@ -36,7 +39,7 @@ import {
   threadReplyLabel,
 } from "./logic";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
-import type { Agent, AgentEvent, Daemon, PresenceItem, ThreadItem, UserItem, WorkspaceState } from "./types";
+import type { ActivityEvent, Agent, AgentEvent, Daemon, PresenceItem, ThreadItem, UserItem, WorkspaceState } from "./types";
 
 function baseWorkspace(): WorkspaceState {
   return {
@@ -348,6 +351,42 @@ describe("documentParticipants", () => {
     });
     expect(documentParticipants(workspace, undefined).map((p) => p.id)).toEqual(["u_me"]);
     expect(documentParticipants(workspace, "doc1").map((p) => p.id)).toEqual(["u_me"]);
+  });
+});
+
+describe("documentActivity", () => {
+  const activity = (over: Partial<ActivityEvent>): ActivityEvent => ({
+    type: "document.updated", documentId: "doc1", actorId: "u1", actorType: "human",
+    summary: "", occurredAt: "2026-07-06T12:00:00Z", ...over,
+  });
+
+  it("scopes to the current document, newest first, and empties with no document", () => {
+    const activities = [
+      activity({ documentId: "doc1", occurredAt: "2026-07-06T12:00:00Z", summary: "a" }),
+      activity({ documentId: "doc2", occurredAt: "2026-07-06T13:00:00Z", summary: "b" }),
+      activity({ documentId: "doc1", occurredAt: "2026-07-06T14:00:00Z", summary: "c" }),
+    ];
+    expect(documentActivity({ activities }, "doc1").map((a) => a.summary)).toEqual(["c", "a"]);
+    expect(documentActivity({ activities }, undefined)).toEqual([]);
+    expect(documentActivity({ activities: undefined }, "doc1")).toEqual([]);
+  });
+
+  it("classifies categories from type + actor, unknown → neutral, no fabricated done", () => {
+    expect(activityCategory("document.updated", "human")).toBe("human-edit");
+    expect(activityCategory("document.created", "agent")).toBe("agent-change");
+    expect(activityCategory("thread.created", "human")).toBe("comment");
+    expect(activityCategory("thread.replied", "agent")).toBe("comment");
+    expect(activityCategory("agent.run.updated", "agent")).toBe("agent-change");
+    expect(activityCategory("workspace.snapshot", "human")).toBe("neutral");
+  });
+
+  it("relativeTime formats past timestamps and guards bad input", () => {
+    const nowMs = Date.parse("2026-07-06T12:00:00Z");
+    expect(relativeTime("2026-07-06T11:59:30Z", nowMs)).toContain("second");
+    expect(relativeTime("2026-07-06T11:30:00Z", nowMs)).toContain("minute");
+    expect(relativeTime("2026-07-06T09:00:00Z", nowMs)).toContain("hour");
+    expect(relativeTime("2026-07-04T12:00:00Z", nowMs)).toContain("day");
+    expect(relativeTime("not-a-date", nowMs)).toBe("");
   });
 });
 
