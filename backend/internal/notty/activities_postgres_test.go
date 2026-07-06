@@ -105,8 +105,7 @@ func TestActivitiesSurviveStoreRestartPostgres(t *testing.T) {
 	seedCodexDaemonRuntime(t, store)
 	user := seedTestUser(t, store)
 	meta := OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"}
-	snapshot := store.Snapshot()
-	workspaceID := snapshot.WorkspaceID
+	workspaceID := store.WorkspaceID()
 
 	agent, err := store.CreateAgent(CreateAgentRequest{Handle: "restart-agent", Name: "Restart Agent", Role: "durable", Kind: "codex"}, meta)
 	if err != nil {
@@ -135,7 +134,7 @@ func TestActivitiesSurviveStoreRestartPostgres(t *testing.T) {
 	}
 	beforeTypes := activityTypeCounts(before)
 
-	reloaded, err := NewWorkspaceStore(database, workspaceID, snapshot.Name)
+	reloaded, err := NewWorkspaceStore(database, workspaceID, store.WorkspaceName())
 	if err != nil {
 		t.Fatalf("reopen store: %v", err)
 	}
@@ -176,7 +175,7 @@ func TestActivitiesConcurrentWritesPostgres(t *testing.T) {
 	db := database.DB
 	store := newPostgresTestWorkspaceStore(t, database)
 	user := seedTestUser(t, store)
-	workspaceID := store.Snapshot().WorkspaceID
+	workspaceID := store.WorkspaceID()
 
 	before := activityCount(t, db, workspaceID)
 
@@ -223,7 +222,7 @@ func TestActivitiesReadWindowPreservedPostgres(t *testing.T) {
 	store := newPostgresTestWorkspaceStore(t, database)
 	seedCodexDaemonRuntime(t, store)
 	user := seedTestUser(t, store)
-	workspaceID := store.Snapshot().WorkspaceID
+	workspaceID := store.WorkspaceID()
 
 	agent, err := store.CreateAgent(CreateAgentRequest{Handle: "window-agent", Name: "Window Agent", Role: "noisy", Kind: "codex"}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
 	if err != nil {

@@ -7,11 +7,6 @@ type WorkspaceState struct {
 	Name                string                         `json:"name"`
 	RootDocumentID      string                         `json:"rootDocumentId"`
 	ContentDocuments    map[string]*Document           `json:"contentDocuments"`
-	Users               map[string]*User               `json:"users"`
-	Daemons             map[string]*Daemon             `json:"daemons"`
-	Agents              map[string]*Agent              `json:"agents"`
-	AgentRuns           map[string]*AgentRun           `json:"agentRuns"`
-	AgentDocumentViews  map[string]*AgentDocumentView  `json:"agentDocumentViews,omitempty"`
 	DocumentCheckpoints map[string]*DocumentCheckpoint `json:"documentCheckpoints,omitempty"`
 	UpdatedAt           time.Time                      `json:"updatedAt"`
 }

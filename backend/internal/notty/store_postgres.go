@@ -745,37 +745,6 @@ func (s *Store) loadWorkspaceMetadataPostgresLocked() error {
 	return nil
 }
 
-func (s *Store) persistPostgresLocked() error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	inboxEvents, err := s.persistDocumentsPostgresLocked(tx)
-	if err != nil {
-		return err
-	}
-	if err = s.insertPendingActivitiesPostgresLocked(tx); err != nil {
-		return err
-	}
-	if err = tx.Commit(); err != nil {
-		return err
-	}
-	s.recordActivitiesCreatedLocked(s.pendingActivities)
-	s.dirtyDocuments = map[string]struct{}{}
-	s.pendingDocumentEvents = []documentUpdateRecord{}
-	s.pendingActivities = nil
-	for _, event := range inboxEvents {
-		s.recordAgentInboxChangedLocked(event)
-	}
-	return nil
-}
-
 func (s *Store) persistDocumentMutationPostgresLocked() error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -1575,10 +1544,6 @@ func documentInboxHandledPostgres(db *sql.DB, workspaceID, agentID, documentID s
 		workspaceID, agentID, documentID, updateID, updatedAt,
 	).Scan(&exists)
 	return exists, err
-}
-
-func (s *Store) documentContentAtUpdatePostgresLocked(document *Document, updateID int64) (string, error) {
-	return documentContentAtUpdatePostgres(s.db, s.state.WorkspaceID, document, updateID)
 }
 
 func documentContentAtUpdatePostgres(db *sql.DB, workspaceID string, document *Document, updateID int64) (string, error) {
@@ -3114,10 +3079,3 @@ func documentHasOpenThreadForParticipantPostgres(q querier, workspaceID string, 
 	return true, threadID, threadTitle, nil
 }
 
-func removeThreadParticipantPostgres(db *sql.DB, workspaceID string, participantID string) error {
-	_, err := db.Exec(
-		`DELETE FROM thread_participants WHERE workspace_id = $1::uuid AND participant_id = $2::uuid`,
-		workspaceID, participantID,
-	)
-	return err
-}

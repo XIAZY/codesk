@@ -89,24 +89,23 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	}, OperationMeta{ActorID: "daemon", ActorType: "agent", Source: "test"}); err != nil {
 		t.Fatalf("complete event: %v", err)
 	}
-	workspace := store.Snapshot()
-	reloaded, err := NewWorkspaceStore(database, workspace.WorkspaceID, workspace.Name)
+	reloaded, err := NewWorkspaceStore(database, store.WorkspaceID(), store.WorkspaceName())
 	if err != nil {
 		t.Fatalf("reload store: %v", err)
 	}
 
-	snapshot := reloaded.Snapshot()
-	if got := snapshot.ContentDocuments[documentID]; got == nil {
-		t.Fatalf("expected document after reload, got %#v", got)
+	if !reloaded.HasDocument(documentID) {
+		t.Fatalf("expected document after reload")
 	}
-	users, err := listUsersPostgres(db, snapshot.WorkspaceID)
+	workspaceID := reloaded.WorkspaceID()
+	users, err := listUsersPostgres(db, workspaceID)
 	if err != nil {
 		t.Fatalf("list users after reload: %v", err)
 	}
 	if got := findUserForTest(users, user.ID); got == nil || got.Handle != user.Handle {
 		t.Fatalf("expected user after reload, got %#v", got)
 	}
-	gotAgent, err := getAgentPostgres(db, snapshot.WorkspaceID, agent.ID)
+	gotAgent, err := getAgentPostgres(db, workspaceID, agent.ID)
 	if err != nil {
 		t.Fatalf("get agent after reload: %v", err)
 	}
@@ -116,10 +115,10 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	if gotAgent.SessionID != "session_pg_123" {
 		t.Fatalf("expected agent session id after reload, got %#v", gotAgent)
 	}
-	if got, err := getThreadPostgres(db, snapshot.WorkspaceID, thread.ID); err != nil || got == nil || len(got.Messages) != 1 || got.Anchor.RelativeStart != "pg-relative-start" || got.Anchor.RelativeEnd != "pg-relative-end" {
+	if got, err := getThreadPostgres(db, workspaceID, thread.ID); err != nil || got == nil || len(got.Messages) != 1 || got.Anchor.RelativeStart != "pg-relative-start" || got.Anchor.RelativeEnd != "pg-relative-end" {
 		t.Fatalf("expected thread messages after reload, got %#v (err: %v)", got, err)
 	}
-	gotRun, err := getAgentRunPostgres(db, snapshot.WorkspaceID, run.ID)
+	gotRun, err := getAgentRunPostgres(db, workspaceID, run.ID)
 	if err != nil {
 		t.Fatalf("get completed run after reload: %v", err)
 	}
@@ -129,10 +128,10 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	if gotRun.SessionID != "session_pg_123" {
 		t.Fatalf("expected persisted run session id after reload, got %#v", gotRun)
 	}
-	if got, err := getAgentEventPostgres(db, snapshot.WorkspaceID, claimed.ID); err != nil || got == nil || got.Status != "completed" || got.RunID != run.ID {
+	if got, err := getAgentEventPostgres(db, workspaceID, claimed.ID); err != nil || got == nil || got.Status != "completed" || got.RunID != run.ID {
 		t.Fatalf("expected completed event after reload, got %#v (err: %v)", got, err)
 	}
-	if presences, err := listPresencesPostgres(db, snapshot.WorkspaceID); err != nil {
+	if presences, err := listPresencesPostgres(db, workspaceID); err != nil {
 		t.Fatalf("list presences: %v", err)
 	} else if len(presences) == 0 {
 		t.Fatal("expected presences in Postgres after reload")
@@ -147,7 +146,7 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 			t.Fatalf("expected presence for user %s with docs/spec.md, got %d presences", user.ID, len(presences))
 		}
 	}
-	if activities, err := listActivitiesPostgres(db, snapshot.WorkspaceID); err != nil || len(activities) == 0 {
+	if activities, err := listActivitiesPostgres(db, workspaceID); err != nil || len(activities) == 0 {
 		t.Fatalf("expected activities after reload, got %d (err: %v)", len(activities), err)
 	}
 	assertNoActivityMaterializedContentColumn(t, db)
@@ -185,10 +184,6 @@ func TestPostgresWorkspaceViewReadsIdentityTablesWithoutSnapshot(t *testing.T) {
 		t.Fatalf("start run: %v", err)
 	}
 
-	snapshot := store.Snapshot()
-	if len(snapshot.Users) != 0 || len(snapshot.Agents) != 0 || len(snapshot.AgentRuns) != 0 || len(snapshot.Daemons) != 0 {
-		t.Fatalf("Snapshot must not expose identity tables, got users=%d agents=%d runs=%d daemons=%d", len(snapshot.Users), len(snapshot.Agents), len(snapshot.AgentRuns), len(snapshot.Daemons))
-	}
 	view, err := loadWorkspaceView(context.Background(), database.DB, store.workspaceID, nil)
 	if err != nil {
 		t.Fatalf("load workspace view: %v", err)
@@ -256,7 +251,7 @@ func TestPostgresThreadCreatedDirectlyInPostgres(t *testing.T) {
 	store := newPostgresTestWorkspaceStore(t, database)
 	user := seedTestUser(t, store)
 	documentID := mustCreateTestDocument(t, store, "docs/thread-preserve.md", "keep the thread\n")
-	workspace := store.Snapshot()
+	workspaceID := store.WorkspaceID()
 
 	thread, _, _, err := store.CreateThread(CreateThreadRequest{
 		DocumentID: documentID,
@@ -267,7 +262,7 @@ func TestPostgresThreadCreatedDirectlyInPostgres(t *testing.T) {
 		t.Fatalf("create thread: %v", err)
 	}
 
-	got, err := getThreadPostgres(db, workspace.WorkspaceID, thread.ID)
+	got, err := getThreadPostgres(db, workspaceID, thread.ID)
 	if err != nil {
 		t.Fatalf("get thread from Postgres: %v", err)
 	}
@@ -285,7 +280,7 @@ func TestPostgresThreadHandlesAfterActorDeletion(t *testing.T) {
 	store := newPostgresTestWorkspaceStore(t, database)
 	seedCodexDaemonRuntime(t, store)
 	user := seedTestUser(t, store)
-	workspace := store.Snapshot()
+	workspaceID := store.WorkspaceID()
 	documentID := mustCreateTestDocument(t, store, "docs/actor-delete.md", "test\n")
 
 	agent, err := store.CreateAgent(CreateAgentRequest{
@@ -312,7 +307,7 @@ func TestPostgresThreadHandlesAfterActorDeletion(t *testing.T) {
 	// the scope of this conversion).
 	mustExec(t, db, `DELETE FROM agents WHERE id = $1`, agent.ID)
 
-	got, err := getThreadPostgres(db, workspace.WorkspaceID, thread.ID)
+	got, err := getThreadPostgres(db, workspaceID, thread.ID)
 	if err != nil {
 		t.Fatalf("get thread after deletion: %v", err)
 	}
@@ -353,7 +348,7 @@ func TestPostgresSnapshotPersistPreservesDatabaseOnlyRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get document: %v", err)
 	}
-	workspace := staleStore.Snapshot()
+	workspaceID := staleStore.WorkspaceID()
 	now := time.Now().UTC()
 	eventID := uuid.NewString()
 
@@ -361,7 +356,7 @@ func TestPostgresSnapshotPersistPreservesDatabaseOnlyRows(t *testing.T) {
 			workspace_id, actor_id, actor_type, document_id, file_path, mode,
 			selection_start, selection_end, activity, updated_at
 		) VALUES ($1, $2, 'human', $3, 'docs/db-only.md', 'editing', 0, 4, 'db-only', $4)`,
-		workspace.WorkspaceID, user.ID, documentID, now)
+		workspaceID, user.ID, documentID, now)
 	var activityID int64
 	if err := db.QueryRow(`INSERT INTO activities (
 			workspace_id, type, document_id, actor_id, actor_type, summary, occurred_at,
@@ -373,7 +368,7 @@ func TestPostgresSnapshotPersistPreservesDatabaseOnlyRows(t *testing.T) {
 			$1, 'db_only', $2, $3, 'human', 'db-only activity', $4,
 			'', '', '', '', FALSE, '', '', '', '', '', ''
 		) RETURNING id`,
-		workspace.WorkspaceID, documentID, user.ID, now).Scan(&activityID); err != nil {
+		workspaceID, documentID, user.ID, now).Scan(&activityID); err != nil {
 		t.Fatalf("insert database-only activity: %v", err)
 	}
 	mustExec(t, db, `INSERT INTO agent_events (
@@ -384,18 +379,14 @@ func TestPostgresSnapshotPersistPreservesDatabaseOnlyRows(t *testing.T) {
 			$1, $2, $3, $4, 'db.only', 'for_me', 'pending', $5,
 			0, 0, 'db-only event', '', $6, '', 0, $7, $7, $7
 		)`,
-		workspace.WorkspaceID, eventID, agent.ID, agent.Handle, documentID, "db-only-"+eventID, now)
+		workspaceID, eventID, agent.ID, agent.Handle, documentID, "db-only-"+eventID, now)
 	mustExec(t, db, `INSERT INTO agent_document_views (
 			workspace_id, agent_id, document_id, update_id, state_vector, viewed_at
 		) VALUES ($1, $2, $3, $4, $5, $6)`,
-		workspace.WorkspaceID, agent.ID, documentID, document.UpdateID, document.StateVector, now)
+		workspaceID, agent.ID, documentID, document.UpdateID, document.StateVector, now)
 
 	staleStore.mu.Lock()
 	staleStore.ensureMaps()
-	if staleStore.state.AgentDocumentViews[agentDocumentViewKey(agent.ID, documentID)] != nil {
-		staleStore.mu.Unlock()
-		t.Fatalf("stale store unexpectedly contains database-only agent document view")
-	}
 	err = staleStore.persistLocked()
 	staleStore.mu.Unlock()
 	if err != nil {
@@ -413,10 +404,10 @@ func TestPostgresSnapshotPersistPreservesDatabaseOnlyRows(t *testing.T) {
 			t.Fatalf("expected one %s row matching %q, got %d", table, where, count)
 		}
 	}
-	assertRowCount("presences", "workspace_id = $1 AND actor_id = $2", workspace.WorkspaceID, user.ID)
+	assertRowCount("presences", "workspace_id = $1 AND actor_id = $2", workspaceID, user.ID)
 	assertRowCount("activities", "id = $1", activityID)
-	assertRowCount("agent_events", "workspace_id = $1 AND id = $2", workspace.WorkspaceID, eventID)
-	assertRowCount("agent_document_views", "workspace_id = $1 AND agent_id = $2 AND document_id = $3", workspace.WorkspaceID, agent.ID, documentID)
+	assertRowCount("agent_events", "workspace_id = $1 AND id = $2", workspaceID, eventID)
+	assertRowCount("agent_document_views", "workspace_id = $1 AND agent_id = $2 AND document_id = $3", workspaceID, agent.ID, documentID)
 }
 
 func TestPostgresThreadSurvivesUUIDTurnSessionPersist(t *testing.T) {
@@ -467,20 +458,19 @@ func TestPostgresThreadSurvivesUUIDTurnSessionPersist(t *testing.T) {
 		t.Fatalf("current_run_id was poisoned by turn id: %q", currentRunID.String)
 	}
 
-	workspace := store.Snapshot()
-	reloaded, err := NewWorkspaceStore(database, workspace.WorkspaceID, workspace.Name)
+	reloaded, err := NewWorkspaceStore(database, store.WorkspaceID(), store.WorkspaceName())
 	if err != nil {
 		t.Fatalf("reload store: %v", err)
 	}
-	snapshot := reloaded.Snapshot()
-	gotAgent, err := getAgentPostgres(db, snapshot.WorkspaceID, agent.ID)
+	workspaceID := reloaded.WorkspaceID()
+	gotAgent, err := getAgentPostgres(db, workspaceID, agent.ID)
 	if err != nil {
 		t.Fatalf("get agent after reload: %v", err)
 	}
 	if gotAgent == nil || gotAgent.CurrentTurnID != turnID || gotAgent.CurrentRunID != "" {
 		t.Fatalf("expected turn id without run-id mirror after reload, got %#v", gotAgent)
 	}
-	gotThread, err := getThreadPostgres(db, snapshot.WorkspaceID, thread.ID)
+	gotThread, err := getThreadPostgres(db, workspaceID, thread.ID)
 	if err != nil || gotThread == nil || len(gotThread.Messages) != 1 || !containsString(gotThread.ParticipantIDs, user.ID) {
 		t.Fatalf("expected thread/message/participant after reload, got %#v (err: %v)", gotThread, err)
 	}
@@ -505,16 +495,16 @@ func TestPostgresLoadRegeneratesMissingCheckpointBeforeSync(t *testing.T) {
 			t.Fatalf("apply update %q: %v", value, err)
 		}
 	}
-	workspace := store.Snapshot()
-	if _, err := db.Exec(`DELETE FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2`, workspace.WorkspaceID, documentID); err != nil {
+	workspaceID := store.WorkspaceID()
+	if _, err := db.Exec(`DELETE FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2`, workspaceID, documentID); err != nil {
 		t.Fatalf("delete checkpoints: %v", err)
 	}
-	if _, err := db.Exec(`UPDATE document_heads SET state_vector = '' WHERE workspace_id = $1 AND document_id = $2`, workspace.WorkspaceID, documentID); err != nil {
+	if _, err := db.Exec(`UPDATE document_heads SET state_vector = '' WHERE workspace_id = $1 AND document_id = $2`, workspaceID, documentID); err != nil {
 
 		t.Fatalf("clear head state vector: %v", err)
 	}
 
-	reloaded, err := NewWorkspaceStore(database, workspace.WorkspaceID, workspace.Name)
+	reloaded, err := NewWorkspaceStore(database, workspaceID, store.WorkspaceName())
 	if err != nil {
 		t.Fatalf("reload store: %v", err)
 	}
@@ -527,7 +517,7 @@ func TestPostgresLoadRegeneratesMissingCheckpointBeforeSync(t *testing.T) {
 	}
 
 	var checkpointCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2 AND update_id = $3`, workspace.WorkspaceID, documentID, reloadedDocument.UpdateID).Scan(&checkpointCount); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM document_checkpoints WHERE workspace_id = $1 AND document_id = $2 AND update_id = $3`, workspaceID, documentID, reloadedDocument.UpdateID).Scan(&checkpointCount); err != nil {
 
 		t.Fatalf("count regenerated checkpoint: %v", err)
 	}
@@ -610,12 +600,11 @@ func TestPostgresUpdateAgentSessionPersistsTargetAgent(t *testing.T) {
 	}, OperationMeta{ActorID: "daemon_agent", ActorType: "agent", Source: "test"}); err != nil {
 		t.Fatalf("update agent session: %v", err)
 	}
-	workspace := store.Snapshot()
-	reloaded, err := NewWorkspaceStore(database, workspace.WorkspaceID, workspace.Name)
+	reloaded, err := NewWorkspaceStore(database, store.WorkspaceID(), store.WorkspaceName())
 	if err != nil {
 		t.Fatalf("reload store: %v", err)
 	}
-	got, err := getAgentPostgres(reloaded.db, workspace.WorkspaceID, agent.ID)
+	got, err := getAgentPostgres(reloaded.db, reloaded.WorkspaceID(), agent.ID)
 	if err != nil {
 		t.Fatalf("get agent after reload: %v", err)
 	}
@@ -628,7 +617,7 @@ func TestPostgresDocumentUpdatesPersistWithoutWorkspaceSnapshot(t *testing.T) {
 	database := newPostgresTestDatabase(t)
 	db := database.DB
 	store := newPostgresTestWorkspaceStore(t, database)
-	workspaceID := store.Snapshot().WorkspaceID
+	workspaceID := store.WorkspaceID()
 
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "# before\n")
 
@@ -681,7 +670,7 @@ func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testin
 	database := newPostgresTestDatabase(t)
 	db := database.DB
 	store := newPostgresTestWorkspaceStore(t, database)
-	workspaceID := store.Snapshot().WorkspaceID
+	workspaceID := store.WorkspaceID()
 
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "version 0\n")
 	for index := 1; index <= 105; index++ {
@@ -733,8 +722,7 @@ func TestPostgresDocumentProtocolColdBootstrapStreamsCheckpointAndTail(t *testin
 	if tailCount == 0 {
 		t.Fatalf("test setup expected tail updates after checkpoint, checkpoint=%d head=%d", checkpointUpdateID, head.UpdateID)
 	}
-	workspace := store.Snapshot()
-	store, err = NewWorkspaceStore(database, workspace.WorkspaceID, workspace.Name)
+	store, err = NewWorkspaceStore(database, store.WorkspaceID(), store.WorkspaceName())
 	if err != nil {
 		t.Fatalf("reload store for cold bootstrap: %v", err)
 	}
@@ -783,7 +771,7 @@ func TestPostgresApplyCRDTUpdateCreatesPeriodicCheckpointFromHistory(t *testing.
 	database := newPostgresTestDatabase(t)
 	db := database.DB
 	store := newPostgresTestWorkspaceStore(t, database)
-	workspaceID := store.Snapshot().WorkspaceID
+	workspaceID := store.WorkspaceID()
 
 	documentID := mustCreateTestDocument(t, store, "docs/periodic-checkpoint.md", "")
 	peer := syncDocumentToDocForTest(t, store, documentID, 77)
@@ -847,7 +835,7 @@ func TestPostgresApplyCRDTUpdatePersistsWithoutWorkspaceSnapshot(t *testing.T) {
 	database := newPostgresTestDatabase(t)
 	db := database.DB
 	store := newPostgresTestWorkspaceStore(t, database)
-	workspaceID := store.Snapshot().WorkspaceID
+	workspaceID := store.WorkspaceID()
 
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "# before\n")
 
@@ -1040,7 +1028,7 @@ func TestPostgresAgentEventsInsertedDirectlyToPostgres(t *testing.T) {
 	seedCodexDaemonRuntime(t, store)
 	user := seedTestUser(t, store)
 	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "start\n")
-	workspaceID := store.Snapshot().WorkspaceID
+	workspaceID := store.WorkspaceID()
 	agent, err := store.CreateAgent(CreateAgentRequest{
 		Handle: "watcher",
 		Name:   "Watcher",
@@ -1106,9 +1094,8 @@ func TestPostgresConcurrentThreadCreateIdempotency(t *testing.T) {
 	seedStore := newPostgresTestWorkspaceStore(t, database)
 	user := seedTestUser(t, seedStore)
 	documentID := mustCreateTestDocument(t, seedStore, "docs/concurrent.md", "race\n")
-	snapshot := seedStore.Snapshot()
-	workspaceID := snapshot.WorkspaceID
-	workspaceName := snapshot.Name
+	workspaceID := seedStore.WorkspaceID()
+	workspaceName := seedStore.WorkspaceName()
 
 	const n = 10
 	stores := make([]*Store, n)
@@ -1192,7 +1179,7 @@ func TestPostgresCreateThreadRollsBackOnPoisonedEvent(t *testing.T) {
 	store := newPostgresTestWorkspaceStore(t, database)
 	user := seedTestUser(t, store)
 	documentID := mustCreateTestDocument(t, store, "docs/rollback.md", "tx test\n")
-	workspaceID := store.Snapshot().WorkspaceID
+	workspaceID := store.WorkspaceID()
 
 	now := time.Now().UTC()
 	thread := &Thread{
@@ -1284,7 +1271,7 @@ func TestPostgresDiffDocumentReconstructsAcrossCheckpointsAfterReload(t *testing
 	database := newPostgresTestDatabase(t)
 	db := database.DB
 	store := newPostgresTestWorkspaceStore(t, database)
-	workspaceID := store.Snapshot().WorkspaceID
+	workspaceID := store.WorkspaceID()
 	seedCodexDaemonRuntime(t, store)
 	documentID := mustCreateTestDocument(t, store, "docs/history.md", "v000\n")
 	agent, err := store.CreateAgent(CreateAgentRequest{
@@ -1325,8 +1312,7 @@ func TestPostgresDiffDocumentReconstructsAcrossCheckpointsAfterReload(t *testing
 		t.Fatalf("reconstruct final document: %v", err)
 	}
 
-	workspace := store.Snapshot()
-	reloaded, err := NewWorkspaceStore(database, workspace.WorkspaceID, workspace.Name)
+	reloaded, err := NewWorkspaceStore(database, store.WorkspaceID(), store.WorkspaceName())
 	if err != nil {
 		t.Fatalf("reload store: %v", err)
 	}
@@ -1768,17 +1754,6 @@ func assertNoProposalTable(t *testing.T, db *sql.DB) {
 	}
 }
 
-func TestNewWorkspaceStartsWithNoSyntheticUsers(t *testing.T) {
-	database := newPostgresTestDatabase(t)
-	store := newPostgresTestWorkspaceStore(t, database)
-	snapshot := store.Snapshot()
-	for id, user := range snapshot.Users {
-		if id == "user_owner" || (user != nil && user.Handle == "owner" && user.Name == "Workspace Owner") {
-			t.Fatalf("workspace should not contain synthetic user_owner, found %q: %+v", id, user)
-		}
-	}
-}
-
 func TestCreateAgentRequiresDaemon(t *testing.T) {
 	database := newPostgresTestDatabase(t)
 	store := newPostgresTestWorkspaceStore(t, database)
@@ -1793,9 +1768,5 @@ func TestCreateAgentRequiresDaemon(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "daemon") {
 		t.Fatalf("expected daemon-related error, got: %v", err)
-	}
-	snapshot := store.Snapshot()
-	if _, exists := snapshot.Daemons["daemon_local"]; exists {
-		t.Fatalf("daemon_local should not be synthesized")
 	}
 }

@@ -652,9 +652,8 @@ func TestCreateWorkspaceStoresIndependentRootDocumentID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open workspace store: %v", err)
 	}
-	snapshot := store.Snapshot()
-	if snapshot.RootDocumentID != workspace.RootDocumentID {
-		t.Fatalf("workspace store root document ID = %q, want %q", snapshot.RootDocumentID, workspace.RootDocumentID)
+	if store.RootDocumentID() != workspace.RootDocumentID {
+		t.Fatalf("workspace store root document ID = %q, want %q", store.RootDocumentID(), workspace.RootDocumentID)
 	}
 	if !store.HasDocument(workspace.RootDocumentID) {
 		t.Fatalf("stored root document %q is not syncable", workspace.RootDocumentID)
