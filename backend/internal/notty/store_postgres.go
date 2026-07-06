@@ -380,9 +380,9 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			workspace_id UUID NOT NULL,
 			actor_id UUID NOT NULL,
 			actor_type TEXT NOT NULL,
-			document_id UUID NOT NULL,
-			file_path TEXT NOT NULL,
-			mode TEXT NOT NULL,
+			document_id UUID,
+			file_path TEXT NOT NULL DEFAULT '',
+			mode TEXT NOT NULL DEFAULT '',
 			selection_start INTEGER,
 			selection_end INTEGER,
 			activity TEXT NOT NULL,
@@ -398,6 +398,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 				ON DELETE CASCADE
 		)
 		`,
+		`ALTER TABLE presences ALTER COLUMN document_id DROP NOT NULL`,
 		`
 		CREATE TABLE IF NOT EXISTS activities (
 			id BIGSERIAL PRIMARY KEY,
@@ -1310,7 +1311,7 @@ func (s *Store) upsertPresencesPostgresLocked(tx *sql.Tx) error {
 			s.state.WorkspaceID,
 			presence.ActorID,
 			presence.ActorType,
-			presence.DocumentID,
+			uuidStringOrNil(presence.DocumentID),
 			presence.FilePath,
 			presence.Mode,
 			start,
@@ -1357,7 +1358,7 @@ func upsertPresencePostgres(db *sql.DB, workspaceID string, presence *Presence) 
 		workspaceID,
 		presence.ActorID,
 		presence.ActorType,
-		presence.DocumentID,
+		uuidStringOrNil(presence.DocumentID),
 		presence.FilePath,
 		presence.Mode,
 		start,
@@ -2361,7 +2362,7 @@ func (s *Store) loadAgentRunsPostgresLocked() error {
 
 func (s *Store) loadPresencesPostgresLocked() error {
 	rows, err := s.db.Query(
-		`SELECT actor_id::text, actor_type, document_id::text, file_path, mode, selection_start, selection_end, activity, updated_at
+		`SELECT actor_id::text, actor_type, COALESCE(document_id::text, ''), file_path, mode, selection_start, selection_end, activity, updated_at
 		   FROM presences
 		  WHERE workspace_id = $1::uuid`,
 		s.state.WorkspaceID,
