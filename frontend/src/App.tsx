@@ -2637,6 +2637,7 @@ function PeoplePanel({
           <div className="col gap-2 min-0">
             <strong className="small truncate">@{person.handle}</strong>
             <span className="tiny muted truncate">{personRoleTag[person.kind]}</span>
+            {online ? <span className="sr-only">Online</span> : null}
           </div>
         );
         return agent ? (

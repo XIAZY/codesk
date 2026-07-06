@@ -440,18 +440,18 @@ svg.i.sm {
   box-shadow: 0 0 0 2px var(--paper), 0 0 0 3.5px var(--ok);
 }
 
-.avi-stack {
-  display: flex;
-  align-items: center;
-}
-
-.avi-stack .avi {
-  margin-left: -6px;
-  box-shadow: 0 0 0 2px var(--paper);
-}
-
-.avi-stack .avi:first-child {
-  margin-left: 0;
+/* Visually hidden but read by screen readers — e.g. the online state that the
+   avatar ring only conveys with color. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .status-dot {
