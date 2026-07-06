@@ -1828,6 +1828,16 @@ pre.code {
   color: var(--ink-4);
 }
 
+.name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.name-row input {
+  flex: 1;
+}
+
 .hint b {
   color: var(--ink-3);
   font-weight: 600;

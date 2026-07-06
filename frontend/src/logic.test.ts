@@ -20,9 +20,14 @@ import {
   encodeRelativeAnchor,
   handleMaxLength,
   identifierFromName,
+  identifierPattern,
   lineForOffset,
   lineStartsForText,
+  randomWorkspaceName,
   reduceWorkspaceEvent,
+  workspaceNameAdjectives,
+  workspaceNameNouns,
+  workspaceSlugMaxLength,
   resolveThreadAnchorLive,
   selectionLabel,
   threadReplyCount,
@@ -78,6 +83,40 @@ describe("Yjs editor helpers", () => {
     expect(anchor.line).toBe(1);
     expect(anchor.excerpt).toBe("bravo");
     expect(anchor.resolved).toBe(true);
+  });
+});
+
+describe("randomWorkspaceName", () => {
+  it("returns the first adjective and noun when the RNG yields 0", () => {
+    expect(randomWorkspaceName(() => 0)).toBe(`${workspaceNameAdjectives[0]} ${workspaceNameNouns[0]}`);
+  });
+
+  it("returns the last adjective and noun when the RNG yields a value near 1", () => {
+    const last = workspaceNameAdjectives.length - 1;
+    const lastNoun = workspaceNameNouns.length - 1;
+    expect(randomWorkspaceName(() => 0.999999)).toBe(`${workspaceNameAdjectives[last]} ${workspaceNameNouns[lastNoun]}`);
+  });
+
+  it("produces two Capitalized words separated by one space", () => {
+    const name = randomWorkspaceName(() => 0.5);
+    expect(name).toMatch(/^[A-Z][a-z]+ [A-Z][a-z]+$/);
+  });
+
+  it("survives identifierFromName to a non-empty, pattern-valid slug for every combination", () => {
+    const slugRe = new RegExp(`^${identifierPattern}$`);
+    for (let a = 0; a < workspaceNameAdjectives.length; a++) {
+      for (let n = 0; n < workspaceNameNouns.length; n++) {
+        // Drive the RNG to select adjective a, then noun n.
+        const values = [a / workspaceNameAdjectives.length, n / workspaceNameNouns.length];
+        let call = 0;
+        const rng = () => values[call++];
+        const name = randomWorkspaceName(rng);
+        expect(name).toBe(`${workspaceNameAdjectives[a]} ${workspaceNameNouns[n]}`);
+        const slug = identifierFromName(name, workspaceSlugMaxLength);
+        expect(slug.length).toBeGreaterThan(0);
+        expect(slug).toMatch(slugRe);
+      }
+    }
   });
 });
 
