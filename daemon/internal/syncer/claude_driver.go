@@ -67,7 +67,6 @@ func (d *claudeDriver) Detect(ctx context.Context) RuntimeDetection {
 }
 
 func (d *claudeDriver) Spawn(ctx context.Context, spec RuntimeSpawnSpec) (RuntimeProcess, error) {
-	_ = ctx
 	return &claudeRuntimeProcess{
 		cfg:           d.cfg,
 		command:       d.command(),
@@ -97,11 +96,11 @@ type claudeRuntimeProcess struct {
 	stdin      io.WriteCloser
 	sessionID  string
 	activeTurn string
+	stopped    bool
 	log        *agentLog
 }
 
 func (p *claudeRuntimeProcess) Start(ctx context.Context) error {
-	_ = ctx
 	if p == nil {
 		return errors.New("claude runtime process is nil")
 	}
@@ -124,6 +123,7 @@ func (p *claudeRuntimeProcess) Stop() error {
 		return nil
 	}
 	p.mu.Lock()
+	p.stopped = true
 	cmd := p.cmd
 	stdin := p.stdin
 	p.mu.Unlock()
@@ -133,10 +133,18 @@ func (p *claudeRuntimeProcess) Stop() error {
 	if cmd != nil && cmd.Process != nil {
 		p.logf("stopping claude process pid=%d", cmd.Process.Pid)
 		err := cmd.Process.Kill()
+		if errors.Is(err, os.ErrProcessDone) {
+			// Closing stdin above can trigger a clean exit before the kill lands;
+			// an already-finished process is a successful stop, not an error.
+			err = nil
+		}
+		// The exit goroutine closes the events channel once cmd.Wait returns and
+		// readLoop drains (which is why it, not Stop, owns the close): stopped=true
+		// makes it terminal even if the kill lands inside the handshake window.
 		p.closeLog()
 		return err
 	}
-	// Never spawned: close the event stream ourselves so consumers finish.
+	// Never spawned: no exit goroutine exists, so close the event stream here.
 	p.closeEvents()
 	p.closeLog()
 	return nil
@@ -247,11 +255,11 @@ func buildClaudeEnv(cfg Config, toolToken string) []string {
 		env = append(env, value)
 	}
 	env = append(env, buildAgentToolEnv(cfg, toolToken)...)
-	if os.Geteuid() == 0 {
-		// claude refuses --dangerously-skip-permissions as root unless the
-		// environment declares itself a sandbox (the daemon container case).
-		env = append(env, "IS_SANDBOX=1")
-	}
+	// IS_SANDBOX (which lets claude accept --dangerously-skip-permissions as
+	// root) is declared by the daemon container's Dockerfile, the only supported
+	// root context. Inferring it from euid==0 would also mark a misconfigured
+	// bare-metal root daemon as a sandbox — a false claim; the environment
+	// declares what it is instead.
 	return env
 }
 
@@ -311,7 +319,13 @@ func (p *claudeRuntimeProcess) spawn(ctx context.Context, sessionID string, resu
 		p.logf("claude exited err=%v", err)
 		exited <- err
 		<-readDone
-		if <-established {
+		// Closing the events channel is how the supervisor learns the process is
+		// done, so the exit goroutine owns it (after readLoop drains, so no
+		// send-on-closed race). It closes on exit by default; the one exception
+		// is a failed spawn attempt the supervisor retries on this same
+		// RuntimeProcess (stale-resume -> fresh-session), which reuses the
+		// channel. A Stop() is always terminal, even inside the handshake window.
+		if <-established || p.wasStopped() {
 			p.closeEvents()
 		}
 	}()
@@ -390,14 +404,21 @@ func (p *claudeRuntimeProcess) writeControlRequest(subtype string) error {
 }
 
 func (p *claudeRuntimeProcess) writeLine(stdin io.Writer, payload map[string]any) error {
-	bytes, err := json.Marshal(payload)
+	line, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	if _, err := stdin.Write(append(bytes, '\n')); err != nil {
+	// Serialize the pipe write under p.mu so concurrent startTurn/steer/interrupt
+	// writes cannot interleave their JSON+newline bytes into corrupt input (the
+	// codex driver serializes writes the same way). logf reacquires p.mu, so it
+	// stays outside this critical section.
+	p.mu.Lock()
+	_, err = stdin.Write(append(line, '\n'))
+	p.mu.Unlock()
+	if err != nil {
 		return err
 	}
-	p.logf("stream send %s", truncateForLog(string(bytes)))
+	p.logf("stream send %s", truncateForLog(string(line)))
 	return nil
 }
 
@@ -442,6 +463,12 @@ func (p *claudeRuntimeProcess) emit(event RuntimeEvent) {
 	default:
 		p.logf("dropping runtime event kind=%s because channel is full", event.Kind)
 	}
+}
+
+func (p *claudeRuntimeProcess) wasStopped() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.stopped
 }
 
 func (p *claudeRuntimeProcess) closeEvents() {

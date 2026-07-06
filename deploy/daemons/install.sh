@@ -247,7 +247,7 @@ case "$claude_command" in
 		;;
 esac
 
-degraded_mode="The daemon will run document sync only; agent sessions are unavailable until Codex is configured."
+degraded_mode="Codex agents will be unavailable until Codex is configured; other runtimes such as Claude Code are unaffected."
 
 check_codex() {
 	case "$codex_command" in

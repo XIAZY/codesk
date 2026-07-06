@@ -175,7 +175,7 @@ common_args="
 
 PATH="$test_bin:$PATH" NOTTY_CODEX_COMMAND="$tmp_dir/missing-codex" NOTTY_CLAUDE_COMMAND="$tmp_dir/missing-claude" HOME="$tmp_dir/home-missing" sh "$installer" $common_args > "$tmp_dir/missing.out" 2> "$tmp_dir/missing.err"
 grep -q "Codex runtime unavailable" "$tmp_dir/missing.err" || fail "missing codex warning did not explain runtime availability"
-grep -q "document sync only; agent sessions are unavailable" "$tmp_dir/missing.err" || fail "missing codex warning did not name the degraded mode"
+grep -q "Codex agents will be unavailable" "$tmp_dir/missing.err" || fail "missing codex warning did not name the degraded mode"
 grep -q "Claude Code runtime unavailable" "$tmp_dir/missing.err" || fail "missing claude warning did not explain runtime availability"
 assert_executable "$tmp_dir/install/notty-daemon"
 assert_file "$tmp_dir/data/daemons/ws-test/daemon.env"

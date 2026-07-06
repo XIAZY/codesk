@@ -18,11 +18,17 @@ const claudeTestHandshakeWait = 500 * time.Millisecond
 // stream-json stdin/stdout protocol (init on first message, result per turn,
 // control_response for control requests). Spawn args and received stdin lines
 // are appended to files named by FAKE_CLAUDE_ARGS_FILE / FAKE_CLAUDE_IO_FILE,
-// and FAKE_CLAUDE_FAIL_RESUME=1 simulates resuming an unknown session.
+// FAKE_CLAUDE_ENV_FILE captures the child process env, FAKE_CLAUDE_FAIL_RESUME=1
+// simulates resuming an unknown session, and FAKE_CLAUDE_HOLD_TURN=1 holds a
+// turn open (no result) until an interrupt so steer/interrupt run provably
+// mid-turn.
 const fakeClaudeScript = `#!/bin/sh
 if [ "$1" = "--version" ]; then
 	echo "9.9.9 (Claude Code)"
 	exit 0
+fi
+if [ -n "$FAKE_CLAUDE_ENV_FILE" ]; then
+	env > "$FAKE_CLAUDE_ENV_FILE"
 fi
 SID=""
 RESUME=""
@@ -52,6 +58,13 @@ while IFS= read -r line; do
 	case "$line" in
 	*control_request*)
 		printf '{"type":"control_response","response":{"subtype":"success"}}\n'
+		if [ "$FAKE_CLAUDE_HOLD_TURN" = "1" ]; then
+			case "$line" in
+			*interrupt*)
+				printf '{"type":"result","subtype":"success","is_error":false,"session_id":"%s"}\n' "$SID"
+				;;
+			esac
+		fi
 		continue
 		;;
 	esac
@@ -65,7 +78,9 @@ while IFS= read -r line; do
 		;;
 	*)
 		printf '{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]},"session_id":"%s"}\n' "$SID"
-		printf '{"type":"result","subtype":"success","is_error":false,"session_id":"%s"}\n' "$SID"
+		if [ "$FAKE_CLAUDE_HOLD_TURN" != "1" ]; then
+			printf '{"type":"result","subtype":"success","is_error":false,"session_id":"%s"}\n' "$SID"
+		fi
 		;;
 	esac
 done
@@ -292,14 +307,22 @@ func TestClaudeSteerRequiresActiveTurn(t *testing.T) {
 func TestClaudeSteerAndInterruptWriteToStdin(t *testing.T) {
 	ioFile := filepath.Join(t.TempDir(), "io")
 	t.Setenv("FAKE_CLAUDE_IO_FILE", ioFile)
+	// Hold the turn open (the fake emits no result until the interrupt) so the
+	// steer and interrupt are provably delivered while the turn is still active,
+	// not after it has already completed.
+	t.Setenv("FAKE_CLAUDE_HOLD_TURN", "1")
 	process := newTestClaudeProcess(t, writeFakeClaude(t))
-	if _, err := process.WriteStdin(context.Background(), RuntimeInput{Kind: RuntimeInputStartSession}); err != nil {
+	session, err := process.WriteStdin(context.Background(), RuntimeInput{Kind: RuntimeInputStartSession})
+	if err != nil {
 		t.Fatalf("start session: %v", err)
 	}
 	turn, err := process.WriteStdin(context.Background(), RuntimeInput{Kind: RuntimeInputStartTurn, Text: "long task"})
 	if err != nil {
 		t.Fatalf("start turn: %v", err)
 	}
+	// The turn is held open, so no completion event fires: the turn is genuinely
+	// active when we steer (steer requires an active turn).
+	expectNoRuntimeEventWithin(t, process.Events(), 150*time.Millisecond)
 	if _, err := process.WriteStdin(context.Background(), RuntimeInput{
 		Kind:   RuntimeInputSteerTurn,
 		TurnID: turn.TurnID,
@@ -310,23 +333,26 @@ func TestClaudeSteerAndInterruptWriteToStdin(t *testing.T) {
 	if _, err := process.WriteStdin(context.Background(), RuntimeInput{Kind: RuntimeInputInterruptTurn, TurnID: turn.TurnID}); err != nil {
 		t.Fatalf("interrupt turn: %v", err)
 	}
+	// The interrupt ends the held turn — its completion event confirms the steer
+	// and interrupt were processed mid-turn, not against a completed one.
+	expectRuntimeEvent(t, process.Events(), RuntimeEvent{
+		Kind:      RuntimeEventTurnCompleted,
+		SessionID: session.SessionID,
+		TurnID:    turn.TurnID,
+	})
 
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		lines := readLines(t, ioFile)
-		if len(lines) >= 3 {
-			if !strings.Contains(lines[1], "important follow-up") {
-				t.Fatalf("expected steer message on stdin, got %v", lines)
-			}
-			if !strings.Contains(lines[2], `"type":"control_request"`) || !strings.Contains(lines[2], `"subtype":"interrupt"`) {
-				t.Fatalf("expected interrupt control request on stdin, got %v", lines)
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for stdin writes, got %v", lines)
-		}
-		time.Sleep(10 * time.Millisecond)
+	lines := readLines(t, ioFile)
+	if len(lines) < 3 {
+		t.Fatalf("expected user + steer + interrupt on stdin, got %v", lines)
+	}
+	if !strings.Contains(lines[0], "long task") {
+		t.Fatalf("expected the turn message first on stdin, got %v", lines)
+	}
+	if !strings.Contains(lines[1], "important follow-up") {
+		t.Fatalf("expected steer message on stdin, got %v", lines)
+	}
+	if !strings.Contains(lines[2], `"type":"control_request"`) || !strings.Contains(lines[2], `"subtype":"interrupt"`) {
+		t.Fatalf("expected interrupt control request on stdin, got %v", lines)
 	}
 }
 
@@ -369,6 +395,48 @@ func TestClaudeStopKillsProcessAndClosesEvents(t *testing.T) {
 	}
 	if events := collectRuntimeEvents(t, process.Events()); len(events) != 0 {
 		t.Fatalf("expected no runtime events, got %#v", events)
+	}
+}
+
+// A Stop that lands inside the handshake window (process spawned but not yet
+// established) must still close the events channel — otherwise the supervisor's
+// event consumer blocks forever.
+func TestClaudeStopDuringHandshakeClosesEvents(t *testing.T) {
+	driver := &claudeDriver{
+		cfg: Config{ClaudeCommand: writeFakeClaude(t), DataDir: t.TempDir()},
+		// Generous window so Stop lands while spawn is still waiting on startup.
+		handshakeWait: 2 * time.Second,
+	}
+	spawned, err := driver.Spawn(context.Background(), RuntimeSpawnSpec{AgentID: "agent_claude", Workdir: t.TempDir(), ToolToken: "tool_token"})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if err := spawned.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	process := spawned.(*claudeRuntimeProcess)
+
+	// spawn() blocks for the handshake window, so start the session from a
+	// goroutine and stop the process while it is still mid-handshake.
+	go func() { _, _ = process.WriteStdin(context.Background(), RuntimeInput{Kind: RuntimeInputStartSession}) }()
+	deadline := time.Now().Add(time.Second)
+	for process.PID() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("claude process did not start")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if err := process.Stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	select {
+	case _, ok := <-process.Events():
+		if ok {
+			t.Fatal("expected the events channel to close, got an event")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("events channel did not close after Stop during the handshake window (leak)")
 	}
 }
 
@@ -576,6 +644,18 @@ func expectRuntimeEventWithin(t *testing.T, events <-chan RuntimeEvent, want Run
 	}
 }
 
+func expectNoRuntimeEventWithin(t *testing.T, events <-chan RuntimeEvent, timeout time.Duration) {
+	t.Helper()
+	select {
+	case got, ok := <-events:
+		if !ok {
+			t.Fatal("event channel closed while asserting no event")
+		}
+		t.Fatalf("expected no runtime event within %s, got %#v", timeout, got)
+	case <-time.After(timeout):
+	}
+}
+
 func readLines(t *testing.T, path string) []string {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -605,4 +685,84 @@ func containsSequence(lines []string, sequence []string) bool {
 		}
 	}
 	return false
+}
+
+// TestClaudeSpawnEnvContract pins the child process env the driver is
+// responsible for: the CLAUDECODE marker is stripped, the agent-tool values are
+// passed through, and IS_SANDBOX is not injected (the Dockerfile declares it).
+func TestClaudeSpawnEnvContract(t *testing.T) {
+	envFile := filepath.Join(t.TempDir(), "env")
+	t.Setenv("FAKE_CLAUDE_ENV_FILE", envFile)
+	// A CLAUDECODE marker in the parent env must not reach the child, since a
+	// nested marker changes claude CLI behavior.
+	t.Setenv("CLAUDECODE", "1")
+	// The driver must not inject IS_SANDBOX; make sure the parent env can't
+	// smuggle it into the assertion.
+	if orig, had := os.LookupEnv("IS_SANDBOX"); had {
+		os.Unsetenv("IS_SANDBOX")
+		t.Cleanup(func() { os.Setenv("IS_SANDBOX", orig) })
+	}
+
+	driver := &claudeDriver{
+		cfg: Config{
+			ClaudeCommand:    writeFakeClaude(t),
+			DataDir:          t.TempDir(),
+			AgentToolBaseURL: "http://tool.example",
+		},
+		handshakeWait: claudeTestHandshakeWait,
+	}
+	process, err := driver.Spawn(context.Background(), RuntimeSpawnSpec{
+		AgentID:   "agent_claude",
+		Workdir:   t.TempDir(),
+		ToolToken: "tool_token",
+	})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if err := process.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	claudeProcess := process.(*claudeRuntimeProcess)
+	t.Cleanup(func() { _ = claudeProcess.Stop() })
+	if _, err := claudeProcess.WriteStdin(context.Background(), RuntimeInput{Kind: RuntimeInputStartSession}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+
+	env := waitForEnvFile(t, envFile)
+	if _, ok := envLookup(env, "CLAUDECODE"); ok {
+		t.Fatal("expected CLAUDECODE stripped from the child env")
+	}
+	if got, _ := envLookup(env, "NOTTY_AGENT_TOOL_TOKEN"); got != "tool_token" {
+		t.Fatalf("expected NOTTY_AGENT_TOOL_TOKEN=tool_token in child env, got %q", got)
+	}
+	if got, _ := envLookup(env, "NOTTY_AGENT_TOOL_BASE_URL"); got != "http://tool.example" {
+		t.Fatalf("expected NOTTY_AGENT_TOOL_BASE_URL passed through, got %q", got)
+	}
+	if _, ok := envLookup(env, "IS_SANDBOX"); ok {
+		t.Fatal("expected the driver not to inject IS_SANDBOX (the Dockerfile declares it)")
+	}
+}
+
+func waitForEnvFile(t *testing.T, path string) []string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if data, err := os.ReadFile(path); err == nil && len(strings.TrimSpace(string(data))) > 0 {
+			return strings.Split(strings.TrimSpace(string(data)), "\n")
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for env capture file %s", path)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func envLookup(env []string, key string) (string, bool) {
+	prefix := key + "="
+	for _, line := range env {
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimPrefix(line, prefix), true
+		}
+	}
+	return "", false
 }
