@@ -796,6 +796,7 @@ func (s *Store) persistPostgresLocked() error {
 	if err = tx.Commit(); err != nil {
 		return err
 	}
+	s.pendingAgentEvents = nil
 	for _, insert := range activityInserts {
 		if insert.activity != nil {
 			insert.activity.ID = insert.id
@@ -1887,7 +1888,6 @@ func (s *Store) flushPendingAgentEventsPostgresLocked(tx *sql.Tx) error {
 			return err
 		}
 	}
-	s.pendingAgentEvents = nil
 	return nil
 }
 

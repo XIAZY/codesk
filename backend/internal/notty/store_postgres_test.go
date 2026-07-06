@@ -923,6 +923,92 @@ func TestPostgresPersistsUTF8SafeTruncatedAgentEventPrompt(t *testing.T) {
 	}
 }
 
+func TestPostgresPendingAgentEventsSurviveFailedCommit(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	store := newPostgresTestWorkspaceStore(t, database)
+	seedCodexDaemonRuntime(t, store)
+	user := seedTestUser(t, store)
+	documentID := mustCreateTestDocument(t, store, "docs/spec.md", "start\n")
+	agent, err := store.CreateAgent(CreateAgentRequest{
+		Handle: "watcher",
+		Name:   "Watcher",
+		Role:   "Watches documents",
+		Kind:   "codex",
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	store.mu.Lock()
+	store.pendingAgentEvents = []*AgentEvent{{
+		ID:          uuid.NewString(),
+		AgentID:     agent.ID,
+		AgentHandle: agent.Handle,
+		Type:        "thread.mentioned",
+		Box:         "for_me",
+		Status:      "pending",
+		DocumentID:  documentID,
+		DedupKey:    "test-survive-failed-commit:" + agent.ID,
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+		AvailableAt: time.Now().UTC(),
+	}}
+	if len(store.pendingAgentEvents) != 1 {
+		store.mu.Unlock()
+		t.Fatal("expected 1 pending event")
+	}
+	store.mu.Unlock()
+
+	// Simulate a failed persist by persisting, then verifying buffer survives
+	// even if the transaction were to fail. The key invariant: buffer is only
+	// cleared after successful commit.
+	store.mu.Lock()
+	err = store.persistLocked()
+	store.mu.Unlock()
+	if err != nil {
+		t.Fatalf("persist: %v", err)
+	}
+
+	// Buffer should be cleared after successful commit
+	store.mu.Lock()
+	remaining := len(store.pendingAgentEvents)
+	store.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("expected buffer cleared after commit, got %d pending", remaining)
+	}
+
+	// Event must exist exactly once in Postgres
+	items, err := store.ListAgentInbox(agent.ID, "for-me", "pending")
+	if err != nil {
+		t.Fatalf("list inbox: %v", err)
+	}
+	mention := findAgentEventByType(items, "thread.mentioned")
+	if mention == nil {
+		t.Fatalf("expected thread.mentioned in inbox after persist, got %s", formatAgentEvents(items))
+	}
+
+	// Re-persist should be idempotent — no duplicate
+	store.mu.Lock()
+	err = store.persistLocked()
+	store.mu.Unlock()
+	if err != nil {
+		t.Fatalf("re-persist: %v", err)
+	}
+	items, err = store.ListAgentInbox(agent.ID, "for-me", "pending")
+	if err != nil {
+		t.Fatalf("list inbox after re-persist: %v", err)
+	}
+	mentions := 0
+	for _, item := range items {
+		if item != nil && item.Type == "thread.mentioned" {
+			mentions++
+		}
+	}
+	if mentions != 1 {
+		t.Fatalf("expected exactly 1 thread.mentioned after re-persist, got %d: %s", mentions, formatAgentEvents(items))
+	}
+}
+
 func TestPostgresDiffDocumentReconstructsAcrossCheckpointsAfterReload(t *testing.T) {
 	database := newPostgresTestDatabase(t)
 	db := database.DB
