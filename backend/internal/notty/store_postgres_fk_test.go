@@ -151,6 +151,12 @@ func TestPostgresSchemaInitIsIdempotentOnNativeDatabase(t *testing.T) {
 	}
 }
 
+func TestPostgresSchemaOmitsLegacyDocumentPathTitleColumns(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+
+	assertNoDocumentPathTitleColumns(t, database.DB)
+}
+
 func TestPostgresSchemaForeignKeyConstraintsAreValidated(t *testing.T) {
 	database := newPostgresTestDatabase(t)
 	db := database.DB
@@ -210,8 +216,8 @@ func newFKTestFixture(t *testing.T) *fkTestFixture {
 		workspaceID, "fk-test-"+strings.ReplaceAll(uuid.NewString(), "-", "")[:8],
 		"FK Test", rootDocID, now, now)
 
-	mustExecFK(t, db, `INSERT INTO documents (workspace_id, id, path, title, hidden, client_id_seed, updated_at)
-		VALUES ($1, $2, '', '', TRUE, 1000, $3)`,
+	mustExecFK(t, db, `INSERT INTO documents (workspace_id, id, hidden, client_id_seed, updated_at)
+		VALUES ($1, $2, TRUE, 1000, $3)`,
 		workspaceID, rootDocID, now)
 
 	return &fkTestFixture{db: db, workspaceID: workspaceID, rootDocID: rootDocID, now: now}
@@ -219,8 +225,8 @@ func newFKTestFixture(t *testing.T) *fkTestFixture {
 
 func (f *fkTestFixture) insertDocument(t *testing.T, docID string) {
 	t.Helper()
-	mustExecFK(t, f.db, `INSERT INTO documents (workspace_id, id, path, title, hidden, client_id_seed, updated_at)
-		VALUES ($1, $2, 'test/path', 'Test', FALSE, 1001, $3)`,
+	mustExecFK(t, f.db, `INSERT INTO documents (workspace_id, id, hidden, client_id_seed, updated_at)
+		VALUES ($1, $2, FALSE, 1001, $3)`,
 		f.workspaceID, docID, f.now)
 }
 
@@ -295,8 +301,8 @@ func (f *fkTestFixture) insertForeignActors(t *testing.T) fkActorIDs {
 	mustExecFK(t, f.db, `INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6)`,
 		wsID, "foreign-"+wsID[:8], "Foreign Workspace", rootDocID, f.now, f.now)
-	mustExecFK(t, f.db, `INSERT INTO documents (workspace_id, id, path, title, hidden, client_id_seed, updated_at)
-		VALUES ($1, $2, '', '', TRUE, 1000, $3)`,
+	mustExecFK(t, f.db, `INSERT INTO documents (workspace_id, id, hidden, client_id_seed, updated_at)
+		VALUES ($1, $2, TRUE, 1000, $3)`,
 		wsID, rootDocID, f.now)
 
 	actors := fkActorIDs{
@@ -876,12 +882,12 @@ func TestFKConstraintsRejectCrossWorkspaceRefs(t *testing.T) {
 	mustExecFK(t, f.db, `INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6)`,
 		wsB, "ws-b-"+wsB[:8], "Workspace B", rootDocB, f.now, f.now)
-	mustExecFK(t, f.db, `INSERT INTO documents (workspace_id, id, path, title, hidden, client_id_seed, updated_at)
-		VALUES ($1, $2, '', '', TRUE, 1000, $3)`,
+	mustExecFK(t, f.db, `INSERT INTO documents (workspace_id, id, hidden, client_id_seed, updated_at)
+		VALUES ($1, $2, TRUE, 1000, $3)`,
 		wsB, rootDocB, f.now)
 	docB := uuid.NewString()
-	mustExecFK(t, f.db, `INSERT INTO documents (workspace_id, id, path, title, hidden, client_id_seed, updated_at)
-		VALUES ($1, $2, 'b/doc', 'Doc B', FALSE, 1001, $3)`,
+	mustExecFK(t, f.db, `INSERT INTO documents (workspace_id, id, hidden, client_id_seed, updated_at)
+		VALUES ($1, $2, FALSE, 1001, $3)`,
 		wsB, docB, f.now)
 	userB := uuid.NewString()
 	mustExecFK(t, f.db, `INSERT INTO users (workspace_id, id, handle, name, role, kind, status, created_at, updated_at)
@@ -1225,8 +1231,8 @@ func TestPolymorphicTriggerRejectsCrossWorkspaceRef(t *testing.T) {
 	mustExecFK(t, f.db, `INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6)`,
 		wsB, "ws-b-"+wsB[:8], "Workspace B", rootDocB, f.now, f.now)
-	mustExecFK(t, f.db, `INSERT INTO documents (workspace_id, id, path, title, hidden, client_id_seed, updated_at)
-		VALUES ($1, $2, '', '', TRUE, 1000, $3)`,
+	mustExecFK(t, f.db, `INSERT INTO documents (workspace_id, id, hidden, client_id_seed, updated_at)
+		VALUES ($1, $2, TRUE, 1000, $3)`,
 		wsB, rootDocB, f.now)
 	userB := uuid.NewString()
 	mustExecFK(t, f.db, `INSERT INTO users (workspace_id, id, handle, name, role, kind, status, created_at, updated_at)
