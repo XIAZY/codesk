@@ -297,19 +297,26 @@ export function coworkerCount(workspace: Pick<WorkspaceState, "agents" | "users"
   return workspace.agents.length + workspace.users.length;
 }
 
+// Matches the backend's 2-minute presence read cutoff (see PR #50), so the
+// client-side ring window agrees with what the server would still serve.
+export const PRESENCE_ONLINE_WINDOW_MS = 120_000;
+
 export type DocumentParticipant = {
   id: string;
   handle: string;
   name: string;
   kind: "you" | "agent" | "collaborator";
-  online: boolean;
+  // updatedAt of a presence row that points at THIS document, if any. Whether
+  // that counts as *online* is a freshness decision left to participantOnline,
+  // so the ring can decay client-side instead of lying after the backend window.
+  presentAt?: string;
 };
 
 // The durable participant set for a document: the current user, everyone in a
 // thread on the document, and every agent that has emitted an event on it —
 // all queryable from the workspace payload. Presence is NOT membership; it only
-// decorates the set with a live ring, and only for a fresh presence row that
-// points at this same document (workspace-level presence is not "here").
+// records presentAt for a presence row that points at this same document
+// (workspace-level presence is not "here"), which the ring then decays live.
 export function documentParticipants(
   workspace: Pick<WorkspaceState, "currentUserId" | "agents" | "users" | "threads" | "agentEvents" | "presences">,
   documentId: string | undefined,
@@ -337,18 +344,19 @@ export function documentParticipants(
     }
   }
 
-  const isOnline = (id: string) => {
+  const presentAt = (id: string) => {
     if (!documentId) {
-      return false;
+      return undefined;
     }
-    return workspace.presences[id]?.documentId === documentId;
+    const presence = workspace.presences[id];
+    return presence && presence.documentId === documentId ? presence.updatedAt : undefined;
   };
 
   const participants: DocumentParticipant[] = [];
   for (const id of ids) {
     const agent = agentsById.get(id);
     if (agent) {
-      participants.push({ id, handle: agent.handle, name: agent.name, kind: "agent", online: isOnline(id) });
+      participants.push({ id, handle: agent.handle, name: agent.name, kind: "agent", presentAt: presentAt(id) });
       continue;
     }
     const user = usersById.get(id);
@@ -360,14 +368,26 @@ export function documentParticipants(
       handle: user.handle,
       name: user.name,
       kind: id === currentUserId ? "you" : "collaborator",
-      online: isOnline(id),
+      presentAt: presentAt(id),
     });
   }
 
-  // You first, then online-in-this-document, then the rest; stable by handle.
-  const rank = (participant: DocumentParticipant) => (participant.kind === "you" ? 0 : participant.online ? 1 : 2);
+  // Deterministic base order — You first, then by handle. The panel re-orders
+  // online-first using a live freshness check (participantOnline).
+  const rank = (participant: DocumentParticipant) => (participant.kind === "you" ? 0 : 1);
   participants.sort((a, b) => rank(a) - rank(b) || a.handle.localeCompare(b.handle));
   return participants;
+}
+
+// A participant is online only when a presence row points at the current
+// document AND is still within the freshness window at nowMs — the same decay
+// daemon liveness uses, so a closed laptop drops the ring instead of lying.
+export function participantOnline(participant: Pick<DocumentParticipant, "presentAt">, nowMs: number): boolean {
+  if (!participant.presentAt) {
+    return false;
+  }
+  const presentMs = Date.parse(participant.presentAt);
+  return !Number.isNaN(presentMs) && nowMs - presentMs <= PRESENCE_ONLINE_WINDOW_MS;
 }
 
 export function threadReplyCount(thread: { messages: readonly unknown[] }) {

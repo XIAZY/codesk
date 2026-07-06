@@ -10,6 +10,7 @@ import {
   buildDaemonReinstallCommand,
   buildDaemonUninstallCommand,
   documentParticipants,
+  participantOnline,
   daemonStatus,
   daemonLiveStatus,
   handleMaxLength,
@@ -2545,8 +2546,9 @@ function ActivityPanel({ workspace }: { workspace: ReturnType<typeof useWorkspac
 const participantRoleTag = { you: "You", agent: "Agent", collaborator: "Collaborator" } as const;
 
 // Current-document participants (presence-read-only): the durable set from
-// documentParticipants(), rendered with a doc-level online ring. Membership
-// management lives in Manage → Members, not here.
+// documentParticipants(), decorated with a doc-level online ring that decays
+// after the freshness window (a 12s now-ticker, like daemon liveness) so a
+// closed laptop drops the ring instead of lying. Membership lives in Manage.
 function ParticipantsPanel({
   participants,
   agents,
@@ -2556,19 +2558,25 @@ function ParticipantsPanel({
   agents: Agent[];
   onAgent: (agent: Agent) => void;
 }) {
+  const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
   const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
+  const rank = (row: { participant: DocumentParticipant; online: boolean }) =>
+    row.participant.kind === "you" ? 0 : row.online ? 1 : 2;
+  const rows = participants
+    .map((participant) => ({ participant, online: participantOnline(participant, now) }))
+    .sort((a, b) => rank(a) - rank(b) || a.participant.handle.localeCompare(b.participant.handle));
   return (
     <div className="ctx-body people-pane">
       <div className="row between ctx-head">
         <span className="label">Participants</span>
         <span className="chip sm">{participants.length}</span>
       </div>
-      {participants.map((participant) => {
+      {rows.map(({ participant, online }) => {
         const agent = participant.kind === "agent" ? agentsById.get(participant.id) : undefined;
         const avatar = (
           <div
-            className={`avi ${participant.kind === "agent" ? "agent" : "you"}${participant.online ? " online" : ""}`}
-            title={participant.online ? "Online in this document" : undefined}
+            className={`avi ${participant.kind === "agent" ? "agent" : "you"}${online ? " online" : ""}`}
+            title={online ? "Online in this document" : undefined}
           >
             {initials(participant.handle || participant.name)}
           </div>

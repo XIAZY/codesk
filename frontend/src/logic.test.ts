@@ -13,6 +13,7 @@ import {
   computeReplace,
   coworkerCount,
   documentParticipants,
+  participantOnline,
   daemonStatus,
   daemonLiveStatus,
   stampDaemonReceipt,
@@ -325,9 +326,18 @@ describe("documentParticipants", () => {
     // durable set = me + alice (thread) + writer (event); bob/other are on doc2, excluded
     expect(result.map((p) => p.id)).toEqual(["u_me", "u_alice", "a_writer"]);
     expect(result.map((p) => p.kind)).toEqual(["you", "collaborator", "agent"]);
-    expect(result.find((p) => p.id === "u_alice")?.online).toBe(true);
-    expect(result.find((p) => p.id === "u_me")?.online).toBe(false);
-    expect(result.find((p) => p.id === "a_writer")?.online).toBe(false);
+    expect(result.find((p) => p.id === "u_alice")?.presentAt).toBe("now"); // fresh doc-level presence
+    expect(result.find((p) => p.id === "u_me")?.presentAt).toBeUndefined(); // present in another document
+    expect(result.find((p) => p.id === "a_writer")?.presentAt).toBeUndefined(); // workspace-level presence, not here
+  });
+
+  it("participantOnline shows the ring only for fresh presence and decays after the window", () => {
+    const nowMs = Date.parse("2026-07-06T12:00:00Z");
+    const iso = (offsetMs: number) => new Date(nowMs - offsetMs).toISOString();
+    expect(participantOnline({ presentAt: iso(60_000) }, nowMs)).toBe(true); // 1 min ago -> online
+    expect(participantOnline({ presentAt: iso(3 * 60_000) }, nowMs)).toBe(false); // 3 min ago -> decayed
+    expect(participantOnline({ presentAt: undefined }, nowMs)).toBe(false);
+    expect(participantOnline({ presentAt: "not-a-date" }, nowMs)).toBe(false);
   });
 
   it("keeps the current user with no document and never derives membership from presence", () => {
