@@ -39,7 +39,6 @@ services:
       NOTTY_DAEMON_TOKEN: ${NOTTY_DAEMON_TOKEN:-}
       NOTTY_WORKSPACE_DIR: /workspace/notty/${NOTTY_WORKSPACE_ID:-default}
       NOTTY_AGENT_WORKSPACE_ROOT: /workspace/agents/${NOTTY_WORKSPACE_ID:-default}
-      NOTTY_AGENT_ID: daemon_agent
     volumes:
       - daemon_workspace:/workspace
 

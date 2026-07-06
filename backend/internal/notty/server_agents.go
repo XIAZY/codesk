@@ -84,7 +84,7 @@ func (s *Server) handleClaimAgentEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.TrimSpace(req.AgentID) == "" {
-		req.AgentID = actorFromRequest(r, "")
+		req.AgentID = r.URL.Query().Get("actor")
 		if auth, ok := authFromContext(r.Context()); ok && auth.ActingAgentID != "" {
 			req.AgentID = auth.ActingAgentID
 		}
@@ -122,7 +122,7 @@ func (s *Server) handleUpdateAgentEvent(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	auth, _ := authFromContext(r.Context())
-	meta := operationMetaFromAuth(auth, "agent-event-update", actorFromRequest(r, "daemon_agent"), actorTypeFromRequest(r, "agent"))
+	meta := operationMetaFromAuth(auth, "agent-event-update", "system", "system")
 	event, err := s.requestStore(r).UpdateAgentEvent(chi.URLParam(r, "id"), req, meta)
 	if err != nil {
 		status := http.StatusBadRequest
@@ -213,7 +213,7 @@ func (s *Server) handleUpdateAgentNotification(w http.ResponseWriter, r *http.Re
 		return
 	}
 	auth, _ := authFromContext(r.Context())
-	meta := operationMetaFromAuth(auth, "agent-notification-update", actorFromRequest(r, "daemon_agent"), actorTypeFromRequest(r, "agent"))
+	meta := operationMetaFromAuth(auth, "agent-notification-update", "system", "system")
 	notification, err := s.requestStore(r).UpdateAgentNotification(chi.URLParam(r, "id"), req, meta)
 	if err != nil {
 		status := http.StatusBadRequest
@@ -237,7 +237,7 @@ func (s *Server) handleUpdateAgentInboxItem(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	auth, _ := authFromContext(r.Context())
-	meta := operationMetaFromAuth(auth, "agent-inbox-update", actorFromRequest(r, "daemon_agent"), actorTypeFromRequest(r, "agent"))
+	meta := operationMetaFromAuth(auth, "agent-inbox-update", "system", "system")
 	item, err := s.requestStore(r).UpdateAgentInboxItem(chi.URLParam(r, "id"), req, meta)
 	if err != nil {
 		status := http.StatusBadRequest
@@ -312,7 +312,7 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "daemon id is required")
 		return
 	}
-	meta := operationMetaFromAuth(auth, "agent-create", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
+	meta := operationMetaFromAuth(auth, "agent-create", "system", "system")
 	agent, err := s.requestStore(r).CreateAgent(req, meta)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -337,7 +337,7 @@ func (s *Server) handleCreateDaemonAgent(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	req.DaemonID = chi.URLParam(r, "daemonID")
-	meta := operationMetaFromAuth(auth, "daemon-agent-create", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
+	meta := operationMetaFromAuth(auth, "daemon-agent-create", "system", "system")
 	agent, err := s.requestStore(r).CreateAgent(req, meta)
 	if err != nil {
 		status := http.StatusBadRequest
@@ -365,7 +365,7 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	meta := operationMetaFromAuth(auth, "agent-update", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
+	meta := operationMetaFromAuth(auth, "agent-update", "system", "system")
 	agent, err := s.requestStore(r).UpdateAgent(chi.URLParam(r, "id"), req, meta)
 	if err != nil {
 		status := http.StatusBadRequest
@@ -389,7 +389,7 @@ func (s *Server) handleUpdateAgentSession(w http.ResponseWriter, r *http.Request
 		return
 	}
 	auth, _ := authFromContext(r.Context())
-	meta := operationMetaFromAuth(auth, "agent-session-update", actorFromRequest(r, "daemon_agent"), actorTypeFromRequest(r, "agent"))
+	meta := operationMetaFromAuth(auth, "agent-session-update", "system", "system")
 	agent, err := s.requestStore(r).UpdateAgentSession(chi.URLParam(r, "id"), req, meta)
 	if err != nil {
 		status := http.StatusBadRequest
@@ -412,7 +412,7 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
-	meta := operationMetaFromAuth(auth, "agent-delete", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
+	meta := operationMetaFromAuth(auth, "agent-delete", "system", "system")
 	agent, err := s.requestStore(r).DeleteAgent(chi.URLParam(r, "id"), meta)
 	if err != nil {
 		status := http.StatusBadRequest
@@ -450,7 +450,7 @@ func (s *Server) handleStartAgentRunRequest(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	auth, _ := authFromContext(r.Context())
-	meta := operationMetaFromAuth(auth, "agent-run-create", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
+	meta := operationMetaFromAuth(auth, "agent-run-create", "system", "system")
 	meta.Trigger = "agent launch"
 	agent, run, err := s.requestStore(r).StartAgentRun(req, meta)
 	if err != nil {
@@ -479,7 +479,7 @@ func (s *Server) handleUpdateAgentRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	auth, _ := authFromContext(r.Context())
-	meta := operationMetaFromAuth(auth, "agent-supervisor", actorFromRequest(r, "daemon"), actorTypeFromRequest(r, "agent"))
+	meta := operationMetaFromAuth(auth, "agent-supervisor", "system", "system")
 	meta.Source = "daemon"
 	meta.Trigger = "process status"
 	run, agent, err := s.requestStore(r).UpdateAgentRun(chi.URLParam(r, "id"), req, meta)
@@ -501,7 +501,7 @@ func (s *Server) handleStopAgentRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	auth, _ := authFromContext(r.Context())
-	meta := operationMetaFromAuth(auth, "agent-run-stop", actorFromRequest(r, "owner"), actorTypeFromRequest(r, "human"))
+	meta := operationMetaFromAuth(auth, "agent-run-stop", "system", "system")
 	meta.Trigger = "user stop"
 	run, err := s.requestStore(r).StopAgentRun(chi.URLParam(r, "id"), meta)
 	if err != nil {

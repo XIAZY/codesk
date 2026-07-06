@@ -27,17 +27,3 @@ func writeJSON(w http.ResponseWriter, status int, value interface{}) {
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
-
-func actorFromRequest(r *http.Request, fallback string) string {
-	if value := r.URL.Query().Get("actor"); value != "" {
-		return value
-	}
-	return fallback
-}
-
-func actorTypeFromRequest(r *http.Request, fallback string) string {
-	if value := r.URL.Query().Get("actor_type"); value != "" {
-		return value
-	}
-	return fallback
-}
