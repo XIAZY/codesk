@@ -235,40 +235,23 @@ func (s *Store) ensureRootDocumentLocked() (bool, error) {
 		return false, errors.New("workspace root document id is required")
 	}
 	s.state.RootDocumentID = rootID
-	if existing := s.state.ContentDocuments[rootID]; existing != nil {
-		changed := false
-		if !existing.Hidden {
-			existing.Hidden = true
-			changed = true
-		}
-		if changed {
-			existing.UpdatedAt = time.Now().UTC()
-			s.markDocumentDirtyLocked(existing.ID)
-		}
-		return changed, nil
+	existing := s.state.ContentDocuments[rootID]
+	if existing == nil {
+		// The deferred fk_workspaces_root_document constraint makes a workspace
+		// without its root document row unrepresentable, and every workspace is
+		// created with its root in one transaction (seedRootDocumentTx). Reaching
+		// here means that invariant was violated — fail closed rather than
+		// silently re-seed a document whose absence is itself the bug.
+		return false, fmt.Errorf("workspace %s is missing root document %s", s.state.WorkspaceID, rootID)
 	}
-
-	now := time.Now().UTC()
-	clientIDSeed := s.nextClientIDSeedLocked()
-	doc := crdt.New(crdt.WithClientID(crdt.ClientID(clientIDSeed)))
-	defer doc.Close()
-	document := &Document{
-		ID:           rootID,
-		Hidden:       true,
-		UpdatedAt:    now,
-		ClientIDSeed: clientIDSeed,
-		StateVector:  base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc)),
+	changed := false
+	if !existing.Hidden {
+		existing.Hidden = true
+		existing.UpdatedAt = time.Now().UTC()
+		s.markDocumentDirtyLocked(existing.ID)
+		changed = true
 	}
-	s.state.ContentDocuments[rootID] = document
-	_ = s.documentLockLocked(rootID)
-	s.markDocumentDirtyLocked(rootID)
-	s.appendIncrementalDocumentUpdateLocked(rootID, doc.EncodeStateAsUpdate(), OperationMeta{
-		ActorID:   "system",
-		ActorType: "system",
-		Source:    "root-document-bootstrap",
-	}, now)
-	s.state.UpdatedAt = now
-	return true, nil
+	return changed, nil
 }
 
 func newSeedDocument(id string, clientID uint64, content string, now time.Time) (*Document, []byte) {
@@ -1735,8 +1718,14 @@ func (s *Store) persistDocumentMutationLocked() error {
 	return s.persistDocumentMutationPostgresLocked()
 }
 
+// initialClientIDSeed is the CRDT client-id seed assigned to the first document
+// in a workspace (its root). Sharing it between nextClientIDSeedLocked and the
+// creation-time root seed keeps a root bootstrapped atomically byte-identical to
+// one that was seeded lazily.
+const initialClientIDSeed uint64 = 1001
+
 func (s *Store) nextClientIDSeedLocked() uint64 {
-	var next uint64 = 1001
+	next := initialClientIDSeed
 	for _, document := range s.state.ContentDocuments {
 		if document.ClientIDSeed >= next {
 			next = document.ClientIDSeed + 1

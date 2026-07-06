@@ -203,6 +203,32 @@ type fkActorIDs struct {
 	agentID  string
 }
 
+// seedWorkspaceRowFK inserts a workspace and its root document row in one
+// transaction, satisfying the deferred fk_workspaces_root_document constraint
+// (a workspace can never exist without its root document row).
+func seedWorkspaceRowFK(t *testing.T, db *sql.DB, workspaceID, slug, name, rootDocID string, now time.Time) {
+	t.Helper()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin workspace seed: %v", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		workspaceID, slug, name, rootDocID, now, now); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("insert workspace: %v", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO documents (workspace_id, id, hidden, client_id_seed, updated_at)
+		VALUES ($1, $2, TRUE, 1000, $3)`,
+		workspaceID, rootDocID, now); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("insert root document: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit workspace seed: %v", err)
+	}
+}
+
 func newFKTestFixture(t *testing.T) *fkTestFixture {
 	t.Helper()
 	database := newPostgresTestDatabase(t)
@@ -211,14 +237,7 @@ func newFKTestFixture(t *testing.T) *fkTestFixture {
 	workspaceID := uuid.NewString()
 	rootDocID := uuid.NewString()
 
-	mustExecFK(t, db, `INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6)`,
-		workspaceID, "fk-test-"+strings.ReplaceAll(uuid.NewString(), "-", "")[:8],
-		"FK Test", rootDocID, now, now)
-
-	mustExecFK(t, db, `INSERT INTO documents (workspace_id, id, hidden, client_id_seed, updated_at)
-		VALUES ($1, $2, TRUE, 1000, $3)`,
-		workspaceID, rootDocID, now)
+	seedWorkspaceRowFK(t, db, workspaceID, "fk-test-"+strings.ReplaceAll(uuid.NewString(), "-", "")[:8], "FK Test", rootDocID, now)
 
 	return &fkTestFixture{db: db, workspaceID: workspaceID, rootDocID: rootDocID, now: now}
 }
@@ -298,12 +317,7 @@ func (f *fkTestFixture) insertForeignActors(t *testing.T) fkActorIDs {
 	t.Helper()
 	wsID := uuid.NewString()
 	rootDocID := uuid.NewString()
-	mustExecFK(t, f.db, `INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6)`,
-		wsID, "foreign-"+wsID[:8], "Foreign Workspace", rootDocID, f.now, f.now)
-	mustExecFK(t, f.db, `INSERT INTO documents (workspace_id, id, hidden, client_id_seed, updated_at)
-		VALUES ($1, $2, TRUE, 1000, $3)`,
-		wsID, rootDocID, f.now)
+	seedWorkspaceRowFK(t, f.db, wsID, "foreign-"+wsID[:8], "Foreign Workspace", rootDocID, f.now)
 
 	actors := fkActorIDs{
 		userID:   uuid.NewString(),
@@ -879,12 +893,7 @@ func TestFKConstraintsRejectCrossWorkspaceRefs(t *testing.T) {
 	// Create workspace B with a full entity graph.
 	wsB := uuid.NewString()
 	rootDocB := uuid.NewString()
-	mustExecFK(t, f.db, `INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6)`,
-		wsB, "ws-b-"+wsB[:8], "Workspace B", rootDocB, f.now, f.now)
-	mustExecFK(t, f.db, `INSERT INTO documents (workspace_id, id, hidden, client_id_seed, updated_at)
-		VALUES ($1, $2, TRUE, 1000, $3)`,
-		wsB, rootDocB, f.now)
+	seedWorkspaceRowFK(t, f.db, wsB, "ws-b-"+wsB[:8], "Workspace B", rootDocB, f.now)
 	docB := uuid.NewString()
 	mustExecFK(t, f.db, `INSERT INTO documents (workspace_id, id, hidden, client_id_seed, updated_at)
 		VALUES ($1, $2, FALSE, 1001, $3)`,
@@ -1198,10 +1207,16 @@ func TestCompositeKeyIntrospection(t *testing.T) {
 		sourceCols := strings.Split(sourceColsStr, ",")
 		refCols := strings.Split(refColsStr, ",")
 
-		// Source must be exactly (workspace_id, <something>).
-		if len(sourceCols) != 2 || sourceCols[0] != "workspace_id" {
-			t.Errorf("FK %s on %s -> %s: source columns [%s] must be (workspace_id, <ref>)",
-				name, table, refTable, sourceColsStr)
+		// Source must be exactly (<workspace-scope col>, <ref>). Every
+		// workspace-scoped table names that scope column workspace_id, except
+		// workspaces itself, whose own id is the workspace scope.
+		wantScopeCol := "workspace_id"
+		if table == "workspaces" {
+			wantScopeCol = "id"
+		}
+		if len(sourceCols) != 2 || sourceCols[0] != wantScopeCol {
+			t.Errorf("FK %s on %s -> %s: source columns [%s] must be (%s, <ref>)",
+				name, table, refTable, sourceColsStr, wantScopeCol)
 		}
 		// Referenced must be exactly (workspace_id, id).
 		if len(refCols) != 2 || refCols[0] != "workspace_id" || refCols[1] != "id" {
@@ -1228,12 +1243,7 @@ func TestPolymorphicTriggerRejectsCrossWorkspaceRef(t *testing.T) {
 	// Create workspace B entities.
 	wsB := uuid.NewString()
 	rootDocB := uuid.NewString()
-	mustExecFK(t, f.db, `INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6)`,
-		wsB, "ws-b-"+wsB[:8], "Workspace B", rootDocB, f.now, f.now)
-	mustExecFK(t, f.db, `INSERT INTO documents (workspace_id, id, hidden, client_id_seed, updated_at)
-		VALUES ($1, $2, TRUE, 1000, $3)`,
-		wsB, rootDocB, f.now)
+	seedWorkspaceRowFK(t, f.db, wsB, "ws-b-"+wsB[:8], "Workspace B", rootDocB, f.now)
 	userB := uuid.NewString()
 	mustExecFK(t, f.db, `INSERT INTO users (workspace_id, id, handle, name, role, kind, status, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, 'member', 'human', 'active', $5, $6)`,

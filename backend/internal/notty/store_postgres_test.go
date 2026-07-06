@@ -342,51 +342,6 @@ func TestPostgresThreadSurvivesUUIDTurnSessionPersist(t *testing.T) {
 	}
 }
 
-func TestPostgresCreatesWorkspaceRootDocumentFromStoredRootID(t *testing.T) {
-	database := newPostgresTestDatabase(t)
-	db := database.DB
-
-	workspaceID := "11111111-1111-1111-1111-111111111111"
-	rootDocumentID := "22222222-2222-4222-8222-222222222222"
-	now := time.Now().UTC()
-	if _, err := db.Exec(
-		`INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		workspaceID,
-		"legacy-root",
-		"Legacy Root",
-		rootDocumentID,
-		now,
-		now,
-	); err != nil {
-		t.Fatalf("insert workspace row: %v", err)
-	}
-
-	store, err := NewWorkspaceStore(database, workspaceID, "fallback name")
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-
-	snapshot := store.Snapshot()
-	if snapshot.Name != "Legacy Root" {
-		t.Fatalf("workspace name = %q, want row name", snapshot.Name)
-	}
-	if snapshot.RootDocumentID != rootDocumentID {
-		t.Fatalf("root document ID = %q, want stored %q", snapshot.RootDocumentID, rootDocumentID)
-	}
-	if !store.HasDocument(rootDocumentID) {
-		t.Fatalf("stored root document %q is not syncable", rootDocumentID)
-	}
-
-	var storedRootID string
-	if err := db.QueryRow(`SELECT root_document_id::text FROM workspaces WHERE id = $1`, workspaceID).Scan(&storedRootID); err != nil {
-		t.Fatalf("select stored root document ID: %v", err)
-	}
-	if storedRootID != rootDocumentID {
-		t.Fatalf("stored root document ID = %q, want %q", storedRootID, rootDocumentID)
-	}
-}
-
 func TestPostgresLoadRegeneratesMissingCheckpointBeforeSync(t *testing.T) {
 	database := newPostgresTestDatabase(t)
 	db := database.DB
@@ -1239,7 +1194,11 @@ func insertPostgresTestWorkspace(t *testing.T, database *Database, name string) 
 	if workspace.Name == "" {
 		workspace.Name = "Test Workspace"
 	}
-	if _, err := database.DB.Exec(
+	tx, err := database.DB.Begin()
+	if err != nil {
+		t.Fatalf("begin test workspace tx: %v", err)
+	}
+	if _, err := tx.Exec(
 		`INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, $6)`,
 		workspace.ID,
@@ -1249,7 +1208,17 @@ func insertPostgresTestWorkspace(t *testing.T, database *Database, name string) 
 		workspace.CreatedAt,
 		workspace.UpdatedAt,
 	); err != nil {
+		_ = tx.Rollback()
 		t.Fatalf("insert test workspace: %v", err)
+	}
+	// Seed the root document in the same transaction, exactly as production
+	// creation does, so the deferred fk_workspaces_root_document is satisfied.
+	if err := seedRootDocumentTx(tx, workspace.ID, workspace.RootDocumentID, now); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("seed test workspace root document: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit test workspace: %v", err)
 	}
 	return workspace
 }
