@@ -1728,17 +1728,19 @@ func TestAgentEventClaimedByStateMachine(t *testing.T) {
 
 	insertEvent := func(t *testing.T, claimedBy any) {
 		t.Helper()
+		eventID := uuid.NewString()
 		mustExecFK(t, f.db, `INSERT INTO agent_events (workspace_id, id, agent_id, agent_handle, type, status,
 			summary, prompt, dedup_key, last_error, attempt_count, claimed_by, available_at, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, 'test', 'claimed', '', '', '', '', 0, $5, $6, $7, $8)`,
-			f.workspaceID, uuid.NewString(), agentID, "agent-"+agentID[:8], claimedBy, f.now, f.now, f.now)
+			VALUES ($1, $2, $3, $4, 'test', 'claimed', '', '', $5, '', 0, $6, $7, $8, $9)`,
+			f.workspaceID, eventID, agentID, "agent-"+agentID[:8], "test-"+eventID, claimedBy, f.now, f.now, f.now)
 	}
 	expectEventError := func(t *testing.T, claimedBy any) {
 		t.Helper()
+		eventID := uuid.NewString()
 		expectExecErrorFK(t, f.db, `INSERT INTO agent_events (workspace_id, id, agent_id, agent_handle, type, status,
 			summary, prompt, dedup_key, last_error, attempt_count, claimed_by, available_at, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, 'test', 'claimed', '', '', '', '', 0, $5, $6, $7, $8)`,
-			f.workspaceID, uuid.NewString(), agentID, "agent-"+agentID[:8], claimedBy, f.now, f.now, f.now)
+			VALUES ($1, $2, $3, $4, 'test', 'claimed', '', '', $5, '', 0, $6, $7, $8, $9)`,
+			f.workspaceID, eventID, agentID, "agent-"+agentID[:8], "test-"+eventID, claimedBy, f.now, f.now, f.now)
 	}
 
 	t.Run("null_accepts", func(t *testing.T) { insertEvent(t, nil) })
@@ -1751,8 +1753,8 @@ func TestAgentEventClaimedByStateMachine(t *testing.T) {
 		eventID := uuid.NewString()
 		mustExecFK(t, f.db, `INSERT INTO agent_events (workspace_id, id, agent_id, agent_handle, type, status,
 			summary, prompt, dedup_key, last_error, attempt_count, available_at, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, 'test', 'pending', '', '', '', '', 0, $5, $6, $7)`,
-			f.workspaceID, eventID, agentID, "agent-"+agentID[:8], f.now, f.now, f.now)
+			VALUES ($1, $2, $3, $4, 'test', 'pending', '', '', $5, '', 0, $6, $7, $8)`,
+			f.workspaceID, eventID, agentID, "agent-"+agentID[:8], "test-"+eventID, f.now, f.now, f.now)
 		expectExecErrorFK(t, f.db, `UPDATE agent_events SET claimed_by = $1 WHERE id = $2`, unrelatedDaemonID, eventID)
 	})
 }

@@ -46,7 +46,7 @@ type Store struct {
 	dirtyDocuments        map[string]struct{}
 	pendingDocumentEvents []documentUpdateRecord
 	pendingInboxChanges   []AgentInboxChangedEvent
-	dirtyAgentEvents      bool
+	pendingAgentEvents    []*AgentEvent
 }
 
 type documentUpdateRecord struct {
@@ -123,9 +123,6 @@ func (s *Store) load() error {
 		needsPersist = true
 	}
 	s.refreshThreadParticipantsLocked()
-	if s.reconcileThreadMentionEventsLocked() {
-		needsPersist = true
-	}
 	if needsPersist {
 		if err := s.persistLocked(); err != nil {
 			return fmt.Errorf("persist normalized workspace state: %w", err)
@@ -152,9 +149,6 @@ func (s *Store) ensureMaps() {
 	}
 	if s.state.Threads == nil {
 		s.state.Threads = map[string]*Thread{}
-	}
-	if s.state.AgentEvents == nil {
-		s.state.AgentEvents = map[string]*AgentEvent{}
 	}
 	if s.state.AgentDocumentViews == nil {
 		s.state.AgentDocumentViews = map[string]*AgentDocumentView{}
@@ -218,7 +212,6 @@ func seedWorkspaceFor(workspaceID string, workspaceName string) WorkspaceState {
 		Agents:              map[string]*Agent{},
 		AgentRuns:           map[string]*AgentRun{},
 		Threads:             map[string]*Thread{},
-		AgentEvents:         map[string]*AgentEvent{},
 		AgentDocumentViews:  map[string]*AgentDocumentView{},
 		DocumentCheckpoints: map[string]*DocumentCheckpoint{},
 		Presences:           map[string]*Presence{},
@@ -392,37 +385,21 @@ func (s *Store) ListThreadsForDocument(documentID string) ([]*Thread, error) {
 
 func (s *Store) ListAgentNotifications(agentID string, statuses ...string) ([]*AgentEvent, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	resolvedAgentID, _, err := s.resolveAgentIdentityLocked(strings.TrimSpace(agentID))
 	if err != nil {
+		s.mu.RUnlock()
 		return nil, err
 	}
-	allowed := map[string]struct{}{}
-	for _, status := range statuses {
-		if trimmed := strings.TrimSpace(status); trimmed != "" {
-			allowed[trimmed] = struct{}{}
+	workspaceID := s.state.WorkspaceID
+	s.mu.RUnlock()
+
+	trimmed := make([]string, 0, len(statuses))
+	for _, st := range statuses {
+		if t := strings.TrimSpace(st); t != "" {
+			trimmed = append(trimmed, t)
 		}
 	}
-	notifications := make([]*AgentEvent, 0)
-	for _, event := range s.state.AgentEvents {
-		if event == nil || event.AgentID != resolvedAgentID {
-			continue
-		}
-		if len(allowed) > 0 {
-			if _, ok := allowed[event.Status]; !ok {
-				continue
-			}
-		}
-		notifications = append(notifications, cloneAgentEvent(event))
-	}
-	sort.Slice(notifications, func(i, j int) bool {
-		if notifications[i].CreatedAt.Equal(notifications[j].CreatedAt) {
-			return notifications[i].ID < notifications[j].ID
-		}
-		return notifications[i].CreatedAt.Before(notifications[j].CreatedAt)
-	})
-	return notifications, nil
+	return listAgentEventsPostgres(s.db, workspaceID, resolvedAgentID, "", trimmed)
 }
 
 func (s *Store) DrainAgentInboxChanges() []AgentInboxChangedEvent {
@@ -438,39 +415,36 @@ func (s *Store) DrainAgentInboxChanges() []AgentInboxChangedEvent {
 
 func (s *Store) ListAgentInbox(agentID string, box string, statuses ...string) ([]*AgentEvent, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	resolvedAgentID, _, err := s.resolveAgentIdentityLocked(strings.TrimSpace(agentID))
+	if err != nil {
+		s.mu.RUnlock()
+		return nil, err
+	}
+	workspaceID := s.state.WorkspaceID
+	s.mu.RUnlock()
+
+	box = normalizeInboxBox(box)
+	trimmed := make([]string, 0, len(statuses))
+	allowed := map[string]struct{}{}
+	for _, st := range statuses {
+		if t := strings.TrimSpace(st); t != "" {
+			trimmed = append(trimmed, t)
+			allowed[t] = struct{}{}
+		}
+	}
+	notifications, err := listAgentEventsPostgres(s.db, workspaceID, resolvedAgentID, box, trimmed)
 	if err != nil {
 		return nil, err
 	}
-	box = normalizeInboxBox(box)
-	allowed := map[string]struct{}{}
-	for _, status := range statuses {
-		if trimmed := strings.TrimSpace(status); trimmed != "" {
-			allowed[trimmed] = struct{}{}
-		}
-	}
-	notifications := make([]*AgentEvent, 0)
-	seen := map[string]struct{}{}
-	for _, event := range s.state.AgentEvents {
-		if event == nil || event.AgentID != resolvedAgentID {
-			continue
-		}
-		if normalizeInboxBox(event.Box) != box {
-			continue
-		}
-		if len(allowed) > 0 {
-			if _, ok := allowed[event.Status]; !ok {
-				continue
-			}
-		}
-		cloned := cloneAgentEvent(event)
-		notifications = append(notifications, cloned)
-		seen[inboxDedupKey(cloned)] = struct{}{}
-	}
 	if includesPendingStatus(allowed) {
-		for _, event := range s.computedDocumentInboxLocked(resolvedAgentID) {
+		seen := map[string]struct{}{}
+		for _, event := range notifications {
+			seen[inboxDedupKey(event)] = struct{}{}
+		}
+		s.mu.RLock()
+		synthetic := s.computedDocumentInboxLocked(resolvedAgentID)
+		s.mu.RUnlock()
+		for _, event := range synthetic {
 			if event == nil || normalizeInboxBox(event.Box) != box {
 				continue
 			}
@@ -481,24 +455,21 @@ func (s *Store) ListAgentInbox(agentID string, box string, statuses ...string) (
 			notifications = append(notifications, event)
 			seen[key] = struct{}{}
 		}
+		sort.Slice(notifications, func(i, j int) bool {
+			if notifications[i].CreatedAt.Equal(notifications[j].CreatedAt) {
+				return notifications[i].ID < notifications[j].ID
+			}
+			return notifications[i].CreatedAt.Before(notifications[j].CreatedAt)
+		})
 	}
-	sort.Slice(notifications, func(i, j int) bool {
-		if notifications[i].CreatedAt.Equal(notifications[j].CreatedAt) {
-			return notifications[i].ID < notifications[j].ID
-		}
-		return notifications[i].CreatedAt.Before(notifications[j].CreatedAt)
-	})
 	return notifications, nil
 }
 
 func (s *Store) GetAgentNotification(id string) (*AgentEvent, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	event, ok := s.state.AgentEvents[id]
-	if !ok {
-		return nil, ErrNotFound
-	}
-	return cloneAgentEvent(event), nil
+	workspaceID := s.state.WorkspaceID
+	s.mu.RUnlock()
+	return getAgentEventPostgres(s.db, workspaceID, id)
 }
 
 func (s *Store) UpdateAgentNotification(id string, req UpdateAgentNotificationRequest, meta OperationMeta) (*AgentEvent, error) {
@@ -509,15 +480,19 @@ func (s *Store) UpdateAgentNotification(id string, req UpdateAgentNotificationRe
 
 func (s *Store) GetAgentInboxItem(id string) (*AgentEvent, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	event, ok := s.state.AgentEvents[id]
-	if !ok {
-		if synthetic, ok := s.syntheticDocumentInboxItemLocked(id); ok {
+	workspaceID := s.state.WorkspaceID
+	s.mu.RUnlock()
+	event, err := getAgentEventPostgres(s.db, workspaceID, id)
+	if err == ErrNotFound {
+		s.mu.RLock()
+		synthetic, ok := s.syntheticDocumentInboxItemLocked(id)
+		s.mu.RUnlock()
+		if ok {
 			return synthetic, nil
 		}
 		return nil, ErrNotFound
 	}
-	return cloneAgentEvent(event), nil
+	return event, err
 }
 
 func (s *Store) UpdateAgentInboxItem(id string, req UpdateAgentNotificationRequest, meta OperationMeta) (*AgentEvent, error) {
@@ -582,35 +557,15 @@ func (s *Store) MarkDocumentViewed(agentID, documentID string, req MarkDocumentV
 		ViewedAt:    now,
 	}
 	s.state.AgentDocumentViews[agentDocumentViewKey(resolvedAgentID, document.ID)] = view
-	for _, event := range s.state.AgentEvents {
-		if event == nil || event.AgentID != resolvedAgentID || event.DocumentID != document.ID || !strings.HasPrefix(event.Type, "document.") {
-			continue
-		}
-		if event.Status == "completed" || event.Status == "dismissed" {
-			continue
-		}
-		if event.ToUpdateID <= updateID {
-			event.Status = "completed"
-			event.CompletedAt = now
-			event.UpdatedAt = now
-			s.dirtyAgentEvents = true
-		}
-	}
 	s.state.UpdatedAt = now
 	workspaceID := s.state.WorkspaceID
 	cloned := cloneAgentDocumentView(view)
-	dirtyEvents := s.dirtyAgentEvents
 	s.mu.Unlock()
 	if err := upsertAgentDocumentViewPostgres(s.db, workspaceID, cloned); err != nil {
 		return nil, err
 	}
-	if dirtyEvents {
-		if err := completeDocumentInboxEventsPostgres(s.db, workspaceID, resolvedAgentID, document.ID, updateID, now); err != nil {
-			return nil, err
-		}
-		s.mu.Lock()
-		s.dirtyAgentEvents = false
-		s.mu.Unlock()
+	if err := completeDocumentInboxEventsPostgres(s.db, workspaceID, resolvedAgentID, document.ID, updateID, now); err != nil {
+		return nil, err
 	}
 	return cloned, nil
 }
@@ -746,21 +701,11 @@ func (s *Store) computedDocumentInboxLocked(agentID string) []*AgentEvent {
 }
 
 func (s *Store) documentInboxHandledLocked(agentID string, document *Document) bool {
-	for _, event := range s.state.AgentEvents {
-		if event == nil || event.AgentID != agentID || event.DocumentID != document.ID || !strings.HasPrefix(event.Type, "document.") {
-			continue
-		}
-		if event.Status != "completed" && event.Status != "dismissed" {
-			continue
-		}
-		if event.ToUpdateID >= document.UpdateID {
-			return true
-		}
-		if event.ToUpdateID == 0 && !event.UpdatedAt.Before(document.UpdatedAt) {
-			return true
-		}
+	handled, err := documentInboxHandledPostgres(s.db, s.state.WorkspaceID, agentID, document.ID, document.UpdateID, document.UpdatedAt)
+	if err != nil {
+		return false
 	}
-	return false
+	return handled
 }
 
 func (s *Store) syntheticDocumentInboxItemLocked(id string) (*AgentEvent, bool) {
@@ -1178,11 +1123,6 @@ func (s *Store) DeleteAgent(id string, meta OperationMeta) (*Agent, error) {
 	for runID, run := range s.state.AgentRuns {
 		if run.AgentID == id {
 			delete(s.state.AgentRuns, runID)
-		}
-	}
-	for eventID, event := range s.state.AgentEvents {
-		if event.AgentID == id {
-			delete(s.state.AgentEvents, eventID)
 		}
 	}
 	for _, thread := range s.state.Threads {
@@ -1728,20 +1668,13 @@ func (s *Store) ClaimAgentEvent(req ClaimAgentEventRequest) (*AgentEvent, error)
 	if err != nil {
 		return nil, err
 	}
-	s.mu.Lock()
-	s.state.AgentEvents[event.ID] = cloneAgentEvent(event)
-	s.mu.Unlock()
 	return event, nil
 }
 
 func (s *Store) UpdateAgentEvent(id string, req UpdateAgentEventRequest, meta OperationMeta) (*AgentEvent, error) {
-	s.mu.Lock()
+	s.mu.RLock()
 	workspaceID := s.state.WorkspaceID
-	if _, ok := s.state.AgentEvents[id]; !ok {
-		s.mu.Unlock()
-		return nil, ErrNotFound
-	}
-	s.mu.Unlock()
+	s.mu.RUnlock()
 	updated, err := updateAgentEventPostgres(s.db, workspaceID, id, req)
 	if err != nil {
 		return nil, err
@@ -1752,7 +1685,6 @@ func (s *Store) UpdateAgentEvent(id string, req UpdateAgentEventRequest, meta Op
 		}
 	}
 	s.mu.Lock()
-	s.state.AgentEvents[id] = cloneAgentEvent(updated)
 	s.state.UpdatedAt = updated.UpdatedAt
 	s.appendActivityLocked(&ActivityEvent{
 		Type:       "agent.event.updated",
@@ -1845,10 +1777,6 @@ func cloneState(state WorkspaceState) WorkspaceState {
 	copyState.Threads = map[string]*Thread{}
 	for key, thread := range state.Threads {
 		copyState.Threads[key] = cloneThread(thread)
-	}
-	copyState.AgentEvents = map[string]*AgentEvent{}
-	for key, event := range state.AgentEvents {
-		copyState.AgentEvents[key] = cloneAgentEvent(event)
 	}
 	copyState.AgentDocumentViews = map[string]*AgentDocumentView{}
 	for key, view := range state.AgentDocumentViews {
@@ -2385,19 +2313,6 @@ func SortedThreads(state WorkspaceState) []*Thread {
 	return threads
 }
 
-func SortedAgentEvents(state WorkspaceState) []*AgentEvent {
-	events := make([]*AgentEvent, 0, len(state.AgentEvents))
-	for _, event := range state.AgentEvents {
-		events = append(events, cloneAgentEvent(event))
-	}
-	sort.Slice(events, func(i, j int) bool {
-		if events[i].CreatedAt.Equal(events[j].CreatedAt) {
-			return events[i].ID < events[j].ID
-		}
-		return events[i].CreatedAt.Before(events[j].CreatedAt)
-	})
-	return events
-}
 
 func cloneThread(thread *Thread) *Thread {
 	if thread == nil {
@@ -2649,29 +2564,6 @@ func (s *Store) upsertDocumentInboxEventLocked(agent *Agent, document *Document,
 		summary = fmt.Sprintf("%s changed near thread %s", documentLabel(document), firstNonEmptyString(threadTitle, threadID))
 		prompt = fmt.Sprintf("Document %s changed near thread %q. Review the latest edits and continue the discussion if needed.", documentLabel(document), firstNonEmptyString(threadTitle, threadID))
 	}
-	for _, current := range s.state.AgentEvents {
-		if current == nil || current.AgentID != agent.ID || current.DocumentID != document.ID || !strings.HasPrefix(current.Type, "document.") {
-			continue
-		}
-		if normalizeInboxBox(current.Box) != box || current.Status != "pending" {
-			continue
-		}
-		if current.FromUpdateID == 0 || fromUpdateID < current.FromUpdateID {
-			current.FromUpdateID = fromUpdateID
-		}
-		if toUpdateID > current.ToUpdateID {
-			current.ToUpdateID = toUpdateID
-		}
-		current.AgentHandle = agent.Handle
-		current.ThreadID = threadID
-		current.Summary = summary
-		current.Prompt = prompt
-		current.UpdatedAt = now
-		current.AvailableAt = now
-		s.dirtyAgentEvents = true
-		s.recordAgentInboxChangedLocked(current)
-		return
-	}
 	event := &AgentEvent{
 		ID:           uuid.NewString(),
 		AgentID:      agent.ID,
@@ -2690,9 +2582,11 @@ func (s *Store) upsertDocumentInboxEventLocked(agent *Agent, document *Document,
 		UpdatedAt:    now,
 		AvailableAt:  now,
 	}
-	s.state.AgentEvents[event.ID] = event
-	s.dirtyAgentEvents = true
-	s.recordAgentInboxChangedLocked(event)
+	upserted, err := upsertDocumentInboxEventPostgres(s.db, s.state.WorkspaceID, event)
+	if err != nil {
+		return
+	}
+	s.recordAgentInboxChangedLocked(upserted)
 }
 
 func (s *Store) enqueueThreadMentionEventsLocked(thread *Thread, message *ThreadMessage, meta OperationMeta) {
@@ -2716,25 +2610,6 @@ func (s *Store) enqueueThreadMentionEventsLocked(thread *Thread, message *Thread
 	}
 }
 
-func (s *Store) reconcileThreadMentionEventsLocked() bool {
-	before := len(s.state.AgentEvents)
-	for _, thread := range s.state.Threads {
-		if thread == nil {
-			continue
-		}
-		for _, message := range thread.Messages {
-			if message == nil {
-				continue
-			}
-			s.enqueueThreadMentionEventsLocked(thread, message, OperationMeta{
-				ActorID:   message.AuthorID,
-				ActorType: message.AuthorType,
-				Source:    "reconcile",
-			})
-		}
-	}
-	return len(s.state.AgentEvents) != before
-}
 
 func (s *Store) enqueueThreadReplyEventsLocked(thread *Thread, message *ThreadMessage, meta OperationMeta, skipAgentIDs ...string) {
 	if thread == nil || message == nil {
@@ -2778,11 +2653,6 @@ func (s *Store) shouldNotifyAgentLocked(agentID string, meta OperationMeta, fall
 }
 
 func (s *Store) ensureAgentEventLocked(agentID, agentHandle, eventType, dedupKey string, apply func(event *AgentEvent, now time.Time)) {
-	for _, current := range s.state.AgentEvents {
-		if current.DedupKey == dedupKey {
-			return
-		}
-	}
 	now := time.Now().UTC()
 	event := &AgentEvent{
 		ID:          uuid.NewString(),
@@ -2799,8 +2669,7 @@ func (s *Store) ensureAgentEventLocked(agentID, agentHandle, eventType, dedupKey
 	if apply != nil {
 		apply(event, now)
 	}
-	s.state.AgentEvents[event.ID] = event
-	s.dirtyAgentEvents = true
+	s.pendingAgentEvents = append(s.pendingAgentEvents, event)
 	s.recordAgentInboxChangedLocked(event)
 }
 

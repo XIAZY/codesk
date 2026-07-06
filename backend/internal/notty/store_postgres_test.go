@@ -116,8 +116,8 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	if got := snapshot.AgentRuns[run.ID]; got == nil || got.SessionID != "session_pg_123" {
 		t.Fatalf("expected persisted run session id after reload, got %#v", got)
 	}
-	if got := snapshot.AgentEvents[claimed.ID]; got == nil || got.Status != "completed" || got.RunID != run.ID {
-		t.Fatalf("expected completed event after reload, got %#v", got)
+	if got, err := getAgentEventPostgres(db, snapshot.WorkspaceID, claimed.ID); err != nil || got == nil || got.Status != "completed" || got.RunID != run.ID {
+		t.Fatalf("expected completed event after reload, got %#v (err: %v)", got, err)
 	}
 	if got := snapshot.Presences[user.ID]; got == nil || got.FilePath != "docs/spec.md" || len(got.Selection) != 2 {
 		t.Fatalf("expected presence after reload, got %#v", got)
@@ -242,10 +242,6 @@ func TestPostgresSnapshotPersistPreservesDatabaseOnlyRows(t *testing.T) {
 	if staleStore.state.Presences[user.ID] != nil {
 		staleStore.mu.Unlock()
 		t.Fatalf("stale store unexpectedly contains database-only presence")
-	}
-	if staleStore.state.AgentEvents[eventID] != nil {
-		staleStore.mu.Unlock()
-		t.Fatalf("stale store unexpectedly contains database-only agent event")
 	}
 	if staleStore.state.AgentDocumentViews[agentDocumentViewKey(agent.ID, documentID)] != nil {
 		staleStore.mu.Unlock()
@@ -844,28 +840,8 @@ func TestPostgresAgentInboxTracksDocumentUpdatesAndThreadMentions(t *testing.T) 
 		t.Fatalf("expected log thread mention in for-me inbox, got %s", formatAgentEvents(items))
 	}
 
-	store.mu.Lock()
-	store.state.AgentEvents = map[string]*AgentEvent{}
-	if err := store.persistLocked(); err != nil {
-		store.mu.Unlock()
-		t.Fatalf("persist missing log thread mention: %v", err)
-	}
-	store.mu.Unlock()
-	if err := store.load(); err != nil {
-		t.Fatalf("reload store with missing log thread mention: %v", err)
-	}
-	items, err = store.ListAgentInbox(agent.ID, "for-me", "pending")
-	if err != nil {
-		t.Fatalf("list reconciled inbox after reload: %v", err)
-	}
-	mention = findAgentEventByType(items, "thread.mentioned")
-	if mention == nil || mention.ThreadID != thread.ID || mention.ThreadMessageID != message.ID {
-		t.Fatalf("expected missing log thread mention to reconcile after reload, got %s", formatAgentEvents(items))
-	}
-
-	// Under upsert-only persistence, the document.updated event also survives
-	// in Postgres (clearing memory does not delete DB rows). Drain it first so
-	// the next claim returns the reconciled thread.mentioned event.
+	// The document.updated event also lives in Postgres. Drain it first so
+	// the next claim returns the thread.mentioned event.
 	claimed, err := store.ClaimAgentEvent(ClaimAgentEventRequest{AgentID: agent.ID, ClaimedBy: "daemon"})
 	if err != nil {
 		t.Fatalf("claim first event: %v", err)
