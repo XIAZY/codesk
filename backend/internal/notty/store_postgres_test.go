@@ -225,6 +225,12 @@ func TestPostgresThreadHandlesAfterActorDeletion(t *testing.T) {
 	if len(got.ParticipantIDs) != 0 {
 		t.Fatalf("expected zero participants after agent deletion (trigger cleans up), got %v", got.ParticipantIDs)
 	}
+	if got.ParticipantHandles == nil {
+		t.Fatalf("expected ParticipantHandles to be [] (not nil), got nil")
+	}
+	if len(got.ParticipantHandles) != 0 {
+		t.Fatalf("expected zero participant handles after agent deletion, got %v", got.ParticipantHandles)
+	}
 }
 
 func TestPostgresSnapshotPersistPreservesDatabaseOnlyRows(t *testing.T) {

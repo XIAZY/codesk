@@ -1729,6 +1729,49 @@ func insertAgentEventPostgres(db *sql.DB, workspaceID string, event *AgentEvent)
 	return err
 }
 
+func insertAgentEventTx(tx *sql.Tx, workspaceID string, event *AgentEvent) error {
+	_, err := tx.Exec(
+		`INSERT INTO agent_events (
+			workspace_id, id, agent_id, agent_handle, type, box, status, document_id,
+			thread_id, thread_message_id, from_update_id, to_update_id, summary,
+			prompt, dedup_key, claimed_by, run_id, last_error, attempt_count,
+			available_at, claimed_at, completed_at, created_at, updated_at
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8,
+			$9, $10, $11, $12, $13,
+			$14, $15, $16, $17, $18, $19,
+			$20, $21, $22, $23, $24
+		)
+		ON CONFLICT (workspace_id, dedup_key) WHERE status NOT IN ('completed', 'dismissed')
+		DO NOTHING`,
+		workspaceID,
+		event.ID,
+		event.AgentID,
+		event.AgentHandle,
+		event.Type,
+		normalizeInboxBox(event.Box),
+		event.Status,
+		uuidStringOrNil(event.DocumentID),
+		uuidStringOrNil(event.ThreadID),
+		uuidStringOrNil(event.ThreadMessageID),
+		event.FromUpdateID,
+		event.ToUpdateID,
+		event.Summary,
+		event.Prompt,
+		event.DedupKey,
+		uuidStringOrNil(event.ClaimedBy),
+		uuidStringOrNil(event.RunID),
+		event.LastError,
+		event.AttemptCount,
+		event.AvailableAt,
+		nullTime(event.ClaimedAt),
+		nullTime(event.CompletedAt),
+		event.CreatedAt,
+		event.UpdatedAt,
+	)
+	return err
+}
+
 func upsertDocumentInboxEventPostgres(db *sql.DB, workspaceID string, event *AgentEvent) (*AgentEvent, error) {
 	row := db.QueryRow(
 		`INSERT INTO agent_events (
@@ -2467,7 +2510,7 @@ func scanAgentRun(scanner interface{ Scan(...any) error }) (*AgentRun, error) {
 }
 
 func scanThread(scanner interface{ Scan(...any) error }) (*Thread, error) {
-	thread := &Thread{Messages: []*ThreadMessage{}, ParticipantIDs: []string{}}
+	thread := &Thread{Messages: []*ThreadMessage{}, ParticipantIDs: []string{}, ParticipantHandles: []string{}}
 	if err := scanner.Scan(
 		&thread.ID,
 		&thread.DocumentID,
@@ -2709,6 +2752,9 @@ func queryThreadsPostgres(db *sql.DB, workspaceID string, documentID string, thr
 	if err := pRows.Err(); err != nil {
 		return nil, err
 	}
+	for _, thread := range threads {
+		sort.Strings(thread.ParticipantHandles)
+	}
 
 	messageQuery := `SELECT m.id::text, m.thread_id::text, COALESCE(m.author_id::text, ''), m.author_type,
 	       COALESCE(u.handle, a.handle, m.author_handle) AS author_handle,
@@ -2752,7 +2798,7 @@ func queryThreadsPostgres(db *sql.DB, workspaceID string, documentID string, thr
 	return threads, nil
 }
 
-func createThreadPostgres(db *sql.DB, workspaceID string, thread *Thread, message *ThreadMessage) (bool, error) {
+func createThreadPostgres(db *sql.DB, workspaceID string, thread *Thread, message *ThreadMessage, events []*AgentEvent, activity *ActivityEvent) (bool, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return false, err
@@ -2839,11 +2885,21 @@ func createThreadPostgres(db *sql.DB, workspaceID string, thread *Thread, messag
 		}
 	}
 
+	for _, event := range events {
+		if err = insertAgentEventTx(tx, workspaceID, event); err != nil {
+			return false, err
+		}
+	}
+
+	if err = insertActivityPostgres(tx, workspaceID, activity); err != nil {
+		return false, err
+	}
+
 	err = tx.Commit()
 	return err == nil, err
 }
 
-func replyThreadPostgres(db *sql.DB, workspaceID string, threadID string, message *ThreadMessage, participantIDs []string) (*Thread, error) {
+func replyThreadPostgres(db *sql.DB, workspaceID string, threadID string, message *ThreadMessage, participantIDs []string, events []*AgentEvent, activity *ActivityEvent) (*Thread, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
@@ -2855,10 +2911,16 @@ func replyThreadPostgres(db *sql.DB, workspaceID string, threadID string, messag
 	}()
 
 	now := message.CreatedAt
-	if _, err = tx.Exec(
-		`UPDATE threads SET updated_at = $1 WHERE workspace_id = $2::uuid AND id = $3::uuid`,
+	var foundID string
+	err = tx.QueryRow(
+		`UPDATE threads SET updated_at = $1 WHERE workspace_id = $2::uuid AND id = $3::uuid RETURNING id::text`,
 		now, workspaceID, threadID,
-	); err != nil {
+	).Scan(&foundID)
+	if err == sql.ErrNoRows {
+		_ = tx.Rollback()
+		return nil, ErrNotFound
+	}
+	if err != nil {
 		return nil, err
 	}
 
@@ -2893,6 +2955,16 @@ func replyThreadPostgres(db *sql.DB, workspaceID string, threadID string, messag
 		); err != nil {
 			return nil, err
 		}
+	}
+
+	for _, event := range events {
+		if err = insertAgentEventTx(tx, workspaceID, event); err != nil {
+			return nil, err
+		}
+	}
+
+	if err = insertActivityPostgres(tx, workspaceID, activity); err != nil {
+		return nil, err
 	}
 
 	if err = tx.Commit(); err != nil {
@@ -2939,15 +3011,6 @@ func documentHasOpenThreadForParticipantPostgres(db *sql.DB, workspaceID string,
 		return false, "", "", err
 	}
 	return true, threadID, threadTitle, nil
-}
-
-func documentHasThreadsPostgres(db *sql.DB, workspaceID string, documentID string) (bool, error) {
-	var exists bool
-	err := db.QueryRow(
-		`SELECT EXISTS(SELECT 1 FROM threads WHERE workspace_id = $1::uuid AND document_id = $2::uuid)`,
-		workspaceID, documentID,
-	).Scan(&exists)
-	return exists, err
 }
 
 func removeThreadParticipantPostgres(db *sql.DB, workspaceID string, participantID string) error {

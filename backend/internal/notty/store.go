@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -323,6 +324,9 @@ func (s *Store) EncodeDocumentSyncUpdates(documentID string, stateVector []byte)
 }
 
 func (s *Store) GetThread(id string) (*Thread, error) {
+	if _, err := uuid.Parse(id); err != nil {
+		return nil, ErrNotFound
+	}
 	s.mu.RLock()
 	workspaceID := s.state.WorkspaceID
 	s.mu.RUnlock()
@@ -684,7 +688,11 @@ func (s *Store) documentInboxClassificationLocked(agentID string, document *Docu
 		return "general", "document.updated"
 	}
 	found, _, _, err := documentHasOpenThreadForParticipantPostgres(s.db, s.state.WorkspaceID, document.ID, agentID)
-	if err != nil || !found {
+	if err != nil {
+		log.Printf("documentInboxClassificationLocked: %v", err)
+		return "general", "document.updated"
+	}
+	if !found {
 		return "general", "document.updated"
 	}
 	return "for_me", "document.updated"
@@ -1081,7 +1089,9 @@ func (s *Store) DeleteAgent(id string, meta OperationMeta) (*Agent, error) {
 			delete(s.state.AgentRuns, runID)
 		}
 	}
-	_ = removeThreadParticipantPostgres(s.db, s.state.WorkspaceID, id)
+	if err := removeThreadParticipantPostgres(s.db, s.state.WorkspaceID, id); err != nil {
+		return nil, err
+	}
 	now := time.Now().UTC()
 	s.state.UpdatedAt = now
 	s.appendActivityLocked(&ActivityEvent{
@@ -1504,7 +1514,17 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 		Kind:         "comment",
 		CreatedAt:    now,
 	}
-	created, err := createThreadPostgres(s.db, s.state.WorkspaceID, thread, message)
+	events := s.collectThreadMentionEventsLocked(thread, message, meta)
+	activity := &ActivityEvent{
+		Type:       "thread.created",
+		DocumentID: document.ID,
+		ActorID:    meta.ActorID,
+		ActorType:  meta.ActorType,
+		Summary:    fmt.Sprintf("%s started a thread on %s", meta.ActorID, documentLabel(document)),
+		OccurredAt: now,
+		Provenance: meta,
+	}
+	created, err := createThreadPostgres(s.db, s.state.WorkspaceID, thread, message, events, activity)
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -1518,21 +1538,17 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 		}
 		return nil, nil, false, errors.New("thread creation conflict")
 	}
-	s.enqueueThreadMentionEventsLocked(thread, message, meta)
+	// Defer inbox-change broadcasts until after the tx has committed.
+	for _, event := range events {
+		s.recordAgentInboxChangedLocked(event)
+	}
 	s.state.UpdatedAt = now
-	s.appendActivityLocked(&ActivityEvent{
-		Type:       "thread.created",
-		DocumentID: document.ID,
-		ActorID:    meta.ActorID,
-		ActorType:  meta.ActorType,
-		Summary:    fmt.Sprintf("%s started a thread on %s", meta.ActorID, documentLabel(document)),
-		OccurredAt: now,
-		Provenance: meta,
-	})
-	if err := s.persistLocked(); err != nil {
+	// Re-read from Postgres to get JOIN-resolved handles and populated messages.
+	committed, err := getThreadPostgres(s.db, s.state.WorkspaceID, thread.ID)
+	if err != nil {
 		return nil, nil, false, err
 	}
-	return thread, message, true, nil
+	return committed, firstThreadMessage(committed), true, nil
 }
 
 func firstThreadMessage(thread *Thread) *ThreadMessage {
@@ -1543,10 +1559,15 @@ func firstThreadMessage(thread *Thread) *ThreadMessage {
 }
 
 func (s *Store) ReplyThread(id string, req ReplyThreadRequest, meta OperationMeta) (*Thread, *ThreadMessage, error) {
+	if _, err := uuid.Parse(id); err != nil {
+		return nil, nil, ErrNotFound
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	workspaceID := s.state.WorkspaceID
+	// Pre-read for participant list (needed to build reply events).
+	// The actual existence guarantee is the UPDATE RETURNING inside the tx.
 	thread, err := getThreadPostgres(s.db, workspaceID, id)
 	if err != nil {
 		return nil, nil, err
@@ -1577,14 +1598,11 @@ func (s *Store) ReplyThread(id string, req ReplyThreadRequest, meta OperationMet
 	}
 	mentionedIDs := s.extractMentionPrincipalIDsLocked(body)
 	participantIDs := append([]string{author.ID}, mentionedIDs...)
-	updatedThread, err := replyThreadPostgres(s.db, workspaceID, id, message, participantIDs)
-	if err != nil {
-		return nil, nil, err
-	}
-	s.enqueueThreadMentionEventsLocked(updatedThread, message, meta)
-	s.enqueueThreadReplyEventsLocked(updatedThread, message, meta, mentionedIDs...)
-	s.state.UpdatedAt = now
-	s.appendActivityLocked(&ActivityEvent{
+	// Collect events and activity before the single-tx Postgres call.
+	mentionEvents := s.collectThreadMentionEventsLocked(thread, message, meta)
+	replyEvents := s.collectThreadReplyEventsLocked(thread, message, meta, mentionedIDs...)
+	allEvents := append(mentionEvents, replyEvents...)
+	activity := &ActivityEvent{
 		Type:       "thread.replied",
 		DocumentID: thread.DocumentID,
 		ActorID:    meta.ActorID,
@@ -1592,10 +1610,16 @@ func (s *Store) ReplyThread(id string, req ReplyThreadRequest, meta OperationMet
 		Summary:    fmt.Sprintf("%s replied in thread %s", meta.ActorID, thread.Title),
 		OccurredAt: now,
 		Provenance: meta,
-	})
-	if err := s.persistLocked(); err != nil {
+	}
+	updatedThread, err := replyThreadPostgres(s.db, workspaceID, id, message, participantIDs, allEvents, activity)
+	if err != nil {
 		return nil, nil, err
 	}
+	// Defer inbox-change broadcasts until after the tx has committed.
+	for _, event := range allEvents {
+		s.recordAgentInboxChangedLocked(event)
+	}
+	s.state.UpdatedAt = now
 	return updatedThread, message, nil
 }
 
@@ -2142,17 +2166,6 @@ func (s *Store) principalByHandleLocked(handle string) (*principalRef, bool) {
 	return nil, false
 }
 
-func (s *Store) documentHasThreadsLocked(documentID string) bool {
-	if documentID == "" {
-		return false
-	}
-	has, err := documentHasThreadsPostgres(s.db, s.state.WorkspaceID, documentID)
-	if err != nil {
-		return false
-	}
-	return has
-}
-
 func cloneAgentRun(run *AgentRun) *AgentRun {
 	if run == nil {
 		return nil
@@ -2425,7 +2438,11 @@ func (s *Store) documentInboxTargetLocked(agentID string, document *Document) (b
 		return "general", "", ""
 	}
 	found, tid, title, err := documentHasOpenThreadForParticipantPostgres(s.db, s.state.WorkspaceID, document.ID, agentID)
-	if err != nil || !found {
+	if err != nil {
+		log.Printf("documentInboxTargetLocked: %v", err)
+		return "general", "", ""
+	}
+	if !found {
 		return "general", "", ""
 	}
 	return "for_me", tid, title
@@ -2468,32 +2485,48 @@ func (s *Store) upsertDocumentInboxEventLocked(agent *Agent, document *Document,
 	s.recordAgentInboxChangedLocked(upserted)
 }
 
-func (s *Store) enqueueThreadMentionEventsLocked(thread *Thread, message *ThreadMessage, meta OperationMeta) {
+func (s *Store) collectThreadMentionEventsLocked(thread *Thread, message *ThreadMessage, meta OperationMeta) []*AgentEvent {
 	if thread == nil || message == nil {
-		return
+		return nil
 	}
+	var events []*AgentEvent
 	mentionedIDs := s.extractMentionPrincipalIDsLocked(message.Body)
 	for _, principalID := range mentionedIDs {
 		agent, ok := s.state.Agents[principalID]
 		if !ok {
 			continue
 		}
+		if !s.shouldNotifyAgentLocked(agent.ID, meta, message.AuthorID) {
+			continue
+		}
+		now := time.Now().UTC()
 		dedupKey := fmt.Sprintf("thread-mentioned:%s:%s", message.ID, agent.ID)
-		s.enqueueAgentNotificationLocked(agent.ID, agent.Handle, "thread.mentioned", dedupKey, meta, message.AuthorID, func(event *AgentEvent, now time.Time) {
-			event.DocumentID = thread.DocumentID
-			event.ThreadID = thread.ID
-			event.ThreadMessageID = message.ID
-			event.Summary = fmt.Sprintf("@%s was mentioned in thread %s", agent.Handle, thread.Title)
-			event.Prompt = fmt.Sprintf("You were mentioned by @%s in thread %q: %s", message.AuthorHandle, thread.Title, truncateText(message.Body, 240))
+		events = append(events, &AgentEvent{
+			ID:              uuid.NewString(),
+			AgentID:         agent.ID,
+			AgentHandle:     agent.Handle,
+			Type:            "thread.mentioned",
+			Box:             "for_me",
+			Status:          "pending",
+			DocumentID:      thread.DocumentID,
+			ThreadID:        thread.ID,
+			ThreadMessageID: message.ID,
+			Summary:         fmt.Sprintf("@%s was mentioned in thread %s", agent.Handle, thread.Title),
+			Prompt:          fmt.Sprintf("You were mentioned by @%s in thread %q: %s", message.AuthorHandle, thread.Title, truncateText(message.Body, 240)),
+			DedupKey:        dedupKey,
+			CreatedAt:       now,
+			UpdatedAt:       now,
+			AvailableAt:     now,
 		})
 	}
+	return events
 }
 
-
-func (s *Store) enqueueThreadReplyEventsLocked(thread *Thread, message *ThreadMessage, meta OperationMeta, skipAgentIDs ...string) {
+func (s *Store) collectThreadReplyEventsLocked(thread *Thread, message *ThreadMessage, meta OperationMeta, skipAgentIDs ...string) []*AgentEvent {
 	if thread == nil || message == nil {
-		return
+		return nil
 	}
+	var events []*AgentEvent
 	for _, participantID := range thread.ParticipantIDs {
 		if containsText(skipAgentIDs, participantID) {
 			continue
@@ -2502,15 +2535,30 @@ func (s *Store) enqueueThreadReplyEventsLocked(thread *Thread, message *ThreadMe
 		if !ok {
 			continue
 		}
+		if !s.shouldNotifyAgentLocked(agent.ID, meta, message.AuthorID) {
+			continue
+		}
+		now := time.Now().UTC()
 		dedupKey := fmt.Sprintf("thread-replied:%s:%s", message.ID, agent.ID)
-		s.enqueueAgentNotificationLocked(agent.ID, agent.Handle, "thread.replied", dedupKey, meta, message.AuthorID, func(event *AgentEvent, now time.Time) {
-			event.DocumentID = thread.DocumentID
-			event.ThreadID = thread.ID
-			event.ThreadMessageID = message.ID
-			event.Summary = fmt.Sprintf("New reply in thread %s", thread.Title)
-			event.Prompt = fmt.Sprintf("A new reply was added in thread %q by @%s: %s", thread.Title, message.AuthorHandle, truncateText(message.Body, 240))
+		events = append(events, &AgentEvent{
+			ID:              uuid.NewString(),
+			AgentID:         agent.ID,
+			AgentHandle:     agent.Handle,
+			Type:            "thread.replied",
+			Box:             "for_me",
+			Status:          "pending",
+			DocumentID:      thread.DocumentID,
+			ThreadID:        thread.ID,
+			ThreadMessageID: message.ID,
+			Summary:         fmt.Sprintf("New reply in thread %s", thread.Title),
+			Prompt:          fmt.Sprintf("A new reply was added in thread %q by @%s: %s", thread.Title, message.AuthorHandle, truncateText(message.Body, 240)),
+			DedupKey:        dedupKey,
+			CreatedAt:       now,
+			UpdatedAt:       now,
+			AvailableAt:     now,
 		})
 	}
+	return events
 }
 
 func (s *Store) enqueueAgentNotificationLocked(agentID, agentHandle, eventType, dedupKey string, meta OperationMeta, fallbackActorID string, apply func(event *AgentEvent, now time.Time)) {

@@ -1130,6 +1130,23 @@ func TestThreadEndpointsRoundTrip(t *testing.T) {
 		t.Fatalf("documentId is already on the thread and should not be duplicated in anchor: %#v", anchorMap)
 	}
 
+	// Assert that the POST response includes messages, participantIds, and participantHandles.
+	messages, _ := threadMap["messages"].([]any)
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 message in create thread response, got %d: %#v", len(messages), threadMap["messages"])
+	}
+	participantIds, _ := threadMap["participantIds"].([]any)
+	if len(participantIds) == 0 {
+		t.Fatalf("expected non-empty participantIds in create thread response, got %#v", threadMap["participantIds"])
+	}
+	participantHandles, ok := threadMap["participantHandles"].([]any)
+	if !ok {
+		t.Fatalf("expected participantHandles array in create thread response, got %#v", threadMap["participantHandles"])
+	}
+	if len(participantHandles) == 0 {
+		t.Fatalf("expected non-empty participantHandles in create thread response, got %#v", participantHandles)
+	}
+
 	var fetched map[string]any
 	authTestJSON(t, router, http.MethodGet, fixture.workspaceAPIPath("/threads/"+threadID), fixture.token, nil, http.StatusOK, &fetched)
 	gotThread, ok := fetched["thread"].(map[string]any)
