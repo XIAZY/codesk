@@ -1524,7 +1524,7 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 		OccurredAt: now,
 		Provenance: meta,
 	}
-	created, err := createThreadPostgres(s.db, s.state.WorkspaceID, thread, message, events, activity)
+	committed, created, err := createThreadPostgres(s.db, s.state.WorkspaceID, thread, message, events, activity)
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -1543,11 +1543,6 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 		s.recordAgentInboxChangedLocked(event)
 	}
 	s.state.UpdatedAt = now
-	// Re-read from Postgres to get JOIN-resolved handles and populated messages.
-	committed, err := getThreadPostgres(s.db, s.state.WorkspaceID, thread.ID)
-	if err != nil {
-		return nil, nil, false, err
-	}
 	return committed, firstThreadMessage(committed), true, nil
 }
 
@@ -2559,32 +2554,6 @@ func (s *Store) collectThreadReplyEventsLocked(thread *Thread, message *ThreadMe
 		})
 	}
 	return events
-}
-
-func (s *Store) enqueueAgentNotificationLocked(agentID, agentHandle, eventType, dedupKey string, meta OperationMeta, fallbackActorID string, apply func(event *AgentEvent, now time.Time)) {
-	if !s.shouldNotifyAgentLocked(agentID, meta, fallbackActorID) {
-		return
-	}
-	now := time.Now().UTC()
-	event := &AgentEvent{
-		ID:          uuid.NewString(),
-		AgentID:     agentID,
-		AgentHandle: agentHandle,
-		Type:        eventType,
-		Box:         "for_me",
-		Status:      "pending",
-		DedupKey:    dedupKey,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-		AvailableAt: now,
-	}
-	if apply != nil {
-		apply(event, now)
-	}
-	if err := insertAgentEventPostgres(s.db, s.state.WorkspaceID, event); err != nil {
-		return
-	}
-	s.recordAgentInboxChangedLocked(event)
 }
 
 func (s *Store) shouldNotifyAgentLocked(agentID string, meta OperationMeta, fallbackActorID string) bool {

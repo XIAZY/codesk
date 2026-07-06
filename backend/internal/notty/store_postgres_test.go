@@ -960,9 +960,21 @@ func TestPostgresAgentEventsInsertedDirectlyToPostgres(t *testing.T) {
 		UpdatedAt:   now,
 		AvailableAt: now,
 	}
-	if err := insertAgentEventPostgres(db, workspaceID, event); err != nil {
-		t.Fatalf("insert agent event: %v", err)
+	insertEvent := func(ev *AgentEvent) {
+		t.Helper()
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatalf("begin tx: %v", err)
+		}
+		if err := insertAgentEventTx(tx, workspaceID, ev); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("insert agent event: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
 	}
+	insertEvent(event)
 
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM agent_events WHERE workspace_id = $1 AND dedup_key = $2`, workspaceID, dedupKey).Scan(&count); err != nil {
@@ -973,9 +985,7 @@ func TestPostgresAgentEventsInsertedDirectlyToPostgres(t *testing.T) {
 	}
 
 	// Dedup: inserting again with same key should not create a second row
-	if err := insertAgentEventPostgres(db, workspaceID, event); err != nil {
-		t.Fatalf("dedup insert: %v", err)
-	}
+	insertEvent(event)
 	if err := db.QueryRow(`SELECT COUNT(*) FROM agent_events WHERE workspace_id = $1 AND dedup_key = $2`, workspaceID, dedupKey).Scan(&count); err != nil {
 		t.Fatalf("count after dedup: %v", err)
 	}
@@ -1047,6 +1057,100 @@ func TestPostgresConcurrentThreadCreateIdempotency(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected exactly 1 thread in Postgres, got %d", count)
+	}
+}
+
+func TestPostgresCreateThreadRollsBackOnPoisonedEvent(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	db := database.DB
+	store := newPostgresTestWorkspaceStore(t, database)
+	user := seedTestUser(t, store)
+	documentID := mustCreateTestDocument(t, store, "docs/rollback.md", "tx test\n")
+	workspaceID := store.Snapshot().WorkspaceID
+
+	now := time.Now().UTC()
+	thread := &Thread{
+		ID:            uuid.NewString(),
+		DocumentID:    documentID,
+		Title:         "Should not survive",
+		Status:        "open",
+		CreatedByID:   user.ID,
+		CreatedByType: "human",
+		ParticipantIDs: []string{user.ID},
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	message := &ThreadMessage{
+		ID:        uuid.NewString(),
+		ThreadID:  thread.ID,
+		AuthorID:  user.ID,
+		AuthorType: "human",
+		Body:      "rollback test",
+		Kind:      "comment",
+		CreatedAt: now,
+	}
+	poisonedEvent := &AgentEvent{
+		ID:          uuid.NewString(),
+		AgentID:     uuid.NewString(), // non-existent agent → FK violation
+		AgentHandle: "ghost",
+		Type:        "thread.mentioned",
+		Box:         "for_me",
+		Status:      "pending",
+		DedupKey:    "poison:" + uuid.NewString(),
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		AvailableAt: now,
+	}
+	activity := &ActivityEvent{
+		Type:       "thread.created",
+		DocumentID: documentID,
+		ActorID:    user.ID,
+		ActorType:  "human",
+		Summary:    "rollback test",
+		OccurredAt: now,
+	}
+
+	_, _, err := createThreadPostgres(db, workspaceID, thread, message, []*AgentEvent{poisonedEvent}, activity)
+	if err == nil {
+		t.Fatal("expected FK violation from poisoned event, got nil")
+	}
+
+	// Assert no thread, message, or activity row survived the rollback.
+	var threadCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM threads WHERE id = $1`, thread.ID).Scan(&threadCount); err != nil {
+		t.Fatalf("count threads: %v", err)
+	}
+	if threadCount != 0 {
+		t.Fatalf("thread row survived rollback: got %d", threadCount)
+	}
+	var msgCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM thread_messages WHERE id = $1`, message.ID).Scan(&msgCount); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if msgCount != 0 {
+		t.Fatalf("message row survived rollback: got %d", msgCount)
+	}
+	var actCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM activities WHERE workspace_id = $1 AND type = 'thread.created' AND document_id = $2::uuid`, workspaceID, documentID).Scan(&actCount); err != nil {
+		t.Fatalf("count activities: %v", err)
+	}
+	if actCount != 0 {
+		t.Fatalf("activity row survived rollback: got %d", actCount)
+	}
+
+	// Retry without the poisoned event succeeds.
+	committed, created, err := createThreadPostgres(db, workspaceID, thread, message, nil, activity)
+	if err != nil {
+		t.Fatalf("retry after rollback: %v", err)
+	}
+	if !created {
+		t.Fatal("retry should have created the thread")
+	}
+	if committed.ID != thread.ID {
+		t.Fatalf("retry thread ID mismatch: got %s, want %s", committed.ID, thread.ID)
+	}
+	if len(committed.Messages) != 1 {
+		t.Fatalf("retry thread should have 1 message, got %d", len(committed.Messages))
 	}
 }
 
