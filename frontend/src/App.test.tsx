@@ -322,6 +322,31 @@ describe("WorkspaceApp coming-soon controls", () => {
   });
 });
 
+describe("WorkspaceApp document activity single source", () => {
+  it("carries no count on the sidebar Activity nav, so nav and panel cannot disagree", () => {
+    render(
+      <WorkspaceApp
+        api={{ updateLastAccessed: vi.fn().mockResolvedValue({}) } as never}
+        token="token"
+        workspaceId="ws"
+        workspaceSlug="workspace"
+        view={{ kind: "home" }}
+        account={{ id: "account_1", email: "you@example.com", displayName: "You" }}
+        workspaces={[{ id: "ws", slug: "workspace", name: "Workspace" }]}
+        onAccess={vi.fn()}
+        onWorkspaceChange={vi.fn()}
+        onSignOut={vi.fn()}
+      />,
+    );
+
+    // The sidebar Activity nav is a pure jump affordance — no count element means
+    // no second source that could drift from the right-rail Document Activity panel.
+    const navButton = screen.getByText("Activity").closest("button");
+    expect(navButton).toBeTruthy();
+    expect(navButton?.querySelector(".ct")).toBeNull();
+  });
+});
+
 describe("CreateDaemonModal install status", () => {
   it("flips the install chip from waiting to connected when the daemon checks in live", async () => {
     const user = userEvent.setup();

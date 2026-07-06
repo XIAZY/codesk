@@ -1478,7 +1478,9 @@ export function WorkspaceApp({
           <button className="nav-item" type="button" onClick={() => setRightTab("activity")}>
             <Icon name="activity" />
             <span>Activity</span>
-            <span className={`ct ${workspace.agentEvents.length ? "has" : ""}`}>{workspace.agentEvents.length}</span>
+            {/* No count here: Document Activity is current-document context, so the
+                right-rail tab's unread dot owns the "new" signal. A workspace-level
+                count would be a second, disagreeing source (Anton/Eva/Bill ruling). */}
           </button>
           <button className="nav-item" type="button" onClick={() => setRightTab("threads")}>
             <Icon name="thread" />
