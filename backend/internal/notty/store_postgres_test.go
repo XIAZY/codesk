@@ -978,6 +978,72 @@ func TestPostgresAgentEventsInsertedDirectlyToPostgres(t *testing.T) {
 	}
 }
 
+func TestPostgresConcurrentThreadCreateIdempotency(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	db := database.DB
+	store := newPostgresTestWorkspaceStore(t, database)
+	user := seedTestUser(t, store)
+	documentID := mustCreateTestDocument(t, store, "docs/concurrent.md", "race\n")
+	workspaceID := store.Snapshot().WorkspaceID
+
+	const goroutines = 10
+	clientOpID := "idempotent-op-" + uuid.NewString()
+	type result struct {
+		thread  *Thread
+		created bool
+		err     error
+	}
+	results := make(chan result, goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			th, _, created, err := store.CreateThread(CreateThreadRequest{
+				DocumentID:        documentID,
+				ClientOperationID: clientOpID,
+				Title:             "Concurrent thread",
+				Body:              "Only one should win.",
+			}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
+			results <- result{thread: th, created: created, err: err}
+		}()
+	}
+
+	var winners, dupes int
+	var winnerID string
+	for i := 0; i < goroutines; i++ {
+		r := <-results
+		if r.err != nil {
+			t.Fatalf("goroutine error: %v", r.err)
+		}
+		if r.created {
+			winners++
+			winnerID = r.thread.ID
+		} else {
+			dupes++
+		}
+		if winnerID == "" {
+			winnerID = r.thread.ID
+		}
+		if r.thread.ID != winnerID {
+			t.Fatalf("expected all goroutines to converge on same thread, got %s vs %s", r.thread.ID, winnerID)
+		}
+	}
+
+	if winners != 1 {
+		t.Fatalf("expected exactly 1 winner, got %d winners and %d dupes", winners, dupes)
+	}
+
+	var count int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM threads WHERE workspace_id = $1 AND client_operation_id = $2`,
+		workspaceID, clientOpID,
+	).Scan(&count); err != nil {
+		t.Fatalf("count threads: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly 1 thread in Postgres, got %d", count)
+	}
+}
+
 func TestPostgresDiffDocumentReconstructsAcrossCheckpointsAfterReload(t *testing.T) {
 	database := newPostgresTestDatabase(t)
 	db := database.DB

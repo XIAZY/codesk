@@ -1464,16 +1464,6 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 		return nil, nil, false, err
 	}
 	clientOperationID := strings.TrimSpace(req.ClientOperationID)
-	if clientOperationID != "" {
-		existing, err := findThreadByClientOperationPostgres(s.db, s.state.WorkspaceID, clientOperationID, author.ID)
-		if err != nil {
-			return nil, nil, false, err
-		}
-		if existing != nil {
-			message := firstThreadMessage(existing)
-			return existing, message, false, nil
-		}
-	}
 	now := time.Now().UTC()
 	anchor, err := buildThreadAnchorFromRequest(req)
 	if err != nil {
@@ -1514,8 +1504,19 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 		Kind:         "comment",
 		CreatedAt:    now,
 	}
-	if err := createThreadPostgres(s.db, s.state.WorkspaceID, thread, message); err != nil {
+	created, err := createThreadPostgres(s.db, s.state.WorkspaceID, thread, message)
+	if err != nil {
 		return nil, nil, false, err
+	}
+	if !created {
+		existing, err := findThreadByClientOperationPostgres(s.db, s.state.WorkspaceID, clientOperationID, author.ID)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		if existing != nil {
+			return existing, firstThreadMessage(existing), false, nil
+		}
+		return nil, nil, false, errors.New("thread creation conflict")
 	}
 	s.enqueueThreadMentionEventsLocked(thread, message, meta)
 	s.state.UpdatedAt = now

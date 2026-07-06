@@ -329,7 +329,11 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		)
 		`,
 		`CREATE INDEX IF NOT EXISTS idx_threads_workspace_document_updated ON threads (workspace_id, document_id, updated_at DESC)`,
-		`CREATE INDEX IF NOT EXISTS idx_threads_workspace_actor_operation ON threads (workspace_id, created_by_id, created_by_type, client_operation_id) WHERE client_operation_id <> ''`,
+		// Temporary scaffolding: replaces the old non-unique index with a unique
+		// partial index for atomic thread-create idempotency via ON CONFLICT.
+		// Teardown: remove the DROP once all environments carry the unique index.
+		`DROP INDEX IF EXISTS idx_threads_workspace_actor_operation`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_threads_workspace_actor_operation ON threads (workspace_id, created_by_id, client_operation_id) WHERE client_operation_id <> ''`,
 		`
 		CREATE TABLE IF NOT EXISTS thread_messages (
 			workspace_id UUID NOT NULL,
@@ -2748,10 +2752,10 @@ func queryThreadsPostgres(db *sql.DB, workspaceID string, documentID string, thr
 	return threads, nil
 }
 
-func createThreadPostgres(db *sql.DB, workspaceID string, thread *Thread, message *ThreadMessage) error {
+func createThreadPostgres(db *sql.DB, workspaceID string, thread *Thread, message *ThreadMessage) (bool, error) {
 	tx, err := db.Begin()
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer func() {
 		if err != nil {
@@ -2759,7 +2763,7 @@ func createThreadPostgres(db *sql.DB, workspaceID string, thread *Thread, messag
 		}
 	}()
 
-	if _, err = tx.Exec(
+	res, err := tx.Exec(
 		`INSERT INTO threads (
 			workspace_id, id, document_id, client_operation_id, title, status,
 			anchor_relative_start, anchor_relative_end, anchor_kind, anchor_excerpt,
@@ -2770,7 +2774,10 @@ func createThreadPostgres(db *sql.DB, workspaceID string, thread *Thread, messag
 			$7, $8, $9, $10,
 			$11, $12, $13, $14,
 			$15, $16
-		)`,
+		)
+		ON CONFLICT (workspace_id, created_by_id, client_operation_id)
+			WHERE client_operation_id <> ''
+		DO NOTHING`,
 		workspaceID,
 		thread.ID,
 		thread.DocumentID,
@@ -2787,8 +2794,14 @@ func createThreadPostgres(db *sql.DB, workspaceID string, thread *Thread, messag
 		thread.CreatedByName,
 		thread.CreatedAt,
 		thread.UpdatedAt,
-	); err != nil {
-		return err
+	)
+	if err != nil {
+		return false, err
+	}
+	rowsAffected, _ := res.RowsAffected()
+	if rowsAffected == 0 {
+		_ = tx.Rollback()
+		return false, nil
 	}
 
 	for _, participantID := range thread.ParticipantIDs {
@@ -2798,7 +2811,7 @@ func createThreadPostgres(db *sql.DB, workspaceID string, thread *Thread, messag
 			 ON CONFLICT (workspace_id, thread_id, participant_id) DO NOTHING`,
 			workspaceID, thread.ID, participantID,
 		); err != nil {
-			return err
+			return false, err
 		}
 	}
 
@@ -2822,12 +2835,12 @@ func createThreadPostgres(db *sql.DB, workspaceID string, thread *Thread, messag
 			message.Kind,
 			message.CreatedAt,
 		); err != nil {
-			return err
+			return false, err
 		}
 	}
 
 	err = tx.Commit()
-	return err
+	return err == nil, err
 }
 
 func replyThreadPostgres(db *sql.DB, workspaceID string, threadID string, message *ThreadMessage, participantIDs []string) (*Thread, error) {
