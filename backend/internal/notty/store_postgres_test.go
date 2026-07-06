@@ -1067,8 +1067,6 @@ func clearNottyTables(db *sql.DB) error {
 		CASCADE`); err != nil {
 		return err
 	}
-	// Clear migration map to prevent stale mappings from previous test runs.
-	_, _ = db.Exec(`TRUNCATE TABLE uuid_migration_map`)
 	return nil
 }
 
@@ -1203,90 +1201,5 @@ func TestCreateAgentRequiresDaemon(t *testing.T) {
 	snapshot := store.Snapshot()
 	if _, exists := snapshot.Daemons["daemon_local"]; exists {
 		t.Fatalf("daemon_local should not be synthesized")
-	}
-}
-
-func TestLegacyScaffoldingRowsDeletedOnStartup(t *testing.T) {
-	dsn := postgresTestDSN(t)
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("open postgres: %v", err)
-	}
-	defer db.Close()
-	resetUUIDGroup1MigrationTables(t, db)
-	createLegacyUUIDGroup1Schema(t, db)
-
-	// Make last_accessed_workspace_id NOT NULL DEFAULT '' to match legacy production schema.
-	mustExec(t, db, `UPDATE accounts SET last_accessed_workspace_id = '' WHERE last_accessed_workspace_id IS NULL`)
-	mustExec(t, db, `ALTER TABLE accounts ALTER COLUMN last_accessed_workspace_id SET NOT NULL`)
-	mustExec(t, db, `ALTER TABLE accounts ALTER COLUMN last_accessed_workspace_id SET DEFAULT ''`)
-
-	now := time.Now().UTC()
-	realWS := "ws_" + uuid.NewString()
-	realAccount := "account_" + uuid.NewString()
-	realUser := "user_" + uuid.NewString()
-
-	mustExec(t, db, `INSERT INTO workspaces (id, slug, name, root_document_id) VALUES ($1, $2, $3, $4)`,
-		"ws_notty", "notty", "notty", "doc_root_ws_notty")
-	mustExec(t, db, `INSERT INTO workspaces (id, slug, name, root_document_id) VALUES ($1, $2, $3, $4)`,
-		realWS, "real", "Real Workspace", "doc_root_"+realWS)
-	mustExec(t, db, `INSERT INTO users (workspace_id, id, handle, name, role, kind, status) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		"ws_notty", "user_owner", "owner", "Workspace Owner", "owner", "human", "active")
-	mustExec(t, db, `INSERT INTO users (workspace_id, id, handle, name, role, kind, status) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		realWS, realUser, "dev", "Developer", "member", "human", "active")
-	mustExec(t, db, `INSERT INTO daemons (id, workspace_id, name, token_hash, status) VALUES ($1, $2, $3, $4, $5)`,
-		"daemon_local", "ws_notty", "Local daemon", "legacy_placeholder", "active")
-	mustExec(t, db, `INSERT INTO agents (workspace_id, id, daemon_id, handle, name, role, kind, status, current_task, current_activity) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-		realWS, "agent_"+uuid.NewString(), "daemon_local", "legacy-bot", "Legacy Bot", "assistant", "codex", "idle", "", "")
-	mustExec(t, db, `INSERT INTO agent_runs (workspace_id, id, agent_id, agent_handle, agent_name, agent_kind, status, desired_status) VALUES ($1, $2, (SELECT id FROM agents WHERE workspace_id = $1 LIMIT 1), $3, $4, $5, $6, $7)`,
-		realWS, "run_"+uuid.NewString(), "legacy-bot", "Legacy Bot", "codex", "completed", "completed")
-	mustExec(t, db, `INSERT INTO accounts (id, email, display_name, password_hash, last_accessed_workspace_id, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		realAccount, "legacy@example.com", "Legacy", "hash", "ws_notty", now, now)
-	mustExec(t, db, `INSERT INTO workspace_members (workspace_id, account_id, user_id, membership_role, created_at) VALUES ($1, $2, $3, $4, $5)`,
-		realWS, realAccount, "user_owner", "member", now)
-	// Regression: user_owner leaked into polymorphic actor ref (document_updates) in real workspace.
-	mustExec(t, db, `INSERT INTO documents (workspace_id, id, path, title, client_id_seed) VALUES ($1, $2, $3, $4, $5)`,
-		realWS, "doc_"+uuid.NewString(), "test.md", "Test", int64(1))
-	mustExec(t, db, `INSERT INTO document_heads (workspace_id, document_id, state_vector, update_id) VALUES ($1, (SELECT id FROM documents WHERE workspace_id = $1 LIMIT 1), $2, $3)`,
-		realWS, "", int64(1))
-	mustExec(t, db, `INSERT INTO document_updates (workspace_id, document_id, update, actor_id, actor_type) VALUES ($1, (SELECT id FROM documents WHERE workspace_id = $1 LIMIT 1), $2, $3, $4)`,
-		realWS, []byte{0x01}, "user_owner", "human")
-	// Regression: user_owner leaked into union ref (thread_participants) in real workspace.
-	realThread := "thread_" + uuid.NewString()
-	mustExec(t, db, `INSERT INTO threads (workspace_id, id, document_id, created_by_id, created_by_type, title, status, created_by_handle, created_by_name) VALUES ($1, $2, (SELECT id FROM documents WHERE workspace_id = $1 LIMIT 1), $3, $4, $5, $6, $7, $8)`,
-		realWS, realThread, realUser, "human", "Test Thread", "open", "dev", "Developer")
-	mustExec(t, db, `INSERT INTO thread_participants (workspace_id, thread_id, participant_id) VALUES ($1, $2, $3)`,
-		realWS, realThread, "user_owner")
-
-	if err := initPostgresSchema(db); err != nil {
-		t.Fatalf("legacy boot initPostgresSchema: %v", err)
-	}
-
-	// Legacy scaffolding rows must be gone.
-	var wsCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM workspaces WHERE id::text = 'ws_notty'`).Scan(&wsCount); err != nil {
-		t.Fatalf("check ws_notty: %v", err)
-	}
-	if wsCount != 0 {
-		t.Fatal("ws_notty should have been deleted by legacy cleanup")
-	}
-
-	// Account's last_accessed_workspace_id should be cleared (not ws_notty).
-	var lastAccessed sql.NullString
-	if err := db.QueryRow(`SELECT last_accessed_workspace_id::text FROM accounts WHERE id::text LIKE $1`, "%"+strings.TrimPrefix(realAccount, "account_")+"%").Scan(&lastAccessed); err != nil {
-		t.Fatalf("check account: %v", err)
-	}
-	if lastAccessed.Valid && lastAccessed.String == "ws_notty" {
-		t.Fatal("account last_accessed_workspace_id should have been cleared")
-	}
-
-	// Surviving workspace should be migrated to native UUID.
-	assertColumnType(t, db, "workspaces", "id", "uuid")
-	assertColumnType(t, db, "users", "id", "uuid")
-	assertColumnType(t, db, "agents", "id", "uuid")
-
-	// Terminal scan should pass.
-	if err := assertNoLegacyScaffoldingRows(db); err != nil {
-		t.Fatalf("terminal legacy scan: %v", err)
 	}
 }

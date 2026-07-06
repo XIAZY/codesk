@@ -5,14 +5,11 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"log"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgconn"
 	crdt "notty/internal/ycrdt"
 )
 
@@ -41,12 +38,12 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			id UUID PRIMARY KEY,
 			slug TEXT UNIQUE NOT NULL,
 			name TEXT NOT NULL,
-			root_document_id TEXT NOT NULL,
+			root_document_id UUID NOT NULL,
 			created_at TIMESTAMPTZ NOT NULL,
 			updated_at TIMESTAMPTZ NOT NULL
 		)
 		`,
-		`ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS root_document_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS root_document_id UUID`,
 		`DO $$
 		BEGIN
 			IF EXISTS (
@@ -98,13 +95,13 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			membership_role TEXT NOT NULL DEFAULT 'member',
 			status TEXT NOT NULL DEFAULT 'active',
 			invited_by UUID,
-			last_accessed_document_id TEXT NOT NULL DEFAULT '',
+			last_accessed_document_id UUID,
 			created_at TIMESTAMPTZ NOT NULL,
 			accepted_at TIMESTAMPTZ,
 			PRIMARY KEY (workspace_id, account_id)
 		)
 		`,
-		`ALTER TABLE workspace_members ADD COLUMN IF NOT EXISTS last_accessed_document_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE workspace_members ADD COLUMN IF NOT EXISTS last_accessed_document_id UUID`,
 		`CREATE INDEX IF NOT EXISTS idx_workspace_members_account ON workspace_members (account_id, status, workspace_id)`,
 		`
 		CREATE TABLE IF NOT EXISTS workspace_invites (
@@ -142,7 +139,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		`
 		CREATE TABLE IF NOT EXISTS documents (
 			workspace_id UUID NOT NULL,
-			id TEXT PRIMARY KEY,
+			id UUID PRIMARY KEY,
 			path TEXT NOT NULL,
 			title TEXT NOT NULL,
 			hidden BOOLEAN NOT NULL DEFAULT false,
@@ -158,7 +155,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		`
 		CREATE TABLE IF NOT EXISTS document_heads (
 			workspace_id UUID NOT NULL,
-			document_id TEXT PRIMARY KEY,
+			document_id UUID PRIMARY KEY,
 			state_vector TEXT NOT NULL DEFAULT '',
 			update_id BIGINT NOT NULL DEFAULT 0,
 			updated_at TIMESTAMPTZ NOT NULL
@@ -170,7 +167,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS document_updates (
 			id BIGSERIAL PRIMARY KEY,
 			workspace_id UUID NOT NULL,
-			document_id TEXT NOT NULL,
+			document_id UUID NOT NULL,
 			update BYTEA NOT NULL,
 			actor_id UUID,
 			actor_type TEXT NOT NULL,
@@ -208,7 +205,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 						CREATE TABLE document_checkpoints (
 							id BIGSERIAL PRIMARY KEY,
 							workspace_id UUID NOT NULL,
-							document_id TEXT NOT NULL,
+							document_id UUID NOT NULL,
 							update_id BIGINT NOT NULL,
 							crdt_state TEXT NOT NULL,
 							state_vector TEXT NOT NULL,
@@ -337,7 +334,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS threads (
 			workspace_id UUID NOT NULL,
 			id UUID PRIMARY KEY,
-			document_id TEXT NOT NULL,
+			document_id UUID NOT NULL,
 			client_operation_id TEXT NOT NULL DEFAULT '',
 			title TEXT NOT NULL,
 			status TEXT NOT NULL,
@@ -395,7 +392,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			workspace_id UUID NOT NULL,
 			actor_id UUID NOT NULL,
 			actor_type TEXT NOT NULL,
-			document_id TEXT NOT NULL,
+			document_id UUID NOT NULL,
 			file_path TEXT NOT NULL,
 			mode TEXT NOT NULL,
 			selection_start INTEGER,
@@ -411,7 +408,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			id BIGSERIAL PRIMARY KEY,
 			workspace_id UUID NOT NULL,
 			type TEXT NOT NULL,
-			document_id TEXT NOT NULL,
+			document_id UUID,
 			actor_id UUID,
 			actor_type TEXT NOT NULL,
 			summary TEXT NOT NULL,
@@ -444,7 +441,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			type TEXT NOT NULL,
 			box TEXT NOT NULL DEFAULT 'for_me',
 			status TEXT NOT NULL,
-			document_id TEXT NOT NULL,
+			document_id UUID,
 			thread_id UUID,
 			thread_message_id UUID,
 			from_update_id BIGINT NOT NULL DEFAULT 0,
@@ -474,14 +471,13 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS agent_document_views (
 			workspace_id UUID NOT NULL,
 			agent_id UUID NOT NULL,
-			document_id TEXT NOT NULL,
+			document_id UUID NOT NULL,
 			update_id BIGINT NOT NULL,
 			state_vector TEXT NOT NULL,
 			viewed_at TIMESTAMPTZ NOT NULL,
 			PRIMARY KEY (workspace_id, agent_id, document_id)
 		)
 		`,
-
 	}
 	for index, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {
@@ -492,7 +488,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 }
 
 // initPostgresSchemaConstraints adds FK constraints, composite unique indexes,
-// and constraint triggers. Called AFTER UUID migrations so all columns are native UUID.
+// and constraint triggers after the native UUID tables exist.
 func initPostgresSchemaConstraints(db *sql.DB) error {
 	statements := []string{
 		// ── Composite unique indexes for same-workspace enforcement ──
@@ -799,239 +795,6 @@ func initPostgresSchemaConstraints(db *sql.DB) error {
 	for index, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {
 			return fmt.Errorf("init postgres schema constraint %d: %w", index+1, err)
-		}
-	}
-	return nil
-}
-
-func deleteLegacyScaffoldingRows(db *sql.DB) error {
-	// Phase 1: Sweep ALL inventory-listed references to legacy entities.
-	// Derived from the Group 1 migration inventory so both share one source of truth.
-	if err := sweepLegacyReferencesFromInventory(db); err != nil {
-		return err
-	}
-
-	// Phase 2: Delete primary entity rows and workspace-scoped children.
-	type legacyDelete struct {
-		table string
-		where string
-		args  []any
-	}
-	deletes := []legacyDelete{
-		// ws_notty workspace and all its children (child-before-parent order).
-		{"presences", "workspace_id = $1", []any{"ws_notty"}},
-		{"agent_document_views", "workspace_id = $1", []any{"ws_notty"}},
-		{"agent_events", "workspace_id = $1", []any{"ws_notty"}},
-		{"agent_runs", "workspace_id = $1", []any{"ws_notty"}},
-		{"agents", "workspace_id = $1", []any{"ws_notty"}},
-		{"activities", "workspace_id = $1", []any{"ws_notty"}},
-		{"thread_messages", "workspace_id = $1", []any{"ws_notty"}},
-		{"thread_participants", "workspace_id = $1", []any{"ws_notty"}},
-		{"threads", "workspace_id = $1", []any{"ws_notty"}},
-		{"document_checkpoints", "workspace_id = $1", []any{"ws_notty"}},
-		{"document_updates", "workspace_id = $1", []any{"ws_notty"}},
-		{"document_heads", "workspace_id = $1", []any{"ws_notty"}},
-		{"documents", "workspace_id = $1", []any{"ws_notty"}},
-		{"daemons", "workspace_id = $1", []any{"ws_notty"}},
-		{"users", "workspace_id = $1", []any{"ws_notty"}},
-		{"workspace_members", "workspace_id = $1", []any{"ws_notty"}},
-		{"workspace_invites", "workspace_id = $1", []any{"ws_notty"}},
-		{"workspaces", "id = $1", []any{"ws_notty"}},
-
-		// daemon_local and its dependents (any workspace).
-		{"presences", "actor_id IN (SELECT id FROM agents WHERE daemon_id = $1)", []any{"daemon_local"}},
-		{"agent_document_views", "agent_id IN (SELECT id FROM agents WHERE daemon_id = $1)", []any{"daemon_local"}},
-		{"agent_events", "agent_id IN (SELECT id FROM agents WHERE daemon_id = $1)", []any{"daemon_local"}},
-		{"agent_runs", "agent_id IN (SELECT id FROM agents WHERE daemon_id = $1)", []any{"daemon_local"}},
-		{"agents", "daemon_id = $1", []any{"daemon_local"}},
-		{"daemons", "id = $1", []any{"daemon_local"}},
-
-		// user_owner primary row (references already swept in phase 1).
-		{"users", "id = $1", []any{"user_owner"}},
-	}
-	var totalDeleted int64
-	for _, d := range deletes {
-		result, err := db.Exec("DELETE FROM "+d.table+" WHERE "+d.where, d.args...)
-		if err != nil {
-			if isUUIDTypeMismatch(err) {
-				continue
-			}
-			return fmt.Errorf("delete legacy rows from %s: %w", d.table, err)
-		}
-		n, _ := result.RowsAffected()
-		if n > 0 {
-			log.Printf("legacy cleanup: deleted %d rows from %s where %s", n, d.table, d.where)
-			totalDeleted += n
-		}
-	}
-	if totalDeleted > 0 {
-		log.Printf("legacy cleanup: deleted %d total scaffolding rows", totalDeleted)
-	}
-
-	// Phase 3: Clear workspace refs in accounts.
-	if _, err := db.Exec("UPDATE accounts SET last_accessed_workspace_id = '' WHERE last_accessed_workspace_id::text = 'ws_notty'"); err != nil && !isUUIDTypeMismatch(err) {
-		return fmt.Errorf("clear legacy workspace reference in accounts: %w", err)
-	}
-	return assertNoLegacyScaffoldingRows(db)
-}
-
-// sweepLegacyReferencesFromInventory clears references to legacy placeholder
-// entities (user_owner, daemon_local) from every column listed in the Group 1
-// migration inventory. Nullable columns are blanked; non-nullable join/data rows
-// are deleted. Runs before primary entity deletes so subqueries can still resolve.
-func sweepLegacyReferencesFromInventory(db *sql.DB) error {
-	legacyIDs := map[string][]string{
-		"users":   {"user_owner"},
-		"daemons": {"daemon_local"},
-	}
-
-	execOrSkip := func(query string, args ...any) error {
-		if _, err := db.Exec(query, args...); err != nil && !isUUIDTypeMismatch(err) {
-			return err
-		}
-		return nil
-	}
-
-	// Direct references (uuidGroup1References).
-	for _, ref := range uuidGroup1References() {
-		vals, ok := legacyIDs[ref.entity]
-		if !ok {
-			continue
-		}
-		for _, val := range vals {
-			if ref.nullable {
-				if err := execOrSkip(fmt.Sprintf("UPDATE %s SET %s = '' WHERE %s = $1", ref.table, ref.column, ref.column), val); err != nil {
-					return fmt.Errorf("sweep %s.%s: %w", ref.table, ref.column, err)
-				}
-			} else {
-				if err := execOrSkip(fmt.Sprintf("DELETE FROM %s WHERE %s = $1", ref.table, ref.column), val); err != nil {
-					return fmt.Errorf("sweep %s.%s: %w", ref.table, ref.column, err)
-				}
-			}
-		}
-	}
-
-	// Union references (uuidGroup1UnionReferences).
-	for _, ref := range uuidGroup1UnionReferences() {
-		for _, entity := range ref.entities {
-			vals, ok := legacyIDs[entity]
-			if !ok {
-				continue
-			}
-			for _, val := range vals {
-				if ref.nullable {
-					if err := execOrSkip(fmt.Sprintf("UPDATE %s SET %s = '' WHERE %s = $1", ref.table, ref.column, ref.column), val); err != nil {
-						return fmt.Errorf("sweep %s.%s: %w", ref.table, ref.column, err)
-					}
-				} else {
-					if err := execOrSkip(fmt.Sprintf("DELETE FROM %s WHERE %s = $1", ref.table, ref.column), val); err != nil {
-						return fmt.Errorf("sweep %s.%s: %w", ref.table, ref.column, err)
-					}
-				}
-			}
-		}
-	}
-
-	// Polymorphic references (uuidGroup1PolymorphicReferences).
-	for _, ref := range uuidGroup1PolymorphicReferences() {
-		for actorType, entity := range ref.typeEntity {
-			vals, ok := legacyIDs[entity]
-			if !ok {
-				continue
-			}
-			for _, val := range vals {
-				if ref.nullable {
-					if err := execOrSkip(fmt.Sprintf(
-						"UPDATE %s SET %s = '' WHERE %s = $1 AND %s = $2",
-						ref.table, ref.column, ref.column, ref.typeColumn), val, actorType); err != nil {
-						return fmt.Errorf("sweep %s.%s: %w", ref.table, ref.column, err)
-					}
-				} else {
-					if err := execOrSkip(fmt.Sprintf(
-						"DELETE FROM %s WHERE %s = $1 AND %s = $2",
-						ref.table, ref.column, ref.typeColumn), val, actorType); err != nil {
-						return fmt.Errorf("sweep %s.%s: %w", ref.table, ref.column, err)
-					}
-				}
-			}
-		}
-	}
-
-	return nil
-}
-
-func isUUIDTypeMismatch(err error) bool {
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		return pgErr.Code == "22P02" || pgErr.Code == "42883"
-	}
-	return false
-}
-
-func assertNoLegacyScaffoldingRows(db *sql.DB) error {
-	type probe struct {
-		table  string
-		column string
-		value  string
-	}
-	// Static probes for workspace-scoped and primary entity rows.
-	probes := []probe{
-		{"workspaces", "id", "ws_notty"},
-		{"workspace_members", "workspace_id", "ws_notty"},
-		{"workspace_invites", "workspace_id", "ws_notty"},
-		{"users", "workspace_id", "ws_notty"},
-		{"daemons", "workspace_id", "ws_notty"},
-		{"agents", "workspace_id", "ws_notty"},
-		{"documents", "workspace_id", "ws_notty"},
-		{"threads", "workspace_id", "ws_notty"},
-		{"agent_runs", "workspace_id", "ws_notty"},
-		{"agent_events", "workspace_id", "ws_notty"},
-		{"presences", "workspace_id", "ws_notty"},
-		{"activities", "workspace_id", "ws_notty"},
-		{"accounts", "last_accessed_workspace_id", "ws_notty"},
-		{"users", "id", "user_owner"},
-		{"daemons", "id", "daemon_local"},
-	}
-	// Inventory-derived probes: every reference column that could hold a legacy value.
-	legacyIDs := map[string][]string{
-		"users":   {"user_owner"},
-		"daemons": {"daemon_local"},
-	}
-	for _, ref := range uuidGroup1References() {
-		if vals, ok := legacyIDs[ref.entity]; ok {
-			for _, val := range vals {
-				probes = append(probes, probe{ref.table, ref.column, val})
-			}
-		}
-	}
-	for _, ref := range uuidGroup1UnionReferences() {
-		for _, entity := range ref.entities {
-			if vals, ok := legacyIDs[entity]; ok {
-				for _, val := range vals {
-					probes = append(probes, probe{ref.table, ref.column, val})
-				}
-			}
-		}
-	}
-	for _, ref := range uuidGroup1PolymorphicReferences() {
-		for _, entity := range ref.typeEntity {
-			if vals, ok := legacyIDs[entity]; ok {
-				for _, val := range vals {
-					probes = append(probes, probe{ref.table, ref.column, val})
-				}
-			}
-		}
-	}
-
-	for _, p := range probes {
-		var count int
-		if err := db.QueryRow("SELECT COUNT(*) FROM "+p.table+" WHERE "+p.column+" = $1", p.value).Scan(&count); isUUIDTypeMismatch(err) {
-			continue
-		} else if err != nil {
-			return fmt.Errorf("legacy probe %s.%s=%s: %w", p.table, p.column, p.value, err)
-		}
-		if count > 0 {
-			return fmt.Errorf("legacy scaffolding not fully cleaned: %d rows in %s where %s = %q", count, p.table, p.column, p.value)
 		}
 	}
 	return nil
@@ -1727,15 +1490,7 @@ func (s *Store) replaceActivitiesPostgresLocked(tx *sql.Tx) error {
 	if _, err := tx.Exec(`DELETE FROM activities WHERE workspace_id::text = $1`, s.state.WorkspaceID); err != nil {
 		return err
 	}
-	documentIDColumnType, err := columnDataType(context.Background(), tx, "activities", "document_id")
-	if err != nil {
-		return err
-	}
 	for _, activity := range s.state.Activities {
-		documentID := any(strings.TrimSpace(activity.DocumentID))
-		if documentIDColumnType == "uuid" {
-			documentID = uuidStringOrNil(activity.DocumentID)
-		}
 		if _, err := tx.Exec(
 			`INSERT INTO activities (
 				workspace_id, type, document_id, actor_id, actor_type, summary, occurred_at,
@@ -1752,7 +1507,7 @@ func (s *Store) replaceActivitiesPostgresLocked(tx *sql.Tx) error {
 				)`,
 			s.state.WorkspaceID,
 			activity.Type,
-			documentID,
+			uuidStringOrNil(activity.DocumentID),
 			actorUUIDOrNil(activity.ActorID, activity.ActorType),
 			activity.ActorType,
 			activity.Summary,
@@ -1860,15 +1615,7 @@ func (s *Store) replaceAgentEventsPostgresLocked(tx *sql.Tx) error {
 	if _, err := tx.Exec(`DELETE FROM agent_events WHERE workspace_id::text = $1`, s.state.WorkspaceID); err != nil {
 		return err
 	}
-	documentIDColumnType, err := columnDataType(context.Background(), tx, "agent_events", "document_id")
-	if err != nil {
-		return err
-	}
 	for _, event := range s.state.AgentEvents {
-		documentID := any(strings.TrimSpace(event.DocumentID))
-		if documentIDColumnType == "uuid" {
-			documentID = uuidStringOrNil(event.DocumentID)
-		}
 		if _, err := tx.Exec(
 			`INSERT INTO agent_events (
 				workspace_id, id, agent_id, agent_handle, type, box, status, document_id,
@@ -1888,7 +1635,7 @@ func (s *Store) replaceAgentEventsPostgresLocked(tx *sql.Tx) error {
 			event.Type,
 			normalizeInboxBox(event.Box),
 			event.Status,
-			documentID,
+			uuidStringOrNil(event.DocumentID),
 			uuidStringOrNil(event.ThreadID),
 			uuidStringOrNil(event.ThreadMessageID),
 			event.FromUpdateID,

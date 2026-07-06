@@ -521,32 +521,33 @@ func TestAuthenticateHumanRequestRejectsUnverifiedAccountJWT(t *testing.T) {
 }
 
 func TestEmailVerifiedMigrationBackfillsExistingAccountsButFutureDefaultIsFalse(t *testing.T) {
-	db, err := sql.Open("pgx", postgresTestDSN(t))
-	if err != nil {
-		t.Fatalf("open postgres: %v", err)
+	database := newPostgresTestDatabase(t)
+	db := database.DB
+	if _, err := db.Exec(`DROP TABLE IF EXISTS account_email_tokens CASCADE`); err != nil {
+		t.Fatalf("drop account_email_tokens: %v", err)
 	}
-	defer db.Close()
-	resetUUIDGroup1MigrationTables(t, db)
-	defer resetUUIDGroup1MigrationTables(t, db)
+	if _, err := db.Exec(`DROP TABLE IF EXISTS accounts CASCADE`); err != nil {
+		t.Fatalf("drop accounts: %v", err)
+	}
 	if _, err := db.Exec(`
 		CREATE TABLE accounts (
-			id TEXT PRIMARY KEY,
+			id UUID PRIMARY KEY,
 			email TEXT UNIQUE NOT NULL,
 			display_name TEXT NOT NULL,
 			password_hash TEXT NOT NULL,
-			last_accessed_workspace_id TEXT NOT NULL DEFAULT '',
+			last_accessed_workspace_id UUID,
 			password_updated_at TIMESTAMPTZ,
 			created_at TIMESTAMPTZ NOT NULL,
 			updated_at TIMESTAMPTZ NOT NULL
 		)`); err != nil {
-		t.Fatalf("create legacy accounts: %v", err)
+		t.Fatalf("create accounts without email_verified: %v", err)
 	}
 	now := time.Now().UTC()
 	legacyAccountID := uuid.NewString()
 	if _, err := db.Exec(
 		`INSERT INTO accounts (id, email, display_name, password_hash, last_accessed_workspace_id, password_updated_at, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, '', $5, $5, $5)`,
-		"account_"+legacyAccountID,
+		 VALUES ($1, $2, $3, $4, NULL, $5, $5, $5)`,
+		legacyAccountID,
 		"legacy-verified@example.com",
 		"Legacy",
 		"hash",
