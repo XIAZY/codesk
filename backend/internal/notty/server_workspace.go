@@ -31,7 +31,7 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		"agentRuns":             SortedWorkspaceAgentRuns(state),
 		"threads":               SortedThreads(state),
 		"agentEvents":           s.agentEventsForWorkspace(r, state),
-		"presences":             state.Presences,
+		"presences":             s.presencesForWorkspace(r, state),
 		"activities":            state.Activities,
 		"updatedAt":             state.UpdatedAt,
 	})
@@ -55,6 +55,15 @@ func (s *Server) agentEventsForWorkspace(r *http.Request, state WorkspaceState) 
 	if s.sqlDB() != nil {
 		if events, err := listAllAgentEventsPostgres(s.sqlDB(), state.WorkspaceID); err == nil {
 			return events
+		}
+	}
+	return nil
+}
+
+func (s *Server) presencesForWorkspace(r *http.Request, state WorkspaceState) []*Presence {
+	if s.sqlDB() != nil {
+		if presences := listPresencesPostgres(s.sqlDB(), state.WorkspaceID); presences != nil {
+			return presences
 		}
 	}
 	return nil
@@ -96,7 +105,7 @@ func (s *Server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 			"agentRuns":             SortedWorkspaceAgentRuns(snapshot),
 			"threads":               SortedThreads(snapshot),
 			"agentEvents":           s.agentEventsForWorkspace(r, snapshot),
-			"presences":             snapshot.Presences,
+			"presences":             s.presencesForWorkspace(r, snapshot),
 			"activities":            snapshot.Activities,
 		},
 	}); err != nil {
