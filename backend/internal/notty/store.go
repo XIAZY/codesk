@@ -48,6 +48,7 @@ type Store struct {
 	pendingDocumentEvents []documentUpdateRecord
 	pendingInboxChanges   []AgentInboxChangedEvent
 	pendingActivities     []*ActivityEvent
+	committedActivities   []*ActivityEvent
 }
 
 type documentUpdateRecord struct {
@@ -352,6 +353,17 @@ func (s *Store) DrainAgentInboxChanges() []AgentInboxChangedEvent {
 	changes := append([]AgentInboxChangedEvent(nil), s.pendingInboxChanges...)
 	s.pendingInboxChanges = nil
 	return changes
+}
+
+func (s *Store) DrainActivityChanges() []*ActivityEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.committedActivities) == 0 {
+		return nil
+	}
+	activities := cloneActivityEvents(s.committedActivities)
+	s.committedActivities = nil
+	return activities
 }
 
 func (s *Store) ListAgentInbox(agentID string, box string, statuses ...string) ([]*AgentEvent, error) {
@@ -1067,20 +1079,22 @@ func (s *Store) CreateAgent(req CreateAgentRequest, meta OperationMeta) (*Agent,
 			return nil, err
 		}
 	}
-	if err := insertActivityPostgres(tx, workspaceID, &ActivityEvent{
+	activity := &ActivityEvent{
 		Type:       "agent.created",
 		ActorID:    meta.ActorID,
 		ActorType:  meta.ActorType,
 		Summary:    fmt.Sprintf("%s created agent @%s", meta.ActorID, agent.Handle),
 		OccurredAt: now,
 		Provenance: meta,
-	}); err != nil {
+	}
+	if err := insertActivityPostgres(tx, workspaceID, activity); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	committed = true
+	s.recordActivityCreated(activity)
 	return cloneAgent(agent), nil
 }
 
@@ -1112,20 +1126,22 @@ func (s *Store) UpdateAgent(id string, req UpdateAgentRequest, meta OperationMet
 	if err := upsertAgentPostgresTx(tx, workspaceID, agent); err != nil {
 		return nil, err
 	}
-	if err := insertActivityPostgres(tx, workspaceID, &ActivityEvent{
+	activity := &ActivityEvent{
 		Type:       "agent.updated",
 		ActorID:    meta.ActorID,
 		ActorType:  meta.ActorType,
 		Summary:    fmt.Sprintf("%s updated agent @%s", meta.ActorID, agent.Handle),
 		OccurredAt: now,
 		Provenance: meta,
-	}); err != nil {
+	}
+	if err := insertActivityPostgres(tx, workspaceID, activity); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	committed = true
+	s.recordActivityCreated(activity)
 	return cloneAgent(agent), nil
 }
 
@@ -1165,20 +1181,22 @@ func (s *Store) DeleteAgent(id string, meta OperationMeta) (*Agent, error) {
 		return nil, ErrNotFound
 	}
 	now := time.Now().UTC()
-	if err := insertActivityPostgres(tx, workspaceID, &ActivityEvent{
+	activity := &ActivityEvent{
 		Type:       "agent.deleted",
 		ActorID:    meta.ActorID,
 		ActorType:  meta.ActorType,
 		Summary:    fmt.Sprintf("%s deleted agent @%s", meta.ActorID, agent.Handle),
 		OccurredAt: now,
 		Provenance: meta,
-	}); err != nil {
+	}
+	if err := insertActivityPostgres(tx, workspaceID, activity); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	committed = true
+	s.recordActivityCreated(activity)
 	return cloneAgent(agent), nil
 }
 
@@ -1241,20 +1259,22 @@ func (s *Store) StartAgentRun(req StartAgentRunRequest, meta OperationMeta) (*Ag
 	if err := upsertAgentPostgresTx(tx, workspaceID, agent); err != nil {
 		return nil, nil, err
 	}
-	if err := insertActivityPostgres(tx, workspaceID, &ActivityEvent{
+	activity := &ActivityEvent{
 		Type:       "agent.run.created",
 		ActorID:    agent.ID,
 		ActorType:  "agent",
 		Summary:    fmt.Sprintf("%s queued %s run", meta.ActorID, agent.Name),
 		OccurredAt: now,
 		Provenance: meta,
-	}); err != nil {
+	}
+	if err := insertActivityPostgres(tx, workspaceID, activity); err != nil {
 		return nil, nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, nil, err
 	}
 	committed = true
+	s.recordActivityCreated(activity)
 	return cloneAgent(agent), cloneAgentRun(run), nil
 }
 
@@ -1344,20 +1364,22 @@ func (s *Store) UpdateAgentRun(id string, req UpdateAgentRunRequest, meta Operat
 	if err := upsertAgentPostgresTx(tx, workspaceID, agent); err != nil {
 		return nil, nil, err
 	}
-	if err := insertActivityPostgres(tx, workspaceID, &ActivityEvent{
+	activity := &ActivityEvent{
 		Type:       "agent.run.updated",
 		ActorID:    agent.ID,
 		ActorType:  "agent",
 		Summary:    fmt.Sprintf("%s is %s", agent.Name, run.Status),
 		OccurredAt: now,
 		Provenance: meta,
-	}); err != nil {
+	}
+	if err := insertActivityPostgres(tx, workspaceID, activity); err != nil {
 		return nil, nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, nil, err
 	}
 	committed = true
+	s.recordActivityCreated(activity)
 	return cloneAgentRun(run), cloneAgent(agent), nil
 }
 
@@ -1397,20 +1419,22 @@ func (s *Store) StopAgentRun(id string, meta OperationMeta) (*AgentRun, error) {
 			return nil, err
 		}
 	}
-	if err := insertActivityPostgres(tx, workspaceID, &ActivityEvent{
+	activity := &ActivityEvent{
 		Type:       "agent.run.stop_requested",
 		ActorID:    meta.ActorID,
 		ActorType:  meta.ActorType,
 		Summary:    fmt.Sprintf("%s requested stop for %s", meta.ActorID, run.AgentName),
 		OccurredAt: run.UpdatedAt,
 		Provenance: meta,
-	}); err != nil {
+	}
+	if err := insertActivityPostgres(tx, workspaceID, activity); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	committed = true
+	s.recordActivityCreated(activity)
 	return cloneAgentRun(run), nil
 }
 
@@ -1469,20 +1493,22 @@ func (s *Store) UpdateAgentSession(id string, req UpdateAgentSessionRequest, met
 	if err := upsertAgentPostgresTx(tx, workspaceID, updated); err != nil {
 		return nil, err
 	}
-	if err := insertActivityPostgres(tx, workspaceID, &ActivityEvent{
+	activity := &ActivityEvent{
 		Type:       "agent.session.updated",
 		ActorID:    meta.ActorID,
 		ActorType:  meta.ActorType,
 		Summary:    fmt.Sprintf("%s session is %s", updated.Name, updated.Status),
 		OccurredAt: now,
 		Provenance: meta,
-	}); err != nil {
+	}
+	if err := insertActivityPostgres(tx, workspaceID, activity); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	committed = true
+	s.recordActivityCreated(activity)
 	return updated, nil
 }
 
@@ -1690,6 +1716,7 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 	for _, event := range events {
 		s.recordAgentInboxChangedLocked(event)
 	}
+	s.recordActivityCreatedLocked(activity)
 	s.state.UpdatedAt = now
 	return committed, firstThreadMessage(committed), true, nil
 }
@@ -1734,7 +1761,7 @@ func (s *Store) ReplyThread(id string, req ReplyThreadRequest, meta OperationMet
 		Kind:         kind,
 		CreatedAt:    now,
 	}
-	updatedThread, allEvents, err := replyThreadPostgres(db, workspaceID, id, message, meta)
+	updatedThread, allEvents, activity, err := replyThreadPostgres(db, workspaceID, id, message, meta)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1744,6 +1771,7 @@ func (s *Store) ReplyThread(id string, req ReplyThreadRequest, meta OperationMet
 	for _, event := range allEvents {
 		s.recordAgentInboxChangedLocked(event)
 	}
+	s.recordActivityCreatedLocked(activity)
 	s.state.UpdatedAt = now
 	return updatedThread, message, nil
 }
@@ -1808,7 +1836,7 @@ func (s *Store) UpdateAgentEvent(id string, req UpdateAgentEventRequest, meta Op
 	// UpdateAgentEvent writes to Postgres directly (no persist walk), so its
 	// activity is inserted directly too; document_id references the existing
 	// event's document, so the FK is already satisfied.
-	if err := insertActivityPostgres(s.db, workspaceID, &ActivityEvent{
+	activity := &ActivityEvent{
 		Type:       "agent.event.updated",
 		DocumentID: updated.DocumentID,
 		ActorID:    meta.ActorID,
@@ -1816,9 +1844,11 @@ func (s *Store) UpdateAgentEvent(id string, req UpdateAgentEventRequest, meta Op
 		Summary:    fmt.Sprintf("%s marked %s %s", meta.ActorID, updated.Type, updated.Status),
 		OccurredAt: updated.UpdatedAt,
 		Provenance: meta,
-	}); err != nil {
+	}
+	if err := insertActivityPostgres(s.db, workspaceID, activity); err != nil {
 		return nil, err
 	}
+	s.recordActivityCreated(activity)
 	return updated, nil
 }
 
@@ -1876,6 +1906,46 @@ func (s *Store) nextClientIDSeedLocked() uint64 {
 // is no in-memory retention or cap here.
 func (s *Store) appendActivityLocked(event *ActivityEvent) {
 	s.pendingActivities = append(s.pendingActivities, event)
+}
+
+func (s *Store) recordActivityCreated(activity *ActivityEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recordActivityCreatedLocked(activity)
+}
+
+func (s *Store) recordActivityCreatedLocked(activity *ActivityEvent) {
+	if activity == nil {
+		return
+	}
+	s.committedActivities = append(s.committedActivities, cloneActivityEvent(activity))
+}
+
+func (s *Store) recordActivitiesCreatedLocked(activities []*ActivityEvent) {
+	for _, activity := range activities {
+		s.recordActivityCreatedLocked(activity)
+	}
+}
+
+func cloneActivityEvent(activity *ActivityEvent) *ActivityEvent {
+	if activity == nil {
+		return nil
+	}
+	clone := *activity
+	return &clone
+}
+
+func cloneActivityEvents(activities []*ActivityEvent) []*ActivityEvent {
+	if len(activities) == 0 {
+		return nil
+	}
+	clones := make([]*ActivityEvent, 0, len(activities))
+	for _, activity := range activities {
+		if clone := cloneActivityEvent(activity); clone != nil {
+			clones = append(clones, clone)
+		}
+	}
+	return clones
 }
 
 func cloneState(state WorkspaceState) WorkspaceState {

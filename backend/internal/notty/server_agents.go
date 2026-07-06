@@ -140,6 +140,7 @@ func (s *Server) handleUpdateAgentEvent(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.event.updated", Data: event})
+	s.publishActivityChanges(r)
 	writeJSON(w, http.StatusOK, event)
 }
 
@@ -231,6 +232,7 @@ func (s *Server) handleUpdateAgentNotification(w http.ResponseWriter, r *http.Re
 		return
 	}
 	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.event.updated", Data: notification})
+	s.publishActivityChanges(r)
 	writeJSON(w, http.StatusOK, map[string]any{"notification": notification})
 }
 
@@ -255,6 +257,7 @@ func (s *Server) handleUpdateAgentInboxItem(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.event.updated", Data: item})
+	s.publishActivityChanges(r)
 	writeJSON(w, http.StatusOK, map[string]any{"item": item})
 }
 
@@ -326,6 +329,7 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.created", Data: agent})
+	s.publishActivityChanges(r)
 	writeJSON(w, http.StatusCreated, agent)
 }
 
@@ -355,6 +359,7 @@ func (s *Server) handleCreateDaemonAgent(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.created", Data: agent})
+	s.publishActivityChanges(r)
 	writeJSON(w, http.StatusCreated, agent)
 }
 
@@ -383,6 +388,7 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.updated", Data: agent})
+	s.publishActivityChanges(r)
 	writeJSON(w, http.StatusOK, agent)
 }
 
@@ -407,6 +413,7 @@ func (s *Server) handleUpdateAgentSession(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.updated", Data: agent})
+	s.publishActivityChanges(r)
 	writeJSON(w, http.StatusOK, agent)
 }
 
@@ -430,6 +437,7 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.deleted", Data: agent})
+	s.publishActivityChanges(r)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -470,6 +478,7 @@ func (s *Server) handleStartAgentRunRequest(w http.ResponseWriter, r *http.Reque
 	}
 	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.updated", Data: agent})
 	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.run.updated", Data: cloneAgentRunForWorkspace(run)})
+	s.publishActivityChanges(r)
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"agent": agent,
 		"run":   run,
@@ -500,6 +509,7 @@ func (s *Server) handleUpdateAgentRun(w http.ResponseWriter, r *http.Request) {
 	}
 	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.updated", Data: agent})
 	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.run.updated", Data: cloneAgentRunForWorkspace(run)})
+	s.publishActivityChanges(r)
 	writeJSON(w, http.StatusOK, run)
 }
 
@@ -520,5 +530,6 @@ func (s *Server) handleStopAgentRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.requestBroker(r).Publish(EventEnvelope{Type: "agent.run.updated", Data: cloneAgentRunForWorkspace(run)})
+	s.publishActivityChanges(r)
 	writeJSON(w, http.StatusOK, run)
 }
