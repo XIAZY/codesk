@@ -21,11 +21,6 @@ export default defineConfig({
     host: "0.0.0.0",
     port: 5173,
     allowedHosts,
-    // Allow importing the Go contract-pin golden file (daemon fixtures) that lives one directory up,
-    // outside frontend/. See frontend/src/daemonFixtures.ts.
-    fs: {
-      allow: [".", ".."],
-    },
   },
   preview: {
     host: "0.0.0.0",
