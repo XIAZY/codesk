@@ -614,16 +614,23 @@ func (s *regressionStack) backendURL(t *testing.T) string {
 func (s *regressionStack) bootstrapWorkspace(t *testing.T) {
 	t.Helper()
 	email := "regression-" + s.project + "@example.test"
-	var auth struct {
-		Token string `json:"token"`
-	}
 	s.postJSON(t, "/api/auth/register", "", map[string]string{
 		"email":       email,
 		"password":    "regression-password",
 		"displayName": "Regression User",
-	}, http.StatusCreated, &auth)
+	}, http.StatusCreated, nil)
+
+	s.execService(t, "postgres", "psql -U notty -d notty -v ON_ERROR_STOP=1 -c "+shellQuote("UPDATE accounts SET email_verified = TRUE WHERE email = "+sqlQuote(email)))
+
+	var auth struct {
+		Token string `json:"token"`
+	}
+	s.postJSON(t, "/api/auth/login", "", map[string]string{
+		"email":    email,
+		"password": "regression-password",
+	}, http.StatusOK, &auth)
 	if auth.Token == "" {
-		t.Fatal("registration returned empty token")
+		t.Fatal("login returned empty token")
 	}
 	s.authToken = auth.Token
 
@@ -633,8 +640,9 @@ func (s *regressionStack) bootstrapWorkspace(t *testing.T) {
 		} `json:"workspace"`
 	}
 	s.postJSON(t, "/api/workspaces", s.authToken, map[string]string{
-		"name": "Regression Workspace",
-		"slug": s.project,
+		"name":   "Regression Workspace",
+		"slug":   s.project,
+		"handle": "regression-user",
 	}, http.StatusCreated, &workspaceResponse)
 	if workspaceResponse.Workspace.ID == "" {
 		t.Fatal("workspace creation returned empty id")
@@ -1172,7 +1180,7 @@ func (s *regressionStack) documentHeaderByPath(path string) (string, uint64, int
 
 func (s *regressionStack) workspaceRootDocumentID() string {
 	query := fmt.Sprintf(
-		"SELECT id FROM documents WHERE workspace_id=%s AND path='.notty/root' LIMIT 1",
+		"SELECT root_document_id FROM workspaces WHERE id=%s",
 		sqlQuote(s.workspaceID),
 	)
 	return strings.TrimSpace(s.psql(query))

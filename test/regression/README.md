@@ -16,6 +16,7 @@ NOTTY_REGRESSION_BACKEND_RESTART=1 NOTTY_REGRESSION_RESTART_LINES=20000 go test 
 ```
 
 The suite uses a dedicated Docker Compose project and random localhost ports, so it can run beside the normal dev stack.
+The Compose stack provides fake Mailgun settings so strict email configuration does not prevent backend boot; the harness marks its own throwaway account verified in Postgres before logging in.
 
 Delete/backspace coverage is included at both levels: a CRDT-only regression verifies partial delete ranges inside larger text items, and a websocket regression verifies peer propagation plus backend persistence.
 
