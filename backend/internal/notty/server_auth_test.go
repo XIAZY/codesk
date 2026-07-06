@@ -2280,3 +2280,53 @@ func authTestRequest(t *testing.T, router http.Handler, method string, target st
 	router.ServeHTTP(recorder, request)
 	return recorder
 }
+
+// A daemon check-in must broadcast a daemon.updated event carrying the freshly
+// computed connection status. This is the backend half of the "status shows up
+// live, no refresh" contract: if the publish is ever dropped, the frontend can
+// only recover the status on a full snapshot refetch — the exact bug we fixed.
+func TestDaemonStatusCheckInPublishesDaemonUpdatedEvent(t *testing.T) {
+	server, router := newAuthTestServer(t)
+
+	owner := authTestRegister(t, router, "daemon-live-status@example.com", "owner-pass", "Daemon Live Status")
+	workspace := authTestCreateWorkspace(t, router, owner.Token, "Daemon Live Status Tenant")
+
+	var daemonResponse CreateDaemonResponse
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons", owner.Token, CreateDaemonRequest{Name: "Install daemon"}, http.StatusCreated, &daemonResponse)
+
+	// Subscribe after creation so we isolate the status check-in from daemon.created.
+	events, unsubscribe := server.workspaceBroker(workspace.ID).Subscribe()
+	defer unsubscribe()
+
+	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/daemon/status", daemonResponse.Token, UpdateDaemonStatusRequest{
+		Version: "0.63.0",
+		OS:      "linux",
+		Arch:    "arm64",
+	}, http.StatusOK)
+
+	var updated *Daemon
+	for draining := true; draining; {
+		select {
+		case event := <-events:
+			if event.Type == "daemon.updated" {
+				daemon, ok := event.Data.(*Daemon)
+				if !ok {
+					t.Fatalf("daemon.updated event carried %T, want *Daemon", event.Data)
+				}
+				updated = daemon
+			}
+		default:
+			draining = false
+		}
+	}
+
+	if updated == nil {
+		t.Fatal("PATCH /daemon/status must publish a daemon.updated event so the frontend reflects check-ins without a refresh")
+	}
+	if updated.ID != daemonResponse.Daemon.ID {
+		t.Fatalf("daemon.updated carried daemon %q, want %q", updated.ID, daemonResponse.Daemon.ID)
+	}
+	if updated.ConnectionStatus != "online" {
+		t.Fatalf("daemon.updated must carry the fresh connectionStatus the UI renders, got %q want online", updated.ConnectionStatus)
+	}
+}
