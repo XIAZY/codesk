@@ -232,15 +232,27 @@ svg.i.sm {
   border-color: transparent;
 }
 
+/* Primary action = a neutral color that contrasts its background (never accent,
+   which is reserved for "needs you"). On light surfaces that is ink + paper. */
 .btn.accent {
   background: var(--ink);
   border-color: var(--ink);
   color: var(--paper);
 }
 
-.btn.accent:hover {
-  background: #2A251F;
-  border-color: #2A251F;
+.btn.accent:hover:not(:disabled) {
+  background: oklch(0.33 0.01 75);
+  border-color: oklch(0.33 0.01 75);
+}
+
+.btn.accent:active:not(:disabled) {
+  background: oklch(0.20 0.01 75);
+  border-color: oklch(0.20 0.01 75);
+}
+
+.btn.accent:disabled {
+  background: var(--ink-3);
+  border-color: var(--ink-3);
 }
 
 .btn.danger {
@@ -1199,12 +1211,18 @@ svg.i.sm {
   background: rgba(255, 255, 255, 0.08);
 }
 
+/* Same rule inverted for the dark selection toolbar: paper fill + ink text. */
 .selection-toolbar button.primary {
-  background: var(--accent);
+  background: var(--paper);
+  color: var(--ink);
 }
 
 .selection-toolbar button.primary:hover {
-  background: var(--accent-700);
+  background: oklch(0.90 0.006 75);
+}
+
+.selection-toolbar button.primary:active {
+  background: oklch(0.85 0.006 75);
 }
 
 .selection-toolbar .sep {
