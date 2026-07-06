@@ -44,19 +44,6 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		)
 		`,
 		`ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS root_document_id UUID`,
-		`DO $$
-		BEGIN
-			IF EXISTS (
-				SELECT 1 FROM information_schema.columns
-				 WHERE table_schema = 'public'
-				   AND table_name = 'workspaces'
-				   AND column_name = 'root_document_id'
-				   AND data_type = 'text'
-			) THEN
-				UPDATE workspaces SET root_document_id = 'doc_root_' || id::text WHERE root_document_id = '';
-			END IF;
-		END $$`,
-		`ALTER TABLE workspaces ALTER COLUMN root_document_id DROP DEFAULT`,
 		`ALTER TABLE workspaces DROP COLUMN IF EXISTS root_stream_id`,
 		`
 		CREATE TABLE IF NOT EXISTS accounts (
