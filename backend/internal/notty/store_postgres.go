@@ -333,7 +333,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		// partial index for atomic thread-create idempotency via ON CONFLICT.
 		// Teardown: remove the DROP once all environments carry the unique index.
 		`DROP INDEX IF EXISTS idx_threads_workspace_actor_operation`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_threads_workspace_actor_operation ON threads (workspace_id, created_by_id, client_operation_id) WHERE client_operation_id <> ''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_threads_workspace_actor_operation ON threads (workspace_id, created_by_id, created_by_type, client_operation_id) WHERE client_operation_id <> ''`,
 		`
 		CREATE TABLE IF NOT EXISTS thread_messages (
 			workspace_id UUID NOT NULL,
@@ -2821,7 +2821,7 @@ func createThreadPostgres(db *sql.DB, workspaceID string, thread *Thread, messag
 			$11, $12, $13, $14,
 			$15, $16
 		)
-		ON CONFLICT (workspace_id, created_by_id, client_operation_id)
+		ON CONFLICT (workspace_id, created_by_id, created_by_type, client_operation_id)
 			WHERE client_operation_id <> ''
 		DO NOTHING`,
 		workspaceID,
@@ -2974,13 +2974,13 @@ func replyThreadPostgres(db *sql.DB, workspaceID string, threadID string, messag
 	return getThreadPostgres(db, workspaceID, threadID)
 }
 
-func findThreadByClientOperationPostgres(db *sql.DB, workspaceID string, clientOperationID string, createdByID string) (*Thread, error) {
+func findThreadByClientOperationPostgres(db *sql.DB, workspaceID string, clientOperationID string, createdByID string, createdByType string) (*Thread, error) {
 	var threadID string
 	err := db.QueryRow(
 		`SELECT id::text FROM threads
-		  WHERE workspace_id = $1::uuid AND client_operation_id = $2 AND created_by_id = $3::uuid
+		  WHERE workspace_id = $1::uuid AND client_operation_id = $2 AND created_by_id = $3::uuid AND created_by_type = $4
 		  LIMIT 1`,
-		workspaceID, clientOperationID, createdByID,
+		workspaceID, clientOperationID, createdByID, createdByType,
 	).Scan(&threadID)
 	if err == sql.ErrNoRows {
 		return nil, nil

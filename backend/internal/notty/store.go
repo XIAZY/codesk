@@ -1529,7 +1529,7 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 		return nil, nil, false, err
 	}
 	if !created {
-		existing, err := findThreadByClientOperationPostgres(s.db, s.state.WorkspaceID, clientOperationID, author.ID)
+		existing, err := findThreadByClientOperationPostgres(s.db, s.state.WorkspaceID, clientOperationID, author.ID, author.Type)
 		if err != nil {
 			return nil, nil, false, err
 		}
