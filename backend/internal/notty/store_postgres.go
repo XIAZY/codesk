@@ -1328,7 +1328,7 @@ func upsertPresencePostgres(db *sql.DB, workspaceID string, presence *Presence) 
 	return tx.Commit()
 }
 
-func listPresencesPostgres(db *sql.DB, workspaceID string) []*Presence {
+func listPresencesPostgres(db *sql.DB, workspaceID string) ([]*Presence, error) {
 	rows, err := db.Query(
 		`SELECT actor_id::text, actor_type, COALESCE(document_id::text, ''), file_path, mode, selection_start, selection_end, activity, updated_at
 		   FROM presences
@@ -1337,7 +1337,7 @@ func listPresencesPostgres(db *sql.DB, workspaceID string) []*Presence {
 		workspaceID,
 	)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -1347,12 +1347,12 @@ func listPresencesPostgres(db *sql.DB, workspaceID string) []*Presence {
 		var start sql.NullInt64
 		var end sql.NullInt64
 		if err := rows.Scan(&p.ActorID, &p.ActorType, &p.DocumentID, &p.FilePath, &p.Mode, &start, &end, &p.Activity, &p.UpdatedAt); err != nil {
-			return nil
+			return nil, err
 		}
 		p.Selection = selectionFromNulls(start, end)
 		presences = append(presences, p)
 	}
-	return presences
+	return presences, rows.Err()
 }
 
 type persistedActivityInsert struct {

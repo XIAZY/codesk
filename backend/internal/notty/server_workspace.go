@@ -1,6 +1,7 @@
 package notty
 
 import (
+	"log"
 	"net/http"
 	"time"
 
@@ -18,6 +19,11 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		currentDaemonID = auth.DaemonID
 		currentMembershipRole = auth.MembershipRole
 	}
+	presences, err := s.presencesForWorkspace(state)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"workspaceId":           state.WorkspaceID,
 		"rootDocumentId":        state.RootDocumentID,
@@ -31,7 +37,7 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		"agentRuns":             SortedWorkspaceAgentRuns(state),
 		"threads":               SortedThreads(state),
 		"agentEvents":           s.agentEventsForWorkspace(r, state),
-		"presences":             s.presencesForWorkspace(r, state),
+		"presences":             presences,
 		"activities":            state.Activities,
 		"updatedAt":             state.UpdatedAt,
 	})
@@ -60,13 +66,11 @@ func (s *Server) agentEventsForWorkspace(r *http.Request, state WorkspaceState) 
 	return nil
 }
 
-func (s *Server) presencesForWorkspace(r *http.Request, state WorkspaceState) []*Presence {
+func (s *Server) presencesForWorkspace(state WorkspaceState) ([]*Presence, error) {
 	if s.sqlDB() != nil {
-		if presences := listPresencesPostgres(s.sqlDB(), state.WorkspaceID); presences != nil {
-			return presences
-		}
+		return listPresencesPostgres(s.sqlDB(), state.WorkspaceID)
 	}
-	return nil
+	return nil, nil
 }
 
 func (s *Server) daemonsForWorkspace(r *http.Request, state WorkspaceState) []*Daemon {
@@ -94,6 +98,10 @@ func (s *Server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	if auth != nil {
 		currentMembershipRole = auth.MembershipRole
 	}
+	wsPresences, err := s.presencesForWorkspace(snapshot)
+	if err != nil {
+		log.Printf("list presences for websocket snapshot: %v", err)
+	}
 	if err := conn.WriteJSON(EventEnvelope{
 		Type: "workspace.snapshot",
 		Data: map[string]interface{}{
@@ -105,7 +113,7 @@ func (s *Server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 			"agentRuns":             SortedWorkspaceAgentRuns(snapshot),
 			"threads":               SortedThreads(snapshot),
 			"agentEvents":           s.agentEventsForWorkspace(r, snapshot),
-			"presences":             s.presencesForWorkspace(r, snapshot),
+			"presences":             wsPresences,
 			"activities":            snapshot.Activities,
 		},
 	}); err != nil {

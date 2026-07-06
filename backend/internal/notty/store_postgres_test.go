@@ -119,7 +119,9 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	if got, err := getAgentEventPostgres(db, snapshot.WorkspaceID, claimed.ID); err != nil || got == nil || got.Status != "completed" || got.RunID != run.ID {
 		t.Fatalf("expected completed event after reload, got %#v (err: %v)", got, err)
 	}
-	if presences := listPresencesPostgres(db, snapshot.WorkspaceID); len(presences) == 0 {
+	if presences, err := listPresencesPostgres(db, snapshot.WorkspaceID); err != nil {
+		t.Fatalf("list presences: %v", err)
+	} else if len(presences) == 0 {
 		t.Fatal("expected presences in Postgres after reload")
 	} else {
 		var found bool
