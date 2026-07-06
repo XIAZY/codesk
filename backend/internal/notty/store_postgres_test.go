@@ -997,23 +997,35 @@ func TestPostgresAgentEventsInsertedDirectlyToPostgres(t *testing.T) {
 func TestPostgresConcurrentThreadCreateIdempotency(t *testing.T) {
 	database := newPostgresTestDatabase(t)
 	db := database.DB
-	store := newPostgresTestWorkspaceStore(t, database)
-	user := seedTestUser(t, store)
-	documentID := mustCreateTestDocument(t, store, "docs/concurrent.md", "race\n")
-	workspaceID := store.Snapshot().WorkspaceID
+	seedStore := newPostgresTestWorkspaceStore(t, database)
+	user := seedTestUser(t, seedStore)
+	documentID := mustCreateTestDocument(t, seedStore, "docs/concurrent.md", "race\n")
+	snapshot := seedStore.Snapshot()
+	workspaceID := snapshot.WorkspaceID
+	workspaceName := snapshot.Name
 
-	const goroutines = 10
+	const n = 10
+	stores := make([]*Store, n)
+	for i := 0; i < n; i++ {
+		s, err := NewWorkspaceStore(database, workspaceID, workspaceName)
+		if err != nil {
+			t.Fatalf("create store %d: %v", i, err)
+		}
+		stores[i] = s
+	}
+
 	clientOpID := "idempotent-op-" + uuid.NewString()
 	type result struct {
 		thread  *Thread
 		created bool
 		err     error
 	}
-	results := make(chan result, goroutines)
+	results := make(chan result, n)
 
-	for i := 0; i < goroutines; i++ {
+	for i := 0; i < n; i++ {
+		s := stores[i]
 		go func() {
-			th, _, created, err := store.CreateThread(CreateThreadRequest{
+			th, _, created, err := s.CreateThread(CreateThreadRequest{
 				DocumentID:        documentID,
 				ClientOperationID: clientOpID,
 				Title:             "Concurrent thread",
@@ -1025,7 +1037,7 @@ func TestPostgresConcurrentThreadCreateIdempotency(t *testing.T) {
 
 	var winners, dupes int
 	var winnerID string
-	for i := 0; i < goroutines; i++ {
+	for i := 0; i < n; i++ {
 		r := <-results
 		if r.err != nil {
 			t.Fatalf("goroutine error: %v", r.err)
@@ -1057,6 +1069,14 @@ func TestPostgresConcurrentThreadCreateIdempotency(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected exactly 1 thread in Postgres, got %d", count)
+	}
+
+	got, err := getThreadPostgres(db, workspaceID, winnerID)
+	if err != nil {
+		t.Fatalf("re-read winner: %v", err)
+	}
+	if len(got.Messages) != 1 {
+		t.Fatalf("winner should have 1 message, got %d", len(got.Messages))
 	}
 }
 
