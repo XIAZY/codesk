@@ -20,13 +20,13 @@ import (
 	"notty/internal/yproto"
 )
 
-func TestCloneThreadPreservesEmptyArrays(t *testing.T) {
-	thread := cloneThread(&Thread{
+func TestThreadPreservesEmptyArrays(t *testing.T) {
+	thread := &Thread{
 		ID:                 "thread_1",
 		ParticipantIDs:     []string{},
 		ParticipantHandles: []string{},
 		Messages:           []*ThreadMessage{},
-	})
+	}
 	payload, err := json.Marshal(thread)
 	if err != nil {
 		t.Fatalf("marshal thread: %v", err)

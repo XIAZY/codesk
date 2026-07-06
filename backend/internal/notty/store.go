@@ -46,7 +46,6 @@ type Store struct {
 	dirtyDocuments        map[string]struct{}
 	pendingDocumentEvents []documentUpdateRecord
 	pendingInboxChanges   []AgentInboxChangedEvent
-	pendingAgentEvents    []*AgentEvent
 	pendingActivities     []*ActivityEvent
 }
 
@@ -123,7 +122,6 @@ func (s *Store) load() error {
 	if s.refreshAgentSystemPromptsLocked() {
 		needsPersist = true
 	}
-	s.refreshThreadParticipantsLocked()
 	if needsPersist {
 		if err := s.persistLocked(); err != nil {
 			return fmt.Errorf("persist normalized workspace state: %w", err)
@@ -147,9 +145,6 @@ func (s *Store) ensureMaps() {
 	}
 	if s.state.AgentRuns == nil {
 		s.state.AgentRuns = map[string]*AgentRun{}
-	}
-	if s.state.Threads == nil {
-		s.state.Threads = map[string]*Thread{}
 	}
 	if s.state.AgentDocumentViews == nil {
 		s.state.AgentDocumentViews = map[string]*AgentDocumentView{}
@@ -206,7 +201,6 @@ func seedWorkspaceFor(workspaceID string, workspaceName string) WorkspaceState {
 		Daemons:             map[string]*Daemon{},
 		Agents:              map[string]*Agent{},
 		AgentRuns:           map[string]*AgentRun{},
-		Threads:             map[string]*Thread{},
 		AgentDocumentViews:  map[string]*AgentDocumentView{},
 		DocumentCheckpoints: map[string]*DocumentCheckpoint{},
 		UpdatedAt:           now,
@@ -330,33 +324,20 @@ func (s *Store) EncodeDocumentSyncUpdates(documentID string, stateVector []byte)
 
 func (s *Store) GetThread(id string) (*Thread, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	thread, ok := s.state.Threads[id]
-	if !ok {
-		return nil, ErrNotFound
-	}
-	return cloneThread(thread), nil
+	workspaceID := s.state.WorkspaceID
+	s.mu.RUnlock()
+	return getThreadPostgres(s.db, workspaceID, id)
 }
 
 func (s *Store) ListThreadsForDocument(documentID string) ([]*Thread, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if document := s.state.ContentDocuments[documentID]; document == nil || document.Hidden {
+	document := s.state.ContentDocuments[documentID]
+	workspaceID := s.state.WorkspaceID
+	s.mu.RUnlock()
+	if document == nil || document.Hidden {
 		return nil, ErrNotFound
 	}
-	threads := make([]*Thread, 0)
-	for _, thread := range s.state.Threads {
-		if thread.DocumentID == documentID {
-			threads = append(threads, cloneThread(thread))
-		}
-	}
-	sort.Slice(threads, func(i, j int) bool {
-		if threads[i].UpdatedAt.Equal(threads[j].UpdatedAt) {
-			return threads[i].ID < threads[j].ID
-		}
-		return threads[i].UpdatedAt.After(threads[j].UpdatedAt)
-	})
-	return threads, nil
+	return listThreadsForDocumentPostgres(s.db, workspaceID, documentID)
 }
 
 func (s *Store) ListAgentNotifications(agentID string, statuses ...string) ([]*AgentEvent, error) {
@@ -699,15 +680,14 @@ func (s *Store) syntheticDocumentInboxItemLocked(id string) (*AgentEvent, bool) 
 }
 
 func (s *Store) documentInboxClassificationLocked(agentID string, document *Document) (box string, eventType string) {
-	for _, thread := range s.state.Threads {
-		if thread == nil || thread.DocumentID != document.ID || thread.Status != "open" {
-			continue
-		}
-		if containsText(thread.ParticipantIDs, agentID) {
-			return "for_me", "document.updated"
-		}
+	if document == nil {
+		return "general", "document.updated"
 	}
-	return "general", "document.updated"
+	found, _, _, err := documentHasOpenThreadForParticipantPostgres(s.db, s.state.WorkspaceID, document.ID, agentID)
+	if err != nil || !found {
+		return "general", "document.updated"
+	}
+	return "for_me", "document.updated"
 }
 
 func shouldMarkDocumentViewedForEvent(event *AgentEvent) bool {
@@ -1036,7 +1016,6 @@ func (s *Store) CreateAgent(req CreateAgentRequest, meta OperationMeta) (*Agent,
 			ViewedAt:    agent.UpdatedAt,
 		}
 	}
-	s.refreshThreadParticipantsLocked()
 	s.state.UpdatedAt = agent.UpdatedAt
 	s.appendActivityLocked(&ActivityEvent{
 		Type:       "agent.created",
@@ -1068,7 +1047,6 @@ func (s *Store) UpdateAgent(id string, req UpdateAgentRequest, meta OperationMet
 	}
 	agent.SystemPrompt = sharedAgentSystemPrompt(agent)
 	agent.UpdatedAt = time.Now().UTC()
-	s.refreshThreadParticipantsLocked()
 	s.state.UpdatedAt = agent.UpdatedAt
 	s.appendActivityLocked(&ActivityEvent{
 		Type:       "agent.updated",
@@ -1103,10 +1081,7 @@ func (s *Store) DeleteAgent(id string, meta OperationMeta) (*Agent, error) {
 			delete(s.state.AgentRuns, runID)
 		}
 	}
-	for _, thread := range s.state.Threads {
-		thread.ParticipantIDs = removeString(thread.ParticipantIDs, id)
-	}
-	s.refreshThreadParticipantsLocked()
+	_ = removeThreadParticipantPostgres(s.db, s.state.WorkspaceID, id)
 	now := time.Now().UTC()
 	s.state.UpdatedAt = now
 	s.appendActivityLocked(&ActivityEvent{
@@ -1490,14 +1465,13 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 	}
 	clientOperationID := strings.TrimSpace(req.ClientOperationID)
 	if clientOperationID != "" {
-		for _, thread := range s.state.Threads {
-			if thread == nil {
-				continue
-			}
-			if thread.ClientOperationID == clientOperationID && thread.CreatedByID == author.ID && thread.CreatedByType == author.Type {
-				message := firstThreadMessage(thread)
-				return cloneThread(thread), cloneThreadMessage(message), false, nil
-			}
+		existing, err := findThreadByClientOperationPostgres(s.db, s.state.WorkspaceID, clientOperationID, author.ID)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		if existing != nil {
+			message := firstThreadMessage(existing)
+			return existing, message, false, nil
 		}
 	}
 	now := time.Now().UTC()
@@ -1505,6 +1479,14 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 	if err != nil {
 		return nil, nil, false, err
 	}
+	mentionedIDs := s.extractMentionPrincipalIDsLocked(body)
+	participantIDs := []string{author.ID}
+	for _, mid := range mentionedIDs {
+		if mid != "" && !containsText(participantIDs, mid) {
+			participantIDs = append(participantIDs, mid)
+		}
+	}
+	sort.Strings(participantIDs)
 	thread := &Thread{
 		ID:                uuid.NewString(),
 		DocumentID:        document.ID,
@@ -1516,7 +1498,7 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 		CreatedByType:     author.Type,
 		CreatedByHandle:   author.Handle,
 		CreatedByName:     author.Name,
-		ParticipantIDs:    []string{author.ID},
+		ParticipantIDs:    participantIDs,
 		Messages:          []*ThreadMessage{},
 		CreatedAt:         now,
 		UpdatedAt:         now,
@@ -1532,11 +1514,9 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 		Kind:         "comment",
 		CreatedAt:    now,
 	}
-	thread.Messages = append(thread.Messages, message)
-	s.mergeThreadParticipantsLocked(thread, author.ID)
-	s.mergeThreadParticipantsLocked(thread, s.extractMentionPrincipalIDsLocked(body)...)
-	s.state.Threads[thread.ID] = thread
-	s.refreshThreadParticipantsLocked()
+	if err := createThreadPostgres(s.db, s.state.WorkspaceID, thread, message); err != nil {
+		return nil, nil, false, err
+	}
 	s.enqueueThreadMentionEventsLocked(thread, message, meta)
 	s.state.UpdatedAt = now
 	s.appendActivityLocked(&ActivityEvent{
@@ -1551,7 +1531,7 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 	if err := s.persistLocked(); err != nil {
 		return nil, nil, false, err
 	}
-	return cloneThread(thread), cloneThreadMessage(message), true, nil
+	return thread, message, true, nil
 }
 
 func firstThreadMessage(thread *Thread) *ThreadMessage {
@@ -1565,9 +1545,10 @@ func (s *Store) ReplyThread(id string, req ReplyThreadRequest, meta OperationMet
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	thread, ok := s.state.Threads[id]
-	if !ok {
-		return nil, nil, ErrNotFound
+	workspaceID := s.state.WorkspaceID
+	thread, err := getThreadPostgres(s.db, workspaceID, id)
+	if err != nil {
+		return nil, nil, err
 	}
 	body := strings.TrimSpace(req.Body)
 	if body == "" {
@@ -1593,14 +1574,14 @@ func (s *Store) ReplyThread(id string, req ReplyThreadRequest, meta OperationMet
 		Kind:         kind,
 		CreatedAt:    now,
 	}
-	thread.Messages = append(thread.Messages, message)
-	thread.UpdatedAt = now
 	mentionedIDs := s.extractMentionPrincipalIDsLocked(body)
-	s.mergeThreadParticipantsLocked(thread, author.ID)
-	s.mergeThreadParticipantsLocked(thread, mentionedIDs...)
-	s.refreshThreadParticipantsLocked()
-	s.enqueueThreadMentionEventsLocked(thread, message, meta)
-	s.enqueueThreadReplyEventsLocked(thread, message, meta, mentionedIDs...)
+	participantIDs := append([]string{author.ID}, mentionedIDs...)
+	updatedThread, err := replyThreadPostgres(s.db, workspaceID, id, message, participantIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	s.enqueueThreadMentionEventsLocked(updatedThread, message, meta)
+	s.enqueueThreadReplyEventsLocked(updatedThread, message, meta, mentionedIDs...)
 	s.state.UpdatedAt = now
 	s.appendActivityLocked(&ActivityEvent{
 		Type:       "thread.replied",
@@ -1614,7 +1595,7 @@ func (s *Store) ReplyThread(id string, req ReplyThreadRequest, meta OperationMet
 	if err := s.persistLocked(); err != nil {
 		return nil, nil, err
 	}
-	return cloneThread(thread), cloneThreadMessage(message), nil
+	return updatedThread, message, nil
 }
 
 func (s *Store) ClaimAgentEvent(req ClaimAgentEventRequest) (*AgentEvent, error) {
@@ -1763,10 +1744,6 @@ func cloneState(state WorkspaceState) WorkspaceState {
 	copyState.AgentRuns = map[string]*AgentRun{}
 	for key, run := range state.AgentRuns {
 		copyState.AgentRuns[key] = cloneAgentRun(run)
-	}
-	copyState.Threads = map[string]*Thread{}
-	for key, thread := range state.Threads {
-		copyState.Threads[key] = cloneThread(thread)
 	}
 	copyState.AgentDocumentViews = map[string]*AgentDocumentView{}
 	for key, view := range state.AgentDocumentViews {
@@ -2168,12 +2145,11 @@ func (s *Store) documentHasThreadsLocked(documentID string) bool {
 	if documentID == "" {
 		return false
 	}
-	for _, thread := range s.state.Threads {
-		if thread != nil && thread.DocumentID == documentID {
-			return true
-		}
+	has, err := documentHasThreadsPostgres(s.db, s.state.WorkspaceID, documentID)
+	if err != nil {
+		return false
 	}
-	return false
+	return has
 }
 
 func cloneAgentRun(run *AgentRun) *AgentRun {
@@ -2278,88 +2254,12 @@ type principalIdentity struct {
 	Name   string
 }
 
-func SortedThreads(state WorkspaceState) []*Thread {
-	threads := make([]*Thread, 0, len(state.Threads))
-	for _, thread := range state.Threads {
-		threads = append(threads, cloneThread(thread))
-	}
-	sort.Slice(threads, func(i, j int) bool {
-		if threads[i].UpdatedAt.Equal(threads[j].UpdatedAt) {
-			return threads[i].ID < threads[j].ID
-		}
-		return threads[i].UpdatedAt.After(threads[j].UpdatedAt)
-	})
-	return threads
-}
-
-
-func cloneThread(thread *Thread) *Thread {
-	if thread == nil {
-		return nil
-	}
-	clone := *thread
-	clone.ParticipantIDs = cloneStringSlice(thread.ParticipantIDs)
-	clone.ParticipantHandles = cloneStringSlice(thread.ParticipantHandles)
-	clone.Messages = make([]*ThreadMessage, len(thread.Messages))
-	for index, message := range thread.Messages {
-		clone.Messages[index] = cloneThreadMessage(message)
-	}
-	return &clone
-}
-
-func cloneStringSlice(values []string) []string {
-	if len(values) == 0 {
-		return []string{}
-	}
-	return append([]string(nil), values...)
-}
-
-func cloneThreadMessage(message *ThreadMessage) *ThreadMessage {
-	if message == nil {
-		return nil
-	}
-	clone := *message
-	return &clone
-}
-
 func cloneAgentEvent(event *AgentEvent) *AgentEvent {
 	if event == nil {
 		return nil
 	}
 	clone := *event
 	return &clone
-}
-
-func (s *Store) refreshThreadParticipantsLocked() {
-	for _, thread := range s.state.Threads {
-		handles := make([]string, 0, len(thread.ParticipantIDs))
-		for _, participantID := range thread.ParticipantIDs {
-			if user, ok := s.state.Users[participantID]; ok {
-				handles = append(handles, user.Handle)
-				continue
-			}
-			if agent, ok := s.state.Agents[participantID]; ok {
-				handles = append(handles, agent.Handle)
-			}
-		}
-		sort.Strings(handles)
-		thread.ParticipantHandles = handles
-	}
-}
-
-func (s *Store) mergeThreadParticipantsLocked(thread *Thread, participantIDs ...string) {
-	if thread == nil {
-		return
-	}
-	for _, participantID := range participantIDs {
-		if participantID == "" {
-			continue
-		}
-		if !containsText(thread.ParticipantIDs, participantID) {
-			thread.ParticipantIDs = append(thread.ParticipantIDs, participantID)
-		}
-	}
-	sort.Strings(thread.ParticipantIDs)
 }
 
 func buildThreadAnchorFromRequest(req CreateThreadRequest) (ThreadAnchor, error) {
@@ -2520,15 +2420,14 @@ func (s *Store) enqueueDocumentInboxEventsLocked(document *Document, meta Operat
 }
 
 func (s *Store) documentInboxTargetLocked(agentID string, document *Document) (box string, threadID string, threadTitle string) {
-	for _, thread := range s.state.Threads {
-		if thread == nil || document == nil || thread.DocumentID != document.ID || thread.Status != "open" {
-			continue
-		}
-		if containsText(thread.ParticipantIDs, agentID) {
-			return "for_me", thread.ID, thread.Title
-		}
+	if document == nil {
+		return "general", "", ""
 	}
-	return "general", "", ""
+	found, tid, title, err := documentHasOpenThreadForParticipantPostgres(s.db, s.state.WorkspaceID, document.ID, agentID)
+	if err != nil || !found {
+		return "general", "", ""
+	}
+	return "for_me", tid, title
 }
 
 func (s *Store) upsertDocumentInboxEventLocked(agent *Agent, document *Document, box string, threadID string, threadTitle string, fromUpdateID int64, toUpdateID int64) {
@@ -2617,21 +2516,6 @@ func (s *Store) enqueueAgentNotificationLocked(agentID, agentHandle, eventType, 
 	if !s.shouldNotifyAgentLocked(agentID, meta, fallbackActorID) {
 		return
 	}
-	s.ensureAgentEventLocked(agentID, agentHandle, eventType, dedupKey, apply)
-}
-
-func (s *Store) shouldNotifyAgentLocked(agentID string, meta OperationMeta, fallbackActorID string) bool {
-	originID := strings.TrimSpace(fallbackActorID)
-	if actor, err := s.resolvePrincipalLocked(meta.ActorID, meta.ActorType); err == nil {
-		originID = actor.ID
-	}
-	if originID == "" {
-		return true
-	}
-	return originID != agentID
-}
-
-func (s *Store) ensureAgentEventLocked(agentID, agentHandle, eventType, dedupKey string, apply func(event *AgentEvent, now time.Time)) {
 	now := time.Now().UTC()
 	event := &AgentEvent{
 		ID:          uuid.NewString(),
@@ -2648,8 +2532,21 @@ func (s *Store) ensureAgentEventLocked(agentID, agentHandle, eventType, dedupKey
 	if apply != nil {
 		apply(event, now)
 	}
-	s.pendingAgentEvents = append(s.pendingAgentEvents, event)
+	if err := insertAgentEventPostgres(s.db, s.state.WorkspaceID, event); err != nil {
+		return
+	}
 	s.recordAgentInboxChangedLocked(event)
+}
+
+func (s *Store) shouldNotifyAgentLocked(agentID string, meta OperationMeta, fallbackActorID string) bool {
+	originID := strings.TrimSpace(fallbackActorID)
+	if actor, err := s.resolvePrincipalLocked(meta.ActorID, meta.ActorType); err == nil {
+		originID = actor.ID
+	}
+	if originID == "" {
+		return true
+	}
+	return originID != agentID
 }
 
 func (s *Store) recordAgentInboxChangedLocked(event *AgentEvent) {
