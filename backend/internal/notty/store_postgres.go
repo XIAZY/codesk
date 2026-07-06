@@ -381,8 +381,8 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			actor_id UUID NOT NULL,
 			actor_type TEXT NOT NULL,
 			document_id UUID,
-			file_path TEXT NOT NULL DEFAULT '',
-			mode TEXT NOT NULL DEFAULT '',
+			file_path TEXT NOT NULL,
+			mode TEXT NOT NULL,
 			selection_start INTEGER,
 			selection_end INTEGER,
 			activity TEXT NOT NULL,
@@ -398,6 +398,9 @@ func initPostgresSchemaTables(db *sql.DB) error {
 				ON DELETE CASCADE
 		)
 		`,
+		// Temporary one-deploy scaffolding: prod presences.document_id is NOT NULL
+		// but daemons without an open document send "". Safe to remove after prod
+		// has booted past this version.
 		`ALTER TABLE presences ALTER COLUMN document_id DROP NOT NULL`,
 		`
 		CREATE TABLE IF NOT EXISTS activities (
