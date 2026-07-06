@@ -119,8 +119,20 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	if got, err := getAgentEventPostgres(db, snapshot.WorkspaceID, claimed.ID); err != nil || got == nil || got.Status != "completed" || got.RunID != run.ID {
 		t.Fatalf("expected completed event after reload, got %#v (err: %v)", got, err)
 	}
-	if got := snapshot.Presences[user.ID]; got == nil || got.FilePath != "docs/spec.md" || len(got.Selection) != 2 {
-		t.Fatalf("expected presence after reload, got %#v", got)
+	if presences, err := listPresencesPostgres(db, snapshot.WorkspaceID); err != nil {
+		t.Fatalf("list presences: %v", err)
+	} else if len(presences) == 0 {
+		t.Fatal("expected presences in Postgres after reload")
+	} else {
+		var found bool
+		for _, p := range presences {
+			if p.ActorID == user.ID && p.FilePath == "docs/spec.md" && len(p.Selection) == 2 {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("expected presence for user %s with docs/spec.md, got %d presences", user.ID, len(presences))
+		}
 	}
 	if len(snapshot.Activities) == 0 {
 		t.Fatal("expected activities after reload")
@@ -239,10 +251,6 @@ func TestPostgresSnapshotPersistPreservesDatabaseOnlyRows(t *testing.T) {
 
 	staleStore.mu.Lock()
 	staleStore.ensureMaps()
-	if staleStore.state.Presences[user.ID] != nil {
-		staleStore.mu.Unlock()
-		t.Fatalf("stale store unexpectedly contains database-only presence")
-	}
 	if staleStore.state.AgentDocumentViews[agentDocumentViewKey(agent.ID, documentID)] != nil {
 		staleStore.mu.Unlock()
 		t.Fatalf("stale store unexpectedly contains database-only agent document view")

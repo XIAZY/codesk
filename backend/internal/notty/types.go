@@ -14,8 +14,7 @@ type WorkspaceState struct {
 	Threads             map[string]*Thread             `json:"threads"`
 	AgentDocumentViews  map[string]*AgentDocumentView  `json:"agentDocumentViews,omitempty"`
 	DocumentCheckpoints map[string]*DocumentCheckpoint `json:"documentCheckpoints,omitempty"`
-	Presences           map[string]*Presence           `json:"presences"`
-	Activities          []*ActivityEvent               `json:"activities"`
+	Activities []*ActivityEvent `json:"activities"`
 	UpdatedAt           time.Time                      `json:"updatedAt"`
 }
 

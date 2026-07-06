@@ -699,7 +699,6 @@ func (s *Store) loadNormalizedPostgresLocked() error {
 	s.state.Daemons = map[string]*Daemon{}
 	s.state.Agents = map[string]*Agent{}
 	s.state.AgentRuns = map[string]*AgentRun{}
-	s.state.Presences = map[string]*Presence{}
 	s.state.Activities = []*ActivityEvent{}
 	s.state.Threads = map[string]*Thread{}
 	s.state.AgentDocumentViews = map[string]*AgentDocumentView{}
@@ -722,9 +721,6 @@ func (s *Store) loadNormalizedPostgresLocked() error {
 	}
 	if err := s.loadAgentRunsPostgresLocked(); err != nil {
 		return fmt.Errorf("load agent runs: %w", err)
-	}
-	if err := s.loadPresencesPostgresLocked(); err != nil {
-		return fmt.Errorf("load presences: %w", err)
 	}
 	if err := s.loadActivitiesPostgresLocked(); err != nil {
 		return fmt.Errorf("load activities: %w", err)
@@ -779,9 +775,6 @@ func (s *Store) persistPostgresLocked() error {
 		return err
 	}
 	if err = s.replaceAgentRunsPostgresLocked(tx); err != nil {
-		return err
-	}
-	if err = s.upsertPresencesPostgresLocked(tx); err != nil {
 		return err
 	}
 	activityInserts, err := s.insertActivitiesPostgresLocked(tx)
@@ -1287,46 +1280,6 @@ func (s *Store) replaceAgentRunsPostgresLocked(tx *sql.Tx) error {
 	return err
 }
 
-func (s *Store) upsertPresencesPostgresLocked(tx *sql.Tx) error {
-	for _, presence := range s.state.Presences {
-		if presence == nil {
-			continue
-		}
-		start, end := selectionBounds(presence.Selection)
-		if _, err := tx.Exec(
-			`INSERT INTO presences (
-				workspace_id, actor_id, actor_type, document_id, file_path, mode,
-				selection_start, selection_end, activity, updated_at
-			) VALUES (
-				$1, $2, $3, $4, $5, $6,
-				$7, $8, $9, $10
-			)
-			ON CONFLICT (workspace_id, actor_id)
-			DO UPDATE SET
-				actor_type = EXCLUDED.actor_type,
-				document_id = EXCLUDED.document_id,
-				file_path = EXCLUDED.file_path,
-				mode = EXCLUDED.mode,
-				selection_start = EXCLUDED.selection_start,
-				selection_end = EXCLUDED.selection_end,
-				activity = EXCLUDED.activity,
-				updated_at = EXCLUDED.updated_at`,
-			s.state.WorkspaceID,
-			presence.ActorID,
-			presence.ActorType,
-			uuidStringOrNil(presence.DocumentID),
-			presence.FilePath,
-			presence.Mode,
-			start,
-			end,
-			presence.Activity,
-			presence.UpdatedAt,
-		); err != nil {
-			return err
-		}
-	}
-	return nil
-}
 
 func upsertPresencePostgres(db *sql.DB, workspaceID string, presence *Presence) error {
 	tx, err := db.Begin()
@@ -1373,6 +1326,33 @@ func upsertPresencePostgres(db *sql.DB, workspaceID string, presence *Presence) 
 	}
 
 	return tx.Commit()
+}
+
+func listPresencesPostgres(db *sql.DB, workspaceID string) ([]*Presence, error) {
+	rows, err := db.Query(
+		`SELECT actor_id::text, actor_type, COALESCE(document_id::text, ''), file_path, mode, selection_start, selection_end, activity, updated_at
+		   FROM presences
+		  WHERE workspace_id = $1::uuid
+		    AND updated_at > now() - interval '2 minutes'`,
+		workspaceID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var presences []*Presence
+	for rows.Next() {
+		p := &Presence{}
+		var start sql.NullInt64
+		var end sql.NullInt64
+		if err := rows.Scan(&p.ActorID, &p.ActorType, &p.DocumentID, &p.FilePath, &p.Mode, &start, &end, &p.Activity, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		p.Selection = selectionFromNulls(start, end)
+		presences = append(presences, p)
+	}
+	return presences, rows.Err()
 }
 
 type persistedActivityInsert struct {
@@ -2363,40 +2343,6 @@ func (s *Store) loadAgentRunsPostgresLocked() error {
 	return rows.Err()
 }
 
-func (s *Store) loadPresencesPostgresLocked() error {
-	rows, err := s.db.Query(
-		`SELECT actor_id::text, actor_type, COALESCE(document_id::text, ''), file_path, mode, selection_start, selection_end, activity, updated_at
-		   FROM presences
-		  WHERE workspace_id = $1::uuid`,
-		s.state.WorkspaceID,
-	)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		presence := &Presence{}
-		var start sql.NullInt64
-		var end sql.NullInt64
-		if err := rows.Scan(
-			&presence.ActorID,
-			&presence.ActorType,
-			&presence.DocumentID,
-			&presence.FilePath,
-			&presence.Mode,
-			&start,
-			&end,
-			&presence.Activity,
-			&presence.UpdatedAt,
-		); err != nil {
-			return err
-		}
-		presence.Selection = selectionFromNulls(start, end)
-		s.state.Presences[presence.ActorID] = presence
-	}
-	return rows.Err()
-}
 
 func (s *Store) loadActivitiesPostgresLocked() error {
 	rows, err := s.db.Query(

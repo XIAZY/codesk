@@ -156,9 +156,6 @@ func (s *Store) ensureMaps() {
 	if s.state.DocumentCheckpoints == nil {
 		s.state.DocumentCheckpoints = map[string]*DocumentCheckpoint{}
 	}
-	if s.state.Presences == nil {
-		s.state.Presences = map[string]*Presence{}
-	}
 	if s.state.Activities == nil {
 		s.state.Activities = []*ActivityEvent{}
 	}
@@ -214,8 +211,7 @@ func seedWorkspaceFor(workspaceID string, workspaceName string) WorkspaceState {
 		Threads:             map[string]*Thread{},
 		AgentDocumentViews:  map[string]*AgentDocumentView{},
 		DocumentCheckpoints: map[string]*DocumentCheckpoint{},
-		Presences:           map[string]*Presence{},
-		Activities:          []*ActivityEvent{},
+		Activities: []*ActivityEvent{},
 		UpdatedAt:           now,
 	}
 }
@@ -1700,7 +1696,9 @@ func (s *Store) UpdateAgentEvent(id string, req UpdateAgentEventRequest, meta Op
 }
 
 func (s *Store) UpsertPresence(req UpsertPresenceRequest) (*Presence, error) {
-	s.mu.Lock()
+	s.mu.RLock()
+	workspaceID := s.state.WorkspaceID
+	s.mu.RUnlock()
 
 	now := time.Now().UTC()
 	presence := &Presence{
@@ -1713,16 +1711,10 @@ func (s *Store) UpsertPresence(req UpsertPresenceRequest) (*Presence, error) {
 		Activity:   req.Activity,
 		UpdatedAt:  now,
 	}
-	s.state.Presences[req.ActorID] = presence
-	s.state.UpdatedAt = now
-	workspaceID := s.state.WorkspaceID
-	clone := *presence
-	clone.Selection = append([]int(nil), presence.Selection...)
-	s.mu.Unlock()
-	if err := upsertPresencePostgres(s.db, workspaceID, &clone); err != nil {
+	if err := upsertPresencePostgres(s.db, workspaceID, presence); err != nil {
 		return nil, err
 	}
-	return &clone, nil
+	return presence, nil
 }
 
 func (s *Store) persistLocked() error {
@@ -1789,12 +1781,6 @@ func cloneState(state WorkspaceState) WorkspaceState {
 		}
 		clone := *checkpoint
 		copyState.DocumentCheckpoints[key] = &clone
-	}
-	copyState.Presences = map[string]*Presence{}
-	for key, presence := range state.Presences {
-		clone := *presence
-		clone.Selection = append([]int(nil), presence.Selection...)
-		copyState.Presences[key] = &clone
 	}
 	copyState.Activities = make([]*ActivityEvent, len(state.Activities))
 	for index, activity := range state.Activities {
