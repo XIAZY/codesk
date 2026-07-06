@@ -12,6 +12,11 @@ import {
   buildLineThreads,
   computeReplace,
   coworkerCount,
+  workspacePeople,
+  personOnline,
+  documentActivity,
+  activityCategory,
+  relativeTime,
   daemonStatus,
   daemonLiveStatus,
   stampDaemonReceipt,
@@ -34,7 +39,7 @@ import {
   threadReplyLabel,
 } from "./logic";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
-import type { Agent, Daemon, WorkspaceState } from "./types";
+import type { ActivityEvent, Agent, Daemon, PresenceItem, UserItem, WorkspaceState } from "./types";
 
 function baseWorkspace(): WorkspaceState {
   return {
@@ -296,6 +301,81 @@ describe("presentation grouping", () => {
     };
 
     expect(coworkerCount(workspace)).toBe(3);
+  });
+});
+
+describe("workspacePeople", () => {
+  const ws = (over: Partial<WorkspaceState>): WorkspaceState => ({ ...baseWorkspace(), ...over });
+  const user = (id: string, handle: string, kind = "human"): UserItem => ({ id, handle, name: handle, role: "", kind, status: "", updatedAt: "now" });
+  const agent = (id: string, handle: string): Agent => ({
+    id, daemonId: "d1", handle, name: handle, role: "", kind: "agent", workspaceRoot: "",
+    status: "idle", currentTask: "", currentActivity: "", currentRunId: "", updatedAt: "now",
+  });
+  const presence = (actorId: string, documentId: string | undefined): PresenceItem => ({
+    actorId, actorType: "human", documentId, activity: "editing", updatedAt: "now",
+  });
+
+  it("lists all workspace humans + agents with a workspace-level presence ring", () => {
+    const workspace = ws({
+      currentUserId: "u_me",
+      users: [user("u_me", "me"), user("u_alice", "alice"), user("d_bot", "bot", "daemon")],
+      agents: [agent("a_writer", "writer")],
+      presences: { u_alice: presence("u_alice", "docX") }, // present in some doc -> workspace-level ring
+    });
+
+    const result = workspacePeople(workspace);
+
+    // all humans (me, alice) + the agent; the non-human user (bot) is filtered out
+    expect(result.map((p) => p.id)).toEqual(["u_me", "u_alice", "a_writer"]);
+    expect(result.map((p) => p.kind)).toEqual(["you", "member", "agent"]);
+    // presentAt is any-document presence (workspace-level), not scoped to a current doc
+    expect(result.find((p) => p.id === "u_alice")?.presentAt).toBe("now");
+    expect(result.find((p) => p.id === "u_me")?.presentAt).toBeUndefined();
+  });
+
+  it("personOnline shows the ring only for fresh presence and decays after the window", () => {
+    const nowMs = Date.parse("2026-07-06T12:00:00Z");
+    const iso = (offsetMs: number) => new Date(nowMs - offsetMs).toISOString();
+    expect(personOnline({ presentAt: iso(60_000) }, nowMs)).toBe(true); // 1 min ago -> online
+    expect(personOnline({ presentAt: iso(3 * 60_000) }, nowMs)).toBe(false); // 3 min ago -> decayed
+    expect(personOnline({ presentAt: undefined }, nowMs)).toBe(false);
+    expect(personOnline({ presentAt: "not-a-date" }, nowMs)).toBe(false);
+  });
+});
+
+describe("documentActivity", () => {
+  const activity = (over: Partial<ActivityEvent>): ActivityEvent => ({
+    type: "document.updated", documentId: "doc1", actorId: "u1", actorType: "human",
+    summary: "", occurredAt: "2026-07-06T12:00:00Z", ...over,
+  });
+
+  it("scopes to the current document, newest first, and empties with no document", () => {
+    const activities = [
+      activity({ documentId: "doc1", occurredAt: "2026-07-06T12:00:00Z", summary: "a" }),
+      activity({ documentId: "doc2", occurredAt: "2026-07-06T13:00:00Z", summary: "b" }),
+      activity({ documentId: "doc1", occurredAt: "2026-07-06T14:00:00Z", summary: "c" }),
+    ];
+    expect(documentActivity({ activities }, "doc1").map((a) => a.summary)).toEqual(["c", "a"]);
+    expect(documentActivity({ activities }, undefined)).toEqual([]);
+    expect(documentActivity({ activities: undefined }, "doc1")).toEqual([]);
+  });
+
+  it("classifies categories from type + actor, unknown → neutral, no fabricated done", () => {
+    expect(activityCategory("document.updated", "human")).toBe("human-edit");
+    expect(activityCategory("document.created", "agent")).toBe("agent-change");
+    expect(activityCategory("thread.created", "human")).toBe("comment");
+    expect(activityCategory("thread.replied", "agent")).toBe("comment");
+    expect(activityCategory("agent.run.updated", "agent")).toBe("agent-change");
+    expect(activityCategory("workspace.snapshot", "human")).toBe("neutral");
+  });
+
+  it("relativeTime formats past timestamps and guards bad input", () => {
+    const nowMs = Date.parse("2026-07-06T12:00:00Z");
+    expect(relativeTime("2026-07-06T11:59:30Z", nowMs)).toContain("second");
+    expect(relativeTime("2026-07-06T11:30:00Z", nowMs)).toContain("minute");
+    expect(relativeTime("2026-07-06T09:00:00Z", nowMs)).toContain("hour");
+    expect(relativeTime("2026-07-04T12:00:00Z", nowMs)).toContain("day");
+    expect(relativeTime("not-a-date", nowMs)).toBe("");
   });
 });
 

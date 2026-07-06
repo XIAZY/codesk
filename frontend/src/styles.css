@@ -20,14 +20,19 @@
   --agent: oklch(0.62 0.08 230);
   --agent-50: oklch(0.965 0.018 230);
   --agent-100: oklch(0.90 0.035 230);
+  --agent-700: oklch(0.40 0.06 230);
   --iris: oklch(0.55 0.09 285);
   --iris-50: oklch(0.965 0.018 285);
   --iris-700: oklch(0.42 0.09 285);
   --daemon: oklch(0.60 0.08 155);
   --daemon-50: oklch(0.955 0.018 155);
+  --daemon-700: oklch(0.40 0.06 155);
   --ok: oklch(0.60 0.08 155);
   --warn: oklch(0.74 0.10 80);
+  --warn-50: oklch(0.97 0.02 80);
   --err: oklch(0.58 0.16 25);
+  --err-50: oklch(0.965 0.02 25);
+  --err-100: oklch(0.85 0.05 25);
   --display: "Newsreader", Georgia, serif;
   --sans: "Archivo", ui-sans-serif, system-ui, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -227,20 +232,32 @@ svg.i.sm {
   border-color: transparent;
 }
 
+/* Primary action = a neutral color that contrasts its background (never accent,
+   which is reserved for "needs you"). On light surfaces that is ink + paper. */
 .btn.accent {
   background: var(--ink);
   border-color: var(--ink);
   color: var(--paper);
 }
 
-.btn.accent:hover {
-  background: #2A251F;
-  border-color: #2A251F;
+.btn.accent:hover:not(:disabled) {
+  background: oklch(0.33 0.01 75);
+  border-color: oklch(0.33 0.01 75);
+}
+
+.btn.accent:active:not(:disabled) {
+  background: oklch(0.20 0.01 75);
+  border-color: oklch(0.20 0.01 75);
+}
+
+.btn.accent:disabled {
+  background: var(--ink-3);
+  border-color: var(--ink-3);
 }
 
 .btn.danger {
-  background: #fff4f1;
-  border-color: #efc1b8;
+  background: var(--err-50);
+  border-color: var(--err-100);
   color: var(--err);
 }
 
@@ -357,13 +374,13 @@ svg.i.sm {
 }
 
 .chip.warn {
-  background: #fff7e4;
+  background: var(--warn-50);
   color: var(--warn);
 }
 
 .chip.stale,
 .chip.queued {
-  background: #fff7e4;
+  background: var(--warn-50);
   color: var(--warn);
 }
 
@@ -376,7 +393,7 @@ svg.i.sm {
 .chip.deleted,
 .chip.failed,
 .chip.err {
-  background: #fff4f1;
+  background: var(--err-50);
   color: var(--err);
 }
 
@@ -388,8 +405,8 @@ svg.i.sm {
   justify-content: center;
   border: 1px solid rgba(0, 0, 0, 0.06);
   border-radius: 11px;
-  background: linear-gradient(140deg, #fcdec5, #f0a875);
-  color: #6b330c;
+  background: var(--accent-100);
+  color: var(--accent-700);
   font-size: 11px;
   font-weight: 800;
   text-transform: uppercase;
@@ -404,32 +421,37 @@ svg.i.sm {
 }
 
 .avi.agent {
-  background: linear-gradient(140deg, var(--agent-100), var(--agent));
-  color: #08323C;
+  background: var(--agent-100);
+  color: var(--agent-700);
 }
 
 .avi.daemon {
-  background: linear-gradient(140deg, var(--daemon-50), #99cdbb);
-  color: #125240;
+  background: var(--daemon-50);
+  color: var(--daemon-700);
 }
 
 .avi.you {
-  background: linear-gradient(140deg, #ffe6c8, #f4bf75);
-  color: #684111;
+  background: var(--accent-100);
+  color: var(--accent-700);
 }
 
-.avi-stack {
-  display: flex;
-  align-items: center;
+/* Online ring (People). Presence-driven, workspace-level; decays on the freshness window. */
+.avi.online {
+  box-shadow: 0 0 0 2px var(--paper), 0 0 0 3.5px var(--ok);
 }
 
-.avi-stack .avi {
-  margin-left: -6px;
-  box-shadow: 0 0 0 2px var(--paper);
-}
-
-.avi-stack .avi:first-child {
-  margin-left: 0;
+/* Visually hidden but read by screen readers — e.g. the online state that the
+   avatar ring only conveys with color. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .status-dot {
@@ -540,9 +562,9 @@ svg.i.sm {
 
 .error-text {
   margin: 0;
-  border: 1px solid #efc1b8;
+  border: 1px solid var(--err-100);
   border-radius: var(--r-2);
-  background: #fff4f1;
+  background: var(--err-50);
   color: var(--err);
   padding: 8px 10px;
   font-size: 12.5px;
@@ -651,6 +673,12 @@ svg.i.sm {
   padding: 0 8px;
 }
 
+/* Honest disabled affordance for not-yet-built controls (2a-2). */
+.coming-soon {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .sb-section {
   padding: 4px 8px;
 }
@@ -693,7 +721,7 @@ svg.i.sm {
 }
 
 .nav-item.renaming-row {
-  border-color: rgba(217, 120, 66, 0.28);
+  border-color: color-mix(in oklab, var(--accent) 28%, transparent);
   background: var(--accent-50);
 }
 
@@ -916,8 +944,8 @@ svg.i.sm {
 }
 
 .notice.error {
-  border-color: #efc1b8;
-  background: #fff4f1;
+  border-color: var(--err-100);
+  background: var(--err-50);
   color: var(--err);
 }
 
@@ -980,7 +1008,7 @@ svg.i.sm {
 .document-title-field.editing,
 .document-title-field:focus-within {
   background: var(--paper);
-  box-shadow: inset 0 0 0 1px var(--accent), 0 0 0 3px rgba(217, 120, 66, 0.14);
+  box-shadow: inset 0 0 0 1px var(--accent), 0 0 0 3px color-mix(in oklab, var(--accent) 14%, transparent);
 }
 
 .document-title-mirror {
@@ -1183,12 +1211,18 @@ svg.i.sm {
   background: rgba(255, 255, 255, 0.08);
 }
 
+/* Same rule inverted for the dark selection toolbar: paper fill + ink text. */
 .selection-toolbar button.primary {
-  background: var(--accent);
+  background: var(--paper);
+  color: var(--ink);
 }
 
 .selection-toolbar button.primary:hover {
-  background: var(--accent-700);
+  background: oklch(0.90 0.006 75);
+}
+
+.selection-toolbar button.primary:active {
+  background: oklch(0.85 0.006 75);
 }
 
 .selection-toolbar .sep {
@@ -1234,7 +1268,7 @@ svg.i.sm {
 
 .thread-drafter textarea:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(217, 120, 66, 0.14);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 14%, transparent);
 }
 
 .thread-popover {
@@ -1464,6 +1498,33 @@ svg.i.sm {
   margin: 0;
 }
 
+/* Document Activity: color lands only on the dot; the glyph stays monochrome. */
+.activity-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  align-self: flex-start;
+  margin-top: 2px;
+  color: var(--ink-3);
+}
+
+.activity-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+}
+
+.unread-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  display: inline-block;
+  flex: 0 0 auto;
+}
+
 .people-pane {
   display: block;
 }
@@ -1612,16 +1673,6 @@ svg.i.sm {
   background: var(--paper-2);
 }
 
-.roster-filter {
-  width: 180px;
-  min-height: 32px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--ink-4);
-  font-size: 12.5px;
-}
-
 .roster-group-head {
   display: flex;
   align-items: center;
@@ -1714,22 +1765,6 @@ svg.i.sm {
 .token-reveal {
   display: grid;
   gap: 14px;
-}
-
-.token-warning {
-  border-bottom: 1px solid var(--border);
-  border-radius: var(--r-3);
-  background: linear-gradient(180deg, #fff7ec, var(--paper));
-  padding: 14px;
-}
-
-.token-warning p {
-  margin: 8px 0 12px;
-}
-
-.token-warning .token-block {
-  flex: 1;
-  margin: 0;
 }
 
 .deploy-block {

@@ -260,8 +260,8 @@ describe("WorkspaceOnboarding", () => {
   });
 });
 
-describe("WorkspaceApp coworkers rail", () => {
-  it("renames people to coworkers, counts humans plus agents, and keeps agents flat", async () => {
+describe("WorkspaceApp people rail", () => {
+  it("lists the whole workspace's people and agents (not doc-scoped)", async () => {
     render(
       <WorkspaceApp
         api={{ updateLastAccessed: vi.fn().mockResolvedValue({}) } as never}
@@ -277,22 +277,71 @@ describe("WorkspaceApp coworkers rail", () => {
       />,
     );
 
-    const tab = screen.getByRole("button", { name: /coworkers/i });
-    expect(within(tab).getByText("3")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /people/i })).toBeNull();
+    const tab = screen.getByRole("button", { name: /people/i });
+    expect(within(tab).getByText("3")).toBeTruthy(); // 2 humans + 1 agent, workspace-wide
 
     fireEvent.click(tab);
 
     await waitFor(() => expect(document.querySelector(".ctx-body.people-pane")).toBeTruthy());
-    const coworkersPanel = document.querySelector(".ctx-body.people-pane") as HTMLElement;
-    expect(within(coworkersPanel).getByText("People")).toBeTruthy();
-    expect(within(coworkersPanel).getByText("@ada")).toBeTruthy();
-    expect(within(coworkersPanel).getByText("@grace")).toBeTruthy();
-    expect(within(coworkersPanel).getByText("Agents")).toBeTruthy();
-    expect(within(coworkersPanel).queryByText("Daemons")).toBeNull();
-    expect(coworkersPanel.querySelector(".grp-head")).toBeNull();
-    expect(within(coworkersPanel).getByRole("button", { name: /@codex/i })).toBeTruthy();
-    expect(within(coworkersPanel).queryByText("Local")).toBeNull();
+    const panel = document.querySelector(".ctx-body.people-pane") as HTMLElement;
+    expect(within(panel).getByText("People")).toBeTruthy();
+    expect(within(panel).getByText("@ada")).toBeTruthy();
+    expect(within(panel).getByText("You")).toBeTruthy();
+    // workspace-wide: everyone shows, not just the current document's participants
+    expect(within(panel).getByText("@grace")).toBeTruthy();
+    expect(within(panel).getByText("@codex")).toBeTruthy();
+    expect(within(panel).getByText("Agent")).toBeTruthy();
+    // membership management does not live in this tab
+    expect(within(panel).queryByRole("button", { name: "Share" })).toBeNull();
+  });
+});
+
+describe("WorkspaceApp coming-soon controls", () => {
+  it("shows the sidebar search as a non-actionable Coming soon affordance", () => {
+    render(
+      <WorkspaceApp
+        api={{ updateLastAccessed: vi.fn().mockResolvedValue({}) } as never}
+        token="token"
+        workspaceId="ws"
+        workspaceSlug="workspace"
+        view={{ kind: "home" }}
+        account={{ id: "account_1", email: "you@example.com", displayName: "You" }}
+        workspaces={[{ id: "ws", slug: "workspace", name: "Workspace" }]}
+        onAccess={vi.fn()}
+        onWorkspaceChange={vi.fn()}
+        onSignOut={vi.fn()}
+      />,
+    );
+
+    const label = screen.getByText("Search — coming soon");
+    expect(label.closest("[aria-disabled='true']")).toBeTruthy();
+    expect(screen.queryByText("Search or jump…")).toBeNull(); // old placeholder gone
+    expect(screen.queryByText("⌘K")).toBeNull(); // no fake keyboard shortcut
+  });
+});
+
+describe("WorkspaceApp document activity single source", () => {
+  it("carries no count on the sidebar Activity nav, so nav and panel cannot disagree", () => {
+    render(
+      <WorkspaceApp
+        api={{ updateLastAccessed: vi.fn().mockResolvedValue({}) } as never}
+        token="token"
+        workspaceId="ws"
+        workspaceSlug="workspace"
+        view={{ kind: "home" }}
+        account={{ id: "account_1", email: "you@example.com", displayName: "You" }}
+        workspaces={[{ id: "ws", slug: "workspace", name: "Workspace" }]}
+        onAccess={vi.fn()}
+        onWorkspaceChange={vi.fn()}
+        onSignOut={vi.fn()}
+      />,
+    );
+
+    // The sidebar Activity nav is a pure jump affordance — no count element means
+    // no second source that could drift from the right-rail Document Activity panel.
+    const navButton = screen.getByText("Activity").closest("button");
+    expect(navButton).toBeTruthy();
+    expect(navButton?.querySelector(".ct")).toBeNull();
   });
 });
 

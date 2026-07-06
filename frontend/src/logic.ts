@@ -1,5 +1,5 @@
 import * as Y from "yjs";
-import type { Agent, AgentRun, Daemon, ThreadAnchor, ThreadItem, WorkspaceEvent, WorkspaceState } from "./types";
+import type { ActivityEvent, Agent, AgentRun, Daemon, ThreadAnchor, ThreadItem, WorkspaceEvent, WorkspaceState } from "./types";
 
 export const identifierPattern = "[a-z0-9_-]+";
 export const identifierHelpText = "Only lowercase letters, numbers, underscores, and dashes.";
@@ -295,6 +295,127 @@ export function agentStatus(agent: Agent, runs: AgentRun[]) {
 
 export function coworkerCount(workspace: Pick<WorkspaceState, "agents" | "users">) {
   return workspace.agents.length + workspace.users.length;
+}
+
+// Matches the backend's 2-minute presence read cutoff (see PR #50), so the
+// client-side ring window agrees with what the server would still serve.
+export const PRESENCE_ONLINE_WINDOW_MS = 120_000;
+
+export type WorkspacePerson = {
+  id: string;
+  handle: string;
+  name: string;
+  kind: "you" | "agent" | "member";
+  // updatedAt of this actor's most recent presence row (any document =
+  // workspace-level). Whether it counts as *online* is a freshness decision
+  // left to personOnline, so the ring decays instead of lying after the window.
+  presentAt?: string;
+};
+
+// Everyone in the workspace — humans + agents — for the People panel. The online
+// ring is workspace-level: presentAt is the actor's presence row (any document),
+// and personOnline decays it on the same 2-minute window. Presence is never
+// fabricated: no row means no ring.
+export function workspacePeople(
+  workspace: Pick<WorkspaceState, "currentUserId" | "agents" | "users" | "presences">,
+): WorkspacePerson[] {
+  const currentUserId = workspace.currentUserId;
+  const presentAt = (id: string) => workspace.presences[id]?.updatedAt;
+
+  const people: WorkspacePerson[] = [];
+  for (const user of workspace.users) {
+    if (user.kind !== "human") {
+      continue;
+    }
+    people.push({
+      id: user.id,
+      handle: user.handle,
+      name: user.name,
+      kind: user.id === currentUserId ? "you" : "member",
+      presentAt: presentAt(user.id),
+    });
+  }
+  for (const agent of workspace.agents) {
+    people.push({ id: agent.id, handle: agent.handle, name: agent.name, kind: "agent", presentAt: presentAt(agent.id) });
+  }
+
+  // Deterministic base order — You first, then by handle. The panel re-orders
+  // online-first using a live freshness check (personOnline).
+  const rank = (person: WorkspacePerson) => (person.kind === "you" ? 0 : 1);
+  people.sort((a, b) => rank(a) - rank(b) || a.handle.localeCompare(b.handle));
+  return people;
+}
+
+// Online only when the actor has a presence row still within the freshness
+// window at nowMs — the same decay daemon liveness uses, so a closed laptop
+// drops the ring instead of lying. Workspace-level: any document counts.
+export function personOnline(person: Pick<WorkspacePerson, "presentAt">, nowMs: number): boolean {
+  if (!person.presentAt) {
+    return false;
+  }
+  const presentMs = Date.parse(person.presentAt);
+  return !Number.isNaN(presentMs) && nowMs - presentMs <= PRESENCE_ONLINE_WINDOW_MS;
+}
+
+export type ActivityCategory = "human-edit" | "comment" | "agent-change" | "done" | "neutral";
+
+// Map a Document Activity event to one of 2a-3's semantic categories from its
+// type + actor. Only the known shapes get a color; anything else is neutral
+// (no guessed color). No completion activity type exists yet, so the "done"
+// category stays dormant until one does — we don't fabricate it.
+export function activityCategory(type: string, actorType: string): ActivityCategory {
+  if (type.startsWith("thread.")) {
+    return "comment";
+  }
+  if (type.startsWith("document.")) {
+    return actorType === "agent" ? "agent-change" : "human-edit";
+  }
+  if (type.startsWith("agent.")) {
+    return "agent-change";
+  }
+  return "neutral";
+}
+
+// The current document's activity, newest first. Snapshot-fresh: reflects
+// workspace.activities as of the last snapshot — there is no per-event live
+// update yet (tracked separately), so the renderer must not imply live.
+export function documentActivity(
+  workspace: Pick<WorkspaceState, "activities">,
+  documentId: string | undefined,
+  limit = 12,
+): ActivityEvent[] {
+  if (!documentId) {
+    return [];
+  }
+  return (workspace.activities ?? [])
+    .filter((activity) => activity.documentId === documentId)
+    .slice()
+    .sort((a, b) => (a.occurredAt < b.occurredAt ? 1 : a.occurredAt > b.occurredAt ? -1 : 0))
+    .slice(0, limit);
+}
+
+const relativeTimeFormat = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+
+// Human relative time for an ISO timestamp, e.g. "5 minutes ago". Empty for an
+// unparseable timestamp so a bad value never renders a misleading "now".
+export function relativeTime(iso: string, nowMs: number): string {
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) {
+    return "";
+  }
+  const diffSec = Math.round((ms - nowMs) / 1000);
+  if (Math.abs(diffSec) < 60) {
+    return relativeTimeFormat.format(diffSec, "second");
+  }
+  const diffMin = Math.round(diffSec / 60);
+  if (Math.abs(diffMin) < 60) {
+    return relativeTimeFormat.format(diffMin, "minute");
+  }
+  const diffHour = Math.round(diffSec / 3600);
+  if (Math.abs(diffHour) < 24) {
+    return relativeTimeFormat.format(diffHour, "hour");
+  }
+  return relativeTimeFormat.format(Math.round(diffSec / 86400), "day");
 }
 
 export function threadReplyCount(thread: { messages: readonly unknown[] }) {

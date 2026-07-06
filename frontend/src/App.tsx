@@ -9,7 +9,11 @@ import {
   buildDaemonInstallCommand,
   buildDaemonReinstallCommand,
   buildDaemonUninstallCommand,
-  coworkerCount,
+  workspacePeople,
+  personOnline,
+  documentActivity,
+  activityCategory,
+  relativeTime,
   daemonStatus,
   daemonLiveStatus,
   handleMaxLength,
@@ -22,6 +26,8 @@ import {
   threadReplyLabel,
   workspaceSlugMaxLength,
   workspaceSlugMinLength,
+  type ActivityCategory,
+  type WorkspacePerson,
   type LineThreadGroup,
 } from "./logic";
 import { resolveRoot, resolveWorkspace, type WorkspaceView } from "./routes";
@@ -29,11 +35,12 @@ import { navigate, useRoute } from "./useRoute";
 import { useRootNamespace } from "./useRootNamespace";
 import { useDocumentSync } from "./useDocument";
 import { useWorkspace } from "./useWorkspace";
-import type { Account, Agent, Daemon, DocumentItem, ThreadItem, WorkspaceInvitePreview, WorkspaceSummary } from "./types";
+import type { Account, ActivityEvent, Agent, Daemon, DocumentItem, ThreadItem, WorkspaceInvitePreview, WorkspaceSummary } from "./types";
 import { resolveRuntimeTiles, selectableRuntimeKinds, type RuntimeTile } from "./runtimes";
 import "./styles.css";
 
 const tokenStorageKey = "codesk.auth.token";
+const rightTabLabels = { threads: "Threads", activity: "Document Activity", coworkers: "People" } as const;
 const portableFileNameIllegalChars = /[\u0000-\u001F<>:"\/\\|?*]/g;
 const windowsReservedBaseName = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 
@@ -1395,7 +1402,25 @@ export function WorkspaceApp({
       return next;
     });
   }, [activeDocumentPath]);
-  const coworkers = coworkerCount(workspace);
+  const workspacePeopleList = workspacePeople(workspace);
+  const documentActivityList = documentActivity(workspace, activeDocument?.id);
+  // Unread = new since you last opened the tab (snapshot delta — honest for
+  // snapshot-fresh activity; not a live stream). Marked seen when the tab opens.
+  const [activitySeenAt, setActivitySeenAt] = useState("");
+  const newestActivityAt = documentActivityList[0]?.occurredAt ?? "";
+  const activityUnread = rightTab !== "activity" && newestActivityAt !== "" && newestActivityAt > activitySeenAt;
+  useEffect(() => {
+    if (rightTab === "activity" && newestActivityAt) {
+      setActivitySeenAt(newestActivityAt);
+    }
+  }, [rightTab, newestActivityAt]);
+  const activityActorLabel: Record<string, string> = {};
+  for (const user of workspace.users) {
+    activityActorLabel[user.id] = user.handle;
+  }
+  for (const agent of workspace.agents) {
+    activityActorLabel[agent.id] = agent.handle;
+  }
 
   useEffect(() => {
     if (selectedThreadId && !documentThreads.some((thread) => thread.id === selectedThreadId)) {
@@ -1441,12 +1466,11 @@ export function WorkspaceApp({
         </div>
 
         <div className="sb-search">
-          <div className="input search-box">
+          <div className="input search-box coming-soon" aria-disabled="true" title="Coming soon">
             <div className="row gap-6">
               <Icon name="search" />
-              <span>Search or jump…</span>
+              <span>Search — coming soon</span>
             </div>
-            <span className="kbd">⌘K</span>
           </div>
         </div>
 
@@ -1454,7 +1478,9 @@ export function WorkspaceApp({
           <button className="nav-item" type="button" onClick={() => setRightTab("activity")}>
             <Icon name="activity" />
             <span>Activity</span>
-            <span className={`ct ${workspace.agentEvents.length ? "has" : ""}`}>{workspace.agentEvents.length}</span>
+            {/* No count here: Document Activity is current-document context, so the
+                right-rail tab's unread dot owns the "new" signal. A workspace-level
+                count would be a second, disagreeing source (Anton/Eva/Bill ruling). */}
           </button>
           <button className="nav-item" type="button" onClick={() => setRightTab("threads")}>
             <Icon name="thread" />
@@ -1560,12 +1586,12 @@ export function WorkspaceApp({
             <span className={`chip sm ${connected ? "ok" : "warn"}`}>{connected ? "workspace live" : "workspace offline"}</span>
           </div>
           <div className="row gap-6">
-            <div className="avi-stack" aria-label="Workspace presence">
-              <div className="avi sm you" title={currentWorkspaceUserHandle}>{initials(currentWorkspaceUserIdentity)}</div>
-              {workspace.agents.slice(0, 2).map((agent) => (
-                <div className="avi sm agent" title={`@${agent.handle}`} key={agent.id}>{initials(agent.handle)}</div>
-              ))}
-            </div>
+            {canInviteMembers ? (
+              <button className="btn sm ghost" type="button" onClick={() => setModal("share")} title="Invite people to this workspace">
+                <Icon name="share" />
+                Invite
+              </button>
+            ) : null}
             <span className="divider-v" />
             <button
               className={`btn sm ${centerView === "daemons" ? "selected" : ""}`}
@@ -1661,9 +1687,10 @@ export function WorkspaceApp({
           {(["threads", "activity", "coworkers"] as const).map((tab) => (
             <button key={tab} className={`btn sm ${rightTab === tab ? "selected" : "ghost"}`} onClick={() => setRightTab(tab)}>
               <Icon name={tab === "threads" ? "thread" : tab === "activity" ? "activity" : "people"} />
-              {tab}
+              {rightTabLabels[tab]}
               {tab === "threads" ? <span className="muted">{documentThreads.length}</span> : null}
-              {tab === "coworkers" ? <span className="muted">{coworkers}</span> : null}
+              {tab === "coworkers" ? <span className="muted">{workspacePeopleList.length}</span> : null}
+              {tab === "activity" && activityUnread ? <span className="unread-dot" aria-label="New activity" /> : null}
             </button>
           ))}
         </div>
@@ -1683,12 +1710,11 @@ export function WorkspaceApp({
             onReply={() => void reload()}
           />
         ) : null}
-        {rightTab === "activity" ? <ActivityPanel workspace={workspace} /> : null}
+        {rightTab === "activity" ? <ActivityPanel activities={documentActivityList} hasDocument={!!activeDocument} actorLabel={activityActorLabel} /> : null}
         {rightTab === "coworkers" ? (
-          <CoworkersPanel
-            workspace={workspace}
-            canInviteMembers={canInviteMembers}
-            onShare={() => setModal("share")}
+          <PeoplePanel
+            people={workspacePeopleList}
+            agents={workspace.agents}
             onAgent={(agent) => {
               setSelectedAgentId(agent.id);
               setModal("agent-detail");
@@ -2063,10 +2089,6 @@ function AgentsManagement({
             <div className="small muted">Codex collaborators in this workspace. Each is owned by a daemon.</div>
           </div>
           <div className="row gap-6">
-            <div className="input roster-filter">
-              <Icon name="search" />
-              <span>Filter agents…</span>
-            </div>
             <button className="btn accent" type="button" onClick={onNew}>
               <Icon name="plus" />
               New agent
@@ -2514,76 +2536,123 @@ function ThreadsPanel({
   );
 }
 
-function ActivityPanel({ workspace }: { workspace: ReturnType<typeof useWorkspace>["workspace"] }) {
+// Color lands only on the dot; the glyph stays monochrome (currentColor).
+const activityDotColor: Record<ActivityCategory, string> = {
+  "human-edit": "var(--accent)",
+  comment: "var(--iris)",
+  "agent-change": "var(--agent)",
+  done: "var(--ok)",
+  neutral: "var(--ink-3)",
+};
+const activityGlyph: Record<ActivityCategory, string> = {
+  "human-edit": "doc",
+  comment: "thread",
+  "agent-change": "agent",
+  done: "activity",
+  neutral: "activity",
+};
+
+// Current-document activity, snapshot-fresh (NOT a live stream). Each row shows
+// a semantic color dot for its category + a monochrome glyph; relative time is
+// derived from the real occurredAt. Membership/summary IDs are resolved to
+// handles where we can.
+function ActivityPanel({
+  activities,
+  hasDocument,
+  actorLabel,
+}: {
+  activities: ActivityEvent[];
+  hasDocument: boolean;
+  actorLabel: Record<string, string>;
+}) {
+  const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
   return (
     <div className="ctx-body">
       <div className="row between ctx-head">
-        <span className="label">Recent activity</span>
-        <span className="chip sm">{workspace.agentEvents.length}</span>
+        <span className="label">Document Activity</span>
+        <span className="chip sm">{activities.length}</span>
       </div>
-      {workspace.agentEvents.slice(0, 12).map((event) => (
-        <article className="activity-row" key={event.id}>
-          <div className="avi sm agent">{initials(event.agentHandle || event.agentId)}</div>
-          <div className="col gap-2 min-0">
-            <div className="small truncate"><b>@{event.agentHandle || event.agentId}</b> {event.type}</div>
-            <p className="tiny muted">{event.summary}</p>
-          </div>
-        </article>
-      ))}
-      {!workspace.agentEvents.length ? <p className="empty-note">Workspace activity will appear here.</p> : null}
+      {activities.map((activity, index) => {
+        const category = activityCategory(activity.type, activity.actorType);
+        const label = actorLabel[activity.actorId];
+        const text = label ? activity.summary.split(activity.actorId).join(`@${label}`) : activity.summary;
+        return (
+          <article className="activity-row" key={`${activity.occurredAt}-${activity.actorId}-${index}`}>
+            <span className="activity-mark">
+              <span className="activity-dot" style={{ background: activityDotColor[category] }} />
+              <Icon name={activityGlyph[category]} />
+            </span>
+            <div className="col gap-2 min-0">
+              <div className="small truncate">{text || activity.type}</div>
+              <p className="tiny muted">{relativeTime(activity.occurredAt, now)}</p>
+            </div>
+          </article>
+        );
+      })}
+      {!activities.length ? (
+        <p className="empty-note">{hasDocument ? "No activity on this document yet." : "Open a document to see its activity."}</p>
+      ) : null}
     </div>
   );
 }
 
-function CoworkersPanel({
-  workspace,
-  canInviteMembers,
-  onShare,
+const personRoleTag = { you: "You", agent: "Agent", member: "Member" } as const;
+
+// Everyone in the workspace — humans + agents. Soft avatars, role tag, and a
+// workspace-level online ring driven by real presence that decays on a 12s
+// now-ticker (like daemon liveness) so it never shows a stale "online".
+function PeoplePanel({
+  people,
+  agents,
   onAgent,
 }: {
-  workspace: ReturnType<typeof useWorkspace>["workspace"];
-  canInviteMembers: boolean;
-  onShare: () => void;
+  people: WorkspacePerson[];
+  agents: Agent[];
   onAgent: (agent: Agent) => void;
 }) {
-  const humans = workspace.users.filter((user) => user.kind === "human");
+  const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
+  const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
+  const rank = (row: { person: WorkspacePerson; online: boolean }) =>
+    row.person.kind === "you" ? 0 : row.online ? 1 : 2;
+  const rows = people
+    .map((person) => ({ person, online: personOnline(person, now) }))
+    .sort((a, b) => rank(a) - rank(b) || a.person.handle.localeCompare(b.person.handle));
   return (
     <div className="ctx-body people-pane">
       <div className="row between ctx-head">
         <span className="label">People</span>
-        {canInviteMembers ? (
-          <button className="btn sm" type="button" onClick={onShare}>
-            <Icon name="share" />
-            Share
+        <span className="chip sm">{people.length}</span>
+      </div>
+      {rows.map(({ person, online }) => {
+        const agent = person.kind === "agent" ? agentsById.get(person.id) : undefined;
+        const avatar = (
+          <div
+            className={`avi ${person.kind === "agent" ? "agent" : "you"}${online ? " online" : ""}`}
+            title={online ? "Online" : undefined}
+          >
+            {initials(person.handle || person.name)}
+          </div>
+        );
+        const body = (
+          <div className="col gap-2 min-0">
+            <strong className="small truncate">@{person.handle}</strong>
+            <span className="tiny muted truncate">{personRoleTag[person.kind]}</span>
+            {online ? <span className="sr-only">Online</span> : null}
+          </div>
+        );
+        return agent ? (
+          <button key={person.id} className="agent-card" onClick={() => onAgent(agent)}>
+            {avatar}
+            {body}
           </button>
         ) : (
-          <span className="chip sm">{humans.length}</span>
-        )}
-      </div>
-      {humans.map((user) => (
-        <article className="agent-card" key={user.id}>
-          <div className="avi you">{initials(user.handle || user.name)}</div>
-          <div className="col gap-2 min-0">
-            <strong className="small truncate">@{user.handle}</strong>
-            <span className="tiny muted truncate">{user.role || "Workspace member"}</span>
-          </div>
-        </article>
-      ))}
-      {!humans.length ? <p className="empty-note">Workspace members will appear here.</p> : null}
-      <div className="row between ctx-head with-space">
-        <span className="label">Agents</span>
-        <span className="chip sm">{workspace.agents.length}</span>
-      </div>
-      {workspace.agents.map((agent) => (
-        <button key={agent.id} className="agent-card" onClick={() => onAgent(agent)}>
-          <div className="avi agent">{initials(agent.handle)}</div>
-          <div className="col gap-2 min-0">
-            <strong className="small truncate">@{agent.handle}</strong>
-            <span className="tiny muted truncate">{agent.currentActivity || agent.role}</span>
-          </div>
-          <StatusDot tone={visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons)} />
-        </button>
-      ))}
+          <article key={person.id} className="agent-card">
+            {avatar}
+            {body}
+          </article>
+        );
+      })}
+      {!people.length ? <p className="empty-note">No people in this workspace yet.</p> : null}
     </div>
   );
 }
@@ -3277,8 +3346,8 @@ export function Logo() {
   return (
     <div className="row gap-8 logo-row">
       <svg className="logo-mark" viewBox="14 31 72 38" aria-hidden="true">
-        <circle cx="24" cy="50" r="9" fill="#E3A15B" />
-        <circle cx="76" cy="50" r="9" fill="#7FC1D6" />
+        <circle cx="24" cy="50" r="9" fill="var(--accent)" />
+        <circle cx="76" cy="50" r="9" fill="var(--agent)" />
         <line x1="39.6" y1="39.6" x2="60.4" y2="60.4" stroke="currentColor" strokeWidth="7.8" strokeLinecap="round" />
         <line x1="60.4" y1="39.6" x2="39.6" y2="60.4" stroke="currentColor" strokeWidth="7.8" strokeLinecap="round" />
       </svg>

@@ -184,6 +184,19 @@ export type PresenceItem = {
   updatedAt: string;
 };
 
+// The workspace-wide Document Activity feed (backend ActivityEvent). Delivered
+// in the workspace snapshot; the store carries it through but does not update it
+// incrementally, so it is snapshot-fresh rather than per-event live.
+export type ActivityEvent = {
+  type: string;
+  documentId?: string;
+  actorId: string;
+  actorType: string;
+  summary: string;
+  occurredAt: string;
+  presenceRef?: string;
+};
+
 export type WorkspaceState = {
   workspaceId: string;
   rootDocumentId: string;
@@ -198,7 +211,7 @@ export type WorkspaceState = {
   threads: ThreadItem[];
   agentEvents: AgentEvent[];
   presences: Record<string, PresenceItem>;
-  activities?: unknown[];
+  activities?: ActivityEvent[];
   updatedAt?: string;
 };
 

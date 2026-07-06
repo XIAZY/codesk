@@ -457,8 +457,7 @@ describe("App URL routing", () => {
     render(<App />);
 
     await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_1"));
-    await user.click(screen.getByRole("button", { name: /coworkers/i }));
-    await user.click(screen.getByRole("button", { name: "Share" }));
+    await user.click(screen.getByRole("button", { name: "Invite" }));
 
     expect(await screen.findByDisplayValue(`${window.location.origin}/invite/created321`)).toBeTruthy();
 
@@ -468,8 +467,7 @@ describe("App URL routing", () => {
     render(<App />);
 
     await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_1"));
-    await user.click(screen.getByRole("button", { name: /coworkers/i }));
-    expect(screen.queryByRole("button", { name: "Share" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Invite" })).toBeNull();
   });
 
   it("routes from backend account state after login from an invalid protected workspace URL", async () => {
