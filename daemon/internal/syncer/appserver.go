@@ -67,7 +67,7 @@ func (c *codexAppServer) Start(ctx context.Context) error {
 	}
 	cmd := exec.CommandContext(ctx, c.cfg.CodexCommand, "app-server")
 	cmd.Dir = c.workdir
-	cmd.Env = append(os.Environ(), buildCodexEnv(c.cfg, c.toolToken)...)
+	cmd.Env = append(os.Environ(), buildAgentToolEnv(c.cfg, c.toolToken)...)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

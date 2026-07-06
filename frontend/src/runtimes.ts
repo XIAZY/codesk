@@ -3,7 +3,7 @@ import type { Daemon } from "./types";
 // Codesk's supported-runtime registry. A runtime is "supported" when Codesk knows
 // how to drive it; only those can actually host an agent. Everything else is a
 // roadmap entry shown as "coming soon" — independent of any individual daemon.
-// Today Codesk only integrates Codex.
+// Today Codesk integrates Codex and Claude Code.
 export type RuntimeRegistryEntry = {
   kind: string;
   label: string;
@@ -14,7 +14,7 @@ export type RuntimeRegistryEntry = {
 
 export const SUPPORTED_RUNTIME_REGISTRY: RuntimeRegistryEntry[] = [
   { kind: "codex", label: "Codex", monogram: "Cx", tile: "codex", supported: true },
-  { kind: "claude-code", label: "Claude Code", monogram: "CC", tile: "claude", supported: false },
+  { kind: "claude-code", label: "Claude Code", monogram: "CC", tile: "claude", supported: true },
   { kind: "pi", label: "pi", monogram: "π", tile: "pi", supported: false },
   { kind: "opencode", label: "opencode", monogram: "oc", supported: false },
 ];

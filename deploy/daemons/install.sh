@@ -24,6 +24,7 @@ Options:
 
 Environment:
   NOTTY_CODEX_COMMAND   Optional Codex executable to use. Defaults to codex.
+  NOTTY_CLAUDE_COMMAND  Optional Claude Code executable to use. Defaults to claude.
 EOF
 }
 
@@ -153,6 +154,7 @@ safe_name() {
 }
 
 codex_command="${NOTTY_CODEX_COMMAND:-codex}"
+claude_command="${NOTTY_CLAUDE_COMMAND:-claude}"
 
 # PATH policy: the installer's shell PATH is used to *detect* tools only.
 # What persists for the daemon is the resolved tool directory plus a fixed
@@ -160,7 +162,11 @@ codex_command="${NOTTY_CODEX_COMMAND:-codex}"
 # install time and re-derived at every daemon start (see run.sh below), so
 # a tool that moves after install heals on the next restart. The interactive
 # PATH is never snapshotted into the service environment.
-notty_path_helpers="$(cat <<'EOF'
+#
+# Kept as a single-quoted string, not a $(cat <<heredoc): macOS /bin/sh is
+# bash 3.2, whose command-substitution parser mis-tracks the `)` in case
+# patterns inside a heredoc and mangles the captured text.
+notty_path_helpers='
 notty_path_has_dir() {
 	case ":$PATH:" in
 		*:"$1":*) return 0 ;;
@@ -199,11 +205,11 @@ notty_append_known_tool_dirs() {
 notty_derive_daemon_path() {
 	PATH=""
 	notty_append_path_dir "${NOTTY_TOOL_DIR_CODEX:-}"
+	notty_append_path_dir "${NOTTY_TOOL_DIR_CLAUDE:-}"
 	notty_append_known_tool_dirs
 	export PATH
 }
-EOF
-)"
+'
 eval "$notty_path_helpers"
 
 detection_path="$(
@@ -226,7 +232,22 @@ case "$codex_command" in
 		;;
 esac
 
-degraded_mode="The daemon will run document sync only; agent sessions are unavailable until Codex is configured."
+claude_tool_dir=""
+case "$claude_command" in
+	*/*)
+		if [ -x "$claude_command" ]; then
+			claude_tool_dir="$(dirname -- "$claude_command")"
+		fi
+		;;
+	*)
+		claude_resolved="$(PATH="$detection_path" command -v -- "$claude_command" 2>/dev/null || true)"
+		if [ -n "$claude_resolved" ]; then
+			claude_tool_dir="$(dirname -- "$claude_resolved")"
+		fi
+		;;
+esac
+
+degraded_mode="Codex agents will be unavailable until Codex is configured; other runtimes such as Claude Code are unaffected."
 
 check_codex() {
 	case "$codex_command" in
@@ -256,14 +277,42 @@ check_codex() {
 
 check_codex
 
+check_claude() {
+	case "$claude_command" in
+		*/*)
+			if [ ! -x "$claude_command" ]; then
+				warn "Claude Code runtime unavailable: $claude_command is not executable. Claude Code agents are unavailable until it is fixed. Install Claude Code or set NOTTY_CLAUDE_COMMAND to the Claude Code executable path."
+				return 0
+			fi
+			;;
+		*)
+			if ! PATH="$detection_path" command -v "$claude_command" >/dev/null 2>&1; then
+				warn "Claude Code runtime unavailable: '$claude_command' was not found on PATH. Claude Code agents are unavailable until it is installed. Install Claude Code or set NOTTY_CLAUDE_COMMAND to the Claude Code executable path."
+				return 0
+			fi
+			;;
+	esac
+
+	if ! PATH="$detection_path" "$claude_command" --version >/dev/null 2>&1; then
+		warn "Claude Code runtime unavailable: '$claude_command --version' did not run successfully. Fix Claude Code to enable Claude Code agents."
+		return 0
+	fi
+}
+
+check_claude
+
 daemon_service_path="$(
 	NOTTY_TOOL_DIR_CODEX="$codex_tool_dir"
+	NOTTY_TOOL_DIR_CLAUDE="$claude_tool_dir"
 	notty_derive_daemon_path
 	printf '%s' "$install_dir:$PATH"
 )"
 printf 'Daemon service PATH: %s\n' "$daemon_service_path"
 if [ -n "$codex_tool_dir" ]; then
 	printf 'Codex resolved in: %s\n' "$codex_tool_dir"
+fi
+if [ -n "$claude_tool_dir" ]; then
+	printf 'Claude Code resolved in: %s\n' "$claude_tool_dir"
 fi
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/notty-install.XXXXXX")"
@@ -322,7 +371,9 @@ mv "$install_dir/.notty-agent-tool.$$" "$install_dir/notty-agent-tool"
 	printf 'export NOTTY_WORKSPACE_DIR=%s\n' "$(shell_quote "$workspace_dir")"
 	printf 'export NOTTY_AGENT_WORKSPACE_ROOT=%s\n' "$(shell_quote "$agent_workspace_root")"
 	printf 'export NOTTY_CODEX_COMMAND=%s\n' "$(shell_quote "$codex_command")"
+	printf 'export NOTTY_CLAUDE_COMMAND=%s\n' "$(shell_quote "$claude_command")"
 	printf 'export NOTTY_TOOL_DIR_CODEX=%s\n' "$(shell_quote "$codex_tool_dir")"
+	printf 'export NOTTY_TOOL_DIR_CLAUDE=%s\n' "$(shell_quote "$claude_tool_dir")"
 } > "$env_file"
 chmod 600 "$env_file"
 
@@ -334,12 +385,13 @@ chmod 600 "$env_file"
 	printf '#!/usr/bin/env sh\n'
 	printf 'set -eu\n'
 	printf '. %s\n' "$(shell_quote "$env_file")"
-	printf 'export NOTTY_BACKEND_URL NOTTY_WORKSPACE_ID NOTTY_DAEMON_TOKEN NOTTY_DAEMON_VERSION NOTTY_DATA_DIR NOTTY_WORKSPACE_DIR NOTTY_AGENT_WORKSPACE_ROOT NOTTY_CODEX_COMMAND NOTTY_TOOL_DIR_CODEX\n'
+	printf 'export NOTTY_BACKEND_URL NOTTY_WORKSPACE_ID NOTTY_DAEMON_TOKEN NOTTY_DAEMON_VERSION NOTTY_DATA_DIR NOTTY_WORKSPACE_DIR NOTTY_AGENT_WORKSPACE_ROOT NOTTY_CODEX_COMMAND NOTTY_CLAUDE_COMMAND NOTTY_TOOL_DIR_CODEX NOTTY_TOOL_DIR_CLAUDE\n'
 	printf '%s\n' "$notty_path_helpers"
 	printf 'notty_derive_daemon_path\n'
 	printf 'export PATH=%s:"$PATH"\n' "$(shell_quote "$install_dir")"
 	printf 'echo "notty-daemon start: PATH=$PATH"\n'
 	printf 'echo "notty-daemon start: codex=$NOTTY_CODEX_COMMAND resolved=$(command -v -- "$NOTTY_CODEX_COMMAND" 2>/dev/null || echo not-found)"\n'
+	printf 'echo "notty-daemon start: claude=$NOTTY_CLAUDE_COMMAND resolved=$(command -v -- "$NOTTY_CLAUDE_COMMAND" 2>/dev/null || echo not-found)"\n'
 	printf 'exec %s\n' "$(shell_quote "$install_dir/notty-daemon")"
 } > "$run_script"
 chmod +x "$run_script"

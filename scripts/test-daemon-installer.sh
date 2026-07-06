@@ -143,6 +143,26 @@ exit 42
 EOF
 chmod +x "$bad_codex"
 
+ok_claude="$tmp_dir/claude-ok"
+cat > "$ok_claude" <<'EOF'
+#!/usr/bin/env sh
+case "${1:-}" in
+	--version)
+		echo "9.9.9 (Claude Code)"
+		exit 0
+		;;
+esac
+exit 2
+EOF
+chmod +x "$ok_claude"
+
+bad_claude="$tmp_dir/claude-bad"
+cat > "$bad_claude" <<'EOF'
+#!/usr/bin/env sh
+exit 42
+EOF
+chmod +x "$bad_claude"
+
 common_args="
 --backend-url http://127.0.0.1:8080
 --workspace-id ws-test
@@ -153,15 +173,18 @@ common_args="
 --no-service
 "
 
-PATH="$test_bin:$PATH" NOTTY_CODEX_COMMAND="$tmp_dir/missing-codex" HOME="$tmp_dir/home-missing" sh "$installer" $common_args > "$tmp_dir/missing.out" 2> "$tmp_dir/missing.err"
+PATH="$test_bin:$PATH" NOTTY_CODEX_COMMAND="$tmp_dir/missing-codex" NOTTY_CLAUDE_COMMAND="$tmp_dir/missing-claude" HOME="$tmp_dir/home-missing" sh "$installer" $common_args > "$tmp_dir/missing.out" 2> "$tmp_dir/missing.err"
 grep -q "Codex runtime unavailable" "$tmp_dir/missing.err" || fail "missing codex warning did not explain runtime availability"
-grep -q "document sync only; agent sessions are unavailable" "$tmp_dir/missing.err" || fail "missing codex warning did not name the degraded mode"
+grep -q "Codex agents will be unavailable" "$tmp_dir/missing.err" || fail "missing codex warning did not name the degraded mode"
+grep -q "Claude Code runtime unavailable" "$tmp_dir/missing.err" || fail "missing claude warning did not explain runtime availability"
 assert_executable "$tmp_dir/install/notty-daemon"
 assert_file "$tmp_dir/data/daemons/ws-test/daemon.env"
 grep -q "NOTTY_CODEX_COMMAND='$tmp_dir/missing-codex'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "missing codex install did not preserve configured command"
+grep -q "NOTTY_CLAUDE_COMMAND='$tmp_dir/missing-claude'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "missing claude install did not preserve configured command"
 
-PATH="$test_bin:$PATH" NOTTY_CODEX_COMMAND="$bad_codex" HOME="$tmp_dir/home-bad" sh "$installer" $common_args > "$tmp_dir/bad.out" 2> "$tmp_dir/bad.err"
-grep -q "did not run successfully" "$tmp_dir/bad.err" || fail "bad codex warning did not explain failed smoke test"
+PATH="$test_bin:$PATH" NOTTY_CODEX_COMMAND="$bad_codex" NOTTY_CLAUDE_COMMAND="$bad_claude" HOME="$tmp_dir/home-bad" sh "$installer" $common_args > "$tmp_dir/bad.out" 2> "$tmp_dir/bad.err"
+grep -q "'$bad_codex --version' did not run successfully" "$tmp_dir/bad.err" || fail "bad codex warning did not explain failed smoke test"
+grep -q "'$bad_claude --version' did not run successfully" "$tmp_dir/bad.err" || fail "bad claude warning did not explain failed smoke test"
 assert_executable "$tmp_dir/install/notty-daemon"
 assert_file "$tmp_dir/data/daemons/ws-test/daemon.env"
 grep -q "NOTTY_CODEX_COMMAND='$bad_codex'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "bad codex install did not preserve configured command"
@@ -185,20 +208,23 @@ assert_executable "$tmp_dir/install/notty-daemon"
 assert_file "$tmp_dir/data/daemons/ws-test/daemon.env"
 grep -q "NOTTY_CODEX_COMMAND='$old_codex'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "old codex install did not preserve configured command"
 
-PATH="$test_bin:$PATH" NOTTY_CODEX_COMMAND="$ok_codex" HOME="$tmp_dir/home-ok" sh "$installer" $common_args > "$tmp_dir/ok.out" 2> "$tmp_dir/ok.err"
+PATH="$test_bin:$PATH" NOTTY_CODEX_COMMAND="$ok_codex" NOTTY_CLAUDE_COMMAND="$ok_claude" HOME="$tmp_dir/home-ok" sh "$installer" $common_args > "$tmp_dir/ok.out" 2> "$tmp_dir/ok.err"
 assert_executable "$tmp_dir/install/notty-daemon"
 assert_executable "$tmp_dir/install/notty-agent-tool"
 assert_file "$tmp_dir/data/daemons/ws-test/daemon.env"
 grep -q "NOTTY_CODEX_COMMAND='$ok_codex'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "env file did not preserve configured Codex command"
+grep -q "NOTTY_CLAUDE_COMMAND='$ok_claude'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "env file did not preserve configured Claude Code command"
+if grep -q "Claude Code runtime unavailable" "$tmp_dir/ok.err"; then fail "healthy claude should not warn about runtime availability"; fi
 grep -q "NOTTY_DAEMON_VERSION='$version'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "env file did not preserve daemon version"
 grep -q "NOTTY_DATA_DIR='$tmp_dir/data'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "env file did not preserve daemon data dir"
 if grep -q "^export PATH=" "$tmp_dir/data/daemons/ws-test/daemon.env"; then
 	fail "env file must not persist a PATH snapshot"
 fi
 grep -q "NOTTY_TOOL_DIR_CODEX='" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "env file did not persist resolved codex tool dir"
+grep -q "NOTTY_TOOL_DIR_CLAUDE='$tmp_dir'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "env file did not persist resolved claude tool dir"
 grep -q "NOTTY_DAEMON_VERSION NOTTY_DATA_DIR" "$tmp_dir/data/daemons/ws-test/run.sh" || fail "run script did not export daemon version"
 grep -q "NOTTY_DATA_DIR NOTTY_WORKSPACE_DIR" "$tmp_dir/data/daemons/ws-test/run.sh" || fail "run script did not export daemon data dir"
-grep -q "NOTTY_CODEX_COMMAND NOTTY_TOOL_DIR_CODEX" "$tmp_dir/data/daemons/ws-test/run.sh" || fail "run script did not export codex tool dir"
+grep -q "NOTTY_CODEX_COMMAND NOTTY_CLAUDE_COMMAND NOTTY_TOOL_DIR_CODEX NOTTY_TOOL_DIR_CLAUDE" "$tmp_dir/data/daemons/ws-test/run.sh" || fail "run script did not export runtime commands and tool dirs"
 grep -q "notty_derive_daemon_path" "$tmp_dir/data/daemons/ws-test/run.sh" || fail "run script does not re-derive PATH at start"
 grep -q "export PATH='$tmp_dir/install':\"\$PATH\"" "$tmp_dir/data/daemons/ws-test/run.sh" || fail "run script did not prepend install directory to PATH"
 

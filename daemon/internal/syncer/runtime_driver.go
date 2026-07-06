@@ -108,7 +108,7 @@ func newRuntimeRegistry(drivers ...RuntimeDriver) *runtimeRegistry {
 }
 
 func defaultRuntimeRegistry(cfg Config) *runtimeRegistry {
-	return newRuntimeRegistry(newCodexDriver(cfg))
+	return newRuntimeRegistry(newCodexDriver(cfg), newClaudeDriver(cfg))
 }
 
 func (r *runtimeRegistry) DetectAll(ctx context.Context) []RuntimeDetection {

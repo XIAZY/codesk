@@ -22,11 +22,19 @@ describe("resolveRuntimeTiles", () => {
     expect(selectableRuntimeKinds(tiles)).toEqual(["codex"]);
   });
 
-  it("treats every non-codex runtime as coming_soon regardless of daemon report", () => {
-    const tiles = resolveRuntimeTiles(daemon([{ kind: "claude-code", available: true, version: "1.8.0" }]));
+  it("marks claude-code available and selectable when the daemon reports it", () => {
+    const tiles = resolveRuntimeTiles(daemon([{ kind: "claude-code", available: true, version: "2.1.201 (Claude Code)" }]));
     const claude = tiles.find((tile) => tile.entry.kind === "claude-code");
-    expect(claude?.availability).toBe("coming_soon");
-    // A supported-but-available-elsewhere runtime never becomes selectable.
+    expect(claude?.availability).toBe("available");
+    expect(claude?.meta).toBe("2.1.201 (Claude Code)");
+    expect(selectableRuntimeKinds(tiles)).toEqual(["claude-code"]);
+  });
+
+  it("treats unsupported registry runtimes as coming_soon regardless of daemon report", () => {
+    const tiles = resolveRuntimeTiles(daemon([{ kind: "pi", available: true, version: "1.8.0" }]));
+    const pi = tiles.find((tile) => tile.entry.kind === "pi");
+    expect(pi?.availability).toBe("coming_soon");
+    // A roadmap runtime never becomes selectable, even if a daemon has it.
     expect(selectableRuntimeKinds(tiles)).toEqual([]);
   });
 

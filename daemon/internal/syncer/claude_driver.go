@@ -1,0 +1,618 @@
+package syncer
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"os/exec"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+const RuntimeClaudeCode RuntimeKind = "claude-code"
+
+// Claude Code has no app-server equivalent: one process hosts exactly one
+// session, and session identity is fixed by CLI flags at launch. The daemon
+// talks to it over the CLI's stream-json stdin/stdout protocol.
+//
+// Interactive-only tools would wedge a headless turn, and scheduling tools
+// would spawn background work outside the supervisor's control.
+const claudeDisallowedTools = "EnterPlanMode,ExitPlanMode,ScheduleWakeup,CronCreate,CronList,CronDelete"
+
+// A claude process emits nothing at startup; its only synchronous failure
+// signal is a fast exit (e.g. `--resume` with an unknown session ID). Spawn
+// watches the process for this long before declaring the session usable, so
+// a stale resume falls back to a fresh session instead of crash-looping
+// through the supervisor's restart path.
+const claudeSpawnHandshakeWait = 2 * time.Second
+
+type claudeDriver struct {
+	cfg           Config
+	handshakeWait time.Duration
+}
+
+func newClaudeDriver(cfg Config) RuntimeDriver {
+	return &claudeDriver{cfg: cfg, handshakeWait: claudeSpawnHandshakeWait}
+}
+
+func (d *claudeDriver) Kind() RuntimeKind {
+	return RuntimeClaudeCode
+}
+
+func (d *claudeDriver) command() string {
+	return firstNonEmptyText(strings.TrimSpace(d.cfg.ClaudeCommand), "claude")
+}
+
+func (d *claudeDriver) Detect(ctx context.Context) RuntimeDetection {
+	path, err := exec.LookPath(d.command())
+	if err != nil {
+		return RuntimeDetection{Kind: RuntimeClaudeCode, Available: false, Reason: "claude command not found"}
+	}
+	detectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(detectCtx, path, "--version").CombinedOutput()
+	if err != nil {
+		return RuntimeDetection{Kind: RuntimeClaudeCode, Available: false, Path: path, Reason: "claude --version failed"}
+	}
+	return RuntimeDetection{Kind: RuntimeClaudeCode, Available: true, Version: strings.TrimSpace(string(output)), Path: path}
+}
+
+func (d *claudeDriver) Spawn(ctx context.Context, spec RuntimeSpawnSpec) (RuntimeProcess, error) {
+	return &claudeRuntimeProcess{
+		cfg:           d.cfg,
+		command:       d.command(),
+		agentID:       spec.AgentID,
+		workdir:       spec.Workdir,
+		toolToken:     spec.ToolToken,
+		instructions:  spec.Instructions,
+		handshakeWait: d.handshakeWait,
+		events:        make(chan RuntimeEvent, 128),
+	}, nil
+}
+
+type claudeRuntimeProcess struct {
+	cfg           Config
+	command       string
+	agentID       string
+	workdir       string
+	toolToken     string
+	instructions  string
+	handshakeWait time.Duration
+
+	events    chan RuntimeEvent
+	closeOnce sync.Once
+
+	mu         sync.Mutex
+	cmd        *exec.Cmd
+	stdin      io.WriteCloser
+	sessionID  string
+	activeTurn string
+	stopped    bool
+	log        *agentLog
+}
+
+func (p *claudeRuntimeProcess) Start(ctx context.Context) error {
+	if p == nil {
+		return errors.New("claude runtime process is nil")
+	}
+	// The claude CLI takes session identity (--session-id / --resume) as
+	// launch flags, so the OS process is spawned lazily by the first
+	// startSession/resumeSession input rather than here.
+	if agentLog, err := openAgentLog(p.cfg, p.agentID); err == nil {
+		p.mu.Lock()
+		p.log = agentLog
+		p.mu.Unlock()
+		p.logf("claude runtime prepared command=%s agent=%s workdir=%s", p.command, p.agentID, p.workdir)
+	} else {
+		log.Printf("agent log open failed agent=%s data_dir=%s err=%v", p.agentID, p.cfg.DataDir, err)
+	}
+	return nil
+}
+
+func (p *claudeRuntimeProcess) Stop() error {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	p.stopped = true
+	cmd := p.cmd
+	stdin := p.stdin
+	p.mu.Unlock()
+	if stdin != nil {
+		_ = stdin.Close()
+	}
+	if cmd != nil && cmd.Process != nil {
+		p.logf("stopping claude process pid=%d", cmd.Process.Pid)
+		err := cmd.Process.Kill()
+		if errors.Is(err, os.ErrProcessDone) {
+			// Closing stdin above can trigger a clean exit before the kill lands;
+			// an already-finished process is a successful stop, not an error.
+			err = nil
+		}
+		// The exit goroutine closes the events channel once cmd.Wait returns and
+		// readLoop drains (which is why it, not Stop, owns the close): stopped=true
+		// makes it terminal even if the kill lands inside the handshake window.
+		p.closeLog()
+		return err
+	}
+	// Never spawned: no exit goroutine exists, so close the event stream here.
+	p.closeEvents()
+	p.closeLog()
+	return nil
+}
+
+func (p *claudeRuntimeProcess) Events() <-chan RuntimeEvent {
+	if p == nil {
+		return nil
+	}
+	return p.events
+}
+
+func (p *claudeRuntimeProcess) PID() int {
+	if p == nil {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cmd == nil || p.cmd.Process == nil {
+		return 0
+	}
+	return p.cmd.Process.Pid
+}
+
+func (p *claudeRuntimeProcess) WriteStdin(ctx context.Context, input RuntimeInput) (RuntimeWriteResult, error) {
+	if p == nil {
+		return RuntimeWriteResult{}, errors.New("claude runtime process is not started")
+	}
+	switch input.Kind {
+	case RuntimeInputResumeSession:
+		sessionID := strings.TrimSpace(input.SessionID)
+		if sessionID == "" {
+			return RuntimeWriteResult{}, errors.New("session id is required to resume claude session")
+		}
+		if err := p.spawn(ctx, sessionID, true); err != nil {
+			return RuntimeWriteResult{}, err
+		}
+		return RuntimeWriteResult{SessionID: sessionID}, nil
+	case RuntimeInputStartSession:
+		sessionID := uuid.NewString()
+		if err := p.spawn(ctx, sessionID, false); err != nil {
+			return RuntimeWriteResult{}, err
+		}
+		return RuntimeWriteResult{SessionID: sessionID}, nil
+	case RuntimeInputStartTurn:
+		// Registered before the write so a fast result event can never
+		// observe an empty active turn.
+		turnID := "turn_" + uuid.NewString()
+		p.mu.Lock()
+		p.activeTurn = turnID
+		p.mu.Unlock()
+		if err := p.writeUserMessage(input.Text); err != nil {
+			p.mu.Lock()
+			if p.activeTurn == turnID {
+				p.activeTurn = ""
+			}
+			p.mu.Unlock()
+			return RuntimeWriteResult{}, err
+		}
+		return RuntimeWriteResult{TurnID: turnID}, nil
+	case RuntimeInputSteerTurn:
+		p.mu.Lock()
+		active := p.activeTurn
+		p.mu.Unlock()
+		if active == "" {
+			return RuntimeWriteResult{}, errors.New("no active turn to steer")
+		}
+		// Claude Code queues mid-turn user messages and folds them into the
+		// running turn at the next safe stream boundary.
+		return RuntimeWriteResult{}, p.writeUserMessage(input.Text)
+	case RuntimeInputInterruptTurn:
+		return RuntimeWriteResult{}, p.writeControlRequest("interrupt")
+	default:
+		return RuntimeWriteResult{}, errors.New("unsupported runtime input kind " + string(input.Kind))
+	}
+}
+
+func (p *claudeRuntimeProcess) buildArgs(sessionID string, resume bool) []string {
+	args := []string{
+		"--print",
+		"--input-format", "stream-json",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--allow-dangerously-skip-permissions",
+		"--dangerously-skip-permissions",
+		"--permission-mode", "bypassPermissions",
+		"--disallowed-tools", claudeDisallowedTools,
+	}
+	if resume {
+		args = append(args, "--resume", sessionID)
+	} else {
+		args = append(args, "--session-id", sessionID)
+	}
+	if strings.TrimSpace(p.instructions) != "" {
+		args = append(args, "--append-system-prompt", p.instructions)
+	}
+	return args
+}
+
+func buildClaudeEnv(cfg Config, toolToken string) []string {
+	env := make([]string, 0, len(os.Environ())+3)
+	for _, value := range os.Environ() {
+		// A nested CLAUDECODE marker (daemon itself launched from Claude
+		// Code) changes CLI behavior; agents must not inherit it.
+		if strings.HasPrefix(value, "CLAUDECODE=") {
+			continue
+		}
+		env = append(env, value)
+	}
+	env = append(env, buildAgentToolEnv(cfg, toolToken)...)
+	// IS_SANDBOX (which lets claude accept --dangerously-skip-permissions as
+	// root) is declared by the daemon container's Dockerfile, the only supported
+	// root context. Inferring it from euid==0 would also mark a misconfigured
+	// bare-metal root daemon as a sandbox — a false claim; the environment
+	// declares what it is instead.
+	return env
+}
+
+// spawn launches the claude CLI for one session attempt. The supervisor
+// retries a failed resume as a fresh startSession on the same RuntimeProcess,
+// so a failed attempt resets state for respawn and must NOT close the events
+// channel; only an established process closes it on exit (which is how the
+// supervisor learns the session died).
+func (p *claudeRuntimeProcess) spawn(ctx context.Context, sessionID string, resume bool) error {
+	p.mu.Lock()
+	if p.cmd != nil {
+		p.mu.Unlock()
+		return errors.New("claude process is already running")
+	}
+	p.mu.Unlock()
+
+	args := p.buildArgs(sessionID, resume)
+	// Intentionally not exec.CommandContext: the spawn ctx is a
+	// per-reconcile request context, while the process must outlive it.
+	cmd := exec.Command(p.command, args...)
+	cmd.Dir = p.workdir
+	cmd.Env = buildClaudeEnv(p.cfg, p.toolToken)
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	// Stderr goes to an in-memory sink instead of a pipe: exec then finishes
+	// copying it before Wait returns, so a fast startup failure cannot race
+	// its own diagnostic output.
+	stderrTail := &claudeStderrTail{process: p}
+	cmd.Stderr = stderrTail
+	if err := cmd.Start(); err != nil {
+		p.logf("claude start failed err=%v", err)
+		return err
+	}
+	p.mu.Lock()
+	p.cmd = cmd
+	p.stdin = stdin
+	p.sessionID = sessionID
+	p.mu.Unlock()
+	p.logf("claude started pid=%d resume=%t session=%s", cmd.Process.Pid, resume, sessionID)
+
+	readDone := make(chan struct{})
+	exited := make(chan error, 1)
+	established := make(chan bool, 1)
+	go func() {
+		p.readLoop(stdout)
+		close(readDone)
+	}()
+	go func() {
+		err := cmd.Wait()
+		p.logf("claude exited err=%v", err)
+		exited <- err
+		<-readDone
+		// Closing the events channel is how the supervisor learns the process is
+		// done, so the exit goroutine owns it (after readLoop drains, so no
+		// send-on-closed race). It closes on exit by default; the one exception
+		// is a failed spawn attempt the supervisor retries on this same
+		// RuntimeProcess (stale-resume -> fresh-session), which reuses the
+		// channel. A Stop() is always terminal, even inside the handshake window.
+		if <-established || p.wasStopped() {
+			p.closeEvents()
+		}
+	}()
+
+	// claude prints nothing until the first user message, so the only
+	// startup acknowledgment is surviving the handshake window. A fast exit
+	// (unknown --resume session, bad flags, refused permissions mode) is
+	// reported synchronously so the supervisor can fall back or surface it.
+	wait := p.handshakeWait
+	if wait <= 0 {
+		wait = claudeSpawnHandshakeWait
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case err := <-exited:
+		established <- false
+		p.resetSpawn(stdin)
+		detail := stderrTail.String()
+		if detail == "" && err != nil {
+			detail = err.Error()
+		}
+		return fmt.Errorf("claude exited during startup: %s", firstNonEmptyText(detail, "no output"))
+	case <-timer.C:
+		established <- true
+		return nil
+	case <-ctx.Done():
+		established <- false
+		_ = cmd.Process.Kill()
+		p.resetSpawn(stdin)
+		return ctx.Err()
+	}
+}
+
+func (p *claudeRuntimeProcess) resetSpawn(stdin io.Closer) {
+	_ = stdin.Close()
+	p.mu.Lock()
+	p.cmd = nil
+	p.stdin = nil
+	p.mu.Unlock()
+}
+
+func (p *claudeRuntimeProcess) writeUserMessage(text string) error {
+	p.mu.Lock()
+	stdin := p.stdin
+	sessionID := p.sessionID
+	p.mu.Unlock()
+	if stdin == nil {
+		return errors.New("claude process is not running")
+	}
+	payload := map[string]any{
+		"type": "user",
+		"message": map[string]any{
+			"role":    "user",
+			"content": []map[string]string{{"type": "text", "text": text}},
+		},
+	}
+	if sessionID != "" {
+		payload["session_id"] = sessionID
+	}
+	return p.writeLine(stdin, payload)
+}
+
+func (p *claudeRuntimeProcess) writeControlRequest(subtype string) error {
+	p.mu.Lock()
+	stdin := p.stdin
+	p.mu.Unlock()
+	if stdin == nil {
+		return errors.New("claude process is not running")
+	}
+	return p.writeLine(stdin, map[string]any{
+		"type":       "control_request",
+		"request_id": "req_" + uuid.NewString(),
+		"request":    map[string]string{"subtype": subtype},
+	})
+}
+
+func (p *claudeRuntimeProcess) writeLine(stdin io.Writer, payload map[string]any) error {
+	line, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	// Serialize the pipe write under p.mu so concurrent startTurn/steer/interrupt
+	// writes cannot interleave their JSON+newline bytes into corrupt input (the
+	// codex driver serializes writes the same way). logf reacquires p.mu, so it
+	// stays outside this critical section.
+	p.mu.Lock()
+	_, err = stdin.Write(append(line, '\n'))
+	p.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	p.logf("stream send %s", truncateForLog(string(line)))
+	return nil
+}
+
+func (p *claudeRuntimeProcess) readLoop(stdout io.Reader) {
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		p.logf("stream recv %s", truncateForLog(string(line)))
+		event := parseClaudeStreamLine(line)
+		if event == nil {
+			continue
+		}
+		switch event.kind {
+		case claudeStreamInit:
+			p.mu.Lock()
+			if event.sessionID != "" {
+				p.sessionID = event.sessionID
+			}
+			p.mu.Unlock()
+		case claudeStreamTurnEnd:
+			p.mu.Lock()
+			turnID := p.activeTurn
+			sessionID := p.sessionID
+			p.activeTurn = ""
+			p.mu.Unlock()
+			kind := RuntimeEventTurnCompleted
+			if event.failed {
+				kind = RuntimeEventTurnFailed
+			}
+			p.emit(RuntimeEvent{Kind: kind, SessionID: sessionID, TurnID: turnID, Error: event.errText})
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		p.logf("stream stdout scan error err=%v", err)
+	}
+}
+
+func (p *claudeRuntimeProcess) emit(event RuntimeEvent) {
+	select {
+	case p.events <- event:
+	default:
+		p.logf("dropping runtime event kind=%s because channel is full", event.Kind)
+	}
+}
+
+func (p *claudeRuntimeProcess) wasStopped() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.stopped
+}
+
+func (p *claudeRuntimeProcess) closeEvents() {
+	p.closeOnce.Do(func() {
+		close(p.events)
+	})
+}
+
+// claudeStderrTail is the process's stderr writer: it logs complete lines to
+// the agent log and keeps the last few for startup-failure diagnostics.
+type claudeStderrTail struct {
+	process *claudeRuntimeProcess
+
+	mu      sync.Mutex
+	partial []byte
+	lines   []string
+}
+
+func (t *claudeStderrTail) Write(data []byte) (int, error) {
+	t.mu.Lock()
+	t.partial = append(t.partial, data...)
+	var complete []string
+	for {
+		newline := bytes.IndexByte(t.partial, '\n')
+		if newline < 0 {
+			break
+		}
+		complete = append(complete, string(t.partial[:newline]))
+		t.partial = t.partial[newline+1:]
+	}
+	for _, line := range complete {
+		t.appendLineLocked(line)
+	}
+	t.mu.Unlock()
+	for _, line := range complete {
+		t.process.logf("stderr %s", line)
+	}
+	return len(data), nil
+}
+
+func (t *claudeStderrTail) appendLineLocked(line string) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return
+	}
+	t.lines = append(t.lines, line)
+	if len(t.lines) > 5 {
+		t.lines = t.lines[len(t.lines)-5:]
+	}
+}
+
+func (t *claudeStderrTail) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	parts := append([]string(nil), t.lines...)
+	if trailing := strings.TrimSpace(string(t.partial)); trailing != "" {
+		parts = append(parts, trailing)
+	}
+	return strings.Join(parts, " | ")
+}
+
+func (p *claudeRuntimeProcess) logf(format string, args ...any) {
+	p.mu.Lock()
+	agentLog := p.log
+	p.mu.Unlock()
+	if agentLog == nil {
+		return
+	}
+	agentLog.Printf(format, args...)
+}
+
+func (p *claudeRuntimeProcess) closeLog() {
+	p.mu.Lock()
+	agentLog := p.log
+	p.log = nil
+	p.mu.Unlock()
+	if agentLog != nil {
+		agentLog.Close()
+	}
+}
+
+const claudeLogLineLimit = 4 * 1024
+
+// Tool results in the stream can be megabytes; cap what lands in agent logs.
+func truncateForLog(line string) string {
+	if len(line) <= claudeLogLineLimit {
+		return line
+	}
+	return line[:claudeLogLineLimit] + fmt.Sprintf("... (%d bytes truncated)", len(line)-claudeLogLineLimit)
+}
+
+type claudeStreamEventKind string
+
+const (
+	claudeStreamInit    claudeStreamEventKind = "init"
+	claudeStreamTurnEnd claudeStreamEventKind = "turnEnd"
+)
+
+type claudeStreamEvent struct {
+	kind      claudeStreamEventKind
+	sessionID string
+	failed    bool
+	errText   string
+}
+
+// parseClaudeStreamLine reduces one stream-json stdout line to what the
+// supervisor cares about: session identity and turn boundaries. Assistant
+// deltas, tool calls, and control responses are intentionally ignored.
+func parseClaudeStreamLine(line []byte) *claudeStreamEvent {
+	var payload struct {
+		Type      string   `json:"type"`
+		Subtype   string   `json:"subtype"`
+		SessionID string   `json:"session_id"`
+		IsError   bool     `json:"is_error"`
+		Errors    []string `json:"errors"`
+		Result    string   `json:"result"`
+	}
+	if err := json.Unmarshal(line, &payload); err != nil {
+		return nil
+	}
+	switch payload.Type {
+	case "system":
+		if payload.Subtype == "init" {
+			return &claudeStreamEvent{kind: claudeStreamInit, sessionID: strings.TrimSpace(payload.SessionID)}
+		}
+	case "result":
+		event := &claudeStreamEvent{
+			kind:      claudeStreamTurnEnd,
+			sessionID: strings.TrimSpace(payload.SessionID),
+			failed:    payload.IsError,
+		}
+		if payload.IsError {
+			parts := make([]string, 0, len(payload.Errors)+1)
+			for _, message := range payload.Errors {
+				if trimmed := strings.TrimSpace(message); trimmed != "" {
+					parts = append(parts, trimmed)
+				}
+			}
+			if len(parts) == 0 && strings.TrimSpace(payload.Result) != "" {
+				parts = append(parts, strings.TrimSpace(payload.Result))
+			}
+			event.errText = firstNonEmptyText(strings.Join(parts, " | "), "claude turn failed")
+		}
+		return event
+	}
+	return nil
+}
