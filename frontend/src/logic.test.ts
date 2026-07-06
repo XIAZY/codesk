@@ -150,8 +150,11 @@ describe("workspace reduction", () => {
   });
 
   it("prepends live activity.created events while keeping the activity window bounded", () => {
-    const existing = Array.from({ length: 50 }, (_, index) => ({ type: `old-${index}` }));
-    const nextActivity = { type: "document.created", summary: "created" };
+    const activityEvent = (over: Partial<ActivityEvent>): ActivityEvent => ({
+      type: "document.updated", actorId: "actor", actorType: "human", summary: "", occurredAt: "now", ...over,
+    });
+    const existing = Array.from({ length: 50 }, (_, index) => activityEvent({ type: `old-${index}` }));
+    const nextActivity = activityEvent({ type: "document.created", summary: "created" });
     const next = reduceWorkspaceEvent({ ...baseWorkspace(), activities: existing }, {
       type: "activity.created",
       data: nextActivity,
@@ -159,7 +162,22 @@ describe("workspace reduction", () => {
 
     expect(next.activities).toHaveLength(50);
     expect(next.activities?.[0]).toBe(nextActivity);
-    expect(next.activities?.[49]).toEqual({ type: "old-48" });
+    expect(next.activities?.[49]).toBe(existing[48]);
+  });
+
+  it("coerces a snapshot's null collections to empty so consumers never deref null", () => {
+    // Idle-workspace snapshot: the backend marshals empty Go slices as JSON null.
+    const next = reduceWorkspaceEvent(baseWorkspace(), {
+      type: "workspace.snapshot",
+      data: { presences: null, activities: null, users: null, agents: null, threads: null, agentEvents: null },
+    });
+    expect(next.presences).toEqual({});
+    expect(next.activities).toEqual([]);
+    expect(next.users).toEqual([]);
+    expect(next.agents).toEqual([]);
+    // The People online ring + Document Activity must not throw on this shape (the switch crash).
+    expect(() => workspacePeople(next)).not.toThrow();
+    expect(() => documentActivity(next, "doc1")).not.toThrow();
   });
 
   it("attaches thread messages without duplicating repeated events", () => {
