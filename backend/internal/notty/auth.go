@@ -677,6 +677,12 @@ func createWorkspaceForAccount(db *sql.DB, account *Account, req CreateWorkspace
 		}
 		return nil, nil, err
 	}
+	// Seed the root document in the same transaction so the workspace and its
+	// root commit together; the deferred fk_workspaces_root_document constraint
+	// validates the pair at commit.
+	if err = seedRootDocumentTx(tx, workspace.ID, workspace.RootDocumentID, now); err != nil {
+		return nil, nil, err
+	}
 	if _, err = tx.Exec(
 		`INSERT INTO users (workspace_id, id, handle, name, role, kind, status, created_at, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,

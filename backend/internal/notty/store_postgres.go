@@ -690,7 +690,92 @@ func initPostgresSchemaConstraints(db *sql.DB) error {
 			return fmt.Errorf("init postgres schema constraint %d: %w", index+1, err)
 		}
 	}
+	// Temporary one-deploy scaffolding: workspaces created before atomic creation
+	// may have no root document row (the old path seeded the root lazily on first
+	// open, so an unopened workspace has none). Seed any missing roots through the
+	// production helper before enforcing the FK, or ADD CONSTRAINT's immediate
+	// validation turns one unopened workspace into a boot loop. Delete after prod
+	// has booted past this version (rides the #47/#49 teardown PR).
+	if err := backfillMissingRootDocumentsPostgres(db); err != nil {
+		return fmt.Errorf("backfill missing root documents: %w", err)
+	}
+	// documents.workspace_id and workspaces.root_document_id form the schema's
+	// second FK cycle. Unlike agents↔agent_runs it cannot break via a nullable
+	// side (root_document_id is NOT NULL), so it defers instead: a workspace and
+	// its root commit together and the constraint validates at commit. Deleting a
+	// live workspace's root document is refused (RESTRICT).
+	if _, err := db.Exec(
+		`DO $$
+		BEGIN
+			ALTER TABLE workspaces
+				ADD CONSTRAINT fk_workspaces_root_document
+				FOREIGN KEY (id, root_document_id)
+				REFERENCES documents(workspace_id, id)
+				ON DELETE RESTRICT
+				DEFERRABLE INITIALLY DEFERRED;
+		EXCEPTION
+			WHEN duplicate_object THEN NULL;
+		END $$`,
+	); err != nil {
+		return fmt.Errorf("add fk_workspaces_root_document: %w", err)
+	}
 	return nil
+}
+
+// backfillMissingRootDocumentsPostgres seeds a root document for any workspace
+// whose root_document_id has no matching documents row — the state produced by
+// the pre-atomic creation path when a workspace was never opened. Idempotent: it
+// seeds only the missing ones through the production seedRootDocumentTx helper,
+// so backfilled roots are identical to freshly-created ones. One-deploy
+// scaffolding; delete after prod has booted past this version.
+func backfillMissingRootDocumentsPostgres(db *sql.DB) error {
+	rows, err := db.Query(
+		`SELECT w.id::text, w.root_document_id::text
+		   FROM workspaces w
+		  WHERE NOT EXISTS (
+		      SELECT 1 FROM documents d
+		       WHERE d.workspace_id = w.id AND d.id = w.root_document_id
+		  )`,
+	)
+	if err != nil {
+		return err
+	}
+	type missingRoot struct{ workspaceID, rootDocumentID string }
+	var missing []missingRoot
+	for rows.Next() {
+		var m missingRoot
+		if err := rows.Scan(&m.workspaceID, &m.rootDocumentID); err != nil {
+			rows.Close()
+			return err
+		}
+		missing = append(missing, m)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if len(missing) == 0 {
+		return nil
+	}
+
+	now := time.Now().UTC()
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	for _, m := range missing {
+		if err = seedRootDocumentTx(tx, m.workspaceID, m.rootDocumentID, now); err != nil {
+			return err
+		}
+	}
+	err = tx.Commit()
+	return err
 }
 
 func (s *Store) loadNormalizedPostgresLocked() error {
@@ -2393,6 +2478,47 @@ func listActivitiesPostgres(db *sql.DB, workspaceID string) ([]*ActivityEvent, e
 		activities = append(activities, activity)
 	}
 	return activities, rows.Err()
+}
+
+// seedRootDocumentTx bootstraps a workspace's root document inside an existing
+// transaction: the documents row, its initial CRDT update, and the document
+// head (the head row is required — loadDocumentsPostgresLocked inner-joins it).
+// This is the single source of truth for how a root document is born, so a
+// workspace and its root commit together and satisfy the deferred
+// fk_workspaces_root_document constraint. A checkpoint is a replay snapshot the
+// next persist creates on demand, so none is seeded here.
+func seedRootDocumentTx(tx *sql.Tx, workspaceID string, rootDocumentID string, now time.Time) error {
+	doc := crdt.New(crdt.WithClientID(crdt.ClientID(initialClientIDSeed)))
+	defer doc.Close()
+	update := doc.EncodeStateAsUpdate()
+	stateVector := base64.StdEncoding.EncodeToString(crdt.EncodeStateVectorV1(doc))
+
+	if _, err := tx.Exec(
+		`INSERT INTO documents (workspace_id, id, hidden, client_id_seed, create_client_operation_id, updated_at)
+		 VALUES ($1, $2, true, $3, '', $4)`,
+		workspaceID, rootDocumentID, int64(initialClientIDSeed), now,
+	); err != nil {
+		return err
+	}
+
+	var updateID int64
+	if err := tx.QueryRow(
+		`INSERT INTO document_updates (workspace_id, document_id, update, actor_id, actor_type, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 RETURNING id`,
+		workspaceID, rootDocumentID, update, actorUUIDOrNil("system", "system"), "system", now,
+	).Scan(&updateID); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(
+		`INSERT INTO document_heads (workspace_id, document_id, state_vector, update_id, updated_at)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		workspaceID, rootDocumentID, stateVector, updateID, now,
+	); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *Store) loadDocumentsPostgresLocked() error {
