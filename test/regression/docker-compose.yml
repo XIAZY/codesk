@@ -26,6 +26,9 @@ services:
       NOTTY_PORT: "8080"
       NOTTY_DATABASE_URL: postgres://notty:notty@postgres:5432/notty?sslmode=disable
       NOTTY_JWT_SECRET: regression-secret
+      NOTTY_MAILGUN_DOMAIN: regression.example
+      NOTTY_MAILGUN_API_KEY: regression-test
+      NOTTY_MAILGUN_FROM: regression@example.test
 
   daemon:
     build:
