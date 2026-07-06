@@ -1052,12 +1052,12 @@ func TestDaemonTokenIsWorkspaceScopedAndCanActAsWorkspaceAgent(t *testing.T) {
 	authTestStatusWithHeaders(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/agents/"+agent.ID+"/session", daemonResponse.Token, map[string]string{
 		"X-Notty-Acting-Agent-ID": agent.ID,
 	}, UpdateAgentSessionRequest{Status: "idle", SessionID: "thread-1"}, http.StatusOK)
-	store, err := server.workspaceStore(workspace.ID)
+	activities, err := listActivitiesPostgres(server.sqlDB(), workspace.ID)
 	if err != nil {
-		t.Fatalf("open workspace store: %v", err)
+		t.Fatalf("list activities: %v", err)
 	}
 	var sessionActivity *ActivityEvent
-	for _, activity := range store.Snapshot().Activities {
+	for _, activity := range activities {
 		if activity.Type == "agent.session.updated" {
 			sessionActivity = activity
 			break

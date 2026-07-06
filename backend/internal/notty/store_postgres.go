@@ -699,7 +699,6 @@ func (s *Store) loadNormalizedPostgresLocked() error {
 	s.state.Daemons = map[string]*Daemon{}
 	s.state.Agents = map[string]*Agent{}
 	s.state.AgentRuns = map[string]*AgentRun{}
-	s.state.Activities = []*ActivityEvent{}
 	s.state.Threads = map[string]*Thread{}
 	s.state.AgentDocumentViews = map[string]*AgentDocumentView{}
 	s.state.DocumentCheckpoints = map[string]*DocumentCheckpoint{}
@@ -721,9 +720,6 @@ func (s *Store) loadNormalizedPostgresLocked() error {
 	}
 	if err := s.loadAgentRunsPostgresLocked(); err != nil {
 		return fmt.Errorf("load agent runs: %w", err)
-	}
-	if err := s.loadActivitiesPostgresLocked(); err != nil {
-		return fmt.Errorf("load activities: %w", err)
 	}
 	if err := s.loadThreadsPostgresLocked(); err != nil {
 		return fmt.Errorf("load threads: %w", err)
@@ -777,8 +773,7 @@ func (s *Store) persistPostgresLocked() error {
 	if err = s.replaceAgentRunsPostgresLocked(tx); err != nil {
 		return err
 	}
-	activityInserts, err := s.insertActivitiesPostgresLocked(tx)
-	if err != nil {
+	if err = s.insertPendingActivitiesPostgresLocked(tx); err != nil {
 		return err
 	}
 	if err = s.upsertThreadsPostgresLocked(tx); err != nil {
@@ -794,11 +789,7 @@ func (s *Store) persistPostgresLocked() error {
 		return err
 	}
 	s.pendingAgentEvents = nil
-	for _, insert := range activityInserts {
-		if insert.activity != nil {
-			insert.activity.ID = insert.id
-		}
-	}
+	s.pendingActivities = nil
 	return nil
 }
 
@@ -816,9 +807,15 @@ func (s *Store) persistDocumentMutationPostgresLocked() error {
 	if err = s.persistDocumentsPostgresLocked(tx); err != nil {
 		return err
 	}
+	// Flush activities in the same transaction as the documents they reference
+	// (e.g. document.created), so the activities FK is satisfied atomically.
+	if err = s.insertPendingActivitiesPostgresLocked(tx); err != nil {
+		return err
+	}
 	if err = tx.Commit(); err != nil {
 		return err
 	}
+	s.pendingActivities = nil
 	return nil
 }
 
@@ -1355,59 +1352,60 @@ func listPresencesPostgres(db *sql.DB, workspaceID string) ([]*Presence, error) 
 	return presences, rows.Err()
 }
 
-type persistedActivityInsert struct {
-	activity *ActivityEvent
-	id       int64
+// activityExecer is satisfied by both *sql.DB and *sql.Tx, so an activity can
+// be inserted directly or inside an operation's persist transaction.
+type activityExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
 }
 
-func (s *Store) insertActivitiesPostgresLocked(tx *sql.Tx) ([]persistedActivityInsert, error) {
-	inserts := []persistedActivityInsert{}
-	for _, activity := range s.state.Activities {
-		if activity == nil || activity.ID != 0 {
-			continue
-		}
-		var id int64
-		if err := tx.QueryRow(
-			`INSERT INTO activities (
-				workspace_id, type, document_id, actor_id, actor_type, summary, occurred_at,
-				provenance_actor_id, provenance_actor_type, provenance_execution_id, provenance_tool,
-					provenance_trigger, provenance_autonomous, provenance_confidence, provenance_requested_by,
-					provenance_source, provenance_intended_scope, provenance_read_set_summary,
-					comment_id, presence_ref
-				) VALUES (
-					$1, $2, $3, $4, $5, $6, $7,
-					$8, $9, $10, $11,
-					$12, $13, $14, $15,
-					$16, $17, $18,
-					$19, $20
-				)
-				RETURNING id`,
-			s.state.WorkspaceID,
-			activity.Type,
-			uuidStringOrNil(activity.DocumentID),
-			actorUUIDOrNil(activity.ActorID, activity.ActorType),
-			activity.ActorType,
-			activity.Summary,
-			activity.OccurredAt,
-			actorUUIDOrNil(activity.Provenance.ActorID, activity.Provenance.ActorType),
-			activity.Provenance.ActorType,
-			activity.Provenance.ExecutionID,
-			activity.Provenance.Tool,
-			activity.Provenance.Trigger,
-			activity.Provenance.Autonomous,
-			activity.Provenance.Confidence,
-			activity.Provenance.RequestedBy,
-			activity.Provenance.Source,
-			activity.Provenance.IntendedScope,
-			activity.Provenance.ReadSetSummary,
-			"",
-			activity.PresenceRef,
-		).Scan(&id); err != nil {
-			return nil, err
-		}
-		inserts = append(inserts, persistedActivityInsert{activity: activity, id: id})
+func insertActivityPostgres(exec activityExecer, workspaceID string, activity *ActivityEvent) error {
+	if activity == nil {
+		return nil
 	}
-	return inserts, nil
+	_, err := exec.Exec(
+		`INSERT INTO activities (
+			workspace_id, type, document_id, actor_id, actor_type, summary, occurred_at,
+			provenance_actor_id, provenance_actor_type, provenance_execution_id, provenance_tool,
+				provenance_trigger, provenance_autonomous, provenance_confidence, provenance_requested_by,
+				provenance_source, provenance_intended_scope, provenance_read_set_summary,
+				presence_ref
+			) VALUES (
+				$1, $2, $3, $4, $5, $6, $7,
+				$8, $9, $10, $11,
+				$12, $13, $14, $15,
+				$16, $17, $18,
+				$19
+			)`,
+		workspaceID,
+		activity.Type,
+		uuidStringOrNil(activity.DocumentID),
+		actorUUIDOrNil(activity.ActorID, activity.ActorType),
+		activity.ActorType,
+		activity.Summary,
+		activity.OccurredAt,
+		actorUUIDOrNil(activity.Provenance.ActorID, activity.Provenance.ActorType),
+		activity.Provenance.ActorType,
+		activity.Provenance.ExecutionID,
+		activity.Provenance.Tool,
+		activity.Provenance.Trigger,
+		activity.Provenance.Autonomous,
+		activity.Provenance.Confidence,
+		activity.Provenance.RequestedBy,
+		activity.Provenance.Source,
+		activity.Provenance.IntendedScope,
+		activity.Provenance.ReadSetSummary,
+		activity.PresenceRef,
+	)
+	return err
+}
+
+func (s *Store) insertPendingActivitiesPostgresLocked(tx *sql.Tx) error {
+	for _, activity := range s.pendingActivities {
+		if err := insertActivityPostgres(tx, s.state.WorkspaceID, activity); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) upsertThreadsPostgresLocked(tx *sql.Tx) error {
@@ -2344,8 +2342,11 @@ func (s *Store) loadAgentRunsPostgresLocked() error {
 }
 
 
-func (s *Store) loadActivitiesPostgresLocked() error {
-	rows, err := s.db.Query(
+// listActivitiesPostgres returns the newest window of activities for a
+// workspace directly from Postgres (source of truth), newest first. The window
+// (LIMIT) shapes the read only; rows are never trimmed from the table.
+func listActivitiesPostgres(db *sql.DB, workspaceID string) ([]*ActivityEvent, error) {
+	rows, err := db.Query(
 		`SELECT id, type, COALESCE(document_id::text, ''), COALESCE(actor_id::text, ''), actor_type, summary, occurred_at,
 		        COALESCE(provenance_actor_id::text, ''), provenance_actor_type, provenance_execution_id,
 		        provenance_tool, provenance_trigger, provenance_autonomous,
@@ -2356,13 +2357,14 @@ func (s *Store) loadActivitiesPostgresLocked() error {
 		  WHERE workspace_id = $1::uuid
 		  ORDER BY occurred_at DESC, id DESC
 		  LIMIT 100`,
-		s.state.WorkspaceID,
+		workspaceID,
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer rows.Close()
 
+	activities := []*ActivityEvent{}
 	for rows.Next() {
 		activity := &ActivityEvent{}
 		if err := rows.Scan(
@@ -2386,11 +2388,11 @@ func (s *Store) loadActivitiesPostgresLocked() error {
 			&activity.Provenance.ReadSetSummary,
 			&activity.PresenceRef,
 		); err != nil {
-			return err
+			return nil, err
 		}
-		s.state.Activities = append(s.state.Activities, activity)
+		activities = append(activities, activity)
 	}
-	return rows.Err()
+	return activities, rows.Err()
 }
 
 func (s *Store) loadDocumentsPostgresLocked() error {
