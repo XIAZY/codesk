@@ -227,10 +227,10 @@ func TestPostgresSnapshotPersistPreservesDatabaseOnlyRows(t *testing.T) {
 			provenance_actor_type, provenance_execution_id, provenance_tool, provenance_trigger,
 			provenance_autonomous, provenance_confidence, provenance_requested_by,
 			provenance_source, provenance_intended_scope, provenance_read_set_summary,
-			comment_id, presence_ref
+			presence_ref
 		) VALUES (
 			$1, 'db_only', $2, $3, 'human', 'db-only activity', $4,
-			'', '', '', '', FALSE, '', '', '', '', '', '', ''
+			'', '', '', '', FALSE, '', '', '', '', '', ''
 		) RETURNING id`,
 		workspace.WorkspaceID, documentID, user.ID, now).Scan(&activityID); err != nil {
 		t.Fatalf("insert database-only activity: %v", err)

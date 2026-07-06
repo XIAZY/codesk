@@ -117,11 +117,6 @@ func initPostgresSchemaTables(db *sql.DB) error {
 				ON DELETE CASCADE
 		)
 		`,
-		// Temporary one-deploy scaffolding: prod still has these NOT NULL
-		// file-path-era columns, and the new insert shape cannot coexist with
-		// them. Delete after prod has booted past this version.
-		`ALTER TABLE documents DROP COLUMN IF EXISTS path`,
-		`ALTER TABLE documents DROP COLUMN IF EXISTS title`,
 		`
 		CREATE TABLE IF NOT EXISTS document_heads (
 			workspace_id UUID NOT NULL,
@@ -398,10 +393,6 @@ func initPostgresSchemaTables(db *sql.DB) error {
 				ON DELETE CASCADE
 		)
 		`,
-		// Temporary one-deploy scaffolding: prod presences.document_id is NOT NULL
-		// but daemons without an open document send "". Safe to remove after prod
-		// has booted past this version.
-		`ALTER TABLE presences ALTER COLUMN document_id DROP NOT NULL`,
 		`
 		CREATE TABLE IF NOT EXISTS activities (
 			id BIGSERIAL PRIMARY KEY,
@@ -423,7 +414,6 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			provenance_source TEXT NOT NULL,
 			provenance_intended_scope TEXT NOT NULL,
 			provenance_read_set_summary TEXT NOT NULL,
-			comment_id TEXT NOT NULL DEFAULT '',
 			presence_ref TEXT NOT NULL,
 			CONSTRAINT fk_activities_workspace
 				FOREIGN KEY (workspace_id)
@@ -690,15 +680,6 @@ func initPostgresSchemaConstraints(db *sql.DB) error {
 			return fmt.Errorf("init postgres schema constraint %d: %w", index+1, err)
 		}
 	}
-	// Temporary one-deploy scaffolding: workspaces created before atomic creation
-	// may have no root document row (the old path seeded the root lazily on first
-	// open, so an unopened workspace has none). Seed any missing roots through the
-	// production helper before enforcing the FK, or ADD CONSTRAINT's immediate
-	// validation turns one unopened workspace into a boot loop. Delete after prod
-	// has booted past this version (rides the #47/#49 teardown PR).
-	if err := backfillMissingRootDocumentsPostgres(db); err != nil {
-		return fmt.Errorf("backfill missing root documents: %w", err)
-	}
 	// documents.workspace_id and workspaces.root_document_id form the schema's
 	// second FK cycle. Unlike agents↔agent_runs it cannot break via a nullable
 	// side (root_document_id is NOT NULL), so it defers instead: a workspace and
@@ -720,62 +701,6 @@ func initPostgresSchemaConstraints(db *sql.DB) error {
 		return fmt.Errorf("add fk_workspaces_root_document: %w", err)
 	}
 	return nil
-}
-
-// backfillMissingRootDocumentsPostgres seeds a root document for any workspace
-// whose root_document_id has no matching documents row — the state produced by
-// the pre-atomic creation path when a workspace was never opened. Idempotent: it
-// seeds only the missing ones through the production seedRootDocumentTx helper,
-// so backfilled roots are identical to freshly-created ones. One-deploy
-// scaffolding; delete after prod has booted past this version.
-func backfillMissingRootDocumentsPostgres(db *sql.DB) error {
-	rows, err := db.Query(
-		`SELECT w.id::text, w.root_document_id::text
-		   FROM workspaces w
-		  WHERE NOT EXISTS (
-		      SELECT 1 FROM documents d
-		       WHERE d.workspace_id = w.id AND d.id = w.root_document_id
-		  )`,
-	)
-	if err != nil {
-		return err
-	}
-	type missingRoot struct{ workspaceID, rootDocumentID string }
-	var missing []missingRoot
-	for rows.Next() {
-		var m missingRoot
-		if err := rows.Scan(&m.workspaceID, &m.rootDocumentID); err != nil {
-			rows.Close()
-			return err
-		}
-		missing = append(missing, m)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-	if len(missing) == 0 {
-		return nil
-	}
-
-	now := time.Now().UTC()
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-	for _, m := range missing {
-		if err = seedRootDocumentTx(tx, m.workspaceID, m.rootDocumentID, now); err != nil {
-			return err
-		}
-	}
-	err = tx.Commit()
-	return err
 }
 
 func (s *Store) loadNormalizedPostgresLocked() error {

@@ -104,58 +104,6 @@ func TestWorkspaceRootDocumentDeleteRestricted(t *testing.T) {
 	}
 }
 
-// TestBackfillSeedsMissingRootDocumentsAndValidatesConstraint plants a rootless
-// workspace (the created-but-never-opened state produced by the pre-atomic path),
-// runs schema init, and asserts the backfill seeded the root through the
-// production helper and the constraint validated — the deploy-safety Bill required.
-func TestBackfillSeedsMissingRootDocumentsAndValidatesConstraint(t *testing.T) {
-	database := newPostgresTestDatabase(t)
-	db := database.DB
-
-	if _, err := db.Exec(`ALTER TABLE workspaces DROP CONSTRAINT IF EXISTS fk_workspaces_root_document`); err != nil {
-		t.Fatalf("drop constraint: %v", err)
-	}
-	wsID := uuid.NewString()
-	rootID := uuid.NewString()
-	if _, err := db.Exec(
-		`INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at)
-		 VALUES ($1, $2, 'Unopened', $3, now(), now())`,
-		wsID, "unopened-"+wsID[:8], rootID,
-	); err != nil {
-		t.Fatalf("plant rootless workspace: %v", err)
-	}
-	assertSQLCount(t, db, 0, `SELECT count(*) FROM documents WHERE id = $1::uuid`, rootID)
-
-	if err := initPostgresSchemaConstraints(db); err != nil {
-		t.Fatalf("schema constraints (with backfill): %v", err)
-	}
-
-	// The root document (row + head + update) was seeded by seedRootDocumentTx.
-	assertSQLCount(t, db, 1, `SELECT count(*) FROM documents WHERE workspace_id = $1::uuid AND id = $2::uuid`, wsID, rootID)
-	assertSQLCount(t, db, 1, `SELECT count(*) FROM document_heads WHERE workspace_id = $1::uuid AND document_id = $2::uuid`, wsID, rootID)
-	assertSQLCount(t, db, 1, `SELECT count(*) FROM document_updates WHERE workspace_id = $1::uuid AND document_id = $2::uuid`, wsID, rootID)
-
-	var conValidated bool
-	if err := db.QueryRow(
-		`SELECT convalidated FROM pg_constraint WHERE conname = 'fk_workspaces_root_document'`,
-	).Scan(&conValidated); err != nil {
-		t.Fatalf("check constraint: %v", err)
-	}
-	if !conValidated {
-		t.Fatal("expected fk_workspaces_root_document to be re-added and validated")
-	}
-
-	// The backfilled workspace opens cleanly — no tripwire.
-	if _, err := NewWorkspaceStore(database, wsID, "Unopened"); err != nil {
-		t.Fatalf("open backfilled workspace: %v", err)
-	}
-
-	// Idempotent: a second schema-init run is a no-op.
-	if err := initPostgresSchemaConstraints(db); err != nil {
-		t.Fatalf("second schema constraints run: %v", err)
-	}
-}
-
 // TestStoreLoadFailsClosedWhenRootDocumentMissing forces the unrepresentable
 // state the constraint normally prevents and asserts the store fails closed
 // (the deleted from-scratch branch is now a tripwire, not a silent re-seed).
