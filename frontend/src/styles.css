@@ -1721,22 +1721,6 @@ svg.i.sm {
   gap: 14px;
 }
 
-.token-warning {
-  border-bottom: 1px solid var(--border);
-  border-radius: var(--r-3);
-  background: linear-gradient(180deg, #fff7ec, var(--paper));
-  padding: 14px;
-}
-
-.token-warning p {
-  margin: 8px 0 12px;
-}
-
-.token-warning .token-block {
-  flex: 1;
-  margin: 0;
-}
-
 .deploy-block {
   display: grid;
   gap: 8px;
