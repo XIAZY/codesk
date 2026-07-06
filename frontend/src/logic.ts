@@ -188,6 +188,12 @@ export function daemonStatus(daemon: Daemon) {
   return daemon.connectionStatus || "disconnected";
 }
 
+// A daemon has genuinely checked in only if it carries a real lastSeenAt. Never-seen daemons carry
+// a zero time (year 0001) — the same idiomatic guard the daemon table uses for "Last check-in".
+export function hasGenuineCheckIn(daemon: Daemon): boolean {
+  return daemon.lastSeenAt != null && new Date(daemon.lastSeenAt).getUTCFullYear() >= 2020;
+}
+
 // Liveness decay windows — mirror the backend's daemonOnlineWindow / daemonStaleWindow in
 // backend/internal/notty/store.go (applyDaemonLiveness). A daemon that stops checking in emits
 // no event, so the client must decay its status on a timer instead of trusting the last payload.
@@ -201,8 +207,10 @@ export function daemonLiveStatus(daemon: Daemon, nowMs: number): string {
   if (daemon.status === "deleted") {
     return "deleted";
   }
-  if (daemon.lastSeenAgeSeconds == null || daemon.receivedAtMs == null) {
-    // No age/receipt info (e.g. never checked in) — trust the server's snapshot value.
+  // A daemon that has never checked in serializes lastSeenAgeSeconds: 0 (no omitempty) with a zero
+  // lastSeenAt, so the null-guard alone would fabricate a fresh "online". Gate on a genuine check-in
+  // — the same zero-time idiom the table uses — and otherwise trust the server's status.
+  if (!hasGenuineCheckIn(daemon) || daemon.lastSeenAgeSeconds == null || daemon.receivedAtMs == null) {
     return daemon.connectionStatus || "disconnected";
   }
   const ageMs = daemon.lastSeenAgeSeconds * 1000 + Math.max(0, nowMs - daemon.receivedAtMs);

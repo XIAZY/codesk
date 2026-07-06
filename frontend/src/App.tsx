@@ -3028,8 +3028,10 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
   const [reinstallError, setReinstallError] = useState("");
   const [reinstallLoading, setReinstallLoading] = useState(false);
   // Derive the live daemon from workspace state every render, so daemon.updated events and the
-  // liveness tick reach the open modal instead of a frozen snapshot captured at click time.
-  const daemon = daemons.find((item) => item.id === daemonId);
+  // liveness tick reach the open modal instead of a frozen snapshot captured at click time. Exclude
+  // soft-deleted rows: a daemon.deleted event upserts the daemon with status "deleted" (it stays in
+  // the array), so matching it would render a dead modal instead of closing.
+  const daemon = daemons.find((item) => item.id === daemonId && item.status !== "deleted");
   useEffect(() => {
     // Daemon deleted while the modal is open — nothing to show, close it.
     if (!daemon) {
