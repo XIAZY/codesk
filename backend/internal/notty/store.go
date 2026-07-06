@@ -47,6 +47,7 @@ type Store struct {
 	pendingDocumentEvents []documentUpdateRecord
 	pendingInboxChanges   []AgentInboxChangedEvent
 	pendingAgentEvents    []*AgentEvent
+	pendingActivities     []*ActivityEvent
 }
 
 type documentUpdateRecord struct {
@@ -156,9 +157,6 @@ func (s *Store) ensureMaps() {
 	if s.state.DocumentCheckpoints == nil {
 		s.state.DocumentCheckpoints = map[string]*DocumentCheckpoint{}
 	}
-	if s.state.Activities == nil {
-		s.state.Activities = []*ActivityEvent{}
-	}
 	if s.documentLocks == nil {
 		s.documentLocks = map[string]*sync.RWMutex{}
 	}
@@ -211,7 +209,6 @@ func seedWorkspaceFor(workspaceID string, workspaceName string) WorkspaceState {
 		Threads:             map[string]*Thread{},
 		AgentDocumentViews:  map[string]*AgentDocumentView{},
 		DocumentCheckpoints: map[string]*DocumentCheckpoint{},
-		Activities: []*ActivityEvent{},
 		UpdatedAt:           now,
 	}
 }
@@ -966,6 +963,7 @@ func (s *Store) CreateDocument(req CreateDocumentRequest, meta OperationMeta) (*
 	rollbackState := cloneState(s.state)
 	rollbackDirtyDocuments := cloneStringSet(s.dirtyDocuments)
 	rollbackPendingDocumentEvents := append([]documentUpdateRecord(nil), s.pendingDocumentEvents...)
+	rollbackPendingActivities := append([]*ActivityEvent(nil), s.pendingActivities...)
 
 	now := time.Now().UTC()
 	clientIDSeed := s.nextClientIDSeedLocked()
@@ -993,6 +991,7 @@ func (s *Store) CreateDocument(req CreateDocumentRequest, meta OperationMeta) (*
 		s.state = rollbackState
 		s.dirtyDocuments = rollbackDirtyDocuments
 		s.pendingDocumentEvents = rollbackPendingDocumentEvents
+		s.pendingActivities = rollbackPendingActivities
 		delete(s.documentLocks, document.ID)
 		return nil, err
 	}
@@ -1362,18 +1361,22 @@ func (s *Store) UpdateAgentSession(id string, req UpdateAgentSessionRequest, met
 	}
 	agent.UpdatedAt = now
 	s.state.UpdatedAt = now
-	s.appendActivityLocked(&ActivityEvent{
-		Type:       "agent.session.updated",
-		ActorID:    meta.ActorID,
-		ActorType:  meta.ActorType,
-		Summary:    fmt.Sprintf("%s session is %s", agent.Name, agent.Status),
-		OccurredAt: now,
-		Provenance: meta,
-	})
 	workspaceID := s.state.WorkspaceID
 	updated := cloneAgent(agent)
 	s.mu.Unlock()
 	if err := upsertAgentPostgres(s.db, workspaceID, updated); err != nil {
+		return nil, err
+	}
+	// Session updates write to Postgres directly (no persist walk), so the
+	// activity is inserted directly too; it carries no document reference.
+	if err := insertActivityPostgres(s.db, workspaceID, &ActivityEvent{
+		Type:       "agent.session.updated",
+		ActorID:    meta.ActorID,
+		ActorType:  meta.ActorType,
+		Summary:    fmt.Sprintf("%s session is %s", updated.Name, updated.Status),
+		OccurredAt: now,
+		Provenance: meta,
+	}); err != nil {
 		return nil, err
 	}
 	return updated, nil
@@ -1682,7 +1685,11 @@ func (s *Store) UpdateAgentEvent(id string, req UpdateAgentEventRequest, meta Op
 	}
 	s.mu.Lock()
 	s.state.UpdatedAt = updated.UpdatedAt
-	s.appendActivityLocked(&ActivityEvent{
+	s.mu.Unlock()
+	// UpdateAgentEvent writes to Postgres directly (no persist walk), so its
+	// activity is inserted directly too; document_id references the existing
+	// event's document, so the FK is already satisfied.
+	if err := insertActivityPostgres(s.db, workspaceID, &ActivityEvent{
 		Type:       "agent.event.updated",
 		DocumentID: updated.DocumentID,
 		ActorID:    meta.ActorID,
@@ -1690,8 +1697,9 @@ func (s *Store) UpdateAgentEvent(id string, req UpdateAgentEventRequest, meta Op
 		Summary:    fmt.Sprintf("%s marked %s %s", meta.ActorID, updated.Type, updated.Status),
 		OccurredAt: updated.UpdatedAt,
 		Provenance: meta,
-	})
-	s.mu.Unlock()
+	}); err != nil {
+		return nil, err
+	}
 	return updated, nil
 }
 
@@ -1737,11 +1745,12 @@ func (s *Store) nextClientIDSeedLocked() uint64 {
 	return next
 }
 
+// appendActivityLocked buffers an activity for insertion in the current
+// operation's persist transaction. Activities are Postgres-as-truth: they are
+// inserted (never trimmed) and read back with a window at query time, so there
+// is no in-memory retention or cap here.
 func (s *Store) appendActivityLocked(event *ActivityEvent) {
-	s.state.Activities = append([]*ActivityEvent{event}, s.state.Activities...)
-	if len(s.state.Activities) > 100 {
-		s.state.Activities = s.state.Activities[:100]
-	}
+	s.pendingActivities = append(s.pendingActivities, event)
 }
 
 func cloneState(state WorkspaceState) WorkspaceState {
@@ -1781,11 +1790,6 @@ func cloneState(state WorkspaceState) WorkspaceState {
 		}
 		clone := *checkpoint
 		copyState.DocumentCheckpoints[key] = &clone
-	}
-	copyState.Activities = make([]*ActivityEvent, len(state.Activities))
-	for index, activity := range state.Activities {
-		clone := *activity
-		copyState.Activities[index] = &clone
 	}
 	return copyState
 }

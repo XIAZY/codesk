@@ -134,8 +134,8 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 			t.Fatalf("expected presence for user %s with docs/spec.md, got %d presences", user.ID, len(presences))
 		}
 	}
-	if len(snapshot.Activities) == 0 {
-		t.Fatal("expected activities after reload")
+	if activities, err := listActivitiesPostgres(db, snapshot.WorkspaceID); err != nil || len(activities) == 0 {
+		t.Fatalf("expected activities after reload, got %d (err: %v)", len(activities), err)
 	}
 	assertNoActivityMaterializedContentColumn(t, db)
 	assertNoProposalTable(t, db)
