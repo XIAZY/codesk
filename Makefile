@@ -129,7 +129,7 @@ prod-config-check:
 		printf '%s\n' 'NOTTY_JWT_SECRET=notty-test-secret'; \
 		printf '%s\n' 'NOTTY_MAILGUN_API_KEY=notty-test-mailgun-key'; \
 	} > "$$tmp_secrets" && \
-	NOTTY_SECRETS_ENV_FILE="$$tmp_secrets" docker compose -f compose.prod.yml --env-file deploy/env/prod.server.env config >/dev/null
+	NOTTY_BACKEND_IMAGE=alphatoad/notty:backend-test NOTTY_SECRETS_ENV_FILE="$$tmp_secrets" docker compose -f compose.prod.yml --env-file deploy/env/prod.server.env config >/dev/null
 
 daemon-checksums:
 	cd "$(DIST_DIR)/$(VERSION)" && shasum -a 256 *.tar.gz > SHA256SUMS

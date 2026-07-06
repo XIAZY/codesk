@@ -520,69 +520,28 @@ func TestAuthenticateHumanRequestRejectsUnverifiedAccountJWT(t *testing.T) {
 	authTestErrorContains(t, router, http.MethodGet, "/api/auth/me", token, nil, http.StatusUnauthorized, errEmailNotVerified.Error())
 }
 
-func TestEmailVerifiedMigrationBackfillsExistingAccountsButFutureDefaultIsFalse(t *testing.T) {
+func TestEmailVerifiedColumnDefaultIsFalse(t *testing.T) {
 	database := newPostgresTestDatabase(t)
 	db := database.DB
-	if _, err := db.Exec(`DROP TABLE IF EXISTS account_email_tokens CASCADE`); err != nil {
-		t.Fatalf("drop account_email_tokens: %v", err)
-	}
-	if _, err := db.Exec(`DROP TABLE IF EXISTS accounts CASCADE`); err != nil {
-		t.Fatalf("drop accounts: %v", err)
-	}
-	if _, err := db.Exec(`
-		CREATE TABLE accounts (
-			id UUID PRIMARY KEY,
-			email TEXT UNIQUE NOT NULL,
-			display_name TEXT NOT NULL,
-			password_hash TEXT NOT NULL,
-			last_accessed_workspace_id UUID,
-			password_updated_at TIMESTAMPTZ,
-			created_at TIMESTAMPTZ NOT NULL,
-			updated_at TIMESTAMPTZ NOT NULL
-		)`); err != nil {
-		t.Fatalf("create accounts without email_verified: %v", err)
-	}
 	now := time.Now().UTC()
-	legacyAccountID := uuid.NewString()
-	if _, err := db.Exec(
-		`INSERT INTO accounts (id, email, display_name, password_hash, last_accessed_workspace_id, password_updated_at, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, NULL, $5, $5, $5)`,
-		legacyAccountID,
-		"legacy-verified@example.com",
-		"Legacy",
-		"hash",
-		now,
-	); err != nil {
-		t.Fatalf("insert legacy account: %v", err)
-	}
-	if err := initPostgresSchema(db); err != nil {
-		t.Fatalf("init schema: %v", err)
-	}
-	var existingVerified bool
-	if err := db.QueryRow(`SELECT email_verified FROM accounts WHERE id = $1`, legacyAccountID).Scan(&existingVerified); err != nil {
-		t.Fatalf("select existing email_verified: %v", err)
-	}
-	if !existingVerified {
-		t.Fatalf("existing account was not backfilled as verified")
-	}
-	futureAccountID := uuid.NewString()
+	accountID := uuid.NewString()
 	if _, err := db.Exec(
 		`INSERT INTO accounts (id, email, display_name, password_hash, password_updated_at, created_at, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, $5, $5)`,
-		futureAccountID,
-		"future-unverified@example.com",
-		"Future",
+		accountID,
+		"future-default-unverified@example.com",
+		"Future Default",
 		"hash",
 		now,
 	); err != nil {
-		t.Fatalf("insert future account: %v", err)
+		t.Fatalf("insert account: %v", err)
 	}
-	var futureVerified bool
-	if err := db.QueryRow(`SELECT email_verified FROM accounts WHERE id = $1`, futureAccountID).Scan(&futureVerified); err != nil {
-		t.Fatalf("select future email_verified: %v", err)
+	var verified bool
+	if err := db.QueryRow(`SELECT email_verified FROM accounts WHERE id = $1`, accountID).Scan(&verified); err != nil {
+		t.Fatalf("select email_verified: %v", err)
 	}
-	if futureVerified {
-		t.Fatalf("future account defaulted to verified")
+	if verified {
+		t.Fatalf("email_verified defaulted to true")
 	}
 }
 

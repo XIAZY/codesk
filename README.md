@@ -1689,6 +1689,7 @@ NOTTY_MAILGUN_API_KEY=replace-with-mailgun-api-key
 
 Important backend environment variables:
 
+- `NOTTY_BACKEND_IMAGE`: required by production Compose. `scripts/deploy-backend.sh` sets this to the immutable `backend-<version>` image; direct Compose users must export it explicitly.
 - `NOTTY_PORT`: backend port, default `8080`.
 - `NOTTY_DATABASE_URL`: Postgres DSN.
 - `NOTTY_JWT_SECRET`: required JWT signing secret.
@@ -1708,7 +1709,6 @@ Important deployment environment variables in `deploy/env/prod.deploy.env`:
 
 Important production server defaults in `deploy/env/prod.server.env`:
 
-- `NOTTY_BACKEND_IMAGE`: default backend image if a deploy does not override it.
 - `NOTTY_HTTP_BIND` and `NOTTY_HTTP_PORT`: nginx bind address and host port.
 - `NOTTY_HTTPS_BIND` and `NOTTY_HTTPS_PORT`: nginx TLS bind address and host port.
 - `NOTTY_FRONTEND_ORIGIN`, `NOTTY_BACKEND_ORIGIN`, and `NOTTY_STATIC_ORIGIN`: public production origins for app, API, and static artifacts.

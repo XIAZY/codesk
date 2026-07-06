@@ -43,7 +43,7 @@ services:
       retries: 12
 
   backend:
-    image: ${NOTTY_BACKEND_IMAGE:-alphatoad/notty:backend-latest}
+    image: ${NOTTY_BACKEND_IMAGE:?NOTTY_BACKEND_IMAGE must be set to an immutable backend image}
     restart: unless-stopped
     expose:
       - "8080"
