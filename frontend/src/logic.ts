@@ -103,6 +103,50 @@ export function emptyWorkspace(): WorkspaceState {
   };
 }
 
+export const workspaceNameAdjectives = [
+  "Crimson",
+  "Azure",
+  "Golden",
+  "Silver",
+  "Amber",
+  "Violet",
+  "Coral",
+  "Jade",
+  "Scarlet",
+  "Cobalt",
+  "Ivory",
+  "Onyx",
+  "Emerald",
+  "Copper",
+  "Indigo",
+  "Hazel",
+];
+
+export const workspaceNameNouns = [
+  "Otter",
+  "Falcon",
+  "Willow",
+  "Harbor",
+  "Meadow",
+  "Cedar",
+  "Lantern",
+  "Comet",
+  "Canyon",
+  "Ember",
+  "Ridge",
+  "Beacon",
+  "Maple",
+  "Quartz",
+  "Summit",
+  "Heron",
+];
+
+export function randomWorkspaceName(random: () => number = Math.random): string {
+  const adjective = workspaceNameAdjectives[Math.floor(random() * workspaceNameAdjectives.length)];
+  const noun = workspaceNameNouns[Math.floor(random() * workspaceNameNouns.length)];
+  return `${adjective} ${noun}`;
+}
+
 export function identifierFromName(value: string, maxLength: number) {
   return value
     .trim()

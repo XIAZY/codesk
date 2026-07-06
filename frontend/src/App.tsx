@@ -18,6 +18,7 @@ import {
   identifierHelpText,
   identifierPattern,
   isMarkdownDocumentPath,
+  randomWorkspaceName,
   threadReplyLabel,
   workspaceSlugMaxLength,
   workspaceSlugMinLength,
@@ -1055,9 +1056,17 @@ function CreateWorkspaceForm({
   onWorkspaces: (workspaces: WorkspaceSummary[]) => void;
   onSelect: (workspace: WorkspaceSummary) => void;
 }) {
-  const [name, setName] = useState("Product Workspace");
-  const [slug, setSlug] = useState(() => identifierFromName("Product Workspace", workspaceSlugMaxLength));
+  const [name, setName] = useState("");
+  const [slug, setSlug] = useState("");
   const [slugEdited, setSlugEdited] = useState(false);
+
+  const randomizeName = () => {
+    const generated = randomWorkspaceName();
+    setName(generated);
+    if (!slugEdited) {
+      setSlug(identifierFromName(generated, workspaceSlugMaxLength));
+    }
+  };
   const [handle, setHandle] = useState(initialHandle);
   const [error, setError] = useState("");
 
@@ -1082,23 +1091,36 @@ function CreateWorkspaceForm({
       </div>
       <label className="field">
         <span className="lab">Workspace name</span>
-        <input
-          value={name}
-          onChange={(event) => {
-            const next = event.target.value;
-            setName(next);
-            if (!slugEdited) {
-              setSlug(identifierFromName(next, workspaceSlugMaxLength));
-            }
-          }}
-          required
-        />
+        <div className="name-row">
+          <input
+            value={name}
+            placeholder="ACME Inc"
+            onChange={(event) => {
+              const next = event.target.value;
+              setName(next);
+              if (!slugEdited) {
+                setSlug(identifierFromName(next, workspaceSlugMaxLength));
+              }
+            }}
+            required
+          />
+          <button
+            className="btn icon"
+            type="button"
+            aria-label="Generate a random name"
+            title="Generate a random name"
+            onClick={randomizeName}
+          >
+            <Icon name="refresh" />
+          </button>
+        </div>
       </label>
       <label className="field">
         <span className="lab">Workspace slug</span>
         <input
           aria-label="Workspace slug"
           value={slug}
+          placeholder="acme-inc"
           onChange={(event) => {
             setSlug(event.target.value);
             setSlugEdited(true);
