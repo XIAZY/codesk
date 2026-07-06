@@ -1378,12 +1378,12 @@ func TestWorkspaceInviteLinkCreatePreviewAndAccept(t *testing.T) {
 
 	owner := authTestRegister(t, router, "invite-link-owner@example.com", "owner-pass", "Invite Link Owner")
 	workspace := authTestCreateWorkspace(t, router, owner.Token, "Invite Link Workspace")
-	store, err := server.workspaceStore(workspace.ID)
+	ownerUser, err := getUserForTest(server.sqlDB(), workspace.ID, workspace.OwnerUserID)
 	if err != nil {
-		t.Fatalf("open workspace store: %v", err)
+		t.Fatalf("get owner user: %v", err)
 	}
-	if _, ok := store.Snapshot().Users[workspace.OwnerUserID]; !ok {
-		t.Fatalf("expected owner user in loaded workspace store")
+	if ownerUser == nil {
+		t.Fatalf("expected owner user in workspace users")
 	}
 
 	invite, token := authTestCreateInvite(t, router, owner.Token, workspace.ID)
@@ -1449,8 +1449,12 @@ func TestWorkspaceInviteLinkCreatePreviewAndAccept(t *testing.T) {
 	if memberCount != 1 || role != MembershipRoleMember {
 		t.Fatalf("expected one active member role, got count=%d role=%q", memberCount, role)
 	}
-	if user := store.Snapshot().Users[joinedUserID]; user == nil || user.Handle != "joiner" {
-		t.Fatalf("accept should reload workspace store with joined user, got userID=%q snapshot=%#v", joinedUserID, store.Snapshot().Users)
+	joinedUser, err := getUserForTest(server.sqlDB(), workspace.ID, joinedUserID)
+	if err != nil {
+		t.Fatalf("get joined user: %v", err)
+	}
+	if joinedUser == nil || joinedUser.Handle != "joiner" {
+		t.Fatalf("accept should persist joined user, got userID=%q user=%#v", joinedUserID, joinedUser)
 	}
 	var userCount int
 	if err := server.sqlDB().QueryRow(

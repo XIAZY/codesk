@@ -757,9 +757,6 @@ func addWorkspaceMember(db *sql.DB, workspaceID string, req AddWorkspaceMemberRe
 	if err != nil {
 		return nil, err
 	}
-	if err := ensurePostgresWorkspaceHandleAvailable(db, workspaceID, handle); err != nil {
-		return nil, err
-	}
 	name := firstNonEmptyString(req.DisplayName, account.DisplayName, account.Email)
 	role := strings.TrimSpace(req.Role)
 	if role == "" {
@@ -785,6 +782,9 @@ func addWorkspaceMember(db *sql.DB, workspaceID string, req AddWorkspaceMemberRe
 			_ = tx.Rollback()
 		}
 	}()
+	if err := ensureWorkspaceHandleAvailableTx(tx, workspaceID, handle); err != nil {
+		return nil, err
+	}
 	if _, err = tx.Exec(
 		`INSERT INTO users (workspace_id, id, handle, name, role, kind, status, created_at, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
@@ -1082,24 +1082,10 @@ func reactivateWorkspaceInviteMemberTx(tx *sql.Tx, workspaceID string, accountID
 	return nil
 }
 
-func ensurePostgresWorkspaceHandleAvailable(db *sql.DB, workspaceID string, handle string) error {
-	var count int
-	if err := db.QueryRow(
-		`SELECT
-			(SELECT COUNT(*) FROM users WHERE workspace_id = $1 AND handle = $2) +
-			(SELECT COUNT(*) FROM agents WHERE workspace_id = $1 AND handle = $2)`,
-		strings.TrimSpace(workspaceID),
-		handle,
-	).Scan(&count); err != nil {
+func ensureWorkspaceHandleAvailableTx(tx *sql.Tx, workspaceID string, handle string) error {
+	if err := lockWorkspaceHandleTx(tx, workspaceID, handle); err != nil {
 		return err
 	}
-	if count > 0 {
-		return errors.New("Handle is already taken.")
-	}
-	return nil
-}
-
-func ensureWorkspaceHandleAvailableTx(tx *sql.Tx, workspaceID string, handle string) error {
 	var count int
 	if err := tx.QueryRow(
 		`SELECT
@@ -1114,6 +1100,15 @@ func ensureWorkspaceHandleAvailableTx(tx *sql.Tx, workspaceID string, handle str
 		return errors.New("Handle is already taken.")
 	}
 	return nil
+}
+
+func lockWorkspaceHandleTx(tx *sql.Tx, workspaceID string, handle string) error {
+	_, err := tx.Exec(
+		`SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2, 0))`,
+		strings.TrimSpace(workspaceID),
+		strings.TrimSpace(handle),
+	)
+	return err
 }
 
 func isUniqueViolation(err error) bool {
@@ -1246,9 +1241,9 @@ func createDaemonReinstallToken(db *sql.DB, workspaceID string, daemonID string)
 	return daemon, token, nil
 }
 
-func listDaemons(db *sql.DB, workspaceID string) ([]*Daemon, error) {
+func listDaemons(q querier, workspaceID string) ([]*Daemon, error) {
 	now := time.Now().UTC()
-	rows, err := db.Query(
+	rows, err := q.Query(
 		`SELECT id::text, workspace_id::text, name, status, daemon_version, os, arch, runtime_detections::text, last_seen_at, created_at, deleted_at
 		   FROM daemons
 		  WHERE workspace_id = $1

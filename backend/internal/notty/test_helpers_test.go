@@ -1,6 +1,7 @@
 package notty
 
 import (
+	"database/sql"
 	"fmt"
 	"strings"
 	"testing"
@@ -16,7 +17,6 @@ func containsString(items []string, target string) bool {
 	}
 	return false
 }
-
 
 func numberedLines(count int) string {
 	var builder strings.Builder
@@ -133,6 +133,51 @@ func findAgentEventByType(items []*AgentEvent, eventType string) *AgentEvent {
 		}
 	}
 	return nil
+}
+
+func findUserForTest(items []*User, userID string) *User {
+	for _, item := range items {
+		if item != nil && item.ID == userID {
+			return item
+		}
+	}
+	return nil
+}
+
+func getUserForTest(db *sql.DB, workspaceID string, userID string) (*User, error) {
+	row := db.QueryRow(
+		`SELECT id::text, handle, name, role, kind, status, created_at, updated_at
+		   FROM users
+		  WHERE workspace_id = $1::uuid AND id = $2::uuid`,
+		workspaceID,
+		userID,
+	)
+	user := &User{}
+	if err := row.Scan(&user.ID, &user.Handle, &user.Name, &user.Role, &user.Kind, &user.Status, &user.CreatedAt, &user.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return user, nil
+}
+
+func containsAgentForTest(items []*Agent, agentID string) bool {
+	for _, item := range items {
+		if item != nil && item.ID == agentID {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAgentRunForTest(items []*AgentRun, runID string) bool {
+	for _, item := range items {
+		if item != nil && item.ID == runID {
+			return true
+		}
+	}
+	return false
 }
 
 func formatAgentEvents(items []*AgentEvent) string {

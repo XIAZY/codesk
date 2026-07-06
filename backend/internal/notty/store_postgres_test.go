@@ -1,6 +1,7 @@
 package notty
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/url"
@@ -98,23 +99,35 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	if got := snapshot.ContentDocuments[documentID]; got == nil {
 		t.Fatalf("expected document after reload, got %#v", got)
 	}
-	if got := snapshot.Users[user.ID]; got == nil || got.Handle != user.Handle {
+	users, err := listUsersPostgres(db, snapshot.WorkspaceID)
+	if err != nil {
+		t.Fatalf("list users after reload: %v", err)
+	}
+	if got := findUserForTest(users, user.ID); got == nil || got.Handle != user.Handle {
 		t.Fatalf("expected user after reload, got %#v", got)
 	}
-	if got := snapshot.Agents[agent.ID]; got == nil || got.Handle != "pg-reviewer" {
-		t.Fatalf("expected agent after reload, got %#v", got)
+	gotAgent, err := getAgentPostgres(db, snapshot.WorkspaceID, agent.ID)
+	if err != nil {
+		t.Fatalf("get agent after reload: %v", err)
 	}
-	if got := snapshot.Agents[agent.ID]; got == nil || got.SessionID != "session_pg_123" {
-		t.Fatalf("expected agent session id after reload, got %#v", got)
+	if gotAgent == nil || gotAgent.Handle != "pg-reviewer" {
+		t.Fatalf("expected agent after reload, got %#v", gotAgent)
+	}
+	if gotAgent.SessionID != "session_pg_123" {
+		t.Fatalf("expected agent session id after reload, got %#v", gotAgent)
 	}
 	if got, err := getThreadPostgres(db, snapshot.WorkspaceID, thread.ID); err != nil || got == nil || len(got.Messages) != 1 || got.Anchor.RelativeStart != "pg-relative-start" || got.Anchor.RelativeEnd != "pg-relative-end" {
 		t.Fatalf("expected thread messages after reload, got %#v (err: %v)", got, err)
 	}
-	if got := snapshot.AgentRuns[run.ID]; got == nil || got.Status != "completed" {
-		t.Fatalf("expected completed run after reload, got %#v", got)
+	gotRun, err := getAgentRunPostgres(db, snapshot.WorkspaceID, run.ID)
+	if err != nil {
+		t.Fatalf("get completed run after reload: %v", err)
 	}
-	if got := snapshot.AgentRuns[run.ID]; got == nil || got.SessionID != "session_pg_123" {
-		t.Fatalf("expected persisted run session id after reload, got %#v", got)
+	if gotRun == nil || gotRun.Status != "completed" {
+		t.Fatalf("expected completed run after reload, got %#v", gotRun)
+	}
+	if gotRun.SessionID != "session_pg_123" {
+		t.Fatalf("expected persisted run session id after reload, got %#v", gotRun)
 	}
 	if got, err := getAgentEventPostgres(db, snapshot.WorkspaceID, claimed.ID); err != nil || got == nil || got.Status != "completed" || got.RunID != run.ID {
 		t.Fatalf("expected completed event after reload, got %#v (err: %v)", got, err)
@@ -147,6 +160,93 @@ func TestPostgresPersistsNormalizedEntitiesAcrossReload(t *testing.T) {
 	}
 	if snapshotTable.Valid {
 		t.Fatalf("expected workspace_snapshots table to be removed, got %q", snapshotTable.String)
+	}
+}
+
+func TestPostgresWorkspaceViewReadsIdentityTablesWithoutSnapshot(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	store := newPostgresTestWorkspaceStore(t, database)
+	seedCodexDaemonRuntime(t, store)
+	user := seedTestUser(t, store)
+	agent, err := store.CreateAgent(CreateAgentRequest{
+		Handle: "view-agent",
+		Name:   "View Agent",
+		Role:   "Validates the workspace view",
+		Kind:   "codex",
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	_, run, err := store.StartAgentRun(StartAgentRunRequest{
+		AgentID: agent.ID,
+		Prompt:  "Check workspace view",
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+
+	snapshot := store.Snapshot()
+	if len(snapshot.Users) != 0 || len(snapshot.Agents) != 0 || len(snapshot.AgentRuns) != 0 || len(snapshot.Daemons) != 0 {
+		t.Fatalf("Snapshot must not expose identity tables, got users=%d agents=%d runs=%d daemons=%d", len(snapshot.Users), len(snapshot.Agents), len(snapshot.AgentRuns), len(snapshot.Daemons))
+	}
+	view, err := loadWorkspaceView(context.Background(), database.DB, store.workspaceID, nil)
+	if err != nil {
+		t.Fatalf("load workspace view: %v", err)
+	}
+	if findUserForTest(view.Users, user.ID) == nil {
+		t.Fatalf("workspace view missing user %s: %#v", user.ID, view.Users)
+	}
+	if !containsAgentForTest(view.Agents, agent.ID) {
+		t.Fatalf("workspace view missing agent %s: %#v", agent.ID, view.Agents)
+	}
+	if !containsAgentRunForTest(view.AgentRuns, run.ID) {
+		t.Fatalf("workspace view missing run %s: %#v", run.ID, view.AgentRuns)
+	}
+	if len(view.Daemons) != 1 {
+		t.Fatalf("workspace view missing daemon: %#v", view.Daemons)
+	}
+}
+
+func TestPostgresThreadReplyRecipientsUsePostgresParticipants(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	db := database.DB
+	store := newPostgresTestWorkspaceStore(t, database)
+	seedCodexDaemonRuntime(t, store)
+	user := seedTestUser(t, store)
+	agent, err := store.CreateAgent(CreateAgentRequest{
+		Handle: "reply-agent",
+		Name:   "Reply Agent",
+		Role:   "Receives reply notifications",
+		Kind:   "codex",
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	documentID := mustCreateTestDocument(t, store, "docs/reply-participants.md", "reply\n")
+	thread, _, _, err := store.CreateThread(CreateThreadRequest{
+		DocumentID: documentID,
+		Title:      "Reply recipients",
+		Body:       "Initial thread.",
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	mustExec(t, db, `INSERT INTO thread_participants (workspace_id, thread_id, participant_id)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (workspace_id, thread_id, participant_id) DO NOTHING`,
+		store.workspaceID, thread.ID, agent.ID)
+
+	_, message, err := store.ReplyThread(thread.ID, ReplyThreadRequest{Body: "A fresh reply."}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("reply thread: %v", err)
+	}
+	events, err := listAgentEventsPostgres(db, store.workspaceID, agent.ID, "for_me", []string{"pending"})
+	if err != nil {
+		t.Fatalf("list agent events: %v", err)
+	}
+	reply := findAgentEventByType(events, "thread.replied")
+	if reply == nil || reply.ThreadID != thread.ID || reply.ThreadMessageID != message.ID {
+		t.Fatalf("expected reply event for SQL participant, got %s", formatAgentEvents(events))
 	}
 }
 
@@ -373,7 +473,10 @@ func TestPostgresThreadSurvivesUUIDTurnSessionPersist(t *testing.T) {
 		t.Fatalf("reload store: %v", err)
 	}
 	snapshot := reloaded.Snapshot()
-	gotAgent := snapshot.Agents[agent.ID]
+	gotAgent, err := getAgentPostgres(db, snapshot.WorkspaceID, agent.ID)
+	if err != nil {
+		t.Fatalf("get agent after reload: %v", err)
+	}
 	if gotAgent == nil || gotAgent.CurrentTurnID != turnID || gotAgent.CurrentRunID != "" {
 		t.Fatalf("expected turn id without run-id mirror after reload, got %#v", gotAgent)
 	}
@@ -512,7 +615,10 @@ func TestPostgresUpdateAgentSessionPersistsTargetAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload store: %v", err)
 	}
-	got := reloaded.Snapshot().Agents[agent.ID]
+	got, err := getAgentPostgres(reloaded.db, workspace.WorkspaceID, agent.ID)
+	if err != nil {
+		t.Fatalf("get agent after reload: %v", err)
+	}
 	if got == nil || got.Status != "working" || got.SessionID != "thread_pg" || got.CurrentTurnID != turnID || got.CurrentRunID != "" {
 		t.Fatalf("expected targeted session fields to persist, got %#v", got)
 	}
@@ -1090,24 +1196,24 @@ func TestPostgresCreateThreadRollsBackOnPoisonedEvent(t *testing.T) {
 
 	now := time.Now().UTC()
 	thread := &Thread{
-		ID:            uuid.NewString(),
-		DocumentID:    documentID,
-		Title:         "Should not survive",
-		Status:        "open",
-		CreatedByID:   user.ID,
-		CreatedByType: "human",
+		ID:             uuid.NewString(),
+		DocumentID:     documentID,
+		Title:          "Should not survive",
+		Status:         "open",
+		CreatedByID:    user.ID,
+		CreatedByType:  "human",
 		ParticipantIDs: []string{user.ID},
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 	message := &ThreadMessage{
-		ID:        uuid.NewString(),
-		ThreadID:  thread.ID,
-		AuthorID:  user.ID,
+		ID:         uuid.NewString(),
+		ThreadID:   thread.ID,
+		AuthorID:   user.ID,
 		AuthorType: "human",
-		Body:      "rollback test",
-		Kind:      "comment",
-		CreatedAt: now,
+		Body:       "rollback test",
+		Kind:       "comment",
+		CreatedAt:  now,
 	}
 	poisonedEvent := &AgentEvent{
 		ID:          uuid.NewString(),
@@ -1441,12 +1547,19 @@ func seedTestUser(t *testing.T, store *Store) *User {
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	store.mu.Lock()
-	store.ensureMaps()
-	store.state.Users[user.ID] = user
-	err := store.persistLocked()
-	store.mu.Unlock()
-	if err != nil {
+	if _, err := store.db.Exec(
+		`INSERT INTO users (workspace_id, id, handle, name, role, kind, status, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		store.workspaceID,
+		user.ID,
+		user.Handle,
+		user.Name,
+		user.Role,
+		user.Kind,
+		user.Status,
+		user.CreatedAt,
+		user.UpdatedAt,
+	); err != nil {
 		t.Fatalf("persist test user: %v", err)
 	}
 	return user
@@ -1475,19 +1588,6 @@ func seedStoreDaemonRuntime(t *testing.T, store *Store, daemonID string, runtime
 	); err != nil {
 		t.Fatalf("insert test daemon: %v", err)
 	}
-	store.mu.Lock()
-	store.ensureMaps()
-	store.state.Daemons[daemonID] = &Daemon{
-		ID:          daemonID,
-		WorkspaceID: store.state.WorkspaceID,
-		Name:        "Test daemon",
-		Status:      "active",
-		Runtimes:    append([]RuntimeDetection(nil), runtimes...),
-		LastSeenAt:  now,
-		CreatedAt:   now,
-	}
-	applyDaemonLiveness(store.state.Daemons[daemonID], now)
-	store.mu.Unlock()
 	return daemonID
 }
 

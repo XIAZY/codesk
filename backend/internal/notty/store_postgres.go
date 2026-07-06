@@ -714,11 +714,6 @@ func initPostgresSchemaConstraints(db *sql.DB) error {
 
 func (s *Store) loadNormalizedPostgresLocked() error {
 	s.state.ContentDocuments = map[string]*Document{}
-	s.state.Users = map[string]*User{}
-	s.state.Daemons = map[string]*Daemon{}
-	s.state.Agents = map[string]*Agent{}
-	s.state.AgentRuns = map[string]*AgentRun{}
-	s.state.AgentDocumentViews = map[string]*AgentDocumentView{}
 	s.state.DocumentCheckpoints = map[string]*DocumentCheckpoint{}
 
 	if err := s.ensurePostgresCheckpointsLocked(); err != nil {
@@ -726,21 +721,6 @@ func (s *Store) loadNormalizedPostgresLocked() error {
 	}
 	if err := s.loadDocumentsPostgresLocked(); err != nil {
 		return fmt.Errorf("load documents: %w", err)
-	}
-	if err := s.loadUsersPostgresLocked(); err != nil {
-		return fmt.Errorf("load users: %w", err)
-	}
-	if err := s.loadDaemonsPostgresLocked(); err != nil {
-		return fmt.Errorf("load daemons: %w", err)
-	}
-	if err := s.loadAgentsPostgresLocked(); err != nil {
-		return fmt.Errorf("load agents: %w", err)
-	}
-	if err := s.loadAgentRunsPostgresLocked(); err != nil {
-		return fmt.Errorf("load agent runs: %w", err)
-	}
-	if err := s.loadAgentDocumentViewsPostgresLocked(); err != nil {
-		return fmt.Errorf("load agent document views: %w", err)
 	}
 	return nil
 }
@@ -776,28 +756,22 @@ func (s *Store) persistPostgresLocked() error {
 		}
 	}()
 
-	if err = s.persistDocumentsPostgresLocked(tx); err != nil {
-		return err
-	}
-	if err = s.replaceUsersPostgresLocked(tx); err != nil {
-		return err
-	}
-	if err = s.replaceAgentsPostgresLocked(tx); err != nil {
-		return err
-	}
-	if err = s.replaceAgentRunsPostgresLocked(tx); err != nil {
+	inboxEvents, err := s.persistDocumentsPostgresLocked(tx)
+	if err != nil {
 		return err
 	}
 	if err = s.insertPendingActivitiesPostgresLocked(tx); err != nil {
 		return err
 	}
-	if err = s.upsertAgentDocumentViewsPostgresLocked(tx); err != nil {
-		return err
-	}
 	if err = tx.Commit(); err != nil {
 		return err
 	}
+	s.dirtyDocuments = map[string]struct{}{}
+	s.pendingDocumentEvents = []documentUpdateRecord{}
 	s.pendingActivities = nil
+	for _, event := range inboxEvents {
+		s.recordAgentInboxChangedLocked(event)
+	}
 	return nil
 }
 
@@ -812,7 +786,8 @@ func (s *Store) persistDocumentMutationPostgresLocked() error {
 		}
 	}()
 
-	if err = s.persistDocumentsPostgresLocked(tx); err != nil {
+	inboxEvents, err := s.persistDocumentsPostgresLocked(tx)
+	if err != nil {
 		return err
 	}
 	// Flush activities in the same transaction as the documents they reference
@@ -823,7 +798,12 @@ func (s *Store) persistDocumentMutationPostgresLocked() error {
 	if err = tx.Commit(); err != nil {
 		return err
 	}
+	s.dirtyDocuments = map[string]struct{}{}
+	s.pendingDocumentEvents = []documentUpdateRecord{}
 	s.pendingActivities = nil
+	for _, event := range inboxEvents {
+		s.recordAgentInboxChangedLocked(event)
+	}
 	return nil
 }
 
@@ -839,7 +819,8 @@ func (s *Store) pendingDocumentMutationIDsLocked() []string {
 	return ids
 }
 
-func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) error {
+func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) ([]*AgentEvent, error) {
+	var inboxEvents []*AgentEvent
 	for documentID := range s.dirtyDocuments {
 		document := s.state.ContentDocuments[documentID]
 		if document == nil {
@@ -860,7 +841,7 @@ func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) error {
 			document.CreateClientOperationID,
 			document.UpdatedAt,
 		); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	latestUpdateByDocument := map[string]int64{}
@@ -878,7 +859,7 @@ func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) error {
 			event.ActorType,
 			event.CreatedAt,
 		).Scan(&updateID); err != nil {
-			return err
+			return nil, err
 		}
 		latestUpdateByDocument[event.DocumentID] = updateID
 		latestMetaByDocument[event.DocumentID] = OperationMeta{
@@ -890,7 +871,11 @@ func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) error {
 	for documentID, updateID := range latestUpdateByDocument {
 		if document := s.state.ContentDocuments[documentID]; document != nil {
 			document.UpdateID = updateID
-			s.enqueueDocumentInboxEventsLocked(document, latestMetaByDocument[documentID])
+			events, err := s.enqueueDocumentInboxEventsLocked(tx, document, latestMetaByDocument[documentID])
+			if err != nil {
+				return nil, err
+			}
+			inboxEvents = append(inboxEvents, events...)
 		}
 	}
 	for documentID := range s.dirtyDocuments {
@@ -913,11 +898,11 @@ func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) error {
 				document.ID,
 			)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			affected, err := result.RowsAffected()
 			if err != nil {
-				return err
+				return nil, err
 			}
 			if affected == 0 {
 				if _, err := tx.Exec(
@@ -929,7 +914,7 @@ func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) error {
 					document.UpdateID,
 					document.UpdatedAt,
 				); err != nil {
-					return err
+					return nil, err
 				}
 			}
 		} else if _, err := tx.Exec(
@@ -945,15 +930,13 @@ func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) error {
 			document.UpdateID,
 			document.UpdatedAt,
 		); err != nil {
-			return err
+			return nil, err
 		}
 		if err := s.maybeInsertDocumentCheckpointPostgresLocked(tx, document); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	s.dirtyDocuments = map[string]struct{}{}
-	s.pendingDocumentEvents = []documentUpdateRecord{}
-	return nil
+	return inboxEvents, nil
 }
 
 func (s *Store) maybeInsertDocumentCheckpointPostgresLocked(tx *sql.Tx, document *Document) error {
@@ -980,139 +963,6 @@ func (s *Store) maybeInsertDocumentCheckpointPostgresLocked(tx *sql.Tx, document
 	}
 	document.StateVector = stateVector
 	return nil
-}
-
-func (s *Store) replaceUsersPostgresLocked(tx *sql.Tx) error {
-	// Upsert current users.
-	for _, user := range s.state.Users {
-		if _, err := tx.Exec(
-			`INSERT INTO users (workspace_id, id, handle, name, role, kind, status, created_at, updated_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-			 ON CONFLICT (id)
-			 DO UPDATE SET handle = EXCLUDED.handle,
-			               name = EXCLUDED.name,
-			               role = EXCLUDED.role,
-			               kind = EXCLUDED.kind,
-			               status = EXCLUDED.status,
-			               updated_at = EXCLUDED.updated_at`,
-			s.state.WorkspaceID,
-			user.ID,
-			user.Handle,
-			user.Name,
-			user.Role,
-			user.Kind,
-			user.Status,
-			user.CreatedAt,
-			user.UpdatedAt,
-		); err != nil {
-			return err
-		}
-	}
-	// Remove users that are no longer in the in-memory state.
-	ids := make([]string, 0, len(s.state.Users))
-	for id := range s.state.Users {
-		ids = append(ids, id)
-	}
-	if len(ids) == 0 {
-		_, err := tx.Exec(`DELETE FROM users WHERE workspace_id = $1::uuid`, s.state.WorkspaceID)
-		return err
-	}
-	// Build a VALUES list for the keep set.
-	keepQuery := `DELETE FROM users WHERE workspace_id = $1::uuid AND id NOT IN (`
-	args := []any{s.state.WorkspaceID}
-	for i, id := range ids {
-		if i > 0 {
-			keepQuery += ","
-		}
-		keepQuery += fmt.Sprintf("$%d::uuid", i+2)
-		args = append(args, id)
-	}
-	keepQuery += ")"
-	_, err := tx.Exec(keepQuery, args...)
-	return err
-}
-
-func (s *Store) replaceAgentsPostgresLocked(tx *sql.Tx) error {
-	// Upsert current agents.
-	for _, agent := range s.state.Agents {
-		if err := upsertAgentPostgresTx(tx, s.state.WorkspaceID, agent); err != nil {
-			return err
-		}
-	}
-	// Remove agents no longer in state.
-	ids := make([]string, 0, len(s.state.Agents))
-	for id := range s.state.Agents {
-		ids = append(ids, id)
-	}
-	if len(ids) == 0 {
-		_, err := tx.Exec(`DELETE FROM agents WHERE workspace_id = $1::uuid`, s.state.WorkspaceID)
-		return err
-	}
-	keepQuery := `DELETE FROM agents WHERE workspace_id = $1::uuid AND id NOT IN (`
-	args := []any{s.state.WorkspaceID}
-	for i, id := range ids {
-		if i > 0 {
-			keepQuery += ","
-		}
-		keepQuery += fmt.Sprintf("$%d::uuid", i+2)
-		args = append(args, id)
-	}
-	keepQuery += ")"
-	_, err := tx.Exec(keepQuery, args...)
-	return err
-}
-
-func upsertAgentPostgres(db *sql.DB, workspaceID string, agent *Agent) error {
-	if agent == nil {
-		return nil
-	}
-	_, err := db.Exec(
-		`INSERT INTO agents (
-			workspace_id, id, daemon_id, handle, name, role, kind, system_prompt, workspace_root,
-			current_turn_id, session_id, status, current_task, current_activity,
-			current_run_id, last_heartbeat_at, last_run_completed, updated_at
-		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9,
-			$10, $11, $12, $13, $14,
-			$15, $16, $17, $18
-		)
-		ON CONFLICT (id)
-		DO UPDATE SET daemon_id = EXCLUDED.daemon_id,
-		              handle = EXCLUDED.handle,
-		              name = EXCLUDED.name,
-		              role = EXCLUDED.role,
-		              kind = EXCLUDED.kind,
-		              system_prompt = EXCLUDED.system_prompt,
-		              workspace_root = EXCLUDED.workspace_root,
-		              current_turn_id = EXCLUDED.current_turn_id,
-		              session_id = EXCLUDED.session_id,
-		              status = EXCLUDED.status,
-		              current_task = EXCLUDED.current_task,
-		              current_activity = EXCLUDED.current_activity,
-		              current_run_id = EXCLUDED.current_run_id,
-		              last_heartbeat_at = EXCLUDED.last_heartbeat_at,
-		              last_run_completed = EXCLUDED.last_run_completed,
-		              updated_at = EXCLUDED.updated_at`,
-		workspaceID,
-		agent.ID,
-		uuidStringOrNil(agent.DaemonID),
-		agent.Handle,
-		agent.Name,
-		agent.Role,
-		agent.Kind,
-		agent.SystemPrompt,
-		agent.WorkspaceRoot,
-		agent.CurrentTurnID,
-		agent.SessionID,
-		agent.Status,
-		agent.CurrentTask,
-		agent.CurrentActivity,
-		uuidStringOrNil(agent.CurrentRunID),
-		nullTime(agent.LastHeartbeatAt),
-		nullTime(agent.LastRunCompleted),
-		agent.UpdatedAt,
-	)
-	return err
 }
 
 func insertAgentPostgres(tx *sql.Tx, workspaceID string, agent *Agent) error {
@@ -1204,88 +1054,6 @@ func upsertAgentPostgresTx(tx *sql.Tx, workspaceID string, agent *Agent) error {
 	return err
 }
 
-func (s *Store) replaceAgentRunsPostgresLocked(tx *sql.Tx) error {
-	for _, run := range s.state.AgentRuns {
-		logTail, err := json.Marshal(run.LogTail)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(
-			`INSERT INTO agent_runs (
-				workspace_id, id, agent_id, agent_handle, agent_name, agent_kind, system_prompt,
-				session_id, workspace_root, working_dir, prompt, status, desired_status, process_id,
-				launch_time, last_heartbeat_at, completed_at, exit_code, last_message,
-				log_tail, error, assigned_task_ref, updated_at
-			) VALUES (
-				$1, $2, $3, $4, $5, $6, $7,
-				$8, $9, $10, $11, $12, $13, $14,
-				$15, $16, $17, $18, $19,
-				$20::jsonb, $21, $22, $23
-			)
-			ON CONFLICT (id)
-			DO UPDATE SET status = EXCLUDED.status,
-			              desired_status = EXCLUDED.desired_status,
-			              process_id = EXCLUDED.process_id,
-			              launch_time = EXCLUDED.launch_time,
-			              last_heartbeat_at = EXCLUDED.last_heartbeat_at,
-			              completed_at = EXCLUDED.completed_at,
-			              exit_code = EXCLUDED.exit_code,
-			              last_message = EXCLUDED.last_message,
-			              log_tail = EXCLUDED.log_tail,
-			              error = EXCLUDED.error,
-			              session_id = EXCLUDED.session_id,
-			              updated_at = EXCLUDED.updated_at`,
-			s.state.WorkspaceID,
-			run.ID,
-			run.AgentID,
-			run.AgentHandle,
-			run.AgentName,
-			run.AgentKind,
-			run.SystemPrompt,
-			run.SessionID,
-			run.WorkspaceRoot,
-			run.WorkingDir,
-			run.Prompt,
-			run.Status,
-			run.DesiredStatus,
-			nullInt(run.ProcessID),
-			nullTime(run.LaunchTime),
-			nullTime(run.LastHeartbeatAt),
-			nullTime(run.CompletedAt),
-			nullExitCode(run),
-			run.LastMessage,
-			string(logTail),
-			run.Error,
-			run.AssignedTaskRef,
-			run.UpdatedAt,
-		); err != nil {
-			return err
-		}
-	}
-	// Remove agent runs no longer in state.
-	ids := make([]string, 0, len(s.state.AgentRuns))
-	for id := range s.state.AgentRuns {
-		ids = append(ids, id)
-	}
-	if len(ids) == 0 {
-		_, err := tx.Exec(`DELETE FROM agent_runs WHERE workspace_id = $1::uuid`, s.state.WorkspaceID)
-		return err
-	}
-	keepQuery := `DELETE FROM agent_runs WHERE workspace_id = $1::uuid AND id NOT IN (`
-	args := []any{s.state.WorkspaceID}
-	for i, id := range ids {
-		if i > 0 {
-			keepQuery += ","
-		}
-		keepQuery += fmt.Sprintf("$%d::uuid", i+2)
-		args = append(args, id)
-	}
-	keepQuery += ")"
-	_, err := tx.Exec(keepQuery, args...)
-	return err
-}
-
-
 func upsertPresencePostgres(db *sql.DB, workspaceID string, presence *Presence) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -1333,8 +1101,8 @@ func upsertPresencePostgres(db *sql.DB, workspaceID string, presence *Presence) 
 	return tx.Commit()
 }
 
-func listPresencesPostgres(db *sql.DB, workspaceID string) ([]*Presence, error) {
-	rows, err := db.Query(
+func listPresencesPostgres(q querier, workspaceID string) ([]*Presence, error) {
+	rows, err := q.Query(
 		`SELECT actor_id::text, actor_type, COALESCE(document_id::text, ''), file_path, mode, selection_start, selection_end, activity, updated_at
 		   FROM presences
 		  WHERE workspace_id = $1::uuid
@@ -1532,36 +1300,11 @@ func updateAgentEventPostgres(db *sql.DB, workspaceID string, id string, req Upd
 	return cloneAgentEvent(updated), nil
 }
 
-func (s *Store) upsertAgentDocumentViewsPostgresLocked(tx *sql.Tx) error {
-	for _, view := range s.state.AgentDocumentViews {
-		if view == nil {
-			continue
-		}
-		if _, err := tx.Exec(
-			`INSERT INTO agent_document_views (workspace_id, agent_id, document_id, update_id, state_vector, viewed_at)
-			 VALUES ($1, $2, $3, $4, $5, $6)
-			 ON CONFLICT (workspace_id, agent_id, document_id)
-			 DO UPDATE SET update_id = EXCLUDED.update_id,
-			               state_vector = EXCLUDED.state_vector,
-			               viewed_at = EXCLUDED.viewed_at`,
-			s.state.WorkspaceID,
-			view.AgentID,
-			view.DocumentID,
-			view.UpdateID,
-			view.StateVector,
-			view.ViewedAt,
-		); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func upsertAgentDocumentViewPostgres(db *sql.DB, workspaceID string, view *AgentDocumentView) error {
+func upsertAgentDocumentViewPostgres(exec activityExecer, workspaceID string, view *AgentDocumentView) error {
 	if view == nil {
 		return nil
 	}
-	_, err := db.Exec(
+	_, err := exec.Exec(
 		`INSERT INTO agent_document_views (workspace_id, agent_id, document_id, update_id, state_vector, viewed_at)
 		 VALUES ($1, $2, $3, $4, $5, $6)
 		 ON CONFLICT (workspace_id, agent_id, document_id)
@@ -1578,8 +1321,8 @@ func upsertAgentDocumentViewPostgres(db *sql.DB, workspaceID string, view *Agent
 	return err
 }
 
-func completeDocumentInboxEventsPostgres(db *sql.DB, workspaceID string, agentID string, documentID string, updateID int64, completedAt time.Time) error {
-	_, err := db.Exec(
+func completeDocumentInboxEventsPostgres(exec activityExecer, workspaceID string, agentID string, documentID string, updateID int64, completedAt time.Time) error {
+	_, err := exec.Exec(
 		`UPDATE agent_events
 		    SET status = 'completed',
 		        completed_at = $5,
@@ -1597,6 +1340,30 @@ func completeDocumentInboxEventsPostgres(db *sql.DB, workspaceID string, agentID
 		completedAt,
 	)
 	return err
+}
+
+func getAgentDocumentViewPostgres(q querier, workspaceID string, agentID string, documentID string) (*AgentDocumentView, error) {
+	if !isUUIDString(agentID) || !isUUIDString(documentID) {
+		return nil, ErrNotFound
+	}
+	row := q.QueryRow(
+		`SELECT agent_id::text, document_id::text, update_id, state_vector, viewed_at
+		   FROM agent_document_views
+		  WHERE workspace_id = $1::uuid
+		    AND agent_id = $2::uuid
+		    AND document_id = $3::uuid`,
+		workspaceID,
+		agentID,
+		documentID,
+	)
+	view := &AgentDocumentView{}
+	if err := row.Scan(&view.AgentID, &view.DocumentID, &view.UpdateID, &view.StateVector, &view.ViewedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return view, nil
 }
 
 func getAgentEventPostgres(db *sql.DB, workspaceID, id string) (*AgentEvent, error) {
@@ -1663,8 +1430,8 @@ func listAgentEventsPostgres(db *sql.DB, workspaceID, agentID string, box string
 	return events, rows.Err()
 }
 
-func listAllAgentEventsPostgres(db *sql.DB, workspaceID string) ([]*AgentEvent, error) {
-	rows, err := db.Query(
+func listAllAgentEventsPostgres(q querier, workspaceID string) ([]*AgentEvent, error) {
+	rows, err := q.Query(
 		`SELECT id::text, agent_id::text, agent_handle, type, box, status,
 		        COALESCE(document_id::text, ''), COALESCE(thread_id::text, ''),
 		        COALESCE(thread_message_id::text, ''), from_update_id, to_update_id,
@@ -1734,8 +1501,8 @@ func insertAgentEventTx(tx *sql.Tx, workspaceID string, event *AgentEvent) error
 	return err
 }
 
-func upsertDocumentInboxEventPostgres(db *sql.DB, workspaceID string, event *AgentEvent) (*AgentEvent, error) {
-	row := db.QueryRow(
+func upsertDocumentInboxEventPostgres(q querier, workspaceID string, event *AgentEvent) (*AgentEvent, error) {
+	row := q.QueryRow(
 		`INSERT INTO agent_events (
 			workspace_id, id, agent_id, agent_handle, type, box, status, document_id,
 			thread_id, thread_message_id, from_update_id, to_update_id, summary,
@@ -1806,27 +1573,6 @@ func documentInboxHandledPostgres(db *sql.DB, workspaceID, agentID, documentID s
 		workspaceID, agentID, documentID, updateID, updatedAt,
 	).Scan(&exists)
 	return exists, err
-}
-
-func (s *Store) loadAgentDocumentViewsPostgresLocked() error {
-	rows, err := s.db.Query(
-		`SELECT agent_id::text, document_id::text, update_id, state_vector, viewed_at
-		   FROM agent_document_views
-		  WHERE workspace_id = $1::uuid`,
-		s.state.WorkspaceID,
-	)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		view := &AgentDocumentView{}
-		if err := rows.Scan(&view.AgentID, &view.DocumentID, &view.UpdateID, &view.StateVector, &view.ViewedAt); err != nil {
-			return err
-		}
-		s.state.AgentDocumentViews[agentDocumentViewKey(view.AgentID, view.DocumentID)] = view
-	}
-	return rows.Err()
 }
 
 func (s *Store) documentContentAtUpdatePostgresLocked(document *Document, updateID int64) (string, error) {
@@ -2051,18 +1797,20 @@ func (s *Store) insertPostgresCheckpointAtHeadTxLocked(tx *sql.Tx, documentID st
 	return stateVector, nil
 }
 
-func (s *Store) loadUsersPostgresLocked() error {
-	rows, err := s.db.Query(
+func listUsersPostgres(q querier, workspaceID string) ([]*User, error) {
+	rows, err := q.Query(
 		`SELECT id::text, handle, name, role, kind, status, created_at, updated_at
 		   FROM users
-		  WHERE workspace_id = $1::uuid`,
-		s.state.WorkspaceID,
+		  WHERE workspace_id = $1::uuid
+		  ORDER BY handle ASC, id ASC`,
+		workspaceID,
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer rows.Close()
 
+	users := []*User{}
 	for rows.Next() {
 		user := &User{}
 		if err := rows.Scan(
@@ -2075,139 +1823,489 @@ func (s *Store) loadUsersPostgresLocked() error {
 			&user.CreatedAt,
 			&user.UpdatedAt,
 		); err != nil {
-			return err
+			return nil, err
 		}
-		s.state.Users[user.ID] = user
+		users = append(users, user)
 	}
-	return rows.Err()
+	return users, rows.Err()
 }
 
-func (s *Store) loadDaemonsPostgresLocked() error {
-	rows, err := s.db.Query(
-		`SELECT id::text, workspace_id::text, name, status, daemon_version, os, arch, runtime_detections::text, last_seen_at, created_at, deleted_at
-		   FROM daemons
-		  WHERE workspace_id = $1::uuid
-		    AND status <> 'deleted'`,
-		s.state.WorkspaceID,
-	)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		daemon := &Daemon{}
-		var lastSeen sql.NullTime
-		var deletedAt sql.NullTime
-		if err := rows.Scan(
-			&daemon.ID,
-			&daemon.WorkspaceID,
-			&daemon.Name,
-			&daemon.Status,
-			&daemon.Version,
-			&daemon.OS,
-			&daemon.Arch,
-			runtimeDetectionsScanner(&daemon.Runtimes),
-			&lastSeen,
-			&daemon.CreatedAt,
-			&deletedAt,
-		); err != nil {
-			return err
-		}
-		if lastSeen.Valid {
-			daemon.LastSeenAt = lastSeen.Time
-		}
-		if deletedAt.Valid {
-			daemon.DeletedAt = deletedAt.Time
-		}
-		s.state.Daemons[daemon.ID] = daemon
-	}
-	return rows.Err()
-}
-
-func (s *Store) loadAgentsPostgresLocked() error {
-	rows, err := s.db.Query(
+func listAgentsPostgres(q querier, workspaceID string) ([]*Agent, error) {
+	rows, err := q.Query(
 		`SELECT id::text, COALESCE(daemon_id::text, ''), handle, name, role, kind, system_prompt, workspace_root,
 		        current_turn_id, session_id, status,
 		        current_task, current_activity, COALESCE(current_run_id::text, ''), last_heartbeat_at,
 		        last_run_completed, updated_at
 		   FROM agents
-		  WHERE workspace_id = $1::uuid`,
-		s.state.WorkspaceID,
+		  WHERE workspace_id = $1::uuid
+		  ORDER BY name ASC, id ASC`,
+		workspaceID,
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer rows.Close()
 
+	agents := []*Agent{}
 	for rows.Next() {
-		agent := &Agent{}
-		var lastHeartbeat sql.NullTime
-		var lastRunCompleted sql.NullTime
-		if err := rows.Scan(
-			&agent.ID,
-			&agent.DaemonID,
-			&agent.Handle,
-			&agent.Name,
-			&agent.Role,
-			&agent.Kind,
-			&agent.SystemPrompt,
-			&agent.WorkspaceRoot,
-			&agent.CurrentTurnID,
-			&agent.SessionID,
-			&agent.Status,
-			&agent.CurrentTask,
-			&agent.CurrentActivity,
-			&agent.CurrentRunID,
-			&lastHeartbeat,
-			&lastRunCompleted,
-			&agent.UpdatedAt,
-		); err != nil {
-			return err
+		agent, err := scanAgent(rows)
+		if err != nil {
+			return nil, err
 		}
-		if lastHeartbeat.Valid {
-			agent.LastHeartbeatAt = lastHeartbeat.Time
-		}
-		if lastRunCompleted.Valid {
-			agent.LastRunCompleted = lastRunCompleted.Time
-		}
-		s.state.Agents[agent.ID] = agent
+		agents = append(agents, agent)
 	}
-	return rows.Err()
+	return agents, rows.Err()
 }
 
-func (s *Store) loadAgentRunsPostgresLocked() error {
-	rows, err := s.db.Query(
+func getAgentPostgres(q querier, workspaceID string, agentID string) (*Agent, error) {
+	if !isUUIDString(agentID) {
+		return nil, ErrNotFound
+	}
+	row := q.QueryRow(
+		`SELECT id::text, COALESCE(daemon_id::text, ''), handle, name, role, kind, system_prompt, workspace_root,
+		        current_turn_id, session_id, status,
+		        current_task, current_activity, COALESCE(current_run_id::text, ''), last_heartbeat_at,
+		        last_run_completed, updated_at
+		   FROM agents
+		  WHERE workspace_id = $1::uuid
+		    AND id = $2::uuid`,
+		workspaceID,
+		agentID,
+	)
+	agent, err := scanAgent(row)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	return agent, err
+}
+
+func getAgentForUpdatePostgres(tx *sql.Tx, workspaceID string, agentID string) (*Agent, error) {
+	if !isUUIDString(agentID) {
+		return nil, ErrNotFound
+	}
+	row := tx.QueryRow(
+		`SELECT id::text, COALESCE(daemon_id::text, ''), handle, name, role, kind, system_prompt, workspace_root,
+		        current_turn_id, session_id, status,
+		        current_task, current_activity, COALESCE(current_run_id::text, ''), last_heartbeat_at,
+		        last_run_completed, updated_at
+		   FROM agents
+		  WHERE workspace_id = $1::uuid
+		    AND id = $2::uuid
+		  FOR UPDATE`,
+		workspaceID,
+		agentID,
+	)
+	agent, err := scanAgent(row)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	return agent, err
+}
+
+func resolveAgentIdentityPostgres(q querier, workspaceID string, agentRef string) (string, string, error) {
+	trimmed := strings.TrimSpace(agentRef)
+	row := q.QueryRow(
+		`SELECT id::text, handle
+		   FROM agents
+		  WHERE workspace_id = $1::uuid
+		    AND (handle = $2 OR ($3::uuid IS NOT NULL AND id = $3::uuid))`,
+		workspaceID,
+		trimmed,
+		uuidStringOrNil(trimmed),
+	)
+	var id string
+	var handle string
+	if err := row.Scan(&id, &handle); err != nil {
+		if err == sql.ErrNoRows {
+			return "", "", ErrNotFound
+		}
+		return "", "", err
+	}
+	return id, handle, nil
+}
+
+func resolvePrincipalPostgres(q querier, workspaceID string, actorID string, actorType string) (*principalIdentity, error) {
+	trimmedType := strings.TrimSpace(actorType)
+	if trimmedType == "human" {
+		principal, err := resolveUserPrincipalPostgres(q, workspaceID, actorID)
+		if err != ErrNotFound {
+			return principal, err
+		}
+	}
+	if trimmedType == "agent" {
+		principal, err := resolveAgentPrincipalPostgres(q, workspaceID, actorID)
+		if err != ErrNotFound {
+			return principal, err
+		}
+	}
+	if principal, err := resolveUserPrincipalPostgres(q, workspaceID, actorID); err != ErrNotFound {
+		return principal, err
+	}
+	if principal, err := resolveAgentPrincipalPostgres(q, workspaceID, actorID); err != ErrNotFound {
+		return principal, err
+	}
+	return nil, ErrNotFound
+}
+
+func resolveUserPrincipalPostgres(q querier, workspaceID string, userRef string) (*principalIdentity, error) {
+	trimmed := strings.TrimSpace(userRef)
+	row := q.QueryRow(
+		`SELECT id::text, handle, name
+		   FROM users
+		  WHERE workspace_id = $1::uuid
+		    AND (handle = $2 OR ($3::uuid IS NOT NULL AND id = $3::uuid))`,
+		workspaceID,
+		trimmed,
+		uuidStringOrNil(trimmed),
+	)
+	principal := &principalIdentity{Type: "human"}
+	if err := row.Scan(&principal.ID, &principal.Handle, &principal.Name); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return principal, nil
+}
+
+func resolveAgentPrincipalPostgres(q querier, workspaceID string, agentRef string) (*principalIdentity, error) {
+	trimmed := strings.TrimSpace(agentRef)
+	row := q.QueryRow(
+		`SELECT id::text, handle, name
+		   FROM agents
+		  WHERE workspace_id = $1::uuid
+		    AND (handle = $2 OR ($3::uuid IS NOT NULL AND id = $3::uuid))`,
+		workspaceID,
+		trimmed,
+		uuidStringOrNil(trimmed),
+	)
+	principal := &principalIdentity{Type: "agent"}
+	if err := row.Scan(&principal.ID, &principal.Handle, &principal.Name); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return principal, nil
+}
+
+func principalByHandlePostgres(q querier, workspaceID string, handle string) (*principalRef, bool, error) {
+	trimmed := strings.TrimSpace(handle)
+	if trimmed == "" {
+		return nil, false, nil
+	}
+	row := q.QueryRow(
+		`SELECT id::text, handle, name, kind
+		   FROM users
+		  WHERE workspace_id = $1::uuid AND handle = $2`,
+		workspaceID,
+		trimmed,
+	)
+	user := &principalRef{}
+	if err := row.Scan(&user.UserID, &user.Handle, &user.Name, &user.Kind); err == nil {
+		return user, true, nil
+	} else if err != sql.ErrNoRows {
+		return nil, false, err
+	}
+	row = q.QueryRow(
+		`SELECT id::text, handle, name
+		   FROM agents
+		  WHERE workspace_id = $1::uuid AND handle = $2`,
+		workspaceID,
+		trimmed,
+	)
+	agent := &principalRef{Kind: "agent"}
+	if err := row.Scan(&agent.UserID, &agent.Handle, &agent.Name); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return agent, true, nil
+}
+
+func extractMentionPrincipalIDsPostgres(q querier, workspaceID string, content string) ([]string, error) {
+	matches := mentionPattern.FindAllStringSubmatchIndex(content, -1)
+	if len(matches) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 6 {
+			continue
+		}
+		handle := content[match[4]:match[5]]
+		principal, ok, err := principalByHandlePostgres(q, workspaceID, handle)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		if !containsText(ids, principal.UserID) {
+			ids = append(ids, principal.UserID)
+		}
+	}
+	return ids, nil
+}
+
+func shouldNotifyAgentPostgres(q querier, workspaceID string, agentID string, meta OperationMeta, fallbackActorID string) (bool, error) {
+	originID := strings.TrimSpace(fallbackActorID)
+	if strings.TrimSpace(meta.ActorID) != "" {
+		actor, err := resolvePrincipalPostgres(q, workspaceID, meta.ActorID, meta.ActorType)
+		if err != nil && err != ErrNotFound {
+			return false, err
+		}
+		if actor != nil {
+			originID = actor.ID
+		}
+	}
+	if originID == "" {
+		return true, nil
+	}
+	return originID != agentID, nil
+}
+
+func daemonExistsPostgres(q querier, workspaceID string, daemonID string) (bool, error) {
+	trimmed := strings.TrimSpace(daemonID)
+	if trimmed == "" {
+		return false, nil
+	}
+	if !isUUIDString(trimmed) {
+		return false, nil
+	}
+	var exists bool
+	err := q.QueryRow(
+		`SELECT EXISTS(
+			SELECT 1
+			  FROM daemons
+			 WHERE workspace_id = $1::uuid
+			   AND id = $2::uuid
+			   AND status <> 'deleted'
+		)`,
+		workspaceID,
+		trimmed,
+	).Scan(&exists)
+	return exists, err
+}
+
+func scanAgent(scanner interface{ Scan(...any) error }) (*Agent, error) {
+	agent := &Agent{}
+	var lastHeartbeat sql.NullTime
+	var lastRunCompleted sql.NullTime
+	if err := scanner.Scan(
+		&agent.ID,
+		&agent.DaemonID,
+		&agent.Handle,
+		&agent.Name,
+		&agent.Role,
+		&agent.Kind,
+		&agent.SystemPrompt,
+		&agent.WorkspaceRoot,
+		&agent.CurrentTurnID,
+		&agent.SessionID,
+		&agent.Status,
+		&agent.CurrentTask,
+		&agent.CurrentActivity,
+		&agent.CurrentRunID,
+		&lastHeartbeat,
+		&lastRunCompleted,
+		&agent.UpdatedAt,
+	); err != nil {
+		return nil, err
+	}
+	if lastHeartbeat.Valid {
+		agent.LastHeartbeatAt = lastHeartbeat.Time
+	}
+	if lastRunCompleted.Valid {
+		agent.LastRunCompleted = lastRunCompleted.Time
+	}
+	return agent, nil
+}
+
+func listAgentRunsPostgres(q querier, workspaceID string) ([]*AgentRun, error) {
+	rows, err := q.Query(
 		`SELECT id::text, agent_id::text, agent_handle, agent_name, agent_kind, system_prompt, session_id,
 		        workspace_root, working_dir, prompt, status, desired_status, process_id,
 		        launch_time, last_heartbeat_at, completed_at, exit_code, last_message,
 		        log_tail, error, assigned_task_ref, updated_at
 		   FROM agent_runs
-		  WHERE workspace_id = $1::uuid`,
-		s.state.WorkspaceID,
+		  WHERE workspace_id = $1::uuid
+		  ORDER BY updated_at DESC, id ASC`,
+		workspaceID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	runs := []*AgentRun{}
+	for rows.Next() {
+		run, err := scanAgentRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		run.WorkspaceID = workspaceID
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
+func getAgentRunPostgres(q querier, workspaceID string, runID string) (*AgentRun, error) {
+	if !isUUIDString(runID) {
+		return nil, ErrNotFound
+	}
+	row := q.QueryRow(
+		`SELECT id::text, agent_id::text, agent_handle, agent_name, agent_kind, system_prompt, session_id,
+		        workspace_root, working_dir, prompt, status, desired_status, process_id,
+		        launch_time, last_heartbeat_at, completed_at, exit_code, last_message,
+		        log_tail, error, assigned_task_ref, updated_at
+		   FROM agent_runs
+		  WHERE workspace_id = $1::uuid
+		    AND id = $2::uuid`,
+		workspaceID,
+		runID,
+	)
+	run, err := scanAgentRun(row)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	run.WorkspaceID = workspaceID
+	return run, nil
+}
+
+func getAgentRunForUpdatePostgres(tx *sql.Tx, workspaceID string, runID string) (*AgentRun, error) {
+	if !isUUIDString(runID) {
+		return nil, ErrNotFound
+	}
+	row := tx.QueryRow(
+		`SELECT id::text, agent_id::text, agent_handle, agent_name, agent_kind, system_prompt, session_id,
+		        workspace_root, working_dir, prompt, status, desired_status, process_id,
+		        launch_time, last_heartbeat_at, completed_at, exit_code, last_message,
+		        log_tail, error, assigned_task_ref, updated_at
+		   FROM agent_runs
+		  WHERE workspace_id = $1::uuid
+		    AND id = $2::uuid
+		  FOR UPDATE`,
+		workspaceID,
+		runID,
+	)
+	run, err := scanAgentRun(row)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	run.WorkspaceID = workspaceID
+	return run, nil
+}
+
+func insertAgentRunPostgresTx(tx *sql.Tx, workspaceID string, run *AgentRun) error {
+	if run == nil {
+		return nil
+	}
+	logTail, err := json.Marshal(run.LogTail)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(
+		`INSERT INTO agent_runs (
+			workspace_id, id, agent_id, agent_handle, agent_name, agent_kind, system_prompt,
+			session_id, workspace_root, working_dir, prompt, status, desired_status, process_id,
+			launch_time, last_heartbeat_at, completed_at, exit_code, last_message,
+			log_tail, error, assigned_task_ref, updated_at
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7,
+			$8, $9, $10, $11, $12, $13, $14,
+			$15, $16, $17, $18, $19,
+			$20::jsonb, $21, $22, $23
+		)`,
+		workspaceID,
+		run.ID,
+		run.AgentID,
+		run.AgentHandle,
+		run.AgentName,
+		run.AgentKind,
+		run.SystemPrompt,
+		run.SessionID,
+		run.WorkspaceRoot,
+		run.WorkingDir,
+		run.Prompt,
+		run.Status,
+		run.DesiredStatus,
+		nullInt(run.ProcessID),
+		nullTime(run.LaunchTime),
+		nullTime(run.LastHeartbeatAt),
+		nullTime(run.CompletedAt),
+		nullExitCode(run),
+		run.LastMessage,
+		string(logTail),
+		run.Error,
+		run.AssignedTaskRef,
+		run.UpdatedAt,
+	)
+	return err
+}
+
+func updateAgentRunPostgresTx(tx *sql.Tx, workspaceID string, run *AgentRun) error {
+	if run == nil {
+		return nil
+	}
+	logTail, err := json.Marshal(run.LogTail)
+	if err != nil {
+		return err
+	}
+	result, err := tx.Exec(
+		`UPDATE agent_runs
+		    SET status = $3,
+		        desired_status = $4,
+		        process_id = $5,
+		        launch_time = $6,
+		        last_heartbeat_at = $7,
+		        completed_at = $8,
+		        exit_code = $9,
+		        last_message = $10,
+		        log_tail = $11::jsonb,
+		        error = $12,
+		        session_id = $13,
+		        updated_at = $14
+		  WHERE workspace_id = $1::uuid
+		    AND id = $2::uuid`,
+		workspaceID,
+		run.ID,
+		run.Status,
+		run.DesiredStatus,
+		nullInt(run.ProcessID),
+		nullTime(run.LaunchTime),
+		nullTime(run.LastHeartbeatAt),
+		nullTime(run.CompletedAt),
+		nullExitCode(run),
+		run.LastMessage,
+		string(logTail),
+		run.Error,
+		run.SessionID,
+		run.UpdatedAt,
 	)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		run, err := scanAgentRun(rows)
-		if err != nil {
-			return err
-		}
-		run.WorkspaceID = s.state.WorkspaceID
-		s.state.AgentRuns[run.ID] = run
+	if rows, err := result.RowsAffected(); err != nil {
+		return err
+	} else if rows != 1 {
+		return ErrNotFound
 	}
-	return rows.Err()
+	return nil
 }
-
 
 // listActivitiesPostgres returns the newest window of activities for a
 // workspace directly from Postgres (source of truth), newest first. The window
 // (LIMIT) shapes the read only; rows are never trimmed from the table.
-func listActivitiesPostgres(db *sql.DB, workspaceID string) ([]*ActivityEvent, error) {
-	rows, err := db.Query(
+func listActivitiesPostgres(q querier, workspaceID string) ([]*ActivityEvent, error) {
+	rows, err := q.Query(
 		`SELECT id, type, COALESCE(document_id::text, ''), COALESCE(actor_id::text, ''), actor_type, summary, occurred_at,
 		        COALESCE(provenance_actor_id::text, ''), provenance_actor_type, provenance_execution_id,
 		        provenance_tool, provenance_trigger, provenance_autonomous,
@@ -2869,10 +2967,10 @@ func createThreadPostgres(db *sql.DB, workspaceID string, thread *Thread, messag
 	return committed, true, nil
 }
 
-func replyThreadPostgres(db *sql.DB, workspaceID string, threadID string, message *ThreadMessage, participantIDs []string, events []*AgentEvent, activity *ActivityEvent) (*Thread, error) {
+func replyThreadPostgres(db *sql.DB, workspaceID string, threadID string, message *ThreadMessage, meta OperationMeta) (*Thread, []*AgentEvent, error) {
 	tx, err := db.Begin()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer func() {
 		if err != nil {
@@ -2888,10 +2986,10 @@ func replyThreadPostgres(db *sql.DB, workspaceID string, threadID string, messag
 	).Scan(&foundID)
 	if err == sql.ErrNoRows {
 		_ = tx.Rollback()
-		return nil, ErrNotFound
+		return nil, nil, ErrNotFound
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if _, err = tx.Exec(
@@ -2913,9 +3011,14 @@ func replyThreadPostgres(db *sql.DB, workspaceID string, threadID string, messag
 		message.Kind,
 		message.CreatedAt,
 	); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
+	mentionedIDs, err := extractMentionPrincipalIDsPostgres(tx, workspaceID, message.Body)
+	if err != nil {
+		return nil, nil, err
+	}
+	participantIDs := append([]string{message.AuthorID}, mentionedIDs...)
 	for _, pid := range participantIDs {
 		if _, err = tx.Exec(
 			`INSERT INTO thread_participants (workspace_id, thread_id, participant_id)
@@ -2923,29 +3026,51 @@ func replyThreadPostgres(db *sql.DB, workspaceID string, threadID string, messag
 			 ON CONFLICT (workspace_id, thread_id, participant_id) DO NOTHING`,
 			workspaceID, threadID, pid,
 		); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
+	thread, err := getThreadPostgres(tx, workspaceID, threadID)
+	if err != nil {
+		return nil, nil, err
+	}
+	mentionEvents, err := collectThreadMentionEventsPostgres(tx, workspaceID, thread, message, meta)
+	if err != nil {
+		return nil, nil, err
+	}
+	replyEvents, err := collectThreadReplyEventsPostgres(tx, workspaceID, thread, message, meta, mentionedIDs...)
+	if err != nil {
+		return nil, nil, err
+	}
+	events := append(mentionEvents, replyEvents...)
 	for _, event := range events {
 		if err = insertAgentEventTx(tx, workspaceID, event); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
+	activity := &ActivityEvent{
+		Type:       "thread.replied",
+		DocumentID: thread.DocumentID,
+		ActorID:    meta.ActorID,
+		ActorType:  meta.ActorType,
+		Summary:    fmt.Sprintf("%s replied in thread %s", meta.ActorID, thread.Title),
+		OccurredAt: now,
+		Provenance: meta,
+	}
 	if err = insertActivityPostgres(tx, workspaceID, activity); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	result, err := getThreadPostgres(tx, workspaceID, threadID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if err = tx.Commit(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return result, nil
+	return result, events, nil
 }
 
 func findThreadByClientOperationPostgres(db *sql.DB, workspaceID string, clientOperationID string, createdByID string, createdByType string) (*Thread, error) {
@@ -2965,9 +3090,9 @@ func findThreadByClientOperationPostgres(db *sql.DB, workspaceID string, clientO
 	return getThreadPostgres(db, workspaceID, threadID)
 }
 
-func documentHasOpenThreadForParticipantPostgres(db *sql.DB, workspaceID string, documentID string, participantID string) (bool, string, string, error) {
+func documentHasOpenThreadForParticipantPostgres(q querier, workspaceID string, documentID string, participantID string) (bool, string, string, error) {
 	var threadID, threadTitle string
-	err := db.QueryRow(
+	err := q.QueryRow(
 		`SELECT t.id::text, t.title
 		   FROM threads t
 		   JOIN thread_participants tp ON tp.workspace_id = t.workspace_id AND tp.thread_id = t.id
