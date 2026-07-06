@@ -139,6 +139,50 @@ func TestPostgresSchemaForeignKeyConstraints(t *testing.T) {
 	}
 }
 
+func TestPostgresSchemaInitIsIdempotentOnNativeDatabase(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	db := database.DB
+
+	if err := initPostgresSchema(db); err != nil {
+		t.Fatalf("first repeated schema init: %v", err)
+	}
+	if err := initPostgresSchema(db); err != nil {
+		t.Fatalf("second repeated schema init: %v", err)
+	}
+}
+
+func TestPostgresSchemaForeignKeyConstraintsAreValidated(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	db := database.DB
+
+	rows, err := db.Query(`
+		SELECT conname
+		  FROM pg_constraint
+		 WHERE connamespace = 'public'::regnamespace
+		   AND contype = 'f'
+		   AND NOT convalidated
+		 ORDER BY conname`)
+	if err != nil {
+		t.Fatalf("query unvalidated FK constraints: %v", err)
+	}
+	defer rows.Close()
+
+	var unvalidated []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan unvalidated FK constraint: %v", err)
+		}
+		unvalidated = append(unvalidated, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate unvalidated FK constraints: %v", err)
+	}
+	if len(unvalidated) != 0 {
+		t.Fatalf("found unvalidated FK constraints: %v", unvalidated)
+	}
+}
+
 // fkTestFixture holds the IDs and database for a single FK behavior test.
 type fkTestFixture struct {
 	db          *sql.DB

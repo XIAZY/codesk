@@ -28,8 +28,6 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			updated_at TIMESTAMPTZ NOT NULL
 		)
 		`,
-		`ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS root_document_id UUID`,
-		`ALTER TABLE workspaces DROP COLUMN IF EXISTS root_stream_id`,
 		`
 		CREATE TABLE IF NOT EXISTS accounts (
 			id UUID PRIMARY KEY,
@@ -40,13 +38,13 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			last_accessed_workspace_id UUID,
 			password_updated_at TIMESTAMPTZ,
 			created_at TIMESTAMPTZ NOT NULL,
-			updated_at TIMESTAMPTZ NOT NULL
+			updated_at TIMESTAMPTZ NOT NULL,
+			CONSTRAINT fk_accounts_last_workspace
+				FOREIGN KEY (last_accessed_workspace_id)
+				REFERENCES workspaces(id)
+				ON DELETE SET NULL
 		)
 		`,
-		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT TRUE`,
-		`ALTER TABLE accounts ALTER COLUMN email_verified SET DEFAULT FALSE`,
-		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_accessed_workspace_id UUID`,
-		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS password_updated_at TIMESTAMPTZ`,
 		`
 		CREATE TABLE IF NOT EXISTS account_email_tokens (
 			id UUID PRIMARY KEY,
@@ -55,37 +53,33 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			token_hash TEXT UNIQUE NOT NULL,
 			expires_at TIMESTAMPTZ NOT NULL,
 			consumed_at TIMESTAMPTZ,
-			created_at TIMESTAMPTZ NOT NULL
+			created_at TIMESTAMPTZ NOT NULL,
+			CONSTRAINT fk_account_email_tokens_account
+				FOREIGN KEY (account_id)
+				REFERENCES accounts(id)
+				ON DELETE CASCADE
 		)
 		`,
 		`CREATE INDEX IF NOT EXISTS idx_account_email_tokens_account_purpose_created ON account_email_tokens (account_id, purpose, created_at DESC)`,
 		`
-		CREATE TABLE IF NOT EXISTS workspace_members (
+		CREATE TABLE IF NOT EXISTS users (
 			workspace_id UUID NOT NULL,
-			account_id UUID NOT NULL,
-			user_id UUID NOT NULL,
-			membership_role TEXT NOT NULL DEFAULT 'member',
-			status TEXT NOT NULL DEFAULT 'active',
-			invited_by UUID,
-			last_accessed_document_id UUID,
-			created_at TIMESTAMPTZ NOT NULL,
-			accepted_at TIMESTAMPTZ,
-			PRIMARY KEY (workspace_id, account_id)
-		)
-		`,
-		`ALTER TABLE workspace_members ADD COLUMN IF NOT EXISTS last_accessed_document_id UUID`,
-		`CREATE INDEX IF NOT EXISTS idx_workspace_members_account ON workspace_members (account_id, status, workspace_id)`,
-		`
-		CREATE TABLE IF NOT EXISTS workspace_invites (
 			id UUID PRIMARY KEY,
-			workspace_id UUID NOT NULL,
-			token_hash TEXT UNIQUE NOT NULL,
-			created_by_user_id UUID NOT NULL,
-			expires_at TIMESTAMPTZ NOT NULL,
-			created_at TIMESTAMPTZ NOT NULL
+			handle TEXT NOT NULL,
+			name TEXT NOT NULL,
+			role TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			status TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL,
+			CONSTRAINT uq_users_workspace_id UNIQUE (workspace_id, id),
+			CONSTRAINT fk_users_workspace
+				FOREIGN KEY (workspace_id)
+				REFERENCES workspaces(id)
+				ON DELETE CASCADE
 		)
 		`,
-		`CREATE INDEX IF NOT EXISTS idx_workspace_invites_workspace ON workspace_invites (workspace_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_workspace_handle ON users (workspace_id, handle)`,
 		`
 		CREATE TABLE IF NOT EXISTS daemons (
 			id UUID PRIMARY KEY,
@@ -99,15 +93,15 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			runtime_detections JSONB NOT NULL DEFAULT '[]'::jsonb,
 			last_seen_at TIMESTAMPTZ,
 			created_at TIMESTAMPTZ NOT NULL,
-			deleted_at TIMESTAMPTZ
+			deleted_at TIMESTAMPTZ,
+			CONSTRAINT uq_daemons_workspace_id UNIQUE (workspace_id, id),
+			CONSTRAINT fk_daemons_workspace
+				FOREIGN KEY (workspace_id)
+				REFERENCES workspaces(id)
+				ON DELETE CASCADE
 		)
 		`,
 		`CREATE INDEX IF NOT EXISTS idx_daemons_workspace ON daemons (workspace_id, status)`,
-		`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS daemon_version TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS os TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS arch TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS runtime_detections JSONB NOT NULL DEFAULT '[]'::jsonb`,
-		`ALTER TABLE daemons DROP COLUMN IF EXISTS pending_token_hash`,
 		`
 		CREATE TABLE IF NOT EXISTS documents (
 			workspace_id UUID NOT NULL,
@@ -117,24 +111,31 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			hidden BOOLEAN NOT NULL DEFAULT false,
 			client_id_seed BIGINT NOT NULL,
 			create_client_operation_id TEXT NOT NULL DEFAULT '',
-			updated_at TIMESTAMPTZ NOT NULL
+			updated_at TIMESTAMPTZ NOT NULL,
+			CONSTRAINT uq_documents_workspace_id UNIQUE (workspace_id, id),
+			CONSTRAINT fk_documents_workspace
+				FOREIGN KEY (workspace_id)
+				REFERENCES workspaces(id)
+				ON DELETE CASCADE
 		)
 		`,
-		`ALTER TABLE documents ADD COLUMN IF NOT EXISTS hidden BOOLEAN NOT NULL DEFAULT false`,
-		`ALTER TABLE documents ADD COLUMN IF NOT EXISTS create_client_operation_id TEXT NOT NULL DEFAULT ''`,
-		`DROP INDEX IF EXISTS idx_documents_workspace_path`,
-		`DROP INDEX IF EXISTS idx_documents_workspace_visible_path`,
 		`
 		CREATE TABLE IF NOT EXISTS document_heads (
 			workspace_id UUID NOT NULL,
 			document_id UUID PRIMARY KEY,
 			state_vector TEXT NOT NULL DEFAULT '',
 			update_id BIGINT NOT NULL DEFAULT 0,
-			updated_at TIMESTAMPTZ NOT NULL
+			updated_at TIMESTAMPTZ NOT NULL,
+			CONSTRAINT fk_document_heads_workspace
+				FOREIGN KEY (workspace_id)
+				REFERENCES workspaces(id)
+				ON DELETE CASCADE,
+			CONSTRAINT fk_document_heads_document
+				FOREIGN KEY (workspace_id, document_id)
+				REFERENCES documents(workspace_id, id)
+				ON DELETE CASCADE
 		)
 		`,
-		`ALTER TABLE document_heads ADD COLUMN IF NOT EXISTS state_vector TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE document_heads ADD COLUMN IF NOT EXISTS update_id BIGINT NOT NULL DEFAULT 0`,
 		`
 		CREATE TABLE IF NOT EXISTS document_updates (
 			id BIGSERIAL PRIMARY KEY,
@@ -143,109 +144,40 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			update BYTEA NOT NULL,
 			actor_id UUID,
 			actor_type TEXT NOT NULL,
-			created_at TIMESTAMPTZ NOT NULL
+			created_at TIMESTAMPTZ NOT NULL,
+			CONSTRAINT fk_document_updates_workspace
+				FOREIGN KEY (workspace_id)
+				REFERENCES workspaces(id)
+				ON DELETE CASCADE,
+			CONSTRAINT fk_document_updates_document
+				FOREIGN KEY (workspace_id, document_id)
+				REFERENCES documents(workspace_id, id)
+				ON DELETE CASCADE
 		)
 		`,
 		`CREATE INDEX IF NOT EXISTS idx_document_updates_workspace_document_created ON document_updates (workspace_id, document_id, created_at ASC, id ASC)`,
 		`CREATE INDEX IF NOT EXISTS idx_document_updates_workspace_document_id ON document_updates (workspace_id, document_id, id ASC)`,
-		`DO $$
-		BEGIN
-			IF NOT EXISTS (
-				SELECT 1 FROM information_schema.tables
-				 WHERE table_schema = 'public' AND table_name = 'document_checkpoints'
-			) THEN
-				IF EXISTS (
-					SELECT 1 FROM information_schema.columns
-					 WHERE table_schema = 'public'
-					   AND table_name = 'document_heads'
-					   AND column_name = 'workspace_id'
-					   AND data_type = 'text'
-				) THEN
-					EXECUTE '
-						CREATE TABLE document_checkpoints (
-							id BIGSERIAL PRIMARY KEY,
-							workspace_id TEXT NOT NULL,
-							document_id TEXT NOT NULL,
-							update_id BIGINT NOT NULL,
-							crdt_state TEXT NOT NULL,
-							state_vector TEXT NOT NULL,
-							created_at TIMESTAMPTZ NOT NULL,
-							UNIQUE (workspace_id, document_id, update_id)
-						)';
-				ELSE
-					EXECUTE '
-						CREATE TABLE document_checkpoints (
-							id BIGSERIAL PRIMARY KEY,
-							workspace_id UUID NOT NULL,
-							document_id UUID NOT NULL,
-							update_id BIGINT NOT NULL,
-							crdt_state TEXT NOT NULL,
-							state_vector TEXT NOT NULL,
-							created_at TIMESTAMPTZ NOT NULL,
-							UNIQUE (workspace_id, document_id, update_id)
-						)';
-				END IF;
-			END IF;
-		END $$`,
-		`CREATE INDEX IF NOT EXISTS idx_document_checkpoints_workspace_document_update ON document_checkpoints (workspace_id, document_id, update_id DESC)`,
-		`UPDATE document_heads h
-		    SET update_id = COALESCE((
-			    SELECT MAX(u.id)
-			      FROM document_updates u
-			     WHERE u.workspace_id::text = h.workspace_id::text AND u.document_id = h.document_id
-		    ), 0)
-		  WHERE h.update_id = 0`,
-		`DO $$
-		BEGIN
-			IF EXISTS (
-				SELECT 1 FROM information_schema.columns
-				 WHERE table_name = 'document_heads' AND column_name = 'crdt_state'
-			) THEN
-				IF EXISTS (
-					SELECT 1 FROM information_schema.columns
-					 WHERE table_name = 'document_heads' AND column_name = 'crdt_state_update_id'
-				) THEN
-					EXECUTE '
-						INSERT INTO document_checkpoints (workspace_id, document_id, update_id, crdt_state, state_vector, created_at)
-						SELECT workspace_id,
-						       document_id,
-						       CASE WHEN crdt_state_update_id > 0 THEN crdt_state_update_id ELSE update_id END,
-						       crdt_state,
-						       state_vector,
-						       updated_at
-						  FROM document_heads
-						 WHERE crdt_state <> ''''
-						   AND CASE WHEN crdt_state_update_id > 0 THEN crdt_state_update_id ELSE update_id END > 0
-						ON CONFLICT (workspace_id, document_id, update_id) DO NOTHING';
-				ELSE
-					EXECUTE '
-						INSERT INTO document_checkpoints (workspace_id, document_id, update_id, crdt_state, state_vector, created_at)
-						SELECT workspace_id, document_id, update_id, crdt_state, state_vector, updated_at
-						  FROM document_heads
-						 WHERE crdt_state <> '''' AND update_id > 0
-						ON CONFLICT (workspace_id, document_id, update_id) DO NOTHING';
-				END IF;
-			END IF;
-		END $$`,
-		`ALTER TABLE document_heads DROP COLUMN IF EXISTS content`,
-		`ALTER TABLE document_heads DROP COLUMN IF EXISTS crdt_state`,
-		`ALTER TABLE document_heads DROP COLUMN IF EXISTS crdt_state_update_id`,
-		`DROP TABLE IF EXISTS document_mentions`,
 		`
-		CREATE TABLE IF NOT EXISTS users (
+		CREATE TABLE IF NOT EXISTS document_checkpoints (
+			id BIGSERIAL PRIMARY KEY,
 			workspace_id UUID NOT NULL,
-			id UUID PRIMARY KEY,
-			handle TEXT NOT NULL,
-			name TEXT NOT NULL,
-			role TEXT NOT NULL,
-			kind TEXT NOT NULL,
-			status TEXT NOT NULL,
+			document_id UUID NOT NULL,
+			update_id BIGINT NOT NULL,
+			crdt_state TEXT NOT NULL,
+			state_vector TEXT NOT NULL,
 			created_at TIMESTAMPTZ NOT NULL,
-			updated_at TIMESTAMPTZ NOT NULL
+			UNIQUE (workspace_id, document_id, update_id),
+			CONSTRAINT fk_document_checkpoints_workspace
+				FOREIGN KEY (workspace_id)
+				REFERENCES workspaces(id)
+				ON DELETE CASCADE,
+			CONSTRAINT fk_document_checkpoints_document
+				FOREIGN KEY (workspace_id, document_id)
+				REFERENCES documents(workspace_id, id)
+				ON DELETE CASCADE
 		)
 		`,
-		`ALTER TABLE users DROP COLUMN IF EXISTS daemon_id`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_workspace_handle ON users (workspace_id, handle)`,
+		`CREATE INDEX IF NOT EXISTS idx_document_checkpoints_workspace_document_update ON document_checkpoints (workspace_id, document_id, update_id DESC)`,
 		`
 		CREATE TABLE IF NOT EXISTS agents (
 			workspace_id UUID NOT NULL,
@@ -265,13 +197,19 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			current_run_id UUID,
 			last_heartbeat_at TIMESTAMPTZ,
 			last_run_completed TIMESTAMPTZ,
-			updated_at TIMESTAMPTZ NOT NULL
+			updated_at TIMESTAMPTZ NOT NULL,
+			CONSTRAINT uq_agents_workspace_id UNIQUE (workspace_id, id),
+			CONSTRAINT fk_agents_workspace
+				FOREIGN KEY (workspace_id)
+				REFERENCES workspaces(id)
+				ON DELETE CASCADE,
+			CONSTRAINT fk_agents_daemon
+				FOREIGN KEY (workspace_id, daemon_id)
+				REFERENCES daemons(workspace_id, id)
+				ON DELETE SET NULL (daemon_id)
 		)
 		`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_workspace_handle ON agents (workspace_id, handle)`,
-		`ALTER TABLE agents ADD COLUMN IF NOT EXISTS daemon_id UUID`,
-		`ALTER TABLE agents DROP COLUMN IF EXISTS codex_thread_id`,
-		`ALTER TABLE agents ADD COLUMN IF NOT EXISTS current_turn_id TEXT NOT NULL DEFAULT ''`,
 		`
 		CREATE TABLE IF NOT EXISTS agent_runs (
 			workspace_id UUID NOT NULL,
@@ -296,12 +234,73 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			log_tail JSONB NOT NULL DEFAULT '[]'::jsonb,
 			error TEXT NOT NULL,
 			assigned_task_ref TEXT NOT NULL,
-			updated_at TIMESTAMPTZ NOT NULL
+			updated_at TIMESTAMPTZ NOT NULL,
+			CONSTRAINT uq_agent_runs_workspace_id UNIQUE (workspace_id, id),
+			CONSTRAINT fk_agent_runs_workspace
+				FOREIGN KEY (workspace_id)
+				REFERENCES workspaces(id)
+				ON DELETE CASCADE,
+			CONSTRAINT fk_agent_runs_agent
+				FOREIGN KEY (workspace_id, agent_id)
+				REFERENCES agents(workspace_id, id)
+				ON DELETE CASCADE
 		)
 		`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_runs_workspace_agent_updated ON agent_runs (workspace_id, agent_id, updated_at DESC)`,
-		`ALTER TABLE agents ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT ''`,
+		`
+		CREATE TABLE IF NOT EXISTS workspace_members (
+			workspace_id UUID NOT NULL,
+			account_id UUID NOT NULL,
+			user_id UUID NOT NULL,
+			membership_role TEXT NOT NULL DEFAULT 'member',
+			status TEXT NOT NULL DEFAULT 'active',
+			invited_by UUID,
+			last_accessed_document_id UUID,
+			created_at TIMESTAMPTZ NOT NULL,
+			accepted_at TIMESTAMPTZ,
+			PRIMARY KEY (workspace_id, account_id),
+			CONSTRAINT fk_workspace_members_workspace
+				FOREIGN KEY (workspace_id)
+				REFERENCES workspaces(id)
+				ON DELETE CASCADE,
+			CONSTRAINT fk_workspace_members_account
+				FOREIGN KEY (account_id)
+				REFERENCES accounts(id)
+				ON DELETE CASCADE,
+			CONSTRAINT fk_workspace_members_user
+				FOREIGN KEY (workspace_id, user_id)
+				REFERENCES users(workspace_id, id)
+				ON DELETE CASCADE,
+			CONSTRAINT fk_workspace_members_invited_by
+				FOREIGN KEY (workspace_id, invited_by)
+				REFERENCES users(workspace_id, id)
+				ON DELETE SET NULL (invited_by),
+			CONSTRAINT fk_workspace_members_last_doc
+				FOREIGN KEY (workspace_id, last_accessed_document_id)
+				REFERENCES documents(workspace_id, id)
+				ON DELETE SET NULL (last_accessed_document_id)
+		)
+		`,
+		`CREATE INDEX IF NOT EXISTS idx_workspace_members_account ON workspace_members (account_id, status, workspace_id)`,
+		`
+		CREATE TABLE IF NOT EXISTS workspace_invites (
+			id UUID PRIMARY KEY,
+			workspace_id UUID NOT NULL,
+			token_hash TEXT UNIQUE NOT NULL,
+			created_by_user_id UUID NOT NULL,
+			expires_at TIMESTAMPTZ NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL,
+			CONSTRAINT fk_workspace_invites_workspace
+				FOREIGN KEY (workspace_id)
+				REFERENCES workspaces(id)
+				ON DELETE CASCADE,
+			CONSTRAINT fk_workspace_invites_created_by
+				FOREIGN KEY (workspace_id, created_by_user_id)
+				REFERENCES users(workspace_id, id)
+				ON DELETE CASCADE
+		)
+		`,
+		`CREATE INDEX IF NOT EXISTS idx_workspace_invites_workspace ON workspace_invites (workspace_id)`,
 		`
 		CREATE TABLE IF NOT EXISTS threads (
 			workspace_id UUID NOT NULL,
@@ -319,22 +318,20 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			created_by_handle TEXT NOT NULL,
 			created_by_name TEXT NOT NULL,
 			created_at TIMESTAMPTZ NOT NULL,
-			updated_at TIMESTAMPTZ NOT NULL
+			updated_at TIMESTAMPTZ NOT NULL,
+			CONSTRAINT uq_threads_workspace_id UNIQUE (workspace_id, id),
+			CONSTRAINT fk_threads_workspace
+				FOREIGN KEY (workspace_id)
+				REFERENCES workspaces(id)
+				ON DELETE CASCADE,
+			CONSTRAINT fk_threads_document
+				FOREIGN KEY (workspace_id, document_id)
+				REFERENCES documents(workspace_id, id)
+				ON DELETE CASCADE
 		)
 		`,
-		`ALTER TABLE threads ADD COLUMN IF NOT EXISTS client_operation_id TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE threads ALTER COLUMN created_by_id DROP NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_threads_workspace_document_updated ON threads (workspace_id, document_id, updated_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_threads_workspace_actor_operation ON threads (workspace_id, created_by_id, created_by_type, client_operation_id) WHERE client_operation_id <> ''`,
-		`DROP TABLE IF EXISTS workspace_snapshots`,
-		`ALTER TABLE threads DROP COLUMN IF EXISTS anchor`,
-		`ALTER TABLE threads ADD COLUMN IF NOT EXISTS anchor_relative_start TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE threads ADD COLUMN IF NOT EXISTS anchor_relative_end TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE threads ADD COLUMN IF NOT EXISTS anchor_kind TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE threads DROP COLUMN IF EXISTS anchor_start`,
-		`ALTER TABLE threads DROP COLUMN IF EXISTS anchor_end`,
-		`ALTER TABLE threads DROP COLUMN IF EXISTS anchor_line`,
-		`ALTER TABLE threads ADD COLUMN IF NOT EXISTS anchor_excerpt TEXT NOT NULL DEFAULT ''`,
 		`
 		CREATE TABLE IF NOT EXISTS thread_messages (
 			workspace_id UUID NOT NULL,
@@ -346,17 +343,33 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			author_name TEXT NOT NULL,
 			body TEXT NOT NULL,
 			kind TEXT NOT NULL,
-			created_at TIMESTAMPTZ NOT NULL
+			created_at TIMESTAMPTZ NOT NULL,
+			CONSTRAINT uq_thread_messages_workspace_id UNIQUE (workspace_id, id),
+			CONSTRAINT fk_thread_messages_workspace
+				FOREIGN KEY (workspace_id)
+				REFERENCES workspaces(id)
+				ON DELETE CASCADE,
+			CONSTRAINT fk_thread_messages_thread
+				FOREIGN KEY (workspace_id, thread_id)
+				REFERENCES threads(workspace_id, id)
+				ON DELETE CASCADE
 		)
 		`,
-		`ALTER TABLE thread_messages ALTER COLUMN author_id DROP NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_thread_messages_workspace_thread_created ON thread_messages (workspace_id, thread_id, created_at ASC)`,
 		`
 		CREATE TABLE IF NOT EXISTS thread_participants (
 			workspace_id UUID NOT NULL,
 			thread_id UUID NOT NULL,
 			participant_id UUID NOT NULL,
-			PRIMARY KEY (workspace_id, thread_id, participant_id)
+			PRIMARY KEY (workspace_id, thread_id, participant_id),
+			CONSTRAINT fk_thread_participants_workspace
+				FOREIGN KEY (workspace_id)
+				REFERENCES workspaces(id)
+				ON DELETE CASCADE,
+			CONSTRAINT fk_thread_participants_thread
+				FOREIGN KEY (workspace_id, thread_id)
+				REFERENCES threads(workspace_id, id)
+				ON DELETE CASCADE
 		)
 		`,
 		`
@@ -371,12 +384,19 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			selection_end INTEGER,
 			activity TEXT NOT NULL,
 			updated_at TIMESTAMPTZ NOT NULL,
-			PRIMARY KEY (workspace_id, actor_id)
+			PRIMARY KEY (workspace_id, actor_id),
+			CONSTRAINT fk_presences_workspace
+				FOREIGN KEY (workspace_id)
+				REFERENCES workspaces(id)
+				ON DELETE CASCADE,
+			CONSTRAINT fk_presences_document
+				FOREIGN KEY (workspace_id, document_id)
+				REFERENCES documents(workspace_id, id)
+				ON DELETE CASCADE
 		)
 		`,
-		`DROP TABLE IF EXISTS proposals`,
 		`
-			CREATE TABLE IF NOT EXISTS activities (
+		CREATE TABLE IF NOT EXISTS activities (
 			id BIGSERIAL PRIMARY KEY,
 			workspace_id UUID NOT NULL,
 			type TEXT NOT NULL,
@@ -395,15 +415,20 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			provenance_requested_by TEXT NOT NULL,
 			provenance_source TEXT NOT NULL,
 			provenance_intended_scope TEXT NOT NULL,
-				provenance_read_set_summary TEXT NOT NULL,
-				comment_id TEXT NOT NULL DEFAULT '',
-				presence_ref TEXT NOT NULL
-			)
-			`,
+			provenance_read_set_summary TEXT NOT NULL,
+			comment_id TEXT NOT NULL DEFAULT '',
+			presence_ref TEXT NOT NULL,
+			CONSTRAINT fk_activities_workspace
+				FOREIGN KEY (workspace_id)
+				REFERENCES workspaces(id)
+				ON DELETE CASCADE,
+			CONSTRAINT fk_activities_document
+				FOREIGN KEY (workspace_id, document_id)
+				REFERENCES documents(workspace_id, id)
+				ON DELETE SET NULL (document_id)
+		)
+		`,
 		`CREATE INDEX IF NOT EXISTS idx_activities_workspace_occurred ON activities (workspace_id, occurred_at DESC, id DESC)`,
-		`ALTER TABLE activities DROP COLUMN IF EXISTS proposal_id`,
-		`ALTER TABLE activities ALTER COLUMN comment_id SET DEFAULT ''`,
-		`ALTER TABLE activities DROP COLUMN IF EXISTS new_content`,
 		`
 		CREATE TABLE IF NOT EXISTS agent_events (
 			workspace_id UUID NOT NULL,
@@ -429,14 +454,33 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			claimed_at TIMESTAMPTZ,
 			completed_at TIMESTAMPTZ,
 			created_at TIMESTAMPTZ NOT NULL,
-			updated_at TIMESTAMPTZ NOT NULL
+			updated_at TIMESTAMPTZ NOT NULL,
+			CONSTRAINT fk_agent_events_workspace
+				FOREIGN KEY (workspace_id)
+				REFERENCES workspaces(id)
+				ON DELETE CASCADE,
+			CONSTRAINT fk_agent_events_agent
+				FOREIGN KEY (workspace_id, agent_id)
+				REFERENCES agents(workspace_id, id)
+				ON DELETE CASCADE,
+			CONSTRAINT fk_agent_events_run
+				FOREIGN KEY (workspace_id, run_id)
+				REFERENCES agent_runs(workspace_id, id)
+				ON DELETE SET NULL (run_id),
+			CONSTRAINT fk_agent_events_document
+				FOREIGN KEY (workspace_id, document_id)
+				REFERENCES documents(workspace_id, id)
+				ON DELETE SET NULL (document_id),
+			CONSTRAINT fk_agent_events_thread
+				FOREIGN KEY (workspace_id, thread_id)
+				REFERENCES threads(workspace_id, id)
+				ON DELETE SET NULL (thread_id),
+			CONSTRAINT fk_agent_events_thread_message
+				FOREIGN KEY (workspace_id, thread_message_id)
+				REFERENCES thread_messages(workspace_id, id)
+				ON DELETE SET NULL (thread_message_id)
 		)
 		`,
-		`ALTER TABLE agent_events ADD COLUMN IF NOT EXISTS box TEXT NOT NULL DEFAULT 'for_me'`,
-		`ALTER TABLE agent_events DROP COLUMN IF EXISTS anchor_start`,
-		`ALTER TABLE agent_events DROP COLUMN IF EXISTS anchor_end`,
-		`ALTER TABLE agent_events ADD COLUMN IF NOT EXISTS from_update_id BIGINT NOT NULL DEFAULT 0`,
-		`ALTER TABLE agent_events ADD COLUMN IF NOT EXISTS to_update_id BIGINT NOT NULL DEFAULT 0`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_events_workspace_agent_claim ON agent_events (workspace_id, agent_id, status, available_at, created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_events_workspace_agent_box_status ON agent_events (workspace_id, agent_id, box, status, created_at)`,
 		`
@@ -447,7 +491,19 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			update_id BIGINT NOT NULL,
 			state_vector TEXT NOT NULL,
 			viewed_at TIMESTAMPTZ NOT NULL,
-			PRIMARY KEY (workspace_id, agent_id, document_id)
+			PRIMARY KEY (workspace_id, agent_id, document_id),
+			CONSTRAINT fk_agent_document_views_workspace
+				FOREIGN KEY (workspace_id)
+				REFERENCES workspaces(id)
+				ON DELETE CASCADE,
+			CONSTRAINT fk_agent_document_views_agent
+				FOREIGN KEY (workspace_id, agent_id)
+				REFERENCES agents(workspace_id, id)
+				ON DELETE CASCADE,
+			CONSTRAINT fk_agent_document_views_document
+				FOREIGN KEY (workspace_id, document_id)
+				REFERENCES documents(workspace_id, id)
+				ON DELETE CASCADE
 		)
 		`,
 	}
@@ -459,166 +515,23 @@ func initPostgresSchemaTables(db *sql.DB) error {
 	return nil
 }
 
-// initPostgresSchemaConstraints adds FK constraints, composite unique indexes,
-// and constraint triggers after the native UUID tables exist.
+// initPostgresSchemaConstraints adds the cyclic FK and constraint triggers after
+// the native UUID tables exist.
 func initPostgresSchemaConstraints(db *sql.DB) error {
 	statements := []string{
-		// ── Composite unique indexes for same-workspace enforcement ──
-
-		`CREATE UNIQUE INDEX IF NOT EXISTS uq_documents_workspace_id ON documents (workspace_id, id)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS uq_users_workspace_id ON users (workspace_id, id)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS uq_agents_workspace_id ON agents (workspace_id, id)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS uq_daemons_workspace_id ON daemons (workspace_id, id)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS uq_threads_workspace_id ON threads (workspace_id, id)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS uq_thread_messages_workspace_id ON thread_messages (workspace_id, id)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_runs_workspace_id ON agent_runs (workspace_id, id)`,
-
-		// ── Workspace ownership (CASCADE) ──
-
-		`DO $$ BEGIN ALTER TABLE workspace_members ADD CONSTRAINT fk_workspace_members_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE workspace_members VALIDATE CONSTRAINT fk_workspace_members_workspace`,
-
-		`DO $$ BEGIN ALTER TABLE workspace_invites ADD CONSTRAINT fk_workspace_invites_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE workspace_invites VALIDATE CONSTRAINT fk_workspace_invites_workspace`,
-
-		`DO $$ BEGIN ALTER TABLE daemons ADD CONSTRAINT fk_daemons_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE daemons VALIDATE CONSTRAINT fk_daemons_workspace`,
-
-		`DO $$ BEGIN ALTER TABLE documents ADD CONSTRAINT fk_documents_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE documents VALIDATE CONSTRAINT fk_documents_workspace`,
-
-		`DO $$ BEGIN ALTER TABLE document_heads ADD CONSTRAINT fk_document_heads_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE document_heads VALIDATE CONSTRAINT fk_document_heads_workspace`,
-
-		`DO $$ BEGIN ALTER TABLE document_updates ADD CONSTRAINT fk_document_updates_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE document_updates VALIDATE CONSTRAINT fk_document_updates_workspace`,
-
-		`DO $$ BEGIN ALTER TABLE document_checkpoints ADD CONSTRAINT fk_document_checkpoints_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE document_checkpoints VALIDATE CONSTRAINT fk_document_checkpoints_workspace`,
-
-		`DO $$ BEGIN ALTER TABLE users ADD CONSTRAINT fk_users_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE users VALIDATE CONSTRAINT fk_users_workspace`,
-
-		`DO $$ BEGIN ALTER TABLE agents ADD CONSTRAINT fk_agents_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE agents VALIDATE CONSTRAINT fk_agents_workspace`,
-
-		`DO $$ BEGIN ALTER TABLE agent_runs ADD CONSTRAINT fk_agent_runs_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE agent_runs VALIDATE CONSTRAINT fk_agent_runs_workspace`,
-
-		`DO $$ BEGIN ALTER TABLE threads ADD CONSTRAINT fk_threads_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE threads VALIDATE CONSTRAINT fk_threads_workspace`,
-
-		`DO $$ BEGIN ALTER TABLE thread_messages ADD CONSTRAINT fk_thread_messages_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE thread_messages VALIDATE CONSTRAINT fk_thread_messages_workspace`,
-
-		`DO $$ BEGIN ALTER TABLE thread_participants ADD CONSTRAINT fk_thread_participants_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE thread_participants VALIDATE CONSTRAINT fk_thread_participants_workspace`,
-
-		`DO $$ BEGIN ALTER TABLE presences ADD CONSTRAINT fk_presences_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE presences VALIDATE CONSTRAINT fk_presences_workspace`,
-
-		`DO $$ BEGIN ALTER TABLE activities ADD CONSTRAINT fk_activities_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE activities VALIDATE CONSTRAINT fk_activities_workspace`,
-
-		`DO $$ BEGIN ALTER TABLE agent_events ADD CONSTRAINT fk_agent_events_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE agent_events VALIDATE CONSTRAINT fk_agent_events_workspace`,
-
-		`DO $$ BEGIN ALTER TABLE agent_document_views ADD CONSTRAINT fk_agent_document_views_workspace FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE agent_document_views VALIDATE CONSTRAINT fk_agent_document_views_workspace`,
-
-		// ── Account/auth ──
-
-		`DO $$ BEGIN ALTER TABLE account_email_tokens ADD CONSTRAINT fk_account_email_tokens_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE account_email_tokens VALIDATE CONSTRAINT fk_account_email_tokens_account`,
-
-		`DO $$ BEGIN ALTER TABLE accounts ADD CONSTRAINT fk_accounts_last_workspace FOREIGN KEY (last_accessed_workspace_id) REFERENCES workspaces(id) ON DELETE SET NULL NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE accounts VALIDATE CONSTRAINT fk_accounts_last_workspace`,
-
-		`DO $$ BEGIN ALTER TABLE workspace_members ADD CONSTRAINT fk_workspace_members_account FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE workspace_members VALIDATE CONSTRAINT fk_workspace_members_account`,
-
-		// ── Membership/invite (composite same-workspace enforcement) ──
-
-		`DO $$ BEGIN ALTER TABLE workspace_members ADD CONSTRAINT fk_workspace_members_user FOREIGN KEY (workspace_id, user_id) REFERENCES users(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE workspace_members VALIDATE CONSTRAINT fk_workspace_members_user`,
-
-		`DO $$ BEGIN ALTER TABLE workspace_members ADD CONSTRAINT fk_workspace_members_invited_by FOREIGN KEY (workspace_id, invited_by) REFERENCES users(workspace_id, id) ON DELETE SET NULL (invited_by) NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE workspace_members VALIDATE CONSTRAINT fk_workspace_members_invited_by`,
-
-		`DO $$ BEGIN ALTER TABLE workspace_invites ADD CONSTRAINT fk_workspace_invites_created_by FOREIGN KEY (workspace_id, created_by_user_id) REFERENCES users(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE workspace_invites VALIDATE CONSTRAINT fk_workspace_invites_created_by`,
-
-		// ── Daemon/agent/run (composite same-workspace enforcement) ──
-
-		`DO $$ BEGIN ALTER TABLE agents ADD CONSTRAINT fk_agents_daemon FOREIGN KEY (workspace_id, daemon_id) REFERENCES daemons(workspace_id, id) ON DELETE SET NULL (daemon_id) NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE agents VALIDATE CONSTRAINT fk_agents_daemon`,
-
-		`DO $$ BEGIN ALTER TABLE agent_runs ADD CONSTRAINT fk_agent_runs_agent FOREIGN KEY (workspace_id, agent_id) REFERENCES agents(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE agent_runs VALIDATE CONSTRAINT fk_agent_runs_agent`,
-
-		`DO $$ BEGIN ALTER TABLE agents ADD CONSTRAINT fk_agents_current_run FOREIGN KEY (workspace_id, current_run_id) REFERENCES agent_runs(workspace_id, id) ON DELETE SET NULL (current_run_id) DEFERRABLE INITIALLY DEFERRED NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE agents VALIDATE CONSTRAINT fk_agents_current_run`,
-
-		`DO $$ BEGIN ALTER TABLE agent_events ADD CONSTRAINT fk_agent_events_agent FOREIGN KEY (workspace_id, agent_id) REFERENCES agents(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE agent_events VALIDATE CONSTRAINT fk_agent_events_agent`,
-
-		`DO $$ BEGIN ALTER TABLE agent_events ADD CONSTRAINT fk_agent_events_run FOREIGN KEY (workspace_id, run_id) REFERENCES agent_runs(workspace_id, id) ON DELETE SET NULL (run_id) NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE agent_events VALIDATE CONSTRAINT fk_agent_events_run`,
-
-		`DO $$ BEGIN ALTER TABLE agent_document_views ADD CONSTRAINT fk_agent_document_views_agent FOREIGN KEY (workspace_id, agent_id) REFERENCES agents(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE agent_document_views VALIDATE CONSTRAINT fk_agent_document_views_agent`,
-
-		// ── Documents (composite same-workspace enforcement) ──
-
-		// NOTE: workspaces(id, root_document_id) -> documents(workspace_id, id) FK is
-		// deferred to a future phase. The current workspace creation flow inserts the
-		// workspace row and creates the root document in a separate step (ensureRootDocument),
-		// so a FK constraint would fail even with DEFERRABLE INITIALLY DEFERRED since the
-		// document is created outside the workspace insert transaction.
-
-		`DO $$ BEGIN ALTER TABLE document_heads ADD CONSTRAINT fk_document_heads_document FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE document_heads VALIDATE CONSTRAINT fk_document_heads_document`,
-
-		`DO $$ BEGIN ALTER TABLE document_updates ADD CONSTRAINT fk_document_updates_document FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE document_updates VALIDATE CONSTRAINT fk_document_updates_document`,
-
-		`DO $$ BEGIN ALTER TABLE document_checkpoints ADD CONSTRAINT fk_document_checkpoints_document FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE document_checkpoints VALIDATE CONSTRAINT fk_document_checkpoints_document`,
-
-		`DO $$ BEGIN ALTER TABLE threads ADD CONSTRAINT fk_threads_document FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE threads VALIDATE CONSTRAINT fk_threads_document`,
-
-		`DO $$ BEGIN ALTER TABLE presences ADD CONSTRAINT fk_presences_document FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE presences VALIDATE CONSTRAINT fk_presences_document`,
-
-		`DO $$ BEGIN ALTER TABLE agent_document_views ADD CONSTRAINT fk_agent_document_views_document FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE agent_document_views VALIDATE CONSTRAINT fk_agent_document_views_document`,
-
-		// SET NULL FKs for optional document refs use composite keys with column-list SET NULL
-		// (Postgres 15+) to null only the ref column, not workspace_id.
-		`DO $$ BEGIN ALTER TABLE workspace_members ADD CONSTRAINT fk_workspace_members_last_doc FOREIGN KEY (workspace_id, last_accessed_document_id) REFERENCES documents(workspace_id, id) ON DELETE SET NULL (last_accessed_document_id) NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE workspace_members VALIDATE CONSTRAINT fk_workspace_members_last_doc`,
-
-		`DO $$ BEGIN ALTER TABLE activities ADD CONSTRAINT fk_activities_document FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id) ON DELETE SET NULL (document_id) NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE activities VALIDATE CONSTRAINT fk_activities_document`,
-
-		`DO $$ BEGIN ALTER TABLE agent_events ADD CONSTRAINT fk_agent_events_document FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id) ON DELETE SET NULL (document_id) NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE agent_events VALIDATE CONSTRAINT fk_agent_events_document`,
-
-		// ── Threads/messages (composite same-workspace enforcement) ──
-
-		`DO $$ BEGIN ALTER TABLE thread_messages ADD CONSTRAINT fk_thread_messages_thread FOREIGN KEY (workspace_id, thread_id) REFERENCES threads(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE thread_messages VALIDATE CONSTRAINT fk_thread_messages_thread`,
-
-		`DO $$ BEGIN ALTER TABLE thread_participants ADD CONSTRAINT fk_thread_participants_thread FOREIGN KEY (workspace_id, thread_id) REFERENCES threads(workspace_id, id) ON DELETE CASCADE NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE thread_participants VALIDATE CONSTRAINT fk_thread_participants_thread`,
-
-		// SET NULL FKs for optional thread/message refs use composite keys with column-list SET NULL.
-		`DO $$ BEGIN ALTER TABLE agent_events ADD CONSTRAINT fk_agent_events_thread FOREIGN KEY (workspace_id, thread_id) REFERENCES threads(workspace_id, id) ON DELETE SET NULL (thread_id) NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE agent_events VALIDATE CONSTRAINT fk_agent_events_thread`,
-
-		`DO $$ BEGIN ALTER TABLE agent_events ADD CONSTRAINT fk_agent_events_thread_message FOREIGN KEY (workspace_id, thread_message_id) REFERENCES thread_messages(workspace_id, id) ON DELETE SET NULL (thread_message_id) NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-		`ALTER TABLE agent_events VALIDATE CONSTRAINT fk_agent_events_thread_message`,
+		// agents.current_run_id and agent_runs.agent_id form the only FK cycle, so
+		// current_run is the single justified post-create FK. It is still validated on create.
+		`DO $$
+		BEGIN
+			ALTER TABLE agents
+				ADD CONSTRAINT fk_agents_current_run
+				FOREIGN KEY (workspace_id, current_run_id)
+				REFERENCES agent_runs(workspace_id, id)
+				ON DELETE SET NULL (current_run_id)
+				DEFERRABLE INITIALLY DEFERRED;
+		EXCEPTION
+			WHEN duplicate_object THEN NULL;
+		END $$`,
 
 		// ── Polymorphic constraint triggers ──
 
@@ -825,7 +738,7 @@ func (s *Store) loadWorkspaceMetadataPostgresLocked() error {
 	var name string
 	var rootDocumentID string
 	err := s.db.QueryRow(
-		`SELECT name, root_document_id::text FROM workspaces WHERE id::text = $1`,
+		`SELECT name, root_document_id::text FROM workspaces WHERE id = $1::uuid`,
 		s.state.WorkspaceID,
 	).Scan(&name, &rootDocumentID)
 	if err == sql.ErrNoRows {
@@ -1000,7 +913,7 @@ func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) error {
 				    SET state_vector = $1,
 				        update_id = $2,
 				        updated_at = $3
-				  WHERE workspace_id::text = $4 AND document_id::text = $5`,
+				  WHERE workspace_id = $4::uuid AND document_id = $5::uuid`,
 				document.StateVector,
 				document.UpdateID,
 				document.UpdatedAt,
@@ -1059,7 +972,7 @@ func (s *Store) maybeInsertDocumentCheckpointPostgresLocked(tx *sql.Tx, document
 	err := tx.QueryRow(
 		`SELECT COALESCE(MAX(update_id), 0)
 		   FROM document_checkpoints
-		  WHERE workspace_id::text = $1 AND document_id::text = $2`,
+		  WHERE workspace_id = $1::uuid AND document_id = $2::uuid`,
 		s.state.WorkspaceID,
 		document.ID,
 	).Scan(&lastCheckpointID)
@@ -1109,17 +1022,17 @@ func (s *Store) replaceUsersPostgresLocked(tx *sql.Tx) error {
 		ids = append(ids, id)
 	}
 	if len(ids) == 0 {
-		_, err := tx.Exec(`DELETE FROM users WHERE workspace_id::text = $1`, s.state.WorkspaceID)
+		_, err := tx.Exec(`DELETE FROM users WHERE workspace_id = $1::uuid`, s.state.WorkspaceID)
 		return err
 	}
 	// Build a VALUES list for the keep set.
-	keepQuery := `DELETE FROM users WHERE workspace_id::text = $1 AND id NOT IN (`
+	keepQuery := `DELETE FROM users WHERE workspace_id = $1::uuid AND id NOT IN (`
 	args := []any{s.state.WorkspaceID}
 	for i, id := range ids {
 		if i > 0 {
 			keepQuery += ","
 		}
-		keepQuery += fmt.Sprintf("$%d", i+2)
+		keepQuery += fmt.Sprintf("$%d::uuid", i+2)
 		args = append(args, id)
 	}
 	keepQuery += ")"
@@ -1140,16 +1053,16 @@ func (s *Store) replaceAgentsPostgresLocked(tx *sql.Tx) error {
 		ids = append(ids, id)
 	}
 	if len(ids) == 0 {
-		_, err := tx.Exec(`DELETE FROM agents WHERE workspace_id::text = $1`, s.state.WorkspaceID)
+		_, err := tx.Exec(`DELETE FROM agents WHERE workspace_id = $1::uuid`, s.state.WorkspaceID)
 		return err
 	}
-	keepQuery := `DELETE FROM agents WHERE workspace_id::text = $1 AND id NOT IN (`
+	keepQuery := `DELETE FROM agents WHERE workspace_id = $1::uuid AND id NOT IN (`
 	args := []any{s.state.WorkspaceID}
 	for i, id := range ids {
 		if i > 0 {
 			keepQuery += ","
 		}
-		keepQuery += fmt.Sprintf("$%d", i+2)
+		keepQuery += fmt.Sprintf("$%d::uuid", i+2)
 		args = append(args, id)
 	}
 	keepQuery += ")"
@@ -1363,16 +1276,16 @@ func (s *Store) replaceAgentRunsPostgresLocked(tx *sql.Tx) error {
 		ids = append(ids, id)
 	}
 	if len(ids) == 0 {
-		_, err := tx.Exec(`DELETE FROM agent_runs WHERE workspace_id::text = $1`, s.state.WorkspaceID)
+		_, err := tx.Exec(`DELETE FROM agent_runs WHERE workspace_id = $1::uuid`, s.state.WorkspaceID)
 		return err
 	}
-	keepQuery := `DELETE FROM agent_runs WHERE workspace_id::text = $1 AND id NOT IN (`
+	keepQuery := `DELETE FROM agent_runs WHERE workspace_id = $1::uuid AND id NOT IN (`
 	args := []any{s.state.WorkspaceID}
 	for i, id := range ids {
 		if i > 0 {
 			keepQuery += ","
 		}
-		keepQuery += fmt.Sprintf("$%d", i+2)
+		keepQuery += fmt.Sprintf("$%d::uuid", i+2)
 		args = append(args, id)
 	}
 	keepQuery += ")"
@@ -1877,7 +1790,7 @@ func (s *Store) loadAgentDocumentViewsPostgresLocked() error {
 	rows, err := s.db.Query(
 		`SELECT agent_id::text, document_id::text, update_id, state_vector, viewed_at
 		   FROM agent_document_views
-		  WHERE workspace_id::text = $1`,
+		  WHERE workspace_id = $1::uuid`,
 		s.state.WorkspaceID,
 	)
 	if err != nil {
@@ -1905,7 +1818,7 @@ func documentContentAtUpdatePostgres(db *sql.DB, workspaceID string, document *D
 	err := db.QueryRow(
 		`SELECT update_id, crdt_state
 		   FROM document_checkpoints
-		  WHERE workspace_id::text = $1 AND document_id::text = $2 AND update_id <= $3
+		  WHERE workspace_id = $1::uuid AND document_id = $2::uuid AND update_id <= $3
 		  ORDER BY update_id DESC
 		  LIMIT 1`,
 		workspaceID,
@@ -1927,8 +1840,8 @@ func documentContentAtUpdatePostgres(db *sql.DB, workspaceID string, document *D
 	rows, err := db.Query(
 		`SELECT update
 		   FROM document_updates
-		  WHERE workspace_id::text = $1
-		    AND document_id::text = $2
+		  WHERE workspace_id = $1::uuid
+		    AND document_id = $2::uuid
 		    AND id > $3
 		    AND id <= $4
 		  ORDER BY id ASC`,
@@ -1964,17 +1877,17 @@ func (s *Store) ensurePostgresCheckpointsLocked() error {
 		        COALESCE(checkpoint.update_id, 0) AS checkpoint_update_id
 		   FROM documents d
 		   JOIN document_heads h
-		     ON h.workspace_id::text = d.workspace_id::text AND h.document_id::text = d.id::text
+		     ON h.workspace_id = d.workspace_id AND h.document_id = d.id
 		   LEFT JOIN LATERAL (
 		       SELECT update_id
 		         FROM document_checkpoints c
-		        WHERE c.workspace_id::text = d.workspace_id::text
-		          AND c.document_id::text = d.id::text
+		        WHERE c.workspace_id = d.workspace_id
+		          AND c.document_id = d.id
 		          AND c.update_id <= h.update_id
 		        ORDER BY c.update_id DESC
 		        LIMIT 1
 		   ) checkpoint ON TRUE
-		  WHERE d.workspace_id::text = $1
+		  WHERE d.workspace_id = $1::uuid
 		    AND h.update_id > 0
 		    AND (checkpoint.update_id IS NULL OR h.update_id - checkpoint.update_id > $2)
 		  ORDER BY d.id ASC`,
@@ -2033,7 +1946,7 @@ func (s *Store) insertPostgresCheckpointAtHeadTxLocked(tx *sql.Tx, documentID st
 	err := tx.QueryRow(
 		`SELECT update_id, crdt_state
 		   FROM document_checkpoints
-		  WHERE workspace_id::text = $1 AND document_id::text = $2 AND update_id <= $3
+		  WHERE workspace_id = $1::uuid AND document_id = $2::uuid AND update_id <= $3
 		  ORDER BY update_id DESC
 		  LIMIT 1`,
 		s.state.WorkspaceID,
@@ -2057,8 +1970,8 @@ func (s *Store) insertPostgresCheckpointAtHeadTxLocked(tx *sql.Tx, documentID st
 	rows, err := tx.Query(
 		`SELECT update
 		   FROM document_updates
-		  WHERE workspace_id::text = $1
-		    AND document_id::text = $2
+		  WHERE workspace_id = $1::uuid
+		    AND document_id = $2::uuid
 		    AND id > $3
 		    AND id <= $4
 		  ORDER BY id ASC`,
@@ -2120,7 +2033,7 @@ func (s *Store) loadUsersPostgresLocked() error {
 	rows, err := s.db.Query(
 		`SELECT id::text, handle, name, role, kind, status, created_at, updated_at
 		   FROM users
-		  WHERE workspace_id::text = $1`,
+		  WHERE workspace_id = $1::uuid`,
 		s.state.WorkspaceID,
 	)
 	if err != nil {
@@ -2151,7 +2064,7 @@ func (s *Store) loadDaemonsPostgresLocked() error {
 	rows, err := s.db.Query(
 		`SELECT id::text, workspace_id::text, name, status, daemon_version, os, arch, runtime_detections::text, last_seen_at, created_at, deleted_at
 		   FROM daemons
-		  WHERE workspace_id::text = $1
+		  WHERE workspace_id = $1::uuid
 		    AND status <> 'deleted'`,
 		s.state.WorkspaceID,
 	)
@@ -2197,7 +2110,7 @@ func (s *Store) loadAgentsPostgresLocked() error {
 		        current_task, current_activity, COALESCE(current_run_id::text, ''), last_heartbeat_at,
 		        last_run_completed, updated_at
 		   FROM agents
-		  WHERE workspace_id::text = $1`,
+		  WHERE workspace_id = $1::uuid`,
 		s.state.WorkspaceID,
 	)
 	if err != nil {
@@ -2248,7 +2161,7 @@ func (s *Store) loadAgentRunsPostgresLocked() error {
 		        launch_time, last_heartbeat_at, completed_at, exit_code, last_message,
 		        log_tail, error, assigned_task_ref, updated_at
 		   FROM agent_runs
-		  WHERE workspace_id::text = $1`,
+		  WHERE workspace_id = $1::uuid`,
 		s.state.WorkspaceID,
 	)
 	if err != nil {
@@ -2271,7 +2184,7 @@ func (s *Store) loadPresencesPostgresLocked() error {
 	rows, err := s.db.Query(
 		`SELECT actor_id::text, actor_type, document_id::text, file_path, mode, selection_start, selection_end, activity, updated_at
 		   FROM presences
-		  WHERE workspace_id::text = $1`,
+		  WHERE workspace_id = $1::uuid`,
 		s.state.WorkspaceID,
 	)
 	if err != nil {
@@ -2311,7 +2224,7 @@ func (s *Store) loadActivitiesPostgresLocked() error {
 		        provenance_intended_scope, provenance_read_set_summary,
 		        presence_ref
 		   FROM activities
-		  WHERE workspace_id::text = $1
+		  WHERE workspace_id = $1::uuid
 		  ORDER BY occurred_at DESC, id DESC
 		  LIMIT 100`,
 		s.state.WorkspaceID,
@@ -2362,17 +2275,17 @@ func (s *Store) loadDocumentsPostgresLocked() error {
 		        d.create_client_operation_id
 		   FROM documents d
 		   JOIN document_heads h
-		     ON h.workspace_id::text = d.workspace_id::text AND h.document_id::text = d.id::text
+		     ON h.workspace_id = d.workspace_id AND h.document_id = d.id
 		   LEFT JOIN LATERAL (
 		       SELECT state_vector
 		         FROM document_checkpoints c
-		        WHERE c.workspace_id::text = d.workspace_id::text
-		          AND c.document_id::text = d.id::text
+		        WHERE c.workspace_id = d.workspace_id
+		          AND c.document_id = d.id
 		          AND c.update_id <= h.update_id
 		        ORDER BY c.update_id DESC
 		        LIMIT 1
 		   ) checkpoint ON TRUE
-		  WHERE d.workspace_id::text = $1
+		  WHERE d.workspace_id = $1::uuid
 		  ORDER BY d.id ASC`,
 		s.state.WorkspaceID,
 	)
@@ -2409,7 +2322,7 @@ func (s *Store) restoreDocumentDocPostgresLocked(document *Document) (*crdt.Doc,
 	err := s.db.QueryRow(
 		`SELECT update_id, crdt_state
 		   FROM document_checkpoints
-		  WHERE workspace_id::text = $1 AND document_id::text = $2 AND update_id <= $3
+		  WHERE workspace_id = $1::uuid AND document_id = $2::uuid AND update_id <= $3
 		  ORDER BY update_id DESC
 		  LIMIT 1`,
 		s.state.WorkspaceID,
@@ -2438,8 +2351,8 @@ func (s *Store) restoreDocumentDocPostgresLocked(document *Document) (*crdt.Doc,
 	updateRows, err := s.db.Query(
 		`SELECT update
 		   FROM document_updates
-		  WHERE workspace_id::text = $1
-		    AND document_id::text = $2
+		  WHERE workspace_id = $1::uuid
+		    AND document_id = $2::uuid
 		    AND id > $3
 		    AND id <= $4
 		  ORDER BY id ASC`,
@@ -2473,7 +2386,7 @@ func (s *Store) loadThreadsPostgresLocked() error {
 		        anchor_kind, anchor_excerpt, COALESCE(created_by_id::text, ''), created_by_type,
 		        created_by_handle, created_by_name, created_at, updated_at
 		   FROM threads
-		  WHERE workspace_id::text = $1`,
+		  WHERE workspace_id = $1::uuid`,
 		s.state.WorkspaceID,
 	)
 	if err != nil {
@@ -2495,7 +2408,7 @@ func (s *Store) loadThreadsPostgresLocked() error {
 	participants, err := s.db.Query(
 		`SELECT thread_id::text, participant_id::text
 		   FROM thread_participants
-		  WHERE workspace_id::text = $1
+		  WHERE workspace_id = $1::uuid
 		  ORDER BY thread_id, participant_id`,
 		s.state.WorkspaceID,
 	)
@@ -2521,7 +2434,7 @@ func (s *Store) loadThreadsPostgresLocked() error {
 	messages, err := s.db.Query(
 		`SELECT id::text, thread_id::text, COALESCE(author_id::text, ''), author_type, author_handle, author_name, body, kind, created_at
 		   FROM thread_messages
-		  WHERE workspace_id::text = $1
+		  WHERE workspace_id = $1::uuid
 		  ORDER BY created_at ASC, id ASC`,
 		s.state.WorkspaceID,
 	)
@@ -2550,7 +2463,7 @@ func (s *Store) loadAgentEventsPostgresLocked() error {
 		        summary, prompt, dedup_key, COALESCE(claimed_by::text, ''), COALESCE(run_id::text, ''), last_error, attempt_count,
 		        available_at, claimed_at, completed_at, created_at, updated_at
 		   FROM agent_events
-		  WHERE workspace_id::text = $1`,
+		  WHERE workspace_id = $1::uuid`,
 		s.state.WorkspaceID,
 	)
 	if err != nil {
