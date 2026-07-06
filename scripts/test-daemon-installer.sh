@@ -155,6 +155,7 @@ common_args="
 
 PATH="$test_bin:$PATH" NOTTY_CODEX_COMMAND="$tmp_dir/missing-codex" HOME="$tmp_dir/home-missing" sh "$installer" $common_args > "$tmp_dir/missing.out" 2> "$tmp_dir/missing.err"
 grep -q "Codex runtime unavailable" "$tmp_dir/missing.err" || fail "missing codex warning did not explain runtime availability"
+grep -q "document sync only; agent sessions are unavailable" "$tmp_dir/missing.err" || fail "missing codex warning did not name the degraded mode"
 assert_executable "$tmp_dir/install/notty-daemon"
 assert_file "$tmp_dir/data/daemons/ws-test/daemon.env"
 grep -q "NOTTY_CODEX_COMMAND='$tmp_dir/missing-codex'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "missing codex install did not preserve configured command"
@@ -191,10 +192,14 @@ assert_file "$tmp_dir/data/daemons/ws-test/daemon.env"
 grep -q "NOTTY_CODEX_COMMAND='$ok_codex'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "env file did not preserve configured Codex command"
 grep -q "NOTTY_DAEMON_VERSION='$version'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "env file did not preserve daemon version"
 grep -q "NOTTY_DATA_DIR='$tmp_dir/data'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "env file did not preserve daemon data dir"
-grep -q "^export PATH='" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "env file did not persist daemon PATH"
+if grep -q "^export PATH=" "$tmp_dir/data/daemons/ws-test/daemon.env"; then
+	fail "env file must not persist a PATH snapshot"
+fi
+grep -q "NOTTY_TOOL_DIR_CODEX='" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "env file did not persist resolved codex tool dir"
 grep -q "NOTTY_DAEMON_VERSION NOTTY_DATA_DIR" "$tmp_dir/data/daemons/ws-test/run.sh" || fail "run script did not export daemon version"
 grep -q "NOTTY_DATA_DIR NOTTY_WORKSPACE_DIR" "$tmp_dir/data/daemons/ws-test/run.sh" || fail "run script did not export daemon data dir"
-grep -q "NOTTY_CODEX_COMMAND PATH" "$tmp_dir/data/daemons/ws-test/run.sh" || fail "run script did not export daemon PATH"
+grep -q "NOTTY_CODEX_COMMAND NOTTY_TOOL_DIR_CODEX" "$tmp_dir/data/daemons/ws-test/run.sh" || fail "run script did not export codex tool dir"
+grep -q "notty_derive_daemon_path" "$tmp_dir/data/daemons/ws-test/run.sh" || fail "run script does not re-derive PATH at start"
 grep -q "export PATH='$tmp_dir/install':\"\$PATH\"" "$tmp_dir/data/daemons/ws-test/run.sh" || fail "run script did not prepend install directory to PATH"
 
 fake_path="$tmp_dir/fake-path"
@@ -215,7 +220,7 @@ assert_executable "$tmp_dir/install-path/notty-daemon"
 assert_file "$tmp_dir/data-path/daemons/ws-path/daemon.env"
 grep -q "NOTTY_CODEX_COMMAND='codex'" "$tmp_dir/data-path/daemons/ws-path/daemon.env" || fail "env file did not preserve bare Codex command"
 grep -q "NOTTY_DATA_DIR='$tmp_dir/data-path'" "$tmp_dir/data-path/daemons/ws-path/daemon.env" || fail "env file did not preserve configured data dir"
-grep -q "$fake_path" "$tmp_dir/data-path/daemons/ws-path/daemon.env" || fail "env file did not persist install shell PATH"
+grep -q "NOTTY_TOOL_DIR_CODEX='$fake_path'" "$tmp_dir/data-path/daemons/ws-path/daemon.env" || fail "env file did not persist resolved codex tool dir from install shell PATH"
 
 fallback_home="$tmp_dir/home-fallback"
 mkdir -p "$fallback_home/.local/bin"
@@ -234,7 +239,7 @@ PATH="$test_bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$fallback_home" \
 assert_executable "$tmp_dir/install-fallback/notty-daemon"
 assert_file "$tmp_dir/data-fallback/daemons/ws-fallback/daemon.env"
 grep -q "NOTTY_CODEX_COMMAND='codex'" "$tmp_dir/data-fallback/daemons/ws-fallback/daemon.env" || fail "fallback install did not preserve bare Codex command"
-grep -q "$fallback_home/.local/bin" "$tmp_dir/data-fallback/daemons/ws-fallback/daemon.env" || fail "fallback install did not persist common Codex path"
+grep -q "NOTTY_TOOL_DIR_CODEX='$fallback_home/.local/bin'" "$tmp_dir/data-fallback/daemons/ws-fallback/daemon.env" || fail "fallback install did not persist common Codex path as the tool dir"
 
 linux_bin="$tmp_dir/linux-bin"
 mkdir -p "$linux_bin"
@@ -327,5 +332,59 @@ assert_executable "$tmp_dir/install-http/notty-daemon"
 grep -q 'latest/manifest.json?notty_cache_bust=' "$tmp_dir/curl.urls" || fail "http manifest download did not bypass cache"
 grep -q 'SHA256SUMS?notty_cache_bust=' "$tmp_dir/curl.urls" || fail "http checksum download did not bypass cache"
 grep -q "$package.tar.gz?notty_cache_bust=" "$tmp_dir/curl.urls" || fail "http artifact download did not bypass cache"
+
+# PATH policy: the interactive PATH is detection-only; only the resolved tool
+# dir persists, and run.sh re-derives PATH at every daemon start so a tool
+# that moves after install heals on restart.
+junk_path="$tmp_dir/junk-bin"
+heal_home="$tmp_dir/home-heal"
+heal_codex_dir="$tmp_dir/heal-initial-bin"
+mkdir -p "$junk_path" "$heal_codex_dir" "$heal_home"
+cp "$ok_codex" "$heal_codex_dir/codex"
+chmod +x "$heal_codex_dir/codex"
+
+PATH="$heal_codex_dir:$junk_path:$test_bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$heal_home" \
+	NOTTY_INSTALL_DIR="$tmp_dir/install-heal" \
+	NOTTY_DATA_DIR="$tmp_dir/data-heal" \
+	sh "$installer" \
+	--backend-url http://127.0.0.1:8080 \
+	--workspace-id ws-heal \
+	--daemon-token nottyd_test \
+	--static-base "file://$static_root" \
+	--no-service > "$tmp_dir/heal.out" 2> "$tmp_dir/heal.err"
+
+heal_env="$tmp_dir/data-heal/daemons/ws-heal/daemon.env"
+heal_run="$tmp_dir/data-heal/daemons/ws-heal/run.sh"
+assert_file "$heal_env"
+assert_file "$heal_run"
+grep -q "NOTTY_TOOL_DIR_CODEX='$heal_codex_dir'" "$heal_env" || fail "heal install did not persist resolved codex tool dir"
+if grep -q "$junk_path" "$heal_env"; then
+	fail "daemon.env leaked unrelated interactive PATH entries"
+fi
+if grep -q "$junk_path" "$heal_run"; then
+	fail "run script leaked unrelated interactive PATH entries"
+fi
+grep -q "Daemon service PATH: $tmp_dir/install-heal:$heal_codex_dir:" "$tmp_dir/heal.out" || fail "install did not print the derived daemon service PATH"
+
+cat > "$tmp_dir/install-heal/notty-daemon" <<'EOF'
+#!/usr/bin/env sh
+printf 'probe codex=%s\n' "$(command -v codex 2>/dev/null || echo missing)"
+EOF
+chmod +x "$tmp_dir/install-heal/notty-daemon"
+
+# Drift after install: codex's install-time dir disappears entirely and codex
+# reappears in ~/.local/bin, which did not exist at install time.
+rm -rf "$heal_codex_dir"
+mkdir -p "$heal_home/.local/bin"
+cp "$ok_codex" "$heal_home/.local/bin/codex"
+chmod +x "$heal_home/.local/bin/codex"
+
+PATH="/usr/bin:/bin:/usr/sbin:/sbin" HOME="$heal_home" sh "$heal_run" > "$tmp_dir/heal-run.out" 2>&1
+grep -q "notty-daemon start: PATH=" "$tmp_dir/heal-run.out" || fail "daemon start did not log its effective PATH"
+grep -q "notty-daemon start: codex=codex resolved=$heal_home/.local/bin/codex" "$tmp_dir/heal-run.out" || fail "daemon start did not log the resolved codex location"
+grep -q "probe codex=$heal_home/.local/bin/codex" "$tmp_dir/heal-run.out" || fail "daemon start did not re-derive PATH to find moved codex"
+if grep -q "$heal_codex_dir" "$tmp_dir/heal-run.out"; then
+	fail "daemon start kept a dead tool dir on PATH"
+fi
 
 printf 'daemon installer tests passed\n'

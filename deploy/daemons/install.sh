@@ -153,72 +153,118 @@ safe_name() {
 }
 
 codex_command="${NOTTY_CODEX_COMMAND:-codex}"
-daemon_path="${PATH:-}"
 
-path_has_dir() {
-	case ":$daemon_path:" in
+# PATH policy: the installer's shell PATH is used to *detect* tools only.
+# What persists for the daemon is the resolved tool directory plus a fixed
+# list of standard directories; the effective PATH is derived from those at
+# install time and re-derived at every daemon start (see run.sh below), so
+# a tool that moves after install heals on the next restart. The interactive
+# PATH is never snapshotted into the service environment.
+notty_path_helpers="$(cat <<'EOF'
+notty_path_has_dir() {
+	case ":$PATH:" in
 		*:"$1":*) return 0 ;;
 		*) return 1 ;;
 	esac
 }
 
-append_path_dir() {
-	dir="$1"
-	[ -n "$dir" ] || return 0
-	[ -d "$dir" ] || return 0
-	if ! path_has_dir "$dir"; then
-		if [ -n "$daemon_path" ]; then
-			daemon_path="$daemon_path:$dir"
-		else
-			daemon_path="$dir"
-		fi
+notty_append_path_dir() {
+	[ -n "${1:-}" ] || return 0
+	[ -d "$1" ] || return 0
+	if notty_path_has_dir "$1"; then
+		return 0
+	fi
+	if [ -n "${PATH:-}" ]; then
+		PATH="$PATH:$1"
+	else
+		PATH="$1"
 	fi
 }
 
-append_codex_search_paths() {
-	append_path_dir "/opt/homebrew/bin"
-	append_path_dir "/usr/local/bin"
-	append_path_dir "/usr/bin"
-	append_path_dir "/bin"
-	append_path_dir "/usr/sbin"
-	append_path_dir "/sbin"
-	append_path_dir "$HOME/.local/bin"
-	append_path_dir "$HOME/.npm-global/bin"
-	npm_prefix="$(PATH="$daemon_path" npm config get prefix 2>/dev/null || true)"
+notty_append_known_tool_dirs() {
+	notty_append_path_dir "${HOME:-}/.local/bin"
+	notty_append_path_dir "${HOME:-}/.npm-global/bin"
+	notty_append_path_dir "/opt/homebrew/bin"
+	notty_append_path_dir "/usr/local/bin"
+	notty_append_path_dir "/usr/bin"
+	notty_append_path_dir "/bin"
+	notty_append_path_dir "/usr/sbin"
+	notty_append_path_dir "/sbin"
+	npm_prefix="$(npm config get prefix 2>/dev/null || true)"
 	if [ -n "$npm_prefix" ]; then
-		append_path_dir "$npm_prefix/bin"
+		notty_append_path_dir "$npm_prefix/bin"
 	fi
 }
 
-append_codex_search_paths
+notty_derive_daemon_path() {
+	PATH=""
+	notty_append_path_dir "${NOTTY_TOOL_DIR_CODEX:-}"
+	notty_append_known_tool_dirs
+	export PATH
+}
+EOF
+)"
+eval "$notty_path_helpers"
+
+detection_path="$(
+	notty_append_known_tool_dirs
+	printf '%s' "$PATH"
+)"
+
+codex_tool_dir=""
+case "$codex_command" in
+	*/*)
+		if [ -x "$codex_command" ]; then
+			codex_tool_dir="$(dirname -- "$codex_command")"
+		fi
+		;;
+	*)
+		codex_resolved="$(PATH="$detection_path" command -v -- "$codex_command" 2>/dev/null || true)"
+		if [ -n "$codex_resolved" ]; then
+			codex_tool_dir="$(dirname -- "$codex_resolved")"
+		fi
+		;;
+esac
+
+degraded_mode="The daemon will run document sync only; agent sessions are unavailable until Codex is configured."
 
 check_codex() {
 	case "$codex_command" in
 		*/*)
 			if [ ! -x "$codex_command" ]; then
-				warn "Codex runtime unavailable: $codex_command is not executable. Install Codex later or set NOTTY_CODEX_COMMAND to the Codex executable path."
+				warn "Codex runtime unavailable: $codex_command is not executable. $degraded_mode Install Codex or set NOTTY_CODEX_COMMAND to the Codex executable path."
 				return 0
 			fi
 			;;
 		*)
-			if ! PATH="$daemon_path" command -v "$codex_command" >/dev/null 2>&1; then
-				warn "Codex runtime unavailable: '$codex_command' was not found on PATH. Install Codex later or set NOTTY_CODEX_COMMAND to the Codex executable path."
+			if ! PATH="$detection_path" command -v "$codex_command" >/dev/null 2>&1; then
+				warn "Codex runtime unavailable: '$codex_command' was not found on PATH. $degraded_mode Install Codex or set NOTTY_CODEX_COMMAND to the Codex executable path."
 				return 0
 			fi
 			;;
 	esac
 
-	if ! PATH="$daemon_path" "$codex_command" --version >/dev/null 2>&1; then
-		warn "Codex runtime unavailable: '$codex_command --version' did not run successfully. Fix Codex later to enable Codex agents."
+	if ! PATH="$detection_path" "$codex_command" --version >/dev/null 2>&1; then
+		warn "Codex runtime unavailable: '$codex_command --version' did not run successfully. $degraded_mode Fix Codex to enable Codex agents."
 		return 0
 	fi
-	if ! PATH="$daemon_path" "$codex_command" app-server --help >/dev/null 2>&1; then
-		warn "Codex runtime unavailable: '$codex_command' does not support 'app-server'. Upgrade Codex later to enable Codex agents."
+	if ! PATH="$detection_path" "$codex_command" app-server --help >/dev/null 2>&1; then
+		warn "Codex runtime unavailable: '$codex_command' does not support 'app-server'. $degraded_mode Upgrade Codex to enable Codex agents."
 		return 0
 	fi
 }
 
 check_codex
+
+daemon_service_path="$(
+	NOTTY_TOOL_DIR_CODEX="$codex_tool_dir"
+	notty_derive_daemon_path
+	printf '%s' "$install_dir:$PATH"
+)"
+printf 'Daemon service PATH: %s\n' "$daemon_service_path"
+if [ -n "$codex_tool_dir" ]; then
+	printf 'Codex resolved in: %s\n' "$codex_tool_dir"
+fi
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/notty-install.XXXXXX")"
 cleanup() {
@@ -276,16 +322,24 @@ mv "$install_dir/.notty-agent-tool.$$" "$install_dir/notty-agent-tool"
 	printf 'export NOTTY_WORKSPACE_DIR=%s\n' "$(shell_quote "$workspace_dir")"
 	printf 'export NOTTY_AGENT_WORKSPACE_ROOT=%s\n' "$(shell_quote "$agent_workspace_root")"
 	printf 'export NOTTY_CODEX_COMMAND=%s\n' "$(shell_quote "$codex_command")"
-	printf 'export PATH=%s\n' "$(shell_quote "$daemon_path")"
+	printf 'export NOTTY_TOOL_DIR_CODEX=%s\n' "$(shell_quote "$codex_tool_dir")"
 } > "$env_file"
 chmod 600 "$env_file"
 
+# run.sh re-derives PATH on every start instead of trusting an install-time
+# snapshot, so tools that move after install are found again on restart.
+# Agent sessions inherit this PATH, so it is also the deliberately bounded
+# tool surface for agents — do not widen it back to the interactive PATH.
 {
 	printf '#!/usr/bin/env sh\n'
 	printf 'set -eu\n'
 	printf '. %s\n' "$(shell_quote "$env_file")"
-	printf 'export NOTTY_BACKEND_URL NOTTY_WORKSPACE_ID NOTTY_DAEMON_TOKEN NOTTY_DAEMON_VERSION NOTTY_DATA_DIR NOTTY_WORKSPACE_DIR NOTTY_AGENT_WORKSPACE_ROOT NOTTY_CODEX_COMMAND PATH\n'
+	printf 'export NOTTY_BACKEND_URL NOTTY_WORKSPACE_ID NOTTY_DAEMON_TOKEN NOTTY_DAEMON_VERSION NOTTY_DATA_DIR NOTTY_WORKSPACE_DIR NOTTY_AGENT_WORKSPACE_ROOT NOTTY_CODEX_COMMAND NOTTY_TOOL_DIR_CODEX\n'
+	printf '%s\n' "$notty_path_helpers"
+	printf 'notty_derive_daemon_path\n'
 	printf 'export PATH=%s:"$PATH"\n' "$(shell_quote "$install_dir")"
+	printf 'echo "notty-daemon start: PATH=$PATH"\n'
+	printf 'echo "notty-daemon start: codex=$NOTTY_CODEX_COMMAND resolved=$(command -v -- "$NOTTY_CODEX_COMMAND" 2>/dev/null || echo not-found)"\n'
 	printf 'exec %s\n' "$(shell_quote "$install_dir/notty-daemon")"
 } > "$run_script"
 chmod +x "$run_script"
