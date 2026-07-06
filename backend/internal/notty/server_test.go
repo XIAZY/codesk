@@ -105,7 +105,7 @@ func TestWorkspaceExposesRootDocumentIDAndHidesRootDocument(t *testing.T) {
 	fixture := newWorkspaceRouteTestFixture(t)
 	server := fixture.server
 	store := fixture.store
-	rootID := store.Snapshot().RootDocumentID
+	rootID := store.RootDocumentID()
 	if rootID == "" {
 		t.Fatal("expected root document id")
 	}
@@ -152,8 +152,8 @@ func TestWorkspaceEventSocketSnapshotOmitsDocumentList(t *testing.T) {
 	if _, ok := data["documents"]; ok {
 		t.Fatalf("workspace event socket snapshot must not carry documents: %#v", data["documents"])
 	}
-	if data["rootDocumentId"] != store.Snapshot().RootDocumentID {
-		t.Fatalf("rootDocumentId = %#v, want %q", data["rootDocumentId"], store.Snapshot().RootDocumentID)
+	if data["rootDocumentId"] != store.RootDocumentID() {
+		t.Fatalf("rootDocumentId = %#v, want %q", data["rootDocumentId"], store.RootDocumentID())
 	}
 }
 
@@ -164,7 +164,7 @@ func TestRootDocumentDoesNotBootstrapLegacyVisibleDocumentsOnReload(t *testing.T
 		t.Fatalf("reload store: %v", err)
 	}
 
-	rootID := store.Snapshot().RootDocumentID
+	rootID := store.RootDocumentID()
 	rootDoc := syncDocumentToDocForTest(t, store, rootID, 909)
 	if rootEntryExistsForDocumentForTest(t, rootDoc, documentID) {
 		t.Fatalf("legacy backend document path for %s must not bootstrap a root entry", documentID)
@@ -260,7 +260,7 @@ func TestDocumentNamespaceMutationHTTPRoutesRemoved(t *testing.T) {
 	store := fixture.store
 	documentID := mustCreateTestDocument(t, store, "docs/route.md", "content")
 	router := server.Routes()
-	for _, target := range []string{"/api/documents/" + documentID, "/api/workspaces/" + store.Snapshot().WorkspaceID + "/documents/" + documentID} {
+	for _, target := range []string{"/api/documents/" + documentID, "/api/workspaces/" + store.WorkspaceID() + "/documents/" + documentID} {
 		recorder := authTestRequest(t, router, http.MethodPatch, target, fixture.token, nil, map[string]string{"path": "docs/next.md"})
 		if recorder.Code == http.StatusOK {
 			t.Fatalf("expected PATCH %s to be unavailable, got status 200 body=%s", target, recorder.Body.String())
@@ -350,7 +350,7 @@ func TestRootDocumentSyncsOverMuxWebsocket(t *testing.T) {
 	fixture := newWorkspaceRouteTestFixture(t)
 	server := fixture.server
 	store := fixture.store
-	rootID := store.Snapshot().RootDocumentID
+	rootID := store.RootDocumentID()
 	httpServer := httptest.NewServer(server.Routes())
 	defer httpServer.Close()
 
@@ -383,13 +383,13 @@ func TestRootDocumentUpdatesStreamToRawRootSubscriber(t *testing.T) {
 	fixture := newWorkspaceRouteTestFixture(t)
 	server := fixture.server
 	store := fixture.store
-	rootID := store.Snapshot().RootDocumentID
+	rootID := store.RootDocumentID()
 	httpServer := httptest.NewServer(server.Routes())
 	defer httpServer.Close()
 
 	reader := dialDocumentWebsocketForTest(t, httpServer.URL, fixture.workspaceWSPath("/documents/"+rootID), fixture.token)
 	defer reader.Close()
-	rootRoom := server.rooms.ForDocument(store.Snapshot().WorkspaceID + ":" + rootID)
+	rootRoom := server.rooms.ForDocument(store.WorkspaceID() + ":" + rootID)
 	waitDocumentRoomSubscriberCount(t, rootRoom, 1)
 
 	writer := dialDocumentWebsocketForTest(t, httpServer.URL, fixture.workspaceWSPath("/documents-sync"), fixture.token)
@@ -637,7 +637,7 @@ func TestAgentEventContendedClaimPostgres(t *testing.T) {
 	seedCodexDaemonRuntime(t, store)
 	user := seedTestUser(t, store)
 	documentID := mustCreateTestDocument(t, store, "docs/contention.md", "start\n")
-	workspaceID := store.Snapshot().WorkspaceID
+	workspaceID := store.WorkspaceID()
 
 	agent, err := store.CreateAgent(CreateAgentRequest{
 		Handle: "contention-agent",
@@ -735,7 +735,7 @@ func TestDocumentProtocolUpdateDoesNotPublishDocumentNamespaceEvent(t *testing.T
 		text.Insert(txn, text.LenInTxn(txn), " beta", nil)
 	})
 
-	events, unsubscribe := server.workspaceBroker(store.Snapshot().WorkspaceID).Subscribe()
+	events, unsubscribe := server.workspaceBroker(store.WorkspaceID()).Subscribe()
 	defer unsubscribe()
 	source := &DocumentConn{send: make(chan []byte, 4)}
 	if err := handleDocumentProtocolMessageForTest(t, server, store, server.rooms.ForDocument(documentID), source, documentID, yproto.BuildSyncUpdate(update), OperationMeta{
@@ -861,7 +861,7 @@ func TestWebsocketDocumentUpdateBroadcastsToMuxSubscriber(t *testing.T) {
 	if err := conn.WriteMessage(websocket.BinaryMessage, yproto.BuildDocumentMessage(documentID, subscribePayload)); err != nil {
 		t.Fatalf("write mux awareness subscription: %v", err)
 	}
-	roomKey := store.Snapshot().WorkspaceID + ":" + documentID
+	roomKey := store.WorkspaceID() + ":" + documentID
 	waitDocumentRoomSubscriberCount(t, server.rooms.ForDocument(roomKey), 1)
 
 	peerDoc := syncDocumentToDocForTest(t, store, documentID, 77)
@@ -916,8 +916,8 @@ func TestWorkspaceDocumentSyncWebsocketCloseRemovesAllSubscriptions(t *testing.T
 			t.Fatalf("write subscription for %s: %v", documentID, err)
 		}
 	}
-	roomA := server.rooms.ForDocument(store.Snapshot().WorkspaceID + ":" + docA)
-	roomB := server.rooms.ForDocument(store.Snapshot().WorkspaceID + ":" + docB)
+	roomA := server.rooms.ForDocument(store.WorkspaceID() + ":" + docA)
+	roomB := server.rooms.ForDocument(store.WorkspaceID() + ":" + docB)
 	waitDocumentRoomSubscriberCount(t, roomA, 1)
 	waitDocumentRoomSubscriberCount(t, roomB, 1)
 
@@ -1004,7 +1004,7 @@ func TestDocumentProtocolIgnoresCanonicalEmptyYjsUpdate(t *testing.T) {
 		t.Fatalf("get document before empty update: %v", err)
 	}
 
-	events, unsubscribe := server.workspaceBroker(store.Snapshot().WorkspaceID).Subscribe()
+	events, unsubscribe := server.workspaceBroker(store.WorkspaceID()).Subscribe()
 	defer unsubscribe()
 	source := &DocumentConn{send: make(chan []byte, 4)}
 	if err := handleDocumentProtocolMessageForTest(t, server, store, server.rooms.ForDocument(documentID), source, documentID, yproto.BuildSyncUpdate([]byte{0, 0}), OperationMeta{
@@ -1695,7 +1695,7 @@ func TestHandleDocumentProtocolMessageDoesNotPublishDocumentMentionMetadataChang
 		text.Insert(txn, text.LenInTxn(txn), "Ping @codex-agent.\n", nil)
 	})
 
-	events, unsubscribe := server.workspaceBroker(store.Snapshot().WorkspaceID).Subscribe()
+	events, unsubscribe := server.workspaceBroker(store.WorkspaceID()).Subscribe()
 	defer unsubscribe()
 
 	source := &DocumentConn{send: make(chan []byte, 4)}
@@ -2045,7 +2045,7 @@ func handleDocumentProtocolMessageForTest(t *testing.T, server *Server, store *S
 	if server == nil || store == nil {
 		t.Fatal("server and store are required")
 	}
-	return server.handleDocumentProtocolMessageWithStore(store, server.workspaceBroker(store.Snapshot().WorkspaceID), room, session, documentID, payload, meta)
+	return server.handleDocumentProtocolMessageWithStore(store, server.workspaceBroker(store.WorkspaceID()), room, session, documentID, payload, meta)
 }
 
 func newTestServer(t *testing.T) (*Server, *Store) {

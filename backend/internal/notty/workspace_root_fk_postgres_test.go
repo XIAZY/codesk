@@ -50,7 +50,7 @@ func TestWorkspaceCreationSeedsRootDocumentAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open workspace store: %v", err)
 	}
-	if got := store.Snapshot().RootDocumentID; got != rootID {
+	if got := store.RootDocumentID(); got != rootID {
 		t.Fatalf("store root document id = %q, want %q", got, rootID)
 	}
 	if !store.HasDocument(rootID) {

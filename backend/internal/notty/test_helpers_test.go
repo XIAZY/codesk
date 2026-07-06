@@ -110,7 +110,7 @@ func currentDocumentContentForTest(t *testing.T, store *Store, documentID string
 
 func documentContentForTest(t *testing.T, store *Store, document *Document) string {
 	t.Helper()
-	content, err := documentContentAtUpdatePostgres(store.db, store.Snapshot().WorkspaceID, document, document.UpdateID)
+	content, err := documentContentAtUpdatePostgres(store.db, store.WorkspaceID(), document, document.UpdateID)
 	if err != nil {
 		t.Fatalf("materialize document %s at %d: %v", document.ID, document.UpdateID, err)
 	}

@@ -245,10 +245,22 @@ func newSeedDocument(id string, clientID uint64, content string, now time.Time) 
 	return document, doc.EncodeStateAsUpdate()
 }
 
-func (s *Store) Snapshot() WorkspaceState {
+func (s *Store) WorkspaceID() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return cloneState(s.state)
+	return s.state.WorkspaceID
+}
+
+func (s *Store) RootDocumentID() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.state.RootDocumentID
+}
+
+func (s *Store) WorkspaceName() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.state.Name
 }
 
 func (s *Store) GetDocument(id string) (*Document, error) {
@@ -527,8 +539,7 @@ func (s *Store) MarkDocumentViewed(agentID, documentID string, req MarkDocumentV
 		StateVector: stateVector,
 		ViewedAt:    now,
 	}
-	cloned := cloneAgentDocumentView(view)
-	if err := upsertAgentDocumentViewPostgres(tx, workspaceID, cloned); err != nil {
+	if err := upsertAgentDocumentViewPostgres(tx, workspaceID, view); err != nil {
 		return nil, err
 	}
 	if err := completeDocumentInboxEventsPostgres(tx, workspaceID, resolvedAgentID, resolvedDocumentID, updateID, now); err != nil {
@@ -538,7 +549,7 @@ func (s *Store) MarkDocumentViewed(agentID, documentID string, req MarkDocumentV
 		return nil, err
 	}
 	committed = true
-	return cloned, nil
+	return view, nil
 }
 
 func (s *Store) DiffDocument(agentID, documentID, fromSpec, toSpec string) (*DocumentDiff, error) {
@@ -727,18 +738,6 @@ func shouldMarkDocumentViewedForEvent(event *AgentEvent) bool {
 		return false
 	}
 	return event.Status == "completed" || event.Status == "dismissed"
-}
-
-func agentDocumentViewKey(agentID, documentID string) string {
-	return agentID + ":" + documentID
-}
-
-func cloneAgentDocumentView(view *AgentDocumentView) *AgentDocumentView {
-	if view == nil {
-		return nil
-	}
-	clone := *view
-	return &clone
 }
 
 func resolveDocumentVersionPostgres(q querier, workspaceID string, agentID string, document *Document, spec string, defaultSpec string) (int64, error) {
@@ -952,7 +951,7 @@ func (s *Store) CreateDocument(req CreateDocumentRequest, meta OperationMeta) (*
 		}
 	}
 
-	rollbackState := cloneState(s.state)
+	rollbackState := cloneDocumentState(s.state)
 	rollbackDirtyDocuments := cloneStringSet(s.dirtyDocuments)
 	rollbackPendingDocumentEvents := append([]documentUpdateRecord(nil), s.pendingDocumentEvents...)
 	rollbackPendingActivities := append([]*ActivityEvent(nil), s.pendingActivities...)
@@ -969,7 +968,6 @@ func (s *Store) CreateDocument(req CreateDocumentRequest, meta OperationMeta) (*
 	_ = s.documentLockLocked(document.ID)
 	s.markDocumentDirtyLocked(document.ID)
 	s.appendIncrementalDocumentUpdateLocked(document.ID, initialUpdate, meta, now)
-	s.state.UpdatedAt = now
 	s.appendActivityLocked(&ActivityEvent{
 		Type:       "document.created",
 		DocumentID: document.ID,
@@ -1553,7 +1551,6 @@ func (s *Store) ApplyCRDTUpdateWithResult(documentID string, update []byte, meta
 	s.appendIncrementalDocumentUpdateLocked(document.ID, update, meta, now)
 	document.StateVector = base64.StdEncoding.EncodeToString(afterStateVector)
 	document.UpdatedAt = now
-	s.state.UpdatedAt = now
 	if err := s.persistDocumentMutationLocked(); err != nil {
 		return nil, err
 	}
@@ -1602,7 +1599,6 @@ func (s *Store) ReplaceDocumentText(documentID string, nextText string, meta Ope
 	s.markDocumentDirtyLocked(document.ID)
 	s.appendIncrementalDocumentUpdateLocked(document.ID, update, meta, time.Now().UTC())
 	document.UpdatedAt = time.Now().UTC()
-	s.state.UpdatedAt = document.UpdatedAt
 	s.appendActivityLocked(&ActivityEvent{
 		Type:       "document.updated",
 		DocumentID: document.ID,
@@ -1717,7 +1713,6 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 		s.recordAgentInboxChangedLocked(event)
 	}
 	s.recordActivityCreatedLocked(activity)
-	s.state.UpdatedAt = now
 	return committed, firstThreadMessage(committed), true, nil
 }
 
@@ -1772,7 +1767,6 @@ func (s *Store) ReplyThread(id string, req ReplyThreadRequest, meta OperationMet
 		s.recordAgentInboxChangedLocked(event)
 	}
 	s.recordActivityCreatedLocked(activity)
-	s.state.UpdatedAt = now
 	return updatedThread, message, nil
 }
 
@@ -1830,9 +1824,6 @@ func (s *Store) UpdateAgentEvent(id string, req UpdateAgentEventRequest, meta Op
 			return nil, err
 		}
 	}
-	s.mu.Lock()
-	s.state.UpdatedAt = updated.UpdatedAt
-	s.mu.Unlock()
 	// UpdateAgentEvent writes to Postgres directly (no persist walk), so its
 	// activity is inserted directly too; document_id references the existing
 	// event's document, so the FK is already satisfied.
@@ -1876,7 +1867,7 @@ func (s *Store) UpsertPresence(req UpsertPresenceRequest) (*Presence, error) {
 
 func (s *Store) persistLocked() error {
 	s.ensureMaps()
-	return s.persistPostgresLocked()
+	return s.persistDocumentMutationPostgresLocked()
 }
 
 func (s *Store) persistDocumentMutationLocked() error {
@@ -1948,17 +1939,12 @@ func cloneActivityEvents(activities []*ActivityEvent) []*ActivityEvent {
 	return clones
 }
 
-func cloneState(state WorkspaceState) WorkspaceState {
+func cloneDocumentState(state WorkspaceState) WorkspaceState {
 	copyState := state
 	copyState.ContentDocuments = map[string]*Document{}
 	for key, doc := range state.ContentDocuments {
 		copyState.ContentDocuments[key] = cloneDocument(doc)
 	}
-	copyState.Users = nil
-	copyState.Daemons = nil
-	copyState.Agents = nil
-	copyState.AgentRuns = nil
-	copyState.AgentDocumentViews = nil
 	copyState.DocumentCheckpoints = map[string]*DocumentCheckpoint{}
 	for key, checkpoint := range state.DocumentCheckpoints {
 		if checkpoint == nil {
@@ -2221,24 +2207,10 @@ func cloneAgent(agent *Agent) *Agent {
 	return &clone
 }
 
-func cloneDaemon(daemon *Daemon) *Daemon {
-	if daemon == nil {
-		return nil
-	}
-	clone := *daemon
-	return &clone
-}
-
 const (
 	daemonOnlineWindow = 30 * time.Second
 	daemonStaleWindow  = 2 * time.Minute
 )
-
-func daemonWithLiveness(daemon *Daemon, now time.Time) *Daemon {
-	clone := cloneDaemon(daemon)
-	applyDaemonLiveness(clone, now)
-	return clone
-}
 
 func applyDaemonLiveness(daemon *Daemon, now time.Time) {
 	if daemon == nil {
@@ -2264,14 +2236,6 @@ func applyDaemonLiveness(daemon *Daemon, now time.Time) {
 	}
 }
 
-func cloneUser(user *User) *User {
-	if user == nil {
-		return nil
-	}
-	clone := *user
-	return &clone
-}
-
 func cloneAgentRun(run *AgentRun) *AgentRun {
 	if run == nil {
 		return nil
@@ -2284,14 +2248,6 @@ func cloneAgentRun(run *AgentRun) *AgentRun {
 func cloneAgentRunForWorkspace(run *AgentRun) *AgentRun {
 	clone := cloneAgentRun(run)
 	slimAgentRunPayload(clone)
-	return clone
-}
-
-func cloneAgentRunForSync(run *AgentRun) *AgentRun {
-	clone := cloneAgentRun(run)
-	if isTerminalRunStatus(clone.Status) {
-		slimAgentRunPayload(clone)
-	}
 	return clone
 }
 
@@ -2645,15 +2601,6 @@ func collectThreadReplyEventsPostgres(q querier, workspaceID string, thread *Thr
 		})
 	}
 	return events, nil
-}
-
-func (s *Store) shouldNotifyAgentLocked(agentID string, meta OperationMeta, fallbackActorID string) bool {
-	notify, err := shouldNotifyAgentPostgres(s.db, s.state.WorkspaceID, agentID, meta, fallbackActorID)
-	if err != nil {
-		log.Printf("shouldNotifyAgentLocked: %v", err)
-		return false
-	}
-	return notify
 }
 
 func (s *Store) recordAgentInboxChangedLocked(event *AgentEvent) {
