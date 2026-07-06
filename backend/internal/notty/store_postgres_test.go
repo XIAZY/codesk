@@ -179,6 +179,54 @@ func TestPostgresThreadCreatedDirectlyInPostgres(t *testing.T) {
 	}
 }
 
+func TestPostgresThreadHandlesAfterActorDeletion(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	db := database.DB
+	store := newPostgresTestWorkspaceStore(t, database)
+	seedCodexDaemonRuntime(t, store)
+	user := seedTestUser(t, store)
+	workspace := store.Snapshot()
+	documentID := mustCreateTestDocument(t, store, "docs/actor-delete.md", "test\n")
+
+	agent, err := store.CreateAgent(CreateAgentRequest{
+		Handle: "ephemeral-agent",
+		Name:   "Ephemeral Agent",
+		Role:   "Gets deleted after posting",
+		Kind:   "codex",
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	thread, _, _, err := store.CreateThread(CreateThreadRequest{
+		DocumentID: documentID,
+		Title:      "Thread by ephemeral agent",
+		Body:       "This message survives the author's deletion.",
+	}, OperationMeta{ActorID: agent.ID, ActorType: "agent", Source: "test"})
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+
+	// Delete the agent via SQL to trigger on_actor_delete without hitting
+	// the agent_document_views persist race (a pre-existing issue outside
+	// the scope of this conversion).
+	mustExec(t, db, `DELETE FROM agents WHERE id = $1`, agent.ID)
+
+	got, err := getThreadPostgres(db, workspace.WorkspaceID, thread.ID)
+	if err != nil {
+		t.Fatalf("get thread after deletion: %v", err)
+	}
+	if got.CreatedByHandle != "ephemeral-agent" {
+		t.Fatalf("expected denormalized handle to survive deletion, got %q", got.CreatedByHandle)
+	}
+	if len(got.Messages) != 1 || got.Messages[0].AuthorHandle != "ephemeral-agent" {
+		t.Fatalf("expected message author handle to survive deletion, got %#v", got.Messages)
+	}
+	if len(got.ParticipantIDs) != 0 {
+		t.Fatalf("expected zero participants after agent deletion (trigger cleans up), got %v", got.ParticipantIDs)
+	}
+}
+
 func TestPostgresSnapshotPersistPreservesDatabaseOnlyRows(t *testing.T) {
 	database := newPostgresTestDatabase(t)
 	db := database.DB
