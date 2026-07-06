@@ -447,11 +447,27 @@ export function agentsByDaemon(agents: Agent[], daemons: Daemon[]) {
 export function reduceWorkspaceEvent(state: WorkspaceState, event: WorkspaceEvent): WorkspaceState {
   if (event.type === "workspace.snapshot") {
     const { documents: _documents, ...data } = event.data as Partial<WorkspaceState> & { documents?: unknown };
-    return { ...state, ...data };
+    // The backend marshals empty collections as JSON null (Go nil slices) — e.g. an
+    // idle workspace's presences after the 2-minute freshness cutoff, or a workspace
+    // with no activities. Coerce them to empty at this seam so no consumer (the People
+    // online ring, Document Activity, …) dereferences null when switching workspaces.
+    return {
+      ...state,
+      ...data,
+      users: data.users ?? [],
+      daemons: data.daemons ?? [],
+      agents: data.agents ?? [],
+      agentRuns: data.agentRuns ?? [],
+      threads: data.threads ?? [],
+      agentEvents: data.agentEvents ?? [],
+      presences: data.presences ?? {},
+      activities: data.activities ?? [],
+    };
   }
   if (event.type === "activity.created") {
     const activities = Array.isArray(state.activities) ? state.activities : [];
-    return { ...state, activities: [event.data, ...activities].slice(0, 50) };
+    // TODO: runtime-validate envelope payloads (unvalidated WS-payload casts are a class, not a one-off)
+    return { ...state, activities: [event.data as ActivityEvent, ...activities].slice(0, 50) };
   }
   if (event.type === "thread.created" || event.type === "thread.updated") {
     return { ...state, threads: upsertById(state.threads, event.data as ThreadItem) };
