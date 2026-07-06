@@ -570,6 +570,37 @@ func TestAgentEventsAPISeamThroughHandlers(t *testing.T) {
 	})
 }
 
+func TestPresenceEmptyDocumentIDThroughHandler(t *testing.T) {
+	fixture := newWorkspaceRouteTestFixture(t)
+	router := fixture.router
+
+	var daemonResponse CreateDaemonResponse
+	authTestJSON(t, router, http.MethodPost, fixture.workspaceAPIPath("/daemons"), fixture.token, CreateDaemonRequest{Name: "Presence daemon"}, http.StatusCreated, &daemonResponse)
+
+	var resp Presence
+	authTestJSON(t, router, http.MethodPost, fixture.workspaceAPIPath("/presence"), daemonResponse.Token, UpsertPresenceRequest{
+		ActorID:   "daemon-actor",
+		ActorType: "daemon",
+		Activity:  "idle",
+	}, http.StatusOK, &resp)
+
+	if resp.DocumentID != "" {
+		t.Fatalf("expected empty documentId, got %q", resp.DocumentID)
+	}
+
+	var nullDocID bool
+	err := fixture.store.db.QueryRow(
+		`SELECT document_id IS NULL FROM presences WHERE workspace_id = $1::uuid AND actor_id = $2::uuid`,
+		fixture.workspaceID, resp.ActorID,
+	).Scan(&nullDocID)
+	if err != nil {
+		t.Fatalf("query presence row: %v", err)
+	}
+	if !nullDocID {
+		t.Fatalf("expected NULL document_id in Postgres, got non-NULL")
+	}
+}
+
 func TestAgentEventContendedClaimPostgres(t *testing.T) {
 	database := newPostgresTestDatabase(t)
 	db := database.DB
