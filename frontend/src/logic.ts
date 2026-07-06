@@ -248,7 +248,7 @@ export function reduceWorkspaceEvent(state: WorkspaceState, event: WorkspaceEven
       ),
     };
   }
-  if (event.type === "daemon.created" || event.type === "daemon.deleted") {
+  if (event.type === "daemon.created" || event.type === "daemon.updated" || event.type === "daemon.deleted") {
     return { ...state, daemons: upsertById(state.daemons, event.data as Daemon) };
   }
   if (event.type === "agent.created" || event.type === "agent.updated") {

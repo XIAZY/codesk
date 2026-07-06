@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WorkspaceApp, WorkspaceOnboarding } from "./App";
+import { CreateDaemonModal, WorkspaceApp, WorkspaceOnboarding } from "./App";
 import { emptyWorkspace, identifierHelpText, identifierPattern } from "./logic";
 import type { Account, WorkspaceSummary } from "./types";
 
@@ -223,5 +223,32 @@ describe("WorkspaceApp coworkers rail", () => {
     expect(coworkersPanel.querySelector(".grp-head")).toBeNull();
     expect(within(coworkersPanel).getByRole("button", { name: /@codex/i })).toBeTruthy();
     expect(within(coworkersPanel).queryByText("Local")).toBeNull();
+  });
+});
+
+describe("CreateDaemonModal install status", () => {
+  it("flips the install chip from waiting to connected when the daemon checks in live", async () => {
+    const user = userEvent.setup();
+    const created = { id: "daemon_new", workspaceId: "ws", name: "Local daemon", status: "active", connectionStatus: "disconnected", createdAt: "now" };
+    const api = { createDaemon: vi.fn().mockResolvedValue({ daemon: created, token: "nottyd_secret" }) };
+
+    const { rerender } = render(
+      <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Create daemon" }));
+
+    // Daemon created but has not checked in yet: the chip must say waiting.
+    expect(await screen.findByText("Waiting for daemon to check in…")).toBeTruthy();
+    expect(screen.queryByText("Daemon connected")).toBeNull();
+
+    // A daemon.updated event lands via the workspace socket, so live state now reports
+    // the daemon online. The chip must flip without a manual refresh.
+    rerender(
+      <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[{ ...created, connectionStatus: "online" }]} onClose={vi.fn()} onDone={vi.fn()} />
+    );
+
+    expect(screen.getByText("Daemon connected")).toBeTruthy();
+    expect(screen.queryByText("Waiting for daemon to check in…")).toBeNull();
   });
 });

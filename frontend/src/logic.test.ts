@@ -128,6 +128,21 @@ describe("workspace reduction", () => {
 
     expect(twice.threads[0].messages).toHaveLength(1);
   });
+
+  it("applies live daemon.updated events so status reflects a check-in without a refresh", () => {
+    const state: WorkspaceState = {
+      ...baseWorkspace(),
+      daemons: [{ id: "daemon_1", workspaceId: "ws", name: "Local", status: "active", connectionStatus: "disconnected", createdAt: "now" }],
+    };
+
+    const next = reduceWorkspaceEvent(state, {
+      type: "daemon.updated",
+      data: { id: "daemon_1", workspaceId: "ws", name: "Local", status: "active", connectionStatus: "online", createdAt: "now" },
+    });
+
+    expect(next.daemons).toHaveLength(1);
+    expect(daemonStatus(next.daemons[0])).toBe("online");
+  });
 });
 
 describe("presentation grouping", () => {

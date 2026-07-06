@@ -1689,7 +1689,7 @@ export function WorkspaceApp({
           }}
         />
       ) : null}
-      {modal === "daemon" ? <CreateDaemonModal api={api} workspaceId={workspaceId} onClose={() => setModal(null)} onDone={() => void reload()} /> : null}
+      {modal === "daemon" ? <CreateDaemonModal api={api} workspaceId={workspaceId} daemons={workspace.daemons} onClose={() => setModal(null)} onDone={() => void reload()} /> : null}
       {modal === "agent" ? <CreateAgentModal api={api} workspaceId={workspaceId} daemons={workspace.daemons} onClose={() => setModal(null)} onDone={() => { setModal(null); void reload(); }} /> : null}
       {modal === "share" ? <ShareWorkspaceModal api={api} workspaceId={workspaceId} onClose={() => setModal(null)} /> : null}
       {modal === "agent-detail" && selectedAgent ? <AgentDetailModal api={api} workspaceId={workspaceId} agent={selectedAgent} daemons={workspace.daemons} runs={workspace.agentRuns} onClose={() => setModal(null)} onChanged={() => void reload()} /> : null}
@@ -2620,15 +2620,21 @@ export function ShellScriptBlock({ title, badge, command, children }: { title: s
   );
 }
 
-function CreateDaemonModal({ api, workspaceId, onClose, onDone }: { api: ApiClient; workspaceId: string; onClose: () => void; onDone: () => void }) {
+export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }: { api: ApiClient; workspaceId: string; daemons: Daemon[]; onClose: () => void; onDone: () => void }) {
   const [name, setName] = useState("Local daemon");
   const [token, setToken] = useState("");
+  const [daemonId, setDaemonId] = useState("");
   const command = buildDaemonInstallCommand({
     backendUrl: apiBase,
     workspaceId,
     daemonToken: token || "nottyd_...",
     staticBaseUrl: daemonStaticBase,
   });
+  // Track the created daemon in live workspace state so the chip reflects its real
+  // check-in instead of a hard-coded "waiting". `daemon.updated` events flow through
+  // the workspace socket the moment the daemon calls home, flipping this to online.
+  const createdDaemon = daemons.find((daemon) => daemon.id === daemonId);
+  const connected = createdDaemon ? daemonStatus(createdDaemon) === "online" : false;
   return (
     <Modal title={token ? `${name} created` : "New daemon"} onClose={onClose}>
       {token ? (
@@ -2637,7 +2643,11 @@ function CreateDaemonModal({ api, workspaceId, onClose, onDone }: { api: ApiClie
             <p className="small muted">This downloads the release bundle, installs the daemon and agent helper, writes daemon config, and starts a local service. Docker Compose is only for local development.</p>
           </ShellScriptBlock>
           <div className="row between">
-            <span className="chip"><StatusDot tone="stale" />Waiting for daemon to check in…</span>
+            {connected ? (
+              <span className="chip online"><StatusDot tone="online" />Daemon connected</span>
+            ) : (
+              <span className="chip"><StatusDot tone="stale" />Waiting for daemon to check in…</span>
+            )}
             <button className="btn accent" onClick={onClose}>Done</button>
           </div>
         </div>
@@ -2647,6 +2657,7 @@ function CreateDaemonModal({ api, workspaceId, onClose, onDone }: { api: ApiClie
           onSubmit={async (event) => {
             event.preventDefault();
             const response = await api.createDaemon(workspaceId, name);
+            setDaemonId(response.daemon.id);
             setToken(response.token);
             onDone();
           }}
