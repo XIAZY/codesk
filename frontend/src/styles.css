@@ -1,30 +1,33 @@
 @import url("https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&family=Archivo:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap");
 
 :root {
-  --ink: #1B1A17;
-  --ink-2: #29261F;
-  --ink-3: #76726A;
-  --ink-4: #A6A29A;
-  --paper: #FCFBF7;
-  --paper-2: #F3F1EA;
-  --paper-3: #ECE8DD;
-  --border: #E6E2D8;
-  --border-strong: #D7D2C5;
-  --accent: #E3A15B;
-  --accent-50: #FFF5EA;
-  --accent-100: #F7DEC0;
-  --accent-700: #8B5422;
-  --agent: #7FC1D6;
-  --agent-50: #EEF8FB;
-  --agent-100: #CFEDF4;
-  --iris: #8E79D6;
-  --iris-50: #F2EFFB;
-  --iris-700: #4F3C99;
-  --daemon: #2f7b67;
-  --daemon-50: #eaf6f1;
-  --ok: #2f7d55;
-  --warn: #b98222;
-  --err: #b94737;
+  /* §10 palette — OKLCH, mapped from design source codesk-ui-v2.html :root.
+     Neutral-warm base (chroma <=0.02) keeps warmth in the ambience layer;
+     full saturation reserved for the human accent + danger only. */
+  --ink: oklch(0.26 0.010 75);
+  --ink-2: oklch(0.33 0.010 75);
+  --ink-3: oklch(0.53 0.010 75);
+  --ink-4: oklch(0.68 0.008 75);
+  --paper: oklch(0.985 0.006 75);
+  --paper-2: oklch(0.965 0.010 75);
+  --paper-3: oklch(0.935 0.010 75);
+  --border: oklch(0.90 0.008 75);
+  --border-strong: oklch(0.86 0.010 75);
+  --accent: oklch(0.68 0.09 60);
+  --accent-50: oklch(0.965 0.020 60);
+  --accent-100: oklch(0.90 0.038 60);
+  --accent-700: oklch(0.44 0.07 60);
+  --agent: oklch(0.62 0.08 230);
+  --agent-50: oklch(0.965 0.018 230);
+  --agent-100: oklch(0.90 0.035 230);
+  --iris: oklch(0.55 0.09 285);
+  --iris-50: oklch(0.965 0.018 285);
+  --iris-700: oklch(0.42 0.09 285);
+  --daemon: oklch(0.60 0.08 155);
+  --daemon-50: oklch(0.955 0.018 155);
+  --ok: oklch(0.60 0.08 155);
+  --warn: oklch(0.72 0.11 80);
+  --err: oklch(0.58 0.16 25);
   --display: "Newsreader", Georgia, serif;
   --sans: "Archivo", ui-sans-serif, system-ui, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
