@@ -120,8 +120,8 @@ func (s *Store) load() error {
 	} else if changed {
 		needsPersist = true
 	}
-	if s.refreshAgentSystemPromptsLocked() {
-		needsPersist = true
+	if err := s.refreshAgentSystemPromptsLocked(); err != nil {
+		return fmt.Errorf("refresh agent system prompts: %w", err)
 	}
 	if needsPersist {
 		if err := s.persistLocked(); err != nil {
@@ -134,21 +134,6 @@ func (s *Store) load() error {
 func (s *Store) ensureMaps() {
 	if s.state.ContentDocuments == nil {
 		s.state.ContentDocuments = map[string]*Document{}
-	}
-	if s.state.Users == nil {
-		s.state.Users = map[string]*User{}
-	}
-	if s.state.Daemons == nil {
-		s.state.Daemons = map[string]*Daemon{}
-	}
-	if s.state.Agents == nil {
-		s.state.Agents = map[string]*Agent{}
-	}
-	if s.state.AgentRuns == nil {
-		s.state.AgentRuns = map[string]*AgentRun{}
-	}
-	if s.state.AgentDocumentViews == nil {
-		s.state.AgentDocumentViews = map[string]*AgentDocumentView{}
 	}
 	if s.state.DocumentCheckpoints == nil {
 		s.state.DocumentCheckpoints = map[string]*DocumentCheckpoint{}
@@ -198,11 +183,6 @@ func seedWorkspaceFor(workspaceID string, workspaceName string) WorkspaceState {
 		WorkspaceID:         workspaceID,
 		Name:                workspaceName,
 		ContentDocuments:    map[string]*Document{},
-		Users:               map[string]*User{},
-		Daemons:             map[string]*Daemon{},
-		Agents:              map[string]*Agent{},
-		AgentRuns:           map[string]*AgentRun{},
-		AgentDocumentViews:  map[string]*AgentDocumentView{},
 		DocumentCheckpoints: map[string]*DocumentCheckpoint{},
 		UpdatedAt:           now,
 	}
@@ -346,13 +326,13 @@ func (s *Store) ListThreadsForDocument(documentID string) ([]*Thread, error) {
 
 func (s *Store) ListAgentNotifications(agentID string, statuses ...string) ([]*AgentEvent, error) {
 	s.mu.RLock()
-	resolvedAgentID, _, err := s.resolveAgentIdentityLocked(strings.TrimSpace(agentID))
+	workspaceID := s.state.WorkspaceID
+	db := s.db
+	s.mu.RUnlock()
+	resolvedAgentID, _, err := resolveAgentIdentityPostgres(db, workspaceID, strings.TrimSpace(agentID))
 	if err != nil {
-		s.mu.RUnlock()
 		return nil, err
 	}
-	workspaceID := s.state.WorkspaceID
-	s.mu.RUnlock()
 
 	trimmed := make([]string, 0, len(statuses))
 	for _, st := range statuses {
@@ -360,7 +340,7 @@ func (s *Store) ListAgentNotifications(agentID string, statuses ...string) ([]*A
 			trimmed = append(trimmed, t)
 		}
 	}
-	return listAgentEventsPostgres(s.db, workspaceID, resolvedAgentID, "", trimmed)
+	return listAgentEventsPostgres(db, workspaceID, resolvedAgentID, "", trimmed)
 }
 
 func (s *Store) DrainAgentInboxChanges() []AgentInboxChangedEvent {
@@ -376,13 +356,13 @@ func (s *Store) DrainAgentInboxChanges() []AgentInboxChangedEvent {
 
 func (s *Store) ListAgentInbox(agentID string, box string, statuses ...string) ([]*AgentEvent, error) {
 	s.mu.RLock()
-	resolvedAgentID, _, err := s.resolveAgentIdentityLocked(strings.TrimSpace(agentID))
+	workspaceID := s.state.WorkspaceID
+	db := s.db
+	s.mu.RUnlock()
+	resolvedAgentID, agentHandle, err := resolveAgentIdentityPostgres(db, workspaceID, strings.TrimSpace(agentID))
 	if err != nil {
-		s.mu.RUnlock()
 		return nil, err
 	}
-	workspaceID := s.state.WorkspaceID
-	s.mu.RUnlock()
 
 	box = normalizeInboxBox(box)
 	trimmed := make([]string, 0, len(statuses))
@@ -393,7 +373,7 @@ func (s *Store) ListAgentInbox(agentID string, box string, statuses ...string) (
 			allowed[t] = struct{}{}
 		}
 	}
-	notifications, err := listAgentEventsPostgres(s.db, workspaceID, resolvedAgentID, box, trimmed)
+	notifications, err := listAgentEventsPostgres(db, workspaceID, resolvedAgentID, box, trimmed)
 	if err != nil {
 		return nil, err
 	}
@@ -403,8 +383,11 @@ func (s *Store) ListAgentInbox(agentID string, box string, statuses ...string) (
 			seen[inboxDedupKey(event)] = struct{}{}
 		}
 		s.mu.RLock()
-		synthetic := s.computedDocumentInboxLocked(resolvedAgentID)
+		synthetic, err := s.computedDocumentInboxLocked(resolvedAgentID, agentHandle)
 		s.mu.RUnlock()
+		if err != nil {
+			return nil, err
+		}
 		for _, event := range synthetic {
 			if event == nil || normalizeInboxBox(event.Box) != box {
 				continue
@@ -446,8 +429,11 @@ func (s *Store) GetAgentInboxItem(id string) (*AgentEvent, error) {
 	event, err := getAgentEventPostgres(s.db, workspaceID, id)
 	if err == ErrNotFound {
 		s.mu.RLock()
-		synthetic, ok := s.syntheticDocumentInboxItemLocked(id)
+		synthetic, ok, syntheticErr := s.syntheticDocumentInboxItemLocked(id)
 		s.mu.RUnlock()
+		if syntheticErr != nil {
+			return nil, syntheticErr
+		}
 		if ok {
 			return synthetic, nil
 		}
@@ -489,16 +475,10 @@ func (s *Store) UpdateAgentInboxItem(id string, req UpdateAgentNotificationReque
 }
 
 func (s *Store) MarkDocumentViewed(agentID, documentID string, req MarkDocumentViewedRequest) (*AgentDocumentView, error) {
-	s.mu.Lock()
-
-	resolvedAgentID, _, err := s.resolveAgentIdentityLocked(strings.TrimSpace(agentID))
-	if err != nil {
-		s.mu.Unlock()
-		return nil, err
-	}
+	s.mu.RLock()
 	document, ok := s.state.ContentDocuments[strings.TrimSpace(documentID)]
 	if !ok {
-		s.mu.Unlock()
+		s.mu.RUnlock()
 		return nil, ErrNotFound
 	}
 	updateID := req.UpdateID
@@ -509,63 +489,76 @@ func (s *Store) MarkDocumentViewed(agentID, documentID string, req MarkDocumentV
 	if updateID != document.UpdateID {
 		stateVector = ""
 	}
+	workspaceID := s.state.WorkspaceID
+	resolvedDocumentID := document.ID
+	s.mu.RUnlock()
+
 	now := time.Now().UTC()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	resolvedAgentID, _, err := resolveAgentIdentityPostgres(tx, workspaceID, strings.TrimSpace(agentID))
+	if err != nil {
+		return nil, err
+	}
 	view := &AgentDocumentView{
 		AgentID:     resolvedAgentID,
-		DocumentID:  document.ID,
+		DocumentID:  resolvedDocumentID,
 		UpdateID:    updateID,
 		StateVector: stateVector,
 		ViewedAt:    now,
 	}
-	s.state.AgentDocumentViews[agentDocumentViewKey(resolvedAgentID, document.ID)] = view
-	s.state.UpdatedAt = now
-	workspaceID := s.state.WorkspaceID
 	cloned := cloneAgentDocumentView(view)
-	s.mu.Unlock()
-	if err := upsertAgentDocumentViewPostgres(s.db, workspaceID, cloned); err != nil {
+	if err := upsertAgentDocumentViewPostgres(tx, workspaceID, cloned); err != nil {
 		return nil, err
 	}
-	if err := completeDocumentInboxEventsPostgres(s.db, workspaceID, resolvedAgentID, document.ID, updateID, now); err != nil {
+	if err := completeDocumentInboxEventsPostgres(tx, workspaceID, resolvedAgentID, resolvedDocumentID, updateID, now); err != nil {
 		return nil, err
 	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	committed = true
 	return cloned, nil
 }
 
 func (s *Store) DiffDocument(agentID, documentID, fromSpec, toSpec string) (*DocumentDiff, error) {
 	s.mu.RLock()
-
-	resolvedAgentID, _, err := s.resolveAgentIdentityLocked(strings.TrimSpace(agentID))
-	if err != nil {
-		s.mu.RUnlock()
-		return nil, err
-	}
 	document, ok := s.state.ContentDocuments[strings.TrimSpace(documentID)]
 	if !ok || document.Hidden {
 		s.mu.RUnlock()
 		return nil, ErrNotFound
 	}
-	fromUpdateID, err := s.resolveDocumentVersionLocked(resolvedAgentID, document, fromSpec, "last-viewed")
-	if err != nil {
-		s.mu.RUnlock()
-		return nil, err
-	}
-	toUpdateID, err := s.resolveDocumentVersionLocked(resolvedAgentID, document, toSpec, "head")
-	if err != nil {
-		s.mu.RUnlock()
-		return nil, err
-	}
-	if fromUpdateID > toUpdateID {
-		s.mu.RUnlock()
-		return nil, fmt.Errorf("from version %d is newer than to version %d", fromUpdateID, toUpdateID)
-	}
-	if fromUpdateID == toUpdateID {
-		s.mu.RUnlock()
-		return emptyDocumentDiff(document.ID, fromUpdateID, toUpdateID), nil
-	}
 	documentSnapshot := cloneDocument(document)
 	workspaceID := s.state.WorkspaceID
 	db := s.db
 	s.mu.RUnlock()
+
+	resolvedAgentID, _, err := resolveAgentIdentityPostgres(db, workspaceID, strings.TrimSpace(agentID))
+	if err != nil {
+		return nil, err
+	}
+	fromUpdateID, err := resolveDocumentVersionPostgres(db, workspaceID, resolvedAgentID, documentSnapshot, fromSpec, "last-viewed")
+	if err != nil {
+		return nil, err
+	}
+	toUpdateID, err := resolveDocumentVersionPostgres(db, workspaceID, resolvedAgentID, documentSnapshot, toSpec, "head")
+	if err != nil {
+		return nil, err
+	}
+	if fromUpdateID > toUpdateID {
+		return nil, fmt.Errorf("from version %d is newer than to version %d", fromUpdateID, toUpdateID)
+	}
+	if fromUpdateID == toUpdateID {
+		return emptyDocumentDiff(documentSnapshot.ID, fromUpdateID, toUpdateID), nil
+	}
 
 	fromContent, err := documentContentAtUpdatePostgres(db, workspaceID, documentSnapshot, fromUpdateID)
 	if err != nil {
@@ -575,7 +568,7 @@ func (s *Store) DiffDocument(agentID, documentID, fromSpec, toSpec string) (*Doc
 	if err != nil {
 		return nil, err
 	}
-	return buildDocumentDiff(document.ID, fromUpdateID, toUpdateID, fromContent, toContent)
+	return buildDocumentDiff(documentSnapshot.ID, fromUpdateID, toUpdateID, fromContent, toContent)
 }
 
 type syntheticDocumentInboxSpec struct {
@@ -623,28 +616,38 @@ func inboxDedupKey(event *AgentEvent) string {
 	return event.ID
 }
 
-func (s *Store) computedDocumentInboxLocked(agentID string) []*AgentEvent {
+func (s *Store) computedDocumentInboxLocked(agentID string, agentHandle string) ([]*AgentEvent, error) {
 	items := make([]*AgentEvent, 0)
 	for _, document := range s.state.ContentDocuments {
 		if document == nil || document.Hidden || document.UpdateID <= 0 {
 			continue
 		}
-		if s.documentInboxHandledLocked(agentID, document) {
+		handled, err := s.documentInboxHandledLocked(agentID, document)
+		if err != nil {
+			return nil, err
+		}
+		if handled {
 			continue
 		}
-		view := s.state.AgentDocumentViews[agentDocumentViewKey(agentID, document.ID)]
 		fromUpdateID := int64(0)
+		view, err := getAgentDocumentViewPostgres(s.db, s.state.WorkspaceID, agentID, document.ID)
+		if err != nil && err != ErrNotFound {
+			return nil, err
+		}
 		if view != nil {
 			fromUpdateID = view.UpdateID
 		}
 		if fromUpdateID >= document.UpdateID {
 			continue
 		}
-		box, eventType := s.documentInboxClassificationLocked(agentID, document)
+		box, eventType, err := s.documentInboxClassificationLocked(agentID, document)
+		if err != nil {
+			return nil, err
+		}
 		items = append(items, &AgentEvent{
 			ID:           syntheticDocumentInboxID(box, agentID, document.ID),
 			AgentID:      agentID,
-			AgentHandle:  s.agentHandleByIDLocked(agentID),
+			AgentHandle:  agentHandle,
 			Type:         eventType,
 			Box:          box,
 			Status:       "pending",
@@ -658,44 +661,53 @@ func (s *Store) computedDocumentInboxLocked(agentID string) []*AgentEvent {
 			UpdatedAt:    document.UpdatedAt,
 		})
 	}
-	return items
+	return items, nil
 }
 
-func (s *Store) documentInboxHandledLocked(agentID string, document *Document) bool {
+func (s *Store) documentInboxHandledLocked(agentID string, document *Document) (bool, error) {
 	handled, err := documentInboxHandledPostgres(s.db, s.state.WorkspaceID, agentID, document.ID, document.UpdateID, document.UpdatedAt)
 	if err != nil {
-		return false
+		return false, err
 	}
-	return handled
+	return handled, nil
 }
 
-func (s *Store) syntheticDocumentInboxItemLocked(id string) (*AgentEvent, bool) {
+func (s *Store) syntheticDocumentInboxItemLocked(id string) (*AgentEvent, bool, error) {
 	spec, ok := parseSyntheticDocumentInboxID(id)
 	if !ok {
-		return nil, false
+		return nil, false, nil
 	}
-	items := s.computedDocumentInboxLocked(spec.AgentID)
+	agent, err := getAgentPostgres(s.db, s.state.WorkspaceID, spec.AgentID)
+	if err != nil {
+		if err == ErrNotFound {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	items, err := s.computedDocumentInboxLocked(spec.AgentID, agent.Handle)
+	if err != nil {
+		return nil, false, err
+	}
 	for _, item := range items {
 		if item.ID == id {
-			return item, true
+			return item, true, nil
 		}
 	}
-	return nil, false
+	return nil, false, nil
 }
 
-func (s *Store) documentInboxClassificationLocked(agentID string, document *Document) (box string, eventType string) {
+func (s *Store) documentInboxClassificationLocked(agentID string, document *Document) (box string, eventType string, err error) {
 	if document == nil {
-		return "general", "document.updated"
+		return "general", "document.updated", nil
 	}
 	found, _, _, err := documentHasOpenThreadForParticipantPostgres(s.db, s.state.WorkspaceID, document.ID, agentID)
 	if err != nil {
-		log.Printf("documentInboxClassificationLocked: %v", err)
-		return "general", "document.updated"
+		return "", "", err
 	}
 	if !found {
-		return "general", "document.updated"
+		return "general", "document.updated", nil
 	}
-	return "for_me", "document.updated"
+	return "for_me", "document.updated", nil
 }
 
 func shouldMarkDocumentViewedForEvent(event *AgentEvent) bool {
@@ -703,13 +715,6 @@ func shouldMarkDocumentViewedForEvent(event *AgentEvent) bool {
 		return false
 	}
 	return event.Status == "completed" || event.Status == "dismissed"
-}
-
-func (s *Store) agentHandleByIDLocked(agentID string) string {
-	if agent := s.state.Agents[agentID]; agent != nil {
-		return agent.Handle
-	}
-	return ""
 }
 
 func agentDocumentViewKey(agentID, documentID string) string {
@@ -724,7 +729,7 @@ func cloneAgentDocumentView(view *AgentDocumentView) *AgentDocumentView {
 	return &clone
 }
 
-func (s *Store) resolveDocumentVersionLocked(agentID string, document *Document, spec string, defaultSpec string) (int64, error) {
+func resolveDocumentVersionPostgres(q querier, workspaceID string, agentID string, document *Document, spec string, defaultSpec string) (int64, error) {
 	value := strings.TrimSpace(strings.ToLower(spec))
 	if value == "" {
 		value = strings.TrimSpace(strings.ToLower(defaultSpec))
@@ -733,7 +738,11 @@ func (s *Store) resolveDocumentVersionLocked(agentID string, document *Document,
 	case "head", "current", "latest":
 		return document.UpdateID, nil
 	case "last-viewed", "last_viewed", "viewed":
-		if view := s.state.AgentDocumentViews[agentDocumentViewKey(agentID, document.ID)]; view != nil {
+		view, err := getAgentDocumentViewPostgres(q, workspaceID, agentID, document.ID)
+		if err != nil && err != ErrNotFound {
+			return 0, err
+		}
+		if view != nil {
 			return view.UpdateID, nil
 		}
 		return 0, nil
@@ -971,81 +980,125 @@ func (s *Store) CreateDocument(req CreateDocumentRequest, meta OperationMeta) (*
 }
 
 func (s *Store) CreateAgent(req CreateAgentRequest, meta OperationMeta) (*Agent, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	daemonID := strings.TrimSpace(req.DaemonID)
-	if daemonID == "" {
-		for id, daemon := range s.state.Daemons {
-			if daemon != nil && daemon.Status == "active" {
-				if daemonID != "" {
-					daemonID = ""
-					break
-				}
-				daemonID = id
-			}
+	s.mu.RLock()
+	workspaceID := s.state.WorkspaceID
+	documents := make([]*Document, 0, len(s.state.ContentDocuments))
+	for _, document := range s.state.ContentDocuments {
+		if document != nil {
+			documents = append(documents, cloneDocument(document))
 		}
 	}
-	if daemonID == "" {
-		return nil, errors.New("daemon id is required")
-	}
-	daemon := s.state.Daemons[daemonID]
-	if daemon == nil || daemon.Status != "active" || !daemon.DeletedAt.IsZero() {
-		return nil, ErrNotFound
-	}
+	s.mu.RUnlock()
+	daemonID := strings.TrimSpace(req.DaemonID)
 	kind, err := normalizeAgentRuntimeKind(req.Kind)
 	if err != nil {
-		return nil, err
-	}
-	if err := validateDaemonRuntimeKind(daemon, kind); err != nil {
 		return nil, err
 	}
 	agent, err := buildAgent(req.Handle, req.Name, req.Role, kind)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.ensureHandleAvailableLocked(agent.Handle, "", ""); err != nil {
+	agent.ID = uuid.NewString()
+	agent.WorkspaceRoot = "agents/" + agent.ID
+	now := time.Now().UTC()
+	agent.UpdatedAt = now
+
+	tx, err := s.db.Begin()
+	if err != nil {
 		return nil, err
 	}
-	agent.ID = uuid.NewString()
-	agent.DaemonID = daemonID
-	agent.WorkspaceRoot = "agents/" + agent.ID
-	agent.UpdatedAt = time.Now().UTC()
-	s.state.Agents[agent.ID] = agent
-	for _, document := range s.state.ContentDocuments {
-		if document == nil {
-			continue
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
 		}
-		s.state.AgentDocumentViews[agentDocumentViewKey(agent.ID, document.ID)] = &AgentDocumentView{
+	}()
+	daemons, err := listDaemons(tx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	var daemon *Daemon
+	if daemonID == "" {
+		for _, candidate := range daemons {
+			if candidate == nil || candidate.Status != "active" || !candidate.DeletedAt.IsZero() {
+				continue
+			}
+			if daemon != nil {
+				return nil, errors.New("daemon id is required")
+			}
+			daemon = candidate
+		}
+		if daemon != nil {
+			daemonID = daemon.ID
+		}
+	} else {
+		for _, candidate := range daemons {
+			if candidate != nil && candidate.ID == daemonID {
+				daemon = candidate
+				break
+			}
+		}
+	}
+	if daemonID == "" {
+		return nil, errors.New("daemon id is required")
+	}
+	if daemon == nil || daemon.Status != "active" || !daemon.DeletedAt.IsZero() {
+		return nil, ErrNotFound
+	}
+	if err := validateDaemonRuntimeKind(daemon, kind); err != nil {
+		return nil, err
+	}
+	agent.DaemonID = daemonID
+	if err := ensureWorkspaceHandleAvailableTx(tx, workspaceID, agent.Handle); err != nil {
+		return nil, err
+	}
+	if err := insertAgentPostgres(tx, workspaceID, agent); err != nil {
+		return nil, err
+	}
+	for _, document := range documents {
+		view := &AgentDocumentView{
 			AgentID:     agent.ID,
 			DocumentID:  document.ID,
 			UpdateID:    document.UpdateID,
 			StateVector: document.StateVector,
 			ViewedAt:    agent.UpdatedAt,
 		}
+		if err := upsertAgentDocumentViewPostgres(tx, workspaceID, view); err != nil {
+			return nil, err
+		}
 	}
-	s.state.UpdatedAt = agent.UpdatedAt
-	s.appendActivityLocked(&ActivityEvent{
+	if err := insertActivityPostgres(tx, workspaceID, &ActivityEvent{
 		Type:       "agent.created",
 		ActorID:    meta.ActorID,
 		ActorType:  meta.ActorType,
 		Summary:    fmt.Sprintf("%s created agent @%s", meta.ActorID, agent.Handle),
-		OccurredAt: agent.UpdatedAt,
+		OccurredAt: now,
 		Provenance: meta,
-	})
-	if err := s.persistLocked(); err != nil {
+	}); err != nil {
 		return nil, err
 	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	committed = true
 	return cloneAgent(agent), nil
 }
 
 func (s *Store) UpdateAgent(id string, req UpdateAgentRequest, meta OperationMeta) (*Agent, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	agent, ok := s.state.Agents[id]
-	if !ok {
-		return nil, ErrNotFound
+	workspaceID := s.workspaceID
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	agent, err := getAgentForUpdatePostgres(tx, workspaceID, strings.TrimSpace(id))
+	if err != nil {
+		return nil, err
 	}
 	if name := strings.TrimSpace(req.Name); name != "" {
 		agent.Name = name
@@ -1054,77 +1107,108 @@ func (s *Store) UpdateAgent(id string, req UpdateAgentRequest, meta OperationMet
 		agent.Role = role
 	}
 	agent.SystemPrompt = sharedAgentSystemPrompt(agent)
-	agent.UpdatedAt = time.Now().UTC()
-	s.state.UpdatedAt = agent.UpdatedAt
-	s.appendActivityLocked(&ActivityEvent{
+	now := time.Now().UTC()
+	agent.UpdatedAt = now
+	if err := upsertAgentPostgresTx(tx, workspaceID, agent); err != nil {
+		return nil, err
+	}
+	if err := insertActivityPostgres(tx, workspaceID, &ActivityEvent{
 		Type:       "agent.updated",
 		ActorID:    meta.ActorID,
 		ActorType:  meta.ActorType,
 		Summary:    fmt.Sprintf("%s updated agent @%s", meta.ActorID, agent.Handle),
-		OccurredAt: agent.UpdatedAt,
+		OccurredAt: now,
 		Provenance: meta,
-	})
-	if err := s.persistLocked(); err != nil {
+	}); err != nil {
 		return nil, err
 	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	committed = true
 	return cloneAgent(agent), nil
 }
 
 func (s *Store) DeleteAgent(id string, meta OperationMeta) (*Agent, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	agent, ok := s.state.Agents[id]
-	if !ok {
-		return nil, ErrNotFound
-	}
-	if agent.CurrentRunID != "" {
-		if run, ok := s.state.AgentRuns[agent.CurrentRunID]; ok && !isTerminalRunStatus(run.Status) {
-			return nil, errors.New("stop the active run before deleting this agent")
-		}
-	}
-	delete(s.state.Agents, id)
-	for runID, run := range s.state.AgentRuns {
-		if run.AgentID == id {
-			delete(s.state.AgentRuns, runID)
-		}
-	}
-	if err := removeThreadParticipantPostgres(s.db, s.state.WorkspaceID, id); err != nil {
+	workspaceID := s.workspaceID
+	tx, err := s.db.Begin()
+	if err != nil {
 		return nil, err
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	agent, err := getAgentForUpdatePostgres(tx, workspaceID, strings.TrimSpace(id))
+	if err != nil {
+		return nil, err
+	}
+	if agent.CurrentRunID != "" {
+		if run, err := getAgentRunForUpdatePostgres(tx, workspaceID, agent.CurrentRunID); err == nil && !isTerminalRunStatus(run.Status) {
+			return nil, errors.New("stop the active run before deleting this agent")
+		} else if err != nil && err != ErrNotFound {
+			return nil, err
+		}
+	}
+	if _, err := tx.Exec(`DELETE FROM thread_participants WHERE workspace_id = $1::uuid AND participant_id = $2::uuid`, workspaceID, agent.ID); err != nil {
+		return nil, err
+	}
+	result, err := tx.Exec(`DELETE FROM agents WHERE workspace_id = $1::uuid AND id = $2::uuid`, workspaceID, agent.ID)
+	if err != nil {
+		return nil, err
+	}
+	if rows, err := result.RowsAffected(); err != nil {
+		return nil, err
+	} else if rows != 1 {
+		return nil, ErrNotFound
+	}
 	now := time.Now().UTC()
-	s.state.UpdatedAt = now
-	s.appendActivityLocked(&ActivityEvent{
+	if err := insertActivityPostgres(tx, workspaceID, &ActivityEvent{
 		Type:       "agent.deleted",
 		ActorID:    meta.ActorID,
 		ActorType:  meta.ActorType,
 		Summary:    fmt.Sprintf("%s deleted agent @%s", meta.ActorID, agent.Handle),
 		OccurredAt: now,
 		Provenance: meta,
-	})
-	if err := s.persistLocked(); err != nil {
+	}); err != nil {
 		return nil, err
 	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	committed = true
 	return cloneAgent(agent), nil
 }
 
 func (s *Store) StartAgentRun(req StartAgentRunRequest, meta OperationMeta) (*Agent, *AgentRun, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	prompt := strings.TrimSpace(req.Prompt)
 	if prompt == "" {
 		return nil, nil, errors.New("prompt is required")
 	}
 
+	workspaceID := s.workspaceID
 	agentID := strings.TrimSpace(req.AgentID)
-	agent, ok := s.state.Agents[agentID]
-	if !ok {
-		return nil, nil, ErrNotFound
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, nil, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	agent, err := getAgentForUpdatePostgres(tx, workspaceID, agentID)
+	if err != nil {
+		return nil, nil, err
 	}
 	if agent.CurrentRunID != "" {
-		if active, ok := s.state.AgentRuns[agent.CurrentRunID]; ok && !isTerminalRunStatus(active.Status) {
+		if active, err := getAgentRunForUpdatePostgres(tx, workspaceID, agent.CurrentRunID); err == nil && !isTerminalRunStatus(active.Status) {
 			return nil, nil, fmt.Errorf("agent %s already has an active run", agent.Name)
+		} else if err != nil && err != ErrNotFound {
+			return nil, nil, err
 		}
 	}
 	now := time.Now().UTC()
@@ -1136,7 +1220,7 @@ func (s *Store) StartAgentRun(req StartAgentRunRequest, meta OperationMeta) (*Ag
 		AgentKind:       agent.Kind,
 		SystemPrompt:    sharedAgentSystemPrompt(agent),
 		SessionID:       agent.SessionID,
-		WorkspaceID:     s.state.WorkspaceID,
+		WorkspaceID:     workspaceID,
 		WorkspaceRoot:   agent.WorkspaceRoot,
 		WorkingDir:      ".",
 		Prompt:          prompt,
@@ -1146,38 +1230,53 @@ func (s *Store) StartAgentRun(req StartAgentRunRequest, meta OperationMeta) (*Ag
 		AssignedTaskRef: strings.TrimSpace(req.AssignedTaskRef),
 		UpdatedAt:       now,
 	}
-	s.state.AgentRuns[run.ID] = run
 	agent.Status = "queued"
 	agent.CurrentRunID = run.ID
 	agent.CurrentTask = summarizePrompt(prompt)
 	agent.CurrentActivity = "Queued in daemon"
 	agent.UpdatedAt = now
-	s.state.UpdatedAt = now
-	s.appendActivityLocked(&ActivityEvent{
+	if err := insertAgentRunPostgresTx(tx, workspaceID, run); err != nil {
+		return nil, nil, err
+	}
+	if err := upsertAgentPostgresTx(tx, workspaceID, agent); err != nil {
+		return nil, nil, err
+	}
+	if err := insertActivityPostgres(tx, workspaceID, &ActivityEvent{
 		Type:       "agent.run.created",
 		ActorID:    agent.ID,
 		ActorType:  "agent",
 		Summary:    fmt.Sprintf("%s queued %s run", meta.ActorID, agent.Name),
 		OccurredAt: now,
 		Provenance: meta,
-	})
-	if err := s.persistLocked(); err != nil {
+	}); err != nil {
 		return nil, nil, err
 	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	committed = true
 	return cloneAgent(agent), cloneAgentRun(run), nil
 }
 
 func (s *Store) UpdateAgentRun(id string, req UpdateAgentRunRequest, meta OperationMeta) (*AgentRun, *Agent, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	run, ok := s.state.AgentRuns[id]
-	if !ok {
-		return nil, nil, ErrNotFound
+	workspaceID := s.workspaceID
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, nil, err
 	}
-	agent, ok := s.state.Agents[run.AgentID]
-	if !ok {
-		return nil, nil, ErrNotFound
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	run, err := getAgentRunForUpdatePostgres(tx, workspaceID, strings.TrimSpace(id))
+	if err != nil {
+		return nil, nil, err
+	}
+	agent, err := getAgentForUpdatePostgres(tx, workspaceID, run.AgentID)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	now := time.Now().UTC()
@@ -1239,58 +1338,97 @@ func (s *Store) UpdateAgentRun(id string, req UpdateAgentRunRequest, meta Operat
 		agent.LastRunCompleted = run.CompletedAt
 	}
 
-	s.state.UpdatedAt = now
-	s.appendActivityLocked(&ActivityEvent{
+	if err := updateAgentRunPostgresTx(tx, workspaceID, run); err != nil {
+		return nil, nil, err
+	}
+	if err := upsertAgentPostgresTx(tx, workspaceID, agent); err != nil {
+		return nil, nil, err
+	}
+	if err := insertActivityPostgres(tx, workspaceID, &ActivityEvent{
 		Type:       "agent.run.updated",
 		ActorID:    agent.ID,
 		ActorType:  "agent",
 		Summary:    fmt.Sprintf("%s is %s", agent.Name, run.Status),
 		OccurredAt: now,
 		Provenance: meta,
-	})
-	if err := s.persistLocked(); err != nil {
+	}); err != nil {
 		return nil, nil, err
 	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	committed = true
 	return cloneAgentRun(run), cloneAgent(agent), nil
 }
 
 func (s *Store) StopAgentRun(id string, meta OperationMeta) (*AgentRun, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	run, ok := s.state.AgentRuns[id]
-	if !ok {
-		return nil, ErrNotFound
+	workspaceID := s.workspaceID
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	run, err := getAgentRunForUpdatePostgres(tx, workspaceID, strings.TrimSpace(id))
+	if err != nil {
+		return nil, err
+	}
+	agent, err := getAgentForUpdatePostgres(tx, workspaceID, run.AgentID)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
 	run.DesiredStatus = "stopped"
-	run.UpdatedAt = time.Now().UTC()
-	if agent := s.state.Agents[run.AgentID]; agent != nil {
+	run.UpdatedAt = now
+	if agent != nil {
 		agent.Status = "stopping"
 		agent.CurrentActivity = "Waiting for daemon stop"
 		agent.UpdatedAt = run.UpdatedAt
 	}
-	s.state.UpdatedAt = run.UpdatedAt
-	s.appendActivityLocked(&ActivityEvent{
+	if err := updateAgentRunPostgresTx(tx, workspaceID, run); err != nil {
+		return nil, err
+	}
+	if agent != nil {
+		if err := upsertAgentPostgresTx(tx, workspaceID, agent); err != nil {
+			return nil, err
+		}
+	}
+	if err := insertActivityPostgres(tx, workspaceID, &ActivityEvent{
 		Type:       "agent.run.stop_requested",
 		ActorID:    meta.ActorID,
 		ActorType:  meta.ActorType,
 		Summary:    fmt.Sprintf("%s requested stop for %s", meta.ActorID, run.AgentName),
 		OccurredAt: run.UpdatedAt,
 		Provenance: meta,
-	})
-	if err := s.persistLocked(); err != nil {
+	}); err != nil {
 		return nil, err
 	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	committed = true
 	return cloneAgentRun(run), nil
 }
 
 func (s *Store) UpdateAgentSession(id string, req UpdateAgentSessionRequest, meta OperationMeta) (*Agent, error) {
-	s.mu.Lock()
-
-	agent, ok := s.state.Agents[strings.TrimSpace(id)]
-	if !ok {
-		s.mu.Unlock()
-		return nil, ErrNotFound
+	workspaceID := s.workspaceID
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	agent, err := getAgentForUpdatePostgres(tx, workspaceID, strings.TrimSpace(id))
+	if err != nil {
+		return nil, err
 	}
 	now := time.Now().UTC()
 	if status := strings.TrimSpace(req.Status); status != "" {
@@ -1298,7 +1436,6 @@ func (s *Store) UpdateAgentSession(id string, req UpdateAgentSessionRequest, met
 		case "idle", "working", "disconnected":
 			agent.Status = status
 		default:
-			s.mu.Unlock()
 			return nil, fmt.Errorf("unsupported agent status %q", status)
 		}
 	}
@@ -1328,16 +1465,11 @@ func (s *Store) UpdateAgentSession(id string, req UpdateAgentSessionRequest, met
 		agent.LastHeartbeatAt = now
 	}
 	agent.UpdatedAt = now
-	s.state.UpdatedAt = now
-	workspaceID := s.state.WorkspaceID
 	updated := cloneAgent(agent)
-	s.mu.Unlock()
-	if err := upsertAgentPostgres(s.db, workspaceID, updated); err != nil {
+	if err := upsertAgentPostgresTx(tx, workspaceID, updated); err != nil {
 		return nil, err
 	}
-	// Session updates write to Postgres directly (no persist walk), so the
-	// activity is inserted directly too; it carries no document reference.
-	if err := insertActivityPostgres(s.db, workspaceID, &ActivityEvent{
+	if err := insertActivityPostgres(tx, workspaceID, &ActivityEvent{
 		Type:       "agent.session.updated",
 		ActorID:    meta.ActorID,
 		ActorType:  meta.ActorType,
@@ -1347,6 +1479,10 @@ func (s *Store) UpdateAgentSession(id string, req UpdateAgentSessionRequest, met
 	}); err != nil {
 		return nil, err
 	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	committed = true
 	return updated, nil
 }
 
@@ -1458,18 +1594,22 @@ func (s *Store) ReplaceDocumentText(documentID string, nextText string, meta Ope
 }
 
 func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thread, *ThreadMessage, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+	s.mu.RLock()
 	document, ok := s.state.ContentDocuments[req.DocumentID]
 	if !ok || document.Hidden {
+		s.mu.RUnlock()
 		return nil, nil, false, ErrNotFound
 	}
+	documentSnapshot := cloneDocument(document)
+	workspaceID := s.state.WorkspaceID
+	db := s.db
+	s.mu.RUnlock()
+
 	body := strings.TrimSpace(req.Body)
 	if body == "" {
 		return nil, nil, false, errors.New("thread body is required")
 	}
-	author, err := s.resolvePrincipalLocked(meta.ActorID, meta.ActorType)
+	author, err := resolvePrincipalPostgres(db, workspaceID, meta.ActorID, meta.ActorType)
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -1479,7 +1619,10 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 	if err != nil {
 		return nil, nil, false, err
 	}
-	mentionedIDs := s.extractMentionPrincipalIDsLocked(body)
+	mentionedIDs, err := extractMentionPrincipalIDsPostgres(db, workspaceID, body)
+	if err != nil {
+		return nil, nil, false, err
+	}
 	participantIDs := []string{author.ID}
 	for _, mid := range mentionedIDs {
 		if mid != "" && !containsText(participantIDs, mid) {
@@ -1489,9 +1632,9 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 	sort.Strings(participantIDs)
 	thread := &Thread{
 		ID:                uuid.NewString(),
-		DocumentID:        document.ID,
+		DocumentID:        documentSnapshot.ID,
 		ClientOperationID: clientOperationID,
-		Title:             firstNonEmptyString(strings.TrimSpace(req.Title), inferThreadTitleFromRequest(document, req)),
+		Title:             firstNonEmptyString(strings.TrimSpace(req.Title), inferThreadTitleFromRequest(documentSnapshot, req)),
 		Status:            "open",
 		Anchor:            anchor,
 		CreatedByID:       author.ID,
@@ -1514,22 +1657,25 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 		Kind:         "comment",
 		CreatedAt:    now,
 	}
-	events := s.collectThreadMentionEventsLocked(thread, message, meta)
+	events, err := collectThreadMentionEventsPostgres(db, workspaceID, thread, message, meta)
+	if err != nil {
+		return nil, nil, false, err
+	}
 	activity := &ActivityEvent{
 		Type:       "thread.created",
-		DocumentID: document.ID,
+		DocumentID: documentSnapshot.ID,
 		ActorID:    meta.ActorID,
 		ActorType:  meta.ActorType,
-		Summary:    fmt.Sprintf("%s started a thread on %s", meta.ActorID, documentLabel(document)),
+		Summary:    fmt.Sprintf("%s started a thread on %s", meta.ActorID, documentLabel(documentSnapshot)),
 		OccurredAt: now,
 		Provenance: meta,
 	}
-	committed, created, err := createThreadPostgres(s.db, s.state.WorkspaceID, thread, message, events, activity)
+	committed, created, err := createThreadPostgres(db, workspaceID, thread, message, events, activity)
 	if err != nil {
 		return nil, nil, false, err
 	}
 	if !created {
-		existing, err := findThreadByClientOperationPostgres(s.db, s.state.WorkspaceID, clientOperationID, author.ID, author.Type)
+		existing, err := findThreadByClientOperationPostgres(db, workspaceID, clientOperationID, author.ID, author.Type)
 		if err != nil {
 			return nil, nil, false, err
 		}
@@ -1539,6 +1685,8 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 		return nil, nil, false, errors.New("thread creation conflict")
 	}
 	// Defer inbox-change broadcasts until after the tx has committed.
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for _, event := range events {
 		s.recordAgentInboxChangedLocked(event)
 	}
@@ -1557,21 +1705,16 @@ func (s *Store) ReplyThread(id string, req ReplyThreadRequest, meta OperationMet
 	if _, err := uuid.Parse(id); err != nil {
 		return nil, nil, ErrNotFound
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+	s.mu.RLock()
 	workspaceID := s.state.WorkspaceID
-	// Pre-read for participant list (needed to build reply events).
-	// The actual existence guarantee is the UPDATE RETURNING inside the tx.
-	thread, err := getThreadPostgres(s.db, workspaceID, id)
-	if err != nil {
-		return nil, nil, err
-	}
+	db := s.db
+	s.mu.RUnlock()
+
 	body := strings.TrimSpace(req.Body)
 	if body == "" {
 		return nil, nil, errors.New("thread reply is required")
 	}
-	author, err := s.resolvePrincipalLocked(meta.ActorID, meta.ActorType)
+	author, err := resolvePrincipalPostgres(db, workspaceID, meta.ActorID, meta.ActorType)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1582,7 +1725,7 @@ func (s *Store) ReplyThread(id string, req ReplyThreadRequest, meta OperationMet
 	}
 	message := &ThreadMessage{
 		ID:           uuid.NewString(),
-		ThreadID:     thread.ID,
+		ThreadID:     id,
 		AuthorID:     author.ID,
 		AuthorType:   author.Type,
 		AuthorHandle: author.Handle,
@@ -1591,26 +1734,13 @@ func (s *Store) ReplyThread(id string, req ReplyThreadRequest, meta OperationMet
 		Kind:         kind,
 		CreatedAt:    now,
 	}
-	mentionedIDs := s.extractMentionPrincipalIDsLocked(body)
-	participantIDs := append([]string{author.ID}, mentionedIDs...)
-	// Collect events and activity before the single-tx Postgres call.
-	mentionEvents := s.collectThreadMentionEventsLocked(thread, message, meta)
-	replyEvents := s.collectThreadReplyEventsLocked(thread, message, meta, mentionedIDs...)
-	allEvents := append(mentionEvents, replyEvents...)
-	activity := &ActivityEvent{
-		Type:       "thread.replied",
-		DocumentID: thread.DocumentID,
-		ActorID:    meta.ActorID,
-		ActorType:  meta.ActorType,
-		Summary:    fmt.Sprintf("%s replied in thread %s", meta.ActorID, thread.Title),
-		OccurredAt: now,
-		Provenance: meta,
-	}
-	updatedThread, err := replyThreadPostgres(s.db, workspaceID, id, message, participantIDs, allEvents, activity)
+	updatedThread, allEvents, err := replyThreadPostgres(db, workspaceID, id, message, meta)
 	if err != nil {
 		return nil, nil, err
 	}
 	// Defer inbox-change broadcasts until after the tx has committed.
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for _, event := range allEvents {
 		s.recordAgentInboxChangedLocked(event)
 	}
@@ -1619,17 +1749,18 @@ func (s *Store) ReplyThread(id string, req ReplyThreadRequest, meta OperationMet
 }
 
 func (s *Store) ClaimAgentEvent(req ClaimAgentEventRequest) (*AgentEvent, error) {
-	s.mu.Lock()
-	agentID, agentHandle, err := s.resolveAgentIdentityLocked(req.AgentID)
+	s.mu.RLock()
+	workspaceID := s.state.WorkspaceID
+	db := s.db
+	s.mu.RUnlock()
+
+	agentID, agentHandle, err := resolveAgentIdentityPostgres(db, workspaceID, req.AgentID)
 	if err != nil {
-		s.mu.Unlock()
 		return nil, err
 	}
-	workspaceID := s.state.WorkspaceID
-	targetAgent := s.state.Agents[agentID]
-	if targetAgent == nil {
-		s.mu.Unlock()
-		return nil, ErrNotFound
+	targetAgent, err := getAgentPostgres(db, workspaceID, agentID)
+	if err != nil {
+		return nil, err
 	}
 	claimedBy := strings.TrimSpace(req.ClaimedBy)
 	targetDaemonID := strings.TrimSpace(targetAgent.DaemonID)
@@ -1638,16 +1769,20 @@ func (s *Store) ClaimAgentEvent(req ClaimAgentEventRequest) (*AgentEvent, error)
 		claimedBy = agentID
 	case agentID:
 	case targetDaemonID:
-		if targetDaemonID == "" || s.state.Daemons[targetDaemonID] == nil {
-			s.mu.Unlock()
+		if targetDaemonID == "" {
+			return nil, errors.New("claimed_by must be the target agent or its daemon")
+		}
+		ok, err := daemonExistsPostgres(db, workspaceID, targetDaemonID)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
 			return nil, errors.New("claimed_by must be the target agent or its daemon")
 		}
 	default:
-		s.mu.Unlock()
 		return nil, errors.New("claimed_by must be the target agent or its daemon")
 	}
-	s.mu.Unlock()
-	event, err := claimAgentEventPostgres(s.db, workspaceID, agentID, agentHandle, claimedBy)
+	event, err := claimAgentEventPostgres(db, workspaceID, agentID, agentHandle, claimedBy)
 	if err != nil {
 		return nil, err
 	}
@@ -1749,26 +1884,11 @@ func cloneState(state WorkspaceState) WorkspaceState {
 	for key, doc := range state.ContentDocuments {
 		copyState.ContentDocuments[key] = cloneDocument(doc)
 	}
-	copyState.Users = map[string]*User{}
-	for key, user := range state.Users {
-		copyState.Users[key] = cloneUser(user)
-	}
-	copyState.Daemons = map[string]*Daemon{}
-	for key, daemon := range state.Daemons {
-		copyState.Daemons[key] = cloneDaemon(daemon)
-	}
-	copyState.Agents = map[string]*Agent{}
-	for key, agent := range state.Agents {
-		copyState.Agents[key] = cloneAgent(agent)
-	}
-	copyState.AgentRuns = map[string]*AgentRun{}
-	for key, run := range state.AgentRuns {
-		copyState.AgentRuns[key] = cloneAgentRun(run)
-	}
-	copyState.AgentDocumentViews = map[string]*AgentDocumentView{}
-	for key, view := range state.AgentDocumentViews {
-		copyState.AgentDocumentViews[key] = cloneAgentDocumentView(view)
-	}
+	copyState.Users = nil
+	copyState.Daemons = nil
+	copyState.Agents = nil
+	copyState.AgentRuns = nil
+	copyState.AgentDocumentViews = nil
 	copyState.DocumentCheckpoints = map[string]*DocumentCheckpoint{}
 	for key, checkpoint := range state.DocumentCheckpoints {
 		if checkpoint == nil {
@@ -1801,65 +1921,6 @@ func (s *Store) appendIncrementalDocumentUpdateLocked(documentID string, update 
 		ActorType:  meta.ActorType,
 		CreatedAt:  now,
 	})
-}
-
-func SortedAgentRuns(state WorkspaceState) []*AgentRun {
-	return sortedAgentRunsWithCloner(state, cloneAgentRun)
-}
-
-func SortedWorkspaceAgentRuns(state WorkspaceState) []*AgentRun {
-	return sortedAgentRunsWithCloner(state, cloneAgentRunForWorkspace)
-}
-
-func SortedSyncAgentRuns(state WorkspaceState) []*AgentRun {
-	return sortedAgentRunsWithCloner(state, cloneAgentRunForSync)
-}
-
-func sortedAgentRunsWithCloner(state WorkspaceState, clone func(*AgentRun) *AgentRun) []*AgentRun {
-	runs := make([]*AgentRun, 0, len(state.AgentRuns))
-	for _, run := range state.AgentRuns {
-		runs = append(runs, clone(run))
-	}
-	sort.Slice(runs, func(i, j int) bool {
-		if runs[i].UpdatedAt.Equal(runs[j].UpdatedAt) {
-			return runs[i].ID < runs[j].ID
-		}
-		return runs[i].UpdatedAt.After(runs[j].UpdatedAt)
-	})
-	return runs
-}
-
-func SortedUsers(state WorkspaceState) []*User {
-	users := make([]*User, 0, len(state.Users))
-	for _, user := range state.Users {
-		users = append(users, cloneUser(user))
-	}
-	sort.Slice(users, func(i, j int) bool { return users[i].Handle < users[j].Handle })
-	return users
-}
-
-func SortedAgents(state WorkspaceState) []*Agent {
-	agents := make([]*Agent, 0, len(state.Agents))
-	for _, agent := range state.Agents {
-		agents = append(agents, cloneAgent(agent))
-	}
-	sort.Slice(agents, func(i, j int) bool { return agents[i].Name < agents[j].Name })
-	return agents
-}
-
-func SortedDaemons(state WorkspaceState) []*Daemon {
-	daemons := make([]*Daemon, 0, len(state.Daemons))
-	now := time.Now().UTC()
-	for _, daemon := range state.Daemons {
-		daemons = append(daemons, daemonWithLiveness(daemon, now))
-	}
-	sort.Slice(daemons, func(i, j int) bool {
-		if daemons[i].CreatedAt.Equal(daemons[j].CreatedAt) {
-			return daemons[i].ID < daemons[j].ID
-		}
-		return daemons[i].CreatedAt.Before(daemons[j].CreatedAt)
-	})
-	return daemons
 }
 
 func isPostgresDSN(value string) bool {
@@ -2039,16 +2100,30 @@ If you are directly mentioned in a thread, you must reply with the thread tools.
 Keep edits bounded, relevant to your role, and grounded in the current document and thread context.`, name, handle, kind, role))
 }
 
-func (s *Store) refreshAgentSystemPromptsLocked() bool {
-	changed := false
-	for _, agent := range s.state.Agents {
+func (s *Store) refreshAgentSystemPromptsLocked() error {
+	agents, err := listAgentsPostgres(s.db, s.state.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	for _, agent := range agents {
 		next := sharedAgentSystemPrompt(agent)
 		if agent.SystemPrompt != next {
-			agent.SystemPrompt = next
-			changed = true
+			if _, err := s.db.Exec(
+				`UPDATE agents
+				    SET system_prompt = $1,
+				        updated_at = $2
+				  WHERE workspace_id = $3::uuid
+				    AND id = $4::uuid`,
+				next,
+				time.Now().UTC(),
+				s.state.WorkspaceID,
+				agent.ID,
+			); err != nil {
+				return err
+			}
 		}
 	}
-	return changed
+	return nil
 }
 
 func normalizeWorkspaceRelativePath(value string) (string, error) {
@@ -2125,40 +2200,6 @@ func cloneUser(user *User) *User {
 	}
 	clone := *user
 	return &clone
-}
-
-func (s *Store) ensureHandleAvailableLocked(handle, exceptUserID, exceptAgentID string) error {
-	for id, user := range s.state.Users {
-		if id == exceptUserID {
-			continue
-		}
-		if user.Handle == handle {
-			return errors.New("Handle is already taken.")
-		}
-	}
-	for id, agent := range s.state.Agents {
-		if id == exceptAgentID {
-			continue
-		}
-		if agent.Handle == handle {
-			return errors.New("Handle is already taken.")
-		}
-	}
-	return nil
-}
-
-func (s *Store) principalByHandleLocked(handle string) (*principalRef, bool) {
-	for _, user := range s.state.Users {
-		if user.Handle == handle {
-			return &principalRef{UserID: user.ID, Handle: user.Handle, Name: user.Name, Kind: user.Kind}, true
-		}
-	}
-	for _, agent := range s.state.Agents {
-		if agent.Handle == handle {
-			return &principalRef{UserID: agent.ID, Handle: agent.Handle, Name: agent.Name, Kind: "agent"}, true
-		}
-	}
-	return nil, false
 }
 
 func cloneAgentRun(run *AgentRun) *AgentRun {
@@ -2346,106 +2387,69 @@ func firstNonEmptyString(values ...string) string {
 	return ""
 }
 
-func (s *Store) resolvePrincipalLocked(actorID, actorType string) (*principalIdentity, error) {
-	trimmedID := strings.TrimSpace(actorID)
-	switch strings.TrimSpace(actorType) {
-	case "human":
-		for _, user := range s.state.Users {
-			if user.ID == trimmedID || user.Handle == trimmedID {
-				return &principalIdentity{ID: user.ID, Type: "human", Handle: user.Handle, Name: user.Name}, nil
-			}
-		}
-	case "agent":
-		for _, agent := range s.state.Agents {
-			if agent.ID == trimmedID || agent.Handle == trimmedID {
-				return &principalIdentity{ID: agent.ID, Type: "agent", Handle: agent.Handle, Name: agent.Name}, nil
-			}
-		}
-	}
-	for _, user := range s.state.Users {
-		if user.ID == trimmedID || user.Handle == trimmedID {
-			return &principalIdentity{ID: user.ID, Type: "human", Handle: user.Handle, Name: user.Name}, nil
-		}
-	}
-	for _, agent := range s.state.Agents {
-		if agent.ID == trimmedID || agent.Handle == trimmedID {
-			return &principalIdentity{ID: agent.ID, Type: "agent", Handle: agent.Handle, Name: agent.Name}, nil
-		}
-	}
-	return nil, fmt.Errorf("unknown principal %q", actorID)
-}
-
-func (s *Store) resolveAgentIdentityLocked(agentRef string) (string, string, error) {
-	trimmed := strings.TrimSpace(agentRef)
-	for _, agent := range s.state.Agents {
-		if agent.ID == trimmed || agent.Handle == trimmed {
-			return agent.ID, agent.Handle, nil
-		}
-	}
-	return "", "", ErrNotFound
-}
-
-func (s *Store) extractMentionPrincipalIDsLocked(content string) []string {
-	matches := mentionPattern.FindAllStringSubmatchIndex(content, -1)
-	if len(matches) == 0 {
-		return nil
-	}
-	ids := make([]string, 0, len(matches))
-	for _, match := range matches {
-		if len(match) < 6 {
-			continue
-		}
-		handle := content[match[4]:match[5]]
-		principal, ok := s.principalByHandleLocked(handle)
-		if !ok {
-			continue
-		}
-		if !containsText(ids, principal.UserID) {
-			ids = append(ids, principal.UserID)
-		}
-	}
-	return ids
-}
-
-func (s *Store) enqueueDocumentInboxEventsLocked(document *Document, meta OperationMeta) {
+func (s *Store) enqueueDocumentInboxEventsLocked(q querier, document *Document, meta OperationMeta) ([]*AgentEvent, error) {
 	if document == nil || document.Hidden || document.UpdateID <= 1 {
-		return
+		return nil, nil
 	}
-	for _, agent := range s.state.Agents {
-		if agent == nil || !s.shouldNotifyAgentLocked(agent.ID, meta, "") {
+	agents, err := listAgentsPostgres(q, s.state.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	var events []*AgentEvent
+	for _, agent := range agents {
+		if agent == nil {
 			continue
 		}
-		box, threadID, threadTitle := s.documentInboxTargetLocked(agent.ID, document)
-		view := s.state.AgentDocumentViews[agentDocumentViewKey(agent.ID, document.ID)]
+		notify, err := shouldNotifyAgentPostgres(q, s.state.WorkspaceID, agent.ID, meta, "")
+		if err != nil {
+			return nil, err
+		}
+		if !notify {
+			continue
+		}
+		box, threadID, threadTitle, err := s.documentInboxTargetLocked(q, agent.ID, document)
+		if err != nil {
+			return nil, err
+		}
 		fromUpdateID := int64(0)
+		view, err := getAgentDocumentViewPostgres(q, s.state.WorkspaceID, agent.ID, document.ID)
+		if err != nil && err != ErrNotFound {
+			return nil, err
+		}
 		if view != nil {
 			fromUpdateID = view.UpdateID
 		}
 		if fromUpdateID >= document.UpdateID {
 			continue
 		}
-		s.upsertDocumentInboxEventLocked(agent, document, box, threadID, threadTitle, fromUpdateID, document.UpdateID)
+		event, err := s.upsertDocumentInboxEventLocked(q, agent, document, box, threadID, threadTitle, fromUpdateID, document.UpdateID)
+		if err != nil {
+			return nil, err
+		}
+		if event != nil {
+			events = append(events, event)
+		}
 	}
+	return events, nil
 }
 
-func (s *Store) documentInboxTargetLocked(agentID string, document *Document) (box string, threadID string, threadTitle string) {
+func (s *Store) documentInboxTargetLocked(q querier, agentID string, document *Document) (box string, threadID string, threadTitle string, err error) {
 	if document == nil {
-		return "general", "", ""
+		return "general", "", "", nil
 	}
-	found, tid, title, err := documentHasOpenThreadForParticipantPostgres(s.db, s.state.WorkspaceID, document.ID, agentID)
+	found, tid, title, err := documentHasOpenThreadForParticipantPostgres(q, s.state.WorkspaceID, document.ID, agentID)
 	if err != nil {
-		log.Printf("documentInboxTargetLocked: %v", err)
-		return "general", "", ""
+		return "", "", "", err
 	}
 	if !found {
-		return "general", "", ""
+		return "general", "", "", nil
 	}
-	return "for_me", tid, title
+	return "for_me", tid, title, nil
 }
 
-func (s *Store) upsertDocumentInboxEventLocked(agent *Agent, document *Document, box string, threadID string, threadTitle string, fromUpdateID int64, toUpdateID int64) {
+func (s *Store) upsertDocumentInboxEventLocked(q querier, agent *Agent, document *Document, box string, threadID string, threadTitle string, fromUpdateID int64, toUpdateID int64) (*AgentEvent, error) {
 	if agent == nil || document == nil || toUpdateID <= 0 {
-		return
+		return nil, nil
 	}
 	box = normalizeInboxBox(box)
 	now := time.Now().UTC()
@@ -2473,25 +2477,35 @@ func (s *Store) upsertDocumentInboxEventLocked(agent *Agent, document *Document,
 		UpdatedAt:    now,
 		AvailableAt:  now,
 	}
-	upserted, err := upsertDocumentInboxEventPostgres(s.db, s.state.WorkspaceID, event)
+	upserted, err := upsertDocumentInboxEventPostgres(q, s.state.WorkspaceID, event)
 	if err != nil {
-		return
+		return nil, err
 	}
-	s.recordAgentInboxChangedLocked(upserted)
+	return upserted, nil
 }
 
-func (s *Store) collectThreadMentionEventsLocked(thread *Thread, message *ThreadMessage, meta OperationMeta) []*AgentEvent {
+func collectThreadMentionEventsPostgres(q querier, workspaceID string, thread *Thread, message *ThreadMessage, meta OperationMeta) ([]*AgentEvent, error) {
 	if thread == nil || message == nil {
-		return nil
+		return nil, nil
 	}
 	var events []*AgentEvent
-	mentionedIDs := s.extractMentionPrincipalIDsLocked(message.Body)
+	mentionedIDs, err := extractMentionPrincipalIDsPostgres(q, workspaceID, message.Body)
+	if err != nil {
+		return nil, err
+	}
 	for _, principalID := range mentionedIDs {
-		agent, ok := s.state.Agents[principalID]
-		if !ok {
-			continue
+		agent, err := getAgentPostgres(q, workspaceID, principalID)
+		if err != nil {
+			if err == ErrNotFound {
+				continue
+			}
+			return nil, err
 		}
-		if !s.shouldNotifyAgentLocked(agent.ID, meta, message.AuthorID) {
+		notify, err := shouldNotifyAgentPostgres(q, workspaceID, agent.ID, meta, message.AuthorID)
+		if err != nil {
+			return nil, err
+		}
+		if !notify {
 			continue
 		}
 		now := time.Now().UTC()
@@ -2514,23 +2528,30 @@ func (s *Store) collectThreadMentionEventsLocked(thread *Thread, message *Thread
 			AvailableAt:     now,
 		})
 	}
-	return events
+	return events, nil
 }
 
-func (s *Store) collectThreadReplyEventsLocked(thread *Thread, message *ThreadMessage, meta OperationMeta, skipAgentIDs ...string) []*AgentEvent {
+func collectThreadReplyEventsPostgres(q querier, workspaceID string, thread *Thread, message *ThreadMessage, meta OperationMeta, skipAgentIDs ...string) ([]*AgentEvent, error) {
 	if thread == nil || message == nil {
-		return nil
+		return nil, nil
 	}
 	var events []*AgentEvent
 	for _, participantID := range thread.ParticipantIDs {
 		if containsText(skipAgentIDs, participantID) {
 			continue
 		}
-		agent, ok := s.state.Agents[participantID]
-		if !ok {
-			continue
+		agent, err := getAgentPostgres(q, workspaceID, participantID)
+		if err != nil {
+			if err == ErrNotFound {
+				continue
+			}
+			return nil, err
 		}
-		if !s.shouldNotifyAgentLocked(agent.ID, meta, message.AuthorID) {
+		notify, err := shouldNotifyAgentPostgres(q, workspaceID, agent.ID, meta, message.AuthorID)
+		if err != nil {
+			return nil, err
+		}
+		if !notify {
 			continue
 		}
 		now := time.Now().UTC()
@@ -2553,18 +2574,16 @@ func (s *Store) collectThreadReplyEventsLocked(thread *Thread, message *ThreadMe
 			AvailableAt:     now,
 		})
 	}
-	return events
+	return events, nil
 }
 
 func (s *Store) shouldNotifyAgentLocked(agentID string, meta OperationMeta, fallbackActorID string) bool {
-	originID := strings.TrimSpace(fallbackActorID)
-	if actor, err := s.resolvePrincipalLocked(meta.ActorID, meta.ActorType); err == nil {
-		originID = actor.ID
+	notify, err := shouldNotifyAgentPostgres(s.db, s.state.WorkspaceID, agentID, meta, fallbackActorID)
+	if err != nil {
+		log.Printf("shouldNotifyAgentLocked: %v", err)
+		return false
 	}
-	if originID == "" {
-		return true
-	}
-	return originID != agentID
+	return notify
 }
 
 func (s *Store) recordAgentInboxChangedLocked(event *AgentEvent) {
@@ -2578,8 +2597,10 @@ func (s *Store) recordAgentInboxChangedLocked(event *AgentEvent) {
 		EventID:          event.ID,
 		NotificationType: event.Type,
 	}
-	if agent := s.state.Agents[event.AgentID]; agent != nil {
+	if agent, err := getAgentPostgres(s.db, s.state.WorkspaceID, event.AgentID); err == nil && agent != nil {
 		change.DaemonID = agent.DaemonID
+	} else if err != nil && err != ErrNotFound {
+		log.Printf("recordAgentInboxChangedLocked: %v", err)
 	}
 	s.pendingInboxChanges = append(s.pendingInboxChanges, change)
 }

@@ -627,14 +627,9 @@ func (s *Server) authenticateWorkspaceRequest(r *http.Request, workspaceID strin
 	if actingAgentID == "" {
 		return auth, nil
 	}
-	store, err := s.workspaceStore(workspaceID)
+	actingAgent, err := getAgentPostgres(db, workspaceID, actingAgentID)
 	if err != nil {
 		return nil, err
-	}
-	snapshot := store.Snapshot()
-	actingAgent, ok := snapshot.Agents[actingAgentID]
-	if !ok || actingAgent == nil {
-		return nil, ErrNotFound
 	}
 	if actingAgent.DaemonID != daemon.ID {
 		return nil, ErrNotFound

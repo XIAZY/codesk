@@ -36,10 +36,13 @@ func (s *Server) requireAgentEndpointAccess(w http.ResponseWriter, r *http.Reque
 		return false
 	}
 	if auth.PrincipalKind == "daemon" {
-		snapshot := s.requestStore(r).Snapshot()
-		agent := snapshot.Agents[agentID]
-		if agent != nil && agent.DaemonID == auth.DaemonID {
+		agent, err := getAgentPostgres(s.sqlDB(), s.requestWorkspaceID(r), agentID)
+		if err == nil && agent != nil && agent.DaemonID == auth.DaemonID {
 			return true
+		}
+		if err != nil && err != ErrNotFound {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return false
 		}
 		writeError(w, http.StatusForbidden, "daemon cannot access this agent")
 		return false
@@ -70,9 +73,13 @@ func (s *Server) requireAgentRunEndpointAccess(w http.ResponseWriter, r *http.Re
 		return true
 	}
 	runID = strings.TrimSpace(runID)
-	snapshot := s.requestStore(r).Snapshot()
-	if run := snapshot.AgentRuns[runID]; run != nil {
+	run, err := getAgentRunPostgres(s.sqlDB(), s.requestWorkspaceID(r), runID)
+	if err == nil && run != nil {
 		return s.requireAgentEndpointAccess(w, r, run.AgentID)
+	}
+	if err != nil && err != ErrNotFound {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return false
 	}
 	return true
 }
