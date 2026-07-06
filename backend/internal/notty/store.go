@@ -2,7 +2,6 @@ package notty
 
 import (
 	"bytes"
-	"context"
 	"database/sql"
 	"encoding/base64"
 	"errors"
@@ -1974,16 +1973,40 @@ func initPostgresSchema(db *sql.DB) error {
 	if err := initPostgresSchemaTables(db); err != nil {
 		return err
 	}
-	if err := deleteLegacyScaffoldingRows(db); err != nil {
-		return err
-	}
-	if err := RunUUIDGroup1Migration(context.Background(), db); err != nil {
-		return err
-	}
-	if err := RunUUIDGroup2Migration(context.Background(), db); err != nil {
-		return err
-	}
 	return initPostgresSchemaConstraints(db)
+}
+
+func uuidStringOrNil(value string) any {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	if !isUUIDString(value) {
+		return nil
+	}
+	return value
+}
+
+func isUUIDString(value string) bool {
+	_, err := uuid.Parse(strings.TrimSpace(value))
+	return err == nil
+}
+
+func actorUUIDOrNil(actorID, actorType string) any {
+	actorID = strings.TrimSpace(actorID)
+	switch strings.TrimSpace(actorType) {
+	case "", "system":
+		return nil
+	default:
+		return uuidStringOrNil(actorID)
+	}
+}
+
+func stringFromNull(value sql.NullString) string {
+	if value.Valid {
+		return value.String
+	}
+	return ""
 }
 
 func normalizeDocumentPath(value string) (string, error) {
