@@ -383,29 +383,6 @@ func TestPostgresCreatesWorkspaceRootDocumentFromStoredRootID(t *testing.T) {
 	}
 }
 
-func TestPostgresWorkspaceRequiresStoredRootDocumentID(t *testing.T) {
-	database := newPostgresTestDatabase(t)
-	db := database.DB
-
-	workspaceID := "11111111-1111-1111-1111-111111111112"
-	now := time.Now().UTC()
-	if _, err := db.Exec(
-		`INSERT INTO workspaces (id, slug, name, root_document_id, created_at, updated_at)
-		 VALUES ($1, $2, $3, '', $4, $5)`,
-		workspaceID,
-		"blank-root",
-		"Blank Root",
-		now,
-		now,
-	); err != nil {
-		t.Fatalf("insert workspace row: %v", err)
-	}
-
-	if _, err := NewWorkspaceStore(database, workspaceID, "fallback name"); err == nil || !strings.Contains(err.Error(), "workspace root document id is required") {
-		t.Fatalf("expected blank root document id to fail closed, got %v", err)
-	}
-}
-
 func TestPostgresLoadRegeneratesMissingCheckpointBeforeSync(t *testing.T) {
 	database := newPostgresTestDatabase(t)
 	db := database.DB
@@ -886,9 +863,21 @@ func TestPostgresAgentInboxTracksDocumentUpdatesAndThreadMentions(t *testing.T) 
 		t.Fatalf("expected missing log thread mention to reconcile after reload, got %s", formatAgentEvents(items))
 	}
 
+	// Under upsert-only persistence, the document.updated event also survives
+	// in Postgres (clearing memory does not delete DB rows). Drain it first so
+	// the next claim returns the reconciled thread.mentioned event.
 	claimed, err := store.ClaimAgentEvent(ClaimAgentEventRequest{AgentID: agent.ID, ClaimedBy: "daemon"})
 	if err != nil {
-		t.Fatalf("claim log thread mention: %v", err)
+		t.Fatalf("claim first event: %v", err)
+	}
+	if claimed.Type == "document.updated" {
+		if _, err := store.UpdateAgentEvent(claimed.ID, UpdateAgentEventRequest{Status: "completed"}, OperationMeta{ActorID: "daemon", ActorType: "agent", Source: "test"}); err != nil {
+			t.Fatalf("complete document.updated: %v", err)
+		}
+		claimed, err = store.ClaimAgentEvent(ClaimAgentEventRequest{AgentID: agent.ID, ClaimedBy: "daemon"})
+		if err != nil {
+			t.Fatalf("claim thread mention after draining document.updated: %v", err)
+		}
 	}
 	if claimed.Type != "thread.mentioned" || claimed.ThreadID != thread.ID || claimed.ThreadMessageID != message.ID {
 		t.Fatalf("unexpected claimed log thread mention: %#v", claimed)
@@ -1264,6 +1253,13 @@ func seedStoreDaemonRuntime(t *testing.T, store *Store, daemonID string, runtime
 func seedCodexDaemonRuntime(t *testing.T, store *Store) string {
 	t.Helper()
 	return seedStoreDaemonRuntime(t, store, "", RuntimeDetection{Kind: "codex", Available: true, Version: "codex test"})
+}
+
+func mustExec(t *testing.T, db *sql.DB, query string, args ...any) {
+	t.Helper()
+	if _, err := db.Exec(query, args...); err != nil {
+		t.Fatalf("exec: %v", err)
+	}
 }
 
 func clearNottyTables(db *sql.DB) error {

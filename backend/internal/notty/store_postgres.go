@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -837,10 +836,6 @@ func (s *Store) loadWorkspaceMetadataPostgresLocked() error {
 	}
 	if strings.TrimSpace(name) != "" {
 		s.state.Name = name
-	}
-	rootDocumentID = strings.TrimSpace(rootDocumentID)
-	if rootDocumentID == "" {
-		return errors.New("workspace root document id is required")
 	}
 	s.state.RootDocumentID = rootDocumentID
 	return nil
