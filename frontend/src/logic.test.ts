@@ -13,6 +13,10 @@ import {
   computeReplace,
   coworkerCount,
   daemonStatus,
+  daemonLiveStatus,
+  stampDaemonReceipt,
+  DAEMON_ONLINE_WINDOW_MS,
+  DAEMON_STALE_WINDOW_MS,
   encodeRelativeAnchor,
   handleMaxLength,
   identifierFromName,
@@ -24,6 +28,7 @@ import {
   threadReplyCount,
   threadReplyLabel,
 } from "./logic";
+import { daemonFixtures, withReceipt } from "./daemonFixtures";
 import type { Agent, Daemon, WorkspaceState } from "./types";
 
 function baseWorkspace(): WorkspaceState {
@@ -130,15 +135,12 @@ describe("workspace reduction", () => {
   });
 
   it("applies live daemon.updated events so status reflects a check-in without a refresh", () => {
-    const state: WorkspaceState = {
-      ...baseWorkspace(),
-      daemons: [{ id: "daemon_1", workspaceId: "ws", name: "Local", status: "active", connectionStatus: "disconnected", createdAt: "now" }],
-    };
+    // A disconnected daemon (dead fixture) checks in and comes online (justSeen fixture), sharing an id.
+    const before: Daemon = { ...daemonFixtures.dead, id: "daemon_1" };
+    const after: Daemon = { ...daemonFixtures.justSeen, id: "daemon_1" };
+    const state: WorkspaceState = { ...baseWorkspace(), daemons: [before] };
 
-    const next = reduceWorkspaceEvent(state, {
-      type: "daemon.updated",
-      data: { id: "daemon_1", workspaceId: "ws", name: "Local", status: "active", connectionStatus: "online", createdAt: "now" },
-    });
+    const next = reduceWorkspaceEvent(state, { type: "daemon.updated", data: after });
 
     expect(next.daemons).toHaveLength(1);
     expect(daemonStatus(next.daemons[0])).toBe("online");
@@ -184,7 +186,7 @@ describe("presentation grouping", () => {
   });
 
   it("summarizes daemon and agent status from backend state", () => {
-    const daemon: Daemon = { id: "daemon", workspaceId: "ws", name: "Local", status: "active", connectionStatus: "stale", createdAt: "now" };
+    const daemon: Daemon = { ...daemonFixtures.stale, id: "daemon", name: "Local" };
     const agent: Agent = {
       id: "agent",
       daemonId: "daemon",
@@ -242,6 +244,61 @@ describe("presentation grouping", () => {
     };
 
     expect(coworkerCount(workspace)).toBe(3);
+  });
+});
+
+describe("daemon liveness decay", () => {
+  // Every daemon comes from the canonical fixtures (the real backend wire shape) stamped with a
+  // fixed receipt time; each row probes daemonLiveStatus at receipt + elapsed. Table-driven over the
+  // six lifecycle states × probe offsets so the boundary/age-folding semantics stay explicit.
+  const RECEIPT = 1_000_000;
+
+  type Row = { name: string; daemon: Daemon; elapsedMs: number; expected: string };
+  const rows: Row[] = [
+    // neverSeen must be "disconnected" at every probe — never a transient "online" (root of bug 1).
+    { name: "neverSeen @ 0s", daemon: withReceipt(daemonFixtures.neverSeen, RECEIPT), elapsedMs: 0, expected: "disconnected" },
+    { name: "neverSeen @ 10s", daemon: withReceipt(daemonFixtures.neverSeen, RECEIPT), elapsedMs: 10_000, expected: "disconnected" },
+    { name: "neverSeen @ 31s", daemon: withReceipt(daemonFixtures.neverSeen, RECEIPT), elapsedMs: 31_000, expected: "disconnected" },
+    { name: "neverSeen @ 3min", daemon: withReceipt(daemonFixtures.neverSeen, RECEIPT), elapsedMs: 180_000, expected: "disconnected" },
+    // softDeleted is "deleted" at every probe (root of bug 2).
+    { name: "softDeleted @ 0s", daemon: withReceipt(daemonFixtures.softDeleted, RECEIPT), elapsedMs: 0, expected: "deleted" },
+    { name: "softDeleted @ 10s", daemon: withReceipt(daemonFixtures.softDeleted, RECEIPT), elapsedMs: 10_000, expected: "deleted" },
+    { name: "softDeleted @ 31s", daemon: withReceipt(daemonFixtures.softDeleted, RECEIPT), elapsedMs: 31_000, expected: "deleted" },
+    { name: "softDeleted @ 3min", daemon: withReceipt(daemonFixtures.softDeleted, RECEIPT), elapsedMs: 180_000, expected: "deleted" },
+    // Boundary rows off justSeen (age 0) — <= semantics matching the backend windows.
+    { name: "justSeen @ 0s → online", daemon: withReceipt(daemonFixtures.justSeen, RECEIPT), elapsedMs: 0, expected: "online" },
+    { name: "justSeen @ exactly 30s → online", daemon: withReceipt(daemonFixtures.justSeen, RECEIPT), elapsedMs: DAEMON_ONLINE_WINDOW_MS, expected: "online" },
+    { name: "justSeen @ 30.001s → stale", daemon: withReceipt(daemonFixtures.justSeen, RECEIPT), elapsedMs: DAEMON_ONLINE_WINDOW_MS + 1, expected: "stale" },
+    { name: "justSeen @ exactly 2m → stale", daemon: withReceipt(daemonFixtures.justSeen, RECEIPT), elapsedMs: DAEMON_STALE_WINDOW_MS, expected: "stale" },
+    { name: "justSeen @ 2m+1ms → disconnected", daemon: withReceipt(daemonFixtures.justSeen, RECEIPT), elapsedMs: DAEMON_STALE_WINDOW_MS + 1, expected: "disconnected" },
+    // Age-folding: aging carries a server age of 25s; 6s of elapsed pushes the effective age to 31s → stale.
+    { name: "aging @ 0s → online", daemon: withReceipt(daemonFixtures.aging, RECEIPT), elapsedMs: 0, expected: "online" },
+    { name: "aging @ +6s (age 25+6=31s) → stale", daemon: withReceipt(daemonFixtures.aging, RECEIPT), elapsedMs: 6_000, expected: "stale" },
+  ];
+
+  it.each(rows)("$name", ({ daemon, elapsedMs, expected }) => {
+    expect(daemonLiveStatus(daemon, RECEIPT + elapsedMs)).toBe(expected);
+  });
+
+  it("falls back to the server snapshot when age/receipt are absent", () => {
+    // Strip the receipt/age off a genuine fixture so the null-guard branch is exercised; status is
+    // then trusted verbatim from connectionStatus.
+    const { lastSeenAgeSeconds: _age, receivedAtMs: _receipt, ...noReceipt } = daemonFixtures.stale;
+    expect(daemonLiveStatus({ ...noReceipt, connectionStatus: "stale" }, 9e9)).toBe("stale");
+    expect(daemonLiveStatus({ ...noReceipt, connectionStatus: undefined }, 9e9)).toBe("disconnected");
+  });
+});
+
+describe("stampDaemonReceipt", () => {
+  it("stamps the receipt time on daemon events and every daemon in a snapshot, and passes others through", () => {
+    const updated = stampDaemonReceipt({ type: "daemon.updated", data: daemonFixtures.justSeen }, 42);
+    expect((updated.data as Daemon).receivedAtMs).toBe(42);
+
+    const snapshot = stampDaemonReceipt({ type: "workspace.snapshot", data: { daemons: [daemonFixtures.justSeen] } }, 99);
+    expect((snapshot.data as { daemons: Daemon[] }).daemons[0].receivedAtMs).toBe(99);
+
+    const other = { type: "agent.updated", data: { id: "a1" } } as const;
+    expect(stampDaemonReceipt(other, 7)).toBe(other);
   });
 });
 

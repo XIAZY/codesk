@@ -1,0 +1,68 @@
+{
+  "aging": {
+    "id": "daemon-aging",
+    "workspaceId": "11111111-1111-1111-1111-111111111111",
+    "name": "Aging",
+    "status": "active",
+    "connectionStatus": "online",
+    "lastSeenAt": "2026-07-05T23:59:35Z",
+    "lastSeenAgeSeconds": 25,
+    "createdAt": "2026-07-01T00:00:00Z",
+    "deletedAt": "0001-01-01T00:00:00Z"
+  },
+  "dead": {
+    "id": "daemon-dead",
+    "workspaceId": "11111111-1111-1111-1111-111111111111",
+    "name": "Dead",
+    "status": "active",
+    "connectionStatus": "disconnected",
+    "lastSeenAt": "2026-07-05T23:56:40Z",
+    "lastSeenAgeSeconds": 200,
+    "createdAt": "2026-07-01T00:00:00Z",
+    "deletedAt": "0001-01-01T00:00:00Z"
+  },
+  "justSeen": {
+    "id": "daemon-justseen",
+    "workspaceId": "11111111-1111-1111-1111-111111111111",
+    "name": "Just Seen",
+    "status": "active",
+    "connectionStatus": "online",
+    "lastSeenAt": "2026-07-06T00:00:00Z",
+    "lastSeenAgeSeconds": 0,
+    "createdAt": "2026-07-01T00:00:00Z",
+    "deletedAt": "0001-01-01T00:00:00Z"
+  },
+  "neverSeen": {
+    "id": "daemon-neverseen",
+    "workspaceId": "11111111-1111-1111-1111-111111111111",
+    "name": "Never Seen",
+    "status": "active",
+    "connectionStatus": "disconnected",
+    "lastSeenAt": "0001-01-01T00:00:00Z",
+    "lastSeenAgeSeconds": 0,
+    "createdAt": "2026-07-01T00:00:00Z",
+    "deletedAt": "0001-01-01T00:00:00Z"
+  },
+  "softDeleted": {
+    "id": "daemon-softdeleted",
+    "workspaceId": "11111111-1111-1111-1111-111111111111",
+    "name": "Soft Deleted",
+    "status": "deleted",
+    "connectionStatus": "disconnected",
+    "lastSeenAt": "2026-07-06T00:00:00Z",
+    "lastSeenAgeSeconds": 0,
+    "createdAt": "2026-07-01T00:00:00Z",
+    "deletedAt": "2026-07-06T00:00:00Z"
+  },
+  "stale": {
+    "id": "daemon-stale",
+    "workspaceId": "11111111-1111-1111-1111-111111111111",
+    "name": "Stale",
+    "status": "active",
+    "connectionStatus": "stale",
+    "lastSeenAt": "2026-07-05T23:59:00Z",
+    "lastSeenAgeSeconds": 60,
+    "createdAt": "2026-07-01T00:00:00Z",
+    "deletedAt": "0001-01-01T00:00:00Z"
+  }
+}

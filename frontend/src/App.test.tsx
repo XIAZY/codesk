@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CreateDaemonModal, WorkspaceApp, WorkspaceOnboarding } from "./App";
+import { CreateDaemonModal, DaemonDetailModal, DaemonsManagement, WorkspaceApp, WorkspaceOnboarding } from "./App";
 import { emptyWorkspace, identifierHelpText, identifierPattern } from "./logic";
-import type { Account, WorkspaceSummary } from "./types";
+import { daemonFixtures, withReceipt } from "./daemonFixtures";
+import type { Account, Daemon, WorkspaceSummary } from "./types";
 
 vi.mock("./useWorkspace", () => ({
   useWorkspace: () => ({
@@ -229,7 +230,7 @@ describe("WorkspaceApp coworkers rail", () => {
 describe("CreateDaemonModal install status", () => {
   it("flips the install chip from waiting to connected when the daemon checks in live", async () => {
     const user = userEvent.setup();
-    const created = { id: "daemon_new", workspaceId: "ws", name: "Local daemon", status: "active", connectionStatus: "disconnected", createdAt: "now" };
+    const created: Daemon = { ...daemonFixtures.dead, id: "daemon_new", name: "Local daemon" };
     const api = { createDaemon: vi.fn().mockResolvedValue({ daemon: created, token: "nottyd_secret" }) };
 
     const { rerender } = render(
@@ -245,10 +246,142 @@ describe("CreateDaemonModal install status", () => {
     // A daemon.updated event lands via the workspace socket, so live state now reports
     // the daemon online. The chip must flip without a manual refresh.
     rerender(
-      <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[{ ...created, connectionStatus: "online" }]} onClose={vi.fn()} onDone={vi.fn()} />
+      <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[{ ...daemonFixtures.justSeen, id: "daemon_new", name: "Local daemon" }]} onClose={vi.fn()} onDone={vi.fn()} />
     );
 
     expect(screen.getByText("Daemon connected")).toBeTruthy();
     expect(screen.queryByText("Waiting for daemon to check in…")).toBeNull();
+  });
+});
+
+describe("DaemonsManagement liveness decay", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // Read the status chip text of every table row (one .chip.sm per row, in the Status cell).
+  const rowChips = (container: HTMLElement) =>
+    Array.from(container.querySelectorAll("td .chip.sm")).map((chip) => (chip.textContent ?? "").trim());
+  // The "Last check-in" cell is the only `small muted` td that is not the `mono` fingerprint cell.
+  const lastCheckIn = (container: HTMLElement) =>
+    (container.querySelector("td.small.muted:not(.mono)")?.textContent ?? "").trim();
+  // MetricCard renders a `.label` and a `.metric-value`; look the value up by its card label.
+  const metricValue = (container: HTMLElement, label: string) => {
+    const card = Array.from(container.querySelectorAll(".metric-card")).find(
+      (node) => node.querySelector(".label")?.textContent === label
+    );
+    return Number(card?.querySelector(".metric-value")?.textContent);
+  };
+
+  it("decays a silent daemon online -> stale -> disconnected with no further events", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-06T00:00:00Z"));
+    const start = Date.now();
+    // justSeen (age 0, online) stamped with the receipt time — the same online snapshot as before.
+    const daemon = withReceipt(daemonFixtures.justSeen, start);
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws", daemons: [daemon] };
+    const { container } = render(
+      <DaemonsManagement workspace={workspace as never} onRefresh={vi.fn()} onNew={vi.fn()} onDaemon={vi.fn()} />
+    );
+    const statusChip = () => container.querySelector("td .chip.sm")?.textContent ?? "";
+
+    expect(statusChip()).toContain("online");
+
+    // No events arrive; only time passes. The ticker (12s cadence) must re-derive the status
+    // once elapsed crosses each window — advance past a tick boundary beyond the threshold.
+    act(() => { vi.advanceTimersByTime(36_000); });
+    expect(statusChip()).toContain("stale");
+
+    act(() => { vi.advanceTimersByTime(120_000); });
+    expect(statusChip()).toContain("disconnected");
+  });
+
+  it("shows a never-seen daemon as disconnected with 'never' check-in from the first frame and across ticks", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-06T00:00:00Z"));
+    const now = Date.now();
+    // neverSeen carries lastSeenAgeSeconds 0 and a zero lastSeenAt — the exact shape that used to
+    // fabricate a transient "online" (bug 1). It must read disconnected/never from the very first paint.
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws", daemons: [withReceipt(daemonFixtures.neverSeen, now)] };
+    const { container } = render(
+      <DaemonsManagement workspace={workspace as never} onRefresh={vi.fn()} onNew={vi.fn()} onDaemon={vi.fn()} />
+    );
+
+    expect(rowChips(container)).toEqual(["disconnected"]);
+    expect(lastCheckIn(container)).toBe("never");
+
+    // Two 12s ticker cycles pass with no events — it must never flip to online.
+    act(() => { vi.advanceTimersByTime(24_000); });
+    expect(rowChips(container)).toEqual(["disconnected"]);
+    expect(lastCheckIn(container)).toBe("never");
+  });
+
+  it("keeps the metric cards in agreement with the row status chips at first paint", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-06T00:00:00Z"));
+    const now = Date.now();
+    // A non-trivial mix: justSeen -> online, stale -> stale, dead + neverSeen -> disconnected.
+    const daemons = [daemonFixtures.justSeen, daemonFixtures.stale, daemonFixtures.dead, daemonFixtures.neverSeen].map(
+      (daemon) => withReceipt(daemon, now)
+    );
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws", daemons };
+    const { container } = render(
+      <DaemonsManagement workspace={workspace as never} onRefresh={vi.fn()} onNew={vi.fn()} onDaemon={vi.fn()} />
+    );
+
+    const chips = rowChips(container);
+    const countChips = (status: string) => chips.filter((chip) => chip === status).length;
+
+    // Chips derived from the fixtures at first paint.
+    expect(countChips("online")).toBe(1);
+    expect(countChips("stale")).toBe(1);
+    expect(countChips("disconnected")).toBe(2);
+
+    // Metric cards must equal the row chip counts — same source of truth, no drift.
+    expect(metricValue(container, "Online")).toBe(countChips("online"));
+    expect(metricValue(container, "Stale")).toBe(countChips("stale"));
+    expect(metricValue(container, "Offline")).toBe(countChips("disconnected"));
+  });
+});
+
+describe("DaemonDetailModal live status", () => {
+  it("reflects live daemon updates on the open modal instead of a click-time snapshot", () => {
+    const nowMs = Date.now();
+    // Same-id states derived from the fixtures: justSeen (online) then dead (disconnected).
+    const online = withReceipt({ ...daemonFixtures.justSeen, id: "d1" }, nowMs);
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], onClose: vi.fn(), onChanged: vi.fn() };
+    const { container, rerender } = render(<DaemonDetailModal {...props} daemons={[online]} />);
+    const statusChip = () => container.querySelector(".deploy-block .chip.sm")?.textContent ?? "";
+
+    expect(statusChip()).toContain("online");
+
+    // A daemon.updated event lands reporting the daemon long-silent — the open modal must move.
+    const silent = withReceipt({ ...daemonFixtures.dead, id: "d1" }, Date.now());
+    rerender(<DaemonDetailModal {...props} daemons={[silent]} />);
+    expect(statusChip()).toContain("disconnected");
+  });
+
+  it("closes when the deleted daemon stays in the array as status 'deleted' (reducer upsert path)", () => {
+    const onClose = vi.fn();
+    // The daemon.deleted reducer upserts the daemon with status "deleted" — it stays in the array.
+    const live = withReceipt({ ...daemonFixtures.justSeen, id: "d1" }, Date.now());
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], onChanged: vi.fn() };
+    const { rerender } = render(<DaemonDetailModal {...props} daemons={[live]} onClose={onClose} />);
+    expect(onClose).not.toHaveBeenCalled();
+
+    const deleted: Daemon = { ...daemonFixtures.softDeleted, id: "d1" };
+    rerender(<DaemonDetailModal {...props} daemons={[deleted]} onClose={onClose} />);
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("closes when the deleted daemon is removed from the array (snapshot reload path)", () => {
+    const onClose = vi.fn();
+    const live = withReceipt({ ...daemonFixtures.justSeen, id: "d1" }, Date.now());
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], onChanged: vi.fn() };
+    const { rerender } = render(<DaemonDetailModal {...props} daemons={[live]} onClose={onClose} />);
+    expect(onClose).not.toHaveBeenCalled();
+
+    rerender(<DaemonDetailModal {...props} daemons={[]} onClose={onClose} />);
+    expect(onClose).toHaveBeenCalled();
   });
 });

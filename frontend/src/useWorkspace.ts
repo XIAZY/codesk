@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { ApiClient, workspaceWsUrl } from "./api";
-import { emptyWorkspace, reduceWorkspaceEvent } from "./logic";
+import { emptyWorkspace, reduceWorkspaceEvent, stampDaemonReceipt } from "./logic";
 import type { WorkspaceEvent, WorkspaceState } from "./types";
 
 export function useWorkspace(workspaceId: string, token: string) {
@@ -22,7 +22,7 @@ export function useWorkspace(workspaceId: string, token: string) {
     try {
       const payload = await api.loadWorkspace(workspaceId);
       if (requestId.current === id) {
-        dispatch({ type: "workspace.snapshot", data: payload });
+        dispatch(stampDaemonReceipt({ type: "workspace.snapshot", data: payload }, Date.now()));
       }
     } catch (err) {
       if (requestId.current === id) {
@@ -59,7 +59,7 @@ export function useWorkspace(workspaceId: string, token: string) {
       };
       socket.onmessage = (event) => {
         try {
-          dispatch(JSON.parse(event.data) as WorkspaceEvent);
+          dispatch(stampDaemonReceipt(JSON.parse(event.data) as WorkspaceEvent, Date.now()));
         } catch {
           // Workspace events are JSON only. Ignore malformed frames from stale sockets.
         }

@@ -188,6 +188,56 @@ export function daemonStatus(daemon: Daemon) {
   return daemon.connectionStatus || "disconnected";
 }
 
+// A daemon has genuinely checked in only if it carries a real lastSeenAt. Never-seen daemons carry
+// a zero time (year 0001) — the same idiomatic guard the daemon table uses for "Last check-in".
+export function hasGenuineCheckIn(daemon: Daemon): boolean {
+  return daemon.lastSeenAt != null && new Date(daemon.lastSeenAt).getUTCFullYear() >= 2020;
+}
+
+// Liveness decay windows — mirror the backend's daemonOnlineWindow / daemonStaleWindow in
+// backend/internal/notty/store.go (applyDaemonLiveness). A daemon that stops checking in emits
+// no event, so the client must decay its status on a timer instead of trusting the last payload.
+export const DAEMON_ONLINE_WINDOW_MS = 30_000;
+export const DAEMON_STALE_WINDOW_MS = 120_000;
+
+// Live daemon status accounting for time elapsed since the last payload landed. We add the
+// server-computed lastSeenAgeSeconds to elapsed-since-receipt rather than comparing lastSeenAt to
+// the client clock, which would be wrong under clock skew. Windows use <= to match the backend.
+export function daemonLiveStatus(daemon: Daemon, nowMs: number): string {
+  if (daemon.status === "deleted") {
+    return "deleted";
+  }
+  // A daemon that has never checked in serializes lastSeenAgeSeconds: 0 (no omitempty) with a zero
+  // lastSeenAt, so the null-guard alone would fabricate a fresh "online". Gate on a genuine check-in
+  // — the same zero-time idiom the table uses — and otherwise trust the server's status.
+  if (!hasGenuineCheckIn(daemon) || daemon.lastSeenAgeSeconds == null || daemon.receivedAtMs == null) {
+    return daemon.connectionStatus || "disconnected";
+  }
+  const ageMs = daemon.lastSeenAgeSeconds * 1000 + Math.max(0, nowMs - daemon.receivedAtMs);
+  if (ageMs <= DAEMON_ONLINE_WINDOW_MS) {
+    return "online";
+  }
+  if (ageMs <= DAEMON_STALE_WINDOW_MS) {
+    return "stale";
+  }
+  return "disconnected";
+}
+
+// Stamp the client receipt time onto daemon payloads as they land, so daemonLiveStatus can decay
+// them later. Pure: the caller passes nowMs (Date.now at the socket/snapshot boundary).
+export function stampDaemonReceipt(event: WorkspaceEvent, nowMs: number): WorkspaceEvent {
+  if (event.type === "daemon.created" || event.type === "daemon.updated" || event.type === "daemon.deleted") {
+    return { ...event, data: { ...(event.data as Daemon), receivedAtMs: nowMs } };
+  }
+  if (event.type === "workspace.snapshot") {
+    const data = event.data as Partial<WorkspaceState> & { daemons?: Daemon[] };
+    if (data.daemons) {
+      return { ...event, data: { ...data, daemons: data.daemons.map((daemon) => ({ ...daemon, receivedAtMs: nowMs })) } };
+    }
+  }
+  return event;
+}
+
 export function agentStatus(agent: Agent, runs: AgentRun[]) {
   const run = runs.find((item) => item.id === agent.currentRunId || item.agentId === agent.id);
   if (agent.status === "working" || (run && run.desiredStatus === "running" && !["completed", "failed", "stopped"].includes(run.status))) {
