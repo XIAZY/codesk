@@ -231,11 +231,6 @@ func newRootDocumentID() string {
 	return uuid.NewString()
 }
 
-func legacyRootDocumentID(workspaceID string) string {
-	workspaceID = strings.TrimSpace(workspaceID)
-	return "doc_root_" + workspaceID
-}
-
 func normalizeCreateDocumentID(id string) (string, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -251,7 +246,7 @@ func (s *Store) ensureRootDocumentLocked() (bool, error) {
 	s.ensureMaps()
 	rootID := strings.TrimSpace(s.state.RootDocumentID)
 	if rootID == "" {
-		rootID = legacyRootDocumentID(s.state.WorkspaceID)
+		return false, errors.New("workspace root document id is required")
 	}
 	s.state.RootDocumentID = rootID
 	if existing := s.state.ContentDocuments[rootID]; existing != nil {
@@ -1409,7 +1404,6 @@ func (s *Store) UpdateAgentSession(id string, req UpdateAgentSessionRequest, met
 	}
 	if turnID := strings.TrimSpace(req.CurrentTurnID); turnID != "" || agent.Status != "working" {
 		agent.CurrentTurnID = turnID
-		agent.CurrentRunID = turnID
 	}
 	if activity := strings.TrimSpace(req.CurrentActivity); activity != "" {
 		agent.CurrentActivity = activity

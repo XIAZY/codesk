@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -15,21 +16,6 @@ import (
 
 const postgresCheckpointInterval = 100
 const postgresCheckpointTailLimit = postgresCheckpointInterval
-
-const (
-	legacyRootDocumentPath  = ".notty/root"
-	legacyRootDocumentTitle = "Workspace Root"
-)
-
-func legacyDocumentPathTitleForPersistence(rootDocumentID string, document *Document) (string, string) {
-	if document == nil {
-		return "", ""
-	}
-	if document.ID == rootDocumentID {
-		return legacyRootDocumentPath, legacyRootDocumentTitle
-	}
-	return "", ""
-}
 
 func initPostgresSchemaTables(db *sql.DB) error {
 	statements := []string{
@@ -854,14 +840,7 @@ func (s *Store) loadWorkspaceMetadataPostgresLocked() error {
 	}
 	rootDocumentID = strings.TrimSpace(rootDocumentID)
 	if rootDocumentID == "" {
-		rootDocumentID = legacyRootDocumentID(s.state.WorkspaceID)
-		if _, err := s.db.Exec(
-			`UPDATE workspaces SET root_document_id = $1 WHERE id::text = $2 AND root_document_id = ''`,
-			rootDocumentID,
-			s.state.WorkspaceID,
-		); err != nil {
-			return err
-		}
+		return errors.New("workspace root document id is required")
 	}
 	s.state.RootDocumentID = rootDocumentID
 	return nil
@@ -890,23 +869,32 @@ func (s *Store) persistPostgresLocked() error {
 	if err = s.replaceAgentRunsPostgresLocked(tx); err != nil {
 		return err
 	}
-	if err = s.replacePresencesPostgresLocked(tx); err != nil {
+	if err = s.upsertPresencesPostgresLocked(tx); err != nil {
 		return err
 	}
-	if err = s.replaceActivitiesPostgresLocked(tx); err != nil {
+	activityInserts, err := s.insertActivitiesPostgresLocked(tx)
+	if err != nil {
 		return err
 	}
-	if err = s.replaceThreadsPostgresLocked(tx); err != nil {
+	if err = s.upsertThreadsPostgresLocked(tx); err != nil {
 		return err
 	}
-	if err = s.replaceAgentEventsPostgresLocked(tx); err != nil {
+	if err = s.upsertAgentEventsPostgresLocked(tx); err != nil {
 		return err
+	}
+	if err = s.upsertAgentDocumentViewsPostgresLocked(tx); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	for _, insert := range activityInserts {
+		if insert.activity != nil {
+			insert.activity.ID = insert.id
+		}
 	}
 	s.dirtyAgentEvents = false
-	if err = s.replaceAgentDocumentViewsPostgresLocked(tx); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return nil
 }
 
 func (s *Store) persistDocumentMutationPostgresLocked() error {
@@ -924,12 +912,15 @@ func (s *Store) persistDocumentMutationPostgresLocked() error {
 		return err
 	}
 	if s.dirtyAgentEvents {
-		if err = s.replaceAgentEventsPostgresLocked(tx); err != nil {
+		if err = s.upsertAgentEventsPostgresLocked(tx); err != nil {
 			return err
 		}
-		s.dirtyAgentEvents = false
 	}
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	s.dirtyAgentEvents = false
+	return nil
 }
 
 func (s *Store) pendingDocumentMutationIDsLocked() []string {
@@ -950,7 +941,6 @@ func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) error {
 		if document == nil {
 			continue
 		}
-		legacyPath, legacyTitle := legacyDocumentPathTitleForPersistence(s.state.RootDocumentID, document)
 		if _, err := tx.Exec(
 			`INSERT INTO documents (workspace_id, id, path, title, hidden, client_id_seed, create_client_operation_id, updated_at)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -963,8 +953,8 @@ func (s *Store) persistDocumentsPostgresLocked(tx *sql.Tx) error {
 			               updated_at = EXCLUDED.updated_at`,
 			s.state.WorkspaceID,
 			document.ID,
-			legacyPath,
-			legacyTitle,
+			"",
+			"",
 			document.Hidden,
 			int64(document.ClientIDSeed),
 			document.CreateClientOperationID,
@@ -1395,11 +1385,11 @@ func (s *Store) replaceAgentRunsPostgresLocked(tx *sql.Tx) error {
 	return err
 }
 
-func (s *Store) replacePresencesPostgresLocked(tx *sql.Tx) error {
-	if _, err := tx.Exec(`DELETE FROM presences WHERE workspace_id::text = $1`, s.state.WorkspaceID); err != nil {
-		return err
-	}
+func (s *Store) upsertPresencesPostgresLocked(tx *sql.Tx) error {
 	for _, presence := range s.state.Presences {
+		if presence == nil {
+			continue
+		}
 		start, end := selectionBounds(presence.Selection)
 		if _, err := tx.Exec(
 			`INSERT INTO presences (
@@ -1408,7 +1398,17 @@ func (s *Store) replacePresencesPostgresLocked(tx *sql.Tx) error {
 			) VALUES (
 				$1, $2, $3, $4, $5, $6,
 				$7, $8, $9, $10
-			)`,
+			)
+			ON CONFLICT (workspace_id, actor_id)
+			DO UPDATE SET
+				actor_type = EXCLUDED.actor_type,
+				document_id = EXCLUDED.document_id,
+				file_path = EXCLUDED.file_path,
+				mode = EXCLUDED.mode,
+				selection_start = EXCLUDED.selection_start,
+				selection_end = EXCLUDED.selection_end,
+				activity = EXCLUDED.activity,
+				updated_at = EXCLUDED.updated_at`,
 			s.state.WorkspaceID,
 			presence.ActorID,
 			presence.ActorType,
@@ -1473,12 +1473,19 @@ func upsertPresencePostgres(db *sql.DB, workspaceID string, presence *Presence) 
 	return tx.Commit()
 }
 
-func (s *Store) replaceActivitiesPostgresLocked(tx *sql.Tx) error {
-	if _, err := tx.Exec(`DELETE FROM activities WHERE workspace_id::text = $1`, s.state.WorkspaceID); err != nil {
-		return err
-	}
+type persistedActivityInsert struct {
+	activity *ActivityEvent
+	id       int64
+}
+
+func (s *Store) insertActivitiesPostgresLocked(tx *sql.Tx) ([]persistedActivityInsert, error) {
+	inserts := []persistedActivityInsert{}
 	for _, activity := range s.state.Activities {
-		if _, err := tx.Exec(
+		if activity == nil || activity.ID != 0 {
+			continue
+		}
+		var id int64
+		if err := tx.QueryRow(
 			`INSERT INTO activities (
 				workspace_id, type, document_id, actor_id, actor_type, summary, occurred_at,
 				provenance_actor_id, provenance_actor_type, provenance_execution_id, provenance_tool,
@@ -1491,7 +1498,8 @@ func (s *Store) replaceActivitiesPostgresLocked(tx *sql.Tx) error {
 					$12, $13, $14, $15,
 					$16, $17, $18,
 					$19, $20
-				)`,
+				)
+				RETURNING id`,
 			s.state.WorkspaceID,
 			activity.Type,
 			uuidStringOrNil(activity.DocumentID),
@@ -1512,36 +1520,43 @@ func (s *Store) replaceActivitiesPostgresLocked(tx *sql.Tx) error {
 			activity.Provenance.ReadSetSummary,
 			"",
 			activity.PresenceRef,
-		); err != nil {
-			return err
+		).Scan(&id); err != nil {
+			return nil, err
 		}
+		inserts = append(inserts, persistedActivityInsert{activity: activity, id: id})
 	}
-	return nil
+	return inserts, nil
 }
 
-func (s *Store) replaceThreadsPostgresLocked(tx *sql.Tx) error {
-	if _, err := tx.Exec(`DELETE FROM thread_messages WHERE workspace_id::text = $1`, s.state.WorkspaceID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM thread_participants WHERE workspace_id::text = $1`, s.state.WorkspaceID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM threads WHERE workspace_id::text = $1`, s.state.WorkspaceID); err != nil {
-		return err
-	}
+func (s *Store) upsertThreadsPostgresLocked(tx *sql.Tx) error {
 	for _, thread := range s.state.Threads {
 		if _, err := tx.Exec(
 			`INSERT INTO threads (
-				workspace_id, id, document_id, client_operation_id, title, status,
-				anchor_relative_start, anchor_relative_end, anchor_kind, anchor_excerpt,
-				created_by_id, created_by_type, created_by_handle, created_by_name,
-				created_at, updated_at
-			) VALUES (
-				$1, $2, $3, $4, $5, $6,
-				$7, $8, $9, $10,
-				$11, $12, $13, $14,
-				$15, $16
-			)`,
+					workspace_id, id, document_id, client_operation_id, title, status,
+					anchor_relative_start, anchor_relative_end, anchor_kind, anchor_excerpt,
+					created_by_id, created_by_type, created_by_handle, created_by_name,
+					created_at, updated_at
+				) VALUES (
+					$1, $2, $3, $4, $5, $6,
+					$7, $8, $9, $10,
+					$11, $12, $13, $14,
+					$15, $16
+				)
+				ON CONFLICT (id)
+				DO UPDATE SET document_id = EXCLUDED.document_id,
+				              client_operation_id = EXCLUDED.client_operation_id,
+				              title = EXCLUDED.title,
+				              status = EXCLUDED.status,
+				              anchor_relative_start = EXCLUDED.anchor_relative_start,
+				              anchor_relative_end = EXCLUDED.anchor_relative_end,
+				              anchor_kind = EXCLUDED.anchor_kind,
+				              anchor_excerpt = EXCLUDED.anchor_excerpt,
+				              created_by_id = EXCLUDED.created_by_id,
+				              created_by_type = EXCLUDED.created_by_type,
+				              created_by_handle = EXCLUDED.created_by_handle,
+				              created_by_name = EXCLUDED.created_by_name,
+				              created_at = EXCLUDED.created_at,
+				              updated_at = EXCLUDED.updated_at`,
 			s.state.WorkspaceID,
 			thread.ID,
 			thread.DocumentID,
@@ -1563,7 +1578,9 @@ func (s *Store) replaceThreadsPostgresLocked(tx *sql.Tx) error {
 		}
 		for _, participantID := range thread.ParticipantIDs {
 			if _, err := tx.Exec(
-				`INSERT INTO thread_participants (workspace_id, thread_id, participant_id) VALUES ($1, $2, $3)`,
+				`INSERT INTO thread_participants (workspace_id, thread_id, participant_id)
+					 VALUES ($1, $2, $3)
+					 ON CONFLICT (workspace_id, thread_id, participant_id) DO NOTHING`,
 				s.state.WorkspaceID,
 				thread.ID,
 				participantID,
@@ -1574,12 +1591,21 @@ func (s *Store) replaceThreadsPostgresLocked(tx *sql.Tx) error {
 		for _, message := range thread.Messages {
 			if _, err := tx.Exec(
 				`INSERT INTO thread_messages (
-					workspace_id, id, thread_id, author_id, author_type,
-					author_handle, author_name, body, kind, created_at
-				) VALUES (
-					$1, $2, $3, $4, $5,
-					$6, $7, $8, $9, $10
-				)`,
+						workspace_id, id, thread_id, author_id, author_type,
+						author_handle, author_name, body, kind, created_at
+					) VALUES (
+						$1, $2, $3, $4, $5,
+						$6, $7, $8, $9, $10
+					)
+					ON CONFLICT (id)
+					DO UPDATE SET thread_id = EXCLUDED.thread_id,
+					              author_id = EXCLUDED.author_id,
+					              author_type = EXCLUDED.author_type,
+					              author_handle = EXCLUDED.author_handle,
+					              author_name = EXCLUDED.author_name,
+					              body = EXCLUDED.body,
+					              kind = EXCLUDED.kind,
+					              created_at = EXCLUDED.created_at`,
 				s.state.WorkspaceID,
 				message.ID,
 				thread.ID,
@@ -1598,11 +1624,11 @@ func (s *Store) replaceThreadsPostgresLocked(tx *sql.Tx) error {
 	return nil
 }
 
-func (s *Store) replaceAgentEventsPostgresLocked(tx *sql.Tx) error {
-	if _, err := tx.Exec(`DELETE FROM agent_events WHERE workspace_id::text = $1`, s.state.WorkspaceID); err != nil {
-		return err
-	}
+func (s *Store) upsertAgentEventsPostgresLocked(tx *sql.Tx) error {
 	for _, event := range s.state.AgentEvents {
+		if event == nil {
+			continue
+		}
 		if _, err := tx.Exec(
 			`INSERT INTO agent_events (
 				workspace_id, id, agent_id, agent_handle, type, box, status, document_id,
@@ -1614,7 +1640,30 @@ func (s *Store) replaceAgentEventsPostgresLocked(tx *sql.Tx) error {
 				$9, $10, $11, $12, $13,
 				$14, $15, $16, $17, $18, $19,
 				$20, $21, $22, $23, $24
-			)`,
+			)
+			ON CONFLICT (id)
+			DO UPDATE SET
+				agent_id = EXCLUDED.agent_id,
+				agent_handle = EXCLUDED.agent_handle,
+				type = EXCLUDED.type,
+				box = EXCLUDED.box,
+				status = EXCLUDED.status,
+				document_id = EXCLUDED.document_id,
+				thread_id = EXCLUDED.thread_id,
+				thread_message_id = EXCLUDED.thread_message_id,
+				from_update_id = EXCLUDED.from_update_id,
+				to_update_id = EXCLUDED.to_update_id,
+				summary = EXCLUDED.summary,
+				prompt = EXCLUDED.prompt,
+				dedup_key = EXCLUDED.dedup_key,
+				claimed_by = EXCLUDED.claimed_by,
+				run_id = EXCLUDED.run_id,
+				last_error = EXCLUDED.last_error,
+				attempt_count = EXCLUDED.attempt_count,
+				available_at = EXCLUDED.available_at,
+				claimed_at = EXCLUDED.claimed_at,
+				completed_at = EXCLUDED.completed_at,
+				updated_at = EXCLUDED.updated_at`,
 			s.state.WorkspaceID,
 			event.ID,
 			event.AgentID,
@@ -1762,17 +1811,18 @@ func updateAgentEventPostgres(db *sql.DB, workspaceID string, id string, req Upd
 	return cloneAgentEvent(updated), nil
 }
 
-func (s *Store) replaceAgentDocumentViewsPostgresLocked(tx *sql.Tx) error {
-	if _, err := tx.Exec(`DELETE FROM agent_document_views WHERE workspace_id::text = $1`, s.state.WorkspaceID); err != nil {
-		return err
-	}
+func (s *Store) upsertAgentDocumentViewsPostgresLocked(tx *sql.Tx) error {
 	for _, view := range s.state.AgentDocumentViews {
 		if view == nil {
 			continue
 		}
 		if _, err := tx.Exec(
 			`INSERT INTO agent_document_views (workspace_id, agent_id, document_id, update_id, state_vector, viewed_at)
-			 VALUES ($1, $2, $3, $4, $5, $6)`,
+			 VALUES ($1, $2, $3, $4, $5, $6)
+			 ON CONFLICT (workspace_id, agent_id, document_id)
+			 DO UPDATE SET update_id = EXCLUDED.update_id,
+			               state_vector = EXCLUDED.state_vector,
+			               viewed_at = EXCLUDED.viewed_at`,
 			s.state.WorkspaceID,
 			view.AgentID,
 			view.DocumentID,
@@ -2191,9 +2241,6 @@ func (s *Store) loadAgentsPostgresLocked() error {
 		if lastRunCompleted.Valid {
 			agent.LastRunCompleted = lastRunCompleted.Time
 		}
-		if agent.CurrentTurnID == "" {
-			agent.CurrentTurnID = agent.CurrentRunID
-		}
 		s.state.Agents[agent.ID] = agent
 	}
 	return rows.Err()
@@ -2262,7 +2309,7 @@ func (s *Store) loadPresencesPostgresLocked() error {
 
 func (s *Store) loadActivitiesPostgresLocked() error {
 	rows, err := s.db.Query(
-		`SELECT type, COALESCE(document_id::text, ''), COALESCE(actor_id::text, ''), actor_type, summary, occurred_at,
+		`SELECT id, type, COALESCE(document_id::text, ''), COALESCE(actor_id::text, ''), actor_type, summary, occurred_at,
 		        COALESCE(provenance_actor_id::text, ''), provenance_actor_type, provenance_execution_id,
 		        provenance_tool, provenance_trigger, provenance_autonomous,
 		        provenance_confidence, provenance_requested_by, provenance_source,
@@ -2282,6 +2329,7 @@ func (s *Store) loadActivitiesPostgresLocked() error {
 	for rows.Next() {
 		activity := &ActivityEvent{}
 		if err := rows.Scan(
+			&activity.ID,
 			&activity.Type,
 			&activity.DocumentID,
 			&activity.ActorID,

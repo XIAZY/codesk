@@ -677,8 +677,8 @@ func TestCreateWorkspaceStoresIndependentRootDocumentID(t *testing.T) {
 	if workspace.RootDocumentID == "" {
 		t.Fatalf("expected workspace creation to return root document ID")
 	}
-	if legacy := legacyRootDocumentID(workspace.ID); workspace.RootDocumentID == legacy {
-		t.Fatalf("root document ID must be stored independently, got derived legacy ID %q", workspace.RootDocumentID)
+	if _, err := uuid.Parse(workspace.RootDocumentID); err != nil {
+		t.Fatalf("root document ID must be a stored UUID, got %q: %v", workspace.RootDocumentID, err)
 	}
 
 	var storedRootID string
@@ -699,9 +699,6 @@ func TestCreateWorkspaceStoresIndependentRootDocumentID(t *testing.T) {
 	}
 	if !store.HasDocument(workspace.RootDocumentID) {
 		t.Fatalf("stored root document %q is not syncable", workspace.RootDocumentID)
-	}
-	if store.HasDocument(legacyRootDocumentID(workspace.ID)) {
-		t.Fatalf("workspace store created legacy derived root document %q", legacyRootDocumentID(workspace.ID))
 	}
 }
 
