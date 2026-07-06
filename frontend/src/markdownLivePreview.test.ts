@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
+import { ensureSyntaxTree } from "@codemirror/language";
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,11 +16,19 @@ afterEach(() => {
 });
 
 function markdownState(doc: string, selection = EditorSelection.cursor(doc.length)) {
-  return EditorState.create({
+  const state = EditorState.create({
     doc,
     selection,
     extensions: [markdown({ base: markdownLanguage }), nottyMarkdownLivePreview()],
   });
+  // Force a complete parse before the test reads tokens. collectMarkdownPreviewTokens calls
+  // syntaxTree(), which advances the Lezer parse within a real-time work budget and returns whatever
+  // is parsed so far — correct for the live editor's viewport, but under CPU load the parse can halt
+  // mid-document in a test, dropping tokens for later lines (the observed flake: the ordered "1."
+  // list marker, and everything after it, went missing). ensureSyntaxTree parses to the document end
+  // deterministically, so token collection no longer races the parser's wall-clock budget.
+  ensureSyntaxTree(state, doc.length, 5000);
+  return state;
 }
 
 function editor(doc: string, selection = EditorSelection.cursor(doc.length)) {
