@@ -2596,7 +2596,7 @@ function ActivityPanel({
   );
 }
 
-const personRoleTag = { you: "You", agent: "Agent", collaborator: "Collaborator" } as const;
+const personRoleTag = { you: "You", agent: "Agent", member: "Member" } as const;
 
 // Everyone in the workspace — humans + agents. Soft avatars, role tag, and a
 // workspace-level online ring driven by real presence that decays on a 12s

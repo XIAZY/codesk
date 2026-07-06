@@ -314,7 +314,7 @@ describe("workspacePeople", () => {
 
     // all humans (me, alice) + the agent; the non-human user (bot) is filtered out
     expect(result.map((p) => p.id)).toEqual(["u_me", "u_alice", "a_writer"]);
-    expect(result.map((p) => p.kind)).toEqual(["you", "collaborator", "agent"]);
+    expect(result.map((p) => p.kind)).toEqual(["you", "member", "agent"]);
     // presentAt is any-document presence (workspace-level), not scoped to a current doc
     expect(result.find((p) => p.id === "u_alice")?.presentAt).toBe("now");
     expect(result.find((p) => p.id === "u_me")?.presentAt).toBeUndefined();

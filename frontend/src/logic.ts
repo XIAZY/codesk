@@ -305,7 +305,7 @@ export type WorkspacePerson = {
   id: string;
   handle: string;
   name: string;
-  kind: "you" | "agent" | "collaborator";
+  kind: "you" | "agent" | "member";
   // updatedAt of this actor's most recent presence row (any document =
   // workspace-level). Whether it counts as *online* is a freshness decision
   // left to personOnline, so the ring decays instead of lying after the window.
@@ -331,7 +331,7 @@ export function workspacePeople(
       id: user.id,
       handle: user.handle,
       name: user.name,
-      kind: user.id === currentUserId ? "you" : "collaborator",
+      kind: user.id === currentUserId ? "you" : "member",
       presentAt: presentAt(user.id),
     });
   }
