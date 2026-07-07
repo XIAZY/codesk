@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentDetailModal, CreateDaemonModal, DaemonDetailModal, DaemonsManagement, ManageModal, WorkspaceApp, WorkspaceOnboarding } from "./App";
+import { ApiError } from "./api";
 import { emptyWorkspace, identifierFromName, identifierHelpText, identifierPattern, workspaceSlugMaxLength } from "./logic";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
 import type { Account, Agent, AgentEvent, AgentRun, Daemon, DocumentItem, WorkspaceState, WorkspaceSummary } from "./types";
@@ -333,6 +334,76 @@ describe("WorkspaceApp agent status rail", () => {
   });
 });
 
+describe("WorkspaceApp workspace management", () => {
+  it("updates the workspace list before navigating to a changed slug", async () => {
+    const user = userEvent.setup();
+    const calls: string[] = [];
+    const updateWorkspaceSettings = vi.fn().mockResolvedValue({
+      workspace: { id: "ws", slug: "new-slug", name: "Workspace", defaultRuntime: "codex" },
+    });
+    workspaceMock = workspaceFixture({ currentMembershipRole: "owner", slug: "workspace", defaultRuntime: "" });
+    window.history.replaceState(null, "", "/w/workspace");
+
+    render(
+      <WorkspaceApp
+        api={{ updateLastAccessed: vi.fn().mockResolvedValue({}), updateWorkspaceSettings } as never}
+        token="token"
+        workspaceId="ws"
+        workspaceSlug="workspace"
+        view={{ kind: "home" }}
+        account={{ id: "account_1", email: "you@example.com", displayName: "You" }}
+        workspaces={[{ id: "ws", slug: "workspace", name: "Workspace" }]}
+        onAccess={vi.fn()}
+        onWorkspaceUpdated={(workspace) => calls.push(`updated:${workspace.slug}`)}
+        onWorkspaceChange={vi.fn()}
+        onSignOut={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Manage / Settings" }));
+    await user.click(screen.getByRole("button", { name: "Workspace settings" }));
+    await user.clear(screen.getByLabelText("Workspace URL slug"));
+    await user.type(screen.getByLabelText("Workspace URL slug"), "new-slug");
+    await user.selectOptions(screen.getByLabelText("Default agent runtime"), "codex");
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+
+    await waitFor(() => expect(window.location.pathname).toBe("/w/new-slug"));
+    expect(calls[0]).toBe("updated:new-slug");
+  });
+
+  it("navigates away only after workspace.deleted clears the live workspace state", async () => {
+    const onWorkspaceDeleted = vi.fn();
+    const props = {
+      api: { updateLastAccessed: vi.fn().mockResolvedValue({}) } as never,
+      token: "token",
+      workspaceId: "ws",
+      workspaceSlug: "workspace",
+      view: { kind: "home" } as const,
+      account: { id: "account_1", email: "you@example.com", displayName: "You" },
+      workspaces: [
+        { id: "ws", slug: "workspace", name: "Workspace" },
+        { id: "other", slug: "other", name: "Other" },
+      ],
+      onAccess: vi.fn(),
+      onWorkspaceDeleted,
+      onWorkspaceChange: vi.fn(),
+      onSignOut: vi.fn(),
+    };
+    workspaceMock = workspaceFixture({ workspaceId: "ws", name: "Workspace" });
+    window.history.replaceState(null, "", "/w/workspace");
+
+    const { rerender } = render(<WorkspaceApp {...props} />);
+    await waitFor(() => expect(screen.getByText("Manage / Settings")).toBeTruthy());
+    expect(onWorkspaceDeleted).not.toHaveBeenCalled();
+
+    workspaceMock = emptyWorkspace();
+    rerender(<WorkspaceApp {...props} />);
+
+    await waitFor(() => expect(onWorkspaceDeleted).toHaveBeenCalledWith("ws"));
+    expect(window.location.pathname).toBe("/w/other");
+  });
+});
+
 describe("WorkspaceApp coming-soon controls", () => {
   it("shows the sidebar search as a non-actionable Coming soon affordance", () => {
     render(
@@ -550,23 +621,108 @@ describe("ManageModal", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("shows read-only workspace settings with editing marked coming soon", () => {
-    const workspace = { ...emptyWorkspace(), workspaceId: "ws", name: "Acme" };
-    render(<ManageModal {...baseProps} workspace={workspace as never} workspaceSlug="acme" activeTab="workspace" />);
-    expect(screen.getByText("Acme")).toBeTruthy();
-    expect(screen.getByText("Editing coming soon.")).toBeTruthy();
-    // Honest-controls: read-only current values are static text, not editable-looking inputs.
-    expect(screen.queryByRole("textbox")).toBeNull();
-    // Not another tab's surface.
-    expect(screen.queryByText("Local environments")).toBeNull();
+  it("saves workspace name, slug, and default runtime with owner-only slug editing", async () => {
+    const user = userEvent.setup();
+    const updateWorkspaceSettings = vi.fn().mockResolvedValue({
+      workspace: { id: "ws", name: "Acme Labs", slug: "acme-labs", defaultRuntime: "claude" },
+    });
+    const onWorkspaceSaved = vi.fn();
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws", name: "Acme", slug: "acme", defaultRuntime: "", currentMembershipRole: "owner" };
+    render(
+      <ManageModal
+        {...baseProps}
+        api={{ updateWorkspaceSettings } as never}
+        onWorkspaceSaved={onWorkspaceSaved}
+        workspace={workspace as never}
+        workspaceSlug="acme"
+        activeTab="workspace"
+      />
+    );
+
+    await user.clear(screen.getByLabelText("Workspace name"));
+    await user.type(screen.getByLabelText("Workspace name"), "Acme Labs");
+    await user.clear(screen.getByLabelText("Workspace URL slug"));
+    await user.type(screen.getByLabelText("Workspace URL slug"), "acme-labs");
+    await user.selectOptions(screen.getByLabelText("Default agent runtime"), "claude");
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+
+    expect(updateWorkspaceSettings).toHaveBeenCalledWith("ws", {
+      name: "Acme Labs",
+      slug: "acme-labs",
+      defaultRuntime: "claude",
+    });
+    expect(onWorkspaceSaved).toHaveBeenCalledWith({ id: "ws", name: "Acme Labs", slug: "acme-labs", defaultRuntime: "claude" });
+    expect(await screen.findByText("Workspace settings saved.")).toBeTruthy();
   });
 
-  it("shows a calm danger-zone coming-soon note without a live delete control", () => {
-    const workspace = { ...emptyWorkspace(), workspaceId: "ws" };
-    render(<ManageModal {...baseProps} workspace={workspace as never} activeTab="danger" />);
-    expect(screen.getByText("Workspace deletion is coming soon.")).toBeTruthy();
-    // Honest-controls: no clickable Delete until the backend supports it.
-    expect(screen.queryByRole("button", { name: /delete/i })).toBeNull();
+  it("lets admins change name/runtime but not the slug", async () => {
+    const user = userEvent.setup();
+    const updateWorkspaceSettings = vi.fn().mockResolvedValue({
+      workspace: { id: "ws", name: "Admin name", slug: "acme", defaultRuntime: "codex" },
+    });
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws", name: "Acme", slug: "acme", defaultRuntime: "", currentMembershipRole: "admin" };
+    render(
+      <ManageModal
+        {...baseProps}
+        api={{ updateWorkspaceSettings } as never}
+        workspace={workspace as never}
+        workspaceSlug="acme"
+        activeTab="workspace"
+      />
+    );
+
+    expect((screen.getByLabelText("Workspace URL slug") as HTMLInputElement).disabled).toBe(true);
+    await user.clear(screen.getByLabelText("Workspace name"));
+    await user.type(screen.getByLabelText("Workspace name"), "Admin name");
+    await user.selectOptions(screen.getByLabelText("Default agent runtime"), "codex");
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+
+    expect(updateWorkspaceSettings).toHaveBeenCalledWith("ws", {
+      name: "Admin name",
+      defaultRuntime: "codex",
+    });
+  });
+
+  it("surfaces slug conflicts distinctly from validation errors", async () => {
+    const user = userEvent.setup();
+    const updateWorkspaceSettings = vi.fn().mockRejectedValue(new ApiError(409, "Workspace slug is already taken."));
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws", name: "Acme", slug: "acme", currentMembershipRole: "owner" };
+    render(
+      <ManageModal
+        {...baseProps}
+        api={{ updateWorkspaceSettings } as never}
+        workspace={workspace as never}
+        workspaceSlug="acme"
+        activeTab="workspace"
+      />
+    );
+
+    await user.clear(screen.getByLabelText("Workspace URL slug"));
+    await user.type(screen.getByLabelText("Workspace URL slug"), "taken");
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+
+    expect(await screen.findByText("Slug taken. Choose another workspace URL.")).toBeTruthy();
+  });
+
+  it("requires exact workspace-name confirmation before deleting", async () => {
+    const user = userEvent.setup();
+    const deleteWorkspace = vi.fn().mockResolvedValue(undefined);
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws", name: "Acme", currentMembershipRole: "owner" };
+    render(<ManageModal {...baseProps} api={{ deleteWorkspace } as never} workspace={workspace as never} activeTab="danger" />);
+
+    const deleteButton = screen.getByRole("button", { name: "Delete workspace" });
+    expect((deleteButton as HTMLButtonElement).disabled).toBe(true);
+
+    await user.type(screen.getByLabelText("Type Acme"), "acme");
+    expect((deleteButton as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText("Workspace name must match exactly.")).toBeTruthy();
+
+    await user.clear(screen.getByLabelText("Type Acme"));
+    await user.type(screen.getByLabelText("Type Acme"), "Acme");
+    await user.click(deleteButton);
+
+    expect(deleteWorkspace).toHaveBeenCalledWith("ws", "Acme");
+    expect(await screen.findByText("Deletion requested. Waiting for workspace removal...")).toBeTruthy();
   });
 
   it("lists workspace members and offers invite generation on the Members tab", () => {

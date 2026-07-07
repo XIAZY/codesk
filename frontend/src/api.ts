@@ -10,6 +10,12 @@ import type {
   WorkspaceSummary,
 } from "./types";
 
+export type UpdateWorkspaceSettingsInput = {
+  name?: string;
+  slug?: string;
+  defaultRuntime?: string;
+};
+
 function cleanOrigin(value: string) {
   return value.trim().replace(/\/+$/, "");
 }
@@ -119,6 +125,20 @@ export class ApiClient {
     return this.request<WorkspaceState>(workspacePath(workspaceId, "/workspace"));
   }
 
+  async updateWorkspaceSettings(workspaceId: string, input: UpdateWorkspaceSettingsInput) {
+    return this.request<{ workspace: WorkspaceSummary }>(workspacePath(workspaceId, "/workspace"), {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
+  }
+
+  async deleteWorkspace(workspaceId: string, confirmName: string) {
+    return this.request<void>(workspacePath(workspaceId, "/"), {
+      method: "DELETE",
+      body: JSON.stringify({ confirmName }),
+    });
+  }
+
   async createDocument(workspaceId: string) {
     return this.request<DocumentMetadata>(workspacePath(workspaceId, "/documents"), {
       method: "POST",
@@ -144,6 +164,13 @@ export class ApiClient {
     return this.request<{ thread: ThreadItem }>(workspacePath(workspaceId, `/threads/${encodeURIComponent(threadId)}/messages`), {
       method: "POST",
       body: JSON.stringify({ body, kind: "comment" }),
+    });
+  }
+
+  async updateThreadStatus(workspaceId: string, threadId: string, status: "open" | "resolved") {
+    return this.request<{ thread: ThreadItem }>(workspacePath(workspaceId, `/threads/${encodeURIComponent(threadId)}/status`), {
+      method: "PATCH",
+      body: JSON.stringify({ status }),
     });
   }
 

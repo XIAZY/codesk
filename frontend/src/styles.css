@@ -26,6 +26,11 @@
   --iris: oklch(0.55 0.09 285);
   --iris-50: oklch(0.965 0.018 285);
   --iris-700: oklch(0.42 0.09 285);
+  /* #30 keyboard focus ring — neutral cool gray. Focus is a UI state, not
+     identity, so it deliberately stays off the human/agent brand colors.
+     Brighter variant for the near-black left rail. */
+  --focus-ring: oklch(0.62 0.03 250);
+  --focus-ring-bright: oklch(0.74 0.03 250);
   --daemon: oklch(0.60 0.08 155);
   --daemon-50: oklch(0.955 0.018 155);
   --daemon-700: oklch(0.40 0.06 155);
@@ -305,6 +310,38 @@ svg.i.sm {
 .reply-form textarea:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(227, 161, 91, 0.18);
+}
+
+/* #30: one keyboard-focus ring across every interactive surface — buttons, links,
+   and ARIA/tabindex controls (which is what .btn / .nav-item / roster & doc rows /
+   tabs / Inbox items / CollaboratorAvatars all resolve to). :focus-visible only,
+   so it shows on keyboard nav and never on a mouse click. Neutral (--focus-ring),
+   no animation. Form fields keep their own accent focus above. */
+button:focus-visible,
+a:focus-visible,
+[role="button"]:focus-visible,
+[tabindex="0"]:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: inherit;
+}
+/* Brighter ring on the near-black left rail for contrast. */
+.sb button:focus-visible,
+.sb a:focus-visible,
+.sb [role="button"]:focus-visible,
+.sb [tabindex="0"]:focus-visible {
+  outline-color: var(--focus-ring-bright);
+}
+
+/* #32: a disabled field must LOOK disabled — honest controls, the same
+   controls-match-behavior principle as the authZ-gated Workspace settings. */
+.field input:disabled,
+.field textarea:disabled,
+.field select:disabled {
+  background: var(--paper-2);
+  color: var(--ink-4);
+  border-color: var(--border);
+  cursor: not-allowed;
 }
 
 .field {
@@ -777,7 +814,7 @@ svg.i.sm {
   color: oklch(0.82 0.004 75);
 }
 .sb-rail-handle:focus-visible {
-  outline: 2px solid var(--iris);
+  outline: 2px solid var(--focus-ring-bright);
   outline-offset: 2px;
 }
 /* Tooltip below the handle — never to the right, which would overlap the document
@@ -1880,6 +1917,8 @@ button.inbox-row:hover {
   flex-direction: column;
   gap: 0;
   padding: 6px;
+  max-height: 320px;
+  overflow-y: auto;
 }
 
 .thread-popover-row {
@@ -1955,6 +1994,33 @@ button.inbox-row:hover {
 .titem.selected {
   border-color: var(--accent);
   background: var(--accent-50);
+}
+
+.titem.resolved {
+  color: var(--ink-3);
+}
+
+.thread-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.thread-badge-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.thread-badge.open .thread-badge-dot {
+  background: var(--iris);
+}
+
+.thread-badge.resolved .thread-badge-dot {
+  background: var(--ok);
 }
 
 .tdetail {
@@ -2656,6 +2722,28 @@ pre.code {
 .setting-value.mono {
   font-family: var(--mono);
   font-size: 13px;
+}
+
+.settings-list .btn,
+.danger-note .btn {
+  align-self: flex-start;
+}
+
+.success-text {
+  margin: 0;
+  color: var(--ok);
+  font-size: 12px;
+}
+
+.btn.danger {
+  background: var(--err);
+  border-color: var(--err);
+  color: white;
+}
+
+.btn.danger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .new-agent-form {
