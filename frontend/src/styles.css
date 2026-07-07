@@ -2305,9 +2305,13 @@ button.inbox-row:hover {
 }
 
 .roster-grid {
+  /* #28 follow-on (qianyi): simplified agent rows — one per line so the full
+     @handle is always readable (was a 3-col grid that truncated names to "@…").
+     Each row is now just identity + §6 status; activity / threads / inbox /
+     for-me moved into the agent detail, which the whole row opens. */
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  grid-template-columns: 1fr;
+  gap: 8px;
 }
 
 .agent-roster-card {
@@ -2360,56 +2364,6 @@ button.inbox-row:hover {
   text-overflow: ellipsis;
 }
 
-.roster-activity {
-  min-height: 38px;
-  max-height: 58px;
-  line-height: 1.4;
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-}
-
-.agent-roster-meta {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px 8px;
-  min-width: 0;
-}
-
-.agent-roster-meta-list {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 4px;
-  min-width: 0;
-  flex: 1 1 140px;
-  color: var(--ink-4);
-  font-size: 11px;
-}
-
-.agent-roster-meta-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  min-width: 0;
-  max-width: 100%;
-}
-
-.agent-roster-meta-item svg {
-  flex: 0 0 auto;
-}
-
-.agent-roster-meta-sep {
-  flex: 0 0 auto;
-}
-
-.agent-for-me-chip {
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: 100%;
-}
 
 .modal-backdrop {
   position: fixed;

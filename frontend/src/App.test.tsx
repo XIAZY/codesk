@@ -610,7 +610,7 @@ describe("ManageModal", () => {
     expect(screen.getByText("@codex")).toBeTruthy();
   });
 
-  it("contains long agent status and for-me chips inside a wrapped roster meta row", () => {
+  it("simplifies the roster card to identity + status; full handle rendered, meta moved to the detail view", () => {
     const longAgent = {
       id: "a1",
       daemonId: "d1",
@@ -640,9 +640,13 @@ describe("ManageModal", () => {
     const card = screen.getByRole("button", { name: /Open @codex-super-long-collaborator-name/ }) as HTMLElement;
     expect(card.querySelector(".agent-roster-top")).toBeTruthy();
     expect(card.querySelector(".agent-roster-status .agent-chip-text")).toBeTruthy();
-    expect(card.querySelector(".agent-roster-meta")).toBeTruthy();
-    expect(card.querySelector(".agent-roster-meta-list")).toBeTruthy();
-    expect(card.querySelector(".agent-for-me-chip .agent-chip-text")?.textContent).toBe("1 for-me");
+    // Full @handle is present in the DOM (one row per agent — no longer squeezed into a
+    // 3-col grid that truncated names to "@…").
+    expect(card.querySelector(".agent-roster-identity b")?.textContent).toBe("@codex-super-long-collaborator-name");
+    // threads / inbox / for-me chip are moved into the agent detail (the whole row opens it),
+    // so they are no longer rendered on the roster card.
+    expect(card.querySelector(".agent-roster-meta")).toBeNull();
+    expect(card.querySelector(".agent-for-me-chip")).toBeNull();
   });
 });
 

@@ -2459,9 +2459,7 @@ function AgentsManagement({
               <div className="roster-grid">
                 {group.agents.map((agent) => {
                   const status = visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons, workspace.agentEvents, now);
-                  const inboxCount = workspace.agentEvents.filter((event) => event.agentId === agent.id && event.box === "for_me").length;
                   const statusLabel = detailStatusLabel(status);
-                  const activityCopy = status.key === "failed" && status.reason ? status.reason : agent.currentActivity || agent.currentTask || "Waiting for workspace notifications.";
                   return (
                     <button className="agent-roster-card" key={agent.id} onClick={() => onAgent(agent)} aria-label={`Open @${agent.handle}. Status: ${statusLabel}`}>
                       <div className="agent-roster-top">
@@ -2476,24 +2474,6 @@ function AgentsManagement({
                           <StatusDot tone={status.tone} />
                           <span className="agent-chip-text">{statusLabel}</span>
                         </span>
-                      </div>
-                      <div className="small muted roster-activity">{activityCopy}</div>
-                      <div className="agent-roster-meta">
-                        <div className="agent-roster-meta-list">
-                          <span className="agent-roster-meta-item">
-                            <Icon name="thread" />
-                            <span className="truncate">{workspace.threads.filter((thread) => thread.participantIds.includes(agent.id)).length} threads</span>
-                          </span>
-                          <span className="agent-roster-meta-sep">·</span>
-                          <span className="agent-roster-meta-item">
-                            <span className="truncate">{workspace.agentEvents.filter((event) => event.agentId === agent.id).length} inbox</span>
-                          </span>
-                        </div>
-                        {inboxCount ? (
-                          <span className="chip accent sm agent-for-me-chip" title={`${inboxCount} for-me`}>
-                            <span className="agent-chip-text">{inboxCount} for-me</span>
-                          </span>
-                        ) : null}
                       </div>
                     </button>
                   );
