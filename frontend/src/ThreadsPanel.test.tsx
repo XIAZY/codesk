@@ -277,6 +277,8 @@ describe("ThreadsPanel orphan warning", () => {
     expect(container.querySelector(".titem.orphaned")).toBeTruthy();
     expect(container.querySelector(".thread-orphan-warning")).toBeTruthy();
     expect(container.querySelector(".thread-orphan-warning")?.textContent).toContain("Anchor lost");
+    const metaRow = container.querySelector(".titem.orphaned .row.gap-4.tiny.muted");
+    expect(metaRow?.textContent).not.toContain("anchored");
   });
 
   it("shows resolve action on orphan card and fires updateThreadStatus on click", async () => {

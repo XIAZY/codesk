@@ -2999,8 +2999,7 @@ export function ThreadsPanel({
             </span>
             <span>·</span>
             <span>{threadReplyLabel(thread)}</span>
-            <span>·</span>
-            <span>{thread.anchor.kind === "document" ? "document" : "anchored"}</span>
+            {!isOrphaned ? <><span>·</span><span>{thread.anchor.kind === "document" ? "document" : "anchored"}</span></> : null}
             {isAnchored && anchorLine ? (
               <>
                 <span>·</span>
