@@ -17,6 +17,7 @@ import {
   workspacePeople,
   personOnline,
   documentActivity,
+  emptyWorkspace,
   activityCategory,
   relativeTime,
   daemonStatus,
@@ -181,6 +182,65 @@ describe("workspace reduction", () => {
     // The People online ring + Document Activity must not throw on this shape (the switch crash).
     expect(() => workspacePeople(next)).not.toThrow();
     expect(() => documentActivity(next, "doc1")).not.toThrow();
+  });
+
+  it("applies workspace.updated without dropping live collections", () => {
+    const state: WorkspaceState = {
+      ...baseWorkspace(),
+      workspaceId: "ws",
+      rootDocumentId: "root",
+      name: "Old name",
+      users: [{ id: "u1", handle: "owner", name: "Owner", role: "Owner", kind: "human", status: "active", updatedAt: "now" }],
+      agents: [{ id: "a1", daemonId: "d1", handle: "codex", name: "Codex", role: "Reviewer", kind: "codex", workspaceRoot: "agents/a1", status: "idle", currentTask: "", currentActivity: "", currentRunId: "", updatedAt: "now" }],
+    };
+
+    const next = reduceWorkspaceEvent(state, {
+      type: "workspace.updated",
+      data: {
+        id: "ws",
+        name: "New name",
+        slug: "new-name",
+        defaultRuntime: "codex",
+        updatedAt: "later",
+      },
+    });
+
+    expect(next.name).toBe("New name");
+    expect(next.slug).toBe("new-name");
+    expect(next.defaultRuntime).toBe("codex");
+    expect(next.updatedAt).toBe("later");
+    expect(next.users).toEqual(state.users);
+    expect(next.agents).toEqual(state.agents);
+  });
+
+  it("ignores workspace.updated events for another workspace", () => {
+    const state: WorkspaceState = { ...baseWorkspace(), workspaceId: "ws", name: "Current" };
+    const next = reduceWorkspaceEvent(state, {
+      type: "workspace.updated",
+      data: { id: "other", name: "Other", slug: "other" },
+    });
+
+    expect(next).toBe(state);
+  });
+
+  it("clears defaultRuntime when workspace.updated omits the omitempty field", () => {
+    const state: WorkspaceState = { ...baseWorkspace(), workspaceId: "ws", name: "Current", defaultRuntime: "codex" };
+    const next = reduceWorkspaceEvent(state, {
+      type: "workspace.updated",
+      data: { id: "ws", name: "Current", slug: "current" },
+    });
+
+    expect(next.defaultRuntime).toBe("");
+  });
+
+  it("empties state when this workspace is deleted", () => {
+    const state: WorkspaceState = { ...baseWorkspace(), workspaceId: "ws", name: "Current", users: [{ id: "u1", handle: "owner", name: "Owner", role: "Owner", kind: "human", status: "active", updatedAt: "now" }] };
+    const next = reduceWorkspaceEvent(state, {
+      type: "workspace.deleted",
+      data: { workspaceId: "ws" },
+    });
+
+    expect(next).toEqual(emptyWorkspace());
   });
 
   it("attaches thread messages without duplicating repeated events", () => {

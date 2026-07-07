@@ -10,6 +10,12 @@ import type {
   WorkspaceSummary,
 } from "./types";
 
+export type UpdateWorkspaceSettingsInput = {
+  name?: string;
+  slug?: string;
+  defaultRuntime?: string;
+};
+
 function cleanOrigin(value: string) {
   return value.trim().replace(/\/+$/, "");
 }
@@ -117,6 +123,20 @@ export class ApiClient {
 
   async loadWorkspace(workspaceId: string) {
     return this.request<WorkspaceState>(workspacePath(workspaceId, "/workspace"));
+  }
+
+  async updateWorkspaceSettings(workspaceId: string, input: UpdateWorkspaceSettingsInput) {
+    return this.request<{ workspace: WorkspaceSummary }>(workspacePath(workspaceId, "/workspace"), {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
+  }
+
+  async deleteWorkspace(workspaceId: string, confirmName: string) {
+    return this.request<void>(workspacePath(workspaceId, "/"), {
+      method: "DELETE",
+      body: JSON.stringify({ confirmName }),
+    });
   }
 
   async createDocument(workspaceId: string) {

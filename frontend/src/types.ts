@@ -10,6 +10,7 @@ export type WorkspaceSummary = {
   id: string;
   slug: string;
   name: string;
+  defaultRuntime?: string;
   lastAccessedDocumentId?: string;
 };
 
@@ -206,6 +207,8 @@ export type WorkspaceState = {
   currentDaemonId?: string;
   currentMembershipRole?: "owner" | "admin" | "member" | string;
   name: string;
+  slug?: string;
+  defaultRuntime?: string;
   users: UserItem[];
   daemons: Daemon[];
   agents: Agent[];

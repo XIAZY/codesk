@@ -333,6 +333,17 @@ a:focus-visible,
   outline-color: var(--focus-ring-bright);
 }
 
+/* #32: a disabled field must LOOK disabled — honest controls, the same
+   controls-match-behavior principle as the authZ-gated Workspace settings. */
+.field input:disabled,
+.field textarea:disabled,
+.field select:disabled {
+  background: var(--paper-2);
+  color: var(--ink-4);
+  border-color: var(--border);
+  cursor: not-allowed;
+}
+
 .field {
   display: grid;
   gap: 6px;
@@ -2711,6 +2722,28 @@ pre.code {
 .setting-value.mono {
   font-family: var(--mono);
   font-size: 13px;
+}
+
+.settings-list .btn,
+.danger-note .btn {
+  align-self: flex-start;
+}
+
+.success-text {
+  margin: 0;
+  color: var(--ok);
+  font-size: 12px;
+}
+
+.btn.danger {
+  background: var(--err);
+  border-color: var(--err);
+  color: white;
+}
+
+.btn.danger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .new-agent-form {
