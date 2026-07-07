@@ -1759,7 +1759,7 @@ export function WorkspaceApp({
             </button>
           </div>
           <div className="col gap-6 agent-summary-list">
-            {workspace.agents.slice(0, 5).map((agent) => {
+            {workspace.agents.map((agent) => {
               const status = visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons, workspace.agentEvents, now);
               return (
                 <button
@@ -2982,44 +2982,58 @@ function PeoplePanel({
   const rows = people
     .map((person) => ({ person, online: personOnline(person, now) }))
     .sort((a, b) => rank(a) - rank(b) || a.person.handle.localeCompare(b.person.handle));
+  const humans = rows.filter((r) => r.person.kind !== "agent");
+  const agentRows = rows.filter((r) => r.person.kind === "agent");
+  const renderRow = ({ person, online }: { person: WorkspacePerson; online: boolean }) => {
+    const agent = person.kind === "agent" ? agentsById.get(person.id) : undefined;
+    // The online ring is driven by personOnline, which decays on the presence freshness window
+    // (like daemon liveness). A closed laptop drops the ring — we never show a stale "online".
+    // This honest-decay rule is Eva's ruling; keep it documented at every ring site.
+    const avatar = (
+      <div
+        className={`avi ${person.kind === "agent" ? "agent" : "you"}${online ? " online" : ""}`}
+        title={online ? "Online" : undefined}
+      >
+        {initials(person.handle || person.name)}
+      </div>
+    );
+    const body = (
+      <div className="col gap-2 min-0">
+        <strong className="small truncate">@{person.handle}</strong>
+        <span className="tiny muted truncate">{personRoleTag[person.kind]}</span>
+        {online ? <span className="sr-only">Online</span> : null}
+      </div>
+    );
+    return agent ? (
+      <button key={person.id} className="agent-card" onClick={() => onAgent(agent)}>
+        {avatar}
+        {body}
+      </button>
+    ) : (
+      <article key={person.id} className="agent-card">
+        {avatar}
+        {body}
+      </article>
+    );
+  };
   return (
     <div className="ctx-body people-pane">
       <div className="row between ctx-head">
         <span className="label">People</span>
         <span className="chip sm">{people.length}</span>
       </div>
-      {rows.map(({ person, online }) => {
-        const agent = person.kind === "agent" ? agentsById.get(person.id) : undefined;
-        // The online ring is driven by personOnline, which decays on the presence freshness window
-        // (like daemon liveness). A closed laptop drops the ring — we never show a stale "online".
-        // This honest-decay rule is Eva's ruling; keep it documented at every ring site.
-        const avatar = (
-          <div
-            className={`avi ${person.kind === "agent" ? "agent" : "you"}${online ? " online" : ""}`}
-            title={online ? "Online" : undefined}
-          >
-            {initials(person.handle || person.name)}
-          </div>
-        );
-        const body = (
-          <div className="col gap-2 min-0">
-            <strong className="small truncate">@{person.handle}</strong>
-            <span className="tiny muted truncate">{personRoleTag[person.kind]}</span>
-            {online ? <span className="sr-only">Online</span> : null}
-          </div>
-        );
-        return agent ? (
-          <button key={person.id} className="agent-card" onClick={() => onAgent(agent)}>
-            {avatar}
-            {body}
-          </button>
-        ) : (
-          <article key={person.id} className="agent-card">
-            {avatar}
-            {body}
-          </article>
-        );
-      })}
+      {humans.length ? (
+        <>
+          <div className="people-section-head"><span className="tiny muted">Members</span><span className="chip sm">{humans.length}</span></div>
+          {humans.map(renderRow)}
+        </>
+      ) : null}
+      {agentRows.length ? (
+        <>
+          <div className="people-section-head"><span className="tiny muted">Agents</span><span className="chip sm">{agentRows.length}</span></div>
+          {agentRows.map(renderRow)}
+        </>
+      ) : null}
       {!people.length ? <p className="empty-note">No people in this workspace yet.</p> : null}
     </div>
   );

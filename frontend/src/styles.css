@@ -1226,6 +1226,8 @@ button.inbox-row:hover {
 
 .agent-summary-list {
   margin-top: 8px;
+  max-height: 192px;
+  overflow-y: auto;
 }
 
 .agent-mini {
@@ -2064,6 +2066,14 @@ button.inbox-row:hover {
 
 .people-pane {
   display: block;
+}
+
+.people-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0 4px;
+  margin-top: 4px;
 }
 
 .daemon-card {
