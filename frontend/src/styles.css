@@ -951,13 +951,18 @@ svg.i.sm {
   position: relative;
 }
 
-/* #28: the Inbox count badge is the human-domain "you have work" signal → always
-   amber (--needs-you), regardless of whether the worst item is a failure. Per-item
-   severity is NOT lost — it stays in the flyout (failed rows keep red + View reason,
-   failed-first ordering). One amber badge, honest severity one click in. */
-.nav-item .ct.inbox-ct.needs-review,
-.nav-item .ct.inbox-ct.failed {
+/* #28: Inbox badge default is amber (needs-review = human-domain "you have work",
+   which is now the retuned --accent amber). But it KEEPS §6 severity — a failed
+   item escalates the badge to red (--danger), so the at-a-glance failure signal is
+   never lost at the badge level (Phase D behavior; Eva's #28 ruling — don't regress).
+   Amber default and red-on-failed both sit within qianyi's amber theme. */
+.nav-item .ct.inbox-ct.needs-review {
   background: var(--needs-you);
+  color: var(--paper);
+}
+
+.nav-item .ct.inbox-ct.failed {
+  background: var(--danger);
   color: var(--paper);
 }
 
@@ -980,9 +985,12 @@ svg.i.sm {
   pointer-events: none;
 }
 
-.inbox-corner-badge.needs-review,
-.inbox-corner-badge.failed {
+.inbox-corner-badge.needs-review {
   background: var(--needs-you);
+}
+
+.inbox-corner-badge.failed {
+  background: var(--danger);
 }
 
 .inbox-flyout {
