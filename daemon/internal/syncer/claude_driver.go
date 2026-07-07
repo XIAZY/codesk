@@ -76,6 +76,7 @@ func (d *claudeDriver) Spawn(ctx context.Context, spec RuntimeSpawnSpec) (Runtim
 		instructions:  spec.Instructions,
 		handshakeWait: d.handshakeWait,
 		events:        make(chan RuntimeEvent, 128),
+		stopping:      make(chan struct{}),
 	}, nil
 }
 
@@ -90,6 +91,12 @@ type claudeRuntimeProcess struct {
 
 	events    chan RuntimeEvent
 	closeOnce sync.Once
+	// stopping is closed by Stop (once, ever) and releases a lifecycle emit
+	// blocked on a full events channel; see emitLifecycle. It spans the whole
+	// process lifetime, like events — a failed spawn attempt that the
+	// supervisor retries on this same process must not close it.
+	stopping chan struct{}
+	stopOnce sync.Once
 
 	mu         sync.Mutex
 	cmd        *exec.Cmd
@@ -127,6 +134,10 @@ func (p *claudeRuntimeProcess) Stop() error {
 	cmd := p.cmd
 	stdin := p.stdin
 	p.mu.Unlock()
+	// Release a lifecycle emit blocked on a full events channel before killing
+	// the process: readLoop must be able to reach stdout EOF and return, or the
+	// exit goroutine (which waits on readLoop) would never close the channel.
+	p.signalStop()
 	if stdin != nil {
 		_ = stdin.Close()
 	}
@@ -449,7 +460,7 @@ func (p *claudeRuntimeProcess) readLoop(stdout io.Reader) {
 			if event.failed {
 				kind = RuntimeEventTurnFailed
 			}
-			p.emit(RuntimeEvent{Kind: kind, SessionID: sessionID, TurnID: turnID, Error: event.errText})
+			p.emitLifecycle(RuntimeEvent{Kind: kind, SessionID: sessionID, TurnID: turnID, Error: event.errText})
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -457,12 +468,30 @@ func (p *claudeRuntimeProcess) readLoop(stdout io.Reader) {
 	}
 }
 
-func (p *claudeRuntimeProcess) emit(event RuntimeEvent) {
+// emitLifecycle delivers a lifecycle event (turn end today; anything driving
+// the supervisor's session state machine) with guaranteed delivery: it blocks
+// until the consumer takes the event or the process is stopped. The previous
+// emit dropped on a full channel, and a dropped turn-end wedged the session as
+// "working" forever — silence caused by our own code, which no external-runtime
+// defense can attribute correctly. Blocking is safe here: the supervisor's
+// consumeEvents goroutine drains the channel for the process's entire life
+// (it exits only on channel close, and the channel closes only after readLoop
+// returns — or in Stop's never-spawned branch, where no emitter exists — so a
+// blocked send can never race the close). The stop case is the release valve
+// for processes stopped before a consumer ever attached (the supervisor's
+// pre-registration failure paths); a stopped process is terminal, so its
+// events are moot. High-volume notification-class events must NOT use this
+// path — if they ever share this channel, give them a lossy emit of their own.
+func (p *claudeRuntimeProcess) emitLifecycle(event RuntimeEvent) {
 	select {
 	case p.events <- event:
-	default:
-		p.logf("dropping runtime event kind=%s because channel is full", event.Kind)
+	case <-p.stopping:
+		p.logf("discarding lifecycle event kind=%s because the process is stopped", event.Kind)
 	}
+}
+
+func (p *claudeRuntimeProcess) signalStop() {
+	p.stopOnce.Do(func() { close(p.stopping) })
 }
 
 func (p *claudeRuntimeProcess) wasStopped() bool {
