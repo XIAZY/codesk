@@ -2258,7 +2258,12 @@ button.inbox-row:hover {
 
 .roster-activity {
   min-height: 38px;
+  max-height: 58px;
   line-height: 1.4;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
 }
 
 .modal-backdrop {
