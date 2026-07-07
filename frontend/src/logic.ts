@@ -394,6 +394,23 @@ export function documentActivity(
     .slice(0, limit);
 }
 
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+
+export function recentActivity(
+  workspace: Pick<WorkspaceState, "activities">,
+  documentId: string | undefined,
+  nowMs: number,
+  limit = 5,
+): ActivityEvent[] {
+  if (!documentId) return [];
+  const cutoff = nowMs - SEVEN_DAYS_MS;
+  return (workspace.activities ?? [])
+    .filter((a) => a.documentId === documentId && Date.parse(a.occurredAt) >= cutoff)
+    .slice()
+    .sort((a, b) => (a.occurredAt < b.occurredAt ? 1 : a.occurredAt > b.occurredAt ? -1 : 0))
+    .slice(0, limit);
+}
+
 const relativeTimeFormat = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
 
 // Human relative time for an ISO timestamp, e.g. "5 minutes ago". Empty for an
