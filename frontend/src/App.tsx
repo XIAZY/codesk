@@ -2602,7 +2602,7 @@ function CollaboratorAvatars({ people, onClick }: { people: WorkspacePerson[]; o
   const online = people.filter((p) => personOnline(p, now));
   if (!online.length) return null;
   return (
-    <button className="collaborator-avatars" type="button" onClick={onClick} title={`${online.length} online`}>
+    <button className="collaborator-avatars" type="button" onClick={onClick} title={`${online.length} online`} aria-label={`${online.length} collaborator${online.length === 1 ? "" : "s"} online — open People`}>
       {online.slice(0, 5).map((p) => (
         <div key={p.id} className={`avi sm ${p.kind === "agent" ? "agent" : "you"} online`}>
           {initials(p.handle || p.name)}
@@ -2615,6 +2615,9 @@ function CollaboratorAvatars({ people, onClick }: { people: WorkspacePerson[]; o
 
 const personRoleTag = { you: "You", agent: "Agent", member: "Member" } as const;
 
+// Everyone in the workspace — humans + agents. Soft avatars, role tag, and a
+// workspace-level online ring driven by real presence that decays on a 12s
+// now-ticker (like daemon liveness) so it never shows a stale "online".
 function PeoplePanel({
   people,
   agents,
