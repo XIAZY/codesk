@@ -1849,13 +1849,17 @@ func (s *Store) UpsertPresence(req UpsertPresenceRequest) (*Presence, error) {
 	s.mu.RUnlock()
 
 	now := time.Now().UTC()
+	selection := append([]int(nil), req.Selection...)
+	if selection == nil {
+		selection = []int{}
+	}
 	presence := &Presence{
 		ActorID:    req.ActorID,
 		ActorType:  req.ActorType,
 		DocumentID: req.DocumentID,
 		FilePath:   req.FilePath,
 		Mode:       req.Mode,
-		Selection:  append([]int(nil), req.Selection...),
+		Selection:  selection,
 		Activity:   req.Activity,
 		UpdatedAt:  now,
 	}

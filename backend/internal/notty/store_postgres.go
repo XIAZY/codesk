@@ -1085,7 +1085,7 @@ func listPresencesPostgres(q querier, workspaceID string) ([]*Presence, error) {
 	}
 	defer rows.Close()
 
-	var presences []*Presence
+	presences := make([]*Presence, 0)
 	for rows.Next() {
 		p := &Presence{}
 		var start sql.NullInt64
@@ -2641,7 +2641,7 @@ func selectionBounds(selection []int) (any, any) {
 
 func selectionFromNulls(start, end sql.NullInt64) []int {
 	if !start.Valid && !end.Valid {
-		return nil
+		return []int{}
 	}
 	if start.Valid && end.Valid {
 		return []int{int(start.Int64), int(end.Int64)}
@@ -2724,7 +2724,7 @@ func queryThreadsPostgres(q querier, workspaceID string, documentID string, thre
 	defer rows.Close()
 
 	threadsByID := map[string]*Thread{}
-	var threads []*Thread
+	threads := make([]*Thread, 0)
 	for rows.Next() {
 		thread, err := scanThread(rows)
 		if err != nil {
