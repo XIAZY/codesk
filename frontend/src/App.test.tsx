@@ -376,12 +376,16 @@ describe("ManageModal", () => {
   const baseProps = {
     api: {} as never,
     workspaceId: "ws",
+    workspaceSlug: "acme",
     canInvite: true,
+    groupedAgents: [],
     onTabChange: vi.fn(),
     onClose: vi.fn(),
     onRefresh: vi.fn(),
     onNewDaemon: vi.fn(),
     onDaemon: vi.fn(),
+    onNewAgent: vi.fn(),
+    onAgent: vi.fn(),
   };
 
   it("renders all five tabs, shows the Local environment surface, delegates tab clicks, and closes on Escape", async () => {
@@ -406,12 +410,23 @@ describe("ManageModal", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("shows a coming-soon placeholder for tabs that are not built yet", () => {
-    const workspace = { ...emptyWorkspace(), workspaceId: "ws" };
-    render(<ManageModal {...baseProps} workspace={workspace as never} activeTab="workspace" />);
-    expect(screen.getByText("Workspace settings — coming soon.")).toBeTruthy();
-    // The Local environment surface must NOT render on a different tab.
+  it("shows read-only workspace settings with editing marked coming soon", () => {
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws", name: "Acme" };
+    render(<ManageModal {...baseProps} workspace={workspace as never} workspaceSlug="acme" activeTab="workspace" />);
+    expect(screen.getByText("Acme")).toBeTruthy();
+    expect(screen.getByText("Editing coming soon.")).toBeTruthy();
+    // Honest-controls: read-only current values are static text, not editable-looking inputs.
+    expect(screen.queryByRole("textbox")).toBeNull();
+    // Not another tab's surface.
     expect(screen.queryByText("Local environments")).toBeNull();
+  });
+
+  it("shows a calm danger-zone coming-soon note without a live delete control", () => {
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws" };
+    render(<ManageModal {...baseProps} workspace={workspace as never} activeTab="danger" />);
+    expect(screen.getByText("Workspace deletion is coming soon.")).toBeTruthy();
+    // Honest-controls: no clickable Delete until the backend supports it.
+    expect(screen.queryByRole("button", { name: /delete/i })).toBeNull();
   });
 
   it("lists workspace members and offers invite generation on the Members tab", () => {
@@ -438,6 +453,21 @@ describe("ManageModal", () => {
     render(<ManageModal {...baseProps} canInvite={false} workspace={workspace as never} activeTab="members" />);
     expect(screen.queryByRole("button", { name: "Generate invite link" })).toBeNull();
     expect(screen.getByText("Only workspace owners and admins can invite new members.")).toBeTruthy();
+  });
+
+  it("hosts the agents configuration surface on the Agents tab", () => {
+    const workspace = {
+      ...emptyWorkspace(),
+      workspaceId: "ws",
+      agents: [
+        { id: "a1", daemonId: "d1", handle: "codex", name: "Codex", role: "Reviewer", kind: "codex", workspaceRoot: "agents/a1", status: "idle", currentTask: "", currentActivity: "", currentRunId: "", updatedAt: "now" },
+      ],
+    };
+    const grouped = [{ daemonId: "d1", daemonName: "Local", agents: workspace.agents }];
+    render(<ManageModal {...baseProps} workspace={workspace as never} groupedAgents={grouped as never} activeTab="agents" />);
+    // AgentsManagement renders in the tab (its subtitle + the agent handle).
+    expect(screen.getByText(/Codex collaborators in this workspace/)).toBeTruthy();
+    expect(screen.getByText("@codex")).toBeTruthy();
   });
 });
 

@@ -131,12 +131,6 @@ function patchLastAccessed(path: string, init: RequestInit | undefined) {
   return true;
 }
 
-function lastAccessedPatchBodies() {
-  return vi.mocked(globalThis.fetch).mock.calls
-    .filter(([url, init]) => String(url).endsWith("/last-accessed") && init?.method === "PATCH")
-    .map(([, init]) => String(init?.body ?? ""));
-}
-
 beforeEach(() => {
   localStorage.clear();
   window.history.replaceState(null, "", "/");
@@ -515,23 +509,6 @@ describe("App URL routing", () => {
     expect(await screen.findByRole("heading", { name: "Document not found" })).toBeTruthy();
     expect(screen.queryByTestId("document-surface")).toBeNull();
     expect(screen.getByRole("button", { name: "Back to workspace" })).toBeTruthy();
-  });
-
-  it("updates URL from workspace navigation and responds to browser history", async () => {
-    const user = userEvent.setup();
-    localStorage.setItem("codesk.auth.token", "token");
-    window.history.replaceState(null, "", "/w/team/d/doc_1");
-
-    render(<App />);
-
-    await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_1"));
-    await user.click(screen.getByRole("button", { name: "Agents" }));
-    expect(window.location.pathname).toBe("/w/team/agents");
-
-    window.history.back();
-    await waitFor(() => expect(window.location.pathname).toBe("/w/team/d/doc_1"));
-    await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_1"));
-    expect(lastAccessedPatchBodies().filter((body) => body === JSON.stringify({}))).toHaveLength(1);
   });
 
   it("opens a document URL after creating the workspace and document", async () => {

@@ -1274,7 +1274,6 @@ export function WorkspaceApp({
   const [titleDraft, setTitleDraft] = useState("");
   const lastAccessUpdateKeyRef = useRef("");
 
-  const centerView = view.kind === "agents" ? "agents" : "document";
   const requestedDocumentId = view.kind === "document" ? view.documentId : "";
   const activeDocument = requestedDocumentId ? rootDocuments.find((document) => document.id === requestedDocumentId) ?? null : null;
   const documentMissing = view.kind === "document" && rootNamespace.ready && !activeDocument;
@@ -1453,7 +1452,7 @@ export function WorkspaceApp({
   }, [createDocument]);
 
   return (
-    <main className={`shell ${centerView === "document" ? "" : "management-shell"}`}>
+    <main className="shell">
       <aside className="sb">
         <div className="workspace-switcher">
           <div className="row gap-8 min-0">
@@ -1586,7 +1585,7 @@ export function WorkspaceApp({
       <section className="doc-area">
         <header className="doc-toolbar">
           <div className="breadcrumb document-breadcrumb">
-            {centerView === "document" && activeDocument ? (
+            {activeDocument ? (
               <DocumentPathBar
                 document={activeDocument}
                 workspaceName={workspace.name || activeWorkspace?.name || "Workspace"}
@@ -1595,23 +1594,15 @@ export function WorkspaceApp({
               />
             ) : (
               <>
-                <span>{centerView === "document" ? activeFolder : "Operations"}</span>
+                <span>{activeFolder}</span>
                 <Icon name="chevron" />
-                <b>{centerView === "agents" ? "Agents" : "No document selected"}</b>
+                <b>No document selected</b>
               </>
             )}
             <span className={`chip sm ${connected ? "ok" : "warn"}`}>{connected ? "workspace live" : "workspace offline"}</span>
           </div>
           <div className="row gap-6">
-            <button
-              className={`btn sm ${centerView === "agents" ? "selected" : ""}`}
-              type="button"
-              onClick={() => navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "agents" } })}
-            >
-              <Icon name="agent" />
-              Agents
-            </button>
-            <button className="btn sm ghost icon" type="button" onClick={() => setModal("rename")} disabled={!activeDocument || centerView !== "document"}>
+            <button className="btn sm ghost icon" type="button" onClick={() => setModal("rename")} disabled={!activeDocument}>
               <Icon name="more" />
             </button>
           </div>
@@ -1619,17 +1610,7 @@ export function WorkspaceApp({
         {loading ? <div className="notice compact">Loading workspace...</div> : null}
         {error ? <div className="notice error compact">{error}</div> : null}
         {createError ? <div className="notice error compact">{createError}</div> : null}
-        {centerView === "agents" ? (
-          <AgentsManagement
-            workspace={workspace}
-            groupedAgents={groupedAgents}
-            onNew={() => setModal("agent")}
-            onAgent={(agent) => {
-              setSelectedAgentId(agent.id);
-              setModal("agent-detail");
-            }}
-          />
-        ) : documentMissing ? (
+        {documentMissing ? (
           <DocumentNotFound
             onBackToWorkspace={() => {
               navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "home" } }, { replace: true });
@@ -1674,7 +1655,7 @@ export function WorkspaceApp({
         )}
       </section>
 
-      <aside className={`ctx ${centerView === "document" ? "" : "hidden"}`}>
+      <aside className="ctx">
         <div className="ctx-tabs">
           {(["threads", "activity", "coworkers"] as const).map((tab) => (
             <button key={tab} className={`btn sm ${rightTab === tab ? "selected" : "ghost"}`} onClick={() => setRightTab(tab)}>
@@ -1739,8 +1720,10 @@ export function WorkspaceApp({
           api={api}
           workspaceId={workspaceId}
           workspace={workspace}
+          workspaceSlug={workspaceSlug}
           activeTab={manageTab}
           canInvite={canInviteMembers}
+          groupedAgents={groupedAgents}
           onTabChange={setManageTab}
           onClose={() => setModal(null)}
           onRefresh={() => void reload()}
@@ -1748,6 +1731,11 @@ export function WorkspaceApp({
           onDaemon={(daemon) => {
             setSelectedDaemonId(daemon.id);
             setModal("daemon-detail");
+          }}
+          onNewAgent={() => setModal("agent")}
+          onAgent={(agent) => {
+            setSelectedAgentId(agent.id);
+            setModal("agent-detail");
           }}
         />
       ) : null}
@@ -3382,14 +3370,45 @@ export function MembersAndInvite({
   );
 }
 
-function ManagePlaceholder({ label }: { label: string }) {
+// Workspace settings (plan §4.2). Read-only today: it states the current name and URL
+// (zero backend) with an explicit "editing coming soon". When PATCH /workspace lands the
+// read-only fields flip to editable — wiring, not construction (Juan/Eva ruling).
+function WorkspaceSettings({ name, slug }: { name: string; slug: string }) {
   return (
     <div className="manage-panel">
       <div className="manage-panel-head">
-        <span className="display management-title">{label}</span>
+        <span className="display management-title">Workspace settings</span>
       </div>
-      <div className="coming-soon-block">
-        <span className="small muted">{label} — coming soon.</span>
+      <div className="settings-list">
+        <div className="setting-readonly">
+          <span className="lab">Workspace name</span>
+          <span className="setting-value">{name}</span>
+        </div>
+        <div className="setting-readonly">
+          <span className="lab">Workspace URL</span>
+          <span className="setting-value mono">{`${publicOrigin}/w/${slug}`}</span>
+        </div>
+        <p className="tiny muted">Editing coming soon.</p>
+      </div>
+    </div>
+  );
+}
+
+// Danger zone (plan §4.2). Deliberately NOT a red, clickable-looking Delete button today —
+// a destructive control that can't act is alarming, not honest. Calm coming-soon copy now;
+// the danger styling + real DELETE /workspace land together in the backend follow-up (Eva).
+function DangerZone() {
+  return (
+    <div className="manage-panel">
+      <div className="manage-panel-head">
+        <span className="display management-title">Danger zone</span>
+      </div>
+      <div className="danger-note">
+        <p className="small">Workspace deletion is coming soon.</p>
+        <p className="tiny muted">
+          Deleting a workspace permanently removes its documents, agents and members. This will be
+          available once the action is fully supported.
+        </p>
       </div>
     </div>
   );
@@ -3401,24 +3420,32 @@ export function ManageModal({
   api,
   workspaceId,
   workspace,
+  workspaceSlug,
   activeTab,
   canInvite,
+  groupedAgents,
   onTabChange,
   onClose,
   onRefresh,
   onNewDaemon,
   onDaemon,
+  onNewAgent,
+  onAgent,
 }: {
   api: ApiClient;
   workspaceId: string;
   workspace: ReturnType<typeof useWorkspace>["workspace"];
+  workspaceSlug: string;
   activeTab: ManageTab;
   canInvite: boolean;
+  groupedAgents: Array<{ daemonId: string; daemonName: string; agents: Agent[] }>;
   onTabChange: (tab: ManageTab) => void;
   onClose: () => void;
   onRefresh: () => void;
   onNewDaemon: () => void;
   onDaemon: (daemon: Daemon) => void;
+  onNewAgent: () => void;
+  onAgent: (agent: Agent) => void;
 }) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -3430,7 +3457,6 @@ export function ManageModal({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const label = MANAGE_TABS.find((tab) => tab.id === activeTab)?.label ?? "";
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <section className="modal-card card lifted wide manage-modal" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label="Manage workspace">
@@ -3469,8 +3495,12 @@ export function ManageModal({
               <DaemonsManagement workspace={workspace} onRefresh={onRefresh} onNew={onNewDaemon} onDaemon={onDaemon} />
             ) : activeTab === "members" ? (
               <MembersAndInvite api={api} workspaceId={workspaceId} users={workspace.users} canInvite={canInvite} />
+            ) : activeTab === "agents" ? (
+              <AgentsManagement workspace={workspace} groupedAgents={groupedAgents} onNew={onNewAgent} onAgent={onAgent} />
+            ) : activeTab === "workspace" ? (
+              <WorkspaceSettings name={workspace.name} slug={workspaceSlug} />
             ) : (
-              <ManagePlaceholder label={label} />
+              <DangerZone />
             )}
           </div>
         </div>

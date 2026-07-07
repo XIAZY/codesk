@@ -1993,6 +1993,30 @@ pre.code {
   gap: 8px;
 }
 
+/* Read-only workspace settings today: plain label + value, deliberately NOT dressed
+   as editable input boxes so the appearance matches the behavior (Eva). */
+.settings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.setting-readonly {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.setting-value {
+  font-size: 14px;
+  color: var(--ink-2);
+}
+
+.setting-value.mono {
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
 .new-agent-form {
   display: flex;
   flex-direction: column;
