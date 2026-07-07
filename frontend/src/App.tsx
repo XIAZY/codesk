@@ -1651,6 +1651,15 @@ export function WorkspaceApp({
       className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${draggingRail ? " dragging" : ""}`}
       style={rightWidth != null ? ({ "--right": `${rightWidth}px` } as CSSProperties) : undefined}
     >
+      <button
+        className="sb-rail-handle"
+        type="button"
+        onClick={toggleSidebar}
+        aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+        data-tip={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+      >
+        {sidebarCollapsed ? "›" : "‹"}
+      </button>
       <aside className={`sb ${inboxOpen ? "inbox-open" : ""}`}>
         <div className="workspace-switcher">
           <div className="row gap-8 min-0">
@@ -1665,8 +1674,6 @@ export function WorkspaceApp({
               <option value={workspace.slug} key={workspace.id}>{workspace.name}</option>
             ))}
           </select>
-          <button className="sb-collapse-btn" type="button" onClick={toggleSidebar} aria-label="Collapse sidebar" title="Collapse sidebar">‹</button>
-          <button className="sb-expand-tab" type="button" onClick={toggleSidebar} aria-label="Expand sidebar" title="Expand sidebar">›</button>
         </div>
 
         <div className="sb-search">

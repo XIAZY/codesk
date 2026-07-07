@@ -650,6 +650,7 @@ svg.i.sm {
 }
 
 .shell {
+  position: relative;
   height: 100vh;
   min-width: 1120px;
   display: grid;
@@ -736,34 +737,70 @@ svg.i.sm {
   display: inline-flex;
 }
 
-/* Collapse toggle (in the workspace switcher) + expand affordance shown only
-   when collapsed. */
-.sb-collapse-btn,
-.sb-expand-tab {
+/* Single collapse/expand handle: a round button straddling the left rail's right
+   edge, vertically centered. Replaces the old corner chevron + expand tab — one
+   control, never two (Eva). Anchored to .shell (position:relative) at left:var(--left)
+   so it rides the rail's right edge through the 0.18s collapse to the 60px track;
+   .sb's collapsed overflow:hidden never clips it. Chevron flips ‹/› by state. */
+.sb-rail-handle {
+  position: absolute;
+  top: 50%;
+  left: var(--left);
+  transform: translate(-50%, -50%);
+  z-index: 30;
   width: 24px;
   height: 24px;
-  border-radius: 7px;
-  border: 0;
-  flex: none;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid oklch(0.28 0.004 75);
+  background: oklch(0.22 0.004 75);
+  color: oklch(0.60 0.004 75);
+  font-size: 15px;
+  line-height: 1;
   display: grid;
   place-items: center;
-  background: transparent;
-  color: var(--sb-ink-2);
   cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, left 0.18s ease;
 }
-.sb-collapse-btn:hover,
-.sb-expand-tab:hover {
-  background: var(--sb-2);
-  color: var(--sb-ink);
+/* ~28px hit target without enlarging the visible 24px disc. */
+.sb-rail-handle::before {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
 }
-.shell:not(.sidebar-collapsed) .sb-expand-tab {
-  display: none;
+.sb-rail-handle:hover {
+  background: color-mix(in oklab, oklch(0.30 0.004 75), var(--iris) 14%);
+  border-color: var(--iris);
+  color: oklch(0.82 0.004 75);
 }
-.shell.sidebar-collapsed .sb-collapse-btn {
-  display: none;
+.sb-rail-handle:focus-visible {
+  outline: 2px solid var(--iris);
+  outline-offset: 2px;
 }
-.shell.sidebar-collapsed .sb-expand-tab {
-  margin: 0 auto;
+/* Tooltip below the handle — never to the right, which would overlap the document
+   (the collision the earlier layout hit). Hover/focus reveal only. */
+.sb-rail-handle::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: calc(100% + 7px);
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  background: oklch(0.20 0.004 75);
+  color: oklch(0.82 0.004 75);
+  border: 1px solid oklch(0.28 0.004 75);
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+.sb-rail-handle:hover::after,
+.sb-rail-handle:focus-visible::after {
+  opacity: 1;
 }
 
 /* Right-rail resize handle — grab the left edge, clamp handled in JS. */
