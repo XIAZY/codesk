@@ -67,7 +67,7 @@ func (d *claudeDriver) Detect(ctx context.Context) RuntimeDetection {
 }
 
 func (d *claudeDriver) Spawn(ctx context.Context, spec RuntimeSpawnSpec) (RuntimeProcess, error) {
-	return &claudeRuntimeProcess{
+	proc := &claudeRuntimeProcess{
 		cfg:           d.cfg,
 		command:       d.command(),
 		agentID:       spec.AgentID,
@@ -76,7 +76,9 @@ func (d *claudeDriver) Spawn(ctx context.Context, spec RuntimeSpawnSpec) (Runtim
 		instructions:  spec.Instructions,
 		handshakeWait: d.handshakeWait,
 		events:        make(chan RuntimeEvent, 128),
-	}, nil
+	}
+	proc.watchdog = newWedgeWatchdog(d.cfg, spec.AgentID, RuntimeClaudeCode, proc.Stop)
+	return proc, nil
 }
 
 type claudeRuntimeProcess struct {
@@ -87,6 +89,7 @@ type claudeRuntimeProcess struct {
 	toolToken     string
 	instructions  string
 	handshakeWait time.Duration
+	watchdog      *wedgeWatchdog
 
 	events    chan RuntimeEvent
 	closeOnce sync.Once
@@ -115,6 +118,9 @@ func (p *claudeRuntimeProcess) Start(ctx context.Context) error {
 	} else {
 		log.Printf("agent log open failed agent=%s data_dir=%s err=%v", p.agentID, p.cfg.DataDir, err)
 	}
+	// The watchdog only trips while a turn is active, so starting it here (before the lazy first spawn)
+	// is a harmless no-op until the first startTurn arms it.
+	go p.watchdog.run()
 	return nil
 }
 
@@ -196,12 +202,14 @@ func (p *claudeRuntimeProcess) WriteStdin(ctx context.Context, input RuntimeInpu
 		p.mu.Lock()
 		p.activeTurn = turnID
 		p.mu.Unlock()
+		p.watchdog.turnStarted(turnID)
 		if err := p.writeUserMessage(input.Text); err != nil {
 			p.mu.Lock()
 			if p.activeTurn == turnID {
 				p.activeTurn = ""
 			}
 			p.mu.Unlock()
+			p.watchdog.turnEnded()
 			return RuntimeWriteResult{}, err
 		}
 		return RuntimeWriteResult{TurnID: turnID}, nil
@@ -427,6 +435,9 @@ func (p *claudeRuntimeProcess) readLoop(stdout io.Reader) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Bytes()
+		// Every stream line is a liveness signal — the fine-grained stream a wedge (silence with a
+		// live process) shows up against, finer than the coarse turn lifecycle events.
+		p.watchdog.noteActivity()
 		p.logf("stream recv %s", truncateForLog(string(line)))
 		event := parseClaudeStreamLine(line)
 		if event == nil {
@@ -445,6 +456,7 @@ func (p *claudeRuntimeProcess) readLoop(stdout io.Reader) {
 			sessionID := p.sessionID
 			p.activeTurn = ""
 			p.mu.Unlock()
+			p.watchdog.turnEnded()
 			kind := RuntimeEventTurnCompleted
 			if event.failed {
 				kind = RuntimeEventTurnFailed
@@ -473,6 +485,7 @@ func (p *claudeRuntimeProcess) wasStopped() bool {
 
 func (p *claudeRuntimeProcess) closeEvents() {
 	p.closeOnce.Do(func() {
+		p.watchdog.close()
 		close(p.events)
 	})
 }

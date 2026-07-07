@@ -73,17 +73,20 @@ func (d *codexDriver) Spawn(ctx context.Context, spec RuntimeSpawnSpec) (Runtime
 		factory = newCodexRuntimeApp
 	}
 	app := factory(d.cfg, spec.Workdir, spec.ToolToken, spec.AgentID)
-	return &codexRuntimeProcess{
+	proc := &codexRuntimeProcess{
 		app:          app,
 		instructions: spec.Instructions,
 		events:       make(chan RuntimeEvent, 128),
-	}, nil
+	}
+	proc.watchdog = newWedgeWatchdog(d.cfg, spec.AgentID, RuntimeCodex, proc.Stop)
+	return proc, nil
 }
 
 type codexRuntimeProcess struct {
 	app          codexRuntimeApp
 	instructions string
 	events       chan RuntimeEvent
+	watchdog     *wedgeWatchdog
 }
 
 func (p *codexRuntimeProcess) Start(ctx context.Context) error {
@@ -94,6 +97,7 @@ func (p *codexRuntimeProcess) Start(ctx context.Context) error {
 		close(p.events)
 		return err
 	}
+	go p.watchdog.run()
 	go p.forwardEvents()
 	return nil
 }
@@ -156,10 +160,20 @@ func (p *codexRuntimeProcess) PID() int {
 
 func (p *codexRuntimeProcess) forwardEvents() {
 	defer close(p.events)
+	defer p.watchdog.close()
 	for event := range p.app.Events() {
+		// Bump on EVERY app-server notification, before the lifecycle filter — the raw stream is the
+		// fine-grained liveness signal a wedge (silence with a live process) shows up against.
+		p.watchdog.noteActivity()
 		runtimeEvent, ok := codexRuntimeEvent(event)
 		if !ok {
 			continue
+		}
+		switch runtimeEvent.Kind {
+		case RuntimeEventTurnStarted:
+			p.watchdog.turnStarted(runtimeEvent.TurnID)
+		case RuntimeEventTurnCompleted, RuntimeEventTurnFailed, RuntimeEventIdle:
+			p.watchdog.turnEnded()
 		}
 		p.events <- runtimeEvent
 	}
