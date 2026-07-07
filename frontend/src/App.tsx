@@ -1422,7 +1422,7 @@ export function WorkspaceApp({
   const requestedDocumentId = view.kind === "document" ? view.documentId : "";
   const activeDocument = requestedDocumentId ? rootDocuments.find((document) => document.id === requestedDocumentId) ?? null : null;
   const documentMissing = view.kind === "document" && rootNamespace.ready && !activeDocument;
-  const documentThreads = activeDocument ? workspace.threads.filter((thread) => thread.documentId === activeDocument.id) : [];
+  const documentThreads = useMemo(() => activeDocument ? workspace.threads.filter((thread) => thread.documentId === activeDocument.id) : [], [workspace.threads, activeDocument?.id]);
   const [threadAnchorInfo, setThreadAnchorInfo] = useState<Record<string, { orphaned: boolean; line: number }>>({});
   const groupedAgents = agentsByDaemon(workspace.agents, workspace.daemons);
   const documentTree = useMemo(() => buildDocumentTree(rootDocuments), [rootDocuments]);
@@ -2622,6 +2622,7 @@ function DocumentEditor({
     y: clamp((selection?.point.y ?? 120) + 28, 12, Math.max(12, window.innerHeight - 320)),
   };
 
+  const lastAnchorInfoRef = useRef("");
   useEffect(() => {
     if (!ydoc || !ytext) return;
     const content = ytext.toString();
@@ -2630,7 +2631,11 @@ function DocumentEditor({
       const resolved = resolveThreadAnchorLive(thread.anchor, ydoc, content);
       info[thread.id] = { orphaned: !resolved.resolved && thread.anchor.kind !== "document", line: resolved.line };
     }
-    onThreadAnchorInfo(info);
+    const serialized = JSON.stringify(info);
+    if (serialized !== lastAnchorInfoRef.current) {
+      lastAnchorInfoRef.current = serialized;
+      onThreadAnchorInfo(info);
+    }
   }, [ydoc, ytext, threads, onThreadAnchorInfo]);
 
   useEffect(() => {
@@ -2838,6 +2843,7 @@ export function ThreadsPanel({
   const [reply, setReply] = useState("");
   const [statusBusy, setStatusBusy] = useState(false);
   const [statusError, setStatusError] = useState("");
+  const [cardError, setCardError] = useState<Record<string, string>>({});
   const [resolvedFolded, setResolvedFolded] = useState(() => {
     try { return localStorage.getItem("codesk.threads.resolvedFolded") !== "false"; } catch { return true; }
   });
@@ -2956,7 +2962,9 @@ export function ThreadsPanel({
     try {
       await api.updateThreadStatus(workspaceId, threadId, "resolved");
       onReply();
-    } catch {}
+    } catch (err) {
+      setCardError((prev) => ({ ...prev, [threadId]: err instanceof Error ? err.message : "Failed to resolve" }));
+    }
   };
 
   const renderThreadCard = (thread: ThreadItem) => {
@@ -2990,6 +2998,7 @@ export function ThreadsPanel({
               <div className="thread-orphan-actions">
                 <span className="thread-resolve-link" role="button" onClick={(e) => resolveCard(thread.id, e)}>Resolve</span>
               </div>
+              {cardError[thread.id] ? <div className="tiny" style={{ color: "var(--err)" }}>{cardError[thread.id]}</div> : null}
             </>
           ) : null}
           <div className="row gap-4 tiny muted">
