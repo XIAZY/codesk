@@ -38,6 +38,7 @@ function mockApi(overrides: Partial<ApiClient> = {}): ApiClient {
 }
 
 afterEach(() => {
+  localStorage.clear();
   cleanup();
 });
 
@@ -61,7 +62,7 @@ describe("ThreadsPanel badge rendering", () => {
     expect(badge?.querySelector(".thread-badge-dot")).toBeTruthy();
   });
 
-  it("renders a Resolved badge with ok dot and dims the card for resolved threads", () => {
+  it("folds resolved threads by default and shows them on expand", () => {
     const { container } = render(
       <ThreadsPanel
         api={mockApi()}
@@ -74,16 +75,24 @@ describe("ThreadsPanel badge rendering", () => {
       />,
     );
 
-    const badge = container.querySelector(".thread-badge.resolved");
-    expect(badge).toBeTruthy();
-    expect(badge?.textContent).toContain("Resolved");
-    expect(badge?.querySelector(".thread-badge-dot")).toBeTruthy();
+    const foldHeader = container.querySelector(".thread-fold-header");
+    expect(foldHeader).toBeTruthy();
+    expect(foldHeader?.textContent).toContain("Resolved");
+    expect(foldHeader?.textContent).toContain("1");
+
+    expect(container.querySelector(".titem.resolved")).toBeNull();
+
+    fireEvent.click(foldHeader!);
 
     const card = container.querySelector(".titem.resolved");
     expect(card).toBeTruthy();
+    const badge = card?.querySelector(".thread-badge.resolved");
+    expect(badge).toBeTruthy();
+    expect(badge?.textContent).toContain("Resolved");
+    expect(badge?.querySelector(".thread-badge-dot")).toBeTruthy();
   });
 
-  it("renders both open and resolved badges in a mixed thread list", () => {
+  it("separates open and resolved threads with resolved folded by default", () => {
     const { container } = render(
       <ThreadsPanel
         api={mockApi()}
@@ -100,7 +109,12 @@ describe("ThreadsPanel badge rendering", () => {
     );
 
     expect(container.querySelectorAll(".thread-badge.open")).toHaveLength(1);
-    expect(container.querySelectorAll(".thread-badge.resolved")).toHaveLength(1);
+    expect(container.querySelectorAll(".titem.resolved")).toHaveLength(0);
+
+    const foldHeader = container.querySelector(".thread-fold-header");
+    expect(foldHeader?.textContent).toContain("Resolved · 1");
+
+    fireEvent.click(foldHeader!);
     expect(container.querySelectorAll(".titem.resolved")).toHaveLength(1);
   });
 });
@@ -242,6 +256,162 @@ describe("ThreadsPanel detail view badge and resolve", () => {
     await user.click(screen.getByRole("button", { name: "Resolve thread" }));
 
     await waitFor(() => expect(screen.getByText("Network error")).toBeTruthy());
+  });
+});
+
+describe("ThreadsPanel orphan warning", () => {
+  it("shows orphan warning on thread card when anchor is lost", () => {
+    const { container } = render(
+      <ThreadsPanel
+        api={mockApi()}
+        workspaceId="ws"
+        threads={[threadFixture({ id: "t1", status: "open", anchor: { kind: "range", excerpt: "deleted text" } })]}
+        threadAnchorInfo={{ t1: { orphaned: true, line: 0 } }}
+        selectedThreadId=""
+        onSelectThread={vi.fn()}
+        onJumpToThread={vi.fn()}
+        onReply={vi.fn()}
+      />,
+    );
+
+    expect(container.querySelector(".titem.orphaned")).toBeTruthy();
+    expect(container.querySelector(".thread-orphan-warning")).toBeTruthy();
+    expect(container.querySelector(".thread-orphan-warning")?.textContent).toContain("Anchor lost");
+  });
+
+  it("shows resolve action on orphan card and fires updateThreadStatus on click", async () => {
+    const updateThreadStatus = vi.fn().mockResolvedValue({ thread: threadFixture({ status: "resolved" }) });
+    const onReply = vi.fn();
+    const { container } = render(
+      <ThreadsPanel
+        api={mockApi({ updateThreadStatus })}
+        workspaceId="ws"
+        threads={[threadFixture({ id: "t1", status: "open", anchor: { kind: "range", excerpt: "deleted text" } })]}
+        threadAnchorInfo={{ t1: { orphaned: true, line: 0 } }}
+        selectedThreadId=""
+        onSelectThread={vi.fn()}
+        onJumpToThread={vi.fn()}
+        onReply={onReply}
+      />,
+    );
+
+    const resolveLink = container.querySelector(".thread-resolve-link");
+    expect(resolveLink).toBeTruthy();
+    expect(resolveLink?.textContent).toBe("Resolve");
+
+    fireEvent.click(resolveLink!);
+    await waitFor(() => expect(updateThreadStatus).toHaveBeenCalledWith("ws", "t1", "resolved"));
+    await waitFor(() => expect(onReply).toHaveBeenCalled());
+  });
+
+  it("shows orphan warning in detail view for orphaned thread", () => {
+    const { container } = render(
+      <ThreadsPanel
+        api={mockApi()}
+        workspaceId="ws"
+        threads={[threadFixture({ id: "t1", status: "open", anchor: { kind: "range", excerpt: "deleted text" } })]}
+        threadAnchorInfo={{ t1: { orphaned: true, line: 0 } }}
+        selectedThreadId="t1"
+        onSelectThread={vi.fn()}
+        onJumpToThread={vi.fn()}
+        onReply={vi.fn()}
+      />,
+    );
+
+    expect(container.querySelector(".thread-orphan-warning")).toBeTruthy();
+    expect(container.querySelector(".quoted-range .tiny")?.textContent).toContain("anchor lost");
+  });
+
+  it("does not show orphan warning for non-orphaned anchored thread", () => {
+    const { container } = render(
+      <ThreadsPanel
+        api={mockApi()}
+        workspaceId="ws"
+        threads={[threadFixture({ id: "t1", status: "open" })]}
+        threadAnchorInfo={{ t1: { orphaned: false, line: 12 } }}
+        selectedThreadId=""
+        onSelectThread={vi.fn()}
+        onJumpToThread={vi.fn()}
+        onReply={vi.fn()}
+      />,
+    );
+
+    expect(container.querySelector(".titem.orphaned")).toBeNull();
+    expect(container.querySelector(".thread-orphan-warning")).toBeNull();
+  });
+});
+
+describe("ThreadsPanel jump to anchor", () => {
+  it("shows jump-to-line link for anchored thread with line info", () => {
+    const { container } = render(
+      <ThreadsPanel
+        api={mockApi()}
+        workspaceId="ws"
+        threads={[threadFixture({ id: "t1", status: "open" })]}
+        threadAnchorInfo={{ t1: { orphaned: false, line: 42 } }}
+        selectedThreadId=""
+        onSelectThread={vi.fn()}
+        onJumpToThread={vi.fn()}
+        onReply={vi.fn()}
+      />,
+    );
+
+    const jumpLink = container.querySelector(".thread-jump-link");
+    expect(jumpLink).toBeTruthy();
+    expect(jumpLink?.textContent).toContain("Jump to line 42");
+  });
+
+  it("calls onJumpToThread when jump link is clicked", () => {
+    const onJumpToThread = vi.fn();
+    const { container } = render(
+      <ThreadsPanel
+        api={mockApi()}
+        workspaceId="ws"
+        threads={[threadFixture({ id: "t1", status: "open" })]}
+        threadAnchorInfo={{ t1: { orphaned: false, line: 42 } }}
+        selectedThreadId=""
+        onSelectThread={vi.fn()}
+        onJumpToThread={onJumpToThread}
+        onReply={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(container.querySelector(".thread-jump-link")!);
+    expect(onJumpToThread).toHaveBeenCalledWith("t1");
+  });
+
+  it("does not show jump link for orphaned thread", () => {
+    const { container } = render(
+      <ThreadsPanel
+        api={mockApi()}
+        workspaceId="ws"
+        threads={[threadFixture({ id: "t1", status: "open" })]}
+        threadAnchorInfo={{ t1: { orphaned: true, line: 0 } }}
+        selectedThreadId=""
+        onSelectThread={vi.fn()}
+        onJumpToThread={vi.fn()}
+        onReply={vi.fn()}
+      />,
+    );
+
+    expect(container.querySelector(".thread-jump-link")).toBeNull();
+  });
+
+  it("does not show jump link for document-level thread", () => {
+    const { container } = render(
+      <ThreadsPanel
+        api={mockApi()}
+        workspaceId="ws"
+        threads={[threadFixture({ id: "t1", status: "open", anchor: { kind: "document" } })]}
+        threadAnchorInfo={{ t1: { orphaned: false, line: 1 } }}
+        selectedThreadId=""
+        onSelectThread={vi.fn()}
+        onJumpToThread={vi.fn()}
+        onReply={vi.fn()}
+      />,
+    );
+
+    expect(container.querySelector(".thread-jump-link")).toBeNull();
   });
 });
 

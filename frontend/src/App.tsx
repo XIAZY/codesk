@@ -33,6 +33,7 @@ import {
   type WorkspaceInboxSummary,
   type WorkspacePerson,
   type LineThreadGroup,
+  resolveThreadAnchorLive,
 } from "./logic";
 import { resolveRoot, resolveWorkspace, type WorkspaceView } from "./routes";
 import { navigate, useRoute } from "./useRoute";
@@ -1422,6 +1423,7 @@ export function WorkspaceApp({
   const activeDocument = requestedDocumentId ? rootDocuments.find((document) => document.id === requestedDocumentId) ?? null : null;
   const documentMissing = view.kind === "document" && rootNamespace.ready && !activeDocument;
   const documentThreads = activeDocument ? workspace.threads.filter((thread) => thread.documentId === activeDocument.id) : [];
+  const [threadAnchorInfo, setThreadAnchorInfo] = useState<Record<string, { orphaned: boolean; line: number }>>({});
   const groupedAgents = agentsByDaemon(workspace.agents, workspace.daemons);
   const documentTree = useMemo(() => buildDocumentTree(rootDocuments), [rootDocuments]);
   const threadCountByDocument = useMemo(() => {
@@ -1926,6 +1928,7 @@ export function WorkspaceApp({
             onTitleDraftChange={setTitleDraft}
             onTitleEditCancel={cancelRenamingDocument}
             onTitleCommit={(draft) => commitDocumentTitle(activeDocument, draft)}
+            onThreadAnchorInfo={setThreadAnchorInfo}
           />
         ) : rootNamespace.ready && rootDocuments.length ? (
           <div className="notice compact">Opening document...</div>
@@ -1966,6 +1969,7 @@ export function WorkspaceApp({
             api={api}
             workspaceId={workspaceId}
             threads={documentThreads}
+            threadAnchorInfo={threadAnchorInfo}
             selectedThreadId={selectedThreadId}
             onSelectThread={setSelectedThreadId}
             onJumpToThread={(threadId) => {
@@ -2573,6 +2577,7 @@ function DocumentEditor({
   onTitleDraftChange,
   onTitleEditCancel,
   onTitleCommit,
+  onThreadAnchorInfo,
 }: {
   api: ApiClient;
   token: string;
@@ -2591,6 +2596,7 @@ function DocumentEditor({
   onTitleDraftChange: (value: string) => void;
   onTitleEditCancel: () => void;
   onTitleCommit: (value: string) => void;
+  onThreadAnchorInfo: (info: Record<string, { orphaned: boolean; line: number }>) => void;
 }) {
   const draftRef = useRef<HTMLTextAreaElement | null>(null);
   const [selection, setSelection] = useState<SurfaceSelection | null>(null);
@@ -2615,6 +2621,17 @@ function DocumentEditor({
     x: clamp((selection?.point.x ?? 24) + 20, 12, Math.max(12, window.innerWidth - 340)),
     y: clamp((selection?.point.y ?? 120) + 28, 12, Math.max(12, window.innerHeight - 320)),
   };
+
+  useEffect(() => {
+    if (!ydoc || !ytext) return;
+    const content = ytext.toString();
+    const info: Record<string, { orphaned: boolean; line: number }> = {};
+    for (const thread of threads) {
+      const resolved = resolveThreadAnchorLive(thread.anchor, ydoc, content);
+      info[thread.id] = { orphaned: !resolved.resolved && thread.anchor.kind !== "document", line: resolved.line };
+    }
+    onThreadAnchorInfo(info);
+  }, [ydoc, ytext, threads, onThreadAnchorInfo]);
 
   useEffect(() => {
     setActiveThreadGroup(null);
@@ -2803,6 +2820,7 @@ export function ThreadsPanel({
   api,
   workspaceId,
   threads,
+  threadAnchorInfo,
   selectedThreadId,
   onSelectThread,
   onJumpToThread,
@@ -2811,6 +2829,7 @@ export function ThreadsPanel({
   api: ApiClient;
   workspaceId: string;
   threads: ThreadItem[];
+  threadAnchorInfo?: Record<string, { orphaned: boolean; line: number }>;
   selectedThreadId: string;
   onSelectThread: (threadId: string) => void;
   onJumpToThread: (threadId: string) => void;
@@ -2819,8 +2838,19 @@ export function ThreadsPanel({
   const [reply, setReply] = useState("");
   const [statusBusy, setStatusBusy] = useState(false);
   const [statusError, setStatusError] = useState("");
+  const [resolvedFolded, setResolvedFolded] = useState(() => {
+    try { return localStorage.getItem("codesk.threads.resolvedFolded") !== "false"; } catch { return true; }
+  });
   const selected = selectedThreadId ? threads.find((thread) => thread.id === selectedThreadId) ?? null : null;
   const selectedResolved = selected?.status === "resolved";
+  const openThreads = threads.filter((t) => t.status !== "resolved");
+  const resolvedThreads = threads.filter((t) => t.status === "resolved");
+
+  const toggleResolvedFold = () => {
+    const next = !resolvedFolded;
+    setResolvedFolded(next);
+    try { localStorage.setItem("codesk.threads.resolvedFolded", String(next)); } catch {}
+  };
 
   const toggleStatus = async () => {
     if (!selected || statusBusy) return;
@@ -2879,14 +2909,21 @@ export function ThreadsPanel({
             </div>
             {statusError ? <div className="tiny" style={{ color: "var(--err)" }}>{statusError}</div> : null}
             <div className="quoted-range">
-              <div className="tiny mono muted">{selected.anchor.kind === "document" ? "document thread" : "anchored range"}</div>
+              <div className="tiny mono muted">
+                {threadAnchorInfo?.[selected.id]?.orphaned
+                  ? "⚠ anchor lost"
+                  : selected.anchor.kind === "document" ? "document thread" : "anchored range"}
+              </div>
               <span>{selected.anchor.excerpt || selected.title}</span>
-              {selected.anchor.kind !== "document" ? (
+              {selected.anchor.kind !== "document" && !threadAnchorInfo?.[selected.id]?.orphaned ? (
                 <button className="jump-range-link" type="button" onClick={() => onJumpToThread(selected.id)}>
-                  Jump to range
+                  Jump to line {threadAnchorInfo?.[selected.id]?.line ?? ""}
                 </button>
               ) : null}
             </div>
+            {threadAnchorInfo?.[selected.id]?.orphaned ? (
+              <div className="thread-orphan-warning">Anchor lost · original text deleted</div>
+            ) : null}
           </div>
         </div>
         <div className="tdetail-body">
@@ -2914,45 +2951,96 @@ export function ThreadsPanel({
     );
   }
 
+  const resolveCard = async (threadId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await api.updateThreadStatus(workspaceId, threadId, "resolved");
+      onReply();
+    } catch {}
+  };
+
+  const renderThreadCard = (thread: ThreadItem) => {
+    const info = threadAnchorInfo?.[thread.id];
+    const isOrphaned = info?.orphaned ?? false;
+    const anchorLine = info?.line;
+    const isAnchored = thread.anchor.kind !== "document" && !isOrphaned;
+
+    return (
+      <button
+        key={thread.id}
+        className={`titem${thread.id === selectedThreadId ? " selected" : ""}${thread.status === "resolved" ? " resolved" : ""}${isOrphaned ? " orphaned" : ""}`}
+        onClick={() => onSelectThread(thread.id)}
+      >
+        <Icon name="thread" />
+        <div className="col gap-4 min-0">
+          <div className="between gap-8">
+            <span className="chip code sm truncate">{thread.anchor.excerpt || thread.title}</span>
+            <span className="tiny muted">{shortTime(thread.updatedAt)}</span>
+          </div>
+          <div className="row gap-6 min-0">
+            <div className={`avi sm ${thread.createdByType === "agent" ? "agent" : "you"}`}>{initials(thread.createdByHandle || thread.createdByName || "You")}</div>
+            <span className="small truncate">
+              <b>{thread.createdByHandle ? `@${thread.createdByHandle}` : thread.createdByName || "Someone"}</b>{" "}
+              {thread.messages[0]?.body || thread.title}
+            </span>
+          </div>
+          {isOrphaned ? (
+            <>
+              <div className="thread-orphan-warning">⚠ Anchor lost · original text deleted</div>
+              <div className="thread-orphan-actions">
+                <span className="thread-resolve-link" role="button" onClick={(e) => resolveCard(thread.id, e)}>Resolve</span>
+              </div>
+            </>
+          ) : null}
+          <div className="row gap-4 tiny muted">
+            <span className={`thread-badge ${thread.status === "resolved" ? "resolved" : "open"}`}>
+              <span className="thread-badge-dot" />
+              {thread.status === "resolved" ? "Resolved" : "Open"}
+            </span>
+            <span>·</span>
+            <span>{threadReplyLabel(thread)}</span>
+            <span>·</span>
+            <span>{thread.anchor.kind === "document" ? "document" : "anchored"}</span>
+            {isAnchored && anchorLine ? (
+              <>
+                <span>·</span>
+                <span
+                  className="thread-jump-link"
+                  role="link"
+                  onClick={(e) => { e.stopPropagation(); onJumpToThread(thread.id); }}
+                >
+                  Jump to line {anchorLine} →
+                </span>
+              </>
+            ) : null}
+          </div>
+        </div>
+      </button>
+    );
+  };
+
   return (
     <div className="ctx-body">
       <div className="row between ctx-head">
         <span className="label">Threads on this doc</span>
       </div>
       <div className="tlist">
-        {threads.map((thread) => (
-          <button
-            key={thread.id}
-            className={`titem${thread.id === selectedThreadId ? " selected" : ""}${thread.status === "resolved" ? " resolved" : ""}`}
-            onClick={() => onSelectThread(thread.id)}
-          >
-            <Icon name="thread" />
-            <div className="col gap-4 min-0">
-              <div className="between gap-8">
-                <span className="chip code sm truncate">{thread.anchor.excerpt || thread.title}</span>
-                <span className="tiny muted">{shortTime(thread.updatedAt)}</span>
-              </div>
-              <div className="row gap-6 min-0">
-                <div className={`avi sm ${thread.createdByType === "agent" ? "agent" : "you"}`}>{initials(thread.createdByHandle || thread.createdByName || "You")}</div>
-                <span className="small truncate">
-                  <b>{thread.createdByHandle ? `@${thread.createdByHandle}` : thread.createdByName || "Someone"}</b>{" "}
-                  {thread.messages[0]?.body || thread.title}
-                </span>
-              </div>
-              <div className="row gap-4 tiny muted">
-                <span className={`thread-badge ${thread.status === "resolved" ? "resolved" : "open"}`}>
-                  <span className="thread-badge-dot" />
-                  {thread.status === "resolved" ? "Resolved" : "Open"}
-                </span>
-                <span>·</span>
-                <span>{threadReplyLabel(thread)}</span>
-                <span>·</span>
-                <span>{thread.anchor.kind === "document" ? "document" : "anchored"}</span>
-              </div>
-            </div>
-          </button>
-        ))}
+        {openThreads.map(renderThreadCard)}
       </div>
+      {resolvedThreads.length > 0 ? (
+        <div className="thread-fold">
+          <button className="thread-fold-header" type="button" onClick={toggleResolvedFold} aria-expanded={!resolvedFolded}>
+            <span className="thread-badge resolved"><span className="thread-badge-dot" /></span>
+            <span>Resolved · {resolvedThreads.length}</span>
+            <span className={`thread-fold-chevron${resolvedFolded ? "" : " expanded"}`}>▾</span>
+          </button>
+          {!resolvedFolded ? (
+            <div className="tlist">
+              {resolvedThreads.map(renderThreadCard)}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
