@@ -296,6 +296,31 @@ describe("WorkspaceApp people rail", () => {
   });
 });
 
+describe("WorkspaceApp agent status rail", () => {
+  it("renders left-rail agent status as readable copy, not only a colored dot", () => {
+    render(
+      <WorkspaceApp
+        api={{ updateLastAccessed: vi.fn().mockResolvedValue({}) } as never}
+        token="token"
+        workspaceId="ws"
+        workspaceSlug="workspace"
+        view={{ kind: "home" }}
+        account={{ id: "account_1", email: "you@example.com", displayName: "You" }}
+        workspaces={[{ id: "ws", slug: "workspace", name: "Workspace" }]}
+        onAccess={vi.fn()}
+        onWorkspaceChange={vi.fn()}
+        onSignOut={vi.fn()}
+      />,
+    );
+
+    const agentButton = screen.getByRole("button", { name: "Open @codex. Status: Queued" });
+    expect(within(agentButton).getByText("@codex")).toBeTruthy();
+    const status = within(agentButton).getByLabelText("Status: Queued");
+    expect(status.textContent).toContain("Queued");
+    expect(status.getAttribute("title")).toBe("Queued");
+  });
+});
+
 describe("WorkspaceApp coming-soon controls", () => {
   it("shows the sidebar search as a non-actionable Coming soon affordance", () => {
     render(
@@ -467,7 +492,7 @@ describe("DaemonDetailModal live status", () => {
     const nowMs = Date.now();
     // Same-id states derived from the fixtures: justSeen (online) then dead (disconnected).
     const online = withReceipt({ ...daemonFixtures.justSeen, id: "d1" }, nowMs);
-    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], onClose: vi.fn(), onChanged: vi.fn() };
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
     const { container, rerender } = render(<DaemonDetailModal {...props} daemons={[online]} />);
     const statusChip = () => container.querySelector(".deploy-block .chip.sm")?.textContent ?? "";
 
@@ -483,7 +508,7 @@ describe("DaemonDetailModal live status", () => {
     const onClose = vi.fn();
     // The daemon.deleted reducer upserts the daemon with status "deleted" — it stays in the array.
     const live = withReceipt({ ...daemonFixtures.justSeen, id: "d1" }, Date.now());
-    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], onChanged: vi.fn() };
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onChanged: vi.fn() };
     const { rerender } = render(<DaemonDetailModal {...props} daemons={[live]} onClose={onClose} />);
     expect(onClose).not.toHaveBeenCalled();
 
@@ -495,7 +520,7 @@ describe("DaemonDetailModal live status", () => {
   it("closes when the deleted daemon is removed from the array (snapshot reload path)", () => {
     const onClose = vi.fn();
     const live = withReceipt({ ...daemonFixtures.justSeen, id: "d1" }, Date.now());
-    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], onChanged: vi.fn() };
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onChanged: vi.fn() };
     const { rerender } = render(<DaemonDetailModal {...props} daemons={[live]} onClose={onClose} />);
     expect(onClose).not.toHaveBeenCalled();
 
@@ -505,8 +530,8 @@ describe("DaemonDetailModal live status", () => {
 });
 
 describe("AgentDetailModal live status", () => {
-  // Online daemon (from the canonical fixture) so visibleAgentStatus falls through to agentStatus
-  // rather than forcing "disconnected".
+  // Online daemon (from the canonical fixture) so visibleAgentStatus uses the agent/run ladder
+  // rather than forcing "Waiting for local environment".
   const daemon: Daemon = { ...daemonFixtures.justSeen, id: "d1" };
   const baseAgent: Agent = {
     id: "a1", daemonId: "d1", handle: "codex", name: "Codex", role: "Review", kind: "codex",
@@ -516,26 +541,26 @@ describe("AgentDetailModal live status", () => {
     id: "run1", agentId: "a1", agentHandle: "codex", agentName: "Codex", agentKind: "codex",
     workspaceRoot: "", workingDirectory: "", prompt: "", status, desiredStatus: "running", updatedAt: "now",
   });
-  const props = { api: {} as never, workspaceId: "ws", agentId: "a1", daemons: [daemon], onChanged: vi.fn() };
+  const props = { api: {} as never, workspaceId: "ws", agentId: "a1", daemons: [daemon], agentEvents: [], onChanged: vi.fn() };
   const modalStatus = (container: HTMLElement) => (container.querySelector(".modal-identity .col span")?.textContent ?? "").trim();
 
   it("reflects a live agent.updated status change on the open modal instead of a click-time snapshot", () => {
-    // No active run, so the agent's own status field drives visibleAgentStatus.
+    // No active run, so the online daemon falls through to the Queued vocabulary row.
     const { container, rerender } = render(<AgentDetailModal {...props} agents={[baseAgent]} runs={[]} onClose={vi.fn()} />);
-    expect(modalStatus(container)).toContain("idle");
+    expect(modalStatus(container)).toContain("Queued");
 
-    // An agent.updated event flips the agent's own status — the open modal must move.
-    rerender(<AgentDetailModal {...props} agents={[{ ...baseAgent, status: "disconnected" }]} runs={[]} onClose={vi.fn()} />);
-    expect(modalStatus(container)).toContain("disconnected");
+    // An agent.updated event flips the agent's own status to working — the open modal must move.
+    rerender(<AgentDetailModal {...props} agents={[{ ...baseAgent, status: "working", currentActivity: "checking tests" }]} runs={[]} onClose={vi.fn()} />);
+    expect(modalStatus(container)).toContain("Running · checking tests");
   });
 
   it("reflects a live agentRuns change — a run finishing while the modal is open moves the status", () => {
     const { container, rerender } = render(<AgentDetailModal {...props} agents={[baseAgent]} runs={[run("running")]} onClose={vi.fn()} />);
-    expect(modalStatus(container)).toContain("working");
+    expect(modalStatus(container)).toContain("Running · Working");
 
-    // The run completes in live state (no agent.updated). Status derives from runs too, so it moves to idle.
+    // The run completes in live state (no agent.updated). Status derives from runs too, so it moves to Queued.
     rerender(<AgentDetailModal {...props} agents={[baseAgent]} runs={[run("completed")]} onClose={vi.fn()} />);
-    expect(modalStatus(container)).toContain("idle");
+    expect(modalStatus(container)).toContain("Queued");
   });
 
   it("closes when the agent is removed from the array (the reducer's agent.deleted shape)", () => {

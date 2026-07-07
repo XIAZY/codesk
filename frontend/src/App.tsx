@@ -4,7 +4,7 @@ import { ApiClient, ApiError, apiBase, daemonStaticBase, publicOrigin } from "./
 import { DocumentSurface, type LiveThread, type SurfaceSelection } from "./DocumentSurface";
 import type { MarkdownPreviewCommandName } from "./markdownLivePreview";
 import {
-  agentStatus,
+  agentDisplayStatus,
   agentsByDaemon,
   buildDaemonInstallCommand,
   buildDaemonReinstallCommand,
@@ -35,7 +35,7 @@ import { navigate, useRoute } from "./useRoute";
 import { useRootNamespace } from "./useRootNamespace";
 import { useDocumentSync } from "./useDocument";
 import { useWorkspace } from "./useWorkspace";
-import type { Account, ActivityEvent, Agent, Daemon, DocumentItem, ThreadItem, WorkspaceInvitePreview, WorkspaceSummary } from "./types";
+import type { Account, ActivityEvent, Agent, AgentEvent, Daemon, DocumentItem, ThreadItem, WorkspaceInvitePreview, WorkspaceSummary } from "./types";
 import { resolveRuntimeTiles, selectableRuntimeKinds, type RuntimeTile } from "./runtimes";
 import "./styles.css";
 
@@ -267,13 +267,14 @@ function shortTime(value?: string) {
   return `${Math.round(seconds / 86400)}d`;
 }
 
-function visibleAgentStatus(agent: Agent, runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"], daemons: Daemon[]) {
-  const daemon = daemons.find((item) => item.id === agent.daemonId);
-  const owningDaemonStatus = daemon ? daemonStatus(daemon) : "disconnected";
-  if (owningDaemonStatus === "disconnected" || owningDaemonStatus === "deleted") {
-    return "disconnected";
-  }
-  return agentStatus(agent, runs);
+function visibleAgentStatus(
+  agent: Agent,
+  runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"],
+  daemons: Daemon[],
+  events: AgentEvent[],
+  nowMs: number,
+) {
+  return agentDisplayStatus(agent, runs, daemons, events, nowMs);
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -1268,6 +1269,7 @@ export function WorkspaceApp({
   const [freshDocumentId, setFreshDocumentId] = useState("");
   const [titleDraft, setTitleDraft] = useState("");
   const lastAccessUpdateKeyRef = useRef("");
+  const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
 
   const centerView = view.kind === "daemons" ? "daemons" : view.kind === "agents" ? "agents" : "document";
   const requestedDocumentId = view.kind === "document" ? view.documentId : "";
@@ -1534,20 +1536,27 @@ export function WorkspaceApp({
           </div>
           <div className="col gap-6 agent-summary-list">
             {workspace.agents.slice(0, 5).map((agent) => {
-              const status = visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons);
+              const status = visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons, workspace.agentEvents, now);
               return (
                 <button
                   key={agent.id}
                   className="agent-mini row gap-8"
                   type="button"
+                  title={`@${agent.handle}: ${status.title}`}
+                  aria-label={`Open @${agent.handle}. Status: ${status.label}`}
                   onClick={() => {
                     setSelectedAgentId(agent.id);
                     setModal("agent-detail");
                   }}
                 >
                   <div className="avi sm agent">{initials(agent.handle)}</div>
-                  <span className="small truncate">@{agent.handle}</span>
-                  <StatusDot tone={status} />
+                  <span className="agent-mini-copy">
+                    <span className="small truncate">@{agent.handle}</span>
+                    <span className="agent-mini-status" title={status.title} aria-label={`Status: ${status.label}`}>
+                      <StatusDot tone={status.tone} />
+                      <span className="agent-mini-status-label">{status.label}</span>
+                    </span>
+                  </span>
                 </button>
               );
             })}
@@ -1741,8 +1750,8 @@ export function WorkspaceApp({
       {modal === "daemon" ? <CreateDaemonModal api={api} workspaceId={workspaceId} daemons={workspace.daemons} onClose={() => setModal(null)} onDone={() => void reload()} /> : null}
       {modal === "agent" ? <CreateAgentModal api={api} workspaceId={workspaceId} daemons={workspace.daemons} onClose={() => setModal(null)} onDone={() => { setModal(null); void reload(); }} /> : null}
       {modal === "share" ? <ShareWorkspaceModal api={api} workspaceId={workspaceId} onClose={() => setModal(null)} /> : null}
-      {modal === "agent-detail" && selectedAgentId ? <AgentDetailModal api={api} workspaceId={workspaceId} agentId={selectedAgentId} agents={workspace.agents} daemons={workspace.daemons} runs={workspace.agentRuns} onClose={() => setModal(null)} onChanged={() => void reload()} /> : null}
-      {modal === "daemon-detail" && selectedDaemonId ? <DaemonDetailModal api={api} workspaceId={workspaceId} daemonId={selectedDaemonId} daemons={workspace.daemons} agents={workspace.agents} runs={workspace.agentRuns} onClose={() => setModal(null)} onChanged={() => { setModal(null); void reload(); }} /> : null}
+      {modal === "agent-detail" && selectedAgentId ? <AgentDetailModal api={api} workspaceId={workspaceId} agentId={selectedAgentId} agents={workspace.agents} daemons={workspace.daemons} runs={workspace.agentRuns} agentEvents={workspace.agentEvents} onClose={() => setModal(null)} onChanged={() => void reload()} /> : null}
+      {modal === "daemon-detail" && selectedDaemonId ? <DaemonDetailModal api={api} workspaceId={workspaceId} daemonId={selectedDaemonId} daemons={workspace.daemons} agents={workspace.agents} runs={workspace.agentRuns} agentEvents={workspace.agentEvents} onClose={() => setModal(null)} onChanged={() => { setModal(null); void reload(); }} /> : null}
     </main>
   );
 }
@@ -2074,7 +2083,8 @@ function AgentsManagement({
   onNew: () => void;
   onAgent: (agent: Agent) => void;
 }) {
-  const running = workspace.agents.filter((agent) => visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons) === "working").length;
+  const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
+  const running = workspace.agents.filter((agent) => visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons, workspace.agentEvents, now).key === "running").length;
   const daemonById = new Map(workspace.daemons.map((daemon) => [daemon.id, daemon]));
 
   return (
@@ -2098,7 +2108,7 @@ function AgentsManagement({
 
         {groupedAgents.map((group) => {
           const daemon = daemonById.get(group.daemonId);
-          const daemonTone = daemon ? daemonStatus(daemon) : "disconnected";
+          const daemonTone = daemon ? daemonLiveStatus(daemon, now) : "disconnected";
           return (
             <section key={group.daemonId}>
               <div className="roster-group-head">
@@ -2110,10 +2120,11 @@ function AgentsManagement({
               </div>
               <div className="roster-grid">
                 {group.agents.map((agent) => {
-                  const status = visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons);
+                  const status = visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons, workspace.agentEvents, now);
                   const inboxCount = workspace.agentEvents.filter((event) => event.agentId === agent.id && event.box === "for_me").length;
+                  const activityCopy = status.key === "failed" && status.reason ? status.reason : agent.currentActivity || agent.currentTask || "Waiting for workspace notifications.";
                   return (
-                    <button className="agent-roster-card" key={agent.id} onClick={() => onAgent(agent)}>
+                    <button className="agent-roster-card" key={agent.id} onClick={() => onAgent(agent)} aria-label={`Open @${agent.handle}. Status: ${status.label}`}>
                       <div className="between gap-8">
                         <div className="row gap-8 min-0">
                           <div className="avi agent">{initials(agent.handle)}</div>
@@ -2122,9 +2133,9 @@ function AgentsManagement({
                             <span className="tiny muted truncate">{agent.role}</span>
                           </div>
                         </div>
-                        <span className={`chip sm ${status}`}><StatusDot tone={status} />{status}</span>
+                        <span className={`chip sm ${status.tone}`} title={status.title}><StatusDot tone={status.tone} />{status.label}</span>
                       </div>
-                      <div className="small muted roster-activity">{agent.currentActivity || agent.currentTask || "Waiting for workspace notifications."}</div>
+                      <div className="small muted roster-activity">{activityCopy}</div>
                       <div className="row between gap-8">
                         <div className="row gap-4 tiny muted">
                           <Icon name="thread" />
@@ -3089,7 +3100,8 @@ function ClockIcon() {
   return <svg className="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 8v4l3 2" /></svg>;
 }
 
-export function AgentDetailModal({ api, workspaceId, agentId, agents, daemons, runs, onClose, onChanged }: { api: ApiClient; workspaceId: string; agentId: string; agents: Agent[]; daemons: Daemon[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; onClose: () => void; onChanged: () => void }) {
+export function AgentDetailModal({ api, workspaceId, agentId, agents, daemons, runs, agentEvents, onClose, onChanged }: { api: ApiClient; workspaceId: string; agentId: string; agents: Agent[]; daemons: Daemon[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; agentEvents: AgentEvent[]; onClose: () => void; onChanged: () => void }) {
+  const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
   const [prompt, setPrompt] = useState("Review the current workspace and respond if you have useful feedback.");
   // Derive the live agent from workspace state every render, so agent.updated / agent.run.updated
   // events reach the open modal instead of a frozen snapshot captured at click time. A deleted agent
@@ -3104,17 +3116,18 @@ export function AgentDetailModal({ api, workspaceId, agentId, agents, daemons, r
     return null;
   }
   const daemon = daemons.find((item) => item.id === agent.daemonId);
-  const status = visibleAgentStatus(agent, runs, daemons);
+  const status = visibleAgentStatus(agent, runs, daemons, agentEvents, now);
   return (
     <Modal title={`@${agent.handle}`} onClose={onClose}>
       <div className="form-stack">
         <div className="modal-identity">
           <div className="avi agent">{initials(agent.handle)}</div>
           <div className="col gap-2">
-            <span><StatusDot tone={status} /> {status}</span>
+            <span className={`chip sm ${status.tone}`} title={status.title}><StatusDot tone={status.tone} /> {status.label}</span>
             <span className="small muted">Daemon: {daemon?.name ?? agent.daemonId}</span>
           </div>
         </div>
+        {status.key === "failed" && status.reason ? <p className="error-text">Failure reason: {status.reason}</p> : null}
         <p className="small"><strong>Role:</strong> {agent.role}</p>
         <label className="field"><span className="lab">One-off instruction</span><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} /></label>
         <button className="btn accent full" onClick={async () => { await api.startAgent(workspaceId, agent.id, prompt); onChanged(); }}>Start run</button>
@@ -3124,7 +3137,7 @@ export function AgentDetailModal({ api, workspaceId, agentId, agents, daemons, r
   );
 }
 
-export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents, runs, onClose, onChanged }: { api: ApiClient; workspaceId: string; daemonId: string; daemons: Daemon[]; agents: Agent[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; onClose: () => void; onChanged: () => void }) {
+export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents, runs, agentEvents, onClose, onChanged }: { api: ApiClient; workspaceId: string; daemonId: string; daemons: Daemon[]; agents: Agent[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; agentEvents: AgentEvent[]; onClose: () => void; onChanged: () => void }) {
   const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
   const [reinstallOpen, setReinstallOpen] = useState(false);
   const [reinstallToken, setReinstallToken] = useState("");
@@ -3181,7 +3194,10 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
             <p className="tiny muted mono">ID: {daemon.id}</p>
             <p className="small muted">Last seen: {daemon.lastSeenAt ? new Date(daemon.lastSeenAt).toLocaleString() : "Never"}</p>
             <p className="small muted">Agents: {daemonAgents.length}</p>
-            {daemonAgents.map((agent) => <p className="small" key={agent.id}>@{agent.handle} · {visibleAgentStatus(agent, runs, [daemon])}</p>)}
+            {daemonAgents.map((agent) => {
+              const agentStatus = visibleAgentStatus(agent, runs, [daemon], agentEvents, now);
+              return <p className="small" key={agent.id}>@{agent.handle} · {agentStatus.label}</p>;
+            })}
           </div>
           <button className="btn accent full" onClick={() => void prepareReinstall()} disabled={reinstallLoading}>Reinstall daemon</button>
           <ShellScriptBlock title="Uninstall daemon" badge="Global" command={uninstallCommand}>
