@@ -31,10 +31,15 @@ Seeded 2026-07-07 from the Tests-improvements scorecard (Tom/Bill/Deniz), alongs
 ### Daemon
 - **Daemon lifecycle & install** — breaks → 212 daemon boundary tests + installer lifecycle (shell).
 
+### Agent lifecycle (daemon-side, in-process)
+- **Session state machine** — idle/working/disconnected transitions, resume-falls-back-to-fresh, steer-vs-queue on a busy session, stale-process events ignored, idle-notification-once — breaks → the fake-driver suite in `daemon/internal/syncer/agent_sessions_test.go` (`TestAgentSessionResumeFailureStartsNewSession`, the `BusyForMe`/`BusyGeneral` steer/queue tests, the missing/unregistered-runtime disconnect tests, `…IgnoresEventsFromStaleRuntimeProcess`, `…IdleNotificationStartsOncePerInboxSignature`).
+- **A failed turn-start leaves no stale active turn** — breaks → `TestClaudeStartTurnWriteErrorLeavesNoStaleActiveTurn` (`daemon/internal/syncer/claude_driver_test.go`): a StartTurn whose write fails must clear the turn it optimistically armed, or a later steer targets a phantom turn.
+
 ## Gap — not yet pinned (business-weight order)
-1. **The agent collaboration loop** (mention → claim → work → reply; session state machine) — the product's spine, zero end-to-end pins today; its failure class already cost hotfix #70. → Tier E (in-process half into the required gate, compose half nightly).
-2. **User-facing browser flows** (login / switch / edit / thread-reply) — task #5, spec final, unbuilt. Yesterday's white-screen shipped because nothing walks these.
-3. **WS event envelopes** — 13 types; only the two workspace ones (`workspace.updated` / `workspace.deleted`) scheduled so far.
+1. **The agent collaboration loop — wire half** (claim/reclaim contention under concurrent claimers, tool-gateway per-session token auth, one full notification-turn round-trip) — the session state machine is now pinned in-process (above); this remaining half needs the real daemon↔backend protocol → compose + fake-runtime, nightly lane.
+2. **A dropped turn-end must not wedge a session** — the daemon's own event queue can drop a lifecycle event on overflow, stranding a session in `working`. → task #12 (guaranteed lifecycle-event delivery + a full-queue-can't-lose-a-turn-end regression test), in progress. _A wedge from the runtime process itself going silent (external code) has no detection today — revisit with a production incident as the evidence, per the ruling that dropped the observe-only watchdog._
+3. **User-facing browser flows** (login / switch / edit / thread-reply) — task #5, spec final, unbuilt. Yesterday's white-screen shipped because nothing walks these.
+4. **WS event envelopes** — 13 types; only the two workspace ones (`workspace.updated` / `workspace.deleted`) scheduled so far.
 
 _What a pin can never carry is the **why** — that lives in the regression catalog and the decision
 records. The register says what breaks and what notices; the catalog says what we chose and why._

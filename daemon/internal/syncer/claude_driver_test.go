@@ -766,3 +766,20 @@ func envLookup(env []string, key string) (string, bool) {
 	}
 	return "", false
 }
+
+// TestClaudeStartTurnWriteErrorLeavesNoStaleActiveTurn pins the cleanup on the StartTurn write-error
+// path: StartTurn optimistically arms the turn before writing (so a fast result can't observe an empty
+// active turn), so if the write fails it must clear that turn — otherwise a later steer targets a
+// phantom turn that will never complete.
+func TestClaudeStartTurnWriteErrorLeavesNoStaleActiveTurn(t *testing.T) {
+	process := newTestClaudeProcess(t, writeFakeClaude(t))
+
+	// No session spawned yet, so the StartTurn write fails after arming the turn.
+	if _, err := process.WriteStdin(context.Background(), RuntimeInput{Kind: RuntimeInputStartTurn, Text: "hi"}); err == nil {
+		t.Fatal("expected StartTurn without a spawned session to fail on write")
+	}
+	// If the failed start left the turn armed, this steer would be accepted against a phantom turn.
+	if _, err := process.WriteStdin(context.Background(), RuntimeInput{Kind: RuntimeInputSteerTurn, Text: "steer"}); err == nil || !strings.Contains(err.Error(), "no active turn") {
+		t.Fatalf("a failed StartTurn must leave no active turn, got err=%v", err)
+	}
+}
