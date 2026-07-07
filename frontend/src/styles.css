@@ -2042,65 +2042,6 @@ button.inbox-row:hover {
   flex: 0 0 auto;
 }
 
-.activity-peek {
-  border-bottom: 1px solid var(--line-2);
-  padding: 6px 16px;
-}
-
-.activity-peek-header {
-  all: unset;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  width: 100%;
-  cursor: pointer;
-  padding: 2px 0;
-}
-
-.activity-peek-header .icon {
-  width: 14px;
-  height: 14px;
-  color: var(--ink-3);
-  transition: transform 0.15s ease;
-}
-
-.activity-peek.expanded .activity-peek-header .icon {
-  transform: rotate(90deg);
-}
-
-.activity-peek-body {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 4px 0 2px;
-}
-
-.activity-peek-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 0;
-  min-width: 0;
-}
-
-.activity-peek-row .activity-dot {
-  width: 6px;
-  height: 6px;
-  flex: 0 0 auto;
-}
-
-.activity-peek-row .icon {
-  width: 14px;
-  height: 14px;
-  color: var(--ink-3);
-  flex: 0 0 auto;
-}
-
-.activity-peek-row .tiny.muted {
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-
 .btn-link {
   all: unset;
   cursor: pointer;
