@@ -3084,6 +3084,43 @@ func updateThreadStatusPostgres(db *sql.DB, workspaceID string, threadID string,
 	return thread, priorStatus != status, nil
 }
 
+func updateThreadAnchorPostgres(db *sql.DB, workspaceID string, threadID string, req UpdateThreadAnchorRequest) (*Thread, bool, error) {
+	existing, err := getThreadPostgres(db, workspaceID, threadID)
+	if err != nil {
+		return nil, false, err
+	}
+	// Omitted excerpt preserves the stored one; a provided value (including "") replaces it.
+	excerpt := existing.Anchor.Excerpt
+	if req.Excerpt != nil {
+		excerpt = *req.Excerpt
+	}
+	anchor, err := buildThreadAnchor(req.Kind, req.RelativeStart, req.RelativeEnd, excerpt)
+	if err != nil {
+		return nil, false, err
+	}
+	if anchor == existing.Anchor {
+		// Idempotent no-op: identical anchor, no write and no broadcast.
+		return existing, false, nil
+	}
+	if _, err := db.Exec(
+		`UPDATE threads
+		    SET anchor_kind = $1,
+		        anchor_relative_start = $2,
+		        anchor_relative_end = $3,
+		        anchor_excerpt = $4,
+		        updated_at = $5
+		  WHERE workspace_id = $6::uuid AND id = $7::uuid`,
+		anchor.Kind, anchor.RelativeStart, anchor.RelativeEnd, anchor.Excerpt, time.Now().UTC(), workspaceID, threadID,
+	); err != nil {
+		return nil, false, err
+	}
+	thread, err := getThreadPostgres(db, workspaceID, threadID)
+	if err != nil {
+		return nil, false, err
+	}
+	return thread, true, nil
+}
+
 func findThreadByClientOperationPostgres(db *sql.DB, workspaceID string, clientOperationID string, createdByID string, createdByType string) (*Thread, error) {
 	var threadID string
 	err := db.QueryRow(
