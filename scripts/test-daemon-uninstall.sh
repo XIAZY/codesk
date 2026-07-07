@@ -2,11 +2,12 @@
 set -eu
 
 root_dir="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
+. "$root_dir/scripts/lib/testtmp.sh"
 workspace_id="ws:test/value"
 daemon_name="$(printf '%s' "$workspace_id" | sed 's/[^A-Za-z0-9_.-]/-/g')"
 second_workspace_id="ws:second/value"
 second_daemon_name="$(printf '%s' "$second_workspace_id" | sed 's/[^A-Za-z0-9_.-]/-/g')"
-tmp_home="$(mktemp -d "${TMPDIR:-/tmp}/notty-uninstall-test.XXXXXX")"
+tmp_home="$(notty_test_mktemp notty-uninstall-test)"
 fake_bin="$tmp_home/fake-bin"
 install_dir="$tmp_home/.notty/bin"
 data_dir="$tmp_home/.notty"
