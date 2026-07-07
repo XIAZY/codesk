@@ -688,6 +688,7 @@ svg.i.sm {
 .shell.sidebar-collapsed .sb .agent-summary .label,
 .shell.sidebar-collapsed .sb .agent-summary > .row > .btn,
 .shell.sidebar-collapsed .sb .agent-mini .small,
+.shell.sidebar-collapsed .sb .agent-mini-status-label,
 .shell.sidebar-collapsed .sb .manage-entry span,
 .shell.sidebar-collapsed .sb .account-footer .small,
 .shell.sidebar-collapsed .sb .account-footer .btn {
@@ -705,6 +706,13 @@ svg.i.sm {
 }
 .shell.sidebar-collapsed .sb .workspace-switcher .row {
   gap: 0;
+}
+/* B wraps the handle + status label in .agent-mini-copy (flex:1). In the collapsed rail its
+   text is hidden and the status dot rides as a corner badge on the avatar, so the copy must
+   not reserve width — otherwise it pushes the avatar off-center in the 60px track (B×E seam). */
+.shell.sidebar-collapsed .sb .agent-mini-copy {
+  flex: 0;
+  min-width: 0;
 }
 /* Collapsed agent rows keep the status dot as a corner badge on the identity
    avatar: identity color (who) + status color (what) + a11y all survive the
