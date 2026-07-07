@@ -307,6 +307,15 @@ svg.i.sm {
   box-shadow: 0 0 0 3px rgba(227, 161, 91, 0.18);
 }
 
+.field input:disabled,
+.field textarea:disabled,
+.field select:disabled {
+  background: var(--paper-2);
+  color: var(--ink-4);
+  border-color: var(--border);
+  cursor: not-allowed;
+}
+
 .field {
   display: grid;
   gap: 6px;
