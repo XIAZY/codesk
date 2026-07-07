@@ -5,13 +5,13 @@
 #   build (Go + libyrs cgo)            -> backend: "Build all Go"
 #   backend suite on LIVE Postgres     -> backend: "Backend + full Go suite on live Postgres" (+ skip-guard)
 #   regression tag (deterministic)     -> backend: "Regression suite (deterministic slice)"
-#   regression tag (compose E2E)       -> nightly + manual: .github/workflows/regression-e2e.yml (non-blocking)
+#   regression tag (compose E2E)       -> nightly + manual: .github/workflows/regression-e2e.yml
+#                                           until the CI-scaled lane has 3 consecutive green scheduled runs
 #   installer tests                    -> backend: "Installer tests"
 #   gofmt / vet                        -> backend: "gofmt", "go vet"
 #   frontend typecheck + vitest        -> frontend: "Typecheck + vitest"
 #   frontend production build          -> frontend: "Production build"
 #   git diff --check                   -> diff-check
-#   frontend auto-deploy on main       -> deploy-frontend (push to main only)
 #
 # Two meta-properties (Tom's bar):
 #   * Fail loud on infrastructure absence — a skipped live-DB suite reporting green is the exact
@@ -20,11 +20,6 @@
 #   * Base-freshness — `on: pull_request` checks out the PR *merge commit* (refs/pull/N/merge), so
 #     every gate runs against the merge result, not the stale branch head. Stale-base merges bit this
 #     project twice; this makes them a red check.
-#
-# Deploy secrets required for the deploy-frontend job (configured in repo settings by an admin):
-#   NOTTY_DEPLOY_ENV  — the contents of deploy/env/prod.deploy.env (origins, R2 bucket names, etc.)
-#   R2 credentials    — CLOUDFLARE_API_TOKEN (or NOTTY_CLOUDFLARE_TOKEN), or R2_ENDPOINT_URL + AWS keys
-# Until they exist the deploy job fails loudly (never silently no-ops).
 
 name: CI
 
@@ -35,8 +30,7 @@ on:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  # Cancel superseded PR runs, but never cancel a push-to-main run — that could abort the deploy
-  # job mid-R2-upload and leave the live site partially updated.
+  # Cancel superseded PR runs; push-to-main runs are left alone so main history gets a complete gate.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -142,9 +136,10 @@ jobs:
       - name: Regression suite (deterministic slice)
         # Per-PR runs only the deterministic regression test. EXCLUDED: the docker-compose fs↔DB↔daemon
         # sync E2E in sync_regression_test.go — its convergence deadlines race under a loaded CI runner
-        # (a flake, not a code bug). That suite runs in the non-blocking nightly .github/workflows/
-        # regression-e2e.yml, and backend-touching PRs still get the reviewer-run full tag by hand,
-        # until Deniz's CI-deadline hardening lands — at which point it returns to this required gate.
+        # (a flake, not a code bug). That suite runs with NOTTY_REGRESSION_DEADLINE_SCALE in the
+        # nightly/manual .github/workflows/regression-e2e.yml lane while proving 3 consecutive green
+        # scheduled runs. Backend-touching PRs still get the reviewer-run full tag by hand until that
+        # evidence exists, then the compose E2E returns to this required gate.
         run: go test -tags=regression -run '^TestRegressionCreateDocumentDoesNotUseLegacyNamespacePayload$' ./test/regression
       - name: Installer tests
         run: |
@@ -191,37 +186,3 @@ jobs:
           fi
           echo "checking diff $base..HEAD"
           git diff --check "$base" HEAD
-
-  deploy-frontend:
-    name: deploy frontend (main only)
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [backend, frontend, diff-check]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: Guard — deploy env configured (fail loud, never a silent no-deploy)
-        env:
-          NOTTY_DEPLOY_ENV: ${{ secrets.NOTTY_DEPLOY_ENV }}
-        run: |
-          if [ -z "$NOTTY_DEPLOY_ENV" ]; then
-            echo "::error::secrets.NOTTY_DEPLOY_ENV is not configured — frontend cannot auto-deploy. Add the deploy env + R2 credentials in repo settings."
-            exit 1
-          fi
-      - name: Write deploy env
-        env:
-          NOTTY_DEPLOY_ENV: ${{ secrets.NOTTY_DEPLOY_ENV }}
-        run: |
-          printf '%s\n' "$NOTTY_DEPLOY_ENV" > "$RUNNER_TEMP/prod.deploy.env"
-      - name: Deploy frontend to R2
-        env:
-          NOTTY_DEPLOY_ENV_FILE: ${{ runner.temp }}/prod.deploy.env
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_AWS_SECRET_ACCESS_KEY }}
-        run: make deploy-frontend

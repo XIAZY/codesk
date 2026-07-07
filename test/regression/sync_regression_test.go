@@ -587,7 +587,7 @@ func (s *regressionStack) up(t *testing.T) {
 	t.Helper()
 	s.run(t, "up", "-d", "--build", "postgres", "backend")
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), regressionScaledTimeout(t, 2*time.Minute))
 		defer cancel()
 		cmd := s.command(ctx, "down", "-v", "--remove-orphans")
 		if output, err := cmd.CombinedOutput(); err != nil {
@@ -743,7 +743,7 @@ func (s *regressionStack) getJSON(t *testing.T, path string, bearer string, want
 
 func (s *regressionStack) waitForBackend(t *testing.T, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(regressionScaledTimeout(t, timeout))
 	var lastErr error
 	for time.Now().Before(deadline) {
 		url := s.backendURL(t) + "/healthz"
@@ -787,7 +787,7 @@ func (s *regressionStack) runOutput(t *testing.T, args ...string) string {
 
 func (s *regressionStack) runOutputWithEnv(t *testing.T, env map[string]string, args ...string) string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), regressionScaledTimeout(t, 5*time.Minute))
 	defer cancel()
 	cmd := s.command(ctx, args...)
 	if len(env) > 0 {
@@ -901,7 +901,7 @@ func (s *regressionStack) daemonLogs(t *testing.T) string {
 
 func (s *regressionStack) waitForLocalContent(t *testing.T, path string, want string, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(regressionScaledTimeout(t, timeout))
 	var last string
 	for time.Now().Before(deadline) {
 		last = s.localFileContent(t, path)
@@ -915,7 +915,7 @@ func (s *regressionStack) waitForLocalContent(t *testing.T, path string, want st
 
 func (s *regressionStack) waitForLocalContentPredicate(t *testing.T, path string, timeout time.Duration, accept func(string) bool) string {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(regressionScaledTimeout(t, timeout))
 	var last string
 	for time.Now().Before(deadline) {
 		last = s.localFileContent(t, path)
@@ -930,7 +930,7 @@ func (s *regressionStack) waitForLocalContentPredicate(t *testing.T, path string
 
 func (s *regressionStack) assertLocalMissing(t *testing.T, path string, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(regressionScaledTimeout(t, timeout))
 	var last string
 	for time.Now().Before(deadline) {
 		last = s.execService(t, "daemon", fmt.Sprintf("cd %s && if [ -e %s ]; then printf exists; else printf missing; fi", shellQuote(s.daemonWorkspaceDir()), shellQuote(path)))
@@ -944,7 +944,7 @@ func (s *regressionStack) assertLocalMissing(t *testing.T, path string, timeout 
 
 func (s *regressionStack) waitForLocalLineCountAtLeast(t *testing.T, path string, lines int, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(regressionScaledTimeout(t, timeout))
 	var last string
 	for time.Now().Before(deadline) {
 		output := strings.TrimSpace(s.execService(t, "daemon", fmt.Sprintf("if [ -d %s ]; then cd %s && if [ -f %s ]; then wc -l < %s; fi; fi", shellQuote(s.daemonWorkspaceDir()), shellQuote(s.daemonWorkspaceDir()), shellQuote(path), shellQuote(path))))
@@ -959,7 +959,7 @@ func (s *regressionStack) waitForLocalLineCountAtLeast(t *testing.T, path string
 
 func (s *regressionStack) waitForBackendSequence(t *testing.T, path string, lines int, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(regressionScaledTimeout(t, timeout))
 	var lastErr error
 	for time.Now().Before(deadline) {
 		content, err := s.backendDocumentContentByPath(path)
@@ -979,7 +979,7 @@ func (s *regressionStack) waitForBackendSequence(t *testing.T, path string, line
 
 func (s *regressionStack) waitForBackendContent(t *testing.T, documentID string, want string, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(regressionScaledTimeout(t, timeout))
 	var last string
 	for time.Now().Before(deadline) {
 		content, err := s.backendDocumentContent(documentID)
@@ -996,7 +996,7 @@ func (s *regressionStack) waitForBackendContent(t *testing.T, documentID string,
 
 func (s *regressionStack) waitForBackendContentByPath(t *testing.T, path string, want string, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(regressionScaledTimeout(t, timeout))
 	var last string
 	for time.Now().Before(deadline) {
 		content, err := s.backendDocumentContentByPath(path)
@@ -1013,7 +1013,7 @@ func (s *regressionStack) waitForBackendContentByPath(t *testing.T, path string,
 
 func (s *regressionStack) waitForBackendContentPredicate(t *testing.T, documentID string, timeout time.Duration, accept func(string) bool) string {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(regressionScaledTimeout(t, timeout))
 	var last string
 	var lastErr error
 	for time.Now().Before(deadline) {
@@ -1042,7 +1042,7 @@ func (s *regressionStack) assertRootDocumentSynced(t *testing.T, documentID, pat
 func (s *regressionStack) waitForRootEntry(t *testing.T, documentID, path string, deleted bool, timeout time.Duration) {
 	t.Helper()
 	rootID := s.workspaceRootDocumentIDForTest(t)
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(regressionScaledTimeout(t, timeout))
 	var last regressionRootEntry
 	var found bool
 	var lastErr error
@@ -1079,7 +1079,7 @@ func (s *regressionStack) syncFreshWebsocketClientByPath(t *testing.T, path stri
 
 func (s *regressionStack) waitForDocumentPath(t *testing.T, path string, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(regressionScaledTimeout(t, timeout))
 	for time.Now().Before(deadline) {
 		if contains(s.documentPaths(), path) {
 			return
@@ -1091,7 +1091,7 @@ func (s *regressionStack) waitForDocumentPath(t *testing.T, path string, timeout
 
 func (s *regressionStack) waitForDocumentPathGone(t *testing.T, path string, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(regressionScaledTimeout(t, timeout))
 	var paths []string
 	for time.Now().Before(deadline) {
 		paths = s.documentPaths()
@@ -1538,7 +1538,7 @@ func encodeRelativeAnchorForRegression(text *crdt.YText, index int) string {
 
 func waitForSyncUpdate(t *testing.T, conn *websocket.Conn, want []byte) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(regressionScaledTimeout(t, 15*time.Second))
 	if err := conn.SetReadDeadline(deadline); err != nil {
 		t.Fatal(err)
 	}
@@ -1575,7 +1575,7 @@ func waitForSyncUpdate(t *testing.T, conn *websocket.Conn, want []byte) {
 
 func waitForWebsocketContent(t *testing.T, conn *websocket.Conn, doc *crdt.Doc, want string) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(regressionScaledTimeout(t, 15*time.Second))
 	if err := conn.SetReadDeadline(deadline); err != nil {
 		t.Fatal(err)
 	}
