@@ -1361,6 +1361,24 @@ button.inbox-row:hover {
   padding: 0 18px;
 }
 
+.collaborator-avatars {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.collaborator-avatars .avi {
+  margin-left: -6px;
+}
+
+.collaborator-avatars .avi:first-child {
+  margin-left: 0;
+}
+
 .breadcrumb {
   display: flex;
   align-items: center;

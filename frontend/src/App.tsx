@@ -1833,6 +1833,7 @@ export function WorkspaceApp({
             {!connected ? <span className="chip sm warn">workspace offline</span> : null}
           </div>
           <div className="row gap-6">
+            <CollaboratorAvatars people={workspacePeopleList} onClick={() => setRightTab("coworkers")} />
             <button className="btn sm ghost icon" type="button" onClick={() => setModal("rename")} disabled={!activeDocument}>
               <Icon name="more" />
             </button>
@@ -2998,11 +2999,31 @@ function RecentActivityPeek({
   );
 }
 
+function CollaboratorAvatars({ people, onClick }: { people: WorkspacePerson[]; onClick: () => void }) {
+  const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
+  const online = people.filter((p) => personOnline(p, now));
+  if (!online.length) return null;
+  return (
+    <button
+      className="collaborator-avatars"
+      type="button"
+      onClick={onClick}
+      title={`${online.length} online`}
+      aria-label={`${online.length} collaborator${online.length === 1 ? "" : "s"} online — open People`}
+    >
+      {online.slice(0, 5).map((p) => (
+        <div key={p.id} className={`avi sm ${p.kind === "agent" ? "agent" : "you"} online`}>
+          {initials(p.handle || p.name)}
+        </div>
+      ))}
+      {/* +N overflow is a neutral count, NOT ringed — a ring would imply all N are online (Eva). */}
+      {online.length > 5 ? <span className="avi sm you">+{online.length - 5}</span> : null}
+    </button>
+  );
+}
+
 const personRoleTag = { you: "You", agent: "Agent", member: "Member" } as const;
 
-// Everyone in the workspace — humans + agents. Soft avatars, role tag, and a
-// workspace-level online ring driven by real presence that decays on a 12s
-// now-ticker (like daemon liveness) so it never shows a stale "online".
 function PeoplePanel({
   people,
   agents,
