@@ -2023,6 +2023,78 @@ button.inbox-row:hover {
   background: var(--ok);
 }
 
+.titem.orphaned {
+  border-color: var(--accent-100);
+}
+
+.thread-orphan-warning {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-700);
+  background: var(--accent-50);
+  border-radius: var(--r-1);
+  padding: 4px 8px;
+}
+
+.thread-orphan-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.thread-resolve-link {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.thread-resolve-link:hover {
+  text-decoration: underline;
+}
+
+.thread-jump-link {
+  color: var(--iris);
+  cursor: pointer;
+}
+
+.thread-jump-link:hover {
+  text-decoration: underline;
+}
+
+.thread-fold {
+  margin-top: 12px;
+}
+
+.thread-fold-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-top: 1px solid var(--border);
+  background: transparent;
+  color: var(--ink-3);
+  padding: 10px 0;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.thread-fold-header:hover {
+  color: var(--ink-2);
+}
+
+.thread-fold-chevron {
+  margin-left: auto;
+  transition: transform 0.15s;
+}
+
+.thread-fold-chevron.expanded {
+  transform: rotate(180deg);
+}
+
 .tdetail {
   display: grid;
   gap: 10px;
