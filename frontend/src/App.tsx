@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, RefObject } from "react";
-import { ApiClient, ApiError, apiBase, daemonStaticBase, publicOrigin } from "./api";
+import { ApiClient, ApiError, apiBase, daemonStaticBase, publicOrigin, type UpdateWorkspaceSettingsInput } from "./api";
 import { DocumentSurface, type LiveThread, type SurfaceSelection } from "./DocumentSurface";
 import type { MarkdownPreviewCommandName } from "./markdownLivePreview";
 import {
@@ -321,6 +321,16 @@ function focusableElements(root: HTMLElement) {
   ).filter((element) => !element.hasAttribute("disabled") && element.getAttribute("aria-hidden") !== "true");
 }
 
+function upsertWorkspaceSummary(workspaces: WorkspaceSummary[], workspace: WorkspaceSummary) {
+  const index = workspaces.findIndex((item) => item.id === workspace.id);
+  if (index === -1) {
+    return [...workspaces, workspace];
+  }
+  const next = workspaces.slice();
+  next[index] = { ...next[index], ...workspace };
+  return next;
+}
+
 export function App() {
   const route = useRoute();
   const [token, setToken] = useState(() => localStorage.getItem(tokenStorageKey) ?? "");
@@ -525,6 +535,17 @@ export function App() {
     );
   }
 
+  const handleWorkspaceUpdated = (workspace: WorkspaceSummary) => {
+    setWorkspaces((current) => upsertWorkspaceSummary(current, workspace));
+  };
+
+  const handleWorkspaceDeleted = (workspaceId: string) => {
+    setWorkspaces((current) => current.filter((workspace) => workspace.id !== workspaceId));
+    setAccount((current) =>
+      current?.lastAccessedWorkspaceId === workspaceId ? { ...current, lastAccessedWorkspaceId: "" } : current
+    );
+  };
+
   return (
     <WorkspaceApp
       api={api}
@@ -535,6 +556,8 @@ export function App() {
       account={account}
       workspaces={workspaces}
       onAccess={rememberWorkspaceAccess}
+      onWorkspaceUpdated={handleWorkspaceUpdated}
+      onWorkspaceDeleted={handleWorkspaceDeleted}
       onWorkspaceChange={(slug) => {
         navigate({ kind: "workspace", slug, view: { kind: "home" } });
       }}
@@ -1275,6 +1298,8 @@ export function WorkspaceApp({
   account,
   workspaces,
   onAccess,
+  onWorkspaceUpdated = () => {},
+  onWorkspaceDeleted = () => {},
   onWorkspaceChange,
   onSignOut,
 }: {
@@ -1286,6 +1311,8 @@ export function WorkspaceApp({
   account: Account | null;
   workspaces: WorkspaceSummary[];
   onAccess: (workspaceId: string, documentId?: string) => void;
+  onWorkspaceUpdated?: (workspace: WorkspaceSummary) => void;
+  onWorkspaceDeleted?: (workspaceId: string) => void;
   onWorkspaceChange: (slug: string) => void;
   onSignOut: () => void;
 }) {
@@ -1387,6 +1414,8 @@ export function WorkspaceApp({
   const inboxDialogRef = useRef<HTMLDivElement>(null);
   const inboxTriggerRef = useRef<HTMLButtonElement>(null);
   const lastAccessUpdateKeyRef = useRef("");
+  const seenWorkspaceRef = useRef(false);
+  const deletionHandledRef = useRef(false);
   const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
 
   const requestedDocumentId = view.kind === "document" ? view.documentId : "";
@@ -1411,6 +1440,23 @@ export function WorkspaceApp({
   const inboxSummary = useMemo(() => workspaceInboxSummary({ ...workspace, documents: rootNamespace.ready ? rootDocuments : undefined }, { nowMs: now }), [workspace, rootDocuments, rootNamespace.ready, now]);
   const inboxCount = inboxSummary.counts.total;
   const inboxAriaLabel = inboxBadgeLabel(inboxSummary);
+
+  useEffect(() => {
+    if (workspace.workspaceId === workspaceId) {
+      seenWorkspaceRef.current = true;
+      deletionHandledRef.current = false;
+    }
+  }, [workspace.workspaceId, workspaceId]);
+
+  useEffect(() => {
+    if (!seenWorkspaceRef.current || deletionHandledRef.current || workspace.workspaceId || loading) {
+      return;
+    }
+    deletionHandledRef.current = true;
+    onWorkspaceDeleted(workspaceId);
+    const remaining = workspaces.filter((item) => item.id !== workspaceId);
+    navigate(resolveRoot({ authenticated: true, account, workspaces: remaining }), { replace: true });
+  }, [account, loading, onWorkspaceDeleted, workspace.workspaceId, workspaceId, workspaces]);
 
   const closeInbox = useCallback((restoreFocus = true) => {
     setInboxOpen(false);
@@ -1489,14 +1535,14 @@ export function WorkspaceApp({
   }, [closeInbox, inboxOpen]);
 
   useEffect(() => {
-    if (view.kind !== "home" || !rootNamespace.ready || !activeWorkspace) {
+    if (view.kind !== "home" || !workspace.workspaceId || !rootNamespace.ready || !activeWorkspace) {
       return;
     }
     const resolved = resolveWorkspace(activeWorkspace, rootDocuments);
     if (resolved.kind === "workspace" && resolved.view.kind === "document") {
       navigate(resolved, { replace: true });
     }
-  }, [activeWorkspace, rootDocuments, rootNamespace.ready, view.kind]);
+  }, [activeWorkspace, rootDocuments, rootNamespace.ready, view.kind, workspace.workspaceId]);
 
   useEffect(() => {
     const documentId = view.kind === "document" ? activeDocument?.id ?? "" : "";
@@ -1984,6 +2030,12 @@ export function WorkspaceApp({
           onAgent={(agent) => {
             setSelectedAgentId(agent.id);
             setModal("agent-detail");
+          }}
+          onWorkspaceSaved={(updatedWorkspace) => {
+            onWorkspaceUpdated(updatedWorkspace);
+            if (updatedWorkspace.slug !== workspaceSlug) {
+              navigate({ kind: "workspace", slug: updatedWorkspace.slug, view }, { replace: true });
+            }
           }}
         />
       ) : null}
@@ -3758,46 +3810,239 @@ export function MembersAndInvite({
   );
 }
 
-// Workspace settings (plan §4.2). Read-only today: it states the current name and URL
-// (zero backend) with an explicit "editing coming soon". When PATCH /workspace lands the
-// read-only fields flip to editable — wiring, not construction (Juan/Eva ruling).
-function WorkspaceSettings({ name, slug }: { name: string; slug: string }) {
+const workspaceRuntimeOptions = [
+  { value: "", label: "No default" },
+  { value: "codex", label: "Codex" },
+  { value: "claude", label: "Claude" },
+];
+
+// Workspace settings (plan §4.2). The backend supports partial PATCH: owners/admins can edit
+// name/default runtime, while slug is owner-only because changing it invalidates old URLs.
+function WorkspaceSettings({
+  api,
+  workspaceId,
+  workspace,
+  workspaceSlug,
+  onSaved,
+}: {
+  api: ApiClient;
+  workspaceId: string;
+  workspace: ReturnType<typeof useWorkspace>["workspace"];
+  workspaceSlug: string;
+  onSaved: (workspace: WorkspaceSummary) => void;
+}) {
+  const currentSlug = workspace.slug || workspaceSlug;
+  const currentDefaultRuntime = workspace.defaultRuntime ?? "";
+  const role = workspace.currentMembershipRole || "";
+  const canManage = role === "owner" || role === "admin";
+  const canEditSlug = role === "owner";
+  const [nameDraft, setNameDraft] = useState(workspace.name);
+  const [slugDraft, setSlugDraft] = useState(currentSlug);
+  const [runtimeDraft, setRuntimeDraft] = useState(currentDefaultRuntime);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    setNameDraft(workspace.name);
+    setSlugDraft(currentSlug);
+    setRuntimeDraft(currentDefaultRuntime);
+    setMessage("");
+    setError("");
+  }, [currentDefaultRuntime, currentSlug, workspace.name]);
+
+  const trimmedName = nameDraft.trim();
+  const trimmedSlug = slugDraft.trim();
+  const slugPattern = new RegExp(`^${identifierPattern}$`);
+  const nameChanged = trimmedName !== workspace.name.trim();
+  const slugChanged = trimmedSlug !== currentSlug;
+  const runtimeChanged = runtimeDraft !== currentDefaultRuntime;
+  const hasEditableChange =
+    (canManage && nameChanged) ||
+    (canEditSlug && slugChanged) ||
+    (canManage && runtimeChanged);
+  const slugValid =
+    trimmedSlug.length >= workspaceSlugMinLength &&
+    trimmedSlug.length <= workspaceSlugMaxLength &&
+    slugPattern.test(trimmedSlug);
+  const saveDisabled =
+    saving ||
+    !canManage ||
+    !hasEditableChange ||
+    !trimmedName ||
+    (canEditSlug && slugChanged && !slugValid);
+
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    if (saveDisabled) {
+      return;
+    }
+    const input: UpdateWorkspaceSettingsInput = {};
+    if (canManage && nameChanged) {
+      input.name = trimmedName;
+    }
+    if (canEditSlug && slugChanged) {
+      input.slug = trimmedSlug;
+    }
+    if (canManage && runtimeChanged) {
+      input.defaultRuntime = runtimeDraft;
+    }
+    setSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      const response = await api.updateWorkspaceSettings(workspaceId, input);
+      onSaved(response.workspace);
+      setNameDraft(response.workspace.name);
+      setSlugDraft(response.workspace.slug);
+      setRuntimeDraft(response.workspace.defaultRuntime ?? "");
+      setMessage("Workspace settings saved.");
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        setError("Slug taken. Choose another workspace URL.");
+      } else {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div className="manage-panel">
       <div className="manage-panel-head">
         <span className="display management-title">Workspace settings</span>
       </div>
-      <div className="settings-list">
-        <div className="setting-readonly">
+      <form className="settings-list" onSubmit={(event) => void save(event)}>
+        <label className="field">
           <span className="lab">Workspace name</span>
-          <span className="setting-value">{name}</span>
-        </div>
-        <div className="setting-readonly">
-          <span className="lab">Workspace URL</span>
-          <span className="setting-value mono">{`${publicOrigin}/w/${slug}`}</span>
-        </div>
-        <p className="tiny muted">Editing coming soon.</p>
-      </div>
+          <input
+            value={nameDraft}
+            onChange={(event) => {
+              setNameDraft(event.target.value);
+              setMessage("");
+              setError("");
+            }}
+            disabled={!canManage || saving}
+          />
+        </label>
+        <label className="field">
+          <span className="lab">Workspace URL slug</span>
+          <input
+            value={slugDraft}
+            onChange={(event) => {
+              setSlugDraft(event.target.value.trim().toLowerCase());
+              setMessage("");
+              setError("");
+            }}
+            disabled={!canEditSlug || saving}
+            aria-describedby="workspace-slug-help"
+          />
+        </label>
+        <p id="workspace-slug-help" className="tiny muted">
+          {canEditSlug
+            ? `${identifierHelpText} The public URL is ${publicOrigin}/w/${trimmedSlug || currentSlug}.`
+            : "Only the workspace owner can change the URL slug."}
+        </p>
+        <label className="field">
+          <span className="lab">Default agent runtime</span>
+          <select
+            value={runtimeDraft}
+            onChange={(event) => {
+              setRuntimeDraft(event.target.value);
+              setMessage("");
+              setError("");
+            }}
+            disabled={!canManage || saving}
+          >
+            {workspaceRuntimeOptions.map((option) => (
+              <option value={option.value} key={option.value}>{option.label}</option>
+            ))}
+          </select>
+        </label>
+        <p className="tiny muted">
+          {canManage
+            ? "Owners and admins can update the name and default runtime. Slug changes are owner-only."
+            : "Only workspace owners and admins can edit workspace settings."}
+        </p>
+        {canEditSlug && slugChanged && !slugValid ? <p className="error-text">{identifierHelpText}</p> : null}
+        {error ? <p className="error-text">{error}</p> : null}
+        {message ? <p className="success-text">{message}</p> : null}
+        <button className="btn accent" type="submit" disabled={saveDisabled}>
+          {saving ? "Saving..." : "Save settings"}
+        </button>
+      </form>
     </div>
   );
 }
 
-// Danger zone (plan §4.2). Deliberately NOT a red, clickable-looking Delete button today —
-// a destructive control that can't act is alarming, not honest. Calm coming-soon copy now;
-// the danger styling + real DELETE /workspace land together in the backend follow-up (Eva).
-function DangerZone() {
+// Danger zone (plan §4.2). Destructive deletion is owner-only and server-enforced by an exact
+// confirmName match. After DELETE succeeds, the UI waits for workspace.deleted before navigating.
+function DangerZone({
+  api,
+  workspaceId,
+  workspace,
+}: {
+  api: ApiClient;
+  workspaceId: string;
+  workspace: ReturnType<typeof useWorkspace>["workspace"];
+}) {
+  const [confirmName, setConfirmName] = useState("");
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const canDelete = workspace.currentMembershipRole === "owner";
+  const matchesName = confirmName === workspace.name;
+
+  const deleteWorkspace = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!canDelete || !matchesName || deleting) {
+      return;
+    }
+    setDeleting(true);
+    setError("");
+    setMessage("");
+    try {
+      await api.deleteWorkspace(workspaceId, confirmName);
+      setMessage("Deletion requested. Waiting for workspace removal...");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setDeleting(false);
+    }
+  };
+
   return (
     <div className="manage-panel">
       <div className="manage-panel-head">
         <span className="display management-title">Danger zone</span>
       </div>
-      <div className="danger-note">
-        <p className="small">Workspace deletion is coming soon.</p>
+      <form className="danger-note" onSubmit={(event) => void deleteWorkspace(event)}>
+        <p className="small">Delete this workspace permanently.</p>
         <p className="tiny muted">
-          Deleting a workspace permanently removes its documents, agents and members. This will be
-          available once the action is fully supported.
+          Deleting a workspace permanently removes its documents, agents and members. Type the exact
+          workspace name to confirm.
         </p>
-      </div>
+        <label className="field">
+          <span className="lab">Type {workspace.name}</span>
+          <input
+            value={confirmName}
+            onChange={(event) => {
+              setConfirmName(event.target.value);
+              setError("");
+              setMessage("");
+            }}
+            disabled={!canDelete || deleting}
+            autoComplete="off"
+          />
+        </label>
+        {!canDelete ? <p className="tiny muted">Only the workspace owner can delete this workspace.</p> : null}
+        {canDelete && confirmName && !matchesName ? <p className="error-text">Workspace name must match exactly.</p> : null}
+        {error ? <p className="error-text">{error}</p> : null}
+        {message ? <p className="success-text">{message}</p> : null}
+        <button className="btn danger" type="submit" disabled={!canDelete || !matchesName || deleting}>
+          {deleting ? "Deleting..." : "Delete workspace"}
+        </button>
+      </form>
     </div>
   );
 }
@@ -3819,6 +4064,7 @@ export function ManageModal({
   onDaemon,
   onNewAgent,
   onAgent,
+  onWorkspaceSaved = () => {},
 }: {
   api: ApiClient;
   workspaceId: string;
@@ -3834,6 +4080,7 @@ export function ManageModal({
   onDaemon: (daemon: Daemon) => void;
   onNewAgent: () => void;
   onAgent: (agent: Agent) => void;
+  onWorkspaceSaved?: (workspace: WorkspaceSummary) => void;
 }) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -3886,9 +4133,15 @@ export function ManageModal({
             ) : activeTab === "agents" ? (
               <AgentsManagement workspace={workspace} groupedAgents={groupedAgents} onNew={onNewAgent} onAgent={onAgent} />
             ) : activeTab === "workspace" ? (
-              <WorkspaceSettings name={workspace.name} slug={workspaceSlug} />
+              <WorkspaceSettings
+                api={api}
+                workspaceId={workspaceId}
+                workspace={workspace}
+                workspaceSlug={workspaceSlug}
+                onSaved={onWorkspaceSaved}
+              />
             ) : (
-              <DangerZone />
+              <DangerZone api={api} workspaceId={workspaceId} workspace={workspace} />
             )}
           </div>
         </div>

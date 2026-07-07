@@ -2658,6 +2658,28 @@ pre.code {
   font-size: 13px;
 }
 
+.settings-list .btn,
+.danger-note .btn {
+  align-self: flex-start;
+}
+
+.success-text {
+  margin: 0;
+  color: var(--ok);
+  font-size: 12px;
+}
+
+.btn.danger {
+  background: var(--err);
+  border-color: var(--err);
+  color: white;
+}
+
+.btn.danger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .new-agent-form {
   display: flex;
   flex-direction: column;

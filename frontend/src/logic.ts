@@ -770,6 +770,25 @@ export function reduceWorkspaceEvent(state: WorkspaceState, event: WorkspaceEven
     // TODO: runtime-validate envelope payloads (unvalidated WS-payload casts are a class, not a one-off)
     return { ...state, activities: [event.data as ActivityEvent, ...activities].slice(0, 50) };
   }
+  if (event.type === "workspace.updated") {
+    const workspace = event.data as Partial<WorkspaceState> & { id?: string };
+    if (workspace.id && workspace.id !== state.workspaceId) {
+      return state;
+    }
+    return {
+      ...state,
+      workspaceId: workspace.id ?? state.workspaceId,
+      rootDocumentId: workspace.rootDocumentId ?? state.rootDocumentId,
+      name: workspace.name ?? state.name,
+      slug: workspace.slug ?? state.slug,
+      defaultRuntime: workspace.defaultRuntime ?? "",
+      updatedAt: workspace.updatedAt ?? state.updatedAt,
+    };
+  }
+  if (event.type === "workspace.deleted") {
+    const deleted = event.data as { workspaceId?: string };
+    return !deleted.workspaceId || deleted.workspaceId === state.workspaceId ? emptyWorkspace() : state;
+  }
   if (event.type === "thread.created" || event.type === "thread.updated") {
     return { ...state, threads: upsertById(state.threads, event.data as ThreadItem) };
   }
