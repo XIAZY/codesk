@@ -310,7 +310,7 @@ function inboxDocumentLabel(documents: DocumentItem[], documentId?: string) {
     return "";
   }
   const document = documents.find((item) => item.id === documentId);
-  return document ? fileName(document.path) : "Unknown document";
+  return document ? fileName(document.path) : "";
 }
 
 function focusableElements(root: HTMLElement) {
@@ -1408,7 +1408,7 @@ export function WorkspaceApp({
   const currentWorkspaceUserHandle = currentWorkspaceUser?.handle ? `@${currentWorkspaceUser.handle}` : "Workspace user";
   const currentWorkspaceUserIdentity = currentWorkspaceUser?.handle || currentWorkspaceUser?.name || "Workspace user";
   const canInviteMembers = workspace.currentMembershipRole === "owner" || workspace.currentMembershipRole === "admin";
-  const inboxSummary = useMemo(() => workspaceInboxSummary(workspace), [workspace]);
+  const inboxSummary = useMemo(() => workspaceInboxSummary({ ...workspace, documents: rootNamespace.ready ? rootDocuments : undefined }, { nowMs: now }), [workspace, rootDocuments, rootNamespace.ready, now]);
   const inboxCount = inboxSummary.counts.total;
   const inboxAriaLabel = inboxBadgeLabel(inboxSummary);
 
@@ -2456,25 +2456,36 @@ function AgentsManagement({
                   const activityCopy = status.key === "failed" && status.reason ? status.reason : agent.currentActivity || agent.currentTask || "Waiting for workspace notifications.";
                   return (
                     <button className="agent-roster-card" key={agent.id} onClick={() => onAgent(agent)} aria-label={`Open @${agent.handle}. Status: ${statusLabel}`}>
-                      <div className="between gap-8">
-                        <div className="row gap-8 min-0">
-                          <div className="avi agent">{initials(agent.handle)}</div>
+                      <div className="agent-roster-top">
+                        <div className="agent-roster-identity">
+                          <div className="avi agent agent-roster-avatar">{initials(agent.handle)}</div>
                           <div className="col gap-0 min-0">
                             <b className="truncate">@{agent.handle}</b>
                             <span className="tiny muted truncate">{agent.role}</span>
                           </div>
                         </div>
-                        <span className={`chip sm ${status.tone}`} title={status.title}><StatusDot tone={status.tone} />{statusLabel}</span>
+                        <span className={`chip sm agent-roster-status ${status.tone}`} title={status.title}>
+                          <StatusDot tone={status.tone} />
+                          <span className="agent-chip-text">{statusLabel}</span>
+                        </span>
                       </div>
                       <div className="small muted roster-activity">{activityCopy}</div>
-                      <div className="row between gap-8">
-                        <div className="row gap-4 tiny muted">
-                          <Icon name="thread" />
-                          <span>{workspace.threads.filter((thread) => thread.participantIds.includes(agent.id)).length} threads</span>
-                          <span>·</span>
-                          <span>{workspace.agentEvents.filter((event) => event.agentId === agent.id).length} inbox</span>
+                      <div className="agent-roster-meta">
+                        <div className="agent-roster-meta-list">
+                          <span className="agent-roster-meta-item">
+                            <Icon name="thread" />
+                            <span className="truncate">{workspace.threads.filter((thread) => thread.participantIds.includes(agent.id)).length} threads</span>
+                          </span>
+                          <span className="agent-roster-meta-sep">·</span>
+                          <span className="agent-roster-meta-item">
+                            <span className="truncate">{workspace.agentEvents.filter((event) => event.agentId === agent.id).length} inbox</span>
+                          </span>
                         </div>
-                        {inboxCount ? <span className="chip accent sm">{inboxCount} for-me</span> : null}
+                        {inboxCount ? (
+                          <span className="chip accent sm agent-for-me-chip" title={`${inboxCount} for-me`}>
+                            <span className="agent-chip-text">{inboxCount} for-me</span>
+                          </span>
+                        ) : null}
                       </div>
                     </button>
                   );

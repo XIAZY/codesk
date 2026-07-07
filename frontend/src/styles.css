@@ -2244,21 +2244,96 @@ button.inbox-row:hover {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-width: 0;
   border: 1px solid var(--border);
   border-radius: var(--r-2);
   background: var(--paper);
   color: inherit;
   padding: 14px;
   text-align: left;
+  overflow: hidden;
 }
 
 .agent-roster-card:hover {
   background: var(--paper-2);
 }
 
+.agent-roster-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.agent-roster-identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.agent-roster-avatar {
+  flex: 0 0 auto;
+}
+
+.agent-roster-status {
+  flex: 0 1 auto;
+  max-width: min(52%, 170px);
+  min-width: 0;
+}
+
+.agent-chip-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .roster-activity {
   min-height: 38px;
   line-height: 1.4;
+}
+
+.agent-roster-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  min-width: 0;
+}
+
+.agent-roster-meta-list {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+  flex: 1 1 140px;
+  color: var(--ink-4);
+  font-size: 11px;
+}
+
+.agent-roster-meta-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.agent-roster-meta-item svg {
+  flex: 0 0 auto;
+}
+
+.agent-roster-meta-sep {
+  flex: 0 0 auto;
+}
+
+.agent-for-me-chip {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .modal-backdrop {

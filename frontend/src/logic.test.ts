@@ -42,7 +42,7 @@ import {
   workspaceInboxSummary,
 } from "./logic";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
-import type { ActivityEvent, Agent, AgentEvent, AgentRun, Daemon, PresenceItem, UserItem, WorkspaceState } from "./types";
+import type { ActivityEvent, Agent, AgentEvent, AgentRun, Daemon, DocumentItem, PresenceItem, UserItem, WorkspaceState } from "./types";
 
 function baseWorkspace(): WorkspaceState {
   return {
@@ -554,6 +554,12 @@ describe("workspaceInboxSummary", () => {
     updatedAt: "2026-07-06T12:00:00Z",
     ...over,
   });
+  const document = (over: Partial<DocumentItem> = {}): DocumentItem => ({
+    id: "doc1",
+    path: "docs/spec.md",
+    title: "spec.md",
+    ...over,
+  });
 
   it("builds one event-derived source for reviews and failures while dropping mention activity", () => {
     const summary = workspaceInboxSummary({
@@ -599,6 +605,39 @@ describe("workspaceInboxSummary", () => {
     expect(summary.items).toEqual([]);
     expect(summary.counts.total).toBe(0);
     expect(summary.badgeTone).toBe("");
+  });
+
+  it("drops review events whose document id cannot resolve", () => {
+    const summary = workspaceInboxSummary({
+      ...baseWorkspace(),
+      documents: [document()],
+      agentEvents: [
+        event({ id: "review_1", documentId: "doc1", summary: "Review real doc" }),
+        event({ id: "missing_doc", documentId: "missing", summary: "Review missing doc" }),
+      ],
+    });
+
+    expect(summary.counts).toEqual({ needsReview: 1, failed: 0, total: 1 });
+    expect(summary.items.map((item) => item.summary)).toEqual(["Review real doc"]);
+  });
+
+  it("drops stale review events while preserving current failed runtime state", () => {
+    const nowMs = Date.parse("2026-07-06T12:00:00Z");
+    const summary = workspaceInboxSummary({
+      ...baseWorkspace(),
+      documents: [document()],
+      agents: [agent({ status: "failed", currentActivity: "daemon stopped", updatedAt: "2026-07-06T12:00:00Z" })],
+      agentRuns: [],
+      agentEvents: [
+        event({ id: "stale_review", summary: "Old review", updatedAt: "2026-06-01T12:00:00Z" }),
+        event({ id: "fresh_review", summary: "Fresh review", updatedAt: "2026-07-06T11:00:00Z" }),
+      ],
+    }, { nowMs });
+
+    expect(summary.counts).toEqual({ needsReview: 1, failed: 1, total: 2 });
+    expect(summary.items.some((item) => item.summary === "Old review")).toBe(false);
+    expect(summary.items.some((item) => item.summary === "Fresh review")).toBe(true);
+    expect(summary.items.some((item) => item.kind === "failed" && item.reason === "daemon stopped")).toBe(true);
   });
 });
 
