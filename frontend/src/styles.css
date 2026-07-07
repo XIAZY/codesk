@@ -2095,6 +2095,30 @@ button.inbox-row:hover {
   transform: rotate(180deg);
 }
 
+.thread-reanchor-link {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--iris);
+  cursor: pointer;
+}
+
+.thread-reanchor-link:hover {
+  text-decoration: underline;
+}
+
+.reanchor-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--iris-50);
+  border: 1px solid var(--iris);
+  border-radius: var(--r-1);
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
 .tdetail {
   display: grid;
   gap: 10px;
