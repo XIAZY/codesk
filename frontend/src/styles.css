@@ -13,14 +13,16 @@
   --paper-3: oklch(0.935 0.010 75);
   --border: oklch(0.90 0.008 75);
   --border-strong: oklch(0.86 0.010 75);
-  --accent: oklch(0.68 0.09 60);
+  /* #28 brand dual-color (qianyi logo theme): human = amber, agent = soft blue.
+     Identity axis only — §6 status colors (--iris/--warn/--err) stay separate. */
+  --accent: oklch(0.72 0.11 60);
   --accent-50: oklch(0.965 0.020 60);
-  --accent-100: oklch(0.90 0.038 60);
-  --accent-700: oklch(0.44 0.07 60);
-  --agent: oklch(0.62 0.08 230);
+  --accent-100: oklch(0.87 0.055 55);
+  --accent-700: oklch(0.46 0.11 58);
+  --agent: oklch(0.64 0.06 235);
   --agent-50: oklch(0.965 0.018 230);
-  --agent-100: oklch(0.90 0.035 230);
-  --agent-700: oklch(0.40 0.06 230);
+  --agent-100: oklch(0.86 0.05 235);
+  --agent-700: oklch(0.44 0.085 238);
   --iris: oklch(0.55 0.09 285);
   --iris-50: oklch(0.965 0.018 285);
   --iris-700: oklch(0.42 0.09 285);
@@ -650,6 +652,7 @@ svg.i.sm {
 }
 
 .shell {
+  position: relative;
   height: 100vh;
   min-width: 1120px;
   display: grid;
@@ -736,34 +739,70 @@ svg.i.sm {
   display: inline-flex;
 }
 
-/* Collapse toggle (in the workspace switcher) + expand affordance shown only
-   when collapsed. */
-.sb-collapse-btn,
-.sb-expand-tab {
+/* Single collapse/expand handle: a round button straddling the left rail's right
+   edge, vertically centered. Replaces the old corner chevron + expand tab — one
+   control, never two (Eva). Anchored to .shell (position:relative) at left:var(--left)
+   so it rides the rail's right edge through the 0.18s collapse to the 60px track;
+   .sb's collapsed overflow:hidden never clips it. Chevron flips ‹/› by state. */
+.sb-rail-handle {
+  position: absolute;
+  top: 50%;
+  left: var(--left);
+  transform: translate(-50%, -50%);
+  z-index: 30;
   width: 24px;
   height: 24px;
-  border-radius: 7px;
-  border: 0;
-  flex: none;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid oklch(0.28 0.004 75);
+  background: oklch(0.22 0.004 75);
+  color: oklch(0.60 0.004 75);
+  font-size: 15px;
+  line-height: 1;
   display: grid;
   place-items: center;
-  background: transparent;
-  color: var(--sb-ink-2);
   cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, left 0.18s ease;
 }
-.sb-collapse-btn:hover,
-.sb-expand-tab:hover {
-  background: var(--sb-2);
-  color: var(--sb-ink);
+/* ~28px hit target without enlarging the visible 24px disc. */
+.sb-rail-handle::before {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
 }
-.shell:not(.sidebar-collapsed) .sb-expand-tab {
-  display: none;
+.sb-rail-handle:hover {
+  background: color-mix(in oklab, oklch(0.30 0.004 75), var(--iris) 14%);
+  border-color: var(--iris);
+  color: oklch(0.82 0.004 75);
 }
-.shell.sidebar-collapsed .sb-collapse-btn {
-  display: none;
+.sb-rail-handle:focus-visible {
+  outline: 2px solid var(--iris);
+  outline-offset: 2px;
 }
-.shell.sidebar-collapsed .sb-expand-tab {
-  margin: 0 auto;
+/* Tooltip below the handle — never to the right, which would overlap the document
+   (the collision the earlier layout hit). Hover/focus reveal only. */
+.sb-rail-handle::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: calc(100% + 7px);
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  background: oklch(0.20 0.004 75);
+  color: oklch(0.82 0.004 75);
+  border: 1px solid oklch(0.28 0.004 75);
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+.sb-rail-handle:hover::after,
+.sb-rail-handle:focus-visible::after {
+  opacity: 1;
 }
 
 /* Right-rail resize handle — grab the left edge, clamp handled in JS. */
@@ -949,6 +988,11 @@ svg.i.sm {
   position: relative;
 }
 
+/* #28: Inbox badge default is amber (needs-review = human-domain "you have work",
+   which is now the retuned --accent amber). But it KEEPS §6 severity — a failed
+   item escalates the badge to red (--danger), so the at-a-glance failure signal is
+   never lost at the badge level (Phase D behavior; Eva's #28 ruling — don't regress).
+   Amber default and red-on-failed both sit within qianyi's amber theme. */
 .nav-item .ct.inbox-ct.needs-review {
   background: var(--needs-you);
   color: var(--paper);
@@ -1226,6 +1270,10 @@ button.inbox-row:hover {
 
 .agent-summary-list {
   margin-top: 8px;
+  max-height: 192px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.15) transparent;
 }
 
 .agent-mini {
@@ -1261,6 +1309,20 @@ button.inbox-row:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* #28: the agent status TEXT takes the §6 semantic color (the "enrichment") —
+   identity color lives on the avatar, status color on the dot AND now the text,
+   two separate axes. Running/needs-review/failed get the semantic hue; idle,
+   queued and waiting-env keep the inherited neutral gray. Status dots unchanged. */
+.agent-mini-status-label.running {
+  color: var(--iris);
+}
+.agent-mini-status-label.needs-review {
+  color: var(--warn);
+}
+.agent-mini-status-label.failed {
+  color: var(--err);
 }
 
 .account-footer {
@@ -2066,6 +2128,14 @@ button.inbox-row:hover {
   display: block;
 }
 
+.people-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0 4px;
+  margin-top: 4px;
+}
+
 .daemon-card {
   margin-bottom: 8px;
 }
@@ -2235,31 +2305,65 @@ button.inbox-row:hover {
 }
 
 .roster-grid {
+  /* #28 follow-on (qianyi): simplified agent rows — one per line so the full
+     @handle is always readable (was a 3-col grid that truncated names to "@…").
+     Each row is now just identity + §6 status; activity / threads / inbox /
+     for-me moved into the agent detail, which the whole row opens. */
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  grid-template-columns: 1fr;
+  gap: 8px;
 }
 
 .agent-roster-card {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-width: 0;
   border: 1px solid var(--border);
   border-radius: var(--r-2);
   background: var(--paper);
   color: inherit;
   padding: 14px;
   text-align: left;
+  overflow: hidden;
 }
 
 .agent-roster-card:hover {
   background: var(--paper-2);
 }
 
-.roster-activity {
-  min-height: 38px;
-  line-height: 1.4;
+.agent-roster-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
 }
+
+.agent-roster-identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.agent-roster-avatar {
+  flex: 0 0 auto;
+}
+
+.agent-roster-status {
+  flex: 0 1 auto;
+  max-width: min(52%, 170px);
+  min-width: 0;
+}
+
+.agent-chip-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 
 .modal-backdrop {
   position: fixed;

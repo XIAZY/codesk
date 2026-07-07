@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentDetailModal, CreateDaemonModal, DaemonDetailModal, DaemonsManagement, ManageModal, WorkspaceApp, WorkspaceOnboarding } from "./App";
 import { emptyWorkspace, identifierFromName, identifierHelpText, identifierPattern, workspaceSlugMaxLength } from "./logic";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
-import type { Account, Agent, AgentEvent, AgentRun, Daemon, WorkspaceState, WorkspaceSummary } from "./types";
+import type { Account, Agent, AgentEvent, AgentRun, Daemon, DocumentItem, WorkspaceState, WorkspaceSummary } from "./types";
 
 function workspaceFixture(overrides: Partial<WorkspaceState> = {}): WorkspaceState {
   return {
@@ -43,6 +43,7 @@ function workspaceFixture(overrides: Partial<WorkspaceState> = {}): WorkspaceSta
 }
 
 let workspaceMock = workspaceFixture();
+let rootDocumentsMock: DocumentItem[] = [{ id: "doc_1", path: "docs/Product Plan.md", title: "Product Plan.md" }];
 
 vi.mock("./useWorkspace", () => ({
   useWorkspace: () => ({
@@ -56,7 +57,7 @@ vi.mock("./useWorkspace", () => ({
 
 vi.mock("./useRootNamespace", () => ({
   useRootNamespace: () => ({
-    documents: [],
+    documents: rootDocumentsMock,
     ready: true,
     upsertFile: vi.fn(),
     moveFile: vi.fn(),
@@ -66,6 +67,8 @@ vi.mock("./useRootNamespace", () => ({
 
 afterEach(() => {
   workspaceMock = workspaceFixture();
+  rootDocumentsMock = [{ id: "doc_1", path: "docs/Product Plan.md", title: "Product Plan.md" }];
+  vi.useRealTimers();
   localStorage.clear();
   cleanup();
 });
@@ -454,6 +457,32 @@ describe("WorkspaceApp Inbox", () => {
     expect(screen.getByRole("button", { name: /Inbox, 1 need attention/ })).toBeTruthy();
     expect(localStorage.getItem("codesk.inbox.mentions.ws.user_1")).toBeNull();
   });
+
+  it("drops stale and unresolved review events before they reach the badge or flyout", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-06T12:00:00Z"));
+    rootDocumentsMock = [{ id: "doc_1", path: "docs/Product Plan.md", title: "Product Plan.md" }];
+    workspaceMock = workspaceFixture({
+      agentEvents: [
+        inboxEvent({ id: "fresh_doc", documentId: "doc_1", summary: "Fresh review", updatedAt: "2026-07-06T11:59:00Z" }),
+        inboxEvent({ id: "missing_doc", documentId: "missing_doc", summary: "Missing doc review", updatedAt: "2026-07-06T11:58:00Z" }),
+        inboxEvent({ id: "stale_doc", documentId: "doc_1", summary: "Stale review", updatedAt: "2026-06-01T12:00:00Z" }),
+      ],
+    });
+    renderWorkspaceApp();
+
+    const trigger = screen.getByRole("button", { name: /Inbox, 1 need attention/ });
+    expect(trigger.querySelector(".inbox-ct")?.textContent).toBe("1");
+
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "Inbox" });
+    expect(within(dialog).getByText("1 need attention")).toBeTruthy();
+    expect(within(dialog).getByText("Fresh review")).toBeTruthy();
+    expect(within(dialog).getByText("Product Plan.md")).toBeTruthy();
+    expect(within(dialog).queryByText("Missing doc review")).toBeNull();
+    expect(within(dialog).queryByText("Stale review")).toBeNull();
+    expect(within(dialog).queryByText("Unknown document")).toBeNull();
+  });
 });
 
 describe("CreateDaemonModal install status", () => {
@@ -579,6 +608,45 @@ describe("ManageModal", () => {
     // AgentsManagement renders in the tab (its subtitle + the agent handle).
     expect(screen.getByText(/Codex collaborators in this workspace/)).toBeTruthy();
     expect(screen.getByText("@codex")).toBeTruthy();
+  });
+
+  it("simplifies the roster card to identity + status; full handle rendered, meta moved to the detail view", () => {
+    const longAgent = {
+      id: "a1",
+      daemonId: "d1",
+      handle: "codex-super-long-collaborator-name",
+      name: "Codex",
+      role: "Reviewer with a very long workspace collaboration role",
+      kind: "codex",
+      workspaceRoot: "agents/a1",
+      status: "idle",
+      currentTask: "",
+      currentActivity: "Waiting for local environment diagnostics",
+      currentRunId: "",
+      updatedAt: "2026-07-06T12:00:00Z",
+    };
+    const workspace = {
+      ...emptyWorkspace(),
+      workspaceId: "ws",
+      daemons: [{ ...daemonFixtures.justSeen, id: "d1" }],
+      agents: [longAgent],
+      agentEvents: [
+        { id: "event_1", agentId: "a1", agentHandle: longAgent.handle, type: "document.updated", box: "for_me", status: "pending", documentId: "doc_1", summary: "Review this very long workspace document", createdAt: "2026-07-06T12:00:00Z", updatedAt: "2026-07-06T12:00:00Z" },
+      ],
+    };
+    const grouped = [{ daemonId: "d1", daemonName: "Local", agents: workspace.agents }];
+    render(<ManageModal {...baseProps} workspace={workspace as never} groupedAgents={grouped as never} activeTab="agents" />);
+
+    const card = screen.getByRole("button", { name: /Open @codex-super-long-collaborator-name/ }) as HTMLElement;
+    expect(card.querySelector(".agent-roster-top")).toBeTruthy();
+    expect(card.querySelector(".agent-roster-status .agent-chip-text")).toBeTruthy();
+    // Full @handle is present in the DOM (one row per agent — no longer squeezed into a
+    // 3-col grid that truncated names to "@…").
+    expect(card.querySelector(".agent-roster-identity b")?.textContent).toBe("@codex-super-long-collaborator-name");
+    // threads / inbox / for-me chip are moved into the agent detail (the whole row opens it),
+    // so they are no longer rendered on the roster card.
+    expect(card.querySelector(".agent-roster-meta")).toBeNull();
+    expect(card.querySelector(".agent-for-me-chip")).toBeNull();
   });
 });
 

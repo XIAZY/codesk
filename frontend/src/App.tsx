@@ -310,7 +310,7 @@ function inboxDocumentLabel(documents: DocumentItem[], documentId?: string) {
     return "";
   }
   const document = documents.find((item) => item.id === documentId);
-  return document ? fileName(document.path) : "Unknown document";
+  return document ? fileName(document.path) : "";
 }
 
 function focusableElements(root: HTMLElement) {
@@ -1408,7 +1408,7 @@ export function WorkspaceApp({
   const currentWorkspaceUserHandle = currentWorkspaceUser?.handle ? `@${currentWorkspaceUser.handle}` : "Workspace user";
   const currentWorkspaceUserIdentity = currentWorkspaceUser?.handle || currentWorkspaceUser?.name || "Workspace user";
   const canInviteMembers = workspace.currentMembershipRole === "owner" || workspace.currentMembershipRole === "admin";
-  const inboxSummary = useMemo(() => workspaceInboxSummary(workspace), [workspace]);
+  const inboxSummary = useMemo(() => workspaceInboxSummary({ ...workspace, documents: rootNamespace.ready ? rootDocuments : undefined }, { nowMs: now }), [workspace, rootDocuments, rootNamespace.ready, now]);
   const inboxCount = inboxSummary.counts.total;
   const inboxAriaLabel = inboxBadgeLabel(inboxSummary);
 
@@ -1651,6 +1651,15 @@ export function WorkspaceApp({
       className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${draggingRail ? " dragging" : ""}`}
       style={rightWidth != null ? ({ "--right": `${rightWidth}px` } as CSSProperties) : undefined}
     >
+      <button
+        className="sb-rail-handle"
+        type="button"
+        onClick={toggleSidebar}
+        aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+        data-tip={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+      >
+        {sidebarCollapsed ? "›" : "‹"}
+      </button>
       <aside className={`sb ${inboxOpen ? "inbox-open" : ""}`}>
         <div className="workspace-switcher">
           <div className="row gap-8 min-0">
@@ -1665,8 +1674,6 @@ export function WorkspaceApp({
               <option value={workspace.slug} key={workspace.id}>{workspace.name}</option>
             ))}
           </select>
-          <button className="sb-collapse-btn" type="button" onClick={toggleSidebar} aria-label="Collapse sidebar" title="Collapse sidebar">‹</button>
-          <button className="sb-expand-tab" type="button" onClick={toggleSidebar} aria-label="Expand sidebar" title="Expand sidebar">›</button>
         </div>
 
         <div className="sb-search">
@@ -1723,6 +1730,7 @@ export function WorkspaceApp({
             <button
               className="btn ghost icon sm"
               title="New doc"
+              aria-label="New document"
               type="button"
               onClick={() => void createDocument()}
               disabled={creatingDocument || !workspace.rootDocumentId}
@@ -1759,7 +1767,7 @@ export function WorkspaceApp({
             </button>
           </div>
           <div className="col gap-6 agent-summary-list">
-            {workspace.agents.slice(0, 5).map((agent) => {
+            {workspace.agents.map((agent) => {
               const status = visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons, workspace.agentEvents, now);
               return (
                 <button
@@ -1778,7 +1786,7 @@ export function WorkspaceApp({
                     <span className="small truncate">@{agent.handle}</span>
                     <span className="agent-mini-status" title={status.title} aria-label={`Status: ${status.label}`}>
                       <StatusDot tone={status.tone} />
-                      <span className="agent-mini-status-label">{status.label}</span>
+                      <span className={`agent-mini-status-label ${status.tone}`}>{status.label}</span>
                     </span>
                   </span>
                 </button>
@@ -1832,7 +1840,7 @@ export function WorkspaceApp({
           </div>
           <div className="row gap-6">
             <CollaboratorAvatars people={workspacePeopleList} onClick={() => setRightTab("coworkers")} />
-            <button className="btn sm ghost icon" type="button" onClick={() => setModal("rename")} disabled={!activeDocument}>
+            <button className="btn sm ghost icon" type="button" onClick={() => setModal("rename")} disabled={!activeDocument} aria-label="Document options">
               <Icon name="more" />
             </button>
           </div>
@@ -2451,30 +2459,21 @@ function AgentsManagement({
               <div className="roster-grid">
                 {group.agents.map((agent) => {
                   const status = visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons, workspace.agentEvents, now);
-                  const inboxCount = workspace.agentEvents.filter((event) => event.agentId === agent.id && event.box === "for_me").length;
                   const statusLabel = detailStatusLabel(status);
-                  const activityCopy = status.key === "failed" && status.reason ? status.reason : agent.currentActivity || agent.currentTask || "Waiting for workspace notifications.";
                   return (
                     <button className="agent-roster-card" key={agent.id} onClick={() => onAgent(agent)} aria-label={`Open @${agent.handle}. Status: ${statusLabel}`}>
-                      <div className="between gap-8">
-                        <div className="row gap-8 min-0">
-                          <div className="avi agent">{initials(agent.handle)}</div>
+                      <div className="agent-roster-top">
+                        <div className="agent-roster-identity">
+                          <div className="avi agent agent-roster-avatar">{initials(agent.handle)}</div>
                           <div className="col gap-0 min-0">
                             <b className="truncate">@{agent.handle}</b>
                             <span className="tiny muted truncate">{agent.role}</span>
                           </div>
                         </div>
-                        <span className={`chip sm ${status.tone}`} title={status.title}><StatusDot tone={status.tone} />{statusLabel}</span>
-                      </div>
-                      <div className="small muted roster-activity">{activityCopy}</div>
-                      <div className="row between gap-8">
-                        <div className="row gap-4 tiny muted">
-                          <Icon name="thread" />
-                          <span>{workspace.threads.filter((thread) => thread.participantIds.includes(agent.id)).length} threads</span>
-                          <span>·</span>
-                          <span>{workspace.agentEvents.filter((event) => event.agentId === agent.id).length} inbox</span>
-                        </div>
-                        {inboxCount ? <span className="chip accent sm">{inboxCount} for-me</span> : null}
+                        <span className={`chip sm agent-roster-status ${status.tone}`} title={status.title}>
+                          <StatusDot tone={status.tone} />
+                          <span className="agent-chip-text">{statusLabel}</span>
+                        </span>
                       </div>
                     </button>
                   );
@@ -2694,7 +2693,7 @@ function DocumentEditor({
                 <Icon name="thread" />
                 <b className="small">New thread</b>
               </div>
-              <button className="btn ghost icon sm" onClick={() => setThreadDraftOpen(false)} type="button">×</button>
+              <button className="btn ghost icon sm" onClick={() => setThreadDraftOpen(false)} type="button" aria-label="Close">×</button>
             </div>
             <div className="thread-drafter-body">
               <div className="quoted-range">
@@ -2722,7 +2721,7 @@ function DocumentEditor({
                 <b className="small">{activeThreadGroup.threads.length} thread{activeThreadGroup.threads.length === 1 ? "" : "s"} on this line</b>
                 <div className="tiny muted">line {activeThreadGroup.line}</div>
               </div>
-              <button className="btn ghost icon sm" onClick={() => setActiveThreadGroup(null)} type="button">×</button>
+              <button className="btn ghost icon sm" onClick={() => setActiveThreadGroup(null)} type="button" aria-label="Close">×</button>
             </div>
             <div className="thread-popover-list">
               {activeThreadGroup.threads.map((thread) => (
@@ -2783,7 +2782,6 @@ function ThreadsPanel({
       <div className="ctx-body">
         <div className="row between">
           <span className="label">Threads on this doc</span>
-          <button className="btn ghost sm icon" type="button"><Icon name="plus" /></button>
         </div>
         <p className="empty-note">No threads on this document yet. Select text in the editor and open a thread.</p>
       </div>
@@ -2796,7 +2794,7 @@ function ThreadsPanel({
         <div className="tdetail-head">
           <div className="col gap-6 min-0">
             <div className="row gap-6">
-              <button className="btn ghost icon sm" type="button" onClick={() => onSelectThread("")}>
+              <button className="btn ghost icon sm" type="button" onClick={() => onSelectThread("")} aria-label="Back to thread list">
                 <Icon name="back" />
               </button>
               <b>Thread</b>
@@ -2812,7 +2810,6 @@ function ThreadsPanel({
               ) : null}
             </div>
           </div>
-          <button className="btn ghost icon sm" type="button"><Icon name="more" /></button>
         </div>
         <div className="tdetail-body">
           {selected.messages.map((message) => (
@@ -2843,7 +2840,6 @@ function ThreadsPanel({
     <div className="ctx-body">
       <div className="row between ctx-head">
         <span className="label">Threads on this doc</span>
-        <button className="btn ghost sm icon" type="button"><Icon name="plus" /></button>
       </div>
       <div className="tlist">
         {threads.map((thread) => (
@@ -2982,44 +2978,58 @@ function PeoplePanel({
   const rows = people
     .map((person) => ({ person, online: personOnline(person, now) }))
     .sort((a, b) => rank(a) - rank(b) || a.person.handle.localeCompare(b.person.handle));
+  const humans = rows.filter((r) => r.person.kind !== "agent");
+  const agentRows = rows.filter((r) => r.person.kind === "agent");
+  const renderRow = ({ person, online }: { person: WorkspacePerson; online: boolean }) => {
+    const agent = person.kind === "agent" ? agentsById.get(person.id) : undefined;
+    // The online ring is driven by personOnline, which decays on the presence freshness window
+    // (like daemon liveness). A closed laptop drops the ring — we never show a stale "online".
+    // This honest-decay rule is Eva's ruling; keep it documented at every ring site.
+    const avatar = (
+      <div
+        className={`avi ${person.kind === "agent" ? "agent" : "you"}${online ? " online" : ""}`}
+        title={online ? "Online" : undefined}
+      >
+        {initials(person.handle || person.name)}
+      </div>
+    );
+    const body = (
+      <div className="col gap-2 min-0">
+        <strong className="small truncate">@{person.handle}</strong>
+        <span className="tiny muted truncate">{personRoleTag[person.kind]}</span>
+        {online ? <span className="sr-only">Online</span> : null}
+      </div>
+    );
+    return agent ? (
+      <button key={person.id} className="agent-card" onClick={() => onAgent(agent)}>
+        {avatar}
+        {body}
+      </button>
+    ) : (
+      <article key={person.id} className="agent-card">
+        {avatar}
+        {body}
+      </article>
+    );
+  };
   return (
     <div className="ctx-body people-pane">
       <div className="row between ctx-head">
         <span className="label">People</span>
         <span className="chip sm">{people.length}</span>
       </div>
-      {rows.map(({ person, online }) => {
-        const agent = person.kind === "agent" ? agentsById.get(person.id) : undefined;
-        // The online ring is driven by personOnline, which decays on the presence freshness window
-        // (like daemon liveness). A closed laptop drops the ring — we never show a stale "online".
-        // This honest-decay rule is Eva's ruling; keep it documented at every ring site.
-        const avatar = (
-          <div
-            className={`avi ${person.kind === "agent" ? "agent" : "you"}${online ? " online" : ""}`}
-            title={online ? "Online" : undefined}
-          >
-            {initials(person.handle || person.name)}
-          </div>
-        );
-        const body = (
-          <div className="col gap-2 min-0">
-            <strong className="small truncate">@{person.handle}</strong>
-            <span className="tiny muted truncate">{personRoleTag[person.kind]}</span>
-            {online ? <span className="sr-only">Online</span> : null}
-          </div>
-        );
-        return agent ? (
-          <button key={person.id} className="agent-card" onClick={() => onAgent(agent)}>
-            {avatar}
-            {body}
-          </button>
-        ) : (
-          <article key={person.id} className="agent-card">
-            {avatar}
-            {body}
-          </article>
-        );
-      })}
+      {humans.length ? (
+        <>
+          <div className="people-section-head"><span className="tiny muted">Members</span><span className="chip sm">{humans.length}</span></div>
+          {humans.map(renderRow)}
+        </>
+      ) : null}
+      {agentRows.length ? (
+        <>
+          <div className="people-section-head"><span className="tiny muted">Agents</span><span className="chip sm">{agentRows.length}</span></div>
+          {agentRows.map(renderRow)}
+        </>
+      ) : null}
       {!people.length ? <p className="empty-note">No people in this workspace yet.</p> : null}
     </div>
   );
@@ -3893,7 +3903,7 @@ export function Modal({ title, children, onClose, wide }: { title: string; child
       <section className={`modal-card card lifted${wide ? " wide" : ""}`}>
         <header className="modal-header">
           <h2 className="modal-title">{title}</h2>
-          <button className="btn ghost icon sm" onClick={onClose}>×</button>
+          <button className="btn ghost icon sm" onClick={onClose} aria-label="Close">×</button>
         </header>
         {children}
       </section>

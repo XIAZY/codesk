@@ -1,5 +1,5 @@
 import * as Y from "yjs";
-import type { ActivityEvent, Agent, AgentEvent, AgentRun, Daemon, ThreadAnchor, ThreadItem, WorkspaceEvent, WorkspaceState } from "./types";
+import type { ActivityEvent, Agent, AgentEvent, AgentRun, Daemon, DocumentItem, ThreadAnchor, ThreadItem, WorkspaceEvent, WorkspaceState } from "./types";
 
 export const identifierPattern = "[a-z0-9_-]+";
 export const identifierHelpText = "Only lowercase letters, numbers, underscores, and dashes.";
@@ -434,6 +434,7 @@ export type WorkspaceInboxSummary = {
 
 const resolvedInboxStatuses = new Set(["completed", "dismissed"]);
 const terminalInboxRunStatuses = new Set(["completed", "failed", "stopped", "cancelled", "canceled"]);
+const actionableInboxWindowMs = 14 * 24 * 60 * 60 * 1000;
 
 function inboxEventOpen(event: AgentEvent) {
   return !resolvedInboxStatuses.has((event.status || "").toLowerCase());
@@ -446,6 +447,24 @@ function inboxEventTime(event: AgentEvent) {
 function inboxTimeValue(value: string) {
   const ms = Date.parse(value);
   return Number.isNaN(ms) ? 0 : ms;
+}
+
+function inboxEventFresh(event: AgentEvent, nowMs?: number) {
+  if (nowMs === undefined) {
+    return true;
+  }
+  const occurredMs = inboxTimeValue(inboxEventTime(event));
+  if (!occurredMs) {
+    return false;
+  }
+  return occurredMs >= nowMs - actionableInboxWindowMs;
+}
+
+function inboxDocumentResolvable(event: AgentEvent, documents?: DocumentItem[]) {
+  if (!event.documentId || !documents) {
+    return true;
+  }
+  return documents.some((document) => document.id === event.documentId);
 }
 
 function inboxAgentLabel(handle: string | undefined) {
@@ -491,7 +510,8 @@ function isNeedsReviewEvent(event: AgentEvent) {
 // pendingReviewEvent) share one split predicate — isReliableMentionEvent — so a for_me event
 // lights both or neither, never one alone. That agreement is pinned by the "B×D split" test.
 export function workspaceInboxSummary(
-  workspace: Pick<WorkspaceState, "agents" | "agentRuns" | "agentEvents">,
+  workspace: Pick<WorkspaceState, "agents" | "agentRuns" | "agentEvents"> & { documents?: DocumentItem[] },
+  options: { nowMs?: number } = {},
 ): WorkspaceInboxSummary {
   const items: WorkspaceInboxItem[] = [];
 
@@ -502,6 +522,9 @@ export function workspaceInboxSummary(
     const occurredAt = inboxEventTime(event);
     if (isReliableMentionEvent(event)) {
       // Agent mention events are activity-only until human-targeted mention events exist.
+      continue;
+    }
+    if (!inboxEventFresh(event, options.nowMs) || !inboxDocumentResolvable(event, workspace.documents)) {
       continue;
     }
     if (isNeedsReviewEvent(event)) {
