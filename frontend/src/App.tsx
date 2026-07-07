@@ -1730,6 +1730,7 @@ export function WorkspaceApp({
             <button
               className="btn ghost icon sm"
               title="New doc"
+              aria-label="New document"
               type="button"
               onClick={() => void createDocument()}
               disabled={creatingDocument || !workspace.rootDocumentId}
@@ -1839,7 +1840,7 @@ export function WorkspaceApp({
           </div>
           <div className="row gap-6">
             <CollaboratorAvatars people={workspacePeopleList} onClick={() => setRightTab("coworkers")} />
-            <button className="btn sm ghost icon" type="button" onClick={() => setModal("rename")} disabled={!activeDocument}>
+            <button className="btn sm ghost icon" type="button" onClick={() => setModal("rename")} disabled={!activeDocument} aria-label="Document options">
               <Icon name="more" />
             </button>
           </div>
@@ -2712,7 +2713,7 @@ function DocumentEditor({
                 <Icon name="thread" />
                 <b className="small">New thread</b>
               </div>
-              <button className="btn ghost icon sm" onClick={() => setThreadDraftOpen(false)} type="button">×</button>
+              <button className="btn ghost icon sm" onClick={() => setThreadDraftOpen(false)} type="button" aria-label="Close">×</button>
             </div>
             <div className="thread-drafter-body">
               <div className="quoted-range">
@@ -2740,7 +2741,7 @@ function DocumentEditor({
                 <b className="small">{activeThreadGroup.threads.length} thread{activeThreadGroup.threads.length === 1 ? "" : "s"} on this line</b>
                 <div className="tiny muted">line {activeThreadGroup.line}</div>
               </div>
-              <button className="btn ghost icon sm" onClick={() => setActiveThreadGroup(null)} type="button">×</button>
+              <button className="btn ghost icon sm" onClick={() => setActiveThreadGroup(null)} type="button" aria-label="Close">×</button>
             </div>
             <div className="thread-popover-list">
               {activeThreadGroup.threads.map((thread) => (
@@ -2801,7 +2802,6 @@ function ThreadsPanel({
       <div className="ctx-body">
         <div className="row between">
           <span className="label">Threads on this doc</span>
-          <button className="btn ghost sm icon" type="button"><Icon name="plus" /></button>
         </div>
         <p className="empty-note">No threads on this document yet. Select text in the editor and open a thread.</p>
       </div>
@@ -2814,7 +2814,7 @@ function ThreadsPanel({
         <div className="tdetail-head">
           <div className="col gap-6 min-0">
             <div className="row gap-6">
-              <button className="btn ghost icon sm" type="button" onClick={() => onSelectThread("")}>
+              <button className="btn ghost icon sm" type="button" onClick={() => onSelectThread("")} aria-label="Back to thread list">
                 <Icon name="back" />
               </button>
               <b>Thread</b>
@@ -2830,7 +2830,6 @@ function ThreadsPanel({
               ) : null}
             </div>
           </div>
-          <button className="btn ghost icon sm" type="button"><Icon name="more" /></button>
         </div>
         <div className="tdetail-body">
           {selected.messages.map((message) => (
@@ -2861,7 +2860,6 @@ function ThreadsPanel({
     <div className="ctx-body">
       <div className="row between ctx-head">
         <span className="label">Threads on this doc</span>
-        <button className="btn ghost sm icon" type="button"><Icon name="plus" /></button>
       </div>
       <div className="tlist">
         {threads.map((thread) => (
@@ -3925,7 +3923,7 @@ export function Modal({ title, children, onClose, wide }: { title: string; child
       <section className={`modal-card card lifted${wide ? " wide" : ""}`}>
         <header className="modal-header">
           <h2 className="modal-title">{title}</h2>
-          <button className="btn ghost icon sm" onClick={onClose}>×</button>
+          <button className="btn ghost icon sm" onClick={onClose} aria-label="Close">×</button>
         </header>
         {children}
       </section>
