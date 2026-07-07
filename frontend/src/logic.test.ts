@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import {
+  agentDisplayStatus,
   agentStatus,
   agentsByDaemon,
   applyReplaceToYText,
@@ -39,7 +40,7 @@ import {
   threadReplyLabel,
 } from "./logic";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
-import type { ActivityEvent, Agent, Daemon, PresenceItem, UserItem, WorkspaceState } from "./types";
+import type { ActivityEvent, Agent, AgentEvent, AgentRun, Daemon, PresenceItem, UserItem, WorkspaceState } from "./types";
 
 function baseWorkspace(): WorkspaceState {
   return {
@@ -278,8 +279,119 @@ describe("presentation grouping", () => {
     };
 
     expect(daemonStatus(daemon)).toBe("stale");
-    expect(agentStatus(agent, [{ id: "run", agentId: "agent", agentHandle: "codex", agentName: "Codex", agentKind: "codex", workspaceRoot: "", workingDirectory: "", prompt: "", status: "running", desiredStatus: "running", updatedAt: "now" }])).toBe("working");
+    expect(agentStatus(agent, [{ id: "run", agentId: "agent", agentHandle: "codex", agentName: "Codex", agentKind: "codex", workspaceRoot: "", workingDirectory: "", prompt: "", status: "running", desiredStatus: "running", updatedAt: "now" }])).toBe("running");
     expect(agentsByDaemon([agent], [daemon])[0].daemonName).toBe("Local");
+  });
+
+  it("derives the ratified agent status vocabulary and priority ladder", () => {
+    const nowMs = 1_000_000;
+    const onlineDaemon = withReceipt({ ...daemonFixtures.justSeen, id: "daemon" }, nowMs);
+    const agent: Agent = {
+      id: "agent",
+      daemonId: "daemon",
+      handle: "codex",
+      name: "Codex",
+      role: "Review",
+      kind: "codex",
+      workspaceRoot: "agents/agent",
+      status: "idle",
+      currentTask: "",
+      currentActivity: "",
+      currentRunId: "run",
+      updatedAt: "now",
+    };
+    const run = (status: string, extra: Partial<AgentRun> = {}): AgentRun => ({
+      id: "run",
+      agentId: "agent",
+      agentHandle: "codex",
+      agentName: "Codex",
+      agentKind: "codex",
+      workspaceRoot: "",
+      workingDirectory: "",
+      prompt: "",
+      status,
+      desiredStatus: status === "completed" ? "completed" : "running",
+      updatedAt: "2026-01-01T00:00:00Z",
+      ...extra,
+    });
+    const review: AgentEvent = {
+      id: "event",
+      agentId: "agent",
+      agentHandle: "codex",
+      type: "review.requested",
+      box: "for_me",
+      status: "pending",
+      summary: "Review proposed changes",
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+    };
+
+    expect(agentDisplayStatus(agent, [run("running", { lastMessage: "editing sidebar" })], [onlineDaemon], [], nowMs)).toMatchObject({
+      key: "running",
+      label: "Running · editing sidebar",
+    });
+    expect(agentDisplayStatus(agent, [run("queued")], [onlineDaemon], [], nowMs)).toMatchObject({ key: "queued", label: "Queued" });
+    expect(agentDisplayStatus(agent, [], [onlineDaemon], [], nowMs)).toMatchObject({
+      key: "idle",
+      label: "Idle",
+      detailLabel: "Standing by",
+      title: "Standing by",
+    });
+    expect(agentDisplayStatus(agent, [run("completed")], [onlineDaemon], [], nowMs)).toMatchObject({
+      key: "idle",
+      label: "Idle",
+      detailLabel: "Standing by",
+    });
+    expect(agentDisplayStatus(agent, [run("completed")], [onlineDaemon], [review], nowMs)).toMatchObject({ key: "needs-review", label: "Needs your review" });
+    expect(agentDisplayStatus(agent, [run("failed", { error: "tool exited 1" })], [onlineDaemon], [review], nowMs)).toMatchObject({
+      key: "failed",
+      label: "Failed — view reason",
+      reason: "tool exited 1",
+    });
+
+    const deadDaemon = withReceipt({ ...daemonFixtures.dead, id: "daemon" }, nowMs);
+    expect(agentDisplayStatus(agent, [run("failed", { error: "tool exited 1" })], [deadDaemon], [review], nowMs)).toMatchObject({
+      key: "waiting-env",
+      label: "Waiting for local environment",
+    });
+
+    const deletedDaemon = { ...daemonFixtures.softDeleted, id: "daemon" };
+    expect(agentDisplayStatus(agent, [run("queued")], [deletedDaemon], [], nowMs)).toMatchObject({ key: "waiting-env" });
+  });
+
+  it("keeps stale-but-not-dead daemon agents on their last running state until liveness decays", () => {
+    const receivedAtMs = 10_000;
+    const daemon = withReceipt({ ...daemonFixtures.justSeen, id: "daemon", lastSeenAgeSeconds: 0 }, receivedAtMs);
+    const agent: Agent = {
+      id: "agent",
+      daemonId: "daemon",
+      handle: "codex",
+      name: "Codex",
+      role: "Review",
+      kind: "codex",
+      workspaceRoot: "agents/agent",
+      status: "idle",
+      currentTask: "",
+      currentActivity: "updating tests",
+      currentRunId: "run",
+      updatedAt: "now",
+    };
+    const runningRun: AgentRun = {
+      id: "run",
+      agentId: "agent",
+      agentHandle: "codex",
+      agentName: "Codex",
+      agentKind: "codex",
+      workspaceRoot: "",
+      workingDirectory: "",
+      prompt: "",
+      status: "running",
+      desiredStatus: "running",
+      updatedAt: "2026-01-01T00:00:00Z",
+    };
+
+    expect(agentDisplayStatus(agent, [runningRun], [daemon], [], receivedAtMs + DAEMON_STALE_WINDOW_MS).key).toBe("running");
+    expect(agentDisplayStatus(agent, [runningRun], [daemon], [], receivedAtMs + DAEMON_STALE_WINDOW_MS + 1).key).toBe("waiting-env");
   });
 
   it("counts humans and agents as coworkers", () => {

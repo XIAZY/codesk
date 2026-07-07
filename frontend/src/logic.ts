@@ -1,5 +1,5 @@
 import * as Y from "yjs";
-import type { ActivityEvent, Agent, AgentRun, Daemon, ThreadAnchor, ThreadItem, WorkspaceEvent, WorkspaceState } from "./types";
+import type { ActivityEvent, Agent, AgentEvent, AgentRun, Daemon, ThreadAnchor, ThreadItem, WorkspaceEvent, WorkspaceState } from "./types";
 
 export const identifierPattern = "[a-z0-9_-]+";
 export const identifierHelpText = "Only lowercase letters, numbers, underscores, and dashes.";
@@ -282,15 +282,120 @@ export function stampDaemonReceipt(event: WorkspaceEvent, nowMs: number): Worksp
   return event;
 }
 
+export type AgentDisplayStatusKey = "running" | "queued" | "waiting-env" | "needs-review" | "failed" | "idle";
+
+export type AgentDisplayStatus = {
+  key: AgentDisplayStatusKey;
+  tone: AgentDisplayStatusKey;
+  label: string;
+  detailLabel?: string;
+  title: string;
+  action?: string;
+  reason?: string;
+  run?: AgentRun;
+  event?: AgentEvent;
+};
+
+const terminalAgentRunStatuses = new Set(["completed", "failed", "stopped", "cancelled", "canceled"]);
+
+function runUpdatedAtMs(run: AgentRun) {
+  const value = Date.parse(run.updatedAt);
+  return Number.isNaN(value) ? 0 : value;
+}
+
+function currentAgentRun(agent: Agent, runs: AgentRun[]) {
+  const exact = agent.currentRunId ? runs.find((run) => run.id === agent.currentRunId) : undefined;
+  if (exact) {
+    return exact;
+  }
+  const agentRuns = runs
+    .filter((run) => run.agentId === agent.id)
+    .sort((left, right) => runUpdatedAtMs(right) - runUpdatedAtMs(left));
+  return agentRuns.find((run) => !terminalAgentRunStatuses.has(run.status)) ?? agentRuns[0];
+}
+
+function textOrUndefined(value?: string) {
+  const text = (value ?? "").trim().replace(/\s+/g, " ");
+  return text || undefined;
+}
+
+function runningAction(agent: Agent, run?: AgentRun) {
+  const candidates = [run?.lastMessage, agent.currentActivity, agent.currentTask];
+  for (const candidate of candidates) {
+    const text = textOrUndefined(candidate);
+    if (!text) {
+      continue;
+    }
+    const normalized = text.toLowerCase();
+    if (normalized === "running" || normalized === "working" || normalized === "queued" || normalized === "queued in daemon") {
+      continue;
+    }
+    return text;
+  }
+  return "Working";
+}
+
+function failureReason(agent: Agent, run?: AgentRun) {
+  for (const candidate of [run?.error, run?.lastMessage, agent.currentActivity]) {
+    const text = textOrUndefined(candidate);
+    if (!text || text.toLowerCase() === "failed") {
+      continue;
+    }
+    return text;
+  }
+  return "No failure reason was provided.";
+}
+
+function pendingReviewEvent(agent: Agent, events: AgentEvent[]) {
+  return events.find((event) => event.agentId === agent.id && event.box === "for_me" && event.status !== "completed" && event.status !== "dismissed");
+}
+
+function hasQueuedWork(agent: Agent, run?: AgentRun) {
+  return !!run && !terminalAgentRunStatuses.has(run.status) && (run.status === "queued" || agent.status === "queued");
+}
+
+function status(key: AgentDisplayStatusKey, label: string, title = label, extra: Omit<AgentDisplayStatus, "key" | "tone" | "label" | "title"> = {}): AgentDisplayStatus {
+  return { key, tone: key, label, title, ...extra };
+}
+
+export function agentDisplayStatus(
+  agent: Agent,
+  runs: AgentRun[],
+  daemons?: Daemon[],
+  events: AgentEvent[] = [],
+  nowMs = Date.now(),
+): AgentDisplayStatus {
+  const daemon = daemons?.find((item) => item.id === agent.daemonId);
+  const daemonState = daemon ? daemonLiveStatus(daemon, nowMs) : daemons ? "disconnected" : "";
+  if (daemonState === "disconnected" || daemonState === "deleted") {
+    return status("waiting-env", "Waiting for local environment", "Waiting for local environment", { run: currentAgentRun(agent, runs) });
+  }
+
+  const run = currentAgentRun(agent, runs);
+  if (agent.status === "failed" || run?.status === "failed") {
+    const reason = failureReason(agent, run);
+    return status("failed", "Failed — view reason", `Failed — view reason: ${reason}`, { reason, run });
+  }
+
+  const reviewEvent = pendingReviewEvent(agent, events);
+  if (reviewEvent) {
+    return status("needs-review", "Needs your review", reviewEvent.summary ? `Needs your review: ${reviewEvent.summary}` : "Needs your review", { event: reviewEvent, run });
+  }
+
+  if (agent.status === "working" || run?.status === "running" || (run?.desiredStatus === "running" && run && !terminalAgentRunStatuses.has(run.status) && run.status !== "queued")) {
+    const action = runningAction(agent, run);
+    return status("running", `Running · ${action}`, `Running · ${action}`, { action, run });
+  }
+
+  if (hasQueuedWork(agent, run)) {
+    return status("queued", "Queued", "Queued", { run });
+  }
+
+  return status("idle", "Idle", "Standing by", { detailLabel: "Standing by", run });
+}
+
 export function agentStatus(agent: Agent, runs: AgentRun[]) {
-  const run = runs.find((item) => item.id === agent.currentRunId || item.agentId === agent.id);
-  if (agent.status === "working" || (run && run.desiredStatus === "running" && !["completed", "failed", "stopped"].includes(run.status))) {
-    return "working";
-  }
-  if (agent.status === "disconnected") {
-    return "disconnected";
-  }
-  return "idle";
+  return agentDisplayStatus(agent, runs).key;
 }
 
 export function coworkerCount(workspace: Pick<WorkspaceState, "agents" | "users">) {
