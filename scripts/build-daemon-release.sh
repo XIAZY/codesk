@@ -7,6 +7,7 @@ platforms="${PLATFORMS:-}"
 all_platforms="darwin/amd64 darwin/arm64 linux/amd64 linux/arm64"
 
 root_dir="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
+. "$root_dir/scripts/lib/testtmp.sh"
 case "$dist_dir" in
 	/*) dist_abs="$dist_dir" ;;
 	*) dist_abs="$root_dir/$dist_dir" ;;
@@ -14,7 +15,7 @@ esac
 
 out_dir="$dist_abs/$version"
 latest_dir="$dist_abs/latest"
-tmp_dir="${TMPDIR:-/tmp}/notty-daemon-release-$$"
+tmp_dir="$(notty_test_mktemp notty-daemon-release)"
 manifest="$out_dir/manifest.json"
 installer="$root_dir/deploy/daemons/install.sh"
 uninstaller="$root_dir/deploy/daemons/uninstall.sh"

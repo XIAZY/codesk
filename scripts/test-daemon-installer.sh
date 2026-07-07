@@ -3,7 +3,8 @@ set -eu
 
 repo_dir="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 installer="$repo_dir/deploy/daemons/install.sh"
-tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/notty-installer-test.XXXXXX")"
+. "$repo_dir/scripts/lib/testtmp.sh"
+tmp_dir="$(notty_test_mktemp notty-installer-test)"
 
 cleanup() {
 	rm -rf "$tmp_dir"
