@@ -15,6 +15,7 @@ const (
 	ActionManageDaemons   = "manage_daemons"   // create/delete daemons
 	ActionEditDocuments   = "edit_documents"   // create/update/delete documents
 	ActionDeleteWorkspace = "delete_workspace" // workspace delete
+	ActionManageWorkspace = "manage_workspace" // PATCH workspace settings (name/default runtime; slug is owner-only)
 )
 
 var rolePermissions = map[string]map[string]struct{}{
@@ -24,6 +25,7 @@ var rolePermissions = map[string]map[string]struct{}{
 	ActionManageDaemons:   {MembershipRoleOwner: {}, MembershipRoleAdmin: {}},
 	ActionEditDocuments:   {MembershipRoleOwner: {}, MembershipRoleAdmin: {}, MembershipRoleMember: {}},
 	ActionDeleteWorkspace: {MembershipRoleOwner: {}},
+	ActionManageWorkspace: {MembershipRoleOwner: {}, MembershipRoleAdmin: {}},
 }
 
 func validateMembershipRole(role string) error {

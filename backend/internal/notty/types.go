@@ -94,6 +94,7 @@ type Workspace struct {
 	Name                   string    `json:"name"`
 	RootDocumentID         string    `json:"rootDocumentId,omitempty"`
 	LastAccessedDocumentID string    `json:"lastAccessedDocumentId,omitempty"`
+	DefaultRuntime         string    `json:"defaultRuntime,omitempty"`
 	CreatedAt              time.Time `json:"createdAt"`
 	UpdatedAt              time.Time `json:"updatedAt"`
 }
@@ -322,6 +323,20 @@ type CreateWorkspaceRequest struct {
 	Name   string `json:"name"`
 	Slug   string `json:"slug"`
 	Handle string `json:"handle"`
+}
+
+// UpdateWorkspaceRequest is a partial update: nil means "leave unchanged",
+// a pointer to "" is a valid value only for DefaultRuntime (no default).
+type UpdateWorkspaceRequest struct {
+	Name           *string `json:"name"`
+	Slug           *string `json:"slug"`
+	DefaultRuntime *string `json:"defaultRuntime"`
+}
+
+// DeleteWorkspaceRequest carries the server-enforced confirmation: the caller
+// must echo the workspace's exact current name to prove intent.
+type DeleteWorkspaceRequest struct {
+	ConfirmName string `json:"confirmName"`
 }
 
 type AddWorkspaceMemberRequest struct {

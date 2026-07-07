@@ -29,10 +29,14 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			slug TEXT UNIQUE NOT NULL,
 			name TEXT NOT NULL,
 			root_document_id UUID NOT NULL,
+			default_runtime TEXT NOT NULL DEFAULT '',
 			created_at TIMESTAMPTZ NOT NULL,
 			updated_at TIMESTAMPTZ NOT NULL
 		)
 		`,
+		// Idempotent column-add for databases created before default_runtime existed
+		// (instant backfill: the column carries a default).
+		`ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS default_runtime TEXT NOT NULL DEFAULT ''`,
 		`
 		CREATE TABLE IF NOT EXISTS accounts (
 			id UUID PRIMARY KEY,
@@ -646,6 +650,15 @@ func initPostgresSchemaConstraints(db *sql.DB) error {
 		`CREATE OR REPLACE FUNCTION on_actor_delete()
 		RETURNS TRIGGER AS $fn$
 		BEGIN
+			-- When the whole workspace is being deleted, its row is already gone
+			-- by the time the member-row cascade fires this trigger. Touching
+			-- sibling rows then re-validates their workspace FK against a deleted
+			-- workspace and aborts the cascade — so actor cleanup only applies
+			-- while the workspace survives; otherwise the cascade removes
+			-- everything anyway.
+			IF NOT EXISTS (SELECT 1 FROM workspaces WHERE id = OLD.workspace_id) THEN
+				RETURN OLD;
+			END IF;
 			UPDATE document_updates SET actor_id = NULL WHERE actor_type = TG_ARGV[0] AND actor_id = OLD.id;
 			UPDATE threads SET created_by_id = NULL WHERE created_by_type = TG_ARGV[0] AND created_by_id = OLD.id;
 			UPDATE thread_messages SET author_id = NULL WHERE author_type = TG_ARGV[0] AND author_id = OLD.id;
@@ -671,6 +684,10 @@ func initPostgresSchemaConstraints(db *sql.DB) error {
 		`CREATE OR REPLACE FUNCTION on_daemon_delete()
 		RETURNS TRIGGER AS $fn$
 		BEGIN
+			-- Same workspace-cascade guard as on_actor_delete above.
+			IF NOT EXISTS (SELECT 1 FROM workspaces WHERE id = OLD.workspace_id) THEN
+				RETURN OLD;
+			END IF;
 			UPDATE document_updates SET actor_id = NULL WHERE actor_type = 'daemon' AND actor_id = OLD.id;
 			UPDATE activities SET actor_id = NULL WHERE actor_type = 'daemon' AND actor_id = OLD.id;
 			UPDATE activities SET provenance_actor_id = NULL WHERE provenance_actor_type = 'daemon' AND provenance_actor_id = OLD.id;
