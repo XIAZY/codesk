@@ -13,14 +13,16 @@
   --paper-3: oklch(0.935 0.010 75);
   --border: oklch(0.90 0.008 75);
   --border-strong: oklch(0.86 0.010 75);
-  --accent: oklch(0.68 0.09 60);
+  /* #28 brand dual-color (qianyi logo theme): human = amber, agent = soft blue.
+     Identity axis only — §6 status colors (--iris/--warn/--err) stay separate. */
+  --accent: oklch(0.72 0.11 60);
   --accent-50: oklch(0.965 0.020 60);
-  --accent-100: oklch(0.90 0.038 60);
-  --accent-700: oklch(0.44 0.07 60);
-  --agent: oklch(0.62 0.08 230);
+  --accent-100: oklch(0.87 0.055 55);
+  --accent-700: oklch(0.46 0.11 58);
+  --agent: oklch(0.64 0.06 235);
   --agent-50: oklch(0.965 0.018 230);
-  --agent-100: oklch(0.90 0.035 230);
-  --agent-700: oklch(0.40 0.06 230);
+  --agent-100: oklch(0.86 0.05 235);
+  --agent-700: oklch(0.44 0.085 238);
   --iris: oklch(0.55 0.09 285);
   --iris-50: oklch(0.965 0.018 285);
   --iris-700: oklch(0.42 0.09 285);
@@ -949,13 +951,13 @@ svg.i.sm {
   position: relative;
 }
 
-.nav-item .ct.inbox-ct.needs-review {
-  background: var(--needs-you);
-  color: var(--paper);
-}
-
+/* #28: the Inbox count badge is the human-domain "you have work" signal → always
+   amber (--needs-you), regardless of whether the worst item is a failure. Per-item
+   severity is NOT lost — it stays in the flyout (failed rows keep red + View reason,
+   failed-first ordering). One amber badge, honest severity one click in. */
+.nav-item .ct.inbox-ct.needs-review,
 .nav-item .ct.inbox-ct.failed {
-  background: var(--danger);
+  background: var(--needs-you);
   color: var(--paper);
 }
 
@@ -978,12 +980,9 @@ svg.i.sm {
   pointer-events: none;
 }
 
-.inbox-corner-badge.needs-review {
-  background: var(--needs-you);
-}
-
+.inbox-corner-badge.needs-review,
 .inbox-corner-badge.failed {
-  background: var(--danger);
+  background: var(--needs-you);
 }
 
 .inbox-flyout {
@@ -1261,6 +1260,20 @@ button.inbox-row:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* #28: the agent status TEXT takes the §6 semantic color (the "enrichment") —
+   identity color lives on the avatar, status color on the dot AND now the text,
+   two separate axes. Running/needs-review/failed get the semantic hue; idle,
+   queued and waiting-env keep the inherited neutral gray. Status dots unchanged. */
+.agent-mini-status-label.running {
+  color: var(--iris);
+}
+.agent-mini-status-label.needs-review {
+  color: var(--warn);
+}
+.agent-mini-status-label.failed {
+  color: var(--err);
 }
 
 .account-footer {
