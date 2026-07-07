@@ -277,6 +277,10 @@ function visibleAgentStatus(
   return agentDisplayStatus(agent, runs, daemons, events, nowMs);
 }
 
+function detailStatusLabel(status: ReturnType<typeof visibleAgentStatus>) {
+  return status.detailLabel ?? status.label;
+}
+
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
@@ -2122,9 +2126,10 @@ function AgentsManagement({
                 {group.agents.map((agent) => {
                   const status = visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons, workspace.agentEvents, now);
                   const inboxCount = workspace.agentEvents.filter((event) => event.agentId === agent.id && event.box === "for_me").length;
+                  const statusLabel = detailStatusLabel(status);
                   const activityCopy = status.key === "failed" && status.reason ? status.reason : agent.currentActivity || agent.currentTask || "Waiting for workspace notifications.";
                   return (
-                    <button className="agent-roster-card" key={agent.id} onClick={() => onAgent(agent)} aria-label={`Open @${agent.handle}. Status: ${status.label}`}>
+                    <button className="agent-roster-card" key={agent.id} onClick={() => onAgent(agent)} aria-label={`Open @${agent.handle}. Status: ${statusLabel}`}>
                       <div className="between gap-8">
                         <div className="row gap-8 min-0">
                           <div className="avi agent">{initials(agent.handle)}</div>
@@ -2133,7 +2138,7 @@ function AgentsManagement({
                             <span className="tiny muted truncate">{agent.role}</span>
                           </div>
                         </div>
-                        <span className={`chip sm ${status.tone}`} title={status.title}><StatusDot tone={status.tone} />{status.label}</span>
+                        <span className={`chip sm ${status.tone}`} title={status.title}><StatusDot tone={status.tone} />{statusLabel}</span>
                       </div>
                       <div className="small muted roster-activity">{activityCopy}</div>
                       <div className="row between gap-8">
@@ -3117,13 +3122,14 @@ export function AgentDetailModal({ api, workspaceId, agentId, agents, daemons, r
   }
   const daemon = daemons.find((item) => item.id === agent.daemonId);
   const status = visibleAgentStatus(agent, runs, daemons, agentEvents, now);
+  const statusLabel = detailStatusLabel(status);
   return (
     <Modal title={`@${agent.handle}`} onClose={onClose}>
       <div className="form-stack">
         <div className="modal-identity">
           <div className="avi agent">{initials(agent.handle)}</div>
           <div className="col gap-2">
-            <span className={`chip sm ${status.tone}`} title={status.title}><StatusDot tone={status.tone} /> {status.label}</span>
+            <span className={`chip sm ${status.tone}`} title={status.title}><StatusDot tone={status.tone} /> {statusLabel}</span>
             <span className="small muted">Daemon: {daemon?.name ?? agent.daemonId}</span>
           </div>
         </div>
@@ -3196,7 +3202,7 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
             <p className="small muted">Agents: {daemonAgents.length}</p>
             {daemonAgents.map((agent) => {
               const agentStatus = visibleAgentStatus(agent, runs, [daemon], agentEvents, now);
-              return <p className="small" key={agent.id}>@{agent.handle} · {agentStatus.label}</p>;
+              return <p className="small" key={agent.id}>@{agent.handle} · {detailStatusLabel(agentStatus)}</p>;
             })}
           </div>
           <button className="btn accent full" onClick={() => void prepareReinstall()} disabled={reinstallLoading}>Reinstall daemon</button>

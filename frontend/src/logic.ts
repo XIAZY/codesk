@@ -282,12 +282,13 @@ export function stampDaemonReceipt(event: WorkspaceEvent, nowMs: number): Worksp
   return event;
 }
 
-export type AgentDisplayStatusKey = "running" | "queued" | "waiting-env" | "needs-review" | "failed";
+export type AgentDisplayStatusKey = "running" | "queued" | "waiting-env" | "needs-review" | "failed" | "idle";
 
 export type AgentDisplayStatus = {
   key: AgentDisplayStatusKey;
   tone: AgentDisplayStatusKey;
   label: string;
+  detailLabel?: string;
   title: string;
   action?: string;
   reason?: string;
@@ -349,6 +350,10 @@ function pendingReviewEvent(agent: Agent, events: AgentEvent[]) {
   return events.find((event) => event.agentId === agent.id && event.box === "for_me" && event.status !== "completed" && event.status !== "dismissed");
 }
 
+function hasQueuedWork(agent: Agent, run?: AgentRun) {
+  return !!run && !terminalAgentRunStatuses.has(run.status) && (run.status === "queued" || agent.status === "queued");
+}
+
 function status(key: AgentDisplayStatusKey, label: string, title = label, extra: Omit<AgentDisplayStatus, "key" | "tone" | "label" | "title"> = {}): AgentDisplayStatus {
   return { key, tone: key, label, title, ...extra };
 }
@@ -382,7 +387,11 @@ export function agentDisplayStatus(
     return status("running", `Running · ${action}`, `Running · ${action}`, { action, run });
   }
 
-  return status("queued", "Queued", "Queued", { run });
+  if (hasQueuedWork(agent, run)) {
+    return status("queued", "Queued", "Queued", { run });
+  }
+
+  return status("idle", "Idle", "Standing by", { detailLabel: "Standing by", run });
 }
 
 export function agentStatus(agent: Agent, runs: AgentRun[]) {

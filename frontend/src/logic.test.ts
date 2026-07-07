@@ -331,6 +331,17 @@ describe("presentation grouping", () => {
       label: "Running · editing sidebar",
     });
     expect(agentDisplayStatus(agent, [run("queued")], [onlineDaemon], [], nowMs)).toMatchObject({ key: "queued", label: "Queued" });
+    expect(agentDisplayStatus(agent, [], [onlineDaemon], [], nowMs)).toMatchObject({
+      key: "idle",
+      label: "Idle",
+      detailLabel: "Standing by",
+      title: "Standing by",
+    });
+    expect(agentDisplayStatus(agent, [run("completed")], [onlineDaemon], [], nowMs)).toMatchObject({
+      key: "idle",
+      label: "Idle",
+      detailLabel: "Standing by",
+    });
     expect(agentDisplayStatus(agent, [run("completed")], [onlineDaemon], [review], nowMs)).toMatchObject({ key: "needs-review", label: "Needs your review" });
     expect(agentDisplayStatus(agent, [run("failed", { error: "tool exited 1" })], [onlineDaemon], [review], nowMs)).toMatchObject({
       key: "failed",

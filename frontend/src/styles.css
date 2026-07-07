@@ -480,9 +480,13 @@ svg.i.sm {
 
 .status-dot.online,
 .status-dot.working,
-.status-dot.active,
-.status-dot.idle {
+.status-dot.active {
   background: var(--ok);
+}
+
+.status-dot.idle {
+  background: transparent;
+  border: 1.5px solid var(--ink-4);
 }
 
 .status-dot.running {

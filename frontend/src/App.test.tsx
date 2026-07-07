@@ -313,11 +313,11 @@ describe("WorkspaceApp agent status rail", () => {
       />,
     );
 
-    const agentButton = screen.getByRole("button", { name: "Open @codex. Status: Queued" });
+    const agentButton = screen.getByRole("button", { name: "Open @codex. Status: Idle" });
     expect(within(agentButton).getByText("@codex")).toBeTruthy();
-    const status = within(agentButton).getByLabelText("Status: Queued");
-    expect(status.textContent).toContain("Queued");
-    expect(status.getAttribute("title")).toBe("Queued");
+    const status = within(agentButton).getByLabelText("Status: Idle");
+    expect(status.textContent).toContain("Idle");
+    expect(status.getAttribute("title")).toBe("Standing by");
   });
 });
 
@@ -545,9 +545,9 @@ describe("AgentDetailModal live status", () => {
   const modalStatus = (container: HTMLElement) => (container.querySelector(".modal-identity .col span")?.textContent ?? "").trim();
 
   it("reflects a live agent.updated status change on the open modal instead of a click-time snapshot", () => {
-    // No active run, so the online daemon falls through to the Queued vocabulary row.
+    // No active run, so the online daemon falls through to the Idle vocabulary row.
     const { container, rerender } = render(<AgentDetailModal {...props} agents={[baseAgent]} runs={[]} onClose={vi.fn()} />);
-    expect(modalStatus(container)).toContain("Queued");
+    expect(modalStatus(container)).toContain("Standing by");
 
     // An agent.updated event flips the agent's own status to working — the open modal must move.
     rerender(<AgentDetailModal {...props} agents={[{ ...baseAgent, status: "working", currentActivity: "checking tests" }]} runs={[]} onClose={vi.fn()} />);
@@ -558,9 +558,9 @@ describe("AgentDetailModal live status", () => {
     const { container, rerender } = render(<AgentDetailModal {...props} agents={[baseAgent]} runs={[run("running")]} onClose={vi.fn()} />);
     expect(modalStatus(container)).toContain("Running · Working");
 
-    // The run completes in live state (no agent.updated). Status derives from runs too, so it moves to Queued.
+    // The run completes in live state (no agent.updated). Status derives from runs too, so it moves to Idle.
     rerender(<AgentDetailModal {...props} agents={[baseAgent]} runs={[run("completed")]} onClose={vi.fn()} />);
-    expect(modalStatus(container)).toContain("Queued");
+    expect(modalStatus(container)).toContain("Standing by");
   });
 
   it("closes when the agent is removed from the array (the reducer's agent.deleted shape)", () => {
