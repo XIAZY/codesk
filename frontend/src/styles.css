@@ -43,6 +43,17 @@
   --r-4: 24px;
   --shadow: 0 1px 0 rgba(20, 18, 12, 0.02), 0 24px 60px -42px rgba(20, 18, 12, 0.22);
   --shadow-2: 0 1px 0 rgba(20, 18, 12, 0.02), 0 30px 70px -44px rgba(20, 18, 12, 0.26);
+  /* Dark left-sidebar palette (Phase E, qianyi-approved). Only the left rail goes dark;
+     center + right rail + Manage modal stay on the warm-paper palette. Agent identity
+     avatars and status dots keep their own colors on top of this. */
+  --sb: oklch(0.14 0.004 75);
+  --sb-2: oklch(0.205 0.006 75);
+  --sb-line: oklch(0.26 0.006 75);
+  --sb-ink: oklch(0.94 0.004 75);
+  --sb-ink-2: oklch(0.62 0.006 75);
+  /* Resizable/collapsible column widths (Phase E). */
+  --left: 248px;
+  --right: 320px;
   font-family: var(--sans);
   color: var(--ink);
   background: var(--paper);
@@ -599,21 +610,141 @@ svg.i.sm {
   height: 100vh;
   min-width: 1120px;
   display: grid;
-  grid-template-columns: 248px minmax(560px, 1fr) 320px;
+  grid-template-columns: var(--left) minmax(0, 1fr) var(--right);
   overflow: hidden;
   background: var(--paper);
+  transition: grid-template-columns 0.18s ease;
+}
+
+/* While dragging the right-rail handle: kill the width animation and text selection
+   so the drag tracks the cursor 1:1 (Phase E). */
+.shell.dragging {
+  transition: none;
+  user-select: none;
+}
+
+/* Collapsed left rail: 60px icon track. Center + right absorb the freed width.
+   Labels/counts/tree/buttons hide; icons and identity avatars (+ status dots)
+   stay and center. */
+.shell.sidebar-collapsed {
+  --left: 60px;
+}
+.shell.sidebar-collapsed .sb {
+  overflow: hidden;
+}
+.shell.sidebar-collapsed .sb .workspace-switcher .col,
+.shell.sidebar-collapsed .sb .workspace-switcher select,
+.shell.sidebar-collapsed .sb .sb-search,
+.shell.sidebar-collapsed .sb .nav-item > span,
+.shell.sidebar-collapsed .sb .nav-item .ct,
+.shell.sidebar-collapsed .sb .lab,
+.shell.sidebar-collapsed .sb .doc-tree-body,
+.shell.sidebar-collapsed .sb .agent-summary .label,
+.shell.sidebar-collapsed .sb .agent-summary > .row > .btn,
+.shell.sidebar-collapsed .sb .agent-mini .small,
+.shell.sidebar-collapsed .sb .manage-entry span,
+.shell.sidebar-collapsed .sb .account-footer .small,
+.shell.sidebar-collapsed .sb .account-footer .btn {
+  display: none;
+}
+.shell.sidebar-collapsed .sb .nav-item,
+.shell.sidebar-collapsed .sb .agent-mini,
+.shell.sidebar-collapsed .sb .manage-entry,
+.shell.sidebar-collapsed .sb .workspace-switcher,
+.shell.sidebar-collapsed .sb .account-footer .row,
+.shell.sidebar-collapsed .sb .account-footer {
+  justify-content: center;
+  padding-left: 0;
+  padding-right: 0;
+}
+.shell.sidebar-collapsed .sb .workspace-switcher .row {
+  gap: 0;
+}
+/* Collapsed agent rows keep the status dot as a corner badge on the identity
+   avatar: identity color (who) + status color (what) + a11y all survive the
+   collapse (plan §3 "颜色即状态", Phase B single source, qianyi no-color-lost).
+   The avatar is centered at 24px, so anchoring off the row center lands the dot
+   on its bottom-right corner; a 1px paper ring lifts it off the avatar (Eva). */
+.shell.sidebar-collapsed .sb .agent-mini {
+  position: relative;
+}
+.shell.sidebar-collapsed .sb .agent-mini .status-dot {
+  position: absolute;
+  left: calc(50% + 4px);
+  bottom: 3px;
+  margin: 0;
+  box-shadow: 0 0 0 1px var(--paper);
+}
+
+/* Collapse toggle (in the workspace switcher) + expand affordance shown only
+   when collapsed. */
+.sb-collapse-btn,
+.sb-expand-tab {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  border: 0;
+  flex: none;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  color: var(--sb-ink-2);
+  cursor: pointer;
+}
+.sb-collapse-btn:hover,
+.sb-expand-tab:hover {
+  background: var(--sb-2);
+  color: var(--sb-ink);
+}
+.shell:not(.sidebar-collapsed) .sb-expand-tab {
+  display: none;
+}
+.shell.sidebar-collapsed .sb-collapse-btn {
+  display: none;
+}
+.shell.sidebar-collapsed .sb-expand-tab {
+  margin: 0 auto;
+}
+
+/* Right-rail resize handle — grab the left edge, clamp handled in JS. */
+.ctx {
+  position: relative;
+}
+.rz {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 10;
+}
+.rz::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  background: transparent;
+  transition: background 0.12s ease;
+}
+.rz:hover::after,
+.shell.dragging .rz::after {
+  background: color-mix(in oklab, var(--iris) 55%, transparent);
 }
 
 .shell.management-shell {
-  grid-template-columns: 248px minmax(0, 1fr);
+  grid-template-columns: var(--left) minmax(0, 1fr);
 }
 
 .sb {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  border-right: 1px solid var(--border);
-  background: var(--paper-2);
+  border-right: 1px solid var(--sb-line);
+  background: var(--sb);
+  color: var(--sb-ink);
 }
 
 .doc-area {
@@ -848,6 +979,96 @@ svg.i.sm {
 .account-footer {
   border-top: 1px solid var(--border);
   padding: 8px 12px;
+}
+
+/* --- Phase E: dark left-rail chrome --------------------------------------
+   Recolor the sidebar's text / borders / hovers / neutral chips onto the --sb
+   palette. Identity avatars (.avi.*) and status dots (.status-dot) are
+   deliberately NOT touched — their colors are the no-color-lost constraint.
+   Meaningful accent counts (.ct.has) are preserved too; only neutral chrome
+   goes dark. Center, right rail and the Manage modal stay on warm paper. */
+.sb .label,
+.sb .lab,
+.sb .group-label,
+.sb .empty-note,
+.sb .muted,
+.sb .tiny.muted,
+.sb .small.muted,
+.sb .faint {
+  color: var(--sb-ink-2);
+}
+.sb .divider,
+.sb .sb-divider {
+  background: var(--sb-line);
+}
+.sb .workspace-switcher {
+  border-bottom-color: var(--sb-line);
+}
+.sb .workspace-switcher select {
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--sb-ink-2) 50%),
+    linear-gradient(135deg, var(--sb-ink-2) 50%, transparent 50%);
+}
+.sb .input {
+  background: var(--sb-2);
+  border-color: var(--sb-line);
+  color: var(--sb-ink-2);
+}
+.sb .search-box {
+  color: var(--sb-ink-2);
+}
+.sb .kbd {
+  background: var(--sb-2);
+  border-color: var(--sb-line);
+  color: var(--sb-ink-2);
+}
+.sb .nav-item {
+  color: var(--sb-ink);
+}
+.sb .nav-item:hover {
+  background: var(--sb-2);
+}
+.sb .nav-item.on {
+  border-color: var(--sb-line);
+  background: var(--sb-2);
+  box-shadow: none;
+}
+.sb .nav-item .car,
+.sb .folder-row .ct {
+  color: var(--sb-ink-2);
+}
+.sb .nav-item .ct:not(.has) {
+  background: var(--sb-2);
+  color: var(--sb-ink-2);
+}
+.sb .folder-row {
+  color: var(--sb-ink);
+}
+.sb .folder-row:hover .car {
+  color: var(--sb-ink);
+}
+.sb .tree-children {
+  border-left-color: var(--sb-line);
+}
+.sb .agent-mini:hover {
+  background: var(--sb-2);
+}
+.sb .manage-entry {
+  color: var(--sb-ink-2);
+}
+.sb .manage-entry:hover {
+  background: var(--sb-2);
+  color: var(--sb-ink);
+}
+.sb .account-footer {
+  border-top-color: var(--sb-line);
+}
+.sb .btn.ghost {
+  color: var(--sb-ink-2);
+}
+.sb .btn.ghost:hover {
+  background: var(--sb-2);
+  color: var(--sb-ink);
 }
 
 .doc-toolbar {

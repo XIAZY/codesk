@@ -1,11 +1,12 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { ApiClient, ApiError, apiBase, daemonStaticBase, publicOrigin } from "./api";
 import { DocumentSurface, type LiveThread, type SurfaceSelection } from "./DocumentSurface";
 import type { MarkdownPreviewCommandName } from "./markdownLivePreview";
 import {
   agentStatus,
   agentsByDaemon,
+  clampRailWidth,
   buildDaemonInstallCommand,
   buildDaemonReinstallCommand,
   buildDaemonUninstallCommand,
@@ -1262,6 +1263,75 @@ export function WorkspaceApp({
   // a placeholder. If A2 slips out of the batch, flipping this default to "local-env"
   // (the tab with real content) becomes a REQUIRED pre-integration change.
   const [manageTab, setManageTab] = useState<ManageTab>("members");
+  // Phase E: collapsible left rail + resizable right rail, both remembered in localStorage.
+  const shellRef = useRef<HTMLElement>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("codesk.sb.collapsed") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [rightWidth, setRightWidth] = useState<number | null>(() => {
+    try {
+      const stored = parseInt(localStorage.getItem("codesk.right.width") || "", 10);
+      return Number.isFinite(stored) ? stored : null;
+    } catch {
+      return null;
+    }
+  });
+  const [draggingRail, setDraggingRail] = useState(false);
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((collapsed) => {
+      const next = !collapsed;
+      try {
+        localStorage.setItem("codesk.sb.collapsed", next ? "1" : "0");
+      } catch {
+        // ignore storage failures (private mode) — collapse still works this session.
+      }
+      return next;
+    });
+  }, []);
+  // Clamp the right rail so a drag can never crush or overlap the document
+  // (plan §4.1 "不塌、不错位"). Pure bounds live in logic.ts for direct testing.
+  const clampRightWidth = useCallback(
+    (width: number) => {
+      const shellWidth = shellRef.current?.getBoundingClientRect().width ?? 1120;
+      return clampRailWidth(width, shellWidth, sidebarCollapsed);
+    },
+    [sidebarCollapsed]
+  );
+  useEffect(() => {
+    if (!draggingRail) {
+      return;
+    }
+    const onMove = (event: MouseEvent) => {
+      const rect = shellRef.current?.getBoundingClientRect();
+      if (!rect) {
+        return;
+      }
+      setRightWidth(clampRightWidth(rect.right - event.clientX));
+    };
+    const onUp = () => {
+      setDraggingRail(false);
+      setRightWidth((width) => {
+        if (width != null) {
+          try {
+            localStorage.setItem("codesk.right.width", String(width));
+          } catch {
+            // ignore storage failures.
+          }
+        }
+        return width;
+      });
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [draggingRail, clampRightWidth]);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [selectedDaemonId, setSelectedDaemonId] = useState<string | null>(null);
   const [selectedThreadId, setSelectedThreadId] = useState("");
@@ -1453,7 +1523,11 @@ export function WorkspaceApp({
   }, [createDocument]);
 
   return (
-    <main className={`shell ${centerView === "document" ? "" : "management-shell"}`}>
+    <main
+      ref={shellRef}
+      className={`shell ${centerView === "document" ? "" : "management-shell"}${sidebarCollapsed ? " sidebar-collapsed" : ""}${draggingRail ? " dragging" : ""}`}
+      style={rightWidth != null ? ({ "--right": `${rightWidth}px` } as CSSProperties) : undefined}
+    >
       <aside className="sb">
         <div className="workspace-switcher">
           <div className="row gap-8 min-0">
@@ -1468,6 +1542,8 @@ export function WorkspaceApp({
               <option value={workspace.slug} key={workspace.id}>{workspace.name}</option>
             ))}
           </select>
+          <button className="sb-collapse-btn" type="button" onClick={toggleSidebar} aria-label="Collapse sidebar" title="Collapse sidebar">‹</button>
+          <button className="sb-expand-tab" type="button" onClick={toggleSidebar} aria-label="Expand sidebar" title="Expand sidebar">›</button>
         </div>
 
         <div className="sb-search">
@@ -1682,6 +1758,16 @@ export function WorkspaceApp({
       </section>
 
       <aside className={`ctx ${centerView === "document" ? "" : "hidden"}`}>
+        <div
+          className="rz"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize context panel"
+          onMouseDown={(event) => {
+            setDraggingRail(true);
+            event.preventDefault();
+          }}
+        />
         <div className="ctx-tabs">
           {(["threads", "activity", "coworkers"] as const).map((tab) => (
             <button key={tab} className={`btn sm ${rightTab === tab ? "selected" : "ghost"}`} onClick={() => setRightTab(tab)}>
