@@ -141,16 +141,40 @@ func TestWorkspaceDeleteRequiresOwnerAndExactNameThenCascades(t *testing.T) {
 	authTestStatus(t, router, http.MethodDelete, target, admin.Token, DeleteWorkspaceRequest{ConfirmName: "Delete Tenant"}, http.StatusForbidden)
 	authTestStatus(t, router, http.MethodDelete, target, daemonResponse.Token, DeleteWorkspaceRequest{ConfirmName: "Delete Tenant"}, http.StatusForbidden)
 
+	// Watch the broker: workspace.deleted must fire only when a delete
+	// actually happens — never on refused attempts.
+	events, unsubscribe := server.workspaceBroker(workspace.ID).Subscribe()
+	defer unsubscribe()
+	drainWorkspaceDeleted := func() int {
+		count := 0
+		for {
+			select {
+			case event := <-events:
+				if event.Type == "workspace.deleted" {
+					count++
+				}
+			default:
+				return count
+			}
+		}
+	}
+
 	// The confirmation must echo the exact current name.
 	authTestStatus(t, router, http.MethodDelete, target, owner.Token, DeleteWorkspaceRequest{ConfirmName: "delete tenant"}, http.StatusBadRequest)
 	authTestStatus(t, router, http.MethodDelete, target, owner.Token, DeleteWorkspaceRequest{}, http.StatusBadRequest)
 	if _, err := getWorkspace(server.sqlDB(), workspace.ID); err != nil {
 		t.Fatalf("workspace must survive refused deletions: %v", err)
 	}
+	if got := drainWorkspaceDeleted(); got != 0 {
+		t.Fatalf("refused deletions must not broadcast workspace.deleted, got %d", got)
+	}
 
 	// Owner + exact name deletes, root document and all (the deferred
 	// fk_workspaces_root_document RESTRICT must not block the cascade).
 	authTestStatus(t, router, http.MethodDelete, target, owner.Token, DeleteWorkspaceRequest{ConfirmName: "Delete Tenant"}, http.StatusNoContent)
+	if got := drainWorkspaceDeleted(); got != 1 {
+		t.Fatalf("successful deletion should broadcast workspace.deleted exactly once, got %d", got)
+	}
 
 	// Deletion proof: zero rows remain in any workspace-scoped table.
 	for _, table := range []string{

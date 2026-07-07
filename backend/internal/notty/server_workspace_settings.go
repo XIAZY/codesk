@@ -84,11 +84,9 @@ func (s *Server) handleDeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "confirmName must match the workspace name exactly")
 		return
 	}
-	// Tell connected clients before the workspace disappears so open UIs can
-	// navigate away; their next request will fail authentication.
-	if broker := s.requestBroker(r); broker != nil {
-		broker.Publish(EventEnvelope{Type: "workspace.deleted", Data: map[string]string{"workspaceId": workspaceID}})
-	}
+	// Hold the broker before eviction drops it from the map; the instance
+	// itself keeps delivering to existing subscribers.
+	broker := s.requestBroker(r)
 	if err := deleteWorkspaceHard(s.sqlDB(), workspaceID); err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, ErrNotFound) {
@@ -96,6 +94,12 @@ func (s *Server) handleDeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, status, err.Error())
 		return
+	}
+	// Broadcast only after the delete actually happened — a destructive event
+	// must never announce something that then fails. Open UIs navigate away;
+	// their next request fails authentication.
+	if broker != nil {
+		broker.Publish(EventEnvelope{Type: "workspace.deleted", Data: map[string]string{"workspaceId": workspaceID}})
 	}
 	s.evictWorkspace(workspaceID)
 	w.WriteHeader(http.StatusNoContent)
