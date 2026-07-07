@@ -1840,6 +1840,127 @@ pre.code {
   width: min(760px, calc(100vw - 36px));
 }
 
+/* Manage / Settings container (plan §4.2) --------------------------------- */
+.manage-entry {
+  width: calc(100% - 16px);
+  margin: 2px 8px 4px;
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid transparent;
+  border-radius: var(--r-2);
+  background: transparent;
+  color: var(--ink-3); /* de-emphasized: no accent, visually lowered (Eva) */
+  padding: 0 8px;
+  text-align: left;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.manage-entry:hover {
+  background: rgba(255, 253, 248, 0.72);
+  color: var(--ink-2);
+}
+
+.manage-modal {
+  width: min(880px, calc(100vw - 36px));
+  padding: 0;
+  overflow: hidden;
+}
+
+.manage-modal .modal-header {
+  padding: 16px 18px;
+  margin-bottom: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.manage-body {
+  display: flex;
+  min-height: 440px;
+  max-height: calc(100vh - 140px);
+}
+
+.manage-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 200px;
+  flex-shrink: 0;
+  padding: 12px;
+  border-right: 1px solid var(--border);
+  background: var(--paper-2);
+}
+
+.manage-tab {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--r-2);
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.manage-tab:hover {
+  background: var(--paper);
+}
+
+.manage-tab.active {
+  background: var(--paper);
+  border-color: var(--border);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* Danger zone pushed to the bottom of the tab column and isolated with the
+   danger color, kept apart from the routine tabs to prevent mis-taps (Eva). */
+.manage-tabs-spacer {
+  flex: 1;
+}
+
+.manage-tab.danger {
+  color: var(--err);
+}
+
+.manage-tab.danger.active {
+  background: color-mix(in oklab, var(--err) 8%, var(--paper));
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.manage-content {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+}
+
+.manage-content .management-inner {
+  padding: 22px 24px 32px;
+}
+
+.manage-panel {
+  padding: 22px 24px;
+}
+
+.manage-panel-head {
+  margin-bottom: 14px;
+}
+
+.coming-soon-block {
+  display: grid;
+  place-items: center;
+  min-height: 220px;
+  border: 1px dashed var(--border);
+  border-radius: var(--r-2);
+  background: var(--paper-2);
+}
+
 .new-agent-form {
   display: flex;
   flex-direction: column;

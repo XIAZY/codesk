@@ -521,14 +521,12 @@ describe("App URL routing", () => {
     render(<App />);
 
     await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_1"));
-    await user.click(screen.getByRole("button", { name: "Daemons" }));
-    expect(window.location.pathname).toBe("/w/team/daemons");
     await user.click(screen.getByRole("button", { name: "Agents" }));
     expect(window.location.pathname).toBe("/w/team/agents");
 
     window.history.back();
-    await waitFor(() => expect(window.location.pathname).toBe("/w/team/daemons"));
-    expect(screen.getAllByText("Daemons").length).toBeGreaterThan(0);
+    await waitFor(() => expect(window.location.pathname).toBe("/w/team/d/doc_1"));
+    await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_1"));
     expect(lastAccessedPatchBodies().filter((body) => body === JSON.stringify({}))).toHaveLength(1);
   });
 

@@ -12,7 +12,6 @@ const routeCases: AppRoute[] = [
   { kind: "newWorkspace" },
   { kind: "workspace", slug: "team", view: { kind: "home" } },
   { kind: "workspace", slug: "team", view: { kind: "document", documentId: "doc_1" } },
-  { kind: "workspace", slug: "team", view: { kind: "daemons" } },
   { kind: "workspace", slug: "team", view: { kind: "agents" } },
 ];
 
@@ -27,6 +26,8 @@ describe("routes", () => {
     expect(parseRoute("/anything")).toEqual({ kind: "notFound" });
     expect(parseRoute("/w")).toEqual({ kind: "notFound" });
     expect(parseRoute("/w/team/settings")).toEqual({ kind: "notFound" });
+    // The old /daemons view was retired into Manage → Local environment (plan §4.2).
+    expect(parseRoute("/w/team/daemons")).toEqual({ kind: "notFound" });
     expect(parseRoute("/w/team/d")).toEqual({ kind: "notFound" });
     expect(parseRoute("/w/%E0%A4%A")).toEqual({ kind: "notFound" });
   });

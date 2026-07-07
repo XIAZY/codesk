@@ -3,7 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentDetailModal, CreateDaemonModal, DaemonDetailModal, DaemonsManagement, WorkspaceApp, WorkspaceOnboarding } from "./App";
+import { AgentDetailModal, CreateDaemonModal, DaemonDetailModal, DaemonsManagement, ManageModal, WorkspaceApp, WorkspaceOnboarding } from "./App";
 import { emptyWorkspace, identifierFromName, identifierHelpText, identifierPattern, workspaceSlugMaxLength } from "./logic";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
 import type { Account, Agent, AgentRun, Daemon, WorkspaceSummary } from "./types";
@@ -355,11 +355,11 @@ describe("CreateDaemonModal install status", () => {
       <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />
     );
 
-    await user.click(screen.getByRole("button", { name: "Create daemon" }));
+    await user.click(screen.getByRole("button", { name: "Create local environment" }));
 
-    // Daemon created but has not checked in yet: the chip must say waiting.
-    expect(await screen.findByText("Waiting for daemon to check in…")).toBeTruthy();
-    expect(screen.queryByText("Daemon connected")).toBeNull();
+    // Local environment created but has not checked in yet: the chip must say waiting.
+    expect(await screen.findByText("Waiting for local environment to check in…")).toBeTruthy();
+    expect(screen.queryByText("Local environment connected")).toBeNull();
 
     // A daemon.updated event lands via the workspace socket, so live state now reports
     // the daemon online. The chip must flip without a manual refresh.
@@ -367,8 +367,48 @@ describe("CreateDaemonModal install status", () => {
       <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[{ ...daemonFixtures.justSeen, id: "daemon_new", name: "Local daemon" }]} onClose={vi.fn()} onDone={vi.fn()} />
     );
 
-    expect(screen.getByText("Daemon connected")).toBeTruthy();
-    expect(screen.queryByText("Waiting for daemon to check in…")).toBeNull();
+    expect(screen.getByText("Local environment connected")).toBeTruthy();
+    expect(screen.queryByText("Waiting for local environment to check in…")).toBeNull();
+  });
+});
+
+describe("ManageModal", () => {
+  const baseProps = {
+    onTabChange: vi.fn(),
+    onClose: vi.fn(),
+    onRefresh: vi.fn(),
+    onNewDaemon: vi.fn(),
+    onDaemon: vi.fn(),
+  };
+
+  it("renders all five tabs, shows the Local environment surface, delegates tab clicks, and closes on Escape", async () => {
+    const user = userEvent.setup();
+    const onTabChange = vi.fn();
+    const onClose = vi.fn();
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws", daemons: [daemonFixtures.justSeen] };
+    render(
+      <ManageModal {...baseProps} workspace={workspace as never} activeTab="local-env" onTabChange={onTabChange} onClose={onClose} />
+    );
+
+    for (const label of ["Members & Invite", "Agents", "Local environment", "Workspace settings", "Danger zone"]) {
+      expect(screen.getByRole("button", { name: label })).toBeTruthy();
+    }
+    // Local environment tab hosts the migrated management surface (renamed heading).
+    expect(screen.getAllByText("Local environments").length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("button", { name: "Danger zone" }));
+    expect(onTabChange).toHaveBeenCalledWith("danger");
+
+    await user.keyboard("{Escape}");
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("shows a coming-soon placeholder for tabs that are not built yet", () => {
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws" };
+    render(<ManageModal {...baseProps} workspace={workspace as never} activeTab="members" />);
+    expect(screen.getByText("Members & Invite — coming soon.")).toBeTruthy();
+    // The Local environment surface must NOT render on a different tab.
+    expect(screen.queryByText("Local environments")).toBeNull();
   });
 });
 
