@@ -11,6 +11,7 @@ import {
   buildDaemonReinstallCommand,
   buildDaemonUninstallCommand,
   buildLineThreads,
+  clampRailWidth,
   computeReplace,
   coworkerCount,
   workspacePeople,
@@ -39,6 +40,7 @@ import {
   selectionLabel,
   threadReplyCount,
   threadReplyLabel,
+  workspaceInboxSummary,
 } from "./logic";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
 import type { ActivityEvent, Agent, AgentEvent, AgentRun, Daemon, PresenceItem, UserItem, WorkspaceState } from "./types";
@@ -543,6 +545,97 @@ describe("recentActivity", () => {
   });
 });
 
+describe("workspaceInboxSummary", () => {
+  const agent = (over: Partial<Agent> = {}): Agent => ({
+    id: "agent_1",
+    daemonId: "daemon_1",
+    handle: "codex",
+    name: "Codex",
+    role: "Review",
+    kind: "codex",
+    workspaceRoot: "/tmp/codex",
+    status: "idle",
+    currentTask: "",
+    currentActivity: "",
+    currentRunId: "",
+    updatedAt: "2026-07-06T12:00:00Z",
+    ...over,
+  });
+  const run = (over: Partial<AgentRun> = {}): AgentRun => ({
+    id: "run_1",
+    agentId: "agent_1",
+    agentHandle: "codex",
+    agentName: "Codex",
+    agentKind: "codex",
+    workspaceRoot: "/tmp/codex",
+    workingDirectory: "/tmp/codex",
+    prompt: "Do it",
+    status: "completed",
+    desiredStatus: "completed",
+    updatedAt: "2026-07-06T12:00:00Z",
+    ...over,
+  });
+  const event = (over: Partial<AgentEvent> = {}): AgentEvent => ({
+    id: "event_1",
+    agentId: "agent_1",
+    agentHandle: "codex",
+    type: "document.updated",
+    box: "for_me",
+    status: "pending",
+    documentId: "doc1",
+    summary: "Review changes",
+    createdAt: "2026-07-06T12:00:00Z",
+    updatedAt: "2026-07-06T12:00:00Z",
+    ...over,
+  });
+
+  it("builds one event-derived source for reviews and failures while dropping mention activity", () => {
+    const summary = workspaceInboxSummary({
+      ...baseWorkspace(),
+      agents: [agent()],
+      agentRuns: [run({ status: "failed", error: "tool exited 1", updatedAt: "2026-07-06T12:03:00Z" })],
+      agentEvents: [
+        event({ id: "mention_1", type: "thread.mentioned", threadId: "thread_1", summary: "@codex was mentioned", updatedAt: "2026-07-06T12:04:00Z" }),
+        event({ id: "review_1", type: "document.updated", summary: "Review the workspace plan", updatedAt: "2026-07-06T12:02:00Z" }),
+      ],
+    });
+
+    expect(summary.counts).toEqual({ needsReview: 1, failed: 1, total: 2 });
+    expect(summary.badgeTone).toBe("failed");
+    expect(summary.items.map((item) => item.kind)).toEqual(["failed", "needs-review"]);
+    expect(summary.items.some((item) => item.summary.includes("@codex"))).toBe(false);
+    expect(summary.items.find((item) => item.kind === "failed")?.reason).toBe("tool exited 1");
+  });
+
+  it("ignores mention events without hiding unresolved review and failure work", () => {
+    const summary = workspaceInboxSummary({
+      ...baseWorkspace(),
+      agents: [agent({ status: "failed", currentActivity: "daemon stopped" })],
+      agentRuns: [],
+      agentEvents: [
+        event({ id: "mention_1", type: "thread.mentioned", summary: "@codex was mentioned", updatedAt: "2026-07-06T12:00:00Z" }),
+        event({ id: "review_1", type: "document.updated", summary: "Review even if runtime moved on", updatedAt: "2026-07-06T12:01:00Z" }),
+      ],
+    });
+
+    expect(summary.counts).toEqual({ needsReview: 1, failed: 1, total: 2 });
+    expect(summary.items.some((item) => item.summary.includes("@codex"))).toBe(false);
+    expect(summary.items.find((item) => item.kind === "needs-review")?.countable).toBe(true);
+    expect(summary.badgeTone).toBe("failed");
+  });
+
+  it("ignores resolved events and never crashes on missing collections", () => {
+    const summary = workspaceInboxSummary({
+      ...baseWorkspace(),
+      agentEvents: [event({ status: "completed" })],
+    });
+
+    expect(summary.items).toEqual([]);
+    expect(summary.counts.total).toBe(0);
+    expect(summary.badgeTone).toBe("");
+  });
+});
+
 describe("daemon liveness decay", () => {
   // Every daemon comes from the canonical fixtures (the real backend wire shape) stamped with a
   // fixed receipt time; each row probes daemonLiveStatus at receipt + elapsed. Table-driven over the
@@ -691,5 +784,28 @@ describe("daemon reinstall command", () => {
     expect(command).toContain("--workspace-id 'ws bad'\\''id' \\");
     expect(command).toContain("--daemon-token 'nottyd token' \\");
     expect(command).toContain("--static-base 'https://static.example.com/daemon files'");
+  });
+});
+
+describe("clampRailWidth", () => {
+  const WIDE = 1600; // roomy shell — center-min never binds
+
+  it("clamps to the 280–520px rail bounds", () => {
+    expect(clampRailWidth(100, WIDE, false)).toBe(280);
+    expect(clampRailWidth(400, WIDE, false)).toBe(400);
+    expect(clampRailWidth(9999, WIDE, false)).toBe(520);
+  });
+
+  it("never lets the center column drop below 380px (open sidebar)", () => {
+    // 1120 shell, 248 left, 380 center-min => right can be at most 492.
+    expect(clampRailWidth(520, 1120, false)).toBe(492);
+    // Center stays >= 380 at the clamped width.
+    expect(1120 - 248 - clampRailWidth(520, 1120, false)).toBe(380);
+  });
+
+  it("gives back the width the collapsed rail frees to the center", () => {
+    // Same 1120 shell but left is 60 when collapsed => right can reach its 520 max.
+    expect(clampRailWidth(520, 1120, true)).toBe(520);
+    expect(1120 - 60 - clampRailWidth(520, 1120, true)).toBeGreaterThanOrEqual(380);
   });
 });

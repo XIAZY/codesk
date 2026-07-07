@@ -398,6 +398,159 @@ export function agentStatus(agent: Agent, runs: AgentRun[]) {
   return agentDisplayStatus(agent, runs).key;
 }
 
+export type InboxItemKind = "needs-review" | "failed";
+export type InboxBadgeTone = InboxItemKind | "";
+
+export type WorkspaceInboxItem = {
+  id: string;
+  kind: InboxItemKind;
+  actorLabel: string;
+  action: string;
+  summary: string;
+  documentId?: string;
+  threadId?: string;
+  threadMessageId?: string;
+  agentId?: string;
+  agentHandle?: string;
+  occurredAt: string;
+  unread: boolean;
+  countable: boolean;
+  reason?: string;
+};
+
+export type WorkspaceInboxSummary = {
+  items: WorkspaceInboxItem[];
+  counts: {
+    needsReview: number;
+    failed: number;
+    total: number;
+  };
+  badgeTone: InboxBadgeTone;
+};
+
+const resolvedInboxStatuses = new Set(["completed", "dismissed"]);
+const terminalInboxRunStatuses = new Set(["completed", "failed", "stopped", "cancelled", "canceled"]);
+
+function inboxEventOpen(event: AgentEvent) {
+  return !resolvedInboxStatuses.has((event.status || "").toLowerCase());
+}
+
+function inboxEventTime(event: AgentEvent) {
+  return event.updatedAt || event.createdAt || "";
+}
+
+function inboxTimeValue(value: string) {
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
+function inboxAgentLabel(handle: string | undefined) {
+  return handle ? `@${handle}` : "Agent";
+}
+
+function inboxText(value?: string) {
+  const text = (value ?? "").trim().replace(/\s+/g, " ");
+  return text || "";
+}
+
+function inboxCurrentAgentRun(agent: Agent, runs: AgentRun[]) {
+  const exact = agent.currentRunId ? runs.find((run) => run.id === agent.currentRunId) : undefined;
+  if (exact) {
+    return exact;
+  }
+  const agentRuns = runs
+    .filter((run) => run.agentId === agent.id)
+    .sort((left, right) => inboxTimeValue(right.updatedAt) - inboxTimeValue(left.updatedAt));
+  return agentRuns.find((run) => !terminalInboxRunStatuses.has((run.status || "").toLowerCase())) ?? agentRuns[0];
+}
+
+function inboxFailureReason(agent: Agent, run?: AgentRun) {
+  for (const candidate of [run?.error, run?.lastMessage, agent.currentActivity]) {
+    const text = inboxText(candidate);
+    if (!text || text.toLowerCase() === "failed") {
+      continue;
+    }
+    return text;
+  }
+  return "No failure reason was provided.";
+}
+
+function isReliableMentionEvent(event: AgentEvent) {
+  return event.type === "thread.mentioned";
+}
+
+function isNeedsReviewEvent(event: AgentEvent) {
+  return event.box === "for_me" && !isReliableMentionEvent(event) && inboxEventOpen(event);
+}
+
+// Phase D is stacked before Phase B in some local worktrees. These bottom-condition helpers
+// intentionally mirror B's pre-ladder conditions; delete this shim when Jackie resolves D onto
+// B's shared agentDisplayStatus/source helpers.
+export function workspaceInboxSummary(
+  workspace: Pick<WorkspaceState, "agents" | "agentRuns" | "agentEvents">,
+): WorkspaceInboxSummary {
+  const items: WorkspaceInboxItem[] = [];
+
+  for (const event of workspace.agentEvents ?? []) {
+    if (!inboxEventOpen(event)) {
+      continue;
+    }
+    const occurredAt = inboxEventTime(event);
+    if (isReliableMentionEvent(event)) {
+      // Agent mention events are activity-only until human-targeted mention events exist.
+      continue;
+    }
+    if (isNeedsReviewEvent(event)) {
+      items.push({
+        id: `review:${event.id}`,
+        kind: "needs-review",
+        actorLabel: inboxAgentLabel(event.agentHandle),
+        action: "needs your review",
+        summary: inboxText(event.summary) || inboxText(event.prompt) || "Review requested",
+        documentId: event.documentId || undefined,
+        threadId: event.threadId || undefined,
+        threadMessageId: event.threadMessageId || undefined,
+        agentId: event.agentId,
+        agentHandle: event.agentHandle,
+        occurredAt,
+        unread: true,
+        countable: true,
+      });
+    }
+  }
+
+  for (const agent of workspace.agents ?? []) {
+    const run = inboxCurrentAgentRun(agent, workspace.agentRuns ?? []);
+    if (agent.status !== "failed" && run?.status !== "failed") {
+      continue;
+    }
+    const reason = inboxFailureReason(agent, run);
+    items.push({
+      id: `failed:${agent.id}:${run?.id ?? "agent"}`,
+      kind: "failed",
+      actorLabel: inboxAgentLabel(agent.handle),
+      action: "failed",
+      summary: reason,
+      agentId: agent.id,
+      agentHandle: agent.handle,
+      occurredAt: run?.updatedAt || agent.updatedAt,
+      unread: true,
+      countable: true,
+      reason,
+    });
+  }
+
+  items.sort((left, right) => inboxTimeValue(right.occurredAt) - inboxTimeValue(left.occurredAt) || left.id.localeCompare(right.id));
+  const needsReview = items.filter((item) => item.kind === "needs-review" && item.countable).length;
+  const failed = items.filter((item) => item.kind === "failed" && item.countable).length;
+  const total = needsReview + failed;
+  return {
+    items,
+    counts: { needsReview, failed, total },
+    badgeTone: failed ? "failed" : needsReview ? "needs-review" : "",
+  };
+}
+
 export function coworkerCount(workspace: Pick<WorkspaceState, "agents" | "users">) {
   return workspace.agents.length + workspace.users.length;
 }
@@ -405,6 +558,22 @@ export function coworkerCount(workspace: Pick<WorkspaceState, "agents" | "users"
 // Matches the backend's 2-minute presence read cutoff (see PR #50), so the
 // client-side ring window agrees with what the server would still serve.
 export const PRESENCE_ONLINE_WINDOW_MS = 120_000;
+
+// Phase E right-rail resize bounds. The rail clamps to [280, 520]px, and never
+// so wide that the center document column drops below 380px — so a drag can't
+// crush or overlap the document ("不塌、不错位"). The left rail is 248px open,
+// 60px collapsed, which changes how much width the center still needs.
+export const RAIL_RIGHT_MIN = 280;
+export const RAIL_RIGHT_MAX = 520;
+export const RAIL_CENTER_MIN = 380;
+export const RAIL_LEFT_OPEN = 248;
+export const RAIL_LEFT_COLLAPSED = 60;
+
+export function clampRailWidth(desired: number, shellWidth: number, sidebarCollapsed: boolean): number {
+  const leftWidth = sidebarCollapsed ? RAIL_LEFT_COLLAPSED : RAIL_LEFT_OPEN;
+  const maxByCenter = shellWidth - leftWidth - RAIL_CENTER_MIN;
+  return Math.max(RAIL_RIGHT_MIN, Math.min(Math.min(desired, RAIL_RIGHT_MAX), maxByCenter));
+}
 
 export type WorkspacePerson = {
   id: string;

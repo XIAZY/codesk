@@ -169,6 +169,8 @@ export type AgentEvent = {
   threadMessageId?: string;
   summary: string;
   prompt?: string;
+  runId?: string;
+  lastError?: string;
   createdAt: string;
   updatedAt: string;
 };
