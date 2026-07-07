@@ -531,6 +531,13 @@ func TestClaudeStopDuringHandshakeClosesEvents(t *testing.T) {
 // session id must recover into a fresh session and complete a turn.
 func TestAgentSessionSupervisorRunsClaudeRuntime(t *testing.T) {
 	t.Setenv("FAKE_CLAUDE_FAIL_RESUME", "1")
+	// Hold the turn open until an explicit interrupt (task #13). The status
+	// syncer coalesces to the LATEST state per agent — intermediate states are
+	// droppable by design — so a fake claude that finishes its turn instantly
+	// races "idle" over "working" and a loaded runner loses the "working"
+	// update the old test asserted on. Holding the turn makes "working" the
+	// stable latest state until the test has observed it and interrupts.
+	t.Setenv("FAKE_CLAUDE_HOLD_TURN", "1")
 	cfg := Config{
 		ClaudeCommand:      writeFakeClaude(t),
 		DataDir:            t.TempDir(),
@@ -568,6 +575,18 @@ func TestAgentSessionSupervisorRunsClaudeRuntime(t *testing.T) {
 		t.Fatalf("expected turn id while working, got %#v", working)
 	}
 
+	// End the held turn only now that "working" has been observed; the result
+	// line the interrupt triggers drives turnCompleted -> idle.
+	supervisor.mu.Lock()
+	process := supervisor.sessions[current.ID].process
+	supervisor.mu.Unlock()
+	if _, err := process.WriteStdin(context.Background(), RuntimeInput{
+		Kind:      RuntimeInputInterruptTurn,
+		SessionID: working.SessionID,
+		TurnID:    working.CurrentTurnID,
+	}); err != nil {
+		t.Fatalf("interrupt turn: %v", err)
+	}
 	finished := waitForSessionStatus(t, updates, "idle")
 	if finished.SessionID != idle.SessionID {
 		t.Fatalf("expected stable session id across the turn, got %#v", finished)
