@@ -33,6 +33,28 @@ var (
 	contractEmbeddedTimestampPattern = regexp.MustCompile(`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})`)
 )
 
+// contractVolatileNumericKeys are response fields whose numeric VALUE is computed from wall-clock at
+// serialization time (now - some stored instant), so it varies run-to-run at fine granularity while
+// only its presence/shape is part of the contract. Each is replaced by contractVolatilePlaceholder.
+// This is the designed home for wall-clock-derived numerics; the list is deliberately explicit and
+// small so a reviewer sees exactly which values are intentionally NOT pinned.
+//   - lastSeenAgeSeconds: int64(now.Sub(daemon.LastSeenAt) / time.Second) (store.go) — flips 0→1 in ~1s.
+//
+// Sweep result (stated for the record): every numeric json field on the GET /workspace types was
+// checked. The updateId / fromUpdateId / toUpdateId / attemptCount / id fields are deterministic
+// monotonic counters (fixed by the operation sequence, not the clock). connectionStatus is the SAME
+// wall-clock family (online/stale/disconnected by age windows) but is deliberately NOT excepted: its
+// enum value is a meaningful pinned contract (a fresh check-in serializes "online") and only flips at
+// the ~30s stale window — a pathological gap between two adjacent same-test calls — so we pin it and
+// document the bound rather than canonicalize away a real contract value. processId / exitCode /
+// clientIdSeed are not present in this contract (agent-run process detail / checkpoint types) and
+// become candidates for this set when those rows are added.
+var contractVolatileNumericKeys = map[string]bool{
+	"lastSeenAgeSeconds": true,
+}
+
+const contractVolatilePlaceholder = "<n>"
+
 func canonicalizeContractJSON(raw []byte) ([]byte, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber() // keep numeric shape (int vs float) intact instead of coercing to float64
@@ -65,6 +87,10 @@ func canonicalizeContractValue(v interface{}, aliases map[string]string) interfa
 		sort.Strings(keys)
 		out := make(map[string]interface{}, len(t))
 		for _, k := range keys {
+			if contractVolatileNumericKeys[k] {
+				out[k] = contractVolatilePlaceholder
+				continue
+			}
 			out[k] = canonicalizeContractValue(t[k], aliases)
 		}
 		return out
@@ -168,6 +194,28 @@ func TestCanonicalizeContractJSONAliasesEmbeddedIdsAndTimestamps(t *testing.T) {
 	}
 	if !strings.Contains(got, "started a thread on document <id-2> at <ts>") {
 		t.Fatalf("expected embedded ids and timestamp replaced in place:\n%s", got)
+	}
+}
+
+func TestCanonicalizeContractJSONNormalizesVolatileNumericFields(t *testing.T) {
+	// lastSeenAgeSeconds is wall-clock arithmetic (now - last check-in). Two DIFFERENT real ages must
+	// canonicalize to the SAME bytes, or the golden flakes the day a loaded runner elapses a second
+	// between the builder's daemon check-in and the GET. connectionStatus, by contrast, is a pinned
+	// contract value and must survive canonicalization unchanged.
+	young := mustCanonicalize(t, `{"connectionStatus": "online", "lastSeenAgeSeconds": 0}`)
+	aged := mustCanonicalize(t, `{"connectionStatus": "online", "lastSeenAgeSeconds": 47}`)
+
+	if young != aged {
+		t.Fatalf("volatile age field not normalized — goldens would flake run-to-run:\n--- age 0 ---\n%s\n--- age 47 ---\n%s", young, aged)
+	}
+	if strings.Contains(aged, "47") {
+		t.Fatalf("raw age value 47 leaked into canonical form:\n%s", aged)
+	}
+	if !strings.Contains(young, `"lastSeenAgeSeconds": "<n>"`) {
+		t.Fatalf("expected volatile age field replaced by placeholder:\n%s", young)
+	}
+	if !strings.Contains(young, `"connectionStatus": "online"`) {
+		t.Fatalf("connectionStatus is a pinned contract value and must not be canonicalized away:\n%s", young)
 	}
 }
 

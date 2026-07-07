@@ -103,7 +103,7 @@
       "createdAt": "<ts>",
       "deletedAt": "<ts>",
       "id": "<id-4>",
-      "lastSeenAgeSeconds": 0,
+      "lastSeenAgeSeconds": "<n>",
       "lastSeenAt": "<ts>",
       "name": "Contract daemon",
       "os": "linux",
