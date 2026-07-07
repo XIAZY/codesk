@@ -2765,7 +2765,24 @@ function ThreadsPanel({
   onReply: () => void;
 }) {
   const [reply, setReply] = useState("");
+  const [statusBusy, setStatusBusy] = useState(false);
+  const [statusError, setStatusError] = useState("");
   const selected = selectedThreadId ? threads.find((thread) => thread.id === selectedThreadId) ?? null : null;
+  const selectedResolved = selected?.status === "resolved";
+
+  const toggleStatus = async () => {
+    if (!selected || statusBusy) return;
+    setStatusBusy(true);
+    setStatusError("");
+    try {
+      await api.updateThreadStatus(workspaceId, selected.id, selectedResolved ? "open" : "resolved");
+      onReply();
+    } catch (err) {
+      setStatusError(err instanceof Error ? err.message : "Failed to update status");
+    } finally {
+      setStatusBusy(false);
+    }
+  };
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -2799,7 +2816,16 @@ function ThreadsPanel({
               </button>
               <b>Thread</b>
               <span className="chip sm">{threadReplyLabel(selected)}</span>
+              <span className={`thread-badge ${selectedResolved ? "resolved" : "open"}`}>
+                <span className="thread-badge-dot" />
+                {selectedResolved ? "Resolved" : "Open"}
+              </span>
+              <span style={{ flex: 1 }} />
+              <button className="btn ghost sm" type="button" onClick={toggleStatus} disabled={statusBusy} aria-label={selectedResolved ? "Reopen thread" : "Resolve thread"}>
+                {statusBusy ? "…" : selectedResolved ? "Reopen" : "Resolve"}
+              </button>
             </div>
+            {statusError ? <div className="tiny" style={{ color: "var(--err)" }}>{statusError}</div> : null}
             <div className="quoted-range">
               <div className="tiny mono muted">{selected.anchor.kind === "document" ? "document thread" : "anchored range"}</div>
               <span>{selected.anchor.excerpt || selected.title}</span>
@@ -2845,7 +2871,7 @@ function ThreadsPanel({
         {threads.map((thread) => (
           <button
             key={thread.id}
-            className={thread.id === selectedThreadId ? "titem selected" : "titem"}
+            className={`titem${thread.id === selectedThreadId ? " selected" : ""}${thread.status === "resolved" ? " resolved" : ""}`}
             onClick={() => onSelectThread(thread.id)}
           >
             <Icon name="thread" />
@@ -2862,6 +2888,11 @@ function ThreadsPanel({
                 </span>
               </div>
               <div className="row gap-4 tiny muted">
+                <span className={`thread-badge ${thread.status === "resolved" ? "resolved" : "open"}`}>
+                  <span className="thread-badge-dot" />
+                  {thread.status === "resolved" ? "Resolved" : "Open"}
+                </span>
+                <span>·</span>
                 <span>{threadReplyLabel(thread)}</span>
                 <span>·</span>
                 <span>{thread.anchor.kind === "document" ? "document" : "anchored"}</span>

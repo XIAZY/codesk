@@ -1880,6 +1880,8 @@ button.inbox-row:hover {
   flex-direction: column;
   gap: 0;
   padding: 6px;
+  max-height: 320px;
+  overflow-y: auto;
 }
 
 .thread-popover-row {
@@ -1955,6 +1957,33 @@ button.inbox-row:hover {
 .titem.selected {
   border-color: var(--accent);
   background: var(--accent-50);
+}
+
+.titem.resolved {
+  color: var(--ink-3);
+}
+
+.thread-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.thread-badge-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.thread-badge.open .thread-badge-dot {
+  background: var(--iris);
+}
+
+.thread-badge.resolved .thread-badge-dot {
+  background: var(--ok);
 }
 
 .tdetail {

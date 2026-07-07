@@ -147,6 +147,13 @@ export class ApiClient {
     });
   }
 
+  async updateThreadStatus(workspaceId: string, threadId: string, status: "open" | "resolved") {
+    return this.request<{ thread: ThreadItem }>(workspacePath(workspaceId, `/threads/${encodeURIComponent(threadId)}/status`), {
+      method: "PATCH",
+      body: JSON.stringify({ status }),
+    });
+  }
+
   async createDaemon(workspaceId: string, name: string) {
     return this.request<{ daemon: Daemon; token: string }>(workspacePath(workspaceId, "/daemons"), {
       method: "POST",
