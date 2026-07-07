@@ -16,6 +16,7 @@ import {
   workspacePeople,
   personOnline,
   documentActivity,
+  recentActivity,
   activityCategory,
   relativeTime,
   daemonStatus,
@@ -506,6 +507,39 @@ describe("documentActivity", () => {
     expect(relativeTime("2026-07-06T09:00:00Z", nowMs)).toContain("hour");
     expect(relativeTime("2026-07-04T12:00:00Z", nowMs)).toContain("day");
     expect(relativeTime("not-a-date", nowMs)).toBe("");
+  });
+});
+
+describe("recentActivity", () => {
+  const nowMs = Date.parse("2026-07-06T12:00:00Z");
+  const activity = (over: Partial<ActivityEvent>): ActivityEvent => ({
+    type: "document.updated", documentId: "doc1", actorId: "u1", actorType: "human",
+    summary: "", occurredAt: "2026-07-06T12:00:00Z", ...over,
+  });
+
+  it("returns only events within the 7-day window for the given document", () => {
+    const activities = [
+      activity({ occurredAt: "2026-07-06T10:00:00Z", summary: "recent" }),
+      activity({ occurredAt: "2026-06-28T12:00:00Z", summary: "old" }),
+      activity({ documentId: "doc2", occurredAt: "2026-07-06T11:00:00Z", summary: "other-doc" }),
+    ];
+    const result = recentActivity({ activities }, "doc1", nowMs);
+    expect(result.map((a) => a.summary)).toEqual(["recent"]);
+  });
+
+  it("returns the full windowed list newest first (render slices to 5)", () => {
+    const activities = Array.from({ length: 8 }, (_, i) =>
+      activity({ occurredAt: `2026-07-06T0${i}:00:00Z`, summary: `e${i}` }),
+    );
+    const result = recentActivity({ activities }, "doc1", nowMs);
+    expect(result).toHaveLength(8);
+    expect(result[0].summary).toBe("e7");
+  });
+
+  it("tolerates null/undefined activities and undefined documentId", () => {
+    expect(recentActivity({ activities: undefined }, "doc1", nowMs)).toEqual([]);
+    expect(recentActivity({ activities: null as unknown as ActivityEvent[] }, "doc1", nowMs)).toEqual([]);
+    expect(recentActivity({ activities: [] }, undefined, nowMs)).toEqual([]);
   });
 });
 

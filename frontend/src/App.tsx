@@ -12,6 +12,7 @@ import {
   workspacePeople,
   personOnline,
   documentActivity,
+  recentActivity,
   activityCategory,
   relativeTime,
   daemonStatus,
@@ -1414,6 +1415,7 @@ export function WorkspaceApp({
   }, [activeDocumentPath]);
   const workspacePeopleList = workspacePeople(workspace);
   const documentActivityList = documentActivity(workspace, activeDocument?.id);
+  const recentActivityList = recentActivity(workspace, activeDocument?.id, Date.now());
   // Unread = new since you last opened the tab (snapshot delta — honest for
   // snapshot-fresh activity; not a live stream). Marked seen when the tab opens.
   const [activitySeenAt, setActivitySeenAt] = useState("");
@@ -1612,7 +1614,7 @@ export function WorkspaceApp({
                 <b>No document selected</b>
               </>
             )}
-            <span className={`chip sm ${connected ? "ok" : "warn"}`}>{connected ? "workspace live" : "workspace offline"}</span>
+            {!connected ? <span className="chip sm warn">workspace offline</span> : null}
           </div>
           <div className="row gap-6">
             <button className="btn sm ghost icon" type="button" onClick={() => setModal("rename")} disabled={!activeDocument}>
@@ -1620,6 +1622,13 @@ export function WorkspaceApp({
             </button>
           </div>
         </header>
+        {activeDocument ? (
+          <RecentActivityPeek
+            activities={recentActivityList}
+            actorLabel={activityActorLabel}
+            onViewAll={() => setRightTab("activity")}
+          />
+        ) : null}
         {loading ? <div className="notice compact">Loading workspace...</div> : null}
         {error ? <div className="notice error compact">{error}</div> : null}
         {createError ? <div className="notice error compact">{createError}</div> : null}
@@ -2604,6 +2613,58 @@ function ActivityPanel({
       {!activities.length ? (
         <p className="empty-note">{hasDocument ? "No activity on this document yet." : "Open a document to see its activity."}</p>
       ) : null}
+    </div>
+  );
+}
+
+const PEEK_COLLAPSED_KEY = "activity-peek-collapsed";
+
+function RecentActivityPeek({
+  activities,
+  actorLabel,
+  onViewAll,
+}: {
+  activities: ActivityEvent[];
+  actorLabel: Record<string, string>;
+  onViewAll: () => void;
+}) {
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem(PEEK_COLLAPSED_KEY) !== "false");
+  const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
+  const toggle = useCallback(() => {
+    setCollapsed((prev) => {
+      const next = !prev;
+      localStorage.setItem(PEEK_COLLAPSED_KEY, String(next));
+      return next;
+    });
+  }, []);
+
+  return (
+    <div className={`activity-peek ${collapsed ? "" : "expanded"}`}>
+      <button className="activity-peek-header" type="button" onClick={toggle}>
+        <span className="tiny muted">Last 7 days · {activities.length} update{activities.length !== 1 ? "s" : ""}</span>
+        <Icon name="chevron" />
+      </button>
+      {!collapsed && (
+        <div className="activity-peek-body">
+          {activities.slice(0, 5).map((activity, i) => {
+            const category = activityCategory(activity.type, activity.actorType);
+            const label = actorLabel[activity.actorId];
+            const text = label ? activity.summary.split(activity.actorId).join(`@${label}`) : activity.summary;
+            return (
+              <div className="activity-peek-row" key={`${activity.occurredAt}-${activity.actorId}-${i}`}>
+                <span className="activity-dot" style={{ background: activityDotColor[category] }} />
+                <Icon name={activityGlyph[category]} />
+                <span className="tiny muted">{relativeTime(activity.occurredAt, now)}</span>
+                <span className="small truncate">{text || activity.type}</span>
+              </div>
+            );
+          })}
+          {!activities.length ? (
+            <p className="tiny muted">No activity in the last 7 days.</p>
+          ) : null}
+          <button className="btn-link tiny" type="button" onClick={onViewAll}>View all activity…</button>
+        </div>
+      )}
     </div>
   );
 }
