@@ -347,7 +347,11 @@ function failureReason(agent: Agent, run?: AgentRun) {
 }
 
 function pendingReviewEvent(agent: Agent, events: AgentEvent[]) {
-  return events.find((event) => event.agentId === agent.id && event.box === "for_me" && event.status !== "completed" && event.status !== "dismissed");
+  // Share the split with the Inbox (isNeedsReviewEvent): a for_me event only lights the
+  // "Needs your review" chip if it is a real review, not a pure mention. Without the
+  // isReliableMentionEvent guard a bare @mention would light Needs-review on the chip while
+  // the Inbox (which drops mentions) counts nothing — B×D would disagree on the same event.
+  return events.find((event) => event.agentId === agent.id && event.box === "for_me" && !isReliableMentionEvent(event) && event.status !== "completed" && event.status !== "dismissed");
 }
 
 function hasQueuedWork(agent: Agent, run?: AgentRun) {
@@ -483,9 +487,9 @@ function isNeedsReviewEvent(event: AgentEvent) {
   return event.box === "for_me" && !isReliableMentionEvent(event) && inboxEventOpen(event);
 }
 
-// Phase D is stacked before Phase B in some local worktrees. These bottom-condition helpers
-// intentionally mirror B's pre-ladder conditions; delete this shim when Jackie resolves D onto
-// B's shared agentDisplayStatus/source helpers.
+// B×D resolved: the Inbox (below) and the Needs-review chip (agentDisplayStatus /
+// pendingReviewEvent) share one split predicate — isReliableMentionEvent — so a for_me event
+// lights both or neither, never one alone. That agreement is pinned by the "B×D split" test.
 export function workspaceInboxSummary(
   workspace: Pick<WorkspaceState, "agents" | "agentRuns" | "agentEvents">,
 ): WorkspaceInboxSummary {

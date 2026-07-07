@@ -809,3 +809,33 @@ describe("clampRailWidth", () => {
     expect(1120 - 60 - clampRailWidth(520, 1120, true)).toBeGreaterThanOrEqual(380);
   });
 });
+
+// B×D integration behavior (Eva/Bill design ruling): the Needs-review chip (B) and the Inbox
+// (D) must agree on the same event. A pure @mention is activity, not attention — it lights
+// neither. A review event lights both. Pinned here so the resolve can't silently regress.
+describe("B×D split — mention vs review agreement (chip and Inbox)", () => {
+  const splitAgent: Agent = {
+    id: "agent_split", daemonId: "daemon_1", handle: "codex", name: "Codex", role: "Review",
+    kind: "codex", workspaceRoot: "/tmp/codex", status: "idle", currentTask: "",
+    currentActivity: "", currentRunId: "", updatedAt: "2026-07-06T12:00:00Z",
+  };
+  const splitEvent = (over: Partial<AgentEvent>): AgentEvent => ({
+    id: "event_1", agentId: "agent_split", agentHandle: "codex", type: "document.updated",
+    box: "for_me", status: "pending", documentId: "doc1", summary: "Review the plan",
+    createdAt: "2026-07-06T12:00:00Z", updatedAt: "2026-07-06T12:00:00Z", ...over,
+  });
+
+  it("a pure @mention lights NEITHER the Needs-review chip NOR the Inbox count", () => {
+    const mention = splitEvent({ type: "thread.mentioned", summary: "@codex was mentioned" });
+    // Chip (B): a bare mention must not read as Needs review (daemons=undefined skips waiting-env).
+    expect(agentDisplayStatus(splitAgent, [], undefined, [mention]).key).not.toBe("needs-review");
+    // Inbox (D): mention-kind counts nowhere.
+    expect(workspaceInboxSummary({ ...baseWorkspace(), agents: [splitAgent], agentEvents: [mention] }).counts.total).toBe(0);
+  });
+
+  it("a review event lights the Needs-review chip AND counts in the Inbox", () => {
+    const review = splitEvent({ type: "document.updated", summary: "Review the workspace plan" });
+    expect(agentDisplayStatus(splitAgent, [], undefined, [review]).key).toBe("needs-review");
+    expect(workspaceInboxSummary({ ...baseWorkspace(), agents: [splitAgent], agentEvents: [review] }).counts.needsReview).toBe(1);
+  });
+});
