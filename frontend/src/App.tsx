@@ -2747,7 +2747,7 @@ function DocumentEditor({
   );
 }
 
-function ThreadsPanel({
+export function ThreadsPanel({
   api,
   workspaceId,
   threads,
