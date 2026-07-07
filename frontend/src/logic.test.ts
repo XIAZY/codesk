@@ -443,7 +443,7 @@ describe("workspaceInboxSummary", () => {
     ...over,
   });
 
-  it("builds one event-derived source for mentions, reviews, and failures", () => {
+  it("builds one event-derived source for reviews and failures while dropping mention activity", () => {
     const summary = workspaceInboxSummary({
       ...baseWorkspace(),
       agents: [agent()],
@@ -454,28 +454,26 @@ describe("workspaceInboxSummary", () => {
       ],
     });
 
-    expect(summary.counts).toEqual({ mentionUnread: 1, needsReview: 1, failed: 1, total: 3 });
+    expect(summary.counts).toEqual({ needsReview: 1, failed: 1, total: 2 });
     expect(summary.badgeTone).toBe("failed");
-    expect(summary.items.map((item) => item.kind)).toEqual(["mention", "failed", "needs-review"]);
+    expect(summary.items.map((item) => item.kind)).toEqual(["failed", "needs-review"]);
+    expect(summary.items.some((item) => item.summary.includes("@codex"))).toBe(false);
     expect(summary.items.find((item) => item.kind === "failed")?.reason).toBe("tool exited 1");
   });
 
-  it("uses a persisted mention watermark without hiding unresolved work", () => {
-    const summary = workspaceInboxSummary(
-      {
-        ...baseWorkspace(),
-        agents: [agent({ status: "failed", currentActivity: "daemon stopped" })],
-        agentRuns: [],
-        agentEvents: [
-          event({ id: "mention_1", type: "thread.mentioned", summary: "@codex was mentioned", updatedAt: "2026-07-06T12:00:00Z" }),
-          event({ id: "review_1", type: "document.updated", summary: "Review even if runtime moved on", updatedAt: "2026-07-06T12:01:00Z" }),
-        ],
-      },
-      { mentionSeenAt: "2026-07-06T12:00:00Z" },
-    );
+  it("ignores mention events without hiding unresolved review and failure work", () => {
+    const summary = workspaceInboxSummary({
+      ...baseWorkspace(),
+      agents: [agent({ status: "failed", currentActivity: "daemon stopped" })],
+      agentRuns: [],
+      agentEvents: [
+        event({ id: "mention_1", type: "thread.mentioned", summary: "@codex was mentioned", updatedAt: "2026-07-06T12:00:00Z" }),
+        event({ id: "review_1", type: "document.updated", summary: "Review even if runtime moved on", updatedAt: "2026-07-06T12:01:00Z" }),
+      ],
+    });
 
-    expect(summary.counts).toEqual({ mentionUnread: 0, needsReview: 1, failed: 1, total: 2 });
-    expect(summary.items.find((item) => item.kind === "mention")?.unread).toBe(false);
+    expect(summary.counts).toEqual({ needsReview: 1, failed: 1, total: 2 });
+    expect(summary.items.some((item) => item.summary.includes("@codex"))).toBe(false);
     expect(summary.items.find((item) => item.kind === "needs-review")?.countable).toBe(true);
     expect(summary.badgeTone).toBe("failed");
   });

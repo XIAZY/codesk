@@ -900,11 +900,6 @@ svg.i.sm {
   position: relative;
 }
 
-.nav-item .ct.inbox-ct.mention {
-  background: color-mix(in oklab, var(--iris) 22%, var(--paper));
-  color: var(--iris-700);
-}
-
 .nav-item .ct.inbox-ct.needs-review {
   background: var(--needs-you);
   color: var(--paper);
@@ -932,10 +927,6 @@ svg.i.sm {
   font-style: normal;
   font-weight: 700;
   pointer-events: none;
-}
-
-.inbox-corner-badge.mention {
-  background: var(--iris);
 }
 
 .inbox-corner-badge.needs-review {

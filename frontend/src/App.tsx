@@ -284,41 +284,20 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
 
-function readLocalStorage(key: string) {
-  try {
-    return localStorage.getItem(key) ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function writeLocalStorage(key: string, value: string) {
-  try {
-    localStorage.setItem(key, value);
-  } catch {
-    // Ignore storage failures: the current-session state still updates.
-  }
-}
-
-function inboxMentionWatermarkKey(workspaceId: string, currentUserId?: string) {
-  return `codesk.inbox.mentions.${workspaceId || "workspace"}.${currentUserId || "anonymous"}`;
-}
-
 function inboxBadgeText(count: number) {
   return count > 9 ? "9+" : String(count);
 }
 
 function inboxBadgeLabel(summary: WorkspaceInboxSummary) {
-  const { total, failed, needsReview, mentionUnread } = summary.counts;
+  const { total, failed, needsReview } = summary.counts;
   if (!total) {
     return "Inbox";
   }
   const parts = [
     failed ? `${failed} failed` : "",
     needsReview ? `${needsReview} needs review` : "",
-    mentionUnread ? `${mentionUnread} unread mention${mentionUnread === 1 ? "" : "s"}` : "",
   ].filter(Boolean);
-  return `Inbox, ${total} pending: ${parts.join(", ")}`;
+  return `Inbox, ${total} need attention: ${parts.join(", ")}`;
 }
 
 function inboxDocumentLabel(documents: DocumentItem[], documentId?: string) {
@@ -1312,7 +1291,6 @@ export function WorkspaceApp({
     rootDocumentId: workspace.rootDocumentId,
   });
   const rootDocuments = rootNamespace.documents;
-  const mentionWatermarkKey = inboxMentionWatermarkKey(workspace.workspaceId || workspaceId, workspace.currentUserId);
   const [rightTab, setRightTab] = useState<"threads" | "activity" | "coworkers">("threads");
   const [modal, setModal] = useState<"daemon" | "agent" | "rename" | "share" | "agent-detail" | "daemon-detail" | "manage" | null>(null);
   // Default tab is Members & Invite (plan tab order). Integration protocol (Juan's
@@ -1400,7 +1378,6 @@ export function WorkspaceApp({
   const [freshDocumentId, setFreshDocumentId] = useState("");
   const [titleDraft, setTitleDraft] = useState("");
   const [inboxOpen, setInboxOpen] = useState(false);
-  const [mentionSeenAt, setMentionSeenAt] = useState(() => readLocalStorage(mentionWatermarkKey));
   const inboxRef = useRef<HTMLDivElement>(null);
   const inboxDialogRef = useRef<HTMLDivElement>(null);
   const inboxTriggerRef = useRef<HTMLButtonElement>(null);
@@ -1426,13 +1403,9 @@ export function WorkspaceApp({
   const currentWorkspaceUserHandle = currentWorkspaceUser?.handle ? `@${currentWorkspaceUser.handle}` : "Workspace user";
   const currentWorkspaceUserIdentity = currentWorkspaceUser?.handle || currentWorkspaceUser?.name || "Workspace user";
   const canInviteMembers = workspace.currentMembershipRole === "owner" || workspace.currentMembershipRole === "admin";
-  const inboxSummary = useMemo(() => workspaceInboxSummary(workspace, { mentionSeenAt }), [mentionSeenAt, workspace]);
+  const inboxSummary = useMemo(() => workspaceInboxSummary(workspace), [workspace]);
   const inboxCount = inboxSummary.counts.total;
   const inboxAriaLabel = inboxBadgeLabel(inboxSummary);
-
-  useEffect(() => {
-    setMentionSeenAt(readLocalStorage(mentionWatermarkKey));
-  }, [mentionWatermarkKey]);
 
   const closeInbox = useCallback((restoreFocus = true) => {
     setInboxOpen(false);
@@ -1441,33 +1414,15 @@ export function WorkspaceApp({
     }
   }, []);
 
-  const markInboxMentionsRead = useCallback(() => {
-    if (!inboxSummary.newestMentionAt) {
-      return;
-    }
-    writeLocalStorage(mentionWatermarkKey, inboxSummary.newestMentionAt);
-    setMentionSeenAt(inboxSummary.newestMentionAt);
-  }, [inboxSummary.newestMentionAt, mentionWatermarkKey]);
-
   const openInboxItem = useCallback(
     (item: WorkspaceInboxItem) => {
-      if (item.kind === "mention" && item.threadId) {
-        if (item.documentId) {
-          navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "document", documentId: item.documentId } });
-        }
-        setRightTab("threads");
-        setSelectedThreadId(item.threadId);
-        setFocusThreadId(item.threadId);
-        closeInbox();
-        return;
-      }
       if (item.agentId) {
         setSelectedAgentId(item.agentId);
         setModal("agent-detail");
         closeInbox();
       }
     },
-    [closeInbox, workspaceSlug],
+    [closeInbox],
   );
 
   useEffect(() => {
@@ -1750,7 +1705,6 @@ export function WorkspaceApp({
               dialogRef={inboxDialogRef}
               summary={inboxSummary}
               documents={rootDocuments}
-              onMarkMentionsRead={markInboxMentionsRead}
               onItem={openInboxItem}
             />
           ) : null}
@@ -2254,19 +2208,16 @@ function useNowTicker(intervalMs: number) {
 }
 
 const inboxDotColor: Record<WorkspaceInboxItem["kind"], string> = {
-  mention: "var(--iris)",
   "needs-review": "var(--needs-you)",
   failed: "var(--danger)",
 };
 
 const inboxGlyph: Record<WorkspaceInboxItem["kind"], string> = {
-  mention: "mention",
   "needs-review": "review",
   failed: "alert",
 };
 
 const inboxKindLabel: Record<WorkspaceInboxItem["kind"], string> = {
-  mention: "Mention",
   "needs-review": "Needs review",
   failed: "Failed",
 };
@@ -2275,18 +2226,15 @@ function WorkspaceInboxFlyout({
   dialogRef,
   summary,
   documents,
-  onMarkMentionsRead,
   onItem,
 }: {
   dialogRef: RefObject<HTMLDivElement>;
   summary: WorkspaceInboxSummary;
   documents: DocumentItem[];
-  onMarkMentionsRead: () => void;
   onItem: (item: WorkspaceInboxItem) => void;
 }) {
   const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
   const [expandedReasonId, setExpandedReasonId] = useState("");
-  const hasUnreadMentions = summary.counts.mentionUnread > 0;
 
   const renderRowBody = (item: WorkspaceInboxItem) => {
     const documentLabel = inboxDocumentLabel(documents, item.documentId);
@@ -2338,22 +2286,13 @@ function WorkspaceInboxFlyout({
         <div className="col gap-2 min-0">
           <b>Inbox</b>
           <span className="tiny muted">
-            {summary.counts.total ? `${summary.counts.total} pending` : "Zero pending"}
+            {summary.counts.total ? `${summary.counts.total} need attention` : "Inbox zero"}
           </span>
         </div>
-        <button
-          className="btn ghost sm"
-          type="button"
-          disabled={!hasUnreadMentions}
-          aria-disabled={!hasUnreadMentions}
-          onClick={onMarkMentionsRead}
-        >
-          Mark all read
-        </button>
       </div>
       <div className="inbox-list">
         {summary.items.map((item) => {
-          const canOpen = (item.kind === "mention" && !!item.threadId) || (item.kind === "needs-review" && !!item.agentId);
+          const canOpen = item.kind === "needs-review" && !!item.agentId;
           const className = `inbox-row ${item.kind} ${item.unread ? "unread" : "read"}`;
           return canOpen ? (
             <button className={className} type="button" key={item.id} onClick={() => onItem(item)}>
@@ -2365,7 +2304,7 @@ function WorkspaceInboxFlyout({
             </article>
           );
         })}
-        {!summary.items.length ? <p className="inbox-empty">Inbox zero · No pending items.</p> : null}
+        {!summary.items.length ? <p className="inbox-empty">Inbox zero · No attention needed.</p> : null}
       </div>
     </div>
   );

@@ -293,7 +293,7 @@ export function agentStatus(agent: Agent, runs: AgentRun[]) {
   return "idle";
 }
 
-export type InboxItemKind = "mention" | "needs-review" | "failed";
+export type InboxItemKind = "needs-review" | "failed";
 export type InboxBadgeTone = InboxItemKind | "";
 
 export type WorkspaceInboxItem = {
@@ -315,9 +315,7 @@ export type WorkspaceInboxItem = {
 
 export type WorkspaceInboxSummary = {
   items: WorkspaceInboxItem[];
-  newestMentionAt: string;
   counts: {
-    mentionUnread: number;
     needsReview: number;
     failed: number;
     total: number;
@@ -339,22 +337,6 @@ function inboxEventTime(event: AgentEvent) {
 function inboxTimeValue(value: string) {
   const ms = Date.parse(value);
   return Number.isNaN(ms) ? 0 : ms;
-}
-
-function inboxIsAfterWatermark(value: string, watermark: string) {
-  if (!watermark) {
-    return true;
-  }
-  const valueMs = inboxTimeValue(value);
-  const watermarkMs = inboxTimeValue(watermark);
-  if (valueMs || watermarkMs) {
-    return valueMs > watermarkMs;
-  }
-  return value > watermark;
-}
-
-function inboxLatestIso(left: string, right: string) {
-  return inboxTimeValue(left) >= inboxTimeValue(right) ? left : right;
 }
 
 function inboxAgentLabel(handle: string | undefined) {
@@ -401,11 +383,8 @@ function isNeedsReviewEvent(event: AgentEvent) {
 // B's shared agentDisplayStatus/source helpers.
 export function workspaceInboxSummary(
   workspace: Pick<WorkspaceState, "agents" | "agentRuns" | "agentEvents">,
-  options: { mentionSeenAt?: string } = {},
 ): WorkspaceInboxSummary {
-  const mentionSeenAt = options.mentionSeenAt ?? "";
   const items: WorkspaceInboxItem[] = [];
-  let newestMentionAt = "";
 
   for (const event of workspace.agentEvents ?? []) {
     if (!inboxEventOpen(event)) {
@@ -413,23 +392,7 @@ export function workspaceInboxSummary(
     }
     const occurredAt = inboxEventTime(event);
     if (isReliableMentionEvent(event)) {
-      const unread = inboxIsAfterWatermark(occurredAt, mentionSeenAt);
-      newestMentionAt = newestMentionAt ? inboxLatestIso(newestMentionAt, occurredAt) : occurredAt;
-      items.push({
-        id: `mention:${event.id}`,
-        kind: "mention",
-        actorLabel: inboxAgentLabel(event.agentHandle),
-        action: "was mentioned",
-        summary: inboxText(event.prompt) || inboxText(event.summary) || "Mentioned in a thread",
-        documentId: event.documentId || undefined,
-        threadId: event.threadId || undefined,
-        threadMessageId: event.threadMessageId || undefined,
-        agentId: event.agentId,
-        agentHandle: event.agentHandle,
-        occurredAt,
-        unread,
-        countable: unread,
-      });
+      // Agent mention events are activity-only until human-targeted mention events exist.
       continue;
     }
     if (isNeedsReviewEvent(event)) {
@@ -473,15 +436,13 @@ export function workspaceInboxSummary(
   }
 
   items.sort((left, right) => inboxTimeValue(right.occurredAt) - inboxTimeValue(left.occurredAt) || left.id.localeCompare(right.id));
-  const mentionUnread = items.filter((item) => item.kind === "mention" && item.countable).length;
   const needsReview = items.filter((item) => item.kind === "needs-review" && item.countable).length;
   const failed = items.filter((item) => item.kind === "failed" && item.countable).length;
-  const total = mentionUnread + needsReview + failed;
+  const total = needsReview + failed;
   return {
     items,
-    newestMentionAt,
-    counts: { mentionUnread, needsReview, failed, total },
-    badgeTone: failed ? "failed" : needsReview ? "needs-review" : mentionUnread ? "mention" : "",
+    counts: { needsReview, failed, total },
+    badgeTone: failed ? "failed" : needsReview ? "needs-review" : "",
   };
 }
 

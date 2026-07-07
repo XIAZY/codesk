@@ -389,14 +389,15 @@ describe("WorkspaceApp Inbox", () => {
     });
     renderWorkspaceApp();
 
-    const trigger = screen.getByRole("button", { name: /Inbox, 3 pending/ });
-    expect(trigger.querySelector(".inbox-ct")?.textContent).toBe("3");
+    const trigger = screen.getByRole("button", { name: /Inbox, 2 need attention/ });
+    expect(trigger.querySelector(".inbox-ct")?.textContent).toBe("2");
 
     await user.click(trigger);
     const dialog = screen.getByRole("dialog", { name: "Inbox" });
-    expect(within(dialog).getByText("3 pending")).toBeTruthy();
+    expect(within(dialog).getByText("2 need attention")).toBeTruthy();
     expect(within(dialog).getByText("Review changes")).toBeTruthy();
     expect(within(dialog).getByText("tool exited 1")).toBeTruthy();
+    expect(within(dialog).queryByText("@codex was mentioned")).toBeNull();
 
     await user.click(within(dialog).getByRole("button", { name: "View reason" }));
     expect(within(dialog).getAllByText("tool exited 1").length).toBeGreaterThanOrEqual(2);
@@ -406,7 +407,7 @@ describe("WorkspaceApp Inbox", () => {
     expect(document.activeElement).toBe(trigger);
   });
 
-  it("mark all read clears only mention badge count and persists the mention watermark", async () => {
+  it("ignores mention activity and does not render a dead mark-all-read control", async () => {
     const user = userEvent.setup();
     workspaceMock = workspaceFixture({
       agentEvents: [
@@ -416,11 +417,17 @@ describe("WorkspaceApp Inbox", () => {
     });
     renderWorkspaceApp();
 
-    await user.click(screen.getByRole("button", { name: /Inbox, 2 pending/ }));
-    await user.click(screen.getByRole("button", { name: "Mark all read" }));
+    const trigger = screen.getByRole("button", { name: /Inbox, 1 need attention/ });
+    expect(trigger.querySelector(".inbox-ct")?.textContent).toBe("1");
 
-    expect(screen.getByRole("button", { name: /Inbox, 1 pending/ })).toBeTruthy();
-    expect(localStorage.getItem("codesk.inbox.mentions.ws.user_1")).toBe("2026-07-06T12:04:00Z");
+    await user.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "Inbox" });
+    expect(within(dialog).getByText("1 need attention")).toBeTruthy();
+    expect(within(dialog).getByText("Review changes")).toBeTruthy();
+    expect(within(dialog).queryByText("@codex was mentioned")).toBeNull();
+    expect(within(dialog).queryByRole("button", { name: "Mark all read" })).toBeNull();
+    expect(screen.getByRole("button", { name: /Inbox, 1 need attention/ })).toBeTruthy();
+    expect(localStorage.getItem("codesk.inbox.mentions.ws.user_1")).toBeNull();
   });
 });
 
