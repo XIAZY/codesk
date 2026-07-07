@@ -415,12 +415,12 @@ describe("recentActivity", () => {
     expect(result.map((a) => a.summary)).toEqual(["recent"]);
   });
 
-  it("limits to 5 by default, returns newest first", () => {
+  it("returns the full windowed list newest first (render slices to 5)", () => {
     const activities = Array.from({ length: 8 }, (_, i) =>
       activity({ occurredAt: `2026-07-06T0${i}:00:00Z`, summary: `e${i}` }),
     );
     const result = recentActivity({ activities }, "doc1", nowMs);
-    expect(result).toHaveLength(5);
+    expect(result).toHaveLength(8);
     expect(result[0].summary).toBe("e7");
   });
 

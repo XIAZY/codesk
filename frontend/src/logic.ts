@@ -400,15 +400,13 @@ export function recentActivity(
   workspace: Pick<WorkspaceState, "activities">,
   documentId: string | undefined,
   nowMs: number,
-  limit = 5,
 ): ActivityEvent[] {
   if (!documentId) return [];
   const cutoff = nowMs - SEVEN_DAYS_MS;
   return (workspace.activities ?? [])
     .filter((a) => a.documentId === documentId && Date.parse(a.occurredAt) >= cutoff)
     .slice()
-    .sort((a, b) => (a.occurredAt < b.occurredAt ? 1 : a.occurredAt > b.occurredAt ? -1 : 0))
-    .slice(0, limit);
+    .sort((a, b) => (a.occurredAt < b.occurredAt ? 1 : a.occurredAt > b.occurredAt ? -1 : 0));
 }
 
 const relativeTimeFormat = new Intl.RelativeTimeFormat("en", { numeric: "auto" });

@@ -2634,7 +2634,7 @@ function RecentActivityPeek({
       </button>
       {!collapsed && (
         <div className="activity-peek-body">
-          {activities.map((activity, i) => {
+          {activities.slice(0, 5).map((activity, i) => {
             const category = activityCategory(activity.type, activity.actorType);
             const label = actorLabel[activity.actorId];
             const text = label ? activity.summary.split(activity.actorId).join(`@${label}`) : activity.summary;
