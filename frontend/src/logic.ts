@@ -301,6 +301,22 @@ export function coworkerCount(workspace: Pick<WorkspaceState, "agents" | "users"
 // client-side ring window agrees with what the server would still serve.
 export const PRESENCE_ONLINE_WINDOW_MS = 120_000;
 
+// Phase E right-rail resize bounds. The rail clamps to [280, 520]px, and never
+// so wide that the center document column drops below 380px — so a drag can't
+// crush or overlap the document ("不塌、不错位"). The left rail is 248px open,
+// 60px collapsed, which changes how much width the center still needs.
+export const RAIL_RIGHT_MIN = 280;
+export const RAIL_RIGHT_MAX = 520;
+export const RAIL_CENTER_MIN = 380;
+export const RAIL_LEFT_OPEN = 248;
+export const RAIL_LEFT_COLLAPSED = 60;
+
+export function clampRailWidth(desired: number, shellWidth: number, sidebarCollapsed: boolean): number {
+  const leftWidth = sidebarCollapsed ? RAIL_LEFT_COLLAPSED : RAIL_LEFT_OPEN;
+  const maxByCenter = shellWidth - leftWidth - RAIL_CENTER_MIN;
+  return Math.max(RAIL_RIGHT_MIN, Math.min(Math.min(desired, RAIL_RIGHT_MAX), maxByCenter));
+}
+
 export type WorkspacePerson = {
   id: string;
   handle: string;

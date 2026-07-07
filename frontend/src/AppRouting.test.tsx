@@ -530,6 +530,26 @@ describe("App URL routing", () => {
     expect(lastAccessedPatchBodies().filter((body) => body === JSON.stringify({}))).toHaveLength(1);
   });
 
+  it("collapses and expands the left sidebar, remembering the choice", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("codesk.auth.token", "token");
+    window.history.replaceState(null, "", "/w/team/d/doc_1");
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_1"));
+    const shell = document.querySelector(".shell") as HTMLElement;
+    expect(shell.className).not.toContain("sidebar-collapsed");
+
+    await user.click(screen.getByRole("button", { name: "Collapse sidebar" }));
+    expect(shell.className).toContain("sidebar-collapsed");
+    expect(localStorage.getItem("codesk.sb.collapsed")).toBe("1");
+
+    await user.click(screen.getByRole("button", { name: "Expand sidebar" }));
+    expect(shell.className).not.toContain("sidebar-collapsed");
+    expect(localStorage.getItem("codesk.sb.collapsed")).toBe("0");
+  });
+
   it("opens a document URL after creating the workspace and document", async () => {
     const user = userEvent.setup();
     localStorage.setItem("codesk.auth.token", "token");
