@@ -3040,6 +3040,33 @@ func replyThreadPostgres(db *sql.DB, workspaceID string, threadID string, messag
 	return result, events, activity, nil
 }
 
+func updateThreadStatusPostgres(db *sql.DB, workspaceID string, threadID string, status string) (*Thread, bool, error) {
+	var id string
+	var priorStatus string
+	err := db.QueryRow(
+		`WITH prior AS (
+			SELECT status FROM threads WHERE workspace_id = $3::uuid AND id = $4::uuid
+		)
+		UPDATE threads t
+		   SET status = $1,
+		       updated_at = CASE WHEN t.status IS DISTINCT FROM $1 THEN $2 ELSE t.updated_at END
+		 WHERE t.workspace_id = $3::uuid AND t.id = $4::uuid
+		 RETURNING t.id::text, (SELECT status FROM prior)`,
+		status, time.Now().UTC(), workspaceID, threadID,
+	).Scan(&id, &priorStatus)
+	if err == sql.ErrNoRows {
+		return nil, false, ErrNotFound
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	thread, err := getThreadPostgres(db, workspaceID, threadID)
+	if err != nil {
+		return nil, false, err
+	}
+	return thread, priorStatus != status, nil
+}
+
 func findThreadByClientOperationPostgres(db *sql.DB, workspaceID string, clientOperationID string, createdByID string, createdByType string) (*Thread, error) {
 	var threadID string
 	err := db.QueryRow(

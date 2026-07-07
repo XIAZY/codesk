@@ -1723,6 +1723,26 @@ func firstThreadMessage(thread *Thread) *ThreadMessage {
 	return thread.Messages[0]
 }
 
+// UpdateThreadStatus flips a thread between "open" and "resolved". Both
+// directions are allowed (resolve is reversible by design). Re-applying the
+// current status is an idempotent success that reports changed=false and
+// leaves updated_at alone, so no-op re-resolves neither reorder thread lists
+// nor emit broadcasts.
+func (s *Store) UpdateThreadStatus(id string, req UpdateThreadRequest) (*Thread, bool, error) {
+	if _, err := uuid.Parse(id); err != nil {
+		return nil, false, ErrNotFound
+	}
+	status := strings.TrimSpace(req.Status)
+	if status != "open" && status != "resolved" {
+		return nil, false, errors.New(`status must be "open" or "resolved"`)
+	}
+	s.mu.RLock()
+	workspaceID := s.state.WorkspaceID
+	db := s.db
+	s.mu.RUnlock()
+	return updateThreadStatusPostgres(db, workspaceID, id, status)
+}
+
 func (s *Store) ReplyThread(id string, req ReplyThreadRequest, meta OperationMeta) (*Thread, *ThreadMessage, error) {
 	if _, err := uuid.Parse(id); err != nil {
 		return nil, nil, ErrNotFound

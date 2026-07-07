@@ -2,6 +2,7 @@ package notty
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -64,6 +65,35 @@ func (s *Server) handleReplyThread(w http.ResponseWriter, r *http.Request) {
 		"thread":  thread,
 		"message": message,
 	})
+}
+
+// handleUpdateThreadStatus is PATCH /threads/{id}/status — the minimal
+// resolve endpoint. Human workspace members only (any role: resolving is a
+// judgment call, not an admin action); opening it to agent tooling is a
+// deliberate later decision, so agent/daemon principals get 403 today.
+// Idempotent no-ops return the unchanged thread and skip the broadcast.
+func (s *Server) handleUpdateThreadStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.requireHumanPrincipal(w, r) {
+		return
+	}
+	var req UpdateThreadRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	thread, changed, err := s.requestStore(r).UpdateThreadStatus(chi.URLParam(r, "id"), req)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	if changed {
+		s.requestBroker(r).Publish(EventEnvelope{Type: "thread.updated", Data: thread})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"thread": thread})
 }
 
 func (s *Server) handleThread(w http.ResponseWriter, r *http.Request) {
