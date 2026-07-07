@@ -319,6 +319,13 @@ type ResetPasswordRequest struct {
 	Password string `json:"password"`
 }
 
+// UpdateThreadRequest sets a thread's lifecycle status. Valid values are
+// "open" and "resolved"; both directions are allowed and re-applying the
+// current status is an idempotent success.
+type UpdateThreadRequest struct {
+	Status string `json:"status"`
+}
+
 type CreateWorkspaceRequest struct {
 	Name   string `json:"name"`
 	Slug   string `json:"slug"`
