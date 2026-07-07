@@ -244,12 +244,22 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	primaryCtx, cancelPrimary := context.WithCancel(ctx)
 	defer cancelPrimary()
+	shutdown := func() {
+		cancelPrimary()
+		s.closeAgentWorkers()
+		s.closeAgentRuntimes()
+		if s.sessions != nil {
+			s.sessions.Shutdown()
+		}
+		_ = shutdownToolGateway(context.Background(), s.toolServer)
+	}
 	go func() {
 		if err := s.primaryRuntime.Run(primaryCtx); err != nil && primaryCtx.Err() == nil {
 			log.Printf("primary workspace runtime error: %v", err)
 		}
 	}()
-	go s.workspaceEventLoop(ctx)
+	drained := make(chan error, 1)
+	go s.workspaceEventLoop(ctx, drained)
 
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
@@ -257,17 +267,20 @@ func (s *Service) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			cancelPrimary()
-			s.closeAgentWorkers()
-			s.closeAgentRuntimes()
-			if s.sessions != nil {
-				s.sessions.Shutdown()
-			}
-			_ = shutdownToolGateway(context.Background(), s.toolServer)
+			shutdown()
 			return nil
+		case err := <-drained:
+			fmt.Printf("workspace event stream: %v; daemon has been drained, exiting\n", err)
+			shutdown()
+			return err
 		case <-ticker.C:
 			s.reportDaemonStatus(ctx, false)
 			if err := s.refresh(ctx); err != nil {
+				if isTerminalAuthError(err) {
+					fmt.Printf("workspace refresh: %v; daemon has been drained, exiting\n", err)
+					shutdown()
+					return err
+				}
 				fmt.Printf("workspace refresh error: %v\n", err)
 			}
 		}
@@ -328,20 +341,45 @@ func isFatalInitializationError(err error) bool {
 	if errors.As(err, &agentErr) {
 		return true
 	}
-	var statusErr *backendStatusError
-	if errors.As(err, &statusErr) {
-		return statusErr.StatusCode == http.StatusUnauthorized || statusErr.StatusCode == http.StatusForbidden
+	return isTerminalAuthError(err)
+}
+
+// isTerminalAuthStatus reports whether a backend status means this daemon must stop rather than
+// retry: its credentials are rejected (401/403) or it has been drained/deprovisioned (410 Gone).
+func isTerminalAuthStatus(code int) bool {
+	switch code {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusGone:
+		return true
 	}
 	return false
 }
 
-func (s *Service) workspaceEventLoop(ctx context.Context) {
+// isTerminalAuthError reports whether an error carries a terminal backend auth/drain status. These
+// are not transient — retrying forever defeats the migration's drain intent for a running daemon, so
+// both the steady-state refresh loop and the workspace event stream exit the daemon on them.
+func isTerminalAuthError(err error) bool {
+	var statusErr *backendStatusError
+	if errors.As(err, &statusErr) {
+		return isTerminalAuthStatus(statusErr.StatusCode)
+	}
+	return false
+}
+
+func (s *Service) workspaceEventLoop(ctx context.Context, drained chan<- error) {
 	backoff := time.Second
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 		if err := s.runWorkspaceEventStream(ctx); err != nil && ctx.Err() == nil {
+			if isTerminalAuthError(err) {
+				// Credentials rejected / daemon drained: stop reconnecting and signal Run to exit.
+				select {
+				case drained <- err:
+				default:
+				}
+				return
+			}
 			log.Printf("workspace event stream error: %v", err)
 		}
 		select {
@@ -356,8 +394,16 @@ func (s *Service) workspaceEventLoop(ctx context.Context) {
 }
 
 func (s *Service) runWorkspaceEventStream(ctx context.Context) error {
-	conn, _, err := dialWorkspaceWebsocket(ctx, s.cfg, "/ws", nil, "")
+	conn, resp, err := dialWorkspaceWebsocket(ctx, s.cfg, "/ws", nil, "")
 	if err != nil {
+		if resp != nil {
+			// A rejected handshake still returns a response whose body must be closed; surface a
+			// terminal auth/drain status so the loop exits instead of reconnecting forever.
+			resp.Body.Close()
+			if isTerminalAuthStatus(resp.StatusCode) {
+				return &backendStatusError{Method: http.MethodGet, URL: "/ws", StatusCode: resp.StatusCode}
+			}
+		}
 		return err
 	}
 	defer conn.Close()
