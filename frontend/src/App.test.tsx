@@ -3,7 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentDetailModal, CreateDaemonModal, DaemonDetailModal, DaemonsManagement, WorkspaceApp, WorkspaceOnboarding } from "./App";
+import { AgentDetailModal, CreateDaemonModal, DaemonDetailModal, DaemonsManagement, ManageModal, WorkspaceApp, WorkspaceOnboarding } from "./App";
 import { emptyWorkspace, identifierFromName, identifierHelpText, identifierPattern, workspaceSlugMaxLength } from "./logic";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
 import type { Account, Agent, AgentRun, Daemon, WorkspaceSummary } from "./types";
@@ -355,11 +355,11 @@ describe("CreateDaemonModal install status", () => {
       <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />
     );
 
-    await user.click(screen.getByRole("button", { name: "Create daemon" }));
+    await user.click(screen.getByRole("button", { name: "Create local environment" }));
 
-    // Daemon created but has not checked in yet: the chip must say waiting.
-    expect(await screen.findByText("Waiting for daemon to check in…")).toBeTruthy();
-    expect(screen.queryByText("Daemon connected")).toBeNull();
+    // Local environment created but has not checked in yet: the chip must say waiting.
+    expect(await screen.findByText("Waiting for local environment to check in…")).toBeTruthy();
+    expect(screen.queryByText("Local environment connected")).toBeNull();
 
     // A daemon.updated event lands via the workspace socket, so live state now reports
     // the daemon online. The chip must flip without a manual refresh.
@@ -367,8 +367,107 @@ describe("CreateDaemonModal install status", () => {
       <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[{ ...daemonFixtures.justSeen, id: "daemon_new", name: "Local daemon" }]} onClose={vi.fn()} onDone={vi.fn()} />
     );
 
-    expect(screen.getByText("Daemon connected")).toBeTruthy();
-    expect(screen.queryByText("Waiting for daemon to check in…")).toBeNull();
+    expect(screen.getByText("Local environment connected")).toBeTruthy();
+    expect(screen.queryByText("Waiting for local environment to check in…")).toBeNull();
+  });
+});
+
+describe("ManageModal", () => {
+  const baseProps = {
+    api: {} as never,
+    workspaceId: "ws",
+    workspaceSlug: "acme",
+    canInvite: true,
+    groupedAgents: [],
+    onTabChange: vi.fn(),
+    onClose: vi.fn(),
+    onRefresh: vi.fn(),
+    onNewDaemon: vi.fn(),
+    onDaemon: vi.fn(),
+    onNewAgent: vi.fn(),
+    onAgent: vi.fn(),
+  };
+
+  it("renders all five tabs, shows the Local environment surface, delegates tab clicks, and closes on Escape", async () => {
+    const user = userEvent.setup();
+    const onTabChange = vi.fn();
+    const onClose = vi.fn();
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws", daemons: [daemonFixtures.justSeen] };
+    render(
+      <ManageModal {...baseProps} workspace={workspace as never} activeTab="local-env" onTabChange={onTabChange} onClose={onClose} />
+    );
+
+    for (const label of ["Members & Invite", "Agents", "Local environment", "Workspace settings", "Danger zone"]) {
+      expect(screen.getByRole("button", { name: label })).toBeTruthy();
+    }
+    // Local environment tab hosts the migrated management surface (renamed heading).
+    expect(screen.getAllByText("Local environments").length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("button", { name: "Danger zone" }));
+    expect(onTabChange).toHaveBeenCalledWith("danger");
+
+    await user.keyboard("{Escape}");
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("shows read-only workspace settings with editing marked coming soon", () => {
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws", name: "Acme" };
+    render(<ManageModal {...baseProps} workspace={workspace as never} workspaceSlug="acme" activeTab="workspace" />);
+    expect(screen.getByText("Acme")).toBeTruthy();
+    expect(screen.getByText("Editing coming soon.")).toBeTruthy();
+    // Honest-controls: read-only current values are static text, not editable-looking inputs.
+    expect(screen.queryByRole("textbox")).toBeNull();
+    // Not another tab's surface.
+    expect(screen.queryByText("Local environments")).toBeNull();
+  });
+
+  it("shows a calm danger-zone coming-soon note without a live delete control", () => {
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws" };
+    render(<ManageModal {...baseProps} workspace={workspace as never} activeTab="danger" />);
+    expect(screen.getByText("Workspace deletion is coming soon.")).toBeTruthy();
+    // Honest-controls: no clickable Delete until the backend supports it.
+    expect(screen.queryByRole("button", { name: /delete/i })).toBeNull();
+  });
+
+  it("lists workspace members and offers invite generation on the Members tab", () => {
+    const workspace = {
+      ...emptyWorkspace(),
+      workspaceId: "ws",
+      users: [
+        { id: "u1", handle: "ada", name: "Ada Lovelace", role: "Owner", kind: "human", status: "active", updatedAt: "now" },
+        { id: "u2", handle: "grace", name: "Grace Hopper", role: "Member", kind: "human", status: "active", updatedAt: "now" },
+        { id: "a1", handle: "codex", name: "Codex", role: "Agent", kind: "agent", status: "active", updatedAt: "now" },
+      ],
+    };
+    render(<ManageModal {...baseProps} workspace={workspace as never} activeTab="members" />);
+    // Human members are listed; the agent is not (agents live in the Agents tab).
+    expect(screen.getByText("Ada Lovelace")).toBeTruthy();
+    expect(screen.getByText("Grace Hopper")).toBeTruthy();
+    expect(screen.queryByText("Codex")).toBeNull();
+    // Owners/admins see invite generation.
+    expect(screen.getByRole("button", { name: "Generate invite link" })).toBeTruthy();
+  });
+
+  it("hides invite generation from members without permission", () => {
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws" };
+    render(<ManageModal {...baseProps} canInvite={false} workspace={workspace as never} activeTab="members" />);
+    expect(screen.queryByRole("button", { name: "Generate invite link" })).toBeNull();
+    expect(screen.getByText("Only workspace owners and admins can invite new members.")).toBeTruthy();
+  });
+
+  it("hosts the agents configuration surface on the Agents tab", () => {
+    const workspace = {
+      ...emptyWorkspace(),
+      workspaceId: "ws",
+      agents: [
+        { id: "a1", daemonId: "d1", handle: "codex", name: "Codex", role: "Reviewer", kind: "codex", workspaceRoot: "agents/a1", status: "idle", currentTask: "", currentActivity: "", currentRunId: "", updatedAt: "now" },
+      ],
+    };
+    const grouped = [{ daemonId: "d1", daemonName: "Local", agents: workspace.agents }];
+    render(<ManageModal {...baseProps} workspace={workspace as never} groupedAgents={grouped as never} activeTab="agents" />);
+    // AgentsManagement renders in the tab (its subtitle + the agent handle).
+    expect(screen.getByText(/Codex collaborators in this workspace/)).toBeTruthy();
+    expect(screen.getByText("@codex")).toBeTruthy();
   });
 });
 
