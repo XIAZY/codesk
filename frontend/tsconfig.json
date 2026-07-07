@@ -16,6 +16,11 @@
     "noEmit": true,
     "jsx": "react-jsx"
   },
-  "include": ["src", "../backend/internal/notty/testdata/daemon_states.json"],
+  "include": [
+    "src",
+    "../backend/internal/notty/testdata/daemon_states.json",
+    "../backend/internal/notty/testdata/contract/workspace_get_empty.json",
+    "../backend/internal/notty/testdata/contract/workspace_get_populated.json"
+  ],
   "references": []
 }

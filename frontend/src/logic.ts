@@ -745,6 +745,18 @@ export function agentsByDaemon(agents: Agent[], daemons: Daemon[]) {
   }, []);
 }
 
+// The backend serializes presences as a JSON array (one row per actor), but state.presences is a map
+// keyed by actorId: every consumer reads presences[id], and the incremental presence.updated handler
+// keys by actorId. A snapshot must key the same way — otherwise presences that arrive in the INITIAL
+// snapshot are stored array-shaped and are silently invisible to the online ring until the actor emits
+// a live update. A Go nil slice (JSON null) coerces to an empty map, exactly as before.
+function presencesById(raw: unknown): WorkspaceState["presences"] {
+  if (Array.isArray(raw)) {
+    return Object.fromEntries((raw as Array<WorkspaceState["presences"][string]>).map((presence) => [presence.actorId, presence]));
+  }
+  return (raw as WorkspaceState["presences"]) ?? {};
+}
+
 export function reduceWorkspaceEvent(state: WorkspaceState, event: WorkspaceEvent): WorkspaceState {
   if (event.type === "workspace.snapshot") {
     const { documents: _documents, ...data } = event.data as Partial<WorkspaceState> & { documents?: unknown };
@@ -761,7 +773,7 @@ export function reduceWorkspaceEvent(state: WorkspaceState, event: WorkspaceEven
       agentRuns: data.agentRuns ?? [],
       threads: data.threads ?? [],
       agentEvents: data.agentEvents ?? [],
-      presences: data.presences ?? {},
+      presences: presencesById(data.presences),
       activities: data.activities ?? [],
     };
   }
