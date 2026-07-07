@@ -1,0 +1,227 @@
+# CI — encodes the manual gate ritual this team ran by hand, so the quality bar is infrastructure
+# rather than social convention.
+#
+# Gate -> job map (the matrix Tom's review checks for completeness):
+#   build (Go + libyrs cgo)            -> backend: "Build all Go"
+#   backend suite on LIVE Postgres     -> backend: "Backend + full Go suite on live Postgres" (+ skip-guard)
+#   regression tag (deterministic)     -> backend: "Regression suite (deterministic slice)"
+#   regression tag (compose E2E)       -> nightly + manual: .github/workflows/regression-e2e.yml (non-blocking)
+#   installer tests                    -> backend: "Installer tests"
+#   gofmt / vet                        -> backend: "gofmt", "go vet"
+#   frontend typecheck + vitest        -> frontend: "Typecheck + vitest"
+#   frontend production build          -> frontend: "Production build"
+#   git diff --check                   -> diff-check
+#   frontend auto-deploy on main       -> deploy-frontend (push to main only)
+#
+# Two meta-properties (Tom's bar):
+#   * Fail loud on infrastructure absence — a skipped live-DB suite reporting green is the exact
+#     false-assurance class this pipeline exists to kill. The Postgres preflight fails if the DB is
+#     unreachable, and the skip-guard fails if the canary live-Postgres test does not actually PASS.
+#   * Base-freshness — `on: pull_request` checks out the PR *merge commit* (refs/pull/N/merge), so
+#     every gate runs against the merge result, not the stale branch head. Stale-base merges bit this
+#     project twice; this makes them a red check.
+#
+# Deploy secrets required for the deploy-frontend job (configured in repo settings by an admin):
+#   NOTTY_DEPLOY_ENV  — the contents of deploy/env/prod.deploy.env (origins, R2 bucket names, etc.)
+#   R2 credentials    — CLOUDFLARE_API_TOKEN (or NOTTY_CLOUDFLARE_TOKEN), or R2_ENDPOINT_URL + AWS keys
+# Until they exist the deploy job fails loudly (never silently no-ops).
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # Cancel superseded PR runs, but never cancel a push-to-main run — that could abort the deploy
+  # job mid-R2-upload and leave the live site partially updated.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: backend (build, vet, live-postgres suite, regression, installer)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: notty_test
+          POSTGRES_USER: notty
+          POSTGRES_PASSWORD: notty
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U notty -d notty_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      # Disposable, isolated live database — matches scripts/test-postgres.sh so the live-DB tests
+      # RUN instead of skipping. postgresTestDSN requires the db to be named exactly notty_test.
+      NOTTY_DATABASE_TEST_URL: postgres://notty:notty@localhost:5432/notty_test?sslmode=disable
+      NOTTY_DATABASE_TEST_ISOLATED: "1"
+      # internal/ycrdt's Yjs cross-compat test shells out to `node -e "require('yjs')"`. ubuntu-latest
+      # ships Node, so the test runs rather than skipping — point it at the frontend's pinned yjs.
+      NODE_PATH: ${{ github.workspace }}/frontend/node_modules
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive # third_party/y-crdt is a submodule; build-yffi needs its source
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod # pin to the repo's Go version, not a duplicated literal
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend deps (provides yjs for the CRDT Yjs cross-compat test)
+        run: cd frontend && npm ci
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo + libyrs build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            third_party/y-crdt/target
+          key: yffi-${{ runner.os }}-${{ hashFiles('third_party/y-crdt/**/Cargo.lock') }}
+          restore-keys: |
+            yffi-${{ runner.os }}-
+      - name: Build libyrs (cgo dependency)
+        run: scripts/build-yffi.sh
+      - name: gofmt
+        run: |
+          files="$(git ls-files '*.go' | grep -v '^third_party/')"
+          if [ -z "$files" ]; then echo "no Go files to check"; exit 0; fi # avoid gofmt reading stdin
+          unformatted="$(gofmt -l $files)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needs to run on:"; echo "$unformatted"; exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: Preflight — Postgres must be reachable (fail loud, never skip silently)
+        run: |
+          for i in $(seq 1 30); do
+            if pg_isready -h localhost -p 5432 -U notty -d notty_test >/dev/null 2>&1; then
+              echo "postgres ready"; exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Postgres service never became ready — refusing to run a suite that would silently skip its live-DB tests"
+          exit 1
+      - name: Backend + full Go suite on live Postgres
+        run: go test ./...
+      - name: Guard — live-Postgres tests actually ran (no silent skip = false green)
+        run: |
+          out="$(go test -run TestActivitiesSurviveStoreRestartPostgres -count=1 -v ./backend/internal/notty)"
+          echo "$out"
+          if ! echo "$out" | grep -q -- '--- PASS: TestActivitiesSurviveStoreRestartPostgres'; then
+            echo "::error::live-Postgres canary did not PASS — the DB suite may be skipping (false green)"; exit 1
+          fi
+          if echo "$out" | grep -q -- '--- SKIP'; then
+            echo "::error::live-Postgres canary SKIPPED — infra absent, this is a false green"; exit 1
+          fi
+      - name: Guard — Yjs cross-compat test actually ran (CRDT gate must not silently skip)
+        run: |
+          # The test courtesy-skips when node is absent; in CI a skip means the CRDT-vs-Yjs gate went
+          # unenforced. Node/yjs must stay present (see setup-node + NODE_PATH) or this job goes red.
+          out="$(go test -run TestYCRDTStickyIndexIsYjsRelativePositionCompatible -count=1 -v ./internal/ycrdt)"
+          echo "$out"
+          if ! echo "$out" | grep -q -- '--- PASS: TestYCRDTStickyIndexIsYjsRelativePositionCompatible'; then
+            echo "::error::Yjs cross-compat test did not PASS — CRDT gate unenforced (node/yjs missing?)"; exit 1
+          fi
+          if echo "$out" | grep -q -- '--- SKIP'; then
+            echo "::error::Yjs cross-compat test SKIPPED in CI — the CRDT gate must run, not skip"; exit 1
+          fi
+      - name: Regression suite (deterministic slice)
+        # Per-PR runs only the deterministic regression test. EXCLUDED: the docker-compose fs↔DB↔daemon
+        # sync E2E in sync_regression_test.go — its convergence deadlines race under a loaded CI runner
+        # (a flake, not a code bug). That suite runs in the non-blocking nightly .github/workflows/
+        # regression-e2e.yml, and backend-touching PRs still get the reviewer-run full tag by hand,
+        # until Deniz's CI-deadline hardening lands — at which point it returns to this required gate.
+        run: go test -tags=regression -run '^TestRegressionCreateDocumentDoesNotUseLegacyNamespacePayload$' ./test/regression
+      - name: Installer tests
+        run: |
+          make daemon-installer-check
+          make daemon-uninstall-test
+      - name: Build all Go
+        run: go build ./...
+
+  frontend:
+    name: frontend (typecheck, vitest, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Typecheck + vitest
+        run: npm test # runs `tsc --noEmit && vitest run`
+      - name: Production build
+        run: npm run build
+
+  diff-check:
+    name: git diff --check (whitespace / conflict markers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: git diff --check against base
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            base="$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"
+          fi
+          echo "checking diff $base..HEAD"
+          git diff --check "$base" HEAD
+
+  deploy-frontend:
+    name: deploy frontend (main only)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [backend, frontend, diff-check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Guard — deploy env configured (fail loud, never a silent no-deploy)
+        env:
+          NOTTY_DEPLOY_ENV: ${{ secrets.NOTTY_DEPLOY_ENV }}
+        run: |
+          if [ -z "$NOTTY_DEPLOY_ENV" ]; then
+            echo "::error::secrets.NOTTY_DEPLOY_ENV is not configured — frontend cannot auto-deploy. Add the deploy env + R2 credentials in repo settings."
+            exit 1
+          fi
+      - name: Write deploy env
+        env:
+          NOTTY_DEPLOY_ENV: ${{ secrets.NOTTY_DEPLOY_ENV }}
+        run: |
+          printf '%s\n' "$NOTTY_DEPLOY_ENV" > "$RUNNER_TEMP/prod.deploy.env"
+      - name: Deploy frontend to R2
+        env:
+          NOTTY_DEPLOY_ENV_FILE: ${{ runner.temp }}/prod.deploy.env
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_AWS_SECRET_ACCESS_KEY }}
+        run: make deploy-frontend
