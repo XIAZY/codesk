@@ -98,3 +98,82 @@ func TestContractWorkspaceEmptyState(t *testing.T) {
 	}
 	assertContractGolden(t, "workspace_get_empty", canonical)
 }
+
+// buildPopulatedWorkspace is the `populated` state builder: a workspace seeded through the real
+// handlers into the healthy, everything-present shape the frontend renders in steady state — an
+// online daemon (checked in), one agent it owns, an idle agent session, an agent-authored thread on
+// the root document, and daemon presence on that document. It exercises the collections the workspace
+// reducer dereferences on every render (users, daemons, agents, threads, activities, presences); the
+// agentRuns / agentEvents collections get dedicated degraded rows rather than being forced here.
+// Returns the owner token and workspace id for driving the row's endpoint.
+func buildPopulatedWorkspace(t *testing.T, router http.Handler) (ownerToken, workspaceID string) {
+	t.Helper()
+	owner := authTestRegister(t, router, "contract-populated-owner@example.com", "owner-pass", "Contract Populated Owner")
+	ws := authTestCreateWorkspace(t, router, owner.Token, "Contract Populated Workspace")
+
+	// A daemon that has checked in → connection status flips from disconnected to online.
+	var daemon CreateDaemonResponse
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+ws.ID+"/daemons", owner.Token, CreateDaemonRequest{Name: "Contract daemon"}, http.StatusCreated, &daemon)
+	authTestReportCodexRuntime(t, router, ws.ID, daemon.Token)
+
+	// One agent owned by that daemon.
+	var agent Agent
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+ws.ID+"/daemons/"+daemon.Daemon.ID+"/agents", owner.Token, CreateAgentRequest{
+		Handle: "contract-agent",
+		Name:   "Contract Agent",
+		Role:   "Exercises the populated contract",
+		Kind:   "codex",
+	}, http.StatusCreated, &agent)
+
+	// Idle agent session → emits agent.updated + an activity row.
+	authTestStatusWithHeaders(t, router, http.MethodPatch, "/api/workspaces/"+ws.ID+"/agents/"+agent.ID+"/session", daemon.Token, map[string]string{
+		"X-Notty-Acting-Agent-ID": agent.ID,
+	}, UpdateAgentSessionRequest{Status: "idle", SessionID: "contract-session"}, http.StatusOK)
+
+	// Agent-authored thread on the root document → threads + an activity row.
+	var thread struct {
+		Thread Thread `json:"thread"`
+	}
+	authTestJSONWithHeaders(t, router, http.MethodPost, "/api/workspaces/"+ws.ID+"/threads", daemon.Token, map[string]string{
+		"X-Notty-Acting-Agent-ID": agent.ID,
+	}, CreateThreadRequest{
+		DocumentID: ws.RootDocumentID,
+		Title:      "Contract thread",
+		Body:       "A populated-state thread authored by the agent.",
+		Excerpt:    "contract",
+	}, http.StatusCreated, &thread)
+
+	// Daemon presence on the root document → presences (the handler binds the actor to the
+	// authenticated daemon, so a stray ActorID cannot spoof a different actor).
+	var presence Presence
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+ws.ID+"/presence", daemon.Token, UpsertPresenceRequest{
+		ActorID:    daemon.Daemon.ID,
+		ActorType:  "daemon",
+		DocumentID: ws.RootDocumentID,
+		Activity:   "viewing",
+	}, http.StatusOK, &presence)
+
+	return owner.Token, ws.ID
+}
+
+func TestContractWorkspacePopulatedState(t *testing.T) {
+	_, router := newAuthTestServer(t)
+	ownerToken, workspaceID := buildPopulatedWorkspace(t, router)
+
+	recorder := authTestRequest(t, router, http.MethodGet, "/api/workspaces/"+workspaceID+"/workspace", ownerToken, nil, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("GET /workspace: got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	raw := recorder.Body.Bytes()
+
+	// A1 — even fully populated, the never-null invariant still holds for every collection.
+	assertNoNullCollections(t, raw, workspaceCollectionKeys)
+
+	// A2 — canonical shape pinned as a committed golden (aliased ids preserve the daemon↔agent↔thread
+	// reference graph, so a broken cross-reference surfaces as a golden diff).
+	canonical, err := canonicalizeContractJSON(raw)
+	if err != nil {
+		t.Fatalf("canonicalize GET /workspace: %v", err)
+	}
+	assertContractGolden(t, "workspace_get_populated", canonical)
+}
