@@ -38,9 +38,10 @@ import {
   selectionLabel,
   threadReplyCount,
   threadReplyLabel,
+  workspaceInboxSummary,
 } from "./logic";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
-import type { ActivityEvent, Agent, Daemon, PresenceItem, UserItem, WorkspaceState } from "./types";
+import type { ActivityEvent, Agent, AgentEvent, AgentRun, Daemon, PresenceItem, UserItem, WorkspaceState } from "./types";
 
 function baseWorkspace(): WorkspaceState {
   return {
@@ -395,6 +396,99 @@ describe("documentActivity", () => {
     expect(relativeTime("2026-07-06T09:00:00Z", nowMs)).toContain("hour");
     expect(relativeTime("2026-07-04T12:00:00Z", nowMs)).toContain("day");
     expect(relativeTime("not-a-date", nowMs)).toBe("");
+  });
+});
+
+describe("workspaceInboxSummary", () => {
+  const agent = (over: Partial<Agent> = {}): Agent => ({
+    id: "agent_1",
+    daemonId: "daemon_1",
+    handle: "codex",
+    name: "Codex",
+    role: "Review",
+    kind: "codex",
+    workspaceRoot: "/tmp/codex",
+    status: "idle",
+    currentTask: "",
+    currentActivity: "",
+    currentRunId: "",
+    updatedAt: "2026-07-06T12:00:00Z",
+    ...over,
+  });
+  const run = (over: Partial<AgentRun> = {}): AgentRun => ({
+    id: "run_1",
+    agentId: "agent_1",
+    agentHandle: "codex",
+    agentName: "Codex",
+    agentKind: "codex",
+    workspaceRoot: "/tmp/codex",
+    workingDirectory: "/tmp/codex",
+    prompt: "Do it",
+    status: "completed",
+    desiredStatus: "completed",
+    updatedAt: "2026-07-06T12:00:00Z",
+    ...over,
+  });
+  const event = (over: Partial<AgentEvent> = {}): AgentEvent => ({
+    id: "event_1",
+    agentId: "agent_1",
+    agentHandle: "codex",
+    type: "document.updated",
+    box: "for_me",
+    status: "pending",
+    documentId: "doc1",
+    summary: "Review changes",
+    createdAt: "2026-07-06T12:00:00Z",
+    updatedAt: "2026-07-06T12:00:00Z",
+    ...over,
+  });
+
+  it("builds one event-derived source for mentions, reviews, and failures", () => {
+    const summary = workspaceInboxSummary({
+      ...baseWorkspace(),
+      agents: [agent()],
+      agentRuns: [run({ status: "failed", error: "tool exited 1", updatedAt: "2026-07-06T12:03:00Z" })],
+      agentEvents: [
+        event({ id: "mention_1", type: "thread.mentioned", threadId: "thread_1", summary: "@codex was mentioned", updatedAt: "2026-07-06T12:04:00Z" }),
+        event({ id: "review_1", type: "document.updated", summary: "Review the workspace plan", updatedAt: "2026-07-06T12:02:00Z" }),
+      ],
+    });
+
+    expect(summary.counts).toEqual({ mentionUnread: 1, needsReview: 1, failed: 1, total: 3 });
+    expect(summary.badgeTone).toBe("failed");
+    expect(summary.items.map((item) => item.kind)).toEqual(["mention", "failed", "needs-review"]);
+    expect(summary.items.find((item) => item.kind === "failed")?.reason).toBe("tool exited 1");
+  });
+
+  it("uses a persisted mention watermark without hiding unresolved work", () => {
+    const summary = workspaceInboxSummary(
+      {
+        ...baseWorkspace(),
+        agents: [agent({ status: "failed", currentActivity: "daemon stopped" })],
+        agentRuns: [],
+        agentEvents: [
+          event({ id: "mention_1", type: "thread.mentioned", summary: "@codex was mentioned", updatedAt: "2026-07-06T12:00:00Z" }),
+          event({ id: "review_1", type: "document.updated", summary: "Review even if runtime moved on", updatedAt: "2026-07-06T12:01:00Z" }),
+        ],
+      },
+      { mentionSeenAt: "2026-07-06T12:00:00Z" },
+    );
+
+    expect(summary.counts).toEqual({ mentionUnread: 0, needsReview: 1, failed: 1, total: 2 });
+    expect(summary.items.find((item) => item.kind === "mention")?.unread).toBe(false);
+    expect(summary.items.find((item) => item.kind === "needs-review")?.countable).toBe(true);
+    expect(summary.badgeTone).toBe("failed");
+  });
+
+  it("ignores resolved events and never crashes on missing collections", () => {
+    const summary = workspaceInboxSummary({
+      ...baseWorkspace(),
+      agentEvents: [event({ status: "completed" })],
+    });
+
+    expect(summary.items).toEqual([]);
+    expect(summary.counts.total).toBe(0);
+    expect(summary.badgeTone).toBe("");
   });
 });
 

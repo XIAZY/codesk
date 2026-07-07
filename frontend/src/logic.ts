@@ -1,5 +1,5 @@
 import * as Y from "yjs";
-import type { ActivityEvent, Agent, AgentRun, Daemon, ThreadAnchor, ThreadItem, WorkspaceEvent, WorkspaceState } from "./types";
+import type { ActivityEvent, Agent, AgentEvent, AgentRun, Daemon, ThreadAnchor, ThreadItem, WorkspaceEvent, WorkspaceState } from "./types";
 
 export const identifierPattern = "[a-z0-9_-]+";
 export const identifierHelpText = "Only lowercase letters, numbers, underscores, and dashes.";
@@ -291,6 +291,198 @@ export function agentStatus(agent: Agent, runs: AgentRun[]) {
     return "disconnected";
   }
   return "idle";
+}
+
+export type InboxItemKind = "mention" | "needs-review" | "failed";
+export type InboxBadgeTone = InboxItemKind | "";
+
+export type WorkspaceInboxItem = {
+  id: string;
+  kind: InboxItemKind;
+  actorLabel: string;
+  action: string;
+  summary: string;
+  documentId?: string;
+  threadId?: string;
+  threadMessageId?: string;
+  agentId?: string;
+  agentHandle?: string;
+  occurredAt: string;
+  unread: boolean;
+  countable: boolean;
+  reason?: string;
+};
+
+export type WorkspaceInboxSummary = {
+  items: WorkspaceInboxItem[];
+  newestMentionAt: string;
+  counts: {
+    mentionUnread: number;
+    needsReview: number;
+    failed: number;
+    total: number;
+  };
+  badgeTone: InboxBadgeTone;
+};
+
+const resolvedInboxStatuses = new Set(["completed", "dismissed"]);
+const terminalInboxRunStatuses = new Set(["completed", "failed", "stopped", "cancelled", "canceled"]);
+
+function inboxEventOpen(event: AgentEvent) {
+  return !resolvedInboxStatuses.has((event.status || "").toLowerCase());
+}
+
+function inboxEventTime(event: AgentEvent) {
+  return event.updatedAt || event.createdAt || "";
+}
+
+function inboxTimeValue(value: string) {
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
+function inboxIsAfterWatermark(value: string, watermark: string) {
+  if (!watermark) {
+    return true;
+  }
+  const valueMs = inboxTimeValue(value);
+  const watermarkMs = inboxTimeValue(watermark);
+  if (valueMs || watermarkMs) {
+    return valueMs > watermarkMs;
+  }
+  return value > watermark;
+}
+
+function inboxLatestIso(left: string, right: string) {
+  return inboxTimeValue(left) >= inboxTimeValue(right) ? left : right;
+}
+
+function inboxAgentLabel(handle: string | undefined) {
+  return handle ? `@${handle}` : "Agent";
+}
+
+function inboxText(value?: string) {
+  const text = (value ?? "").trim().replace(/\s+/g, " ");
+  return text || "";
+}
+
+function inboxCurrentAgentRun(agent: Agent, runs: AgentRun[]) {
+  const exact = agent.currentRunId ? runs.find((run) => run.id === agent.currentRunId) : undefined;
+  if (exact) {
+    return exact;
+  }
+  const agentRuns = runs
+    .filter((run) => run.agentId === agent.id)
+    .sort((left, right) => inboxTimeValue(right.updatedAt) - inboxTimeValue(left.updatedAt));
+  return agentRuns.find((run) => !terminalInboxRunStatuses.has((run.status || "").toLowerCase())) ?? agentRuns[0];
+}
+
+function inboxFailureReason(agent: Agent, run?: AgentRun) {
+  for (const candidate of [run?.error, run?.lastMessage, agent.currentActivity]) {
+    const text = inboxText(candidate);
+    if (!text || text.toLowerCase() === "failed") {
+      continue;
+    }
+    return text;
+  }
+  return "No failure reason was provided.";
+}
+
+function isReliableMentionEvent(event: AgentEvent) {
+  return event.type === "thread.mentioned";
+}
+
+function isNeedsReviewEvent(event: AgentEvent) {
+  return event.box === "for_me" && !isReliableMentionEvent(event) && inboxEventOpen(event);
+}
+
+// Phase D is stacked before Phase B in some local worktrees. These bottom-condition helpers
+// intentionally mirror B's pre-ladder conditions; delete this shim when Jackie resolves D onto
+// B's shared agentDisplayStatus/source helpers.
+export function workspaceInboxSummary(
+  workspace: Pick<WorkspaceState, "agents" | "agentRuns" | "agentEvents">,
+  options: { mentionSeenAt?: string } = {},
+): WorkspaceInboxSummary {
+  const mentionSeenAt = options.mentionSeenAt ?? "";
+  const items: WorkspaceInboxItem[] = [];
+  let newestMentionAt = "";
+
+  for (const event of workspace.agentEvents ?? []) {
+    if (!inboxEventOpen(event)) {
+      continue;
+    }
+    const occurredAt = inboxEventTime(event);
+    if (isReliableMentionEvent(event)) {
+      const unread = inboxIsAfterWatermark(occurredAt, mentionSeenAt);
+      newestMentionAt = newestMentionAt ? inboxLatestIso(newestMentionAt, occurredAt) : occurredAt;
+      items.push({
+        id: `mention:${event.id}`,
+        kind: "mention",
+        actorLabel: inboxAgentLabel(event.agentHandle),
+        action: "was mentioned",
+        summary: inboxText(event.prompt) || inboxText(event.summary) || "Mentioned in a thread",
+        documentId: event.documentId || undefined,
+        threadId: event.threadId || undefined,
+        threadMessageId: event.threadMessageId || undefined,
+        agentId: event.agentId,
+        agentHandle: event.agentHandle,
+        occurredAt,
+        unread,
+        countable: unread,
+      });
+      continue;
+    }
+    if (isNeedsReviewEvent(event)) {
+      items.push({
+        id: `review:${event.id}`,
+        kind: "needs-review",
+        actorLabel: inboxAgentLabel(event.agentHandle),
+        action: "needs your review",
+        summary: inboxText(event.summary) || inboxText(event.prompt) || "Review requested",
+        documentId: event.documentId || undefined,
+        threadId: event.threadId || undefined,
+        threadMessageId: event.threadMessageId || undefined,
+        agentId: event.agentId,
+        agentHandle: event.agentHandle,
+        occurredAt,
+        unread: true,
+        countable: true,
+      });
+    }
+  }
+
+  for (const agent of workspace.agents ?? []) {
+    const run = inboxCurrentAgentRun(agent, workspace.agentRuns ?? []);
+    if (agent.status !== "failed" && run?.status !== "failed") {
+      continue;
+    }
+    const reason = inboxFailureReason(agent, run);
+    items.push({
+      id: `failed:${agent.id}:${run?.id ?? "agent"}`,
+      kind: "failed",
+      actorLabel: inboxAgentLabel(agent.handle),
+      action: "failed",
+      summary: reason,
+      agentId: agent.id,
+      agentHandle: agent.handle,
+      occurredAt: run?.updatedAt || agent.updatedAt,
+      unread: true,
+      countable: true,
+      reason,
+    });
+  }
+
+  items.sort((left, right) => inboxTimeValue(right.occurredAt) - inboxTimeValue(left.occurredAt) || left.id.localeCompare(right.id));
+  const mentionUnread = items.filter((item) => item.kind === "mention" && item.countable).length;
+  const needsReview = items.filter((item) => item.kind === "needs-review" && item.countable).length;
+  const failed = items.filter((item) => item.kind === "failed" && item.countable).length;
+  const total = mentionUnread + needsReview + failed;
+  return {
+    items,
+    newestMentionAt,
+    counts: { mentionUnread, needsReview, failed, total },
+    badgeTone: failed ? "failed" : needsReview ? "needs-review" : mentionUnread ? "mention" : "",
+  };
 }
 
 export function coworkerCount(workspace: Pick<WorkspaceState, "agents" | "users">) {

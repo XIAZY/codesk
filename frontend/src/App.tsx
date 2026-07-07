@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, ReactNode } from "react";
+import type { CSSProperties, ReactNode, RefObject } from "react";
 import { ApiClient, ApiError, apiBase, daemonStaticBase, publicOrigin } from "./api";
 import { DocumentSurface, type LiveThread, type SurfaceSelection } from "./DocumentSurface";
 import type { MarkdownPreviewCommandName } from "./markdownLivePreview";
@@ -25,9 +25,12 @@ import {
   isMarkdownDocumentPath,
   randomWorkspaceName,
   threadReplyLabel,
+  workspaceInboxSummary,
   workspaceSlugMaxLength,
   workspaceSlugMinLength,
   type ActivityCategory,
+  type WorkspaceInboxItem,
+  type WorkspaceInboxSummary,
   type WorkspacePerson,
   type LineThreadGroup,
 } from "./logic";
@@ -279,6 +282,59 @@ function visibleAgentStatus(agent: Agent, runs: ReturnType<typeof useWorkspace>[
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
+}
+
+function readLocalStorage(key: string) {
+  try {
+    return localStorage.getItem(key) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function writeLocalStorage(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Ignore storage failures: the current-session state still updates.
+  }
+}
+
+function inboxMentionWatermarkKey(workspaceId: string, currentUserId?: string) {
+  return `codesk.inbox.mentions.${workspaceId || "workspace"}.${currentUserId || "anonymous"}`;
+}
+
+function inboxBadgeText(count: number) {
+  return count > 9 ? "9+" : String(count);
+}
+
+function inboxBadgeLabel(summary: WorkspaceInboxSummary) {
+  const { total, failed, needsReview, mentionUnread } = summary.counts;
+  if (!total) {
+    return "Inbox";
+  }
+  const parts = [
+    failed ? `${failed} failed` : "",
+    needsReview ? `${needsReview} needs review` : "",
+    mentionUnread ? `${mentionUnread} unread mention${mentionUnread === 1 ? "" : "s"}` : "",
+  ].filter(Boolean);
+  return `Inbox, ${total} pending: ${parts.join(", ")}`;
+}
+
+function inboxDocumentLabel(documents: DocumentItem[], documentId?: string) {
+  if (!documentId) {
+    return "";
+  }
+  const document = documents.find((item) => item.id === documentId);
+  return document ? fileName(document.path) : "Unknown document";
+}
+
+function focusableElements(root: HTMLElement) {
+  return Array.from(
+    root.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter((element) => !element.hasAttribute("disabled") && element.getAttribute("aria-hidden") !== "true");
 }
 
 export function App() {
@@ -1256,6 +1312,7 @@ export function WorkspaceApp({
     rootDocumentId: workspace.rootDocumentId,
   });
   const rootDocuments = rootNamespace.documents;
+  const mentionWatermarkKey = inboxMentionWatermarkKey(workspace.workspaceId || workspaceId, workspace.currentUserId);
   const [rightTab, setRightTab] = useState<"threads" | "activity" | "coworkers">("threads");
   const [modal, setModal] = useState<"daemon" | "agent" | "rename" | "share" | "agent-detail" | "daemon-detail" | "manage" | null>(null);
   // Default tab is Members & Invite (plan tab order). Integration protocol (Juan's
@@ -1342,6 +1399,11 @@ export function WorkspaceApp({
   const [renamingDocumentId, setRenamingDocumentId] = useState("");
   const [freshDocumentId, setFreshDocumentId] = useState("");
   const [titleDraft, setTitleDraft] = useState("");
+  const [inboxOpen, setInboxOpen] = useState(false);
+  const [mentionSeenAt, setMentionSeenAt] = useState(() => readLocalStorage(mentionWatermarkKey));
+  const inboxRef = useRef<HTMLDivElement>(null);
+  const inboxDialogRef = useRef<HTMLDivElement>(null);
+  const inboxTriggerRef = useRef<HTMLButtonElement>(null);
   const lastAccessUpdateKeyRef = useRef("");
 
   const centerView = view.kind === "agents" ? "agents" : "document";
@@ -1364,6 +1426,107 @@ export function WorkspaceApp({
   const currentWorkspaceUserHandle = currentWorkspaceUser?.handle ? `@${currentWorkspaceUser.handle}` : "Workspace user";
   const currentWorkspaceUserIdentity = currentWorkspaceUser?.handle || currentWorkspaceUser?.name || "Workspace user";
   const canInviteMembers = workspace.currentMembershipRole === "owner" || workspace.currentMembershipRole === "admin";
+  const inboxSummary = useMemo(() => workspaceInboxSummary(workspace, { mentionSeenAt }), [mentionSeenAt, workspace]);
+  const inboxCount = inboxSummary.counts.total;
+  const inboxAriaLabel = inboxBadgeLabel(inboxSummary);
+
+  useEffect(() => {
+    setMentionSeenAt(readLocalStorage(mentionWatermarkKey));
+  }, [mentionWatermarkKey]);
+
+  const closeInbox = useCallback((restoreFocus = true) => {
+    setInboxOpen(false);
+    if (restoreFocus) {
+      window.setTimeout(() => inboxTriggerRef.current?.focus(), 0);
+    }
+  }, []);
+
+  const markInboxMentionsRead = useCallback(() => {
+    if (!inboxSummary.newestMentionAt) {
+      return;
+    }
+    writeLocalStorage(mentionWatermarkKey, inboxSummary.newestMentionAt);
+    setMentionSeenAt(inboxSummary.newestMentionAt);
+  }, [inboxSummary.newestMentionAt, mentionWatermarkKey]);
+
+  const openInboxItem = useCallback(
+    (item: WorkspaceInboxItem) => {
+      if (item.kind === "mention" && item.threadId) {
+        if (item.documentId) {
+          navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "document", documentId: item.documentId } });
+        }
+        setRightTab("threads");
+        setSelectedThreadId(item.threadId);
+        setFocusThreadId(item.threadId);
+        closeInbox();
+        return;
+      }
+      if (item.agentId) {
+        setSelectedAgentId(item.agentId);
+        setModal("agent-detail");
+        closeInbox();
+      }
+    },
+    [closeInbox, workspaceSlug],
+  );
+
+  useEffect(() => {
+    if (!inboxOpen) {
+      return;
+    }
+    const focusTimer = window.setTimeout(() => {
+      const dialog = inboxDialogRef.current;
+      if (!dialog) {
+        return;
+      }
+      const first = focusableElements(dialog)[0];
+      (first ?? dialog).focus();
+    }, 0);
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && inboxRef.current?.contains(target)) {
+        return;
+      }
+      closeInbox();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeInbox();
+        return;
+      }
+      if (event.key !== "Tab") {
+        return;
+      }
+      const dialog = inboxDialogRef.current;
+      if (!dialog) {
+        return;
+      }
+      const focusable = focusableElements(dialog);
+      if (!focusable.length) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.clearTimeout(focusTimer);
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [closeInbox, inboxOpen]);
 
   useEffect(() => {
     if (view.kind !== "home" || !rootNamespace.ready || !activeWorkspace) {
@@ -1528,7 +1691,7 @@ export function WorkspaceApp({
       className={`shell ${centerView === "document" ? "" : "management-shell"}${sidebarCollapsed ? " sidebar-collapsed" : ""}${draggingRail ? " dragging" : ""}`}
       style={rightWidth != null ? ({ "--right": `${rightWidth}px` } as CSSProperties) : undefined}
     >
-      <aside className="sb">
+      <aside className={`sb ${inboxOpen ? "inbox-open" : ""}`}>
         <div className="workspace-switcher">
           <div className="row gap-8 min-0">
             <div className="avi workspace-avi">{initials(activeWorkspace?.name ?? workspace.name)}</div>
@@ -1555,19 +1718,42 @@ export function WorkspaceApp({
           </div>
         </div>
 
-        <nav className="sb-section">
-          <button className="nav-item" type="button" onClick={() => setRightTab("activity")}>
-            <Icon name="activity" />
-            <span>Activity</span>
-            {/* No count here: Document Activity is current-document context, so the
-                right-rail tab's unread dot owns the "new" signal. A workspace-level
-                count would be a second, disagreeing source (Anton/Eva/Bill ruling). */}
+        <nav className="sb-section inbox-nav" ref={inboxRef}>
+          <button
+            ref={inboxTriggerRef}
+            className={`nav-item inbox-trigger ${inboxOpen ? "on" : ""}`}
+            type="button"
+            aria-label={inboxAriaLabel}
+            aria-haspopup="dialog"
+            aria-expanded={inboxOpen}
+            aria-controls="workspace-inbox-flyout"
+            title={inboxAriaLabel}
+            onClick={() => {
+              setInboxOpen((open) => !open);
+            }}
+          >
+            <Icon name="inbox" />
+            <span>Inbox</span>
+            {inboxCount ? (
+              <>
+                <span className={`ct has inbox-ct ${inboxSummary.badgeTone}`} title={inboxAriaLabel}>
+                  {inboxBadgeText(inboxCount)}
+                </span>
+                <em className={`inbox-corner-badge ${inboxSummary.badgeTone}`} aria-hidden="true">
+                  {inboxBadgeText(inboxCount)}
+                </em>
+              </>
+            ) : null}
           </button>
-          <button className="nav-item" type="button" onClick={() => setRightTab("threads")}>
-            <Icon name="thread" />
-            <span>Threads</span>
-            <span className={`ct ${workspace.threads.length ? "has" : ""}`}>{workspace.threads.length}</span>
-          </button>
+          {inboxOpen ? (
+            <WorkspaceInboxFlyout
+              dialogRef={inboxDialogRef}
+              summary={inboxSummary}
+              documents={rootDocuments}
+              onMarkMentionsRead={markInboxMentionsRead}
+              onItem={openInboxItem}
+            />
+          ) : null}
         </nav>
 
         <div className="divider sb-divider" />
@@ -2065,6 +2251,124 @@ function useNowTicker(intervalMs: number) {
     return () => window.clearInterval(id);
   }, [intervalMs]);
   return now;
+}
+
+const inboxDotColor: Record<WorkspaceInboxItem["kind"], string> = {
+  mention: "var(--iris)",
+  "needs-review": "var(--needs-you)",
+  failed: "var(--danger)",
+};
+
+const inboxGlyph: Record<WorkspaceInboxItem["kind"], string> = {
+  mention: "mention",
+  "needs-review": "review",
+  failed: "alert",
+};
+
+const inboxKindLabel: Record<WorkspaceInboxItem["kind"], string> = {
+  mention: "Mention",
+  "needs-review": "Needs review",
+  failed: "Failed",
+};
+
+function WorkspaceInboxFlyout({
+  dialogRef,
+  summary,
+  documents,
+  onMarkMentionsRead,
+  onItem,
+}: {
+  dialogRef: RefObject<HTMLDivElement>;
+  summary: WorkspaceInboxSummary;
+  documents: DocumentItem[];
+  onMarkMentionsRead: () => void;
+  onItem: (item: WorkspaceInboxItem) => void;
+}) {
+  const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
+  const [expandedReasonId, setExpandedReasonId] = useState("");
+  const hasUnreadMentions = summary.counts.mentionUnread > 0;
+
+  const renderRowBody = (item: WorkspaceInboxItem) => {
+    const documentLabel = inboxDocumentLabel(documents, item.documentId);
+    const timeLabel = relativeTime(item.occurredAt, now);
+    return (
+      <>
+        <span className="inbox-kind" title={inboxKindLabel[item.kind]}>
+          <span className={`inbox-dot ${item.unread ? "solid" : "hollow"}`} style={{ "--dot": inboxDotColor[item.kind] } as CSSProperties} />
+          <Icon name={inboxGlyph[item.kind]} />
+        </span>
+        <span className="inbox-copy min-0">
+          <span className="inbox-main">
+            <strong>{item.actorLabel}</strong>
+            <span>{item.action}</span>
+            {documentLabel ? <span className="inbox-doc-link">{documentLabel}</span> : null}
+          </span>
+          <span className="inbox-detail">
+            <span className="truncate">{item.summary}</span>
+            {timeLabel ? <span className="inbox-time">{timeLabel}</span> : null}
+          </span>
+          {item.kind === "failed" ? (
+            <span className="inbox-failed-detail">
+              <button
+                className="inbox-reason-link"
+                type="button"
+                onClick={() => setExpandedReasonId((current) => (current === item.id ? "" : item.id))}
+                aria-expanded={expandedReasonId === item.id}
+              >
+                View reason
+              </button>
+              {expandedReasonId === item.id ? <span className="inbox-reason">{item.reason || item.summary}</span> : null}
+            </span>
+          ) : null}
+        </span>
+      </>
+    );
+  };
+
+  return (
+    <div
+      id="workspace-inbox-flyout"
+      className="inbox-flyout"
+      role="dialog"
+      aria-label="Inbox"
+      tabIndex={-1}
+      ref={dialogRef}
+    >
+      <div className="inbox-flyout-head">
+        <div className="col gap-2 min-0">
+          <b>Inbox</b>
+          <span className="tiny muted">
+            {summary.counts.total ? `${summary.counts.total} pending` : "Zero pending"}
+          </span>
+        </div>
+        <button
+          className="btn ghost sm"
+          type="button"
+          disabled={!hasUnreadMentions}
+          aria-disabled={!hasUnreadMentions}
+          onClick={onMarkMentionsRead}
+        >
+          Mark all read
+        </button>
+      </div>
+      <div className="inbox-list">
+        {summary.items.map((item) => {
+          const canOpen = (item.kind === "mention" && !!item.threadId) || (item.kind === "needs-review" && !!item.agentId);
+          const className = `inbox-row ${item.kind} ${item.unread ? "unread" : "read"}`;
+          return canOpen ? (
+            <button className={className} type="button" key={item.id} onClick={() => onItem(item)}>
+              {renderRowBody(item)}
+            </button>
+          ) : (
+            <article className={className} key={item.id}>
+              {renderRowBody(item)}
+            </article>
+          );
+        })}
+        {!summary.items.length ? <p className="inbox-empty">Inbox zero · No pending items.</p> : null}
+      </div>
+    </div>
+  );
 }
 
 export function DaemonsManagement({
@@ -3562,6 +3866,14 @@ export function Icon({ name }: { name: string }) {
       return <svg className="i sm" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6" /></svg>;
     case "activity":
       return <svg className="i sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>;
+    case "inbox":
+      return <svg className="i sm" viewBox="0 0 24 24"><path d="M4 4h16l-2 10h-3l-1.5 3h-3L9 14H6L4 4z" /><path d="M4 20h16" /></svg>;
+    case "mention":
+      return <svg className="i sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" /><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8" /></svg>;
+    case "review":
+      return <svg className="i sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 3a9 9 0 0 1 0 18z" /></svg>;
+    case "alert":
+      return <svg className="i sm" viewBox="0 0 24 24"><path d="M12 3l10 18H2L12 3z" /><path d="M12 9v5M12 18h.01" /></svg>;
     case "thread":
       return <svg className="i sm" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5A8.5 8.5 0 1 1 21 11.5z" /></svg>;
     case "people":
