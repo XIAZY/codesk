@@ -2,8 +2,7 @@ import type { Account, DocumentItem, WorkspaceSummary } from "./types";
 
 export type WorkspaceView =
   | { kind: "home" }
-  | { kind: "document"; documentId: string }
-  | { kind: "agents" };
+  | { kind: "document"; documentId: string };
 
 export type AppRoute =
   | { kind: "root" }
@@ -59,9 +58,6 @@ export function parseRoute(pathname: string): AppRoute {
   if (segments.length === 2) {
     return { kind: "workspace", slug, view: { kind: "home" } };
   }
-  if (segments.length === 3 && segments[2] === "agents") {
-    return { kind: "workspace", slug, view: { kind: "agents" } };
-  }
   if (segments.length === 4 && segments[2] === "d") {
     const documentId = decodePathSegment(segments[3]);
     return documentId ? { kind: "workspace", slug, view: { kind: "document", documentId } } : { kind: "notFound" };
@@ -94,8 +90,6 @@ export function routePath(route: AppRoute): string {
           return `/w/${slug}`;
         case "document":
           return `/w/${slug}/d/${encodeURIComponent(route.view.documentId)}`;
-        case "agents":
-          return `/w/${slug}/agents`;
       }
       break;
     }
