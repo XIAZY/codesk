@@ -33,6 +33,8 @@
   --err: oklch(0.58 0.16 25);
   --err-50: oklch(0.965 0.02 25);
   --err-100: oklch(0.85 0.05 25);
+  --needs-you: var(--accent);
+  --danger: var(--err);
   --display: "Newsreader", Georgia, serif;
   --sans: "Archivo", ui-sans-serif, system-ui, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -43,6 +45,17 @@
   --r-4: 24px;
   --shadow: 0 1px 0 rgba(20, 18, 12, 0.02), 0 24px 60px -42px rgba(20, 18, 12, 0.22);
   --shadow-2: 0 1px 0 rgba(20, 18, 12, 0.02), 0 30px 70px -44px rgba(20, 18, 12, 0.26);
+  /* Dark left-sidebar palette (Phase E, qianyi-approved). Only the left rail goes dark;
+     center + right rail + Manage modal stay on the warm-paper palette. Agent identity
+     avatars and status dots keep their own colors on top of this. */
+  --sb: oklch(0.14 0.004 75);
+  --sb-2: oklch(0.205 0.006 75);
+  --sb-line: oklch(0.26 0.006 75);
+  --sb-ink: oklch(0.94 0.004 75);
+  --sb-ink-2: oklch(0.62 0.006 75);
+  /* Resizable/collapsible column widths (Phase E). */
+  --left: 248px;
+  --right: 320px;
   font-family: var(--sans);
   color: var(--ink);
   background: var(--paper);
@@ -368,6 +381,11 @@ svg.i.sm {
   color: var(--ok);
 }
 
+.chip.running {
+  background: var(--iris-50);
+  color: var(--iris-700);
+}
+
 .chip.idle {
   background: var(--paper-3);
   color: var(--ink-3);
@@ -378,10 +396,20 @@ svg.i.sm {
   color: var(--warn);
 }
 
-.chip.stale,
-.chip.queued {
+.chip.stale {
   background: var(--warn-50);
   color: var(--warn);
+}
+
+.chip.queued,
+.chip.waiting-env {
+  background: var(--paper-3);
+  color: var(--ink-3);
+}
+
+.chip.needs-review {
+  background: var(--accent-100);
+  color: var(--accent-700);
 }
 
 .chip.accent {
@@ -465,20 +493,46 @@ svg.i.sm {
 
 .status-dot.online,
 .status-dot.working,
-.status-dot.active,
-.status-dot.idle {
+.status-dot.active {
   background: var(--ok);
 }
 
-.status-dot.stale,
-.status-dot.queued {
+.status-dot.idle {
+  background: transparent;
+  border: 1.5px solid var(--ink-4);
+}
+
+.status-dot.running {
+  background: var(--iris);
+  animation: status-pulse 1.8s ease-in-out infinite;
+}
+
+.status-dot.stale {
   background: var(--warn);
+}
+
+.status-dot.queued,
+.status-dot.waiting-env {
+  background: var(--ink-4);
+}
+
+.status-dot.needs-review {
+  background: var(--accent);
 }
 
 .status-dot.disconnected,
 .status-dot.deleted,
 .status-dot.failed {
   background: var(--err);
+}
+
+@keyframes status-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--iris) 30%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in oklab, var(--iris) 0%, transparent);
+  }
 }
 
 .auth-screen {
@@ -599,21 +653,158 @@ svg.i.sm {
   height: 100vh;
   min-width: 1120px;
   display: grid;
-  grid-template-columns: 248px minmax(560px, 1fr) 320px;
+  grid-template-columns: var(--left) minmax(0, 1fr) var(--right);
   overflow: hidden;
   background: var(--paper);
+  transition: grid-template-columns 0.18s ease;
+}
+
+/* While dragging the right-rail handle: kill the width animation and text selection
+   so the drag tracks the cursor 1:1 (Phase E). */
+.shell.dragging {
+  transition: none;
+  user-select: none;
+}
+
+/* Collapsed left rail: 60px icon track. Center + right absorb the freed width.
+   Labels/counts/tree/buttons hide; icons and identity avatars (+ status dots)
+   stay and center. */
+.shell.sidebar-collapsed {
+  --left: 60px;
+}
+.shell.sidebar-collapsed .sb {
+  overflow: hidden;
+}
+.shell.sidebar-collapsed .sb.inbox-open {
+  overflow: visible;
+}
+.shell.sidebar-collapsed .sb .workspace-switcher .col,
+.shell.sidebar-collapsed .sb .workspace-switcher select,
+.shell.sidebar-collapsed .sb .sb-search,
+.shell.sidebar-collapsed .sb .nav-item > span,
+.shell.sidebar-collapsed .sb .nav-item .ct,
+.shell.sidebar-collapsed .sb .lab,
+.shell.sidebar-collapsed .sb .doc-tree-body,
+.shell.sidebar-collapsed .sb .agent-summary .label,
+.shell.sidebar-collapsed .sb .agent-summary > .row > .btn,
+.shell.sidebar-collapsed .sb .agent-mini .small,
+.shell.sidebar-collapsed .sb .agent-mini-status-label,
+.shell.sidebar-collapsed .sb .manage-entry span,
+.shell.sidebar-collapsed .sb .account-footer .small,
+.shell.sidebar-collapsed .sb .account-footer .btn {
+  display: none;
+}
+.shell.sidebar-collapsed .sb .nav-item,
+.shell.sidebar-collapsed .sb .agent-mini,
+.shell.sidebar-collapsed .sb .manage-entry,
+.shell.sidebar-collapsed .sb .workspace-switcher,
+.shell.sidebar-collapsed .sb .account-footer .row,
+.shell.sidebar-collapsed .sb .account-footer {
+  justify-content: center;
+  padding-left: 0;
+  padding-right: 0;
+}
+.shell.sidebar-collapsed .sb .workspace-switcher .row {
+  gap: 0;
+}
+/* B wraps the handle + status label in .agent-mini-copy (flex:1). In the collapsed rail its
+   text is hidden and the status dot rides as a corner badge on the avatar, so the copy must
+   not reserve width — otherwise it pushes the avatar off-center in the 60px track (B×E seam). */
+.shell.sidebar-collapsed .sb .agent-mini-copy {
+  flex: 0;
+  min-width: 0;
+}
+/* Collapsed agent rows keep the status dot as a corner badge on the identity
+   avatar: identity color (who) + status color (what) + a11y all survive the
+   collapse (plan §3 "颜色即状态", Phase B single source, qianyi no-color-lost).
+   The avatar is centered at 24px, so anchoring off the row center lands the dot
+   on its bottom-right corner; a 1px paper ring lifts it off the avatar (Eva). */
+.shell.sidebar-collapsed .sb .agent-mini {
+  position: relative;
+}
+.shell.sidebar-collapsed .sb .agent-mini .status-dot {
+  position: absolute;
+  left: calc(50% + 4px);
+  bottom: 3px;
+  margin: 0;
+  box-shadow: 0 0 0 1px var(--paper);
+}
+.shell.sidebar-collapsed .sb .inbox-trigger {
+  position: relative;
+}
+.shell.sidebar-collapsed .sb .inbox-corner-badge {
+  display: inline-flex;
+}
+
+/* Collapse toggle (in the workspace switcher) + expand affordance shown only
+   when collapsed. */
+.sb-collapse-btn,
+.sb-expand-tab {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  border: 0;
+  flex: none;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  color: var(--sb-ink-2);
+  cursor: pointer;
+}
+.sb-collapse-btn:hover,
+.sb-expand-tab:hover {
+  background: var(--sb-2);
+  color: var(--sb-ink);
+}
+.shell:not(.sidebar-collapsed) .sb-expand-tab {
+  display: none;
+}
+.shell.sidebar-collapsed .sb-collapse-btn {
+  display: none;
+}
+.shell.sidebar-collapsed .sb-expand-tab {
+  margin: 0 auto;
+}
+
+/* Right-rail resize handle — grab the left edge, clamp handled in JS. */
+.ctx {
+  position: relative;
+}
+.rz {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 10;
+}
+.rz::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  background: transparent;
+  transition: background 0.12s ease;
+}
+.rz:hover::after,
+.shell.dragging .rz::after {
+  background: color-mix(in oklab, var(--iris) 55%, transparent);
 }
 
 .shell.management-shell {
-  grid-template-columns: 248px minmax(0, 1fr);
+  grid-template-columns: var(--left) minmax(0, 1fr);
 }
 
 .sb {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  border-right: 1px solid var(--border);
-  background: var(--paper-2);
+  border-right: 1px solid var(--sb-line);
+  background: var(--sb);
+  color: var(--sb-ink);
 }
 
 .doc-area {
@@ -749,6 +940,212 @@ svg.i.sm {
   color: var(--accent-700);
 }
 
+.inbox-nav {
+  position: relative;
+  z-index: 20;
+}
+
+.inbox-trigger {
+  position: relative;
+}
+
+.nav-item .ct.inbox-ct.needs-review {
+  background: var(--needs-you);
+  color: var(--paper);
+}
+
+.nav-item .ct.inbox-ct.failed {
+  background: var(--danger);
+  color: var(--paper);
+}
+
+.inbox-corner-badge {
+  position: absolute;
+  right: 6px;
+  bottom: 3px;
+  min-width: 15px;
+  height: 15px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid var(--paper);
+  color: var(--paper);
+  font-size: 9px;
+  line-height: 1;
+  font-style: normal;
+  font-weight: 700;
+  pointer-events: none;
+}
+
+.inbox-corner-badge.needs-review {
+  background: var(--needs-you);
+}
+
+.inbox-corner-badge.failed {
+  background: var(--danger);
+}
+
+.inbox-flyout {
+  position: absolute;
+  top: 40px;
+  left: 8px;
+  width: min(344px, calc(100vw - 32px));
+  max-height: min(520px, calc(100vh - 112px));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-2);
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+}
+
+.inbox-flyout .muted {
+  color: var(--ink-3);
+}
+
+.shell.sidebar-collapsed .inbox-flyout {
+  left: 52px;
+  top: 0;
+}
+
+.inbox-flyout:focus {
+  outline: none;
+  box-shadow: var(--shadow-2), 0 0 0 3px color-mix(in oklab, var(--accent) 18%, transparent);
+}
+
+.inbox-flyout-head {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--border);
+  padding: 10px 12px;
+}
+
+.inbox-list {
+  min-height: 0;
+  max-height: 468px;
+  overflow: auto;
+  padding: 8px;
+}
+
+.inbox-row {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  border: 1px solid transparent;
+  border-radius: var(--r-1);
+  background: transparent;
+  color: var(--ink);
+  padding: 9px 8px;
+  text-align: left;
+}
+
+button.inbox-row:hover {
+  background: var(--paper-2);
+  border-color: var(--border);
+}
+
+.inbox-row.read {
+  color: var(--ink-3);
+}
+
+.inbox-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  min-width: 31px;
+  color: var(--ink-3);
+  padding-top: 2px;
+}
+
+.inbox-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  border: 1px solid var(--dot);
+  flex: 0 0 auto;
+}
+
+.inbox-dot.solid {
+  background: var(--dot);
+}
+
+.inbox-dot.hollow {
+  background: transparent;
+}
+
+.inbox-copy {
+  display: grid;
+  gap: 3px;
+  flex: 1 1 auto;
+}
+
+.inbox-main,
+.inbox-detail,
+.inbox-failed-detail {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.inbox-main {
+  font-size: 12.5px;
+}
+
+.inbox-main strong {
+  color: var(--ink);
+}
+
+.inbox-row.read .inbox-main strong {
+  color: var(--ink-3);
+}
+
+.inbox-doc-link {
+  color: var(--ink-2);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.inbox-detail,
+.inbox-failed-detail {
+  color: var(--ink-3);
+  font-size: 11.5px;
+}
+
+.inbox-time {
+  flex: 0 0 auto;
+}
+
+.inbox-reason-link {
+  border: 0;
+  background: transparent;
+  color: var(--danger);
+  padding: 0;
+  font-size: inherit;
+  font-weight: 700;
+}
+
+.inbox-reason {
+  color: var(--ink-2);
+}
+
+.inbox-empty {
+  margin: 4px;
+  border: 1px dashed var(--border);
+  border-radius: var(--r-1);
+  color: var(--ink-3);
+  padding: 14px 12px;
+  font-size: 12.5px;
+}
+
 .nav-item .car {
   display: inline-flex;
   align-items: center;
@@ -841,13 +1238,124 @@ svg.i.sm {
   text-align: left;
 }
 
-.agent-mini .status-dot {
-  margin-left: auto;
+.agent-mini-copy {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 1px;
+}
+
+.agent-mini-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--ink-3);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.agent-mini-status-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .account-footer {
   border-top: 1px solid var(--border);
   padding: 8px 12px;
+}
+
+/* --- Phase E: dark left-rail chrome --------------------------------------
+   Recolor the sidebar's text / borders / hovers / neutral chips onto the --sb
+   palette. Identity avatars (.avi.*) and status dots (.status-dot) are
+   deliberately NOT touched — their colors are the no-color-lost constraint.
+   Meaningful accent counts (.ct.has) are preserved too; only neutral chrome
+   goes dark. Center, right rail and the Manage modal stay on warm paper. */
+.sb .label,
+.sb .lab,
+.sb .group-label,
+.sb .empty-note,
+.sb .muted,
+.sb .tiny.muted,
+.sb .small.muted,
+.sb .faint {
+  color: var(--sb-ink-2);
+}
+.sb .divider,
+.sb .sb-divider {
+  background: var(--sb-line);
+}
+.sb .workspace-switcher {
+  border-bottom-color: var(--sb-line);
+}
+.sb .workspace-switcher select {
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--sb-ink-2) 50%),
+    linear-gradient(135deg, var(--sb-ink-2) 50%, transparent 50%);
+}
+.sb .input {
+  background: var(--sb-2);
+  border-color: var(--sb-line);
+  color: var(--sb-ink-2);
+}
+.sb .search-box {
+  color: var(--sb-ink-2);
+}
+.sb .kbd {
+  background: var(--sb-2);
+  border-color: var(--sb-line);
+  color: var(--sb-ink-2);
+}
+.sb .nav-item {
+  color: var(--sb-ink);
+}
+.sb .nav-item:hover {
+  background: var(--sb-2);
+}
+.sb .nav-item.on {
+  border-color: var(--sb-line);
+  background: var(--sb-2);
+  box-shadow: none;
+}
+.sb .nav-item .car,
+.sb .folder-row .ct {
+  color: var(--sb-ink-2);
+}
+.sb .nav-item .ct:not(.has) {
+  background: var(--sb-2);
+  color: var(--sb-ink-2);
+}
+.sb .folder-row {
+  color: var(--sb-ink);
+}
+.sb .folder-row:hover .car {
+  color: var(--sb-ink);
+}
+.sb .tree-children {
+  border-left-color: var(--sb-line);
+}
+.sb .agent-mini:hover {
+  background: var(--sb-2);
+}
+.sb .manage-entry {
+  color: var(--sb-ink-2);
+}
+.sb .manage-entry:hover {
+  background: var(--sb-2);
+  color: var(--sb-ink);
+}
+.sb .account-footer {
+  border-top-color: var(--sb-line);
+}
+.sb .btn.ghost {
+  color: var(--sb-ink-2);
+}
+.sb .btn.ghost:hover {
+  background: var(--sb-2);
+  color: var(--sb-ink);
 }
 
 .doc-toolbar {
@@ -859,6 +1367,24 @@ svg.i.sm {
   border-bottom: 1px solid var(--border);
   background: var(--paper);
   padding: 0 18px;
+}
+
+.collaborator-avatars {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.collaborator-avatars .avi {
+  margin-left: -6px;
+}
+
+.collaborator-avatars .avi:first-child {
+  margin-left: 0;
 }
 
 .breadcrumb {
@@ -1516,6 +2042,17 @@ svg.i.sm {
   flex: 0 0 auto;
 }
 
+.btn-link {
+  all: unset;
+  cursor: pointer;
+  color: var(--ink-2);
+  padding: 3px 0;
+}
+
+.btn-link:hover {
+  color: var(--ink);
+}
+
 .unread-dot {
   width: 6px;
   height: 6px;
@@ -1838,6 +2375,183 @@ pre.code {
 /* ── New agent modal ── */
 .modal-card.wide {
   width: min(760px, calc(100vw - 36px));
+}
+
+/* Manage / Settings container (plan §4.2) --------------------------------- */
+.manage-entry {
+  width: calc(100% - 16px);
+  margin: 2px 8px 4px;
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid transparent;
+  border-radius: var(--r-2);
+  background: transparent;
+  color: var(--ink-3); /* de-emphasized: no accent, visually lowered (Eva) */
+  padding: 0 8px;
+  text-align: left;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.manage-entry:hover {
+  background: rgba(255, 253, 248, 0.72);
+  color: var(--ink-2);
+}
+
+.manage-modal {
+  width: min(880px, calc(100vw - 36px));
+  padding: 0;
+  overflow: hidden;
+}
+
+.manage-modal .modal-header {
+  padding: 16px 18px;
+  margin-bottom: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.manage-body {
+  display: flex;
+  min-height: 440px;
+  max-height: calc(100vh - 140px);
+}
+
+.manage-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 200px;
+  flex-shrink: 0;
+  padding: 12px;
+  border-right: 1px solid var(--border);
+  background: var(--paper-2);
+}
+
+.manage-tab {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--r-2);
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.manage-tab:hover {
+  background: var(--paper);
+}
+
+.manage-tab.active {
+  background: var(--paper);
+  border-color: var(--border);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* Danger zone pushed to the bottom of the tab column and isolated with the
+   danger color, kept apart from the routine tabs to prevent mis-taps (Eva). */
+.manage-tabs-spacer {
+  flex: 1;
+}
+
+.manage-tab.danger {
+  color: var(--err);
+}
+
+.manage-tab.danger.active {
+  background: color-mix(in oklab, var(--err) 8%, var(--paper));
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.manage-content {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+}
+
+.manage-content .management-inner {
+  padding: 22px 24px 32px;
+}
+
+.manage-panel {
+  padding: 22px 24px;
+}
+
+.manage-panel-head {
+  margin-bottom: 14px;
+}
+
+.coming-soon-block {
+  display: grid;
+  place-items: center;
+  min-height: 220px;
+  border: 1px dashed var(--border);
+  border-radius: var(--r-2);
+  background: var(--paper-2);
+}
+
+/* Manage → Members & Invite (Phase A · A2) */
+.member-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 22px;
+}
+
+.member-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 6px;
+  border-radius: var(--r-2);
+}
+
+.member-row:hover {
+  background: var(--paper-2);
+}
+
+.member-role {
+  margin-left: auto;
+}
+
+.invite-block {
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Read-only workspace settings today: plain label + value, deliberately NOT dressed
+   as editable input boxes so the appearance matches the behavior (Eva). */
+.settings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.setting-readonly {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.setting-value {
+  font-size: 14px;
+  color: var(--ink-2);
+}
+
+.setting-value.mono {
+  font-family: var(--mono);
+  font-size: 13px;
 }
 
 .new-agent-form {

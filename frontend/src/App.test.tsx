@@ -3,43 +3,50 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentDetailModal, CreateDaemonModal, DaemonDetailModal, DaemonsManagement, WorkspaceApp, WorkspaceOnboarding } from "./App";
+import { AgentDetailModal, CreateDaemonModal, DaemonDetailModal, DaemonsManagement, ManageModal, WorkspaceApp, WorkspaceOnboarding } from "./App";
 import { emptyWorkspace, identifierFromName, identifierHelpText, identifierPattern, workspaceSlugMaxLength } from "./logic";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
-import type { Account, Agent, AgentRun, Daemon, WorkspaceSummary } from "./types";
+import type { Account, Agent, AgentEvent, AgentRun, Daemon, WorkspaceState, WorkspaceSummary } from "./types";
+
+function workspaceFixture(overrides: Partial<WorkspaceState> = {}): WorkspaceState {
+  return {
+    ...emptyWorkspace(),
+    workspaceId: "ws",
+    rootDocumentId: "doc_root",
+    name: "Workspace",
+    currentUserId: "user_1",
+    users: [
+      { id: "user_1", handle: "ada", name: "Ada", role: "", kind: "human", status: "active", updatedAt: "now" },
+      { id: "user_2", handle: "grace", name: "Grace", role: "", kind: "human", status: "active", updatedAt: "now" },
+    ],
+    daemons: [
+      { id: "daemon_1", workspaceId: "ws", name: "Local", status: "active", connectionStatus: "online", createdAt: "now" },
+    ],
+    agents: [
+      {
+        id: "agent_1",
+        daemonId: "daemon_1",
+        handle: "codex",
+        name: "Codex",
+        role: "Review",
+        kind: "codex",
+        workspaceRoot: "agents/agent_1",
+        status: "idle",
+        currentTask: "",
+        currentActivity: "",
+        currentRunId: "",
+        updatedAt: "2026-07-06T12:00:00Z",
+      },
+    ],
+    ...overrides,
+  };
+}
+
+let workspaceMock = workspaceFixture();
 
 vi.mock("./useWorkspace", () => ({
   useWorkspace: () => ({
-    workspace: {
-      ...emptyWorkspace(),
-      workspaceId: "ws",
-      rootDocumentId: "doc_root",
-      name: "Workspace",
-      currentUserId: "user_1",
-      users: [
-        { id: "user_1", handle: "ada", name: "Ada", role: "", kind: "human", status: "active", updatedAt: "now" },
-        { id: "user_2", handle: "grace", name: "Grace", role: "", kind: "human", status: "active", updatedAt: "now" },
-      ],
-      daemons: [
-        { id: "daemon_1", workspaceId: "ws", name: "Local", status: "active", connectionStatus: "online", createdAt: "now" },
-      ],
-      agents: [
-        {
-          id: "agent_1",
-          daemonId: "daemon_1",
-          handle: "codex",
-          name: "Codex",
-          role: "Review",
-          kind: "codex",
-          workspaceRoot: "agents/agent_1",
-          status: "idle",
-          currentTask: "",
-          currentActivity: "",
-          currentRunId: "",
-          updatedAt: "now",
-        },
-      ],
-    },
+    workspace: workspaceMock,
     connected: true,
     loading: false,
     error: "",
@@ -58,6 +65,8 @@ vi.mock("./useRootNamespace", () => ({
 }));
 
 afterEach(() => {
+  workspaceMock = workspaceFixture();
+  localStorage.clear();
   cleanup();
 });
 
@@ -296,6 +305,31 @@ describe("WorkspaceApp people rail", () => {
   });
 });
 
+describe("WorkspaceApp agent status rail", () => {
+  it("renders left-rail agent status as readable copy, not only a colored dot", () => {
+    render(
+      <WorkspaceApp
+        api={{ updateLastAccessed: vi.fn().mockResolvedValue({}) } as never}
+        token="token"
+        workspaceId="ws"
+        workspaceSlug="workspace"
+        view={{ kind: "home" }}
+        account={{ id: "account_1", email: "you@example.com", displayName: "You" }}
+        workspaces={[{ id: "ws", slug: "workspace", name: "Workspace" }]}
+        onAccess={vi.fn()}
+        onWorkspaceChange={vi.fn()}
+        onSignOut={vi.fn()}
+      />,
+    );
+
+    const agentButton = screen.getByRole("button", { name: "Open @codex. Status: Idle" });
+    expect(within(agentButton).getByText("@codex")).toBeTruthy();
+    const status = within(agentButton).getByLabelText("Status: Idle");
+    expect(status.textContent).toContain("Idle");
+    expect(status.getAttribute("title")).toBe("Standing by");
+  });
+});
+
 describe("WorkspaceApp coming-soon controls", () => {
   it("shows the sidebar search as a non-actionable Coming soon affordance", () => {
     render(
@@ -320,8 +354,22 @@ describe("WorkspaceApp coming-soon controls", () => {
   });
 });
 
-describe("WorkspaceApp document activity single source", () => {
-  it("carries no count on the sidebar Activity nav, so nav and panel cannot disagree", () => {
+describe("WorkspaceApp Inbox", () => {
+  const inboxEvent = (overrides: Partial<AgentEvent> = {}): AgentEvent => ({
+    id: "event_1",
+    agentId: "agent_1",
+    agentHandle: "codex",
+    type: "document.updated",
+    box: "for_me",
+    status: "pending",
+    documentId: "doc_1",
+    summary: "Review changes",
+    createdAt: "2026-07-06T12:00:00Z",
+    updatedAt: "2026-07-06T12:00:00Z",
+    ...overrides,
+  });
+
+  function renderWorkspaceApp() {
     render(
       <WorkspaceApp
         api={{ updateLastAccessed: vi.fn().mockResolvedValue({}) } as never}
@@ -336,12 +384,75 @@ describe("WorkspaceApp document activity single source", () => {
         onSignOut={vi.fn()}
       />,
     );
+  }
 
-    // The sidebar Activity nav is a pure jump affordance — no count element means
-    // no second source that could drift from the right-rail Document Activity panel.
-    const navButton = screen.getByText("Activity").closest("button");
-    expect(navButton).toBeTruthy();
-    expect(navButton?.querySelector(".ct")).toBeNull();
+  it("replaces the left Activity and Threads entries with one zero-badge Inbox", () => {
+    renderWorkspaceApp();
+
+    const sidebar = document.querySelector(".sb") as HTMLElement;
+    expect(within(sidebar).getByRole("button", { name: "Inbox" })).toBeTruthy();
+    expect(within(sidebar).queryByText("Activity")).toBeNull();
+    expect(within(sidebar).queryByText("Threads")).toBeNull();
+    expect(within(sidebar).getByRole("button", { name: "Inbox" }).querySelector(".ct")).toBeNull();
+  });
+
+  it("opens a flyout with the shared aggregate count, reason expansion, and focus return", async () => {
+    const user = userEvent.setup();
+    workspaceMock = workspaceFixture({
+      agents: [
+        {
+          ...workspaceFixture().agents[0],
+          status: "failed",
+          currentActivity: "tool exited 1",
+          updatedAt: "2026-07-06T12:03:00Z",
+        },
+      ],
+      agentEvents: [
+        inboxEvent({ id: "mention_1", type: "thread.mentioned", threadId: "thread_1", summary: "@codex was mentioned", updatedAt: "2026-07-06T12:04:00Z" }),
+        inboxEvent({ id: "review_1", type: "document.updated", summary: "Review changes", updatedAt: "2026-07-06T12:02:00Z" }),
+      ],
+    });
+    renderWorkspaceApp();
+
+    const trigger = screen.getByRole("button", { name: /Inbox, 2 need attention/ });
+    expect(trigger.querySelector(".inbox-ct")?.textContent).toBe("2");
+
+    await user.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "Inbox" });
+    expect(within(dialog).getByText("2 need attention")).toBeTruthy();
+    expect(within(dialog).getByText("Review changes")).toBeTruthy();
+    expect(within(dialog).getByText("tool exited 1")).toBeTruthy();
+    expect(within(dialog).queryByText("@codex was mentioned")).toBeNull();
+
+    await user.click(within(dialog).getByRole("button", { name: "View reason" }));
+    expect(within(dialog).getAllByText("tool exited 1").length).toBeGreaterThanOrEqual(2);
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Inbox" })).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("ignores mention activity and does not render a dead mark-all-read control", async () => {
+    const user = userEvent.setup();
+    workspaceMock = workspaceFixture({
+      agentEvents: [
+        inboxEvent({ id: "mention_1", type: "thread.mentioned", threadId: "thread_1", summary: "@codex was mentioned", updatedAt: "2026-07-06T12:04:00Z" }),
+        inboxEvent({ id: "review_1", type: "document.updated", summary: "Review changes", updatedAt: "2026-07-06T12:02:00Z" }),
+      ],
+    });
+    renderWorkspaceApp();
+
+    const trigger = screen.getByRole("button", { name: /Inbox, 1 need attention/ });
+    expect(trigger.querySelector(".inbox-ct")?.textContent).toBe("1");
+
+    await user.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "Inbox" });
+    expect(within(dialog).getByText("1 need attention")).toBeTruthy();
+    expect(within(dialog).getByText("Review changes")).toBeTruthy();
+    expect(within(dialog).queryByText("@codex was mentioned")).toBeNull();
+    expect(within(dialog).queryByRole("button", { name: "Mark all read" })).toBeNull();
+    expect(screen.getByRole("button", { name: /Inbox, 1 need attention/ })).toBeTruthy();
+    expect(localStorage.getItem("codesk.inbox.mentions.ws.user_1")).toBeNull();
   });
 });
 
@@ -355,11 +466,11 @@ describe("CreateDaemonModal install status", () => {
       <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />
     );
 
-    await user.click(screen.getByRole("button", { name: "Create daemon" }));
+    await user.click(screen.getByRole("button", { name: "Create local environment" }));
 
-    // Daemon created but has not checked in yet: the chip must say waiting.
-    expect(await screen.findByText("Waiting for daemon to check in…")).toBeTruthy();
-    expect(screen.queryByText("Daemon connected")).toBeNull();
+    // Local environment created but has not checked in yet: the chip must say waiting.
+    expect(await screen.findByText("Waiting for local environment to check in…")).toBeTruthy();
+    expect(screen.queryByText("Local environment connected")).toBeNull();
 
     // A daemon.updated event lands via the workspace socket, so live state now reports
     // the daemon online. The chip must flip without a manual refresh.
@@ -367,8 +478,107 @@ describe("CreateDaemonModal install status", () => {
       <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[{ ...daemonFixtures.justSeen, id: "daemon_new", name: "Local daemon" }]} onClose={vi.fn()} onDone={vi.fn()} />
     );
 
-    expect(screen.getByText("Daemon connected")).toBeTruthy();
-    expect(screen.queryByText("Waiting for daemon to check in…")).toBeNull();
+    expect(screen.getByText("Local environment connected")).toBeTruthy();
+    expect(screen.queryByText("Waiting for local environment to check in…")).toBeNull();
+  });
+});
+
+describe("ManageModal", () => {
+  const baseProps = {
+    api: {} as never,
+    workspaceId: "ws",
+    workspaceSlug: "acme",
+    canInvite: true,
+    groupedAgents: [],
+    onTabChange: vi.fn(),
+    onClose: vi.fn(),
+    onRefresh: vi.fn(),
+    onNewDaemon: vi.fn(),
+    onDaemon: vi.fn(),
+    onNewAgent: vi.fn(),
+    onAgent: vi.fn(),
+  };
+
+  it("renders all five tabs, shows the Local environment surface, delegates tab clicks, and closes on Escape", async () => {
+    const user = userEvent.setup();
+    const onTabChange = vi.fn();
+    const onClose = vi.fn();
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws", daemons: [daemonFixtures.justSeen] };
+    render(
+      <ManageModal {...baseProps} workspace={workspace as never} activeTab="local-env" onTabChange={onTabChange} onClose={onClose} />
+    );
+
+    for (const label of ["Members & Invite", "Agents", "Local environment", "Workspace settings", "Danger zone"]) {
+      expect(screen.getByRole("button", { name: label })).toBeTruthy();
+    }
+    // Local environment tab hosts the migrated management surface (renamed heading).
+    expect(screen.getAllByText("Local environments").length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("button", { name: "Danger zone" }));
+    expect(onTabChange).toHaveBeenCalledWith("danger");
+
+    await user.keyboard("{Escape}");
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("shows read-only workspace settings with editing marked coming soon", () => {
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws", name: "Acme" };
+    render(<ManageModal {...baseProps} workspace={workspace as never} workspaceSlug="acme" activeTab="workspace" />);
+    expect(screen.getByText("Acme")).toBeTruthy();
+    expect(screen.getByText("Editing coming soon.")).toBeTruthy();
+    // Honest-controls: read-only current values are static text, not editable-looking inputs.
+    expect(screen.queryByRole("textbox")).toBeNull();
+    // Not another tab's surface.
+    expect(screen.queryByText("Local environments")).toBeNull();
+  });
+
+  it("shows a calm danger-zone coming-soon note without a live delete control", () => {
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws" };
+    render(<ManageModal {...baseProps} workspace={workspace as never} activeTab="danger" />);
+    expect(screen.getByText("Workspace deletion is coming soon.")).toBeTruthy();
+    // Honest-controls: no clickable Delete until the backend supports it.
+    expect(screen.queryByRole("button", { name: /delete/i })).toBeNull();
+  });
+
+  it("lists workspace members and offers invite generation on the Members tab", () => {
+    const workspace = {
+      ...emptyWorkspace(),
+      workspaceId: "ws",
+      users: [
+        { id: "u1", handle: "ada", name: "Ada Lovelace", role: "Owner", kind: "human", status: "active", updatedAt: "now" },
+        { id: "u2", handle: "grace", name: "Grace Hopper", role: "Member", kind: "human", status: "active", updatedAt: "now" },
+        { id: "a1", handle: "codex", name: "Codex", role: "Agent", kind: "agent", status: "active", updatedAt: "now" },
+      ],
+    };
+    render(<ManageModal {...baseProps} workspace={workspace as never} activeTab="members" />);
+    // Human members are listed; the agent is not (agents live in the Agents tab).
+    expect(screen.getByText("Ada Lovelace")).toBeTruthy();
+    expect(screen.getByText("Grace Hopper")).toBeTruthy();
+    expect(screen.queryByText("Codex")).toBeNull();
+    // Owners/admins see invite generation.
+    expect(screen.getByRole("button", { name: "Generate invite link" })).toBeTruthy();
+  });
+
+  it("hides invite generation from members without permission", () => {
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws" };
+    render(<ManageModal {...baseProps} canInvite={false} workspace={workspace as never} activeTab="members" />);
+    expect(screen.queryByRole("button", { name: "Generate invite link" })).toBeNull();
+    expect(screen.getByText("Only workspace owners and admins can invite new members.")).toBeTruthy();
+  });
+
+  it("hosts the agents configuration surface on the Agents tab", () => {
+    const workspace = {
+      ...emptyWorkspace(),
+      workspaceId: "ws",
+      agents: [
+        { id: "a1", daemonId: "d1", handle: "codex", name: "Codex", role: "Reviewer", kind: "codex", workspaceRoot: "agents/a1", status: "idle", currentTask: "", currentActivity: "", currentRunId: "", updatedAt: "now" },
+      ],
+    };
+    const grouped = [{ daemonId: "d1", daemonName: "Local", agents: workspace.agents }];
+    render(<ManageModal {...baseProps} workspace={workspace as never} groupedAgents={grouped as never} activeTab="agents" />);
+    // AgentsManagement renders in the tab (its subtitle + the agent handle).
+    expect(screen.getByText(/Codex collaborators in this workspace/)).toBeTruthy();
+    expect(screen.getByText("@codex")).toBeTruthy();
   });
 });
 
@@ -467,7 +677,7 @@ describe("DaemonDetailModal live status", () => {
     const nowMs = Date.now();
     // Same-id states derived from the fixtures: justSeen (online) then dead (disconnected).
     const online = withReceipt({ ...daemonFixtures.justSeen, id: "d1" }, nowMs);
-    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], onClose: vi.fn(), onChanged: vi.fn() };
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
     const { container, rerender } = render(<DaemonDetailModal {...props} daemons={[online]} />);
     const statusChip = () => container.querySelector(".deploy-block .chip.sm")?.textContent ?? "";
 
@@ -483,7 +693,7 @@ describe("DaemonDetailModal live status", () => {
     const onClose = vi.fn();
     // The daemon.deleted reducer upserts the daemon with status "deleted" — it stays in the array.
     const live = withReceipt({ ...daemonFixtures.justSeen, id: "d1" }, Date.now());
-    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], onChanged: vi.fn() };
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onChanged: vi.fn() };
     const { rerender } = render(<DaemonDetailModal {...props} daemons={[live]} onClose={onClose} />);
     expect(onClose).not.toHaveBeenCalled();
 
@@ -495,7 +705,7 @@ describe("DaemonDetailModal live status", () => {
   it("closes when the deleted daemon is removed from the array (snapshot reload path)", () => {
     const onClose = vi.fn();
     const live = withReceipt({ ...daemonFixtures.justSeen, id: "d1" }, Date.now());
-    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], onChanged: vi.fn() };
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onChanged: vi.fn() };
     const { rerender } = render(<DaemonDetailModal {...props} daemons={[live]} onClose={onClose} />);
     expect(onClose).not.toHaveBeenCalled();
 
@@ -505,8 +715,8 @@ describe("DaemonDetailModal live status", () => {
 });
 
 describe("AgentDetailModal live status", () => {
-  // Online daemon (from the canonical fixture) so visibleAgentStatus falls through to agentStatus
-  // rather than forcing "disconnected".
+  // Online daemon (from the canonical fixture) so visibleAgentStatus uses the agent/run ladder
+  // rather than forcing "Waiting for local environment".
   const daemon: Daemon = { ...daemonFixtures.justSeen, id: "d1" };
   const baseAgent: Agent = {
     id: "a1", daemonId: "d1", handle: "codex", name: "Codex", role: "Review", kind: "codex",
@@ -516,26 +726,26 @@ describe("AgentDetailModal live status", () => {
     id: "run1", agentId: "a1", agentHandle: "codex", agentName: "Codex", agentKind: "codex",
     workspaceRoot: "", workingDirectory: "", prompt: "", status, desiredStatus: "running", updatedAt: "now",
   });
-  const props = { api: {} as never, workspaceId: "ws", agentId: "a1", daemons: [daemon], onChanged: vi.fn() };
+  const props = { api: {} as never, workspaceId: "ws", agentId: "a1", daemons: [daemon], agentEvents: [], onChanged: vi.fn() };
   const modalStatus = (container: HTMLElement) => (container.querySelector(".modal-identity .col span")?.textContent ?? "").trim();
 
   it("reflects a live agent.updated status change on the open modal instead of a click-time snapshot", () => {
-    // No active run, so the agent's own status field drives visibleAgentStatus.
+    // No active run, so the online daemon falls through to the Idle vocabulary row.
     const { container, rerender } = render(<AgentDetailModal {...props} agents={[baseAgent]} runs={[]} onClose={vi.fn()} />);
-    expect(modalStatus(container)).toContain("idle");
+    expect(modalStatus(container)).toContain("Standing by");
 
-    // An agent.updated event flips the agent's own status — the open modal must move.
-    rerender(<AgentDetailModal {...props} agents={[{ ...baseAgent, status: "disconnected" }]} runs={[]} onClose={vi.fn()} />);
-    expect(modalStatus(container)).toContain("disconnected");
+    // An agent.updated event flips the agent's own status to working — the open modal must move.
+    rerender(<AgentDetailModal {...props} agents={[{ ...baseAgent, status: "working", currentActivity: "checking tests" }]} runs={[]} onClose={vi.fn()} />);
+    expect(modalStatus(container)).toContain("Running · checking tests");
   });
 
   it("reflects a live agentRuns change — a run finishing while the modal is open moves the status", () => {
     const { container, rerender } = render(<AgentDetailModal {...props} agents={[baseAgent]} runs={[run("running")]} onClose={vi.fn()} />);
-    expect(modalStatus(container)).toContain("working");
+    expect(modalStatus(container)).toContain("Running · Working");
 
-    // The run completes in live state (no agent.updated). Status derives from runs too, so it moves to idle.
+    // The run completes in live state (no agent.updated). Status derives from runs too, so it moves to Idle.
     rerender(<AgentDetailModal {...props} agents={[baseAgent]} runs={[run("completed")]} onClose={vi.fn()} />);
-    expect(modalStatus(container)).toContain("idle");
+    expect(modalStatus(container)).toContain("Standing by");
   });
 
   it("closes when the agent is removed from the array (the reducer's agent.deleted shape)", () => {

@@ -1,11 +1,12 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode, RefObject } from "react";
 import { ApiClient, ApiError, apiBase, daemonStaticBase, publicOrigin } from "./api";
 import { DocumentSurface, type LiveThread, type SurfaceSelection } from "./DocumentSurface";
 import type { MarkdownPreviewCommandName } from "./markdownLivePreview";
 import {
-  agentStatus,
+  agentDisplayStatus,
   agentsByDaemon,
+  clampRailWidth,
   buildDaemonInstallCommand,
   buildDaemonReinstallCommand,
   buildDaemonUninstallCommand,
@@ -24,9 +25,12 @@ import {
   isMarkdownDocumentPath,
   randomWorkspaceName,
   threadReplyLabel,
+  workspaceInboxSummary,
   workspaceSlugMaxLength,
   workspaceSlugMinLength,
   type ActivityCategory,
+  type WorkspaceInboxItem,
+  type WorkspaceInboxSummary,
   type WorkspacePerson,
   type LineThreadGroup,
 } from "./logic";
@@ -35,7 +39,7 @@ import { navigate, useRoute } from "./useRoute";
 import { useRootNamespace } from "./useRootNamespace";
 import { useDocumentSync } from "./useDocument";
 import { useWorkspace } from "./useWorkspace";
-import type { Account, ActivityEvent, Agent, Daemon, DocumentItem, ThreadItem, WorkspaceInvitePreview, WorkspaceSummary } from "./types";
+import type { Account, ActivityEvent, Agent, AgentEvent, Daemon, DocumentItem, ThreadItem, UserItem, WorkspaceInvitePreview, WorkspaceSummary } from "./types";
 import { resolveRuntimeTiles, selectableRuntimeKinds, type RuntimeTile } from "./runtimes";
 import "./styles.css";
 
@@ -267,17 +271,54 @@ function shortTime(value?: string) {
   return `${Math.round(seconds / 86400)}d`;
 }
 
-function visibleAgentStatus(agent: Agent, runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"], daemons: Daemon[]) {
-  const daemon = daemons.find((item) => item.id === agent.daemonId);
-  const owningDaemonStatus = daemon ? daemonStatus(daemon) : "disconnected";
-  if (owningDaemonStatus === "disconnected" || owningDaemonStatus === "deleted") {
-    return "disconnected";
-  }
-  return agentStatus(agent, runs);
+function visibleAgentStatus(
+  agent: Agent,
+  runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"],
+  daemons: Daemon[],
+  events: AgentEvent[],
+  nowMs: number,
+) {
+  return agentDisplayStatus(agent, runs, daemons, events, nowMs);
+}
+
+function detailStatusLabel(status: ReturnType<typeof visibleAgentStatus>) {
+  return status.detailLabel ?? status.label;
 }
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
+}
+
+function inboxBadgeText(count: number) {
+  return count > 9 ? "9+" : String(count);
+}
+
+function inboxBadgeLabel(summary: WorkspaceInboxSummary) {
+  const { total, failed, needsReview } = summary.counts;
+  if (!total) {
+    return "Inbox";
+  }
+  const parts = [
+    failed ? `${failed} failed` : "",
+    needsReview ? `${needsReview} needs review` : "",
+  ].filter(Boolean);
+  return `Inbox, ${total} need attention: ${parts.join(", ")}`;
+}
+
+function inboxDocumentLabel(documents: DocumentItem[], documentId?: string) {
+  if (!documentId) {
+    return "";
+  }
+  const document = documents.find((item) => item.id === documentId);
+  return document ? fileName(document.path) : "Unknown document";
+}
+
+function focusableElements(root: HTMLElement) {
+  return Array.from(
+    root.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter((element) => !element.hasAttribute("disabled") && element.getAttribute("aria-hidden") !== "true");
 }
 
 export function App() {
@@ -1034,7 +1075,7 @@ export function WorkspaceOnboarding({
         </div>
         <div className="picker-head">
           <h1 className="auth-title">Create a workspace</h1>
-          <p className="small muted">Workspaces are where documents, daemons, agents, and members live.</p>
+          <p className="small muted">Workspaces are where documents, local environments, agents, and members live.</p>
         </div>
         <CreateWorkspaceForm
           api={api}
@@ -1256,7 +1297,81 @@ export function WorkspaceApp({
   });
   const rootDocuments = rootNamespace.documents;
   const [rightTab, setRightTab] = useState<"threads" | "activity" | "coworkers">("threads");
-  const [modal, setModal] = useState<"daemon" | "agent" | "rename" | "share" | "agent-detail" | "daemon-detail" | null>(null);
+  const [modal, setModal] = useState<"daemon" | "agent" | "rename" | "agent-detail" | "daemon-detail" | "manage" | null>(null);
+  // Default tab is Members & Invite (plan tab order). Integration protocol (Juan's
+  // single-flip rule): A2 fills Members before integration, so nothing ships showing
+  // a placeholder. If A2 slips out of the batch, flipping this default to "local-env"
+  // (the tab with real content) becomes a REQUIRED pre-integration change.
+  const [manageTab, setManageTab] = useState<ManageTab>("members");
+  // Phase E: collapsible left rail + resizable right rail, both remembered in localStorage.
+  const shellRef = useRef<HTMLElement>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("codesk.sb.collapsed") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [rightWidth, setRightWidth] = useState<number | null>(() => {
+    try {
+      const stored = parseInt(localStorage.getItem("codesk.right.width") || "", 10);
+      return Number.isFinite(stored) ? stored : null;
+    } catch {
+      return null;
+    }
+  });
+  const [draggingRail, setDraggingRail] = useState(false);
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((collapsed) => {
+      const next = !collapsed;
+      try {
+        localStorage.setItem("codesk.sb.collapsed", next ? "1" : "0");
+      } catch {
+        // ignore storage failures (private mode) — collapse still works this session.
+      }
+      return next;
+    });
+  }, []);
+  // Clamp the right rail so a drag can never crush or overlap the document
+  // (plan §4.1 "不塌、不错位"). Pure bounds live in logic.ts for direct testing.
+  const clampRightWidth = useCallback(
+    (width: number) => {
+      const shellWidth = shellRef.current?.getBoundingClientRect().width ?? 1120;
+      return clampRailWidth(width, shellWidth, sidebarCollapsed);
+    },
+    [sidebarCollapsed]
+  );
+  useEffect(() => {
+    if (!draggingRail) {
+      return;
+    }
+    const onMove = (event: MouseEvent) => {
+      const rect = shellRef.current?.getBoundingClientRect();
+      if (!rect) {
+        return;
+      }
+      setRightWidth(clampRightWidth(rect.right - event.clientX));
+    };
+    const onUp = () => {
+      setDraggingRail(false);
+      setRightWidth((width) => {
+        if (width != null) {
+          try {
+            localStorage.setItem("codesk.right.width", String(width));
+          } catch {
+            // ignore storage failures.
+          }
+        }
+        return width;
+      });
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [draggingRail, clampRightWidth]);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [selectedDaemonId, setSelectedDaemonId] = useState<string | null>(null);
   const [selectedThreadId, setSelectedThreadId] = useState("");
@@ -1267,9 +1382,13 @@ export function WorkspaceApp({
   const [renamingDocumentId, setRenamingDocumentId] = useState("");
   const [freshDocumentId, setFreshDocumentId] = useState("");
   const [titleDraft, setTitleDraft] = useState("");
+  const [inboxOpen, setInboxOpen] = useState(false);
+  const inboxRef = useRef<HTMLDivElement>(null);
+  const inboxDialogRef = useRef<HTMLDivElement>(null);
+  const inboxTriggerRef = useRef<HTMLButtonElement>(null);
   const lastAccessUpdateKeyRef = useRef("");
+  const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
 
-  const centerView = view.kind === "daemons" ? "daemons" : view.kind === "agents" ? "agents" : "document";
   const requestedDocumentId = view.kind === "document" ? view.documentId : "";
   const activeDocument = requestedDocumentId ? rootDocuments.find((document) => document.id === requestedDocumentId) ?? null : null;
   const documentMissing = view.kind === "document" && rootNamespace.ready && !activeDocument;
@@ -1289,6 +1408,85 @@ export function WorkspaceApp({
   const currentWorkspaceUserHandle = currentWorkspaceUser?.handle ? `@${currentWorkspaceUser.handle}` : "Workspace user";
   const currentWorkspaceUserIdentity = currentWorkspaceUser?.handle || currentWorkspaceUser?.name || "Workspace user";
   const canInviteMembers = workspace.currentMembershipRole === "owner" || workspace.currentMembershipRole === "admin";
+  const inboxSummary = useMemo(() => workspaceInboxSummary(workspace), [workspace]);
+  const inboxCount = inboxSummary.counts.total;
+  const inboxAriaLabel = inboxBadgeLabel(inboxSummary);
+
+  const closeInbox = useCallback((restoreFocus = true) => {
+    setInboxOpen(false);
+    if (restoreFocus) {
+      window.setTimeout(() => inboxTriggerRef.current?.focus(), 0);
+    }
+  }, []);
+
+  const openInboxItem = useCallback(
+    (item: WorkspaceInboxItem) => {
+      if (item.agentId) {
+        setSelectedAgentId(item.agentId);
+        setModal("agent-detail");
+        closeInbox();
+      }
+    },
+    [closeInbox],
+  );
+
+  useEffect(() => {
+    if (!inboxOpen) {
+      return;
+    }
+    const focusTimer = window.setTimeout(() => {
+      const dialog = inboxDialogRef.current;
+      if (!dialog) {
+        return;
+      }
+      const first = focusableElements(dialog)[0];
+      (first ?? dialog).focus();
+    }, 0);
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && inboxRef.current?.contains(target)) {
+        return;
+      }
+      closeInbox();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeInbox();
+        return;
+      }
+      if (event.key !== "Tab") {
+        return;
+      }
+      const dialog = inboxDialogRef.current;
+      if (!dialog) {
+        return;
+      }
+      const focusable = focusableElements(dialog);
+      if (!focusable.length) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.clearTimeout(focusTimer);
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [closeInbox, inboxOpen]);
 
   useEffect(() => {
     if (view.kind !== "home" || !rootNamespace.ready || !activeWorkspace) {
@@ -1448,8 +1646,12 @@ export function WorkspaceApp({
   }, [createDocument]);
 
   return (
-    <main className={`shell ${centerView === "document" ? "" : "management-shell"}`}>
-      <aside className="sb">
+    <main
+      ref={shellRef}
+      className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${draggingRail ? " dragging" : ""}`}
+      style={rightWidth != null ? ({ "--right": `${rightWidth}px` } as CSSProperties) : undefined}
+    >
+      <aside className={`sb ${inboxOpen ? "inbox-open" : ""}`}>
         <div className="workspace-switcher">
           <div className="row gap-8 min-0">
             <div className="avi workspace-avi">{initials(activeWorkspace?.name ?? workspace.name)}</div>
@@ -1463,6 +1665,8 @@ export function WorkspaceApp({
               <option value={workspace.slug} key={workspace.id}>{workspace.name}</option>
             ))}
           </select>
+          <button className="sb-collapse-btn" type="button" onClick={toggleSidebar} aria-label="Collapse sidebar" title="Collapse sidebar">‹</button>
+          <button className="sb-expand-tab" type="button" onClick={toggleSidebar} aria-label="Expand sidebar" title="Expand sidebar">›</button>
         </div>
 
         <div className="sb-search">
@@ -1474,19 +1678,41 @@ export function WorkspaceApp({
           </div>
         </div>
 
-        <nav className="sb-section">
-          <button className="nav-item" type="button" onClick={() => setRightTab("activity")}>
-            <Icon name="activity" />
-            <span>Activity</span>
-            {/* No count here: Document Activity is current-document context, so the
-                right-rail tab's unread dot owns the "new" signal. A workspace-level
-                count would be a second, disagreeing source (Anton/Eva/Bill ruling). */}
+        <nav className="sb-section inbox-nav" ref={inboxRef}>
+          <button
+            ref={inboxTriggerRef}
+            className={`nav-item inbox-trigger ${inboxOpen ? "on" : ""}`}
+            type="button"
+            aria-label={inboxAriaLabel}
+            aria-haspopup="dialog"
+            aria-expanded={inboxOpen}
+            aria-controls="workspace-inbox-flyout"
+            title={inboxAriaLabel}
+            onClick={() => {
+              setInboxOpen((open) => !open);
+            }}
+          >
+            <Icon name="inbox" />
+            <span>Inbox</span>
+            {inboxCount ? (
+              <>
+                <span className={`ct has inbox-ct ${inboxSummary.badgeTone}`} title={inboxAriaLabel}>
+                  {inboxBadgeText(inboxCount)}
+                </span>
+                <em className={`inbox-corner-badge ${inboxSummary.badgeTone}`} aria-hidden="true">
+                  {inboxBadgeText(inboxCount)}
+                </em>
+              </>
+            ) : null}
           </button>
-          <button className="nav-item" type="button" onClick={() => setRightTab("threads")}>
-            <Icon name="thread" />
-            <span>Threads</span>
-            <span className={`ct ${workspace.threads.length ? "has" : ""}`}>{workspace.threads.length}</span>
-          </button>
+          {inboxOpen ? (
+            <WorkspaceInboxFlyout
+              dialogRef={inboxDialogRef}
+              summary={inboxSummary}
+              documents={rootDocuments}
+              onItem={openInboxItem}
+            />
+          ) : null}
         </nav>
 
         <div className="divider sb-divider" />
@@ -1534,26 +1760,45 @@ export function WorkspaceApp({
           </div>
           <div className="col gap-6 agent-summary-list">
             {workspace.agents.slice(0, 5).map((agent) => {
-              const status = visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons);
+              const status = visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons, workspace.agentEvents, now);
               return (
                 <button
                   key={agent.id}
                   className="agent-mini row gap-8"
                   type="button"
+                  title={`@${agent.handle}: ${status.title}`}
+                  aria-label={`Open @${agent.handle}. Status: ${status.label}`}
                   onClick={() => {
                     setSelectedAgentId(agent.id);
                     setModal("agent-detail");
                   }}
                 >
                   <div className="avi sm agent">{initials(agent.handle)}</div>
-                  <span className="small truncate">@{agent.handle}</span>
-                  <StatusDot tone={status} />
+                  <span className="agent-mini-copy">
+                    <span className="small truncate">@{agent.handle}</span>
+                    <span className="agent-mini-status" title={status.title} aria-label={`Status: ${status.label}`}>
+                      <StatusDot tone={status.tone} />
+                      <span className="agent-mini-status-label">{status.label}</span>
+                    </span>
+                  </span>
                 </button>
               );
             })}
-            {!workspace.agents.length ? <span className="tiny muted">Create an agent after deploying a daemon.</span> : null}
+            {!workspace.agents.length ? <span className="tiny muted">Create an agent after deploying a local environment.</span> : null}
           </div>
         </section>
+
+        <button
+          className="manage-entry"
+          type="button"
+          onClick={() => {
+            setManageTab("members");
+            setModal("manage");
+          }}
+        >
+          <Icon name="settings" />
+          <span>Manage / Settings</span>
+        </button>
 
         <footer className="account-footer">
           <div className="row between">
@@ -1569,7 +1814,7 @@ export function WorkspaceApp({
       <section className="doc-area">
         <header className="doc-toolbar">
           <div className="breadcrumb document-breadcrumb">
-            {centerView === "document" && activeDocument ? (
+            {activeDocument ? (
               <DocumentPathBar
                 document={activeDocument}
                 workspaceName={workspace.name || activeWorkspace?.name || "Workspace"}
@@ -1578,38 +1823,16 @@ export function WorkspaceApp({
               />
             ) : (
               <>
-                <span>{centerView === "document" ? activeFolder : "Operations"}</span>
+                <span>{activeFolder}</span>
                 <Icon name="chevron" />
-                <b>{centerView === "daemons" ? "Daemons" : centerView === "agents" ? "Agents" : "No document selected"}</b>
+                <b>No document selected</b>
               </>
             )}
-            <span className={`chip sm ${connected ? "ok" : "warn"}`}>{connected ? "workspace live" : "workspace offline"}</span>
+            {!connected ? <span className="chip sm warn">workspace offline</span> : null}
           </div>
           <div className="row gap-6">
-            {canInviteMembers ? (
-              <button className="btn sm ghost" type="button" onClick={() => setModal("share")} title="Invite people to this workspace">
-                <Icon name="share" />
-                Invite
-              </button>
-            ) : null}
-            <span className="divider-v" />
-            <button
-              className={`btn sm ${centerView === "daemons" ? "selected" : ""}`}
-              type="button"
-              onClick={() => navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "daemons" } })}
-            >
-              <Icon name="daemon" />
-              Daemons
-            </button>
-            <button
-              className={`btn sm ${centerView === "agents" ? "selected" : ""}`}
-              type="button"
-              onClick={() => navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "agents" } })}
-            >
-              <Icon name="agent" />
-              Agents
-            </button>
-            <button className="btn sm ghost icon" type="button" onClick={() => setModal("rename")} disabled={!activeDocument || centerView !== "document"}>
+            <CollaboratorAvatars people={workspacePeopleList} onClick={() => setRightTab("coworkers")} />
+            <button className="btn sm ghost icon" type="button" onClick={() => setModal("rename")} disabled={!activeDocument}>
               <Icon name="more" />
             </button>
           </div>
@@ -1617,27 +1840,7 @@ export function WorkspaceApp({
         {loading ? <div className="notice compact">Loading workspace...</div> : null}
         {error ? <div className="notice error compact">{error}</div> : null}
         {createError ? <div className="notice error compact">{createError}</div> : null}
-        {centerView === "daemons" ? (
-          <DaemonsManagement
-            workspace={workspace}
-            onRefresh={() => void reload()}
-            onNew={() => setModal("daemon")}
-            onDaemon={(daemon) => {
-              setSelectedDaemonId(daemon.id);
-              setModal("daemon-detail");
-            }}
-          />
-        ) : centerView === "agents" ? (
-          <AgentsManagement
-            workspace={workspace}
-            groupedAgents={groupedAgents}
-            onNew={() => setModal("agent")}
-            onAgent={(agent) => {
-              setSelectedAgentId(agent.id);
-              setModal("agent-detail");
-            }}
-          />
-        ) : documentMissing ? (
+        {documentMissing ? (
           <DocumentNotFound
             onBackToWorkspace={() => {
               navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "home" } }, { replace: true });
@@ -1682,7 +1885,17 @@ export function WorkspaceApp({
         )}
       </section>
 
-      <aside className={`ctx ${centerView === "document" ? "" : "hidden"}`}>
+      <aside className="ctx">
+        <div
+          className="rz"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize context panel"
+          onMouseDown={(event) => {
+            setDraggingRail(true);
+            event.preventDefault();
+          }}
+        />
         <div className="ctx-tabs">
           {(["threads", "activity", "coworkers"] as const).map((tab) => (
             <button key={tab} className={`btn sm ${rightTab === tab ? "selected" : "ghost"}`} onClick={() => setRightTab(tab)}>
@@ -1740,9 +1953,32 @@ export function WorkspaceApp({
       ) : null}
       {modal === "daemon" ? <CreateDaemonModal api={api} workspaceId={workspaceId} daemons={workspace.daemons} onClose={() => setModal(null)} onDone={() => void reload()} /> : null}
       {modal === "agent" ? <CreateAgentModal api={api} workspaceId={workspaceId} daemons={workspace.daemons} onClose={() => setModal(null)} onDone={() => { setModal(null); void reload(); }} /> : null}
-      {modal === "share" ? <ShareWorkspaceModal api={api} workspaceId={workspaceId} onClose={() => setModal(null)} /> : null}
-      {modal === "agent-detail" && selectedAgentId ? <AgentDetailModal api={api} workspaceId={workspaceId} agentId={selectedAgentId} agents={workspace.agents} daemons={workspace.daemons} runs={workspace.agentRuns} onClose={() => setModal(null)} onChanged={() => void reload()} /> : null}
-      {modal === "daemon-detail" && selectedDaemonId ? <DaemonDetailModal api={api} workspaceId={workspaceId} daemonId={selectedDaemonId} daemons={workspace.daemons} agents={workspace.agents} runs={workspace.agentRuns} onClose={() => setModal(null)} onChanged={() => { setModal(null); void reload(); }} /> : null}
+      {modal === "agent-detail" && selectedAgentId ? <AgentDetailModal api={api} workspaceId={workspaceId} agentId={selectedAgentId} agents={workspace.agents} daemons={workspace.daemons} runs={workspace.agentRuns} agentEvents={workspace.agentEvents} onClose={() => setModal(null)} onChanged={() => void reload()} /> : null}
+      {modal === "daemon-detail" && selectedDaemonId ? <DaemonDetailModal api={api} workspaceId={workspaceId} daemonId={selectedDaemonId} daemons={workspace.daemons} agents={workspace.agents} runs={workspace.agentRuns} agentEvents={workspace.agentEvents} onClose={() => setModal(null)} onChanged={() => { setModal(null); void reload(); }} /> : null}
+      {modal === "manage" ? (
+        <ManageModal
+          api={api}
+          workspaceId={workspaceId}
+          workspace={workspace}
+          workspaceSlug={workspaceSlug}
+          activeTab={manageTab}
+          canInvite={canInviteMembers}
+          groupedAgents={groupedAgents}
+          onTabChange={setManageTab}
+          onClose={() => setModal(null)}
+          onRefresh={() => void reload()}
+          onNewDaemon={() => setModal("daemon")}
+          onDaemon={(daemon) => {
+            setSelectedDaemonId(daemon.id);
+            setModal("daemon-detail");
+          }}
+          onNewAgent={() => setModal("agent")}
+          onAgent={(agent) => {
+            setSelectedAgentId(agent.id);
+            setModal("agent-detail");
+          }}
+        />
+      ) : null}
     </main>
   );
 }
@@ -1968,6 +2204,109 @@ function useNowTicker(intervalMs: number) {
   return now;
 }
 
+const inboxDotColor: Record<WorkspaceInboxItem["kind"], string> = {
+  "needs-review": "var(--needs-you)",
+  failed: "var(--danger)",
+};
+
+const inboxGlyph: Record<WorkspaceInboxItem["kind"], string> = {
+  "needs-review": "review",
+  failed: "alert",
+};
+
+const inboxKindLabel: Record<WorkspaceInboxItem["kind"], string> = {
+  "needs-review": "Needs review",
+  failed: "Failed",
+};
+
+function WorkspaceInboxFlyout({
+  dialogRef,
+  summary,
+  documents,
+  onItem,
+}: {
+  dialogRef: RefObject<HTMLDivElement>;
+  summary: WorkspaceInboxSummary;
+  documents: DocumentItem[];
+  onItem: (item: WorkspaceInboxItem) => void;
+}) {
+  const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
+  const [expandedReasonId, setExpandedReasonId] = useState("");
+
+  const renderRowBody = (item: WorkspaceInboxItem) => {
+    const documentLabel = inboxDocumentLabel(documents, item.documentId);
+    const timeLabel = relativeTime(item.occurredAt, now);
+    return (
+      <>
+        <span className="inbox-kind" title={inboxKindLabel[item.kind]}>
+          <span className={`inbox-dot ${item.unread ? "solid" : "hollow"}`} style={{ "--dot": inboxDotColor[item.kind] } as CSSProperties} />
+          <Icon name={inboxGlyph[item.kind]} />
+        </span>
+        <span className="inbox-copy min-0">
+          <span className="inbox-main">
+            <strong>{item.actorLabel}</strong>
+            <span>{item.action}</span>
+            {documentLabel ? <span className="inbox-doc-link">{documentLabel}</span> : null}
+          </span>
+          <span className="inbox-detail">
+            <span className="truncate">{item.summary}</span>
+            {timeLabel ? <span className="inbox-time">{timeLabel}</span> : null}
+          </span>
+          {item.kind === "failed" ? (
+            <span className="inbox-failed-detail">
+              <button
+                className="inbox-reason-link"
+                type="button"
+                onClick={() => setExpandedReasonId((current) => (current === item.id ? "" : item.id))}
+                aria-expanded={expandedReasonId === item.id}
+              >
+                View reason
+              </button>
+              {expandedReasonId === item.id ? <span className="inbox-reason">{item.reason || item.summary}</span> : null}
+            </span>
+          ) : null}
+        </span>
+      </>
+    );
+  };
+
+  return (
+    <div
+      id="workspace-inbox-flyout"
+      className="inbox-flyout"
+      role="dialog"
+      aria-label="Inbox"
+      tabIndex={-1}
+      ref={dialogRef}
+    >
+      <div className="inbox-flyout-head">
+        <div className="col gap-2 min-0">
+          <b>Inbox</b>
+          <span className="tiny muted">
+            {summary.counts.total ? `${summary.counts.total} need attention` : "Inbox zero"}
+          </span>
+        </div>
+      </div>
+      <div className="inbox-list">
+        {summary.items.map((item) => {
+          const canOpen = item.kind === "needs-review" && !!item.agentId;
+          const className = `inbox-row ${item.kind} ${item.unread ? "unread" : "read"}`;
+          return canOpen ? (
+            <button className={className} type="button" key={item.id} onClick={() => onItem(item)}>
+              {renderRowBody(item)}
+            </button>
+          ) : (
+            <article className={className} key={item.id}>
+              {renderRowBody(item)}
+            </article>
+          );
+        })}
+        {!summary.items.length ? <p className="inbox-empty">Inbox zero · No attention needed.</p> : null}
+      </div>
+    </div>
+  );
+}
+
 export function DaemonsManagement({
   workspace,
   onRefresh,
@@ -1990,10 +2329,10 @@ export function DaemonsManagement({
         <div className="management-head">
           <div className="col gap-2">
             <div className="row gap-8">
-              <span className="display management-title">Daemons</span>
+              <span className="display management-title">Local environments</span>
               <span className="chip">{visibleDaemons.length} total</span>
             </div>
-            <div className="small muted">Local processes that sync this workspace and run agents.</div>
+            <div className="small muted">Local environments that sync this workspace and run agents.</div>
           </div>
           <div className="row gap-6">
             <button className="btn" type="button" onClick={onRefresh}>
@@ -2002,7 +2341,7 @@ export function DaemonsManagement({
             </button>
             <button className="btn accent" type="button" onClick={onNew}>
               <Icon name="plus" />
-              New daemon
+              New local environment
             </button>
           </div>
         </div>
@@ -2052,7 +2391,7 @@ export function DaemonsManagement({
               })}
               {!visibleDaemons.length ? (
                 <tr>
-                  <td colSpan={6} className="small muted">No daemons yet. Create one to sync docs locally and host agents.</td>
+                  <td colSpan={6} className="small muted">No local environments yet. Create one to sync docs locally and host agents.</td>
                 </tr>
               ) : null}
             </tbody>
@@ -2074,7 +2413,8 @@ function AgentsManagement({
   onNew: () => void;
   onAgent: (agent: Agent) => void;
 }) {
-  const running = workspace.agents.filter((agent) => visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons) === "working").length;
+  const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
+  const running = workspace.agents.filter((agent) => visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons, workspace.agentEvents, now).key === "running").length;
   const daemonById = new Map(workspace.daemons.map((daemon) => [daemon.id, daemon]));
 
   return (
@@ -2086,7 +2426,7 @@ function AgentsManagement({
               <span className="display management-title">Agents</span>
               <span className="chip">{workspace.agents.length} total · {running} running</span>
             </div>
-            <div className="small muted">Codex collaborators in this workspace. Each is owned by a daemon.</div>
+            <div className="small muted">Codex collaborators in this workspace. Each is owned by a local environment.</div>
           </div>
           <div className="row gap-6">
             <button className="btn accent" type="button" onClick={onNew}>
@@ -2098,7 +2438,7 @@ function AgentsManagement({
 
         {groupedAgents.map((group) => {
           const daemon = daemonById.get(group.daemonId);
-          const daemonTone = daemon ? daemonStatus(daemon) : "disconnected";
+          const daemonTone = daemon ? daemonLiveStatus(daemon, now) : "disconnected";
           return (
             <section key={group.daemonId}>
               <div className="roster-group-head">
@@ -2110,10 +2450,12 @@ function AgentsManagement({
               </div>
               <div className="roster-grid">
                 {group.agents.map((agent) => {
-                  const status = visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons);
+                  const status = visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons, workspace.agentEvents, now);
                   const inboxCount = workspace.agentEvents.filter((event) => event.agentId === agent.id && event.box === "for_me").length;
+                  const statusLabel = detailStatusLabel(status);
+                  const activityCopy = status.key === "failed" && status.reason ? status.reason : agent.currentActivity || agent.currentTask || "Waiting for workspace notifications.";
                   return (
-                    <button className="agent-roster-card" key={agent.id} onClick={() => onAgent(agent)}>
+                    <button className="agent-roster-card" key={agent.id} onClick={() => onAgent(agent)} aria-label={`Open @${agent.handle}. Status: ${statusLabel}`}>
                       <div className="between gap-8">
                         <div className="row gap-8 min-0">
                           <div className="avi agent">{initials(agent.handle)}</div>
@@ -2122,9 +2464,9 @@ function AgentsManagement({
                             <span className="tiny muted truncate">{agent.role}</span>
                           </div>
                         </div>
-                        <span className={`chip sm ${status}`}><StatusDot tone={status} />{status}</span>
+                        <span className={`chip sm ${status.tone}`} title={status.title}><StatusDot tone={status.tone} />{statusLabel}</span>
                       </div>
-                      <div className="small muted roster-activity">{agent.currentActivity || agent.currentTask || "Waiting for workspace notifications."}</div>
+                      <div className="small muted roster-activity">{activityCopy}</div>
                       <div className="row between gap-8">
                         <div className="row gap-4 tiny muted">
                           <Icon name="thread" />
@@ -2144,8 +2486,8 @@ function AgentsManagement({
         {!workspace.agents.length ? (
           <p className="empty-note">
             {workspace.daemons.some((daemon) => daemon.status !== "deleted")
-              ? "No agents yet. Add one to a daemon; it will start working when that daemon is online."
-              : "No agents yet. Create a daemon first, then add an agent to it."}
+              ? "No agents yet. Add one to a local environment; it will start working when that local environment is online."
+              : "No agents yet. Create a local environment first, then add an agent to it."}
           </p>
         ) : null}
       </div>
@@ -2596,11 +2938,34 @@ function ActivityPanel({
   );
 }
 
+function CollaboratorAvatars({ people, onClick }: { people: WorkspacePerson[]; onClick: () => void }) {
+  const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
+  // Same honest-decay ruling as the People panel (Eva): the ring reflects personOnline, which
+  // decays on the presence freshness window, so a closed laptop drops the ring — never a stale
+  // "online". The toolbar only renders confirmed-online collaborators; +N below is neutral.
+  const online = people.filter((p) => personOnline(p, now));
+  if (!online.length) return null;
+  return (
+    <button
+      className="collaborator-avatars"
+      type="button"
+      onClick={onClick}
+      title={`${online.length} online`}
+      aria-label={`${online.length} collaborator${online.length === 1 ? "" : "s"} online — open People`}
+    >
+      {online.slice(0, 5).map((p) => (
+        <div key={p.id} className={`avi sm ${p.kind === "agent" ? "agent" : "you"} online`}>
+          {initials(p.handle || p.name)}
+        </div>
+      ))}
+      {/* +N overflow is a neutral count, NOT ringed — a ring would imply all N are online (Eva). */}
+      {online.length > 5 ? <span className="avi sm you">+{online.length - 5}</span> : null}
+    </button>
+  );
+}
+
 const personRoleTag = { you: "You", agent: "Agent", member: "Member" } as const;
 
-// Everyone in the workspace — humans + agents. Soft avatars, role tag, and a
-// workspace-level online ring driven by real presence that decays on a 12s
-// now-ticker (like daemon liveness) so it never shows a stale "online".
 function PeoplePanel({
   people,
   agents,
@@ -2625,6 +2990,9 @@ function PeoplePanel({
       </div>
       {rows.map(({ person, online }) => {
         const agent = person.kind === "agent" ? agentsById.get(person.id) : undefined;
+        // The online ring is driven by personOnline, which decays on the presence freshness window
+        // (like daemon liveness). A closed laptop drops the ring — we never show a stale "online".
+        // This honest-decay rule is Eva's ruling; keep it documented at every ring site.
         const avatar = (
           <div
             className={`avi ${person.kind === "agent" ? "agent" : "you"}${online ? " online" : ""}`}
@@ -2730,7 +3098,7 @@ export function ShellScriptBlock({ title, badge, command, children }: { title: s
 }
 
 export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }: { api: ApiClient; workspaceId: string; daemons: Daemon[]; onClose: () => void; onDone: () => void }) {
-  const [name, setName] = useState("Local daemon");
+  const [name, setName] = useState("Local environment");
   const [token, setToken] = useState("");
   const [daemonId, setDaemonId] = useState("");
   const command = buildDaemonInstallCommand({
@@ -2745,17 +3113,17 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
   const createdDaemon = daemons.find((daemon) => daemon.id === daemonId);
   const connected = createdDaemon ? daemonStatus(createdDaemon) === "online" : false;
   return (
-    <Modal title={token ? `${name} created` : "New daemon"} onClose={onClose}>
+    <Modal title={token ? `${name} created` : "New local environment"} onClose={onClose}>
       {token ? (
         <div className="token-reveal">
-          <ShellScriptBlock title="Install daemon" badge="Host native" command={command}>
-            <p className="small muted">This downloads the release bundle, installs the daemon and agent helper, writes daemon config, and starts a local service. Docker Compose is only for local development.</p>
+          <ShellScriptBlock title="Install local environment" badge="Host native" command={command}>
+            <p className="small muted">This downloads the release bundle, installs the local environment and agent helper, writes local environment config, and starts a local service. Docker Compose is only for local development.</p>
           </ShellScriptBlock>
           <div className="row between">
             {connected ? (
-              <span className="chip online"><StatusDot tone="online" />Daemon connected</span>
+              <span className="chip online"><StatusDot tone="online" />Local environment connected</span>
             ) : (
-              <span className="chip"><StatusDot tone="stale" />Waiting for daemon to check in…</span>
+              <span className="chip"><StatusDot tone="stale" />Waiting for local environment to check in…</span>
             )}
             <button className="btn accent" onClick={onClose}>Done</button>
           </div>
@@ -2772,7 +3140,7 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
           }}
         >
           <label className="field"><span className="lab">Name</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label>
-          <button className="btn accent full">Create daemon</button>
+          <button className="btn accent full">Create local environment</button>
         </form>
       )}
     </Modal>
@@ -2924,7 +3292,7 @@ function CreateAgentModal({ api, workspaceId, daemons, onClose, onDone }: { api:
             <label className="field"><span className="lab">Role</span><textarea value={role} placeholder={rolePlaceholder} onChange={(event) => setRole(event.target.value)} required /></label>
             <div className="divider" />
             <div className="field">
-              <span className="lab">Owning daemon</span>
+              <span className="lab">Owning local environment</span>
               <div className="daemon-choice-list">
                 {activeDaemons.map((daemon) => {
                   const status = daemonStatus(daemon);
@@ -2948,10 +3316,10 @@ function CreateAgentModal({ api, workspaceId, daemons, onClose, onDone }: { api:
                     </label>
                   );
                 })}
-                {!activeDaemons.length ? <p className="small muted">Create a daemon before adding agents.</p> : null}
+                {!activeDaemons.length ? <p className="small muted">Create a local environment before adding agents.</p> : null}
               </div>
               {noReachableDaemon ? (
-                <span className="hint err-text">Every daemon is offline. Bring one online to host a new agent.</span>
+                <span className="hint err-text">Every local environment is offline. Bring one online to host a new agent.</span>
               ) : null}
             </div>
           </div>
@@ -2982,15 +3350,15 @@ function CreateAgentModal({ api, workspaceId, daemons, onClose, onDone }: { api:
                   </div>
                   <p className="tiny muted">
                     {explainTile.availability === "update_required"
-                      ? `The Codex CLI on ${selectedDaemon?.name ?? "this daemon"}’s host is below the version Codesk supports (${explainTile.meta}).`
-                      : `Codex isn’t installed on ${selectedDaemon?.name ?? "this daemon"}’s host.`}{" "}
-                    Install it on that machine, then reconnect the daemon so Codesk can re-scan its runtimes.
+                      ? `The Codex CLI on ${selectedDaemon?.name ?? "this local environment"}’s host is below the version Codesk supports (${explainTile.meta}).`
+                      : `Codex isn’t installed on ${selectedDaemon?.name ?? "this local environment"}’s host.`}{" "}
+                    Install it on that machine, then reconnect the local environment so Codesk can re-scan its runtimes.
                   </p>
                   <div className="rt-help-cmd"><code>curl -fsSL https://chatgpt.com/codex/install.sh | sh</code></div>
                   <p className="tiny muted">Codex needs an active ChatGPT subscription or API (usage-based) billing to run.</p>
                 </div>
               ) : selectedDaemon && selectableKinds.length === 0 ? (
-                <span className="hint err-text">No supported runtime is available on this daemon. Codesk currently supports Codex — install the Codex CLI on this host, then re-scan.</span>
+                <span className="hint err-text">No supported runtime is available on this local environment. Codesk currently supports Codex — install the Codex CLI on this host, then re-scan.</span>
               ) : null}
             </div>
             <p className="small muted">Model and reasoning effort are taken from the runtime. System prompts are generated by the backend shared prompt and are not user-editable.</p>
@@ -3052,7 +3420,7 @@ export function RuntimeOption({ tile, selected, daemonSelected, onSelect, onExpl
         </div>
         <div className="rt-name">{entry.label}</div>
         <div className={`rt-meta${availability === "update_required" ? " warn-text" : ""}`}>
-          {daemonSelected ? meta : "Select a daemon to check"}
+          {daemonSelected ? meta : "Select a local environment to check"}
         </div>
       </div>
     );
@@ -3089,7 +3457,8 @@ function ClockIcon() {
   return <svg className="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 8v4l3 2" /></svg>;
 }
 
-export function AgentDetailModal({ api, workspaceId, agentId, agents, daemons, runs, onClose, onChanged }: { api: ApiClient; workspaceId: string; agentId: string; agents: Agent[]; daemons: Daemon[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; onClose: () => void; onChanged: () => void }) {
+export function AgentDetailModal({ api, workspaceId, agentId, agents, daemons, runs, agentEvents, onClose, onChanged }: { api: ApiClient; workspaceId: string; agentId: string; agents: Agent[]; daemons: Daemon[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; agentEvents: AgentEvent[]; onClose: () => void; onChanged: () => void }) {
+  const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
   const [prompt, setPrompt] = useState("Review the current workspace and respond if you have useful feedback.");
   // Derive the live agent from workspace state every render, so agent.updated / agent.run.updated
   // events reach the open modal instead of a frozen snapshot captured at click time. A deleted agent
@@ -3104,17 +3473,19 @@ export function AgentDetailModal({ api, workspaceId, agentId, agents, daemons, r
     return null;
   }
   const daemon = daemons.find((item) => item.id === agent.daemonId);
-  const status = visibleAgentStatus(agent, runs, daemons);
+  const status = visibleAgentStatus(agent, runs, daemons, agentEvents, now);
+  const statusLabel = detailStatusLabel(status);
   return (
     <Modal title={`@${agent.handle}`} onClose={onClose}>
       <div className="form-stack">
         <div className="modal-identity">
           <div className="avi agent">{initials(agent.handle)}</div>
           <div className="col gap-2">
-            <span><StatusDot tone={status} /> {status}</span>
-            <span className="small muted">Daemon: {daemon?.name ?? agent.daemonId}</span>
+            <span className={`chip sm ${status.tone}`} title={status.title}><StatusDot tone={status.tone} /> {statusLabel}</span>
+            <span className="small muted">Local environment: {daemon?.name ?? agent.daemonId}</span>
           </div>
         </div>
+        {status.key === "failed" && status.reason ? <p className="error-text">Failure reason: {status.reason}</p> : null}
         <p className="small"><strong>Role:</strong> {agent.role}</p>
         <label className="field"><span className="lab">One-off instruction</span><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} /></label>
         <button className="btn accent full" onClick={async () => { await api.startAgent(workspaceId, agent.id, prompt); onChanged(); }}>Start run</button>
@@ -3124,7 +3495,7 @@ export function AgentDetailModal({ api, workspaceId, agentId, agents, daemons, r
   );
 }
 
-export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents, runs, onClose, onChanged }: { api: ApiClient; workspaceId: string; daemonId: string; daemons: Daemon[]; agents: Agent[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; onClose: () => void; onChanged: () => void }) {
+export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents, runs, agentEvents, onClose, onChanged }: { api: ApiClient; workspaceId: string; daemonId: string; daemons: Daemon[]; agents: Agent[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; agentEvents: AgentEvent[]; onClose: () => void; onChanged: () => void }) {
   const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
   const [reinstallOpen, setReinstallOpen] = useState(false);
   const [reinstallToken, setReinstallToken] = useState("");
@@ -3181,17 +3552,20 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
             <p className="tiny muted mono">ID: {daemon.id}</p>
             <p className="small muted">Last seen: {daemon.lastSeenAt ? new Date(daemon.lastSeenAt).toLocaleString() : "Never"}</p>
             <p className="small muted">Agents: {daemonAgents.length}</p>
-            {daemonAgents.map((agent) => <p className="small" key={agent.id}>@{agent.handle} · {visibleAgentStatus(agent, runs, [daemon])}</p>)}
+            {daemonAgents.map((agent) => {
+              const agentStatus = visibleAgentStatus(agent, runs, [daemon], agentEvents, now);
+              return <p className="small" key={agent.id}>@{agent.handle} · {detailStatusLabel(agentStatus)}</p>;
+            })}
           </div>
-          <button className="btn accent full" onClick={() => void prepareReinstall()} disabled={reinstallLoading}>Reinstall daemon</button>
-          <ShellScriptBlock title="Uninstall daemon" badge="Global" command={uninstallCommand}>
-            <p className="small muted">Run this on the daemon host to remove the local Codesk daemon installation. This uses the global uninstall script because workspace-specific uninstall is not supported yet.</p>
+          <button className="btn accent full" onClick={() => void prepareReinstall()} disabled={reinstallLoading}>Reinstall local environment</button>
+          <ShellScriptBlock title="Uninstall local environment" badge="Global" command={uninstallCommand}>
+            <p className="small muted">Run this on the local environment host to remove the local Codesk installation. This uses the global uninstall script because workspace-specific uninstall is not supported yet.</p>
           </ShellScriptBlock>
-          <button className="btn danger full" onClick={async () => { await api.deleteDaemon(workspaceId, daemon.id); onChanged(); onClose(); }}>Delete daemon record</button>
+          <button className="btn danger full" onClick={async () => { await api.deleteDaemon(workspaceId, daemon.id); onChanged(); onClose(); }}>Delete local environment record</button>
         </div>
       </Modal>
       {reinstallOpen ? (
-        <Modal title="Reinstall daemon" onClose={() => setReinstallOpen(false)}>
+        <Modal title="Reinstall local environment" onClose={() => setReinstallOpen(false)}>
           <div className="form-stack">
             {reinstallLoading ? (
               <div className="deploy-block">
@@ -3199,7 +3573,7 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
                   <b className="small">Reinstall script</b>
                   <span className="chip sm">Preparing</span>
                 </div>
-                <p className="small muted">Preparing a fresh daemon token and reinstall script.</p>
+                <p className="small muted">Preparing a fresh local environment token and reinstall script.</p>
               </div>
             ) : reinstallError ? (
               <div className="deploy-block">
@@ -3210,8 +3584,8 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
                 <p className="small muted">{reinstallError}</p>
               </div>
             ) : (
-              <ShellScriptBlock title="Reinstall daemon" badge="Host native" command={reinstallCommand}>
-                <p className="small muted">Run this on the daemon host to remove the current local install and install the latest daemon again using the fresh daemon token below.</p>
+              <ShellScriptBlock title="Reinstall local environment" badge="Host native" command={reinstallCommand}>
+                <p className="small muted">Run this on the local environment host to remove the current local install and install the latest local environment again using the fresh token below.</p>
               </ShellScriptBlock>
             )}
           </div>
@@ -3236,10 +3610,10 @@ export function EmptyWorkspace({
     <section className="doc-canvas">
       <div className="doc-inner empty-state">
         <h2 className="display">Let's get this workspace working.</h2>
-        <p className="small muted">Codesk is best with at least one daemon: it syncs docs to disk and hosts your agents. You can also start by writing something.</p>
+        <p className="small muted">Codesk is best with at least one local environment: it syncs docs to disk and hosts your agents. You can also start by writing something.</p>
         <div className="empty-grid">
           <button className="card p-20 empty-choice" onClick={onCreateDaemon}>
-            <div className="row gap-8"><div className="avi sm daemon">D</div><b>Deploy a daemon</b></div>
+            <div className="row gap-8"><div className="avi sm daemon">D</div><b>Deploy a local environment</b></div>
             <span className="small muted">Bring docs to local disk and enable agents.</span>
           </button>
           <button className="card p-20 empty-choice" onClick={onCreateDocument} disabled={!canCreateDocument || creatingDocument}>
@@ -3266,34 +3640,50 @@ export function DocumentNotFound({ onBackToWorkspace }: { onBackToWorkspace: () 
   );
 }
 
-function ShareWorkspaceModal({ api, workspaceId, onClose }: { api: ApiClient; workspaceId: string; onClose: () => void }) {
+export type ManageTab = "members" | "agents" | "local-env" | "workspace" | "danger";
+
+export const MANAGE_TABS: { id: ManageTab; label: string; danger?: boolean }[] = [
+  { id: "members", label: "Members & Invite" },
+  { id: "agents", label: "Agents" },
+  { id: "local-env", label: "Local environment" },
+  { id: "workspace", label: "Workspace settings" },
+  { id: "danger", label: "Danger zone", danger: true },
+];
+
+// Members & Invite tab (plan §4.2): the workspace-wide member list plus invite-link
+// generation, migrated out of the toolbar's Share modal into Manage. The right-rail
+// People panel is unchanged (#19 governs its display scope, not where management lives).
+export function MembersAndInvite({
+  api,
+  workspaceId,
+  users,
+  canInvite,
+}: {
+  api: ApiClient;
+  workspaceId: string;
+  users: UserItem[];
+  canInvite: boolean;
+}) {
   const [link, setLink] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
-  const [error, setError] = useState("");
+  const [inviteError, setInviteError] = useState("");
+  const [creating, setCreating] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  useEffect(() => {
-    let disposed = false;
-    setError("");
-    setLink("");
-    setExpiresAt("");
-    api.createWorkspaceInvite(workspaceId)
-      .then((response) => {
-        if (disposed) {
-          return;
-        }
-        setLink(new URL(response.url, publicOrigin).toString());
-        setExpiresAt(response.invite.expiresAt);
-      })
-      .catch((err) => {
-        if (!disposed) {
-          setError(err instanceof Error ? err.message : String(err));
-        }
-      });
-    return () => {
-      disposed = true;
-    };
-  }, [api, workspaceId]);
+  const generate = async () => {
+    setCreating(true);
+    setInviteError("");
+    setCopied(false);
+    try {
+      const response = await api.createWorkspaceInvite(workspaceId);
+      setLink(new URL(response.url, publicOrigin).toString());
+      setExpiresAt(response.invite.expiresAt);
+    } catch (err) {
+      setInviteError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCreating(false);
+    }
+  };
 
   const copy = async () => {
     if (!link) {
@@ -3303,24 +3693,197 @@ function ShareWorkspaceModal({ api, workspaceId, onClose }: { api: ApiClient; wo
       await navigator.clipboard.writeText(link);
       setCopied(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setInviteError(err instanceof Error ? err.message : String(err));
     }
   };
 
+  const members = users.filter((user) => user.kind !== "agent");
+
   return (
-    <Modal title="Share workspace" onClose={onClose}>
-      <div className="form-stack">
-        {error ? <p className="error-text">{error}</p> : null}
-        <label className="field">
-          <span className="lab">Invite link</span>
-          <input readOnly value={link || "Creating invite link..."} onFocus={(event) => event.currentTarget.select()} />
-        </label>
-        {expiresAt ? <p className="tiny muted">Expires {formatInviteDate(expiresAt)}</p> : null}
-        <button className="btn accent full" type="button" onClick={() => void copy()} disabled={!link}>
-          {copied ? "Copied" : "Copy invite link"}
-        </button>
+    <div className="manage-panel">
+      <div className="manage-panel-head">
+        <span className="display management-title">Members &amp; Invite</span>
+        <span className="chip">{members.length} {members.length === 1 ? "member" : "members"}</span>
       </div>
-    </Modal>
+
+      <div className="member-list">
+        {members.map((user) => (
+          <div className="member-row" key={user.id}>
+            <div className="avi sm you">{initials(user.handle || user.name)}</div>
+            <div className="col gap-0 min-0">
+              <b className="small truncate">{user.name || `@${user.handle}`}</b>
+              <span className="tiny muted truncate">@{user.handle}</span>
+            </div>
+            <span className="chip sm member-role">{user.role || "Member"}</span>
+          </div>
+        ))}
+        {!members.length ? <p className="tiny muted">No members yet.</p> : null}
+      </div>
+
+      <div className="invite-block">
+        <div className="lab"><span className="label">Invite by link</span></div>
+        {canInvite ? (
+          <>
+            {inviteError ? <p className="error-text">{inviteError}</p> : null}
+            {link ? (
+              <>
+                <input className="input" readOnly value={link} onFocus={(event) => event.currentTarget.select()} />
+                {expiresAt ? <p className="tiny muted">Expires {formatInviteDate(expiresAt)}</p> : null}
+                <div className="row gap-8">
+                  <button className="btn accent" type="button" onClick={() => void copy()}>{copied ? "Copied" : "Copy link"}</button>
+                  <button className="btn ghost" type="button" onClick={() => void generate()} disabled={creating}>Regenerate</button>
+                </div>
+              </>
+            ) : (
+              <button className="btn accent" type="button" onClick={() => void generate()} disabled={creating}>
+                {creating ? "Generating…" : "Generate invite link"}
+              </button>
+            )}
+          </>
+        ) : (
+          <p className="tiny muted">Only workspace owners and admins can invite new members.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Workspace settings (plan §4.2). Read-only today: it states the current name and URL
+// (zero backend) with an explicit "editing coming soon". When PATCH /workspace lands the
+// read-only fields flip to editable — wiring, not construction (Juan/Eva ruling).
+function WorkspaceSettings({ name, slug }: { name: string; slug: string }) {
+  return (
+    <div className="manage-panel">
+      <div className="manage-panel-head">
+        <span className="display management-title">Workspace settings</span>
+      </div>
+      <div className="settings-list">
+        <div className="setting-readonly">
+          <span className="lab">Workspace name</span>
+          <span className="setting-value">{name}</span>
+        </div>
+        <div className="setting-readonly">
+          <span className="lab">Workspace URL</span>
+          <span className="setting-value mono">{`${publicOrigin}/w/${slug}`}</span>
+        </div>
+        <p className="tiny muted">Editing coming soon.</p>
+      </div>
+    </div>
+  );
+}
+
+// Danger zone (plan §4.2). Deliberately NOT a red, clickable-looking Delete button today —
+// a destructive control that can't act is alarming, not honest. Calm coming-soon copy now;
+// the danger styling + real DELETE /workspace land together in the backend follow-up (Eva).
+function DangerZone() {
+  return (
+    <div className="manage-panel">
+      <div className="manage-panel-head">
+        <span className="display management-title">Danger zone</span>
+      </div>
+      <div className="danger-note">
+        <p className="small">Workspace deletion is coming soon.</p>
+        <p className="tiny muted">
+          Deleting a workspace permanently removes its documents, agents and members. This will be
+          available once the action is fully supported.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// Low-frequency workspace management, pulled out of the toolbar and right rail into a single
+// container (plan §4.2). Local environment holds what used to be the "Daemons" center view.
+export function ManageModal({
+  api,
+  workspaceId,
+  workspace,
+  workspaceSlug,
+  activeTab,
+  canInvite,
+  groupedAgents,
+  onTabChange,
+  onClose,
+  onRefresh,
+  onNewDaemon,
+  onDaemon,
+  onNewAgent,
+  onAgent,
+}: {
+  api: ApiClient;
+  workspaceId: string;
+  workspace: ReturnType<typeof useWorkspace>["workspace"];
+  workspaceSlug: string;
+  activeTab: ManageTab;
+  canInvite: boolean;
+  groupedAgents: Array<{ daemonId: string; daemonName: string; agents: Agent[] }>;
+  onTabChange: (tab: ManageTab) => void;
+  onClose: () => void;
+  onRefresh: () => void;
+  onNewDaemon: () => void;
+  onDaemon: (daemon: Daemon) => void;
+  onNewAgent: () => void;
+  onAgent: (agent: Agent) => void;
+}) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <section className="modal-card card lifted wide manage-modal" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label="Manage workspace">
+        <header className="modal-header">
+          <h2 className="modal-title">Manage workspace</h2>
+          <button className="btn ghost icon sm" onClick={onClose} aria-label="Close">×</button>
+        </header>
+        <div className="manage-body">
+          <nav className="manage-tabs" aria-label="Manage sections">
+            {MANAGE_TABS.filter((tab) => !tab.danger).map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                className={`manage-tab ${activeTab === tab.id ? "active" : ""}`}
+                aria-current={activeTab === tab.id}
+                onClick={() => onTabChange(tab.id)}
+              >
+                {tab.label}
+              </button>
+            ))}
+            <span className="manage-tabs-spacer" />
+            {MANAGE_TABS.filter((tab) => tab.danger).map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                className={`manage-tab danger ${activeTab === tab.id ? "active" : ""}`}
+                aria-current={activeTab === tab.id}
+                onClick={() => onTabChange(tab.id)}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </nav>
+          <div className="manage-content">
+            {activeTab === "local-env" ? (
+              <DaemonsManagement workspace={workspace} onRefresh={onRefresh} onNew={onNewDaemon} onDaemon={onDaemon} />
+            ) : activeTab === "members" ? (
+              <MembersAndInvite api={api} workspaceId={workspaceId} users={workspace.users} canInvite={canInvite} />
+            ) : activeTab === "agents" ? (
+              <AgentsManagement workspace={workspace} groupedAgents={groupedAgents} onNew={onNewAgent} onAgent={onAgent} />
+            ) : activeTab === "workspace" ? (
+              <WorkspaceSettings name={workspace.name} slug={workspaceSlug} />
+            ) : (
+              <DangerZone />
+            )}
+          </div>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -3364,6 +3927,14 @@ export function Icon({ name }: { name: string }) {
       return <svg className="i sm" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6" /></svg>;
     case "activity":
       return <svg className="i sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>;
+    case "inbox":
+      return <svg className="i sm" viewBox="0 0 24 24"><path d="M4 4h16l-2 10h-3l-1.5 3h-3L9 14H6L4 4z" /><path d="M4 20h16" /></svg>;
+    case "mention":
+      return <svg className="i sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" /><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8" /></svg>;
+    case "review":
+      return <svg className="i sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 3a9 9 0 0 1 0 18z" /></svg>;
+    case "alert":
+      return <svg className="i sm" viewBox="0 0 24 24"><path d="M12 3l10 18H2L12 3z" /><path d="M12 9v5M12 18h.01" /></svg>;
     case "thread":
       return <svg className="i sm" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5A8.5 8.5 0 1 1 21 11.5z" /></svg>;
     case "people":
@@ -3390,6 +3961,8 @@ export function Icon({ name }: { name: string }) {
       return <svg className="i sm" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3" /><circle cx="6" cy="12" r="3" /><circle cx="18" cy="19" r="3" /><path d="M8.6 10.6l6.8-4.2M8.6 13.4l6.8 4.2" /></svg>;
     case "more":
       return <svg className="i sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1.5" /><circle cx="19" cy="12" r="1.5" /><circle cx="5" cy="12" r="1.5" /></svg>;
+    case "settings":
+      return <svg className="i sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1" /></svg>;
     default:
       return null;
   }

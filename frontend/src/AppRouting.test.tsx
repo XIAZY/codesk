@@ -131,12 +131,6 @@ function patchLastAccessed(path: string, init: RequestInit | undefined) {
   return true;
 }
 
-function lastAccessedPatchBodies() {
-  return vi.mocked(globalThis.fetch).mock.calls
-    .filter(([url, init]) => String(url).endsWith("/last-accessed") && init?.method === "PATCH")
-    .map(([, init]) => String(init?.body ?? ""));
-}
-
 beforeEach(() => {
   localStorage.clear();
   window.history.replaceState(null, "", "/");
@@ -449,7 +443,7 @@ describe("App URL routing", () => {
     await waitFor(() => expect(window.location.pathname.startsWith("/w/team")).toBe(true));
   });
 
-  it("shows share-link controls only to workspace owners and admins", async () => {
+  it("shows invite generation only to owners/admins in Manage → Members & Invite", async () => {
     const user = userEvent.setup();
     localStorage.setItem("codesk.auth.token", "token");
     window.history.replaceState(null, "", "/w/team/d/doc_1");
@@ -457,8 +451,9 @@ describe("App URL routing", () => {
     render(<App />);
 
     await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_1"));
-    await user.click(screen.getByRole("button", { name: "Invite" }));
-
+    // Owner opens Manage (defaults to Members & Invite) and can generate an invite link.
+    await user.click(screen.getByRole("button", { name: "Manage / Settings" }));
+    await user.click(screen.getByRole("button", { name: "Generate invite link" }));
     expect(await screen.findByDisplayValue(`${window.location.origin}/invite/created321`)).toBeTruthy();
 
     cleanup();
@@ -467,7 +462,10 @@ describe("App URL routing", () => {
     render(<App />);
 
     await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_1"));
-    expect(screen.queryByRole("button", { name: "Invite" })).toBeNull();
+    // A plain member sees no invite generation, just the permission note.
+    await user.click(screen.getByRole("button", { name: "Manage / Settings" }));
+    expect(screen.queryByRole("button", { name: "Generate invite link" })).toBeNull();
+    expect(screen.getByText("Only workspace owners and admins can invite new members.")).toBeTruthy();
   });
 
   it("routes from backend account state after login from an invalid protected workspace URL", async () => {
@@ -513,7 +511,7 @@ describe("App URL routing", () => {
     expect(screen.getByRole("button", { name: "Back to workspace" })).toBeTruthy();
   });
 
-  it("updates URL from workspace navigation and responds to browser history", async () => {
+  it("collapses and expands the left sidebar, remembering the choice", async () => {
     const user = userEvent.setup();
     localStorage.setItem("codesk.auth.token", "token");
     window.history.replaceState(null, "", "/w/team/d/doc_1");
@@ -521,15 +519,16 @@ describe("App URL routing", () => {
     render(<App />);
 
     await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_1"));
-    await user.click(screen.getByRole("button", { name: "Daemons" }));
-    expect(window.location.pathname).toBe("/w/team/daemons");
-    await user.click(screen.getByRole("button", { name: "Agents" }));
-    expect(window.location.pathname).toBe("/w/team/agents");
+    const shell = document.querySelector(".shell") as HTMLElement;
+    expect(shell.className).not.toContain("sidebar-collapsed");
 
-    window.history.back();
-    await waitFor(() => expect(window.location.pathname).toBe("/w/team/daemons"));
-    expect(screen.getAllByText("Daemons").length).toBeGreaterThan(0);
-    expect(lastAccessedPatchBodies().filter((body) => body === JSON.stringify({}))).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "Collapse sidebar" }));
+    expect(shell.className).toContain("sidebar-collapsed");
+    expect(localStorage.getItem("codesk.sb.collapsed")).toBe("1");
+
+    await user.click(screen.getByRole("button", { name: "Expand sidebar" }));
+    expect(shell.className).not.toContain("sidebar-collapsed");
+    expect(localStorage.getItem("codesk.sb.collapsed")).toBe("0");
   });
 
   it("opens a document URL after creating the workspace and document", async () => {
