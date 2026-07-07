@@ -11,12 +11,14 @@ go test -tags=regression ./test/regression
 Useful knobs:
 
 ```sh
+NOTTY_REGRESSION_DEADLINE_SCALE=4 go test -tags=regression ./test/regression
 NOTTY_REGRESSION_STRESS_LINES=100000 go test -tags=regression ./test/regression -run AppendOnly
 NOTTY_REGRESSION_BACKEND_RESTART=1 NOTTY_REGRESSION_RESTART_LINES=20000 go test -tags=regression ./test/regression -run BackendRestart
 ```
 
 The suite uses a dedicated Docker Compose project and random localhost ports, so it can run beside the normal dev stack.
 The Compose stack provides fake Mailgun settings so strict email configuration does not prevent backend boot; the harness marks its own throwaway account verified in Postgres before logging in.
+`NOTTY_REGRESSION_DEADLINE_SCALE` multiplies convergence deadlines and Docker command timeouts for loaded CI runners without adding blanket sleeps; values below 1 are rejected so local/default runs stay strict.
 
 Delete/backspace coverage is included at both levels: a CRDT-only regression verifies partial delete ranges inside larger text items, and a websocket regression verifies peer propagation plus backend persistence.
 

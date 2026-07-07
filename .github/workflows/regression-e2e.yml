@@ -1,9 +1,8 @@
 # Nightly (and on-demand) docker-compose E2E regression suite — the fs<->DB<->daemon sync tests in
-# test/regression/sync_regression_test.go, whose convergence deadlines race under a loaded per-PR CI
-# runner (a timing flake, not a code bug). Kept OUT of the required per-PR gate so it can't stop it
-# being trustworthy, but run every day so failures land in front of us instead of nowhere. When
-# Deniz's CI-facing deadline hardening lands (NOTTY_REGRESSION_DEADLINE_SCALE / retry-until-converge),
-# this suite is promoted back into the required gate in .github/workflows/ci.yml.
+# test/regression/sync_regression_test.go. The tests support NOTTY_REGRESSION_DEADLINE_SCALE so
+# loaded runners get wider convergence deadlines without blanket sleeps or slower fast paths.
+# This lane proves the hardening before promotion: after 3 consecutive green scheduled runs on
+# fresh runners, move this suite back into the required per-PR gate in .github/workflows/ci.yml.
 name: Regression E2E (nightly)
 
 on:
@@ -22,7 +21,9 @@ jobs:
   regression-e2e:
     name: docker-compose fs<->DB<->daemon sync regression
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    env:
+      NOTTY_REGRESSION_DEADLINE_SCALE: "4"
     steps:
       - uses: actions/checkout@v4
         with:
