@@ -25,6 +25,12 @@ var (
 	contractUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 	// RFC3339 with optional fractional seconds, plus the zero-time the store emits for "never".
 	contractTimestampPattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$`)
+	// Unanchored variants: UUIDs and timestamps also appear EMBEDDED in human-readable strings —
+	// activity summaries like "<uuid> started a thread on document <uuid>". Left raw, those non-
+	// deterministic ids leak into the golden, so we replace each occurrence in place with the same
+	// alias it gets as a standalone id field (referential consistency across the sentence and the graph).
+	contractEmbeddedUUIDPattern      = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
+	contractEmbeddedTimestampPattern = regexp.MustCompile(`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})`)
 )
 
 func canonicalizeContractJSON(raw []byte) ([]byte, error) {
@@ -76,18 +82,30 @@ func canonicalizeContractValue(v interface{}, aliases map[string]string) interfa
 }
 
 func canonicalizeContractString(s string, aliases map[string]string) string {
+	// Whole-string id / timestamp fields — the common case.
 	if contractUUIDPattern.MatchString(s) {
-		alias, ok := aliases[s]
-		if !ok {
-			alias = fmt.Sprintf("<id-%d>", len(aliases)+1)
-			aliases[s] = alias
-		}
-		return alias
+		return contractAliasFor(s, aliases)
 	}
 	if contractTimestampPattern.MatchString(s) {
 		return "<ts>"
 	}
+	// Otherwise the string may still embed ids / timestamps (activity summaries, error messages).
+	// Collapse embedded timestamps first (they never overlap a UUID), then alias embedded UUIDs so
+	// the same id reads as the same alias whether it appears as a field or inside a sentence.
+	s = contractEmbeddedTimestampPattern.ReplaceAllString(s, "<ts>")
+	s = contractEmbeddedUUIDPattern.ReplaceAllStringFunc(s, func(m string) string {
+		return contractAliasFor(m, aliases)
+	})
 	return s
+}
+
+func contractAliasFor(uuid string, aliases map[string]string) string {
+	alias, ok := aliases[uuid]
+	if !ok {
+		alias = fmt.Sprintf("<id-%d>", len(aliases)+1)
+		aliases[uuid] = alias
+	}
+	return alias
 }
 
 func mustCanonicalize(t *testing.T, raw string) string {
@@ -121,6 +139,35 @@ func TestCanonicalizeContractJSONStableAliasesAndRefConsistency(t *testing.T) {
 	}
 	if c := strings.Count(got, "<id-2>"); c != 2 {
 		t.Fatalf("thread uuid should map to one stable alias used twice, got %d occurrences of <id-2>:\n%s", c, got)
+	}
+}
+
+func TestCanonicalizeContractJSONAliasesEmbeddedIdsAndTimestamps(t *testing.T) {
+	// Activity summaries embed ids and timestamps inside a human-readable sentence. Each must
+	// canonicalize to the SAME alias the id carries as a standalone field (and timestamps to <ts>),
+	// or raw non-deterministic ids leak into the golden and it drifts every run — the exact bug the
+	// populated-workspace row surfaced.
+	const actorID = "44444444-4444-4444-4444-444444444444"
+	const docID = "55555555-5555-5555-5555-555555555555"
+	raw := fmt.Sprintf(`{
+		"actorId": %[1]q,
+		"documentId": %[2]q,
+		"summary": "%[1]s started a thread on document %[2]s at 2026-07-06T12:00:00Z"
+	}`, actorID, docID)
+	got := mustCanonicalize(t, raw)
+
+	if strings.Contains(got, actorID) || strings.Contains(got, docID) || strings.Contains(got, "2026") {
+		t.Fatalf("embedded id/timestamp leaked into canonical form:\n%s", got)
+	}
+	// sorted keys: actorId < documentId < summary → actorID=<id-1>, docID=<id-2>; the summary reuses both.
+	if c := strings.Count(got, "<id-1>"); c != 2 {
+		t.Fatalf("actor id should read as <id-1> both as a field and inside the summary, got %d:\n%s", c, got)
+	}
+	if c := strings.Count(got, "<id-2>"); c != 2 {
+		t.Fatalf("document id should read as <id-2> both as a field and inside the summary, got %d:\n%s", c, got)
+	}
+	if !strings.Contains(got, "started a thread on document <id-2> at <ts>") {
+		t.Fatalf("expected embedded ids and timestamp replaced in place:\n%s", got)
 	}
 }
 

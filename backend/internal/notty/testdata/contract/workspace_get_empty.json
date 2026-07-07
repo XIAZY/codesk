@@ -1,0 +1,28 @@
+{
+  "activities": [],
+  "agentEvents": [],
+  "agentRuns": [],
+  "agents": [],
+  "currentDaemonId": "",
+  "currentMembershipRole": "owner",
+  "currentUserId": "<id-1>",
+  "daemons": [],
+  "name": "Contract Empty Workspace",
+  "presences": [],
+  "rootDocumentId": "<id-2>",
+  "threads": [],
+  "updatedAt": "<ts>",
+  "users": [
+    {
+      "createdAt": "<ts>",
+      "handle": "owner",
+      "id": "<id-1>",
+      "kind": "human",
+      "name": "Contract Empty Owner",
+      "role": "Workspace owner",
+      "status": "active",
+      "updatedAt": "<ts>"
+    }
+  ],
+  "workspaceId": "<id-3>"
+}

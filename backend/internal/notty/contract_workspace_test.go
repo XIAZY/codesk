@@ -111,6 +111,9 @@ func buildPopulatedWorkspace(t *testing.T, router http.Handler) (ownerToken, wor
 	owner := authTestRegister(t, router, "contract-populated-owner@example.com", "owner-pass", "Contract Populated Owner")
 	ws := authTestCreateWorkspace(t, router, owner.Token, "Contract Populated Workspace")
 
+	// A real document to anchor the thread and presence (the thread handler 404s on an unknown doc id).
+	document := authTestCreateDocument(t, router, owner.Token, ws.ID, "docs/contract.md", "# Contract\n")
+
 	// A daemon that has checked in → connection status flips from disconnected to online.
 	var daemon CreateDaemonResponse
 	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+ws.ID+"/daemons", owner.Token, CreateDaemonRequest{Name: "Contract daemon"}, http.StatusCreated, &daemon)
@@ -130,26 +133,26 @@ func buildPopulatedWorkspace(t *testing.T, router http.Handler) (ownerToken, wor
 		"X-Notty-Acting-Agent-ID": agent.ID,
 	}, UpdateAgentSessionRequest{Status: "idle", SessionID: "contract-session"}, http.StatusOK)
 
-	// Agent-authored thread on the root document → threads + an activity row.
+	// Agent-authored thread on the document → threads + an activity row.
 	var thread struct {
 		Thread Thread `json:"thread"`
 	}
 	authTestJSONWithHeaders(t, router, http.MethodPost, "/api/workspaces/"+ws.ID+"/threads", daemon.Token, map[string]string{
 		"X-Notty-Acting-Agent-ID": agent.ID,
 	}, CreateThreadRequest{
-		DocumentID: ws.RootDocumentID,
+		DocumentID: document.ID,
 		Title:      "Contract thread",
 		Body:       "A populated-state thread authored by the agent.",
 		Excerpt:    "contract",
 	}, http.StatusCreated, &thread)
 
-	// Daemon presence on the root document → presences (the handler binds the actor to the
+	// Daemon presence on the document → presences (the handler binds the actor to the
 	// authenticated daemon, so a stray ActorID cannot spoof a different actor).
 	var presence Presence
 	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+ws.ID+"/presence", daemon.Token, UpsertPresenceRequest{
 		ActorID:    daemon.Daemon.ID,
 		ActorType:  "daemon",
-		DocumentID: ws.RootDocumentID,
+		DocumentID: document.ID,
 		Activity:   "viewing",
 	}, http.StatusOK, &presence)
 
