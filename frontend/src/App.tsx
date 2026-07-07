@@ -2608,7 +2608,7 @@ function CollaboratorAvatars({ people, onClick }: { people: WorkspacePerson[]; o
           {initials(p.handle || p.name)}
         </div>
       ))}
-      {online.length > 5 ? <span className="avi sm you online">+{online.length - 5}</span> : null}
+      {online.length > 5 ? <span className="avi sm you">+{online.length - 5}</span> : null}
     </button>
   );
 }
