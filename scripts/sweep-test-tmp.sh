@@ -22,10 +22,11 @@ if [ ! -d "$ROOT" ]; then
 	exit 0
 fi
 
-# Only immediate children of the root are per-run units; -mmin +N selects those last modified more
-# than N minutes ago. mtime of the dir advances while a run writes into it, so an in-progress run is
-# not eligible until it has been idle for the full window.
-removed=0
+# Only immediate children of the root are per-run units; -mmin +N selects those whose own mtime is
+# older than N minutes. A directory's mtime advances when a direct child is created or removed, NOT on
+# writes deep inside its subtree — so the real guard is "idle at the top level for the window", not
+# "idle everywhere". At our run lengths (minutes) against a 24h window that gap is theoretical, but the
+# comment states what mtime actually delivers rather than promising more.
 find "$ROOT" -mindepth 1 -maxdepth 1 -mmin "+$age_min" -print | while IFS= read -r path; do
 	if [ "$DRY_RUN" = "1" ]; then
 		printf 'would remove: %s\n' "$path"
@@ -33,7 +34,6 @@ find "$ROOT" -mindepth 1 -maxdepth 1 -mmin "+$age_min" -print | while IFS= read 
 		rm -rf "$path"
 		printf 'removed: %s\n' "$path"
 	fi
-	removed=$((removed + 1))
 done
 
 printf 'sweep complete: root=%s max-age=%sh%s\n' "$ROOT" "$AGE_HOURS" "$([ "$DRY_RUN" = 1 ] && printf ' (dry-run)' || printf '')"

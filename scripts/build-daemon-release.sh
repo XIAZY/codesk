@@ -15,7 +15,7 @@ esac
 
 out_dir="$dist_abs/$version"
 latest_dir="$dist_abs/latest"
-tmp_dir="$(notty_test_tmp_root)/notty-daemon-release-$$"
+tmp_dir="$(notty_test_mktemp notty-daemon-release)"
 manifest="$out_dir/manifest.json"
 installer="$root_dir/deploy/daemons/install.sh"
 uninstaller="$root_dir/deploy/daemons/uninstall.sh"
