@@ -766,3 +766,52 @@ func envLookup(env []string, key string) (string, bool) {
 	}
 	return "", false
 }
+
+// TestClaudeRuntimeProcessWedgeWatchdogWiredThroughTurnLifecycle mirrors the codex wiring pin for the
+// claude driver: a completed turn proves readLoop recorded stream activity on the watchdog and the
+// result-event path disarmed it (turnEnded runs before the event is emitted, so this is deterministic).
+func TestClaudeRuntimeProcessWedgeWatchdogWiredThroughTurnLifecycle(t *testing.T) {
+	t.Setenv("NOTTY_WEDGE_WATCHDOG", "observe")
+	t.Setenv("FAKE_CLAUDE_IO_FILE", filepath.Join(t.TempDir(), "io"))
+	process := newTestClaudeProcess(t, writeFakeClaude(t))
+	if process.watchdog == nil {
+		t.Fatal("expected a watchdog on the spawned claude process")
+	}
+
+	session, err := process.WriteStdin(context.Background(), RuntimeInput{Kind: RuntimeInputStartSession})
+	if err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	turn, err := process.WriteStdin(context.Background(), RuntimeInput{Kind: RuntimeInputStartTurn, Text: "do work"})
+	if err != nil {
+		t.Fatalf("start turn: %v", err)
+	}
+	expectRuntimeEvent(t, process.Events(), RuntimeEvent{
+		Kind:      RuntimeEventTurnCompleted,
+		SessionID: session.SessionID,
+		TurnID:    turn.TurnID,
+	})
+
+	active, lastActivity := process.watchdog.stateForTest()
+	if active != "" {
+		t.Fatalf("a completed turn must disarm the watchdog, still armed on %q", active)
+	}
+	if lastActivity.IsZero() {
+		t.Fatal("readLoop must record stream activity on the watchdog")
+	}
+}
+
+// TestClaudeRuntimeProcessWedgeWatchdogDisarmsOnTurnWriteError pins claude's intricate branch: StartTurn
+// arms the watchdog before the write, so a write failure must disarm it — otherwise the watchdog is left
+// armed on a turn that never ran, a latent false wedge.
+func TestClaudeRuntimeProcessWedgeWatchdogDisarmsOnTurnWriteError(t *testing.T) {
+	t.Setenv("NOTTY_WEDGE_WATCHDOG", "observe")
+	process := newTestClaudeProcess(t, writeFakeClaude(t))
+
+	if _, err := process.WriteStdin(context.Background(), RuntimeInput{Kind: RuntimeInputStartTurn, Text: "hi"}); err == nil {
+		t.Fatal("expected StartTurn without a spawned session to fail on write")
+	}
+	if active, _ := process.watchdog.stateForTest(); active != "" {
+		t.Fatalf("the write-error branch must disarm the watchdog, still armed on %q", active)
+	}
+}

@@ -26,6 +26,14 @@ func (c *testClock) advance(d time.Duration) {
 	c.mu.Unlock()
 }
 
+// stateForTest reads the watchdog's arm state and last-activity stamp under the lock, for driver-wiring
+// assertions that a turn armed/disarmed and activity was recorded.
+func (w *wedgeWatchdog) stateForTest() (activeTurn string, lastActivity time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.activeTurn, w.lastActivity
+}
+
 func newTestWatchdog(t *testing.T, mode wedgeWatchdogMode, window time.Duration, clock *testClock, stop func() error) *wedgeWatchdog {
 	t.Helper()
 	return &wedgeWatchdog{
@@ -174,6 +182,13 @@ func TestNewWedgeWatchdogEnvConfig(t *testing.T) {
 	t.Setenv("NOTTY_WEDGE_WATCHDOG", "nonsense")
 	if fb := newWedgeWatchdog(Config{}, "a", RuntimeCodex, nil); fb == nil || fb.mode != wedgeWatchdogObserve {
 		t.Fatalf("an unrecognized mode must fall back to observe, got %#v", fb)
+	}
+
+	// An invalid window falls back to the default (and logs loudly — see newWedgeWatchdog).
+	t.Setenv("NOTTY_WEDGE_WATCHDOG", "observe")
+	t.Setenv("NOTTY_WEDGE_WATCHDOG_WINDOW", "not-a-duration")
+	if bad := newWedgeWatchdog(Config{}, "a", RuntimeCodex, nil); bad == nil || bad.window != defaultWedgeWatchdogWindow {
+		t.Fatalf("an invalid window must fall back to the default, got %#v", bad)
 	}
 }
 

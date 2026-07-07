@@ -1,6 +1,7 @@
 package syncer
 
 import (
+	"log"
 	"sync"
 	"time"
 )
@@ -65,6 +66,10 @@ func newWedgeWatchdog(cfg Config, agentID string, driver RuntimeKind, stop func(
 	if raw := getenv("NOTTY_WEDGE_WATCHDOG_WINDOW", ""); raw != "" {
 		if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
 			window = parsed
+		} else {
+			// A knob that silently ignores your typo and runs the default is a quiet cousin of the
+			// lying control — make the misconfiguration loud rather than let it pass unnoticed.
+			log.Printf("wedge watchdog: ignoring invalid NOTTY_WEDGE_WATCHDOG_WINDOW=%q, using default %s", raw, window)
 		}
 	}
 	return &wedgeWatchdog{
