@@ -1785,7 +1785,7 @@ export function WorkspaceApp({
                     <span className="small truncate">@{agent.handle}</span>
                     <span className="agent-mini-status" title={status.title} aria-label={`Status: ${status.label}`}>
                       <StatusDot tone={status.tone} />
-                      <span className="agent-mini-status-label">{status.label}</span>
+                      <span className={`agent-mini-status-label ${status.tone}`}>{status.label}</span>
                     </span>
                   </span>
                 </button>
