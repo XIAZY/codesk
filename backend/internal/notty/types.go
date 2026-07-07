@@ -326,6 +326,17 @@ type UpdateThreadRequest struct {
 	Status string `json:"status"`
 }
 
+// UpdateThreadAnchorRequest re-anchors a thread (e.g. an orphan whose original text was deleted) to a
+// new position. Kind is inferred from the relative positions when omitted, exactly as on create.
+// Excerpt is a pointer so an omitted key preserves the stored excerpt (partial-update convention) while
+// a provided value — including "" — replaces it; the re-anchor picker always sends the fresh excerpt.
+type UpdateThreadAnchorRequest struct {
+	Kind          string  `json:"kind,omitempty"`
+	RelativeStart string  `json:"relativeStart"`
+	RelativeEnd   string  `json:"relativeEnd"`
+	Excerpt       *string `json:"excerpt,omitempty"`
+}
+
 type CreateWorkspaceRequest struct {
 	Name   string `json:"name"`
 	Slug   string `json:"slug"`

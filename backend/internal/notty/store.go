@@ -1743,6 +1743,20 @@ func (s *Store) UpdateThreadStatus(id string, req UpdateThreadRequest) (*Thread,
 	return updateThreadStatusPostgres(db, workspaceID, id, status)
 }
 
+// UpdateThreadAnchor re-anchors a thread. It reuses the shared anchor validator, preserves the stored
+// excerpt when the request omits one, and reports changed=false for a no-op (identical anchor) so the
+// handler can skip the broadcast — the same idempotency contract as UpdateThreadStatus.
+func (s *Store) UpdateThreadAnchor(id string, req UpdateThreadAnchorRequest) (*Thread, bool, error) {
+	if _, err := uuid.Parse(id); err != nil {
+		return nil, false, ErrNotFound
+	}
+	s.mu.RLock()
+	workspaceID := s.state.WorkspaceID
+	db := s.db
+	s.mu.RUnlock()
+	return updateThreadAnchorPostgres(db, workspaceID, id, req)
+}
+
 func (s *Store) ReplyThread(id string, req ReplyThreadRequest, meta OperationMeta) (*Thread, *ThreadMessage, error) {
 	if _, err := uuid.Parse(id); err != nil {
 		return nil, nil, ErrNotFound
@@ -2363,13 +2377,20 @@ func cloneAgentEvent(event *AgentEvent) *AgentEvent {
 }
 
 func buildThreadAnchorFromRequest(req CreateThreadRequest) (ThreadAnchor, error) {
-	relativeStart := strings.TrimSpace(req.RelativeStart)
-	relativeEnd := strings.TrimSpace(req.RelativeEnd)
+	return buildThreadAnchor(req.Kind, req.RelativeStart, req.RelativeEnd, req.Excerpt)
+}
+
+// buildThreadAnchor is the single anchor validator shared by thread creation and re-anchoring, so the
+// two paths cannot drift: kind inference, the both-or-neither relative-position rule, and excerpt
+// truncation are defined exactly once.
+func buildThreadAnchor(kindRaw, relativeStartRaw, relativeEndRaw, excerptRaw string) (ThreadAnchor, error) {
+	relativeStart := strings.TrimSpace(relativeStartRaw)
+	relativeEnd := strings.TrimSpace(relativeEndRaw)
 	if (relativeStart == "") != (relativeEnd == "") {
 		return ThreadAnchor{}, errors.New("relativeStart and relativeEnd must be provided together")
 	}
-	excerpt := truncateText(strings.TrimSpace(req.Excerpt), 140)
-	kind := strings.TrimSpace(req.Kind)
+	excerpt := truncateText(strings.TrimSpace(excerptRaw), 140)
+	kind := strings.TrimSpace(kindRaw)
 	if kind == "" {
 		if relativeStart == "" {
 			kind = "document"

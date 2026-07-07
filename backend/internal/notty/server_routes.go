@@ -59,6 +59,7 @@ func (s *Server) Routes() http.Handler {
 		router.Post("/threads", s.handleCreateThread)
 		router.Get("/threads/{id}", s.handleThread)
 		router.Patch("/threads/{id}/status", s.handleUpdateThreadStatus)
+		router.Patch("/threads/{id}/anchor", s.handleUpdateThreadAnchor)
 		router.Post("/threads/{id}/messages", s.handleReplyThread)
 		router.Post("/presence", s.handlePresence)
 		router.Post("/agent-runs", s.handleStartAgentRun)

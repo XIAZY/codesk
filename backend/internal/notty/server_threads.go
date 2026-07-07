@@ -96,6 +96,34 @@ func (s *Server) handleUpdateThreadStatus(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{"thread": thread})
 }
 
+// handleUpdateThreadAnchor is PATCH /threads/{id}/anchor — re-anchor a thread (e.g. an orphan whose
+// original text was deleted) to a new position. AuthZ mirrors /status: human workspace members only,
+// so agent/daemon principals get 403. Idempotent no-ops return the unchanged thread and skip the
+// broadcast; a real change emits exactly one thread.updated.
+func (s *Server) handleUpdateThreadAnchor(w http.ResponseWriter, r *http.Request) {
+	if !s.requireHumanPrincipal(w, r) {
+		return
+	}
+	var req UpdateThreadAnchorRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	thread, changed, err := s.requestStore(r).UpdateThreadAnchor(chi.URLParam(r, "id"), req)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	if changed {
+		s.requestBroker(r).Publish(EventEnvelope{Type: "thread.updated", Data: thread})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"thread": thread})
+}
+
 func (s *Server) handleThread(w http.ResponseWriter, r *http.Request) {
 	thread, err := s.requestStore(r).GetThread(chi.URLParam(r, "id"))
 	if err != nil {
