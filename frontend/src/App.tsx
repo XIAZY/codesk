@@ -3001,6 +3001,9 @@ function RecentActivityPeek({
 
 function CollaboratorAvatars({ people, onClick }: { people: WorkspacePerson[]; onClick: () => void }) {
   const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
+  // Same honest-decay ruling as the People panel (Eva): the ring reflects personOnline, which
+  // decays on the presence freshness window, so a closed laptop drops the ring — never a stale
+  // "online". The toolbar only renders confirmed-online collaborators; +N below is neutral.
   const online = people.filter((p) => personOnline(p, now));
   if (!online.length) return null;
   return (
@@ -3048,6 +3051,9 @@ function PeoplePanel({
       </div>
       {rows.map(({ person, online }) => {
         const agent = person.kind === "agent" ? agentsById.get(person.id) : undefined;
+        // The online ring is driven by personOnline, which decays on the presence freshness window
+        // (like daemon liveness). A closed laptop drops the ring — we never show a stale "online".
+        // This honest-decay rule is Eva's ruling; keep it documented at every ring site.
         const avatar = (
           <div
             className={`avi ${person.kind === "agent" ? "agent" : "you"}${online ? " online" : ""}`}
