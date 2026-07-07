@@ -449,7 +449,7 @@ describe("App URL routing", () => {
     await waitFor(() => expect(window.location.pathname.startsWith("/w/team")).toBe(true));
   });
 
-  it("shows share-link controls only to workspace owners and admins", async () => {
+  it("shows invite generation only to owners/admins in Manage → Members & Invite", async () => {
     const user = userEvent.setup();
     localStorage.setItem("codesk.auth.token", "token");
     window.history.replaceState(null, "", "/w/team/d/doc_1");
@@ -457,8 +457,9 @@ describe("App URL routing", () => {
     render(<App />);
 
     await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_1"));
-    await user.click(screen.getByRole("button", { name: "Invite" }));
-
+    // Owner opens Manage (defaults to Members & Invite) and can generate an invite link.
+    await user.click(screen.getByRole("button", { name: "Manage / Settings" }));
+    await user.click(screen.getByRole("button", { name: "Generate invite link" }));
     expect(await screen.findByDisplayValue(`${window.location.origin}/invite/created321`)).toBeTruthy();
 
     cleanup();
@@ -467,7 +468,10 @@ describe("App URL routing", () => {
     render(<App />);
 
     await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_1"));
-    expect(screen.queryByRole("button", { name: "Invite" })).toBeNull();
+    // A plain member sees no invite generation, just the permission note.
+    await user.click(screen.getByRole("button", { name: "Manage / Settings" }));
+    expect(screen.queryByRole("button", { name: "Generate invite link" })).toBeNull();
+    expect(screen.getByText("Only workspace owners and admins can invite new members.")).toBeTruthy();
   });
 
   it("routes from backend account state after login from an invalid protected workspace URL", async () => {

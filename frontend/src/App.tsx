@@ -35,7 +35,7 @@ import { navigate, useRoute } from "./useRoute";
 import { useRootNamespace } from "./useRootNamespace";
 import { useDocumentSync } from "./useDocument";
 import { useWorkspace } from "./useWorkspace";
-import type { Account, ActivityEvent, Agent, Daemon, DocumentItem, ThreadItem, WorkspaceInvitePreview, WorkspaceSummary } from "./types";
+import type { Account, ActivityEvent, Agent, Daemon, DocumentItem, ThreadItem, UserItem, WorkspaceInvitePreview, WorkspaceSummary } from "./types";
 import { resolveRuntimeTiles, selectableRuntimeKinds, type RuntimeTile } from "./runtimes";
 import "./styles.css";
 
@@ -1256,7 +1256,7 @@ export function WorkspaceApp({
   });
   const rootDocuments = rootNamespace.documents;
   const [rightTab, setRightTab] = useState<"threads" | "activity" | "coworkers">("threads");
-  const [modal, setModal] = useState<"daemon" | "agent" | "rename" | "share" | "agent-detail" | "daemon-detail" | "manage" | null>(null);
+  const [modal, setModal] = useState<"daemon" | "agent" | "rename" | "agent-detail" | "daemon-detail" | "manage" | null>(null);
   // Default tab is Members & Invite (plan tab order). Integration protocol (Juan's
   // single-flip rule): A2 fills Members before integration, so nothing ships showing
   // a placeholder. If A2 slips out of the batch, flipping this default to "local-env"
@@ -1603,13 +1603,6 @@ export function WorkspaceApp({
             <span className={`chip sm ${connected ? "ok" : "warn"}`}>{connected ? "workspace live" : "workspace offline"}</span>
           </div>
           <div className="row gap-6">
-            {canInviteMembers ? (
-              <button className="btn sm ghost" type="button" onClick={() => setModal("share")} title="Invite people to this workspace">
-                <Icon name="share" />
-                Invite
-              </button>
-            ) : null}
-            <span className="divider-v" />
             <button
               className={`btn sm ${centerView === "agents" ? "selected" : ""}`}
               type="button"
@@ -1739,13 +1732,15 @@ export function WorkspaceApp({
       ) : null}
       {modal === "daemon" ? <CreateDaemonModal api={api} workspaceId={workspaceId} daemons={workspace.daemons} onClose={() => setModal(null)} onDone={() => void reload()} /> : null}
       {modal === "agent" ? <CreateAgentModal api={api} workspaceId={workspaceId} daemons={workspace.daemons} onClose={() => setModal(null)} onDone={() => { setModal(null); void reload(); }} /> : null}
-      {modal === "share" ? <ShareWorkspaceModal api={api} workspaceId={workspaceId} onClose={() => setModal(null)} /> : null}
       {modal === "agent-detail" && selectedAgentId ? <AgentDetailModal api={api} workspaceId={workspaceId} agentId={selectedAgentId} agents={workspace.agents} daemons={workspace.daemons} runs={workspace.agentRuns} onClose={() => setModal(null)} onChanged={() => void reload()} /> : null}
       {modal === "daemon-detail" && selectedDaemonId ? <DaemonDetailModal api={api} workspaceId={workspaceId} daemonId={selectedDaemonId} daemons={workspace.daemons} agents={workspace.agents} runs={workspace.agentRuns} onClose={() => setModal(null)} onChanged={() => { setModal(null); void reload(); }} /> : null}
       {modal === "manage" ? (
         <ManageModal
+          api={api}
+          workspaceId={workspaceId}
           workspace={workspace}
           activeTab={manageTab}
+          canInvite={canInviteMembers}
           onTabChange={setManageTab}
           onClose={() => setModal(null)}
           onRefresh={() => void reload()}
@@ -3279,64 +3274,6 @@ export function DocumentNotFound({ onBackToWorkspace }: { onBackToWorkspace: () 
   );
 }
 
-function ShareWorkspaceModal({ api, workspaceId, onClose }: { api: ApiClient; workspaceId: string; onClose: () => void }) {
-  const [link, setLink] = useState("");
-  const [expiresAt, setExpiresAt] = useState("");
-  const [error, setError] = useState("");
-  const [copied, setCopied] = useState(false);
-
-  useEffect(() => {
-    let disposed = false;
-    setError("");
-    setLink("");
-    setExpiresAt("");
-    api.createWorkspaceInvite(workspaceId)
-      .then((response) => {
-        if (disposed) {
-          return;
-        }
-        setLink(new URL(response.url, publicOrigin).toString());
-        setExpiresAt(response.invite.expiresAt);
-      })
-      .catch((err) => {
-        if (!disposed) {
-          setError(err instanceof Error ? err.message : String(err));
-        }
-      });
-    return () => {
-      disposed = true;
-    };
-  }, [api, workspaceId]);
-
-  const copy = async () => {
-    if (!link) {
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(link);
-      setCopied(true);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  return (
-    <Modal title="Share workspace" onClose={onClose}>
-      <div className="form-stack">
-        {error ? <p className="error-text">{error}</p> : null}
-        <label className="field">
-          <span className="lab">Invite link</span>
-          <input readOnly value={link || "Creating invite link..."} onFocus={(event) => event.currentTarget.select()} />
-        </label>
-        {expiresAt ? <p className="tiny muted">Expires {formatInviteDate(expiresAt)}</p> : null}
-        <button className="btn accent full" type="button" onClick={() => void copy()} disabled={!link}>
-          {copied ? "Copied" : "Copy invite link"}
-        </button>
-      </div>
-    </Modal>
-  );
-}
-
 export type ManageTab = "members" | "agents" | "local-env" | "workspace" | "danger";
 
 export const MANAGE_TABS: { id: ManageTab; label: string; danger?: boolean }[] = [
@@ -3346,6 +3283,104 @@ export const MANAGE_TABS: { id: ManageTab; label: string; danger?: boolean }[] =
   { id: "workspace", label: "Workspace settings" },
   { id: "danger", label: "Danger zone", danger: true },
 ];
+
+// Members & Invite tab (plan §4.2): the workspace-wide member list plus invite-link
+// generation, migrated out of the toolbar's Share modal into Manage. The right-rail
+// People panel is unchanged (#19 governs its display scope, not where management lives).
+export function MembersAndInvite({
+  api,
+  workspaceId,
+  users,
+  canInvite,
+}: {
+  api: ApiClient;
+  workspaceId: string;
+  users: UserItem[];
+  canInvite: boolean;
+}) {
+  const [link, setLink] = useState("");
+  const [expiresAt, setExpiresAt] = useState("");
+  const [inviteError, setInviteError] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const generate = async () => {
+    setCreating(true);
+    setInviteError("");
+    setCopied(false);
+    try {
+      const response = await api.createWorkspaceInvite(workspaceId);
+      setLink(new URL(response.url, publicOrigin).toString());
+      setExpiresAt(response.invite.expiresAt);
+    } catch (err) {
+      setInviteError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const copy = async () => {
+    if (!link) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopied(true);
+    } catch (err) {
+      setInviteError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const members = users.filter((user) => user.kind !== "agent");
+
+  return (
+    <div className="manage-panel">
+      <div className="manage-panel-head">
+        <span className="display management-title">Members &amp; Invite</span>
+        <span className="chip">{members.length} {members.length === 1 ? "member" : "members"}</span>
+      </div>
+
+      <div className="member-list">
+        {members.map((user) => (
+          <div className="member-row" key={user.id}>
+            <div className="avi sm you">{initials(user.handle || user.name)}</div>
+            <div className="col gap-0 min-0">
+              <b className="small truncate">{user.name || `@${user.handle}`}</b>
+              <span className="tiny muted truncate">@{user.handle}</span>
+            </div>
+            <span className="chip sm member-role">{user.role || "Member"}</span>
+          </div>
+        ))}
+        {!members.length ? <p className="tiny muted">No members yet.</p> : null}
+      </div>
+
+      <div className="invite-block">
+        <div className="lab"><span className="label">Invite by link</span></div>
+        {canInvite ? (
+          <>
+            {inviteError ? <p className="error-text">{inviteError}</p> : null}
+            {link ? (
+              <>
+                <input className="input" readOnly value={link} onFocus={(event) => event.currentTarget.select()} />
+                {expiresAt ? <p className="tiny muted">Expires {formatInviteDate(expiresAt)}</p> : null}
+                <div className="row gap-8">
+                  <button className="btn accent" type="button" onClick={() => void copy()}>{copied ? "Copied" : "Copy link"}</button>
+                  <button className="btn ghost" type="button" onClick={() => void generate()} disabled={creating}>Regenerate</button>
+                </div>
+              </>
+            ) : (
+              <button className="btn accent" type="button" onClick={() => void generate()} disabled={creating}>
+                {creating ? "Generating…" : "Generate invite link"}
+              </button>
+            )}
+          </>
+        ) : (
+          <p className="tiny muted">Only workspace owners and admins can invite new members.</p>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function ManagePlaceholder({ label }: { label: string }) {
   return (
@@ -3363,16 +3398,22 @@ function ManagePlaceholder({ label }: { label: string }) {
 // Low-frequency workspace management, pulled out of the toolbar and right rail into a single
 // container (plan §4.2). Local environment holds what used to be the "Daemons" center view.
 export function ManageModal({
+  api,
+  workspaceId,
   workspace,
   activeTab,
+  canInvite,
   onTabChange,
   onClose,
   onRefresh,
   onNewDaemon,
   onDaemon,
 }: {
+  api: ApiClient;
+  workspaceId: string;
   workspace: ReturnType<typeof useWorkspace>["workspace"];
   activeTab: ManageTab;
+  canInvite: boolean;
   onTabChange: (tab: ManageTab) => void;
   onClose: () => void;
   onRefresh: () => void;
@@ -3426,6 +3467,8 @@ export function ManageModal({
           <div className="manage-content">
             {activeTab === "local-env" ? (
               <DaemonsManagement workspace={workspace} onRefresh={onRefresh} onNew={onNewDaemon} onDaemon={onDaemon} />
+            ) : activeTab === "members" ? (
+              <MembersAndInvite api={api} workspaceId={workspaceId} users={workspace.users} canInvite={canInvite} />
             ) : (
               <ManagePlaceholder label={label} />
             )}

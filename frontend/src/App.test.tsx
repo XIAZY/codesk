@@ -374,6 +374,9 @@ describe("CreateDaemonModal install status", () => {
 
 describe("ManageModal", () => {
   const baseProps = {
+    api: {} as never,
+    workspaceId: "ws",
+    canInvite: true,
     onTabChange: vi.fn(),
     onClose: vi.fn(),
     onRefresh: vi.fn(),
@@ -405,10 +408,36 @@ describe("ManageModal", () => {
 
   it("shows a coming-soon placeholder for tabs that are not built yet", () => {
     const workspace = { ...emptyWorkspace(), workspaceId: "ws" };
-    render(<ManageModal {...baseProps} workspace={workspace as never} activeTab="members" />);
-    expect(screen.getByText("Members & Invite — coming soon.")).toBeTruthy();
+    render(<ManageModal {...baseProps} workspace={workspace as never} activeTab="workspace" />);
+    expect(screen.getByText("Workspace settings — coming soon.")).toBeTruthy();
     // The Local environment surface must NOT render on a different tab.
     expect(screen.queryByText("Local environments")).toBeNull();
+  });
+
+  it("lists workspace members and offers invite generation on the Members tab", () => {
+    const workspace = {
+      ...emptyWorkspace(),
+      workspaceId: "ws",
+      users: [
+        { id: "u1", handle: "ada", name: "Ada Lovelace", role: "Owner", kind: "human", status: "active", updatedAt: "now" },
+        { id: "u2", handle: "grace", name: "Grace Hopper", role: "Member", kind: "human", status: "active", updatedAt: "now" },
+        { id: "a1", handle: "codex", name: "Codex", role: "Agent", kind: "agent", status: "active", updatedAt: "now" },
+      ],
+    };
+    render(<ManageModal {...baseProps} workspace={workspace as never} activeTab="members" />);
+    // Human members are listed; the agent is not (agents live in the Agents tab).
+    expect(screen.getByText("Ada Lovelace")).toBeTruthy();
+    expect(screen.getByText("Grace Hopper")).toBeTruthy();
+    expect(screen.queryByText("Codex")).toBeNull();
+    // Owners/admins see invite generation.
+    expect(screen.getByRole("button", { name: "Generate invite link" })).toBeTruthy();
+  });
+
+  it("hides invite generation from members without permission", () => {
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws" };
+    render(<ManageModal {...baseProps} canInvite={false} workspace={workspace as never} activeTab="members" />);
+    expect(screen.queryByRole("button", { name: "Generate invite link" })).toBeNull();
+    expect(screen.getByText("Only workspace owners and admins can invite new members.")).toBeTruthy();
   });
 });
 
