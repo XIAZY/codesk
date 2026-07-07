@@ -1586,6 +1586,7 @@ export function WorkspaceApp({
             <span className={`chip sm ${connected ? "ok" : "warn"}`}>{connected ? "workspace live" : "workspace offline"}</span>
           </div>
           <div className="row gap-6">
+            <CollaboratorAvatars people={workspacePeopleList} onClick={() => setRightTab("coworkers")} />
             {canInviteMembers ? (
               <button className="btn sm ghost" type="button" onClick={() => setModal("share")} title="Invite people to this workspace">
                 <Icon name="share" />
@@ -2448,7 +2449,24 @@ function ThreadsPanel({
     );
   }
 
+  const [statusBusy, setStatusBusy] = useState(false);
+  const [statusError, setStatusError] = useState("");
+  const toggleStatus = async (thread: ThreadItem) => {
+    const next = thread.status === "resolved" ? "open" : "resolved";
+    setStatusBusy(true);
+    setStatusError("");
+    try {
+      await api.updateThreadStatus(workspaceId, thread.id, next as "open" | "resolved");
+      onReply();
+    } catch (err) {
+      setStatusError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setStatusBusy(false);
+    }
+  };
+
   if (selected) {
+    const selectedResolved = selected.status === "resolved";
     return (
       <div className="tdetail full">
         <div className="tdetail-head">
@@ -2459,6 +2477,10 @@ function ThreadsPanel({
               </button>
               <b>Thread</b>
               <span className="chip sm">{threadReplyLabel(selected)}</span>
+              <span className={`thread-badge ${selectedResolved ? "resolved" : "open"}`}>
+                <span className="thread-badge-dot" />
+                {selectedResolved ? "Resolved" : "Open"}
+              </span>
             </div>
             <div className="quoted-range">
               <div className="tiny mono muted">{selected.anchor.kind === "document" ? "document thread" : "anchored range"}</div>
@@ -2469,8 +2491,17 @@ function ThreadsPanel({
                 </button>
               ) : null}
             </div>
+            {statusError ? <span className="tiny" style={{ color: "var(--err)" }}>{statusError}</span> : null}
           </div>
-          <button className="btn ghost icon sm" type="button"><Icon name="more" /></button>
+          <button
+            className="btn ghost sm"
+            type="button"
+            disabled={statusBusy}
+            onClick={() => toggleStatus(selected)}
+            aria-label={selectedResolved ? "Reopen thread" : "Resolve thread"}
+          >
+            {statusBusy ? "…" : selectedResolved ? "Reopen" : "Resolve"}
+          </button>
         </div>
         <div className="tdetail-body">
           {selected.messages.map((message) => (
@@ -2504,33 +2535,41 @@ function ThreadsPanel({
         <button className="btn ghost sm icon" type="button"><Icon name="plus" /></button>
       </div>
       <div className="tlist">
-        {threads.map((thread) => (
-          <button
-            key={thread.id}
-            className={thread.id === selectedThreadId ? "titem selected" : "titem"}
-            onClick={() => onSelectThread(thread.id)}
-          >
-            <Icon name="thread" />
-            <div className="col gap-4 min-0">
-              <div className="between gap-8">
-                <span className="chip code sm truncate">{thread.anchor.excerpt || thread.title}</span>
-                <span className="tiny muted">{shortTime(thread.updatedAt)}</span>
+        {threads.map((thread) => {
+          const resolved = thread.status === "resolved";
+          return (
+            <button
+              key={thread.id}
+              className={`titem${thread.id === selectedThreadId ? " selected" : ""}${resolved ? " resolved" : ""}`}
+              onClick={() => onSelectThread(thread.id)}
+            >
+              <Icon name="thread" />
+              <div className="col gap-4 min-0">
+                <div className="between gap-8">
+                  <span className="chip code sm truncate">{thread.anchor.excerpt || thread.title}</span>
+                  <span className="tiny muted">{shortTime(thread.updatedAt)}</span>
+                </div>
+                <div className="row gap-6 min-0">
+                  <div className={`avi sm ${thread.createdByType === "agent" ? "agent" : "you"}`}>{initials(thread.createdByHandle || thread.createdByName || "You")}</div>
+                  <span className="small truncate">
+                    <b>{thread.createdByHandle ? `@${thread.createdByHandle}` : thread.createdByName || "Someone"}</b>{" "}
+                    {thread.messages[0]?.body || thread.title}
+                  </span>
+                </div>
+                <div className="row gap-4 tiny muted">
+                  <span>{threadReplyLabel(thread)}</span>
+                  <span>·</span>
+                  <span>{thread.anchor.kind === "document" ? "document" : "anchored"}</span>
+                  <span>·</span>
+                  <span className={`thread-badge ${resolved ? "resolved" : "open"}`}>
+                    <span className="thread-badge-dot" />
+                    {resolved ? "Resolved" : "Open"}
+                  </span>
+                </div>
               </div>
-              <div className="row gap-6 min-0">
-                <div className={`avi sm ${thread.createdByType === "agent" ? "agent" : "you"}`}>{initials(thread.createdByHandle || thread.createdByName || "You")}</div>
-                <span className="small truncate">
-                  <b>{thread.createdByHandle ? `@${thread.createdByHandle}` : thread.createdByName || "Someone"}</b>{" "}
-                  {thread.messages[0]?.body || thread.title}
-                </span>
-              </div>
-              <div className="row gap-4 tiny muted">
-                <span>{threadReplyLabel(thread)}</span>
-                <span>·</span>
-                <span>{thread.anchor.kind === "document" ? "document" : "anchored"}</span>
-              </div>
-            </div>
-          </button>
-        ))}
+            </button>
+          );
+        })}
       </div>
     </div>
   );
@@ -2596,11 +2635,24 @@ function ActivityPanel({
   );
 }
 
+function CollaboratorAvatars({ people, onClick }: { people: WorkspacePerson[]; onClick: () => void }) {
+  const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
+  const online = people.filter((p) => personOnline(p, now));
+  if (!online.length) return null;
+  return (
+    <button className="collaborator-avatars" type="button" onClick={onClick} title={`${online.length} online`}>
+      {online.slice(0, 5).map((p) => (
+        <div key={p.id} className={`avi sm ${p.kind === "agent" ? "agent" : "you"} online`}>
+          {initials(p.handle || p.name)}
+        </div>
+      ))}
+      {online.length > 5 ? <span className="avi sm you online">+{online.length - 5}</span> : null}
+    </button>
+  );
+}
+
 const personRoleTag = { you: "You", agent: "Agent", member: "Member" } as const;
 
-// Everyone in the workspace — humans + agents. Soft avatars, role tag, and a
-// workspace-level online ring driven by real presence that decays on a 12s
-// now-ticker (like daemon liveness) so it never shows a stale "online".
 function PeoplePanel({
   people,
   agents,
