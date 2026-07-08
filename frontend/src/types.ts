@@ -127,6 +127,10 @@ export type ThreadAnchor = {
   relativeStart?: string;
   relativeEnd?: string;
   excerpt?: string;
+  // Opaque base64 Y.js state vector captured when the anchor was created (or last
+  // re-anchored). Used by orphan detection to count only the ORIGINAL characters
+  // and ignore text inserted after anchor time. Absent on legacy anchors.
+  stateAtAnchor?: string;
 };
 
 export type ThreadMessage = {

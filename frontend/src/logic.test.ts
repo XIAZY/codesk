@@ -111,6 +111,241 @@ describe("Yjs editor helpers", () => {
 
     expect(anchor.resolved).toBe(false);
   });
+
+  it("pattern 1: delete exact anchored range → orphaned (collapsed)", () => {
+    const doc1 = new Y.Doc(); doc1.clientID = 1;
+    const t1 = doc1.getText("content");
+    t1.insert(0, "first line\nhello world here\nthird line");
+    const relativeStart = encodeRelativeAnchor(t1, 11);
+    const relativeEnd = encodeRelativeAnchor(t1, 22);
+
+    const doc2 = new Y.Doc(); doc2.clientID = 2;
+    Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
+    doc2.getText("content").delete(11, 11);
+    Y.applyUpdate(doc1, Y.encodeStateAsUpdate(doc2));
+
+    const result = resolveThreadAnchorLive(
+      { kind: "text-range", relativeStart, relativeEnd, excerpt: "hello world" },
+      doc1, t1.toString(),
+    );
+    expect(result.resolved).toBe(false);
+  });
+
+  it("pattern 2: delete paragraph containing range → orphaned (collapsed)", () => {
+    const doc1 = new Y.Doc(); doc1.clientID = 1;
+    const t1 = doc1.getText("content");
+    t1.insert(0, "first line\nhello world here\nthird line");
+    const relativeStart = encodeRelativeAnchor(t1, 11);
+    const relativeEnd = encodeRelativeAnchor(t1, 22);
+
+    const doc2 = new Y.Doc(); doc2.clientID = 2;
+    Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
+    doc2.getText("content").delete(10, 18);
+    Y.applyUpdate(doc1, Y.encodeStateAsUpdate(doc2));
+
+    const result = resolveThreadAnchorLive(
+      { kind: "text-range", relativeStart, relativeEnd, excerpt: "hello world" },
+      doc1, t1.toString(),
+    );
+    expect(result.resolved).toBe(false);
+  });
+
+  it("pattern 4: select-all and type new content → orphaned (collapsed)", () => {
+    const doc1 = new Y.Doc(); doc1.clientID = 1;
+    const t1 = doc1.getText("content");
+    t1.insert(0, "first line\nhello world here\nthird line");
+    const relativeStart = encodeRelativeAnchor(t1, 11);
+    const relativeEnd = encodeRelativeAnchor(t1, 22);
+
+    const doc2 = new Y.Doc(); doc2.clientID = 2;
+    Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
+    const t2 = doc2.getText("content");
+    t2.delete(0, t2.length);
+    t2.insert(0, "totally new document content");
+    Y.applyUpdate(doc1, Y.encodeStateAsUpdate(doc2));
+
+    const result = resolveThreadAnchorLive(
+      { kind: "text-range", relativeStart, relativeEnd, excerpt: "hello world" },
+      doc1, t1.toString(),
+    );
+    expect(result.resolved).toBe(false);
+  });
+
+  it("pattern 5: delete range and insert new text at same position → orphaned (drifted)", () => {
+    const doc1 = new Y.Doc(); doc1.clientID = 1;
+    const t1 = doc1.getText("content");
+    t1.insert(0, "first line\nhello world here\nthird line");
+    const relativeStart = encodeRelativeAnchor(t1, 11);
+    const relativeEnd = encodeRelativeAnchor(t1, 22);
+
+    const doc2 = new Y.Doc(); doc2.clientID = 2;
+    Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
+    const t2 = doc2.getText("content");
+    t2.delete(11, 11);
+    t2.insert(11, "replaced text");
+    Y.applyUpdate(doc1, Y.encodeStateAsUpdate(doc2));
+
+    const result = resolveThreadAnchorLive(
+      { kind: "text-range", relativeStart, relativeEnd, excerpt: "hello world" },
+      doc1, t1.toString(),
+    );
+    expect(result.resolved).toBe(false);
+  });
+
+  it("pattern 6a: typo fix inside range → still anchored", () => {
+    const doc1 = new Y.Doc(); doc1.clientID = 1;
+    const t1 = doc1.getText("content");
+    t1.insert(0, "first line\nhello world here\nthird line");
+    const relativeStart = encodeRelativeAnchor(t1, 11);
+    const relativeEnd = encodeRelativeAnchor(t1, 22);
+
+    const doc2 = new Y.Doc(); doc2.clientID = 2;
+    Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
+    const t2 = doc2.getText("content");
+    t2.delete(11, 1);
+    t2.insert(11, "H");
+    Y.applyUpdate(doc1, Y.encodeStateAsUpdate(doc2));
+
+    const result = resolveThreadAnchorLive(
+      { kind: "text-range", relativeStart, relativeEnd, excerpt: "hello world" },
+      doc1, t1.toString(),
+    );
+    expect(result.resolved).toBe(true);
+  });
+
+  it("pattern 6b: append at end of range → still anchored", () => {
+    const doc1 = new Y.Doc(); doc1.clientID = 1;
+    const t1 = doc1.getText("content");
+    t1.insert(0, "first line\nhello world here\nthird line");
+    const relativeStart = encodeRelativeAnchor(t1, 11);
+    const relativeEnd = encodeRelativeAnchor(t1, 22);
+
+    const doc2 = new Y.Doc(); doc2.clientID = 2;
+    Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
+    doc2.getText("content").insert(22, "!");
+    Y.applyUpdate(doc1, Y.encodeStateAsUpdate(doc2));
+
+    const result = resolveThreadAnchorLive(
+      { kind: "text-range", relativeStart, relativeEnd, excerpt: "hello world" },
+      doc1, t1.toString(),
+    );
+    expect(result.resolved).toBe(true);
+  });
+
+  it("pattern 6c: insert at start of range → still anchored", () => {
+    const doc1 = new Y.Doc(); doc1.clientID = 1;
+    const t1 = doc1.getText("content");
+    t1.insert(0, "first line\nhello world here\nthird line");
+    const relativeStart = encodeRelativeAnchor(t1, 11);
+    const relativeEnd = encodeRelativeAnchor(t1, 22);
+
+    const doc2 = new Y.Doc(); doc2.clientID = 2;
+    Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
+    doc2.getText("content").insert(11, "> ");
+    Y.applyUpdate(doc1, Y.encodeStateAsUpdate(doc2));
+
+    const result = resolveThreadAnchorLive(
+      { kind: "text-range", relativeStart, relativeEnd, excerpt: "hello world" },
+      doc1, t1.toString(),
+    );
+    expect(result.resolved).toBe(true);
+  });
+
+  it("pattern 6d: insert punctuation mid-range (comma) → still anchored", () => {
+    const doc1 = new Y.Doc(); doc1.clientID = 1;
+    const t1 = doc1.getText("content");
+    t1.insert(0, "first line\nhello world here\nthird line");
+    const relativeStart = encodeRelativeAnchor(t1, 11);
+    const relativeEnd = encodeRelativeAnchor(t1, 22);
+
+    const doc2 = new Y.Doc(); doc2.clientID = 2;
+    Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
+    doc2.getText("content").insert(16, ",");
+    Y.applyUpdate(doc1, Y.encodeStateAsUpdate(doc2));
+
+    const result = resolveThreadAnchorLive(
+      { kind: "text-range", relativeStart, relativeEnd, excerpt: "hello world" },
+      doc1, t1.toString(),
+    );
+    expect(result.resolved).toBe(true);
+  });
+
+  it("pattern 6e: insert word mid-range → still anchored", () => {
+    const doc1 = new Y.Doc(); doc1.clientID = 1;
+    const t1 = doc1.getText("content");
+    t1.insert(0, "first line\nhello world here\nthird line");
+    const relativeStart = encodeRelativeAnchor(t1, 11);
+    const relativeEnd = encodeRelativeAnchor(t1, 22);
+
+    const doc2 = new Y.Doc(); doc2.clientID = 2;
+    Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
+    doc2.getText("content").insert(17, "beautiful ");
+    Y.applyUpdate(doc1, Y.encodeStateAsUpdate(doc2));
+
+    const result = resolveThreadAnchorLive(
+      { kind: "text-range", relativeStart, relativeEnd, excerpt: "hello world" },
+      doc1, t1.toString(),
+    );
+    expect(result.resolved).toBe(true);
+  });
+
+  it("adversarial: punctuation-glued excerpt token still matches after edit", () => {
+    const doc1 = new Y.Doc(); doc1.clientID = 1;
+    const t1 = doc1.getText("content");
+    t1.insert(0, "the end.");
+    const relativeStart = encodeRelativeAnchor(t1, 0);
+    const relativeEnd = encodeRelativeAnchor(t1, 8);
+
+    const doc2 = new Y.Doc(); doc2.clientID = 2;
+    Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
+    const t2 = doc2.getText("content");
+    t2.delete(7, 1);
+    Y.applyUpdate(doc1, Y.encodeStateAsUpdate(doc2));
+
+    const result = resolveThreadAnchorLive(
+      { kind: "text-range", relativeStart, relativeEnd, excerpt: "the end." },
+      doc1, t1.toString(),
+    );
+    expect(result.resolved).toBe(true);
+  });
+
+  it("adversarial: short excerpt token does not false-match unrelated text", () => {
+    const doc1 = new Y.Doc(); doc1.clientID = 1;
+    const t1 = doc1.getText("content");
+    t1.insert(0, "a cat sat on the mat");
+    const relativeStart = encodeRelativeAnchor(t1, 0);
+    const relativeEnd = encodeRelativeAnchor(t1, 5);
+
+    const doc2 = new Y.Doc(); doc2.clientID = 2;
+    Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
+    const t2 = doc2.getText("content");
+    t2.delete(0, 5);
+    t2.insert(0, "irrelevant paragraph");
+    Y.applyUpdate(doc1, Y.encodeStateAsUpdate(doc2));
+
+    const result = resolveThreadAnchorLive(
+      { kind: "text-range", relativeStart, relativeEnd, excerpt: "a cat" },
+      doc1, t1.toString(),
+    );
+    expect(result.resolved).toBe(false);
+  });
+
+  it("collapsed case shows stored excerpt, not forward-slice", () => {
+    const doc = new Y.Doc();
+    const text = doc.getText("content");
+    doc.transact(() => text.insert(0, "first line\nhello world here\nthird line"));
+    const relativeStart = encodeRelativeAnchor(text, 11);
+    const relativeEnd = encodeRelativeAnchor(text, 22);
+
+    doc.transact(() => text.delete(11, 11));
+
+    const result = resolveThreadAnchorLive(
+      { kind: "text-range", relativeStart, relativeEnd, excerpt: "hello world" },
+      doc, text.toString(),
+    );
+    expect(result.resolved).toBe(false);
+    expect(result.excerpt).toBe("hello world");
+  });
 });
 
 describe("randomWorkspaceName", () => {

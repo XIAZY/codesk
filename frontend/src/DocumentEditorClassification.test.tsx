@@ -157,4 +157,34 @@ describe("DocumentEditor anchor-info classification effect", () => {
     expect(info.t1.orphaned).toBe(false);
     expect(info.t1.line).toBeGreaterThanOrEqual(1);
   });
+
+  it("re-classifies live when a content edit deletes an anchor's text (observe-trigger, #40)", async () => {
+    const doc = new Y.Doc();
+    const text = doc.getText("content");
+    doc.transact(() => text.insert(0, "hello world\nsecond line"));
+
+    const thread = makeThread(doc, "t1", "hello world\nsecond line", 0, 5); // anchor on "hello"
+
+    mockYdoc = doc;
+    mockYtext = text;
+    mockReady = true;
+
+    const onInfo = vi.fn();
+    renderEditor([thread], onInfo);
+
+    // Load-time classification: the anchored text is present → anchored.
+    await waitFor(() => expect(onInfo).toHaveBeenCalled());
+    const initial = onInfo.mock.calls[onInfo.mock.calls.length - 1][0] as Record<string, { orphaned: boolean; line: number }>;
+    expect(initial.t1.orphaned).toBe(false);
+
+    // Live in-place edit: Y.js mutates ytext, so the effect deps do not change.
+    // Only the observe-trigger re-runs classification. Deleting "hello world"
+    // removes the anchored text → the anchor must flip to orphaned live.
+    doc.transact(() => text.delete(0, 11));
+
+    await waitFor(() => {
+      const latest = onInfo.mock.calls[onInfo.mock.calls.length - 1][0] as Record<string, { orphaned: boolean; line: number }>;
+      expect(latest.t1.orphaned).toBe(true);
+    });
+  });
 });

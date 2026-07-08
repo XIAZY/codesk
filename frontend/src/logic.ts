@@ -838,6 +838,95 @@ export function reduceWorkspaceEvent(state: WorkspaceState, event: WorkspaceEven
   return state;
 }
 
+// Minimal view of the internal Y.js item chain we traverse for orphan detection.
+// Y.js keeps deleted characters as walkable tombstoned structs in a live doc, so
+// the chain is the source of truth for character identity.
+type YChainItem = {
+  id: { client: number; clock: number };
+  length: number;
+  deleted: boolean;
+  countable: boolean;
+  right: YChainItem | null;
+};
+
+function decodeStateVectorSafe(value: string | undefined | null): Map<number, number> | null {
+  if (!value) return null;
+  try {
+    return Y.decodeStateVector(base64ToUint8Array(value));
+  } catch {
+    return null;
+  }
+}
+
+// First-principle orphan detection for anchors that carry a creation-time state
+// vector: an anchor is alive iff any of the ORIGINAL characters the user anchored
+// still exist un-tombstoned. We walk the Y.js item chain between the two relative
+// positions' embedded item IDs — assoc-immune, since resolved indices shift with
+// association params but item IDs do not — count live original characters, and
+// treat zero survivors as orphaned. `sv` (the state vector captured at anchor
+// creation) filters out characters inserted AFTER anchor time, so "surviving
+// ORIGINAL" is exact even for the insert-inside-then-delete-originals edit order.
+function countSurvivingOriginalChars(
+  type: Y.AbstractType<unknown>,
+  startRP: Y.RelativePosition,
+  endRP: Y.RelativePosition,
+  sv: Map<number, number>,
+): number {
+  const startId = startRP.item;
+  const endId = endRP.item;
+  const startInclusive = (startRP.assoc ?? 0) >= 0; // startId's char is anchored, vs the char after it
+  const endInclusive = (endRP.assoc ?? 0) < 0;      // endId's char is anchored, vs an exclusive upper bound
+
+  const isOriginal = (client: number, clock: number) => {
+    const frontier = sv.get(client);
+    return frontier !== undefined && clock < frontier;
+  };
+
+  let surviving = 0;
+  let inRange = startId === null; // null start => the position is at the type start
+  let item = (type as unknown as { _start: YChainItem | null })._start;
+
+  while (item) {
+    const { client, clock } = item.id;
+    const len = item.length;
+    const coversStart = startId !== null && client === startId.client && clock <= startId.clock && startId.clock < clock + len;
+    const coversEnd = endId !== null && client === endId.client && clock <= endId.clock && endId.clock < clock + len;
+
+    if (coversStart) inRange = true;
+
+    if (inRange && !item.deleted && item.countable) {
+      let lo = 0;
+      let hi = len;
+      if (coversStart) lo = startId!.clock - clock + (startInclusive ? 0 : 1);
+      if (coversEnd) hi = endId!.clock - clock + (endInclusive ? 1 : 0);
+      if (hi > lo && isOriginal(client, clock)) {
+        surviving += hi - lo;
+      }
+    }
+
+    if (coversEnd) break;
+    item = item.right;
+  }
+
+  return surviving;
+}
+
+// Legacy fallback for anchors created before stateAtAnchor existed. Orphaned when
+// the resolved span collapsed (the original range is gone) or drifted to text that
+// shares no token with the stored excerpt. Public-API only (no Y.js internals).
+// Kept as the documented retreat path from the identity walk.
+function orphanedByTokenOverlap(excerpt: string, resolvedText: string, start: number, end: number): boolean {
+  const excerptNorm = excerpt.trim().toLowerCase();
+  const collapsed = start === end && excerptNorm.length > 0;
+  const resolvedNorm = resolvedText.trim().toLowerCase();
+  const excerptTokens = new Set(excerptNorm.split(/[^a-z0-9]+/).filter(Boolean));
+  const resolvedTokens = new Set(resolvedNorm.split(/[^a-z0-9]+/).filter(Boolean));
+  const hasOverlap = excerptTokens.size > 0 && resolvedTokens.size > 0
+    && [...excerptTokens].some((token) => resolvedTokens.has(token));
+  const drifted = !collapsed && start !== end && excerptTokens.size > 0 && resolvedTokens.size > 0 && !hasOverlap;
+  return collapsed || drifted;
+}
+
 export function resolveThreadAnchorLive(anchor: ThreadAnchor, ydoc: Y.Doc | null, content: string) {
   const fallback: ResolvedThreadAnchor = {
     ...anchor,
@@ -851,13 +940,29 @@ export function resolveThreadAnchorLive(anchor: ThreadAnchor, ydoc: Y.Doc | null
     return fallback;
   }
   try {
-    const startPosition = Y.createAbsolutePositionFromRelativePosition(decodeRelativePosition(anchor.relativeStart), ydoc);
-    const endPosition = Y.createAbsolutePositionFromRelativePosition(decodeRelativePosition(anchor.relativeEnd), ydoc);
+    const startRP = decodeRelativePosition(anchor.relativeStart);
+    const endRP = decodeRelativePosition(anchor.relativeEnd);
+    const startPosition = Y.createAbsolutePositionFromRelativePosition(startRP, ydoc);
+    const endPosition = Y.createAbsolutePositionFromRelativePosition(endRP, ydoc);
     if (!startPosition || !endPosition) {
       return fallback;
     }
     const start = Math.max(0, startPosition.index);
     const end = Math.max(start, endPosition.index);
+    // Hybrid criterion — ONE branch point, off state-vector presence:
+    //   • stateAtAnchor present  -> item-identity walk (correct by construction:
+    //     alive iff an ORIGINAL character survives un-tombstoned).
+    //   • absent (legacy anchor) -> token-overlap fallback (public-API, no Y.js
+    //     internals). Weaker on delete-then-retype-identical, but it fixes the
+    //     delete-then-reflow bug for threads created before the field existed; the
+    //     population migrates to identity as threads are created / re-anchored.
+    // The token-overlap path is also the documented retreat if a yjs upgrade
+    // changes item-chain / tombstone behavior. The harness pins both columns.
+    const hadExtent = (anchor.excerpt || "").trim().length > 0;
+    const sv = decodeStateVectorSafe(anchor.stateAtAnchor);
+    const orphaned = sv
+      ? hadExtent && countSurvivingOriginalChars(startPosition.type, startRP, endRP, sv) === 0
+      : orphanedByTokenOverlap(anchor.excerpt || "", content.slice(start, end), start, end);
     const lineStarts = lineStartsForText(content);
     const previewEnd = end === start ? Math.min(content.length, start + 80) : end;
     return {
@@ -865,8 +970,11 @@ export function resolveThreadAnchorLive(anchor: ThreadAnchor, ydoc: Y.Doc | null
       start,
       end,
       line: lineForOffset(lineStarts, start),
-      excerpt: (content.slice(start, previewEnd).trim() || anchor.excerpt || "").slice(0, 140),
-      resolved: true,
+      // Honest preview: an orphaned anchor quotes the STORED original text (the
+      // characters that were lost), never a forward-slice of whatever lives at the
+      // collapse point now.
+      excerpt: (orphaned ? anchor.excerpt || "" : content.slice(start, previewEnd).trim() || anchor.excerpt || "").slice(0, 140),
+      resolved: !orphaned,
     };
   } catch {
     return fallback;

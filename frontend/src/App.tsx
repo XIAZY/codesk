@@ -2636,6 +2636,9 @@ export function DocumentEditor({
         relativeStart: selection.relativeStart,
         relativeEnd: selection.relativeEnd,
         excerpt: selection.excerpt.slice(0, 140),
+        // Fresh state vector captured at the re-anchor pick — a repaired anchor's
+        // "original characters" date from the repair, not the thread's birth.
+        stateAtAnchor: selection.stateAtAnchor,
       });
       onReanchorComplete();
     } catch (err) {
@@ -2658,17 +2661,26 @@ export function DocumentEditor({
   const lastAnchorInfoRef = useRef("");
   useEffect(() => {
     if (!ydoc || !ytext || !ready) return;
-    const content = ytext.toString();
-    const info: Record<string, { orphaned: boolean; line: number }> = {};
-    for (const thread of threads) {
-      const resolved = resolveThreadAnchorLive(thread.anchor, ydoc, content);
-      info[thread.id] = { orphaned: !resolved.resolved && thread.anchor.kind !== "document", line: resolved.line };
-    }
-    const serialized = JSON.stringify(info);
-    if (serialized !== lastAnchorInfoRef.current) {
-      lastAnchorInfoRef.current = serialized;
-      onThreadAnchorInfo(info);
-    }
+    // Y.js mutates ytext in place, so a live content edit does not change the
+    // effect's dependencies. Recompute on every ytext change so a deletion that
+    // orphans an anchor (or an edit that revives one) re-classifies live, not
+    // only on reload. #40.
+    const recompute = () => {
+      const content = ytext.toString();
+      const info: Record<string, { orphaned: boolean; line: number }> = {};
+      for (const thread of threads) {
+        const resolved = resolveThreadAnchorLive(thread.anchor, ydoc, content);
+        info[thread.id] = { orphaned: !resolved.resolved && thread.anchor.kind !== "document", line: resolved.line };
+      }
+      const serialized = JSON.stringify(info);
+      if (serialized !== lastAnchorInfoRef.current) {
+        lastAnchorInfoRef.current = serialized;
+        onThreadAnchorInfo(info);
+      }
+    };
+    recompute();
+    ytext.observe(recompute);
+    return () => ytext.unobserve(recompute);
   }, [ydoc, ytext, ready, threads, onThreadAnchorInfo]);
 
   useEffect(() => {
@@ -2698,6 +2710,7 @@ export function DocumentEditor({
       relativeEnd: selection.relativeEnd,
       kind: "text-range",
       excerpt: selection.excerpt.slice(0, 140),
+      stateAtAnchor: selection.stateAtAnchor,
     });
     setThreadBody("");
     setSelection(null);
