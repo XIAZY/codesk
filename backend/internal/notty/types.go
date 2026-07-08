@@ -35,6 +35,10 @@ type ThreadAnchor struct {
 	RelativeStart string `json:"relativeStart,omitempty"`
 	RelativeEnd   string `json:"relativeEnd,omitempty"`
 	Excerpt       string `json:"excerpt,omitempty"`
+	// StateAtAnchor is the anchor-time Y.js state vector (opaque base64), persisted so the identity-based
+	// orphan classifier can filter post-anchor inserts. The backend never interprets it — it travels
+	// verbatim alongside the relative positions.
+	StateAtAnchor string `json:"stateAtAnchor,omitempty"`
 }
 
 type ThreadMessage struct {
@@ -335,6 +339,9 @@ type UpdateThreadAnchorRequest struct {
 	RelativeStart string  `json:"relativeStart"`
 	RelativeEnd   string  `json:"relativeEnd"`
 	Excerpt       *string `json:"excerpt,omitempty"`
+	// StateAtAnchor is captured fresh at pick time on every re-anchor (a repaired anchor's originals date
+	// from the repair), so — unlike excerpt — it is taken from the request verbatim, never preserved.
+	StateAtAnchor string `json:"stateAtAnchor,omitempty"`
 }
 
 type CreateWorkspaceRequest struct {
@@ -405,6 +412,7 @@ type CreateThreadRequest struct {
 	RelativeStart     string `json:"relativeStart"`
 	RelativeEnd       string `json:"relativeEnd"`
 	Excerpt           string `json:"excerpt"`
+	StateAtAnchor     string `json:"stateAtAnchor,omitempty"`
 }
 
 type ReplyThreadRequest struct {

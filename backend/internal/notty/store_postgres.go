@@ -320,6 +320,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			anchor_relative_end TEXT NOT NULL DEFAULT '',
 			anchor_kind TEXT NOT NULL DEFAULT '',
 			anchor_excerpt TEXT NOT NULL DEFAULT '',
+			anchor_state_vector TEXT NOT NULL DEFAULT '',
 			created_by_id UUID,
 			created_by_type TEXT NOT NULL,
 			created_by_handle TEXT NOT NULL,
@@ -337,6 +338,9 @@ func initPostgresSchemaTables(db *sql.DB) error {
 				ON DELETE CASCADE
 		)
 		`,
+		// Idempotent column-add for the anchor-time Y.js state vector (exact orphan classification) —
+		// placed after the CREATE so databases that predate the column get it too (instant backfill via default).
+		`ALTER TABLE threads ADD COLUMN IF NOT EXISTS anchor_state_vector TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_threads_workspace_document_updated ON threads (workspace_id, document_id, updated_at DESC)`,
 		// Temporary scaffolding: replaces the old non-unique index with a unique
 		// partial index for atomic thread-create idempotency via ON CONFLICT.
@@ -2565,6 +2569,7 @@ func scanThread(scanner interface{ Scan(...any) error }) (*Thread, error) {
 		&thread.Anchor.RelativeEnd,
 		&thread.Anchor.Kind,
 		&thread.Anchor.Excerpt,
+		&thread.Anchor.StateAtAnchor,
 		&thread.CreatedByID,
 		&thread.CreatedByType,
 		&thread.CreatedByHandle,
@@ -2714,7 +2719,7 @@ func getThreadPostgres(q querier, workspaceID string, threadID string) (*Thread,
 
 func queryThreadsPostgres(q querier, workspaceID string, documentID string, threadID string) ([]*Thread, error) {
 	threadQuery := `SELECT t.id::text, t.document_id::text, t.client_operation_id, t.title, t.status,
-	       t.anchor_relative_start, t.anchor_relative_end, t.anchor_kind, t.anchor_excerpt,
+	       t.anchor_relative_start, t.anchor_relative_end, t.anchor_kind, t.anchor_excerpt, t.anchor_state_vector,
 	       COALESCE(t.created_by_id::text, ''), t.created_by_type,
 	       COALESCE(u.handle, a.handle, t.created_by_handle) AS created_by_handle,
 	       COALESCE(u.name, a.name, t.created_by_name) AS created_by_name,
@@ -2856,14 +2861,14 @@ func createThreadPostgres(db *sql.DB, workspaceID string, thread *Thread, messag
 	res, err := tx.Exec(
 		`INSERT INTO threads (
 			workspace_id, id, document_id, client_operation_id, title, status,
-			anchor_relative_start, anchor_relative_end, anchor_kind, anchor_excerpt,
+			anchor_relative_start, anchor_relative_end, anchor_kind, anchor_excerpt, anchor_state_vector,
 			created_by_id, created_by_type, created_by_handle, created_by_name,
 			created_at, updated_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
-			$7, $8, $9, $10,
-			$11, $12, $13, $14,
-			$15, $16
+			$7, $8, $9, $10, $11,
+			$12, $13, $14, $15,
+			$16, $17
 		)
 		ON CONFLICT (workspace_id, created_by_id, created_by_type, client_operation_id)
 			WHERE client_operation_id <> ''
@@ -2878,6 +2883,7 @@ func createThreadPostgres(db *sql.DB, workspaceID string, thread *Thread, messag
 		thread.Anchor.RelativeEnd,
 		thread.Anchor.Kind,
 		thread.Anchor.Excerpt,
+		thread.Anchor.StateAtAnchor,
 		uuidStringOrNil(thread.CreatedByID),
 		thread.CreatedByType,
 		thread.CreatedByHandle,
@@ -3089,12 +3095,14 @@ func updateThreadAnchorPostgres(db *sql.DB, workspaceID string, threadID string,
 	if err != nil {
 		return nil, false, err
 	}
-	// Omitted excerpt preserves the stored one; a provided value (including "") replaces it.
+	// Omitted excerpt preserves the stored one; a provided value (including "") replaces it. The state
+	// vector is captured fresh at pick time on every re-anchor, so it is taken from the request verbatim
+	// (never preserved) — a repaired anchor's originals date from the repair.
 	excerpt := existing.Anchor.Excerpt
 	if req.Excerpt != nil {
 		excerpt = *req.Excerpt
 	}
-	anchor, err := buildThreadAnchor(req.Kind, req.RelativeStart, req.RelativeEnd, excerpt)
+	anchor, err := buildThreadAnchor(req.Kind, req.RelativeStart, req.RelativeEnd, excerpt, req.StateAtAnchor)
 	if err != nil {
 		return nil, false, err
 	}
@@ -3108,9 +3116,10 @@ func updateThreadAnchorPostgres(db *sql.DB, workspaceID string, threadID string,
 		        anchor_relative_start = $2,
 		        anchor_relative_end = $3,
 		        anchor_excerpt = $4,
-		        updated_at = $5
-		  WHERE workspace_id = $6::uuid AND id = $7::uuid`,
-		anchor.Kind, anchor.RelativeStart, anchor.RelativeEnd, anchor.Excerpt, time.Now().UTC(), workspaceID, threadID,
+		        anchor_state_vector = $5,
+		        updated_at = $6
+		  WHERE workspace_id = $7::uuid AND id = $8::uuid`,
+		anchor.Kind, anchor.RelativeStart, anchor.RelativeEnd, anchor.Excerpt, anchor.StateAtAnchor, time.Now().UTC(), workspaceID, threadID,
 	); err != nil {
 		return nil, false, err
 	}

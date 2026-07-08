@@ -2377,19 +2377,30 @@ func cloneAgentEvent(event *AgentEvent) *AgentEvent {
 }
 
 func buildThreadAnchorFromRequest(req CreateThreadRequest) (ThreadAnchor, error) {
-	return buildThreadAnchor(req.Kind, req.RelativeStart, req.RelativeEnd, req.Excerpt)
+	return buildThreadAnchor(req.Kind, req.RelativeStart, req.RelativeEnd, req.Excerpt, req.StateAtAnchor)
 }
 
 // buildThreadAnchor is the single anchor validator shared by thread creation and re-anchoring, so the
-// two paths cannot drift: kind inference, the both-or-neither relative-position rule, and excerpt
-// truncation are defined exactly once.
-func buildThreadAnchor(kindRaw, relativeStartRaw, relativeEndRaw, excerptRaw string) (ThreadAnchor, error) {
+// two paths cannot drift: kind inference, the both-or-neither relative-position rule, excerpt truncation,
+// and state-vector validation are defined exactly once.
+func buildThreadAnchor(kindRaw, relativeStartRaw, relativeEndRaw, excerptRaw, stateVectorRaw string) (ThreadAnchor, error) {
 	relativeStart := strings.TrimSpace(relativeStartRaw)
 	relativeEnd := strings.TrimSpace(relativeEndRaw)
 	if (relativeStart == "") != (relativeEnd == "") {
 		return ThreadAnchor{}, errors.New("relativeStart and relativeEnd must be provided together")
 	}
 	excerpt := truncateText(strings.TrimSpace(excerptRaw), 140)
+	// The state vector is opaque base64 the backend never interprets, but it must be well-formed and
+	// bounded before it is stored verbatim: decodable base64, ≤64KB.
+	stateVector := strings.TrimSpace(stateVectorRaw)
+	if stateVector != "" {
+		if len(stateVector) > 64*1024 {
+			return ThreadAnchor{}, errors.New("anchor state vector exceeds the 64KB limit")
+		}
+		if _, err := base64.StdEncoding.DecodeString(stateVector); err != nil {
+			return ThreadAnchor{}, errors.New("anchor state vector must be base64-encoded")
+		}
+	}
 	kind := strings.TrimSpace(kindRaw)
 	if kind == "" {
 		if relativeStart == "" {
@@ -2405,6 +2416,10 @@ func buildThreadAnchor(kindRaw, relativeStartRaw, relativeEndRaw, excerptRaw str
 		if relativeStart != "" || relativeEnd != "" {
 			return ThreadAnchor{}, errors.New("document threads cannot include relative anchors")
 		}
+		// No range means no frontier: a document-kind anchor has no state vector to capture.
+		if stateVector != "" {
+			return ThreadAnchor{}, errors.New("document threads cannot include an anchor state vector")
+		}
 		return ThreadAnchor{
 			Kind:    "document",
 			Excerpt: excerpt,
@@ -2419,6 +2434,7 @@ func buildThreadAnchor(kindRaw, relativeStartRaw, relativeEndRaw, excerptRaw str
 	}
 	anchor.RelativeStart = relativeStart
 	anchor.RelativeEnd = relativeEnd
+	anchor.StateAtAnchor = stateVector
 	return anchor, nil
 }
 
