@@ -861,7 +861,7 @@ export function resolveThreadAnchorLive(anchor: ThreadAnchor, ydoc: Y.Doc | null
     const excerptNorm = (anchor.excerpt || "").trim().toLowerCase();
     const collapsed = start === end && excerptNorm.length > 0;
     const resolvedNorm = content.slice(start, end).trim().toLowerCase();
-    const excerptTokens = excerptNorm.split(/\s+/).filter(Boolean);
+    const excerptTokens = excerptNorm.split(/[^a-z0-9]+/).filter(Boolean);
     const drifted = !collapsed && start !== end && excerptTokens.length > 0 && resolvedNorm.length > 0
       && !excerptTokens.some((token) => resolvedNorm.includes(token));
     const lineStarts = lineStartsForText(content);
