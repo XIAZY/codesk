@@ -35,6 +35,25 @@ func decodeInto(t *testing.T, rec *httptest.ResponseRecorder, dst any) {
 	}
 }
 
+// redactTopLevelKey replaces a top-level string field's value with a fixed placeholder, so a golden can
+// pin a response's shape without committing the secret it carries.
+func redactTopLevelKey(t *testing.T, raw []byte, key string) []byte {
+	t.Helper()
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("redact: unmarshal body: %v; body=%s", err, raw)
+	}
+	if _, ok := obj[key]; !ok {
+		t.Fatalf("redact: key %q not present to redact", key)
+	}
+	obj[key] = json.RawMessage(`"<redacted-secret>"`)
+	out, err := json.Marshal(obj)
+	if err != nil {
+		t.Fatalf("redact: re-marshal: %v", err)
+	}
+	return out
+}
+
 func TestContractMutationResponseShapes(t *testing.T) {
 	_, router := newAuthTestServer(t)
 	owner := authTestRegister(t, router, "contract-mutations-owner@example.com", "owner-pass", "Contract Mutations Owner")
@@ -89,4 +108,31 @@ func TestContractMutationResponseShapes(t *testing.T) {
 		Activity:   "viewing",
 	})
 	assertResponseGolden(t, recPresence, http.StatusOK, "mutation_presence_upsert")
+}
+
+// TestContractDaemonCreateRedactsToken is the 2.4 redaction row: daemon-create returns a real enrollment
+// token (the installer needs it), so the response MUST carry a non-empty secret — but a secret can never
+// land in a committed golden. The row asserts the token is present and non-empty, then pins the shape with
+// the token redacted, so a change to the daemon-create contract is still a reviewable diff.
+func TestContractDaemonCreateRedactsToken(t *testing.T) {
+	_, router := newAuthTestServer(t)
+	owner := authTestRegister(t, router, "contract-daemon-owner@example.com", "owner-pass", "Contract Daemon Owner")
+	ws := authTestCreateWorkspace(t, router, owner.Token, "Contract Daemon Workspace")
+
+	rec := authTestRequest(t, router, http.MethodPost, "/api/workspaces/"+ws.ID+"/daemons", owner.Token, nil, CreateDaemonRequest{Name: "Redaction daemon"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("daemon create: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp CreateDaemonResponse
+	decodeInto(t, rec, &resp)
+	if resp.Token == "" {
+		t.Fatal("daemon-create must return a non-empty enrollment token")
+	}
+
+	redacted := redactTopLevelKey(t, rec.Body.Bytes(), "token")
+	canonical, err := canonicalizeContractJSON(redacted)
+	if err != nil {
+		t.Fatalf("canonicalize redacted daemon-create: %v", err)
+	}
+	assertContractGolden(t, "mutation_daemon_create_redacted", canonical)
 }
