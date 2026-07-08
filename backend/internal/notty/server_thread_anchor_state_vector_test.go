@@ -92,6 +92,29 @@ func TestThreadAnchorStateVectorRoundTripsAndValidates(t *testing.T) {
 		t.Fatalf("a vector-only change is a real change — expected one broadcast, got %d", got)
 	}
 
+	// Clear-to-legacy: re-anchoring while OMITTING the vector clears the stored one to "" (verbatim, never
+	// preserved). A pinned choice — it flips the thread onto the classifier's legacy path, not an accident.
+	// Assert against a FRESH struct: the response omits an empty stateAtAnchor (omitempty), so unmarshalling
+	// into a reused variable would leave the prior value untouched — the empty read must come from a zero value.
+	var cleared struct {
+		Thread *Thread `json:"thread"`
+	}
+	authTestJSON(t, router, http.MethodPatch, target, owner.Token, UpdateThreadAnchorRequest{
+		RelativeStart: "start-4", RelativeEnd: "end-4", // stateAtAnchor omitted -> cleared
+	}, http.StatusOK, &cleared)
+	if cleared.Thread.Anchor.StateAtAnchor != "" {
+		t.Fatalf("omitting the vector on re-anchor must clear it, got anchor %#v", cleared.Thread.Anchor)
+	}
+	if got := drainThreadUpdated(); got != 1 {
+		t.Fatalf("clearing the vector is a real change, expected one broadcast, got %d", got)
+	}
+
+	// Size-cap: a vector larger than 64KB is rejected.
+	oversized := base64.StdEncoding.EncodeToString(make([]byte, 70*1024))
+	authTestStatus(t, router, http.MethodPatch, target, owner.Token, UpdateThreadAnchorRequest{
+		RelativeStart: "start-5", RelativeEnd: "end-5", StateAtAnchor: oversized,
+	}, http.StatusBadRequest)
+
 	// Validation: malformed base64 → 400; a document-kind anchor (no range) may not carry a vector → 400.
 	authTestStatus(t, router, http.MethodPatch, target, owner.Token, UpdateThreadAnchorRequest{
 		RelativeStart: "start-3", RelativeEnd: "end-3", StateAtAnchor: "not!!valid!!base64",
