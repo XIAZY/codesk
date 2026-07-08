@@ -876,19 +876,22 @@ export function resolveThreadAnchorLive(anchor: ThreadAnchor, ydoc: Y.Doc | null
     }
     const start = Math.max(0, startPosition.index);
     const end = Math.max(start, endPosition.index);
-    // Continuity criterion — ONE branch point, off encoding version (stateAtAnchor
-    // presence marks the assoc-fixed encoding):
-    //   • new-encoding: start attaches RIGHT, end attaches LEFT (see
-    //     encodeRelativeAnchor) -> orphaned iff the resolved span is EMPTY. Text
-    //     typed at either boundary lands outside the anchor; a fully-deleted range
-    //     collapses and can never be re-entered, so "a moment of nothing" is
-    //     permanent. This IS AlphaToad's ruled continuity semantics — text typed
-    //     inside a living range is adopted, the anchor dies only when its content
-    //     entirely vanishes — enforced by CRDT geometry, no walk, no vector read.
-    //   • legacy (old symmetric assoc, no field) -> token-overlap fallback until the
-    //     population migrates as threads are created / re-anchored.
+    // Continuity criterion — ONE branch point, off the encoding's own geometry.
+    // The end edge's association is self-describing: the assoc-fixed encoding
+    // attaches the end edge LEFT (assoc -1), the old symmetric encoding attaches it
+    // RIGHT (assoc 0). Keying on the assoc — NOT stateAtAnchor presence — is correct
+    // for every cohort, including anchors created between the #102 deploy and this
+    // one that carry a state vector but the OLD geometry: they must take the legacy
+    // path, or delete-then-retype resolves to a non-empty span of unrelated text.
+    //   • new geometry (end attaches LEFT) -> orphaned iff the resolved span is
+    //     EMPTY. Text typed at either boundary lands outside the anchor; a fully
+    //     deleted range collapses and can never be re-entered, so "a moment of
+    //     nothing" is permanent — AlphaToad's ruled continuity semantics, enforced
+    //     by CRDT geometry, no walk, no vector read.
+    //   • old geometry -> token-overlap fallback until the population migrates as
+    //     threads are created / re-anchored.
     const hadExtent = (anchor.excerpt || "").trim().length > 0;
-    const orphaned = anchor.stateAtAnchor
+    const orphaned = (endRP.assoc ?? 0) < 0
       ? hadExtent && end === start
       : orphanedByTokenOverlap(anchor.excerpt || "", content.slice(start, end), start, end);
     const lineStarts = lineStartsForText(content);
