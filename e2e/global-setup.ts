@@ -15,8 +15,13 @@ import { join } from "node:path";
 
 const BACKEND = required("NOTTY_E2E_BACKEND_URL");
 const PREVIEW = required("NOTTY_E2E_PREVIEW_URL");
-const COMPOSE_PROJECT = required("NOTTY_E2E_COMPOSE_PROJECT");
-const COMPOSE_FILE = required("NOTTY_E2E_COMPOSE_FILE");
+// Two mark-verified transports. CI/compose path resolves the psql via `docker compose exec`
+// (COMPOSE_PROJECT + COMPOSE_FILE). Native-local path (fast selector iteration against a native
+// backend + a standalone postgres container) sets NOTTY_E2E_PG_CONTAINER and runs `docker exec`
+// directly. Exactly one must be configured; the container form wins when both are present.
+const PG_CONTAINER = process.env.NOTTY_E2E_PG_CONTAINER || "";
+const COMPOSE_PROJECT = PG_CONTAINER ? "" : required("NOTTY_E2E_COMPOSE_PROJECT");
+const COMPOSE_FILE = PG_CONTAINER ? "" : required("NOTTY_E2E_COMPOSE_FILE");
 
 function required(name: string): string {
   const v = process.env[name];
@@ -54,12 +59,11 @@ function markVerified(email: string): void {
   // Exact pattern from test/regression's bootstrapWorkspace: verify in Postgres because fake Mailgun has
   // no inbox to read a token from. DB touch confined to this seed step.
   const sql = `UPDATE accounts SET email_verified = TRUE WHERE email = '${email.replace(/'/g, "''")}'`;
-  execFileSync(
-    "docker",
-    ["compose", "-p", COMPOSE_PROJECT, "-f", COMPOSE_FILE, "exec", "-T", "postgres",
-     "psql", "-U", "notty", "-d", "notty", "-v", "ON_ERROR_STOP=1", "-c", sql],
-    { stdio: "pipe" },
-  );
+  const psql = ["psql", "-U", "notty", "-d", "notty", "-v", "ON_ERROR_STOP=1", "-c", sql];
+  const args = PG_CONTAINER
+    ? ["exec", "-i", PG_CONTAINER, ...psql] // plain `docker exec` uses -i, not compose's -T
+    : ["compose", "-p", COMPOSE_PROJECT, "-f", COMPOSE_FILE, "exec", "-T", "postgres", ...psql];
+  execFileSync("docker", args, { stdio: "pipe" });
 }
 
 export default async function globalSetup(): Promise<void> {
@@ -79,15 +83,19 @@ export default async function globalSetup(): Promise<void> {
   // Workspace A with one document (its content is written through the editor in the flow, so opening it is
   // a real product action); workspace B left FULLY IDLE — no daemons, agents, threads, presence — so the
   // A->B switch reproduces the white-screen incident shape by construction.
-  const a = await api("/api/workspaces", { method: "POST", token, body: JSON.stringify({ name: "Smoke Alpha" }) });
+  // Workspace A is where the flow creates a document through the UI (its path lives in A's root-namespace
+  // CRDT); workspace B is left FULLY IDLE — no daemons, agents, threads, presence — so the A->B switch
+  // reproduces the white-screen incident shape by construction.
+  const a = await api("/api/workspaces", { method: "POST", token,
+    body: JSON.stringify({ name: "Smoke Alpha", slug: `smoke-alpha-${stamp}`, handle: `smoke-owner-a-${stamp}` }) });
   const workspaceA = a.workspace ?? a;
-  const doc = await api(`/api/workspaces/${workspaceA.id}/documents`, { method: "POST", token, body: JSON.stringify({}) });
-  const b = await api("/api/workspaces", { method: "POST", token, body: JSON.stringify({ name: "Smoke Bravo" }) });
+  const b = await api("/api/workspaces", { method: "POST", token,
+    body: JSON.stringify({ name: "Smoke Bravo", slug: `smoke-bravo-${stamp}`, handle: `smoke-owner-b-${stamp}` }) });
   const workspaceB = b.workspace ?? b;
 
   const seed = {
     email, password,
-    slugA: workspaceA.slug, nameA: workspaceA.name, documentId: doc.id ?? doc.documentId,
+    slugA: workspaceA.slug, nameA: workspaceA.name,
     slugB: workspaceB.slug, nameB: workspaceB.name,
   };
   writeFileSync(join(__dirname, "seed.json"), JSON.stringify(seed, null, 2));
