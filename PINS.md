@@ -34,6 +34,7 @@ Seeded 2026-07-07 from the Tests-improvements scorecard (Tom/Bill/Deniz), alongs
 
 ### Frontend units (vitest)
 - **The workspace realtime lifeline (useWorkspace hook) loads, dispatches, survives bad frames, and reconnects** — breaks → `frontend/src/useWorkspace.test.tsx` (five cases, previously zero): loads the initial snapshot over REST into the reducer; marks connected on socket open and dispatches every frame; ignores a malformed frame without crashing or mutating state; reconnects with exponential backoff (1000ms → 2000ms) after a close; and closes the socket + cancels the reconnect on unmount. A dropped snapshot, a crash on a bad frame, a broken backoff, or a leaked socket is caught here in isolation. _Corpus suite 5.1._
+- **The thread/time view helpers stay honest** — breaks → `frontend/src/logic.test.ts` (audited 2026-07-08, already covered): `relativeTime` (formats past timestamps, guards bad input), `threadReplyLabel`/`threadReplyCount` (a starter message is not a reply), and `resolveThreadAnchorLive` (the full anchor-pattern matrix — stable-after-edit, collapsed-range orphan, mid-range insert stays anchored, and the pre-sync empty-ydoc reproduction). _Corpus suite 5.2; the audit added the register line, the tests already existed._
 
 ### Workspace & thread lifecycle
 - **Workspace creation is atomic; deletion cascades and is honest** — breaks → creation tests + #83's deletion suite (cascade proof across 16 tables, exact-name confirm, broadcast-count honesty).
