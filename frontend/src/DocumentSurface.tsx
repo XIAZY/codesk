@@ -27,6 +27,7 @@ import * as Y from "yjs";
 import {
   base64ToUint8Array,
   encodeRelativeAnchor,
+  uint8ArrayToBase64,
   type LineThreadGroup,
   type ResolvedThreadAnchor,
 } from "./logic";
@@ -46,6 +47,9 @@ export type SurfaceSelection = {
   excerpt: string;
   relativeStart: string;
   relativeEnd: string;
+  // Y.js state vector captured at selection time, so orphan detection can tell the
+  // ORIGINAL anchored characters from text inserted afterward. Empty if unavailable.
+  stateAtAnchor: string;
   point: { x: number; y: number };
 };
 
@@ -371,6 +375,7 @@ function selectionFromView(view: EditorView, ytext: Y.Text): SurfaceSelection | 
     excerpt,
     relativeStart: encodeRelativeAnchor(ytext, start),
     relativeEnd: encodeRelativeAnchor(ytext, end),
+    stateAtAnchor: ytext.doc ? uint8ArrayToBase64(Y.encodeStateVector(ytext.doc)) : "",
     point: {
       x: coords ? coords.left : 24,
       y: coords ? coords.bottom : 120,
