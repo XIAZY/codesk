@@ -289,6 +289,47 @@ describe("Yjs editor helpers", () => {
     expect(result.resolved).toBe(true);
   });
 
+  it("adversarial: punctuation-glued excerpt token still matches after edit", () => {
+    const doc1 = new Y.Doc(); doc1.clientID = 1;
+    const t1 = doc1.getText("content");
+    t1.insert(0, "the end.");
+    const relativeStart = encodeRelativeAnchor(t1, 0);
+    const relativeEnd = encodeRelativeAnchor(t1, 8);
+
+    const doc2 = new Y.Doc(); doc2.clientID = 2;
+    Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
+    const t2 = doc2.getText("content");
+    t2.delete(7, 1);
+    Y.applyUpdate(doc1, Y.encodeStateAsUpdate(doc2));
+
+    const result = resolveThreadAnchorLive(
+      { kind: "text-range", relativeStart, relativeEnd, excerpt: "the end." },
+      doc1, t1.toString(),
+    );
+    expect(result.resolved).toBe(true);
+  });
+
+  it("adversarial: short excerpt token does not false-match unrelated text", () => {
+    const doc1 = new Y.Doc(); doc1.clientID = 1;
+    const t1 = doc1.getText("content");
+    t1.insert(0, "a cat sat on the mat");
+    const relativeStart = encodeRelativeAnchor(t1, 0);
+    const relativeEnd = encodeRelativeAnchor(t1, 5);
+
+    const doc2 = new Y.Doc(); doc2.clientID = 2;
+    Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
+    const t2 = doc2.getText("content");
+    t2.delete(0, 5);
+    t2.insert(0, "irrelevant paragraph");
+    Y.applyUpdate(doc1, Y.encodeStateAsUpdate(doc2));
+
+    const result = resolveThreadAnchorLive(
+      { kind: "text-range", relativeStart, relativeEnd, excerpt: "a cat" },
+      doc1, t1.toString(),
+    );
+    expect(result.resolved).toBe(false);
+  });
+
   it("collapsed case shows stored excerpt, not forward-slice", () => {
     const doc = new Y.Doc();
     const text = doc.getText("content");

@@ -861,9 +861,11 @@ export function resolveThreadAnchorLive(anchor: ThreadAnchor, ydoc: Y.Doc | null
     const excerptNorm = (anchor.excerpt || "").trim().toLowerCase();
     const collapsed = start === end && excerptNorm.length > 0;
     const resolvedNorm = content.slice(start, end).trim().toLowerCase();
-    const excerptTokens = excerptNorm.split(/[^a-z0-9]+/).filter(Boolean);
-    const drifted = !collapsed && start !== end && excerptTokens.length > 0 && resolvedNorm.length > 0
-      && !excerptTokens.some((token) => resolvedNorm.includes(token));
+    const excerptTokens = new Set(excerptNorm.split(/[^a-z0-9]+/).filter(Boolean));
+    const resolvedTokens = new Set(resolvedNorm.split(/[^a-z0-9]+/).filter(Boolean));
+    const hasOverlap = excerptTokens.size > 0 && resolvedTokens.size > 0
+      && [...excerptTokens].some((token) => resolvedTokens.has(token));
+    const drifted = !collapsed && start !== end && excerptTokens.size > 0 && resolvedTokens.size > 0 && !hasOverlap;
     const lineStarts = lineStartsForText(content);
     const previewEnd = end === start ? Math.min(content.length, start + 80) : end;
     return {
