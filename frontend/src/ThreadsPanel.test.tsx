@@ -353,13 +353,11 @@ describe("ThreadsPanel orphan warning", () => {
         onSelectThread={vi.fn()}
         onJumpToThread={vi.fn()}
         onReply={vi.fn()}
-        onReanchorThread={vi.fn()}
       />,
     );
 
     expect(container.querySelector(".titem.orphaned")).toBeNull();
     expect(container.querySelector(".thread-orphan-warning")).toBeNull();
-    expect(container.querySelector(".thread-reanchor-link")).toBeNull();
   });
 
   it("shows no orphan warning when threadAnchorInfo is omitted (pre-mount state)", () => {
@@ -420,70 +418,6 @@ describe("ThreadsPanel orphan warning", () => {
     expect(container.querySelector(".thread-jump-link")?.textContent).toContain("Jump to line 5");
   });
 
-  it("shows re-anchor link on orphan card when onReanchorThread is provided", () => {
-    const onReanchorThread = vi.fn();
-    const { container } = render(
-      <ThreadsPanel
-        api={mockApi()}
-        workspaceId="ws"
-        threads={[threadFixture({ id: "t1", status: "open", anchor: { kind: "range", excerpt: "deleted text" } })]}
-        threadAnchorInfo={{ t1: { orphaned: true, line: 0 } }}
-        selectedThreadId=""
-        onSelectThread={vi.fn()}
-        onJumpToThread={vi.fn()}
-        onReply={vi.fn()}
-        onReanchorThread={onReanchorThread}
-      />,
-    );
-
-    const reanchorLink = container.querySelector(".thread-reanchor-link");
-    expect(reanchorLink).toBeTruthy();
-    expect(reanchorLink?.textContent).toBe("Re-anchor");
-
-    fireEvent.click(reanchorLink!);
-    expect(onReanchorThread).toHaveBeenCalledWith("t1");
-  });
-
-  it("does not show re-anchor link when onReanchorThread is not provided", () => {
-    const { container } = render(
-      <ThreadsPanel
-        api={mockApi()}
-        workspaceId="ws"
-        threads={[threadFixture({ id: "t1", status: "open", anchor: { kind: "range", excerpt: "deleted text" } })]}
-        threadAnchorInfo={{ t1: { orphaned: true, line: 0 } }}
-        selectedThreadId=""
-        onSelectThread={vi.fn()}
-        onJumpToThread={vi.fn()}
-        onReply={vi.fn()}
-      />,
-    );
-
-    expect(container.querySelector(".thread-reanchor-link")).toBeNull();
-  });
-
-  it("shows re-anchor button in detail view for orphaned thread", () => {
-    const onReanchorThread = vi.fn();
-    const { container } = render(
-      <ThreadsPanel
-        api={mockApi()}
-        workspaceId="ws"
-        threads={[threadFixture({ id: "t1", status: "open", anchor: { kind: "range", excerpt: "deleted text" } })]}
-        threadAnchorInfo={{ t1: { orphaned: true, line: 0 } }}
-        selectedThreadId="t1"
-        onSelectThread={vi.fn()}
-        onJumpToThread={vi.fn()}
-        onReply={vi.fn()}
-        onReanchorThread={onReanchorThread}
-      />,
-    );
-
-    const reanchorBtn = container.querySelector(".thread-orphan-actions .btn.accent");
-    expect(reanchorBtn).toBeTruthy();
-    expect(reanchorBtn?.textContent).toBe("Re-anchor");
-
-    fireEvent.click(reanchorBtn!);
-    expect(onReanchorThread).toHaveBeenCalledWith("t1");
-  });
 });
 
 describe("ThreadsPanel jump to anchor", () => {

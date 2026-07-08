@@ -73,7 +73,7 @@ function makeThread(ydoc: Y.Doc, id: string, text: string, start: number, end: n
 function renderEditor(threads: ThreadItem[], onThreadAnchorInfo: (info: Record<string, { orphaned: boolean; line: number }>) => void) {
   return render(
     <DocumentEditor
-      api={{ updateThreadAnchor: vi.fn() } as never}
+      api={{} as never}
       token="test-token"
       workspaceId="ws-1"
       actorName="Tester"
@@ -91,9 +91,6 @@ function renderEditor(threads: ThreadItem[], onThreadAnchorInfo: (info: Record<s
       onTitleEditCancel={vi.fn()}
       onTitleCommit={vi.fn()}
       onThreadAnchorInfo={onThreadAnchorInfo}
-      reanchorThreadId=""
-      onReanchorComplete={vi.fn()}
-      onReanchorCancel={vi.fn()}
     />,
   );
 }
@@ -126,7 +123,7 @@ describe("DocumentEditor anchor-info classification effect", () => {
 
     rerender(
       <DocumentEditor
-        api={{ updateThreadAnchor: vi.fn() } as never}
+        api={{} as never}
         token="test-token"
         workspaceId="ws-1"
         actorName="Tester"
@@ -144,9 +141,6 @@ describe("DocumentEditor anchor-info classification effect", () => {
         onTitleEditCancel={vi.fn()}
         onTitleCommit={vi.fn()}
         onThreadAnchorInfo={onInfo}
-        reanchorThreadId=""
-        onReanchorComplete={vi.fn()}
-        onReanchorCancel={vi.fn()}
       />,
     );
 

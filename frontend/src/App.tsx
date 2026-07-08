@@ -1424,7 +1424,6 @@ export function WorkspaceApp({
   const documentMissing = view.kind === "document" && rootNamespace.ready && !activeDocument;
   const documentThreads = useMemo(() => activeDocument ? workspace.threads.filter((thread) => thread.documentId === activeDocument.id) : [], [workspace.threads, activeDocument?.id]);
   const [threadAnchorInfo, setThreadAnchorInfo] = useState<Record<string, { orphaned: boolean; line: number }>>({});
-  const [reanchorThreadId, setReanchorThreadId] = useState("");
   const groupedAgents = agentsByDaemon(workspace.agents, workspace.daemons);
   const documentTree = useMemo(() => buildDocumentTree(rootDocuments), [rootDocuments]);
   const threadCountByDocument = useMemo(() => {
@@ -1930,9 +1929,6 @@ export function WorkspaceApp({
             onTitleEditCancel={cancelRenamingDocument}
             onTitleCommit={(draft) => commitDocumentTitle(activeDocument, draft)}
             onThreadAnchorInfo={setThreadAnchorInfo}
-            reanchorThreadId={reanchorThreadId}
-            onReanchorComplete={() => { setReanchorThreadId(""); void reload(); }}
-            onReanchorCancel={() => setReanchorThreadId("")}
           />
         ) : rootNamespace.ready && rootDocuments.length ? (
           <div className="notice compact">Opening document...</div>
@@ -1983,7 +1979,6 @@ export function WorkspaceApp({
               setFocusThreadId(threadId);
             }}
             onReply={() => void reload()}
-            onReanchorThread={setReanchorThreadId}
           />
         ) : null}
         {rightTab === "activity" ? <ActivityPanel activities={documentActivityList} hasDocument={!!activeDocument} actorLabel={activityActorLabel} /> : null}
@@ -2583,9 +2578,6 @@ export function DocumentEditor({
   onTitleEditCancel,
   onTitleCommit,
   onThreadAnchorInfo,
-  reanchorThreadId,
-  onReanchorComplete,
-  onReanchorCancel,
 }: {
   api: ApiClient;
   token: string;
@@ -2605,9 +2597,6 @@ export function DocumentEditor({
   onTitleEditCancel: () => void;
   onTitleCommit: (value: string) => void;
   onThreadAnchorInfo: (info: Record<string, { orphaned: boolean; line: number }>) => void;
-  reanchorThreadId: string;
-  onReanchorComplete: () => void;
-  onReanchorCancel: () => void;
 }) {
   const draftRef = useRef<HTMLTextAreaElement | null>(null);
   const [selection, setSelection] = useState<SurfaceSelection | null>(null);
@@ -2623,31 +2612,6 @@ export function DocumentEditor({
     document,
     actorName,
   });
-  const reanchorThread = reanchorThreadId ? threads.find((t) => t.id === reanchorThreadId) ?? null : null;
-  const [reanchorBusy, setReanchorBusy] = useState(false);
-  const [reanchorError, setReanchorError] = useState("");
-
-  const confirmReanchor = async () => {
-    if (!selection || !reanchorThreadId || reanchorBusy) return;
-    setReanchorBusy(true);
-    setReanchorError("");
-    try {
-      await api.updateThreadAnchor(workspaceId, reanchorThreadId, {
-        relativeStart: selection.relativeStart,
-        relativeEnd: selection.relativeEnd,
-        excerpt: selection.excerpt.slice(0, 140),
-        // Fresh state vector captured at the re-anchor pick — a repaired anchor's
-        // "original characters" date from the repair, not the thread's birth.
-        stateAtAnchor: selection.stateAtAnchor,
-      });
-      onReanchorComplete();
-    } catch (err) {
-      setReanchorError(err instanceof Error ? err.message : "Failed to re-anchor");
-    } finally {
-      setReanchorBusy(false);
-    }
-  };
-
   const hasRangeSelection = Boolean(selection);
   const toolbarPoint = {
     x: clamp(selection?.point.x ?? 24, 12, Math.max(12, window.innerWidth - 680)),
@@ -2760,13 +2724,6 @@ export function DocumentEditor({
           <span className={`chip outline ${connected ? "ok" : "warn"}`}>{connected ? "Live" : "Reconnecting"}</span>
         </div>
 
-        {reanchorThread ? (
-          <div className="reanchor-banner">
-            <span>Select new anchor for <b>"{reanchorThread.anchor.excerpt || reanchorThread.title || "thread"}"</b> — select text in the document</span>
-            <button className="btn ghost sm" type="button" onClick={onReanchorCancel}>Cancel</button>
-          </div>
-        ) : null}
-
         <div className="editor-frame">
           <DocumentSurface
             documentId={document.id}
@@ -2789,17 +2746,11 @@ export function DocumentEditor({
             style={{ left: toolbarPoint.x, top: toolbarPoint.y }}
             onMouseDown={(event) => event.preventDefault()}
           >
-            {reanchorThread ? (
-              <button className="primary" type="button" onClick={confirmReanchor} disabled={reanchorBusy}>
-                {reanchorBusy ? "…" : "Re-anchor here"}
-              </button>
-            ) : (
-              <button className="primary" type="button" onClick={openThreadDraft}>
-                <Icon name="thread" />
-                Open thread
-              </button>
-            )}
-            {!reanchorThread && isMarkdownDocument ? (
+            <button className="primary" type="button" onClick={openThreadDraft}>
+              <Icon name="thread" />
+              Open thread
+            </button>
+            {isMarkdownDocument ? (
               <>
                 <div className="sep" />
                 <button type="button" title="Heading 1" onClick={() => requestFormat("heading1")}>H1</button>
@@ -2814,8 +2765,6 @@ export function DocumentEditor({
             ) : null}
           </div>
         ) : null}
-        {reanchorError ? <div className="reanchor-error tiny" style={{ color: "var(--err)" }}>{reanchorError}</div> : null}
-
         {threadDraftOpen ? (
           <form
             className="thread-drafter card lifted"
@@ -2890,7 +2839,6 @@ export function ThreadsPanel({
   onSelectThread,
   onJumpToThread,
   onReply,
-  onReanchorThread,
 }: {
   api: ApiClient;
   workspaceId: string;
@@ -2900,7 +2848,6 @@ export function ThreadsPanel({
   onSelectThread: (threadId: string) => void;
   onJumpToThread: (threadId: string) => void;
   onReply: () => void;
-  onReanchorThread?: (threadId: string) => void;
 }) {
   const [reply, setReply] = useState("");
   const [statusBusy, setStatusBusy] = useState(false);
@@ -2993,8 +2940,7 @@ export function ThreadsPanel({
               <>
                 <div className="thread-orphan-warning">Anchor lost · original text deleted</div>
                 <div className="thread-orphan-actions">
-                  {onReanchorThread ? <button className="btn accent sm" type="button" onClick={() => onReanchorThread(selected.id)}>Re-anchor</button> : null}
-                  <button className="btn ghost sm" type="button" onClick={toggleStatus} disabled={statusBusy}>{statusBusy ? "…" : "Resolve"}</button>
+                  <button className="btn accent sm" type="button" onClick={toggleStatus} disabled={statusBusy}>{statusBusy ? "…" : "Resolve"}</button>
                 </div>
               </>
             ) : null}
@@ -3064,7 +3010,6 @@ export function ThreadsPanel({
             <>
               <div className="thread-orphan-warning">⚠ Anchor lost · original text deleted</div>
               <div className="thread-orphan-actions">
-                {onReanchorThread ? <span className="thread-reanchor-link" role="button" onClick={(e) => { e.stopPropagation(); onReanchorThread(thread.id); }}>Re-anchor</span> : null}
                 <span className="thread-resolve-link" role="button" onClick={(e) => resolveCard(thread.id, e)}>Resolve</span>
               </div>
               {cardError[thread.id] ? <div className="tiny" style={{ color: "var(--err)" }}>{cardError[thread.id]}</div> : null}
