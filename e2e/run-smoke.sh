@@ -33,7 +33,7 @@ echo "e2e: backend at $BACKEND_URL"
 
 echo "e2e: building production frontend (VITE_API_BASE=$BACKEND_URL)…"
 ( cd "$ROOT_DIR/frontend" && VITE_API_BASE="$BACKEND_URL" VITE_PUBLIC_ORIGIN="http://127.0.0.1:$PREVIEW_PORT" npm run build )
-( cd "$ROOT_DIR/frontend" && npm run preview -- --port "$PREVIEW_PORT" --strictPort >/tmp/e2e-preview.log 2>&1 & echo $! > /tmp/e2e-preview.pid )
+( cd "$ROOT_DIR/frontend" && npx vite preview --port "$PREVIEW_PORT" --strictPort --host 127.0.0.1 >/tmp/e2e-preview.log 2>&1 & echo $! > /tmp/e2e-preview.pid )
 PREVIEW_PID="$(cat /tmp/e2e-preview.pid)"
 
 export NOTTY_E2E_BACKEND_URL="$BACKEND_URL"

@@ -167,6 +167,37 @@ jobs:
       - name: Production build
         run: npm run build
 
+  e2e:
+    name: e2e (browser core-flow smoke, Playwright vs compose stack)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive # the compose backend image build needs third_party/y-crdt source
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            e2e/package-lock.json
+      - name: Install frontend deps
+        run: npm ci
+        working-directory: frontend
+      - name: Install e2e deps
+        run: npm ci
+        working-directory: e2e
+      - name: Install Playwright chromium (with OS deps)
+        run: npx playwright install --with-deps chromium
+        working-directory: e2e
+      # run-smoke.sh brings up the real compose backend + Postgres, builds the production frontend pointed at
+      # it, serves via vite preview, and runs the Playwright smoke — failing loud if any piece of the stack
+      # does not come up (never a silent skip). Its seeding uses the compose-exec mark-verified transport.
+      - name: Browser core-flow smoke (fail loud if the stack does not come up)
+        run: sh run-smoke.sh
+        working-directory: e2e
+
   diff-check:
     name: git diff --check (whitespace / conflict markers)
     runs-on: ubuntu-latest

@@ -2,10 +2,16 @@ import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+// ARCHITECTURAL CONSTRAINT for E2E authors: document content has NO REST seed path. A document's PATH lives
+// in the workspace root-namespace CRDT and its TEXT in the per-document CRDT — POST /documents only allocates
+// an empty pathless stream, so an API-created doc is unlistable and unopenable (the UI shows "Document not
+// found", which reads like a harness bug but is the architecture). Faithful seeding is UI-driven (the "New
+// document" action) or via a Yjs WS client — never REST. This is why the flow creates its doc through the UI.
+//
 // Seeds the compose stack via the real API before the browser opens, per Tom's (c) ruling: the stack runs
 // fake Mailgun (no inbox), so a freshly-registered account is marked verified directly in Postgres — the
 // only DB touch in the whole smoke; every flow assertion afterward goes through the browser against real
-// endpoints. Writes the seed (credentials + slugs + doc id) to seed.json for the test to consume.
+// endpoints. Writes the seed (credentials + workspace slugs/names) to seed.json for the test to consume.
 //
 // Env (set by run-smoke.sh / the CI e2e job):
 //   NOTTY_E2E_BACKEND_URL      backend base (dynamic compose port)
