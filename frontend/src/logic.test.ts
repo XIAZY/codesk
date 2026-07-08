@@ -93,6 +93,24 @@ describe("Yjs editor helpers", () => {
     expect(anchor.excerpt).toBe("bravo");
     expect(anchor.resolved).toBe(true);
   });
+
+  it("returns resolved=false for valid anchors against an empty ydoc (pre-sync reproduction)", () => {
+    const populatedDoc = new Y.Doc();
+    const populatedText = populatedDoc.getText("content");
+    populatedDoc.transact(() => populatedText.insert(0, "hello world"));
+    const relativeStart = encodeRelativeAnchor(populatedText, 0);
+    const relativeEnd = encodeRelativeAnchor(populatedText, 5);
+
+    const emptyDoc = new Y.Doc();
+    emptyDoc.getText("content");
+    const anchor = resolveThreadAnchorLive(
+      { kind: "text-range", relativeStart, relativeEnd, excerpt: "hello" },
+      emptyDoc,
+      "",
+    );
+
+    expect(anchor.resolved).toBe(false);
+  });
 });
 
 describe("randomWorkspaceName", () => {
