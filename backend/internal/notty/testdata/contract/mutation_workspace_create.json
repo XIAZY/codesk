@@ -1,0 +1,21 @@
+{
+  "member": {
+    "acceptedAt": "<ts>",
+    "accountId": "<id-1>",
+    "createdAt": "<ts>",
+    "membershipRole": "owner",
+    "status": "active",
+    "userHandle": "owner",
+    "userId": "<id-2>",
+    "userName": "Contract Mutations Owner",
+    "workspaceId": "<id-3>"
+  },
+  "workspace": {
+    "createdAt": "<ts>",
+    "id": "<id-3>",
+    "name": "Mutation Workspace",
+    "rootDocumentId": "<id-4>",
+    "slug": "mutation-workspace",
+    "updatedAt": "<ts>"
+  }
+}

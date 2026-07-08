@@ -39,18 +39,23 @@ var (
 // This is the designed home for wall-clock-derived numerics; the list is deliberately explicit and
 // small so a reviewer sees exactly which values are intentionally NOT pinned.
 //   - lastSeenAgeSeconds: int64(now.Sub(daemon.LastSeenAt) / time.Second) (store.go) — flips 0→1 in ~1s.
+//   - updateId, clientIdSeed: the document-metadata CRDT counters. updateId is a GLOBAL monotonic
+//     sequence that Postgres does not reset when the test harness clears tables between runs, so its value
+//     depends on how many updates every prior test in the process performed — deterministic within one run,
+//     but not stable across golden regenerations. clientIdSeed is an allocation-order seed with the same
+//     cross-run instability. Both are internal CRDT plumbing, not a shape the frontend renders, so only
+//     their presence is pinned. (This corrects the earlier sweep note, which reasoned about within-run
+//     determinism; goldens are compared across runs, where these counters drift.)
 //
-// Sweep result (stated for the record): every numeric json field on the GET /workspace types was
-// checked. The updateId / fromUpdateId / toUpdateId / attemptCount / id fields are deterministic
-// monotonic counters (fixed by the operation sequence, not the clock). connectionStatus is the SAME
-// wall-clock family (online/stale/disconnected by age windows) but is deliberately NOT excepted: its
-// enum value is a meaningful pinned contract (a fresh check-in serializes "online") and only flips at
-// the ~30s stale window — a pathological gap between two adjacent same-test calls — so we pin it and
-// document the bound rather than canonicalize away a real contract value. processId / exitCode /
-// clientIdSeed are not present in this contract (agent-run process detail / checkpoint types) and
-// become candidates for this set when those rows are added.
+// connectionStatus is the SAME wall-clock family (online/stale/disconnected by age windows) but is
+// deliberately NOT excepted: its enum value is a meaningful pinned contract (a fresh check-in serializes
+// "online") and only flips at the ~30s stale window — a pathological gap between two adjacent same-test
+// calls — so we pin it and document the bound rather than canonicalize away a real contract value.
+// processId / exitCode remain candidates for this set when agent-run process-detail rows are added.
 var contractVolatileNumericKeys = map[string]bool{
 	"lastSeenAgeSeconds": true,
+	"updateId":           true,
+	"clientIdSeed":       true,
 }
 
 const contractVolatilePlaceholder = "<n>"

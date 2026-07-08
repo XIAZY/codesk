@@ -1,0 +1,10 @@
+{
+  "activity": "viewing",
+  "actorId": "<id-1>",
+  "actorType": "daemon",
+  "documentId": "<id-2>",
+  "filePath": "",
+  "mode": "",
+  "selection": [],
+  "updatedAt": "<ts>"
+}

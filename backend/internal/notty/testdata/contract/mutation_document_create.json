@@ -1,0 +1,7 @@
+{
+  "clientIdSeed": "<n>",
+  "id": "<id-1>",
+  "stateVector": "AA==",
+  "updateId": "<n>",
+  "updatedAt": "<ts>"
+}

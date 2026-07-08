@@ -1,0 +1,48 @@
+{
+  "message": {
+    "authorHandle": "mutation-agent",
+    "authorId": "<id-1>",
+    "authorName": "Mutation Agent",
+    "authorType": "agent",
+    "body": "A thread created to pin the create response shape.",
+    "createdAt": "<ts>",
+    "id": "<id-2>",
+    "kind": "comment",
+    "threadId": "<id-3>"
+  },
+  "thread": {
+    "anchor": {
+      "excerpt": "mutation",
+      "kind": "document"
+    },
+    "createdAt": "<ts>",
+    "createdByHandle": "mutation-agent",
+    "createdById": "<id-1>",
+    "createdByName": "Mutation Agent",
+    "createdByType": "agent",
+    "documentId": "<id-4>",
+    "id": "<id-3>",
+    "messages": [
+      {
+        "authorHandle": "mutation-agent",
+        "authorId": "<id-1>",
+        "authorName": "Mutation Agent",
+        "authorType": "agent",
+        "body": "A thread created to pin the create response shape.",
+        "createdAt": "<ts>",
+        "id": "<id-2>",
+        "kind": "comment",
+        "threadId": "<id-3>"
+      }
+    ],
+    "participantHandles": [
+      "mutation-agent"
+    ],
+    "participantIds": [
+      "<id-1>"
+    ],
+    "status": "open",
+    "title": "Mutation thread",
+    "updatedAt": "<ts>"
+  }
+}
