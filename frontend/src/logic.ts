@@ -858,7 +858,11 @@ export function resolveThreadAnchorLive(anchor: ThreadAnchor, ydoc: Y.Doc | null
     }
     const start = Math.max(0, startPosition.index);
     const end = Math.max(start, endPosition.index);
-    const collapsed = start === end && Boolean(anchor.excerpt?.trim());
+    const excerptNorm = (anchor.excerpt || "").trim().toLowerCase();
+    const collapsed = start === end && excerptNorm.length > 0;
+    const resolvedNorm = content.slice(start, end).trim().toLowerCase();
+    const drifted = !collapsed && start !== end && excerptNorm.length > 0 && resolvedNorm.length > 0
+      && !resolvedNorm.includes(excerptNorm) && !excerptNorm.includes(resolvedNorm);
     const lineStarts = lineStartsForText(content);
     const previewEnd = end === start ? Math.min(content.length, start + 80) : end;
     return {
@@ -867,7 +871,7 @@ export function resolveThreadAnchorLive(anchor: ThreadAnchor, ydoc: Y.Doc | null
       end,
       line: lineForOffset(lineStarts, start),
       excerpt: (content.slice(start, previewEnd).trim() || anchor.excerpt || "").slice(0, 140),
-      resolved: !collapsed,
+      resolved: !collapsed && !drifted,
     };
   } catch {
     return fallback;
