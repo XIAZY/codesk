@@ -2564,7 +2564,7 @@ export function MetricCard({ label, value, tone }: { label: string; value: numbe
   );
 }
 
-function DocumentEditor({
+export function DocumentEditor({
   api,
   token,
   workspaceId,
@@ -2657,7 +2657,7 @@ function DocumentEditor({
 
   const lastAnchorInfoRef = useRef("");
   useEffect(() => {
-    if (!ydoc || !ytext) return;
+    if (!ydoc || !ytext || !ready) return;
     const content = ytext.toString();
     const info: Record<string, { orphaned: boolean; line: number }> = {};
     for (const thread of threads) {
@@ -2669,7 +2669,7 @@ function DocumentEditor({
       lastAnchorInfoRef.current = serialized;
       onThreadAnchorInfo(info);
     }
-  }, [ydoc, ytext, threads, onThreadAnchorInfo]);
+  }, [ydoc, ytext, ready, threads, onThreadAnchorInfo]);
 
   useEffect(() => {
     setActiveThreadGroup(null);
