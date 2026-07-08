@@ -3,87 +3,88 @@ import { describe, it, expect } from "vitest";
 import * as Y from "yjs";
 import { encodeRelativeAnchor, resolveThreadAnchorLive, uint8ArrayToBase64 } from "./logic";
 
-// Signed anchor-orphan hybrid regression matrix (this incident's reproduction
-// artifact). Each row drives a real Y.Doc + real range anchor through a realistic
-// edit and asserts resolveThreadAnchorLive's `resolved` verdict on BOTH criterion
-// paths — pinning the hybrid seam:
-//   • NEW anchors carry stateAtAnchor → item-identity walk (correct by construction).
-//   • LEGACY anchors (no field) → token-overlap fallback.
-// Red-first: against the pre-fix code (which returned resolved:true unconditionally)
-// every orphaned expectation here fails.
-//
-// resolved === true  => anchored;  resolved === false => orphaned ("Anchor lost").
+// Signed anchor-continuity regression matrix (AlphaToad's 9 ruled rows). Each row
+// drives a real Y.Doc + real range anchor through a realistic edit and asserts
+// resolveThreadAnchorLive's `resolved` verdict on BOTH criterion paths:
+//   • NEW    = assoc-fixed edges (start right, end LEFT) + stateAtAnchor → the
+//     span-empty continuity criterion (adoption; a range that empties is
+//     permanently dead — "a moment of nothing" is structural).
+//   • LEGACY = old symmetric assoc (both right), no field → token-overlap fallback,
+//     kept for pre-fix anchors during natural migration.
+// resolved === true => alive/anchored; false => dead ("Anchor lost").
 
-function anchorOn(doc: Y.Doc, text: Y.Text, needle: string, withStateVector: boolean) {
+function anchorOn(doc: Y.Doc, text: Y.Text, needle: string, encoding: "new" | "legacy") {
   const from = text.toString().indexOf(needle);
   const to = from + needle.length;
+  if (encoding === "new") {
+    return {
+      kind: "text-range",
+      relativeStart: encodeRelativeAnchor(text, from, "start"),
+      relativeEnd: encodeRelativeAnchor(text, to, "end"),
+      excerpt: needle,
+      stateAtAnchor: uint8ArrayToBase64(Y.encodeStateVector(doc)),
+    };
+  }
   return {
     kind: "text-range",
-    relativeStart: encodeRelativeAnchor(text, from),
-    relativeEnd: encodeRelativeAnchor(text, to),
+    relativeStart: encodeRelativeAnchor(text, from, "start"),
+    relativeEnd: encodeRelativeAnchor(text, to, "start"), // old: end also right-associated
     excerpt: needle,
-    stateAtAnchor: withStateVector ? uint8ArrayToBase64(Y.encodeStateVector(doc)) : undefined,
   };
 }
 
-function resolvedAfter(seed: string, needle: string, edit: (doc: Y.Doc, text: Y.Text) => void, withStateVector: boolean) {
+function resolvedAfter(seed: string, needle: string, edit: (d: Y.Doc, t: Y.Text) => void, encoding: "new" | "legacy") {
   const doc = new Y.Doc();
   const text = doc.getText("content");
   doc.transact(() => text.insert(0, seed));
-  const anchor = anchorOn(doc, text, needle, withStateVector);
+  const anchor = anchorOn(doc, text, needle, encoding);
   edit(doc, text);
   return resolveThreadAnchorLive(anchor, doc, text.toString()).resolved;
 }
 
-const SEED = "The quick brown fox jumps over the lazy dog";
-const NEEDLE = "brown fox";
+const S = "big fox jumps over the lazy dog";
+const N = "big fox";
 
-// newAnchored / legacyAnchored = the signed expected `resolved` on each path.
+// newAlive / legacyAlive = signed expected `resolved` on each path.
 const ROWS: Array<{
   name: string;
-  edit: (doc: Y.Doc, text: Y.Text) => void;
-  newAnchored: boolean;
-  legacyAnchored: boolean;
+  edit: (d: Y.Doc, t: Y.Text) => void;
+  newAlive: boolean;
+  legacyAlive: boolean;
 }> = [
-  { name: "1 delete exact range", newAnchored: false, legacyAnchored: false,
-    edit: (d, t) => { const i = t.toString().indexOf(NEEDLE); d.transact(() => t.delete(i, NEEDLE.length)); } },
-  { name: "2 delete whole doc", newAnchored: false, legacyAnchored: false,
+  { name: "1 type at END (no growth)", newAlive: true, legacyAlive: true,
+    edit: (d, t) => { const i = t.toString().indexOf(N) + N.length; d.transact(() => t.insert(i, "123")); } },
+  { name: "2 type at START (no growth)", newAlive: true, legacyAlive: true,
+    edit: (d, t) => { const i = t.toString().indexOf(N); d.transact(() => t.insert(i, "X")); } },
+  { name: "3 insert MIDDLE (adopt/grow)", newAlive: true, legacyAlive: true,
+    edit: (d, t) => { const i = t.toString().indexOf("big ") + 4; d.transact(() => t.insert(i, "brown ")); } },
+  // Row 4 is Alpha's overrule + the red-first flip: NEW alive (survivor "brown"
+  // keeps the region), LEGACY dead (token-overlap can't adopt).
+  { name: "4 grow then delete big+fox (ALIVE new)", newAlive: true, legacyAlive: false,
+    edit: (d, t) => { d.transact(() => { const i = t.toString().indexOf("big ") + 4; t.insert(i, "brown "); }); d.transact(() => { let s = t.toString(); t.delete(s.indexOf("big "), 4); s = t.toString(); t.delete(s.indexOf("fox"), 3); }); } },
+  { name: "5 delete exact range (dead)", newAlive: false, legacyAlive: false,
+    edit: (d, t) => { const i = t.toString().indexOf(N); d.transact(() => t.delete(i, N.length)); } },
+  { name: "6 delete whole doc (dead)", newAlive: false, legacyAlive: false,
     edit: (d, t) => { d.transact(() => t.delete(0, t.length)); } },
-  { name: "3a delete front-overlap (' fox' survives)", newAnchored: true, legacyAnchored: true,
-    edit: (d, t) => { const i = t.toString().indexOf("quick brown"); d.transact(() => t.delete(i, "quick brown".length)); } },
-  { name: "3b delete back-overlap ('brown ' survives)", newAnchored: true, legacyAnchored: true,
-    edit: (d, t) => { const i = t.toString().indexOf("fox jumps"); d.transact(() => t.delete(i, "fox jumps".length)); } },
-  { name: "4 select-all retype", newAnchored: false, legacyAnchored: false,
-    edit: (d, t) => { d.transact(() => { t.delete(0, t.length); t.insert(0, "Completely different words"); }); } },
-  { name: "5 delete then type unrelated (Alpha's bug)", newAnchored: false, legacyAnchored: false,
-    edit: (d, t) => { const i = t.toString().indexOf(NEEDLE); d.transact(() => { t.delete(i, NEEDLE.length); t.insert(i, "red cat"); }); } },
-  // 5b is the documented transition divergence: identity orphans (original chars
-  // are strangers), token-overlap anchors (identical text, err-toward-life).
-  { name: "5b delete then retype SAME text", newAnchored: false, legacyAnchored: true,
-    edit: (d, t) => { const i = t.toString().indexOf(NEEDLE); d.transact(() => { t.delete(i, NEEDLE.length); t.insert(i, "brown fox"); }); } },
-  { name: "6 edit inside range ('brown very fox')", newAnchored: true, legacyAnchored: true,
-    edit: (d, t) => { const i = t.toString().indexOf("brown ") + "brown ".length; d.transact(() => t.insert(i, "very ")); } },
-  { name: "6b typo fix inside range", newAnchored: true, legacyAnchored: true,
-    edit: (d, t) => { const i = t.toString().indexOf("brown") + 1; d.transact(() => { t.delete(i, 1); t.insert(i, "R"); }); } },
-  // 7 requires the clock filter on the identity path; token-overlap catches it too
-  // because the inserted text ("NEW") shares no token with the excerpt.
-  { name: "7 insert inside then delete all originals", newAnchored: false, legacyAnchored: false,
-    edit: (d, t) => {
-      d.transact(() => { const i = t.toString().indexOf("brown") + 1; t.insert(i, "NEW"); });
-      d.transact(() => {
-        const bi = t.toString().indexOf("bNEW"); t.delete(bi, 1);
-        const ri = t.toString().indexOf("rown fox"); t.delete(ri, "rown fox".length);
-      });
-    } },
+  // 7a/7b are Eva's honesty floor: a range that emptied is permanently dead, so BOTH
+  // unrelated retype and IDENTICAL retype are dead under the new criterion.
+  { name: "7a delete then type unrelated (dead)", newAlive: false, legacyAlive: false,
+    edit: (d, t) => { const i = t.toString().indexOf(N); d.transact(() => { t.delete(i, N.length); t.insert(i, "red cat"); }); } },
+  { name: "7b delete then retype IDENTICAL (dead new)", newAlive: false, legacyAlive: true,
+    edit: (d, t) => { const i = t.toString().indexOf(N); d.transact(() => { t.delete(i, N.length); t.insert(i, "big fox"); }); } },
+  { name: "8 typo fix inside (alive)", newAlive: true, legacyAlive: true,
+    edit: (d, t) => { const i = t.toString().indexOf("fox"); d.transact(() => { t.delete(i, 1); t.insert(i, "F"); }); } },
+  { name: "9 delete half leave fox (alive)", newAlive: true, legacyAlive: true,
+    edit: (d, t) => { const i = t.toString().indexOf("big "); d.transact(() => t.delete(i, 4)); } },
 ];
 
-describe("anchor-orphan hybrid regression matrix (NEW=identity, LEGACY=token)", () => {
+describe("anchor-continuity matrix (NEW=span-empty, LEGACY=token)", () => {
   for (const row of ROWS) {
-    it(`${row.name} — new anchor (identity walk)`, () => {
-      expect(resolvedAfter(SEED, NEEDLE, row.edit, true)).toBe(row.newAnchored);
+    it(`${row.name} — new encoding`, () => {
+      expect(resolvedAfter(S, N, row.edit, "new")).toBe(row.newAlive);
     });
-    it(`${row.name} — legacy anchor (token overlap)`, () => {
-      expect(resolvedAfter(SEED, NEEDLE, row.edit, false)).toBe(row.legacyAnchored);
+    it(`${row.name} — legacy encoding`, () => {
+      expect(resolvedAfter(S, N, row.edit, "legacy")).toBe(row.legacyAlive);
     });
   }
 });
