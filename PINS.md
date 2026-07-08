@@ -34,6 +34,13 @@ Seeded 2026-07-07 from the Tests-improvements scorecard (Tom/Bill/Deniz), alongs
 ### Auth & isolation
 - **A workspace's data is scoped to its members; destructive ops are human-only** — breaks → the authZ matrix (owner/admin/member/non-member) + daemon-bypass traps in the #83/#84 suites.
 
+### Auth & accounts (email-token lifecycle — corpus suite 2.5 audit)
+_Audited 2026-07-08: every rule below is already pinned by a named live-PG test in `backend/internal/notty/server_auth_test.go` — the audit added no tests, it made the coverage a reviewed line here. `accountEmailTokenTTL = 1h`, `accountEmailTokenCooldown = 2m` (`auth.go`)._
+- **Verify/reset tokens expire after their TTL** — breaks → `TestAccountEmailTokensRejectExpiredVerificationAndResetTokens` (expired token → 400, no welcome email; expired-unverified login → 403).
+- **Tokens are purpose-scoped and single-use** — breaks → `TestAccountEmailTokensArePurposeScopedAndSingleUse` (a verify token is rejected by the reset endpoint; a second verify → `email_already_verified`).
+- **A reissued token invalidates the older one; resend respects the cooldown; verify flips the row once** — breaks → `TestVerificationAndPasswordResetRequestsRespectNoopAndCooldownStates` (resend inside cooldown sends nothing; after the cooldown a new token issues and the older token is now rejected; verify sends exactly one welcome email; no-op resend / forgot-password for verified-or-unknown accounts stay silent).
+- **An unverified account is rejected across every surface** — breaks → `TestAuthenticateHumanRequestRejectsUnverifiedAccountJWT` (even a validly-issued JWT for an unverified account is rejected at `/api/auth/me`) + `TestRegisterCreatesUnverifiedAccountAndRequiresEmailVerification` + `TestEmailVerifiedColumnDefaultIsFalse` (the column defaults to false at the DB).
+
 ### Daemon
 - **Daemon lifecycle & install** — breaks → 212 daemon boundary tests + installer lifecycle (shell).
 
