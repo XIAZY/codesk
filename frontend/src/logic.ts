@@ -861,8 +861,9 @@ export function resolveThreadAnchorLive(anchor: ThreadAnchor, ydoc: Y.Doc | null
     const excerptNorm = (anchor.excerpt || "").trim().toLowerCase();
     const collapsed = start === end && excerptNorm.length > 0;
     const resolvedNorm = content.slice(start, end).trim().toLowerCase();
-    const drifted = !collapsed && start !== end && excerptNorm.length > 0 && resolvedNorm.length > 0
-      && !resolvedNorm.includes(excerptNorm) && !excerptNorm.includes(resolvedNorm);
+    const excerptTokens = excerptNorm.split(/\s+/).filter(Boolean);
+    const drifted = !collapsed && start !== end && excerptTokens.length > 0 && resolvedNorm.length > 0
+      && !excerptTokens.some((token) => resolvedNorm.includes(token));
     const lineStarts = lineStartsForText(content);
     const previewEnd = end === start ? Math.min(content.length, start + 80) : end;
     return {
@@ -870,7 +871,7 @@ export function resolveThreadAnchorLive(anchor: ThreadAnchor, ydoc: Y.Doc | null
       start,
       end,
       line: lineForOffset(lineStarts, start),
-      excerpt: (content.slice(start, previewEnd).trim() || anchor.excerpt || "").slice(0, 140),
+      excerpt: (collapsed ? anchor.excerpt || "" : content.slice(start, previewEnd).trim() || anchor.excerpt || "").slice(0, 140),
       resolved: !collapsed && !drifted,
     };
   } catch {

@@ -250,6 +250,61 @@ describe("Yjs editor helpers", () => {
     );
     expect(result.resolved).toBe(true);
   });
+
+  it("pattern 6d: insert punctuation mid-range (comma) → still anchored", () => {
+    const doc1 = new Y.Doc(); doc1.clientID = 1;
+    const t1 = doc1.getText("content");
+    t1.insert(0, "first line\nhello world here\nthird line");
+    const relativeStart = encodeRelativeAnchor(t1, 11);
+    const relativeEnd = encodeRelativeAnchor(t1, 22);
+
+    const doc2 = new Y.Doc(); doc2.clientID = 2;
+    Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
+    doc2.getText("content").insert(16, ",");
+    Y.applyUpdate(doc1, Y.encodeStateAsUpdate(doc2));
+
+    const result = resolveThreadAnchorLive(
+      { kind: "text-range", relativeStart, relativeEnd, excerpt: "hello world" },
+      doc1, t1.toString(),
+    );
+    expect(result.resolved).toBe(true);
+  });
+
+  it("pattern 6e: insert word mid-range → still anchored", () => {
+    const doc1 = new Y.Doc(); doc1.clientID = 1;
+    const t1 = doc1.getText("content");
+    t1.insert(0, "first line\nhello world here\nthird line");
+    const relativeStart = encodeRelativeAnchor(t1, 11);
+    const relativeEnd = encodeRelativeAnchor(t1, 22);
+
+    const doc2 = new Y.Doc(); doc2.clientID = 2;
+    Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
+    doc2.getText("content").insert(17, "beautiful ");
+    Y.applyUpdate(doc1, Y.encodeStateAsUpdate(doc2));
+
+    const result = resolveThreadAnchorLive(
+      { kind: "text-range", relativeStart, relativeEnd, excerpt: "hello world" },
+      doc1, t1.toString(),
+    );
+    expect(result.resolved).toBe(true);
+  });
+
+  it("collapsed case shows stored excerpt, not forward-slice", () => {
+    const doc = new Y.Doc();
+    const text = doc.getText("content");
+    doc.transact(() => text.insert(0, "first line\nhello world here\nthird line"));
+    const relativeStart = encodeRelativeAnchor(text, 11);
+    const relativeEnd = encodeRelativeAnchor(text, 22);
+
+    doc.transact(() => text.delete(11, 11));
+
+    const result = resolveThreadAnchorLive(
+      { kind: "text-range", relativeStart, relativeEnd, excerpt: "hello world" },
+      doc, text.toString(),
+    );
+    expect(result.resolved).toBe(false);
+    expect(result.excerpt).toBe("hello world");
+  });
 });
 
 describe("randomWorkspaceName", () => {
