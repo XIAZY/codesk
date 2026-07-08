@@ -111,6 +111,51 @@ describe("Yjs editor helpers", () => {
 
     expect(anchor.resolved).toBe(false);
   });
+
+  it("returns resolved=false when anchored text is deleted (Y.js collapse reproduction)", () => {
+    const doc = new Y.Doc();
+    const text = doc.getText("content");
+    doc.transact(() => text.insert(0, "hello world second line"));
+    const relativeStart = encodeRelativeAnchor(text, 0);
+    const relativeEnd = encodeRelativeAnchor(text, 5);
+
+    const before = resolveThreadAnchorLive(
+      { kind: "text-range", relativeStart, relativeEnd, excerpt: "hello" },
+      doc,
+      text.toString(),
+    );
+    expect(before.resolved).toBe(true);
+    expect(before.start).toBe(0);
+    expect(before.end).toBe(5);
+
+    doc.transact(() => text.delete(0, 5));
+    const after = resolveThreadAnchorLive(
+      { kind: "text-range", relativeStart, relativeEnd, excerpt: "hello" },
+      doc,
+      text.toString(),
+    );
+    expect(after.resolved).toBe(false);
+  });
+
+  it("returns resolved=false when entire document is rewritten", () => {
+    const doc = new Y.Doc();
+    const text = doc.getText("content");
+    doc.transact(() => text.insert(0, "alpha bravo charlie"));
+    const relativeStart = encodeRelativeAnchor(text, 6);
+    const relativeEnd = encodeRelativeAnchor(text, 11);
+
+    doc.transact(() => {
+      text.delete(0, text.length);
+      text.insert(0, "completely different content");
+    });
+
+    const anchor = resolveThreadAnchorLive(
+      { kind: "text-range", relativeStart, relativeEnd, excerpt: "bravo" },
+      doc,
+      text.toString(),
+    );
+    expect(anchor.resolved).toBe(false);
+  });
 });
 
 describe("randomWorkspaceName", () => {
