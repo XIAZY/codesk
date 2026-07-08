@@ -1,0 +1,67 @@
+package notty
+
+import (
+	"encoding/json"
+	"net/http"
+	"testing"
+)
+
+// Suite 2.3 of the corpus: the error envelope is uniform across status classes. Every error path must
+// return exactly {"error": "<non-empty message>"} — one key, a non-null non-empty string — so the frontend
+// can parse any failure the same way regardless of which handler or class produced it. A handler that
+// invents a different error shape (a bare string, an extra field, a null message, a status/body mismatch)
+// goes red here. Messages themselves are not pinned (they are human copy); the shape and the status are.
+//
+// Triggers use the real handlers: 400 missing-slug, 401 no-credential, 403 non-human on a human-only
+// endpoint, 404 unknown entity. (409 slug-conflict, 410 expired-invite, 413 oversized-diff have known
+// triggers and are the next rows.)
+
+// assertErrorEnvelope asserts the response is the canonical error shape at the expected status.
+func assertErrorEnvelope(t *testing.T, gotStatus int, body []byte, wantStatus int, label string) {
+	t.Helper()
+	if gotStatus != wantStatus {
+		t.Fatalf("%s: got status %d, want %d; body=%s", label, gotStatus, wantStatus, body)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil {
+		t.Fatalf("%s: error body is not a JSON object: %v; body=%s", label, err, body)
+	}
+	if len(obj) != 1 {
+		t.Fatalf("%s: error envelope must have exactly one key, got %d: %s", label, len(obj), body)
+	}
+	raw, ok := obj["error"]
+	if !ok {
+		t.Fatalf("%s: error envelope missing the \"error\" key: %s", label, body)
+	}
+	var message string
+	if err := json.Unmarshal(raw, &message); err != nil {
+		t.Fatalf("%s: \"error\" is not a JSON string (null or object?): %s", label, body)
+	}
+	if message == "" {
+		t.Fatalf("%s: \"error\" message is empty", label)
+	}
+}
+
+func TestContractErrorEnvelopePerClass(t *testing.T) {
+	_, router := newAuthTestServer(t)
+	fx := buildContractPopulatedFixture(t, router)
+	ws := "/api/workspaces/" + fx.WorkspaceID
+
+	// 400 — a create-workspace request missing its required slug.
+	rec := authTestRequest(t, router, http.MethodPost, "/api/workspaces", fx.OwnerToken, nil, CreateWorkspaceRequest{Name: "No Slug"})
+	assertErrorEnvelope(t, rec.Code, rec.Body.Bytes(), http.StatusBadRequest, "400 missing slug")
+
+	// 401 — an authenticated endpoint with no credential.
+	rec = authTestRequest(t, router, http.MethodGet, "/api/auth/me", "", nil, nil)
+	assertErrorEnvelope(t, rec.Code, rec.Body.Bytes(), http.StatusUnauthorized, "401 no credential")
+
+	// 403 — a non-human principal (a daemon token) on a human-only endpoint (create agent).
+	rec = authTestRequest(t, router, http.MethodPost, ws+"/daemons/"+fx.DaemonID+"/agents", fx.DaemonToken, nil, CreateAgentRequest{
+		Handle: "forbidden-agent", Name: "Forbidden", Role: "should be rejected", Kind: "codex",
+	})
+	assertErrorEnvelope(t, rec.Code, rec.Body.Bytes(), http.StatusForbidden, "403 non-human on human-only endpoint")
+
+	// 404 — a GET for a thread id that does not exist in this workspace.
+	rec = authTestRequest(t, router, http.MethodGet, ws+"/threads/00000000-0000-0000-0000-000000000000", fx.OwnerToken, nil, nil)
+	assertErrorEnvelope(t, rec.Code, rec.Body.Bytes(), http.StatusNotFound, "404 unknown thread")
+}
