@@ -365,6 +365,93 @@ func TestClaudeStartTurnWithoutSpawnFails(t *testing.T) {
 	}
 }
 
+// A full events channel must never lose a lifecycle event (task #12). The old
+// emit dropped on full, so a dropped turn-end wedged the session as "working"
+// forever with no external cause. This pins the guarantee at the readLoop
+// seam: fill the channel to capacity, feed readLoop a real result line, and
+// the turn-end must still come out the other end once the consumer drains.
+func TestClaudeFullChannelCannotLoseTurnEnd(t *testing.T) {
+	process := newTestClaudeProcess(t, writeFakeClaude(t))
+	process.mu.Lock()
+	process.sessionID = "sess_full"
+	process.activeTurn = "turn_full"
+	process.mu.Unlock()
+	for i := 0; i < cap(process.events); i++ {
+		process.events <- RuntimeEvent{Kind: RuntimeEventIdle}
+	}
+
+	readDone := make(chan struct{})
+	go func() {
+		process.readLoop(strings.NewReader(`{"type":"result","subtype":"success","session_id":"sess_full"}` + "\n"))
+		close(readDone)
+	}()
+
+	// Do not drain until readLoop has made its emit attempt against the full
+	// channel — draining first frees a slot and the drop-on-full bug this test
+	// pins would never trigger. A lossy readLoop returns immediately after
+	// dropping (readDone closes); the fixed one blocks in the emit, so the
+	// timeout arm is how the green path proceeds.
+	select {
+	case <-readDone:
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	deadline := time.After(5 * time.Second)
+	drained := 0
+	for {
+		select {
+		case event := <-process.events:
+			if event.Kind == RuntimeEventIdle {
+				drained++
+				continue
+			}
+			if event.Kind != RuntimeEventTurnCompleted || event.TurnID != "turn_full" || event.SessionID != "sess_full" {
+				t.Fatalf("expected the blocked turn-end, got %#v", event)
+			}
+		case <-deadline:
+			t.Fatalf("turn-end was lost: drained %d filler events and it never arrived", drained)
+		}
+		break
+	}
+	select {
+	case <-readDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("readLoop did not return after its turn-end was delivered")
+	}
+}
+
+// The blocking guarantee needs a release valve: the supervisor's failure paths
+// can Stop a process before consumeEvents ever attaches, and a lifecycle emit
+// blocked on a full channel must not pin readLoop (and the exit goroutine
+// behind it) forever. The stop signal releases the emitter; the event is
+// discarded because a stopped process is terminal. This drives signalStop
+// directly rather than Stop() so the events channel stays open — closing it
+// under a blocked emitter is exactly the race prod ordering forbids.
+func TestClaudeStopSignalReleasesBlockedLifecycleEmit(t *testing.T) {
+	process := newTestClaudeProcess(t, writeFakeClaude(t))
+	for i := 0; i < cap(process.events); i++ {
+		process.events <- RuntimeEvent{Kind: RuntimeEventIdle}
+	}
+
+	emitted := make(chan struct{})
+	go func() {
+		process.emitLifecycle(RuntimeEvent{Kind: RuntimeEventTurnCompleted, TurnID: "turn_blocked"})
+		close(emitted)
+	}()
+	select {
+	case <-emitted:
+		t.Fatal("emit must block while the channel is full and the process is live")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	process.signalStop()
+	select {
+	case <-emitted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stop signal did not release the blocked lifecycle emit")
+	}
+}
+
 func TestClaudeStopWithoutSpawnClosesEvents(t *testing.T) {
 	process := newTestClaudeProcess(t, writeFakeClaude(t))
 
@@ -444,6 +531,13 @@ func TestClaudeStopDuringHandshakeClosesEvents(t *testing.T) {
 // session id must recover into a fresh session and complete a turn.
 func TestAgentSessionSupervisorRunsClaudeRuntime(t *testing.T) {
 	t.Setenv("FAKE_CLAUDE_FAIL_RESUME", "1")
+	// Hold the turn open until an explicit interrupt (task #13). The status
+	// syncer coalesces to the LATEST state per agent — intermediate states are
+	// droppable by design — so a fake claude that finishes its turn instantly
+	// races "idle" over "working" and a loaded runner loses the "working"
+	// update the old test asserted on. Holding the turn makes "working" the
+	// stable latest state until the test has observed it and interrupts.
+	t.Setenv("FAKE_CLAUDE_HOLD_TURN", "1")
 	cfg := Config{
 		ClaudeCommand:      writeFakeClaude(t),
 		DataDir:            t.TempDir(),
@@ -479,6 +573,19 @@ func TestAgentSessionSupervisorRunsClaudeRuntime(t *testing.T) {
 	working := waitForSessionStatus(t, updates, "working")
 	if working.CurrentTurnID == "" {
 		t.Fatalf("expected turn id while working, got %#v", working)
+	}
+
+	// End the held turn only now that "working" has been observed; the result
+	// line the interrupt triggers drives turnCompleted -> idle.
+	supervisor.mu.Lock()
+	process := supervisor.sessions[current.ID].process
+	supervisor.mu.Unlock()
+	if _, err := process.WriteStdin(context.Background(), RuntimeInput{
+		Kind:      RuntimeInputInterruptTurn,
+		SessionID: working.SessionID,
+		TurnID:    working.CurrentTurnID,
+	}); err != nil {
+		t.Fatalf("interrupt turn: %v", err)
 	}
 	finished := waitForSessionStatus(t, updates, "idle")
 	if finished.SessionID != idle.SessionID {
