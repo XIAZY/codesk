@@ -342,6 +342,82 @@ describe("ThreadsPanel orphan warning", () => {
     expect(container.querySelector(".thread-orphan-warning")).toBeNull();
   });
 
+  it("shows no orphan warning when threadAnchorInfo is empty (pre-sync state)", () => {
+    const { container } = render(
+      <ThreadsPanel
+        api={mockApi()}
+        workspaceId="ws"
+        threads={[threadFixture({ id: "t1", status: "open", anchor: { kind: "range", excerpt: "some text" } })]}
+        threadAnchorInfo={{}}
+        selectedThreadId=""
+        onSelectThread={vi.fn()}
+        onJumpToThread={vi.fn()}
+        onReply={vi.fn()}
+      />,
+    );
+
+    expect(container.querySelector(".titem.orphaned")).toBeNull();
+    expect(container.querySelector(".thread-orphan-warning")).toBeNull();
+  });
+
+  it("shows no orphan warning when threadAnchorInfo is omitted (pre-mount state)", () => {
+    const { container } = render(
+      <ThreadsPanel
+        api={mockApi()}
+        workspaceId="ws"
+        threads={[threadFixture({ id: "t1", status: "open", anchor: { kind: "range", excerpt: "some text" } })]}
+        selectedThreadId=""
+        onSelectThread={vi.fn()}
+        onJumpToThread={vi.fn()}
+        onReply={vi.fn()}
+      />,
+    );
+
+    expect(container.querySelector(".titem.orphaned")).toBeNull();
+    expect(container.querySelector(".thread-orphan-warning")).toBeNull();
+  });
+
+  it("transitions from no warning to correct state when anchor info arrives", () => {
+    const { container, rerender } = render(
+      <ThreadsPanel
+        api={mockApi()}
+        workspaceId="ws"
+        threads={[
+          threadFixture({ id: "t1", status: "open", anchor: { kind: "range", excerpt: "alive text" } }),
+          threadFixture({ id: "t2", status: "open", anchor: { kind: "range", excerpt: "dead text" } }),
+        ]}
+        threadAnchorInfo={{}}
+        selectedThreadId=""
+        onSelectThread={vi.fn()}
+        onJumpToThread={vi.fn()}
+        onReply={vi.fn()}
+      />,
+    );
+
+    expect(container.querySelector(".titem.orphaned")).toBeNull();
+    expect(container.querySelector(".thread-orphan-warning")).toBeNull();
+
+    rerender(
+      <ThreadsPanel
+        api={mockApi()}
+        workspaceId="ws"
+        threads={[
+          threadFixture({ id: "t1", status: "open", anchor: { kind: "range", excerpt: "alive text" } }),
+          threadFixture({ id: "t2", status: "open", anchor: { kind: "range", excerpt: "dead text" } }),
+        ]}
+        threadAnchorInfo={{ t1: { orphaned: false, line: 5 }, t2: { orphaned: true, line: 0 } }}
+        selectedThreadId=""
+        onSelectThread={vi.fn()}
+        onJumpToThread={vi.fn()}
+        onReply={vi.fn()}
+      />,
+    );
+
+    expect(container.querySelectorAll(".titem.orphaned")).toHaveLength(1);
+    expect(container.querySelector(".thread-orphan-warning")).toBeTruthy();
+    expect(container.querySelector(".thread-jump-link")?.textContent).toContain("Jump to line 5");
+  });
+
   it("shows re-anchor link on orphan card when onReanchorThread is provided", () => {
     const onReanchorThread = vi.fn();
     const { container } = render(
