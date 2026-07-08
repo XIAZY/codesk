@@ -2564,7 +2564,7 @@ export function MetricCard({ label, value, tone }: { label: string; value: numbe
   );
 }
 
-function DocumentEditor({
+export function DocumentEditor({
   api,
   token,
   workspaceId,
