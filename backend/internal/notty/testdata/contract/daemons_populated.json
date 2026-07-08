@@ -1,0 +1,26 @@
+{
+  "daemons": [
+    {
+      "arch": "arm64",
+      "connectionStatus": "online",
+      "createdAt": "<ts>",
+      "deletedAt": "<ts>",
+      "id": "<id-1>",
+      "lastSeenAgeSeconds": "<n>",
+      "lastSeenAt": "<ts>",
+      "name": "Contract daemon",
+      "os": "linux",
+      "runtimes": [
+        {
+          "available": true,
+          "kind": "codex",
+          "path": "/usr/local/bin/codex",
+          "version": "codex-cli 0.134.0"
+        }
+      ],
+      "status": "active",
+      "version": "0.62.0",
+      "workspaceId": "<id-2>"
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "thread": {
+    "anchor": {
+      "excerpt": "contract",
+      "kind": "document"
+    },
+    "createdAt": "<ts>",
+    "createdByHandle": "contract-agent",
+    "createdById": "<id-1>",
+    "createdByName": "Contract Agent",
+    "createdByType": "agent",
+    "documentId": "<id-2>",
+    "id": "<id-3>",
+    "messages": [
+      {
+        "authorHandle": "contract-agent",
+        "authorId": "<id-1>",
+        "authorName": "Contract Agent",
+        "authorType": "agent",
+        "body": "A populated-state thread authored by the agent.",
+        "createdAt": "<ts>",
+        "id": "<id-4>",
+        "kind": "comment",
+        "threadId": "<id-3>"
+      }
+    ],
+    "participantHandles": [
+      "contract-agent"
+    ],
+    "participantIds": [
+      "<id-1>"
+    ],
+    "status": "open",
+    "title": "Contract thread",
+    "updatedAt": "<ts>"
+  }
+}

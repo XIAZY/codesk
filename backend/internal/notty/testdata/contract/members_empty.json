@@ -1,0 +1,15 @@
+{
+  "members": [
+    {
+      "acceptedAt": "<ts>",
+      "accountId": "<id-1>",
+      "createdAt": "<ts>",
+      "membershipRole": "owner",
+      "status": "active",
+      "userHandle": "owner",
+      "userId": "<id-2>",
+      "userName": "Contract Endpoints Empty Owner",
+      "workspaceId": "<id-3>"
+    }
+  ]
+}
