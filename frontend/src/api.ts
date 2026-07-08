@@ -174,13 +174,6 @@ export class ApiClient {
     });
   }
 
-  async updateThreadAnchor(workspaceId: string, threadId: string, input: { relativeStart: string; relativeEnd: string; excerpt: string; stateAtAnchor?: string }) {
-    return this.request<{ thread: ThreadItem }>(workspacePath(workspaceId, `/threads/${encodeURIComponent(threadId)}/anchor`), {
-      method: "PATCH",
-      body: JSON.stringify(input),
-    });
-  }
-
   async createDaemon(workspaceId: string, name: string) {
     return this.request<{ daemon: Daemon; token: string }>(workspacePath(workspaceId, "/daemons"), {
       method: "POST",
