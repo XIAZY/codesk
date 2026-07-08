@@ -77,8 +77,8 @@ describe("Yjs editor helpers", () => {
     const doc = new Y.Doc();
     const text = doc.getText("content");
     doc.transact(() => text.insert(0, "alpha bravo charlie"));
-    const relativeStart = encodeRelativeAnchor(text, 6);
-    const relativeEnd = encodeRelativeAnchor(text, 11);
+    const relativeStart = encodeRelativeAnchor(text, 6, "start");
+    const relativeEnd = encodeRelativeAnchor(text, 11, "end");
     doc.transact(() => text.insert(0, "intro "));
 
     const anchor = resolveThreadAnchorLive(
@@ -98,8 +98,8 @@ describe("Yjs editor helpers", () => {
     const populatedDoc = new Y.Doc();
     const populatedText = populatedDoc.getText("content");
     populatedDoc.transact(() => populatedText.insert(0, "hello world"));
-    const relativeStart = encodeRelativeAnchor(populatedText, 0);
-    const relativeEnd = encodeRelativeAnchor(populatedText, 5);
+    const relativeStart = encodeRelativeAnchor(populatedText, 0, "start");
+    const relativeEnd = encodeRelativeAnchor(populatedText, 5, "end");
 
     const emptyDoc = new Y.Doc();
     emptyDoc.getText("content");
@@ -116,8 +116,8 @@ describe("Yjs editor helpers", () => {
     const doc1 = new Y.Doc(); doc1.clientID = 1;
     const t1 = doc1.getText("content");
     t1.insert(0, "first line\nhello world here\nthird line");
-    const relativeStart = encodeRelativeAnchor(t1, 11);
-    const relativeEnd = encodeRelativeAnchor(t1, 22);
+    const relativeStart = encodeRelativeAnchor(t1, 11, "start");
+    const relativeEnd = encodeRelativeAnchor(t1, 22, "end");
 
     const doc2 = new Y.Doc(); doc2.clientID = 2;
     Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
@@ -135,8 +135,8 @@ describe("Yjs editor helpers", () => {
     const doc1 = new Y.Doc(); doc1.clientID = 1;
     const t1 = doc1.getText("content");
     t1.insert(0, "first line\nhello world here\nthird line");
-    const relativeStart = encodeRelativeAnchor(t1, 11);
-    const relativeEnd = encodeRelativeAnchor(t1, 22);
+    const relativeStart = encodeRelativeAnchor(t1, 11, "start");
+    const relativeEnd = encodeRelativeAnchor(t1, 22, "end");
 
     const doc2 = new Y.Doc(); doc2.clientID = 2;
     Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
@@ -154,8 +154,8 @@ describe("Yjs editor helpers", () => {
     const doc1 = new Y.Doc(); doc1.clientID = 1;
     const t1 = doc1.getText("content");
     t1.insert(0, "first line\nhello world here\nthird line");
-    const relativeStart = encodeRelativeAnchor(t1, 11);
-    const relativeEnd = encodeRelativeAnchor(t1, 22);
+    const relativeStart = encodeRelativeAnchor(t1, 11, "start");
+    const relativeEnd = encodeRelativeAnchor(t1, 22, "end");
 
     const doc2 = new Y.Doc(); doc2.clientID = 2;
     Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
@@ -175,8 +175,8 @@ describe("Yjs editor helpers", () => {
     const doc1 = new Y.Doc(); doc1.clientID = 1;
     const t1 = doc1.getText("content");
     t1.insert(0, "first line\nhello world here\nthird line");
-    const relativeStart = encodeRelativeAnchor(t1, 11);
-    const relativeEnd = encodeRelativeAnchor(t1, 22);
+    const relativeStart = encodeRelativeAnchor(t1, 11, "start");
+    const relativeEnd = encodeRelativeAnchor(t1, 22, "end");
 
     const doc2 = new Y.Doc(); doc2.clientID = 2;
     Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
@@ -196,8 +196,8 @@ describe("Yjs editor helpers", () => {
     const doc1 = new Y.Doc(); doc1.clientID = 1;
     const t1 = doc1.getText("content");
     t1.insert(0, "first line\nhello world here\nthird line");
-    const relativeStart = encodeRelativeAnchor(t1, 11);
-    const relativeEnd = encodeRelativeAnchor(t1, 22);
+    const relativeStart = encodeRelativeAnchor(t1, 11, "start");
+    const relativeEnd = encodeRelativeAnchor(t1, 22, "end");
 
     const doc2 = new Y.Doc(); doc2.clientID = 2;
     Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
@@ -217,8 +217,8 @@ describe("Yjs editor helpers", () => {
     const doc1 = new Y.Doc(); doc1.clientID = 1;
     const t1 = doc1.getText("content");
     t1.insert(0, "first line\nhello world here\nthird line");
-    const relativeStart = encodeRelativeAnchor(t1, 11);
-    const relativeEnd = encodeRelativeAnchor(t1, 22);
+    const relativeStart = encodeRelativeAnchor(t1, 11, "start");
+    const relativeEnd = encodeRelativeAnchor(t1, 22, "end");
 
     const doc2 = new Y.Doc(); doc2.clientID = 2;
     Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
@@ -236,8 +236,8 @@ describe("Yjs editor helpers", () => {
     const doc1 = new Y.Doc(); doc1.clientID = 1;
     const t1 = doc1.getText("content");
     t1.insert(0, "first line\nhello world here\nthird line");
-    const relativeStart = encodeRelativeAnchor(t1, 11);
-    const relativeEnd = encodeRelativeAnchor(t1, 22);
+    const relativeStart = encodeRelativeAnchor(t1, 11, "start");
+    const relativeEnd = encodeRelativeAnchor(t1, 22, "end");
 
     const doc2 = new Y.Doc(); doc2.clientID = 2;
     Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
@@ -255,8 +255,8 @@ describe("Yjs editor helpers", () => {
     const doc1 = new Y.Doc(); doc1.clientID = 1;
     const t1 = doc1.getText("content");
     t1.insert(0, "first line\nhello world here\nthird line");
-    const relativeStart = encodeRelativeAnchor(t1, 11);
-    const relativeEnd = encodeRelativeAnchor(t1, 22);
+    const relativeStart = encodeRelativeAnchor(t1, 11, "start");
+    const relativeEnd = encodeRelativeAnchor(t1, 22, "end");
 
     const doc2 = new Y.Doc(); doc2.clientID = 2;
     Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
@@ -274,8 +274,8 @@ describe("Yjs editor helpers", () => {
     const doc1 = new Y.Doc(); doc1.clientID = 1;
     const t1 = doc1.getText("content");
     t1.insert(0, "first line\nhello world here\nthird line");
-    const relativeStart = encodeRelativeAnchor(t1, 11);
-    const relativeEnd = encodeRelativeAnchor(t1, 22);
+    const relativeStart = encodeRelativeAnchor(t1, 11, "start");
+    const relativeEnd = encodeRelativeAnchor(t1, 22, "end");
 
     const doc2 = new Y.Doc(); doc2.clientID = 2;
     Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
@@ -293,8 +293,8 @@ describe("Yjs editor helpers", () => {
     const doc1 = new Y.Doc(); doc1.clientID = 1;
     const t1 = doc1.getText("content");
     t1.insert(0, "the end.");
-    const relativeStart = encodeRelativeAnchor(t1, 0);
-    const relativeEnd = encodeRelativeAnchor(t1, 8);
+    const relativeStart = encodeRelativeAnchor(t1, 0, "start");
+    const relativeEnd = encodeRelativeAnchor(t1, 8, "end");
 
     const doc2 = new Y.Doc(); doc2.clientID = 2;
     Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
@@ -313,8 +313,8 @@ describe("Yjs editor helpers", () => {
     const doc1 = new Y.Doc(); doc1.clientID = 1;
     const t1 = doc1.getText("content");
     t1.insert(0, "a cat sat on the mat");
-    const relativeStart = encodeRelativeAnchor(t1, 0);
-    const relativeEnd = encodeRelativeAnchor(t1, 5);
+    const relativeStart = encodeRelativeAnchor(t1, 0, "start");
+    const relativeEnd = encodeRelativeAnchor(t1, 5, "end");
 
     const doc2 = new Y.Doc(); doc2.clientID = 2;
     Y.applyUpdate(doc2, Y.encodeStateAsUpdate(doc1));
@@ -334,8 +334,8 @@ describe("Yjs editor helpers", () => {
     const doc = new Y.Doc();
     const text = doc.getText("content");
     doc.transact(() => text.insert(0, "first line\nhello world here\nthird line"));
-    const relativeStart = encodeRelativeAnchor(text, 11);
-    const relativeEnd = encodeRelativeAnchor(text, 22);
+    const relativeStart = encodeRelativeAnchor(text, 11, "start");
+    const relativeEnd = encodeRelativeAnchor(text, 22, "end");
 
     doc.transact(() => text.delete(11, 11));
 

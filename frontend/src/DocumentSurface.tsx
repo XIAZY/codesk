@@ -373,8 +373,8 @@ function selectionFromView(view: EditorView, ytext: Y.Text): SurfaceSelection | 
     end,
     title,
     excerpt,
-    relativeStart: encodeRelativeAnchor(ytext, start),
-    relativeEnd: encodeRelativeAnchor(ytext, end),
+    relativeStart: encodeRelativeAnchor(ytext, start, "start"),
+    relativeEnd: encodeRelativeAnchor(ytext, end, "end"),
     stateAtAnchor: ytext.doc ? uint8ArrayToBase64(Y.encodeStateVector(ytext.doc)) : "",
     point: {
       x: coords ? coords.left : 24,

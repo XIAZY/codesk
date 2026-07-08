@@ -140,8 +140,8 @@ describe("DocumentSurface", () => {
       status: "open",
       anchor: {
         kind: "text-range",
-        relativeStart: encodeRelativeAnchor(ytext, 6),
-        relativeEnd: encodeRelativeAnchor(ytext, 11),
+        relativeStart: encodeRelativeAnchor(ytext, 6, "start"),
+        relativeEnd: encodeRelativeAnchor(ytext, 11, "end"),
         excerpt: "bravo",
       },
       participantIds: [],
@@ -173,8 +173,8 @@ describe("DocumentSurface", () => {
       status: "open",
       anchor: {
         kind: "text-range",
-        relativeStart: encodeRelativeAnchor(ytext, 6),
-        relativeEnd: encodeRelativeAnchor(ytext, 11),
+        relativeStart: encodeRelativeAnchor(ytext, 6, "start"),
+        relativeEnd: encodeRelativeAnchor(ytext, 11, "end"),
         excerpt: "bravo",
       },
       participantIds: [],

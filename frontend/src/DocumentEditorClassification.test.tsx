@@ -54,8 +54,8 @@ function makeThread(ydoc: Y.Doc, id: string, text: string, start: number, end: n
     status: "open",
     anchor: {
       kind: "text-range",
-      relativeStart: encodeRelativeAnchor(ytext, start),
-      relativeEnd: encodeRelativeAnchor(ytext, end),
+      relativeStart: encodeRelativeAnchor(ytext, start, "start"),
+      relativeEnd: encodeRelativeAnchor(ytext, end, "end"),
       excerpt: text.slice(start, end),
     },
     participantIds: [],

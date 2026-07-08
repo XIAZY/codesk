@@ -838,79 +838,6 @@ export function reduceWorkspaceEvent(state: WorkspaceState, event: WorkspaceEven
   return state;
 }
 
-// Minimal view of the internal Y.js item chain we traverse for orphan detection.
-// Y.js keeps deleted characters as walkable tombstoned structs in a live doc, so
-// the chain is the source of truth for character identity.
-type YChainItem = {
-  id: { client: number; clock: number };
-  length: number;
-  deleted: boolean;
-  countable: boolean;
-  right: YChainItem | null;
-};
-
-function decodeStateVectorSafe(value: string | undefined | null): Map<number, number> | null {
-  if (!value) return null;
-  try {
-    return Y.decodeStateVector(base64ToUint8Array(value));
-  } catch {
-    return null;
-  }
-}
-
-// First-principle orphan detection for anchors that carry a creation-time state
-// vector: an anchor is alive iff any of the ORIGINAL characters the user anchored
-// still exist un-tombstoned. We walk the Y.js item chain between the two relative
-// positions' embedded item IDs — assoc-immune, since resolved indices shift with
-// association params but item IDs do not — count live original characters, and
-// treat zero survivors as orphaned. `sv` (the state vector captured at anchor
-// creation) filters out characters inserted AFTER anchor time, so "surviving
-// ORIGINAL" is exact even for the insert-inside-then-delete-originals edit order.
-function countSurvivingOriginalChars(
-  type: Y.AbstractType<unknown>,
-  startRP: Y.RelativePosition,
-  endRP: Y.RelativePosition,
-  sv: Map<number, number>,
-): number {
-  const startId = startRP.item;
-  const endId = endRP.item;
-  const startInclusive = (startRP.assoc ?? 0) >= 0; // startId's char is anchored, vs the char after it
-  const endInclusive = (endRP.assoc ?? 0) < 0;      // endId's char is anchored, vs an exclusive upper bound
-
-  const isOriginal = (client: number, clock: number) => {
-    const frontier = sv.get(client);
-    return frontier !== undefined && clock < frontier;
-  };
-
-  let surviving = 0;
-  let inRange = startId === null; // null start => the position is at the type start
-  let item = (type as unknown as { _start: YChainItem | null })._start;
-
-  while (item) {
-    const { client, clock } = item.id;
-    const len = item.length;
-    const coversStart = startId !== null && client === startId.client && clock <= startId.clock && startId.clock < clock + len;
-    const coversEnd = endId !== null && client === endId.client && clock <= endId.clock && endId.clock < clock + len;
-
-    if (coversStart) inRange = true;
-
-    if (inRange && !item.deleted && item.countable) {
-      let lo = 0;
-      let hi = len;
-      if (coversStart) lo = startId!.clock - clock + (startInclusive ? 0 : 1);
-      if (coversEnd) hi = endId!.clock - clock + (endInclusive ? 1 : 0);
-      if (hi > lo && isOriginal(client, clock)) {
-        surviving += hi - lo;
-      }
-    }
-
-    if (coversEnd) break;
-    item = item.right;
-  }
-
-  return surviving;
-}
-
 // Legacy fallback for anchors created before stateAtAnchor existed. Orphaned when
 // the resolved span collapsed (the original range is gone) or drifted to text that
 // shares no token with the stored excerpt. Public-API only (no Y.js internals).
@@ -949,19 +876,23 @@ export function resolveThreadAnchorLive(anchor: ThreadAnchor, ydoc: Y.Doc | null
     }
     const start = Math.max(0, startPosition.index);
     const end = Math.max(start, endPosition.index);
-    // Hybrid criterion — ONE branch point, off state-vector presence:
-    //   • stateAtAnchor present  -> item-identity walk (correct by construction:
-    //     alive iff an ORIGINAL character survives un-tombstoned).
-    //   • absent (legacy anchor) -> token-overlap fallback (public-API, no Y.js
-    //     internals). Weaker on delete-then-retype-identical, but it fixes the
-    //     delete-then-reflow bug for threads created before the field existed; the
-    //     population migrates to identity as threads are created / re-anchored.
-    // The token-overlap path is also the documented retreat if a yjs upgrade
-    // changes item-chain / tombstone behavior. The harness pins both columns.
+    // Continuity criterion — ONE branch point, off the encoding's own geometry.
+    // The end edge's association is self-describing: the assoc-fixed encoding
+    // attaches the end edge LEFT (assoc -1), the old symmetric encoding attaches it
+    // RIGHT (assoc 0). Keying on the assoc — NOT stateAtAnchor presence — is correct
+    // for every cohort, including anchors created between the #102 deploy and this
+    // one that carry a state vector but the OLD geometry: they must take the legacy
+    // path, or delete-then-retype resolves to a non-empty span of unrelated text.
+    //   • new geometry (end attaches LEFT) -> orphaned iff the resolved span is
+    //     EMPTY. Text typed at either boundary lands outside the anchor; a fully
+    //     deleted range collapses and can never be re-entered, so "a moment of
+    //     nothing" is permanent — AlphaToad's ruled continuity semantics, enforced
+    //     by CRDT geometry, no walk, no vector read.
+    //   • old geometry -> token-overlap fallback until the population migrates as
+    //     threads are created / re-anchored.
     const hadExtent = (anchor.excerpt || "").trim().length > 0;
-    const sv = decodeStateVectorSafe(anchor.stateAtAnchor);
-    const orphaned = sv
-      ? hadExtent && countSurvivingOriginalChars(startPosition.type, startRP, endRP, sv) === 0
+    const orphaned = (endRP.assoc ?? 0) < 0
+      ? hadExtent && end === start
       : orphanedByTokenOverlap(anchor.excerpt || "", content.slice(start, end), start, end);
     const lineStarts = lineStartsForText(content);
     const previewEnd = end === start ? Math.min(content.length, start + 80) : end;
@@ -981,9 +912,15 @@ export function resolveThreadAnchorLive(anchor: ThreadAnchor, ydoc: Y.Doc | null
   }
 }
 
-export function encodeRelativeAnchor(text: Y.Text, index: number) {
+// Encode a range endpoint as a Y.js relative position. The two edges take OPPOSITE
+// associations so the anchor tracks a living range: the start edge attaches to the
+// RIGHT (the first anchored character), the end edge attaches to the LEFT (the last
+// anchored character). Text typed at either boundary therefore lands OUTSIDE the
+// anchor, and a fully-deleted range collapses to an empty span that can never be
+// re-entered — the geometric basis of continuity orphan detection.
+export function encodeRelativeAnchor(text: Y.Text, index: number, edge: "start" | "end") {
   const safeIndex = Math.max(0, Math.min(index, text.length));
-  const assoc = safeIndex >= text.length ? -1 : 0;
+  const assoc = edge === "end" ? -1 : 0;
   return uint8ArrayToBase64(Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(text, safeIndex, assoc)));
 }
 
