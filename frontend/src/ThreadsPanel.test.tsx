@@ -342,7 +342,7 @@ describe("ThreadsPanel orphan warning", () => {
     expect(container.querySelector(".thread-orphan-warning")).toBeNull();
   });
 
-  it("shows no orphan warning when threadAnchorInfo is empty (pre-sync state)", () => {
+  it("shows no orphan warning or re-anchor button when threadAnchorInfo is empty (pre-sync state)", () => {
     const { container } = render(
       <ThreadsPanel
         api={mockApi()}
@@ -353,11 +353,13 @@ describe("ThreadsPanel orphan warning", () => {
         onSelectThread={vi.fn()}
         onJumpToThread={vi.fn()}
         onReply={vi.fn()}
+        onReanchorThread={vi.fn()}
       />,
     );
 
     expect(container.querySelector(".titem.orphaned")).toBeNull();
     expect(container.querySelector(".thread-orphan-warning")).toBeNull();
+    expect(container.querySelector(".thread-reanchor-link")).toBeNull();
   });
 
   it("shows no orphan warning when threadAnchorInfo is omitted (pre-mount state)", () => {
