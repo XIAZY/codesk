@@ -10,7 +10,9 @@ set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 PROJECT="${NOTTY_E2E_PROJECT:-notty-e2e-$$}"
-COMPOSE_FILE="$ROOT_DIR/docker-compose.yml"
+# The regression compose is self-contained (inline JWT secret + fake Mailgun, no secrets file) — the
+# stack the (c) seeding pattern targets; the main compose needs deploy secrets we don't want here.
+COMPOSE_FILE="$ROOT_DIR/test/regression/docker-compose.yml"
 PREVIEW_PORT="${NOTTY_E2E_PREVIEW_PORT:-4173}"
 DC="docker compose -p $PROJECT -f $COMPOSE_FILE"
 
