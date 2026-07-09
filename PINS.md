@@ -66,8 +66,17 @@ _Audited 2026-07-08: every rule below is already pinned by a named live-PG test 
 ## Gap — not yet pinned (business-weight order)
 1. **The full agent-turn wire round-trip (corpus 4.3)** — one complete notification turn over the real daemon↔backend protocol: mention → agent-event → daemon claim → runtime turn → reply → complete. The claim-contention and acting-agent-token halves are now pinned above (4.1/4.2), and the daemon's turn/session logic is pinned in-process ("Session state machine"); what remains is the over-the-wire round-trip. _Prerequisite: a compose-level **fake-runtime** harness that does not exist yet — `test/regression/sync_regression_test.go` only drives doc-sync convergence, and the daemon fake-driver is in-process only. Fast-follow: @Danilo, its own non-blocking CI job (burn-in, then promote to required), per the #94 ruling that removed the nightly lane._
 2. **The remaining WS event-type goldens (corpus 3.1)** — the `workspace.snapshot` shape and the `agent.run.updated` redaction are pinned above; the other event types (daemon/agent/thread/presence/activity created/updated/deleted, workspace.updated/deleted) still want a canonicalized golden each. Mechanical — trigger each, capture off the broker, golden the `data`. _Fast-follow: @Danilo._
+3. **Approved-but-staged browser extensions (corpus TOC)** — flows approved in the locked corpus TOC and staged behind the suite-1 spine, not yet built. The suite-1 smoke walks login / workspace-switch / open+edit today; these extend the browser tier feature-by-feature:
+   - **login-failure UX** — a bad credential shows a visible error, no crash (TOC 1.5).
+   - **invite-accept via browser** — accept a workspace invite through the UI (TOC 1.7).
+   - **thread create + reply via the UI** (TOC 1.8).
+   - **two-browser co-editing** — the collaboration promise walked in two real UIs (simultaneous edits converge).
+   - **document-tree ops via the UI** — rename / move / delete a document.
+   - **token-expiry handling** — an expired session surfaces re-auth, no white-screen.
+   _Fast-follow: @Danilo; each is one browser row on the existing e2e harness. Full descriptions in the corpus TOC._
 
-_User-facing browser flows (login / switch / edit) are now pinned above (Browser flows) — the corpus suite 1 smoke walks them; thread-reply via the UI (1.8) remains a planned extension._
+_What a pin can never carry is the **why** — that lives in the regression catalog and the decision
+records. The register says what breaks and what notices; the catalog says what we chose and why._
 
 _What a pin can never carry is the **why** — that lives in the regression catalog and the decision
 records. The register says what breaks and what notices; the catalog says what we chose and why._
