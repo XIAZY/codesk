@@ -75,6 +75,9 @@ func (s *Server) Routes() http.Handler {
 		router.Patch("/agent-inbox/{id}", s.handleUpdateAgentInboxItem)
 		router.Get("/agents/{id}/documents/{documentID}/diff", s.handleAgentDocumentDiff)
 		router.Post("/agents/{id}/documents/{documentID}/viewed", s.handleMarkAgentDocumentViewed)
+		router.Get("/agents/{id}/document-subscriptions", s.handleListAgentDocumentSubscriptions)
+		router.Post("/agents/{id}/document-subscriptions", s.handleSubscribeAgentDocument)
+		router.Delete("/agents/{id}/document-subscriptions/{documentID}", s.handleUnsubscribeAgentDocument)
 	})
 	router.Group(func(router chi.Router) {
 		router.Use(s.requireWorkspace)
