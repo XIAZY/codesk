@@ -372,6 +372,57 @@ func TestToolGatewayListsInboxForRequestedBox(t *testing.T) {
 	}
 }
 
+func TestToolGatewaySubscribeUnsubscribeListDocuments(t *testing.T) {
+	service := newToolGatewayTestService(&agent{ID: "agent_1", Handle: "reviewer", Kind: "codex"}, "token_123")
+	service.client = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			const path = "/api/agents/agent_1/document-subscriptions"
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == path:
+				return jsonResponse(t, http.StatusOK, toolDocumentSubscriptionsResponse{DocumentIDs: []string{"doc_spec"}}), nil
+			case r.Method == http.MethodGet && r.URL.Path == path:
+				return jsonResponse(t, http.StatusOK, toolDocumentSubscriptionsResponse{DocumentIDs: []string{"doc_spec"}}), nil
+			case r.Method == http.MethodDelete && r.URL.Path == path+"/doc_spec":
+				return jsonResponse(t, http.StatusOK, toolDocumentSubscriptionsResponse{DocumentIDs: []string{}}), nil
+			default:
+				t.Fatalf("unexpected backend request: %s %s", r.Method, r.URL.String())
+				return nil, nil
+			}
+		}),
+	}
+
+	call := func(handler http.HandlerFunc, method, target string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, target, nil)
+		req.Header.Set("Authorization", "Bearer token_123")
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+		return rec
+	}
+
+	// Subscribe proxies POST to the backend and returns the post-change {documentIds}.
+	if rec := call(service.handleSubscribeDocumentTool, http.MethodPost, "/agent-tools/subscribe-document?document_id=doc_spec"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "\"documentIds\":[\"doc_spec\"]") {
+		t.Fatalf("subscribe: status %d body=%s", rec.Code, rec.Body.String())
+	}
+	// List proxies GET.
+	if rec := call(service.handleListDocumentSubscriptionsTool, http.MethodGet, "/agent-tools/list-subscriptions"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "doc_spec") {
+		t.Fatalf("list: status %d body=%s", rec.Code, rec.Body.String())
+	}
+	// Unsubscribe proxies DELETE (to the {documentID} path) and returns the emptied list.
+	if rec := call(service.handleUnsubscribeDocumentTool, http.MethodPost, "/agent-tools/unsubscribe-document?document_id=doc_spec"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "\"documentIds\":[]") {
+		t.Fatalf("unsubscribe: status %d body=%s", rec.Code, rec.Body.String())
+	}
+	// An unknown tool token is rejected before any backend call.
+	if rec := (func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/agent-tools/subscribe-document?document_id=doc_spec", nil)
+		req.Header.Set("Authorization", "Bearer bogus")
+		rec := httptest.NewRecorder()
+		service.handleSubscribeDocumentTool(rec, req)
+		return rec
+	}()); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unknown token: want 401, got %d", rec.Code)
+	}
+}
+
 func TestToolGatewayDiffDocumentUsesVersionQuery(t *testing.T) {
 	service := newToolGatewayTestService(&agent{ID: "agent_1", Handle: "reviewer", Kind: "codex"}, "token_123")
 	service.client = &http.Client{

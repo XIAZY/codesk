@@ -54,6 +54,12 @@ func main() {
 		runCreateThread(baseURL, token, os.Args[2:])
 	case "reply-thread":
 		runReplyThread(baseURL, token, os.Args[2:])
+	case "subscribe-document":
+		runSubscribeDocument(baseURL, token, os.Args[2:])
+	case "unsubscribe-document":
+		runUnsubscribeDocument(baseURL, token, os.Args[2:])
+	case "list-subscriptions":
+		runListSubscriptions(baseURL, token)
 	default:
 		fatalf("unknown command %q", os.Args[1])
 	}
@@ -209,6 +215,34 @@ func runMarkDocumentViewed(baseURL, token string, args []string) {
 		fatalf("--document-id is required")
 	}
 	postJSON(baseURL+"/agent-tools/mark-document-viewed?document_id="+url.QueryEscape(*documentID), token, "")
+}
+
+func runSubscribeDocument(baseURL, token string, args []string) {
+	fs := flag.NewFlagSet("subscribe-document", flag.ExitOnError)
+	documentID := fs.String("document-id", "", "document id to subscribe to")
+	if err := fs.Parse(args); err != nil {
+		fatalf("parse subscribe-document flags: %v", err)
+	}
+	if strings.TrimSpace(*documentID) == "" {
+		fatalf("--document-id is required")
+	}
+	postJSON(baseURL+"/agent-tools/subscribe-document?document_id="+url.QueryEscape(*documentID), token, "")
+}
+
+func runUnsubscribeDocument(baseURL, token string, args []string) {
+	fs := flag.NewFlagSet("unsubscribe-document", flag.ExitOnError)
+	documentID := fs.String("document-id", "", "document id to unsubscribe from")
+	if err := fs.Parse(args); err != nil {
+		fatalf("parse unsubscribe-document flags: %v", err)
+	}
+	if strings.TrimSpace(*documentID) == "" {
+		fatalf("--document-id is required")
+	}
+	postJSON(baseURL+"/agent-tools/unsubscribe-document?document_id="+url.QueryEscape(*documentID), token, "")
+}
+
+func runListSubscriptions(baseURL, token string) {
+	getJSON(baseURL+"/agent-tools/list-subscriptions", token)
 }
 
 func runCreateThread(baseURL, token string, args []string) {
