@@ -8,7 +8,13 @@ RUN go mod download
 RUN scripts/build-yffi.sh
 COPY backend ./backend
 COPY internal ./internal
-RUN CGO_ENABLED=1 GOOS=linux go build -o /bin/notty-backend ./backend/cmd/server
+# Build identity, injected at link time so /healthz can report the served commit.
+# Declared right before the build so changing it only busts this layer.
+ARG NOTTY_COMMIT=dev
+ARG NOTTY_BUILT_AT=unknown
+RUN CGO_ENABLED=1 GOOS=linux go build \
+	-ldflags "-X notty/backend/internal/buildinfo.Commit=${NOTTY_COMMIT} -X notty/backend/internal/buildinfo.Time=${NOTTY_BUILT_AT}" \
+	-o /bin/notty-backend ./backend/cmd/server
 
 FROM alpine:3.20
 WORKDIR /app

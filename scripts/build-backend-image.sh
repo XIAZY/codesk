@@ -6,6 +6,7 @@ root_dir="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
 load_notty_deploy_env "$root_dir"
 
 version="${VERSION:-$(git -C "$root_dir" rev-parse --short HEAD)}"
+built_at="${BUILT_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 docker_repo="${DOCKER_REPO:-alphatoad/notty}"
 backend_image="$docker_repo:backend-$version"
 latest_image="$docker_repo:backend-latest"
@@ -24,6 +25,8 @@ case "$mode" in
 		printf 'Building local backend image %s\n' "$backend_image"
 		docker buildx build \
 			--load \
+			--build-arg NOTTY_COMMIT="$version" \
+			--build-arg NOTTY_BUILT_AT="$built_at" \
 			-f "$root_dir/backend/Dockerfile" \
 			-t "$backend_image" \
 			"$root_dir"
@@ -32,6 +35,8 @@ case "$mode" in
 		printf 'Building and pushing backend image %s\n' "$backend_image"
 		docker buildx build \
 			--platform "$platforms" \
+			--build-arg NOTTY_COMMIT="$version" \
+			--build-arg NOTTY_BUILT_AT="$built_at" \
 			-f "$root_dir/backend/Dockerfile" \
 			-t "$backend_image" \
 			-t "$latest_image" \

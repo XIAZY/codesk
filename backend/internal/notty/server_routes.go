@@ -5,6 +5,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+
+	"notty/backend/internal/buildinfo"
 )
 
 func (s *Server) Routes() http.Handler {
@@ -16,7 +18,13 @@ func (s *Server) Routes() http.Handler {
 	router.Use(cors)
 
 	router.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		// Build identity (commit + build time) so a deploy can be verified with a
+		// single unauthenticated curl instead of route-fingerprinting forensics.
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":  "ok",
+			"commit":  buildinfo.Commit,
+			"builtAt": buildinfo.Time,
+		})
 	})
 
 	router.Post("/api/auth/register", s.handleRegister)

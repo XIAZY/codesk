@@ -56,3 +56,17 @@ ssh "$ssh_host" "cd $quoted_remote_dir && \
 	NOTTY_SERVER_ENV_FILE=notty.server.env NOTTY_SECRETS_ENV_FILE=secrets.env NOTTY_BACKEND_IMAGE=$quoted_backend_image docker compose -f compose.prod.yml --env-file notty.server.env ps"
 
 printf 'Backend deploy complete: %s\n' "$backend_image"
+
+# Verify by curl, not by forensics: the served /healthz must report the commit we
+# just pushed. Fails loud on mismatch so a defective deploy announces itself.
+printf 'Verifying served build identity matches %s...\n' "$version"
+served_commit=""
+for _ in 1 2 3 4 5 6; do
+	served_commit="$(ssh "$ssh_host" "cd $quoted_remote_dir && NOTTY_SERVER_ENV_FILE=notty.server.env NOTTY_SECRETS_ENV_FILE=secrets.env NOTTY_BACKEND_IMAGE=$quoted_backend_image docker compose -f compose.prod.yml --env-file notty.server.env exec -T backend wget -qO- http://127.0.0.1:8080/healthz 2>/dev/null" | sed -n 's/.*"commit":"\([^"]*\)".*/\1/p')"
+	[ -n "$served_commit" ] && break
+	sleep 3
+done
+if [ "$served_commit" != "$version" ]; then
+	die "deploy verification FAILED: /healthz reports commit '$served_commit', expected '$version' — the new image may not be running"
+fi
+printf 'Deploy verified by curl: backend is serving commit %s\n' "$served_commit"
