@@ -179,6 +179,11 @@ func normalizeInboxBox(box string) string {
 	switch strings.TrimSpace(strings.ToLower(strings.ReplaceAll(box, "-", "_"))) {
 	case "general":
 		return "general"
+	case "muted":
+		// Muted is the never-pushed box (task #2) — must be recognized here as on the backend, or the
+		// default branch routes it to for_me (a PUSHED box) and the daemon would surface a muted item as an
+		// actionable notification. Both normalizer copies MUST agree; an adversarial test pins that.
+		return "muted"
 	default:
 		return "for_me"
 	}
