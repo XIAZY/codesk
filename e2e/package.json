@@ -1,0 +1,11 @@
+{
+  "name": "notty-e2e",
+  "private": true,
+  "description": "Browser core-flow smoke (task #14) — Playwright vs the production build + real compose stack",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "account": {
+    "createdAt": "<ts>",
+    "displayName": "Contract Endpoints Owner",
+    "email": "contract-endpoints-owner@example.com",
+    "emailVerified": true,
+    "id": "<id-1>",
+    "lastAccessedWorkspaceId": "<id-2>",
+    "updatedAt": "<ts>"
+  },
+  "workspaces": [
+    {
+      "createdAt": "<ts>",
+      "id": "<id-2>",
+      "name": "Contract Endpoints Workspace",
+      "rootDocumentId": "<id-3>",
+      "slug": "contract-endpoints-workspace",
+      "updatedAt": "<ts>"
+    }
+  ]
+}

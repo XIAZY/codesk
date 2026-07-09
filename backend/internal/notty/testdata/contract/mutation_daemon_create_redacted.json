@@ -1,0 +1,14 @@
+{
+  "daemon": {
+    "connectionStatus": "disconnected",
+    "createdAt": "<ts>",
+    "deletedAt": "<ts>",
+    "id": "<id-1>",
+    "lastSeenAgeSeconds": "<n>",
+    "lastSeenAt": "<ts>",
+    "name": "Redaction daemon",
+    "status": "active",
+    "workspaceId": "<id-2>"
+  },
+  "token": "<redacted-secret>"
+}

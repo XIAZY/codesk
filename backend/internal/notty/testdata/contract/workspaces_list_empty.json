@@ -1,0 +1,12 @@
+{
+  "workspaces": [
+    {
+      "createdAt": "<ts>",
+      "id": "<id-1>",
+      "name": "Contract Endpoints Empty Workspace",
+      "rootDocumentId": "<id-2>",
+      "slug": "contract-endpoints-empty-workspace",
+      "updatedAt": "<ts>"
+    }
+  ]
+}
