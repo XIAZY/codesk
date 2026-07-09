@@ -128,6 +128,14 @@ func TestWorkspaceDeleteRequiresOwnerAndExactNameThenCascades(t *testing.T) {
 	var daemonResponse CreateDaemonResponse
 	authTestJSON(t, router, http.MethodPost, target+"/daemons", owner.Token, CreateDaemonRequest{Name: "Doomed daemon"}, http.StatusCreated, &daemonResponse)
 	authTestStatus(t, router, http.MethodPatch, target+"/last-accessed", owner.Token, UpdateLastAccessedRequest{}, http.StatusOK)
+	// An agent with a document subscription, so the cascade sweep proves the subscription row
+	// disappears rather than passing vacuously against an empty table.
+	authTestReportCodexRuntime(t, router, workspace.ID, daemonResponse.Token)
+	var subscriberAgent Agent
+	authTestJSON(t, router, http.MethodPost, target+"/daemons/"+daemonResponse.Daemon.ID+"/agents", owner.Token, CreateAgentRequest{
+		Handle: "doomed-agent", Name: "Doomed Agent", Role: "subscribes then cascades away", Kind: "codex",
+	}, http.StatusCreated, &subscriberAgent)
+	authTestStatus(t, router, http.MethodPost, target+"/agents/"+subscriberAgent.ID+"/document-subscriptions", owner.Token, SubscribeDocumentRequest{DocumentID: document.ID}, http.StatusOK)
 
 	// Non-owner roles are refused before any destructive work.
 	admin := authTestRegister(t, router, "ws-delete-admin@example.com", "owner-pass", "Delete Admin")
@@ -181,6 +189,7 @@ func TestWorkspaceDeleteRequiresOwnerAndExactNameThenCascades(t *testing.T) {
 		"users", "documents", "document_updates", "document_checkpoints",
 		"threads", "thread_messages", "thread_participants",
 		"agents", "agent_runs", "agent_events", "agent_document_views",
+		"agent_document_subscriptions",
 		"activities", "presences", "daemons",
 		"workspace_members", "workspace_invites",
 	} {
