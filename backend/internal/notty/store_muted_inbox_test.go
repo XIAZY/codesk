@@ -64,6 +64,101 @@ func TestMutedDocumentUpdateDoesNotPushToNonSubscriber(t *testing.T) {
 	}
 }
 
+// Cascade guard: a subscription joins the FK cascade graph, so deleting the agent removes its
+// subscriptions (the same ON DELETE CASCADE FK covers document deletion). Extends the #83 cascade sweep.
+func TestDocumentSubscriptionsCascadeOnAgentDelete(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	store := newPostgresTestWorkspaceStore(t, database)
+	seedCodexDaemonRuntime(t, store)
+	user := seedTestUser(t, store)
+	documentID := mustCreateTestDocument(t, store, "docs/cascade.md", "x\n")
+
+	agent, err := store.CreateAgent(CreateAgentRequest{
+		Handle: "cascade-agent", Name: "Cascade", Role: "subscribes then is deleted", Kind: "codex",
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	if err := store.SubscribeAgentDocument(agent.ID, documentID); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	if subs, err := listDocumentSubscriberAgentIDsPostgres(store.db, store.WorkspaceID(), documentID); err != nil || len(subs) != 1 {
+		t.Fatalf("expected exactly one subscriber before delete (err=%v), got %d", err, len(subs))
+	}
+
+	if _, err := store.DeleteAgent(agent.ID, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"}); err != nil {
+		t.Fatalf("delete agent: %v", err)
+	}
+
+	subs, err := listDocumentSubscriberAgentIDsPostgres(store.db, store.WorkspaceID(), documentID)
+	if err != nil {
+		t.Fatalf("list subscribers after delete: %v", err)
+	}
+	if len(subs) != 0 {
+		t.Fatalf("deleting the agent must cascade-remove its subscriptions, got %d", len(subs))
+	}
+}
+
+// Load-bearing thread-doorbell guard (Tom's ruling 964e6eaa): task #2 removes the DOCUMENT doorbell, and
+// the protocol-test flip deleted the only positive doorbell-fires assertion — so this is now the ONLY pin
+// that a thread event still rings the inbox doorbell. It asserts the FULL positive shape (exactly one
+// agent.inbox.changed for the agent, right type + for_me box) on BOTH thread create and reply. A regression
+// that silently killed thread doorbells (e.g. an over-eager deletion of the fan-out) reds here or nowhere.
+func TestThreadDoorbellFiresForMentionOnCreateAndReply(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	store := newPostgresTestWorkspaceStore(t, database)
+	seedCodexDaemonRuntime(t, store)
+	user := seedTestUser(t, store)
+	documentID := mustCreateTestDocument(t, store, "docs/thread.md", "start\n")
+
+	agent, err := store.CreateAgent(CreateAgentRequest{
+		Handle: "reviewer",
+		Name:   "Reviewer",
+		Role:   "Gets mentioned",
+		Kind:   "codex",
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	assertExactlyOneMentionDoorbell := func(label string) {
+		t.Helper()
+		count := 0
+		for _, c := range store.DrainAgentInboxChanges() {
+			if c.AgentID != agent.ID {
+				continue
+			}
+			count++
+			if c.NotificationType != "thread.mentioned" {
+				t.Fatalf("%s: doorbell type = %q, want thread.mentioned", label, c.NotificationType)
+			}
+			if normalizeInboxBox(c.Box) != "for_me" {
+				t.Fatalf("%s: doorbell box = %q, want for_me", label, c.Box)
+			}
+		}
+		if count != 1 {
+			t.Fatalf("%s: want exactly one inbox doorbell for the agent, got %d", label, count)
+		}
+	}
+
+	store.DrainAgentInboxChanges()
+	thread, _, _, err := store.CreateThread(CreateThreadRequest{
+		DocumentID: documentID, Title: "Question", Body: "please review @reviewer",
+		RelativeStart: "s", RelativeEnd: "e",
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	assertExactlyOneMentionDoorbell("thread create mention")
+
+	if _, _, err := store.ReplyThread(thread.ID, ReplyThreadRequest{Body: "following up @reviewer"}, OperationMeta{
+		ActorID: user.ID, ActorType: "human", Source: "test",
+	}); err != nil {
+		t.Fatalf("reply thread: %v", err)
+	}
+	assertExactlyOneMentionDoorbell("thread reply mention")
+}
+
 // The subscription boundary: subscribing is the ONLY document→push path, and it respects quiescence. A
 // subscribed edit persists exactly one general-box card whose available_at sits in the future (~60s) and
 // SLIDES forward on the next keystroke batch — so the card matures one window after typing stops, not once
