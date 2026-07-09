@@ -36,6 +36,10 @@ const (
 	rootEntriesMapName       = "entriesById"
 )
 
+// documentQuiescenceWindow is how long after a subscribed document's last edit its inbox card matures and
+// becomes deliverable — one delivery per edit session (task #2), not one per keystroke batch.
+const documentQuiescenceWindow = 60 * time.Second
+
 type Store struct {
 	mu            sync.RWMutex
 	state         WorkspaceState
@@ -367,6 +371,28 @@ func (s *Store) DrainAgentInboxChanges() []AgentInboxChangedEvent {
 	return changes
 }
 
+// SubscribeAgentDocument opts an agent in to a document's updates (task #2). Idempotent — a repeat
+// subscribe is a no-op. The FK constraints enforce that the agent and document exist.
+func (s *Store) SubscribeAgentDocument(agentID, documentID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return subscribeAgentDocumentPostgres(s.db, s.state.WorkspaceID, agentID, documentID, time.Now().UTC())
+}
+
+// UnsubscribeAgentDocument removes a subscription. Returns whether a row was removed (idempotent).
+func (s *Store) UnsubscribeAgentDocument(agentID, documentID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return unsubscribeAgentDocumentPostgres(s.db, s.state.WorkspaceID, agentID, documentID)
+}
+
+// ListAgentDocumentSubscriptions returns the document ids an agent is subscribed to.
+func (s *Store) ListAgentDocumentSubscriptions(agentID string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return listAgentDocumentSubscriptionsPostgres(s.db, s.state.WorkspaceID, agentID)
+}
+
 func (s *Store) DrainActivityChanges() []*ActivityEvent {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -604,6 +630,11 @@ func normalizeInboxBox(box string) string {
 	switch strings.TrimSpace(strings.ToLower(strings.ReplaceAll(box, "-", "_"))) {
 	case "general":
 		return "general"
+	case "muted":
+		// Muted is the never-pushed box (task #2). It MUST be recognized here or the default branch below
+		// silently routes it to for_me — a PUSHED box — which is the exact trap that would re-introduce
+		// ambient document pushes. The daemon copy (automation.go) carries the same case.
+		return "muted"
 	default:
 		return "for_me"
 	}
@@ -721,16 +752,20 @@ func (s *Store) syntheticDocumentInboxItemLocked(id string) (*AgentEvent, bool, 
 
 func (s *Store) documentInboxClassificationLocked(agentID string, document *Document) (box string, eventType string, err error) {
 	if document == nil {
-		return "general", "document.updated", nil
+		return "muted", "document.updated", nil
 	}
-	found, _, _, err := documentHasOpenThreadForParticipantPostgres(s.db, s.state.WorkspaceID, document.ID, agentID)
+	// Subscription is the only thing that lifts a document gap out of the muted box (task #2). A subscribed
+	// agent sees the gap in `general` (and gets it pushed via the persisted card); everyone else sees it
+	// only when they explicitly query `--box muted`. Thread proximity no longer promotes to for_me —
+	// thread.mentioned/replied are the sole for_me sources.
+	subscribed, err := isAgentSubscribedToDocumentPostgres(s.db, s.state.WorkspaceID, agentID, document.ID)
 	if err != nil {
 		return "", "", err
 	}
-	if !found {
+	if subscribed {
 		return "general", "document.updated", nil
 	}
-	return "for_me", "document.updated", nil
+	return "muted", "document.updated", nil
 }
 
 func shouldMarkDocumentViewedForEvent(event *AgentEvent) bool {
@@ -2478,14 +2513,22 @@ func (s *Store) enqueueDocumentInboxEventsLocked(q querier, document *Document, 
 	if document == nil || document.Hidden || document.UpdateID <= 1 {
 		return nil, nil
 	}
-	agents, err := listAgentsPostgres(q, s.state.WorkspaceID)
+	// Muted-by-default routing (task #2): a document edit pushes ONLY to agents that explicitly subscribed
+	// to this document. Non-subscribers get nothing — no row, no doorbell — and answer "what changed?" via
+	// the on-demand watermark walk instead. This replaces the old all-agents fan-out that woke everyone on
+	// every keystroke.
+	subscriberIDs, err := listDocumentSubscriberAgentIDsPostgres(q, s.state.WorkspaceID, document.ID)
 	if err != nil {
 		return nil, err
 	}
 	var events []*AgentEvent
-	for _, agent := range agents {
-		if agent == nil {
-			continue
+	for _, agentID := range subscriberIDs {
+		agent, err := getAgentPostgres(q, s.state.WorkspaceID, agentID)
+		if err != nil {
+			if err == ErrNotFound {
+				continue
+			}
+			return nil, err
 		}
 		notify, err := shouldNotifyAgentPostgres(q, s.state.WorkspaceID, agent.ID, meta, "")
 		if err != nil {
@@ -2493,10 +2536,6 @@ func (s *Store) enqueueDocumentInboxEventsLocked(q querier, document *Document, 
 		}
 		if !notify {
 			continue
-		}
-		box, threadID, threadTitle, err := s.documentInboxTargetLocked(q, agent.ID, document)
-		if err != nil {
-			return nil, err
 		}
 		fromUpdateID := int64(0)
 		view, err := getAgentDocumentViewPostgres(q, s.state.WorkspaceID, agent.ID, document.ID)
@@ -2509,7 +2548,9 @@ func (s *Store) enqueueDocumentInboxEventsLocked(q querier, document *Document, 
 		if fromUpdateID >= document.UpdateID {
 			continue
 		}
-		event, err := s.upsertDocumentInboxEventLocked(q, agent, document, box, threadID, threadTitle, fromUpdateID, document.UpdateID)
+		// Subscribed document updates always land in `general`; the old thread-proximity for_me promotion
+		// died with the auto-subscription idea — thread.mentioned/replied are now the only for_me sources.
+		event, err := s.upsertDocumentInboxEventLocked(q, agent, document, "general", "", "", fromUpdateID, document.UpdateID)
 		if err != nil {
 			return nil, err
 		}
@@ -2562,7 +2603,10 @@ func (s *Store) upsertDocumentInboxEventLocked(q querier, agent *Agent, document
 		DedupKey:     fmt.Sprintf("document-updated:%s:%s:%s", box, document.ID, agent.ID),
 		CreatedAt:    now,
 		UpdatedAt:    now,
-		AvailableAt:  now,
+		// Quiescence: the card matures documentQuiescenceWindow after this edit. The upsert's
+		// DO UPDATE SET available_at = EXCLUDED.available_at slides it forward on every keystroke batch,
+		// so a subscriber gets one delivery documentQuiescenceWindow after typing STOPS, not one per batch.
+		AvailableAt: now.Add(documentQuiescenceWindow),
 	}
 	upserted, err := upsertDocumentInboxEventPostgres(q, s.state.WorkspaceID, event)
 	if err != nil {
