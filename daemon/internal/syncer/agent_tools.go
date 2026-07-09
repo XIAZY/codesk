@@ -191,9 +191,9 @@ func (s *Service) listInboxForAgent(ctx context.Context, agentID string, box str
 		return nil, fmt.Errorf("agent id is required")
 	}
 	box = strings.TrimSpace(box)
-	if box == "" {
-		box = "for_me"
-	}
+	// An empty box passes through: the backend returns all three boxes, so a bare `list-inbox` shows
+	// everything pending. The automation loop always passes an explicit box (for_me/general), so its
+	// behavior — and the no-turn guarantee — is unchanged by this default.
 	req, err := s.newBackendRequest(ctx, http.MethodGet, "/api/agents/"+url.PathEscape(agentID)+"/inbox?status=pending&box="+url.QueryEscape(box), nil)
 	if err != nil {
 		return nil, err

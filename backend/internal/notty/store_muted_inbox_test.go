@@ -64,6 +64,73 @@ func TestMutedDocumentUpdateDoesNotPushToNonSubscriber(t *testing.T) {
 	}
 }
 
+// Bare list-inbox = ALL boxes (AlphaToad's ruling): an empty box query returns items from for-me, general,
+// AND muted in one list; a specific --box still filters to that box. The muted item being reachable via the
+// bare list is the point — it stays queryable, just not pushed.
+func TestBareListInboxReturnsAllBoxesIncludingMuted(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	store := newPostgresTestWorkspaceStore(t, database)
+	seedCodexDaemonRuntime(t, store)
+	user := seedTestUser(t, store)
+	mutedDoc := mustCreateTestDocument(t, store, "docs/muted.md", "start\n")
+	subscribedDoc := mustCreateTestDocument(t, store, "docs/subscribed.md", "start\n")
+
+	agent, err := store.CreateAgent(CreateAgentRequest{
+		Handle: "watcher", Name: "Watcher", Role: "sees all three boxes", Kind: "codex",
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	// general source: a subscribed document, edited.
+	if err := store.SubscribeAgentDocument(agent.ID, subscribedDoc); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	if _, _, err := store.ReplaceDocumentText(subscribedDoc, "start\nsub-edit\n", OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"}); err != nil {
+		t.Fatalf("edit subscribed doc: %v", err)
+	}
+	// muted source: an unsubscribed document, edited.
+	if _, _, err := store.ReplaceDocumentText(mutedDoc, "start\nmuted-edit\n", OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"}); err != nil {
+		t.Fatalf("edit muted doc: %v", err)
+	}
+	// for-me source: a thread that mentions the agent.
+	if _, _, _, err := store.CreateThread(CreateThreadRequest{
+		DocumentID: subscribedDoc, Title: "Look", Body: "please review @watcher", RelativeStart: "s", RelativeEnd: "e",
+	}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"}); err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+
+	// Bare list (empty box) → all three boxes present.
+	all, err := store.ListAgentInbox(agent.ID, "", "pending")
+	if err != nil {
+		t.Fatalf("bare list inbox: %v", err)
+	}
+	boxes := map[string]bool{}
+	for _, e := range all {
+		boxes[normalizeInboxBox(e.Box)] = true
+	}
+	for _, want := range []string{"for_me", "general", "muted"} {
+		if !boxes[want] {
+			t.Fatalf("bare list-inbox must include the %q box; got boxes %v", want, boxes)
+		}
+	}
+
+	// A specific --box still filters to exactly that box.
+	for _, box := range []string{"for_me", "general", "muted"} {
+		items, err := store.ListAgentInbox(agent.ID, box, "pending")
+		if err != nil {
+			t.Fatalf("list --box %q: %v", box, err)
+		}
+		if len(items) == 0 {
+			t.Fatalf("--box %q should return its items", box)
+		}
+		for _, e := range items {
+			if normalizeInboxBox(e.Box) != normalizeInboxBox(box) {
+				t.Fatalf("--box %q returned a %q item", box, e.Box)
+			}
+		}
+	}
+}
+
 // Cascade guard: a subscription joins the FK cascade graph, so deleting the agent removes its
 // subscriptions (the same ON DELETE CASCADE FK covers document deletion). Extends the #83 cascade sweep.
 func TestDocumentSubscriptionsCascadeOnAgentDelete(t *testing.T) {

@@ -59,6 +59,14 @@ func TestDriveAgentAutomationStartsNotificationTurnFromInbox(t *testing.T) {
 				}), nil
 			case "general":
 				return jsonResponse(t, http.StatusOK, toolInboxResponse{}), nil
+			case "muted":
+				// Turn-assembly count fetch (task #2): the firing turn decorates the prompt with a muted count.
+				return jsonResponse(t, http.StatusOK, toolInboxResponse{
+					Items: []*agentEvent{
+						{ID: "muted_1", AgentID: "agent_1", Type: "document.updated", Box: "muted", Status: "pending"},
+						{ID: "muted_2", AgentID: "agent_1", Type: "document.updated", Box: "muted", Status: "pending"},
+					},
+				}), nil
 			default:
 				t.Fatalf("unexpected box: %q", r.URL.Query().Get("box"))
 				return nil, nil
@@ -83,6 +91,13 @@ func TestDriveAgentAutomationStartsNotificationTurnFromInbox(t *testing.T) {
 	if !strings.Contains(starts[0].Text, "mentioned in spec") {
 		t.Fatalf("expected document summary in prompt, got %q", starts[0].Text)
 	}
+	// The firing turn carries a count-only pointer to the muted box (2 items), with no muted details.
+	if !strings.Contains(starts[0].Text, "Muted inbox: 2 item(s)") {
+		t.Fatalf("expected the muted count pointer in the prompt, got %q", starts[0].Text)
+	}
+	if strings.Contains(starts[0].Text, "muted_1") || strings.Contains(starts[0].Text, "muted_2") {
+		t.Fatalf("muted item details must not appear in the prompt (count only), got %q", starts[0].Text)
+	}
 }
 
 func TestBuildNotificationPromptIsSummaryOnly(t *testing.T) {
@@ -90,6 +105,7 @@ func TestBuildNotificationPromptIsSummaryOnly(t *testing.T) {
 		&agent{Handle: "reviewer", Role: "Review docs"},
 		[]*agentEvent{{ID: "evt_1", Type: "thread.mentioned", Box: "for_me", Summary: "Please review this section"}},
 		[]*agentEvent{{ID: "evt_2", Type: "document.updated", Box: "general", Summary: "docs/spec.md changed"}},
+		0,
 		&workspaceResponse{Threads: []*thread{{ID: "thread_1", Title: "Need review"}}},
 	)
 
@@ -123,6 +139,7 @@ func TestBuildNotificationPromptUsesTriggeringThreadMessage(t *testing.T) {
 			Summary:         "New reply in thread Cursor on line 1",
 		}},
 		nil,
+		0,
 		&workspaceResponse{
 			Threads: []*thread{{
 				ID:         "thread_log",
@@ -160,6 +177,7 @@ func TestBuildNotificationPromptDoesNotUseStaleLatestThreadMessageForEvent(t *te
 			Prompt:          "A new reply was added in thread \"Cursor on line 1\" by @owner: is it currently empty?",
 		}},
 		nil,
+		0,
 		&workspaceResponse{
 			Threads: []*thread{{
 				ID:         "thread_log",
@@ -369,6 +387,42 @@ func TestToolGatewayListsInboxForRequestedBox(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "\"box\":\"general\"") {
 		t.Fatalf("unexpected response body: %s", rec.Body.String())
+	}
+}
+
+// Guard for the bare-list-inbox=all-boxes change: the automation loop must keep fetching the PUSHED boxes
+// explicitly (for_me + general) and never issue a bare all-box fetch — a bare fetch would pull muted items
+// into the wake path and re-create the ambient wakes the feature removed. This keeps the ergonomic default
+// (bare CLI list = everything) from leaking into the turn-scheduling path.
+func TestAutomationNeverIssuesBareAllBoxInboxFetch(t *testing.T) {
+	service := newToolGatewayTestService(&agent{ID: "agent_1", Handle: "reviewer", Kind: "codex"}, "token_123")
+	var boxes []string
+	service.client = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.URL.Path != "/api/agents/agent_1/inbox" {
+				t.Fatalf("unexpected backend path: %s", r.URL.Path)
+			}
+			box := strings.TrimSpace(r.URL.Query().Get("box"))
+			if box == "" {
+				t.Fatalf("automation must never issue a bare all-box inbox fetch — that would pull muted items into the wake path")
+			}
+			boxes = append(boxes, box)
+			return jsonResponse(t, http.StatusOK, toolInboxResponse{Items: nil}), nil
+		}),
+	}
+
+	if _, _, err := service.fetchPendingInboxForAgent(context.Background(), "agent_1"); err != nil {
+		t.Fatalf("fetch pending inbox: %v", err)
+	}
+	got := map[string]bool{}
+	for _, b := range boxes {
+		got[b] = true
+	}
+	if !got["for_me"] || !got["general"] {
+		t.Fatalf("automation must fetch for_me and general explicitly, got %v", boxes)
+	}
+	if got["muted"] {
+		t.Fatalf("automation must never fetch the muted box")
 	}
 }
 

@@ -105,7 +105,7 @@ func runListNotifications(baseURL, token string) {
 
 func runListInbox(baseURL, token string, args []string) {
 	fs := flag.NewFlagSet("list-inbox", flag.ExitOnError)
-	box := fs.String("box", "for-me", "inbox box: for-me or general")
+	box := fs.String("box", "", "inbox box to filter to: for-me, general, or muted (default: all boxes)")
 	if err := fs.Parse(args); err != nil {
 		fatalf("parse list-inbox flags: %v", err)
 	}

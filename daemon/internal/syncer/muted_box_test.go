@@ -39,6 +39,17 @@ func TestMutedEventNeverEntersPushedNotificationBoxes(t *testing.T) {
 	if got := pendingNotificationsForAgent(events, agentID, "for_me"); len(got) != 1 || got[0].ID != forme.ID {
 		t.Fatalf("for_me box should carry exactly the mention, got %v", got)
 	}
+
+	// Signature exclusion (the count-feature trap): the suppression signature is computed over the pushed
+	// boxes only, so the presence of a muted item must NOT change it. If it did, a muted-only document edit
+	// would flip the signature and wake the agent — ambient wakes reborn through the count line.
+	withoutMuted := []*agentEvent{general, forme}
+	if got, want := notificationSignature(pendingNotificationsForAgent(events, agentID, "for_me")), notificationSignature(pendingNotificationsForAgent(withoutMuted, agentID, "for_me")); got != want {
+		t.Fatalf("a muted item must not change the for_me signature (got %q vs %q)", got, want)
+	}
+	if got, want := notificationSignature(pendingNotificationsForAgent(events, agentID, "general")), notificationSignature(pendingNotificationsForAgent(withoutMuted, agentID, "general")); got != want {
+		t.Fatalf("a muted item must not change the general signature (got %q vs %q)", got, want)
+	}
 }
 
 // Task #2 boundary #2 (daemon copy): a muted box value must NEVER normalize to a pushed box. The daemon

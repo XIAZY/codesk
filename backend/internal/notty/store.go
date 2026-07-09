@@ -414,7 +414,15 @@ func (s *Store) ListAgentInbox(agentID string, box string, statuses ...string) (
 		return nil, err
 	}
 
-	box = normalizeInboxBox(box)
+	// Empty/absent box = ALL boxes (AlphaToad's ruling): no box filter here, and the synthetic walk below
+	// includes every box. A specific --box normalizes and filters to that box. This "all" semantic lives ONLY
+	// at this query/filter layer — normalizeInboxBox's ""→for_me default normalizes EVENT ROWS and stays untouched.
+	rawBox := strings.TrimSpace(box)
+	filterByBox := rawBox != ""
+	queryBox := ""
+	if filterByBox {
+		queryBox = normalizeInboxBox(rawBox)
+	}
 	trimmed := make([]string, 0, len(statuses))
 	allowed := map[string]struct{}{}
 	for _, st := range statuses {
@@ -423,7 +431,7 @@ func (s *Store) ListAgentInbox(agentID string, box string, statuses ...string) (
 			allowed[t] = struct{}{}
 		}
 	}
-	notifications, err := listAgentEventsPostgres(db, workspaceID, resolvedAgentID, box, trimmed)
+	notifications, err := listAgentEventsPostgres(db, workspaceID, resolvedAgentID, queryBox, trimmed)
 	if err != nil {
 		return nil, err
 	}
@@ -439,7 +447,7 @@ func (s *Store) ListAgentInbox(agentID string, box string, statuses ...string) (
 			return nil, err
 		}
 		for _, event := range synthetic {
-			if event == nil || normalizeInboxBox(event.Box) != box {
+			if event == nil || (filterByBox && normalizeInboxBox(event.Box) != queryBox) {
 				continue
 			}
 			key := inboxDedupKey(event)
@@ -2214,8 +2222,8 @@ You may be notified by direct thread mentions, document edits, thread messages, 
 Plain @handle text inside markdown documents is regular document text, not a notification; use document threads when you want to mention a collaborator.
 Your inbox has two classes: for-me items are specific to you and should be reviewed first; general items are workspace activity and may not require action unless you have specific opinions, questions, or useful edits.
 Document update inbox items are deduplicated; use the diff-document tool to compare your last viewed CRDT update version with the current head, and mark documents viewed after review.
-Use notty-agent-tool list-inbox --box for-me and notty-agent-tool list-inbox --box general to inspect notification center items. Use get-inbox-item, complete-inbox-item, dismiss-inbox-item, diff-document, and mark-document-viewed when needed.
-Document updates are MUTED by default: they are never pushed and do not appear in for-me or general — they wait in the muted box. Use notty-agent-tool list-inbox --box muted to review them on demand. To be actively notified of a specific document's edits, subscribe to it: notty-agent-tool subscribe-document --document-id <id> (and unsubscribe-document / list-subscriptions to manage). A subscribed document's edits arrive in your general inbox shortly after editing pauses; without a subscription you will not be interrupted by document changes.
+Use notty-agent-tool list-inbox to see everything pending across all boxes; add --box for-me, --box general, or --box muted to filter to one. Use get-inbox-item, complete-inbox-item, dismiss-inbox-item, diff-document, and mark-document-viewed when needed.
+Document updates are MUTED by default: they are never pushed and do not appear in for-me or general — they wait in the muted box. Your wake prompt shows only a COUNT of muted items ("N items in the muted inbox"); run notty-agent-tool list-inbox --box muted to review them on demand. To be actively notified of a specific document's edits, subscribe to it: notty-agent-tool subscribe-document --document-id <id> (and unsubscribe-document / list-subscriptions to manage). A subscribed document's edits arrive in your general inbox shortly after editing pauses; without a subscription you will not be interrupted by document changes.
 Use notty-agent-tool list-documents, get-document-by-path, get-thread, and list-threads-for-document to gather context before acting.
 Create document threads with simple anchors: notty-agent-tool create-thread --path <file> --line <line> --body "..." or add --quote "exact text" for a precise anchor. Use --document for document-level threads.
 You do not need to reply by default. If there is nothing worth replying to, and you have no disagreement, question, or constructive feedback, you may stay silent and only make useful workspace changes.
