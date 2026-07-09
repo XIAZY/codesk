@@ -4,9 +4,7 @@
 # Gate -> job map (the matrix Tom's review checks for completeness):
 #   build (Go + libyrs cgo)            -> backend: "Build all Go"
 #   backend suite on LIVE Postgres     -> backend: "Backend + full Go suite on live Postgres" (+ skip-guard)
-#   regression tag (deterministic)     -> backend: "Regression suite (deterministic slice)"
-#   regression tag (compose E2E)       -> nightly + manual: .github/workflows/regression-e2e.yml
-#                                           until the CI-scaled lane has 3 consecutive green scheduled runs
+#   regression tag (deterministic + compose E2E) -> regression-e2e
 #   installer tests                    -> backend: "Installer tests"
 #   gofmt / vet                        -> backend: "gofmt", "go vet"
 #   frontend typecheck + vitest        -> frontend: "Typecheck + vitest"
@@ -38,7 +36,7 @@ permissions:
 
 jobs:
   backend:
-    name: backend (build, vet, live-postgres suite, regression, installer)
+    name: backend (build, vet, live-postgres suite, installer)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -133,20 +131,43 @@ jobs:
           if echo "$out" | grep -q -- '--- SKIP'; then
             echo "::error::Yjs cross-compat test SKIPPED in CI — the CRDT gate must run, not skip"; exit 1
           fi
-      - name: Regression suite (deterministic slice)
-        # Per-PR runs only the deterministic regression test. EXCLUDED: the docker-compose fs↔DB↔daemon
-        # sync E2E in sync_regression_test.go — its convergence deadlines race under a loaded CI runner
-        # (a flake, not a code bug). That suite runs with NOTTY_REGRESSION_DEADLINE_SCALE in the
-        # nightly/manual .github/workflows/regression-e2e.yml lane while proving 3 consecutive green
-        # scheduled runs. Backend-touching PRs still get the reviewer-run full tag by hand until that
-        # evidence exists, then the compose E2E returns to this required gate.
-        run: go test -tags=regression -run '^TestRegressionCreateDocumentDoesNotUseLegacyNamespacePayload$' ./test/regression
       - name: Installer tests
         run: |
           make daemon-installer-check
           make daemon-uninstall-test
       - name: Build all Go
         run: go build ./...
+
+  regression-e2e:
+    name: regression e2e (docker-compose fs<->DB<->daemon sync)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      NOTTY_REGRESSION_DEADLINE_SCALE: "4"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive # third_party/y-crdt is a submodule; build-yffi needs its source
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo + libyrs build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            third_party/y-crdt/target
+          key: yffi-${{ runner.os }}-${{ hashFiles('third_party/y-crdt/**/Cargo.lock') }}
+          restore-keys: |
+            yffi-${{ runner.os }}-
+      - name: Build libyrs (cgo dependency)
+        run: scripts/build-yffi.sh
+      # The regression suite brings up its own postgres + backend via docker compose
+      # (test/regression/docker-compose.yml), so no GitHub Postgres service is needed here.
+      - name: Full regression suite (docker-compose E2E)
+        run: go test -tags=regression -count=1 ./test/regression
 
   frontend:
     name: frontend (typecheck, vitest, build)
