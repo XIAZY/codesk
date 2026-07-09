@@ -51,6 +51,10 @@ func TestDocumentSubscriptionEndpoints(t *testing.T) {
 	crossPath := wsAPI + "/agents/" + agentB.ID + "/document-subscriptions"
 	authTestStatusWithHeaders(t, router, http.MethodPost, crossPath, daemonA.Token, hdrA, SubscribeDocumentRequest{DocumentID: doc.ID}, http.StatusForbidden)
 
+	// Human-principal policy (Tom's ruling): a human owner passes the same shared boundary — no special-case
+	// human rejection. "Agent-only" means no human UI is built on this, not that the API rejects humans.
+	authTestStatusWithHeaders(t, router, http.MethodPost, subPath, owner.Token, nil, SubscribeDocumentRequest{DocumentID: doc.ID}, http.StatusOK)
+
 	// Unsubscribe is idempotent: twice → 200, and the list is then empty.
 	delPath := subPath + "/" + doc.ID
 	authTestStatusWithHeaders(t, router, http.MethodDelete, delPath, daemonA.Token, hdrA, nil, http.StatusOK)

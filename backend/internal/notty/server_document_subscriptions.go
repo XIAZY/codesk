@@ -13,6 +13,12 @@ import (
 // its token + the X-Notty-Acting-Agent-ID header, and requireAgentEndpointAccess enforces the 4.2 boundary
 // (a daemon may act only for an agent it owns — a cross-daemon or unknown agent is 403). Subscribe and
 // unsubscribe are idempotent and ring no broadcast.
+//
+// Human-principal policy (Tom's ruling): these are agent-driven, but a human principal passes the SAME
+// shared boundary every sibling agent endpoint uses — we deliberately do NOT special-case a human rejection
+// here. AlphaToad's "agent-only for now" means no human UI is built on this, not that the API rejects
+// humans; keeping the shared boundary avoids extra special-case code. An explicit owner-subscribe test row
+// pins this as a chosen behavior.
 
 // SubscribeDocumentRequest is the POST body for subscribing an agent to a document's updates.
 type SubscribeDocumentRequest struct {
@@ -37,7 +43,7 @@ func (s *Server) handleSubscribeAgentDocument(w http.ResponseWriter, r *http.Req
 		writeError(w, subscriptionErrorStatus(err), err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "subscribed"})
+	s.writeAgentDocumentSubscriptions(w, r, agentID)
 }
 
 func (s *Server) handleUnsubscribeAgentDocument(w http.ResponseWriter, r *http.Request) {
@@ -50,7 +56,7 @@ func (s *Server) handleUnsubscribeAgentDocument(w http.ResponseWriter, r *http.R
 		writeError(w, subscriptionErrorStatus(err), err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "unsubscribed"})
+	s.writeAgentDocumentSubscriptions(w, r, agentID)
 }
 
 func (s *Server) handleListAgentDocumentSubscriptions(w http.ResponseWriter, r *http.Request) {
@@ -58,6 +64,13 @@ func (s *Server) handleListAgentDocumentSubscriptions(w http.ResponseWriter, r *
 	if !s.requireAgentEndpointAccess(w, r, agentID) {
 		return
 	}
+	s.writeAgentDocumentSubscriptions(w, r, agentID)
+}
+
+// writeAgentDocumentSubscriptions writes the agent's current subscription list. All three endpoints return
+// the same {documentIds:[…]} body (Tom's ruling) — subscribe/unsubscribe return the POST-CHANGE list, which
+// is self-verifying (the caller sees the effect, not a bare ack) and saves a follow-up list call.
+func (s *Server) writeAgentDocumentSubscriptions(w http.ResponseWriter, r *http.Request, agentID string) {
 	documentIDs, err := s.requestStore(r).ListAgentDocumentSubscriptions(agentID)
 	if err != nil {
 		writeError(w, subscriptionErrorStatus(err), err.Error())
