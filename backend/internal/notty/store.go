@@ -376,7 +376,65 @@ func (s *Store) DrainAgentInboxChanges() []AgentInboxChangedEvent {
 func (s *Store) SubscribeAgentDocument(agentID, documentID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return subscribeAgentDocumentPostgres(s.db, s.state.WorkspaceID, agentID, documentID, time.Now().UTC())
+	_, err := subscribeAgentDocumentPostgres(s.db, s.state.WorkspaceID, agentID, documentID, time.Now().UTC())
+	return err
+}
+
+// SubscribeAgentDocumentAndNotify subscribes the agent and, when a HUMAN subscribed someone OTHER than
+// themselves (the Participants-panel case), cards that agent so it learns it was added (task #6). Self-
+// subscribe via the tool (an agent principal) gets the CLI confirmation copy instead of a card, and an
+// idempotent re-subscribe cards no one. Returns whether a new subscription row was created. The card is a
+// directed second-person fact → for_me box, instant doorbell; its `subscription.added` type is deliberately
+// NOT `document.`-prefixed so completing it does not advance the document watermark.
+func (s *Store) SubscribeAgentDocumentAndNotify(agentID, documentID string, meta OperationMeta) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	inserted, err := subscribeAgentDocumentPostgres(s.db, s.state.WorkspaceID, agentID, documentID, time.Now().UTC())
+	if err != nil || !inserted {
+		return inserted, err
+	}
+	if !strings.EqualFold(strings.TrimSpace(meta.ActorType), "human") {
+		return inserted, nil
+	}
+	actor, err := resolvePrincipalPostgres(s.db, s.state.WorkspaceID, meta.ActorID, meta.ActorType)
+	if err != nil {
+		if err == ErrNotFound {
+			return inserted, nil
+		}
+		return inserted, err
+	}
+	if actor.ID == agentID {
+		return inserted, nil
+	}
+	agent, err := getAgentPostgres(s.db, s.state.WorkspaceID, agentID)
+	if err != nil {
+		if err == ErrNotFound {
+			return inserted, nil
+		}
+		return inserted, err
+	}
+	document := s.state.ContentDocuments[documentID]
+	now := time.Now().UTC()
+	event := &AgentEvent{
+		ID:          uuid.NewString(),
+		AgentID:     agent.ID,
+		AgentHandle: agent.Handle,
+		Type:        "subscription.added",
+		Box:         "for_me",
+		Status:      "pending",
+		DocumentID:  documentID,
+		Summary:     fmt.Sprintf("You were added as a subscriber to %s", documentLabel(document)),
+		Prompt:      fmt.Sprintf("@%s added you as a subscriber to %s. You will now receive notifications about new edits and thread messages on this document.", actor.Handle, documentLabel(document)),
+		DedupKey:    fmt.Sprintf("subscription-added:%s:%s", documentID, agent.ID),
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		AvailableAt: now,
+	}
+	if _, err := upsertDocumentInboxEventPostgres(s.db, s.state.WorkspaceID, event); err != nil {
+		return inserted, err
+	}
+	s.recordAgentInboxChangedLocked(event)
+	return inserted, nil
 }
 
 // UnsubscribeAgentDocument removes a subscription. Returns whether a row was removed (idempotent).
@@ -1767,6 +1825,17 @@ func (s *Store) CreateThread(req CreateThreadRequest, meta OperationMeta) (*Thre
 	if err != nil {
 		return nil, nil, false, err
 	}
+	// Card the document's subscribers about the new thread (task #6), skipping the author and anyone the
+	// mention collect already carded (mention's for_me wins over a general watcher card).
+	subscriberSkip := []string{author.ID}
+	for _, event := range events {
+		subscriberSkip = append(subscriberSkip, event.AgentID)
+	}
+	subscriberEvents, err := collectThreadCreatedSubscriberEventsPostgres(db, workspaceID, thread, message, meta, subscriberSkip...)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	events = append(events, subscriberEvents...)
 	activity := &ActivityEvent{
 		Type:       "thread.created",
 		DocumentID: documentSnapshot.ID,
@@ -2790,6 +2859,62 @@ func collectThreadMentionEventsPostgres(q querier, workspaceID string, thread *T
 	return events, nil
 }
 
+// collectThreadCreatedSubscriberEventsPostgres cards each document SUBSCRIBER when a new thread is created on
+// the doc (task #6, AlphaToad ruling): a new thread is a one-shot fact, so it rides the instant class —
+// general box, available_at = now, one doorbell per carded agent (the caller records it). Recipients are the
+// doc's subscribers minus the author (`shouldNotifyAgentPostgres`) minus anyone already carded by the mention
+// collect for this message (skipAgentIDs) — mention (for_me) wins over a general watcher card, no double
+// card. Type is `thread.created` (a first-class one-shot, NOT a document.* type — so it must not advance the
+// doc watermark on completion). Dedup key makes a re-create/retry idempotent.
+func collectThreadCreatedSubscriberEventsPostgres(q querier, workspaceID string, thread *Thread, message *ThreadMessage, meta OperationMeta, skipAgentIDs ...string) ([]*AgentEvent, error) {
+	if thread == nil || message == nil || thread.DocumentID == "" {
+		return nil, nil
+	}
+	subscriberIDs, err := listDocumentSubscriberAgentIDsPostgres(q, workspaceID, thread.DocumentID)
+	if err != nil {
+		return nil, err
+	}
+	var events []*AgentEvent
+	for _, agentID := range subscriberIDs {
+		if containsText(skipAgentIDs, agentID) {
+			continue
+		}
+		agent, err := getAgentPostgres(q, workspaceID, agentID)
+		if err != nil {
+			if err == ErrNotFound {
+				continue
+			}
+			return nil, err
+		}
+		notify, err := shouldNotifyAgentPostgres(q, workspaceID, agent.ID, meta, message.AuthorID)
+		if err != nil {
+			return nil, err
+		}
+		if !notify {
+			continue
+		}
+		now := time.Now().UTC()
+		events = append(events, &AgentEvent{
+			ID:              uuid.NewString(),
+			AgentID:         agent.ID,
+			AgentHandle:     agent.Handle,
+			Type:            "thread.created",
+			Box:             "general",
+			Status:          "pending",
+			DocumentID:      thread.DocumentID,
+			ThreadID:        thread.ID,
+			ThreadMessageID: message.ID,
+			Summary:         fmt.Sprintf("New thread %q on a document you watch", thread.Title),
+			Prompt:          fmt.Sprintf("@%s opened thread %q on a document you subscribe to: %s. Read it with notty-agent-tool get-thread --thread-id %s.", message.AuthorHandle, thread.Title, truncateText(message.Body, 240), thread.ID),
+			DedupKey:        fmt.Sprintf("thread-created:%s:%s", thread.ID, agent.ID),
+			CreatedAt:       now,
+			UpdatedAt:       now,
+			AvailableAt:     now,
+		})
+	}
+	return events, nil
+}
+
 func collectThreadReplyEventsPostgres(q querier, workspaceID string, thread *Thread, message *ThreadMessage, meta OperationMeta, skipAgentIDs ...string) ([]*AgentEvent, error) {
 	if thread == nil || message == nil {
 		return nil, nil
@@ -2831,6 +2956,65 @@ func collectThreadReplyEventsPostgres(q querier, workspaceID string, thread *Thr
 			CreatedAt:       now,
 			UpdatedAt:       now,
 			AvailableAt:     now,
+		})
+	}
+	return events, nil
+}
+
+// collectThreadReplyWatcherEventsPostgres cards document SUBSCRIBERS who are NOT thread participants when a
+// reply lands (task #6). Replies are a RECURRING stream, not one-shot facts, so a watcher card must NOT ring
+// a doorbell per reply (that's the storm the muted design killed) — it rides the EDIT class: general box,
+// sliding `documentQuiescenceWindow`, upserted per `thread-replied-watch:<threadID>:<agentID>` so a busy
+// thread collapses to ONE delivery per watcher, matured after the thread quiets. Version fields stay 0 (a
+// thread has no version — the type carries the semantics), and the summary is stateless (get-thread is the
+// truth about how much happened). Participants keep their instant for_me `thread.replied` card (they're in
+// the conversation); the exclusion is `thread.ParticipantIDs`, which already covers the author + everyone
+// mentioned/participating. The caller UPSERTS these (no doorbell), separate from the doorbell-rung events.
+func collectThreadReplyWatcherEventsPostgres(q querier, workspaceID string, thread *Thread, message *ThreadMessage, meta OperationMeta) ([]*AgentEvent, error) {
+	if thread == nil || message == nil || thread.DocumentID == "" {
+		return nil, nil
+	}
+	subscriberIDs, err := listDocumentSubscriberAgentIDsPostgres(q, workspaceID, thread.DocumentID)
+	if err != nil {
+		return nil, err
+	}
+	var events []*AgentEvent
+	for _, agentID := range subscriberIDs {
+		if containsText(thread.ParticipantIDs, agentID) {
+			continue
+		}
+		agent, err := getAgentPostgres(q, workspaceID, agentID)
+		if err != nil {
+			if err == ErrNotFound {
+				continue
+			}
+			return nil, err
+		}
+		notify, err := shouldNotifyAgentPostgres(q, workspaceID, agent.ID, meta, message.AuthorID)
+		if err != nil {
+			return nil, err
+		}
+		if !notify {
+			continue
+		}
+		now := time.Now().UTC()
+		events = append(events, &AgentEvent{
+			ID:          uuid.NewString(),
+			AgentID:     agent.ID,
+			AgentHandle: agent.Handle,
+			Type:        "thread.replied",
+			Box:         "general",
+			Status:      "pending",
+			DocumentID:  thread.DocumentID,
+			ThreadID:    thread.ID,
+			Summary:     fmt.Sprintf("New replies in thread %q on a document you watch", thread.Title),
+			Prompt:      fmt.Sprintf("New activity in thread %q on a document you subscribe to. Read it with notty-agent-tool get-thread --thread-id %s.", thread.Title, thread.ID),
+			DedupKey:    fmt.Sprintf("thread-replied-watch:%s:%s", thread.ID, agent.ID),
+			CreatedAt:   now,
+			UpdatedAt:   now,
+			// Coalesce like edits: the upsert slides available_at forward on each reply, so the watcher gets
+			// one delivery documentQuiescenceWindow after the thread STOPS, not one per reply. No doorbell.
+			AvailableAt: now.Add(documentQuiescenceWindow),
 		})
 	}
 	return events, nil

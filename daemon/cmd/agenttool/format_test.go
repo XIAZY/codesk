@@ -48,12 +48,14 @@ func TestFormatSubscriptionsHeaderListAndIDOnly(t *testing.T) {
 
 	// subscribe: header names the target (path resolved from the list), then the full list; the pathless
 	// doc degrades to an id-only line.
-	out, err := formatSubscriptions(data, "subscribed to", "5a49")
+	out, err := formatSubscriptions(data, subscribeVerb, "5a49")
 	if err != nil {
 		t.Fatalf("format: %v", err)
 	}
 	for _, want := range []string{
 		"subscribed to specs/api.md (id: 5a49)\n",
+		// Subscribe confirmation copy (task #6): the notification contract is stated at opt-in.
+		"you will now receive notifications about new edits and thread messages on this document\n",
 		"you are subscribed to 2 documents:",
 		"- specs/api.md (id: 5a49)",
 		"- gone\n",
@@ -66,13 +68,16 @@ func TestFormatSubscriptionsHeaderListAndIDOnly(t *testing.T) {
 		t.Fatalf("pathless doc must render id-only:\n%s", out)
 	}
 
-	// list-subscriptions: no header.
+	// list-subscriptions: no header, and no subscribe-confirmation copy (it belongs to the opt-in only).
 	list, err := formatSubscriptions(data, "", "")
 	if err != nil {
 		t.Fatalf("format: %v", err)
 	}
 	if strings.HasPrefix(list, "subscribed to") || strings.HasPrefix(list, "unsubscribed") {
 		t.Fatalf("list-subscriptions must have no header:\n%s", list)
+	}
+	if strings.Contains(list, "you will now receive notifications") {
+		t.Fatalf("list must not carry the subscribe confirmation copy:\n%s", list)
 	}
 
 	// zero case.

@@ -253,7 +253,7 @@ func runSubscribeDocument(baseURL, token string, args []string) {
 		fatalf("--document-id is required")
 	}
 	render(postRaw(baseURL+"/agent-tools/subscribe-document?document_id="+url.QueryEscape(*documentID), token, ""), func(data []byte) (string, error) {
-		return formatSubscriptions(data, "subscribed to", *documentID)
+		return formatSubscriptions(data, subscribeVerb, *documentID)
 	})
 }
 
@@ -417,7 +417,7 @@ func printUsage(w io.Writer) {
 		"  dismiss-inbox-item --item-id <id>            mark an item ignored without acting",
 		"",
 		"Document subscriptions:",
-		"  subscribe-document --document-id <id>        get a document's updates in your general inbox",
+		"  subscribe-document --document-id <id>        watch a document — notifications on new edits and thread messages",
 		"  unsubscribe-document --document-id <id>      stop watching a document",
 		"  list-subscriptions                           list documents you are subscribed to",
 		"",
