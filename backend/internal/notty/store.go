@@ -1028,6 +1028,15 @@ func (s *Store) CreateDocument(req CreateDocumentRequest, meta OperationMeta) (*
 		delete(s.documentLocks, document.ID)
 		return nil, err
 	}
+	// Emit the one-shot document.created cards after the create commits (task #3). This is deliberately the
+	// creation seam, not the edit path: the UpdateID<=1 guard in enqueueDocumentInboxEventsLocked keeps
+	// ignoring the seed update, and the replay guard above returns before we reach here — so a re-created
+	// document never double-cards. Cards are instant (available now + inbox doorbell). Emission is best-effort
+	// and never fails the create: the document is already durably committed, so a card/doorbell failure is
+	// logged and the affected agent simply falls back to seeing the doc's muted version gap — returning an
+	// error here would lie to the caller about a durable success and, via the replay guard, never re-card on
+	// retry. The create HANDLER drains the doorbell via publishAgentInboxChanges.
+	s.enqueueDocumentCreatedInboxEventsLocked(s.db, document, meta)
 	created := cloneDocument(document)
 	return created, nil
 }
@@ -2516,6 +2525,84 @@ func firstNonEmptyString(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// enqueueDocumentCreatedInboxEventsLocked pushes a one-shot `document.created` card to every workspace agent
+// except the creator when a new document is created (task #3, AlphaToad ruling). Where edits are muted
+// unless an agent explicitly subscribed, creation is a rare, high-signal event worth a general-box card for
+// workspace awareness. Delivery is INSTANT (AlphaToad's ruling): the card is immediately available
+// (available_at = now) AND rings the agent.inbox.changed doorbell, so a creation wakes its recipients right
+// away. This is the deliberate exception — recurring document.updated edits still ride poll+maturity with no
+// doorbell, so the per-keystroke class this channel killed stays dead. A directory-push burst wakes every
+// agent immediately; the daemon's busy-path one-slot follow-up collapses it into bounded turns per agent (and
+// the wake prompt caps the general section at top-3 + overflow), so the burst never becomes N turns.
+//
+// Self-exclusion is the same `shouldNotifyAgentPostgres` actor check the thread paths use, covering human
+// AND agent creators. Hidden documents never notify. Idempotency is twofold: CreateDocument's replay guard
+// returns early before this runs, and the dedup key (`document-created:<docID>:<agentID>`) makes even a
+// direct re-emit a no-op — so exactly one card per eligible agent, zero on replay. ToUpdateID carries the
+// created version so completing the card advances the agent's document watermark (clearing its muted gap).
+//
+// Best-effort by contract: the document is already committed before this runs, so a card write MUST NOT fail
+// the create. Every failure is logged (visibly, with doc + agent ids) and skipped per-agent — one bad row
+// never un-cards the others, and any un-carded agent degrades to exactly the pre-#108 behavior (it still
+// sees the document's version gap in its MUTED box, never silence). Returns whatever it managed to emit.
+func (s *Store) enqueueDocumentCreatedInboxEventsLocked(q querier, document *Document, meta OperationMeta) []*AgentEvent {
+	if document == nil || document.Hidden || document.UpdateID <= 0 {
+		return nil
+	}
+	agents, err := listAgentsPostgres(q, s.state.WorkspaceID)
+	if err != nil {
+		// Can't enumerate recipients — degrade every agent to the muted-gap fallback, don't fail the create.
+		log.Printf("document.created: listing agents for document %s failed, no cards emitted: %v", document.ID, err)
+		return nil
+	}
+	now := time.Now().UTC()
+	var events []*AgentEvent
+	for _, agent := range agents {
+		if agent == nil {
+			continue
+		}
+		notify, err := shouldNotifyAgentPostgres(q, s.state.WorkspaceID, agent.ID, meta, "")
+		if err != nil {
+			log.Printf("document.created: notify check for agent %s on document %s failed, skipping: %v", agent.ID, document.ID, err)
+			continue
+		}
+		if !notify {
+			// The creator does not card themselves (human or agent actor).
+			continue
+		}
+		event := &AgentEvent{
+			ID:           uuid.NewString(),
+			AgentID:      agent.ID,
+			AgentHandle:  agent.Handle,
+			Type:         "document.created",
+			Box:          "general",
+			Status:       "pending",
+			DocumentID:   document.ID,
+			FromUpdateID: 0,
+			ToUpdateID:   document.UpdateID,
+			Summary:      fmt.Sprintf("new %s created", documentLabel(document)),
+			Prompt:       fmt.Sprintf("A new %s was created. Read it with notty-agent-tool get-document-by-path, or diff-document --document-id %s. Act only if you have useful feedback or edits.", documentLabel(document), document.ID),
+			DedupKey:     fmt.Sprintf("document-created:%s:%s", document.ID, agent.ID),
+			// Instant delivery: available immediately (no quiescence — creation is one-shot, nothing slides).
+			AvailableAt: now,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}
+		upserted, err := upsertDocumentInboxEventPostgres(q, s.state.WorkspaceID, event)
+		if err != nil {
+			log.Printf("document.created: writing card for agent %s on document %s failed, skipping: %v", agent.ID, document.ID, err)
+			continue
+		}
+		if upserted != nil {
+			events = append(events, upserted)
+			// Instant wake: ring the inbox doorbell for this agent. Best-effort like the card write —
+			// recordAgentInboxChangedLocked logs internally and never fails the committed create.
+			s.recordAgentInboxChangedLocked(upserted)
+		}
+	}
+	return events
 }
 
 func (s *Store) enqueueDocumentInboxEventsLocked(q querier, document *Document, meta OperationMeta) ([]*AgentEvent, error) {
