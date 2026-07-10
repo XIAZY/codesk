@@ -1028,6 +1028,14 @@ func (s *Store) CreateDocument(req CreateDocumentRequest, meta OperationMeta) (*
 		delete(s.documentLocks, document.ID)
 		return nil, err
 	}
+	// Emit the one-shot document.created cards after the create commits (task #3). This is deliberately the
+	// creation seam, not the edit path: the UpdateID<=1 guard in enqueueDocumentInboxEventsLocked keeps
+	// ignoring the seed update, and the replay guard above returns before we reach here — so a re-created
+	// document never double-cards. Cards ride poll+maturity (no doorbell); a write failure here does not
+	// unwind the committed document.
+	if _, err := s.enqueueDocumentCreatedInboxEventsLocked(s.db, document, meta); err != nil {
+		return nil, err
+	}
 	created := cloneDocument(document)
 	return created, nil
 }
@@ -2516,6 +2524,71 @@ func firstNonEmptyString(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// enqueueDocumentCreatedInboxEventsLocked pushes a one-shot `document.created` card to every workspace agent
+// except the creator when a new document is created (task #3, AlphaToad ruling). Where edits are muted
+// unless an agent explicitly subscribed, creation is a rare, high-signal event worth a general-box card for
+// workspace awareness. Delivery reuses the subscribed-edit class EXACTLY: a pending row + a maturity window,
+// picked up by the poll with NO doorbell — so a burst of creations (a directory push / initial sync)
+// collapses into cheap rows the poll batches into one bounded turn per agent, not N wakes. The invariant
+// holds: the doorbell belongs to thread events only; document events of every kind ride poll+maturity.
+//
+// Self-exclusion is the same `shouldNotifyAgentPostgres` actor check the thread paths use, covering human
+// AND agent creators. Hidden documents never notify. Idempotency is twofold: CreateDocument's replay guard
+// returns early before this runs, and the dedup key (`document-created:<docID>:<agentID>`) makes even a
+// direct re-emit a no-op — so exactly one card per eligible agent, zero on replay. ToUpdateID carries the
+// created version so completing the card advances the agent's document watermark (clearing its muted gap).
+func (s *Store) enqueueDocumentCreatedInboxEventsLocked(q querier, document *Document, meta OperationMeta) ([]*AgentEvent, error) {
+	if document == nil || document.Hidden || document.UpdateID <= 0 {
+		return nil, nil
+	}
+	agents, err := listAgentsPostgres(q, s.state.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	var events []*AgentEvent
+	for _, agent := range agents {
+		if agent == nil {
+			continue
+		}
+		notify, err := shouldNotifyAgentPostgres(q, s.state.WorkspaceID, agent.ID, meta, "")
+		if err != nil {
+			return nil, err
+		}
+		if !notify {
+			// The creator does not card themselves (human or agent actor).
+			continue
+		}
+		event := &AgentEvent{
+			ID:           uuid.NewString(),
+			AgentID:      agent.ID,
+			AgentHandle:  agent.Handle,
+			Type:         "document.created",
+			Box:          "general",
+			Status:       "pending",
+			DocumentID:   document.ID,
+			FromUpdateID: 0,
+			ToUpdateID:   document.UpdateID,
+			Summary:      fmt.Sprintf("new %s created", documentLabel(document)),
+			Prompt:       fmt.Sprintf("A new %s was created. Read it with notty-agent-tool get-document-by-path, or diff-document --document-id %s. Act only if you have useful feedback or edits.", documentLabel(document), document.ID),
+			DedupKey:     fmt.Sprintf("document-created:%s:%s", document.ID, agent.ID),
+			// Rides the same maturity window as subscribed edits: the poll delivers it ~60s later, batching
+			// a creation burst into one turn instead of ringing per document.
+			AvailableAt: now.Add(documentQuiescenceWindow),
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}
+		upserted, err := upsertDocumentInboxEventPostgres(q, s.state.WorkspaceID, event)
+		if err != nil {
+			return nil, err
+		}
+		if upserted != nil {
+			events = append(events, upserted)
+		}
+	}
+	return events, nil
 }
 
 func (s *Store) enqueueDocumentInboxEventsLocked(q querier, document *Document, meta OperationMeta) ([]*AgentEvent, error) {
