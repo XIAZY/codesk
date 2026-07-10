@@ -530,6 +530,94 @@ func TestWorkspaceReplicaDirectoryCreateCanCoalesceTrackedMove(t *testing.T) {
 	}
 }
 
+func TestWorkspaceReplicaAuthoritativePathRekeyRetiresWatcherMoveArtifacts(t *testing.T) {
+	for _, createBeforeRekey := range []bool{false, true} {
+		name := "create-after-rekey"
+		if createBeforeRekey {
+			name = "create-before-rekey"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			oldPath := filepath.Join(root, "old", "tracked.md")
+			newPath := filepath.Join(root, "new", "tracked.md")
+			if err := os.MkdirAll(filepath.Dir(oldPath), 0o755); err != nil {
+				t.Fatalf("mkdir old path: %v", err)
+			}
+			if err := os.MkdirAll(filepath.Dir(newPath), 0o755); err != nil {
+				t.Fatalf("mkdir new path: %v", err)
+			}
+			if err := os.WriteFile(oldPath, []byte("same\n"), 0o644); err != nil {
+				t.Fatalf("write old path: %v", err)
+			}
+
+			var creates []localCreateCandidate
+			replica := &workspaceReplica{
+				rootDir:   root,
+				actorID:   "daemon_agent",
+				actorType: "daemon",
+				markDirty: func(string) {},
+				markCreate: func(candidate localCreateCandidate) {
+					creates = append(creates, candidate)
+				},
+				fs:              NewWorkspaceFS(root),
+				projectedByPath: map[string]*trackedFile{},
+				projectedByID:   map[string]*trackedFile{},
+				changes:         newWorkspaceChangeIndex(),
+			}
+			tracked := &trackedFile{
+				DocumentID:    "doc_projected_move",
+				DocumentPath:  "new/tracked.md",
+				Path:          oldPath,
+				WorkspaceRoot: root,
+				FS:            replica.fs,
+				Owner:         replica,
+			}
+			tracked.setProjectedContent("same\n")
+			replica.projectedByPath[oldPath] = tracked
+			replica.projectedByID[tracked.DocumentID] = tracked
+			replica.recordTrackedIdentity(oldPath)
+
+			if err := os.Rename(oldPath, newPath); err != nil {
+				t.Fatalf("project file move: %v", err)
+			}
+			now := time.Now()
+			if err := replica.handleWatcherEvent(fsnotify.Event{Name: oldPath, Op: fsnotify.Rename}, now); err != nil {
+				t.Fatalf("handle old-path rename: %v", err)
+			}
+			if createBeforeRekey {
+				if err := replica.handleWatcherEvent(fsnotify.Event{Name: newPath, Op: fsnotify.Create}, now.Add(time.Millisecond)); err != nil {
+					t.Fatalf("handle new-path create before rekey: %v", err)
+				}
+			}
+
+			replica.setTrackedPath(tracked, newPath)
+
+			if !createBeforeRekey {
+				if err := replica.handleWatcherEvent(fsnotify.Event{Name: newPath, Op: fsnotify.Create}, now.Add(time.Millisecond)); err != nil {
+					t.Fatalf("handle new-path create after rekey: %v", err)
+				}
+			}
+			if pending, err := replica.drainPathChanges(context.Background(), now.Add(workspaceMissingPathDelay+time.Millisecond)); err != nil {
+				t.Fatalf("drain projected move artifacts: %v", err)
+			} else if pending {
+				t.Fatal("projected move should not leave pending path changes")
+			}
+			if tracked.Path != newPath {
+				t.Fatalf("tracked path = %q, want %q", tracked.Path, newPath)
+			}
+			if tracked.isLocalMoved() {
+				t.Fatal("projected move was misclassified as a local move")
+			}
+			if tracked.isLocalDeleted() {
+				t.Fatal("projected move was misclassified as a local delete")
+			}
+			if len(creates) != 0 {
+				t.Fatalf("projected move created local documents: %#v", creates)
+			}
+		})
+	}
+}
+
 func TestWorkspaceReplicaIgnoresDotAndTempPaths(t *testing.T) {
 	root := t.TempDir()
 	ignoredPath := filepath.Join(root, ".git", "config")
