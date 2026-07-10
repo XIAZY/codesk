@@ -209,16 +209,13 @@ func buildNotificationPrompt(currentAgent *agent, forMe []*agentEvent, general [
 	builder.WriteString("You have new items in your notification center.\n\n")
 	appendNotificationSection(&builder, "For-me inbox", forMe, workspace, 5)
 	appendNotificationSection(&builder, "General inbox", general, workspace, 3)
-	// Count-only pointer to the muted box (document updates you have not subscribed to). Never pushed and
-	// never a reason you were woken — this line is decoration on a wake that already fired, so you can choose
-	// to review muted activity on demand. The count is as of this turn.
+	// Count-only pointer to the muted box. Never pushed and never a reason you were woken — this line is
+	// decoration on a wake that already fired, so you can choose to review muted activity on demand. The
+	// count is as of this turn.
 	if mutedCount > 0 {
-		builder.WriteString(fmt.Sprintf("Muted inbox: %d item(s) waiting (document updates you have not subscribed to) — not shown here; run notty-agent-tool list-inbox --box muted to review.\n\n", mutedCount))
+		builder.WriteString(fmt.Sprintf("Muted inbox: %d item(s) waiting — not shown here; run notty-agent-tool list-inbox --box muted to review.\n\n", mutedCount))
 	}
 	builder.WriteString("Use the notification center tools if you want details, diffs, or to act on any item.\n")
-	if currentAgent != nil && strings.TrimSpace(currentAgent.Role) != "" {
-		builder.WriteString("\nRole:\n- " + currentAgent.Role + "\n")
-	}
 	return builder.String()
 }
 

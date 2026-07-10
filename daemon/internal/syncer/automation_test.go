@@ -98,6 +98,9 @@ func TestDriveAgentAutomationStartsNotificationTurnFromInbox(t *testing.T) {
 	if strings.Contains(starts[0].Text, "muted_1") || strings.Contains(starts[0].Text, "muted_2") {
 		t.Fatalf("muted item details must not appear in the prompt (count only), got %q", starts[0].Text)
 	}
+	if strings.Contains(starts[0].Text, "not subscribed to") {
+		t.Fatalf("the muted line must not carry the '(document updates you have not subscribed to)' parenthetical, got %q", starts[0].Text)
+	}
 }
 
 func TestBuildNotificationPromptIsSummaryOnly(t *testing.T) {
@@ -114,11 +117,14 @@ func TestBuildNotificationPromptIsSummaryOnly(t *testing.T) {
 		"For-me inbox:",
 		"General inbox:",
 		"Use the notification center tools if you want details",
-		"Review docs",
 	} {
 		if !strings.Contains(prompt, fragment) {
 			t.Fatalf("expected prompt to contain %q, got %q", fragment, prompt)
 		}
+	}
+	// The Role suffix is removed (the role already lives in the session system prompt).
+	if strings.Contains(prompt, "Role:") || strings.Contains(prompt, "Review docs") {
+		t.Fatalf("notification prompt must not carry the Role block, got %q", prompt)
 	}
 	if strings.Contains(prompt, "response policy:") || strings.Contains(prompt, "notty-agent-tool reply-thread") {
 		t.Fatalf("notification prompt should not force action/tool details, got %q", prompt)
