@@ -116,15 +116,19 @@ func TestBuildNotificationPromptIsSummaryOnly(t *testing.T) {
 		"You have new items in your notification center.",
 		"For-me inbox:",
 		"General inbox:",
-		"Use the notification center tools if you want details",
+		"run notty-agent-tool list-inbox to inspect full inbox",
 	} {
 		if !strings.Contains(prompt, fragment) {
 			t.Fatalf("expected prompt to contain %q, got %q", fragment, prompt)
 		}
 	}
-	// The Role suffix is removed (the role already lives in the session system prompt).
+	// The Role suffix is removed (the role already lives in the session system prompt), and the old
+	// notification-center-tools closer is replaced by the single list-inbox closer.
 	if strings.Contains(prompt, "Role:") || strings.Contains(prompt, "Review docs") {
 		t.Fatalf("notification prompt must not carry the Role block, got %q", prompt)
+	}
+	if strings.Contains(prompt, "Use the notification center tools") {
+		t.Fatalf("notification prompt closer must be the single list-inbox line, got %q", prompt)
 	}
 	if strings.Contains(prompt, "response policy:") || strings.Contains(prompt, "notty-agent-tool reply-thread") {
 		t.Fatalf("notification prompt should not force action/tool details, got %q", prompt)
