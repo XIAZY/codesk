@@ -513,7 +513,7 @@ func (r *workspaceReplica) setTrackedPath(tracked *trackedFile, nextPath string)
 	tracked.FS = r.fs
 	r.projectedByPath[nextPath] = tracked
 	if r.changes != nil {
-		r.changes.moveIdentity(oldPath, nextPath, statFileIdentity(nextPath))
+		r.changes.rekeyTrackedPath(tracked.DocumentID, oldPath, nextPath, statFileIdentity(nextPath))
 	}
 }
 

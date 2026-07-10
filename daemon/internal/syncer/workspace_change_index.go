@@ -77,11 +77,17 @@ func (c *workspaceChangeIndex) recordIdentity(path string, identity fileIdentity
 	c.mu.Unlock()
 }
 
-func (c *workspaceChangeIndex) moveIdentity(oldPath, newPath string, identity fileIdentity) {
+func (c *workspaceChangeIndex) rekeyTrackedPath(documentID, oldPath, newPath string, identity fileIdentity) {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
+	// The authoritative rekey owns newPath, so watcher artifacts for the old absence or new creation
+	// are observations of this same projected move and cannot represent independent local changes.
+	if missing, ok := c.missing[documentID]; ok && missing.path == oldPath {
+		delete(c.missing, documentID)
+	}
+	delete(c.creates, newPath)
 	delete(c.identities, oldPath)
 	if strings.TrimSpace(newPath) != "" && identity.valid {
 		c.identities[newPath] = identity
