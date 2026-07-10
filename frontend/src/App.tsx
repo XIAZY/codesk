@@ -2615,7 +2615,7 @@ export function ThreadPopover({
   const [statusBusy, setStatusBusy] = useState(false);
   const [error, setError] = useState("");
   const [viewportHeight, setViewportHeight] = useState(() => window.visualViewport?.height ?? window.innerHeight);
-  const groupKey = `${group.line}:${group.threads.map((thread) => thread.id).join("|")}`;
+  const groupKey = `${group.line}:${group.threads.map((thread) => thread.id).sort().join("|")}`;
   const selected = selectedThreadId ? threadItems.find((thread) => thread.id === selectedThreadId) ?? null : null;
   const popoverStyle = {
     left: point.x,

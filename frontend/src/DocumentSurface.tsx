@@ -294,7 +294,7 @@ export function DocumentSurface({
           const count = marker.threads.filter((thread) => thread.status === "open").length;
           return (
             <button
-              key={`${marker.line}:${marker.threads.map((thread) => thread.id).join("|")}`}
+              key={`${marker.line}:${marker.threads.map((thread) => thread.id).sort().join("|")}`}
               className="thread-rail-marker"
               type="button"
               style={{ top: marker.top }}

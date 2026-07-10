@@ -154,8 +154,14 @@ describe("ThreadPopover", () => {
     expect(screen.getByRole("button", { name: "Reopen thread" })).toBeTruthy();
   });
 
-  it("keeps the selected detail stable when the parent refreshes the thread as resolved", async () => {
+  it("keeps selected detail stable when a status refresh reverses the same thread membership", async () => {
     const user = userEvent.setup();
+    const sibling = threadFixture({
+      id: "thread_sibling",
+      createdByHandle: "lin",
+      messages: [message("sibling_msg", "Sibling comment", { threadId: "thread_sibling", authorHandle: "lin" })],
+      updatedAt: "2026-07-10T12:00:30Z",
+    });
     const commonProps = {
       api: mockApi(),
       workspaceId: "ws",
@@ -165,14 +171,17 @@ describe("ThreadPopover", () => {
       onThreadsChanged: vi.fn(),
     };
     const { rerender } = render(
-      <ThreadPopover {...commonProps} group={{ line: 5, threads: [threadFixture()] }} />,
+      <ThreadPopover {...commonProps} group={{ line: 5, threads: [threadFixture(), sibling] }} />,
     );
 
     await user.click(screen.getByRole("button", { name: "Open thread by @ada" }));
     rerender(
       <ThreadPopover
         {...commonProps}
-        group={{ line: 5, threads: [threadFixture({ status: "resolved", updatedAt: "2026-07-10T12:03:00Z" })] }}
+        group={{
+          line: 5,
+          threads: [sibling, threadFixture({ status: "resolved", updatedAt: "2026-07-10T12:03:00Z" })],
+        }}
       />,
     );
 
