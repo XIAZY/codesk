@@ -7,6 +7,8 @@ import (
 	"time"
 )
 
+// Missing paths and identity-bearing creates share one window so either watcher
+// event can arrive first without turning a move into a delete plus create.
 const workspaceMissingPathDelay = 250 * time.Millisecond
 
 type fileIdentity struct {
@@ -47,6 +49,7 @@ type pendingMissingPath struct {
 type pendingCreatedPath struct {
 	candidate localCreateCandidate
 	identity  fileIdentity
+	readyAt   time.Time
 }
 
 type workspaceChangeIndex struct {
@@ -113,12 +116,19 @@ func (c *workspaceChangeIndex) markDirtyDocument(documentID string) {
 	c.mu.Unlock()
 }
 
-func (c *workspaceChangeIndex) markLocalCreate(candidate localCreateCandidate, identity fileIdentity) {
+func (c *workspaceChangeIndex) markLocalCreate(candidate localCreateCandidate, identity fileIdentity, now time.Time) {
 	if c == nil || strings.TrimSpace(candidate.Path) == "" {
 		return
 	}
 	c.mu.Lock()
-	c.creates[candidate.Path] = pendingCreatedPath{candidate: candidate, identity: identity}
+	readyAt := time.Time{}
+	if identity.valid {
+		readyAt = now.Add(workspaceMissingPathDelay)
+	}
+	if existing, ok := c.creates[candidate.Path]; ok && !existing.readyAt.IsZero() && (readyAt.IsZero() || existing.readyAt.Before(readyAt)) {
+		readyAt = existing.readyAt
+	}
+	c.creates[candidate.Path] = pendingCreatedPath{candidate: candidate, identity: identity, readyAt: readyAt}
 	if identity.valid {
 		c.identities[candidate.Path] = identity
 	}
@@ -228,6 +238,9 @@ func (c *workspaceChangeIndex) drain(now time.Time) (workspaceChanges, bool) {
 		delete(c.identities, missing.path)
 	}
 	for path, created := range c.creates {
+		if !created.readyAt.IsZero() && now.Before(created.readyAt) {
+			continue
+		}
 		changes.LocalCreates = append(changes.LocalCreates, created.candidate)
 		delete(c.creates, path)
 		if created.identity.valid {
@@ -249,7 +262,7 @@ func (c *workspaceChangeIndex) drain(now time.Time) (workspaceChanges, bool) {
 		return changes.LocalDeletes[i].Path < changes.LocalDeletes[j].Path
 	})
 
-	return changes, len(c.missing) > 0
+	return changes, len(c.missing) > 0 || len(c.creates) > 0
 }
 
 func sortedStringSet(values map[string]struct{}) []string {

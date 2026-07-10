@@ -222,7 +222,7 @@ func (r *workspaceReplica) handleWatcherEvent(event fsnotify.Event, now time.Tim
 			Path:      path,
 			ActorID:   r.actorID,
 			ActorType: r.actorKind(),
-		}, identity)
+		}, identity, now)
 		r.markDocumentDirty(localPathChangeReconcileWake)
 		return nil
 	}
@@ -254,7 +254,7 @@ func (r *workspaceReplica) handleWatcherEvent(event fsnotify.Event, now time.Tim
 			Path:      path,
 			ActorID:   r.actorID,
 			ActorType: r.actorKind(),
-		}, fileIdentityForInfo(info))
+		}, fileIdentityForInfo(info), now)
 		r.markDocumentDirty(localPathChangeReconcileWake)
 	}
 	return nil
@@ -363,7 +363,7 @@ func (r *workspaceReplica) drainPathChanges(ctx context.Context, now time.Time) 
 		if ctx.Err() != nil {
 			return true, ctx.Err()
 		}
-		if err := r.discoverLocalCreatesInDir(dir); err != nil {
+		if err := r.discoverLocalCreatesInDir(dir, now); err != nil {
 			r.changes.markDiscoverDir(dir)
 			return true, err
 		}
@@ -405,7 +405,7 @@ func (r *workspaceReplica) drainPathChanges(ctx context.Context, now time.Time) 
 	return hasPending, nil
 }
 
-func (r *workspaceReplica) discoverLocalCreatesInDir(dir string) error {
+func (r *workspaceReplica) discoverLocalCreatesInDir(dir string, now time.Time) error {
 	if r == nil || strings.TrimSpace(dir) == "" {
 		return nil
 	}
@@ -446,7 +446,7 @@ func (r *workspaceReplica) discoverLocalCreatesInDir(dir string) error {
 				Path:      path,
 				ActorID:   r.actorID,
 				ActorType: r.actorKind(),
-			}, fileIdentityForInfo(info))
+			}, fileIdentityForInfo(info), now)
 		}
 		return nil
 	})

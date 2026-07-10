@@ -22,11 +22,11 @@ func TestWorkspaceChangeIndexCoalescesDirtyCreatesMovesAndDeletes(t *testing.T) 
 	index.markDirtyDocument("doc_dirty")
 	index.recordIdentity(oldPath, identity)
 	index.markPendingMissing("doc_move", oldPath, now)
-	index.markLocalCreate(localCreateCandidate{Root: "/workspace", Path: newPath}, identity)
-	index.markLocalCreate(localCreateCandidate{Root: "/workspace", Path: "/workspace/docs/unmatched.md"}, fileIdentity{dev: 1, ino: 99, valid: true})
+	index.markLocalCreate(localCreateCandidate{Root: "/workspace", Path: newPath}, identity, now)
+	index.markLocalCreate(localCreateCandidate{Root: "/workspace", Path: "/workspace/docs/unmatched.md"}, fileIdentity{dev: 1, ino: 99, valid: true}, now)
 	index.markDiscoverDir("/workspace/docs")
 
-	changes, pending := index.drain(now)
+	changes, pending := index.drain(now.Add(workspaceMissingPathDelay + time.Millisecond))
 	if pending {
 		t.Fatal("matched move should not leave pending missing paths")
 	}
@@ -66,6 +66,33 @@ func TestWorkspaceChangeIndexDelaysUnmatchedMissingBeforeDelete(t *testing.T) {
 	}
 	if got := changes.LocalDeletes; len(got) != 1 || got[0].DocumentID != "doc_gone" {
 		t.Fatalf("local deletes = %#v", got)
+	}
+}
+
+func TestWorkspaceChangeIndexDelaysUnmatchedIdentityCreateWithoutResettingDeadline(t *testing.T) {
+	now := time.Now()
+	path := "/workspace/docs/new.md"
+	identity := fileIdentity{dev: 1, ino: 42, valid: true}
+	index := newWorkspaceChangeIndex()
+	index.markLocalCreate(localCreateCandidate{Root: "/workspace", Path: path}, identity, now)
+
+	changes, pending := index.drain(now.Add(workspaceMissingPathDelay / 2))
+	if !pending {
+		t.Fatal("identity-bearing create should remain pending during the coalescing window")
+	}
+	if len(changes.LocalCreates) != 0 {
+		t.Fatalf("create emitted before coalescing window: %#v", changes.LocalCreates)
+	}
+
+	// Duplicate write/create notifications must not extend the first observation's
+	// deadline indefinitely for a genuinely new file.
+	index.markLocalCreate(localCreateCandidate{Root: "/workspace", Path: path}, identity, now.Add(workspaceMissingPathDelay/2))
+	changes, pending = index.drain(now.Add(workspaceMissingPathDelay + time.Millisecond))
+	if pending {
+		t.Fatal("expired create should not leave pending work")
+	}
+	if got := changes.LocalCreates; len(got) != 1 || got[0].Path != path {
+		t.Fatalf("local creates = %#v, want only %q", got, path)
 	}
 }
 
@@ -144,14 +171,25 @@ func TestWorkspaceReplicaEventPathDoesNotFullScanForTargetedChanges(t *testing.T
 	if err := os.WriteFile(newPath, []byte("new\n"), 0o644); err != nil {
 		t.Fatalf("write new file: %v", err)
 	}
-	if err := replica.handleWatcherEvent(fsnotify.Event{Name: newPath, Op: fsnotify.Create}, time.Now()); err != nil {
+	createTime := time.Now()
+	if err := replica.handleWatcherEvent(fsnotify.Event{Name: newPath, Op: fsnotify.Create}, createTime); err != nil {
 		t.Fatalf("handle create: %v", err)
 	}
-	if _, err := replica.drainPathChanges(context.Background(), time.Now()); err != nil {
+	if pending, err := replica.drainPathChanges(context.Background(), createTime); err != nil {
 		t.Fatalf("drain create: %v", err)
+	} else if !pending {
+		t.Fatal("identity-bearing create should remain pending during the move coalescing window")
 	}
 	if scans.Load() != 0 {
 		t.Fatalf("create event path called full workspace scan %d time(s)", scans.Load())
+	}
+	if len(creates) != 0 {
+		t.Fatalf("local create emitted before coalescing delay: %#v", creates)
+	}
+	if pending, err := replica.drainPathChanges(context.Background(), createTime.Add(workspaceMissingPathDelay+time.Millisecond)); err != nil {
+		t.Fatalf("drain delayed create: %v", err)
+	} else if pending {
+		t.Fatal("expired local create should not leave pending work")
 	}
 	if len(creates) != 1 || creates[0].Path != newPath {
 		t.Fatalf("local creates after create = %#v", creates)
@@ -405,14 +443,25 @@ func TestWorkspaceReplicaEventPathTreatsUntrackedWriteAsLocalCreate(t *testing.T
 	}
 	defer func() { scanWorkspaceFilesForReconcile = previousScan }()
 
-	if err := replica.handleWatcherEvent(fsnotify.Event{Name: path, Op: fsnotify.Write}, time.Now()); err != nil {
+	now := time.Now()
+	if err := replica.handleWatcherEvent(fsnotify.Event{Name: path, Op: fsnotify.Write}, now); err != nil {
 		t.Fatalf("handle untracked write: %v", err)
 	}
-	if _, err := replica.drainPathChanges(context.Background(), time.Now()); err != nil {
+	if pending, err := replica.drainPathChanges(context.Background(), now); err != nil {
 		t.Fatalf("drain untracked write: %v", err)
+	} else if !pending {
+		t.Fatal("untracked write should remain pending during the move coalescing window")
 	}
 	if scans.Load() != 0 {
 		t.Fatalf("untracked write called full workspace scan %d time(s)", scans.Load())
+	}
+	if len(creates) != 0 {
+		t.Fatalf("untracked write emitted create before coalescing delay: %#v", creates)
+	}
+	if pending, err := replica.drainPathChanges(context.Background(), now.Add(workspaceMissingPathDelay+time.Millisecond)); err != nil {
+		t.Fatalf("drain delayed untracked write: %v", err)
+	} else if pending {
+		t.Fatal("expired untracked write should not leave pending work")
 	}
 	if len(creates) != 1 || creates[0].Path != path {
 		t.Fatalf("local creates after untracked write = %#v", creates)
@@ -450,8 +499,19 @@ func TestWorkspaceReplicaDirectoryCreateDiscoversOnlySubtree(t *testing.T) {
 	if err := replica.handleWatcherEvent(fsnotify.Event{Name: newDir, Op: fsnotify.Create}, time.Now()); err != nil {
 		t.Fatalf("handle dir create: %v", err)
 	}
-	if _, err := replica.drainPathChanges(context.Background(), time.Now()); err != nil {
+	now := time.Now()
+	if pending, err := replica.drainPathChanges(context.Background(), now); err != nil {
 		t.Fatalf("drain dir create: %v", err)
+	} else if !pending {
+		t.Fatal("directory discovery should hold creates during the move coalescing window")
+	}
+	if len(creates) != 0 {
+		t.Fatalf("directory discovery emitted creates before coalescing delay: %#v", creates)
+	}
+	if pending, err := replica.drainPathChanges(context.Background(), now.Add(workspaceMissingPathDelay+time.Millisecond)); err != nil {
+		t.Fatalf("drain delayed dir create: %v", err)
+	} else if pending {
+		t.Fatal("expired directory discovery should not leave pending work")
 	}
 	if len(creates) != 1 || creates[0].Path != inside {
 		t.Fatalf("directory discovery creates = %#v, want only %q", creates, inside)
@@ -527,6 +587,102 @@ func TestWorkspaceReplicaDirectoryCreateCanCoalesceTrackedMove(t *testing.T) {
 	}
 	if len(creates) != 0 {
 		t.Fatalf("matched directory move should not create new local documents: %#v", creates)
+	}
+}
+
+func TestWorkspaceReplicaDirectoryDiscoveryWaitsForTrackedRenamePair(t *testing.T) {
+	root := t.TempDir()
+	oldPath := filepath.Join(root, "old", "tracked.md")
+	newDir := filepath.Join(root, "new")
+	newPath := filepath.Join(newDir, "tracked.md")
+	if err := os.MkdirAll(filepath.Dir(oldPath), 0o755); err != nil {
+		t.Fatalf("mkdir old path: %v", err)
+	}
+	if err := os.WriteFile(oldPath, []byte("same\n"), 0o644); err != nil {
+		t.Fatalf("write old path: %v", err)
+	}
+
+	var dirty []string
+	var creates []localCreateCandidate
+	replica := &workspaceReplica{
+		rootDir:   root,
+		actorID:   "daemon_agent",
+		actorType: "daemon",
+		markDirty: func(documentID string) {
+			dirty = append(dirty, documentID)
+		},
+		markCreate: func(candidate localCreateCandidate) {
+			creates = append(creates, candidate)
+		},
+		fs:              NewWorkspaceFS(root),
+		projectedByPath: map[string]*trackedFile{},
+		projectedByID:   map[string]*trackedFile{},
+		changes:         newWorkspaceChangeIndex(),
+	}
+	tracked := &trackedFile{
+		DocumentID:    "doc_move",
+		DocumentPath:  "old/tracked.md",
+		Path:          oldPath,
+		WorkspaceRoot: root,
+		FS:            replica.fs,
+		Owner:         replica,
+	}
+	tracked.setProjectedContent("same\n")
+	replica.projectedByPath[oldPath] = tracked
+	replica.projectedByID[tracked.DocumentID] = tracked
+	replica.recordTrackedIdentity(oldPath)
+
+	if err := os.MkdirAll(newDir, 0o755); err != nil {
+		t.Fatalf("mkdir new directory: %v", err)
+	}
+	if err := os.Rename(oldPath, newPath); err != nil {
+		t.Fatalf("rename tracked file: %v", err)
+	}
+	now := time.Now()
+	// mkdir precedes mv, so the new-directory event can be handled and drained
+	// before the old-path rename event reaches the daemon.
+	if err := replica.handleWatcherEvent(fsnotify.Event{Name: newDir, Op: fsnotify.Create}, now); err != nil {
+		t.Fatalf("handle new directory before old rename: %v", err)
+	}
+	if pending, err := replica.drainPathChanges(context.Background(), now); err != nil {
+		t.Fatalf("drain directory discovery before old rename: %v", err)
+	} else if !pending {
+		t.Fatal("discovered file should wait for a matching rename during the coalescing window")
+	}
+	if len(creates) != 0 {
+		t.Fatalf("directory discovery emitted a new document before rename pairing: %#v", creates)
+	}
+
+	if err := replica.handleWatcherEvent(fsnotify.Event{Name: oldPath, Op: fsnotify.Rename}, now.Add(time.Millisecond)); err != nil {
+		t.Fatalf("handle delayed old-path rename: %v", err)
+	}
+	if pending, err := replica.drainPathChanges(context.Background(), now.Add(time.Millisecond)); err != nil {
+		t.Fatalf("drain paired local move: %v", err)
+	} else if pending {
+		t.Fatal("paired local move should not leave pending path changes")
+	}
+	if tracked.Path != newPath {
+		t.Fatalf("tracked path = %q, want %q", tracked.Path, newPath)
+	}
+	if !tracked.isLocalMoved() || !tracked.isLocalDirty() {
+		t.Fatal("paired local move should mark tracked file locally moved and dirty")
+	}
+	if tracked.isLocalDeleted() {
+		t.Fatal("paired local move was misclassified as a local delete")
+	}
+	if !containsTestString(dirty, tracked.DocumentID) {
+		t.Fatalf("paired local move did not mark document dirty: %#v", dirty)
+	}
+	if len(creates) != 0 {
+		t.Fatalf("paired local move created a duplicate local document: %#v", creates)
+	}
+	if pending, err := replica.drainPathChanges(context.Background(), now.Add(workspaceMissingPathDelay+time.Millisecond)); err != nil {
+		t.Fatalf("drain after local move coalescing window: %v", err)
+	} else if pending {
+		t.Fatal("paired local move left delayed path work")
+	}
+	if tracked.isLocalDeleted() || len(creates) != 0 {
+		t.Fatalf("paired local move matured false artifacts: deleted=%t creates=%#v", tracked.isLocalDeleted(), creates)
 	}
 }
 
