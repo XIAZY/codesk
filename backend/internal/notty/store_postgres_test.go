@@ -903,6 +903,12 @@ func TestPostgresAgentInboxTracksDocumentUpdatesAndThreadMentions(t *testing.T) 
 	if err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
+	// Task #2: document updates are muted by default — an agent must explicitly subscribe to see them in a
+	// pushed box. Subscribe to the log document so its edit surfaces in general (the pre-task behavior for
+	// every agent, now opt-in per document).
+	if err := store.SubscribeAgentDocument(agent.ID, logDocumentID); err != nil {
+		t.Fatalf("subscribe agent to log document: %v", err)
+	}
 	if _, _, err := store.ReplaceDocumentText(logDocumentID, "start\ntelemetry\n", OperationMeta{
 		ActorID:   "daemon",
 		ActorType: "agent",
@@ -916,7 +922,7 @@ func TestPostgresAgentInboxTracksDocumentUpdatesAndThreadMentions(t *testing.T) 
 	}
 	update := findAgentEventByType(items, "document.updated")
 	if update == nil || update.DocumentID != logDocumentID {
-		t.Fatalf("expected document update in general inbox, got %#v", items)
+		t.Fatalf("expected document update in general inbox for the subscribed doc, got %#v", items)
 	}
 
 	thread, message, _, err := store.CreateThread(CreateThreadRequest{

@@ -27,6 +27,9 @@ func (s *Service) startToolGateway() (*http.Server, error) {
 	mux.HandleFunc("/agent-tools/mark-document-viewed", s.handleMarkDocumentViewedTool)
 	mux.HandleFunc("/agent-tools/create-thread", s.handleCreateThreadTool)
 	mux.HandleFunc("/agent-tools/reply-thread", s.handleReplyThreadTool)
+	mux.HandleFunc("/agent-tools/subscribe-document", s.handleSubscribeDocumentTool)
+	mux.HandleFunc("/agent-tools/unsubscribe-document", s.handleUnsubscribeDocumentTool)
+	mux.HandleFunc("/agent-tools/list-subscriptions", s.handleListDocumentSubscriptionsTool)
 
 	server := &http.Server{Handler: mux}
 	parsedAddr := strings.TrimSpace(strings.TrimPrefix(s.cfg.AgentToolBaseURL, "http://"))

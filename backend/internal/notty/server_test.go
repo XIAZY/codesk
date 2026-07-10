@@ -1707,7 +1707,6 @@ func TestHandleDocumentProtocolMessageDoesNotPublishDocumentMentionMetadataChang
 		t.Fatalf("handle document protocol message: %v", err)
 	}
 
-	sawInboxChange := false
 	for {
 		select {
 		case event := <-events:
@@ -1718,12 +1717,11 @@ func TestHandleDocumentProtocolMessageDoesNotPublishDocumentMentionMetadataChang
 				t.Fatalf("document update must not publish backend document namespace event: %#v", event)
 			}
 			if event.Type == "agent.inbox.changed" {
-				sawInboxChange = true
+				// Muted-by-default (task #2): the agent is not subscribed to this document, so its edit
+				// rings no inbox doorbell — nothing wakes a non-subscriber on a keystroke.
+				t.Fatalf("document update must not ring the inbox doorbell for a non-subscriber: %#v", event)
 			}
 		default:
-			if !sawInboxChange {
-				t.Fatal("expected agent inbox change event to be published")
-			}
 			return
 		}
 	}

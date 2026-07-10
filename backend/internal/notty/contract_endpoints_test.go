@@ -138,3 +138,19 @@ func TestContractEndpointsEmptyState(t *testing.T) {
 	assertEndpointGolden(t, router, http.MethodGet, ws+"/daemons", fx.OwnerToken, "daemons_empty", []string{"daemons"})
 	assertEndpointGolden(t, router, http.MethodGet, ws+"/documents/"+fx.DocumentID+"/threads", fx.OwnerToken, "document_threads_empty", []string{"threads"})
 }
+
+// TestContractDocumentSubscriptionsGolden pins the document-subscriptions response shape (task #2) across
+// empty and populated states. All three endpoints return {documentIds:[…]}; goldening the GET after a
+// subscribe covers the shape subscribe/unsubscribe also return.
+func TestContractDocumentSubscriptionsGolden(t *testing.T) {
+	_, router := newAuthTestServer(t)
+	fx := buildContractPopulatedFixture(t, router)
+	subs := "/api/workspaces/" + fx.WorkspaceID + "/agents/" + fx.AgentID + "/document-subscriptions"
+
+	// Empty: no subscriptions yet.
+	assertEndpointGolden(t, router, http.MethodGet, subs, fx.OwnerToken, "document_subscriptions_empty", []string{"documentIds"})
+
+	// Populated: subscribe (owner passes the shared boundary), then pin the list shape.
+	authTestStatus(t, router, http.MethodPost, subs, fx.OwnerToken, SubscribeDocumentRequest{DocumentID: fx.DocumentID}, http.StatusOK)
+	assertEndpointGolden(t, router, http.MethodGet, subs, fx.OwnerToken, "document_subscriptions_populated", []string{"documentIds"})
+}

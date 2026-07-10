@@ -59,6 +59,14 @@ func TestDriveAgentAutomationStartsNotificationTurnFromInbox(t *testing.T) {
 				}), nil
 			case "general":
 				return jsonResponse(t, http.StatusOK, toolInboxResponse{}), nil
+			case "muted":
+				// Turn-assembly count fetch (task #2): the firing turn decorates the prompt with a muted count.
+				return jsonResponse(t, http.StatusOK, toolInboxResponse{
+					Items: []*agentEvent{
+						{ID: "muted_1", AgentID: "agent_1", Type: "document.updated", Box: "muted", Status: "pending"},
+						{ID: "muted_2", AgentID: "agent_1", Type: "document.updated", Box: "muted", Status: "pending"},
+					},
+				}), nil
 			default:
 				t.Fatalf("unexpected box: %q", r.URL.Query().Get("box"))
 				return nil, nil
@@ -83,6 +91,16 @@ func TestDriveAgentAutomationStartsNotificationTurnFromInbox(t *testing.T) {
 	if !strings.Contains(starts[0].Text, "mentioned in spec") {
 		t.Fatalf("expected document summary in prompt, got %q", starts[0].Text)
 	}
+	// The firing turn carries a count-only pointer to the muted box (2 items), with no muted details.
+	if !strings.Contains(starts[0].Text, "Muted inbox: 2 item(s)") {
+		t.Fatalf("expected the muted count pointer in the prompt, got %q", starts[0].Text)
+	}
+	if strings.Contains(starts[0].Text, "muted_1") || strings.Contains(starts[0].Text, "muted_2") {
+		t.Fatalf("muted item details must not appear in the prompt (count only), got %q", starts[0].Text)
+	}
+	if strings.Contains(starts[0].Text, "not subscribed to") {
+		t.Fatalf("the muted line must not carry the '(document updates you have not subscribed to)' parenthetical, got %q", starts[0].Text)
+	}
 }
 
 func TestBuildNotificationPromptIsSummaryOnly(t *testing.T) {
@@ -90,6 +108,7 @@ func TestBuildNotificationPromptIsSummaryOnly(t *testing.T) {
 		&agent{Handle: "reviewer", Role: "Review docs"},
 		[]*agentEvent{{ID: "evt_1", Type: "thread.mentioned", Box: "for_me", Summary: "Please review this section"}},
 		[]*agentEvent{{ID: "evt_2", Type: "document.updated", Box: "general", Summary: "docs/spec.md changed"}},
+		0,
 		&workspaceResponse{Threads: []*thread{{ID: "thread_1", Title: "Need review"}}},
 	)
 
@@ -97,12 +116,19 @@ func TestBuildNotificationPromptIsSummaryOnly(t *testing.T) {
 		"You have new items in your notification center.",
 		"For-me inbox:",
 		"General inbox:",
-		"Use the notification center tools if you want details",
-		"Review docs",
+		"run notty-agent-tool list-inbox to inspect full inbox, if you need to",
 	} {
 		if !strings.Contains(prompt, fragment) {
 			t.Fatalf("expected prompt to contain %q, got %q", fragment, prompt)
 		}
+	}
+	// The Role suffix is removed (the role already lives in the session system prompt), and the old
+	// notification-center-tools closer is replaced by the single list-inbox closer.
+	if strings.Contains(prompt, "Role:") || strings.Contains(prompt, "Review docs") {
+		t.Fatalf("notification prompt must not carry the Role block, got %q", prompt)
+	}
+	if strings.Contains(prompt, "Use the notification center tools") {
+		t.Fatalf("notification prompt closer must be the single list-inbox line, got %q", prompt)
 	}
 	if strings.Contains(prompt, "response policy:") || strings.Contains(prompt, "notty-agent-tool reply-thread") {
 		t.Fatalf("notification prompt should not force action/tool details, got %q", prompt)
@@ -123,6 +149,7 @@ func TestBuildNotificationPromptUsesTriggeringThreadMessage(t *testing.T) {
 			Summary:         "New reply in thread Cursor on line 1",
 		}},
 		nil,
+		0,
 		&workspaceResponse{
 			Threads: []*thread{{
 				ID:         "thread_log",
@@ -160,6 +187,7 @@ func TestBuildNotificationPromptDoesNotUseStaleLatestThreadMessageForEvent(t *te
 			Prompt:          "A new reply was added in thread \"Cursor on line 1\" by @owner: is it currently empty?",
 		}},
 		nil,
+		0,
 		&workspaceResponse{
 			Threads: []*thread{{
 				ID:         "thread_log",
@@ -369,6 +397,113 @@ func TestToolGatewayListsInboxForRequestedBox(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "\"box\":\"general\"") {
 		t.Fatalf("unexpected response body: %s", rec.Body.String())
+	}
+}
+
+// Guard for the bare-list-inbox=all-boxes change: the automation loop must keep fetching the PUSHED boxes
+// explicitly (for_me + general) and never issue a bare all-box fetch — a bare fetch would pull muted items
+// into the wake path and re-create the ambient wakes the feature removed. This keeps the ergonomic default
+// (bare CLI list = everything) from leaking into the turn-scheduling path.
+func TestAutomationNeverIssuesBareAllBoxInboxFetch(t *testing.T) {
+	service := newToolGatewayTestService(&agent{ID: "agent_1", Handle: "reviewer", Kind: "codex"}, "token_123")
+	var boxes []string
+	service.client = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.URL.Path != "/api/agents/agent_1/inbox" {
+				t.Fatalf("unexpected backend path: %s", r.URL.Path)
+			}
+			box := strings.TrimSpace(r.URL.Query().Get("box"))
+			if box == "" {
+				t.Fatalf("automation must never issue a bare all-box inbox fetch — that would pull muted items into the wake path")
+			}
+			boxes = append(boxes, box)
+			return jsonResponse(t, http.StatusOK, toolInboxResponse{Items: nil}), nil
+		}),
+	}
+
+	if _, _, err := service.fetchPendingInboxForAgent(context.Background(), "agent_1"); err != nil {
+		t.Fatalf("fetch pending inbox: %v", err)
+	}
+	got := map[string]bool{}
+	for _, b := range boxes {
+		got[b] = true
+	}
+	if !got["for_me"] || !got["general"] {
+		t.Fatalf("automation must fetch for_me and general explicitly, got %v", boxes)
+	}
+	if got["muted"] {
+		t.Fatalf("automation must never fetch the muted box")
+	}
+}
+
+func TestToolGatewaySubscribeUnsubscribeListDocuments(t *testing.T) {
+	service := newToolGatewayTestService(&agent{ID: "agent_1", Handle: "reviewer", Kind: "codex"}, "token_123")
+	service.client = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			const path = "/api/agents/agent_1/document-subscriptions"
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == path:
+				return jsonResponse(t, http.StatusOK, backendDocumentSubscriptionsResponse{DocumentIDs: []string{"doc_spec"}}), nil
+			case r.Method == http.MethodGet && r.URL.Path == path:
+				return jsonResponse(t, http.StatusOK, backendDocumentSubscriptionsResponse{DocumentIDs: []string{"doc_spec"}}), nil
+			case r.Method == http.MethodDelete && r.URL.Path == path+"/doc_spec":
+				return jsonResponse(t, http.StatusOK, backendDocumentSubscriptionsResponse{DocumentIDs: []string{}}), nil
+			default:
+				t.Fatalf("unexpected backend request: %s %s", r.Method, r.URL.String())
+				return nil, nil
+			}
+		}),
+	}
+
+	call := func(handler http.HandlerFunc, method, target string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, target, nil)
+		req.Header.Set("Authorization", "Bearer token_123")
+		rec := httptest.NewRecorder()
+		handler(rec, req)
+		return rec
+	}
+
+	// The gateway enriches the backend's bare {documentIds} into {documents:[{id,path}]}. This test service
+	// has no workspace runtime, so the path index is empty — the HONESTY case: the doc still appears with an
+	// id and an empty path (the CLI renders that as an id-only line) rather than erroring or vanishing.
+	//
+	// Subscribe proxies POST and returns the enriched post-change list.
+	if rec := call(service.handleSubscribeDocumentTool, http.MethodPost, "/agent-tools/subscribe-document?document_id=doc_spec"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "\"documents\":[{\"id\":\"doc_spec\",\"path\":\"\"}]") {
+		t.Fatalf("subscribe: status %d body=%s", rec.Code, rec.Body.String())
+	}
+	// List proxies GET.
+	if rec := call(service.handleListDocumentSubscriptionsTool, http.MethodGet, "/agent-tools/list-subscriptions"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "\"id\":\"doc_spec\"") {
+		t.Fatalf("list: status %d body=%s", rec.Code, rec.Body.String())
+	}
+	// Unsubscribe proxies DELETE (to the {documentID} path) and returns the emptied list.
+	if rec := call(service.handleUnsubscribeDocumentTool, http.MethodPost, "/agent-tools/unsubscribe-document?document_id=doc_spec"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "\"documents\":[]") {
+		t.Fatalf("unsubscribe: status %d body=%s", rec.Code, rec.Body.String())
+	}
+	// An unknown tool token is rejected before any backend call.
+	if rec := (func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/agent-tools/subscribe-document?document_id=doc_spec", nil)
+		req.Header.Set("Authorization", "Bearer bogus")
+		rec := httptest.NewRecorder()
+		service.handleSubscribeDocumentTool(rec, req)
+		return rec
+	}()); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unknown token: want 401, got %d", rec.Code)
+	}
+}
+
+func TestBuildSubscribedDocumentsDegradesUnknownIDToIDOnly(t *testing.T) {
+	pathByID := map[string]string{"doc_spec": "specs/api.md"}
+	got := buildSubscribedDocuments([]string{"doc_spec", "doc_gone"}, pathByID)
+	if len(got) != 2 {
+		t.Fatalf("want 2 documents, got %d: %+v", len(got), got)
+	}
+	// Known id carries its path from the projection.
+	if got[0] != (subscribedDocument{ID: "doc_spec", Path: "specs/api.md"}) {
+		t.Fatalf("known id: %+v", got[0])
+	}
+	// Unknown id (no projection entry) is kept with an empty path, not dropped — the honesty case.
+	if got[1] != (subscribedDocument{ID: "doc_gone", Path: ""}) {
+		t.Fatalf("unknown id: %+v", got[1])
 	}
 }
 

@@ -120,8 +120,23 @@ func (s *Service) driveSingleAgentAutomation(ctx context.Context, skills agentSk
 }
 
 func (e agentSkillExecutor) startNotificationCheck(ctx context.Context, currentAgent *agent, forMe []*agentEvent, general []*agentEvent, workspace *workspaceResponse) error {
-	prompt := buildNotificationPrompt(currentAgent, forMe, general, workspace)
+	// Turn-assembly time only: fetch the muted count to DECORATE the prompt. This runs solely when a turn is
+	// already firing for pushed (for_me/general) items — NOT in the per-cycle poll — so it never re-adds the
+	// per-agent synthetic document walk to the hot path. The count is deliberately excluded from the
+	// suppression signature below: muted must never admit a turn, so the count may be stale (as-of this turn).
+	mutedCount := e.service.mutedInboxCount(ctx, currentAgent.ID)
+	prompt := buildNotificationPrompt(currentAgent, forMe, general, mutedCount, workspace)
 	return e.service.sessions.ScheduleNotificationTurn(ctx, currentAgent, prompt, notificationSignature(forMe), notificationSignature(general))
+}
+
+// mutedInboxCount returns how many items sit in the agent's muted box, for the count-only prompt pointer.
+// Best-effort: on any error it returns 0 (the pointer is decoration and must never fail a firing turn).
+func (s *Service) mutedInboxCount(ctx context.Context, agentID string) int {
+	response, err := s.listInboxForAgent(ctx, agentID, "muted")
+	if err != nil || response == nil {
+		return 0
+	}
+	return len(response.Items)
 }
 
 func findThreadByID(threads []*thread, threadID string) *thread {
@@ -179,20 +194,29 @@ func normalizeInboxBox(box string) string {
 	switch strings.TrimSpace(strings.ToLower(strings.ReplaceAll(box, "-", "_"))) {
 	case "general":
 		return "general"
+	case "muted":
+		// Muted is the never-pushed box (task #2) — must be recognized here as on the backend, or the
+		// default branch routes it to for_me (a PUSHED box) and the daemon would surface a muted item as an
+		// actionable notification. Both normalizer copies MUST agree; an adversarial test pins that.
+		return "muted"
 	default:
 		return "for_me"
 	}
 }
 
-func buildNotificationPrompt(currentAgent *agent, forMe []*agentEvent, general []*agentEvent, workspace *workspaceResponse) string {
+func buildNotificationPrompt(currentAgent *agent, forMe []*agentEvent, general []*agentEvent, mutedCount int, workspace *workspaceResponse) string {
 	var builder strings.Builder
 	builder.WriteString("You have new items in your notification center.\n\n")
 	appendNotificationSection(&builder, "For-me inbox", forMe, workspace, 5)
 	appendNotificationSection(&builder, "General inbox", general, workspace, 3)
-	builder.WriteString("Use the notification center tools if you want details, diffs, or to act on any item.\n")
-	if currentAgent != nil && strings.TrimSpace(currentAgent.Role) != "" {
-		builder.WriteString("\nRole:\n- " + currentAgent.Role + "\n")
+	// Count-only pointer to the muted box. Never pushed and never a reason you were woken — this line is
+	// decoration on a wake that already fired. The count is as of this turn.
+	if mutedCount > 0 {
+		builder.WriteString(fmt.Sprintf("Muted inbox: %d item(s) waiting\n\n", mutedCount))
 	}
+	// One closer: a bare list-inbox now inspects every box (for-me + general + muted), so this single command
+	// covers the full inbox.
+	builder.WriteString("run notty-agent-tool list-inbox to inspect full inbox, if you need to\n")
 	return builder.String()
 }
 

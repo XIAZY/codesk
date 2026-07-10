@@ -521,6 +521,31 @@ func initPostgresSchemaTables(db *sql.DB) error {
 				ON DELETE CASCADE
 		)
 		`,
+		// agent_document_subscriptions: an agent's explicit opt-in to a document's updates. A document
+		// edit pushes an inbox card ONLY to its subscribers (task #2, muted-by-default routing); a row
+		// here is the sole document→push path. Joins the cascade graph so subscriptions vanish with the
+		// agent or the document.
+		`
+		CREATE TABLE IF NOT EXISTS agent_document_subscriptions (
+			workspace_id UUID NOT NULL,
+			agent_id UUID NOT NULL,
+			document_id UUID NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL,
+			PRIMARY KEY (workspace_id, agent_id, document_id),
+			CONSTRAINT fk_agent_document_subscriptions_workspace
+				FOREIGN KEY (workspace_id)
+				REFERENCES workspaces(id)
+				ON DELETE CASCADE,
+			CONSTRAINT fk_agent_document_subscriptions_agent
+				FOREIGN KEY (workspace_id, agent_id)
+				REFERENCES agents(workspace_id, id)
+				ON DELETE CASCADE,
+			CONSTRAINT fk_agent_document_subscriptions_document
+				FOREIGN KEY (workspace_id, document_id)
+				REFERENCES documents(workspace_id, id)
+				ON DELETE CASCADE
+		)
+		`,
 	}
 	for index, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {
@@ -777,8 +802,11 @@ func (s *Store) persistDocumentMutationPostgresLocked() error {
 		}
 	}()
 
-	inboxEvents, err := s.persistDocumentsPostgresLocked(tx)
-	if err != nil {
+	// Document inbox rows are persisted for subscribers inside persistDocumentsPostgresLocked, but they do
+	// NOT ring the inbox doorbell (task #2): documents never push a wake — a subscriber finds its mature card
+	// on the next poll. Thread events keep their own doorbell (store.go reply/create paths); only the
+	// document fan-out is dropped here. The returned events are intentionally discarded.
+	if _, err = s.persistDocumentsPostgresLocked(tx); err != nil {
 		return err
 	}
 	// Flush activities in the same transaction as the documents they reference
@@ -793,9 +821,6 @@ func (s *Store) persistDocumentMutationPostgresLocked() error {
 	s.dirtyDocuments = map[string]struct{}{}
 	s.pendingDocumentEvents = []documentUpdateRecord{}
 	s.pendingActivities = nil
-	for _, event := range inboxEvents {
-		s.recordAgentInboxChangedLocked(event)
-	}
 	return nil
 }
 
@@ -1358,6 +1383,110 @@ func getAgentDocumentViewPostgres(q querier, workspaceID string, agentID string,
 	return view, nil
 }
 
+// subscribeAgentDocumentPostgres records an agent's opt-in to a document's updates. Idempotent: a
+// double-subscribe is a no-op (no error, no duplicate).
+func subscribeAgentDocumentPostgres(exec activityExecer, workspaceID, agentID, documentID string, createdAt time.Time) error {
+	_, err := exec.Exec(
+		`INSERT INTO agent_document_subscriptions (workspace_id, agent_id, document_id, created_at)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (workspace_id, agent_id, document_id) DO NOTHING`,
+		workspaceID, agentID, documentID, createdAt,
+	)
+	return err
+}
+
+// unsubscribeAgentDocumentPostgres removes a subscription. Returns whether a row was actually deleted so
+// the caller can keep the operation idempotent (unsubscribing a non-subscription is a no-op).
+func unsubscribeAgentDocumentPostgres(exec activityExecer, workspaceID, agentID, documentID string) (bool, error) {
+	res, err := exec.Exec(
+		`DELETE FROM agent_document_subscriptions
+		  WHERE workspace_id = $1 AND agent_id = $2 AND document_id = $3`,
+		workspaceID, agentID, documentID,
+	)
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
+// isAgentSubscribedToDocumentPostgres reports whether an agent has opted in to a document's updates.
+func isAgentSubscribedToDocumentPostgres(q querier, workspaceID, agentID, documentID string) (bool, error) {
+	if !isUUIDString(agentID) || !isUUIDString(documentID) {
+		return false, nil
+	}
+	var exists bool
+	err := q.QueryRow(
+		`SELECT EXISTS (
+			SELECT 1 FROM agent_document_subscriptions
+			 WHERE workspace_id = $1::uuid AND agent_id = $2::uuid AND document_id = $3::uuid
+		)`,
+		workspaceID, agentID, documentID,
+	).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
+// listDocumentSubscriberAgentIDsPostgres returns the agent ids subscribed to a document — the only agents
+// a document edit may push to.
+func listDocumentSubscriberAgentIDsPostgres(q querier, workspaceID, documentID string) ([]string, error) {
+	if !isUUIDString(documentID) {
+		return nil, nil
+	}
+	rows, err := q.Query(
+		`SELECT agent_id::text
+		   FROM agent_document_subscriptions
+		  WHERE workspace_id = $1::uuid AND document_id = $2::uuid
+		  ORDER BY agent_id`,
+		workspaceID, documentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// listAgentDocumentSubscriptionsPostgres returns the document ids an agent is subscribed to (the list tool).
+func listAgentDocumentSubscriptionsPostgres(q querier, workspaceID, agentID string) ([]string, error) {
+	if !isUUIDString(agentID) {
+		return nil, nil
+	}
+	rows, err := q.Query(
+		`SELECT document_id::text
+		   FROM agent_document_subscriptions
+		  WHERE workspace_id = $1::uuid AND agent_id = $2::uuid
+		  ORDER BY created_at, document_id`,
+		workspaceID, agentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func getAgentEventPostgres(db *sql.DB, workspaceID, id string) (*AgentEvent, error) {
 	row := db.QueryRow(
 		`SELECT id::text, agent_id::text, agent_handle, type, box, status,
@@ -1385,7 +1514,8 @@ func listAgentEventsPostgres(db *sql.DB, workspaceID, agentID string, box string
 	                 COALESCE(run_id::text, ''), last_error, attempt_count,
 	                 available_at, claimed_at, completed_at, created_at, updated_at
 	            FROM agent_events
-	           WHERE workspace_id = $1::uuid AND agent_id = $2::uuid`
+	           WHERE workspace_id = $1::uuid AND agent_id = $2::uuid
+	             AND (status <> 'pending' OR available_at <= now())`
 	args := []any{workspaceID, agentID}
 	argN := 3
 	if box != "" {
