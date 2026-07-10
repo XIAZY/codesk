@@ -86,15 +86,26 @@ func TestDocumentCreatedPushesGeneralCardToNonCreators(t *testing.T) {
 		if card.ToUpdateID != doc.UpdateID {
 			t.Fatalf("to_update_id = %d, want the created version %d (watermark advance depends on it)", card.ToUpdateID, doc.UpdateID)
 		}
-		if gap := card.AvailableAt.Sub(card.CreatedAt); gap < 55*time.Second || gap > 65*time.Second {
-			t.Fatalf("created card should mature ~60s out (poll+maturity), got %v", gap)
+		// Instant delivery (AlphaToad's ruling): available immediately, no quiescence window.
+		if gap := card.AvailableAt.Sub(card.CreatedAt); gap > time.Second {
+			t.Fatalf("created card should be available instantly, got a %v delay", gap)
 		}
 	}
 
-	// Documents ride poll+maturity: creation rings NO inbox doorbell for anyone.
+	// Instant wake: creation rings exactly one document.created doorbell per carded agent (general box).
+	doorbells := map[string]int{}
 	for _, change := range store.DrainAgentInboxChanges() {
-		if change.NotificationType == "document.created" {
-			t.Fatalf("document.created must ring no doorbell, got %#v", change)
+		if change.NotificationType != "document.created" {
+			continue
+		}
+		if normalizeInboxBox(change.Box) != "general" {
+			t.Fatalf("document.created doorbell must be general, got %q", change.Box)
+		}
+		doorbells[change.AgentID]++
+	}
+	for _, agentID := range []string{agentA.ID, agentB.ID} {
+		if doorbells[agentID] != 1 {
+			t.Fatalf("agent %s: want exactly 1 document.created doorbell, got %d", agentID, doorbells[agentID])
 		}
 	}
 }
@@ -119,6 +130,19 @@ func TestDocumentCreatedExcludesTheCreator(t *testing.T) {
 	if cards := documentCreatedCards(t, store, bystander.ID); len(cards) != 1 {
 		t.Fatalf("a non-creator agent must be carded once, got %d", len(cards))
 	}
+	// The doorbell follows the card: the creator is never woken, the bystander is woken once.
+	doorbells := map[string]int{}
+	for _, change := range store.DrainAgentInboxChanges() {
+		if change.NotificationType == "document.created" {
+			doorbells[change.AgentID]++
+		}
+	}
+	if doorbells[creator.ID] != 0 {
+		t.Fatalf("the creator must not be woken, got %d doorbells", doorbells[creator.ID])
+	}
+	if doorbells[bystander.ID] != 1 {
+		t.Fatalf("the bystander must be woken once, got %d doorbells", doorbells[bystander.ID])
+	}
 	_ = doc
 }
 
@@ -134,6 +158,8 @@ func TestDocumentCreatedIsIdempotentOnReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first create: %v", err)
 	}
+	// Drain the first create's doorbell so the replay assertion sees only the replay's effect.
+	store.DrainAgentInboxChanges()
 	// Same document id + client operation → the replay guard returns the existing doc before any emission.
 	second, err := store.CreateDocument(req, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
 	if err != nil {
@@ -144,6 +170,12 @@ func TestDocumentCreatedIsIdempotentOnReplay(t *testing.T) {
 	}
 	if cards := documentCreatedCards(t, store, agent.ID); len(cards) != 1 {
 		t.Fatalf("idempotent replay must not double-card: want 1, got %d", len(cards))
+	}
+	// A replay re-cards no one and so wakes no one.
+	for _, change := range store.DrainAgentInboxChanges() {
+		if change.NotificationType == "document.created" {
+			t.Fatalf("idempotent replay must ring no doorbell, got %#v", change)
+		}
 	}
 }
 
@@ -190,7 +222,7 @@ func TestDocumentCreatedEmissionFailureIsBestEffort(t *testing.T) {
 	}
 }
 
-func TestDocumentCreatedBurstProducesRowsWithoutDoorbell(t *testing.T) {
+func TestDocumentCreatedBurstRingsPerCreationDoorbells(t *testing.T) {
 	database := newPostgresTestDatabase(t)
 	store := newPostgresTestWorkspaceStore(t, database)
 	seedCodexDaemonRuntime(t, store)
@@ -207,13 +239,19 @@ func TestDocumentCreatedBurstProducesRowsWithoutDoorbell(t *testing.T) {
 	}
 
 	if cards := documentCreatedCards(t, store, agent.ID); len(cards) != burst {
-		t.Fatalf("burst of %d creations must yield %d cheap rows, got %d", burst, burst, len(cards))
+		t.Fatalf("burst of %d creations must yield %d rows, got %d", burst, burst, len(cards))
 	}
-	// The flood answer: N creations, zero doorbells — the poll batches them into one bounded turn.
+	// Instant delivery (AlphaToad's ruling): the store rings one doorbell per creation. The burst is bounded
+	// to one TURN per agent downstream by the daemon's busy-path one-slot follow-up (and the wake prompt's
+	// top-3+overflow cap) — that collapse is a supervisor property, not the store's; the store fires N.
+	doorbells := 0
 	for _, change := range store.DrainAgentInboxChanges() {
-		if change.NotificationType == "document.created" {
-			t.Fatalf("a creation burst must ring zero doorbells, got %#v", change)
+		if change.NotificationType == "document.created" && change.AgentID == agent.ID {
+			doorbells++
 		}
+	}
+	if doorbells != burst {
+		t.Fatalf("a burst of %d creations must ring %d instant doorbells, got %d", burst, burst, doorbells)
 	}
 }
 

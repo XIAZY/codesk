@@ -44,6 +44,9 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publishActivityChanges(r)
+	// document.created cards are instant (task #3): drain the inbox doorbell the create just rang, so every
+	// carded agent wakes now. Both create surfaces (REST + the daemon's local-file create) reach this handler.
+	s.publishAgentInboxChanges(r)
 	writeJSON(w, http.StatusCreated, documentMetadata(document))
 }
 
