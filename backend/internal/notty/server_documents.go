@@ -30,6 +30,27 @@ func (s *Server) handleDocumentThreads(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleDocumentSubscribers serves the doc→agents subscriber list for the Participants panel (task #4).
+// Workspace-scoped like its sibling document reads (the route lives under the same subtree gate, so a
+// non-member is already 403'd). Never-null: an unsubscribed document returns {agents: []}.
+func (s *Server) handleDocumentSubscribers(w http.ResponseWriter, r *http.Request) {
+	agents, err := s.requestStore(r).ListDocumentSubscriberAgents(chi.URLParam(r, "id"))
+	if err != nil {
+		status := http.StatusBadRequest
+		if err == ErrNotFound {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	if agents == nil {
+		agents = []DocumentSubscriberAgent{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"agents": agents,
+	})
+}
+
 func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 	var req CreateDocumentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

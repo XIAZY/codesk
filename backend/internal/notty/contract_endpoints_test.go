@@ -154,3 +154,65 @@ func TestContractDocumentSubscriptionsGolden(t *testing.T) {
 	authTestStatus(t, router, http.MethodPost, subs, fx.OwnerToken, SubscribeDocumentRequest{DocumentID: fx.DocumentID}, http.StatusOK)
 	assertEndpointGolden(t, router, http.MethodGet, subs, fx.OwnerToken, "document_subscriptions_populated", []string{"documentIds"})
 }
+
+// TestContractDocumentSubscribersGolden pins the doc→subscribers read shape (task #4, Participants panel)
+// across empty and populated states, and demonstrates the one-write-path property: subscribing through the
+// existing agent endpoint is what surfaces the agent in this read — there is no second write path.
+func TestContractDocumentSubscribersGolden(t *testing.T) {
+	_, router := newAuthTestServer(t)
+	fx := buildContractPopulatedFixture(t, router)
+	ws := "/api/workspaces/" + fx.WorkspaceID
+	subscribers := ws + "/documents/" + fx.DocumentID + "/subscribers"
+
+	// Empty: the document has no subscribers yet.
+	assertEndpointGolden(t, router, http.MethodGet, subscribers, fx.OwnerToken, "document_subscribers_empty", []string{"agents"})
+
+	// Populated: subscribe the agent through the existing agent endpoint (owner passes the shared boundary),
+	// then pin the subscriber list — the same write the CLI/daemon uses, surfaced doc→agents.
+	subs := ws + "/agents/" + fx.AgentID + "/document-subscriptions"
+	authTestStatus(t, router, http.MethodPost, subs, fx.OwnerToken, SubscribeDocumentRequest{DocumentID: fx.DocumentID}, http.StatusOK)
+	assertEndpointGolden(t, router, http.MethodGet, subscribers, fx.OwnerToken, "document_subscribers_populated", []string{"agents"})
+}
+
+// TestDocumentSubscribersReadAuthzAndBehavior pins the read's authz (workspace-member only, unknown doc 404)
+// and the one-write-path round trip: an owner-initiated subscribe surfaces the agent with its lean
+// projection, an unsubscribe removes it — same rows the CLI writes, no divergent write path.
+func TestDocumentSubscribersReadAuthzAndBehavior(t *testing.T) {
+	_, router := newAuthTestServer(t)
+	fx := buildContractPopulatedFixture(t, router)
+	ws := "/api/workspaces/" + fx.WorkspaceID
+	subscribers := ws + "/documents/" + fx.DocumentID + "/subscribers"
+
+	// A non-member never reaches the handler (the requireWorkspace subtree gate).
+	outsider := authTestRegister(t, router, "document-subscribers-outsider@example.com", "owner-pass", "Subscribers Outsider")
+	authTestStatus(t, router, http.MethodGet, subscribers, outsider.Token, nil, http.StatusForbidden)
+
+	// Unknown document → 404, like the sibling document reads.
+	authTestStatus(t, router, http.MethodGet, ws+"/documents/00000000-0000-4000-8000-000000000000/subscribers", fx.OwnerToken, nil, http.StatusNotFound)
+
+	// One write path: subscribing through the existing agent endpoint surfaces the agent here, with the lean
+	// id/handle/name/kind projection and nothing more.
+	subs := ws + "/agents/" + fx.AgentID + "/document-subscriptions"
+	authTestStatus(t, router, http.MethodPost, subs, fx.OwnerToken, SubscribeDocumentRequest{DocumentID: fx.DocumentID}, http.StatusOK)
+
+	var populated struct {
+		Agents []DocumentSubscriberAgent `json:"agents"`
+	}
+	authTestJSON(t, router, http.MethodGet, subscribers, fx.OwnerToken, nil, http.StatusOK, &populated)
+	if len(populated.Agents) != 1 {
+		t.Fatalf("subscribe-on-behalf must surface exactly one subscriber, got %#v", populated.Agents)
+	}
+	if got := populated.Agents[0]; got.ID != fx.AgentID || got.Handle != "contract-agent" || got.Name != "Contract Agent" || got.Kind != "codex" {
+		t.Fatalf("subscriber projection mismatch: %#v", got)
+	}
+
+	// Unsubscribe through the same endpoint removes it from the read.
+	authTestStatus(t, router, http.MethodDelete, subs+"/"+fx.DocumentID, fx.OwnerToken, nil, http.StatusOK)
+	var emptied struct {
+		Agents []DocumentSubscriberAgent `json:"agents"`
+	}
+	authTestJSON(t, router, http.MethodGet, subscribers, fx.OwnerToken, nil, http.StatusOK, &emptied)
+	if len(emptied.Agents) != 0 {
+		t.Fatalf("unsubscribe must remove the agent from the read, got %#v", emptied.Agents)
+	}
+}

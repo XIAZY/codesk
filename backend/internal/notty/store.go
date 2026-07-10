@@ -393,6 +393,38 @@ func (s *Store) ListAgentDocumentSubscriptions(agentID string) ([]string, error)
 	return listAgentDocumentSubscriptionsPostgres(s.db, s.state.WorkspaceID, agentID)
 }
 
+// ListDocumentSubscriberAgents returns the agents subscribed to a document — the doc→agents direction the
+// Participants panel reads (task #4), the mirror of ListAgentDocumentSubscriptions. A thin projection
+// (id/handle/name/kind) over the same fan-out helper the routing uses plus agent metadata, so the panel and
+// the push path agree on who watches a document by construction. A missing/hidden document is ErrNotFound
+// (404), like the sibling document reads; a subscription whose agent has since been deleted is skipped.
+func (s *Store) ListDocumentSubscriberAgents(documentID string) ([]DocumentSubscriberAgent, error) {
+	s.mu.RLock()
+	document := s.state.ContentDocuments[documentID]
+	workspaceID := s.state.WorkspaceID
+	db := s.db
+	s.mu.RUnlock()
+	if document == nil || document.Hidden {
+		return nil, ErrNotFound
+	}
+	ids, err := listDocumentSubscriberAgentIDsPostgres(db, workspaceID, documentID)
+	if err != nil {
+		return nil, err
+	}
+	agents := make([]DocumentSubscriberAgent, 0, len(ids))
+	for _, id := range ids {
+		agent, err := getAgentPostgres(db, workspaceID, id)
+		if err != nil {
+			if err == ErrNotFound {
+				continue
+			}
+			return nil, err
+		}
+		agents = append(agents, DocumentSubscriberAgent{ID: agent.ID, Handle: agent.Handle, Name: agent.Name, Kind: agent.Kind})
+	}
+	return agents, nil
+}
+
 func (s *Store) DrainActivityChanges() []*ActivityEvent {
 	s.mu.Lock()
 	defer s.mu.Unlock()
