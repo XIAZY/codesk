@@ -101,6 +101,14 @@ export type Agent = {
   updatedAt: string;
 };
 
+// The lean subscriber projection served by GET /documents/{id}/subscribers (task #4) — identity only.
+export type DocumentSubscriberAgent = {
+  id: string;
+  handle: string;
+  name: string;
+  kind: string;
+};
+
 export type AgentRun = {
   id: string;
   agentId: string;

@@ -658,6 +658,58 @@ export function personOnline(person: Pick<WorkspacePerson, "presentAt">, nowMs: 
   return !Number.isNaN(presentMs) && nowMs - presentMs <= PRESENCE_ONLINE_WINDOW_MS;
 }
 
+// The document-scoped Participants panel (task #4). Two disjoint durable/live sets, plus the picker source:
+//   hereNow  — humans AND agents with FRESH presence on THIS document (presence rows carry documentId; a
+//              stale or other-document row does not count — presence is only ever real activity).
+//   watching — agents subscribed to this document (the durable notification relationship), independent of
+//              presence. "Watching", never "online": an offline agent still watches.
+//   addable  — agents NOT subscribed, the ONLY place unsubscribed agents surface (the add-watcher picker),
+//              so the panel never reintroduces the ambient every-agent-watches-everything view.
+// subscriberIds comes from GET /documents/{id}/subscribers; presence is workspace state. Pure, so the panel's
+// grouping is unit-testable without the fetch.
+export type DocumentParticipants = {
+  hereNow: WorkspacePerson[];
+  watching: WorkspacePerson[];
+  addable: WorkspacePerson[];
+};
+
+export function documentParticipants(
+  workspace: Pick<WorkspaceState, "currentUserId" | "agents" | "users" | "presences">,
+  documentId: string | undefined,
+  subscriberIds: readonly string[],
+  nowMs: number,
+): DocumentParticipants {
+  const subscribed = new Set(subscriberIds);
+  const onThisDoc = (id: string): boolean => {
+    if (!documentId) {
+      return false;
+    }
+    const presence = workspace.presences[id];
+    if (!presence || presence.documentId !== documentId) {
+      return false;
+    }
+    return personOnline({ presentAt: presence.updatedAt }, nowMs);
+  };
+
+  const hereNow: WorkspacePerson[] = [];
+  for (const person of workspacePeople(workspace)) {
+    if (onThisDoc(person.id)) {
+      hereNow.push(person);
+    }
+  }
+
+  const watching: WorkspacePerson[] = [];
+  const addable: WorkspacePerson[] = [];
+  const byHandle = (a: WorkspacePerson, b: WorkspacePerson) => a.handle.localeCompare(b.handle);
+  for (const agent of workspace.agents) {
+    const person: WorkspacePerson = { id: agent.id, handle: agent.handle, name: agent.name, kind: "agent", presentAt: workspace.presences[agent.id]?.updatedAt };
+    (subscribed.has(agent.id) ? watching : addable).push(person);
+  }
+  watching.sort(byHandle);
+  addable.sort(byHandle);
+  return { hereNow, watching, addable };
+}
+
 export type ActivityCategory = "human-edit" | "comment" | "agent-change" | "done" | "neutral";
 
 // Map a Document Activity event to one of 2a-3's semantic categories from its
