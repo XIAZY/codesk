@@ -443,11 +443,11 @@ func TestToolGatewaySubscribeUnsubscribeListDocuments(t *testing.T) {
 			const path = "/api/agents/agent_1/document-subscriptions"
 			switch {
 			case r.Method == http.MethodPost && r.URL.Path == path:
-				return jsonResponse(t, http.StatusOK, toolDocumentSubscriptionsResponse{DocumentIDs: []string{"doc_spec"}}), nil
+				return jsonResponse(t, http.StatusOK, backendDocumentSubscriptionsResponse{DocumentIDs: []string{"doc_spec"}}), nil
 			case r.Method == http.MethodGet && r.URL.Path == path:
-				return jsonResponse(t, http.StatusOK, toolDocumentSubscriptionsResponse{DocumentIDs: []string{"doc_spec"}}), nil
+				return jsonResponse(t, http.StatusOK, backendDocumentSubscriptionsResponse{DocumentIDs: []string{"doc_spec"}}), nil
 			case r.Method == http.MethodDelete && r.URL.Path == path+"/doc_spec":
-				return jsonResponse(t, http.StatusOK, toolDocumentSubscriptionsResponse{DocumentIDs: []string{}}), nil
+				return jsonResponse(t, http.StatusOK, backendDocumentSubscriptionsResponse{DocumentIDs: []string{}}), nil
 			default:
 				t.Fatalf("unexpected backend request: %s %s", r.Method, r.URL.String())
 				return nil, nil
@@ -463,16 +463,20 @@ func TestToolGatewaySubscribeUnsubscribeListDocuments(t *testing.T) {
 		return rec
 	}
 
-	// Subscribe proxies POST to the backend and returns the post-change {documentIds}.
-	if rec := call(service.handleSubscribeDocumentTool, http.MethodPost, "/agent-tools/subscribe-document?document_id=doc_spec"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "\"documentIds\":[\"doc_spec\"]") {
+	// The gateway enriches the backend's bare {documentIds} into {documents:[{id,path}]}. This test service
+	// has no workspace runtime, so the path index is empty — the HONESTY case: the doc still appears with an
+	// id and an empty path (the CLI renders that as an id-only line) rather than erroring or vanishing.
+	//
+	// Subscribe proxies POST and returns the enriched post-change list.
+	if rec := call(service.handleSubscribeDocumentTool, http.MethodPost, "/agent-tools/subscribe-document?document_id=doc_spec"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "\"documents\":[{\"id\":\"doc_spec\",\"path\":\"\"}]") {
 		t.Fatalf("subscribe: status %d body=%s", rec.Code, rec.Body.String())
 	}
 	// List proxies GET.
-	if rec := call(service.handleListDocumentSubscriptionsTool, http.MethodGet, "/agent-tools/list-subscriptions"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "doc_spec") {
+	if rec := call(service.handleListDocumentSubscriptionsTool, http.MethodGet, "/agent-tools/list-subscriptions"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "\"id\":\"doc_spec\"") {
 		t.Fatalf("list: status %d body=%s", rec.Code, rec.Body.String())
 	}
 	// Unsubscribe proxies DELETE (to the {documentID} path) and returns the emptied list.
-	if rec := call(service.handleUnsubscribeDocumentTool, http.MethodPost, "/agent-tools/unsubscribe-document?document_id=doc_spec"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "\"documentIds\":[]") {
+	if rec := call(service.handleUnsubscribeDocumentTool, http.MethodPost, "/agent-tools/unsubscribe-document?document_id=doc_spec"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "\"documents\":[]") {
 		t.Fatalf("unsubscribe: status %d body=%s", rec.Code, rec.Body.String())
 	}
 	// An unknown tool token is rejected before any backend call.
@@ -484,6 +488,22 @@ func TestToolGatewaySubscribeUnsubscribeListDocuments(t *testing.T) {
 		return rec
 	}()); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unknown token: want 401, got %d", rec.Code)
+	}
+}
+
+func TestBuildSubscribedDocumentsDegradesUnknownIDToIDOnly(t *testing.T) {
+	pathByID := map[string]string{"doc_spec": "specs/api.md"}
+	got := buildSubscribedDocuments([]string{"doc_spec", "doc_gone"}, pathByID)
+	if len(got) != 2 {
+		t.Fatalf("want 2 documents, got %d: %+v", len(got), got)
+	}
+	// Known id carries its path from the projection.
+	if got[0] != (subscribedDocument{ID: "doc_spec", Path: "specs/api.md"}) {
+		t.Fatalf("known id: %+v", got[0])
+	}
+	// Unknown id (no projection entry) is kept with an empty path, not dropped — the honesty case.
+	if got[1] != (subscribedDocument{ID: "doc_gone", Path: ""}) {
+		t.Fatalf("unknown id: %+v", got[1])
 	}
 }
 

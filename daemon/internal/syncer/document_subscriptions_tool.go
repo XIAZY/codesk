@@ -13,10 +13,27 @@ import (
 
 // Agent-tool surface for document subscriptions (task #2). This is the RULED subscribe interface: agents
 // opt in to a document's updates explicitly via the CLI. Each tool call is proxied to the backend with the
-// run's agent identity (daemon token + acting-agent), so the backend's ownership boundary applies. All three
-// return the same {documentIds:[…]} shape the backend serves.
+// run's agent identity (daemon token + acting-agent), so the backend's ownership boundary applies.
+//
+// The backend serves bare {documentIds:[…]} — it stores the root-namespace CRDT as opaque truth and never
+// decodes a document's path (there is no path column). The daemon is the only party that materializes paths,
+// from the root-document projection it already holds to sync files to disk. So the gateway enriches here:
+// it joins the backend's ids against that projection (zero extra network calls, the actual source of truth)
+// and returns {documents:[{id,path}]} to the CLI. An id with no projection entry (a deleted/renamed doc
+// mid-sync) degrades honestly to an empty path, which the CLI renders as an id-only line.
+
+type subscribedDocument struct {
+	ID   string `json:"id"`
+	Path string `json:"path"`
+}
 
 type toolDocumentSubscriptionsResponse struct {
+	Documents []subscribedDocument `json:"documents"`
+}
+
+// backendDocumentSubscriptionsResponse is the bare id-only shape the backend endpoints serve; the gateway
+// enriches it into toolDocumentSubscriptionsResponse before returning it to the CLI.
+type backendDocumentSubscriptionsResponse struct {
 	DocumentIDs []string `json:"documentIds"`
 }
 
@@ -58,7 +75,11 @@ func (s *Service) mutateDocumentSubscriptionForRun(ctx context.Context, run *age
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	return s.doDocumentSubscriptionsRequest(req, "update document subscription")
+	ids, err := s.doDocumentSubscriptionsRequest(req, "update document subscription")
+	if err != nil {
+		return nil, err
+	}
+	return s.enrichDocumentSubscriptions(run, ids), nil
 }
 
 func (s *Service) listDocumentSubscriptionsForRun(ctx context.Context, run *agentRun) (*toolDocumentSubscriptionsResponse, error) {
@@ -69,10 +90,14 @@ func (s *Service) listDocumentSubscriptionsForRun(ctx context.Context, run *agen
 	if err != nil {
 		return nil, err
 	}
-	return s.doDocumentSubscriptionsRequest(req, "list document subscriptions")
+	ids, err := s.doDocumentSubscriptionsRequest(req, "list document subscriptions")
+	if err != nil {
+		return nil, err
+	}
+	return s.enrichDocumentSubscriptions(run, ids), nil
 }
 
-func (s *Service) doDocumentSubscriptionsRequest(req *http.Request, label string) (*toolDocumentSubscriptionsResponse, error) {
+func (s *Service) doDocumentSubscriptionsRequest(req *http.Request, label string) ([]string, error) {
 	res, err := s.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -81,11 +106,49 @@ func (s *Service) doDocumentSubscriptionsRequest(req *http.Request, label string
 	if res.StatusCode >= http.StatusBadRequest {
 		return nil, fmt.Errorf("%s failed: %s", label, res.Status)
 	}
-	var response toolDocumentSubscriptionsResponse
+	var response backendDocumentSubscriptionsResponse
 	if err := json.NewDecoder(res.Body).Decode(&response); err != nil {
 		return nil, err
 	}
-	return &response, nil
+	return response.DocumentIDs, nil
+}
+
+// enrichDocumentSubscriptions joins backend document ids against the root-namespace projection the daemon
+// already holds, attaching each document's path. An id absent from the projection (deleted/renamed mid-sync)
+// keeps an empty path — the CLI renders that as an id-only line rather than erroring or dropping it.
+func (s *Service) enrichDocumentSubscriptions(run *agentRun, ids []string) *toolDocumentSubscriptionsResponse {
+	return &toolDocumentSubscriptionsResponse{Documents: buildSubscribedDocuments(ids, s.subscriptionPathIndex(run))}
+}
+
+// buildSubscribedDocuments joins ids against a path index. An id absent from the index keeps an empty path
+// (a deleted/renamed doc the projection no longer has) rather than being dropped — pure so the honesty case
+// is unit-testable without a live runtime.
+func buildSubscribedDocuments(ids []string, pathByID map[string]string) []subscribedDocument {
+	documents := make([]subscribedDocument, 0, len(ids))
+	for _, id := range ids {
+		documents = append(documents, subscribedDocument{ID: id, Path: pathByID[id]})
+	}
+	return documents
+}
+
+// subscriptionPathIndex materializes an id→path map from the root projection the daemon holds. Best-effort:
+// if the runtime or projection is unavailable, it returns an empty map and every line degrades to id-only.
+func (s *Service) subscriptionPathIndex(run *agentRun) map[string]string {
+	index := map[string]string{}
+	runtime := s.runtimeForThreadAnchor(run)
+	if runtime == nil {
+		return index
+	}
+	documents, err := runtime.documentsFromRootProjection()
+	if err != nil {
+		return index
+	}
+	for _, document := range documents {
+		if document != nil && document.ID != "" {
+			index[document.ID] = document.Path
+		}
+	}
+	return index
 }
 
 func (s *Service) handleSubscribeDocumentTool(w http.ResponseWriter, r *http.Request) {
