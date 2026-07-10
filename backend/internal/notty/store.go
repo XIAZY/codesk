@@ -386,36 +386,93 @@ func (s *Store) SubscribeAgentDocument(agentID, documentID string) error {
 // idempotent re-subscribe cards no one. Returns whether a new subscription row was created. The card is a
 // directed second-person fact → for_me box, instant doorbell; its `subscription.added` type is deliberately
 // NOT `document.`-prefixed so completing it does not advance the document watermark.
+// testHookSubscriptionCardUpsert, when non-nil (tests only), replaces the subscription.added card upsert so a
+// forced failure can prove the subscribe+card transaction rolls back atomically. The card and the
+// subscription share the same document_id/agent_id foreign keys, so a schema/FK failure can never make one
+// succeed while the other fails — this seam exists to inject the one realistic divergence (a transient error
+// mid-transaction) deterministically.
+var testHookSubscriptionCardUpsert func(querier, string, *AgentEvent) (*AgentEvent, error)
+
 func (s *Store) SubscribeAgentDocumentAndNotify(agentID, documentID string, meta OperationMeta) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	inserted, err := subscribeAgentDocumentPostgres(s.db, s.state.WorkspaceID, agentID, documentID, time.Now().UTC())
-	if err != nil || !inserted {
-		return inserted, err
+	now := time.Now().UTC()
+
+	// Build the card candidate (or nil) BEFORE the write tx — the human-vs-self policy and the actor/agent
+	// lookups do not mutate anything, so they stay outside the transaction.
+	card, err := s.buildSubscriptionAddedCardLocked(agentID, documentID, meta, now)
+	if err != nil {
+		return false, err
 	}
+
+	// One transaction for the subscription insert AND the conditional card upsert: all-or-nothing, so a card
+	// write failure never strands a durable subscription with no retry path (Thomas/Tom ruling). If nothing
+	// commits, the error response is finally true.
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	inserted, err := subscribeAgentDocumentPostgres(tx, s.state.WorkspaceID, agentID, documentID, now)
+	if err != nil {
+		return false, err
+	}
+	var persisted *AgentEvent
+	if inserted && card != nil {
+		upsert := upsertDocumentInboxEventPostgres
+		if testHookSubscriptionCardUpsert != nil {
+			upsert = testHookSubscriptionCardUpsert
+		}
+		persisted, err = upsert(tx, s.state.WorkspaceID, card)
+		if err != nil {
+			return false, err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return false, err
+	}
+	committed = true
+
+	// Doorbell from the PERSISTED event (its real id, correct even if a dedup row was reused), recorded
+	// post-commit and best-effort: a failed broadcast must never un-subscribe anyone.
+	if persisted != nil {
+		s.recordAgentInboxChangedLocked(persisted)
+	}
+	return inserted, nil
+}
+
+// buildSubscriptionAddedCardLocked returns the subscription.added card for a genuine human-adds-someone-else
+// subscribe, or nil when no card is due (a non-human/self-subscribe, or an unresolvable actor/agent). It only
+// reads, so it runs before the write transaction.
+func (s *Store) buildSubscriptionAddedCardLocked(agentID, documentID string, meta OperationMeta, now time.Time) (*AgentEvent, error) {
 	if !strings.EqualFold(strings.TrimSpace(meta.ActorType), "human") {
-		return inserted, nil
+		return nil, nil
 	}
 	actor, err := resolvePrincipalPostgres(s.db, s.state.WorkspaceID, meta.ActorID, meta.ActorType)
 	if err != nil {
 		if err == ErrNotFound {
-			return inserted, nil
+			return nil, nil
 		}
-		return inserted, err
+		return nil, err
 	}
 	if actor.ID == agentID {
-		return inserted, nil
+		return nil, nil
 	}
 	agent, err := getAgentPostgres(s.db, s.state.WorkspaceID, agentID)
 	if err != nil {
 		if err == ErrNotFound {
-			return inserted, nil
+			return nil, nil
 		}
-		return inserted, err
+		return nil, err
 	}
 	document := s.state.ContentDocuments[documentID]
-	now := time.Now().UTC()
-	event := &AgentEvent{
+	return &AgentEvent{
 		ID:          uuid.NewString(),
 		AgentID:     agent.ID,
 		AgentHandle: agent.Handle,
@@ -429,12 +486,7 @@ func (s *Store) SubscribeAgentDocumentAndNotify(agentID, documentID string, meta
 		CreatedAt:   now,
 		UpdatedAt:   now,
 		AvailableAt: now,
-	}
-	if _, err := upsertDocumentInboxEventPostgres(s.db, s.state.WorkspaceID, event); err != nil {
-		return inserted, err
-	}
-	s.recordAgentInboxChangedLocked(event)
-	return inserted, nil
+	}, nil
 }
 
 // UnsubscribeAgentDocument removes a subscription. Returns whether a row was removed (idempotent).

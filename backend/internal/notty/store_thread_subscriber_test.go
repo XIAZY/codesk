@@ -1,6 +1,7 @@
 package notty
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -110,6 +111,118 @@ func TestThreadCreatedCardsSubscribersExcludingAuthorAndMentioned(t *testing.T) 
 	}
 	if changes[author.ID] != 0 || changes[bystander.ID] != 0 {
 		t.Fatalf("author/bystander must not be rung, got %d/%d", changes[author.ID], changes[bystander.ID])
+	}
+}
+
+func TestThreadCreatedReplayDoesNotDoubleCard(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	store := newPostgresTestWorkspaceStore(t, database)
+	seedCodexDaemonRuntime(t, store)
+	user := seedTestUser(t, store)
+	watcher := mustCreateInboxTestAgent(t, store, user, "watcher")
+	doc := mustCreateTestDocument(t, store, "docs/spec.md", "start\n")
+	if err := store.SubscribeAgentDocument(watcher.ID, doc); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	store.DrainAgentInboxChanges()
+
+	// Same client operation id → the second create is a replay of the first, not a new thread.
+	req := CreateThreadRequest{DocumentID: doc, Title: "T", Body: "hello", RelativeStart: "s", RelativeEnd: "e", ClientOperationID: "create-op-1"}
+	if _, _, created, err := store.CreateThread(req, humanMeta(user)); err != nil || !created {
+		t.Fatalf("first create: created=%v err=%v", created, err)
+	}
+	if _, _, created, err := store.CreateThread(req, humanMeta(user)); err != nil || created {
+		t.Fatalf("replay create must be a no-op: created=%v err=%v", created, err)
+	}
+
+	// Exactly one card and one doorbell total — asserted against the counters, not absence.
+	if cards := agentEventsByType(t, store, watcher.ID, "thread.created"); len(cards) != 1 {
+		t.Fatalf("replay must not double-card: want 1, got %d", len(cards))
+	}
+	if n := doorbellsByType(store, watcher.ID, "thread.created"); n != 1 {
+		t.Fatalf("replay must ring exactly one doorbell total, got %d", n)
+	}
+}
+
+func TestThreadRepliedWatcherSlidesAvailableAtForward(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	store := newPostgresTestWorkspaceStore(t, database)
+	seedCodexDaemonRuntime(t, store)
+	user := seedTestUser(t, store)
+	watcher := mustCreateInboxTestAgent(t, store, user, "watcher")
+	doc := mustCreateTestDocument(t, store, "docs/spec.md", "start\n")
+	if err := store.SubscribeAgentDocument(watcher.ID, doc); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	thread, _, _, err := store.CreateThread(CreateThreadRequest{DocumentID: doc, Title: "Q", Body: "?", RelativeStart: "s", RelativeEnd: "e"}, humanMeta(user))
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	store.DrainAgentInboxChanges()
+
+	// First reply establishes the watcher card; capture its availability.
+	if _, _, err := store.ReplyThread(thread.ID, ReplyThreadRequest{Body: "one"}, humanMeta(user)); err != nil {
+		t.Fatalf("reply one: %v", err)
+	}
+	first := agentEventsByType(t, store, watcher.ID, "thread.replied")
+	if len(first) != 1 {
+		t.Fatalf("want 1 watcher card after reply one, got %d", len(first))
+	}
+	firstAvailable := first[0].AvailableAt
+
+	// Second reply must SLIDE the same row's availability forward (coalescing), not add a row or ring.
+	if _, _, err := store.ReplyThread(thread.ID, ReplyThreadRequest{Body: "two"}, humanMeta(user)); err != nil {
+		t.Fatalf("reply two: %v", err)
+	}
+	second := agentEventsByType(t, store, watcher.ID, "thread.replied")
+	if len(second) != 1 {
+		t.Fatalf("second reply must coalesce onto one row, got %d", len(second))
+	}
+	if !second[0].AvailableAt.After(firstAvailable) {
+		t.Fatalf("second reply must slide available_at forward: first=%v second=%v", firstAvailable, second[0].AvailableAt)
+	}
+	if n := doorbellsByType(store, watcher.ID, "thread.replied"); n != 0 {
+		t.Fatalf("coalesced watcher replies must ring zero doorbells, got %d", n)
+	}
+}
+
+func TestSubscriptionAddedCardFailureRollsBackSubscription(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	store := newPostgresTestWorkspaceStore(t, database)
+	seedCodexDaemonRuntime(t, store)
+	user := seedTestUser(t, store)
+	agent := mustCreateInboxTestAgent(t, store, user, "reviewer")
+	doc := mustCreateTestDocument(t, store, "docs/spec.md", "start\n")
+
+	// Poison the card upsert to simulate a transient failure mid-transaction.
+	testHookSubscriptionCardUpsert = func(querier, string, *AgentEvent) (*AgentEvent, error) {
+		return nil, errors.New("poisoned card write")
+	}
+	defer func() { testHookSubscriptionCardUpsert = nil }()
+
+	if _, err := store.SubscribeAgentDocumentAndNotify(agent.ID, doc, humanMeta(user)); err == nil {
+		t.Fatalf("expected the card failure to surface an error")
+	}
+
+	// All-or-nothing: the subscription must NOT have persisted (rolled back with the card), and no card exists.
+	ids, err := listAgentDocumentSubscriptionsPostgres(store.db, store.state.WorkspaceID, agent.ID)
+	if err != nil {
+		t.Fatalf("list subscriptions: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("a card-write failure must leave no orphaned subscription, got %v", ids)
+	}
+	if cards := agentEventsByType(t, store, agent.ID, "subscription.added"); len(cards) != 0 {
+		t.Fatalf("no card should persist on failure, got %d", len(cards))
+	}
+
+	// Recovery: with the seam cleared, a retry now subscribes and cards cleanly.
+	testHookSubscriptionCardUpsert = nil
+	if inserted, err := store.SubscribeAgentDocumentAndNotify(agent.ID, doc, humanMeta(user)); err != nil || !inserted {
+		t.Fatalf("retry after the transient failure must succeed: inserted=%v err=%v", inserted, err)
+	}
+	if cards := agentEventsByType(t, store, agent.ID, "subscription.added"); len(cards) != 1 {
+		t.Fatalf("retry must card once, got %d", len(cards))
 	}
 }
 
