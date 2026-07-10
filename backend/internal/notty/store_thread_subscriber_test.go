@@ -1,9 +1,10 @@
 package notty
 
 import (
-	"errors"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Task #6: document subscribers are notified of thread activity. A new thread is a one-shot fact (general,
@@ -186,25 +187,36 @@ func TestThreadRepliedWatcherSlidesAvailableAtForward(t *testing.T) {
 	}
 }
 
-func TestSubscriptionAddedCardFailureRollsBackSubscription(t *testing.T) {
+func TestSubscribeAgentDocumentWithCardRollsBackOnPoisonedCard(t *testing.T) {
 	database := newPostgresTestDatabase(t)
 	store := newPostgresTestWorkspaceStore(t, database)
 	seedCodexDaemonRuntime(t, store)
 	user := seedTestUser(t, store)
 	agent := mustCreateInboxTestAgent(t, store, user, "reviewer")
 	doc := mustCreateTestDocument(t, store, "docs/spec.md", "start\n")
+	now := time.Now().UTC()
 
-	// Poison the card upsert to simulate a transient failure mid-transaction.
-	testHookSubscriptionCardUpsert = func(querier, string, *AgentEvent) (*AgentEvent, error) {
-		return nil, errors.New("poisoned card write")
+	// A card whose agent_id references no agent violates fk_agent_events_agent, so its upsert fails at the
+	// SQL level inside the shared transaction (same real-constraint pattern as
+	// TestPostgresCreateThreadRollsBackOnPoisonedEvent) — no production seam needed.
+	poisoned := &AgentEvent{
+		ID:          uuid.NewString(),
+		AgentID:     uuid.NewString(), // non-existent agent → FK violation
+		AgentHandle: "ghost",
+		Type:        "subscription.added",
+		Box:         "for_me",
+		Status:      "pending",
+		DocumentID:  doc,
+		DedupKey:    "subscription-added:poison:" + uuid.NewString(),
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		AvailableAt: now,
 	}
-	defer func() { testHookSubscriptionCardUpsert = nil }()
-
-	if _, err := store.SubscribeAgentDocumentAndNotify(agent.ID, doc, humanMeta(user)); err == nil {
-		t.Fatalf("expected the card failure to surface an error")
+	if _, _, err := subscribeAgentDocumentWithCardPostgres(store.db, store.state.WorkspaceID, agent.ID, doc, poisoned, now); err == nil {
+		t.Fatalf("a poisoned card must fail the transaction")
 	}
 
-	// All-or-nothing: the subscription must NOT have persisted (rolled back with the card), and no card exists.
+	// All-or-nothing: the subscription rolled back with the card — nothing durable survived.
 	ids, err := listAgentDocumentSubscriptionsPostgres(store.db, store.state.WorkspaceID, agent.ID)
 	if err != nil {
 		t.Fatalf("list subscriptions: %v", err)
@@ -216,10 +228,9 @@ func TestSubscriptionAddedCardFailureRollsBackSubscription(t *testing.T) {
 		t.Fatalf("no card should persist on failure, got %d", len(cards))
 	}
 
-	// Recovery: with the seam cleared, a retry now subscribes and cards cleanly.
-	testHookSubscriptionCardUpsert = nil
+	// Recovery: a real retry through the store method subscribes and cards cleanly.
 	if inserted, err := store.SubscribeAgentDocumentAndNotify(agent.ID, doc, humanMeta(user)); err != nil || !inserted {
-		t.Fatalf("retry after the transient failure must succeed: inserted=%v err=%v", inserted, err)
+		t.Fatalf("retry after the failure must succeed: inserted=%v err=%v", inserted, err)
 	}
 	if cards := agentEventsByType(t, store, agent.ID, "subscription.added"); len(cards) != 1 {
 		t.Fatalf("retry must card once, got %d", len(cards))

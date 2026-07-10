@@ -1405,6 +1405,39 @@ func subscribeAgentDocumentPostgres(exec activityExecer, workspaceID, agentID, d
 	return affected > 0, nil
 }
 
+// subscribeAgentDocumentWithCardPostgres inserts the subscription and, when a card is supplied for a genuine
+// new subscription, upserts it in the SAME transaction — all-or-nothing, so a card write failure (e.g. a
+// transient DB error) never leaves an orphaned subscription behind. Returns whether a new subscription row
+// was created and the persisted card (for the caller's post-commit doorbell).
+func subscribeAgentDocumentWithCardPostgres(db *sql.DB, workspaceID, agentID, documentID string, card *AgentEvent, now time.Time) (bool, *AgentEvent, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return false, nil, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	inserted, err := subscribeAgentDocumentPostgres(tx, workspaceID, agentID, documentID, now)
+	if err != nil {
+		return false, nil, err
+	}
+	var persisted *AgentEvent
+	if inserted && card != nil {
+		persisted, err = upsertDocumentInboxEventPostgres(tx, workspaceID, card)
+		if err != nil {
+			return false, nil, err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return false, nil, err
+	}
+	committed = true
+	return inserted, persisted, nil
+}
+
 // unsubscribeAgentDocumentPostgres removes a subscription. Returns whether a row was actually deleted so
 // the caller can keep the operation idempotent (unsubscribing a non-subscription is a no-op).
 func unsubscribeAgentDocumentPostgres(exec activityExecer, workspaceID, agentID, documentID string) (bool, error) {
