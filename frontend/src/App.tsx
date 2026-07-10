@@ -3174,7 +3174,7 @@ const personRoleTag = { you: "You", agent: "Agent", member: "Member" } as const;
 // Subscribers are fetched from GET /documents/{id}/subscribers on doc change and after each mutation;
 // subscribe/unsubscribe reuse the existing agent endpoints (one write path). Mutations are optimistic and
 // reconcile against the server on completion.
-function ParticipantsPanel({
+export function ParticipantsPanel({
   documentId,
   workspace,
   agents,
@@ -3190,57 +3190,88 @@ function ParticipantsPanel({
   onAgent: (agent: Agent) => void;
 }) {
   const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
-  const [subscriberIds, setSubscriberIds] = useState<string[]>([]);
+  // null = UNKNOWN (the read for this document has not resolved yet) — distinct from [] (loaded, genuinely no
+  // subscribers). On a document switch we reset to null so B shows a loading state, not a truthful-looking
+  // empty/all-addable panel, and actions stay disabled until B's own read establishes server truth.
+  const [subscriberIds, setSubscriberIds] = useState<string[] | null>(null);
   const [error, setError] = useState("");
   const [busyIds, setBusyIds] = useState<Set<string>>(() => new Set());
   const [picking, setPicking] = useState(false);
+  // Two guards against stale responses. generationRef bumps on a document/workspace SWITCH, so a slower
+  // in-flight response for the OLD document can never overwrite the NEW one (cross-document race).
+  // readSeqRef bumps at the start of EVERY read, so among reads of the SAME document (e.g. two concurrent
+  // mutations' reconcile fetches) only the latest-STARTED one may apply — an older read returning late can't
+  // clobber a newer one and drop a change (same-document out-of-order race).
+  const generationRef = useRef(0);
+  const readSeqRef = useRef(0);
 
-  const refetch = useCallback(async () => {
-    if (!documentId) {
-      setSubscriberIds([]);
-      return;
-    }
-    try {
-      const response = await api.listDocumentSubscribers(workspaceId, documentId);
-      setSubscriberIds(response.agents.map((agent) => agent.id));
-      setError("");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load participants");
-    }
-  }, [api, workspaceId, documentId]);
+  const loadSubscribers = useCallback(
+    async (generation: number, docId: string) => {
+      const seq = ++readSeqRef.current;
+      try {
+        const response = await api.listDocumentSubscribers(workspaceId, docId);
+        if (generationRef.current !== generation || readSeqRef.current !== seq) return;
+        setSubscriberIds(response.agents.map((agent) => agent.id));
+        setError("");
+      } catch (err) {
+        if (generationRef.current !== generation || readSeqRef.current !== seq) return;
+        setError(err instanceof Error ? err.message : "Failed to load participants");
+      }
+    },
+    [api, workspaceId],
+  );
 
   useEffect(() => {
-    void refetch();
-  }, [refetch]);
+    // A new document (or workspace) invalidates all in-flight work and resets the panel SYNCHRONOUSLY to the
+    // unknown/loading state, so B never shows A's rows OR a false empty panel while B's fetch is outstanding.
+    const generation = ++generationRef.current;
+    setSubscriberIds(null);
+    setError("");
+    setBusyIds(new Set());
+    setPicking(false);
+    if (!documentId) return;
+    void loadSubscribers(generation, documentId);
+  }, [loadSubscribers, documentId, workspaceId]);
 
+  const loaded = subscriberIds !== null;
   const { hereNow, watching, addable } = useMemo(
-    () => documentParticipants(workspace, documentId, subscriberIds, now),
+    () => documentParticipants(workspace, documentId, subscriberIds ?? [], now),
     [workspace, documentId, subscriberIds, now],
   );
   const agentsById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
 
   const mutate = async (agentId: string, subscribe: boolean) => {
-    if (!documentId || busyIds.has(agentId)) {
+    if (!documentId || !loaded || busyIds.has(agentId)) {
       return;
     }
+    // Bind this mutation to the document + generation it started on; a switch away drops its reconcile.
+    const generation = generationRef.current;
+    const docId = documentId;
     setBusyIds((current) => new Set(current).add(agentId));
-    // Optimistic: reflect the intent immediately, then reconcile against the server truth on completion.
-    setSubscriberIds((ids) => (subscribe ? Array.from(new Set([...ids, agentId])) : ids.filter((id) => id !== agentId)));
+    // Optimistic: reflect the intent immediately (only meaningful once loaded), reconcile on completion.
+    setSubscriberIds((ids) => (ids === null ? ids : subscribe ? Array.from(new Set([...ids, agentId])) : ids.filter((id) => id !== agentId)));
     try {
       if (subscribe) {
-        await api.subscribeAgentToDocument(workspaceId, agentId, documentId);
+        await api.subscribeAgentToDocument(workspaceId, agentId, docId);
       } else {
-        await api.unsubscribeAgentFromDocument(workspaceId, agentId, documentId);
+        await api.unsubscribeAgentFromDocument(workspaceId, agentId, docId);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Update failed");
+      if (generationRef.current === generation) {
+        setError(err instanceof Error ? err.message : "Update failed");
+      }
     } finally {
-      await refetch();
-      setBusyIds((current) => {
-        const next = new Set(current);
-        next.delete(agentId);
-        return next;
-      });
+      // Only reconcile/clear-busy if we are still on the document this mutation targeted.
+      if (generationRef.current === generation) {
+        await loadSubscribers(generation, docId);
+        if (generationRef.current === generation) {
+          setBusyIds((current) => {
+            const next = new Set(current);
+            next.delete(agentId);
+            return next;
+          });
+        }
+      }
     }
   };
 
@@ -3299,23 +3330,32 @@ function ParticipantsPanel({
     <div className="ctx-body people-pane">
       <div className="row between ctx-head">
         <span className="label">Participants</span>
-        <span className="chip sm">{watching.length}</span>
+        <span className="chip sm">{loaded ? watching.length : "…"}</span>
       </div>
       {error ? <p className="empty-note error">{error}</p> : null}
 
+      {/* Here now is presence-only (known synchronously from workspace state), so it renders even while the
+          subscriber read is outstanding. Watching / Add-watcher wait for `loaded` so B never shows A's rows
+          or a false empty/all-addable panel mid-switch, and their actions stay disabled while unknown. */}
       <div className="people-section-head"><span className="tiny muted">Here now</span><span className="chip sm">{hereNow.length}</span></div>
       {hereNow.length ? hereNow.map(hereNowRow) : <p className="empty-note">No one is on this document right now.</p>}
 
-      <div className="people-section-head"><span className="tiny muted">Watching</span><span className="chip sm">{watching.length}</span></div>
-      {watching.length ? watching.map(watchingRow) : <p className="empty-note">No agents are watching this document yet.</p>}
+      <div className="people-section-head"><span className="tiny muted">Watching</span><span className="chip sm">{loaded ? watching.length : "…"}</span></div>
+      {!loaded ? (
+        <p className="empty-note">Loading participants…</p>
+      ) : watching.length ? (
+        watching.map(watchingRow)
+      ) : (
+        <p className="empty-note">No agents are watching this document yet.</p>
+      )}
 
       <div className="people-section-head">
         <span className="tiny muted">Add watcher</span>
-        <button className="btn sm ghost" onClick={() => setPicking((open) => !open)} disabled={!addable.length} aria-expanded={picking}>
+        <button className="btn sm ghost" onClick={() => setPicking((open) => !open)} disabled={!loaded || !addable.length} aria-expanded={picking}>
           {picking ? "Close" : "Add"}
         </button>
       </div>
-      {picking ? (
+      {picking && loaded ? (
         addable.length ? (
           <div className="col gap-2 add-watcher-picker">
             {addable.map((person) => (
