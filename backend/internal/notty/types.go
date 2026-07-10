@@ -30,6 +30,16 @@ type DocumentMetadata struct {
 	CreateClientOperationID string    `json:"createClientOperationId,omitempty"`
 }
 
+// DocumentSubscriberAgent is the lean projection the Participants panel reads (task #4): the identity fields
+// a subscriber row renders, and nothing more — deliberately not the full Agent (no systemPrompt/status/etc.)
+// so the read's contract stays tight and never leaks agent internals into this workspace-member surface.
+type DocumentSubscriberAgent struct {
+	ID     string `json:"id"`
+	Handle string `json:"handle"`
+	Name   string `json:"name"`
+	Kind   string `json:"kind"`
+}
+
 type ThreadAnchor struct {
 	Kind          string `json:"kind"`
 	RelativeStart string `json:"relativeStart,omitempty"`

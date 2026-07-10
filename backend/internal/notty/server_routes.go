@@ -51,6 +51,7 @@ func (s *Server) Routes() http.Handler {
 		router.Post("/daemons/{daemonID}/agents", s.handleCreateDaemonAgent)
 		router.Post("/documents", s.handleCreateDocument)
 		router.Get("/documents/{id}/threads", s.handleDocumentThreads)
+		router.Get("/documents/{id}/subscribers", s.handleDocumentSubscribers)
 		router.Post("/agents", s.handleCreateAgent)
 		router.Patch("/agents/{id}", s.handleUpdateAgent)
 		router.Patch("/agents/{id}/session", s.handleUpdateAgentSession)

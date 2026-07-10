@@ -1,0 +1,10 @@
+{
+  "agents": [
+    {
+      "handle": "contract-agent",
+      "id": "<id-1>",
+      "kind": "codex",
+      "name": "Contract Agent"
+    }
+  ]
+}

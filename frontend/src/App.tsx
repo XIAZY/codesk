@@ -11,6 +11,7 @@ import {
   buildDaemonReinstallCommand,
   buildDaemonUninstallCommand,
   workspacePeople,
+  documentParticipants,
   personOnline,
   documentActivity,
   activityCategory,
@@ -40,12 +41,12 @@ import { navigate, useRoute } from "./useRoute";
 import { useRootNamespace } from "./useRootNamespace";
 import { useDocumentSync } from "./useDocument";
 import { useWorkspace } from "./useWorkspace";
-import type { Account, ActivityEvent, Agent, AgentEvent, Daemon, DocumentItem, ThreadItem, UserItem, WorkspaceInvitePreview, WorkspaceSummary } from "./types";
+import type { Account, ActivityEvent, Agent, AgentEvent, Daemon, DocumentItem, ThreadItem, UserItem, WorkspaceInvitePreview, WorkspaceState, WorkspaceSummary } from "./types";
 import { resolveRuntimeTiles, selectableRuntimeKinds, type RuntimeTile } from "./runtimes";
 import "./styles.css";
 
 const tokenStorageKey = "codesk.auth.token";
-const rightTabLabels = { threads: "Threads", activity: "Document Activity", coworkers: "People" } as const;
+const rightTabLabels = { threads: "Threads", activity: "Document Activity", coworkers: "Participants" } as const;
 const portableFileNameIllegalChars = /[\u0000-\u001F<>:"\/\\|?*]/g;
 const windowsReservedBaseName = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 
@@ -1649,6 +1650,12 @@ export function WorkspaceApp({
     });
   }, [activeDocumentPath]);
   const workspacePeopleList = workspacePeople(workspace);
+  // The Participants tab badge shows who is present on THIS document right now (here-now); subscriber counts
+  // live inside the panel, which owns the fetch. hereNow needs only presence, so it is cheap to derive here.
+  const documentPresentCount = useMemo(
+    () => (activeDocument ? documentParticipants(workspace, activeDocument.id, [], now).hereNow.length : 0),
+    [workspace, activeDocument?.id, now],
+  );
   const documentActivityList = documentActivity(workspace, activeDocument?.id);
   // Unread = new since you last opened the tab (snapshot delta — honest for
   // snapshot-fresh activity; not a live stream). Marked seen when the tab opens.
@@ -1959,7 +1966,7 @@ export function WorkspaceApp({
               <Icon name={tab === "threads" ? "thread" : tab === "activity" ? "activity" : "people"} />
               {rightTabLabels[tab]}
               {tab === "threads" ? <span className="muted">{documentThreads.length}</span> : null}
-              {tab === "coworkers" ? <span className="muted">{workspacePeopleList.length}</span> : null}
+              {tab === "coworkers" ? <span className="muted">{documentPresentCount}</span> : null}
               {tab === "activity" && activityUnread ? <span className="unread-dot" aria-label="New activity" /> : null}
             </button>
           ))}
@@ -1983,9 +1990,16 @@ export function WorkspaceApp({
         ) : null}
         {rightTab === "activity" ? <ActivityPanel activities={documentActivityList} hasDocument={!!activeDocument} actorLabel={activityActorLabel} /> : null}
         {rightTab === "coworkers" ? (
-          <PeoplePanel
-            people={workspacePeopleList}
+          <ParticipantsPanel
+            // Key on scope so a workspace/document switch REMOUNTS the panel: the old scope's state is
+            // discarded and unrenderable, closing the async-race window (a stale read lands on an unmounted
+            // instance). This is the make-invalid-states-unrepresentable fix for the QA-caught switch race.
+            key={workspaceId + "/" + (activeDocument?.id ?? "none")}
+            documentId={activeDocument?.id}
+            workspace={workspace}
             agents={workspace.agents}
+            api={api}
+            workspaceId={workspaceId}
             onAgent={(agent) => {
               setSelectedAgentId(agent.id);
               setModal("agent-detail");
@@ -3155,75 +3169,198 @@ function CollaboratorAvatars({ people, onClick }: { people: WorkspacePerson[]; o
 
 const personRoleTag = { you: "You", agent: "Agent", member: "Member" } as const;
 
-function PeoplePanel({
-  people,
+// ParticipantsPanel (task #4): the document-scoped right tab. It replaces the workspace-wide People panel
+// (AlphaToad's full-conversion ruling). Three groups over the open document:
+//   Here now — humans + agents with fresh presence on THIS doc (honest decay; presence = real activity only).
+//   Watching — agents subscribed to this doc (the durable notification relationship), each removable.
+//   Add watcher — the picker of NOT-yet-subscribed agents; the only place an unsubscribed agent appears, so
+//                 the panel never redraws the ambient every-agent-watches model.
+// Subscribers are fetched from GET /documents/{id}/subscribers on doc change and after each mutation;
+// subscribe/unsubscribe reuse the existing agent endpoints (one write path). Mutations are optimistic and
+// reconcile against the server on completion.
+export function ParticipantsPanel({
+  documentId,
+  workspace,
   agents,
+  api,
+  workspaceId,
   onAgent,
 }: {
-  people: WorkspacePerson[];
+  documentId: string | undefined;
+  workspace: Pick<WorkspaceState, "currentUserId" | "agents" | "users" | "presences">;
   agents: Agent[];
+  api: ApiClient;
+  workspaceId: string;
   onAgent: (agent: Agent) => void;
 }) {
+  // This panel is KEY'd on workspace+document by its parent, so a scope switch REMOUNTS it: the entire state
+  // tree is discarded and old state is unrenderable by construction — no cross-document stale write can reach
+  // a different scope's panel (its setState lands on an unmounted instance and is a no-op). That makes a
+  // per-switch generation guard unnecessary; what remains is the SAME-scope race within one mount.
   const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
-  const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
-  const rank = (row: { person: WorkspacePerson; online: boolean }) =>
-    row.person.kind === "you" ? 0 : row.online ? 1 : 2;
-  const rows = people
-    .map((person) => ({ person, online: personOnline(person, now) }))
-    .sort((a, b) => rank(a) - rank(b) || a.person.handle.localeCompare(b.person.handle));
-  const humans = rows.filter((r) => r.person.kind !== "agent");
-  const agentRows = rows.filter((r) => r.person.kind === "agent");
-  const renderRow = ({ person, online }: { person: WorkspacePerson; online: boolean }) => {
+  // null = UNKNOWN (this mount's read has not resolved yet) — distinct from [] (loaded, genuinely none). A
+  // fresh mount starts unknown, so a just-switched-to document shows loading, never a false empty panel, and
+  // actions stay disabled until its own read establishes server truth.
+  const [subscriberIds, setSubscriberIds] = useState<string[] | null>(null);
+  const [error, setError] = useState("");
+  const [busyIds, setBusyIds] = useState<Set<string>>(() => new Set());
+  const [picking, setPicking] = useState(false);
+  // readSeqRef bumps at the start of EVERY read, so among reads within this one mount (two concurrent
+  // mutations' reconcile fetches) only the latest-STARTED may apply — an older read returning late can't
+  // clobber a newer one and drop a change (same-scope out-of-order reconcile).
+  const readSeqRef = useRef(0);
+
+  const loadSubscribers = useCallback(async () => {
+    if (!documentId) return;
+    const seq = ++readSeqRef.current;
+    try {
+      const response = await api.listDocumentSubscribers(workspaceId, documentId);
+      if (readSeqRef.current !== seq) return;
+      setSubscriberIds(response.agents.map((agent) => agent.id));
+      setError("");
+    } catch (err) {
+      if (readSeqRef.current !== seq) return;
+      setError(err instanceof Error ? err.message : "Failed to load participants");
+    }
+  }, [api, workspaceId, documentId]);
+
+  useEffect(() => {
+    void loadSubscribers();
+  }, [loadSubscribers]);
+
+  const loaded = subscriberIds !== null;
+  const { hereNow, watching, addable } = useMemo(
+    () => documentParticipants(workspace, documentId, subscriberIds ?? [], now),
+    [workspace, documentId, subscriberIds, now],
+  );
+  const agentsById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
+
+  const mutate = async (agentId: string, subscribe: boolean) => {
+    if (!documentId || !loaded || busyIds.has(agentId)) {
+      return;
+    }
+    setBusyIds((current) => new Set(current).add(agentId));
+    // Optimistic: reflect the intent immediately (only meaningful once loaded), reconcile on completion.
+    setSubscriberIds((ids) => (ids === null ? ids : subscribe ? Array.from(new Set([...ids, agentId])) : ids.filter((id) => id !== agentId)));
+    try {
+      if (subscribe) {
+        await api.subscribeAgentToDocument(workspaceId, agentId, documentId);
+      } else {
+        await api.unsubscribeAgentFromDocument(workspaceId, agentId, documentId);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Update failed");
+    } finally {
+      // Same-scope reconcile; the readSeqRef guard keeps the latest-started read. If the user switched scope
+      // mid-mutation this instance is unmounted, so these setState calls are harmless no-ops.
+      await loadSubscribers();
+      setBusyIds((current) => {
+        const next = new Set(current);
+        next.delete(agentId);
+        return next;
+      });
+    }
+  };
+
+  const personAvatar = (person: WorkspacePerson, online: boolean) => (
+    // Honest decay: the online ring is only ever present activity within the freshness window, never a
+    // durable/subscribed state — an offline agent that is watching shows no ring.
+    <div className={`avi ${person.kind === "agent" ? "agent" : "you"}${online ? " online" : ""}`} title={online ? "Online" : undefined}>
+      {initials(person.handle || person.name)}
+    </div>
+  );
+
+  const hereNowRow = (person: WorkspacePerson) => {
     const agent = person.kind === "agent" ? agentsById.get(person.id) : undefined;
-    // The online ring is driven by personOnline, which decays on the presence freshness window
-    // (like daemon liveness). A closed laptop drops the ring — we never show a stale "online".
-    // This honest-decay rule is Eva's ruling; keep it documented at every ring site.
-    const avatar = (
-      <div
-        className={`avi ${person.kind === "agent" ? "agent" : "you"}${online ? " online" : ""}`}
-        title={online ? "Online" : undefined}
-      >
-        {initials(person.handle || person.name)}
-      </div>
-    );
     const body = (
       <div className="col gap-2 min-0">
         <strong className="small truncate">@{person.handle}</strong>
         <span className="tiny muted truncate">{personRoleTag[person.kind]}</span>
-        {online ? <span className="sr-only">Online</span> : null}
+        <span className="sr-only">Online</span>
       </div>
     );
     return agent ? (
-      <button key={person.id} className="agent-card" onClick={() => onAgent(agent)}>
-        {avatar}
-        {body}
-      </button>
+      <button key={person.id} className="agent-card" onClick={() => onAgent(agent)}>{personAvatar(person, true)}{body}</button>
     ) : (
-      <article key={person.id} className="agent-card">
-        {avatar}
-        {body}
-      </article>
+      <article key={person.id} className="agent-card">{personAvatar(person, true)}{body}</article>
     );
   };
+
+  const watchingRow = (person: WorkspacePerson) => {
+    const agent = agentsById.get(person.id);
+    const online = personOnline({ presentAt: workspace.presences[person.id]?.documentId === documentId ? workspace.presences[person.id]?.updatedAt : undefined }, now);
+    return (
+      <div key={person.id} className="agent-card row between">
+        <button className="row gap-2 min-0 ghost flat" onClick={() => agent && onAgent(agent)} disabled={!agent}>
+          {personAvatar(person, online)}
+          <div className="col gap-2 min-0">
+            <strong className="small truncate">@{person.handle}</strong>
+            <span className="tiny muted truncate">Watching</span>
+          </div>
+        </button>
+        <button className="btn sm ghost" onClick={() => void mutate(person.id, false)} disabled={busyIds.has(person.id)} title="Stop watching this document">
+          Remove
+        </button>
+      </div>
+    );
+  };
+
+  if (!documentId) {
+    return (
+      <div className="ctx-body people-pane">
+        <p className="empty-note">Open a document to see its participants.</p>
+      </div>
+    );
+  }
+
   return (
     <div className="ctx-body people-pane">
       <div className="row between ctx-head">
-        <span className="label">People</span>
-        <span className="chip sm">{people.length}</span>
+        <span className="label">Participants</span>
+        <span className="chip sm">{loaded ? watching.length : "…"}</span>
       </div>
-      {humans.length ? (
-        <>
-          <div className="people-section-head"><span className="tiny muted">Members</span><span className="chip sm">{humans.length}</span></div>
-          {humans.map(renderRow)}
-        </>
+      {error ? <p className="empty-note error">{error}</p> : null}
+
+      {/* Here now is presence-only (known synchronously from workspace state), so it renders even while the
+          subscriber read is outstanding. Watching / Add-watcher wait for `loaded` so B never shows A's rows
+          or a false empty/all-addable panel mid-switch, and their actions stay disabled while unknown. */}
+      <div className="people-section-head"><span className="tiny muted">Here now</span><span className="chip sm">{hereNow.length}</span></div>
+      {hereNow.length ? hereNow.map(hereNowRow) : <p className="empty-note">No one is on this document right now.</p>}
+
+      <div className="people-section-head"><span className="tiny muted">Watching</span><span className="chip sm">{loaded ? watching.length : "…"}</span></div>
+      {!loaded ? (
+        <p className="empty-note">Loading participants…</p>
+      ) : watching.length ? (
+        watching.map(watchingRow)
+      ) : (
+        <p className="empty-note">No agents are watching this document yet.</p>
+      )}
+
+      <div className="people-section-head">
+        <span className="tiny muted">Add watcher</span>
+        <button className="btn sm ghost" onClick={() => setPicking((open) => !open)} disabled={!loaded || !addable.length} aria-expanded={picking}>
+          {picking ? "Close" : "Add"}
+        </button>
+      </div>
+      {picking && loaded ? (
+        addable.length ? (
+          <div className="col gap-2 add-watcher-picker">
+            {addable.map((person) => (
+              <div key={person.id} className="agent-card row between">
+                <div className="row gap-2 min-0">
+                  {personAvatar(person, false)}
+                  <strong className="small truncate">@{person.handle}</strong>
+                </div>
+                <button className="btn sm" onClick={() => void mutate(person.id, true)} disabled={busyIds.has(person.id)}>
+                  Subscribe
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="empty-note">Every agent is already watching.</p>
+        )
       ) : null}
-      {agentRows.length ? (
-        <>
-          <div className="people-section-head"><span className="tiny muted">Agents</span><span className="chip sm">{agentRows.length}</span></div>
-          {agentRows.map(renderRow)}
-        </>
-      ) : null}
-      {!people.length ? <p className="empty-note">No people in this workspace yet.</p> : null}
     </div>
   );
 }

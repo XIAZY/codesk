@@ -15,6 +15,7 @@ import {
   computeReplace,
   coworkerCount,
   workspacePeople,
+  documentParticipants,
   personOnline,
   documentActivity,
   emptyWorkspace,
@@ -785,6 +786,62 @@ describe("workspacePeople", () => {
     expect(personOnline({ presentAt: iso(3 * 60_000) }, nowMs)).toBe(false); // 3 min ago -> decayed
     expect(personOnline({ presentAt: undefined }, nowMs)).toBe(false);
     expect(personOnline({ presentAt: "not-a-date" }, nowMs)).toBe(false);
+  });
+});
+
+describe("documentParticipants", () => {
+  const nowMs = Date.parse("2026-07-06T12:00:00Z");
+  const iso = (offsetMs: number) => new Date(nowMs - offsetMs).toISOString();
+  const ws = (over: Partial<WorkspaceState>): WorkspaceState => ({ ...baseWorkspace(), ...over });
+  const user = (id: string, handle: string): UserItem => ({ id, handle, name: handle, role: "", kind: "human", status: "", updatedAt: "now" });
+  const agent = (id: string, handle: string): Agent => ({
+    id, daemonId: "d1", handle, name: handle, role: "", kind: "agent", workspaceRoot: "",
+    status: "idle", currentTask: "", currentActivity: "", currentRunId: "", updatedAt: "now",
+  });
+  const presence = (actorId: string, documentId: string | undefined, updatedAt: string): PresenceItem => ({
+    actorId, actorType: "human", documentId, activity: "editing", updatedAt,
+  });
+
+  it("hereNow = fresh presence on THIS doc; watching = subscribers; addable = the rest", () => {
+    const workspace = ws({
+      currentUserId: "u_me",
+      users: [user("u_me", "me")],
+      agents: [agent("a1", "alpha"), agent("a2", "beta"), agent("a3", "gamma")],
+      presences: {
+        u_me: presence("u_me", "docX", iso(60_000)), // me: fresh, on this doc -> here now
+        a1: presence("a1", "docX", iso(60_000)), // alpha: fresh, on this doc -> here now
+        a2: presence("a2", "docY", iso(60_000)), // beta: fresh but a DIFFERENT doc -> not here now
+        a3: presence("a3", "docX", iso(5 * 60_000)), // gamma: on this doc but STALE -> not here now
+      },
+    });
+
+    const result = documentParticipants(workspace, "docX", ["a1"], nowMs);
+
+    // Here now: humans + agents with fresh presence on docX only (you first, then by handle).
+    expect(result.hereNow.map((p) => p.id)).toEqual(["u_me", "a1"]);
+    // Watching: only the subscribed agent, regardless of presence.
+    expect(result.watching.map((p) => p.id)).toEqual(["a1"]);
+    // Addable (the picker): the agents NOT subscribed, sorted by handle — the only place they appear.
+    expect(result.addable.map((p) => p.handle)).toEqual(["beta", "gamma"]);
+  });
+
+  it("watching is independent of presence — an offline subscribed agent still watches", () => {
+    const workspace = ws({
+      agents: [agent("a1", "alpha")],
+      presences: {}, // no presence at all
+    });
+    const result = documentParticipants(workspace, "docX", ["a1"], nowMs);
+    expect(result.hereNow).toEqual([]);
+    expect(result.watching.map((p) => p.id)).toEqual(["a1"]);
+    expect(result.addable).toEqual([]);
+  });
+
+  it("with no open document, here-now is empty and every agent is addable", () => {
+    const workspace = ws({ agents: [agent("a1", "alpha")], presences: { a1: presence("a1", "docX", iso(60_000)) } });
+    const result = documentParticipants(workspace, undefined, [], nowMs);
+    expect(result.hereNow).toEqual([]);
+    expect(result.watching).toEqual([]);
+    expect(result.addable.map((p) => p.id)).toEqual(["a1"]);
   });
 });
 

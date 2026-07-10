@@ -273,8 +273,8 @@ describe("WorkspaceOnboarding", () => {
   });
 });
 
-describe("WorkspaceApp people rail", () => {
-  it("lists the whole workspace's people and agents (not doc-scoped)", async () => {
+describe("WorkspaceApp participants rail", () => {
+  it("the right tab is document-scoped Participants, not the workspace-wide People list", async () => {
     render(
       <WorkspaceApp
         api={{ updateLastAccessed: vi.fn().mockResolvedValue({}) } as never}
@@ -290,22 +290,18 @@ describe("WorkspaceApp people rail", () => {
       />,
     );
 
-    const tab = screen.getByRole("button", { name: /people/i });
-    expect(within(tab).getByText("3")).toBeTruthy(); // 2 humans + 1 agent, workspace-wide
-
+    // The tab converted from "People" to document-scoped "Participants" (task #4, full conversion ruling).
+    const tab = screen.getByRole("button", { name: /participants/i });
     fireEvent.click(tab);
 
     await waitFor(() => expect(document.querySelector(".ctx-body.people-pane")).toBeTruthy());
     const panel = document.querySelector(".ctx-body.people-pane") as HTMLElement;
-    expect(within(panel).getByText("People")).toBeTruthy();
-    expect(within(panel).getByText("@ada")).toBeTruthy();
-    expect(within(panel).getByText("You")).toBeTruthy();
-    // workspace-wide: everyone shows, not just the current document's participants
-    expect(within(panel).getByText("@grace")).toBeTruthy();
-    expect(within(panel).getByText("@codex")).toBeTruthy();
-    expect(within(panel).getByText("Agent")).toBeTruthy();
-    // membership management does not live in this tab
-    expect(within(panel).queryByRole("button", { name: "Share" })).toBeNull();
+
+    // Doc-scoped: with no document open, the panel prompts to open one — it deliberately does NOT list the
+    // whole workspace (the old ambient People view is gone).
+    expect(within(panel).getByText(/open a document to see its participants/i)).toBeTruthy();
+    expect(within(panel).queryByText("@grace")).toBeNull();
+    expect(within(panel).queryByText("@codex")).toBeNull();
   });
 });
 

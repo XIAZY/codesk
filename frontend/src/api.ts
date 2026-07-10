@@ -3,6 +3,7 @@ import type {
   AuthResponse,
   Daemon,
   DocumentMetadata,
+  DocumentSubscriberAgent,
   WorkspaceInvite,
   WorkspaceInvitePreview,
   ThreadItem,
@@ -218,6 +219,29 @@ export class ApiClient {
       method: "POST",
       body: JSON.stringify({ prompt }),
     });
+  }
+
+  // Participants panel (task #4). The read is the doc→agents direction; subscribe/unsubscribe reuse the
+  // existing agent endpoints (humans pass the shared boundary), so the panel writes the same rows the CLI
+  // does — one write path. The caller refetches subscribers after a mutation.
+  async listDocumentSubscribers(workspaceId: string, documentId: string) {
+    return this.request<{ agents: DocumentSubscriberAgent[] }>(
+      workspacePath(workspaceId, `/documents/${encodeURIComponent(documentId)}/subscribers`),
+    );
+  }
+
+  async subscribeAgentToDocument(workspaceId: string, agentId: string, documentId: string) {
+    return this.request<{ documentIds: string[] }>(
+      workspacePath(workspaceId, `/agents/${encodeURIComponent(agentId)}/document-subscriptions`),
+      { method: "POST", body: JSON.stringify({ documentId }) },
+    );
+  }
+
+  async unsubscribeAgentFromDocument(workspaceId: string, agentId: string, documentId: string) {
+    return this.request<{ documentIds: string[] }>(
+      workspacePath(workspaceId, `/agents/${encodeURIComponent(agentId)}/document-subscriptions/${encodeURIComponent(documentId)}`),
+      { method: "DELETE" },
+    );
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
