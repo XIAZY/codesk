@@ -1,6 +1,7 @@
 package notty
 
 import (
+	"database/sql"
 	"testing"
 	"time"
 
@@ -155,15 +156,37 @@ func TestDocumentCreatedHiddenEmitsNothing(t *testing.T) {
 
 	// A hidden document must never notify — CreateDocument can't produce one, so pin the guard directly.
 	hidden := &Document{ID: uuid.NewString(), Hidden: true, UpdateID: 7}
-	events, err := store.enqueueDocumentCreatedInboxEventsLocked(store.db, hidden, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
-	if err != nil {
-		t.Fatalf("enqueue for hidden doc: %v", err)
-	}
+	events := store.enqueueDocumentCreatedInboxEventsLocked(store.db, hidden, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
 	if len(events) != 0 {
 		t.Fatalf("hidden document must emit zero created cards, got %d", len(events))
 	}
 	if cards := documentCreatedCards(t, store, agent.ID); len(cards) != 0 {
 		t.Fatalf("hidden document must leave no rows, got %d", len(cards))
+	}
+}
+
+func TestDocumentCreatedEmissionFailureIsBestEffort(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	store := newPostgresTestWorkspaceStore(t, database)
+	seedCodexDaemonRuntime(t, store)
+	user := seedTestUser(t, store)
+	_ = mustCreateInboxTestAgent(t, store, user, "reviewer")
+
+	// A closed connection stands in for the emission's backend being unavailable right after the doc commits.
+	// The contract: emission is best-effort, so this must neither panic nor return an error (the helper's
+	// signature carries none) — which is exactly why CreateDocument, ignoring the result, always returns the
+	// committed document even when card writes fail. The un-carded agent falls back to its muted version gap.
+	broken, err := sql.Open("pgx", postgresTestDSN(t))
+	if err != nil {
+		t.Fatalf("open broken db: %v", err)
+	}
+	if err := broken.Close(); err != nil {
+		t.Fatalf("close broken db: %v", err)
+	}
+
+	events := store.enqueueDocumentCreatedInboxEventsLocked(broken, &Document{ID: uuid.NewString(), UpdateID: 5}, OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"})
+	if len(events) != 0 {
+		t.Fatalf("a failed emission must produce no cards, got %d", len(events))
 	}
 }
 

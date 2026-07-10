@@ -1031,11 +1031,11 @@ func (s *Store) CreateDocument(req CreateDocumentRequest, meta OperationMeta) (*
 	// Emit the one-shot document.created cards after the create commits (task #3). This is deliberately the
 	// creation seam, not the edit path: the UpdateID<=1 guard in enqueueDocumentInboxEventsLocked keeps
 	// ignoring the seed update, and the replay guard above returns before we reach here — so a re-created
-	// document never double-cards. Cards ride poll+maturity (no doorbell); a write failure here does not
-	// unwind the committed document.
-	if _, err := s.enqueueDocumentCreatedInboxEventsLocked(s.db, document, meta); err != nil {
-		return nil, err
-	}
+	// document never double-cards. Cards ride poll+maturity (no doorbell). Emission is best-effort and never
+	// fails the create: the document is already durably committed, so a card-write failure is logged and the
+	// affected agent simply falls back to seeing the doc's muted version gap — returning an error here would
+	// lie to the caller about a durable success and, via the replay guard, never re-card on retry.
+	s.enqueueDocumentCreatedInboxEventsLocked(s.db, document, meta)
 	created := cloneDocument(document)
 	return created, nil
 }
@@ -2539,13 +2539,20 @@ func firstNonEmptyString(values ...string) string {
 // returns early before this runs, and the dedup key (`document-created:<docID>:<agentID>`) makes even a
 // direct re-emit a no-op — so exactly one card per eligible agent, zero on replay. ToUpdateID carries the
 // created version so completing the card advances the agent's document watermark (clearing its muted gap).
-func (s *Store) enqueueDocumentCreatedInboxEventsLocked(q querier, document *Document, meta OperationMeta) ([]*AgentEvent, error) {
+//
+// Best-effort by contract: the document is already committed before this runs, so a card write MUST NOT fail
+// the create. Every failure is logged (visibly, with doc + agent ids) and skipped per-agent — one bad row
+// never un-cards the others, and any un-carded agent degrades to exactly the pre-#108 behavior (it still
+// sees the document's version gap in its MUTED box, never silence). Returns whatever it managed to emit.
+func (s *Store) enqueueDocumentCreatedInboxEventsLocked(q querier, document *Document, meta OperationMeta) []*AgentEvent {
 	if document == nil || document.Hidden || document.UpdateID <= 0 {
-		return nil, nil
+		return nil
 	}
 	agents, err := listAgentsPostgres(q, s.state.WorkspaceID)
 	if err != nil {
-		return nil, err
+		// Can't enumerate recipients — degrade every agent to the muted-gap fallback, don't fail the create.
+		log.Printf("document.created: listing agents for document %s failed, no cards emitted: %v", document.ID, err)
+		return nil
 	}
 	now := time.Now().UTC()
 	var events []*AgentEvent
@@ -2555,7 +2562,8 @@ func (s *Store) enqueueDocumentCreatedInboxEventsLocked(q querier, document *Doc
 		}
 		notify, err := shouldNotifyAgentPostgres(q, s.state.WorkspaceID, agent.ID, meta, "")
 		if err != nil {
-			return nil, err
+			log.Printf("document.created: notify check for agent %s on document %s failed, skipping: %v", agent.ID, document.ID, err)
+			continue
 		}
 		if !notify {
 			// The creator does not card themselves (human or agent actor).
@@ -2582,13 +2590,14 @@ func (s *Store) enqueueDocumentCreatedInboxEventsLocked(q querier, document *Doc
 		}
 		upserted, err := upsertDocumentInboxEventPostgres(q, s.state.WorkspaceID, event)
 		if err != nil {
-			return nil, err
+			log.Printf("document.created: writing card for agent %s on document %s failed, skipping: %v", agent.ID, document.ID, err)
+			continue
 		}
 		if upserted != nil {
 			events = append(events, upserted)
 		}
 	}
-	return events, nil
+	return events
 }
 
 func (s *Store) enqueueDocumentInboxEventsLocked(q querier, document *Document, meta OperationMeta) ([]*AgentEvent, error) {
