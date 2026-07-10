@@ -1991,6 +1991,10 @@ export function WorkspaceApp({
         {rightTab === "activity" ? <ActivityPanel activities={documentActivityList} hasDocument={!!activeDocument} actorLabel={activityActorLabel} /> : null}
         {rightTab === "coworkers" ? (
           <ParticipantsPanel
+            // Key on scope so a workspace/document switch REMOUNTS the panel: the old scope's state is
+            // discarded and unrenderable, closing the async-race window (a stale read lands on an unmounted
+            // instance). This is the make-invalid-states-unrepresentable fix for the QA-caught switch race.
+            key={workspaceId + "/" + (activeDocument?.id ?? "none")}
             documentId={activeDocument?.id}
             workspace={workspace}
             agents={workspace.agents}
@@ -3189,49 +3193,40 @@ export function ParticipantsPanel({
   workspaceId: string;
   onAgent: (agent: Agent) => void;
 }) {
+  // This panel is KEY'd on workspace+document by its parent, so a scope switch REMOUNTS it: the entire state
+  // tree is discarded and old state is unrenderable by construction — no cross-document stale write can reach
+  // a different scope's panel (its setState lands on an unmounted instance and is a no-op). That makes a
+  // per-switch generation guard unnecessary; what remains is the SAME-scope race within one mount.
   const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
-  // null = UNKNOWN (the read for this document has not resolved yet) — distinct from [] (loaded, genuinely no
-  // subscribers). On a document switch we reset to null so B shows a loading state, not a truthful-looking
-  // empty/all-addable panel, and actions stay disabled until B's own read establishes server truth.
+  // null = UNKNOWN (this mount's read has not resolved yet) — distinct from [] (loaded, genuinely none). A
+  // fresh mount starts unknown, so a just-switched-to document shows loading, never a false empty panel, and
+  // actions stay disabled until its own read establishes server truth.
   const [subscriberIds, setSubscriberIds] = useState<string[] | null>(null);
   const [error, setError] = useState("");
   const [busyIds, setBusyIds] = useState<Set<string>>(() => new Set());
   const [picking, setPicking] = useState(false);
-  // Two guards against stale responses. generationRef bumps on a document/workspace SWITCH, so a slower
-  // in-flight response for the OLD document can never overwrite the NEW one (cross-document race).
-  // readSeqRef bumps at the start of EVERY read, so among reads of the SAME document (e.g. two concurrent
-  // mutations' reconcile fetches) only the latest-STARTED one may apply — an older read returning late can't
-  // clobber a newer one and drop a change (same-document out-of-order race).
-  const generationRef = useRef(0);
+  // readSeqRef bumps at the start of EVERY read, so among reads within this one mount (two concurrent
+  // mutations' reconcile fetches) only the latest-STARTED may apply — an older read returning late can't
+  // clobber a newer one and drop a change (same-scope out-of-order reconcile).
   const readSeqRef = useRef(0);
 
-  const loadSubscribers = useCallback(
-    async (generation: number, docId: string) => {
-      const seq = ++readSeqRef.current;
-      try {
-        const response = await api.listDocumentSubscribers(workspaceId, docId);
-        if (generationRef.current !== generation || readSeqRef.current !== seq) return;
-        setSubscriberIds(response.agents.map((agent) => agent.id));
-        setError("");
-      } catch (err) {
-        if (generationRef.current !== generation || readSeqRef.current !== seq) return;
-        setError(err instanceof Error ? err.message : "Failed to load participants");
-      }
-    },
-    [api, workspaceId],
-  );
+  const loadSubscribers = useCallback(async () => {
+    if (!documentId) return;
+    const seq = ++readSeqRef.current;
+    try {
+      const response = await api.listDocumentSubscribers(workspaceId, documentId);
+      if (readSeqRef.current !== seq) return;
+      setSubscriberIds(response.agents.map((agent) => agent.id));
+      setError("");
+    } catch (err) {
+      if (readSeqRef.current !== seq) return;
+      setError(err instanceof Error ? err.message : "Failed to load participants");
+    }
+  }, [api, workspaceId, documentId]);
 
   useEffect(() => {
-    // A new document (or workspace) invalidates all in-flight work and resets the panel SYNCHRONOUSLY to the
-    // unknown/loading state, so B never shows A's rows OR a false empty panel while B's fetch is outstanding.
-    const generation = ++generationRef.current;
-    setSubscriberIds(null);
-    setError("");
-    setBusyIds(new Set());
-    setPicking(false);
-    if (!documentId) return;
-    void loadSubscribers(generation, documentId);
-  }, [loadSubscribers, documentId, workspaceId]);
+    void loadSubscribers();
+  }, [loadSubscribers]);
 
   const loaded = subscriberIds !== null;
   const { hereNow, watching, addable } = useMemo(
@@ -3244,34 +3239,26 @@ export function ParticipantsPanel({
     if (!documentId || !loaded || busyIds.has(agentId)) {
       return;
     }
-    // Bind this mutation to the document + generation it started on; a switch away drops its reconcile.
-    const generation = generationRef.current;
-    const docId = documentId;
     setBusyIds((current) => new Set(current).add(agentId));
     // Optimistic: reflect the intent immediately (only meaningful once loaded), reconcile on completion.
     setSubscriberIds((ids) => (ids === null ? ids : subscribe ? Array.from(new Set([...ids, agentId])) : ids.filter((id) => id !== agentId)));
     try {
       if (subscribe) {
-        await api.subscribeAgentToDocument(workspaceId, agentId, docId);
+        await api.subscribeAgentToDocument(workspaceId, agentId, documentId);
       } else {
-        await api.unsubscribeAgentFromDocument(workspaceId, agentId, docId);
+        await api.unsubscribeAgentFromDocument(workspaceId, agentId, documentId);
       }
     } catch (err) {
-      if (generationRef.current === generation) {
-        setError(err instanceof Error ? err.message : "Update failed");
-      }
+      setError(err instanceof Error ? err.message : "Update failed");
     } finally {
-      // Only reconcile/clear-busy if we are still on the document this mutation targeted.
-      if (generationRef.current === generation) {
-        await loadSubscribers(generation, docId);
-        if (generationRef.current === generation) {
-          setBusyIds((current) => {
-            const next = new Set(current);
-            next.delete(agentId);
-            return next;
-          });
-        }
-      }
+      // Same-scope reconcile; the readSeqRef guard keeps the latest-started read. If the user switched scope
+      // mid-mutation this instance is unmounted, so these setState calls are harmless no-ops.
+      await loadSubscribers();
+      setBusyIds((current) => {
+        const next = new Set(current);
+        next.delete(agentId);
+        return next;
+      });
     }
   };
 

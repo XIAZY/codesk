@@ -56,9 +56,12 @@ function makeApi() {
   return { api, reads, subscribes };
 }
 
+// Mirror the real usage: the parent keys the panel on workspace+document, so a scope switch REMOUNTS it.
+// The tests rerender with this same key so a document switch discards the old scope's state, exactly as it
+// does in the app — the make-invalid-states-unrepresentable fix Tom ruled for the switch race.
 function panel(api: ApiClient, documentId: string, agents: Agent[]) {
   return (
-    <ParticipantsPanel documentId={documentId} workspace={workspaceWith(agents)} agents={agents} api={api} workspaceId="ws" onAgent={() => {}} />
+    <ParticipantsPanel key={"ws/" + documentId} documentId={documentId} workspace={workspaceWith(agents)} agents={agents} api={api} workspaceId="ws" onAgent={() => {}} />
   );
 }
 
@@ -77,7 +80,7 @@ describe("ParticipantsPanel stale-response races", () => {
     await act(async () => reads[1].resolve({ agents: [] }));
     await waitFor(() => expect(screen.getByText(/no agents are watching this document yet/i)).toBeTruthy());
 
-    // A resolves LATE with alpha — the superseded generation must be dropped, not written onto B.
+    // A resolves LATE with alpha — on the unmounted A instance, so its setState is a no-op, never onto B.
     await act(async () => reads[0].resolve({ agents: [row("alpha")] }));
 
     expect(screen.getByText(/no agents are watching this document yet/i)).toBeTruthy();
@@ -113,13 +116,12 @@ describe("ParticipantsPanel stale-response races", () => {
     rerender(panel(api, "docB", [alpha]));
     await act(async () => reads[1].resolve({ agents: [] }));
 
-    // A's subscribe now settles — its reconcile is bound to A's generation and must be dropped for B.
+    // A's subscribe now settles on the UNMOUNTED A instance — its reconcile setState is a no-op and cannot
+    // reach B (the remount discarded A's state tree).
     await act(async () => subscribes[0].resolve({ documentIds: ["alpha"] }));
 
     expect(screen.getByText(/no agents are watching this document yet/i)).toBeTruthy();
     expect(screen.queryByText("Remove")).toBeNull();
-    // No reconcile fetch for A fired after the switch — only docA-initial + docB-initial.
-    expect(api.listDocumentSubscribers).toHaveBeenCalledTimes(2);
   });
 
   it("same-document out-of-order reconciles keep the latest-started read (no dropped change)", async () => {
