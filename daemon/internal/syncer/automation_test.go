@@ -116,7 +116,7 @@ func TestBuildNotificationPromptIsSummaryOnly(t *testing.T) {
 		"You have new items in your notification center.",
 		"For-me inbox:",
 		"General inbox:",
-		"run notty-agent-tool list-inbox to inspect full inbox",
+		"run notty-agent-tool list-inbox to inspect full inbox, if you need to",
 	} {
 		if !strings.Contains(prompt, fragment) {
 			t.Fatalf("expected prompt to contain %q, got %q", fragment, prompt)

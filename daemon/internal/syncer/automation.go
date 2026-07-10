@@ -216,7 +216,7 @@ func buildNotificationPrompt(currentAgent *agent, forMe []*agentEvent, general [
 	}
 	// One closer: a bare list-inbox now inspects every box (for-me + general + muted), so this single command
 	// covers the full inbox.
-	builder.WriteString("run notty-agent-tool list-inbox to inspect full inbox\n")
+	builder.WriteString("run notty-agent-tool list-inbox to inspect full inbox, if you need to\n")
 	return builder.String()
 }
 
