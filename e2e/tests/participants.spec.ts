@@ -52,11 +52,12 @@ test("participants panel: the right tab is document-scoped, not the workspace Pe
   await expect(panel).toBeVisible();
   await expect(panel.locator(".label", { hasText: "Participants" })).toBeVisible();
 
-  // Document-scoped structure: the two sections, and the Watching empty state (no ambient member list).
-  await expect(panel.getByText("Here now")).toBeVisible();
-  await expect(panel.getByText("Watching")).toBeVisible();
+  // Document-scoped structure: the two section headers (exact match — "Watching" is also a substring of the
+  // empty-state copy below, so a loose match is ambiguous), and the Watching empty state (no ambient list).
+  await expect(panel.getByText("Here now", { exact: true })).toBeVisible();
+  await expect(panel.getByText("Watching", { exact: true })).toBeVisible();
   await expect(panel.getByText(/no agents are watching this document yet/i)).toBeVisible();
-  await expect(panel.getByText("Add watcher")).toBeVisible();
+  await expect(panel.getByText("Add watcher", { exact: true })).toBeVisible();
 
   expect(errors, `uncaught page errors during the flow:\n${errors.map((e) => e.stack ?? e.message).join("\n")}`).toEqual([]);
 });
