@@ -16,6 +16,7 @@ import {
   coworkerCount,
   workspacePeople,
   documentParticipants,
+  clampPopoverPosition,
   personOnline,
   documentActivity,
   emptyWorkspace,
@@ -786,6 +787,35 @@ describe("workspacePeople", () => {
     expect(personOnline({ presentAt: iso(3 * 60_000) }, nowMs)).toBe(false); // 3 min ago -> decayed
     expect(personOnline({ presentAt: undefined }, nowMs)).toBe(false);
     expect(personOnline({ presentAt: "not-a-date" }, nowMs)).toBe(false);
+  });
+});
+
+describe("clampPopoverPosition", () => {
+  const viewport = { width: 1000, height: 800 };
+  const card = { width: 326, height: 300 };
+
+  it("leaves a well-placed card where it is", () => {
+    expect(clampPopoverPosition({ x: 200, y: 100 }, card, viewport)).toEqual({ left: 200, top: 100 });
+  });
+
+  it("clamps a card that would spill off the right edge", () => {
+    // x=900 + 326 width would overflow 1000; pinned to width - card - margin.
+    expect(clampPopoverPosition({ x: 900, y: 100 }, card, viewport).left).toBe(1000 - 326 - 12);
+  });
+
+  it("pins to the left margin when the card is wider than the viewport", () => {
+    expect(clampPopoverPosition({ x: 40, y: 100 }, { width: 1200, height: 300 }, viewport).left).toBe(12);
+  });
+
+  it("flips above the marker when the card cannot fit below it", () => {
+    // y=700 + 300 overflows 800; card fits above (700-300=400 ≥ 12), so it flips: bottom sits at the marker.
+    expect(clampPopoverPosition({ x: 200, y: 700 }, card, viewport).top).toBe(700 - 300);
+  });
+
+  it("clamps into view when the card fits neither below nor above", () => {
+    // A tall card near the top: can't fit below (600+250>800-12) and can't fit above (600-250<12) → maxTop.
+    const tall = { width: 326, height: 600 };
+    expect(clampPopoverPosition({ x: 200, y: 250 }, tall, viewport).top).toBe(800 - 600 - 12);
   });
 });
 

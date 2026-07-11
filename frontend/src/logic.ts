@@ -658,6 +658,36 @@ export function personOnline(person: Pick<WorkspacePerson, "presentAt">, nowMs: 
   return !Number.isNaN(presentMs) && nowMs - presentMs <= PRESENCE_ONLINE_WINDOW_MS;
 }
 
+// clampPopoverPosition keeps the thread popover fully inside the viewport (thread-redesign containment fix).
+// It clamps the fixed marker coordinates so the card never spills off an edge, and PREFERS flipping above the
+// marker when the card can't fit below it (so it stays attached to the line). Horizontally, a card wider than
+// the viewport pins to the left margin; vertically, a card that fits neither below nor above (only possible if
+// it's taller than the viewport — the CSS height cap prevents that) clamps into view. Pure, so the placement
+// math is unit-tested without a browser; a layout-effect feeds it the measured card + viewport.
+export function clampPopoverPosition(
+  point: { x: number; y: number },
+  card: { width: number; height: number },
+  viewport: { width: number; height: number },
+  margin = 12,
+): { left: number; top: number } {
+  const maxLeft = viewport.width - card.width - margin;
+  const left = maxLeft < margin ? margin : Math.min(Math.max(point.x, margin), maxLeft);
+
+  let top: number;
+  if (point.y + card.height <= viewport.height - margin) {
+    top = point.y; // fits below the marker
+  } else {
+    const above = point.y - card.height; // flip: card sits above the marker
+    if (above >= margin) {
+      top = above;
+    } else {
+      const maxTop = viewport.height - card.height - margin;
+      top = maxTop < margin ? margin : maxTop;
+    }
+  }
+  return { left, top };
+}
+
 // The document-scoped Participants panel (task #4). Two disjoint durable/live sets, plus the picker source:
 //   hereNow  — humans AND agents with FRESH presence on THIS document (presence rows carry documentId; a
 //              stale or other-document row does not count — presence is only ever real activity).

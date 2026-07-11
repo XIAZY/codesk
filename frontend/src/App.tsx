@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, RefObject } from "react";
 import { ApiClient, ApiError, apiBase, daemonStaticBase, publicOrigin, type UpdateWorkspaceSettingsInput } from "./api";
 import { DocumentSurface, type LiveThread, type SurfaceSelection } from "./DocumentSurface";
@@ -12,6 +12,7 @@ import {
   buildDaemonUninstallCommand,
   workspacePeople,
   documentParticipants,
+  clampPopoverPosition,
   personOnline,
   documentActivity,
   activityCategory,
@@ -2615,13 +2616,40 @@ export function ThreadPopover({
   const [statusBusy, setStatusBusy] = useState(false);
   const [error, setError] = useState("");
   const [viewportHeight, setViewportHeight] = useState(() => window.visualViewport?.height ?? window.innerHeight);
+  const [placement, setPlacement] = useState<{ left: number; top: number } | null>(null);
   const groupKey = `${group.line}:${group.threads.map((thread) => thread.id).sort().join("|")}`;
   const selected = selectedThreadId ? threadItems.find((thread) => thread.id === selectedThreadId) ?? null : null;
   const popoverStyle = {
-    left: point.x,
-    top: point.y,
+    left: placement?.left ?? point.x,
+    top: placement?.top ?? point.y,
     "--thread-popover-viewport-height": `${viewportHeight}px`,
   } as CSSProperties;
+
+  // Keep the card inside the viewport (thread-redesign containment fix): after render — when the card's real
+  // size is known and CSS has capped its height — clamp the fixed position, and re-clamp on resize and when
+  // the list↔detail switch changes the card's height. The clamp math is pure (clampPopoverPosition); this
+  // only measures and feeds it.
+  useLayoutEffect(() => {
+    const reposition = () => {
+      const node = popoverRef.current;
+      if (!node) return;
+      const rect = node.getBoundingClientRect();
+      setPlacement(
+        clampPopoverPosition(
+          point,
+          { width: rect.width, height: rect.height },
+          { width: window.visualViewport?.width ?? window.innerWidth, height: window.visualViewport?.height ?? window.innerHeight },
+        ),
+      );
+    };
+    reposition();
+    window.addEventListener("resize", reposition);
+    window.visualViewport?.addEventListener("resize", reposition);
+    return () => {
+      window.removeEventListener("resize", reposition);
+      window.visualViewport?.removeEventListener("resize", reposition);
+    };
+  }, [point.x, point.y, selectedThreadId, viewportHeight]);
 
   useEffect(() => {
     setThreadItems((current) => {
