@@ -146,6 +146,27 @@ describe("useDocumentSubscribers scope-carrying guards", () => {
     await waitFor(() => expect(result.current.subscriberIds).toEqual(["alpha", "beta"]));
   });
 
+  it("a read resolving after the scope became no-document does not resurface on return to that document", async () => {
+    const { api, reads } = makeApi();
+    const { result, rerender } = renderHook(({ docId }) => useDocumentSubscribers(api, "ws", docId), {
+      initialProps: { docId: "docA" as string | undefined },
+    });
+
+    // docA's read is in flight; the scope then becomes no-document (undefined). The no-document reload returns
+    // early WITHOUT bumping the sequence, so only the post-await current-scope check can reject A's late read.
+    rerender({ docId: undefined });
+    await act(async () => reads[0].resolve({ agents: [row("alpha")] }));
+    expect(result.current.subscriberIds).toBeNull();
+
+    // Return to docA: a fresh read is now in flight (reads[1]). The stale [alpha] captured during the
+    // no-document window must NOT be stored, so it cannot resurface here — it reads null (loading) until the
+    // fresh read lands. (Red without the post-await key check: the stale result would show immediately.)
+    rerender({ docId: "docA" });
+    expect(result.current.subscriberIds).toBeNull();
+    await act(async () => reads[1].resolve({ agents: [] }));
+    expect(result.current.subscriberIds).toEqual([]);
+  });
+
   it("a mutation settling BEFORE the new document's read cannot starve that read", async () => {
     const { api, reads, subscribes } = makeApi();
     const { result, rerender } = renderHook(({ docId }) => useDocumentSubscribers(api, "ws", docId), {
