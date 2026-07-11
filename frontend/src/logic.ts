@@ -282,7 +282,7 @@ export function stampDaemonReceipt(event: WorkspaceEvent, nowMs: number): Worksp
   return event;
 }
 
-export type AgentDisplayStatusKey = "running" | "queued" | "waiting-env" | "needs-review" | "failed" | "idle";
+export type AgentDisplayStatusKey = "running" | "queued" | "waiting-env" | "failed" | "idle";
 
 export type AgentDisplayStatus = {
   key: AgentDisplayStatusKey;
@@ -293,7 +293,6 @@ export type AgentDisplayStatus = {
   action?: string;
   reason?: string;
   run?: AgentRun;
-  event?: AgentEvent;
 };
 
 const terminalAgentRunStatuses = new Set(["completed", "failed", "stopped", "cancelled", "canceled"]);
@@ -346,14 +345,6 @@ function failureReason(agent: Agent, run?: AgentRun) {
   return "No failure reason was provided.";
 }
 
-function pendingReviewEvent(agent: Agent, events: AgentEvent[]) {
-  // Share the split with the Inbox (isNeedsReviewEvent): a for_me event only lights the
-  // "Needs your review" chip if it is a real review, not a pure mention. Without the
-  // isReliableMentionEvent guard a bare @mention would light Needs-review on the chip while
-  // the Inbox (which drops mentions) counts nothing — B×D would disagree on the same event.
-  return events.find((event) => event.agentId === agent.id && event.box === "for_me" && !isReliableMentionEvent(event) && event.status !== "completed" && event.status !== "dismissed");
-}
-
 function hasQueuedWork(agent: Agent, run?: AgentRun) {
   return !!run && !terminalAgentRunStatuses.has(run.status) && (run.status === "queued" || agent.status === "queued");
 }
@@ -366,7 +357,6 @@ export function agentDisplayStatus(
   agent: Agent,
   runs: AgentRun[],
   daemons?: Daemon[],
-  events: AgentEvent[] = [],
   nowMs = Date.now(),
 ): AgentDisplayStatus {
   const daemon = daemons?.find((item) => item.id === agent.daemonId);
@@ -379,11 +369,6 @@ export function agentDisplayStatus(
   if (agent.status === "failed" || run?.status === "failed") {
     const reason = failureReason(agent, run);
     return status("failed", "Failed — view reason", `Failed — view reason: ${reason}`, { reason, run });
-  }
-
-  const reviewEvent = pendingReviewEvent(agent, events);
-  if (reviewEvent) {
-    return status("needs-review", "Needs your review", reviewEvent.summary ? `Needs your review: ${reviewEvent.summary}` : "Needs your review", { event: reviewEvent, run });
   }
 
   if (agent.status === "working" || run?.status === "running" || (run?.desiredStatus === "running" && run && !terminalAgentRunStatuses.has(run.status) && run.status !== "queued")) {
@@ -402,181 +387,6 @@ export function agentStatus(agent: Agent, runs: AgentRun[]) {
   return agentDisplayStatus(agent, runs).key;
 }
 
-export type InboxItemKind = "needs-review" | "failed";
-export type InboxBadgeTone = InboxItemKind | "";
-
-export type WorkspaceInboxItem = {
-  id: string;
-  kind: InboxItemKind;
-  actorLabel: string;
-  action: string;
-  summary: string;
-  documentId?: string;
-  threadId?: string;
-  threadMessageId?: string;
-  agentId?: string;
-  agentHandle?: string;
-  occurredAt: string;
-  unread: boolean;
-  countable: boolean;
-  reason?: string;
-};
-
-export type WorkspaceInboxSummary = {
-  items: WorkspaceInboxItem[];
-  counts: {
-    needsReview: number;
-    failed: number;
-    total: number;
-  };
-  badgeTone: InboxBadgeTone;
-};
-
-const resolvedInboxStatuses = new Set(["completed", "dismissed"]);
-const terminalInboxRunStatuses = new Set(["completed", "failed", "stopped", "cancelled", "canceled"]);
-const actionableInboxWindowMs = 14 * 24 * 60 * 60 * 1000;
-
-function inboxEventOpen(event: AgentEvent) {
-  return !resolvedInboxStatuses.has((event.status || "").toLowerCase());
-}
-
-function inboxEventTime(event: AgentEvent) {
-  return event.updatedAt || event.createdAt || "";
-}
-
-function inboxTimeValue(value: string) {
-  const ms = Date.parse(value);
-  return Number.isNaN(ms) ? 0 : ms;
-}
-
-function inboxEventFresh(event: AgentEvent, nowMs?: number) {
-  if (nowMs === undefined) {
-    return true;
-  }
-  const occurredMs = inboxTimeValue(inboxEventTime(event));
-  if (!occurredMs) {
-    return false;
-  }
-  return occurredMs >= nowMs - actionableInboxWindowMs;
-}
-
-function inboxDocumentResolvable(event: AgentEvent, documents?: DocumentItem[]) {
-  if (!event.documentId || !documents) {
-    return true;
-  }
-  return documents.some((document) => document.id === event.documentId);
-}
-
-function inboxAgentLabel(handle: string | undefined) {
-  return handle ? `@${handle}` : "Agent";
-}
-
-function inboxText(value?: string) {
-  const text = (value ?? "").trim().replace(/\s+/g, " ");
-  return text || "";
-}
-
-function inboxCurrentAgentRun(agent: Agent, runs: AgentRun[]) {
-  const exact = agent.currentRunId ? runs.find((run) => run.id === agent.currentRunId) : undefined;
-  if (exact) {
-    return exact;
-  }
-  const agentRuns = runs
-    .filter((run) => run.agentId === agent.id)
-    .sort((left, right) => inboxTimeValue(right.updatedAt) - inboxTimeValue(left.updatedAt));
-  return agentRuns.find((run) => !terminalInboxRunStatuses.has((run.status || "").toLowerCase())) ?? agentRuns[0];
-}
-
-function inboxFailureReason(agent: Agent, run?: AgentRun) {
-  for (const candidate of [run?.error, run?.lastMessage, agent.currentActivity]) {
-    const text = inboxText(candidate);
-    if (!text || text.toLowerCase() === "failed") {
-      continue;
-    }
-    return text;
-  }
-  return "No failure reason was provided.";
-}
-
-function isReliableMentionEvent(event: AgentEvent) {
-  return event.type === "thread.mentioned";
-}
-
-function isNeedsReviewEvent(event: AgentEvent) {
-  return event.box === "for_me" && !isReliableMentionEvent(event) && inboxEventOpen(event);
-}
-
-// B×D resolved: the Inbox (below) and the Needs-review chip (agentDisplayStatus /
-// pendingReviewEvent) share one split predicate — isReliableMentionEvent — so a for_me event
-// lights both or neither, never one alone. That agreement is pinned by the "B×D split" test.
-export function workspaceInboxSummary(
-  workspace: Pick<WorkspaceState, "agents" | "agentRuns" | "agentEvents"> & { documents?: DocumentItem[] },
-  options: { nowMs?: number } = {},
-): WorkspaceInboxSummary {
-  const items: WorkspaceInboxItem[] = [];
-
-  for (const event of workspace.agentEvents ?? []) {
-    if (!inboxEventOpen(event)) {
-      continue;
-    }
-    const occurredAt = inboxEventTime(event);
-    if (isReliableMentionEvent(event)) {
-      // Agent mention events are activity-only until human-targeted mention events exist.
-      continue;
-    }
-    if (!inboxEventFresh(event, options.nowMs) || !inboxDocumentResolvable(event, workspace.documents)) {
-      continue;
-    }
-    if (isNeedsReviewEvent(event)) {
-      items.push({
-        id: `review:${event.id}`,
-        kind: "needs-review",
-        actorLabel: inboxAgentLabel(event.agentHandle),
-        action: "needs your review",
-        summary: inboxText(event.summary) || inboxText(event.prompt) || "Review requested",
-        documentId: event.documentId || undefined,
-        threadId: event.threadId || undefined,
-        threadMessageId: event.threadMessageId || undefined,
-        agentId: event.agentId,
-        agentHandle: event.agentHandle,
-        occurredAt,
-        unread: true,
-        countable: true,
-      });
-    }
-  }
-
-  for (const agent of workspace.agents ?? []) {
-    const run = inboxCurrentAgentRun(agent, workspace.agentRuns ?? []);
-    if (agent.status !== "failed" && run?.status !== "failed") {
-      continue;
-    }
-    const reason = inboxFailureReason(agent, run);
-    items.push({
-      id: `failed:${agent.id}:${run?.id ?? "agent"}`,
-      kind: "failed",
-      actorLabel: inboxAgentLabel(agent.handle),
-      action: "failed",
-      summary: reason,
-      agentId: agent.id,
-      agentHandle: agent.handle,
-      occurredAt: run?.updatedAt || agent.updatedAt,
-      unread: true,
-      countable: true,
-      reason,
-    });
-  }
-
-  items.sort((left, right) => inboxTimeValue(right.occurredAt) - inboxTimeValue(left.occurredAt) || left.id.localeCompare(right.id));
-  const needsReview = items.filter((item) => item.kind === "needs-review" && item.countable).length;
-  const failed = items.filter((item) => item.kind === "failed" && item.countable).length;
-  const total = needsReview + failed;
-  return {
-    items,
-    counts: { needsReview, failed, total },
-    badgeTone: failed ? "failed" : needsReview ? "needs-review" : "",
-  };
-}
 
 export function coworkerCount(workspace: Pick<WorkspaceState, "agents" | "users">) {
   return workspace.agents.length + workspace.users.length;

@@ -27,12 +27,9 @@ import {
   isMarkdownDocumentPath,
   randomWorkspaceName,
   threadReplyLabel,
-  workspaceInboxSummary,
   workspaceSlugMaxLength,
   workspaceSlugMinLength,
   type ActivityCategory,
-  type WorkspaceInboxItem,
-  type WorkspaceInboxSummary,
   type WorkspacePerson,
   type LineThreadGroup,
   resolveThreadAnchorLive,
@@ -42,7 +39,7 @@ import { navigate, useRoute } from "./useRoute";
 import { useRootNamespace } from "./useRootNamespace";
 import { useDocumentSync } from "./useDocument";
 import { useWorkspace } from "./useWorkspace";
-import type { Account, ActivityEvent, Agent, AgentEvent, Daemon, DocumentItem, ThreadItem, UserItem, WorkspaceInvitePreview, WorkspaceState, WorkspaceSummary } from "./types";
+import type { Account, ActivityEvent, Agent, Daemon, DocumentItem, ThreadItem, UserItem, WorkspaceInvitePreview, WorkspaceState, WorkspaceSummary } from "./types";
 import { resolveRuntimeTiles, selectableRuntimeKinds, type RuntimeTile } from "./runtimes";
 import "./styles.css";
 
@@ -286,10 +283,9 @@ function visibleAgentStatus(
   agent: Agent,
   runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"],
   daemons: Daemon[],
-  events: AgentEvent[],
   nowMs: number,
 ) {
-  return agentDisplayStatus(agent, runs, daemons, events, nowMs);
+  return agentDisplayStatus(agent, runs, daemons, nowMs);
 }
 
 function detailStatusLabel(status: ReturnType<typeof visibleAgentStatus>) {
@@ -300,29 +296,6 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
 
-function inboxBadgeText(count: number) {
-  return count > 9 ? "9+" : String(count);
-}
-
-function inboxBadgeLabel(summary: WorkspaceInboxSummary) {
-  const { total, failed, needsReview } = summary.counts;
-  if (!total) {
-    return "Inbox";
-  }
-  const parts = [
-    failed ? `${failed} failed` : "",
-    needsReview ? `${needsReview} needs review` : "",
-  ].filter(Boolean);
-  return `Inbox, ${total} need attention: ${parts.join(", ")}`;
-}
-
-function inboxDocumentLabel(documents: DocumentItem[], documentId?: string) {
-  if (!documentId) {
-    return "";
-  }
-  const document = documents.find((item) => item.id === documentId);
-  return document ? fileName(document.path) : "";
-}
 
 function focusableElements(root: HTMLElement) {
   return Array.from(
@@ -1526,10 +1499,6 @@ export function WorkspaceApp({
   const [renamingDocumentId, setRenamingDocumentId] = useState("");
   const [freshDocumentId, setFreshDocumentId] = useState("");
   const [titleDraft, setTitleDraft] = useState("");
-  const [inboxOpen, setInboxOpen] = useState(false);
-  const inboxRef = useRef<HTMLDivElement>(null);
-  const inboxDialogRef = useRef<HTMLDivElement>(null);
-  const inboxTriggerRef = useRef<HTMLButtonElement>(null);
   const lastAccessUpdateKeyRef = useRef("");
   const seenWorkspaceRef = useRef(false);
   const deletionHandledRef = useRef(false);
@@ -1572,9 +1541,6 @@ export function WorkspaceApp({
   const currentWorkspaceUserHandle = currentWorkspaceUser?.handle ? `@${currentWorkspaceUser.handle}` : "Workspace user";
   const currentWorkspaceUserIdentity = currentWorkspaceUser?.handle || currentWorkspaceUser?.name || "Workspace user";
   const canInviteMembers = workspace.currentMembershipRole === "owner" || workspace.currentMembershipRole === "admin";
-  const inboxSummary = useMemo(() => workspaceInboxSummary({ ...workspace, documents: rootNamespace.ready ? rootDocuments : undefined }, { nowMs: now }), [workspace, rootDocuments, rootNamespace.ready, now]);
-  const inboxCount = inboxSummary.counts.total;
-  const inboxAriaLabel = inboxBadgeLabel(inboxSummary);
   const documentOpenThreadCount = useMemo(
     () => documentThreads.filter((thread) => (
       thread.status !== "resolved" && !threadIsObsolete(thread, threadAnchorInfo)
@@ -1599,13 +1565,6 @@ export function WorkspaceApp({
     navigate(resolveRoot({ authenticated: true, account, workspaces: remaining }), { replace: true });
   }, [account, loading, onWorkspaceDeleted, workspace.workspaceId, workspaceId, workspaces]);
 
-  const closeInbox = useCallback((restoreFocus = true) => {
-    setInboxOpen(false);
-    if (restoreFocus) {
-      window.setTimeout(() => inboxTriggerRef.current?.focus(), 0);
-    }
-  }, []);
-
   const closeDocumentThreads = useCallback((restoreFocus = true) => {
     setDocumentThreadsOpen(false);
     setSelectedThreadId("");
@@ -1620,75 +1579,6 @@ export function WorkspaceApp({
       window.setTimeout(() => documentWatchersTriggerRef.current?.focus(), 0);
     }
   }, []);
-
-  const openInboxItem = useCallback(
-    (item: WorkspaceInboxItem) => {
-      if (item.agentId) {
-        setSelectedAgentId(item.agentId);
-        setModal("agent-detail");
-        closeInbox();
-      }
-    },
-    [closeInbox],
-  );
-
-  useEffect(() => {
-    if (!inboxOpen) {
-      return;
-    }
-    const focusTimer = window.setTimeout(() => {
-      const dialog = inboxDialogRef.current;
-      if (!dialog) {
-        return;
-      }
-      const first = focusableElements(dialog)[0];
-      (first ?? dialog).focus();
-    }, 0);
-
-    const onPointerDown = (event: PointerEvent) => {
-      const target = event.target;
-      if (target instanceof Node && inboxRef.current?.contains(target)) {
-        return;
-      }
-      closeInbox();
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeInbox();
-        return;
-      }
-      if (event.key !== "Tab") {
-        return;
-      }
-      const dialog = inboxDialogRef.current;
-      if (!dialog) {
-        return;
-      }
-      const focusable = focusableElements(dialog);
-      if (!focusable.length) {
-        event.preventDefault();
-        dialog.focus();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.clearTimeout(focusTimer);
-      document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [closeInbox, inboxOpen]);
 
   useEffect(() => {
     if (!documentThreadsOpen) {
@@ -1976,7 +1866,7 @@ export function WorkspaceApp({
       >
         {sidebarCollapsed ? "›" : "‹"}
       </button>
-      <aside className={`sb ${inboxOpen ? "inbox-open" : ""}`}>
+      <aside className="sb">
         <div className="workspace-switcher">
           <div className="row gap-8 min-0">
             <div className="avi workspace-avi">{initials(activeWorkspace?.name ?? workspace.name)}</div>
@@ -2000,45 +1890,6 @@ export function WorkspaceApp({
             </div>
           </div>
         </div>
-
-        <nav className="sb-section inbox-nav" ref={inboxRef}>
-          <button
-            ref={inboxTriggerRef}
-            className={`nav-item inbox-trigger ${inboxOpen ? "on" : ""}`}
-            type="button"
-            aria-label={inboxAriaLabel}
-            aria-haspopup="dialog"
-            aria-expanded={inboxOpen}
-            aria-controls="workspace-inbox-flyout"
-            title={inboxAriaLabel}
-            onClick={() => {
-              setInboxOpen((open) => !open);
-            }}
-          >
-            <Icon name="inbox" />
-            <span>Inbox</span>
-            {inboxCount ? (
-              <>
-                <span className={`ct has inbox-ct ${inboxSummary.badgeTone}`} title={inboxAriaLabel}>
-                  {inboxBadgeText(inboxCount)}
-                </span>
-                <em className={`inbox-corner-badge ${inboxSummary.badgeTone}`} aria-hidden="true">
-                  {inboxBadgeText(inboxCount)}
-                </em>
-              </>
-            ) : null}
-          </button>
-          {inboxOpen ? (
-            <WorkspaceInboxFlyout
-              dialogRef={inboxDialogRef}
-              summary={inboxSummary}
-              documents={rootDocuments}
-              onItem={openInboxItem}
-            />
-          ) : null}
-        </nav>
-
-        <div className="divider sb-divider" />
 
         <section className="sb-section flex-1 doc-tree">
           <div className="lab">
@@ -2084,7 +1935,7 @@ export function WorkspaceApp({
           </div>
           <div className="col gap-6 agent-summary-list">
             {workspace.agents.map((agent) => {
-              const status = visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons, workspace.agentEvents, now);
+              const status = visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons, now);
               return (
                 <button
                   key={agent.id}
@@ -2367,8 +2218,8 @@ export function WorkspaceApp({
       ) : null}
       {modal === "daemon" ? <CreateDaemonModal api={api} workspaceId={workspaceId} daemons={workspace.daemons} onClose={() => setModal(null)} onDone={() => void reload()} /> : null}
       {modal === "agent" ? <CreateAgentModal api={api} workspaceId={workspaceId} daemons={workspace.daemons} onClose={() => setModal(null)} onDone={() => { setModal(null); void reload(); }} /> : null}
-      {modal === "agent-detail" && selectedAgentId ? <AgentDetailModal api={api} workspaceId={workspaceId} agentId={selectedAgentId} agents={workspace.agents} daemons={workspace.daemons} runs={workspace.agentRuns} agentEvents={workspace.agentEvents} onClose={() => setModal(null)} onChanged={() => void reload()} /> : null}
-      {modal === "daemon-detail" && selectedDaemonId ? <DaemonDetailModal api={api} workspaceId={workspaceId} daemonId={selectedDaemonId} daemons={workspace.daemons} agents={workspace.agents} runs={workspace.agentRuns} agentEvents={workspace.agentEvents} onClose={() => setModal(null)} onChanged={() => { setModal(null); void reload(); }} /> : null}
+      {modal === "agent-detail" && selectedAgentId ? <AgentDetailModal api={api} workspaceId={workspaceId} agentId={selectedAgentId} agents={workspace.agents} daemons={workspace.daemons} runs={workspace.agentRuns} onClose={() => setModal(null)} onChanged={() => void reload()} /> : null}
+      {modal === "daemon-detail" && selectedDaemonId ? <DaemonDetailModal api={api} workspaceId={workspaceId} daemonId={selectedDaemonId} daemons={workspace.daemons} agents={workspace.agents} runs={workspace.agentRuns} onClose={() => setModal(null)} onChanged={() => { setModal(null); void reload(); }} /> : null}
       {modal === "manage" ? (
         <ManageModal
           api={api}
@@ -2624,109 +2475,6 @@ function useNowTicker(intervalMs: number) {
   return now;
 }
 
-const inboxDotColor: Record<WorkspaceInboxItem["kind"], string> = {
-  "needs-review": "var(--needs-you)",
-  failed: "var(--danger)",
-};
-
-const inboxGlyph: Record<WorkspaceInboxItem["kind"], string> = {
-  "needs-review": "review",
-  failed: "alert",
-};
-
-const inboxKindLabel: Record<WorkspaceInboxItem["kind"], string> = {
-  "needs-review": "Needs review",
-  failed: "Failed",
-};
-
-function WorkspaceInboxFlyout({
-  dialogRef,
-  summary,
-  documents,
-  onItem,
-}: {
-  dialogRef: RefObject<HTMLDivElement>;
-  summary: WorkspaceInboxSummary;
-  documents: DocumentItem[];
-  onItem: (item: WorkspaceInboxItem) => void;
-}) {
-  const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
-  const [expandedReasonId, setExpandedReasonId] = useState("");
-
-  const renderRowBody = (item: WorkspaceInboxItem) => {
-    const documentLabel = inboxDocumentLabel(documents, item.documentId);
-    const timeLabel = relativeTime(item.occurredAt, now);
-    return (
-      <>
-        <span className="inbox-kind" title={inboxKindLabel[item.kind]}>
-          <span className={`inbox-dot ${item.unread ? "solid" : "hollow"}`} style={{ "--dot": inboxDotColor[item.kind] } as CSSProperties} />
-          <Icon name={inboxGlyph[item.kind]} />
-        </span>
-        <span className="inbox-copy min-0">
-          <span className="inbox-main">
-            <strong>{item.actorLabel}</strong>
-            <span>{item.action}</span>
-            {documentLabel ? <span className="inbox-doc-link">{documentLabel}</span> : null}
-          </span>
-          <span className="inbox-detail">
-            <span className="truncate">{item.summary}</span>
-            {timeLabel ? <span className="inbox-time">{timeLabel}</span> : null}
-          </span>
-          {item.kind === "failed" ? (
-            <span className="inbox-failed-detail">
-              <button
-                className="inbox-reason-link"
-                type="button"
-                onClick={() => setExpandedReasonId((current) => (current === item.id ? "" : item.id))}
-                aria-expanded={expandedReasonId === item.id}
-              >
-                View reason
-              </button>
-              {expandedReasonId === item.id ? <span className="inbox-reason">{item.reason || item.summary}</span> : null}
-            </span>
-          ) : null}
-        </span>
-      </>
-    );
-  };
-
-  return (
-    <div
-      id="workspace-inbox-flyout"
-      className="inbox-flyout"
-      role="dialog"
-      aria-label="Inbox"
-      tabIndex={-1}
-      ref={dialogRef}
-    >
-      <div className="inbox-flyout-head">
-        <div className="col gap-2 min-0">
-          <b>Inbox</b>
-          <span className="tiny muted">
-            {summary.counts.total ? `${summary.counts.total} need attention` : "Inbox zero"}
-          </span>
-        </div>
-      </div>
-      <div className="inbox-list">
-        {summary.items.map((item) => {
-          const canOpen = item.kind === "needs-review" && !!item.agentId;
-          const className = `inbox-row ${item.kind} ${item.unread ? "unread" : "read"}`;
-          return canOpen ? (
-            <button className={className} type="button" key={item.id} onClick={() => onItem(item)}>
-              {renderRowBody(item)}
-            </button>
-          ) : (
-            <article className={className} key={item.id}>
-              {renderRowBody(item)}
-            </article>
-          );
-        })}
-        {!summary.items.length ? <p className="inbox-empty">Inbox zero · No attention needed.</p> : null}
-      </div>
-    </div>
-  );
-}
-
 export function DaemonsManagement({
   workspace,
   onRefresh,
@@ -2834,7 +2582,7 @@ function AgentsManagement({
   onAgent: (agent: Agent) => void;
 }) {
   const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
-  const running = workspace.agents.filter((agent) => visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons, workspace.agentEvents, now).key === "running").length;
+  const running = workspace.agents.filter((agent) => visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons, now).key === "running").length;
   const daemonById = new Map(workspace.daemons.map((daemon) => [daemon.id, daemon]));
 
   return (
@@ -2870,7 +2618,7 @@ function AgentsManagement({
               </div>
               <div className="roster-grid">
                 {group.agents.map((agent) => {
-                  const status = visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons, workspace.agentEvents, now);
+                  const status = visibleAgentStatus(agent, workspace.agentRuns, workspace.daemons, now);
                   const statusLabel = detailStatusLabel(status);
                   return (
                     <button className="agent-roster-card" key={agent.id} onClick={() => onAgent(agent)} aria-label={`Open @${agent.handle}. Status: ${statusLabel}`}>
@@ -4372,7 +4120,7 @@ function ClockIcon() {
   return <svg className="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 8v4l3 2" /></svg>;
 }
 
-export function AgentDetailModal({ api, workspaceId, agentId, agents, daemons, runs, agentEvents, onClose, onChanged }: { api: ApiClient; workspaceId: string; agentId: string; agents: Agent[]; daemons: Daemon[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; agentEvents: AgentEvent[]; onClose: () => void; onChanged: () => void }) {
+export function AgentDetailModal({ api, workspaceId, agentId, agents, daemons, runs, onClose, onChanged }: { api: ApiClient; workspaceId: string; agentId: string; agents: Agent[]; daemons: Daemon[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; onClose: () => void; onChanged: () => void }) {
   const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
   const [prompt, setPrompt] = useState("Review the current workspace and respond if you have useful feedback.");
   // Derive the live agent from workspace state every render, so agent.updated / agent.run.updated
@@ -4388,7 +4136,7 @@ export function AgentDetailModal({ api, workspaceId, agentId, agents, daemons, r
     return null;
   }
   const daemon = daemons.find((item) => item.id === agent.daemonId);
-  const status = visibleAgentStatus(agent, runs, daemons, agentEvents, now);
+  const status = visibleAgentStatus(agent, runs, daemons, now);
   const statusLabel = detailStatusLabel(status);
   return (
     <Modal title={`@${agent.handle}`} onClose={onClose}>
@@ -4410,7 +4158,7 @@ export function AgentDetailModal({ api, workspaceId, agentId, agents, daemons, r
   );
 }
 
-export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents, runs, agentEvents, onClose, onChanged }: { api: ApiClient; workspaceId: string; daemonId: string; daemons: Daemon[]; agents: Agent[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; agentEvents: AgentEvent[]; onClose: () => void; onChanged: () => void }) {
+export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents, runs, onClose, onChanged }: { api: ApiClient; workspaceId: string; daemonId: string; daemons: Daemon[]; agents: Agent[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; onClose: () => void; onChanged: () => void }) {
   const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
   const [reinstallOpen, setReinstallOpen] = useState(false);
   const [reinstallToken, setReinstallToken] = useState("");
@@ -4468,7 +4216,7 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
             <p className="small muted">Last seen: {daemon.lastSeenAt ? new Date(daemon.lastSeenAt).toLocaleString() : "Never"}</p>
             <p className="small muted">Agents: {daemonAgents.length}</p>
             {daemonAgents.map((agent) => {
-              const agentStatus = visibleAgentStatus(agent, runs, [daemon], agentEvents, now);
+              const agentStatus = visibleAgentStatus(agent, runs, [daemon], now);
               return <p className="small" key={agent.id}>@{agent.handle} · {detailStatusLabel(agentStatus)}</p>;
             })}
           </div>
@@ -5043,12 +4791,8 @@ export function Icon({ name }: { name: string }) {
       return <svg className="i sm" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6" /></svg>;
     case "activity":
       return <svg className="i sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>;
-    case "inbox":
-      return <svg className="i sm" viewBox="0 0 24 24"><path d="M4 4h16l-2 10h-3l-1.5 3h-3L9 14H6L4 4z" /><path d="M4 20h16" /></svg>;
     case "mention":
       return <svg className="i sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" /><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8" /></svg>;
-    case "review":
-      return <svg className="i sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 3a9 9 0 0 1 0 18z" /></svg>;
     case "alert":
       return <svg className="i sm" viewBox="0 0 24 24"><path d="M12 3l10 18H2L12 3z" /><path d="M12 9v5M12 18h.01" /></svg>;
     case "thread":

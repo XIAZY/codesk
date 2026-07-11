@@ -314,7 +314,7 @@ svg.i.sm {
 
 /* #30: one keyboard-focus ring across every interactive surface — buttons, links,
    and ARIA/tabindex controls (which is what .btn / .nav-item / roster & doc rows /
-   tabs / Inbox items / CollaboratorAvatars all resolve to). :focus-visible only,
+   tabs / CollaboratorAvatars all resolve to). :focus-visible only,
    so it shows on keyboard nav and never on a mouse click. Neutral (--focus-ring),
    no animation. Form fields keep their own accent focus above. */
 button:focus-visible,
@@ -446,11 +446,6 @@ a:focus-visible,
   color: var(--ink-3);
 }
 
-.chip.needs-review {
-  background: var(--accent-100);
-  color: var(--accent-700);
-}
-
 .chip.accent {
   background: var(--accent-100);
   color: var(--accent-700);
@@ -553,10 +548,6 @@ a:focus-visible,
 .status-dot.queued,
 .status-dot.waiting-env {
   background: var(--ink-4);
-}
-
-.status-dot.needs-review {
-  background: var(--accent);
 }
 
 .status-dot.disconnected,
@@ -715,9 +706,6 @@ a:focus-visible,
 .shell.sidebar-collapsed .sb {
   overflow: hidden;
 }
-.shell.sidebar-collapsed .sb.inbox-open {
-  overflow: visible;
-}
 .shell.sidebar-collapsed .sb .workspace-switcher .col,
 .shell.sidebar-collapsed .sb .workspace-switcher select,
 .shell.sidebar-collapsed .sb .sb-search,
@@ -769,13 +757,6 @@ a:focus-visible,
   margin: 0;
   box-shadow: 0 0 0 1px var(--paper);
 }
-.shell.sidebar-collapsed .sb .inbox-trigger {
-  position: relative;
-}
-.shell.sidebar-collapsed .sb .inbox-corner-badge {
-  display: inline-flex;
-}
-
 /* Single collapse/expand handle: a round button straddling the left rail's right
    edge, vertically centered. Replaces the old corner chevron + expand tab — one
    control, never two (Eva). Anchored to .shell (position:relative) at left:var(--left)
@@ -950,10 +931,6 @@ a:focus-visible,
   padding: 4px 8px;
 }
 
-.sb-divider {
-  margin: 6px 8px;
-}
-
 .lab {
   display: flex;
   align-items: center;
@@ -1014,217 +991,6 @@ a:focus-visible,
 .nav-item .ct.has {
   background: var(--accent-100);
   color: var(--accent-700);
-}
-
-.inbox-nav {
-  position: relative;
-  z-index: 20;
-}
-
-.inbox-trigger {
-  position: relative;
-}
-
-/* #28: Inbox badge default is amber (needs-review = human-domain "you have work",
-   which is now the retuned --accent amber). But it KEEPS §6 severity — a failed
-   item escalates the badge to red (--danger), so the at-a-glance failure signal is
-   never lost at the badge level (Phase D behavior; Eva's #28 ruling — don't regress).
-   Amber default and red-on-failed both sit within qianyi's amber theme. */
-.nav-item .ct.inbox-ct.needs-review {
-  background: var(--needs-you);
-  color: var(--paper);
-}
-
-.nav-item .ct.inbox-ct.failed {
-  background: var(--danger);
-  color: var(--paper);
-}
-
-.inbox-corner-badge {
-  position: absolute;
-  right: 6px;
-  bottom: 3px;
-  min-width: 15px;
-  height: 15px;
-  display: none;
-  align-items: center;
-  justify-content: center;
-  border-radius: 999px;
-  border: 1px solid var(--paper);
-  color: var(--paper);
-  font-size: 9px;
-  line-height: 1;
-  font-style: normal;
-  font-weight: 700;
-  pointer-events: none;
-}
-
-.inbox-corner-badge.needs-review {
-  background: var(--needs-you);
-}
-
-.inbox-corner-badge.failed {
-  background: var(--danger);
-}
-
-.inbox-flyout {
-  position: absolute;
-  top: 40px;
-  left: 8px;
-  width: min(344px, calc(100vw - 32px));
-  max-height: min(520px, calc(100vh - 112px));
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--r-2);
-  background: var(--paper);
-  color: var(--ink);
-  box-shadow: var(--shadow-2);
-  overflow: hidden;
-}
-
-.inbox-flyout .muted {
-  color: var(--ink-3);
-}
-
-.shell.sidebar-collapsed .inbox-flyout {
-  left: 52px;
-  top: 0;
-}
-
-.inbox-flyout:focus {
-  outline: none;
-  box-shadow: var(--shadow-2), 0 0 0 3px color-mix(in oklab, var(--accent) 18%, transparent);
-}
-
-.inbox-flyout-head {
-  min-height: 52px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  border-bottom: 1px solid var(--border);
-  padding: 10px 12px;
-}
-
-.inbox-list {
-  min-height: 0;
-  max-height: 468px;
-  overflow: auto;
-  padding: 8px;
-}
-
-.inbox-row {
-  width: 100%;
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  border: 1px solid transparent;
-  border-radius: var(--r-1);
-  background: transparent;
-  color: var(--ink);
-  padding: 9px 8px;
-  text-align: left;
-}
-
-button.inbox-row:hover {
-  background: var(--paper-2);
-  border-color: var(--border);
-}
-
-.inbox-row.read {
-  color: var(--ink-3);
-}
-
-.inbox-kind {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex: 0 0 auto;
-  min-width: 31px;
-  color: var(--ink-3);
-  padding-top: 2px;
-}
-
-.inbox-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  border: 1px solid var(--dot);
-  flex: 0 0 auto;
-}
-
-.inbox-dot.solid {
-  background: var(--dot);
-}
-
-.inbox-dot.hollow {
-  background: transparent;
-}
-
-.inbox-copy {
-  display: grid;
-  gap: 3px;
-  flex: 1 1 auto;
-}
-
-.inbox-main,
-.inbox-detail,
-.inbox-failed-detail {
-  min-width: 0;
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-}
-
-.inbox-main {
-  font-size: 12.5px;
-}
-
-.inbox-main strong {
-  color: var(--ink);
-}
-
-.inbox-row.read .inbox-main strong {
-  color: var(--ink-3);
-}
-
-.inbox-doc-link {
-  color: var(--ink-2);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-.inbox-detail,
-.inbox-failed-detail {
-  color: var(--ink-3);
-  font-size: 11.5px;
-}
-
-.inbox-time {
-  flex: 0 0 auto;
-}
-
-.inbox-reason-link {
-  border: 0;
-  background: transparent;
-  color: var(--danger);
-  padding: 0;
-  font-size: inherit;
-  font-weight: 700;
-}
-
-.inbox-reason {
-  color: var(--ink-2);
-}
-
-.inbox-empty {
-  margin: 4px;
-  border: 1px dashed var(--border);
-  border-radius: var(--r-1);
-  color: var(--ink-3);
-  padding: 14px 12px;
-  font-size: 12.5px;
 }
 
 .nav-item .car {
@@ -1348,15 +1114,8 @@ button.inbox-row:hover {
   white-space: nowrap;
 }
 
-/* #28: the agent status TEXT takes the §6 semantic color (the "enrichment") —
-   identity color lives on the avatar, status color on the dot AND now the text,
-   two separate axes. Running/needs-review/failed get the semantic hue; idle,
-   queued and waiting-env keep the inherited neutral gray. Status dots unchanged. */
 .agent-mini-status-label.running {
   color: var(--iris);
-}
-.agent-mini-status-label.needs-review {
-  color: var(--warn);
 }
 .agent-mini-status-label.failed {
   color: var(--err);
@@ -1383,8 +1142,7 @@ button.inbox-row:hover {
 .sb .faint {
   color: var(--sb-ink-2);
 }
-.sb .divider,
-.sb .sb-divider {
+.sb .divider {
   background: var(--sb-line);
 }
 .sb .workspace-switcher {
@@ -2653,7 +2411,7 @@ button.inbox-row:hover {
 .roster-grid {
   /* #28 follow-on (qianyi): simplified agent rows — one per line so the full
      @handle is always readable (was a 3-col grid that truncated names to "@…").
-     Each row is now just identity + §6 status; activity / threads / inbox /
+     Each row is now just identity + §6 status; activity / threads /
      for-me moved into the agent detail, which the whole row opens. */
   display: grid;
   grid-template-columns: 1fr;
