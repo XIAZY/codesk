@@ -2149,17 +2149,6 @@ button.inbox-row:hover {
   opacity: 0.65;
 }
 
-.thread-popover-check {
-  display: inline-grid;
-  place-items: center;
-  width: 16px;
-  height: 16px;
-  border: 1px solid currentColor;
-  border-radius: 50%;
-  font-size: 10px;
-  line-height: 1;
-}
-
 .thread-popover-error {
   flex: 0 0 auto;
   border-top: 1px solid color-mix(in oklab, var(--err) 20%, var(--border));

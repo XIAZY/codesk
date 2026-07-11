@@ -2792,7 +2792,6 @@ function ThreadDetailContent({
           disabled={statusBusy}
           aria-label={resolved ? "Reopen thread" : "Mark as resolved"}
         >
-          <span className="thread-popover-check">✓</span>
           {statusBusy ? "Updating…" : resolved ? "Reopen" : "Mark as resolved"}
         </button>
         {onJump && jumpLabel ? (
