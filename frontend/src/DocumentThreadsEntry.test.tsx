@@ -101,7 +101,8 @@ describe("document Threads toolbar entry", () => {
     const railTabs = container.querySelector(".ctx-tabs") as HTMLElement;
     expect(within(railTabs).queryByRole("button", { name: /Threads/i })).toBeNull();
     expect(within(railTabs).getByRole("button", { name: /Document Activity/i })).toBeTruthy();
-    expect(within(railTabs).getByRole("button", { name: /Participants/i })).toBeTruthy();
+    // The Participants tab was removed from the rail — its subscriber controls now live in the top-bar Watchers popover.
+    expect(within(railTabs).queryByRole("button", { name: /Participants/i })).toBeNull();
 
     const trigger = screen.getByRole("button", { name: "Threads, 1 open" });
     const toolbarActions = container.querySelector(".doc-toolbar > .row.gap-6") as HTMLElement;

@@ -1504,6 +1504,38 @@ button.inbox-row:hover {
   padding: 8px 12px 8px 14px;
 }
 
+.document-watchers-entry {
+  position: relative;
+}
+
+.document-watchers-trigger {
+  min-width: 48px;
+  justify-content: center;
+  border-color: var(--border-strong);
+  font-variant-numeric: tabular-nums;
+}
+
+.document-watchers-popover {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 8px);
+  right: 0;
+  width: min(340px, calc(100vw - 24px));
+  max-height: calc(100vh - 68px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--paper);
+}
+
+.document-watchers-popover .watchers-pane {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 12px 12px;
+}
+
 .document-threads-popover-body {
   flex: 1 1 auto;
   min-height: 0;

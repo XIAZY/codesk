@@ -273,8 +273,8 @@ describe("WorkspaceOnboarding", () => {
   });
 });
 
-describe("WorkspaceApp participants rail", () => {
-  it("the right tab is document-scoped Participants, not the workspace-wide People list", async () => {
+describe("WorkspaceApp right rail", () => {
+  it("no longer has a Participants tab — subscriber controls moved to the top-bar Watchers popover", () => {
     render(
       <WorkspaceApp
         api={{ updateLastAccessed: vi.fn().mockResolvedValue({}) } as never}
@@ -290,18 +290,10 @@ describe("WorkspaceApp participants rail", () => {
       />,
     );
 
-    // The tab converted from "People" to document-scoped "Participants" (task #4, full conversion ruling).
-    const tab = screen.getByRole("button", { name: /participants/i });
-    fireEvent.click(tab);
-
-    await waitFor(() => expect(document.querySelector(".ctx-body.people-pane")).toBeTruthy());
-    const panel = document.querySelector(".ctx-body.people-pane") as HTMLElement;
-
-    // Doc-scoped: with no document open, the panel prompts to open one — it deliberately does NOT list the
-    // whole workspace (the old ambient People view is gone).
-    expect(within(panel).getByText(/open a document to see its participants/i)).toBeTruthy();
-    expect(within(panel).queryByText("@grace")).toBeNull();
-    expect(within(panel).queryByText("@codex")).toBeNull();
+    // The Participants rail tab (task #4) was removed; its view/add/remove of document subscribers now lives in
+    // the top-bar Watchers popover. Only Document Activity remains in the rail.
+    expect(screen.queryByRole("button", { name: /participants/i })).toBeNull();
+    expect(screen.getByRole("button", { name: /document activity/i })).toBeTruthy();
   });
 });
 
