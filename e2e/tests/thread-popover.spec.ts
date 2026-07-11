@@ -32,14 +32,23 @@ async function createDocument(page: Page, content: string): Promise<Locator> {
   const editor = page.locator(".cm-editor").first();
   await expect(editor).toBeVisible({ timeout: 20_000 });
   await editor.click();
-  await page.keyboard.type(content);
-  await expect(editor).toContainText(content);
+  if (content.includes("\n")) {
+    await page.keyboard.insertText(content);
+    const lines = content.split("\n");
+    await expect(editor.locator(".cm-line")).toHaveCount(lines.length);
+    await expect(editor.locator(".cm-line").first()).toHaveText(lines[0]);
+    await expect(editor.locator(".cm-line").last()).toHaveText(lines.at(-1)!);
+  } else {
+    await page.keyboard.type(content);
+    await expect(editor).toContainText(content);
+  }
   await expect(page.locator(".doc-meta-row .chip.ok")).toBeVisible({ timeout: 15_000 });
   return editor;
 }
 
-async function createAnchoredThread(page: Page, editor: Locator, body: string): Promise<void> {
+async function createAnchoredThread(page: Page, editor: Locator, body: string, line = 1): Promise<void> {
   await editor.click();
+  if (line > 1) await page.keyboard.press("Control+End");
   await page.keyboard.press("Home");
   await page.keyboard.press("Shift+End");
   const startThread = page.locator(".selection-toolbar button.primary").first();
@@ -52,15 +61,20 @@ async function createAnchoredThread(page: Page, editor: Locator, body: string): 
   await expect(drafter).toBeHidden();
 }
 
-async function setupThreadDocument(page: Page, bodies: string[]): Promise<{ editor: Locator; errors: Error[] }> {
+async function setupThreadDocument(
+  page: Page,
+  bodies: string[],
+  content = `thread popover regression ${Date.now()}`,
+  line = 1,
+): Promise<{ editor: Locator; errors: Error[] }> {
   const seed = loadSeed();
   const errors: Error[] = [];
   failOnPageError(page, errors);
   await loginToWorkspace(page, seed);
-  const editor = await createDocument(page, `thread popover regression ${Date.now()}`);
+  const editor = await createDocument(page, content);
   for (let index = 0; index < bodies.length; index += 1) {
-    await createAnchoredThread(page, editor, bodies[index]);
-    await expect(page.getByRole("button", { name: `${index + 1} open thread${index ? "s" : ""} on line 1` })).toBeVisible({ timeout: 20_000 });
+    await createAnchoredThread(page, editor, bodies[index], line);
+    await expect(page.getByRole("button", { name: `${index + 1} open thread${index ? "s" : ""} on line ${line}` })).toBeVisible({ timeout: 20_000 });
   }
   return { editor, errors };
 }
@@ -75,11 +89,11 @@ async function captureRender(page: Page, testInfo: TestInfo, name: string): Prom
   await testInfo.attach(name, { path, contentType: "image/png" });
 }
 
-async function openThreadDetail(page: Page, markerCount: number, body: string): Promise<Locator> {
+async function openThreadDetail(page: Page, markerCount: number, body: string, line = 1): Promise<Locator> {
   await page.getByRole("button", {
-    name: `${markerCount} open thread${markerCount === 1 ? "" : "s"} on line 1`,
+    name: `${markerCount} open thread${markerCount === 1 ? "" : "s"} on line ${line}`,
   }).click();
-  const list = page.getByRole("dialog", { name: "Threads on line 1" });
+  const list = page.getByRole("dialog", { name: `Threads on line ${line}` });
   await expect(list).toBeVisible();
   const row = list.locator(".thread-popover-row", { hasText: body });
   await expect(row).toBeVisible();
@@ -87,6 +101,18 @@ async function openThreadDetail(page: Page, markerCount: number, body: string): 
   const detail = page.getByRole("dialog", { name: /Thread by @/ });
   await expect(detail).toBeVisible();
   return detail;
+}
+
+async function expectInsideViewport(page: Page, locator: Locator, margin = 12): Promise<void> {
+  await expect.poll(async () => {
+    const box = await locator.boundingBox();
+    const viewport = page.viewportSize();
+    if (!box || !viewport) return false;
+    return box.x >= margin - 1
+      && box.y >= margin - 1
+      && box.x + box.width <= viewport.width - margin + 1
+      && box.y + box.height <= viewport.height - margin + 1;
+  }).toBe(true);
 }
 
 test("thread popover: marker → detail → reply persists through a real reload", async ({ page }, testInfo) => {
@@ -99,14 +125,14 @@ test("thread popover: marker → detail → reply persists through a real reload
   await captureRender(page, testInfo, "thread-popover-open-detail");
   await detail.getByRole("textbox", { name: "Reply to this thread" }).fill(reply);
   await detail.getByRole("button", { name: "Send reply" }).click();
-  await expect(detail.getByText(reply)).toBeVisible({ timeout: 20_000 });
+  await expect(detail.locator(".thread-popover-message-body").getByText(reply, { exact: true })).toBeVisible({ timeout: 20_000 });
 
   await page.reload();
   await expect(editor).toBeVisible({ timeout: 20_000 });
   await expect(editor).toContainText("thread popover regression", { timeout: 20_000 });
   await expect(page.locator(".doc-meta-row .chip.ok")).toBeVisible({ timeout: 15_000 });
   detail = await openThreadDetail(page, 1, initial);
-  await expect(detail.getByText(reply)).toBeVisible();
+  await expect(detail.locator(".thread-popover-message-body").getByText(reply, { exact: true })).toBeVisible();
 
   assertNoPageErrors(errors);
 });
@@ -226,6 +252,48 @@ test("thread popover: mobile sheet keeps fixed regions reachable and scrolls mes
   await expect(detail.getByRole("button", { name: "Jump to line 1" })).toBeVisible();
   await expect(detail.getByRole("textbox", { name: "Reply to this thread" })).toBeVisible();
   await captureRender(page, testInfo, "thread-popover-mobile-detail");
+
+  assertNoPageErrors(errors);
+});
+
+test("thread popover: desktop float stays contained near viewport edges and in a short window", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const lineCount = 28;
+  const content = Array.from({ length: lineCount }, (_, index) => `containment line ${index + 1}`).join("\n");
+  const body = `desktop overflow ${"message ".repeat(220)}`;
+  const { errors } = await setupThreadDocument(page, [body], content, lineCount);
+  await page.setViewportSize({ width: 720, height: 360 });
+  const marker = page.getByRole("button", { name: `1 open thread on line ${lineCount}` });
+  const markerBox = await marker.boundingBox();
+  expect(markerBox).not.toBeNull();
+  expect(markerBox!.x + markerBox!.width).toBeGreaterThan(600);
+
+  await marker.click();
+  const list = page.getByRole("dialog", { name: `Threads on line ${lineCount}` });
+  await expect(list).toBeVisible();
+  await expectInsideViewport(page, list);
+  await captureRender(page, testInfo, "thread-popover-desktop-edge-list");
+  await list.locator(".thread-popover-row", { hasText: "desktop overflow" }).click();
+
+  const detail = page.getByRole("dialog", { name: /Thread by @/ });
+  await expect(detail).toBeVisible();
+  await expectInsideViewport(page, detail);
+  for (const region of [
+    detail.locator(".thread-popover-head"),
+    detail.locator(".thread-popover-anchor"),
+    detail.locator(".thread-popover-actions"),
+    detail.locator(".thread-popover-reply"),
+  ]) {
+    await expect(region).toBeVisible();
+    await expectInsideViewport(page, region, 0);
+  }
+
+  const messages = detail.locator(".thread-popover-messages");
+  await expect(messages).toBeVisible();
+  expect(await messages.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+  expect(await detail.evaluate((element) => element.scrollHeight <= element.clientHeight + 1)).toBe(true);
+  await expect(detail.getByRole("textbox", { name: "Reply to this thread" })).toBeVisible();
+  await captureRender(page, testInfo, "thread-popover-desktop-short-detail");
 
   assertNoPageErrors(errors);
 });
