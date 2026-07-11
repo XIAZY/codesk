@@ -76,6 +76,10 @@ func documentRef(path, id string) string {
 // formatSubscriptions renders the post-change subscription list. verb is "" for list-subscriptions (no
 // header) or "subscribed to" / "unsubscribed from" for the mutating commands, whose header names the
 // document just changed (targetID); its path is resolved from the returned list when still present.
+// subscribeVerb is the header verb for a subscribe render; the confirmation copy keys off it so subscribe
+// gets the notification-contract line while unsubscribe/list do not.
+const subscribeVerb = "subscribed to"
+
 func formatSubscriptions(data []byte, verb, targetID string) (string, error) {
 	var resp subscriptionsResponse
 	if err := json.Unmarshal(data, &resp); err != nil {
@@ -91,6 +95,10 @@ func formatSubscriptions(data []byte, verb, targetID string) (string, error) {
 			}
 		}
 		b.WriteString(verb + " " + documentRef(path, targetID) + "\n")
+		// Subscribe confirmation (task #6): make the notification contract explicit at the moment of opt-in.
+		if verb == subscribeVerb {
+			b.WriteString("you will now receive notifications about new edits and thread messages on this document\n")
+		}
 	}
 	n := len(resp.Documents)
 	b.WriteString(fmt.Sprintf("you are subscribed to %d %s", n, countNoun(n, "document")))

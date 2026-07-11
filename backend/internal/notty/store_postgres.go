@@ -1385,14 +1385,57 @@ func getAgentDocumentViewPostgres(q querier, workspaceID string, agentID string,
 
 // subscribeAgentDocumentPostgres records an agent's opt-in to a document's updates. Idempotent: a
 // double-subscribe is a no-op (no error, no duplicate).
-func subscribeAgentDocumentPostgres(exec activityExecer, workspaceID, agentID, documentID string, createdAt time.Time) error {
-	_, err := exec.Exec(
+// subscribeAgentDocumentPostgres inserts the subscription idempotently and reports whether a NEW row was
+// created (RowsAffected is 0 on an ON CONFLICT no-op) — the caller cards the agent only on a genuine new
+// subscription, never on a re-subscribe.
+func subscribeAgentDocumentPostgres(exec activityExecer, workspaceID, agentID, documentID string, createdAt time.Time) (bool, error) {
+	result, err := exec.Exec(
 		`INSERT INTO agent_document_subscriptions (workspace_id, agent_id, document_id, created_at)
 		 VALUES ($1, $2, $3, $4)
 		 ON CONFLICT (workspace_id, agent_id, document_id) DO NOTHING`,
 		workspaceID, agentID, documentID, createdAt,
 	)
-	return err
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
+// subscribeAgentDocumentWithCardPostgres inserts the subscription and, when a card is supplied for a genuine
+// new subscription, upserts it in the SAME transaction — all-or-nothing, so a card write failure (e.g. a
+// transient DB error) never leaves an orphaned subscription behind. Returns whether a new subscription row
+// was created and the persisted card (for the caller's post-commit doorbell).
+func subscribeAgentDocumentWithCardPostgres(db *sql.DB, workspaceID, agentID, documentID string, card *AgentEvent, now time.Time) (bool, *AgentEvent, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return false, nil, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	inserted, err := subscribeAgentDocumentPostgres(tx, workspaceID, agentID, documentID, now)
+	if err != nil {
+		return false, nil, err
+	}
+	var persisted *AgentEvent
+	if inserted && card != nil {
+		persisted, err = upsertDocumentInboxEventPostgres(tx, workspaceID, card)
+		if err != nil {
+			return false, nil, err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return false, nil, err
+	}
+	committed = true
+	return inserted, persisted, nil
 }
 
 // unsubscribeAgentDocumentPostgres removes a subscription. Returns whether a row was actually deleted so
@@ -3165,6 +3208,19 @@ func replyThreadPostgres(db *sql.DB, workspaceID string, threadID string, messag
 	events := append(mentionEvents, replyEvents...)
 	for _, event := range events {
 		if err = insertAgentEventTx(tx, workspaceID, event); err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	// Watcher reply cards (task #6): document subscribers who are NOT participants get a coalesced,
+	// NO-doorbell card riding the edit class. They are UPSERTED (sliding available_at per thread+agent) and
+	// deliberately NOT added to `events`, so ReplyThread never rings their doorbell — they mature on the poll,
+	// collapsing a busy thread into one delivery per watcher.
+	watcherEvents, err := collectThreadReplyWatcherEventsPostgres(tx, workspaceID, thread, message, meta)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	for _, event := range watcherEvents {
+		if _, err = upsertDocumentInboxEventPostgres(tx, workspaceID, event); err != nil {
 			return nil, nil, nil, err
 		}
 	}

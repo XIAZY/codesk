@@ -39,10 +39,16 @@ func (s *Server) handleSubscribeAgentDocument(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, "documentId is required")
 		return
 	}
-	if err := s.requestStore(r).SubscribeAgentDocument(agentID, req.DocumentID); err != nil {
+	auth, _ := authFromContext(r.Context())
+	meta := operationMetaFromAuth(auth, "document-subscribe", "", "")
+	// Cards the agent ONLY when a human subscribed someone other than themselves (the Participants panel);
+	// self-subscribe via the tool gets the CLI confirmation copy, not a card. The card is instant + rings the
+	// doorbell, which this handler drains below.
+	if _, err := s.requestStore(r).SubscribeAgentDocumentAndNotify(agentID, req.DocumentID, meta); err != nil {
 		writeError(w, subscriptionErrorStatus(err), err.Error())
 		return
 	}
+	s.publishAgentInboxChanges(r)
 	s.writeAgentDocumentSubscriptions(w, r, agentID)
 }
 
