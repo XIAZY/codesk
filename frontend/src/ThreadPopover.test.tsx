@@ -91,9 +91,14 @@ describe("ThreadPopover", () => {
     expect(rows[0].textContent).toContain("@ada");
     expect(rows[1].textContent).toContain("@lin");
     expect(rows[1].classList.contains("resolved")).toBe(true);
+    // Eva's redesign: the list rows carry NO leading status dot — resolved state reads from the row's own
+    // dimming (.resolved), not a dot. The dot lives only in the detail header (asserted below).
+    expect(container.querySelectorAll(".thread-popover-row .thread-popover-status-dot")).toHaveLength(0);
 
     await user.click(rows[0] as HTMLElement);
     const dialog = screen.getByRole("dialog", { name: "Thread by @ada" });
+    // The detail header keeps its status dot (it pairs with the open/resolved text there, per Eva).
+    expect(dialog.querySelector(".thread-popover-status-dot")).toBeTruthy();
     expect(within(dialog).getByText("First comment")).toBeTruthy();
     expect(within(dialog).getByText("Second comment")).toBeTruthy();
     expect(within(dialog).getByText(/can you see me/)).toBeTruthy();
