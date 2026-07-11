@@ -167,6 +167,26 @@ describe("useDocumentSubscribers scope-carrying guards", () => {
     expect(result.current.subscriberIds).toEqual([]);
   });
 
+  it("a read REJECTING after the scope became no-document does not resurface an error on return", async () => {
+    const { api, reads } = makeApi();
+    const { result, rerender } = renderHook(({ docId }) => useDocumentSubscribers(api, "ws", docId), {
+      initialProps: { docId: "docA" as string | undefined },
+    });
+
+    // docA's read is in flight; the scope becomes no-document; then the read REJECTS. reload() guards the
+    // catch path separately from the try path, so this exercises the error branch of row 6.
+    rerender({ docId: undefined });
+    await act(async () => reads[0].reject(new Error("A load boom")));
+    expect(result.current.error).toBe("");
+
+    // Return to docA: a fresh read is in flight. The stale A load error captured during the no-document window
+    // must NOT resurface. (Red without the CATCH-side post-await key check.)
+    rerender({ docId: "docA" });
+    expect(result.current.error).toBe("");
+    await act(async () => reads[1].resolve({ agents: [] }));
+    expect(result.current.error).toBe("");
+  });
+
   it("a mutation settling BEFORE the new document's read cannot starve that read", async () => {
     const { api, reads, subscribes } = makeApi();
     const { result, rerender } = renderHook(({ docId }) => useDocumentSubscribers(api, "ws", docId), {
