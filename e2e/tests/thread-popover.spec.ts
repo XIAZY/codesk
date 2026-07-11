@@ -163,7 +163,7 @@ test("thread popover: resolving the last open thread removes only the marker", a
 test("thread popover: mixed line orders resolved last and supports Reopen", async ({ page }, testInfo) => {
   const resolvedBody = `resolve me ${Date.now()}`;
   const openBody = `keep me open ${Date.now()}`;
-  const { errors } = await setupThreadDocument(page, [resolvedBody, openBody]);
+  const { editor, errors } = await setupThreadDocument(page, [resolvedBody, openBody]);
   let detail = await openThreadDetail(page, 2, resolvedBody);
 
   await detail.getByRole("button", { name: "Mark as resolved" }).click();
@@ -294,6 +294,72 @@ test("thread popover: desktop float stays contained near viewport edges and in a
   expect(await detail.evaluate((element) => element.scrollHeight <= element.clientHeight + 1)).toBe(true);
   await expect(detail.getByRole("textbox", { name: "Reply to this thread" })).toBeVisible();
   await captureRender(page, testInfo, "thread-popover-desktop-short-detail");
+
+  assertNoPageErrors(errors);
+});
+
+test("document Threads entry replaces the rail tab and reuses thread detail", async ({ page }, testInfo) => {
+  const resolvedBody = `document index resolved ${Date.now()}`;
+  const openBody = `document index open ${Date.now()}`;
+  const { editor, errors } = await setupThreadDocument(page, [resolvedBody, openBody]);
+
+  let detail = await openThreadDetail(page, 2, resolvedBody);
+  await detail.getByRole("button", { name: "Mark as resolved" }).click();
+  await expect(detail.getByRole("button", { name: "Reopen thread" })).toBeVisible({ timeout: 20_000 });
+  await detail.getByRole("button", { name: "Back to threads on this line" }).click();
+  await page.getByRole("dialog", { name: "Threads on line 1" }).getByRole("button", { name: "Close" }).click();
+
+  const railTabs = page.locator(".ctx-tabs");
+  await expect(railTabs.getByRole("button", { name: /Threads/i })).toHaveCount(0);
+  await expect(railTabs.getByRole("button", { name: /Document Activity/i })).toBeVisible();
+  await expect(railTabs.getByRole("button", { name: /Participants/i })).toBeVisible();
+
+  const trigger = page.getByRole("button", { name: "Threads, 1 open" });
+  await trigger.click();
+  const documentThreads = page.getByRole("dialog", { name: "Threads on this document" });
+  await expect(documentThreads.locator(".titem", { hasText: openBody })).toBeVisible();
+  await expect(documentThreads.locator(".titem", { hasText: resolvedBody })).toHaveCount(0);
+  const resolvedFold = documentThreads.getByRole("button", { name: /Resolved · 1/ });
+  await expect(resolvedFold).toHaveAttribute("aria-expanded", "false");
+  await captureRender(page, testInfo, "document-threads-list");
+
+  await resolvedFold.click();
+  const resolvedRow = documentThreads.locator(".titem.resolved", { hasText: resolvedBody });
+  await expect(resolvedRow).toBeVisible();
+  await resolvedRow.click();
+  await expect(documentThreads.getByRole("button", { name: "Reopen thread" })).toBeVisible();
+  await expect(documentThreads.getByRole("textbox", { name: "Reply to this thread" })).toBeVisible();
+  await expect(documentThreads.getByText(resolvedBody)).toBeVisible();
+  await expect(page.locator(".thread-popover-scrim")).toHaveCount(0);
+  await page.waitForTimeout(500);
+  await captureRender(page, testInfo, "document-threads-resolved-detail");
+
+  await documentThreads.getByRole("button", { name: "Back to thread list" }).click();
+  const expandedResolvedFold = documentThreads.getByRole("button", { name: /Resolved · 1/ });
+  await expect(expandedResolvedFold).toHaveAttribute("aria-expanded", "true");
+  await expandedResolvedFold.click();
+  await page.keyboard.press("Escape");
+  await expect(documentThreads).toBeHidden();
+  await expect(trigger).toBeFocused();
+
+  // Deleting the remaining open thread's anchored text must classify it visually as Obsolete without
+  // changing its backend status. The toolbar's live-open count drops, both non-default groups stay folded,
+  // and expanding Obsolete exposes the conversation without warning copy or a dead Jump affordance.
+  await editor.click();
+  await page.keyboard.press("Control+A");
+  await page.keyboard.press("Backspace");
+  const emptyOpenTrigger = page.getByRole("button", { name: "Threads, 0 open" });
+  await expect(emptyOpenTrigger).toBeVisible({ timeout: 20_000 });
+  await emptyOpenTrigger.click();
+  const obsoleteFold = documentThreads.getByRole("button", { name: /Obsolete · 1/ });
+  await expect(obsoleteFold).toHaveAttribute("aria-expanded", "false");
+  await expect(documentThreads.getByRole("button", { name: /Resolved · 1/ })).toHaveAttribute("aria-expanded", "false");
+  await obsoleteFold.click();
+  const obsoleteRow = documentThreads.locator(".titem.obsolete", { hasText: openBody });
+  await expect(obsoleteRow).toBeVisible();
+  await expect(obsoleteRow.getByText(/anchor lost|original text deleted/i)).toHaveCount(0);
+  await expect(obsoleteRow.getByText(/Jump to line/i)).toHaveCount(0);
+  await captureRender(page, testInfo, "document-threads-obsolete");
 
   assertNoPageErrors(errors);
 });

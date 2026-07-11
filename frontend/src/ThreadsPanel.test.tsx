@@ -56,10 +56,7 @@ describe("ThreadsPanel badge rendering", () => {
       />,
     );
 
-    const badge = container.querySelector(".thread-badge.open");
-    expect(badge).toBeTruthy();
-    expect(badge?.textContent).toContain("Open");
-    expect(badge?.querySelector(".thread-badge-dot")).toBeTruthy();
+    expect(container.querySelector(".thread-list-status-dot.open")).toBeTruthy();
   });
 
   it("folds resolved threads by default and shows them on expand", () => {
@@ -86,10 +83,7 @@ describe("ThreadsPanel badge rendering", () => {
 
     const card = container.querySelector(".titem.resolved");
     expect(card).toBeTruthy();
-    const badge = card?.querySelector(".thread-badge.resolved");
-    expect(badge).toBeTruthy();
-    expect(badge?.textContent).toContain("Resolved");
-    expect(badge?.querySelector(".thread-badge-dot")).toBeTruthy();
+    expect(card?.querySelector(".thread-list-status-dot.resolved")).toBeTruthy();
   });
 
   it("separates open and resolved threads with resolved folded by default", () => {
@@ -108,7 +102,7 @@ describe("ThreadsPanel badge rendering", () => {
       />,
     );
 
-    expect(container.querySelectorAll(".thread-badge.open")).toHaveLength(1);
+    expect(container.querySelectorAll(".thread-list-status-dot.open")).toHaveLength(1);
     expect(container.querySelectorAll(".titem.resolved")).toHaveLength(0);
 
     const foldHeader = container.querySelector(".thread-fold-header");
@@ -133,13 +127,12 @@ describe("ThreadsPanel detail view badge and resolve", () => {
       />,
     );
 
-    const badge = container.querySelector(".tdetail .thread-badge.open");
-    expect(badge).toBeTruthy();
-    expect(badge?.textContent).toContain("Open");
+    expect(container.querySelector(".tdetail .thread-popover-status-dot.open")).toBeTruthy();
+    expect(container.querySelector(".tdetail .thread-popover-detail-head")?.textContent).toContain("open");
 
-    const resolveBtn = screen.getByRole("button", { name: "Resolve thread" });
+    const resolveBtn = screen.getByRole("button", { name: "Mark as resolved" });
     expect(resolveBtn).toBeTruthy();
-    expect(resolveBtn.textContent).toBe("Resolve");
+    expect(resolveBtn.textContent).toContain("Mark as resolved");
   });
 
   it("shows Resolved badge and Reopen button in detail view for resolved thread", () => {
@@ -155,13 +148,12 @@ describe("ThreadsPanel detail view badge and resolve", () => {
       />,
     );
 
-    const badge = container.querySelector(".tdetail .thread-badge.resolved");
-    expect(badge).toBeTruthy();
-    expect(badge?.textContent).toContain("Resolved");
+    expect(container.querySelector(".tdetail .thread-popover-status-dot.resolved")).toBeTruthy();
+    expect(container.querySelector(".tdetail .thread-popover-detail-head")?.textContent).toContain("resolved");
 
     const reopenBtn = screen.getByRole("button", { name: "Reopen thread" });
     expect(reopenBtn).toBeTruthy();
-    expect(reopenBtn.textContent).toBe("Reopen");
+    expect(reopenBtn.textContent).toContain("Reopen");
   });
 
   it("calls updateThreadStatus on Resolve click and then refreshes via onReply", async () => {
@@ -181,7 +173,7 @@ describe("ThreadsPanel detail view badge and resolve", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Resolve thread" }));
+    await user.click(screen.getByRole("button", { name: "Mark as resolved" }));
 
     await waitFor(() => expect(updateThreadStatus).toHaveBeenCalledWith("ws", "thread_1", "resolved"));
     await waitFor(() => expect(onReply).toHaveBeenCalled());
@@ -227,14 +219,14 @@ describe("ThreadsPanel detail view badge and resolve", () => {
       />,
     );
 
-    const btn = screen.getByRole("button", { name: "Resolve thread" });
+    const btn = screen.getByRole("button", { name: "Mark as resolved" });
     fireEvent.click(btn);
 
-    await waitFor(() => expect(btn.textContent).toBe("…"));
+    await waitFor(() => expect(btn.textContent).toContain("Updating…"));
     expect((btn as HTMLButtonElement).disabled).toBe(true);
 
     resolvePromise!({ thread: threadFixture({ status: "resolved" }) });
-    await waitFor(() => expect(btn.textContent).toBe("Resolve"));
+    await waitFor(() => expect(btn.textContent).toContain("Mark as resolved"));
   });
 
   it("shows inline error on status toggle failure", async () => {
@@ -253,14 +245,14 @@ describe("ThreadsPanel detail view badge and resolve", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Resolve thread" }));
+    await user.click(screen.getByRole("button", { name: "Mark as resolved" }));
 
     await waitFor(() => expect(screen.getByText("Network error")).toBeTruthy());
   });
 });
 
-describe("ThreadsPanel orphan warning", () => {
-  it("shows orphan warning on thread card when anchor is lost", () => {
+describe("ThreadsPanel obsolete grouping", () => {
+  it("folds definitively orphaned open threads into Obsolete without warning copy", () => {
     const { container } = render(
       <ThreadsPanel
         api={mockApi()}
@@ -274,44 +266,106 @@ describe("ThreadsPanel orphan warning", () => {
       />,
     );
 
-    expect(container.querySelector(".titem.orphaned")).toBeTruthy();
-    expect(container.querySelector(".thread-orphan-warning")).toBeTruthy();
-    expect(container.querySelector(".thread-orphan-warning")?.textContent).toContain("Anchor lost");
-    const metaRow = container.querySelector(".titem.orphaned .row.gap-4.tiny.muted");
-    expect(metaRow?.textContent).not.toContain("anchored");
+    const foldHeader = screen.getByRole("button", { name: /Obsolete · 1/ });
+    expect(foldHeader.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelector(".titem.obsolete")).toBeNull();
+    expect(container.textContent).not.toMatch(/anchor lost|original text deleted/i);
+
+    fireEvent.click(foldHeader);
+    const card = container.querySelector(".titem.obsolete");
+    expect(card).toBeTruthy();
+    expect(card?.querySelector(".thread-list-status-dot.obsolete")).toBeTruthy();
+    expect(card?.textContent).not.toMatch(/anchor lost|original text deleted|jump to line/i);
   });
 
-  it("shows resolve action on orphan card and fires updateThreadStatus on click", async () => {
-    const updateThreadStatus = vi.fn().mockResolvedValue({ thread: threadFixture({ status: "resolved" }) });
-    const onReply = vi.fn();
-    const { container } = render(
+  it("keeps unknown pre-sync range threads in Open until anchor info arrives", () => {
+    const threads = [threadFixture({ id: "t1", status: "open" })];
+    const updateThreadStatus = vi.fn();
+    const props = {
+      api: mockApi({ updateThreadStatus }),
+      workspaceId: "ws",
+      threads,
+      selectedThreadId: "",
+      onSelectThread: vi.fn(),
+      onJumpToThread: vi.fn(),
+      onReply: vi.fn(),
+    };
+    const { container, rerender } = render(<ThreadsPanel {...props} threadAnchorInfo={{}} />);
+
+    expect(container.querySelector(".titem .thread-list-status-dot.open")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Obsolete/ })).toBeNull();
+
+    rerender(<ThreadsPanel {...props} threadAnchorInfo={{ t1: { orphaned: true, line: 0 } }} />);
+    expect(container.querySelector(".titem .thread-list-status-dot.open")).toBeNull();
+    expect(screen.getByRole("button", { name: /Obsolete · 1/ })).toBeTruthy();
+    expect(updateThreadStatus).not.toHaveBeenCalled();
+  });
+
+  it("keeps resolved status in Resolved even when the anchor is orphaned", () => {
+    render(
       <ThreadsPanel
-        api={mockApi({ updateThreadStatus })}
+        api={mockApi()}
         workspaceId="ws"
-        threads={[threadFixture({ id: "t1", status: "open", anchor: { kind: "range", excerpt: "deleted text" } })]}
+        threads={[threadFixture({ id: "t1", status: "resolved" })]}
         threadAnchorInfo={{ t1: { orphaned: true, line: 0 } }}
         selectedThreadId=""
         onSelectThread={vi.fn()}
         onJumpToThread={vi.fn()}
-        onReply={onReply}
+        onReply={vi.fn()}
       />,
     );
 
-    const resolveLink = container.querySelector(".thread-resolve-link");
-    expect(resolveLink).toBeTruthy();
-    expect(resolveLink?.textContent).toBe("Resolve");
-
-    fireEvent.click(resolveLink!);
-    await waitFor(() => expect(updateThreadStatus).toHaveBeenCalledWith("ws", "t1", "resolved"));
-    await waitFor(() => expect(onReply).toHaveBeenCalled());
+    expect(screen.getByRole("button", { name: /Resolved · 1/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Obsolete/ })).toBeNull();
   });
 
-  it("shows orphan warning in detail view for orphaned thread", () => {
+  it("keeps document-level open threads in Open even if stale classifier data says orphaned", () => {
     const { container } = render(
       <ThreadsPanel
         api={mockApi()}
         workspaceId="ws"
-        threads={[threadFixture({ id: "t1", status: "open", anchor: { kind: "range", excerpt: "deleted text" } })]}
+        threads={[threadFixture({ id: "t1", status: "open", anchor: { kind: "document" } })]}
+        threadAnchorInfo={{ t1: { orphaned: true, line: 0 } }}
+        selectedThreadId=""
+        onSelectThread={vi.fn()}
+        onJumpToThread={vi.fn()}
+        onReply={vi.fn()}
+      />,
+    );
+
+    expect(container.querySelector(".titem .thread-list-status-dot.open")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Obsolete/ })).toBeNull();
+  });
+
+  it("remembers when the Obsolete fold is expanded", () => {
+    const props = {
+      api: mockApi(),
+      workspaceId: "ws",
+      threads: [threadFixture({ id: "t1", status: "open" })],
+      threadAnchorInfo: { t1: { orphaned: true, line: 0 } },
+      selectedThreadId: "",
+      onSelectThread: vi.fn(),
+      onJumpToThread: vi.fn(),
+      onReply: vi.fn(),
+    };
+    const { unmount } = render(<ThreadsPanel {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: /Obsolete · 1/ }));
+    expect(localStorage.getItem("codesk.threads.obsoleteFolded")).toBe("false");
+    unmount();
+
+    render(<ThreadsPanel {...props} />);
+    expect(screen.getByRole("button", { name: /Obsolete · 1/ }).getAttribute("aria-expanded")).toBe("true");
+    expect(document.querySelector(".titem.obsolete")).toBeTruthy();
+  });
+
+  it("opens an obsolete thread detail with manual Resolve and no lost-anchor wording", async () => {
+    const user = userEvent.setup();
+    const updateThreadStatus = vi.fn().mockResolvedValue({ thread: threadFixture({ status: "resolved" }) });
+    render(
+      <ThreadsPanel
+        api={mockApi({ updateThreadStatus })}
+        workspaceId="ws"
+        threads={[threadFixture({ id: "t1", status: "open" })]}
         threadAnchorInfo={{ t1: { orphaned: true, line: 0 } }}
         selectedThreadId="t1"
         onSelectThread={vi.fn()}
@@ -320,104 +374,35 @@ describe("ThreadsPanel orphan warning", () => {
       />,
     );
 
-    expect(container.querySelector(".thread-orphan-warning")).toBeTruthy();
-    expect(container.querySelector(".quoted-range .tiny")?.textContent).toContain("anchor lost");
+    expect(document.querySelector(".tdetail .thread-popover-status-dot.obsolete")).toBeTruthy();
+    expect(document.querySelector(".tdetail .thread-popover-detail-head")?.textContent).toContain("obsolete");
+    expect(document.body.textContent).not.toMatch(/anchor lost|original text deleted/i);
+    await user.click(screen.getByRole("button", { name: "Mark as resolved" }));
+    await waitFor(() => expect(updateThreadStatus).toHaveBeenCalledWith("ws", "t1", "resolved"));
   });
 
-  it("does not show orphan warning for non-orphaned anchored thread", () => {
-    const { container } = render(
+  it("reuses the Phase 1 reply composer and refreshes after a trimmed reply", async () => {
+    const user = userEvent.setup();
+    const replyThread = vi.fn().mockResolvedValue({ thread: threadFixture() });
+    const onReply = vi.fn();
+    render(
       <ThreadsPanel
-        api={mockApi()}
+        api={mockApi({ replyThread })}
         workspaceId="ws"
-        threads={[threadFixture({ id: "t1", status: "open" })]}
-        threadAnchorInfo={{ t1: { orphaned: false, line: 12 } }}
-        selectedThreadId=""
+        threads={[threadFixture({ id: "t1" })]}
+        selectedThreadId="t1"
         onSelectThread={vi.fn()}
         onJumpToThread={vi.fn()}
-        onReply={vi.fn()}
+        onReply={onReply}
       />,
     );
 
-    expect(container.querySelector(".titem.orphaned")).toBeNull();
-    expect(container.querySelector(".thread-orphan-warning")).toBeNull();
+    const composer = screen.getByLabelText("Reply to this thread");
+    await user.type(composer, "  Follow up  ");
+    await user.click(screen.getByRole("button", { name: "Send reply" }));
+    await waitFor(() => expect(replyThread).toHaveBeenCalledWith("ws", "t1", "Follow up"));
+    expect(onReply).toHaveBeenCalled();
   });
-
-  it("shows no orphan warning or re-anchor button when threadAnchorInfo is empty (pre-sync state)", () => {
-    const { container } = render(
-      <ThreadsPanel
-        api={mockApi()}
-        workspaceId="ws"
-        threads={[threadFixture({ id: "t1", status: "open", anchor: { kind: "range", excerpt: "some text" } })]}
-        threadAnchorInfo={{}}
-        selectedThreadId=""
-        onSelectThread={vi.fn()}
-        onJumpToThread={vi.fn()}
-        onReply={vi.fn()}
-      />,
-    );
-
-    expect(container.querySelector(".titem.orphaned")).toBeNull();
-    expect(container.querySelector(".thread-orphan-warning")).toBeNull();
-  });
-
-  it("shows no orphan warning when threadAnchorInfo is omitted (pre-mount state)", () => {
-    const { container } = render(
-      <ThreadsPanel
-        api={mockApi()}
-        workspaceId="ws"
-        threads={[threadFixture({ id: "t1", status: "open", anchor: { kind: "range", excerpt: "some text" } })]}
-        selectedThreadId=""
-        onSelectThread={vi.fn()}
-        onJumpToThread={vi.fn()}
-        onReply={vi.fn()}
-      />,
-    );
-
-    expect(container.querySelector(".titem.orphaned")).toBeNull();
-    expect(container.querySelector(".thread-orphan-warning")).toBeNull();
-  });
-
-  it("transitions from no warning to correct state when anchor info arrives", () => {
-    const { container, rerender } = render(
-      <ThreadsPanel
-        api={mockApi()}
-        workspaceId="ws"
-        threads={[
-          threadFixture({ id: "t1", status: "open", anchor: { kind: "range", excerpt: "alive text" } }),
-          threadFixture({ id: "t2", status: "open", anchor: { kind: "range", excerpt: "dead text" } }),
-        ]}
-        threadAnchorInfo={{}}
-        selectedThreadId=""
-        onSelectThread={vi.fn()}
-        onJumpToThread={vi.fn()}
-        onReply={vi.fn()}
-      />,
-    );
-
-    expect(container.querySelector(".titem.orphaned")).toBeNull();
-    expect(container.querySelector(".thread-orphan-warning")).toBeNull();
-
-    rerender(
-      <ThreadsPanel
-        api={mockApi()}
-        workspaceId="ws"
-        threads={[
-          threadFixture({ id: "t1", status: "open", anchor: { kind: "range", excerpt: "alive text" } }),
-          threadFixture({ id: "t2", status: "open", anchor: { kind: "range", excerpt: "dead text" } }),
-        ]}
-        threadAnchorInfo={{ t1: { orphaned: false, line: 5 }, t2: { orphaned: true, line: 0 } }}
-        selectedThreadId=""
-        onSelectThread={vi.fn()}
-        onJumpToThread={vi.fn()}
-        onReply={vi.fn()}
-      />,
-    );
-
-    expect(container.querySelectorAll(".titem.orphaned")).toHaveLength(1);
-    expect(container.querySelector(".thread-orphan-warning")).toBeTruthy();
-    expect(container.querySelector(".thread-jump-link")?.textContent).toContain("Jump to line 5");
-  });
-
 });
 
 describe("ThreadsPanel jump to anchor", () => {
