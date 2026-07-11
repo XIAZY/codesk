@@ -1312,11 +1312,28 @@ export function useDocumentSubscribers(api: ApiClient, workspaceId: string, docu
   const [error, setError] = useState("");
   const [busyIds, setBusyIds] = useState<Set<string>>(() => new Set());
   const readSeqRef = useRef(0);
+  // The CURRENT scope, readable synchronously inside async callbacks captured under an OLD scope. A reconcile
+  // from a dead scope (e.g. a mutation on doc A settling after a switch to B) checks this and becomes a full
+  // no-op — critically it must not bump readSeq or fetch, or it would starve B's in-flight initial read.
+  const scopeKeyRef = useRef(scopeKey);
+  scopeKeyRef.current = scopeKey;
+
+  // Drop transient per-scope UI state synchronously on a scope switch (React's adjust-state-during-render
+  // pattern) so doc B never shows A's in-flight busy row or A's stale error string.
+  const [prevScopeKey, setPrevScopeKey] = useState(scopeKey);
+  if (scopeKey !== prevScopeKey) {
+    setPrevScopeKey(scopeKey);
+    setBusyIds((current) => (current.size ? new Set() : current));
+    setError("");
+  }
 
   const reload = useCallback(async () => {
     if (!documentId) return;
-    const seq = ++readSeqRef.current;
     const key = scopeKey;
+    // A reconcile from a scope that is no longer current does nothing — no seq bump, no fetch — so it cannot
+    // drop the current scope's read.
+    if (key !== scopeKeyRef.current) return;
+    const seq = ++readSeqRef.current;
     try {
       const response = await api.listDocumentSubscribers(workspaceId, documentId);
       if (readSeqRef.current !== seq) return;
@@ -1355,10 +1372,15 @@ export function useDocumentSubscribers(api: ApiClient, workspaceId: string, docu
           await api.unsubscribeAgentFromDocument(workspaceId, agentId, documentId);
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Update failed");
+        // Only surface the error if this mutation's scope is still current — a rejection arriving after a
+        // switch must not paint A's error onto B.
+        if (scopeKeyRef.current === key) {
+          setError(err instanceof Error ? err.message : "Update failed");
+        }
       } finally {
         await reload();
         setBusyIds((current) => {
+          if (!current.has(agentId)) return current;
           const next = new Set(current);
           next.delete(agentId);
           return next;
@@ -2128,7 +2150,7 @@ export function WorkspaceApp({
             {!connected ? <span className="chip sm warn">workspace offline</span> : null}
           </div>
           <div className="row gap-6">
-            <CollaboratorAvatars people={workspacePeopleList} onClick={() => { if (activeDocument) { void reloadSubscribers(); setDocumentWatchersOpen(true); } }} />
+            <CollaboratorAvatars people={workspacePeopleList} onClick={() => { if (activeDocument) { setDocumentThreadsOpen(false); setSelectedThreadId(""); void reloadSubscribers(); setDocumentWatchersOpen(true); } }} />
             {activeDocument ? (
               <div className="document-threads-entry" ref={documentThreadsRef}>
                 <button
@@ -2143,6 +2165,7 @@ export function WorkspaceApp({
                     if (documentThreadsOpen) {
                       closeDocumentThreads(false);
                     } else {
+                      setDocumentWatchersOpen(false);
                       setSelectedThreadId("");
                       setDocumentThreadsOpen(true);
                     }
@@ -2204,6 +2227,9 @@ export function WorkspaceApp({
                     if (documentWatchersOpen) {
                       closeDocumentWatchers(false);
                     } else {
+                      // Only one document popover open at a time — opening Watchers closes Threads.
+                      setDocumentThreadsOpen(false);
+                      setSelectedThreadId("");
                       // Refetch on open so the always-visible badge self-heals cross-client subscription
                       // changes (no workspace WS event carries them); between opens the count can read a
                       // stale N — accepted parity with the old closed tab.
@@ -2229,7 +2255,7 @@ export function WorkspaceApp({
                       <div className="row gap-8 min-0">
                         <Icon name="users" />
                         <b>Watchers</b>
-                        <span className="small muted">· {documentWatcherCount ?? 0}</span>
+                        <span className="small muted">· {documentWatcherCount === null ? "…" : documentWatcherCount}</span>
                       </div>
                       <button className="btn ghost icon sm" type="button" onClick={() => closeDocumentWatchers()} aria-label="Close watchers">×</button>
                     </div>

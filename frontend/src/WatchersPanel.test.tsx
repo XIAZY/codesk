@@ -141,6 +141,52 @@ describe("useDocumentSubscribers scope-carrying guards", () => {
     // Latest-started read wins: both alpha AND beta remain; the stale [alpha] did not drop beta.
     await waitFor(() => expect(result.current.subscriberIds).toEqual(["alpha", "beta"]));
   });
+
+  it("a mutation settling BEFORE the new document's read cannot starve that read", async () => {
+    const { api, reads, subscribes } = makeApi();
+    const { result, rerender } = renderHook(({ docId }) => useDocumentSubscribers(api, "ws", docId), {
+      initialProps: { docId: "docA" },
+    });
+
+    await act(async () => reads[0].resolve({ agents: [] }));
+    expect(result.current.subscriberIds).toEqual([]);
+
+    // Start a mutation on A, then switch to B before it settles. B's initial read (reads[1]) is now in flight.
+    act(() => void result.current.mutate("alpha", true));
+    rerender({ docId: "docB" });
+    expect(result.current.subscriberIds).toBeNull();
+
+    // A's mutation settles FIRST. Its reconcile targets dead scope A: with the current-scope guard it is a
+    // full no-op — it must NOT bump the read sequence, or B's in-flight read would be dropped.
+    await act(async () => subscribes[0].resolve({ documentIds: ["alpha"] }));
+
+    // THEN B's initial read resolves — it must land, not be starved by A's dead reconcile.
+    await act(async () => reads[1].resolve({ agents: [row("beta")] }));
+    expect(result.current.subscriberIds).toEqual(["beta"]);
+  });
+
+  it("a stale mutation rejection after a switch does not surface A's error or busy on B", async () => {
+    const { api, reads } = makeApi();
+    const rejectingApi = {
+      ...api,
+      subscribeAgentToDocument: vi.fn(() => Promise.reject(new Error("A boom"))),
+    } as unknown as ApiClient;
+    const { result, rerender } = renderHook(({ docId }) => useDocumentSubscribers(rejectingApi, "ws", docId), {
+      initialProps: { docId: "docA" },
+    });
+
+    await act(async () => reads[0].resolve({ agents: [] }));
+    // Kick a mutation that will reject, then switch scope before it settles.
+    await act(async () => {
+      void result.current.mutate("alpha", true);
+    });
+    rerender({ docId: "docB" });
+    await act(async () => reads[1].resolve({ agents: [] }));
+
+    // The A rejection lands on scope B: neither its error string nor its busy id may surface on B.
+    expect(result.current.error).toBe("");
+    expect(result.current.busyIds.size).toBe(0);
+  });
 });
 
 describe("WatchersPanel (presentational, subscriber-only)", () => {

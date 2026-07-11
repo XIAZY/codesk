@@ -123,4 +123,25 @@ describe("document Threads toolbar entry", () => {
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Threads on this document" })).toBeNull());
     expect(document.activeElement).toBe(trigger);
   });
+
+  it("only one toolbar popover is open at a time — Threads and Watchers are mutually exclusive", async () => {
+    const user = userEvent.setup();
+    renderWorkspace();
+
+    const threadsTrigger = screen.getByRole("button", { name: "Threads, 1 open" });
+    const watchersTrigger = screen.getByRole("button", { name: "Watchers" });
+
+    await user.click(threadsTrigger);
+    expect(screen.getByRole("dialog", { name: "Threads on this document" })).toBeTruthy();
+
+    // Opening Watchers closes Threads.
+    await user.click(watchersTrigger);
+    expect(screen.getByRole("dialog", { name: "Watchers on this document" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Threads on this document" })).toBeNull();
+
+    // Opening Threads closes Watchers.
+    await user.click(threadsTrigger);
+    expect(screen.getByRole("dialog", { name: "Threads on this document" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Watchers on this document" })).toBeNull();
+  });
 });
