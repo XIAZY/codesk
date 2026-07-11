@@ -46,9 +46,10 @@ async function createDocument(page: Page, content: string): Promise<Locator> {
   return editor;
 }
 
-async function createAnchoredThread(page: Page, editor: Locator, body: string, line = 1): Promise<void> {
+async function createAnchoredThread(page: Page, editor: Locator, body: string, line: number | "first" | "last" = 1): Promise<void> {
   await editor.click();
-  if (line > 1) await page.keyboard.press("Control+End");
+  const targetLastLine = line === "last" || (typeof line === "number" && line > 1);
+  await page.keyboard.press(targetLastLine ? "Control+End" : "Control+Home");
   await page.keyboard.press("Home");
   await page.keyboard.press("Shift+End");
   const startThread = page.locator(".selection-toolbar button.primary").first();
@@ -86,6 +87,12 @@ function assertNoPageErrors(errors: Error[]): void {
 async function captureRender(page: Page, testInfo: TestInfo, name: string): Promise<void> {
   const path = testInfo.outputPath(`${name}.png`);
   await page.screenshot({ path });
+  await testInfo.attach(name, { path, contentType: "image/png" });
+}
+
+async function captureElementRender(locator: Locator, testInfo: TestInfo, name: string): Promise<void> {
+  const path = testInfo.outputPath(`${name}.png`);
+  await locator.screenshot({ path });
   await testInfo.attach(name, { path, contentType: "image/png" });
 }
 
@@ -300,8 +307,10 @@ test("thread popover: desktop float stays contained near viewport edges and in a
 
 test("document Threads entry replaces the rail tab and reuses thread detail", async ({ page }, testInfo) => {
   const resolvedBody = `document index resolved ${Date.now()}`;
+  const obsoleteBody = `document index obsolete ${Date.now()}`;
   const openBody = `document index open ${Date.now()}`;
-  const { editor, errors } = await setupThreadDocument(page, [resolvedBody, openBody]);
+  const liveAnchorText = `still anchored ${Date.now()}`;
+  const { editor, errors } = await setupThreadDocument(page, [resolvedBody, obsoleteBody]);
 
   let detail = await openThreadDetail(page, 2, resolvedBody);
   await detail.getByRole("button", { name: "Mark as resolved" }).click();
@@ -309,57 +318,66 @@ test("document Threads entry replaces the rail tab and reuses thread detail", as
   await detail.getByRole("button", { name: "Back to threads on this line" }).click();
   await page.getByRole("dialog", { name: "Threads on line 1" }).getByRole("button", { name: "Close" }).click();
 
+  await editor.click();
+  await page.keyboard.press("Control+End");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type(liveAnchorText);
+  await expect(editor).toContainText(liveAnchorText);
+  await createAnchoredThread(page, editor, openBody, "last");
+  await expect(page.getByRole("button", { name: "1 open thread on line 2" })).toBeVisible({ timeout: 20_000 });
+
   const railTabs = page.locator(".ctx-tabs");
   await expect(railTabs.getByRole("button", { name: /Threads/i })).toHaveCount(0);
   await expect(railTabs.getByRole("button", { name: /Document Activity/i })).toBeVisible();
   await expect(railTabs.getByRole("button", { name: /Participants/i })).toBeVisible();
 
+  // Delete only line 1. Its remaining open thread becomes Obsolete, the resolved thread stays Resolved,
+  // and the line-2 thread keeps a live inline home in Open.
+  await editor.click();
+  await page.keyboard.press("Control+Home");
+  await page.keyboard.press("Home");
+  await page.keyboard.press("Shift+End");
+  await page.keyboard.press("Backspace");
+
   const trigger = page.getByRole("button", { name: "Threads, 1 open" });
+  await expect(trigger).toBeVisible({ timeout: 20_000 });
   await trigger.click();
   const documentThreads = page.getByRole("dialog", { name: "Threads on this document" });
   await expect(documentThreads.locator(".titem", { hasText: openBody })).toBeVisible();
+  await expect(documentThreads.locator(".titem", { hasText: obsoleteBody })).toHaveCount(0);
   await expect(documentThreads.locator(".titem", { hasText: resolvedBody })).toHaveCount(0);
-  const resolvedFold = documentThreads.getByRole("button", { name: /Resolved · 1/ });
-  await expect(resolvedFold).toHaveAttribute("aria-expanded", "false");
-  await captureRender(page, testInfo, "document-threads-list");
-
-  await resolvedFold.click();
-  const resolvedRow = documentThreads.locator(".titem.resolved", { hasText: resolvedBody });
-  await expect(resolvedRow).toBeVisible();
-  await resolvedRow.click();
-  await expect(documentThreads.getByRole("button", { name: "Reopen thread" })).toBeVisible();
-  await expect(documentThreads.getByRole("textbox", { name: "Reply to this thread" })).toBeVisible();
-  await expect(documentThreads.getByText(resolvedBody)).toBeVisible();
-  await expect(page.locator(".thread-popover-scrim")).toHaveCount(0);
-  await page.waitForTimeout(500);
-  await captureRender(page, testInfo, "document-threads-resolved-detail");
-
-  await documentThreads.getByRole("button", { name: "Back to thread list" }).click();
-  const expandedResolvedFold = documentThreads.getByRole("button", { name: /Resolved · 1/ });
-  await expect(expandedResolvedFold).toHaveAttribute("aria-expanded", "true");
-  await expandedResolvedFold.click();
-  await page.keyboard.press("Escape");
-  await expect(documentThreads).toBeHidden();
-  await expect(trigger).toBeFocused();
-
-  // Deleting the remaining open thread's anchored text must classify it visually as Obsolete without
-  // changing its backend status. The toolbar's live-open count drops, both non-default groups stay folded,
-  // and expanding Obsolete exposes the conversation without warning copy or a dead Jump affordance.
-  await editor.click();
-  await page.keyboard.press("Control+A");
-  await page.keyboard.press("Backspace");
-  const emptyOpenTrigger = page.getByRole("button", { name: "Threads, 0 open" });
-  await expect(emptyOpenTrigger).toBeVisible({ timeout: 20_000 });
-  await emptyOpenTrigger.click();
   const obsoleteFold = documentThreads.getByRole("button", { name: /Obsolete · 1/ });
   await expect(obsoleteFold).toHaveAttribute("aria-expanded", "false");
-  await expect(documentThreads.getByRole("button", { name: /Resolved · 1/ })).toHaveAttribute("aria-expanded", "false");
+  const resolvedFold = documentThreads.getByRole("button", { name: /Resolved · 1/ });
+  await expect(resolvedFold).toHaveAttribute("aria-expanded", "false");
+  await page.waitForTimeout(500);
+  await captureRender(page, testInfo, "document-threads-list");
+
+  await documentThreads.locator(".titem", { hasText: openBody }).click();
+  await expect(documentThreads.getByRole("button", { name: "Mark as resolved" })).toBeVisible();
+  await expect(documentThreads.getByRole("button", { name: "Jump to line 2" })).toBeVisible();
+  await expect(documentThreads.getByRole("textbox", { name: "Reply to this thread" })).toBeVisible();
+  await expect(documentThreads.getByText(openBody)).toBeVisible();
+  await expect(page.locator(".thread-popover-scrim")).toHaveCount(0);
+  await page.waitForTimeout(500);
+  await captureElementRender(documentThreads, testInfo, "document-threads-open-detail");
+
+  await documentThreads.getByRole("button", { name: "Back to thread list" }).click();
   await obsoleteFold.click();
-  const obsoleteRow = documentThreads.locator(".titem.obsolete", { hasText: openBody });
+  const obsoleteRow = documentThreads.locator(".titem.obsolete", { hasText: obsoleteBody });
   await expect(obsoleteRow).toBeVisible();
   await expect(obsoleteRow.getByText(/anchor lost|original text deleted/i)).toHaveCount(0);
   await expect(obsoleteRow.getByText(/Jump to line/i)).toHaveCount(0);
   await captureRender(page, testInfo, "document-threads-obsolete");
+
+  await documentThreads.getByRole("button", { name: /Resolved · 1/ }).click();
+  const resolvedRow = documentThreads.locator(".titem.resolved", { hasText: resolvedBody });
+  await expect(resolvedRow).toBeVisible();
+  await resolvedRow.click();
+  await expect(documentThreads.getByRole("button", { name: "Reopen thread" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(documentThreads).toBeHidden();
+  await expect(trigger).toBeFocused();
 
   assertNoPageErrors(errors);
 });
