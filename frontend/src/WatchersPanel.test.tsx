@@ -18,10 +18,14 @@ type SubscriberResponse = { agents: { id: string; handle: string; name: string; 
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
     resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  // Swallow rejections that a test never awaits, so a deferred reject can't crash the run as unhandled.
+  promise.catch(() => {});
+  return { promise, resolve, reject };
 }
 
 const agent = (id: string): Agent => ({
@@ -165,25 +169,44 @@ describe("useDocumentSubscribers scope-carrying guards", () => {
     expect(result.current.subscriberIds).toEqual(["beta"]);
   });
 
-  it("a stale mutation rejection after a switch does not surface A's error or busy on B", async () => {
-    const { api, reads } = makeApi();
-    const rejectingApi = {
-      ...api,
-      subscribeAgentToDocument: vi.fn(() => Promise.reject(new Error("A boom"))),
-    } as unknown as ApiClient;
-    const { result, rerender } = renderHook(({ docId }) => useDocumentSubscribers(rejectingApi, "ws", docId), {
+  it("a mutation on A settling after B re-marked the same agent busy does not clear B's busy marker", async () => {
+    const { api, reads, subscribes } = makeApi();
+    const { result, rerender } = renderHook(({ docId }) => useDocumentSubscribers(api, "ws", docId), {
+      initialProps: { docId: "docA" },
+    });
+
+    await act(async () => reads[0].resolve({ agents: [] })); // A loaded, alpha addable
+    act(() => void result.current.mutate("alpha", true)); // A/alpha subscribe pending (subscribes[0])
+
+    // Switch to B and load it, then start the SAME agent's mutation on B — B marks alpha busy.
+    rerender({ docId: "docB" });
+    await act(async () => reads[1].resolve({ agents: [] }));
+    act(() => void result.current.mutate("alpha", true)); // B/alpha subscribe pending (subscribes[1])
+    expect(result.current.busyIds.has("alpha")).toBe(true);
+
+    // A's mutation settles now. Its finally must clear only A's (foreign-scope) busy marker by OWNERSHIP —
+    // it must not delete B's live alpha marker (the membership-only cleanup would).
+    await act(async () => subscribes[0].resolve({ documentIds: ["alpha"] }));
+    expect(result.current.busyIds.has("alpha")).toBe(true);
+  });
+
+  it("a stale mutation rejection arriving after a switch does not surface A's error or busy on B", async () => {
+    const { api, reads, subscribes } = makeApi();
+    const { result, rerender } = renderHook(({ docId }) => useDocumentSubscribers(api, "ws", docId), {
       initialProps: { docId: "docA" },
     });
 
     await act(async () => reads[0].resolve({ agents: [] }));
-    // Kick a mutation that will reject, then switch scope before it settles.
-    await act(async () => {
-      void result.current.mutate("alpha", true);
-    });
+    act(() => void result.current.mutate("alpha", true)); // A/alpha subscribe pending (subscribes[0])
+
+    // Switch to B and load it BEFORE A's mutation settles.
     rerender({ docId: "docB" });
     await act(async () => reads[1].resolve({ agents: [] }));
+    expect(result.current.error).toBe("");
+    expect(result.current.busyIds.size).toBe(0);
 
-    // The A rejection lands on scope B: neither its error string nor its busy id may surface on B.
+    // NOW reject A's subscribe (post-switch). Its error/busy belong to dead scope A and must not touch B.
+    await act(async () => subscribes[0].reject(new Error("A boom")));
     expect(result.current.error).toBe("");
     expect(result.current.busyIds.size).toBe(0);
   });

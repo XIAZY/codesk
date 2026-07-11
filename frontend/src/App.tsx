@@ -1306,26 +1306,28 @@ function tokenFromInvitePath(value: string) {
 // A-count can never paint on B (the make-invalid-states-unrepresentable fix, without an effect reset). A
 // readSeq guard keeps only the latest-started read among same-scope reads, and optimistic mutations are
 // applied only while the stored result is still this scope. This is the task-#4 isolation, hoisted.
+const NO_BUSY_IDS: Set<string> = new Set();
+
 export function useDocumentSubscribers(api: ApiClient, workspaceId: string, documentId: string | undefined) {
   const scopeKey = documentId ? `${workspaceId}/${documentId}` : "";
+  // result, errorState, and busyState are all SCOPE-CARRYING: each is tagged with the scope key it belongs to,
+  // and reads as null/empty unless that key matches the CURRENT scope. So a stale scope's async settle can
+  // never surface its ids, error, or busy marker on a different document — and a mutation on A that settles
+  // after a switch to B cannot delete B's same-agent busy marker (its cleanup no-ops on a foreign scope).
   const [result, setResult] = useState<{ key: string; ids: string[] } | null>(null);
-  const [error, setError] = useState("");
-  const [busyIds, setBusyIds] = useState<Set<string>>(() => new Set());
+  const [errorState, setErrorState] = useState<{ key: string; message: string }>({ key: scopeKey, message: "" });
+  const [busyState, setBusyState] = useState<{ key: string; ids: Set<string> }>({ key: scopeKey, ids: NO_BUSY_IDS });
   const readSeqRef = useRef(0);
   // The CURRENT scope, readable synchronously inside async callbacks captured under an OLD scope. A reconcile
-  // from a dead scope (e.g. a mutation on doc A settling after a switch to B) checks this and becomes a full
-  // no-op — critically it must not bump readSeq or fetch, or it would starve B's in-flight initial read.
+  // from a dead scope (a mutation on doc A settling after a switch to B) checks this and becomes a full no-op —
+  // critically it must not bump readSeq or fetch, or it would starve B's in-flight initial read.
   const scopeKeyRef = useRef(scopeKey);
   scopeKeyRef.current = scopeKey;
 
-  // Drop transient per-scope UI state synchronously on a scope switch (React's adjust-state-during-render
-  // pattern) so doc B never shows A's in-flight busy row or A's stale error string.
-  const [prevScopeKey, setPrevScopeKey] = useState(scopeKey);
-  if (scopeKey !== prevScopeKey) {
-    setPrevScopeKey(scopeKey);
-    setBusyIds((current) => (current.size ? new Set() : current));
-    setError("");
-  }
+  const subscriberIds = result && result.key === scopeKey ? result.ids : null;
+  const loaded = subscriberIds !== null;
+  const error = errorState.key === scopeKey ? errorState.message : "";
+  const busyIds = busyState.key === scopeKey ? busyState.ids : NO_BUSY_IDS;
 
   const reload = useCallback(async () => {
     if (!documentId) return;
@@ -1336,12 +1338,14 @@ export function useDocumentSubscribers(api: ApiClient, workspaceId: string, docu
     const seq = ++readSeqRef.current;
     try {
       const response = await api.listDocumentSubscribers(workspaceId, documentId);
-      if (readSeqRef.current !== seq) return;
+      // Re-check AFTER the await: neither a newer same-scope read (seq) nor a scope switch (key) may have
+      // happened, or this response is stale and must not land.
+      if (readSeqRef.current !== seq || key !== scopeKeyRef.current) return;
       setResult({ key, ids: response.agents.map((agent) => agent.id) });
-      setError("");
+      setErrorState((current) => (current.key === key && current.message ? { key, message: "" } : current));
     } catch (err) {
-      if (readSeqRef.current !== seq) return;
-      setError(err instanceof Error ? err.message : "Failed to load watchers");
+      if (readSeqRef.current !== seq || key !== scopeKeyRef.current) return;
+      setErrorState({ key, message: err instanceof Error ? err.message : "Failed to load watchers" });
     }
   }, [api, workspaceId, documentId, scopeKey]);
 
@@ -1349,16 +1353,15 @@ export function useDocumentSubscribers(api: ApiClient, workspaceId: string, docu
     void reload();
   }, [reload]);
 
-  // Scope-carrying read: ids are valid only for the scope they were fetched under. On a doc/workspace switch
-  // scopeKey changes and this instantly reads null until the new scope's read lands — no stale paint.
-  const subscriberIds = result && result.key === scopeKey ? result.ids : null;
-  const loaded = subscriberIds !== null;
-
   const mutate = useCallback(
     async (agentId: string, subscribe: boolean) => {
-      if (!documentId || busyIds.has(agentId)) return;
       const key = scopeKey;
-      setBusyIds((current) => new Set(current).add(agentId));
+      if (!documentId || (busyState.key === key && busyState.ids.has(agentId))) return;
+      // Scope-carry the busy marker: if the stored busy state is a foreign scope, start fresh under this scope.
+      setBusyState((current) => {
+        const base = current.key === key ? current.ids : NO_BUSY_IDS;
+        return { key, ids: new Set(base).add(agentId) };
+      });
       // Optimistic, scope-carrying: only touch ids while the stored result is still this scope.
       setResult((current) =>
         current && current.key === key
@@ -1373,21 +1376,23 @@ export function useDocumentSubscribers(api: ApiClient, workspaceId: string, docu
         }
       } catch (err) {
         // Only surface the error if this mutation's scope is still current — a rejection arriving after a
-        // switch must not paint A's error onto B.
+        // switch must not paint A's error onto B (also guarded by the scope-carrying derivation).
         if (scopeKeyRef.current === key) {
-          setError(err instanceof Error ? err.message : "Update failed");
+          setErrorState({ key, message: err instanceof Error ? err.message : "Update failed" });
         }
       } finally {
         await reload();
-        setBusyIds((current) => {
-          if (!current.has(agentId)) return current;
-          const next = new Set(current);
+        // Clear this mutation's busy marker only while the busy state is still THIS scope — never delete a
+        // different scope's marker for the same agent id.
+        setBusyState((current) => {
+          if (current.key !== key || !current.ids.has(agentId)) return current;
+          const next = new Set(current.ids);
           next.delete(agentId);
-          return next;
+          return { key, ids: next };
         });
       }
     },
-    [api, workspaceId, documentId, scopeKey, busyIds, reload],
+    [api, workspaceId, documentId, scopeKey, busyState, reload],
   );
 
   return { subscriberIds, loaded, busyIds, error, reload, mutate };
