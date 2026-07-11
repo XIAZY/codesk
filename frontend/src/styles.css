@@ -2031,28 +2031,8 @@ button.inbox-row:hover {
   outline-offset: -2px;
 }
 
-.thread-popover-row.resolved {
-  opacity: 0.58;
-}
-
 .thread-popover-row-copy {
   flex: 1;
-}
-
-.thread-popover-status-dot {
-  flex: 0 0 auto;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--iris);
-}
-
-.thread-popover-status-dot.resolved {
-  background: var(--ok);
-}
-
-.thread-popover-status-dot.obsolete {
-  background: var(--ink-4);
 }
 
 .thread-popover-foot {
@@ -2352,33 +2332,6 @@ button.inbox-row:hover {
 
 .titem.resolved {
   color: var(--ink-3);
-}
-
-.thread-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.thread-badge-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex: 0 0 auto;
-}
-
-.thread-badge.open .thread-badge-dot {
-  background: var(--iris);
-}
-
-.thread-badge.resolved .thread-badge-dot {
-  background: var(--ok);
-}
-
-.thread-badge.obsolete .thread-badge-dot {
-  background: var(--ink-4);
 }
 
 .titem.obsolete {

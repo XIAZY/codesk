@@ -65,7 +65,7 @@ function mockApi(overrides: Partial<ApiClient> = {}): ApiClient {
 afterEach(cleanup);
 
 describe("ThreadPopover", () => {
-  it("orders open threads before dimmed resolved threads and moves list → detail → back", async () => {
+  it("lists only open threads and moves list → detail → back without status dots", async () => {
     const user = userEvent.setup();
     const resolved = threadFixture({
       id: "thread_resolved",
@@ -86,19 +86,16 @@ describe("ThreadPopover", () => {
     );
 
     expect(screen.getByText("Line 5")).toBeTruthy();
+    expect(screen.getByText("· 1 thread")).toBeTruthy();
     const rows = container.querySelectorAll(".thread-popover-row");
-    expect(rows).toHaveLength(2);
+    expect(rows).toHaveLength(1);
     expect(rows[0].textContent).toContain("@ada");
-    expect(rows[1].textContent).toContain("@lin");
-    expect(rows[1].classList.contains("resolved")).toBe(true);
-    // Eva's redesign: the list rows carry NO leading status dot — resolved state reads from the row's own
-    // dimming (.resolved), not a dot. The dot lives only in the detail header (asserted below).
-    expect(container.querySelectorAll(".thread-popover-row .thread-popover-status-dot")).toHaveLength(0);
+    expect(container.textContent).not.toContain("@lin");
+    expect(container.querySelector(".thread-popover-status-dot")).toBeNull();
 
     await user.click(rows[0] as HTMLElement);
     const dialog = screen.getByRole("dialog", { name: "Thread by @ada" });
-    // The detail header keeps its status dot (it pairs with the open/resolved text there, per Eva).
-    expect(dialog.querySelector(".thread-popover-status-dot")).toBeTruthy();
+    expect(dialog.querySelector(".thread-popover-status-dot")).toBeNull();
     expect(within(dialog).getByText("First comment")).toBeTruthy();
     expect(within(dialog).getByText("Second comment")).toBeTruthy();
     expect(within(dialog).getByText(/can you see me/)).toBeTruthy();
@@ -134,10 +131,11 @@ describe("ThreadPopover", () => {
     expect(onThreadsChanged).toHaveBeenCalledTimes(1);
   });
 
-  it("marks an open thread resolved without closing, then exposes Reopen", async () => {
+  it("keeps resolved detail open, then Back returns an empty open-only list", async () => {
     const user = userEvent.setup();
     const updateThreadStatus = vi.fn().mockResolvedValue({ thread: threadFixture({ status: "resolved" }) });
     const onClose = vi.fn();
+    const onJumpToThread = vi.fn();
     render(
       <ThreadPopover
         api={mockApi({ updateThreadStatus })}
@@ -145,7 +143,7 @@ describe("ThreadPopover", () => {
         group={{ line: 5, threads: [threadFixture()] }}
         point={{ x: 20, y: 30 }}
         onClose={onClose}
-        onJumpToThread={vi.fn()}
+        onJumpToThread={onJumpToThread}
         onThreadsChanged={vi.fn()}
       />,
     );
@@ -157,6 +155,15 @@ describe("ThreadPopover", () => {
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByRole("dialog", { name: "Thread by @ada" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Reopen thread" })).toBeTruthy();
+    expect(document.querySelector(".thread-popover-status-dot")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Back to threads on this line" }));
+    expect(screen.getByRole("dialog", { name: "Threads on line 5" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Open thread by @ada" })).toBeNull();
+    expect(screen.getByText("· 0 open")).toBeTruthy();
+    expect(screen.getByText("No open threads on this line")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Jump to line 5" }));
+    expect(onJumpToThread).toHaveBeenCalledWith("thread_open");
   });
 
   it("keeps selected detail stable when a status refresh reverses the same thread membership", async () => {
@@ -193,6 +200,10 @@ describe("ThreadPopover", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Reopen thread" })).toBeTruthy());
     expect(screen.getByRole("dialog", { name: "Thread by @ada" })).toBeTruthy();
     expect(screen.getByText("First comment")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Back to threads on this line" }));
+    expect(screen.queryByRole("button", { name: "Open thread by @ada" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Open thread by @lin" })).toBeTruthy();
   });
 
   it("jumps to the anchor and supports Escape/outside dismissal", async () => {

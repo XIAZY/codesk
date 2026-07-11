@@ -175,12 +175,17 @@ test("thread popover: resolving the last open thread removes only the marker", a
   await expect(page.getByRole("button", { name: /open threads? on line 1/ })).toHaveCount(0);
   await expect(detail).toBeVisible();
   await expect(detail.getByText(body)).toBeVisible();
+  await expect(detail.locator(".thread-popover-status-dot")).toHaveCount(0);
   await captureRender(page, testInfo, "thread-popover-resolved-detail");
 
   await detail.getByRole("button", { name: "Back to threads on this line" }).click();
   const list = page.getByRole("dialog", { name: "Threads on line 1" });
   await expect(list).toBeVisible();
-  await expect(list.locator(".thread-popover-row.resolved", { hasText: body })).toBeVisible();
+  await expect(list.locator(".thread-popover-row")).toHaveCount(0);
+  await expect(list.getByText("· 0 open")).toBeVisible();
+  await expect(list.getByText("No open threads on this line")).toBeVisible();
+  await expect(list.getByRole("button", { name: "Jump to line 1" })).toBeVisible();
+  await captureRender(page, testInfo, "thread-popover-empty-list");
   await list.getByRole("button", { name: "Close" }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(page.getByRole("button", { name: /open threads? on line 1/ })).toHaveCount(0);
@@ -188,7 +193,7 @@ test("thread popover: resolving the last open thread removes only the marker", a
   assertNoPageErrors(errors);
 });
 
-test("thread popover: mixed line orders resolved last and supports Reopen", async ({ page }, testInfo) => {
+test("thread popover: mixed line hides resolved rows after Back", async ({ page }, testInfo) => {
   const resolvedBody = `resolve me ${Date.now()}`;
   const openBody = `keep me open ${Date.now()}`;
   const { editor, errors } = await setupThreadDocument(page, [resolvedBody, openBody]);
@@ -201,24 +206,10 @@ test("thread popover: mixed line orders resolved last and supports Reopen", asyn
 
   let list = page.getByRole("dialog", { name: "Threads on line 1" });
   let rows = list.locator(".thread-popover-row");
-  await expect(rows).toHaveCount(2);
+  await expect(rows).toHaveCount(1);
   await expect(rows.nth(0)).toContainText(openBody);
-  await expect(rows.nth(0)).not.toHaveClass(/resolved/);
-  await expect(rows.nth(1)).toContainText(resolvedBody);
-  await expect(rows.nth(1)).toHaveClass(/resolved/);
+  await expect(list.getByText(resolvedBody)).toHaveCount(0);
   await captureRender(page, testInfo, "thread-popover-list");
-
-  await rows.nth(1).click();
-  detail = page.getByRole("dialog", { name: /Thread by @/ });
-  await detail.getByRole("button", { name: "Reopen thread" }).click();
-  await expect(detail.getByRole("button", { name: "Mark as resolved" })).toBeVisible({ timeout: 20_000 });
-  await expect(page.getByRole("button", { name: "2 open threads on line 1" })).toBeVisible();
-  await detail.getByRole("button", { name: "Back to threads on this line" }).click();
-
-  list = page.getByRole("dialog", { name: "Threads on line 1" });
-  rows = list.locator(".thread-popover-row");
-  await expect(rows).toHaveCount(2);
-  await expect(list.locator(".thread-popover-row.resolved")).toHaveCount(0);
 
   assertNoPageErrors(errors);
 });
@@ -380,7 +371,7 @@ test("document Threads entry replaces the rail tab and reuses thread detail", as
   await expect(documentThreads.locator(".titem", { hasText: obsoleteBody })).toHaveCount(0);
   await expect(documentThreads.locator(".titem", { hasText: resolvedBody })).toHaveCount(0);
   await expect(documentThreads.locator(".thread-list-status-dot")).toHaveCount(0);
-  await expect(documentThreads.locator(".thread-fold-header .thread-badge-dot")).toHaveCount(2);
+  await expect(documentThreads.locator(".thread-fold-header .thread-badge-dot")).toHaveCount(0);
   await expect(documentThreads.locator(".titem", { hasText: openBody }).locator(".row.gap-4.tiny.muted")).toHaveText("No replies");
   const obsoleteFold = documentThreads.getByRole("button", { name: /Obsolete · 1/ });
   await expect(obsoleteFold).toHaveAttribute("aria-expanded", "false");
@@ -391,6 +382,7 @@ test("document Threads entry replaces the rail tab and reuses thread detail", as
 
   await documentThreads.locator(".titem", { hasText: openBody }).click();
   await expect(documentThreads.getByRole("button", { name: "Mark as resolved" })).toBeVisible();
+  await expect(documentThreads.locator(".thread-popover-status-dot")).toHaveCount(0);
   await expect(documentThreads.getByRole("button", { name: "Jump to line 2" })).toBeVisible();
   await expect(documentThreads.getByRole("textbox", { name: "Reply to this thread" })).toBeVisible();
   await expect(documentThreads.getByText(openBody)).toBeVisible();
