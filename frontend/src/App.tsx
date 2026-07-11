@@ -2851,7 +2851,6 @@ export function ThreadPopover({
                 onClick={() => openThread(thread.id)}
                 aria-label={`Open thread by ${author}`}
               >
-                <span className={`thread-popover-status-dot ${resolved ? "resolved" : "open"}`} />
                 <div className={`avi sm ${thread.createdByType === "agent" ? "agent" : "you"}`}>
                   {initials(thread.createdByHandle || thread.createdByName || "T")}
                 </div>
