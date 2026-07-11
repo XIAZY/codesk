@@ -1977,6 +1977,7 @@ export function WorkspaceApp({
             {!connected ? <span className="chip sm warn">workspace offline</span> : null}
           </div>
           <div className="row gap-6">
+            <CollaboratorAvatars people={workspacePeopleList} onClick={() => setRightTab("coworkers")} />
             {activeDocument ? (
               <div className="document-threads-entry" ref={documentThreadsRef}>
                 <button
@@ -2038,7 +2039,6 @@ export function WorkspaceApp({
                 ) : null}
               </div>
             ) : null}
-            <CollaboratorAvatars people={workspacePeopleList} onClick={() => setRightTab("coworkers")} />
             <button className="btn sm ghost icon" type="button" onClick={() => setModal("rename")} disabled={!activeDocument} aria-label="Document options">
               <Icon name="more" />
             </button>
@@ -3488,10 +3488,7 @@ export function ThreadsPanel({
   }
 
   const renderThreadCard = (thread: ThreadItem) => {
-    const info = threadAnchorInfo?.[thread.id];
     const isObsolete = threadIsObsolete(thread, threadAnchorInfo);
-    const anchorLine = info?.line;
-    const isAnchored = thread.anchor.kind !== "document" && !isObsolete;
     const statusClass = thread.status === "resolved" ? "resolved" : isObsolete ? "obsolete" : "open";
 
     return (
@@ -3501,7 +3498,6 @@ export function ThreadsPanel({
         onClick={() => onSelectThread(thread.id)}
         aria-label={`Open ${statusClass} thread by ${thread.createdByHandle ? `@${thread.createdByHandle}` : thread.createdByName || "Someone"}`}
       >
-        <span className={`thread-list-status-dot ${statusClass}`} aria-hidden="true" />
         <div className={`avi sm ${thread.createdByType === "agent" ? "agent" : "you"}`}>{initials(thread.createdByHandle || thread.createdByName || "You")}</div>
         <div className="col gap-3 min-0 titem-copy">
           <div className="row gap-6 min-0">
@@ -3513,19 +3509,6 @@ export function ThreadsPanel({
           </div>
           <div className="row gap-4 tiny muted">
             <span>{threadReplyLabel(thread)}</span>
-            {!isObsolete ? <><span>·</span><span>{thread.anchor.kind === "document" ? "document" : "anchored"}</span></> : null}
-            {isAnchored && anchorLine ? (
-              <>
-                <span>·</span>
-                <span
-                  className="thread-jump-link"
-                  role="link"
-                  onClick={(e) => { e.stopPropagation(); onJumpToThread(thread.id); }}
-                >
-                  Jump to line {anchorLine} →
-                </span>
-              </>
-            ) : null}
           </div>
         </div>
         <Icon name="chevron" />
