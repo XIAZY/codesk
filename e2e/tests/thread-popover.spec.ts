@@ -343,7 +343,8 @@ test("document Threads entry replaces the rail tab and reuses thread detail", as
   const railTabs = page.locator(".ctx-tabs");
   await expect(railTabs.getByRole("button", { name: /Threads/i })).toHaveCount(0);
   await expect(railTabs.getByRole("button", { name: /Document Activity/i })).toBeVisible();
-  await expect(railTabs.getByRole("button", { name: /Participants/i })).toBeVisible();
+  // Participants was removed from the rail — its subscriber controls moved to the top-bar Watchers popover.
+  await expect(railTabs.getByRole("button", { name: /Participants/i })).toHaveCount(0);
 
   await publishCurrentUserPresence(page, seed);
   const toolbarOrder = await page.locator(".doc-toolbar > .row.gap-6").evaluate((toolbar) => (

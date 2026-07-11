@@ -101,7 +101,8 @@ describe("document Threads toolbar entry", () => {
     const railTabs = container.querySelector(".ctx-tabs") as HTMLElement;
     expect(within(railTabs).queryByRole("button", { name: /Threads/i })).toBeNull();
     expect(within(railTabs).getByRole("button", { name: /Document Activity/i })).toBeTruthy();
-    expect(within(railTabs).getByRole("button", { name: /Participants/i })).toBeTruthy();
+    // The Participants tab was removed from the rail — its subscriber controls now live in the top-bar Watchers popover.
+    expect(within(railTabs).queryByRole("button", { name: /Participants/i })).toBeNull();
 
     const trigger = screen.getByRole("button", { name: "Threads, 1 open" });
     const toolbarActions = container.querySelector(".doc-toolbar > .row.gap-6") as HTMLElement;
@@ -121,5 +122,26 @@ describe("document Threads toolbar entry", () => {
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Threads on this document" })).toBeNull());
     expect(document.activeElement).toBe(trigger);
+  });
+
+  it("only one toolbar popover is open at a time — Threads and Watchers are mutually exclusive", async () => {
+    const user = userEvent.setup();
+    renderWorkspace();
+
+    const threadsTrigger = screen.getByRole("button", { name: "Threads, 1 open" });
+    const watchersTrigger = screen.getByRole("button", { name: "Watchers" });
+
+    await user.click(threadsTrigger);
+    expect(screen.getByRole("dialog", { name: "Threads on this document" })).toBeTruthy();
+
+    // Opening Watchers closes Threads.
+    await user.click(watchersTrigger);
+    expect(screen.getByRole("dialog", { name: "Watchers on this document" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Threads on this document" })).toBeNull();
+
+    // Opening Threads closes Watchers.
+    await user.click(threadsTrigger);
+    expect(screen.getByRole("dialog", { name: "Threads on this document" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Watchers on this document" })).toBeNull();
   });
 });

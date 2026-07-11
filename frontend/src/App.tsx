@@ -44,7 +44,7 @@ import { resolveRuntimeTiles, selectableRuntimeKinds, type RuntimeTile } from ".
 import "./styles.css";
 
 const tokenStorageKey = "codesk.auth.token";
-const rightTabLabels = { activity: "Document Activity", coworkers: "Participants" } as const;
+const rightTabLabels = { activity: "Document Activity" } as const;
 const portableFileNameIllegalChars = /[\u0000-\u001F<>:"\/\\|?*]/g;
 const windowsReservedBaseName = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 
@@ -1273,6 +1273,104 @@ function tokenFromInvitePath(value: string) {
   return "";
 }
 
+// Document subscribers (watchers), lifted to the parent so the top-bar badge count is live while the popover
+// is unmounted. Scope-carrying: the stored result is tagged with the workspace+document key it was read for,
+// and `subscriberIds` reads as null (unknown/loading) unless that key matches the CURRENT scope — so a stale
+// A-count can never paint on B (the make-invalid-states-unrepresentable fix, without an effect reset). A
+// readSeq guard keeps only the latest-started read among same-scope reads, and optimistic mutations are
+// applied only while the stored result is still this scope. This is the task-#4 isolation, hoisted.
+const NO_BUSY_IDS: Set<string> = new Set();
+
+export function useDocumentSubscribers(api: ApiClient, workspaceId: string, documentId: string | undefined) {
+  const scopeKey = documentId ? `${workspaceId}/${documentId}` : "";
+  // result, errorState, and busyState are all SCOPE-CARRYING: each is tagged with the scope key it belongs to,
+  // and reads as null/empty unless that key matches the CURRENT scope. So a stale scope's async settle can
+  // never surface its ids, error, or busy marker on a different document — and a mutation on A that settles
+  // after a switch to B cannot delete B's same-agent busy marker (its cleanup no-ops on a foreign scope).
+  const [result, setResult] = useState<{ key: string; ids: string[] } | null>(null);
+  const [errorState, setErrorState] = useState<{ key: string; message: string }>({ key: scopeKey, message: "" });
+  const [busyState, setBusyState] = useState<{ key: string; ids: Set<string> }>({ key: scopeKey, ids: NO_BUSY_IDS });
+  const readSeqRef = useRef(0);
+  // The CURRENT scope, readable synchronously inside async callbacks captured under an OLD scope. A reconcile
+  // from a dead scope (a mutation on doc A settling after a switch to B) checks this and becomes a full no-op —
+  // critically it must not bump readSeq or fetch, or it would starve B's in-flight initial read.
+  const scopeKeyRef = useRef(scopeKey);
+  scopeKeyRef.current = scopeKey;
+
+  const subscriberIds = result && result.key === scopeKey ? result.ids : null;
+  const loaded = subscriberIds !== null;
+  const error = errorState.key === scopeKey ? errorState.message : "";
+  const busyIds = busyState.key === scopeKey ? busyState.ids : NO_BUSY_IDS;
+
+  const reload = useCallback(async () => {
+    if (!documentId) return;
+    const key = scopeKey;
+    // A reconcile from a scope that is no longer current does nothing — no seq bump, no fetch — so it cannot
+    // drop the current scope's read.
+    if (key !== scopeKeyRef.current) return;
+    const seq = ++readSeqRef.current;
+    try {
+      const response = await api.listDocumentSubscribers(workspaceId, documentId);
+      // Re-check AFTER the await: neither a newer same-scope read (seq) nor a scope switch (key) may have
+      // happened, or this response is stale and must not land.
+      if (readSeqRef.current !== seq || key !== scopeKeyRef.current) return;
+      setResult({ key, ids: response.agents.map((agent) => agent.id) });
+      setErrorState((current) => (current.key === key && current.message ? { key, message: "" } : current));
+    } catch (err) {
+      if (readSeqRef.current !== seq || key !== scopeKeyRef.current) return;
+      setErrorState({ key, message: err instanceof Error ? err.message : "Failed to load watchers" });
+    }
+  }, [api, workspaceId, documentId, scopeKey]);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  const mutate = useCallback(
+    async (agentId: string, subscribe: boolean) => {
+      const key = scopeKey;
+      if (!documentId || (busyState.key === key && busyState.ids.has(agentId))) return;
+      // Scope-carry the busy marker: if the stored busy state is a foreign scope, start fresh under this scope.
+      setBusyState((current) => {
+        const base = current.key === key ? current.ids : NO_BUSY_IDS;
+        return { key, ids: new Set(base).add(agentId) };
+      });
+      // Optimistic, scope-carrying: only touch ids while the stored result is still this scope.
+      setResult((current) =>
+        current && current.key === key
+          ? { key, ids: subscribe ? Array.from(new Set([...current.ids, agentId])) : current.ids.filter((id) => id !== agentId) }
+          : current,
+      );
+      try {
+        if (subscribe) {
+          await api.subscribeAgentToDocument(workspaceId, agentId, documentId);
+        } else {
+          await api.unsubscribeAgentFromDocument(workspaceId, agentId, documentId);
+        }
+      } catch (err) {
+        // Only surface the error if this mutation's scope is still current — a rejection arriving after a
+        // switch must not paint A's error onto B (also guarded by the scope-carrying derivation).
+        if (scopeKeyRef.current === key) {
+          setErrorState({ key, message: err instanceof Error ? err.message : "Update failed" });
+        }
+      } finally {
+        await reload();
+        // Clear this mutation's busy marker only while the busy state is still THIS scope — never delete a
+        // different scope's marker for the same agent id.
+        setBusyState((current) => {
+          if (current.key !== key || !current.ids.has(agentId)) return current;
+          const next = new Set(current.ids);
+          next.delete(agentId);
+          return { key, ids: next };
+        });
+      }
+    },
+    [api, workspaceId, documentId, scopeKey, busyState, reload],
+  );
+
+  return { subscriberIds, loaded, busyIds, error, reload, mutate };
+}
+
 export function WorkspaceApp({
   api,
   token,
@@ -1307,7 +1405,7 @@ export function WorkspaceApp({
     rootDocumentId: workspace.rootDocumentId,
   });
   const rootDocuments = rootNamespace.documents;
-  const [rightTab, setRightTab] = useState<"activity" | "coworkers">("activity");
+  const [rightTab, setRightTab] = useState<"activity">("activity");
   const [modal, setModal] = useState<"daemon" | "agent" | "rename" | "agent-detail" | "daemon-detail" | "manage" | null>(null);
   // Default tab is Members & Invite (plan tab order). Integration protocol (Juan's
   // single-flip rule): A2 fills Members before integration, so nothing ships showing
@@ -1391,6 +1489,10 @@ export function WorkspaceApp({
   const documentThreadsRef = useRef<HTMLDivElement>(null);
   const documentThreadsDialogRef = useRef<HTMLDivElement>(null);
   const documentThreadsTriggerRef = useRef<HTMLButtonElement>(null);
+  const [documentWatchersOpen, setDocumentWatchersOpen] = useState(false);
+  const documentWatchersRef = useRef<HTMLDivElement>(null);
+  const documentWatchersDialogRef = useRef<HTMLDivElement>(null);
+  const documentWatchersTriggerRef = useRef<HTMLButtonElement>(null);
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(() => new Set());
   const [creatingDocument, setCreatingDocument] = useState(false);
   const [createError, setCreateError] = useState("");
@@ -1407,6 +1509,23 @@ export function WorkspaceApp({
   const documentMissing = view.kind === "document" && rootNamespace.ready && !activeDocument;
   const documentThreads = useMemo(() => activeDocument ? workspace.threads.filter((thread) => thread.documentId === activeDocument.id) : [], [workspace.threads, activeDocument?.id]);
   const [threadAnchorInfo, setThreadAnchorInfo] = useState<ThreadAnchorInfo>({});
+  // Document subscribers (watchers) are fetched at the parent so the top-bar badge count is live even while
+  // the popover is unmounted (mirrors documentOpenThreadCount). The hook is scope-carrying — its ids only
+  // read as loaded when their key matches the current workspace+document — so a stale A-count can never paint
+  // on B. See useDocumentSubscribers.
+  const {
+    subscriberIds: documentSubscriberIds,
+    loaded: subscribersLoaded,
+    busyIds: subscriberBusyIds,
+    error: subscribersError,
+    reload: reloadSubscribers,
+    mutate: mutateSubscriber,
+  } = useDocumentSubscribers(api, workspaceId, activeDocument?.id);
+  const documentWatcherCount = useMemo(() => {
+    if (documentSubscriberIds === null) return null;
+    const subscribed = new Set(documentSubscriberIds);
+    return workspace.agents.reduce((count, agent) => (subscribed.has(agent.id) ? count + 1 : count), 0);
+  }, [workspace.agents, documentSubscriberIds]);
   const groupedAgents = agentsByDaemon(workspace.agents, workspace.daemons);
   const documentTree = useMemo(() => buildDocumentTree(rootDocuments), [rootDocuments]);
   const threadCountByDocument = useMemo(() => {
@@ -1451,6 +1570,13 @@ export function WorkspaceApp({
     setSelectedThreadId("");
     if (restoreFocus) {
       window.setTimeout(() => documentThreadsTriggerRef.current?.focus(), 0);
+    }
+  }, []);
+
+  const closeDocumentWatchers = useCallback((restoreFocus = true) => {
+    setDocumentWatchersOpen(false);
+    if (restoreFocus) {
+      window.setTimeout(() => documentWatchersTriggerRef.current?.focus(), 0);
     }
   }, []);
 
@@ -1512,9 +1638,67 @@ export function WorkspaceApp({
   }, [closeDocumentThreads, documentThreadsOpen]);
 
   useEffect(() => {
+    if (!documentWatchersOpen) {
+      return;
+    }
+    const focusTimer = window.setTimeout(() => {
+      const dialog = documentWatchersDialogRef.current;
+      if (!dialog) {
+        return;
+      }
+      const first = focusableElements(dialog)[0];
+      (first ?? dialog).focus();
+    }, 0);
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && documentWatchersRef.current?.contains(target)) {
+        return;
+      }
+      closeDocumentWatchers();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeDocumentWatchers();
+        return;
+      }
+      if (event.key !== "Tab") {
+        return;
+      }
+      const dialog = documentWatchersDialogRef.current;
+      if (!dialog) {
+        return;
+      }
+      const focusable = focusableElements(dialog);
+      if (!focusable.length) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.clearTimeout(focusTimer);
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [closeDocumentWatchers, documentWatchersOpen]);
+
+  useEffect(() => {
     setDocumentThreadsOpen(false);
     setSelectedThreadId("");
     setThreadAnchorInfo({});
+    setDocumentWatchersOpen(false);
   }, [activeDocument?.id]);
 
   useEffect(() => {
@@ -1629,12 +1813,6 @@ export function WorkspaceApp({
     });
   }, [activeDocumentPath]);
   const workspacePeopleList = workspacePeople(workspace);
-  // The Participants tab badge shows who is present on THIS document right now (here-now); subscriber counts
-  // live inside the panel, which owns the fetch. hereNow needs only presence, so it is cheap to derive here.
-  const documentPresentCount = useMemo(
-    () => (activeDocument ? documentParticipants(workspace, activeDocument.id, [], now).hereNow.length : 0),
-    [workspace, activeDocument?.id, now],
-  );
   const documentActivityList = documentActivity(workspace, activeDocument?.id);
   // Unread = new since you last opened the tab (snapshot delta — honest for
   // snapshot-fresh activity; not a live stream). Marked seen when the tab opens.
@@ -1828,7 +2006,7 @@ export function WorkspaceApp({
             {!connected ? <span className="chip sm warn">workspace offline</span> : null}
           </div>
           <div className="row gap-6">
-            <CollaboratorAvatars people={workspacePeopleList} onClick={() => setRightTab("coworkers")} />
+            <CollaboratorAvatars people={workspacePeopleList} onClick={() => { if (activeDocument) { setDocumentThreadsOpen(false); setSelectedThreadId(""); void reloadSubscribers(); setDocumentWatchersOpen(true); } }} />
             {activeDocument ? (
               <div className="document-threads-entry" ref={documentThreadsRef}>
                 <button
@@ -1843,6 +2021,7 @@ export function WorkspaceApp({
                     if (documentThreadsOpen) {
                       closeDocumentThreads(false);
                     } else {
+                      setDocumentWatchersOpen(false);
                       setSelectedThreadId("");
                       setDocumentThreadsOpen(true);
                     }
@@ -1885,6 +2064,66 @@ export function WorkspaceApp({
                       onReply={() => void reload()}
                       onClose={() => closeDocumentThreads()}
                       embedded
+                    />
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            {activeDocument ? (
+              <div className="document-watchers-entry" ref={documentWatchersRef}>
+                <button
+                  ref={documentWatchersTriggerRef}
+                  className={`btn sm document-watchers-trigger ${documentWatchersOpen ? "selected" : "ghost"}`}
+                  type="button"
+                  aria-label={documentWatcherCount === null ? "Watchers" : `Watchers, ${documentWatcherCount} watching`}
+                  aria-haspopup="dialog"
+                  aria-expanded={documentWatchersOpen}
+                  aria-controls="document-watchers-popover"
+                  onClick={() => {
+                    if (documentWatchersOpen) {
+                      closeDocumentWatchers(false);
+                    } else {
+                      // Only one document popover open at a time — opening Watchers closes Threads.
+                      setDocumentThreadsOpen(false);
+                      setSelectedThreadId("");
+                      // Refetch on open so the always-visible badge self-heals cross-client subscription
+                      // changes (no workspace WS event carries them); between opens the count can read a
+                      // stale N — accepted parity with the old closed tab.
+                      void reloadSubscribers();
+                      setDocumentWatchersOpen(true);
+                    }
+                  }}
+                >
+                  <Icon name="users" />
+                  <span>{documentWatcherCount === null ? "…" : documentWatcherCount}</span>
+                </button>
+                {documentWatchersOpen ? (
+                  <div
+                    ref={documentWatchersDialogRef}
+                    id="document-watchers-popover"
+                    className="document-watchers-popover card lifted"
+                    role="dialog"
+                    aria-modal="false"
+                    aria-label="Watchers on this document"
+                    tabIndex={-1}
+                  >
+                    <div className="document-threads-popover-head">
+                      <div className="row gap-8 min-0">
+                        <Icon name="users" />
+                        <b>Watchers</b>
+                        <span className="small muted">· {documentWatcherCount === null ? "…" : documentWatcherCount}</span>
+                      </div>
+                      <button className="btn ghost icon sm" type="button" onClick={() => closeDocumentWatchers()} aria-label="Close watchers">×</button>
+                    </div>
+                    <WatchersPanel
+                      key={workspaceId + "/" + activeDocument.id}
+                      documentId={activeDocument.id}
+                      workspace={workspace}
+                      subscriberIds={documentSubscriberIds}
+                      loaded={subscribersLoaded}
+                      busyIds={subscriberBusyIds}
+                      error={subscribersError}
+                      onMutate={mutateSubscriber}
                     />
                   </div>
                 ) : null}
@@ -1951,33 +2190,15 @@ export function WorkspaceApp({
           }}
         />
         <div className="ctx-tabs">
-          {(["activity", "coworkers"] as const).map((tab) => (
+          {(["activity"] as const).map((tab) => (
             <button key={tab} className={`btn sm ${rightTab === tab ? "selected" : "ghost"}`} onClick={() => setRightTab(tab)}>
-              <Icon name={tab === "activity" ? "activity" : "people"} />
+              <Icon name="activity" />
               {rightTabLabels[tab]}
-              {tab === "coworkers" ? <span className="muted">{documentPresentCount}</span> : null}
               {tab === "activity" && activityUnread ? <span className="unread-dot" aria-label="New activity" /> : null}
             </button>
           ))}
         </div>
         {rightTab === "activity" ? <ActivityPanel activities={documentActivityList} hasDocument={!!activeDocument} actorLabel={activityActorLabel} /> : null}
-        {rightTab === "coworkers" ? (
-          <ParticipantsPanel
-            // Key on scope so a workspace/document switch REMOUNTS the panel: the old scope's state is
-            // discarded and unrenderable, closing the async-race window (a stale read lands on an unmounted
-            // instance). This is the make-invalid-states-unrepresentable fix for the QA-caught switch race.
-            key={workspaceId + "/" + (activeDocument?.id ?? "none")}
-            documentId={activeDocument?.id}
-            workspace={workspace}
-            agents={workspace.agents}
-            api={api}
-            workspaceId={workspaceId}
-            onAgent={(agent) => {
-              setSelectedAgentId(agent.id);
-              setModal("agent-detail");
-            }}
-          />
-        ) : null}
       </aside>
 
       {modal === "rename" && activeDocument ? (
@@ -3368,169 +3589,70 @@ function CollaboratorAvatars({ people, onClick }: { people: WorkspacePerson[]; o
   );
 }
 
-const personRoleTag = { you: "You", agent: "Agent", member: "Member" } as const;
-
-// ParticipantsPanel (task #4): the document-scoped right tab. It replaces the workspace-wide People panel
-// (AlphaToad's full-conversion ruling). Three groups over the open document:
-//   Here now — humans + agents with fresh presence on THIS doc (honest decay; presence = real activity only).
+// WatchersPanel: the document subscribers surface, hosted in the top-bar Watchers popover (it replaces the
+// old right-rail Participants tab). Subscriber-only — the "Here now" presence display is intentionally gone
+// with the tab (top-bar avatars still carry workspace presence; doc-level presence is a future revival). Two
+// groups over the open document:
 //   Watching — agents subscribed to this doc (the durable notification relationship), each removable.
-//   Add watcher — the picker of NOT-yet-subscribed agents; the only place an unsubscribed agent appears, so
-//                 the panel never redraws the ambient every-agent-watches model.
-// Subscribers are fetched from GET /documents/{id}/subscribers on doc change and after each mutation;
-// subscribe/unsubscribe reuse the existing agent endpoints (one write path). Mutations are optimistic and
-// reconcile against the server on completion.
-export function ParticipantsPanel({
+//   Add watcher — the picker of NOT-yet-subscribed agents; the only place an unsubscribed agent appears.
+// The panel is PRESENTATIONAL: the subscriber list, its fetch, and the async-race guards live in
+// useDocumentSubscribers at the parent (so the top-bar badge count is live while this popover is unmounted).
+// This instance is KEY'd on workspace+document by its parent, so a scope switch remounts it and the local
+// picker state can never leak across documents. subscribe/unsubscribe are optimistic (in the hook) and
+// reconcile on completion.
+export function WatchersPanel({
   documentId,
   workspace,
-  agents,
-  api,
-  workspaceId,
-  onAgent,
+  subscriberIds,
+  loaded,
+  busyIds,
+  error,
+  onMutate,
 }: {
   documentId: string | undefined;
   workspace: Pick<WorkspaceState, "currentUserId" | "agents" | "users" | "presences">;
-  agents: Agent[];
-  api: ApiClient;
-  workspaceId: string;
-  onAgent: (agent: Agent) => void;
+  subscriberIds: string[] | null;
+  loaded: boolean;
+  busyIds: Set<string>;
+  error: string;
+  onMutate: (agentId: string, subscribe: boolean) => void;
 }) {
-  // This panel is KEY'd on workspace+document by its parent, so a scope switch REMOUNTS it: the entire state
-  // tree is discarded and old state is unrenderable by construction — no cross-document stale write can reach
-  // a different scope's panel (its setState lands on an unmounted instance and is a no-op). That makes a
-  // per-switch generation guard unnecessary; what remains is the SAME-scope race within one mount.
-  const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
-  // null = UNKNOWN (this mount's read has not resolved yet) — distinct from [] (loaded, genuinely none). A
-  // fresh mount starts unknown, so a just-switched-to document shows loading, never a false empty panel, and
-  // actions stay disabled until its own read establishes server truth.
-  const [subscriberIds, setSubscriberIds] = useState<string[] | null>(null);
-  const [error, setError] = useState("");
-  const [busyIds, setBusyIds] = useState<Set<string>>(() => new Set());
   const [picking, setPicking] = useState(false);
-  // readSeqRef bumps at the start of EVERY read, so among reads within this one mount (two concurrent
-  // mutations' reconcile fetches) only the latest-STARTED may apply — an older read returning late can't
-  // clobber a newer one and drop a change (same-scope out-of-order reconcile).
-  const readSeqRef = useRef(0);
-
-  const loadSubscribers = useCallback(async () => {
-    if (!documentId) return;
-    const seq = ++readSeqRef.current;
-    try {
-      const response = await api.listDocumentSubscribers(workspaceId, documentId);
-      if (readSeqRef.current !== seq) return;
-      setSubscriberIds(response.agents.map((agent) => agent.id));
-      setError("");
-    } catch (err) {
-      if (readSeqRef.current !== seq) return;
-      setError(err instanceof Error ? err.message : "Failed to load participants");
-    }
-  }, [api, workspaceId, documentId]);
-
-  useEffect(() => {
-    void loadSubscribers();
-  }, [loadSubscribers]);
-
-  const loaded = subscriberIds !== null;
-  const { hereNow, watching, addable } = useMemo(
-    () => documentParticipants(workspace, documentId, subscriberIds ?? [], now),
-    [workspace, documentId, subscriberIds, now],
+  // Watching / addable are subscription-only groupings (nowMs is irrelevant here since this surface no longer
+  // renders presence), so pass 0 and ignore hereNow.
+  const { watching, addable } = useMemo(
+    () => documentParticipants(workspace, documentId, subscriberIds ?? [], 0),
+    [workspace, documentId, subscriberIds],
   );
-  const agentsById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
 
-  const mutate = async (agentId: string, subscribe: boolean) => {
-    if (!documentId || !loaded || busyIds.has(agentId)) {
-      return;
-    }
-    setBusyIds((current) => new Set(current).add(agentId));
-    // Optimistic: reflect the intent immediately (only meaningful once loaded), reconcile on completion.
-    setSubscriberIds((ids) => (ids === null ? ids : subscribe ? Array.from(new Set([...ids, agentId])) : ids.filter((id) => id !== agentId)));
-    try {
-      if (subscribe) {
-        await api.subscribeAgentToDocument(workspaceId, agentId, documentId);
-      } else {
-        await api.unsubscribeAgentFromDocument(workspaceId, agentId, documentId);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Update failed");
-    } finally {
-      // Same-scope reconcile; the readSeqRef guard keeps the latest-started read. If the user switched scope
-      // mid-mutation this instance is unmounted, so these setState calls are harmless no-ops.
-      await loadSubscribers();
-      setBusyIds((current) => {
-        const next = new Set(current);
-        next.delete(agentId);
-        return next;
-      });
-    }
-  };
+  const personAvatar = (person: WorkspacePerson) => (
+    <div className="avi agent">{initials(person.handle || person.name)}</div>
+  );
 
-  const personAvatar = (person: WorkspacePerson, online: boolean) => (
-    // Honest decay: the online ring is only ever present activity within the freshness window, never a
-    // durable/subscribed state — an offline agent that is watching shows no ring.
-    <div className={`avi ${person.kind === "agent" ? "agent" : "you"}${online ? " online" : ""}`} title={online ? "Online" : undefined}>
-      {initials(person.handle || person.name)}
+  const watchingRow = (person: WorkspacePerson) => (
+    <div key={person.id} className="agent-card row between">
+      <div className="row gap-2 min-0">
+        {personAvatar(person)}
+        <div className="col gap-2 min-0">
+          <strong className="small truncate">@{person.handle}</strong>
+          <span className="tiny muted truncate">Watching</span>
+        </div>
+      </div>
+      <button className="btn sm ghost" onClick={() => onMutate(person.id, false)} disabled={busyIds.has(person.id)} title="Stop watching this document">
+        Remove
+      </button>
     </div>
   );
 
-  const hereNowRow = (person: WorkspacePerson) => {
-    const agent = person.kind === "agent" ? agentsById.get(person.id) : undefined;
-    const body = (
-      <div className="col gap-2 min-0">
-        <strong className="small truncate">@{person.handle}</strong>
-        <span className="tiny muted truncate">{personRoleTag[person.kind]}</span>
-        <span className="sr-only">Online</span>
-      </div>
-    );
-    return agent ? (
-      <button key={person.id} className="agent-card" onClick={() => onAgent(agent)}>{personAvatar(person, true)}{body}</button>
-    ) : (
-      <article key={person.id} className="agent-card">{personAvatar(person, true)}{body}</article>
-    );
-  };
-
-  const watchingRow = (person: WorkspacePerson) => {
-    const agent = agentsById.get(person.id);
-    const online = personOnline({ presentAt: workspace.presences[person.id]?.documentId === documentId ? workspace.presences[person.id]?.updatedAt : undefined }, now);
-    return (
-      <div key={person.id} className="agent-card row between">
-        <button className="row gap-2 min-0 ghost flat" onClick={() => agent && onAgent(agent)} disabled={!agent}>
-          {personAvatar(person, online)}
-          <div className="col gap-2 min-0">
-            <strong className="small truncate">@{person.handle}</strong>
-            <span className="tiny muted truncate">Watching</span>
-          </div>
-        </button>
-        <button className="btn sm ghost" onClick={() => void mutate(person.id, false)} disabled={busyIds.has(person.id)} title="Stop watching this document">
-          Remove
-        </button>
-      </div>
-    );
-  };
-
-  if (!documentId) {
-    return (
-      <div className="ctx-body people-pane">
-        <p className="empty-note">Open a document to see its participants.</p>
-      </div>
-    );
-  }
-
   return (
-    <div className="ctx-body people-pane">
-      <div className="row between ctx-head">
-        <span className="label">Participants</span>
-        <span className="chip sm">{loaded ? watching.length : "…"}</span>
-      </div>
+    <div className="ctx-body people-pane watchers-pane">
       {error ? <p className="empty-note error">{error}</p> : null}
 
-      {/* Here now is presence-only (known synchronously from workspace state), so it renders even while the
-          subscriber read is outstanding. Watching / Add-watcher wait for `loaded` so B never shows A's rows
-          or a false empty/all-addable panel mid-switch, and their actions stay disabled while unknown. */}
-      <div className="people-section-head"><span className="tiny muted">Here now</span><span className="chip sm">{hereNow.length}</span></div>
-      {hereNow.length ? hereNow.map(hereNowRow) : <p className="empty-note">No one is on this document right now.</p>}
-
+      {/* Watching / Add-watcher wait for `loaded` so a just-switched-to document never shows the prior doc's
+          rows or a false empty/all-addable panel, and actions stay disabled while the count is unknown. */}
       <div className="people-section-head"><span className="tiny muted">Watching</span><span className="chip sm">{loaded ? watching.length : "…"}</span></div>
       {!loaded ? (
-        <p className="empty-note">Loading participants…</p>
+        <p className="empty-note">Loading watchers…</p>
       ) : watching.length ? (
         watching.map(watchingRow)
       ) : (
@@ -3549,10 +3671,10 @@ export function ParticipantsPanel({
             {addable.map((person) => (
               <div key={person.id} className="agent-card row between">
                 <div className="row gap-2 min-0">
-                  {personAvatar(person, false)}
+                  {personAvatar(person)}
                   <strong className="small truncate">@{person.handle}</strong>
                 </div>
-                <button className="btn sm" onClick={() => void mutate(person.id, true)} disabled={busyIds.has(person.id)}>
+                <button className="btn sm" onClick={() => onMutate(person.id, true)} disabled={busyIds.has(person.id)}>
                   Subscribe
                 </button>
               </div>
@@ -4679,6 +4801,8 @@ export function Icon({ name }: { name: string }) {
       return <svg className="i sm" viewBox="0 0 16 16"><path d="M3 3h10a1.6 1.6 0 0 1 1.6 1.6v5A1.6 1.6 0 0 1 13 11.2H6.6L4 13.4v-2.2H3a1.6 1.6 0 0 1-1.6-1.6v-5A1.6 1.6 0 0 1 3 3Z" /></svg>;
     case "people":
       return <svg className="i sm" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /></svg>;
+    case "users":
+      return <svg className="i sm" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.4" /><path d="M2.8 20c0-3.6 2.8-5.8 6.2-5.8s6.2 2.2 6.2 5.8" /><path d="M15.8 4.9a3.4 3.4 0 0 1 0 6.2" /><path d="M17 14.4c2.9.4 4.6 2.6 4.6 5.6" /></svg>;
     case "search":
       return <svg className="i sm" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" /></svg>;
     case "plus":
