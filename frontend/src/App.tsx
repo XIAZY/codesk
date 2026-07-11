@@ -2763,7 +2763,16 @@ export function ThreadPopover({
             <button className="btn ghost icon sm" onClick={onClose} type="button" aria-label="Close">×</button>
           </div>
           <div className="thread-popover-anchor">
-            <span>“{selected.anchor.excerpt || selected.title}” · line {group.line}</span>
+            <span className="thread-popover-anchor-quote" aria-hidden="true">
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+                <path
+                  d="M6.5 4.2C4.9 4.9 3.9 6.3 3.9 8.1v3.2h3.3V8.1H5.5c0-1 .5-1.7 1.6-2.1l-.6-1.8Zm5.6 0c-1.6.7-2.6 2.1-2.6 3.9v3.2h3.3V8.1h-1.7c0-1 .5-1.7 1.6-2.1l-.6-1.8Z"
+                  fill="currentColor"
+                />
+              </svg>
+            </span>
+            <span className="thread-popover-anchor-excerpt">{selected.anchor.excerpt || selected.title}</span>
+            <span className="thread-popover-anchor-line">line {group.line}</span>
           </div>
           <div className="thread-popover-messages">
             {selected.messages.map((message) => (
