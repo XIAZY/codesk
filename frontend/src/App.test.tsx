@@ -7,7 +7,7 @@ import { AgentDetailModal, CreateDaemonModal, DaemonDetailModal, DaemonsManageme
 import { ApiError } from "./api";
 import { emptyWorkspace, identifierFromName, identifierHelpText, identifierPattern, workspaceSlugMaxLength } from "./logic";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
-import type { Account, Agent, AgentEvent, AgentRun, Daemon, DocumentItem, WorkspaceState, WorkspaceSummary } from "./types";
+import type { Account, Agent, AgentRun, Daemon, DocumentItem, WorkspaceState, WorkspaceSummary } from "./types";
 
 function workspaceFixture(overrides: Partial<WorkspaceState> = {}): WorkspaceState {
   return {
@@ -424,134 +424,6 @@ describe("WorkspaceApp coming-soon controls", () => {
   });
 });
 
-describe("WorkspaceApp Inbox", () => {
-  const inboxEvent = (overrides: Partial<AgentEvent> = {}): AgentEvent => ({
-    id: "event_1",
-    agentId: "agent_1",
-    agentHandle: "codex",
-    type: "document.updated",
-    box: "for_me",
-    status: "pending",
-    documentId: "doc_1",
-    summary: "Review changes",
-    createdAt: "2026-07-06T12:00:00Z",
-    updatedAt: "2026-07-06T12:00:00Z",
-    ...overrides,
-  });
-
-  function renderWorkspaceApp() {
-    render(
-      <WorkspaceApp
-        api={{ updateLastAccessed: vi.fn().mockResolvedValue({}) } as never}
-        token="token"
-        workspaceId="ws"
-        workspaceSlug="workspace"
-        view={{ kind: "home" }}
-        account={{ id: "account_1", email: "you@example.com", displayName: "You" }}
-        workspaces={[{ id: "ws", slug: "workspace", name: "Workspace" }]}
-        onAccess={vi.fn()}
-        onWorkspaceChange={vi.fn()}
-        onSignOut={vi.fn()}
-      />,
-    );
-  }
-
-  it("replaces the left Activity and Threads entries with one zero-badge Inbox", () => {
-    renderWorkspaceApp();
-
-    const sidebar = document.querySelector(".sb") as HTMLElement;
-    expect(within(sidebar).getByRole("button", { name: "Inbox" })).toBeTruthy();
-    expect(within(sidebar).queryByText("Activity")).toBeNull();
-    expect(within(sidebar).queryByText("Threads")).toBeNull();
-    expect(within(sidebar).getByRole("button", { name: "Inbox" }).querySelector(".ct")).toBeNull();
-  });
-
-  it("opens a flyout with the shared aggregate count, reason expansion, and focus return", async () => {
-    const user = userEvent.setup();
-    workspaceMock = workspaceFixture({
-      agents: [
-        {
-          ...workspaceFixture().agents[0],
-          status: "failed",
-          currentActivity: "tool exited 1",
-          updatedAt: "2026-07-06T12:03:00Z",
-        },
-      ],
-      agentEvents: [
-        inboxEvent({ id: "mention_1", type: "thread.mentioned", threadId: "thread_1", summary: "@codex was mentioned", updatedAt: "2026-07-06T12:04:00Z" }),
-        inboxEvent({ id: "review_1", type: "document.updated", summary: "Review changes", updatedAt: "2026-07-06T12:02:00Z" }),
-      ],
-    });
-    renderWorkspaceApp();
-
-    const trigger = screen.getByRole("button", { name: /Inbox, 2 need attention/ });
-    expect(trigger.querySelector(".inbox-ct")?.textContent).toBe("2");
-
-    await user.click(trigger);
-    const dialog = screen.getByRole("dialog", { name: "Inbox" });
-    expect(within(dialog).getByText("2 need attention")).toBeTruthy();
-    expect(within(dialog).getByText("Review changes")).toBeTruthy();
-    expect(within(dialog).getByText("tool exited 1")).toBeTruthy();
-    expect(within(dialog).queryByText("@codex was mentioned")).toBeNull();
-
-    await user.click(within(dialog).getByRole("button", { name: "View reason" }));
-    expect(within(dialog).getAllByText("tool exited 1").length).toBeGreaterThanOrEqual(2);
-
-    await user.keyboard("{Escape}");
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Inbox" })).toBeNull());
-    expect(document.activeElement).toBe(trigger);
-  });
-
-  it("ignores mention activity and does not render a dead mark-all-read control", async () => {
-    const user = userEvent.setup();
-    workspaceMock = workspaceFixture({
-      agentEvents: [
-        inboxEvent({ id: "mention_1", type: "thread.mentioned", threadId: "thread_1", summary: "@codex was mentioned", updatedAt: "2026-07-06T12:04:00Z" }),
-        inboxEvent({ id: "review_1", type: "document.updated", summary: "Review changes", updatedAt: "2026-07-06T12:02:00Z" }),
-      ],
-    });
-    renderWorkspaceApp();
-
-    const trigger = screen.getByRole("button", { name: /Inbox, 1 need attention/ });
-    expect(trigger.querySelector(".inbox-ct")?.textContent).toBe("1");
-
-    await user.click(trigger);
-    const dialog = screen.getByRole("dialog", { name: "Inbox" });
-    expect(within(dialog).getByText("1 need attention")).toBeTruthy();
-    expect(within(dialog).getByText("Review changes")).toBeTruthy();
-    expect(within(dialog).queryByText("@codex was mentioned")).toBeNull();
-    expect(within(dialog).queryByRole("button", { name: "Mark all read" })).toBeNull();
-    expect(screen.getByRole("button", { name: /Inbox, 1 need attention/ })).toBeTruthy();
-    expect(localStorage.getItem("codesk.inbox.mentions.ws.user_1")).toBeNull();
-  });
-
-  it("drops stale and unresolved review events before they reach the badge or flyout", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-07-06T12:00:00Z"));
-    rootDocumentsMock = [{ id: "doc_1", path: "docs/Product Plan.md", title: "Product Plan.md" }];
-    workspaceMock = workspaceFixture({
-      agentEvents: [
-        inboxEvent({ id: "fresh_doc", documentId: "doc_1", summary: "Fresh review", updatedAt: "2026-07-06T11:59:00Z" }),
-        inboxEvent({ id: "missing_doc", documentId: "missing_doc", summary: "Missing doc review", updatedAt: "2026-07-06T11:58:00Z" }),
-        inboxEvent({ id: "stale_doc", documentId: "doc_1", summary: "Stale review", updatedAt: "2026-06-01T12:00:00Z" }),
-      ],
-    });
-    renderWorkspaceApp();
-
-    const trigger = screen.getByRole("button", { name: /Inbox, 1 need attention/ });
-    expect(trigger.querySelector(".inbox-ct")?.textContent).toBe("1");
-
-    fireEvent.click(trigger);
-    const dialog = screen.getByRole("dialog", { name: "Inbox" });
-    expect(within(dialog).getByText("1 need attention")).toBeTruthy();
-    expect(within(dialog).getByText("Fresh review")).toBeTruthy();
-    expect(within(dialog).getByText("Product Plan.md")).toBeTruthy();
-    expect(within(dialog).queryByText("Missing doc review")).toBeNull();
-    expect(within(dialog).queryByText("Stale review")).toBeNull();
-    expect(within(dialog).queryByText("Unknown document")).toBeNull();
-  });
-});
-
 describe("CreateDaemonModal install status", () => {
   it("flips the install chip from waiting to connected when the daemon checks in live", async () => {
     const user = userEvent.setup();
@@ -795,7 +667,7 @@ describe("ManageModal", () => {
     // Full @handle is present in the DOM (one row per agent — no longer squeezed into a
     // 3-col grid that truncated names to "@…").
     expect(card.querySelector(".agent-roster-identity b")?.textContent).toBe("@codex-super-long-collaborator-name");
-    // threads / inbox / for-me chip are moved into the agent detail (the whole row opens it),
+    // threads / for-me chip are moved into the agent detail (the whole row opens it),
     // so they are no longer rendered on the roster card.
     expect(card.querySelector(".agent-roster-meta")).toBeNull();
     expect(card.querySelector(".agent-for-me-chip")).toBeNull();

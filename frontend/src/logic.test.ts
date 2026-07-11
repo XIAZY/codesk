@@ -42,10 +42,9 @@ import {
   selectionLabel,
   threadReplyCount,
   threadReplyLabel,
-  workspaceInboxSummary,
 } from "./logic";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
-import type { ActivityEvent, Agent, AgentEvent, AgentRun, Daemon, DocumentItem, PresenceItem, UserItem, WorkspaceState } from "./types";
+import type { ActivityEvent, Agent, AgentRun, Daemon, DocumentItem, PresenceItem, UserItem, WorkspaceState } from "./types";
 
 function baseWorkspace(): WorkspaceState {
   return {
@@ -631,49 +630,36 @@ describe("presentation grouping", () => {
       updatedAt: "2026-01-01T00:00:00Z",
       ...extra,
     });
-    const review: AgentEvent = {
-      id: "event",
-      agentId: "agent",
-      agentHandle: "codex",
-      type: "review.requested",
-      box: "for_me",
-      status: "pending",
-      summary: "Review proposed changes",
-      createdAt: "2026-01-01T00:00:00Z",
-      updatedAt: "2026-01-01T00:00:00Z",
-    };
-
-    expect(agentDisplayStatus(agent, [run("running", { lastMessage: "editing sidebar" })], [onlineDaemon], [], nowMs)).toMatchObject({
+    expect(agentDisplayStatus(agent, [run("running", { lastMessage: "editing sidebar" })], [onlineDaemon], nowMs)).toMatchObject({
       key: "running",
       label: "Running · editing sidebar",
     });
-    expect(agentDisplayStatus(agent, [run("queued")], [onlineDaemon], [], nowMs)).toMatchObject({ key: "queued", label: "Queued" });
-    expect(agentDisplayStatus(agent, [], [onlineDaemon], [], nowMs)).toMatchObject({
+    expect(agentDisplayStatus(agent, [run("queued")], [onlineDaemon], nowMs)).toMatchObject({ key: "queued", label: "Queued" });
+    expect(agentDisplayStatus(agent, [], [onlineDaemon], nowMs)).toMatchObject({
       key: "idle",
       label: "Idle",
       detailLabel: "Standing by",
       title: "Standing by",
     });
-    expect(agentDisplayStatus(agent, [run("completed")], [onlineDaemon], [], nowMs)).toMatchObject({
+    expect(agentDisplayStatus(agent, [run("completed")], [onlineDaemon], nowMs)).toMatchObject({
       key: "idle",
       label: "Idle",
       detailLabel: "Standing by",
     });
-    expect(agentDisplayStatus(agent, [run("completed")], [onlineDaemon], [review], nowMs)).toMatchObject({ key: "needs-review", label: "Needs your review" });
-    expect(agentDisplayStatus(agent, [run("failed", { error: "tool exited 1" })], [onlineDaemon], [review], nowMs)).toMatchObject({
+    expect(agentDisplayStatus(agent, [run("failed", { error: "tool exited 1" })], [onlineDaemon], nowMs)).toMatchObject({
       key: "failed",
       label: "Failed — view reason",
       reason: "tool exited 1",
     });
 
     const deadDaemon = withReceipt({ ...daemonFixtures.dead, id: "daemon" }, nowMs);
-    expect(agentDisplayStatus(agent, [run("failed", { error: "tool exited 1" })], [deadDaemon], [review], nowMs)).toMatchObject({
+    expect(agentDisplayStatus(agent, [run("failed", { error: "tool exited 1" })], [deadDaemon], nowMs)).toMatchObject({
       key: "waiting-env",
       label: "Waiting for local environment",
     });
 
     const deletedDaemon = { ...daemonFixtures.softDeleted, id: "daemon" };
-    expect(agentDisplayStatus(agent, [run("queued")], [deletedDaemon], [], nowMs)).toMatchObject({ key: "waiting-env" });
+    expect(agentDisplayStatus(agent, [run("queued")], [deletedDaemon], nowMs)).toMatchObject({ key: "waiting-env" });
   });
 
   it("keeps stale-but-not-dead daemon agents on their last running state until liveness decays", () => {
@@ -707,8 +693,8 @@ describe("presentation grouping", () => {
       updatedAt: "2026-01-01T00:00:00Z",
     };
 
-    expect(agentDisplayStatus(agent, [runningRun], [daemon], [], receivedAtMs + DAEMON_STALE_WINDOW_MS).key).toBe("running");
-    expect(agentDisplayStatus(agent, [runningRun], [daemon], [], receivedAtMs + DAEMON_STALE_WINDOW_MS + 1).key).toBe("waiting-env");
+    expect(agentDisplayStatus(agent, [runningRun], [daemon], receivedAtMs + DAEMON_STALE_WINDOW_MS).key).toBe("running");
+    expect(agentDisplayStatus(agent, [runningRun], [daemon], receivedAtMs + DAEMON_STALE_WINDOW_MS + 1).key).toBe("waiting-env");
   });
 
   it("counts humans and agents as coworkers", () => {
@@ -911,136 +897,6 @@ describe("documentActivity", () => {
   });
 });
 
-describe("workspaceInboxSummary", () => {
-  const agent = (over: Partial<Agent> = {}): Agent => ({
-    id: "agent_1",
-    daemonId: "daemon_1",
-    handle: "codex",
-    name: "Codex",
-    role: "Review",
-    kind: "codex",
-    workspaceRoot: "/tmp/codex",
-    status: "idle",
-    currentTask: "",
-    currentActivity: "",
-    currentRunId: "",
-    updatedAt: "2026-07-06T12:00:00Z",
-    ...over,
-  });
-  const run = (over: Partial<AgentRun> = {}): AgentRun => ({
-    id: "run_1",
-    agentId: "agent_1",
-    agentHandle: "codex",
-    agentName: "Codex",
-    agentKind: "codex",
-    workspaceRoot: "/tmp/codex",
-    workingDirectory: "/tmp/codex",
-    prompt: "Do it",
-    status: "completed",
-    desiredStatus: "completed",
-    updatedAt: "2026-07-06T12:00:00Z",
-    ...over,
-  });
-  const event = (over: Partial<AgentEvent> = {}): AgentEvent => ({
-    id: "event_1",
-    agentId: "agent_1",
-    agentHandle: "codex",
-    type: "document.updated",
-    box: "for_me",
-    status: "pending",
-    documentId: "doc1",
-    summary: "Review changes",
-    createdAt: "2026-07-06T12:00:00Z",
-    updatedAt: "2026-07-06T12:00:00Z",
-    ...over,
-  });
-  const document = (over: Partial<DocumentItem> = {}): DocumentItem => ({
-    id: "doc1",
-    path: "docs/spec.md",
-    title: "spec.md",
-    ...over,
-  });
-
-  it("builds one event-derived source for reviews and failures while dropping mention activity", () => {
-    const summary = workspaceInboxSummary({
-      ...baseWorkspace(),
-      agents: [agent()],
-      agentRuns: [run({ status: "failed", error: "tool exited 1", updatedAt: "2026-07-06T12:03:00Z" })],
-      agentEvents: [
-        event({ id: "mention_1", type: "thread.mentioned", threadId: "thread_1", summary: "@codex was mentioned", updatedAt: "2026-07-06T12:04:00Z" }),
-        event({ id: "review_1", type: "document.updated", summary: "Review the workspace plan", updatedAt: "2026-07-06T12:02:00Z" }),
-      ],
-    });
-
-    expect(summary.counts).toEqual({ needsReview: 1, failed: 1, total: 2 });
-    expect(summary.badgeTone).toBe("failed");
-    expect(summary.items.map((item) => item.kind)).toEqual(["failed", "needs-review"]);
-    expect(summary.items.some((item) => item.summary.includes("@codex"))).toBe(false);
-    expect(summary.items.find((item) => item.kind === "failed")?.reason).toBe("tool exited 1");
-  });
-
-  it("ignores mention events without hiding unresolved review and failure work", () => {
-    const summary = workspaceInboxSummary({
-      ...baseWorkspace(),
-      agents: [agent({ status: "failed", currentActivity: "daemon stopped" })],
-      agentRuns: [],
-      agentEvents: [
-        event({ id: "mention_1", type: "thread.mentioned", summary: "@codex was mentioned", updatedAt: "2026-07-06T12:00:00Z" }),
-        event({ id: "review_1", type: "document.updated", summary: "Review even if runtime moved on", updatedAt: "2026-07-06T12:01:00Z" }),
-      ],
-    });
-
-    expect(summary.counts).toEqual({ needsReview: 1, failed: 1, total: 2 });
-    expect(summary.items.some((item) => item.summary.includes("@codex"))).toBe(false);
-    expect(summary.items.find((item) => item.kind === "needs-review")?.countable).toBe(true);
-    expect(summary.badgeTone).toBe("failed");
-  });
-
-  it("ignores resolved events and never crashes on missing collections", () => {
-    const summary = workspaceInboxSummary({
-      ...baseWorkspace(),
-      agentEvents: [event({ status: "completed" })],
-    });
-
-    expect(summary.items).toEqual([]);
-    expect(summary.counts.total).toBe(0);
-    expect(summary.badgeTone).toBe("");
-  });
-
-  it("drops review events whose document id cannot resolve", () => {
-    const summary = workspaceInboxSummary({
-      ...baseWorkspace(),
-      documents: [document()],
-      agentEvents: [
-        event({ id: "review_1", documentId: "doc1", summary: "Review real doc" }),
-        event({ id: "missing_doc", documentId: "missing", summary: "Review missing doc" }),
-      ],
-    });
-
-    expect(summary.counts).toEqual({ needsReview: 1, failed: 0, total: 1 });
-    expect(summary.items.map((item) => item.summary)).toEqual(["Review real doc"]);
-  });
-
-  it("drops stale review events while preserving current failed runtime state", () => {
-    const nowMs = Date.parse("2026-07-06T12:00:00Z");
-    const summary = workspaceInboxSummary({
-      ...baseWorkspace(),
-      documents: [document()],
-      agents: [agent({ status: "failed", currentActivity: "daemon stopped", updatedAt: "2026-07-06T12:00:00Z" })],
-      agentRuns: [],
-      agentEvents: [
-        event({ id: "stale_review", summary: "Old review", updatedAt: "2026-06-01T12:00:00Z" }),
-        event({ id: "fresh_review", summary: "Fresh review", updatedAt: "2026-07-06T11:00:00Z" }),
-      ],
-    }, { nowMs });
-
-    expect(summary.counts).toEqual({ needsReview: 1, failed: 1, total: 2 });
-    expect(summary.items.some((item) => item.summary === "Old review")).toBe(false);
-    expect(summary.items.some((item) => item.summary === "Fresh review")).toBe(true);
-    expect(summary.items.some((item) => item.kind === "failed" && item.reason === "daemon stopped")).toBe(true);
-  });
-});
-
 describe("daemon liveness decay", () => {
   // Every daemon comes from the canonical fixtures (the real backend wire shape) stamped with a
   // fixed receipt time; each row probes daemonLiveStatus at receipt + elapsed. Table-driven over the
@@ -1215,32 +1071,4 @@ describe("clampRailWidth", () => {
   });
 });
 
-// B×D integration behavior (Eva/Bill design ruling): the Needs-review chip (B) and the Inbox
-// (D) must agree on the same event. A pure @mention is activity, not attention — it lights
-// neither. A review event lights both. Pinned here so the resolve can't silently regress.
-describe("B×D split — mention vs review agreement (chip and Inbox)", () => {
-  const splitAgent: Agent = {
-    id: "agent_split", daemonId: "daemon_1", handle: "codex", name: "Codex", role: "Review",
-    kind: "codex", workspaceRoot: "/tmp/codex", status: "idle", currentTask: "",
-    currentActivity: "", currentRunId: "", updatedAt: "2026-07-06T12:00:00Z",
-  };
-  const splitEvent = (over: Partial<AgentEvent>): AgentEvent => ({
-    id: "event_1", agentId: "agent_split", agentHandle: "codex", type: "document.updated",
-    box: "for_me", status: "pending", documentId: "doc1", summary: "Review the plan",
-    createdAt: "2026-07-06T12:00:00Z", updatedAt: "2026-07-06T12:00:00Z", ...over,
-  });
 
-  it("a pure @mention lights NEITHER the Needs-review chip NOR the Inbox count", () => {
-    const mention = splitEvent({ type: "thread.mentioned", summary: "@codex was mentioned" });
-    // Chip (B): a bare mention must not read as Needs review (daemons=undefined skips waiting-env).
-    expect(agentDisplayStatus(splitAgent, [], undefined, [mention]).key).not.toBe("needs-review");
-    // Inbox (D): mention-kind counts nowhere.
-    expect(workspaceInboxSummary({ ...baseWorkspace(), agents: [splitAgent], agentEvents: [mention] }).counts.total).toBe(0);
-  });
-
-  it("a review event lights the Needs-review chip AND counts in the Inbox", () => {
-    const review = splitEvent({ type: "document.updated", summary: "Review the workspace plan" });
-    expect(agentDisplayStatus(splitAgent, [], undefined, [review]).key).toBe("needs-review");
-    expect(workspaceInboxSummary({ ...baseWorkspace(), agents: [splitAgent], agentEvents: [review] }).counts.needsReview).toBe(1);
-  });
-});
