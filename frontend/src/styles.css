@@ -2345,23 +2345,6 @@ button.inbox-row:hover {
   align-self: center;
 }
 
-.thread-list-status-dot {
-  width: 7px;
-  height: 7px;
-  flex: 0 0 auto;
-  align-self: center;
-  border-radius: 50%;
-  background: var(--iris);
-}
-
-.thread-list-status-dot.obsolete {
-  background: var(--ink-4);
-}
-
-.thread-list-status-dot.resolved {
-  background: var(--ok);
-}
-
 .titem.selected {
   border-color: var(--accent);
   background: var(--accent-50);
@@ -2400,15 +2383,6 @@ button.inbox-row:hover {
 
 .titem.obsolete {
   color: var(--ink-3);
-}
-
-.thread-jump-link {
-  color: var(--iris);
-  cursor: pointer;
-}
-
-.thread-jump-link:hover {
-  text-decoration: underline;
 }
 
 .thread-fold {

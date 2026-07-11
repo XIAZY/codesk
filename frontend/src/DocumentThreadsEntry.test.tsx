@@ -38,6 +38,9 @@ const workspace: WorkspaceState = {
   name: "Workspace",
   currentUserId: "user_1",
   users: [{ id: "user_1", handle: "ada", name: "Ada", role: "", kind: "human", status: "active", updatedAt: "now" }],
+  presences: {
+    user_1: { actorId: "user_1", actorType: "human", documentId: "doc_1", activity: "editing", updatedAt: new Date().toISOString() },
+  },
   threads: [
     threadFixture(),
     threadFixture({ id: "thread_2", status: "resolved", title: "Resolved thread" }),
@@ -101,6 +104,13 @@ describe("document Threads toolbar entry", () => {
     expect(within(railTabs).getByRole("button", { name: /Participants/i })).toBeTruthy();
 
     const trigger = screen.getByRole("button", { name: "Threads, 1 open" });
+    const toolbarActions = container.querySelector(".doc-toolbar > .row.gap-6") as HTMLElement;
+    const toolbarChildren = Array.from(toolbarActions.children);
+    const collaborators = container.querySelector(".collaborator-avatars") as Element;
+    const threadEntry = container.querySelector(".document-threads-entry") as Element;
+    expect(collaborators).toBeTruthy();
+    expect(threadEntry).toBeTruthy();
+    expect(toolbarChildren.indexOf(collaborators)).toBeLessThan(toolbarChildren.indexOf(threadEntry));
     await user.click(trigger);
 
     const dialog = screen.getByRole("dialog", { name: "Threads on this document" });

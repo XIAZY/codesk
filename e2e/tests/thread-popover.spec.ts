@@ -27,6 +27,27 @@ async function loginToWorkspace(page: Page, seed: Seed): Promise<void> {
   await expect(page).toHaveURL(new RegExp(seed.slugA));
 }
 
+async function publishCurrentUserPresence(page: Page, seed: Seed): Promise<void> {
+  const backendUrl = process.env.NOTTY_E2E_BACKEND_URL;
+  const token = await page.evaluate(() => localStorage.getItem("codesk.auth.token"));
+  expect(backendUrl).toBeTruthy();
+  expect(token).toBeTruthy();
+
+  const headers = { Authorization: `Bearer ${token}` };
+  const workspacesResponse = await page.request.get(`${backendUrl}/api/workspaces`, { headers });
+  expect(workspacesResponse.ok()).toBeTruthy();
+  const payload = await workspacesResponse.json() as { workspaces: Array<{ id: string; slug: string }> };
+  const workspaceId = payload.workspaces.find((workspace) => workspace.slug === seed.slugA)?.id;
+  expect(workspaceId).toBeTruthy();
+
+  const presenceResponse = await page.request.post(`${backendUrl}/api/workspaces/${workspaceId}/presence`, {
+    headers,
+    data: { actorId: "", actorType: "human", activity: "editing", selection: [] },
+  });
+  expect(presenceResponse.ok()).toBeTruthy();
+  await expect(page.locator(".collaborator-avatars")).toBeVisible();
+}
+
 async function createDocument(page: Page, content: string): Promise<Locator> {
   await page.getByRole("button", { name: "New document" }).click();
   const editor = page.locator(".cm-editor").first();
@@ -306,6 +327,7 @@ test("thread popover: desktop float stays contained near viewport edges and in a
 });
 
 test("document Threads entry replaces the rail tab and reuses thread detail", async ({ page }, testInfo) => {
+  const seed = loadSeed();
   const resolvedBody = `document index resolved ${Date.now()}`;
   const obsoleteBody = `document index obsolete ${Date.now()}`;
   const openBody = `document index open ${Date.now()}`;
@@ -331,6 +353,17 @@ test("document Threads entry replaces the rail tab and reuses thread detail", as
   await expect(railTabs.getByRole("button", { name: /Document Activity/i })).toBeVisible();
   await expect(railTabs.getByRole("button", { name: /Participants/i })).toBeVisible();
 
+  await publishCurrentUserPresence(page, seed);
+  const toolbarOrder = await page.locator(".doc-toolbar > .row.gap-6").evaluate((toolbar) => (
+    Array.from(toolbar.children).map((child) => child.getAttribute("class") ?? "")
+  ));
+  const collaboratorsIndex = toolbarOrder.findIndex((className) => className.includes("collaborator-avatars"));
+  const threadEntryIndex = toolbarOrder.findIndex((className) => className.includes("document-threads-entry"));
+  expect(collaboratorsIndex).toBeGreaterThanOrEqual(0);
+  expect(threadEntryIndex).toBeGreaterThanOrEqual(0);
+  expect(collaboratorsIndex).toBeLessThan(threadEntryIndex);
+  await captureElementRender(page.locator(".doc-toolbar"), testInfo, "document-threads-toolbar");
+
   // Delete only line 1. Its remaining open thread becomes Obsolete, the resolved thread stays Resolved,
   // and the line-2 thread keeps a live inline home in Open.
   await editor.click();
@@ -346,6 +379,9 @@ test("document Threads entry replaces the rail tab and reuses thread detail", as
   await expect(documentThreads.locator(".titem", { hasText: openBody })).toBeVisible();
   await expect(documentThreads.locator(".titem", { hasText: obsoleteBody })).toHaveCount(0);
   await expect(documentThreads.locator(".titem", { hasText: resolvedBody })).toHaveCount(0);
+  await expect(documentThreads.locator(".thread-list-status-dot")).toHaveCount(0);
+  await expect(documentThreads.locator(".thread-fold-header .thread-badge-dot")).toHaveCount(2);
+  await expect(documentThreads.locator(".titem", { hasText: openBody }).locator(".row.gap-4.tiny.muted")).toHaveText("No replies");
   const obsoleteFold = documentThreads.getByRole("button", { name: /Obsolete · 1/ });
   await expect(obsoleteFold).toHaveAttribute("aria-expanded", "false");
   const resolvedFold = documentThreads.getByRole("button", { name: /Resolved · 1/ });
