@@ -84,7 +84,6 @@ function renderEditor(threads: ThreadItem[], onThreadAnchorInfo: (info: Record<s
       onFocusThreadHandled={vi.fn()}
       onThreadCreated={vi.fn()}
       onThreadsChanged={vi.fn()}
-      onJumpToThread={vi.fn()}
       titleEditing={false}
       titleDraft=""
       onTitleEditStart={vi.fn()}
@@ -135,7 +134,6 @@ describe("DocumentEditor anchor-info classification effect", () => {
         onFocusThreadHandled={vi.fn()}
         onThreadCreated={vi.fn()}
         onThreadsChanged={vi.fn()}
-        onJumpToThread={vi.fn()}
         titleEditing={false}
         titleDraft=""
         onTitleEditStart={vi.fn()}

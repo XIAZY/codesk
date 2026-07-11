@@ -2068,7 +2068,6 @@ export function WorkspaceApp({
               void reload();
             }}
             onThreadsChanged={() => void reload()}
-            onJumpToThread={(threadId) => setFocusThreadId(threadId)}
             titleEditing={renamingDocumentId === activeDocument.id}
             titleDraft={renamingDocumentId === activeDocument.id ? titleDraft : fileName(activeDocument.path)}
             onTitleEditStart={() => startRenamingDocument(activeDocument)}
@@ -2695,10 +2694,6 @@ export function MetricCard({ label, value, tone }: { label: string; value: numbe
   );
 }
 
-function orderPopoverThreads(threads: LiveThread[]) {
-  return [...threads].sort((left, right) => Number(left.status === "resolved") - Number(right.status === "resolved"));
-}
-
 function mergePopoverThread(current: LiveThread, updated: ThreadItem): LiveThread {
   return {
     ...updated,
@@ -2756,7 +2751,6 @@ function ThreadDetailContent({
         <button ref={backButtonRef} className="btn ghost icon sm" type="button" onClick={onBack} aria-label={backLabel}>
           <Icon name="back" />
         </button>
-        <span className={`thread-popover-status-dot ${statusLabel}`} />
         <b className="small truncate">{author}</b>
         <span className="tiny muted">· {statusLabel}</span>
         <span className="thread-popover-head-spacer" />
@@ -2836,7 +2830,6 @@ export function ThreadPopover({
   group,
   point,
   onClose,
-  onJumpToThread,
   onThreadsChanged,
 }: {
   api: ApiClient;
@@ -2844,12 +2837,11 @@ export function ThreadPopover({
   group: LineThreadGroup<LiveThread>;
   point: { x: number; y: number };
   onClose: () => void;
-  onJumpToThread: (threadId: string) => void;
   onThreadsChanged: () => void;
 }) {
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const backButtonRef = useRef<HTMLButtonElement>(null);
-  const [threadItems, setThreadItems] = useState(() => orderPopoverThreads(group.threads));
+  const [threadItems, setThreadItems] = useState(() => [...group.threads]);
   const [selectedThreadId, setSelectedThreadId] = useState("");
   const [reply, setReply] = useState("");
   const [replyBusy, setReplyBusy] = useState(false);
@@ -2859,6 +2851,7 @@ export function ThreadPopover({
   const [placement, setPlacement] = useState<{ left: number; top: number } | null>(null);
   const groupKey = `${group.line}:${group.threads.map((thread) => thread.id).sort().join("|")}`;
   const selected = selectedThreadId ? threadItems.find((thread) => thread.id === selectedThreadId) ?? null : null;
+  const openThreadItems = threadItems.filter((thread) => thread.status !== "resolved");
   const popoverStyle = {
     left: placement?.left ?? point.x,
     top: placement?.top ?? point.y,
@@ -2894,12 +2887,10 @@ export function ThreadPopover({
   useEffect(() => {
     setThreadItems((current) => {
       const currentById = new Map(current.map((thread) => [thread.id, thread]));
-      return orderPopoverThreads(
-        group.threads.map((thread) => {
-          const local = currentById.get(thread.id);
-          return local && local.updatedAt > thread.updatedAt ? local : thread;
-        }),
-      );
+      return group.threads.map((thread) => {
+        const local = currentById.get(thread.id);
+        return local && local.updatedAt > thread.updatedAt ? local : thread;
+      });
     });
   }, [group.threads]);
 
@@ -2947,9 +2938,9 @@ export function ThreadPopover({
   }, [selectedThreadId]);
 
   const replaceThread = (updated: ThreadItem) => {
-    setThreadItems((current) => orderPopoverThreads(current.map((thread) => (
+    setThreadItems((current) => current.map((thread) => (
       thread.id === updated.id ? mergePopoverThread(thread, updated) : thread
-    ))));
+    )));
   };
 
   const openThread = (threadId: string) => {
@@ -2967,10 +2958,6 @@ export function ThreadPopover({
       const rows = popoverRef.current?.querySelectorAll<HTMLButtonElement>("[data-thread-id]");
       Array.from(rows ?? []).find((row) => row.dataset.threadId === previousThreadId)?.focus();
     }, 0);
-  };
-
-  const jumpToThread = (threadId: string) => {
-    onJumpToThread(threadId);
   };
 
   const submitReply = async (event: FormEvent) => {
@@ -3030,8 +3017,6 @@ export function ThreadPopover({
             onClose={onClose}
             onToggleStatus={toggleStatus}
             statusBusy={statusBusy}
-            onJump={() => jumpToThread(selected.id)}
-            jumpLabel={`Jump to line ${group.line}`}
             error={error}
             reply={reply}
             onReplyChange={setReply}
@@ -3057,17 +3042,18 @@ export function ThreadPopover({
         <div className="thread-popover-head">
           <Icon name="message" />
           <b className="small">Line {group.line}</b>
-          <span className="small muted">· {threadItems.length} thread{threadItems.length === 1 ? "" : "s"}</span>
+          <span className="small muted">
+            · {openThreadItems.length ? `${openThreadItems.length} thread${openThreadItems.length === 1 ? "" : "s"}` : "0 open"}
+          </span>
           <span className="thread-popover-head-spacer" />
           <button className="btn ghost icon sm" onClick={onClose} type="button" aria-label="Close">×</button>
         </div>
         <div className="thread-popover-list">
-          {threadItems.map((thread) => {
-            const resolved = thread.status === "resolved";
+          {openThreadItems.map((thread) => {
             const author = thread.createdByHandle ? `@${thread.createdByHandle}` : thread.createdByName || "Someone";
             return (
               <button
-                className={`thread-popover-row${resolved ? " resolved" : ""}`}
+                className="thread-popover-row"
                 key={thread.id}
                 data-thread-id={thread.id}
                 type="button"
@@ -3087,11 +3073,7 @@ export function ThreadPopover({
               </button>
             );
           })}
-        </div>
-        <div className="thread-popover-foot">
-          <button type="button" onClick={() => jumpToThread(threadItems[0]?.id || "")} aria-label={`Jump to line ${group.line}`}>
-            Jump to line {group.line} →
-          </button>
+          {!openThreadItems.length ? <p className="empty-note">No open threads on this line</p> : null}
         </div>
       </div>
     </>
@@ -3110,7 +3092,6 @@ export function DocumentEditor({
   onFocusThreadHandled,
   onThreadCreated,
   onThreadsChanged,
-  onJumpToThread,
   titleEditing,
   titleDraft,
   onTitleEditStart,
@@ -3130,7 +3111,6 @@ export function DocumentEditor({
   onFocusThreadHandled: () => void;
   onThreadCreated: (threadId: string) => void;
   onThreadsChanged: () => void;
-  onJumpToThread: (threadId: string) => void;
   titleEditing: boolean;
   titleDraft: string;
   onTitleEditStart: () => void;
@@ -3352,7 +3332,6 @@ export function DocumentEditor({
             group={activeThreadGroup}
             point={threadPopoverPoint}
             onClose={() => setActiveThreadGroup(null)}
-            onJumpToThread={onJumpToThread}
             onThreadsChanged={onThreadsChanged}
           />
         ) : null}
@@ -3529,7 +3508,6 @@ export function ThreadsPanel({
       {obsoleteThreads.length > 0 ? (
         <div className="thread-fold obsolete">
           <button className="thread-fold-header" type="button" onClick={toggleObsoleteFold} aria-expanded={!obsoleteFolded}>
-            <span className="thread-badge obsolete"><span className="thread-badge-dot" /></span>
             <span>Obsolete · {obsoleteThreads.length}</span>
             <span className={`thread-fold-chevron${obsoleteFolded ? "" : " expanded"}`}>▾</span>
           </button>
@@ -3543,7 +3521,6 @@ export function ThreadsPanel({
       {resolvedThreads.length > 0 ? (
         <div className="thread-fold">
           <button className="thread-fold-header" type="button" onClick={toggleResolvedFold} aria-expanded={!resolvedFolded}>
-            <span className="thread-badge resolved"><span className="thread-badge-dot" /></span>
             <span>Resolved · {resolvedThreads.length}</span>
             <span className={`thread-fold-chevron${resolvedFolded ? "" : " expanded"}`}>▾</span>
           </button>

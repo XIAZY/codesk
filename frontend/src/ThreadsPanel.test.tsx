@@ -75,7 +75,7 @@ describe("ThreadsPanel grouped status rendering", () => {
 
     const foldHeader = container.querySelector(".thread-fold-header");
     expect(foldHeader).toBeTruthy();
-    expect(foldHeader?.querySelector(".thread-badge-dot")).toBeTruthy();
+    expect(foldHeader?.querySelector(".thread-badge-dot")).toBeNull();
     expect(foldHeader?.textContent).toContain("Resolved");
     expect(foldHeader?.textContent).toContain("1");
 
@@ -129,7 +129,7 @@ describe("ThreadsPanel detail view badge and resolve", () => {
       />,
     );
 
-    expect(container.querySelector(".tdetail .thread-popover-status-dot.open")).toBeTruthy();
+    expect(container.querySelector(".tdetail .thread-popover-status-dot")).toBeNull();
     expect(container.querySelector(".tdetail .thread-popover-detail-head")?.textContent).toContain("open");
 
     const resolveBtn = screen.getByRole("button", { name: "Mark as resolved" });
@@ -150,7 +150,7 @@ describe("ThreadsPanel detail view badge and resolve", () => {
       />,
     );
 
-    expect(container.querySelector(".tdetail .thread-popover-status-dot.resolved")).toBeTruthy();
+    expect(container.querySelector(".tdetail .thread-popover-status-dot")).toBeNull();
     expect(container.querySelector(".tdetail .thread-popover-detail-head")?.textContent).toContain("resolved");
 
     const reopenBtn = screen.getByRole("button", { name: "Reopen thread" });
@@ -270,7 +270,7 @@ describe("ThreadsPanel obsolete grouping", () => {
 
     const foldHeader = screen.getByRole("button", { name: /Obsolete · 1/ });
     expect(foldHeader.getAttribute("aria-expanded")).toBe("false");
-    expect(foldHeader.querySelector(".thread-badge-dot")).toBeTruthy();
+    expect(foldHeader.querySelector(".thread-badge-dot")).toBeNull();
     expect(container.querySelector(".titem.obsolete")).toBeNull();
     expect(container.textContent).not.toMatch(/anchor lost|original text deleted/i);
 
@@ -378,7 +378,7 @@ describe("ThreadsPanel obsolete grouping", () => {
       />,
     );
 
-    expect(document.querySelector(".tdetail .thread-popover-status-dot.obsolete")).toBeTruthy();
+    expect(document.querySelector(".tdetail .thread-popover-status-dot")).toBeNull();
     expect(document.querySelector(".tdetail .thread-popover-detail-head")?.textContent).toContain("obsolete");
     expect(document.body.textContent).not.toMatch(/anchor lost|original text deleted/i);
     await user.click(screen.getByRole("button", { name: "Mark as resolved" }));

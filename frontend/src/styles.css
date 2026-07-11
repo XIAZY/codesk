@@ -2031,38 +2031,10 @@ button.inbox-row:hover {
   outline-offset: -2px;
 }
 
-.thread-popover-row.resolved {
-  opacity: 0.58;
-}
-
 .thread-popover-row-copy {
   flex: 1;
 }
 
-.thread-popover-status-dot {
-  flex: 0 0 auto;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--iris);
-}
-
-.thread-popover-status-dot.resolved {
-  background: var(--ok);
-}
-
-.thread-popover-status-dot.obsolete {
-  background: var(--ink-4);
-}
-
-.thread-popover-foot {
-  flex: 0 0 auto;
-  border-top: 1px solid var(--border);
-  background: var(--paper-2);
-  padding: 0;
-}
-
-.thread-popover-foot button,
 .thread-popover-jump,
 .thread-popover-status-action {
   border: 0;
@@ -2074,13 +2046,6 @@ button.inbox-row:hover {
   font-weight: 700;
 }
 
-.thread-popover-foot button {
-  width: 100%;
-  padding: 10px 12px;
-  text-align: left;
-}
-
-.thread-popover-foot button:hover,
 .thread-popover-jump:hover,
 .thread-popover-status-action:hover {
   color: var(--ink);
@@ -2271,8 +2236,7 @@ button.inbox-row:hover {
   .thread-popover-head,
   .thread-popover-anchor,
   .thread-popover-actions,
-  .thread-popover-reply,
-  .thread-popover-foot {
+  .thread-popover-reply {
     flex: 0 0 auto;
   }
 
@@ -2352,33 +2316,6 @@ button.inbox-row:hover {
 
 .titem.resolved {
   color: var(--ink-3);
-}
-
-.thread-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.thread-badge-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex: 0 0 auto;
-}
-
-.thread-badge.open .thread-badge-dot {
-  background: var(--iris);
-}
-
-.thread-badge.resolved .thread-badge-dot {
-  background: var(--ok);
-}
-
-.thread-badge.obsolete .thread-badge-dot {
-  background: var(--ink-4);
 }
 
 .titem.obsolete {
