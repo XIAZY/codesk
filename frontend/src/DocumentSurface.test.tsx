@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { DocumentSurface } from "./DocumentSurface";
@@ -157,9 +157,11 @@ describe("DocumentSurface", () => {
 
     renderSurface({ ydoc, ytext, threads: [thread] });
 
-    const marker = await screen.findByRole("button", { name: "1 thread on line 1" });
+    const marker = await screen.findByRole("button", { name: "1 open thread on line 1" });
     expect(marker.closest(".thread-anchor-rail")).toBeTruthy();
     expect(marker.closest(".cm-content")).toBeFalsy();
+    expect(marker.querySelector(".thread-rail-icon")).toBeTruthy();
+    expect(marker.querySelector(".thread-rail-dot")).toBeNull();
   });
 
   it("moves a rail marker when CRDT-relative anchors move after text edits", async () => {
@@ -190,9 +192,105 @@ describe("DocumentSurface", () => {
 
     renderSurface({ ydoc, ytext, threads: [thread] });
 
-    expect(await screen.findByRole("button", { name: "1 thread on line 1" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "1 open thread on line 1" })).toBeTruthy();
     ytext.insert(0, "\n");
 
-    expect(await screen.findByRole("button", { name: "1 thread on line 2" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "1 open thread on line 2" })).toBeTruthy();
+  });
+
+  it("counts only open threads while passing the full mixed-line group to the popup", async () => {
+    const ydoc = new Y.Doc();
+    const ytext = ydoc.getText("content");
+    ytext.insert(0, "alpha bravo charlie");
+    const anchor = {
+      kind: "text-range",
+      relativeStart: encodeRelativeAnchor(ytext, 6, "start"),
+      relativeEnd: encodeRelativeAnchor(ytext, 11, "end"),
+      excerpt: "bravo",
+    };
+    const base = {
+      documentId: "doc",
+      title: "Selection on line 1",
+      anchor,
+      participantIds: [],
+      participantHandles: [],
+      messages: [],
+      createdById: "user",
+      createdByType: "human",
+      createdByHandle: "hello",
+      createdByName: "Hello",
+      createdAt: "now",
+      updatedAt: "now",
+    };
+    const threads: ThreadItem[] = [
+      { ...base, id: "open", status: "open" },
+      { ...base, id: "resolved", status: "resolved" },
+    ];
+    const onLineThreadsOpen = vi.fn();
+
+    const { rerender } = render(
+      <DocumentSurface
+        documentId="doc"
+        ydoc={ydoc}
+        ytext={ytext}
+        ready
+        threads={threads}
+        focusThreadId=""
+        onFocusThreadHandled={vi.fn()}
+        onSelectionChange={vi.fn()}
+        onLineThreadsOpen={onLineThreadsOpen}
+      />,
+    );
+
+    const marker = await screen.findByRole("button", { name: "1 open thread on line 1" });
+    fireEvent.click(marker);
+    expect(onLineThreadsOpen).toHaveBeenCalledTimes(1);
+    expect(onLineThreadsOpen.mock.calls[0][0].threads.map((thread: ThreadItem) => thread.id)).toEqual(["open", "resolved"]);
+
+    rerender(
+      <DocumentSurface
+        documentId="doc"
+        ydoc={ydoc}
+        ytext={ytext}
+        ready
+        threads={threads.map((thread) => ({ ...thread, status: "resolved" }))}
+        focusThreadId=""
+        onFocusThreadHandled={vi.fn()}
+        onSelectionChange={vi.fn()}
+        onLineThreadsOpen={onLineThreadsOpen}
+      />,
+    );
+    await waitFor(() => expect(screen.queryByRole("button", { name: /open threads? on line 1/ })).toBeNull());
+  });
+
+  it("does not render a marker for a fully resolved line", async () => {
+    const ydoc = new Y.Doc();
+    const ytext = ydoc.getText("content");
+    ytext.insert(0, "alpha bravo charlie");
+    const thread: ThreadItem = {
+      id: "resolved",
+      documentId: "doc",
+      title: "Selection on line 1",
+      status: "resolved",
+      anchor: {
+        kind: "text-range",
+        relativeStart: encodeRelativeAnchor(ytext, 6, "start"),
+        relativeEnd: encodeRelativeAnchor(ytext, 11, "end"),
+        excerpt: "bravo",
+      },
+      participantIds: [],
+      participantHandles: [],
+      messages: [],
+      createdById: "user",
+      createdByType: "human",
+      createdByHandle: "hello",
+      createdByName: "Hello",
+      createdAt: "now",
+      updatedAt: "now",
+    };
+
+    const { container } = renderSurface({ ydoc, ytext, threads: [thread] });
+    await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
+    expect(container.querySelector(".thread-rail-marker")).toBeNull();
   });
 });

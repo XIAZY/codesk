@@ -1920,15 +1920,13 @@ export function WorkspaceApp({
             threads={documentThreads}
             focusThreadId={focusThreadId}
             onFocusThreadHandled={() => setFocusThreadId("")}
-            onThreadSelected={(threadId) => {
-              setRightTab("threads");
-              setSelectedThreadId(threadId);
-            }}
             onThreadCreated={(threadId) => {
               setRightTab("threads");
               setSelectedThreadId(threadId);
               void reload();
             }}
+            onThreadsChanged={() => void reload()}
+            onJumpToThread={(threadId) => setFocusThreadId(threadId)}
             titleEditing={renamingDocumentId === activeDocument.id}
             titleDraft={renamingDocumentId === activeDocument.id ? titleDraft : fileName(activeDocument.path)}
             onTitleEditStart={() => startRenamingDocument(activeDocument)}
@@ -2573,6 +2571,311 @@ export function MetricCard({ label, value, tone }: { label: string; value: numbe
   );
 }
 
+function orderPopoverThreads(threads: LiveThread[]) {
+  return [...threads].sort((left, right) => Number(left.status === "resolved") - Number(right.status === "resolved"));
+}
+
+function mergePopoverThread(current: LiveThread, updated: ThreadItem): LiveThread {
+  return {
+    ...updated,
+    anchor: {
+      ...updated.anchor,
+      start: current.anchor.start,
+      end: current.anchor.end,
+      line: current.anchor.line,
+      excerpt: updated.anchor.excerpt || current.anchor.excerpt,
+      resolved: current.anchor.resolved,
+    },
+  };
+}
+
+export function ThreadPopover({
+  api,
+  workspaceId,
+  group,
+  point,
+  onClose,
+  onJumpToThread,
+  onThreadsChanged,
+}: {
+  api: ApiClient;
+  workspaceId: string;
+  group: LineThreadGroup<LiveThread>;
+  point: { x: number; y: number };
+  onClose: () => void;
+  onJumpToThread: (threadId: string) => void;
+  onThreadsChanged: () => void;
+}) {
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+  const backButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [threadItems, setThreadItems] = useState(() => orderPopoverThreads(group.threads));
+  const [selectedThreadId, setSelectedThreadId] = useState("");
+  const [reply, setReply] = useState("");
+  const [replyBusy, setReplyBusy] = useState(false);
+  const [statusBusy, setStatusBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [viewportHeight, setViewportHeight] = useState(() => window.visualViewport?.height ?? window.innerHeight);
+  const groupKey = `${group.line}:${group.threads.map((thread) => thread.id).sort().join("|")}`;
+  const selected = selectedThreadId ? threadItems.find((thread) => thread.id === selectedThreadId) ?? null : null;
+  const popoverStyle = {
+    left: point.x,
+    top: point.y,
+    "--thread-popover-viewport-height": `${viewportHeight}px`,
+  } as CSSProperties;
+
+  useEffect(() => {
+    setThreadItems((current) => {
+      const currentById = new Map(current.map((thread) => [thread.id, thread]));
+      return orderPopoverThreads(
+        group.threads.map((thread) => {
+          const local = currentById.get(thread.id);
+          return local && local.updatedAt > thread.updatedAt ? local : thread;
+        }),
+      );
+    });
+  }, [group.threads]);
+
+  useEffect(() => {
+    setSelectedThreadId("");
+    setReply("");
+    setError("");
+  }, [groupKey]);
+
+  useEffect(() => {
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && !popoverRef.current?.contains(event.target)) {
+        onClose();
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [onClose]);
+
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    const updateHeight = () => setViewportHeight(viewport?.height ?? window.innerHeight);
+    viewport?.addEventListener("resize", updateHeight);
+    window.addEventListener("resize", updateHeight);
+    return () => {
+      viewport?.removeEventListener("resize", updateHeight);
+      window.removeEventListener("resize", updateHeight);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (selectedThreadId) {
+      window.setTimeout(() => backButtonRef.current?.focus(), 0);
+    }
+  }, [selectedThreadId]);
+
+  const replaceThread = (updated: ThreadItem) => {
+    setThreadItems((current) => orderPopoverThreads(current.map((thread) => (
+      thread.id === updated.id ? mergePopoverThread(thread, updated) : thread
+    ))));
+  };
+
+  const openThread = (threadId: string) => {
+    setSelectedThreadId(threadId);
+    setReply("");
+    setError("");
+  };
+
+  const backToList = () => {
+    const previousThreadId = selectedThreadId;
+    setSelectedThreadId("");
+    setReply("");
+    setError("");
+    window.setTimeout(() => {
+      const rows = popoverRef.current?.querySelectorAll<HTMLButtonElement>("[data-thread-id]");
+      Array.from(rows ?? []).find((row) => row.dataset.threadId === previousThreadId)?.focus();
+    }, 0);
+  };
+
+  const jumpToThread = (threadId: string) => {
+    onJumpToThread(threadId);
+  };
+
+  const submitReply = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!selected || !reply.trim() || replyBusy) return;
+    setReplyBusy(true);
+    setError("");
+    try {
+      const result = await api.replyThread(workspaceId, selected.id, reply.trim());
+      replaceThread(result.thread);
+      setReply("");
+      onThreadsChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to send reply");
+    } finally {
+      setReplyBusy(false);
+    }
+  };
+
+  const toggleStatus = async () => {
+    if (!selected || statusBusy) return;
+    const nextStatus = selected.status === "resolved" ? "open" : "resolved";
+    setStatusBusy(true);
+    setError("");
+    try {
+      const result = await api.updateThreadStatus(workspaceId, selected.id, nextStatus);
+      replaceThread(result.thread);
+      onThreadsChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update thread status");
+    } finally {
+      setStatusBusy(false);
+    }
+  };
+
+  if (selected) {
+    const resolved = selected.status === "resolved";
+    const author = selected.createdByHandle ? `@${selected.createdByHandle}` : selected.createdByName || "Someone";
+    return (
+      <>
+        <div className="thread-popover-scrim" aria-hidden="true" />
+        <div
+          ref={popoverRef}
+          className="thread-popover thread-popover-detail card lifted"
+          style={popoverStyle}
+          role="dialog"
+          aria-modal="false"
+          aria-label={`Thread by ${author}`}
+        >
+          <div className="thread-popover-head thread-popover-detail-head">
+            <button ref={backButtonRef} className="btn ghost icon sm" type="button" onClick={backToList} aria-label="Back to threads on this line">
+              <Icon name="back" />
+            </button>
+            <span className={`thread-popover-status-dot ${resolved ? "resolved" : "open"}`} />
+            <b className="small truncate">{author}</b>
+            <span className="tiny muted">· {resolved ? "resolved" : "open"}</span>
+            <span className="thread-popover-head-spacer" />
+            <button className="btn ghost icon sm" onClick={onClose} type="button" aria-label="Close">×</button>
+          </div>
+          <div className="thread-popover-anchor">
+            <span>“{selected.anchor.excerpt || selected.title}” · line {group.line}</span>
+          </div>
+          <div className="thread-popover-messages">
+            {selected.messages.map((message) => (
+              <article className="thread-popover-message" key={message.id}>
+                <div className={`avi sm ${message.authorType === "agent" ? "agent" : "you"}`}>
+                  {initials(message.authorHandle || message.authorName || message.authorId)}
+                </div>
+                <div className="thread-popover-message-body">
+                  <div className="row gap-6">
+                    <strong className="small">@{message.authorHandle || message.authorName || message.authorId}</strong>
+                    <span className="tiny muted">{shortTime(message.createdAt)}</span>
+                  </div>
+                  <p>{message.body}</p>
+                </div>
+              </article>
+            ))}
+          </div>
+          <div className="thread-popover-actions">
+            <button
+              className="thread-popover-status-action"
+              type="button"
+              onClick={toggleStatus}
+              disabled={statusBusy}
+              aria-label={resolved ? "Reopen thread" : "Mark as resolved"}
+            >
+              <span className="thread-popover-check">✓</span>
+              {statusBusy ? "Updating…" : resolved ? "Reopen" : "Mark as resolved"}
+            </button>
+            <button className="thread-popover-jump" type="button" onClick={() => jumpToThread(selected.id)} aria-label={`Jump to line ${group.line}`}>
+              Jump to line {group.line} →
+            </button>
+          </div>
+          {error ? <div className="thread-popover-error" role="alert">{error}</div> : null}
+          <form className="thread-popover-reply" onSubmit={submitReply}>
+            <textarea
+              rows={1}
+              value={reply}
+              onChange={(event) => setReply(event.target.value)}
+              onKeyDown={(event) => {
+                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                  event.preventDefault();
+                  event.currentTarget.form?.requestSubmit();
+                }
+              }}
+              placeholder="Reply to this thread…"
+              aria-label="Reply to this thread"
+            />
+            <button className="btn accent" disabled={!reply.trim() || replyBusy} aria-label="Send reply">
+              {replyBusy ? "Sending…" : "Send"}
+            </button>
+          </form>
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <div className="thread-popover-scrim" aria-hidden="true" />
+      <div
+        ref={popoverRef}
+        className="thread-popover card lifted"
+        style={popoverStyle}
+        role="dialog"
+        aria-modal="false"
+        aria-label={`Threads on line ${group.line}`}
+      >
+        <div className="thread-popover-head">
+          <Icon name="message" />
+          <b className="small">Line {group.line}</b>
+          <span className="small muted">· {threadItems.length} thread{threadItems.length === 1 ? "" : "s"}</span>
+          <span className="thread-popover-head-spacer" />
+          <button className="btn ghost icon sm" onClick={onClose} type="button" aria-label="Close">×</button>
+        </div>
+        <div className="thread-popover-list">
+          {threadItems.map((thread) => {
+            const resolved = thread.status === "resolved";
+            const author = thread.createdByHandle ? `@${thread.createdByHandle}` : thread.createdByName || "Someone";
+            return (
+              <button
+                className={`thread-popover-row${resolved ? " resolved" : ""}`}
+                key={thread.id}
+                data-thread-id={thread.id}
+                type="button"
+                onClick={() => openThread(thread.id)}
+                aria-label={`Open thread by ${author}`}
+              >
+                <span className={`thread-popover-status-dot ${resolved ? "resolved" : "open"}`} />
+                <div className={`avi sm ${thread.createdByType === "agent" ? "agent" : "you"}`}>
+                  {initials(thread.createdByHandle || thread.createdByName || "T")}
+                </div>
+                <div className="col gap-2 min-0 thread-popover-row-copy">
+                  <div className="small truncate">
+                    <b>{author}</b> {thread.messages[0]?.body || thread.title}
+                  </div>
+                  <div className="tiny muted">{shortTime(thread.updatedAt)}</div>
+                </div>
+                <Icon name="chevron" />
+              </button>
+            );
+          })}
+        </div>
+        <div className="thread-popover-foot">
+          <button type="button" onClick={() => jumpToThread(threadItems[0]?.id || "")} aria-label={`Jump to line ${group.line}`}>
+            Jump to line {group.line} →
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
 export function DocumentEditor({
   api,
   token,
@@ -2583,8 +2886,9 @@ export function DocumentEditor({
   threads,
   focusThreadId,
   onFocusThreadHandled,
-  onThreadSelected,
   onThreadCreated,
+  onThreadsChanged,
+  onJumpToThread,
   titleEditing,
   titleDraft,
   onTitleEditStart,
@@ -2602,8 +2906,9 @@ export function DocumentEditor({
   threads: ThreadItem[];
   focusThreadId: string;
   onFocusThreadHandled: () => void;
-  onThreadSelected: (threadId: string) => void;
   onThreadCreated: (threadId: string) => void;
+  onThreadsChanged: () => void;
+  onJumpToThread: (threadId: string) => void;
   titleEditing: boolean;
   titleDraft: string;
   onTitleEditStart: () => void;
@@ -2670,6 +2975,18 @@ export function DocumentEditor({
   }, [document.id, document.path]);
 
   useEffect(() => {
+    if (!activeThreadGroup) return;
+    const currentIds = new Set(activeThreadGroup.threads.map((thread) => thread.id));
+    const content = ytext.toString();
+    const nextThreads = threads
+      .filter((thread) => currentIds.has(thread.id))
+      .map((thread): LiveThread => ({ ...thread, anchor: resolveThreadAnchorLive(thread.anchor, ydoc, content) }));
+    if (nextThreads.length) {
+      setActiveThreadGroup({ line: activeThreadGroup.line, threads: nextThreads });
+    }
+  }, [threads, ydoc, ytext]);
+
+  useEffect(() => {
     if (threadDraftOpen) {
       window.setTimeout(() => draftRef.current?.focus(), 0);
     }
@@ -2699,11 +3016,6 @@ export function DocumentEditor({
   const openLineThreads = (group: LineThreadGroup<LiveThread>, point: { x: number; y: number }) => {
     setThreadPopoverPoint(point);
     setActiveThreadGroup(group);
-  };
-
-  const openThread = (threadId: string) => {
-    onThreadSelected(threadId);
-    setActiveThreadGroup(null);
   };
 
   const openThreadDraft = () => {
@@ -2812,32 +3124,15 @@ export function DocumentEditor({
         ) : null}
 
         {activeThreadGroup ? (
-          <div className="thread-popover card lifted" style={{ left: threadPopoverPoint.x, top: threadPopoverPoint.y }}>
-            <div className="thread-popover-head">
-              <div>
-                <b className="small">{activeThreadGroup.threads.length} thread{activeThreadGroup.threads.length === 1 ? "" : "s"} on this line</b>
-                <div className="tiny muted">line {activeThreadGroup.line}</div>
-              </div>
-              <button className="btn ghost icon sm" onClick={() => setActiveThreadGroup(null)} type="button" aria-label="Close">×</button>
-            </div>
-            <div className="thread-popover-list">
-              {activeThreadGroup.threads.map((thread) => (
-                <button className="thread-popover-row" key={thread.id} type="button" onClick={() => openThread(thread.id)}>
-                  <div className={`avi sm ${thread.createdByType === "agent" ? "agent" : "you"}`}>{initials(thread.createdByHandle || thread.createdByName || "T")}</div>
-                  <div className="col gap-2 min-0">
-                    <div className="small truncate">
-                      <b>{thread.createdByHandle ? `@${thread.createdByHandle}` : thread.createdByName || "Someone"}</b>{" "}
-                      {thread.messages[0]?.body || thread.title}
-                    </div>
-                    <div className="tiny muted">{shortTime(thread.updatedAt)} · {threadReplyLabel(thread)}</div>
-                  </div>
-                </button>
-              ))}
-            </div>
-            <div className="thread-popover-foot">
-              <span className="tiny muted">Open a thread to reply or jump to range.</span>
-            </div>
-          </div>
+          <ThreadPopover
+            api={api}
+            workspaceId={workspaceId}
+            group={activeThreadGroup}
+            point={threadPopoverPoint}
+            onClose={() => setActiveThreadGroup(null)}
+            onJumpToThread={onJumpToThread}
+            onThreadsChanged={onThreadsChanged}
+          />
         ) : null}
       </div>
     </div>
@@ -4478,6 +4773,8 @@ export function Icon({ name }: { name: string }) {
       return <svg className="i sm" viewBox="0 0 24 24"><path d="M12 3l10 18H2L12 3z" /><path d="M12 9v5M12 18h.01" /></svg>;
     case "thread":
       return <svg className="i sm" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5A8.5 8.5 0 1 1 21 11.5z" /></svg>;
+    case "message":
+      return <svg className="i sm" viewBox="0 0 16 16"><path d="M3 3h10a1.6 1.6 0 0 1 1.6 1.6v5A1.6 1.6 0 0 1 13 11.2H6.6L4 13.4v-2.2H3a1.6 1.6 0 0 1-1.6-1.6v-5A1.6 1.6 0 0 1 3 3Z" /></svg>;
     case "people":
       return <svg className="i sm" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /></svg>;
     case "search":

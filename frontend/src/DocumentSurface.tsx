@@ -291,15 +291,15 @@ export function DocumentSurface({
       <div ref={hostRef} className="document-surface" aria-label="Document editor" />
       <div className="thread-anchor-rail" aria-label="Thread anchors">
         {railMarkers.map((marker) => {
-          const count = marker.threads.length;
+          const count = marker.threads.filter((thread) => thread.status === "open").length;
           return (
             <button
-              key={`${marker.line}:${marker.threads.map((thread) => thread.id).join("|")}`}
+              key={`${marker.line}:${marker.threads.map((thread) => thread.id).sort().join("|")}`}
               className="thread-rail-marker"
               type="button"
               style={{ top: marker.top }}
-              aria-label={`${count} thread${count === 1 ? "" : "s"} on line ${marker.line}`}
-              title={`${count} thread${count === 1 ? "" : "s"} on line ${marker.line}`}
+              aria-label={`${count} open thread${count === 1 ? "" : "s"} on line ${marker.line}`}
+              title={`${count} open thread${count === 1 ? "" : "s"} on line ${marker.line}`}
               onMouseDown={(event) => event.preventDefault()}
               onClick={(event) => {
                 event.preventDefault();
@@ -311,7 +311,9 @@ export function DocumentSurface({
                 });
               }}
             >
-              <span className="thread-rail-dot" />
+              <svg className="thread-rail-icon" viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M3 3h10a1.6 1.6 0 0 1 1.6 1.6v5A1.6 1.6 0 0 1 13 11.2H6.6L4 13.4v-2.2H3a1.6 1.6 0 0 1-1.6-1.6v-5A1.6 1.6 0 0 1 3 3Z" />
+              </svg>
               <span>{count}</span>
             </button>
           );
@@ -439,6 +441,9 @@ function computeThreadRailMarkers(view: EditorView, shell: HTMLElement, ydoc: Y.
   return Array.from(groups.entries())
     .sort(([left], [right]) => left - right)
     .flatMap(([lineNumber, groupThreads]) => {
+      if (!groupThreads.some((thread) => thread.status === "open")) {
+        return [];
+      }
       const safeLine = Math.max(1, Math.min(view.state.doc.lines, lineNumber));
       const line = view.state.doc.line(safeLine);
       if (line.to < view.viewport.from || line.from > view.viewport.to) {
