@@ -931,10 +931,6 @@ a:focus-visible,
   padding: 4px 8px;
 }
 
-.sb-divider {
-  margin: 6px 8px;
-}
-
 .lab {
   display: flex;
   align-items: center;
@@ -1146,8 +1142,7 @@ a:focus-visible,
 .sb .faint {
   color: var(--sb-ink-2);
 }
-.sb .divider,
-.sb .sb-divider {
+.sb .divider {
   background: var(--sb-line);
 }
 .sb .workspace-switcher {
