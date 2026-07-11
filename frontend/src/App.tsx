@@ -2068,7 +2068,6 @@ export function WorkspaceApp({
               void reload();
             }}
             onThreadsChanged={() => void reload()}
-            onJumpToThread={(threadId) => setFocusThreadId(threadId)}
             titleEditing={renamingDocumentId === activeDocument.id}
             titleDraft={renamingDocumentId === activeDocument.id ? titleDraft : fileName(activeDocument.path)}
             onTitleEditStart={() => startRenamingDocument(activeDocument)}
@@ -2831,7 +2830,6 @@ export function ThreadPopover({
   group,
   point,
   onClose,
-  onJumpToThread,
   onThreadsChanged,
 }: {
   api: ApiClient;
@@ -2839,7 +2837,6 @@ export function ThreadPopover({
   group: LineThreadGroup<LiveThread>;
   point: { x: number; y: number };
   onClose: () => void;
-  onJumpToThread: (threadId: string) => void;
   onThreadsChanged: () => void;
 }) {
   const popoverRef = useRef<HTMLDivElement | null>(null);
@@ -2963,10 +2960,6 @@ export function ThreadPopover({
     }, 0);
   };
 
-  const jumpToThread = (threadId: string) => {
-    onJumpToThread(threadId);
-  };
-
   const submitReply = async (event: FormEvent) => {
     event.preventDefault();
     if (!selected || !reply.trim() || replyBusy) return;
@@ -3024,8 +3017,6 @@ export function ThreadPopover({
             onClose={onClose}
             onToggleStatus={toggleStatus}
             statusBusy={statusBusy}
-            onJump={() => jumpToThread(selected.id)}
-            jumpLabel={`Jump to line ${group.line}`}
             error={error}
             reply={reply}
             onReplyChange={setReply}
@@ -3084,17 +3075,6 @@ export function ThreadPopover({
           })}
           {!openThreadItems.length ? <p className="empty-note">No open threads on this line</p> : null}
         </div>
-        {threadItems.length ? (
-          <div className="thread-popover-foot">
-            <button
-              type="button"
-              onClick={() => jumpToThread(openThreadItems[0]?.id ?? threadItems[0].id)}
-              aria-label={`Jump to line ${group.line}`}
-            >
-              Jump to line {group.line} →
-            </button>
-          </div>
-        ) : null}
       </div>
     </>
   );
@@ -3112,7 +3092,6 @@ export function DocumentEditor({
   onFocusThreadHandled,
   onThreadCreated,
   onThreadsChanged,
-  onJumpToThread,
   titleEditing,
   titleDraft,
   onTitleEditStart,
@@ -3132,7 +3111,6 @@ export function DocumentEditor({
   onFocusThreadHandled: () => void;
   onThreadCreated: (threadId: string) => void;
   onThreadsChanged: () => void;
-  onJumpToThread: (threadId: string) => void;
   titleEditing: boolean;
   titleDraft: string;
   onTitleEditStart: () => void;
@@ -3354,7 +3332,6 @@ export function DocumentEditor({
             group={activeThreadGroup}
             point={threadPopoverPoint}
             onClose={() => setActiveThreadGroup(null)}
-            onJumpToThread={onJumpToThread}
             onThreadsChanged={onThreadsChanged}
           />
         ) : null}

@@ -184,7 +184,7 @@ test("thread popover: resolving the last open thread removes only the marker", a
   await expect(list.locator(".thread-popover-row")).toHaveCount(0);
   await expect(list.getByText("· 0 open")).toBeVisible();
   await expect(list.getByText("No open threads on this line")).toBeVisible();
-  await expect(list.getByRole("button", { name: "Jump to line 1" })).toBeVisible();
+  await expect(list.getByRole("button", { name: "Jump to line 1" })).toHaveCount(0);
   await captureRender(page, testInfo, "thread-popover-empty-list");
   await list.getByRole("button", { name: "Close" }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
@@ -209,6 +209,7 @@ test("thread popover: mixed line hides resolved rows after Back", async ({ page 
   await expect(rows).toHaveCount(1);
   await expect(rows.nth(0)).toContainText(openBody);
   await expect(list.getByText(resolvedBody)).toHaveCount(0);
+  await expect(list.getByRole("button", { name: "Jump to line 1" })).toHaveCount(0);
   await captureRender(page, testInfo, "thread-popover-list");
 
   assertNoPageErrors(errors);
@@ -268,7 +269,7 @@ test("thread popover: mobile sheet keeps fixed regions reachable and scrolls mes
   await expect(messages).toBeVisible();
   expect(await messages.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
   await expect(detail.getByRole("button", { name: "Mark as resolved" })).toBeVisible();
-  await expect(detail.getByRole("button", { name: "Jump to line 1" })).toBeVisible();
+  await expect(detail.getByRole("button", { name: "Jump to line 1" })).toHaveCount(0);
   await expect(detail.getByRole("textbox", { name: "Reply to this thread" })).toBeVisible();
   await captureRender(page, testInfo, "thread-popover-mobile-detail");
 

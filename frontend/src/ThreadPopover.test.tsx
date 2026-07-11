@@ -80,7 +80,6 @@ describe("ThreadPopover", () => {
         group={{ line: 5, threads: [resolved, threadFixture()] }}
         point={{ x: 20, y: 30 }}
         onClose={vi.fn()}
-        onJumpToThread={vi.fn()}
         onThreadsChanged={vi.fn()}
       />,
     );
@@ -92,6 +91,7 @@ describe("ThreadPopover", () => {
     expect(rows[0].textContent).toContain("@ada");
     expect(container.textContent).not.toContain("@lin");
     expect(container.querySelector(".thread-popover-status-dot")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Jump to line 5" })).toBeNull();
 
     await user.click(rows[0] as HTMLElement);
     const dialog = screen.getByRole("dialog", { name: "Thread by @ada" });
@@ -117,7 +117,6 @@ describe("ThreadPopover", () => {
         group={{ line: 5, threads: [threadFixture()] }}
         point={{ x: 20, y: 30 }}
         onClose={vi.fn()}
-        onJumpToThread={vi.fn()}
         onThreadsChanged={onThreadsChanged}
       />,
     );
@@ -135,7 +134,6 @@ describe("ThreadPopover", () => {
     const user = userEvent.setup();
     const updateThreadStatus = vi.fn().mockResolvedValue({ thread: threadFixture({ status: "resolved" }) });
     const onClose = vi.fn();
-    const onJumpToThread = vi.fn();
     render(
       <ThreadPopover
         api={mockApi({ updateThreadStatus })}
@@ -143,7 +141,6 @@ describe("ThreadPopover", () => {
         group={{ line: 5, threads: [threadFixture()] }}
         point={{ x: 20, y: 30 }}
         onClose={onClose}
-        onJumpToThread={onJumpToThread}
         onThreadsChanged={vi.fn()}
       />,
     );
@@ -162,8 +159,7 @@ describe("ThreadPopover", () => {
     expect(screen.queryByRole("button", { name: "Open thread by @ada" })).toBeNull();
     expect(screen.getByText("· 0 open")).toBeTruthy();
     expect(screen.getByText("No open threads on this line")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Jump to line 5" }));
-    expect(onJumpToThread).toHaveBeenCalledWith("thread_open");
+    expect(screen.queryByRole("button", { name: "Jump to line 5" })).toBeNull();
   });
 
   it("keeps selected detail stable when a status refresh reverses the same thread membership", async () => {
@@ -179,7 +175,6 @@ describe("ThreadPopover", () => {
       workspaceId: "ws",
       point: { x: 20, y: 30 },
       onClose: vi.fn(),
-      onJumpToThread: vi.fn(),
       onThreadsChanged: vi.fn(),
     };
     const { rerender } = render(
@@ -206,9 +201,7 @@ describe("ThreadPopover", () => {
     expect(screen.getByRole("button", { name: "Open thread by @lin" })).toBeTruthy();
   });
 
-  it("jumps to the anchor and supports Escape/outside dismissal", async () => {
-    const user = userEvent.setup();
-    const onJumpToThread = vi.fn();
+  it("omits redundant Jump and supports Escape/outside dismissal", () => {
     const onClose = vi.fn();
     const { rerender } = render(
       <ThreadPopover
@@ -217,13 +210,11 @@ describe("ThreadPopover", () => {
         group={{ line: 5, threads: [threadFixture()] }}
         point={{ x: 20, y: 30 }}
         onClose={onClose}
-        onJumpToThread={onJumpToThread}
         onThreadsChanged={vi.fn()}
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Jump to line 5" }));
-    expect(onJumpToThread).toHaveBeenCalledWith("thread_open");
+    expect(screen.queryByRole("button", { name: "Jump to line 5" })).toBeNull();
 
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -235,7 +226,6 @@ describe("ThreadPopover", () => {
         group={{ line: 5, threads: [threadFixture()] }}
         point={{ x: 20, y: 30 }}
         onClose={onClose}
-        onJumpToThread={onJumpToThread}
         onThreadsChanged={vi.fn()}
       />,
     );

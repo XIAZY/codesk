@@ -2035,14 +2035,6 @@ button.inbox-row:hover {
   flex: 1;
 }
 
-.thread-popover-foot {
-  flex: 0 0 auto;
-  border-top: 1px solid var(--border);
-  background: var(--paper-2);
-  padding: 0;
-}
-
-.thread-popover-foot button,
 .thread-popover-jump,
 .thread-popover-status-action {
   border: 0;
@@ -2054,13 +2046,6 @@ button.inbox-row:hover {
   font-weight: 700;
 }
 
-.thread-popover-foot button {
-  width: 100%;
-  padding: 10px 12px;
-  text-align: left;
-}
-
-.thread-popover-foot button:hover,
 .thread-popover-jump:hover,
 .thread-popover-status-action:hover {
   color: var(--ink);
@@ -2251,8 +2236,7 @@ button.inbox-row:hover {
   .thread-popover-head,
   .thread-popover-anchor,
   .thread-popover-actions,
-  .thread-popover-reply,
-  .thread-popover-foot {
+  .thread-popover-reply {
     flex: 0 0 auto;
   }
 
