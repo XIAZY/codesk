@@ -3,75 +3,33 @@ package notty
 import (
 	"database/sql"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 )
 
-// knownAgentRuntimes mirrors the runtime drivers the daemon ships (see
-// daemon/internal/syncer). A workspace's default runtime is a UI default for
-// new agents; "" means no default.
-var knownAgentRuntimes = map[string]struct{}{
-	"codex":  {},
-	"claude": {},
-}
-
-func validateDefaultRuntime(value string) (string, error) {
-	runtime := strings.TrimSpace(value)
-	if runtime == "" {
-		return "", nil
-	}
-	if _, ok := knownAgentRuntimes[runtime]; !ok {
-		return "", fmt.Errorf("Unknown default runtime %q.", runtime)
-	}
-	return runtime, nil
-}
-
-var errSlugTaken = errors.New("Workspace slug is already taken.")
-
-// updateWorkspaceSettings applies a partial update to the workspace summary
-// fields. Field-level authorization (slug is owner-only) is the handler's
-// responsibility; this function validates values and applies last-write-wins.
+// updateWorkspaceSettings applies a partial update to the workspace name.
+// Workspace slugs and default runtime are immutable after creation.
 func updateWorkspaceSettings(db *sql.DB, workspaceID string, req UpdateWorkspaceRequest) (*Workspace, error) {
 	if db == nil {
 		return nil, errors.New("database is required")
 	}
-	if req.Name == nil && req.Slug == nil && req.DefaultRuntime == nil {
-		return nil, errors.New("At least one of name, slug, or defaultRuntime is required.")
+	if req.Name == nil {
+		return nil, errors.New("Name is required.")
 	}
 	workspace, err := getWorkspace(db, workspaceID)
 	if err != nil {
 		return nil, err
 	}
-	if req.Name != nil {
-		name := strings.TrimSpace(*req.Name)
-		if name == "" {
-			return nil, errors.New("Workspace name is required.")
-		}
-		workspace.Name = name
+	name := strings.TrimSpace(*req.Name)
+	if name == "" {
+		return nil, errors.New("Workspace name is required.")
 	}
-	if req.Slug != nil {
-		slug, err := validateWorkspaceSlug(*req.Slug)
-		if err != nil {
-			return nil, err
-		}
-		workspace.Slug = slug
-	}
-	if req.DefaultRuntime != nil {
-		runtime, err := validateDefaultRuntime(*req.DefaultRuntime)
-		if err != nil {
-			return nil, err
-		}
-		workspace.DefaultRuntime = runtime
-	}
+	workspace.Name = name
 	workspace.UpdatedAt = time.Now().UTC()
 	if _, err := db.Exec(
-		`UPDATE workspaces SET slug = $1, name = $2, default_runtime = $3, updated_at = $4 WHERE id = $5::uuid`,
-		workspace.Slug, workspace.Name, workspace.DefaultRuntime, workspace.UpdatedAt, workspace.ID,
+		`UPDATE workspaces SET name = $1, updated_at = $2 WHERE id = $3::uuid`,
+		workspace.Name, workspace.UpdatedAt, workspace.ID,
 	); err != nil {
-		if isUniqueViolation(err) {
-			return nil, errSlugTaken
-		}
 		return nil, err
 	}
 	return workspace, nil

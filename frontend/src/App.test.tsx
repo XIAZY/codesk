@@ -434,42 +434,6 @@ describe("WorkspaceApp agent status rail", () => {
 });
 
 describe("WorkspaceApp workspace management", () => {
-  it("updates the workspace list before navigating to a changed slug", async () => {
-    const user = userEvent.setup();
-    const calls: string[] = [];
-    const updateWorkspaceSettings = vi.fn().mockResolvedValue({
-      workspace: { id: "ws", slug: "new-slug", name: "Workspace", defaultRuntime: "codex" },
-    });
-    workspaceMock = workspaceFixture({ currentMembershipRole: "owner", slug: "workspace", defaultRuntime: "" });
-    window.history.replaceState(null, "", "/w/workspace");
-
-    render(
-      <WorkspaceApp
-        api={{ updateLastAccessed: vi.fn().mockResolvedValue({}), updateWorkspaceSettings } as never}
-        token="token"
-        workspaceId="ws"
-        workspaceSlug="workspace"
-        view={{ kind: "home" }}
-        account={{ id: "account_1", email: "you@example.com", displayName: "You" }}
-        workspaces={[{ id: "ws", slug: "workspace", name: "Workspace" }]}
-        onAccess={vi.fn()}
-        onWorkspaceUpdated={(workspace) => calls.push(`updated:${workspace.slug}`)}
-        onWorkspaceChange={vi.fn()}
-        onSignOut={vi.fn()}
-      />,
-    );
-
-    await user.click(screen.getByRole("button", { name: "Manage / Settings" }));
-    await user.click(screen.getByRole("button", { name: "Workspace settings" }));
-    await user.clear(screen.getByLabelText("Workspace URL slug"));
-    await user.type(screen.getByLabelText("Workspace URL slug"), "new-slug");
-    await user.selectOptions(screen.getByLabelText("Default agent runtime"), "codex");
-    await user.click(screen.getByRole("button", { name: "Save settings" }));
-
-    await waitFor(() => expect(window.location.pathname).toBe("/w/new-slug"));
-    expect(calls[0]).toBe("updated:new-slug");
-  });
-
   it("navigates away only after workspace.deleted clears the live workspace state", async () => {
     const onWorkspaceDeleted = vi.fn();
     const props = {
@@ -558,7 +522,6 @@ describe("ManageModal", () => {
   const baseProps = {
     api: {} as never,
     workspaceId: "ws",
-    workspaceSlug: "acme",
     canInvite: true,
     groupedAgents: [],
     onTabChange: vi.fn(),
@@ -592,87 +555,45 @@ describe("ManageModal", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("saves workspace name, slug, and default runtime with owner-only slug editing", async () => {
+  it("saves workspace name", async () => {
     const user = userEvent.setup();
     const updateWorkspaceSettings = vi.fn().mockResolvedValue({
-      workspace: { id: "ws", name: "Acme Labs", slug: "acme-labs", defaultRuntime: "claude" },
+      workspace: { id: "ws", name: "Acme Labs", slug: "acme" },
     });
     const onWorkspaceSaved = vi.fn();
-    const workspace = { ...emptyWorkspace(), workspaceId: "ws", name: "Acme", slug: "acme", defaultRuntime: "", currentMembershipRole: "owner" };
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws", name: "Acme", slug: "acme", currentMembershipRole: "owner" };
     render(
       <ManageModal
         {...baseProps}
         api={{ updateWorkspaceSettings } as never}
         onWorkspaceSaved={onWorkspaceSaved}
         workspace={workspace as never}
-        workspaceSlug="acme"
         activeTab="workspace"
       />
     );
 
     await user.clear(screen.getByLabelText("Workspace name"));
     await user.type(screen.getByLabelText("Workspace name"), "Acme Labs");
-    await user.clear(screen.getByLabelText("Workspace URL slug"));
-    await user.type(screen.getByLabelText("Workspace URL slug"), "acme-labs");
-    await user.selectOptions(screen.getByLabelText("Default agent runtime"), "claude");
     await user.click(screen.getByRole("button", { name: "Save settings" }));
 
-    expect(updateWorkspaceSettings).toHaveBeenCalledWith("ws", {
-      name: "Acme Labs",
-      slug: "acme-labs",
-      defaultRuntime: "claude",
-    });
-    expect(onWorkspaceSaved).toHaveBeenCalledWith({ id: "ws", name: "Acme Labs", slug: "acme-labs", defaultRuntime: "claude" });
+    expect(updateWorkspaceSettings).toHaveBeenCalledWith("ws", { name: "Acme Labs" });
+    expect(onWorkspaceSaved).toHaveBeenCalledWith({ id: "ws", name: "Acme Labs", slug: "acme" });
     expect(await screen.findByText("Workspace settings saved.")).toBeTruthy();
   });
 
-  it("lets admins change name/runtime but not the slug", async () => {
-    const user = userEvent.setup();
-    const updateWorkspaceSettings = vi.fn().mockResolvedValue({
-      workspace: { id: "ws", name: "Admin name", slug: "acme", defaultRuntime: "codex" },
-    });
-    const workspace = { ...emptyWorkspace(), workspaceId: "ws", name: "Acme", slug: "acme", defaultRuntime: "", currentMembershipRole: "admin" };
-    render(
-      <ManageModal
-        {...baseProps}
-        api={{ updateWorkspaceSettings } as never}
-        workspace={workspace as never}
-        workspaceSlug="acme"
-        activeTab="workspace"
-      />
-    );
-
-    expect((screen.getByLabelText("Workspace URL slug") as HTMLInputElement).disabled).toBe(true);
-    await user.clear(screen.getByLabelText("Workspace name"));
-    await user.type(screen.getByLabelText("Workspace name"), "Admin name");
-    await user.selectOptions(screen.getByLabelText("Default agent runtime"), "codex");
-    await user.click(screen.getByRole("button", { name: "Save settings" }));
-
-    expect(updateWorkspaceSettings).toHaveBeenCalledWith("ws", {
-      name: "Admin name",
-      defaultRuntime: "codex",
-    });
-  });
-
-  it("surfaces slug conflicts distinctly from validation errors", async () => {
-    const user = userEvent.setup();
-    const updateWorkspaceSettings = vi.fn().mockRejectedValue(new ApiError(409, "Workspace slug is already taken."));
+  it("does not render slug or runtime controls — both are immutable after creation", () => {
     const workspace = { ...emptyWorkspace(), workspaceId: "ws", name: "Acme", slug: "acme", currentMembershipRole: "owner" };
     render(
       <ManageModal
         {...baseProps}
-        api={{ updateWorkspaceSettings } as never}
         workspace={workspace as never}
-        workspaceSlug="acme"
         activeTab="workspace"
       />
     );
 
-    await user.clear(screen.getByLabelText("Workspace URL slug"));
-    await user.type(screen.getByLabelText("Workspace URL slug"), "taken");
-    await user.click(screen.getByRole("button", { name: "Save settings" }));
-
-    expect(await screen.findByText("Slug taken. Choose another workspace URL.")).toBeTruthy();
+    expect(screen.queryByLabelText("Workspace URL slug")).toBeNull();
+    expect(screen.queryByLabelText("Default agent runtime")).toBeNull();
+    expect(screen.queryByText(/slug/i)).toBeNull();
   });
 
   it("requires exact workspace-name confirmation before deleting", async () => {

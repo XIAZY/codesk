@@ -16,16 +16,15 @@ func TestWorkspaceSettingsPatchAuthZAndValidation(t *testing.T) {
 	workspace := authTestCreateWorkspace(t, router, owner.Token, "Settings Tenant")
 	target := "/api/workspaces/" + workspace.ID + "/workspace"
 
-	// Owner renames + sets a default runtime.
+	// Owner renames.
 	var updated struct {
 		Workspace Workspace `json:"workspace"`
 	}
 	authTestJSON(t, router, http.MethodPatch, target, owner.Token, UpdateWorkspaceRequest{
-		Name:           patchStr("Settings Tenant Renamed"),
-		DefaultRuntime: patchStr("claude"),
+		Name: patchStr("Settings Tenant Renamed"),
 	}, http.StatusOK, &updated)
-	if updated.Workspace.Name != "Settings Tenant Renamed" || updated.Workspace.DefaultRuntime != "claude" {
-		t.Fatalf("expected updated summary, got %#v", updated.Workspace)
+	if updated.Workspace.Name != "Settings Tenant Renamed" {
+		t.Fatalf("expected updated name, got %#v", updated.Workspace)
 	}
 
 	// The update survives independent reads (list endpoint).
@@ -37,7 +36,7 @@ func TestWorkspaceSettingsPatchAuthZAndValidation(t *testing.T) {
 	for _, ws := range listed.Workspaces {
 		if ws.ID == workspace.ID {
 			found = true
-			if ws.Name != "Settings Tenant Renamed" || ws.DefaultRuntime != "claude" {
+			if ws.Name != "Settings Tenant Renamed" {
 				t.Fatalf("list did not reflect update: %#v", ws)
 			}
 		}
@@ -46,15 +45,7 @@ func TestWorkspaceSettingsPatchAuthZAndValidation(t *testing.T) {
 		t.Fatal("workspace missing from list")
 	}
 
-	// Owner changes the slug; the list reflects it.
-	authTestJSON(t, router, http.MethodPatch, target, owner.Token, UpdateWorkspaceRequest{
-		Slug: patchStr("settings-tenant-moved"),
-	}, http.StatusOK, &updated)
-	if updated.Workspace.Slug != "settings-tenant-moved" {
-		t.Fatalf("expected slug change, got %q", updated.Workspace.Slug)
-	}
-
-	// Admin may rename but not change the slug.
+	// Admin may rename.
 	admin := authTestRegister(t, router, "ws-settings-admin@example.com", "owner-pass", "Settings Admin")
 	authTestAddMember(t, router, owner.Token, workspace.ID, admin.Account.Email, "settings-admin")
 	if _, err := server.sqlDB().Exec(
@@ -66,9 +57,6 @@ func TestWorkspaceSettingsPatchAuthZAndValidation(t *testing.T) {
 	authTestJSON(t, router, http.MethodPatch, target, admin.Token, UpdateWorkspaceRequest{
 		Name: patchStr("Admin Renamed"),
 	}, http.StatusOK, &updated)
-	authTestStatus(t, router, http.MethodPatch, target, admin.Token, UpdateWorkspaceRequest{
-		Slug: patchStr("admin-slug-grab"),
-	}, http.StatusForbidden)
 
 	// A plain member may not manage workspace settings.
 	member := authTestRegister(t, router, "ws-settings-member@example.com", "owner-pass", "Settings Member")
@@ -91,17 +79,65 @@ func TestWorkspaceSettingsPatchAuthZAndValidation(t *testing.T) {
 		Name: patchStr("Outsider Renamed"),
 	}, http.StatusForbidden)
 
-	// Validation: empty patch, empty name, bad slug, unknown runtime.
+	// Validation: empty patch, empty name.
 	authTestStatus(t, router, http.MethodPatch, target, owner.Token, UpdateWorkspaceRequest{}, http.StatusBadRequest)
 	authTestStatus(t, router, http.MethodPatch, target, owner.Token, UpdateWorkspaceRequest{Name: patchStr("   ")}, http.StatusBadRequest)
-	authTestStatus(t, router, http.MethodPatch, target, owner.Token, UpdateWorkspaceRequest{Slug: patchStr("Bad Slug!")}, http.StatusBadRequest)
-	authTestStatus(t, router, http.MethodPatch, target, owner.Token, UpdateWorkspaceRequest{DefaultRuntime: patchStr("cobol")}, http.StatusBadRequest)
+}
 
-	// Slug uniqueness surfaces as 409.
-	authTestCreateWorkspace(t, router, owner.Token, "Conflict Target")
-	authTestStatus(t, router, http.MethodPatch, target, owner.Token, UpdateWorkspaceRequest{
-		Slug: patchStr(authTestIdentifierFromName("Conflict Target", 64)),
-	}, http.StatusConflict)
+func TestWorkspaceSlugIsImmutableAfterCreation(t *testing.T) {
+	server, router := newAuthTestServer(t)
+	if server == nil {
+		t.Skip("NOTTY_DATABASE_TEST_URL is not set")
+	}
+
+	owner := authTestRegister(t, router, "ws-slug-immutable@example.com", "owner-pass", "Slug Immutable Owner")
+	workspace := authTestCreateWorkspace(t, router, owner.Token, "Slug Pinned")
+	original, err := getWorkspace(server.sqlDB(), workspace.ID)
+	if err != nil {
+		t.Fatalf("load workspace: %v", err)
+	}
+	originalSlug := original.Slug
+	target := "/api/workspaces/" + workspace.ID + "/workspace"
+
+	// A stale/malicious client sends {name, slug, defaultRuntime} — name updates,
+	// slug and defaultRuntime are silently ignored.
+	var updated struct {
+		Workspace Workspace `json:"workspace"`
+	}
+	authTestJSON(t, router, http.MethodPatch, target, owner.Token, map[string]string{
+		"name":           "Renamed Workspace",
+		"slug":           "attacker-slug",
+		"defaultRuntime": "claude",
+	}, http.StatusOK, &updated)
+	if updated.Workspace.Name != "Renamed Workspace" {
+		t.Fatalf("name should update, got %q", updated.Workspace.Name)
+	}
+	if updated.Workspace.Slug != originalSlug {
+		t.Fatalf("slug must be immutable: got %q, want %q", updated.Workspace.Slug, originalSlug)
+	}
+	if updated.Workspace.DefaultRuntime != original.DefaultRuntime {
+		t.Fatalf("defaultRuntime must be immutable: got %q, want %q", updated.Workspace.DefaultRuntime, original.DefaultRuntime)
+	}
+
+	// Independent reload confirms slug and defaultRuntime are unchanged in the database.
+	reloaded, err := getWorkspace(server.sqlDB(), workspace.ID)
+	if err != nil {
+		t.Fatalf("reload workspace: %v", err)
+	}
+	if reloaded.Slug != originalSlug {
+		t.Fatalf("DB slug must be immutable: got %q, want %q", reloaded.Slug, originalSlug)
+	}
+	if reloaded.DefaultRuntime != original.DefaultRuntime {
+		t.Fatalf("DB defaultRuntime must be immutable: got %q, want %q", reloaded.DefaultRuntime, original.DefaultRuntime)
+	}
+
+	// Slug-only or defaultRuntime-only PATCH (no name) is rejected as 400.
+	authTestStatus(t, router, http.MethodPatch, target, owner.Token, map[string]string{
+		"slug": "another-attempt",
+	}, http.StatusBadRequest)
+	authTestStatus(t, router, http.MethodPatch, target, owner.Token, map[string]string{
+		"defaultRuntime": "claude",
+	}, http.StatusBadRequest)
 }
 
 func TestWorkspaceDeleteRequiresOwnerAndExactNameThenCascades(t *testing.T) {
