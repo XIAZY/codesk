@@ -72,6 +72,31 @@ function markVerified(email: string): void {
   execFileSync("docker", args, { stdio: "pipe" });
 }
 
+type VerifiedAccount = {
+  email: string;
+  password: string;
+  token: string;
+};
+
+async function registerVerifiedAccount(stamp: number, slug: string, name: string): Promise<VerifiedAccount> {
+  const email = `e2e-${slug}-${stamp}@example.invalid`;
+  const password = "smoke-pass-12345";
+  await api("/api/auth/register", { method: "POST", body: JSON.stringify({ email, password, name }) });
+  markVerified(email);
+  const login = await api("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
+  if (!login.token) throw new Error(`login returned no token for ${slug} after verification`);
+  return { email, password, token: login.token };
+}
+
+async function createWorkspace(token: string, stamp: number, slug: string, name: string): Promise<any> {
+  const response = await api("/api/workspaces", {
+    method: "POST",
+    token,
+    body: JSON.stringify({ name, slug: `${slug}-${stamp}`, handle: `ob-${slug.slice(0, 10)}-${stamp}` }),
+  });
+  return response.workspace ?? response;
+}
+
 export default async function globalSetup(): Promise<void> {
   await waitFor(`${BACKEND}/healthz`, "backend");
   await waitFor(PREVIEW, "frontend preview");
@@ -99,10 +124,57 @@ export default async function globalSetup(): Promise<void> {
     body: JSON.stringify({ name: "Smoke Bravo", slug: `smoke-bravo-${stamp}`, handle: `smoke-owner-b-${stamp}` }) });
   const workspaceB = b.workspace ?? b;
 
+  // Onboarding scenarios use dedicated identities so completion and localStorage state
+  // never leak from the long-lived core smoke owner:
+  //   A: verified account with zero workspaces;
+  //   B: verified account with zero workspaces plus a real invite to an existing workspace;
+  //   E: verified returning account with an existing workspace.
+  // Phase-2 assertions are deliberately activated only after the integration wiring lands.
+  const onboardingNew = await registerVerifiedAccount(stamp, "onboarding-new", "Onboarding New User");
+
+  const inviteOwner = await registerVerifiedAccount(stamp, "onboarding-invite-owner", "Onboarding Invite Owner");
+  const invitedWorkspace = await createWorkspace(inviteOwner.token, stamp, "onboarding-invited", "Onboarding Invited Workspace");
+  const invite = await api(`/api/workspaces/${encodeURIComponent(invitedWorkspace.id)}/invites`, {
+    method: "POST",
+    token: inviteOwner.token,
+  });
+  if (!invite.url) throw new Error("onboarding invite creation returned no URL");
+  const onboardingInvited = await registerVerifiedAccount(stamp, "onboarding-invitee", "Onboarding Invited Member");
+
+  const onboardingReturning = await registerVerifiedAccount(stamp, "onboarding-returning", "Onboarding Returning User");
+  const returningWorkspace = await createWorkspace(
+    onboardingReturning.token,
+    stamp,
+    "onboarding-returning",
+    "Onboarding Returning Workspace",
+  );
+
   const seed = {
     email, password,
     slugA: workspaceA.slug, nameA: workspaceA.name,
     slugB: workspaceB.slug, nameB: workspaceB.name,
+    onboarding: {
+      brandNew: {
+        email: onboardingNew.email,
+        password: onboardingNew.password,
+      },
+      invitedMember: {
+        email: onboardingInvited.email,
+        password: onboardingInvited.password,
+        handle: `ob-invitee-${stamp}`,
+        invitePath: invite.url,
+        workspaceId: invitedWorkspace.id,
+        workspaceSlug: invitedWorkspace.slug,
+        workspaceName: invitedWorkspace.name,
+      },
+      returningUser: {
+        email: onboardingReturning.email,
+        password: onboardingReturning.password,
+        workspaceId: returningWorkspace.id,
+        workspaceSlug: returningWorkspace.slug,
+        workspaceName: returningWorkspace.name,
+      },
+    },
   };
   writeFileSync(join(__dirname, "seed.json"), JSON.stringify(seed, null, 2));
 }
