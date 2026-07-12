@@ -55,7 +55,12 @@ export type DerivedSignal =
   | "agent-exists"
   | "agent-at-work";
 
-export type OnboardingAction = { label: string; event: string };
+// The UI actions a node's buttons can fire (distinct from the §4.2 completion event
+// keys). A closed union so a typo dies at compile time and OnboardingNode stays
+// structurally assignable to P2's OnboardingStep by construction — no cast/parser.
+export type OnboardingActionEvent = "advance" | "back" | "complete" | "dismiss" | "open-thread-draft";
+
+export type OnboardingAction = { label: string; event: OnboardingActionEvent };
 
 // `spotlight` nodes form the guided sequence (step counter); `tip` nodes are
 // standalone contextual callouts (no counter, one-time).
