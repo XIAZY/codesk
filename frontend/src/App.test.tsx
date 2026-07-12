@@ -3,7 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentDetailModal, CreateDaemonModal, DaemonDetailModal, DaemonsManagement, ManageModal, WorkspaceApp, WorkspaceOnboarding } from "./App";
+import { AgentDetailModal, CreateDaemonModal, DaemonDetailModal, DaemonsManagement, documentFolders, ManageModal, MoveDocumentModal, WorkspaceApp, WorkspaceOnboarding } from "./App";
 import { ApiError } from "./api";
 import { emptyWorkspace, identifierFromName, identifierHelpText, identifierPattern, workspaceSlugMaxLength } from "./logic";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
@@ -273,9 +273,83 @@ describe("WorkspaceOnboarding", () => {
   });
 });
 
+describe("documentFolders", () => {
+  it("derives root + nested folders from document paths, pre-ordered with depth", () => {
+    const docs = [
+      { id: "1", path: "Drafts/a.md", title: "a" },
+      { id: "2", path: "Specs/API/v3/b.md", title: "b" },
+      { id: "3", path: "c.md", title: "c" },
+    ] as DocumentItem[];
+    // Folders are path prefixes only (no folder entities): root first, each parent before its children, with
+    // depth for indentation. The root-level file contributes no folder.
+    expect(documentFolders(docs).map((folder) => `${folder.depth}:${folder.path}`)).toEqual([
+      "0:",
+      "1:Drafts",
+      "1:Specs",
+      "2:Specs/API",
+      "3:Specs/API/v3",
+    ]);
+  });
+
+  it("orders segment-wise so a child never renders under a prefix-overlapping sibling", () => {
+    const docs = [
+      { id: "1", path: "notes/a.md", title: "a" },
+      { id: "2", path: "notes-old/b.md", title: "b" },
+      { id: "3", path: "notes/x/c.md", title: "c" },
+    ] as DocumentItem[];
+    // A flat string sort puts `notes-old` before `notes/x` ('-' < '/'), mis-parenting the depth-2 child under
+    // `notes-old`. Segment-wise keeps `notes/x` directly under `notes`, then `notes-old` after the subtree.
+    expect(documentFolders(docs).map((folder) => folder.path)).toEqual([
+      "",
+      "notes",
+      "notes/x",
+      "notes-old",
+    ]);
+  });
+});
+
+describe("MoveDocumentModal", () => {
+  const doc = { id: "d1", path: "Docs/Product.md", title: "Product.md" } as DocumentItem;
+  function renderMove(others: DocumentItem[], onMove = vi.fn()) {
+    render(<MoveDocumentModal document={doc} documents={[doc, ...others]} onClose={vi.fn()} onMove={onMove} />);
+    return onMove;
+  }
+  const moveButton = () => screen.getByRole("button", { name: "Move document" }) as HTMLButtonElement;
+
+  it("rejects a \"..\" folder name whose committed path would differ from the preview", () => {
+    renderMove([]);
+    fireEvent.change(screen.getByLabelText(/New folder in/i), { target: { value: ".." } });
+    expect(moveButton().disabled).toBe(true);
+    expect(screen.getByText(/isn't allowed/i)).toBeTruthy();
+    // WYSIWYG: the preview shows the normalized committed path, never the raw "Docs/../Product.md".
+    expect(screen.queryByText(/\.\.\//)).toBeNull();
+  });
+
+  it("rejects a dot-prefixed folder name the daemon's visible-root contract would refuse", () => {
+    renderMove([]);
+    fireEvent.change(screen.getByLabelText(/New folder in/i), { target: { value: ".secret" } });
+    expect(moveButton().disabled).toBe(true);
+    expect(screen.getByText(/isn't allowed/i)).toBeTruthy();
+  });
+
+  it("blocks a move to a case-insensitively occupied path", () => {
+    // Another doc occupies Other/PRODUCT.md; selecting Other targets Other/Product.md — occupied regardless of case.
+    renderMove([{ id: "d2", path: "Other/PRODUCT.md", title: "PRODUCT.md" } as DocumentItem]);
+    fireEvent.click(screen.getByRole("option", { name: /Other/i }));
+    expect(moveButton().disabled).toBe(true);
+  });
+
+  it("commits the exact selected target path via moveFile", async () => {
+    const onMove = renderMove([{ id: "d2", path: "Specs/x.md", title: "x.md" } as DocumentItem]);
+    fireEvent.click(screen.getByRole("option", { name: /Specs/i }));
+    fireEvent.click(moveButton());
+    await waitFor(() => expect(onMove).toHaveBeenCalledWith("Specs/Product.md"));
+  });
+});
+
 describe("WorkspaceApp right rail", () => {
-  it("no longer has a Participants tab — subscriber controls moved to the top-bar Watchers popover", () => {
-    render(
+  it("has no right rail at all — Activity moved into the … menu, subscribers into the Watchers popover", () => {
+    const { container } = render(
       <WorkspaceApp
         api={{ updateLastAccessed: vi.fn().mockResolvedValue({}) } as never}
         token="token"
@@ -290,10 +364,13 @@ describe("WorkspaceApp right rail", () => {
       />,
     );
 
-    // The Participants rail tab (task #4) was removed; its view/add/remove of document subscribers now lives in
-    // the top-bar Watchers popover. Only Document Activity remains in the rail.
+    // The whole right rail (.ctx / .ctx-tabs) is gone — the kill-the-sidebar finish. Activity lives in the "…"
+    // menu, subscribers in the top-bar Watchers popover; neither a Participants nor a Document Activity tab
+    // remains in the chrome.
+    expect(container.querySelector(".ctx")).toBeNull();
+    expect(container.querySelector(".ctx-tabs")).toBeNull();
     expect(screen.queryByRole("button", { name: /participants/i })).toBeNull();
-    expect(screen.getByRole("button", { name: /document activity/i })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /document activity/i })).toBeNull();
   });
 });
 

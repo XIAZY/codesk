@@ -98,11 +98,9 @@ describe("document Threads toolbar entry", () => {
     const user = userEvent.setup();
     const { container } = renderWorkspace();
 
-    const railTabs = container.querySelector(".ctx-tabs") as HTMLElement;
-    expect(within(railTabs).queryByRole("button", { name: /Threads/i })).toBeNull();
-    expect(within(railTabs).getByRole("button", { name: /Document Activity/i })).toBeTruthy();
-    // The Participants tab was removed from the rail — its subscriber controls now live in the top-bar Watchers popover.
-    expect(within(railTabs).queryByRole("button", { name: /Participants/i })).toBeNull();
+    // The right rail is gone entirely — no .ctx-tabs, and Activity now lives in the "…" menu.
+    expect(container.querySelector(".ctx-tabs")).toBeNull();
+    expect(container.querySelector(".ctx")).toBeNull();
 
     const trigger = screen.getByRole("button", { name: "Threads, 1 open" });
     const toolbarActions = container.querySelector(".doc-toolbar > .row.gap-6") as HTMLElement;
@@ -124,12 +122,17 @@ describe("document Threads toolbar entry", () => {
     expect(document.activeElement).toBe(trigger);
   });
 
-  it("only one toolbar popover is open at a time — Threads and Watchers are mutually exclusive", async () => {
+  it("only one toolbar popover is open at a time — Threads, Watchers, and Activity are mutually exclusive", async () => {
     const user = userEvent.setup();
     renderWorkspace();
 
     const threadsTrigger = screen.getByRole("button", { name: "Threads, 1 open" });
     const watchersTrigger = screen.getByRole("button", { name: "Watchers" });
+    const moreTrigger = screen.getByRole("button", { name: "Document options" });
+    const openActivity = async () => {
+      await user.click(moreTrigger);
+      await user.click(screen.getByRole("menuitem", { name: /Document activity/i }));
+    };
 
     await user.click(threadsTrigger);
     expect(screen.getByRole("dialog", { name: "Threads on this document" })).toBeTruthy();
@@ -139,9 +142,47 @@ describe("document Threads toolbar entry", () => {
     expect(screen.getByRole("dialog", { name: "Watchers on this document" })).toBeTruthy();
     expect(screen.queryByRole("dialog", { name: "Threads on this document" })).toBeNull();
 
-    // Opening Threads closes Watchers.
+    // Opening Activity (from the "…" menu) closes Watchers.
+    await openActivity();
+    expect(screen.getByRole("dialog", { name: "Activity on this document" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Watchers on this document" })).toBeNull();
+
+    // Opening Threads closes Activity.
     await user.click(threadsTrigger);
     expect(screen.getByRole("dialog", { name: "Threads on this document" })).toBeTruthy();
-    expect(screen.queryByRole("dialog", { name: "Watchers on this document" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "Activity on this document" })).toBeNull();
+  });
+
+  it("the \"…\" menu holds Document activity, Move, and Delete", async () => {
+    const user = userEvent.setup();
+    renderWorkspace();
+
+    await user.click(screen.getByRole("button", { name: "Document options" }));
+    const menu = screen.getByRole("menu", { name: "Document options" });
+    expect(within(menu).getByRole("menuitem", { name: /Document activity/i })).toBeTruthy();
+    expect(within(menu).getByRole("menuitem", { name: /Move document/i })).toBeTruthy();
+    expect(within(menu).getByRole("menuitem", { name: /Delete document/i })).toBeTruthy();
+
+    // Delete opens a confirmation modal naming the document, not a silent delete.
+    await user.click(within(menu).getByRole("menuitem", { name: /Delete document/i }));
+    expect(screen.getByRole("heading", { name: "Delete document" })).toBeTruthy();
+    expect(screen.getByText(/can't be undone/i)).toBeTruthy();
+  });
+
+  it("re-opening the … menu closes an open Activity popover — they never stack", async () => {
+    const user = userEvent.setup();
+    renderWorkspace();
+    const moreTrigger = screen.getByRole("button", { name: "Document options" });
+
+    // Open Activity from the menu — the menu closes as Activity opens.
+    await user.click(moreTrigger);
+    await user.click(screen.getByRole("menuitem", { name: /Document activity/i }));
+    expect(screen.getByRole("dialog", { name: "Activity on this document" })).toBeTruthy();
+    expect(screen.queryByRole("menu")).toBeNull();
+
+    // Click "…" again: the menu reopens and Activity must close, not stack behind it.
+    await user.click(moreTrigger);
+    expect(screen.getByRole("menu", { name: "Document options" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Activity on this document" })).toBeNull();
   });
 });

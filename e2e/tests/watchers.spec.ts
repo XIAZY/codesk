@@ -44,10 +44,9 @@ test("watchers popover: top-bar entry replaces the Participants rail tab and is 
   await page.getByRole("button", { name: "New document" }).click();
   await expect(page.locator(".cm-editor").first()).toBeVisible({ timeout: 20_000 });
 
-  // The Participants rail tab is gone; only Document Activity remains in the rail.
-  const railTabs = page.locator(".ctx-tabs");
-  await expect(railTabs.getByRole("button", { name: /participants/i })).toHaveCount(0);
-  await expect(railTabs.getByRole("button", { name: /Document Activity/i })).toBeVisible();
+  // The right rail is gone entirely (kill-the-sidebar finish) — no .ctx / .ctx-tabs anywhere.
+  await expect(page.locator(".ctx-tabs")).toHaveCount(0);
+  await expect(page.locator(".ctx")).toHaveCount(0);
 
   // Open the top-bar Watchers popover.
   const trigger = page.locator(".document-watchers-trigger");

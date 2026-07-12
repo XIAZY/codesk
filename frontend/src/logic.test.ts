@@ -11,7 +11,6 @@ import {
   buildDaemonReinstallCommand,
   buildDaemonUninstallCommand,
   buildLineThreads,
-  clampRailWidth,
   computeReplace,
   coworkerCount,
   workspacePeople,
@@ -1045,29 +1044,6 @@ describe("daemon reinstall command", () => {
     expect(command).toContain("--workspace-id 'ws bad'\\''id' \\");
     expect(command).toContain("--daemon-token 'nottyd token' \\");
     expect(command).toContain("--static-base 'https://static.example.com/daemon files'");
-  });
-});
-
-describe("clampRailWidth", () => {
-  const WIDE = 1600; // roomy shell — center-min never binds
-
-  it("clamps to the 280–520px rail bounds", () => {
-    expect(clampRailWidth(100, WIDE, false)).toBe(280);
-    expect(clampRailWidth(400, WIDE, false)).toBe(400);
-    expect(clampRailWidth(9999, WIDE, false)).toBe(520);
-  });
-
-  it("never lets the center column drop below 380px (open sidebar)", () => {
-    // 1120 shell, 248 left, 380 center-min => right can be at most 492.
-    expect(clampRailWidth(520, 1120, false)).toBe(492);
-    // Center stays >= 380 at the clamped width.
-    expect(1120 - 248 - clampRailWidth(520, 1120, false)).toBe(380);
-  });
-
-  it("gives back the width the collapsed rail frees to the center", () => {
-    // Same 1120 shell but left is 60 when collapsed => right can reach its 520 max.
-    expect(clampRailWidth(520, 1120, true)).toBe(520);
-    expect(1120 - 60 - clampRailWidth(520, 1120, true)).toBeGreaterThanOrEqual(380);
   });
 });
 
