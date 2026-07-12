@@ -314,11 +314,16 @@ describe("MoveDocumentModal", () => {
     render(<MoveDocumentModal document={doc} documents={[doc, ...others]} onClose={vi.fn()} onMove={onMove} />);
     return onMove;
   }
-  const moveButton = () => screen.getByRole("button", { name: "Move document" }) as HTMLButtonElement;
+  const moveButton = () => screen.getByRole("button", { name: "Move" }) as HTMLButtonElement;
+  // The New Folder button (OS-picker style) reveals an inline editable row under the selected folder.
+  const typeNewFolder = (value: string) => {
+    fireEvent.click(screen.getByRole("button", { name: "New Folder" }));
+    fireEvent.change(screen.getByLabelText("New folder name"), { target: { value } });
+  };
 
   it("rejects a \"..\" folder name whose committed path would differ from the preview", () => {
     renderMove([]);
-    fireEvent.change(screen.getByLabelText(/New folder in/i), { target: { value: ".." } });
+    typeNewFolder("..");
     expect(moveButton().disabled).toBe(true);
     expect(screen.getByText(/isn't allowed/i)).toBeTruthy();
     // WYSIWYG: the preview shows the normalized committed path, never the raw "Docs/../Product.md".
@@ -327,7 +332,7 @@ describe("MoveDocumentModal", () => {
 
   it("rejects a dot-prefixed folder name the daemon's visible-root contract would refuse", () => {
     renderMove([]);
-    fireEvent.change(screen.getByLabelText(/New folder in/i), { target: { value: ".secret" } });
+    typeNewFolder(".secret");
     expect(moveButton().disabled).toBe(true);
     expect(screen.getByText(/isn't allowed/i)).toBeTruthy();
   });
@@ -344,6 +349,35 @@ describe("MoveDocumentModal", () => {
     fireEvent.click(screen.getByRole("option", { name: /Specs/i }));
     fireEvent.click(moveButton());
     await waitFor(() => expect(onMove).toHaveBeenCalledWith("Specs/Product.md"));
+  });
+
+  it("New Folder inserts an inline row and commits the doc into the new-folder path", async () => {
+    const onMove = renderMove([{ id: "d2", path: "Specs/x.md", title: "x.md" } as DocumentItem]);
+    fireEvent.click(screen.getByRole("option", { name: /Specs/i }));
+    typeNewFolder("Drafts");
+    await waitFor(() => expect(moveButton().disabled).toBe(false));
+    fireEvent.click(moveButton());
+    await waitFor(() => expect(onMove).toHaveBeenCalledWith("Specs/Drafts/Product.md"));
+  });
+
+  it("requires a name for an active New Folder row — never silently moves into the parent", () => {
+    renderMove([{ id: "d2", path: "Specs/x.md", title: "x.md" } as DocumentItem]);
+    fireEvent.click(screen.getByRole("option", { name: "Specs" }));
+    fireEvent.click(screen.getByRole("button", { name: "New Folder" }));
+    fireEvent.change(screen.getByLabelText("New folder name"), { target: { value: "" } });
+    expect(moveButton().disabled).toBe(true);
+    expect(screen.getByText(/enter a name for the new folder/i)).toBeTruthy();
+  });
+
+  it("resolves a New Folder name matching an existing folder to its canonical path — moves in, no error", async () => {
+    const onMove = renderMove([{ id: "d2", path: "Specs/Existing/Other.md", title: "Other.md" } as DocumentItem]);
+    fireEvent.click(screen.getByRole("option", { name: "Specs" }));
+    typeNewFolder("existing"); // lowercase — matches the existing Specs/Existing folder case-insensitively
+    await waitFor(() => expect(moveButton().disabled).toBe(false));
+    expect(screen.queryByText(/already exists|isn't allowed/i)).toBeNull();
+    fireEvent.click(moveButton());
+    // Commits into the CANONICAL existing folder (correct case), not a new lowercase "existing" folder.
+    await waitFor(() => expect(onMove).toHaveBeenCalledWith("Specs/Existing/Product.md"));
   });
 });
 
