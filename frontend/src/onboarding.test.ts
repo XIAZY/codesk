@@ -10,6 +10,7 @@ import {
   nextIncomplete,
   isComplete,
   checklistProgress,
+  acknowledgeFlag,
   type OnboardingContext,
   type OnboardingLiveSignals,
   type OnboardingRole,
@@ -38,6 +39,7 @@ function ctx(overrides: Partial<OnboardingContext> = {}): OnboardingContext {
 }
 
 const node = (id: string) => NODES.find((n) => n.id === id)!;
+const seen = (id: string) => acknowledgeFlag(node(id));
 
 describe("onboarding event keys (§4.2 contract)", () => {
   it("has the 11 stable keys and never a step_N key", () => {
@@ -70,7 +72,18 @@ describe("node config integrity (§4.1)", () => {
     // create-first-document is derivable; teaching nodes are not (need a flag).
     expect(isComplete(node("create-first-document"), ctx({ signals: { ...emptySignals, documentCount: 1 } }))).toBe(true);
     expect(isComplete(node("threads-intro"), ctx({ signals: { ...emptySignals, documentCount: 5 } }))).toBe(false);
-    expect(isComplete(node("threads-intro"), ctx({ events: new Set(["seen:threads-intro"]) }))).toBe(true);
+    expect(isComplete(node("threads-intro"), ctx({ events: new Set([seen("threads-intro")]) }))).toBe(true);
+  });
+
+  it("bumping a node's version re-shows it — the acknowledge flag is version-scoped", () => {
+    const n = node("threads-intro");
+    expect(acknowledgeFlag(n)).toBe(`seen:${n.id}@v${n.version}`);
+    // Acknowledged at the current version → complete.
+    expect(isComplete(n, ctx({ events: new Set([acknowledgeFlag(n)]) }))).toBe(true);
+    // A prior-version flag (as a redesign would leave) does NOT satisfy → re-shows.
+    expect(isComplete(n, ctx({ events: new Set([`seen:${n.id}@v${n.version - 1}`]) }))).toBe(false);
+    // An unversioned flag likewise does not satisfy.
+    expect(isComplete(n, ctx({ events: new Set([`seen:${n.id}`]) }))).toBe(false);
   });
 });
 
@@ -133,7 +146,7 @@ describe("guided sequence: activeNode / nextIncomplete", () => {
     const c = ctx({
       signals: { ...emptySignals, documentCount: 1 },
       route: "document",
-      events: new Set(["seen:threads-intro"]),
+      events: new Set([seen("threads-intro")]),
     });
     expect(activeNode(c)?.id).toBe("watchers-intro");
   });
@@ -142,7 +155,7 @@ describe("guided sequence: activeNode / nextIncomplete", () => {
     const c = ctx({
       signals: { ...emptySignals, documentCount: 1 },
       route: "document",
-      events: new Set(["seen:threads-intro", "seen:watchers-intro"]),
+      events: new Set([seen("threads-intro"), seen("watchers-intro")]),
     });
     expect(nextIncomplete(c)).toBeNull();
     expect(activeNode(c)).toBeNull();
@@ -160,7 +173,7 @@ describe("contextual tip (standalone, not in the sequence)", () => {
   it("shows on first text selection, hides once dismissed or a thread exists", () => {
     expect(activeTip(ctx({ selectionActive: true }))?.id).toBe("tip-first-selection");
     expect(activeTip(ctx({ selectionActive: false }))).toBeNull();
-    expect(activeTip(ctx({ selectionActive: true, events: new Set(["seen:tip-first-selection"]) }))).toBeNull();
+    expect(activeTip(ctx({ selectionActive: true, events: new Set([seen("tip-first-selection")]) }))).toBeNull();
     expect(activeTip(ctx({ selectionActive: true, signals: { ...emptySignals, threadCount: 1 } }))).toBeNull();
   });
 

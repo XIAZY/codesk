@@ -45,6 +45,7 @@ export type OnboardingTrigger =
 export type OnboardingCondition =
   | { via: "derived"; signal: DerivedSignal }
   | { via: "flag"; key: string }
+  | { via: "acknowledge" } // completed once the node's VERSIONED seen flag is recorded
   | { via: "any"; of: OnboardingCondition[] };
 
 export type DerivedSignal =
@@ -118,7 +119,14 @@ const created = (key: OnboardingEventKey, signal: DerivedSignal): OnboardingCond
   ],
 });
 
-const acknowledged = (nodeId: string): OnboardingCondition => ({ via: "flag", key: `seen:${nodeId}` });
+const ACKNOWLEDGE: OnboardingCondition = { via: "acknowledge" };
+
+// The versioned seen flag the host records when a node is acknowledged (Next/Done)
+// or dismissed. The version is embedded so bumping OnboardingNode.version re-shows
+// the node after a redesign — a v1 flag no longer satisfies the v2 node.
+export function acknowledgeFlag(node: OnboardingNode): string {
+  return `seen:${node.id}@v${node.version}`;
+}
 
 export const NODES: OnboardingNode[] = [
   // A. Guided spotlight sequence — scope workspace, all roles, 3 steps.
@@ -144,7 +152,7 @@ export const NODES: OnboardingNode[] = [
     presentation: "spotlight",
     eligibleRoles: [],
     trigger: { type: "document-open" },
-    completion: acknowledged("threads-intro"),
+    completion: ACKNOWLEDGE,
     targetOnboardingId: "document-threads",
     title: "Every discussion has a home",
     body: "Select any text to open a thread anchored to it. Discussion stays out of the document — open threads here anytime.",
@@ -160,7 +168,7 @@ export const NODES: OnboardingNode[] = [
     presentation: "spotlight",
     eligibleRoles: [],
     trigger: { type: "document-open" },
-    completion: acknowledged("watchers-intro"),
+    completion: ACKNOWLEDGE,
     targetOnboardingId: "document-watchers",
     title: "Let an agent keep watch",
     body: "Watchers are the agents following this document. When something relevant changes, it lands in their work queue — no need to ping them.",
@@ -180,7 +188,7 @@ export const NODES: OnboardingNode[] = [
     completion: {
       via: "any",
       of: [
-        { via: "flag", key: "seen:tip-first-selection" }, // dismissed with "Got it"
+        ACKNOWLEDGE, // dismissed with "Got it" (versioned)
         { via: "derived", signal: "thread-exists" }, // or a thread was created
       ],
     },
@@ -194,8 +202,10 @@ export const NODES: OnboardingNode[] = [
   },
 ];
 
-// C. Getting-started checklist — scope workspace, completion always derived from
-// live data (never a stored "done").
+// C. Getting-started checklist — scope workspace. Completion is derived from live
+// data (never a stored "done") for every item EXCEPT `invite-team`: an invitation
+// sent is not derivable from the member list until the invitee accepts, so deriving
+// it would falsely read incomplete. It is the one flag-based item, by design.
 export const CHECKLIST_ITEMS: OnboardingChecklistItem[] = [
   { id: "create-document", label: "Create your first document", eligibleRoles: [], completion: { via: "derived", signal: "document-exists" } },
   { id: "start-discussion", label: "Start a discussion", eligibleRoles: [], completion: { via: "derived", signal: "thread-exists" } },
@@ -222,14 +232,21 @@ function derivedSignal(signal: DerivedSignal, s: OnboardingLiveSignals): boolean
   }
 }
 
-function isSatisfied(cond: OnboardingCondition, ctx: OnboardingContext): boolean {
+function isSatisfied(
+  cond: OnboardingCondition,
+  ctx: OnboardingContext,
+  node: OnboardingNode | OnboardingChecklistItem,
+): boolean {
   switch (cond.via) {
     case "flag":
       return ctx.events.has(cond.key);
+    case "acknowledge":
+      // Only nodes (which carry a version) use acknowledge; checklist items never do.
+      return "version" in node && ctx.events.has(acknowledgeFlag(node));
     case "derived":
       return derivedSignal(cond.signal, ctx.signals);
     case "any":
-      return cond.of.some((c) => isSatisfied(c, ctx));
+      return cond.of.some((c) => isSatisfied(c, ctx, node));
   }
 }
 
@@ -261,7 +278,7 @@ export function guideSteps(ctx: OnboardingContext): OnboardingNode[] {
 }
 
 export function isComplete(node: OnboardingNode | OnboardingChecklistItem, ctx: OnboardingContext): boolean {
-  return isSatisfied(node.completion, ctx);
+  return isSatisfied(node.completion, ctx, node);
 }
 
 // The next incomplete step in the guided sequence (drives the step counter), or
