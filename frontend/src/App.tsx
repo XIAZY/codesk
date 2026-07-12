@@ -3667,7 +3667,7 @@ function CollaboratorAvatars({ people }: { people: WorkspacePerson[] }) {
   // Presence display only — not interactive (AlphaToad: clicking the avatars shouldn't open the Watchers
   // popover). A non-button, non-focusable element so there's no dead click affordance.
   return (
-    <div className="collaborator-avatars" title={`${online.length} online`} aria-label={`${online.length} collaborator${online.length === 1 ? "" : "s"} online`}>
+    <div className="collaborator-avatars" title={`${online.length} online`}>
       {online.slice(0, 5).map((p) => (
         <div key={p.id} className={`avi sm ${p.kind === "agent" ? "agent" : "you"} online`}>
           {initials(p.handle || p.name)}
