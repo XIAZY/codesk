@@ -632,14 +632,14 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 		switch event.Kind {
 		case RuntimeEventTurnStarted:
 			if strings.TrimSpace(event.TurnID) != "" {
-				s.markWorking(agentID, process, event.TurnID)
+				s.markWorking(agentID, process, event.TurnID, event.SessionID)
 			}
 		case RuntimeEventTurnCompleted:
-			s.markIdle(agentID, process, true)
+			s.markIdle(agentID, process, true, event.SessionID)
 		case RuntimeEventTurnFailed:
-			s.markIdle(agentID, process, false)
+			s.markIdle(agentID, process, false, event.SessionID)
 		case RuntimeEventIdle:
-			s.markIdle(agentID, process, true)
+			s.markIdle(agentID, process, true, event.SessionID)
 		}
 	}
 	var restartAgent *agent
@@ -675,7 +675,7 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 	}()
 }
 
-func (s *agentSessionSupervisor) markWorking(agentID string, process RuntimeProcess, turnID string) {
+func (s *agentSessionSupervisor) markWorking(agentID string, process RuntimeProcess, turnID string, observedSessionID string) {
 	s.mu.Lock()
 	session := s.sessions[agentID]
 	if session == nil || session.process != process {
@@ -685,6 +685,9 @@ func (s *agentSessionSupervisor) markWorking(agentID string, process RuntimeProc
 	if session != nil {
 		session.state = "working"
 		session.activeTurn = turnID
+		if id := strings.TrimSpace(observedSessionID); id != "" && id != session.sessionID {
+			session.sessionID = id
+		}
 	}
 	sessionID := ""
 	if session != nil {
@@ -701,7 +704,7 @@ func (s *agentSessionSupervisor) markWorking(agentID string, process RuntimeProc
 	appendAgentLog(s.cfg, agentID, "event turn started turn=%s", turnID)
 }
 
-func (s *agentSessionSupervisor) markIdle(agentID string, process RuntimeProcess, delivered bool) {
+func (s *agentSessionSupervisor) markIdle(agentID string, process RuntimeProcess, delivered bool, observedSessionID string) {
 	s.mu.Lock()
 	session := s.sessions[agentID]
 	if session == nil || session.process != process {
@@ -721,6 +724,9 @@ func (s *agentSessionSupervisor) markIdle(agentID string, process RuntimeProcess
 		session.activeForMeSig = ""
 		session.activeGeneralSig = ""
 		session.steeredForMeSig = ""
+		if id := strings.TrimSpace(observedSessionID); id != "" && id != session.sessionID {
+			session.sessionID = id
+		}
 		sessionID = session.sessionID
 	}
 	s.mu.Unlock()

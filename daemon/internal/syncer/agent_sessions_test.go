@@ -384,23 +384,23 @@ func TestAgentSessionIgnoresEventsFromStaleRuntimeProcess(t *testing.T) {
 	active := factory.only(t)
 	stale := &fakeRuntimeProcess{events: make(chan RuntimeEvent, 1)}
 
-	supervisor.markWorking("agent_1", stale, "turn_stale")
+	supervisor.markWorking("agent_1", stale, "turn_stale", "")
 	state, turn := sessionState(supervisor, "agent_1")
 	if state != "idle" || turn != "" {
 		t.Fatalf("stale turn/started mutated session: state=%q turn=%q", state, turn)
 	}
 
-	supervisor.markWorking("agent_1", active, "turn_live")
+	supervisor.markWorking("agent_1", active, "turn_live", "")
 	state, turn = sessionState(supervisor, "agent_1")
 	if state != "working" || turn != "turn_live" {
 		t.Fatalf("active turn/started did not mark working: state=%q turn=%q", state, turn)
 	}
-	supervisor.markIdle("agent_1", stale, true)
+	supervisor.markIdle("agent_1", stale, true, "")
 	state, turn = sessionState(supervisor, "agent_1")
 	if state != "working" || turn != "turn_live" {
 		t.Fatalf("stale turn/completed mutated session: state=%q turn=%q", state, turn)
 	}
-	supervisor.markIdle("agent_1", active, true)
+	supervisor.markIdle("agent_1", active, true, "")
 	state, turn = sessionState(supervisor, "agent_1")
 	if state != "idle" || turn != "" {
 		t.Fatalf("active turn/completed did not mark idle: state=%q turn=%q", state, turn)
@@ -468,7 +468,7 @@ func TestAgentSessionIdleNotificationStartsOncePerInboxSignature(t *testing.T) {
 	if len(process.inputsByKind(RuntimeInputStartTurn)) != 1 {
 		t.Fatalf("expected first turn start, got %d", len(process.inputsByKind(RuntimeInputStartTurn)))
 	}
-	supervisor.markIdle("agent_1", process, true)
+	supervisor.markIdle("agent_1", process, true, "")
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "same", "for-me:v1", ""); err != nil {
 		t.Fatalf("schedule same: %v", err)
 	}
@@ -516,7 +516,7 @@ func TestAgentSessionBusyForMeSteersOnceAndQueuesFollowup(t *testing.T) {
 	if !forMePending || generalPending {
 		t.Fatalf("expected for-me followup only, got forMe=%v general=%v", forMePending, generalPending)
 	}
-	supervisor.markIdle("agent_1", process, true)
+	supervisor.markIdle("agent_1", process, true, "")
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "followup", "for-me:v1", "general:v1"); err != nil {
 		t.Fatalf("schedule followup: %v", err)
 	}
@@ -545,7 +545,7 @@ func TestAgentSessionBusyGeneralQueuesFollowupWithoutSteer(t *testing.T) {
 	if forMePending || !generalPending {
 		t.Fatalf("expected general followup only, got forMe=%v general=%v", forMePending, generalPending)
 	}
-	supervisor.markIdle("agent_1", process, true)
+	supervisor.markIdle("agent_1", process, true, "")
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "followup", "for-me:v1", "general:v1"); err != nil {
 		t.Fatalf("schedule followup: %v", err)
 	}
@@ -605,7 +605,7 @@ func TestAgentSessionFailedTurnDoesNotMarkInboxSignatureDelivered(t *testing.T) 
 		t.Fatalf("schedule first: %v", err)
 	}
 	process := factory.only(t)
-	supervisor.markIdle("agent_1", process, false)
+	supervisor.markIdle("agent_1", process, false, "")
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "retry", "for-me:v1", ""); err != nil {
 		t.Fatalf("schedule retry: %v", err)
 	}
@@ -678,6 +678,45 @@ func TestAgentSessionRuntimeEventsPublishGenericStatus(t *testing.T) {
 	}
 }
 
+func TestAgentSessionAdoptsForkedSessionIDFromStreamEvents(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	updates := make(chan agentSessionStatusUpdate, 8)
+	updater := func(ctx context.Context, agentID string, payload updateAgentSessionRequest) error {
+		_ = ctx
+		updates <- agentSessionStatusUpdate{agentID: agentID, payload: payload}
+		return nil
+	}
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), updater, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	// A fresh session is spawn-pinned to the start id "thread_new".
+	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"}); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+
+	// The runtime forks a NEW underlying session mid-turn (e.g. `claude --resume`
+	// forks a new session id). The driver observes it on the init stream event and
+	// threads it into every lifecycle event it emits.
+	process.events <- RuntimeEvent{Kind: RuntimeEventTurnStarted, TurnID: "turn_event", SessionID: "thread_forked"}
+	working := waitAgentSessionStatus(t, updates, "agent_1", "working")
+	if working.payload.SessionID != "thread_forked" {
+		t.Fatalf("supervisor published the stale spawn session id instead of the forked id observed on the stream: %#v", working.payload)
+	}
+
+	process.events <- RuntimeEvent{Kind: RuntimeEventTurnCompleted, SessionID: "thread_forked"}
+	idle := waitAgentSessionStatus(t, updates, "agent_1", "idle")
+	if idle.payload.SessionID != "thread_forked" {
+		t.Fatalf("supervisor published the stale spawn session id on idle: %#v", idle.payload)
+	}
+
+	// The in-memory pin must also advance to the forked id, so a crash-restart
+	// re-resumes the live session instead of rewinding to the discarded spawn id.
+	if got := sessionSessionID(supervisor, "agent_1"); got != "thread_forked" {
+		t.Fatalf("supervisor kept the stale spawn session id %q; a crash-restart would rewind/discard turns", got)
+	}
+}
+
 func TestAgentSessionSupervisorDoesNotUseCodexWireMethods(t *testing.T) {
 	body, err := os.ReadFile("agent_sessions.go")
 	if err != nil {
@@ -729,6 +768,16 @@ func sessionState(supervisor *agentSessionSupervisor, agentID string) (string, s
 		return "", ""
 	}
 	return session.state, session.activeTurn
+}
+
+func sessionSessionID(supervisor *agentSessionSupervisor, agentID string) string {
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	session := supervisor.sessions[agentID]
+	if session == nil {
+		return ""
+	}
+	return session.sessionID
 }
 
 func TestCodexAppServerReadLoopRoutesResponsesNotificationsAndServerRequests(t *testing.T) {
