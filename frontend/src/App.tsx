@@ -39,7 +39,7 @@ import { navigate, useRoute } from "./useRoute";
 import { useRootNamespace } from "./useRootNamespace";
 import { useDocumentSync } from "./useDocument";
 import { useWorkspace } from "./useWorkspace";
-import { Onboarding, type OnboardingActionEvent } from "./Onboarding";
+import { Onboarding, type OnboardingActionEvent, type OnboardingPresentation } from "./Onboarding";
 import { OnboardingChecklist } from "./OnboardingChecklist";
 import { useOnboardingController } from "./onboardingController";
 import type { OnboardingRole } from "./onboarding";
@@ -50,6 +50,13 @@ import "./styles.css";
 const tokenStorageKey = "codesk.auth.token";
 const portableFileNameIllegalChars = /[\u0000-\u001F<>:"\/\\|?*]/g;
 const windowsReservedBaseName = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+
+export function shouldRenderOnboardingChecklist(
+  namespaceReady: boolean,
+  activePresentation: OnboardingPresentation | null | undefined,
+): boolean {
+  return namespaceReady && activePresentation !== "spotlight";
+}
 
 function clearLegacyClientStorage() {
   for (let index = localStorage.length - 1; index >= 0; index -= 1) {
@@ -2427,7 +2434,7 @@ export function WorkspaceApp({
           onAction={handleOnboardingAction}
         />
       ) : null}
-      {rootNamespace.ready ? (
+      {shouldRenderOnboardingChecklist(rootNamespace.ready, onboarding.active?.presentation) ? (
         <OnboardingChecklist
           progress={onboarding.checklist}
           dismissed={onboarding.checklistDismissed}

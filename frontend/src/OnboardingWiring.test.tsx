@@ -8,7 +8,7 @@
 
 import { cleanup, render, renderHook, screen, fireEvent, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WorkspaceApp, MembersAndInvite } from "./App";
+import { WorkspaceApp, MembersAndInvite, shouldRenderOnboardingChecklist } from "./App";
 import { useOnboardingController } from "./onboardingController";
 import type { OnboardingRole } from "./onboarding";
 import type { Account, Agent, WorkspaceState, WorkspaceSummary } from "./types";
@@ -115,26 +115,36 @@ function renderWorkspace() {
 }
 
 describe("onboarding wiring in WorkspaceApp", () => {
-  it("mounts the checklist + empty-workspace spotlight, honestly counted from live state", () => {
+  it("mounts the empty-workspace spotlight without placing the checklist under its scrim", () => {
     mocks.workspace = workspaceState();
     mocks.documents = [];
     renderWorkspace();
 
-    // Vitaliy's checklist, fed by the controller's checklistProgress.
-    expect(screen.getByText("Finish setting up this workspace")).toBeTruthy();
-    // Member role (no membership role set) → 5 eligible items, none done yet.
-    expect(screen.getByText("0 of 5 done")).toBeTruthy();
     // The guided sequence's first step triggers on the empty workspace.
     expect(screen.getByText("These are real files")).toBeTruthy();
+    expect(screen.queryByText("Finish setting up this workspace")).toBeNull();
+    expect(screen.queryByText("0 of 5 done")).toBeNull();
   });
 
-  it("reflects a live signal: one agent marks 'create-agent' done (derived, no record)", () => {
+  it("shows honest live checklist progress after the guide is complete", () => {
+    window.localStorage.setItem(
+      "codesk.onboarding.account.account_1.ws.workspace_1.flags",
+      JSON.stringify(["seen:threads-intro@v1", "seen:watchers-intro@v1"]),
+    );
     mocks.workspace = workspaceState({ agents: [agent("agent_1")] });
-    mocks.documents = [];
+    mocks.documents = [{ id: "doc_1", path: "Product.md", title: "Product.md" }];
     renderWorkspace();
 
-    // agent-exists derives from workspace.agents — the checklist recomputes live.
-    expect(screen.getByText("1 of 5 done")).toBeTruthy();
+    // document-exists + agent-exists derive from live state — no stored "done" flags.
+    expect(screen.getByText("2 of 5 done")).toBeTruthy();
+    expect(screen.queryByText("These are real files")).toBeNull();
+  });
+
+  it("gates the checklist only for blocking guide spotlights, never for contextual tips", () => {
+    expect(shouldRenderOnboardingChecklist(true, "spotlight")).toBe(false);
+    expect(shouldRenderOnboardingChecklist(true, "tip")).toBe(true);
+    expect(shouldRenderOnboardingChecklist(true, null)).toBe(true);
+    expect(shouldRenderOnboardingChecklist(false, null)).toBe(false);
   });
 });
 
