@@ -3,7 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentDetailModal, CreateDaemonModal, DaemonDetailModal, DaemonsManagement, ManageModal, WorkspaceApp, WorkspaceOnboarding } from "./App";
+import { AgentDetailModal, CreateDaemonModal, DaemonDetailModal, DaemonsManagement, documentFolders, ManageModal, WorkspaceApp, WorkspaceOnboarding } from "./App";
 import { ApiError } from "./api";
 import { emptyWorkspace, identifierFromName, identifierHelpText, identifierPattern, workspaceSlugMaxLength } from "./logic";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
@@ -273,9 +273,28 @@ describe("WorkspaceOnboarding", () => {
   });
 });
 
+describe("documentFolders", () => {
+  it("derives root + nested folders from document paths, pre-ordered with depth", () => {
+    const docs = [
+      { id: "1", path: "Drafts/a.md", title: "a" },
+      { id: "2", path: "Specs/API/v3/b.md", title: "b" },
+      { id: "3", path: "c.md", title: "c" },
+    ] as DocumentItem[];
+    // Folders are path prefixes only (no folder entities): root first, each parent before its children, with
+    // depth for indentation. The root-level file contributes no folder.
+    expect(documentFolders(docs).map((folder) => `${folder.depth}:${folder.path}`)).toEqual([
+      "0:",
+      "1:Drafts",
+      "1:Specs",
+      "2:Specs/API",
+      "3:Specs/API/v3",
+    ]);
+  });
+});
+
 describe("WorkspaceApp right rail", () => {
-  it("no longer has a Participants tab — subscriber controls moved to the top-bar Watchers popover", () => {
-    render(
+  it("has no right rail at all — Activity moved into the … menu, subscribers into the Watchers popover", () => {
+    const { container } = render(
       <WorkspaceApp
         api={{ updateLastAccessed: vi.fn().mockResolvedValue({}) } as never}
         token="token"
@@ -290,10 +309,13 @@ describe("WorkspaceApp right rail", () => {
       />,
     );
 
-    // The Participants rail tab (task #4) was removed; its view/add/remove of document subscribers now lives in
-    // the top-bar Watchers popover. Only Document Activity remains in the rail.
+    // The whole right rail (.ctx / .ctx-tabs) is gone — the kill-the-sidebar finish. Activity lives in the "…"
+    // menu, subscribers in the top-bar Watchers popover; neither a Participants nor a Document Activity tab
+    // remains in the chrome.
+    expect(container.querySelector(".ctx")).toBeNull();
+    expect(container.querySelector(".ctx-tabs")).toBeNull();
     expect(screen.queryByRole("button", { name: /participants/i })).toBeNull();
-    expect(screen.getByRole("button", { name: /document activity/i })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /document activity/i })).toBeNull();
   });
 });
 

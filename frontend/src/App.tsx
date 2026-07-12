@@ -6,7 +6,6 @@ import type { MarkdownPreviewCommandName } from "./markdownLivePreview";
 import {
   agentDisplayStatus,
   agentsByDaemon,
-  clampRailWidth,
   buildDaemonInstallCommand,
   buildDaemonReinstallCommand,
   buildDaemonUninstallCommand,
@@ -44,7 +43,6 @@ import { resolveRuntimeTiles, selectableRuntimeKinds, type RuntimeTile } from ".
 import "./styles.css";
 
 const tokenStorageKey = "codesk.auth.token";
-const rightTabLabels = { activity: "Document Activity" } as const;
 const portableFileNameIllegalChars = /[\u0000-\u001F<>:"\/\\|?*]/g;
 const windowsReservedBaseName = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 
@@ -1405,15 +1403,13 @@ export function WorkspaceApp({
     rootDocumentId: workspace.rootDocumentId,
   });
   const rootDocuments = rootNamespace.documents;
-  const [rightTab, setRightTab] = useState<"activity">("activity");
-  const [modal, setModal] = useState<"daemon" | "agent" | "rename" | "agent-detail" | "daemon-detail" | "manage" | null>(null);
+  const [modal, setModal] = useState<"daemon" | "agent" | "move" | "delete-doc" | "agent-detail" | "daemon-detail" | "manage" | null>(null);
   // Default tab is Members & Invite (plan tab order). Integration protocol (Juan's
   // single-flip rule): A2 fills Members before integration, so nothing ships showing
   // a placeholder. If A2 slips out of the batch, flipping this default to "local-env"
   // (the tab with real content) becomes a REQUIRED pre-integration change.
   const [manageTab, setManageTab] = useState<ManageTab>("members");
   // Phase E: collapsible left rail + resizable right rail, both remembered in localStorage.
-  const shellRef = useRef<HTMLElement>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     try {
       return localStorage.getItem("codesk.sb.collapsed") === "1";
@@ -1421,15 +1417,6 @@ export function WorkspaceApp({
       return false;
     }
   });
-  const [rightWidth, setRightWidth] = useState<number | null>(() => {
-    try {
-      const stored = parseInt(localStorage.getItem("codesk.right.width") || "", 10);
-      return Number.isFinite(stored) ? stored : null;
-    } catch {
-      return null;
-    }
-  });
-  const [draggingRail, setDraggingRail] = useState(false);
   const toggleSidebar = useCallback(() => {
     setSidebarCollapsed((collapsed) => {
       const next = !collapsed;
@@ -1441,46 +1428,6 @@ export function WorkspaceApp({
       return next;
     });
   }, []);
-  // Clamp the right rail so a drag can never crush or overlap the document
-  // (plan §4.1 "不塌、不错位"). Pure bounds live in logic.ts for direct testing.
-  const clampRightWidth = useCallback(
-    (width: number) => {
-      const shellWidth = shellRef.current?.getBoundingClientRect().width ?? 1120;
-      return clampRailWidth(width, shellWidth, sidebarCollapsed);
-    },
-    [sidebarCollapsed]
-  );
-  useEffect(() => {
-    if (!draggingRail) {
-      return;
-    }
-    const onMove = (event: MouseEvent) => {
-      const rect = shellRef.current?.getBoundingClientRect();
-      if (!rect) {
-        return;
-      }
-      setRightWidth(clampRightWidth(rect.right - event.clientX));
-    };
-    const onUp = () => {
-      setDraggingRail(false);
-      setRightWidth((width) => {
-        if (width != null) {
-          try {
-            localStorage.setItem("codesk.right.width", String(width));
-          } catch {
-            // ignore storage failures.
-          }
-        }
-        return width;
-      });
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-    return () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-  }, [draggingRail, clampRightWidth]);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [selectedDaemonId, setSelectedDaemonId] = useState<string | null>(null);
   const [selectedThreadId, setSelectedThreadId] = useState("");
@@ -1493,6 +1440,12 @@ export function WorkspaceApp({
   const documentWatchersRef = useRef<HTMLDivElement>(null);
   const documentWatchersDialogRef = useRef<HTMLDivElement>(null);
   const documentWatchersTriggerRef = useRef<HTMLButtonElement>(null);
+  const [documentActivityOpen, setDocumentActivityOpen] = useState(false);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  const documentMoreRef = useRef<HTMLDivElement>(null);
+  const documentActivityDialogRef = useRef<HTMLDivElement>(null);
+  const moreMenuRef = useRef<HTMLDivElement>(null);
+  const documentMoreTriggerRef = useRef<HTMLButtonElement>(null);
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(() => new Set());
   const [creatingDocument, setCreatingDocument] = useState(false);
   const [createError, setCreateError] = useState("");
@@ -1577,6 +1530,20 @@ export function WorkspaceApp({
     setDocumentWatchersOpen(false);
     if (restoreFocus) {
       window.setTimeout(() => documentWatchersTriggerRef.current?.focus(), 0);
+    }
+  }, []);
+
+  const closeDocumentActivity = useCallback((restoreFocus = true) => {
+    setDocumentActivityOpen(false);
+    if (restoreFocus) {
+      window.setTimeout(() => documentMoreTriggerRef.current?.focus(), 0);
+    }
+  }, []);
+
+  const closeMoreMenu = useCallback((restoreFocus = true) => {
+    setMoreMenuOpen(false);
+    if (restoreFocus) {
+      window.setTimeout(() => documentMoreTriggerRef.current?.focus(), 0);
     }
   }, []);
 
@@ -1695,10 +1662,94 @@ export function WorkspaceApp({
   }, [closeDocumentWatchers, documentWatchersOpen]);
 
   useEffect(() => {
+    if (!documentActivityOpen) {
+      return;
+    }
+    const focusTimer = window.setTimeout(() => {
+      const dialog = documentActivityDialogRef.current;
+      if (!dialog) {
+        return;
+      }
+      const first = focusableElements(dialog)[0];
+      (first ?? dialog).focus();
+    }, 0);
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && documentMoreRef.current?.contains(target)) {
+        return;
+      }
+      closeDocumentActivity();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeDocumentActivity();
+        return;
+      }
+      if (event.key !== "Tab") {
+        return;
+      }
+      const dialog = documentActivityDialogRef.current;
+      if (!dialog) {
+        return;
+      }
+      const focusable = focusableElements(dialog);
+      if (!focusable.length) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.clearTimeout(focusTimer);
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [closeDocumentActivity, documentActivityOpen]);
+
+  useEffect(() => {
+    if (!moreMenuOpen) {
+      return;
+    }
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && documentMoreRef.current?.contains(target)) {
+        return;
+      }
+      closeMoreMenu(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeMoreMenu();
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [closeMoreMenu, moreMenuOpen]);
+
+  useEffect(() => {
     setDocumentThreadsOpen(false);
     setSelectedThreadId("");
     setThreadAnchorInfo({});
     setDocumentWatchersOpen(false);
+    setDocumentActivityOpen(false);
+    setMoreMenuOpen(false);
   }, [activeDocument?.id]);
 
   useEffect(() => {
@@ -1814,16 +1865,6 @@ export function WorkspaceApp({
   }, [activeDocumentPath]);
   const workspacePeopleList = workspacePeople(workspace);
   const documentActivityList = documentActivity(workspace, activeDocument?.id);
-  // Unread = new since you last opened the tab (snapshot delta — honest for
-  // snapshot-fresh activity; not a live stream). Marked seen when the tab opens.
-  const [activitySeenAt, setActivitySeenAt] = useState("");
-  const newestActivityAt = documentActivityList[0]?.occurredAt ?? "";
-  const activityUnread = rightTab !== "activity" && newestActivityAt !== "" && newestActivityAt > activitySeenAt;
-  useEffect(() => {
-    if (rightTab === "activity" && newestActivityAt) {
-      setActivitySeenAt(newestActivityAt);
-    }
-  }, [rightTab, newestActivityAt]);
   const activityActorLabel: Record<string, string> = {};
   for (const user of workspace.users) {
     activityActorLabel[user.id] = user.handle;
@@ -1853,9 +1894,7 @@ export function WorkspaceApp({
 
   return (
     <main
-      ref={shellRef}
-      className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${draggingRail ? " dragging" : ""}`}
-      style={rightWidth != null ? ({ "--right": `${rightWidth}px` } as CSSProperties) : undefined}
+      className={`shell${sidebarCollapsed ? " sidebar-collapsed" : ""}`}
     >
       <button
         className="sb-rail-handle"
@@ -2006,7 +2045,7 @@ export function WorkspaceApp({
             {!connected ? <span className="chip sm warn">workspace offline</span> : null}
           </div>
           <div className="row gap-6">
-            <CollaboratorAvatars people={workspacePeopleList} onClick={() => { if (activeDocument) { setDocumentThreadsOpen(false); setSelectedThreadId(""); void reloadSubscribers(); setDocumentWatchersOpen(true); } }} />
+            <CollaboratorAvatars people={workspacePeopleList} onClick={() => { if (activeDocument) { setDocumentThreadsOpen(false); setSelectedThreadId(""); setDocumentActivityOpen(false); void reloadSubscribers(); setDocumentWatchersOpen(true); } }} />
             {activeDocument ? (
               <div className="document-threads-entry" ref={documentThreadsRef}>
                 <button
@@ -2022,6 +2061,7 @@ export function WorkspaceApp({
                       closeDocumentThreads(false);
                     } else {
                       setDocumentWatchersOpen(false);
+                      setDocumentActivityOpen(false);
                       setSelectedThreadId("");
                       setDocumentThreadsOpen(true);
                     }
@@ -2083,8 +2123,9 @@ export function WorkspaceApp({
                     if (documentWatchersOpen) {
                       closeDocumentWatchers(false);
                     } else {
-                      // Only one document popover open at a time — opening Watchers closes Threads.
+                      // Only one document popover open at a time — opening Watchers closes Threads and Activity.
                       setDocumentThreadsOpen(false);
+                      setDocumentActivityOpen(false);
                       setSelectedThreadId("");
                       // Refetch on open so the always-visible badge self-heals cross-client subscription
                       // changes (no workspace WS event carries them); between opens the count can read a
@@ -2129,9 +2170,73 @@ export function WorkspaceApp({
                 ) : null}
               </div>
             ) : null}
-            <button className="btn sm ghost icon" type="button" onClick={() => setModal("rename")} disabled={!activeDocument} aria-label="Document options">
-              <Icon name="more" />
-            </button>
+            <div className="document-more-entry" ref={documentMoreRef}>
+              <button
+                ref={documentMoreTriggerRef}
+                className={`btn sm ghost icon ${moreMenuOpen || documentActivityOpen ? "selected" : ""}`}
+                type="button"
+                onClick={() => {
+                  if (moreMenuOpen) {
+                    closeMoreMenu(false);
+                  } else {
+                    setMoreMenuOpen(true);
+                  }
+                }}
+                disabled={!activeDocument}
+                aria-label="Document options"
+                aria-haspopup="menu"
+                aria-expanded={moreMenuOpen}
+              >
+                <Icon name="more" />
+              </button>
+              {moreMenuOpen && activeDocument ? (
+                <div className="document-more-menu card lifted" role="menu" aria-label="Document options">
+                  <button
+                    role="menuitem"
+                    className="document-more-item"
+                    type="button"
+                    onClick={() => {
+                      setMoreMenuOpen(false);
+                      // Three-way exclusion: opening Activity closes Threads and Watchers.
+                      setDocumentThreadsOpen(false);
+                      setSelectedThreadId("");
+                      setDocumentWatchersOpen(false);
+                      setDocumentActivityOpen(true);
+                    }}
+                  >
+                    <Icon name="activity" />
+                    <span>Document activity</span>
+                  </button>
+                  <button role="menuitem" className="document-more-item" type="button" onClick={() => { setMoreMenuOpen(false); setModal("move"); }}>
+                    <Icon name="doc" />
+                    <span>Move document</span>
+                  </button>
+                  <button role="menuitem" className="document-more-item destructive" type="button" onClick={() => { setMoreMenuOpen(false); setModal("delete-doc"); }}>
+                    <span>Delete document</span>
+                  </button>
+                </div>
+              ) : null}
+              {documentActivityOpen && activeDocument ? (
+                <div
+                  ref={documentActivityDialogRef}
+                  id="document-activity-popover"
+                  className="document-activity-popover card lifted"
+                  role="dialog"
+                  aria-modal="false"
+                  aria-label="Activity on this document"
+                  tabIndex={-1}
+                >
+                  <div className="document-threads-popover-head">
+                    <div className="row gap-8 min-0">
+                      <Icon name="activity" />
+                      <b>Activity</b>
+                    </div>
+                    <button className="btn ghost icon sm" type="button" onClick={() => closeDocumentActivity()} aria-label="Close activity">×</button>
+                  </div>
+                  <ActivityPanel activities={documentActivityList} hasDocument={!!activeDocument} actorLabel={activityActorLabel} />
+                </div>
+              ) : null}
+            </div>
           </div>
         </header>
         {loading ? <div className="notice compact">Loading workspace...</div> : null}
@@ -2178,37 +2283,21 @@ export function WorkspaceApp({
         )}
       </section>
 
-      <aside className="ctx">
-        <div
-          className="rz"
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="Resize context panel"
-          onMouseDown={(event) => {
-            setDraggingRail(true);
-            event.preventDefault();
-          }}
-        />
-        <div className="ctx-tabs">
-          {(["activity"] as const).map((tab) => (
-            <button key={tab} className={`btn sm ${rightTab === tab ? "selected" : "ghost"}`} onClick={() => setRightTab(tab)}>
-              <Icon name="activity" />
-              {rightTabLabels[tab]}
-              {tab === "activity" && activityUnread ? <span className="unread-dot" aria-label="New activity" /> : null}
-            </button>
-          ))}
-        </div>
-        {rightTab === "activity" ? <ActivityPanel activities={documentActivityList} hasDocument={!!activeDocument} actorLabel={activityActorLabel} /> : null}
-      </aside>
-
-      {modal === "rename" && activeDocument ? (
-        <RenameDocumentModal
+      {modal === "move" && activeDocument ? (
+        <MoveDocumentModal
           document={activeDocument}
+          documents={rootDocuments}
           onClose={() => setModal(null)}
-          onRename={async (path) => {
+          onMove={async (path) => {
             rootNamespace.moveFile(activeDocument.id, path);
             setModal(null);
           }}
+        />
+      ) : null}
+      {modal === "delete-doc" && activeDocument ? (
+        <DeleteDocumentModal
+          document={activeDocument}
+          onClose={() => setModal(null)}
           onDelete={async () => {
             rootNamespace.tombstoneFile(activeDocument.id);
             navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "home" } }, { replace: true });
@@ -3688,39 +3777,92 @@ export function WatchersPanel({
   );
 }
 
-function RenameDocumentModal({ document, onClose, onRename, onDelete }: { document: DocumentItem; onClose: () => void; onRename: (path: string) => Promise<void>; onDelete: () => Promise<void> }) {
-  const [path, setPath] = useState(document.path);
+// The distinct folders across all documents, root first — folders are not entities, they exist only as path
+// prefixes derived from document paths (Tom's fact), so this synthesizes them the same way the sidebar tree is
+// built. Each carries its depth for indentation. A "New folder" is just a name typed under a selected folder;
+// it becomes a real prefix only when a Move commits, so nothing is written here.
+export function documentFolders(documents: DocumentItem[]): { path: string; name: string; depth: number }[] {
+  const seen = new Set<string>([""]);
+  const folders: { path: string; name: string; depth: number }[] = [{ path: "", name: "root", depth: 0 }];
+  for (const doc of documents) {
+    const segments = (doc.path || "").split("/").filter(Boolean).slice(0, -1);
+    let prefix = "";
+    segments.forEach((segment, index) => {
+      prefix = prefix ? `${prefix}/${segment}` : segment;
+      if (!seen.has(prefix)) {
+        seen.add(prefix);
+        folders.push({ path: prefix, name: segment, depth: index + 1 });
+      }
+    });
+  }
+  // Path order puts each parent immediately before its children and siblings alphabetically — a pre-order tree.
+  return folders.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+// Move = change the document's location (distinct from the title-bar rename, which edits only the name; both
+// go through rootNamespace.moveFile). Folder picker: pick any folder in the derived tree, or type a "New folder
+// in ‹selected›" name that becomes a real prefix only on commit. Reuses the existing filename validation.
+function MoveDocumentModal({ document, documents, onClose, onMove }: { document: DocumentItem; documents: DocumentItem[]; onClose: () => void; onMove: (path: string) => Promise<void> }) {
+  const folders = useMemo(() => documentFolders(documents), [documents]);
+  const baseName = document.path.split("/").pop() || document.path;
+  const currentFolder = document.path.split("/").filter(Boolean).slice(0, -1).join("/");
+  const [selectedFolder, setSelectedFolder] = useState(currentFolder);
+  const [newFolder, setNewFolder] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  const newFolderName = newFolder.trim();
+  const targetFolder = newFolderName ? (selectedFolder ? `${selectedFolder}/${newFolderName}` : newFolderName) : selectedFolder;
+  const targetPath = targetFolder ? `${targetFolder}/${baseName}` : baseName;
+
+  const hasIllegalChars = newFolderName !== "" && filterDocumentFileNameInput(newFolderName) !== newFolderName;
+  const isReserved = newFolderName !== "" && windowsReservedBaseName.test(splitVisibleFileName(newFolderName).stem || newFolderName);
+  const conflicts = documents.some((item) => item.id !== document.id && item.path === targetPath);
+  const validation = hasIllegalChars
+    ? "That folder name has characters that aren't allowed."
+    : isReserved
+      ? "That name is reserved by the operating system."
+      : conflicts
+        ? "A document already lives there — pick another folder, or rename it in the title bar."
+        : "";
+  const unchanged = targetPath === document.path;
+
   return (
-    <Modal title="Document options" onClose={onClose}>
-      <form
-        className="form-stack"
-        onSubmit={async (event) => {
-          event.preventDefault();
-          setBusy(true);
-          setError("");
-          try {
-            await onRename(path);
-          } catch (err) {
-            setError(err instanceof Error ? err.message : String(err));
-          } finally {
-            setBusy(false);
-          }
-        }}
-      >
-        <label className="field"><span className="lab">Path</span><input value={path} onChange={(event) => setPath(event.target.value)} required /></label>
+    <Modal title="Move document" onClose={onClose}>
+      <div className="form-stack move-doc">
+        <div className="move-folder-tree" role="listbox" aria-label="Destination folder">
+          {folders.map((folder) => (
+            <button
+              key={folder.path || "root"}
+              role="option"
+              aria-selected={folder.path === selectedFolder}
+              className={`move-folder-row${folder.path === selectedFolder ? " selected" : ""}`}
+              style={{ paddingLeft: `${10 + folder.depth * 16}px` } as CSSProperties}
+              type="button"
+              onClick={() => setSelectedFolder(folder.path)}
+            >
+              <Icon name="doc" />
+              <span className="truncate">{folder.path === "" ? "root" : folder.name}</span>
+              {folder.path === currentFolder ? <span className="tiny muted">current</span> : null}
+            </button>
+          ))}
+        </div>
+        <label className="field">
+          <span className="lab">New folder in {selectedFolder || "root"}</span>
+          <input value={newFolder} onChange={(event) => setNewFolder(event.target.value)} placeholder="optional — creates the folder on move" />
+        </label>
+        <p className="hint">Moves to <b>{targetPath}</b>. Threads, activity, and subscriptions move with the document — they're keyed by ID, not path.</p>
+        {validation ? <p className="error-text">{validation}</p> : null}
         {error ? <p className="error-text">{error}</p> : null}
-        <button className="btn accent full" disabled={busy}>Save path</button>
         <button
-          className="btn danger full"
-          disabled={busy}
+          className="btn accent full"
           type="button"
+          disabled={busy || !!validation || unchanged}
           onClick={async () => {
             setBusy(true);
             setError("");
             try {
-              await onDelete();
+              await onMove(targetPath);
             } catch (err) {
               setError(err instanceof Error ? err.message : String(err));
             } finally {
@@ -3728,9 +3870,44 @@ function RenameDocumentModal({ document, onClose, onRename, onDelete }: { docume
             }
           }}
         >
-          Delete document
+          Move document
         </button>
-      </form>
+      </div>
+    </Modal>
+  );
+}
+
+function DeleteDocumentModal({ document, onClose, onDelete }: { document: DocumentItem; onClose: () => void; onDelete: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const name = document.path.split("/").pop() || document.path;
+  return (
+    <Modal title="Delete document" onClose={onClose}>
+      <div className="form-stack">
+        <p>Delete <b>{name}</b> and all of its threads and activity? This can't be undone.</p>
+        {error ? <p className="error-text">{error}</p> : null}
+        <div className="row gap-8">
+          <button className="btn full" type="button" onClick={onClose} disabled={busy}>Cancel</button>
+          <button
+            className="btn danger full"
+            type="button"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              setError("");
+              try {
+                await onDelete();
+              } catch (err) {
+                setError(err instanceof Error ? err.message : String(err));
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            Delete document
+          </button>
+        </div>
+      </div>
     </Modal>
   );
 }
