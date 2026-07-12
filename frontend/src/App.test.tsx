@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentDetailModal, CreateDaemonModal, DaemonDetailModal, DaemonsManagement, documentFolders, ManageModal, MoveDocumentModal, WorkspaceApp, WorkspaceOnboarding } from "./App";
-import { ApiError } from "./api";
+import { ApiError, publicOrigin } from "./api";
 import { emptyWorkspace, identifierFromName, identifierHelpText, identifierPattern, workspaceSlugMaxLength } from "./logic";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
 import type { Account, Agent, AgentRun, Daemon, DocumentItem, WorkspaceState, WorkspaceSummary } from "./types";
@@ -555,8 +555,9 @@ describe("ManageModal", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("saves workspace name", async () => {
+  it("shows owners a permanent workspace URL, copies it, and saves only the name", async () => {
     const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, "writeText");
     const updateWorkspaceSettings = vi.fn().mockResolvedValue({
       workspace: { id: "ws", name: "Acme Labs", slug: "acme" },
     });
@@ -571,6 +572,15 @@ describe("ManageModal", () => {
         activeTab="workspace"
       />
     );
+
+    expect(screen.queryByRole("textbox", { name: /Workspace URL/i })).toBeNull();
+    expect(screen.getByText("Workspace URL")).toBeTruthy();
+    expect(screen.getByText("Permanent")).toBeTruthy();
+    expect(screen.getByText(`${publicOrigin}/w/acme`)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Copy workspace URL" }));
+    expect(writeText).toHaveBeenCalledWith(`${publicOrigin}/w/acme`);
+    expect(screen.getByRole("button", { name: "Workspace URL copied" })).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Save settings" }) as HTMLButtonElement).disabled).toBe(true);
 
     await user.clear(screen.getByLabelText("Workspace name"));
     await user.type(screen.getByLabelText("Workspace name"), "Acme Labs");
@@ -594,6 +604,21 @@ describe("ManageModal", () => {
     expect(screen.queryByLabelText("Workspace URL slug")).toBeNull();
     expect(screen.queryByLabelText("Default agent runtime")).toBeNull();
     expect(screen.queryByText(/slug/i)).toBeNull();
+  });
+
+  it.each(["owner", "admin", "member"])("renders the permanent URL information for the %s role", (role) => {
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws", name: "Acme", slug: "acme", currentMembershipRole: role };
+    render(
+      <ManageModal
+        {...baseProps}
+        workspace={workspace as never}
+        activeTab="workspace"
+      />
+    );
+
+    expect(screen.getByText(`${publicOrigin}/w/acme`)).toBeTruthy();
+    expect(screen.getByText("Permanent")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Copy workspace URL" })).toBeTruthy();
   });
 
   it("requires exact workspace-name confirmation before deleting", async () => {
