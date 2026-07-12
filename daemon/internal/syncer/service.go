@@ -1799,18 +1799,11 @@ func materializeTrackedFile(ctx context.Context, cache *documentCache, document 
 		tracked.markLocalDirty()
 		return tracked, nil
 	}
-	snapshot, err := tracked.workspaceFS().Read(absolutePath)
-	if err == nil && snapshot.Exists {
-		tracked.setProjectedContent(string(snapshot.Bytes))
-		return tracked, nil
-	}
+	snapshot, err := tracked.workspaceFS().CreateEmptyOrRead(absolutePath)
 	if err != nil {
 		return nil, err
 	}
-	if err := writeIfChanged(absolutePath, ""); err != nil {
-		return nil, err
-	}
-	tracked.setProjectedContent("")
+	tracked.setProjectedContent(string(snapshot.Bytes))
 	return tracked, nil
 }
 
@@ -1865,7 +1858,7 @@ func scanWorkspaceFiles(root string) (map[string]string, error) {
 		if entry.IsDir() {
 			return nil
 		}
-		content, err := readFileLocked(path)
+		content, err := readFileObservation(path)
 		if err != nil {
 			return err
 		}

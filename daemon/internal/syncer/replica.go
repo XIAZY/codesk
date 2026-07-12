@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -192,14 +191,13 @@ func (r *workspaceReplica) handleWatcherEvent(event fsnotify.Event, now time.Tim
 	}
 
 	if event.Op&fsnotify.Create != 0 {
-		info, err := os.Stat(path)
+		info, identity, err := statFileWithIdentity(path)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return nil
 			}
 			return err
 		}
-		identity := fileIdentityForInfo(info)
 		if info.IsDir() {
 			_ = r.addWatchDir(path)
 			r.changes.markDiscoverDir(path)
@@ -239,7 +237,7 @@ func (r *workspaceReplica) handleWatcherEvent(event fsnotify.Event, now time.Tim
 			}
 			return nil
 		}
-		info, err := os.Stat(path)
+		info, identity, err := statFileWithIdentity(path)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return nil
@@ -254,7 +252,7 @@ func (r *workspaceReplica) handleWatcherEvent(event fsnotify.Event, now time.Tim
 			Path:      path,
 			ActorID:   r.actorID,
 			ActorType: r.actorKind(),
-		}, fileIdentityForInfo(info))
+		}, identity)
 		r.markDocumentDirty(localPathChangeReconcileWake)
 	}
 	return nil
@@ -423,22 +421,24 @@ func (r *workspaceReplica) discoverLocalCreatesInDir(dir string) error {
 			}
 			return nil
 		}
-		if entry.IsDir() {
+		info, identity, err := statFileWithIdentity(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if info.IsDir() {
 			return r.addWatchDir(path)
 		}
 		r.mu.Lock()
 		_, tracked := r.projectedByPath[path]
 		r.mu.Unlock()
 		if tracked {
-			r.recordTrackedIdentity(path)
-			return nil
-		}
-		info, err := entry.Info()
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return nil
+			if r.changes != nil {
+				r.changes.recordIdentity(path, identity)
 			}
-			return err
+			return nil
 		}
 		if r.changes != nil {
 			r.changes.markLocalCreate(localCreateCandidate{
@@ -446,7 +446,7 @@ func (r *workspaceReplica) discoverLocalCreatesInDir(dir string) error {
 				Path:      path,
 				ActorID:   r.actorID,
 				ActorType: r.actorKind(),
-			}, fileIdentityForInfo(info))
+			}, identity)
 		}
 		return nil
 	})
@@ -546,20 +546,5 @@ func (r *workspaceReplica) recordTrackedIdentity(path string) {
 }
 
 func statFileIdentity(path string) fileIdentity {
-	info, err := os.Stat(path)
-	if err != nil {
-		return fileIdentity{}
-	}
-	return fileIdentityForInfo(info)
-}
-
-func fileIdentityForInfo(info os.FileInfo) fileIdentity {
-	if info == nil {
-		return fileIdentity{}
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat == nil {
-		return fileIdentity{}
-	}
-	return fileIdentity{dev: uint64(stat.Dev), ino: uint64(stat.Ino), valid: stat.Ino != 0}
+	return fileIdentityForPath(path)
 }
