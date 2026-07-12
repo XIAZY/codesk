@@ -118,7 +118,7 @@ svg.i {
   height: 18px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.75;
+  stroke-width: 2;
   stroke-linecap: round;
   stroke-linejoin: round;
   flex: 0 0 auto;
@@ -1354,6 +1354,26 @@ a:focus-visible,
 
 .move-folder-row:first-child::before {
   display: none;
+}
+
+.move-folder-new {
+  cursor: default;
+}
+
+.move-folder-new input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  padding: 2px 6px;
+  font: inherit;
+  font-size: 13px;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.move-doc-actions {
+  align-items: center;
 }
 
 .move-folder-row:hover {

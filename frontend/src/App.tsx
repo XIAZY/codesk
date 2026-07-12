@@ -2212,10 +2212,11 @@ export function WorkspaceApp({
                     <span>Document activity</span>
                   </button>
                   <button role="menuitem" className="document-more-item" type="button" onClick={() => { setMoreMenuOpen(false); setModal("move"); }}>
-                    <Icon name="doc" />
+                    <Icon name="move" />
                     <span>Move document</span>
                   </button>
                   <button role="menuitem" className="document-more-item destructive" type="button" onClick={() => { setMoreMenuOpen(false); setModal("delete-doc"); }}>
+                    <Icon name="trash" />
                     <span>Delete document</span>
                   </button>
                 </div>
@@ -3825,10 +3826,17 @@ export function MoveDocumentModal({ document, documents, onClose, onMove }: { do
   const currentFolder = document.path.split("/").filter(Boolean).slice(0, -1).join("/");
   const [selectedFolder, setSelectedFolder] = useState(currentFolder);
   const [newFolder, setNewFolder] = useState("");
+  const [newFolderActive, setNewFolderActive] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  const newFolderName = newFolder.trim();
+  // The new folder only applies while its inline row is active — cancelling it drops back to the plain selected
+  // folder as the destination.
+  const newFolderName = newFolderActive ? newFolder.trim() : "";
+  const startNewFolder = () => {
+    setNewFolderActive(true);
+    setNewFolder("New folder");
+  };
   // The folder name that would ACTUALLY commit — normalized the same way moveFile is: illegal chars filtered,
   // trailing dots/spaces stripped ("." / ".." collapse to nothing). The preview, target, and conflict check all
   // use this, so what the user sees is exactly what commits — no preview/commit divergence.
@@ -3857,47 +3865,82 @@ export function MoveDocumentModal({ document, documents, onClose, onMove }: { do
     <Modal title="Move document" onClose={onClose}>
       <div className="form-stack move-doc">
         <div className="move-folder-tree" role="listbox" aria-label="Destination folder">
-          {folders.map((folder) => (
-            <button
-              key={folder.path || "root"}
-              role="option"
-              aria-selected={folder.path === selectedFolder}
-              className={`move-folder-row${folder.path === selectedFolder ? " selected" : ""}`}
-              style={{ "--depth": String(folder.depth) } as CSSProperties}
-              type="button"
-              onClick={() => setSelectedFolder(folder.path)}
-            >
-              <Icon name="doc" />
-              <span className="truncate">{folder.path === "" ? "root" : folder.name}</span>
-              {folder.path === currentFolder ? <span className="tiny muted">current</span> : null}
-            </button>
-          ))}
+          {folders.flatMap((folder) => {
+            const rows = [
+              <button
+                key={folder.path || "root"}
+                role="option"
+                aria-selected={folder.path === selectedFolder}
+                className={`move-folder-row${folder.path === selectedFolder ? " selected" : ""}`}
+                style={{ "--depth": String(folder.depth) } as CSSProperties}
+                type="button"
+                onClick={() => setSelectedFolder(folder.path)}
+              >
+                <Icon name="folder" />
+                <span className="truncate">{folder.path === "" ? "root" : folder.name}</span>
+                {folder.path === currentFolder ? <span className="tiny muted">current</span> : null}
+              </button>,
+            ];
+            // The New Folder row is inserted directly under the selected folder — it's a name, not a written
+            // folder, so it materializes only when the Move commits (Tom's fact: folders are path prefixes).
+            if (newFolderActive && folder.path === selectedFolder) {
+              rows.push(
+                <div
+                  key={(folder.path || "root") + "/__new"}
+                  className="move-folder-row move-folder-new"
+                  style={{ "--depth": String(folder.depth + 1) } as CSSProperties}
+                >
+                  <Icon name="folder" />
+                  <input
+                    autoFocus
+                    aria-label="New folder name"
+                    value={newFolder}
+                    onChange={(event) => setNewFolder(event.target.value)}
+                    onFocus={(event) => event.target.select()}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") {
+                        event.preventDefault();
+                        setNewFolderActive(false);
+                        setNewFolder("");
+                      }
+                    }}
+                  />
+                </div>,
+              );
+            }
+            return rows;
+          })}
         </div>
-        <label className="field">
-          <span className="lab">New folder in {selectedFolder || "root"}</span>
-          <input value={newFolder} onChange={(event) => setNewFolder(event.target.value)} placeholder="optional — creates the folder on move" />
-        </label>
         <p className="hint">Moves to <b>{targetPath}</b>. Threads, activity, and subscriptions move with the document — they're keyed by ID, not path.</p>
         {validation ? <p className="error-text">{validation}</p> : null}
         {error ? <p className="error-text">{error}</p> : null}
-        <button
-          className="btn accent full"
-          type="button"
-          disabled={busy || !!validation || unchanged}
-          onClick={async () => {
-            setBusy(true);
-            setError("");
-            try {
-              await onMove(targetPath);
-            } catch (err) {
-              setError(err instanceof Error ? err.message : String(err));
-            } finally {
-              setBusy(false);
-            }
-          }}
-        >
-          Move document
-        </button>
+        <div className="row between move-doc-actions">
+          <button className="btn sm" type="button" onClick={startNewFolder} disabled={newFolderActive}>
+            <Icon name="plus" />
+            New Folder
+          </button>
+          <div className="row gap-8">
+            <button className="btn" type="button" onClick={onClose} disabled={busy}>Cancel</button>
+            <button
+              className="btn accent"
+              type="button"
+              disabled={busy || !!validation || unchanged}
+              onClick={async () => {
+                setBusy(true);
+                setError("");
+                try {
+                  await onMove(targetPath);
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : String(err));
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              Move
+            </button>
+          </div>
+        </div>
       </div>
     </Modal>
   );
@@ -5016,6 +5059,8 @@ export function Icon({ name }: { name: string }) {
       return <svg className="i sm" viewBox="0 0 24 24"><path d="M3 7l9-4 9 4-9 4-9-4zm0 6l9 4 9-4M3 17l9 4 9-4" /></svg>;
     case "doc":
       return <svg className="i sm" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" /><path d="M14 3v5h5" /></svg>;
+    case "folder":
+      return <svg className="i sm" viewBox="0 0 24 24"><path d="M3 8V6.5A1.5 1.5 0 0 1 4.5 5H9l2 2h8A1.5 1.5 0 0 1 20.5 8.5V18A1.5 1.5 0 0 1 19 19.5H4.5A1.5 1.5 0 0 1 3 18Z" /></svg>;
     case "chevron":
       return <svg className="i sm muted" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6" /></svg>;
     case "caret":
@@ -5027,7 +5072,11 @@ export function Icon({ name }: { name: string }) {
     case "share":
       return <svg className="i sm" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3" /><circle cx="6" cy="12" r="3" /><circle cx="18" cy="19" r="3" /><path d="M8.6 10.6l6.8-4.2M8.6 13.4l6.8 4.2" /></svg>;
     case "more":
-      return <svg className="i sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1.5" /><circle cx="19" cy="12" r="1.5" /><circle cx="5" cy="12" r="1.5" /></svg>;
+      return <svg className="i sm" viewBox="0 0 24 24"><circle cx="4.5" cy="12" r="1.9" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1.9" fill="currentColor" stroke="none" /><circle cx="19.5" cy="12" r="1.9" fill="currentColor" stroke="none" /></svg>;
+    case "move":
+      return <svg className="i sm" viewBox="0 0 24 24"><path d="M3 8V6.5A1.5 1.5 0 0 1 4.5 5H9l2 2h8A1.5 1.5 0 0 1 20.5 8.5V18A1.5 1.5 0 0 1 19 19.5H4.5A1.5 1.5 0 0 1 3 18Z" /><path d="M7.5 12.25h6" /><path d="M11 9.75 13.5 12.25 11 14.75" /></svg>;
+    case "trash":
+      return <svg className="i sm" viewBox="0 0 24 24"><path d="M3.5 6.5h17" /><path d="M8.5 6.5V5a1.5 1.5 0 0 1 1.5-1.5h4A1.5 1.5 0 0 1 15.5 5v1.5" /><path d="M18.5 6.5l-.9 13a2 2 0 0 1-2 1.9H8.4a2 2 0 0 1-2-1.9l-.9-13" /><path d="M10 10.5v6.5M14 10.5v6.5" /></svg>;
     case "settings":
       return <svg className="i sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1" /></svg>;
     default:
