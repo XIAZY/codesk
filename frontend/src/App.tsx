@@ -643,7 +643,7 @@ function InvitePage({
         api={api}
         mode="login"
         onAuth={onAuth}
-        title="Join workspace"
+        title={`Join ${preview.workspace.name}`}
         copy="Log in or create an account to accept this invite."
         preserveRoute
       >
@@ -686,7 +686,9 @@ function InvitePage({
       <section className="card p-24 auth-panel">
         <Logo />
         {previewCard}
-        <h1 className="auth-title">Join workspace</h1>
+        <h1 className="auth-title">Join {preview.workspace.name}</h1>
+        <p className="small muted">You'll join this project and share its documents and discussions with the team and its agents.</p>
+        <p className="tiny muted">This invitation expires in {relativeInviteExpiry(preview.expiresAt)}.</p>
         <form onSubmit={accept} className="form-stack">
           <label className="field">
             <span className="lab">Your handle in this workspace</span>
@@ -700,7 +702,7 @@ function InvitePage({
               title={identifierHelpText}
               required
             />
-            <span className="hint">{identifierHelpText}</span>
+            <span className="hint">This is how teammates and agents mention you here — unique to this workspace. {identifierHelpText}</span>
           </label>
           {joinError ? <p className="error-text">{joinError}</p> : null}
           <button className="btn accent full lg" disabled={joining}>{joining ? "Joining..." : "Join workspace"}</button>
@@ -732,6 +734,24 @@ function formatInviteDate(value: string) {
     return "soon";
   }
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date);
+}
+
+function relativeInviteExpiry(value: string) {
+  const date = new Date(value);
+  const ms = date.valueOf() - Date.now();
+  if (Number.isNaN(date.valueOf()) || ms <= 0) {
+    return "soon";
+  }
+  const minutes = Math.round(ms / 60000);
+  if (minutes < 60) {
+    return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  }
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) {
+    return `${hours} hour${hours === 1 ? "" : "s"}`;
+  }
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"}`;
 }
 
 export function AuthScreen({
@@ -1199,7 +1219,7 @@ function CreateWorkspaceForm({
           title={identifierHelpText}
           required
         />
-        <span className="hint">Teammates and agents mention you by this. Use lowercase letters, numbers, and hyphens.</span>
+        <span className="hint">Teammates and agents mention you by this. {identifierHelpText}</span>
       </label>
       {error ? <p className="error-text">{error}</p> : null}
       <button className="btn accent full lg">Create workspace</button>
@@ -4041,19 +4061,22 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
   // the workspace socket the moment the daemon calls home, flipping this to online.
   const createdDaemon = daemons.find((daemon) => daemon.id === daemonId);
   const connected = createdDaemon ? daemonStatus(createdDaemon) === "online" : false;
+  const failed = createdDaemon ? isDaemonOffline(createdDaemon) : false;
   return (
-    <Modal title={token ? `${name} created` : "New local environment"} onClose={onClose}>
+    <Modal title="Connect this workspace to your computer" onClose={onClose}>
       {token ? (
         <div className="token-reveal">
-          <ShellScriptBlock title="Install local environment" badge="Host native" command={command}>
-            <p className="small muted">This downloads the release bundle, installs the local environment and agent helper, writes local environment config, and starts a local service. Docker Compose is only for local development.</p>
+          <ShellScriptBlock title="Install command" badge="Host native" command={command}>
+            <p className="small muted">Run this in a terminal on the computer you want to connect. It sets up local file sync and the space where your agents run.</p>
           </ShellScriptBlock>
-          <div className="row between">
-            {connected ? (
-              <span className="chip online"><StatusDot tone="online" />Local environment connected</span>
-            ) : (
-              <span className="chip"><StatusDot tone="stale" />Waiting for local environment to check in…</span>
-            )}
+          {connected ? (
+            <p className="chip online"><StatusDot tone="online" />Local environment connected. You can create an agent now.</p>
+          ) : failed ? (
+            <p className="chip"><StatusDot tone="stale" />No connection yet. Make sure the command ran completely, or generate a new install command.</p>
+          ) : (
+            <p className="chip"><StatusDot tone="stale" />Install command ready. Run it in a terminal on the target computer — Codesk detects the connection automatically.</p>
+          )}
+          <div className="row end">
             <button className="btn accent" onClick={onClose}>Done</button>
           </div>
         </div>
@@ -4068,6 +4091,7 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
             onDone();
           }}
         >
+          <p className="small muted">A local environment syncs your Codesk documents to your machine and hosts long-running agents. Once connected, the same file opens in the browser, VS Code, or any local tool.</p>
           <label className="field"><span className="lab">Name</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label>
           <button className="btn accent full">Create local environment</button>
         </form>
@@ -4179,8 +4203,9 @@ function CreateAgentModal({ api, workspaceId, daemons, onClose, onDone }: { api:
   };
 
   return (
-    <Modal title="New agent" onClose={onClose} wide>
+    <Modal title="Create an agent that stays with the project" onClose={onClose} wide>
       <form className="new-agent-form" onSubmit={submit}>
+        <p className="small muted new-agent-lead">An agent isn't a one-off chat. It has its own name, role, and environment, and keeps working in this workspace over time.</p>
         <div className="new-agent-grid">
           <div className="col gap-14 new-agent-col">
             <label className="field">
@@ -4197,6 +4222,7 @@ function CreateAgentModal({ api, workspaceId, daemons, onClose, onDone }: { api:
                 }}
                 required
               />
+              <span className="hint">Give it a name that's easy to recognize.</span>
             </label>
             <label className="field">
               <span className="lab">Handle</span>
@@ -4218,10 +4244,11 @@ function CreateAgentModal({ api, workspaceId, daemons, onClose, onDone }: { api:
               />
               <span className="hint">{identifierHelpText} Auto-filled from the display name; edit to override. Unique in this workspace.</span>
             </label>
-            <label className="field"><span className="lab">Role</span><textarea value={role} placeholder={rolePlaceholder} onChange={(event) => setRole(event.target.value)} required /></label>
+            <label className="field"><span className="lab">Role</span><textarea value={role} placeholder={rolePlaceholder} onChange={(event) => setRole(event.target.value)} required /><span className="hint">Describe what it owns, how it knows the work is done, and when it should check with a person.</span></label>
             <div className="divider" />
             <div className="field">
               <span className="lab">Owning local environment</span>
+              <span className="hint">The agent runs in the local environment you choose.</span>
               <div className="daemon-choice-list">
                 {activeDaemons.map((daemon) => {
                   const status = daemonStatus(daemon);

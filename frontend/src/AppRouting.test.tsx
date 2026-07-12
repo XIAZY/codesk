@@ -406,7 +406,7 @@ describe("App URL routing", () => {
     render(<App />);
 
     expect(await screen.findByText("Invited Workspace")).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Join workspace" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Join Invited Workspace" })).toBeTruthy();
     expect(window.location.pathname).toBe("/invite/new123");
 
     await user.type(screen.getByLabelText("Email"), "owner@example.com");

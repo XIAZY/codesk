@@ -541,8 +541,8 @@ describe("CreateDaemonModal install status", () => {
     await user.click(screen.getByRole("button", { name: "Create local environment" }));
 
     // Local environment created but has not checked in yet: the chip must say waiting.
-    expect(await screen.findByText("Waiting for local environment to check in…")).toBeTruthy();
-    expect(screen.queryByText("Local environment connected")).toBeNull();
+    expect(await screen.findByText("Install command ready. Run it in a terminal on the target computer — Codesk detects the connection automatically.")).toBeTruthy();
+    expect(screen.queryByText("Local environment connected. You can create an agent now.")).toBeNull();
 
     // A daemon.updated event lands via the workspace socket, so live state now reports
     // the daemon online. The chip must flip without a manual refresh.
@@ -550,8 +550,8 @@ describe("CreateDaemonModal install status", () => {
       <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[{ ...daemonFixtures.justSeen, id: "daemon_new", name: "Local daemon" }]} onClose={vi.fn()} onDone={vi.fn()} />
     );
 
-    expect(screen.getByText("Local environment connected")).toBeTruthy();
-    expect(screen.queryByText("Waiting for local environment to check in…")).toBeNull();
+    expect(screen.getByText("Local environment connected. You can create an agent now.")).toBeTruthy();
+    expect(screen.queryByText("Install command ready. Run it in a terminal on the target computer — Codesk detects the connection automatically.")).toBeNull();
   });
 });
 
