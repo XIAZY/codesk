@@ -325,6 +325,13 @@ describe("MoveDocumentModal", () => {
     expect(screen.queryByText(/\.\.\//)).toBeNull();
   });
 
+  it("rejects a dot-prefixed folder name the daemon's visible-root contract would refuse", () => {
+    renderMove([]);
+    fireEvent.change(screen.getByLabelText(/New folder in/i), { target: { value: ".secret" } });
+    expect(moveButton().disabled).toBe(true);
+    expect(screen.getByText(/isn't allowed/i)).toBeTruthy();
+  });
+
   it("blocks a move to a case-insensitively occupied path", () => {
     // Another doc occupies Other/PRODUCT.md; selecting Other targets Other/Product.md — occupied regardless of case.
     renderMove([{ id: "d2", path: "Other/PRODUCT.md", title: "PRODUCT.md" } as DocumentItem]);

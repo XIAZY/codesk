@@ -3833,7 +3833,10 @@ export function MoveDocumentModal({ document, documents, onClose, onMove }: { do
   // trailing dots/spaces stripped ("." / ".." collapse to nothing). The preview, target, and conflict check all
   // use this, so what the user sees is exactly what commits — no preview/commit divergence.
   const normalizedNewFolder = filterDocumentFileNameInput(newFolderName).replace(/[. ]+$/g, "");
-  const invalidNewFolder = newFolderName !== "" && normalizedNewFolder !== newFolderName;
+  // Refuse names whose normalized form differs (`.`/`..`, trailing dots/spaces, illegal chars) AND any
+  // dot-PREFIXED name: the daemon's visible-root contract ignores any dot-prefixed path segment
+  // (isIgnoredWorkspaceRelativePath), so `Docs/.secret/…` would write a path the daemon refuses to project.
+  const invalidNewFolder = newFolderName !== "" && (normalizedNewFolder !== newFolderName || newFolderName.startsWith("."));
   const targetFolder = normalizedNewFolder ? (selectedFolder ? `${selectedFolder}/${normalizedNewFolder}` : normalizedNewFolder) : selectedFolder;
   const targetPath = targetFolder ? `${targetFolder}/${baseName}` : baseName;
 
@@ -3842,7 +3845,7 @@ export function MoveDocumentModal({ document, documents, onClose, onMove }: { do
   // regardless of case (Other/PRODUCT.md blocks a move to Other/Product.md).
   const conflicts = documents.some((item) => item.id !== document.id && item.path.toLowerCase() === targetPath.toLowerCase());
   const validation = invalidNewFolder
-    ? "That folder name isn't allowed — no “.” or “..”, no trailing dots or spaces, and no illegal characters."
+    ? "That folder name isn't allowed — no leading “.”, no “.”/“..”, no trailing dots or spaces, and no illegal characters."
     : isReserved
       ? "That name is reserved by the operating system."
       : conflicts
