@@ -2591,6 +2591,199 @@ a:focus-visible,
   letter-spacing: -0.01em;
 }
 
+/* Onboarding sits below real modals (80). Four panels leave a physical hole,
+   so the highlighted control remains the actual clickable/focusable element. */
+.ob-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  pointer-events: none;
+}
+
+.ob-scrim-panel {
+  position: fixed;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: oklch(0.26 0.010 62 / 0.34);
+  z-index: 70;
+  pointer-events: auto;
+  cursor: default;
+  animation: ob-fade 140ms ease both;
+}
+
+.ob-window {
+  position: fixed;
+  z-index: 70;
+  border: 1px solid oklch(0.99 0.004 75 / 0.55);
+  border-radius: 16px;
+  pointer-events: none;
+  transition: all 180ms cubic-bezier(0.2, 0.6, 0.2, 1);
+  animation: ob-fade 120ms ease both;
+}
+
+.ob-coach {
+  position: fixed;
+  z-index: 71;
+  width: min(312px, calc(100vw - 24px));
+  padding: 22px 24px 18px;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 20px 50px -20px oklch(0.32 0.03 60 / 0.30), 0 3px 10px -6px oklch(0.3 0.02 60 / 0.25);
+  pointer-events: auto;
+  animation: ob-settle 120ms ease both;
+}
+
+.ob-page-fallback {
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  animation: ob-fade 120ms ease both;
+}
+
+.ob-coach-meta,
+.ob-actions,
+.ob-actions-main,
+.ob-dots {
+  display: flex;
+  align-items: center;
+}
+
+.ob-coach-meta { gap: 8px; }
+
+.ob-gmark {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.ob-step {
+  color: var(--ink-4);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.ob-coach h4 {
+  margin: 14px 0 7px;
+  color: var(--ink);
+  font-size: 16.5px;
+  font-weight: 660;
+  letter-spacing: 0;
+}
+
+.ob-coach.ob-tip h4 {
+  margin-top: 0;
+}
+
+.ob-coach p {
+  margin: 0;
+  color: var(--ink-3);
+  font-size: 13.5px;
+  line-height: 1.65;
+}
+
+.ob-dots {
+  min-height: 16px;
+  gap: 5px;
+  margin-top: 16px;
+}
+
+.ob-dots i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--border-strong);
+  transition: width 100ms ease, background 100ms ease;
+}
+
+.ob-dots i.on {
+  width: 16px;
+  border-radius: 5px;
+  background: var(--accent);
+}
+
+.ob-actions {
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.ob-actions-main { gap: 7px; }
+
+.ob-skip,
+.ob-back,
+.ob-secondary,
+.ob-next {
+  min-height: 36px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ob-skip,
+.ob-back {
+  color: var(--ink-4);
+  background: transparent;
+}
+
+.ob-back:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+.ob-secondary {
+  color: var(--ink-2);
+  background: var(--paper-2);
+}
+
+.ob-next {
+  padding-inline: 17px;
+  color: var(--paper);
+  background: var(--ink);
+  border-radius: 9px;
+}
+
+.ob-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@keyframes ob-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes ob-settle {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ob-scrim-panel,
+  .ob-window,
+  .ob-coach,
+  .ob-dots i {
+    animation: none;
+    transition: none;
+  }
+}
+
 .modal-identity {
   display: flex;
   align-items: center;

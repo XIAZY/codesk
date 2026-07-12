@@ -1,0 +1,341 @@
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+
+export type OnboardingActionEvent = "advance" | "back" | "complete" | "dismiss" | "open-thread-draft";
+export type OnboardingScope = "account" | "workspace";
+export type OnboardingPresentation = "spotlight" | "tip";
+
+export type OnboardingAction = {
+  label: string;
+  event: OnboardingActionEvent;
+};
+
+// Structural view model for the overlay. The Phase-2 adapter maps P1's richer
+// OnboardingNode into this shape without coupling the parallel branches.
+export type OnboardingStep = {
+  id: string;
+  version: number;
+  scope: OnboardingScope;
+  presentation: OnboardingPresentation;
+  targetOnboardingId?: string;
+  title: string;
+  body: string;
+  primaryAction?: OnboardingAction;
+  secondaryAction?: OnboardingAction;
+  skippable: boolean;
+  fallback: "page-card" | "skip";
+};
+
+type Rect = {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  width: number;
+  height: number;
+};
+
+type PanelRect = { left: number; top: number; width: number; height: number };
+
+export type SpotlightGeometry = {
+  hole: Rect;
+  panels: [PanelRect, PanelRect, PanelRect, PanelRect];
+  placement: { left: number; top: number };
+};
+
+const SPOTLIGHT_PAD = 12;
+const COACH_MARGIN = 12;
+const COACH_RIGHT = 24;
+const COACH_TOP = 72;
+const COACH_FALLBACK = { width: 312, height: 220 };
+
+function bounded(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+export function spotlightGeometry(
+  target: Rect,
+  viewport: { width: number; height: number },
+  coach: { width: number; height: number },
+): SpotlightGeometry {
+  const left = bounded(target.left - SPOTLIGHT_PAD, 0, viewport.width);
+  const top = bounded(target.top - SPOTLIGHT_PAD, 0, viewport.height);
+  const right = bounded(target.right + SPOTLIGHT_PAD, left, viewport.width);
+  const bottom = bounded(target.bottom + SPOTLIGHT_PAD, top, viewport.height);
+  const hole = { left, top, right, bottom, width: right - left, height: bottom - top };
+  const panels: SpotlightGeometry["panels"] = [
+    { left: 0, top: 0, width: viewport.width, height: top },
+    { left: 0, top, width: left, height: hole.height },
+    { left: right, top, width: Math.max(0, viewport.width - right), height: hole.height },
+    { left: 0, top: bottom, width: viewport.width, height: Math.max(0, viewport.height - bottom) },
+  ];
+
+  const maxLeft = Math.max(COACH_MARGIN, viewport.width - coach.width - COACH_MARGIN);
+  const maxTop = Math.max(COACH_MARGIN, viewport.height - coach.height - COACH_MARGIN);
+  const coachLeft = bounded(viewport.width - coach.width - COACH_RIGHT, COACH_MARGIN, maxLeft);
+  let coachTop = bounded(COACH_TOP, COACH_MARGIN, maxTop);
+  const intersectsHole = (candidateTop: number) => (
+    coachLeft < hole.right + 18
+    && coachLeft + coach.width > hole.left - 18
+    && candidateTop < hole.bottom + 18
+    && candidateTop + coach.height > hole.top - 18
+  );
+  if (intersectsHole(coachTop)) {
+    const below = hole.bottom + 18;
+    const above = hole.top - coach.height - 18;
+    if (below <= maxTop) coachTop = below;
+    else if (above >= COACH_MARGIN) coachTop = above;
+  }
+  return { hole, panels, placement: { left: coachLeft, top: coachTop } };
+}
+
+function targetFor(onboardingId: string | undefined): HTMLElement | null {
+  if (!onboardingId) return null;
+  return Array.from(document.querySelectorAll<HTMLElement>("[data-onboarding-id]"))
+    .find((candidate) => candidate.dataset.onboardingId === onboardingId) ?? null;
+}
+
+function viewportSize() {
+  return {
+    width: window.visualViewport?.width ?? window.innerWidth,
+    height: window.visualViewport?.height ?? window.innerHeight,
+  };
+}
+
+function focusable(node: HTMLElement | null): node is HTMLElement {
+  if (!node) return false;
+  if (node.matches("button:disabled, input:disabled, select:disabled, textarea:disabled")) return false;
+  return node.matches("button, a[href], input, select, textarea, [tabindex]:not([tabindex='-1'])");
+}
+
+type OnboardingProps = {
+  step: OnboardingStep;
+  stepIndex: number;
+  total: number;
+  onNext: () => void;
+  onBack: () => void;
+  onSkip: () => void;
+  onAction?: (event: OnboardingActionEvent) => void;
+  onMissingTarget?: () => void;
+};
+
+export function Onboarding({
+  step,
+  stepIndex,
+  total,
+  onNext,
+  onBack,
+  onSkip,
+  onAction,
+  onMissingTarget,
+}: OnboardingProps) {
+  const isTip = step.presentation === "tip";
+  const coachRef = useRef<HTMLElement | null>(null);
+  const missingNotifiedRef = useRef("");
+  const [target, setTarget] = useState<HTMLElement | null>(null);
+  const [missing, setMissing] = useState(false);
+  const [geometry, setGeometry] = useState<SpotlightGeometry | null>(null);
+
+  const measure = useCallback((node: HTMLElement) => {
+    if (!node.isConnected) {
+      setTarget(null);
+      setGeometry(null);
+      setMissing(true);
+      return;
+    }
+    const targetRect = node.getBoundingClientRect();
+    const coachRect = coachRef.current?.getBoundingClientRect();
+    const coachSize = coachRect?.width && coachRect?.height
+      ? { width: coachRect.width, height: coachRect.height }
+      : COACH_FALLBACK;
+    setGeometry(spotlightGeometry(targetRect, viewportSize(), coachSize));
+  }, []);
+
+  useLayoutEffect(() => {
+    const node = targetFor(step.targetOnboardingId);
+    setTarget(node);
+    setMissing(!node);
+    setGeometry(null);
+    if (!node) return;
+
+    let frame = 0;
+    const schedule = () => {
+      if (frame) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        measure(node);
+      });
+    };
+    measure(node);
+    schedule();
+    window.addEventListener("resize", schedule);
+    window.visualViewport?.addEventListener("resize", schedule);
+    window.visualViewport?.addEventListener("scroll", schedule);
+    document.addEventListener("scroll", schedule, true);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(schedule);
+    observer?.observe(node);
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      observer?.disconnect();
+      window.removeEventListener("resize", schedule);
+      window.visualViewport?.removeEventListener("resize", schedule);
+      window.visualViewport?.removeEventListener("scroll", schedule);
+      document.removeEventListener("scroll", schedule, true);
+    };
+  }, [measure, step.id, step.targetOnboardingId]);
+
+  useEffect(() => {
+    if (!missing || step.fallback !== "skip" || missingNotifiedRef.current === step.id) return;
+    missingNotifiedRef.current = step.id;
+    console.warn(`[onboarding] skipped ${step.id}: target ${step.targetOnboardingId ?? "(none)"} is missing`);
+    (onMissingTarget ?? onNext)();
+  }, [missing, onMissingTarget, onNext, step.fallback, step.id, step.targetOnboardingId]);
+
+  useEffect(() => {
+    if ((!target || !geometry) && !missing) return;
+    const coach = coachRef.current;
+    const coachNodes = () => Array.from(coach?.querySelectorAll<HTMLElement>(
+      "button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex='-1'])",
+    ) ?? []);
+    const cycle = () => [...(focusable(target) ? [target] : []), ...coachNodes()];
+    const modalOpen = () => Boolean(document.querySelector(".modal-backdrop"));
+
+    const onFocusIn = (event: FocusEvent) => {
+      if (modalOpen() || !(event.target instanceof Node)) return;
+      if (target?.contains(event.target) || coach?.contains(event.target)) return;
+      cycle()[0]?.focus();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (modalOpen()) return;
+      if (event.key === "Escape") {
+        if (step.skippable) {
+          event.preventDefault();
+          onSkip();
+        }
+        return;
+      }
+      if (event.key === "ArrowLeft" && stepIndex > 0) {
+        event.preventDefault();
+        onBack();
+        return;
+      }
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+        onNext();
+        return;
+      }
+      if (event.key === "Enter" && (document.activeElement === document.body || document.activeElement === coach)) {
+        event.preventDefault();
+        onNext();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const nodes = cycle();
+      if (!nodes.length) return;
+      const current = nodes.indexOf(document.activeElement as HTMLElement);
+      const nextIndex = event.shiftKey
+        ? (current <= 0 ? nodes.length - 1 : current - 1)
+        : (current < 0 || current === nodes.length - 1 ? 0 : current + 1);
+      event.preventDefault();
+      nodes[nextIndex]?.focus();
+    };
+    document.addEventListener("focusin", onFocusIn);
+    document.addEventListener("keydown", onKeyDown);
+    const initialFocusTimer = window.setTimeout(() => {
+      if (modalOpen()) return;
+      const nodes = coachNodes();
+      nodes[nodes.length - 1]?.focus();
+    }, 0);
+    return () => {
+      window.clearTimeout(initialFocusTimer);
+      document.removeEventListener("focusin", onFocusIn);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [geometry, missing, onBack, onNext, onSkip, step.skippable, stepIndex, target]);
+
+  const takeAction = (action: OnboardingAction | undefined, fallback?: () => void) => {
+    if (action) onAction?.(action.event);
+    fallback?.();
+  };
+
+  if (missing && step.fallback === "skip") return null;
+  if (!missing && (!target || !geometry)) return null;
+
+  const coach = (
+    <section
+      ref={coachRef}
+      className={`ob-coach${missing ? " ob-page-fallback" : ""}${isTip ? " ob-tip" : ""}`}
+      style={missing ? undefined : {
+        left: geometry?.placement.left,
+        top: geometry?.placement.top,
+      } as CSSProperties}
+      role="dialog"
+      aria-modal="false"
+      aria-labelledby={`ob-title-${step.id}`}
+      aria-describedby={`ob-body-${step.id}`}
+    >
+      {isTip ? null : (
+        <div className="ob-coach-meta">
+          <span className="ob-gmark" aria-hidden="true" />
+          <span className="ob-step">Step {stepIndex + 1} of {Math.max(total, 1)}</span>
+        </div>
+      )}
+      <h4 id={`ob-title-${step.id}`}>{step.title}</h4>
+      <p id={`ob-body-${step.id}`}>{step.body}</p>
+      {isTip ? null : (
+        <div className="ob-dots" aria-hidden="true">
+          {Array.from({ length: Math.max(total, 1) }, (_, index) => <i className={index === stepIndex ? "on" : ""} key={index} />)}
+        </div>
+      )}
+      <div className="ob-actions">
+        {!isTip && step.skippable ? <button type="button" className="ob-skip" onClick={onSkip}>Skip</button> : <span />}
+        <div className="ob-actions-main">
+          {isTip || step.secondaryAction?.event === "back"
+            ? null
+            : <button type="button" className="ob-back" onClick={onBack} disabled={stepIndex === 0}>Back</button>}
+          {step.secondaryAction ? (
+            <button
+              type="button"
+              className="ob-secondary"
+              onClick={() => takeAction(
+                step.secondaryAction,
+                step.secondaryAction?.event === "back" ? onBack : step.secondaryAction?.event === "dismiss" ? onSkip : onNext,
+              )}
+            >
+              {step.secondaryAction.label}
+            </button>
+          ) : null}
+          <button type="button" className="ob-next" onClick={() => takeAction(step.primaryAction, isTip ? undefined : onNext)}>
+            {step.primaryAction?.label ?? "Next"}
+          </button>
+        </div>
+      </div>
+      <span className="ob-live" aria-live="polite">{step.title}. {step.body}</span>
+    </section>
+  );
+
+  if (missing) return coach;
+
+  return (
+    <div className="ob-layer" data-onboarding-step={step.id}>
+      {geometry!.panels.map((panel, index) => (
+        <div
+          className="ob-scrim-panel"
+          onClick={step.skippable ? onSkip : undefined}
+          key={index}
+          style={panel as CSSProperties}
+        />
+      ))}
+      <div
+        className="ob-window"
+        aria-hidden="true"
+        style={{
+          left: geometry!.hole.left,
+          top: geometry!.hole.top,
+          width: geometry!.hole.width,
+          height: geometry!.hole.height,
+        }}
+      />
+      {coach}
+    </div>
+  );
+}
