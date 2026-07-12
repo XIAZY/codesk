@@ -321,6 +321,8 @@ describe("MoveDocumentModal", () => {
     fireEvent.change(screen.getByLabelText(/New folder in/i), { target: { value: ".." } });
     expect(moveButton().disabled).toBe(true);
     expect(screen.getByText(/isn't allowed/i)).toBeTruthy();
+    // WYSIWYG: the preview shows the normalized committed path, never the raw "Docs/../Product.md".
+    expect(screen.queryByText(/\.\.\//)).toBeNull();
   });
 
   it("blocks a move to a case-insensitively occupied path", () => {

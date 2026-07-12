@@ -3829,14 +3829,14 @@ export function MoveDocumentModal({ document, documents, onClose, onMove }: { do
   const [error, setError] = useState("");
 
   const newFolderName = newFolder.trim();
-  const targetFolder = newFolderName ? (selectedFolder ? `${selectedFolder}/${newFolderName}` : newFolderName) : selectedFolder;
-  const targetPath = targetFolder ? `${targetFolder}/${baseName}` : baseName;
-
-  // Reject any new-folder name that would COMMIT to a different path than the preview shows: "." / ".." collapse
-  // on normalize, trailing dots/spaces are stripped, and illegal characters are filtered. Anything whose
-  // normalized form differs from the typed name is refused rather than silently rewritten.
+  // The folder name that would ACTUALLY commit — normalized the same way moveFile is: illegal chars filtered,
+  // trailing dots/spaces stripped ("." / ".." collapse to nothing). The preview, target, and conflict check all
+  // use this, so what the user sees is exactly what commits — no preview/commit divergence.
   const normalizedNewFolder = filterDocumentFileNameInput(newFolderName).replace(/[. ]+$/g, "");
   const invalidNewFolder = newFolderName !== "" && normalizedNewFolder !== newFolderName;
+  const targetFolder = normalizedNewFolder ? (selectedFolder ? `${selectedFolder}/${normalizedNewFolder}` : normalizedNewFolder) : selectedFolder;
+  const targetPath = targetFolder ? `${targetFolder}/${baseName}` : baseName;
+
   const isReserved = newFolderName !== "" && windowsReservedBaseName.test(splitVisibleFileName(newFolderName).stem || newFolderName);
   // Conflicts are case-insensitive, matching the title-bar path contract — an occupied path is occupied
   // regardless of case (Other/PRODUCT.md blocks a move to Other/Product.md).
