@@ -2852,6 +2852,35 @@ pre.code {
   font-size: 13px;
 }
 
+.workspace-url-setting {
+  gap: 6px;
+}
+
+.workspace-url-label,
+.workspace-url-value-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.workspace-url-label .tiny {
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+}
+
+.workspace-url-value-row {
+  justify-content: space-between;
+}
+
+.workspace-url-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.workspace-url-setting > p {
+  margin: 0;
+}
+
 .settings-list .btn,
 .danger-note .btn {
   align-self: flex-start;

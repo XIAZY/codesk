@@ -4679,22 +4679,36 @@ function WorkspaceSettings({
   workspace: ReturnType<typeof useWorkspace>["workspace"];
   onSaved: (workspace: WorkspaceSummary) => void;
 }) {
+  const workspaceUrl = `${publicOrigin}/w/${workspace.slug}`;
   const role = workspace.currentMembershipRole || "";
   const canManage = role === "owner" || role === "admin";
   const [nameDraft, setNameDraft] = useState(workspace.name);
   const [saving, setSaving] = useState(false);
+  const [copied, setCopied] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
     setNameDraft(workspace.name);
+    setCopied(false);
     setMessage("");
     setError("");
-  }, [workspace.name]);
+  }, [workspace.name, workspace.slug]);
 
   const trimmedName = nameDraft.trim();
   const nameChanged = trimmedName !== workspace.name.trim();
   const saveDisabled = saving || !canManage || !nameChanged || !trimmedName;
+
+  const copyWorkspaceUrl = async () => {
+    setError("");
+    try {
+      await navigator.clipboard.writeText(workspaceUrl);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
 
   const save = async (event: FormEvent) => {
     event.preventDefault();
@@ -4734,6 +4748,24 @@ function WorkspaceSettings({
             disabled={!canManage || saving}
           />
         </label>
+        <div className="setting-readonly workspace-url-setting">
+          <div className="workspace-url-label">
+            <span className="lab">Workspace URL</span>
+            <span className="tiny muted">Permanent</span>
+          </div>
+          <div className="workspace-url-value-row">
+            <span className="setting-value mono workspace-url-value">{workspaceUrl}</span>
+            <button
+              className="btn sm"
+              type="button"
+              aria-label={copied ? "Workspace URL copied" : "Copy workspace URL"}
+              onClick={() => void copyWorkspaceUrl()}
+            >
+              {copied ? "Copied" : "Copy"}
+            </button>
+          </div>
+          <p className="tiny muted">This URL is permanent and cannot be changed.</p>
+        </div>
         <p className="tiny muted">
           {canManage
             ? "Owners and admins can rename the workspace."
