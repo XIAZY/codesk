@@ -340,11 +340,16 @@ test("document Threads entry replaces the rail tab and reuses thread detail", as
   await createAnchoredThread(page, editor, openBody, "last");
   await expect(page.getByRole("button", { name: "1 open thread on line 2" })).toBeVisible({ timeout: 20_000 });
 
-  const railTabs = page.locator(".ctx-tabs");
-  await expect(railTabs.getByRole("button", { name: /Threads/i })).toHaveCount(0);
-  await expect(railTabs.getByRole("button", { name: /Document Activity/i })).toBeVisible();
-  // Participants was removed from the rail — its subscriber controls moved to the top-bar Watchers popover.
-  await expect(railTabs.getByRole("button", { name: /Participants/i })).toHaveCount(0);
+  // The right rail is gone entirely (kill-the-sidebar finish) — no .ctx / .ctx-tabs anywhere.
+  await expect(page.locator(".ctx-tabs")).toHaveCount(0);
+  await expect(page.locator(".ctx")).toHaveCount(0);
+
+  // Document Activity now lives in the "…" menu — open it over the real stack and confirm the Activity popover.
+  await page.getByRole("button", { name: "Document options" }).click();
+  await page.getByRole("menuitem", { name: /Document activity/i }).click();
+  await expect(page.getByRole("dialog", { name: "Activity on this document" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { name: "Activity on this document" })).toHaveCount(0);
 
   await publishCurrentUserPresence(page, seed);
   const toolbarOrder = await page.locator(".doc-toolbar > .row.gap-6").evaluate((toolbar) => (

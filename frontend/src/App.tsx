@@ -2045,7 +2045,7 @@ export function WorkspaceApp({
             {!connected ? <span className="chip sm warn">workspace offline</span> : null}
           </div>
           <div className="row gap-6">
-            <CollaboratorAvatars people={workspacePeopleList} onClick={() => { if (activeDocument) { setDocumentThreadsOpen(false); setSelectedThreadId(""); setDocumentActivityOpen(false); void reloadSubscribers(); setDocumentWatchersOpen(true); } }} />
+            <CollaboratorAvatars people={workspacePeopleList} onClick={() => { if (activeDocument) { setDocumentThreadsOpen(false); setSelectedThreadId(""); setDocumentActivityOpen(false); setMoreMenuOpen(false); void reloadSubscribers(); setDocumentWatchersOpen(true); } }} />
             {activeDocument ? (
               <div className="document-threads-entry" ref={documentThreadsRef}>
                 <button
@@ -2062,6 +2062,7 @@ export function WorkspaceApp({
                     } else {
                       setDocumentWatchersOpen(false);
                       setDocumentActivityOpen(false);
+                      setMoreMenuOpen(false);
                       setSelectedThreadId("");
                       setDocumentThreadsOpen(true);
                     }
@@ -2126,6 +2127,7 @@ export function WorkspaceApp({
                       // Only one document popover open at a time — opening Watchers closes Threads and Activity.
                       setDocumentThreadsOpen(false);
                       setDocumentActivityOpen(false);
+                      setMoreMenuOpen(false);
                       setSelectedThreadId("");
                       // Refetch on open so the always-visible badge self-heals cross-client subscription
                       // changes (no workspace WS event carries them); between opens the count can read a
@@ -2179,6 +2181,8 @@ export function WorkspaceApp({
                   if (moreMenuOpen) {
                     closeMoreMenu(false);
                   } else {
+                    // One document surface at a time — opening the menu closes the Activity popover.
+                    setDocumentActivityOpen(false);
                     setMoreMenuOpen(true);
                   }
                 }}
@@ -3795,14 +3799,27 @@ export function documentFolders(documents: DocumentItem[]): { path: string; name
       }
     });
   }
-  // Path order puts each parent immediately before its children and siblings alphabetically — a pre-order tree.
-  return folders.sort((left, right) => left.path.localeCompare(right.path));
+  // Pre-order the tree by comparing paths SEGMENT-WISE, not as flat strings: a plain string compare puts
+  // `notes-old` before `notes/x` (because '-' < '/'), which would render a depth-2 child indented under the
+  // wrong depth-1 parent — an indented tree that isn't pre-order visually mis-parents. Segment-wise, a parent
+  // prefix always sorts immediately before its children and before any later sibling.
+  return folders.sort((left, right) => {
+    const a = left.path.split("/");
+    const b = right.path.split("/");
+    const shared = Math.min(a.length, b.length);
+    for (let i = 0; i < shared; i += 1) {
+      if (a[i] !== b[i]) {
+        return a[i].localeCompare(b[i]);
+      }
+    }
+    return a.length - b.length;
+  });
 }
 
 // Move = change the document's location (distinct from the title-bar rename, which edits only the name; both
 // go through rootNamespace.moveFile). Folder picker: pick any folder in the derived tree, or type a "New folder
 // in ‹selected›" name that becomes a real prefix only on commit. Reuses the existing filename validation.
-function MoveDocumentModal({ document, documents, onClose, onMove }: { document: DocumentItem; documents: DocumentItem[]; onClose: () => void; onMove: (path: string) => Promise<void> }) {
+export function MoveDocumentModal({ document, documents, onClose, onMove }: { document: DocumentItem; documents: DocumentItem[]; onClose: () => void; onMove: (path: string) => Promise<void> }) {
   const folders = useMemo(() => documentFolders(documents), [documents]);
   const baseName = document.path.split("/").pop() || document.path;
   const currentFolder = document.path.split("/").filter(Boolean).slice(0, -1).join("/");
@@ -3815,11 +3832,17 @@ function MoveDocumentModal({ document, documents, onClose, onMove }: { document:
   const targetFolder = newFolderName ? (selectedFolder ? `${selectedFolder}/${newFolderName}` : newFolderName) : selectedFolder;
   const targetPath = targetFolder ? `${targetFolder}/${baseName}` : baseName;
 
-  const hasIllegalChars = newFolderName !== "" && filterDocumentFileNameInput(newFolderName) !== newFolderName;
+  // Reject any new-folder name that would COMMIT to a different path than the preview shows: "." / ".." collapse
+  // on normalize, trailing dots/spaces are stripped, and illegal characters are filtered. Anything whose
+  // normalized form differs from the typed name is refused rather than silently rewritten.
+  const normalizedNewFolder = filterDocumentFileNameInput(newFolderName).replace(/[. ]+$/g, "");
+  const invalidNewFolder = newFolderName !== "" && normalizedNewFolder !== newFolderName;
   const isReserved = newFolderName !== "" && windowsReservedBaseName.test(splitVisibleFileName(newFolderName).stem || newFolderName);
-  const conflicts = documents.some((item) => item.id !== document.id && item.path === targetPath);
-  const validation = hasIllegalChars
-    ? "That folder name has characters that aren't allowed."
+  // Conflicts are case-insensitive, matching the title-bar path contract — an occupied path is occupied
+  // regardless of case (Other/PRODUCT.md blocks a move to Other/Product.md).
+  const conflicts = documents.some((item) => item.id !== document.id && item.path.toLowerCase() === targetPath.toLowerCase());
+  const validation = invalidNewFolder
+    ? "That folder name isn't allowed — no “.” or “..”, no trailing dots or spaces, and no illegal characters."
     : isReserved
       ? "That name is reserved by the operating system."
       : conflicts
@@ -3837,7 +3860,7 @@ function MoveDocumentModal({ document, documents, onClose, onMove }: { document:
               role="option"
               aria-selected={folder.path === selectedFolder}
               className={`move-folder-row${folder.path === selectedFolder ? " selected" : ""}`}
-              style={{ paddingLeft: `${10 + folder.depth * 16}px` } as CSSProperties}
+              style={{ "--depth": String(folder.depth) } as CSSProperties}
               type="button"
               onClick={() => setSelectedFolder(folder.path)}
             >

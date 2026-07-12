@@ -168,4 +168,21 @@ describe("document Threads toolbar entry", () => {
     expect(screen.getByRole("heading", { name: "Delete document" })).toBeTruthy();
     expect(screen.getByText(/can't be undone/i)).toBeTruthy();
   });
+
+  it("re-opening the … menu closes an open Activity popover — they never stack", async () => {
+    const user = userEvent.setup();
+    renderWorkspace();
+    const moreTrigger = screen.getByRole("button", { name: "Document options" });
+
+    // Open Activity from the menu — the menu closes as Activity opens.
+    await user.click(moreTrigger);
+    await user.click(screen.getByRole("menuitem", { name: /Document activity/i }));
+    expect(screen.getByRole("dialog", { name: "Activity on this document" })).toBeTruthy();
+    expect(screen.queryByRole("menu")).toBeNull();
+
+    // Click "…" again: the menu reopens and Activity must close, not stack behind it.
+    await user.click(moreTrigger);
+    expect(screen.getByRole("menu", { name: "Document options" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Activity on this document" })).toBeNull();
+  });
 });
