@@ -1184,8 +1184,7 @@ a:focus-visible,
 }
 
 .document-threads-trigger {
-  min-width: 48px;
-  justify-content: center;
+  padding-inline: 0;
   border-color: var(--border-strong);
   font-variant-numeric: tabular-nums;
 }
@@ -1220,8 +1219,7 @@ a:focus-visible,
 }
 
 .document-watchers-trigger {
-  min-width: 48px;
-  justify-content: center;
+  padding-inline: 0;
   border-color: var(--border-strong);
   font-variant-numeric: tabular-nums;
 }
@@ -1249,6 +1247,16 @@ a:focus-visible,
 
 .document-more-entry {
   position: relative;
+}
+
+/* The toolbar cluster [avatars][💬][👥][…]: every gap comes from this one container gap, and the triggers
+   carry no extra horizontal padding, so avatar↔icon reads identical to icon↔icon (Eva's even-spacing spec). */
+.doc-toolbar-actions {
+  gap: 11px;
+}
+
+.document-more-trigger {
+  padding-inline: 0;
 }
 
 .document-more-menu {
@@ -1429,7 +1437,6 @@ a:focus-visible,
   border: none;
   background: none;
   padding: 0;
-  cursor: pointer;
 }
 
 .collaborator-avatars .avi {

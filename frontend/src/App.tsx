@@ -2044,8 +2044,8 @@ export function WorkspaceApp({
             )}
             {!connected ? <span className="chip sm warn">workspace offline</span> : null}
           </div>
-          <div className="row gap-6">
-            <CollaboratorAvatars people={workspacePeopleList} onClick={() => { if (activeDocument) { setDocumentThreadsOpen(false); setSelectedThreadId(""); setDocumentActivityOpen(false); setMoreMenuOpen(false); void reloadSubscribers(); setDocumentWatchersOpen(true); } }} />
+          <div className="row doc-toolbar-actions">
+            <CollaboratorAvatars people={workspacePeopleList} />
             {activeDocument ? (
               <div className="document-threads-entry" ref={documentThreadsRef}>
                 <button
@@ -2175,7 +2175,7 @@ export function WorkspaceApp({
             <div className="document-more-entry" ref={documentMoreRef}>
               <button
                 ref={documentMoreTriggerRef}
-                className={`btn sm ghost icon ${moreMenuOpen || documentActivityOpen ? "selected" : ""}`}
+                className={`btn sm ghost icon document-more-trigger ${moreMenuOpen || documentActivityOpen ? "selected" : ""}`}
                 type="button"
                 onClick={() => {
                   if (moreMenuOpen) {
@@ -3657,21 +3657,17 @@ function ActivityPanel({
   );
 }
 
-function CollaboratorAvatars({ people, onClick }: { people: WorkspacePerson[]; onClick: () => void }) {
+function CollaboratorAvatars({ people }: { people: WorkspacePerson[] }) {
   const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
   // Same honest-decay ruling as the People panel (Eva): the ring reflects personOnline, which
   // decays on the presence freshness window, so a closed laptop drops the ring — never a stale
   // "online". The toolbar only renders confirmed-online collaborators; +N below is neutral.
   const online = people.filter((p) => personOnline(p, now));
   if (!online.length) return null;
+  // Presence display only — not interactive (AlphaToad: clicking the avatars shouldn't open the Watchers
+  // popover). A non-button, non-focusable element so there's no dead click affordance.
   return (
-    <button
-      className="collaborator-avatars"
-      type="button"
-      onClick={onClick}
-      title={`${online.length} online`}
-      aria-label={`${online.length} collaborator${online.length === 1 ? "" : "s"} online — open People`}
-    >
+    <div className="collaborator-avatars" title={`${online.length} online`} aria-label={`${online.length} collaborator${online.length === 1 ? "" : "s"} online`}>
       {online.slice(0, 5).map((p) => (
         <div key={p.id} className={`avi sm ${p.kind === "agent" ? "agent" : "you"} online`}>
           {initials(p.handle || p.name)}
@@ -3679,7 +3675,7 @@ function CollaboratorAvatars({ people, onClick }: { people: WorkspacePerson[]; o
       ))}
       {/* +N overflow is a neutral count, NOT ringed — a ring would imply all N are online (Eva). */}
       {online.length > 5 ? <span className="avi sm you">+{online.length - 5}</span> : null}
-    </button>
+    </div>
   );
 }
 

@@ -352,7 +352,7 @@ test("document Threads entry replaces the rail tab and reuses thread detail", as
   await expect(page.getByRole("dialog", { name: "Activity on this document" })).toHaveCount(0);
 
   await publishCurrentUserPresence(page, seed);
-  const toolbarOrder = await page.locator(".doc-toolbar > .row.gap-6").evaluate((toolbar) => (
+  const toolbarOrder = await page.locator(".doc-toolbar > .row.doc-toolbar-actions").evaluate((toolbar) => (
     Array.from(toolbar.children).map((child) => child.getAttribute("class") ?? "")
   ));
   const collaboratorsIndex = toolbarOrder.findIndex((className) => className.includes("collaborator-avatars"));
