@@ -17,6 +17,7 @@ import {
   activityCategory,
   relativeTime,
   daemonStatus,
+  hasGenuineCheckIn,
   daemonLiveStatus,
   handleMaxLength,
   handleMinLength,
@@ -4061,7 +4062,10 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
   // the workspace socket the moment the daemon calls home, flipping this to online.
   const createdDaemon = daemons.find((daemon) => daemon.id === daemonId);
   const connected = createdDaemon ? daemonStatus(createdDaemon) === "online" : false;
-  const failed = createdDaemon ? isDaemonOffline(createdDaemon) : false;
+  // Failed only after a genuine check-in that then dropped — never on a fresh daemon. A never-seen
+  // daemon reads as "disconnected" with a zero-time lastSeenAt, so gate on hasGenuineCheckIn (year
+  // >= 2020) instead of Boolean(lastSeenAt), which the "0001-01-01" zero time would satisfy.
+  const failed = createdDaemon ? isDaemonOffline(createdDaemon) && hasGenuineCheckIn(createdDaemon) : false;
   return (
     <Modal title="Connect this workspace to your computer" onClose={onClose}>
       {token ? (

@@ -553,6 +553,32 @@ describe("CreateDaemonModal install status", () => {
     expect(screen.getByText("Local environment connected. You can create an agent now.")).toBeTruthy();
     expect(screen.queryByText("Install command ready. Run it in a terminal on the target computer — Codesk detects the connection automatically.")).toBeNull();
   });
+
+  it("shows waiting, not failure, for a freshly created daemon that has never checked in", async () => {
+    const user = userEvent.setup();
+    const created: Daemon = { ...daemonFixtures.neverSeen, id: "daemon_new", name: "Local daemon" };
+    const api = { createDaemon: vi.fn().mockResolvedValue({ daemon: created, token: "nottyd_secret" }) };
+
+    const { rerender } = render(
+      <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />
+    );
+    await user.click(screen.getByRole("button", { name: "Create local environment" }));
+
+    // A never-seen daemon reads as "disconnected" on the wire (zero-time lastSeenAt) but the user
+    // hasn't run the install command yet — it must show Waiting, never accuse them of a failed run.
+    rerender(
+      <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[created]} onClose={vi.fn()} onDone={vi.fn()} />
+    );
+    expect(screen.getByText(/Install command ready/)).toBeTruthy();
+    expect(screen.queryByText(/No connection yet/)).toBeNull();
+
+    // Once it has genuinely checked in and then gone offline, the failure line is the honest state.
+    rerender(
+      <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[{ ...daemonFixtures.dead, id: "daemon_new", name: "Local daemon" }]} onClose={vi.fn()} onDone={vi.fn()} />
+    );
+    expect(screen.getByText(/No connection yet/)).toBeTruthy();
+    expect(screen.queryByText(/Install command ready/)).toBeNull();
+  });
 });
 
 describe("ManageModal", () => {
