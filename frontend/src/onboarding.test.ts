@@ -1,0 +1,185 @@
+import { describe, it, expect } from "vitest";
+import {
+  NODES,
+  CHECKLIST_ITEMS,
+  ONBOARDING_EVENT_KEYS,
+  eligibleNodes,
+  guideSteps,
+  activeNode,
+  activeTip,
+  nextIncomplete,
+  isComplete,
+  checklistProgress,
+  type OnboardingContext,
+  type OnboardingLiveSignals,
+  type OnboardingRole,
+} from "./onboarding";
+
+const emptySignals: OnboardingLiveSignals = {
+  documentCount: 0,
+  threadCount: 0,
+  liveEnvironmentCount: 0,
+  agentCount: 0,
+  agentRunCount: 0,
+  agentThreadCount: 0,
+  watchedDocumentCount: 0,
+};
+
+function ctx(overrides: Partial<OnboardingContext> = {}): OnboardingContext {
+  const { signals, ...rest } = overrides;
+  return {
+    roles: ["owner"] as OnboardingRole[],
+    events: new Set<string>(),
+    route: "workspace",
+    selectionActive: false,
+    ...rest,
+    signals: { ...emptySignals, ...(signals ?? {}) },
+  };
+}
+
+const node = (id: string) => NODES.find((n) => n.id === id)!;
+
+describe("onboarding event keys (§4.2 contract)", () => {
+  it("has the 11 stable keys and never a step_N key", () => {
+    expect(ONBOARDING_EVENT_KEYS).toHaveLength(11);
+    expect(ONBOARDING_EVENT_KEYS).toContain("first_document_created");
+    expect(ONBOARDING_EVENT_KEYS).toContain("local_environment_connected");
+    for (const key of ONBOARDING_EVENT_KEYS) {
+      expect(key).not.toMatch(/step[_ ]?\d/i);
+    }
+  });
+});
+
+describe("node config integrity (§4.1)", () => {
+  it("every node has a stable id, version, and a valid fallback", () => {
+    for (const n of NODES) {
+      expect(n.id).toBeTruthy();
+      expect(n.version).toBeGreaterThanOrEqual(1);
+      expect(["page-card", "skip"]).toContain(n.fallback);
+      expect(typeof n.skippable).toBe("boolean");
+    }
+    // The guided sequence is exactly the 3 ruled spotlight steps (Eva's 3-not-4).
+    expect(guideSteps(ctx()).map((n) => n.id)).toEqual([
+      "create-first-document",
+      "threads-intro",
+      "watchers-intro",
+    ]);
+  });
+
+  it("teaching nodes complete on acknowledge; the action node derives", () => {
+    // create-first-document is derivable; teaching nodes are not (need a flag).
+    expect(isComplete(node("create-first-document"), ctx({ signals: { ...emptySignals, documentCount: 1 } }))).toBe(true);
+    expect(isComplete(node("threads-intro"), ctx({ signals: { ...emptySignals, documentCount: 5 } }))).toBe(false);
+    expect(isComplete(node("threads-intro"), ctx({ events: new Set(["seen:threads-intro"]) }))).toBe(true);
+  });
+});
+
+describe("eligibility by role (§4.1 — removed, not disabled)", () => {
+  it("all guided/tip nodes are role-agnostic", () => {
+    expect(eligibleNodes(ctx({ roles: ["member"] })).map((n) => n.id)).toEqual(NODES.map((n) => n.id));
+  });
+
+  it("checklist gates 'Invite your team' to owners/admins only", () => {
+    const owner = checklistProgress(ctx({ roles: ["owner"] })).map((c) => c.item.id);
+    const member = checklistProgress(ctx({ roles: ["member"] })).map((c) => c.item.id);
+    expect(owner).toContain("invite-team");
+    expect(member).not.toContain("invite-team");
+    expect(member).toHaveLength(5);
+  });
+});
+
+describe("completion derivation (§6.1 — live state is the source of truth)", () => {
+  it("first_document_created derives from documentCount and also honors the recorded event", () => {
+    const n = node("create-first-document");
+    expect(isComplete(n, ctx())).toBe(false); // no doc, no event
+    expect(isComplete(n, ctx({ signals: { ...emptySignals, documentCount: 1 } }))).toBe(true); // derived
+    expect(isComplete(n, ctx({ events: new Set(["first_document_created"]) }))).toBe(true); // belt-and-suspenders
+  });
+
+  it("local_environment is satisfied only by a receipt-live daemon count, never raw status", () => {
+    // The engine only ever sees liveEnvironmentCount (host derives it via
+    // daemonLiveStatus). A stale-but-'online' daemon contributes 0 here by contract.
+    const item = CHECKLIST_ITEMS.find((i) => i.id === "connect-environment")!;
+    expect(isComplete(item, ctx({ signals: { ...emptySignals, liveEnvironmentCount: 0 } }))).toBe(false);
+    expect(isComplete(item, ctx({ signals: { ...emptySignals, liveEnvironmentCount: 1 } }))).toBe(true);
+  });
+
+  it("agent-at-work is any of: watcher added, agent run started, or agent in a thread", () => {
+    const item = CHECKLIST_ITEMS.find((i) => i.id === "agent-at-work")!;
+    expect(isComplete(item, ctx())).toBe(false);
+    expect(isComplete(item, ctx({ signals: { ...emptySignals, watchedDocumentCount: 1 } }))).toBe(true);
+    expect(isComplete(item, ctx({ signals: { ...emptySignals, agentRunCount: 1 } }))).toBe(true);
+    expect(isComplete(item, ctx({ signals: { ...emptySignals, agentThreadCount: 1 } }))).toBe(true);
+  });
+});
+
+describe("guided sequence: activeNode / nextIncomplete", () => {
+  it("empty workspace spotlights create-first-document", () => {
+    const c = ctx(); // documentCount 0 → workspace-empty triggered
+    expect(activeNode(c)?.id).toBe("create-first-document");
+  });
+
+  it("after a document exists, waits (null) until a document is open, then shows threads-intro", () => {
+    const withDoc = ctx({ signals: { ...emptySignals, documentCount: 1 } });
+    // create-first-document is complete; threads-intro's trigger (document-open) not met yet.
+    expect(nextIncomplete(withDoc)?.id).toBe("threads-intro");
+    expect(activeNode(withDoc)).toBeNull();
+
+    const onDoc = ctx({ signals: { ...emptySignals, documentCount: 1 }, route: "document" });
+    expect(activeNode(onDoc)?.id).toBe("threads-intro");
+  });
+
+  it("advances to watchers-intro after threads-intro is acknowledged", () => {
+    const c = ctx({
+      signals: { ...emptySignals, documentCount: 1 },
+      route: "document",
+      events: new Set(["seen:threads-intro"]),
+    });
+    expect(activeNode(c)?.id).toBe("watchers-intro");
+  });
+
+  it("finishes: all steps complete → no active node, nothing left", () => {
+    const c = ctx({
+      signals: { ...emptySignals, documentCount: 1 },
+      route: "document",
+      events: new Set(["seen:threads-intro", "seen:watchers-intro"]),
+    });
+    expect(nextIncomplete(c)).toBeNull();
+    expect(activeNode(c)).toBeNull();
+  });
+
+  it("never jumps past an earlier incomplete step to a later triggered one", () => {
+    // threads-intro not seen, but a document is open. watchers-intro is also
+    // document-open-triggered — activeNode must still be threads-intro, not watchers.
+    const c = ctx({ signals: { ...emptySignals, documentCount: 1 }, route: "document" });
+    expect(activeNode(c)?.id).toBe("threads-intro");
+  });
+});
+
+describe("contextual tip (standalone, not in the sequence)", () => {
+  it("shows on first text selection, hides once dismissed or a thread exists", () => {
+    expect(activeTip(ctx({ selectionActive: true }))?.id).toBe("tip-first-selection");
+    expect(activeTip(ctx({ selectionActive: false }))).toBeNull();
+    expect(activeTip(ctx({ selectionActive: true, events: new Set(["seen:tip-first-selection"]) }))).toBeNull();
+    expect(activeTip(ctx({ selectionActive: true, signals: { ...emptySignals, threadCount: 1 } }))).toBeNull();
+  });
+
+  it("the tip is not part of the guided step sequence", () => {
+    expect(guideSteps(ctx()).some((n) => n.id === "tip-first-selection")).toBe(false);
+  });
+});
+
+describe("checklist (§C — derived, never a stored done)", () => {
+  it("reflects live completion per item", () => {
+    const c = ctx({
+      signals: { ...emptySignals, documentCount: 1, threadCount: 1, agentCount: 1 },
+    });
+    const done = new Map(checklistProgress(c).map((r) => [r.item.id, r.done]));
+    expect(done.get("create-document")).toBe(true);
+    expect(done.get("start-discussion")).toBe(true);
+    expect(done.get("create-agent")).toBe(true);
+    expect(done.get("connect-environment")).toBe(false);
+    expect(done.get("agent-at-work")).toBe(false);
+    expect(done.get("invite-team")).toBe(false);
+  });
+});
