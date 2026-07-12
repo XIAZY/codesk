@@ -15,7 +15,7 @@ const (
 	ActionManageDaemons   = "manage_daemons"   // create/delete daemons
 	ActionEditDocuments   = "edit_documents"   // create/update/delete documents
 	ActionDeleteWorkspace = "delete_workspace" // workspace delete
-	ActionManageWorkspace = "manage_workspace" // PATCH workspace settings (name/default runtime; slug is owner-only)
+	ActionManageWorkspace = "manage_workspace" // PATCH workspace settings (name/default runtime)
 )
 
 var rolePermissions = map[string]map[string]struct{}{

@@ -46,15 +46,7 @@ func TestWorkspaceSettingsPatchAuthZAndValidation(t *testing.T) {
 		t.Fatal("workspace missing from list")
 	}
 
-	// Owner changes the slug; the list reflects it.
-	authTestJSON(t, router, http.MethodPatch, target, owner.Token, UpdateWorkspaceRequest{
-		Slug: patchStr("settings-tenant-moved"),
-	}, http.StatusOK, &updated)
-	if updated.Workspace.Slug != "settings-tenant-moved" {
-		t.Fatalf("expected slug change, got %q", updated.Workspace.Slug)
-	}
-
-	// Admin may rename but not change the slug.
+	// Admin may rename.
 	admin := authTestRegister(t, router, "ws-settings-admin@example.com", "owner-pass", "Settings Admin")
 	authTestAddMember(t, router, owner.Token, workspace.ID, admin.Account.Email, "settings-admin")
 	if _, err := server.sqlDB().Exec(
@@ -66,9 +58,6 @@ func TestWorkspaceSettingsPatchAuthZAndValidation(t *testing.T) {
 	authTestJSON(t, router, http.MethodPatch, target, admin.Token, UpdateWorkspaceRequest{
 		Name: patchStr("Admin Renamed"),
 	}, http.StatusOK, &updated)
-	authTestStatus(t, router, http.MethodPatch, target, admin.Token, UpdateWorkspaceRequest{
-		Slug: patchStr("admin-slug-grab"),
-	}, http.StatusForbidden)
 
 	// A plain member may not manage workspace settings.
 	member := authTestRegister(t, router, "ws-settings-member@example.com", "owner-pass", "Settings Member")
@@ -91,17 +80,10 @@ func TestWorkspaceSettingsPatchAuthZAndValidation(t *testing.T) {
 		Name: patchStr("Outsider Renamed"),
 	}, http.StatusForbidden)
 
-	// Validation: empty patch, empty name, bad slug, unknown runtime.
+	// Validation: empty patch, empty name, unknown runtime.
 	authTestStatus(t, router, http.MethodPatch, target, owner.Token, UpdateWorkspaceRequest{}, http.StatusBadRequest)
 	authTestStatus(t, router, http.MethodPatch, target, owner.Token, UpdateWorkspaceRequest{Name: patchStr("   ")}, http.StatusBadRequest)
-	authTestStatus(t, router, http.MethodPatch, target, owner.Token, UpdateWorkspaceRequest{Slug: patchStr("Bad Slug!")}, http.StatusBadRequest)
 	authTestStatus(t, router, http.MethodPatch, target, owner.Token, UpdateWorkspaceRequest{DefaultRuntime: patchStr("cobol")}, http.StatusBadRequest)
-
-	// Slug uniqueness surfaces as 409.
-	authTestCreateWorkspace(t, router, owner.Token, "Conflict Target")
-	authTestStatus(t, router, http.MethodPatch, target, owner.Token, UpdateWorkspaceRequest{
-		Slug: patchStr(authTestIdentifierFromName("Conflict Target", 64)),
-	}, http.StatusConflict)
 }
 
 func TestWorkspaceDeleteRequiresOwnerAndExactNameThenCascades(t *testing.T) {

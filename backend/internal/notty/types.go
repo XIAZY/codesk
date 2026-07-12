@@ -364,7 +364,6 @@ type CreateWorkspaceRequest struct {
 // a pointer to "" is a valid value only for DefaultRuntime (no default).
 type UpdateWorkspaceRequest struct {
 	Name           *string `json:"name"`
-	Slug           *string `json:"slug"`
 	DefaultRuntime *string `json:"defaultRuntime"`
 }
 

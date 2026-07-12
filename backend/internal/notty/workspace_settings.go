@@ -27,17 +27,14 @@ func validateDefaultRuntime(value string) (string, error) {
 	return runtime, nil
 }
 
-var errSlugTaken = errors.New("Workspace slug is already taken.")
-
 // updateWorkspaceSettings applies a partial update to the workspace summary
-// fields. Field-level authorization (slug is owner-only) is the handler's
-// responsibility; this function validates values and applies last-write-wins.
+// fields (name and defaultRuntime). Workspace slugs are immutable after creation.
 func updateWorkspaceSettings(db *sql.DB, workspaceID string, req UpdateWorkspaceRequest) (*Workspace, error) {
 	if db == nil {
 		return nil, errors.New("database is required")
 	}
-	if req.Name == nil && req.Slug == nil && req.DefaultRuntime == nil {
-		return nil, errors.New("At least one of name, slug, or defaultRuntime is required.")
+	if req.Name == nil && req.DefaultRuntime == nil {
+		return nil, errors.New("At least one of name or defaultRuntime is required.")
 	}
 	workspace, err := getWorkspace(db, workspaceID)
 	if err != nil {
@@ -50,13 +47,6 @@ func updateWorkspaceSettings(db *sql.DB, workspaceID string, req UpdateWorkspace
 		}
 		workspace.Name = name
 	}
-	if req.Slug != nil {
-		slug, err := validateWorkspaceSlug(*req.Slug)
-		if err != nil {
-			return nil, err
-		}
-		workspace.Slug = slug
-	}
 	if req.DefaultRuntime != nil {
 		runtime, err := validateDefaultRuntime(*req.DefaultRuntime)
 		if err != nil {
@@ -66,12 +56,9 @@ func updateWorkspaceSettings(db *sql.DB, workspaceID string, req UpdateWorkspace
 	}
 	workspace.UpdatedAt = time.Now().UTC()
 	if _, err := db.Exec(
-		`UPDATE workspaces SET slug = $1, name = $2, default_runtime = $3, updated_at = $4 WHERE id = $5::uuid`,
-		workspace.Slug, workspace.Name, workspace.DefaultRuntime, workspace.UpdatedAt, workspace.ID,
+		`UPDATE workspaces SET name = $1, default_runtime = $2, updated_at = $3 WHERE id = $4::uuid`,
+		workspace.Name, workspace.DefaultRuntime, workspace.UpdatedAt, workspace.ID,
 	); err != nil {
-		if isUniqueViolation(err) {
-			return nil, errSlugTaken
-		}
 		return nil, err
 	}
 	return workspace, nil

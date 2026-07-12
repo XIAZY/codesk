@@ -15,7 +15,7 @@ import (
 // The shape is uniform BY CONSTRUCTION: every error in the package flows through the one writeError helper
 // (server_http.go), so this test's real job is to catch a handler that bypasses it. It samples across the
 // 4xx classes on real handlers — 400 missing-slug, 401 no-credential, 403 non-human on a human-only
-// endpoint, 404 unknown entity, 409 slug-conflict. The remaining classes (410 expired-invite via
+// endpoint, 404 unknown entity. The remaining classes (410 expired-invite via
 // workspaceInviteErrorStatus, 413 oversized-diff via ErrDocumentDiffTooLarge) go through the same helper
 // and are exercised for status by their own handler tests; they are candidates to fold in here if a
 // dedicated red-proof of the envelope on those paths is wanted later.
@@ -69,20 +69,4 @@ func TestContractErrorEnvelopePerClass(t *testing.T) {
 	rec = authTestRequest(t, router, http.MethodGet, ws+"/threads/00000000-0000-0000-0000-000000000000", fx.OwnerToken, nil, nil)
 	assertErrorEnvelope(t, rec.Code, rec.Body.Bytes(), http.StatusNotFound, "404 unknown thread")
 
-	// 409 — renaming a workspace's slug to one already held by another workspace the same owner owns.
-	var wsA struct {
-		Workspace Workspace `json:"workspace"`
-	}
-	authTestJSON(t, router, http.MethodPost, "/api/workspaces", fx.OwnerToken, CreateWorkspaceRequest{
-		Name: "Conflict A", Slug: "err-conflict-slug-a", Handle: "owner",
-	}, http.StatusCreated, &wsA)
-	var wsB struct {
-		Workspace Workspace `json:"workspace"`
-	}
-	authTestJSON(t, router, http.MethodPost, "/api/workspaces", fx.OwnerToken, CreateWorkspaceRequest{
-		Name: "Conflict B", Slug: "err-conflict-slug-b", Handle: "owner",
-	}, http.StatusCreated, &wsB)
-	takenSlug := "err-conflict-slug-a"
-	rec = authTestRequest(t, router, http.MethodPatch, "/api/workspaces/"+wsB.Workspace.ID+"/workspace", fx.OwnerToken, nil, UpdateWorkspaceRequest{Slug: &takenSlug})
-	assertErrorEnvelope(t, rec.Code, rec.Body.Bytes(), http.StatusConflict, "409 slug already taken")
 }
