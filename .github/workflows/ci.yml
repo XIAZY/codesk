@@ -37,7 +37,7 @@ permissions:
 jobs:
   backend:
     name: backend (build, vet, live-postgres suite, installer)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, ARM64]
     services:
       postgres:
         image: postgres:16-alpine
@@ -57,8 +57,8 @@ jobs:
       # RUN instead of skipping. postgresTestDSN requires the db to be named exactly notty_test.
       NOTTY_DATABASE_TEST_URL: postgres://notty:notty@localhost:5432/notty_test?sslmode=disable
       NOTTY_DATABASE_TEST_ISOLATED: "1"
-      # internal/ycrdt's Yjs cross-compat test shells out to `node -e "require('yjs')"`. ubuntu-latest
-      # ships Node, so the test runs rather than skipping — point it at the frontend's pinned yjs.
+      # internal/ycrdt's Yjs cross-compat test shells out to `node -e "require('yjs')"`.
+      # setup-node provides Node; point it at the frontend's pinned yjs so the test cannot skip.
       NODE_PATH: ${{ github.workspace }}/frontend/node_modules
     steps:
       - uses: actions/checkout@v4
@@ -140,7 +140,7 @@ jobs:
 
   regression-e2e:
     name: regression e2e (docker-compose fs<->DB<->daemon sync)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, ARM64]
     timeout-minutes: 45
     env:
       NOTTY_REGRESSION_DEADLINE_SCALE: "4"
@@ -171,7 +171,7 @@ jobs:
 
   frontend:
     name: frontend (typecheck, vitest, build)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, ARM64]
     defaults:
       run:
         working-directory: frontend
@@ -190,7 +190,7 @@ jobs:
 
   e2e:
     name: e2e (browser core-flow smoke, Playwright vs compose stack)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, ARM64]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -221,7 +221,7 @@ jobs:
 
   diff-check:
     name: git diff --check (whitespace / conflict markers)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, ARM64]
     steps:
       - uses: actions/checkout@v4
         with:
