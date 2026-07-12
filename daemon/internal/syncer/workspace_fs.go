@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -120,6 +119,44 @@ func (fs *WorkspaceFS) Append(path string, content string) error {
 		return &FSError{Op: "append", Path: path, Err: err}
 	}
 	return nil
+}
+
+// CreateEmptyOrRead creates an empty path when absent. If another writer has
+// already created it, that local content wins and is returned unchanged.
+func (fs *WorkspaceFS) CreateEmptyOrRead(path string) (FileSnapshot, error) {
+	return fs.createEmptyOrRead(path, createEmptyFileExclusive)
+}
+
+func (fs *WorkspaceFS) createEmptyOrRead(path string, createEmpty func(string) error) (FileSnapshot, error) {
+	path, err := fs.cleanPath(path)
+	if err != nil {
+		return FileSnapshot{}, err
+	}
+	unlock, err := fs.lockPaths(path)
+	if err != nil {
+		return FileSnapshot{}, err
+	}
+	defer unlock()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return FileSnapshot{}, &FSError{Op: "create-empty-or-read", Path: path, Err: err}
+	}
+	err = createEmpty(path)
+	if err != nil && !errors.Is(err, os.ErrExist) {
+		return FileSnapshot{}, &FSError{Op: "create-empty-or-read", Path: path, Err: err}
+	}
+	existing, err := readFileObservation(path)
+	if err != nil {
+		return FileSnapshot{}, &FSError{Op: "create-empty-or-read", Path: path, Err: err}
+	}
+	return FileSnapshot{Path: path, Exists: true, Bytes: existing, Hash: projectedHashBytes(existing)}, nil
+}
+
+func createEmptyFileExclusive(path string) error {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	return file.Close()
 }
 
 func (fs *WorkspaceFS) WriteIfUnchanged(path string, expected projectedContentHash, content []byte) error {
@@ -249,7 +286,7 @@ func (fs *WorkspaceFS) Archive(path string, reason string) (string, error) {
 			unlock()
 			return archivePath, nil
 		}
-		if !errors.Is(err, syscall.EXDEV) {
+		if !isCrossDeviceError(err) {
 			unlock()
 			return "", &FSError{Op: "archive", Path: path, TargetPath: archivePath, Err: err}
 		}

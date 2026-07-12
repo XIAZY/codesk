@@ -1927,7 +1927,7 @@ func TestSingleWriterAppendPressureReconcilesIncrementalBatches(t *testing.T) {
 	for i := 1; i <= totalLines; i++ {
 		line := fmt.Sprintf("%d\n", i)
 		expected.WriteString(line)
-		if err := appendOpenFileLocked(file, line); err != nil {
+		if err := writeFullString(file, line); err != nil {
 			t.Fatalf("append line %d: %v", i, err)
 		}
 		if err := markTrackedLocalDirty(tracked, path); err != nil {
@@ -2475,6 +2475,51 @@ func TestMaterializeTrackedFileDefersProjectionToReconcile(t *testing.T) {
 	}
 	if tracked.DocumentID != "doc_1" || tracked.Path != path {
 		t.Fatalf("unexpected tracked file: %#v", tracked)
+	}
+}
+
+func TestMaterializeTrackedFileWithoutCacheCreatesEmptyProjection(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "docs", "new.md")
+	tracked, err := materializeTrackedFile(context.Background(), nil, &document{
+		ID:   "doc_new",
+		Path: "docs/new.md",
+	}, path)
+	if err != nil {
+		t.Fatalf("materialize tracked file: %v", err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read created projection: %v", err)
+	}
+	if len(content) != 0 || !tracked.matchesProjectedString("") {
+		t.Fatalf("expected empty projection, content=%q", content)
+	}
+}
+
+func TestMaterializeTrackedFileWithoutCachePreservesExistingLocalContent(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "docs", "local.md")
+	local := []byte("local content\n")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	if err := os.WriteFile(path, local, 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+	tracked, err := materializeTrackedFile(context.Background(), nil, &document{
+		ID:   "doc_local",
+		Path: "docs/local.md",
+	}, path)
+	if err != nil {
+		t.Fatalf("materialize tracked file: %v", err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read preserved projection: %v", err)
+	}
+	if string(content) != string(local) || !tracked.matchesProjectedString(string(local)) {
+		t.Fatalf("local content was not preserved, got %q want %q", content, local)
 	}
 }
 
