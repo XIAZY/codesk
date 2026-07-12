@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -29,6 +30,25 @@ type fakeCodexRuntimeCall struct {
 	cwd          string
 	text         string
 	instructions string
+}
+
+type countingStopCodexRuntimeApp struct {
+	*fakeCodexRuntimeApp
+	mu        sync.Mutex
+	stopCalls int
+}
+
+func (f *countingStopCodexRuntimeApp) Stop() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stopCalls++
+	return nil
+}
+
+func (f *countingStopCodexRuntimeApp) stopCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stopCalls
 }
 
 func newFakeCodexRuntimeApp() *fakeCodexRuntimeApp {
@@ -256,6 +276,7 @@ func TestCodexRuntimeProcessMapsAppServerEventsToRuntimeEvents(t *testing.T) {
 		app:          app,
 		instructions: "driver instructions",
 		events:       make(chan RuntimeEvent, 8),
+		stopping:     make(chan struct{}),
 	}
 	if err := process.Start(context.Background()); err != nil {
 		t.Fatalf("start process: %v", err)
@@ -286,6 +307,75 @@ func TestCodexRuntimeProcessMapsAppServerEventsToRuntimeEvents(t *testing.T) {
 	}
 	if !app.stopped {
 		t.Fatal("expected appserver stop")
+	}
+}
+
+func TestCodexRuntimeStopReleasesBlockedLifecycleForward(t *testing.T) {
+	app := newFakeCodexRuntimeApp()
+	process := &codexRuntimeProcess{
+		app:      app,
+		events:   make(chan RuntimeEvent),
+		stopping: make(chan struct{}),
+	}
+
+	forwardDone := make(chan struct{})
+	go func() {
+		process.forwardEvents()
+		close(forwardDone)
+	}()
+	app.events <- appServerEvent{Method: "turn/completed", Params: rawJSON(t, `{}`)}
+	close(app.events)
+	select {
+	case <-forwardDone:
+		t.Fatal("lifecycle forward returned without a runtime consumer")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	if err := process.Stop(); err != nil {
+		t.Fatalf("stop process: %v", err)
+	}
+	select {
+	case <-forwardDone:
+	case <-time.After(100 * time.Millisecond):
+		// Release the held-head goroutine so the red test does not leak it.
+		<-process.events
+		<-forwardDone
+		t.Fatal("Stop did not release lifecycle send blocked in codexRuntimeProcess.forwardEvents")
+	}
+}
+
+func TestCodexRuntimeStopIsConcurrentAndIdempotent(t *testing.T) {
+	app := &countingStopCodexRuntimeApp{fakeCodexRuntimeApp: newFakeCodexRuntimeApp()}
+	process := &codexRuntimeProcess{
+		app:      app,
+		events:   make(chan RuntimeEvent),
+		stopping: make(chan struct{}),
+	}
+
+	const callers = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- process.Stop()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Stop returned error: %v", err)
+		}
+	}
+	if got := app.stopCallCount(); got != 1 {
+		t.Fatalf("underlying app Stop calls = %d, want 1", got)
+	}
+	select {
+	case <-process.stopping:
+	default:
+		t.Fatal("process stop signal was not closed")
 	}
 }
 
