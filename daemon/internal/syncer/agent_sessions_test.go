@@ -727,6 +727,51 @@ func TestAgentSessionRuntimeEventsPublishGenericStatus(t *testing.T) {
 	}
 }
 
+func TestAgentSessionDoesNotRestartAfterShutdown(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	// Deterministically park the restart callback at its backoff delay so we can
+	// interleave Shutdown mid-flight, and observe when the callback finishes — no
+	// wall-clock dependency.
+	parked := make(chan struct{})
+	release := make(chan struct{})
+	restartDone := make(chan struct{})
+	supervisor.restartSleep = func(time.Duration) { close(parked); <-release }
+	supervisor.testHookRestartComplete = func() { close(restartDone) }
+
+	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"}); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+
+	// Kill the runtime: closing Events drives consumeEvents into its restart
+	// path, which schedules the delayed respawn — parked at the injected delay.
+	close(process.events)
+	<-parked
+
+	// Shutdown wins while the restart is parked, then release it. A restart
+	// scheduled before shutdown must not spawn a runtime or re-store a session
+	// after it — otherwise the respawn escapes supervision as a zombie process.
+	supervisor.Shutdown()
+	close(release)
+	<-restartDone
+
+	factory.mu.Lock()
+	spawned := len(factory.processes)
+	factory.mu.Unlock()
+	if spawned != 1 {
+		t.Fatalf("restart spawned a runtime after Shutdown: want 1 process total, got %d (untracked zombie)", spawned)
+	}
+	supervisor.mu.Lock()
+	remaining := len(supervisor.sessions)
+	supervisor.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("restart re-stored a session after Shutdown: want 0 sessions, got %d", remaining)
+	}
+}
+
 func TestAgentSessionSupervisorDoesNotUseCodexWireMethods(t *testing.T) {
 	body, err := os.ReadFile("agent_sessions.go")
 	if err != nil {
