@@ -103,7 +103,7 @@ describe("document Threads toolbar entry", () => {
     expect(container.querySelector(".ctx")).toBeNull();
 
     const trigger = screen.getByRole("button", { name: "Threads, 1 open" });
-    const toolbarActions = container.querySelector(".doc-toolbar > .row.gap-6") as HTMLElement;
+    const toolbarActions = container.querySelector(".doc-toolbar > .row.doc-toolbar-actions") as HTMLElement;
     const toolbarChildren = Array.from(toolbarActions.children);
     const collaborators = container.querySelector(".collaborator-avatars") as Element;
     const threadEntry = container.querySelector(".document-threads-entry") as Element;
