@@ -2764,6 +2764,158 @@ a:focus-visible,
   border: 0;
 }
 
+.ob-checklist {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 40;
+  width: min(312px, calc(100vw - 24px));
+  max-height: calc(100vh - 32px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+  background: var(--paper);
+  box-shadow: var(--shadow-2);
+  color: var(--ink);
+  animation: ob-settle 120ms ease both;
+}
+
+.ob-checklist-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px 16px 10px;
+}
+
+.ob-checklist-header > div {
+  min-width: 0;
+}
+
+.ob-checklist-header h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.ob-checklist-header p {
+  margin: 6px 0 0;
+  color: var(--ink-3);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.ob-checklist-dismiss {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  margin: -5px -5px 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink-4);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.ob-checklist-dismiss:hover {
+  background: var(--paper-2);
+  color: var(--ink-2);
+}
+
+.ob-checklist-progress {
+  display: grid;
+  grid-template-columns: auto minmax(64px, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--ink-3);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.ob-checklist-progress progress {
+  width: 100%;
+  height: 4px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 4px;
+  background: var(--paper-3);
+  appearance: none;
+}
+
+.ob-checklist-progress progress::-webkit-progress-bar {
+  background: var(--paper-3);
+}
+
+.ob-checklist-progress progress::-webkit-progress-value {
+  border-radius: 4px;
+  background: var(--accent);
+}
+
+.ob-checklist-progress progress::-moz-progress-bar {
+  border-radius: 4px;
+  background: var(--accent);
+}
+
+.ob-checklist.complete .ob-checklist-progress progress::-webkit-progress-value {
+  background: var(--ok);
+}
+
+.ob-checklist.complete .ob-checklist-progress progress::-moz-progress-bar {
+  background: var(--ok);
+}
+
+.ob-checklist-list {
+  min-height: 0;
+  max-height: min(264px, calc(100vh - 190px));
+  overflow-y: auto;
+  margin: 0;
+  padding: 8px;
+  list-style: none;
+}
+
+.ob-checklist-list li {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+
+.ob-checklist-list li[data-done="true"] {
+  color: var(--ink-4);
+}
+
+.ob-checklist-check {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  color: var(--paper);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+[data-done="true"] > .ob-checklist-check {
+  border-color: var(--ink-3);
+  background: var(--ink-3);
+}
+
 @keyframes ob-fade {
   from { opacity: 0; }
   to { opacity: 1; }
@@ -2778,6 +2930,7 @@ a:focus-visible,
   .ob-scrim-panel,
   .ob-window,
   .ob-coach,
+  .ob-checklist,
   .ob-dots i {
     animation: none;
     transition: none;
