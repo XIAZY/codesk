@@ -8,6 +8,7 @@ import { ApiError } from "./api";
 import { emptyWorkspace, identifierFromName, identifierHelpText, identifierPattern, workspaceSlugMaxLength } from "./logic";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
 import type { Account, Agent, AgentRun, Daemon, DocumentItem, WorkspaceState, WorkspaceSummary } from "./types";
+import appSource from "./App.tsx?raw";
 
 function workspaceFixture(overrides: Partial<WorkspaceState> = {}): WorkspaceState {
   return {
@@ -951,5 +952,91 @@ describe("AgentDetailModal live status", () => {
     // agent.deleted FILTERS the agent out of workspace.agents (unlike daemons' soft-delete upsert).
     rerender(<AgentDetailModal {...props} agents={[]} runs={[run("running")]} onClose={onClose} />);
     expect(onClose).toHaveBeenCalled();
+  });
+});
+
+describe("Onboarding anchor audit", () => {
+  const ONBOARDING_ANCHORS = [
+    "create-document",
+    "connect-local-env",
+    "new-document",
+    "new-agent",
+    "document-threads",
+    "document-watchers",
+    "document-more",
+    "selection-thread",
+  ] as const;
+
+  it("every onboarding anchor ID appears exactly once in App.tsx source", () => {
+    const source: string = appSource;
+    for (const id of ONBOARDING_ANCHORS) {
+      const pattern = `data-onboarding-id="${id}"`;
+      const count = source.split(pattern).length - 1;
+      expect(count, `anchor "${id}" must appear exactly once in App.tsx, found ${count}`).toBe(1);
+    }
+  });
+
+  it("empty workspace renders create-document and connect-local-env anchors", () => {
+    workspaceMock = workspaceFixture({ rootDocumentId: "" });
+    rootDocumentsMock = [];
+    render(
+      <WorkspaceApp
+        api={{ updateLastAccessed: vi.fn().mockResolvedValue({}) } as never}
+        token="token"
+        workspaceId="ws"
+        workspaceSlug="workspace"
+        view={{ kind: "home" }}
+        account={{ id: "account_1", email: "you@example.com", displayName: "You" }}
+        workspaces={[{ id: "ws", slug: "workspace", name: "Workspace" }]}
+        onAccess={vi.fn()}
+        onWorkspaceChange={vi.fn()}
+        onSignOut={vi.fn()}
+      />,
+    );
+
+    expect(document.querySelector('[data-onboarding-id="create-document"]')).toBeTruthy();
+    expect(document.querySelector('[data-onboarding-id="connect-local-env"]')).toBeTruthy();
+  });
+
+  it("workspace with documents renders the new-document sidebar anchor", () => {
+    render(
+      <WorkspaceApp
+        api={{ updateLastAccessed: vi.fn().mockResolvedValue({}) } as never}
+        token="token"
+        workspaceId="ws"
+        workspaceSlug="workspace"
+        view={{ kind: "home" }}
+        account={{ id: "account_1", email: "you@example.com", displayName: "You" }}
+        workspaces={[{ id: "ws", slug: "workspace", name: "Workspace" }]}
+        onAccess={vi.fn()}
+        onWorkspaceChange={vi.fn()}
+        onSignOut={vi.fn()}
+      />,
+    );
+
+    expect(document.querySelector('[data-onboarding-id="new-document"]')).toBeTruthy();
+  });
+
+  it("agents management panel renders the new-agent anchor", async () => {
+    const user = userEvent.setup();
+    render(
+      <WorkspaceApp
+        api={{ updateLastAccessed: vi.fn().mockResolvedValue({}) } as never}
+        token="token"
+        workspaceId="ws"
+        workspaceSlug="workspace"
+        view={{ kind: "home" }}
+        account={{ id: "account_1", email: "you@example.com", displayName: "You" }}
+        workspaces={[{ id: "ws", slug: "workspace", name: "Workspace" }]}
+        onAccess={vi.fn()}
+        onWorkspaceChange={vi.fn()}
+        onSignOut={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Manage / Settings" }));
+    await user.click(screen.getByRole("button", { name: "Agents" }));
+
+    expect(document.querySelector('[data-onboarding-id="new-agent"]')).toBeTruthy();
   });
 });
