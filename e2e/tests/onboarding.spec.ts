@@ -99,8 +99,8 @@ test.describe("onboarding Batch 1 real-stack scenarios", () => {
     // 1. Create a workspace through the full-page zero-workspace entry.
     // 2. Prove the three-step spotlight targets create-document, document-threads,
     //    and document-watchers exactly once while leaving each target operable.
-    // 3. Create/type/thread through the real UI; a remote edit must not satisfy the
-    //    first-user-edit event before local typing does.
+    // 3. Create/type/thread through the real UI. Batch 1 deliberately records no
+    //    first-edit flag; document/thread progress derives from live state.
     // 4. Create a local environment through the real UI, pass its returned token to
     //    startComposeDaemon(), and wait for receipt-live completion.
     // 5. Reload mid-flow and prove resume/dismiss state without localStorage-derived
