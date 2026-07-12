@@ -88,6 +88,28 @@ export function spotlightGeometry(
   return { hole, panels, placement: { left: coachLeft, top: coachTop } };
 }
 
+export function contextualTipPlacement(
+  target: Rect,
+  viewport: { width: number; height: number },
+  coach: { width: number; height: number },
+): { left: number; top: number } {
+  const maxLeft = Math.max(COACH_MARGIN, viewport.width - coach.width - COACH_MARGIN);
+  const maxTop = Math.max(COACH_MARGIN, viewport.height - coach.height - COACH_MARGIN);
+  const left = bounded(
+    target.left + target.width / 2 - coach.width / 2,
+    COACH_MARGIN,
+    maxLeft,
+  );
+  const below = target.bottom + COACH_MARGIN;
+  const above = target.top - coach.height - COACH_MARGIN;
+  const top = below <= maxTop
+    ? below
+    : above >= COACH_MARGIN
+      ? above
+      : bounded(below, COACH_MARGIN, maxTop);
+  return { left, top };
+}
+
 function targetFor(onboardingId: string | undefined): HTMLElement | null {
   if (!onboardingId) return null;
   return Array.from(document.querySelectorAll<HTMLElement>("[data-onboarding-id]"))
@@ -147,8 +169,12 @@ export function Onboarding({
     const coachSize = coachRect?.width && coachRect?.height
       ? { width: coachRect.width, height: coachRect.height }
       : COACH_FALLBACK;
-    setGeometry(spotlightGeometry(targetRect, viewportSize(), coachSize));
-  }, []);
+    const viewport = viewportSize();
+    const nextGeometry = spotlightGeometry(targetRect, viewport, coachSize);
+    setGeometry(isTip
+      ? { ...nextGeometry, placement: contextualTipPlacement(targetRect, viewport, coachSize) }
+      : nextGeometry);
+  }, [isTip]);
 
   useLayoutEffect(() => {
     const node = targetFor(step.targetOnboardingId);
@@ -193,11 +219,22 @@ export function Onboarding({
   useEffect(() => {
     if ((!target || !geometry) && !missing) return;
     const coach = coachRef.current;
+    const modalOpen = () => Boolean(document.querySelector(".modal-backdrop"));
+
+    if (isTip) {
+      const onKeyDown = (event: KeyboardEvent) => {
+        if (modalOpen() || event.key !== "Escape" || !step.skippable) return;
+        event.preventDefault();
+        onSkip();
+      };
+      document.addEventListener("keydown", onKeyDown);
+      return () => document.removeEventListener("keydown", onKeyDown);
+    }
+
     const coachNodes = () => Array.from(coach?.querySelectorAll<HTMLElement>(
       "button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex='-1'])",
     ) ?? []);
     const cycle = () => [...(focusable(target) ? [target] : []), ...coachNodes()];
-    const modalOpen = () => Boolean(document.querySelector(".modal-backdrop"));
 
     const onFocusIn = (event: FocusEvent) => {
       if (modalOpen() || !(event.target instanceof Node)) return;
@@ -250,7 +287,7 @@ export function Onboarding({
       document.removeEventListener("focusin", onFocusIn);
       document.removeEventListener("keydown", onKeyDown);
     };
-  }, [geometry, missing, onBack, onNext, onSkip, step.skippable, stepIndex, target]);
+  }, [geometry, isTip, missing, onBack, onNext, onSkip, step.skippable, stepIndex, target]);
 
   const takeAction = (action: OnboardingAction | undefined, fallback?: () => void) => {
     if (action) onAction?.(action.event);
@@ -313,7 +350,7 @@ export function Onboarding({
     </section>
   );
 
-  if (missing) return coach;
+  if (missing || isTip) return coach;
 
   return (
     <div className="ob-layer" data-onboarding-step={step.id}>

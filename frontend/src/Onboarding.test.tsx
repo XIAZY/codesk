@@ -3,7 +3,7 @@
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Onboarding, spotlightGeometry, type OnboardingStep } from "./Onboarding";
+import { Onboarding, contextualTipPlacement, spotlightGeometry, type OnboardingStep } from "./Onboarding";
 import { useOnboarding } from "./useOnboarding";
 
 const step: OnboardingStep = {
@@ -17,6 +17,17 @@ const step: OnboardingStep = {
   primaryAction: { label: "Next", event: "advance" },
   skippable: true,
   fallback: "page-card",
+};
+
+const tip: OnboardingStep = {
+  ...step,
+  id: "tip-first-selection",
+  scope: "account",
+  presentation: "tip",
+  targetOnboardingId: "selection-thread",
+  title: "Talk about this exact line",
+  primaryAction: { label: "Start thread", event: "open-thread-draft" },
+  secondaryAction: { label: "Got it", event: "dismiss" },
 };
 
 class ResizeObserverMock {
@@ -97,6 +108,24 @@ describe("spotlightGeometry", () => {
     expect(geometry.placement.left).toBe(944);
     expect(geometry.placement.top).toBe(86);
     expect(geometry.placement.top).toBeGreaterThanOrEqual(geometry.hole.bottom + 18);
+  });
+});
+
+describe("contextualTipPlacement", () => {
+  it("attaches below the target instead of using the guided-step upper-right clamp", () => {
+    expect(contextualTipPlacement(
+      { left: 420, top: 280, right: 580, bottom: 320, width: 160, height: 40 },
+      { width: 1200, height: 800 },
+      { width: 312, height: 180 },
+    )).toEqual({ left: 344, top: 332 });
+  });
+
+  it("flips above the target and clamps horizontally at viewport edges", () => {
+    expect(contextualTipPlacement(
+      { left: 310, top: 700, right: 370, bottom: 740, width: 60, height: 40 },
+      { width: 380, height: 760 },
+      { width: 312, height: 180 },
+    )).toEqual({ left: 56, top: 508 });
   });
 });
 
@@ -195,24 +224,15 @@ describe("Onboarding", () => {
   });
 
   it("renders a contextual tip without guide counter, dots, Back, or a duplicate Skip", async () => {
-    const tip = {
-      ...step,
-      id: "tip-first-selection",
-      scope: "account" as const,
-      presentation: "tip" as const,
-      title: "Talk about this exact line",
-      primaryAction: { label: "Start thread", event: "open-thread-draft" as const },
-      secondaryAction: { label: "Got it", event: "dismiss" as const },
-    };
     const onAction = vi.fn();
     const onNext = vi.fn();
     const onSkip = vi.fn();
     render(
       <>
         <button
-          data-onboarding-id="create-document"
+          data-onboarding-id="selection-thread"
           ref={(node) => {
-            if (node) node.getBoundingClientRect = () => ({ left: 100, top: 80, right: 200, bottom: 120, width: 100, height: 40 }) as DOMRect;
+            if (node) node.getBoundingClientRect = () => ({ left: 420, top: 280, right: 580, bottom: 320, width: 160, height: 40 }) as DOMRect;
           }}
         >
           Start a thread
@@ -229,7 +249,9 @@ describe("Onboarding", () => {
       </>,
     );
 
-    await screen.findByRole("dialog", { name: "Talk about this exact line" });
+    const dialog = await screen.findByRole("dialog", { name: "Talk about this exact line" });
+    expect(dialog.style.left).toBe("344px");
+    expect(dialog.style.top).toBe("332px");
     expect(screen.queryByText("Step 1 of 3")).toBeNull();
     expect(screen.queryByRole("button", { name: "Back" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Skip" })).toBeNull();
@@ -239,6 +261,58 @@ describe("Onboarding", () => {
     await userEvent.click(screen.getByRole("button", { name: "Got it" }));
     expect(onAction).toHaveBeenCalledWith("dismiss");
     expect(onSkip).toHaveBeenCalledOnce();
+  });
+
+  it("renders a contextual tip without a blocking layer and leaves its live target clickable", async () => {
+    const onTarget = vi.fn();
+    const onSkip = vi.fn();
+    const { container } = render(
+      <>
+        <button
+          data-onboarding-id="selection-thread"
+          onClick={onTarget}
+          ref={(node) => {
+            if (node) node.getBoundingClientRect = () => ({ left: 420, top: 280, right: 580, bottom: 320, width: 160, height: 40 }) as DOMRect;
+          }}
+        >
+          Start a thread
+        </button>
+        <Onboarding step={tip} stepIndex={0} total={3} onNext={vi.fn()} onBack={vi.fn()} onSkip={onSkip} />
+      </>,
+    );
+
+    await screen.findByRole("dialog", { name: "Talk about this exact line" });
+    expect(container.querySelectorAll(".ob-scrim-panel")).toHaveLength(0);
+    expect(container.querySelector(".ob-window")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Start a thread" }));
+    expect(onTarget).toHaveBeenCalledOnce();
+    expect(onSkip).not.toHaveBeenCalled();
+  });
+
+  it("does not intercept editor arrow keys while a contextual tip is open", async () => {
+    const onNext = vi.fn();
+    const onSkip = vi.fn();
+    render(
+      <>
+        <button
+          data-onboarding-id="selection-thread"
+          ref={(node) => {
+            if (node) node.getBoundingClientRect = () => ({ left: 420, top: 280, right: 580, bottom: 320, width: 160, height: 40 }) as DOMRect;
+          }}
+        >
+          Start a thread
+        </button>
+        <Onboarding step={tip} stepIndex={0} total={3} onNext={onNext} onBack={vi.fn()} onSkip={onSkip} />
+      </>,
+    );
+
+    await screen.findByRole("dialog", { name: "Talk about this exact line" });
+    const arrowRight = new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true });
+    expect(document.dispatchEvent(arrowRight)).toBe(true);
+    expect(arrowRight.defaultPrevented).toBe(false);
+    expect(onNext).not.toHaveBeenCalled();
+    expect(onSkip).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "Talk about this exact line" })).toBeTruthy();
   });
 
   it("renders a centered page card when the target is missing", async () => {
