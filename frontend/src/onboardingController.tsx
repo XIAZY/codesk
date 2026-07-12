@@ -152,7 +152,9 @@ export function useOnboardingController(input: OnboardingControllerInput) {
     activeSpotlightId,
     tip,
     enabled,
-    onRecord: (event) => syncEvents(event),
+    // Pass syncEvents directly (not wrapped) so the hook's `record` stays a stable
+    // reference — WorkspaceApp's createDocument callback depends on it.
+    onRecord: syncEvents,
   });
 
   // The getting-started checklist for Vitaliy's OnboardingChecklist to render —

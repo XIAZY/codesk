@@ -39,6 +39,10 @@ import { navigate, useRoute } from "./useRoute";
 import { useRootNamespace } from "./useRootNamespace";
 import { useDocumentSync } from "./useDocument";
 import { useWorkspace } from "./useWorkspace";
+import { Onboarding, type OnboardingActionEvent } from "./Onboarding";
+import { OnboardingChecklist } from "./OnboardingChecklist";
+import { useOnboardingController } from "./onboardingController";
+import type { OnboardingRole } from "./onboarding";
 import type { Account, ActivityEvent, Agent, Daemon, DocumentItem, ThreadItem, UserItem, WorkspaceInvitePreview, WorkspaceState, WorkspaceSummary } from "./types";
 import { resolveRuntimeTiles, selectableRuntimeKinds, type RuntimeTile } from "./runtimes";
 import "./styles.css";
@@ -1516,6 +1520,39 @@ export function WorkspaceApp({
   const currentWorkspaceUserHandle = currentWorkspaceUser?.handle ? `@${currentWorkspaceUser.handle}` : "Workspace user";
   const currentWorkspaceUserIdentity = currentWorkspaceUser?.handle || currentWorkspaceUser?.name || "Workspace user";
   const canInviteMembers = workspace.currentMembershipRole === "owner" || workspace.currentMembershipRole === "admin";
+
+  // --- Onboarding (Batch 1 wiring) --------------------------------------------
+  // selectionActive is lifted from DocumentEditor (below) so the account-scoped
+  // first-selection tip can trigger; openThreadDraftRequest is the parent->editor
+  // signal the tip's "Start thread" action fires (mirrors the formatRequest idiom).
+  const [selectionActive, setSelectionActive] = useState(false);
+  const [openThreadDraftRequest, setOpenThreadDraftRequest] = useState(0);
+  const onboardingRole: OnboardingRole =
+    workspace.currentMembershipRole === "owner" || workspace.currentMembershipRole === "admin"
+      ? workspace.currentMembershipRole
+      : "member";
+  const onboarding = useOnboardingController({
+    enabled: rootNamespace.ready,
+    workspaceId,
+    roles: [onboardingRole],
+    route: view.kind,
+    selectionActive,
+    workspaceState: workspace,
+    documentCount: rootDocuments.length,
+    // No workspace-wide agent-watcher count exists in Batch 1 (subscribers are fetched
+    // per open document via useDocumentSubscribers), so "put an agent to work" derives
+    // from the agent-run / agent-thread signals; the watcher leg lands with Batch 2's
+    // Watchers/Activity work.
+    watchedDocumentCount: 0,
+    nowMs: now,
+  });
+  const recordOnboardingEvent = onboarding.record;
+  const handleOnboardingAction = useCallback((event: OnboardingActionEvent) => {
+    if (event === "open-thread-draft") {
+      setOpenThreadDraftRequest((request) => request + 1);
+    }
+  }, []);
+
   const documentOpenThreadCount = useMemo(
     () => documentThreads.filter((thread) => (
       thread.status !== "resolved" && !threadIsObsolete(thread, threadAnchorInfo)
@@ -1838,6 +1875,7 @@ export function WorkspaceApp({
       setFreshDocumentId(doc.id);
       setTitleDraft(fileName(path));
       void reload();
+      recordOnboardingEvent("first_document_created", "workspace");
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -1847,6 +1885,7 @@ export function WorkspaceApp({
     activeDocument?.path,
     api,
     creatingDocument,
+    recordOnboardingEvent,
     reload,
     rootDocuments,
     rootNamespace,
@@ -2301,6 +2340,8 @@ export function WorkspaceApp({
             onTitleEditCancel={cancelRenamingDocument}
             onTitleCommit={(draft) => commitDocumentTitle(activeDocument, draft)}
             onThreadAnchorInfo={setThreadAnchorInfo}
+            onSelectionActiveChange={setSelectionActive}
+            openThreadDraftRequest={openThreadDraftRequest}
           />
         ) : rootNamespace.ready && rootDocuments.length ? (
           <div className="notice compact">Opening document...</div>
@@ -2368,6 +2409,25 @@ export function WorkspaceApp({
               navigate({ kind: "workspace", slug: updatedWorkspace.slug, view }, { replace: true });
             }
           }}
+          onMemberInvited={() => onboarding.record("member_invited", "workspace")}
+        />
+      ) : null}
+      {onboarding.active ? (
+        <Onboarding
+          step={onboarding.active}
+          stepIndex={onboarding.stepIndex}
+          total={onboarding.total}
+          onNext={onboarding.next}
+          onBack={onboarding.back}
+          onSkip={onboarding.skip}
+          onAction={handleOnboardingAction}
+        />
+      ) : null}
+      {rootNamespace.ready ? (
+        <OnboardingChecklist
+          progress={onboarding.checklist}
+          dismissed={onboarding.checklistDismissed}
+          onDismiss={onboarding.dismissChecklist}
         />
       ) : null}
     </main>
@@ -3187,6 +3247,8 @@ export function DocumentEditor({
   onTitleEditCancel,
   onTitleCommit,
   onThreadAnchorInfo,
+  onSelectionActiveChange,
+  openThreadDraftRequest,
 }: {
   api: ApiClient;
   token: string;
@@ -3206,6 +3268,8 @@ export function DocumentEditor({
   onTitleEditCancel: () => void;
   onTitleCommit: (value: string) => void;
   onThreadAnchorInfo: (info: ThreadAnchorInfo) => void;
+  onSelectionActiveChange?: (active: boolean) => void;
+  openThreadDraftRequest?: number;
 }) {
   const draftRef = useRef<HTMLTextAreaElement | null>(null);
   const [selection, setSelection] = useState<SurfaceSelection | null>(null);
@@ -3263,6 +3327,27 @@ export function DocumentEditor({
     setThreadBody("");
     setFormatRequest(null);
   }, [document.id, document.path]);
+
+  // Report live text-selection presence up to WorkspaceApp so the account-scoped
+  // first-selection onboarding tip can trigger; reset on unmount so leaving the
+  // document view clears the signal.
+  useEffect(() => {
+    onSelectionActiveChange?.(hasRangeSelection);
+  }, [hasRangeSelection, onSelectionActiveChange]);
+  useEffect(() => () => onSelectionActiveChange?.(false), [onSelectionActiveChange]);
+
+  // The onboarding tip's "Start thread" action bumps openThreadDraftRequest; open the
+  // draft for the current selection once per bump (ref-compare so a later selection
+  // change never re-opens it), mirroring the formatRequest request-id idiom.
+  const lastThreadDraftRequestRef = useRef(0);
+  useEffect(() => {
+    if (openThreadDraftRequest && openThreadDraftRequest !== lastThreadDraftRequestRef.current) {
+      lastThreadDraftRequestRef.current = openThreadDraftRequest;
+      if (hasRangeSelection) {
+        setThreadDraftOpen(true);
+      }
+    }
+  }, [openThreadDraftRequest, hasRangeSelection]);
 
   useEffect(() => {
     if (!activeThreadGroup) return;
@@ -4618,11 +4703,13 @@ export function MembersAndInvite({
   workspaceId,
   users,
   canInvite,
+  onMemberInvited,
 }: {
   api: ApiClient;
   workspaceId: string;
   users: UserItem[];
   canInvite: boolean;
+  onMemberInvited?: () => void;
 }) {
   const [link, setLink] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
@@ -4638,6 +4725,7 @@ export function MembersAndInvite({
       const response = await api.createWorkspaceInvite(workspaceId);
       setLink(new URL(response.url, publicOrigin).toString());
       setExpiresAt(response.invite.expiresAt);
+      onMemberInvited?.();
     } catch (err) {
       setInviteError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -4963,6 +5051,7 @@ export function ManageModal({
   onNewAgent,
   onAgent,
   onWorkspaceSaved = () => {},
+  onMemberInvited,
 }: {
   api: ApiClient;
   workspaceId: string;
@@ -4979,6 +5068,7 @@ export function ManageModal({
   onNewAgent: () => void;
   onAgent: (agent: Agent) => void;
   onWorkspaceSaved?: (workspace: WorkspaceSummary) => void;
+  onMemberInvited?: () => void;
 }) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -5027,7 +5117,7 @@ export function ManageModal({
             {activeTab === "local-env" ? (
               <DaemonsManagement workspace={workspace} onRefresh={onRefresh} onNew={onNewDaemon} onDaemon={onDaemon} />
             ) : activeTab === "members" ? (
-              <MembersAndInvite api={api} workspaceId={workspaceId} users={workspace.users} canInvite={canInvite} />
+              <MembersAndInvite api={api} workspaceId={workspaceId} users={workspace.users} canInvite={canInvite} onMemberInvited={onMemberInvited} />
             ) : activeTab === "agents" ? (
               <AgentsManagement workspace={workspace} groupedAgents={groupedAgents} onNew={onNewAgent} onAgent={onAgent} />
             ) : activeTab === "workspace" ? (
