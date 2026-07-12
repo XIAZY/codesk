@@ -555,13 +555,13 @@ describe("ManageModal", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("saves workspace name and default runtime", async () => {
+  it("saves workspace name", async () => {
     const user = userEvent.setup();
     const updateWorkspaceSettings = vi.fn().mockResolvedValue({
-      workspace: { id: "ws", name: "Acme Labs", slug: "acme", defaultRuntime: "claude" },
+      workspace: { id: "ws", name: "Acme Labs", slug: "acme" },
     });
     const onWorkspaceSaved = vi.fn();
-    const workspace = { ...emptyWorkspace(), workspaceId: "ws", name: "Acme", slug: "acme", defaultRuntime: "", currentMembershipRole: "owner" };
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws", name: "Acme", slug: "acme", currentMembershipRole: "owner" };
     render(
       <ManageModal
         {...baseProps}
@@ -574,14 +574,10 @@ describe("ManageModal", () => {
 
     await user.clear(screen.getByLabelText("Workspace name"));
     await user.type(screen.getByLabelText("Workspace name"), "Acme Labs");
-    await user.selectOptions(screen.getByLabelText("Default agent runtime"), "claude");
     await user.click(screen.getByRole("button", { name: "Save settings" }));
 
-    expect(updateWorkspaceSettings).toHaveBeenCalledWith("ws", {
-      name: "Acme Labs",
-      defaultRuntime: "claude",
-    });
-    expect(onWorkspaceSaved).toHaveBeenCalledWith({ id: "ws", name: "Acme Labs", slug: "acme", defaultRuntime: "claude" });
+    expect(updateWorkspaceSettings).toHaveBeenCalledWith("ws", { name: "Acme Labs" });
+    expect(onWorkspaceSaved).toHaveBeenCalledWith({ id: "ws", name: "Acme Labs", slug: "acme" });
     expect(await screen.findByText("Workspace settings saved.")).toBeTruthy();
   });
 

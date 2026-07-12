@@ -8,8 +8,7 @@ import (
 )
 
 // handleUpdateWorkspace is PATCH /api/workspaces/{id}/workspace.
-// name and defaultRuntime require manage_workspace (owner or admin).
-// Workspace slugs are immutable after creation.
+// Only the workspace name is mutable; slug and default runtime are immutable.
 func (s *Server) handleUpdateWorkspace(w http.ResponseWriter, r *http.Request) {
 	if !s.requireHumanPrincipal(w, r) {
 		return

@@ -4668,14 +4668,6 @@ export function MembersAndInvite({
   );
 }
 
-const workspaceRuntimeOptions = [
-  { value: "", label: "No default" },
-  { value: "codex", label: "Codex" },
-  { value: "claude", label: "Claude" },
-];
-
-// Workspace settings (plan §4.2). The backend supports partial PATCH: owners/admins can edit
-// name/default runtime. Workspace slugs are immutable after creation.
 function WorkspaceSettings({
   api,
   workspaceId,
@@ -4687,54 +4679,35 @@ function WorkspaceSettings({
   workspace: ReturnType<typeof useWorkspace>["workspace"];
   onSaved: (workspace: WorkspaceSummary) => void;
 }) {
-  const currentDefaultRuntime = workspace.defaultRuntime ?? "";
   const role = workspace.currentMembershipRole || "";
   const canManage = role === "owner" || role === "admin";
   const [nameDraft, setNameDraft] = useState(workspace.name);
-  const [runtimeDraft, setRuntimeDraft] = useState(currentDefaultRuntime);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
     setNameDraft(workspace.name);
-    setRuntimeDraft(currentDefaultRuntime);
     setMessage("");
     setError("");
-  }, [currentDefaultRuntime, workspace.name]);
+  }, [workspace.name]);
 
   const trimmedName = nameDraft.trim();
   const nameChanged = trimmedName !== workspace.name.trim();
-  const runtimeChanged = runtimeDraft !== currentDefaultRuntime;
-  const hasEditableChange =
-    (canManage && nameChanged) ||
-    (canManage && runtimeChanged);
-  const saveDisabled =
-    saving ||
-    !canManage ||
-    !hasEditableChange ||
-    !trimmedName;
+  const saveDisabled = saving || !canManage || !nameChanged || !trimmedName;
 
   const save = async (event: FormEvent) => {
     event.preventDefault();
     if (saveDisabled) {
       return;
     }
-    const input: UpdateWorkspaceSettingsInput = {};
-    if (canManage && nameChanged) {
-      input.name = trimmedName;
-    }
-    if (canManage && runtimeChanged) {
-      input.defaultRuntime = runtimeDraft;
-    }
     setSaving(true);
     setError("");
     setMessage("");
     try {
-      const response = await api.updateWorkspaceSettings(workspaceId, input);
+      const response = await api.updateWorkspaceSettings(workspaceId, { name: trimmedName });
       onSaved(response.workspace);
       setNameDraft(response.workspace.name);
-      setRuntimeDraft(response.workspace.defaultRuntime ?? "");
       setMessage("Workspace settings saved.");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -4761,25 +4734,9 @@ function WorkspaceSettings({
             disabled={!canManage || saving}
           />
         </label>
-        <label className="field">
-          <span className="lab">Default agent runtime</span>
-          <select
-            value={runtimeDraft}
-            onChange={(event) => {
-              setRuntimeDraft(event.target.value);
-              setMessage("");
-              setError("");
-            }}
-            disabled={!canManage || saving}
-          >
-            {workspaceRuntimeOptions.map((option) => (
-              <option value={option.value} key={option.value}>{option.label}</option>
-            ))}
-          </select>
-        </label>
         <p className="tiny muted">
           {canManage
-            ? "Owners and admins can update the name and default runtime."
+            ? "Owners and admins can rename the workspace."
             : "Only workspace owners and admins can edit workspace settings."}
         </p>
         {error ? <p className="error-text">{error}</p> : null}

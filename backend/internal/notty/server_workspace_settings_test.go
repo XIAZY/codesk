@@ -16,16 +16,15 @@ func TestWorkspaceSettingsPatchAuthZAndValidation(t *testing.T) {
 	workspace := authTestCreateWorkspace(t, router, owner.Token, "Settings Tenant")
 	target := "/api/workspaces/" + workspace.ID + "/workspace"
 
-	// Owner renames + sets a default runtime.
+	// Owner renames.
 	var updated struct {
 		Workspace Workspace `json:"workspace"`
 	}
 	authTestJSON(t, router, http.MethodPatch, target, owner.Token, UpdateWorkspaceRequest{
-		Name:           patchStr("Settings Tenant Renamed"),
-		DefaultRuntime: patchStr("claude"),
+		Name: patchStr("Settings Tenant Renamed"),
 	}, http.StatusOK, &updated)
-	if updated.Workspace.Name != "Settings Tenant Renamed" || updated.Workspace.DefaultRuntime != "claude" {
-		t.Fatalf("expected updated summary, got %#v", updated.Workspace)
+	if updated.Workspace.Name != "Settings Tenant Renamed" {
+		t.Fatalf("expected updated name, got %#v", updated.Workspace)
 	}
 
 	// The update survives independent reads (list endpoint).
@@ -37,7 +36,7 @@ func TestWorkspaceSettingsPatchAuthZAndValidation(t *testing.T) {
 	for _, ws := range listed.Workspaces {
 		if ws.ID == workspace.ID {
 			found = true
-			if ws.Name != "Settings Tenant Renamed" || ws.DefaultRuntime != "claude" {
+			if ws.Name != "Settings Tenant Renamed" {
 				t.Fatalf("list did not reflect update: %#v", ws)
 			}
 		}
@@ -80,10 +79,9 @@ func TestWorkspaceSettingsPatchAuthZAndValidation(t *testing.T) {
 		Name: patchStr("Outsider Renamed"),
 	}, http.StatusForbidden)
 
-	// Validation: empty patch, empty name, unknown runtime.
+	// Validation: empty patch, empty name.
 	authTestStatus(t, router, http.MethodPatch, target, owner.Token, UpdateWorkspaceRequest{}, http.StatusBadRequest)
 	authTestStatus(t, router, http.MethodPatch, target, owner.Token, UpdateWorkspaceRequest{Name: patchStr("   ")}, http.StatusBadRequest)
-	authTestStatus(t, router, http.MethodPatch, target, owner.Token, UpdateWorkspaceRequest{DefaultRuntime: patchStr("cobol")}, http.StatusBadRequest)
 }
 
 func TestWorkspaceDeleteRequiresOwnerAndExactNameThenCascades(t *testing.T) {

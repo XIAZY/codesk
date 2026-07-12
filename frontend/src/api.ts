@@ -13,7 +13,6 @@ import type {
 
 export type UpdateWorkspaceSettingsInput = {
   name?: string;
-  defaultRuntime?: string;
 };
 
 function cleanOrigin(value: string) {
