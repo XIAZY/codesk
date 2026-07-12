@@ -5063,7 +5063,7 @@ export function Icon({ name }: { name: string }) {
     case "thread":
       return <svg className="i sm" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5A8.5 8.5 0 1 1 21 11.5z" /></svg>;
     case "message":
-      return <svg className="i sm" viewBox="0 0 16 16"><path d="M3 3h10a1.6 1.6 0 0 1 1.6 1.6v5A1.6 1.6 0 0 1 13 11.2H6.6L4 13.4v-2.2H3a1.6 1.6 0 0 1-1.6-1.6v-5A1.6 1.6 0 0 1 3 3Z" /></svg>;
+      return <svg className="i sm" viewBox="0 0 24 24"><path d="M4 5h16a1.7 1.7 0 0 1 1.7 1.7v8.6A1.7 1.7 0 0 1 20 17H10l-4.3 3.4V17H4a1.7 1.7 0 0 1-1.7-1.7V6.7A1.7 1.7 0 0 1 4 5Z" /></svg>;
     case "people":
       return <svg className="i sm" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /></svg>;
     case "users":
