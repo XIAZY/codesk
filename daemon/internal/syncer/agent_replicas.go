@@ -3,7 +3,6 @@ package syncer
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"sort"
 )
 
@@ -35,7 +34,7 @@ func (s *Service) syncAgentRuntimes(ctx context.Context, workspace *workspaceRes
 			managed.cancel()
 			delete(s.agentRuntimes, agentID)
 		}
-		rootDir := filepath.Join(s.cfg.AgentWorkspaceRoot, safeAgentWorkspaceName(agentID))
+		rootDir := agentWorkspacePath(s.cfg, agentID)
 		runtime, err := newWorkspaceRuntime(s.cfg, s.client, rootDir, currentAgent.ID, "agent")
 		if err != nil {
 			s.mu.Unlock()
@@ -75,7 +74,7 @@ func (s *Service) syncAgentRuntimes(ctx context.Context, workspace *workspaceRes
 			stale[index].cancel()
 		}
 		waitManagedWorkspaceRuntime(stale[index])
-		_ = os.RemoveAll(filepath.Join(s.cfg.AgentWorkspaceRoot, safeAgentWorkspaceName(agentID)))
+		_ = os.RemoveAll(agentWorkspacePath(s.cfg, agentID))
 	}
 	return nil
 }
