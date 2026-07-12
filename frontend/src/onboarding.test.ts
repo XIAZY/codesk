@@ -11,6 +11,7 @@ import {
   isComplete,
   checklistProgress,
   acknowledgeFlag,
+  type OnboardingCondition,
   type OnboardingContext,
   type OnboardingLiveSignals,
   type OnboardingRole,
@@ -84,6 +85,39 @@ describe("node config integrity (§4.1)", () => {
     expect(isComplete(n, ctx({ events: new Set([`seen:${n.id}@v${n.version - 1}`]) }))).toBe(false);
     // An unversioned flag likewise does not satisfy.
     expect(isComplete(n, ctx({ events: new Set([`seen:${n.id}`]) }))).toBe(false);
+  });
+
+  // Class guard (Tom): every derived signal answers a WORKSPACE-live question, so an
+  // account-scoped node that could ONLY complete via a derived leg would re-nag after a
+  // workspace switch. An account node must carry an account-durable (acknowledge/flag)
+  // leg. This forbids the tip-first-selection class, not just the one instance.
+  it("every account-scoped node has an account-durable (non-derived) completion leg", () => {
+    const hasNonDerivedLeg = (cond: OnboardingCondition): boolean => {
+      switch (cond.via) {
+        case "acknowledge":
+        case "flag":
+          return true;
+        case "derived":
+          return false;
+        case "any":
+          return cond.of.some(hasNonDerivedLeg);
+      }
+    };
+    const accountNodes = NODES.filter((n) => n.scope === "account");
+    expect(accountNodes.length).toBeGreaterThan(0); // guard: the rule has something to check
+    for (const n of accountNodes) {
+      expect(hasNonDerivedLeg(n.completion)).toBe(true);
+    }
+  });
+
+  it("tip-first-selection is account-durable: a recorded first_thread_created completes it", () => {
+    const tip = node("tip-first-selection");
+    expect(tip.scope).toBe("account");
+    // The account-scope flag recorded on thread creation completes the tip across a
+    // workspace switch, even where the current workspace has no thread (thread-exists false).
+    expect(isComplete(tip, ctx({ events: new Set(["first_thread_created"]) }))).toBe(true);
+    // Nothing recorded + no live thread → still open (would recur, which the flag prevents).
+    expect(isComplete(tip, ctx())).toBe(false);
   });
 });
 

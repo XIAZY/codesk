@@ -213,8 +213,12 @@ export function Onboarding({
     if (!missing || step.fallback !== "skip" || missingNotifiedRef.current === step.id) return;
     missingNotifiedRef.current = step.id;
     console.warn(`[onboarding] skipped ${step.id}: target ${step.targetOnboardingId ?? "(none)"} is missing`);
-    (onMissingTarget ?? onNext)();
-  }, [missing, onMissingTarget, onNext, step.fallback, step.id, step.targetOnboardingId]);
+    // Presentation-correct dispatch: a tip's durable completion lives in onSkip (it
+    // acknowledges the account node), so a missing tip target must NOT call onNext —
+    // onNext drives the guide machinery and could advance/complete the whole guide off
+    // an absent anchor. Spotlight steps still skip forward via onNext.
+    (onMissingTarget ?? (isTip ? onSkip : onNext))();
+  }, [isTip, missing, onMissingTarget, onNext, onSkip, step.fallback, step.id, step.targetOnboardingId]);
 
   useEffect(() => {
     if ((!target || !geometry) && !missing) return;

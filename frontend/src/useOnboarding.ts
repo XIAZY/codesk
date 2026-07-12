@@ -1,199 +1,138 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { OnboardingScope, OnboardingStep } from "./Onboarding";
 
 type UseOnboardingOptions = {
   steps: readonly OnboardingStep[];
   completedIds: ReadonlySet<string>;
-  guideCompletedKey: string;
-  checklistDismissedKey?: string;
-  accountFlagsKey: string;
-  workspaceFlagsKey: string;
+  // The event set + writer are owned by useScopedEventFlags (one keyed store) and
+  // passed in — the hook never keeps its own copy, so a scope switch can't leak.
+  events: ReadonlySet<string>;
+  record: (event: string, scope: OnboardingScope) => void;
+  scopeKey: string; // account×workspace identity — resets the session on a switch
+  checklistDismissedKey: string;
   activeSpotlightId?: string | null;
   tip?: OnboardingStep | null;
   enabled?: boolean;
-  onRecord?: (event: string, scope: OnboardingScope) => void;
 };
 
 type SessionState = {
   key: string;
-  cursor: number;
+  // An original step index the user Backed to (session-only presentation), or null =
+  // track the engine frontier. Never persisted; durable completion is never moved by it.
+  revisit: number | null;
   skipped: boolean;
 };
 
-type KeyedBoolean = {
-  key: string | undefined;
-  value: boolean;
-};
-
-type KeyedEvents = {
-  key: string;
-  events: ReadonlySet<string>;
-};
-
-function storedTrue(key: string | undefined): boolean {
+function storedTrue(key: string): boolean {
   if (!key || typeof window === "undefined") return false;
   return window.localStorage.getItem(key) === "true";
 }
 
-function persistTrue(key: string | undefined) {
+function persistTrue(key: string) {
   if (!key || typeof window === "undefined") return;
-  window.localStorage.setItem(key, "true");
-}
-
-function storedEvents(key: string): ReadonlySet<string> {
-  if (!key || typeof window === "undefined") return new Set();
   try {
-    const value: unknown = JSON.parse(window.localStorage.getItem(key) ?? "[]");
-    return new Set(Array.isArray(value) ? value.filter((event): event is string => typeof event === "string") : []);
+    window.localStorage.setItem(key, "true");
   } catch {
-    return new Set();
+    // ignore storage failures (private mode) — dismissal just doesn't persist this session.
   }
 }
 
-function persistEvents(key: string, events: ReadonlySet<string>) {
-  if (!key || typeof window === "undefined") return;
-  window.localStorage.setItem(key, JSON.stringify([...events].sort()));
-}
-
 function newSession(key: string): SessionState {
-  return { key, cursor: 0, skipped: false };
+  return { key, revisit: null, skipped: false };
 }
 
 export function useOnboarding({
   steps,
   completedIds,
-  guideCompletedKey,
+  events,
+  record,
+  scopeKey,
   checklistDismissedKey,
-  accountFlagsKey,
-  workspaceFlagsKey,
   activeSpotlightId,
   tip = null,
   enabled = true,
-  onRecord,
 }: UseOnboardingOptions) {
-  const [sessionState, setSessionState] = useState<SessionState>(() => newSession(guideCompletedKey));
-  const [guideState, setGuideState] = useState<KeyedBoolean>(() => ({
-    key: guideCompletedKey,
-    value: storedTrue(guideCompletedKey),
-  }));
-  const [checklistState, setChecklistState] = useState<KeyedBoolean>(() => ({
+  const [sessionState, setSessionState] = useState<SessionState>(() => newSession(scopeKey));
+  // checklistDismissed is the one genuinely non-derivable durable flag (the user's
+  // state can't answer "did they dismiss the card"), so it stays stored — keyed by
+  // account×workspace like every other durable value.
+  const [checklistState, setChecklistState] = useState<{ key: string; value: boolean }>(() => ({
     key: checklistDismissedKey,
     value: storedTrue(checklistDismissedKey),
   }));
-  const [accountEventState, setAccountEventState] = useState<KeyedEvents>(() => ({
-    key: accountFlagsKey,
-    events: storedEvents(accountFlagsKey),
-  }));
-  const [workspaceEventState, setWorkspaceEventState] = useState<KeyedEvents>(() => ({
-    key: workspaceFlagsKey,
-    events: storedEvents(workspaceFlagsKey),
-  }));
-  const accountEventsRef = useRef(accountEventState);
-  const workspaceEventsRef = useRef(workspaceEventState);
 
-  // WorkspaceApp keeps this hook mounted while its workspace changes. Key every
-  // durable and session value so the first render in the new scope is already honest.
-  const freshSession = useMemo(() => newSession(guideCompletedKey), [guideCompletedKey]);
-  const session = sessionState.key === guideCompletedKey ? sessionState : freshSession;
-  const guideCompleted = guideState.key === guideCompletedKey
-    ? guideState.value
-    : storedTrue(guideCompletedKey);
+  // WorkspaceApp keeps this hook mounted across account/workspace switches. Key the
+  // session and the dismissed flag so the first render in the new scope is already honest.
+  const freshSession = useMemo(() => newSession(scopeKey), [scopeKey]);
+  const session = sessionState.key === scopeKey ? sessionState : freshSession;
   const checklistDismissed = checklistState.key === checklistDismissedKey
     ? checklistState.value
     : storedTrue(checklistDismissedKey);
-  const accountEvents = accountEventState.key === accountFlagsKey
-    ? accountEventState.events
-    : storedEvents(accountFlagsKey);
-  const workspaceEvents = workspaceEventState.key === workspaceFlagsKey
-    ? workspaceEventState.events
-    : storedEvents(workspaceFlagsKey);
-  accountEventsRef.current = { key: accountFlagsKey, events: accountEvents };
-  workspaceEventsRef.current = { key: workspaceFlagsKey, events: workspaceEvents };
-  const recordedEvents = useMemo(
-    () => new Set([...accountEvents, ...workspaceEvents]),
-    [accountEvents, workspaceEvents],
-  );
 
   useEffect(() => {
-    setSessionState(newSession(guideCompletedKey));
-    setGuideState({ key: guideCompletedKey, value: storedTrue(guideCompletedKey) });
-  }, [guideCompletedKey]);
-
+    setSessionState(newSession(scopeKey));
+  }, [scopeKey]);
   useEffect(() => {
     setChecklistState({ key: checklistDismissedKey, value: storedTrue(checklistDismissedKey) });
   }, [checklistDismissedKey]);
 
-  useEffect(() => {
-    setAccountEventState({ key: accountFlagsKey, events: storedEvents(accountFlagsKey) });
-  }, [accountFlagsKey]);
-
-  useEffect(() => {
-    setWorkspaceEventState({ key: workspaceFlagsKey, events: storedEvents(workspaceFlagsKey) });
-  }, [workspaceFlagsKey]);
-
-  const remaining = useMemo(
-    () => steps
-      .map((candidate, originalIndex) => ({ candidate, originalIndex }))
-      .filter(({ candidate }) => !completedIds.has(candidate.id)),
-    [completedIds, steps],
-  );
-  const cursorRemainingIndex = remaining.findIndex(({ originalIndex }) => originalIndex >= session.cursor);
-  const fallbackRemainingIndex = cursorRemainingIndex >= 0 ? cursorRemainingIndex : (remaining.length ? 0 : -1);
-  const requestedRemainingIndex = activeSpotlightId === undefined
-    ? fallbackRemainingIndex
-    : remaining.findIndex(({ candidate }) => candidate.id === activeSpotlightId);
-  const activeEntry = requestedRemainingIndex >= 0 ? remaining[requestedRemainingIndex] : undefined;
-  const spotlight = !session.skipped && !guideCompleted ? activeEntry?.candidate ?? null : null;
-  // P1 can expose an active spotlight and active tip simultaneously. The guide
-  // wins; the still-triggered tip is not consumed and resurfaces afterwards.
-  const active = enabled ? spotlight ?? tip : null;
-
   const updateSession = useCallback((update: (current: SessionState) => SessionState) => {
-    setSessionState((current) => update(current.key === guideCompletedKey ? current : newSession(guideCompletedKey)));
-  }, [guideCompletedKey]);
+    setSessionState((current) => update(current.key === scopeKey ? current : newSession(scopeKey)));
+  }, [scopeKey]);
 
-  const record = useCallback((event: string, scope: OnboardingScope) => {
-    const key = scope === "account" ? accountFlagsKey : workspaceFlagsKey;
-    const eventRef = scope === "account" ? accountEventsRef : workspaceEventsRef;
-    const currentEvents = eventRef.current.key === key ? eventRef.current.events : storedEvents(key);
-    if (currentEvents.has(event)) return;
-    const events = new Set(currentEvents);
-    events.add(event);
-    const nextState = { key, events };
-    eventRef.current = nextState;
-    persistEvents(key, events);
-    if (scope === "account") {
-      setAccountEventState(nextState);
-    } else {
-      setWorkspaceEventState(nextState);
-    }
-    onRecord?.(event, scope);
-  }, [accountFlagsKey, onRecord, workspaceFlagsKey]);
+  // The frontier: the first step whose completion condition doesn't hold yet — where the
+  // guide honestly "wants" to be. Guide completion is DERIVED from this (all steps
+  // complete ⇒ frontier past the end ⇒ nothing shows); no stored boolean exists to defeat
+  // a version bump — bump any node and its versioned flag stops matching, reopening it.
+  const frontierIndex = useMemo(() => {
+    const index = steps.findIndex((step) => !completedIds.has(step.id));
+    return index < 0 ? steps.length : index;
+  }, [steps, completedIds]);
+
+  // A Back revisit is honored only while it sits BEHIND the frontier (a completed prior
+  // step); once the frontier catches or passes it the revisit clears and we track the
+  // frontier again. Revisit is session-only presentation and never moves completion.
+  const revisitIndex = session.revisit !== null && session.revisit < frontierIndex ? session.revisit : null;
+
+  // The spotlight to show. An explicit Back revisit wins over the engine's activeNode
+  // (Juan's session precedence); otherwise defer to activeSpotlightId, which is null when
+  // the frontier step isn't triggered yet or the whole guide is complete (wait-don't-skip).
+  const spotlightIndex = revisitIndex !== null
+    ? revisitIndex
+    : activeSpotlightId != null
+      ? steps.findIndex((step) => step.id === activeSpotlightId)
+      : -1;
+  const spotlightStep = !session.skipped && spotlightIndex >= 0 ? steps[spotlightIndex] ?? null : null;
+  // P1 can expose a spotlight and a tip at once. The guide wins; the still-triggered tip
+  // is not consumed and resurfaces once the guide is done.
+  const active = enabled ? spotlightStep ?? tip : null;
 
   const acknowledge = useCallback((node: Pick<OnboardingStep, "id" | "version" | "scope">) => {
     record(`seen:${node.id}@v${node.version}`, node.scope);
   }, [record]);
 
   const next = useCallback(() => {
-    if (spotlight) acknowledge(spotlight);
-    if (requestedRemainingIndex >= 0 && requestedRemainingIndex < remaining.length - 1) {
-      const nextCursor = remaining[requestedRemainingIndex + 1].originalIndex;
-      updateSession((current) => ({ ...current, cursor: nextCursor }));
+    // From a revisited step, Next returns FORWARD to the frontier — no re-acknowledgement,
+    // durable completion untouched.
+    if (revisitIndex !== null) {
+      updateSession((current) => ({ ...current, revisit: null }));
       return;
     }
-    persistTrue(guideCompletedKey);
-    setGuideState({ key: guideCompletedKey, value: true });
-  }, [acknowledge, guideCompletedKey, remaining, requestedRemainingIndex, spotlight, updateSession]);
+    // At the frontier, Next acknowledges the current spotlight; completing it advances the
+    // frontier (derived) on the next render. The guide ends when the last step completes.
+    if (spotlightStep && spotlightStep.presentation === "spotlight") {
+      acknowledge(spotlightStep);
+    }
+  }, [acknowledge, revisitIndex, spotlightStep, updateSession]);
 
   const back = useCallback(() => {
-    const previousCursor = requestedRemainingIndex > 0
-      ? remaining[requestedRemainingIndex - 1].originalIndex
-      : 0;
-    updateSession((current) => ({ ...current, cursor: previousCursor }));
-  }, [remaining, requestedRemainingIndex, updateSession]);
+    if (spotlightIndex <= 0) return;
+    const previous = spotlightIndex - 1;
+    updateSession((current) => ({ ...current, revisit: previous }));
+  }, [spotlightIndex, updateSession]);
 
-  // Guide Skip is session-only and resumable. A contextual tip's Skip/Escape is
-  // a durable acknowledgement in that node's own account/workspace scope.
+  // Guide Skip is session-only and resumable. A contextual tip's Skip/Escape is a durable
+  // acknowledgement in that node's own account/workspace scope.
   const skip = useCallback(() => {
     if (active?.presentation === "tip") {
       acknowledge(active);
@@ -212,16 +151,17 @@ export function useOnboarding({
 
   return {
     active,
-    stepIndex: Math.max(0, requestedRemainingIndex),
-    total: remaining.length,
+    // Presentation binds to the ORIGINAL guide position + total step count, never the
+    // completion-filtered remaining list — a stable 1/3 → 2/3 → 3/3 even after Back.
+    stepIndex: spotlightIndex >= 0 ? spotlightIndex : 0,
+    total: steps.length,
     next,
     back,
     skip,
     resume,
     record,
     acknowledge,
-    recordedEvents,
-    guideCompleted,
+    recordedEvents: events,
     checklistDismissed,
     dismissChecklist,
   };

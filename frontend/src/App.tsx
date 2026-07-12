@@ -1533,6 +1533,7 @@ export function WorkspaceApp({
       : "member";
   const onboarding = useOnboardingController({
     enabled: rootNamespace.ready,
+    accountId: account?.id ?? "",
     workspaceId,
     roles: [onboardingRole],
     route: view.kind,
@@ -2331,6 +2332,9 @@ export function WorkspaceApp({
             onFocusThreadHandled={() => setFocusThreadId("")}
             onThreadCreated={() => {
               void reload();
+              // Account-scoped so "has used threads" survives a workspace switch — the
+              // account-durable completion leg of the first-selection tip (plan §4.3).
+              onboarding.record("first_thread_created", "account");
             }}
             onThreadsChanged={() => void reload()}
             titleEditing={renamingDocumentId === activeDocument.id}
