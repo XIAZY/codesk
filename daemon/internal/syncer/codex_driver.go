@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -77,6 +78,7 @@ func (d *codexDriver) Spawn(ctx context.Context, spec RuntimeSpawnSpec) (Runtime
 		app:          app,
 		instructions: spec.Instructions,
 		events:       make(chan RuntimeEvent, 128),
+		stopping:     make(chan struct{}),
 	}, nil
 }
 
@@ -84,6 +86,9 @@ type codexRuntimeProcess struct {
 	app          codexRuntimeApp
 	instructions string
 	events       chan RuntimeEvent
+	stopOnce     sync.Once
+	stopping     chan struct{}
+	stopErr      error
 }
 
 func (p *codexRuntimeProcess) Start(ctx context.Context) error {
@@ -99,10 +104,16 @@ func (p *codexRuntimeProcess) Start(ctx context.Context) error {
 }
 
 func (p *codexRuntimeProcess) Stop() error {
-	if p == nil || p.app == nil {
+	if p == nil {
 		return nil
 	}
-	return p.app.Stop()
+	p.stopOnce.Do(func() {
+		close(p.stopping)
+		if p.app != nil {
+			p.stopErr = p.app.Stop()
+		}
+	})
+	return p.stopErr
 }
 
 func (p *codexRuntimeProcess) WriteStdin(ctx context.Context, input RuntimeInput) (RuntimeWriteResult, error) {
@@ -161,7 +172,11 @@ func (p *codexRuntimeProcess) forwardEvents() {
 		if !ok {
 			continue
 		}
-		p.events <- runtimeEvent
+		select {
+		case p.events <- runtimeEvent:
+		case <-p.stopping:
+			return
+		}
 	}
 }
 

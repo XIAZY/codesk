@@ -29,6 +29,8 @@ func newCodexAppServer(cfg Config, workdir string, toolToken string, agentID str
 		pending:   map[int64]chan appServerResponse{},
 		events:    make(chan appServerEvent, 128),
 		done:      make(chan error, 1),
+		stopping:  make(chan struct{}),
+		readDone:  make(chan struct{}),
 	}
 }
 
@@ -42,11 +44,14 @@ type codexAppServer struct {
 	stdin  io.WriteCloser
 	nextID atomic.Int64
 
-	mu      sync.Mutex
-	pending map[int64]chan appServerResponse
-	events  chan appServerEvent
-	done    chan error
-	log     *agentLog
+	mu       sync.Mutex
+	pending  map[int64]chan appServerResponse
+	events   chan appServerEvent
+	done     chan error
+	stopOnce sync.Once
+	stopping chan struct{}
+	readDone chan struct{}
+	log      *agentLog
 }
 
 type appServerResponse struct {
@@ -101,6 +106,7 @@ func (c *codexAppServer) Start(ctx context.Context) error {
 		err := cmd.Wait()
 		c.logf("codex app-server exited err=%v", err)
 		c.done <- err
+		<-c.readDone
 		close(c.events)
 	}()
 	if _, err := c.request(ctx, "initialize", map[string]any{
@@ -136,6 +142,7 @@ func (c *codexAppServer) closeLog() {
 }
 
 func (c *codexAppServer) Stop() error {
+	c.stopOnce.Do(func() { close(c.stopping) })
 	if c.cmd == nil || c.cmd.Process == nil {
 		return nil
 	}
@@ -265,6 +272,7 @@ func (c *codexAppServer) write(payload map[string]any) error {
 }
 
 func (c *codexAppServer) readLoop(stdout io.Reader) {
+	defer close(c.readDone)
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	for scanner.Scan() {
@@ -302,14 +310,32 @@ func (c *codexAppServer) readLoop(stdout io.Reader) {
 		if err := json.Unmarshal(line, &notification); err != nil || notification.Method == "" {
 			continue
 		}
-		select {
-		case c.events <- appServerEvent{Method: notification.Method, Params: notification.Params}:
-		default:
-		}
+		c.emitEvent(appServerEvent{Method: notification.Method, Params: notification.Params})
 	}
 	if err := scanner.Err(); err != nil {
 		c.logf("jsonrpc stdout scan error err=%v", err)
 	}
+}
+
+func (c *codexAppServer) emitEvent(event appServerEvent) {
+	if isLifecycleNotification(event) {
+		select {
+		case c.events <- event:
+		case <-c.stopping:
+		}
+		return
+	}
+	select {
+	case c.events <- event:
+	default:
+	}
+}
+
+// Derive transport backpressure from the exact runtime mapping so telemetry
+// cannot become blocking when lifecycle semantics evolve.
+func isLifecycleNotification(event appServerEvent) bool {
+	_, ok := codexRuntimeEvent(event)
+	return ok
 }
 
 func (c *codexAppServer) stderrLoop(stderr io.Reader) {
