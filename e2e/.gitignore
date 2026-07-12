@@ -1,4 +1,5 @@
 node_modules/
 seed.json
+storage-state.json
 test-results/
 playwright-report/

@@ -73,6 +73,7 @@ function markVerified(email: string): void {
 }
 
 type VerifiedAccount = {
+  accountId: string;
   email: string;
   password: string;
   token: string;
@@ -85,7 +86,8 @@ async function registerVerifiedAccount(stamp: number, slug: string, name: string
   markVerified(email);
   const login = await api("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
   if (!login.token) throw new Error(`login returned no token for ${slug} after verification`);
-  return { email, password, token: login.token };
+  if (!login.account?.id) throw new Error(`login returned no account id for ${slug} after verification`);
+  return { accountId: login.account.id, email, password, token: login.token };
 }
 
 async function createWorkspace(token: string, stamp: number, slug: string, name: string): Promise<any> {
@@ -110,6 +112,7 @@ export default async function globalSetup(): Promise<void> {
   const login = await api("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
   const token: string = login.token;
   if (!token) throw new Error("login returned no token after verification");
+  if (!login.account?.id) throw new Error("login returned no account id after verification");
 
   // Workspace A with one document (its content is written through the editor in the flow, so opening it is
   // a real product action); workspace B left FULLY IDLE — no daemons, agents, threads, presence — so the
@@ -123,6 +126,30 @@ export default async function globalSetup(): Promise<void> {
   const b = await api("/api/workspaces", { method: "POST", token,
     body: JSON.stringify({ name: "Smoke Bravo", slug: `smoke-bravo-${stamp}`, handle: `smoke-owner-b-${stamp}` }) });
   const workspaceB = b.workspace ?? b;
+
+  // The older smoke/popover rows are not onboarding tests. Give only their isolated
+  // account fully-complete/dismissed browser state so the new spotlight cannot block
+  // their pre-existing controls. Because every key carries account identity, this
+  // same storage state is intentionally inert for the dedicated A/B/E identities.
+  const smokeWorkspaceEvents = JSON.stringify([
+    "first_document_created",
+    "seen:threads-intro@v1",
+    "seen:watchers-intro@v1",
+  ]);
+  const smokeAccount = `codesk.onboarding.account.${login.account.id}`;
+  writeFileSync(join(__dirname, "storage-state.json"), JSON.stringify({
+    cookies: [],
+    origins: [{
+      origin: PREVIEW,
+      localStorage: [
+        { name: `${smokeAccount}.flags`, value: JSON.stringify(["seen:tip-first-selection@v1"]) },
+        { name: `${smokeAccount}.ws.${workspaceA.id}.flags`, value: smokeWorkspaceEvents },
+        { name: `${smokeAccount}.ws.${workspaceA.id}.checklistDismissed`, value: "true" },
+        { name: `${smokeAccount}.ws.${workspaceB.id}.flags`, value: smokeWorkspaceEvents },
+        { name: `${smokeAccount}.ws.${workspaceB.id}.checklistDismissed`, value: "true" },
+      ],
+    }],
+  }, null, 2));
 
   // Onboarding scenarios use dedicated identities so completion and localStorage state
   // never leak from the long-lived core smoke owner:
@@ -167,7 +194,12 @@ export default async function globalSetup(): Promise<void> {
         workspaceSlug: invitedWorkspace.slug,
         workspaceName: invitedWorkspace.name,
       },
+      invitedOwner: {
+        email: inviteOwner.email,
+        password: inviteOwner.password,
+      },
       returningUser: {
+        accountId: onboardingReturning.accountId,
         email: onboardingReturning.email,
         password: onboardingReturning.password,
         workspaceId: returningWorkspace.id,
