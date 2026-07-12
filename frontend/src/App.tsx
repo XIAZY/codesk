@@ -3845,20 +3845,31 @@ export function MoveDocumentModal({ document, documents, onClose, onMove }: { do
   // dot-PREFIXED name: the daemon's visible-root contract ignores any dot-prefixed path segment
   // (isIgnoredWorkspaceRelativePath), so `Docs/.secret/…` would write a path the daemon refuses to project.
   const invalidNewFolder = newFolderName !== "" && (normalizedNewFolder !== newFolderName || newFolderName.startsWith("."));
-  const targetFolder = normalizedNewFolder ? (selectedFolder ? `${selectedFolder}/${normalizedNewFolder}` : normalizedNewFolder) : selectedFolder;
+  // If the typed New Folder name matches an EXISTING folder (case-insensitive), resolve to that folder's
+  // CANONICAL path and move into it — moving into an existing folder is legal, so don't error; just don't
+  // pretend it's new (the preview shows the real, canonically-cased path, not the typed case). Eva's honesty
+  // ruling over a hard reject.
+  const prospectiveFolder = normalizedNewFolder ? (selectedFolder ? `${selectedFolder}/${normalizedNewFolder}` : normalizedNewFolder) : selectedFolder;
+  const existingFolderMatch = normalizedNewFolder ? folders.find((folder) => folder.path.toLowerCase() === prospectiveFolder.toLowerCase()) : undefined;
+  const targetFolder = existingFolderMatch ? existingFolderMatch.path : prospectiveFolder;
   const targetPath = targetFolder ? `${targetFolder}/${baseName}` : baseName;
 
+  // An active New Folder row with a blank name must NOT silently fall back to moving into the parent — it's a
+  // required-name error until the user types one or presses Escape/blur to cancel the row.
+  const blankNewFolder = newFolderActive && newFolderName === "";
   const isReserved = newFolderName !== "" && windowsReservedBaseName.test(splitVisibleFileName(newFolderName).stem || newFolderName);
   // Conflicts are case-insensitive, matching the title-bar path contract — an occupied path is occupied
   // regardless of case (Other/PRODUCT.md blocks a move to Other/Product.md).
   const conflicts = documents.some((item) => item.id !== document.id && item.path.toLowerCase() === targetPath.toLowerCase());
-  const validation = invalidNewFolder
-    ? "That folder name isn't allowed — no leading “.”, no “.”/“..”, no trailing dots or spaces, and no illegal characters."
-    : isReserved
-      ? "That name is reserved by the operating system."
-      : conflicts
-        ? "A document already lives there — pick another folder, or rename it in the title bar."
-        : "";
+  const validation = blankNewFolder
+    ? "Enter a name for the new folder, or press Escape to cancel."
+    : invalidNewFolder
+      ? "That folder name isn't allowed — no leading “.”, no “.”/“..”, no trailing dots or spaces, and no illegal characters."
+      : isReserved
+        ? "That name is reserved by the operating system."
+        : conflicts
+          ? "A document already lives there — pick another folder, or rename it in the title bar."
+          : "";
   const unchanged = targetPath === document.path;
 
   return (
@@ -3897,6 +3908,14 @@ export function MoveDocumentModal({ document, documents, onClose, onMove }: { do
                     value={newFolder}
                     onChange={(event) => setNewFolder(event.target.value)}
                     onFocus={(event) => event.target.select()}
+                    onBlur={() => {
+                      // A blank row on blur collapses back to the plain selection (never left showing an empty
+                      // creation row that silently means "move to parent").
+                      if (newFolder.trim() === "") {
+                        setNewFolderActive(false);
+                        setNewFolder("");
+                      }
+                    }}
                     onKeyDown={(event) => {
                       if (event.key === "Escape") {
                         event.preventDefault();

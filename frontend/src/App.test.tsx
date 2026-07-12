@@ -359,6 +359,26 @@ describe("MoveDocumentModal", () => {
     fireEvent.click(moveButton());
     await waitFor(() => expect(onMove).toHaveBeenCalledWith("Specs/Drafts/Product.md"));
   });
+
+  it("requires a name for an active New Folder row — never silently moves into the parent", () => {
+    renderMove([{ id: "d2", path: "Specs/x.md", title: "x.md" } as DocumentItem]);
+    fireEvent.click(screen.getByRole("option", { name: "Specs" }));
+    fireEvent.click(screen.getByRole("button", { name: "New Folder" }));
+    fireEvent.change(screen.getByLabelText("New folder name"), { target: { value: "" } });
+    expect(moveButton().disabled).toBe(true);
+    expect(screen.getByText(/enter a name for the new folder/i)).toBeTruthy();
+  });
+
+  it("resolves a New Folder name matching an existing folder to its canonical path — moves in, no error", async () => {
+    const onMove = renderMove([{ id: "d2", path: "Specs/Existing/Other.md", title: "Other.md" } as DocumentItem]);
+    fireEvent.click(screen.getByRole("option", { name: "Specs" }));
+    typeNewFolder("existing"); // lowercase — matches the existing Specs/Existing folder case-insensitively
+    await waitFor(() => expect(moveButton().disabled).toBe(false));
+    expect(screen.queryByText(/already exists|isn't allowed/i)).toBeNull();
+    fireEvent.click(moveButton());
+    // Commits into the CANONICAL existing folder (correct case), not a new lowercase "existing" folder.
+    await waitFor(() => expect(onMove).toHaveBeenCalledWith("Specs/Existing/Product.md"));
+  });
 });
 
 describe("WorkspaceApp right rail", () => {
