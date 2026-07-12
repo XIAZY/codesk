@@ -231,6 +231,37 @@ func TestReconcileAgentReplicasKeepsUUIDActorWhenHandleChanges(t *testing.T) {
 	}
 }
 
+func TestReconcileAgentReplicasCleanupRemovesOnlyCanonicalAgentPath(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "agent_four")
+	sibling := filepath.Join(root, "agent_five")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatalf("create target agent path: %v", err)
+	}
+	if err := os.MkdirAll(sibling, 0o755); err != nil {
+		t.Fatalf("create sibling agent path: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sibling, "sentinel"), []byte("keep"), 0o644); err != nil {
+		t.Fatalf("write sibling sentinel: %v", err)
+	}
+
+	service := &Service{
+		cfg: Config{AgentWorkspaceRoot: root},
+		agentRuntimes: map[string]*managedWorkspaceRuntime{
+			"agent/four": {},
+		},
+	}
+	if err := service.syncAgentRuntimes(context.Background(), &workspaceResponse{}); err != nil {
+		t.Fatalf("sync agent runtimes: %v", err)
+	}
+	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("canonical stale agent path should be removed, stat error = %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(sibling, "sentinel")); err != nil || string(data) != "keep" {
+		t.Fatalf("sibling agent path was modified: data=%q err=%v", data, err)
+	}
+}
+
 func TestIgnoredWorkspacePathPolicy(t *testing.T) {
 	root := t.TempDir()
 	cases := []struct {

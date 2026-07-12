@@ -3,6 +3,7 @@ package syncer
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -78,7 +79,7 @@ func safeAgentWorkspaceName(agentID string) string {
 	if trimmed == "" {
 		return "agent"
 	}
-	return strings.Map(func(r rune) rune {
+	name := strings.Map(func(r rune) rune {
 		switch {
 		case r >= 'a' && r <= 'z':
 			return r
@@ -92,4 +93,17 @@ func safeAgentWorkspaceName(agentID string) string {
 			return '_'
 		}
 	}, trimmed)
+	switch name {
+	case ".":
+		return "_"
+	case "..":
+		return "__"
+	default:
+		return name
+	}
+}
+
+// Backend WorkspaceRoot is display metadata, never filesystem identity.
+func agentWorkspacePath(cfg Config, agentID string) string {
+	return filepath.Join(cfg.AgentWorkspaceRoot, safeAgentWorkspaceName(agentID))
 }

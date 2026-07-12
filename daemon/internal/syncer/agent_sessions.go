@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -370,7 +369,7 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 }
 
 func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agent) error {
-	workdir := s.workspacePath(current)
+	workdir := agentWorkspacePath(s.cfg, current.ID)
 	if err := os.MkdirAll(workdir, 0o755); err != nil {
 		return err
 	}
@@ -742,20 +741,6 @@ func (s *agentSessionSupervisor) markIdle(agentID string, process RuntimeProcess
 
 func (s *agentSessionSupervisor) publish(agentID string, payload updateAgentSessionRequest) {
 	s.status.Publish(agentID, payload)
-}
-
-func (s *agentSessionSupervisor) workspacePath(current *agent) string {
-	if current == nil {
-		return s.cfg.AgentWorkspaceRoot
-	}
-	name := filepath.Base(strings.TrimSpace(current.WorkspaceRoot))
-	if name == "." || name == string(filepath.Separator) || name == "" {
-		name = strings.TrimSpace(current.ID)
-	}
-	if name == "" {
-		return s.cfg.AgentWorkspaceRoot
-	}
-	return filepath.Join(s.cfg.AgentWorkspaceRoot, name)
 }
 
 func cloneAgentValue(current *agent) *agent {

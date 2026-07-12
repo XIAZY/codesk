@@ -21,6 +21,7 @@ type agentSessionStatusUpdate struct {
 type fakeRuntimeDriver struct {
 	mu              sync.Mutex
 	processes       []*fakeRuntimeProcess
+	spawnSpecs      []RuntimeSpawnSpec
 	detection       RuntimeDetection
 	startEntered    chan struct{}
 	startRelease    chan struct{}
@@ -82,6 +83,7 @@ func (f *fakeRuntimeDriver) Spawn(ctx context.Context, spec RuntimeSpawnSpec) (R
 	}
 	f.mu.Lock()
 	f.processes = append(f.processes, process)
+	f.spawnSpecs = append(f.spawnSpecs, spec)
 	f.mu.Unlock()
 	return process, nil
 }
@@ -103,6 +105,16 @@ func (f *fakeRuntimeDriver) only(t *testing.T) *fakeRuntimeProcess {
 		t.Fatalf("expected one runtime process, got %d", len(f.processes))
 	}
 	return f.processes[0]
+}
+
+func (f *fakeRuntimeDriver) onlySpawnSpec(t *testing.T) RuntimeSpawnSpec {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.spawnSpecs) != 1 {
+		t.Fatalf("expected one runtime spawn spec, got %d", len(f.spawnSpecs))
+	}
+	return f.spawnSpecs[0]
 }
 
 func (p *fakeRuntimeProcess) Start(ctx context.Context) error {
@@ -227,6 +239,43 @@ func TestAgentSessionStartsThreadWithDeveloperInstructions(t *testing.T) {
 	update := <-updates
 	if update.agentID != "agent_1" || update.payload.Status != "idle" || update.payload.SessionID != "thread_new" {
 		t.Fatalf("unexpected session update: %#v", update)
+	}
+}
+
+func TestAgentSessionWorkdirUsesAgentIdentityNotBackendWorkspaceRoot(t *testing.T) {
+	tests := []struct {
+		name          string
+		agentID       string
+		workspaceRoot string
+		workspaceName string
+	}{
+		{name: "backend path cannot relocate agent", agentID: "agent_one", workspaceRoot: "teams/shared", workspaceName: "agent_one"},
+		{name: "shared basename cannot merge agents", agentID: "agent_two", workspaceRoot: "other/shared", workspaceName: "agent_two"},
+		{name: "metadata parent cannot escape root", agentID: "agent_three", workspaceRoot: "..", workspaceName: "agent_three"},
+		{name: "empty metadata still sanitizes identity", agentID: "agent/four", workspaceRoot: "", workspaceName: "agent_four"},
+		{name: "embedded dots remain part of identity", agentID: "agent.five", workspaceRoot: "agents/dotted", workspaceName: "agent.five"},
+		{name: "dot identity cannot collapse to root", agentID: ".", workspaceRoot: "agents/dot", workspaceName: "_"},
+		{name: "dot dot identity cannot escape root", agentID: "..", workspaceRoot: "agents/dot-dot", workspaceName: "__"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workspaceRoot := filepath.Join(t.TempDir(), "agents")
+			factory := newFakeRuntimeDriver()
+			supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, workspaceRoot), nil, newFakeRuntimeRegistry(factory))
+			defer supervisor.Shutdown()
+
+			current := &agent{ID: test.agentID, Kind: "codex", WorkspaceRoot: test.workspaceRoot}
+			if err := supervisor.ensureSession(context.Background(), current); err != nil {
+				t.Fatalf("ensure session: %v", err)
+			}
+
+			got := factory.onlySpawnSpec(t).Workdir
+			want := filepath.Join(workspaceRoot, test.workspaceName)
+			if got != want {
+				t.Fatalf("runtime workdir = %q, want identity-derived %q", got, want)
+			}
+		})
 	}
 }
 
