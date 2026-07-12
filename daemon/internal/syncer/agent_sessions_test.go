@@ -689,6 +689,13 @@ func TestAgentSessionAdoptsForkedSessionIDFromStreamEvents(t *testing.T) {
 	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), updater, newFakeRuntimeRegistry(factory))
 	defer supervisor.Shutdown()
 
+	// markIdle fires the idle-wake callback only after its completion-log append
+	// (agent_sessions.go), giving a deterministic post-handler barrier to drain
+	// that async append before t.TempDir cleanup — the fake process Stop never
+	// closes Events, so Shutdown is not a join point.
+	idleWake := make(chan string, 4)
+	supervisor.SetIdleWake(func(agentID string) { idleWake <- agentID })
+
 	// A fresh session is spawn-pinned to the start id "thread_new".
 	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"}); err != nil {
 		t.Fatalf("ensure session: %v", err)
@@ -714,6 +721,14 @@ func TestAgentSessionAdoptsForkedSessionIDFromStreamEvents(t *testing.T) {
 	// re-resumes the live session instead of rewinding to the discarded spawn id.
 	if got := sessionSessionID(supervisor, "agent_1"); got != "thread_forked" {
 		t.Fatalf("supervisor kept the stale spawn session id %q; a crash-restart would rewind/discard turns", got)
+	}
+
+	// Drain markIdle's post-publish completion-log append via the idle-wake
+	// barrier before returning, so teardown can't race the in-flight write.
+	select {
+	case <-idleWake:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for idle-wake barrier before teardown")
 	}
 }
 
