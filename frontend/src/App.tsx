@@ -1937,6 +1937,7 @@ export function WorkspaceApp({
               className="btn ghost icon sm"
               title="New doc"
               aria-label="New document"
+              data-onboarding-id="new-document"
               type="button"
               onClick={() => void createDocument()}
               disabled={creatingDocument || !workspace.rootDocumentId}
@@ -2052,6 +2053,7 @@ export function WorkspaceApp({
                   ref={documentThreadsTriggerRef}
                   className={`btn sm document-threads-trigger ${documentThreadsOpen ? "selected" : "ghost"}`}
                   type="button"
+                  data-onboarding-id="document-threads"
                   aria-label={`Threads, ${documentOpenThreadCount} open`}
                   aria-haspopup="dialog"
                   aria-expanded={documentThreadsOpen}
@@ -2116,6 +2118,7 @@ export function WorkspaceApp({
                   ref={documentWatchersTriggerRef}
                   className={`btn sm document-watchers-trigger ${documentWatchersOpen ? "selected" : "ghost"}`}
                   type="button"
+                  data-onboarding-id="document-watchers"
                   aria-label={documentWatcherCount === null ? "Watchers" : `Watchers, ${documentWatcherCount} watching`}
                   aria-haspopup="dialog"
                   aria-expanded={documentWatchersOpen}
@@ -2177,6 +2180,7 @@ export function WorkspaceApp({
                 ref={documentMoreTriggerRef}
                 className={`btn sm ghost icon document-more-trigger ${moreMenuOpen || documentActivityOpen ? "selected" : ""}`}
                 type="button"
+                data-onboarding-id="document-more"
                 onClick={() => {
                   if (moreMenuOpen) {
                     closeMoreMenu(false);
@@ -2691,7 +2695,7 @@ function AgentsManagement({
             <div className="small muted">Codex collaborators in this workspace. Each is owned by a local environment.</div>
           </div>
           <div className="row gap-6">
-            <button className="btn accent" type="button" onClick={onNew}>
+            <button className="btn accent" type="button" data-onboarding-id="new-agent" onClick={onNew}>
               <Icon name="plus" />
               New agent
             </button>
@@ -3336,7 +3340,7 @@ export function DocumentEditor({
             style={{ left: toolbarPoint.x, top: toolbarPoint.y }}
             onMouseDown={(event) => event.preventDefault()}
           >
-            <button className="primary" type="button" onClick={openThreadDraft}>
+            <button className="primary" type="button" data-onboarding-id="selection-thread" onClick={openThreadDraft}>
               <Icon name="thread" />
               Open thread
             </button>
@@ -4536,11 +4540,11 @@ export function EmptyWorkspace({
         <h2 className="display">Let's get this workspace working.</h2>
         <p className="small muted">Codesk is best with at least one local environment: it syncs docs to disk and hosts your agents. You can also start by writing something.</p>
         <div className="empty-grid">
-          <button className="card p-20 empty-choice" onClick={onCreateDaemon}>
+          <button className="card p-20 empty-choice" data-onboarding-id="connect-local-env" onClick={onCreateDaemon}>
             <div className="row gap-8"><div className="avi sm daemon">D</div><b>Deploy a local environment</b></div>
             <span className="small muted">Bring docs to local disk and enable agents.</span>
           </button>
-          <button className="card p-20 empty-choice" onClick={onCreateDocument} disabled={!canCreateDocument || creatingDocument}>
+          <button className="card p-20 empty-choice" data-onboarding-id="create-document" onClick={onCreateDocument} disabled={!canCreateDocument || creatingDocument}>
             <div className="row gap-8"><Icon name="doc" /><b>Create your first doc</b></div>
             <span className="small muted">{creatingDocument ? "Creating..." : "Markdown or plaintext. Threads and agents come along."}</span>
           </button>
