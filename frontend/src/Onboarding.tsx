@@ -46,6 +46,7 @@ const SPOTLIGHT_PAD = 12;
 const COACH_MARGIN = 12;
 const COACH_RIGHT = 24;
 const COACH_TOP = 72;
+const COACH_TARGET_GAP = 18;
 const COACH_FALLBACK = { width: 312, height: 220 };
 
 function bounded(value: number, min: number, max: number): number {
@@ -73,15 +74,15 @@ export function spotlightGeometry(
   const maxTop = Math.max(COACH_MARGIN, viewport.height - coach.height - COACH_MARGIN);
   const coachLeft = bounded(viewport.width - coach.width - COACH_RIGHT, COACH_MARGIN, maxLeft);
   let coachTop = bounded(COACH_TOP, COACH_MARGIN, maxTop);
-  const intersectsHole = (candidateTop: number) => (
-    coachLeft < hole.right + 18
-    && coachLeft + coach.width > hole.left - 18
-    && candidateTop < hole.bottom + 18
-    && candidateTop + coach.height > hole.top - 18
+  const crowdsTarget = (candidateTop: number) => (
+    coachLeft < target.right + COACH_TARGET_GAP
+    && coachLeft + coach.width > target.left - COACH_TARGET_GAP
+    && candidateTop < target.bottom + COACH_TARGET_GAP
+    && candidateTop + coach.height > target.top - COACH_TARGET_GAP
   );
-  if (intersectsHole(coachTop)) {
-    const below = hole.bottom + 18;
-    const above = hole.top - coach.height - 18;
+  if (crowdsTarget(coachTop)) {
+    const below = hole.bottom + COACH_TARGET_GAP;
+    const above = hole.top - coach.height - COACH_TARGET_GAP;
     if (below <= maxTop) coachTop = below;
     else if (above >= COACH_MARGIN) coachTop = above;
   }
@@ -154,14 +155,15 @@ export function Onboarding({
   const coachRef = useRef<HTMLElement | null>(null);
   const missingNotifiedRef = useRef("");
   const [target, setTarget] = useState<HTMLElement | null>(null);
-  const [missing, setMissing] = useState(false);
+  const [targetResolution, setTargetResolution] = useState({ stepId: step.id, missing: false });
   const [geometry, setGeometry] = useState<SpotlightGeometry | null>(null);
+  const missing = targetResolution.stepId === step.id && targetResolution.missing;
 
   const measure = useCallback((node: HTMLElement) => {
     if (!node.isConnected) {
       setTarget(null);
       setGeometry(null);
-      setMissing(true);
+      setTargetResolution({ stepId: step.id, missing: true });
       return;
     }
     const targetRect = node.getBoundingClientRect();
@@ -174,12 +176,12 @@ export function Onboarding({
     setGeometry(isTip
       ? { ...nextGeometry, placement: contextualTipPlacement(targetRect, viewport, coachSize) }
       : nextGeometry);
-  }, [isTip]);
+  }, [isTip, step.id]);
 
   useLayoutEffect(() => {
     const node = targetFor(step.targetOnboardingId);
     setTarget(node);
-    setMissing(!node);
+    setTargetResolution({ stepId: step.id, missing: !node });
     setGeometry(null);
     if (!node) return;
 

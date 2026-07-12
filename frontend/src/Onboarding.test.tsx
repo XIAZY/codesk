@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { useState } from "react";
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -96,6 +97,16 @@ describe("spotlightGeometry", () => {
     expect(geometry.panels.every((panel) => panel.width >= 0 && panel.height >= 0)).toBe(true);
     expect(geometry.placement.left).toBeGreaterThanOrEqual(12);
     expect(geometry.placement.top).toBeGreaterThanOrEqual(12);
+  });
+
+  it("keeps the coach at upper right when a wide centered target only nears its padded spotlight", () => {
+    const geometry = spotlightGeometry(
+      { left: 460, top: 250, right: 1080, bottom: 540, width: 620, height: 290 },
+      { width: 1440, height: 900 },
+      { width: 312, height: 220 },
+    );
+
+    expect(geometry.placement).toEqual({ left: 1104, top: 72 });
   });
 
   it("moves below a top-right target cluster instead of covering it", () => {
@@ -437,6 +448,57 @@ describe("Onboarding", () => {
     render(<Onboarding step={{ ...step, id: "watchers-intro", targetOnboardingId: "document-watchers", fallback: "skip" }} stepIndex={2} total={3} onNext={onNext} onBack={vi.fn()} onSkip={onSkip} />);
     await waitFor(() => expect(onNext).toHaveBeenCalledTimes(1));
     expect(onSkip).not.toHaveBeenCalled();
+  });
+
+  it("does not cascade a missing-step advance into the next present guide step", async () => {
+    const onNext = vi.fn();
+    const threads = {
+      ...step,
+      id: "threads-intro",
+      targetOnboardingId: "document-threads",
+      title: "Every discussion has a home",
+      fallback: "skip" as const,
+    };
+    const watchers = {
+      ...step,
+      id: "watchers-intro",
+      targetOnboardingId: "document-watchers",
+      title: "Let an agent keep watch",
+      fallback: "skip" as const,
+    };
+
+    function ConsecutiveSteps() {
+      const [active, setActive] = useState(threads);
+      return (
+        <>
+          <button
+            data-onboarding-id="document-watchers"
+            ref={(node) => {
+              if (node) node.getBoundingClientRect = () => ({ left: 1080, top: 20, right: 1240, bottom: 56, width: 160, height: 36 }) as DOMRect;
+            }}
+          >
+            Watchers
+          </button>
+          <Onboarding
+            step={active}
+            stepIndex={active.id === "threads-intro" ? 1 : 2}
+            total={3}
+            onNext={() => {
+              onNext();
+              setActive(watchers);
+            }}
+            onBack={vi.fn()}
+            onSkip={vi.fn()}
+          />
+        </>
+      );
+    }
+
+    render(<ConsecutiveSteps />);
+
+    expect(await screen.findByRole("dialog", { name: "Let an agent keep watch" })).toBeTruthy();
+    expect(screen.getByText("Step 3 of 3")).toBeTruthy();
+    expect(onNext).toHaveBeenCalledTimes(1);
   });
 });
 
