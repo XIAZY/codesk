@@ -99,13 +99,15 @@ func TestWorkspaceSlugIsImmutableAfterCreation(t *testing.T) {
 	originalSlug := original.Slug
 	target := "/api/workspaces/" + workspace.ID + "/workspace"
 
-	// A stale/malicious client sends {name, slug} — name updates, slug is silently ignored.
+	// A stale/malicious client sends {name, slug, defaultRuntime} — name updates,
+	// slug and defaultRuntime are silently ignored.
 	var updated struct {
 		Workspace Workspace `json:"workspace"`
 	}
 	authTestJSON(t, router, http.MethodPatch, target, owner.Token, map[string]string{
-		"name": "Renamed Workspace",
-		"slug": "attacker-slug",
+		"name":           "Renamed Workspace",
+		"slug":           "attacker-slug",
+		"defaultRuntime": "claude",
 	}, http.StatusOK, &updated)
 	if updated.Workspace.Name != "Renamed Workspace" {
 		t.Fatalf("name should update, got %q", updated.Workspace.Name)
@@ -113,8 +115,11 @@ func TestWorkspaceSlugIsImmutableAfterCreation(t *testing.T) {
 	if updated.Workspace.Slug != originalSlug {
 		t.Fatalf("slug must be immutable: got %q, want %q", updated.Workspace.Slug, originalSlug)
 	}
+	if updated.Workspace.DefaultRuntime != original.DefaultRuntime {
+		t.Fatalf("defaultRuntime must be immutable: got %q, want %q", updated.Workspace.DefaultRuntime, original.DefaultRuntime)
+	}
 
-	// Independent reload confirms the slug is unchanged in the database.
+	// Independent reload confirms slug and defaultRuntime are unchanged in the database.
 	reloaded, err := getWorkspace(server.sqlDB(), workspace.ID)
 	if err != nil {
 		t.Fatalf("reload workspace: %v", err)
@@ -122,10 +127,16 @@ func TestWorkspaceSlugIsImmutableAfterCreation(t *testing.T) {
 	if reloaded.Slug != originalSlug {
 		t.Fatalf("DB slug must be immutable: got %q, want %q", reloaded.Slug, originalSlug)
 	}
+	if reloaded.DefaultRuntime != original.DefaultRuntime {
+		t.Fatalf("DB defaultRuntime must be immutable: got %q, want %q", reloaded.DefaultRuntime, original.DefaultRuntime)
+	}
 
-	// Slug-only PATCH (no name) is rejected as 400 — nothing to update.
+	// Slug-only or defaultRuntime-only PATCH (no name) is rejected as 400.
 	authTestStatus(t, router, http.MethodPatch, target, owner.Token, map[string]string{
 		"slug": "another-attempt",
+	}, http.StatusBadRequest)
+	authTestStatus(t, router, http.MethodPatch, target, owner.Token, map[string]string{
+		"defaultRuntime": "claude",
 	}, http.StatusBadRequest)
 }
 
