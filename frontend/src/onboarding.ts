@@ -194,7 +194,13 @@ export const NODES: OnboardingNode[] = [
       via: "any",
       of: [
         ACKNOWLEDGE, // dismissed with "Got it" (versioned)
-        { via: "derived", signal: "thread-exists" }, // or a thread was created
+        // Account-durable: recorded at ACCOUNT scope on thread creation, so once the
+        // user has started a thread anywhere the tip never nags again after a switch
+        // (plan §4.3 `has-used-thread` is an account-level fact). This is the account
+        // leg that makes an account-scoped node honestly account-complete.
+        { via: "flag", key: "first_thread_created" },
+        // Convenience leg for workspaces that already had a thread before this shipped.
+        { via: "derived", signal: "thread-exists" },
       ],
     },
     targetOnboardingId: "selection-thread",

@@ -421,170 +421,171 @@ describe("Onboarding", () => {
     fireEvent.click(container.querySelector(".ob-scrim-panel")!);
     expect(onSkip).not.toHaveBeenCalled();
   });
+
+  it("routes a missing tip target to onSkip (durable acknowledge), never onNext", async () => {
+    const onSkip = vi.fn();
+    const onNext = vi.fn();
+    // No element carries data-onboarding-id="selection-thread" → the tip target is missing.
+    render(<Onboarding step={{ ...tip, fallback: "skip" }} stepIndex={0} total={1} onNext={onNext} onBack={vi.fn()} onSkip={onSkip} />);
+    await waitFor(() => expect(onSkip).toHaveBeenCalledTimes(1));
+    expect(onNext).not.toHaveBeenCalled();
+  });
+
+  it("routes a missing spotlight target to onNext (advance the sequence)", async () => {
+    const onSkip = vi.fn();
+    const onNext = vi.fn();
+    render(<Onboarding step={{ ...step, id: "watchers-intro", targetOnboardingId: "document-watchers", fallback: "skip" }} stepIndex={2} total={3} onNext={onNext} onBack={vi.fn()} onSkip={onSkip} />);
+    await waitFor(() => expect(onNext).toHaveBeenCalledTimes(1));
+    expect(onSkip).not.toHaveBeenCalled();
+  });
 });
 
 describe("useOnboarding", () => {
-  const steps: OnboardingStep[] = [step, { ...step, id: "connect-local", title: "Connect your local environment" }];
-  const flagKeys = {
-    accountFlagsKey: "codesk.onboarding.account.flags",
-    workspaceFlagsKey: "codesk.onboarding.ws.ws.flags",
-  };
+  // The 3-step guided sequence (Eva's locked shape). Teaching steps fall back to "skip".
+  const guide: OnboardingStep[] = [
+    step, // create-first-document, index 0, fallback "page-card"
+    { ...step, id: "threads-intro", targetOnboardingId: "document-threads", title: "Every discussion has a home", fallback: "skip" },
+    { ...step, id: "watchers-intro", targetOnboardingId: "document-watchers", title: "Let an agent keep watch", fallback: "skip" },
+  ];
 
-  it("derives incomplete steps, keeps Skip resumable, and persists only final completion", () => {
+  // Stand-in for the one keyed event store (useScopedEventFlags): a mutable set + a
+  // spyable writer. The hook no longer owns event storage.
+  function store(initial: string[] = []) {
+    const events = new Set<string>(initial);
+    return { events, record: vi.fn((event: string) => { events.add(event); }) };
+  }
+
+  const base = { scopeKey: "acct.A.ws.W", checklistDismissedKey: "acct.A.ws.W.checklistDismissed" };
+
+  it("derives guide completion from live per-node state — no stored boolean, version bump reopens", () => {
+    const s = store();
+    const { result, rerender } = renderHook(
+      (props: { completedIds: Set<string>; activeSpotlightId: string | null }) =>
+        useOnboarding({ steps: guide, events: s.events, record: s.record, ...base, ...props }),
+      { initialProps: { completedIds: new Set(guide.map((g) => g.id)), activeSpotlightId: null as string | null } },
+    );
+    // All steps complete → the engine offers no spotlight → guide done, nothing shows,
+    // and no guideCompleted boolean was ever written.
+    expect(result.current.active).toBeNull();
+    expect(localStorage.getItem("acct.A.ws.W.guideCompleted")).toBeNull();
+    // A version bump leaves that node incomplete + active again → it reappears; no cached
+    // boolean exists to override the versioned source of truth.
+    rerender({ completedIds: new Set(["create-first-document", "watchers-intro"]), activeSpotlightId: "threads-intro" });
+    expect(result.current.active?.id).toBe("threads-intro");
+  });
+
+  it("binds the counter to the original position and Back revisits prior original steps", () => {
+    const s = store();
+    const { result, rerender } = renderHook(
+      (props: { completedIds: Set<string>; activeSpotlightId: string | null }) =>
+        useOnboarding({ steps: guide, events: s.events, record: s.record, ...base, ...props }),
+      { initialProps: { completedIds: new Set(["create-first-document"]), activeSpotlightId: "threads-intro" } },
+    );
+    // create-first-document complete → threads at 2 of 3 (not 1 of a shrunken 2).
+    expect(result.current.active?.id).toBe("threads-intro");
+    expect(result.current.stepIndex).toBe(1);
+    expect(result.current.total).toBe(3);
+    // Back → revisit the completed create-first-document at 1 of 3; completion untouched.
+    act(() => result.current.back());
+    expect(result.current.active?.id).toBe("create-first-document");
+    expect(result.current.stepIndex).toBe(0);
+    expect(s.record).not.toHaveBeenCalled();
+    // Next from a revisit returns FORWARD to the frontier, re-recording nothing.
+    act(() => result.current.next());
+    expect(result.current.active?.id).toBe("threads-intro");
+    expect(result.current.stepIndex).toBe(1);
+    expect(s.record).not.toHaveBeenCalled();
+    // Advance to watchers (3 of 3); Back revisits threads (2 of 3).
+    rerender({ completedIds: new Set(["create-first-document", "threads-intro"]), activeSpotlightId: "watchers-intro" });
+    expect(result.current.stepIndex).toBe(2);
+    act(() => result.current.back());
+    expect(result.current.active?.id).toBe("threads-intro");
+    expect(result.current.stepIndex).toBe(1);
+  });
+
+  it("Next at the frontier acknowledges the current spotlight in its own scope", () => {
+    const s = store();
     const { result } = renderHook(() => useOnboarding({
-      steps,
-      completedIds: new Set(["create-first-document"]),
-      guideCompletedKey: "codesk.onboarding.ws.ws.guideCompleted",
-      ...flagKeys,
+      steps: guide, events: s.events, record: s.record, ...base,
+      completedIds: new Set(["create-first-document"]), activeSpotlightId: "threads-intro",
     }));
+    act(() => result.current.next());
+    expect(s.record).toHaveBeenCalledWith("seen:threads-intro@v1", "workspace");
+  });
 
-    expect(result.current.active?.id).toBe("connect-local");
+  it("keeps guide Skip session-only and resumable; a tip Skip is a durable acknowledge", () => {
+    const s = store();
+    const { result, rerender } = renderHook(
+      (props: { completedIds: Set<string>; activeSpotlightId: string | null; tip: OnboardingStep | null }) =>
+        useOnboarding({ steps: guide, events: s.events, record: s.record, ...base, ...props }),
+      { initialProps: { completedIds: new Set<string>(), activeSpotlightId: "create-first-document" as string | null, tip: null as OnboardingStep | null } },
+    );
+    expect(result.current.active?.id).toBe("create-first-document");
     act(() => result.current.skip());
     expect(result.current.active).toBeNull();
-    expect(localStorage.getItem("codesk.onboarding.ws.ws.guideCompleted")).toBeNull();
+    expect(s.record).not.toHaveBeenCalled(); // session-only, nothing durable
     act(() => result.current.resume());
-    expect(result.current.active?.id).toBe("connect-local");
-    act(() => result.current.next());
-    expect(result.current.active).toBeNull();
-    expect(localStorage.getItem("codesk.onboarding.ws.ws.guideCompleted")).toBe("true");
-  });
-
-  it("records events through the caller and persists checklist dismissal", () => {
-    const onRecord = vi.fn();
-    const { result } = renderHook(() => useOnboarding({
-      steps,
-      completedIds: new Set(),
-      guideCompletedKey: "codesk.onboarding.ws.ws.guideCompleted",
-      checklistDismissedKey: "codesk.onboarding.ws.ws.checklistDismissed",
-      onRecord,
-      ...flagKeys,
-    }));
-
-    act(() => result.current.record("first_document_created", "workspace"));
-    expect(onRecord).toHaveBeenCalledWith("first_document_created", "workspace");
-    expect(result.current.recordedEvents.has("first_document_created")).toBe(true);
-    act(() => result.current.dismissChecklist());
-    expect(localStorage.getItem("codesk.onboarding.ws.ws.checklistDismissed")).toBe("true");
-    expect(result.current.checklistDismissed).toBe(true);
-  });
-
-  it("does not lose same-scope events recorded before React rerenders", () => {
-    const onRecord = vi.fn();
-    const { result } = renderHook(() => useOnboarding({
-      steps,
-      completedIds: new Set(),
-      guideCompletedKey: "codesk.onboarding.ws.ws.guideCompleted",
-      onRecord,
-      ...flagKeys,
-    }));
-
-    act(() => {
-      result.current.record("first_thread_created", "workspace");
-      result.current.record("first_thread_replied", "workspace");
-    });
-    expect(JSON.parse(localStorage.getItem(flagKeys.workspaceFlagsKey) ?? "[]")).toEqual([
-      "first_thread_created",
-      "first_thread_replied",
-    ]);
-    expect(result.current.recordedEvents.has("first_thread_created")).toBe(true);
-    expect(result.current.recordedEvents.has("first_thread_replied")).toBe(true);
-    expect(onRecord).toHaveBeenCalledTimes(2);
-  });
-
-  it("keeps the current step stable when an earlier live completion arrives", () => {
-    const threeSteps = [step, { ...step, id: "connect-local" }, { ...step, id: "create-agent" }];
-    const { result, rerender } = renderHook(
-      ({ completedIds }) => useOnboarding({
-        steps: threeSteps,
-        completedIds,
-        guideCompletedKey: "codesk.onboarding.ws.ws.guideCompleted",
-        ...flagKeys,
-      }),
-      { initialProps: { completedIds: new Set<string>() } },
-    );
-
-    act(() => result.current.next());
-    expect(result.current.active?.id).toBe("connect-local");
-    rerender({ completedIds: new Set(["create-first-document"]) });
-    expect(result.current.active?.id).toBe("connect-local");
-    expect(result.current.stepIndex).toBe(0);
-  });
-
-  it("scopes durable flags and session-only state to the caller's workspace key", () => {
-    localStorage.setItem("codesk.onboarding.ws.a.guideCompleted", "true");
-    localStorage.setItem("codesk.onboarding.ws.a.checklistDismissed", "true");
-    const { result, rerender } = renderHook(
-      ({ workspace }) => useOnboarding({
-        steps,
-        completedIds: new Set(),
-        guideCompletedKey: `codesk.onboarding.ws.${workspace}.guideCompleted`,
-        checklistDismissedKey: `codesk.onboarding.ws.${workspace}.checklistDismissed`,
-        accountFlagsKey: "codesk.onboarding.account.flags",
-        workspaceFlagsKey: `codesk.onboarding.ws.${workspace}.flags`,
-      }),
-      { initialProps: { workspace: "a" } },
-    );
-
-    expect(result.current.active).toBeNull();
-    expect(result.current.guideCompleted).toBe(true);
-    expect(result.current.checklistDismissed).toBe(true);
-
-    rerender({ workspace: "b" });
     expect(result.current.active?.id).toBe("create-first-document");
-    expect(result.current.guideCompleted).toBe(false);
-    expect(result.current.checklistDismissed).toBe(false);
-    act(() => {
-      result.current.skip();
-      result.current.record("seen:tip-first-selection@v1", "account");
-      result.current.record("first_document_created", "workspace");
-    });
-    expect(result.current.active).toBeNull();
-    expect(result.current.recordedEvents.has("first_document_created")).toBe(true);
-    expect(JSON.parse(localStorage.getItem("codesk.onboarding.account.flags") ?? "[]")).toContain("seen:tip-first-selection@v1");
-    expect(JSON.parse(localStorage.getItem("codesk.onboarding.ws.b.flags") ?? "[]")).toContain("first_document_created");
-
-    rerender({ workspace: "c" });
-    expect(result.current.active?.id).toBe("create-first-document");
-    expect(result.current.recordedEvents.has("seen:tip-first-selection@v1")).toBe(true);
-    expect(result.current.recordedEvents.has("first_document_created")).toBe(false);
+    // A contextual tip's Skip acknowledges durably in the tip's account scope.
+    rerender({ completedIds: new Set(guide.map((g) => g.id)), activeSpotlightId: null, tip });
+    expect(result.current.active?.id).toBe("tip-first-selection");
+    act(() => result.current.skip());
+    expect(s.record).toHaveBeenCalledWith("seen:tip-first-selection@v1", "account");
   });
 
   it("gives an active spotlight precedence and defers the still-triggered account tip", () => {
-    const tip = { ...step, id: "tip-first-selection", scope: "account" as const, presentation: "tip" as const };
+    const s = store();
     const { result, rerender } = renderHook(
-      ({ activeSpotlightId }) => useOnboarding({
-        steps,
-        completedIds: new Set(),
-        guideCompletedKey: "codesk.onboarding.ws.ws.guideCompleted",
-        activeSpotlightId,
-        tip,
-        ...flagKeys,
-      }),
+      (props: { activeSpotlightId: string | null }) =>
+        useOnboarding({ steps: guide, events: s.events, record: s.record, ...base, completedIds: new Set(), tip, ...props }),
       { initialProps: { activeSpotlightId: "create-first-document" as string | null } },
     );
-
     expect(result.current.active?.id).toBe("create-first-document");
     rerender({ activeSpotlightId: null });
     expect(result.current.active?.id).toBe("tip-first-selection");
+  });
+
+  it("resets session and rereads the dismissed flag when the scope key changes", () => {
+    localStorage.setItem("acct.A.ws.a.checklistDismissed", "true");
+    const s = store();
+    const { result, rerender } = renderHook(
+      (props: { scopeKey: string; checklistDismissedKey: string }) =>
+        useOnboarding({ steps: guide, events: s.events, record: s.record, completedIds: new Set<string>(), activeSpotlightId: "create-first-document", ...props }),
+      { initialProps: { scopeKey: "acct.A.ws.a", checklistDismissedKey: "acct.A.ws.a.checklistDismissed" } },
+    );
     act(() => result.current.skip());
-    expect(JSON.parse(localStorage.getItem(flagKeys.accountFlagsKey) ?? "[]")).toContain("seen:tip-first-selection@v1");
+    expect(result.current.active).toBeNull();
+    expect(result.current.checklistDismissed).toBe(true);
+    // New workspace scope: the session-only skip clears and the dismissed flag is reread.
+    rerender({ scopeKey: "acct.A.ws.b", checklistDismissedKey: "acct.A.ws.b.checklistDismissed" });
+    expect(result.current.active?.id).toBe("create-first-document");
+    expect(result.current.checklistDismissed).toBe(false);
+  });
+
+  it("exposes the store's event set and writer, and persists checklist dismissal", () => {
+    const s = store(["member_invited"]);
+    const { result } = renderHook(() => useOnboarding({
+      steps: guide, events: s.events, record: s.record, ...base,
+      completedIds: new Set<string>(), activeSpotlightId: null,
+    }));
+    expect(result.current.recordedEvents.has("member_invited")).toBe(true);
+    act(() => result.current.record("first_thread_created", "account"));
+    expect(s.record).toHaveBeenCalledWith("first_thread_created", "account");
+    expect(result.current.checklistDismissed).toBe(false);
+    act(() => result.current.dismissChecklist());
+    expect(localStorage.getItem("acct.A.ws.W.checklistDismissed")).toBe("true");
+    expect(result.current.checklistDismissed).toBe(true);
   });
 
   it("acknowledges each node version in the node's own scope", () => {
+    const s = store();
     const { result } = renderHook(() => useOnboarding({
-      steps,
-      completedIds: new Set(),
-      guideCompletedKey: "codesk.onboarding.ws.ws.guideCompleted",
-      ...flagKeys,
+      steps: guide, events: s.events, record: s.record, ...base,
+      completedIds: new Set<string>(), activeSpotlightId: null,
     }));
-    const tip = { ...step, id: "tip-first-selection", scope: "account" as const, presentation: "tip" as const };
-
-    act(() => result.current.acknowledge(tip));
-    act(() => result.current.acknowledge({ ...tip, version: 2 }));
-    expect(JSON.parse(localStorage.getItem(flagKeys.accountFlagsKey) ?? "[]")).toEqual([
-      "seen:tip-first-selection@v1",
-      "seen:tip-first-selection@v2",
-    ]);
-    expect(localStorage.getItem(flagKeys.workspaceFlagsKey)).toBeNull();
+    act(() => result.current.acknowledge({ id: "tip-first-selection", version: 1, scope: "account" }));
+    act(() => result.current.acknowledge({ id: "tip-first-selection", version: 2, scope: "account" }));
+    expect(s.record).toHaveBeenNthCalledWith(1, "seen:tip-first-selection@v1", "account");
+    expect(s.record).toHaveBeenNthCalledWith(2, "seen:tip-first-selection@v2", "account");
   });
 });

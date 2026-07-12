@@ -1,11 +1,12 @@
 // Phase-2 wiring: bridges the pure onboarding engine (onboarding.ts) to the P2
 // overlay (Onboarding.tsx / useOnboarding.ts) and to WorkspaceApp's live data.
 // Kept out of both parallel lanes' files so nothing cross-imports until here.
-import { useMemo, useState, useCallback } from "react";
+import { useMemo } from "react";
 import { daemonLiveStatus } from "./logic";
 import type { WorkspaceState } from "./types";
 import type { OnboardingStep, OnboardingScope } from "./Onboarding";
 import { useOnboarding } from "./useOnboarding";
+import { useScopedEventFlags } from "./useScopedEventFlags";
 import {
   eligibleNodes,
   guideSteps,
@@ -67,33 +68,27 @@ export function toOnboardingStep(node: OnboardingNode): OnboardingStep {
   };
 }
 
-// ---- Persistence keys (plan §6.1) --------------------------------------------
+// ---- Persistence keys (plan §4.3/§6.1) ---------------------------------------
 
-// Account flags persist per user across workspaces; workspace flags per workspace.
-// Scope-partitioned storage is the P2 acceptance contract (no cross-workspace leak).
-export function onboardingFlagKeys(workspaceId: string) {
+// Every durable value is keyed PER USER: account flags by accountId (they follow the
+// user across workspaces but never across accounts on a shared browser); workspace
+// flags + the checklist-dismissed flag by accountId × workspaceId (two members of a
+// shared workspace keep separate onboarding state). The browser is not the user.
+export function onboardingFlagKeys(accountId: string, workspaceId: string) {
+  const account = `codesk.onboarding.account.${accountId}`;
+  const workspace = `${account}.ws.${workspaceId}`;
   return {
-    accountFlagsKey: "codesk.onboarding.account.flags",
-    workspaceFlagsKey: `codesk.onboarding.ws.${workspaceId}.flags`,
-    guideCompletedKey: `codesk.onboarding.ws.${workspaceId}.guideCompleted`,
-    checklistDismissedKey: `codesk.onboarding.ws.${workspaceId}.checklistDismissed`,
+    accountFlagsKey: `${account}.flags`,
+    workspaceFlagsKey: `${workspace}.flags`,
+    checklistDismissedKey: `${workspace}.checklistDismissed`,
   };
-}
-
-function readStored(key: string): ReadonlySet<string> {
-  if (typeof window === "undefined") return new Set();
-  try {
-    const value: unknown = JSON.parse(window.localStorage.getItem(key) ?? "[]");
-    return new Set(Array.isArray(value) ? value.filter((event): event is string => typeof event === "string") : []);
-  } catch {
-    return new Set();
-  }
 }
 
 // ---- Controller hook ---------------------------------------------------------
 
 export type OnboardingControllerInput = {
   enabled: boolean;
+  accountId: string;
   workspaceId: string;
   roles: OnboardingRole[];
   route: string; // active view, e.g. "document"
@@ -108,18 +103,14 @@ export type OnboardingControllerInput = {
 // which step/tip is active, and drives useOnboarding. WorkspaceApp calls this once
 // and renders <Onboarding step={active} .../> plus the checklist.
 export function useOnboardingController(input: OnboardingControllerInput) {
-  const { enabled, workspaceId, roles, route, selectionActive, workspaceState, documentCount, watchedDocumentCount, nowMs } = input;
-  const keys = useMemo(() => onboardingFlagKeys(workspaceId), [workspaceId]);
+  const { enabled, accountId, workspaceId, roles, route, selectionActive, workspaceState, documentCount, watchedDocumentCount, nowMs } = input;
+  const keys = useMemo(() => onboardingFlagKeys(accountId, workspaceId), [accountId, workspaceId]);
 
-  // The engine needs the recorded events to derive completion; the hook records and
-  // persists them, and echoes each write back through onRecord so this recompute
-  // stays in sync without a second read of localStorage.
-  const [recordedEvents, setRecordedEvents] = useState<ReadonlySet<string>>(
-    () => new Set([...readStored(keys.accountFlagsKey), ...readStored(keys.workspaceFlagsKey)]),
-  );
-  const syncEvents = useCallback((event: string) => {
-    setRecordedEvents((current) => (current.has(event) ? current : new Set([...current, event])));
-  }, []);
+  // ONE keyed store owns the recorded event flags. The engine context and
+  // useOnboarding both read `flags.events` and write through `flags.record`, so a
+  // scope switch rehydrates from the current keys — there is no duplicate copy to go
+  // stale (the leak this replaces) and completion stays a single source of truth.
+  const flags = useScopedEventFlags(keys.accountFlagsKey, keys.workspaceFlagsKey);
 
   const signals = useMemo(
     () => deriveOnboardingSignals({ workspaceState, documentCount, watchedDocumentCount, nowMs }),
@@ -127,8 +118,8 @@ export function useOnboardingController(input: OnboardingControllerInput) {
   );
 
   const ctx: OnboardingContext = useMemo(
-    () => ({ roles, events: recordedEvents, route, selectionActive, signals }),
-    [roles, recordedEvents, route, selectionActive, signals],
+    () => ({ roles, events: flags.events, route, selectionActive, signals }),
+    [roles, flags.events, route, selectionActive, signals],
   );
 
   const steps = useMemo(() => guideSteps(ctx).map(toOnboardingStep), [ctx]);
@@ -145,16 +136,13 @@ export function useOnboardingController(input: OnboardingControllerInput) {
   const hook = useOnboarding({
     steps,
     completedIds,
-    guideCompletedKey: keys.guideCompletedKey,
+    events: flags.events,
+    record: flags.record,
+    scopeKey: keys.workspaceFlagsKey,
     checklistDismissedKey: keys.checklistDismissedKey,
-    accountFlagsKey: keys.accountFlagsKey,
-    workspaceFlagsKey: keys.workspaceFlagsKey,
     activeSpotlightId,
     tip,
     enabled,
-    // Pass syncEvents directly (not wrapped) so the hook's `record` stays a stable
-    // reference — WorkspaceApp's createDocument callback depends on it.
-    onRecord: syncEvents,
   });
 
   // The getting-started checklist for Vitaliy's OnboardingChecklist to render —

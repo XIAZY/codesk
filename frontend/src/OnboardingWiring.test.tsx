@@ -6,9 +6,11 @@
 // fires on a real invite. The pure derivation/adapter is covered in
 // onboarding.test.ts / onboardingController.test.ts; this pins the App.tsx glue.
 
-import { cleanup, render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { cleanup, render, renderHook, screen, fireEvent, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceApp, MembersAndInvite } from "./App";
+import { useOnboardingController } from "./onboardingController";
+import type { OnboardingRole } from "./onboarding";
 import type { Account, Agent, WorkspaceState, WorkspaceSummary } from "./types";
 
 const mocks = vi.hoisted(() => ({
@@ -40,6 +42,7 @@ vi.mock("./useRootNamespace", () => ({
 
 afterEach(() => {
   cleanup();
+  window.localStorage.clear();
   mocks.workspace = null;
   mocks.documents = [];
   mocks.ready = true;
@@ -158,5 +161,57 @@ describe("member_invited record site", () => {
 
     await waitFor(() => expect(onMemberInvited).toHaveBeenCalledTimes(1));
     expect(api.createWorkspaceInvite).toHaveBeenCalledWith("workspace_1");
+  });
+});
+
+describe("useOnboardingController scope isolation (per user × workspace)", () => {
+  const baseInput = {
+    enabled: true,
+    roles: ["owner"] as OnboardingRole[],
+    workspaceState: workspaceState(),
+    documentCount: 1, // create-first-document already complete → guide sits past it
+    watchedDocumentCount: 0,
+    nowMs: 0,
+  };
+
+  it("rehydrates workspace acknowledgements on a workspace switch — no cross-workspace leak", () => {
+    window.localStorage.setItem(
+      "codesk.onboarding.account.acct_1.ws.wsA.flags",
+      JSON.stringify(["seen:threads-intro@v1"]),
+    );
+    const { result, rerender } = renderHook(
+      (props: { workspaceId: string }) =>
+        useOnboardingController({ ...baseInput, accountId: "acct_1", route: "document", selectionActive: false, ...props }),
+      { initialProps: { workspaceId: "wsA" } },
+    );
+    // A: threads-intro acknowledged → the guide sits on watchers-intro.
+    expect(result.current.active?.id).toBe("watchers-intro");
+    // Switch the still-mounted controller to workspace B (no flags): threads-intro reappears.
+    rerender({ workspaceId: "wsB" });
+    expect(result.current.active?.id).toBe("threads-intro");
+  });
+
+  it("isolates account acknowledgements per account — A's tip-completion can't suppress B", () => {
+    // Guide already finished in this workspace for BOTH accounts (workspace flags are per
+    // account × workspace), so the only thing left to show is the account-scoped tip.
+    for (const account of ["acctA", "acctB"]) {
+      window.localStorage.setItem(
+        `codesk.onboarding.account.${account}.ws.shared.flags`,
+        JSON.stringify(["seen:threads-intro@v1", "seen:watchers-intro@v1"]),
+      );
+    }
+    // Account A has used threads (account-durable flag) → its first-selection tip is done.
+    window.localStorage.setItem("codesk.onboarding.account.acctA.flags", JSON.stringify(["first_thread_created"]));
+    const { result, rerender } = renderHook(
+      (props: { accountId: string }) =>
+        useOnboardingController({ ...baseInput, workspaceId: "shared", route: "document", selectionActive: true, ...props }),
+      { initialProps: { accountId: "acctA" } },
+    );
+    // A: guide done + tip account-complete → nothing shows.
+    expect(result.current.active).toBeNull();
+    // Account B on the same browser: guide done, but B never used threads → the tip shows,
+    // NOT suppressed by A's account flag.
+    rerender({ accountId: "acctB" });
+    expect(result.current.active?.id).toBe("tip-first-selection");
   });
 });
