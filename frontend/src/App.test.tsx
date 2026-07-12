@@ -581,6 +581,21 @@ describe("ManageModal", () => {
     expect(await screen.findByText("Workspace settings saved.")).toBeTruthy();
   });
 
+  it("does not render slug or runtime controls — both are immutable after creation", () => {
+    const workspace = { ...emptyWorkspace(), workspaceId: "ws", name: "Acme", slug: "acme", currentMembershipRole: "owner" };
+    render(
+      <ManageModal
+        {...baseProps}
+        workspace={workspace as never}
+        activeTab="workspace"
+      />
+    );
+
+    expect(screen.queryByLabelText("Workspace URL slug")).toBeNull();
+    expect(screen.queryByLabelText("Default agent runtime")).toBeNull();
+    expect(screen.queryByText(/slug/i)).toBeNull();
+  });
+
   it("requires exact workspace-name confirmation before deleting", async () => {
     const user = userEvent.setup();
     const deleteWorkspace = vi.fn().mockResolvedValue(undefined);

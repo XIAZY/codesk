@@ -84,6 +84,51 @@ func TestWorkspaceSettingsPatchAuthZAndValidation(t *testing.T) {
 	authTestStatus(t, router, http.MethodPatch, target, owner.Token, UpdateWorkspaceRequest{Name: patchStr("   ")}, http.StatusBadRequest)
 }
 
+func TestWorkspaceSlugIsImmutableAfterCreation(t *testing.T) {
+	server, router := newAuthTestServer(t)
+	if server == nil {
+		t.Skip("NOTTY_DATABASE_TEST_URL is not set")
+	}
+
+	owner := authTestRegister(t, router, "ws-slug-immutable@example.com", "owner-pass", "Slug Immutable Owner")
+	workspace := authTestCreateWorkspace(t, router, owner.Token, "Slug Pinned")
+	original, err := getWorkspace(server.sqlDB(), workspace.ID)
+	if err != nil {
+		t.Fatalf("load workspace: %v", err)
+	}
+	originalSlug := original.Slug
+	target := "/api/workspaces/" + workspace.ID + "/workspace"
+
+	// A stale/malicious client sends {name, slug} — name updates, slug is silently ignored.
+	var updated struct {
+		Workspace Workspace `json:"workspace"`
+	}
+	authTestJSON(t, router, http.MethodPatch, target, owner.Token, map[string]string{
+		"name": "Renamed Workspace",
+		"slug": "attacker-slug",
+	}, http.StatusOK, &updated)
+	if updated.Workspace.Name != "Renamed Workspace" {
+		t.Fatalf("name should update, got %q", updated.Workspace.Name)
+	}
+	if updated.Workspace.Slug != originalSlug {
+		t.Fatalf("slug must be immutable: got %q, want %q", updated.Workspace.Slug, originalSlug)
+	}
+
+	// Independent reload confirms the slug is unchanged in the database.
+	reloaded, err := getWorkspace(server.sqlDB(), workspace.ID)
+	if err != nil {
+		t.Fatalf("reload workspace: %v", err)
+	}
+	if reloaded.Slug != originalSlug {
+		t.Fatalf("DB slug must be immutable: got %q, want %q", reloaded.Slug, originalSlug)
+	}
+
+	// Slug-only PATCH (no name) is rejected as 400 — nothing to update.
+	authTestStatus(t, router, http.MethodPatch, target, owner.Token, map[string]string{
+		"slug": "another-attempt",
+	}, http.StatusBadRequest)
+}
+
 func TestWorkspaceDeleteRequiresOwnerAndExactNameThenCascades(t *testing.T) {
 	server, router := newAuthTestServer(t)
 
