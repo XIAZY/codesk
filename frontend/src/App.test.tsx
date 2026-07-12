@@ -8,6 +8,7 @@ import { ApiError } from "./api";
 import { emptyWorkspace, identifierFromName, identifierHelpText, identifierPattern, workspaceSlugMaxLength } from "./logic";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
 import type { Account, Agent, AgentRun, Daemon, DocumentItem, WorkspaceState, WorkspaceSummary } from "./types";
+import appSource from "./App.tsx?raw";
 
 function workspaceFixture(overrides: Partial<WorkspaceState> = {}): WorkspaceState {
   return {
@@ -966,10 +967,8 @@ describe("Onboarding anchor audit", () => {
     "selection-thread",
   ] as const;
 
-  it("every onboarding anchor ID appears exactly once in App.tsx source", async () => {
-    const fs = await import("node:fs");
-    const path = await import("node:path");
-    const source = fs.readFileSync(path.resolve(__dirname, "App.tsx"), "utf-8");
+  it("every onboarding anchor ID appears exactly once in App.tsx source", () => {
+    const source: string = appSource;
     for (const id of ONBOARDING_ANCHORS) {
       const pattern = `data-onboarding-id="${id}"`;
       const count = source.split(pattern).length - 1;
