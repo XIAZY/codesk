@@ -3110,6 +3110,23 @@ pre.code {
   width: 36px;
 }
 
+.address-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.address-row input {
+  flex: 1;
+}
+
+.address-prefix {
+  color: var(--ink-4);
+  font-size: 13px;
+  white-space: nowrap;
+  user-select: none;
+}
+
 .hint b {
   color: var(--ink-3);
   font-weight: 600;

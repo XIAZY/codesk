@@ -96,7 +96,7 @@ describe("WorkspaceOnboarding", () => {
       />
     );
 
-    expect(screen.getByRole("heading", { name: "Create a workspace" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Create your first workspace" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Join with invite link" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Join with invite link" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Choose a workspace" })).toBeNull();
@@ -137,8 +137,8 @@ describe("WorkspaceOnboarding", () => {
     );
 
     const name = screen.getByLabelText("Workspace name") as HTMLInputElement;
-    const slug = screen.getByLabelText("Workspace slug") as HTMLInputElement;
-    const handle = screen.getByLabelText("Your handle in this workspace") as HTMLInputElement;
+    const slug = screen.getByLabelText("Workspace address") as HTMLInputElement;
+    const handle = screen.getByLabelText("Your handle") as HTMLInputElement;
 
     expect(name.value).toBe("");
     expect(slug.value).toBe("");
@@ -176,7 +176,7 @@ describe("WorkspaceOnboarding", () => {
     );
 
     await user.type(screen.getByLabelText("Workspace name"), "Research Lab");
-    await user.click(screen.getByRole("button", { name: "Create and enter" }));
+    await user.click(screen.getByRole("button", { name: "Create workspace" }));
 
     await waitFor(() => expect(createWorkspace).toHaveBeenCalledWith({ name: "Research Lab", slug: "research-lab", handle: "owner" }));
     expect(onWorkspaces).toHaveBeenCalledWith([created]);
@@ -200,7 +200,7 @@ describe("WorkspaceOnboarding", () => {
     );
 
     await user.type(screen.getByLabelText("Workspace name"), "Research Lab");
-    await user.click(screen.getByRole("button", { name: "Create and enter" }));
+    await user.click(screen.getByRole("button", { name: "Create workspace" }));
 
     expect(await screen.findByText("Workspace slug is already taken.")).toBeTruthy();
     expect(onSelect).not.toHaveBeenCalled();
@@ -220,7 +220,7 @@ describe("WorkspaceOnboarding", () => {
     );
 
     const name = screen.getByLabelText("Workspace name") as HTMLInputElement;
-    const slug = screen.getByLabelText("Workspace slug") as HTMLInputElement;
+    const slug = screen.getByLabelText("Workspace address") as HTMLInputElement;
 
     await user.click(screen.getByLabelText("Generate a random name"));
 
@@ -242,7 +242,7 @@ describe("WorkspaceOnboarding", () => {
       />
     );
 
-    const slug = screen.getByLabelText("Workspace slug") as HTMLInputElement;
+    const slug = screen.getByLabelText("Workspace address") as HTMLInputElement;
 
     await user.type(slug, "custom_slug");
     await user.click(screen.getByLabelText("Generate a random name"));
@@ -268,7 +268,7 @@ describe("WorkspaceOnboarding", () => {
     expect(name.value).toBe("");
     expect(name.hasAttribute("required")).toBe(true);
 
-    await user.click(screen.getByRole("button", { name: "Create and enter" }));
+    await user.click(screen.getByRole("button", { name: "Create workspace" }));
 
     expect(createWorkspace).not.toHaveBeenCalled();
   });

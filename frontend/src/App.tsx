@@ -1079,8 +1079,8 @@ export function WorkspaceOnboarding({
           <button className="btn ghost sm" onClick={onSignOut}>Sign out</button>
         </div>
         <div className="picker-head">
-          <h1 className="auth-title">Create a workspace</h1>
-          <p className="small muted">Workspaces are where documents, local environments, agents, and members live.</p>
+          <h1 className="auth-title">Create your first workspace</h1>
+          <p className="small muted">A workspace is the shared home for one project or team. Documents, members, local files, and agents all live here.</p>
         </div>
         <CreateWorkspaceForm
           api={api}
@@ -1138,14 +1138,11 @@ function CreateWorkspaceForm({
 
   return (
     <form onSubmit={createWorkspace} className="form-stack create-workspace-card">
-      <div>
-        <h2 className="modal-title">Create workspace</h2>
-        <p className="small muted">You will become the workspace owner.</p>
-      </div>
       <label className="field">
         <span className="lab">Workspace name</span>
         <div className="name-row">
           <input
+            aria-label="Workspace name"
             value={name}
             placeholder="ACME Inc"
             onChange={(event) => {
@@ -1167,29 +1164,33 @@ function CreateWorkspaceForm({
             <Icon name="refresh" />
           </button>
         </div>
+        <span className="hint">Use a project, team, or client name. You can change it later.</span>
       </label>
       <label className="field">
-        <span className="lab">Workspace slug</span>
-        <input
-          aria-label="Workspace slug"
-          value={slug}
-          placeholder="acme-inc"
-          onChange={(event) => {
-            setSlug(event.target.value);
-            setSlugEdited(true);
-          }}
-          pattern={identifierPattern}
-          minLength={workspaceSlugMinLength}
-          maxLength={workspaceSlugMaxLength}
-          title={identifierHelpText}
-          required
-        />
-        <span className="hint">{identifierHelpText}</span>
+        <span className="lab">Workspace address</span>
+        <div className="address-row">
+          <span className="address-prefix">codesk.co/</span>
+          <input
+            aria-label="Workspace address"
+            value={slug}
+            placeholder="acme-inc"
+            onChange={(event) => {
+              setSlug(event.target.value);
+              setSlugEdited(true);
+            }}
+            pattern={identifierPattern}
+            minLength={workspaceSlugMinLength}
+            maxLength={workspaceSlugMaxLength}
+            title={identifierHelpText}
+            required
+          />
+        </div>
+        <span className="hint">This becomes the link people use to reach the workspace.</span>
       </label>
       <label className="field">
-        <span className="lab">Your handle in this workspace</span>
+        <span className="lab">Your handle</span>
         <input
-          aria-label="Your handle in this workspace"
+          aria-label="Your handle"
           value={handle}
           onChange={(event) => setHandle(event.target.value)}
           pattern={identifierPattern}
@@ -1198,10 +1199,10 @@ function CreateWorkspaceForm({
           title={identifierHelpText}
           required
         />
-        <span className="hint">{identifierHelpText}</span>
+        <span className="hint">Teammates and agents mention you by this. Use lowercase letters, numbers, and hyphens.</span>
       </label>
       {error ? <p className="error-text">{error}</p> : null}
-      <button className="btn accent full lg">Create and enter</button>
+      <button className="btn accent full lg">Create workspace</button>
     </form>
   );
 }
