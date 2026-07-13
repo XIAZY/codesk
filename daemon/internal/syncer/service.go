@@ -53,9 +53,14 @@ type Service struct {
 }
 
 type managedWorkspaceRuntime struct {
-	runtime *workspaceRuntime
-	cancel  context.CancelFunc
-	done    <-chan struct{}
+	runtime        *workspaceRuntime
+	cancel         context.CancelFunc
+	done           <-chan struct{}
+	resultMu       sync.Mutex
+	runErr         error
+	startedAt      time.Time
+	stoppedAt      time.Time
+	restartAttempt int
 }
 
 type managedAgentWorker struct {

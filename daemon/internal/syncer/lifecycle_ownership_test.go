@@ -492,6 +492,52 @@ func TestServiceTeardownUsesReverseDependencyOrder(t *testing.T) {
 	}
 }
 
+func TestServiceTeardownWaitsForBlockedCoreRefreshBeforeClosingRuntimeData(t *testing.T) {
+	refreshStarted := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	refreshDone := make(chan struct{})
+	go func() {
+		close(refreshStarted)
+		<-releaseRefresh
+		close(refreshDone)
+	}()
+	<-refreshStarted
+	var runtimeDataClosed atomic.Bool
+	teardown := &serviceTeardown{
+		cancelCore:    func() {},
+		closeIngress:  func() error { return nil },
+		joinCore:      func() { <-refreshDone },
+		drainGateway:  func() error { return nil },
+		joinAgentTree: func() {},
+		closeRuntimeData: func() error {
+			runtimeDataClosed.Store(true)
+			return nil
+		},
+	}
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- teardown.Close() }()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("teardown returned before the blocked core refresh joined: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if runtimeDataClosed.Load() {
+		t.Fatal("runtime data closed while a core refresh still owned it")
+	}
+	close(releaseRefresh)
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("teardown did not finish after the core refresh joined")
+	}
+	if !runtimeDataClosed.Load() {
+		t.Fatal("runtime data remained open after core quiescence")
+	}
+}
+
 func TestWorkspaceRuntimeClosesDocumentCacheBeforePathLocks(t *testing.T) {
 	cache, err := newDocumentCache(filepath.Join(t.TempDir(), "sync.db"))
 	if err != nil {
@@ -677,10 +723,37 @@ func startManagedWorkspaceRuntimeForTest(
 	result := make(chan error, 1)
 	managed := &managedWorkspaceRuntime{runtime: runtime, cancel: cancel, done: done}
 	go func() {
-		defer close(done)
-		result <- runtime.run(runtimeCtx, ready)
+		runErr := runtime.run(runtimeCtx, ready)
+		managed.recordResult(runErr)
+		result <- runErr
+		close(done)
 	}()
 	return managed, result
+}
+
+func TestManagedWorkspaceRuntimeRestartBackoffClassifiesFailures(t *testing.T) {
+	terminalErr := &backendStatusError{StatusCode: http.StatusUnauthorized}
+	cases := []struct {
+		name    string
+		attempt int
+		err     error
+		want    time.Duration
+	}{
+		{name: "clean stop", attempt: 4, want: 0},
+		{name: "canceled", attempt: 4, err: context.Canceled, want: 0},
+		{name: "first runtime failure restarts immediately", err: errors.New("boom"), want: 0},
+		{name: "first retry backs off", attempt: 1, err: errors.New("boom"), want: 100 * time.Millisecond},
+		{name: "second retry doubles", attempt: 2, err: errors.New("boom"), want: 200 * time.Millisecond},
+		{name: "backoff is capped", attempt: 10, err: errors.New("boom"), want: 5 * time.Second},
+		{name: "terminal auth is classified conservatively", err: terminalErr, want: 5 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := managedWorkspaceRuntimeRestartDelay(tc.attempt, tc.err); got != tc.want {
+				t.Fatalf("restart delay = %s, want %s", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestSyncAgentRuntimesRestartsAfterStartupAddFailure(t *testing.T) {

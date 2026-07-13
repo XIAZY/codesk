@@ -3,8 +3,16 @@ package syncer
 import (
 	"context"
 	"errors"
+	"log"
 	"os"
 	"sort"
+	"time"
+)
+
+const (
+	agentRuntimeRestartBaseDelay = 100 * time.Millisecond
+	agentRuntimeRestartMaxDelay  = 5 * time.Second
+	agentRuntimeStableWindow     = 30 * time.Second
 )
 
 func (s *Service) syncAgentRuntimes(ctx context.Context, workspace *workspaceResponse) error {
@@ -26,12 +34,35 @@ func (s *Service) syncAgentRuntimes(ctx context.Context, workspace *workspaceRes
 	s.mu.Lock()
 	existing := make([]*workspaceRuntime, 0, len(desired))
 	retired := make([]*managedWorkspaceRuntime, 0)
+	now := time.Now()
 	for agentID := range desired {
 		currentAgent := desired[agentID]
+		restartAttempt := 0
 		if managed, ok := s.agentRuntimes[agentID]; ok && managed != nil && managed.runtime != nil {
 			if managed.runtime.replica != nil && managed.runtime.replica.actorID == currentAgent.ID {
-				existing = append(existing, managed.runtime)
-				continue
+				if !managed.stopped() {
+					existing = append(existing, managed.runtime)
+					continue
+				}
+				runErr, stoppedAt := managed.result()
+				delay := managedWorkspaceRuntimeRestartDelay(managed.restartAttempt, runErr)
+				if delay > 0 && !stoppedAt.IsZero() && now.Before(stoppedAt.Add(delay)) {
+					log.Printf(
+						"agent workspace runtime %s stopped (%s): %v; retrying in %s",
+						agentID,
+						managedWorkspaceRuntimeExitClass(runErr),
+						runErr,
+						stoppedAt.Add(delay).Sub(now).Round(time.Millisecond),
+					)
+					continue
+				}
+				restartAttempt = managed.nextRestartAttempt()
+				log.Printf(
+					"agent workspace runtime %s stopped (%s): %v; restarting",
+					agentID,
+					managedWorkspaceRuntimeExitClass(runErr),
+					runErr,
+				)
 			}
 			if managed.cancel != nil {
 				managed.cancel()
@@ -46,7 +77,7 @@ func (s *Service) syncAgentRuntimes(ctx context.Context, workspace *workspaceRes
 			return errors.Join(err, closeManagedWorkspaceRuntimes(retired))
 		}
 		runtime.initialWorkspace = workspace
-		s.agentRuntimes[agentID] = startManagedWorkspaceRuntime(ctx, runtime)
+		s.agentRuntimes[agentID] = startManagedWorkspaceRuntimeAttempt(ctx, runtime, restartAttempt)
 	}
 
 	staleIDs := make([]string, 0)
@@ -91,14 +122,102 @@ func (s *Service) closeAgentRuntimes() {
 }
 
 func startManagedWorkspaceRuntime(ctx context.Context, runtime *workspaceRuntime) *managedWorkspaceRuntime {
+	return startManagedWorkspaceRuntimeAttempt(ctx, runtime, 0)
+}
+
+func startManagedWorkspaceRuntimeAttempt(
+	ctx context.Context,
+	runtime *workspaceRuntime,
+	restartAttempt int,
+) *managedWorkspaceRuntime {
 	runtimeCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
-	managed := &managedWorkspaceRuntime{runtime: runtime, cancel: cancel, done: done}
+	managed := &managedWorkspaceRuntime{
+		runtime:        runtime,
+		cancel:         cancel,
+		done:           done,
+		startedAt:      time.Now(),
+		restartAttempt: restartAttempt,
+	}
 	go func() {
-		defer close(done)
-		_ = runtime.run(runtimeCtx, nil)
+		runErr := runtime.run(runtimeCtx, nil)
+		managed.recordResult(runErr)
+		close(done)
 	}()
 	return managed
+}
+
+func (runtime *managedWorkspaceRuntime) stopped() bool {
+	if runtime == nil || runtime.done == nil {
+		return false
+	}
+	select {
+	case <-runtime.done:
+		return true
+	default:
+		return false
+	}
+}
+
+func (runtime *managedWorkspaceRuntime) recordResult(err error) {
+	if runtime == nil {
+		return
+	}
+	runtime.resultMu.Lock()
+	runtime.runErr = err
+	runtime.stoppedAt = time.Now()
+	runtime.resultMu.Unlock()
+}
+
+func (runtime *managedWorkspaceRuntime) result() (error, time.Time) {
+	if runtime == nil {
+		return nil, time.Time{}
+	}
+	runtime.resultMu.Lock()
+	defer runtime.resultMu.Unlock()
+	return runtime.runErr, runtime.stoppedAt
+}
+
+func (runtime *managedWorkspaceRuntime) nextRestartAttempt() int {
+	if runtime == nil {
+		return 0
+	}
+	_, stoppedAt := runtime.result()
+	if !runtime.startedAt.IsZero() && !stoppedAt.IsZero() && stoppedAt.Sub(runtime.startedAt) >= agentRuntimeStableWindow {
+		return 0
+	}
+	return runtime.restartAttempt + 1
+}
+
+func managedWorkspaceRuntimeExitClass(err error) string {
+	switch {
+	case err == nil, errors.Is(err, context.Canceled):
+		return "stopped"
+	case isTerminalAuthError(err):
+		return "terminal-auth"
+	default:
+		return "runtime-failure"
+	}
+}
+
+func managedWorkspaceRuntimeRestartDelay(attempt int, err error) time.Duration {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return 0
+	}
+	if isTerminalAuthError(err) {
+		return agentRuntimeRestartMaxDelay
+	}
+	if attempt <= 0 {
+		return 0
+	}
+	delay := agentRuntimeRestartBaseDelay
+	for current := 1; current < attempt && delay < agentRuntimeRestartMaxDelay; current++ {
+		delay *= 2
+	}
+	if delay > agentRuntimeRestartMaxDelay {
+		return agentRuntimeRestartMaxDelay
+	}
+	return delay
 }
 
 func closeManagedWorkspaceRuntime(runtime *managedWorkspaceRuntime) error {
