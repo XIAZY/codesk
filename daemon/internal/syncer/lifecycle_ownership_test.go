@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -269,6 +270,69 @@ func TestServicePrimaryWatcherFailureAfterReadyIsFatal(t *testing.T) {
 		cancel()
 		err := <-done
 		t.Fatalf("service stayed online after its primary watcher failed; shutdown error: %v", err)
+	}
+}
+
+func TestServiceDoesNotReportOnlineBeforePrimaryRuntimeReady(t *testing.T) {
+	var statusReports atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/workspace":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"rootDocumentId":"","agents":[]}`))
+		case "/api/daemon/status":
+			statusReports.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer backend.Close()
+
+	reservation, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolAddr := reservation.Addr().String()
+	if err := reservation.Close(); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	wantErr := errors.New("injected primary watcher Add failure")
+	watcher := newScriptedWorkspaceWatcher()
+	watcher.add = func(string) error { return wantErr }
+	runtime, err := newWorkspaceRuntime(
+		Config{BackendURL: backend.URL, WorkspaceDir: root, AgentID: "daemon"},
+		backend.Client(),
+		root,
+		"daemon",
+		"daemon",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.replica.newWatcher = func() (workspaceWatcher, error) { return watcher, nil }
+	cfg := Config{
+		BackendURL:         backend.URL,
+		WorkspaceDir:       root,
+		AgentWorkspaceRoot: filepath.Join(root, "agents"),
+		AgentID:            "daemon",
+		AgentToolBaseURL:   "http://" + toolAddr,
+	}
+	service := &Service{
+		cfg:             cfg,
+		client:          backend.Client(),
+		daemonStatus:    newDaemonStatusReporter(cfg, backend.Client()),
+		primaryRuntime:  runtime,
+		agentRuntimes:   map[string]*managedWorkspaceRuntime{},
+		agentWorkers:    map[string]*managedAgentWorker{},
+		latestWorkspace: &workspaceResponse{},
+	}
+	if err := service.Run(context.Background()); !errors.Is(err, wantErr) {
+		t.Fatalf("service error = %v, want %v", err, wantErr)
+	}
+	if got := statusReports.Load(); got != 0 {
+		t.Fatalf("daemon published %d online heartbeat(s) before primary readiness, want 0", got)
 	}
 }
 
@@ -603,6 +667,120 @@ func TestManagedAgentRuntimeRetainsStoresUntilRegistryOwnerCloses(t *testing.T) 
 	}
 }
 
+func startManagedWorkspaceRuntimeForTest(
+	ctx context.Context,
+	runtime *workspaceRuntime,
+	ready chan<- error,
+) (*managedWorkspaceRuntime, <-chan error) {
+	runtimeCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	result := make(chan error, 1)
+	managed := &managedWorkspaceRuntime{runtime: runtime, cancel: cancel, done: done}
+	go func() {
+		defer close(done)
+		result <- runtime.run(runtimeCtx, ready)
+	}()
+	return managed, result
+}
+
+func TestSyncAgentRuntimesRestartsAfterStartupAddFailure(t *testing.T) {
+	root := t.TempDir()
+	cfg := Config{AgentWorkspaceRoot: filepath.Join(root, "agents")}
+	workspace := &workspaceResponse{Agents: []*agent{{ID: "agent-1"}}}
+	wantErr := errors.New("injected agent watcher Add failure")
+	watcher := newScriptedWorkspaceWatcher()
+	watcher.add = func(string) error { return wantErr }
+	runtime, err := newWorkspaceRuntime(
+		cfg,
+		http.DefaultClient,
+		agentWorkspacePath(cfg, "agent-1"),
+		"agent-1",
+		"agent",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.initialWorkspace = workspace
+	runtime.replica.newWatcher = func() (workspaceWatcher, error) { return watcher, nil }
+	managed, result := startManagedWorkspaceRuntimeForTest(context.Background(), runtime, make(chan error, 1))
+	if err := <-result; !errors.Is(err, wantErr) {
+		t.Fatalf("agent runtime error = %v, want %v", err, wantErr)
+	}
+	<-managed.done
+
+	service := &Service{
+		cfg:           cfg,
+		client:        http.DefaultClient,
+		agentRuntimes: map[string]*managedWorkspaceRuntime{"agent-1": managed},
+	}
+	defer service.closeAgentRuntimes()
+	if err := service.syncAgentRuntimes(context.Background(), workspace); err != nil {
+		t.Fatalf("sync agent runtimes: %v", err)
+	}
+	service.mu.Lock()
+	replacement := service.agentRuntimes["agent-1"]
+	service.mu.Unlock()
+	if replacement == managed {
+		t.Fatal("stopped agent runtime remained registered instead of being restarted")
+	}
+	select {
+	case <-replacement.done:
+		t.Fatal("replacement agent runtime stopped immediately")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestSyncAgentRuntimesRestartsAfterFatalWatcherEvent(t *testing.T) {
+	root := t.TempDir()
+	cfg := Config{AgentWorkspaceRoot: filepath.Join(root, "agents")}
+	workspace := &workspaceResponse{Agents: []*agent{{ID: "agent-1"}}}
+	watcher := newScriptedWorkspaceWatcher()
+	runtime, err := newWorkspaceRuntime(
+		cfg,
+		http.DefaultClient,
+		agentWorkspacePath(cfg, "agent-1"),
+		"agent-1",
+		"agent",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.initialWorkspace = workspace
+	runtime.replica.newWatcher = func() (workspaceWatcher, error) { return watcher, nil }
+	ready := make(chan error, 1)
+	managed, result := startManagedWorkspaceRuntimeForTest(context.Background(), runtime, ready)
+	if err := <-ready; err != nil {
+		t.Fatalf("agent runtime startup: %v", err)
+	}
+	badPath := filepath.Join(runtime.replica.rootDir, strings.Repeat("x", 5000))
+	watcher.events <- fsnotify.Event{Name: badPath, Op: fsnotify.Create}
+	if err := <-result; err == nil {
+		t.Fatal("watcher event processing failure did not stop the agent runtime")
+	}
+	<-managed.done
+
+	service := &Service{
+		cfg:           cfg,
+		client:        http.DefaultClient,
+		agentRuntimes: map[string]*managedWorkspaceRuntime{"agent-1": managed},
+	}
+	defer service.closeAgentRuntimes()
+	if err := service.syncAgentRuntimes(context.Background(), workspace); err != nil {
+		t.Fatalf("sync agent runtimes: %v", err)
+	}
+	service.mu.Lock()
+	replacement := service.agentRuntimes["agent-1"]
+	service.mu.Unlock()
+	if replacement == managed {
+		t.Fatal("fatal event left a dead agent runtime registered instead of restarting it")
+	}
+	select {
+	case <-replacement.done:
+		t.Fatal("replacement agent runtime stopped immediately")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestServiceEarlyWorkspaceSetupFailureClosesGateway(t *testing.T) {
 	reservation, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -635,6 +813,57 @@ func TestServiceEarlyWorkspaceSetupFailureClosesGateway(t *testing.T) {
 	if dialErr == nil {
 		t.Fatal("tool gateway still accepted connections after setup failed")
 	}
+}
+
+func TestToolGatewayCloseIngressDefersListenerTeardownToDrain(t *testing.T) {
+	reservation, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := reservation.Addr().String()
+	if err := reservation.Close(); err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{
+		cfg:      Config{AgentToolBaseURL: "http://" + addr},
+		sessions: newAgentSessionSupervisor(Config{}, nil, newRuntimeRegistry()),
+	}
+	gateway, err := service.startToolGateway()
+	if err != nil {
+		t.Fatal(err)
+	}
+	drained := false
+	defer func() {
+		if drained {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = gateway.Drain(ctx)
+	}()
+	if err := gateway.CloseIngress(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-gateway.Done():
+		t.Fatal("CloseIngress took listener ownership away from Server.Shutdown")
+	case <-time.After(50 * time.Millisecond):
+	}
+	res, err := http.Get("http://" + addr + "/agent-tools/list-documents")
+	if err != nil {
+		t.Fatalf("closed ingress should reject through the HTTP gate: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, res.Body)
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("closed ingress status = %d, want %d", res.StatusCode, http.StatusServiceUnavailable)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := gateway.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	drained = true
 }
 
 func TestWorkspaceEventLoopStopsWhenContextIsCanceled(t *testing.T) {
@@ -688,6 +917,123 @@ type toolRequestResult struct {
 	status int
 	body   string
 	err    error
+}
+
+func TestToolGatewayDrainWaitsForAdmittedHandlersAfterDeadline(t *testing.T) {
+	reservation, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := reservation.Addr().String()
+	if err := reservation.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := newWorkspaceRuntime(
+		Config{},
+		http.DefaultClient,
+		t.TempDir(),
+		"daemon",
+		"daemon",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.rootDocumentID = "root"
+	defer runtime.Close()
+	service := &Service{
+		cfg:            Config{AgentToolBaseURL: "http://" + addr},
+		primaryRuntime: runtime,
+		sessions:       newAgentSessionSupervisor(Config{}, nil, newRuntimeRegistry()),
+	}
+	process := &fakeRuntimeProcess{events: make(chan RuntimeEvent)}
+	service.sessions.mu.Lock()
+	service.sessions.sessions["tool"] = &managedAgentSession{
+		agent:     &agent{ID: "", Handle: "tool"},
+		process:   process,
+		toolToken: "tool-token",
+		state:     "idle",
+	}
+	service.sessions.mu.Unlock()
+	gateway, err := service.startToolGateway()
+	if err != nil {
+		t.Fatal(err)
+	}
+	drainStarted := false
+	drainCompleted := false
+	defer func() {
+		if !drainStarted || drainCompleted {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			_ = gateway.Drain(ctx)
+		}
+	}()
+
+	heldConn, err := runtime.docCache.db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitCount := runtime.docCache.db.Stats().WaitCount
+	requestDone := make(chan toolRequestResult, 1)
+	go func() {
+		req, reqErr := http.NewRequest(http.MethodGet, "http://"+addr+"/agent-tools/list-documents", nil)
+		if reqErr != nil {
+			requestDone <- toolRequestResult{err: reqErr}
+			return
+		}
+		req.Header.Set("Authorization", "Bearer tool-token")
+		res, reqErr := http.DefaultClient.Do(req)
+		if reqErr != nil {
+			requestDone <- toolRequestResult{err: reqErr}
+			return
+		}
+		defer res.Body.Close()
+		body, readErr := io.ReadAll(res.Body)
+		requestDone <- toolRequestResult{status: res.StatusCode, body: string(body), err: readErr}
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for runtime.docCache.db.Stats().WaitCount == waitCount && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if runtime.docCache.db.Stats().WaitCount == waitCount {
+		_ = heldConn.Close()
+		t.Fatal("tool request did not enter the document-cache handler")
+	}
+
+	drainDone := make(chan error, 1)
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelDrain()
+	drainStarted = true
+	go func() { drainDone <- gateway.Drain(drainCtx) }()
+	var earlyDrain error
+	drainReturnedWhileBlocked := false
+	select {
+	case earlyDrain = <-drainDone:
+		drainCompleted = true
+		drainReturnedWhileBlocked = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := heldConn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-requestDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("tool handler did not finish after its cache dependency was released")
+	}
+	if !drainCompleted {
+		select {
+		case earlyDrain = <-drainDone:
+			drainCompleted = true
+		case <-time.After(3 * time.Second):
+			t.Fatal("gateway drain did not finish after the admitted handler returned")
+		}
+	}
+	if earlyDrain == nil || !errors.Is(earlyDrain, context.DeadlineExceeded) {
+		t.Fatalf("gateway drain error = %v, want deadline exceeded after forced connection close", earlyDrain)
+	}
+	if drainReturnedWhileBlocked {
+		t.Fatal("gateway Drain returned after its deadline while an admitted handler still owned runtime dependencies")
+	}
 }
 
 func TestServiceShutdownDrainsToolRequestBeforeClosingRuntimeCache(t *testing.T) {
