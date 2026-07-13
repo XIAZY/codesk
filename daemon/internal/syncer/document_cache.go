@@ -144,7 +144,13 @@ func sqliteFileDSN(path string) string {
 	if abs, err := filepath.Abs(clean); err == nil {
 		clean = abs
 	}
-	dsn := url.URL{Scheme: "file", Path: filepath.ToSlash(clean)}
+	uriPath := filepath.ToSlash(clean)
+	if filepath.VolumeName(clean) != "" && !strings.HasPrefix(uriPath, "/") {
+		// A drive-letter path needs a leading slash so URL.String emits
+		// file:///C:/path instead of file:C:/path, which SQLite rejects.
+		uriPath = "/" + uriPath
+	}
+	dsn := url.URL{Scheme: "file", Path: uriPath}
 	query := dsn.Query()
 	query.Set("_busy_timeout", "5000")
 	query.Set("_journal_mode", "WAL")
