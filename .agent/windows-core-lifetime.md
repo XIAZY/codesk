@@ -16,8 +16,8 @@ The change is demonstrated with tests written before the behavioral implementati
 - [x] (2026-07-13 13:28 EDT) Reconfirmed the source ownership graph for `workspaceReplica`, `workspaceRuntime`, `Service`, the tool gateway, agent runtimes, agent workers, and the agent session supervisor.
 - [x] (2026-07-13 13:39 EDT) Added behavior-preserving watcher/store test seams, current-boundary readiness observation, and seven permanent lifecycle regressions without changing acquisition or teardown order.
 - [x] (2026-07-13 13:39 EDT) Captured the native Windows ARM64 RED run on `3389d1b`: all seven tests failed for their named lifecycle defects, including the blocked tool request returning HTTP 400 with `sql: database is closed`.
-- [ ] Implement the watcher pump, serialized handler, startup barrier, and fatal error propagation; make watcher tests green.
-- [ ] Move one path-lock store into each workspace runtime, route every runtime filesystem operation through it, and close it last; make exact open/init/close-count tests green.
+- [x] (2026-07-13 14:08 EDT) Implemented an always-live watcher pump, logically unbounded ordered work queue, independent serialized handler, startup barrier, and replica-to-runtime fatal propagation; all three focused watcher/readiness tests pass natively on Windows ARM64.
+- [x] (2026-07-13 14:20 EDT) Moved one path-lock store into each workspace runtime, routed runtime filesystem operations and materialization through the shared `WorkspaceFS`, made close idempotent with document-cache-before-path-store ordering, and covered both normal and constructor-error close counts.
 - [ ] Replace ad hoc service goroutines and early returns with one owned core lifetime and reverse-dependency teardown; make blocked-request, blocked-refresh, WebSocket cancellation, and early-unwind tests green under `-race` where supported.
 - [ ] Ensure agent worker/session goroutines are cancelled and joined by their supervisor but never feed failures into the core fatal channel; add the ownership-split regression.
 - [ ] Run focused, native Windows, complete Go, formatting, vet, build, and relevant repository gates; update this plan with transcripts and outcomes.
@@ -46,6 +46,12 @@ The change is demonstrated with tests written before the behavioral implementati
 - Observation: Native ARM64 test execution is available, but the repository staging script cannot currently refresh that archive under the inherited PowerShell/MSYS path.
   Evidence: the cached `aarch64-pc-windows-gnullvm/release/libyrs.a` links and the focused Go test passes natively in 1.252 seconds. Running `scripts/build-yffi.sh` tried to use MSYS `/usr/bin/link.exe` for Rust host build scripts and failed. Atomically staging the already-built target archive works; amd64 will be restaged before race/release validation.
 
+- Observation: An ordered barrier has to cross both watcher stages, not just prove that the backend channel has a receiver.
+  Evidence: `Add` may unblock as soon as the pump receives an event, before the independent handler has processed it. The pump therefore enqueues a barrier into the same FIFO after setup; readiness waits for the handler to close that barrier after all preceding startup events.
+
+- Observation: Keeping an operation-scoped fallback for standalone `WorkspaceFS` values avoids introducing unowned database handles outside a runtime.
+  Evidence: Production runtime paths now receive the retained store explicitly, including materialization and local-create checks. Existing focused filesystem tests construct standalone values without a lifetime owner; their fallback still opens and closes around one operation, while the runtime ownership regression proves the retained path opens once and closes once.
+
 ## Decision Log
 
 - Decision: Enforce a real red/green gate before changing ownership behavior.
@@ -70,7 +76,7 @@ The change is demonstrated with tests written before the behavioral implementati
 
 ## Outcomes & Retrospective
 
-The test-first milestone is complete. Seven permanent regressions now fail on the original behavior for the expected reasons, and focused existing tests still need a smoke run before the RED commit. No ownership behavior has been repaired yet.
+The test-first milestone is complete and committed as `32c9cad`. The watcher and retained path-lock milestones are complete locally: startup/fatal watcher behavior is owned and propagated, and a runtime now acquires one shared store and closes it once after its document cache. Service and agent ownership work remains.
 
 ## Context and Orientation
 
@@ -201,6 +207,22 @@ Permanent RED transcript on Windows/ARM64, `3389d1b` plus observation-only seams
 
     FAIL notty/daemon/internal/syncer 1.998s
 
+Focused watcher GREEN transcript on Windows/ARM64:
+
+    go test ./daemon/internal/syncer -run \
+      'TestWorkspaceReplicaStartupDrainsEventsBeforeFirstAdd|TestWorkspaceRuntimeStartupPropagatesReplicaAddFailure|TestWorkspaceReplicaWatcherErrorAfterReadyIsFatal' -count=1
+    ok notty/daemon/internal/syncer 1.270s
+
+Focused retained-store GREEN transcript on Windows/ARM64:
+
+    go test ./daemon/internal/syncer -run \
+      'TestWorkspaceFSReusesOnePathLockStoreAcrossOperations|TestWorkspaceRuntimeConstructorFailureClosesAcquiredPathLocks' -count=1
+    ok notty/daemon/internal/syncer 1.186s
+
+    go test ./daemon/internal/syncer -run \
+      'TestWorkspaceFS|TestMaterialize|TestWorkspaceRuntime' -count=1
+    ok notty/daemon/internal/syncer 1.227s
+
 ## Interfaces and Dependencies
 
 Define a watcher abstraction in `replica.go` with `Add(string) error`, `Close() error`, and receive-only event/error channels exposed by methods. A real adapter wraps `*fsnotify.Watcher`; tests inject a factory on `workspaceReplica`.
@@ -216,3 +238,7 @@ Use a small core lifetime owner (an `errgroup` or equivalent first-error-plus-wa
 Revision note (2026-07-13): Initial follow-up plan written after the first PR's handle-cleanup changes were benchmarked and subjected to deterministic local lifecycle probes. It replaces the operation-scoped path-lock decision and requires permanent RED tests before implementation.
 
 Revision note (2026-07-13 13:39 EDT): Recorded the behavior-preserving test seams, successful native ARM64 execution using the cached Yrs archive, and the seven-test RED transcript. Behavioral implementation remains untouched.
+
+Revision note (2026-07-13 14:08 EDT): Recorded the green watcher pipeline and runtime readiness/fatal propagation milestone.
+
+Revision note (2026-07-13 14:20 EDT): Recorded retained per-runtime path-lock ownership, constructor unwind coverage, and focused filesystem validation.

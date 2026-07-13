@@ -712,7 +712,7 @@ func (s *workspaceRuntime) validateLocalCreateCandidate(candidate localCreateCan
 	if root == "" || path == "" || isIgnoredWorkspaceAbsolutePath(root, path) {
 		return "", false, nil
 	}
-	fs := NewWorkspaceFS(candidate.Root)
+	fs := s.workspaceFSForRoot(candidate.Root)
 	snapshot, err := fs.Read(candidate.Path)
 	if err != nil {
 		return "", false, err
@@ -746,7 +746,7 @@ func (s *workspaceRuntime) validateLocalCreateCandidate(candidate localCreateCan
 }
 
 func (s *workspaceRuntime) localCreateIntentFromCandidate(candidate localCreateCandidate, relativePath string) (localNamespaceIntent, error) {
-	fs := NewWorkspaceFS(candidate.Root)
+	fs := s.workspaceFSForRoot(candidate.Root)
 	snapshot, err := fs.Read(candidate.Path)
 	if err != nil {
 		return localNamespaceIntent{}, err
@@ -776,7 +776,7 @@ func (s *workspaceRuntime) validateLocalNamespaceIntent(intent localNamespaceInt
 		return false, nil
 	}
 	absolutePath := filepath.Join(s.replica.rootDir, filepath.FromSlash(relativePath))
-	fs := NewWorkspaceFS(s.replica.rootDir)
+	fs := s.workspaceFSForRoot(s.replica.rootDir)
 	snapshot, err := fs.Read(absolutePath)
 	if err != nil {
 		return false, err
@@ -849,7 +849,7 @@ func (s *workspaceRuntime) createDocumentFromLocalIntent(ctx context.Context, in
 		projectedSeq = seq
 	}
 	absolutePath := filepath.Join(s.replica.rootDir, filepath.FromSlash(intent.WorkspaceRelativePath))
-	fs := NewWorkspaceFS(s.replica.rootDir)
+	fs := s.workspaceFSForRoot(s.replica.rootDir)
 	tracked := &trackedFile{
 		DocumentID:    created.ID,
 		DocumentPath:  created.Path,
@@ -1809,12 +1809,26 @@ func projectMergedContentOverLocalDiskWithWrite(
 }
 
 func materializeTrackedFile(ctx context.Context, cache *documentCache, document *document, absolutePath string) (*trackedFile, error) {
+	return materializeTrackedFileWithFS(ctx, cache, document, absolutePath, nil)
+}
+
+func materializeTrackedFileWithFS(
+	ctx context.Context,
+	cache *documentCache,
+	document *document,
+	absolutePath string,
+	fs *WorkspaceFS,
+) (*trackedFile, error) {
+	root := workspaceRootForDocumentPath(absolutePath, document.Path)
+	if fs == nil {
+		fs = NewWorkspaceFS(root)
+	}
 	tracked := &trackedFile{
 		DocumentID:    document.ID,
 		DocumentPath:  document.Path,
 		Path:          absolutePath,
-		WorkspaceRoot: workspaceRootForDocumentPath(absolutePath, document.Path),
-		FS:            NewWorkspaceFS(workspaceRootForDocumentPath(absolutePath, document.Path)),
+		WorkspaceRoot: root,
+		FS:            fs,
 		Doc:           crdt.New(),
 		docMu:         &sync.Mutex{},
 		cache:         cache,
@@ -1862,6 +1876,13 @@ func materializeTrackedFile(ctx context.Context, cache *documentCache, document 
 	}
 	tracked.setProjectedContent(string(snapshot.Bytes))
 	return tracked, nil
+}
+
+func (s *workspaceRuntime) workspaceFSForRoot(root string) *WorkspaceFS {
+	if s != nil && s.replica != nil && s.replica.fs != nil && filepath.Clean(root) == filepath.Clean(s.replica.rootDir) {
+		return s.replica.fs
+	}
+	return NewWorkspaceFS(root)
 }
 
 func archiveUnknownWorkingCopy(tracked *trackedFile) error {

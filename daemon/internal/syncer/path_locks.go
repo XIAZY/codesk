@@ -39,8 +39,9 @@ func openPathLockStore(root string) (pathLockLeaseStore, error) {
 	return newPathLockStore(root)
 }
 
-// newPathLockStore returns an operation-scoped store. Its caller keeps it open
-// through lease release, then closes it; WorkspaceFS itself stays stateless.
+// newPathLockStore returns a closeable store owned by a workspace runtime. The
+// runtime keeps it open while any WorkspaceFS user can acquire a lease and
+// closes it only after those users have stopped.
 func newPathLockStore(root string) (*pathLockStore, error) {
 	root = filepath.Clean(root)
 	if err := os.MkdirAll(filepath.Join(root, ".notty"), 0o755); err != nil {
