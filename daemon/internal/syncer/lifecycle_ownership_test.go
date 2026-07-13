@@ -165,14 +165,260 @@ func TestWorkspaceRuntimeStartupPropagatesReplicaAddFailure(t *testing.T) {
 	}
 }
 
-func TestWorkspaceReplicaWatcherErrorAfterReadyIsFatal(t *testing.T) {
-	wantErr := errors.New("injected watcher pump failure")
+func TestWorkspaceReplicaWatcherErrorsAfterReadyTriggerReconcile(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "overflow", err: fsnotify.ErrEventOverflow},
+		{name: "transient backend error", err: errors.New("injected watcher backend error")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			recovered := make(chan localCreateCandidate, 1)
+			watcher := newScriptedWorkspaceWatcher()
+			replica := newWorkspaceReplica(Config{}, root, "daemon", "daemon", nil, func(candidate localCreateCandidate) {
+				select {
+				case recovered <- candidate:
+				default:
+				}
+			})
+			replica.newWatcher = func() (workspaceWatcher, error) { return watcher, nil }
+
+			ctx, cancel := context.WithCancel(context.Background())
+			ready := make(chan error, 1)
+			done := make(chan error, 1)
+			go func() { done <- replica.run(ctx, ready) }()
+			if err := <-ready; err != nil {
+				cancel()
+				<-done
+				t.Fatalf("replica startup: %v", err)
+			}
+			path := filepath.Join(root, "recovered.md")
+			if err := os.WriteFile(path, []byte("recovered\n"), 0o644); err != nil {
+				cancel()
+				<-done
+				t.Fatal(err)
+			}
+			watcher.errors <- tc.err
+			select {
+			case candidate := <-recovered:
+				if candidate.Path != path {
+					t.Fatalf("reconciled path = %q, want %q", candidate.Path, path)
+				}
+			case err := <-done:
+				t.Fatalf("recoverable watcher error stopped replica: %v", err)
+			case <-time.After(2 * time.Second):
+				cancel()
+				<-done
+				t.Fatal("watcher error did not trigger an authoritative reconcile")
+			}
+			select {
+			case err := <-done:
+				t.Fatalf("replica stopped after recovering watcher error: %v", err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			cancel()
+			if err := <-done; err != nil {
+				t.Fatalf("replica shutdown: %v", err)
+			}
+		})
+	}
+}
+
+func TestWorkspaceReplicaWatcherQueueBoundsBurstAndRecoversFinalState(t *testing.T) {
+	const eventBudget = 256
+
+	root := t.TempDir()
+	blockedDir := filepath.Join(root, "blocked")
+	finalPath := filepath.Join(root, "final.md")
+	recovered := make(chan localCreateCandidate, 1)
 	watcher := newScriptedWorkspaceWatcher()
+	watcher.events = make(chan fsnotify.Event, eventBudget*2)
+	addBlocked := make(chan struct{})
+	releaseAdd := make(chan struct{})
+	var addBlockedOnce sync.Once
+	var releaseAddOnce sync.Once
+	watcher.add = func(path string) error {
+		if filepath.Clean(path) != blockedDir {
+			return nil
+		}
+		addBlockedOnce.Do(func() { close(addBlocked) })
+		<-releaseAdd
+		return nil
+	}
+	replica := newWorkspaceReplica(Config{}, root, "daemon", "daemon", nil, func(candidate localCreateCandidate) {
+		select {
+		case recovered <- candidate:
+		default:
+		}
+	})
+	replica.watchMu.Lock()
+	replica.watcher = watcher
+	replica.watched = map[string]struct{}{root: {}}
+	replica.watchMu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	queue := newWorkspaceWatcherQueue()
+	barriers := make(chan chan struct{})
+	fatal := make(chan error, 2)
+	var pipeline sync.WaitGroup
+	pipeline.Add(2)
+	go func() {
+		defer pipeline.Done()
+		replica.runWatcherPump(ctx, watcher, queue, barriers, fatal)
+	}()
+	go func() {
+		defer pipeline.Done()
+		replica.runWatcherHandler(ctx, queue)
+	}()
+	t.Cleanup(func() {
+		releaseAddOnce.Do(func() { close(releaseAdd) })
+		cancel()
+		pipeline.Wait()
+	})
+	initialResult := make(chan error, 1)
+	queue.push(workspaceWatcherWork{initial: initialResult})
+	if err := <-initialResult; err != nil {
+		t.Fatalf("initial reconcile: %v", err)
+	}
+	if err := os.MkdirAll(blockedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	watcher.events <- fsnotify.Event{Name: blockedDir, Op: fsnotify.Create}
+	select {
+	case <-addBlocked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher handler did not block in directory watch registration")
+	}
+	if err := os.WriteFile(finalPath, []byte("final\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < eventBudget*2-1; i++ {
+		watcher.events <- fsnotify.Event{Name: filepath.Join(root, "missing.md"), Op: fsnotify.Write}
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		queue.mu.Lock()
+		pending := len(queue.work)
+		queue.mu.Unlock()
+		if pending >= eventBudget+1 {
+			if pending > eventBudget+1 {
+				t.Fatalf("watcher queue retained %d work items, budget allows at most %d events plus one rescan", pending, eventBudget)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("watcher pump did not consume the burst; pending work = %d", pending)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	releaseAddOnce.Do(func() { close(releaseAdd) })
+	select {
+	case candidate := <-recovered:
+		if candidate.Path != finalPath {
+			t.Fatalf("reconciled path = %q, want final path %q", candidate.Path, finalPath)
+		}
+	case err := <-fatal:
+		t.Fatalf("event burst stopped watcher pipeline: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("bounded watcher overflow did not recover final disk state by full reconcile")
+	}
+}
+
+func TestWorkspaceReplicaFullReconcileIsSingleOwnerAcrossStartup(t *testing.T) {
+	var calls atomic.Int32
+	var active atomic.Int32
+	var overlapped atomic.Bool
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondDone := make(chan struct{})
+	var firstOnce sync.Once
+	var secondOnce sync.Once
+	var releaseOnce sync.Once
 	replica := newWorkspaceReplica(Config{}, t.TempDir(), "daemon", "daemon", nil, nil)
+	replica.reconcile = func(ctx context.Context) error {
+		call := calls.Add(1)
+		if active.Add(1) != 1 {
+			overlapped.Store(true)
+		}
+		defer active.Add(-1)
+		switch call {
+		case 1:
+			firstOnce.Do(func() { close(firstStarted) })
+			select {
+			case <-releaseFirst:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		case 2:
+			secondOnce.Do(func() { close(secondDone) })
+		}
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	queue := newWorkspaceWatcherQueue()
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		replica.runWatcherHandler(ctx, queue)
+	}()
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(releaseFirst) })
+		cancel()
+		<-handlerDone
+	})
+	initialResult := make(chan error, 1)
+	queue.push(workspaceWatcherWork{initial: initialResult})
+	select {
+	case <-firstStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial full reconcile did not start")
+	}
+	queue.pushReconcile()
+	time.Sleep(100 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("pending startup recovery entered %d full reconciles before initial release, want 1", got)
+	}
+	if overlapped.Load() {
+		t.Fatal("full reconciles overlapped during startup")
+	}
+
+	releaseOnce.Do(func() { close(releaseFirst) })
+	if err := <-initialResult; err != nil {
+		t.Fatalf("initial reconcile: %v", err)
+	}
+	select {
+	case <-secondDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("coalesced startup recovery did not run after initial reconcile")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("full reconcile count = %d, want initial plus one coalesced recovery", got)
+	}
+	if overlapped.Load() {
+		t.Fatal("full reconciles were not single-owner")
+	}
+}
+
+func TestWorkspaceReplicaPostReadyEventFailureReconcilesInPlace(t *testing.T) {
+	root := t.TempDir()
+	recovered := make(chan localCreateCandidate, 1)
+	watcher := newScriptedWorkspaceWatcher()
+	replica := newWorkspaceReplica(Config{}, root, "daemon", "daemon", nil, func(candidate localCreateCandidate) {
+		select {
+		case recovered <- candidate:
+		default:
+		}
+	})
 	replica.newWatcher = func() (workspaceWatcher, error) { return watcher, nil }
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	ready := make(chan error, 1)
 	done := make(chan error, 1)
 	go func() { done <- replica.run(ctx, ready) }()
@@ -181,20 +427,38 @@ func TestWorkspaceReplicaWatcherErrorAfterReadyIsFatal(t *testing.T) {
 		<-done
 		t.Fatalf("replica startup: %v", err)
 	}
-	watcher.errors <- wantErr
-	select {
-	case err := <-done:
-		if !errors.Is(err, wantErr) {
-			t.Fatalf("replica error = %v, want %v", err, wantErr)
-		}
-	case <-time.After(300 * time.Millisecond):
+	path := filepath.Join(root, "after-error.md")
+	if err := os.WriteFile(path, []byte("final\n"), 0o644); err != nil {
 		cancel()
 		<-done
-		t.Fatal("ready replica logged and ignored a fatal watcher error")
+		t.Fatal(err)
+	}
+	badPath := filepath.Join(root, strings.Repeat("x", 5000))
+	watcher.events <- fsnotify.Event{Name: badPath, Op: fsnotify.Create}
+	select {
+	case candidate := <-recovered:
+		if candidate.Path != path {
+			t.Fatalf("reconciled path = %q, want %q", candidate.Path, path)
+		}
+	case err := <-done:
+		t.Fatalf("post-ready event error stopped replica: %v", err)
+	case <-time.After(2 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("post-ready event error did not trigger a successful follow-up reconcile")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("replica stopped after transient event error: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("replica shutdown: %v", err)
 	}
 }
 
-func TestServicePrimaryWatcherFailureAfterReadyIsFatal(t *testing.T) {
+func TestServicePrimaryWatcherChannelClosureAfterReadyIsFatal(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -260,17 +524,16 @@ func TestServicePrimaryWatcherFailureAfterReadyIsFatal(t *testing.T) {
 		t.Fatal("service did not become ready")
 	}
 
-	wantErr := errors.New("injected primary watcher failure")
-	watcher.errors <- wantErr
+	close(watcher.errors)
 	select {
 	case err := <-done:
-		if !errors.Is(err, wantErr) {
-			t.Fatalf("service error = %v, want %v", err, wantErr)
+		if err == nil || !strings.Contains(err.Error(), "watcher error channel closed unexpectedly") {
+			t.Fatalf("service error = %v, want structural watcher channel closure", err)
 		}
 	case <-time.After(500 * time.Millisecond):
 		cancel()
 		err := <-done
-		t.Fatalf("service stayed online after its primary watcher failed; shutdown error: %v", err)
+		t.Fatalf("service stayed online after its primary watcher error channel closed; shutdown error: %v", err)
 	}
 }
 
@@ -775,6 +1038,10 @@ func TestAgentRuntimeReplacementProcessesIntentAcceptedByRetiredGeneration(t *te
 		)
 	case <-time.After(150 * time.Millisecond):
 	}
+	// Give an incorrectly early replacement enough time to finish all startup
+	// work before the old borrower commits its durable intent. A correct cutover
+	// has no replacement yet and recovers the intent during startup after drain.
+	time.Sleep(workspaceReconcileMinInterval + 250*time.Millisecond)
 	targetUnlock.Do(unlockTarget)
 	var result toolRequestResult
 	select {
@@ -822,7 +1089,7 @@ func TestAgentRuntimeReplacementProcessesIntentAcceptedByRetiredGeneration(t *te
 	waitForManagedRuntimeStoresToClose(t, runtime)
 }
 
-func TestAgentScopedToolDoesNotFallBackToPrimaryWhileRuntimeRetires(t *testing.T) {
+func TestAgentScopedToolNeverFallsBackToPrimary(t *testing.T) {
 	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -839,20 +1106,118 @@ func TestAgentScopedToolDoesNotFallBackToPrimaryWhileRuntimeRetires(t *testing.T
 	}
 	service := newToolGatewayTestService(&agent{ID: "agent-1"}, "tool-token")
 	service.primaryRuntime = &workspaceRuntime{rootDocumentID: rootID, docCache: cache}
-	managed := &managedWorkspaceRuntime{runtime: &workspaceRuntime{}}
-	managed.retire()
-	service.agentRuntimes = map[string]*managedWorkspaceRuntime{"agent-1": managed}
+	for _, tc := range []struct {
+		name    string
+		managed *managedWorkspaceRuntime
+	}{
+		{name: "missing"},
+		{name: "retiring", managed: &managedWorkspaceRuntime{runtime: &workspaceRuntime{}, retiring: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			service.agentRuntimes = map[string]*managedWorkspaceRuntime{}
+			if tc.managed != nil {
+				service.agentRuntimes["agent-1"] = tc.managed
+			}
+			req := httptest.NewRequest(http.MethodGet, "/agent-tools/list-documents", nil)
+			req.Header.Set("Authorization", "Bearer tool-token")
+			recorder := httptest.NewRecorder()
+			service.handleListDocumentsTool(recorder, req)
 
-	req := httptest.NewRequest(http.MethodGet, "/agent-tools/list-documents", nil)
-	req.Header.Set("Authorization", "Bearer tool-token")
-	recorder := httptest.NewRecorder()
-	service.handleListDocumentsTool(recorder, req)
-
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("retiring agent request status = %d body=%q, want unavailable", recorder.Code, recorder.Body.String())
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("agent-scoped request status = %d body=%q, want unavailable", recorder.Code, recorder.Body.String())
+			}
+			body := recorder.Body.String()
+			if !strings.Contains(body, "workspace runtime is unavailable") || strings.Contains(body, "primary/secret.md") {
+				t.Fatalf("agent-scoped request touched the primary runtime: %q", body)
+			}
+		})
 	}
-	if body := recorder.Body.String(); !strings.Contains(body, "workspace runtime is unavailable") || strings.Contains(body, "primary/secret.md") {
-		t.Fatalf("retiring agent request touched the primary runtime: %q", body)
+}
+
+func TestAgentRuntimeIsUnavailableUntilStartupReady(t *testing.T) {
+	root := t.TempDir()
+	primaryCache, err := newTestDocumentCache(t, filepath.Join(root, "primary.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := primaryCache.storeRootProjectionEntries("primary-root", []rootProjectionEntry{{
+		EntryID:           "primary-doc",
+		ContentDocumentID: "primary-doc",
+		DesiredPath:       "primary/secret.md",
+		MaterializedPath:  "primary/secret.md",
+		Active:            true,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{AgentWorkspaceRoot: filepath.Join(root, "agents")}
+	agentRoot := agentWorkspacePath(cfg, "agent-1")
+	runtime, err := newWorkspaceRuntime(cfg, http.DefaultClient, agentRoot, "agent-1", "agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.docCache.storeRootProjectionEntries("agent-root", []rootProjectionEntry{{
+		EntryID:           "agent-doc",
+		ContentDocumentID: "agent-doc",
+		DesiredPath:       "agent/owned.md",
+		MaterializedPath:  "agent/owned.md",
+		Active:            true,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	watcher := newScriptedWorkspaceWatcher()
+	addStarted := make(chan struct{})
+	releaseAdd := make(chan struct{})
+	var addOnce sync.Once
+	watcher.add = func(string) error {
+		addOnce.Do(func() { close(addStarted) })
+		<-releaseAdd
+		return nil
+	}
+	runtime.replica.newWatcher = func() (workspaceWatcher, error) { return watcher, nil }
+	workspace := &workspaceResponse{RootDocumentID: "agent-root", Agents: []*agent{{ID: "agent-1"}}}
+	service := newToolGatewayTestService(&agent{ID: "agent-1"}, "tool-token")
+	service.cfg = cfg
+	service.primaryRuntime = &workspaceRuntime{rootDocumentID: "primary-root", docCache: primaryCache}
+	service.agentRuntimes = map[string]*managedWorkspaceRuntime{}
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan error, 1)
+	managed := service.startAgentWorkspaceRuntimeAttemptWithReady(ctx, "agent-1", runtime, workspace, 0, ready)
+	service.agentRuntimes["agent-1"] = managed
+	t.Cleanup(func() {
+		cancel()
+		service.closeAgentRuntimes()
+	})
+
+	select {
+	case <-addStarted:
+	case <-time.After(2 * time.Second):
+		close(releaseAdd)
+		t.Fatal("replacement startup did not reach blocked watcher readiness")
+	}
+	request := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/agent-tools/list-documents", nil)
+		req.Header.Set("Authorization", "Bearer tool-token")
+		recorder := httptest.NewRecorder()
+		service.handleListDocumentsTool(recorder, req)
+		return recorder
+	}
+	starting := request()
+	if starting.Code != http.StatusBadRequest || !strings.Contains(starting.Body.String(), "workspace runtime is unavailable") {
+		close(releaseAdd)
+		t.Fatalf("starting runtime request status = %d body=%q, want unavailable", starting.Code, starting.Body.String())
+	}
+	if strings.Contains(starting.Body.String(), "primary/secret.md") {
+		close(releaseAdd)
+		t.Fatalf("starting runtime request fell back to primary: %q", starting.Body.String())
+	}
+
+	close(releaseAdd)
+	if err := <-ready; err != nil {
+		t.Fatalf("replacement startup: %v", err)
+	}
+	started := request()
+	if started.Code != http.StatusOK || strings.Contains(started.Body.String(), "primary/secret.md") {
+		t.Fatalf("ready runtime request status = %d body=%q, want the agent runtime without primary data", started.Code, started.Body.String())
 	}
 }
 
@@ -935,6 +1300,108 @@ func TestAgentWorkspaceApplyBorrowSurvivesConcurrentRetirement(t *testing.T) {
 	}
 	_, _ = waitForAgentRuntimeWatcher(t, service, "agent-1", managed)
 	waitForManagedRuntimeStoresToClose(t, runtime)
+}
+
+func TestRefreshSerializesStaleRemovalBeforeConcurrentReadd(t *testing.T) {
+	var workspaceRequests atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/workspace" {
+			http.Error(w, "unexpected request", http.StatusNotFound)
+			return
+		}
+		if workspaceRequests.Add(1) == 1 {
+			writeJSONResponse(w, http.StatusOK, workspaceResponse{})
+			return
+		}
+		writeJSONResponse(w, http.StatusOK, workspaceResponse{Agents: []*agent{{ID: "agent-1"}}})
+	}))
+	defer backend.Close()
+
+	root := t.TempDir()
+	cfg := Config{
+		BackendURL:         backend.URL,
+		WorkspaceDir:       filepath.Join(root, "primary"),
+		AgentWorkspaceRoot: filepath.Join(root, "agents"),
+		AgentID:            "daemon",
+	}
+	agentRoot := agentWorkspacePath(cfg, "agent-1")
+	oldRuntime, err := newWorkspaceRuntime(cfg, backend.Client(), agentRoot, "agent-1", "agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := &managedWorkspaceRuntime{
+		runtime:   oldRuntime,
+		workspace: &workspaceResponse{Agents: []*agent{{ID: "agent-1"}}},
+	}
+	service := &Service{
+		cfg:            cfg,
+		client:         backend.Client(),
+		primaryRuntime: &workspaceRuntime{},
+		agentRuntimes:  map[string]*managedWorkspaceRuntime{"agent-1": old},
+		agentWorkers:   map[string]*managedAgentWorker{},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		service.closeAgentWorkers()
+		service.closeAgentRuntimes()
+		_ = service.closePrimaryRuntime()
+	})
+	borrowed, release := old.borrow()
+	if borrowed != oldRuntime {
+		t.Fatal("failed to admit old runtime borrower")
+	}
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(release) })
+
+	olderDone := make(chan error, 1)
+	go func() { olderDone <- service.refresh(ctx) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		service.mu.Lock()
+		_, registered := service.agentRuntimes["agent-1"]
+		service.mu.Unlock()
+		old.borrowMu.Lock()
+		retiring := old.retiring
+		old.borrowMu.Unlock()
+		if !registered && retiring {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("stale refresh did not retire and unregister the old runtime")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	newerDone := make(chan error, 1)
+	go func() { newerDone <- service.refresh(ctx) }()
+	// On the unfenced implementation the newer snapshot publishes a runtime
+	// into the same root while the older refresh remains blocked in drain.
+	time.Sleep(100 * time.Millisecond)
+	releaseOnce.Do(release)
+	for name, done := range map[string]<-chan error{"older": olderDone, "newer": newerDone} {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("%s refresh: %v", name, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s refresh did not finish", name)
+		}
+	}
+
+	service.mu.Lock()
+	replacement := service.agentRuntimes["agent-1"]
+	service.mu.Unlock()
+	if replacement == nil || replacement == old || replacement.runtime == nil {
+		t.Fatalf("registered runtime after re-add = %#v, want a new generation", replacement)
+	}
+	if _, err := os.Stat(workspaceSyncDBPath(agentRoot)); err != nil {
+		t.Fatalf("older refresh deleted the live replacement root: %v", err)
+	}
+	if err := replacement.runtime.pathLocks.cleanupExpired(time.Now().UTC()); err != nil {
+		t.Fatalf("live replacement store is unusable after concurrent refreshes: %v", err)
+	}
 }
 
 func superviseManagedRuntimeFailureForTest(
@@ -1495,7 +1962,7 @@ func TestSyncAgentRuntimesRestartsAfterStartupAddFailure(t *testing.T) {
 	}
 }
 
-func TestSyncAgentRuntimesRestartsAfterFatalWatcherEvent(t *testing.T) {
+func TestSyncAgentRuntimesDoesNotRestartAfterRecoverableWatcherEventError(t *testing.T) {
 	root := t.TempDir()
 	cfg := Config{AgentWorkspaceRoot: filepath.Join(root, "agents")}
 	workspace := &workspaceResponse{Agents: []*agent{{ID: "agent-1"}}}
@@ -1539,17 +2006,14 @@ func TestSyncAgentRuntimesRestartsAfterFatalWatcherEvent(t *testing.T) {
 	watcher.events <- fsnotify.Event{Name: badPath, Op: fsnotify.Create}
 	select {
 	case <-managed.done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("watcher event processing failure did not stop the agent runtime")
+		t.Fatal("recoverable watcher event error stopped the agent runtime")
+	case <-time.After(300 * time.Millisecond):
 	}
-	if runErr, _ := managed.result(); runErr == nil {
-		t.Fatal("watcher event processing failure returned nil")
-	}
-	replacement, _ := waitForAgentRuntimeWatcher(t, service, "agent-1", managed)
-	select {
-	case <-replacement.done:
-		t.Fatal("replacement agent runtime stopped immediately")
-	case <-time.After(100 * time.Millisecond):
+	service.mu.Lock()
+	current := service.agentRuntimes["agent-1"]
+	service.mu.Unlock()
+	if current != managed {
+		t.Fatal("recoverable watcher event error replaced the managed runtime")
 	}
 }
 
