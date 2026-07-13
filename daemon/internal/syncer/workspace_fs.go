@@ -18,6 +18,7 @@ var ErrOutsideWorkspace = errors.New("path is outside workspace")
 
 type WorkspaceFS struct {
 	Root          string
+	pathLocks     pathLockLeaseStore
 	openPathLocks pathLockStoreOpener
 }
 
@@ -53,11 +54,15 @@ func (e *FSError) Unwrap() error {
 }
 
 func NewWorkspaceFS(root string) *WorkspaceFS {
+	return newWorkspaceFS(root, nil)
+}
+
+func newWorkspaceFS(root string, pathLocks pathLockLeaseStore) *WorkspaceFS {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		abs = filepath.Clean(root)
 	}
-	return &WorkspaceFS{Root: abs, openPathLocks: openPathLockStore}
+	return &WorkspaceFS{Root: abs, pathLocks: pathLocks, openPathLocks: openPathLockStore}
 }
 
 func (fs *WorkspaceFS) pathLockStore() (pathLockLeaseStore, error) {
@@ -70,6 +75,12 @@ func (fs *WorkspaceFS) pathLockStore() (pathLockLeaseStore, error) {
 
 func (fs *WorkspaceFS) CleanupStaleLocks() error {
 	if fs == nil || fs.Root == "" {
+		return nil
+	}
+	if fs.pathLocks != nil {
+		if err := fs.pathLocks.cleanupExpired(time.Now().UTC()); err != nil {
+			return &FSError{Op: "cleanup-locks", Path: fs.Root, Err: err}
+		}
 		return nil
 	}
 	store, err := fs.pathLockStore()
@@ -367,20 +378,30 @@ func (fs *WorkspaceFS) lockPaths(paths ...string) (func(), error) {
 		seen[keyPath] = struct{}{}
 		lockPaths = append(lockPaths, keyPath)
 	}
-	store, err := fs.pathLockStore()
-	if err != nil {
-		return nil, &FSError{Op: "lock", Path: fs.Root, Err: err}
+	store := fs.pathLocks
+	closeStore := false
+	if store == nil {
+		var err error
+		store, err = fs.pathLockStore()
+		if err != nil {
+			return nil, &FSError{Op: "lock", Path: fs.Root, Err: err}
+		}
+		closeStore = true
 	}
 	leases, err := store.lock(lockPaths)
 	if err != nil {
-		_ = store.Close()
+		if closeStore {
+			_ = store.Close()
+		}
 		return nil, &FSError{Op: "lock", Path: fs.Root, Err: err}
 	}
 	var unlockOnce sync.Once
 	return func() {
 		unlockOnce.Do(func() {
 			_ = store.release(leases)
-			_ = store.Close()
+			if closeStore {
+				_ = store.Close()
+			}
 		})
 	}, nil
 }

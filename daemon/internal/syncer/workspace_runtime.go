@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -25,6 +26,7 @@ type workspaceRuntime struct {
 	mu                 sync.Mutex
 	replica            *workspaceReplica
 	docCache           *documentCache
+	pathLocks          pathLockLeaseStore
 	reconcileQueue     *reconcileQueue
 	localCreates       *localCreateQueue
 	documentSocket     *workspaceDocumentSocket
@@ -32,6 +34,8 @@ type workspaceRuntime struct {
 	initialWorkspace   *workspaceResponse
 	rootDocumentID     string
 	sendDocumentUpdate func(context.Context, string, outboxUpdateRecord) error
+	closeOnce          sync.Once
+	closeErr           error
 }
 
 func (r *workspaceRuntime) fetchWorkspace(ctx context.Context) (*workspaceResponse, error) {
@@ -62,12 +66,40 @@ func (r *workspaceRuntime) fetchWorkspace(ctx context.Context) (*workspaceRespon
 }
 
 func newWorkspaceRuntime(cfg Config, client *http.Client, rootDir, actorID, actorType string) (*workspaceRuntime, error) {
+	return newWorkspaceRuntimeWithOpeners(
+		cfg,
+		client,
+		rootDir,
+		actorID,
+		actorType,
+		openPathLockStore,
+		newDocumentCache,
+	)
+}
+
+func newWorkspaceRuntimeWithOpeners(
+	cfg Config,
+	client *http.Client,
+	rootDir, actorID, actorType string,
+	openPathLocks pathLockStoreOpener,
+	openDocCache func(string) (*documentCache, error),
+) (*workspaceRuntime, error) {
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
-	cache, err := newDocumentCache(workspaceSyncDBPath(rootDir))
+	if openPathLocks == nil {
+		openPathLocks = openPathLockStore
+	}
+	pathLocks, err := openPathLocks(rootDir)
 	if err != nil {
 		return nil, err
+	}
+	if openDocCache == nil {
+		openDocCache = newDocumentCache
+	}
+	cache, err := openDocCache(workspaceSyncDBPath(rootDir))
+	if err != nil {
+		return nil, errors.Join(err, pathLocks.Close())
 	}
 	queue := newReconcileQueue()
 	localCreates := newLocalCreateQueue()
@@ -75,22 +107,34 @@ func newWorkspaceRuntime(cfg Config, client *http.Client, rootDir, actorID, acto
 		cfg:                cfg,
 		client:             client,
 		docCache:           cache,
+		pathLocks:          pathLocks,
 		reconcileQueue:     queue,
 		localCreates:       localCreates,
 		threadDeliveryWake: make(chan struct{}, 1),
 	}
 	runtime.documentSocket = newWorkspaceDocumentSocket(runtime)
-	replica := newWorkspaceReplica(cfg, rootDir, actorID, actorType, runtime.markDocumentDirty, runtime.markLocalCreate)
+	fs := newWorkspaceFS(rootDir, pathLocks)
+	replica := newWorkspaceReplicaWithFS(rootDir, actorID, actorType, runtime.markDocumentDirty, runtime.markLocalCreate, fs)
 	replica.docCache = cache
 	runtime.replica = replica
 	return runtime, nil
 }
 
 func (r *workspaceRuntime) Close() error {
-	if r == nil || r.docCache == nil {
+	if r == nil {
 		return nil
 	}
-	return r.docCache.Close()
+	r.closeOnce.Do(func() {
+		var errs []error
+		if r.docCache != nil {
+			errs = append(errs, r.docCache.Close())
+		}
+		if r.pathLocks != nil {
+			errs = append(errs, r.pathLocks.Close())
+		}
+		r.closeErr = errors.Join(errs...)
+	})
+	return r.closeErr
 }
 
 func (r *workspaceRuntime) markLocalCreate(candidate localCreateCandidate) {
@@ -137,47 +181,73 @@ func (r *workspaceRuntime) run(ctx context.Context, ready chan<- error) (runErr 
 	}
 	r.enqueueStartupStoreWork()
 
-	replicaCtx, cancelReplica := context.WithCancel(ctx)
+	runCtx, cancelRun := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	defer func() {
-		cancelReplica()
+		cancelRun()
 		wg.Wait()
 	}()
+	replicaReady := make(chan error, 1)
+	replicaDone := make(chan error, 1)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := r.replica.Run(replicaCtx); err != nil && replicaCtx.Err() == nil {
-			log.Printf("%s workspace replica error: %v", r.replica.actorID, err)
-		}
+		replicaDone <- r.replica.run(runCtx, replicaReady)
 	}()
+
+	select {
+	case err := <-replicaReady:
+		if err != nil {
+			return err
+		}
+	case err := <-replicaDone:
+		if err != nil {
+			return err
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		return errors.New("workspace replica stopped before startup completed")
+	case <-ctx.Done():
+		return nil
+	}
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		r.reconcileLoop(ctx)
+		r.reconcileLoop(runCtx)
 	}()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		r.threadDeliveryLoop(ctx)
+		r.threadDeliveryLoop(runCtx)
 	}()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		r.presenceLoop(ctx)
+		r.presenceLoop(runCtx)
 	}()
 	if r.documentSocket != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r.documentSocket.Run(ctx)
+			r.documentSocket.Run(runCtx)
 		}()
 	}
 	reportReady(nil)
 
-	<-ctx.Done()
-	cancelReplica()
-	return nil
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-replicaDone:
+		if err != nil {
+			return err
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		return errors.New("workspace replica stopped unexpectedly")
+	}
 }
 
 func (r *workspaceRuntime) enqueueStartupStoreWork() {

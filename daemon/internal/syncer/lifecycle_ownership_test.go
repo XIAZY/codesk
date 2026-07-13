@@ -212,11 +212,28 @@ func TestWorkspaceFSReusesOnePathLockStoreAcrossOperations(t *testing.T) {
 	}
 	var opens atomic.Int32
 	var closes atomic.Int32
-	fs := NewWorkspaceFS(root)
-	fs.openPathLocks = func(string) (pathLockLeaseStore, error) {
-		opens.Add(1)
-		return &countingPathLockStore{closes: &closes}, nil
+	runtime, err := newWorkspaceRuntimeWithOpeners(
+		Config{},
+		http.DefaultClient,
+		root,
+		"daemon",
+		"daemon",
+		func(string) (pathLockLeaseStore, error) {
+			opens.Add(1)
+			return &countingPathLockStore{closes: &closes}, nil
+		},
+		newDocumentCache,
+	)
+	if err != nil {
+		t.Fatal(err)
 	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = runtime.Close()
+		}
+	}()
+	fs := runtime.replica.fs
 	if err := fs.CleanupStaleLocks(); err != nil {
 		t.Fatal(err)
 	}
@@ -241,6 +258,49 @@ func TestWorkspaceFSReusesOnePathLockStoreAcrossOperations(t *testing.T) {
 	}
 	if got := closes.Load(); got != 0 {
 		t.Fatalf("path-lock store close count during operations = %d, want 0", got)
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	closed = true
+	if got := closes.Load(); got != 1 {
+		t.Fatalf("path-lock store close count after quiescence = %d, want 1", got)
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := closes.Load(); got != 1 {
+		t.Fatalf("path-lock store close count after second close = %d, want 1", got)
+	}
+}
+
+func TestWorkspaceRuntimeConstructorFailureClosesAcquiredPathLocks(t *testing.T) {
+	wantErr := errors.New("injected document cache open failure")
+	var opens atomic.Int32
+	var closes atomic.Int32
+	runtime, err := newWorkspaceRuntimeWithOpeners(
+		Config{},
+		http.DefaultClient,
+		t.TempDir(),
+		"daemon",
+		"daemon",
+		func(string) (pathLockLeaseStore, error) {
+			opens.Add(1)
+			return &countingPathLockStore{closes: &closes}, nil
+		},
+		func(string) (*documentCache, error) { return nil, wantErr },
+	)
+	if runtime != nil {
+		t.Fatal("constructor returned a partial runtime")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("constructor error = %v, want %v", err, wantErr)
+	}
+	if got := opens.Load(); got != 1 {
+		t.Fatalf("path-lock store open count = %d, want 1", got)
+	}
+	if got := closes.Load(); got != 1 {
+		t.Fatalf("path-lock store close count after constructor failure = %d, want 1", got)
 	}
 }
 
