@@ -1264,6 +1264,187 @@ func TestApplyProjectedContentRollsBackOnWriteFailure(t *testing.T) {
 	}
 }
 
+func TestApplyProjectedContentDoesNotAdvanceBaseAfterDurabilityFailure(t *testing.T) {
+	tests := []struct {
+		name            string
+		replaceFile     func(wantErr error) func(string, string, os.FileMode) error
+		wantDiskContent string
+	}{
+		{
+			name: "staged sync",
+			replaceFile: func(wantErr error) func(string, string, os.FileMode) error {
+				return func(path, content string, mode os.FileMode) error {
+					return replaceFileAtomicallyWith(
+						path,
+						content,
+						mode,
+						func(*os.File) error { return wantErr },
+						func(_, _ string) error { return errors.New("commit ran after staged sync failure") },
+					)
+				}
+			},
+			wantDiskContent: "old",
+		},
+		{
+			name: "post-rename flush",
+			replaceFile: func(wantErr error) func(string, string, os.FileMode) error {
+				return func(path, content string, mode os.FileMode) error {
+					return replaceFileAtomicallyWith(
+						path,
+						content,
+						mode,
+						func(file *os.File) error { return file.Sync() },
+						func(stagedPath, targetPath string) error {
+							if err := os.Rename(stagedPath, targetPath); err != nil {
+								return err
+							}
+							return wantErr
+						},
+					)
+				}
+			},
+			wantDiskContent: "new",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "doc.md")
+			if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+				t.Fatalf("write old projection: %v", err)
+			}
+			cache, err := newDocumentCache(t.TempDir())
+			if err != nil {
+				t.Fatalf("new cache: %v", err)
+			}
+			baseDoc := newDocWithText(t, "old")
+			if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
+				t.Fatalf("store base doc: %v", err)
+			}
+			baseRow, err := cache.ensureDocument("doc_1", "doc.md")
+			if err != nil {
+				t.Fatalf("load base row: %v", err)
+			}
+			fs := NewWorkspaceFS(root)
+			wantErr := errors.New("injected durability failure")
+			replaceFile := test.replaceFile(wantErr)
+			tracked := &trackedFile{
+				DocumentID:   "doc_1",
+				DocumentPath: "doc.md",
+				Path:         path,
+				FS:           fs,
+				cache:        cache,
+			}
+			tracked.setProjectedContent("old")
+			if err := tracked.storeProjectedBaseAtSeq("old", baseDoc.EncodeStateAsUpdate(), baseRow.AppliedSeq); err != nil {
+				t.Fatalf("store projected base: %v", err)
+			}
+
+			writeIfUnchanged := func(path string, expected projectedContentHash, content []byte) error {
+				return fs.writeIfUnchangedWith(path, expected, content, replaceFile)
+			}
+			if _, err := applyProjectedContentWithWrite(
+				tracked,
+				"new",
+				crdtStateFromContent("new"),
+				baseRow.AppliedSeq+1,
+				writeIfUnchanged,
+			); !errors.Is(err, wantErr) {
+				t.Fatalf("apply error = %v, want %v", err, wantErr)
+			}
+			projectedContent, _, projectedKnown, err := tracked.loadProjectedBase()
+			if err != nil {
+				t.Fatalf("load projected base: %v", err)
+			}
+			if !projectedKnown || projectedContent != "old" {
+				t.Fatalf("projected base advanced after durability failure: known=%v content=%q", projectedKnown, projectedContent)
+			}
+			if !tracked.matchesProjectedString("old") {
+				t.Fatal("in-memory projection advanced after durability failure")
+			}
+			if tracked.isLocalDirty() {
+				t.Fatal("durability failure produced an outbound local edit")
+			}
+			diskContent, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read disk after durability failure: %v", err)
+			}
+			if string(diskContent) != test.wantDiskContent {
+				t.Fatalf("disk content = %q, want %q", diskContent, test.wantDiskContent)
+			}
+		})
+	}
+}
+
+func TestProjectMergedContentDoesNotAdvanceBaseAfterWriteFailure(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "doc.md")
+	if err := os.WriteFile(path, []byte("local"), 0o644); err != nil {
+		t.Fatalf("write local content: %v", err)
+	}
+	cache, err := newDocumentCache(t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base")
+	if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base doc: %v", err)
+	}
+	baseRow, err := cache.ensureDocument("doc_1", "doc.md")
+	if err != nil {
+		t.Fatalf("load base row: %v", err)
+	}
+	tracked := &trackedFile{
+		DocumentID:   "doc_1",
+		DocumentPath: "doc.md",
+		Path:         path,
+		cache:        cache,
+	}
+	tracked.setProjectedContent("base")
+	if err := tracked.storeProjectedBaseAtSeq("base", baseDoc.EncodeStateAsUpdate(), baseRow.AppliedSeq); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+	wantErr := errors.New("injected merge write failure")
+	writeCalled := false
+	writeIfUnchanged := func(gotPath string, expected projectedContentHash, content []byte) error {
+		writeCalled = true
+		if gotPath != path || expected != projectedHashString("local") || string(content) != "merged" {
+			t.Fatalf("unexpected merge write: path=%q expected=%+v content=%q", gotPath, expected, content)
+		}
+		return wantErr
+	}
+
+	if _, err := projectMergedContentOverLocalDiskWithWrite(
+		tracked,
+		"local",
+		crdtStateFromContent("local"),
+		baseRow.AppliedSeq,
+		"merged",
+		crdtStateFromContent("merged"),
+		baseRow.AppliedSeq+1,
+		writeIfUnchanged,
+	); !errors.Is(err, wantErr) {
+		t.Fatalf("project merge error = %v, want %v", err, wantErr)
+	}
+	if !writeCalled {
+		t.Fatal("merge write seam was not called")
+	}
+	projectedContent, _, projectedKnown, err := tracked.loadProjectedBase()
+	if err != nil {
+		t.Fatalf("load projected base: %v", err)
+	}
+	if !projectedKnown || projectedContent != "base" {
+		t.Fatalf("projected base advanced after merge write failure: known=%v content=%q", projectedKnown, projectedContent)
+	}
+	if !tracked.matchesProjectedString("base") {
+		t.Fatal("in-memory projection advanced after merge write failure")
+	}
+	if tracked.isLocalDirty() {
+		t.Fatal("merge write failure marked the working copy dirty")
+	}
+}
+
 func TestApplyProjectedContentDoesNotOverwriteDivergedDiskState(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "doc.md")
 	if err := os.WriteFile(path, []byte("old plus local edit"), 0o644); err != nil {

@@ -3,6 +3,7 @@
 package syncer
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -24,6 +25,15 @@ func TestFileRenameInfoIncludesTrailingNUL(t *testing.T) {
 		t.Fatalf("encode path: %v", err)
 	}
 	var header fileRenameInfo
+	if got := unsafe.Offsetof(header.rootDirectory); got != 8 {
+		t.Fatalf("RootDirectory offset = %d, want 8", got)
+	}
+	if got := unsafe.Offsetof(header.fileNameLength); got != 16 {
+		t.Fatalf("FileNameLength offset = %d, want 16", got)
+	}
+	if got := unsafe.Offsetof(header.fileName); got != 20 {
+		t.Fatalf("FileName offset = %d, want 20", got)
+	}
 	nameOffset := int(unsafe.Offsetof(header.fileName))
 	if len(buffer) != nameOffset+len(wantName)*2 {
 		t.Fatalf("rename buffer does not include UTF-16 terminator: got %d bytes want %d", len(buffer), nameOffset+len(wantName)*2)
@@ -206,5 +216,46 @@ func TestAtomicReplacementSucceedsWhileDeleteSharedObservationIsOpenOnWindows(t 
 	}
 	if len(matches) != 0 {
 		t.Fatalf("replacement stranded staging files: %v", matches)
+	}
+}
+
+func TestAtomicReplacementReturnsErrorWhenPostRenameFlushFailsOnWindows(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "doc.md")
+	if err := os.WriteFile(path, []byte("before"), 0o644); err != nil {
+		t.Fatalf("write original: %v", err)
+	}
+	wantErr := windows.ERROR_WRITE_FAULT
+
+	err := replaceFileAtomicallyWith(
+		path,
+		"after",
+		0o644,
+		func(file *os.File) error { return file.Sync() },
+		func(stagedPath, targetPath string) error {
+			return commitReplacementWith(
+				stagedPath,
+				targetPath,
+				windows.SetFileInformationByHandle,
+				func(windows.Handle) error { return wantErr },
+			)
+		},
+	)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("replace error = %v, want %v", err, wantErr)
+	}
+	content, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("read renamed destination: %v", readErr)
+	}
+	if string(content) != "after" {
+		t.Fatalf("post-rename flush failure left unexpected content: got %q want %q", content, "after")
+	}
+	matches, globErr := filepath.Glob(filepath.Join(dir, ".doc.md.*.tmp"))
+	if globErr != nil {
+		t.Fatalf("glob staging files: %v", globErr)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("post-rename flush failure left staging files: %v", matches)
 	}
 }

@@ -17,13 +17,27 @@ type fileRenameInfo struct {
 }
 
 func commitReplacement(stagedPath, targetPath string) error {
+	return commitReplacementWith(
+		stagedPath,
+		targetPath,
+		windows.SetFileInformationByHandle,
+		windows.FlushFileBuffers,
+	)
+}
+
+func commitReplacementWith(
+	stagedPath string,
+	targetPath string,
+	setFileInformation func(windows.Handle, uint32, *byte, uint32) error,
+	flushFileBuffers func(windows.Handle) error,
+) error {
 	stagedPtr, err := windows.UTF16PtrFromString(stagedPath)
 	if err != nil {
 		return err
 	}
 	handle, err := windows.CreateFile(
 		stagedPtr,
-		windows.DELETE,
+		windows.GENERIC_WRITE|windows.DELETE,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		nil,
 		windows.OPEN_EXISTING,
@@ -39,12 +53,16 @@ func commitReplacement(stagedPath, targetPath string) error {
 	if err != nil {
 		return err
 	}
-	return windows.SetFileInformationByHandle(
+	if err := setFileInformation(
 		handle,
 		windows.FileRenameInfoEx,
 		&renameInfo[0],
 		uint32(len(renameInfo)),
-	)
+	); err != nil {
+		return err
+	}
+	// Callers persist the projected base only after this durable commit succeeds.
+	return flushFileBuffers(handle)
 }
 
 func makeFileRenameInfo(targetPath string) ([]byte, error) {

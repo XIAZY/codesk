@@ -1693,11 +1693,27 @@ func buildLocalUpdateFromBase(baseState []byte, baseContent, localContent string
 }
 
 func applyProjectedContent(tracked *trackedFile, nextContent string, nextState []byte, projectedSeq int64) (bool, error) {
+	return applyProjectedContentWithWrite(
+		tracked,
+		nextContent,
+		nextState,
+		projectedSeq,
+		tracked.workspaceFS().WriteIfUnchanged,
+	)
+}
+
+func applyProjectedContentWithWrite(
+	tracked *trackedFile,
+	nextContent string,
+	nextState []byte,
+	projectedSeq int64,
+	writeIfUnchanged func(path string, expected projectedContentHash, content []byte) error,
+) (bool, error) {
 	previousHash, previousKnown := tracked.projectedSnapshot()
 	tracked.beginProjection()
 	defer tracked.endProjection()
 	tracked.setProjectedContent(nextContent)
-	if err := tracked.workspaceFS().WriteIfUnchanged(tracked.Path, previousHash, []byte(nextContent)); err != nil {
+	if err := writeIfUnchanged(tracked.Path, previousHash, []byte(nextContent)); err != nil {
 		if errors.Is(err, ErrDivergedWorkingCopy) {
 			tracked.setProjectedSnapshot(previousHash, previousKnown)
 			return false, nil
@@ -1726,11 +1742,33 @@ func markTrackedLocalDirty(tracked *trackedFile, _ string) error {
 }
 
 func projectMergedContentOverLocalDisk(tracked *trackedFile, currentDiskContent string, currentDiskState []byte, currentDiskSeq int64, mergedContent string, mergedState []byte, mergedSeq int64) (bool, error) {
+	return projectMergedContentOverLocalDiskWithWrite(
+		tracked,
+		currentDiskContent,
+		currentDiskState,
+		currentDiskSeq,
+		mergedContent,
+		mergedState,
+		mergedSeq,
+		tracked.workspaceFS().WriteIfUnchanged,
+	)
+}
+
+func projectMergedContentOverLocalDiskWithWrite(
+	tracked *trackedFile,
+	currentDiskContent string,
+	currentDiskState []byte,
+	currentDiskSeq int64,
+	mergedContent string,
+	mergedState []byte,
+	mergedSeq int64,
+	writeIfUnchanged func(path string, expected projectedContentHash, content []byte) error,
+) (bool, error) {
 	previousHash, previousKnown := tracked.projectedSnapshot()
 	tracked.beginProjection()
 	defer tracked.endProjection()
 	tracked.setProjectedContent(mergedContent)
-	if err := tracked.workspaceFS().WriteIfUnchanged(tracked.Path, projectedHashString(currentDiskContent), []byte(mergedContent)); err != nil {
+	if err := writeIfUnchanged(tracked.Path, projectedHashString(currentDiskContent), []byte(mergedContent)); err != nil {
 		if errors.Is(err, ErrDivergedWorkingCopy) {
 			if len(currentDiskState) == 0 {
 				currentDiskState = crdtStateFromContent(currentDiskContent)

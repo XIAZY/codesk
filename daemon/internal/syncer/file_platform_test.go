@@ -1,6 +1,7 @@
 package syncer
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -93,5 +94,107 @@ func TestReplaceFileAtomicallyCreatesDestination(t *testing.T) {
 	}
 	if string(content) != "created" {
 		t.Fatalf("created content mismatch: got %q want %q", content, "created")
+	}
+}
+
+func TestReplaceFileAtomicallySyncsStagedContentBeforeCommit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "doc.md")
+	if err := os.WriteFile(path, []byte("before"), 0o640); err != nil {
+		t.Fatalf("write original: %v", err)
+	}
+
+	synced := false
+	err := replaceFileAtomicallyWith(
+		path,
+		"after",
+		0o640,
+		func(file *os.File) error {
+			content, err := os.ReadFile(file.Name())
+			if err != nil {
+				return err
+			}
+			if string(content) != "after" {
+				t.Fatalf("staged content before sync: got %q want %q", content, "after")
+			}
+			synced = true
+			return file.Sync()
+		},
+		func(stagedPath, targetPath string) error {
+			if !synced {
+				t.Fatal("commit ran before staged content sync")
+			}
+			return os.Rename(stagedPath, targetPath)
+		},
+	)
+	if err != nil {
+		t.Fatalf("replace file: %v", err)
+	}
+}
+
+func TestReplaceFileAtomicallyPreservesDestinationWhenStagedSyncFails(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "doc.md")
+	if err := os.WriteFile(path, []byte("before"), 0o640); err != nil {
+		t.Fatalf("write original: %v", err)
+	}
+	wantErr := errors.New("injected staged sync failure")
+	commitCalled := false
+
+	err := replaceFileAtomicallyWith(
+		path,
+		"after",
+		0o640,
+		func(*os.File) error { return wantErr },
+		func(_, _ string) error {
+			commitCalled = true
+			return nil
+		},
+	)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("replace error = %v, want %v", err, wantErr)
+	}
+	if commitCalled {
+		t.Fatal("commit ran after staged sync failure")
+	}
+	assertAtomicReplacementState(t, dir, path, "before")
+}
+
+func TestReplaceFileAtomicallyPreservesDestinationWhenCommitUnsupported(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "doc.md")
+	if err := os.WriteFile(path, []byte("before"), 0o640); err != nil {
+		t.Fatalf("write original: %v", err)
+	}
+	wantErr := errors.New("injected unsupported commit")
+
+	err := replaceFileAtomicallyWith(
+		path,
+		"after",
+		0o640,
+		func(file *os.File) error { return file.Sync() },
+		func(_, _ string) error { return wantErr },
+	)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("replace error = %v, want %v", err, wantErr)
+	}
+	assertAtomicReplacementState(t, dir, path, "before")
+}
+
+func assertAtomicReplacementState(t *testing.T, dir, path, wantContent string) {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read destination: %v", err)
+	}
+	if string(content) != wantContent {
+		t.Fatalf("destination content: got %q want %q", content, wantContent)
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, ".doc.md.*.tmp"))
+	if err != nil {
+		t.Fatalf("glob staging files: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("replacement left staging files: %v", matches)
 	}
 }
