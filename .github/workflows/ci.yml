@@ -276,6 +276,7 @@ jobs:
             "TestScanWorkspaceFilesObservesCompleteContentDuringAtomicReplacement",
             "TestFileIdentityTracksHardLinks",
             "TestStatFileWithIdentityReturnsMetadataAndStableIdentity",
+            "TestFileRenameInfoIncludesTrailingNUL",
             "TestFileIdentityFromWindowsInfoRejectsZeroFileIndex",
             "TestFileIdentitySurvivesRenameOnWindows",
             "TestDirectoryIdentitySurvivesRenameOnWindows",
