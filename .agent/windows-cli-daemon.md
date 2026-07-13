@@ -19,6 +19,7 @@ This plan deliberately excludes the system-tray application, PowerShell installe
 - [x] (2026-07-12 23:52Z) Native Windows execution invalidated the target byte-lock model: append-lock and replace-under-lock returned `Access is denied`, and the POSIX-disposition identity row modeled a lifecycle the daemon does not use.
 - [x] (2026-07-13 00:00Z) Froze and implemented the amended P1 protocol: `WorkspaceFS.lockPaths` is the sole daemon mutation coordinator, fallback scan is an old-or-new delete-shared observation, initial creation is create-empty-or-read/preserve under the path lease, and identity tests use the production close/remove/recreate lifecycle.
 - [x] (2026-07-13 00:29Z) Narrowed the initial-creation API after QA review: `CreateEmptyOrRead` cannot stage arbitrary bytes, never removes a pathname after late failure, re-observes the final pathname after create, and is the cache-nil branch's single observation/creation operation.
+- [x] (2026-07-13 01:08Z) Replaced `MoveFileEx` with handle-based `FileRenameInfoEx` using replace/POSIX semantics after native Windows proved that delete sharing alone does not make `MoveFileEx` compatible with an open observation. Added direct ABI and behavior rows, plus repeated scan/write stress coverage.
 - [ ] Milestone 1 checkpoint: finish full repository gates, publish an exact head, and obtain native Windows CI evidence plus lead stamp before Phase 2 or Phase 3.
 - [ ] Milestone 2: implement deterministic portable-path materialization, host path keys, containment, and visible health failures red-first.
 - [ ] Milestone 3: implement Windows provider command/process-tree ownership and prove Codex/Claude lifecycle behavior.
@@ -37,6 +38,12 @@ This plan deliberately excludes the system-tray application, PowerShell installe
 
 - Observation: Go's ordinary Windows read handle does not request delete sharing, so an unlocked fallback scan can still block `MoveFileEx` during overlap.
   Evidence: the amended Windows observation opens with read/write/delete sharing and the concurrency row requires every scan to return complete old-or-new bytes while atomic replacements commit without `Access denied` or temp residue.
+
+- Observation: `MoveFileEx(REPLACE_EXISTING)` still rejects an open destination even when that observation opted into delete sharing. The Windows rename contract that explicitly preserves existing handles while rebinding the path is `FileRenameInfoEx` with `FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS`.
+  Evidence: the direct open-observation replacement row failed with `Access is denied` under both native ARM64 and emulated AMD64, then passed with the handle-based rename. Microsoft documents that POSIX rename semantics keep existing handles valid while subsequent opens resolve to the replacement object.
+
+- Observation: the Win32 `FILE_RENAME_INFO` buffer requires a trailing UTF-16 NUL even though `FileNameLength` excludes it.
+  Evidence: omitting the terminator passed the single-row probe but intermittently returned `ERROR_INVALID_NAME` under repeated concurrent scan/write stress; an ABI row now pins both the buffer size and excluded length.
 
 - Observation: Windows stable file identity cannot be implemented honestly from the current `fileIdentityForInfo(os.FileInfo)` signature. Windows needs an opened file handle to call `GetFileInformationByHandle` and retrieve volume serial plus 64-bit file index.
   Evidence: `daemon/internal/syncer/replica.go` currently type-asserts `info.Sys()` to Unix `*syscall.Stat_t`.
@@ -82,9 +89,9 @@ This plan deliberately excludes the system-tray application, PowerShell installe
   Rationale: independent path observations create a TOCTOU false-pairing window, while an unconditional zero file index can make unrelated files on one volume compare equal.
   Date/Author: 2026-07-12, Thomas/Bill/Vitaliy.
 
-- Decision: Windows atomic replacement uses a sibling staging file plus `MoveFileEx(REPLACE_EXISTING|WRITE_THROUGH)`. Daemon scan observations opt into delete sharing; externally held destinations that deny it fail visibly and retain complete old content.
-  Rationale: truncation is not atomic, an unbounded sharing-violation retry would hide ownership contention, and no daemon-owned target handle may block its own namespace swap.
-  Date/Author: 2026-07-12, Thomas/Deniz/Vitaliy, amended after native Windows red evidence.
+- Decision: Windows atomic replacement uses a sibling staging file plus handle-based `FileRenameInfoEx` with replace/POSIX semantics. Daemon scan observations opt into delete sharing; externally held destinations that deny it fail visibly and retain complete old content.
+  Rationale: `MoveFileEx` cannot perform the required namespace swap while a scan observation is open. POSIX rename semantics are the Windows 10 v1607+ primitive whose contract explicitly keeps old handles valid while future opens resolve to the replacement object.
+  Date/Author: 2026-07-13, AlphaToad/Vitaliy, amended after native Windows red and stress evidence.
 
 - Decision: initial absent-file materialization uses the narrow `WorkspaceFS.CreateEmptyOrRead` operation under the path lease and never replaces a local file that appeared before exclusive create. It does not remove the pathname after a late create/close failure and re-observes the final path after successful create.
   Rationale: production creates only an empty placeholder. Encoding that limit in the API makes partial arbitrary content impossible, avoids deleting a non-cooperating editor's replacement object by pathname during cleanup, and returns the actual bytes/hash if an external rename-over wins while the created handle is open.
@@ -112,7 +119,7 @@ This plan deliberately excludes the system-tray application, PowerShell installe
 
 ## Outcomes & Retrospective
 
-The task is in progress. Native Windows execution found two protocol defects and one POSIX-assumptive test defect before merge. The amended P1 code now has one mutation owner, no target byte-lock layer, deterministic local-create preservation, delete-shared scan observations, and production-lifecycle identity rows. Milestone 1 still requires a green exact-head native rerun before Phase 2 or Phase 3 opens.
+The task is in progress. Native Windows execution found the target-lock defects, a POSIX-assumptive identity row, and the mismatch between `MoveFileEx` and delete-shared observations before merge. The amended P1 code now has one mutation owner, no target byte-lock layer, deterministic local-create preservation, handle-based POSIX replacement, delete-shared scan observations, and production-lifecycle identity rows. Milestone 1 still requires a green exact-head native rerun before Phase 2 or Phase 3 opens.
 
 ## Context and Orientation
 
@@ -139,7 +146,7 @@ Configuration currently comes only from environment variables in `daemon/interna
 
 First make the platform boundary honest without changing path allocation or sync policy. Keep `WorkspaceFS.lockPaths` as the only daemon mutation coordinator and remove the redundant target byte-lock API. `WorkspaceFS.Append`, `WriteIfUnchanged`, and `CreateEmptyOrRead` execute under that path lease. Fallback scan remains a cheap eventual observation; on Windows its read handle opts into delete sharing so it cannot block an atomic replacement. Native tests prove complete append records, complete old-or-new scan observations during replacement, no stranded temp file, preservation of a local file that appears before exclusive creation, and no pathname deletion after a late create/close failure.
 
-Move atomic replacement to `file_replace_unix.go` and `file_replace_windows.go`. Unix retains temp-write then rename. Windows closes and flushes the temp file and calls `MoveFileEx` with replace-existing and write-through flags. Sharing violations must return a visible error or use a small bounded retry; never truncate the destination first. Windows tests cover destination absent, destination present, destination open without delete sharing, and unchanged/complete content after failure.
+Move atomic replacement to `file_replace_unix.go` and `file_replace_windows.go`. Unix retains temp-write then rename. Windows closes the temp file, reopens it with delete access, and commits it through `FileRenameInfoEx` with replace/POSIX semantics so delete-shared observations retain the old object while new opens resolve to the replacement. Sharing violations must return a visible error; never truncate the destination first. Windows tests cover destination absent, destination present, destination open with and without delete sharing, the exact UTF-16 rename-info ABI, and unchanged/complete content after failure.
 
 Replace `fileIdentityForInfo` with `fileIdentityForPath`. Unix stats the path and maps device/inode. Windows opens the path with read-attributes and read/write/delete sharing, includes backup-semantics for directories, calls `GetFileInformationByHandle`, and maps volume serial and 64-bit file index into the existing `fileIdentity`. Update watcher and scan call sites to pass the path. Windows tests prove identity remains stable across a rename and differs for delete/recreate.
 
@@ -277,3 +284,5 @@ Milestone 3 must centralize command and process ownership so drivers do not cont
     }
 
 Revision note (2026-07-12): created the initial self-contained plan after reproducing the Windows build red, auditing the current platform/process/config sites, and incorporating Bill's CLI-only boundary plus Thomas's portable-path contract. Updated it after the red-first Phase 1 implementation, the final prompt-file/suspended-Job provider contract freeze, and the native Windows run invalidated the target byte-lock protocol.
+
+Revision note (2026-07-13): replaced the amended `MoveFileEx` design after exact-head native Windows testing showed that it still conflicts with delete-shared observations. Recorded the `FileRenameInfoEx` replace/POSIX contract, its Windows 10 v1607+ boundary, the required trailing UTF-16 terminator, and the direct plus stress evidence that promoted the prototype into the Milestone 1 implementation.

@@ -6,10 +6,40 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
+
+func TestFileRenameInfoIncludesTrailingNUL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "replacement.md")
+	buffer, err := makeFileRenameInfo(path)
+	if err != nil {
+		t.Fatalf("make rename info: %v", err)
+	}
+	wantName, err := windows.UTF16FromString(path)
+	if err != nil {
+		t.Fatalf("encode path: %v", err)
+	}
+	var header fileRenameInfo
+	nameOffset := int(unsafe.Offsetof(header.fileName))
+	if len(buffer) != nameOffset+len(wantName)*2 {
+		t.Fatalf("rename buffer does not include UTF-16 terminator: got %d bytes want %d", len(buffer), nameOffset+len(wantName)*2)
+	}
+	info := (*fileRenameInfo)(unsafe.Pointer(&buffer[0]))
+	if info.flags != windows.FILE_RENAME_REPLACE_IF_EXISTS|windows.FILE_RENAME_POSIX_SEMANTICS {
+		t.Fatalf("unexpected rename flags: %#x", info.flags)
+	}
+	if info.fileNameLength != uint32((len(wantName)-1)*2) {
+		t.Fatalf("filename length includes terminator: got %d want %d", info.fileNameLength, (len(wantName)-1)*2)
+	}
+	gotName := unsafe.Slice(&info.fileName[0], len(wantName))
+	if !slices.Equal(gotName, wantName) || gotName[len(gotName)-1] != 0 {
+		t.Fatalf("rename filename is not NUL-terminated: got %v want %v", gotName, wantName)
+	}
+}
 
 func TestFileIdentityFromWindowsInfoRejectsZeroFileIndex(t *testing.T) {
 	zero := fileIdentityFromWindowsInfo(windows.ByHandleFileInformation{VolumeSerialNumber: 42})
@@ -153,8 +183,7 @@ func TestAtomicReplacementSucceedsWhileDeleteSharedObservationIsOpenOnWindows(t 
 	}
 	defer observation.Close()
 
-	fs := NewWorkspaceFS(dir)
-	if err := fs.WriteIfUnchanged(path, projectedHashString("before"), []byte("after")); err != nil {
+	if err := replaceFileAtomically(path, "after", 0o644); err != nil {
 		t.Fatalf("replace while observation handle is open: %v", err)
 	}
 	observed, err := io.ReadAll(observation)
