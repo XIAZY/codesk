@@ -53,9 +53,14 @@ type Service struct {
 }
 
 type managedWorkspaceRuntime struct {
-	runtime *workspaceRuntime
-	cancel  context.CancelFunc
-	done    <-chan struct{}
+	runtime        *workspaceRuntime
+	cancel         context.CancelFunc
+	done           <-chan struct{}
+	resultMu       sync.Mutex
+	runErr         error
+	startedAt      time.Time
+	stoppedAt      time.Time
+	restartAttempt int
 }
 
 type managedAgentWorker struct {
@@ -314,7 +319,6 @@ func (s *Service) Run(ctx context.Context) (runErr error) {
 		return err
 	}
 	primaryRuntime := s.primaryRuntime
-	s.reportDaemonStatus(coreCtx, true)
 	if err := s.refreshInitialWorkspace(coreCtx); err != nil {
 		if ctx.Err() != nil {
 			return nil
@@ -348,6 +352,9 @@ func (s *Service) Run(ctx context.Context) (runErr error) {
 	case <-ctx.Done():
 		return nil
 	}
+	// Reporting status updates last_seen_at, which is the backend's online
+	// signal. Do not publish it until the primary watcher pipeline is live.
+	s.reportDaemonStatus(coreCtx, true)
 	drained := make(chan error, 1)
 	eventDone = make(chan struct{})
 	go func() {

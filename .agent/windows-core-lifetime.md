@@ -22,6 +22,10 @@ The change is demonstrated with tests written before the behavioral implementati
 - [x] (2026-07-13 14:02 EDT) Made inbox workers, runtime-event consumers, delayed restarts, and status workers cancelable and joinable; proved a terminal agent exit remains nonfatal while a primary watcher failure terminates the ready service.
 - [x] (2026-07-13 14:14 EDT) Ran the focused lifecycle set, full native ARM64 syncer package, Windows/amd64 race suite with all 28 required rows, full Go test/vet/build, Yjs canary, frontend typecheck/Vitest/build, uninstall harness, installer syntax, and direct static Windows/amd64 release-style links.
 - [x] (2026-07-13 14:24 EDT) Confirmed `origin/feat/windows-cli-daemon` remains at `4639f09` with no base-only commits, pushed the complete fix series through `ec62e6a`, and updated draft PR #149 without staging the pre-existing `agents/` or `workspaces/` directories.
+- [x] (2026-07-13 16:22 EDT) Reopened the lifecycle audit at exact PR head `7b7e2c6`; five test-only reducers on commit `bb92e3d` proved premature online publication, two dead managed-runtime retention paths, raw listener ownership, and deadline-expired drain under an admitted live handler.
+- [x] (2026-07-13 16:39 EDT) Re-established the six legacy rows that had originally arrived beside their fixes by mutation-testing exact `7b7e2c6`; each failed for its named ownership invariant. The blocked-core/store-lifetime row also failed when the core join was removed.
+- [x] (2026-07-13 16:46 EDT) Moved the initial daemon status report after `primaryReady`, added an application-level gateway admission gate plus an explicit admitted-handler join, and made managed agent runtimes record exits and restart dead same-actor entries with classified exponential backoff.
+- [ ] Publish the amended exact head after the full repository and frontend validation gates pass, then transfer the immutable head to independent reviewers.
 
 ## Surprises & Discoveries
 
@@ -73,6 +77,15 @@ The change is demonstrated with tests written before the behavioral implementati
 - Observation: Agent workspace runtimes also have tool-handler cache consumers, so invoking their self-closing public `Run` under the service context was still too early.
   Evidence: A final owner-boundary regression cancelled a managed agent runtime and then probed its path-lock store before registry teardown; it failed RED with `sql: database is closed`. Managed runtimes now call the non-owning run helper, while registry removal or global teardown performs cancel, join, and close after gateway drain. The regression and affected race set pass.
 
+- Observation: `http.Server.Close` terminates connections but does not join handler goroutines.
+  Evidence: On exact `7b7e2c6`, a 20 ms drain deadline returned while the authenticated list-documents handler still waited on the document-cache connection. The service could then close that cache under the live handler even though `Serve` had exited.
+
+- Observation: Map presence is not a liveness signal for managed workspace runtimes.
+  Evidence: Both an injected startup `Add` failure and a post-ready event-processing failure closed the managed runtime's `done` channel, but `syncAgentRuntimes` retained the same entry indefinitely because actor identity still matched.
+
+- Observation: Publishing daemon status is itself a readiness transition because the backend derives `online` from `last_seen_at`.
+  Evidence: The injected primary `Add` failure returned before readiness but exact `7b7e2c6` had already emitted one `/api/daemon/status` request.
+
 ## Decision Log
 
 - Decision: Enforce a real red/green gate before changing ownership behavior.
@@ -95,9 +108,17 @@ The change is demonstrated with tests written before the behavioral implementati
   Rationale: Gateway handlers and refresh code use runtime caches. Shutdown must cancel, close watcher/WebSocket/gateway ingress, join core handlers and both agent trees, then close the document cache and finally the shared path-lock store. Installing the teardown immediately after the first acquisition also covers early setup errors.
   Date/Author: 2026-07-13 / Codex
 
+- Decision: `Server.Shutdown` is the sole owner of listener teardown; `CloseIngress` only closes the application admission gate and disables keep-alives.
+  Rationale: Raw listener close races the server's own shutdown path. The application gate rejects newly admitted handlers while the server remains alive long enough to return a deterministic 503, and the explicit handler count remains the dependency barrier even after a forced connection close.
+  Date/Author: 2026-07-13 / Vitaliy
+
+- Decision: Managed agent workspace-runtime exits remain nonfatal to the core but are observable and restartable.
+  Rationale: Nonfatal without resurrection silently disables an agent workspace. The registry records each result and stop time, immediately replaces the first failed runtime, exponentially backs off repeated failures to five seconds, and treats terminal authentication failures conservatively at the maximum delay. A runtime that lived for the stability window resets its retry history.
+  Date/Author: 2026-07-13 / Vitaliy
+
 ## Outcomes & Retrospective
 
-The implementation, locally representable validation, and publication are complete. Tests first proved every claimed defect on the old behavior. The final implementation owns watcher delivery before `Add`, propagates primary core failures without making agent exits fatal, shares one path-lock store per runtime, and tears down ingress/users/stores in dependency order. All native Windows, full Go, frontend, Yjs, and direct static-link gates pass. Docker/Postgres/browser E2E, the Unix-only installer functional harness, and a fresh Rust archive rebuild remain external host limitations recorded above. Draft PR #149 targets the requested `feat/windows-cli-daemon` branch; its native Windows job remains intentionally disabled while the replacement cross-platform CI run proceeds.
+The original implementation was published, then reopened after exact-head review exposed three platform-independent lifecycle regressions and a test-proof gap. The amendment now has a committed test-only RED checkpoint and mutation RED proof for the six legacy rows that previously arrived beside their fixes. The production changes gate online status on primary readiness, give listener shutdown one owner, retain stores until every admitted handler returns, and resurrect dead managed agent runtimes without making their failure core-fatal. Publication remains pending the full validation run; native Windows remains a separate original-behavior gate rather than evidence for these Linux-reproducible lifecycle fixes.
 
 ## Context and Orientation
 
@@ -288,6 +309,43 @@ Final managed-agent owner-boundary proof:
          sql: database is closed
     GREEN: TestManagedAgentRuntimeRetainsStoresUntilRegistryOwnerCloses PASS
     affected Windows/amd64 race set: PASS (9.117s)
+
+Amendment test-only RED checkpoint, exact `bb92e3d` on unchanged production `7b7e2c6`:
+
+    TestServiceDoesNotReportOnlineBeforePrimaryRuntimeReady
+      daemon published 1 online heartbeat(s) before primary readiness, want 0
+    TestSyncAgentRuntimesRestartsAfterStartupAddFailure
+      stopped agent runtime remained registered instead of being restarted
+    TestSyncAgentRuntimesRestartsAfterFatalWatcherEvent
+      fatal event left a dead agent runtime registered instead of restarting it
+    TestToolGatewayCloseIngressDefersListenerTeardownToDrain
+      CloseIngress took listener ownership away from Server.Shutdown
+    TestToolGatewayDrainWaitsForAdmittedHandlersAfterDeadline
+      gateway Drain returned after its deadline while an admitted handler still owned runtime dependencies
+
+    FAIL notty/daemon/internal/syncer
+
+Legacy mutation RED reproof, exact `7b7e2c6` with only the named owning fix removed:
+
+    TestWorkspaceRuntimeConstructorFailureClosesAcquiredPathLocks
+      path-lock store close count after constructor failure = 0, want 1
+    TestServicePrimaryWatcherFailureAfterReadyIsFatal
+      service stayed online after its primary watcher failed; shutdown error: <nil>
+    TestServiceAgentExitIsNonfatalAndSupervisorStopsRestarts
+      agent supervisor restarted after shutdown; process count = 2, want 1
+    TestServiceTeardownUsesReverseDependencyOrder
+      close-runtime-data observed before join-core/drain-gateway/join-agent-tree
+    TestWorkspaceRuntimeClosesDocumentCacheBeforePathLocks
+      runtime store close sequence = [path-lock-store document-cache]
+    TestManagedAgentRuntimeRetainsStoresUntilRegistryOwnerCloses
+      agent runtime closed its stores before the registry owner drained tool users: sql: database is closed
+    TestServiceTeardownWaitsForBlockedCoreRefreshBeforeClosingRuntimeData
+      runtime data closed while a core refresh still owned it
+
+Amendment repeated focused GREEN transcript on Linux/ARM64:
+
+    go test -race ./daemon/internal/syncer -run '<seven amendment rows>' -count=20
+    ok notty/daemon/internal/syncer 14.861s
 
 ## Interfaces and Dependencies
 
