@@ -18,6 +18,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/gorilla/websocket"
+	crdt "notty/internal/ycrdt"
 )
 
 type scriptedWorkspaceWatcher struct {
@@ -621,7 +622,14 @@ func TestAgentRuntimeReplacementProcessesIntentAcceptedByRetiredGeneration(t *te
 	}
 	agentRoot := agentWorkspacePath(cfg, "agent-1")
 	documentPath := "docs/spec.md"
+	absolutePath := filepath.Join(agentRoot, filepath.FromSlash(documentPath))
+	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	const documentContent = "root\ntarget\n"
+	if err := os.WriteFile(absolutePath, []byte(documentContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	runtime, err := newWorkspaceRuntime(
 		cfg,
 		backend.Client(),
@@ -634,6 +642,16 @@ func TestAgentRuntimeReplacementProcessesIntentAcceptedByRetiredGeneration(t *te
 	}
 	rootID := "root"
 	documentID := "doc-1"
+	rootDoc := crdt.New()
+	if _, err := UpsertRootFile(rootDoc, documentID, documentPath, rootMutationActor{}); err != nil {
+		rootDoc.Close()
+		t.Fatal(err)
+	}
+	if err := runtime.docCache.storeDoc(rootID, rootDocumentPath, 1, rootDoc); err != nil {
+		rootDoc.Close()
+		t.Fatal(err)
+	}
+	rootDoc.Close()
 	if err := runtime.docCache.storeRootProjectionEntries(rootID, []rootProjectionEntry{{
 		EntryID:           documentID,
 		ContentDocumentID: documentID,
@@ -896,7 +914,7 @@ func TestAgentWorkspaceApplyBorrowSurvivesConcurrentRetirement(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("failed agent runtime did not stop")
 	}
-	_, _ = waitForAgentRuntimeWatcher(t, service, "agent-1", managed)
+	waitForManagedRuntimeRetiring(t, managed)
 	if err := runtime.pathLocks.cleanupExpired(time.Now().UTC()); err != nil {
 		t.Fatalf("replacement closed the old runtime while applyWorkspace still borrowed it: %v", err)
 	}
@@ -915,6 +933,7 @@ func TestAgentWorkspaceApplyBorrowSurvivesConcurrentRetirement(t *testing.T) {
 	if applyErr != nil {
 		t.Errorf("workspace apply lost its runtime generation during retirement: %v", applyErr)
 	}
+	_, _ = waitForAgentRuntimeWatcher(t, service, "agent-1", managed)
 	waitForManagedRuntimeStoresToClose(t, runtime)
 }
 
