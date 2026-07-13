@@ -4,7 +4,9 @@ set -eu
 version="${1:-${VERSION:-dev}}"
 dist_dir="${2:-${DIST_DIR:-dist/static/daemons}}"
 platforms="${PLATFORMS:-}"
-all_platforms="darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64"
+# "all" is the public release set. Keep construction-only targets explicit
+# until their native acceptance and user-facing packaging are complete.
+all_platforms="darwin/amd64 darwin/arm64 linux/amd64 linux/arm64"
 
 root_dir="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
 . "$root_dir/scripts/lib/testtmp.sh"
