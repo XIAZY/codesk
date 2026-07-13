@@ -135,7 +135,8 @@ func buildSubscribedDocuments(ids []string, pathByID map[string]string) []subscr
 // if the runtime or projection is unavailable, it returns an empty map and every line degrades to id-only.
 func (s *Service) subscriptionPathIndex(run *agentRun) map[string]string {
 	index := map[string]string{}
-	runtime := s.runtimeForThreadAnchor(run)
+	runtime, release := s.runtimeForThreadAnchor(run)
+	defer release()
 	if runtime == nil {
 		return index
 	}

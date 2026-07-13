@@ -36,31 +36,39 @@ type agentInboxChangedEvent struct {
 }
 
 type Service struct {
-	cfg             Config
-	client          *http.Client
-	sessions        *agentSessionSupervisor
-	runtimes        *runtimeRegistry
-	daemonStatus    *daemonStatusReporter
-	toolServer      *http.Server
-	toolGateway     *toolGateway
-	mu              sync.Mutex
-	primaryRuntime  *workspaceRuntime
-	agentRuntimes   map[string]*managedWorkspaceRuntime
-	agentWorkers    map[string]*managedAgentWorker
-	latestWorkspace *workspaceResponse
-	ready           chan struct{}
-	readyOnce       sync.Once
+	cfg                     Config
+	client                  *http.Client
+	sessions                *agentSessionSupervisor
+	runtimes                *runtimeRegistry
+	daemonStatus            *daemonStatusReporter
+	toolServer              *http.Server
+	toolGateway             *toolGateway
+	mu                      sync.Mutex
+	agentRuntimeSupervisors sync.WaitGroup
+	primaryRuntime          *workspaceRuntime
+	agentRuntimes           map[string]*managedWorkspaceRuntime
+	agentWorkers            map[string]*managedAgentWorker
+	latestWorkspace         *workspaceResponse
+	ready                   chan struct{}
+	readyOnce               sync.Once
 }
 
 type managedWorkspaceRuntime struct {
 	runtime        *workspaceRuntime
 	cancel         context.CancelFunc
 	done           <-chan struct{}
+	parentCtx      context.Context
+	runtimeCtx     context.Context
+	workspace      *workspaceResponse
 	resultMu       sync.Mutex
 	runErr         error
 	startedAt      time.Time
 	stoppedAt      time.Time
 	restartAttempt int
+	borrowMu       sync.Mutex
+	borrowCond     *sync.Cond
+	borrowers      int
+	retiring       bool
 }
 
 type managedAgentWorker struct {
