@@ -578,13 +578,54 @@ func waitForAgentRuntimeWatcher(
 	}
 }
 
-func TestAgentToolRuntimeBorrowSurvivesGenerationReplacement(t *testing.T) {
+func TestAgentRuntimeReplacementProcessesIntentAcceptedByRetiredGeneration(t *testing.T) {
 	root := t.TempDir()
-	cfg := Config{AgentWorkspaceRoot: filepath.Join(root, "agents")}
+	threadRequests := make(chan string, 1)
+	upgrader := websocket.Upgrader{}
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/workspace":
+			writeJSONResponse(w, http.StatusOK, workspaceResponse{
+				RootDocumentID: "root",
+				Agents:         []*agent{{ID: "agent-1"}},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/threads":
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			threadRequests <- string(body)
+			writeJSONResponse(w, http.StatusCreated, toolThreadMutationResponse{Thread: &thread{ID: "thread-1"}})
+		case r.URL.Path == "/ws/documents-sync":
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			for {
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		default:
+			http.Error(w, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer backend.Close()
+
+	cfg := Config{
+		BackendURL:         backend.URL,
+		AgentWorkspaceRoot: filepath.Join(root, "agents"),
+		AgentID:            "daemon",
+	}
+	agentRoot := agentWorkspacePath(cfg, "agent-1")
+	documentPath := "docs/spec.md"
+	const documentContent = "root\ntarget\n"
 	runtime, err := newWorkspaceRuntime(
 		cfg,
-		http.DefaultClient,
-		agentWorkspacePath(cfg, "agent-1"),
+		backend.Client(),
+		agentRoot,
 		"agent-1",
 		"agent",
 	)
@@ -592,8 +633,32 @@ func TestAgentToolRuntimeBorrowSurvivesGenerationReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	rootID := "root"
+	documentID := "doc-1"
+	if err := runtime.docCache.storeRootProjectionEntries(rootID, []rootProjectionEntry{{
+		EntryID:           documentID,
+		ContentDocumentID: documentID,
+		DesiredPath:       documentPath,
+		MaterializedPath:  documentPath,
+		Active:            true,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	baseDoc := newDocWithText(t, documentContent)
+	if err := runtime.docCache.storeDoc(documentID, documentPath, 1, baseDoc); err != nil {
+		baseDoc.Close()
+		t.Fatal(err)
+	}
+	appliedSeq, err := runtime.docCache.documentAppliedSeq(documentID)
+	if err != nil {
+		baseDoc.Close()
+		t.Fatal(err)
+	}
+	if err := runtime.docCache.storeProjectedBase(documentID, documentContent, baseDoc.EncodeStateAsUpdate(), appliedSeq); err != nil {
+		baseDoc.Close()
+		t.Fatal(err)
+	}
+	baseDoc.Close()
 	runtime.rootDocumentID = rootID
-	runtime.docCache.db.SetMaxOpenConns(1)
 	workspace := &workspaceResponse{
 		RootDocumentID: rootID,
 		Agents:         []*agent{{ID: "agent-1"}},
@@ -603,6 +668,7 @@ func TestAgentToolRuntimeBorrowSurvivesGenerationReplacement(t *testing.T) {
 		"tool-token",
 	)
 	service.cfg = cfg
+	service.client = backend.Client()
 	ctx, cancel := context.WithCancel(context.Background())
 	runtimeCtx, runtimeCancel := context.WithCancel(ctx)
 	done := make(chan struct{})
@@ -638,19 +704,15 @@ func TestAgentToolRuntimeBorrowSurvivesGenerationReplacement(t *testing.T) {
 		service.closeAgentRuntimes()
 	})
 
-	conn, err := runtime.docCache.db.Conn(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	var heldConnClose sync.Once
-	t.Cleanup(func() { heldConnClose.Do(func() { _ = conn.Close() }) })
-	waitCount := runtime.docCache.db.Stats().WaitCount
+	_, unlockTarget := runtime.docCache.lockEntry(documentID)
+	var targetUnlock sync.Once
+	t.Cleanup(func() { targetUnlock.Do(unlockTarget) })
 	requestDone := make(chan toolRequestResult, 1)
 	go func() {
 		req, err := http.NewRequest(
 			http.MethodPost,
 			"http://"+toolAddr+"/agent-tools/create-thread",
-			strings.NewReader(`{"documentId":"root","quote":"root","body":"review root"}`),
+			strings.NewReader(`{"path":"docs/spec.md","quote":"target","body":"late old-generation intent"}`),
 		)
 		if err != nil {
 			requestDone <- toolRequestResult{err: err}
@@ -667,7 +729,7 @@ func TestAgentToolRuntimeBorrowSurvivesGenerationReplacement(t *testing.T) {
 		body, readErr := io.ReadAll(res.Body)
 		requestDone <- toolRequestResult{status: res.StatusCode, body: string(body), err: readErr}
 	}()
-	waitForDocumentCacheWaiter(t, runtime.docCache, waitCount)
+	waitForManagedRuntimeBorrower(t, managed)
 	gateway.mu.Lock()
 	activeHandlers := gateway.activeHandlers
 	gateway.mu.Unlock()
@@ -681,47 +743,21 @@ func TestAgentToolRuntimeBorrowSurvivesGenerationReplacement(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("failed agent runtime did not stop")
 	}
-	_, _ = waitForAgentRuntimeWatcher(t, service, "agent-1", managed)
-
-	newReq, err := http.NewRequest(
-		http.MethodPost,
-		"http://"+toolAddr+"/agent-tools/create-thread",
-		strings.NewReader(`{"documentId":"root","quote":"root","body":"review replacement"}`),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	newReq.Header.Set("Authorization", "Bearer tool-token")
-	newReq.Header.Set("Content-Type", "application/json")
-	newRes, err := http.DefaultClient.Do(newReq)
-	if err != nil {
-		t.Fatalf("new-generation tool request: %v", err)
-	}
-	newBody, readErr := io.ReadAll(newRes.Body)
-	_ = newRes.Body.Close()
-	if readErr != nil || newRes.StatusCode != http.StatusCreated {
-		t.Fatalf(
-			"new tool request did not resolve to the replacement generation: status=%d body=%q err=%v",
-			newRes.StatusCode,
-			string(newBody),
-			readErr,
-		)
-	}
-
+	waitForManagedRuntimeRetiring(t, managed)
 	if err := runtime.pathLocks.cleanupExpired(time.Now().UTC()); err != nil {
 		t.Fatalf("replacement closed the old runtime while an admitted tool borrower still owned it: %v", err)
 	}
 	select {
 	case result := <-requestDone:
 		t.Fatalf(
-			"admitted tool request finished before its held cache connection was released: status=%d body=%q err=%v",
+			"admitted tool request finished before its target entry was released: status=%d body=%q err=%v",
 			result.status,
 			result.body,
 			result.err,
 		)
 	case <-time.After(150 * time.Millisecond):
 	}
-	heldConnClose.Do(func() { _ = conn.Close() })
+	targetUnlock.Do(unlockTarget)
 	var result toolRequestResult
 	select {
 	case result = <-requestDone:
@@ -731,7 +767,75 @@ func TestAgentToolRuntimeBorrowSurvivesGenerationReplacement(t *testing.T) {
 	if result.err != nil || result.status != http.StatusCreated {
 		t.Errorf("tool request lost its runtime generation during replacement: status=%d body=%q err=%v", result.status, result.body, result.err)
 	}
+	replacement, _ := waitForAgentRuntimeWatcher(t, service, "agent-1", managed)
+	waitForRuntimeReconcileIdle(t, replacement.runtime)
+
+	newReq, err := http.NewRequest(
+		http.MethodGet,
+		"http://"+toolAddr+"/agent-tools/list-documents",
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newReq.Header.Set("Authorization", "Bearer tool-token")
+	newRes, err := http.DefaultClient.Do(newReq)
+	if err != nil {
+		t.Fatalf("new-generation tool request: %v", err)
+	}
+	newBody, readErr := io.ReadAll(newRes.Body)
+	_ = newRes.Body.Close()
+	if readErr != nil || newRes.StatusCode != http.StatusOK {
+		t.Fatalf(
+			"new tool request did not resolve to the replacement generation: status=%d body=%q err=%v",
+			newRes.StatusCode,
+			string(newBody),
+			readErr,
+		)
+	}
+	select {
+	case body := <-threadRequests:
+		if !strings.Contains(body, "late old-generation intent") {
+			t.Fatalf("replacement delivered the wrong thread intent: %s", body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("replacement did not recover the thread intent accepted by the retired runtime generation")
+	}
 	waitForManagedRuntimeStoresToClose(t, runtime)
+}
+
+func TestAgentScopedToolDoesNotFallBackToPrimaryWhileRuntimeRetires(t *testing.T) {
+	cache, err := newTestDocumentCache(t, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootID := "primary-root"
+	if err := cache.storeRootProjectionEntries(rootID, []rootProjectionEntry{{
+		EntryID:           "primary-doc",
+		ContentDocumentID: "primary-doc",
+		DesiredPath:       "primary/secret.md",
+		MaterializedPath:  "primary/secret.md",
+		Active:            true,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	service := newToolGatewayTestService(&agent{ID: "agent-1"}, "tool-token")
+	service.primaryRuntime = &workspaceRuntime{rootDocumentID: rootID, docCache: cache}
+	managed := &managedWorkspaceRuntime{runtime: &workspaceRuntime{}}
+	managed.retire()
+	service.agentRuntimes = map[string]*managedWorkspaceRuntime{"agent-1": managed}
+
+	req := httptest.NewRequest(http.MethodGet, "/agent-tools/list-documents", nil)
+	req.Header.Set("Authorization", "Bearer tool-token")
+	recorder := httptest.NewRecorder()
+	service.handleListDocumentsTool(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("retiring agent request status = %d body=%q, want unavailable", recorder.Code, recorder.Body.String())
+	}
+	if body := recorder.Body.String(); !strings.Contains(body, "workspace runtime is unavailable") || strings.Contains(body, "primary/secret.md") {
+		t.Fatalf("retiring agent request touched the primary runtime: %q", body)
+	}
 }
 
 func TestAgentWorkspaceApplyBorrowSurvivesConcurrentRetirement(t *testing.T) {
@@ -841,6 +945,64 @@ func waitForManagedRuntimeStoresToClose(t *testing.T, runtime *workspaceRuntime)
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+func waitForManagedRuntimeBorrower(t *testing.T, runtime *managedWorkspaceRuntime) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	var stableSince time.Time
+	for time.Now().Before(deadline) {
+		runtime.borrowMu.Lock()
+		borrowers := runtime.borrowers
+		runtime.borrowMu.Unlock()
+		if borrowers == 1 {
+			if stableSince.IsZero() {
+				stableSince = time.Now()
+			}
+			if time.Since(stableSince) >= 100*time.Millisecond {
+				return
+			}
+		} else {
+			stableSince = time.Time{}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("tool request did not retain the old runtime generation while waiting to append its intent")
+}
+
+func waitForManagedRuntimeRetiring(t *testing.T, runtime *managedWorkspaceRuntime) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		runtime.borrowMu.Lock()
+		retiring := runtime.retiring
+		runtime.borrowMu.Unlock()
+		if retiring {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("failed agent runtime did not begin retirement")
+}
+
+func waitForRuntimeReconcileIdle(t *testing.T, runtime *workspaceRuntime) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var stableSince time.Time
+	for time.Now().Before(deadline) {
+		if runtime != nil && runtime.reconcileQueue != nil && runtime.reconcileQueue.Len() == 0 {
+			if stableSince.IsZero() {
+				stableSince = time.Now()
+			}
+			if time.Since(stableSince) >= 100*time.Millisecond {
+				return
+			}
+		} else {
+			stableSince = time.Time{}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("replacement runtime did not finish its startup reconcile work")
 }
 
 func waitForDocumentCacheWaiter(t *testing.T, cache *documentCache, previous int64) {
