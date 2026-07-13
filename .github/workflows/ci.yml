@@ -273,6 +273,7 @@ jobs:
             "TestWorkspaceFSCreateEmptyOrReadReturnsReplacementAfterCreate",
             "TestMaterializeTrackedFileWithoutCacheCreatesEmptyProjection",
             "TestMaterializeTrackedFileWithoutCachePreservesExistingLocalContent",
+            "TestSQLiteFileDSNOpensWindowsDrivePath",
             "TestScanWorkspaceFilesObservesCompleteContentDuringAtomicReplacement",
             "TestApplyProjectedContentDoesNotAdvanceBaseAfterDurabilityFailure",
             "TestProjectMergedContentDoesNotAdvanceBaseAfterWriteFailure",
