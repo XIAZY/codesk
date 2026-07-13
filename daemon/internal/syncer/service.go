@@ -43,6 +43,7 @@ type Service struct {
 	daemonStatus            *daemonStatusReporter
 	toolServer              *http.Server
 	toolGateway             *toolGateway
+	refreshMu               sync.Mutex
 	mu                      sync.Mutex
 	agentRuntimeSupervisors sync.WaitGroup
 	primaryRuntime          *workspaceRuntime
@@ -69,6 +70,7 @@ type managedWorkspaceRuntime struct {
 	borrowCond     *sync.Cond
 	borrowers      int
 	retiring       bool
+	starting       bool
 }
 
 type managedAgentWorker struct {
@@ -625,6 +627,9 @@ func shouldRefreshForEvent(eventType string) bool {
 }
 
 func (s *Service) refresh(ctx context.Context) error {
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
+
 	workspace, err := s.fetchWorkspace(ctx)
 	if err != nil {
 		return err

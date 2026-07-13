@@ -258,7 +258,8 @@ func TestToolGatewayCreateThreadQueuesPathQuoteIntent(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("store root projection: %v", err)
 	}
-	service.primaryRuntime = &workspaceRuntime{rootDocumentID: rootID, docCache: cache, reconcileQueue: queue}
+	runtime := &workspaceRuntime{rootDocumentID: rootID, docCache: cache, reconcileQueue: queue}
+	service.agentRuntimes = map[string]*managedWorkspaceRuntime{"agent_1": {runtime: runtime}}
 	doc := crdt.New(crdt.WithClientID(771))
 	text := doc.GetText("content")
 	doc.Transact(func(txn *crdt.Transaction) {
@@ -344,10 +345,11 @@ func TestToolGatewayGetsDocumentByPathAsAuthorizedAgent(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("store root projection: %v", err)
 	}
-	service.primaryRuntime = &workspaceRuntime{
+	runtime := &workspaceRuntime{
 		rootDocumentID: rootID,
 		docCache:       cache,
 	}
+	service.agentRuntimes = map[string]*managedWorkspaceRuntime{"agent_1": {runtime: runtime}}
 	service.client = &http.Client{
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			t.Fatalf("get-document-by-path should use local root projection, not backend: %s %s", r.Method, r.URL.String())

@@ -21,6 +21,14 @@ type workspaceRuntimeBorrow struct {
 	release func()
 }
 
+type preparedAgentRuntimeReplacement struct {
+	agentID        string
+	expected       *managedWorkspaceRuntime
+	runtime        *workspaceRuntime
+	parentCtx      context.Context
+	restartAttempt int
+}
+
 func (s *Service) syncAgentRuntimes(ctx context.Context, workspace *workspaceResponse) error {
 	if s.agentRuntimes == nil {
 		s.agentRuntimes = map[string]*managedWorkspaceRuntime{}
@@ -39,7 +47,7 @@ func (s *Service) syncAgentRuntimes(ctx context.Context, workspace *workspaceRes
 
 	s.mu.Lock()
 	existing := make([]workspaceRuntimeBorrow, 0, len(desired))
-	retired := make([]*managedWorkspaceRuntime, 0)
+	prepared := make([]preparedAgentRuntimeReplacement, 0)
 	var setupErr error
 	for agentID := range desired {
 		currentAgent := desired[agentID]
@@ -54,8 +62,10 @@ func (s *Service) syncAgentRuntimes(ctx context.Context, workspace *workspaceRes
 					// updates its desired-workspace snapshot and must not bypass backoff.
 					continue
 				}
-				if runtime, release := managed.borrow(); runtime != nil {
+				if runtime, release, owned := managed.borrowForRefresh(); runtime != nil {
 					existing = append(existing, workspaceRuntimeBorrow{runtime: runtime, release: release})
+					continue
+				} else if owned {
 					continue
 				}
 			}
@@ -67,15 +77,20 @@ func (s *Service) syncAgentRuntimes(ctx context.Context, workspace *workspaceRes
 			break
 		}
 		runtime.initialWorkspace = workspace
-		replacement := s.startAgentWorkspaceRuntimeAttempt(ctx, agentID, runtime, workspace, 0)
 		if managed != nil {
 			managed.retire()
 			if managed.cancel != nil {
 				managed.cancel()
 			}
-			retired = append(retired, managed)
+			prepared = append(prepared, preparedAgentRuntimeReplacement{
+				agentID:   agentID,
+				expected:  managed,
+				runtime:   runtime,
+				parentCtx: ctx,
+			})
+			continue
 		}
-		s.agentRuntimes[agentID] = replacement
+		s.agentRuntimes[agentID] = s.startAgentWorkspaceRuntimeAttempt(ctx, agentID, runtime, workspace, 0)
 	}
 
 	staleIDs := make([]string, 0)
@@ -108,7 +123,11 @@ func (s *Service) syncAgentRuntimes(ctx context.Context, workspace *workspaceRes
 		}
 		borrowed.release()
 	}
-	errs = append(errs, closeManagedWorkspaceRuntimes(retired))
+	for _, replacement := range prepared {
+		errs = append(errs, closeManagedWorkspaceRuntime(replacement.expected))
+		_, publishErr := s.publishPreparedAgentRuntimeReplacement(replacement)
+		errs = append(errs, publishErr)
+	}
 	if setupErr != nil {
 		return errors.Join(setupErr, errors.Join(errs...))
 	}
@@ -165,16 +184,58 @@ func (s *Service) startAgentWorkspaceRuntimeAttemptWithReady(
 		workspace:      workspace,
 		startedAt:      time.Now(),
 		restartAttempt: restartAttempt,
+		starting:       true,
 	}
 	s.agentRuntimeSupervisors.Add(1)
 	go func() {
 		defer s.agentRuntimeSupervisors.Done()
-		runErr := runtime.run(runtimeCtx, ready)
+		startup := make(chan error, 1)
+		runDone := make(chan error, 1)
+		go func() { runDone <- runtime.run(runtimeCtx, startup) }()
+		startupErr := <-startup
+		if startupErr == nil && runtimeCtx.Err() == nil {
+			managed.borrowMu.Lock()
+			if !managed.retiring {
+				managed.starting = false
+			}
+			managed.borrowMu.Unlock()
+		}
+		if ready != nil {
+			ready <- startupErr
+		}
+		runErr := <-runDone
 		managed.recordResult(runErr)
 		close(done)
 		s.superviseStoppedAgentWorkspaceRuntime(agentID, managed)
 	}()
 	return managed
+}
+
+func (s *Service) publishPreparedAgentRuntimeReplacement(
+	prepared preparedAgentRuntimeReplacement,
+) (*managedWorkspaceRuntime, error) {
+	if prepared.runtime == nil {
+		return nil, nil
+	}
+	s.mu.Lock()
+	if prepared.expected == nil || prepared.parentCtx == nil || prepared.parentCtx.Err() != nil ||
+		s.agentRuntimes[prepared.agentID] != prepared.expected ||
+		!workspaceContainsAgent(prepared.expected.workspace, prepared.agentID) {
+		s.mu.Unlock()
+		return nil, prepared.runtime.Close()
+	}
+	workspace := prepared.expected.workspace
+	prepared.runtime.initialWorkspace = workspace
+	replacement := s.startAgentWorkspaceRuntimeAttempt(
+		prepared.parentCtx,
+		prepared.agentID,
+		prepared.runtime,
+		workspace,
+		prepared.restartAttempt,
+	)
+	s.agentRuntimes[prepared.agentID] = replacement
+	s.mu.Unlock()
+	return replacement, nil
 }
 
 func (s *Service) superviseStoppedAgentWorkspaceRuntime(agentID string, failed *managedWorkspaceRuntime) {
@@ -219,29 +280,34 @@ func (s *Service) superviseStoppedAgentWorkspaceRuntime(agentID string, failed *
 			continue
 		}
 		runtime.initialWorkspace = workspace
-		replacement := s.startAgentWorkspaceRuntimeAttempt(
-			failed.parentCtx,
-			agentID,
-			runtime,
-			workspace,
-			nextAttempt,
-		)
 		failed.retire()
 		if failed.cancel != nil {
 			failed.cancel()
 		}
-		s.agentRuntimes[agentID] = replacement
 		s.mu.Unlock()
 
+		if err := closeManagedWorkspaceRuntime(failed); err != nil {
+			log.Printf("agent workspace runtime %s retirement failed: %v", agentID, err)
+		}
+		replacement, err := s.publishPreparedAgentRuntimeReplacement(preparedAgentRuntimeReplacement{
+			agentID:        agentID,
+			expected:       failed,
+			runtime:        runtime,
+			parentCtx:      failed.parentCtx,
+			restartAttempt: nextAttempt,
+		})
+		if err != nil {
+			log.Printf("agent workspace runtime %s replacement discard failed: %v", agentID, err)
+		}
+		if replacement == nil {
+			return
+		}
 		log.Printf(
 			"agent workspace runtime %s stopped (%s): %v; restarting",
 			agentID,
 			managedWorkspaceRuntimeExitClass(runErr),
 			runErr,
 		)
-		if err := closeManagedWorkspaceRuntime(failed); err != nil {
-			log.Printf("agent workspace runtime %s retirement failed: %v", agentID, err)
-		}
 		return
 	}
 }
@@ -319,13 +385,22 @@ func (runtime *managedWorkspaceRuntime) restartPlan() (delayAttempt, nextAttempt
 }
 
 func (runtime *managedWorkspaceRuntime) borrow() (*workspaceRuntime, func()) {
+	borrowed, release, _ := runtime.borrowForRefresh()
+	return borrowed, release
+}
+
+func (runtime *managedWorkspaceRuntime) borrowForRefresh() (*workspaceRuntime, func(), bool) {
 	if runtime == nil {
-		return nil, func() {}
+		return nil, func() {}, false
 	}
 	runtime.borrowMu.Lock()
-	if runtime.retiring || runtime.runtime == nil {
+	if runtime.retiring || runtime.starting {
 		runtime.borrowMu.Unlock()
-		return nil, func() {}
+		return nil, func() {}, true
+	}
+	if runtime.runtime == nil {
+		runtime.borrowMu.Unlock()
+		return nil, func() {}, false
 	}
 	if runtime.borrowCond == nil {
 		runtime.borrowCond = sync.NewCond(&runtime.borrowMu)
@@ -346,7 +421,7 @@ func (runtime *managedWorkspaceRuntime) borrow() (*workspaceRuntime, func()) {
 			}
 			runtime.borrowMu.Unlock()
 		})
-	}
+	}, true
 }
 
 func (runtime *managedWorkspaceRuntime) retire() {

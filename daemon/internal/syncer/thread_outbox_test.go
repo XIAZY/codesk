@@ -77,7 +77,7 @@ func TestThreadOutboxPipelineQueuesMaterializesDeliversAndDeletesIntent(t *testi
 		t.Fatalf("store root projection: %v", err)
 	}
 	runtime.rootDocumentID = rootID
-	service.primaryRuntime = runtime
+	service.agentRuntimes = map[string]*managedWorkspaceRuntime{"agent_1": {runtime: runtime}}
 	service.client = &http.Client{
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			t.Fatalf("tool path should not call backend directly, got %s %s", r.Method, r.URL.String())
