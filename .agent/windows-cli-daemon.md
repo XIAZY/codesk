@@ -21,6 +21,8 @@ This plan deliberately excludes the system-tray application, PowerShell installe
 - [x] (2026-07-13 00:29Z) Narrowed the initial-creation API after QA review: `CreateEmptyOrRead` cannot stage arbitrary bytes, never removes a pathname after late failure, re-observes the final pathname after create, and is the cache-nil branch's single observation/creation operation.
 - [x] (2026-07-13 01:08Z) Replaced `MoveFileEx` with handle-based `FileRenameInfoEx` using replace/POSIX semantics after native Windows proved that delete sharing alone does not make `MoveFileEx` compatible with an open observation. Added direct ABI and behavior rows, plus repeated scan/write stress coverage.
 - [x] (2026-07-13 01:36Z) Closed the durability review gap: sync complete staging bytes before rename, open the Windows staging handle with write/delete access, flush it after the namespace swap before reporting success, keep projected-base persistence behind that success, and pin pre-sync/post-rename failure ordering plus the supported 64-bit ABI offsets.
+- [x] (2026-07-13 05:34Z) Required the native SQLite open/ping row in the Windows PASS guard, corrected the drive-letter URI explanation, and bound the construction review to one exact head.
+- [x] (2026-07-13 05:41Z) Split Windows CI evidence honestly: Linux/ARM64 automatically cross-builds the canonical Windows/amd64 GNU+CGO release and vets Windows-tagged daemon packages, while Windows-host execution is explicitly paused without deleting its native matrix or PASS guards. Made targeted Yrs staging replace the stable link archive without mutating Cargo's hard-linked host cache, so a cross-build cannot poison the next Linux run. Task #9 tracks restoring automatic native execution; task #5 remains the exact-head manual evidence lane.
 - [ ] Milestone 1 checkpoint: finish full repository gates, publish an exact head, and obtain native Windows CI evidence plus lead stamp before Phase 2 or Phase 3.
 - [ ] Milestone 2: implement deterministic portable-path materialization, host path keys, containment, and visible health failures red-first.
 - [ ] Milestone 3: implement Windows provider command/process-tree ownership and prove Codex/Claude lifecycle behavior.
@@ -61,6 +63,12 @@ This plan deliberately excludes the system-tray application, PowerShell installe
 - Observation: Cargo places a targeted GNU Windows static library under `target/x86_64-pc-windows-gnu/release`, while the CGO directive intentionally consumes one stable `target/release/libyrs.a` path.
   Evidence: the Windows build must stage the target-specific `libyrs.a` into the stable link location before Go compilation; a CGO-disabled daemon build cannot validate this boundary.
 
+- Observation: the repository's Linux/ARM64 CI host can cross-compile and link Windows/amd64 without executing Windows code by using the installed x86_64 MinGW compiler, Rust's `x86_64-pc-windows-gnu` target, and the canonical release script.
+  Evidence: `scripts/build-daemon-release.sh` already builds targeted Yrs, stages `libyrs.a`, links the CGO daemon, packages the `.exe` binaries, and fails loudly when MinGW, the Rust target, or `zip` is absent. This preserves automatic build/link coverage but cannot prove Win32 runtime, NTFS, race-detector, or CRDT round-trip behavior.
+
+- Observation: Cargo hard-links `target/release/libyrs.a` to `target/release/deps/libyrs.a` on this host. Copying a Windows archive over the stable link path in place therefore also replaced Cargo's cached host archive; a later host build reported fresh but Linux linking failed with `file format not recognized`.
+  Evidence: after the first real ARM64-to-Windows cross-build, both host paths had the same inode and contained AMD64 COFF objects. Target staging now copies through a fresh temporary file and renames it over the stable path, while a host build explicitly restores the stable path from the untouched host `deps` archive.
+
 - Observation: Claude instructions currently use `--append-system-prompt <full text>`, exposing arbitrary prompt contents in host process inspection on every platform and making `.cmd` invocation unsafe on Windows.
   Evidence: `claude_driver.go` currently builds the full instruction text into argv; the installed Claude CLI supports `--append-system-prompt-file`.
 
@@ -76,6 +84,10 @@ This plan deliberately excludes the system-tray application, PowerShell installe
 - Decision: keep `go-sqlite3` and build it with the same MinGW toolchain used by Yrs.
   Rationale: migrating the persistence driver adds behavioral and performance risk without removing CGO.
   Date/Author: 2026-07-12, Thomas/Bill.
+
+- Decision: split Windows CI into automatic Linux construction and paused Windows-host execution while no Windows runner is available. A dedicated Linux/ARM64 build job cross-builds the canonical Windows/amd64 release, vets Windows-tagged daemon packages, and compiles the native syncer test binary; the complete Windows-native race suite, `$required` PASS guard, and release verification remain intact behind an explicit job-level pause. A skipped Windows job is never runtime-green evidence.
+  Rationale: Rust/MinGW/CGO compile and link correctness does not require a Windows host and must not be silently dropped. Win32 syscall behavior, NTFS semantics, race execution, daemon start/sync, and release acceptance still require recorded output from a real Windows machine. Task #9 tracks restoring automatic execution, while task #5 records the interim exact-head native matrix.
+  Date/Author: 2026-07-13, AlphaToad/Bill/Deniz/Thomas/Vitaliy.
 
 - Decision: Phase 1 uses platform-specific files and semantic common APIs, with no `runtime.GOOS` branches inside sync decisions.
   Rationale: platform mechanics should be isolated and directly testable while the shared sync model remains one implementation.
@@ -123,7 +135,7 @@ This plan deliberately excludes the system-tray application, PowerShell installe
 
 ## Outcomes & Retrospective
 
-The task is in progress. Native Windows execution found the target-lock defects, a POSIX-assumptive identity row, and the mismatch between `MoveFileEx` and delete-shared observations before merge. The amended P1 code now has one mutation owner, no target byte-lock layer, deterministic local-create preservation, handle-based POSIX replacement, delete-shared scan observations, and production-lifecycle identity rows. Milestone 1 still requires a green exact-head native rerun before Phase 2 or Phase 3 opens.
+The task is in progress. Native Windows execution found the target-lock defects, a POSIX-assumptive identity row, and the mismatch between `MoveFileEx` and delete-shared observations before merge. The amended P1 code now has one mutation owner, no target byte-lock layer, deterministic local-create preservation, handle-based POSIX replacement, delete-shared scan observations, and production-lifecycle identity rows. Automatic Linux CI preserves the Windows GNU/CGO construction boundary, but automatic Windows-host execution is paused until task #9 provisions a runner. Milestone 1 still requires the recorded exact-head native matrix in task #5 before Phase 2 or Phase 3 opens; a skipped job is not acceptance.
 
 ## Context and Orientation
 
@@ -156,7 +168,7 @@ Replace `fileIdentityForInfo` with `fileIdentityForPath`. Unix stats the path an
 
 Replace the inline `syscall.EXDEV` branch with `isCrossDeviceError`. Unix checks `EXDEV`; Windows unwraps path/link errors and checks `ERROR_NOT_SAME_DEVICE`.
 
-Extend the build tooling without changing SQLite drivers. `scripts/build-daemon-release.sh` gains `windows/amd64` target mappings and `.exe` output/package handling. `scripts/build-yffi.sh` and the CGO link path must copy or select the `x86_64-pc-windows-gnu` `libyrs.a` deterministically. Add a dedicated Windows CI job that installs Go, Rust GNU target, MSYS2/MinGW, builds Yrs, runs the Windows-native syncer tests, and builds both daemon and agent-tool. The job must fail if Windows tests are skipped.
+Extend the build tooling without changing SQLite drivers. `scripts/build-daemon-release.sh` gains `windows/amd64` target mappings and `.exe` output/package handling. `scripts/build-yffi.sh` and the CGO link path must copy or select the `x86_64-pc-windows-gnu` `libyrs.a` deterministically. A dedicated automatic Linux/ARM64 build job enters through that canonical release script with x86_64 MinGW, vets the Windows-tagged syncer and Yrs packages, and compiles the native syncer test binary. Keep a dedicated Windows CI job that installs Go, Rust GNU target, MSYS2/MinGW, builds Yrs, runs the Windows-native syncer tests, and builds both daemon and agent-tool. While no Windows runner is available, only that host-execution job is explicitly paused; its full body and required PASS guard remain executable and task #9 tracks re-enabling it.
 
 The Windows job must enter through `scripts/build-daemon-release.sh`, not a parallel ad hoc `go build`. It verifies the zip members are the two `.exe` binaries with valid PE headers/signatures, the manifest contains exactly the Windows/amd64 artifact, and `SHA256SUMS` plus the manifest hash match the archive. The native primitive suite structurally guards removal of the legacy byte-lock files/symbols and requires canonical append/create-empty-or-read/scan-replacement rows, file and directory rename stability, production close/remove/recreate inequality, and deterministic replacement-object identity.
 
@@ -219,7 +231,7 @@ For every milestone, run formatting and repository gates:
     go vet ./...
     git diff --check
 
-The Windows CI job must execute the equivalent native commands and print actual test passes; a compile-only or skipped test job is a failure.
+The automatic Linux construction gate is supporting evidence only. Milestone acceptance still requires the Windows CI job, or a recorded exact-head manual run, to execute the equivalent native commands and print actual test passes; a compile-only or skipped Windows job is never runtime-green evidence.
 
 ## Validation and Acceptance
 
