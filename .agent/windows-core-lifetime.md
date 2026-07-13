@@ -70,6 +70,9 @@ The change is demonstrated with tests written before the behavioral implementati
 - Observation: The canonical release wrapper cannot rebuild Rust host build scripts on this ARM64 Windows installation even though the actual release-style link is valid.
   Evidence: ARM64-MSVC Rust resolves MSYS `/usr/bin/link.exe` and reports its Unix `link` operand error; Visual Studio `link.exe` is absent. Using the retained, previously built x86_64 GNU Yrs archive, the wrapper's exact static Go linker flags produced valid AMD64 PE daemon and agent-tool binaries.
 
+- Observation: Agent workspace runtimes also have tool-handler cache consumers, so invoking their self-closing public `Run` under the service context was still too early.
+  Evidence: A final owner-boundary regression cancelled a managed agent runtime and then probed its path-lock store before registry teardown; it failed RED with `sql: database is closed`. Managed runtimes now call the non-owning run helper, while registry removal or global teardown performs cancel, join, and close after gateway drain. The regression and affected race set pass.
+
 ## Decision Log
 
 - Decision: Enforce a real red/green gate before changing ownership behavior.
@@ -279,6 +282,13 @@ Direct Windows/amd64 release-style static links:
     notty-agent-tool.exe PE machine=0x8664 bytes=6376448
       sha256=868d48812cde1a76143107777cbd4a3a4c3b959ae94bd3baa7a5c79e60047353
 
+Final managed-agent owner-boundary proof:
+
+    RED: agent runtime closed its stores before the registry owner drained tool users:
+         sql: database is closed
+    GREEN: TestManagedAgentRuntimeRetainsStoresUntilRegistryOwnerCloses PASS
+    affected Windows/amd64 race set: PASS (9.117s)
+
 ## Interfaces and Dependencies
 
 Define a watcher abstraction in `replica.go` with `Add(string) error`, `Close() error`, and receive-only event/error channels exposed by methods. A real adapter wraps `*fsnotify.Watcher`; tests inject a factory on `workspaceReplica`.
@@ -302,3 +312,5 @@ Revision note (2026-07-13 13:52 EDT): Recorded retained per-runtime path-lock ow
 Revision note (2026-07-13 14:02 EDT): Recorded the owned service teardown, joined agent supervisor, ownership-split regressions, complete native ARM64 package pass, and Windows/amd64 race pass.
 
 Revision note (2026-07-13 14:14 EDT): Recorded the final locally available repository gates, exact 28-row audit, release-style static link, and concrete host limitations.
+
+Revision note (2026-07-13 14:20 EDT): Added the managed-agent-runtime store boundary found during final dependency review and its RED/GREEN proof.
