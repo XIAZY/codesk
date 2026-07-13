@@ -21,6 +21,7 @@ type codexRuntimeApp interface {
 	Start(context.Context) error
 	Stop() error
 	Events() <-chan appServerEvent
+	ExitInfo() RuntimeExitInfo
 	PID() int
 	ThreadResume(context.Context, string, string, string) error
 	ThreadStart(context.Context, string, string) (string, error)
@@ -163,6 +164,13 @@ func (p *codexRuntimeProcess) PID() int {
 		return 0
 	}
 	return p.app.PID()
+}
+
+func (p *codexRuntimeProcess) ExitInfo() RuntimeExitInfo {
+	if p == nil || p.app == nil {
+		return RuntimeExitInfo{}
+	}
+	return p.app.ExitInfo()
 }
 
 func (p *codexRuntimeProcess) forwardEvents() {

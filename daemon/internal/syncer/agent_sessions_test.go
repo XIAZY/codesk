@@ -46,6 +46,7 @@ type fakeRuntimeProcess struct {
 	startSessionErr error
 	steerErr        error
 	failResume      bool
+	exitInfo        RuntimeExitInfo
 }
 
 func newFakeRuntimeDriver() *fakeRuntimeDriver {
@@ -181,6 +182,18 @@ func (p *fakeRuntimeProcess) Events() <-chan RuntimeEvent {
 
 func (p *fakeRuntimeProcess) PID() int {
 	return 123
+}
+
+func (p *fakeRuntimeProcess) ExitInfo() RuntimeExitInfo {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.exitInfo
+}
+
+func (p *fakeRuntimeProcess) setExitInfo(info RuntimeExitInfo) {
+	p.mu.Lock()
+	p.exitInfo = info
+	p.mu.Unlock()
 }
 
 func (p *fakeRuntimeProcess) inputsByKind(kind RuntimeInputKind) []RuntimeInput {

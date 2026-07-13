@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 )
 
 type appServerEvent struct {
@@ -44,14 +45,17 @@ type codexAppServer struct {
 	stdin  io.WriteCloser
 	nextID atomic.Int64
 
-	mu       sync.Mutex
-	pending  map[int64]chan appServerResponse
-	events   chan appServerEvent
-	done     chan error
-	stopOnce sync.Once
-	stopping chan struct{}
-	readDone chan struct{}
-	log      *agentLog
+	mu         sync.Mutex
+	pending    map[int64]chan appServerResponse
+	events     chan appServerEvent
+	done       chan error
+	stopOnce   sync.Once
+	stopping   chan struct{}
+	readDone   chan struct{}
+	log        *agentLog
+	expected   bool            // true once Stop() deliberately killed the process
+	stderrRing []string        // bounded ring of the most recent stderr lines
+	exitInfo   RuntimeExitInfo // set by the exit goroutine before events closes
 }
 
 type appServerResponse struct {
@@ -105,6 +109,7 @@ func (c *codexAppServer) Start(ctx context.Context) error {
 	go func() {
 		err := cmd.Wait()
 		c.logf("codex app-server exited err=%v", err)
+		c.recordExitInfo(cmd, err)
 		c.done <- err
 		<-c.readDone
 		close(c.events)
@@ -142,6 +147,9 @@ func (c *codexAppServer) closeLog() {
 }
 
 func (c *codexAppServer) Stop() error {
+	c.mu.Lock()
+	c.expected = true
+	c.mu.Unlock()
 	c.stopOnce.Do(func() { close(c.stopping) })
 	if c.cmd == nil || c.cmd.Process == nil {
 		return nil
@@ -342,11 +350,50 @@ func (c *codexAppServer) stderrLoop(stderr io.Reader) {
 	scanner := bufio.NewScanner(stderr)
 	scanner.Buffer(make([]byte, 0, 16*1024), 1024*1024)
 	for scanner.Scan() {
-		c.logf("stderr %s", scanner.Text())
+		line := scanner.Text()
+		c.logf("stderr %s", line)
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			c.mu.Lock()
+			c.stderrRing = append(c.stderrRing, trimmed)
+			if len(c.stderrRing) > 8 {
+				c.stderrRing = c.stderrRing[len(c.stderrRing)-8:]
+			}
+			c.mu.Unlock()
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		c.logf("stderr scan error err=%v", err)
 	}
+}
+
+// recordExitInfo captures why the app-server process ended, before the events
+// channel closes so a consumer observing the close can read it via ExitInfo().
+func (c *codexAppServer) recordExitInfo(cmd *exec.Cmd, waitErr error) {
+	c.mu.Lock()
+	info := RuntimeExitInfo{
+		ExitCode: -1,
+		Expected: c.expected,
+		Stderr:   append([]string(nil), c.stderrRing...),
+	}
+	c.mu.Unlock()
+	if waitErr != nil {
+		info.Err = waitErr.Error()
+	}
+	if state := cmd.ProcessState; state != nil {
+		info.ExitCode = state.ExitCode()
+		if ws, ok := state.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			info.Signal = ws.Signal().String()
+		}
+	}
+	c.mu.Lock()
+	c.exitInfo = info
+	c.mu.Unlock()
+}
+
+func (c *codexAppServer) ExitInfo() RuntimeExitInfo {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.exitInfo
 }
 
 func (c *codexAppServer) handleServerRequest(payload []byte) {
