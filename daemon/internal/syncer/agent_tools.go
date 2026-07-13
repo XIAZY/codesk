@@ -87,7 +87,8 @@ type toolDocumentViewResponse struct {
 }
 
 func (s *Service) listDocumentsForRun(ctx context.Context, run *agentRun) (*toolDocumentsResponse, error) {
-	runtime := s.runtimeForThreadAnchor(run)
+	runtime, release := s.runtimeForThreadAnchor(run)
+	defer release()
 	if runtime == nil {
 		return nil, fmt.Errorf("workspace runtime is unavailable")
 	}
@@ -404,7 +405,8 @@ func (s *Service) queueThreadCreateAsRun(ctx context.Context, run *agentRun, pay
 	} else if !hasThreadRangeTarget(payload) && strings.TrimSpace(payload.Quote) == "" {
 		return "", fmt.Errorf("provide --line, --quote, a line-column range, UTF-16 offsets, or --document")
 	}
-	runtime := s.runtimeForThreadAnchor(run)
+	runtime, release := s.runtimeForThreadAnchor(run)
+	defer release()
 	if runtime == nil || runtime.docCache == nil {
 		return "", fmt.Errorf("workspace runtime is unavailable")
 	}

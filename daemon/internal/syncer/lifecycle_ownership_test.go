@@ -592,30 +592,29 @@ func TestAgentToolRuntimeBorrowSurvivesGenerationReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	rootID := "root"
-	if err := runtime.docCache.storeRootProjectionEntries(rootID, []rootProjectionEntry{{
-		EntryID:           "doc-1",
-		ContentDocumentID: "doc-1",
-		DesiredPath:       "docs/spec.md",
-		MaterializedPath:  "docs/spec.md",
-		Active:            true,
-	}}); err != nil {
-		t.Fatal(err)
-	}
 	runtime.rootDocumentID = rootID
 	runtime.docCache.db.SetMaxOpenConns(1)
-
-	done := make(chan struct{})
-	managed := &managedWorkspaceRuntime{
-		runtime:   runtime,
-		cancel:    func() {},
-		done:      done,
-		startedAt: time.Now(),
+	workspace := &workspaceResponse{
+		RootDocumentID: rootID,
+		Agents:         []*agent{{ID: "agent-1"}},
 	}
 	service := newToolGatewayTestService(
 		&agent{ID: "agent-1", Handle: "reviewer", Kind: "codex"},
 		"tool-token",
 	)
 	service.cfg = cfg
+	ctx, cancel := context.WithCancel(context.Background())
+	runtimeCtx, runtimeCancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	managed := &managedWorkspaceRuntime{
+		runtime:    runtime,
+		cancel:     runtimeCancel,
+		done:       done,
+		parentCtx:  ctx,
+		runtimeCtx: runtimeCtx,
+		workspace:  workspace,
+		startedAt:  time.Now(),
+	}
 	service.agentRuntimes = map[string]*managedWorkspaceRuntime{"agent-1": managed}
 
 	reservation, err := net.Listen("tcp", "127.0.0.1:0")
@@ -631,7 +630,6 @@ func TestAgentToolRuntimeBorrowSurvivesGenerationReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() {
 		drainCtx, drainCancel := context.WithTimeout(context.Background(), 3*time.Second)
 		_ = gateway.Drain(drainCtx)
@@ -650,15 +648,16 @@ func TestAgentToolRuntimeBorrowSurvivesGenerationReplacement(t *testing.T) {
 	requestDone := make(chan toolRequestResult, 1)
 	go func() {
 		req, err := http.NewRequest(
-			http.MethodGet,
-			"http://"+toolAddr+"/agent-tools/get-document-by-path?path=docs%2Fspec.md",
-			nil,
+			http.MethodPost,
+			"http://"+toolAddr+"/agent-tools/create-thread",
+			strings.NewReader(`{"documentId":"root","quote":"root","body":"review root"}`),
 		)
 		if err != nil {
 			requestDone <- toolRequestResult{err: err}
 			return
 		}
 		req.Header.Set("Authorization", "Bearer tool-token")
+		req.Header.Set("Content-Type", "application/json")
 		res, err := http.DefaultClient.Do(req)
 		if err != nil {
 			requestDone <- toolRequestResult{err: err}
@@ -676,32 +675,31 @@ func TestAgentToolRuntimeBorrowSurvivesGenerationReplacement(t *testing.T) {
 		t.Fatalf("active tool handlers = %d, want 1 admitted cache borrower", activeHandlers)
 	}
 
-	managed.recordResult(errors.New("injected agent runtime failure"))
-	close(done)
-	replacementDone := make(chan error, 1)
-	workspace := &workspaceResponse{
-		RootDocumentID: rootID,
-		Agents:         []*agent{{ID: "agent-1"}},
+	superviseManagedRuntimeFailureForTest(service, managed, done, errors.New("injected agent runtime failure"))
+	select {
+	case <-managed.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("failed agent runtime did not stop")
 	}
-	go func() { replacementDone <- service.syncAgentRuntimes(ctx, workspace) }()
 	_, _ = waitForAgentRuntimeWatcher(t, service, "agent-1", managed)
 
 	newReq, err := http.NewRequest(
-		http.MethodGet,
-		"http://"+toolAddr+"/agent-tools/get-document-by-path?path=docs%2Fspec.md",
-		nil,
+		http.MethodPost,
+		"http://"+toolAddr+"/agent-tools/create-thread",
+		strings.NewReader(`{"documentId":"root","quote":"root","body":"review replacement"}`),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	newReq.Header.Set("Authorization", "Bearer tool-token")
+	newReq.Header.Set("Content-Type", "application/json")
 	newRes, err := http.DefaultClient.Do(newReq)
 	if err != nil {
 		t.Fatalf("new-generation tool request: %v", err)
 	}
 	newBody, readErr := io.ReadAll(newRes.Body)
 	_ = newRes.Body.Close()
-	if readErr != nil || newRes.StatusCode != http.StatusOK {
+	if readErr != nil || newRes.StatusCode != http.StatusCreated {
 		t.Fatalf(
 			"new tool request did not resolve to the replacement generation: status=%d body=%q err=%v",
 			newRes.StatusCode,
@@ -710,10 +708,17 @@ func TestAgentToolRuntimeBorrowSurvivesGenerationReplacement(t *testing.T) {
 		)
 	}
 
-	var earlyReplacement *error
+	if err := runtime.pathLocks.cleanupExpired(time.Now().UTC()); err != nil {
+		t.Fatalf("replacement closed the old runtime while an admitted tool borrower still owned it: %v", err)
+	}
 	select {
-	case err := <-replacementDone:
-		earlyReplacement = &err
+	case result := <-requestDone:
+		t.Fatalf(
+			"admitted tool request finished before its held cache connection was released: status=%d body=%q err=%v",
+			result.status,
+			result.body,
+			result.err,
+		)
 	case <-time.After(150 * time.Millisecond):
 	}
 	heldConnClose.Do(func() { _ = conn.Close() })
@@ -723,25 +728,10 @@ func TestAgentToolRuntimeBorrowSurvivesGenerationReplacement(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("admitted tool request did not finish after releasing the cache connection")
 	}
-	var replacementErr error
-	if earlyReplacement != nil {
-		replacementErr = *earlyReplacement
-	} else {
-		select {
-		case replacementErr = <-replacementDone:
-		case <-time.After(3 * time.Second):
-			t.Fatal("generation replacement did not finish after the tool borrower released")
-		}
-	}
-	if earlyReplacement != nil {
-		t.Errorf("generation replacement retired the runtime while an admitted tool borrower still owned it: %v", replacementErr)
-	}
-	if result.err != nil || result.status != http.StatusOK {
+	if result.err != nil || result.status != http.StatusCreated {
 		t.Errorf("tool request lost its runtime generation during replacement: status=%d body=%q err=%v", result.status, result.body, result.err)
 	}
-	if replacementErr != nil {
-		t.Errorf("generation replacement: %v", replacementErr)
-	}
+	waitForManagedRuntimeStoresToClose(t, runtime)
 }
 
 func TestAgentWorkspaceApplyBorrowSurvivesConcurrentRetirement(t *testing.T) {
@@ -758,21 +748,32 @@ func TestAgentWorkspaceApplyBorrowSurvivesConcurrentRetirement(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime.docCache.db.SetMaxOpenConns(1)
-	done := make(chan struct{})
-	managed := &managedWorkspaceRuntime{
-		runtime:   runtime,
-		cancel:    func() {},
-		done:      done,
-		startedAt: time.Now(),
+	workspace := &workspaceResponse{
+		RootDocumentID: "root",
+		Agents:         []*agent{{ID: "agent-1"}},
 	}
 	service := &Service{
 		cfg:           cfg,
 		client:        http.DefaultClient,
-		agentRuntimes: map[string]*managedWorkspaceRuntime{"agent-1": managed},
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	defer service.closeAgentRuntimes()
+	t.Cleanup(func() {
+		cancel()
+		service.closeAgentRuntimes()
+	})
+	runtimeCtx, runtimeCancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	managed := &managedWorkspaceRuntime{
+		runtime:    runtime,
+		cancel:     runtimeCancel,
+		done:       done,
+		parentCtx:  ctx,
+		runtimeCtx: runtimeCtx,
+		workspace:  workspace,
+		startedAt:  time.Now(),
+	}
+	service.agentRuntimes["agent-1"] = managed
 
 	heldConn, err := runtime.docCache.db.Conn(context.Background())
 	if err != nil {
@@ -781,23 +782,23 @@ func TestAgentWorkspaceApplyBorrowSurvivesConcurrentRetirement(t *testing.T) {
 	var heldConnClose sync.Once
 	defer heldConnClose.Do(func() { _ = heldConn.Close() })
 	waitCount := runtime.docCache.db.Stats().WaitCount
-	workspace := &workspaceResponse{
-		RootDocumentID: "root",
-		Agents:         []*agent{{ID: "agent-1"}},
-	}
 	applyDone := make(chan error, 1)
 	go func() { applyDone <- service.syncAgentRuntimes(ctx, workspace) }()
 	waitForDocumentCacheWaiter(t, runtime.docCache, waitCount)
 
-	managed.recordResult(errors.New("injected concurrent runtime failure"))
-	close(done)
-	replacementDone := make(chan error, 1)
-	go func() { replacementDone <- service.syncAgentRuntimes(ctx, workspace) }()
-
-	var earlyReplacement *error
+	superviseManagedRuntimeFailureForTest(service, managed, done, errors.New("injected concurrent runtime failure"))
 	select {
-	case err := <-replacementDone:
-		earlyReplacement = &err
+	case <-managed.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("failed agent runtime did not stop")
+	}
+	_, _ = waitForAgentRuntimeWatcher(t, service, "agent-1", managed)
+	if err := runtime.pathLocks.cleanupExpired(time.Now().UTC()); err != nil {
+		t.Fatalf("replacement closed the old runtime while applyWorkspace still borrowed it: %v", err)
+	}
+	select {
+	case err := <-applyDone:
+		t.Fatalf("workspace apply finished before its held cache connection was released: %v", err)
 	case <-time.After(150 * time.Millisecond):
 	}
 	heldConnClose.Do(func() { _ = heldConn.Close() })
@@ -807,24 +808,38 @@ func TestAgentWorkspaceApplyBorrowSurvivesConcurrentRetirement(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("workspace apply did not finish after releasing the cache connection")
 	}
-	var replacementErr error
-	if earlyReplacement != nil {
-		replacementErr = *earlyReplacement
-	} else {
-		select {
-		case replacementErr = <-replacementDone:
-		case <-time.After(3 * time.Second):
-			t.Fatal("retirement did not finish after workspace apply released its generation")
-		}
-	}
-	if earlyReplacement != nil {
-		t.Errorf("runtime retirement completed while applyWorkspace still borrowed the generation: %v", replacementErr)
-	}
 	if applyErr != nil {
 		t.Errorf("workspace apply lost its runtime generation during retirement: %v", applyErr)
 	}
-	if replacementErr != nil {
-		t.Errorf("runtime retirement: %v", replacementErr)
+	waitForManagedRuntimeStoresToClose(t, runtime)
+}
+
+func superviseManagedRuntimeFailureForTest(
+	service *Service,
+	managed *managedWorkspaceRuntime,
+	done chan struct{},
+	runErr error,
+) {
+	service.agentRuntimeSupervisors.Add(1)
+	managed.recordResult(runErr)
+	close(done)
+	go func() {
+		defer service.agentRuntimeSupervisors.Done()
+		service.superviseStoppedAgentWorkspaceRuntime(managed.runtime.replica.actorID, managed)
+	}()
+}
+
+func waitForManagedRuntimeStoresToClose(t *testing.T, runtime *workspaceRuntime) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if err := runtime.pathLocks.cleanupExpired(time.Now().UTC()); err != nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("retired runtime stores remained open after its borrowers released")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -1117,22 +1132,30 @@ func TestManagedAgentRuntimeRetainsStoresUntilRegistryOwnerCloses(t *testing.T) 
 	}
 }
 
-func startManagedWorkspaceRuntimeForTest(
+func startSupervisedAgentWorkspaceRuntimeForTest(
+	t *testing.T,
+	service *Service,
 	ctx context.Context,
+	agentID string,
 	runtime *workspaceRuntime,
+	workspace *workspaceResponse,
+	restartAttempt int,
 	ready chan<- error,
-) (*managedWorkspaceRuntime, <-chan error) {
-	runtimeCtx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-	result := make(chan error, 1)
-	managed := &managedWorkspaceRuntime{runtime: runtime, cancel: cancel, done: done}
-	go func() {
-		runErr := runtime.run(runtimeCtx, ready)
-		managed.recordResult(runErr)
-		result <- runErr
-		close(done)
-	}()
-	return managed, result
+) *managedWorkspaceRuntime {
+	t.Helper()
+	runtime.initialWorkspace = workspace
+	service.mu.Lock()
+	managed := service.startAgentWorkspaceRuntimeAttemptWithReady(
+		ctx,
+		agentID,
+		runtime,
+		workspace,
+		restartAttempt,
+		ready,
+	)
+	service.agentRuntimes[agentID] = managed
+	service.mu.Unlock()
+	return managed
 }
 
 func TestManagedWorkspaceRuntimeRestartBackoffClassifiesFailures(t *testing.T) {
@@ -1158,12 +1181,28 @@ func TestManagedWorkspaceRuntimeRestartBackoffClassifiesFailures(t *testing.T) {
 			}
 		})
 	}
+	now := time.Now()
+	stable := &managedWorkspaceRuntime{
+		startedAt:      now.Add(-agentRuntimeStableWindow),
+		stoppedAt:      now,
+		restartAttempt: 7,
+	}
+	if delayAttempt, nextAttempt := stable.restartPlan(); delayAttempt != 0 || nextAttempt != 0 {
+		t.Fatalf(
+			"stable runtime restart plan = delay attempt %d, next attempt %d; want 0, 0",
+			delayAttempt,
+			nextAttempt,
+		)
+	}
 }
 
 func TestSyncAgentRuntimesHonorsRepeatedFailureBackoff(t *testing.T) {
 	root := t.TempDir()
 	cfg := Config{AgentWorkspaceRoot: filepath.Join(root, "agents")}
 	workspace := &workspaceResponse{Agents: []*agent{{ID: "agent-1"}}}
+	wantErr := errors.New("injected repeated runtime failure")
+	watcher := newScriptedWorkspaceWatcher()
+	watcher.add = func(string) error { return wantErr }
 	runtime, err := newWorkspaceRuntime(
 		cfg,
 		http.DefaultClient,
@@ -1174,48 +1213,47 @@ func TestSyncAgentRuntimesHonorsRepeatedFailureBackoff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan struct{})
-	close(done)
-	stoppedAt := time.Now()
-	managed := &managedWorkspaceRuntime{
-		runtime:        runtime,
-		cancel:         func() {},
-		done:           done,
-		runErr:         errors.New("injected repeated runtime failure"),
-		startedAt:      stoppedAt.Add(-time.Second),
-		stoppedAt:      stoppedAt,
-		restartAttempt: 1,
-	}
+	runtime.replica.newWatcher = func() (workspaceWatcher, error) { return watcher, nil }
 	service := &Service{
 		cfg:           cfg,
 		client:        http.DefaultClient,
-		agentRuntimes: map[string]*managedWorkspaceRuntime{"agent-1": managed},
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 	}
-	defer service.closeAgentRuntimes()
-
-	if err := service.syncAgentRuntimes(context.Background(), workspace); err != nil {
-		t.Fatalf("sync during backoff: %v", err)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		service.closeAgentRuntimes()
+	})
+	ready := make(chan error, 1)
+	managed := startSupervisedAgentWorkspaceRuntimeForTest(
+		t,
+		service,
+		ctx,
+		"agent-1",
+		runtime,
+		workspace,
+		1,
+		ready,
+	)
+	if err := <-ready; !errors.Is(err, wantErr) {
+		t.Fatalf("agent runtime error = %v, want %v", err, wantErr)
 	}
+	select {
+	case <-managed.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("failed agent runtime did not stop")
+	}
+	if err := service.syncAgentRuntimes(ctx, workspace); err != nil {
+		t.Fatalf("workspace refresh during completion-owned backoff: %v", err)
+	}
+	time.Sleep(agentRuntimeRestartBaseDelay / 2)
 	service.mu.Lock()
 	duringBackoff := service.agentRuntimes["agent-1"]
 	service.mu.Unlock()
 	if duringBackoff != managed {
 		t.Fatal("managed runtime restarted before its repeated-failure backoff elapsed")
 	}
-
-	managed.resultMu.Lock()
-	managed.stoppedAt = time.Now().Add(-agentRuntimeRestartBaseDelay - time.Millisecond)
-	managed.startedAt = managed.stoppedAt.Add(-time.Second)
-	managed.resultMu.Unlock()
-	if err := service.syncAgentRuntimes(context.Background(), workspace); err != nil {
-		t.Fatalf("sync after backoff: %v", err)
-	}
-	service.mu.Lock()
-	replacement := service.agentRuntimes["agent-1"]
-	service.mu.Unlock()
-	if replacement == managed {
-		t.Fatal("managed runtime was not replaced after its backoff elapsed")
-	}
+	replacement, _ := waitForAgentRuntimeWatcher(t, service, "agent-1", managed)
 	if replacement.restartAttempt != 2 {
 		t.Fatalf("replacement restart attempt = %d, want 2", replacement.restartAttempt)
 	}
@@ -1238,29 +1276,37 @@ func TestSyncAgentRuntimesRestartsAfterStartupAddFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime.initialWorkspace = workspace
 	runtime.replica.newWatcher = func() (workspaceWatcher, error) { return watcher, nil }
-	managed, result := startManagedWorkspaceRuntimeForTest(context.Background(), runtime, make(chan error, 1))
-	if err := <-result; !errors.Is(err, wantErr) {
-		t.Fatalf("agent runtime error = %v, want %v", err, wantErr)
-	}
-	<-managed.done
-
 	service := &Service{
 		cfg:           cfg,
 		client:        http.DefaultClient,
-		agentRuntimes: map[string]*managedWorkspaceRuntime{"agent-1": managed},
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 	}
-	defer service.closeAgentRuntimes()
-	if err := service.syncAgentRuntimes(context.Background(), workspace); err != nil {
-		t.Fatalf("sync agent runtimes: %v", err)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		service.closeAgentRuntimes()
+	})
+	ready := make(chan error, 1)
+	managed := startSupervisedAgentWorkspaceRuntimeForTest(
+		t,
+		service,
+		ctx,
+		"agent-1",
+		runtime,
+		workspace,
+		0,
+		ready,
+	)
+	if err := <-ready; !errors.Is(err, wantErr) {
+		t.Fatalf("agent runtime error = %v, want %v", err, wantErr)
 	}
-	service.mu.Lock()
-	replacement := service.agentRuntimes["agent-1"]
-	service.mu.Unlock()
-	if replacement == managed {
-		t.Fatal("stopped agent runtime remained registered instead of being restarted")
+	select {
+	case <-managed.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("failed agent runtime did not stop")
 	}
+	replacement, _ := waitForAgentRuntimeWatcher(t, service, "agent-1", managed)
 	select {
 	case <-replacement.done:
 		t.Fatal("replacement agent runtime stopped immediately")
@@ -1283,35 +1329,42 @@ func TestSyncAgentRuntimesRestartsAfterFatalWatcherEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime.initialWorkspace = workspace
 	runtime.replica.newWatcher = func() (workspaceWatcher, error) { return watcher, nil }
+	service := &Service{
+		cfg:           cfg,
+		client:        http.DefaultClient,
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		service.closeAgentRuntimes()
+	})
 	ready := make(chan error, 1)
-	managed, result := startManagedWorkspaceRuntimeForTest(context.Background(), runtime, ready)
+	managed := startSupervisedAgentWorkspaceRuntimeForTest(
+		t,
+		service,
+		ctx,
+		"agent-1",
+		runtime,
+		workspace,
+		0,
+		ready,
+	)
 	if err := <-ready; err != nil {
 		t.Fatalf("agent runtime startup: %v", err)
 	}
 	badPath := filepath.Join(runtime.replica.rootDir, strings.Repeat("x", 5000))
 	watcher.events <- fsnotify.Event{Name: badPath, Op: fsnotify.Create}
-	if err := <-result; err == nil {
+	select {
+	case <-managed.done:
+	case <-time.After(2 * time.Second):
 		t.Fatal("watcher event processing failure did not stop the agent runtime")
 	}
-	<-managed.done
-
-	service := &Service{
-		cfg:           cfg,
-		client:        http.DefaultClient,
-		agentRuntimes: map[string]*managedWorkspaceRuntime{"agent-1": managed},
+	if runErr, _ := managed.result(); runErr == nil {
+		t.Fatal("watcher event processing failure returned nil")
 	}
-	defer service.closeAgentRuntimes()
-	if err := service.syncAgentRuntimes(context.Background(), workspace); err != nil {
-		t.Fatalf("sync agent runtimes: %v", err)
-	}
-	service.mu.Lock()
-	replacement := service.agentRuntimes["agent-1"]
-	service.mu.Unlock()
-	if replacement == managed {
-		t.Fatal("fatal event left a dead agent runtime registered instead of restarting it")
-	}
+	replacement, _ := waitForAgentRuntimeWatcher(t, service, "agent-1", managed)
 	select {
 	case <-replacement.done:
 		t.Fatal("replacement agent runtime stopped immediately")

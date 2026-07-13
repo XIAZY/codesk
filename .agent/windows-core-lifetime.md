@@ -27,6 +27,9 @@ The change is demonstrated with tests written before the behavioral implementati
 - [x] (2026-07-13 16:46 EDT) Moved the initial daemon status report after `primaryReady`, added an application-level gateway admission gate plus an explicit admitted-handler join, and made managed agent runtimes record exits and restart dead same-actor entries with classified exponential backoff.
 - [x] (2026-07-13 16:53 EDT) Added an integration row proving repeated managed-runtime failures remain registered during backoff and are replaced with the incremented attempt after the delay; it passed 20 race-enabled repetitions.
 - [x] (2026-07-13 16:55 EDT) Re-ran the exact amended source through full syncer race, full Go including the Yjs compatibility canary, vet, build, frontend typecheck plus 250 tests, production frontend build, and diff/clean-tree checks.
+- [x] (2026-07-13 17:38 EDT) Added three second-amendment regressions at test-only checkpoint `082b30e`: service-level completion must restart without a workspace event, an admitted tool request must retain its old runtime generation while a replacement serves new work, and concurrent workspace refresh must retain the generation it is applying. Replayed the final create-thread form against unchanged `c8c215a` production and captured the expected early-retirement plus `sql: database is closed` RED.
+- [x] (2026-07-13 17:47 EDT) Made runtime completion own classified cancellable restart, fenced replacement by registry identity and current desired workspace, added one generic generation borrow/retire barrier for all runtime consumers, and joined the service-owned runtime supervisors during shutdown.
+- [x] (2026-07-13 18:04 EDT) Passed the eight completion, generation-borrow, backoff, and retained-store lifecycle rows 20 times under race, the complete syncer package under race, full Go test/vet/build including the Yjs canary, frontend typecheck plus 250 tests, production frontend build, and diff checks on the final source.
 
 ## Surprises & Discoveries
 
@@ -87,6 +90,15 @@ The change is demonstrated with tests written before the behavioral implementati
 - Observation: Publishing daemon status is itself a readiness transition because the backend derives `online` from `last_seen_at`.
   Evidence: The injected primary `Add` failure returned before readiness but exact `7b7e2c6` had already emitted one `/api/daemon/status` request.
 
+- Observation: Recording a managed runtime result does not itself schedule reconciliation.
+  Evidence: At exact `c8c215a`, closing a live agent watcher stopped the runtime, but a quiet service created no replacement until another workspace refresh or the 60-second ticker happened.
+
+- Observation: Publishing a replacement and immediately closing the replaced runtime violates already-admitted consumers even though new lookups resolve to the replacement.
+  Evidence: On unchanged `c8c215a` production, a create-thread request admitted on the old generation returned HTTP 400 with `sql: database is closed`, and replacement retirement returned before the held cache borrower was released. The same failure reproduced through the service's concurrent `applyWorkspace` path.
+
+- Observation: Completion-driven restart work is part of the service lifetime, not detached cleanup.
+  Evidence: A failed runtime may wait in backoff or retry construction after its run loop has closed `done`. Reserving one service wait-group owner before each managed run lets shutdown cancel the runtime, prevent identity-fenced resurrection, and join that completion work before runtime-data teardown finishes.
+
 ## Decision Log
 
 - Decision: Enforce a real red/green gate before changing ownership behavior.
@@ -117,9 +129,17 @@ The change is demonstrated with tests written before the behavioral implementati
   Rationale: Nonfatal without resurrection silently disables an agent workspace. The registry records each result and stop time, immediately replaces the first failed runtime, exponentially backs off repeated failures to five seconds, and treats terminal authentication failures conservatively at the maximum delay. A runtime that lived for the stability window resets its retry history.
   Date/Author: 2026-07-13 / Vitaliy
 
+- Decision: Runtime completion, rather than a future workspace refresh, owns the restart deadline.
+  Rationale: A quiet workspace must recover on the documented immediate/100 ms-to-5 s schedule. Each completion waits on its own cancellable runtime context, rechecks parent cancellation, desired membership, and exact registry identity, then publishes at most one replacement. Manual refresh replacement or shutdown cancels the stale owner and the identity fence prevents resurrection.
+  Date/Author: 2026-07-13 / Vitaliy
+
+- Decision: Replacement uses one generic generation lease for every managed-runtime consumer.
+  Rationale: Tool handlers and workspace refresh both outlive the map lookup that admitted them. The registry atomically lends the selected runtime under the service lock; replacement marks the old generation retiring and publishes the new one, so new borrowers proceed immediately while close waits only for borrowers already admitted on the old generation. This is a lifetime rule on the existing runtime object, not a tool-specific pause or public version concept.
+  Date/Author: 2026-07-13 / Vitaliy
+
 ## Outcomes & Retrospective
 
-The original implementation was published, then reopened after exact-head review exposed three platform-independent lifecycle regressions and a test-proof gap. The amendment now has a committed test-only RED checkpoint and mutation RED proof for the six legacy rows that previously arrived beside their fixes. The production changes gate online status on primary readiness, give listener shutdown one owner, retain stores until every admitted handler returns, and resurrect dead managed agent runtimes without making their failure core-fatal. Publication remains pending the full validation run; native Windows remains a separate original-behavior gate rather than evidence for these Linux-reproducible lifecycle fixes.
+The original implementation was published, then reopened twice after exact-head review exposed five platform-independent lifecycle regressions and a test-proof gap. Both amendments have committed test-only RED checkpoints, and the six legacy rows that originally arrived beside fixes were separately mutation-reproved. The production changes gate online status on primary readiness, give listener shutdown one owner, retain stores until every admitted consumer returns, and make managed runtime completion schedule an identity-fenced replacement without making its failure core-fatal. New work can use the replacement immediately while existing old-generation borrowers drain; shutdown owns and joins the same supervision work. All locally available final gates are green. Native Windows remains a separate original-behavior gate rather than evidence for these Linux-reproducible lifecycle fixes.
 
 ## Context and Orientation
 
@@ -359,6 +379,28 @@ Amendment final gates on Linux/ARM64:
     frontend production build                               PASS (existing chunk-size warning only)
     git diff --check and tracked-tree cleanliness            PASS
 
+Second-amendment test-only RED checkpoint, exact `082b30e` on unchanged `c8c215a` production (with the final create-thread strengthening replayed in a detached worktree):
+
+    TestServiceRestartsFailedAgentRuntimeWithoutWorkspaceRefresh
+      agent runtime did not start a replacement watcher without a workspace refresh
+    TestAgentToolRuntimeBorrowSurvivesGenerationReplacement
+      generation replacement retired the runtime while an admitted tool borrower still owned it
+      status=400 body="sql: database is closed\n"
+    TestAgentWorkspaceApplyBorrowSurvivesConcurrentRetirement
+      retirement completed while applyWorkspace still borrowed the generation
+      workspace apply lost its runtime generation: sql: database is closed
+
+Second-amendment final gates on Linux/ARM64:
+
+    eight lifecycle rows under race (20x)                     PASS (22.408s)
+    full syncer package under race                            PASS (21.123s)
+    full Go suite, including Yjs compatibility canary        PASS (syncer 16.300s)
+    go vet ./...                                              PASS
+    go build ./...                                            PASS
+    frontend typecheck + Vitest                               PASS (21 files, 250 tests)
+    frontend production build                                PASS (existing chunk-size warning only)
+    git diff --check                                         PASS
+
 ## Interfaces and Dependencies
 
 Define a watcher abstraction in `replica.go` with `Add(string) error`, `Close() error`, and receive-only event/error channels exposed by methods. A real adapter wraps `*fsnotify.Watcher`; tests inject a factory on `workspaceReplica`.
@@ -386,3 +428,5 @@ Revision note (2026-07-13 14:14 EDT): Recorded the final locally available repos
 Revision note (2026-07-13 14:20 EDT): Added the managed-agent-runtime store boundary found during final dependency review and its RED/GREEN proof.
 
 Revision note (2026-07-13 14:24 EDT): Recorded base freshness, final publication to PR #149, and the intentionally skipped native-Windows CI job.
+
+Revision note (2026-07-13 18:04 EDT): Recorded the completion-wakeup and generation-borrow RED proofs, the identity-fenced service-owned supervisor, the sole completion-restart owner, and the final eight-row second-amendment gate set.
