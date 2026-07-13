@@ -35,11 +35,7 @@ type workspaceReplica struct {
 	projectedByID   map[string]*trackedFile
 }
 
-func newWorkspaceReplica(_ Config, rootDir, actorID, actorType string, markDirty func(string), markCreate func(localCreateCandidate)) (*workspaceReplica, error) {
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		return nil, err
-	}
+func newWorkspaceReplica(_ Config, rootDir, actorID, actorType string, markDirty func(string), markCreate func(localCreateCandidate)) *workspaceReplica {
 	if actorType == "" {
 		actorType = "daemon"
 	}
@@ -49,13 +45,12 @@ func newWorkspaceReplica(_ Config, rootDir, actorID, actorType string, markDirty
 		actorType:       actorType,
 		markDirty:       markDirty,
 		markCreate:      markCreate,
-		watcher:         watcher,
 		fs:              NewWorkspaceFS(rootDir),
 		watched:         map[string]struct{}{},
 		changes:         newWorkspaceChangeIndex(),
 		projectedByPath: map[string]*trackedFile{},
 		projectedByID:   map[string]*trackedFile{},
-	}, nil
+	}
 }
 
 func (r *workspaceReplica) actorKind() string {
@@ -72,7 +67,33 @@ func (r *workspaceReplica) markDocumentDirty(documentID string) {
 }
 
 func (r *workspaceReplica) Run(ctx context.Context) error {
-	defer r.watcher.Close()
+	if r == nil {
+		return nil
+	}
+	// The watcher exists only while this method is consuming both of its
+	// channels. Creating it in the constructor can deadlock synchronous users.
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return err
+	}
+	r.watchMu.Lock()
+	if r.watcher != nil {
+		r.watchMu.Unlock()
+		_ = watcher.Close()
+		return errors.New("workspace replica is already running")
+	}
+	r.watcher = watcher
+	r.watched = map[string]struct{}{}
+	r.watchMu.Unlock()
+	defer func() {
+		_ = watcher.Close()
+		r.watchMu.Lock()
+		if r.watcher == watcher {
+			r.watcher = nil
+			r.watched = map[string]struct{}{}
+		}
+		r.watchMu.Unlock()
+	}()
 	if err := os.MkdirAll(r.rootDir, 0o755); err != nil {
 		return err
 	}
@@ -98,11 +119,17 @@ func (r *workspaceReplica) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case event := <-r.watcher.Events:
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return nil
+			}
 			if err := r.handleWatcherEvent(event, time.Now()); err != nil {
 				log.Printf("%s local event error for %s: %v", r.actorID, event.Name, err)
 			}
-		case err := <-r.watcher.Errors:
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return nil
+			}
 			if err != nil {
 				log.Printf("%s watcher error: %v", r.actorID, err)
 			}
@@ -453,7 +480,7 @@ func (r *workspaceReplica) discoverLocalCreatesInDir(dir string) error {
 }
 
 func (r *workspaceReplica) ensureDirectoryWatches() error {
-	if r == nil || r.watcher == nil || r.rootDir == "" {
+	if r == nil || r.rootDir == "" {
 		return nil
 	}
 	return filepath.WalkDir(r.rootDir, func(path string, entry os.DirEntry, walkErr error) error {
@@ -480,12 +507,15 @@ func (r *workspaceReplica) ensureDirectoryWatches() error {
 }
 
 func (r *workspaceReplica) addWatchDir(path string) error {
-	if r == nil || r.watcher == nil || strings.TrimSpace(path) == "" {
+	if r == nil || strings.TrimSpace(path) == "" {
 		return nil
 	}
 	path = filepath.Clean(path)
 	r.watchMu.Lock()
 	defer r.watchMu.Unlock()
+	if r.watcher == nil {
+		return nil
+	}
 	if _, ok := r.watched[path]; ok {
 		return nil
 	}

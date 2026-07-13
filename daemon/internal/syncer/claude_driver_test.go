@@ -13,86 +13,9 @@ import (
 
 const claudeTestHandshakeWait = 500 * time.Millisecond
 
-// fakeClaudeScript speaks just enough of the claude CLI surface for the
-// driver: --version probing, --session-id/--resume launch flags, and the
-// stream-json stdin/stdout protocol (init on first message, result per turn,
-// control_response for control requests). Spawn args and received stdin lines
-// are appended to files named by FAKE_CLAUDE_ARGS_FILE / FAKE_CLAUDE_IO_FILE,
-// FAKE_CLAUDE_ENV_FILE captures the child process env, FAKE_CLAUDE_FAIL_RESUME=1
-// simulates resuming an unknown session, and FAKE_CLAUDE_HOLD_TURN=1 holds a
-// turn open (no result) until an interrupt so steer/interrupt run provably
-// mid-turn.
-const fakeClaudeScript = `#!/bin/sh
-if [ "$1" = "--version" ]; then
-	echo "9.9.9 (Claude Code)"
-	exit 0
-fi
-if [ -n "$FAKE_CLAUDE_ENV_FILE" ]; then
-	env > "$FAKE_CLAUDE_ENV_FILE"
-fi
-SID=""
-RESUME=""
-prev=""
-for arg in "$@"; do
-	if [ -n "$FAKE_CLAUDE_ARGS_FILE" ]; then
-		printf '%s\n' "$arg" >> "$FAKE_CLAUDE_ARGS_FILE"
-	fi
-	case "$prev" in
-	--session-id) SID="$arg" ;;
-	--resume) RESUME="$arg" ;;
-	esac
-	prev="$arg"
-done
-if [ -n "$RESUME" ]; then
-	if [ "$FAKE_CLAUDE_FAIL_RESUME" = "1" ]; then
-		echo "No conversation found with session ID: $RESUME" >&2
-		exit 1
-	fi
-	SID="$RESUME"
-fi
-INIT_SENT=""
-while IFS= read -r line; do
-	if [ -n "$FAKE_CLAUDE_IO_FILE" ]; then
-		printf '%s\n' "$line" >> "$FAKE_CLAUDE_IO_FILE"
-	fi
-	case "$line" in
-	*control_request*)
-		printf '{"type":"control_response","response":{"subtype":"success"}}\n'
-		if [ "$FAKE_CLAUDE_HOLD_TURN" = "1" ]; then
-			case "$line" in
-			*interrupt*)
-				printf '{"type":"result","subtype":"success","is_error":false,"session_id":"%s"}\n' "$SID"
-				;;
-			esac
-		fi
-		continue
-		;;
-	esac
-	if [ -z "$INIT_SENT" ]; then
-		INIT_SENT=1
-		printf '{"type":"system","subtype":"init","session_id":"%s"}\n' "$SID"
-	fi
-	case "$line" in
-	*"fail this turn"*)
-		printf '{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["boom"],"session_id":"%s"}\n' "$SID"
-		;;
-	*)
-		printf '{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]},"session_id":"%s"}\n' "$SID"
-		if [ "$FAKE_CLAUDE_HOLD_TURN" != "1" ]; then
-			printf '{"type":"result","subtype":"success","is_error":false,"session_id":"%s"}\n' "$SID"
-		fi
-		;;
-	esac
-done
-`
-
 func writeFakeClaude(t *testing.T) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "claude")
-	if err := os.WriteFile(path, []byte(fakeClaudeScript), 0o755); err != nil {
-		t.Fatalf("write fake claude: %v", err)
-	}
-	return path
+	return fakeProcessCommand(t, fakeProcessClaude)
 }
 
 func newTestClaudeProcess(t *testing.T, claudePath string) *claudeRuntimeProcess {

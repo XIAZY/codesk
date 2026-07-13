@@ -243,7 +243,7 @@ func TestToolGatewayRepliesAsOwningAgent(t *testing.T) {
 
 func TestToolGatewayCreateThreadQueuesPathQuoteIntent(t *testing.T) {
 	service := newToolGatewayTestService(&agent{ID: "agent_1", Handle: "reviewer", Kind: "codex"}, "token_123")
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new document cache: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestToolGatewayRejectsUnknownToken(t *testing.T) {
 
 func TestToolGatewayGetsDocumentByPathAsAuthorizedAgent(t *testing.T) {
 	service := newToolGatewayTestService(&agent{ID: "agent_1", Handle: "reviewer", Kind: "codex"}, "token_123")
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new document cache: %v", err)
 	}

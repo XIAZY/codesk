@@ -180,18 +180,13 @@ func (q *localCreateQueue) Drain() []localCreateCandidate {
 func New(cfg Config) (*Service, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	runtimes := defaultRuntimeRegistry(cfg)
-	primaryRuntime, err := newWorkspaceRuntime(cfg, client, cfg.WorkspaceDir, cfg.AgentID, "daemon")
-	if err != nil {
-		return nil, err
-	}
 	service := &Service{
-		cfg:            cfg,
-		client:         client,
-		runtimes:       runtimes,
-		daemonStatus:   newDaemonStatusReporter(cfg, client),
-		primaryRuntime: primaryRuntime,
-		agentRuntimes:  map[string]*managedWorkspaceRuntime{},
-		agentWorkers:   map[string]*managedAgentWorker{},
+		cfg:           cfg,
+		client:        client,
+		runtimes:      runtimes,
+		daemonStatus:  newDaemonStatusReporter(cfg, client),
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
+		agentWorkers:  map[string]*managedAgentWorker{},
 	}
 	service.sessions = newAgentSessionSupervisor(cfg, service.updateRemoteAgentSession, runtimes)
 	service.sessions.SetIdleWake(service.wakeAgentWorker)
@@ -216,6 +211,15 @@ func (s *Service) ensurePrimaryRuntime() error {
 	return nil
 }
 
+func (s *Service) closePrimaryRuntime() error {
+	if s == nil || s.primaryRuntime == nil {
+		return nil
+	}
+	runtime := s.primaryRuntime
+	s.primaryRuntime = nil
+	return runtime.Close()
+}
+
 func (s *Service) Run(ctx context.Context) error {
 	toolServer, err := s.startToolGateway()
 	if err != nil {
@@ -232,6 +236,8 @@ func (s *Service) Run(ctx context.Context) error {
 		_ = shutdownToolGateway(context.Background(), s.toolServer)
 		return err
 	}
+	primaryRuntime := s.primaryRuntime
+	defer s.closePrimaryRuntime()
 	s.reportDaemonStatus(ctx, true)
 	if err := s.refreshInitialWorkspace(ctx); err != nil {
 		s.closeAgentWorkers()
@@ -244,6 +250,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	primaryCtx, cancelPrimary := context.WithCancel(ctx)
 	defer cancelPrimary()
+	primaryDone := make(chan struct{})
 	shutdown := func() {
 		cancelPrimary()
 		s.closeAgentWorkers()
@@ -251,10 +258,12 @@ func (s *Service) Run(ctx context.Context) error {
 		if s.sessions != nil {
 			s.sessions.Shutdown()
 		}
+		<-primaryDone
 		_ = shutdownToolGateway(context.Background(), s.toolServer)
 	}
 	go func() {
-		if err := s.primaryRuntime.Run(primaryCtx); err != nil && primaryCtx.Err() == nil {
+		defer close(primaryDone)
+		if err := primaryRuntime.Run(primaryCtx); err != nil && primaryCtx.Err() == nil {
 			log.Printf("primary workspace runtime error: %v", err)
 		}
 	}()

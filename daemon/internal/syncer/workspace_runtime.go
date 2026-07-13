@@ -80,13 +80,17 @@ func newWorkspaceRuntime(cfg Config, client *http.Client, rootDir, actorID, acto
 		threadDeliveryWake: make(chan struct{}, 1),
 	}
 	runtime.documentSocket = newWorkspaceDocumentSocket(runtime)
-	replica, err := newWorkspaceReplica(cfg, rootDir, actorID, actorType, runtime.markDocumentDirty, runtime.markLocalCreate)
-	if err != nil {
-		return nil, err
-	}
+	replica := newWorkspaceReplica(cfg, rootDir, actorID, actorType, runtime.markDocumentDirty, runtime.markLocalCreate)
 	replica.docCache = cache
 	runtime.replica = replica
 	return runtime, nil
+}
+
+func (r *workspaceRuntime) Close() error {
+	if r == nil || r.docCache == nil {
+		return nil
+	}
+	return r.docCache.Close()
 }
 
 func (r *workspaceRuntime) markLocalCreate(candidate localCreateCandidate) {
@@ -106,7 +110,11 @@ func workspaceSyncDBPath(root string) string {
 }
 
 func (r *workspaceRuntime) Run(ctx context.Context) error {
-	if r == nil || r.replica == nil {
+	if r == nil {
+		return nil
+	}
+	defer r.Close()
+	if r.replica == nil {
 		return nil
 	}
 	if r.initialWorkspace != nil {

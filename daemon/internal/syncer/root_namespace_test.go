@@ -480,7 +480,7 @@ func TestRootLocalMoveSendsBeforeApplyingPendingIncomingRoot(t *testing.T) {
 	if err := os.WriteFile(path, []byte("same"), 0o644); err != nil {
 		t.Fatalf("write moved file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}

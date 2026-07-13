@@ -24,8 +24,10 @@ type workspaceStore struct {
 	path string
 	db   *sql.DB
 
-	mu      sync.Mutex
-	entries map[string]*documentCacheEntry
+	mu        sync.Mutex
+	entries   map[string]*documentCacheEntry
+	closeOnce sync.Once
+	closeErr  error
 }
 
 type documentCache = workspaceStore
@@ -137,6 +139,18 @@ func newDocumentCache(path string) (*documentCache, error) {
 		return nil, err
 	}
 	return store, nil
+}
+
+func (c *workspaceStore) Close() error {
+	if c == nil {
+		return nil
+	}
+	c.closeOnce.Do(func() {
+		if c.db != nil {
+			c.closeErr = c.db.Close()
+		}
+	})
+	return c.closeErr
 }
 
 func sqliteFileDSN(path string) string {

@@ -148,7 +148,7 @@ func TestReconcileTrackedDocumentSkipsInvalidUTF8LocalFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte{'b', 0xff, 'd'}, 0o644); err != nil {
 		t.Fatalf("write invalid local file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -407,7 +407,7 @@ func TestWorkspaceReplicaLocalChangeMarksDirtyDocument(t *testing.T) {
 }
 
 func TestReconcileDirtyDocumentsRequeuesOutboxAfterHTTPError(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -454,7 +454,7 @@ func TestReconcileDirtyDocumentsRequeuesOutboxAfterHTTPError(t *testing.T) {
 }
 
 func TestReconcileDirtyDocumentsDoesNotDropLaterIDsAfterError(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -632,6 +632,7 @@ func TestRefreshSharesFetchedWorkspaceWithWorkersAndReplicas(t *testing.T) {
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 		agentWorkers:  map[string]*managedAgentWorker{},
 	}
+	defer service.closePrimaryRuntime()
 
 	if err := service.refresh(ctx); err != nil {
 		t.Fatalf("refresh: %v", err)
@@ -701,6 +702,7 @@ func TestInitialRefreshFailsFastOnAgentStartupError(t *testing.T) {
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 		agentWorkers:  map[string]*managedAgentWorker{},
 	}
+	defer service.closePrimaryRuntime()
 	service.sessions = newAgentSessionSupervisor(service.cfg, nil, newFakeRuntimeRegistry(factory))
 	defer service.sessions.Shutdown()
 	defer service.closeAgentWorkers()
@@ -777,6 +779,7 @@ func TestRefreshStartsAgentSessionFromWorkspaceSnapshot(t *testing.T) {
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 		agentWorkers:  map[string]*managedAgentWorker{},
 	}
+	defer service.closePrimaryRuntime()
 	service.sessions = newAgentSessionSupervisor(service.cfg, nil, newFakeRuntimeRegistry(factory))
 	defer service.sessions.Shutdown()
 	defer service.closeAgentWorkers()
@@ -861,6 +864,7 @@ func TestRefreshStopsAgentSessionWhenWorkspaceSnapshotRemovesAgent(t *testing.T)
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 		agentWorkers:  map[string]*managedAgentWorker{},
 	}
+	defer service.closePrimaryRuntime()
 	service.sessions = newAgentSessionSupervisor(service.cfg, nil, newFakeRuntimeRegistry(factory))
 	defer service.sessions.Shutdown()
 	defer service.closeAgentWorkers()
@@ -1020,7 +1024,7 @@ func TestApplyProjectedContentDoesNotAdvanceBaseAfterDurabilityFailure(t *testin
 			if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
 				t.Fatalf("write old projection: %v", err)
 			}
-			cache, err := newDocumentCache(t.TempDir())
+			cache, err := newTestDocumentCache(t, t.TempDir())
 			if err != nil {
 				t.Fatalf("new cache: %v", err)
 			}
@@ -1089,7 +1093,7 @@ func TestProjectMergedContentDoesNotAdvanceBaseAfterWriteFailure(t *testing.T) {
 	if err := os.WriteFile(path, []byte("local"), 0o644); err != nil {
 		t.Fatalf("write local content: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1184,7 +1188,7 @@ func TestApplyProjectedContentConflictDoesNotAdvanceProjectedSeq(t *testing.T) {
 	if err := os.WriteFile(path, []byte("old plus local edit"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1254,7 +1258,7 @@ func TestProjectedBaseLivesInWorkspaceSQLiteWithCRDTState(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	cache, err := newDocumentCache(workspaceSyncDBPath(root))
+	cache, err := newTestDocumentCache(t, workspaceSyncDBPath(root))
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1290,7 +1294,7 @@ func TestProjectedBaseLivesInWorkspaceSQLiteWithCRDTState(t *testing.T) {
 }
 
 func TestReconcileTrackedDocumentNoopsWithoutDirtyOrPendingRemote(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1321,7 +1325,7 @@ func TestReconcileArchivesUnknownProjectedBaseInsteadOfDiffing(t *testing.T) {
 	if err := os.WriteFile(path, []byte("base"), 0o644); err != nil {
 		t.Fatalf("write projection: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1372,7 +1376,7 @@ func TestReconcileArchivesUnknownProjectedBaseInsteadOfDiffing(t *testing.T) {
 }
 
 func TestWorkspaceDocumentSocketAppendsIncomingUpdateToPendingLog(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1415,7 +1419,7 @@ func TestWorkspaceDocumentSocketAppendsIncomingUpdateToPendingLog(t *testing.T) 
 }
 
 func TestWorkspaceDocumentSocketIgnoresServerSyncStep1(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1448,7 +1452,7 @@ func TestWorkspaceDocumentSocketIgnoresServerSyncStep1(t *testing.T) {
 }
 
 func TestWorkspaceDocumentSocketServerSyncStep1PreservesDurableOutbox(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1676,7 +1680,7 @@ func TestWorkspaceDocumentSocketRunOnceSendsSyncStep1ForDesiredDocuments(t *test
 }
 
 func TestWorkspaceDocumentSocketInitialSyncDoesNotAdvertiseMissingCacheState(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1690,7 +1694,7 @@ func TestWorkspaceDocumentSocketInitialSyncDoesNotAdvertiseMissingCacheState(t *
 }
 
 func TestWorkspaceDocumentSocketInitialSyncUsesOnlyVerifiedLocalCacheState(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1708,7 +1712,7 @@ func TestWorkspaceDocumentSocketInitialSyncUsesOnlyVerifiedLocalCacheState(t *te
 }
 
 func TestDocumentCacheLocalStateVectorRequiresAppliedCRDTRows(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1764,7 +1768,7 @@ func TestReconcileTrackedDocumentMergesLocalEditWithPendingRemoteUpdate(t *testi
 		t.Fatalf("write initial file: %v", err)
 	}
 
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1845,7 +1849,7 @@ func TestReconcileTrackedDocumentDefersLocalUpdateWhenProjectedBaseMissingCRDTSt
 		t.Fatalf("write local file: %v", err)
 	}
 
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1877,7 +1881,7 @@ func TestReconcileTrackedDocumentArchivesLocalUpdateWithoutProjectedBase(t *test
 		t.Fatalf("write local file: %v", err)
 	}
 
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1929,7 +1933,7 @@ func TestMaterializeExistingLocalFileUsesCachedBaseAsProjection(t *testing.T) {
 		t.Fatalf("write local file: %v", err)
 	}
 
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1997,7 +2001,7 @@ func TestReconcileArchivesUnknownLocalFileAfterPendingRemoteEstablishesBase(t *t
 		t.Fatalf("write local file: %v", err)
 	}
 
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -2068,7 +2072,7 @@ func TestSingleWriterAppendPressureReconcilesIncrementalBatches(t *testing.T) {
 	}
 	defer file.Close()
 
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -2152,7 +2156,7 @@ func TestReconcileCapturesSequentialLocalAppendsAcrossCycles(t *testing.T) {
 		t.Fatalf("write local file: %v", err)
 	}
 
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -2216,7 +2220,7 @@ func TestReconcileRebasesAppendFromStaleWorkspaceBase(t *testing.T) {
 		t.Fatalf("write local file: %v", err)
 	}
 
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -2291,7 +2295,7 @@ func TestReconcileSendsLocalEditBeforeApplyingPendingRemoteUpdate(t *testing.T) 
 		t.Fatalf("write local file: %v", err)
 	}
 
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -2366,7 +2370,7 @@ func TestDocumentCacheRejectsInvalidRemoteUpdate(t *testing.T) {
 		t.Fatalf("write initial file: %v", err)
 	}
 
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -2403,7 +2407,7 @@ func TestReconcileTrackedDocumentAppliesPendingRemoteFromSQLiteLog(t *testing.T)
 	}
 
 	cacheRoot := t.TempDir()
-	cache, err := newDocumentCache(cacheRoot)
+	cache, err := newTestDocumentCache(t, cacheRoot)
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -2414,7 +2418,7 @@ func TestReconcileTrackedDocumentAppliesPendingRemoteFromSQLiteLog(t *testing.T)
 	if _, err := cache.appendPendingRemoteUpdate("doc_1", "doc.md", update); err != nil {
 		t.Fatalf("append pending remote: %v", err)
 	}
-	cache, err = newDocumentCache(cacheRoot)
+	cache, err = newTestDocumentCache(t, cacheRoot)
 	if err != nil {
 		t.Fatalf("reopen cache: %v", err)
 	}
@@ -2447,7 +2451,7 @@ func TestReconcileTrackedDocumentAppliesPendingRemoteFromSQLiteLog(t *testing.T)
 }
 
 func TestWorkspaceRuntimeReconcileTrackedDocumentsAppliesPendingRemoteUpdate(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -2506,7 +2510,7 @@ func TestWorkspaceRuntimeReconcileTrackedDocumentsAppliesPendingRemoteUpdate(t *
 }
 
 func TestDocumentCacheDedupesConcurrentRemoteDeliveries(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -2549,7 +2553,7 @@ func TestDocumentCacheDedupesConcurrentRemoteDeliveries(t *testing.T) {
 }
 
 func TestReconcileKeepsIncomingPendingWhenOutgoingSendFails(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -2636,7 +2640,7 @@ func TestMaterializeTrackedFileDefersProjectionToReconcile(t *testing.T) {
 		ID:   "doc_1",
 		Path: "docs/remote.md",
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new document cache: %v", err)
 	}
@@ -2714,7 +2718,7 @@ func TestReconcileProjectsMissingFileFromSharedCache(t *testing.T) {
 		ID:   "doc_1",
 		Path: "docs/remote.md",
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new document cache: %v", err)
 	}
@@ -2760,7 +2764,7 @@ func TestReconcileArchivesUnknownWorkingCopyBeforeProjection(t *testing.T) {
 	if err := os.WriteFile(path, []byte("local draft"), 0o644); err != nil {
 		t.Fatalf("write local draft: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new document cache: %v", err)
 	}
@@ -2815,7 +2819,7 @@ func TestReconcileArchivesUnknownWorkingCopyWithoutCacheContent(t *testing.T) {
 	if err := os.WriteFile(path, []byte("local edit"), 0o644); err != nil {
 		t.Fatalf("write local edit: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new document cache: %v", err)
 	}
@@ -2850,7 +2854,7 @@ func TestReconcileUsesSQLiteProjectedBase(t *testing.T) {
 	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
 		t.Fatalf("write local edit: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new document cache: %v", err)
 	}
@@ -3165,7 +3169,7 @@ func TestCentralReconcilePublishesQueuedCleanMove(t *testing.T) {
 	if err := os.WriteFile(newPath, []byte("same"), 0o644); err != nil {
 		t.Fatalf("write moved file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -3237,7 +3241,7 @@ func TestCentralReconcileRemoteDeleteArchivesDirtyWorkingCopy(t *testing.T) {
 	if err := os.WriteFile(path, []byte("dirty local"), 0o644); err != nil {
 		t.Fatalf("write dirty file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -3316,7 +3320,7 @@ func TestLocalCreateCreatesEmptyDocumentAndKeepsLocalBytesDirty(t *testing.T) {
 		_, _ = w.Write([]byte(`{"id":"doc_created","updateId":1}`))
 	}))
 	defer server.Close()
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -3391,7 +3395,7 @@ func TestLocalCreateIntentRetriesWithStableDocumentAndOperationID(t *testing.T) 
 	}))
 	defer server.Close()
 
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -3487,7 +3491,7 @@ func TestLocalCreateIntentKeepsClaimedPathAfterRootUpsertRestart(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -3582,7 +3586,7 @@ func TestOutgoingOutboxKeepsLocalUpdateWhenBackendSendFails(t *testing.T) {
 	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
 		t.Fatalf("write local file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -3666,7 +3670,7 @@ func TestOutgoingOutboxStoresAllDirtyWorkspacesWithActorAttribution(t *testing.T
 	if err := os.WriteFile(agentPath, []byte("base\nagent\n"), 0o644); err != nil {
 		t.Fatalf("write agent: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -3713,7 +3717,7 @@ func TestOutgoingOutboxClearsOnHTTPAcceptance(t *testing.T) {
 	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
 		t.Fatalf("write local file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -3760,7 +3764,7 @@ func TestOutgoingOutboxFinalizeConflictStoresAcceptedLocalProjectedSeq(t *testin
 	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
 		t.Fatalf("write local file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -3835,7 +3839,7 @@ func TestOutgoingOutboxFinalizeDuplicateDoesNotRegressProjectedSeq(t *testing.T)
 	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
 		t.Fatalf("write local file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -3924,7 +3928,7 @@ func TestFinalizeSentOutboxIgnoresSnapshotFailureAndClearsOutbox(t *testing.T) {
 	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
 		t.Fatalf("write local file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -4000,7 +4004,7 @@ func TestOutgoingOutboxSurvivesCacheReopenAndResendsIdempotently(t *testing.T) {
 	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
 		t.Fatalf("write local file: %v", err)
 	}
-	cache, err := newDocumentCache(cacheRoot)
+	cache, err := newTestDocumentCache(t, cacheRoot)
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -4025,7 +4029,7 @@ func TestOutgoingOutboxSurvivesCacheReopenAndResendsIdempotently(t *testing.T) {
 		t.Fatal("expected first reconcile to keep outbox after backend failure")
 	}
 
-	reopened, err := newDocumentCache(cacheRoot)
+	reopened, err := newTestDocumentCache(t, cacheRoot)
 	if err != nil {
 		t.Fatalf("reopen cache: %v", err)
 	}
