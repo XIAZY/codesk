@@ -360,12 +360,8 @@ type CreateWorkspaceRequest struct {
 	Handle string `json:"handle"`
 }
 
-// UpdateWorkspaceRequest is a partial update: nil means "leave unchanged",
-// a pointer to "" is a valid value only for DefaultRuntime (no default).
 type UpdateWorkspaceRequest struct {
-	Name           *string `json:"name"`
-	Slug           *string `json:"slug"`
-	DefaultRuntime *string `json:"defaultRuntime"`
+	Name *string `json:"name"`
 }
 
 // DeleteWorkspaceRequest carries the server-enforced confirmation: the caller

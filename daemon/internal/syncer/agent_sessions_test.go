@@ -792,10 +792,12 @@ func TestCodexAppServerReadLoopRoutesResponsesNotificationsAndServerRequests(t *
 	stdin := &captureWriteCloser{}
 	pending := make(chan appServerResponse, 1)
 	client := &codexAppServer{
-		stdin:   stdin,
-		pending: map[int64]chan appServerResponse{7: pending},
-		events:  make(chan appServerEvent, 2),
-		log:     logger,
+		stdin:    stdin,
+		pending:  map[int64]chan appServerResponse{7: pending},
+		events:   make(chan appServerEvent, 2),
+		stopping: make(chan struct{}),
+		readDone: make(chan struct{}),
+		log:      logger,
 	}
 	defer client.log.Close()
 	input := strings.Join([]string{

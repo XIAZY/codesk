@@ -8,9 +8,7 @@ import (
 )
 
 // handleUpdateWorkspace is PATCH /api/workspaces/{id}/workspace.
-// name and defaultRuntime require manage_workspace (owner or admin); slug is
-// owner-only because changing it breaks existing links — old-slug URLs 404 by
-// design (no redirect table at this scale).
+// Only the workspace name is mutable; slug and default runtime are immutable.
 func (s *Server) handleUpdateWorkspace(w http.ResponseWriter, r *http.Request) {
 	if !s.requireHumanPrincipal(w, r) {
 		return
@@ -25,18 +23,11 @@ func (s *Server) handleUpdateWorkspace(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if req.Slug != nil && auth.MembershipRole != MembershipRoleOwner {
-		writeError(w, http.StatusForbidden, "changing the workspace slug requires the owner role")
-		return
-	}
 	workspace, err := updateWorkspaceSettings(s.sqlDB(), s.requestWorkspaceID(r), req)
 	if err != nil {
 		status := http.StatusBadRequest
-		switch {
-		case errors.Is(err, ErrNotFound):
+		if errors.Is(err, ErrNotFound) {
 			status = http.StatusNotFound
-		case errors.Is(err, errSlugTaken):
-			status = http.StatusConflict
 		}
 		writeError(w, status, err.Error())
 		return

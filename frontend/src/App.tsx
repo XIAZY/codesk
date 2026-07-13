@@ -2397,7 +2397,6 @@ export function WorkspaceApp({
           api={api}
           workspaceId={workspaceId}
           workspace={workspace}
-          workspaceSlug={workspaceSlug}
           activeTab={manageTab}
           canInvite={canInviteMembers}
           groupedAgents={groupedAgents}
@@ -2416,9 +2415,6 @@ export function WorkspaceApp({
           }}
           onWorkspaceSaved={(updatedWorkspace) => {
             onWorkspaceUpdated(updatedWorkspace);
-            if (updatedWorkspace.slug !== workspaceSlug) {
-              navigate({ kind: "workspace", slug: updatedWorkspace.slug, view }, { replace: true });
-            }
           }}
           onMemberInvited={() => onboarding.record("member_invited", "workspace")}
         />
@@ -4807,99 +4803,63 @@ export function MembersAndInvite({
   );
 }
 
-const workspaceRuntimeOptions = [
-  { value: "", label: "No default" },
-  { value: "codex", label: "Codex" },
-  { value: "claude", label: "Claude" },
-];
-
-// Workspace settings (plan §4.2). The backend supports partial PATCH: owners/admins can edit
-// name/default runtime, while slug is owner-only because changing it invalidates old URLs.
 function WorkspaceSettings({
   api,
   workspaceId,
   workspace,
-  workspaceSlug,
   onSaved,
 }: {
   api: ApiClient;
   workspaceId: string;
   workspace: ReturnType<typeof useWorkspace>["workspace"];
-  workspaceSlug: string;
   onSaved: (workspace: WorkspaceSummary) => void;
 }) {
-  const currentSlug = workspace.slug || workspaceSlug;
-  const currentDefaultRuntime = workspace.defaultRuntime ?? "";
+  const workspaceUrl = `${publicOrigin}/w/${workspace.slug}`;
   const role = workspace.currentMembershipRole || "";
   const canManage = role === "owner" || role === "admin";
-  const canEditSlug = role === "owner";
   const [nameDraft, setNameDraft] = useState(workspace.name);
-  const [slugDraft, setSlugDraft] = useState(currentSlug);
-  const [runtimeDraft, setRuntimeDraft] = useState(currentDefaultRuntime);
   const [saving, setSaving] = useState(false);
+  const [copied, setCopied] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
     setNameDraft(workspace.name);
-    setSlugDraft(currentSlug);
-    setRuntimeDraft(currentDefaultRuntime);
+    setCopied(false);
     setMessage("");
     setError("");
-  }, [currentDefaultRuntime, currentSlug, workspace.name]);
+  }, [workspace.name, workspace.slug]);
 
   const trimmedName = nameDraft.trim();
-  const trimmedSlug = slugDraft.trim();
-  const slugPattern = new RegExp(`^${identifierPattern}$`);
   const nameChanged = trimmedName !== workspace.name.trim();
-  const slugChanged = trimmedSlug !== currentSlug;
-  const runtimeChanged = runtimeDraft !== currentDefaultRuntime;
-  const hasEditableChange =
-    (canManage && nameChanged) ||
-    (canEditSlug && slugChanged) ||
-    (canManage && runtimeChanged);
-  const slugValid =
-    trimmedSlug.length >= workspaceSlugMinLength &&
-    trimmedSlug.length <= workspaceSlugMaxLength &&
-    slugPattern.test(trimmedSlug);
-  const saveDisabled =
-    saving ||
-    !canManage ||
-    !hasEditableChange ||
-    !trimmedName ||
-    (canEditSlug && slugChanged && !slugValid);
+  const saveDisabled = saving || !canManage || !nameChanged || !trimmedName;
+
+  const copyWorkspaceUrl = async () => {
+    setError("");
+    try {
+      await navigator.clipboard.writeText(workspaceUrl);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
 
   const save = async (event: FormEvent) => {
     event.preventDefault();
     if (saveDisabled) {
       return;
     }
-    const input: UpdateWorkspaceSettingsInput = {};
-    if (canManage && nameChanged) {
-      input.name = trimmedName;
-    }
-    if (canEditSlug && slugChanged) {
-      input.slug = trimmedSlug;
-    }
-    if (canManage && runtimeChanged) {
-      input.defaultRuntime = runtimeDraft;
-    }
     setSaving(true);
     setError("");
     setMessage("");
     try {
-      const response = await api.updateWorkspaceSettings(workspaceId, input);
+      const response = await api.updateWorkspaceSettings(workspaceId, { name: trimmedName });
       onSaved(response.workspace);
       setNameDraft(response.workspace.name);
-      setSlugDraft(response.workspace.slug);
-      setRuntimeDraft(response.workspace.defaultRuntime ?? "");
       setMessage("Workspace settings saved.");
     } catch (err) {
-      if (err instanceof ApiError && err.status === 409) {
-        setError("Slug taken. Choose another workspace URL.");
-      } else {
-        setError(err instanceof Error ? err.message : String(err));
-      }
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSaving(false);
     }
@@ -4923,46 +4883,29 @@ function WorkspaceSettings({
             disabled={!canManage || saving}
           />
         </label>
-        <label className="field">
-          <span className="lab">Workspace URL slug</span>
-          <input
-            value={slugDraft}
-            onChange={(event) => {
-              setSlugDraft(event.target.value.trim().toLowerCase());
-              setMessage("");
-              setError("");
-            }}
-            disabled={!canEditSlug || saving}
-            aria-describedby="workspace-slug-help"
-          />
-        </label>
-        <p id="workspace-slug-help" className="tiny muted">
-          {canEditSlug
-            ? `${identifierHelpText} The public URL is ${publicOrigin}/w/${trimmedSlug || currentSlug}.`
-            : "Only the workspace owner can change the URL slug."}
-        </p>
-        <label className="field">
-          <span className="lab">Default agent runtime</span>
-          <select
-            value={runtimeDraft}
-            onChange={(event) => {
-              setRuntimeDraft(event.target.value);
-              setMessage("");
-              setError("");
-            }}
-            disabled={!canManage || saving}
-          >
-            {workspaceRuntimeOptions.map((option) => (
-              <option value={option.value} key={option.value}>{option.label}</option>
-            ))}
-          </select>
-        </label>
+        <div className="setting-readonly workspace-url-setting">
+          <div className="workspace-url-label">
+            <span className="lab">Workspace URL</span>
+            <span className="tiny muted">Permanent</span>
+          </div>
+          <div className="workspace-url-value-row">
+            <span className="setting-value mono workspace-url-value">{workspaceUrl}</span>
+            <button
+              className="btn sm"
+              type="button"
+              aria-label={copied ? "Workspace URL copied" : "Copy workspace URL"}
+              onClick={() => void copyWorkspaceUrl()}
+            >
+              {copied ? "Copied" : "Copy"}
+            </button>
+          </div>
+          <p className="tiny muted">This URL is permanent and cannot be changed.</p>
+        </div>
         <p className="tiny muted">
           {canManage
-            ? "Owners and admins can update the name and default runtime. Slug changes are owner-only."
+            ? "Owners and admins can rename the workspace."
             : "Only workspace owners and admins can edit workspace settings."}
         </p>
-        {canEditSlug && slugChanged && !slugValid ? <p className="error-text">{identifierHelpText}</p> : null}
         {error ? <p className="error-text">{error}</p> : null}
         {message ? <p className="success-text">{message}</p> : null}
         <button className="btn accent" type="submit" disabled={saveDisabled}>
@@ -5050,7 +4993,6 @@ export function ManageModal({
   api,
   workspaceId,
   workspace,
-  workspaceSlug,
   activeTab,
   canInvite,
   groupedAgents,
@@ -5067,7 +5009,6 @@ export function ManageModal({
   api: ApiClient;
   workspaceId: string;
   workspace: ReturnType<typeof useWorkspace>["workspace"];
-  workspaceSlug: string;
   activeTab: ManageTab;
   canInvite: boolean;
   groupedAgents: Array<{ daemonId: string; daemonName: string; agents: Agent[] }>;
@@ -5136,7 +5077,6 @@ export function ManageModal({
                 api={api}
                 workspaceId={workspaceId}
                 workspace={workspace}
-                workspaceSlug={workspaceSlug}
                 onSaved={onWorkspaceSaved}
               />
             ) : (
