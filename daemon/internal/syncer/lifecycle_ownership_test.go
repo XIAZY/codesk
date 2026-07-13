@@ -1168,6 +1168,8 @@ func TestAgentRuntimeIsUnavailableUntilStartupReady(t *testing.T) {
 	addStarted := make(chan struct{})
 	releaseAdd := make(chan struct{})
 	var addOnce sync.Once
+	var releaseOnce sync.Once
+	releaseStartup := func() { releaseOnce.Do(func() { close(releaseAdd) }) }
 	watcher.add = func(string) error {
 		addOnce.Do(func() { close(addStarted) })
 		<-releaseAdd
@@ -1175,15 +1177,16 @@ func TestAgentRuntimeIsUnavailableUntilStartupReady(t *testing.T) {
 	}
 	runtime.replica.newWatcher = func() (workspaceWatcher, error) { return watcher, nil }
 	workspace := &workspaceResponse{RootDocumentID: "agent-root", Agents: []*agent{{ID: "agent-1"}}}
+	updatedWorkspace := &workspaceResponse{RootDocumentID: "agent-root", Agents: []*agent{{ID: "agent-1"}}}
 	service := newToolGatewayTestService(&agent{ID: "agent-1"}, "tool-token")
 	service.cfg = cfg
 	service.primaryRuntime = &workspaceRuntime{rootDocumentID: "primary-root", docCache: primaryCache}
 	service.agentRuntimes = map[string]*managedWorkspaceRuntime{}
 	ctx, cancel := context.WithCancel(context.Background())
 	ready := make(chan error, 1)
-	managed := service.startAgentWorkspaceRuntimeAttemptWithReady(ctx, "agent-1", runtime, workspace, 0, ready)
-	service.agentRuntimes["agent-1"] = managed
+	managed := startSupervisedAgentWorkspaceRuntimeForTest(t, service, ctx, "agent-1", runtime, workspace, 0, ready)
 	t.Cleanup(func() {
+		releaseStartup()
 		cancel()
 		service.closeAgentRuntimes()
 	})
@@ -1191,7 +1194,6 @@ func TestAgentRuntimeIsUnavailableUntilStartupReady(t *testing.T) {
 	select {
 	case <-addStarted:
 	case <-time.After(2 * time.Second):
-		close(releaseAdd)
 		t.Fatal("replacement startup did not reach blocked watcher readiness")
 	}
 	request := func() *httptest.ResponseRecorder {
@@ -1203,15 +1205,40 @@ func TestAgentRuntimeIsUnavailableUntilStartupReady(t *testing.T) {
 	}
 	starting := request()
 	if starting.Code != http.StatusBadRequest || !strings.Contains(starting.Body.String(), "workspace runtime is unavailable") {
-		close(releaseAdd)
 		t.Fatalf("starting runtime request status = %d body=%q, want unavailable", starting.Code, starting.Body.String())
 	}
 	if strings.Contains(starting.Body.String(), "primary/secret.md") {
-		close(releaseAdd)
 		t.Fatalf("starting runtime request fell back to primary: %q", starting.Body.String())
 	}
 
-	close(releaseAdd)
+	syncDone := make(chan error, 1)
+	go func() { syncDone <- service.syncAgentRuntimes(ctx, updatedWorkspace) }()
+	select {
+	case err := <-syncDone:
+		if err != nil {
+			t.Fatalf("refresh during runtime startup: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("refresh blocked on or replaced the still-starting runtime generation")
+	}
+	service.mu.Lock()
+	current := service.agentRuntimes["agent-1"]
+	currentWorkspace := managed.workspace
+	service.mu.Unlock()
+	if current != managed {
+		t.Fatal("refresh replaced the still-starting runtime generation")
+	}
+	if currentWorkspace != updatedWorkspace {
+		t.Fatal("refresh did not retain the latest workspace snapshot for the starting generation")
+	}
+	managed.borrowMu.Lock()
+	startingGeneration := managed.starting && !managed.retiring
+	managed.borrowMu.Unlock()
+	if !startingGeneration {
+		t.Fatal("refresh retired or prematurely published the still-starting runtime generation")
+	}
+
+	releaseStartup()
 	if err := <-ready; err != nil {
 		t.Fatalf("replacement startup: %v", err)
 	}

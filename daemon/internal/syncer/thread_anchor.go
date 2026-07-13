@@ -56,6 +56,7 @@ func (s *Service) runtimeForThreadAnchor(run *agentRun) (*workspaceRuntime, func
 				return runtime, release
 			}
 		}
+		return nil, func() {}
 	}
 	return s.primaryRuntime, func() {}
 }
