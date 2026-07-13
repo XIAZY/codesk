@@ -25,7 +25,8 @@ The change is demonstrated with tests written before the behavioral implementati
 - [x] (2026-07-13 16:22 EDT) Reopened the lifecycle audit at exact PR head `7b7e2c6`; five test-only reducers on commit `bb92e3d` proved premature online publication, two dead managed-runtime retention paths, raw listener ownership, and deadline-expired drain under an admitted live handler.
 - [x] (2026-07-13 16:39 EDT) Re-established the six legacy rows that had originally arrived beside their fixes by mutation-testing exact `7b7e2c6`; each failed for its named ownership invariant. The blocked-core/store-lifetime row also failed when the core join was removed.
 - [x] (2026-07-13 16:46 EDT) Moved the initial daemon status report after `primaryReady`, added an application-level gateway admission gate plus an explicit admitted-handler join, and made managed agent runtimes record exits and restart dead same-actor entries with classified exponential backoff.
-- [ ] Publish the amended exact head after the full repository and frontend validation gates pass, then transfer the immutable head to independent reviewers.
+- [x] (2026-07-13 16:53 EDT) Added an integration row proving repeated managed-runtime failures remain registered during backoff and are replaced with the incremented attempt after the delay; it passed 20 race-enabled repetitions.
+- [x] (2026-07-13 16:55 EDT) Re-ran the exact amended source through full syncer race, full Go including the Yjs compatibility canary, vet, build, frontend typecheck plus 250 tests, production frontend build, and diff/clean-tree checks.
 
 ## Surprises & Discoveries
 
@@ -346,6 +347,17 @@ Amendment repeated focused GREEN transcript on Linux/ARM64:
 
     go test -race ./daemon/internal/syncer -run '<seven amendment rows>' -count=20
     ok notty/daemon/internal/syncer 14.861s
+
+Amendment final gates on Linux/ARM64:
+
+    repeated backoff integration row under race (20x)       PASS (1.697s)
+    full syncer package under race                           PASS (20.361s)
+    full Go suite, including Yjs compatibility canary       PASS (21.339s)
+    go vet ./...                                             PASS
+    go build ./...                                           PASS
+    frontend typecheck + Vitest                              PASS (21 files, 250 tests)
+    frontend production build                               PASS (existing chunk-size warning only)
+    git diff --check and tracked-tree cleanliness            PASS
 
 ## Interfaces and Dependencies
 

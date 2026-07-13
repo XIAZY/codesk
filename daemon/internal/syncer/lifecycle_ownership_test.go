@@ -756,6 +756,67 @@ func TestManagedWorkspaceRuntimeRestartBackoffClassifiesFailures(t *testing.T) {
 	}
 }
 
+func TestSyncAgentRuntimesHonorsRepeatedFailureBackoff(t *testing.T) {
+	root := t.TempDir()
+	cfg := Config{AgentWorkspaceRoot: filepath.Join(root, "agents")}
+	workspace := &workspaceResponse{Agents: []*agent{{ID: "agent-1"}}}
+	runtime, err := newWorkspaceRuntime(
+		cfg,
+		http.DefaultClient,
+		agentWorkspacePath(cfg, "agent-1"),
+		"agent-1",
+		"agent",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	close(done)
+	stoppedAt := time.Now()
+	managed := &managedWorkspaceRuntime{
+		runtime:        runtime,
+		cancel:         func() {},
+		done:           done,
+		runErr:         errors.New("injected repeated runtime failure"),
+		startedAt:      stoppedAt.Add(-time.Second),
+		stoppedAt:      stoppedAt,
+		restartAttempt: 1,
+	}
+	service := &Service{
+		cfg:           cfg,
+		client:        http.DefaultClient,
+		agentRuntimes: map[string]*managedWorkspaceRuntime{"agent-1": managed},
+	}
+	defer service.closeAgentRuntimes()
+
+	if err := service.syncAgentRuntimes(context.Background(), workspace); err != nil {
+		t.Fatalf("sync during backoff: %v", err)
+	}
+	service.mu.Lock()
+	duringBackoff := service.agentRuntimes["agent-1"]
+	service.mu.Unlock()
+	if duringBackoff != managed {
+		t.Fatal("managed runtime restarted before its repeated-failure backoff elapsed")
+	}
+
+	managed.resultMu.Lock()
+	managed.stoppedAt = time.Now().Add(-agentRuntimeRestartBaseDelay - time.Millisecond)
+	managed.startedAt = managed.stoppedAt.Add(-time.Second)
+	managed.resultMu.Unlock()
+	if err := service.syncAgentRuntimes(context.Background(), workspace); err != nil {
+		t.Fatalf("sync after backoff: %v", err)
+	}
+	service.mu.Lock()
+	replacement := service.agentRuntimes["agent-1"]
+	service.mu.Unlock()
+	if replacement == managed {
+		t.Fatal("managed runtime was not replaced after its backoff elapsed")
+	}
+	if replacement.restartAttempt != 2 {
+		t.Fatalf("replacement restart attempt = %d, want 2", replacement.restartAttempt)
+	}
+}
+
 func TestSyncAgentRuntimesRestartsAfterStartupAddFailure(t *testing.T) {
 	root := t.TempDir()
 	cfg := Config{AgentWorkspaceRoot: filepath.Join(root, "agents")}
