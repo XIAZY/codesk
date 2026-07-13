@@ -26,6 +26,19 @@ type pathLockLease struct {
 	token string
 }
 
+type pathLockLeaseStore interface {
+	cleanupExpired(time.Time) error
+	lock([]string) ([]pathLockLease, error)
+	release([]pathLockLease) error
+	Close() error
+}
+
+type pathLockStoreOpener func(string) (pathLockLeaseStore, error)
+
+func openPathLockStore(root string) (pathLockLeaseStore, error) {
+	return newPathLockStore(root)
+}
+
 // newPathLockStore returns an operation-scoped store. Its caller keeps it open
 // through lease release, then closes it; WorkspaceFS itself stays stateless.
 func newPathLockStore(root string) (*pathLockStore, error) {

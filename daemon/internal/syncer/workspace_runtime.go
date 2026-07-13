@@ -110,6 +110,18 @@ func workspaceSyncDBPath(root string) string {
 }
 
 func (r *workspaceRuntime) Run(ctx context.Context) error {
+	return r.run(ctx, nil)
+}
+
+func (r *workspaceRuntime) run(ctx context.Context, ready chan<- error) (runErr error) {
+	reportReady := func(err error) {
+		if ready == nil {
+			return
+		}
+		ready <- err
+		ready = nil
+	}
+	defer func() { reportReady(runErr) }()
 	if r == nil {
 		return nil
 	}
@@ -161,6 +173,7 @@ func (r *workspaceRuntime) Run(ctx context.Context) error {
 			r.documentSocket.Run(ctx)
 		}()
 	}
+	reportReady(nil)
 
 	<-ctx.Done()
 	cancelReplica()

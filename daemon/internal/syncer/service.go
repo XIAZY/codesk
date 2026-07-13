@@ -47,6 +47,8 @@ type Service struct {
 	agentRuntimes   map[string]*managedWorkspaceRuntime
 	agentWorkers    map[string]*managedAgentWorker
 	latestWorkspace *workspaceResponse
+	ready           chan struct{}
+	readyOnce       sync.Once
 }
 
 type managedWorkspaceRuntime struct {
@@ -269,6 +271,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}()
 	drained := make(chan error, 1)
 	go s.workspaceEventLoop(ctx, drained)
+	s.signalReady()
 
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
@@ -294,6 +297,13 @@ func (s *Service) Run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func (s *Service) signalReady() {
+	if s == nil || s.ready == nil {
+		return
+	}
+	s.readyOnce.Do(func() { close(s.ready) })
 }
 
 func (s *Service) reportDaemonStatus(ctx context.Context, refreshDetections bool) {

@@ -16,6 +16,41 @@ import (
 
 const workspaceLocalScanInterval = 5 * time.Second
 
+type workspaceWatcher interface {
+	Add(string) error
+	Close() error
+	Events() <-chan fsnotify.Event
+	Errors() <-chan error
+}
+
+type fsnotifyWorkspaceWatcher struct {
+	watcher *fsnotify.Watcher
+}
+
+func newFSNotifyWorkspaceWatcher() (workspaceWatcher, error) {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return nil, err
+	}
+	return &fsnotifyWorkspaceWatcher{watcher: watcher}, nil
+}
+
+func (w *fsnotifyWorkspaceWatcher) Add(path string) error {
+	return w.watcher.Add(path)
+}
+
+func (w *fsnotifyWorkspaceWatcher) Close() error {
+	return w.watcher.Close()
+}
+
+func (w *fsnotifyWorkspaceWatcher) Events() <-chan fsnotify.Event {
+	return w.watcher.Events
+}
+
+func (w *fsnotifyWorkspaceWatcher) Errors() <-chan error {
+	return w.watcher.Errors
+}
+
 type workspaceReplica struct {
 	rootDir    string
 	actorID    string
@@ -23,12 +58,13 @@ type workspaceReplica struct {
 	markDirty  func(documentID string)
 	markCreate func(localCreateCandidate)
 
-	watcher  *fsnotify.Watcher
-	docCache *documentCache
-	fs       *WorkspaceFS
-	watchMu  sync.Mutex
-	watched  map[string]struct{}
-	changes  *workspaceChangeIndex
+	watcher    workspaceWatcher
+	newWatcher func() (workspaceWatcher, error)
+	docCache   *documentCache
+	fs         *WorkspaceFS
+	watchMu    sync.Mutex
+	watched    map[string]struct{}
+	changes    *workspaceChangeIndex
 
 	mu              sync.Mutex
 	projectedByPath map[string]*trackedFile
@@ -45,6 +81,7 @@ func newWorkspaceReplica(_ Config, rootDir, actorID, actorType string, markDirty
 		actorType:       actorType,
 		markDirty:       markDirty,
 		markCreate:      markCreate,
+		newWatcher:      newFSNotifyWorkspaceWatcher,
 		fs:              NewWorkspaceFS(rootDir),
 		watched:         map[string]struct{}{},
 		changes:         newWorkspaceChangeIndex(),
@@ -67,12 +104,28 @@ func (r *workspaceReplica) markDocumentDirty(documentID string) {
 }
 
 func (r *workspaceReplica) Run(ctx context.Context) error {
+	return r.run(ctx, nil)
+}
+
+func (r *workspaceReplica) run(ctx context.Context, ready chan<- error) (runErr error) {
+	reportReady := func(err error) {
+		if ready == nil {
+			return
+		}
+		ready <- err
+		ready = nil
+	}
+	defer func() { reportReady(runErr) }()
 	if r == nil {
 		return nil
 	}
 	// The watcher exists only while this method is consuming both of its
 	// channels. Creating it in the constructor can deadlock synchronous users.
-	watcher, err := fsnotify.NewWatcher()
+	newWatcher := r.newWatcher
+	if newWatcher == nil {
+		newWatcher = newFSNotifyWorkspaceWatcher
+	}
+	watcher, err := newWatcher()
 	if err != nil {
 		return err
 	}
@@ -111,6 +164,7 @@ func (r *workspaceReplica) Run(ctx context.Context) error {
 	if err := r.reconcileLocalWorkspace(ctx); err != nil {
 		log.Printf("%s initial local reconcile error: %v", r.actorID, err)
 	}
+	reportReady(nil)
 
 	ticker := time.NewTicker(workspaceLocalScanInterval)
 	defer ticker.Stop()
@@ -119,14 +173,14 @@ func (r *workspaceReplica) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case event, ok := <-watcher.Events:
+		case event, ok := <-watcher.Events():
 			if !ok {
 				return nil
 			}
 			if err := r.handleWatcherEvent(event, time.Now()); err != nil {
 				log.Printf("%s local event error for %s: %v", r.actorID, event.Name, err)
 			}
-		case err, ok := <-watcher.Errors:
+		case err, ok := <-watcher.Errors():
 			if !ok {
 				return nil
 			}

@@ -17,7 +17,8 @@ var ErrUnsafeDelete = errors.New("refusing to delete non-matching working copy")
 var ErrOutsideWorkspace = errors.New("path is outside workspace")
 
 type WorkspaceFS struct {
-	Root string
+	Root          string
+	openPathLocks pathLockStoreOpener
 }
 
 type FileSnapshot struct {
@@ -56,14 +57,22 @@ func NewWorkspaceFS(root string) *WorkspaceFS {
 	if err != nil {
 		abs = filepath.Clean(root)
 	}
-	return &WorkspaceFS{Root: abs}
+	return &WorkspaceFS{Root: abs, openPathLocks: openPathLockStore}
+}
+
+func (fs *WorkspaceFS) pathLockStore() (pathLockLeaseStore, error) {
+	opener := fs.openPathLocks
+	if opener == nil {
+		opener = openPathLockStore
+	}
+	return opener(fs.Root)
 }
 
 func (fs *WorkspaceFS) CleanupStaleLocks() error {
 	if fs == nil || fs.Root == "" {
 		return nil
 	}
-	store, err := newPathLockStore(fs.Root)
+	store, err := fs.pathLockStore()
 	if err != nil {
 		return &FSError{Op: "cleanup-locks", Path: fs.Root, Err: err}
 	}
@@ -358,7 +367,7 @@ func (fs *WorkspaceFS) lockPaths(paths ...string) (func(), error) {
 		seen[keyPath] = struct{}{}
 		lockPaths = append(lockPaths, keyPath)
 	}
-	store, err := newPathLockStore(fs.Root)
+	store, err := fs.pathLockStore()
 	if err != nil {
 		return nil, &FSError{Op: "lock", Path: fs.Root, Err: err}
 	}
