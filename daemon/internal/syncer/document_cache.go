@@ -146,8 +146,8 @@ func sqliteFileDSN(path string) string {
 	}
 	uriPath := filepath.ToSlash(clean)
 	if filepath.VolumeName(clean) != "" && !strings.HasPrefix(uriPath, "/") {
-		// A drive-letter path needs a leading slash so URL.String emits
-		// file:///C:/path instead of file:C:/path, which SQLite rejects.
+		// Keep the drive letter in the path instead of URL authority so SQLite
+		// receives file:///C:/path rather than file://C:/path.
 		uriPath = "/" + uriPath
 	}
 	dsn := url.URL{Scheme: "file", Path: uriPath}
