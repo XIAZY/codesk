@@ -15,8 +15,10 @@ import (
 const pathLockLeaseDuration = 30 * time.Second
 
 type pathLockStore struct {
-	db      *sql.DB
-	ownerID string
+	db        *sql.DB
+	ownerID   string
+	closeOnce sync.Once
+	closeErr  error
 }
 
 type pathLockLease struct {
@@ -24,13 +26,10 @@ type pathLockLease struct {
 	token string
 }
 
-var pathLockStores sync.Map
-
-func pathLockStoreForRoot(root string) (*pathLockStore, error) {
+// newPathLockStore returns an operation-scoped store. Its caller keeps it open
+// through lease release, then closes it; WorkspaceFS itself stays stateless.
+func newPathLockStore(root string) (*pathLockStore, error) {
 	root = filepath.Clean(root)
-	if value, ok := pathLockStores.Load(root); ok {
-		return value.(*pathLockStore), nil
-	}
 	if err := os.MkdirAll(filepath.Join(root, ".notty"), 0o755); err != nil {
 		return nil, err
 	}
@@ -46,12 +45,19 @@ func pathLockStoreForRoot(root string) (*pathLockStore, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	actual, loaded := pathLockStores.LoadOrStore(root, store)
-	if loaded {
-		_ = db.Close()
-		return actual.(*pathLockStore), nil
-	}
 	return store, nil
+}
+
+func (s *pathLockStore) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.closeOnce.Do(func() {
+		if s.db != nil {
+			s.closeErr = s.db.Close()
+		}
+	})
+	return s.closeErr
 }
 
 func (s *pathLockStore) initSchema() error {

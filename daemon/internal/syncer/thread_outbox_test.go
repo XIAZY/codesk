@@ -18,7 +18,7 @@ func TestThreadOutboxPipelineQueuesMaterializesDeliversAndDeletesIntent(t *testi
 	if err := os.WriteFile(path, []byte("base\ntarget\n"), 0o644); err != nil {
 		t.Fatalf("write local file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestWorkspaceRuntimeMaterializesThreadIntentBeforePendingRemote(t *testing.
 	if err := os.WriteFile(path, []byte("target\n"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestWorkspaceRuntimeMaterializesThreadIntentAfterAcceptedLocalBeforePending
 	if err := os.WriteFile(path, []byte("base\nlocal target\n"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -322,7 +322,7 @@ func waitForNoThreadIntents(t *testing.T, cache *documentCache, documentID strin
 }
 
 func TestThreadDeliveryRetriesReadyIntentWithIdempotencyKey(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -62,12 +63,16 @@ func (fs *WorkspaceFS) CleanupStaleLocks() error {
 	if fs == nil || fs.Root == "" {
 		return nil
 	}
-	store, err := pathLockStoreForRoot(fs.Root)
+	store, err := newPathLockStore(fs.Root)
 	if err != nil {
 		return &FSError{Op: "cleanup-locks", Path: fs.Root, Err: err}
 	}
 	if err := store.cleanupExpired(time.Now().UTC()); err != nil {
+		_ = store.Close()
 		return &FSError{Op: "cleanup-locks", Path: fs.Root, Err: err}
+	}
+	if err := store.Close(); err != nil {
+		return &FSError{Op: "close-locks", Path: fs.Root, Err: err}
 	}
 	return nil
 }
@@ -353,16 +358,21 @@ func (fs *WorkspaceFS) lockPaths(paths ...string) (func(), error) {
 		seen[keyPath] = struct{}{}
 		lockPaths = append(lockPaths, keyPath)
 	}
-	store, err := pathLockStoreForRoot(fs.Root)
+	store, err := newPathLockStore(fs.Root)
 	if err != nil {
 		return nil, &FSError{Op: "lock", Path: fs.Root, Err: err}
 	}
 	leases, err := store.lock(lockPaths)
 	if err != nil {
+		_ = store.Close()
 		return nil, &FSError{Op: "lock", Path: fs.Root, Err: err}
 	}
+	var unlockOnce sync.Once
 	return func() {
-		_ = store.release(leases)
+		unlockOnce.Do(func() {
+			_ = store.release(leases)
+			_ = store.Close()
+		})
 	}, nil
 }
 
