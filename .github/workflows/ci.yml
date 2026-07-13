@@ -274,6 +274,8 @@ jobs:
             "TestMaterializeTrackedFileWithoutCacheCreatesEmptyProjection",
             "TestMaterializeTrackedFileWithoutCachePreservesExistingLocalContent",
             "TestScanWorkspaceFilesObservesCompleteContentDuringAtomicReplacement",
+            "TestApplyProjectedContentDoesNotAdvanceBaseAfterDurabilityFailure",
+            "TestProjectMergedContentDoesNotAdvanceBaseAfterWriteFailure",
             "TestFileIdentityTracksHardLinks",
             "TestStatFileWithIdentityReturnsMetadataAndStableIdentity",
             "TestFileRenameInfoIncludesTrailingNUL",
@@ -283,8 +285,12 @@ jobs:
             "TestFileIdentityChangesAfterDeleteAndRecreateOnWindows",
             "TestFileIdentityFollowsDistinctReplacementObjectOnWindows",
             "TestReplaceFileAtomicallyReplacesContentAndCleansStagingFile",
+            "TestReplaceFileAtomicallySyncsStagedContentBeforeCommit",
+            "TestReplaceFileAtomicallyPreservesDestinationWhenStagedSyncFails",
+            "TestReplaceFileAtomicallyPreservesDestinationWhenCommitUnsupported",
             "TestReplaceFileAtomicallyLeavesDestinationCompleteWhenDeleteSharingIsDenied",
             "TestAtomicReplacementSucceedsWhileDeleteSharedObservationIsOpenOnWindows",
+            "TestAtomicReplacementReturnsErrorWhenPostRenameFlushFailsOnWindows",
             "TestIsCrossDeviceErrorWindows"
           )
           foreach ($test in $required) {

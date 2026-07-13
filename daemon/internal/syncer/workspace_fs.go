@@ -160,6 +160,15 @@ func createEmptyFileExclusive(path string) error {
 }
 
 func (fs *WorkspaceFS) WriteIfUnchanged(path string, expected projectedContentHash, content []byte) error {
+	return fs.writeIfUnchangedWith(path, expected, content, replaceFileAtomically)
+}
+
+func (fs *WorkspaceFS) writeIfUnchangedWith(
+	path string,
+	expected projectedContentHash,
+	content []byte,
+	replaceFile func(path, content string, mode os.FileMode) error,
+) error {
 	path, err := fs.cleanPath(path)
 	if err != nil {
 		return err
@@ -188,7 +197,7 @@ func (fs *WorkspaceFS) WriteIfUnchanged(path string, expected projectedContentHa
 	if info, err := os.Stat(path); err == nil {
 		mode = info.Mode().Perm()
 	}
-	if err := replaceFileAtomically(path, string(content), mode); err != nil {
+	if err := replaceFile(path, string(content), mode); err != nil {
 		return &FSError{Op: "write", Path: path, Err: err}
 	}
 	return nil
