@@ -21,7 +21,7 @@ The change is demonstrated with tests written before the behavioral implementati
 - [x] (2026-07-13 14:02 EDT) Replaced ad hoc service shutdown branches with one idempotent teardown owner, split gateway ingress close from request drain, joined the primary runtime and workspace event loop, and delayed primary cache closure until all core and agent users quiesce.
 - [x] (2026-07-13 14:02 EDT) Made inbox workers, runtime-event consumers, delayed restarts, and status workers cancelable and joinable; proved a terminal agent exit remains nonfatal while a primary watcher failure terminates the ready service.
 - [x] (2026-07-13 14:14 EDT) Ran the focused lifecycle set, full native ARM64 syncer package, Windows/amd64 race suite with all 28 required rows, full Go test/vet/build, Yjs canary, frontend typecheck/Vitest/build, uninstall harness, installer syntax, and direct static Windows/amd64 release-style links.
-- [x] (2026-07-13 14:14 EDT) Committed the RED milestone and two green implementation milestones without staging the pre-existing `agents/` or `workspaces/` directories; final base-freshness check and push remain.
+- [x] (2026-07-13 14:24 EDT) Confirmed `origin/feat/windows-cli-daemon` remains at `4639f09` with no base-only commits, pushed the complete fix series through `ec62e6a`, and updated draft PR #149 without staging the pre-existing `agents/` or `workspaces/` directories.
 
 ## Surprises & Discoveries
 
@@ -97,7 +97,7 @@ The change is demonstrated with tests written before the behavioral implementati
 
 ## Outcomes & Retrospective
 
-The implementation and locally representable validation are complete. Tests first proved every claimed defect on the old behavior. The final implementation owns watcher delivery before `Add`, propagates primary core failures without making agent exits fatal, shares one path-lock store per runtime, and tears down ingress/users/stores in dependency order. All native Windows, full Go, frontend, Yjs, and direct static-link gates pass. Docker/Postgres/browser E2E, the Unix-only installer functional harness, and a fresh Rust archive rebuild remain external host limitations recorded above.
+The implementation, locally representable validation, and publication are complete. Tests first proved every claimed defect on the old behavior. The final implementation owns watcher delivery before `Add`, propagates primary core failures without making agent exits fatal, shares one path-lock store per runtime, and tears down ingress/users/stores in dependency order. All native Windows, full Go, frontend, Yjs, and direct static-link gates pass. Docker/Postgres/browser E2E, the Unix-only installer functional harness, and a fresh Rust archive rebuild remain external host limitations recorded above. Draft PR #149 targets the requested `feat/windows-cli-daemon` branch; its native Windows job remains intentionally disabled while the replacement cross-platform CI run proceeds.
 
 ## Context and Orientation
 
@@ -314,3 +314,5 @@ Revision note (2026-07-13 14:02 EDT): Recorded the owned service teardown, joine
 Revision note (2026-07-13 14:14 EDT): Recorded the final locally available repository gates, exact 28-row audit, release-style static link, and concrete host limitations.
 
 Revision note (2026-07-13 14:20 EDT): Added the managed-agent-runtime store boundary found during final dependency review and its RED/GREEN proof.
+
+Revision note (2026-07-13 14:24 EDT): Recorded base freshness, final publication to PR #149, and the intentionally skipped native-Windows CI job.
