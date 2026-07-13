@@ -10,6 +10,8 @@
 #   frontend typecheck + vitest        -> frontend: "Typecheck + vitest"
 #   frontend production build          -> frontend: "Production build"
 #   git diff --check                   -> diff-check
+#   Windows GNU compile/link            -> windows-daemon-build
+#   Windows native runtime tests        -> windows-daemon (paused until a runner is available)
 #
 # Two meta-properties (Tom's bar):
 #   * Fail loud on infrastructure absence — a skipped live-DB suite reporting green is the exact
@@ -138,8 +140,59 @@ jobs:
       - name: Build all Go
         run: go build ./...
 
+  windows-daemon-build:
+    name: Windows daemon (GNU cross-build)
+    runs-on: [self-hosted, Linux, ARM64]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - name: Install MinGW-w64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 zip
+      - name: Cache cargo + Windows libyrs build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            third_party/y-crdt/target
+          key: yffi-windows-gnu-cross-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('third_party/y-crdt/**/Cargo.lock') }}
+          restore-keys: |
+            yffi-windows-gnu-cross-${{ runner.os }}-${{ runner.arch }}-
+      - name: Build canonical Windows release
+        env:
+          CC_WINDOWS_AMD64: x86_64-w64-mingw32-gcc
+          PLATFORMS: windows/amd64
+        run: scripts/build-daemon-release.sh p1-ci "$RUNNER_TEMP/notty-release"
+      - name: Vet Windows-tagged daemon code
+        env:
+          CC: x86_64-w64-mingw32-gcc
+          CGO_ENABLED: "1"
+          GOOS: windows
+          GOARCH: amd64
+        run: go vet ./daemon/internal/syncer ./internal/ycrdt
+      - name: Compile Windows-native syncer tests
+        env:
+          CC: x86_64-w64-mingw32-gcc
+          CGO_ENABLED: "1"
+          GOOS: windows
+          GOARCH: amd64
+        run: go test -c -o "$RUNNER_TEMP/notty-syncer.test.exe" ./daemon/internal/syncer
+
   windows-daemon:
     name: Windows daemon (native GNU build + platform tests)
+    # Preserve the native execution matrix, but do not schedule it until a
+    # Windows CI runner is available for this repository.
+    if: ${{ false }}
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
