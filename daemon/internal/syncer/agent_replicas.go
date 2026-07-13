@@ -2,6 +2,7 @@ package syncer
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sort"
 )
@@ -24,6 +25,7 @@ func (s *Service) syncAgentRuntimes(ctx context.Context, workspace *workspaceRes
 
 	s.mu.Lock()
 	existing := make([]*workspaceRuntime, 0, len(desired))
+	retired := make([]*managedWorkspaceRuntime, 0)
 	for agentID := range desired {
 		currentAgent := desired[agentID]
 		if managed, ok := s.agentRuntimes[agentID]; ok && managed != nil && managed.runtime != nil {
@@ -31,23 +33,20 @@ func (s *Service) syncAgentRuntimes(ctx context.Context, workspace *workspaceRes
 				existing = append(existing, managed.runtime)
 				continue
 			}
-			managed.cancel()
+			if managed.cancel != nil {
+				managed.cancel()
+			}
+			retired = append(retired, managed)
 			delete(s.agentRuntimes, agentID)
 		}
 		rootDir := agentWorkspacePath(s.cfg, agentID)
 		runtime, err := newWorkspaceRuntime(s.cfg, s.client, rootDir, currentAgent.ID, "agent")
 		if err != nil {
 			s.mu.Unlock()
-			return err
+			return errors.Join(err, closeManagedWorkspaceRuntimes(retired))
 		}
 		runtime.initialWorkspace = workspace
-		runtimeCtx, cancel := context.WithCancel(ctx)
-		done := make(chan struct{})
-		s.agentRuntimes[agentID] = &managedWorkspaceRuntime{runtime: runtime, cancel: cancel, done: done}
-		go func() {
-			defer close(done)
-			_ = runtime.Run(runtimeCtx)
-		}()
+		s.agentRuntimes[agentID] = startManagedWorkspaceRuntime(ctx, runtime)
 	}
 
 	staleIDs := make([]string, 0)
@@ -64,19 +63,20 @@ func (s *Service) syncAgentRuntimes(ctx context.Context, workspace *workspaceRes
 	}
 	s.mu.Unlock()
 
+	var errs []error
+	errs = append(errs, closeManagedWorkspaceRuntimes(retired))
 	for _, runtime := range existing {
 		if err := runtime.applyWorkspace(ctx, workspace); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
 	for index, agentID := range staleIDs {
-		if stale[index] != nil && stale[index].cancel != nil {
-			stale[index].cancel()
+		errs = append(errs, closeManagedWorkspaceRuntime(stale[index]))
+		if err := os.RemoveAll(agentWorkspacePath(s.cfg, agentID)); err != nil {
+			errs = append(errs, err)
 		}
-		waitManagedWorkspaceRuntime(stale[index])
-		_ = os.RemoveAll(agentWorkspacePath(s.cfg, agentID))
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (s *Service) closeAgentRuntimes() {
@@ -87,14 +87,48 @@ func (s *Service) closeAgentRuntimes() {
 	}
 	s.agentRuntimes = map[string]*managedWorkspaceRuntime{}
 	s.mu.Unlock()
+	_ = closeManagedWorkspaceRuntimes(runtimes)
+}
+
+func startManagedWorkspaceRuntime(ctx context.Context, runtime *workspaceRuntime) *managedWorkspaceRuntime {
+	runtimeCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	managed := &managedWorkspaceRuntime{runtime: runtime, cancel: cancel, done: done}
+	go func() {
+		defer close(done)
+		_ = runtime.run(runtimeCtx, nil)
+	}()
+	return managed
+}
+
+func closeManagedWorkspaceRuntime(runtime *managedWorkspaceRuntime) error {
+	if runtime == nil {
+		return nil
+	}
+	if runtime.cancel != nil {
+		runtime.cancel()
+	}
+	waitManagedWorkspaceRuntime(runtime)
+	if runtime.runtime == nil {
+		return nil
+	}
+	return runtime.runtime.Close()
+}
+
+func closeManagedWorkspaceRuntimes(runtimes []*managedWorkspaceRuntime) error {
 	for _, runtime := range runtimes {
-		if runtime != nil {
+		if runtime != nil && runtime.cancel != nil {
 			runtime.cancel()
 		}
 	}
+	var errs []error
 	for _, runtime := range runtimes {
 		waitManagedWorkspaceRuntime(runtime)
+		if runtime != nil && runtime.runtime != nil {
+			errs = append(errs, runtime.runtime.Close())
+		}
 	}
+	return errors.Join(errs...)
 }
 
 func waitManagedWorkspaceRuntime(runtime *managedWorkspaceRuntime) {

@@ -565,6 +565,44 @@ func TestWorkspaceRuntimeConstructorFailureClosesAcquiredPathLocks(t *testing.T)
 	}
 }
 
+func TestManagedAgentRuntimeRetainsStoresUntilRegistryOwnerCloses(t *testing.T) {
+	root := t.TempDir()
+	service := &Service{
+		cfg: Config{
+			AgentWorkspaceRoot: filepath.Join(root, "agents"),
+		},
+		client:        http.DefaultClient,
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := service.syncAgentRuntimes(ctx, &workspaceResponse{Agents: []*agent{{ID: "agent-1"}}}); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	defer service.closeAgentRuntimes()
+	service.mu.Lock()
+	managed := service.agentRuntimes["agent-1"]
+	service.mu.Unlock()
+	if managed == nil || managed.runtime == nil {
+		cancel()
+		t.Fatal("agent runtime was not registered")
+	}
+	cancel()
+	select {
+	case <-managed.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("agent runtime did not stop after parent cancellation")
+	}
+	if err := managed.runtime.pathLocks.cleanupExpired(time.Now().UTC()); err != nil {
+		t.Fatalf("agent runtime closed its stores before the registry owner drained tool users: %v", err)
+	}
+	service.closeAgentRuntimes()
+	if err := managed.runtime.pathLocks.cleanupExpired(time.Now().UTC()); err == nil {
+		t.Fatal("registry owner did not close the agent runtime stores")
+	}
+}
+
 func TestServiceEarlyWorkspaceSetupFailureClosesGateway(t *testing.T) {
 	reservation, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
