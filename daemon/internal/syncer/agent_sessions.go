@@ -28,10 +28,15 @@ type agentSessionSupervisor struct {
 	status    *agentStatusSyncer
 	runtimes  *runtimeRegistry
 	wakeAgent func(string)
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	shutdown  sync.Once
 
 	mu       sync.Mutex
 	sessions map[string]*managedAgentSession
 	starting map[string]*agentSessionStart
+	closed   bool
 }
 
 type agentSessionStart struct {
@@ -102,6 +107,9 @@ type agentStatusWorker struct {
 	dirty    bool
 	wake     chan struct{}
 	stopped  chan struct{}
+	done     chan struct{}
+	ctx      context.Context
+	cancel   context.CancelFunc
 	stopOnce sync.Once
 }
 
@@ -150,11 +158,15 @@ func (s *agentStatusSyncer) Stop() {
 }
 
 func newAgentStatusWorker(agentID string, updater agentSessionUpdater) *agentStatusWorker {
+	ctx, cancel := context.WithCancel(context.Background())
 	worker := &agentStatusWorker{
 		agentID: agentID,
 		updater: updater,
 		wake:    make(chan struct{}, 1),
 		stopped: make(chan struct{}),
+		done:    make(chan struct{}),
+		ctx:     ctx,
+		cancel:  cancel,
 	}
 	go worker.run()
 	return worker
@@ -171,8 +183,10 @@ func (w *agentStatusWorker) Publish(payload updateAgentSessionRequest) {
 func (w *agentStatusWorker) Stop() {
 	w.stopOnce.Do(func() {
 		close(w.stopped)
+		w.cancel()
 	})
 	w.signal()
+	<-w.done
 }
 
 func (w *agentStatusWorker) signal() {
@@ -183,6 +197,7 @@ func (w *agentStatusWorker) signal() {
 }
 
 func (w *agentStatusWorker) run() {
+	defer close(w.done)
 	backoff := 250 * time.Millisecond
 	for {
 		select {
@@ -196,7 +211,7 @@ func (w *agentStatusWorker) run() {
 			if !ok {
 				break
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), agentStatusUpdateTimeout)
+			ctx, cancel := context.WithTimeout(w.ctx, agentStatusUpdateTimeout)
 			err := w.updater(ctx, w.agentID, payload)
 			cancel()
 			if err == nil {
@@ -256,10 +271,13 @@ func newAgentSessionSupervisor(cfg Config, updater agentSessionUpdater, runtimes
 	if updater == nil {
 		updater = func(context.Context, string, updateAgentSessionRequest) error { return nil }
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	return &agentSessionSupervisor{
 		cfg:      cfg,
 		status:   newAgentStatusSyncer(updater),
 		runtimes: runtimes,
+		ctx:      ctx,
+		cancel:   cancel,
 		sessions: map[string]*managedAgentSession{},
 		starting: map[string]*agentSessionStart{},
 	}
@@ -309,17 +327,30 @@ func (s *agentSessionSupervisor) Reconcile(ctx context.Context, agents []*agent)
 }
 
 func (s *agentSessionSupervisor) Shutdown() {
-	s.mu.Lock()
-	sessions := make([]*managedAgentSession, 0, len(s.sessions))
-	for _, session := range s.sessions {
-		sessions = append(sessions, session)
+	if s == nil {
+		return
 	}
-	s.sessions = map[string]*managedAgentSession{}
-	s.mu.Unlock()
-	for _, session := range sessions {
-		_ = session.process.Stop()
-	}
-	s.status.Stop()
+	s.shutdown.Do(func() {
+		s.mu.Lock()
+		s.closed = true
+		sessions := make([]*managedAgentSession, 0, len(s.sessions))
+		for _, session := range s.sessions {
+			sessions = append(sessions, session)
+		}
+		s.sessions = map[string]*managedAgentSession{}
+		cancel := s.cancel
+		s.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		for _, session := range sessions {
+			_ = session.process.Stop()
+		}
+		s.wg.Wait()
+		if s.status != nil {
+			s.status.Stop()
+		}
+	})
 }
 
 func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *agent) error {
@@ -328,6 +359,10 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 	}
 	for {
 		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			return context.Canceled
+		}
 		if session := s.sessions[current.ID]; session != nil {
 			if session.state == "disconnected" {
 				delete(s.sessions, current.ID)
@@ -448,12 +483,17 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 		state:     "idle",
 	}
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return context.Canceled
+	}
 	if existing := s.sessions[current.ID]; existing != nil {
 		s.mu.Unlock()
 		appendAgentLog(s.cfg, current.ID, "discarding duplicate runtime process because session already exists")
 		return nil
 	}
 	s.sessions[current.ID] = session
+	s.wg.Add(1)
 	s.mu.Unlock()
 	started = false
 	s.publish(current.ID, updateAgentSessionRequest{
@@ -463,7 +503,10 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 		CurrentActivity: "Idle",
 		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
-	go s.consumeEvents(current.ID, process)
+	go func() {
+		defer s.wg.Done()
+		s.consumeEvents(current.ID, process)
+	}()
 	return nil
 }
 
@@ -627,7 +670,18 @@ func (s *agentSessionSupervisor) agentByToolToken(token string) *agentRun {
 }
 
 func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimeProcess) {
-	for event := range process.Events() {
+	events := process.Events()
+	for {
+		var event RuntimeEvent
+		var ok bool
+		select {
+		case <-s.ctx.Done():
+			return
+		case event, ok = <-events:
+			if !ok {
+				goto disconnected
+			}
+		}
 		switch event.Kind {
 		case RuntimeEventTurnStarted:
 			if strings.TrimSpace(event.TurnID) != "" {
@@ -641,6 +695,8 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 			s.markIdle(agentID, process, true)
 		}
 	}
+
+disconnected:
 	var restartAgent *agent
 	s.mu.Lock()
 	if session := s.sessions[agentID]; session != nil && session.process == process {
@@ -665,13 +721,17 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 		CurrentActivity: "Disconnected",
 		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
-	go func() {
-		time.Sleep(2 * time.Second)
-		if err := s.ensureSession(context.Background(), restartAgent); err != nil {
-			fmt.Printf("agent session %s restart error: %v\n", agentID, err)
-			appendAgentLog(s.cfg, agentID, "session restart failed err=%v", err)
-		}
-	}()
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-s.ctx.Done():
+		return
+	case <-timer.C:
+	}
+	if err := s.ensureSession(s.ctx, restartAgent); err != nil && s.ctx.Err() == nil {
+		fmt.Printf("agent session %s restart error: %v\n", agentID, err)
+		appendAgentLog(s.cfg, agentID, "session restart failed err=%v", err)
+	}
 }
 
 func (s *agentSessionSupervisor) markWorking(agentID string, process RuntimeProcess, turnID string) {

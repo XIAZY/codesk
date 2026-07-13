@@ -27,6 +27,7 @@ type workspaceRuntime struct {
 	replica            *workspaceReplica
 	docCache           *documentCache
 	pathLocks          pathLockLeaseStore
+	closeDocumentCache func() error
 	reconcileQueue     *reconcileQueue
 	localCreates       *localCreateQueue
 	documentSocket     *workspaceDocumentSocket
@@ -108,6 +109,7 @@ func newWorkspaceRuntimeWithOpeners(
 		client:             client,
 		docCache:           cache,
 		pathLocks:          pathLocks,
+		closeDocumentCache: cache.Close,
 		reconcileQueue:     queue,
 		localCreates:       localCreates,
 		threadDeliveryWake: make(chan struct{}, 1),
@@ -126,7 +128,9 @@ func (r *workspaceRuntime) Close() error {
 	}
 	r.closeOnce.Do(func() {
 		var errs []error
-		if r.docCache != nil {
+		if r.closeDocumentCache != nil {
+			errs = append(errs, r.closeDocumentCache())
+		} else if r.docCache != nil {
 			errs = append(errs, r.docCache.Close())
 		}
 		if r.pathLocks != nil {
@@ -153,7 +157,8 @@ func workspaceSyncDBPath(root string) string {
 	return filepath.Join(root, ".notty", "sync.db")
 }
 
-func (r *workspaceRuntime) Run(ctx context.Context) error {
+func (r *workspaceRuntime) Run(ctx context.Context) (runErr error) {
+	defer func() { runErr = errors.Join(runErr, r.Close()) }()
 	return r.run(ctx, nil)
 }
 
@@ -169,7 +174,6 @@ func (r *workspaceRuntime) run(ctx context.Context, ready chan<- error) (runErr 
 	if r == nil {
 		return nil
 	}
-	defer r.Close()
 	if r.replica == nil {
 		return nil
 	}

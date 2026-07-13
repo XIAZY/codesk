@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -68,6 +69,7 @@ func TestWorkspaceReplicaStartupDrainsEventsBeforeFirstAdd(t *testing.T) {
 	replica.newWatcher = func() (workspaceWatcher, error) { return watcher, nil }
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	ready := make(chan error, 1)
 	done := make(chan error, 1)
 	go func() { done <- replica.run(ctx, ready) }()
@@ -133,6 +135,7 @@ func TestWorkspaceRuntimeStartupPropagatesReplicaAddFailure(t *testing.T) {
 	runtime.replica.newWatcher = func() (workspaceWatcher, error) { return watcher, nil }
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	ready := make(chan error, 1)
 	done := make(chan error, 1)
 	go func() { done <- runtime.run(ctx, ready) }()
@@ -167,6 +170,7 @@ func TestWorkspaceReplicaWatcherErrorAfterReadyIsFatal(t *testing.T) {
 	replica.newWatcher = func() (workspaceWatcher, error) { return watcher, nil }
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	ready := make(chan error, 1)
 	done := make(chan error, 1)
 	go func() { done <- replica.run(ctx, ready) }()
@@ -188,9 +192,189 @@ func TestWorkspaceReplicaWatcherErrorAfterReadyIsFatal(t *testing.T) {
 	}
 }
 
+func TestServicePrimaryWatcherFailureAfterReadyIsFatal(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/workspace":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"rootDocumentId":"root","agents":[]}`))
+		case "/ws", "/ws/documents-sync":
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err == nil {
+				_ = conn.Close()
+			}
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer backend.Close()
+
+	reservation, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolAddr := reservation.Addr().String()
+	if err := reservation.Close(); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	watcher := newScriptedWorkspaceWatcher()
+	runtime, err := newWorkspaceRuntime(
+		Config{BackendURL: backend.URL, WorkspaceDir: root, AgentID: "daemon"},
+		backend.Client(),
+		root,
+		"daemon",
+		"daemon",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.replica.newWatcher = func() (workspaceWatcher, error) { return watcher, nil }
+	service := &Service{
+		cfg: Config{
+			BackendURL:         backend.URL,
+			WorkspaceDir:       root,
+			AgentWorkspaceRoot: filepath.Join(root, "agents"),
+			AgentID:            "daemon",
+			AgentToolBaseURL:   "http://" + toolAddr,
+		},
+		client:         backend.Client(),
+		sessions:       newAgentSessionSupervisor(Config{}, nil, newRuntimeRegistry()),
+		primaryRuntime: runtime,
+		agentRuntimes:  map[string]*managedWorkspaceRuntime{},
+		agentWorkers:   map[string]*managedAgentWorker{},
+		ready:          make(chan struct{}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- service.Run(ctx) }()
+	select {
+	case <-service.ready:
+	case err := <-done:
+		t.Fatalf("service stopped before ready: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("service did not become ready")
+	}
+
+	wantErr := errors.New("injected primary watcher failure")
+	watcher.errors <- wantErr
+	select {
+	case err := <-done:
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("service error = %v, want %v", err, wantErr)
+		}
+	case <-time.After(500 * time.Millisecond):
+		cancel()
+		err := <-done
+		t.Fatalf("service stayed online after its primary watcher failed; shutdown error: %v", err)
+	}
+}
+
+func TestServiceAgentExitIsNonfatalAndSupervisorStopsRestarts(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/workspace":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"rootDocumentId":"root","agents":[{"id":"agent-1","handle":"agent","kind":"codex"}]}`))
+		case "/ws", "/ws/documents-sync":
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err == nil {
+				_ = conn.Close()
+			}
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer backend.Close()
+
+	reservation, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolAddr := reservation.Addr().String()
+	if err := reservation.Close(); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	cfg := Config{
+		BackendURL:         backend.URL,
+		DataDir:            t.TempDir(),
+		WorkspaceDir:       root,
+		AgentWorkspaceRoot: filepath.Join(root, "agents"),
+		AgentID:            "daemon",
+		AgentToolBaseURL:   "http://" + toolAddr,
+	}
+	driver := newFakeRuntimeDriver()
+	service := &Service{
+		cfg:           cfg,
+		client:        backend.Client(),
+		sessions:      newAgentSessionSupervisor(cfg, nil, newFakeRuntimeRegistry(driver)),
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
+		agentWorkers:  map[string]*managedAgentWorker{},
+		ready:         make(chan struct{}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- service.Run(ctx) }()
+	select {
+	case <-service.ready:
+	case err := <-done:
+		cancel()
+		t.Fatalf("service stopped before ready: %v", err)
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("service did not become ready")
+	}
+	process := driver.only(t)
+	close(process.events)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		service.sessions.mu.Lock()
+		session := service.sessions.sessions["agent-1"]
+		disconnected := session != nil && session.state == "disconnected"
+		service.sessions.mu.Unlock()
+		if disconnected {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			<-done
+			t.Fatal("agent exit did not mark only that session disconnected")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case err := <-done:
+		cancel()
+		t.Fatalf("agent exit terminated the core service: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("service shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("service did not join its agent supervisor")
+	}
+	time.Sleep(2100 * time.Millisecond)
+	driver.mu.Lock()
+	processCount := len(driver.processes)
+	driver.mu.Unlock()
+	if processCount != 1 {
+		t.Fatalf("agent supervisor restarted after shutdown; process count = %d, want 1", processCount)
+	}
+}
+
 type countingPathLockStore struct {
-	closes *atomic.Int32
-	once   sync.Once
+	closes  *atomic.Int32
+	onClose func()
+	once    sync.Once
 }
 
 func (s *countingPathLockStore) cleanupExpired(time.Time) error { return nil }
@@ -200,8 +384,85 @@ func (s *countingPathLockStore) lock(paths []string) ([]pathLockLease, error) {
 }
 func (s *countingPathLockStore) release([]pathLockLease) error { return nil }
 func (s *countingPathLockStore) Close() error {
-	s.once.Do(func() { s.closes.Add(1) })
+	s.once.Do(func() {
+		s.closes.Add(1)
+		if s.onClose != nil {
+			s.onClose()
+		}
+	})
 	return nil
+}
+
+func TestServiceTeardownUsesReverseDependencyOrder(t *testing.T) {
+	var mu sync.Mutex
+	var got []string
+	record := func(stage string) {
+		mu.Lock()
+		got = append(got, stage)
+		mu.Unlock()
+	}
+	teardown := &serviceTeardown{
+		cancelCore:       func() { record("cancel-core") },
+		closeIngress:     func() error { record("close-ingress"); return nil },
+		joinCore:         func() { record("join-core") },
+		drainGateway:     func() error { record("drain-gateway"); return nil },
+		joinAgentTree:    func() { record("join-agent-tree") },
+		closeRuntimeData: func() error { record("close-runtime-data"); return nil },
+	}
+	if err := teardown.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := teardown.Close(); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"cancel-core",
+		"close-ingress",
+		"join-core",
+		"drain-gateway",
+		"join-agent-tree",
+		"close-runtime-data",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("teardown sequence = %v, want %v", got, want)
+	}
+}
+
+func TestWorkspaceRuntimeClosesDocumentCacheBeforePathLocks(t *testing.T) {
+	cache, err := newDocumentCache(filepath.Join(t.TempDir(), "sync.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cache.Close()
+	var mu sync.Mutex
+	var got []string
+	record := func(stage string) {
+		mu.Lock()
+		got = append(got, stage)
+		mu.Unlock()
+	}
+	var closes atomic.Int32
+	runtime := &workspaceRuntime{
+		docCache: cache,
+		pathLocks: &countingPathLockStore{
+			closes:  &closes,
+			onClose: func() { record("path-lock-store") },
+		},
+		closeDocumentCache: func() error {
+			record("document-cache")
+			return cache.Close()
+		},
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"document-cache", "path-lock-store"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("runtime store close sequence = %v, want %v", got, want)
+	}
 }
 
 func TestWorkspaceFSReusesOnePathLockStoreAcrossOperations(t *testing.T) {
@@ -537,6 +798,10 @@ func TestServiceShutdownDrainsToolRequestBeforeClosingRuntimeCache(t *testing.T)
 		earlyRequest = &result
 	case <-time.After(300 * time.Millisecond):
 	}
+	if err := runtime.pathLocks.cleanupExpired(time.Now().UTC()); err != nil {
+		_ = heldConn.Close()
+		t.Fatalf("path-lock store closed while a tool cache user was still active: %v", err)
+	}
 	var earlyRun *error
 	select {
 	case err := <-runDone:
@@ -587,5 +852,8 @@ socketsClosed:
 	}
 	if runErr != nil {
 		t.Fatalf("service shutdown: %v", runErr)
+	}
+	if err := runtime.pathLocks.cleanupExpired(time.Now().UTC()); err == nil {
+		t.Fatal("path-lock store remained open after service quiescence")
 	}
 }

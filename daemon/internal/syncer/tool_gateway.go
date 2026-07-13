@@ -7,9 +7,22 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 )
 
-func (s *Service) startToolGateway() (*http.Server, error) {
+type toolGateway struct {
+	server   *http.Server
+	listener net.Listener
+	done     chan struct{}
+
+	mu          sync.Mutex
+	serveErr    error
+	stopping    bool
+	ingressOnce sync.Once
+	ingressErr  error
+}
+
+func (s *Service) startToolGateway() (*toolGateway, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/agent-tools/list-documents", s.handleListDocumentsTool)
 	mux.HandleFunc("/agent-tools/get-document-by-path", s.handleGetDocumentByPathTool)
@@ -41,10 +54,76 @@ func (s *Service) startToolGateway() (*http.Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	gateway := &toolGateway{
+		server:   server,
+		listener: listener,
+		done:     make(chan struct{}),
+	}
 	go func() {
-		_ = server.Serve(listener)
+		err := server.Serve(listener)
+		gateway.mu.Lock()
+		gateway.serveErr = err
+		gateway.mu.Unlock()
+		close(gateway.done)
 	}()
-	return server, nil
+	return gateway, nil
+}
+
+func (g *toolGateway) Done() <-chan struct{} {
+	if g == nil {
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
+	return g.done
+}
+
+func (g *toolGateway) Err() error {
+	if g == nil {
+		return nil
+	}
+	<-g.done
+	g.mu.Lock()
+	err := g.serveErr
+	stopping := g.stopping
+	g.mu.Unlock()
+	if stopping && (errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed)) {
+		return nil
+	}
+	return err
+}
+
+// CloseIngress prevents new tool requests without interrupting active ones.
+// Drain subsequently waits for those active handlers to finish.
+func (g *toolGateway) CloseIngress() error {
+	if g == nil {
+		return nil
+	}
+	g.ingressOnce.Do(func() {
+		g.mu.Lock()
+		g.stopping = true
+		g.mu.Unlock()
+		if g.listener != nil {
+			g.ingressErr = g.listener.Close()
+			if errors.Is(g.ingressErr, net.ErrClosed) {
+				g.ingressErr = nil
+			}
+		}
+	})
+	return g.ingressErr
+}
+
+func (g *toolGateway) Drain(ctx context.Context) error {
+	if g == nil {
+		return nil
+	}
+	closeErr := g.CloseIngress()
+	shutdownErr := g.server.Shutdown(ctx)
+	if shutdownErr != nil {
+		_ = g.server.Close()
+	}
+	<-g.done
+	return errors.Join(closeErr, shutdownErr, g.Err())
 }
 
 func (s *Service) handleCreateThreadTool(w http.ResponseWriter, r *http.Request) {
@@ -305,11 +384,4 @@ func writeToolJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
-}
-
-func shutdownToolGateway(ctx context.Context, server *http.Server) error {
-	if server == nil {
-		return nil
-	}
-	return server.Shutdown(ctx)
 }
