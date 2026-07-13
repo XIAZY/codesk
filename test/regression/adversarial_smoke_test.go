@@ -80,6 +80,19 @@ func (a *adversarialStack) sendTextInsert(t *testing.T, documentID, text string)
 	writeBinary(t, conn, yproto.BuildSyncUpdate(update))
 }
 
+// pollUntil polls condition every second until it returns true or timeout expires.
+func (a *adversarialStack) pollUntil(t *testing.T, timeout time.Duration, label string, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(1 * time.Second)
+	}
+	t.Fatalf("pollUntil(%s) timed out after %s", label, timeout)
+}
+
 // archiveFilesInDaemon lists files under .notty/recovered in the daemon container.
 func (a *adversarialStack) archiveFilesInDaemon(t *testing.T) string {
 	t.Helper()
@@ -162,23 +175,15 @@ func TestAdversarialR1ExternalEditPreventedByWriteIfUnchanged(t *testing.T) {
 	})
 	writeBinary(t, conn, yproto.BuildSyncUpdate(update))
 
-	// 4. The daemon must NOT overwrite the external content with the backend
-	//    update immediately. Allow up to 10 seconds for the daemon to process.
-	time.Sleep(5 * time.Second)
-	diskContent := a.rawReadFile(t, relPath)
-
-	if strings.TrimSpace(diskContent) == strings.TrimSpace(backendUpdateContent) {
-		t.Fatalf("R1 FAIL: daemon silently clobbered the external edit; disk=%q want=%q",
-			diskContent, externalContent)
-	}
-
-	// 5. The backend should eventually reflect the external edit (the daemon
-	//    reads the diverged local content and pushes it upstream).
+	// 4. The backend must eventually contain the EXTERNAL content — this proves
+	//    the daemon reconciled the external edit upstream rather than clobbering it.
 	finalContent := a.waitForBackendContentPredicate(t, docID, 60*time.Second, func(content string) bool {
-		return strings.Contains(content, "EXTERNAL REWRITE") || strings.Contains(content, "backend update")
+		return strings.Contains(content, "EXTERNAL REWRITE")
 	})
+	if !strings.Contains(finalContent, "EXTERNAL REWRITE") {
+		t.Fatalf("R1 FAIL: backend never received the external edit; got %q", finalContent)
+	}
 	t.Logf("R1: backend converged to %q", finalContent)
-	t.Logf("R1: disk content after projection attempt: %q", diskContent)
 	t.Logf("R1: daemon logs tail:\n%s", a.daemonLogs(t))
 }
 
@@ -223,77 +228,53 @@ func TestAdversarialR2UnsafeTombstoneOrderingArchivesInsteadOfDeleting(t *testin
 	a.tombstoneRootDocument(t, docID)
 	t.Logf("R2: tombstone sent for document %s", docID)
 
-	// Step 4-5: Wait and verify. The daemon should detect hash mismatch in
-	// DeleteIfUnchanged and Archive the file instead of deleting it.
-	// Give the daemon time to process the tombstone.
-	time.Sleep(5 * time.Second)
+	// Step 4-5: Poll until the tombstone is processed (file disappears or is archived).
+	var originalExists bool
+	a.pollUntil(t, 30*time.Second, "tombstone processed", func() bool {
+		originalExists = a.fileExistsInDaemon(t, relPath)
+		archiveFiles := strings.TrimSpace(a.archiveFilesInDaemon(t))
+		return !originalExists || archiveFiles != ""
+	})
 
-	// Check if the file is still at the original path (should be gone — either deleted or archived).
-	originalExists := a.fileExistsInDaemon(t, relPath)
-	t.Logf("R2: original file exists at %s: %v", relPath, originalExists)
-
-	// Check the archive directory for preserved files.
 	archiveFiles := a.archiveFilesInDaemon(t)
+	t.Logf("R2: original file exists at %s: %v", relPath, originalExists)
 	t.Logf("R2: archive files:\n%s", archiveFiles)
+	t.Logf("R2: daemon logs tail:\n%s", a.daemonLogs(t))
 
-	// List all files in the workspace for debugging.
-	allFiles := a.execDaemon(t, fmt.Sprintf("find %s -type f 2>/dev/null | sort || true",
-		shellQuote(a.daemonWorkspaceDir())))
-	t.Logf("R2: all workspace files:\n%s", allFiles)
-
-	// Get daemon logs to verify ErrUnsafeDelete was triggered.
-	logs := a.daemonLogs(t)
-	t.Logf("R2: daemon logs tail:\n%s", logs)
-
-	// Verify: The file content should be preserved SOMEWHERE (either at original path
-	// or in the archive). The daemon must NOT have silently deleted the modified file.
+	// The EXTERNAL content must be preserved SOMEWHERE: at the original path,
+	// in the archive, or reconciled to the backend. FAIL if it's nowhere.
+	found := false
 	if originalExists {
-		// File was preserved at original path — this is acceptable if daemon
-		// detected the mismatch and refused to delete.
 		content := a.rawReadFile(t, relPath)
 		if strings.Contains(content, "EXTERNALLY MODIFIED") {
-			t.Logf("R2 PASS: file preserved at original path with external content: %q", content)
-			return
+			t.Logf("R2: external content preserved at original path")
+			found = true
 		}
 	}
-
-	if strings.TrimSpace(archiveFiles) != "" {
-		// File was archived — this is the expected ErrUnsafeDelete → Archive path.
-		// Verify at least one archive file contains our external content.
-		archiveLines := strings.Split(strings.TrimSpace(archiveFiles), "\n")
-		for _, archivePath := range archiveLines {
+	if !found {
+		for _, archivePath := range strings.Split(strings.TrimSpace(archiveFiles), "\n") {
 			archivePath = strings.TrimSpace(archivePath)
 			if archivePath == "" {
 				continue
 			}
 			content := a.execDaemon(t, fmt.Sprintf("cat %s 2>/dev/null || true", shellQuote(archivePath)))
 			if strings.Contains(content, "EXTERNALLY MODIFIED") {
-				t.Logf("R2 PASS: file archived at %s with content: %q", archivePath, content)
-				return
+				t.Logf("R2: external content archived at %s", archivePath)
+				found = true
+				break
 			}
 		}
-		// Archive files exist but none contain our content — check if they contain
-		// the original content (which means daemon archived old, not the external edit).
-		t.Logf("R2: archive files exist but none contain external content")
 	}
-
-	// If we get here, check if the daemon somehow reconciled the external content
-	// to the backend before the tombstone took effect (which is also safe behavior).
-	backendContent, err := a.backendDocumentContent(docID)
-	if err == nil && strings.Contains(backendContent, "EXTERNALLY MODIFIED") {
-		t.Logf("R2 PASS (alternative): daemon reconciled external content to backend before cleanup: %q", backendContent)
-		return
+	if !found {
+		backendContent, err := a.backendDocumentContent(docID)
+		if err == nil && strings.Contains(backendContent, "EXTERNALLY MODIFIED") {
+			t.Logf("R2: external content reconciled to backend before tombstone")
+			found = true
+		}
 	}
-
-	// True failure: file was deleted without archiving and content is lost.
-	if !originalExists && strings.TrimSpace(archiveFiles) == "" {
-		t.Fatalf("R2 FAIL: file was deleted without archiving. External content is LOST. "+
-			"Backend content: %q", backendContent)
+	if !found {
+		t.Fatalf("R2 FAIL: external content is LOST — not at original path, not in archive, not in backend")
 	}
-
-	t.Logf("R2 PASS (weak): file state unclear but content not completely lost. "+
-		"Original exists: %v, archive files: %q, backend: %q",
-		originalExists, archiveFiles, backendContent)
 }
 
 // ============================================================
@@ -351,55 +332,18 @@ func TestAdversarialR3ExternalRenameOverTrackedPath(t *testing.T) {
 	newInode := a.getInode(t, pathA)
 	t.Logf("R3: new inode at %s after mv: %s (was %s)", pathA, newInode, originalInode)
 
-	// Step 4-5: Wait for the daemon to detect the change. The fsnotify watcher should
-	// see a Create event, call statFileWithIdentity, detect the new inode identity,
-	// and treat it as a new local file.
-	//
-	// The daemon should either:
-	// (a) Adopt the new file content and sync it upstream, OR
-	// (b) Archive the old content and track the new file.
-	//
-	// We verify by checking if the backend eventually contains the external file's content.
-	deadline := time.Now().Add(60 * time.Second)
-	var backendContent string
-	backendHasExternal := false
-	for time.Now().Before(deadline) {
-		content, err := a.backendDocumentContent(docID)
-		if err == nil {
-			backendContent = content
-			if strings.Contains(content, "EXTERNAL FILE") {
-				backendHasExternal = true
-				break
-			}
-		}
-		time.Sleep(1 * time.Second)
-	}
-
-	// Also check local disk content.
-	localContent := a.rawReadFile(t, pathA)
-	t.Logf("R3: local content at %s: %q", pathA, localContent)
+	// Step 4-5: The daemon must detect the identity change and sync the external
+	// file's content to the backend. Only backend convergence proves adoption —
+	// local disk has the external content because mv put it there.
+	backendContent := a.waitForBackendContentPredicate(t, docID, 60*time.Second, func(content string) bool {
+		return strings.Contains(content, "EXTERNAL FILE")
+	})
 	t.Logf("R3: backend content: %q", backendContent)
+	t.Logf("R3: daemon logs tail:\n%s", a.daemonLogs(t))
 
-	// Check the archive for old content.
-	archiveFiles := a.archiveFilesInDaemon(t)
-	t.Logf("R3: archive files:\n%s", archiveFiles)
-
-	logs := a.daemonLogs(t)
-	t.Logf("R3: daemon logs tail:\n%s", logs)
-
-	if backendHasExternal {
-		t.Logf("R3 PASS: daemon detected inode change and synced external file content to backend")
-		return
+	if !strings.Contains(backendContent, "EXTERNAL FILE") {
+		t.Fatalf("R3 FAIL: daemon did not sync external file content to backend; got %q", backendContent)
 	}
-
-	// Alternative pass: local disk has the external content and daemon is tracking it.
-	if strings.Contains(localContent, "EXTERNAL FILE") {
-		t.Logf("R3 PASS (local): external file content preserved at tracked path; backend may still be converging: %q", backendContent)
-		return
-	}
-
-	t.Fatalf("R3 FAIL: daemon did not detect the inode change. Local content: %q, Backend: %q",
-		localContent, backendContent)
 }
 
 // ============================================================
@@ -445,49 +389,27 @@ func TestAdversarialR4CreateEmptyOrReadExternalRacePreservesFile(t *testing.T) {
 	docID2 := a.createDocument(t, relPath2, "")
 	t.Logf("R4: document %s created in backend for path %s (file already exists)", docID2, relPath2)
 
-	// Step 4: Wait and verify. The external file content should be preserved.
-	// Give the daemon time to attempt materialization.
-	time.Sleep(5 * time.Second)
-
-	// Check that the file still exists and has the external content.
-	localContent := a.rawReadFile(t, relPath2)
-	t.Logf("R4: local content at %s after daemon materialization attempt: %q", relPath2, localContent)
+	// Step 4: Poll until the daemon has attempted materialization, then verify
+	// the external file content is preserved.
+	a.pollUntil(t, 30*time.Second, "daemon materialization attempt", func() bool {
+		// The daemon has processed the document when a websocket sync is established.
+		// We just need to wait long enough for the materialize attempt.
+		content, _ := a.backendDocumentContent(docID2)
+		return content != "" || a.fileExistsInDaemon(t, relPath2)
+	})
 
 	fileExists := a.fileExistsInDaemon(t, relPath2)
-	t.Logf("R4: file exists at %s: %v", relPath2, fileExists)
-
-	// Verify the daemon did NOT delete the file.
 	if !fileExists {
 		t.Fatalf("R4 FAIL: daemon DELETED the externally-created file at %s", relPath2)
 	}
 
+	localContent := a.rawReadFile(t, relPath2)
+	t.Logf("R4: local content at %s: %q", relPath2, localContent)
+	t.Logf("R4: daemon logs tail:\n%s", a.daemonLogs(t))
+
 	if !strings.Contains(localContent, "EXTERNAL PRE-EXISTING FILE") {
 		t.Fatalf("R4 FAIL: daemon OVERWROTE the external file content. Got: %q, Want substring: %q",
 			localContent, "EXTERNAL PRE-EXISTING FILE")
-	}
-
-	// Check that the daemon eventually recognizes the external content and
-	// reconciles it as local content to the backend.
-	backendContent := a.waitForBackendContentPredicate(t, docID2, 60*time.Second, func(content string) bool {
-		// Either the backend has the external content (daemon reconciled it)
-		// or it's still empty (daemon hasn't reconciled yet but preserved the file).
-		return true
-	})
-	t.Logf("R4: backend content for %s: %q", relPath2, backendContent)
-
-	logs := a.daemonLogs(t)
-	t.Logf("R4: daemon logs tail:\n%s", logs)
-
-	// CRITICAL verification: search daemon logs for os.Remove calls on the file.
-	// The daemon should never remove files it didn't create.
-	// We check this by verifying the file is still intact.
-	finalContent := a.rawReadFile(t, relPath2)
-	if strings.Contains(finalContent, "EXTERNAL PRE-EXISTING FILE") {
-		t.Logf("R4 PASS: external file preserved. Content: %q", finalContent)
-	} else if fileExists {
-		t.Logf("R4 PASS (weak): file exists but content may have changed. Content: %q", finalContent)
-	} else {
-		t.Fatalf("R4 FAIL: file was deleted by daemon")
 	}
 }
 
@@ -524,8 +446,9 @@ func TestAdversarialR5RestartDurabilityNoPhantomDirtyMarks(t *testing.T) {
 	a.waitForLocalContent(t, relPath, editedContent, 30*time.Second)
 	t.Logf("R5: full bi-directional sync achieved for content: %q", editedContent)
 
-	// Step 2: Verify the file is clean (not locally dirty) before restart.
-	// We can check this by seeing if the backend and local content match.
+	// Step 2: Verify content matches and capture the backend document head
+	// (update_id) BEFORE restart. A phantom re-upload of identical content
+	// still advances the head — content-equality alone can't detect it.
 	backendContent, err := a.backendDocumentContentByPath(relPath)
 	if err != nil {
 		t.Fatalf("R5: failed to read backend content: %v", err)
@@ -535,64 +458,43 @@ func TestAdversarialR5RestartDurabilityNoPhantomDirtyMarks(t *testing.T) {
 		t.Fatalf("R5: content mismatch before restart. Backend: %q, Local: %q",
 			backendContent, localContent)
 	}
-	t.Logf("R5: content matches before restart. Backend == Local == %q", editedContent)
-
-	// Capture daemon logs before restart to compare later.
-	logsBeforeRestart := a.daemonLogs(t)
-	t.Logf("R5: daemon log line count before restart: %d", strings.Count(logsBeforeRestart, "\n"))
+	_, _, headBefore, err := a.documentHeaderByPath(relPath)
+	if err != nil {
+		t.Fatalf("R5: failed to read document header before restart: %v", err)
+	}
+	t.Logf("R5: pre-restart state: content=%q headID=%d", editedContent, headBefore)
 
 	// Step 3: RESTART the daemon container.
-	t.Logf("R5: restarting daemon container...")
 	a.run(t, "restart", "daemon")
 
-	// Wait for the daemon to come back up and re-initialize.
-	// The daemon needs time to reconnect to backend and re-walk the filesystem.
-	time.Sleep(10 * time.Second)
-	t.Logf("R5: daemon restarted, waiting for re-initialization...")
+	// Step 4: Poll until the daemon has re-initialized (file still exists on disk).
+	a.pollUntil(t, 30*time.Second, "daemon re-init after restart", func() bool {
+		return a.fileExistsInDaemon(t, relPath)
+	})
 
-	// Step 4: After restart, verify:
-	// 4a. The synced file still exists on disk with correct content.
+	// 4a. File must exist with correct content.
 	localContentAfterRestart := a.rawReadFile(t, relPath)
 	if localContentAfterRestart != editedContent {
 		t.Fatalf("R5 FAIL: file content changed after restart. Before: %q, After: %q",
 			editedContent, localContentAfterRestart)
 	}
-	t.Logf("R5: file content preserved after restart: %q", localContentAfterRestart)
 
-	// 4b. Wait for daemon to re-sync, then verify the daemon does NOT mark it as dirty.
-	// We check this by ensuring the backend content hasn't changed (no phantom edits).
-	time.Sleep(10 * time.Second)
+	// 4b. Wait for the daemon to complete its post-restart reconciliation,
+	// then verify the document head has NOT advanced (no phantom edits).
+	a.pollUntil(t, 30*time.Second, "post-restart reconciliation settle", func() bool {
+		content, err := a.backendDocumentContentByPath(relPath)
+		return err == nil && content == editedContent
+	})
 
-	backendContentAfterRestart, err := a.backendDocumentContentByPath(relPath)
+	_, _, headAfter, err := a.documentHeaderByPath(relPath)
 	if err != nil {
-		t.Fatalf("R5: failed to read backend content after restart: %v", err)
+		t.Fatalf("R5: failed to read document header after restart: %v", err)
 	}
-	t.Logf("R5: backend content after restart: %q", backendContentAfterRestart)
+	t.Logf("R5: post-restart state: headID=%d (was %d)", headAfter, headBefore)
+	t.Logf("R5: daemon logs after restart:\n%s", a.daemonLogs(t))
 
-	// 4c. Verify no phantom outbound edits — backend content should be unchanged.
-	if backendContentAfterRestart != editedContent {
-		t.Fatalf("R5 FAIL: phantom outbound edit detected! Backend content changed from %q to %q after restart",
-			editedContent, backendContentAfterRestart)
-	}
-
-	// 5. Check daemon logs for any reconcile activity that indicates false dirty detection.
-	logsAfterRestart := a.daemonLogs(t)
-	t.Logf("R5: daemon logs after restart:\n%s", logsAfterRestart)
-
-	// Look for signs of phantom dirty marks in the logs.
-	// After restart, the daemon should see hash match and call clearLocalDirty.
-	// If we see outbound sync activity for this document, that's suspicious.
-	if strings.Contains(logsAfterRestart, "phantom") || strings.Contains(logsAfterRestart, "PHANTOM") {
-		t.Logf("R5 WARNING: daemon logs mention 'phantom' — check for false dirty detection")
-	}
-
-	// Final verification: the file should still exist and content should match.
-	finalLocalContent := a.rawReadFile(t, relPath)
-	finalBackendContent, _ := a.backendDocumentContentByPath(relPath)
-	if finalLocalContent == editedContent && finalBackendContent == editedContent {
-		t.Logf("R5 PASS: no phantom dirty marks after restart. Local and backend content match: %q", editedContent)
-	} else {
-		t.Fatalf("R5 FAIL: content diverged after restart. Local: %q, Backend: %q, Expected: %q",
-			finalLocalContent, finalBackendContent, editedContent)
+	if headAfter != headBefore {
+		t.Fatalf("R5 FAIL: phantom outbound edit detected — document head advanced from %d to %d after restart (content unchanged: %q)",
+			headBefore, headAfter, editedContent)
 	}
 }
