@@ -42,6 +42,7 @@ type Service struct {
 	runtimes        *runtimeRegistry
 	daemonStatus    *daemonStatusReporter
 	toolServer      *http.Server
+	toolGateway     *toolGateway
 	mu              sync.Mutex
 	primaryRuntime  *workspaceRuntime
 	agentRuntimes   map[string]*managedWorkspaceRuntime
@@ -60,6 +61,48 @@ type managedWorkspaceRuntime struct {
 type managedAgentWorker struct {
 	cancel context.CancelFunc
 	wake   chan struct{}
+	done   <-chan struct{}
+}
+
+type serviceTeardown struct {
+	cancelCore       func()
+	closeIngress     func() error
+	joinCore         func()
+	drainGateway     func() error
+	joinAgentTree    func()
+	closeRuntimeData func() error
+
+	once sync.Once
+	err  error
+}
+
+func (t *serviceTeardown) Close() error {
+	if t == nil {
+		return nil
+	}
+	t.once.Do(func() {
+		var errs []error
+		if t.cancelCore != nil {
+			t.cancelCore()
+		}
+		if t.closeIngress != nil {
+			errs = append(errs, t.closeIngress())
+		}
+		if t.joinCore != nil {
+			t.joinCore()
+		}
+		if t.drainGateway != nil {
+			errs = append(errs, t.drainGateway())
+		}
+		if t.joinAgentTree != nil {
+			t.joinAgentTree()
+		}
+		if t.closeRuntimeData != nil {
+			errs = append(errs, t.closeRuntimeData())
+		}
+		t.err = errors.Join(errs...)
+	})
+	return t.err
 }
 
 type trackedFile struct {
@@ -222,12 +265,45 @@ func (s *Service) closePrimaryRuntime() error {
 	return runtime.Close()
 }
 
-func (s *Service) Run(ctx context.Context) error {
-	toolServer, err := s.startToolGateway()
+func (s *Service) Run(ctx context.Context) (runErr error) {
+	gateway, err := s.startToolGateway()
 	if err != nil {
 		return err
 	}
-	s.toolServer = toolServer
+	s.toolGateway = gateway
+	s.toolServer = gateway.server
+	coreCtx, cancelCore := context.WithCancel(ctx)
+	var primaryDone chan struct{}
+	var primaryErr error
+	var eventDone chan struct{}
+	teardown := &serviceTeardown{
+		cancelCore:   cancelCore,
+		closeIngress: gateway.CloseIngress,
+		joinCore: func() {
+			if primaryDone != nil {
+				<-primaryDone
+			}
+			if eventDone != nil {
+				<-eventDone
+			}
+		},
+		drainGateway: func() error {
+			drainCtx, cancelDrain := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancelDrain()
+			return gateway.Drain(drainCtx)
+		},
+		joinAgentTree: func() {
+			s.closeAgentWorkers()
+			s.closeAgentRuntimes()
+			if s.sessions != nil {
+				s.sessions.Shutdown()
+			}
+		},
+		closeRuntimeData: s.closePrimaryRuntime,
+	}
+	defer func() {
+		runErr = errors.Join(runErr, teardown.Close())
+	}()
 	if err := os.MkdirAll(s.cfg.WorkspaceDir, 0o755); err != nil {
 		return err
 	}
@@ -235,42 +311,49 @@ func (s *Service) Run(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensurePrimaryRuntime(); err != nil {
-		_ = shutdownToolGateway(context.Background(), s.toolServer)
 		return err
 	}
 	primaryRuntime := s.primaryRuntime
-	defer s.closePrimaryRuntime()
-	s.reportDaemonStatus(ctx, true)
-	if err := s.refreshInitialWorkspace(ctx); err != nil {
-		s.closeAgentWorkers()
-		s.closeAgentRuntimes()
-		if s.sessions != nil {
-			s.sessions.Shutdown()
+	s.reportDaemonStatus(coreCtx, true)
+	if err := s.refreshInitialWorkspace(coreCtx); err != nil {
+		if ctx.Err() != nil {
+			return nil
 		}
-		_ = shutdownToolGateway(context.Background(), s.toolServer)
 		return err
 	}
-	primaryCtx, cancelPrimary := context.WithCancel(ctx)
-	defer cancelPrimary()
-	primaryDone := make(chan struct{})
-	shutdown := func() {
-		cancelPrimary()
-		s.closeAgentWorkers()
-		s.closeAgentRuntimes()
-		if s.sessions != nil {
-			s.sessions.Shutdown()
-		}
-		<-primaryDone
-		_ = shutdownToolGateway(context.Background(), s.toolServer)
-	}
+	primaryReady := make(chan error, 1)
+	primaryDone = make(chan struct{})
 	go func() {
 		defer close(primaryDone)
-		if err := primaryRuntime.Run(primaryCtx); err != nil && primaryCtx.Err() == nil {
-			log.Printf("primary workspace runtime error: %v", err)
-		}
+		primaryErr = primaryRuntime.run(coreCtx, primaryReady)
 	}()
+	select {
+	case err := <-primaryReady:
+		if err != nil {
+			return err
+		}
+	case <-primaryDone:
+		if primaryErr != nil {
+			return primaryErr
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		return errors.New("primary workspace runtime stopped before readiness")
+	case <-gateway.Done():
+		if err := gateway.Err(); err != nil {
+			return fmt.Errorf("tool gateway: %w", err)
+		}
+		return errors.New("tool gateway stopped before readiness")
+	case <-ctx.Done():
+		return nil
+	}
 	drained := make(chan error, 1)
-	go s.workspaceEventLoop(ctx, drained)
+	eventDone = make(chan struct{})
+	go func() {
+		defer close(eventDone)
+		s.workspaceEventLoop(coreCtx, drained)
+	}()
 	s.signalReady()
 
 	ticker := time.NewTicker(60 * time.Second)
@@ -279,18 +362,28 @@ func (s *Service) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			shutdown()
 			return nil
+		case <-primaryDone:
+			if primaryErr != nil {
+				return primaryErr
+			}
+			if ctx.Err() != nil {
+				return nil
+			}
+			return errors.New("primary workspace runtime stopped unexpectedly")
+		case <-gateway.Done():
+			if err := gateway.Err(); err != nil {
+				return fmt.Errorf("tool gateway: %w", err)
+			}
+			return errors.New("tool gateway stopped unexpectedly")
 		case err := <-drained:
 			fmt.Printf("workspace event stream: %v; daemon has been drained, exiting\n", err)
-			shutdown()
 			return err
 		case <-ticker.C:
-			s.reportDaemonStatus(ctx, false)
-			if err := s.refresh(ctx); err != nil {
+			s.reportDaemonStatus(coreCtx, false)
+			if err := s.refresh(coreCtx); err != nil {
 				if isTerminalAuthError(err) {
 					fmt.Printf("workspace refresh: %v; daemon has been drained, exiting\n", err)
-					shutdown()
 					return err
 				}
 				fmt.Printf("workspace refresh error: %v\n", err)
@@ -426,6 +519,8 @@ func (s *Service) runWorkspaceEventStream(ctx context.Context) error {
 		return err
 	}
 	defer conn.Close()
+	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopClose()
 
 	for {
 		_, payload, err := conn.ReadMessage()
@@ -834,9 +929,13 @@ func (s *Service) syncAgentWorkers(ctx context.Context, agents []*agent) error {
 			continue
 		}
 		workerCtx, cancel := context.WithCancel(ctx)
-		worker := &managedAgentWorker{cancel: cancel, wake: make(chan struct{}, 1)}
+		done := make(chan struct{})
+		worker := &managedAgentWorker{cancel: cancel, wake: make(chan struct{}, 1), done: done}
 		s.agentWorkers[currentAgent.ID] = worker
-		go s.agentWorkerLoop(workerCtx, skills, currentAgent.ID)
+		go func(agentID string) {
+			defer close(done)
+			s.agentWorkerLoop(workerCtx, skills, agentID)
+		}(currentAgent.ID)
 		select {
 		case worker.wake <- struct{}{}:
 		default:
@@ -859,6 +958,9 @@ func (s *Service) syncAgentWorkers(ctx context.Context, agents []*agent) error {
 	for _, worker := range stale {
 		worker.cancel()
 	}
+	for _, worker := range stale {
+		waitManagedAgentWorker(worker)
+	}
 	return nil
 }
 
@@ -873,6 +975,16 @@ func (s *Service) closeAgentWorkers() {
 	for _, worker := range workers {
 		worker.cancel()
 	}
+	for _, worker := range workers {
+		waitManagedAgentWorker(worker)
+	}
+}
+
+func waitManagedAgentWorker(worker *managedAgentWorker) {
+	if worker == nil || worker.done == nil {
+		return
+	}
+	<-worker.done
 }
 
 func (s *Service) agentWorkerLoop(ctx context.Context, skills agentSkillExecutor, agentID string) {
