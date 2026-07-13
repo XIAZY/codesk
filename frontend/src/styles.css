@@ -1884,6 +1884,34 @@ a:focus-visible,
   padding: 10px 14px;
 }
 
+.thread-popover-list-head {
+  align-items: flex-start;
+}
+
+.thread-popover-list-head > .i,
+.thread-popover-list-head > .btn {
+  flex: none;
+  margin-top: 2px;
+}
+
+.thread-popover-head-copy {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.thread-popover-head-excerpt {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
 .thread-popover-head-spacer {
   flex: 1;
   min-width: 0;

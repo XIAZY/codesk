@@ -2910,6 +2910,8 @@ export function ThreadPopover({
   const groupKey = `${group.line}:${group.threads.map((thread) => thread.id).sort().join("|")}`;
   const selected = selectedThreadId ? threadItems.find((thread) => thread.id === selectedThreadId) ?? null : null;
   const openThreadItems = threadItems.filter((thread) => thread.status !== "resolved");
+  const headerThread = threadItems.find((thread) => thread.status !== "resolved") ?? threadItems[0];
+  const headerExcerpt = headerThread?.anchor.excerpt || headerThread?.title || "Thread";
   const popoverStyle = {
     left: placement?.left ?? point.x,
     top: placement?.top ?? point.y,
@@ -3095,15 +3097,16 @@ export function ThreadPopover({
         style={popoverStyle}
         role="dialog"
         aria-modal="false"
-        aria-label={`Threads on line ${group.line}`}
+        aria-label={`Threads anchored to ${headerExcerpt}`}
       >
-        <div className="thread-popover-head">
+        <div className="thread-popover-head thread-popover-list-head">
           <Icon name="message" />
-          <b className="small">Line {group.line}</b>
-          <span className="small muted">
-            · {openThreadItems.length ? `${openThreadItems.length} thread${openThreadItems.length === 1 ? "" : "s"}` : "0 open"}
-          </span>
-          <span className="thread-popover-head-spacer" />
+          <div className="thread-popover-head-copy">
+            <b className="small thread-popover-head-excerpt">{headerExcerpt}</b>
+            <span className="small muted">
+              · {openThreadItems.length ? `${openThreadItems.length} thread${openThreadItems.length === 1 ? "" : "s"}` : "0 open"}
+            </span>
+          </div>
           <button className="btn ghost icon sm" onClick={onClose} type="button" aria-label="Close">×</button>
         </div>
         <div className="thread-popover-list">

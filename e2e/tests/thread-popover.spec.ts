@@ -117,11 +117,15 @@ async function captureElementRender(locator: Locator, testInfo: TestInfo, name: 
   await testInfo.attach(name, { path, contentType: "image/png" });
 }
 
+function threadListDialog(page: Page): Locator {
+  return page.getByRole("dialog", { name: /^Threads anchored to / });
+}
+
 async function openThreadDetail(page: Page, markerCount: number, body: string, line = 1): Promise<Locator> {
   await page.getByRole("button", {
     name: `${markerCount} open thread${markerCount === 1 ? "" : "s"} on line ${line}`,
   }).click();
-  const list = page.getByRole("dialog", { name: `Threads on line ${line}` });
+  const list = threadListDialog(page);
   await expect(list).toBeVisible();
   const row = list.locator(".thread-popover-row", { hasText: body });
   await expect(row).toBeVisible();
@@ -179,7 +183,7 @@ test("thread popover: resolving the last open thread removes only the marker", a
   await captureRender(page, testInfo, "thread-popover-resolved-detail");
 
   await detail.getByRole("button", { name: "Back to threads on this line" }).click();
-  const list = page.getByRole("dialog", { name: "Threads on line 1" });
+  const list = threadListDialog(page);
   await expect(list).toBeVisible();
   await expect(list.locator(".thread-popover-row")).toHaveCount(0);
   await expect(list.getByText("· 0 open")).toBeVisible();
@@ -196,7 +200,8 @@ test("thread popover: resolving the last open thread removes only the marker", a
 test("thread popover: mixed line hides resolved rows after Back", async ({ page }, testInfo) => {
   const resolvedBody = `resolve me ${Date.now()}`;
   const openBody = `keep me open ${Date.now()}`;
-  const { editor, errors } = await setupThreadDocument(page, [resolvedBody, openBody]);
+  const anchorText = `mixed thread anchor ${Date.now()}`;
+  const { editor, errors } = await setupThreadDocument(page, [resolvedBody, openBody], anchorText);
   let detail = await openThreadDetail(page, 2, resolvedBody);
 
   await detail.getByRole("button", { name: "Mark as resolved" }).click();
@@ -204,12 +209,16 @@ test("thread popover: mixed line hides resolved rows after Back", async ({ page 
   await expect(page.getByRole("button", { name: "1 open thread on line 1" })).toBeVisible();
   await detail.getByRole("button", { name: "Back to threads on this line" }).click();
 
-  let list = page.getByRole("dialog", { name: "Threads on line 1" });
+  let list = threadListDialog(page);
   let rows = list.locator(".thread-popover-row");
   await expect(rows).toHaveCount(1);
   await expect(rows.nth(0)).toContainText(openBody);
   await expect(list.getByText(resolvedBody)).toHaveCount(0);
   await expect(list.getByRole("button", { name: "Jump to line 1" })).toHaveCount(0);
+  const headerExcerpt = list.locator(".thread-popover-head-excerpt");
+  await expect(headerExcerpt).toHaveText(anchorText);
+  await expect(list.getByText("Line 1", { exact: true })).toHaveCount(0);
+  expect(await headerExcerpt.evaluate((element) => getComputedStyle(element).webkitLineClamp)).toBe("2");
   await captureRender(page, testInfo, "thread-popover-list");
 
   assertNoPageErrors(errors);
@@ -221,14 +230,14 @@ test("thread popover: Back restores the row and Escape/outside click dismiss", a
   let detail = await openThreadDetail(page, 1, body);
 
   await detail.getByRole("button", { name: "Back to threads on this line" }).click();
-  let list = page.getByRole("dialog", { name: "Threads on line 1" });
+  let list = threadListDialog(page);
   const row = list.locator(".thread-popover-row", { hasText: body });
   await expect(row).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toHaveCount(0);
 
   await page.getByRole("button", { name: "1 open thread on line 1" }).click();
-  list = page.getByRole("dialog", { name: "Threads on line 1" });
+  list = threadListDialog(page);
   await expect(list).toBeVisible();
   await page.locator(".document-title-row").click({ position: { x: 4, y: 4 } });
   await expect(page.getByRole("dialog")).toHaveCount(0);
@@ -289,7 +298,7 @@ test("thread popover: desktop float stays contained near viewport edges and in a
   expect(markerBox!.x + markerBox!.width).toBeGreaterThan(600);
 
   await marker.click();
-  const list = page.getByRole("dialog", { name: `Threads on line ${lineCount}` });
+  const list = threadListDialog(page);
   await expect(list).toBeVisible();
   await expectInsideViewport(page, list);
   await captureRender(page, testInfo, "thread-popover-desktop-edge-list");
@@ -330,7 +339,7 @@ test("document Threads entry replaces the rail tab and reuses thread detail", as
   await detail.getByRole("button", { name: "Mark as resolved" }).click();
   await expect(detail.getByRole("button", { name: "Reopen thread" })).toBeVisible({ timeout: 20_000 });
   await detail.getByRole("button", { name: "Back to threads on this line" }).click();
-  await page.getByRole("dialog", { name: "Threads on line 1" }).getByRole("button", { name: "Close" }).click();
+  await threadListDialog(page).getByRole("button", { name: "Close" }).click();
 
   await editor.click();
   await page.keyboard.press("Control+End");
