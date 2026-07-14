@@ -220,8 +220,12 @@ func TestRunStopsDaemonHeartbeatBeforeBlockingFatalShutdown(t *testing.T) {
 	heartbeatTicks := make(chan time.Time, 1)
 	workspaceStreamStarted := make(chan struct{})
 	releaseWorkspaceStream := make(chan struct{})
+	thirdReportStarted := make(chan struct{})
+	releaseThirdReport := make(chan struct{})
 	var workspaceStreamOnce sync.Once
 	var releaseWorkspaceStreamOnce sync.Once
+	var thirdReportOnce sync.Once
+	var releaseThirdReportOnce sync.Once
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/workspace"):
@@ -246,6 +250,16 @@ func TestRunStopsDaemonHeartbeatBeforeBlockingFatalShutdown(t *testing.T) {
 		}
 	}))
 	t.Cleanup(server.Close)
+	serverClient := server.Client()
+	serverTransport := serverClient.Transport
+	var transportStatusCount atomic.Int64
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/daemon/status") && transportStatusCount.Add(1) == 3 {
+			thirdReportOnce.Do(func() { close(thirdReportStarted) })
+			<-releaseThirdReport
+		}
+		return serverTransport.RoundTrip(r)
+	})}
 
 	cfg := Config{
 		BackendURL:         server.URL,
@@ -259,8 +273,8 @@ func TestRunStopsDaemonHeartbeatBeforeBlockingFatalShutdown(t *testing.T) {
 	}
 	service := &Service{
 		cfg:            cfg,
-		client:         server.Client(),
-		daemonStatus:   newDaemonStatusReporter(cfg, server.Client()),
+		client:         client,
+		daemonStatus:   newDaemonStatusReporter(cfg, client),
 		primaryRuntime: &workspaceRuntime{},
 		agentRuntimes:  map[string]*managedWorkspaceRuntime{},
 		agentWorkers:   map[string]*managedAgentWorker{},
@@ -276,6 +290,7 @@ func TestRunStopsDaemonHeartbeatBeforeBlockingFatalShutdown(t *testing.T) {
 	t.Cleanup(func() {
 		cancel()
 		releaseWorkspaceStreamOnce.Do(func() { close(releaseWorkspaceStream) })
+		releaseThirdReportOnce.Do(func() { close(releaseThirdReport) })
 		blockingRuntimeDoneOnce.Do(func() { close(blockingRuntimeDone) })
 		select {
 		case <-runFinished:
@@ -313,11 +328,23 @@ func TestRunStopsDaemonHeartbeatBeforeBlockingFatalShutdown(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("daemon did not emit a periodic heartbeat")
 	}
+	heartbeatTicks <- time.Now()
+	select {
+	case <-thirdReportStarted:
+	case <-time.After(time.Second):
+		t.Fatal("third daemon heartbeat did not enter the blocking transport")
+	}
 	releaseWorkspaceStreamOnce.Do(func() { close(releaseWorkspaceStream) })
 	select {
 	case <-shutdownBlocked:
+		t.Fatal("fatal shutdown reached runtime teardown before the in-flight heartbeat joined")
+	case <-time.After(100 * time.Millisecond):
+	}
+	releaseThirdReportOnce.Do(func() { close(releaseThirdReport) })
+	select {
+	case <-shutdownBlocked:
 	case <-time.After(time.Second):
-		t.Fatal("fatal workspace drain did not enter blocking shutdown")
+		t.Fatal("fatal workspace drain did not enter teardown after the in-flight heartbeat joined")
 	}
 
 	countAtShutdown := statusCount.Load()
