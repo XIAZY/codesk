@@ -152,6 +152,8 @@ func TestRunReportsDaemonOnlineOnlyAfterInitialRefreshSucceeds(t *testing.T) {
 				writeJSONResponse(w, http.StatusOK, &workspaceResponse{})
 			case <-r.Context().Done():
 			}
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/ws/workspaces/"):
+			<-r.Context().Done()
 		default:
 			http.NotFound(w, r)
 		}
@@ -168,11 +170,24 @@ func TestRunReportsDaemonOnlineOnlyAfterInitialRefreshSucceeds(t *testing.T) {
 		AgentID:            "daemon_agent",
 		AgentToolBaseURL:   "http://127.0.0.1:0",
 	}
+	primaryRuntime, err := newWorkspaceRuntime(
+		cfg,
+		server.Client(),
+		cfg.WorkspaceDir,
+		cfg.AgentID,
+		"daemon",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = primaryRuntime.Close() })
+	watcher := newScriptedWorkspaceWatcher()
+	primaryRuntime.replica.newWatcher = func() (workspaceWatcher, error) { return watcher, nil }
 	service := &Service{
 		cfg:            cfg,
 		client:         server.Client(),
 		daemonStatus:   newDaemonStatusReporter(cfg, server.Client()),
-		primaryRuntime: &workspaceRuntime{},
+		primaryRuntime: primaryRuntime,
 		agentRuntimes:  map[string]*managedWorkspaceRuntime{},
 		agentWorkers:   map[string]*managedAgentWorker{},
 	}
