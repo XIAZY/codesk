@@ -141,10 +141,6 @@ type workspaceReplica struct {
 	projectedByID   map[string]*trackedFile
 }
 
-func newWorkspaceReplica(_ Config, rootDir, actorID, actorType string, markDirty func(string), markCreate func(localCreateCandidate)) *workspaceReplica {
-	return newWorkspaceReplicaWithFS(rootDir, actorID, actorType, markDirty, markCreate, NewWorkspaceFS(rootDir))
-}
-
 func newWorkspaceReplicaWithFS(
 	rootDir, actorID, actorType string,
 	markDirty func(string),

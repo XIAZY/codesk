@@ -15,6 +15,7 @@ var ErrDivergedWorkingCopy = errors.New("working copy diverged from expected has
 var ErrPathCollision = errors.New("target path already exists")
 var ErrUnsafeDelete = errors.New("refusing to delete non-matching working copy")
 var ErrOutsideWorkspace = errors.New("path is outside workspace")
+var errWorkspaceFSInvariant = errors.New("workspace filesystem invariant violated")
 
 type WorkspaceFS struct {
 	Root          string
@@ -63,6 +64,35 @@ func newWorkspaceFS(root string, pathLocks pathLockLeaseStore) *WorkspaceFS {
 		abs = filepath.Clean(root)
 	}
 	return &WorkspaceFS{Root: abs, pathLocks: pathLocks, openPathLocks: openPathLockStore}
+}
+
+func requireWorkspaceFS(fs *WorkspaceFS, root string) (*WorkspaceFS, error) {
+	if fs == nil {
+		return nil, fmt.Errorf("%w: missing filesystem for root %q", errWorkspaceFSInvariant, root)
+	}
+	want, err := canonicalWorkspaceRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	got, err := canonicalWorkspaceRoot(fs.Root)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid filesystem root: %v", errWorkspaceFSInvariant, err)
+	}
+	if got != want {
+		return nil, fmt.Errorf("%w: filesystem root %q does not match workspace root %q", errWorkspaceFSInvariant, got, want)
+	}
+	return fs, nil
+}
+
+func canonicalWorkspaceRoot(root string) (string, error) {
+	if strings.TrimSpace(root) == "" {
+		return "", fmt.Errorf("%w: workspace root is empty", errWorkspaceFSInvariant)
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("%w: resolve workspace root %q: %v", errWorkspaceFSInvariant, root, err)
+	}
+	return filepath.Clean(abs), nil
 }
 
 func (fs *WorkspaceFS) pathLockStore() (pathLockLeaseStore, error) {
