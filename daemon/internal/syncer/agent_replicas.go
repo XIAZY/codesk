@@ -133,7 +133,7 @@ func (s *Service) syncAgentRuntimes(ctx context.Context, workspace *workspaceRes
 	}
 	for index, agentID := range staleIDs {
 		errs = append(errs, closeManagedWorkspaceRuntime(stale[index]))
-		if err := os.RemoveAll(agentWorkspacePath(s.cfg, agentID)); err != nil {
+		if err := s.removeAgentWorkspace(agentWorkspacePath(s.cfg, agentID)); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -217,6 +217,9 @@ func (s *Service) publishPreparedAgentRuntimeReplacement(
 	if prepared.runtime == nil {
 		return nil, nil
 	}
+	if s.beforeAgentRuntimePublish != nil {
+		s.beforeAgentRuntimePublish()
+	}
 	s.mu.Lock()
 	if prepared.expected == nil || prepared.parentCtx == nil || prepared.parentCtx.Err() != nil ||
 		s.agentRuntimes[prepared.agentID] != prepared.expected ||
@@ -238,6 +241,13 @@ func (s *Service) publishPreparedAgentRuntimeReplacement(
 	return replacement, nil
 }
 
+func (s *Service) removeAgentWorkspace(path string) error {
+	if s != nil && s.removeAgentWorkspaceRoot != nil {
+		return s.removeAgentWorkspaceRoot(path)
+	}
+	return os.RemoveAll(path)
+}
+
 func (s *Service) superviseStoppedAgentWorkspaceRuntime(agentID string, failed *managedWorkspaceRuntime) {
 	if s == nil || failed == nil || failed.runtimeCtx == nil || failed.parentCtx == nil {
 		return
@@ -253,14 +263,20 @@ func (s *Service) superviseStoppedAgentWorkspaceRuntime(agentID string, failed *
 			return
 		}
 
+		// A workspace refresh can retire this same generation and remove its
+		// root. Own the complete transition so no prepared SQLite handle is open
+		// while another path removes that root.
+		s.refreshMu.Lock()
 		s.mu.Lock()
 		if failed.runtimeCtx.Err() != nil || failed.parentCtx.Err() != nil || s.agentRuntimes[agentID] != failed {
 			s.mu.Unlock()
+			s.refreshMu.Unlock()
 			return
 		}
 		workspace := failed.workspace
 		if !workspaceContainsAgent(workspace, agentID) {
 			s.mu.Unlock()
+			s.refreshMu.Unlock()
 			return
 		}
 		runtime, err := newWorkspaceRuntime(
@@ -272,6 +288,7 @@ func (s *Service) superviseStoppedAgentWorkspaceRuntime(agentID string, failed *
 		)
 		if err != nil {
 			s.mu.Unlock()
+			s.refreshMu.Unlock()
 			log.Printf("agent workspace runtime %s replacement construction failed: %v", agentID, err)
 			runErr = err
 			stoppedAt = time.Now()
@@ -299,6 +316,7 @@ func (s *Service) superviseStoppedAgentWorkspaceRuntime(agentID string, failed *
 		if err != nil {
 			log.Printf("agent workspace runtime %s replacement discard failed: %v", agentID, err)
 		}
+		s.refreshMu.Unlock()
 		if replacement == nil {
 			return
 		}

@@ -43,7 +43,7 @@ type Service struct {
 	daemonStatus            *daemonStatusReporter
 	toolServer              *http.Server
 	toolGateway             *toolGateway
-	refreshMu               sync.Mutex
+	refreshMu               sync.Mutex // Agent generation/root lifecycle lock across refresh and supervisor paths.
 	mu                      sync.Mutex
 	agentRuntimeSupervisors sync.WaitGroup
 	primaryRuntime          *workspaceRuntime
@@ -52,6 +52,10 @@ type Service struct {
 	latestWorkspace         *workspaceResponse
 	ready                   chan struct{}
 	readyOnce               sync.Once
+
+	// Lifecycle interleaving seams are nil in production.
+	beforeAgentRuntimePublish func()
+	removeAgentWorkspaceRoot  func(string) error
 }
 
 type managedWorkspaceRuntime struct {

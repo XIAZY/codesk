@@ -1431,6 +1431,116 @@ func TestRefreshSerializesStaleRemovalBeforeConcurrentReadd(t *testing.T) {
 	}
 }
 
+func TestSupervisorReplacementSerializesWithStaleRootRemoval(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/workspace" {
+			http.Error(w, "unexpected request", http.StatusNotFound)
+			return
+		}
+		writeJSONResponse(w, http.StatusOK, workspaceResponse{})
+	}))
+	defer backend.Close()
+
+	root := t.TempDir()
+	cfg := Config{
+		BackendURL:         backend.URL,
+		WorkspaceDir:       filepath.Join(root, "primary"),
+		AgentWorkspaceRoot: filepath.Join(root, "agents"),
+		AgentID:            "daemon",
+	}
+	agentRoot := agentWorkspacePath(cfg, "agent-1")
+	oldRuntime, err := newWorkspaceRuntime(cfg, backend.Client(), agentRoot, "agent-1", "agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runtimeCtx, runtimeCancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	failed := &managedWorkspaceRuntime{
+		runtime:    oldRuntime,
+		cancel:     runtimeCancel,
+		done:       done,
+		parentCtx:  ctx,
+		runtimeCtx: runtimeCtx,
+		workspace:  &workspaceResponse{Agents: []*agent{{ID: "agent-1"}}},
+		startedAt:  time.Now(),
+	}
+	publishReached := make(chan struct{})
+	releasePublish := make(chan struct{})
+	removeReached := make(chan string, 1)
+	service := &Service{
+		cfg:            cfg,
+		client:         backend.Client(),
+		primaryRuntime: &workspaceRuntime{},
+		agentRuntimes:  map[string]*managedWorkspaceRuntime{"agent-1": failed},
+		agentWorkers:   map[string]*managedAgentWorker{},
+		beforeAgentRuntimePublish: func() {
+			close(publishReached)
+			<-releasePublish
+		},
+		removeAgentWorkspaceRoot: func(path string) error {
+			removeReached <- path
+			return os.RemoveAll(path)
+		},
+	}
+	var releasePublishOnce sync.Once
+	releasePreparedPublish := func() { releasePublishOnce.Do(func() { close(releasePublish) }) }
+	t.Cleanup(func() {
+		releasePreparedPublish()
+		cancel()
+		service.closeAgentWorkers()
+		service.closeAgentRuntimes()
+		_ = service.closePrimaryRuntime()
+	})
+
+	superviseManagedRuntimeFailureForTest(service, failed, done, errors.New("injected runtime failure"))
+	select {
+	case <-publishReached:
+	case <-time.After(3 * time.Second):
+		t.Fatal("supervisor did not prepare a replacement")
+	}
+
+	// A supervisor that does not own the generation-lifecycle lock permits the
+	// stale refresh to reach root removal while the prepared SQLite stores are
+	// still open. Exercise and observe that invalid ordering without relying on
+	// platform-specific open-file deletion behavior.
+	lifecycleHeld := !service.refreshMu.TryLock()
+	if !lifecycleHeld {
+		service.refreshMu.Unlock()
+	}
+	refreshDone := make(chan error, 1)
+	go func() { refreshDone <- service.refresh(ctx) }()
+	prematureRemoval := ""
+	if !lifecycleHeld {
+		select {
+		case prematureRemoval = <-removeReached:
+		case <-time.After(3 * time.Second):
+			t.Fatal("stale refresh did not reach the injected root-removal observer")
+		}
+	}
+
+	releasePreparedPublish()
+	select {
+	case err := <-refreshDone:
+		if err != nil {
+			t.Fatalf("stale refresh: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stale refresh did not finish after the supervisor transition")
+	}
+	if prematureRemoval != "" {
+		t.Fatalf("stale refresh removed %q while the supervisor still owned an open prepared generation", prematureRemoval)
+	}
+	select {
+	case removed := <-removeReached:
+		if removed != agentRoot {
+			t.Fatalf("removed root = %q, want %q", removed, agentRoot)
+		}
+	default:
+		t.Fatal("stale refresh did not remove the retired agent root after serialization")
+	}
+}
+
 func superviseManagedRuntimeFailureForTest(
 	service *Service,
 	managed *managedWorkspaceRuntime,
