@@ -157,7 +157,7 @@ jobs:
       - name: Install MinGW-w64
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 zip
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 unzip zip
       - name: Cache cargo + Windows libyrs build
         uses: actions/cache@v4
         with:
@@ -173,6 +173,13 @@ jobs:
           CC_WINDOWS_AMD64: x86_64-w64-mingw32-gcc
           PLATFORMS: windows/amd64
         run: scripts/build-daemon-release.sh p1-ci "$RUNNER_TEMP/notty-release"
+      - name: Verify Windows installer packaging
+        run: |
+          release_root="$RUNNER_TEMP/notty-release"
+          archive="$release_root/p1-ci/notty-daemon_p1-ci_windows_amd64.zip"
+          test -f "$release_root/install.ps1"
+          test -f "$release_root/uninstall.ps1"
+          unzip -Z1 "$archive" | grep -qx 'notty-daemon_p1-ci_windows_amd64/run-windows.ps1'
       - name: Vet Windows-tagged daemon code
         env:
           CC: x86_64-w64-mingw32-gcc
@@ -187,6 +194,16 @@ jobs:
           GOOS: windows
           GOARCH: amd64
         run: go test -c -o "$RUNNER_TEMP/notty-syncer.test.exe" ./daemon/internal/syncer
+
+  windows-daemon-installer:
+    name: Windows daemon installer
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: PowerShell installer lifecycle
+        shell: pwsh
+        run: scripts/test-daemon-installer-windows.ps1
 
   windows-daemon:
     name: Windows daemon (native GNU build + platform tests)
@@ -251,6 +268,14 @@ jobs:
           Expand-Archive -Path $archive -DestinationPath $extractDir -Force
           $daemon = Join-Path $extractDir "$releaseName/bin/notty-daemon.exe"
           $agentTool = Join-Path $extractDir "$releaseName/bin/notty-agent-tool.exe"
+          $runner = Join-Path $extractDir "$releaseName/run-windows.ps1"
+          $rootInstaller = Join-Path $distRoot "install.ps1"
+          $rootUninstaller = Join-Path $distRoot "uninstall.ps1"
+          foreach ($script in @($runner, $rootInstaller, $rootUninstaller)) {
+            if (-not (Test-Path $script -PathType Leaf)) {
+              throw "Windows release missing PowerShell script: $script"
+            }
+          }
           foreach ($binary in @($daemon, $agentTool)) {
             if (-not (Test-Path $binary -PathType Leaf)) {
               throw "release archive missing binary: $binary"
@@ -289,6 +314,9 @@ jobs:
               $checksumParts[0] -ne $actualChecksum -or $artifact.sha256 -ne $actualChecksum) {
             throw "Windows release checksum or manifest hash mismatch"
           }
+      - name: PowerShell installer tests
+        shell: pwsh
+        run: scripts/test-daemon-installer-windows.ps1
       - name: Run Windows-native syncer suite and require platform rows
         shell: pwsh
         env:

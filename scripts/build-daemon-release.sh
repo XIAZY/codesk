@@ -6,7 +6,7 @@ dist_dir="${2:-${DIST_DIR:-dist/static/daemons}}"
 platforms="${PLATFORMS:-}"
 # "all" is the public release set. Keep construction-only targets explicit
 # until their native acceptance and user-facing packaging are complete.
-all_platforms="darwin/amd64 darwin/arm64 linux/amd64 linux/arm64"
+all_platforms="darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64"
 
 root_dir="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
 . "$root_dir/scripts/lib/testtmp.sh"
@@ -21,6 +21,9 @@ tmp_dir="$(notty_test_mktemp notty-daemon-release)"
 manifest="$out_dir/manifest.json"
 installer="$root_dir/deploy/daemons/install.sh"
 uninstaller="$root_dir/deploy/daemons/uninstall.sh"
+powershell_installer="$root_dir/deploy/daemons/install.ps1"
+powershell_uninstaller="$root_dir/deploy/daemons/uninstall.ps1"
+windows_runner="$root_dir/deploy/daemons/run-windows.ps1"
 
 host_os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 case "$host_os" in
@@ -305,6 +308,18 @@ if [ ! -f "$uninstaller" ]; then
 	printf 'missing uninstaller: %s\n' "$uninstaller" >&2
 	exit 1
 fi
+if [ ! -f "$powershell_installer" ]; then
+	printf 'missing PowerShell installer: %s\n' "$powershell_installer" >&2
+	exit 1
+fi
+if [ ! -f "$powershell_uninstaller" ]; then
+	printf 'missing PowerShell uninstaller: %s\n' "$powershell_uninstaller" >&2
+	exit 1
+fi
+if [ ! -f "$windows_runner" ]; then
+	printf 'missing Windows daemon runner: %s\n' "$windows_runner" >&2
+	exit 1
+fi
 
 for platform in $platforms; do
 	preflight_platform "$platform"
@@ -342,7 +357,8 @@ for platform in $platforms; do
 	fi
 
 	if [ "$os" = "windows" ]; then
-		launch_help="Run bin/notty-daemon.exe from a terminal. The tray app and installer are separate packaging work."
+		cp "$windows_runner" "$package_dir/run-windows.ps1"
+		launch_help="Use the hosted install.ps1 script for normal installs, or run bin/notty-daemon.exe from PowerShell for manual testing."
 	else
 		launch_help="Use the hosted install script for normal installs:
   curl -fsSL <public-origin>/daemons/install.sh | sh"
@@ -353,6 +369,7 @@ Notty daemon $version
 This package contains:
 - bin/$(binary_name_for notty-daemon "$os")
 - bin/$(binary_name_for notty-agent-tool "$os")
+$(if [ "$os" = "windows" ]; then printf '%s' '- run-windows.ps1'; fi)
 
 $launch_help
 EOF
@@ -384,5 +401,9 @@ cp "$installer" "$dist_abs/install.sh"
 cp "$installer" "$out_dir/install.sh"
 cp "$uninstaller" "$dist_abs/uninstall.sh"
 cp "$uninstaller" "$out_dir/uninstall.sh"
+cp "$powershell_installer" "$dist_abs/install.ps1"
+cp "$powershell_installer" "$out_dir/install.ps1"
+cp "$powershell_uninstaller" "$dist_abs/uninstall.ps1"
+cp "$powershell_uninstaller" "$out_dir/uninstall.ps1"
 
 printf 'Built daemon release %s in %s\n' "$version" "$out_dir"
