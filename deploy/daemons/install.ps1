@@ -287,7 +287,7 @@ function Install-StartupShortcut {
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($ShortcutPath)
     $shortcut.TargetPath = $PowerShellPath
-    $shortcut.Arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$RunScript`""
+    $shortcut.Arguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$RunScript`""
     $shortcut.WorkingDirectory = Split-Path -Parent $RunScript
     $shortcut.WindowStyle = 7
     $shortcut.Description = "Codesk local environment daemon"
@@ -302,7 +302,7 @@ function Register-Launcher {
     )
 
     $powerShellPath = Get-PowerShellExecutable
-    $arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$RunScript`""
+    $arguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$RunScript`""
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 
     try {

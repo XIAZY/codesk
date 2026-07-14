@@ -142,8 +142,13 @@ try {
     if ($service.Mode -eq "scheduled-task") {
         $registeredTask = Get-ScheduledTask -TaskName $service.TaskName -ErrorAction SilentlyContinue
         Assert-True ($null -ne $registeredTask) "Scheduled Task was not registered"
+        $taskArguments = [string]$registeredTask.Actions[0].Arguments
+        Assert-True ($taskArguments -like "*-WindowStyle Hidden*") "Scheduled Task launcher is not hidden"
     } else {
         Assert-File $service.StartupLink
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($service.StartupLink)
+        Assert-True ([string]$shortcut.Arguments -like "*-WindowStyle Hidden*") "Startup shortcut launcher is not hidden"
     }
     $launcherPidPath = Join-Path $daemonDir "launcher.pid"
     for ($attempt = 0; $attempt -lt 50 -and -not (Test-Path -LiteralPath $launcherPidPath -PathType Leaf); $attempt++) {
