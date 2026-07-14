@@ -586,17 +586,18 @@ func (t *claudeStderrTail) appendLineLocked(line string) {
 func (t *claudeStderrTail) linesCopy() []string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return append([]string(nil), t.lines...)
-}
-
-func (t *claudeStderrTail) String() string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
 	parts := append([]string(nil), t.lines...)
+	// Include the unterminated tail: a CLI that emits its final diagnostic
+	// without a trailing newline leaves it in `partial`, and that is exactly the
+	// line death classification may need. The bounded snapshot must not drop it.
 	if trailing := strings.TrimSpace(string(t.partial)); trailing != "" {
 		parts = append(parts, trailing)
 	}
-	return strings.Join(parts, " | ")
+	return parts
+}
+
+func (t *claudeStderrTail) String() string {
+	return strings.Join(t.linesCopy(), " | ")
 }
 
 func (p *claudeRuntimeProcess) logf(format string, args ...any) {

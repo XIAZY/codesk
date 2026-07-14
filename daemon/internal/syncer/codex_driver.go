@@ -183,7 +183,12 @@ func (p *codexRuntimeProcess) forwardEvents() {
 		select {
 		case p.events <- runtimeEvent:
 		case <-p.stopping:
-			return
+			// Stop requested: stop pushing new events to a consumer that may
+			// have gone away, but keep draining the app channel until IT closes.
+			// The app closes its event channel only after its exit goroutine has
+			// published ExitInfo, so closing our public channel early here would
+			// expose a zero snapshot (Expected=false) and make a deliberate Stop
+			// misclassify as a transient crash.
 		}
 	}
 }

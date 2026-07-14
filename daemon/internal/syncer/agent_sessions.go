@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const forMeSteerMessage = "You have new for-me items in your notification center. Continue your current task, but consider them when appropriate."
@@ -96,6 +97,14 @@ type managedAgentSession struct {
 
 	activeTurn string
 	state      string
+
+	// restartPending marks that a backoff restart owns this (dead) session
+	// generation: no other start path may replace it until the delayed restarter
+	// releases it. dead marks that this exact process generation has died — it
+	// gates authorization (a dead generation's tool token is invalid) and is set
+	// only for the generation whose process actually exited.
+	restartPending bool
+	dead           bool
 
 	deliveredForMeSig   string
 	deliveredGeneralSig string
@@ -278,9 +287,9 @@ func newAgentSessionSupervisor(cfg Config, updater agentSessionUpdater, runtimes
 		updater = func(context.Context, string, updateAgentSessionRequest) error { return nil }
 	}
 	return &agentSessionSupervisor{
-		cfg:          cfg,
-		status:       newAgentStatusSyncer(updater),
-		runtimes:     runtimes,
+		cfg:                cfg,
+		status:             newAgentStatusSyncer(updater),
+		runtimes:           runtimes,
 		restartSleep:       func(d time.Duration) { time.Sleep(d) },
 		terminalExitReason: defaultTerminalExitReason,
 		sessions:           map[string]*managedAgentSession{},
@@ -358,6 +367,15 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 			return nil
 		}
 		if session := s.sessions[current.ID]; session != nil {
+			if restartGateClosed(session) {
+				// A terminal `failed` generation (human-gated) or a `disconnected`
+				// generation with an in-flight backoff park (owned by its delayed
+				// restarter) must not be replaced by any other start path — that is
+				// exactly the bypass that lets a reconcile/notification defeat the
+				// cap or resurrect a terminal agent.
+				s.mu.Unlock()
+				return nil
+			}
 			if session.state == "disconnected" {
 				delete(s.sessions, current.ID)
 				s.mu.Unlock()
@@ -566,7 +584,11 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 		}
 		return nil
 	}
-	if session.state == "disconnected" {
+	if session.state == "disconnected" || session.state == "failed" {
+		// A dead generation — whether backing off (disconnected) or terminally
+		// failed — must never be written to. `failed` in particular fell through
+		// here before and got a StartTurn written to the corpse (then demoted
+		// itself to idle on the error), breaking terminal/no-restart stability.
 		s.mu.Unlock()
 		return nil
 	}
@@ -601,7 +623,12 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 	})
 	if err != nil {
 		s.mu.Lock()
-		if currentSession := s.sessions[current.ID]; currentSession != nil {
+		// Fence the completion to the exact generation we wrote to, and never
+		// clobber a terminal/parked state: if this session was replaced or its
+		// generation died (disconnected/failed) while WriteStdin was in flight,
+		// demoting it to idle would strand a gated respawn or revive a corpse for
+		// later notifications.
+		if currentSession := s.sessions[current.ID]; currentSession != nil && currentSession.process == process && !currentSession.dead {
 			currentSession.state = "idle"
 			currentSession.activeForMeSig = ""
 			currentSession.activeGeneralSig = ""
@@ -612,11 +639,19 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 	}
 	turnID := strings.TrimSpace(result.TurnID)
 	s.mu.Lock()
-	if currentSession := s.sessions[current.ID]; currentSession != nil {
+	currentSession := s.sessions[current.ID]
+	stale := currentSession == nil || currentSession.process != process || currentSession.dead
+	if !stale {
 		currentSession.activeTurn = turnID
 		currentSession.state = "working"
 	}
 	s.mu.Unlock()
+	if stale {
+		// The generation we wrote to was replaced or died mid-write; do not mark a
+		// different or dead session working, nor publish a stale working status.
+		appendAgentLog(s.cfg, agentID, "turn start completed on a stale generation session=%s; dropping status", sessionID)
+		return nil
+	}
 	s.publish(current.ID, updateAgentSessionRequest{
 		Status:          "working",
 		SessionID:       sessionID,
@@ -646,7 +681,13 @@ func (s *agentSessionSupervisor) agentByToolToken(token string) *agentRun {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, session := range s.sessions {
-		if session.toolToken == token && session.agent != nil {
+		if session.toolToken == token && session.agent != nil && !session.dead {
+			// A dead process generation's tool token is invalid the instant that
+			// generation exits — a surviving child holding NOTTY_AGENT_TOOL_TOKEN
+			// must not keep mutating workspace data during the parked-backoff
+			// window (disconnected) or indefinitely (failed). Keyed on generation
+			// liveness, not a status label, so a live-but-idle/stalled runtime
+			// stays authorized while only genuinely dead generations are rejected.
 			return &agentRun{
 				ID:            "session_" + session.agent.ID,
 				AgentID:       session.agent.ID,
@@ -671,6 +712,11 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 			}
 		case RuntimeEventTurnCompleted:
 			s.markIdle(agentID, process, true)
+			// A completed turn is the only proof of real uptime — the process ran
+			// actual work, not just respawned. It alone resets the transient
+			// backoff counter (never a failed turn or a bare idle/status event,
+			// which would let a crash->idle->crash agent hot-loop at the floor).
+			s.resetRestartBackoff(agentID, process)
 		case RuntimeEventTurnFailed:
 			s.markIdle(agentID, process, false)
 		case RuntimeEventIdle:
@@ -696,6 +742,11 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 	s.mu.Lock()
 	if session := s.sessions[agentID]; session != nil && session.process == process {
 		owned = true
+		// This exact process generation has died. Mark it dead so every start,
+		// write, and authorization path treats it as a corpse — its tool token is
+		// no longer valid regardless of how long the (disconnected/failed) session
+		// entry is retained.
+		session.dead = true
 		if terminalReason != "" {
 			session.state = "failed"
 		} else {
@@ -708,6 +759,9 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 		if transient {
 			s.restartAttempts[agentID]++
 			attempt = s.restartAttempts[agentID]
+			// A backoff restart now owns this dead generation: no other start path
+			// may replace it until the delayed restarter below releases it.
+			session.restartPending = true
 			restartAgent = cloneAgentValue(session.agent)
 			if restartAgent != nil {
 				restartAgent.SessionID = session.sessionID
@@ -734,11 +788,16 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 	// `failed` with the provider's own (sanitized) line; no restart until a human
 	// acts. The match set is locked only from live-probe evidence.
 	if terminalReason != "" {
-		appendAgentLog(s.cfg, agentID, "runtime terminal failure; no restart: %s", terminalReason)
+		// Sanitize and bound the provider's line at the PUBLICATION boundary, not
+		// only in the log suffix: it is persisted as CurrentActivity and shown to
+		// humans, so control characters and unbounded length must never reach the
+		// backend. Truncation is rune-safe (never splits a multibyte character).
+		published := sanitizeExitLine(terminalReason)
+		appendAgentLog(s.cfg, agentID, "runtime terminal failure; no restart: %s", published)
 		s.publish(agentID, updateAgentSessionRequest{
 			Status:          "failed",
 			CurrentTurnID:   "",
-			CurrentActivity: terminalReason,
+			CurrentActivity: published,
 			LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 		})
 		if s.testHookDeathHandled != nil {
@@ -763,11 +822,20 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 		}
 		s.restartSleep(delay)
 		s.mu.Lock()
-		stopped := s.shutdown
-		s.mu.Unlock()
-		if stopped {
+		// Generation-fence the respawn: only proceed if THIS dead generation is
+		// still the session we parked on, still owns the pending restart, and the
+		// supervisor is not shutting down. If Reconcile removed the agent, a newer
+		// generation replaced it, or Shutdown ran, the entry is gone or no longer
+		// pending — abandon this restart rather than resurrect a removed agent or
+		// spawn an untracked zombie.
+		session := s.sessions[agentID]
+		if s.shutdown || session == nil || session.process != process || !session.restartPending {
+			s.mu.Unlock()
 			return
 		}
+		delete(s.sessions, agentID)
+		s.mu.Unlock()
+		_ = process.Stop()
 		if err := s.ensureSession(context.Background(), restartAgent); err != nil {
 			fmt.Printf("agent session %s restart error: %v\n", agentID, err)
 			appendAgentLog(s.cfg, agentID, "session restart failed err=%v", err)
@@ -872,9 +940,46 @@ func sanitizeExitLine(s string) string {
 	}, s)
 	s = strings.TrimSpace(s)
 	if len(s) > maxExitLineLen {
-		s = strings.TrimSpace(s[:maxExitLineLen]) + "…"
+		// Back up to a rune boundary so the byte cap never splits a multibyte
+		// character (which would emit an invalid-UTF-8 tail into the status/log).
+		cut := maxExitLineLen
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = strings.TrimSpace(s[:cut]) + "…"
 	}
 	return s
+}
+
+// restartGateClosed reports whether automatic lifecycle actions — respawning a
+// dead runtime or writing a new turn to it — must be withheld for this session.
+// It is the single authority every start path consults: a terminal `failed`
+// exit is human-gated, and a `disconnected` generation with an in-flight backoff
+// park is owned by its delayed restarter, which alone may replace it.
+func restartGateClosed(session *managedAgentSession) bool {
+	if session == nil {
+		return false
+	}
+	switch session.state {
+	case "failed":
+		return true
+	case "disconnected":
+		return session.restartPending
+	default:
+		return false
+	}
+}
+
+// resetRestartBackoff clears the transient-restart counter for an agent, but
+// only for the exact live process generation that proved uptime — the guard
+// mirrors markIdle's identity check so a stale completion from a replaced
+// generation cannot reset a newer generation's backoff.
+func (s *agentSessionSupervisor) resetRestartBackoff(agentID string, process RuntimeProcess) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if session := s.sessions[agentID]; session != nil && session.process == process {
+		delete(s.restartAttempts, agentID)
+	}
 }
 
 func lastNonEmpty(lines []string) string {
@@ -923,10 +1028,10 @@ func (s *agentSessionSupervisor) markIdle(agentID string, process RuntimeProcess
 	if session != nil {
 		session.state = "idle"
 		session.activeTurn = ""
-		// A completed turn is proven uptime — the process ran real work, not just
-		// respawned — so reset the transient-restart backoff counter here (never on
-		// a bare respawn, which would defeat backoff for post-handshake quota kills).
-		delete(s.restartAttempts, agentID)
+		// NOTE: the transient-restart backoff counter is reset only by
+		// resetRestartBackoff on a proven RuntimeEventTurnCompleted — never here.
+		// markIdle also fires for TurnFailed and bare idle/status events, none of
+		// which prove uptime; resetting on them would defeat the backoff.
 		if delivered && session.activeForMeSig != "" {
 			session.deliveredForMeSig = session.activeForMeSig
 		}

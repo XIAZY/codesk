@@ -23,15 +23,16 @@ type appServerEvent struct {
 
 func newCodexAppServer(cfg Config, workdir string, toolToken string, agentID string) *codexAppServer {
 	return &codexAppServer{
-		cfg:       cfg,
-		workdir:   workdir,
-		toolToken: toolToken,
-		agentID:   agentID,
-		pending:   map[int64]chan appServerResponse{},
-		events:    make(chan appServerEvent, 128),
-		done:      make(chan error, 1),
-		stopping:  make(chan struct{}),
-		readDone:  make(chan struct{}),
+		cfg:        cfg,
+		workdir:    workdir,
+		toolToken:  toolToken,
+		agentID:    agentID,
+		pending:    map[int64]chan appServerResponse{},
+		events:     make(chan appServerEvent, 128),
+		done:       make(chan error, 1),
+		stopping:   make(chan struct{}),
+		readDone:   make(chan struct{}),
+		stderrDone: make(chan struct{}),
 	}
 }
 
@@ -52,6 +53,7 @@ type codexAppServer struct {
 	stopOnce   sync.Once
 	stopping   chan struct{}
 	readDone   chan struct{}
+	stderrDone chan struct{}
 	log        *agentLog
 	expected   bool            // true once Stop() deliberately killed the process
 	stderrRing []string        // bounded ring of the most recent stderr lines
@@ -107,8 +109,15 @@ func (c *codexAppServer) Start(ctx context.Context) error {
 	go c.readLoop(stdout)
 	go c.stderrLoop(stderr)
 	go func() {
+		// Drain stderr to its natural EOF BEFORE cmd.Wait(): Wait closes the pipes
+		// on process exit and does NOT wait for the reader goroutines, so calling
+		// it first truncates the scanner mid-line and drops the process's final
+		// diagnostic — the exact evidence death classification depends on. stderr
+		// EOF arrives on its own when the process exits, without Wait.
+		<-c.stderrDone
 		err := cmd.Wait()
 		c.logf("codex app-server exited err=%v", err)
+		// stderr is fully captured now, so the exit forensics are complete.
 		c.recordExitInfo(cmd, err)
 		c.done <- err
 		<-c.readDone
@@ -347,6 +356,7 @@ func isLifecycleNotification(event appServerEvent) bool {
 }
 
 func (c *codexAppServer) stderrLoop(stderr io.Reader) {
+	defer close(c.stderrDone)
 	scanner := bufio.NewScanner(stderr)
 	scanner.Buffer(make([]byte, 0, 16*1024), 1024*1024)
 	for scanner.Scan() {

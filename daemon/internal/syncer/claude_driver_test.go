@@ -890,3 +890,27 @@ func TestClaudeStartTurnWriteErrorLeavesNoStaleActiveTurn(t *testing.T) {
 		t.Fatalf("a failed StartTurn must leave no active turn, got err=%v", err)
 	}
 }
+
+// Blocker 7 (Cluster B): the bounded stderr snapshot used for exit forensics
+// must include a final diagnostic that arrives without a trailing newline. On
+// the pre-fix driver linesCopy() returned only completed lines and dropped the
+// unterminated tail (still sitting in `partial`), losing the exact evidence
+// death classification depends on.
+func TestClaudeStderrTailSnapshotIncludesUnterminatedFinalLine(t *testing.T) {
+	// A non-nil process with a nil log keeps Write's per-line logf a no-op.
+	tail := &claudeStderrTail{process: &claudeRuntimeProcess{}}
+	if _, err := tail.Write([]byte("first line\n")); err != nil {
+		t.Fatalf("write first line: %v", err)
+	}
+	if _, err := tail.Write([]byte("fatal: provider quota exhausted")); err != nil {
+		t.Fatalf("write unterminated tail: %v", err)
+	}
+	got := tail.linesCopy()
+	if len(got) != 2 || got[0] != "first line" || got[1] != "fatal: provider quota exhausted" {
+		t.Fatalf("unterminated final stderr line dropped from bounded snapshot: got %#v", got)
+	}
+	// String() must stay consistent with the snapshot it summarizes.
+	if want := "first line | fatal: provider quota exhausted"; tail.String() != want {
+		t.Fatalf("String()=%q, want %q", tail.String(), want)
+	}
+}
