@@ -71,13 +71,12 @@ type agentSessionStart struct {
 	// nil-slot fresh start cannot resurrect a removed agent.
 	cancelled bool
 	cancel    context.CancelFunc
-	// kind/systemPrompt are the spawn fingerprint this fresh construction is
-	// building; a reconcile with a different fingerprint supersedes it. superseded
-	// marks that cancellation was a spec-change (not a failure/removal), so a
-	// waiter retries at the latest spec instead of surfacing context.Canceled.
-	kind         string
-	systemPrompt string
-	superseded   bool
+	// agent is the LATEST desired spec the sole owner is building; a changed-spec
+	// reconcile retargets it and bumps rev, and the owner rebuilds from it. The
+	// publish CAS fences on rev so a cancellation-ignoring old attempt cannot store
+	// a stale-spec runtime.
+	agent *agent
+	rev   uint64
 }
 
 type agentSessionStartupError struct {
@@ -466,10 +465,12 @@ func (session *managedAgentSession) refreshDesiredSpec(current *agent) (changed 
 }
 
 // spawnFingerprintChanged reports whether the spawn-relevant desired spec differs
-// from what a fresh-start claim is building. Same rationale/enumeration as
-// refreshDesiredSpec: only Kind and SystemPrompt reach construction.
+// from the latest spec this fresh-start claim is building. Same rationale/
+// enumeration as refreshDesiredSpec: only Kind and SystemPrompt reach construction.
 func (start *agentSessionStart) spawnFingerprintChanged(current *agent) bool {
-	return start.kind != current.Kind || start.systemPrompt != current.SystemPrompt
+	return start.agent == nil ||
+		start.agent.Kind != current.Kind ||
+		start.agent.SystemPrompt != current.SystemPrompt
 }
 
 func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *agent) error {
@@ -514,62 +515,96 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 			return nil
 		}
 		if start := s.starting[current.ID]; start != nil {
-			// An in-flight fresh construction owns this ID. If it is building the
-			// SAME spawn fingerprint, wait and bind to its result. If the desired
-			// spec CHANGED, supersede it: cancel the old attempt and retry at the
-			// latest spec — the waiter must bind to the fresh retry, never surface
-			// the superseded attempt's context.Canceled as a failure.
+			// A single long-lived construction owns this ID. Any other caller is a
+			// WAITER — it never becomes a second owner. If the desired spawn
+			// fingerprint changed, retarget the claim to the latest spec, bump its
+			// revision, and cancel the current attempt so the SOLE owner rebuilds
+			// from the latest; then bind to the claim's FINAL outcome (read after
+			// `done`, never a pre-wait snapshot), which cannot be a superseded
+			// attempt's context.Canceled because the owner retries internally.
 			if start.spawnFingerprintChanged(current) {
-				start.cancelled = true
-				start.superseded = true
+				start.agent = cloneAgentValue(current)
+				start.rev++
 				if start.cancel != nil {
 					start.cancel()
 				}
 			}
 			done := start.done
-			superseded := start.superseded
 			s.mu.Unlock()
 			select {
 			case <-done:
-				if !superseded && start.err != nil {
-					return start.err
+				s.mu.Lock()
+				err := start.err
+				s.mu.Unlock()
+				if err != nil {
+					return err
 				}
 				continue
 			case <-ctx.Done():
 				return ctx.Err()
 			}
 		}
-		// The starting entry is this fresh construction's ownership claim; its
-		// cancelable context (child of baseCtx) lets Reconcile removal / Shutdown
-		// interrupt a blocked Spawn/Start/handshake and lets the conditional
-		// publish refuse to store a removed agent. It carries the spawn fingerprint
-		// so a changed-spec reconcile can supersede it.
-		cctx, ccancel := context.WithCancel(s.baseCtx)
-		start := &agentSessionStart{
-			done:         make(chan struct{}),
-			cancel:       ccancel,
-			kind:         current.Kind,
-			systemPrompt: current.SystemPrompt,
-		}
+		// This caller becomes the SOLE owner of a new construction claim. The claim
+		// is the durable fresh-start token (parity with the parked-session token):
+		// it holds the LATEST desired spec + a revision, so a changed-spec reconcile
+		// retargets it and the owner rebuilds — never a second construction, never
+		// the owner's own stale captured spec.
+		start := &agentSessionStart{done: make(chan struct{}), agent: cloneAgentValue(current)}
 		s.starting[current.ID] = start
 		s.mu.Unlock()
 
-		err := s.startSession(cctx, current, nil, 0, start)
-		ccancel()
+		var ownerErr error
+		for {
+			s.mu.Lock()
+			if s.shutdown || start.cancelled {
+				s.mu.Unlock()
+				ownerErr = context.Canceled
+				break
+			}
+			spec := cloneAgentValue(start.agent)
+			rev := start.rev
+			cctx, ccancel := context.WithCancel(s.baseCtx)
+			start.cancel = ccancel
+			s.mu.Unlock()
+
+			attemptErr := s.startSession(cctx, spec, nil, 0, start, rev)
+			ccancel()
+
+			// Distinguish WHY publish did/did not happen — the three reasons need
+			// different actions (Bill): removal/Shutdown/no-longer-owner are TERMINAL
+			// (stop, never retry a removed agent), a rev change RETRIES from the
+			// latest spec, a genuine construction failure stops.
+			s.mu.Lock()
+			published := s.sessions[current.ID] != nil
+			terminal := s.shutdown || start.cancelled || s.starting[current.ID] != start
+			revChanged := start.rev != rev
+			s.mu.Unlock()
+			if published {
+				ownerErr = nil
+				break
+			}
+			if terminal {
+				ownerErr = attemptErr
+				break
+			}
+			if revChanged {
+				// The desired spec changed mid-construction; the old-spec process was
+				// reaped by the revision CAS. Rebuild from the claim's latest spec.
+				continue
+			}
+			// A genuine construction failure (Spawn/Start/handshake), not a supersede.
+			ownerErr = attemptErr
+			break
+		}
+
 		s.mu.Lock()
-		start.err = err
-		superseded := start.superseded
+		start.err = ownerErr
 		if s.starting[current.ID] == start {
 			delete(s.starting, current.ID)
 			close(start.done)
 		}
 		s.mu.Unlock()
-		if superseded {
-			// A changed-spec reconcile superseded this attempt; retry at the latest
-			// spec rather than surfacing the cancelled attempt's context.Canceled.
-			continue
-		}
-		return err
+		return ownerErr
 	}
 }
 
@@ -580,7 +615,7 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 // the token (slot must still hold it). If a racing removal/replacement has
 // changed the slot, the store is abandoned and the freshly spawned process is
 // reaped by the deferred Stop — so a removed agent is never resurrected.
-func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agent, expectPrior *managedAgentSession, expectRev uint64, claim *agentSessionStart) error {
+func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agent, expectPrior *managedAgentSession, expectRev uint64, claim *agentSessionStart, claimRev uint64) error {
 	workdir := agentWorkspacePath(s.cfg, current.ID)
 	if err := os.MkdirAll(workdir, 0o755); err != nil {
 		return err
@@ -689,13 +724,14 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 		appendAgentLog(s.cfg, current.ID, "discarding runtime process because the desired spec was refreshed during restart")
 		return nil
 	}
-	if claim != nil && (s.starting[current.ID] != claim || claim.cancelled) {
+	if claim != nil && (s.starting[current.ID] != claim || claim.cancelled || claim.rev != claimRev) {
 		// The fresh-start ownership claim was invalidated: the agent was removed
-		// during construction (Reconcile cancelled the claim) or a newer start
-		// superseded it. Abandon the store so a nil-slot fresh start never
-		// resurrects a removed agent.
+		// during construction (Reconcile cancelled the claim), or its desired spec
+		// was retargeted (rev bumped) so this attempt built a now-stale fingerprint.
+		// Abandon the store — a nil-slot fresh start must never resurrect a removed
+		// agent nor publish a superseded old-spec runtime; the sole owner rebuilds.
 		s.mu.Unlock()
-		appendAgentLog(s.cfg, current.ID, "discarding runtime process because the fresh-start claim was invalidated (removed/superseded)")
+		appendAgentLog(s.cfg, current.ID, "discarding runtime process because the fresh-start claim was invalidated (removed/retargeted)")
 		return nil
 	}
 	s.sessions[current.ID] = session
@@ -1050,7 +1086,7 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 			s.mu.Unlock()
 
 			_ = process.Stop() // idempotent; the old generation is already dead
-			err := s.startSession(cctx, spec, session, rev, nil)
+			err := s.startSession(cctx, spec, session, rev, nil, 0)
 			ccancel()
 			if err != nil {
 				appendAgentLog(s.cfg, agentID, "session restart construction failed err=%v", err)

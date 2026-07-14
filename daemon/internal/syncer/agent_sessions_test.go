@@ -2336,13 +2336,151 @@ func TestAgentSessionFreshSpecChangeSupersedesConstruction(t *testing.T) {
 	if err := <-newDone; err != nil {
 		t.Fatalf("new caller: %v", err)
 	}
-	supervisor.mu.Lock()
-	var got string
-	if sess := supervisor.sessions["agent_1"]; sess != nil && sess.agent != nil {
-		got = sess.agent.SystemPrompt
+	// Assert the ACTUAL spawned process spec, not mutable session.agent (which a
+	// late waiter can refresh even while the live runtime is stale).
+	if got := publishedProcessInstructions(t, supervisor, factory, "agent_1"); got != "new instructions" {
+		t.Fatalf("live process was actually spawned with stale instructions: %q, want %q", got, "new instructions")
 	}
+}
+
+// publishedProcessInstructions returns the Instructions the published session's
+// live runtime was actually spawned with — the strong oracle for stale-spec bugs.
+func publishedProcessInstructions(t *testing.T, s *agentSessionSupervisor, f *fakeRuntimeDriver, agentID string) string {
+	t.Helper()
+	s.mu.Lock()
+	sess := s.sessions[agentID]
+	var proc RuntimeProcess
+	if sess != nil {
+		proc = sess.process
+	}
+	s.mu.Unlock()
+	if proc == nil {
+		t.Fatalf("no published session for %s", agentID)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, p := range f.processes {
+		if RuntimeProcess(p) == proc {
+			return f.spawnSpecs[i].Instructions
+		}
+	}
+	t.Fatal("published process was not found among spawned processes")
+	return ""
+}
+
+func claimRev(s *agentSessionSupervisor, agentID string) (uint64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if start := s.starting[agentID]; start != nil {
+		return start.rev, true
+	}
+	return 0, false
+}
+
+func waitClaimRev(t *testing.T, s *agentSessionSupervisor, agentID string, want uint64) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		if rev, ok := claimRev(s, agentID); ok && rev == want {
+			return
+		}
+		select {
+		case <-deadline:
+			rev, _ := claimRev(s, agentID)
+			t.Fatalf("claim rev for %s = %d, want %d", agentID, rev, want)
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+// Spoke 17 (findings 20/21): three callers with retargets deterministically ordered
+// under the claim revision (old -> middle -> newest). The single owner converges on
+// the newest spec, every waiter returns the claim's final result (no context.Canceled
+// poisoning), exactly one session is live, and the live process's actual spawn spec
+// is newest.
+func TestAgentSessionFreshSupersessionThreeCallersConvergeAndDoNotPoison(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.startEntered = make(chan struct{}, 1)
+	factory.startRelease = make(chan struct{})
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	ownerDone := make(chan error, 1)
+	go func() {
+		ownerDone <- supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex", SystemPrompt: "old"})
+	}()
+	<-factory.startEntered // owner(old) blocked in Start; claim rev=0
+
+	// Retarget 1: middle. Owner rebuilds at rev 1.
+	middleDone := make(chan error, 1)
+	go func() {
+		middleDone <- supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex", SystemPrompt: "middle"})
+	}()
+	waitClaimRev(t, supervisor, "agent_1", 1)
+	<-factory.startEntered // owner's middle-spec attempt blocked in Start
+
+	// Retarget 2: newest. Owner rebuilds at rev 2.
+	newestDone := make(chan error, 1)
+	go func() {
+		newestDone <- supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex", SystemPrompt: "newest"})
+	}()
+	waitClaimRev(t, supervisor, "agent_1", 2)
+	<-factory.startEntered // owner's newest-spec attempt blocked in Start
+
+	close(factory.startRelease) // let the newest attempt publish
+
+	for name, ch := range map[string]chan error{"owner": ownerDone, "middle": middleDone, "newest": newestDone} {
+		if err := <-ch; err != nil {
+			t.Fatalf("%s caller was poisoned / failed: %v", name, err)
+		}
+	}
+	if got := publishedProcessInstructions(t, supervisor, factory, "agent_1"); got != "newest" {
+		t.Fatalf("converged live process spawned with stale instructions: %q, want %q", got, "newest")
+	}
+	supervisor.mu.Lock()
+	sessions := len(supervisor.sessions)
+	live := supervisor.sessions["agent_1"] != nil && !supervisor.sessions["agent_1"].dead
 	supervisor.mu.Unlock()
-	if got != "new instructions" {
-		t.Fatalf("superseded fresh construction published stale spec: %q, want %q", got, "new instructions")
+	if sessions != 1 || !live {
+		t.Fatalf("want exactly one live session after supersession, got %d (live=%v)", sessions, live)
+	}
+}
+
+// Spoke 17 (finding 20): the fresh-start publish is CAS'd on the claim revision.
+// An attempt that completes construction (ignoring the cancel) after a retarget
+// bumped the revision must be refused, and the sole owner rebuilds the latest spec.
+func TestAgentSessionFreshRevCasRefusesStaleSpecPublish(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.startEntered = make(chan struct{}, 1)
+	factory.startRelease = make(chan struct{})
+	factory.startIgnoreCtx = true // the attempt finishes despite the retarget cancel
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	ownerDone := make(chan error, 1)
+	go func() {
+		ownerDone <- supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex", SystemPrompt: "old"})
+	}()
+	<-factory.startEntered // owner(old) blocked in Start, ignoring ctx; claim rev=0
+
+	// Retarget to new (rev=1) while the old-spec attempt is still blocked.
+	newDone := make(chan error, 1)
+	go func() {
+		newDone <- supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex", SystemPrompt: "new"})
+	}()
+	waitClaimRev(t, supervisor, "agent_1", 1)
+
+	// Release: the old attempt completes Start and reaches publish with a stale
+	// rev — the CAS must refuse it, and the owner rebuilds the new spec.
+	close(factory.startRelease)
+
+	if err := <-ownerDone; err != nil {
+		t.Fatalf("owner: %v", err)
+	}
+	if err := <-newDone; err != nil {
+		t.Fatalf("new waiter poisoned: %v", err)
+	}
+	if got := publishedProcessInstructions(t, supervisor, factory, "agent_1"); got != "new" {
+		t.Fatalf("stale-rev attempt published: live process spawned with %q, want %q", got, "new")
 	}
 }
