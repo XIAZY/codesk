@@ -948,6 +948,82 @@ func TestAgentSessionRestartCounterResetsOnCompletedTurn(t *testing.T) {
 	}
 }
 
+func TestAgentSessionUnrequestedCleanExitIsTransient(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	supervisor.restartSleep = func(time.Duration) {}
+	handled := make(chan string, 1)
+	supervisor.testHookDeathHandled = func(c string) { handled <- c }
+
+	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"}); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+
+	// Exit code 0 but NOT Stop()ped: an unrequested clean exit is not "expected".
+	// Expected must come from a deliberate Stop(), never a bare exit code — a
+	// clean exit we didn't ask for must restart (transient), not be silently
+	// treated as a deliberate teardown.
+	process.setExitInfo(RuntimeExitInfo{ExitCode: 0, Expected: false})
+	close(process.events)
+	if got := <-handled; got != "transient" {
+		t.Fatalf("unrequested clean exit classified %q, want transient", got)
+	}
+}
+
+func TestAgentSessionStaleProcessExitIsIgnored(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	supervisor.restartSleep = func(time.Duration) {}
+	handled := make(chan string, 1)
+	supervisor.testHookDeathHandled = func(c string) {
+		select {
+		case handled <- c:
+		default:
+		}
+	}
+	restarted := make(chan struct{}, 4)
+	supervisor.testHookRestartComplete = func() { restarted <- struct{}{} }
+
+	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"}); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	live := factory.only(t)
+
+	// A different, already-replaced process reports an exit. Because the session's
+	// current process is `live`, the stale process's exit snapshot must not
+	// classify, restart, or overwrite the live session — exit info is per-instance
+	// and gated by the process-identity check.
+	stale := &fakeRuntimeProcess{events: make(chan RuntimeEvent, 1)}
+	stale.setExitInfo(RuntimeExitInfo{ExitCode: 1})
+	done := make(chan struct{})
+	go func() {
+		supervisor.consumeEvents("agent_1", stale)
+		close(done)
+	}()
+	close(stale.events)
+	<-done
+
+	select {
+	case c := <-handled:
+		t.Fatalf("stale process exit was classified %q; it must be ignored", c)
+	default:
+	}
+	select {
+	case <-restarted:
+		t.Fatal("stale process exit triggered a restart")
+	default:
+	}
+	supervisor.mu.Lock()
+	sameProcess := supervisor.sessions["agent_1"] != nil && supervisor.sessions["agent_1"].process == live
+	supervisor.mu.Unlock()
+	if !sameProcess {
+		t.Fatal("stale process exit replaced the live session's process")
+	}
+}
+
 func TestAgentSessionSupervisorDoesNotUseCodexWireMethods(t *testing.T) {
 	body, err := os.ReadFile("agent_sessions.go")
 	if err != nil {
