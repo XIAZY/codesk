@@ -506,6 +506,15 @@ describe("CreateDaemonModal install status", () => {
     // Local environment created but has not checked in yet: the chip must say waiting.
     expect(await screen.findByText("Waiting for local environment to check in…")).toBeTruthy();
     expect(screen.queryByText("Local environment connected")).toBeNull();
+    const unixButton = screen.getByRole("button", { name: "macOS / Linux" });
+    const windowsButton = screen.getByRole("button", { name: "Windows" });
+    expect(unixButton.getAttribute("aria-pressed")).toBe("true");
+    expect(document.querySelector("pre.code")?.textContent).toContain("install.sh");
+
+    await user.click(windowsButton);
+    expect(windowsButton.getAttribute("aria-pressed")).toBe("true");
+    expect(document.querySelector("pre.code")?.textContent).toContain("install.ps1");
+    expect(screen.getByText("PowerShell")).toBeTruthy();
 
     // A daemon.updated event lands via the workspace socket, so live state now reports
     // the daemon online. The chip must flip without a manual refresh.
@@ -852,6 +861,24 @@ describe("DaemonDetailModal live status", () => {
 
     rerender(<DaemonDetailModal {...props} daemons={[]} onClose={onClose} />);
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("defaults to a connected Windows daemon and keeps uninstall and reinstall commands on PowerShell", async () => {
+    const user = userEvent.setup();
+    const daemon = withReceipt({ ...daemonFixtures.justSeen, id: "d1", os: "windows", arch: "amd64" }, Date.now());
+    const api = { createDaemonReinstallToken: vi.fn().mockResolvedValue({ token: "nottyd_fresh" }) };
+    const props = { api: api as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
+    const { container } = render(<DaemonDetailModal {...props} daemons={[daemon]} />);
+
+    const windowsButton = screen.getByRole("button", { name: "Windows" });
+    expect(windowsButton.getAttribute("aria-pressed")).toBe("true");
+    expect(container.querySelector("pre.code")?.textContent).toContain("uninstall.ps1");
+
+    await user.click(screen.getByRole("button", { name: "Reinstall local environment" }));
+    await waitFor(() => {
+      const commands = Array.from(container.querySelectorAll("pre.code"), (node) => node.textContent ?? "");
+      expect(commands.some((command) => command.includes("uninstall.ps1") && command.includes("install.ps1") && command.includes("nottyd_fresh"))).toBe(true);
+    });
   });
 });
 

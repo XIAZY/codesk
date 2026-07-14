@@ -27,6 +27,8 @@ export type ResolvedThreadAnchor = ThreadAnchor & {
   resolved: boolean;
 };
 
+export type DaemonInstallPlatform = "unix" | "windows";
+
 export function shellQuote(value: string) {
   if (value.length === 0) {
     return "''";
@@ -35,6 +37,24 @@ export function shellQuote(value: string) {
     return value;
   }
   return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+export function powershellQuote(value: string) {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+export function defaultDaemonInstallPlatform(osHint = "", userAgent?: string): DaemonInstallPlatform {
+  const normalizedOS = osHint.trim().toLowerCase();
+  if (normalizedOS === "windows") {
+    return "windows";
+  }
+  if (normalizedOS === "darwin" || normalizedOS === "linux") {
+    return "unix";
+  }
+  const browserIdentity = userAgent ?? (
+    typeof navigator === "undefined" ? "" : `${navigator.userAgent} ${navigator.platform}`
+  );
+  return /windows|win32|win64/i.test(browserIdentity) ? "windows" : "unix";
 }
 
 export function isMarkdownDocumentPath(path: string) {
@@ -46,9 +66,20 @@ export function buildDaemonInstallCommand(input: {
   workspaceId: string;
   daemonToken: string;
   staticBaseUrl?: string;
+  platform?: DaemonInstallPlatform;
 }) {
   const backendUrl = input.backendUrl.trim().replace(/\/+$/, "");
   const staticBaseUrl = (input.staticBaseUrl?.trim() || `${backendUrl}/daemons`).replace(/\/+$/, "");
+  if (input.platform === "windows") {
+    return [
+      "$ErrorActionPreference = 'Stop'",
+      `& ([ScriptBlock]::Create((Invoke-WebRequest -UseBasicParsing ${powershellQuote(`${staticBaseUrl}/install.ps1`)}).Content)) \``,
+      `  -BackendUrl ${powershellQuote(backendUrl)} \``,
+      `  -WorkspaceId ${powershellQuote(input.workspaceId)} \``,
+      `  -DaemonToken ${powershellQuote(input.daemonToken)} \``,
+      `  -StaticBase ${powershellQuote(staticBaseUrl)}`,
+    ].join("\n");
+  }
   return [
     `curl -fsSL ${shellQuote(`${staticBaseUrl}/install.sh`)} | sh -s -- \\`,
     `  --backend-url ${shellQuote(backendUrl)} \\`,
@@ -63,9 +94,21 @@ export function buildDaemonReinstallCommand(input: {
   workspaceId: string;
   daemonToken: string;
   staticBaseUrl?: string;
+  platform?: DaemonInstallPlatform;
 }) {
   const backendUrl = input.backendUrl.trim().replace(/\/+$/, "");
   const staticBaseUrl = (input.staticBaseUrl?.trim() || `${backendUrl}/daemons`).replace(/\/+$/, "");
+  if (input.platform === "windows") {
+    return [
+      "$ErrorActionPreference = 'Stop'",
+      `& ([ScriptBlock]::Create((Invoke-WebRequest -UseBasicParsing ${powershellQuote(`${staticBaseUrl}/uninstall.ps1`)}).Content)) -All`,
+      `& ([ScriptBlock]::Create((Invoke-WebRequest -UseBasicParsing ${powershellQuote(`${staticBaseUrl}/install.ps1`)}).Content)) \``,
+      `  -BackendUrl ${powershellQuote(backendUrl)} \``,
+      `  -WorkspaceId ${powershellQuote(input.workspaceId)} \``,
+      `  -DaemonToken ${powershellQuote(input.daemonToken)} \``,
+      `  -StaticBase ${powershellQuote(staticBaseUrl)}`,
+    ].join("\n");
+  }
   return [
     "set -e",
     `curl -fsSL ${shellQuote(`${staticBaseUrl}/uninstall.sh`)} | sh -s -- \\`,
@@ -78,8 +121,14 @@ export function buildDaemonReinstallCommand(input: {
   ].join("\n");
 }
 
-export function buildDaemonUninstallCommand(input: { staticBaseUrl: string }) {
+export function buildDaemonUninstallCommand(input: { staticBaseUrl: string; platform?: DaemonInstallPlatform }) {
   const staticBaseUrl = input.staticBaseUrl.trim().replace(/\/+$/, "");
+  if (input.platform === "windows") {
+    return [
+      "$ErrorActionPreference = 'Stop'",
+      `& ([ScriptBlock]::Create((Invoke-WebRequest -UseBasicParsing ${powershellQuote(`${staticBaseUrl}/uninstall.ps1`)}).Content)) -All`,
+    ].join("\n");
+  }
   const lines = [
     `curl -fsSL ${shellQuote(`${staticBaseUrl}/uninstall.sh`)} | sh -s -- \\`,
     "  --all",
