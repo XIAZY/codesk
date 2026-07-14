@@ -55,6 +55,7 @@ content_type_for() {
 		*.webp) printf 'image/webp' ;;
 		*.txt) printf 'text/plain; charset=utf-8' ;;
 		*.sh) printf 'text/x-shellscript; charset=utf-8' ;;
+		*.ps1) printf 'text/plain; charset=utf-8' ;;
 		*.tar.gz) printf 'application/gzip' ;;
 		*) printf 'application/octet-stream' ;;
 	esac
@@ -189,16 +190,30 @@ if [ "$target" = "all" ] || [ "$target" = "daemons" ]; then
 	else
 		uninstaller="$root_dir/deploy/daemons/uninstall.sh"
 	fi
+	if [ -f "$daemon_dist_dir/install.ps1" ]; then
+		powershell_installer="$daemon_dist_dir/install.ps1"
+	else
+		powershell_installer="$root_dir/deploy/daemons/install.ps1"
+	fi
+	if [ -f "$daemon_dist_dir/uninstall.ps1" ]; then
+		powershell_uninstaller="$daemon_dist_dir/uninstall.ps1"
+	else
+		powershell_uninstaller="$root_dir/deploy/daemons/uninstall.ps1"
+	fi
 
 	# Publish latest metadata only after the complete versioned release is present.
 	if [ "$uploader" = "aws" ]; then
 		aws_s3 cp "$installer" "$daemon_dest/install.sh" --cache-control "public, max-age=300"
 		aws_s3 cp "$uninstaller" "$daemon_dest/uninstall.sh" --cache-control "public, max-age=300"
+		aws_s3 cp "$powershell_installer" "$daemon_dest/install.ps1" --content-type "$(content_type_for "$powershell_installer")" --cache-control "public, max-age=300"
+		aws_s3 cp "$powershell_uninstaller" "$daemon_dest/uninstall.ps1" --content-type "$(content_type_for "$powershell_uninstaller")" --cache-control "public, max-age=300"
 		aws_s3 cp "$daemon_dist_dir/$version/SHA256SUMS" "$daemon_dest/latest/SHA256SUMS" --cache-control "public, max-age=60"
 		aws_s3 cp "$daemon_dist_dir/$version/manifest.json" "$daemon_dest/latest/manifest.json" --cache-control "public, max-age=60"
 	else
 		wrangler_put "$R2_DAEMONS_BUCKET" "$(join_key "$daemons_prefix" "install.sh")" "$installer" "public, max-age=300"
 		wrangler_put "$R2_DAEMONS_BUCKET" "$(join_key "$daemons_prefix" "uninstall.sh")" "$uninstaller" "public, max-age=300"
+		wrangler_put "$R2_DAEMONS_BUCKET" "$(join_key "$daemons_prefix" "install.ps1")" "$powershell_installer" "public, max-age=300"
+		wrangler_put "$R2_DAEMONS_BUCKET" "$(join_key "$daemons_prefix" "uninstall.ps1")" "$powershell_uninstaller" "public, max-age=300"
 		wrangler_put "$R2_DAEMONS_BUCKET" "$(join_key "$daemons_prefix" "latest/SHA256SUMS")" "$daemon_dist_dir/$version/SHA256SUMS" "public, max-age=60"
 		wrangler_put "$R2_DAEMONS_BUCKET" "$(join_key "$daemons_prefix" "latest/manifest.json")" "$daemon_dist_dir/$version/manifest.json" "public, max-age=60"
 	fi

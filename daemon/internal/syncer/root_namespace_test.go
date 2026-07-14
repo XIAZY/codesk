@@ -480,7 +480,7 @@ func TestRootLocalMoveSendsBeforeApplyingPendingIncomingRoot(t *testing.T) {
 	if err := os.WriteFile(path, []byte("same"), 0o644); err != nil {
 		t.Fatalf("write moved file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -534,13 +534,13 @@ func TestRootLocalMoveSendsBeforeApplyingPendingIncomingRoot(t *testing.T) {
 	if err := cache.storeDoc("doc_1", "docs/old.md", 1, baseDoc); err != nil {
 		t.Fatalf("store content doc: %v", err)
 	}
-	tracked := &trackedFile{
+	tracked := newTestTrackedFile(t, &trackedFile{
 		DocumentID:    "doc_1",
 		DocumentPath:  "docs/old.md",
 		Path:          path,
 		WorkspaceRoot: root,
 		cache:         cache,
-	}
+	})
 	tracked.setProjectedContent("same")
 	if err := tracked.storeProjectedBase("same", baseDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)

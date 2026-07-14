@@ -9,13 +9,116 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
 
-const workspaceLocalScanInterval = 5 * time.Second
+const (
+	workspaceLocalScanInterval  = 5 * time.Second
+	workspaceWatcherEventBudget = 256
+)
+
+type workspaceWatcher interface {
+	Add(string) error
+	Close() error
+	Events() <-chan fsnotify.Event
+	Errors() <-chan error
+}
+
+type fsnotifyWorkspaceWatcher struct {
+	watcher *fsnotify.Watcher
+}
+
+type workspaceWatcherWork struct {
+	event     *fsnotify.Event
+	barrier   chan struct{}
+	initial   chan<- error
+	reconcile bool
+}
+
+// workspaceWatcherQueue keeps the watcher backend independent from event
+// handling. In particular, a handler may call watcher.Add without preventing
+// the backend from delivering the event that unblocks that Add on Windows.
+type workspaceWatcherQueue struct {
+	mu              sync.Mutex
+	work            []workspaceWatcherWork
+	eventCount      int
+	reconcileQueued bool
+	wake            chan struct{}
+}
+
+func newWorkspaceWatcherQueue() *workspaceWatcherQueue {
+	return &workspaceWatcherQueue{wake: make(chan struct{}, 1)}
+}
+
+func (q *workspaceWatcherQueue) push(work workspaceWatcherWork) {
+	q.mu.Lock()
+	switch {
+	case work.reconcile:
+		q.pushReconcileLocked()
+	case work.event != nil:
+		if q.eventCount < workspaceWatcherEventBudget {
+			q.work = append(q.work, work)
+			q.eventCount++
+		} else {
+			q.pushReconcileLocked()
+		}
+	default:
+		q.work = append(q.work, work)
+	}
+	q.mu.Unlock()
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (q *workspaceWatcherQueue) pushReconcile() {
+	q.push(workspaceWatcherWork{reconcile: true})
+}
+
+func (q *workspaceWatcherQueue) pushReconcileLocked() {
+	if q.reconcileQueued {
+		return
+	}
+	q.work = append(q.work, workspaceWatcherWork{reconcile: true})
+	q.reconcileQueued = true
+}
+
+func (q *workspaceWatcherQueue) drain() []workspaceWatcherWork {
+	q.mu.Lock()
+	work := q.work
+	q.work = nil
+	q.eventCount = 0
+	q.reconcileQueued = false
+	q.mu.Unlock()
+	return work
+}
+
+func newFSNotifyWorkspaceWatcher() (workspaceWatcher, error) {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return nil, err
+	}
+	return &fsnotifyWorkspaceWatcher{watcher: watcher}, nil
+}
+
+func (w *fsnotifyWorkspaceWatcher) Add(path string) error {
+	return w.watcher.Add(path)
+}
+
+func (w *fsnotifyWorkspaceWatcher) Close() error {
+	return w.watcher.Close()
+}
+
+func (w *fsnotifyWorkspaceWatcher) Events() <-chan fsnotify.Event {
+	return w.watcher.Events
+}
+
+func (w *fsnotifyWorkspaceWatcher) Errors() <-chan error {
+	return w.watcher.Errors
+}
 
 type workspaceReplica struct {
 	rootDir    string
@@ -24,39 +127,44 @@ type workspaceReplica struct {
 	markDirty  func(documentID string)
 	markCreate func(localCreateCandidate)
 
-	watcher  *fsnotify.Watcher
-	docCache *documentCache
-	fs       *WorkspaceFS
-	watchMu  sync.Mutex
-	watched  map[string]struct{}
-	changes  *workspaceChangeIndex
+	watcher    workspaceWatcher
+	newWatcher func() (workspaceWatcher, error)
+	docCache   *documentCache
+	fs         *WorkspaceFS
+	watchMu    sync.Mutex
+	watched    map[string]struct{}
+	changes    *workspaceChangeIndex
+	reconcile  func(context.Context) error
 
 	mu              sync.Mutex
 	projectedByPath map[string]*trackedFile
 	projectedByID   map[string]*trackedFile
 }
 
-func newWorkspaceReplica(_ Config, rootDir, actorID, actorType string, markDirty func(string), markCreate func(localCreateCandidate)) (*workspaceReplica, error) {
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		return nil, err
-	}
+func newWorkspaceReplicaWithFS(
+	rootDir, actorID, actorType string,
+	markDirty func(string),
+	markCreate func(localCreateCandidate),
+	fs *WorkspaceFS,
+) *workspaceReplica {
 	if actorType == "" {
 		actorType = "daemon"
 	}
-	return &workspaceReplica{
+	replica := &workspaceReplica{
 		rootDir:         rootDir,
 		actorID:         actorID,
 		actorType:       actorType,
 		markDirty:       markDirty,
 		markCreate:      markCreate,
-		watcher:         watcher,
-		fs:              NewWorkspaceFS(rootDir),
+		newWatcher:      newFSNotifyWorkspaceWatcher,
+		fs:              fs,
 		watched:         map[string]struct{}{},
 		changes:         newWorkspaceChangeIndex(),
 		projectedByPath: map[string]*trackedFile{},
 		projectedByID:   map[string]*trackedFile{},
-	}, nil
+	}
+	replica.reconcile = replica.reconcileLocalWorkspace
+	return replica
 }
 
 func (r *workspaceReplica) actorKind() string {
@@ -73,7 +181,72 @@ func (r *workspaceReplica) markDocumentDirty(documentID string) {
 }
 
 func (r *workspaceReplica) Run(ctx context.Context) error {
-	defer r.watcher.Close()
+	return r.run(ctx, nil)
+}
+
+func (r *workspaceReplica) run(ctx context.Context, ready chan<- error) (runErr error) {
+	reportReady := func(err error) {
+		if ready == nil {
+			return
+		}
+		ready <- err
+		ready = nil
+	}
+	defer func() { reportReady(runErr) }()
+	if r == nil {
+		return nil
+	}
+	if r.reconcile == nil {
+		r.reconcile = r.reconcileLocalWorkspace
+	}
+	// The watcher exists only while this method is consuming both of its
+	// channels. Creating it in the constructor can deadlock synchronous users.
+	newWatcher := r.newWatcher
+	if newWatcher == nil {
+		newWatcher = newFSNotifyWorkspaceWatcher
+	}
+	watcher, err := newWatcher()
+	if err != nil {
+		return err
+	}
+	r.watchMu.Lock()
+	if r.watcher != nil {
+		r.watchMu.Unlock()
+		_ = watcher.Close()
+		return errors.New("workspace replica is already running")
+	}
+	r.watcher = watcher
+	r.watched = map[string]struct{}{}
+	r.watchMu.Unlock()
+
+	// Keep both stages alive until watcher.Close has stopped ingress. The pump
+	// must outlive Close because the Windows backend can be waiting for its
+	// event delivery to be consumed before Close can finish.
+	pipelineCtx, cancelPipeline := context.WithCancel(context.Background())
+	queue := newWorkspaceWatcherQueue()
+	fatal := make(chan error, 2)
+	barriers := make(chan chan struct{})
+	var pipeline sync.WaitGroup
+	pipeline.Add(2)
+	go func() {
+		defer pipeline.Done()
+		r.runWatcherPump(pipelineCtx, watcher, queue, barriers, fatal)
+	}()
+	go func() {
+		defer pipeline.Done()
+		r.runWatcherHandler(pipelineCtx, queue)
+	}()
+	defer func() {
+		_ = watcher.Close()
+		cancelPipeline()
+		pipeline.Wait()
+		r.watchMu.Lock()
+		if r.watcher == watcher {
+			r.watcher = nil
+			r.watched = map[string]struct{}{}
+		}
+		r.watchMu.Unlock()
+	}()
 	if err := os.MkdirAll(r.rootDir, 0o755); err != nil {
 		return err
 	}
@@ -86,32 +259,190 @@ func (r *workspaceReplica) Run(ctx context.Context) error {
 		return err
 	}
 	if err := r.ensureDirectoryWatches(); err != nil {
-		log.Printf("%s workspace watch refresh error: %v", r.actorID, err)
+		return err
 	}
-	if err := r.reconcileLocalWorkspace(ctx); err != nil {
-		log.Printf("%s initial local reconcile error: %v", r.actorID, err)
+	if err := awaitWorkspaceInitialReconcile(ctx, queue, fatal); err != nil {
+		return err
 	}
-
-	ticker := time.NewTicker(workspaceLocalScanInterval)
-	defer ticker.Stop()
+	if err := awaitWorkspaceWatcherBarrier(ctx, barriers, fatal); err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		return err
+	}
+	reportReady(nil)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case event := <-r.watcher.Events:
-			if err := r.handleWatcherEvent(event, time.Now()); err != nil {
-				log.Printf("%s local event error for %s: %v", r.actorID, event.Name, err)
+		case err := <-fatal:
+			return err
+		}
+	}
+}
+
+func (r *workspaceReplica) runWatcherPump(
+	ctx context.Context,
+	watcher workspaceWatcher,
+	queue *workspaceWatcherQueue,
+	barriers <-chan chan struct{},
+	fatal chan<- error,
+) {
+	events := watcher.Events()
+	errorsCh := watcher.Errors()
+	for {
+		if events == nil && errorsCh == nil {
+			reportWorkspaceReplicaFatal(fatal, errors.New("workspace watcher channels closed unexpectedly"))
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case barrier := <-barriers:
+			queue.push(workspaceWatcherWork{barrier: barrier})
+		case event, ok := <-events:
+			if !ok {
+				events = nil
+				reportWorkspaceReplicaFatal(fatal, errors.New("workspace watcher event channel closed unexpectedly"))
+				continue
 			}
-		case err := <-r.watcher.Errors:
+			eventCopy := event
+			queue.push(workspaceWatcherWork{event: &eventCopy})
+		case err, ok := <-errorsCh:
+			if !ok {
+				errorsCh = nil
+				reportWorkspaceReplicaFatal(fatal, errors.New("workspace watcher error channel closed unexpectedly"))
+				continue
+			}
 			if err != nil {
-				log.Printf("%s watcher error: %v", r.actorID, err)
-			}
-		case <-ticker.C:
-			if err := r.reconcileLocalWorkspace(ctx); err != nil {
-				log.Printf("%s local reconcile error: %v", r.actorID, err)
+				log.Printf("workspace watcher error; scheduling full reconcile: %v", err)
+				queue.pushReconcile()
 			}
 		}
+	}
+}
+
+func (r *workspaceReplica) runWatcherHandler(
+	ctx context.Context,
+	queue *workspaceWatcherQueue,
+) {
+	timer := time.NewTimer(workspaceLocalScanInterval)
+	defer timer.Stop()
+	resetTimer := func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(workspaceLocalScanInterval)
+	}
+	startupComplete := false
+	pendingReconcile := false
+	reconcile := func() {
+		if err := r.reconcile(ctx); err != nil && ctx.Err() == nil {
+			log.Printf("workspace reconcile error; will retry: %v", err)
+		}
+		resetTimer()
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-queue.wake:
+			for _, work := range queue.drain() {
+				if work.barrier != nil {
+					close(work.barrier)
+					continue
+				}
+				if work.initial != nil {
+					err := r.reconcile(ctx)
+					if err == nil {
+						startupComplete = true
+						resetTimer()
+					}
+					work.initial <- err
+					continue
+				}
+				if work.reconcile {
+					pendingReconcile = true
+					continue
+				}
+				if work.event != nil {
+					if err := r.handleWatcherEvent(*work.event, time.Now()); err != nil {
+						log.Printf("workspace event processing error; scheduling full reconcile: %v", err)
+						pendingReconcile = true
+					}
+				}
+			}
+			if startupComplete && pendingReconcile {
+				pendingReconcile = false
+				reconcile()
+			}
+		case <-timer.C:
+			if startupComplete {
+				reconcile()
+			} else {
+				pendingReconcile = true
+				resetTimer()
+			}
+		}
+	}
+}
+
+func reportWorkspaceReplicaFatal(fatal chan<- error, err error) {
+	if err == nil {
+		return
+	}
+	select {
+	case fatal <- err:
+	default:
+	}
+}
+
+func awaitWorkspaceInitialReconcile(
+	ctx context.Context,
+	queue *workspaceWatcherQueue,
+	fatal <-chan error,
+) error {
+	result := make(chan error, 1)
+	queue.push(workspaceWatcherWork{initial: result})
+	select {
+	case err := <-result:
+		return err
+	case err := <-fatal:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func awaitWorkspaceWatcherBarrier(
+	ctx context.Context,
+	barriers chan<- chan struct{},
+	fatal <-chan error,
+) error {
+	barrier := make(chan struct{})
+	select {
+	case barriers <- barrier:
+	case err := <-fatal:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-barrier:
+		select {
+		case err := <-fatal:
+			return err
+		default:
+			return nil
+		}
+	case err := <-fatal:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -151,7 +482,7 @@ func (r *workspaceReplica) ensureTracked(ctx context.Context, document *document
 		return nil
 	}
 
-	tracked, err := materializeTrackedFile(ctx, r.docCache, document, absolutePath)
+	tracked, err := materializeTrackedFileWithFS(ctx, r.docCache, document, absolutePath, r.fs)
 	if err != nil {
 		return err
 	}
@@ -192,16 +523,17 @@ func (r *workspaceReplica) handleWatcherEvent(event fsnotify.Event, now time.Tim
 	}
 
 	if event.Op&fsnotify.Create != 0 {
-		info, err := os.Stat(path)
+		info, identity, err := statFileWithIdentity(path)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return nil
 			}
 			return err
 		}
-		identity := fileIdentityForInfo(info)
 		if info.IsDir() {
-			_ = r.addWatchDir(path)
+			if err := r.addWatchDir(path); err != nil {
+				return err
+			}
 			r.changes.markDiscoverDir(path)
 			r.markDocumentDirty(localPathChangeReconcileWake)
 			return nil
@@ -239,7 +571,7 @@ func (r *workspaceReplica) handleWatcherEvent(event fsnotify.Event, now time.Tim
 			}
 			return nil
 		}
-		info, err := os.Stat(path)
+		info, identity, err := statFileWithIdentity(path)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return nil
@@ -254,7 +586,7 @@ func (r *workspaceReplica) handleWatcherEvent(event fsnotify.Event, now time.Tim
 			Path:      path,
 			ActorID:   r.actorID,
 			ActorType: r.actorKind(),
-		}, fileIdentityForInfo(info))
+		}, identity)
 		r.markDocumentDirty(localPathChangeReconcileWake)
 	}
 	return nil
@@ -423,22 +755,24 @@ func (r *workspaceReplica) discoverLocalCreatesInDir(dir string) error {
 			}
 			return nil
 		}
-		if entry.IsDir() {
+		info, identity, err := statFileWithIdentity(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if info.IsDir() {
 			return r.addWatchDir(path)
 		}
 		r.mu.Lock()
 		_, tracked := r.projectedByPath[path]
 		r.mu.Unlock()
 		if tracked {
-			r.recordTrackedIdentity(path)
-			return nil
-		}
-		info, err := entry.Info()
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return nil
+			if r.changes != nil {
+				r.changes.recordIdentity(path, identity)
 			}
-			return err
+			return nil
 		}
 		if r.changes != nil {
 			r.changes.markLocalCreate(localCreateCandidate{
@@ -446,14 +780,14 @@ func (r *workspaceReplica) discoverLocalCreatesInDir(dir string) error {
 				Path:      path,
 				ActorID:   r.actorID,
 				ActorType: r.actorKind(),
-			}, fileIdentityForInfo(info))
+			}, identity)
 		}
 		return nil
 	})
 }
 
 func (r *workspaceReplica) ensureDirectoryWatches() error {
-	if r == nil || r.watcher == nil || r.rootDir == "" {
+	if r == nil || r.rootDir == "" {
 		return nil
 	}
 	return filepath.WalkDir(r.rootDir, func(path string, entry os.DirEntry, walkErr error) error {
@@ -480,12 +814,15 @@ func (r *workspaceReplica) ensureDirectoryWatches() error {
 }
 
 func (r *workspaceReplica) addWatchDir(path string) error {
-	if r == nil || r.watcher == nil || strings.TrimSpace(path) == "" {
+	if r == nil || strings.TrimSpace(path) == "" {
 		return nil
 	}
 	path = filepath.Clean(path)
 	r.watchMu.Lock()
 	defer r.watchMu.Unlock()
+	if r.watcher == nil {
+		return nil
+	}
 	if _, ok := r.watched[path]; ok {
 		return nil
 	}
@@ -546,20 +883,5 @@ func (r *workspaceReplica) recordTrackedIdentity(path string) {
 }
 
 func statFileIdentity(path string) fileIdentity {
-	info, err := os.Stat(path)
-	if err != nil {
-		return fileIdentity{}
-	}
-	return fileIdentityForInfo(info)
-}
-
-func fileIdentityForInfo(info os.FileInfo) fileIdentity {
-	if info == nil {
-		return fileIdentity{}
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat == nil {
-		return fileIdentity{}
-	}
-	return fileIdentity{dev: uint64(stat.Dev), ino: uint64(stat.Ino), valid: stat.Ino != 0}
+	return fileIdentityForPath(path)
 }

@@ -514,9 +514,11 @@ Response `201`:
 }
 ```
 
-Frontend should display the token once and provide a hosted installer command. The frontend, backend, and static origins are environment-driven so local development can use localhost while production uses the public domains.
+Frontend should display the token once and provide a hosted installer command with macOS/Linux and Windows modes. The frontend, backend, and static origins are environment-driven so local development can use localhost while production uses the public domains.
 
-The installer does not require Codex. It keeps `NOTTY_CODEX_COMMAND` as configured, defaulting to `codex`, and writes an explicit daemon `PATH` based on the install shell plus common Codex locations such as Homebrew, `/usr/local/bin`, system bin directories, `~/.local/bin`, `~/.npm-global/bin`, and the npm prefix bin. If Codex is missing, broken, or too old for `app-server`, the installer prints a warning and still installs the daemon; the daemon reports Codex as an unavailable runtime until Codex is installed or fixed.
+The installers do not require Codex. They keep `NOTTY_CODEX_COMMAND` as configured, defaulting to `codex`, and write an explicit daemon `PATH` based on common user and system tool locations. If Codex is missing, broken, or too old for `app-server`, installation prints a warning and continues; the daemon reports Codex as an unavailable runtime until Codex is installed or fixed. Windows installs use a limited current-user Scheduled Task, falling back to the user's Startup folder if task policy blocks registration. Neither path requires an administrator PowerShell session.
+
+macOS or Linux:
 
 ```sh
 curl -fsSL https://static.nottyai.co/daemons/install.sh | sh -s -- \
@@ -524,6 +526,28 @@ curl -fsSL https://static.nottyai.co/daemons/install.sh | sh -s -- \
   --workspace-id ws_... \
   --daemon-token nottyd_... \
   --static-base https://static.nottyai.co/daemons
+```
+
+Windows AMD64, or Windows 11 ARM64 (build 22000 or newer) using built-in x64 emulation, from PowerShell 5.1 or newer:
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$codeskInstallerResponse = Invoke-WebRequest -UseBasicParsing 'https://static.nottyai.co/daemons/install.ps1'
+$codeskInstallerSource = if ($codeskInstallerResponse.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($codeskInstallerResponse.Content) } else { [string]$codeskInstallerResponse.Content }
+& ([ScriptBlock]::Create($codeskInstallerSource)) `
+  -BackendUrl 'https://api.nottyai.co' `
+  -WorkspaceId 'ws_...' `
+  -DaemonToken 'nottyd_...' `
+  -StaticBase 'https://static.nottyai.co/daemons'
+```
+
+Global Windows uninstall (the `-All` confirmation is required):
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$codeskUninstallerResponse = Invoke-WebRequest -UseBasicParsing 'https://static.nottyai.co/daemons/uninstall.ps1'
+$codeskUninstallerSource = if ($codeskUninstallerResponse.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($codeskUninstallerResponse.Content) } else { [string]$codeskUninstallerResponse.Content }
+& ([ScriptBlock]::Create($codeskUninstallerSource)) -All
 ```
 
 Delete daemon:
@@ -1552,7 +1576,9 @@ Default production routes:
 
 For product development from a source checkout, `make dev` is the supported one-command way to start the local backend, frontend, static, and Postgres stack. It first builds host-platform daemon artifacts into `dist/static/daemons`, then starts Docker Compose. Local dev does not run nginx. Local dev defaults `NOTTY_FRONTEND_ORIGIN`, `NOTTY_BACKEND_ORIGIN`, and `NOTTY_STATIC_ORIGIN` to localhost values instead of production domains. The local `static` service serves `dist/static` at `http://localhost:${NOTTY_STATIC_PORT:-5174}`, mirroring production’s separate static origin instead of coupling daemon downloads to the frontend.
 
-Start an external daemon after creating a daemon token in the frontend:
+Start an external daemon after creating a daemon token in the frontend. The frontend provides the matching command after selecting the host operating system.
+
+macOS or Linux:
 
 ```sh
 curl -fsSL https://static.nottyai.co/daemons/install.sh | sh -s -- \
@@ -1560,6 +1586,19 @@ curl -fsSL https://static.nottyai.co/daemons/install.sh | sh -s -- \
   --workspace-id ws_... \
   --daemon-token nottyd_... \
   --static-base https://static.nottyai.co/daemons
+```
+
+Windows AMD64, or Windows 11 ARM64 (build 22000 or newer) using built-in x64 emulation:
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$codeskInstallerResponse = Invoke-WebRequest -UseBasicParsing 'https://static.nottyai.co/daemons/install.ps1'
+$codeskInstallerSource = if ($codeskInstallerResponse.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($codeskInstallerResponse.Content) } else { [string]$codeskInstallerResponse.Content }
+& ([ScriptBlock]::Create($codeskInstallerSource)) `
+  -BackendUrl 'https://api.nottyai.co' `
+  -WorkspaceId 'ws_...' `
+  -DaemonToken 'nottyd_...' `
+  -StaticBase 'https://static.nottyai.co/daemons'
 ```
 
 Build all local artifacts without publishing:
@@ -1576,7 +1615,7 @@ Focused build targets:
 - `make build-static-local`: build local host-platform daemon artifacts into `dist/static/daemons`.
 - `make build-backend-image`: build the backend Docker image locally without pushing.
 - `make build-static VERSION=v0.1.0`: build the full production static tree.
-- `make daemon-release-all VERSION=v0.1.0`: build daemon release tarballs for every supported target.
+- `make daemon-release-all VERSION=v0.1.0`: build daemon release archives for every supported target.
 
 Build daemon release artifacts for every supported target:
 
@@ -1584,7 +1623,7 @@ Build daemon release artifacts for every supported target:
 make daemon-release-all VERSION=v0.1.0
 ```
 
-This creates `dist/static/daemons/install.sh`, `dist/static/daemons/latest/manifest.json`, `dist/static/daemons/latest/SHA256SUMS`, and versioned tarballs containing `notty-daemon` and `notty-agent-tool`. Use `make daemon-release VERSION=v0.1.0 PLATFORMS=linux/arm64` for a focused one-platform release.
+This creates stable `install.sh`, `uninstall.sh`, `install.ps1`, and `uninstall.ps1` entrypoints, plus `latest/manifest.json`, `latest/SHA256SUMS`, and versioned archives containing `notty-daemon` and `notty-agent-tool`. Unix archives are `.tar.gz`; Windows AMD64 is a `.zip` that also contains `run-windows.ps1`. Use `make daemon-release VERSION=v0.1.0 PLATFORMS=windows/amd64` for a focused Windows release.
 
 Publish artifacts without changing the running backend:
 
@@ -1704,7 +1743,7 @@ Important deployment environment variables in `deploy/env/prod.deploy.env`:
 - `NOTTY_DEPLOY_SSH_HOST`: SSH host used by `scripts/deploy-backend.sh`, default `notty`.
 - `NOTTY_REMOTE_DIR`: remote deploy directory, default `/opt/notty`.
 - `DOCKER_REPO` and `DOCKER_PLATFORMS`: backend image repository and build platforms.
-- `DAEMON_PLATFORMS`: comma- or space-separated daemon release platforms, or `all` for every supported target. Production builds Darwin host artifacts locally and uses native Rust/Go cross-compilation for Linux release artifacts and non-host Darwin targets. Linux builds require installed Rust musl targets plus `zig`, or `CC_LINUX_AMD64`/`CC_LINUX_ARM64` pointing at target C compilers. Darwin cross builds on macOS use `xcrun clang -arch`; Darwin cross builds from Linux require installed Rust targets plus `CC_DARWIN_AMD64`/`CC_DARWIN_ARM64` pointing at Darwin-capable compilers such as osxcross clang with an Apple SDK.
+- `DAEMON_PLATFORMS`: comma- or space-separated daemon release platforms, or `all` for every supported target: Darwin AMD64/ARM64, Linux AMD64/ARM64, and Windows AMD64. Production uses Rust/Go cross-compilation for non-host targets. Linux builds require installed Rust musl targets plus `zig`, or `CC_LINUX_AMD64`/`CC_LINUX_ARM64` pointing at target C compilers. Windows builds require the Rust `x86_64-pc-windows-gnu` target plus MinGW-w64's `x86_64-w64-mingw32-gcc`, or `CC_WINDOWS_AMD64` pointing at an equivalent compiler. Darwin cross builds on macOS use `xcrun clang -arch`; Darwin cross builds from Linux require installed Rust targets plus `CC_DARWIN_AMD64`/`CC_DARWIN_ARM64` pointing at Darwin-capable compilers such as osxcross clang with an Apple SDK.
 - `CLOUDFLARE_ACCOUNT_ID`, `R2_ENDPOINT_URL`, `R2_*_BUCKET`, and `R2_*_PREFIX`: static publish targets.
 
 Important production server defaults in `deploy/env/prod.server.env`:

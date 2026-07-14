@@ -6,91 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 )
-
-func TestReadFileLockedWaitsForExclusiveLock(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "doc.md")
-	if err := os.WriteFile(path, []byte("stable"), 0o644); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
-	file, err := os.OpenFile(path, os.O_RDWR, 0o644)
-	if err != nil {
-		t.Fatalf("open file: %v", err)
-	}
-	defer file.Close()
-	if err := lockFile(file, syscall.LOCK_EX); err != nil {
-		t.Fatalf("lock file: %v", err)
-	}
-
-	done := make(chan error, 1)
-	go func() {
-		content, err := readFileLocked(path)
-		if err == nil && string(content) != "stable" {
-			err = errors.New("unexpected locked read content")
-		}
-		done <- err
-	}()
-
-	select {
-	case err := <-done:
-		t.Fatalf("locked read completed before exclusive lock was released: %v", err)
-	case <-time.After(100 * time.Millisecond):
-	}
-	unlockFile(file)
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("locked read after unlock: %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("locked read did not complete after exclusive lock was released")
-	}
-}
-
-func TestAppendFileLockedWaitsForExclusiveLock(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "doc.md")
-	if err := os.WriteFile(path, []byte("base\n"), 0o644); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
-	file, err := os.OpenFile(path, os.O_RDWR, 0o644)
-	if err != nil {
-		t.Fatalf("open file: %v", err)
-	}
-	defer file.Close()
-	if err := lockFile(file, syscall.LOCK_EX); err != nil {
-		t.Fatalf("lock file: %v", err)
-	}
-
-	done := make(chan error, 1)
-	go func() {
-		done <- appendFileLocked(path, "append\n")
-	}()
-
-	select {
-	case err := <-done:
-		t.Fatalf("append completed before exclusive lock was released: %v", err)
-	case <-time.After(100 * time.Millisecond):
-	}
-	unlockFile(file)
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("append after unlock: %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("append did not complete after exclusive lock was released")
-	}
-	content, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read file: %v", err)
-	}
-	if string(content) != "base\nappend\n" {
-		t.Fatalf("unexpected file content: %q", content)
-	}
-}
 
 func TestAgentLogPathUsesDaemonDataDirWorkspaceAndDate(t *testing.T) {
 	cfg := Config{

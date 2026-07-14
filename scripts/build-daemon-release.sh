@@ -4,7 +4,9 @@ set -eu
 version="${1:-${VERSION:-dev}}"
 dist_dir="${2:-${DIST_DIR:-dist/static/daemons}}"
 platforms="${PLATFORMS:-}"
-all_platforms="darwin/amd64 darwin/arm64 linux/amd64 linux/arm64"
+# "all" is the public release set. Keep construction-only targets explicit
+# until their native acceptance and user-facing packaging are complete.
+all_platforms="darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64"
 
 root_dir="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
 . "$root_dir/scripts/lib/testtmp.sh"
@@ -19,10 +21,14 @@ tmp_dir="$(notty_test_mktemp notty-daemon-release)"
 manifest="$out_dir/manifest.json"
 installer="$root_dir/deploy/daemons/install.sh"
 uninstaller="$root_dir/deploy/daemons/uninstall.sh"
+powershell_installer="$root_dir/deploy/daemons/install.ps1"
+powershell_uninstaller="$root_dir/deploy/daemons/uninstall.ps1"
+windows_runner="$root_dir/deploy/daemons/run-windows.ps1"
 
 host_os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 case "$host_os" in
 	darwin|linux) ;;
+	mingw*|msys*|cygwin*) host_os="windows" ;;
 	*) host_os="$(uname -s)" ;;
 esac
 host_arch="$(uname -m)"
@@ -60,6 +66,7 @@ rust_target_for() {
 		linux/arm64) printf 'aarch64-unknown-linux-musl' ;;
 		darwin/amd64) printf 'x86_64-apple-darwin' ;;
 		darwin/arm64) printf 'aarch64-apple-darwin' ;;
+		windows/amd64) printf 'x86_64-pc-windows-gnu' ;;
 		*) printf '' ;;
 	esac
 }
@@ -160,7 +167,7 @@ preflight_platform() {
 		return
 	fi
 
-	if [ "$os" = "linux" ] || [ "$platform" != "$host_platform" ]; then
+	if [ "$os" = "linux" ] || [ "$os" = "windows" ] || [ "$platform" != "$host_platform" ]; then
 		check_rust_target "$rust_target"
 	fi
 
@@ -178,6 +185,16 @@ preflight_platform() {
 					preflight_error "$env_name is required to cross-compile $platform from $host_os; use a Darwin-capable compiler such as osxcross clang with an Apple SDK"
 				fi
 			fi
+			;;
+		windows)
+			if [ -z "$cc_value" ]; then
+				if [ "$host_os" = "windows" ]; then
+					command -v gcc >/dev/null 2>&1 || preflight_error "gcc from MinGW-w64 is required to build $platform on Windows, or set $env_name"
+				elif ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+					preflight_error "x86_64-w64-mingw32-gcc is required to cross-compile $platform, or set $env_name"
+				fi
+			fi
+			command -v zip >/dev/null 2>&1 || preflight_error "zip is required to package $platform"
 			;;
 	esac
 }
@@ -201,6 +218,13 @@ target_cc_for() {
 			make_darwin_cc_wrapper "$os" "$arch" "$wrapper"
 			printf '%s' "$wrapper"
 			;;
+		windows)
+			if [ "$host_os" = "windows" ]; then
+				printf 'gcc'
+			else
+				printf 'x86_64-w64-mingw32-gcc'
+			fi
+			;;
 		*)
 			printf 'build-daemon-release: %s/%s requires %s to point at a target C compiler\n' "$os" "$arch" "$env_name" >&2
 			exit 1
@@ -211,8 +235,19 @@ target_cc_for() {
 go_ldflags_for() {
 	case "$1" in
 		linux) printf -- "-linkmode external -extldflags '-static -lunwind' -s -w" ;;
+		windows) printf -- "-linkmode external -extldflags '-static' -s -w" ;;
 		*) printf -- '-linkmode external -s -w' ;;
 	esac
+}
+
+binary_name_for() {
+	name="$1"
+	os="$2"
+	if [ "$os" = "windows" ]; then
+		printf '%s.exe' "$name"
+	else
+		printf '%s' "$name"
+	fi
 }
 
 build_host_binaries() {
@@ -223,8 +258,8 @@ build_host_binaries() {
 	(
 		cd "$root_dir"
 		"$root_dir/scripts/build-yffi.sh"
-		CGO_ENABLED=1 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "$package_dir/bin/notty-daemon" ./daemon/cmd/daemon
-		CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "$package_dir/bin/notty-agent-tool" ./daemon/cmd/agenttool
+		CGO_ENABLED=1 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "$package_dir/bin/$(binary_name_for notty-daemon "$os")" ./daemon/cmd/daemon
+		CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "$package_dir/bin/$(binary_name_for notty-agent-tool "$os")" ./daemon/cmd/agenttool
 	)
 }
 
@@ -255,8 +290,8 @@ build_cross_binaries() {
 
 	(
 		cd "$root_dir"
-		CC="$cc" CGO_ENABLED=1 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "$(go_ldflags_for "$os")" -o "$package_dir/bin/notty-daemon" ./daemon/cmd/daemon
-		CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "$package_dir/bin/notty-agent-tool" ./daemon/cmd/agenttool
+		CC="$cc" CGO_ENABLED=1 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "$(go_ldflags_for "$os")" -o "$package_dir/bin/$(binary_name_for notty-daemon "$os")" ./daemon/cmd/daemon
+		CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "$package_dir/bin/$(binary_name_for notty-agent-tool "$os")" ./daemon/cmd/agenttool
 	)
 }
 
@@ -271,6 +306,18 @@ if [ ! -f "$installer" ]; then
 fi
 if [ ! -f "$uninstaller" ]; then
 	printf 'missing uninstaller: %s\n' "$uninstaller" >&2
+	exit 1
+fi
+if [ ! -f "$powershell_installer" ]; then
+	printf 'missing PowerShell installer: %s\n' "$powershell_installer" >&2
+	exit 1
+fi
+if [ ! -f "$powershell_uninstaller" ]; then
+	printf 'missing PowerShell uninstaller: %s\n' "$powershell_uninstaller" >&2
+	exit 1
+fi
+if [ ! -f "$windows_runner" ]; then
+	printf 'missing Windows daemon runner: %s\n' "$windows_runner" >&2
 	exit 1
 fi
 
@@ -290,11 +337,15 @@ for platform in $platforms; do
 	arch="${platform#*/}"
 	name="notty-daemon_${version}_${os}_${arch}"
 	package_dir="$tmp_dir/$name"
-	archive="$out_dir/$name.tar.gz"
+	if [ "$os" = "windows" ]; then
+		archive="$out_dir/$name.zip"
+	else
+		archive="$out_dir/$name.tar.gz"
+	fi
 
 	mkdir -p "$package_dir/bin"
 	rust_target="$(rust_target_for "$os" "$arch")"
-	if [ "$os" = "linux" ] && [ -n "$rust_target" ]; then
+	if { [ "$os" = "linux" ] || [ "$os" = "windows" ]; } && [ -n "$rust_target" ]; then
 		build_cross_binaries "$os" "$arch" "$package_dir" "$rust_target"
 	elif [ "$platform" = "$host_platform" ]; then
 		build_host_binaries "$os" "$arch" "$package_dir"
@@ -305,20 +356,31 @@ for platform in $platforms; do
 		exit 1
 	fi
 
+	if [ "$os" = "windows" ]; then
+		cp "$windows_runner" "$package_dir/run-windows.ps1"
+		launch_help="Use the hosted install.ps1 script for normal installs, or run bin/notty-daemon.exe from PowerShell for manual testing."
+	else
+		launch_help="Use the hosted install script for normal installs:
+  curl -fsSL <public-origin>/daemons/install.sh | sh"
+	fi
 	cat > "$package_dir/README.md" <<EOF
 Notty daemon $version
 
 This package contains:
-- bin/notty-daemon
-- bin/notty-agent-tool
+- bin/$(binary_name_for notty-daemon "$os")
+- bin/$(binary_name_for notty-agent-tool "$os")
+$(if [ "$os" = "windows" ]; then printf '%s' '- run-windows.ps1'; fi)
 
-Use the hosted install script for normal installs:
-  curl -fsSL <public-origin>/daemons/install.sh | sh
+$launch_help
 EOF
 
 	(
 		cd "$tmp_dir"
-		tar -czf "$archive" "$name"
+		if [ "$os" = "windows" ]; then
+			zip -qr "$archive" "$name"
+		else
+			tar -czf "$archive" "$name"
+		fi
 	)
 
 	sum="$(checksum "$archive")"
@@ -339,5 +401,9 @@ cp "$installer" "$dist_abs/install.sh"
 cp "$installer" "$out_dir/install.sh"
 cp "$uninstaller" "$dist_abs/uninstall.sh"
 cp "$uninstaller" "$out_dir/uninstall.sh"
+cp "$powershell_installer" "$dist_abs/install.ps1"
+cp "$powershell_installer" "$out_dir/install.ps1"
+cp "$powershell_uninstaller" "$dist_abs/uninstall.ps1"
+cp "$powershell_uninstaller" "$out_dir/uninstall.ps1"
 
 printf 'Built daemon release %s in %s\n' "$version" "$out_dir"

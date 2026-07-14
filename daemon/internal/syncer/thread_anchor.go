@@ -43,19 +43,22 @@ func (s *Service) prepareDocumentThreadPayload(ctx context.Context, run *agentRu
 	return payload, nil
 }
 
-func (s *Service) runtimeForThreadAnchor(run *agentRun) *workspaceRuntime {
+func (s *Service) runtimeForThreadAnchor(run *agentRun) (*workspaceRuntime, func()) {
 	if s == nil {
-		return nil
+		return nil, func() {}
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if run != nil && strings.TrimSpace(run.AgentID) != "" {
-		s.mu.Lock()
 		managed := s.agentRuntimes[run.AgentID]
-		s.mu.Unlock()
-		if managed != nil && managed.runtime != nil {
-			return managed.runtime
+		if managed != nil {
+			if runtime, release := managed.borrow(); runtime != nil {
+				return runtime, release
+			}
 		}
+		return nil, func() {}
 	}
-	return s.primaryRuntime
+	return s.primaryRuntime, func() {}
 }
 
 func (s *Service) resolveThreadDocument(ctx context.Context, run *agentRun, payload createThreadPayload) (*document, error) {
@@ -70,7 +73,8 @@ func (s *Service) resolveThreadDocument(ctx context.Context, run *agentRun, payl
 	if path != "" {
 		return s.lookupDocumentByRootProjection(ctx, run, path)
 	}
-	runtime := s.runtimeForThreadAnchor(run)
+	runtime, release := s.runtimeForThreadAnchor(run)
+	defer release()
 	if runtime == nil {
 		return nil, fmt.Errorf("workspace runtime is unavailable")
 	}
@@ -87,7 +91,8 @@ func (s *Service) lookupDocumentByRootProjection(ctx context.Context, run *agent
 	if err != nil {
 		return nil, err
 	}
-	runtime := s.runtimeForThreadAnchor(run)
+	runtime, release := s.runtimeForThreadAnchor(run)
+	defer release()
 	if runtime != nil && runtime.rootDocumentID != "" && runtime.docCache != nil {
 		documentID, ok, err := runtime.resolveDocumentIDByProjectedPath(path)
 		if err != nil {
