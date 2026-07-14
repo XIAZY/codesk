@@ -73,6 +73,146 @@ func newApplyingDocumentUpdateWebsocketTestRuntime(t *testing.T, cache *document
 	})
 }
 
+func TestServicePeriodicCadencesKeepDaemonOnlineIndependently(t *testing.T) {
+	const backendOnlineWindow = 30 * time.Second
+
+	if daemonStatusHeartbeatInterval != 10*time.Second {
+		t.Fatalf("daemon heartbeat interval = %s, want 10s", daemonStatusHeartbeatInterval)
+	}
+	if daemonStatusHeartbeatInterval >= backendOnlineWindow {
+		t.Fatalf("daemon heartbeat interval %s must stay inside backend online window %s", daemonStatusHeartbeatInterval, backendOnlineWindow)
+	}
+	if workspaceRefreshInterval != time.Minute {
+		t.Fatalf("workspace refresh interval = %s, want 1m", workspaceRefreshInterval)
+	}
+	if daemonStatusHeartbeatInterval == workspaceRefreshInterval {
+		t.Fatal("daemon heartbeat and workspace refresh must use independent schedules")
+	}
+}
+
+func TestDaemonStatusHeartbeatRunsWithoutWorkspaceRefresh(t *testing.T) {
+	requests := make(chan *http.Request, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- r.Clone(context.Background())
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := Config{
+		BackendURL:  server.URL,
+		WorkspaceID: "workspace:test",
+		DaemonToken: "daemon_token",
+	}
+	service := &Service{
+		cfg:          cfg,
+		client:       server.Client(),
+		daemonStatus: newDaemonStatusReporter(cfg, server.Client()),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	ticks := make(chan time.Time, 1)
+	go func() {
+		defer close(done)
+		service.runDaemonStatusHeartbeat(ctx, ticks)
+	}()
+
+	ticks <- time.Now()
+	select {
+	case request := <-requests:
+		if request.Method != http.MethodPatch || !strings.HasSuffix(request.URL.Path, "/daemon/status") {
+			t.Fatalf("heartbeat request = %s %s, want daemon status PATCH", request.Method, request.URL.Path)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for daemon status heartbeat")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("heartbeat loop did not stop after cancellation")
+	}
+}
+
+func TestRunReportsDaemonOnlineOnlyAfterInitialRefreshSucceeds(t *testing.T) {
+	workspaceStarted := make(chan struct{}, 1)
+	allowWorkspace := make(chan struct{})
+	statusRequests := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/daemon/status"):
+			statusRequests <- struct{}{}
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/workspace"):
+			select {
+			case workspaceStarted <- struct{}{}:
+			default:
+			}
+			select {
+			case <-allowWorkspace:
+				writeJSONResponse(w, http.StatusOK, &workspaceResponse{})
+			case <-r.Context().Done():
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{
+		BackendURL:         server.URL,
+		WorkspaceID:        "workspace:test",
+		DaemonToken:        "daemon_token",
+		DataDir:            t.TempDir(),
+		WorkspaceDir:       t.TempDir(),
+		AgentWorkspaceRoot: t.TempDir(),
+		AgentID:            "daemon_agent",
+		AgentToolBaseURL:   "http://127.0.0.1:0",
+	}
+	service := &Service{
+		cfg:            cfg,
+		client:         server.Client(),
+		daemonStatus:   newDaemonStatusReporter(cfg, server.Client()),
+		primaryRuntime: &workspaceRuntime{},
+		agentRuntimes:  map[string]*managedWorkspaceRuntime{},
+		agentWorkers:   map[string]*managedAgentWorker{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- service.Run(ctx)
+	}()
+
+	select {
+	case <-workspaceStarted:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("timed out waiting for initial workspace recovery")
+	}
+	select {
+	case <-statusRequests:
+		cancel()
+		t.Fatal("daemon reported online before initial workspace recovery completed")
+	default:
+	}
+	close(allowWorkspace)
+	select {
+	case <-statusRequests:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("daemon did not report online after initial workspace recovery completed")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run after cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not stop after cancellation")
+	}
+}
+
 func TestComputeLocalTextEditsUsesUTF16Cursor(t *testing.T) {
 	edits, err := computeLocalTextEdits("a🙂b", "a🙂Xb")
 	if err != nil {

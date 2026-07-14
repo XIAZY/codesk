@@ -95,6 +95,8 @@ var nextDocumentConnect time.Time
 
 const documentConnectInterval = 100 * time.Millisecond
 const backendErrorBodyLimit = 4096
+const daemonStatusHeartbeatInterval = 10 * time.Second
+const workspaceRefreshInterval = time.Minute
 
 type backendStatusError struct {
 	Method     string
@@ -232,7 +234,6 @@ func (s *Service) Run(ctx context.Context) error {
 		_ = shutdownToolGateway(context.Background(), s.toolServer)
 		return err
 	}
-	s.reportDaemonStatus(ctx, true)
 	if err := s.refreshInitialWorkspace(ctx); err != nil {
 		s.closeAgentWorkers()
 		s.closeAgentRuntimes()
@@ -242,6 +243,16 @@ func (s *Service) Run(ctx context.Context) error {
 		_ = shutdownToolGateway(context.Background(), s.toolServer)
 		return err
 	}
+	// Reporting status advances the backend's online timestamp. Start it only after every
+	// startup recovery and readiness gate has passed.
+	s.reportDaemonStatus(ctx, true)
+	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
+	heartbeatTicker := time.NewTicker(daemonStatusHeartbeatInterval)
+	defer func() {
+		cancelHeartbeat()
+		heartbeatTicker.Stop()
+	}()
+	go s.runDaemonStatusHeartbeat(heartbeatCtx, heartbeatTicker.C)
 	primaryCtx, cancelPrimary := context.WithCancel(ctx)
 	defer cancelPrimary()
 	shutdown := func() {
@@ -261,7 +272,7 @@ func (s *Service) Run(ctx context.Context) error {
 	drained := make(chan error, 1)
 	go s.workspaceEventLoop(ctx, drained)
 
-	ticker := time.NewTicker(60 * time.Second)
+	ticker := time.NewTicker(workspaceRefreshInterval)
 	defer ticker.Stop()
 
 	for {
@@ -274,7 +285,6 @@ func (s *Service) Run(ctx context.Context) error {
 			shutdown()
 			return err
 		case <-ticker.C:
-			s.reportDaemonStatus(ctx, false)
 			if err := s.refresh(ctx); err != nil {
 				if isTerminalAuthError(err) {
 					fmt.Printf("workspace refresh: %v; daemon has been drained, exiting\n", err)
@@ -283,6 +293,20 @@ func (s *Service) Run(ctx context.Context) error {
 				}
 				fmt.Printf("workspace refresh error: %v\n", err)
 			}
+		}
+	}
+}
+
+func (s *Service) runDaemonStatusHeartbeat(ctx context.Context, ticks <-chan time.Time) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-ticks:
+			if !ok {
+				return
+			}
+			s.reportDaemonStatus(ctx, false)
 		}
 	}
 }
