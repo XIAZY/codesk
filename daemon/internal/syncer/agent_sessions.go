@@ -71,6 +71,13 @@ type agentSessionStart struct {
 	// nil-slot fresh start cannot resurrect a removed agent.
 	cancelled bool
 	cancel    context.CancelFunc
+	// kind/systemPrompt are the spawn fingerprint this fresh construction is
+	// building; a reconcile with a different fingerprint supersedes it. superseded
+	// marks that cancellation was a spec-change (not a failure/removal), so a
+	// waiter retries at the latest spec instead of surfacing context.Canceled.
+	kind         string
+	systemPrompt string
+	superseded   bool
 }
 
 type agentSessionStartupError struct {
@@ -447,14 +454,22 @@ func (s *agentSessionSupervisor) Shutdown() {
 // built from cfg — none are desired-spec inputs. So Kind+SystemPrompt is the
 // complete changeable set; extend this fingerprint if the constructor grows a
 // new `current.*` input.
-func (session *managedAgentSession) refreshDesiredSpec(current *agent) {
-	changed := session.agent == nil ||
+func (session *managedAgentSession) refreshDesiredSpec(current *agent) (changed bool) {
+	changed = session.agent == nil ||
 		session.agent.Kind != current.Kind ||
 		session.agent.SystemPrompt != current.SystemPrompt
 	session.agent = cloneAgentValue(current)
 	if changed {
 		session.agentRev++
 	}
+	return changed
+}
+
+// spawnFingerprintChanged reports whether the spawn-relevant desired spec differs
+// from what a fresh-start claim is building. Same rationale/enumeration as
+// refreshDesiredSpec: only Kind and SystemPrompt reach construction.
+func (start *agentSessionStart) spawnFingerprintChanged(current *agent) bool {
+	return start.kind != current.Kind || start.systemPrompt != current.SystemPrompt
 }
 
 func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *agent) error {
@@ -478,7 +493,13 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 				// uses the LATEST instructions, not the death-time clone, and an
 				// in-flight construction against the old revision is rebuilt — but
 				// only bump the revision on a real spec change (see refreshDesiredSpec).
-				session.refreshDesiredSpec(current)
+				if session.refreshDesiredSpec(current) && session.constructCancel != nil {
+					// A genuine spec change with an in-flight restart construction:
+					// cancel the blocked old-spec Spawn/Start/handshake now so the
+					// restarter re-arms and rebuilds from the latest spec promptly,
+					// instead of the rev-CAS only reaping after the handshake returns.
+					session.constructCancel()
+				}
 				s.mu.Unlock()
 				return nil
 			}
@@ -493,11 +514,24 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 			return nil
 		}
 		if start := s.starting[current.ID]; start != nil {
+			// An in-flight fresh construction owns this ID. If it is building the
+			// SAME spawn fingerprint, wait and bind to its result. If the desired
+			// spec CHANGED, supersede it: cancel the old attempt and retry at the
+			// latest spec — the waiter must bind to the fresh retry, never surface
+			// the superseded attempt's context.Canceled as a failure.
+			if start.spawnFingerprintChanged(current) {
+				start.cancelled = true
+				start.superseded = true
+				if start.cancel != nil {
+					start.cancel()
+				}
+			}
 			done := start.done
+			superseded := start.superseded
 			s.mu.Unlock()
 			select {
 			case <-done:
-				if start.err != nil {
+				if !superseded && start.err != nil {
 					return start.err
 				}
 				continue
@@ -508,9 +542,15 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 		// The starting entry is this fresh construction's ownership claim; its
 		// cancelable context (child of baseCtx) lets Reconcile removal / Shutdown
 		// interrupt a blocked Spawn/Start/handshake and lets the conditional
-		// publish refuse to store a removed agent.
+		// publish refuse to store a removed agent. It carries the spawn fingerprint
+		// so a changed-spec reconcile can supersede it.
 		cctx, ccancel := context.WithCancel(s.baseCtx)
-		start := &agentSessionStart{done: make(chan struct{}), cancel: ccancel}
+		start := &agentSessionStart{
+			done:         make(chan struct{}),
+			cancel:       ccancel,
+			kind:         current.Kind,
+			systemPrompt: current.SystemPrompt,
+		}
 		s.starting[current.ID] = start
 		s.mu.Unlock()
 
@@ -518,11 +558,17 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 		ccancel()
 		s.mu.Lock()
 		start.err = err
+		superseded := start.superseded
 		if s.starting[current.ID] == start {
 			delete(s.starting, current.ID)
 			close(start.done)
 		}
 		s.mu.Unlock()
+		if superseded {
+			// A changed-spec reconcile superseded this attempt; retry at the latest
+			// spec rather than surfacing the cancelled attempt's context.Canceled.
+			continue
+		}
 		return err
 	}
 }
@@ -1194,6 +1240,11 @@ func (s *agentSessionSupervisor) markWorking(agentID string, process RuntimeProc
 	if session != nil {
 		session.state = "working"
 		session.activeTurn = turnID
+		// An authoritative TurnStarted is a state transition that must win over a
+		// StartTurn RPC completion still in flight: bump the operation nonce so a
+		// stale StartTurn error/timeout returning afterward cannot demote this live
+		// turn to idle.
+		session.turnOpSeq++
 	}
 	sessionID := ""
 	if session != nil {

@@ -2192,3 +2192,157 @@ func TestAgentSessionPublishedRuntimeIsNotReaped(t *testing.T) {
 		t.Fatal("session was not published")
 	}
 }
+
+func waitSessionTurn(t *testing.T, s *agentSessionSupervisor, agentID, want string) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		if _, turn := sessionState(s, agentID); turn == want {
+			return
+		}
+		select {
+		case <-deadline:
+			_, turn := sessionState(s, agentID)
+			t.Fatalf("session %s activeTurn=%q, want %q", agentID, turn, want)
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+func waitProcessStopped(t *testing.T, p *fakeRuntimeProcess) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		p.mu.Lock()
+		stopped := p.stopped
+		p.mu.Unlock()
+		if stopped {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("process was not stopped/reaped in time (prompt cancellation failed)")
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+// Spoke 19: an authoritative TurnStarted advances the operation nonce, so a stale
+// StartTurn RPC error returning after the provider accepted the turn cannot demote
+// the event-confirmed live turn to idle.
+func TestAgentSessionTurnStartedEventWinsOverStaleStartTurnError(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	proc1 := factory.only(t)
+	proc1.mu.Lock()
+	proc1.startTurnEntered = make(chan struct{}, 1)
+	proc1.startTurnRelease = make(chan struct{})
+	proc1.startTurnErr = errors.New("startturn rpc timeout")
+	proc1.mu.Unlock()
+
+	notifyDone := make(chan error, 1)
+	go func() {
+		notifyDone <- supervisor.ScheduleNotificationTurn(context.Background(), current, "do work", "sig-forme", "")
+	}()
+	<-proc1.startTurnEntered // op captured; blocked in WriteStdin
+
+	proc1.events <- RuntimeEvent{Kind: RuntimeEventTurnStarted, TurnID: "event_turn"}
+	waitSessionTurn(t, supervisor, "agent_1", "event_turn")
+
+	close(proc1.startTurnRelease)
+	if err := <-notifyDone; err == nil {
+		t.Fatal("expected the StartTurn RPC error to surface")
+	}
+	if st, turn := sessionState(supervisor, "agent_1"); st != "working" || turn != "event_turn" {
+		t.Fatalf("stale StartTurn error demoted an event-confirmed live turn: state=%q turn=%q, want working/event_turn", st, turn)
+	}
+}
+
+// Spoke 18: a genuine spec change on a parked restart cancels the blocked old-spec
+// construction PROMPTLY (no manual release) and rebuilds from the new spec.
+func TestAgentSessionRestartSpecChangeCancelsBlockedConstruction(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	supervisor.restartSleep = func(time.Duration) {}
+	restartDone := make(chan struct{})
+	supervisor.testHookRestartComplete = func() { close(restartDone) }
+
+	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex", SystemPrompt: "old instructions"}); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	proc1 := factory.only(t)
+
+	factory.startEntered = make(chan struct{}, 1)
+	factory.startRelease = make(chan struct{})
+
+	close(proc1.events)
+	<-factory.startEntered // replacement (old spec) blocked in Start
+	proc2 := latestFakeProcess(factory)
+
+	if err := supervisor.Reconcile(context.Background(), []*agent{{ID: "agent_1", Kind: "codex", SystemPrompt: "new instructions"}}); err != nil {
+		t.Fatalf("reconcile spec change: %v", err)
+	}
+	waitProcessStopped(t, proc2) // reaped promptly by the spec-change cancel, before any release
+
+	close(factory.startRelease)
+	<-restartDone
+	supervisor.mu.Lock()
+	var got string
+	if sess := supervisor.sessions["agent_1"]; sess != nil && sess.agent != nil {
+		got = sess.agent.SystemPrompt
+	}
+	supervisor.mu.Unlock()
+	if got != "new instructions" {
+		t.Fatalf("restart did not rebuild from the new spec: %q, want %q", got, "new instructions")
+	}
+}
+
+// Spoke 17: a changed-spec reconcile during a blocked fresh construction supersedes
+// it — the old attempt is cancelled promptly, the new spec is published, and no
+// caller surfaces the superseded attempt's context.Canceled.
+func TestAgentSessionFreshSpecChangeSupersedesConstruction(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.startEntered = make(chan struct{}, 1)
+	factory.startRelease = make(chan struct{})
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	oldDone := make(chan error, 1)
+	go func() {
+		oldDone <- supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex", SystemPrompt: "old instructions"})
+	}()
+	<-factory.startEntered // old-spec fresh construction blocked in Start
+	procOld := latestFakeProcess(factory)
+
+	newDone := make(chan error, 1)
+	go func() {
+		newDone <- supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex", SystemPrompt: "new instructions"})
+	}()
+
+	waitProcessStopped(t, procOld) // old superseded + cancelled promptly
+	<-factory.startEntered         // new-spec construction now blocked in Start
+	close(factory.startRelease)    // let the new construction publish
+
+	if err := <-oldDone; err != nil {
+		t.Fatalf("superseded caller must not surface an error (no context.Canceled poisoning): %v", err)
+	}
+	if err := <-newDone; err != nil {
+		t.Fatalf("new caller: %v", err)
+	}
+	supervisor.mu.Lock()
+	var got string
+	if sess := supervisor.sessions["agent_1"]; sess != nil && sess.agent != nil {
+		got = sess.agent.SystemPrompt
+	}
+	supervisor.mu.Unlock()
+	if got != "new instructions" {
+		t.Fatalf("superseded fresh construction published stale spec: %q, want %q", got, "new instructions")
+	}
+}
