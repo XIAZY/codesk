@@ -1713,3 +1713,275 @@ func TestAgentSessionShutdownDuringStartDoesNotStoreSession(t *testing.T) {
 		t.Fatalf("shutdown-raced start stored a session: want 0, got %d", sessions)
 	}
 }
+
+// Spoke 12 (facet c): a removal that lands while the replacement is under
+// construction must invalidate the conditional swap — the fresh process is
+// reaped and the removed agent is not resurrected.
+func TestAgentSessionRemovalDuringReplacementConstructionDoesNotResurrect(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	supervisor.restartSleep = func(time.Duration) {}
+	restartDone := make(chan struct{})
+	supervisor.testHookRestartComplete = func() { close(restartDone) }
+
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	proc1 := factory.only(t)
+
+	factory.startEntered = make(chan struct{}, 1)
+	factory.startRelease = make(chan struct{})
+
+	close(proc1.events)
+	<-factory.startEntered
+
+	if err := supervisor.Reconcile(context.Background(), nil); err != nil {
+		t.Fatalf("reconcile removal: %v", err)
+	}
+	close(factory.startRelease)
+	<-restartDone
+
+	supervisor.mu.Lock()
+	sessions := len(supervisor.sessions)
+	supervisor.mu.Unlock()
+	if sessions != 0 {
+		t.Fatalf("removed agent resurrected via a mid-construction replacement: want 0 sessions, got %d", sessions)
+	}
+	repl := latestFakeProcess(factory)
+	repl.mu.Lock()
+	stopped := repl.stopped
+	repl.mu.Unlock()
+	if !stopped {
+		t.Fatal("the conditional-swap loss did not reap the freshly constructed process")
+	}
+}
+
+// Spoke 12: a config refresh during the park (before construction) makes the
+// replacement use the LATEST desired spec, not the death-time clone.
+func TestAgentSessionConfigRefreshBeforeConstructionUsesLatestSpec(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	parked := make(chan struct{})
+	release := make(chan struct{})
+	restartDone := make(chan struct{})
+	supervisor.restartSleep = func(time.Duration) { close(parked); <-release }
+	supervisor.testHookRestartComplete = func() { close(restartDone) }
+
+	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex", SystemPrompt: "old instructions"}); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	proc1 := factory.only(t)
+	close(proc1.events)
+	<-parked
+
+	if err := supervisor.Reconcile(context.Background(), []*agent{{ID: "agent_1", Kind: "codex", SystemPrompt: "new instructions"}}); err != nil {
+		t.Fatalf("reconcile refresh: %v", err)
+	}
+	close(release)
+	<-restartDone
+
+	spec := latestSpawnSpec(t, factory)
+	if spec.Instructions != "new instructions" {
+		t.Fatalf("replacement used stale spec: Instructions=%q, want %q", spec.Instructions, "new instructions")
+	}
+}
+
+// Spoke 12: a config refresh that lands WHILE construction is blocked bumps the
+// spec revision; the conditional swap (token x revision) reaps the stale-spec
+// process and the restarter rebuilds from the latest spec.
+func TestAgentSessionConfigRefreshDuringConstructionRebuildsLatestSpec(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	supervisor.restartSleep = func(time.Duration) {}
+	restartDone := make(chan struct{})
+	supervisor.testHookRestartComplete = func() { close(restartDone) }
+
+	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex", SystemPrompt: "old instructions"}); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	proc1 := factory.only(t)
+
+	factory.startEntered = make(chan struct{}, 1)
+	factory.startRelease = make(chan struct{})
+
+	close(proc1.events)
+	<-factory.startEntered
+	if err := supervisor.Reconcile(context.Background(), []*agent{{ID: "agent_1", Kind: "codex", SystemPrompt: "new instructions"}}); err != nil {
+		t.Fatalf("reconcile refresh during construction: %v", err)
+	}
+	close(factory.startRelease)
+	<-restartDone
+
+	supervisor.mu.Lock()
+	var got string
+	if sess := supervisor.sessions["agent_1"]; sess != nil && sess.agent != nil {
+		got = sess.agent.SystemPrompt
+	}
+	live := supervisor.sessions["agent_1"] != nil && !supervisor.sessions["agent_1"].dead
+	supervisor.mu.Unlock()
+	if !live {
+		t.Fatal("no live replacement session published after a mid-construction refresh")
+	}
+	if got != "new instructions" {
+		t.Fatalf("mid-construction refresh published stale spec: %q, want %q", got, "new instructions")
+	}
+}
+
+// Spoke 13: a StartTurn success landing after a fast TurnCompleted (which set the
+// same live generation idle during the unlocked WriteStdin) must NOT revive it.
+func TestAgentSessionFastCompletionDoesNotReviveWorking(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	proc1 := factory.only(t)
+	proc1.mu.Lock()
+	proc1.startTurnEntered = make(chan struct{}, 1)
+	proc1.startTurnRelease = make(chan struct{})
+	proc1.mu.Unlock()
+
+	notifyDone := make(chan error, 1)
+	go func() {
+		notifyDone <- supervisor.ScheduleNotificationTurn(context.Background(), current, "do work", "sig-forme", "")
+	}()
+	<-proc1.startTurnEntered
+
+	proc1.events <- RuntimeEvent{Kind: RuntimeEventTurnCompleted}
+	waitSessionState(t, supervisor, "agent_1", "idle")
+
+	close(proc1.startTurnRelease)
+	if err := <-notifyDone; err != nil {
+		t.Fatalf("schedule notification: %v", err)
+	}
+	if st, turn := sessionState(supervisor, "agent_1"); st != "idle" || turn != "" {
+		t.Fatalf("stale StartTurn success revived working: state=%q turn=%q, want idle/\"\"", st, turn)
+	}
+}
+
+// Spoke 12 (edge 1): a replacement construction failure re-arms the next capped
+// attempt against the same token instead of stranding it.
+func TestAgentSessionFailedReplacementReArmsNextAttempt(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	var mu sync.Mutex
+	var delays []time.Duration
+	supervisor.restartSleep = func(d time.Duration) {
+		mu.Lock()
+		delays = append(delays, d)
+		n := len(delays)
+		mu.Unlock()
+		if n == 2 {
+			factory.mu.Lock()
+			factory.startErr = nil
+			factory.mu.Unlock()
+		}
+	}
+	restarted := make(chan struct{}, 1)
+	supervisor.testHookRestartComplete = func() { restarted <- struct{}{} }
+
+	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"}); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	proc1 := factory.only(t)
+	factory.mu.Lock()
+	factory.startErr = errors.New("replacement start boom")
+	factory.mu.Unlock()
+
+	close(proc1.events)
+	<-restarted
+
+	mu.Lock()
+	got := append([]time.Duration(nil), delays...)
+	mu.Unlock()
+	want := []time.Duration{2 * time.Second, 4 * time.Second}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("failed replacement did not re-arm at the next capped delay: delays=%v, want %v", got, want)
+	}
+	if st, _ := sessionState(supervisor, "agent_1"); st != "idle" {
+		t.Fatalf("re-armed replacement did not publish a live session: state=%q", st)
+	}
+	supervisor.mu.Lock()
+	sess := supervisor.sessions["agent_1"]
+	live := sess != nil && !sess.dead && !sess.restartPending
+	supervisor.mu.Unlock()
+	if !live {
+		t.Fatal("token left stranded after re-armed replacement")
+	}
+}
+
+// Spoke 12 (edge 1): Shutdown during a re-armed (post-failure) park cancels the
+// restart — no replacement is published.
+func TestAgentSessionShutdownCancelsReArmedReplacement(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+
+	parked := make(chan struct{})
+	release := make(chan struct{})
+	restartDone := make(chan struct{})
+	var n int
+	supervisor.restartSleep = func(time.Duration) {
+		n++
+		if n == 2 {
+			close(parked)
+			<-release
+		}
+	}
+	supervisor.testHookRestartComplete = func() { close(restartDone) }
+
+	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"}); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	proc1 := factory.only(t)
+	factory.mu.Lock()
+	factory.startErr = errors.New("replacement start boom")
+	factory.mu.Unlock()
+
+	close(proc1.events)
+	<-parked
+	supervisor.Shutdown()
+	close(release)
+	<-restartDone
+
+	supervisor.mu.Lock()
+	sessions := len(supervisor.sessions)
+	supervisor.mu.Unlock()
+	if sessions != 0 {
+		t.Fatalf("shutdown during a re-armed park still published: want 0 sessions, got %d", sessions)
+	}
+}
+
+func latestSpawnSpec(t *testing.T, f *fakeRuntimeDriver) RuntimeSpawnSpec {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.spawnSpecs) == 0 {
+		t.Fatal("no spawn specs recorded")
+	}
+	return f.spawnSpecs[len(f.spawnSpecs)-1]
+}
+
+func waitSessionState(t *testing.T, s *agentSessionSupervisor, agentID, want string) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		if st, _ := sessionState(s, agentID); st == want {
+			return
+		}
+		select {
+		case <-deadline:
+			st, _ := sessionState(s, agentID)
+			t.Fatalf("session %s state=%q, want %q", agentID, st, want)
+		case <-time.After(time.Millisecond):
+		}
+	}
+}

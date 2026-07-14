@@ -106,6 +106,21 @@ type managedAgentSession struct {
 	restartPending bool
 	dead           bool
 
+	// agentRev is a monotonic revision of the desired agent spec (`agent`). A
+	// parked restarter captures it with the spec at construction and the
+	// conditional swap requires it unchanged at publication, so a reconcile that
+	// refreshes the spec mid-construction forces a rebuild from the latest spec
+	// instead of publishing a process built from stale instructions.
+	agentRev uint64
+
+	// turnOpSeq is a monotonic per-session operation nonce. A StartTurn write
+	// captures it at its decision point and re-checks it at completion; any
+	// intervening authoritative transition (markIdle for a completed/failed/idle
+	// turn, the death owned-block, or a newer notification write) bumps it so a
+	// stale completion that lands after the transition becomes a no-op instead of
+	// reviving already-settled state.
+	turnOpSeq uint64
+
 	deliveredForMeSig   string
 	deliveredGeneralSig string
 	activeForMeSig      string
@@ -332,6 +347,11 @@ func (s *agentSessionSupervisor) Reconcile(ctx context.Context, agents []*agent)
 		if _, ok := desired[agentID]; !ok {
 			stale = append(stale, session)
 			delete(s.sessions, agentID)
+			// Explicit removal ends this agent's lifecycle: drop its transient
+			// restart counter so a future re-add starts backoff from scratch, and
+			// invalidate any in-flight parked restarter (its conditional swap now
+			// fails because the token is gone).
+			delete(s.restartAttempts, agentID)
 		}
 	}
 	s.mu.Unlock()
@@ -372,7 +392,12 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 				// generation with an in-flight backoff park (owned by its delayed
 				// restarter) must not be replaced by any other start path — that is
 				// exactly the bypass that lets a reconcile/notification defeat the
-				// cap or resurrect a terminal agent.
+				// cap or resurrect a terminal agent. Still refresh the desired spec
+				// on the parked token (bumping its revision) so a pending respawn
+				// uses the LATEST instructions, not the death-time clone, and an
+				// in-flight construction against the old revision is rebuilt.
+				session.agent = cloneAgentValue(current)
+				session.agentRev++
 				s.mu.Unlock()
 				return nil
 			}
@@ -383,6 +408,7 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 				continue
 			}
 			session.agent = cloneAgentValue(current)
+			session.agentRev++
 			s.mu.Unlock()
 			return nil
 		}
@@ -403,7 +429,7 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 		s.starting[current.ID] = start
 		s.mu.Unlock()
 
-		err := s.startSession(ctx, current)
+		err := s.startSession(ctx, current, nil, 0)
 		s.mu.Lock()
 		start.err = err
 		if s.starting[current.ID] == start {
@@ -415,7 +441,14 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 	}
 }
 
-func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agent) error {
+// startSession spawns a runtime and publishes the session by an atomic
+// conditional swap against expectPrior: it stores the new session only if the
+// current map slot is still exactly expectPrior. A fresh start passes nil
+// (slot must be absent); a restart passes the parked dead-generation session as
+// the token (slot must still hold it). If a racing removal/replacement has
+// changed the slot, the store is abandoned and the freshly spawned process is
+// reaped by the deferred Stop — so a removed agent is never resurrected.
+func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agent, expectPrior *managedAgentSession, expectRev uint64) error {
 	workdir := agentWorkspacePath(s.cfg, current.ID)
 	if err := os.MkdirAll(workdir, 0o755); err != nil {
 		return err
@@ -502,9 +535,23 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 		appendAgentLog(s.cfg, current.ID, "discarding runtime process because supervisor is shutting down")
 		return nil
 	}
-	if existing := s.sessions[current.ID]; existing != nil {
+	if s.sessions[current.ID] != expectPrior {
+		// The map slot is no longer the token we started against: a fresh start
+		// found a duplicate, or a restart's parked generation was removed/replaced
+		// (e.g. Reconcile deleted it) while we spawned. Abandon the store; the
+		// deferred Stop() reaps this process instead of resurrecting a removed
+		// agent or double-owning a live one.
 		s.mu.Unlock()
-		appendAgentLog(s.cfg, current.ID, "discarding duplicate runtime process because session already exists")
+		appendAgentLog(s.cfg, current.ID, "discarding runtime process because the session slot changed during (re)start")
+		return nil
+	}
+	if expectPrior != nil && expectPrior.agentRev != expectRev {
+		// Same token, but its desired spec was refreshed by a reconcile while we
+		// were constructing. Publishing would ship a process built from stale
+		// instructions/kind, so reap it and let the owning restarter rebuild from
+		// the latest spec against the same token.
+		s.mu.Unlock()
+		appendAgentLog(s.cfg, current.ID, "discarding runtime process because the desired spec was refreshed during restart")
 		return nil
 	}
 	s.sessions[current.ID] = session
@@ -598,6 +645,11 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 		appendAgentLog(s.cfg, agentID, "skipping unchanged notification inbox signatures for_me=%t general=%t", hasForMe, hasGeneral)
 		return nil
 	}
+	// This write is a new authoritative operation: bump the nonce and capture it,
+	// so its own completion can detect whether any later transition (a settled
+	// turn, death, or a newer notification) superseded it while s.mu was dropped.
+	session.turnOpSeq++
+	op := session.turnOpSeq
 	session.state = "working"
 	session.activeForMeSig = forMeSig
 	session.activeGeneralSig = generalSig
@@ -628,7 +680,7 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 		// generation died (disconnected/failed) while WriteStdin was in flight,
 		// demoting it to idle would strand a gated respawn or revive a corpse for
 		// later notifications.
-		if currentSession := s.sessions[current.ID]; currentSession != nil && currentSession.process == process && !currentSession.dead {
+		if currentSession := s.sessions[current.ID]; currentSession != nil && currentSession.process == process && !currentSession.dead && currentSession.turnOpSeq == op {
 			currentSession.state = "idle"
 			currentSession.activeForMeSig = ""
 			currentSession.activeGeneralSig = ""
@@ -640,7 +692,10 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 	turnID := strings.TrimSpace(result.TurnID)
 	s.mu.Lock()
 	currentSession := s.sessions[current.ID]
-	stale := currentSession == nil || currentSession.process != process || currentSession.dead
+	// Fence on BOTH the generation (process) and the operation nonce (turnOpSeq):
+	// a settled turn / death / newer notification that landed during the unlocked
+	// WriteStdin bumped the nonce, so this completion must not revive working.
+	stale := currentSession == nil || currentSession.process != process || currentSession.dead || currentSession.turnOpSeq != op
 	if !stale {
 		currentSession.activeTurn = turnID
 		currentSession.state = "working"
@@ -736,7 +791,6 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 	}
 	transient := !exit.Expected && terminalReason == ""
 
-	var restartAgent *agent
 	owned := false
 	attempt := 0
 	s.mu.Lock()
@@ -745,8 +799,10 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 		// This exact process generation has died. Mark it dead so every start,
 		// write, and authorization path treats it as a corpse — its tool token is
 		// no longer valid regardless of how long the (disconnected/failed) session
-		// entry is retained.
+		// entry is retained. Bump the operation nonce so any StartTurn completion
+		// still in flight against this generation becomes a no-op.
 		session.dead = true
+		session.turnOpSeq++
 		if terminalReason != "" {
 			session.state = "failed"
 		} else {
@@ -759,13 +815,11 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 		if transient {
 			s.restartAttempts[agentID]++
 			attempt = s.restartAttempts[agentID]
-			// A backoff restart now owns this dead generation: no other start path
-			// may replace it until the delayed restarter below releases it.
+			// A backoff restart now owns this dead generation: the parked session
+			// stays authoritative in the map (no delete) until the restarter
+			// publishes the replacement by a conditional swap against it, so no
+			// other start path may replace it and a racing removal invalidates it.
 			session.restartPending = true
-			restartAgent = cloneAgentValue(session.agent)
-			if restartAgent != nil {
-				restartAgent.SessionID = session.sessionID
-			}
 		}
 	}
 	s.mu.Unlock()
@@ -820,25 +874,56 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 		if s.testHookRestartComplete != nil {
 			defer s.testHookRestartComplete()
 		}
-		s.restartSleep(delay)
-		s.mu.Lock()
-		// Generation-fence the respawn: only proceed if THIS dead generation is
-		// still the session we parked on, still owns the pending restart, and the
-		// supervisor is not shutting down. If Reconcile removed the agent, a newer
-		// generation replaced it, or Shutdown ran, the entry is gone or no longer
-		// pending — abandon this restart rather than resurrect a removed agent or
-		// spawn an untracked zombie.
-		session := s.sessions[agentID]
-		if s.shutdown || session == nil || session.process != process || !session.restartPending {
+		// The restarter owns EVERY outcome of the construction window against its
+		// one dead-generation token — publish, fail, refresh, or remove/shutdown —
+		// so a construction failure re-arms the next capped attempt instead of
+		// stranding the token `restartPending` forever (which would gate Reconcile
+		// out permanently). It keeps looping until the token leaves the map (a
+		// successful swap OR a removal/replacement) or shutdown.
+		for {
+			s.restartSleep(delay)
+			s.mu.Lock()
+			session := s.sessions[agentID]
+			if s.shutdown || session == nil || session.process != process || !session.restartPending {
+				// Removed / replaced / shutdown / no longer ours — cancel.
+				s.mu.Unlock()
+				return
+			}
+			// Read the LATEST spec + its revision off the still-authoritative parked
+			// token; the swap requires the revision unchanged at publication.
+			spec := cloneAgentValue(session.agent)
+			if spec == nil {
+				s.mu.Unlock()
+				return
+			}
+			spec.SessionID = session.sessionID
+			rev := session.agentRev
 			s.mu.Unlock()
-			return
-		}
-		delete(s.sessions, agentID)
-		s.mu.Unlock()
-		_ = process.Stop()
-		if err := s.ensureSession(context.Background(), restartAgent); err != nil {
-			fmt.Printf("agent session %s restart error: %v\n", agentID, err)
-			appendAgentLog(s.cfg, agentID, "session restart failed err=%v", err)
+
+			_ = process.Stop() // idempotent; the old generation is already dead
+			if err := s.startSession(context.Background(), spec, session, rev); err != nil {
+				appendAgentLog(s.cfg, agentID, "session restart construction failed err=%v", err)
+			}
+
+			s.mu.Lock()
+			cur := s.sessions[agentID]
+			if cur != session {
+				// The parked token left the map: startSession published the
+				// replacement (cur is the new session) or a removal/replacement took
+				// over. Either way our job is done.
+				s.mu.Unlock()
+				return
+			}
+			// Token still present: nothing was published (construction failure or a
+			// mid-construction spec refresh reaped it). Re-arm the next capped
+			// attempt against the same token, unless shutdown/removal intervened.
+			if s.shutdown || !session.restartPending {
+				s.mu.Unlock()
+				return
+			}
+			s.restartAttempts[agentID]++
+			delay = restartBackoff(s.restartAttempts[agentID])
+			s.mu.Unlock()
 		}
 	}()
 	if s.testHookDeathHandled != nil {
@@ -1028,6 +1113,10 @@ func (s *agentSessionSupervisor) markIdle(agentID string, process RuntimeProcess
 	if session != nil {
 		session.state = "idle"
 		session.activeTurn = ""
+		// This idle/failed/completed transition is authoritative: bump the
+		// operation nonce so a StartTurn completion still in flight against this
+		// generation cannot revive it to working.
+		session.turnOpSeq++
 		// NOTE: the transient-restart backoff counter is reset only by
 		// resetRestartBackoff on a proven RuntimeEventTurnCompleted — never here.
 		// markIdle also fires for TurnFailed and bare idle/status events, none of
