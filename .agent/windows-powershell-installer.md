@@ -20,6 +20,7 @@ The observable result is a Windows option beside the existing macOS/Linux option
 - [x] (2026-07-14 06:07Z) Fixed Windows PowerShell 5.1 handling of installer responses served as `application/octet-stream`; generated commands now decode byte arrays as UTF-8 and R2 publishes stable `.ps1` files as UTF-8 text.
 - [x] (2026-07-14 06:18Z) Allowed Windows ARM64 hosts to install the AMD64 release through Windows x64 emulation and made the Windows lifecycle harness exercise that host path.
 - [x] (2026-07-14 06:39Z) Prevented Windows PowerShell 5.1 from treating normal native daemon stderr as a terminating launcher failure; the lifecycle harness now rejects that restart-loop behavior.
+- [x] (2026-07-14 07:01Z) Made Scheduled Task and Startup fallback launchers pass `-WindowStyle Hidden`, and pinned both registration paths in the Windows lifecycle harness.
 
 ## Surprises & Discoveries
 
@@ -52,6 +53,9 @@ The observable result is a Windows option beside the existing macOS/Linux option
 
 - Observation: Windows PowerShell 5.1 promotes redirected native stderr to an error record governed by `$ErrorActionPreference`. Because the launcher globally uses `Stop`, a healthy daemon's startup message on stderr entered the catch path and caused a five-second restart loop even though the executable remained healthy when launched directly.
   Evidence: native Windows diagnostics showed the packaged daemon remaining active when invoked directly while `run.ps1` repeatedly logged launch failures. The runner's native invocation inherited `$ErrorActionPreference = "Stop"`.
+
+- Observation: A Scheduled Task registered with an interactive principal can expose the long-running `powershell.exe` console when its action omits `-WindowStyle Hidden`. Closing that window terminates the launcher and its daemon child, defeating the background-daemon contract.
+  Evidence: native installation opened a persistent PowerShell window after setup. The registered action contained `-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ...` but no hidden-window option.
 
 ## Decision Log
 
@@ -93,6 +97,10 @@ The observable result is a Windows option beside the existing macOS/Linux option
 
 - Decision: Temporarily set `$ErrorActionPreference` to `Continue` only around the native daemon invocation and restore it in `finally`.
   Rationale: Native stderr is part of the daemon's normal logging contract and is already redirected to `daemon.log`; it must not be confused with a PowerShell launcher failure. Keeping `Stop` everywhere else preserves strict failure handling for configuration, mutex, filesystem, and logging operations.
+  Date/Author: 2026-07-14, Codex.
+
+- Decision: Pass `-WindowStyle Hidden` in the PowerShell arguments for both the Scheduled Task action and the Startup shortcut fallback.
+  Rationale: The launcher is infrastructure, not a user-facing terminal. Applying the option to both persisted registrations also covers immediate fallback startup and subsequent logins without changing task identity or daemon supervision.
   Date/Author: 2026-07-14, Codex.
 
 ## Outcomes & Retrospective
