@@ -113,7 +113,7 @@ func TestThreadOutboxPipelineQueuesMaterializesDeliversAndDeletesIntent(t *testi
 	defer cancel()
 	go runtime.threadDeliveryLoop(ctx)
 
-	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, WorkspaceRoot: root, cache: cache}
+	tracked := newTestTrackedFile(t, &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, WorkspaceRoot: root, cache: cache})
 	tracked.setProjectedContent("base\n")
 	if err := tracked.storeProjectedBase("base\n", baseDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)
@@ -189,7 +189,7 @@ func TestWorkspaceRuntimeMaterializesThreadIntentBeforePendingRemote(t *testing.
 	if err := cache.appendThreadIntent("doc_1", intent); err != nil {
 		t.Fatalf("append thread intent: %v", err)
 	}
-	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, WorkspaceRoot: root, cache: cache}
+	tracked := newTestTrackedFile(t, &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, WorkspaceRoot: root, cache: cache})
 	tracked.setProjectedContent("target\n")
 	if err := tracked.storeProjectedBase("target\n", baseDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)
@@ -253,7 +253,7 @@ func TestWorkspaceRuntimeMaterializesThreadIntentAfterAcceptedLocalBeforePending
 	if err := cache.appendThreadIntent("doc_1", intent); err != nil {
 		t.Fatalf("append thread intent: %v", err)
 	}
-	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, WorkspaceRoot: root, cache: cache}
+	tracked := newTestTrackedFile(t, &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, WorkspaceRoot: root, cache: cache})
 	tracked.setProjectedContent("base\n")
 	if err := tracked.storeProjectedBase("base\n", baseDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)

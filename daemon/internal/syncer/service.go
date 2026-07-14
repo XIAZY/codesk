@@ -831,7 +831,10 @@ func (s *workspaceRuntime) validateLocalCreateCandidate(candidate localCreateCan
 	if root == "" || path == "" || isIgnoredWorkspaceAbsolutePath(root, path) {
 		return "", false, nil
 	}
-	fs := s.workspaceFSForRoot(candidate.Root)
+	fs, err := s.workspaceFSForRoot(candidate.Root)
+	if err != nil {
+		return "", false, err
+	}
 	snapshot, err := fs.Read(candidate.Path)
 	if err != nil {
 		return "", false, err
@@ -865,7 +868,10 @@ func (s *workspaceRuntime) validateLocalCreateCandidate(candidate localCreateCan
 }
 
 func (s *workspaceRuntime) localCreateIntentFromCandidate(candidate localCreateCandidate, relativePath string) (localNamespaceIntent, error) {
-	fs := s.workspaceFSForRoot(candidate.Root)
+	fs, err := s.workspaceFSForRoot(candidate.Root)
+	if err != nil {
+		return localNamespaceIntent{}, err
+	}
 	snapshot, err := fs.Read(candidate.Path)
 	if err != nil {
 		return localNamespaceIntent{}, err
@@ -895,7 +901,10 @@ func (s *workspaceRuntime) validateLocalNamespaceIntent(intent localNamespaceInt
 		return false, nil
 	}
 	absolutePath := filepath.Join(s.replica.rootDir, filepath.FromSlash(relativePath))
-	fs := s.workspaceFSForRoot(s.replica.rootDir)
+	fs, err := s.workspaceFSForRoot(s.replica.rootDir)
+	if err != nil {
+		return false, err
+	}
 	snapshot, err := fs.Read(absolutePath)
 	if err != nil {
 		return false, err
@@ -923,6 +932,10 @@ func (s *workspaceRuntime) createDocumentFromLocalCandidate(ctx context.Context,
 func (s *workspaceRuntime) createDocumentFromLocalIntent(ctx context.Context, intent localNamespaceIntent) (*document, error) {
 	if s == nil || s.replica == nil {
 		return nil, nil
+	}
+	fs, err := s.workspaceFSForRoot(s.replica.rootDir)
+	if err != nil {
+		return nil, err
 	}
 	body, err := json.Marshal(map[string]string{
 		"documentId":        intent.DocumentID,
@@ -968,7 +981,6 @@ func (s *workspaceRuntime) createDocumentFromLocalIntent(ctx context.Context, in
 		projectedSeq = seq
 	}
 	absolutePath := filepath.Join(s.replica.rootDir, filepath.FromSlash(intent.WorkspaceRelativePath))
-	fs := s.workspaceFSForRoot(s.replica.rootDir)
 	tracked := &trackedFile{
 		DocumentID:    created.ID,
 		DocumentPath:  created.Path,
@@ -1548,18 +1560,22 @@ func cleanupRemovedDocument(cache *documentCache, entry *documentCacheEntry, doc
 		if tracked == nil {
 			continue
 		}
+		fs, err := tracked.workspaceFS()
+		if err != nil {
+			return err
+		}
 		if state.fileExists {
 			if state.baseKnown && !state.localDirty {
-				if err := tracked.workspaceFS().DeleteIfUnchanged(tracked.Path, projectedHashString(state.baseContent)); err != nil {
+				if err := fs.DeleteIfUnchanged(tracked.Path, projectedHashString(state.baseContent)); err != nil {
 					if errors.Is(err, ErrUnsafeDelete) {
-						if _, archiveErr := tracked.workspaceFS().Archive(tracked.Path, safeDocumentCacheName(documentID)); archiveErr != nil {
+						if _, archiveErr := fs.Archive(tracked.Path, safeDocumentCacheName(documentID)); archiveErr != nil {
 							return archiveErr
 						}
 					} else {
 						return err
 					}
 				}
-			} else if _, err := tracked.workspaceFS().Archive(tracked.Path, safeDocumentCacheName(documentID)); err != nil {
+			} else if _, err := fs.Archive(tracked.Path, safeDocumentCacheName(documentID)); err != nil {
 				return err
 			}
 		}
@@ -1585,7 +1601,10 @@ func reconcileTrackedPathForProjection(state trackedReconcileState) (bool, error
 	if state.localDirty {
 		return false, nil
 	}
-	fs := tracked.workspaceFS()
+	fs, err := tracked.workspaceFS()
+	if err != nil {
+		return false, err
+	}
 	if state.fileExists {
 		if state.baseKnown && projectedHashString(state.baseContent) == projectedHashString(state.localContent) {
 			if err := fs.MoveIfNoTarget(tracked.Path, desiredPath); err != nil {
@@ -1769,7 +1788,11 @@ func collectTrackedReconcileStates(trackedFiles []*trackedFile) ([]trackedReconc
 				continue
 			}
 		}
-		snapshot, err := tracked.workspaceFS().Read(tracked.Path)
+		fs, err := tracked.workspaceFS()
+		if err != nil {
+			return nil, err
+		}
+		snapshot, err := fs.Read(tracked.Path)
 		if err == nil && !snapshot.Exists {
 			states = append(states, state)
 			continue
@@ -1848,12 +1871,16 @@ func buildLocalUpdateFromBase(baseState []byte, baseContent, localContent string
 }
 
 func applyProjectedContent(tracked *trackedFile, nextContent string, nextState []byte, projectedSeq int64) (bool, error) {
+	fs, err := tracked.workspaceFS()
+	if err != nil {
+		return false, err
+	}
 	return applyProjectedContentWithWrite(
 		tracked,
 		nextContent,
 		nextState,
 		projectedSeq,
-		tracked.workspaceFS().WriteIfUnchanged,
+		fs.WriteIfUnchanged,
 	)
 }
 
@@ -1897,6 +1924,10 @@ func markTrackedLocalDirty(tracked *trackedFile, _ string) error {
 }
 
 func projectMergedContentOverLocalDisk(tracked *trackedFile, currentDiskContent string, currentDiskState []byte, currentDiskSeq int64, mergedContent string, mergedState []byte, mergedSeq int64) (bool, error) {
+	fs, err := tracked.workspaceFS()
+	if err != nil {
+		return false, err
+	}
 	return projectMergedContentOverLocalDiskWithWrite(
 		tracked,
 		currentDiskContent,
@@ -1905,7 +1936,7 @@ func projectMergedContentOverLocalDisk(tracked *trackedFile, currentDiskContent 
 		mergedContent,
 		mergedState,
 		mergedSeq,
-		tracked.workspaceFS().WriteIfUnchanged,
+		fs.WriteIfUnchanged,
 	)
 }
 
@@ -1944,10 +1975,6 @@ func projectMergedContentOverLocalDiskWithWrite(
 	return true, nil
 }
 
-func materializeTrackedFile(ctx context.Context, cache *documentCache, document *document, absolutePath string) (*trackedFile, error) {
-	return materializeTrackedFileWithFS(ctx, cache, document, absolutePath, nil)
-}
-
 func materializeTrackedFileWithFS(
 	ctx context.Context,
 	cache *documentCache,
@@ -1956,8 +1983,9 @@ func materializeTrackedFileWithFS(
 	fs *WorkspaceFS,
 ) (*trackedFile, error) {
 	root := workspaceRootForDocumentPath(absolutePath, document.Path)
-	if fs == nil {
-		fs = NewWorkspaceFS(root)
+	fs, err := requireWorkspaceFS(fs, root)
+	if err != nil {
+		return nil, fmt.Errorf("materialize tracked file: %w", err)
 	}
 	tracked := &trackedFile{
 		DocumentID:    document.ID,
@@ -1988,7 +2016,7 @@ func materializeTrackedFileWithFS(
 		}
 		if baseKnown {
 			tracked.setProjectedContent(baseContent)
-			snapshot, readErr := tracked.workspaceFS().Read(absolutePath)
+			snapshot, readErr := fs.Read(absolutePath)
 			if readErr == nil && snapshot.Exists {
 				if !tracked.matchesProjectedBytes(snapshot.Bytes) {
 					tracked.markLocalDirty()
@@ -2000,13 +2028,13 @@ func materializeTrackedFileWithFS(
 			}
 			return tracked, nil
 		}
-		if _, readErr := tracked.workspaceFS().Read(absolutePath); readErr != nil {
+		if _, readErr := fs.Read(absolutePath); readErr != nil {
 			return nil, readErr
 		}
 		tracked.markLocalDirty()
 		return tracked, nil
 	}
-	snapshot, err := tracked.workspaceFS().CreateEmptyOrRead(absolutePath)
+	snapshot, err := fs.CreateEmptyOrRead(absolutePath)
 	if err != nil {
 		return nil, err
 	}
@@ -2014,11 +2042,27 @@ func materializeTrackedFileWithFS(
 	return tracked, nil
 }
 
-func (s *workspaceRuntime) workspaceFSForRoot(root string) *WorkspaceFS {
-	if s != nil && s.replica != nil && s.replica.fs != nil && filepath.Clean(root) == filepath.Clean(s.replica.rootDir) {
-		return s.replica.fs
+func (s *workspaceRuntime) workspaceFSForRoot(root string) (*WorkspaceFS, error) {
+	if s == nil || s.replica == nil {
+		return nil, fmt.Errorf("%w: runtime has no workspace replica for root %q", errWorkspaceFSInvariant, root)
 	}
-	return NewWorkspaceFS(root)
+	requestedRoot, err := canonicalWorkspaceRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	runtimeRoot, err := canonicalWorkspaceRoot(s.replica.rootDir)
+	if err != nil {
+		return nil, err
+	}
+	if requestedRoot != runtimeRoot {
+		return nil, fmt.Errorf(
+			"%w: requested root %q does not match runtime root %q",
+			errWorkspaceFSInvariant,
+			requestedRoot,
+			runtimeRoot,
+		)
+	}
+	return requireWorkspaceFS(s.replica.fs, runtimeRoot)
 }
 
 func archiveUnknownWorkingCopy(tracked *trackedFile) error {
@@ -2032,7 +2076,11 @@ func archiveUnknownWorkingCopy(tracked *trackedFile) error {
 	if root == "" {
 		return nil
 	}
-	_, err := tracked.workspaceFS().Archive(tracked.Path, safeDocumentCacheName(tracked.DocumentID))
+	fs, err := tracked.workspaceFS()
+	if err != nil {
+		return err
+	}
+	_, err = fs.Archive(tracked.Path, safeDocumentCacheName(tracked.DocumentID))
 	return err
 }
 
@@ -2169,18 +2217,18 @@ func (t *trackedFile) loadProjectedBase() (string, []byte, bool, error) {
 	return t.cache.loadProjectedBase(t.DocumentID)
 }
 
-func (t *trackedFile) workspaceFS() *WorkspaceFS {
-	if t != nil && t.FS != nil {
-		return t.FS
+func (t *trackedFile) workspaceFS() (*WorkspaceFS, error) {
+	if t == nil {
+		return nil, fmt.Errorf("%w: tracked file is nil", errWorkspaceFSInvariant)
 	}
-	root := ""
-	if t != nil {
-		root = t.WorkspaceRoot
-		if root == "" {
-			root = workspaceRootForDocumentPath(t.Path, t.DocumentPath)
-		}
+	fs, err := requireWorkspaceFS(t.FS, t.WorkspaceRoot)
+	if err != nil {
+		return nil, fmt.Errorf("tracked file %q: %w", t.DocumentID, err)
 	}
-	return NewWorkspaceFS(root)
+	if t.Owner != nil && t.Owner.fs != fs {
+		return nil, fmt.Errorf("%w: tracked file %q does not use its replica filesystem", errWorkspaceFSInvariant, t.DocumentID)
+	}
+	return fs, nil
 }
 
 func (t *trackedFile) desiredPath() string {
