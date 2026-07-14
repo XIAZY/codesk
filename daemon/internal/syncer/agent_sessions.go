@@ -65,6 +65,14 @@ type agentSessionSupervisor struct {
 	baseCtx      context.Context
 	baseCancel   context.CancelFunc
 	serviceBound bool
+
+	// constructionWG tracks every detached construction worker (fresh and
+	// restart). Shutdown cancels baseCtx (which makes a real provider Start/
+	// handshake return), then waits on this barrier before status teardown — so it
+	// never returns while a detached worker still owns an unpublished process.
+	// Add is done under s.mu on the same side as the shutdown check, so it can
+	// never race Wait and no worker is admitted after shutdown.
+	constructionWG sync.WaitGroup
 }
 
 type agentSessionStart struct {
@@ -455,6 +463,12 @@ func (s *agentSessionSupervisor) Shutdown() {
 	for _, session := range sessions {
 		_ = session.process.Stop()
 	}
+	// Join every detached construction worker (fresh + restart) before status
+	// teardown: baseCancel above makes a real provider Start/handshake return, so
+	// each worker's construction completes, the baseCtx.Err() publish fence reaps
+	// it, and the worker drains — Shutdown never returns while a detached worker
+	// still owns an unpublished process. No post-Shutdown zombie.
+	s.constructionWG.Wait()
 	s.status.Stop()
 }
 
@@ -599,8 +613,12 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 		}
 		start := &agentSessionStart{done: make(chan struct{}), agent: cloneAgentValue(current)}
 		s.starting[current.ID] = start
+		s.constructionWG.Add(1) // under s.mu, same side as the loop-top shutdown check
 		s.mu.Unlock()
-		go s.runFreshStart(current.ID, start)
+		go func() {
+			defer s.constructionWG.Done()
+			s.runFreshStart(current.ID, start)
+		}()
 		select {
 		case <-start.done:
 			s.mu.Lock()
@@ -1117,7 +1135,23 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 		CurrentActivity: "Disconnected",
 		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
+	// Join the restarter through the same construction barrier as fresh workers.
+	// Add under s.mu on the same side as the shutdown check; if shutdown already
+	// won, do not launch a restart at all (Shutdown's Wait must not see a new Add).
+	s.mu.Lock()
+	launchRestart := !s.shutdown
+	if launchRestart {
+		s.constructionWG.Add(1)
+	}
+	s.mu.Unlock()
+	if !launchRestart {
+		if s.testHookDeathHandled != nil {
+			s.testHookDeathHandled("transient")
+		}
+		return
+	}
 	go func() {
+		defer s.constructionWG.Done()
 		if s.testHookRestartComplete != nil {
 			defer s.testHookRestartComplete()
 		}

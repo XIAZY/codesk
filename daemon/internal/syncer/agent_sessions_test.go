@@ -784,12 +784,13 @@ func TestAgentSessionDoesNotRestartAfterShutdown(t *testing.T) {
 	defer supervisor.Shutdown()
 
 	// Deterministically park the restart callback at its backoff delay so we can
-	// interleave Shutdown mid-flight, and observe when the callback finishes — no
-	// wall-clock dependency.
+	// interleave Shutdown mid-flight. The park is baseCtx-aware so Shutdown's
+	// baseCancel unblocks it — Shutdown now joins the restart worker (finding 28),
+	// so the park must release on cancel rather than deadlock the join.
 	parked := make(chan struct{})
-	release := make(chan struct{})
 	restartDone := make(chan struct{})
-	supervisor.restartSleep = func(time.Duration) { close(parked); <-release }
+	baseCtx := supervisor.baseCtx
+	supervisor.restartSleep = func(time.Duration) { close(parked); <-baseCtx.Done() }
 	supervisor.testHookRestartComplete = func() { close(restartDone) }
 
 	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"}); err != nil {
@@ -802,11 +803,11 @@ func TestAgentSessionDoesNotRestartAfterShutdown(t *testing.T) {
 	close(process.events)
 	<-parked
 
-	// Shutdown wins while the restart is parked, then release it. A restart
-	// scheduled before shutdown must not spawn a runtime or re-store a session
-	// after it — otherwise the respawn escapes supervision as a zombie process.
+	// Shutdown wins while the restart is parked. baseCancel unblocks the park; the
+	// worker then sees shutdown and exits without spawning; Shutdown joins it. A
+	// restart scheduled before shutdown must not spawn a runtime or re-store a
+	// session — otherwise the respawn escapes supervision as a zombie process.
 	supervisor.Shutdown()
-	close(release)
 	<-restartDone
 
 	factory.mu.Lock()
@@ -1940,14 +1941,14 @@ func TestAgentSessionShutdownCancelsReArmedReplacement(t *testing.T) {
 	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
 
 	parked := make(chan struct{})
-	release := make(chan struct{})
 	restartDone := make(chan struct{})
+	baseCtx := supervisor.baseCtx
 	var n int
 	supervisor.restartSleep = func(time.Duration) {
 		n++
 		if n == 2 {
 			close(parked)
-			<-release
+			<-baseCtx.Done() // Shutdown's baseCancel unblocks the re-armed park
 		}
 	}
 	supervisor.testHookRestartComplete = func() { close(restartDone) }
@@ -1962,8 +1963,7 @@ func TestAgentSessionShutdownCancelsReArmedReplacement(t *testing.T) {
 
 	close(proc1.events)
 	<-parked
-	supervisor.Shutdown()
-	close(release)
+	supervisor.Shutdown() // joins the re-armed worker after baseCancel unblocks its park
 	<-restartDone
 
 	supervisor.mu.Lock()
@@ -2727,5 +2727,57 @@ func TestAgentSessionCancelledStaleCallerDoesNotResurrectRemovedAgent(t *testing
 	supervisor.mu.Unlock()
 	if sessions != 0 {
 		t.Fatalf("removed agent was resurrected: %d sessions", sessions)
+	}
+}
+
+// Finding 28: Shutdown joins the detached construction workers — it must not
+// return while a worker still owns an unpublished process. Even a cancellation-
+// ignoring construction is drained: Shutdown blocks until the attempt completes,
+// the baseCtx.Err() fence refuses+reaps it, and only then Shutdown returns.
+func TestAgentSessionShutdownDrainsDetachedFreshConstruction(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.startEntered = make(chan struct{}, 1)
+	factory.startRelease = make(chan struct{})
+	factory.startIgnoreCtx = true // worst case: the construction ignores ctx cancel
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+
+	doneA := make(chan error, 1)
+	go func() {
+		doneA <- supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"})
+	}()
+	<-factory.startEntered // detached fresh worker constructing, owns a process
+
+	shutdownReturned := make(chan struct{})
+	go func() { supervisor.Shutdown(); close(shutdownReturned) }()
+
+	// Shutdown must NOT return while the detached construction still owns an
+	// unpublished process — it is joining the worker.
+	select {
+	case <-shutdownReturned:
+		t.Fatal("Shutdown returned while a detached fresh construction still owned an unstopped process")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// The construction completes; the baseCtx.Err() publish fence refuses + reaps.
+	close(factory.startRelease)
+	select {
+	case <-shutdownReturned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Shutdown did not return after the detached construction drained")
+	}
+	<-doneA
+
+	supervisor.mu.Lock()
+	sessions := len(supervisor.sessions)
+	supervisor.mu.Unlock()
+	if sessions != 0 {
+		t.Fatalf("draining shutdown published a session: %d", sessions)
+	}
+	proc := factory.only(t)
+	proc.mu.Lock()
+	stopped := proc.stopped
+	proc.mu.Unlock()
+	if !stopped {
+		t.Fatal("detached construction process not reaped after Shutdown returned")
 	}
 }
