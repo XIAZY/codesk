@@ -213,6 +213,133 @@ func TestRunReportsDaemonOnlineOnlyAfterInitialRefreshSucceeds(t *testing.T) {
 	}
 }
 
+func TestRunStopsDaemonHeartbeatBeforeBlockingFatalShutdown(t *testing.T) {
+	var statusCount atomic.Int64
+	initialStatus := make(chan struct{}, 1)
+	laterStatus := make(chan struct{}, 1)
+	heartbeatTicks := make(chan time.Time, 1)
+	workspaceStreamStarted := make(chan struct{})
+	releaseWorkspaceStream := make(chan struct{})
+	var workspaceStreamOnce sync.Once
+	var releaseWorkspaceStreamOnce sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/workspace"):
+			writeJSONResponse(w, http.StatusOK, &workspaceResponse{})
+		case r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/daemon/status"):
+			count := statusCount.Add(1)
+			if count == 1 {
+				initialStatus <- struct{}{}
+			} else {
+				select {
+				case laterStatus <- struct{}{}:
+				default:
+				}
+			}
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/ws/workspaces/"):
+			workspaceStreamOnce.Do(func() { close(workspaceStreamStarted) })
+			<-releaseWorkspaceStream
+			w.WriteHeader(http.StatusGone)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := Config{
+		BackendURL:         server.URL,
+		WorkspaceID:        "workspace:test",
+		DaemonToken:        "daemon_token",
+		DataDir:            t.TempDir(),
+		WorkspaceDir:       t.TempDir(),
+		AgentWorkspaceRoot: t.TempDir(),
+		AgentID:            "daemon_agent",
+		AgentToolBaseURL:   "http://127.0.0.1:0",
+	}
+	service := &Service{
+		cfg:            cfg,
+		client:         server.Client(),
+		daemonStatus:   newDaemonStatusReporter(cfg, server.Client()),
+		primaryRuntime: &workspaceRuntime{},
+		agentRuntimes:  map[string]*managedWorkspaceRuntime{},
+		agentWorkers:   map[string]*managedAgentWorker{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	runFinished := make(chan struct{})
+	blockingRuntimeDone := make(chan struct{})
+	shutdownBlocked := make(chan struct{})
+	var blockingRuntimeDoneOnce sync.Once
+	var shutdownBlockedOnce sync.Once
+	t.Cleanup(func() {
+		cancel()
+		releaseWorkspaceStreamOnce.Do(func() { close(releaseWorkspaceStream) })
+		blockingRuntimeDoneOnce.Do(func() { close(blockingRuntimeDone) })
+		select {
+		case <-runFinished:
+		case <-time.After(time.Second):
+		}
+	})
+	go func() {
+		defer close(runFinished)
+		done <- service.run(ctx, heartbeatTicks)
+	}()
+
+	select {
+	case <-initialStatus:
+	case <-time.After(time.Second):
+		t.Fatal("daemon did not report initial online status")
+	}
+	select {
+	case <-workspaceStreamStarted:
+	case <-time.After(time.Second):
+		t.Fatal("workspace event stream did not start")
+	}
+
+	service.mu.Lock()
+	service.agentRuntimes["blocking"] = &managedWorkspaceRuntime{
+		cancel: func() {
+			shutdownBlockedOnce.Do(func() { close(shutdownBlocked) })
+		},
+		done: blockingRuntimeDone,
+	}
+	service.mu.Unlock()
+
+	heartbeatTicks <- time.Now()
+	select {
+	case <-laterStatus:
+	case <-time.After(time.Second):
+		t.Fatal("daemon did not emit a periodic heartbeat")
+	}
+	releaseWorkspaceStreamOnce.Do(func() { close(releaseWorkspaceStream) })
+	select {
+	case <-shutdownBlocked:
+	case <-time.After(time.Second):
+		t.Fatal("fatal workspace drain did not enter blocking shutdown")
+	}
+
+	countAtShutdown := statusCount.Load()
+	heartbeatTicks <- time.Now()
+	select {
+	case <-laterStatus:
+		t.Fatalf("daemon status heartbeat advanced during blocking fatal shutdown: got %d requests, want %d", statusCount.Load(), countAtShutdown)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	blockingRuntimeDoneOnce.Do(func() { close(blockingRuntimeDone) })
+	select {
+	case err := <-done:
+		var statusErr *backendStatusError
+		if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusGone {
+			t.Fatalf("Run error = %v, want terminal workspace drain", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not return after shutdown unblocked")
+	}
+}
+
 func TestComputeLocalTextEditsUsesUTF16Cursor(t *testing.T) {
 	edits, err := computeLocalTextEdits("a🙂b", "a🙂Xb")
 	if err != nil {

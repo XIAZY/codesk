@@ -219,6 +219,10 @@ func (s *Service) ensurePrimaryRuntime() error {
 }
 
 func (s *Service) Run(ctx context.Context) error {
+	return s.run(ctx, nil)
+}
+
+func (s *Service) run(ctx context.Context, heartbeatTicks <-chan time.Time) error {
 	toolServer, err := s.startToolGateway()
 	if err != nil {
 		return err
@@ -247,15 +251,31 @@ func (s *Service) Run(ctx context.Context) error {
 	// startup recovery and readiness gate has passed.
 	s.reportDaemonStatus(ctx, true)
 	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
-	heartbeatTicker := time.NewTicker(daemonStatusHeartbeatInterval)
-	defer func() {
-		cancelHeartbeat()
-		heartbeatTicker.Stop()
+	var heartbeatTicker *time.Ticker
+	if heartbeatTicks == nil {
+		heartbeatTicker = time.NewTicker(daemonStatusHeartbeatInterval)
+		heartbeatTicks = heartbeatTicker.C
+	}
+	heartbeatDone := make(chan struct{})
+	go func() {
+		defer close(heartbeatDone)
+		s.runDaemonStatusHeartbeat(heartbeatCtx, heartbeatTicks)
 	}()
-	go s.runDaemonStatusHeartbeat(heartbeatCtx, heartbeatTicker.C)
+	var stopHeartbeatOnce sync.Once
+	stopHeartbeat := func() {
+		stopHeartbeatOnce.Do(func() {
+			cancelHeartbeat()
+			if heartbeatTicker != nil {
+				heartbeatTicker.Stop()
+			}
+			<-heartbeatDone
+		})
+	}
+	defer stopHeartbeat()
 	primaryCtx, cancelPrimary := context.WithCancel(ctx)
 	defer cancelPrimary()
 	shutdown := func() {
+		stopHeartbeat()
 		cancelPrimary()
 		s.closeAgentWorkers()
 		s.closeAgentRuntimes()
