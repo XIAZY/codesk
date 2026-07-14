@@ -1004,6 +1004,9 @@ describe("daemon install command", () => {
 
     expect(command.startsWith("$ErrorActionPreference = 'Stop'\n")).toBe(true);
     expect(command).toContain("Invoke-WebRequest -UseBasicParsing 'https://static.example.com/daemon files/install.ps1'");
+    expect(command).toContain("$codeskInstallerResponse.Content -is [byte[]]");
+    expect(command).toContain("[System.Text.Encoding]::UTF8.GetString($codeskInstallerResponse.Content)");
+    expect(command).toContain("[ScriptBlock]::Create($codeskInstallerSource)");
     expect(command).toContain("-BackendUrl 'https://api.example.com/notty prod' `");
     expect(command).toContain("-WorkspaceId 'ws bad''id' `");
     expect(command).toContain("-DaemonToken 'nottyd token' `");
@@ -1038,7 +1041,8 @@ describe("daemon uninstall command", () => {
     });
 
     expect(command).toContain("Invoke-WebRequest -UseBasicParsing 'https://static.example.com/daemon''s/uninstall.ps1'");
-    expect(command).toContain(") -All");
+    expect(command).toContain("$codeskUninstallerResponse.Content -is [byte[]]");
+    expect(command).toContain("[ScriptBlock]::Create($codeskUninstallerSource)) -All");
     expect(command).not.toContain("WorkspaceId");
   });
 });
@@ -1085,8 +1089,10 @@ describe("daemon reinstall command", () => {
       platform: "windows",
     });
 
-    expect(command).toContain("uninstall.ps1').Content)) -All");
-    expect(command).toContain("install.ps1').Content)) `");
+    expect(command).toContain("Invoke-WebRequest -UseBasicParsing 'https://static.example.com/daemons/uninstall.ps1'");
+    expect(command).toContain("[ScriptBlock]::Create($codeskUninstallerSource)) -All");
+    expect(command).toContain("Invoke-WebRequest -UseBasicParsing 'https://static.example.com/daemons/install.ps1'");
+    expect(command).toContain("[ScriptBlock]::Create($codeskInstallerSource)) `");
     expect(command).toContain("-DaemonToken 'nottyd_abc' `");
     expect(command.indexOf("uninstall.ps1")).toBeLessThan(command.indexOf("install.ps1"));
   });
@@ -1100,4 +1106,3 @@ describe("daemon install platform", () => {
     expect(defaultDaemonInstallPlatform("", "Mozilla/5.0 (Macintosh; Intel Mac OS X)")).toBe("unix");
   });
 });
-

@@ -55,6 +55,7 @@ content_type_for() {
 		*.webp) printf 'image/webp' ;;
 		*.txt) printf 'text/plain; charset=utf-8' ;;
 		*.sh) printf 'text/x-shellscript; charset=utf-8' ;;
+		*.ps1) printf 'text/plain; charset=utf-8' ;;
 		*.tar.gz) printf 'application/gzip' ;;
 		*) printf 'application/octet-stream' ;;
 	esac
@@ -204,8 +205,8 @@ if [ "$target" = "all" ] || [ "$target" = "daemons" ]; then
 	if [ "$uploader" = "aws" ]; then
 		aws_s3 cp "$installer" "$daemon_dest/install.sh" --cache-control "public, max-age=300"
 		aws_s3 cp "$uninstaller" "$daemon_dest/uninstall.sh" --cache-control "public, max-age=300"
-		aws_s3 cp "$powershell_installer" "$daemon_dest/install.ps1" --cache-control "public, max-age=300"
-		aws_s3 cp "$powershell_uninstaller" "$daemon_dest/uninstall.ps1" --cache-control "public, max-age=300"
+		aws_s3 cp "$powershell_installer" "$daemon_dest/install.ps1" --content-type "$(content_type_for "$powershell_installer")" --cache-control "public, max-age=300"
+		aws_s3 cp "$powershell_uninstaller" "$daemon_dest/uninstall.ps1" --content-type "$(content_type_for "$powershell_uninstaller")" --cache-control "public, max-age=300"
 		aws_s3 cp "$daemon_dist_dir/$version/SHA256SUMS" "$daemon_dest/latest/SHA256SUMS" --cache-control "public, max-age=60"
 		aws_s3 cp "$daemon_dist_dir/$version/manifest.json" "$daemon_dest/latest/manifest.json" --cache-control "public, max-age=60"
 	else
