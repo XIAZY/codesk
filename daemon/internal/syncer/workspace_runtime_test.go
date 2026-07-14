@@ -137,7 +137,9 @@ func TestWorkspaceRuntimeStartupRecoveryQueuesDurableSQLiteWork(t *testing.T) {
 		reconcileQueue:     queue,
 		threadDeliveryWake: make(chan struct{}, 1),
 	}
-	runtime.enqueueStartupStoreWork()
+	if err := runtime.enqueueStartupStoreWork(); err != nil {
+		t.Fatalf("enqueue startup store work: %v", err)
+	}
 
 	dirty := queue.Drain()
 	for _, documentID := range []string{"doc_incoming", "doc_outbox", "doc_thread_pending"} {
