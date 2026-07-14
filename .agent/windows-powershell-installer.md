@@ -13,14 +13,17 @@ The observable result is a Windows option beside the existing macOS/Linux option
 - [x] (2026-07-14 04:48Z) Read `.agent/PLANS.md`, the OXO design reference, the Unix installer and uninstaller, release/publish scripts, Windows release plans, frontend command builders, modal UI, styles, and tests.
 - [x] (2026-07-14 04:48Z) Chose the Windows installation, service, fallback, and frontend platform-selection contracts and recorded them below.
 - [x] (2026-07-14 05:16Z) Added PowerShell install, run, and uninstall scripts with an isolated Windows lifecycle harness; all scripts pass the PowerShell parser in the official PowerShell Docker image.
-- [x] (2026-07-14 05:16Z) Packaged and published PowerShell entrypoints, included Windows AMD64 in the public release set, added an active Windows installer CI job, and updated build targets and documentation.
+- [x] (2026-07-14 05:16Z) Packaged and published PowerShell entrypoints, included Windows AMD64 in the public release set, added a Windows installer CI job, and updated build targets and documentation.
 - [x] (2026-07-14 05:16Z) Added platform-aware frontend command builders, selectors in create/detail/reinstall flows, responsive styles, and unit/component coverage.
 - [x] (2026-07-14 05:16Z) Ran all locally available script, frontend, release-build, YAML, and diff checks and started the frontend at `http://localhost:5173/`. Browser screenshot inspection could not run because this session did not expose the in-app browser control tool; that limitation is recorded below.
 - [x] (2026-07-14 05:16Z) Recorded final evidence and remaining environment-specific validation in this plan.
 - [x] (2026-07-14 06:07Z) Fixed Windows PowerShell 5.1 handling of installer responses served as `application/octet-stream`; generated commands now decode byte arrays as UTF-8 and R2 publishes stable `.ps1` files as UTF-8 text.
-- [x] (2026-07-14 06:18Z) Allowed Windows ARM64 hosts to install the AMD64 release through Windows x64 emulation and made the Windows lifecycle harness exercise that host path.
+- [x] (2026-07-14 06:18Z) Allowed Windows 11 ARM64 hosts to install the AMD64 release through Windows x64 emulation.
 - [x] (2026-07-14 06:39Z) Prevented Windows PowerShell 5.1 from treating normal native daemon stderr as a terminating launcher failure; the lifecycle harness now rejects that restart-loop behavior.
 - [x] (2026-07-14 07:01Z) Made Scheduled Task and Startup fallback launchers pass `-WindowStyle Hidden`, and pinned both registration paths in the Windows lifecycle harness.
+- [x] (2026-07-14 08:05Z) Paused the hosted Windows installer CI job while retaining its lifecycle harness and the automatic Linux-hosted Windows cross-build/package checks.
+- [x] (2026-07-14 08:10Z) Restricted AMD64 emulation support to Windows 11 ARM64 (build 22000 or newer), documented the boundary, and added deterministic Windows 10 rejection coverage.
+- [x] (2026-07-14 08:42Z) Made the lifecycle harness require a real AMD64 PE fixture and exposed `-Amd64Fixture` so Windows ARM64 validation executes the canonical x64 release instead of a host-native system binary.
 
 ## Surprises & Discoveries
 
@@ -49,7 +52,10 @@ The observable result is a Windows option beside the existing macOS/Linux option
   Evidence: native Windows execution failed at `ScriptBlock.Create` with decimal values corresponding to the opening `[CmdletBinding()]` bytes. The R2 publisher's default content-type branch also classified `.ps1` as `application/octet-stream`.
 
 - Observation: Windows ARM64 reports the native architecture through `PROCESSOR_ARCHITECTURE` or `PROCESSOR_ARCHITEW6432`, causing the original strict AMD64 installer gate to reject the package before Windows could run the x64 executable under emulation.
-  Evidence: native Windows ARM64 execution reached the architecture gate and reported `detected ARM64` before any artifact download.
+  Evidence: native Windows 11 ARM64 execution reached the architecture gate and reported `detected ARM64` before any artifact download. Microsoft documents that Windows 11 on Arm emulates x64 applications, while Windows 10 on Arm emulates only x86 applications: https://learn.microsoft.com/en-us/windows/arm/apps-on-arm-x86-emulation.
+
+- Observation: Spoofing `PROCESSOR_ARCHITECTURE=ARM64` while packaging the host-native `System32\where.exe` does not prove that an AMD64 executable runs under Windows on Arm.
+  Evidence: the harness now parses the fixture's PE header and requires machine type `0x8664`; ARM64 validation must pass the canonical Windows AMD64 `notty-agent-tool.exe` through `-Amd64Fixture`.
 
 - Observation: Windows PowerShell 5.1 promotes redirected native stderr to an error record governed by `$ErrorActionPreference`. Because the launcher globally uses `Stop`, a healthy daemon's startup message on stderr entered the catch path and caused a five-second restart loop even though the executable remained healthy when launched directly.
   Evidence: native Windows diagnostics showed the packaged daemon remaining active when invoked directly while `run.ps1` repeatedly logged launch failures. The runner's native invocation inherited `$ErrorActionPreference = "Stop"`.
@@ -83,16 +89,20 @@ The observable result is a Windows option beside the existing macOS/Linux option
   Rationale: Existing call sites and tests continue to work, while users get an explicit, familiar mode control. Connected-daemon metadata is more reliable than browser detection for reinstall and uninstall; the selector remains manually overridable.
   Date/Author: 2026-07-14, Codex.
 
-- Decision: Run the PowerShell lifecycle harness in a small, active `windows-latest` CI job instead of relying on the deliberately paused Windows native compiler job.
-  Rationale: Installer correctness does not require rebuilding the Rust/Go binaries. The harness uses a harmless Windows executable fixture and can continuously verify checksum rejection, protected config, Scheduled Task or Startup registration, runner startup, cleanup, and keep-binaries behavior.
+- Decision: Keep the PowerShell lifecycle harness and its dedicated `windows-latest` job definition, but pause that hosted job until a Windows CI runner is available.
+  Rationale: The harness still pins checksum rejection, protected config, Scheduled Task or Startup registration, runner startup, cleanup, and keep-binaries behavior. The repository currently has no available hosted Windows runner, while the automatic Linux-hosted cross-build continues to verify the release and package construction.
   Date/Author: 2026-07-14, Codex.
 
 - Decision: Normalize downloaded script content in every generated Windows command by decoding `byte[]` responses as UTF-8 before calling `ScriptBlock.Create`, while also publishing stable `.ps1` objects as `text/plain; charset=utf-8`.
   Rationale: MIME metadata should be correct, but the installer entrypoint must remain reliable through development servers, proxies, caches, and object stores that return a generic binary content type. Explicit decoding works with both Windows PowerShell 5.1 byte responses and PowerShell string responses.
   Date/Author: 2026-07-14, Codex.
 
-- Decision: Accept ARM64 Windows hosts while continuing to install the existing Windows AMD64 artifact, with an explicit emulation warning.
-  Rationale: The daemon and agent tool are user-mode x64 executables, so Windows on Arm can execute them through its built-in x64 emulation. This unblocks ARM64 users without claiming a native ARM64 release or changing release manifests.
+- Decision: Accept ARM64 hosts only on Windows 11 (build 22000 or newer) while continuing to install the existing Windows AMD64 artifact, with an explicit emulation warning.
+  Rationale: Windows 11 on Arm can execute the user-mode x64 daemon and agent tool through built-in x64 emulation. Windows 10 on Arm emulates only x86 applications, so accepting it would install an executable that cannot start and leave the launcher in a restart loop.
+  Date/Author: 2026-07-14, Codex.
+
+- Decision: Require the Windows lifecycle fixture to be a real AMD64 PE executable; use the local system executable by default on AMD64 and an explicit canonical release fixture on ARM64.
+  Rationale: The test must exercise x64 emulation rather than merely spoofing architecture environment variables around a native ARM64 binary. Checking the PE machine field before packaging makes a false-green impossible.
   Date/Author: 2026-07-14, Codex.
 
 - Decision: Temporarily set `$ErrorActionPreference` to `Continue` only around the native daemon invocation and restore it in `finally`.
@@ -107,7 +117,7 @@ The observable result is a Windows option beside the existing macOS/Linux option
 
 The repository now has a complete Windows AMD64 installation path. `install.ps1` downloads and verifies the ZIP, installs versioned executables and private workspace configuration, and registers a limited current-user Scheduled Task with a Startup shortcut fallback. `run-windows.ps1` owns the long-running process lifecycle, and `uninstall.ps1 -All` removes registrations, managed data, and binaries. Release builds and R2 publication expose stable PowerShell entrypoints, and `PLATFORMS=all` includes Windows AMD64.
 
-The create, uninstall, and reinstall frontend flows now share an explicit macOS/Linux versus Windows segmented control and emit correctly quoted Shell or PowerShell commands. Those commands accept either string or byte-array HTTP bodies before parsing the downloaded source. The full frontend suite passed 255 tests, the production bundle built, the Unix installer regression harnesses passed, YAML and shell syntax checks passed, all PowerShell files parsed in Docker, and a host-platform release smoke build produced the expected four public scripts. Windows-only lifecycle execution is intentionally delegated to the new active `windows-daemon-installer` CI job; it could not run on this macOS host. Visual screenshot verification was also unavailable for the tooling reason recorded above, although the affected component tests and production build are green and the dev server is running.
+The create, uninstall, and reinstall frontend flows now share an explicit macOS/Linux versus Windows segmented control and emit correctly quoted Shell or PowerShell commands. Those commands accept either string or byte-array HTTP bodies before parsing the downloaded source. The full frontend suite passed 255 tests, the production bundle built, the Unix installer regression harnesses passed, YAML and shell syntax checks passed, all PowerShell files parsed in Docker, and a host-platform release smoke build produced the expected four public scripts. The Windows lifecycle harness remains in the repository, but its hosted `windows-daemon-installer` CI job is paused until a runner is available; the Linux-hosted Windows cross-build/package job remains active. Visual screenshot verification was also unavailable for the tooling reason recorded above, although the affected component tests and production build are green and the dev server is running.
 
 ## Context and Orientation
 
@@ -121,11 +131,11 @@ A Scheduled Task is a Windows-owned registration that starts a program at a trig
 
 ## Plan of Work
 
-First, add the PowerShell implementation. `deploy/daemons/install.ps1` will expose `-BackendUrl`, `-WorkspaceId`, `-DaemonToken`, `-StaticBase`, `-Version`, `-InstallDir`, `-DataDir`, and `-NoService`. It will accept only AMD64 Windows, support HTTPS and `file://` sources, bypass stale CDN metadata with cache-busting query parameters, validate the release checksum, expand the ZIP, install into a version directory, and copy `run-windows.ps1` into the workspace daemon directory as `run.ps1`. It will preserve configured Codex and Claude commands, resolve their tool directories for a bounded runtime path, warn rather than abort when either provider is unavailable, write a protected `daemon.env.json`, and install/start the current-user background registration.
+First, add the PowerShell implementation. `deploy/daemons/install.ps1` will expose `-BackendUrl`, `-WorkspaceId`, `-DaemonToken`, `-StaticBase`, `-Version`, `-InstallDir`, `-DataDir`, and `-NoService`. It will accept AMD64 Windows and Windows 11 ARM64 hosts that can emulate the AMD64 release, support HTTPS and `file://` sources, bypass stale CDN metadata with cache-busting query parameters, validate the release checksum, expand the ZIP, install into a version directory, and copy `run-windows.ps1` into the workspace daemon directory as `run.ps1`. It will preserve configured Codex and Claude commands, resolve their tool directories for a bounded runtime path, warn rather than abort when either provider is unavailable, write a protected `daemon.env.json`, and install/start the current-user background registration.
 
 `deploy/daemons/run-windows.ps1` will load the adjacent JSON, rebuild a bounded `PATH` from installed and known user/system tool directories, set the daemon environment variables in the process, acquire a workspace mutex, write a launcher PID, append startup and exit information to the daemon log, run the daemon, and restart it after a short delay if it exits. `deploy/daemons/uninstall.ps1` will require `-All`, stop and unregister each task or Startup shortcut, terminate recorded launcher process trees, remove managed workspace and agent directories, and remove only recognized Codesk binary version directories unless `-KeepBinaries` is supplied.
 
-Add `scripts/test-daemon-installer-windows.ps1`. It will parse all PowerShell files through the PowerShell parser, construct an isolated fake Windows ZIP and checksums under a temporary directory, run the installer with `-NoService` and custom paths, verify installed files and protected structured configuration, prove checksum rejection, exercise a Scheduled Task or Startup fallback and runner PID, verify that uninstall requires `-All`, and cover ordinary and keep-binaries global uninstall. Add a Make target that runs this harness when Windows PowerShell exists and a lightweight active Windows CI job that runs it unconditionally. The ordinary Unix test target must remain green on hosts without PowerShell.
+Add `scripts/test-daemon-installer-windows.ps1`. It will parse all PowerShell files through the PowerShell parser, require an AMD64 PE fixture (with `-Amd64Fixture` available on ARM64), construct an isolated fake Windows ZIP and checksums under a temporary directory, run the installer with `-NoService` and custom paths, verify installed files and protected structured configuration, prove checksum rejection, exercise a Scheduled Task or Startup fallback and runner PID, verify that uninstall requires `-All`, and cover ordinary and keep-binaries global uninstall. Add a Make target that runs this harness when Windows PowerShell exists and retain a lightweight Windows CI job definition for the harness; keep that hosted job paused until a Windows runner is available. The ordinary Unix test target must remain green on hosts without PowerShell.
 
 Second, extend release and publication. `scripts/build-daemon-release.sh` will require and include `run-windows.ps1` in Windows ZIPs, copy all four public install/uninstall scripts to the generated root and version directory, and include `windows/amd64` in `all_platforms`. `scripts/publish-static-r2.sh` will upload both `.ps1` stable URLs with the same short cache lifetime as the shell scripts. The active Linux Windows cross-build will assert that the generated ZIP and static root include the expected PowerShell artifacts.
 
@@ -174,7 +184,7 @@ Open the reported local URL. Create a local environment, select Windows, and con
 
 Acceptance requires all of the following observable behavior.
 
-On Windows AMD64, running the displayed install command downloads a ZIP whose checksum matches `SHA256SUMS`, creates versioned `notty-daemon.exe` and `notty-agent-tool.exe`, writes a user-private workspace configuration without putting the daemon token on a task command line, and starts either a limited current-user Scheduled Task or the documented Startup fallback. Running the command again for the same version and workspace is safe. `-NoService` installs everything but starts nothing and prints the foreground PowerShell command.
+On Windows AMD64 or Windows 11 ARM64 (build 22000 or newer), running the displayed install command downloads a ZIP whose checksum matches `SHA256SUMS`, creates versioned `notty-daemon.exe` and `notty-agent-tool.exe`, writes a user-private workspace configuration without putting the daemon token on a task command line, and starts either a limited current-user Scheduled Task or the documented Startup fallback. Windows 10 ARM64 is rejected before installation because it cannot emulate the AMD64 executables. Running the command again for the same version and workspace is safe. `-NoService` installs everything but starts nothing and prints the foreground PowerShell command.
 
 The Windows uninstall command refuses to run without `-All`. With `-All`, it stops launchers and daemon descendants, removes all managed daemon/workspace/agent data, removes registrations, and removes recognized binary directories. `-KeepBinaries` leaves the executable directories while removing configuration and workspaces.
 
@@ -221,4 +231,4 @@ Add `platform?: DaemonInstallPlatform` to the existing input objects for `buildD
 
 `deploy/daemons/install.ps1` must expose PowerShell parameters named `BackendUrl`, `WorkspaceId`, `DaemonToken`, `StaticBase`, `Version`, `InstallDir`, `DataDir`, and `NoService`. `deploy/daemons/uninstall.ps1` must expose `All`, `InstallDir`, `DataDir`, and `KeepBinaries`.
 
-Plan revision note: created on 2026-07-14 to turn the existing Windows executable construction path into a complete, discoverable end-user installation workflow. Updated at 06:18Z after native Windows testing confirmed ARM64 hosts should be allowed to consume the AMD64 package through x64 emulation.
+Plan revision note: created on 2026-07-14 to turn the existing Windows executable construction path into a complete, discoverable end-user installation workflow. Updated at 08:42Z to constrain AMD64 emulation to Windows 11 ARM64, require real AMD64 execution evidence on Arm, and keep the hosted installer job paused while its test code remains available.

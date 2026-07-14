@@ -137,6 +137,11 @@ func TestRunReportsDaemonOnlineOnlyAfterInitialRefreshSucceeds(t *testing.T) {
 	workspaceStarted := make(chan struct{}, 1)
 	allowWorkspace := make(chan struct{})
 	statusRequests := make(chan struct{}, 1)
+	workspaceStreamStarted := make(chan struct{})
+	workspaceStreamExited := make(chan struct{})
+	var workspaceStreamStartedOnce sync.Once
+	var workspaceStreamExitedOnce sync.Once
+	workspaceUpgrader := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/daemon/status"):
@@ -153,7 +158,18 @@ func TestRunReportsDaemonOnlineOnlyAfterInitialRefreshSucceeds(t *testing.T) {
 			case <-r.Context().Done():
 			}
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/ws/workspaces/"):
-			<-r.Context().Done()
+			conn, err := workspaceUpgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			workspaceStreamStartedOnce.Do(func() { close(workspaceStreamStarted) })
+			defer workspaceStreamExitedOnce.Do(func() { close(workspaceStreamExited) })
+			for {
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
 		default:
 			http.NotFound(w, r)
 		}
@@ -170,17 +186,14 @@ func TestRunReportsDaemonOnlineOnlyAfterInitialRefreshSucceeds(t *testing.T) {
 		AgentID:            "daemon_agent",
 		AgentToolBaseURL:   "http://127.0.0.1:0",
 	}
-	primaryRuntime, err := newWorkspaceRuntime(
+	primaryRuntime, pathLockCloses := newWorkspaceRuntimeWithDeterministicPathLocks(
+		t,
 		cfg,
 		server.Client(),
 		cfg.WorkspaceDir,
 		cfg.AgentID,
 		"daemon",
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = primaryRuntime.Close() })
 	watcher := newScriptedWorkspaceWatcher()
 	primaryRuntime.replica.newWatcher = func() (workspaceWatcher, error) { return watcher, nil }
 	service := &Service{
@@ -217,6 +230,12 @@ func TestRunReportsDaemonOnlineOnlyAfterInitialRefreshSucceeds(t *testing.T) {
 		cancel()
 		t.Fatal("daemon did not report online after initial workspace recovery completed")
 	}
+	select {
+	case <-workspaceStreamStarted:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("workspace stream did not complete its handshake")
+	}
 	cancel()
 	select {
 	case err := <-done:
@@ -226,6 +245,12 @@ func TestRunReportsDaemonOnlineOnlyAfterInitialRefreshSucceeds(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Run did not stop after cancellation")
 	}
+	select {
+	case <-workspaceStreamExited:
+	case <-time.After(time.Second):
+		t.Fatal("workspace stream handler did not observe the client close")
+	}
+	assertDeterministicPathLockStoreClosed(t, pathLockCloses)
 }
 
 func TestRunStopsDaemonHeartbeatBeforeBlockingFatalShutdown(t *testing.T) {
@@ -286,17 +311,14 @@ func TestRunStopsDaemonHeartbeatBeforeBlockingFatalShutdown(t *testing.T) {
 		AgentID:            "daemon_agent",
 		AgentToolBaseURL:   "http://127.0.0.1:0",
 	}
-	primaryRuntime, err := newWorkspaceRuntime(
+	primaryRuntime, pathLockCloses := newWorkspaceRuntimeWithDeterministicPathLocks(
+		t,
 		cfg,
 		client,
 		cfg.WorkspaceDir,
 		cfg.AgentID,
 		"daemon",
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = primaryRuntime.Close() })
 	service := &Service{
 		cfg:            cfg,
 		client:         client,
@@ -391,6 +413,7 @@ func TestRunStopsDaemonHeartbeatBeforeBlockingFatalShutdown(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Run did not return after shutdown unblocked")
 	}
+	assertDeterministicPathLockStoreClosed(t, pathLockCloses)
 }
 
 func TestComputeLocalTextEditsUsesUTF16Cursor(t *testing.T) {

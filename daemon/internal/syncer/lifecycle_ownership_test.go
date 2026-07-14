@@ -562,11 +562,14 @@ func TestServiceStartsStatusHeartbeatOnlyAfterPrimaryRuntimeReady(t *testing.T) 
 		AgentID:            "daemon",
 		AgentToolBaseURL:   "http://127.0.0.1:0",
 	}
-	runtime, err := newWorkspaceRuntime(cfg, backend.Client(), root, "daemon", "daemon")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = runtime.Close() })
+	runtime, pathLockCloses := newWorkspaceRuntimeWithDeterministicPathLocks(
+		t,
+		cfg,
+		backend.Client(),
+		root,
+		"daemon",
+		"daemon",
+	)
 	watcher := newScriptedWorkspaceWatcher()
 	addStarted := make(chan struct{})
 	releaseAdd := make(chan struct{})
@@ -654,6 +657,7 @@ func TestServiceStartsStatusHeartbeatOnlyAfterPrimaryRuntimeReady(t *testing.T) 
 	case <-time.After(time.Second):
 		t.Fatal("service did not stop after cancellation")
 	}
+	assertDeterministicPathLockStoreClosed(t, pathLockCloses)
 }
 
 func TestServiceDoesNotReportOnlineBeforePrimaryRuntimeReady(t *testing.T) {
@@ -1831,6 +1835,39 @@ type countingPathLockStore struct {
 	closes  *atomic.Int32
 	onClose func()
 	once    sync.Once
+}
+
+func newWorkspaceRuntimeWithDeterministicPathLocks(
+	t *testing.T,
+	cfg Config,
+	client *http.Client,
+	rootDir, actorID, actorType string,
+) (*workspaceRuntime, *atomic.Int32) {
+	t.Helper()
+	closes := &atomic.Int32{}
+	runtime, err := newWorkspaceRuntimeWithOpeners(
+		cfg,
+		client,
+		rootDir,
+		actorID,
+		actorType,
+		func(string) (pathLockLeaseStore, error) {
+			return &countingPathLockStore{closes: closes}, nil
+		},
+		newDocumentCache,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+	return runtime, closes
+}
+
+func assertDeterministicPathLockStoreClosed(t *testing.T, closes *atomic.Int32) {
+	t.Helper()
+	if got := closes.Load(); got != 1 {
+		t.Fatalf("deterministic path-lock store close count = %d, want 1", got)
+	}
 }
 
 func (s *countingPathLockStore) cleanupExpired(time.Time) error { return nil }

@@ -1,5 +1,7 @@
 [CmdletBinding()]
-param()
+param(
+    [string]$Amd64Fixture = ""
+)
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
@@ -29,15 +31,86 @@ function Assert-Missing {
     Assert-True (-not (Test-Path -LiteralPath $Path)) "expected $Path to be absent"
 }
 
+function Get-PEMachine {
+    param([string]$Path)
+
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $reader = [IO.BinaryReader]::new($stream)
+        if ($reader.ReadUInt16() -ne 0x5A4D) {
+            throw "fixture is not a PE executable: $Path"
+        }
+        $stream.Position = 0x3C
+        $peOffset = $reader.ReadInt32()
+        if ($peOffset -lt 0x40 -or $peOffset -gt ($stream.Length - 6)) {
+            throw "fixture has an invalid PE header offset: $Path"
+        }
+        $stream.Position = $peOffset
+        if ($reader.ReadUInt32() -ne 0x00004550) {
+            throw "fixture has an invalid PE signature: $Path"
+        }
+        return $reader.ReadUInt16()
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+$installerAst = $null
 foreach ($scriptPath in @($installer, $runner, $uninstaller, $PSCommandPath)) {
     $tokens = $null
     $parseErrors = $null
-    [Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$parseErrors) | Out-Null
+    $scriptAst = [Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$parseErrors)
     if ($parseErrors.Count -gt 0) {
         $messages = ($parseErrors | ForEach-Object { $_.Message }) -join "; "
         throw "PowerShell parse failed for ${scriptPath}: $messages"
     }
+    if ($scriptPath -eq $installer) {
+        $installerAst = $scriptAst
+    }
 }
+
+Assert-True ($null -ne $installerAst) "installer AST was not captured"
+$hostGuard = $installerAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq "Assert-SupportedWindowsHost"
+    }, $true)
+Assert-True ($null -ne $hostGuard) "installer host support guard was not found"
+Invoke-Expression $hostGuard.Extent.Text
+
+$hostGuardCall = $installerAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq "Assert-SupportedWindowsHost"
+    }, $true)
+$userHomeCall = $installerAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq "Get-UserHome"
+    }, $true)
+Assert-True ($null -ne $hostGuardCall -and $null -ne $userHomeCall) "installer host guard wiring was not found"
+Assert-True ($hostGuardCall.Extent.StartOffset -lt $userHomeCall.Extent.StartOffset) "installer host guard runs after installation path resolution"
+
+foreach ($architecture in @("ARM64", "aarch64")) {
+    $windows10ArmRejected = $false
+    try {
+        Assert-SupportedWindowsHost -MachineArchitecture $architecture -WindowsBuildNumber 19045
+    } catch {
+        $windows10ArmRejected = $_.Exception.Message -like "*Windows 11 or newer*ARM64*19045*"
+    }
+    Assert-True $windows10ArmRejected "Windows 10 $architecture was not rejected"
+    Assert-SupportedWindowsHost -MachineArchitecture $architecture -WindowsBuildNumber 22000
+}
+foreach ($architecture in @("AMD64", "x86_64")) {
+    Assert-SupportedWindowsHost -MachineArchitecture $architecture -WindowsBuildNumber 19045
+}
+$unsupportedArchitectureRejected = $false
+try {
+    Assert-SupportedWindowsHost -MachineArchitecture "x86" -WindowsBuildNumber 22631
+} catch {
+    $unsupportedArchitectureRejected = $_.Exception.Message -like "*AMD64 or ARM64 is required*x86*"
+}
+Assert-True $unsupportedArchitectureRejected "unsupported Windows architecture was not rejected"
 
 if ($env:OS -ne "Windows_NT") {
     throw "Windows installer lifecycle tests require Windows"
@@ -61,8 +134,14 @@ foreach ($name in @("USERPROFILE", "PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW
 }
 
 New-Item -ItemType Directory -Path (Join-Path $packageDir "bin"), (Join-Path $staticRoot "latest"), $testHome -Force | Out-Null
-$testExecutable = Join-Path $env:SystemRoot "System32\where.exe"
+$testExecutable = if ([string]::IsNullOrWhiteSpace($Amd64Fixture)) {
+    Join-Path $env:SystemRoot "System32\where.exe"
+} else {
+    [IO.Path]::GetFullPath($Amd64Fixture)
+}
 Assert-File $testExecutable
+$fixtureMachine = Get-PEMachine $testExecutable
+Assert-True ($fixtureMachine -eq 0x8664) "fixture must be an AMD64 PE executable; got 0x$($fixtureMachine.ToString('X4')). Pass -Amd64Fixture on ARM64 hosts."
 Copy-Item -LiteralPath $testExecutable -Destination (Join-Path $packageDir "bin\notty-daemon.exe")
 Copy-Item -LiteralPath $testExecutable -Destination (Join-Path $packageDir "bin\notty-agent-tool.exe")
 Copy-Item -LiteralPath $runner -Destination (Join-Path $packageDir "run-windows.ps1")
@@ -78,8 +157,6 @@ try {
     $env:NOTTY_CLAUDE_COMMAND = Join-Path $tempDir "missing-claude.exe"
     $env:NOTTY_INSTALL_DIR = $installDir
     $env:NOTTY_DATA_DIR = $dataDir
-    $env:PROCESSOR_ARCHITEW6432 = ""
-    $env:PROCESSOR_ARCHITECTURE = "ARM64"
 
     & $installer `
         -BackendUrl "https://api.example.test/" `
