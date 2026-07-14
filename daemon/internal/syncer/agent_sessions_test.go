@@ -2167,3 +2167,28 @@ func TestAgentSessionRemovalCancelsBlockedReplacementConstruction(t *testing.T) 
 		t.Fatalf("removal-cancelled construction still published: want 0 sessions, got %d", sessions)
 	}
 }
+
+// Spoke 16 guard: the deferred Stop is armed right after Spawn to reap on failure
+// paths, so the publish CAS must transfer ownership (started=false) — a
+// successfully published runtime must NOT be reaped by the defer.
+func TestAgentSessionPublishedRuntimeIsNotReaped(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"}); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	proc := factory.only(t)
+	proc.mu.Lock()
+	started, stopped := proc.started, proc.stopped
+	proc.mu.Unlock()
+	if !started || stopped {
+		t.Fatalf("published runtime reaped by the construction defer: started=%v stopped=%v", started, stopped)
+	}
+	supervisor.mu.Lock()
+	live := supervisor.sessions["agent_1"] != nil && !supervisor.sessions["agent_1"].dead
+	supervisor.mu.Unlock()
+	if !live {
+		t.Fatal("session was not published")
+	}
+}

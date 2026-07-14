@@ -431,6 +431,22 @@ func (s *agentSessionSupervisor) Shutdown() {
 // revision: a parked token under construction would otherwise be reaped and
 // rebuilt on every touch, starving the restart under frequent reconciles or
 // notifications (which also call ensureSession).
+//
+// The fingerprint must cover EVERY desired-spec field startSession's
+// construction consumes, or a mid-construction change to an unfingerprinted
+// field would publish a stale-config process (the same #15 failure via another
+// field). Enumerating the current construction inputs from `current`:
+//   - ID           -> workdir (agentWorkspacePath(cfg, ID)) + AgentID; it is the
+//     session's identity / map key and cannot change in place.
+//   - Kind         -> runtime driver selection.            [fingerprinted]
+//   - SystemPrompt -> Spawn/resume/start-session Instructions. [fingerprinted]
+//   - SessionID    -> resume continuity; for a restart it is taken from the
+//     session, not the desired spec, so it is not a config change.
+//
+// Workdir is ID-derived (NOT WorkspaceRoot), ToolToken is generated, and env is
+// built from cfg — none are desired-spec inputs. So Kind+SystemPrompt is the
+// complete changeable set; extend this fingerprint if the constructor grows a
+// new `current.*` input.
 func (session *managedAgentSession) refreshDesiredSpec(current *agent) {
 	changed := session.agent == nil ||
 		session.agent.Kind != current.Kind ||
