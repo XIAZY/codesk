@@ -485,6 +485,30 @@ func (start *agentSessionStart) spawnFingerprintChanged(current *agent) bool {
 		strings.TrimSpace(start.agent.SessionID) != strings.TrimSpace(current.SessionID)
 }
 
+// constructionContext returns a context + cancel for a fresh construction
+// attempt that is done when cancel is called OR when ANY parent is done. The
+// fresh (synchronous) owner passes both s.baseCtx (Shutdown) and the ensureSession
+// caller ctx — so a provider Start/handshake blocked during startup (before
+// Shutdown/baseCancel is even reachable, while refreshInitialWorkspace->Reconcile
+// is in flight) is broken by the service ctx's cancellation, not wedged. The
+// restart path stays baseCtx-only: it is detached, with no caller to honor.
+func constructionContext(parents ...context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	for _, parent := range parents {
+		if parent == nil {
+			continue
+		}
+		go func(parent context.Context) {
+			select {
+			case <-parent.Done():
+				cancel()
+			case <-ctx.Done():
+			}
+		}(parent)
+	}
+	return ctx, cancel
+}
+
 func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *agent) error {
 	if current == nil || strings.TrimSpace(current.ID) == "" {
 		return nil
@@ -547,8 +571,16 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 			case <-done:
 				s.mu.Lock()
 				err := start.err
+				removed := start.cancelled
 				s.mu.Unlock()
 				if err != nil {
+					// If the shared construction was cancelled by the OWNER's caller
+					// (context.Canceled, and not a removal) while WE still want the
+					// session, retry as the new owner rather than inheriting the
+					// owner-caller's cancellation. Removal/Shutdown stay terminal.
+					if !removed && errors.Is(err, context.Canceled) && ctx.Err() == nil {
+						continue
+					}
 					return err
 				}
 				continue
@@ -575,7 +607,9 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 			}
 			spec := cloneAgentValue(start.agent)
 			rev := start.rev
-			cctx, ccancel := context.WithCancel(s.baseCtx)
+			// Cancelled by Shutdown (baseCtx), the caller (ctx — startup/request
+			// cancellation), or removal/retarget (start.cancel).
+			cctx, ccancel := constructionContext(s.baseCtx, ctx)
 			start.cancel = ccancel
 			s.mu.Unlock()
 

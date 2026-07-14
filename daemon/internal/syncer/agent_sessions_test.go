@@ -2529,3 +2529,79 @@ func TestAgentSessionFreshSessionIDChangeRebuildsResumeTarget(t *testing.T) {
 		t.Fatalf("fresh construction resumed stale session: %#v, want SessionID=thread_new", resumes)
 	}
 }
+
+// Spoke 17 (finding 23): the fresh (synchronous) owner honors its caller ctx —
+// cancelling only the caller (not Shutdown, not release) breaks a blocked
+// Start/handshake so ensureSession returns promptly and the process is reaped.
+// This is the startup-wedge guard (baseCancel isn't reachable while Reconcile is
+// in flight).
+func TestAgentSessionFreshOwnerHonorsCallerCancellation(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.startEntered = make(chan struct{}, 1)
+	factory.startRelease = make(chan struct{}) // never released
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ownerDone := make(chan error, 1)
+	go func() {
+		ownerDone <- supervisor.ensureSession(ctx, &agent{ID: "agent_1", Kind: "codex"})
+	}()
+	<-factory.startEntered // owner blocked in Start on its construction ctx
+
+	cancel() // cancel ONLY the caller ctx — no Shutdown, no release
+	select {
+	case err := <-ownerDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("owner did not honor caller cancellation: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("fresh owner ignored caller-context cancellation (startup wedge)")
+	}
+	waitProcessStopped(t, factory.only(t))
+}
+
+// Spoke 17 (finding 23): when the owner's caller cancels but a valid waiter still
+// wants the session, the waiter takes over as the new owner and publishes — it is
+// NOT poisoned by the departed owner's context.Canceled.
+func TestAgentSessionFreshOwnerCancelLetsWaiterTakeOver(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.startEntered = make(chan struct{}, 1)
+	factory.startRelease = make(chan struct{})
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	ownerCtx, cancelOwner := context.WithCancel(context.Background())
+	ownerDone := make(chan error, 1)
+	go func() {
+		ownerDone <- supervisor.ensureSession(ownerCtx, &agent{ID: "agent_1", Kind: "codex"})
+	}()
+	<-factory.startEntered // owner blocked in Start
+
+	waiterDone := make(chan error, 1)
+	go func() {
+		waiterDone <- supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"})
+	}()
+
+	cancelOwner() // cancel ONLY the owner's caller ctx; the waiter's ctx stays valid
+
+	select {
+	case <-factory.startEntered: // the waiter took over and is constructing
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiter did not take over after the owner's caller cancelled")
+	}
+	close(factory.startRelease) // let the waiter-owner publish
+
+	if err := <-ownerDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled owner should return context.Canceled, got %v", err)
+	}
+	if err := <-waiterDone; err != nil {
+		t.Fatalf("live waiter poisoned by the departed owner's cancellation: %v", err)
+	}
+	supervisor.mu.Lock()
+	live := supervisor.sessions["agent_1"] != nil && !supervisor.sessions["agent_1"].dead
+	supervisor.mu.Unlock()
+	if !live {
+		t.Fatal("waiter takeover did not publish a session")
+	}
+}
