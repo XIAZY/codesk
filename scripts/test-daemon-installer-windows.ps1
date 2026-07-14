@@ -151,6 +151,20 @@ try {
     }
     Assert-File $launcherPidPath
 
+    $daemonLogPath = Join-Path $daemonDir "daemon.log"
+    $daemonLog = ""
+    for ($attempt = 0; $attempt -lt 70; $attempt++) {
+        if (Test-Path -LiteralPath $daemonLogPath -PathType Leaf) {
+            $daemonLog = Get-Content -LiteralPath $daemonLogPath -Raw
+            if ($daemonLog -like "*Codesk daemon exited with code*") {
+                break
+            }
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    Assert-True ($daemonLog -like "*Codesk daemon exited with code*") "launcher did not record the native daemon exit"
+    Assert-True ($daemonLog -notlike "*Codesk daemon launch failed:*") "native stderr triggered the launcher catch path"
+
     $missingAllRejected = $false
     try {
         & $uninstaller -InstallDir $installDir -DataDir $dataDir

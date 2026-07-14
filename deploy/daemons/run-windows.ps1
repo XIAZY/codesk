@@ -136,8 +136,14 @@ try {
     while ($true) {
         $exitCode = 1
         try {
-            & $daemonPath *>> $logPath
-            $exitCode = $LASTEXITCODE
+            $savedErrorActionPreference = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            try {
+                & $daemonPath *>> $logPath
+                $exitCode = $LASTEXITCODE
+            } finally {
+                $ErrorActionPreference = $savedErrorActionPreference
+            }
         } catch {
             Add-Content -LiteralPath $logPath -Encoding UTF8 -Value (
                 "{0:o} Codesk daemon launch failed: {1}" -f [DateTime]::UtcNow, $_.Exception.Message

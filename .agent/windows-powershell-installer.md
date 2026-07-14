@@ -19,6 +19,7 @@ The observable result is a Windows option beside the existing macOS/Linux option
 - [x] (2026-07-14 05:16Z) Recorded final evidence and remaining environment-specific validation in this plan.
 - [x] (2026-07-14 06:07Z) Fixed Windows PowerShell 5.1 handling of installer responses served as `application/octet-stream`; generated commands now decode byte arrays as UTF-8 and R2 publishes stable `.ps1` files as UTF-8 text.
 - [x] (2026-07-14 06:18Z) Allowed Windows ARM64 hosts to install the AMD64 release through Windows x64 emulation and made the Windows lifecycle harness exercise that host path.
+- [x] (2026-07-14 06:39Z) Prevented Windows PowerShell 5.1 from treating normal native daemon stderr as a terminating launcher failure; the lifecycle harness now rejects that restart-loop behavior.
 
 ## Surprises & Discoveries
 
@@ -48,6 +49,9 @@ The observable result is a Windows option beside the existing macOS/Linux option
 
 - Observation: Windows ARM64 reports the native architecture through `PROCESSOR_ARCHITECTURE` or `PROCESSOR_ARCHITEW6432`, causing the original strict AMD64 installer gate to reject the package before Windows could run the x64 executable under emulation.
   Evidence: native Windows ARM64 execution reached the architecture gate and reported `detected ARM64` before any artifact download.
+
+- Observation: Windows PowerShell 5.1 promotes redirected native stderr to an error record governed by `$ErrorActionPreference`. Because the launcher globally uses `Stop`, a healthy daemon's startup message on stderr entered the catch path and caused a five-second restart loop even though the executable remained healthy when launched directly.
+  Evidence: native Windows diagnostics showed the packaged daemon remaining active when invoked directly while `run.ps1` repeatedly logged launch failures. The runner's native invocation inherited `$ErrorActionPreference = "Stop"`.
 
 ## Decision Log
 
@@ -85,6 +89,10 @@ The observable result is a Windows option beside the existing macOS/Linux option
 
 - Decision: Accept ARM64 Windows hosts while continuing to install the existing Windows AMD64 artifact, with an explicit emulation warning.
   Rationale: The daemon and agent tool are user-mode x64 executables, so Windows on Arm can execute them through its built-in x64 emulation. This unblocks ARM64 users without claiming a native ARM64 release or changing release manifests.
+  Date/Author: 2026-07-14, Codex.
+
+- Decision: Temporarily set `$ErrorActionPreference` to `Continue` only around the native daemon invocation and restore it in `finally`.
+  Rationale: Native stderr is part of the daemon's normal logging contract and is already redirected to `daemon.log`; it must not be confused with a PowerShell launcher failure. Keeping `Stop` everywhere else preserves strict failure handling for configuration, mutex, filesystem, and logging operations.
   Date/Author: 2026-07-14, Codex.
 
 ## Outcomes & Retrospective
