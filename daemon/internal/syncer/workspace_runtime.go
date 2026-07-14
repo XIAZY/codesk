@@ -183,7 +183,9 @@ func (r *workspaceRuntime) run(ctx context.Context, ready chan<- error) (runErr 
 		}
 		r.initialWorkspace = nil
 	}
-	r.enqueueStartupStoreWork()
+	if err := r.enqueueStartupStoreWork(); err != nil {
+		return fmt.Errorf("%s startup store recovery: %w", r.actorID(), err)
+	}
 
 	runCtx, cancelRun := context.WithCancel(ctx)
 	var wg sync.WaitGroup
@@ -254,14 +256,13 @@ func (r *workspaceRuntime) run(ctx context.Context, ready chan<- error) (runErr 
 	}
 }
 
-func (r *workspaceRuntime) enqueueStartupStoreWork() {
+func (r *workspaceRuntime) enqueueStartupStoreWork() error {
 	if r == nil || r.docCache == nil {
-		return
+		return nil
 	}
 	documentIDs, wakeDelivery, err := r.docCache.documentsNeedingReconcile()
 	if err != nil {
-		log.Printf("%s startup store recovery error: %v", r.actorID(), err)
-		return
+		return err
 	}
 	for _, documentID := range documentIDs {
 		r.markDocumentDirty(documentID)
@@ -269,6 +270,7 @@ func (r *workspaceRuntime) enqueueStartupStoreWork() {
 	if wakeDelivery {
 		r.wakeThreadDelivery()
 	}
+	return nil
 }
 
 func (r *workspaceRuntime) presenceLoop(ctx context.Context) {

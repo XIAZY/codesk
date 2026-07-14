@@ -600,6 +600,75 @@ func TestServiceDoesNotReportOnlineBeforePrimaryRuntimeReady(t *testing.T) {
 	}
 }
 
+func TestServiceDoesNotReportOnlineWhenPrimaryStartupStoreRecoveryFails(t *testing.T) {
+	var statusReports atomic.Int32
+	var cancelRun context.CancelFunc
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/workspace":
+			writeJSONResponse(w, http.StatusOK, &workspaceResponse{})
+		case "/api/daemon/status":
+			statusReports.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+			if cancelRun != nil {
+				cancelRun()
+			}
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer backend.Close()
+
+	reservation, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolAddr := reservation.Addr().String()
+	if err := reservation.Close(); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	runtime, err := newWorkspaceRuntime(
+		Config{BackendURL: backend.URL, WorkspaceDir: root, AgentID: "daemon"},
+		backend.Client(),
+		root,
+		"daemon",
+		"daemon",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.docCache.Close(); err != nil {
+		t.Fatalf("close runtime store: %v", err)
+	}
+	cfg := Config{
+		BackendURL:         backend.URL,
+		WorkspaceDir:       root,
+		AgentWorkspaceRoot: filepath.Join(root, "agents"),
+		AgentID:            "daemon",
+		AgentToolBaseURL:   "http://" + toolAddr,
+	}
+	service := &Service{
+		cfg:             cfg,
+		client:          backend.Client(),
+		daemonStatus:    newDaemonStatusReporter(cfg, backend.Client()),
+		primaryRuntime:  runtime,
+		agentRuntimes:   map[string]*managedWorkspaceRuntime{},
+		agentWorkers:    map[string]*managedAgentWorker{},
+		latestWorkspace: &workspaceResponse{},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancelRun = cancel
+	defer cancel()
+	err = service.Run(ctx)
+	if err == nil || !strings.Contains(err.Error(), "startup store recovery") {
+		t.Fatalf("service error = %v, want startup store recovery failure", err)
+	}
+	if got := statusReports.Load(); got != 0 {
+		t.Fatalf("daemon published %d online heartbeat(s) after startup store recovery failed, want 0", got)
+	}
+}
+
 func TestServiceAgentExitIsNonfatalAndSupervisorStopsRestarts(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2085,6 +2154,60 @@ func TestSyncAgentRuntimesRestartsAfterStartupAddFailure(t *testing.T) {
 	)
 	if err := <-ready; !errors.Is(err, wantErr) {
 		t.Fatalf("agent runtime error = %v, want %v", err, wantErr)
+	}
+	select {
+	case <-managed.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("failed agent runtime did not stop")
+	}
+	replacement, _ := waitForAgentRuntimeWatcher(t, service, "agent-1", managed)
+	select {
+	case <-replacement.done:
+		t.Fatal("replacement agent runtime stopped immediately")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestSyncAgentRuntimesRestartsAfterStartupStoreRecoveryFailure(t *testing.T) {
+	root := t.TempDir()
+	cfg := Config{AgentWorkspaceRoot: filepath.Join(root, "agents")}
+	workspace := &workspaceResponse{Agents: []*agent{{ID: "agent-1"}}}
+	runtime, err := newWorkspaceRuntime(
+		cfg,
+		http.DefaultClient,
+		agentWorkspacePath(cfg, "agent-1"),
+		"agent-1",
+		"agent",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.docCache.Close(); err != nil {
+		t.Fatalf("close runtime store: %v", err)
+	}
+	service := &Service{
+		cfg:           cfg,
+		client:        http.DefaultClient,
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		service.closeAgentRuntimes()
+	})
+	ready := make(chan error, 1)
+	managed := startSupervisedAgentWorkspaceRuntimeForTest(
+		t,
+		service,
+		ctx,
+		"agent-1",
+		runtime,
+		workspace,
+		0,
+		ready,
+	)
+	if err := <-ready; err == nil || !strings.Contains(err.Error(), "startup store recovery") {
+		t.Fatalf("agent runtime error = %v, want startup store recovery failure", err)
 	}
 	select {
 	case <-managed.done:
