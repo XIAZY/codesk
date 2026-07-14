@@ -528,7 +528,7 @@ curl -fsSL https://static.nottyai.co/daemons/install.sh | sh -s -- \
   --static-base https://static.nottyai.co/daemons
 ```
 
-Windows AMD64, from PowerShell 5.1 or newer:
+Windows AMD64, or Windows ARM64 using built-in x64 emulation, from PowerShell 5.1 or newer:
 
 ```powershell
 $ErrorActionPreference = 'Stop'
@@ -1588,7 +1588,7 @@ curl -fsSL https://static.nottyai.co/daemons/install.sh | sh -s -- \
   --static-base https://static.nottyai.co/daemons
 ```
 
-Windows AMD64:
+Windows AMD64, or Windows ARM64 using built-in x64 emulation:
 
 ```powershell
 $ErrorActionPreference = 'Stop'

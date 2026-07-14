@@ -18,6 +18,7 @@ The observable result is a Windows option beside the existing macOS/Linux option
 - [x] (2026-07-14 05:16Z) Ran all locally available script, frontend, release-build, YAML, and diff checks and started the frontend at `http://localhost:5173/`. Browser screenshot inspection could not run because this session did not expose the in-app browser control tool; that limitation is recorded below.
 - [x] (2026-07-14 05:16Z) Recorded final evidence and remaining environment-specific validation in this plan.
 - [x] (2026-07-14 06:07Z) Fixed Windows PowerShell 5.1 handling of installer responses served as `application/octet-stream`; generated commands now decode byte arrays as UTF-8 and R2 publishes stable `.ps1` files as UTF-8 text.
+- [x] (2026-07-14 06:18Z) Allowed Windows ARM64 hosts to install the AMD64 release through Windows x64 emulation and made the Windows lifecycle harness exercise that host path.
 
 ## Surprises & Discoveries
 
@@ -44,6 +45,9 @@ The observable result is a Windows option beside the existing macOS/Linux option
 
 - Observation: Windows PowerShell 5.1 returns `Invoke-WebRequest.Content` as a byte array when the local Python static server labels `.ps1` files `application/octet-stream`. Passing that value directly to `ScriptBlock.Create` converts it to decimal byte text such as `91 67 109...`, which cannot parse as PowerShell source.
   Evidence: native Windows execution failed at `ScriptBlock.Create` with decimal values corresponding to the opening `[CmdletBinding()]` bytes. The R2 publisher's default content-type branch also classified `.ps1` as `application/octet-stream`.
+
+- Observation: Windows ARM64 reports the native architecture through `PROCESSOR_ARCHITECTURE` or `PROCESSOR_ARCHITEW6432`, causing the original strict AMD64 installer gate to reject the package before Windows could run the x64 executable under emulation.
+  Evidence: native Windows ARM64 execution reached the architecture gate and reported `detected ARM64` before any artifact download.
 
 ## Decision Log
 
@@ -77,6 +81,10 @@ The observable result is a Windows option beside the existing macOS/Linux option
 
 - Decision: Normalize downloaded script content in every generated Windows command by decoding `byte[]` responses as UTF-8 before calling `ScriptBlock.Create`, while also publishing stable `.ps1` objects as `text/plain; charset=utf-8`.
   Rationale: MIME metadata should be correct, but the installer entrypoint must remain reliable through development servers, proxies, caches, and object stores that return a generic binary content type. Explicit decoding works with both Windows PowerShell 5.1 byte responses and PowerShell string responses.
+  Date/Author: 2026-07-14, Codex.
+
+- Decision: Accept ARM64 Windows hosts while continuing to install the existing Windows AMD64 artifact, with an explicit emulation warning.
+  Rationale: The daemon and agent tool are user-mode x64 executables, so Windows on Arm can execute them through its built-in x64 emulation. This unblocks ARM64 users without claiming a native ARM64 release or changing release manifests.
   Date/Author: 2026-07-14, Codex.
 
 ## Outcomes & Retrospective
@@ -197,4 +205,4 @@ Add `platform?: DaemonInstallPlatform` to the existing input objects for `buildD
 
 `deploy/daemons/install.ps1` must expose PowerShell parameters named `BackendUrl`, `WorkspaceId`, `DaemonToken`, `StaticBase`, `Version`, `InstallDir`, `DataDir`, and `NoService`. `deploy/daemons/uninstall.ps1` must expose `All`, `InstallDir`, `DataDir`, and `KeepBinaries`.
 
-Plan revision note: created on 2026-07-14 to turn the existing Windows executable construction path into a complete, discoverable end-user installation workflow. Updated at 06:07Z after native Windows testing exposed binary HTTP response coercion and the generated commands and publisher metadata were hardened accordingly.
+Plan revision note: created on 2026-07-14 to turn the existing Windows executable construction path into a complete, discoverable end-user installation workflow. Updated at 06:18Z after native Windows testing confirmed ARM64 hosts should be allowed to consume the AMD64 package through x64 emulation.

@@ -364,8 +364,11 @@ $machineArchitecture = if (-not [string]::IsNullOrWhiteSpace($env:PROCESSOR_ARCH
 } else {
     $env:PROCESSOR_ARCHITECTURE
 }
-if ($machineArchitecture -notin @("AMD64", "x86_64")) {
-    throw "Codesk install: only Windows AMD64 is currently supported; detected $machineArchitecture"
+if ($machineArchitecture -notin @("AMD64", "x86_64", "ARM64", "aarch64")) {
+    throw "Codesk install: Windows AMD64 or ARM64 is required; detected $machineArchitecture"
+}
+if ($machineArchitecture -in @("ARM64", "aarch64")) {
+    Write-InstallWarning "Windows ARM64 detected; installing the AMD64 release through Windows x64 emulation."
 }
 
 $userHome = Get-UserHome
