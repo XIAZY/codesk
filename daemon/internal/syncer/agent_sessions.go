@@ -54,11 +54,23 @@ type agentSessionSupervisor struct {
 	// backoff and is reset only on proven uptime (a completed turn), never on a
 	// bare respawn — else a post-handshake quota kill would spin at full rate.
 	restartAttempts map[string]int
+
+	// baseCtx is the parent of every construction context; baseCancel (fired by
+	// Shutdown) cancels all in-flight Spawn/Start/handshake calls so a blocked
+	// construction is interrupted and reaped promptly instead of stalling.
+	baseCtx    context.Context
+	baseCancel context.CancelFunc
 }
 
 type agentSessionStart struct {
 	done chan struct{}
 	err  error
+	// cancelled is set by Reconcile when the agent is removed while this fresh
+	// construction is in flight; cancel interrupts its Spawn/Start/handshake. The
+	// conditional publish refuses to store a session for a cancelled claim, so a
+	// nil-slot fresh start cannot resurrect a removed agent.
+	cancelled bool
+	cancel    context.CancelFunc
 }
 
 type agentSessionStartupError struct {
@@ -105,6 +117,11 @@ type managedAgentSession struct {
 	// only for the generation whose process actually exited.
 	restartPending bool
 	dead           bool
+
+	// constructCancel interrupts an in-flight restart construction for this
+	// (parked) token; Reconcile removal fires it so a blocked replacement
+	// Spawn/Start/handshake is cancelled and reaped promptly, not after the CAS.
+	constructCancel context.CancelFunc
 
 	// agentRev is a monotonic revision of the desired agent spec (`agent`). A
 	// parked restarter captures it with the spec at construction and the
@@ -301,16 +318,29 @@ func newAgentSessionSupervisor(cfg Config, updater agentSessionUpdater, runtimes
 	if updater == nil {
 		updater = func(context.Context, string, updateAgentSessionRequest) error { return nil }
 	}
-	return &agentSessionSupervisor{
+	baseCtx, baseCancel := context.WithCancel(context.Background())
+	s := &agentSessionSupervisor{
 		cfg:                cfg,
 		status:             newAgentStatusSyncer(updater),
 		runtimes:           runtimes,
-		restartSleep:       func(d time.Duration) { time.Sleep(d) },
 		terminalExitReason: defaultTerminalExitReason,
 		sessions:           map[string]*managedAgentSession{},
 		starting:           map[string]*agentSessionStart{},
 		restartAttempts:    map[string]int{},
+		baseCtx:            baseCtx,
+		baseCancel:         baseCancel,
 	}
+	// The default restart delay is baseCtx-aware so a parked restart unblocks
+	// promptly on Shutdown instead of lingering for the full capped backoff.
+	s.restartSleep = func(d time.Duration) {
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-s.baseCtx.Done():
+		}
+	}
+	return s
 }
 
 func (s *agentSessionSupervisor) SetIdleWake(wake func(string)) {
@@ -350,8 +380,23 @@ func (s *agentSessionSupervisor) Reconcile(ctx context.Context, agents []*agent)
 			// Explicit removal ends this agent's lifecycle: drop its transient
 			// restart counter so a future re-add starts backoff from scratch, and
 			// invalidate any in-flight parked restarter (its conditional swap now
-			// fails because the token is gone).
+			// fails because the token is gone). Cancel a blocked restart
+			// construction so its process is reaped promptly, not after the CAS.
 			delete(s.restartAttempts, agentID)
+			if session.constructCancel != nil {
+				session.constructCancel()
+			}
+		}
+	}
+	// Invalidate any in-flight FRESH construction for a removed agent: mark the
+	// claim cancelled (the conditional publish then refuses to store it) and
+	// cancel its context so a blocked Spawn/Start/handshake returns and reaps.
+	for agentID, start := range s.starting {
+		if _, ok := desired[agentID]; !ok {
+			start.cancelled = true
+			if start.cancel != nil {
+				start.cancel()
+			}
 		}
 	}
 	s.mu.Unlock()
@@ -364,6 +409,10 @@ func (s *agentSessionSupervisor) Reconcile(ctx context.Context, agents []*agent)
 func (s *agentSessionSupervisor) Shutdown() {
 	s.mu.Lock()
 	s.shutdown = true
+	// Cancel every in-flight construction (fresh and restart) so a blocked
+	// Spawn/Start/provider-handshake returns promptly and its process is reaped,
+	// rather than stalling teardown until the construction completes on its own.
+	s.baseCancel()
 	sessions := make([]*managedAgentSession, 0, len(s.sessions))
 	for _, session := range s.sessions {
 		sessions = append(sessions, session)
@@ -374,6 +423,22 @@ func (s *agentSessionSupervisor) Shutdown() {
 		_ = session.process.Stop()
 	}
 	s.status.Stop()
+}
+
+// refreshDesiredSpec updates a session's desired agent spec to the latest and
+// bumps its revision ONLY when a spawn-relevant field actually changed (kind or
+// instructions). An identical reconcile/notification must not advance the
+// revision: a parked token under construction would otherwise be reaped and
+// rebuilt on every touch, starving the restart under frequent reconciles or
+// notifications (which also call ensureSession).
+func (session *managedAgentSession) refreshDesiredSpec(current *agent) {
+	changed := session.agent == nil ||
+		session.agent.Kind != current.Kind ||
+		session.agent.SystemPrompt != current.SystemPrompt
+	session.agent = cloneAgentValue(current)
+	if changed {
+		session.agentRev++
+	}
 }
 
 func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *agent) error {
@@ -395,9 +460,9 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 				// cap or resurrect a terminal agent. Still refresh the desired spec
 				// on the parked token (bumping its revision) so a pending respawn
 				// uses the LATEST instructions, not the death-time clone, and an
-				// in-flight construction against the old revision is rebuilt.
-				session.agent = cloneAgentValue(current)
-				session.agentRev++
+				// in-flight construction against the old revision is rebuilt — but
+				// only bump the revision on a real spec change (see refreshDesiredSpec).
+				session.refreshDesiredSpec(current)
 				s.mu.Unlock()
 				return nil
 			}
@@ -407,8 +472,7 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 				_ = session.process.Stop()
 				continue
 			}
-			session.agent = cloneAgentValue(current)
-			session.agentRev++
+			session.refreshDesiredSpec(current)
 			s.mu.Unlock()
 			return nil
 		}
@@ -425,11 +489,17 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 				return ctx.Err()
 			}
 		}
-		start := &agentSessionStart{done: make(chan struct{})}
+		// The starting entry is this fresh construction's ownership claim; its
+		// cancelable context (child of baseCtx) lets Reconcile removal / Shutdown
+		// interrupt a blocked Spawn/Start/handshake and lets the conditional
+		// publish refuse to store a removed agent.
+		cctx, ccancel := context.WithCancel(s.baseCtx)
+		start := &agentSessionStart{done: make(chan struct{}), cancel: ccancel}
 		s.starting[current.ID] = start
 		s.mu.Unlock()
 
-		err := s.startSession(ctx, current, nil, 0)
+		err := s.startSession(cctx, current, nil, 0, start)
+		ccancel()
 		s.mu.Lock()
 		start.err = err
 		if s.starting[current.ID] == start {
@@ -448,7 +518,7 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 // the token (slot must still hold it). If a racing removal/replacement has
 // changed the slot, the store is abandoned and the freshly spawned process is
 // reaped by the deferred Stop — so a removed agent is never resurrected.
-func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agent, expectPrior *managedAgentSession, expectRev uint64) error {
+func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agent, expectPrior *managedAgentSession, expectRev uint64, claim *agentSessionStart) error {
 	workdir := agentWorkspacePath(s.cfg, current.ID)
 	if err := os.MkdirAll(workdir, 0o755); err != nil {
 		return err
@@ -483,15 +553,18 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 	if err != nil {
 		return err
 	}
-	if err := process.Start(ctx); err != nil {
-		return err
-	}
+	// Arm the reap BEFORE Start: a Start/provider-handshake failure or a
+	// cancellation must reap the freshly launched runtime, not just the
+	// publish-CAS. started stays true on every exit except a successful publish.
 	started := true
 	defer func() {
 		if started {
 			_ = process.Stop()
 		}
 	}()
+	if err := process.Start(ctx); err != nil {
+		return err
+	}
 	sessionID := strings.TrimSpace(current.SessionID)
 	if sessionID != "" {
 		if _, err := process.WriteStdin(ctx, RuntimeInput{
@@ -552,6 +625,15 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 		// the latest spec against the same token.
 		s.mu.Unlock()
 		appendAgentLog(s.cfg, current.ID, "discarding runtime process because the desired spec was refreshed during restart")
+		return nil
+	}
+	if claim != nil && (s.starting[current.ID] != claim || claim.cancelled) {
+		// The fresh-start ownership claim was invalidated: the agent was removed
+		// during construction (Reconcile cancelled the claim) or a newer start
+		// superseded it. Abandon the store so a nil-slot fresh start never
+		// resurrects a removed agent.
+		s.mu.Unlock()
+		appendAgentLog(s.cfg, current.ID, "discarding runtime process because the fresh-start claim was invalidated (removed/superseded)")
 		return nil
 	}
 	s.sessions[current.ID] = session
@@ -898,14 +980,24 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 			}
 			spec.SessionID = session.sessionID
 			rev := session.agentRev
+			// A cancelable construction context (child of baseCtx) stored on the
+			// token: Reconcile removal / Shutdown fire it to interrupt a blocked
+			// Spawn/Start/handshake and reap promptly, not after the CAS.
+			cctx, ccancel := context.WithCancel(s.baseCtx)
+			session.constructCancel = ccancel
 			s.mu.Unlock()
 
 			_ = process.Stop() // idempotent; the old generation is already dead
-			if err := s.startSession(context.Background(), spec, session, rev); err != nil {
+			err := s.startSession(cctx, spec, session, rev, nil)
+			ccancel()
+			if err != nil {
 				appendAgentLog(s.cfg, agentID, "session restart construction failed err=%v", err)
 			}
 
 			s.mu.Lock()
+			if session.constructCancel != nil {
+				session.constructCancel = nil
+			}
 			cur := s.sessions[agentID]
 			if cur != session {
 				// The parked token left the map: startSession published the

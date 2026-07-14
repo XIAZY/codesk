@@ -30,6 +30,7 @@ type fakeRuntimeDriver struct {
 	startSessionErr error
 	steerErr        error
 	failResume      bool
+	startIgnoreCtx  bool
 }
 
 type fakeRuntimeProcess struct {
@@ -47,6 +48,7 @@ type fakeRuntimeProcess struct {
 	startSessionErr error
 	steerErr        error
 	failResume      bool
+	startIgnoreCtx  bool
 	exitInfo        RuntimeExitInfo
 
 	// Optional StartTurn interception: when startTurnEntered/startTurnRelease are
@@ -90,6 +92,7 @@ func (f *fakeRuntimeDriver) Spawn(ctx context.Context, spec RuntimeSpawnSpec) (R
 		startSessionErr: f.startSessionErr,
 		steerErr:        f.steerErr,
 		failResume:      f.failResume,
+		startIgnoreCtx:  f.startIgnoreCtx,
 	}
 	f.mu.Lock()
 	f.processes = append(f.processes, process)
@@ -138,10 +141,16 @@ func (p *fakeRuntimeProcess) Start(ctx context.Context) error {
 		}
 	}
 	if p.startRelease != nil {
-		select {
-		case <-p.startRelease:
-		case <-ctx.Done():
-			return ctx.Err()
+		if p.startIgnoreCtx {
+			// Simulate a construction that finishes before cancellation propagates,
+			// exercising the publish-time claim/CAS backstop rather than ctx cancel.
+			<-p.startRelease
+		} else {
+			select {
+			case <-p.startRelease:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
 	}
 	if p.startErr != nil {
@@ -1983,5 +1992,178 @@ func waitSessionState(t *testing.T, s *agentSessionSupervisor, agentID, want str
 			t.Fatalf("session %s state=%q, want %q", agentID, st, want)
 		case <-time.After(time.Millisecond):
 		}
+	}
+}
+
+// Spoke 14: a fresh nil-slot start racing removal must not publish. Reconcile
+// invalidates the fresh-start claim (and cancels its construction context), so
+// the removed agent is never stored.
+func TestAgentSessionFreshStartRemovalDoesNotStore(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.startEntered = make(chan struct{}, 1)
+	factory.startRelease = make(chan struct{})
+	// The construction finishes (ignores ctx cancel) so this pins the publish-time
+	// claim backstop: even a completed fresh construction must not store a removed
+	// agent.
+	factory.startIgnoreCtx = true
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	ensureDone := make(chan error, 1)
+	go func() {
+		ensureDone <- supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"})
+	}()
+	<-factory.startEntered // fresh construction blocked in Start
+
+	// Backend removes the agent while the fresh construction is in flight, then the
+	// construction completes anyway — the claim must refuse the store.
+	if err := supervisor.Reconcile(context.Background(), nil); err != nil {
+		t.Fatalf("reconcile removal: %v", err)
+	}
+	close(factory.startRelease)
+	<-ensureDone
+
+	supervisor.mu.Lock()
+	sessions := len(supervisor.sessions)
+	supervisor.mu.Unlock()
+	if sessions != 0 {
+		t.Fatalf("fresh start stored a removed agent: want 0 sessions, got %d", sessions)
+	}
+	proc := factory.only(t)
+	proc.mu.Lock()
+	stopped := proc.stopped
+	proc.mu.Unlock()
+	if !stopped {
+		t.Fatal("the removed fresh construction's process was not reaped")
+	}
+}
+
+// Spoke 15: a byte-identical desired refresh during a blocked replacement
+// construction must NOT reap it (agentRev only advances on a real spec change).
+func TestAgentSessionIdenticalRefreshDuringConstructionPreservesReplacement(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	supervisor.restartSleep = func(time.Duration) {}
+	restartDone := make(chan struct{})
+	supervisor.testHookRestartComplete = func() { close(restartDone) }
+
+	spec := &agent{ID: "agent_1", Kind: "codex", SystemPrompt: "same instructions"}
+	if err := supervisor.ensureSession(context.Background(), spec); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	proc1 := factory.only(t)
+
+	factory.startEntered = make(chan struct{}, 1)
+	factory.startRelease = make(chan struct{})
+
+	close(proc1.events)
+	<-factory.startEntered
+
+	// Identical desired spec (no spawn-relevant change) reconciled during construction.
+	if err := supervisor.Reconcile(context.Background(), []*agent{{ID: "agent_1", Kind: "codex", SystemPrompt: "same instructions"}}); err != nil {
+		t.Fatalf("identical reconcile: %v", err)
+	}
+	close(factory.startRelease)
+	<-restartDone
+
+	factory.mu.Lock()
+	procs := len(factory.processes)
+	factory.mu.Unlock()
+	if procs != 2 {
+		t.Fatalf("identical refresh reaped/churned the in-flight replacement: want 2 processes, got %d", procs)
+	}
+	supervisor.mu.Lock()
+	live := supervisor.sessions["agent_1"] != nil && !supervisor.sessions["agent_1"].dead
+	supervisor.mu.Unlock()
+	if !live {
+		t.Fatal("replacement was not published after an identical refresh")
+	}
+}
+
+// Spoke 16: Shutdown cancels a replacement construction blocked in Start and
+// reaps it promptly, without a manual release (Deniz's teardown-blocking cut).
+func TestAgentSessionShutdownCancelsBlockedReplacementConstruction(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	supervisor.restartSleep = func(time.Duration) {}
+	restartDone := make(chan struct{})
+	supervisor.testHookRestartComplete = func() { close(restartDone) }
+
+	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"}); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	proc1 := factory.only(t)
+
+	factory.startEntered = make(chan struct{}, 1)
+	factory.startRelease = make(chan struct{}) // never released
+
+	close(proc1.events)
+	<-factory.startEntered // replacement blocked in Start
+
+	supervisor.Shutdown() // must cancel the blocked construction, not wait for release
+	select {
+	case <-restartDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Shutdown did not cancel the blocked replacement construction (teardown stalled)")
+	}
+
+	repl := latestFakeProcess(factory)
+	repl.mu.Lock()
+	stopped := repl.stopped
+	repl.mu.Unlock()
+	if !stopped {
+		t.Fatal("blocked replacement construction was not reaped on Shutdown")
+	}
+	supervisor.mu.Lock()
+	sessions := len(supervisor.sessions)
+	supervisor.mu.Unlock()
+	if sessions != 0 {
+		t.Fatalf("Shutdown-cancelled construction still published: want 0 sessions, got %d", sessions)
+	}
+}
+
+// Spoke 16: removal cancels a replacement construction blocked in Start and
+// reaps it promptly, without a manual release.
+func TestAgentSessionRemovalCancelsBlockedReplacementConstruction(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	supervisor.restartSleep = func(time.Duration) {}
+	restartDone := make(chan struct{})
+	supervisor.testHookRestartComplete = func() { close(restartDone) }
+
+	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"}); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	proc1 := factory.only(t)
+
+	factory.startEntered = make(chan struct{}, 1)
+	factory.startRelease = make(chan struct{}) // never released
+
+	close(proc1.events)
+	<-factory.startEntered
+
+	if err := supervisor.Reconcile(context.Background(), nil); err != nil {
+		t.Fatalf("reconcile removal: %v", err)
+	}
+	select {
+	case <-restartDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("removal did not cancel the blocked replacement construction")
+	}
+
+	repl := latestFakeProcess(factory)
+	repl.mu.Lock()
+	stopped := repl.stopped
+	repl.mu.Unlock()
+	if !stopped {
+		t.Fatal("blocked replacement construction was not reaped on removal")
+	}
+	supervisor.mu.Lock()
+	sessions := len(supervisor.sessions)
+	supervisor.mu.Unlock()
+	if sessions != 0 {
+		t.Fatalf("removal-cancelled construction still published: want 0 sessions, got %d", sessions)
 	}
 }
