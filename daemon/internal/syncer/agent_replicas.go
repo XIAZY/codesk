@@ -37,59 +37,40 @@ func (s *Service) syncAgentRuntimes(ctx context.Context, workspace *workspaceRes
 	if workspace != nil {
 		agents = workspace.Agents
 	}
-	desired := make(map[string]*agent, len(agents))
+	desired := make(map[string]struct{}, len(agents))
 	for _, current := range agents {
 		if current == nil {
 			continue
 		}
-		desired[current.ID] = current
+		desired[current.ID] = struct{}{}
 	}
 
 	s.mu.Lock()
 	existing := make([]workspaceRuntimeBorrow, 0, len(desired))
-	prepared := make([]preparedAgentRuntimeReplacement, 0)
 	var setupErr error
 	for agentID := range desired {
-		currentAgent := desired[agentID]
 		managed := s.agentRuntimes[agentID]
 		if managed != nil {
 			managed.workspace = workspace
-		}
-		if managed != nil && managed.runtime != nil {
-			if managed.runtime.replica != nil && managed.runtime.replica.actorID == currentAgent.ID {
-				if managed.stopped() {
-					// The completion owner performs the classified restart. A refresh only
-					// updates its desired-workspace snapshot and must not bypass backoff.
-					continue
-				}
-				if runtime, release, owned := managed.borrowForRefresh(); runtime != nil {
-					existing = append(existing, workspaceRuntimeBorrow{runtime: runtime, release: release})
-					continue
-				} else if owned {
-					continue
-				}
+			if managed.stopped() {
+				// The completion owner performs the classified restart. A refresh only
+				// updates its desired-workspace snapshot and must not bypass backoff.
+				continue
 			}
+			if runtime, release, _ := managed.borrowForRefresh(); runtime != nil {
+				existing = append(existing, workspaceRuntimeBorrow{runtime: runtime, release: release})
+			}
+			// Registered starting, retiring, and otherwise unavailable generations
+			// remain completion-owned. Refresh only constructs absent runtimes.
+			continue
 		}
 		rootDir := agentWorkspacePath(s.cfg, agentID)
-		runtime, err := newWorkspaceRuntime(s.cfg, s.client, rootDir, currentAgent.ID, "agent")
+		runtime, err := newWorkspaceRuntime(s.cfg, s.client, rootDir, agentID, "agent")
 		if err != nil {
 			setupErr = err
 			break
 		}
 		runtime.initialWorkspace = workspace
-		if managed != nil {
-			managed.retire()
-			if managed.cancel != nil {
-				managed.cancel()
-			}
-			prepared = append(prepared, preparedAgentRuntimeReplacement{
-				agentID:   agentID,
-				expected:  managed,
-				runtime:   runtime,
-				parentCtx: ctx,
-			})
-			continue
-		}
 		s.agentRuntimes[agentID] = s.startAgentWorkspaceRuntimeAttempt(ctx, agentID, runtime, workspace, 0)
 	}
 
@@ -122,11 +103,6 @@ func (s *Service) syncAgentRuntimes(ctx context.Context, workspace *workspaceRes
 			}
 		}
 		borrowed.release()
-	}
-	for _, replacement := range prepared {
-		errs = append(errs, closeManagedWorkspaceRuntime(replacement.expected))
-		_, publishErr := s.publishPreparedAgentRuntimeReplacement(replacement)
-		errs = append(errs, publishErr)
 	}
 	if setupErr != nil {
 		return errors.Join(setupErr, errors.Join(errs...))
@@ -469,8 +445,6 @@ func managedWorkspaceRuntimeExitClass(err error) string {
 	switch {
 	case err == nil, errors.Is(err, context.Canceled):
 		return "stopped"
-	case isTerminalAuthError(err):
-		return "terminal-auth"
 	default:
 		return "runtime-failure"
 	}
@@ -479,9 +453,6 @@ func managedWorkspaceRuntimeExitClass(err error) string {
 func managedWorkspaceRuntimeRestartDelay(attempt int, err error) time.Duration {
 	if err == nil || errors.Is(err, context.Canceled) {
 		return 0
-	}
-	if isTerminalAuthError(err) {
-		return agentRuntimeRestartMaxDelay
 	}
 	if attempt <= 0 {
 		return 0
