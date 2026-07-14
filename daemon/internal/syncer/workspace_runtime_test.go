@@ -42,7 +42,7 @@ func TestReconcileQueueWakeCoalescesSignals(t *testing.T) {
 
 func TestWorkspaceRuntimeStartupRecoveryQueuesDurableSQLiteWork(t *testing.T) {
 	root := t.TempDir()
-	cache, err := newDocumentCache(root)
+	cache, err := newTestDocumentCache(t, root)
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -123,11 +123,11 @@ func TestWorkspaceRuntimeStartupRecoveryQueuesDurableSQLiteWork(t *testing.T) {
 	if err := cache.storeLocalNamespaceIntent(newLocalCreateIntent("local-create.md", "daemon_agent", "daemon", "local-create-hash", time.Now().UnixNano())); err != nil {
 		t.Fatalf("store local namespace intent: %v", err)
 	}
-	if err := cache.db.Close(); err != nil {
+	if err := cache.Close(); err != nil {
 		t.Fatalf("close cache: %v", err)
 	}
 
-	reopened, err := newDocumentCache(root)
+	reopened, err := newTestDocumentCache(t, root)
 	if err != nil {
 		t.Fatalf("reopen cache: %v", err)
 	}
@@ -170,18 +170,16 @@ func containsString(values []string, want string) bool {
 func TestWorkspaceRuntimeSyncDBsArePerLocalWorkspace(t *testing.T) {
 	cfg := Config{WorkspaceDir: filepath.Join(t.TempDir(), "primary"), AgentWorkspaceRoot: filepath.Join(t.TempDir(), "agents"), AgentID: "daemon_agent"}
 
-	primary, err := newWorkspaceRuntime(cfg, http.DefaultClient, cfg.WorkspaceDir, cfg.AgentID, "daemon")
+	primary, err := newTestWorkspaceRuntime(t, cfg, http.DefaultClient, cfg.WorkspaceDir, cfg.AgentID, "daemon")
 	if err != nil {
 		t.Fatalf("new primary runtime: %v", err)
 	}
-	defer primary.replica.watcher.Close()
 
 	agentRoot := filepath.Join(cfg.AgentWorkspaceRoot, "agent_1")
-	agent, err := newWorkspaceRuntime(cfg, http.DefaultClient, agentRoot, "agent_1", "agent")
+	agent, err := newTestWorkspaceRuntime(t, cfg, http.DefaultClient, agentRoot, "agent_1", "agent")
 	if err != nil {
 		t.Fatalf("new agent runtime: %v", err)
 	}
-	defer agent.replica.watcher.Close()
 
 	if primary.docCache == nil || agent.docCache == nil {
 		t.Fatal("expected both runtimes to have document caches")
@@ -201,6 +199,17 @@ func TestWorkspaceRuntimeSyncDBsArePerLocalWorkspace(t *testing.T) {
 	}
 	if got := agent.docCache.localStateVector("doc_1"); len(got) != 0 {
 		t.Fatalf("agent cache should not contain primary state, got vector %v", got)
+	}
+}
+
+func TestWorkspaceReplicaConstructionDoesNotStartUndrainedWatcher(t *testing.T) {
+	replica := newWorkspaceReplica(Config{}, t.TempDir(), "daemon_agent", "daemon", nil, nil)
+
+	if replica.watcher != nil {
+		t.Fatal("workspace watcher must be created by Run, which owns its event consumer")
+	}
+	if err := replica.ensureDirectoryWatches(); err != nil {
+		t.Fatalf("refresh watches before Run: %v", err)
 	}
 }
 
@@ -235,12 +244,11 @@ func TestWorkspaceRuntimeCreateEditDeleteMultipleFilesRegression(t *testing.T) {
 	defer server.Close()
 	cfg.BackendURL = server.URL
 
-	runtime, err := newWorkspaceRuntime(cfg, server.Client(), root, cfg.AgentID, "daemon")
+	runtime, err := newTestWorkspaceRuntime(t, cfg, server.Client(), root, cfg.AgentID, "daemon")
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
 	server.installDocumentUpdateHook(t, runtime)
-	defer runtime.replica.watcher.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -309,11 +317,10 @@ func TestWorkspaceRuntimeProjectsRemoteClientLifecycleToFilesystem(t *testing.T)
 		AgentWorkspaceRoot: filepath.Join(t.TempDir(), "agents"),
 		AgentID:            "daemon_agent",
 	}
-	runtime, err := newWorkspaceRuntime(cfg, http.DefaultClient, root, cfg.AgentID, "daemon")
+	runtime, err := newTestWorkspaceRuntime(t, cfg, http.DefaultClient, root, cfg.AgentID, "daemon")
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
-	defer runtime.replica.watcher.Close()
 	ctx := context.Background()
 
 	client := newRemoteLifecycleClientForTest("doc_root_remote")
@@ -348,7 +355,7 @@ func TestWorkspaceRuntimeProjectsRemoteClientLifecycleToFilesystem(t *testing.T)
 
 func TestReconcileStateCleanRemoteRenameMovesWithoutContentOutbox(t *testing.T) {
 	root := t.TempDir()
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -387,7 +394,7 @@ func TestReconcileStateCleanRemoteRenameMovesWithoutContentOutbox(t *testing.T) 
 
 func TestReconcileStateDirtyRemoteRenameSendsLocalEditBeforeMovingPath(t *testing.T) {
 	root := t.TempDir()
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -441,7 +448,7 @@ func TestReconcileStateDirtyRemoteRenameSendsLocalEditBeforeMovingPath(t *testin
 
 func TestReconcileStateRemoteRenameWithDestinationCollisionPreservesCollidingBytes(t *testing.T) {
 	root := t.TempDir()
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -484,7 +491,7 @@ func TestReconcileStateRemoteDeleteCleanAndDirtyOutputs(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
-			cache, err := newDocumentCache(t.TempDir())
+			cache, err := newTestDocumentCache(t, t.TempDir())
 			if err != nil {
 				t.Fatalf("new cache: %v", err)
 			}
@@ -507,11 +514,7 @@ func TestReconcileStateRemoteDeleteCleanAndDirtyOutputs(t *testing.T) {
 				docCache:       cache,
 				reconcileQueue: newReconcileQueue(),
 			}
-			replica, err := newWorkspaceReplica(Config{}, root, "daemon_agent", "daemon", runtime.markDocumentDirty, runtime.markLocalCreate)
-			if err != nil {
-				t.Fatalf("new replica: %v", err)
-			}
-			defer replica.watcher.Close()
+			replica := newWorkspaceReplica(Config{}, root, "daemon_agent", "daemon", runtime.markDocumentDirty, runtime.markLocalCreate)
 			runtime.replica = replica
 			addTrackedForStateTest(runtime, tracked)
 
@@ -531,7 +534,7 @@ func TestReconcileStateRemoteDeleteCleanAndDirtyOutputs(t *testing.T) {
 
 func TestReconcileStateDuplicateMaterializedPathsRouteEditsByDocumentID(t *testing.T) {
 	root := t.TempDir()
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -615,11 +618,10 @@ func TestWorkspaceRuntimeDropsStaleLocalCreateCandidates(t *testing.T) {
 	defer server.Close()
 
 	cfg := Config{BackendURL: server.URL, WorkspaceDir: root, AgentWorkspaceRoot: filepath.Join(t.TempDir(), "agents"), AgentID: "daemon_agent"}
-	runtime, err := newWorkspaceRuntime(cfg, server.Client(), root, cfg.AgentID, "daemon")
+	runtime, err := newTestWorkspaceRuntime(t, cfg, server.Client(), root, cfg.AgentID, "daemon")
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
-	defer runtime.replica.watcher.Close()
 	seedRoot := crdt.New()
 	seedRootMap := seedRoot.GetMap(rootMapName)
 	if _, err := seedRoot.Update(func(txn *crdt.Transaction) error {
@@ -661,7 +663,7 @@ func TestWorkspaceRuntimeOutboxPostDoesNotBlockPendingRemoteAppend(t *testing.T)
 	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
 		t.Fatalf("write local file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -874,7 +876,7 @@ func TestWorkspaceRuntimeRunReconcilesLocalCreateEvents(t *testing.T) {
 	defer server.Close()
 	cfg.BackendURL = server.URL
 
-	runtime, err := newWorkspaceRuntime(cfg, server.Client(), root, cfg.AgentID, "daemon")
+	runtime, err := newTestWorkspaceRuntime(t, cfg, server.Client(), root, cfg.AgentID, "daemon")
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
@@ -925,12 +927,11 @@ func TestWorkspaceRuntimeFilesystemLifecycleRecordsSQLiteAndDaemonCalls(t *testi
 	defer server.Close()
 	cfg.BackendURL = server.URL
 
-	runtime, err := newWorkspaceRuntime(cfg, server.Client(), root, cfg.AgentID, "daemon")
+	runtime, err := newTestWorkspaceRuntime(t, cfg, server.Client(), root, cfg.AgentID, "daemon")
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
 	server.installDocumentUpdateHook(t, runtime)
-	defer runtime.replica.watcher.Close()
 	ctx := context.Background()
 	emptyRoot := crdt.New()
 	if err := runtime.docCache.storeDoc(server.rootDocumentID, rootDocumentPath, 1, emptyRoot); err != nil {
