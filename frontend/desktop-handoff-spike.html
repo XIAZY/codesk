@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="referrer" content="no-referrer" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>Codesk Desktop connection test</title>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <img src="/app-icon.svg" width="32" height="32" alt="" />
+        <span>Codesk</span>
+      </div>
+      <span class="environment">Desktop handoff spike</span>
+    </header>
+    <main>
+      <section class="heading" aria-labelledby="page-title">
+        <div>
+          <p class="eyebrow">Native connection</p>
+          <h1 id="page-title">Connect Codesk Desktop</h1>
+        </div>
+        <span id="status-chip" class="status-chip" data-state="loading">Checking session</span>
+      </section>
+
+      <section id="loading-view" class="state-view" aria-live="polite">
+        <p>Loading your Codesk workspaces...</p>
+      </section>
+
+      <section id="signed-out-view" class="state-view" hidden>
+        <h2>Sign in required</h2>
+        <p>Sign in to Codesk in this browser, then return to this tab.</p>
+        <div class="actions">
+          <a class="button secondary" href="/login" target="_blank" rel="noreferrer">Open sign in</a>
+          <button id="retry-button" class="button" type="button">Check again</button>
+        </div>
+      </section>
+
+      <form id="connect-form" class="connection-form" hidden>
+        <div class="form-row">
+          <label for="workspace-select">Workspace</label>
+          <select id="workspace-select" name="workspace" required>
+            <option value="">Choose a workspace</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label for="daemon-name">Desktop name</label>
+          <input id="daemon-name" name="daemon-name" value="Codesk Desktop" maxlength="128" required />
+        </div>
+        <div class="form-footer">
+          <p id="account-label" class="account-label"></p>
+          <button id="connect-button" class="button" type="submit" disabled>Create and connect</button>
+        </div>
+      </form>
+
+      <section id="error-view" class="state-view error-view" hidden aria-live="assertive">
+        <h2>Connection could not start</h2>
+        <p id="error-message">The desktop handoff request is invalid.</p>
+      </section>
+    </main>
+    <script type="module" src="/src/desktopHandoffSpike.ts"></script>
+  </body>
+</html>
