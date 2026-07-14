@@ -160,35 +160,37 @@ func (s *Session) Wait(ctx context.Context) (Payload, error) {
 		_ = s.Close()
 		return payload, nil
 	case err := <-s.serveErrCh:
-		if payload, ok := s.waitForClaimedPayload(); ok {
+		if payload, ok, _ := s.closeAndWaitForClaimedPayload(); ok {
 			return payload, nil
 		}
-		_ = s.Close()
 		return Payload{}, fmt.Errorf("serve desktop handoff callback: %w", err)
 	case <-s.closedCh:
-		if payload, ok := s.waitForClaimedPayload(); ok {
+		if payload, ok, _ := s.closeAndWaitForClaimedPayload(); ok {
 			return payload, nil
 		}
 		return Payload{}, ErrClosed
 	case <-ctx.Done():
-		if payload, ok := s.waitForClaimedPayload(); ok {
+		if payload, ok, _ := s.closeAndWaitForClaimedPayload(); ok {
 			return payload, nil
 		}
-		_ = s.Close()
 		return Payload{}, ctx.Err()
 	}
 }
 
-// Close releases the callback listener. It is safe to call more than once.
+// Close fences new claims and releases the callback listener. If a valid POST
+// already claimed the session, Close lets its success response finish first.
+// It is safe to call more than once.
 func (s *Session) Close() error {
 	if s == nil {
 		return nil
 	}
+	_, _, closeErr := s.closeAndWaitForClaimedPayload()
+	return closeErr
+}
+
+func (s *Session) closeServer() error {
 	var closeErr error
 	s.closeOnce.Do(func() {
-		s.stateMu.Lock()
-		s.closed = true
-		s.stateMu.Unlock()
 		close(s.closedCh)
 		closeErr = s.server.Close()
 		if errors.Is(closeErr, http.ErrServerClosed) || errors.Is(closeErr, net.ErrClosed) {
@@ -260,15 +262,15 @@ func (s *Session) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.claimed = true
 	s.result = payload
 	s.stateMu.Unlock()
+	// The winning connection is already accepted. Close only the listener at the
+	// claim boundary so no second connection can enter while the response flushes.
+	_ = s.listener.Close()
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(len(successPage)))
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, successPage)
 	_ = http.NewResponseController(w).Flush()
-	// Stop accepting new connections immediately after the first valid POST.
-	// The current response has already been flushed and can finish normally.
-	_ = s.listener.Close()
 
 	s.stateMu.Lock()
 	s.accepted = true
@@ -286,21 +288,23 @@ func (s *Session) acceptedPayload() (Payload, bool) {
 	return payload, true
 }
 
-func (s *Session) waitForClaimedPayload() (Payload, bool) {
-	s.stateMu.RLock()
+func (s *Session) closeAndWaitForClaimedPayload() (Payload, bool, error) {
+	s.stateMu.Lock()
 	claimed := s.claimed
-	s.stateMu.RUnlock()
+	// Closing and claiming share this lock as their linearization boundary. Once
+	// closed is set, a parsed request can no longer claim the session.
+	s.closed = true
+	s.stateMu.Unlock()
 	if !claimed {
-		return Payload{}, false
+		return Payload{}, false, s.closeServer()
 	}
 
-	// Parsing a complete valid form is the atomic ownership boundary. Once a
-	// request claims the session, let its tiny success response finish before a
-	// concurrent cancellation or Close tears down the server.
+	// A complete valid form claimed the session before the close fence. Let its
+	// tiny success response finish before cancellation or Close tears down the
+	// server, then return the accepted payload to the waiter.
 	<-s.acceptedCh
 	payload, _ := s.acceptedPayload()
-	_ = s.Close()
-	return payload, true
+	return payload, true, s.closeServer()
 }
 
 func parsePayload(values url.Values) (Payload, bool) {

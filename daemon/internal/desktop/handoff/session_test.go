@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -375,8 +376,8 @@ func TestSessionOnlyOneConcurrentPostWins(t *testing.T) {
 		t.Fatalf("successful requests = %d, want 1", okCount)
 	}
 	for range errorsCh {
-		// The listener closes immediately after the winner flushes. Requests that
-		// have not connected by then are rejected at the TCP boundary.
+		// The listener closes at the winner's claim boundary. Requests that have
+		// not connected by then are rejected at the TCP boundary.
 		rejectedCount++
 	}
 	if rejectedCount != requests-1 {
@@ -404,6 +405,7 @@ func TestSessionValidClaimWinsCancellationRace(t *testing.T) {
 		session.ServeHTTP(writer, request)
 	}()
 	<-writer.flushStarted
+	assertListenerRefusesConnection(t, session.CallbackURL())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -432,6 +434,93 @@ func TestSessionValidClaimWinsCancellationRace(t *testing.T) {
 		t.Fatal("valid claimed token was not preserved")
 	}
 	<-handlerDone
+}
+
+func TestSessionCancellationFencesLateValidClaim(t *testing.T) {
+	session := newTestSession(t)
+	encoded := validForm().Encode()
+	body := &blockingRequestBody{
+		reader:      strings.NewReader(encoded),
+		readStarted: make(chan struct{}),
+		releaseRead: make(chan struct{}),
+	}
+	request, err := http.NewRequest(http.MethodPost, session.CallbackURL(), body)
+	if err != nil {
+		t.Fatalf("new form request: %v", err)
+	}
+	request.ContentLength = int64(len(encoded))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	writer := httptest.NewRecorder()
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		session.ServeHTTP(writer, request)
+	}()
+	<-body.readStarted
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	payload, waitErr := session.Wait(ctx)
+	close(body.releaseRead)
+	<-handlerDone
+
+	if !errors.Is(waitErr, context.Canceled) {
+		t.Fatalf("wait error = %v, want canceled", waitErr)
+	}
+	if payload != (Payload{}) {
+		t.Fatalf("canceled wait returned payload: %v", payload)
+	}
+	if writer.Code != http.StatusConflict {
+		t.Fatalf("late valid request status = %d, want 409", writer.Code)
+	}
+	if _, ok := session.acceptedPayload(); ok {
+		t.Fatal("late valid request claimed a canceled session")
+	}
+}
+
+func TestSessionCloseWaitsForClaimedResponse(t *testing.T) {
+	session := newTestSession(t)
+	writer := &blockingFlushWriter{
+		ResponseRecorder: httptest.NewRecorder(),
+		flushStarted:     make(chan struct{}),
+		releaseFlush:     make(chan struct{}),
+	}
+	request := formRequest(t, session.CallbackURL(), validForm())
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		session.ServeHTTP(writer, request)
+	}()
+	<-writer.flushStarted
+	assertListenerRefusesConnection(t, session.CallbackURL())
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- session.Close() }()
+	released := false
+	defer func() {
+		if !released {
+			close(writer.releaseFlush)
+		}
+	}()
+	select {
+	case closeErr := <-closeDone:
+		t.Fatalf("Close returned before the claimed response flushed: %v", closeErr)
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	close(writer.releaseFlush)
+	released = true
+	if closeErr := <-closeDone; closeErr != nil {
+		t.Fatalf("close after valid claim: %v", closeErr)
+	}
+	<-handlerDone
+	payload, waitErr := session.Wait(context.Background())
+	if waitErr != nil {
+		t.Fatalf("wait after close preserved claim: %v", waitErr)
+	}
+	if payload.Token() != testToken {
+		t.Fatal("Close discarded the valid claimed token")
+	}
 }
 
 func TestSessionWaitTimeoutAndCancelCloseListener(t *testing.T) {
@@ -590,6 +679,20 @@ func assertListenerClosed(t *testing.T, endpoint string) {
 	}
 }
 
+func assertListenerRefusesConnection(t *testing.T, endpoint string) {
+	t.Helper()
+	callback, err := url.Parse(endpoint)
+	if err != nil {
+		t.Fatalf("parse callback URL: %v", err)
+	}
+	connection, err := net.DialTimeout("tcp4", callback.Host, 100*time.Millisecond)
+	if err != nil {
+		return
+	}
+	_ = connection.Close()
+	t.Fatal("accept socket remained reachable after the valid request claimed the session")
+}
+
 func assertSecondRequestRejected(t *testing.T, endpoint string) {
 	t.Helper()
 	request := formRequest(t, endpoint, validForm())
@@ -609,6 +712,25 @@ type blockingFlushWriter struct {
 	flushStarted chan struct{}
 	releaseFlush chan struct{}
 	flushOnce    sync.Once
+}
+
+type blockingRequestBody struct {
+	reader      *strings.Reader
+	readStarted chan struct{}
+	releaseRead chan struct{}
+	startOnce   sync.Once
+}
+
+func (b *blockingRequestBody) Read(buffer []byte) (int, error) {
+	b.startOnce.Do(func() {
+		close(b.readStarted)
+		<-b.releaseRead
+	})
+	return b.reader.Read(buffer)
+}
+
+func (b *blockingRequestBody) Close() error {
+	return nil
 }
 
 func (w *blockingFlushWriter) Flush() {

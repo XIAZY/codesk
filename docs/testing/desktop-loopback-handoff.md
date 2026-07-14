@@ -5,7 +5,7 @@ This gate proves one narrow contract before the Codesk desktop app is built:
 1. A native process pre-binds `127.0.0.1:0` and generates a 256-bit nonce in the callback path.
 2. The normal HTTPS Codesk web app authenticates the human, asks for an explicit workspace, and calls the existing daemon-create API.
 3. A top-level `application/x-www-form-urlencoded` form POST sends the returned daemon ID, opaque token, and workspace metadata to the callback.
-4. The loopback listener accepts the first valid POST, flushes a success page, and stops accepting connections.
+4. The loopback listener accepts the first valid POST, stops accepting new connections at the claim boundary, and then flushes a success page on the winning connection.
 
 The token is allowed only in the daemon-create HTTPS response, the temporary hidden form value, the loopback POST body, and the receiver's in-memory result. It must not appear in a URL, referrer, browser history entry, console, HAR file, screenshot, command argument, command output, or log.
 
