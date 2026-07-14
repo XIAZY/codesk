@@ -4,7 +4,7 @@ This ExecPlan is a living document. The sections `Progress`, `Surprises & Discov
 
 ## Purpose / Big Picture
 
-Codesk's future desktop app needs to receive the existing static daemon bearer token after a human signs in and chooses a workspace in the normal web application. Before the tray controller, secret stores, or installers are built, this spike proves that a secure web page can hand that token to a one-shot HTTP listener bound only to the same computer. A successful run opens a Codesk browser harness, creates a daemon through the existing API, navigates once to a random `http://127.0.0.1:<port>/desktop/connect/<nonce>` URL with an `application/x-www-form-urlencoded` POST, and shows a local success page. The token appears only in the POST body and in the receiver's in-memory result; it never appears in a URL, browser history, referrer, console output, command-line argument, or log.
+Codesk's future desktop app needs to receive the existing static daemon bearer token after a human signs in and chooses a workspace in the normal web application. Before the tray controller, secret stores, or installers are built, this spike proves that a secure web page can hand that token to a one-shot HTTP listener bound only to the same computer. A successful run opens a Codesk browser harness, creates a daemon through the existing API, navigates once to a random `http://127.0.0.1:<port>/desktop/connect/<nonce>` URL with an `application/x-www-form-urlencoded` POST, receives an empty `303`, and finishes on a fixed credential-free HTTPS completion page at the authorized Codesk origin. The token appears only in the POST body and in the receiver's in-memory result; after the redirect it is absent from URLs, committed browser history, referrers, console output, command-line arguments, and logs.
 
 This is a blocking feasibility gate, not the finished `/desktop/connect` product route. The final product route, credential persistence, and daemon startup ordering belong to later desktop tasks. The reusable transport code and its conformance harness land now so Windows Edge, Windows Chrome, and macOS Safari can all test exactly the same commit.
 
@@ -16,9 +16,12 @@ This is a blocking feasibility gate, not the finished `/desktop/connect` product
 - [x] (2026-07-14 22:18Z) Implemented the reusable Go one-shot receiver and exhaustive protocol tests; focused race and vet gates pass.
 - [x] (2026-07-14 22:22Z) Implemented the reusable browser form builder, literal-loopback validator, opaque-token handling, and frontend tests; typecheck and focused Vitest pass.
 - [x] (2026-07-14 22:28Z) Implemented the test-only authenticated browser harness, separate QA-only Vite build, redacting spike command, and native evidence procedure.
-- [x] (2026-07-14 22:46Z) Passed focused and full Go tests/vet, focused race tests, 100 repeated receiver runs, all 288 frontend tests, ordinary-build exclusion, and the explicit QA-only harness build on Linux ARM64.
+- [x] (2026-07-14 22:46Z) Passed focused and full Go tests/vet, focused race tests, 100 repeated receiver runs, all 291 frontend tests, ordinary-build exclusion, and the explicit QA-only harness build on Linux ARM64.
 - [x] (2026-07-14 22:31Z) Passed a diagnostic Chromium 149 top-level POST against the real Go listener: exact content type and six fields arrived, the opaque token was preserved, Referer was absent, success rendered, and URL/console/command output contained no token.
 - [x] (2026-07-14 22:42Z) Cross-constructed the command for Windows AMD64/ARM64 and macOS AMD64/ARM64 and verified the resulting PE/Mach-O machine types. These builds are construction evidence only and will be rebuilt and hashed from the published exact head.
+- [x] (2026-07-14 23:20Z) Reproduced and accepted the browser-history P1: a literal 200 response left the form POST as a replayable history entry, and Chromium reload attempted the credential-bearing POST again.
+- [x] (2026-07-14 23:39Z) Amended the receiver to return an empty 303 to a fixed prevalidated same-origin completion page. Focused and full Go test/vet, 20 race repetitions, 100 normal repetitions, all 291 frontend tests, production-build exclusion, and the two-page QA build pass on Linux ARM64.
+- [x] (2026-07-14 23:40Z) Chromium 150 real-browser diagnostic passed: one fixture-bearing loopback POST, three credential-free completion GETs across redirect/reload/forward, no callback replay on reload/back/forward, no callback or completion Referer, and no committed callback history URL.
 - [ ] Publish the exact branch head and obtain Windows Edge, Windows Chrome, and macOS Safari evidence bound to that head.
 - [ ] Seal the contract, record browser/OS versions and evidence hashes, request independent review, and move task #35 to review.
 
@@ -36,6 +39,9 @@ This is a blocking feasibility gate, not the finished `/desktop/connect` product
 - Observation: Full Go regression tests need both the host `libyrs.a` and frontend `node_modules` because the Yjs compatibility test invokes Node from the Go suite.
   Evidence: the first full run identified each missing local prerequisite separately; after restoring the current Linux ARM64 library and the unchanged sibling dependency tree, `go test ./...` passed without a product change.
 
+- Observation: `Cache-Control: no-store` does not remove a form POST body from browser navigation history. A 200 response made Chromium's committed entry a `form_submit`; reload attempted a second POST containing the fixture token even though the one-shot listener rejected delivery.
+  Evidence: Chromium 150 CDP reported `hasPostData=true` for the committed callback entry and emitted a second credential-bearing POST on reload. The exact token was a nonproduction fixture.
+
 ## Decision Log
 
 - Decision: Land production-quality transport primitives plus a test-only browser harness, but do not add the product `/desktop/connect` route in this task.
@@ -46,12 +52,16 @@ This is a blocking feasibility gate, not the finished `/desktop/connect` product
   Rationale: a literal IPv4 loopback removes DNS and dual-stack ambiguity. Regex validation before URL parsing prevents alternate numeric spellings from canonicalizing into an apparently acceptable loopback host.
   Date/Author: 2026-07-14 / Vitaliy
 
-- Decision: Use a top-level HTML form POST instead of `fetch`, XHR, iframe, WebSocket, or a query-string redirect.
-  Rationale: the HTML form algorithm puts URL-encoded fields in the POST entity body. This avoids CORS/preflight machinery and the current Chrome Local Network Access coverage for fetch/subresources/subframes. The token is absent from the action URL, browser history, and referrer.
+- Decision: Use a top-level HTML form POST instead of `fetch`, XHR, iframe, WebSocket, or a query-string redirect, then terminate the navigation with POST/Redirect/GET.
+  Rationale: the HTML form algorithm puts URL-encoded fields in the POST entity body. This avoids CORS/preflight machinery and the current Chrome Local Network Access coverage for fetch/subresources/subframes. A bare 200 is insufficient because the browser retains replayable form data; an empty 303 replaces the committed navigation with a credential-free GET.
   Date/Author: 2026-07-14 / Vitaliy
 
-- Decision: Invalid requests do not consume the session; the first fully valid request atomically wins, all concurrent or later valid requests are rejected, and the listener stops accepting immediately after flushing the success response.
-  Rationale: random internet noise, browser probes, or a malformed request must not strand a legitimate connect attempt. Atomic first-valid-wins semantics make duplicate behavior deterministic and testable.
+- Decision: Invalid requests do not consume the session; the first fully valid request atomically wins, all concurrent or later valid requests are rejected, and the listener stops accepting at the claim boundary before the 303 is flushed.
+  Rationale: random internet noise, browser probes, or a malformed request must not strand a legitimate connect attempt. Atomic first-valid-wins semantics make duplicate behavior deterministic and testable. Credential capture is independent of redirect delivery, so a failed completion navigation cannot discard a claimed payload.
+  Date/Author: 2026-07-14 / Vitaliy
+
+- Decision: Construct the completion URL from the already-validated Codesk origin plus the fixed `/desktop-handoff-complete.html` path before generating the nonce or binding the listener. The completion URL permits no userinfo, query, fragment, callback value, nonce, or POST-derived input; remote origins require HTTPS, while literal loopback HTTP is diagnostic-only.
+  Rationale: a fixed external completion page preserves the original one-POST/then-close lifecycle and avoids a second loopback request, timeout, or state machine. Pre-bind validation makes the redirect destination immutable before any credential arrives.
   Date/Author: 2026-07-14 / Vitaliy
 
 - Decision: Treat the daemon token as an opaque credential, not as a `nottyd_`-prefixed 32-byte base64url value.
@@ -64,7 +74,7 @@ This is a blocking feasibility gate, not the finished `/desktop/connect` product
 
 ## Outcomes & Retrospective
 
-The transport receiver, browser form helper, redacting command, test-only authenticated harness, and native evidence procedure are implemented. All local deterministic, race, repository, frontend, build-isolation, and cross-construction gates pass. A real Chromium 149 diagnostic run also passed the complete top-level POST flow on Linux ARM64.
+The transport receiver, browser form helper, redacting command, test-only authenticated harness, and native evidence procedure are implemented. The previously published 200-response heads are superseded because real Chromium proved that reload could replay the credential-bearing POST. The fixed-completion PRG correction now passes deterministic, race, full repository, frontend, build-isolation, and Chromium 150 history diagnostics on Linux ARM64; it still needs a published exact head and independent source/QA verdict.
 
 The task remains incomplete until the same published exact head passes the authorized HTTPS Codesk-origin rows in native Windows Edge, native Windows Chrome, and native macOS Safari. The Linux diagnostic and cross-compiled binaries do not satisfy those rows.
 
@@ -80,13 +90,13 @@ The browser harness reads the existing `codesk.auth.token` value from the same w
 
 ## Plan of Work
 
-Create `daemon/internal/desktop/handoff/session.go`. Define a `Payload` holding daemon ID, token, workspace ID/name/slug/URL and a `Session` that owns its listener and HTTP server. `NewSession` generates the nonce with `crypto/rand`, binds `tcp4` on `127.0.0.1:0`, builds the exact callback URL, and starts serving with conservative header/read/body timeouts. The handler must require the exact Host and path, an empty query, POST, `application/x-www-form-urlencoded`, a small bounded body, exactly one value for each known field, and no unknown fields. It must validate all values without including values in error text. The first fully valid payload wins via an atomic compare-and-swap. The success response must be cache-disabled, referrer-disabled, content-sniffing-disabled, and protected by a `default-src 'none'` content security policy. `Wait(ctx)` must shut down and return the payload, a cancellation/timeout error, a manual-close error, or an unexpected serve error without leaking form values.
+Create `daemon/internal/desktop/handoff/session.go`. Define a `Payload` holding daemon ID, token, workspace ID/name/slug/URL and a `Session` that owns its listener and HTTP server. `NewSession` validates the allowed Codesk origin, constructs the fixed credential-free completion URL, generates the nonce with `crypto/rand`, binds `tcp4` on `127.0.0.1:0`, builds the exact callback URL, and starts serving with conservative header/read/body timeouts. The handler must require the exact Host and path, an empty query, POST, `application/x-www-form-urlencoded`, a small bounded body, exactly one value for each known field, and no unknown fields. It must validate all values without including values in error text. The first fully valid payload wins atomically and closes the accept listener before returning an empty 303 to the prevalidated completion URL. `Wait(ctx)` must shut down and return the payload, a cancellation/timeout error, a manual-close error, or an unexpected serve error without leaking form values.
 
 Create `daemon/internal/desktop/handoff/session_test.go`. Cover the exact 256-bit nonce shape, literal IPv4 binding, happy path, wrong path, wrong Host, query rejection, wrong method, wrong content type, oversized and malformed bodies, missing/duplicate/unknown fields, invalid token/workspace URL, concurrent duplicate requests, listener closure after success, context timeout, cancellation, manual close, response headers, and the invariant that errors and responses never contain the token. Run race tests so first-valid-wins has evidence under concurrency.
 
 Create `frontend/src/desktopHandoff.ts` and `frontend/src/desktopHandoff.test.ts`. Validate the callback string against the exact canonical literal-loopback pattern before constructing a `URL`; reject alternate IP spellings, credentials, zero/overflow ports, query, fragment, wrong path, and short nonce. Build a hidden form with method POST, `application/x-www-form-urlencoded`, UTF-8, and fixed snake_case field names. Keep construction separate from submission so tests can inspect the form and prove its action contains no token.
 
-Create `frontend/desktop-handoff-spike.html`, `frontend/src/desktopHandoffSpike.ts`, and `frontend/src/desktopHandoffSpike.css`. Keep it a compact test tool that uses the OXO app icon and existing design colors. It must show callback validity, session state, a workspace selector, daemon name, and one Connect command. It must require an existing same-origin Codesk login, ask for explicit workspace selection, create through the existing API, and submit immediately. Do not add this file to Vite's production Rollup inputs.
+Create `frontend/desktop-handoff-spike.html`, `frontend/desktop-handoff-complete.html`, `frontend/src/desktopHandoffSpike.ts`, and `frontend/src/desktopHandoffSpike.css`. Keep the launch harness a compact test tool that uses the Codesk icon and existing design colors. It must show callback validity, session state, a workspace selector, daemon name, and one Connect command. It must require an existing same-origin Codesk login, ask for explicit workspace selection, create through the existing API, and submit immediately. The fixed completion page must be static and script-free so it never reads auth or callback state. Do not add either HTML file to Vite's production Rollup inputs.
 
 Create `daemon/cmd/desktop-handoff-spike/main.go`. Accept a connect-page base URL and timeout, start the reusable session before constructing the browser URL, print safe instructions, handle interrupt/cancel, wait once, and print only nonsecret identifiers plus a boolean token receipt. Validate the connect-page URL and never accept a daemon token in flags or environment variables.
 
@@ -120,7 +130,7 @@ For a local preflight, start the normal frontend/backend stack, sign into the ap
 
     go run ./daemon/cmd/desktop-handoff-spike --connect-page http://127.0.0.1:5173/desktop-handoff-spike.html
 
-Open the printed URL in a browser. Select a workspace and connect. Expect the browser to navigate to a local page saying the handoff was accepted, and expect the command to print daemon/workspace metadata with `token_received=true` and no token value.
+Open the printed URL in a browser. Select a workspace and connect. Expect the browser to POST once to the loopback callback, follow an empty 303 to the fixed Codesk completion page, and show that the connection completed. Expect the command to print daemon/workspace metadata with `token_received=true` and no token value.
 
 ## Validation and Acceptance
 
@@ -162,7 +172,7 @@ In `daemon/internal/desktop/handoff/session.go`, provide these stable interfaces
 
     type Session struct { /* private ownership fields */ }
 
-    func NewSession() (*Session, error)
+    func NewSession(codeskOrigin string) (*Session, error)
     func (s *Session) CallbackURL() string
     func (s *Session) Wait(ctx context.Context) (Payload, error)
     func (s *Session) Close() error

@@ -43,15 +43,59 @@ func TestNewSessionUsesIPv4LoopbackAnd256BitNonce(t *testing.T) {
 	}
 }
 
+func TestCompletionURLForOriginUsesFixedCredentialFreePath(t *testing.T) {
+	for origin, want := range map[string]string{
+		"https://app.example.test": "https://app.example.test" + completionPath,
+		"http://127.0.0.1:5173":    "http://127.0.0.1:5173" + completionPath,
+		"http://localhost:5173":    "http://localhost:5173" + completionPath,
+	} {
+		got, err := completionURLForOrigin(origin)
+		if err != nil {
+			t.Errorf("completion URL for %q: %v", origin, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("completion URL for %q = %q, want %q", origin, got, want)
+		}
+	}
+
+	for _, candidate := range []string{
+		"",
+		"/relative",
+		"file:///tmp/codesk",
+		"http://app.example.test",
+		"https://app.example.test:",
+		"https://app.example.test:0",
+		"https://app.example.test:65536",
+		"https://app.example.test:invalid",
+		"https://user@app.example.test",
+		"https://app.example.test/",
+		"https://app.example.test/path",
+		"https://app.example.test?callback=forbidden",
+		"https://app.example.test#fragment",
+	} {
+		if _, err := NewSession(candidate); err == nil {
+			t.Errorf("unsafe completion origin was accepted: %q", candidate)
+		}
+	}
+}
+
 func TestSessionAcceptsOneValidFormPost(t *testing.T) {
 	session := newTestSession(t)
-	response := postForm(t, session.CallbackURL(), validForm())
+	response := postFormWithoutRedirect(t, session.CallbackURL(), validForm())
 	body := readBody(t, response)
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%q", response.StatusCode, body)
+	if response.StatusCode != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303; body=%q", response.StatusCode, body)
 	}
-	if strings.Contains(body, testToken) {
-		t.Fatal("success response contains daemon token")
+	if body != "" {
+		t.Fatalf("redirect body = %q, want empty", body)
+	}
+	location := response.Header.Get("Location")
+	if location != session.completionURL {
+		t.Fatalf("redirect location = %q, want %q", location, session.completionURL)
+	}
+	if strings.Contains(location, testToken) || strings.Contains(location, session.CallbackURL()) || strings.Contains(location, callbackPrefix) {
+		t.Fatal("redirect location contains credential or callback state")
 	}
 	for header, want := range map[string]string{
 		"Cache-Control":           "no-store",
@@ -64,8 +108,11 @@ func TestSessionAcceptsOneValidFormPost(t *testing.T) {
 			t.Errorf("%s = %q, want %q", header, got, want)
 		}
 	}
-	if response.ContentLength != int64(len(body)) {
-		t.Errorf("content length = %d, want %d", response.ContentLength, len(body))
+	if response.ContentLength != 0 {
+		t.Errorf("content length = %d, want 0", response.ContentLength)
+	}
+	if got := response.Header.Get("Content-Type"); got != "" {
+		t.Errorf("content type = %q, want empty", got)
 	}
 	assertSecondRequestRejected(t, session.CallbackURL())
 
@@ -90,6 +137,41 @@ func TestSessionAcceptsOneValidFormPost(t *testing.T) {
 	}
 	if payload.Token() != testToken {
 		t.Fatal("accepted payload token does not match the submitted token")
+	}
+}
+
+func TestSessionRedirectsToCredentialFreeGet(t *testing.T) {
+	type completionRequest struct {
+		method        string
+		requestURI    string
+		contentLength int64
+		body          string
+	}
+	requests := make(chan completionRequest, 1)
+	completion := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		requests <- completionRequest{
+			method:        r.Method,
+			requestURI:    r.URL.RequestURI(),
+			contentLength: r.ContentLength,
+			body:          string(body),
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(completion.Close)
+	session := newTestSessionForOrigin(t, completion.URL)
+
+	response := postForm(t, session.CallbackURL(), validForm())
+	_ = readBody(t, response)
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("completion status = %d, want 204", response.StatusCode)
+	}
+	request := <-requests
+	if request.method != http.MethodGet || request.requestURI != completionPath || request.contentLength != 0 || request.body != "" {
+		t.Fatalf("completion request = %#v, want credential-free GET", request)
+	}
+	if strings.Contains(request.requestURI, testToken) || strings.Contains(request.body, testToken) {
+		t.Fatal("completion request contains daemon token")
 	}
 }
 
@@ -610,7 +692,16 @@ func TestPayloadFormattingRedactsToken(t *testing.T) {
 
 func newTestSession(t *testing.T) *Session {
 	t.Helper()
-	session, err := NewSession()
+	completion := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(completion.Close)
+	return newTestSessionForOrigin(t, completion.URL)
+}
+
+func newTestSessionForOrigin(t *testing.T, codeskOrigin string) *Session {
+	t.Helper()
+	session, err := NewSession(codeskOrigin)
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
@@ -648,6 +739,20 @@ func postForm(t *testing.T, endpoint string, form url.Values) *http.Response {
 	response, err := http.DefaultClient.Do(formRequest(t, endpoint, form))
 	if err != nil {
 		t.Fatalf("post form: %v", err)
+	}
+	return response
+}
+
+func postFormWithoutRedirect(t *testing.T, endpoint string, form url.Values) *http.Response {
+	t.Helper()
+	client := &http.Client{
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	response, err := client.Do(formRequest(t, endpoint, form))
+	if err != nil {
+		t.Fatalf("post form without redirect: %v", err)
 	}
 	return response
 }

@@ -54,6 +54,9 @@ func TestParseConnectPage(t *testing.T) {
 	if got := connectPageWithCallback(valid, testCallback); got != "https://app.example.test/desktop-handoff-spike.html?callback=http%3A%2F%2F127.0.0.1%3A49152%2Fdesktop%2Fconnect%2FAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8" {
 		t.Fatalf("launch URL = %q", got)
 	}
+	if got := connectPageOrigin(valid); got != "https://app.example.test" {
+		t.Fatalf("connect page origin = %q", got)
+	}
 }
 
 func TestParseConnectPageRejectsUnsafeURLs(t *testing.T) {
@@ -62,6 +65,10 @@ func TestParseConnectPageRejectsUnsafeURLs(t *testing.T) {
 		"/desktop-handoff-spike.html",
 		"file:///tmp/desktop-handoff-spike.html",
 		"http://app.example.test/desktop-handoff-spike.html",
+		"https://app.example.test/other.html",
+		"https://app.example.test/desktop-handoff-spike.html/",
+		"https://app.example.test:0/desktop-handoff-spike.html",
+		"https://app.example.test:65536/desktop-handoff-spike.html",
 		"https://user@app.example.test/desktop-handoff-spike.html",
 		"https://app.example.test/desktop-handoff-spike.html?callback=other",
 		"https://app.example.test/desktop-handoff-spike.html#fragment",
@@ -77,9 +84,11 @@ func TestRunPrintsOnlyNonsecretAcceptanceFields(t *testing.T) {
 	session := acceptedSession(t, testSecret)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
+	var factoryOrigin string
 	exitCode := run(context.Background(), []string{
 		"--connect-page", "https://app.example.test/desktop-handoff-spike.html",
-	}, &stdout, &stderr, func() (handoffSession, error) {
+	}, &stdout, &stderr, func(codeskOrigin string) (handoffSession, error) {
+		factoryOrigin = codeskOrigin
 		return session, nil
 	})
 	if exitCode != 0 {
@@ -87,6 +96,9 @@ func TestRunPrintsOnlyNonsecretAcceptanceFields(t *testing.T) {
 	}
 	if !session.closed {
 		t.Fatal("session was not closed")
+	}
+	if factoryOrigin != "https://app.example.test" {
+		t.Fatalf("session factory origin = %q", factoryOrigin)
 	}
 	output := stdout.String() + stderr.String()
 	if strings.Contains(output, testSecret) {
@@ -115,7 +127,7 @@ func TestRunPrintsOnlyNonsecretAcceptanceFields(t *testing.T) {
 
 func acceptedSession(t *testing.T, token string) *trackingSession {
 	t.Helper()
-	session, err := handoff.NewSession()
+	session, err := handoff.NewSession("https://app.example.test")
 	if err != nil {
 		t.Fatalf("new handoff session: %v", err)
 	}
@@ -133,13 +145,18 @@ func acceptedSession(t *testing.T, token string) *trackingSession {
 		"workspace_slug": {"desktop-qa"},
 		"workspace_url":  {"https://app.example.test/w/desktop-qa"},
 	}
-	response, err := http.PostForm(session.CallbackURL(), form)
+	client := &http.Client{
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	response, err := client.PostForm(session.CallbackURL(), form)
 	if err != nil {
 		t.Fatalf("post accepted handoff: %v", err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("accepted handoff status = %d, want 200", response.StatusCode)
+	if response.StatusCode != http.StatusSeeOther {
+		t.Fatalf("accepted handoff status = %d, want 303", response.StatusCode)
 	}
 	return &trackingSession{Session: session}
 }
@@ -150,7 +167,7 @@ func TestRunRedactsReceiverErrors(t *testing.T) {
 	var stderr bytes.Buffer
 	exitCode := run(context.Background(), []string{
 		"--connect-page", "http://127.0.0.1:5173/desktop-handoff-spike.html",
-	}, &stdout, &stderr, func() (handoffSession, error) {
+	}, &stdout, &stderr, func(string) (handoffSession, error) {
 		return session, nil
 	})
 	if exitCode != 1 {
@@ -163,7 +180,7 @@ func TestRunRedactsReceiverErrors(t *testing.T) {
 
 func TestRunRejectsArgumentsBeforeBinding(t *testing.T) {
 	called := false
-	exitCode := run(context.Background(), []string{"--connect-page", "file:///tmp/spike.html"}, &bytes.Buffer{}, &bytes.Buffer{}, func() (handoffSession, error) {
+	exitCode := run(context.Background(), []string{"--connect-page", "file:///tmp/spike.html"}, &bytes.Buffer{}, &bytes.Buffer{}, func(string) (handoffSession, error) {
 		called = true
 		return nil, errors.New("unexpected")
 	})

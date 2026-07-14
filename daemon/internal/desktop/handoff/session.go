@@ -21,9 +21,9 @@ import (
 
 const (
 	callbackPrefix = "/desktop/connect/"
+	completionPath = "/desktop-handoff-complete.html"
 	maxBodyBytes   = 16 << 10
 	maxTokenBytes  = 4 << 10
-	successPage    = "<!doctype html><meta charset=utf-8><title>Codesk connected</title><h1>Codesk is connected</h1><p>You can close this tab.</p>"
 	rejectionBody  = "desktop handoff rejected\n"
 )
 
@@ -68,11 +68,12 @@ func (p Payload) GoString() string {
 
 // Session owns a single loopback-only callback listener.
 type Session struct {
-	listener    net.Listener
-	server      *http.Server
-	callbackURL string
-	host        string
-	path        string
+	listener      net.Listener
+	server        *http.Server
+	callbackURL   string
+	completionURL string
+	host          string
+	path          string
 
 	stateMu  sync.RWMutex
 	claimed  bool
@@ -86,9 +87,15 @@ type Session struct {
 	closeOnce  sync.Once
 }
 
-// NewSession pre-binds an ephemeral IPv4 loopback port, generates a 256-bit
-// callback nonce, and starts the one-shot HTTP receiver.
-func NewSession() (*Session, error) {
+// NewSession validates the Codesk completion origin, pre-binds an ephemeral
+// IPv4 loopback port, generates a 256-bit callback nonce, and starts the
+// one-shot HTTP receiver.
+func NewSession(codeskOrigin string) (*Session, error) {
+	completionURL, err := completionURLForOrigin(codeskOrigin)
+	if err != nil {
+		return nil, fmt.Errorf("validate desktop handoff completion origin: %w", err)
+	}
+
 	nonceBytes := make([]byte, 32)
 	if _, err := rand.Read(nonceBytes); err != nil {
 		return nil, fmt.Errorf("generate desktop handoff nonce: %w", err)
@@ -103,13 +110,14 @@ func NewSession() (*Session, error) {
 	host := listener.Addr().String()
 	path := callbackPrefix + nonce
 	session := &Session{
-		listener:    listener,
-		callbackURL: "http://" + host + path,
-		host:        host,
-		path:        path,
-		acceptedCh:  make(chan struct{}),
-		closedCh:    make(chan struct{}),
-		serveErrCh:  make(chan error, 1),
+		listener:      listener,
+		callbackURL:   "http://" + host + path,
+		completionURL: completionURL,
+		host:          host,
+		path:          path,
+		acceptedCh:    make(chan struct{}),
+		closedCh:      make(chan struct{}),
+		serveErrCh:    make(chan error, 1),
 	}
 	session.server = &http.Server{
 		Handler:           session,
@@ -178,7 +186,7 @@ func (s *Session) Wait(ctx context.Context) (Payload, error) {
 }
 
 // Close fences new claims and releases the callback listener. If a valid POST
-// already claimed the session, Close lets its success response finish first.
+// already claimed the session, Close lets its redirect response finish first.
 // It is safe to call more than once.
 func (s *Session) Close() error {
 	if s == nil {
@@ -266,16 +274,48 @@ func (s *Session) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// claim boundary so no second connection can enter while the response flushes.
 	_ = s.listener.Close()
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Length", strconv.Itoa(len(successPage)))
-	w.WriteHeader(http.StatusOK)
-	_, _ = io.WriteString(w, successPage)
+	w.Header().Set("Location", s.completionURL)
+	w.Header().Set("Content-Length", "0")
+	w.WriteHeader(http.StatusSeeOther)
 	_ = http.NewResponseController(w).Flush()
 
 	s.stateMu.Lock()
 	s.accepted = true
 	close(s.acceptedCh)
 	s.stateMu.Unlock()
+}
+
+func completionURLForOrigin(rawOrigin string) (string, error) {
+	if rawOrigin == "" || strings.ContainsAny(rawOrigin, "?#") {
+		return "", errors.New("invalid Codesk origin")
+	}
+	origin, err := url.Parse(rawOrigin)
+	if err != nil || origin.Host == "" || origin.Opaque != "" {
+		return "", errors.New("invalid Codesk origin")
+	}
+	if origin.Scheme != "https" && origin.Scheme != "http" {
+		return "", errors.New("invalid Codesk origin")
+	}
+	if origin.Scheme == "http" && origin.Hostname() != "127.0.0.1" && origin.Hostname() != "localhost" {
+		return "", errors.New("remote Codesk origin must use HTTPS")
+	}
+	if !validURLPort(origin) {
+		return "", errors.New("Codesk origin contains an invalid port")
+	}
+	if origin.User != nil || origin.Path != "" || origin.RawPath != "" || origin.RawQuery != "" ||
+		origin.ForceQuery || origin.Fragment != "" || origin.String() != rawOrigin {
+		return "", errors.New("Codesk origin contains forbidden URL components")
+	}
+	return rawOrigin + completionPath, nil
+}
+
+func validURLPort(value *url.URL) bool {
+	port := value.Port()
+	if port == "" {
+		return !strings.HasSuffix(value.Host, ":")
+	}
+	number, err := strconv.Atoi(port)
+	return err == nil && number > 0 && number <= 65535
 }
 
 func (s *Session) acceptedPayload() (Payload, bool) {
@@ -300,7 +340,7 @@ func (s *Session) closeAndWaitForClaimedPayload() (Payload, bool, error) {
 	}
 
 	// A complete valid form claimed the session before the close fence. Let its
-	// tiny success response finish before cancellation or Close tears down the
+	// tiny redirect response finish before cancellation or Close tears down the
 	// server, then return the accepted payload to the waiter.
 	<-s.acceptedCh
 	payload, _ := s.acceptedPayload()

@@ -5,7 +5,7 @@ export default defineConfig({
     outDir: ".test-dist/desktop-handoff",
     emptyOutDir: true,
     rollupOptions: {
-      input: "desktop-handoff-spike.html",
+      input: ["desktop-handoff-spike.html", "desktop-handoff-complete.html"],
     },
   },
 });

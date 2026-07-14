@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -16,7 +17,10 @@ import (
 	"notty/daemon/internal/desktop/handoff"
 )
 
-const maxTimeout = 30 * time.Minute
+const (
+	connectPagePath = "/desktop-handoff-spike.html"
+	maxTimeout      = 30 * time.Minute
+)
 
 type handoffSession interface {
 	CallbackURL() string
@@ -24,13 +28,13 @@ type handoffSession interface {
 	Close() error
 }
 
-type sessionFactory func() (handoffSession, error)
+type sessionFactory func(string) (handoffSession, error)
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	os.Exit(run(ctx, os.Args[1:], os.Stdout, os.Stderr, func() (handoffSession, error) {
-		return handoff.NewSession()
+	os.Exit(run(ctx, os.Args[1:], os.Stdout, os.Stderr, func(codeskOrigin string) (handoffSession, error) {
+		return handoff.NewSession(codeskOrigin)
 	}))
 }
 
@@ -48,7 +52,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, newSessio
 	}
 	connectPage, err := parseConnectPage(*connectPageValue)
 	if err != nil {
-		fmt.Fprintln(stderr, "desktop handoff: --connect-page must be an absolute HTTP(S) URL without credentials, query, or fragment")
+		fmt.Fprintf(stderr, "desktop handoff: --connect-page must be an absolute HTTP(S) Codesk URL at %s without credentials, query, or fragment\n", connectPagePath)
 		return 2
 	}
 	if *timeout <= 0 || *timeout > maxTimeout {
@@ -56,7 +60,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, newSessio
 		return 2
 	}
 
-	session, err := newSession()
+	session, err := newSession(connectPageOrigin(connectPage))
 	if err != nil {
 		fmt.Fprintln(stderr, "desktop handoff: could not start the loopback receiver")
 		return 1
@@ -97,13 +101,30 @@ func parseConnectPage(raw string) (*url.URL, error) {
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
 		return nil, errors.New("invalid connect page")
 	}
-	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+	if parsed.User != nil || parsed.Path != connectPagePath || parsed.EscapedPath() != connectPagePath ||
+		parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.String() != raw {
 		return nil, errors.New("connect page contains forbidden URL components")
 	}
 	if parsed.Scheme == "http" && parsed.Hostname() != "127.0.0.1" && parsed.Hostname() != "localhost" {
 		return nil, errors.New("remote connect page must use HTTPS")
 	}
+	if !validConnectPagePort(parsed) {
+		return nil, errors.New("connect page contains an invalid port")
+	}
 	return parsed, nil
+}
+
+func validConnectPagePort(value *url.URL) bool {
+	port := value.Port()
+	if port == "" {
+		return !strings.HasSuffix(value.Host, ":")
+	}
+	number, err := strconv.Atoi(port)
+	return err == nil && number > 0 && number <= 65535
+}
+
+func connectPageOrigin(connectPage *url.URL) string {
+	return (&url.URL{Scheme: connectPage.Scheme, Host: connectPage.Host}).String()
 }
 
 func connectPageWithCallback(connectPage *url.URL, callback string) string {
