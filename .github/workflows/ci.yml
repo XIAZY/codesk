@@ -197,6 +197,9 @@ jobs:
 
   windows-daemon-installer:
     name: Windows daemon installer
+    # Preserve the installer lifecycle test, but do not schedule hosted Windows
+    # jobs until a Windows CI runner is available for this repository.
+    if: ${{ false }}
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
