@@ -537,6 +537,125 @@ func TestServicePrimaryWatcherChannelClosureAfterReadyIsFatal(t *testing.T) {
 	}
 }
 
+func TestServiceStartsStatusHeartbeatOnlyAfterPrimaryRuntimeReady(t *testing.T) {
+	var statusReports atomic.Int32
+	statusRequests := make(chan struct{}, 4)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/workspace":
+			writeJSONResponse(w, http.StatusOK, &workspaceResponse{})
+		case "/api/daemon/status":
+			statusReports.Add(1)
+			statusRequests <- struct{}{}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer backend.Close()
+
+	root := t.TempDir()
+	cfg := Config{
+		BackendURL:         backend.URL,
+		WorkspaceDir:       root,
+		AgentWorkspaceRoot: filepath.Join(root, "agents"),
+		AgentID:            "daemon",
+		AgentToolBaseURL:   "http://127.0.0.1:0",
+	}
+	runtime, err := newWorkspaceRuntime(cfg, backend.Client(), root, "daemon", "daemon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+	watcher := newScriptedWorkspaceWatcher()
+	addStarted := make(chan struct{})
+	releaseAdd := make(chan struct{})
+	var addStartedOnce sync.Once
+	var releaseAddOnce sync.Once
+	watcher.add = func(string) error {
+		addStartedOnce.Do(func() { close(addStarted) })
+		select {
+		case <-releaseAdd:
+			return nil
+		case <-watcher.closed:
+			return fsnotify.ErrClosed
+		}
+	}
+	runtime.replica.newWatcher = func() (workspaceWatcher, error) { return watcher, nil }
+	service := &Service{
+		cfg:             cfg,
+		client:          backend.Client(),
+		daemonStatus:    newDaemonStatusReporter(cfg, backend.Client()),
+		primaryRuntime:  runtime,
+		agentRuntimes:   map[string]*managedWorkspaceRuntime{},
+		agentWorkers:    map[string]*managedAgentWorker{},
+		latestWorkspace: &workspaceResponse{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	heartbeatTicks := make(chan time.Time, 1)
+	done := make(chan error, 1)
+	runFinished := make(chan struct{})
+	go func() {
+		defer close(runFinished)
+		done <- service.run(ctx, heartbeatTicks)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		releaseAddOnce.Do(func() { close(releaseAdd) })
+		select {
+		case <-runFinished:
+		case <-time.After(time.Second):
+		}
+	})
+
+	select {
+	case <-addStarted:
+	case err := <-done:
+		t.Fatalf("service stopped before primary watcher startup: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("primary watcher startup did not begin")
+	}
+	heartbeatTicks <- time.Now()
+	select {
+	case <-statusRequests:
+		t.Fatal("daemon status or heartbeat published before primary readiness")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	releaseAddOnce.Do(func() { close(releaseAdd) })
+	for i := 0; i < 2; i++ {
+		select {
+		case <-statusRequests:
+		case err := <-done:
+			t.Fatalf("service stopped after primary readiness: %v", err)
+		case <-time.After(time.Second):
+			t.Fatalf("received %d post-readiness daemon status reports, want 2", i)
+		}
+	}
+	heartbeatTicks <- time.Now()
+	select {
+	case <-statusRequests:
+	case err := <-done:
+		t.Fatalf("service stopped before post-readiness heartbeat: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("post-readiness heartbeat did not publish daemon status")
+	}
+	if got := statusReports.Load(); got != 3 {
+		t.Fatalf("post-readiness daemon status reports = %d, want initial status plus two heartbeats", got)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("service shutdown: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("service did not stop after cancellation")
+	}
+}
+
 func TestServiceDoesNotReportOnlineBeforePrimaryRuntimeReady(t *testing.T) {
 	var statusReports atomic.Int32
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

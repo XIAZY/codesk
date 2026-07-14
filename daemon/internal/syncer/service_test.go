@@ -271,11 +271,22 @@ func TestRunStopsDaemonHeartbeatBeforeBlockingFatalShutdown(t *testing.T) {
 		AgentID:            "daemon_agent",
 		AgentToolBaseURL:   "http://127.0.0.1:0",
 	}
+	primaryRuntime, err := newWorkspaceRuntime(
+		cfg,
+		client,
+		cfg.WorkspaceDir,
+		cfg.AgentID,
+		"daemon",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = primaryRuntime.Close() })
 	service := &Service{
 		cfg:            cfg,
 		client:         client,
 		daemonStatus:   newDaemonStatusReporter(cfg, client),
-		primaryRuntime: &workspaceRuntime{},
+		primaryRuntime: primaryRuntime,
 		agentRuntimes:  map[string]*managedWorkspaceRuntime{},
 		agentWorkers:   map[string]*managedAgentWorker{},
 	}
