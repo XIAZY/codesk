@@ -619,6 +619,15 @@ func (s *agentSessionSupervisor) ensureSessionDesired(ctx context.Context, curre
 				return ctx.Err()
 			}
 		}
+		// A NON-authoritative caller (stale snapshot) must not CREATE the resident
+		// session from an empty slot — that would make it the desired-spec source
+		// after a failed/soft authoritative outcome removed the claim (finding 30).
+		// It may only wait on an existing claim / use an existing session; let
+		// Reconcile (the authority) create.
+		if !authoritative {
+			s.mu.Unlock()
+			return nil
+		}
 		// Admission fence (the B-specific guard): reject an ALREADY-cancelled caller
 		// before it creates a claim. B decouples construction from the caller ctx,
 		// so a claim admitted here would publish on baseCtx even though this caller

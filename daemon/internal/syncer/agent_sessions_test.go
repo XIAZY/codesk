@@ -560,6 +560,11 @@ func TestAgentSessionIdleNotificationStartsOncePerInboxSignature(t *testing.T) {
 	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
+	// Reconcile is the desired-state authority that creates the resident session;
+	// notifications only deliver into an existing one (findings 29/30).
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
 
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "first", "for-me:v1", ""); err != nil {
 		t.Fatalf("schedule first: %v", err)
@@ -588,6 +593,9 @@ func TestAgentSessionBusyForMeSteersOnceAndQueuesFollowup(t *testing.T) {
 	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
 
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "active", "", "general:v1"); err != nil {
 		t.Fatalf("schedule active: %v", err)
@@ -630,6 +638,9 @@ func TestAgentSessionBusyGeneralQueuesFollowupWithoutSteer(t *testing.T) {
 	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
 
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "active", "for-me:v1", ""); err != nil {
 		t.Fatalf("schedule active: %v", err)
@@ -661,6 +672,9 @@ func TestAgentSessionBusyGeneralCoalescesFollowupLogAndKeepsLatestSignature(t *t
 	supervisor := newAgentSessionSupervisor(cfg, nil, newFakeRuntimeRegistry(factory))
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex", Handle: "tester"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
 
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "active", "for-me:v1", ""); err != nil {
 		t.Fatalf("schedule active: %v", err)
@@ -700,6 +714,9 @@ func TestAgentSessionFailedTurnDoesNotMarkInboxSignatureDelivered(t *testing.T) 
 	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
 
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "first", "for-me:v1", ""); err != nil {
 		t.Fatalf("schedule first: %v", err)
@@ -719,6 +736,9 @@ func TestAgentSessionBusyForMeSteersEachChangedInboxSignature(t *testing.T) {
 	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
 	defer supervisor.Shutdown()
 	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
 
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "active", "", "general:v1"); err != nil {
 		t.Fatalf("schedule active: %v", err)
@@ -2831,5 +2851,106 @@ wait:
 	}
 	if got := publishedProcessInstructions(t, supervisor, factory, "agent_1"); got != "new" {
 		t.Fatalf("stale caller rolled back authoritative desired spec: live process spawned with %q, want new", got)
+	}
+}
+
+// Finding 30: the authority invariant applies to CREATION too. A non-authoritative
+// caller reaching an EMPTY slot (e.g. after an authoritative construction failed and
+// removed the claim) must NOT create the resident session from its own stale spec —
+// it no-ops and lets Reconcile create. Otherwise it becomes the desired-spec source.
+func TestAgentSessionNonAuthoritativeCallerDoesNotCreateFromEmptySlot(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.startErr = errors.New("construction boom") // the authoritative attempt fails
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	// Authoritative Reconcile(new): the construction fails and removes the claim.
+	if err := supervisor.Reconcile(context.Background(), []*agent{{ID: "agent_1", Handle: "swe", Kind: "codex", SystemPrompt: "new"}}); err == nil {
+		t.Fatal("expected the authoritative construction failure to surface")
+	}
+	supervisor.mu.Lock()
+	sessions := len(supervisor.sessions)
+	starting := len(supervisor.starting)
+	supervisor.mu.Unlock()
+	if sessions != 0 || starting != 0 {
+		t.Fatalf("after failed authoritative attempt: want empty slot, got sessions=%d starting=%d", sessions, starting)
+	}
+	factory.mu.Lock()
+	spawnedBefore := len(factory.processes)
+	factory.mu.Unlock()
+
+	// A delayed stale NON-authoritative caller reaches the now-empty slot.
+	if err := supervisor.ensureSessionDesired(context.Background(), &agent{ID: "agent_1", Kind: "codex", SystemPrompt: "old"}, false); err != nil {
+		t.Fatalf("non-authoritative empty-slot ensure should no-op, got %v", err)
+	}
+	factory.mu.Lock()
+	spawnedAfter := len(factory.processes)
+	factory.mu.Unlock()
+	if spawnedAfter != spawnedBefore {
+		t.Fatalf("non-authoritative caller created from an empty slot: spawned %d -> %d (old-spec process)", spawnedBefore, spawnedAfter)
+	}
+	supervisor.mu.Lock()
+	sessions = len(supervisor.sessions)
+	supervisor.mu.Unlock()
+	if sessions != 0 {
+		t.Fatalf("non-authoritative caller published a session from an empty slot: %d", sessions)
+	}
+}
+
+// TestAgentSessionNonAuthoritativeEmptySlotNotificationRedeliversAfterReconcile proves the anti-entropy
+// closure Thomas required for finding #30: a notification for a desired-but-not-yet-resident agent lands
+// on an empty slot, spawns nothing AND records nothing (so the signature stays pending); then the
+// authoritative Reconcile creates the resident session, and the next worker cycle re-firing the SAME
+// still-pending signature delivers the notification exactly once. No notification is silently dropped.
+func TestAgentSessionNonAuthoritativeEmptySlotNotificationRedeliversAfterReconcile(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	current := &agent{ID: "agent_1", Kind: "codex"}
+
+	// Cycle 1: a non-authoritative notification reaches the empty slot. It must no-op — no session, no
+	// spawn, and crucially it must NOT record the inbox signature as delivered.
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "pending", "for-me:v1", ""); err != nil {
+		t.Fatalf("schedule on empty slot should no-op, got %v", err)
+	}
+	factory.mu.Lock()
+	spawned := len(factory.processes)
+	factory.mu.Unlock()
+	if spawned != 0 {
+		t.Fatalf("empty-slot notification spawned a process: %d", spawned)
+	}
+	supervisor.mu.Lock()
+	sessions := len(supervisor.sessions)
+	starting := len(supervisor.starting)
+	supervisor.mu.Unlock()
+	if sessions != 0 || starting != 0 {
+		t.Fatalf("empty-slot notification created state: sessions=%d starting=%d", sessions, starting)
+	}
+
+	// The authoritative Reconcile creates the resident session (no notification delivered yet).
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("authoritative ensure session: %v", err)
+	}
+	process := factory.only(t)
+	if got := len(process.inputsByKind(RuntimeInputStartTurn)); got != 0 {
+		t.Fatalf("Reconcile itself started a turn: %d", got)
+	}
+
+	// Cycle 2: the worker anti-entropy re-fires the SAME still-pending signature into the now-resident
+	// session. Because cycle 1 recorded nothing, this delivers exactly once.
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "pending", "for-me:v1", ""); err != nil {
+		t.Fatalf("re-fire after reconcile: %v", err)
+	}
+	if got := len(process.inputsByKind(RuntimeInputStartTurn)); got != 1 {
+		t.Fatalf("expected the still-pending notification to deliver exactly once, got %d", got)
+	}
+
+	// Cycle 3: a further re-fire of the same signature is now suppressed (delivered exactly once, not per cycle).
+	supervisor.markIdle("agent_1", process, true)
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "pending", "for-me:v1", ""); err != nil {
+		t.Fatalf("second re-fire: %v", err)
+	}
+	if got := len(process.inputsByKind(RuntimeInputStartTurn)); got != 1 {
+		t.Fatalf("expected the delivered signature to be suppressed on re-fire, got %d", got)
 	}
 }
