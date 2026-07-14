@@ -4,9 +4,7 @@ set -eu
 version="${1:-${VERSION:-dev}}"
 dist_dir="${2:-${DIST_DIR:-dist/static/daemons}}"
 platforms="${PLATFORMS:-}"
-# "all" is the public release set. Keep construction-only targets explicit
-# until their native acceptance and user-facing packaging are complete.
-all_platforms="darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64"
+all_platforms="darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64"
 
 root_dir="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
 . "$root_dir/scripts/lib/testtmp.sh"
@@ -67,6 +65,7 @@ rust_target_for() {
 		darwin/amd64) printf 'x86_64-apple-darwin' ;;
 		darwin/arm64) printf 'aarch64-apple-darwin' ;;
 		windows/amd64) printf 'x86_64-pc-windows-gnu' ;;
+		windows/arm64) printf 'aarch64-pc-windows-gnullvm' ;;
 		*) printf '' ;;
 	esac
 }
@@ -75,6 +74,8 @@ zig_target_for() {
 	case "$1/$2" in
 		linux/amd64) printf 'x86_64-linux-musl' ;;
 		linux/arm64) printf 'aarch64-linux-musl' ;;
+		windows/amd64) printf 'x86_64-windows-gnu' ;;
+		windows/arm64) printf 'aarch64-windows-gnu' ;;
 		*) printf '' ;;
 	esac
 }
@@ -87,14 +88,9 @@ darwin_arch_for() {
 	esac
 }
 
-rust_linker_env_for() {
-	printf 'CARGO_TARGET_%s_LINKER' "$(printf '%s' "$1" | tr '[:lower:]-' '[:upper:]_')"
-}
-
-make_zig_cc_wrapper() {
+zig_cc_for() {
 	os="$1"
 	arch="$2"
-	wrapper="$3"
 	zig_target="$(zig_target_for "$os" "$arch")"
 	[ -n "$zig_target" ] || {
 		printf 'build-daemon-release: no zig target mapping for %s/%s\n' "$os" "$arch" >&2
@@ -102,14 +98,10 @@ make_zig_cc_wrapper() {
 	}
 	command -v zig >/dev/null 2>&1 || {
 		env_name="$(cc_env_name_for "$os" "$arch")"
-		printf 'build-daemon-release: zig is required for native cross-compiling %s/%s; install zig or set %s to a target C compiler\n' "$os" "$arch" "$env_name" >&2
+		printf 'build-daemon-release: zig is required to build %s/%s; install zig or set %s to a target C compiler\n' "$os" "$arch" "$env_name" >&2
 		exit 1
 	}
-	cat > "$wrapper" <<EOF
-#!/usr/bin/env sh
-exec zig cc -target $zig_target "\$@"
-EOF
-	chmod +x "$wrapper"
+	printf 'zig cc -target %s' "$zig_target"
 }
 
 make_darwin_cc_wrapper() {
@@ -187,14 +179,12 @@ preflight_platform() {
 			fi
 			;;
 		windows)
-			if [ -z "$cc_value" ]; then
-				if [ "$host_os" = "windows" ]; then
-					command -v gcc >/dev/null 2>&1 || preflight_error "gcc from MinGW-w64 is required to build $platform on Windows, or set $env_name"
-				elif ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
-					preflight_error "x86_64-w64-mingw32-gcc is required to cross-compile $platform, or set $env_name"
-				fi
+			if [ -z "$cc_value" ] && ! command -v zig >/dev/null 2>&1; then
+				preflight_error "zig is required to build $platform; install zig or set $env_name to a target C compiler"
 			fi
-			command -v zip >/dev/null 2>&1 || preflight_error "zip is required to package $platform"
+			if ! command -v zip >/dev/null 2>&1 && ! command -v 7z >/dev/null 2>&1; then
+				preflight_error "zip or 7z is required to package $platform"
+			fi
 			;;
 	esac
 }
@@ -211,25 +201,30 @@ target_cc_for() {
 	fi
 	case "$os" in
 		linux)
-			make_zig_cc_wrapper "$os" "$arch" "$wrapper"
-			printf '%s' "$wrapper"
+			zig_cc_for "$os" "$arch"
 			;;
 		darwin)
 			make_darwin_cc_wrapper "$os" "$arch" "$wrapper"
 			printf '%s' "$wrapper"
 			;;
 		windows)
-			if [ "$host_os" = "windows" ]; then
-				printf 'gcc'
-			else
-				printf 'x86_64-w64-mingw32-gcc'
-			fi
+			zig_cc_for "$os" "$arch"
 			;;
 		*)
 			printf 'build-daemon-release: %s/%s requires %s to point at a target C compiler\n' "$os" "$arch" "$env_name" >&2
 			exit 1
 			;;
 	esac
+}
+
+package_windows_archive() {
+	archive="$1"
+	package_name="$2"
+	if command -v zip >/dev/null 2>&1; then
+		zip -qr "$archive" "$package_name"
+	else
+		7z a -bd -tzip "$archive" "$package_name" >/dev/null
+	fi
 }
 
 go_ldflags_for() {
@@ -271,14 +266,13 @@ build_cross_binaries() {
 
 	cc_wrapper="$tmp_dir/cc-$os-$arch"
 	cc="$(target_cc_for "$os" "$arch" "$cc_wrapper")"
-	linker_env="$(rust_linker_env_for "$rust_target")"
 	yffi_lib="$root_dir/third_party/y-crdt/target/$rust_target/release/libyrs.a"
 	go_link_lib="$root_dir/third_party/y-crdt/target/release/libyrs.a"
 
-	printf 'build-daemon-release: building yffi for %s with %s=%s\n' "$rust_target" "$linker_env" "$cc"
+	printf 'build-daemon-release: building yffi for %s and CGO with %s\n' "$rust_target" "$cc"
 	(
 		cd "$root_dir"
-		env RUST_TARGET="$rust_target" RUSTFLAGS="${RUSTFLAGS:-} -C panic=abort" "$linker_env=$cc" "$root_dir/scripts/build-yffi.sh"
+		env RUST_TARGET="$rust_target" RUSTFLAGS="${RUSTFLAGS:-} -C panic=abort" "$root_dir/scripts/build-yffi.sh"
 	)
 	[ -f "$yffi_lib" ] || {
 		printf 'build-daemon-release: missing Rust library after build: %s\n' "$yffi_lib" >&2
@@ -377,7 +371,7 @@ EOF
 	(
 		cd "$tmp_dir"
 		if [ "$os" = "windows" ]; then
-			zip -qr "$archive" "$name"
+			package_windows_archive "$archive" "$name"
 		else
 			tar -czf "$archive" "$name"
 		fi

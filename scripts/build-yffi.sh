@@ -16,7 +16,7 @@ stage_link_library() {
 
 cd "$ROOT/third_party/y-crdt"
 if [ -n "${RUST_TARGET:-}" ]; then
-	cargo build -p yffi --release --locked --target "$RUST_TARGET"
+	cargo rustc -p yffi --release --locked --target "$RUST_TARGET" --lib --crate-type staticlib
 	target_lib="$ROOT/third_party/y-crdt/target/$RUST_TARGET/release/libyrs.a"
 	link_lib="$ROOT/third_party/y-crdt/target/release/libyrs.a"
 	if [ ! -f "$target_lib" ]; then

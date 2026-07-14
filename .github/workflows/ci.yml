@@ -141,7 +141,7 @@ jobs:
         run: go build ./...
 
   windows-daemon-build:
-    name: Windows daemon (GNU cross-build)
+    name: Windows daemon (Zig AMD64 + ARM64 cross-build)
     runs-on: [self-hosted, Linux, ARM64]
     timeout-minutes: 30
     steps:
@@ -153,11 +153,14 @@ jobs:
           go-version-file: go.mod
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-gnu
-      - name: Install MinGW-w64
+          targets: x86_64-pc-windows-gnu,aarch64-pc-windows-gnullvm
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Install archive tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 unzip zip
+          sudo apt-get install -y --no-install-recommends zip
       - name: Cache cargo + Windows libyrs build
         uses: actions/cache@v4
         with:
@@ -165,35 +168,31 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             third_party/y-crdt/target
-          key: yffi-windows-gnu-cross-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('third_party/y-crdt/**/Cargo.lock') }}
+          key: yffi-windows-zig-cross-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('third_party/y-crdt/**/Cargo.lock') }}
           restore-keys: |
-            yffi-windows-gnu-cross-${{ runner.os }}-${{ runner.arch }}-
+            yffi-windows-zig-cross-${{ runner.os }}-${{ runner.arch }}-
       - name: Build canonical Windows release
         env:
-          CC_WINDOWS_AMD64: x86_64-w64-mingw32-gcc
-          PLATFORMS: windows/amd64
+          PLATFORMS: windows/amd64 windows/arm64
         run: scripts/build-daemon-release.sh p1-ci "$RUNNER_TEMP/notty-release"
-      - name: Verify Windows installer packaging
+      - name: Verify archives, PE machines, manifest, and checksums
+        run: go run ./scripts/verify-windows-daemon-release.go "$RUNNER_TEMP/notty-release/p1-ci" p1-ci
+      - name: Vet and compile Windows-tagged tests for both architectures
         run: |
-          release_root="$RUNNER_TEMP/notty-release"
-          archive="$release_root/p1-ci/notty-daemon_p1-ci_windows_amd64.zip"
-          test -f "$release_root/install.ps1"
-          test -f "$release_root/uninstall.ps1"
-          unzip -Z1 "$archive" | grep -qx 'notty-daemon_p1-ci_windows_amd64/run-windows.ps1'
-      - name: Vet Windows-tagged daemon code
-        env:
-          CC: x86_64-w64-mingw32-gcc
-          CGO_ENABLED: "1"
-          GOOS: windows
-          GOARCH: amd64
-        run: go vet ./daemon/internal/syncer ./internal/ycrdt
-      - name: Compile Windows-native syncer tests
-        env:
-          CC: x86_64-w64-mingw32-gcc
-          CGO_ENABLED: "1"
-          GOOS: windows
-          GOARCH: amd64
-        run: go test -c -o "$RUNNER_TEMP/notty-syncer.test.exe" ./daemon/internal/syncer
+          for target in \
+            "amd64 x86_64-pc-windows-gnu x86_64-windows-gnu" \
+            "arm64 aarch64-pc-windows-gnullvm aarch64-windows-gnu"
+          do
+            set -- $target
+            arch="$1"
+            rust_target="$2"
+            zig_target="$3"
+            RUST_TARGET="$rust_target" RUSTFLAGS="-C panic=abort" scripts/build-yffi.sh
+            CC="zig cc -target $zig_target" CGO_ENABLED=1 GOOS=windows GOARCH="$arch" \
+              go vet ./daemon/internal/syncer ./internal/ycrdt
+            CC="zig cc -target $zig_target" CGO_ENABLED=1 GOOS=windows GOARCH="$arch" \
+              go test -c -o "$RUNNER_TEMP/notty-syncer-$arch.test.exe" ./daemon/internal/syncer
+          done
 
   windows-daemon-installer:
     name: Windows daemon installer
@@ -209,7 +208,7 @@ jobs:
         run: scripts/test-daemon-installer-windows.ps1
 
   windows-daemon:
-    name: Windows daemon (native GNU build + platform tests)
+    name: Windows daemon (native Zig build + platform tests)
     # Preserve the native execution matrix, but do not schedule it until a
     # Windows CI runner is available for this repository.
     if: ${{ false }}
@@ -222,21 +221,20 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: msys2/setup-msys2@v2
+      - uses: mlugg/setup-zig@v2
         with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            mingw-w64-x86_64-gcc
-            zip
-      - name: Expose MinGW-w64 to native Go and Rust
+          version: 0.16.0
+      - name: Expose 7-Zip for release packaging
         shell: pwsh
         run: |
-          "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          "C:\msys64\usr\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $sevenZip = Join-Path $env:ProgramFiles "7-Zip"
+          if (-not (Test-Path (Join-Path $sevenZip "7z.exe") -PathType Leaf)) {
+            throw "7-Zip is required to package the Windows release"
+          }
+          $sevenZip | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-gnu
+          targets: x86_64-pc-windows-gnu,aarch64-pc-windows-gnullvm
       - name: Cache cargo + Windows libyrs build
         uses: actions/cache@v4
         with:
@@ -244,86 +242,29 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             third_party/y-crdt/target
-          key: yffi-windows-gnu-${{ hashFiles('third_party/y-crdt/**/Cargo.lock') }}
+          key: yffi-windows-zig-${{ hashFiles('third_party/y-crdt/**/Cargo.lock') }}
           restore-keys: |
-            yffi-windows-gnu-
+            yffi-windows-zig-
       - name: Build canonical Windows release
         shell: bash
         env:
-          CC_WINDOWS_AMD64: gcc
-          PLATFORMS: windows/amd64
+          PLATFORMS: windows/amd64 windows/arm64
         run: |
           release_dir="$(cygpath -u "$RUNNER_TEMP")/notty-release"
           scripts/build-daemon-release.sh p1-ci "$release_dir"
       - name: Verify canonical Windows release
         shell: pwsh
-        run: |
-          $version = "p1-ci"
-          $releaseName = "notty-daemon_${version}_windows_amd64"
-          $distRoot = Join-Path $env:RUNNER_TEMP "notty-release"
-          $versionDir = Join-Path $distRoot $version
-          $archive = Join-Path $versionDir "${releaseName}.zip"
-          if (-not (Test-Path $archive -PathType Leaf)) {
-            throw "missing Windows release archive: $archive"
-          }
-
-          $extractDir = Join-Path $env:RUNNER_TEMP "notty-release-extracted"
-          Expand-Archive -Path $archive -DestinationPath $extractDir -Force
-          $daemon = Join-Path $extractDir "$releaseName/bin/notty-daemon.exe"
-          $agentTool = Join-Path $extractDir "$releaseName/bin/notty-agent-tool.exe"
-          $runner = Join-Path $extractDir "$releaseName/run-windows.ps1"
-          $rootInstaller = Join-Path $distRoot "install.ps1"
-          $rootUninstaller = Join-Path $distRoot "uninstall.ps1"
-          foreach ($script in @($runner, $rootInstaller, $rootUninstaller)) {
-            if (-not (Test-Path $script -PathType Leaf)) {
-              throw "Windows release missing PowerShell script: $script"
-            }
-          }
-          foreach ($binary in @($daemon, $agentTool)) {
-            if (-not (Test-Path $binary -PathType Leaf)) {
-              throw "release archive missing binary: $binary"
-            }
-            $bytes = [System.IO.File]::ReadAllBytes($binary)
-            if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) {
-              throw "release binary is not a PE image (missing MZ header): $binary"
-            }
-            $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
-            if ($peOffset -lt 0 -or $peOffset + 4 -gt $bytes.Length -or
-                $bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45 -or
-                $bytes[$peOffset + 2] -ne 0 -or $bytes[$peOffset + 3] -ne 0) {
-              throw "release binary is not a PE image (missing PE signature): $binary"
-            }
-          }
-
-          $manifestPath = Join-Path $versionDir "manifest.json"
-          $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
-          $artifacts = @($manifest.artifacts)
-          if ($manifest.version -ne $version -or $artifacts.Count -ne 1) {
-            throw "unexpected Windows release manifest: $manifestPath"
-          }
-          $artifact = $artifacts[0]
-          if ($artifact.os -ne "windows" -or $artifact.arch -ne "amd64" -or
-              $artifact.file -ne "${releaseName}.zip") {
-            throw "manifest does not contain the exact windows/amd64 artifact"
-          }
-
-          $checksumLines = @(Get-Content (Join-Path $versionDir "SHA256SUMS") | Where-Object { $_.Trim() })
-          if ($checksumLines.Count -ne 1) {
-            throw "expected exactly one Windows release checksum"
-          }
-          $checksumParts = $checksumLines[0] -split '\s+', 2
-          $actualChecksum = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
-          if ($checksumParts.Count -ne 2 -or $checksumParts[1] -ne "${releaseName}.zip" -or
-              $checksumParts[0] -ne $actualChecksum -or $artifact.sha256 -ne $actualChecksum) {
-            throw "Windows release checksum or manifest hash mismatch"
-          }
+        run: go run ./scripts/verify-windows-daemon-release.go "$env:RUNNER_TEMP/notty-release/p1-ci" p1-ci
       - name: PowerShell installer tests
         shell: pwsh
         run: scripts/test-daemon-installer-windows.ps1
+      - name: Stage AMD64 Yrs library for native tests
+        shell: bash
+        run: RUST_TARGET=x86_64-pc-windows-gnu RUSTFLAGS="-C panic=abort" scripts/build-yffi.sh
       - name: Run Windows-native syncer suite and require platform rows
         shell: pwsh
         env:
-          CC: gcc
+          CC: zig cc -target x86_64-windows-gnu
           CGO_ENABLED: "1"
         run: |
           $legacyFiles = @(

@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$Amd64Fixture = ""
+    [string]$Amd64Fixture = "",
+    [string]$Arm64Fixture = ""
 )
 
 Set-StrictMode -Version 2.0
@@ -70,47 +71,50 @@ foreach ($scriptPath in @($installer, $runner, $uninstaller, $PSCommandPath)) {
 }
 
 Assert-True ($null -ne $installerAst) "installer AST was not captured"
-$hostGuard = $installerAst.Find({
+$architectureResolver = $installerAst.Find({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -eq "Assert-SupportedWindowsHost"
+            $node.Name -eq "Get-WindowsReleaseArchitecture"
     }, $true)
-Assert-True ($null -ne $hostGuard) "installer host support guard was not found"
-Invoke-Expression $hostGuard.Extent.Text
+Assert-True ($null -ne $architectureResolver) "installer release architecture resolver was not found"
+Invoke-Expression $architectureResolver.Extent.Text
 
-$hostGuardCall = $installerAst.Find({
+$artifactNameResolver = $installerAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq "Get-WindowsArtifactName"
+    }, $true)
+Assert-True ($null -ne $artifactNameResolver) "installer artifact name resolver was not found"
+Invoke-Expression $artifactNameResolver.Extent.Text
+
+$architectureResolverCall = $installerAst.Find({
         param($node)
         $node -is [Management.Automation.Language.CommandAst] -and
-            $node.GetCommandName() -eq "Assert-SupportedWindowsHost"
+            $node.GetCommandName() -eq "Get-WindowsReleaseArchitecture"
     }, $true)
 $userHomeCall = $installerAst.Find({
         param($node)
         $node -is [Management.Automation.Language.CommandAst] -and
             $node.GetCommandName() -eq "Get-UserHome"
     }, $true)
-Assert-True ($null -ne $hostGuardCall -and $null -ne $userHomeCall) "installer host guard wiring was not found"
-Assert-True ($hostGuardCall.Extent.StartOffset -lt $userHomeCall.Extent.StartOffset) "installer host guard runs after installation path resolution"
+Assert-True ($null -ne $architectureResolverCall -and $null -ne $userHomeCall) "installer architecture resolver wiring was not found"
+Assert-True ($architectureResolverCall.Extent.StartOffset -lt $userHomeCall.Extent.StartOffset) "installer architecture resolver runs after installation path resolution"
 
 foreach ($architecture in @("ARM64", "aarch64")) {
-    $windows10ArmRejected = $false
-    try {
-        Assert-SupportedWindowsHost -MachineArchitecture $architecture -WindowsBuildNumber 19045
-    } catch {
-        $windows10ArmRejected = $_.Exception.Message -like "*Windows 11 or newer*ARM64*19045*"
-    }
-    Assert-True $windows10ArmRejected "Windows 10 $architecture was not rejected"
-    Assert-SupportedWindowsHost -MachineArchitecture $architecture -WindowsBuildNumber 22000
+    Assert-True ((Get-WindowsReleaseArchitecture -MachineArchitecture $architecture) -eq "arm64") "$architecture did not select the native ARM64 release"
 }
 foreach ($architecture in @("AMD64", "x86_64")) {
-    Assert-SupportedWindowsHost -MachineArchitecture $architecture -WindowsBuildNumber 19045
+    Assert-True ((Get-WindowsReleaseArchitecture -MachineArchitecture $architecture) -eq "amd64") "$architecture did not select the native AMD64 release"
 }
 $unsupportedArchitectureRejected = $false
 try {
-    Assert-SupportedWindowsHost -MachineArchitecture "x86" -WindowsBuildNumber 22631
+    Get-WindowsReleaseArchitecture -MachineArchitecture "x86" | Out-Null
 } catch {
     $unsupportedArchitectureRejected = $_.Exception.Message -like "*AMD64 or ARM64 is required*x86*"
 }
 Assert-True $unsupportedArchitectureRejected "unsupported Windows architecture was not rejected"
+Assert-True ((Get-WindowsArtifactName -ReleaseVersion "v1.2.3" -ReleaseArchitecture "amd64") -eq "notty-daemon_v1.2.3_windows_amd64.zip") "AMD64 artifact name is incorrect"
+Assert-True ((Get-WindowsArtifactName -ReleaseVersion "v1.2.3" -ReleaseArchitecture "arm64") -eq "notty-daemon_v1.2.3_windows_arm64.zip") "ARM64 artifact name is incorrect"
 
 if ($env:OS -ne "Windows_NT") {
     throw "Windows installer lifecycle tests require Windows"
@@ -119,7 +123,13 @@ if ($env:OS -ne "Windows_NT") {
 $tempDir = Join-Path ([IO.Path]::GetTempPath()) ("codesk-windows-installer-test-" + [Guid]::NewGuid().ToString("N"))
 $staticRoot = Join-Path $tempDir "static"
 $version = "test"
-$packageName = "notty-daemon_${version}_windows_amd64"
+$machineArchitecture = if (-not [string]::IsNullOrWhiteSpace($env:PROCESSOR_ARCHITEW6432)) {
+    $env:PROCESSOR_ARCHITEW6432
+} else {
+    $env:PROCESSOR_ARCHITECTURE
+}
+$releaseArchitecture = Get-WindowsReleaseArchitecture -MachineArchitecture $machineArchitecture
+$packageName = "notty-daemon_${version}_windows_${releaseArchitecture}"
 $releaseDir = Join-Path $staticRoot $version
 $packageDir = Join-Path $releaseDir $packageName
 $archive = Join-Path $releaseDir "$packageName.zip"
@@ -134,14 +144,17 @@ foreach ($name in @("USERPROFILE", "PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW
 }
 
 New-Item -ItemType Directory -Path (Join-Path $packageDir "bin"), (Join-Path $staticRoot "latest"), $testHome -Force | Out-Null
-$testExecutable = if ([string]::IsNullOrWhiteSpace($Amd64Fixture)) {
+$fixtureOverride = if ($releaseArchitecture -eq "arm64") { $Arm64Fixture } else { $Amd64Fixture }
+$testExecutable = if ([string]::IsNullOrWhiteSpace($fixtureOverride)) {
     Join-Path $env:SystemRoot "System32\where.exe"
 } else {
-    [IO.Path]::GetFullPath($Amd64Fixture)
+    [IO.Path]::GetFullPath($fixtureOverride)
 }
 Assert-File $testExecutable
 $fixtureMachine = Get-PEMachine $testExecutable
-Assert-True ($fixtureMachine -eq 0x8664) "fixture must be an AMD64 PE executable; got 0x$($fixtureMachine.ToString('X4')). Pass -Amd64Fixture on ARM64 hosts."
+$expectedFixtureMachine = if ($releaseArchitecture -eq "arm64") { 0xAA64 } else { 0x8664 }
+$fixtureParameter = if ($releaseArchitecture -eq "arm64") { "-Arm64Fixture" } else { "-Amd64Fixture" }
+Assert-True ($fixtureMachine -eq $expectedFixtureMachine) "fixture must be a native $releaseArchitecture PE executable; got 0x$($fixtureMachine.ToString('X4')). Pass $fixtureParameter with a native fixture."
 Copy-Item -LiteralPath $testExecutable -Destination (Join-Path $packageDir "bin\notty-daemon.exe")
 Copy-Item -LiteralPath $testExecutable -Destination (Join-Path $packageDir "bin\notty-agent-tool.exe")
 Copy-Item -LiteralPath $runner -Destination (Join-Path $packageDir "run-windows.ps1")
