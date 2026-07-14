@@ -34,6 +34,11 @@ type agentSessionSupervisor struct {
 	// finishes (whether it respawned or bailed on shutdown). Test seam only.
 	testHookRestartComplete func()
 
+	// testHookDeathHandled, when set, fires once consumeEvents has classified a
+	// process death and taken its action (expected/terminal/transient), passing
+	// the classification. Test seam only.
+	testHookDeathHandled func(classification string)
+
 	mu       sync.Mutex
 	sessions map[string]*managedAgentSession
 	starting map[string]*agentSessionStart
@@ -660,24 +665,76 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 			s.markIdle(agentID, process, true)
 		}
 	}
+	// Classify the death from the exit forensics (facet 2), recorded before the
+	// events channel closed. Default is transient: only an explicit positive
+	// signal moves an exit to Expected (deliberate Stop) or terminal (a
+	// CLI-proven, non-self-recovering provider failure) — a rate-limit/429 or any
+	// unrecognized exit stays transient so we never one-way-door a recoverable
+	// agent.
+	exit := process.ExitInfo()
+	terminalReason := ""
+	if !exit.Expected {
+		terminalReason = terminalExitReason(exit)
+	}
+	transient := !exit.Expected && terminalReason == ""
+
 	var restartAgent *agent
+	owned := false
 	s.mu.Lock()
 	if session := s.sessions[agentID]; session != nil && session.process == process {
-		session.state = "disconnected"
+		owned = true
+		if terminalReason != "" {
+			session.state = "failed"
+		} else {
+			session.state = "disconnected"
+		}
 		session.activeTurn = ""
 		session.activeForMeSig = ""
 		session.activeGeneralSig = ""
 		session.steeredForMeSig = ""
-		restartAgent = cloneAgentValue(session.agent)
-		if restartAgent != nil {
-			restartAgent.SessionID = session.sessionID
+		if transient {
+			restartAgent = cloneAgentValue(session.agent)
+			if restartAgent != nil {
+				restartAgent.SessionID = session.sessionID
+			}
 		}
 	}
 	s.mu.Unlock()
-	if restartAgent == nil {
+	if !owned {
+		// The events belong to a process this session has already replaced.
 		return
 	}
-	appendAgentLog(s.cfg, agentID, "runtime event stream closed; marking session disconnected")
+
+	// Expected: the daemon deliberately Stop()ped this process — clean teardown,
+	// no restart, no status noise.
+	if exit.Expected {
+		appendAgentLog(s.cfg, agentID, "runtime stopped as expected; no restart")
+		if s.testHookDeathHandled != nil {
+			s.testHookDeathHandled("expected")
+		}
+		return
+	}
+
+	// Terminal: a CLI-proven, non-self-recovering provider failure. Surface it as
+	// `failed` with the provider's own (sanitized) line; no restart until a human
+	// acts. The match set is locked only from live-probe evidence.
+	if terminalReason != "" {
+		appendAgentLog(s.cfg, agentID, "runtime terminal failure; no restart: %s", terminalReason)
+		s.publish(agentID, updateAgentSessionRequest{
+			Status:          "failed",
+			CurrentTurnID:   "",
+			CurrentActivity: terminalReason,
+			LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
+		})
+		if s.testHookDeathHandled != nil {
+			s.testHookDeathHandled("terminal")
+		}
+		return
+	}
+
+	// Transient: an unexpected crash (or self-clearing throttle) — mark
+	// disconnected and restart. Capped backoff lands in facet 4.
+	appendAgentLog(s.cfg, agentID, "runtime event stream closed; marking session disconnected%s", crashSuffix(exit))
 	s.publish(agentID, updateAgentSessionRequest{
 		Status:          "disconnected",
 		CurrentTurnID:   "",
@@ -700,6 +757,84 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 			appendAgentLog(s.cfg, agentID, "session restart failed err=%v", err)
 		}
 	}()
+	if s.testHookDeathHandled != nil {
+		s.testHookDeathHandled("transient")
+	}
+}
+
+const maxExitLineLen = 200
+
+// terminalExitReason returns a sanitized, human-facing reason when a process
+// exit matches a CLI-PROVEN, non-self-recovering provider failure (exhausted
+// plan/quota, deprecated/removed model, invalid auth) — the only conditions
+// that should stop restarts. It returns "" for everything else, INCLUDING
+// self-clearing rate-limits/429s, so the caller defaults those to the
+// transient/backoff path and never one-way-doors a recoverable agent.
+//
+// The match set is deliberately empty until the live-CLI probe proves which
+// exit code / stderr wording each provider actually emits (the current-CLI bar
+// from item #1): a substring guessed from a report can mis-classify a
+// recoverable exit as permanent. When the probe locks conditions, prefer a
+// structured signal (exit code) and use stderr substrings only where no
+// structured signal exists. This helper is shared with the turn-loop 429 item
+// (task #8), so its contract — positive-match-only, transient by default —
+// must hold for both callers.
+func terminalExitReason(exit RuntimeExitInfo) string {
+	// TODO(item #3 live-probe): populate from probe evidence, exit codes first.
+	_ = exit
+	return ""
+}
+
+// crashSuffix renders a short, bounded forensic suffix for the disconnected log
+// line so a transient crash is not silent: exit code/signal plus the last
+// stderr line, sanitized and length-capped.
+func crashSuffix(exit RuntimeExitInfo) string {
+	var parts []string
+	if exit.Signal != "" {
+		parts = append(parts, "signal="+exit.Signal)
+	} else if exit.ExitCode >= 0 {
+		parts = append(parts, fmt.Sprintf("code=%d", exit.ExitCode))
+	}
+	if last := lastNonEmpty(exit.Stderr); last != "" {
+		parts = append(parts, "stderr="+sanitizeExitLine(last))
+	} else if exit.Err != "" {
+		parts = append(parts, "err="+sanitizeExitLine(exit.Err))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(parts, " ") + ")"
+}
+
+// sanitizeExitLine bounds and cleans a provider line before it reaches a log or
+// a published status: collapse whitespace/control chars to spaces, drop other
+// control bytes, and length-cap. It keeps arbitrary terminal output from
+// flowing into the UI; the stderr ring must never carry credentials.
+func sanitizeExitLine(s string) string {
+	s = strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			return ' '
+		case r < 0x20:
+			return -1
+		default:
+			return r
+		}
+	}, s)
+	s = strings.TrimSpace(s)
+	if len(s) > maxExitLineLen {
+		s = strings.TrimSpace(s[:maxExitLineLen]) + "…"
+	}
+	return s
+}
+
+func lastNonEmpty(lines []string) string {
+	for i := len(lines) - 1; i >= 0; i-- {
+		if t := strings.TrimSpace(lines[i]); t != "" {
+			return t
+		}
+	}
+	return ""
 }
 
 func (s *agentSessionSupervisor) markWorking(agentID string, process RuntimeProcess, turnID string) {

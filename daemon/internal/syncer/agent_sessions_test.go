@@ -785,6 +785,46 @@ func TestAgentSessionDoesNotRestartAfterShutdown(t *testing.T) {
 	}
 }
 
+func TestAgentSessionExpectedStopIsNotRestarted(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	supervisor.restartSleep = func(time.Duration) {}
+	handled := make(chan string, 1)
+	supervisor.testHookDeathHandled = func(c string) { handled <- c }
+	restarted := make(chan struct{})
+	supervisor.testHookRestartComplete = func() { close(restarted) }
+
+	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"}); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+
+	// The daemon deliberately Stop()ped this process — its exit reports Expected.
+	// A deliberate stop must be classified expected and never restarted (else a
+	// shutdown/reconcile Stop would respawn what we just tore down).
+	process.setExitInfo(RuntimeExitInfo{Expected: true})
+	close(process.events)
+
+	select {
+	case c := <-handled:
+		if c != "expected" {
+			t.Fatalf("deliberate stop classified %q, want expected", c)
+		}
+	case <-restarted:
+		t.Fatal("a deliberately-stopped process was restarted")
+	case <-time.After(2 * time.Second):
+		t.Fatal("consumeEvents did not handle the process death")
+	}
+	factory.mu.Lock()
+	spawned := len(factory.processes)
+	factory.mu.Unlock()
+	if spawned != 1 {
+		t.Fatalf("expected stop spawned a replacement: want 1 process total, got %d", spawned)
+	}
+}
+
 func TestAgentSessionSupervisorDoesNotUseCodexWireMethods(t *testing.T) {
 	body, err := os.ReadFile("agent_sessions.go")
 	if err != nil {
