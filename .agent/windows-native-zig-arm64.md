@@ -16,7 +16,7 @@ The behavior is visible in three ways. A focused release build produces `notty-d
 - [x] (2026-07-14 17:59Z) Built both canonical archives and verified manifests, SHA256 entries, ZIP contents, and both executable PE machine types.
 - [x] (2026-07-14 18:05Z) Added installer architecture selection and deterministic AMD64/ARM64 routing assertions.
 - [x] (2026-07-14 18:10Z) Passed Windows cross vet and syncer test-binary linkage for both architectures, full Go test/vet/build, focused race tests, actionlint, shell syntax, and a Linux ARM64 release regression.
-- [ ] Push one exact review SHA, open the standalone pull request, and bind the reviewers and evidence to that SHA.
+- [x] (2026-07-14 18:17Z) Opened draft PR #159, pushed the standalone review branch, and prepared one exact-head evidence handoff for the platform reviewers.
 - [ ] Run the PowerShell lifecycle and execution smoke on Windows AMD64 and native Windows ARM64; retain raw native ARM64 output as the final platform gate.
 
 ## Surprises & Discoveries
@@ -63,7 +63,7 @@ The behavior is visible in three ways. A focused release build produces `notty-d
 
 The implementation now constructs and structurally verifies both native Windows archives from Linux ARM64 with a single Zig toolchain. It removes active MSYS2/MinGW-GCC setup, removes the installer Windows 11/x64-emulation branch, and makes native ARM64 part of the public `all` release set. Cross vet and linked syncer test binaries prove that Yrs and go-sqlite3 coexist for both target pairs.
 
-The remaining outcome is deliberately external: the exact pushed commit still needs PowerShell lifecycle output and executable smoke evidence on real Windows, including a native ARM64 machine. Those results must be tied to the unchanged pull-request head; a later head invalidates the seals and requires rerunning them.
+Draft PR #159 contains the standalone replacement. The remaining outcome is deliberately external: its exact pushed head still needs PowerShell lifecycle output and executable smoke evidence on real Windows, including a native ARM64 machine. Those results must be tied to the unchanged pull-request head; a later head invalidates the seals and requires rerunning them.
 
 ## Context and Orientation
 
@@ -180,4 +180,4 @@ The first returns only `amd64` or `arm64` and throws for unsupported values. The
 
 `scripts/verify-windows-daemon-release.go` accepts exactly two arguments: the version directory and the expected version. A zero exit status means both archives, structured metadata, checksums, archive members, and PE machines passed.
 
-Plan revision note (2026-07-14): created during implementation after the prior Windows AMD64 and installer plans were found to describe superseded MinGW and x64-emulation paths. This plan records the complete replacement, the exact local evidence, and the native ARM64 gate that remains before merge.
+Plan revision note (2026-07-14): created during implementation after the prior Windows AMD64 and installer plans were found to describe superseded MinGW and x64-emulation paths. This plan records the complete replacement, the exact local evidence, and the native ARM64 gate that remains before merge. Updated after draft PR #159 was opened so the living progress and outcome match the published review state.
