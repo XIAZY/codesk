@@ -24,9 +24,19 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	account, err := registerAccount(s.sqlDB(), req)
+	account, err := registerAccount(s.sqlDB(), req, !s.cfg.RequireEmail)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !s.cfg.RequireEmail {
+		token, err := issueJWT(s.cfg.JWTSecret, account, 7*24*time.Hour)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		workspaces, _ := listWorkspacesForAccount(s.sqlDB(), account.ID)
+		writeJSON(w, http.StatusCreated, AuthResponse{Token: token, Account: account, Workspaces: workspaces})
 		return
 	}
 	rawToken, created, err := requestEmailVerification(s.sqlDB(), account, 0)
@@ -56,7 +66,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
-	if !account.EmailVerified {
+	if s.cfg.RequireEmail && !account.EmailVerified {
 		writeError(w, http.StatusForbidden, errEmailNotVerified.Error())
 		return
 	}
@@ -100,6 +110,10 @@ func (s *Server) handleResendVerification(w http.ResponseWriter, r *http.Request
 	var req ResendVerificationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !s.cfg.RequireEmail {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
 	account, err := getAccountByEmail(s.sqlDB(), req.Email)
@@ -555,7 +569,7 @@ func (s *Server) authenticateHumanRequest(r *http.Request) (*AuthContext, error)
 	if err != nil {
 		return nil, err
 	}
-	if !account.EmailVerified {
+	if s.cfg.RequireEmail && !account.EmailVerified {
 		return nil, errEmailNotVerified
 	}
 	return &AuthContext{

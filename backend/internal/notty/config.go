@@ -24,9 +24,6 @@ type Config struct {
 
 func LoadConfig() Config {
 	requireEmail, requireEmailErr := getenvBool("NOTTY_REQUIRE_EMAIL", true)
-	if requireEmailErr == nil && !requireEmail {
-		requireEmailErr = errors.New("NOTTY_REQUIRE_EMAIL=false is not supported; email delivery is required")
-	}
 	return Config{
 		Port:             getenv("NOTTY_PORT", "8080"),
 		DatabaseURL:      getenv("NOTTY_DATABASE_URL", ""),

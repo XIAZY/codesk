@@ -1524,9 +1524,7 @@ Start the local development stack:
 cat > secrets.env <<'EOF'
 NOTTY_DATABASE_URL=postgres://notty:notty@postgres:5432/notty?sslmode=disable
 NOTTY_JWT_SECRET=replace-with-a-long-random-secret
-NOTTY_MAILGUN_API_KEY=replace-with-mailgun-api-key
 EOF
-# Edit secrets.env with real local Mailgun test credentials.
 make dev
 ```
 
@@ -1538,8 +1536,9 @@ docker compose --env-file deploy/env/dev.server.env up --build
 
 The local Compose backend service loads committed non-secret defaults from
 `deploy/env/dev.server.env` and git-ignored secrets from `secrets.env`. The
-server requires working email configuration by default so registration, account
-activation, and password reset can be tested locally.
+local environment disables email verification, so registrations authenticate
+immediately without Mailgun. Add `NOTTY_REQUIRE_EMAIL=1` and Mailgun configuration
+to `secrets.env` when explicitly testing verification and password-reset email flows.
 
 Open:
 
@@ -1735,7 +1734,7 @@ Important backend environment variables:
 - `NOTTY_MAILGUN_DOMAIN`: Mailgun sending domain, default `mail.getcodesk.com`.
 - `NOTTY_MAILGUN_API_KEY`: Mailgun API key.
 - `NOTTY_MAILGUN_FROM`: sender address used for verification and password reset emails, default `noreply@mail.getcodesk.com`.
-- `NOTTY_REQUIRE_EMAIL`: defaults to `1`; startup fails if Mailgun config is missing or invalid, and explicit `false` is rejected.
+- `NOTTY_REQUIRE_EMAIL`: defaults to `1`. Set it to `0` for local development to skip verification email delivery, mark new accounts verified, and authenticate registrations immediately. When enabled, startup requires complete Mailgun configuration.
 - `NOTTY_PPROF_ADDR`: optional pprof bind address.
 
 Important deployment environment variables in `deploy/env/prod.deploy.env`:
@@ -1757,7 +1756,7 @@ Important production server defaults in `deploy/env/prod.server.env`:
 - `NOTTY_PPROF_ADDR`: optional pprof bind address.
 - `NOTTY_MAILGUN_DOMAIN`: Mailgun sending domain, default `mail.getcodesk.com`.
 - `NOTTY_MAILGUN_FROM`: sender address used for verification and password reset emails, default `noreply@mail.getcodesk.com`.
-- `NOTTY_REQUIRE_EMAIL`: production default `1`; explicit `false` is rejected. Keep Mailgun API keys in `/opt/notty/secrets.env`.
+- `NOTTY_REQUIRE_EMAIL`: production default `1`; keep it enabled in production and keep Mailgun API keys in `/opt/notty/secrets.env`.
 
 Important frontend environment variables:
 

@@ -121,6 +121,50 @@ func TestRegisterCreatesUnverifiedAccountAndRequiresEmailVerification(t *testing
 	}
 }
 
+func TestRegisterAuthenticatesImmediatelyWhenEmailRequirementDisabled(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	server := NewServer(Config{
+		DatabaseURL:  database.URL,
+		JWTSecret:    "test-secret",
+		RequireEmail: false,
+	}, database)
+	sender := newAuthTestEmailSender()
+	server.emailSender = sender
+	router := &authTestRouter{Handler: server.Routes(), emailSender: sender}
+
+	var register AuthResponse
+	authTestJSON(t, router, http.MethodPost, "/api/auth/register", "", RegisterRequest{
+		Email:       "local-no-email@example.com",
+		Password:    "local-pass",
+		DisplayName: "Local Account",
+	}, http.StatusCreated, &register)
+	if register.Token == "" || register.Account == nil || !register.Account.EmailVerified {
+		t.Fatalf("expected immediately authenticated local registration, got %#v", register)
+	}
+	if sender.count() != 0 {
+		t.Fatalf("disabled email verification sent %d messages, want 0", sender.count())
+	}
+
+	var me AuthResponse
+	authTestJSON(t, router, http.MethodGet, "/api/auth/me", register.Token, nil, http.StatusOK, &me)
+	if me.Account == nil || me.Account.ID != register.Account.ID {
+		t.Fatalf("registered token did not authenticate account: %#v", me.Account)
+	}
+
+	if _, err := database.DB.Exec(`UPDATE accounts SET email_verified = FALSE WHERE id = $1`, register.Account.ID); err != nil {
+		t.Fatalf("mark local account unverified: %v", err)
+	}
+	var login AuthResponse
+	authTestJSON(t, router, http.MethodPost, "/api/auth/login", "", LoginRequest{
+		Email:    "local-no-email@example.com",
+		Password: "local-pass",
+	}, http.StatusOK, &login)
+	if login.Token == "" || login.Account == nil {
+		t.Fatalf("existing unverified local account could not log in: %#v", login)
+	}
+	authTestJSON(t, router, http.MethodGet, "/api/auth/me", login.Token, nil, http.StatusOK, &me)
+}
+
 func TestVerifyEmailDoesNotBlockOnWelcomeEmailFailure(t *testing.T) {
 	_, router := newAuthTestServer(t)
 	sender := authTestEmailSenderForRouter(t, router)
@@ -2049,7 +2093,7 @@ func newAuthTestRouter(t *testing.T) http.Handler {
 func newAuthTestServer(t *testing.T) (*Server, http.Handler) {
 	t.Helper()
 	database := newPostgresTestDatabase(t)
-	server := NewServer(Config{DatabaseURL: database.URL, JWTSecret: "test-secret"}, database)
+	server := NewServer(Config{DatabaseURL: database.URL, JWTSecret: "test-secret", RequireEmail: true}, database)
 	emailSender := newAuthTestEmailSender()
 	server.emailSender = emailSender
 	return server, &authTestRouter{

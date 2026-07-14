@@ -357,19 +357,16 @@ func TestLoadConfigRequiresEmailByDefault(t *testing.T) {
 	}
 }
 
-func TestValidateEmailConfigRejectsExplicitFalseRequireEmailFlag(t *testing.T) {
+func TestValidateEmailConfigAllowsExplicitFalseRequireEmailFlag(t *testing.T) {
 	t.Setenv("NOTTY_REQUIRE_EMAIL", "false")
-	t.Setenv("NOTTY_MAILGUN_DOMAIN", "mg.example.com")
-	t.Setenv("NOTTY_MAILGUN_API_KEY", "key")
-	t.Setenv("NOTTY_MAILGUN_FROM", "codesk <noreply@example.com>")
+	t.Setenv("NOTTY_MAILGUN_API_KEY", "")
 
 	cfg := LoadConfig()
-	err := cfg.ValidateEmailConfig()
-	if err == nil {
-		t.Fatalf("expected explicit false NOTTY_REQUIRE_EMAIL to fail validation")
+	if cfg.RequireEmail {
+		t.Fatal("expected explicit false NOTTY_REQUIRE_EMAIL to disable email verification")
 	}
-	if !strings.Contains(err.Error(), "NOTTY_REQUIRE_EMAIL=false") {
-		t.Fatalf("expected explicit false error to mention NOTTY_REQUIRE_EMAIL=false, got %q", err.Error())
+	if err := cfg.ValidateEmailConfig(); err != nil {
+		t.Fatalf("disabled email verification should not require Mailgun config: %v", err)
 	}
 }
 

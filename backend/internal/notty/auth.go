@@ -242,7 +242,7 @@ func accountFromRow(row *sql.Row) (*Account, error) {
 	return account, nil
 }
 
-func registerAccount(db *sql.DB, req RegisterRequest) (*Account, error) {
+func registerAccount(db *sql.DB, req RegisterRequest, emailVerified bool) (*Account, error) {
 	if db == nil {
 		return nil, errors.New("database is required")
 	}
@@ -263,7 +263,7 @@ func registerAccount(db *sql.DB, req RegisterRequest) (*Account, error) {
 		ID:                      uuid.NewString(),
 		Email:                   email,
 		DisplayName:             displayName,
-		EmailVerified:           false,
+		EmailVerified:           emailVerified,
 		LastAccessedWorkspaceID: "",
 		CreatedAt:               now,
 		UpdatedAt:               now,
