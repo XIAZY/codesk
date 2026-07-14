@@ -541,18 +541,22 @@ func (s *workspaceRuntime) projectRootRemovedEntry(projected rootProjectionEntry
 	}
 	if len(states) > 0 {
 		state := states[0]
+		fs, err := tracked.workspaceFS()
+		if err != nil {
+			return err
+		}
 		if state.fileExists {
 			if state.baseKnown && !state.localDirty {
-				if err := tracked.workspaceFS().DeleteIfUnchanged(tracked.Path, projectedHashString(state.baseContent)); err != nil {
+				if err := fs.DeleteIfUnchanged(tracked.Path, projectedHashString(state.baseContent)); err != nil {
 					if errors.Is(err, ErrUnsafeDelete) {
-						if _, archiveErr := tracked.workspaceFS().Archive(tracked.Path, safeDocumentCacheName(tracked.DocumentID)); archiveErr != nil {
+						if _, archiveErr := fs.Archive(tracked.Path, safeDocumentCacheName(tracked.DocumentID)); archiveErr != nil {
 							return archiveErr
 						}
 					} else {
 						return err
 					}
 				}
-			} else if _, err := tracked.workspaceFS().Archive(tracked.Path, safeDocumentCacheName(tracked.DocumentID)); err != nil {
+			} else if _, err := fs.Archive(tracked.Path, safeDocumentCacheName(tracked.DocumentID)); err != nil {
 				return err
 			}
 		}

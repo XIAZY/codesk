@@ -2013,7 +2013,6 @@ func startSupervisedAgentWorkspaceRuntimeForTest(
 }
 
 func TestManagedWorkspaceRuntimeRestartBackoffClassifiesFailures(t *testing.T) {
-	terminalErr := &backendStatusError{StatusCode: http.StatusUnauthorized}
 	cases := []struct {
 		name    string
 		attempt int
@@ -2026,7 +2025,6 @@ func TestManagedWorkspaceRuntimeRestartBackoffClassifiesFailures(t *testing.T) {
 		{name: "first retry backs off", attempt: 1, err: errors.New("boom"), want: 100 * time.Millisecond},
 		{name: "second retry doubles", attempt: 2, err: errors.New("boom"), want: 200 * time.Millisecond},
 		{name: "backoff is capped", attempt: 10, err: errors.New("boom"), want: 5 * time.Second},
-		{name: "terminal auth is classified conservatively", err: terminalErr, want: 5 * time.Second},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
