@@ -186,7 +186,7 @@ func TestRunReportsDaemonOnlineOnlyAfterInitialRefreshSucceeds(t *testing.T) {
 		AgentID:            "daemon_agent",
 		AgentToolBaseURL:   "http://127.0.0.1:0",
 	}
-	primaryRuntime, pathLockCloses := newWorkspaceRuntimeWithDeterministicPathLocks(
+	primaryRuntime, storeCloses := newWorkspaceRuntimeWithDeterministicStores(
 		t,
 		cfg,
 		server.Client(),
@@ -250,7 +250,7 @@ func TestRunReportsDaemonOnlineOnlyAfterInitialRefreshSucceeds(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("workspace stream handler did not observe the client close")
 	}
-	assertDeterministicPathLockStoreClosed(t, pathLockCloses)
+	assertDeterministicWorkspaceStoresClosed(t, storeCloses)
 }
 
 func TestRunStopsDaemonHeartbeatBeforeBlockingFatalShutdown(t *testing.T) {
@@ -311,7 +311,7 @@ func TestRunStopsDaemonHeartbeatBeforeBlockingFatalShutdown(t *testing.T) {
 		AgentID:            "daemon_agent",
 		AgentToolBaseURL:   "http://127.0.0.1:0",
 	}
-	primaryRuntime, pathLockCloses := newWorkspaceRuntimeWithDeterministicPathLocks(
+	primaryRuntime, storeCloses := newWorkspaceRuntimeWithDeterministicStores(
 		t,
 		cfg,
 		client,
@@ -413,7 +413,7 @@ func TestRunStopsDaemonHeartbeatBeforeBlockingFatalShutdown(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Run did not return after shutdown unblocked")
 	}
-	assertDeterministicPathLockStoreClosed(t, pathLockCloses)
+	assertDeterministicWorkspaceStoresClosed(t, storeCloses)
 }
 
 func TestComputeLocalTextEditsUsesUTF16Cursor(t *testing.T) {

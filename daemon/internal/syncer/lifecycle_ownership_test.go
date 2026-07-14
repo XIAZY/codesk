@@ -562,7 +562,7 @@ func TestServiceStartsStatusHeartbeatOnlyAfterPrimaryRuntimeReady(t *testing.T) 
 		AgentID:            "daemon",
 		AgentToolBaseURL:   "http://127.0.0.1:0",
 	}
-	runtime, pathLockCloses := newWorkspaceRuntimeWithDeterministicPathLocks(
+	runtime, storeCloses := newWorkspaceRuntimeWithDeterministicStores(
 		t,
 		cfg,
 		backend.Client(),
@@ -657,7 +657,7 @@ func TestServiceStartsStatusHeartbeatOnlyAfterPrimaryRuntimeReady(t *testing.T) 
 	case <-time.After(time.Second):
 		t.Fatal("service did not stop after cancellation")
 	}
-	assertDeterministicPathLockStoreClosed(t, pathLockCloses)
+	assertDeterministicWorkspaceStoresClosed(t, storeCloses)
 }
 
 func TestServiceDoesNotReportOnlineBeforePrimaryRuntimeReady(t *testing.T) {
@@ -1837,14 +1837,19 @@ type countingPathLockStore struct {
 	once    sync.Once
 }
 
-func newWorkspaceRuntimeWithDeterministicPathLocks(
+type deterministicWorkspaceStoreCloses struct {
+	pathLocks     atomic.Int32
+	documentCache atomic.Int32
+}
+
+func newWorkspaceRuntimeWithDeterministicStores(
 	t *testing.T,
 	cfg Config,
 	client *http.Client,
 	rootDir, actorID, actorType string,
-) (*workspaceRuntime, *atomic.Int32) {
+) (*workspaceRuntime, *deterministicWorkspaceStoreCloses) {
 	t.Helper()
-	closes := &atomic.Int32{}
+	closes := &deterministicWorkspaceStoreCloses{}
 	runtime, err := newWorkspaceRuntimeWithOpeners(
 		cfg,
 		client,
@@ -1852,21 +1857,31 @@ func newWorkspaceRuntimeWithDeterministicPathLocks(
 		actorID,
 		actorType,
 		func(string) (pathLockLeaseStore, error) {
-			return &countingPathLockStore{closes: closes}, nil
+			return &countingPathLockStore{closes: &closes.pathLocks}, nil
 		},
 		newDocumentCache,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Preserve real cache behavior while moving SQLite cleanup outside the Run deadline under test.
+	closeDocumentCache := runtime.closeDocumentCache
+	runtime.closeDocumentCache = func() error {
+		closes.documentCache.Add(1)
+		return nil
+	}
+	t.Cleanup(func() { _ = closeDocumentCache() })
 	t.Cleanup(func() { _ = runtime.Close() })
 	return runtime, closes
 }
 
-func assertDeterministicPathLockStoreClosed(t *testing.T, closes *atomic.Int32) {
+func assertDeterministicWorkspaceStoresClosed(t *testing.T, closes *deterministicWorkspaceStoreCloses) {
 	t.Helper()
-	if got := closes.Load(); got != 1 {
+	if got := closes.pathLocks.Load(); got != 1 {
 		t.Fatalf("deterministic path-lock store close count = %d, want 1", got)
+	}
+	if got := closes.documentCache.Load(); got != 1 {
+		t.Fatalf("deterministic document-cache store close count = %d, want 1", got)
 	}
 }
 
