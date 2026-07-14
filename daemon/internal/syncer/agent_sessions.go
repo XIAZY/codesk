@@ -29,6 +29,11 @@ type agentSessionSupervisor struct {
 	runtimes     *runtimeRegistry
 	wakeAgent    func(string)
 	restartSleep func(time.Duration)
+	// terminalExitReason classifies a process death as a terminal provider
+	// failure (returns the reason) or not (returns ""). Defaults to
+	// defaultTerminalExitReason (empty set until a CLI-proven signal exists);
+	// injectable so the terminal branch is verified, not dormant.
+	terminalExitReason func(RuntimeExitInfo) string
 
 	// testHookRestartComplete, when set, is invoked when a restart goroutine
 	// finishes (whether it respawned or bailed on shutdown). Test seam only.
@@ -276,10 +281,11 @@ func newAgentSessionSupervisor(cfg Config, updater agentSessionUpdater, runtimes
 		cfg:          cfg,
 		status:       newAgentStatusSyncer(updater),
 		runtimes:     runtimes,
-		restartSleep:    func(d time.Duration) { time.Sleep(d) },
-		sessions:        map[string]*managedAgentSession{},
-		starting:        map[string]*agentSessionStart{},
-		restartAttempts: map[string]int{},
+		restartSleep:       func(d time.Duration) { time.Sleep(d) },
+		terminalExitReason: defaultTerminalExitReason,
+		sessions:           map[string]*managedAgentSession{},
+		starting:           map[string]*agentSessionStart{},
+		restartAttempts:    map[string]int{},
 	}
 }
 
@@ -680,7 +686,7 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 	exit := process.ExitInfo()
 	terminalReason := ""
 	if !exit.Expected {
-		terminalReason = terminalExitReason(exit)
+		terminalReason = s.terminalExitReason(exit)
 	}
 	transient := !exit.Expected && terminalReason == ""
 
@@ -815,8 +821,15 @@ func restartBackoff(attempt int) time.Duration {
 // structured signal exists. This helper is shared with the turn-loop 429 item
 // (task #8), so its contract — positive-match-only, transient by default —
 // must hold for both callers.
-func terminalExitReason(exit RuntimeExitInfo) string {
-	// TODO(item #3 live-probe): populate from probe evidence, exit codes first.
+// defaultTerminalExitReason is the production classifier. The set is EMPTY:
+// the live-CLI probe (item #3) found no distinctive, structured, reachable-at-
+// death terminal signal in current claude/codex — a model/auth error prints to
+// stdout with a generic exit code and most likely leaves the process alive
+// (task #8 turn-loop, not a death consumeEvents sees). Per the confirmed
+// contract, unproven → transient/backoff every time; a false terminal is the
+// one-way door we refuse. A distinctive+structured+reachable signal, if a future
+// probe proves one, becomes the first entry via a follow-up PR.
+func defaultTerminalExitReason(exit RuntimeExitInfo) string {
 	_ = exit
 	return ""
 }

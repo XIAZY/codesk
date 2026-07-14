@@ -1024,6 +1024,95 @@ func TestAgentSessionStaleProcessExitIsIgnored(t *testing.T) {
 	}
 }
 
+func TestAgentSessionGenericExitDeathDefaultsToTransient(t *testing.T) {
+	// The live-CLI probe's observed negative shape: exit code 1, no distinctive
+	// structured signal, empty stderr. With the proven-empty terminal set, this
+	// must classify transient (disconnected + capped retry), never `failed` — a
+	// false terminal would permanently strand a recoverable session.
+	factory := newFakeRuntimeDriver()
+	var pubMu sync.Mutex
+	var statuses []string
+	updater := func(ctx context.Context, agentID string, payload updateAgentSessionRequest) error {
+		_ = ctx
+		pubMu.Lock()
+		statuses = append(statuses, payload.Status)
+		pubMu.Unlock()
+		return nil
+	}
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), updater, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	supervisor.restartSleep = func(time.Duration) {}
+	handled := make(chan string, 1)
+	supervisor.testHookDeathHandled = func(c string) { handled <- c }
+	restarted := make(chan struct{}, 2)
+	supervisor.testHookRestartComplete = func() { restarted <- struct{}{} }
+
+	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"}); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	process.setExitInfo(RuntimeExitInfo{ExitCode: 1})
+	close(process.events)
+
+	if got := <-handled; got != "transient" {
+		t.Fatalf("generic exit-1 death classified %q, want transient", got)
+	}
+	<-restarted // transient path restarts (with capped backoff)
+	pubMu.Lock()
+	pub := append([]string(nil), statuses...)
+	pubMu.Unlock()
+	for _, s := range pub {
+		if s == "failed" {
+			t.Fatalf("generic exit-1 death published failed; an unproven signal must never terminal-classify (%v)", pub)
+		}
+	}
+}
+
+func TestAgentSessionInjectedTerminalReasonRoutesToFailed(t *testing.T) {
+	// The production terminal set is empty by proof; inject a call-scoped (per
+	// supervisor instance, no global state) fake distinctive reason to verify the
+	// dormant terminal branch is actually wired: it must publish `failed` with the
+	// reason and NOT restart. This tests routing mechanics only — it claims no
+	// real provider signal exists.
+	factory := newFakeRuntimeDriver()
+	failedPub := make(chan updateAgentSessionRequest, 4)
+	updater := func(ctx context.Context, agentID string, payload updateAgentSessionRequest) error {
+		_ = ctx
+		if payload.Status == "failed" {
+			failedPub <- payload
+		}
+		return nil
+	}
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), updater, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	supervisor.restartSleep = func(time.Duration) {}
+	supervisor.terminalExitReason = func(RuntimeExitInfo) string { return "This model has been retired." }
+	handled := make(chan string, 1)
+	supervisor.testHookDeathHandled = func(c string) { handled <- c }
+	restarted := make(chan struct{})
+	supervisor.testHookRestartComplete = func() { close(restarted) }
+
+	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"}); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	process.setExitInfo(RuntimeExitInfo{ExitCode: 1})
+	close(process.events)
+
+	if got := <-handled; got != "terminal" {
+		t.Fatalf("injected terminal reason classified %q, want terminal", got)
+	}
+	select {
+	case <-restarted:
+		t.Fatal("terminal failure was restarted")
+	default:
+	}
+	got := <-failedPub
+	if got.CurrentActivity != "This model has been retired." {
+		t.Fatalf("failed publish activity = %q, want the injected reason", got.CurrentActivity)
+	}
+}
+
 func TestAgentSessionSupervisorDoesNotUseCodexWireMethods(t *testing.T) {
 	body, err := os.ReadFile("agent_sessions.go")
 	if err != nil {
