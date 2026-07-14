@@ -825,6 +825,129 @@ func TestAgentSessionExpectedStopIsNotRestarted(t *testing.T) {
 	}
 }
 
+func TestRestartBackoff(t *testing.T) {
+	cases := []struct {
+		attempt int
+		want    time.Duration
+	}{
+		{0, 2 * time.Second}, {1, 2 * time.Second}, {2, 4 * time.Second}, {3, 8 * time.Second},
+		{4, 16 * time.Second}, {5, 32 * time.Second}, {6, 60 * time.Second}, {10, 60 * time.Second},
+	}
+	for _, c := range cases {
+		if got := restartBackoff(c.attempt); got != c.want {
+			t.Fatalf("restartBackoff(%d) = %s, want %s", c.attempt, got, c.want)
+		}
+	}
+}
+
+func latestFakeProcess(f *fakeRuntimeDriver) *fakeRuntimeProcess {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.processes[len(f.processes)-1]
+}
+
+func waitRestartAttempts(t *testing.T, s *agentSessionSupervisor, agentID string, want int) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		s.mu.Lock()
+		got := s.restartAttempts[agentID]
+		s.mu.Unlock()
+		if got == want {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("restartAttempts[%s] = %d, want %d", agentID, got, want)
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+func TestAgentSessionTransientRestartBackoffGrowsAcrossRespawns(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	var mu sync.Mutex
+	var delays []time.Duration
+	supervisor.restartSleep = func(d time.Duration) {
+		mu.Lock()
+		delays = append(delays, d)
+		mu.Unlock()
+	}
+	restarted := make(chan struct{}, 8)
+	supervisor.testHookRestartComplete = func() { restarted <- struct{}{} }
+
+	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"}); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+
+	// Three consecutive transient crashes with no proven uptime in between; the
+	// counter is per-agent so it survives each respawn and the backoff grows.
+	for i := 0; i < 3; i++ {
+		close(latestFakeProcess(factory).events)
+		<-restarted
+	}
+	mu.Lock()
+	got := append([]time.Duration(nil), delays...)
+	mu.Unlock()
+	want := []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}
+	if len(got) != len(want) {
+		t.Fatalf("restart delays = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("restart delay[%d] = %s, want %s (full %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestAgentSessionRestartCounterResetsOnCompletedTurn(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	var mu sync.Mutex
+	var delays []time.Duration
+	supervisor.restartSleep = func(d time.Duration) {
+		mu.Lock()
+		delays = append(delays, d)
+		mu.Unlock()
+	}
+	restarted := make(chan struct{}, 8)
+	supervisor.testHookRestartComplete = func() { restarted <- struct{}{} }
+
+	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"}); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+
+	// First transient crash -> attempt 1 -> 2s backoff.
+	close(latestFakeProcess(factory).events)
+	<-restarted
+
+	// The respawned agent completes a turn — proven uptime — which must reset the
+	// counter (a bare respawn must not). The next crash then starts over at 2s.
+	proc := latestFakeProcess(factory)
+	proc.events <- RuntimeEvent{Kind: RuntimeEventTurnCompleted}
+	waitRestartAttempts(t, supervisor, "agent_1", 0)
+	close(proc.events)
+	<-restarted
+
+	mu.Lock()
+	got := append([]time.Duration(nil), delays...)
+	mu.Unlock()
+	want := []time.Duration{2 * time.Second, 2 * time.Second}
+	if len(got) != len(want) {
+		t.Fatalf("restart delays = %v, want %v (counter should reset after a completed turn)", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("restart delay[%d] = %s, want %s — counter did not reset on proven uptime", i, got[i], want[i])
+		}
+	}
+}
+
 func TestAgentSessionSupervisorDoesNotUseCodexWireMethods(t *testing.T) {
 	body, err := os.ReadFile("agent_sessions.go")
 	if err != nil {

@@ -43,6 +43,11 @@ type agentSessionSupervisor struct {
 	sessions map[string]*managedAgentSession
 	starting map[string]*agentSessionStart
 	shutdown bool
+	// restartAttempts counts consecutive transient restarts per agent, keyed by
+	// agentID so it survives the per-restart session replacement. It grows the
+	// backoff and is reset only on proven uptime (a completed turn), never on a
+	// bare respawn — else a post-handshake quota kill would spin at full rate.
+	restartAttempts map[string]int
 }
 
 type agentSessionStart struct {
@@ -271,9 +276,10 @@ func newAgentSessionSupervisor(cfg Config, updater agentSessionUpdater, runtimes
 		cfg:          cfg,
 		status:       newAgentStatusSyncer(updater),
 		runtimes:     runtimes,
-		restartSleep: func(d time.Duration) { time.Sleep(d) },
-		sessions:     map[string]*managedAgentSession{},
-		starting:     map[string]*agentSessionStart{},
+		restartSleep:    func(d time.Duration) { time.Sleep(d) },
+		sessions:        map[string]*managedAgentSession{},
+		starting:        map[string]*agentSessionStart{},
+		restartAttempts: map[string]int{},
 	}
 }
 
@@ -680,6 +686,7 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 
 	var restartAgent *agent
 	owned := false
+	attempt := 0
 	s.mu.Lock()
 	if session := s.sessions[agentID]; session != nil && session.process == process {
 		owned = true
@@ -693,6 +700,8 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 		session.activeGeneralSig = ""
 		session.steeredForMeSig = ""
 		if transient {
+			s.restartAttempts[agentID]++
+			attempt = s.restartAttempts[agentID]
 			restartAgent = cloneAgentValue(session.agent)
 			if restartAgent != nil {
 				restartAgent.SessionID = session.sessionID
@@ -734,7 +743,8 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 
 	// Transient: an unexpected crash (or self-clearing throttle) — mark
 	// disconnected and restart. Capped backoff lands in facet 4.
-	appendAgentLog(s.cfg, agentID, "runtime event stream closed; marking session disconnected%s", crashSuffix(exit))
+	delay := restartBackoff(attempt)
+	appendAgentLog(s.cfg, agentID, "runtime event stream closed; marking session disconnected%s; restart attempt=%d backoff=%s", crashSuffix(exit), attempt, delay)
 	s.publish(agentID, updateAgentSessionRequest{
 		Status:          "disconnected",
 		CurrentTurnID:   "",
@@ -745,7 +755,7 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 		if s.testHookRestartComplete != nil {
 			defer s.testHookRestartComplete()
 		}
-		s.restartSleep(2 * time.Second)
+		s.restartSleep(delay)
 		s.mu.Lock()
 		stopped := s.shutdown
 		s.mu.Unlock()
@@ -763,6 +773,32 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 }
 
 const maxExitLineLen = 200
+
+const (
+	restartBackoffBase = 2 * time.Second
+	restartBackoffCap  = 60 * time.Second
+)
+
+// restartBackoff is the delay before the Nth consecutive transient restart:
+// restartBackoffBase doubled per prior attempt, capped at restartBackoffCap. A
+// persistent crash therefore backs off to one attempt per minute instead of a
+// 0.5 Hz spin.
+func restartBackoff(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	d := restartBackoffBase
+	for i := 1; i < attempt; i++ {
+		if d >= restartBackoffCap {
+			return restartBackoffCap
+		}
+		d *= 2
+	}
+	if d > restartBackoffCap {
+		return restartBackoffCap
+	}
+	return d
+}
 
 // terminalExitReason returns a sanitized, human-facing reason when a process
 // exit matches a CLI-PROVEN, non-self-recovering provider failure (exhausted
@@ -874,6 +910,10 @@ func (s *agentSessionSupervisor) markIdle(agentID string, process RuntimeProcess
 	if session != nil {
 		session.state = "idle"
 		session.activeTurn = ""
+		// A completed turn is proven uptime — the process ran real work, not just
+		// respawned — so reset the transient-restart backoff counter here (never on
+		// a bare respawn, which would defeat backoff for post-handshake quota kills).
+		delete(s.restartAttempts, agentID)
 		if delivered && session.activeForMeSig != "" {
 			session.deliveredForMeSig = session.activeForMeSig
 		}
