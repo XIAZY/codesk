@@ -993,6 +993,10 @@ func TestAgentSessionUnrequestedCleanExitIsTransient(t *testing.T) {
 	supervisor.restartSleep = func(time.Duration) {}
 	handled := make(chan string, 1)
 	supervisor.testHookDeathHandled = func(c string) { handled <- c }
+	// Wait for the async restarter goroutine to finish before returning, so the
+	// deferred Shutdown + t.TempDir cleanup do not race the restart's spawn/log.
+	restarted := make(chan struct{})
+	supervisor.testHookRestartComplete = func() { close(restarted) }
 
 	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"}); err != nil {
 		t.Fatalf("ensure session: %v", err)
@@ -1008,6 +1012,7 @@ func TestAgentSessionUnrequestedCleanExitIsTransient(t *testing.T) {
 	if got := <-handled; got != "transient" {
 		t.Fatalf("unrequested clean exit classified %q, want transient", got)
 	}
+	<-restarted
 }
 
 func TestAgentSessionStaleProcessExitIsIgnored(t *testing.T) {
