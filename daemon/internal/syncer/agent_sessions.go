@@ -55,11 +55,16 @@ type agentSessionSupervisor struct {
 	// bare respawn — else a post-handshake quota kill would spin at full rate.
 	restartAttempts map[string]int
 
-	// baseCtx is the parent of every construction context; baseCancel (fired by
-	// Shutdown) cancels all in-flight Spawn/Start/handshake calls so a blocked
-	// construction is interrupted and reaped promptly instead of stalling.
-	baseCtx    context.Context
-	baseCancel context.CancelFunc
+	// baseCtx is the parent of every (fresh AND restart) detached construction;
+	// baseCancel (fired by Shutdown) cancels all in-flight Spawn/Start/handshake
+	// calls. In production baseCtx is a child of the service run context (bound
+	// once at run() entry via bindServiceContext), so a service-context
+	// cancellation — including during the synchronous startup refresh, before
+	// Shutdown is reachable — propagates to every construction. Direct tests keep
+	// the Background-derived baseCtx from the constructor.
+	baseCtx      context.Context
+	baseCancel   context.CancelFunc
+	serviceBound bool
 }
 
 type agentSessionStart struct {
@@ -349,6 +354,28 @@ func newAgentSessionSupervisor(cfg Config, updater agentSessionUpdater, runtimes
 	return s
 }
 
+// bindServiceContext re-parents baseCtx onto the service run context exactly
+// ONCE, at run() entry before any construction. A service-context cancellation
+// then propagates to every detached construction even during the synchronous
+// startup refresh (before Shutdown/baseCancel is reachable). It is a one-time
+// lifecycle operation — never a mutable reparent after first use.
+func (s *agentSessionSupervisor) bindServiceContext(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.serviceBound {
+		return
+	}
+	s.serviceBound = true
+	previousCancel := s.baseCancel
+	s.baseCtx, s.baseCancel = context.WithCancel(ctx)
+	if previousCancel != nil {
+		previousCancel() // release the throwaway Background-derived context
+	}
+}
+
 func (s *agentSessionSupervisor) SetIdleWake(wake func(string)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -485,30 +512,6 @@ func (start *agentSessionStart) spawnFingerprintChanged(current *agent) bool {
 		strings.TrimSpace(start.agent.SessionID) != strings.TrimSpace(current.SessionID)
 }
 
-// constructionContext returns a context + cancel for a fresh construction
-// attempt that is done when cancel is called OR when ANY parent is done. The
-// fresh (synchronous) owner passes both s.baseCtx (Shutdown) and the ensureSession
-// caller ctx — so a provider Start/handshake blocked during startup (before
-// Shutdown/baseCancel is even reachable, while refreshInitialWorkspace->Reconcile
-// is in flight) is broken by the service ctx's cancellation, not wedged. The
-// restart path stays baseCtx-only: it is detached, with no caller to honor.
-func constructionContext(parents ...context.Context) (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(context.Background())
-	for _, parent := range parents {
-		if parent == nil {
-			continue
-		}
-		go func(parent context.Context) {
-			select {
-			case <-parent.Done():
-				cancel()
-			case <-ctx.Done():
-			}
-		}(parent)
-	}
-	return ctx, cancel
-}
-
 func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *agent) error {
 	if current == nil || strings.TrimSpace(current.ID) == "" {
 		return nil
@@ -551,13 +554,14 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 			return nil
 		}
 		if start := s.starting[current.ID]; start != nil {
-			// A single long-lived construction owns this ID. Any other caller is a
-			// WAITER — it never becomes a second owner. If the desired spawn
-			// fingerprint changed, retarget the claim to the latest spec, bump its
-			// revision, and cancel the current attempt so the SOLE owner rebuilds
-			// from the latest; then bind to the claim's FINAL outcome (read after
-			// `done`, never a pre-wait snapshot), which cannot be a superseded
-			// attempt's context.Canceled because the owner retries internally.
+			// One claim-scoped worker owns the fresh construction (launched exactly
+			// once at claim creation). Every caller — creator included — is a pure
+			// WAITER: it selects the claim's `done` vs its own ctx and mutates no
+			// claim state, so a caller leaving never stops a still-desired
+			// construction. A changed desired fingerprint only RETARGETS the claim
+			// (latest spec + rev) and cancels the current attempt; the SAME worker
+			// rebuilds. There is no owner-departure to classify — findings 24/25
+			// are structurally impossible.
 			if start.spawnFingerprintChanged(current) {
 				start.agent = cloneAgentValue(current)
 				start.rev++
@@ -571,87 +575,95 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 			case <-done:
 				s.mu.Lock()
 				err := start.err
-				removed := start.cancelled
 				s.mu.Unlock()
-				if err != nil {
-					// If the shared construction was cancelled by the OWNER's caller
-					// (context.Canceled, and not a removal) while WE still want the
-					// session, retry as the new owner rather than inheriting the
-					// owner-caller's cancellation. Removal/Shutdown stay terminal.
-					if !removed && errors.Is(err, context.Canceled) && ctx.Err() == nil {
-						continue
-					}
-					return err
-				}
-				continue
+				// The claim completed — a published session, a soft disconnected
+				// status (runtime unavailable), or a real construction failure.
+				// Return its final result directly; never loop and re-create a claim
+				// on a no-session soft outcome.
+				return err
 			case <-ctx.Done():
 				return ctx.Err()
 			}
 		}
-		// This caller becomes the SOLE owner of a new construction claim. The claim
-		// is the durable fresh-start token (parity with the parked-session token):
-		// it holds the LATEST desired spec + a revision, so a changed-spec reconcile
-		// retargets it and the owner rebuilds — never a second construction, never
-		// the owner's own stale captured spec.
+		// No session and no in-flight claim: create the claim and launch exactly
+		// ONE detached, service-lifetime worker (runFreshStart on baseCtx), then
+		// wait as a plain caller. The construction is claim-scoped, not tied to
+		// this caller's lifetime — the resident session is desired by the service,
+		// not by whichever caller first observed the empty slot.
 		start := &agentSessionStart{done: make(chan struct{}), agent: cloneAgentValue(current)}
 		s.starting[current.ID] = start
 		s.mu.Unlock()
-
-		var ownerErr error
-		for {
+		go s.runFreshStart(current.ID, start)
+		select {
+		case <-start.done:
 			s.mu.Lock()
-			if s.shutdown || start.cancelled {
-				s.mu.Unlock()
-				ownerErr = context.Canceled
-				break
-			}
-			spec := cloneAgentValue(start.agent)
-			rev := start.rev
-			// Cancelled by Shutdown (baseCtx), the caller (ctx — startup/request
-			// cancellation), or removal/retarget (start.cancel).
-			cctx, ccancel := constructionContext(s.baseCtx, ctx)
-			start.cancel = ccancel
+			err := start.err
 			s.mu.Unlock()
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
 
-			attemptErr := s.startSession(cctx, spec, nil, 0, start, rev)
-			ccancel()
-
-			// Distinguish WHY publish did/did not happen — the three reasons need
-			// different actions (Bill): removal/Shutdown/no-longer-owner are TERMINAL
-			// (stop, never retry a removed agent), a rev change RETRIES from the
-			// latest spec, a genuine construction failure stops.
-			s.mu.Lock()
-			published := s.sessions[current.ID] != nil
-			terminal := s.shutdown || start.cancelled || s.starting[current.ID] != start
-			revChanged := start.rev != rev
+// runFreshStart is the single, claim-scoped, service-lifetime worker for a fresh
+// construction — the fresh-path counterpart of the restart goroutine. It runs on
+// baseCtx (service lifetime), never any caller's ctx, so a caller's departure
+// never stops a still-desired construction. It reads the claim's latest spec +
+// rev each attempt, publishes by CAS, and closes `done` exactly once with the
+// final result. Retarget rebuilds from the latest; removal/Shutdown/service
+// cancellation are terminal (never resurrect a removed or abandoned agent).
+func (s *agentSessionSupervisor) runFreshStart(agentID string, start *agentSessionStart) {
+	var err error
+	for {
+		s.mu.Lock()
+		if s.shutdown || start.cancelled || s.baseCtx.Err() != nil {
 			s.mu.Unlock()
-			if published {
-				ownerErr = nil
-				break
-			}
-			if terminal {
-				ownerErr = attemptErr
-				break
-			}
-			if revChanged {
-				// The desired spec changed mid-construction; the old-spec process was
-				// reaped by the revision CAS. Rebuild from the claim's latest spec.
-				continue
-			}
-			// A genuine construction failure (Spawn/Start/handshake), not a supersede.
-			ownerErr = attemptErr
+			err = context.Canceled
 			break
 		}
+		spec := cloneAgentValue(start.agent)
+		rev := start.rev
+		// Attempt ctx is baseCtx-derived (Shutdown / service context) plus the
+		// per-attempt cancel used for removal/retarget. There is deliberately no
+		// caller ctx here.
+		cctx, ccancel := context.WithCancel(s.baseCtx)
+		start.cancel = ccancel
+		s.mu.Unlock()
+
+		attemptErr := s.startSession(cctx, spec, nil, 0, start, rev)
+		ccancel()
 
 		s.mu.Lock()
-		start.err = ownerErr
-		if s.starting[current.ID] == start {
-			delete(s.starting, current.ID)
-			close(start.done)
-		}
+		published := s.sessions[agentID] != nil
+		terminal := s.shutdown || start.cancelled || s.baseCtx.Err() != nil || s.starting[agentID] != start
+		revChanged := start.rev != rev
 		s.mu.Unlock()
-		return ownerErr
+		if published {
+			err = nil
+			break
+		}
+		if terminal {
+			err = attemptErr
+			break
+		}
+		if revChanged {
+			// The desired spec changed mid-construction; the stale-spec process was
+			// reaped by the rev-CAS. Rebuild from the claim's latest spec.
+			continue
+		}
+		// A genuine construction failure (Spawn/Start/handshake) — surfaces to a
+		// waiting synchronous Reconcile as agentSessionStartupError.
+		err = attemptErr
+		break
 	}
+	s.mu.Lock()
+	start.err = err
+	if s.starting[agentID] == start {
+		delete(s.starting, agentID)
+	}
+	close(start.done)
+	s.mu.Unlock()
 }
 
 // startSession spawns a runtime and publishes the session by an atomic
@@ -744,11 +756,13 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 		state:     "idle",
 	}
 	s.mu.Lock()
-	if s.shutdown {
+	if s.shutdown || s.baseCtx.Err() != nil {
 		s.mu.Unlock()
-		// Shutdown won the race after this process spawned; abort the store so the
-		// deferred Stop() reaps it instead of leaving an untracked runtime behind.
-		appendAgentLog(s.cfg, current.ID, "discarding runtime process because supervisor is shutting down")
+		// Shutdown OR a service-context cancellation won the race after this process
+		// spawned; abort the store so the deferred Stop() reaps it. baseCtx.Err() is
+		// the mandatory fence for the service-cancel-before-explicit-Shutdown window
+		// (findings 23-25): a cancellation-ignoring provider must never publish then.
+		appendAgentLog(s.cfg, current.ID, "discarding runtime process because supervisor is shutting down or its service context was cancelled")
 		return nil
 	}
 	if s.sessions[current.ID] != expectPrior {
