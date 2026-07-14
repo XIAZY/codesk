@@ -56,7 +56,7 @@ $dataDir = Join-Path $tempDir "data"
 $workspaceId = "ws-installer-$([Guid]::NewGuid().ToString('N'))"
 
 $savedEnvironment = @{}
-foreach ($name in @("USERPROFILE", "NOTTY_CODEX_COMMAND", "NOTTY_CLAUDE_COMMAND", "NOTTY_INSTALL_DIR", "NOTTY_DATA_DIR")) {
+foreach ($name in @("USERPROFILE", "PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW6432", "NOTTY_CODEX_COMMAND", "NOTTY_CLAUDE_COMMAND", "NOTTY_INSTALL_DIR", "NOTTY_DATA_DIR")) {
     $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
 }
 
@@ -78,6 +78,8 @@ try {
     $env:NOTTY_CLAUDE_COMMAND = Join-Path $tempDir "missing-claude.exe"
     $env:NOTTY_INSTALL_DIR = $installDir
     $env:NOTTY_DATA_DIR = $dataDir
+    $env:PROCESSOR_ARCHITEW6432 = ""
+    $env:PROCESSOR_ARCHITECTURE = "ARM64"
 
     & $installer `
         -BackendUrl "https://api.example.test/" `
