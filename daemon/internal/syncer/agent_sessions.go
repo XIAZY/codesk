@@ -585,11 +585,18 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 				return ctx.Err()
 			}
 		}
-		// No session and no in-flight claim: create the claim and launch exactly
-		// ONE detached, service-lifetime worker (runFreshStart on baseCtx), then
-		// wait as a plain caller. The construction is claim-scoped, not tied to
-		// this caller's lifetime — the resident session is desired by the service,
-		// not by whichever caller first observed the empty slot.
+		// Admission fence (the B-specific guard): reject an ALREADY-cancelled caller
+		// before it creates a claim. B decouples construction from the caller ctx,
+		// so a claim admitted here would publish on baseCtx even though this caller
+		// has departed — and if the caller was cancelled by authoritative removal
+		// (syncAgentWorkers before Reconcile), nothing would cancel that new claim,
+		// resurrecting the removed agent. A claim admitted BEFORE cancellation is
+		// still caught by the following Reconcile; a call arriving AFTER cancellation
+		// is refused here. Departure AFTER admission stays inert (the B invariant).
+		if ctx.Err() != nil {
+			s.mu.Unlock()
+			return ctx.Err()
+		}
 		start := &agentSessionStart{done: make(chan struct{}), agent: cloneAgentValue(current)}
 		s.starting[current.ID] = start
 		s.mu.Unlock()

@@ -2681,3 +2681,51 @@ func TestAgentSessionFreshServiceCancelRefusesCancellationIgnoringPublish(t *tes
 	}
 	waitProcessStopped(t, factory.only(t))
 }
+
+// Option B (finding 27): an already-cancelled stale caller (e.g. a worker whose
+// ctx syncAgentWorkers cancelled before Reconcile) that reaches ensureSession
+// AFTER authoritative removal must be refused at the admission boundary — it must
+// not admit a new detached claim (which nothing would cancel) and resurrect the
+// removed agent. Caller departure AFTER admission stays inert (the B invariant,
+// covered by the all-callers-depart row); this is the reversed order.
+func TestAgentSessionCancelledStaleCallerDoesNotResurrectRemovedAgent(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	// A live agent (constructs + publishes synchronously; no Start gate).
+	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"}); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	waitSessionLive(t, supervisor, "agent_1")
+
+	// Authoritative removal.
+	if err := supervisor.Reconcile(context.Background(), nil); err != nil {
+		t.Fatalf("reconcile removal: %v", err)
+	}
+
+	// Arm construction detection for any NEW worker a broken admission would start.
+	factory.mu.Lock()
+	factory.startEntered = make(chan struct{}, 1)
+	factory.startRelease = make(chan struct{})
+	factory.mu.Unlock()
+
+	// A stale caller whose ctx was already cancelled by the removal ordering.
+	staleCtx, cancelStale := context.WithCancel(context.Background())
+	cancelStale()
+	if err := supervisor.ensureSession(staleCtx, &agent{ID: "agent_1", Kind: "codex"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled stale caller should be refused, got %v", err)
+	}
+	// No new worker/construction was admitted.
+	select {
+	case <-factory.startEntered:
+		t.Fatal("cancelled stale caller admitted a claim/worker and resurrected the removed agent")
+	case <-time.After(150 * time.Millisecond):
+	}
+	supervisor.mu.Lock()
+	sessions := len(supervisor.sessions)
+	supervisor.mu.Unlock()
+	if sessions != 0 {
+		t.Fatalf("removed agent was resurrected: %d sessions", sessions)
+	}
+}
