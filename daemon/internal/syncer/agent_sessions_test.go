@@ -2781,3 +2781,55 @@ func TestAgentSessionShutdownDrainsDetachedFreshConstruction(t *testing.T) {
 		t.Fatal("detached construction process not reaped after Shutdown returned")
 	}
 }
+
+// Finding 29: only an authoritative caller (Reconcile) advances the desired spec.
+// A stale NON-authoritative caller (a notification/worker holding an old snapshot)
+// must ensure + wait but must NOT retarget the claim and roll the authoritative
+// desired spec backward — the published process keeps the authoritative "new" spec.
+func TestAgentSessionNonAuthoritativeCallerDoesNotRollBackDesiredSpec(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.startEntered = make(chan struct{}, 1)
+	factory.startRelease = make(chan struct{})
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	reconcileDone := make(chan error, 1)
+	go func() {
+		reconcileDone <- supervisor.Reconcile(context.Background(), []*agent{{ID: "agent_1", Kind: "codex", SystemPrompt: "new"}})
+	}()
+	<-factory.startEntered // authoritative worker constructing "new"; claim rev 0
+
+	staleDone := make(chan error, 1)
+	go func() {
+		staleDone <- supervisor.ensureSessionDesired(context.Background(), &agent{ID: "agent_1", Kind: "codex", SystemPrompt: "old"}, false)
+	}()
+
+	// A wrong retarget bumps the claim revision; otherwise it stays 0. Break early
+	// on a wrong retarget, else proceed after a bounded wait.
+	deadline := time.After(200 * time.Millisecond)
+wait:
+	for {
+		if rev, ok := claimRev(supervisor, "agent_1"); ok && rev >= 1 {
+			break wait
+		}
+		select {
+		case <-deadline:
+			break wait
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if rev, ok := claimRev(supervisor, "agent_1"); ok && rev != 0 {
+		t.Fatalf("non-authoritative caller retargeted the claim: rev=%d (rolled desired spec back)", rev)
+	}
+
+	close(factory.startRelease)
+	if err := <-reconcileDone; err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if err := <-staleDone; err != nil {
+		t.Fatalf("stale caller: %v", err)
+	}
+	if got := publishedProcessInstructions(t, supervisor, factory, "agent_1"); got != "new" {
+		t.Fatalf("stale caller rolled back authoritative desired spec: live process spawned with %q, want new", got)
+	}
+}

@@ -526,7 +526,21 @@ func (start *agentSessionStart) spawnFingerprintChanged(current *agent) bool {
 		strings.TrimSpace(start.agent.SessionID) != strings.TrimSpace(current.SessionID)
 }
 
+// ensureSession is the AUTHORITATIVE entry point (Reconcile — the workspace
+// refresh authority — and direct callers): it may advance the desired spec of a
+// live session or an in-flight construction claim.
 func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *agent) error {
+	return s.ensureSessionDesired(ctx, current, true)
+}
+
+// ensureSessionDesired ensures a resident session for current. An authoritative
+// caller may retarget the claim / refresh a live session's desired spec; a
+// NON-authoritative caller (a notification or agent-worker cycle that may hold a
+// stale s.latestWorkspace snapshot) only ensures + waits and must never roll the
+// authoritative desired spec backward from its own snapshot (finding 29). Reconcile
+// is the single desired-state authority; notifications/workers ensure but do not
+// re-decide desired config.
+func (s *agentSessionSupervisor) ensureSessionDesired(ctx context.Context, current *agent, authoritative bool) error {
 	if current == nil || strings.TrimSpace(current.ID) == "" {
 		return nil
 	}
@@ -547,7 +561,9 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 				// uses the LATEST instructions, not the death-time clone, and an
 				// in-flight construction against the old revision is rebuilt — but
 				// only bump the revision on a real spec change (see refreshDesiredSpec).
-				if session.refreshDesiredSpec(current) && session.constructCancel != nil {
+				// Only an authoritative caller may advance the desired spec; a stale
+				// notification/worker snapshot must not roll it back (finding 29).
+				if authoritative && session.refreshDesiredSpec(current) && session.constructCancel != nil {
 					// A genuine spec change with an in-flight restart construction:
 					// cancel the blocked old-spec Spawn/Start/handshake now so the
 					// restarter re-arms and rebuilds from the latest spec promptly,
@@ -563,7 +579,9 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 				_ = session.process.Stop()
 				continue
 			}
-			session.refreshDesiredSpec(current)
+			if authoritative {
+				session.refreshDesiredSpec(current)
+			}
 			s.mu.Unlock()
 			return nil
 		}
@@ -576,7 +594,9 @@ func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *age
 			// (latest spec + rev) and cancels the current attempt; the SAME worker
 			// rebuilds. There is no owner-departure to classify — findings 24/25
 			// are structurally impossible.
-			if start.spawnFingerprintChanged(current) {
+			// Only an AUTHORITATIVE caller retargets; a non-authoritative caller
+			// (stale snapshot) waits and must not roll the desired spec back (#29).
+			if authoritative && start.spawnFingerprintChanged(current) {
 				start.agent = cloneAgentValue(current)
 				start.rev++
 				if start.cancel != nil {
@@ -837,7 +857,10 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 	if current == nil || strings.TrimSpace(prompt) == "" {
 		return nil
 	}
-	if err := s.ensureSession(ctx, current); err != nil {
+	// A notification is NON-authoritative on desired spec: it may carry a stale
+	// workspace snapshot, so it ensures + waits but must not retarget the claim /
+	// refresh the live session's spec (finding 29). Reconcile is the authority.
+	if err := s.ensureSessionDesired(ctx, current, false); err != nil {
 		return err
 	}
 	s.mu.Lock()
