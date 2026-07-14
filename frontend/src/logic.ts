@@ -43,6 +43,13 @@ export function powershellQuote(value: string) {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
+function powershellDownloadScript(variable: string, url: string) {
+  return [
+    `$${variable}Response = Invoke-WebRequest -UseBasicParsing ${powershellQuote(url)}`,
+    `$${variable}Source = if ($${variable}Response.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($${variable}Response.Content) } else { [string]$${variable}Response.Content }`,
+  ];
+}
+
 export function defaultDaemonInstallPlatform(osHint = "", userAgent?: string): DaemonInstallPlatform {
   const normalizedOS = osHint.trim().toLowerCase();
   if (normalizedOS === "windows") {
@@ -73,7 +80,8 @@ export function buildDaemonInstallCommand(input: {
   if (input.platform === "windows") {
     return [
       "$ErrorActionPreference = 'Stop'",
-      `& ([ScriptBlock]::Create((Invoke-WebRequest -UseBasicParsing ${powershellQuote(`${staticBaseUrl}/install.ps1`)}).Content)) \``,
+      ...powershellDownloadScript("codeskInstaller", `${staticBaseUrl}/install.ps1`),
+      "& ([ScriptBlock]::Create($codeskInstallerSource)) `",
       `  -BackendUrl ${powershellQuote(backendUrl)} \``,
       `  -WorkspaceId ${powershellQuote(input.workspaceId)} \``,
       `  -DaemonToken ${powershellQuote(input.daemonToken)} \``,
@@ -101,8 +109,10 @@ export function buildDaemonReinstallCommand(input: {
   if (input.platform === "windows") {
     return [
       "$ErrorActionPreference = 'Stop'",
-      `& ([ScriptBlock]::Create((Invoke-WebRequest -UseBasicParsing ${powershellQuote(`${staticBaseUrl}/uninstall.ps1`)}).Content)) -All`,
-      `& ([ScriptBlock]::Create((Invoke-WebRequest -UseBasicParsing ${powershellQuote(`${staticBaseUrl}/install.ps1`)}).Content)) \``,
+      ...powershellDownloadScript("codeskUninstaller", `${staticBaseUrl}/uninstall.ps1`),
+      "& ([ScriptBlock]::Create($codeskUninstallerSource)) -All",
+      ...powershellDownloadScript("codeskInstaller", `${staticBaseUrl}/install.ps1`),
+      "& ([ScriptBlock]::Create($codeskInstallerSource)) `",
       `  -BackendUrl ${powershellQuote(backendUrl)} \``,
       `  -WorkspaceId ${powershellQuote(input.workspaceId)} \``,
       `  -DaemonToken ${powershellQuote(input.daemonToken)} \``,
@@ -126,7 +136,8 @@ export function buildDaemonUninstallCommand(input: { staticBaseUrl: string; plat
   if (input.platform === "windows") {
     return [
       "$ErrorActionPreference = 'Stop'",
-      `& ([ScriptBlock]::Create((Invoke-WebRequest -UseBasicParsing ${powershellQuote(`${staticBaseUrl}/uninstall.ps1`)}).Content)) -All`,
+      ...powershellDownloadScript("codeskUninstaller", `${staticBaseUrl}/uninstall.ps1`),
+      "& ([ScriptBlock]::Create($codeskUninstallerSource)) -All",
     ].join("\n");
   }
   const lines = [

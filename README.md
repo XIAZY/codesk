@@ -532,7 +532,9 @@ Windows AMD64, from PowerShell 5.1 or newer:
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-& ([ScriptBlock]::Create((Invoke-WebRequest -UseBasicParsing 'https://static.nottyai.co/daemons/install.ps1').Content)) `
+$codeskInstallerResponse = Invoke-WebRequest -UseBasicParsing 'https://static.nottyai.co/daemons/install.ps1'
+$codeskInstallerSource = if ($codeskInstallerResponse.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($codeskInstallerResponse.Content) } else { [string]$codeskInstallerResponse.Content }
+& ([ScriptBlock]::Create($codeskInstallerSource)) `
   -BackendUrl 'https://api.nottyai.co' `
   -WorkspaceId 'ws_...' `
   -DaemonToken 'nottyd_...' `
@@ -543,7 +545,9 @@ Global Windows uninstall (the `-All` confirmation is required):
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-& ([ScriptBlock]::Create((Invoke-WebRequest -UseBasicParsing 'https://static.nottyai.co/daemons/uninstall.ps1').Content)) -All
+$codeskUninstallerResponse = Invoke-WebRequest -UseBasicParsing 'https://static.nottyai.co/daemons/uninstall.ps1'
+$codeskUninstallerSource = if ($codeskUninstallerResponse.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($codeskUninstallerResponse.Content) } else { [string]$codeskUninstallerResponse.Content }
+& ([ScriptBlock]::Create($codeskUninstallerSource)) -All
 ```
 
 Delete daemon:
@@ -1588,7 +1592,9 @@ Windows AMD64:
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-& ([ScriptBlock]::Create((Invoke-WebRequest -UseBasicParsing 'https://static.nottyai.co/daemons/install.ps1').Content)) `
+$codeskInstallerResponse = Invoke-WebRequest -UseBasicParsing 'https://static.nottyai.co/daemons/install.ps1'
+$codeskInstallerSource = if ($codeskInstallerResponse.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($codeskInstallerResponse.Content) } else { [string]$codeskInstallerResponse.Content }
+& ([ScriptBlock]::Create($codeskInstallerSource)) `
   -BackendUrl 'https://api.nottyai.co' `
   -WorkspaceId 'ws_...' `
   -DaemonToken 'nottyd_...' `
