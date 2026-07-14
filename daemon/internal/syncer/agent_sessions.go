@@ -465,12 +465,24 @@ func (session *managedAgentSession) refreshDesiredSpec(current *agent) (changed 
 }
 
 // spawnFingerprintChanged reports whether the spawn-relevant desired spec differs
-// from the latest spec this fresh-start claim is building. Same rationale/
-// enumeration as refreshDesiredSpec: only Kind and SystemPrompt reach construction.
+// from the latest spec this fresh-start claim is building.
+//
+// ASYMMETRY vs refreshDesiredSpec (restart): the FRESH construction reads
+// current.SessionID to choose RuntimeInputResumeSession (resume) vs a fresh
+// start, so SessionID is a spawn-relevant desired input here and MUST be in the
+// fingerprint — a changed authoritative SessionID has to retarget the claim and
+// rebuild the correct resume target. The restart path takes SessionID from the
+// parked session (continuity), not the desired spec, so refreshDesiredSpec
+// correctly omits it. Both cover Kind (driver) and SystemPrompt (Instructions);
+// ID is the fixed identity, Workdir is ID-derived, ToolToken is generated.
 func (start *agentSessionStart) spawnFingerprintChanged(current *agent) bool {
 	return start.agent == nil ||
 		start.agent.Kind != current.Kind ||
-		start.agent.SystemPrompt != current.SystemPrompt
+		start.agent.SystemPrompt != current.SystemPrompt ||
+		// Normalized: startSession compares strings.TrimSpace(current.SessionID)
+		// to decide resume vs start, so whitespace-only differences aren't a real
+		// change and must not churn the construction.
+		strings.TrimSpace(start.agent.SessionID) != strings.TrimSpace(current.SessionID)
 }
 
 func (s *agentSessionSupervisor) ensureSession(ctx context.Context, current *agent) error {

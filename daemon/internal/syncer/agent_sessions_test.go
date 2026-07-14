@@ -2484,3 +2484,48 @@ func TestAgentSessionFreshRevCasRefusesStaleSpecPublish(t *testing.T) {
 		t.Fatalf("stale-rev attempt published: live process spawned with %q, want %q", got, "new")
 	}
 }
+
+// Spoke 17 (finding 22): SessionID is a fresh-construction input (resume target),
+// so a mid-construction authoritative SessionID advance must retarget the claim and
+// rebuild — the live process must resume the NEW thread. Asserts the actual
+// RuntimeInputResumeSession.SessionID, not mutable session.agent.
+func TestAgentSessionFreshSessionIDChangeRebuildsResumeTarget(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.startEntered = make(chan struct{}, 1)
+	factory.startRelease = make(chan struct{})
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	ownerDone := make(chan error, 1)
+	go func() {
+		ownerDone <- supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex", SessionID: "thread_old"})
+	}()
+	<-factory.startEntered // owner building resume(thread_old), blocked in Start
+
+	// Authoritative SessionID advance during construction (identical Kind/prompt).
+	changeDone := make(chan error, 1)
+	go func() {
+		changeDone <- supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex", SessionID: "thread_new"})
+	}()
+	waitClaimRev(t, supervisor, "agent_1", 1) // SessionID change must retarget the claim
+	<-factory.startEntered                    // owner's rebuild (resume thread_new) blocked in Start
+	close(factory.startRelease)
+
+	if err := <-ownerDone; err != nil {
+		t.Fatalf("owner: %v", err)
+	}
+	if err := <-changeDone; err != nil {
+		t.Fatalf("changer poisoned: %v", err)
+	}
+
+	supervisor.mu.Lock()
+	proc, _ := supervisor.sessions["agent_1"].process.(*fakeRuntimeProcess)
+	supervisor.mu.Unlock()
+	if proc == nil {
+		t.Fatal("no published process")
+	}
+	resumes := proc.inputsByKind(RuntimeInputResumeSession)
+	if len(resumes) != 1 || strings.TrimSpace(resumes[0].SessionID) != "thread_new" {
+		t.Fatalf("fresh construction resumed stale session: %#v, want SessionID=thread_new", resumes)
+	}
+}
