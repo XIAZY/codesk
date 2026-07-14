@@ -7,9 +7,24 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 )
 
-func (s *Service) startToolGateway() (*http.Server, error) {
+type toolGateway struct {
+	server   *http.Server
+	listener net.Listener
+	handler  http.Handler
+	done     chan struct{}
+
+	mu             sync.Mutex
+	handlerCond    *sync.Cond
+	activeHandlers int
+	serveErr       error
+	stopping       bool
+	ingressOnce    sync.Once
+}
+
+func (s *Service) startToolGateway() (*toolGateway, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/agent-tools/list-documents", s.handleListDocumentsTool)
 	mux.HandleFunc("/agent-tools/get-document-by-path", s.handleGetDocumentByPathTool)
@@ -31,7 +46,6 @@ func (s *Service) startToolGateway() (*http.Server, error) {
 	mux.HandleFunc("/agent-tools/unsubscribe-document", s.handleUnsubscribeDocumentTool)
 	mux.HandleFunc("/agent-tools/list-subscriptions", s.handleListDocumentSubscriptionsTool)
 
-	server := &http.Server{Handler: mux}
 	parsedAddr := strings.TrimSpace(strings.TrimPrefix(s.cfg.AgentToolBaseURL, "http://"))
 	parsedAddr = strings.TrimSpace(strings.TrimPrefix(parsedAddr, "https://"))
 	if parsedAddr == "" || strings.Contains(parsedAddr, "/") {
@@ -41,10 +55,124 @@ func (s *Service) startToolGateway() (*http.Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	gateway := &toolGateway{
+		listener: listener,
+		handler:  mux,
+		done:     make(chan struct{}),
+	}
+	gateway.handlerCond = sync.NewCond(&gateway.mu)
+	server := &http.Server{Handler: gateway}
+	gateway.server = server
 	go func() {
-		_ = server.Serve(listener)
+		err := server.Serve(listener)
+		gateway.mu.Lock()
+		gateway.serveErr = err
+		gateway.mu.Unlock()
+		close(gateway.done)
 	}()
-	return server, nil
+	return gateway, nil
+}
+
+func (g *toolGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if g == nil || !g.admitHandler() {
+		w.Header().Set("Connection", "close")
+		http.Error(w, "tool gateway is shutting down", http.StatusServiceUnavailable)
+		return
+	}
+	defer g.releaseHandler()
+	g.handler.ServeHTTP(w, r)
+}
+
+func (g *toolGateway) admitHandler() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.stopping {
+		return false
+	}
+	g.activeHandlers++
+	return true
+}
+
+func (g *toolGateway) releaseHandler() {
+	g.mu.Lock()
+	g.activeHandlers--
+	if g.activeHandlers == 0 && g.handlerCond != nil {
+		g.handlerCond.Broadcast()
+	}
+	g.mu.Unlock()
+}
+
+func (g *toolGateway) waitForHandlers() {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	for g.activeHandlers > 0 {
+		g.handlerCond.Wait()
+	}
+	g.mu.Unlock()
+}
+
+func (g *toolGateway) Done() <-chan struct{} {
+	if g == nil {
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
+	return g.done
+}
+
+func (g *toolGateway) Err() error {
+	if g == nil {
+		return nil
+	}
+	<-g.done
+	g.mu.Lock()
+	err := g.serveErr
+	stopping := g.stopping
+	g.mu.Unlock()
+	if stopping && (errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed)) {
+		return nil
+	}
+	return err
+}
+
+// CloseIngress prevents new tool requests without interrupting active ones.
+// Drain subsequently waits for those active handlers to finish.
+func (g *toolGateway) CloseIngress() error {
+	if g == nil {
+		return nil
+	}
+	g.ingressOnce.Do(func() {
+		g.mu.Lock()
+		g.stopping = true
+		g.mu.Unlock()
+		if g.server != nil {
+			g.server.SetKeepAlivesEnabled(false)
+		}
+	})
+	return nil
+}
+
+func (g *toolGateway) Drain(ctx context.Context) error {
+	if g == nil {
+		return nil
+	}
+	closeErr := g.CloseIngress()
+	shutdownErr := g.server.Shutdown(ctx)
+	var forceCloseErr error
+	if shutdownErr != nil {
+		forceCloseErr = g.server.Close()
+		if errors.Is(forceCloseErr, http.ErrServerClosed) || errors.Is(forceCloseErr, net.ErrClosed) {
+			forceCloseErr = nil
+		}
+	}
+	<-g.done
+	// Shutdown/Close only manage connections. A handler may still be unwinding
+	// after a forced close, so runtime stores remain owned until every admitted
+	// handler has returned.
+	g.waitForHandlers()
+	return errors.Join(closeErr, shutdownErr, forceCloseErr, g.Err())
 }
 
 func (s *Service) handleCreateThreadTool(w http.ResponseWriter, r *http.Request) {
@@ -305,11 +433,4 @@ func writeToolJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
-}
-
-func shutdownToolGateway(ctx context.Context, server *http.Server) error {
-	if server == nil {
-		return nil
-	}
-	return server.Shutdown(ctx)
 }

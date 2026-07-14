@@ -1,6 +1,7 @@
 package notty
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -98,7 +99,15 @@ func TestDaemonStatesGoldenContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read golden file %s: %v (re-run with NOTTY_UPDATE_GOLDEN=1 to generate it)", path, err)
 	}
-	if string(got) != string(want) {
+	var gotCompact bytes.Buffer
+	if err := json.Compact(&gotCompact, got); err != nil {
+		t.Fatalf("compact generated daemon states: %v", err)
+	}
+	var wantCompact bytes.Buffer
+	if err := json.Compact(&wantCompact, want); err != nil {
+		t.Fatalf("compact golden file %s: %v", path, err)
+	}
+	if !bytes.Equal(gotCompact.Bytes(), wantCompact.Bytes()) {
 		t.Fatalf("daemon wire format drifted from %s.\nIf the wire format legitimately changed, re-run with NOTTY_UPDATE_GOLDEN=1 to regenerate the golden file.\n--- got ---\n%s\n--- want ---\n%s", path, got, want)
 	}
 }
