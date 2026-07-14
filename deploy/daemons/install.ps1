@@ -27,30 +27,28 @@ function Write-InstallWarning {
     Write-Warning "Codesk install: $Message"
 }
 
-function Assert-SupportedWindowsHost {
-    param(
-        [string]$MachineArchitecture,
-        [int]$WindowsBuildNumber
-    )
+function Get-WindowsReleaseArchitecture {
+    param([string]$MachineArchitecture)
 
-    if ($MachineArchitecture -notin @("AMD64", "x86_64", "ARM64", "aarch64")) {
-        throw "Codesk install: Windows AMD64 or ARM64 is required; detected $MachineArchitecture"
-    }
-    if ($MachineArchitecture -in @("ARM64", "aarch64") -and $WindowsBuildNumber -lt 22000) {
-        throw "Codesk install: Windows 11 or newer is required on ARM64 because the release contains AMD64 executables; detected Windows build $WindowsBuildNumber"
+    $normalizedArchitecture = if ($null -eq $MachineArchitecture) { "" } else { $MachineArchitecture.ToUpperInvariant() }
+    switch ($normalizedArchitecture) {
+        "AMD64" { return "amd64" }
+        "X86_64" { return "amd64" }
+        "ARM64" { return "arm64" }
+        "AARCH64" { return "arm64" }
+        default {
+            throw "Codesk install: Windows AMD64 or ARM64 is required; detected $MachineArchitecture"
+        }
     }
 }
 
-function Get-WindowsBuildNumber {
-    $currentVersion = Get-ItemProperty `
-        -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" `
-        -Name "CurrentBuildNumber" `
-        -ErrorAction Stop
-    $buildNumber = 0
-    if (-not [int]::TryParse([string]$currentVersion.CurrentBuildNumber, [ref]$buildNumber)) {
-        throw "Codesk install: could not determine the Windows build number"
-    }
-    return $buildNumber
+function Get-WindowsArtifactName {
+    param(
+        [string]$ReleaseVersion,
+        [string]$ReleaseArchitecture
+    )
+
+    return "notty-daemon_${ReleaseVersion}_windows_${ReleaseArchitecture}.zip"
 }
 
 function Get-UserHome {
@@ -390,11 +388,7 @@ $machineArchitecture = if (-not [string]::IsNullOrWhiteSpace($env:PROCESSOR_ARCH
 } else {
     $env:PROCESSOR_ARCHITECTURE
 }
-$windowsBuildNumber = Get-WindowsBuildNumber
-Assert-SupportedWindowsHost -MachineArchitecture $machineArchitecture -WindowsBuildNumber $windowsBuildNumber
-if ($machineArchitecture -in @("ARM64", "aarch64")) {
-    Write-InstallWarning "Windows 11 ARM64 detected; installing the AMD64 release through Windows x64 emulation."
-}
+$releaseArchitecture = Get-WindowsReleaseArchitecture -MachineArchitecture $machineArchitecture
 
 $userHome = Get-UserHome
 if ([string]::IsNullOrWhiteSpace($StaticBase)) {
@@ -447,12 +441,12 @@ try {
         throw "Codesk install: invalid daemon version '$Version'"
     }
 
-    $artifact = "notty-daemon_${Version}_windows_amd64.zip"
+    $artifact = Get-WindowsArtifactName -ReleaseVersion $Version -ReleaseArchitecture $releaseArchitecture
     $versionBase = Join-RemotePath $StaticBase $Version
     $archivePath = Join-Path $tempDir $artifact
     $checksumsPath = Join-Path $tempDir "SHA256SUMS"
 
-    Write-Host "Installing Codesk daemon $Version for windows/amd64"
+    Write-Host "Installing Codesk daemon $Version for windows/$releaseArchitecture"
     Copy-Download -Url (Join-RemotePath $versionBase "SHA256SUMS") -Destination $checksumsPath
     $checksumText = Get-Content -LiteralPath $checksumsPath -Raw
     $checksumPattern = "(?mi)^([0-9a-f]{64})\s+" + [Regex]::Escape($artifact) + "\s*$"
@@ -469,7 +463,7 @@ try {
     }
 
     Expand-Archive -LiteralPath $archivePath -DestinationPath $tempDir -Force
-    $packageDir = Join-Path $tempDir "notty-daemon_${Version}_windows_amd64"
+    $packageDir = Join-Path $tempDir "notty-daemon_${Version}_windows_${releaseArchitecture}"
     $daemonSource = Join-Path $packageDir "bin\notty-daemon.exe"
     $agentToolSource = Join-Path $packageDir "bin\notty-agent-tool.exe"
     $runnerSource = Join-Path $packageDir "run-windows.ps1"

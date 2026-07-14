@@ -528,7 +528,7 @@ curl -fsSL https://static.nottyai.co/daemons/install.sh | sh -s -- \
   --static-base https://static.nottyai.co/daemons
 ```
 
-Windows AMD64, or Windows 11 ARM64 (build 22000 or newer) using built-in x64 emulation, from PowerShell 5.1 or newer:
+Windows AMD64 or ARM64, with the native release selected automatically, from PowerShell 5.1 or newer:
 
 ```powershell
 $ErrorActionPreference = 'Stop'
@@ -1588,7 +1588,7 @@ curl -fsSL https://static.nottyai.co/daemons/install.sh | sh -s -- \
   --static-base https://static.nottyai.co/daemons
 ```
 
-Windows AMD64, or Windows 11 ARM64 (build 22000 or newer) using built-in x64 emulation:
+Windows AMD64 or ARM64, with the native release selected automatically:
 
 ```powershell
 $ErrorActionPreference = 'Stop'
@@ -1623,7 +1623,7 @@ Build daemon release artifacts for every supported target:
 make daemon-release-all VERSION=v0.1.0
 ```
 
-This creates stable `install.sh`, `uninstall.sh`, `install.ps1`, and `uninstall.ps1` entrypoints, plus `latest/manifest.json`, `latest/SHA256SUMS`, and versioned archives containing `notty-daemon` and `notty-agent-tool`. Unix archives are `.tar.gz`; Windows AMD64 is a `.zip` that also contains `run-windows.ps1`. Use `make daemon-release VERSION=v0.1.0 PLATFORMS=windows/amd64` for a focused Windows release.
+This creates stable `install.sh`, `uninstall.sh`, `install.ps1`, and `uninstall.ps1` entrypoints, plus `latest/manifest.json`, `latest/SHA256SUMS`, and versioned archives containing `notty-daemon` and `notty-agent-tool`. Unix archives are `.tar.gz`; native Windows AMD64 and ARM64 releases are `.zip` files that also contain `run-windows.ps1`. Use `make daemon-release VERSION=v0.1.0 PLATFORMS="windows/amd64 windows/arm64"` for a focused Windows release.
 
 Publish artifacts without changing the running backend:
 
@@ -1743,7 +1743,7 @@ Important deployment environment variables in `deploy/env/prod.deploy.env`:
 - `NOTTY_DEPLOY_SSH_HOST`: SSH host used by `scripts/deploy-backend.sh`, default `notty`.
 - `NOTTY_REMOTE_DIR`: remote deploy directory, default `/opt/notty`.
 - `DOCKER_REPO` and `DOCKER_PLATFORMS`: backend image repository and build platforms.
-- `DAEMON_PLATFORMS`: comma- or space-separated daemon release platforms, or `all` for every supported target: Darwin AMD64/ARM64, Linux AMD64/ARM64, and Windows AMD64. Production uses Rust/Go cross-compilation for non-host targets. Linux builds require installed Rust musl targets plus `zig`, or `CC_LINUX_AMD64`/`CC_LINUX_ARM64` pointing at target C compilers. Windows builds require the Rust `x86_64-pc-windows-gnu` target plus MinGW-w64's `x86_64-w64-mingw32-gcc`, or `CC_WINDOWS_AMD64` pointing at an equivalent compiler. Darwin cross builds on macOS use `xcrun clang -arch`; Darwin cross builds from Linux require installed Rust targets plus `CC_DARWIN_AMD64`/`CC_DARWIN_ARM64` pointing at Darwin-capable compilers such as osxcross clang with an Apple SDK.
+- `DAEMON_PLATFORMS`: comma- or space-separated daemon release platforms, or `all` for every supported target: Darwin AMD64/ARM64, Linux AMD64/ARM64, and Windows AMD64/ARM64. Production uses Rust/Go cross-compilation for non-host targets. Linux builds require installed Rust musl targets plus `zig`, or `CC_LINUX_AMD64`/`CC_LINUX_ARM64` pointing at target C compilers. Windows AMD64 builds use Rust `x86_64-pc-windows-gnu` with Zig `x86_64-windows-gnu`; Windows ARM64 builds use Rust `aarch64-pc-windows-gnullvm` with Zig `aarch64-windows-gnu`. Install both Rust targets and `zig`, or set `CC_WINDOWS_AMD64`/`CC_WINDOWS_ARM64` to equivalent target C compiler commands. Darwin cross builds on macOS use `xcrun clang -arch`; Darwin cross builds from Linux require installed Rust targets plus `CC_DARWIN_AMD64`/`CC_DARWIN_ARM64` pointing at Darwin-capable compilers such as osxcross clang with an Apple SDK.
 - `CLOUDFLARE_ACCOUNT_ID`, `R2_ENDPOINT_URL`, `R2_*_BUCKET`, and `R2_*_PREFIX`: static publish targets.
 
 Important production server defaults in `deploy/env/prod.server.env`:
