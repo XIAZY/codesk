@@ -82,6 +82,16 @@ type appServerResponse struct {
 	} `json:"error"`
 }
 
+type appServerRPCError struct {
+	Method  string
+	Code    int
+	Message string
+}
+
+func (e *appServerRPCError) Error() string {
+	return fmt.Sprintf("app-server %s failed: %s", e.Method, e.Message)
+}
+
 func (c *codexAppServer) Start(ctx context.Context) error {
 	select {
 	case <-c.stopping:
@@ -339,7 +349,7 @@ func (c *codexAppServer) request(ctx context.Context, method string, params any)
 		return nil, ctx.Err()
 	case res := <-ch:
 		if res.Error != nil {
-			return nil, fmt.Errorf("app-server %s failed: %s", method, res.Error.Message)
+			return nil, &appServerRPCError{Method: method, Code: res.Error.Code, Message: res.Error.Message}
 		}
 		return res.Result, nil
 	}
