@@ -44,7 +44,7 @@ import { useWorkspace } from "./useWorkspace";
 import { Onboarding, type OnboardingActionEvent, type OnboardingPresentation } from "./Onboarding";
 import { OnboardingChecklist } from "./OnboardingChecklist";
 import { useOnboardingController } from "./onboardingController";
-import type { OnboardingRole } from "./onboarding";
+import type { OnboardingRole } from "./onboardingEngine";
 import type { Account, ActivityEvent, Agent, Daemon, DocumentItem, ThreadItem, UserItem, WorkspaceInvitePreview, WorkspaceState, WorkspaceSummary } from "./types";
 import { resolveRuntimeTiles, selectableRuntimeKinds, type RuntimeTile } from "./runtimes";
 import "./styles.css";

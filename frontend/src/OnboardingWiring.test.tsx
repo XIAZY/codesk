@@ -10,7 +10,7 @@ import { cleanup, render, renderHook, screen, fireEvent, waitFor } from "@testin
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceApp, MembersAndInvite, shouldRenderOnboardingChecklist } from "./App";
 import { useOnboardingController } from "./onboardingController";
-import type { OnboardingRole } from "./onboarding";
+import type { OnboardingRole } from "./onboardingEngine";
 import type { Account, Agent, WorkspaceState, WorkspaceSummary } from "./types";
 
 const mocks = vi.hoisted(() => ({

@@ -1,4 +1,4 @@
-import type { OnboardingChecklistItem } from "./onboarding";
+import type { OnboardingChecklistItem } from "./onboardingEngine";
 
 export type OnboardingChecklistProgress = {
   item: OnboardingChecklistItem;

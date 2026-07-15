@@ -18,7 +18,7 @@ import {
   type OnboardingContext,
   type OnboardingLiveSignals,
   type OnboardingRole,
-} from "./onboarding";
+} from "./onboardingEngine";
 
 // ---- Live-signal derivation (pure) -------------------------------------------
 
