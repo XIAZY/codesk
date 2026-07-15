@@ -992,6 +992,46 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 		}
 		return nil
 	}
+	if session.state == "stalled" {
+		// A wedged working turn. Replace it ONLY when work is genuinely blocked
+		// behind it (an undelivered inbox signature) — a stall that might still
+		// recover on its own must not be churned. When work IS pending, claim the
+		// restart for this exact resident generation (false->true under s.mu) and
+		// rebuild from the RESIDENT authoritative spec via the parked-token restarter
+		// — a stale notification snapshot must not create/recreate a session (finding
+		// #30), so we never recurse through notification delivery. Claiming before
+		// Stop makes consumeEvents (which will see the wedge's Stop) defer to this as
+		// the sole replacement owner. Do NOT mark the signature delivered: the next
+		// anti-entropy worker cycle delivers it once into the replacement.
+		undelivered := (hasForMe && forMeSig != session.deliveredForMeSig) || (hasGeneral && generalSig != session.deliveredGeneralSig)
+		if !undelivered || session.restartPending || session.dead {
+			s.mu.Unlock()
+			return nil
+		}
+		process := session.process
+		sessionID := session.sessionID
+		agentID := current.ID
+		session.dead = true // old tool token invalid immediately
+		session.state = "disconnected"
+		session.activeTurn = ""
+		session.activeForMeSig = ""
+		session.activeGeneralSig = ""
+		session.steeredForMeSig = ""
+		session.turnOpSeq++
+		session.restartPending = true // claim: consumeEvents must not launch a 2nd restarter
+		s.mu.Unlock()
+		appendAgentLog(s.cfg, agentID, "stalled runtime with pending work; replacing session=%s", sessionID)
+		s.publish(agentID, updateAgentSessionRequest{
+			Status:          "disconnected",
+			CurrentTurnID:   "",
+			CurrentActivity: "Disconnected",
+			LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
+		})
+		// Immediate replacement (delay 0): the worker Stops the wedged process and
+		// rebuilds from the resident spec on baseCtx, joined by constructionWG.
+		s.launchRestartWorker(agentID, process, 0)
+		return nil
+	}
 	if session.state == "disconnected" || session.state == "failed" {
 		// A dead generation — whether backing off (disconnected) or terminally
 		// failed — must never be written to. `failed` in particular fell through
@@ -1166,6 +1206,7 @@ disconnected:
 
 	owned := false
 	attempt := 0
+	claimedRestart := false
 	s.mu.Lock()
 	if session := s.sessions[agentID]; session != nil && session.process == process {
 		owned = true
@@ -1185,7 +1226,12 @@ disconnected:
 		session.activeForMeSig = ""
 		session.activeGeneralSig = ""
 		session.steeredForMeSig = ""
-		if transient {
+		if transient && !session.restartPending {
+			// Claim the restart for this dead generation exactly once. If the
+			// stall-replacement path (ScheduleNotificationTurn) already claimed it —
+			// restartPending is set — consumeEvents must NOT launch a second
+			// restarter; that path is the sole replacement owner. This CAS is what
+			// makes a concurrent natural-exit-vs-stall race resolve to one restarter.
 			s.restartAttempts[agentID]++
 			attempt = s.restartAttempts[agentID]
 			// A backoff restart now owns this dead generation: the parked session
@@ -1193,6 +1239,7 @@ disconnected:
 			// publishes the replacement by a conditional swap against it, so no
 			// other start path may replace it and a racing removal invalidates it.
 			session.restartPending = true
+			claimedRestart = true
 		}
 	}
 	s.mu.Unlock()
@@ -1233,8 +1280,16 @@ disconnected:
 		return
 	}
 
-	// Transient: an unexpected crash (or self-clearing throttle) — mark
-	// disconnected and restart. Capped backoff lands in facet 4.
+	// Transient: an unexpected crash (or self-clearing throttle). If the
+	// stall-replacement path already claimed this generation's restart (above), it
+	// is the sole replacement owner and owns the status — consumeEvents must not
+	// re-publish a (now stale) disconnected status nor launch a second restarter.
+	if !claimedRestart {
+		if s.testHookDeathHandled != nil {
+			s.testHookDeathHandled("transient")
+		}
+		return
+	}
 	delay := restartBackoff(attempt)
 	appendAgentLog(s.cfg, agentID, "runtime event stream closed; marking session disconnected%s; restart attempt=%d backoff=%s", crashSuffix(exit), attempt, delay)
 	s.publish(agentID, updateAgentSessionRequest{
@@ -1243,21 +1298,29 @@ disconnected:
 		CurrentActivity: "Disconnected",
 		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
-	// Join the restarter through the same construction barrier as fresh workers.
-	// Add under s.mu on the same side as the shutdown check; if shutdown already
-	// won — or the run/base context was cancelled (a service-context teardown that
-	// has not yet reached Shutdown) — do not launch a restart at all (Shutdown's
-	// Wait must not see a new Add, and a cancelled baseCtx must not spin restarts).
+	s.launchRestartWorker(agentID, process, delay)
+	if s.testHookDeathHandled != nil {
+		s.testHookDeathHandled("transient")
+	}
+}
+
+// launchRestartWorker starts exactly one detached restart worker for a dead
+// generation whose restartPending the caller has already CLAIMED under s.mu
+// (false->true on the resident session). It adds to constructionWG under s.mu on
+// the passing side of the shutdown/base-context fence — so Shutdown's Wait cannot
+// race the Add and a cancelled baseCtx never spins restarts — and does not launch
+// if that fence has closed. The worker owns EVERY outcome against its one parked
+// token (publish/fail/refresh/remove/shutdown), rebuilding from the resident
+// session.agent + revision each attempt with a capped backoff; a construction
+// failure re-arms instead of stranding the token restartPending forever.
+func (s *agentSessionSupervisor) launchRestartWorker(agentID string, process RuntimeProcess, delay time.Duration) {
 	s.mu.Lock()
-	launchRestart := !s.shutdown && s.baseCtx.Err() == nil
-	if launchRestart {
+	launch := !s.shutdown && s.baseCtx.Err() == nil
+	if launch {
 		s.constructionWG.Add(1)
 	}
 	s.mu.Unlock()
-	if !launchRestart {
-		if s.testHookDeathHandled != nil {
-			s.testHookDeathHandled("transient")
-		}
+	if !launch {
 		return
 	}
 	go func() {
@@ -1265,12 +1328,6 @@ disconnected:
 		if s.testHookRestartComplete != nil {
 			defer s.testHookRestartComplete()
 		}
-		// The restarter owns EVERY outcome of the construction window against its
-		// one dead-generation token — publish, fail, refresh, or remove/shutdown —
-		// so a construction failure re-arms the next capped attempt instead of
-		// stranding the token `restartPending` forever (which would gate Reconcile
-		// out permanently). It keeps looping until the token leaves the map (a
-		// successful swap OR a removal/replacement) or shutdown.
 		for {
 			s.restartSleep(delay)
 			s.mu.Lock()
@@ -1332,9 +1389,6 @@ disconnected:
 			s.mu.Unlock()
 		}
 	}()
-	if s.testHookDeathHandled != nil {
-		s.testHookDeathHandled("transient")
-	}
 }
 
 const maxExitLineLen = 200

@@ -2239,15 +2239,6 @@ func waitSessionTurn(t *testing.T, s *agentSessionSupervisor, agentID, want stri
 	}
 }
 
-func sessionStateFor(s *agentSessionSupervisor, agentID string) string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if session := s.sessions[agentID]; session != nil {
-		return session.state
-	}
-	return ""
-}
-
 func waitForPublishedStatus(t *testing.T, updates <-chan updateAgentSessionRequest, status, activitySubstr string) {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
@@ -2271,7 +2262,7 @@ func waitForPublishedStatus(t *testing.T, updates <-chan updateAgentSessionReque
 // drives it into `stalled` via total runtime silence past stallAfter. It returns
 // the supervisor, the running process, the agent, and the clock pointer (already
 // advanced past the stall) so recovery/replacement rows can continue from there.
-func stalledWorkingSession(t *testing.T, updater agentSessionUpdater) (*agentSessionSupervisor, *fakeRuntimeProcess, *agent, *time.Time) {
+func stalledWorkingSession(t *testing.T, updater agentSessionUpdater) (*agentSessionSupervisor, *fakeRuntimeDriver, *fakeRuntimeProcess, *agent, *time.Time) {
 	t.Helper()
 	factory := newFakeRuntimeDriver()
 	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), updater, newFakeRuntimeRegistry(factory))
@@ -2286,10 +2277,10 @@ func stalledWorkingSession(t *testing.T, updater agentSessionUpdater) (*agentSes
 	// Total silence: no fresh frame, advance past stallAfter, evaluate one tick.
 	clock = clock.Add(supervisor.stallAfter + time.Second)
 	supervisor.evaluateLiveness("agent_1", process)
-	if got := sessionStateFor(supervisor, "agent_1"); got != "stalled" {
+	if got, _ := sessionState(supervisor, "agent_1"); got != "stalled" {
 		t.Fatalf("precondition: expected stalled, got %q", got)
 	}
-	return supervisor, process, current, &clock
+	return supervisor, factory, process, current, &clock
 }
 
 // Item #5 liveness, row 1: a working session with continuous valid telemetry past
@@ -2315,7 +2306,7 @@ func TestAgentSessionHeartbeatContinuousTelemetryNeverStalls(t *testing.T) {
 			t.Fatal("liveness must keep watching a live working session")
 		}
 	}
-	if got := sessionStateFor(supervisor, "agent_1"); got != "working" {
+	if got, _ := sessionState(supervisor, "agent_1"); got != "working" {
 		t.Fatalf("continuous telemetry must never stall; state=%q", got)
 	}
 	process.mu.Lock()
@@ -2334,7 +2325,7 @@ func TestAgentSessionHeartbeatSilenceStallsWithoutKilling(t *testing.T) {
 		updates <- payload
 		return nil
 	}
-	supervisor, process, _, _ := stalledWorkingSession(t, updater)
+	supervisor, _, process, _, _ := stalledWorkingSession(t, updater)
 	defer supervisor.Shutdown()
 	process.mu.Lock()
 	stopped := process.stopped
@@ -2347,16 +2338,16 @@ func TestAgentSessionHeartbeatSilenceStallsWithoutKilling(t *testing.T) {
 
 // Item #5 liveness, row 3: a lifecycle event (recovery) clears the stalled state.
 func TestAgentSessionHeartbeatLifecycleRecoveryClearsStalled(t *testing.T) {
-	supervisor, process, _, _ := stalledWorkingSession(t, nil)
+	supervisor, _, process, _, _ := stalledWorkingSession(t, nil)
 	defer supervisor.Shutdown()
 	// A turn-completed lifecycle event flows through markIdle and must clear stalled.
 	supervisor.markIdle("agent_1", process, true)
-	if got := sessionStateFor(supervisor, "agent_1"); got != "idle" {
+	if got, _ := sessionState(supervisor, "agent_1"); got != "idle" {
 		t.Fatalf("lifecycle recovery must clear stalled; state=%q", got)
 	}
 	// A fresh working turn afterward is watched normally, not stuck stalled.
 	supervisor.markWorking("agent_1", process, "turn_2")
-	if got := sessionStateFor(supervisor, "agent_1"); got != "working" {
+	if got, _ := sessionState(supervisor, "agent_1"); got != "working" {
 		t.Fatalf("post-recovery turn should be working; state=%q", got)
 	}
 }
@@ -2364,7 +2355,7 @@ func TestAgentSessionHeartbeatLifecycleRecoveryClearsStalled(t *testing.T) {
 // Item #5 liveness, row 6: a stalled long turn with NO pending work is not
 // replaced — the process keeps running and Reconcile treats stalled as live.
 func TestAgentSessionHeartbeatStallWithoutPendingWorkDoesNotReplace(t *testing.T) {
-	supervisor, process, current, _ := stalledWorkingSession(t, nil)
+	supervisor, _, process, current, _ := stalledWorkingSession(t, nil)
 	defer supervisor.Shutdown()
 	process.mu.Lock()
 	stopped := process.stopped
@@ -2376,7 +2367,7 @@ func TestAgentSessionHeartbeatStallWithoutPendingWorkDoesNotReplace(t *testing.T
 	if err := supervisor.Reconcile(context.Background(), []*agent{current}); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if got := sessionStateFor(supervisor, "agent_1"); got != "stalled" {
+	if got, _ := sessionState(supervisor, "agent_1"); got != "stalled" {
 		t.Fatalf("Reconcile must not clear or replace a stalled session without pending work; state=%q", got)
 	}
 	supervisor.mu.Lock()
@@ -2384,6 +2375,90 @@ func TestAgentSessionHeartbeatStallWithoutPendingWorkDoesNotReplace(t *testing.T
 	supervisor.mu.Unlock()
 	if sessions != 1 {
 		t.Fatalf("expected the single stalled session to remain, got %d", sessions)
+	}
+}
+
+// Item #5 stall replacement, row 1 (via notification): a notification whose
+// signature is already delivered leaves a stalled session in place — no pending
+// work means no replacement (it may still recover on its own).
+func TestAgentSessionStalledNotificationWithoutPendingDoesNotReplace(t *testing.T) {
+	supervisor, factory, process, current, _ := stalledWorkingSession(t, nil)
+	defer supervisor.Shutdown()
+	// The signature this notification carries has already been delivered.
+	supervisor.mu.Lock()
+	supervisor.sessions["agent_1"].deliveredForMeSig = "for-me:v1"
+	supervisor.mu.Unlock()
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "already delivered", "for-me:v1", ""); err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	process.mu.Lock()
+	stopped := process.stopped
+	process.mu.Unlock()
+	if stopped {
+		t.Fatal("no pending work: the stalled process must not be replaced")
+	}
+	if got, _ := sessionState(supervisor, "agent_1"); got != "stalled" {
+		t.Fatalf("expected the session to stay stalled, got %q", got)
+	}
+	factory.mu.Lock()
+	procs := len(factory.processes)
+	factory.mu.Unlock()
+	if procs != 1 {
+		t.Fatalf("no replacement expected, got %d processes", procs)
+	}
+}
+
+// Item #5 stall replacement, rows 2 + 4 + 6: a stalled session with genuinely
+// undelivered pending work is replaced by exactly ONE fresh process (the wedged
+// one stopped, max one live); the old generation's tool token is invalid
+// immediately; and the still-pending signature — never marked delivered — is
+// delivered exactly once into the replacement on the next cycle.
+func TestAgentSessionStalledWithPendingWorkReplacesAndRedelivers(t *testing.T) {
+	supervisor, factory, wedged, current, _ := stalledWorkingSession(t, nil)
+	defer supervisor.Shutdown()
+	supervisor.mu.Lock()
+	oldToken := supervisor.sessions["agent_1"].toolToken
+	supervisor.mu.Unlock()
+
+	// Pending (undelivered) work arrives for the wedged session. The resident
+	// session exists, so this replaces (it does NOT create from an empty slot).
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "wedged work", "for-me:v9", ""); err != nil {
+		t.Fatalf("schedule on stalled: %v", err)
+	}
+	// The wedged process is stopped and exactly one replacement becomes live.
+	waitProcessStopped(t, wedged)
+	waitSessionLive(t, supervisor, "agent_1")
+	factory.mu.Lock()
+	procs := len(factory.processes)
+	factory.mu.Unlock()
+	if procs != 2 {
+		t.Fatalf("expected exactly one replacement (2 processes total), got %d", procs)
+	}
+	replacement := latestFakeProcess(factory)
+	if replacement == wedged {
+		t.Fatal("the replacement must be a fresh process")
+	}
+	// Row 4: the old generation's tool token is invalid immediately.
+	if run := supervisor.agentByToolToken(oldToken); run != nil {
+		t.Fatal("the wedged generation's tool token must be invalid after replacement")
+	}
+	// The triggering notification did NOT deliver or mark the signature delivered.
+	if got := len(wedged.inputsByKind(RuntimeInputStartTurn)); got != 0 {
+		t.Fatalf("the stall-replacement must not write a turn to the wedged process, got %d", got)
+	}
+	supervisor.mu.Lock()
+	delivered := supervisor.sessions["agent_1"].deliveredForMeSig
+	supervisor.mu.Unlock()
+	if delivered == "for-me:v9" {
+		t.Fatal("the pending signature must not be marked delivered by the replacement")
+	}
+	// Row 6: the next anti-entropy cycle delivers the still-pending signature
+	// exactly once into the replacement.
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "wedged work", "for-me:v9", ""); err != nil {
+		t.Fatalf("redeliver: %v", err)
+	}
+	if got := len(replacement.inputsByKind(RuntimeInputStartTurn)); got != 1 {
+		t.Fatalf("expected the pending signature delivered exactly once into the replacement, got %d", got)
 	}
 }
 
