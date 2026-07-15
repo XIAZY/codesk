@@ -107,7 +107,11 @@ const editorTheme = EditorView.theme({
     lineHeight: "1.72",
   },
   ".cm-selectionBackground": {
-    background: "rgba(215, 138, 75, 0.28) !important",
+    background: "oklch(0.72 0.045 250 / 0.30) !important",
+    borderRadius: "4px",
+  },
+  ".cm-content ::selection": {
+    backgroundColor: "transparent !important",
   },
   ".cm-thread-highlight": {
     background: "rgba(215, 138, 75, 0.24)",
