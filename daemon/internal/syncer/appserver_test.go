@@ -474,6 +474,42 @@ func assertAppServerEventsClosed(t *testing.T, events <-chan appServerEvent) {
 			}
 		case <-time.After(time.Second):
 			t.Fatal("app-server events did not close")
+// Item #5 liveness, blocker 25: the Codex read boundary increments the activity
+// generation BEFORE the synchronous logf — a blocked log sink cannot stall
+// liveness. Holding the global log mutex, ActivitySeq must advance while readLoop
+// is still blocked on the log. Moving noteActivity below logf makes this RED.
+func TestCodexReadBoundaryStampsActivityBeforeBlockedLog(t *testing.T) {
+	logg, err := openAgentLog(Config{DataDir: t.TempDir()}, "agent_codex")
+	if err != nil {
+		t.Fatalf("open agent log: %v", err)
+	}
+	c := newCodexAppServer(Config{DataDir: t.TempDir()}, t.TempDir(), "", "agent_codex")
+	c.log = logg
+	agentLogWriteMu.Lock()
+	readDone := make(chan struct{})
+	go func() {
+		c.readLoop(strings.NewReader(`{"telemetry":"unmapped"}` + "\n"))
+		close(readDone)
+	}()
+	deadline := time.After(2 * time.Second)
+	for c.ActivitySeq() == 0 {
+		select {
+		case <-deadline:
+			agentLogWriteMu.Unlock()
+			t.Fatal("ActivitySeq must advance before the (blocked) log write completes")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	select {
+	case <-readDone:
+		agentLogWriteMu.Unlock()
+		t.Fatal("readLoop finished before the log was released — cannot prove increment-before-log ordering")
+	default:
+	}
+	agentLogWriteMu.Unlock()
+	<-readDone
+}
+
 // The shared read-boundary validator both drivers gate on, pinned directly.
 func TestIsValidRuntimeFrame(t *testing.T) {
 	cases := []struct {

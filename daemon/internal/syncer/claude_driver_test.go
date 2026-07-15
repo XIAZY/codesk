@@ -288,6 +288,43 @@ func TestClaudeStartTurnWithoutSpawnFails(t *testing.T) {
 	}
 }
 
+// Item #5 liveness, blocker 25: the Claude read boundary increments the activity
+// generation BEFORE the synchronous logf, so a contended/blocked log sink cannot
+// stall liveness for a demonstrably-live runtime. Proven by holding the global log
+// mutex and asserting ActivitySeq advances WHILE readLoop is still blocked on the
+// log. Moving noteActivity below logf makes this RED.
+func TestClaudeReadBoundaryStampsActivityBeforeBlockedLog(t *testing.T) {
+	logg, err := openAgentLog(Config{DataDir: t.TempDir()}, "agent_claude")
+	if err != nil {
+		t.Fatalf("open agent log: %v", err)
+	}
+	process := &claudeRuntimeProcess{events: make(chan RuntimeEvent, 4), log: logg}
+	agentLogWriteMu.Lock()
+	readDone := make(chan struct{})
+	go func() {
+		process.readLoop(strings.NewReader(`{"type":"telemetry_unmapped"}` + "\n"))
+		close(readDone)
+	}()
+	// ActivitySeq must advance while the read loop is still blocked on the log write.
+	deadline := time.After(2 * time.Second)
+	for process.ActivitySeq() == 0 {
+		select {
+		case <-deadline:
+			agentLogWriteMu.Unlock()
+			t.Fatal("ActivitySeq must advance before the (blocked) log write completes")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	select {
+	case <-readDone:
+		agentLogWriteMu.Unlock()
+		t.Fatal("readLoop finished before the log was released — cannot prove increment-before-log ordering")
+	default:
+	}
+	agentLogWriteMu.Unlock()
+	<-readDone
+}
+
 // Item #5 liveness, row 4: a syntactically valid frame whose type the parser does
 // NOT map still proves the runtime is alive, so it must advance the activity
 // generation at the read boundary. Liveness is syntactic, not semantic — it must
