@@ -759,10 +759,8 @@ export function isLoopbackCallback(raw: string): boolean {
     const parsed = new URL(raw);
     if (parsed.protocol !== "http:" || parsed.hostname !== "127.0.0.1") return false;
     if (parsed.port === "" || parsed.port === "0") return false;
-    if (parsed.username !== "" || parsed.password !== "") return false;
-    if (parsed.search !== "" || parsed.hash !== "") return false;
     if (!callbackNoncePattern.test(parsed.pathname)) return false;
-    return parsed.href === raw;
+    return `http://127.0.0.1:${parsed.port}${parsed.pathname}` === raw;
   } catch {
     return false;
   }
