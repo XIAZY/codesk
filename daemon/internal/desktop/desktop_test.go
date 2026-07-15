@@ -141,6 +141,10 @@ func TestSyncerConfigRejectsInvalidDirs(t *testing.T) {
 		{"padded data", Dirs{Data: " " + base.Data + " ", Logs: base.Logs, Cache: base.Cache}},
 		{"padded logs", Dirs{Data: base.Data, Logs: " " + base.Logs + " ", Cache: base.Cache}},
 		{"padded cache", Dirs{Data: base.Data, Logs: base.Logs, Cache: " " + base.Cache + " "}},
+		{"trailing space data", Dirs{Data: base.Data + " ", Logs: base.Logs, Cache: base.Cache}},
+		{"trailing space logs", Dirs{Data: base.Data, Logs: base.Logs + " ", Cache: base.Cache}},
+		{"trailing space cache", Dirs{Data: base.Data, Logs: base.Logs, Cache: base.Cache + " "}},
+		{"leading space data", Dirs{Data: " " + base.Data, Logs: base.Logs, Cache: base.Cache}},
 		{"dotdot data", Dirs{Data: base.Data + "/../other", Logs: base.Logs, Cache: base.Cache}},
 		{"dotdot logs", Dirs{Data: base.Data, Logs: base.Logs + "/../other", Cache: base.Cache}},
 		{"dotdot cache", Dirs{Data: base.Data, Logs: base.Logs, Cache: base.Cache + "/../other"}},
@@ -237,6 +241,16 @@ func TestDirsValidate(t *testing.T) {
 		{
 			name:    "padded cache",
 			dirs:    Dirs{Data: base.Data, Logs: base.Logs, Cache: " " + base.Cache + " "},
+			wantErr: true,
+		},
+		{
+			name:    "trailing space data",
+			dirs:    Dirs{Data: base.Data + " ", Logs: base.Logs, Cache: base.Cache},
+			wantErr: true,
+		},
+		{
+			name:    "leading space data",
+			dirs:    Dirs{Data: " " + base.Data, Logs: base.Logs, Cache: base.Cache},
 			wantErr: true,
 		},
 		{
