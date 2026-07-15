@@ -121,17 +121,55 @@ describe("node config integrity (§4.1)", () => {
   });
 });
 
+// Class guard (Tom): a checklist/guide item's completion represents a user ACTION that
+// maps to a backend permission (backend/internal/notty/role.go authz matrix). An item
+// whose action is permission-gated MUST carry eligibleRoles matching that permission's
+// roles — otherwise the UI hands a member a task the backend forbids (a 403 dead-end,
+// the "lying UI" red line). This mirrors role.go; the two must stay in sync. The guard
+// makes the next permission-gated item impossible to ship role-open, instead of trusting
+// someone to hold both the config and role.go in their head at once.
+describe("config ↔ backend authz consistency (mirrors role.go)", () => {
+  const OWNER_ADMIN: OnboardingRole[] = ["owner", "admin"];
+  // item id -> roles its completion action requires per role.go. Absent = unrestricted
+  // (ActionEditDocuments grants owner/admin/member), so eligibleRoles must be [] (all).
+  const REQUIRED_ROLES: Record<string, OnboardingRole[]> = {
+    "connect-environment": OWNER_ADMIN, // ActionManageDaemons (owner, admin)
+    "create-agent": OWNER_ADMIN, //        ActionManageAgents  (owner, admin)
+    "agent-at-work": OWNER_ADMIN, //       ActionManageAgents  (owner, admin)
+    "invite-team": OWNER_ADMIN, //         ActionInviteMembers (owner, admin)
+    // create-document / start-discussion -> ActionEditDocuments (all roles) -> []
+  };
+  const sortedRoles = (roles: readonly OnboardingRole[]) => [...roles].sort();
+
+  it("every permission-gated NODE/CHECKLIST item carries eligibleRoles matching the authz matrix", () => {
+    for (const item of [...NODES, ...CHECKLIST_ITEMS]) {
+      const expected = REQUIRED_ROLES[item.id] ?? [];
+      expect({ id: item.id, roles: sortedRoles(item.eligibleRoles) })
+        .toEqual({ id: item.id, roles: sortedRoles(expected) });
+    }
+  });
+});
+
 describe("eligibility by role (§4.1 — removed, not disabled)", () => {
   it("all guided/tip nodes are role-agnostic", () => {
     expect(eligibleNodes(ctx({ roles: ["member"] })).map((n) => n.id)).toEqual(NODES.map((n) => n.id));
   });
 
-  it("checklist gates 'Invite your team' to owners/admins only", () => {
+  it("gates every owner/admin setup item; a member sees only the tasks their role can do", () => {
     const owner = checklistProgress(ctx({ roles: ["owner"] })).map((c) => c.item.id);
     const member = checklistProgress(ctx({ roles: ["member"] })).map((c) => c.item.id);
-    expect(owner).toContain("invite-team");
-    expect(member).not.toContain("invite-team");
-    expect(member).toHaveLength(5);
+    // Owner/admin see the full checklist.
+    expect(owner).toEqual([
+      "create-document",
+      "start-discussion",
+      "connect-environment",
+      "create-agent",
+      "agent-at-work",
+      "invite-team",
+    ]);
+    // A member sees ONLY the all-role tasks — no environment/agent/invite items, since
+    // the backend 403s those for members (no dead task the UI dares them to fail).
+    expect(member).toEqual(["create-document", "start-discussion"]);
   });
 });
 

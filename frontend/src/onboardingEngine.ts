@@ -220,9 +220,13 @@ export const NODES: OnboardingNode[] = [
 export const CHECKLIST_ITEMS: OnboardingChecklistItem[] = [
   { id: "create-document", label: "Create your first document", eligibleRoles: [], completion: { via: "derived", signal: "document-exists" } },
   { id: "start-discussion", label: "Start a discussion", eligibleRoles: [], completion: { via: "derived", signal: "thread-exists" } },
-  { id: "connect-environment", label: "Connect a local environment", eligibleRoles: [], completion: { via: "derived", signal: "live-environment" } },
-  { id: "create-agent", label: "Create your first agent", eligibleRoles: [], completion: { via: "derived", signal: "agent-exists" } },
-  { id: "agent-at-work", label: "Put an agent to work", eligibleRoles: [], completion: { via: "derived", signal: "agent-at-work" } },
+  // Owner/admin only: their completion actions require ManageDaemons / ManageAgents
+  // (backend role.go), which members lack — showing them to a member is a task the
+  // backend 403s. eligibleRoles here must mirror the authz matrix; the config↔authz
+  // test in onboardingEngine.test.ts enforces it.
+  { id: "connect-environment", label: "Connect a local environment", eligibleRoles: ["owner", "admin"], completion: { via: "derived", signal: "live-environment" } },
+  { id: "create-agent", label: "Create your first agent", eligibleRoles: ["owner", "admin"], completion: { via: "derived", signal: "agent-exists" } },
+  { id: "agent-at-work", label: "Put an agent to work", eligibleRoles: ["owner", "admin"], completion: { via: "derived", signal: "agent-at-work" } },
   { id: "invite-team", label: "Invite your team", eligibleRoles: ["owner", "admin"], completion: { via: "flag", key: "member_invited" } },
 ];
 
