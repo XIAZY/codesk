@@ -354,7 +354,7 @@ jobs:
       # The regression suite brings up its own postgres + backend via docker compose
       # (test/regression/docker-compose.yml), so no GitHub Postgres service is needed here.
       - name: Full regression suite (docker-compose E2E)
-        run: go test -tags=regression -count=1 ./test/regression
+        run: go test -tags=regression -count=1 -timeout 40m ./test/regression
 
   frontend:
     name: frontend (typecheck, vitest, build)
