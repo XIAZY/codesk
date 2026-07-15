@@ -57,6 +57,9 @@ func requireAbsolute(name, path string) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("desktop: %s directory %q is not absolute", name, path)
 	}
+	if path != filepath.Clean(path) {
+		return fmt.Errorf("desktop: %s directory %q is not clean (use %q)", name, path, filepath.Clean(path))
+	}
 	return nil
 }
 

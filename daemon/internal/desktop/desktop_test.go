@@ -141,6 +141,11 @@ func TestSyncerConfigRejectsInvalidDirs(t *testing.T) {
 		{"padded data", Dirs{Data: " " + base.Data + " ", Logs: base.Logs, Cache: base.Cache}},
 		{"padded logs", Dirs{Data: base.Data, Logs: " " + base.Logs + " ", Cache: base.Cache}},
 		{"padded cache", Dirs{Data: base.Data, Logs: base.Logs, Cache: " " + base.Cache + " "}},
+		{"dotdot data", Dirs{Data: base.Data + "/../other", Logs: base.Logs, Cache: base.Cache}},
+		{"dotdot logs", Dirs{Data: base.Data, Logs: base.Logs + "/../other", Cache: base.Cache}},
+		{"dotdot cache", Dirs{Data: base.Data, Logs: base.Logs, Cache: base.Cache + "/../other"}},
+		{"dot data", Dirs{Data: base.Data + "/./sub", Logs: base.Logs, Cache: base.Cache}},
+		{"redundant sep data", Dirs{Data: base.Data + "//sub", Logs: base.Logs, Cache: base.Cache}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -152,7 +157,7 @@ func TestSyncerConfigRejectsInvalidDirs(t *testing.T) {
 	}
 }
 
-func TestSyncerConfigSuccessNeverHasEmptyDataDir(t *testing.T) {
+func TestSyncerConfigSuccessInvariants(t *testing.T) {
 	dirs := validDirs(t)
 	cfg, err := SyncerConfig(dirs, "https://api", "ws", "tok", "1.0")
 	if err != nil {
@@ -160,6 +165,15 @@ func TestSyncerConfigSuccessNeverHasEmptyDataDir(t *testing.T) {
 	}
 	if strings.TrimSpace(cfg.DataDir) == "" {
 		t.Error("successful SyncerConfig returned empty DataDir")
+	}
+	for name, path := range map[string]string{
+		"DataDir":            cfg.DataDir,
+		"WorkspaceDir":       cfg.WorkspaceDir,
+		"AgentWorkspaceRoot": cfg.AgentWorkspaceRoot,
+	} {
+		if path != filepath.Clean(path) {
+			t.Errorf("%s = %q is not lexically clean (want %q)", name, path, filepath.Clean(path))
+		}
 	}
 }
 
@@ -223,6 +237,21 @@ func TestDirsValidate(t *testing.T) {
 		{
 			name:    "padded cache",
 			dirs:    Dirs{Data: base.Data, Logs: base.Logs, Cache: " " + base.Cache + " "},
+			wantErr: true,
+		},
+		{
+			name:    "dotdot data",
+			dirs:    Dirs{Data: base.Data + "/../other", Logs: base.Logs, Cache: base.Cache},
+			wantErr: true,
+		},
+		{
+			name:    "dot data",
+			dirs:    Dirs{Data: base.Data + "/./sub", Logs: base.Logs, Cache: base.Cache},
+			wantErr: true,
+		},
+		{
+			name:    "redundant sep",
+			dirs:    Dirs{Data: base.Data + "//sub", Logs: base.Logs, Cache: base.Cache},
 			wantErr: true,
 		},
 	}
