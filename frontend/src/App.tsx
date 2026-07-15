@@ -481,7 +481,7 @@ export function App() {
     return <ResetPasswordPage api={api} token={route.token} />;
   }
   if (route.kind === "desktopConnectComplete") {
-    return <RouteMessageScreen title="Connected" body="Your desktop app is now connected. You can close this tab." />;
+    return <RouteMessageScreen title="Credential handoff complete" body="Check your desktop app for connection status. You can close this tab." />;
   }
 
   if (!token) {
@@ -752,10 +752,17 @@ export function InvitePreviewCard({ preview }: { preview: WorkspaceInvitePreview
   );
 }
 
-function isLoopbackCallback(raw: string): boolean {
+const callbackNoncePattern = /^\/desktop\/connect\/[A-Za-z0-9_-]{43}$/;
+
+export function isLoopbackCallback(raw: string): boolean {
   try {
     const parsed = new URL(raw);
-    return parsed.protocol === "http:" && (parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]");
+    if (parsed.protocol !== "http:" || parsed.hostname !== "127.0.0.1") return false;
+    if (parsed.port === "" || parsed.port === "0") return false;
+    if (parsed.username !== "" || parsed.password !== "") return false;
+    if (parsed.search !== "" || parsed.hash !== "") return false;
+    if (!callbackNoncePattern.test(parsed.pathname)) return false;
+    return parsed.href === raw;
   } catch {
     return false;
   }

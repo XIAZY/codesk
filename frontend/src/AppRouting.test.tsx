@@ -4,7 +4,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { App } from "./App";
+import { App, isLoopbackCallback } from "./App";
 import type { Account, DocumentItem, WorkspaceState, WorkspaceSummary } from "./types";
 
 const mocks = vi.hoisted(() => ({
@@ -559,18 +559,19 @@ describe("App URL routing", () => {
     expect(window.location.pathname).toBe("/w/product-workspace/d/doc_created");
   });
 
-  it("renders the desktop connect completion page without requiring auth", async () => {
+  it("renders the desktop connect completion page as neutral handoff status", async () => {
     window.history.replaceState(null, "", "/desktop/connect/complete");
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Connected" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Credential handoff complete" })).toBeTruthy();
     expect(screen.getByText(/close this tab/)).toBeTruthy();
+    expect(screen.queryByText("Connected")).toBeNull();
     expect(window.location.pathname).toBe("/desktop/connect/complete");
   });
 
   it("shows login on desktop connect when unauthenticated and preserves the route", async () => {
-    window.history.replaceState(null, "", "/desktop/connect?callback=http%3A%2F%2F127.0.0.1%3A12345%2Fdesktop%2Fconnect%2Fnonce");
+    window.history.replaceState(null, "", "/desktop/connect?callback=http%3A%2F%2F127.0.0.1%3A12345%2Fdesktop%2Fconnect%2FABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq");
 
     render(<App />);
 
@@ -580,7 +581,7 @@ describe("App URL routing", () => {
 
   it("shows workspace picker on desktop connect when authenticated", async () => {
     localStorage.setItem("codesk.auth.token", "token");
-    window.history.replaceState(null, "", "/desktop/connect?callback=http%3A%2F%2F127.0.0.1%3A12345%2Fdesktop%2Fconnect%2Fnonce");
+    window.history.replaceState(null, "", "/desktop/connect?callback=http%3A%2F%2F127.0.0.1%3A12345%2Fdesktop%2Fconnect%2FABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq");
 
     render(<App />);
 
@@ -597,5 +598,42 @@ describe("App URL routing", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Invalid callback" })).toBeTruthy();
+  });
+
+  it("rejects loopback callback with arbitrary path", async () => {
+    localStorage.setItem("codesk.auth.token", "token");
+    window.history.replaceState(null, "", "/desktop/connect?callback=http%3A%2F%2F127.0.0.1%3A12345%2Fsteal");
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Invalid callback" })).toBeTruthy();
+  });
+});
+
+describe("isLoopbackCallback", () => {
+  const validNonce = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq";
+
+  it.each([
+    ["canonical shape", `http://127.0.0.1:12345/desktop/connect/${validNonce}`, true],
+    ["high port", `http://127.0.0.1:65535/desktop/connect/${validNonce}`, true],
+    ["arbitrary path", "http://127.0.0.1:12345/steal", false],
+    ["localhost", `http://localhost:12345/desktop/connect/${validNonce}`, false],
+    ["IPv6 loopback", `http://[::1]:12345/desktop/connect/${validNonce}`, false],
+    ["missing port", `http://127.0.0.1/desktop/connect/${validNonce}`, false],
+    ["zero port", `http://127.0.0.1:0/desktop/connect/${validNonce}`, false],
+    ["https scheme", `https://127.0.0.1:12345/desktop/connect/${validNonce}`, false],
+    ["query string", `http://127.0.0.1:12345/desktop/connect/${validNonce}?leak=1`, false],
+    ["hash fragment", `http://127.0.0.1:12345/desktop/connect/${validNonce}#frag`, false],
+    ["userinfo", `http://user:pass@127.0.0.1:12345/desktop/connect/${validNonce}`, false],
+    ["nonce too short (42 chars)", "http://127.0.0.1:12345/desktop/connect/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop", false],
+    ["nonce too long (44 chars)", "http://127.0.0.1:12345/desktop/connect/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqr", false],
+    ["nonce with invalid char", "http://127.0.0.1:12345/desktop/connect/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmno.q", false],
+    ["remote host", `https://attacker.com/desktop/connect/${validNonce}`, false],
+    ["trailing slash", `http://127.0.0.1:12345/desktop/connect/${validNonce}/`, false],
+    ["extra path segment", `http://127.0.0.1:12345/desktop/connect/${validNonce}/extra`, false],
+    ["empty string", "", false],
+    ["not a URL", "not-a-url", false],
+  ])("%s → %s", (_label, input, expected) => {
+    expect(isLoopbackCallback(input)).toBe(expected);
   });
 });
