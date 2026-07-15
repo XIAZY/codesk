@@ -1,32 +1,18 @@
 package desktop
 
 import (
+	"notty/daemon/internal/syncer"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func mustSyncerConfig(t *testing.T, dirs Dirs, backendURL, workspaceID, daemonToken, daemonVersion string) (cfg struct {
-	BackendURL         string
-	WorkspaceID        string
-	DaemonToken        string
-	DaemonVersion      string
-	DataDir            string
-	WorkspaceDir       string
-	AgentWorkspaceRoot string
-}) {
+func mustSyncerConfig(t *testing.T, dirs Dirs, backendURL, workspaceID, daemonToken, daemonVersion string) syncer.Config {
 	t.Helper()
-	c, err := SyncerConfig(dirs, backendURL, workspaceID, daemonToken, daemonVersion)
+	cfg, err := SyncerConfig(dirs, backendURL, workspaceID, daemonToken, daemonVersion)
 	if err != nil {
 		t.Fatalf("SyncerConfig() unexpected error: %v", err)
 	}
-	cfg.BackendURL = c.BackendURL
-	cfg.WorkspaceID = c.WorkspaceID
-	cfg.DaemonToken = c.DaemonToken
-	cfg.DaemonVersion = c.DaemonVersion
-	cfg.DataDir = c.DataDir
-	cfg.WorkspaceDir = c.WorkspaceDir
-	cfg.AgentWorkspaceRoot = c.AgentWorkspaceRoot
 	return cfg
 }
 
@@ -160,6 +146,9 @@ func TestSyncerConfigRejectsInvalidDirs(t *testing.T) {
 		{"relative data", Dirs{Data: "relative/path", Logs: "/logs", Cache: "/cache"}},
 		{"relative logs", Dirs{Data: "/data", Logs: "relative", Cache: "/cache"}},
 		{"relative cache", Dirs{Data: "/data", Logs: "/logs", Cache: "relative"}},
+		{"padded data", Dirs{Data: " /data ", Logs: "/logs", Cache: "/cache"}},
+		{"padded logs", Dirs{Data: "/data", Logs: " /logs ", Cache: "/cache"}},
+		{"padded cache", Dirs{Data: "/data", Logs: "/logs", Cache: " /cache "}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -226,6 +215,21 @@ func TestDirsValidate(t *testing.T) {
 		{
 			name:    "relative cache",
 			dirs:    Dirs{Data: "/a", Logs: "/b", Cache: "relative"},
+			wantErr: true,
+		},
+		{
+			name:    "padded data",
+			dirs:    Dirs{Data: " /a ", Logs: "/b", Cache: "/c"},
+			wantErr: true,
+		},
+		{
+			name:    "padded logs",
+			dirs:    Dirs{Data: "/a", Logs: " /b ", Cache: "/c"},
+			wantErr: true,
+		},
+		{
+			name:    "padded cache",
+			dirs:    Dirs{Data: "/a", Logs: "/b", Cache: " /c "},
 			wantErr: true,
 		},
 	}

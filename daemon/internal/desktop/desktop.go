@@ -48,11 +48,13 @@ func (d Dirs) Validate() error {
 }
 
 func requireAbsolute(name, path string) error {
-	cleaned := strings.TrimSpace(path)
-	if cleaned == "" {
+	if strings.TrimSpace(path) == "" {
 		return fmt.Errorf("desktop: %s directory is empty", name)
 	}
-	if !filepath.IsAbs(cleaned) {
+	if path != strings.TrimSpace(path) {
+		return fmt.Errorf("desktop: %s directory %q has surrounding whitespace", name, path)
+	}
+	if !filepath.IsAbs(path) {
 		return fmt.Errorf("desktop: %s directory %q is not absolute", name, path)
 	}
 	return nil
