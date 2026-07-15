@@ -7,6 +7,16 @@ import (
 	"testing"
 )
 
+func validDirs(t *testing.T) Dirs {
+	t.Helper()
+	root := t.TempDir()
+	return Dirs{
+		Data:  filepath.Join(root, "data"),
+		Logs:  filepath.Join(root, "logs"),
+		Cache: filepath.Join(root, "cache"),
+	}
+}
+
 func mustSyncerConfig(t *testing.T, dirs Dirs, backendURL, workspaceID, daemonToken, daemonVersion string) syncer.Config {
 	t.Helper()
 	cfg, err := SyncerConfig(dirs, backendURL, workspaceID, daemonToken, daemonVersion)
@@ -17,15 +27,10 @@ func mustSyncerConfig(t *testing.T, dirs Dirs, backendURL, workspaceID, daemonTo
 }
 
 func TestSyncerConfigNeverReferencesCLIPaths(t *testing.T) {
-	dirs := Dirs{
-		Data:  "/desktop/data",
-		Logs:  "/desktop/logs",
-		Cache: "/desktop/cache",
-	}
-
+	dirs := validDirs(t)
 	cfg := mustSyncerConfig(t, dirs, "https://api.getcodesk.com", "ws-1", "tok-1", "1.0.0")
 
-	cliPaths := []string{".notty", "notty"}
+	cliPaths := []string{".notty", string(filepath.Separator) + "notty"}
 	fields := map[string]string{
 		"DataDir":            cfg.DataDir,
 		"WorkspaceDir":       cfg.WorkspaceDir,
@@ -41,12 +46,7 @@ func TestSyncerConfigNeverReferencesCLIPaths(t *testing.T) {
 }
 
 func TestSyncerConfigAllPathsUnderDataDir(t *testing.T) {
-	dirs := Dirs{
-		Data:  "/app/Codesk",
-		Logs:  "/app/Codesk/Logs",
-		Cache: "/app/Codesk/Cache",
-	}
-
+	dirs := validDirs(t)
 	cfg := mustSyncerConfig(t, dirs, "https://api.getcodesk.com", "ws-1", "tok-1", "1.0.0")
 
 	paths := map[string]string{
@@ -63,12 +63,7 @@ func TestSyncerConfigAllPathsUnderDataDir(t *testing.T) {
 }
 
 func TestSyncerConfigFieldMapping(t *testing.T) {
-	dirs := Dirs{
-		Data:  "/test/data",
-		Logs:  "/test/logs",
-		Cache: "/test/cache",
-	}
-
+	dirs := validDirs(t)
 	cfg := mustSyncerConfig(t, dirs, "https://backend", "workspace-id", "secret-token", "2.0.0")
 
 	if cfg.BackendURL != "https://backend" {
@@ -83,14 +78,14 @@ func TestSyncerConfigFieldMapping(t *testing.T) {
 	if cfg.DaemonVersion != "2.0.0" {
 		t.Errorf("DaemonVersion = %q, want %q", cfg.DaemonVersion, "2.0.0")
 	}
-	if cfg.DataDir != "/test/data" {
-		t.Errorf("DataDir = %q, want %q", cfg.DataDir, "/test/data")
+	if cfg.DataDir != dirs.Data {
+		t.Errorf("DataDir = %q, want %q", cfg.DataDir, dirs.Data)
 	}
-	if cfg.WorkspaceDir != filepath.Join("/test/data", "workspace") {
-		t.Errorf("WorkspaceDir = %q, want %q", cfg.WorkspaceDir, filepath.Join("/test/data", "workspace"))
+	if cfg.WorkspaceDir != filepath.Join(dirs.Data, "workspace") {
+		t.Errorf("WorkspaceDir = %q, want %q", cfg.WorkspaceDir, filepath.Join(dirs.Data, "workspace"))
 	}
-	if cfg.AgentWorkspaceRoot != filepath.Join("/test/data", "agents") {
-		t.Errorf("AgentWorkspaceRoot = %q, want %q", cfg.AgentWorkspaceRoot, filepath.Join("/test/data", "agents"))
+	if cfg.AgentWorkspaceRoot != filepath.Join(dirs.Data, "agents") {
+		t.Errorf("AgentWorkspaceRoot = %q, want %q", cfg.AgentWorkspaceRoot, filepath.Join(dirs.Data, "agents"))
 	}
 }
 
@@ -104,14 +99,10 @@ func TestSyncerConfigDoesNotReadEnv(t *testing.T) {
 		"NOTTY_AGENT_WORKSPACE_ROOT",
 	}
 	for _, key := range envVars {
-		t.Setenv(key, "/poisoned/"+key)
+		t.Setenv(key, filepath.Join(t.TempDir(), "poisoned-"+key))
 	}
 
-	dirs := Dirs{
-		Data:  "/clean/data",
-		Logs:  "/clean/logs",
-		Cache: "/clean/cache",
-	}
+	dirs := validDirs(t)
 	cfg := mustSyncerConfig(t, dirs, "https://clean.api", "ws-clean", "tok-clean", "1.0.0")
 
 	if strings.Contains(cfg.BackendURL, "poisoned") {
@@ -135,20 +126,21 @@ func TestSyncerConfigDoesNotReadEnv(t *testing.T) {
 }
 
 func TestSyncerConfigRejectsInvalidDirs(t *testing.T) {
+	base := validDirs(t)
 	tests := []struct {
 		name string
 		dirs Dirs
 	}{
 		{"zero dirs", Dirs{}},
-		{"whitespace data", Dirs{Data: "  ", Logs: "/logs", Cache: "/cache"}},
-		{"whitespace logs", Dirs{Data: "/data", Logs: "\t", Cache: "/cache"}},
-		{"whitespace cache", Dirs{Data: "/data", Logs: "/logs", Cache: " \n "}},
-		{"relative data", Dirs{Data: "relative/path", Logs: "/logs", Cache: "/cache"}},
-		{"relative logs", Dirs{Data: "/data", Logs: "relative", Cache: "/cache"}},
-		{"relative cache", Dirs{Data: "/data", Logs: "/logs", Cache: "relative"}},
-		{"padded data", Dirs{Data: " /data ", Logs: "/logs", Cache: "/cache"}},
-		{"padded logs", Dirs{Data: "/data", Logs: " /logs ", Cache: "/cache"}},
-		{"padded cache", Dirs{Data: "/data", Logs: "/logs", Cache: " /cache "}},
+		{"whitespace data", Dirs{Data: "  ", Logs: base.Logs, Cache: base.Cache}},
+		{"whitespace logs", Dirs{Data: base.Data, Logs: "\t", Cache: base.Cache}},
+		{"whitespace cache", Dirs{Data: base.Data, Logs: base.Logs, Cache: " \n "}},
+		{"relative data", Dirs{Data: "relative/path", Logs: base.Logs, Cache: base.Cache}},
+		{"relative logs", Dirs{Data: base.Data, Logs: "relative", Cache: base.Cache}},
+		{"relative cache", Dirs{Data: base.Data, Logs: base.Logs, Cache: "relative"}},
+		{"padded data", Dirs{Data: " " + base.Data + " ", Logs: base.Logs, Cache: base.Cache}},
+		{"padded logs", Dirs{Data: base.Data, Logs: " " + base.Logs + " ", Cache: base.Cache}},
+		{"padded cache", Dirs{Data: base.Data, Logs: base.Logs, Cache: " " + base.Cache + " "}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -161,7 +153,7 @@ func TestSyncerConfigRejectsInvalidDirs(t *testing.T) {
 }
 
 func TestSyncerConfigSuccessNeverHasEmptyDataDir(t *testing.T) {
-	dirs := Dirs{Data: "/valid", Logs: "/valid/logs", Cache: "/valid/cache"}
+	dirs := validDirs(t)
 	cfg, err := SyncerConfig(dirs, "https://api", "ws", "tok", "1.0")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -172,6 +164,7 @@ func TestSyncerConfigSuccessNeverHasEmptyDataDir(t *testing.T) {
 }
 
 func TestDirsValidate(t *testing.T) {
+	base := validDirs(t)
 	tests := []struct {
 		name    string
 		dirs    Dirs
@@ -179,57 +172,57 @@ func TestDirsValidate(t *testing.T) {
 	}{
 		{
 			name:    "valid",
-			dirs:    Dirs{Data: "/a", Logs: "/b", Cache: "/c"},
+			dirs:    base,
 			wantErr: false,
 		},
 		{
 			name:    "empty data",
-			dirs:    Dirs{Data: "", Logs: "/b", Cache: "/c"},
+			dirs:    Dirs{Data: "", Logs: base.Logs, Cache: base.Cache},
 			wantErr: true,
 		},
 		{
 			name:    "empty logs",
-			dirs:    Dirs{Data: "/a", Logs: "", Cache: "/c"},
+			dirs:    Dirs{Data: base.Data, Logs: "", Cache: base.Cache},
 			wantErr: true,
 		},
 		{
 			name:    "empty cache",
-			dirs:    Dirs{Data: "/a", Logs: "/b", Cache: ""},
+			dirs:    Dirs{Data: base.Data, Logs: base.Logs, Cache: ""},
 			wantErr: true,
 		},
 		{
 			name:    "whitespace data",
-			dirs:    Dirs{Data: "  ", Logs: "/b", Cache: "/c"},
+			dirs:    Dirs{Data: "  ", Logs: base.Logs, Cache: base.Cache},
 			wantErr: true,
 		},
 		{
 			name:    "relative data",
-			dirs:    Dirs{Data: "relative", Logs: "/b", Cache: "/c"},
+			dirs:    Dirs{Data: "relative", Logs: base.Logs, Cache: base.Cache},
 			wantErr: true,
 		},
 		{
 			name:    "relative logs",
-			dirs:    Dirs{Data: "/a", Logs: "relative", Cache: "/c"},
+			dirs:    Dirs{Data: base.Data, Logs: "relative", Cache: base.Cache},
 			wantErr: true,
 		},
 		{
 			name:    "relative cache",
-			dirs:    Dirs{Data: "/a", Logs: "/b", Cache: "relative"},
+			dirs:    Dirs{Data: base.Data, Logs: base.Logs, Cache: "relative"},
 			wantErr: true,
 		},
 		{
 			name:    "padded data",
-			dirs:    Dirs{Data: " /a ", Logs: "/b", Cache: "/c"},
+			dirs:    Dirs{Data: " " + base.Data + " ", Logs: base.Logs, Cache: base.Cache},
 			wantErr: true,
 		},
 		{
 			name:    "padded logs",
-			dirs:    Dirs{Data: "/a", Logs: " /b ", Cache: "/c"},
+			dirs:    Dirs{Data: base.Data, Logs: " " + base.Logs + " ", Cache: base.Cache},
 			wantErr: true,
 		},
 		{
 			name:    "padded cache",
-			dirs:    Dirs{Data: "/a", Logs: "/b", Cache: " /c "},
+			dirs:    Dirs{Data: base.Data, Logs: base.Logs, Cache: " " + base.Cache + " "},
 			wantErr: true,
 		},
 	}
