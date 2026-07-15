@@ -755,7 +755,7 @@ export function InvitePreviewCard({ preview }: { preview: WorkspaceInvitePreview
 function isLoopbackCallback(raw: string): boolean {
   try {
     const parsed = new URL(raw);
-    return parsed.protocol === "http:" && (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost");
+    return parsed.protocol === "http:" && (parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]");
   } catch {
     return false;
   }
