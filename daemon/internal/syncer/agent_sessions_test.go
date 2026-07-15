@@ -2462,6 +2462,107 @@ func TestAgentSessionStalledWithPendingWorkReplacesAndRedelivers(t *testing.T) {
 	}
 }
 
+// Item #5 stall replacement, row 3 (Thomas): a natural transient exit racing the
+// stall-replacement claim must still yield exactly ONE restarter. The stall path
+// claims restartPending (CAS false->true under s.mu) synchronously; when the
+// wedged generation's own death then reaches consumeEvents, its transient branch
+// sees restartPending already claimed and must NOT launch a second restarter.
+func TestAgentSessionStalledReplacementRaceWithNaturalExitLaunchesOneRestarter(t *testing.T) {
+	supervisor, _, wedged, current, _ := stalledWorkingSession(t, nil)
+	defer supervisor.Shutdown()
+
+	var launchMu sync.Mutex
+	launches := 0
+	supervisor.testHookRestartLaunched = func() {
+		launchMu.Lock()
+		launches++
+		launchMu.Unlock()
+	}
+	deathHandled := make(chan string, 2)
+	supervisor.testHookDeathHandled = func(classification string) { deathHandled <- classification }
+	// Hold every restarter in construction so the wedge's death is classified while
+	// the wedge is still resident and its restart already claimed — pinning the
+	// interleaving the race row must prove. baseCtx-aware so a deferred Shutdown
+	// still drains any (erroneously) leaked restarter.
+	release := make(chan struct{})
+	baseCtx := supervisor.baseCtx
+	supervisor.restartSleep = func(time.Duration) {
+		select {
+		case <-release:
+		case <-baseCtx.Done():
+		}
+	}
+
+	// The wedged runtime also crashes naturally (transient: not a deliberate Stop).
+	wedged.setExitInfo(RuntimeExitInfo{ExitCode: 1})
+	// Pending work triggers the stall-replacement: it claims restartPending and
+	// launches exactly one restarter (which now blocks in restartSleep).
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "wedged work", "for-me:v9", ""); err != nil {
+		t.Fatalf("schedule on stalled: %v", err)
+	}
+	// Deliver the natural death to the wedge's consumeEvents. Its transient branch
+	// must see restartPending already claimed and defer — launching NO second
+	// restarter.
+	close(wedged.events)
+	select {
+	case <-deathHandled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the wedge's death was never handled by consumeEvents")
+	}
+	launchMu.Lock()
+	got := launches
+	launchMu.Unlock()
+	if got != 1 {
+		t.Fatalf("natural-exit vs stall race must launch exactly one restarter, got %d", got)
+	}
+	// Let the single restarter finish and publish the replacement.
+	close(release)
+	waitSessionLive(t, supervisor, "agent_1")
+}
+
+// Item #5 stall replacement, row 5 (Thomas): Shutdown must cancel and JOIN a
+// stall-replacement whose construction is still in flight before returning —
+// the replacement worker is tracked in constructionWG like every other
+// construction, so no blocked replacement is left running past teardown.
+func TestAgentSessionStalledReplacementIsDrainedByShutdown(t *testing.T) {
+	supervisor, _, wedged, current, _ := stalledWorkingSession(t, nil)
+	// Block the stall-replacement in construction; baseCtx-aware so Shutdown's
+	// baseCancel unblocks it (the join must not deadlock).
+	baseCtx := supervisor.baseCtx
+	entered := make(chan struct{}, 1)
+	supervisor.restartSleep = func(time.Duration) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-baseCtx.Done()
+	}
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "wedged work", "for-me:v9", ""); err != nil {
+		t.Fatalf("schedule on stalled: %v", err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the stall-replacement restarter never entered construction")
+	}
+	done := make(chan struct{})
+	go func() {
+		supervisor.Shutdown()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Shutdown did not cancel+join the blocked stall-replacement")
+	}
+	wedged.mu.Lock()
+	stopped := wedged.stopped
+	wedged.mu.Unlock()
+	if !stopped {
+		t.Fatal("the wedged process must be stopped by shutdown")
+	}
+}
+
 func waitProcessStopped(t *testing.T, p *fakeRuntimeProcess) {
 	t.Helper()
 	deadline := time.After(2 * time.Second)

@@ -54,6 +54,11 @@ type agentSessionSupervisor struct {
 	// the classification. Test seam only.
 	testHookDeathHandled func(classification string)
 
+	// testHookRestartLaunched, when set, fires each time launchRestartWorker
+	// actually launches a restart worker — used to prove the single-owner claim
+	// launches exactly one restarter under a natural-exit-vs-stall race. Test seam.
+	testHookRestartLaunched func()
+
 	// shutdownOnce guards Shutdown so its teardown (baseCtx cancel, session stop,
 	// construction drain, status stop) runs exactly once even if Shutdown is
 	// called multiple times (the #145 idempotency invariant).
@@ -1322,6 +1327,9 @@ func (s *agentSessionSupervisor) launchRestartWorker(agentID string, process Run
 	s.mu.Unlock()
 	if !launch {
 		return
+	}
+	if s.testHookRestartLaunched != nil {
+		s.testHookRestartLaunched()
 	}
 	go func() {
 		defer s.constructionWG.Done()
