@@ -1,6 +1,7 @@
 import { test, expect, type Locator, type Page, type TestInfo } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { dismissOnboarding } from "../utils";
 
 type Seed = {
   email: string;
@@ -22,9 +23,11 @@ async function loginToWorkspace(page: Page, seed: Seed): Promise<void> {
   await page.locator('input[type="email"]').first().fill(seed.email);
   await page.locator('input[type="password"]').first().fill(seed.password);
   await page.getByRole("button", { name: /^log in$/i }).click();
-  await expect(page.getByLabel("Workspace")).toBeVisible({ timeout: 20_000 });
-  await page.getByLabel("Workspace").selectOption(seed.slugA);
+  const workspacePicker = page.getByLabel("Workspace", { exact: true });
+  await expect(workspacePicker).toBeVisible({ timeout: 20_000 });
+  await workspacePicker.selectOption(seed.slugA);
   await expect(page).toHaveURL(new RegExp(seed.slugA));
+  await dismissOnboarding(page);
 }
 
 async function publishCurrentUserPresence(page: Page, seed: Seed): Promise<void> {
@@ -52,6 +55,7 @@ async function createDocument(page: Page, content: string): Promise<Locator> {
   await page.getByRole("button", { name: "New document" }).click();
   const editor = page.locator(".cm-editor").first();
   await expect(editor).toBeVisible({ timeout: 20_000 });
+  await dismissOnboarding(page);
   await editor.click();
   if (content.includes("\n")) {
     await page.keyboard.insertText(content);
@@ -156,6 +160,7 @@ test("thread popover: marker → detail → reply persists through a real reload
   await expect(detail.locator(".thread-popover-message-body").getByText(reply, { exact: true })).toBeVisible({ timeout: 20_000 });
 
   await page.reload();
+  await dismissOnboarding(page);
   await expect(editor).toBeVisible({ timeout: 20_000 });
   await expect(editor).toContainText("thread popover regression", { timeout: 20_000 });
   await expect(page.locator(".doc-meta-row .chip.ok")).toBeVisible({ timeout: 15_000 });

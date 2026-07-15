@@ -1,6 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { dismissOnboarding } from "../utils";
 
 type Seed = {
   email: string; password: string;
@@ -36,21 +37,25 @@ test("core flow: load → auth → switch A↔B (idle B) → open document, no p
   //    most-recently-created workspace (B here), so normalize to A via the real switcher before the flow —
   //    this makes the A→B switch in step 2 the controlled starting point regardless of default-landing order.
   await login(page, seed);
-  await expect(page.getByLabel("Workspace")).toBeVisible({ timeout: 20_000 });
-  await page.getByLabel("Workspace").selectOption(seed.slugA);
+  const workspacePicker = page.getByLabel("Workspace", { exact: true });
+  await expect(workspacePicker).toBeVisible({ timeout: 20_000 });
+  await workspacePicker.selectOption(seed.slugA);
   await expect(page).toHaveURL(new RegExp(seed.slugA));
   await expect(page.locator(".workspace-switcher b").first()).toContainText(seed.nameA);
+  await dismissOnboarding(page);
 
   // 2. Switch A→B where B is fully idle — the white-screen incident, walked. Assert the navigation itself
   //    (URL slug + B-name header marker), not just the absence of a crash, so both failure modes are caught.
-  await page.getByLabel("Workspace").selectOption(seed.slugB);
+  await workspacePicker.selectOption(seed.slugB);
   await expect(page).toHaveURL(new RegExp(seed.slugB));
   await expect(page.locator(".workspace-switcher b").first()).toContainText(seed.nameB);
+  await dismissOnboarding(page);
 
   // 3. Switch back B→A (symmetric).
-  await page.getByLabel("Workspace").selectOption(seed.slugA);
+  await workspacePicker.selectOption(seed.slugA);
   await expect(page).toHaveURL(new RegExp(seed.slugA));
   await expect(page.locator(".workspace-switcher b").first()).toContainText(seed.nameA);
+  await dismissOnboarding(page);
 
   // 4. Create a document via the real "New document" action → the CodeMirror editor mounts, then type a line
   //    and assert it renders. A document's path lives in the workspace root-namespace CRDT and its text in the
@@ -59,6 +64,7 @@ test("core flow: load → auth → switch A↔B (idle B) → open document, no p
   await page.getByRole("button", { name: "New document" }).click();
   const editor = page.locator(".cm-editor").first();
   await expect(editor).toBeVisible({ timeout: 20_000 });
+  await dismissOnboarding(page);
   await editor.click();
   await page.keyboard.type("smoke content line");
   await expect(editor).toContainText("smoke content line");
@@ -80,13 +86,17 @@ test("false-orphan pin: a healthy-anchored thread shows no 'anchor lost' after r
   failOnPageError(page, errors);
 
   await login(page, seed);
-  await expect(page.getByLabel("Workspace")).toBeVisible({ timeout: 20_000 });
-  await page.getByLabel("Workspace").selectOption(seed.slugA);
+  const workspacePicker = page.getByLabel("Workspace", { exact: true });
+  await expect(workspacePicker).toBeVisible({ timeout: 20_000 });
+  await workspacePicker.selectOption(seed.slugA);
+  await expect(page).toHaveURL(new RegExp(seed.slugA));
+  await dismissOnboarding(page);
 
   // Create a document with real content, then anchor a thread to a selected range of it.
   await page.getByRole("button", { name: "New document" }).click();
   const editor = page.locator(".cm-editor").first();
   await expect(editor).toBeVisible({ timeout: 20_000 });
+  await dismissOnboarding(page);
   await editor.click();
   await page.keyboard.type("anchored content for a healthy thread");
   // Wait for the document to report synced before creating the anchor, so the relative position is written
@@ -105,6 +115,7 @@ test("false-orphan pin: a healthy-anchored thread shows no 'anchor lost' after r
   // window the false-orphan bug lived in. Once the content is back and the doc reports synced, the healthy
   // thread must show NO orphan warning (pre-#100 it stuck on "⚠ anchor lost" against the pre-sync empty doc).
   await page.reload();
+  await dismissOnboarding(page);
   await expect(editor).toBeVisible({ timeout: 20_000 });
   await expect(editor).toContainText("anchored content for a healthy thread", { timeout: 20_000 });
   await expect(page.locator(".doc-meta-row .chip.ok")).toBeVisible({ timeout: 15_000 });
