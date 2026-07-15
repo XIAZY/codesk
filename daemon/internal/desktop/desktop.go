@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"notty/daemon/internal/syncer"
 	"path/filepath"
+	"strings"
 )
 
 const SecretKeyDaemonToken = "codesk:daemon-token"
@@ -37,14 +38,22 @@ type Dirs struct {
 }
 
 func (d Dirs) Validate() error {
-	if d.Data == "" {
-		return fmt.Errorf("desktop: data directory is empty")
+	if err := requireAbsolute("data", d.Data); err != nil {
+		return err
 	}
-	if d.Logs == "" {
-		return fmt.Errorf("desktop: logs directory is empty")
+	if err := requireAbsolute("logs", d.Logs); err != nil {
+		return err
 	}
-	if d.Cache == "" {
-		return fmt.Errorf("desktop: cache directory is empty")
+	return requireAbsolute("cache", d.Cache)
+}
+
+func requireAbsolute(name, path string) error {
+	cleaned := strings.TrimSpace(path)
+	if cleaned == "" {
+		return fmt.Errorf("desktop: %s directory is empty", name)
+	}
+	if !filepath.IsAbs(cleaned) {
+		return fmt.Errorf("desktop: %s directory %q is not absolute", name, path)
 	}
 	return nil
 }
@@ -55,7 +64,10 @@ func errNoAppDir(reason string) error {
 
 var ErrUnsupportedPlatform = errors.New("desktop: unsupported platform")
 
-func SyncerConfig(dirs Dirs, backendURL, workspaceID, daemonToken, daemonVersion string) syncer.Config {
+func SyncerConfig(dirs Dirs, backendURL, workspaceID, daemonToken, daemonVersion string) (syncer.Config, error) {
+	if err := dirs.Validate(); err != nil {
+		return syncer.Config{}, err
+	}
 	return syncer.Config{
 		BackendURL:         backendURL,
 		WorkspaceID:        workspaceID,
@@ -64,5 +76,5 @@ func SyncerConfig(dirs Dirs, backendURL, workspaceID, daemonToken, daemonVersion
 		DataDir:            dirs.Data,
 		WorkspaceDir:       filepath.Join(dirs.Data, "workspace"),
 		AgentWorkspaceRoot: filepath.Join(dirs.Data, "agents"),
-	}
+	}, nil
 }
