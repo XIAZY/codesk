@@ -1,6 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { dismissOnboarding } from "../utils";
 
 type Seed = {
   email: string; password: string;
@@ -37,12 +38,16 @@ test("watchers popover: top-bar entry replaces the Participants rail tab and is 
   failOnPageError(page, errors);
 
   await login(page, seed);
-  await expect(page.getByLabel("Workspace")).toBeVisible({ timeout: 20_000 });
-  await page.getByLabel("Workspace").selectOption(seed.slugA);
+  const workspacePicker = page.getByLabel("Workspace", { exact: true });
+  await expect(workspacePicker).toBeVisible({ timeout: 20_000 });
+  await workspacePicker.selectOption(seed.slugA);
+  await expect(page).toHaveURL(new RegExp(seed.slugA));
+  await dismissOnboarding(page);
 
   // A document to scope the popover to (its content is written through the editor — the faithful product path).
   await page.getByRole("button", { name: "New document" }).click();
   await expect(page.locator(".cm-editor").first()).toBeVisible({ timeout: 20_000 });
+  await dismissOnboarding(page);
 
   // The right rail is gone entirely (kill-the-sidebar finish) — no .ctx / .ctx-tabs anywhere.
   await expect(page.locator(".ctx-tabs")).toHaveCount(0);

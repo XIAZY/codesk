@@ -8,6 +8,7 @@ import { ApiError, publicOrigin } from "./api";
 import { emptyWorkspace, identifierFromName, identifierHelpText, identifierPattern, workspaceSlugMaxLength } from "./logic";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
 import type { Account, Agent, AgentRun, Daemon, DocumentItem, WorkspaceState, WorkspaceSummary } from "./types";
+import appSource from "./App.tsx?raw";
 
 function workspaceFixture(overrides: Partial<WorkspaceState> = {}): WorkspaceState {
   return {
@@ -95,7 +96,7 @@ describe("WorkspaceOnboarding", () => {
       />
     );
 
-    expect(screen.getByRole("heading", { name: "Create a workspace" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Create your first workspace" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Join with invite link" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Join with invite link" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Choose a workspace" })).toBeNull();
@@ -136,8 +137,8 @@ describe("WorkspaceOnboarding", () => {
     );
 
     const name = screen.getByLabelText("Workspace name") as HTMLInputElement;
-    const slug = screen.getByLabelText("Workspace slug") as HTMLInputElement;
-    const handle = screen.getByLabelText("Your handle in this workspace") as HTMLInputElement;
+    const slug = screen.getByLabelText("Workspace address") as HTMLInputElement;
+    const handle = screen.getByLabelText("Your handle") as HTMLInputElement;
 
     expect(name.value).toBe("");
     expect(slug.value).toBe("");
@@ -175,7 +176,7 @@ describe("WorkspaceOnboarding", () => {
     );
 
     await user.type(screen.getByLabelText("Workspace name"), "Research Lab");
-    await user.click(screen.getByRole("button", { name: "Create and enter" }));
+    await user.click(screen.getByRole("button", { name: "Create workspace" }));
 
     await waitFor(() => expect(createWorkspace).toHaveBeenCalledWith({ name: "Research Lab", slug: "research-lab", handle: "owner" }));
     expect(onWorkspaces).toHaveBeenCalledWith([created]);
@@ -199,7 +200,7 @@ describe("WorkspaceOnboarding", () => {
     );
 
     await user.type(screen.getByLabelText("Workspace name"), "Research Lab");
-    await user.click(screen.getByRole("button", { name: "Create and enter" }));
+    await user.click(screen.getByRole("button", { name: "Create workspace" }));
 
     expect(await screen.findByText("Workspace slug is already taken.")).toBeTruthy();
     expect(onSelect).not.toHaveBeenCalled();
@@ -219,7 +220,7 @@ describe("WorkspaceOnboarding", () => {
     );
 
     const name = screen.getByLabelText("Workspace name") as HTMLInputElement;
-    const slug = screen.getByLabelText("Workspace slug") as HTMLInputElement;
+    const slug = screen.getByLabelText("Workspace address") as HTMLInputElement;
 
     await user.click(screen.getByLabelText("Generate a random name"));
 
@@ -241,7 +242,7 @@ describe("WorkspaceOnboarding", () => {
       />
     );
 
-    const slug = screen.getByLabelText("Workspace slug") as HTMLInputElement;
+    const slug = screen.getByLabelText("Workspace address") as HTMLInputElement;
 
     await user.type(slug, "custom_slug");
     await user.click(screen.getByLabelText("Generate a random name"));
@@ -267,7 +268,7 @@ describe("WorkspaceOnboarding", () => {
     expect(name.value).toBe("");
     expect(name.hasAttribute("required")).toBe(true);
 
-    await user.click(screen.getByRole("button", { name: "Create and enter" }));
+    await user.click(screen.getByRole("button", { name: "Create workspace" }));
 
     expect(createWorkspace).not.toHaveBeenCalled();
   });
@@ -504,8 +505,8 @@ describe("CreateDaemonModal install status", () => {
     await user.click(screen.getByRole("button", { name: "Create local environment" }));
 
     // Local environment created but has not checked in yet: the chip must say waiting.
-    expect(await screen.findByText("Waiting for local environment to check in…")).toBeTruthy();
-    expect(screen.queryByText("Local environment connected")).toBeNull();
+    expect(await screen.findByText("Install command ready. Run it in a terminal on the target computer — Codesk detects the connection automatically.")).toBeTruthy();
+    expect(screen.queryByText("Local environment connected. You can create an agent now.")).toBeNull();
     const unixButton = screen.getByRole("button", { name: "macOS / Linux" });
     const windowsButton = screen.getByRole("button", { name: "Windows" });
     expect(unixButton.getAttribute("aria-pressed")).toBe("true");
@@ -522,8 +523,34 @@ describe("CreateDaemonModal install status", () => {
       <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[{ ...daemonFixtures.justSeen, id: "daemon_new", name: "Local daemon" }]} onClose={vi.fn()} onDone={vi.fn()} />
     );
 
-    expect(screen.getByText("Local environment connected")).toBeTruthy();
-    expect(screen.queryByText("Waiting for local environment to check in…")).toBeNull();
+    expect(screen.getByText("Local environment connected. You can create an agent now.")).toBeTruthy();
+    expect(screen.queryByText("Install command ready. Run it in a terminal on the target computer — Codesk detects the connection automatically.")).toBeNull();
+  });
+
+  it("shows waiting, not failure, for a freshly created daemon that has never checked in", async () => {
+    const user = userEvent.setup();
+    const created: Daemon = { ...daemonFixtures.neverSeen, id: "daemon_new", name: "Local daemon" };
+    const api = { createDaemon: vi.fn().mockResolvedValue({ daemon: created, token: "nottyd_secret" }) };
+
+    const { rerender } = render(
+      <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />
+    );
+    await user.click(screen.getByRole("button", { name: "Create local environment" }));
+
+    // A never-seen daemon reads as "disconnected" on the wire (zero-time lastSeenAt) but the user
+    // hasn't run the install command yet — it must show Waiting, never accuse them of a failed run.
+    rerender(
+      <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[created]} onClose={vi.fn()} onDone={vi.fn()} />
+    );
+    expect(screen.getByText(/Install command ready/)).toBeTruthy();
+    expect(screen.queryByText(/No connection yet/)).toBeNull();
+
+    // Once it has genuinely checked in and then gone offline, the failure line is the honest state.
+    rerender(
+      <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[{ ...daemonFixtures.dead, id: "daemon_new", name: "Local daemon" }]} onClose={vi.fn()} onDone={vi.fn()} />
+    );
+    expect(screen.getByText(/No connection yet/)).toBeTruthy();
+    expect(screen.queryByText(/Install command ready/)).toBeNull();
   });
 });
 
@@ -924,5 +951,91 @@ describe("AgentDetailModal live status", () => {
     // agent.deleted FILTERS the agent out of workspace.agents (unlike daemons' soft-delete upsert).
     rerender(<AgentDetailModal {...props} agents={[]} runs={[run("running")]} onClose={onClose} />);
     expect(onClose).toHaveBeenCalled();
+  });
+});
+
+describe("Onboarding anchor audit", () => {
+  const ONBOARDING_ANCHORS = [
+    "create-document",
+    "connect-local-env",
+    "new-document",
+    "new-agent",
+    "document-threads",
+    "document-watchers",
+    "document-more",
+    "selection-thread",
+  ] as const;
+
+  it("every onboarding anchor ID appears exactly once in App.tsx source", () => {
+    const source: string = appSource;
+    for (const id of ONBOARDING_ANCHORS) {
+      const pattern = `data-onboarding-id="${id}"`;
+      const count = source.split(pattern).length - 1;
+      expect(count, `anchor "${id}" must appear exactly once in App.tsx, found ${count}`).toBe(1);
+    }
+  });
+
+  it("empty workspace renders create-document and connect-local-env anchors", () => {
+    workspaceMock = workspaceFixture({ rootDocumentId: "" });
+    rootDocumentsMock = [];
+    render(
+      <WorkspaceApp
+        api={{ updateLastAccessed: vi.fn().mockResolvedValue({}) } as never}
+        token="token"
+        workspaceId="ws"
+        workspaceSlug="workspace"
+        view={{ kind: "home" }}
+        account={{ id: "account_1", email: "you@example.com", displayName: "You" }}
+        workspaces={[{ id: "ws", slug: "workspace", name: "Workspace" }]}
+        onAccess={vi.fn()}
+        onWorkspaceChange={vi.fn()}
+        onSignOut={vi.fn()}
+      />,
+    );
+
+    expect(document.querySelector('[data-onboarding-id="create-document"]')).toBeTruthy();
+    expect(document.querySelector('[data-onboarding-id="connect-local-env"]')).toBeTruthy();
+  });
+
+  it("workspace with documents renders the new-document sidebar anchor", () => {
+    render(
+      <WorkspaceApp
+        api={{ updateLastAccessed: vi.fn().mockResolvedValue({}) } as never}
+        token="token"
+        workspaceId="ws"
+        workspaceSlug="workspace"
+        view={{ kind: "home" }}
+        account={{ id: "account_1", email: "you@example.com", displayName: "You" }}
+        workspaces={[{ id: "ws", slug: "workspace", name: "Workspace" }]}
+        onAccess={vi.fn()}
+        onWorkspaceChange={vi.fn()}
+        onSignOut={vi.fn()}
+      />,
+    );
+
+    expect(document.querySelector('[data-onboarding-id="new-document"]')).toBeTruthy();
+  });
+
+  it("agents management panel renders the new-agent anchor", async () => {
+    const user = userEvent.setup();
+    render(
+      <WorkspaceApp
+        api={{ updateLastAccessed: vi.fn().mockResolvedValue({}) } as never}
+        token="token"
+        workspaceId="ws"
+        workspaceSlug="workspace"
+        view={{ kind: "home" }}
+        account={{ id: "account_1", email: "you@example.com", displayName: "You" }}
+        workspaces={[{ id: "ws", slug: "workspace", name: "Workspace" }]}
+        onAccess={vi.fn()}
+        onWorkspaceChange={vi.fn()}
+        onSignOut={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Manage / Settings" }));
+    await user.click(screen.getByRole("button", { name: "Agents" }));
+
+    expect(document.querySelector('[data-onboarding-id="new-agent"]')).toBeTruthy();
   });
 });

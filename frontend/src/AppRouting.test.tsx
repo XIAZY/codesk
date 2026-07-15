@@ -406,7 +406,7 @@ describe("App URL routing", () => {
     render(<App />);
 
     expect(await screen.findByText("Invited Workspace")).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Join workspace" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Join Invited Workspace" })).toBeTruthy();
     expect(window.location.pathname).toBe("/invite/new123");
 
     await user.type(screen.getByLabelText("Email"), "owner@example.com");
@@ -542,9 +542,9 @@ describe("App URL routing", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Create a workspace" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Create your first workspace" })).toBeTruthy();
     await user.type(screen.getByLabelText("Workspace name"), "Product Workspace");
-    await user.click(screen.getByRole("button", { name: "Create and enter" }));
+    await user.click(screen.getByRole("button", { name: "Create workspace" }));
     await waitFor(() => expect(window.location.pathname).toBe("/w/product-workspace"));
 
     await user.click(screen.getByRole("button", { name: /Create your first doc/ }));

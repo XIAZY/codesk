@@ -18,6 +18,7 @@ import {
   activityCategory,
   relativeTime,
   daemonStatus,
+  hasGenuineCheckIn,
   daemonLiveStatus,
   handleMaxLength,
   handleMinLength,
@@ -40,6 +41,10 @@ import { navigate, useRoute } from "./useRoute";
 import { useRootNamespace } from "./useRootNamespace";
 import { useDocumentSync } from "./useDocument";
 import { useWorkspace } from "./useWorkspace";
+import { Onboarding, type OnboardingActionEvent, type OnboardingPresentation } from "./Onboarding";
+import { OnboardingChecklist } from "./OnboardingChecklist";
+import { useOnboardingController } from "./onboardingController";
+import type { OnboardingRole } from "./onboarding";
 import type { Account, ActivityEvent, Agent, Daemon, DocumentItem, ThreadItem, UserItem, WorkspaceInvitePreview, WorkspaceState, WorkspaceSummary } from "./types";
 import { resolveRuntimeTiles, selectableRuntimeKinds, type RuntimeTile } from "./runtimes";
 import "./styles.css";
@@ -47,6 +52,13 @@ import "./styles.css";
 const tokenStorageKey = "codesk.auth.token";
 const portableFileNameIllegalChars = /[\u0000-\u001F<>:"\/\\|?*]/g;
 const windowsReservedBaseName = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+
+export function shouldRenderOnboardingChecklist(
+  namespaceReady: boolean,
+  activePresentation: OnboardingPresentation | null | undefined,
+): boolean {
+  return namespaceReady && activePresentation !== "spotlight";
+}
 
 function clearLegacyClientStorage() {
   for (let index = localStorage.length - 1; index >= 0; index -= 1) {
@@ -645,7 +657,7 @@ function InvitePage({
         api={api}
         mode="login"
         onAuth={onAuth}
-        title="Join workspace"
+        title={`Join ${preview.workspace.name}`}
         copy="Log in or create an account to accept this invite."
         preserveRoute
       >
@@ -688,7 +700,9 @@ function InvitePage({
       <section className="card p-24 auth-panel">
         <Logo />
         {previewCard}
-        <h1 className="auth-title">Join workspace</h1>
+        <h1 className="auth-title">Join {preview.workspace.name}</h1>
+        <p className="small muted">You'll join this project and share its documents and discussions with the team and its agents.</p>
+        <p className="tiny muted">This invitation expires in {relativeInviteExpiry(preview.expiresAt)}.</p>
         <form onSubmit={accept} className="form-stack">
           <label className="field">
             <span className="lab">Your handle in this workspace</span>
@@ -702,7 +716,7 @@ function InvitePage({
               title={identifierHelpText}
               required
             />
-            <span className="hint">{identifierHelpText}</span>
+            <span className="hint">This is how teammates and agents mention you here — unique to this workspace. {identifierHelpText}</span>
           </label>
           {joinError ? <p className="error-text">{joinError}</p> : null}
           <button className="btn accent full lg" disabled={joining}>{joining ? "Joining..." : "Join workspace"}</button>
@@ -734,6 +748,24 @@ function formatInviteDate(value: string) {
     return "soon";
   }
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date);
+}
+
+function relativeInviteExpiry(value: string) {
+  const date = new Date(value);
+  const ms = date.valueOf() - Date.now();
+  if (Number.isNaN(date.valueOf()) || ms <= 0) {
+    return "soon";
+  }
+  const minutes = Math.round(ms / 60000);
+  if (minutes < 60) {
+    return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  }
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) {
+    return `${hours} hour${hours === 1 ? "" : "s"}`;
+  }
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"}`;
 }
 
 export function AuthScreen({
@@ -1081,8 +1113,8 @@ export function WorkspaceOnboarding({
           <button className="btn ghost sm" onClick={onSignOut}>Sign out</button>
         </div>
         <div className="picker-head">
-          <h1 className="auth-title">Create a workspace</h1>
-          <p className="small muted">Workspaces are where documents, local environments, agents, and members live.</p>
+          <h1 className="auth-title">Create your first workspace</h1>
+          <p className="small muted">A workspace is the shared home for one project or team. Documents, members, local files, and agents all live here.</p>
         </div>
         <CreateWorkspaceForm
           api={api}
@@ -1140,14 +1172,11 @@ function CreateWorkspaceForm({
 
   return (
     <form onSubmit={createWorkspace} className="form-stack create-workspace-card">
-      <div>
-        <h2 className="modal-title">Create workspace</h2>
-        <p className="small muted">You will become the workspace owner.</p>
-      </div>
       <label className="field">
         <span className="lab">Workspace name</span>
         <div className="name-row">
           <input
+            aria-label="Workspace name"
             value={name}
             placeholder="ACME Inc"
             onChange={(event) => {
@@ -1169,29 +1198,33 @@ function CreateWorkspaceForm({
             <Icon name="refresh" />
           </button>
         </div>
+        <span className="hint">Use a project, team, or client name. You can change it later.</span>
       </label>
       <label className="field">
-        <span className="lab">Workspace slug</span>
-        <input
-          aria-label="Workspace slug"
-          value={slug}
-          placeholder="acme-inc"
-          onChange={(event) => {
-            setSlug(event.target.value);
-            setSlugEdited(true);
-          }}
-          pattern={identifierPattern}
-          minLength={workspaceSlugMinLength}
-          maxLength={workspaceSlugMaxLength}
-          title={identifierHelpText}
-          required
-        />
-        <span className="hint">{identifierHelpText}</span>
+        <span className="lab">Workspace address</span>
+        <div className="address-row">
+          <span className="address-prefix">codesk.co/</span>
+          <input
+            aria-label="Workspace address"
+            value={slug}
+            placeholder="acme-inc"
+            onChange={(event) => {
+              setSlug(event.target.value);
+              setSlugEdited(true);
+            }}
+            pattern={identifierPattern}
+            minLength={workspaceSlugMinLength}
+            maxLength={workspaceSlugMaxLength}
+            title={identifierHelpText}
+            required
+          />
+        </div>
+        <span className="hint">This becomes the link people use to reach the workspace.</span>
       </label>
       <label className="field">
-        <span className="lab">Your handle in this workspace</span>
+        <span className="lab">Your handle</span>
         <input
-          aria-label="Your handle in this workspace"
+          aria-label="Your handle"
           value={handle}
           onChange={(event) => setHandle(event.target.value)}
           pattern={identifierPattern}
@@ -1200,10 +1233,10 @@ function CreateWorkspaceForm({
           title={identifierHelpText}
           required
         />
-        <span className="hint">{identifierHelpText}</span>
+        <span className="hint">Teammates and agents mention you by this. {identifierHelpText}</span>
       </label>
       {error ? <p className="error-text">{error}</p> : null}
-      <button className="btn accent full lg">Create and enter</button>
+      <button className="btn accent full lg">Create workspace</button>
     </form>
   );
 }
@@ -1496,6 +1529,40 @@ export function WorkspaceApp({
   const currentWorkspaceUserHandle = currentWorkspaceUser?.handle ? `@${currentWorkspaceUser.handle}` : "Workspace user";
   const currentWorkspaceUserIdentity = currentWorkspaceUser?.handle || currentWorkspaceUser?.name || "Workspace user";
   const canInviteMembers = workspace.currentMembershipRole === "owner" || workspace.currentMembershipRole === "admin";
+
+  // --- Onboarding (Batch 1 wiring) --------------------------------------------
+  // selectionActive is lifted from DocumentEditor (below) so the account-scoped
+  // first-selection tip can trigger; openThreadDraftRequest is the parent->editor
+  // signal the tip's "Start thread" action fires (mirrors the formatRequest idiom).
+  const [selectionActive, setSelectionActive] = useState(false);
+  const [openThreadDraftRequest, setOpenThreadDraftRequest] = useState(0);
+  const onboardingRole: OnboardingRole =
+    workspace.currentMembershipRole === "owner" || workspace.currentMembershipRole === "admin"
+      ? workspace.currentMembershipRole
+      : "member";
+  const onboarding = useOnboardingController({
+    enabled: rootNamespace.ready,
+    accountId: account?.id ?? "",
+    workspaceId,
+    roles: [onboardingRole],
+    route: view.kind,
+    selectionActive,
+    workspaceState: workspace,
+    documentCount: rootDocuments.length,
+    // No workspace-wide agent-watcher count exists in Batch 1 (subscribers are fetched
+    // per open document via useDocumentSubscribers), so "put an agent to work" derives
+    // from the agent-run / agent-thread signals; the watcher leg lands with Batch 2's
+    // Watchers/Activity work.
+    watchedDocumentCount: 0,
+    nowMs: now,
+  });
+  const recordOnboardingEvent = onboarding.record;
+  const handleOnboardingAction = useCallback((event: OnboardingActionEvent) => {
+    if (event === "open-thread-draft") {
+      setOpenThreadDraftRequest((request) => request + 1);
+    }
+  }, []);
+
   const documentOpenThreadCount = useMemo(
     () => documentThreads.filter((thread) => (
       thread.status !== "resolved" && !threadIsObsolete(thread, threadAnchorInfo)
@@ -1818,6 +1885,7 @@ export function WorkspaceApp({
       setFreshDocumentId(doc.id);
       setTitleDraft(fileName(path));
       void reload();
+      recordOnboardingEvent("first_document_created", "workspace");
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -1827,6 +1895,7 @@ export function WorkspaceApp({
     activeDocument?.path,
     api,
     creatingDocument,
+    recordOnboardingEvent,
     reload,
     rootDocuments,
     rootNamespace,
@@ -1939,6 +2008,7 @@ export function WorkspaceApp({
               className="btn ghost icon sm"
               title="New doc"
               aria-label="New document"
+              data-onboarding-id="new-document"
               type="button"
               onClick={() => void createDocument()}
               disabled={creatingDocument || !workspace.rootDocumentId}
@@ -2054,6 +2124,7 @@ export function WorkspaceApp({
                   ref={documentThreadsTriggerRef}
                   className={`btn sm document-threads-trigger ${documentThreadsOpen ? "selected" : "ghost"}`}
                   type="button"
+                  data-onboarding-id="document-threads"
                   aria-label={`Threads, ${documentOpenThreadCount} open`}
                   aria-haspopup="dialog"
                   aria-expanded={documentThreadsOpen}
@@ -2118,6 +2189,7 @@ export function WorkspaceApp({
                   ref={documentWatchersTriggerRef}
                   className={`btn sm document-watchers-trigger ${documentWatchersOpen ? "selected" : "ghost"}`}
                   type="button"
+                  data-onboarding-id="document-watchers"
                   aria-label={documentWatcherCount === null ? "Watchers" : `Watchers, ${documentWatcherCount} watching`}
                   aria-haspopup="dialog"
                   aria-expanded={documentWatchersOpen}
@@ -2179,6 +2251,7 @@ export function WorkspaceApp({
                 ref={documentMoreTriggerRef}
                 className={`btn sm ghost icon document-more-trigger ${moreMenuOpen || documentActivityOpen ? "selected" : ""}`}
                 type="button"
+                data-onboarding-id="document-more"
                 onClick={() => {
                   if (moreMenuOpen) {
                     closeMoreMenu(false);
@@ -2268,6 +2341,9 @@ export function WorkspaceApp({
             onFocusThreadHandled={() => setFocusThreadId("")}
             onThreadCreated={() => {
               void reload();
+              // Account-scoped so "has used threads" survives a workspace switch — the
+              // account-durable completion leg of the first-selection tip (plan §4.3).
+              onboarding.record("first_thread_created", "account");
             }}
             onThreadsChanged={() => void reload()}
             titleEditing={renamingDocumentId === activeDocument.id}
@@ -2277,6 +2353,8 @@ export function WorkspaceApp({
             onTitleEditCancel={cancelRenamingDocument}
             onTitleCommit={(draft) => commitDocumentTitle(activeDocument, draft)}
             onThreadAnchorInfo={setThreadAnchorInfo}
+            onSelectionActiveChange={setSelectionActive}
+            openThreadDraftRequest={openThreadDraftRequest}
           />
         ) : rootNamespace.ready && rootDocuments.length ? (
           <div className="notice compact">Opening document...</div>
@@ -2340,6 +2418,25 @@ export function WorkspaceApp({
           onWorkspaceSaved={(updatedWorkspace) => {
             onWorkspaceUpdated(updatedWorkspace);
           }}
+          onMemberInvited={() => onboarding.record("member_invited", "workspace")}
+        />
+      ) : null}
+      {onboarding.active ? (
+        <Onboarding
+          step={onboarding.active}
+          stepIndex={onboarding.stepIndex}
+          total={onboarding.total}
+          onNext={onboarding.next}
+          onBack={onboarding.back}
+          onSkip={onboarding.skip}
+          onAction={handleOnboardingAction}
+        />
+      ) : null}
+      {shouldRenderOnboardingChecklist(rootNamespace.ready, onboarding.active?.presentation) ? (
+        <OnboardingChecklist
+          progress={onboarding.checklist}
+          dismissed={onboarding.checklistDismissed}
+          onDismiss={onboarding.dismissChecklist}
         />
       ) : null}
     </main>
@@ -2689,7 +2786,7 @@ function AgentsManagement({
             <div className="small muted">Codex collaborators in this workspace. Each is owned by a local environment.</div>
           </div>
           <div className="row gap-6">
-            <button className="btn accent" type="button" onClick={onNew}>
+            <button className="btn accent" type="button" data-onboarding-id="new-agent" onClick={onNew}>
               <Icon name="plus" />
               New agent
             </button>
@@ -3159,6 +3256,8 @@ export function DocumentEditor({
   onTitleEditCancel,
   onTitleCommit,
   onThreadAnchorInfo,
+  onSelectionActiveChange,
+  openThreadDraftRequest,
 }: {
   api: ApiClient;
   token: string;
@@ -3178,6 +3277,8 @@ export function DocumentEditor({
   onTitleEditCancel: () => void;
   onTitleCommit: (value: string) => void;
   onThreadAnchorInfo: (info: ThreadAnchorInfo) => void;
+  onSelectionActiveChange?: (active: boolean) => void;
+  openThreadDraftRequest?: number;
 }) {
   const draftRef = useRef<HTMLTextAreaElement | null>(null);
   const [selection, setSelection] = useState<SurfaceSelection | null>(null);
@@ -3235,6 +3336,27 @@ export function DocumentEditor({
     setThreadBody("");
     setFormatRequest(null);
   }, [document.id, document.path]);
+
+  // Report live text-selection presence up to WorkspaceApp so the account-scoped
+  // first-selection onboarding tip can trigger; reset on unmount so leaving the
+  // document view clears the signal.
+  useEffect(() => {
+    onSelectionActiveChange?.(hasRangeSelection);
+  }, [hasRangeSelection, onSelectionActiveChange]);
+  useEffect(() => () => onSelectionActiveChange?.(false), [onSelectionActiveChange]);
+
+  // The onboarding tip's "Start thread" action bumps openThreadDraftRequest; open the
+  // draft for the current selection once per bump (ref-compare so a later selection
+  // change never re-opens it), mirroring the formatRequest request-id idiom.
+  const lastThreadDraftRequestRef = useRef(0);
+  useEffect(() => {
+    if (openThreadDraftRequest && openThreadDraftRequest !== lastThreadDraftRequestRef.current) {
+      lastThreadDraftRequestRef.current = openThreadDraftRequest;
+      if (hasRangeSelection) {
+        setThreadDraftOpen(true);
+      }
+    }
+  }, [openThreadDraftRequest, hasRangeSelection]);
 
   useEffect(() => {
     if (!activeThreadGroup) return;
@@ -3334,7 +3456,7 @@ export function DocumentEditor({
             style={{ left: toolbarPoint.x, top: toolbarPoint.y }}
             onMouseDown={(event) => event.preventDefault()}
           >
-            <button className="primary" type="button" onClick={openThreadDraft}>
+            <button className="primary" type="button" data-onboarding-id="selection-thread" onClick={openThreadDraft}>
               <Icon name="thread" />
               Open thread
             </button>
@@ -4062,20 +4184,26 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
   // the workspace socket the moment the daemon calls home, flipping this to online.
   const createdDaemon = daemons.find((daemon) => daemon.id === daemonId);
   const connected = createdDaemon ? daemonStatus(createdDaemon) === "online" : false;
+  // Failed only after a genuine check-in that then dropped — never on a fresh daemon. A never-seen
+  // daemon reads as "disconnected" with a zero-time lastSeenAt, so gate on hasGenuineCheckIn (year
+  // >= 2020) instead of Boolean(lastSeenAt), which the "0001-01-01" zero time would satisfy.
+  const failed = createdDaemon ? isDaemonOffline(createdDaemon) && hasGenuineCheckIn(createdDaemon) : false;
   return (
-    <Modal title={token ? `${name} created` : "New local environment"} onClose={onClose}>
+    <Modal title="Connect this workspace to your computer" onClose={onClose}>
       {token ? (
         <div className="token-reveal">
           <DaemonPlatformControl value={installPlatform} onChange={setInstallPlatform} />
-          <ShellScriptBlock title="Install local environment" badge={installPlatform === "windows" ? "PowerShell" : "Shell"} command={command}>
-            <p className="small muted">This downloads the release bundle, installs the local environment and agent helper, writes local environment config, and starts a local service. Docker Compose is only for local development.</p>
+          <ShellScriptBlock title="Install command" badge={installPlatform === "windows" ? "PowerShell" : "Shell"} command={command}>
+            <p className="small muted">Run this in a terminal on the computer you want to connect. It sets up local file sync and the space where your agents run.</p>
           </ShellScriptBlock>
-          <div className="row between">
-            {connected ? (
-              <span className="chip online"><StatusDot tone="online" />Local environment connected</span>
-            ) : (
-              <span className="chip"><StatusDot tone="stale" />Waiting for local environment to check in…</span>
-            )}
+          {connected ? (
+            <p className="chip online"><StatusDot tone="online" />Local environment connected. You can create an agent now.</p>
+          ) : failed ? (
+            <p className="chip"><StatusDot tone="stale" />No connection yet. Make sure the command ran completely, or generate a new install command.</p>
+          ) : (
+            <p className="chip"><StatusDot tone="stale" />Install command ready. Run it in a terminal on the target computer — Codesk detects the connection automatically.</p>
+          )}
+          <div className="row end">
             <button className="btn accent" onClick={onClose}>Done</button>
           </div>
         </div>
@@ -4090,6 +4218,7 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
             onDone();
           }}
         >
+          <p className="small muted">A local environment syncs your Codesk documents to your machine and hosts long-running agents. Once connected, the same file opens in the browser, VS Code, or any local tool.</p>
           <label className="field"><span className="lab">Name</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label>
           <button className="btn accent full">Create local environment</button>
         </form>
@@ -4201,8 +4330,9 @@ function CreateAgentModal({ api, workspaceId, daemons, onClose, onDone }: { api:
   };
 
   return (
-    <Modal title="New agent" onClose={onClose} wide>
+    <Modal title="Create an agent that stays with the project" onClose={onClose} wide>
       <form className="new-agent-form" onSubmit={submit}>
+        <p className="small muted new-agent-lead">An agent isn't a one-off chat. It has its own name, role, and environment, and keeps working in this workspace over time.</p>
         <div className="new-agent-grid">
           <div className="col gap-14 new-agent-col">
             <label className="field">
@@ -4219,6 +4349,7 @@ function CreateAgentModal({ api, workspaceId, daemons, onClose, onDone }: { api:
                 }}
                 required
               />
+              <span className="hint">Give it a name that's easy to recognize.</span>
             </label>
             <label className="field">
               <span className="lab">Handle</span>
@@ -4240,10 +4371,11 @@ function CreateAgentModal({ api, workspaceId, daemons, onClose, onDone }: { api:
               />
               <span className="hint">{identifierHelpText} Auto-filled from the display name; edit to override. Unique in this workspace.</span>
             </label>
-            <label className="field"><span className="lab">Role</span><textarea value={role} placeholder={rolePlaceholder} onChange={(event) => setRole(event.target.value)} required /></label>
+            <label className="field"><span className="lab">Role</span><textarea value={role} placeholder={rolePlaceholder} onChange={(event) => setRole(event.target.value)} required /><span className="hint">Describe what it owns, how it knows the work is done, and when it should check with a person.</span></label>
             <div className="divider" />
             <div className="field">
               <span className="lab">Owning local environment</span>
+              <span className="hint">The agent runs in the local environment you choose.</span>
               <div className="daemon-choice-list">
                 {activeDaemons.map((daemon) => {
                   const status = daemonStatus(daemon);
@@ -4576,11 +4708,11 @@ export function EmptyWorkspace({
         <h2 className="display">Let's get this workspace working.</h2>
         <p className="small muted">Codesk is best with at least one local environment: it syncs docs to disk and hosts your agents. You can also start by writing something.</p>
         <div className="empty-grid">
-          <button className="card p-20 empty-choice" onClick={onCreateDaemon}>
+          <button className="card p-20 empty-choice" data-onboarding-id="connect-local-env" onClick={onCreateDaemon}>
             <div className="row gap-8"><div className="avi sm daemon">D</div><b>Deploy a local environment</b></div>
             <span className="small muted">Bring docs to local disk and enable agents.</span>
           </button>
-          <button className="card p-20 empty-choice" onClick={onCreateDocument} disabled={!canCreateDocument || creatingDocument}>
+          <button className="card p-20 empty-choice" data-onboarding-id="create-document" onClick={onCreateDocument} disabled={!canCreateDocument || creatingDocument}>
             <div className="row gap-8"><Icon name="doc" /><b>Create your first doc</b></div>
             <span className="small muted">{creatingDocument ? "Creating..." : "Markdown or plaintext. Threads and agents come along."}</span>
           </button>
@@ -4622,11 +4754,13 @@ export function MembersAndInvite({
   workspaceId,
   users,
   canInvite,
+  onMemberInvited,
 }: {
   api: ApiClient;
   workspaceId: string;
   users: UserItem[];
   canInvite: boolean;
+  onMemberInvited?: () => void;
 }) {
   const [link, setLink] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
@@ -4642,6 +4776,7 @@ export function MembersAndInvite({
       const response = await api.createWorkspaceInvite(workspaceId);
       setLink(new URL(response.url, publicOrigin).toString());
       setExpiresAt(response.invite.expiresAt);
+      onMemberInvited?.();
     } catch (err) {
       setInviteError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -4913,6 +5048,7 @@ export function ManageModal({
   onNewAgent,
   onAgent,
   onWorkspaceSaved = () => {},
+  onMemberInvited,
 }: {
   api: ApiClient;
   workspaceId: string;
@@ -4928,6 +5064,7 @@ export function ManageModal({
   onNewAgent: () => void;
   onAgent: (agent: Agent) => void;
   onWorkspaceSaved?: (workspace: WorkspaceSummary) => void;
+  onMemberInvited?: () => void;
 }) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -4976,7 +5113,7 @@ export function ManageModal({
             {activeTab === "local-env" ? (
               <DaemonsManagement workspace={workspace} onRefresh={onRefresh} onNew={onNewDaemon} onDaemon={onDaemon} />
             ) : activeTab === "members" ? (
-              <MembersAndInvite api={api} workspaceId={workspaceId} users={workspace.users} canInvite={canInvite} />
+              <MembersAndInvite api={api} workspaceId={workspaceId} users={workspace.users} canInvite={canInvite} onMemberInvited={onMemberInvited} />
             ) : activeTab === "agents" ? (
               <AgentsManagement workspace={workspace} groupedAgents={groupedAgents} onNew={onNewAgent} onAgent={onAgent} />
             ) : activeTab === "workspace" ? (
