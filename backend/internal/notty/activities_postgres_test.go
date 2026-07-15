@@ -211,6 +211,49 @@ func TestUpdateAgentSessionAcceptsFailedStatusPostgres(t *testing.T) {
 	}
 }
 
+// TestUpdateAgentSessionAcceptsStalledStatusPostgres proves the daemon's item #5
+// stalled-liveness status is accepted through the real publish/store path (not
+// bounced as an unsupported status) and persists, carrying its diagnostic.
+func TestUpdateAgentSessionAcceptsStalledStatusPostgres(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	store := newPostgresTestWorkspaceStore(t, database)
+	seedCodexDaemonRuntime(t, store)
+	user := seedTestUser(t, store)
+	meta := OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"}
+
+	agent, err := store.CreateAgent(CreateAgentRequest{Handle: "stalled-agent", Name: "Stalled Agent", Role: "durable", Kind: "codex"}, meta)
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	agentMeta := OperationMeta{ActorID: agent.ID, ActorType: "agent", Source: "test"}
+
+	updated, err := store.UpdateAgentSession(agent.ID, UpdateAgentSessionRequest{
+		Status:          "stalled",
+		CurrentActivity: "Stalled: no runtime activity for 15m0s during turn turn_1",
+	}, agentMeta)
+	if err != nil {
+		t.Fatalf("update session to stalled: %v", err)
+	}
+	if updated.Status != "stalled" {
+		t.Fatalf("status = %q, want stalled", updated.Status)
+	}
+	if updated.CurrentActivity != "Stalled: no runtime activity for 15m0s during turn turn_1" {
+		t.Fatalf("activity = %q, want the published stall diagnostic", updated.CurrentActivity)
+	}
+
+	// A second update re-reads current DB state, so a bare heartbeat proves
+	// `stalled` persisted rather than only round-tripping.
+	reloaded, err := store.UpdateAgentSession(agent.ID, UpdateAgentSessionRequest{
+		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}, agentMeta)
+	if err != nil {
+		t.Fatalf("reload session: %v", err)
+	}
+	if reloaded.Status != "stalled" {
+		t.Fatalf("reloaded status = %q, want stalled to persist", reloaded.Status)
+	}
+}
+
 // TestActivitiesConcurrentWritesPostgres fires many activity-producing
 // operations concurrently and asserts each lands exactly one row — no lost or
 // duplicated activities from the shared pending buffer and post-commit clear.
