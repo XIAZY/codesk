@@ -15,7 +15,7 @@ DAEMON_ALL_PLATFORMS ?= all
 	build build-yffi build-go build-frontend build-daemon build-static build-static-local build-backend-image \
 	publish publish-backend publish-frontend publish-static \
 	deploy deploy-backend deploy-frontend deploy-static \
-	prod-config-check static-build static-build-local static-publish backend-image daemon-build daemon-release daemon-release-all release-daemons daemon-checksums daemon-clean daemon-installer-check daemon-uninstall-test
+	prod-config-check static-build static-build-local static-publish backend-image daemon-build daemon-release daemon-release-all release-daemons daemon-checksums daemon-clean daemon-installer-check daemon-installer-windows-check daemon-uninstall-test
 
 dev: static-build-local
 	docker compose --env-file deploy/env/dev.server.env up --build
@@ -138,6 +138,16 @@ daemon-installer-check:
 	sh -n deploy/daemons/install.sh
 	sh -n deploy/daemons/uninstall.sh
 	sh scripts/test-daemon-installer.sh
+
+daemon-installer-windows-check:
+	@if command -v pwsh >/dev/null 2>&1; then \
+		pwsh -NoLogo -NoProfile -File scripts/test-daemon-installer-windows.ps1; \
+	elif command -v powershell.exe >/dev/null 2>&1; then \
+		powershell.exe -NoLogo -NoProfile -File scripts/test-daemon-installer-windows.ps1; \
+	else \
+		printf '%s\n' 'PowerShell is required for daemon-installer-windows-check' >&2; \
+		exit 1; \
+	fi
 
 daemon-uninstall-test:
 	sh scripts/test-daemon-uninstall.sh

@@ -10,6 +10,8 @@
 #   frontend typecheck + vitest        -> frontend: "Typecheck + vitest"
 #   frontend production build          -> frontend: "Production build"
 #   git diff --check                   -> diff-check
+#   Windows GNU compile/link            -> windows-daemon-build
+#   Windows native runtime tests        -> windows-daemon (paused until a runner is available)
 #
 # Two meta-properties (Tom's bar):
 #   * Fail loud on infrastructure absence — a skipped live-DB suite reporting green is the exact
@@ -138,6 +140,191 @@ jobs:
       - name: Build all Go
         run: go build ./...
 
+  windows-daemon-build:
+    name: Windows daemon (Zig AMD64 + ARM64 cross-build)
+    runs-on: [self-hosted, Linux, ARM64]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu,aarch64-pc-windows-gnullvm
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Install archive tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zip
+      - name: Cache cargo + Windows libyrs build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            third_party/y-crdt/target
+          key: yffi-windows-zig-cross-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('third_party/y-crdt/**/Cargo.lock') }}
+          restore-keys: |
+            yffi-windows-zig-cross-${{ runner.os }}-${{ runner.arch }}-
+      - name: Build canonical Windows release
+        env:
+          PLATFORMS: windows/amd64 windows/arm64
+        run: scripts/build-daemon-release.sh p1-ci "$RUNNER_TEMP/notty-release"
+      - name: Verify archives, PE machines, manifest, and checksums
+        run: go run ./scripts/verify-windows-daemon-release.go "$RUNNER_TEMP/notty-release/p1-ci" p1-ci
+      - name: Vet and compile Windows-tagged tests for both architectures
+        run: |
+          for target in \
+            "amd64 x86_64-pc-windows-gnu x86_64-windows-gnu" \
+            "arm64 aarch64-pc-windows-gnullvm aarch64-windows-gnu"
+          do
+            set -- $target
+            arch="$1"
+            rust_target="$2"
+            zig_target="$3"
+            RUST_TARGET="$rust_target" RUSTFLAGS="-C panic=abort" scripts/build-yffi.sh
+            CC="zig cc -target $zig_target" CGO_ENABLED=1 GOOS=windows GOARCH="$arch" \
+              go vet ./daemon/internal/syncer ./internal/ycrdt
+            CC="zig cc -target $zig_target" CGO_ENABLED=1 GOOS=windows GOARCH="$arch" \
+              go test -c -o "$RUNNER_TEMP/notty-syncer-$arch.test.exe" ./daemon/internal/syncer
+          done
+
+  windows-daemon-installer:
+    name: Windows daemon installer
+    # Preserve the installer lifecycle test, but do not schedule hosted Windows
+    # jobs until a Windows CI runner is available for this repository.
+    if: ${{ false }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: PowerShell installer lifecycle
+        shell: pwsh
+        run: scripts/test-daemon-installer-windows.ps1
+
+  windows-daemon:
+    name: Windows daemon (native Zig build + platform tests)
+    # Preserve the native execution matrix, but do not schedule it until a
+    # Windows CI runner is available for this repository.
+    if: ${{ false }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Expose 7-Zip for release packaging
+        shell: pwsh
+        run: |
+          $sevenZip = Join-Path $env:ProgramFiles "7-Zip"
+          if (-not (Test-Path (Join-Path $sevenZip "7z.exe") -PathType Leaf)) {
+            throw "7-Zip is required to package the Windows release"
+          }
+          $sevenZip | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu,aarch64-pc-windows-gnullvm
+      - name: Cache cargo + Windows libyrs build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            third_party/y-crdt/target
+          key: yffi-windows-zig-${{ hashFiles('third_party/y-crdt/**/Cargo.lock') }}
+          restore-keys: |
+            yffi-windows-zig-
+      - name: Build canonical Windows release
+        shell: bash
+        env:
+          PLATFORMS: windows/amd64 windows/arm64
+        run: |
+          release_dir="$(cygpath -u "$RUNNER_TEMP")/notty-release"
+          scripts/build-daemon-release.sh p1-ci "$release_dir"
+      - name: Verify canonical Windows release
+        shell: pwsh
+        run: go run ./scripts/verify-windows-daemon-release.go "$env:RUNNER_TEMP/notty-release/p1-ci" p1-ci
+      - name: PowerShell installer tests
+        shell: pwsh
+        run: scripts/test-daemon-installer-windows.ps1
+      - name: Stage AMD64 Yrs library for native tests
+        shell: bash
+        run: RUST_TARGET=x86_64-pc-windows-gnu RUSTFLAGS="-C panic=abort" scripts/build-yffi.sh
+      - name: Run Windows-native syncer suite and require platform rows
+        shell: pwsh
+        env:
+          CC: zig cc -target x86_64-windows-gnu
+          CGO_ENABLED: "1"
+        run: |
+          $legacyFiles = @(
+            "daemon/internal/syncer/file_lock.go",
+            "daemon/internal/syncer/file_lock_unix.go",
+            "daemon/internal/syncer/file_lock_windows.go"
+          )
+          foreach ($file in $legacyFiles) {
+            if (Test-Path $file) {
+              throw "retired target byte-lock file returned: $file"
+            }
+          }
+          $legacySymbols = Get-ChildItem daemon/internal/syncer -Filter *.go |
+            Select-String -Pattern '\b(readFileLocked|appendFileLocked|appendOpenFileLocked|writeIfChanged|writeFileLocked|lockFile|unlockFile|CreateOrRead)\b'
+          if ($legacySymbols) {
+            $legacySymbols | ForEach-Object { Write-Host $_ }
+            throw "retired target byte-lock API returned"
+          }
+
+          $output = & go test -race -count=1 -v ./daemon/internal/syncer 2>&1
+          $testExit = $LASTEXITCODE
+          $output | ForEach-Object { Write-Host $_ }
+          if ($testExit -ne 0) { exit $testExit }
+
+          $required = @(
+            "TestWorkspaceFSAppendUsesCanonicalPathLease",
+            "TestWorkspaceFSCreateEmptyOrReadCreatesAbsentFile",
+            "TestWorkspaceFSCreateEmptyOrReadPreservesExistingFile",
+            "TestWorkspaceFSCreateEmptyOrReadPreservesFileCreatedAfterAbsentObservation",
+            "TestWorkspaceFSCreateEmptyOrReadDoesNotRemoveReplacementAfterCloseFailure",
+            "TestWorkspaceFSCreateEmptyOrReadReturnsReplacementAfterCreate",
+            "TestMaterializeTrackedFileWithoutCacheCreatesEmptyProjection",
+            "TestMaterializeTrackedFileWithoutCachePreservesExistingLocalContent",
+            "TestSQLiteFileDSNOpensWindowsDrivePath",
+            "TestScanWorkspaceFilesObservesCompleteContentDuringAtomicReplacement",
+            "TestApplyProjectedContentDoesNotAdvanceBaseAfterDurabilityFailure",
+            "TestProjectMergedContentDoesNotAdvanceBaseAfterWriteFailure",
+            "TestFileIdentityTracksHardLinks",
+            "TestStatFileWithIdentityReturnsMetadataAndStableIdentity",
+            "TestFileRenameInfoIncludesTrailingNUL",
+            "TestFileIdentityFromWindowsInfoRejectsZeroFileIndex",
+            "TestFileIdentitySurvivesRenameOnWindows",
+            "TestDirectoryIdentitySurvivesRenameOnWindows",
+            "TestFileIdentityChangesAfterDeleteAndRecreateOnWindows",
+            "TestFileIdentityFollowsDistinctReplacementObjectOnWindows",
+            "TestReplaceFileAtomicallyReplacesContentAndCleansStagingFile",
+            "TestReplaceFileAtomicallySyncsStagedContentBeforeCommit",
+            "TestReplaceFileAtomicallyPreservesDestinationWhenStagedSyncFails",
+            "TestReplaceFileAtomicallyPreservesDestinationWhenCommitUnsupported",
+            "TestReplaceFileAtomicallyLeavesDestinationCompleteWhenDeleteSharingIsDenied",
+            "TestAtomicReplacementSucceedsWhileDeleteSharedObservationIsOpenOnWindows",
+            "TestAtomicReplacementReturnsErrorWhenPostRenameFlushFailsOnWindows",
+            "TestIsCrossDeviceErrorWindows"
+          )
+          foreach ($test in $required) {
+            if (-not ($output -match "--- PASS: $test")) {
+              Write-Error "Required Windows platform test did not PASS: $test"
+              exit 1
+            }
+          }
   regression-e2e:
     name: regression e2e (docker-compose fs<->DB<->daemon sync)
     runs-on: [self-hosted, Linux, ARM64]

@@ -18,6 +18,7 @@ import {
   clampPopoverPosition,
   personOnline,
   documentActivity,
+  defaultDaemonInstallPlatform,
   emptyWorkspace,
   activityCategory,
   relativeTime,
@@ -991,6 +992,27 @@ describe("daemon install command", () => {
     expect(command).toContain("curl -fsSL https://notty.example.com/daemons/install.sh | sh -s --");
     expect(command).toContain("--static-base https://notty.example.com/daemons");
   });
+
+  it("builds a PowerShell installer command and quotes every user-controlled value", () => {
+    const command = buildDaemonInstallCommand({
+      backendUrl: "https://api.example.com/notty prod/",
+      workspaceId: "ws bad'id",
+      daemonToken: "nottyd token",
+      staticBaseUrl: "https://static.example.com/daemon files/",
+      platform: "windows",
+    });
+
+    expect(command.startsWith("$ErrorActionPreference = 'Stop'\n")).toBe(true);
+    expect(command).toContain("Invoke-WebRequest -UseBasicParsing 'https://static.example.com/daemon files/install.ps1'");
+    expect(command).toContain("$codeskInstallerResponse.Content -is [byte[]]");
+    expect(command).toContain("[System.Text.Encoding]::UTF8.GetString($codeskInstallerResponse.Content)");
+    expect(command).toContain("[ScriptBlock]::Create($codeskInstallerSource)");
+    expect(command).toContain("-BackendUrl 'https://api.example.com/notty prod' `");
+    expect(command).toContain("-WorkspaceId 'ws bad''id' `");
+    expect(command).toContain("-DaemonToken 'nottyd token' `");
+    expect(command).toContain("-StaticBase 'https://static.example.com/daemon files'");
+    expect(command).not.toContain("install.sh");
+  });
 });
 
 describe("daemon uninstall command", () => {
@@ -1010,6 +1032,18 @@ describe("daemon uninstall command", () => {
     });
 
     expect(command).not.toContain("--workspace-id");
+  });
+
+  it("builds a PowerShell global uninstaller command", () => {
+    const command = buildDaemonUninstallCommand({
+      staticBaseUrl: "https://static.example.com/daemon's/",
+      platform: "windows",
+    });
+
+    expect(command).toContain("Invoke-WebRequest -UseBasicParsing 'https://static.example.com/daemon''s/uninstall.ps1'");
+    expect(command).toContain("$codeskUninstallerResponse.Content -is [byte[]]");
+    expect(command).toContain("[ScriptBlock]::Create($codeskUninstallerSource)) -All");
+    expect(command).not.toContain("WorkspaceId");
   });
 });
 
@@ -1045,6 +1079,30 @@ describe("daemon reinstall command", () => {
     expect(command).toContain("--daemon-token 'nottyd token' \\");
     expect(command).toContain("--static-base 'https://static.example.com/daemon files'");
   });
+
+  it("builds a PowerShell reinstall that uninstalls globally before using the fresh token", () => {
+    const command = buildDaemonReinstallCommand({
+      backendUrl: "https://notty.example.com/",
+      workspaceId: "ws_123",
+      daemonToken: "nottyd_abc",
+      staticBaseUrl: "https://static.example.com/daemons/",
+      platform: "windows",
+    });
+
+    expect(command).toContain("Invoke-WebRequest -UseBasicParsing 'https://static.example.com/daemons/uninstall.ps1'");
+    expect(command).toContain("[ScriptBlock]::Create($codeskUninstallerSource)) -All");
+    expect(command).toContain("Invoke-WebRequest -UseBasicParsing 'https://static.example.com/daemons/install.ps1'");
+    expect(command).toContain("[ScriptBlock]::Create($codeskInstallerSource)) `");
+    expect(command).toContain("-DaemonToken 'nottyd_abc' `");
+    expect(command.indexOf("uninstall.ps1")).toBeLessThan(command.indexOf("install.ps1"));
+  });
 });
 
-
+describe("daemon install platform", () => {
+  it("prefers a daemon OS hint and otherwise detects Windows browsers", () => {
+    expect(defaultDaemonInstallPlatform("windows", "Macintosh")).toBe("windows");
+    expect(defaultDaemonInstallPlatform("linux", "Windows NT 10.0")).toBe("unix");
+    expect(defaultDaemonInstallPlatform("", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")).toBe("windows");
+    expect(defaultDaemonInstallPlatform("", "Mozilla/5.0 (Macintosh; Intel Mac OS X)")).toBe("unix");
+  });
+});

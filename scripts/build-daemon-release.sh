@@ -4,7 +4,7 @@ set -eu
 version="${1:-${VERSION:-dev}}"
 dist_dir="${2:-${DIST_DIR:-dist/static/daemons}}"
 platforms="${PLATFORMS:-}"
-all_platforms="darwin/amd64 darwin/arm64 linux/amd64 linux/arm64"
+all_platforms="darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64"
 
 root_dir="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
 . "$root_dir/scripts/lib/testtmp.sh"
@@ -19,10 +19,14 @@ tmp_dir="$(notty_test_mktemp notty-daemon-release)"
 manifest="$out_dir/manifest.json"
 installer="$root_dir/deploy/daemons/install.sh"
 uninstaller="$root_dir/deploy/daemons/uninstall.sh"
+powershell_installer="$root_dir/deploy/daemons/install.ps1"
+powershell_uninstaller="$root_dir/deploy/daemons/uninstall.ps1"
+windows_runner="$root_dir/deploy/daemons/run-windows.ps1"
 
 host_os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 case "$host_os" in
 	darwin|linux) ;;
+	mingw*|msys*|cygwin*) host_os="windows" ;;
 	*) host_os="$(uname -s)" ;;
 esac
 host_arch="$(uname -m)"
@@ -60,6 +64,8 @@ rust_target_for() {
 		linux/arm64) printf 'aarch64-unknown-linux-musl' ;;
 		darwin/amd64) printf 'x86_64-apple-darwin' ;;
 		darwin/arm64) printf 'aarch64-apple-darwin' ;;
+		windows/amd64) printf 'x86_64-pc-windows-gnu' ;;
+		windows/arm64) printf 'aarch64-pc-windows-gnullvm' ;;
 		*) printf '' ;;
 	esac
 }
@@ -68,6 +74,8 @@ zig_target_for() {
 	case "$1/$2" in
 		linux/amd64) printf 'x86_64-linux-musl' ;;
 		linux/arm64) printf 'aarch64-linux-musl' ;;
+		windows/amd64) printf 'x86_64-windows-gnu' ;;
+		windows/arm64) printf 'aarch64-windows-gnu' ;;
 		*) printf '' ;;
 	esac
 }
@@ -80,14 +88,9 @@ darwin_arch_for() {
 	esac
 }
 
-rust_linker_env_for() {
-	printf 'CARGO_TARGET_%s_LINKER' "$(printf '%s' "$1" | tr '[:lower:]-' '[:upper:]_')"
-}
-
-make_zig_cc_wrapper() {
+zig_cc_for() {
 	os="$1"
 	arch="$2"
-	wrapper="$3"
 	zig_target="$(zig_target_for "$os" "$arch")"
 	[ -n "$zig_target" ] || {
 		printf 'build-daemon-release: no zig target mapping for %s/%s\n' "$os" "$arch" >&2
@@ -95,14 +98,10 @@ make_zig_cc_wrapper() {
 	}
 	command -v zig >/dev/null 2>&1 || {
 		env_name="$(cc_env_name_for "$os" "$arch")"
-		printf 'build-daemon-release: zig is required for native cross-compiling %s/%s; install zig or set %s to a target C compiler\n' "$os" "$arch" "$env_name" >&2
+		printf 'build-daemon-release: zig is required to build %s/%s; install zig or set %s to a target C compiler\n' "$os" "$arch" "$env_name" >&2
 		exit 1
 	}
-	cat > "$wrapper" <<EOF
-#!/usr/bin/env sh
-exec zig cc -target $zig_target "\$@"
-EOF
-	chmod +x "$wrapper"
+	printf 'zig cc -target %s' "$zig_target"
 }
 
 make_darwin_cc_wrapper() {
@@ -160,7 +159,7 @@ preflight_platform() {
 		return
 	fi
 
-	if [ "$os" = "linux" ] || [ "$platform" != "$host_platform" ]; then
+	if [ "$os" = "linux" ] || [ "$os" = "windows" ] || [ "$platform" != "$host_platform" ]; then
 		check_rust_target "$rust_target"
 	fi
 
@@ -179,6 +178,14 @@ preflight_platform() {
 				fi
 			fi
 			;;
+		windows)
+			if [ -z "$cc_value" ] && ! command -v zig >/dev/null 2>&1; then
+				preflight_error "zig is required to build $platform; install zig or set $env_name to a target C compiler"
+			fi
+			if ! command -v zip >/dev/null 2>&1 && ! command -v 7z >/dev/null 2>&1; then
+				preflight_error "zip or 7z is required to package $platform"
+			fi
+			;;
 	esac
 }
 
@@ -194,12 +201,14 @@ target_cc_for() {
 	fi
 	case "$os" in
 		linux)
-			make_zig_cc_wrapper "$os" "$arch" "$wrapper"
-			printf '%s' "$wrapper"
+			zig_cc_for "$os" "$arch"
 			;;
 		darwin)
 			make_darwin_cc_wrapper "$os" "$arch" "$wrapper"
 			printf '%s' "$wrapper"
+			;;
+		windows)
+			zig_cc_for "$os" "$arch"
 			;;
 		*)
 			printf 'build-daemon-release: %s/%s requires %s to point at a target C compiler\n' "$os" "$arch" "$env_name" >&2
@@ -208,11 +217,32 @@ target_cc_for() {
 	esac
 }
 
+package_windows_archive() {
+	archive="$1"
+	package_name="$2"
+	if command -v zip >/dev/null 2>&1; then
+		zip -qr "$archive" "$package_name"
+	else
+		7z a -bd -tzip "$archive" "$package_name" >/dev/null
+	fi
+}
+
 go_ldflags_for() {
 	case "$1" in
 		linux) printf -- "-linkmode external -extldflags '-static -lunwind' -s -w" ;;
+		windows) printf -- "-linkmode external -extldflags '-static' -s -w" ;;
 		*) printf -- '-linkmode external -s -w' ;;
 	esac
+}
+
+binary_name_for() {
+	name="$1"
+	os="$2"
+	if [ "$os" = "windows" ]; then
+		printf '%s.exe' "$name"
+	else
+		printf '%s' "$name"
+	fi
 }
 
 build_host_binaries() {
@@ -223,8 +253,8 @@ build_host_binaries() {
 	(
 		cd "$root_dir"
 		"$root_dir/scripts/build-yffi.sh"
-		CGO_ENABLED=1 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "$package_dir/bin/notty-daemon" ./daemon/cmd/daemon
-		CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "$package_dir/bin/notty-agent-tool" ./daemon/cmd/agenttool
+		CGO_ENABLED=1 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "$package_dir/bin/$(binary_name_for notty-daemon "$os")" ./daemon/cmd/daemon
+		CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "$package_dir/bin/$(binary_name_for notty-agent-tool "$os")" ./daemon/cmd/agenttool
 	)
 }
 
@@ -236,14 +266,13 @@ build_cross_binaries() {
 
 	cc_wrapper="$tmp_dir/cc-$os-$arch"
 	cc="$(target_cc_for "$os" "$arch" "$cc_wrapper")"
-	linker_env="$(rust_linker_env_for "$rust_target")"
 	yffi_lib="$root_dir/third_party/y-crdt/target/$rust_target/release/libyrs.a"
 	go_link_lib="$root_dir/third_party/y-crdt/target/release/libyrs.a"
 
-	printf 'build-daemon-release: building yffi for %s with %s=%s\n' "$rust_target" "$linker_env" "$cc"
+	printf 'build-daemon-release: building yffi for %s and CGO with %s\n' "$rust_target" "$cc"
 	(
 		cd "$root_dir"
-		env RUST_TARGET="$rust_target" RUSTFLAGS="${RUSTFLAGS:-} -C panic=abort" "$linker_env=$cc" "$root_dir/scripts/build-yffi.sh"
+		env RUST_TARGET="$rust_target" RUSTFLAGS="${RUSTFLAGS:-} -C panic=abort" "$root_dir/scripts/build-yffi.sh"
 	)
 	[ -f "$yffi_lib" ] || {
 		printf 'build-daemon-release: missing Rust library after build: %s\n' "$yffi_lib" >&2
@@ -255,8 +284,8 @@ build_cross_binaries() {
 
 	(
 		cd "$root_dir"
-		CC="$cc" CGO_ENABLED=1 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "$(go_ldflags_for "$os")" -o "$package_dir/bin/notty-daemon" ./daemon/cmd/daemon
-		CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "$package_dir/bin/notty-agent-tool" ./daemon/cmd/agenttool
+		CC="$cc" CGO_ENABLED=1 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "$(go_ldflags_for "$os")" -o "$package_dir/bin/$(binary_name_for notty-daemon "$os")" ./daemon/cmd/daemon
+		CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "$package_dir/bin/$(binary_name_for notty-agent-tool "$os")" ./daemon/cmd/agenttool
 	)
 }
 
@@ -271,6 +300,18 @@ if [ ! -f "$installer" ]; then
 fi
 if [ ! -f "$uninstaller" ]; then
 	printf 'missing uninstaller: %s\n' "$uninstaller" >&2
+	exit 1
+fi
+if [ ! -f "$powershell_installer" ]; then
+	printf 'missing PowerShell installer: %s\n' "$powershell_installer" >&2
+	exit 1
+fi
+if [ ! -f "$powershell_uninstaller" ]; then
+	printf 'missing PowerShell uninstaller: %s\n' "$powershell_uninstaller" >&2
+	exit 1
+fi
+if [ ! -f "$windows_runner" ]; then
+	printf 'missing Windows daemon runner: %s\n' "$windows_runner" >&2
 	exit 1
 fi
 
@@ -290,11 +331,15 @@ for platform in $platforms; do
 	arch="${platform#*/}"
 	name="notty-daemon_${version}_${os}_${arch}"
 	package_dir="$tmp_dir/$name"
-	archive="$out_dir/$name.tar.gz"
+	if [ "$os" = "windows" ]; then
+		archive="$out_dir/$name.zip"
+	else
+		archive="$out_dir/$name.tar.gz"
+	fi
 
 	mkdir -p "$package_dir/bin"
 	rust_target="$(rust_target_for "$os" "$arch")"
-	if [ "$os" = "linux" ] && [ -n "$rust_target" ]; then
+	if { [ "$os" = "linux" ] || [ "$os" = "windows" ]; } && [ -n "$rust_target" ]; then
 		build_cross_binaries "$os" "$arch" "$package_dir" "$rust_target"
 	elif [ "$platform" = "$host_platform" ]; then
 		build_host_binaries "$os" "$arch" "$package_dir"
@@ -305,20 +350,31 @@ for platform in $platforms; do
 		exit 1
 	fi
 
+	if [ "$os" = "windows" ]; then
+		cp "$windows_runner" "$package_dir/run-windows.ps1"
+		launch_help="Use the hosted install.ps1 script for normal installs, or run bin/notty-daemon.exe from PowerShell for manual testing."
+	else
+		launch_help="Use the hosted install script for normal installs:
+  curl -fsSL <public-origin>/daemons/install.sh | sh"
+	fi
 	cat > "$package_dir/README.md" <<EOF
 Notty daemon $version
 
 This package contains:
-- bin/notty-daemon
-- bin/notty-agent-tool
+- bin/$(binary_name_for notty-daemon "$os")
+- bin/$(binary_name_for notty-agent-tool "$os")
+$(if [ "$os" = "windows" ]; then printf '%s' '- run-windows.ps1'; fi)
 
-Use the hosted install script for normal installs:
-  curl -fsSL <public-origin>/daemons/install.sh | sh
+$launch_help
 EOF
 
 	(
 		cd "$tmp_dir"
-		tar -czf "$archive" "$name"
+		if [ "$os" = "windows" ]; then
+			package_windows_archive "$archive" "$name"
+		else
+			tar -czf "$archive" "$name"
+		fi
 	)
 
 	sum="$(checksum "$archive")"
@@ -339,5 +395,9 @@ cp "$installer" "$dist_abs/install.sh"
 cp "$installer" "$out_dir/install.sh"
 cp "$uninstaller" "$dist_abs/uninstall.sh"
 cp "$uninstaller" "$out_dir/uninstall.sh"
+cp "$powershell_installer" "$dist_abs/install.ps1"
+cp "$powershell_installer" "$out_dir/install.ps1"
+cp "$powershell_uninstaller" "$dist_abs/uninstall.ps1"
+cp "$powershell_uninstaller" "$out_dir/uninstall.ps1"
 
 printf 'Built daemon release %s in %s\n' "$version" "$out_dir"

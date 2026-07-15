@@ -9,6 +9,7 @@ import {
   buildDaemonInstallCommand,
   buildDaemonReinstallCommand,
   buildDaemonUninstallCommand,
+  defaultDaemonInstallPlatform,
   workspacePeople,
   documentParticipants,
   clampPopoverPosition,
@@ -30,6 +31,7 @@ import {
   workspaceSlugMaxLength,
   workspaceSlugMinLength,
   type ActivityCategory,
+  type DaemonInstallPlatform,
   type WorkspacePerson,
   type LineThreadGroup,
   resolveThreadAnchorLive,
@@ -4139,15 +4141,43 @@ export function ShellScriptBlock({ title, badge, command, children }: { title: s
   );
 }
 
+export function DaemonPlatformControl({ value, onChange }: { value: DaemonInstallPlatform; onChange: (platform: DaemonInstallPlatform) => void }) {
+  return (
+    <div className="install-platform-control">
+      <span className="lab">Operating system</span>
+      <div className="platform-segments" role="group" aria-label="Local environment operating system">
+        <button
+          type="button"
+          className={`platform-segment${value === "unix" ? " selected" : ""}`}
+          aria-pressed={value === "unix"}
+          onClick={() => onChange("unix")}
+        >
+          macOS / Linux
+        </button>
+        <button
+          type="button"
+          className={`platform-segment${value === "windows" ? " selected" : ""}`}
+          aria-pressed={value === "windows"}
+          onClick={() => onChange("windows")}
+        >
+          Windows
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }: { api: ApiClient; workspaceId: string; daemons: Daemon[]; onClose: () => void; onDone: () => void }) {
   const [name, setName] = useState("Local environment");
   const [token, setToken] = useState("");
   const [daemonId, setDaemonId] = useState("");
+  const [installPlatform, setInstallPlatform] = useState<DaemonInstallPlatform>(() => defaultDaemonInstallPlatform());
   const command = buildDaemonInstallCommand({
     backendUrl: apiBase,
     workspaceId,
     daemonToken: token || "nottyd_...",
     staticBaseUrl: daemonStaticBase,
+    platform: installPlatform,
   });
   // Track the created daemon in live workspace state so the chip reflects its real
   // check-in instead of a hard-coded "waiting". `daemon.updated` events flow through
@@ -4162,7 +4192,8 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
     <Modal title="Connect this workspace to your computer" onClose={onClose}>
       {token ? (
         <div className="token-reveal">
-          <ShellScriptBlock title="Install command" badge="Host native" command={command}>
+          <DaemonPlatformControl value={installPlatform} onChange={setInstallPlatform} />
+          <ShellScriptBlock title="Install command" badge={installPlatform === "windows" ? "PowerShell" : "Shell"} command={command}>
             <p className="small muted">Run this in a terminal on the computer you want to connect. It sets up local file sync and the space where your agents run.</p>
           </ShellScriptBlock>
           {connected ? (
@@ -4548,11 +4579,13 @@ export function AgentDetailModal({ api, workspaceId, agentId, agents, daemons, r
 }
 
 export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents, runs, onClose, onChanged }: { api: ApiClient; workspaceId: string; daemonId: string; daemons: Daemon[]; agents: Agent[]; runs: ReturnType<typeof useWorkspace>["workspace"]["agentRuns"]; onClose: () => void; onChanged: () => void }) {
+  const initialDaemonOS = daemons.find((item) => item.id === daemonId && item.status !== "deleted")?.os;
   const now = useNowTicker(DAEMON_LIVENESS_TICK_MS);
   const [reinstallOpen, setReinstallOpen] = useState(false);
   const [reinstallToken, setReinstallToken] = useState("");
   const [reinstallError, setReinstallError] = useState("");
   const [reinstallLoading, setReinstallLoading] = useState(false);
+  const [installPlatform, setInstallPlatform] = useState<DaemonInstallPlatform>(() => defaultDaemonInstallPlatform(initialDaemonOS));
   // Derive the live daemon from workspace state every render, so daemon.updated events and the
   // liveness tick reach the open modal instead of a frozen snapshot captured at click time. Exclude
   // soft-deleted rows: a daemon.deleted event upserts the daemon with status "deleted" (it stays in
@@ -4564,6 +4597,11 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
       onClose();
     }
   }, [daemon, onClose]);
+  useEffect(() => {
+    if (daemon?.os) {
+      setInstallPlatform(defaultDaemonInstallPlatform(daemon.os));
+    }
+  }, [daemon?.os]);
   if (!daemon) {
     return null;
   }
@@ -4588,9 +4626,11 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
     workspaceId,
     daemonToken: reinstallToken,
     staticBaseUrl: daemonStaticBase,
+    platform: installPlatform,
   }) : "";
   const uninstallCommand = buildDaemonUninstallCommand({
     staticBaseUrl: daemonStaticBase,
+    platform: installPlatform,
   });
   return (
     <>
@@ -4610,7 +4650,8 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
             })}
           </div>
           <button className="btn accent full" onClick={() => void prepareReinstall()} disabled={reinstallLoading}>Reinstall local environment</button>
-          <ShellScriptBlock title="Uninstall local environment" badge="Global" command={uninstallCommand}>
+          <DaemonPlatformControl value={installPlatform} onChange={setInstallPlatform} />
+          <ShellScriptBlock title="Uninstall local environment" badge={installPlatform === "windows" ? "PowerShell" : "Shell"} command={uninstallCommand}>
             <p className="small muted">Run this on the local environment host to remove the local Codesk installation. This uses the global uninstall script because workspace-specific uninstall is not supported yet.</p>
           </ShellScriptBlock>
           <button className="btn danger full" onClick={async () => { await api.deleteDaemon(workspaceId, daemon.id); onChanged(); onClose(); }}>Delete local environment record</button>
@@ -4636,9 +4677,12 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
                 <p className="small muted">{reinstallError}</p>
               </div>
             ) : (
-              <ShellScriptBlock title="Reinstall local environment" badge="Host native" command={reinstallCommand}>
-                <p className="small muted">Run this on the local environment host to remove the current local install and install the latest local environment again using the fresh token below.</p>
-              </ShellScriptBlock>
+              <>
+                <DaemonPlatformControl value={installPlatform} onChange={setInstallPlatform} />
+                <ShellScriptBlock title="Reinstall local environment" badge={installPlatform === "windows" ? "PowerShell" : "Shell"} command={reinstallCommand}>
+                  <p className="small muted">Run this on the local environment host to remove the current local install and install the latest local environment again using the fresh token below.</p>
+                </ShellScriptBlock>
+              </>
             )}
           </div>
         </Modal>

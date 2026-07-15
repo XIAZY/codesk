@@ -3,8 +3,6 @@ package syncer
 import (
 	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -61,16 +59,7 @@ func newFakeCodexRuntimeApp() *fakeCodexRuntimeApp {
 }
 
 func TestCodexDriverDetectRequiresAppServer(t *testing.T) {
-	codexPath := writeFakeCodex(t, `#!/bin/sh
-if [ "$1" = "--version" ]; then
-	echo "codex 0.1.0"
-	exit 0
-fi
-if [ "$1" = "app-server" ]; then
-	exit 2
-fi
-exit 2
-`)
+	codexPath := fakeProcessCommand(t, fakeProcessCodexWithoutAppServer)
 	driver := newCodexDriver(Config{CodexCommand: codexPath})
 
 	detection := driver.Detect(context.Background())
@@ -90,15 +79,6 @@ exit 2
 	if !strings.Contains(detection.Reason, "app-server") {
 		t.Fatalf("expected app-server unavailable reason, got %#v", detection)
 	}
-}
-
-func writeFakeCodex(t *testing.T, script string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "codex")
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake codex: %v", err)
-	}
-	return path
 }
 
 func (f *fakeCodexRuntimeApp) Start(ctx context.Context) error {

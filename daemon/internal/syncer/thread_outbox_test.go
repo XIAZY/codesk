@@ -18,7 +18,7 @@ func TestThreadOutboxPipelineQueuesMaterializesDeliversAndDeletesIntent(t *testi
 	if err := os.WriteFile(path, []byte("base\ntarget\n"), 0o644); err != nil {
 		t.Fatalf("write local file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestThreadOutboxPipelineQueuesMaterializesDeliversAndDeletesIntent(t *testi
 		t.Fatalf("store root projection: %v", err)
 	}
 	runtime.rootDocumentID = rootID
-	service.primaryRuntime = runtime
+	service.agentRuntimes = map[string]*managedWorkspaceRuntime{"agent_1": {runtime: runtime}}
 	service.client = &http.Client{
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			t.Fatalf("tool path should not call backend directly, got %s %s", r.Method, r.URL.String())
@@ -113,7 +113,7 @@ func TestThreadOutboxPipelineQueuesMaterializesDeliversAndDeletesIntent(t *testi
 	defer cancel()
 	go runtime.threadDeliveryLoop(ctx)
 
-	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, WorkspaceRoot: root, cache: cache}
+	tracked := newTestTrackedFile(t, &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, WorkspaceRoot: root, cache: cache})
 	tracked.setProjectedContent("base\n")
 	if err := tracked.storeProjectedBase("base\n", baseDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)
@@ -159,7 +159,7 @@ func TestWorkspaceRuntimeMaterializesThreadIntentBeforePendingRemote(t *testing.
 	if err := os.WriteFile(path, []byte("target\n"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestWorkspaceRuntimeMaterializesThreadIntentBeforePendingRemote(t *testing.
 	if err := cache.appendThreadIntent("doc_1", intent); err != nil {
 		t.Fatalf("append thread intent: %v", err)
 	}
-	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, WorkspaceRoot: root, cache: cache}
+	tracked := newTestTrackedFile(t, &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, WorkspaceRoot: root, cache: cache})
 	tracked.setProjectedContent("target\n")
 	if err := tracked.storeProjectedBase("target\n", baseDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)
@@ -223,7 +223,7 @@ func TestWorkspaceRuntimeMaterializesThreadIntentAfterAcceptedLocalBeforePending
 	if err := os.WriteFile(path, []byte("base\nlocal target\n"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestWorkspaceRuntimeMaterializesThreadIntentAfterAcceptedLocalBeforePending
 	if err := cache.appendThreadIntent("doc_1", intent); err != nil {
 		t.Fatalf("append thread intent: %v", err)
 	}
-	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, WorkspaceRoot: root, cache: cache}
+	tracked := newTestTrackedFile(t, &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, WorkspaceRoot: root, cache: cache})
 	tracked.setProjectedContent("base\n")
 	if err := tracked.storeProjectedBase("base\n", baseDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)
@@ -322,7 +322,7 @@ func waitForNoThreadIntents(t *testing.T, cache *documentCache, documentID strin
 }
 
 func TestThreadDeliveryRetriesReadyIntentWithIdempotencyKey(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}

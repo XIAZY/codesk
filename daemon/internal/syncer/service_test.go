@@ -73,6 +73,349 @@ func newApplyingDocumentUpdateWebsocketTestRuntime(t *testing.T, cache *document
 	})
 }
 
+func TestServicePeriodicCadencesKeepDaemonOnlineIndependently(t *testing.T) {
+	const backendOnlineWindow = 30 * time.Second
+
+	if daemonStatusHeartbeatInterval != 10*time.Second {
+		t.Fatalf("daemon heartbeat interval = %s, want 10s", daemonStatusHeartbeatInterval)
+	}
+	if daemonStatusHeartbeatInterval >= backendOnlineWindow {
+		t.Fatalf("daemon heartbeat interval %s must stay inside backend online window %s", daemonStatusHeartbeatInterval, backendOnlineWindow)
+	}
+	if workspaceRefreshInterval != time.Minute {
+		t.Fatalf("workspace refresh interval = %s, want 1m", workspaceRefreshInterval)
+	}
+	if daemonStatusHeartbeatInterval == workspaceRefreshInterval {
+		t.Fatal("daemon heartbeat and workspace refresh must use independent schedules")
+	}
+}
+
+func TestDaemonStatusHeartbeatRunsWithoutWorkspaceRefresh(t *testing.T) {
+	requests := make(chan *http.Request, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- r.Clone(context.Background())
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := Config{
+		BackendURL:  server.URL,
+		WorkspaceID: "workspace:test",
+		DaemonToken: "daemon_token",
+	}
+	service := &Service{
+		cfg:          cfg,
+		client:       server.Client(),
+		daemonStatus: newDaemonStatusReporter(cfg, server.Client()),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	ticks := make(chan time.Time, 1)
+	go func() {
+		defer close(done)
+		service.runDaemonStatusHeartbeat(ctx, ticks)
+	}()
+
+	ticks <- time.Now()
+	select {
+	case request := <-requests:
+		if request.Method != http.MethodPatch || !strings.HasSuffix(request.URL.Path, "/daemon/status") {
+			t.Fatalf("heartbeat request = %s %s, want daemon status PATCH", request.Method, request.URL.Path)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for daemon status heartbeat")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("heartbeat loop did not stop after cancellation")
+	}
+}
+
+func TestRunReportsDaemonOnlineOnlyAfterInitialRefreshSucceeds(t *testing.T) {
+	workspaceStarted := make(chan struct{}, 1)
+	allowWorkspace := make(chan struct{})
+	statusRequests := make(chan struct{}, 1)
+	workspaceStreamStarted := make(chan struct{})
+	workspaceStreamExited := make(chan struct{})
+	var workspaceStreamStartedOnce sync.Once
+	var workspaceStreamExitedOnce sync.Once
+	workspaceUpgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/daemon/status"):
+			statusRequests <- struct{}{}
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/workspace"):
+			select {
+			case workspaceStarted <- struct{}{}:
+			default:
+			}
+			select {
+			case <-allowWorkspace:
+				writeJSONResponse(w, http.StatusOK, &workspaceResponse{})
+			case <-r.Context().Done():
+			}
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/ws/workspaces/"):
+			conn, err := workspaceUpgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			workspaceStreamStartedOnce.Do(func() { close(workspaceStreamStarted) })
+			defer workspaceStreamExitedOnce.Do(func() { close(workspaceStreamExited) })
+			for {
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{
+		BackendURL:         server.URL,
+		WorkspaceID:        "workspace:test",
+		DaemonToken:        "daemon_token",
+		DataDir:            t.TempDir(),
+		WorkspaceDir:       t.TempDir(),
+		AgentWorkspaceRoot: t.TempDir(),
+		AgentID:            "daemon_agent",
+		AgentToolBaseURL:   "http://127.0.0.1:0",
+	}
+	primaryRuntime, storeCloses := newWorkspaceRuntimeWithDeterministicStores(
+		t,
+		cfg,
+		server.Client(),
+		cfg.WorkspaceDir,
+		cfg.AgentID,
+		"daemon",
+	)
+	watcher := newScriptedWorkspaceWatcher()
+	primaryRuntime.replica.newWatcher = func() (workspaceWatcher, error) { return watcher, nil }
+	service := &Service{
+		cfg:            cfg,
+		client:         server.Client(),
+		daemonStatus:   newDaemonStatusReporter(cfg, server.Client()),
+		primaryRuntime: primaryRuntime,
+		agentRuntimes:  map[string]*managedWorkspaceRuntime{},
+		agentWorkers:   map[string]*managedAgentWorker{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- service.Run(ctx)
+	}()
+
+	select {
+	case <-workspaceStarted:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("timed out waiting for initial workspace recovery")
+	}
+	select {
+	case <-statusRequests:
+		cancel()
+		t.Fatal("daemon reported online before initial workspace recovery completed")
+	default:
+	}
+	close(allowWorkspace)
+	select {
+	case <-statusRequests:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("daemon did not report online after initial workspace recovery completed")
+	}
+	select {
+	case <-workspaceStreamStarted:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("workspace stream did not complete its handshake")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run after cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not stop after cancellation")
+	}
+	select {
+	case <-workspaceStreamExited:
+	case <-time.After(time.Second):
+		t.Fatal("workspace stream handler did not observe the client close")
+	}
+	assertDeterministicWorkspaceStoresClosed(t, storeCloses)
+}
+
+func TestRunStopsDaemonHeartbeatBeforeBlockingFatalShutdown(t *testing.T) {
+	var statusCount atomic.Int64
+	initialStatus := make(chan struct{}, 1)
+	laterStatus := make(chan struct{}, 1)
+	heartbeatTicks := make(chan time.Time, 1)
+	workspaceStreamStarted := make(chan struct{})
+	releaseWorkspaceStream := make(chan struct{})
+	thirdReportStarted := make(chan struct{})
+	releaseThirdReport := make(chan struct{})
+	var workspaceStreamOnce sync.Once
+	var releaseWorkspaceStreamOnce sync.Once
+	var thirdReportOnce sync.Once
+	var releaseThirdReportOnce sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/workspace"):
+			writeJSONResponse(w, http.StatusOK, &workspaceResponse{})
+		case r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/daemon/status"):
+			count := statusCount.Add(1)
+			if count == 1 {
+				initialStatus <- struct{}{}
+			} else {
+				select {
+				case laterStatus <- struct{}{}:
+				default:
+				}
+			}
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/ws/workspaces/"):
+			workspaceStreamOnce.Do(func() { close(workspaceStreamStarted) })
+			<-releaseWorkspaceStream
+			w.WriteHeader(http.StatusGone)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	serverClient := server.Client()
+	serverTransport := serverClient.Transport
+	var transportStatusCount atomic.Int64
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/daemon/status") && transportStatusCount.Add(1) == 3 {
+			thirdReportOnce.Do(func() { close(thirdReportStarted) })
+			<-releaseThirdReport
+		}
+		return serverTransport.RoundTrip(r)
+	})}
+
+	cfg := Config{
+		BackendURL:         server.URL,
+		WorkspaceID:        "workspace:test",
+		DaemonToken:        "daemon_token",
+		DataDir:            t.TempDir(),
+		WorkspaceDir:       t.TempDir(),
+		AgentWorkspaceRoot: t.TempDir(),
+		AgentID:            "daemon_agent",
+		AgentToolBaseURL:   "http://127.0.0.1:0",
+	}
+	primaryRuntime, storeCloses := newWorkspaceRuntimeWithDeterministicStores(
+		t,
+		cfg,
+		client,
+		cfg.WorkspaceDir,
+		cfg.AgentID,
+		"daemon",
+	)
+	service := &Service{
+		cfg:            cfg,
+		client:         client,
+		daemonStatus:   newDaemonStatusReporter(cfg, client),
+		primaryRuntime: primaryRuntime,
+		agentRuntimes:  map[string]*managedWorkspaceRuntime{},
+		agentWorkers:   map[string]*managedAgentWorker{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	runFinished := make(chan struct{})
+	blockingRuntimeDone := make(chan struct{})
+	shutdownBlocked := make(chan struct{})
+	var blockingRuntimeDoneOnce sync.Once
+	var shutdownBlockedOnce sync.Once
+	t.Cleanup(func() {
+		cancel()
+		releaseWorkspaceStreamOnce.Do(func() { close(releaseWorkspaceStream) })
+		releaseThirdReportOnce.Do(func() { close(releaseThirdReport) })
+		blockingRuntimeDoneOnce.Do(func() { close(blockingRuntimeDone) })
+		select {
+		case <-runFinished:
+		case <-time.After(time.Second):
+		}
+	})
+	go func() {
+		defer close(runFinished)
+		done <- service.run(ctx, heartbeatTicks)
+	}()
+
+	select {
+	case <-initialStatus:
+	case <-time.After(time.Second):
+		t.Fatal("daemon did not report initial online status")
+	}
+	select {
+	case <-workspaceStreamStarted:
+	case <-time.After(time.Second):
+		t.Fatal("workspace event stream did not start")
+	}
+
+	service.mu.Lock()
+	service.agentRuntimes["blocking"] = &managedWorkspaceRuntime{
+		cancel: func() {
+			shutdownBlockedOnce.Do(func() { close(shutdownBlocked) })
+		},
+		done: blockingRuntimeDone,
+	}
+	service.mu.Unlock()
+
+	heartbeatTicks <- time.Now()
+	select {
+	case <-laterStatus:
+	case <-time.After(time.Second):
+		t.Fatal("daemon did not emit a periodic heartbeat")
+	}
+	heartbeatTicks <- time.Now()
+	select {
+	case <-thirdReportStarted:
+	case <-time.After(time.Second):
+		t.Fatal("third daemon heartbeat did not enter the blocking transport")
+	}
+	releaseWorkspaceStreamOnce.Do(func() { close(releaseWorkspaceStream) })
+	select {
+	case <-shutdownBlocked:
+		t.Fatal("fatal shutdown reached runtime teardown before the in-flight heartbeat joined")
+	case <-time.After(100 * time.Millisecond):
+	}
+	releaseThirdReportOnce.Do(func() { close(releaseThirdReport) })
+	select {
+	case <-shutdownBlocked:
+	case <-time.After(time.Second):
+		t.Fatal("fatal workspace drain did not enter teardown after the in-flight heartbeat joined")
+	}
+
+	countAtShutdown := statusCount.Load()
+	heartbeatTicks <- time.Now()
+	select {
+	case <-laterStatus:
+		t.Fatalf("daemon status heartbeat advanced during blocking fatal shutdown: got %d requests, want %d", statusCount.Load(), countAtShutdown)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	blockingRuntimeDoneOnce.Do(func() { close(blockingRuntimeDone) })
+	select {
+	case err := <-done:
+		var statusErr *backendStatusError
+		if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusGone {
+			t.Fatalf("Run error = %v, want terminal workspace drain", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not return after shutdown unblocked")
+	}
+	assertDeterministicWorkspaceStoresClosed(t, storeCloses)
+}
+
 func TestComputeLocalTextEditsUsesUTF16Cursor(t *testing.T) {
 	edits, err := computeLocalTextEdits("a🙂b", "a🙂Xb")
 	if err != nil {
@@ -148,7 +491,7 @@ func TestReconcileTrackedDocumentSkipsInvalidUTF8LocalFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte{'b', 0xff, 'd'}, 0o644); err != nil {
 		t.Fatalf("write invalid local file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -156,12 +499,12 @@ func TestReconcileTrackedDocumentSkipsInvalidUTF8LocalFile(t *testing.T) {
 	if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
 		t.Fatalf("store base: %v", err)
 	}
-	tracked := &trackedFile{
+	tracked := newTestTrackedFile(t, &trackedFile{
 		DocumentID:   "doc_1",
 		DocumentPath: "doc.md",
 		Path:         path,
 		cache:        cache,
-	}
+	})
 	tracked.setProjectedContent("base")
 	if err := tracked.storeProjectedBase("base", baseDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)
@@ -407,7 +750,7 @@ func TestWorkspaceReplicaLocalChangeMarksDirtyDocument(t *testing.T) {
 }
 
 func TestReconcileDirtyDocumentsRequeuesOutboxAfterHTTPError(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -454,7 +797,7 @@ func TestReconcileDirtyDocumentsRequeuesOutboxAfterHTTPError(t *testing.T) {
 }
 
 func TestReconcileDirtyDocumentsDoesNotDropLaterIDsAfterError(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -632,6 +975,7 @@ func TestRefreshSharesFetchedWorkspaceWithWorkersAndReplicas(t *testing.T) {
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 		agentWorkers:  map[string]*managedAgentWorker{},
 	}
+	defer service.closePrimaryRuntime()
 
 	if err := service.refresh(ctx); err != nil {
 		t.Fatalf("refresh: %v", err)
@@ -701,6 +1045,7 @@ func TestInitialRefreshFailsFastOnAgentStartupError(t *testing.T) {
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 		agentWorkers:  map[string]*managedAgentWorker{},
 	}
+	defer service.closePrimaryRuntime()
 	service.sessions = newAgentSessionSupervisor(service.cfg, nil, newFakeRuntimeRegistry(factory))
 	defer service.sessions.Shutdown()
 	defer service.closeAgentWorkers()
@@ -777,6 +1122,7 @@ func TestRefreshStartsAgentSessionFromWorkspaceSnapshot(t *testing.T) {
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 		agentWorkers:  map[string]*managedAgentWorker{},
 	}
+	defer service.closePrimaryRuntime()
 	service.sessions = newAgentSessionSupervisor(service.cfg, nil, newFakeRuntimeRegistry(factory))
 	defer service.sessions.Shutdown()
 	defer service.closeAgentWorkers()
@@ -861,6 +1207,7 @@ func TestRefreshStopsAgentSessionWhenWorkspaceSnapshotRemovesAgent(t *testing.T)
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 		agentWorkers:  map[string]*managedAgentWorker{},
 	}
+	defer service.closePrimaryRuntime()
 	service.sessions = newAgentSessionSupervisor(service.cfg, nil, newFakeRuntimeRegistry(factory))
 	defer service.sessions.Shutdown()
 	defer service.closeAgentWorkers()
@@ -930,7 +1277,7 @@ func TestApplyProjectedContentUpdatesSnapshotBeforeWriting(t *testing.T) {
 	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	tracked := &trackedFile{Path: path}
+	tracked := newTestTrackedFile(t, &trackedFile{Path: path})
 	tracked.setProjectedContent("old")
 
 	clean, err := applyProjectedContent(tracked, "new", nil, 0)
@@ -958,7 +1305,7 @@ func TestApplyProjectedContentRollsBackOnWriteFailure(t *testing.T) {
 	if err := os.Mkdir(path, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	tracked := &trackedFile{Path: path}
+	tracked := newTestTrackedFile(t, &trackedFile{Path: path})
 	tracked.setProjectedContent("old")
 
 	if _, err := applyProjectedContent(tracked, "new", nil, 0); err == nil {
@@ -970,12 +1317,193 @@ func TestApplyProjectedContentRollsBackOnWriteFailure(t *testing.T) {
 	}
 }
 
+func TestApplyProjectedContentDoesNotAdvanceBaseAfterDurabilityFailure(t *testing.T) {
+	tests := []struct {
+		name            string
+		replaceFile     func(wantErr error) func(string, string, os.FileMode) error
+		wantDiskContent string
+	}{
+		{
+			name: "staged sync",
+			replaceFile: func(wantErr error) func(string, string, os.FileMode) error {
+				return func(path, content string, mode os.FileMode) error {
+					return replaceFileAtomicallyWith(
+						path,
+						content,
+						mode,
+						func(*os.File) error { return wantErr },
+						func(_, _ string) error { return errors.New("commit ran after staged sync failure") },
+					)
+				}
+			},
+			wantDiskContent: "old",
+		},
+		{
+			name: "post-rename flush",
+			replaceFile: func(wantErr error) func(string, string, os.FileMode) error {
+				return func(path, content string, mode os.FileMode) error {
+					return replaceFileAtomicallyWith(
+						path,
+						content,
+						mode,
+						func(file *os.File) error { return file.Sync() },
+						func(stagedPath, targetPath string) error {
+							if err := os.Rename(stagedPath, targetPath); err != nil {
+								return err
+							}
+							return wantErr
+						},
+					)
+				}
+			},
+			wantDiskContent: "new",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "doc.md")
+			if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+				t.Fatalf("write old projection: %v", err)
+			}
+			cache, err := newTestDocumentCache(t, t.TempDir())
+			if err != nil {
+				t.Fatalf("new cache: %v", err)
+			}
+			baseDoc := newDocWithText(t, "old")
+			if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
+				t.Fatalf("store base doc: %v", err)
+			}
+			baseRow, err := cache.ensureDocument("doc_1", "doc.md")
+			if err != nil {
+				t.Fatalf("load base row: %v", err)
+			}
+			fs := NewWorkspaceFS(root)
+			wantErr := errors.New("injected durability failure")
+			replaceFile := test.replaceFile(wantErr)
+			tracked := &trackedFile{
+				DocumentID:   "doc_1",
+				DocumentPath: "doc.md",
+				Path:         path,
+				FS:           fs,
+				cache:        cache,
+			}
+			tracked.setProjectedContent("old")
+			if err := tracked.storeProjectedBaseAtSeq("old", baseDoc.EncodeStateAsUpdate(), baseRow.AppliedSeq); err != nil {
+				t.Fatalf("store projected base: %v", err)
+			}
+
+			writeIfUnchanged := func(path string, expected projectedContentHash, content []byte) error {
+				return fs.writeIfUnchangedWith(path, expected, content, replaceFile)
+			}
+			if _, err := applyProjectedContentWithWrite(
+				tracked,
+				"new",
+				crdtStateFromContent("new"),
+				baseRow.AppliedSeq+1,
+				writeIfUnchanged,
+			); !errors.Is(err, wantErr) {
+				t.Fatalf("apply error = %v, want %v", err, wantErr)
+			}
+			projectedContent, _, projectedKnown, err := tracked.loadProjectedBase()
+			if err != nil {
+				t.Fatalf("load projected base: %v", err)
+			}
+			if !projectedKnown || projectedContent != "old" {
+				t.Fatalf("projected base advanced after durability failure: known=%v content=%q", projectedKnown, projectedContent)
+			}
+			if !tracked.matchesProjectedString("old") {
+				t.Fatal("in-memory projection advanced after durability failure")
+			}
+			if tracked.isLocalDirty() {
+				t.Fatal("durability failure produced an outbound local edit")
+			}
+			diskContent, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read disk after durability failure: %v", err)
+			}
+			if string(diskContent) != test.wantDiskContent {
+				t.Fatalf("disk content = %q, want %q", diskContent, test.wantDiskContent)
+			}
+		})
+	}
+}
+
+func TestProjectMergedContentDoesNotAdvanceBaseAfterWriteFailure(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "doc.md")
+	if err := os.WriteFile(path, []byte("local"), 0o644); err != nil {
+		t.Fatalf("write local content: %v", err)
+	}
+	cache, err := newTestDocumentCache(t, t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	baseDoc := newDocWithText(t, "base")
+	if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
+		t.Fatalf("store base doc: %v", err)
+	}
+	baseRow, err := cache.ensureDocument("doc_1", "doc.md")
+	if err != nil {
+		t.Fatalf("load base row: %v", err)
+	}
+	tracked := &trackedFile{
+		DocumentID:   "doc_1",
+		DocumentPath: "doc.md",
+		Path:         path,
+		cache:        cache,
+	}
+	tracked.setProjectedContent("base")
+	if err := tracked.storeProjectedBaseAtSeq("base", baseDoc.EncodeStateAsUpdate(), baseRow.AppliedSeq); err != nil {
+		t.Fatalf("store projected base: %v", err)
+	}
+	wantErr := errors.New("injected merge write failure")
+	writeCalled := false
+	writeIfUnchanged := func(gotPath string, expected projectedContentHash, content []byte) error {
+		writeCalled = true
+		if gotPath != path || expected != projectedHashString("local") || string(content) != "merged" {
+			t.Fatalf("unexpected merge write: path=%q expected=%+v content=%q", gotPath, expected, content)
+		}
+		return wantErr
+	}
+
+	if _, err := projectMergedContentOverLocalDiskWithWrite(
+		tracked,
+		"local",
+		crdtStateFromContent("local"),
+		baseRow.AppliedSeq,
+		"merged",
+		crdtStateFromContent("merged"),
+		baseRow.AppliedSeq+1,
+		writeIfUnchanged,
+	); !errors.Is(err, wantErr) {
+		t.Fatalf("project merge error = %v, want %v", err, wantErr)
+	}
+	if !writeCalled {
+		t.Fatal("merge write seam was not called")
+	}
+	projectedContent, _, projectedKnown, err := tracked.loadProjectedBase()
+	if err != nil {
+		t.Fatalf("load projected base: %v", err)
+	}
+	if !projectedKnown || projectedContent != "base" {
+		t.Fatalf("projected base advanced after merge write failure: known=%v content=%q", projectedKnown, projectedContent)
+	}
+	if !tracked.matchesProjectedString("base") {
+		t.Fatal("in-memory projection advanced after merge write failure")
+	}
+	if tracked.isLocalDirty() {
+		t.Fatal("merge write failure marked the working copy dirty")
+	}
+}
+
 func TestApplyProjectedContentDoesNotOverwriteDivergedDiskState(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "doc.md")
 	if err := os.WriteFile(path, []byte("old plus local edit"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	tracked := &trackedFile{Path: path}
+	tracked := newTestTrackedFile(t, &trackedFile{Path: path})
 	tracked.setProjectedContent("old")
 
 	clean, err := applyProjectedContent(tracked, "remote update", nil, 0)
@@ -1003,7 +1531,7 @@ func TestApplyProjectedContentConflictDoesNotAdvanceProjectedSeq(t *testing.T) {
 	if err := os.WriteFile(path, []byte("old plus local edit"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1015,7 +1543,7 @@ func TestApplyProjectedContentConflictDoesNotAdvanceProjectedSeq(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load base row: %v", err)
 	}
-	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache}
+	tracked := newTestTrackedFile(t, &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache})
 	tracked.setProjectedContent("old")
 	if err := tracked.storeProjectedBaseAtSeq("old", baseDoc.EncodeStateAsUpdate(), baseRow.AppliedSeq); err != nil {
 		t.Fatalf("store projected base: %v", err)
@@ -1073,7 +1601,7 @@ func TestProjectedBaseLivesInWorkspaceSQLiteWithCRDTState(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	cache, err := newDocumentCache(workspaceSyncDBPath(root))
+	cache, err := newTestDocumentCache(t, workspaceSyncDBPath(root))
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1109,7 +1637,7 @@ func TestProjectedBaseLivesInWorkspaceSQLiteWithCRDTState(t *testing.T) {
 }
 
 func TestReconcileTrackedDocumentNoopsWithoutDirtyOrPendingRemote(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1117,12 +1645,12 @@ func TestReconcileTrackedDocumentNoopsWithoutDirtyOrPendingRemote(t *testing.T) 
 	if err := os.Mkdir(path, 0o755); err != nil {
 		t.Fatalf("create unreadable-as-file path: %v", err)
 	}
-	tracked := &trackedFile{
+	tracked := newTestTrackedFile(t, &trackedFile{
 		DocumentID:   "doc_1",
 		DocumentPath: "doc.md",
 		Path:         path,
 		cache:        cache,
-	}
+	})
 	tracked.setProjectedContent("base")
 
 	service := newDocumentUpdateWebsocketTestRuntime(t, cache, func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int) {
@@ -1140,7 +1668,7 @@ func TestReconcileArchivesUnknownProjectedBaseInsteadOfDiffing(t *testing.T) {
 	if err := os.WriteFile(path, []byte("base"), 0o644); err != nil {
 		t.Fatalf("write projection: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1148,12 +1676,12 @@ func TestReconcileArchivesUnknownProjectedBaseInsteadOfDiffing(t *testing.T) {
 	if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
 		t.Fatalf("store base: %v", err)
 	}
-	tracked := &trackedFile{
+	tracked := newTestTrackedFile(t, &trackedFile{
 		DocumentID:   "doc_1",
 		DocumentPath: "doc.md",
 		Path:         path,
 		cache:        cache,
-	}
+	})
 	tracked.setProjectedContent("base")
 	if err := tracked.storeProjectedBase("base", baseDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)
@@ -1191,7 +1719,7 @@ func TestReconcileArchivesUnknownProjectedBaseInsteadOfDiffing(t *testing.T) {
 }
 
 func TestWorkspaceDocumentSocketAppendsIncomingUpdateToPendingLog(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1234,7 +1762,7 @@ func TestWorkspaceDocumentSocketAppendsIncomingUpdateToPendingLog(t *testing.T) 
 }
 
 func TestWorkspaceDocumentSocketIgnoresServerSyncStep1(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1267,7 +1795,7 @@ func TestWorkspaceDocumentSocketIgnoresServerSyncStep1(t *testing.T) {
 }
 
 func TestWorkspaceDocumentSocketServerSyncStep1PreservesDurableOutbox(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1495,7 +2023,7 @@ func TestWorkspaceDocumentSocketRunOnceSendsSyncStep1ForDesiredDocuments(t *test
 }
 
 func TestWorkspaceDocumentSocketInitialSyncDoesNotAdvertiseMissingCacheState(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1509,7 +2037,7 @@ func TestWorkspaceDocumentSocketInitialSyncDoesNotAdvertiseMissingCacheState(t *
 }
 
 func TestWorkspaceDocumentSocketInitialSyncUsesOnlyVerifiedLocalCacheState(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1527,7 +2055,7 @@ func TestWorkspaceDocumentSocketInitialSyncUsesOnlyVerifiedLocalCacheState(t *te
 }
 
 func TestDocumentCacheLocalStateVectorRequiresAppliedCRDTRows(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1583,7 +2111,7 @@ func TestReconcileTrackedDocumentMergesLocalEditWithPendingRemoteUpdate(t *testi
 		t.Fatalf("write initial file: %v", err)
 	}
 
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1591,12 +2119,12 @@ func TestReconcileTrackedDocumentMergesLocalEditWithPendingRemoteUpdate(t *testi
 	if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
 		t.Fatalf("store base: %v", err)
 	}
-	tracked := &trackedFile{
+	tracked := newTestTrackedFile(t, &trackedFile{
 		DocumentID:   "doc_1",
 		DocumentPath: "doc.md",
 		Path:         path,
 		cache:        cache,
-	}
+	})
 	tracked.setProjectedContent("base\n")
 	if err := tracked.storeProjectedBase("base\n", baseDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)
@@ -1664,16 +2192,16 @@ func TestReconcileTrackedDocumentDefersLocalUpdateWhenProjectedBaseMissingCRDTSt
 		t.Fatalf("write local file: %v", err)
 	}
 
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
-	tracked := &trackedFile{
+	tracked := newTestTrackedFile(t, &trackedFile{
 		DocumentID:   "doc_1",
 		DocumentPath: "doc.md",
 		Path:         path,
 		cache:        cache,
-	}
+	})
 	tracked.setProjectedContent("already synced\n")
 	tracked.markLocalDirty()
 
@@ -1696,19 +2224,19 @@ func TestReconcileTrackedDocumentArchivesLocalUpdateWithoutProjectedBase(t *test
 		t.Fatalf("write local file: %v", err)
 	}
 
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
 	if err := cache.storeDoc("doc_1", "doc.md", 1, newDocWithText(t, "")); err != nil {
 		t.Fatalf("store empty remote base: %v", err)
 	}
-	tracked := &trackedFile{
+	tracked := newTestTrackedFile(t, &trackedFile{
 		DocumentID:   "doc_1",
 		DocumentPath: "doc.md",
 		Path:         path,
 		cache:        cache,
-	}
+	})
 	tracked.setProjectedContent("large existing local file\n")
 	tracked.markLocalDirty()
 
@@ -1748,7 +2276,7 @@ func TestMaterializeExistingLocalFileUsesCachedBaseAsProjection(t *testing.T) {
 		t.Fatalf("write local file: %v", err)
 	}
 
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1816,16 +2344,16 @@ func TestReconcileArchivesUnknownLocalFileAfterPendingRemoteEstablishesBase(t *t
 		t.Fatalf("write local file: %v", err)
 	}
 
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
-	tracked := &trackedFile{
+	tracked := newTestTrackedFile(t, &trackedFile{
 		DocumentID:   "doc_append",
 		DocumentPath: "append.txt",
 		Path:         path,
 		cache:        cache,
-	}
+	})
 	tracked.setProjectedContent("")
 	tracked.markLocalDirty()
 	remoteUpdate := updateFromBaseContent(t, "", baseContent, "remote")
@@ -1887,7 +2415,7 @@ func TestSingleWriterAppendPressureReconcilesIncrementalBatches(t *testing.T) {
 	}
 	defer file.Close()
 
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1895,12 +2423,12 @@ func TestSingleWriterAppendPressureReconcilesIncrementalBatches(t *testing.T) {
 	if err := cache.storeDoc("doc_append", "append.txt", 1, baseDoc); err != nil {
 		t.Fatalf("store base doc: %v", err)
 	}
-	tracked := &trackedFile{
+	tracked := newTestTrackedFile(t, &trackedFile{
 		DocumentID:   "doc_append",
 		DocumentPath: "append.txt",
 		Path:         path,
 		cache:        cache,
-	}
+	})
 	tracked.setProjectedContent("")
 	if err := tracked.storeProjectedBase(""); err != nil {
 		t.Fatalf("store projected base: %v", err)
@@ -1927,7 +2455,7 @@ func TestSingleWriterAppendPressureReconcilesIncrementalBatches(t *testing.T) {
 	for i := 1; i <= totalLines; i++ {
 		line := fmt.Sprintf("%d\n", i)
 		expected.WriteString(line)
-		if err := appendOpenFileLocked(file, line); err != nil {
+		if err := writeFullString(file, line); err != nil {
 			t.Fatalf("append line %d: %v", i, err)
 		}
 		if err := markTrackedLocalDirty(tracked, path); err != nil {
@@ -1971,7 +2499,7 @@ func TestReconcileCapturesSequentialLocalAppendsAcrossCycles(t *testing.T) {
 		t.Fatalf("write local file: %v", err)
 	}
 
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -1983,12 +2511,12 @@ func TestReconcileCapturesSequentialLocalAppendsAcrossCycles(t *testing.T) {
 	if err := crdt.ApplyUpdateV1(serverDoc, baseDoc.EncodeStateAsUpdate(), "server-base"); err != nil {
 		t.Fatalf("apply server base: %v", err)
 	}
-	tracked := &trackedFile{
+	tracked := newTestTrackedFile(t, &trackedFile{
 		DocumentID:   "doc_append",
 		DocumentPath: "append.txt",
 		Path:         path,
 		cache:        cache,
-	}
+	})
 	tracked.setProjectedContent("1\n")
 	if err := tracked.storeProjectedBase("1\n", baseDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)
@@ -2035,7 +2563,7 @@ func TestReconcileRebasesAppendFromStaleWorkspaceBase(t *testing.T) {
 		t.Fatalf("write local file: %v", err)
 	}
 
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -2069,12 +2597,12 @@ func TestReconcileRebasesAppendFromStaleWorkspaceBase(t *testing.T) {
 		t.Fatalf("apply pending remote: %v", err)
 	}
 	unlock()
-	tracked := &trackedFile{
+	tracked := newTestTrackedFile(t, &trackedFile{
 		DocumentID:   "doc_append",
 		DocumentPath: "append.txt",
 		Path:         path,
 		cache:        cache,
-	}
+	})
 	tracked.setProjectedContent("1\n")
 	if err := tracked.storeProjectedBaseAtSeq("1\n", projectedDoc.EncodeStateAsUpdate(), projectedRow.AppliedSeq); err != nil {
 		t.Fatalf("store projected base: %v", err)
@@ -2110,7 +2638,7 @@ func TestReconcileSendsLocalEditBeforeApplyingPendingRemoteUpdate(t *testing.T) 
 		t.Fatalf("write local file: %v", err)
 	}
 
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -2122,12 +2650,12 @@ func TestReconcileSendsLocalEditBeforeApplyingPendingRemoteUpdate(t *testing.T) 
 	if _, err := cache.appendPendingRemoteUpdate("doc_1", "doc.md", remoteUpdate); err != nil {
 		t.Fatalf("append remote: %v", err)
 	}
-	tracked := &trackedFile{
+	tracked := newTestTrackedFile(t, &trackedFile{
 		DocumentID:   "doc_1",
 		DocumentPath: "doc.md",
 		Path:         path,
 		cache:        cache,
-	}
+	})
 	tracked.setProjectedContent("base\n")
 	if err := tracked.storeProjectedBase("base\n", baseDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)
@@ -2185,7 +2713,7 @@ func TestDocumentCacheRejectsInvalidRemoteUpdate(t *testing.T) {
 		t.Fatalf("write initial file: %v", err)
 	}
 
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -2222,7 +2750,7 @@ func TestReconcileTrackedDocumentAppliesPendingRemoteFromSQLiteLog(t *testing.T)
 	}
 
 	cacheRoot := t.TempDir()
-	cache, err := newDocumentCache(cacheRoot)
+	cache, err := newTestDocumentCache(t, cacheRoot)
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -2233,17 +2761,17 @@ func TestReconcileTrackedDocumentAppliesPendingRemoteFromSQLiteLog(t *testing.T)
 	if _, err := cache.appendPendingRemoteUpdate("doc_1", "doc.md", update); err != nil {
 		t.Fatalf("append pending remote: %v", err)
 	}
-	cache, err = newDocumentCache(cacheRoot)
+	cache, err = newTestDocumentCache(t, cacheRoot)
 	if err != nil {
 		t.Fatalf("reopen cache: %v", err)
 	}
 
-	tracked := &trackedFile{
+	tracked := newTestTrackedFile(t, &trackedFile{
 		DocumentID:   "doc_1",
 		DocumentPath: "doc.md",
 		Path:         path,
 		cache:        cache,
-	}
+	})
 	tracked.setProjectedContent("base")
 	if err := tracked.storeProjectedBase("base"); err != nil {
 		t.Fatalf("store projected base: %v", err)
@@ -2266,7 +2794,7 @@ func TestReconcileTrackedDocumentAppliesPendingRemoteFromSQLiteLog(t *testing.T)
 }
 
 func TestWorkspaceRuntimeReconcileTrackedDocumentsAppliesPendingRemoteUpdate(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -2299,7 +2827,7 @@ func TestWorkspaceRuntimeReconcileTrackedDocumentsAppliesPendingRemoteUpdate(t *
 	if err := os.WriteFile(path, []byte("base"), 0o644); err != nil {
 		t.Fatalf("write projection: %v", err)
 	}
-	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache}
+	tracked := newTestTrackedFile(t, &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache})
 	tracked.setProjectedContent("base")
 	if err := tracked.storeProjectedBase("base"); err != nil {
 		t.Fatalf("store projected base: %v", err)
@@ -2325,7 +2853,7 @@ func TestWorkspaceRuntimeReconcileTrackedDocumentsAppliesPendingRemoteUpdate(t *
 }
 
 func TestDocumentCacheDedupesConcurrentRemoteDeliveries(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -2368,7 +2896,7 @@ func TestDocumentCacheDedupesConcurrentRemoteDeliveries(t *testing.T) {
 }
 
 func TestReconcileKeepsIncomingPendingWhenOutgoingSendFails(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -2384,12 +2912,12 @@ func TestReconcileKeepsIncomingPendingWhenOutgoingSendFails(t *testing.T) {
 	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
 		t.Fatalf("write local: %v", err)
 	}
-	tracked := &trackedFile{
+	tracked := newTestTrackedFile(t, &trackedFile{
 		DocumentID:   "doc_1",
 		DocumentPath: "doc.md",
 		Path:         path,
 		cache:        cache,
-	}
+	})
 	tracked.setProjectedContent("base\n")
 	if err := tracked.storeProjectedBase("base\n", baseDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)
@@ -2455,7 +2983,7 @@ func TestMaterializeTrackedFileDefersProjectionToReconcile(t *testing.T) {
 		ID:   "doc_1",
 		Path: "docs/remote.md",
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new document cache: %v", err)
 	}
@@ -2478,6 +3006,51 @@ func TestMaterializeTrackedFileDefersProjectionToReconcile(t *testing.T) {
 	}
 }
 
+func TestMaterializeTrackedFileWithoutCacheCreatesEmptyProjection(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "docs", "new.md")
+	tracked, err := materializeTrackedFile(context.Background(), nil, &document{
+		ID:   "doc_new",
+		Path: "docs/new.md",
+	}, path)
+	if err != nil {
+		t.Fatalf("materialize tracked file: %v", err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read created projection: %v", err)
+	}
+	if len(content) != 0 || !tracked.matchesProjectedString("") {
+		t.Fatalf("expected empty projection, content=%q", content)
+	}
+}
+
+func TestMaterializeTrackedFileWithoutCachePreservesExistingLocalContent(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "docs", "local.md")
+	local := []byte("local content\n")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	if err := os.WriteFile(path, local, 0o644); err != nil {
+		t.Fatalf("write local file: %v", err)
+	}
+	tracked, err := materializeTrackedFile(context.Background(), nil, &document{
+		ID:   "doc_local",
+		Path: "docs/local.md",
+	}, path)
+	if err != nil {
+		t.Fatalf("materialize tracked file: %v", err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read preserved projection: %v", err)
+	}
+	if string(content) != string(local) || !tracked.matchesProjectedString(string(local)) {
+		t.Fatalf("local content was not preserved, got %q want %q", content, local)
+	}
+}
+
 func TestReconcileProjectsMissingFileFromSharedCache(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "docs", "remote.md")
@@ -2488,7 +3061,7 @@ func TestReconcileProjectsMissingFileFromSharedCache(t *testing.T) {
 		ID:   "doc_1",
 		Path: "docs/remote.md",
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new document cache: %v", err)
 	}
@@ -2534,7 +3107,7 @@ func TestReconcileArchivesUnknownWorkingCopyBeforeProjection(t *testing.T) {
 	if err := os.WriteFile(path, []byte("local draft"), 0o644); err != nil {
 		t.Fatalf("write local draft: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new document cache: %v", err)
 	}
@@ -2589,11 +3162,11 @@ func TestReconcileArchivesUnknownWorkingCopyWithoutCacheContent(t *testing.T) {
 	if err := os.WriteFile(path, []byte("local edit"), 0o644); err != nil {
 		t.Fatalf("write local edit: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new document cache: %v", err)
 	}
-	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache}
+	tracked := newTestTrackedFile(t, &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache})
 	tracked.markLocalDirty()
 	service := newDocumentUpdateWebsocketTestRuntime(t, cache, func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int) {
 		t.Fatalf("must not send local update without projected base; bytes=%d", len(update))
@@ -2624,7 +3197,7 @@ func TestReconcileUsesSQLiteProjectedBase(t *testing.T) {
 	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
 		t.Fatalf("write local edit: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new document cache: %v", err)
 	}
@@ -2632,7 +3205,7 @@ func TestReconcileUsesSQLiteProjectedBase(t *testing.T) {
 	if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
 		t.Fatalf("store base doc: %v", err)
 	}
-	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache}
+	tracked := newTestTrackedFile(t, &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache})
 	tracked.setProjectedContent("base\n")
 	if err := tracked.storeProjectedBase("base\n", baseDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)
@@ -2663,11 +3236,11 @@ func TestHandleLocalChangeIgnoresProjectedWrite(t *testing.T) {
 	}
 
 	doc := newDocWithText(t, "hello")
-	tracked := &trackedFile{
+	tracked := newTestTrackedFile(t, &trackedFile{
 		DocumentID: "doc_1",
 		Path:       path,
 		Doc:        doc,
-	}
+	})
 	tracked.setProjectedContent("hello")
 
 	replica := &workspaceReplica{
@@ -2696,11 +3269,11 @@ func TestWorkspaceReplicaHandleLocalChangeIgnoresProjectedWrite(t *testing.T) {
 	}
 
 	doc := newDocWithText(t, "hello")
-	tracked := &trackedFile{
+	tracked := newTestTrackedFile(t, &trackedFile{
 		DocumentID: "doc_1",
 		Path:       path,
 		Doc:        doc,
-	}
+	})
 	tracked.setProjectedContent("hello")
 
 	replica := &workspaceReplica{
@@ -2939,7 +3512,7 @@ func TestCentralReconcilePublishesQueuedCleanMove(t *testing.T) {
 	if err := os.WriteFile(newPath, []byte("same"), 0o644); err != nil {
 		t.Fatalf("write moved file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -2947,13 +3520,13 @@ func TestCentralReconcilePublishesQueuedCleanMove(t *testing.T) {
 	if err := cache.storeDoc("doc_1", "docs/old.md", 1, baseDoc); err != nil {
 		t.Fatalf("store base: %v", err)
 	}
-	tracked := &trackedFile{
+	tracked := newTestTrackedFile(t, &trackedFile{
 		DocumentID:    "doc_1",
 		DocumentPath:  "docs/old.md",
 		Path:          newPath,
 		WorkspaceRoot: root,
 		cache:         cache,
-	}
+	})
 	tracked.setProjectedContent("same")
 	if err := tracked.storeProjectedBase("same", baseDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)
@@ -3011,7 +3584,7 @@ func TestCentralReconcileRemoteDeleteArchivesDirtyWorkingCopy(t *testing.T) {
 	if err := os.WriteFile(path, []byte("dirty local"), 0o644); err != nil {
 		t.Fatalf("write dirty file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -3090,7 +3663,7 @@ func TestLocalCreateCreatesEmptyDocumentAndKeepsLocalBytesDirty(t *testing.T) {
 		_, _ = w.Write([]byte(`{"id":"doc_created","updateId":1}`))
 	}))
 	defer server.Close()
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -3098,7 +3671,7 @@ func TestLocalCreateCreatesEmptyDocumentAndKeepsLocalBytesDirty(t *testing.T) {
 		cfg:      Config{BackendURL: server.URL, AgentID: "daemon_agent"},
 		client:   server.Client(),
 		docCache: cache,
-		replica:  &workspaceReplica{rootDir: root},
+		replica:  &workspaceReplica{rootDir: root, fs: NewWorkspaceFS(root)},
 	}
 
 	created, err := service.createDocumentFromLocalCandidate(context.Background(), localCreateCandidate{Root: root, Path: path, ActorID: "daemon_agent", ActorType: "daemon"}, "docs/new.md")
@@ -3165,7 +3738,7 @@ func TestLocalCreateIntentRetriesWithStableDocumentAndOperationID(t *testing.T) 
 	}))
 	defer server.Close()
 
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -3181,6 +3754,7 @@ func TestLocalCreateIntentRetriesWithStableDocumentAndOperationID(t *testing.T) 
 		localCreates: newLocalCreateQueue(),
 		replica: &workspaceReplica{
 			rootDir:         root,
+			fs:              NewWorkspaceFS(root),
 			projectedByPath: map[string]*trackedFile{},
 			projectedByID:   map[string]*trackedFile{},
 		},
@@ -3261,7 +3835,7 @@ func TestLocalCreateIntentKeepsClaimedPathAfterRootUpsertRestart(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -3356,7 +3930,7 @@ func TestOutgoingOutboxKeepsLocalUpdateWhenBackendSendFails(t *testing.T) {
 	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
 		t.Fatalf("write local file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -3364,7 +3938,7 @@ func TestOutgoingOutboxKeepsLocalUpdateWhenBackendSendFails(t *testing.T) {
 	if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
 		t.Fatalf("store base: %v", err)
 	}
-	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache, ActorID: "agent_1", ActorType: "agent"}
+	tracked := newTestTrackedFile(t, &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache, ActorID: "agent_1", ActorType: "agent"})
 	tracked.setProjectedContent("base\n")
 	if err := tracked.storeProjectedBase("base\n", baseDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)
@@ -3440,7 +4014,7 @@ func TestOutgoingOutboxStoresAllDirtyWorkspacesWithActorAttribution(t *testing.T
 	if err := os.WriteFile(agentPath, []byte("base\nagent\n"), 0o644); err != nil {
 		t.Fatalf("write agent: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -3448,8 +4022,8 @@ func TestOutgoingOutboxStoresAllDirtyWorkspacesWithActorAttribution(t *testing.T
 	if err := cache.storeDoc("doc_1", "doc.md", 1, baseDoc); err != nil {
 		t.Fatalf("store base: %v", err)
 	}
-	primaryTracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: primaryPath, WorkspaceRoot: primaryRoot, cache: cache, ActorID: "daemon_agent", ActorType: "daemon"}
-	agentTracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: agentPath, WorkspaceRoot: agentRoot, cache: cache, ActorID: "agent_1", ActorType: "agent"}
+	primaryTracked := newTestTrackedFile(t, &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: primaryPath, WorkspaceRoot: primaryRoot, cache: cache, ActorID: "daemon_agent", ActorType: "daemon"})
+	agentTracked := newTestTrackedFile(t, &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: agentPath, WorkspaceRoot: agentRoot, cache: cache, ActorID: "agent_1", ActorType: "agent"})
 	for _, tracked := range []*trackedFile{primaryTracked, agentTracked} {
 		tracked.setProjectedContent("base\n")
 		if err := tracked.storeProjectedBase("base\n", baseDoc.EncodeStateAsUpdate()); err != nil {
@@ -3487,7 +4061,7 @@ func TestOutgoingOutboxClearsOnHTTPAcceptance(t *testing.T) {
 	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
 		t.Fatalf("write local file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -3499,7 +4073,7 @@ func TestOutgoingOutboxClearsOnHTTPAcceptance(t *testing.T) {
 	if err := crdt.ApplyUpdateV1(serverDoc, baseDoc.EncodeStateAsUpdate(), "server-base"); err != nil {
 		t.Fatalf("apply server base: %v", err)
 	}
-	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache}
+	tracked := newTestTrackedFile(t, &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache})
 	tracked.setProjectedContent("base\n")
 	if err := tracked.storeProjectedBase("base\n", baseDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)
@@ -3534,7 +4108,7 @@ func TestOutgoingOutboxFinalizeConflictStoresAcceptedLocalProjectedSeq(t *testin
 	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
 		t.Fatalf("write local file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -3550,7 +4124,7 @@ func TestOutgoingOutboxFinalizeConflictStoresAcceptedLocalProjectedSeq(t *testin
 	if err := crdt.ApplyUpdateV1(serverDoc, baseDoc.EncodeStateAsUpdate(), "server-base"); err != nil {
 		t.Fatalf("apply server base: %v", err)
 	}
-	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache}
+	tracked := newTestTrackedFile(t, &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache})
 	tracked.setProjectedContent("base\n")
 	if err := tracked.storeProjectedBaseAtSeq("base\n", baseDoc.EncodeStateAsUpdate(), baseRow.AppliedSeq); err != nil {
 		t.Fatalf("store projected base: %v", err)
@@ -3609,7 +4183,7 @@ func TestOutgoingOutboxFinalizeDuplicateDoesNotRegressProjectedSeq(t *testing.T)
 	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
 		t.Fatalf("write local file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -3659,7 +4233,7 @@ func TestOutgoingOutboxFinalizeDuplicateDoesNotRegressProjectedSeq(t *testing.T)
 	if remoteSeq <= localSeq {
 		t.Fatalf("remote seq %d must be after local seq %d", remoteSeq, localSeq)
 	}
-	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache}
+	tracked := newTestTrackedFile(t, &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache})
 	tracked.setProjectedContent("base\nlocal\n")
 	if err := tracked.storeProjectedBaseAtSeq("base\nlocal\n", record.ObservedState, localSeq); err != nil {
 		t.Fatalf("store local projected base: %v", err)
@@ -3698,7 +4272,7 @@ func TestFinalizeSentOutboxIgnoresSnapshotFailureAndClearsOutbox(t *testing.T) {
 	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
 		t.Fatalf("write local file: %v", err)
 	}
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -3734,7 +4308,7 @@ func TestFinalizeSentOutboxIgnoresSnapshotFailureAndClearsOutbox(t *testing.T) {
 		t.Fatalf("store outbox: %v", err)
 	}
 	entry.mu.Unlock()
-	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache}
+	tracked := newTestTrackedFile(t, &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache})
 	tracked.setProjectedContent("base\n")
 	if err := tracked.storeProjectedBaseAtSeq("base\n", baseDoc.EncodeStateAsUpdate(), baseRow.AppliedSeq); err != nil {
 		t.Fatalf("store projected base: %v", err)
@@ -3774,7 +4348,7 @@ func TestOutgoingOutboxSurvivesCacheReopenAndResendsIdempotently(t *testing.T) {
 	if err := os.WriteFile(path, []byte("base\nlocal\n"), 0o644); err != nil {
 		t.Fatalf("write local file: %v", err)
 	}
-	cache, err := newDocumentCache(cacheRoot)
+	cache, err := newTestDocumentCache(t, cacheRoot)
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -3786,7 +4360,7 @@ func TestOutgoingOutboxSurvivesCacheReopenAndResendsIdempotently(t *testing.T) {
 	if err := crdt.ApplyUpdateV1(serverDoc, baseDoc.EncodeStateAsUpdate(), "server-base"); err != nil {
 		t.Fatalf("apply server base: %v", err)
 	}
-	tracked := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache}
+	tracked := newTestTrackedFile(t, &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: cache})
 	tracked.setProjectedContent("base\n")
 	if err := tracked.storeProjectedBase("base\n", baseDoc.EncodeStateAsUpdate()); err != nil {
 		t.Fatalf("store projected base: %v", err)
@@ -3799,11 +4373,11 @@ func TestOutgoingOutboxSurvivesCacheReopenAndResendsIdempotently(t *testing.T) {
 		t.Fatal("expected first reconcile to keep outbox after backend failure")
 	}
 
-	reopened, err := newDocumentCache(cacheRoot)
+	reopened, err := newTestDocumentCache(t, cacheRoot)
 	if err != nil {
 		t.Fatalf("reopen cache: %v", err)
 	}
-	restarted := &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: reopened}
+	restarted := newTestTrackedFile(t, &trackedFile{DocumentID: "doc_1", DocumentPath: "doc.md", Path: path, cache: reopened})
 	restarted.setProjectedContent("base\n")
 	restarted.markLocalDirty()
 	duplicateSends := 0

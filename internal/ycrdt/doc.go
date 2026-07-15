@@ -2,6 +2,7 @@ package ycrdt
 
 /*
 #cgo LDFLAGS: ${SRCDIR}/../../third_party/y-crdt/target/release/libyrs.a
+#cgo windows LDFLAGS: -lws2_32 -lntdll -luserenv -ldbghelp -lunwind
 #include <stdlib.h>
 #include "yrs_min.h"
 */
