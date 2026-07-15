@@ -15,7 +15,7 @@ import {
   type OnboardingContext,
   type OnboardingLiveSignals,
   type OnboardingRole,
-} from "./onboarding";
+} from "./onboardingEngine";
 
 const emptySignals: OnboardingLiveSignals = {
   documentCount: 0,

@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
-import type { OnboardingScope } from "./onboarding";
+import type { OnboardingScope } from "./onboardingEngine";
 
 // The single owner of onboarding event flags (plan §6.1). Both the engine context
 // (via useOnboardingController) and useOnboarding read from THIS one store, keyed by

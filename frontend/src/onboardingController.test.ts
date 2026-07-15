@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { deriveOnboardingSignals, toOnboardingStep } from "./onboardingController";
-import { NODES, acknowledgeFlag } from "./onboarding";
+import { NODES, acknowledgeFlag } from "./onboardingEngine";
 import type { WorkspaceState, Daemon, Agent, ThreadItem, AgentRun } from "./types";
 
 // Minimal fixtures — only the fields deriveOnboardingSignals reads. Cast so the
