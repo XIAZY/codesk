@@ -87,6 +87,15 @@ func TestSyncerConfigFieldMapping(t *testing.T) {
 	if cfg.AgentWorkspaceRoot != filepath.Join(dirs.Data, "agents") {
 		t.Errorf("AgentWorkspaceRoot = %q, want %q", cfg.AgentWorkspaceRoot, filepath.Join(dirs.Data, "agents"))
 	}
+	if cfg.CodexCommand != "codex" {
+		t.Errorf("CodexCommand = %q, want %q", cfg.CodexCommand, "codex")
+	}
+	if cfg.ClaudeCommand != "claude" {
+		t.Errorf("ClaudeCommand = %q, want %q", cfg.ClaudeCommand, "claude")
+	}
+	if cfg.AgentToolBaseURL != "http://127.0.0.1:7778" {
+		t.Errorf("AgentToolBaseURL = %q, want %q", cfg.AgentToolBaseURL, "http://127.0.0.1:7778")
+	}
 }
 
 func TestSyncerConfigDoesNotReadEnv(t *testing.T) {

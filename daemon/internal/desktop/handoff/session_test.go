@@ -326,6 +326,24 @@ func TestSessionRejectsInvalidRequestsWithoutConsumingNonce(t *testing.T) {
 			wantStatus: http.StatusBadRequest,
 		},
 		{
+			name: "workspace URL with FTP scheme",
+			request: func(session *Session) *http.Request {
+				form := validForm()
+				form.Set("workspace_url", "ftp://app.example.test/w/desktop-qa")
+				return formRequest(t, session.CallbackURL(), form)
+			},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "workspace URL with custom scheme",
+			request: func(session *Session) *http.Request {
+				form := validForm()
+				form.Set("workspace_url", "codesk://app.example.test/w/desktop-qa")
+				return formRequest(t, session.CallbackURL(), form)
+			},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
 			name: "workspace URL with credentials",
 			request: func(session *Session) *http.Request {
 				form := validForm()

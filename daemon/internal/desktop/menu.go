@@ -46,6 +46,7 @@ type MenuModel struct {
 type MenuOptions struct {
 	Snapshot       Snapshot
 	Configured     bool
+	Connecting     bool
 	WorkspaceName  string
 	LaunchAtLogin  bool
 	DesktopVersion string
@@ -71,6 +72,9 @@ func BuildMenu(options MenuOptions) MenuModel {
 	if options.Configured && options.Snapshot.State == StateReconnectRequired {
 		connectTitle = "Reconnect..."
 	}
+	if options.Connecting {
+		connectTitle = "Connecting..."
+	}
 	version := strings.TrimSpace(options.DesktopVersion)
 	if version == "" {
 		version = "unknown"
@@ -88,7 +92,7 @@ func BuildMenu(options MenuOptions) MenuModel {
 			ID:      MenuItemConnect,
 			Action:  MenuActionConnect,
 			Title:   connectTitle,
-			Enabled: !quitting && (!options.Configured || options.Snapshot.State == StateReconnectRequired),
+			Enabled: !quitting && !options.Connecting && (!options.Configured || options.Snapshot.State == StateReconnectRequired),
 		},
 		{
 			ID:      MenuItemRestart,
