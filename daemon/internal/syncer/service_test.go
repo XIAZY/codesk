@@ -246,6 +246,7 @@ func TestRunReportsDaemonOnlineOnlyAfterInitialRefreshSucceeds(t *testing.T) {
 		primaryRuntime: primaryRuntime,
 		agentRuntimes:  map[string]*managedWorkspaceRuntime{},
 		agentWorkers:   map[string]*managedAgentWorker{},
+		ready:          make(chan struct{}),
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -261,6 +262,12 @@ func TestRunReportsDaemonOnlineOnlyAfterInitialRefreshSucceeds(t *testing.T) {
 		t.Fatal("timed out waiting for initial workspace recovery")
 	}
 	select {
+	case <-service.Ready():
+		cancel()
+		t.Fatal("service reported ready before initial workspace recovery completed")
+	default:
+	}
+	select {
 	case <-statusRequests:
 		cancel()
 		t.Fatal("daemon reported online before initial workspace recovery completed")
@@ -272,6 +279,12 @@ func TestRunReportsDaemonOnlineOnlyAfterInitialRefreshSucceeds(t *testing.T) {
 	case <-time.After(time.Second):
 		cancel()
 		t.Fatal("daemon did not report online after initial workspace recovery completed")
+	}
+	select {
+	case <-service.Ready():
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("service did not report ready after successful startup")
 	}
 	select {
 	case <-workspaceStreamStarted:

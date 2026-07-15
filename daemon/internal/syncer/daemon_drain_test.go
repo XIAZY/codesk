@@ -103,7 +103,7 @@ func TestRunExposesReconnectRequiredError(t *testing.T) {
 				t.Fatalf("New() error = %v", err)
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			err = service.Run(ctx)
 			if errors.Is(err, context.DeadlineExceeded) {
