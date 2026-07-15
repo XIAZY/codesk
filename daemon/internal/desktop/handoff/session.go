@@ -21,7 +21,7 @@ import (
 
 const (
 	callbackPrefix = "/desktop/connect/"
-	completionPath = "/desktop-handoff-complete.html"
+	completionPath = "/desktop/connect/complete"
 	maxBodyBytes   = 16 << 10
 	maxTokenBytes  = 4 << 10
 	rejectionBody  = "desktop handoff rejected\n"

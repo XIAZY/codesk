@@ -94,7 +94,12 @@ func TestSessionAcceptsOneValidFormPost(t *testing.T) {
 	if location != session.completionURL {
 		t.Fatalf("redirect location = %q, want %q", location, session.completionURL)
 	}
-	if strings.Contains(location, testToken) || strings.Contains(location, session.CallbackURL()) || strings.Contains(location, callbackPrefix) {
+	callback, err := url.Parse(session.CallbackURL())
+	if err != nil {
+		t.Fatalf("parse callback URL: %v", err)
+	}
+	nonce := strings.TrimPrefix(callback.Path, callbackPrefix)
+	if strings.Contains(location, testToken) || strings.Contains(location, nonce) {
 		t.Fatal("redirect location contains credential or callback state")
 	}
 	for header, want := range map[string]string{
