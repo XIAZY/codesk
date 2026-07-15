@@ -50,7 +50,7 @@ type fakeRuntimeProcess struct {
 	failResume      bool
 	startIgnoreCtx  bool
 	exitInfo        RuntimeExitInfo
-	lastActivity    time.Time
+	activitySeq     uint64
 
 	// Optional StartTurn interception: when startTurnEntered/startTurnRelease are
 	// set, a StartTurn write signals entry then blocks until released, WITHOUT
@@ -235,15 +235,16 @@ func (p *fakeRuntimeProcess) setExitInfo(info RuntimeExitInfo) {
 	p.mu.Unlock()
 }
 
-func (p *fakeRuntimeProcess) LastActivityAt() time.Time {
+func (p *fakeRuntimeProcess) ActivitySeq() uint64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.lastActivity
+	return p.activitySeq
 }
 
-func (p *fakeRuntimeProcess) setLastActivity(t time.Time) {
+// advanceActivity simulates the driver decoding one more valid frame.
+func (p *fakeRuntimeProcess) advanceActivity() {
 	p.mu.Lock()
-	p.lastActivity = t
+	p.activitySeq++
 	p.mu.Unlock()
 }
 
@@ -2301,7 +2302,7 @@ func TestAgentSessionHeartbeatContinuousTelemetryNeverStalls(t *testing.T) {
 	// frame decoded each interval.
 	for i := 0; i < 40; i++ {
 		clock = clock.Add(supervisor.heartbeatInterval)
-		process.setLastActivity(clock)
+		process.advanceActivity() // a fresh valid frame decoded this interval
 		if !supervisor.evaluateLiveness("agent_1", process) {
 			t.Fatal("liveness must keep watching a live working session")
 		}
@@ -2376,6 +2377,66 @@ func TestAgentSessionHeartbeatStallWithoutPendingWorkDoesNotReplace(t *testing.T
 	if sessions != 1 {
 		t.Fatalf("expected the single stalled session to remain, got %d", sessions)
 	}
+}
+
+// Item #5 liveness: a notification that STARTS a turn must refresh the liveness
+// floor, even though it bypasses markWorking. Otherwise a long-idle session's
+// freshly started turn is measured against the hours-old idle timestamp and can
+// be declared stalled before the provider's first frame.
+func TestAgentSessionNotificationTurnRefreshesLivenessFloor(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	clock := time.Unix(1_000_000, 0)
+	supervisor.now = func() time.Time { return clock }
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	// The session sits idle far longer than stallAfter (a legitimately long-idle
+	// agent), so its lastRuntimeEventAt is now stale.
+	clock = clock.Add(2 * supervisor.stallAfter)
+	// A notification starts a turn. Its freshly started turn must not be judged
+	// stalled against the stale idle timestamp before the first provider frame.
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "start work", "for-me:v1", ""); err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	supervisor.evaluateLiveness("agent_1", process)
+	if got, _ := sessionState(supervisor, "agent_1"); got != "working" {
+		t.Fatalf("a freshly started notification turn must not stall before its first frame; state=%q", got)
+	}
+}
+
+// Item #5 liveness, blocker 7: once stalled, resumed telemetry (the activity
+// generation advancing) must clear the stall on the next poll — a recovered
+// runtime is never left stalled for the next notification to kill.
+func TestAgentSessionStalledRecoversWhenTelemetryResumes(t *testing.T) {
+	supervisor, _, process, _, clock := stalledWorkingSession(t, nil)
+	defer supervisor.Shutdown()
+	// A fresh valid frame decodes (generation advances). The next poll must recover.
+	process.advanceActivity()
+	supervisor.evaluateLiveness("agent_1", process)
+	if got, _ := sessionState(supervisor, "agent_1"); got != "working" {
+		t.Fatalf("resumed telemetry must clear the stall; state=%q", got)
+	}
+	_ = clock
+}
+
+// Item #5 liveness, blocker 12: silence is measured from supervisor-monotonic time
+// and recovery keys off the activity GENERATION, so a backward wall-clock step
+// (the injected clock going back) with unchanged telemetry must NOT falsely
+// "recover" a stalled session.
+func TestAgentSessionStalledDoesNotRecoverOnBackwardClockWithoutNewFrame(t *testing.T) {
+	supervisor, _, process, _, clock := stalledWorkingSession(t, nil)
+	defer supervisor.Shutdown()
+	// Wall clock steps BACKWARD, but no new frame decodes (generation unchanged).
+	*clock = clock.Add(-2 * supervisor.stallAfter)
+	supervisor.evaluateLiveness("agent_1", process)
+	if got, _ := sessionState(supervisor, "agent_1"); got != "stalled" {
+		t.Fatalf("a backward clock step without a new frame must not recover; state=%q", got)
+	}
+	_ = process
 }
 
 // Item #5 stall replacement, row 1 (via notification): a notification whose

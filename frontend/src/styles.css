@@ -461,6 +461,11 @@ a:focus-visible,
   color: var(--err);
 }
 
+.chip.stalled {
+  background: color-mix(in oklab, var(--warn) 16%, var(--paper-1));
+  color: var(--warn);
+}
+
 .avi {
   width: 30px;
   height: 30px;
@@ -556,6 +561,10 @@ a:focus-visible,
 .status-dot.deleted,
 .status-dot.failed {
   background: var(--err);
+}
+
+.status-dot.stalled {
+  background: var(--warn);
 }
 
 @keyframes status-pulse {

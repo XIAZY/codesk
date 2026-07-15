@@ -100,10 +100,10 @@ type claudeRuntimeProcess struct {
 	stopping chan struct{}
 	stopOnce sync.Once
 
-	// lastActivity is the unix-nano time the read loop last decoded a
-	// syntactically valid stream frame, stored atomically (one store per valid
-	// frame, no lock) so the supervisor heartbeat can poll it without contending
-	// with WriteStdin/lifecycle handling. Zero means no valid frame decoded yet.
+	// lastActivity is the count of syntactically valid stream frames the read loop
+	// has decoded, incremented atomically (one Add per valid frame, no lock) so the
+	// supervisor heartbeat can poll the activity generation without contending with
+	// WriteStdin/lifecycle handling. 0 means no valid frame decoded yet.
 	lastActivity atomic.Int64
 
 	mu         sync.Mutex
@@ -448,14 +448,16 @@ func (p *claudeRuntimeProcess) readLoop(stdout io.Reader) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		p.logf("stream recv %s", truncateForLog(string(line)))
-		// Liveness at the read boundary: a syntactically valid frame — even one
-		// whose type we don't map — proves the runtime is alive, so stamp before
-		// any semantic mapping. Malformed output must NOT count (a junk-spewer must
-		// not manufacture a heartbeat), so gate strictly on JSON-object validity.
+		// Liveness at the LITERAL read boundary: increment the activity generation the
+		// instant a syntactically valid frame is decoded — BEFORE the synchronous
+		// logf (which takes the log/global-write mutexes and does file I/O) and before
+		// any semantic mapping. Otherwise a contended/blocked log sink could stall the
+		// generation and let the supervisor declare a demonstrably-live runtime stalled
+		// (blocker 17). Malformed output must NOT count — gate on JSON-object validity.
 		if isValidRuntimeFrame(line) {
 			p.noteActivity()
 		}
+		p.logf("stream recv %s", truncateForLog(string(line)))
 		event := parseClaudeStreamLine(line)
 		if event == nil {
 			continue
@@ -554,20 +556,17 @@ func (p *claudeRuntimeProcess) ExitInfo() RuntimeExitInfo {
 	return p.exitInfo
 }
 
-// noteActivity records that a valid stream frame was just decoded (read boundary).
+// noteActivity records that a valid stream frame was just decoded (read boundary)
+// by advancing the activity generation counter.
 func (p *claudeRuntimeProcess) noteActivity() {
-	p.lastActivity.Store(time.Now().UnixNano())
+	p.lastActivity.Add(1)
 }
 
-func (p *claudeRuntimeProcess) LastActivityAt() time.Time {
+func (p *claudeRuntimeProcess) ActivitySeq() uint64 {
 	if p == nil {
-		return time.Time{}
+		return 0
 	}
-	nanos := p.lastActivity.Load()
-	if nanos == 0 {
-		return time.Time{}
-	}
-	return time.Unix(0, nanos)
+	return uint64(p.lastActivity.Load())
 }
 
 // claudeStderrTail is the process's stderr writer: it logs complete lines to

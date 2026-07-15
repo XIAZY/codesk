@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"strings"
 	"sync"
-	"time"
 )
 
 // isValidRuntimeFrame reports whether line is a syntactically valid JSON object
@@ -117,13 +116,14 @@ type RuntimeProcess interface {
 	Events() <-chan RuntimeEvent
 	// ExitInfo reports why the process ended; valid only after Events() closes.
 	ExitInfo() RuntimeExitInfo
-	// LastActivityAt reports when the driver last decoded a syntactically valid
-	// provider frame from the runtime's stream, updated at the read boundary
-	// before any method/type mapping. It is the liveness signal the supervisor's
-	// heartbeat loop polls to distinguish a genuinely working runtime (continuous
-	// valid telemetry) from a wedged one (total silence). Zero time means the
-	// driver has decoded no valid frame yet.
-	LastActivityAt() time.Time
+	// ActivitySeq is a monotonically increasing count of syntactically valid
+	// provider frames the driver has decoded from the runtime's stream, incremented
+	// at the read boundary before any method/type mapping. It is the liveness signal
+	// the supervisor's heartbeat polls: the supervisor records ITS OWN monotonic
+	// time whenever this generation advances and measures silence from that, so
+	// liveness never depends on comparing a wall-clock timestamp across a clock step.
+	// 0 means the driver has decoded no valid frame yet.
+	ActivitySeq() uint64
 	PID() int
 }
 

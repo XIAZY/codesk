@@ -11,13 +11,13 @@ import (
 )
 
 type fakeCodexRuntimeApp struct {
-	started      bool
-	stopped      bool
-	events       chan appServerEvent
-	eventsOnce   sync.Once
-	pid          int
-	exitInfo     RuntimeExitInfo
-	lastActivity time.Time
+	started     bool
+	stopped     bool
+	events      chan appServerEvent
+	eventsOnce  sync.Once
+	pid         int
+	exitInfo    RuntimeExitInfo
+	activitySeq uint64
 
 	threadStartID string
 	turnStartID   string
@@ -125,8 +125,8 @@ func (f *fakeCodexRuntimeApp) ExitInfo() RuntimeExitInfo {
 	return f.exitInfo
 }
 
-func (f *fakeCodexRuntimeApp) LastActivityAt() time.Time {
-	return f.lastActivity
+func (f *fakeCodexRuntimeApp) ActivitySeq() uint64 {
+	return f.activitySeq
 }
 
 func (f *fakeCodexRuntimeApp) ThreadResume(ctx context.Context, sessionID string, cwd string, instructions string) error {

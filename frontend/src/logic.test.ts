@@ -652,6 +652,22 @@ describe("presentation grouping", () => {
       reason: "tool exited 1",
     });
 
+    // Item #5: a `stalled` agent must surface as its own visible status carrying the
+    // daemon's diagnostic — never fall through to Idle / Standing by.
+    expect(
+      agentDisplayStatus(
+        { ...agent, status: "stalled", currentActivity: "Stalled: no runtime activity for 15m0s during turn turn_1" },
+        [],
+        [onlineDaemon],
+        nowMs,
+      ),
+    ).toMatchObject({
+      key: "stalled",
+      label: "Stalled",
+      detailLabel: "Stalled: no runtime activity for 15m0s during turn turn_1",
+      title: "Stalled: no runtime activity for 15m0s during turn turn_1",
+    });
+
     const deadDaemon = withReceipt({ ...daemonFixtures.dead, id: "daemon" }, nowMs);
     expect(agentDisplayStatus(agent, [run("failed", { error: "tool exited 1" })], [deadDaemon], nowMs)).toMatchObject({
       key: "waiting-env",

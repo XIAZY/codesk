@@ -14,7 +14,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
-	"time"
 )
 
 type appServerEvent struct {
@@ -47,9 +46,9 @@ type codexAppServer struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	nextID atomic.Int64
-	// lastActivity is the unix-nano time the read loop last decoded a valid
-	// JSON-RPC frame, stored atomically (one store per valid frame, no lock) as the
-	// liveness signal the supervisor heartbeat polls. Zero means none decoded yet.
+	// lastActivity is the count of valid JSON-RPC frames the read loop has decoded,
+	// incremented atomically (one Add per valid frame, no lock) as the activity
+	// generation the supervisor heartbeat polls. 0 means none decoded yet.
 	lastActivity atomic.Int64
 
 	mu         sync.Mutex
@@ -373,16 +372,23 @@ func (c *codexAppServer) readLoop(stdout io.Reader) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	for scanner.Scan() {
 		line := append([]byte(nil), scanner.Bytes()...)
+		// Liveness at the LITERAL read boundary: increment the activity generation the
+		// instant a syntactically valid JSON-object frame is decoded — BEFORE the
+		// synchronous logf (log/global-write mutexes + file I/O) and before dispatch —
+		// via the SAME shared object validator as the Claude boundary. A contended log
+		// sink must never stall liveness for a demonstrably-live runtime (blocker 17);
+		// `null` and malformed input are non-objects and never count (blocker 2).
+		if isValidRuntimeFrame(line) {
+			c.noteActivity()
+		}
 		c.logf("jsonrpc recv %s", string(line))
 		var raw map[string]json.RawMessage
-		if err := json.Unmarshal(line, &raw); err != nil {
-			c.logf("jsonrpc recv malformed bytes=%d", len(line))
+		if err := json.Unmarshal(line, &raw); err != nil || raw == nil {
+			// Not a JSON-RPC object (malformed, or valid-but-non-object like `null`):
+			// nothing to dispatch. Liveness was already (correctly) not counted above.
+			c.logf("jsonrpc recv non-object bytes=%d", len(line))
 			continue
 		}
-		// Liveness at the read boundary: the frame decoded as a valid JSON-RPC
-		// object, so stamp before any method/type mapping. Malformed lines above
-		// already continued without stamping — junk cannot forge a heartbeat.
-		c.noteActivity()
 		if idRaw, ok := raw["id"]; ok {
 			if _, isServerRequest := raw["method"]; isServerRequest {
 				c.handleServerRequest(line)
@@ -489,17 +495,14 @@ func (c *codexAppServer) ExitInfo() RuntimeExitInfo {
 	return c.exitInfo
 }
 
-// noteActivity records that a valid JSON-RPC frame was just decoded (read boundary).
+// noteActivity records that a valid JSON-RPC frame was just decoded (read
+// boundary) by advancing the activity generation counter.
 func (c *codexAppServer) noteActivity() {
-	c.lastActivity.Store(time.Now().UnixNano())
+	c.lastActivity.Add(1)
 }
 
-func (c *codexAppServer) LastActivityAt() time.Time {
-	nanos := c.lastActivity.Load()
-	if nanos == 0 {
-		return time.Time{}
-	}
-	return time.Unix(0, nanos)
+func (c *codexAppServer) ActivitySeq() uint64 {
+	return uint64(c.lastActivity.Load())
 }
 
 func (c *codexAppServer) handleServerRequest(payload []byte) {

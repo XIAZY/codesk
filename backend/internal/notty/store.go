@@ -1614,23 +1614,39 @@ func (s *Store) UpdateAgentSession(id string, req UpdateAgentSessionRequest, met
 		return nil, err
 	}
 	now := time.Now().UTC()
-	if status := strings.TrimSpace(req.Status); status != "" {
-		switch status {
+	// Capture the prior semantic session fields so a heartbeat-only update (only
+	// LastHeartbeatAt advancing) produces no activity row (see below).
+	priorStatus := agent.Status
+	priorSessionID := agent.SessionID
+	priorTurnID := agent.CurrentTurnID
+	priorActivity := agent.CurrentActivity
+	statusProvided := strings.TrimSpace(req.Status) != ""
+	if statusProvided {
+		switch strings.TrimSpace(req.Status) {
 		case "idle", "working", "disconnected", "failed", "stalled":
-			agent.Status = status
+			agent.Status = strings.TrimSpace(req.Status)
 		default:
-			return nil, fmt.Errorf("unsupported agent status %q", status)
+			return nil, fmt.Errorf("unsupported agent status %q", strings.TrimSpace(req.Status))
 		}
 	}
 	if sessionID := strings.TrimSpace(req.SessionID); sessionID != "" {
 		agent.SessionID = sessionID
 	}
-	if turnID := strings.TrimSpace(req.CurrentTurnID); turnID != "" || agent.Status != "working" {
+	// Turn: an explicit turn always wins; otherwise only a REAL status transition
+	// (non-working) clears it. A heartbeat-only update (no status) preserves the
+	// existing turn — clearing it would drop the stalled turn each minute (blocker 15).
+	if turnID := strings.TrimSpace(req.CurrentTurnID); turnID != "" {
 		agent.CurrentTurnID = turnID
+	} else if statusProvided && agent.Status != "working" {
+		agent.CurrentTurnID = ""
 	}
+	// Activity: an explicit activity always wins; otherwise default ONLY on a real
+	// status transition. A heartbeat-only update PRESERVES the existing activity —
+	// defaulting it would rewrite a persisted stalled diagnostic to literal
+	// "Stalled" and lose the human-facing detail (blocker 15).
 	if activity := strings.TrimSpace(req.CurrentActivity); activity != "" {
 		agent.CurrentActivity = activity
-	} else {
+	} else if statusProvided {
 		switch agent.Status {
 		case "idle":
 			agent.CurrentActivity = "Idle"
@@ -1656,22 +1672,32 @@ func (s *Store) UpdateAgentSession(id string, req UpdateAgentSessionRequest, met
 	if err := upsertAgentPostgresTx(tx, workspaceID, updated); err != nil {
 		return nil, err
 	}
-	activity := &ActivityEvent{
-		Type:       "agent.session.updated",
-		ActorID:    meta.ActorID,
-		ActorType:  meta.ActorType,
-		Summary:    fmt.Sprintf("%s session is %s", updated.Name, updated.Status),
-		OccurredAt: now,
-		Provenance: meta,
-	}
-	if err := insertActivityPostgres(tx, workspaceID, activity); err != nil {
-		return nil, err
+	// Emit an activity row ONLY when a semantic session field actually changed. A
+	// heartbeat-only update (LastHeartbeatAt advanced, status/session/turn/activity
+	// unchanged — the daemon's 60s liveness republish) is telemetry, not a human
+	// activity; activities are never trimmed, so persisting one per working agent
+	// per minute would grow the table unboundedly and flood the latest window.
+	var activity *ActivityEvent
+	if updated.Status != priorStatus || updated.SessionID != priorSessionID || updated.CurrentTurnID != priorTurnID || updated.CurrentActivity != priorActivity {
+		activity = &ActivityEvent{
+			Type:       "agent.session.updated",
+			ActorID:    meta.ActorID,
+			ActorType:  meta.ActorType,
+			Summary:    fmt.Sprintf("%s session is %s", updated.Name, updated.Status),
+			OccurredAt: now,
+			Provenance: meta,
+		}
+		if err := insertActivityPostgres(tx, workspaceID, activity); err != nil {
+			return nil, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	committed = true
-	s.recordActivityCreated(activity)
+	if activity != nil {
+		s.recordActivityCreated(activity)
+	}
 	return updated, nil
 }
 
