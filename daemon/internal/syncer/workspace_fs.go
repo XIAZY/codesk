@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
+	"sync"
 	"time"
 )
 
@@ -15,9 +15,12 @@ var ErrDivergedWorkingCopy = errors.New("working copy diverged from expected has
 var ErrPathCollision = errors.New("target path already exists")
 var ErrUnsafeDelete = errors.New("refusing to delete non-matching working copy")
 var ErrOutsideWorkspace = errors.New("path is outside workspace")
+var errWorkspaceFSInvariant = errors.New("workspace filesystem invariant violated")
 
 type WorkspaceFS struct {
-	Root string
+	Root          string
+	pathLocks     pathLockLeaseStore
+	openPathLocks pathLockStoreOpener
 }
 
 type FileSnapshot struct {
@@ -52,23 +55,74 @@ func (e *FSError) Unwrap() error {
 }
 
 func NewWorkspaceFS(root string) *WorkspaceFS {
+	return newWorkspaceFS(root, nil)
+}
+
+func newWorkspaceFS(root string, pathLocks pathLockLeaseStore) *WorkspaceFS {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		abs = filepath.Clean(root)
 	}
-	return &WorkspaceFS{Root: abs}
+	return &WorkspaceFS{Root: abs, pathLocks: pathLocks, openPathLocks: openPathLockStore}
+}
+
+func requireWorkspaceFS(fs *WorkspaceFS, root string) (*WorkspaceFS, error) {
+	if fs == nil {
+		return nil, fmt.Errorf("%w: missing filesystem for root %q", errWorkspaceFSInvariant, root)
+	}
+	want, err := canonicalWorkspaceRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	got, err := canonicalWorkspaceRoot(fs.Root)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid filesystem root: %v", errWorkspaceFSInvariant, err)
+	}
+	if got != want {
+		return nil, fmt.Errorf("%w: filesystem root %q does not match workspace root %q", errWorkspaceFSInvariant, got, want)
+	}
+	return fs, nil
+}
+
+func canonicalWorkspaceRoot(root string) (string, error) {
+	if strings.TrimSpace(root) == "" {
+		return "", fmt.Errorf("%w: workspace root is empty", errWorkspaceFSInvariant)
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("%w: resolve workspace root %q: %v", errWorkspaceFSInvariant, root, err)
+	}
+	return filepath.Clean(abs), nil
+}
+
+func (fs *WorkspaceFS) pathLockStore() (pathLockLeaseStore, error) {
+	opener := fs.openPathLocks
+	if opener == nil {
+		opener = openPathLockStore
+	}
+	return opener(fs.Root)
 }
 
 func (fs *WorkspaceFS) CleanupStaleLocks() error {
 	if fs == nil || fs.Root == "" {
 		return nil
 	}
-	store, err := pathLockStoreForRoot(fs.Root)
+	if fs.pathLocks != nil {
+		if err := fs.pathLocks.cleanupExpired(time.Now().UTC()); err != nil {
+			return &FSError{Op: "cleanup-locks", Path: fs.Root, Err: err}
+		}
+		return nil
+	}
+	store, err := fs.pathLockStore()
 	if err != nil {
 		return &FSError{Op: "cleanup-locks", Path: fs.Root, Err: err}
 	}
 	if err := store.cleanupExpired(time.Now().UTC()); err != nil {
+		_ = store.Close()
 		return &FSError{Op: "cleanup-locks", Path: fs.Root, Err: err}
+	}
+	if err := store.Close(); err != nil {
+		return &FSError{Op: "close-locks", Path: fs.Root, Err: err}
 	}
 	return nil
 }
@@ -122,7 +176,54 @@ func (fs *WorkspaceFS) Append(path string, content string) error {
 	return nil
 }
 
+// CreateEmptyOrRead creates an empty path when absent. If another writer has
+// already created it, that local content wins and is returned unchanged.
+func (fs *WorkspaceFS) CreateEmptyOrRead(path string) (FileSnapshot, error) {
+	return fs.createEmptyOrRead(path, createEmptyFileExclusive)
+}
+
+func (fs *WorkspaceFS) createEmptyOrRead(path string, createEmpty func(string) error) (FileSnapshot, error) {
+	path, err := fs.cleanPath(path)
+	if err != nil {
+		return FileSnapshot{}, err
+	}
+	unlock, err := fs.lockPaths(path)
+	if err != nil {
+		return FileSnapshot{}, err
+	}
+	defer unlock()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return FileSnapshot{}, &FSError{Op: "create-empty-or-read", Path: path, Err: err}
+	}
+	err = createEmpty(path)
+	if err != nil && !errors.Is(err, os.ErrExist) {
+		return FileSnapshot{}, &FSError{Op: "create-empty-or-read", Path: path, Err: err}
+	}
+	existing, err := readFileObservation(path)
+	if err != nil {
+		return FileSnapshot{}, &FSError{Op: "create-empty-or-read", Path: path, Err: err}
+	}
+	return FileSnapshot{Path: path, Exists: true, Bytes: existing, Hash: projectedHashBytes(existing)}, nil
+}
+
+func createEmptyFileExclusive(path string) error {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	return file.Close()
+}
+
 func (fs *WorkspaceFS) WriteIfUnchanged(path string, expected projectedContentHash, content []byte) error {
+	return fs.writeIfUnchangedWith(path, expected, content, replaceFileAtomically)
+}
+
+func (fs *WorkspaceFS) writeIfUnchangedWith(
+	path string,
+	expected projectedContentHash,
+	content []byte,
+	replaceFile func(path, content string, mode os.FileMode) error,
+) error {
 	path, err := fs.cleanPath(path)
 	if err != nil {
 		return err
@@ -151,7 +252,7 @@ func (fs *WorkspaceFS) WriteIfUnchanged(path string, expected projectedContentHa
 	if info, err := os.Stat(path); err == nil {
 		mode = info.Mode().Perm()
 	}
-	if err := replaceFileAtomically(path, string(content), mode); err != nil {
+	if err := replaceFile(path, string(content), mode); err != nil {
 		return &FSError{Op: "write", Path: path, Err: err}
 	}
 	return nil
@@ -249,7 +350,7 @@ func (fs *WorkspaceFS) Archive(path string, reason string) (string, error) {
 			unlock()
 			return archivePath, nil
 		}
-		if !errors.Is(err, syscall.EXDEV) {
+		if !isCrossDeviceError(err) {
 			unlock()
 			return "", &FSError{Op: "archive", Path: path, TargetPath: archivePath, Err: err}
 		}
@@ -307,16 +408,31 @@ func (fs *WorkspaceFS) lockPaths(paths ...string) (func(), error) {
 		seen[keyPath] = struct{}{}
 		lockPaths = append(lockPaths, keyPath)
 	}
-	store, err := pathLockStoreForRoot(fs.Root)
-	if err != nil {
-		return nil, &FSError{Op: "lock", Path: fs.Root, Err: err}
+	store := fs.pathLocks
+	closeStore := false
+	if store == nil {
+		var err error
+		store, err = fs.pathLockStore()
+		if err != nil {
+			return nil, &FSError{Op: "lock", Path: fs.Root, Err: err}
+		}
+		closeStore = true
 	}
 	leases, err := store.lock(lockPaths)
 	if err != nil {
+		if closeStore {
+			_ = store.Close()
+		}
 		return nil, &FSError{Op: "lock", Path: fs.Root, Err: err}
 	}
+	var unlockOnce sync.Once
 	return func() {
-		_ = store.release(leases)
+		unlockOnce.Do(func() {
+			_ = store.release(leases)
+			if closeStore {
+				_ = store.Close()
+			}
+		})
 	}, nil
 }
 

@@ -36,28 +36,92 @@ type agentInboxChangedEvent struct {
 }
 
 type Service struct {
-	cfg             Config
-	client          *http.Client
-	sessions        *agentSessionSupervisor
-	runtimes        *runtimeRegistry
-	daemonStatus    *daemonStatusReporter
-	toolServer      *http.Server
-	mu              sync.Mutex
-	primaryRuntime  *workspaceRuntime
-	agentRuntimes   map[string]*managedWorkspaceRuntime
-	agentWorkers    map[string]*managedAgentWorker
-	latestWorkspace *workspaceResponse
+	cfg                     Config
+	client                  *http.Client
+	sessions                *agentSessionSupervisor
+	runtimes                *runtimeRegistry
+	daemonStatus            *daemonStatusReporter
+	toolServer              *http.Server
+	toolGateway             *toolGateway
+	refreshMu               sync.Mutex // Agent generation/root lifecycle lock across refresh and supervisor paths.
+	mu                      sync.Mutex
+	agentRuntimeSupervisors sync.WaitGroup
+	primaryRuntime          *workspaceRuntime
+	agentRuntimes           map[string]*managedWorkspaceRuntime
+	agentWorkers            map[string]*managedAgentWorker
+	latestWorkspace         *workspaceResponse
+	ready                   chan struct{}
+	readyOnce               sync.Once
+
+	// Lifecycle interleaving seams are nil in production.
+	beforeAgentRuntimePublish func()
+	removeAgentWorkspaceRoot  func(string) error
 }
 
 type managedWorkspaceRuntime struct {
-	runtime *workspaceRuntime
-	cancel  context.CancelFunc
-	done    <-chan struct{}
+	runtime        *workspaceRuntime
+	cancel         context.CancelFunc
+	done           <-chan struct{}
+	parentCtx      context.Context
+	runtimeCtx     context.Context
+	workspace      *workspaceResponse
+	resultMu       sync.Mutex
+	runErr         error
+	startedAt      time.Time
+	stoppedAt      time.Time
+	restartAttempt int
+	borrowMu       sync.Mutex
+	borrowCond     *sync.Cond
+	borrowers      int
+	retiring       bool
+	starting       bool
 }
 
 type managedAgentWorker struct {
 	cancel context.CancelFunc
 	wake   chan struct{}
+	done   <-chan struct{}
+}
+
+type serviceTeardown struct {
+	cancelCore       func()
+	closeIngress     func() error
+	joinCore         func()
+	drainGateway     func() error
+	joinAgentTree    func()
+	closeRuntimeData func() error
+
+	once sync.Once
+	err  error
+}
+
+func (t *serviceTeardown) Close() error {
+	if t == nil {
+		return nil
+	}
+	t.once.Do(func() {
+		var errs []error
+		if t.cancelCore != nil {
+			t.cancelCore()
+		}
+		if t.closeIngress != nil {
+			errs = append(errs, t.closeIngress())
+		}
+		if t.joinCore != nil {
+			t.joinCore()
+		}
+		if t.drainGateway != nil {
+			errs = append(errs, t.drainGateway())
+		}
+		if t.joinAgentTree != nil {
+			t.joinAgentTree()
+		}
+		if t.closeRuntimeData != nil {
+			errs = append(errs, t.closeRuntimeData())
+		}
+		t.err = errors.Join(errs...)
+	})
+	return t.err
 }
 
 type trackedFile struct {
@@ -182,18 +246,13 @@ func (q *localCreateQueue) Drain() []localCreateCandidate {
 func New(cfg Config) (*Service, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	runtimes := defaultRuntimeRegistry(cfg)
-	primaryRuntime, err := newWorkspaceRuntime(cfg, client, cfg.WorkspaceDir, cfg.AgentID, "daemon")
-	if err != nil {
-		return nil, err
-	}
 	service := &Service{
-		cfg:            cfg,
-		client:         client,
-		runtimes:       runtimes,
-		daemonStatus:   newDaemonStatusReporter(cfg, client),
-		primaryRuntime: primaryRuntime,
-		agentRuntimes:  map[string]*managedWorkspaceRuntime{},
-		agentWorkers:   map[string]*managedAgentWorker{},
+		cfg:           cfg,
+		client:        client,
+		runtimes:      runtimes,
+		daemonStatus:  newDaemonStatusReporter(cfg, client),
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
+		agentWorkers:  map[string]*managedAgentWorker{},
 	}
 	service.sessions = newAgentSessionSupervisor(cfg, service.updateRemoteAgentSession, runtimes)
 	service.sessions.SetIdleWake(service.wakeAgentWorker)
@@ -218,11 +277,20 @@ func (s *Service) ensurePrimaryRuntime() error {
 	return nil
 }
 
+func (s *Service) closePrimaryRuntime() error {
+	if s == nil || s.primaryRuntime == nil {
+		return nil
+	}
+	runtime := s.primaryRuntime
+	s.primaryRuntime = nil
+	return runtime.Close()
+}
+
 func (s *Service) Run(ctx context.Context) error {
 	return s.run(ctx, nil)
 }
 
-func (s *Service) run(ctx context.Context, heartbeatTicks <-chan time.Time) error {
+func (s *Service) run(ctx context.Context, heartbeatTicks <-chan time.Time) (runErr error) {
 	// Bind the agent-session supervisor's construction lifetime to this run
 	// context once, before anything spawns a runtime, so a service-context
 	// cancellation cancels every (fresh + restart) construction — including a
@@ -231,11 +299,48 @@ func (s *Service) run(ctx context.Context, heartbeatTicks <-chan time.Time) erro
 	if s.sessions != nil {
 		s.sessions.bindServiceContext(ctx)
 	}
-	toolServer, err := s.startToolGateway()
+	gateway, err := s.startToolGateway()
 	if err != nil {
 		return err
 	}
-	s.toolServer = toolServer
+	s.toolGateway = gateway
+	s.toolServer = gateway.server
+	coreCtx, cancelCore := context.WithCancel(ctx)
+	stopHeartbeat := func() {}
+	var primaryDone chan struct{}
+	var primaryErr error
+	var eventDone chan struct{}
+	teardown := &serviceTeardown{
+		cancelCore: func() {
+			stopHeartbeat()
+			cancelCore()
+		},
+		closeIngress: gateway.CloseIngress,
+		joinCore: func() {
+			if primaryDone != nil {
+				<-primaryDone
+			}
+			if eventDone != nil {
+				<-eventDone
+			}
+		},
+		drainGateway: func() error {
+			drainCtx, cancelDrain := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancelDrain()
+			return gateway.Drain(drainCtx)
+		},
+		joinAgentTree: func() {
+			s.closeAgentWorkers()
+			s.closeAgentRuntimes()
+			if s.sessions != nil {
+				s.sessions.Shutdown()
+			}
+		},
+		closeRuntimeData: s.closePrimaryRuntime,
+	}
+	defer func() {
+		runErr = errors.Join(runErr, teardown.Close())
+	}()
 	if err := os.MkdirAll(s.cfg.WorkspaceDir, 0o755); err != nil {
 		return err
 	}
@@ -243,22 +348,46 @@ func (s *Service) run(ctx context.Context, heartbeatTicks <-chan time.Time) erro
 		return err
 	}
 	if err := s.ensurePrimaryRuntime(); err != nil {
-		_ = shutdownToolGateway(context.Background(), s.toolServer)
 		return err
 	}
-	if err := s.refreshInitialWorkspace(ctx); err != nil {
-		s.closeAgentWorkers()
-		s.closeAgentRuntimes()
-		if s.sessions != nil {
-			s.sessions.Shutdown()
+	primaryRuntime := s.primaryRuntime
+	if err := s.refreshInitialWorkspace(coreCtx); err != nil {
+		if ctx.Err() != nil {
+			return nil
 		}
-		_ = shutdownToolGateway(context.Background(), s.toolServer)
 		return err
 	}
-	// Reporting status advances the backend's online timestamp. Start it only after every
-	// startup recovery and readiness gate has passed.
-	s.reportDaemonStatus(ctx, true)
-	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
+	primaryReady := make(chan error, 1)
+	primaryDone = make(chan struct{})
+	go func() {
+		defer close(primaryDone)
+		primaryErr = primaryRuntime.run(coreCtx, primaryReady)
+	}()
+	select {
+	case err := <-primaryReady:
+		if err != nil {
+			return err
+		}
+	case <-primaryDone:
+		if primaryErr != nil {
+			return primaryErr
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		return errors.New("primary workspace runtime stopped before readiness")
+	case <-gateway.Done():
+		if err := gateway.Err(); err != nil {
+			return fmt.Errorf("tool gateway: %w", err)
+		}
+		return errors.New("tool gateway stopped before readiness")
+	case <-ctx.Done():
+		return nil
+	}
+	// Reporting status advances the backend's online timestamp. Start it and its
+	// heartbeat only after the primary watcher pipeline has reported readiness.
+	s.reportDaemonStatus(coreCtx, true)
+	heartbeatCtx, cancelHeartbeat := context.WithCancel(coreCtx)
 	var heartbeatTicker *time.Ticker
 	if heartbeatTicks == nil {
 		heartbeatTicker = time.NewTicker(daemonStatusHeartbeatInterval)
@@ -270,7 +399,7 @@ func (s *Service) run(ctx context.Context, heartbeatTicks <-chan time.Time) erro
 		s.runDaemonStatusHeartbeat(heartbeatCtx, heartbeatTicks)
 	}()
 	var stopHeartbeatOnce sync.Once
-	stopHeartbeat := func() {
+	stopHeartbeat = func() {
 		stopHeartbeatOnce.Do(func() {
 			cancelHeartbeat()
 			if heartbeatTicker != nil {
@@ -279,26 +408,13 @@ func (s *Service) run(ctx context.Context, heartbeatTicks <-chan time.Time) erro
 			<-heartbeatDone
 		})
 	}
-	defer stopHeartbeat()
-	primaryCtx, cancelPrimary := context.WithCancel(ctx)
-	defer cancelPrimary()
-	shutdown := func() {
-		stopHeartbeat()
-		cancelPrimary()
-		s.closeAgentWorkers()
-		s.closeAgentRuntimes()
-		if s.sessions != nil {
-			s.sessions.Shutdown()
-		}
-		_ = shutdownToolGateway(context.Background(), s.toolServer)
-	}
-	go func() {
-		if err := s.primaryRuntime.Run(primaryCtx); err != nil && primaryCtx.Err() == nil {
-			log.Printf("primary workspace runtime error: %v", err)
-		}
-	}()
 	drained := make(chan error, 1)
-	go s.workspaceEventLoop(ctx, drained)
+	eventDone = make(chan struct{})
+	go func() {
+		defer close(eventDone)
+		s.workspaceEventLoop(coreCtx, drained)
+	}()
+	s.signalReady()
 
 	ticker := time.NewTicker(workspaceRefreshInterval)
 	defer ticker.Stop()
@@ -306,17 +422,27 @@ func (s *Service) run(ctx context.Context, heartbeatTicks <-chan time.Time) erro
 	for {
 		select {
 		case <-ctx.Done():
-			shutdown()
 			return nil
+		case <-primaryDone:
+			if primaryErr != nil {
+				return primaryErr
+			}
+			if ctx.Err() != nil {
+				return nil
+			}
+			return errors.New("primary workspace runtime stopped unexpectedly")
+		case <-gateway.Done():
+			if err := gateway.Err(); err != nil {
+				return fmt.Errorf("tool gateway: %w", err)
+			}
+			return errors.New("tool gateway stopped unexpectedly")
 		case err := <-drained:
 			fmt.Printf("workspace event stream: %v; daemon has been drained, exiting\n", err)
-			shutdown()
 			return err
 		case <-ticker.C:
-			if err := s.refresh(ctx); err != nil {
+			if err := s.refresh(coreCtx); err != nil {
 				if isTerminalAuthError(err) {
 					fmt.Printf("workspace refresh: %v; daemon has been drained, exiting\n", err)
-					shutdown()
 					return err
 				}
 				fmt.Printf("workspace refresh error: %v\n", err)
@@ -337,6 +463,13 @@ func (s *Service) runDaemonStatusHeartbeat(ctx context.Context, ticks <-chan tim
 			s.reportDaemonStatus(ctx, false)
 		}
 	}
+}
+
+func (s *Service) signalReady() {
+	if s == nil || s.ready == nil {
+		return
+	}
+	s.readyOnce.Do(func() { close(s.ready) })
 }
 
 func (s *Service) reportDaemonStatus(ctx context.Context, refreshDetections bool) {
@@ -459,6 +592,8 @@ func (s *Service) runWorkspaceEventStream(ctx context.Context) error {
 		return err
 	}
 	defer conn.Close()
+	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopClose()
 
 	for {
 		_, payload, err := conn.ReadMessage()
@@ -504,6 +639,9 @@ func shouldRefreshForEvent(eventType string) bool {
 }
 
 func (s *Service) refresh(ctx context.Context) error {
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
+
 	workspace, err := s.fetchWorkspace(ctx)
 	if err != nil {
 		return err
@@ -701,7 +839,10 @@ func (s *workspaceRuntime) validateLocalCreateCandidate(candidate localCreateCan
 	if root == "" || path == "" || isIgnoredWorkspaceAbsolutePath(root, path) {
 		return "", false, nil
 	}
-	fs := NewWorkspaceFS(candidate.Root)
+	fs, err := s.workspaceFSForRoot(candidate.Root)
+	if err != nil {
+		return "", false, err
+	}
 	snapshot, err := fs.Read(candidate.Path)
 	if err != nil {
 		return "", false, err
@@ -735,7 +876,10 @@ func (s *workspaceRuntime) validateLocalCreateCandidate(candidate localCreateCan
 }
 
 func (s *workspaceRuntime) localCreateIntentFromCandidate(candidate localCreateCandidate, relativePath string) (localNamespaceIntent, error) {
-	fs := NewWorkspaceFS(candidate.Root)
+	fs, err := s.workspaceFSForRoot(candidate.Root)
+	if err != nil {
+		return localNamespaceIntent{}, err
+	}
 	snapshot, err := fs.Read(candidate.Path)
 	if err != nil {
 		return localNamespaceIntent{}, err
@@ -765,7 +909,10 @@ func (s *workspaceRuntime) validateLocalNamespaceIntent(intent localNamespaceInt
 		return false, nil
 	}
 	absolutePath := filepath.Join(s.replica.rootDir, filepath.FromSlash(relativePath))
-	fs := NewWorkspaceFS(s.replica.rootDir)
+	fs, err := s.workspaceFSForRoot(s.replica.rootDir)
+	if err != nil {
+		return false, err
+	}
 	snapshot, err := fs.Read(absolutePath)
 	if err != nil {
 		return false, err
@@ -793,6 +940,10 @@ func (s *workspaceRuntime) createDocumentFromLocalCandidate(ctx context.Context,
 func (s *workspaceRuntime) createDocumentFromLocalIntent(ctx context.Context, intent localNamespaceIntent) (*document, error) {
 	if s == nil || s.replica == nil {
 		return nil, nil
+	}
+	fs, err := s.workspaceFSForRoot(s.replica.rootDir)
+	if err != nil {
+		return nil, err
 	}
 	body, err := json.Marshal(map[string]string{
 		"documentId":        intent.DocumentID,
@@ -838,7 +989,6 @@ func (s *workspaceRuntime) createDocumentFromLocalIntent(ctx context.Context, in
 		projectedSeq = seq
 	}
 	absolutePath := filepath.Join(s.replica.rootDir, filepath.FromSlash(intent.WorkspaceRelativePath))
-	fs := NewWorkspaceFS(s.replica.rootDir)
 	tracked := &trackedFile{
 		DocumentID:    created.ID,
 		DocumentPath:  created.Path,
@@ -867,9 +1017,13 @@ func (s *Service) syncAgentWorkers(ctx context.Context, agents []*agent) error {
 			continue
 		}
 		workerCtx, cancel := context.WithCancel(ctx)
-		worker := &managedAgentWorker{cancel: cancel, wake: make(chan struct{}, 1)}
+		done := make(chan struct{})
+		worker := &managedAgentWorker{cancel: cancel, wake: make(chan struct{}, 1), done: done}
 		s.agentWorkers[currentAgent.ID] = worker
-		go s.agentWorkerLoop(workerCtx, skills, currentAgent.ID)
+		go func(agentID string) {
+			defer close(done)
+			s.agentWorkerLoop(workerCtx, skills, agentID)
+		}(currentAgent.ID)
 		select {
 		case worker.wake <- struct{}{}:
 		default:
@@ -892,6 +1046,9 @@ func (s *Service) syncAgentWorkers(ctx context.Context, agents []*agent) error {
 	for _, worker := range stale {
 		worker.cancel()
 	}
+	for _, worker := range stale {
+		waitManagedAgentWorker(worker)
+	}
 	return nil
 }
 
@@ -906,6 +1063,16 @@ func (s *Service) closeAgentWorkers() {
 	for _, worker := range workers {
 		worker.cancel()
 	}
+	for _, worker := range workers {
+		waitManagedAgentWorker(worker)
+	}
+}
+
+func waitManagedAgentWorker(worker *managedAgentWorker) {
+	if worker == nil || worker.done == nil {
+		return
+	}
+	<-worker.done
 }
 
 func (s *Service) agentWorkerLoop(ctx context.Context, skills agentSkillExecutor, agentID string) {
@@ -1401,18 +1568,22 @@ func cleanupRemovedDocument(cache *documentCache, entry *documentCacheEntry, doc
 		if tracked == nil {
 			continue
 		}
+		fs, err := tracked.workspaceFS()
+		if err != nil {
+			return err
+		}
 		if state.fileExists {
 			if state.baseKnown && !state.localDirty {
-				if err := tracked.workspaceFS().DeleteIfUnchanged(tracked.Path, projectedHashString(state.baseContent)); err != nil {
+				if err := fs.DeleteIfUnchanged(tracked.Path, projectedHashString(state.baseContent)); err != nil {
 					if errors.Is(err, ErrUnsafeDelete) {
-						if _, archiveErr := tracked.workspaceFS().Archive(tracked.Path, safeDocumentCacheName(documentID)); archiveErr != nil {
+						if _, archiveErr := fs.Archive(tracked.Path, safeDocumentCacheName(documentID)); archiveErr != nil {
 							return archiveErr
 						}
 					} else {
 						return err
 					}
 				}
-			} else if _, err := tracked.workspaceFS().Archive(tracked.Path, safeDocumentCacheName(documentID)); err != nil {
+			} else if _, err := fs.Archive(tracked.Path, safeDocumentCacheName(documentID)); err != nil {
 				return err
 			}
 		}
@@ -1438,7 +1609,10 @@ func reconcileTrackedPathForProjection(state trackedReconcileState) (bool, error
 	if state.localDirty {
 		return false, nil
 	}
-	fs := tracked.workspaceFS()
+	fs, err := tracked.workspaceFS()
+	if err != nil {
+		return false, err
+	}
 	if state.fileExists {
 		if state.baseKnown && projectedHashString(state.baseContent) == projectedHashString(state.localContent) {
 			if err := fs.MoveIfNoTarget(tracked.Path, desiredPath); err != nil {
@@ -1622,7 +1796,11 @@ func collectTrackedReconcileStates(trackedFiles []*trackedFile) ([]trackedReconc
 				continue
 			}
 		}
-		snapshot, err := tracked.workspaceFS().Read(tracked.Path)
+		fs, err := tracked.workspaceFS()
+		if err != nil {
+			return nil, err
+		}
+		snapshot, err := fs.Read(tracked.Path)
 		if err == nil && !snapshot.Exists {
 			states = append(states, state)
 			continue
@@ -1701,11 +1879,31 @@ func buildLocalUpdateFromBase(baseState []byte, baseContent, localContent string
 }
 
 func applyProjectedContent(tracked *trackedFile, nextContent string, nextState []byte, projectedSeq int64) (bool, error) {
+	fs, err := tracked.workspaceFS()
+	if err != nil {
+		return false, err
+	}
+	return applyProjectedContentWithWrite(
+		tracked,
+		nextContent,
+		nextState,
+		projectedSeq,
+		fs.WriteIfUnchanged,
+	)
+}
+
+func applyProjectedContentWithWrite(
+	tracked *trackedFile,
+	nextContent string,
+	nextState []byte,
+	projectedSeq int64,
+	writeIfUnchanged func(path string, expected projectedContentHash, content []byte) error,
+) (bool, error) {
 	previousHash, previousKnown := tracked.projectedSnapshot()
 	tracked.beginProjection()
 	defer tracked.endProjection()
 	tracked.setProjectedContent(nextContent)
-	if err := tracked.workspaceFS().WriteIfUnchanged(tracked.Path, previousHash, []byte(nextContent)); err != nil {
+	if err := writeIfUnchanged(tracked.Path, previousHash, []byte(nextContent)); err != nil {
 		if errors.Is(err, ErrDivergedWorkingCopy) {
 			tracked.setProjectedSnapshot(previousHash, previousKnown)
 			return false, nil
@@ -1734,11 +1932,37 @@ func markTrackedLocalDirty(tracked *trackedFile, _ string) error {
 }
 
 func projectMergedContentOverLocalDisk(tracked *trackedFile, currentDiskContent string, currentDiskState []byte, currentDiskSeq int64, mergedContent string, mergedState []byte, mergedSeq int64) (bool, error) {
+	fs, err := tracked.workspaceFS()
+	if err != nil {
+		return false, err
+	}
+	return projectMergedContentOverLocalDiskWithWrite(
+		tracked,
+		currentDiskContent,
+		currentDiskState,
+		currentDiskSeq,
+		mergedContent,
+		mergedState,
+		mergedSeq,
+		fs.WriteIfUnchanged,
+	)
+}
+
+func projectMergedContentOverLocalDiskWithWrite(
+	tracked *trackedFile,
+	currentDiskContent string,
+	currentDiskState []byte,
+	currentDiskSeq int64,
+	mergedContent string,
+	mergedState []byte,
+	mergedSeq int64,
+	writeIfUnchanged func(path string, expected projectedContentHash, content []byte) error,
+) (bool, error) {
 	previousHash, previousKnown := tracked.projectedSnapshot()
 	tracked.beginProjection()
 	defer tracked.endProjection()
 	tracked.setProjectedContent(mergedContent)
-	if err := tracked.workspaceFS().WriteIfUnchanged(tracked.Path, projectedHashString(currentDiskContent), []byte(mergedContent)); err != nil {
+	if err := writeIfUnchanged(tracked.Path, projectedHashString(currentDiskContent), []byte(mergedContent)); err != nil {
 		if errors.Is(err, ErrDivergedWorkingCopy) {
 			if len(currentDiskState) == 0 {
 				currentDiskState = crdtStateFromContent(currentDiskContent)
@@ -1759,13 +1983,24 @@ func projectMergedContentOverLocalDisk(tracked *trackedFile, currentDiskContent 
 	return true, nil
 }
 
-func materializeTrackedFile(ctx context.Context, cache *documentCache, document *document, absolutePath string) (*trackedFile, error) {
+func materializeTrackedFileWithFS(
+	ctx context.Context,
+	cache *documentCache,
+	document *document,
+	absolutePath string,
+	fs *WorkspaceFS,
+) (*trackedFile, error) {
+	root := workspaceRootForDocumentPath(absolutePath, document.Path)
+	fs, err := requireWorkspaceFS(fs, root)
+	if err != nil {
+		return nil, fmt.Errorf("materialize tracked file: %w", err)
+	}
 	tracked := &trackedFile{
 		DocumentID:    document.ID,
 		DocumentPath:  document.Path,
 		Path:          absolutePath,
-		WorkspaceRoot: workspaceRootForDocumentPath(absolutePath, document.Path),
-		FS:            NewWorkspaceFS(workspaceRootForDocumentPath(absolutePath, document.Path)),
+		WorkspaceRoot: root,
+		FS:            fs,
 		Doc:           crdt.New(),
 		docMu:         &sync.Mutex{},
 		cache:         cache,
@@ -1789,7 +2024,7 @@ func materializeTrackedFile(ctx context.Context, cache *documentCache, document 
 		}
 		if baseKnown {
 			tracked.setProjectedContent(baseContent)
-			snapshot, readErr := tracked.workspaceFS().Read(absolutePath)
+			snapshot, readErr := fs.Read(absolutePath)
 			if readErr == nil && snapshot.Exists {
 				if !tracked.matchesProjectedBytes(snapshot.Bytes) {
 					tracked.markLocalDirty()
@@ -1801,25 +2036,41 @@ func materializeTrackedFile(ctx context.Context, cache *documentCache, document 
 			}
 			return tracked, nil
 		}
-		if _, readErr := tracked.workspaceFS().Read(absolutePath); readErr != nil {
+		if _, readErr := fs.Read(absolutePath); readErr != nil {
 			return nil, readErr
 		}
 		tracked.markLocalDirty()
 		return tracked, nil
 	}
-	snapshot, err := tracked.workspaceFS().Read(absolutePath)
-	if err == nil && snapshot.Exists {
-		tracked.setProjectedContent(string(snapshot.Bytes))
-		return tracked, nil
-	}
+	snapshot, err := fs.CreateEmptyOrRead(absolutePath)
 	if err != nil {
 		return nil, err
 	}
-	if err := writeIfChanged(absolutePath, ""); err != nil {
+	tracked.setProjectedContent(string(snapshot.Bytes))
+	return tracked, nil
+}
+
+func (s *workspaceRuntime) workspaceFSForRoot(root string) (*WorkspaceFS, error) {
+	if s == nil || s.replica == nil {
+		return nil, fmt.Errorf("%w: runtime has no workspace replica for root %q", errWorkspaceFSInvariant, root)
+	}
+	requestedRoot, err := canonicalWorkspaceRoot(root)
+	if err != nil {
 		return nil, err
 	}
-	tracked.setProjectedContent("")
-	return tracked, nil
+	runtimeRoot, err := canonicalWorkspaceRoot(s.replica.rootDir)
+	if err != nil {
+		return nil, err
+	}
+	if requestedRoot != runtimeRoot {
+		return nil, fmt.Errorf(
+			"%w: requested root %q does not match runtime root %q",
+			errWorkspaceFSInvariant,
+			requestedRoot,
+			runtimeRoot,
+		)
+	}
+	return requireWorkspaceFS(s.replica.fs, runtimeRoot)
 }
 
 func archiveUnknownWorkingCopy(tracked *trackedFile) error {
@@ -1833,7 +2084,11 @@ func archiveUnknownWorkingCopy(tracked *trackedFile) error {
 	if root == "" {
 		return nil
 	}
-	_, err := tracked.workspaceFS().Archive(tracked.Path, safeDocumentCacheName(tracked.DocumentID))
+	fs, err := tracked.workspaceFS()
+	if err != nil {
+		return err
+	}
+	_, err = fs.Archive(tracked.Path, safeDocumentCacheName(tracked.DocumentID))
 	return err
 }
 
@@ -1873,7 +2128,7 @@ func scanWorkspaceFiles(root string) (map[string]string, error) {
 		if entry.IsDir() {
 			return nil
 		}
-		content, err := readFileLocked(path)
+		content, err := readFileObservation(path)
 		if err != nil {
 			return err
 		}
@@ -1970,18 +2225,18 @@ func (t *trackedFile) loadProjectedBase() (string, []byte, bool, error) {
 	return t.cache.loadProjectedBase(t.DocumentID)
 }
 
-func (t *trackedFile) workspaceFS() *WorkspaceFS {
-	if t != nil && t.FS != nil {
-		return t.FS
+func (t *trackedFile) workspaceFS() (*WorkspaceFS, error) {
+	if t == nil {
+		return nil, fmt.Errorf("%w: tracked file is nil", errWorkspaceFSInvariant)
 	}
-	root := ""
-	if t != nil {
-		root = t.WorkspaceRoot
-		if root == "" {
-			root = workspaceRootForDocumentPath(t.Path, t.DocumentPath)
-		}
+	fs, err := requireWorkspaceFS(t.FS, t.WorkspaceRoot)
+	if err != nil {
+		return nil, fmt.Errorf("tracked file %q: %w", t.DocumentID, err)
 	}
-	return NewWorkspaceFS(root)
+	if t.Owner != nil && t.Owner.fs != fs {
+		return nil, fmt.Errorf("%w: tracked file %q does not use its replica filesystem", errWorkspaceFSInvariant, t.DocumentID)
+	}
+	return fs, nil
 }
 
 func (t *trackedFile) desiredPath() string {

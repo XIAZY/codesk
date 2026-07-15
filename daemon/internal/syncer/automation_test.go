@@ -248,7 +248,7 @@ func TestToolGatewayRepliesAsOwningAgent(t *testing.T) {
 
 func TestToolGatewayCreateThreadQueuesPathQuoteIntent(t *testing.T) {
 	service := newToolGatewayTestService(&agent{ID: "agent_1", Handle: "reviewer", Kind: "codex"}, "token_123")
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new document cache: %v", err)
 	}
@@ -263,7 +263,8 @@ func TestToolGatewayCreateThreadQueuesPathQuoteIntent(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("store root projection: %v", err)
 	}
-	service.primaryRuntime = &workspaceRuntime{rootDocumentID: rootID, docCache: cache, reconcileQueue: queue}
+	runtime := &workspaceRuntime{rootDocumentID: rootID, docCache: cache, reconcileQueue: queue}
+	service.agentRuntimes = map[string]*managedWorkspaceRuntime{"agent_1": {runtime: runtime}}
 	doc := crdt.New(crdt.WithClientID(771))
 	text := doc.GetText("content")
 	doc.Transact(func(txn *crdt.Transaction) {
@@ -335,7 +336,7 @@ func TestToolGatewayRejectsUnknownToken(t *testing.T) {
 
 func TestToolGatewayGetsDocumentByPathAsAuthorizedAgent(t *testing.T) {
 	service := newToolGatewayTestService(&agent{ID: "agent_1", Handle: "reviewer", Kind: "codex"}, "token_123")
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new document cache: %v", err)
 	}
@@ -349,10 +350,11 @@ func TestToolGatewayGetsDocumentByPathAsAuthorizedAgent(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("store root projection: %v", err)
 	}
-	service.primaryRuntime = &workspaceRuntime{
+	runtime := &workspaceRuntime{
 		rootDocumentID: rootID,
 		docCache:       cache,
 	}
+	service.agentRuntimes = map[string]*managedWorkspaceRuntime{"agent_1": {runtime: runtime}}
 	service.client = &http.Client{
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			t.Fatalf("get-document-by-path should use local root projection, not backend: %s %s", r.Method, r.URL.String())

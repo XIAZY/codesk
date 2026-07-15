@@ -2,35 +2,29 @@ package syncer
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
+// writeFakeCodex writes an executable shell script to a temp path so a test can
+// drive the real codex app-server against scripted stdio/stderr behavior.
+func writeFakeCodex(t *testing.T, script string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	return path
+}
+
 // The fake process fills the app-server event channel with telemetry, emits a
 // real lifecycle notification, and exits. The lifecycle event must survive,
 // and process exit must not close the channel until readLoop has delivered it.
 func TestCodexAppServerExitDrainsGuaranteedLifecycleNotification(t *testing.T) {
-	codexPath := writeFakeCodex(t, `#!/bin/sh
-while IFS= read -r line; do
-	case "$line" in
-	*'"method":"initialize"'*)
-		printf '%s\n' '{"id":1,"result":{}}'
-		;;
-	*'"method":"initialized"'*)
-		i=0
-		while [ "$i" -lt 128 ]; do
-			printf '{"method":"item/agentMessage/delta","params":{"index":%s}}\n' "$i"
-			i=$((i + 1))
-		done
-		printf '%s\n' '{"method":"turn/completed","params":{}}'
-		# Keep stdout open until readLoop is blocked on the lifecycle send.
-		sleep 1
-		exit 0
-		;;
-	esac
-done
-`)
+	codexPath := fakeProcessCommand(t, fakeProcessCodexLifecycleFlood)
 	client := newCodexAppServer(Config{CodexCommand: codexPath, DataDir: t.TempDir()}, t.TempDir(), "", "agent_codex")
 	defer client.closeLog()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -45,9 +45,18 @@ type agentSessionSupervisor struct {
 	// the classification. Test seam only.
 	testHookDeathHandled func(classification string)
 
+	// shutdownOnce guards Shutdown so its teardown (baseCtx cancel, session stop,
+	// construction drain, status stop) runs exactly once even if Shutdown is
+	// called multiple times (the #145 idempotency invariant).
+	shutdownOnce sync.Once
+
 	mu       sync.Mutex
 	sessions map[string]*managedAgentSession
 	starting map[string]*agentSessionStart
+	// shutdown is the closed-state flag (the #145 `closed`): once set under s.mu
+	// no start path may admit a new session/claim/construction, and publish is
+	// refused. It is the authority both the crash-classification restart gate and
+	// the #145 lifecycle checks consult.
 	shutdown bool
 	// restartAttempts counts consecutive transient restarts per agent, keyed by
 	// agentID so it survives the per-restart session replacement. It grows the
@@ -55,23 +64,25 @@ type agentSessionSupervisor struct {
 	// bare respawn — else a post-handshake quota kill would spin at full rate.
 	restartAttempts map[string]int
 
-	// baseCtx is the parent of every (fresh AND restart) detached construction;
-	// baseCancel (fired by Shutdown) cancels all in-flight Spawn/Start/handshake
-	// calls. In production baseCtx is a child of the service run context (bound
-	// once at run() entry via bindServiceContext), so a service-context
-	// cancellation — including during the synchronous startup refresh, before
-	// Shutdown is reachable — propagates to every construction. Direct tests keep
-	// the Background-derived baseCtx from the constructor.
+	// baseCtx is the parent of every (fresh AND restart) detached construction AND
+	// every live consumeEvents loop; baseCancel (fired by Shutdown) cancels all
+	// in-flight Spawn/Start/handshake calls and event loops. In production baseCtx
+	// is a child of the service run context (bound once at run() entry via
+	// bindServiceContext), so a service-context cancellation — including during the
+	// synchronous startup refresh, before Shutdown is reachable — propagates to
+	// every construction. Direct tests keep the Background-derived baseCtx from the
+	// constructor.
 	baseCtx      context.Context
 	baseCancel   context.CancelFunc
 	serviceBound bool
 
-	// constructionWG tracks every detached construction worker (fresh and
-	// restart). Shutdown cancels baseCtx (which makes a real provider Start/
-	// handshake return), then waits on this barrier before status teardown — so it
-	// never returns while a detached worker still owns an unpublished process.
+	// constructionWG tracks every detached construction worker (fresh and restart)
+	// AND every live consumeEvents loop. Shutdown cancels baseCtx (which makes a
+	// real provider Start/handshake return and every event loop exit), then waits
+	// on this barrier before status teardown — so it never returns while a detached
+	// worker still owns an unpublished process or an event loop can still publish.
 	// Add is done under s.mu on the same side as the shutdown check, so it can
-	// never race Wait and no worker is admitted after shutdown.
+	// never race Wait and nothing is admitted after shutdown.
 	constructionWG sync.WaitGroup
 }
 
@@ -183,6 +194,9 @@ type agentStatusWorker struct {
 	dirty    bool
 	wake     chan struct{}
 	stopped  chan struct{}
+	done     chan struct{}
+	ctx      context.Context
+	cancel   context.CancelFunc
 	stopOnce sync.Once
 }
 
@@ -231,11 +245,15 @@ func (s *agentStatusSyncer) Stop() {
 }
 
 func newAgentStatusWorker(agentID string, updater agentSessionUpdater) *agentStatusWorker {
+	ctx, cancel := context.WithCancel(context.Background())
 	worker := &agentStatusWorker{
 		agentID: agentID,
 		updater: updater,
 		wake:    make(chan struct{}, 1),
 		stopped: make(chan struct{}),
+		done:    make(chan struct{}),
+		ctx:     ctx,
+		cancel:  cancel,
 	}
 	go worker.run()
 	return worker
@@ -252,8 +270,10 @@ func (w *agentStatusWorker) Publish(payload updateAgentSessionRequest) {
 func (w *agentStatusWorker) Stop() {
 	w.stopOnce.Do(func() {
 		close(w.stopped)
+		w.cancel()
 	})
 	w.signal()
+	<-w.done
 }
 
 func (w *agentStatusWorker) signal() {
@@ -264,6 +284,7 @@ func (w *agentStatusWorker) signal() {
 }
 
 func (w *agentStatusWorker) run() {
+	defer close(w.done)
 	backoff := 250 * time.Millisecond
 	for {
 		select {
@@ -277,7 +298,7 @@ func (w *agentStatusWorker) run() {
 			if !ok {
 				break
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), agentStatusUpdateTimeout)
+			ctx, cancel := context.WithTimeout(w.ctx, agentStatusUpdateTimeout)
 			err := w.updater(ctx, w.agentID, payload)
 			cancel()
 			if err == nil {
@@ -448,28 +469,37 @@ func (s *agentSessionSupervisor) Reconcile(ctx context.Context, agents []*agent)
 }
 
 func (s *agentSessionSupervisor) Shutdown() {
-	s.mu.Lock()
-	s.shutdown = true
-	// Cancel every in-flight construction (fresh and restart) so a blocked
-	// Spawn/Start/provider-handshake returns promptly and its process is reaped,
-	// rather than stalling teardown until the construction completes on its own.
-	s.baseCancel()
-	sessions := make([]*managedAgentSession, 0, len(s.sessions))
-	for _, session := range s.sessions {
-		sessions = append(sessions, session)
+	if s == nil {
+		return
 	}
-	s.sessions = map[string]*managedAgentSession{}
-	s.mu.Unlock()
-	for _, session := range sessions {
-		_ = session.process.Stop()
-	}
-	// Join every detached construction worker (fresh + restart) before status
-	// teardown: baseCancel above makes a real provider Start/handshake return, so
-	// each worker's construction completes, the baseCtx.Err() publish fence reaps
-	// it, and the worker drains — Shutdown never returns while a detached worker
-	// still owns an unpublished process. No post-Shutdown zombie.
-	s.constructionWG.Wait()
-	s.status.Stop()
+	s.shutdownOnce.Do(func() {
+		s.mu.Lock()
+		s.shutdown = true
+		// Cancel every in-flight construction (fresh and restart) AND every live
+		// consumeEvents loop so a blocked Spawn/Start/provider-handshake or event
+		// loop returns promptly and its process is reaped, rather than stalling
+		// teardown until it completes on its own.
+		s.baseCancel()
+		sessions := make([]*managedAgentSession, 0, len(s.sessions))
+		for _, session := range s.sessions {
+			sessions = append(sessions, session)
+		}
+		s.sessions = map[string]*managedAgentSession{}
+		s.mu.Unlock()
+		for _, session := range sessions {
+			_ = session.process.Stop()
+		}
+		// Join every detached construction worker (fresh + restart) AND every live
+		// consumeEvents loop before status teardown: baseCancel above makes a real
+		// provider Start/handshake return and every event loop exit, so each drains,
+		// the baseCtx.Err() publish fence reaps any in-flight process, and Shutdown
+		// never returns while a worker or event loop can still publish — no
+		// post-Shutdown zombie and no status write after teardown.
+		s.constructionWG.Wait()
+		if s.status != nil {
+			s.status.Stop()
+		}
+	})
 }
 
 // refreshDesiredSpec updates a session's desired agent spec to the latest and
@@ -849,6 +879,12 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 		return nil
 	}
 	s.sessions[current.ID] = session
+	// Track the live event loop in the same barrier as construction workers: it is
+	// added under s.mu on the passing side of the shutdown fence above, so Shutdown
+	// (which sets s.shutdown and cancels baseCtx under s.mu, then Waits) can never
+	// race this Add, and the loop is drained before status teardown — no publish
+	// after Stop (the #145 consumeEvents-join invariant).
+	s.constructionWG.Add(1)
 	s.mu.Unlock()
 	started = false
 	s.publish(current.ID, updateAgentSessionRequest{
@@ -858,7 +894,10 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 		CurrentActivity: "Idle",
 		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
-	go s.consumeEvents(current.ID, process)
+	go func() {
+		defer s.constructionWG.Done()
+		s.consumeEvents(current.ID, process)
+	}()
 	return nil
 }
 
@@ -1056,7 +1095,18 @@ func (s *agentSessionSupervisor) agentByToolToken(token string) *agentRun {
 }
 
 func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimeProcess) {
-	for event := range process.Events() {
+	events := process.Events()
+	for {
+		var event RuntimeEvent
+		var ok bool
+		select {
+		case <-s.baseCtx.Done():
+			return
+		case event, ok = <-events:
+			if !ok {
+				goto disconnected
+			}
+		}
 		switch event.Kind {
 		case RuntimeEventTurnStarted:
 			if strings.TrimSpace(event.TurnID) != "" {
@@ -1075,6 +1125,7 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 			s.markIdle(agentID, process, true)
 		}
 	}
+disconnected:
 	// Classify the death from the exit forensics (facet 2), recorded before the
 	// events channel closed. Default is transient: only an explicit positive
 	// signal moves an exit to Expected (deliberate Stop) or terminal (a
@@ -1169,9 +1220,11 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 	})
 	// Join the restarter through the same construction barrier as fresh workers.
 	// Add under s.mu on the same side as the shutdown check; if shutdown already
-	// won, do not launch a restart at all (Shutdown's Wait must not see a new Add).
+	// won — or the run/base context was cancelled (a service-context teardown that
+	// has not yet reached Shutdown) — do not launch a restart at all (Shutdown's
+	// Wait must not see a new Add, and a cancelled baseCtx must not spin restarts).
 	s.mu.Lock()
-	launchRestart := !s.shutdown
+	launchRestart := !s.shutdown && s.baseCtx.Err() == nil
 	if launchRestart {
 		s.constructionWG.Add(1)
 	}
@@ -1197,8 +1250,12 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 			s.restartSleep(delay)
 			s.mu.Lock()
 			session := s.sessions[agentID]
-			if s.shutdown || session == nil || session.process != process || !session.restartPending {
-				// Removed / replaced / shutdown / no longer ours — cancel.
+			if s.shutdown || s.baseCtx.Err() != nil || session == nil || session.process != process || !session.restartPending {
+				// Removed / replaced / shutdown / base-context cancelled / no longer
+				// ours — cancel. Checking baseCtx here stops the spin when the service
+				// run context is cancelled before Shutdown sets s.shutdown: without it
+				// restartSleep returns immediately (baseCtx-aware) and each iteration
+				// would spawn-then-reap a process against the cancelled context.
 				s.mu.Unlock()
 				return
 			}
@@ -1239,8 +1296,9 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 			}
 			// Token still present: nothing was published (construction failure or a
 			// mid-construction spec refresh reaped it). Re-arm the next capped
-			// attempt against the same token, unless shutdown/removal intervened.
-			if s.shutdown || !session.restartPending {
+			// attempt against the same token, unless shutdown/base-context
+			// cancellation/removal intervened.
+			if s.shutdown || s.baseCtx.Err() != nil || !session.restartPending {
 				s.mu.Unlock()
 				return
 			}

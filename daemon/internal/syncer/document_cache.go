@@ -24,8 +24,10 @@ type workspaceStore struct {
 	path string
 	db   *sql.DB
 
-	mu      sync.Mutex
-	entries map[string]*documentCacheEntry
+	mu        sync.Mutex
+	entries   map[string]*documentCacheEntry
+	closeOnce sync.Once
+	closeErr  error
 }
 
 type documentCache = workspaceStore
@@ -139,12 +141,30 @@ func newDocumentCache(path string) (*documentCache, error) {
 	return store, nil
 }
 
+func (c *workspaceStore) Close() error {
+	if c == nil {
+		return nil
+	}
+	c.closeOnce.Do(func() {
+		if c.db != nil {
+			c.closeErr = c.db.Close()
+		}
+	})
+	return c.closeErr
+}
+
 func sqliteFileDSN(path string) string {
 	clean := filepath.Clean(path)
 	if abs, err := filepath.Abs(clean); err == nil {
 		clean = abs
 	}
-	dsn := url.URL{Scheme: "file", Path: filepath.ToSlash(clean)}
+	uriPath := filepath.ToSlash(clean)
+	if filepath.VolumeName(clean) != "" && !strings.HasPrefix(uriPath, "/") {
+		// Keep the drive letter in the path instead of URL authority so SQLite
+		// receives file:///C:/path rather than file://C:/path.
+		uriPath = "/" + uriPath
+	}
+	dsn := url.URL{Scheme: "file", Path: uriPath}
 	query := dsn.Query()
 	query.Set("_busy_timeout", "5000")
 	query.Set("_journal_mode", "WAL")

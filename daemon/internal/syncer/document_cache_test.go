@@ -14,7 +14,7 @@ import (
 func TestDocumentCacheMaterializesCachedStateWithoutBackendFetch(t *testing.T) {
 	root := t.TempDir()
 
-	cache, err := newDocumentCache(root)
+	cache, err := newTestDocumentCache(t, root)
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -23,7 +23,7 @@ func TestDocumentCacheMaterializesCachedStateWithoutBackendFetch(t *testing.T) {
 		t.Fatalf("store cached doc: %v", err)
 	}
 
-	cache, err = newDocumentCache(root)
+	cache, err = newTestDocumentCache(t, root)
 	if err != nil {
 		t.Fatalf("reopen cache: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestDocumentCacheMaterializesCachedStateWithoutBackendFetch(t *testing.T) {
 }
 
 func TestDocumentCacheMaterializesIndependentMutableDocs(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestDocumentCacheMaterializesIndependentMutableDocs(t *testing.T) {
 }
 
 func TestDocumentCacheReportsUnknownContentWithoutCacheState(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestDocumentCacheReportsUnknownContentWithoutCacheState(t *testing.T) {
 
 func TestDocumentCacheDedupesPendingRemoteUpdatesAfterReopen(t *testing.T) {
 	root := t.TempDir()
-	cache, err := newDocumentCache(root)
+	cache, err := newTestDocumentCache(t, root)
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestDocumentCacheDedupesPendingRemoteUpdatesAfterReopen(t *testing.T) {
 		t.Fatal("expected first pending update to append")
 	}
 
-	reopened, err := newDocumentCache(root)
+	reopened, err := newTestDocumentCache(t, root)
 	if err != nil {
 		t.Fatalf("reopen cache: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestDocumentCacheDedupesPendingRemoteUpdatesAfterReopen(t *testing.T) {
 
 func TestDocumentCacheFoldsPendingRemoteUpdatesOnceAfterReopen(t *testing.T) {
 	root := t.TempDir()
-	cache, err := newDocumentCache(root)
+	cache, err := newTestDocumentCache(t, root)
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -174,11 +174,11 @@ func TestDocumentCacheFoldsPendingRemoteUpdatesOnceAfterReopen(t *testing.T) {
 			t.Fatalf("expected pending update %s to append", key)
 		}
 	}
-	if err := cache.db.Close(); err != nil {
+	if err := cache.Close(); err != nil {
 		t.Fatalf("close cache: %v", err)
 	}
 
-	reopened, err := newDocumentCache(root)
+	reopened, err := newTestDocumentCache(t, root)
 	if err != nil {
 		t.Fatalf("reopen cache: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestDocumentCacheFoldsPendingRemoteUpdatesOnceAfterReopen(t *testing.T) {
 }
 
 func TestWorkspaceStoreStoreProjectedBaseUsesExplicitSeq(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -358,7 +358,7 @@ func TestWorkspaceStoreStoreProjectedBaseUsesExplicitSeq(t *testing.T) {
 }
 
 func TestWorkspaceStoreApplyDuplicateOutboxUpdateReturnsExistingSeq(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -432,7 +432,7 @@ func TestWorkspaceStoreApplyDuplicateOutboxUpdateReturnsExistingSeq(t *testing.T
 
 func TestDocumentCacheCreatesSnapshotsAtConfiguredUpdateInterval(t *testing.T) {
 	withDocumentSnapshotEveryUpdates(t, 2)
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -459,7 +459,7 @@ func TestDocumentCacheCreatesSnapshotsAtConfiguredUpdateInterval(t *testing.T) {
 
 func TestDocumentCacheLoadDocAtSeqUsesNearestSnapshotTailReplay(t *testing.T) {
 	withDocumentSnapshotEveryUpdates(t, 1000)
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -507,7 +507,7 @@ func TestDocumentCacheLoadDocAtSeqUsesNearestSnapshotTailReplay(t *testing.T) {
 }
 
 func TestDocumentCacheProjectedBaseUsesMaterializedRowWithoutReconstruction(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -565,7 +565,7 @@ func TestDocumentCacheProjectedBaseUsesMaterializedRowWithoutReconstruction(t *t
 
 func TestDocumentCacheStoreProjectedBaseDoesNotBypassSnapshotInterval(t *testing.T) {
 	withDocumentSnapshotEveryUpdates(t, 1000)
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -598,7 +598,7 @@ func TestDocumentCacheStoreProjectedBaseDoesNotBypassSnapshotInterval(t *testing
 
 func TestDocumentCacheProjectedBaseFallsBackAndBackfillsStaleRow(t *testing.T) {
 	withDocumentSnapshotEveryUpdates(t, 1)
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -644,7 +644,7 @@ func TestDocumentCacheProjectedBaseFallsBackAndBackfillsStaleRow(t *testing.T) {
 }
 
 func TestDocumentCacheProjectedBaseBackfillDoesNotMoveProjectionBackward(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -709,7 +709,7 @@ func TestDocumentCacheProjectedBaseBackfillDoesNotMoveProjectionBackward(t *test
 }
 
 func TestDocumentCacheProjectedBaseFallbackBackfillFailureIsNonFatal(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -744,7 +744,7 @@ func TestDocumentCacheProjectedBaseFallbackBackfillFailureIsNonFatal(t *testing.
 }
 
 func TestDocumentCacheStoreProjectedSeqClearsProjectedBaseRow(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -769,7 +769,7 @@ func TestDocumentCacheStoreProjectedSeqClearsProjectedBaseRow(t *testing.T) {
 
 func TestDocumentCacheLoadDocAtSeqDeletesInvalidSnapshotStateAndFallsBack(t *testing.T) {
 	withDocumentSnapshotEveryUpdates(t, 1)
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -815,7 +815,7 @@ func TestDocumentCacheLoadDocAtSeqDeletesInvalidSnapshotStateAndFallsBack(t *tes
 
 func TestDocumentCacheSnapshotFailureDoesNotFailRemoteFoldOrLoad(t *testing.T) {
 	withDocumentSnapshotEveryUpdates(t, 1)
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -855,7 +855,7 @@ func TestDocumentCacheSnapshotFailureDoesNotFailRemoteFoldOrLoad(t *testing.T) {
 
 func TestDocumentCacheProjectedBaseRowSurvivesReopen(t *testing.T) {
 	root := t.TempDir()
-	cache, err := newDocumentCache(root)
+	cache, err := newTestDocumentCache(t, root)
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -870,11 +870,11 @@ func TestDocumentCacheProjectedBaseRowSurvivesReopen(t *testing.T) {
 	if err := cache.storeProjectedBase("doc_1", "base", baseDoc.EncodeStateAsUpdate(), row.AppliedSeq); err != nil {
 		t.Fatalf("store projected base: %v", err)
 	}
-	if err := cache.db.Close(); err != nil {
+	if err := cache.Close(); err != nil {
 		t.Fatalf("close cache: %v", err)
 	}
 
-	reopened, err := newDocumentCache(root)
+	reopened, err := newTestDocumentCache(t, root)
 	if err != nil {
 		t.Fatalf("reopen cache: %v", err)
 	}
@@ -902,7 +902,7 @@ func TestDocumentCacheProjectedBaseRowSurvivesReopen(t *testing.T) {
 }
 
 func TestDocumentCacheDoesNotCreateFileBackedState(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
@@ -923,7 +923,7 @@ func TestDocumentCacheDoesNotCreateFileBackedState(t *testing.T) {
 }
 
 func TestWorkspaceStoreSchemaUsesAgreedDurableTables(t *testing.T) {
-	cache, err := newDocumentCache(t.TempDir())
+	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
 		t.Fatalf("new cache: %v", err)
 	}
