@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -98,6 +99,12 @@ type claudeRuntimeProcess struct {
 	// supervisor retries on this same process must not close it.
 	stopping chan struct{}
 	stopOnce sync.Once
+
+	// lastActivity is the unix-nano time the read loop last decoded a
+	// syntactically valid stream frame, stored atomically (one store per valid
+	// frame, no lock) so the supervisor heartbeat can poll it without contending
+	// with WriteStdin/lifecycle handling. Zero means no valid frame decoded yet.
+	lastActivity atomic.Int64
 
 	mu         sync.Mutex
 	cmd        *exec.Cmd
@@ -442,6 +449,13 @@ func (p *claudeRuntimeProcess) readLoop(stdout io.Reader) {
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		p.logf("stream recv %s", truncateForLog(string(line)))
+		// Liveness at the read boundary: a syntactically valid frame — even one
+		// whose type we don't map — proves the runtime is alive, so stamp before
+		// any semantic mapping. Malformed output must NOT count (a junk-spewer must
+		// not manufacture a heartbeat), so gate strictly on JSON-object validity.
+		if isValidRuntimeFrame(line) {
+			p.noteActivity()
+		}
 		event := parseClaudeStreamLine(line)
 		if event == nil {
 			continue
@@ -538,6 +552,22 @@ func (p *claudeRuntimeProcess) ExitInfo() RuntimeExitInfo {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.exitInfo
+}
+
+// noteActivity records that a valid stream frame was just decoded (read boundary).
+func (p *claudeRuntimeProcess) noteActivity() {
+	p.lastActivity.Store(time.Now().UnixNano())
+}
+
+func (p *claudeRuntimeProcess) LastActivityAt() time.Time {
+	if p == nil {
+		return time.Time{}
+	}
+	nanos := p.lastActivity.Load()
+	if nanos == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, nanos)
 }
 
 // claudeStderrTail is the process's stderr writer: it logs complete lines to

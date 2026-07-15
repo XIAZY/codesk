@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 )
 
 type appServerEvent struct {
@@ -46,6 +47,10 @@ type codexAppServer struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	nextID atomic.Int64
+	// lastActivity is the unix-nano time the read loop last decoded a valid
+	// JSON-RPC frame, stored atomically (one store per valid frame, no lock) as the
+	// liveness signal the supervisor heartbeat polls. Zero means none decoded yet.
+	lastActivity atomic.Int64
 
 	mu         sync.Mutex
 	pending    map[int64]chan appServerResponse
@@ -374,6 +379,10 @@ func (c *codexAppServer) readLoop(stdout io.Reader) {
 			c.logf("jsonrpc recv malformed bytes=%d", len(line))
 			continue
 		}
+		// Liveness at the read boundary: the frame decoded as a valid JSON-RPC
+		// object, so stamp before any method/type mapping. Malformed lines above
+		// already continued without stamping — junk cannot forge a heartbeat.
+		c.noteActivity()
 		if idRaw, ok := raw["id"]; ok {
 			if _, isServerRequest := raw["method"]; isServerRequest {
 				c.handleServerRequest(line)
@@ -478,6 +487,19 @@ func (c *codexAppServer) ExitInfo() RuntimeExitInfo {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.exitInfo
+}
+
+// noteActivity records that a valid JSON-RPC frame was just decoded (read boundary).
+func (c *codexAppServer) noteActivity() {
+	c.lastActivity.Store(time.Now().UnixNano())
+}
+
+func (c *codexAppServer) LastActivityAt() time.Time {
+	nanos := c.lastActivity.Load()
+	if nanos == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, nanos)
 }
 
 func (c *codexAppServer) handleServerRequest(payload []byte) {

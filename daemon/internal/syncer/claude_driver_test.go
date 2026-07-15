@@ -288,6 +288,32 @@ func TestClaudeStartTurnWithoutSpawnFails(t *testing.T) {
 	}
 }
 
+// Item #5 liveness, row 4: a syntactically valid frame whose type the parser does
+// NOT map still proves the runtime is alive, so it must refresh LastActivityAt at
+// the read boundary. Liveness is syntactic, not semantic — it must not depend on
+// which frame types the parser currently recognizes.
+func TestClaudeReadBoundaryUnknownValidFrameRefreshesLiveness(t *testing.T) {
+	process := &claudeRuntimeProcess{events: make(chan RuntimeEvent, 4)}
+	if !process.LastActivityAt().IsZero() {
+		t.Fatalf("precondition: expected zero liveness, got %v", process.LastActivityAt())
+	}
+	// Well-formed JSON object, but "type" is one the parser has no case for.
+	process.readLoop(strings.NewReader(`{"type":"telemetry_unmapped","progress":0.5}` + "\n"))
+	if process.LastActivityAt().IsZero() {
+		t.Fatal("an unknown-but-valid frame must refresh liveness at the read boundary")
+	}
+}
+
+// Item #5 liveness, row 5: malformed output must NOT refresh liveness — a process
+// spewing junk or partial bytes cannot manufacture a heartbeat and mask a wedge.
+func TestClaudeReadBoundaryMalformedFrameDoesNotRefreshLiveness(t *testing.T) {
+	process := &claudeRuntimeProcess{events: make(chan RuntimeEvent, 4)}
+	process.readLoop(strings.NewReader("{ this is not valid json\n"))
+	if !process.LastActivityAt().IsZero() {
+		t.Fatalf("a malformed frame must not refresh liveness, got %v", process.LastActivityAt())
+	}
+}
+
 // A full events channel must never lose a lifecycle event (task #12). The old
 // emit dropped on full, so a dropped turn-end wedged the session as "working"
 // forever with no external cause. This pins the guarantee at the readLoop

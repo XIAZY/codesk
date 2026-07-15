@@ -50,6 +50,7 @@ type fakeRuntimeProcess struct {
 	failResume      bool
 	startIgnoreCtx  bool
 	exitInfo        RuntimeExitInfo
+	lastActivity    time.Time
 
 	// Optional StartTurn interception: when startTurnEntered/startTurnRelease are
 	// set, a StartTurn write signals entry then blocks until released, WITHOUT
@@ -231,6 +232,18 @@ func (p *fakeRuntimeProcess) ExitInfo() RuntimeExitInfo {
 func (p *fakeRuntimeProcess) setExitInfo(info RuntimeExitInfo) {
 	p.mu.Lock()
 	p.exitInfo = info
+	p.mu.Unlock()
+}
+
+func (p *fakeRuntimeProcess) LastActivityAt() time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastActivity
+}
+
+func (p *fakeRuntimeProcess) setLastActivity(t time.Time) {
+	p.mu.Lock()
+	p.lastActivity = t
 	p.mu.Unlock()
 }
 

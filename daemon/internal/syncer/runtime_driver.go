@@ -1,10 +1,30 @@
 package syncer
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
+	"time"
 )
+
+// isValidRuntimeFrame reports whether line is a syntactically valid JSON object
+// frame — the read-boundary liveness signal shared by the runtime drivers. It
+// accepts any well-formed object (including one carrying fields a driver does not
+// map yet) and rejects malformed input and non-object JSON. So a genuinely
+// communicating runtime refreshes liveness even as the wire format evolves, while
+// a process spewing junk or partial output cannot manufacture a heartbeat. It is
+// deliberately syntactic, not semantic: liveness must not depend on which frame
+// types the parser currently recognizes.
+func isValidRuntimeFrame(line []byte) bool {
+	trimmed := bytes.TrimSpace(line)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return false
+	}
+	var probe map[string]json.RawMessage
+	return json.Unmarshal(trimmed, &probe) == nil
+}
 
 type RuntimeKind string
 
@@ -97,6 +117,13 @@ type RuntimeProcess interface {
 	Events() <-chan RuntimeEvent
 	// ExitInfo reports why the process ended; valid only after Events() closes.
 	ExitInfo() RuntimeExitInfo
+	// LastActivityAt reports when the driver last decoded a syntactically valid
+	// provider frame from the runtime's stream, updated at the read boundary
+	// before any method/type mapping. It is the liveness signal the supervisor's
+	// heartbeat loop polls to distinguish a genuinely working runtime (continuous
+	// valid telemetry) from a wedged one (total silence). Zero time means the
+	// driver has decoded no valid frame yet.
+	LastActivityAt() time.Time
 	PID() int
 }
 
