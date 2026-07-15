@@ -560,6 +560,14 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 				TurnID:     turnID,
 				Text:       forMeSteerMessage,
 			}); err != nil {
+				s.mu.Lock()
+				if currentSession := s.sessions[agentID]; currentSession != nil &&
+					currentSession.process == process &&
+					currentSession.activeTurn == turnID &&
+					currentSession.steeredForMeSig == forMeSig {
+					currentSession.steeredForMeSig = ""
+				}
+				s.mu.Unlock()
 				appendAgentLog(s.cfg, agentID, "turn steer failed session=%s turn=%s err=%v", sessionID, turnID, err)
 				if isNoActiveTurnToSteerError(err) {
 					return nil

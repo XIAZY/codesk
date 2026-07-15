@@ -28,6 +28,7 @@ type fakeRuntimeDriver struct {
 	startErr        error
 	startSessionErr error
 	steerErr        error
+	steerFn         func(context.Context) error
 	failResume      bool
 }
 
@@ -45,6 +46,7 @@ type fakeRuntimeProcess struct {
 	startErr        error
 	startSessionErr error
 	steerErr        error
+	steerFn         func(context.Context) error
 	failResume      bool
 }
 
@@ -79,6 +81,7 @@ func (f *fakeRuntimeDriver) Spawn(ctx context.Context, spec RuntimeSpawnSpec) (R
 		startErr:        f.startErr,
 		startSessionErr: f.startSessionErr,
 		steerErr:        f.steerErr,
+		steerFn:         f.steerFn,
 		failResume:      f.failResume,
 	}
 	f.mu.Lock()
@@ -148,7 +151,6 @@ func (p *fakeRuntimeProcess) Stop() error {
 }
 
 func (p *fakeRuntimeProcess) WriteStdin(ctx context.Context, input RuntimeInput) (RuntimeWriteResult, error) {
-	_ = ctx
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.inputs = append(p.inputs, input)
@@ -167,6 +169,9 @@ func (p *fakeRuntimeProcess) WriteStdin(ctx context.Context, input RuntimeInput)
 		p.nextTurn++
 		return RuntimeWriteResult{TurnID: fmt.Sprintf("turn_%d", p.nextTurn)}, nil
 	case RuntimeInputSteerTurn:
+		if p.steerFn != nil {
+			return RuntimeWriteResult{}, p.steerFn(ctx)
+		}
 		return RuntimeWriteResult{}, p.steerErr
 	case RuntimeInputInterruptTurn:
 		return RuntimeWriteResult{}, nil
@@ -193,6 +198,12 @@ func (p *fakeRuntimeProcess) inputsByKind(kind RuntimeInputKind) []RuntimeInput 
 		}
 	}
 	return inputs
+}
+
+func (p *fakeRuntimeProcess) setSteerError(err error) {
+	p.mu.Lock()
+	p.steerErr = err
+	p.mu.Unlock()
 }
 
 func waitAgentSessionStatus(t *testing.T, updates <-chan agentSessionStatusUpdate, agentID string, status string) agentSessionStatusUpdate {
@@ -574,6 +585,114 @@ func TestAgentSessionBusyForMeSteersOnceAndQueuesFollowup(t *testing.T) {
 	}
 }
 
+func TestAgentSessionFailedSteerRetriesSameInboxSignature(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.steerErr = errors.New("broken pipe")
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	current := &agent{ID: "agent_1", Kind: "codex"}
+
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "active", "", "general:v1"); err != nil {
+		t.Fatalf("schedule active: %v", err)
+	}
+	process := factory.only(t)
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "for-me", "for-me:v1", "general:v1"); !errors.Is(err, factory.steerErr) {
+		t.Fatalf("expected first steer to fail with broken pipe, got %v", err)
+	}
+	process.setSteerError(nil)
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "retry", "for-me:v1", "general:v1"); err != nil {
+		t.Fatalf("retry same signature: %v", err)
+	}
+	if got := len(process.inputsByKind(RuntimeInputSteerTurn)); got != 2 {
+		t.Fatalf("failed steer signature was treated as delivered: got %d attempts want 2", got)
+	}
+}
+
+func TestAgentSessionStaleSteerFailureDoesNotClearNewDeliveryState(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*managedAgentSession)
+	}{
+		{
+			name: "process",
+			mutate: func(session *managedAgentSession) {
+				session.process = &fakeRuntimeProcess{events: make(chan RuntimeEvent)}
+			},
+		},
+		{
+			name: "active turn",
+			mutate: func(session *managedAgentSession) {
+				session.activeTurn = "turn_2"
+			},
+		},
+		{
+			name: "signature",
+			mutate: func(session *managedAgentSession) {
+				session.steeredForMeSig = "for-me:v2"
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			steerEntered := make(chan struct{}, 1)
+			steerRelease := make(chan struct{})
+			factory := newFakeRuntimeDriver()
+			factory.steerErr = errors.New("broken pipe")
+			factory.steerFn = func(ctx context.Context) error {
+				steerEntered <- struct{}{}
+				select {
+				case <-steerRelease:
+					return factory.steerErr
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+			defer supervisor.Shutdown()
+			current := &agent{ID: "agent_1", Kind: "codex"}
+
+			if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "active", "", "general:v1"); err != nil {
+				t.Fatalf("schedule active: %v", err)
+			}
+			process := factory.only(t)
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- supervisor.ScheduleNotificationTurn(context.Background(), current, "for-me", "for-me:v1", "general:v1")
+			}()
+			select {
+			case <-steerEntered:
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for steer write")
+			}
+
+			supervisor.mu.Lock()
+			session := supervisor.sessions[current.ID]
+			if session == nil || session.process != process || session.activeTurn != "turn_1" || session.steeredForMeSig != "for-me:v1" {
+				supervisor.mu.Unlock()
+				t.Fatalf("unexpected pre-mutation session: %#v", session)
+			}
+			tt.mutate(session)
+			wantProcess := session.process
+			wantTurn := session.activeTurn
+			wantSig := session.steeredForMeSig
+			supervisor.mu.Unlock()
+			close(steerRelease)
+
+			if err := <-errCh; !errors.Is(err, factory.steerErr) {
+				t.Fatalf("expected stale steer to fail with broken pipe, got %v", err)
+			}
+			supervisor.mu.Lock()
+			session = supervisor.sessions[current.ID]
+			preserved := session != nil && session.process == wantProcess && session.activeTurn == wantTurn && session.steeredForMeSig == wantSig
+			supervisor.mu.Unlock()
+			if !preserved {
+				t.Fatal("stale steer failure cleared newer delivery state")
+			}
+		})
+	}
+}
+
 func TestAgentSessionBusyGeneralQueuesFollowupWithoutSteer(t *testing.T) {
 	factory := newFakeRuntimeDriver()
 	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
@@ -696,6 +815,12 @@ func TestAgentSessionNoActiveTurnSteerErrorIsNotFatal(t *testing.T) {
 	}
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "for-me", "for-me:v1", "general:v1"); err != nil {
 		t.Fatalf("no-active-turn steer should not fail automation: %v", err)
+	}
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "retry", "for-me:v1", "general:v1"); err != nil {
+		t.Fatalf("no-active-turn retry should not fail automation: %v", err)
+	}
+	if got := len(factory.only(t).inputsByKind(RuntimeInputSteerTurn)); got != 2 {
+		t.Fatalf("expected no-active-turn signature to remain retryable, got %d attempts want 2", got)
 	}
 }
 
