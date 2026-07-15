@@ -480,10 +480,20 @@ export function App() {
   if (route.kind === "resetPassword") {
     return <ResetPasswordPage api={api} token={route.token} />;
   }
+  if (route.kind === "desktopConnectComplete") {
+    return <RouteMessageScreen title="Connected" body="Your desktop app is now connected. You can close this tab." />;
+  }
 
   if (!token) {
     if (route.kind === "invite") {
       return <InvitePage api={api} inviteToken={route.token} account={null} workspaces={[]} onAuth={saveAuth} onAccepted={acceptInviteWorkspace} />;
+    }
+    if (route.kind === "desktopConnect") {
+      return (
+        <AuthScreen api={api} mode="login" onAuth={saveAuth} title="Connect desktop app" copy="Log in to connect your Codesk desktop app." preserveRoute>
+          <DesktopConnectCallbackInfo callback={route.callback} />
+        </AuthScreen>
+      );
     }
     if (route.kind === "notFound") {
       return <RouteMessageScreen title="Page not found" body="That link does not match a Codesk route." />;
@@ -501,6 +511,10 @@ export function App() {
 
   if (route.kind === "invite") {
     return <InvitePage api={api} inviteToken={route.token} account={account} workspaces={workspaces} onAuth={saveAuth} onAccepted={acceptInviteWorkspace} />;
+  }
+
+  if (route.kind === "desktopConnect") {
+    return <DesktopConnectPage api={api} callback={route.callback} workspaces={workspaces} />;
   }
 
   if (route.kind === "notFound") {
@@ -735,6 +749,107 @@ export function InvitePreviewCard({ preview }: { preview: WorkspaceInvitePreview
         <span className="tiny muted truncate">/{preview.workspace.slug} · expires {formatInviteDate(preview.expiresAt)}</span>
       </div>
     </div>
+  );
+}
+
+function isLoopbackCallback(raw: string): boolean {
+  try {
+    const parsed = new URL(raw);
+    return parsed.protocol === "http:" && (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost");
+  } catch {
+    return false;
+  }
+}
+
+function DesktopConnectCallbackInfo({ callback }: { callback: string }) {
+  if (!callback || !isLoopbackCallback(callback)) {
+    return <p className="muted tiny">Desktop app callback not detected.</p>;
+  }
+  return <p className="muted tiny">Your desktop app is waiting to connect.</p>;
+}
+
+function DesktopConnectPage({
+  api,
+  callback,
+  workspaces,
+}: {
+  api: ApiClient;
+  callback: string;
+  workspaces: WorkspaceSummary[];
+}) {
+  const [selected, setSelected] = useState<string | null>(workspaces.length === 1 ? workspaces[0].id : null);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const formRef = useRef<HTMLFormElement>(null);
+  const [formFields, setFormFields] = useState<Record<string, string> | null>(null);
+
+  if (!callback || !isLoopbackCallback(callback)) {
+    return <RouteMessageScreen title="Invalid callback" body="The desktop app callback URL is missing or not a loopback address." />;
+  }
+
+  const selectedWorkspace = workspaces.find((w) => w.id === selected) ?? null;
+
+  const submit = async () => {
+    if (!selectedWorkspace) return;
+    setSubmitting(true);
+    setError("");
+    try {
+      const response = await api.createDaemon(selectedWorkspace.id, "Codesk Desktop");
+      setFormFields({
+        daemon_id: response.daemon.id,
+        token: response.token,
+        workspace_id: selectedWorkspace.id,
+        workspace_name: selectedWorkspace.name,
+        workspace_slug: selectedWorkspace.slug,
+        workspace_url: `${publicOrigin}/w/${encodeURIComponent(selectedWorkspace.slug)}`,
+      });
+    } catch (err) {
+      setError(err instanceof ApiError ? err.details : err instanceof Error ? err.message : String(err));
+      setSubmitting(false);
+    }
+  };
+
+  useEffect(() => {
+    if (formFields && formRef.current) {
+      formRef.current.submit();
+    }
+  }, [formFields]);
+
+  if (workspaces.length === 0) {
+    return <RouteMessageScreen title="No workspaces" body="Create a workspace first, then reconnect your desktop app." />;
+  }
+
+  return (
+    <main className="auth-screen">
+      <section className="card p-24 auth-panel">
+        <Logo />
+        <h1 className="auth-title">Connect desktop app</h1>
+        <p className="muted">Select the workspace your desktop app will sync with.</p>
+        <div className="form-stack">
+          {workspaces.map((w) => (
+            <label key={w.id} className="row gap-8 items-center" style={{ cursor: "pointer", padding: "8px 0" }}>
+              <input type="radio" name="workspace" checked={selected === w.id} onChange={() => setSelected(w.id)} />
+              <div className="avi workspace-avi sm">{initials(w.name)}</div>
+              <div className="col gap-2 min-0">
+                <b className="truncate">{w.name}</b>
+                <span className="tiny muted truncate">/{w.slug}</span>
+              </div>
+            </label>
+          ))}
+          {error ? <p className="error-text">{error}</p> : null}
+          <button className="btn accent full lg" disabled={!selected || submitting} onClick={submit}>
+            {submitting ? "Connecting..." : "Connect"}
+          </button>
+        </div>
+      </section>
+      {formFields ? (
+        <form ref={formRef} method="POST" action={callback} style={{ display: "none" }}>
+          {Object.entries(formFields).map(([k, v]) => (
+            <input key={k} type="hidden" name={k} value={v} />
+          ))}
+        </form>
+      ) : null}
+    </main>
   );
 }
 

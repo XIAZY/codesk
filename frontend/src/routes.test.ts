@@ -12,6 +12,8 @@ const routeCases: AppRoute[] = [
   { kind: "newWorkspace" },
   { kind: "workspace", slug: "team", view: { kind: "home" } },
   { kind: "workspace", slug: "team", view: { kind: "document", documentId: "doc_1" } },
+  { kind: "desktopConnect", callback: "http://127.0.0.1:12345/desktop/connect/nonce123" },
+  { kind: "desktopConnectComplete" },
 ];
 
 describe("routes", () => {

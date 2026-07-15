@@ -1,0 +1,38 @@
+package desktop
+
+import (
+	"context"
+	"fmt"
+	"net/url"
+
+	"notty/daemon/internal/desktop/handoff"
+)
+
+// Connect opens a browser to the Codesk web app's desktop connect page, waits
+// for the one-shot credential handoff, and persists the daemon token in the
+// SecretStore before returning. If persistence fails the handoff is not
+// reported as successful — the caller never observes a connected-but-unpersisted
+// state.
+func Connect(ctx context.Context, codeskOrigin string, secrets SecretStore, opener OpenURL) (handoff.Payload, error) {
+	session, err := handoff.NewSession(codeskOrigin)
+	if err != nil {
+		return handoff.Payload{}, err
+	}
+	defer session.Close()
+
+	connectURL := codeskOrigin + "/desktop/connect?callback=" + url.QueryEscape(session.CallbackURL())
+	if err := opener.Open(connectURL); err != nil {
+		return handoff.Payload{}, fmt.Errorf("desktop connect: open browser: %w", err)
+	}
+
+	payload, err := session.Wait(ctx)
+	if err != nil {
+		return handoff.Payload{}, err
+	}
+
+	if err := secrets.Save(SecretKeyDaemonToken, []byte(payload.Token())); err != nil {
+		return handoff.Payload{}, fmt.Errorf("desktop connect: persist token: %w", err)
+	}
+
+	return payload, nil
+}

@@ -558,4 +558,44 @@ describe("App URL routing", () => {
     await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_created"));
     expect(window.location.pathname).toBe("/w/product-workspace/d/doc_created");
   });
+
+  it("renders the desktop connect completion page without requiring auth", async () => {
+    window.history.replaceState(null, "", "/desktop/connect/complete");
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Connected" })).toBeTruthy();
+    expect(screen.getByText(/close this tab/)).toBeTruthy();
+    expect(window.location.pathname).toBe("/desktop/connect/complete");
+  });
+
+  it("shows login on desktop connect when unauthenticated and preserves the route", async () => {
+    window.history.replaceState(null, "", "/desktop/connect?callback=http%3A%2F%2F127.0.0.1%3A12345%2Fdesktop%2Fconnect%2Fnonce");
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Connect desktop app" })).toBeTruthy();
+    expect(window.location.pathname).toBe("/desktop/connect");
+  });
+
+  it("shows workspace picker on desktop connect when authenticated", async () => {
+    localStorage.setItem("codesk.auth.token", "token");
+    window.history.replaceState(null, "", "/desktop/connect?callback=http%3A%2F%2F127.0.0.1%3A12345%2Fdesktop%2Fconnect%2Fnonce");
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Connect desktop app" })).toBeTruthy());
+    expect(screen.getByText("Alpha Workspace")).toBeTruthy();
+    expect(screen.getByText("Team Workspace")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Connect" })).toBeTruthy();
+  });
+
+  it("rejects non-loopback desktop connect callback", async () => {
+    localStorage.setItem("codesk.auth.token", "token");
+    window.history.replaceState(null, "", "/desktop/connect?callback=https%3A%2F%2Fattacker.com%2Fsteal");
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Invalid callback" })).toBeTruthy();
+  });
 });

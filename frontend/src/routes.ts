@@ -14,6 +14,8 @@ export type AppRoute =
   | { kind: "invite"; token: string }
   | { kind: "newWorkspace" }
   | { kind: "workspace"; slug: string; view: WorkspaceView }
+  | { kind: "desktopConnect"; callback: string }
+  | { kind: "desktopConnectComplete" }
   | { kind: "notFound" };
 
 export function parseRoute(pathname: string): AppRoute {
@@ -40,6 +42,12 @@ export function parseRoute(pathname: string): AppRoute {
   }
   if (path === "/new") {
     return { kind: "newWorkspace" };
+  }
+  if (path === "/desktop/connect/complete") {
+    return { kind: "desktopConnectComplete" };
+  }
+  if (path === "/desktop/connect") {
+    return { kind: "desktopConnect", callback: query.get("callback") ?? "" };
   }
 
   const segments = path.split("/").filter(Boolean);
@@ -93,6 +101,10 @@ export function routePath(route: AppRoute): string {
       }
       break;
     }
+    case "desktopConnect":
+      return `/desktop/connect?callback=${encodeURIComponent(route.callback)}`;
+    case "desktopConnectComplete":
+      return "/desktop/connect/complete";
     case "notFound":
       return "/404";
   }
