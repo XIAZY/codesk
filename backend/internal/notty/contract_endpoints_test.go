@@ -51,7 +51,7 @@ func buildContractPopulatedFixture(t *testing.T, router http.Handler) contractFi
 
 	authTestStatusWithHeaders(t, router, http.MethodPatch, "/api/workspaces/"+ws.ID+"/agents/"+agent.ID+"/session", daemon.Token, map[string]string{
 		"X-Notty-Acting-Agent-ID": agent.ID,
-	}, UpdateAgentSessionRequest{Status: "idle", SessionID: "contract-session"}, http.StatusOK)
+	}, UpdateAgentSessionRequest{Status: "idle", SessionID: "contract-session", CurrentActivity: "Idle"}, http.StatusOK)
 
 	var thread struct {
 		Thread Thread `json:"thread"`

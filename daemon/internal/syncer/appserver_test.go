@@ -186,6 +186,11 @@ func TestCodexRuntimeStartFailureAndSupervisorStopJoinChild(t *testing.T) {
 			}
 			if got := collectRuntimeEvents(t, runtime.Events()); len(got) != 0 {
 				t.Fatalf("failed runtime emitted events: %#v", got)
+			}
+		})
+	}
+}
+
 // Item #5 liveness, blockers 2/17 (Codex read boundary): an unmapped-but-valid
 // JSON-RPC object advances the activity generation, while `null` (valid JSON but
 // not an object) and malformed input do NOT — the same object-frame contract as
@@ -474,6 +479,10 @@ func assertAppServerEventsClosed(t *testing.T, events <-chan appServerEvent) {
 			}
 		case <-time.After(time.Second):
 			t.Fatal("app-server events did not close")
+		}
+	}
+}
+
 // Item #5 liveness, blocker 25: the Codex read boundary increments the activity
 // generation BEFORE the synchronous logf — a blocked log sink cannot stall
 // liveness. Holding the global log mutex, ActivitySeq must advance while readLoop
