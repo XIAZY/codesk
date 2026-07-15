@@ -131,7 +131,7 @@ func buildPopulatedWorkspace(t *testing.T, router http.Handler) (ownerToken, wor
 	// Idle agent session → emits agent.updated + an activity row.
 	authTestStatusWithHeaders(t, router, http.MethodPatch, "/api/workspaces/"+ws.ID+"/agents/"+agent.ID+"/session", daemon.Token, map[string]string{
 		"X-Notty-Acting-Agent-ID": agent.ID,
-	}, UpdateAgentSessionRequest{Status: "idle", SessionID: "contract-session"}, http.StatusOK)
+	}, UpdateAgentSessionRequest{Status: "idle", SessionID: "contract-session", CurrentActivity: "Idle"}, http.StatusOK)
 
 	// Agent-authored thread on the document → threads + an activity row.
 	var thread struct {
