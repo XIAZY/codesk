@@ -81,5 +81,8 @@ func SyncerConfig(dirs Dirs, backendURL, workspaceID, daemonToken, daemonVersion
 		DataDir:            dirs.Data,
 		WorkspaceDir:       filepath.Join(dirs.Data, "workspace"),
 		AgentWorkspaceRoot: filepath.Join(dirs.Data, "agents"),
+		CodexCommand:       "codex",
+		ClaudeCommand:      "claude",
+		AgentToolBaseURL:   "http://127.0.0.1:7778",
 	}, nil
 }

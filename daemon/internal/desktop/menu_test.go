@@ -132,6 +132,21 @@ func TestBuildMenuConnectionActions(t *testing.T) {
 	}
 }
 
+func TestBuildMenuDisablesConnectWhileConnecting(t *testing.T) {
+	model := BuildMenu(MenuOptions{
+		Snapshot:   Snapshot{State: StateReconnectRequired},
+		Configured: true,
+		Connecting: true,
+	})
+	connect := mustMenuItem(t, model, MenuItemConnect)
+	if connect.Enabled {
+		t.Fatal("connect item is enabled while connection handoff is pending")
+	}
+	if connect.Title != "Connecting..." {
+		t.Fatalf("connect title = %q, want %q", connect.Title, "Connecting...")
+	}
+}
+
 func TestBuildMenuQuittingDisablesEveryAction(t *testing.T) {
 	menu := BuildMenu(MenuOptions{
 		Snapshot:      Snapshot{State: StateQuitting},

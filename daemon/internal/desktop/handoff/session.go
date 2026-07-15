@@ -17,6 +17,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"notty/daemon/internal/desktopurl"
 )
 
 const (
@@ -369,7 +371,7 @@ func parsePayload(values url.Values) (Payload, bool) {
 		return Payload{}, false
 	}
 	workspaceURL, ok := singleValue(values, "workspace_url")
-	if !ok || !validWorkspaceURL(workspaceURL) {
+	if !ok || !desktopurl.Valid(workspaceURL) {
 		return Payload{}, false
 	}
 
@@ -410,17 +412,6 @@ func validOpaqueToken(token string) bool {
 		}
 	}
 	return true
-}
-
-func validWorkspaceURL(raw string) bool {
-	if len(raw) > 2048 || !validText(raw, 2048) || strings.Contains(raw, "#") {
-		return false
-	}
-	parsed, err := url.Parse(raw)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-		return false
-	}
-	return parsed.User == nil && parsed.RawQuery == "" && !parsed.ForceQuery && parsed.Fragment == ""
 }
 
 func validText(value string, maxBytes int) bool {
