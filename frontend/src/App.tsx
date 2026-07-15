@@ -752,7 +752,7 @@ export function InvitePreviewCard({ preview }: { preview: WorkspaceInvitePreview
   );
 }
 
-const callbackNoncePattern = /^\/desktop\/connect\/[A-Za-z0-9_-]{43}$/;
+const callbackNoncePattern = /^\/desktop\/connect\/[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/;
 
 export function isLoopbackCallback(raw: string): boolean {
   try {

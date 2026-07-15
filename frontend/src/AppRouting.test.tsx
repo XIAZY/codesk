@@ -571,7 +571,7 @@ describe("App URL routing", () => {
   });
 
   it("shows login on desktop connect when unauthenticated and preserves the route", async () => {
-    window.history.replaceState(null, "", "/desktop/connect?callback=http%3A%2F%2F127.0.0.1%3A12345%2Fdesktop%2Fconnect%2FABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq");
+    window.history.replaceState(null, "", "/desktop/connect?callback=http%3A%2F%2F127.0.0.1%3A12345%2Fdesktop%2Fconnect%2FABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopA");
 
     render(<App />);
 
@@ -581,7 +581,7 @@ describe("App URL routing", () => {
 
   it("shows workspace picker on desktop connect when authenticated", async () => {
     localStorage.setItem("codesk.auth.token", "token");
-    window.history.replaceState(null, "", "/desktop/connect?callback=http%3A%2F%2F127.0.0.1%3A12345%2Fdesktop%2Fconnect%2FABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq");
+    window.history.replaceState(null, "", "/desktop/connect?callback=http%3A%2F%2F127.0.0.1%3A12345%2Fdesktop%2Fconnect%2FABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopA");
 
     render(<App />);
 
@@ -611,7 +611,7 @@ describe("App URL routing", () => {
 });
 
 describe("isLoopbackCallback", () => {
-  const validNonce = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq";
+  const validNonce = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopA";
 
   it.each([
     ["canonical shape", `http://127.0.0.1:12345/desktop/connect/${validNonce}`, true],
@@ -627,9 +627,10 @@ describe("isLoopbackCallback", () => {
     ["hash fragment", `http://127.0.0.1:12345/desktop/connect/${validNonce}#frag`, false],
     ["bare hash delimiter", `http://127.0.0.1:12345/desktop/connect/${validNonce}#`, false],
     ["userinfo", `http://user:pass@127.0.0.1:12345/desktop/connect/${validNonce}`, false],
-    ["nonce too short (42 chars)", "http://127.0.0.1:12345/desktop/connect/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop", false],
-    ["nonce too long (44 chars)", "http://127.0.0.1:12345/desktop/connect/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqr", false],
-    ["nonce with invalid char", "http://127.0.0.1:12345/desktop/connect/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmno.q", false],
+    ["nonce too short (42 chars)", "http://127.0.0.1:12345/desktop/connect/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnoA", false],
+    ["nonce too long (44 chars)", "http://127.0.0.1:12345/desktop/connect/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopAA", false],
+    ["nonce with invalid char", "http://127.0.0.1:12345/desktop/connect/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmno.A", false],
+    ["non-canonical padding bits", "http://127.0.0.1:12345/desktop/connect/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq", false],
     ["remote host", `https://attacker.com/desktop/connect/${validNonce}`, false],
     ["trailing slash", `http://127.0.0.1:12345/desktop/connect/${validNonce}/`, false],
     ["extra path segment", `http://127.0.0.1:12345/desktop/connect/${validNonce}/extra`, false],
