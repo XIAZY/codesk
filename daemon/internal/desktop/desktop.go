@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 )
 
+const SecretKeyDaemonToken = "codesk:daemon-token"
+
 type SecretStore interface {
 	Save(key string, secret []byte) error
 	Load(key string) ([]byte, error)
