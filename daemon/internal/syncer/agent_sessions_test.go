@@ -2239,6 +2239,154 @@ func waitSessionTurn(t *testing.T, s *agentSessionSupervisor, agentID, want stri
 	}
 }
 
+func sessionStateFor(s *agentSessionSupervisor, agentID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if session := s.sessions[agentID]; session != nil {
+		return session.state
+	}
+	return ""
+}
+
+func waitForPublishedStatus(t *testing.T, updates <-chan updateAgentSessionRequest, status, activitySubstr string) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case payload := <-updates:
+			if payload.Status != status {
+				continue
+			}
+			if activitySubstr != "" && !strings.Contains(payload.CurrentActivity, activitySubstr) {
+				t.Fatalf("status %q published without the expected diagnostic %q, got activity %q", status, activitySubstr, payload.CurrentActivity)
+			}
+			return
+		case <-deadline:
+			t.Fatalf("did not observe a published %q status in time", status)
+		}
+	}
+}
+
+// stalledWorkingSession builds a working session under a controllable clock and
+// drives it into `stalled` via total runtime silence past stallAfter. It returns
+// the supervisor, the running process, the agent, and the clock pointer (already
+// advanced past the stall) so recovery/replacement rows can continue from there.
+func stalledWorkingSession(t *testing.T, updater agentSessionUpdater) (*agentSessionSupervisor, *fakeRuntimeProcess, *agent, *time.Time) {
+	t.Helper()
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), updater, newFakeRuntimeRegistry(factory))
+	clock := time.Unix(1_000_000, 0)
+	supervisor.now = func() time.Time { return clock }
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	supervisor.markWorking("agent_1", process, "turn_1")
+	// Total silence: no fresh frame, advance past stallAfter, evaluate one tick.
+	clock = clock.Add(supervisor.stallAfter + time.Second)
+	supervisor.evaluateLiveness("agent_1", process)
+	if got := sessionStateFor(supervisor, "agent_1"); got != "stalled" {
+		t.Fatalf("precondition: expected stalled, got %q", got)
+	}
+	return supervisor, process, current, &clock
+}
+
+// Item #5 liveness, row 1: a working session with continuous valid telemetry past
+// the stall threshold must never be marked stalled.
+func TestAgentSessionHeartbeatContinuousTelemetryNeverStalls(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	clock := time.Unix(1_000_000, 0)
+	supervisor.now = func() time.Time { return clock }
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	supervisor.markWorking("agent_1", process, "turn_1")
+	// 40 intervals = 40min, well past the 15min stallAfter, with a fresh valid
+	// frame decoded each interval.
+	for i := 0; i < 40; i++ {
+		clock = clock.Add(supervisor.heartbeatInterval)
+		process.setLastActivity(clock)
+		if !supervisor.evaluateLiveness("agent_1", process) {
+			t.Fatal("liveness must keep watching a live working session")
+		}
+	}
+	if got := sessionStateFor(supervisor, "agent_1"); got != "working" {
+		t.Fatalf("continuous telemetry must never stall; state=%q", got)
+	}
+	process.mu.Lock()
+	stopped := process.stopped
+	process.mu.Unlock()
+	if stopped {
+		t.Fatal("a live agent must never be killed by the heartbeat")
+	}
+}
+
+// Item #5 liveness, row 2: total runtime silence past stallAfter surfaces a
+// visible stalled status with a diagnostic, and never kills the process.
+func TestAgentSessionHeartbeatSilenceStallsWithoutKilling(t *testing.T) {
+	updates := make(chan updateAgentSessionRequest, 16)
+	updater := func(ctx context.Context, agentID string, payload updateAgentSessionRequest) error {
+		updates <- payload
+		return nil
+	}
+	supervisor, process, _, _ := stalledWorkingSession(t, updater)
+	defer supervisor.Shutdown()
+	process.mu.Lock()
+	stopped := process.stopped
+	process.mu.Unlock()
+	if stopped {
+		t.Fatal("a stalled agent must NOT be killed (it may recover)")
+	}
+	waitForPublishedStatus(t, updates, "stalled", "no runtime activity")
+}
+
+// Item #5 liveness, row 3: a lifecycle event (recovery) clears the stalled state.
+func TestAgentSessionHeartbeatLifecycleRecoveryClearsStalled(t *testing.T) {
+	supervisor, process, _, _ := stalledWorkingSession(t, nil)
+	defer supervisor.Shutdown()
+	// A turn-completed lifecycle event flows through markIdle and must clear stalled.
+	supervisor.markIdle("agent_1", process, true)
+	if got := sessionStateFor(supervisor, "agent_1"); got != "idle" {
+		t.Fatalf("lifecycle recovery must clear stalled; state=%q", got)
+	}
+	// A fresh working turn afterward is watched normally, not stuck stalled.
+	supervisor.markWorking("agent_1", process, "turn_2")
+	if got := sessionStateFor(supervisor, "agent_1"); got != "working" {
+		t.Fatalf("post-recovery turn should be working; state=%q", got)
+	}
+}
+
+// Item #5 liveness, row 6: a stalled long turn with NO pending work is not
+// replaced — the process keeps running and Reconcile treats stalled as live.
+func TestAgentSessionHeartbeatStallWithoutPendingWorkDoesNotReplace(t *testing.T) {
+	supervisor, process, current, _ := stalledWorkingSession(t, nil)
+	defer supervisor.Shutdown()
+	process.mu.Lock()
+	stopped := process.stopped
+	process.mu.Unlock()
+	if stopped {
+		t.Fatal("a stall without pending work must not stop the process")
+	}
+	// Reconcile treats stalled as live: no replacement, no second spawn.
+	if err := supervisor.Reconcile(context.Background(), []*agent{current}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if got := sessionStateFor(supervisor, "agent_1"); got != "stalled" {
+		t.Fatalf("Reconcile must not clear or replace a stalled session without pending work; state=%q", got)
+	}
+	supervisor.mu.Lock()
+	sessions := len(supervisor.sessions)
+	supervisor.mu.Unlock()
+	if sessions != 1 {
+		t.Fatalf("expected the single stalled session to remain, got %d", sessions)
+	}
+}
+
 func waitProcessStopped(t *testing.T, p *fakeRuntimeProcess) {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
