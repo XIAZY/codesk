@@ -3,6 +3,7 @@ module notty
 go 1.23
 
 require (
+	fyne.io/systray v1.12.2
 	github.com/fsnotify/fsnotify v1.8.0
 	github.com/go-chi/chi/v5 v5.2.1
 	github.com/google/uuid v1.6.0
@@ -15,6 +16,7 @@ require (
 )
 
 require (
+	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect

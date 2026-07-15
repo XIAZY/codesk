@@ -33,6 +33,49 @@ type documentUpdateTestResponse struct {
 	UpdateID int64 `json:"updateId"`
 }
 
+func TestNewServiceHasFreshReadinessSignal(t *testing.T) {
+	first, err := New(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Ready() == nil {
+		t.Fatal("Ready() returned nil")
+	}
+	select {
+	case <-first.Ready():
+		t.Fatal("new service reported ready before Run startup")
+	default:
+	}
+
+	first.signalReady()
+	first.signalReady()
+	select {
+	case <-first.Ready():
+	case <-time.After(time.Second):
+		t.Fatal("Ready() did not close after signalReady")
+	}
+
+	second, err := New(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Ready() == first.Ready() {
+		t.Fatal("separate service generations share a readiness signal")
+	}
+	select {
+	case <-second.Ready():
+		t.Fatal("new generation inherited the prior generation's readiness")
+	default:
+	}
+}
+
+func TestNilServiceReadyIsNil(t *testing.T) {
+	var service *Service
+	if service.Ready() != nil {
+		t.Fatal("nil Service.Ready() should return nil")
+	}
+}
+
 func newDocumentUpdateWebsocketTestRuntime(t *testing.T, cache *documentCache, handler func(documentID string, update []byte, r *http.Request) (documentUpdateTestResponse, int)) *workspaceRuntime {
 	t.Helper()
 	runtime := &workspaceRuntime{
@@ -203,6 +246,7 @@ func TestRunReportsDaemonOnlineOnlyAfterInitialRefreshSucceeds(t *testing.T) {
 		primaryRuntime: primaryRuntime,
 		agentRuntimes:  map[string]*managedWorkspaceRuntime{},
 		agentWorkers:   map[string]*managedAgentWorker{},
+		ready:          make(chan struct{}),
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -218,6 +262,12 @@ func TestRunReportsDaemonOnlineOnlyAfterInitialRefreshSucceeds(t *testing.T) {
 		t.Fatal("timed out waiting for initial workspace recovery")
 	}
 	select {
+	case <-service.Ready():
+		cancel()
+		t.Fatal("service reported ready before initial workspace recovery completed")
+	default:
+	}
+	select {
 	case <-statusRequests:
 		cancel()
 		t.Fatal("daemon reported online before initial workspace recovery completed")
@@ -229,6 +279,12 @@ func TestRunReportsDaemonOnlineOnlyAfterInitialRefreshSucceeds(t *testing.T) {
 	case <-time.After(time.Second):
 		cancel()
 		t.Fatal("daemon did not report online after initial workspace recovery completed")
+	}
+	select {
+	case <-service.Ready():
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("service did not report ready after successful startup")
 	}
 	select {
 	case <-workspaceStreamStarted:

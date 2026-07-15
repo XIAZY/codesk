@@ -58,6 +58,27 @@ type Service struct {
 	removeAgentWorkspaceRoot  func(string) error
 }
 
+// ReconnectRequiredError reports that the daemon's credentials were rejected
+// or its backend registration was drained. Callers must obtain new credentials
+// before starting another service generation.
+type ReconnectRequiredError struct {
+	Err error
+}
+
+func (e *ReconnectRequiredError) Error() string {
+	if e == nil || e.Err == nil {
+		return "daemon reconnect required"
+	}
+	return "daemon reconnect required: " + e.Err.Error()
+}
+
+func (e *ReconnectRequiredError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 type managedWorkspaceRuntime struct {
 	runtime        *workspaceRuntime
 	cancel         context.CancelFunc
@@ -253,6 +274,7 @@ func New(cfg Config) (*Service, error) {
 		daemonStatus:  newDaemonStatusReporter(cfg, client),
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 		agentWorkers:  map[string]*managedAgentWorker{},
+		ready:         make(chan struct{}),
 	}
 	service.sessions = newAgentSessionSupervisor(cfg, service.updateRemoteAgentSession, runtimes)
 	service.sessions.SetIdleWake(service.wakeAgentWorker)
@@ -287,7 +309,28 @@ func (s *Service) closePrimaryRuntime() error {
 }
 
 func (s *Service) Run(ctx context.Context) error {
-	return s.run(ctx, nil)
+	return wrapReconnectRequired(s.run(ctx, nil))
+}
+
+func wrapReconnectRequired(err error) error {
+	if err == nil || !isTerminalAuthError(err) {
+		return err
+	}
+	var reconnectErr *ReconnectRequiredError
+	if errors.As(err, &reconnectErr) {
+		return err
+	}
+	return &ReconnectRequiredError{Err: err}
+}
+
+// Ready closes after the primary workspace runtime and all steady-state
+// service loops have started. A Service represents one daemon generation, so
+// callers that restart must construct a new Service and observe its new signal.
+func (s *Service) Ready() <-chan struct{} {
+	if s == nil {
+		return nil
+	}
+	return s.ready
 }
 
 func (s *Service) run(ctx context.Context, heartbeatTicks <-chan time.Time) (runErr error) {
