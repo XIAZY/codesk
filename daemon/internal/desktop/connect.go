@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 
@@ -31,7 +32,7 @@ func Connect(ctx context.Context, codeskOrigin string, secrets SecretStore, open
 	}
 
 	if err := secrets.Save(SecretKeyDaemonToken, []byte(payload.Token())); err != nil {
-		return handoff.Payload{}, fmt.Errorf("desktop connect: persist token: %w", err)
+		return handoff.Payload{}, errors.New("desktop connect: persist token failed")
 	}
 
 	return payload, nil

@@ -201,7 +201,7 @@ func TestConnectPersistsBeforeReturning(t *testing.T) {
 
 func TestConnectSecretStoreFailure(t *testing.T) {
 	secrets := newMemSecretStore()
-	secrets.saveErr = errors.New("disk full")
+	secrets.saveErr = errors.New("keychain store failed: nottyd_secret_token_value")
 	opener := newCaptureOpener()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
