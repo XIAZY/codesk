@@ -462,7 +462,7 @@ a:focus-visible,
 }
 
 .chip.stalled {
-  background: color-mix(in oklab, var(--warn) 16%, var(--paper-1));
+  background: var(--warn-50);
   color: var(--warn);
 }
 

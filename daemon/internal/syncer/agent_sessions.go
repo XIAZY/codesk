@@ -472,6 +472,10 @@ func (s *agentSessionSupervisor) Reconcile(ctx context.Context, agents []*agent)
 				Handle:  current.Handle,
 				Err:     err,
 			})
+			// Publishing the construction failure caller-side is safe: the only
+			// production Reconcile caller (Service.refresh) holds refreshMu across the
+			// whole call, so authoritative Reconciles never overlap and this
+			// disconnected cannot race a concurrent Reconcile's successful idle.
 			s.publish(current.ID, updateAgentSessionRequest{
 				Status:          "disconnected",
 				CurrentActivity: err.Error(),

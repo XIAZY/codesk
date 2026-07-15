@@ -2408,6 +2408,198 @@ func TestAgentSessionNotificationTurnRefreshesLivenessFloor(t *testing.T) {
 	}
 }
 
+// Item #5 liveness, blocker 13: a nonce-current StartTurn ERROR must publish idle
+// so the backend's LATEST status is idle — even when a heartbeat published a
+// provisional working while the StartTurn RPC was in flight. Without the error-path
+// idle publish, the stale provisional working stays visible forever.
+func TestAgentSessionDelayedStartTurnErrorPublishesIdleLast(t *testing.T) {
+	var mu sync.Mutex
+	var statuses []string
+	updater := func(ctx context.Context, agentID string, payload updateAgentSessionRequest) error {
+		mu.Lock()
+		statuses = append(statuses, payload.Status)
+		mu.Unlock()
+		return nil
+	}
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), updater, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	clock := time.Unix(1_000_000, 0)
+	supervisor.now = func() time.Time { return clock }
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	// The StartTurn write blocks (entered), then returns an error on release.
+	process.mu.Lock()
+	process.startTurnEntered = make(chan struct{}, 1)
+	process.startTurnRelease = make(chan struct{})
+	process.startTurnErr = errors.New("turn start boom")
+	process.mu.Unlock()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- supervisor.ScheduleNotificationTurn(context.Background(), current, "work", "for-me:v1", "")
+	}()
+	// Wait until the StartTurn RPC is in flight (session already set working).
+	select {
+	case <-process.startTurnEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("StartTurn write never entered")
+	}
+	// A heartbeat fires while the RPC is in flight and publishes provisional working.
+	supervisor.evaluateLiveness("agent_1", process)
+	// Release the StartTurn → it errors → the error path must publish idle.
+	close(process.startTurnRelease)
+	if err := <-done; err == nil {
+		t.Fatal("expected the StartTurn error to surface")
+	}
+	// The backend's LATEST status must end at idle, not the stale provisional working.
+	deadline := time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		last := ""
+		if len(statuses) > 0 {
+			last = statuses[len(statuses)-1]
+		}
+		mu.Unlock()
+		if last == "idle" {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("the delayed StartTurn error must leave the latest status idle, got %q (all: %v)", last, statuses)
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// Item #5 liveness, blocker 4: evaluateLiveness publishes the heartbeat status
+// WHILE holding s.mu (serialized with the state decision), so a concurrent
+// transition cannot interleave a stale overwrite. Proven by asserting s.mu is held
+// at the pre-publish seam; moving the publish after the unlock makes it RED.
+func TestAgentSessionHeartbeatPublishesUnderLock(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	clock := time.Unix(1_000_000, 0)
+	supervisor.now = func() time.Time { return clock }
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	supervisor.markWorking("agent_1", process, "turn_1")
+	held := make(chan bool, 1)
+	supervisor.testHookLivenessPrePublish = func() {
+		if supervisor.mu.TryLock() {
+			supervisor.mu.Unlock()
+			held <- false
+		} else {
+			held <- true
+		}
+	}
+	supervisor.evaluateLiveness("agent_1", process)
+	if !<-held {
+		t.Fatal("evaluateLiveness must publish the heartbeat status while holding s.mu")
+	}
+}
+
+// stalledSessionWithForMeSig builds a session that stalled WHILE processing a
+// for-me notification turn, so it retains activeForMeSig — the setup Bill's
+// queued-behind (policy b) selector needs.
+func stalledSessionWithForMeSig(t *testing.T, forMeSig string) (*agentSessionSupervisor, *fakeRuntimeDriver, *fakeRuntimeProcess, *agent, *time.Time) {
+	t.Helper()
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	clock := time.Unix(1_000_000, 0)
+	supervisor.now = func() time.Time { return clock }
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	// Start a notification turn carrying the for-me signature (sets activeForMeSig).
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "work", forMeSig, ""); err != nil {
+		t.Fatalf("schedule for-me turn: %v", err)
+	}
+	supervisor.mu.Lock()
+	active := supervisor.sessions["agent_1"].activeForMeSig
+	supervisor.mu.Unlock()
+	if active != forMeSig {
+		t.Fatalf("precondition: activeForMeSig=%q, want %q", active, forMeSig)
+	}
+	// Stall it (no new frame, advance past stallAfter).
+	clock = clock.Add(supervisor.stallAfter + time.Second)
+	supervisor.evaluateLiveness("agent_1", process)
+	if got, _ := sessionState(supervisor, "agent_1"); got != "stalled" {
+		t.Fatalf("precondition: expected stalled, got %q", got)
+	}
+	return supervisor, factory, process, current, &clock
+}
+
+// Item #5 policy (b), Bill's coverage gap: replacement authority comes ONLY from
+// work QUEUED BEHIND the wedge (a signature differing from BOTH the in-flight
+// active AND delivered sig). The stalled turn's own unchanged active signature is
+// in-flight, not queued-behind, and must never confer replacement.
+func TestAgentSessionStalledQueuedBehindSelector(t *testing.T) {
+	t.Run("own_unchanged_active_sig_does_not_replace", func(t *testing.T) {
+		supervisor, factory, wedged, current, _ := stalledSessionWithForMeSig(t, "for-me:v1")
+		defer supervisor.Shutdown()
+		if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "same", "for-me:v1", ""); err != nil {
+			t.Fatalf("schedule: %v", err)
+		}
+		wedged.mu.Lock()
+		stopped := wedged.stopped
+		wedged.mu.Unlock()
+		if stopped {
+			t.Fatal("the stalled turn's own unchanged active signature must not confer replacement")
+		}
+		factory.mu.Lock()
+		procs := len(factory.processes)
+		factory.mu.Unlock()
+		if procs != 1 {
+			t.Fatalf("no replacement expected for own active sig, got %d processes", procs)
+		}
+	})
+
+	t.Run("changed_general_sig_replaces", func(t *testing.T) {
+		supervisor, factory, wedged, current, _ := stalledSessionWithForMeSig(t, "for-me:v1")
+		defer supervisor.Shutdown()
+		// for-me unchanged, general NEW → queued-behind work → replacement.
+		if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "gen", "for-me:v1", "general:g2"); err != nil {
+			t.Fatalf("schedule: %v", err)
+		}
+		waitProcessStopped(t, wedged)
+		waitSessionLive(t, supervisor, "agent_1")
+		factory.mu.Lock()
+		procs := len(factory.processes)
+		factory.mu.Unlock()
+		if procs != 2 {
+			t.Fatalf("a changed general sig (queued behind) must replace exactly once, got %d processes", procs)
+		}
+	})
+
+	t.Run("mixed_only_changed_component_grants", func(t *testing.T) {
+		supervisor, factory, wedged, current, _ := stalledSessionWithForMeSig(t, "for-me:v1")
+		defer supervisor.Shutdown()
+		// for-me unchanged (in-flight) + general changed → only the changed general
+		// grants authority; the unchanged for-me component does not.
+		if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "mixed", "for-me:v1", "general:g9"); err != nil {
+			t.Fatalf("schedule: %v", err)
+		}
+		waitProcessStopped(t, wedged)
+		waitSessionLive(t, supervisor, "agent_1")
+		factory.mu.Lock()
+		procs := len(factory.processes)
+		factory.mu.Unlock()
+		if procs != 2 {
+			t.Fatalf("mixed sig must replace via the changed component only, got %d processes", procs)
+		}
+	})
+}
+
 // Item #5 liveness, blocker 19: a lifecycle floor reset must snapshot the activity
 // GENERATION, not just the timestamp — otherwise a frame decoded BEFORE the turn
 // (a handshake/init or prior idle frame) is consumed later as fresh turn telemetry

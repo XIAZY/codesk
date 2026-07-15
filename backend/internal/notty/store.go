@@ -1620,33 +1620,38 @@ func (s *Store) UpdateAgentSession(id string, req UpdateAgentSessionRequest, met
 	priorSessionID := agent.SessionID
 	priorTurnID := agent.CurrentTurnID
 	priorActivity := agent.CurrentActivity
-	statusProvided := strings.TrimSpace(req.Status) != ""
+	nextStatus := strings.TrimSpace(req.Status)
+	statusProvided := nextStatus != ""
 	if statusProvided {
-		switch strings.TrimSpace(req.Status) {
+		switch nextStatus {
 		case "idle", "working", "disconnected", "failed", "stalled":
-			agent.Status = strings.TrimSpace(req.Status)
+			agent.Status = nextStatus
 		default:
-			return nil, fmt.Errorf("unsupported agent status %q", strings.TrimSpace(req.Status))
+			return nil, fmt.Errorf("unsupported agent status %q", nextStatus)
 		}
 	}
+	// statusChanged is a REAL transition — status supplied AND different from before.
+	// A repeated same-status update (e.g. the 60s stalled heartbeat re-sending
+	// Status:"stalled") is telemetry, not a transition, and must preserve turn +
+	// activity exactly like a heartbeat-only update (blocker 20).
+	statusChanged := statusProvided && nextStatus != priorStatus
 	if sessionID := strings.TrimSpace(req.SessionID); sessionID != "" {
 		agent.SessionID = sessionID
 	}
-	// Turn: an explicit turn always wins; otherwise only a REAL status transition
-	// (non-working) clears it. A heartbeat-only update (no status) preserves the
-	// existing turn — clearing it would drop the stalled turn each minute (blocker 15).
+	// Turn: an explicit turn always wins; otherwise only a real transition
+	// (non-working) clears it. A heartbeat / same-status update preserves the turn.
 	if turnID := strings.TrimSpace(req.CurrentTurnID); turnID != "" {
 		agent.CurrentTurnID = turnID
-	} else if statusProvided && agent.Status != "working" {
+	} else if statusChanged && agent.Status != "working" {
 		agent.CurrentTurnID = ""
 	}
 	// Activity: an explicit activity always wins; otherwise default ONLY on a real
-	// status transition. A heartbeat-only update PRESERVES the existing activity —
-	// defaulting it would rewrite a persisted stalled diagnostic to literal
-	// "Stalled" and lose the human-facing detail (blocker 15).
+	// transition. A heartbeat / same-status update PRESERVES the existing activity —
+	// defaulting it would rewrite a persisted stalled diagnostic to literal "Stalled"
+	// and lose the human-facing detail (blockers 15/20).
 	if activity := strings.TrimSpace(req.CurrentActivity); activity != "" {
 		agent.CurrentActivity = activity
-	} else if statusProvided {
+	} else if statusChanged {
 		switch agent.Status {
 		case "idle":
 			agent.CurrentActivity = "Idle"

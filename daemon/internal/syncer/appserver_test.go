@@ -186,6 +186,33 @@ func TestCodexRuntimeStartFailureAndSupervisorStopJoinChild(t *testing.T) {
 			}
 			if got := collectRuntimeEvents(t, runtime.Events()); len(got) != 0 {
 				t.Fatalf("failed runtime emitted events: %#v", got)
+// Item #5 liveness, blockers 2/17 (Codex read boundary): an unmapped-but-valid
+// JSON-RPC object advances the activity generation, while `null` (valid JSON but
+// not an object) and malformed input do NOT — the same object-frame contract as
+// the Claude boundary, via the shared validator, stamped before dispatch.
+func TestCodexReadBoundaryStampsActivityOnObjectFramesOnly(t *testing.T) {
+	cases := []struct {
+		name    string
+		line    string
+		advance bool
+	}{
+		{"unmapped_object", `{"telemetry":"unmapped","progress":0.5}`, true},
+		{"mapped_notification", `{"method":"turn/started","params":{}}`, true},
+		{"empty_object", `{}`, true},
+		{"null", `null`, false},
+		{"array", `[1,2,3]`, false},
+		{"number", `42`, false},
+		{"string", `"hello"`, false},
+		{"malformed", `{ not json`, false},
+		{"empty_line", ``, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCodexAppServer(Config{DataDir: t.TempDir()}, t.TempDir(), "", "agent_codex")
+			c.readLoop(strings.NewReader(tc.line + "\n"))
+			advanced := c.ActivitySeq() > 0
+			if advanced != tc.advance {
+				t.Fatalf("line %q: activity advanced=%v, want %v (only a JSON object frame counts)", tc.line, advanced, tc.advance)
 			}
 		})
 	}
@@ -447,6 +474,26 @@ func assertAppServerEventsClosed(t *testing.T, events <-chan appServerEvent) {
 			}
 		case <-time.After(time.Second):
 			t.Fatal("app-server events did not close")
+// The shared read-boundary validator both drivers gate on, pinned directly.
+func TestIsValidRuntimeFrame(t *testing.T) {
+	cases := []struct {
+		line string
+		want bool
+	}{
+		{`{"a":1}`, true},
+		{`{}`, true},
+		{`  {"x":true}  `, true},
+		{`null`, false},
+		{`[1]`, false},
+		{`42`, false},
+		{`"s"`, false},
+		{`{ broken`, false},
+		{``, false},
+		{`   `, false},
+	}
+	for _, tc := range cases {
+		if got := isValidRuntimeFrame([]byte(tc.line)); got != tc.want {
+			t.Fatalf("isValidRuntimeFrame(%q) = %v, want %v", tc.line, got, tc.want)
 		}
 	}
 }

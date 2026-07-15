@@ -301,6 +301,26 @@ func TestUpdateAgentSessionHeartbeatOnlyProducesNoActivityAndPreservesFields(t *
 		t.Fatalf("heartbeat-only updates must create no activity rows: baseline=%d after=%d", len(baseline), len(afterHeartbeats))
 	}
 
+	// Blocker 20: the same-status path (the daemon re-sending Status:"stalled" with
+	// omitted turn/activity, as the stalled heartbeat does) is NOT a transition — it
+	// must preserve the turn + diagnostic and create no activity row.
+	for i := 0; i < 2; i++ {
+		updated, err := store.UpdateAgentSession(agent.ID, UpdateAgentSessionRequest{Status: "stalled", LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano)}, agentMeta)
+		if err != nil {
+			t.Fatalf("same-status stalled heartbeat %d: %v", i, err)
+		}
+		if updated.Status != "stalled" || updated.CurrentTurnID != "turn_1" || updated.CurrentActivity != diagnostic {
+			t.Fatalf("same-status stalled heartbeat must preserve turn/diagnostic, got status=%q turn=%q activity=%q", updated.Status, updated.CurrentTurnID, updated.CurrentActivity)
+		}
+	}
+	afterSameStatus, err := listActivitiesPostgres(db, workspaceID)
+	if err != nil {
+		t.Fatalf("list after same-status: %v", err)
+	}
+	if len(afterSameStatus) != len(baseline) {
+		t.Fatalf("same-status stalled heartbeats must create no activity rows: baseline=%d after=%d", len(baseline), len(afterSameStatus))
+	}
+
 	// A real status transition still emits exactly one activity.
 	if _, err := store.UpdateAgentSession(agent.ID, UpdateAgentSessionRequest{Status: "idle"}, agentMeta); err != nil {
 		t.Fatalf("idle transition: %v", err)
