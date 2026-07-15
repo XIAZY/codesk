@@ -167,6 +167,50 @@ func TestActivitiesSurviveStoreRestartPostgres(t *testing.T) {
 	}
 }
 
+// TestUpdateAgentSessionAcceptsFailedStatusPostgres proves the daemon's item-#3
+// terminal classification can publish `failed` through the real store write path
+// (not just the driver unit) — the status is accepted, carries the provider's
+// line, and persists across a re-read.
+func TestUpdateAgentSessionAcceptsFailedStatusPostgres(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	store := newPostgresTestWorkspaceStore(t, database)
+	seedCodexDaemonRuntime(t, store)
+	user := seedTestUser(t, store)
+	meta := OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"}
+
+	agent, err := store.CreateAgent(CreateAgentRequest{Handle: "failing-agent", Name: "Failing Agent", Role: "durable", Kind: "codex"}, meta)
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	agentMeta := OperationMeta{ActorID: agent.ID, ActorType: "agent", Source: "test"}
+
+	updated, err := store.UpdateAgentSession(agent.ID, UpdateAgentSessionRequest{
+		Status:          "failed",
+		CurrentActivity: "The model is no longer available.",
+	}, agentMeta)
+	if err != nil {
+		t.Fatalf("update session to failed: %v", err)
+	}
+	if updated.Status != "failed" {
+		t.Fatalf("status = %q, want failed", updated.Status)
+	}
+	if updated.CurrentActivity != "The model is no longer available." {
+		t.Fatalf("activity = %q, want the published provider line", updated.CurrentActivity)
+	}
+
+	// A second update re-reads current DB state (getAgentForUpdatePostgres), so a
+	// bare heartbeat proves `failed` persisted rather than only round-tripping.
+	reloaded, err := store.UpdateAgentSession(agent.ID, UpdateAgentSessionRequest{
+		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}, agentMeta)
+	if err != nil {
+		t.Fatalf("reload session: %v", err)
+	}
+	if reloaded.Status != "failed" {
+		t.Fatalf("reloaded status = %q, want failed to persist", reloaded.Status)
+	}
+}
+
 // TestActivitiesConcurrentWritesPostgres fires many activity-producing
 // operations concurrently and asserts each lands exactly one row — no lost or
 // duplicated activities from the shared pending buffer and post-commit clear.

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -104,6 +105,7 @@ type claudeRuntimeProcess struct {
 	sessionID  string
 	activeTurn string
 	stopped    bool
+	exitInfo   RuntimeExitInfo
 	log        *agentLog
 }
 
@@ -328,6 +330,7 @@ func (p *claudeRuntimeProcess) spawn(ctx context.Context, sessionID string, resu
 	go func() {
 		err := cmd.Wait()
 		p.logf("claude exited err=%v", err)
+		p.recordExitInfo(cmd, err, stderrTail)
 		exited <- err
 		<-readDone
 		// Closing the events channel is how the supervisor learns the process is
@@ -506,6 +509,37 @@ func (p *claudeRuntimeProcess) closeEvents() {
 	})
 }
 
+// recordExitInfo captures why the process ended, before the events channel is
+// closed, so a consumer observing the close can read it via ExitInfo().
+func (p *claudeRuntimeProcess) recordExitInfo(cmd *exec.Cmd, waitErr error, stderr *claudeStderrTail) {
+	info := RuntimeExitInfo{
+		ExitCode: -1,
+		Expected: p.wasStopped(),
+		Stderr:   stderr.linesCopy(),
+	}
+	if waitErr != nil {
+		info.Err = waitErr.Error()
+	}
+	if state := cmd.ProcessState; state != nil {
+		info.ExitCode = state.ExitCode()
+		if ws, ok := state.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			info.Signal = ws.Signal().String()
+		}
+	}
+	p.mu.Lock()
+	p.exitInfo = info
+	p.mu.Unlock()
+}
+
+func (p *claudeRuntimeProcess) ExitInfo() RuntimeExitInfo {
+	if p == nil {
+		return RuntimeExitInfo{}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.exitInfo
+}
+
 // claudeStderrTail is the process's stderr writer: it logs complete lines to
 // the agent log and keeps the last few for startup-failure diagnostics.
 type claudeStderrTail struct {
@@ -544,19 +578,26 @@ func (t *claudeStderrTail) appendLineLocked(line string) {
 		return
 	}
 	t.lines = append(t.lines, line)
-	if len(t.lines) > 5 {
-		t.lines = t.lines[len(t.lines)-5:]
+	if len(t.lines) > 8 {
+		t.lines = t.lines[len(t.lines)-8:]
 	}
 }
 
-func (t *claudeStderrTail) String() string {
+func (t *claudeStderrTail) linesCopy() []string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	parts := append([]string(nil), t.lines...)
+	// Include the unterminated tail: a CLI that emits its final diagnostic
+	// without a trailing newline leaves it in `partial`, and that is exactly the
+	// line death classification may need. The bounded snapshot must not drop it.
 	if trailing := strings.TrimSpace(string(t.partial)); trailing != "" {
 		parts = append(parts, trailing)
 	}
-	return strings.Join(parts, " | ")
+	return parts
+}
+
+func (t *claudeStderrTail) String() string {
+	return strings.Join(t.linesCopy(), " | ")
 }
 
 func (p *claudeRuntimeProcess) logf(format string, args ...any) {

@@ -77,6 +77,11 @@ func TestDriveAgentAutomationStartsNotificationTurnFromInbox(t *testing.T) {
 		Agents: []*agent{{ID: "agent_1", Handle: "reviewer", Name: "Reviewer", Role: "Review docs", Kind: "codex"}},
 	}
 
+	// Reconcile is the desired-state authority that creates the resident session;
+	// notifications only deliver into an existing one (findings 29/30).
+	if err := service.sessions.ensureSession(context.Background(), workspace.Agents[0]); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
 	if err := service.driveAgentAutomation(context.Background(), workspace); err != nil {
 		t.Fatalf("drive agent automation: %v", err)
 	}

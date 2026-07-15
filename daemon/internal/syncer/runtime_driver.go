@@ -79,11 +79,24 @@ type RuntimeEvent struct {
 	Error     string
 }
 
+// RuntimeExitInfo describes why a runtime process ended. It is valid only once
+// Events() has closed — the exit goroutine records it before the close, so a
+// consumer that observes the channel close can read it without a race.
+type RuntimeExitInfo struct {
+	ExitCode int      // process exit code, or -1 if unknown/killed by signal
+	Signal   string   // termination signal name, if the process was signalled
+	Stderr   []string // bounded ring of the process's most recent stderr lines
+	Expected bool     // true when the daemon deliberately Stop()ped the process
+	Err      string   // cmd.Wait() error text, if any
+}
+
 type RuntimeProcess interface {
 	Start(ctx context.Context) error
 	Stop() error
 	WriteStdin(ctx context.Context, input RuntimeInput) (RuntimeWriteResult, error)
 	Events() <-chan RuntimeEvent
+	// ExitInfo reports why the process ended; valid only after Events() closes.
+	ExitInfo() RuntimeExitInfo
 	PID() int
 }
 

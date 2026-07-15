@@ -1616,7 +1616,7 @@ func (s *Store) UpdateAgentSession(id string, req UpdateAgentSessionRequest, met
 	now := time.Now().UTC()
 	if status := strings.TrimSpace(req.Status); status != "" {
 		switch status {
-		case "idle", "working", "disconnected":
+		case "idle", "working", "disconnected", "failed":
 			agent.Status = status
 		default:
 			return nil, fmt.Errorf("unsupported agent status %q", status)
@@ -1638,6 +1638,8 @@ func (s *Store) UpdateAgentSession(id string, req UpdateAgentSessionRequest, met
 			agent.CurrentActivity = "Working"
 		case "disconnected":
 			agent.CurrentActivity = "Disconnected"
+		case "failed":
+			agent.CurrentActivity = "Failed"
 		}
 	}
 	if heartbeat := strings.TrimSpace(req.LastHeartbeatAt); heartbeat != "" {

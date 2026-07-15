@@ -21,6 +21,7 @@ type codexRuntimeApp interface {
 	Start(context.Context) error
 	Stop() error
 	Events() <-chan appServerEvent
+	ExitInfo() RuntimeExitInfo
 	PID() int
 	ThreadResume(context.Context, string, string, string) error
 	ThreadStart(context.Context, string, string) (string, error)
@@ -165,6 +166,13 @@ func (p *codexRuntimeProcess) PID() int {
 	return p.app.PID()
 }
 
+func (p *codexRuntimeProcess) ExitInfo() RuntimeExitInfo {
+	if p == nil || p.app == nil {
+		return RuntimeExitInfo{}
+	}
+	return p.app.ExitInfo()
+}
+
 func (p *codexRuntimeProcess) forwardEvents() {
 	defer close(p.events)
 	for event := range p.app.Events() {
@@ -175,7 +183,12 @@ func (p *codexRuntimeProcess) forwardEvents() {
 		select {
 		case p.events <- runtimeEvent:
 		case <-p.stopping:
-			return
+			// Stop requested: stop pushing new events to a consumer that may
+			// have gone away, but keep draining the app channel until IT closes.
+			// The app closes its event channel only after its exit goroutine has
+			// published ExitInfo, so closing our public channel early here would
+			// expose a zero snapshot (Expected=false) and make a deliberate Stop
+			// misclassify as a transient crash.
 		}
 	}
 }

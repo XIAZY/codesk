@@ -2,10 +2,23 @@ package syncer
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// writeFakeCodex writes an executable shell script to a temp path so a test can
+// drive the real codex app-server against scripted stdio/stderr behavior.
+func writeFakeCodex(t *testing.T, script string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	return path
+}
 
 // The fake process fills the app-server event channel with telemetry, emits a
 // real lifecycle notification, and exits. The lifecycle event must survive,
@@ -178,5 +191,64 @@ func TestCodexAppServerStopWithoutCommandReleasesBlockedLifecycle(t *testing.T) 
 	case <-readDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Stop did not release the blocked lifecycle notification when cmd was nil")
+	}
+}
+
+// Blocker 6 (Cluster B): recordExitInfo must run only after the stderr reader is
+// joined. cmd.Wait closes the pipes on process exit but does not wait for the
+// reader goroutines, so a snapshot taken at Wait time can omit the process's
+// final diagnostic line. The helper bursts stderr then emits a sentinel as its
+// last line and exits; that sentinel must be present in ExitInfo after Events()
+// closes.
+func TestCodexAppServerExitInfoIncludesFinalStderrLine(t *testing.T) {
+	codexPath := writeFakeCodex(t, `#!/bin/sh
+while IFS= read -r line; do
+	case "$line" in
+	*'"method":"initialize"'*)
+		printf '%s\n' '{"id":1,"result":{}}'
+		;;
+	*'"method":"initialized"'*)
+		i=0
+		while [ "$i" -lt 3000 ]; do
+			printf 'stderr noise %s\n' "$i" >&2
+			i=$((i + 1))
+		done
+		printf 'FINAL-STDERR-SENTINEL\n' >&2
+		exit 7
+		;;
+	esac
+done
+`)
+	client := newCodexAppServer(Config{CodexCommand: codexPath, DataDir: t.TempDir()}, t.TempDir(), "", "agent_codex")
+	defer client.closeLog()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := client.Start(ctx); err != nil {
+		t.Fatalf("start app-server: %v", err)
+	}
+
+	// Drain Events() until it closes; the exit goroutine closes it only AFTER
+	// recordExitInfo, so a closed channel means the snapshot is final.
+Drain:
+	for {
+		select {
+		case _, ok := <-client.Events():
+			if !ok {
+				break Drain
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("app-server events did not close after process exit")
+		}
+	}
+
+	info := client.ExitInfo()
+	found := false
+	for _, line := range info.Stderr {
+		if line == "FINAL-STDERR-SENTINEL" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("final stderr line missing from ExitInfo after Events() closed: stderr=%#v", info.Stderr)
 	}
 }

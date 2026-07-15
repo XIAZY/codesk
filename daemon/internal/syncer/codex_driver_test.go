@@ -11,10 +11,11 @@ import (
 )
 
 type fakeCodexRuntimeApp struct {
-	started bool
-	stopped bool
-	events  chan appServerEvent
-	pid     int
+	started  bool
+	stopped  bool
+	events   chan appServerEvent
+	pid      int
+	exitInfo RuntimeExitInfo
 
 	threadStartID string
 	turnStartID   string
@@ -98,6 +99,10 @@ func (f *fakeCodexRuntimeApp) Events() <-chan appServerEvent {
 
 func (f *fakeCodexRuntimeApp) PID() int {
 	return f.pid
+}
+
+func (f *fakeCodexRuntimeApp) ExitInfo() RuntimeExitInfo {
+	return f.exitInfo
 }
 
 func (f *fakeCodexRuntimeApp) ThreadResume(ctx context.Context, sessionID string, cwd string, instructions string) error {
@@ -382,5 +387,55 @@ func collectRuntimeEvents(t *testing.T, events <-chan RuntimeEvent) []RuntimeEve
 		case <-deadline:
 			t.Fatalf("timed out waiting for runtime events; got %#v", got)
 		}
+	}
+}
+
+// Blocker 8 (Cluster B): when Stop wins while a final lifecycle event is still
+// pending, the wrapper must NOT close its public Events() before the underlying
+// app has published ExitInfo. The app closes its own event channel only after
+// its exit goroutine records ExitInfo; closing the wrapper early on `stopping`
+// exposes a zero snapshot (Expected=false) and makes a deliberate Stop look
+// like a transient crash that gets restarted.
+func TestCodexRuntimeWrapperWaitsForAppExitInfoBeforeClosing(t *testing.T) {
+	app := newFakeCodexRuntimeApp()
+	process := &codexRuntimeProcess{
+		app:      app,
+		events:   make(chan RuntimeEvent), // unbuffered: forward blocks on send with no consumer
+		stopping: make(chan struct{}),
+	}
+
+	forwardDone := make(chan struct{})
+	go func() {
+		process.forwardEvents()
+		close(forwardDone)
+	}()
+
+	// A final lifecycle event is in flight; forwardEvents receives it and blocks
+	// trying to hand it to a consumer that never reads.
+	app.events <- appServerEvent{Method: "turn/completed", Params: rawJSON(t, `{}`)}
+
+	// Stop wins before the app has published ExitInfo / closed its channel.
+	if err := process.Stop(); err != nil {
+		t.Fatalf("stop process: %v", err)
+	}
+
+	// The public channel must stay open: ExitInfo is not available yet.
+	select {
+	case <-forwardDone:
+		t.Fatal("wrapper closed public Events() before the app published ExitInfo (deliberate Stop would misclassify as transient)")
+	case <-time.After(75 * time.Millisecond):
+	}
+
+	// The app's exit goroutine publishes ExitInfo, THEN closes its channel.
+	app.exitInfo = RuntimeExitInfo{Expected: true}
+	close(app.events)
+
+	select {
+	case <-forwardDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("wrapper did not close after the app closed its event channel")
+	}
+	if !process.ExitInfo().Expected {
+		t.Fatal("ExitInfo lost: a deliberately-stopped process must report Expected=true after Events() closes")
 	}
 }

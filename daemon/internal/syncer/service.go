@@ -291,6 +291,14 @@ func (s *Service) Run(ctx context.Context) error {
 }
 
 func (s *Service) run(ctx context.Context, heartbeatTicks <-chan time.Time) (runErr error) {
+	// Bind the agent-session supervisor's construction lifetime to this run
+	// context once, before anything spawns a runtime, so a service-context
+	// cancellation cancels every (fresh + restart) construction — including a
+	// provider handshake blocked during the synchronous startup refresh, before
+	// Shutdown is reachable.
+	if s.sessions != nil {
+		s.sessions.bindServiceContext(ctx)
+	}
 	gateway, err := s.startToolGateway()
 	if err != nil {
 		return err
