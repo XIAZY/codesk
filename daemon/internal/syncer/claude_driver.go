@@ -226,8 +226,7 @@ func (p *claudeRuntimeProcess) WriteStdin(ctx context.Context, input RuntimeInpu
 			return RuntimeWriteResult{}, errors.New("no active turn to steer")
 		}
 		// Claude Code queues mid-turn user messages and folds them into the
-		// running turn at the next safe stream boundary. Verified by the retained
-		// 2026-07-12 production-path transcript from Claude CLI 2.1.205.
+		// running turn at the next safe stream boundary.
 		return RuntimeWriteResult{}, p.writeUserMessage(input.Text)
 	case RuntimeInputInterruptTurn:
 		return RuntimeWriteResult{}, p.writeControlRequest("interrupt")
