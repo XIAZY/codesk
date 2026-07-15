@@ -65,6 +65,32 @@ function mockApi(overrides: Partial<ApiClient> = {}): ApiClient {
 afterEach(cleanup);
 
 describe("ThreadPopover", () => {
+  it("uses the open thread's complete stored anchor excerpt in the list header", () => {
+    const excerpt = "The original sentence stays intact, including text beyond a visual two-line clamp.\nSecond line remains in the DOM.";
+    const orphaned = threadFixture({ anchor: { kind: "text-range", excerpt } });
+    orphaned.anchor.resolved = false;
+    const resolved = threadFixture({
+      id: "thread_resolved",
+      status: "resolved",
+      anchor: { kind: "text-range", excerpt: "An older resolved anchor" },
+    });
+    const { container } = render(
+      <ThreadPopover
+        api={mockApi()}
+        workspaceId="ws"
+        group={{ line: 5, threads: [resolved, orphaned] }}
+        point={{ x: 20, y: 30 }}
+        onClose={vi.fn()}
+        onThreadsChanged={vi.fn()}
+      />,
+    );
+
+    const headerExcerpt = container.querySelector(".thread-popover-head-excerpt");
+    expect(headerExcerpt?.textContent).toBe(excerpt);
+    expect(screen.queryByText("Line 5")).toBeNull();
+    expect(screen.getByText("· 1 thread")).toBeTruthy();
+  });
+
   it("lists only open threads and moves list → detail → back without status dots", async () => {
     const user = userEvent.setup();
     const resolved = threadFixture({
@@ -84,7 +110,7 @@ describe("ThreadPopover", () => {
       />,
     );
 
-    expect(screen.getByText("Line 5")).toBeTruthy();
+    expect(screen.getByText("can you see me")).toBeTruthy();
     expect(screen.getByText("· 1 thread")).toBeTruthy();
     const rows = container.querySelectorAll(".thread-popover-row");
     expect(rows).toHaveLength(1);
@@ -101,7 +127,7 @@ describe("ThreadPopover", () => {
     expect(within(dialog).getByText(/can you see me/)).toBeTruthy();
 
     await user.click(within(dialog).getByRole("button", { name: "Back to threads on this line" }));
-    expect(screen.getByText("Line 5")).toBeTruthy();
+    expect(screen.getByText("can you see me")).toBeTruthy();
   });
 
   it("replies in place through the existing thread API", async () => {
@@ -155,7 +181,7 @@ describe("ThreadPopover", () => {
     expect(document.querySelector(".thread-popover-status-dot")).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Back to threads on this line" }));
-    expect(screen.getByRole("dialog", { name: "Threads on line 5" })).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "Threads anchored to can you see me" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Open thread by @ada" })).toBeNull();
     expect(screen.getByText("· 0 open")).toBeTruthy();
     expect(screen.getByText("No open threads on this line")).toBeTruthy();
