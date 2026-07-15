@@ -2408,6 +2408,32 @@ func TestAgentSessionNotificationTurnRefreshesLivenessFloor(t *testing.T) {
 	}
 }
 
+// Item #5 liveness, blocker 18: the initial idle status must be enqueued WHILE
+// holding s.mu (same locked side as the session store), so a concurrent Schedule
+// that observes the resident session cannot publish `working` and then lose to a
+// delayed initial idle. Proven by asserting s.mu is held at the initial-publish
+// seam (TryLock fails); moving the publish after the unlock makes it RED.
+func TestAgentSessionInitialIdlePublishedUnderLock(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	held := make(chan bool, 1)
+	supervisor.testHookInitialPublish = func() {
+		if supervisor.mu.TryLock() {
+			supervisor.mu.Unlock()
+			held <- false // s.mu was FREE — initial publish not under the lock (bug)
+		} else {
+			held <- true // s.mu held — initial publish is serialized under the lock
+		}
+	}
+	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"}); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	if !<-held {
+		t.Fatal("the initial idle status must be enqueued while holding s.mu so a concurrent Schedule cannot publish working before it")
+	}
+}
+
 // Item #5 liveness, blocker 7: once stalled, resumed telemetry (the activity
 // generation advancing) must clear the stall on the next poll — a recovered
 // runtime is never left stalled for the next notification to kill.

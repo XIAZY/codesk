@@ -64,6 +64,12 @@ type agentSessionSupervisor struct {
 	// publish is serialized with the state decision. Test seam only.
 	testHookLivenessPrePublish func()
 
+	// testHookInitialPublish, when set, fires inside startSession while s.mu is held,
+	// after the session is stored and before the initial idle enqueue — used to prove
+	// a concurrent Schedule cannot publish working before initial-idle ordering is
+	// established. Test seam only.
+	testHookInitialPublish func()
+
 	// shutdownOnce guards Shutdown so its teardown (baseCtx cancel, session stop,
 	// construction drain, status stop) runs exactly once even if Shutdown is
 	// called multiple times (the #145 idempotency invariant).
@@ -927,8 +933,16 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 	// status teardown — no publish after Stop (the #145 consumeEvents-join
 	// invariant, now covering the heartbeat too).
 	s.constructionWG.Add(2)
-	s.mu.Unlock()
 	started = false
+	// Enqueue the initial idle UNDER s.mu, before exposing the session by unlocking:
+	// the session is already in s.sessions, so a concurrent ScheduleNotificationTurn
+	// can observe it and publish `working`. The initial idle must be ordered before
+	// that (same locked side as the store) or a delayed initial idle could overwrite
+	// an active turn's working in backend state (blocker 18). The enqueue is
+	// nonblocking (separate status mutex), so holding s.mu is safe.
+	if s.testHookInitialPublish != nil {
+		s.testHookInitialPublish()
+	}
 	s.publish(current.ID, updateAgentSessionRequest{
 		Status:          "idle",
 		SessionID:       sessionID,
@@ -936,6 +950,7 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 		CurrentActivity: "Idle",
 		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
+	s.mu.Unlock()
 	go func() {
 		defer s.constructionWG.Done()
 		s.consumeEvents(current.ID, process)
