@@ -4687,7 +4687,8 @@ export function AgentDetailModal({ api, workspaceId, agentId, agents, daemons, r
         <div className="modal-identity">
           <div className="avi agent">{initials(agent.handle)}</div>
           <div className="col gap-2">
-            <span className={`chip sm ${status.tone}`} title={status.title}><StatusDot tone={status.tone} /> {statusLabel}</span>
+            <span className={`chip sm ${status.tone}`} title={status.title}><StatusDot tone={status.tone} /> {status.label}</span>
+            {statusLabel !== status.label ? <span className="small muted status-detail">{statusLabel}</span> : null}
             <span className="small muted">Local environment: {daemon?.name ?? agent.daemonId}</span>
           </div>
         </div>

@@ -466,6 +466,13 @@ a:focus-visible,
   color: var(--warn);
 }
 
+/* The modal's status detail (e.g. the full stalled diagnostic) renders OUTSIDE the
+   nowrap chip and must wrap, not overflow the narrow modal (blocker 21). */
+.status-detail {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .avi {
   width: 30px;
   height: 30px;

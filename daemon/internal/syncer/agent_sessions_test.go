@@ -2408,6 +2408,133 @@ func TestAgentSessionNotificationTurnRefreshesLivenessFloor(t *testing.T) {
 	}
 }
 
+// Item #5 liveness, blocker 24: the PRODUCTION heartbeat loop wiring must be
+// exercised — startSession must actually launch a loop that periodically evaluates
+// liveness. Drive it through real ensureSession/startSession with a short real
+// interval and NO manual evaluateLiveness call; deleting the launch makes it RED.
+func TestAgentSessionHeartbeatLoopWiringDetectsStall(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	// Short real ticker so the launched loop fires promptly; the injected clock is
+	// what actually crosses stallAfter (deterministic silence).
+	supervisor.heartbeatInterval = 2 * time.Millisecond
+	clock := time.Unix(1_000_000, 0)
+	var clockMu sync.Mutex
+	supervisor.now = func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return clock
+	}
+	defer supervisor.Shutdown()
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	supervisor.markWorking("agent_1", process, "turn_1")
+	// Advance the supervisor clock past stallAfter with no activity; the LAUNCHED
+	// loop (not a manual call) must publish stalled on its next tick.
+	clockMu.Lock()
+	clock = clock.Add(supervisor.stallAfter + time.Second)
+	clockMu.Unlock()
+	waitSessionState(t, supervisor, "agent_1", "stalled")
+}
+
+// Item #5 liveness, blocker 11: once a resident generation is dead, evaluateLiveness
+// must tell the heartbeat loop to STOP (return false) — no ticker leak for a
+// parked/failed generation.
+func TestAgentSessionDeadGenerationStopsHeartbeatLoop(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	if !supervisor.evaluateLiveness("agent_1", process) {
+		t.Fatal("a live session must keep the loop watching")
+	}
+	// Mark the resident generation dead (as the stall-replacement / death path does).
+	supervisor.mu.Lock()
+	supervisor.sessions["agent_1"].dead = true
+	supervisor.mu.Unlock()
+	if supervisor.evaluateLiveness("agent_1", process) {
+		t.Fatal("a dead resident generation must make evaluateLiveness return false so the loop exits")
+	}
+}
+
+// Item #5 liveness, blocker 16: repeated stalled heartbeats republish the EXACT
+// same diagnostic/turn (a stable payload), not a per-tick recomputed line — so the
+// backend comparator suppresses the activity flood.
+func TestAgentSessionStalledHeartbeatRepublishesStableDiagnostic(t *testing.T) {
+	updates := make(chan updateAgentSessionRequest, 32)
+	updater := func(ctx context.Context, agentID string, payload updateAgentSessionRequest) error {
+		updates <- payload
+		return nil
+	}
+	supervisor, _, process, _, clock := stalledWorkingSession(t, updater)
+	defer supervisor.Shutdown()
+	// Capture the stalled diagnostic from the transition.
+	first := waitForStalledPayload(t, updates)
+	// Two more unchanged-generation ticks (no new frame): each republishes the SAME
+	// diagnostic + turn (only LastHeartbeatAt differs).
+	for i := 0; i < 2; i++ {
+		*clock = clock.Add(supervisor.heartbeatInterval)
+		supervisor.evaluateLiveness("agent_1", process)
+		next := waitForStalledPayload(t, updates)
+		if next.CurrentActivity != first.CurrentActivity || next.CurrentTurnID != first.CurrentTurnID {
+			t.Fatalf("stalled heartbeat must republish the stable diagnostic/turn: first=(%q,%q) got=(%q,%q)", first.CurrentActivity, first.CurrentTurnID, next.CurrentActivity, next.CurrentTurnID)
+		}
+	}
+}
+
+func waitForStalledPayload(t *testing.T, updates <-chan updateAgentSessionRequest) updateAgentSessionRequest {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case p := <-updates:
+			if p.Status == "stalled" {
+				return p
+			}
+		case <-deadline:
+			t.Fatal("did not observe a stalled payload in time")
+		}
+	}
+}
+
+// Item #5 liveness, blocker 8: recovery at the DESTRUCTIVE Schedule decision — a
+// stalled session whose generation advanced, hit by a notification before the next
+// heartbeat tick, recovers to working and is handled busy (no Stop/spawn).
+func TestAgentSessionStalledRecoversAtScheduleDecision(t *testing.T) {
+	supervisor, factory, wedged, current, _ := stalledSessionWithForMeSig(t, "for-me:v1")
+	defer supervisor.Shutdown()
+	// A fresh frame decodes (generation advances) — but NO heartbeat tick runs.
+	wedged.advanceActivity()
+	// A NEW notification arrives (would otherwise trigger replacement). The Schedule
+	// recheck must observe the advanced generation, recover to working, and handle
+	// it on the busy path — no Stop, no spawn.
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "gen", "for-me:v1", "general:g2"); err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	wedged.mu.Lock()
+	stopped := wedged.stopped
+	wedged.mu.Unlock()
+	if stopped {
+		t.Fatal("a recovered runtime (generation advanced) must not be replaced at the Schedule decision")
+	}
+	factory.mu.Lock()
+	procs := len(factory.processes)
+	factory.mu.Unlock()
+	if procs != 1 {
+		t.Fatalf("no replacement expected after synchronous recovery, got %d processes", procs)
+	}
+	if got, _ := sessionState(supervisor, "agent_1"); got != "working" {
+		t.Fatalf("expected recovery to working at the Schedule decision, got %q", got)
+	}
+}
+
 // Item #5 liveness, blocker 13: a nonce-current StartTurn ERROR must publish idle
 // so the backend's LATEST status is idle — even when a heartbeat published a
 // provisional working while the StartTurn RPC was in flight. Without the error-path
