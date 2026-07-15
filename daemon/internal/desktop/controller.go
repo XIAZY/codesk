@@ -50,6 +50,7 @@ func (s State) String() string {
 
 type Snapshot struct {
 	State        State
+	Generation   uint64
 	RetryAttempt int
 	RetryDelay   time.Duration
 	Sequence     uint64
@@ -207,7 +208,7 @@ func (c *Controller) Quit() error {
 		// a pre-start Quit and launch an unowned event loop.
 		c.started = true
 		c.mu.Unlock()
-		c.publish(StateQuitting, 0, 0)
+		c.publish(StateQuitting, 0, 0, 0)
 		c.finishRun()
 		return nil
 	}
@@ -273,6 +274,8 @@ func (c *Controller) run(parent context.Context) {
 	defer c.finishRun()
 
 	var generation *serviceGeneration
+	var generationSequence uint64
+	var currentGeneration uint64
 	var retry Timer
 	var retryC <-chan time.Time
 	failures := 0
@@ -301,17 +304,17 @@ func (c *Controller) run(parent context.Context) {
 		var reconnectErr *syncer.ReconnectRequiredError
 		if errors.As(err, &reconnectErr) {
 			failures = 0
-			c.publish(StateReconnectRequired, 0, 0)
+			c.publish(StateReconnectRequired, currentGeneration, 0, 0)
 			return
 		}
 		failures++
 		delay := c.backoff.delay(failures)
 		retry = c.clock.NewTimer(delay)
 		retryC = retry.C()
-		c.publish(StateRetrying, failures, delay)
+		c.publish(StateRetrying, currentGeneration, failures, delay)
 	}
 	quit := func() error {
-		c.publish(StateQuitting, 0, 0)
+		c.publish(StateQuitting, currentGeneration, 0, 0)
 		stopRetry()
 		return stopGeneration()
 	}
@@ -350,7 +353,9 @@ func (c *Controller) run(parent context.Context) {
 			}
 
 			wantStart = false
-			c.publish(StateStarting, 0, 0)
+			generationSequence++
+			currentGeneration = generationSequence
+			c.publish(StateStarting, currentGeneration, 0, 0)
 			service, err := c.factory()
 			if err != nil {
 				publishFailure(err)
@@ -413,16 +418,17 @@ func (c *Controller) run(parent context.Context) {
 				publishFailure(err)
 			default:
 				failures = 0
-				c.publish(StateOnline, 0, 0)
+				c.publish(StateOnline, currentGeneration, 0, 0)
 			}
 		}
 	}
 }
 
-func (c *Controller) publish(state State, retryAttempt int, retryDelay time.Duration) {
+func (c *Controller) publish(state State, generation uint64, retryAttempt int, retryDelay time.Duration) {
 	c.mu.Lock()
 	c.snapshot = Snapshot{
 		State:        state,
+		Generation:   generation,
 		RetryAttempt: retryAttempt,
 		RetryDelay:   retryDelay,
 		Sequence:     c.snapshot.Sequence + 1,

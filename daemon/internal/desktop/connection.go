@@ -43,7 +43,9 @@ func restoreConnectionToken(secrets SecretStore, previousToken []byte) error {
 	if len(previousToken) == 0 {
 		return secrets.Delete(SecretKeyDaemonToken)
 	}
-	return secrets.Save(SecretKeyDaemonToken, append([]byte(nil), previousToken...))
+	restoredToken := append([]byte(nil), previousToken...)
+	defer clear(restoredToken)
+	return secrets.Save(SecretKeyDaemonToken, restoredToken)
 }
 
 func wrapConnectionCleanupError(err error) error {

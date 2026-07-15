@@ -483,7 +483,10 @@ func TestControllerRestartJoinsOldGenerationBeforeStartingNew(t *testing.T) {
 	waitFactoryCall(t, factory, 1)
 	waitSignal(t, first.started, "first service start")
 	first.markReady()
-	waitState(t, controller, StateOnline)
+	firstOnline := waitState(t, controller, StateOnline)
+	if firstOnline.Generation != 1 {
+		t.Fatalf("first service generation = %d, want 1", firstOnline.Generation)
+	}
 
 	restarted := make(chan error, 1)
 	go func() { restarted <- controller.Restart() }()
@@ -504,6 +507,11 @@ func TestControllerRestartJoinsOldGenerationBeforeStartingNew(t *testing.T) {
 	waitSignal(t, first.joined, "first service join")
 	waitFactoryCall(t, factory, 2)
 	waitSignal(t, second.started, "second service start")
+	second.markReady()
+	secondOnline := waitState(t, controller, StateOnline)
+	if secondOnline.Generation != firstOnline.Generation+1 {
+		t.Fatalf("restarted service generation = %d, want %d", secondOnline.Generation, firstOnline.Generation+1)
+	}
 	active, maxActive := activity.counts()
 	if active != 1 || maxActive != 1 {
 		t.Fatalf("service activity after restart = active %d, max %d; want 1, 1", active, maxActive)
