@@ -2408,6 +2408,34 @@ func TestAgentSessionNotificationTurnRefreshesLivenessFloor(t *testing.T) {
 	}
 }
 
+// Item #5 liveness, blocker 19: a lifecycle floor reset must snapshot the activity
+// GENERATION, not just the timestamp — otherwise a frame decoded BEFORE the turn
+// (a handshake/init or prior idle frame) is consumed later as fresh turn telemetry
+// and grants an extra stall window, hiding a real wedge.
+func TestAgentSessionStaleDecodedFrameDoesNotGrantExtraStallWindow(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	clock := time.Unix(1_000_000, 0)
+	supervisor.now = func() time.Time { return clock }
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	// A frame decodes BEFORE the turn starts (e.g. handshake/init), advancing the seq.
+	process.advanceActivity()
+	// The turn starts: the floor reset must snapshot this seq so the pre-turn frame
+	// is already accounted for.
+	supervisor.markWorking("agent_1", process, "turn_1")
+	// The turn then goes silent (no NEW frame). Advance past stallAfter.
+	clock = clock.Add(supervisor.stallAfter + time.Second)
+	supervisor.evaluateLiveness("agent_1", process)
+	if got, _ := sessionState(supervisor, "agent_1"); got != "stalled" {
+		t.Fatalf("a frame decoded before the turn must not grant an extra stall window; state=%q", got)
+	}
+}
+
 // Item #5 liveness, blocker 18: the initial idle status must be enqueued WHILE
 // holding s.mu (same locked side as the session store), so a concurrent Schedule
 // that observes the resident session cannot publish `working` and then lose to a

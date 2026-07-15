@@ -878,13 +878,14 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 		appendAgentLog(s.cfg, current.ID, "runtime session started session=%s", sessionID)
 	}
 	session := &managedAgentSession{
-		agent:          cloneAgentValue(current),
-		process:        process,
-		toolToken:      toolToken,
-		workdir:        workdir,
-		sessionID:      sessionID,
-		state:          "idle",
-		lastActivityAt: s.now(),
+		agent:           cloneAgentValue(current),
+		process:         process,
+		toolToken:       toolToken,
+		workdir:         workdir,
+		sessionID:       sessionID,
+		state:           "idle",
+		lastActivityAt:  s.now(),
+		lastActivitySeq: process.ActivitySeq(),
 	}
 	s.mu.Lock()
 	if s.shutdown || s.baseCtx.Err() != nil {
@@ -1132,7 +1133,7 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 	// WriteStdin(StartTurn) — before the provider's first frame — never judges this
 	// freshly started turn against the prior idle timestamp. This path bypasses
 	// markWorking, so it must refresh the floor itself.
-	session.lastActivityAt = s.now()
+	s.resetLivenessFloor(session, session.process)
 	session.activeForMeSig = forMeSig
 	session.activeGeneralSig = generalSig
 	session.steeredForMeSig = ""
@@ -1167,7 +1168,7 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 			currentSession.activeTurn = ""
 			currentSession.activeForMeSig = ""
 			currentSession.activeGeneralSig = ""
-			currentSession.lastActivityAt = s.now()
+			s.resetLivenessFloor(currentSession, process)
 			// Publish the idle demotion UNDER s.mu (blocker 13): a heartbeat may have
 			// published provisional `working` before this RPC error returned, so the
 			// nonce-fenced idle must enqueue in the same ordered decision or the backend
@@ -1197,7 +1198,7 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 		// The accepted turn is now genuinely underway: refresh the floor again so the
 		// live turn gets a full stall window measured from acceptance, not from the
 		// pre-write decision point.
-		currentSession.lastActivityAt = s.now()
+		s.resetLivenessFloor(currentSession, process)
 		// Publish UNDER s.mu (see markWorking/markIdle): the turnOpSeq fence guards the
 		// state mutation, but the STATUS enqueue must share the same ordering, or an
 		// authoritative idle that drained during the unlocked WriteStdin could publish
@@ -1684,7 +1685,7 @@ func (s *agentSessionSupervisor) markWorking(agentID string, process RuntimeProc
 	// A lifecycle transition is itself proof of liveness: refresh the floor so a
 	// just-started turn has the full stallAfter window before it could be judged
 	// silent, and so it clears any prior `stalled` marking (event-driven recovery).
-	session.lastActivityAt = s.now()
+	s.resetLivenessFloor(session, process)
 	// An authoritative TurnStarted is a state transition that must win over a
 	// StartTurn RPC completion still in flight: bump the operation nonce so a stale
 	// StartTurn error/timeout returning afterward cannot demote this live turn.
@@ -1718,7 +1719,7 @@ func (s *agentSessionSupervisor) markIdle(agentID string, process RuntimeProcess
 	session.activeTurn = ""
 	// A lifecycle transition proves liveness and clears any `stalled` marking
 	// (event-driven recovery).
-	session.lastActivityAt = s.now()
+	s.resetLivenessFloor(session, process)
 	// This idle/failed/completed transition is authoritative: bump the operation
 	// nonce so a StartTurn completion still in flight against this generation
 	// cannot revive it to working.
@@ -1892,6 +1893,16 @@ func (s *agentSessionSupervisor) evaluateLiveness(agentID string, process Runtim
 // stamp the supervisor's OWN monotonic time. Silence is then measured from
 // lastActivityAt, so it never depends on comparing a wall-clock timestamp across a
 // clock step. Must be called under s.mu.
+// resetLivenessFloor marks a lifecycle transition as fresh liveness NOW: it resets
+// the silence clock AND snapshots the current activity generation, so a frame
+// already decoded before this transition (e.g. the handshake/init or a prior idle
+// frame) is not later consumed by observeActivity as fresh turn telemetry and
+// granted an extra stall window (blocker 19). Must be called under s.mu.
+func (s *agentSessionSupervisor) resetLivenessFloor(session *managedAgentSession, process RuntimeProcess) {
+	session.lastActivityAt = s.now()
+	session.lastActivitySeq = process.ActivitySeq()
+}
+
 // It returns true iff the generation advanced this call (a genuinely new frame).
 func (s *agentSessionSupervisor) observeActivity(session *managedAgentSession, process RuntimeProcess) bool {
 	if seq := process.ActivitySeq(); seq != session.lastActivitySeq {
