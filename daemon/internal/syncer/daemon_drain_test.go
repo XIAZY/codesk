@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // D1: a rejected credential (401/403) or a drained/deprovisioned daemon (410 Gone) is terminal —
@@ -33,6 +34,88 @@ func TestIsTerminalAuthError(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := isTerminalAuthError(tc.err); got != tc.want {
 				t.Fatalf("isTerminalAuthError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWrapReconnectRequired(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"unauthorized", &backendStatusError{StatusCode: http.StatusUnauthorized}, true},
+		{"forbidden", &backendStatusError{StatusCode: http.StatusForbidden}, true},
+		{"gone", &backendStatusError{StatusCode: http.StatusGone}, true},
+		{"wrapped terminal", fmt.Errorf("refresh: %w", &backendStatusError{StatusCode: http.StatusGone}), true},
+		{"server error", &backendStatusError{StatusCode: http.StatusInternalServerError}, false},
+		{"network error", errors.New("dial tcp: connection refused"), false},
+		{"nil", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := wrapReconnectRequired(tt.err)
+			var reconnectErr *ReconnectRequiredError
+			if isReconnect := errors.As(got, &reconnectErr); isReconnect != tt.want {
+				t.Fatalf("errors.As(ReconnectRequiredError) = %v, want %v (err=%v)", isReconnect, tt.want, got)
+			}
+			if tt.err != nil && !errors.Is(got, tt.err) {
+				t.Fatalf("wrapped error does not preserve cause %v: %v", tt.err, got)
+			}
+		})
+	}
+}
+
+func TestWrapReconnectRequiredDoesNotDoubleWrap(t *testing.T) {
+	cause := &backendStatusError{StatusCode: http.StatusUnauthorized}
+	once := wrapReconnectRequired(cause)
+	twice := wrapReconnectRequired(once)
+	if twice != once {
+		t.Fatalf("second wrap returned %p, want original %p", twice, once)
+	}
+}
+
+func TestRunExposesReconnectRequiredError(t *testing.T) {
+	for _, status := range []int{
+		http.StatusUnauthorized,
+		http.StatusForbidden,
+		http.StatusGone,
+	} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(status)
+			}))
+			defer server.Close()
+
+			root := t.TempDir()
+			service, err := New(Config{
+				BackendURL:         server.URL,
+				WorkspaceID:        "workspace:test",
+				DaemonToken:        "daemon_token",
+				DataDir:            root,
+				WorkspaceDir:       root + "/workspace",
+				AgentWorkspaceRoot: root + "/agents",
+				AgentID:            "daemon_agent",
+				AgentToolBaseURL:   "http://127.0.0.1:0",
+			})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			err = service.Run(ctx)
+			if errors.Is(err, context.DeadlineExceeded) {
+				t.Fatal("Run() retried a terminal credential error until timeout")
+			}
+			var reconnectErr *ReconnectRequiredError
+			if !errors.As(err, &reconnectErr) {
+				t.Fatalf("Run() error = %v, want ReconnectRequiredError", err)
+			}
+			var statusErr *backendStatusError
+			if !errors.As(err, &statusErr) || statusErr.StatusCode != status {
+				t.Fatalf("Run() cause = %v, want HTTP %d", err, status)
 			}
 		})
 	}
