@@ -134,12 +134,20 @@ func TestOverlappingRewriteConvergesWithoutLostCharacters(t *testing.T) {
 			c1, sv1 := mergeContentAndState(t, baseState, localUpdate, remoteUpdate)
 			c2, sv2 := mergeContentAndState(t, baseState, remoteUpdate, localUpdate)
 			convergedIdentically(t, c1, sv1, c2, sv2)
+			oldLine := strings.TrimSuffix(strings.TrimPrefix(base, "title\n"), "\n")
 			for _, got := range []string{c1, c2} {
-				if !strings.Contains(got, tc.localLine) {
-					t.Fatalf("local rewrite %q lost characters (dominated-span identity reuse); merged=%q", tc.localLine, got)
+				// Delimiter-complete: each rewritten line must survive intact WITH its "\n"
+				// terminator, exactly once. The newline-loss class strips the local
+				// terminator and concatenates the two payloads, which a substring check on
+				// the delimiter-free line would miss but this exact-payload count catches.
+				if n := strings.Count(got, tc.localLine+"\n"); n != 1 {
+					t.Fatalf("local rewrite %q\\n must appear exactly once (terminator intact); got %d; merged=%q", tc.localLine, n, got)
 				}
-				if !strings.Contains(got, tc.remoteLine) {
-					t.Fatalf("remote rewrite %q missing after merge; merged=%q", tc.remoteLine, got)
+				if n := strings.Count(got, tc.remoteLine+"\n"); n != 1 {
+					t.Fatalf("remote rewrite %q\\n must appear exactly once; got %d; merged=%q", tc.remoteLine, n, got)
+				}
+				if strings.Contains(got, oldLine) {
+					t.Fatalf("old base line %q must be absent after both rewrites; merged=%q", oldLine, got)
 				}
 			}
 		})
@@ -156,25 +164,30 @@ func assertNoRetainedIdentityInReplacedLine(t *testing.T, base, local string) {
 		t.Fatalf("computeLocalTextEdits: %v", err)
 	}
 	// The changed region begins after the common "title\n" prefix (offset 6); no edit
-	// may touch the prefix. For a fully-dominated line replacement the reconcile must
-	// emit exactly ONE delete of the whole old line content and ONE insert of the whole
-	// new content — a retained interior base span (identity reuse) would SPLIT the delete
-	// (and insert) into two around the kept equality, so >1 delete signals reuse.
+	// may touch the prefix. For a fully-dominated line replacement NO base character of
+	// the replaced line may survive — its content AND its trailing delimiter must all be
+	// freshly deleted+inserted. A retained interior span (content reuse) or a retained
+	// trailing "\n" (the newline-loss class) would leave a base char un-deleted, so the
+	// deleted total would fall short of the whole post-prefix region.
 	prefix := utf16Length("title\n")
-	dels, ins := 0, 0
+	delSum, insSum := 0, 0
 	for _, e := range edits {
 		if e.Start < prefix {
 			t.Fatalf("edit touched the unchanged prefix (retained-boundary violation): %+v", e)
 		}
 		switch e.Kind {
 		case localTextEditDelete:
-			dels++
+			delSum += e.Length
 		case localTextEditInsert:
-			ins++
+			insSum += e.Length
 		}
 	}
-	if dels != 1 || ins != 1 {
-		t.Fatalf("fully-replaced line must be one contiguous delete+insert (no interior retained identity); got %d deletes, %d inserts: %+v", dels, ins, edits)
+	// Everything after the prefix — the whole old line INCLUDING its delimiter — must be
+	// deleted, and the whole new line INCLUDING its fresh delimiter inserted.
+	wantDel := utf16Length(base) - prefix
+	wantIns := utf16Length(local) - prefix
+	if delSum != wantDel || insSum != wantIns {
+		t.Fatalf("fully-replaced line (content+delimiter) must carry no retained base identity; deleted %d of %d post-prefix units, inserted %d of %d: %+v", delSum, wantDel, insSum, wantIns, edits)
 	}
 }
 
@@ -332,6 +345,12 @@ func TestGenuineInteriorAnchorRetained(t *testing.T) {
 
 // --- Idempotence / termination of the collapse pass ------------------------------
 
+// NOTE: this row compares the raw emitted diff via reflect.DeepEqual, so it is
+// REPRESENTATION-sensitive. Dropping the per-round DiffCleanupMerge makes it flap
+// (unmerged fragments vs re-normalized re-entry) even when the reconstructed content is
+// identical — so this row is NOT valid mutation-evidence that the per-round merge is
+// load-bearing. The genuine killer for that mechanism is the content-level anchor
+// retention in TestPerRoundNormalizationRetainsFactoredBoundaryAnchor.
 func TestCollapseCoincidentalReuseIsIdempotentAndTerminates(t *testing.T) {
 	dmp := diffmatchpatch.New()
 	corpus := [][2]string{
@@ -436,5 +455,123 @@ func TestCollapseInteriorEqualityCountStrictlyDecreases(t *testing.T) {
 				t.Fatalf("%q: did not reach fixpoint within the interior-count bound", pair)
 			}
 		}
+	}
+}
+
+// --- Row G: delimiter-freshening pass — fires on boundary rewrites, not mid-line ---
+
+// anyDeleteEndsWithDelimiter reports whether some delete edit ends with delim — i.e.
+// the rewritten line's terminator was given a fresh identity (deleted+reinserted)
+// rather than retained as a reused-base equality.
+func anyDeleteEndsWithDelimiter(edits []localTextEdit, delim string) bool {
+	for _, e := range edits {
+		if e.Kind == localTextEditDelete && strings.HasSuffix(e.Text, delim) {
+			return true
+		}
+	}
+	return false
+}
+
+// A boundary-aligned full-line rewrite freshens its trailing delimiter for ANY edit
+// kind — delete+insert, insert-only (fill an empty line), delete-only (empty a line) —
+// and for LF and CRLF. Requiring both edit kinds would miss the insert-only path
+// (locks out the "wrongly-requires-both" mutation).
+func TestBoundaryLineRewriteFreshensDelimiterAnyEditKind(t *testing.T) {
+	for _, tc := range []struct{ name, base, local, delim string }{
+		{"replace_lf", "title\nshared\n", "title\nlocal rewrite\n", "\n"},
+		{"replace_crlf", "title\r\nshared\r\n", "title\r\nlocal rewrite\r\n", "\r\n"},
+		{"empty_line_insert_only", "title\n\n", "title\nfilled\n", "\n"},
+		{"empty_line_delete_only", "title\ndrop me\n", "title\n\n", "\n"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			edits, err := computeLocalTextEdits(tc.base, tc.local)
+			if err != nil {
+				t.Fatalf("computeLocalTextEdits: %v", err)
+			}
+			if !anyDeleteEndsWithDelimiter(edits, tc.delim) {
+				t.Fatalf("boundary line rewrite (%s) must freshen the %q terminator (delete base delimiter) regardless of edit kind: %+v", tc.name, tc.delim, edits)
+			}
+		})
+	}
+}
+
+// Non-firing control (the load-bearing negative): a MID-LINE edit leaves surviving
+// base content on the line, so the line's delimiter is shared with retained text and
+// must NOT be freshened — otherwise the fix over-applies and becomes a new corruption
+// vector. Locks out dropping the boundary-start guard.
+func TestMidLineEditKeepsDelimiterIdentity(t *testing.T) {
+	for _, tc := range []struct{ name, base, local, delim string }{
+		{"suffix_anchor", "title\nhello world\n", "title\nhello earth\n", "\n"},
+		{"prefix_anchor", "title\nkeep tail\n", "title\ndrop tail\n", "\n"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			edits, err := computeLocalTextEdits(tc.base, tc.local)
+			if err != nil {
+				t.Fatalf("computeLocalTextEdits: %v", err)
+			}
+			if anyDeleteEndsWithDelimiter(edits, tc.delim) {
+				t.Fatalf("mid-line edit (%s) must NOT freshen the shared trailing delimiter (over-application): %+v", tc.name, edits)
+			}
+		})
+	}
+}
+
+// Bill's symmetric control: BOTH peers rewrite the same line through the local-edit +
+// freshen path (not remoteLineReplace). Each deletes the base line's shared delimiter
+// (idempotent tombstone) and inserts its own payload+fresh delimiter, so both apply
+// orders converge to two clean, delimiter-complete lines with no concatenation.
+func TestBothPeersRewriteSameLineThroughLocalDiffConverges(t *testing.T) {
+	base := "title\nshared\n"
+	baseState := crdtStateFromContent(base)
+	updA, _, err := buildLocalUpdateFromBase(baseState, base, "title\nlocal rewrite\n")
+	if err != nil {
+		t.Fatalf("build A: %v", err)
+	}
+	updB, _, err := buildLocalUpdateFromBase(baseState, base, "title\nremote rewrite\n")
+	if err != nil {
+		t.Fatalf("build B: %v", err)
+	}
+	c1, sv1 := mergeContentAndState(t, baseState, updA, updB)
+	c2, sv2 := mergeContentAndState(t, baseState, updB, updA)
+	convergedIdentically(t, c1, sv1, c2, sv2)
+	for _, got := range []string{c1, c2} {
+		if strings.Count(got, "local rewrite\n") != 1 || strings.Count(got, "remote rewrite\n") != 1 {
+			t.Fatalf("both-peers local-diff rewrite must keep each line delimiter-complete exactly once; merged=%q", got)
+		}
+		if strings.Contains(got, "shared") {
+			t.Fatalf("old base line must be gone after both rewrites; merged=%q", got)
+		}
+	}
+}
+
+// The per-round DiffCleanupMerge inside the fixpoint is load-bearing and NOT subsumed by
+// maxAdjacentEditLen's run-summing: after a dominated fold, structural cleanup factors a
+// common affix onto the OUTER boundary, where the boundary exemption retains it as a
+// genuine anchor. Witness (Thomas): "zx" -> "xczxxx". Folding the dominated "zx" lets
+// per-round cleanup recover the trailing "x" as a suffix anchor, so ONLY "z" is freshly
+// deleted and the base "x" keeps its identity. Skipping per-round normalization leaves the
+// run with no equality to recover, unnecessarily freshening the suffix "x" (2 deleted
+// units). The committed Ayxx... cascade row only kills single-pass; THIS row kills
+// skip-per-round-normalization.
+func TestPerRoundNormalizationRetainsFactoredBoundaryAnchor(t *testing.T) {
+	edits, err := computeLocalTextEdits("zx", "xczxxx")
+	if err != nil {
+		t.Fatalf("computeLocalTextEdits: %v", err)
+	}
+	// Inspect the identity-bearing boundary DIRECTLY, not via a cardinality proxy: both
+	// "z" and "x" occur in the local string, so a regression that retained interior "z"
+	// while freshening suffix "x" would also delete one base unit and pass a length check.
+	// Aggregate the deleted text (representation-insensitive across fragments) and require
+	// exactly "z" — proving base suffix "x" keeps its identity and is never deleted.
+	delText := ""
+	for _, e := range edits {
+		if e.Kind == localTextEditDelete {
+			delText += e.Text
+		}
+	}
+	if delText != "z" {
+		t.Fatalf("factored suffix boundary anchor \"x\" must be retained: exactly \"z\" freshly deleted, got deleted text %q from edits %+v — per-round normalization did not recover the outer-boundary anchor", delText, edits)
 	}
 }
