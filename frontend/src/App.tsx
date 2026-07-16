@@ -41,9 +41,9 @@ import { navigate, useRoute } from "./useRoute";
 import { useRootNamespace } from "./useRootNamespace";
 import { useDocumentSync } from "./useDocument";
 import { useWorkspace } from "./useWorkspace";
-import { Onboarding, type OnboardingActionEvent, type OnboardingPresentation } from "./Onboarding";
+import { Onboarding, OnboardingChapterCard, type OnboardingActionEvent, type OnboardingPresentation } from "./Onboarding";
 import { OnboardingChecklist } from "./OnboardingChecklist";
-import { useOnboardingController } from "./onboardingController";
+import { useOnboardingController, resolveAgentWorkDestination } from "./onboardingController";
 import type { OnboardingRole } from "./onboardingEngine";
 import type { Account, ActivityEvent, Agent, Daemon, DocumentItem, ThreadItem, UserItem, WorkspaceInvitePreview, WorkspaceState, WorkspaceSummary } from "./types";
 import { resolveRuntimeTiles, selectableRuntimeKinds, type RuntimeTile } from "./runtimes";
@@ -1678,10 +1678,42 @@ export function WorkspaceApp({
   });
   const recordOnboardingEvent = onboarding.record;
   const handleOnboardingAction = useCallback((event: OnboardingActionEvent) => {
-    if (event === "open-thread-draft") {
-      setOpenThreadDraftRequest((request) => request + 1);
+    switch (event) {
+      case "open-thread-draft":
+        setOpenThreadDraftRequest((request) => request + 1);
+        break;
+      case "open-create-environment":
+        setModal("daemon");
+        break;
+      case "open-create-agent":
+        setModal("agent");
+        break;
+      case "open-agent-work": {
+        // One shared destination for the owner/admin work step and the member card
+        // (#56 §2e): 1 agent → its Start run directly; 2+ → the Agents list chooser.
+        const destination = resolveAgentWorkDestination(workspace.agents);
+        if (destination.kind === "start-run") {
+          setSelectedAgentId(destination.agentId);
+          setModal("agent-detail");
+        } else {
+          setManageTab("agents");
+          setModal("manage");
+        }
+        break;
+      }
+      default:
+        break; // advance/back/complete/dismiss are guide events handled via onNext/onBack/onSkip
     }
-  }, []);
+  }, [workspace.agents]);
+
+  // The chapter card to render — with the work CTA's label resolved to its live destination
+  // ("Start a run" for one agent, "Choose an agent" for 2+), so the label never hides the
+  // outcome (Anton). Non-work cards pass through unchanged.
+  const chapterCardStep = useMemo(() => {
+    const card = onboarding.chapterActive;
+    if (!card || card.primaryAction?.event !== "open-agent-work") return card;
+    return { ...card, primaryAction: { ...card.primaryAction, label: resolveAgentWorkDestination(workspace.agents).label } };
+  }, [onboarding.chapterActive, workspace.agents]);
 
   const documentOpenThreadCount = useMemo(
     () => documentThreads.filter((thread) => (
@@ -2552,11 +2584,23 @@ export function WorkspaceApp({
           onAction={handleOnboardingAction}
         />
       ) : null}
+      {chapterCardStep ? (
+        <OnboardingChapterCard
+          step={chapterCardStep}
+          stepIndex={onboarding.chapterStepIndex}
+          total={onboarding.chapterTotal}
+          onAction={handleOnboardingAction}
+          onDismiss={onboarding.closeChapter}
+        />
+      ) : null}
       {shouldRenderOnboardingChecklist(rootNamespace.ready, onboarding.active?.presentation) ? (
         <OnboardingChecklist
           progress={onboarding.checklist}
           dismissed={onboarding.checklistDismissed}
           onDismiss={onboarding.dismissChecklist}
+          onOpenChapter={onboarding.openChapter}
+          chapterStepIndex={onboarding.chapterStepIndex}
+          chapterTotal={onboarding.chapterTotal}
         />
       ) : null}
     </main>

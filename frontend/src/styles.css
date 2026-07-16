@@ -3027,6 +3027,64 @@ a:focus-visible,
   background: var(--ink-3);
 }
 
+/* Chapter entry row (#56) — a clickable launcher card inside the checklist. */
+.ob-checklist-list li.ob-checklist-entry-item {
+  padding: 4px;
+  display: block;
+}
+
+.ob-checklist-entry {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--paper);
+  color: var(--ink-2);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ob-checklist-entry:hover { border-color: var(--border-strong); }
+
+.ob-checklist-entry-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ob-checklist-entry-label { font-size: 12.5px; font-weight: 640; color: var(--ink); }
+
+.ob-checklist-entry-sub { font-size: 11.5px; color: var(--ink-4); line-height: 1.35; }
+
+.ob-checklist-entry-badge {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: oklch(0.93 0.06 70);
+  color: oklch(0.5 0.12 70);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.ob-checklist-entry-badge.done {
+  background: oklch(0.93 0.05 150);
+  color: oklch(0.45 0.1 150);
+}
+
+.ob-checklist-entry-chev {
+  flex: 0 0 auto;
+  color: var(--ink-4);
+  font-size: 16px;
+}
+
+.ob-checklist-entry-item[data-done="true"] .ob-checklist-entry-label { color: var(--ink-3); }
+
 @keyframes ob-fade {
   from { opacity: 0; }
   to { opacity: 1; }

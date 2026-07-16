@@ -131,6 +131,10 @@ export type OnboardingChecklistItem = {
   requiresSignals?: DerivedSignal[];
   subtitle?: string;
   opensChapter?: boolean;
+  // Historical copy shown on the entry ROW once complete (agent-at-work) — past tense,
+  // still resumable. Falls back to label/subtitle when unset (e.g. the member entry).
+  doneLabel?: string;
+  doneSubtitle?: string;
 };
 
 // ---- Live context ------------------------------------------------------------
@@ -393,6 +397,8 @@ export const CHECKLIST_ITEMS: OnboardingChecklistItem[] = [
     completion: { via: "derived", signal: "agent-at-work" },
     subtitle: "Connect an environment, create an agent, put it to work",
     opensChapter: true,
+    doneLabel: "You've started working with an agent",
+    doneSubtitle: "Reopen to add more or hand over new work",
   },
   {
     id: "work-with-agent-entry",

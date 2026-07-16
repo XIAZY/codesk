@@ -72,6 +72,22 @@ export function toOnboardingStep(node: OnboardingNode): OnboardingStep {
   };
 }
 
+// ---- Shared "work with an agent" destination (#56 §2e) -----------------------
+
+// One rule for BOTH the owner/admin chapter step 3 CTA and the member work card so the
+// two surfaces can't diverge (Anton/Juan): exactly 1 agent → that agent's Start run
+// surface directly (no list hop); 2+ → the Agents list. The label is state-dependent for
+// the same reason — a static label would hide the materially different outcome. 0 agents
+// can't reach here (the card requires agent-exists), but falls back to the list safely.
+export type AgentWorkDestination =
+  | { label: "Start a run"; kind: "start-run"; agentId: string }
+  | { label: "Choose an agent"; kind: "agents-list" };
+
+export function resolveAgentWorkDestination(agents: readonly { id: string }[]): AgentWorkDestination {
+  if (agents.length === 1) return { label: "Start a run", kind: "start-run", agentId: agents[0].id };
+  return { label: "Choose an agent", kind: "agents-list" };
+}
+
 // ---- Persistence keys (plan §4.3/§6.1) ---------------------------------------
 
 // Every durable value is keyed PER USER: account flags by accountId (they follow the

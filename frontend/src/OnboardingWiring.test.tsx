@@ -283,3 +283,48 @@ describe("useOnboardingController — chapter open/close + card exposure (#56)",
     expect(result.current.chapterTotal).toBe(1);
   });
 });
+
+describe("chapter integration in WorkspaceApp (#56 render head)", () => {
+  const guideDone = () =>
+    window.localStorage.setItem(
+      "codesk.onboarding.account.account_1.ws.workspace_1.flags",
+      JSON.stringify(["seen:threads-intro@v1"]),
+    );
+
+  it("owner: the single entry shows derived '1 of 3' and opens the chapter to the live next step", () => {
+    guideDone();
+    mocks.workspace = workspaceState({ currentMembershipRole: "owner" });
+    mocks.documents = [{ id: "doc_1", path: "P.md", title: "P.md" }];
+    renderWorkspace();
+
+    // ONE "Add an AI teammate" entry with a derived badge — not the old three rows.
+    expect(screen.getByText("Add an AI teammate")).toBeTruthy();
+    expect(screen.getByText("1 of 3")).toBeTruthy();
+    expect(screen.queryByText("Connect a local environment")).toBeNull(); // chapter starts closed
+
+    fireEvent.click(screen.getByText("Add an AI teammate"));
+    // Opens to the true next step (no environment yet → connect), never a spotlight.
+    expect(screen.getByText("Connect a local environment")).toBeTruthy();
+    expect(screen.getByText("Connect environment")).toBeTruthy();
+    expect(screen.getByText("Step 1 of 3")).toBeTruthy();
+
+    // "Not now" closes it and leaves the checklist entry intact (dismiss only).
+    fireEvent.click(screen.getByText("Not now"));
+    expect(screen.queryByText("Connect a local environment")).toBeNull();
+    expect(screen.getByText("Add an AI teammate")).toBeTruthy();
+  });
+
+  it("member with an agent: the entry opens the single work card with the live 'Start a run' label", () => {
+    guideDone();
+    mocks.workspace = workspaceState({ agents: [agent("agent_1")] }); // no role → member
+    mocks.documents = [{ id: "doc_1", path: "P.md", title: "P.md" }];
+    renderWorkspace();
+
+    expect(screen.getByText("Work with an agent")).toBeTruthy();
+    fireEvent.click(screen.getByText("Work with an agent"));
+    expect(screen.getByText("Put an agent to work")).toBeTruthy();
+    // Exactly one agent → the CTA resolves to "Start a run" (direct), not a static label.
+    expect(screen.getByText("Start a run")).toBeTruthy();
+    expect(screen.getByText(/No setup needed/)).toBeTruthy();
+  });
+});
