@@ -134,6 +134,16 @@ func collapseCoincidentalReuse(dmp *diffmatchpatch.DiffMatchPatch, diffs []diffm
 	// Iterate to a FIXPOINT: folding one equality into delete+insert grows the
 	// neighbouring edit groups, which can newly dominate an equality that a single
 	// pass already walked past. Repeat until a pass folds nothing.
+	//
+	// Termination is guaranteed by a strict decreasing measure, not merely observed on a
+	// corpus: every round that folds anything removes at least one INTERIOR equality
+	// (turning it into delete+insert), and DiffCleanupMerge can only factor common text
+	// onto the OUTER boundaries of a merged change group — it never manufactures a NEW
+	// interior equality. So the count of interior equalities strictly decreases each
+	// folding round and is bounded below by zero. (Boundary prefix/suffix equalities are
+	// exempt precisely because folding them lacks this monotone reduction: their affix is
+	// re-extracted, so the count would not fall — that is the boundary-exemption's reason,
+	// verified by TestCollapseInteriorEqualityCountStrictlyDecreases.)
 	for {
 		out := make([]diffmatchpatch.Diff, 0, len(diffs)+2)
 		folded := false

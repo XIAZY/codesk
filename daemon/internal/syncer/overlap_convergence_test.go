@@ -368,3 +368,73 @@ func diffText(diffs []diffmatchpatch.Diff) string {
 	}
 	return b.String()
 }
+
+// countInteriorEqualities counts equality ops that are neither the first nor last op
+// (i.e. genuine interior runs, the ones the collapse can fold). This is the strict
+// decreasing measure that proves the fixpoint terminates.
+func countInteriorEqualities(diffs []diffmatchpatch.Diff) int {
+	n := 0
+	for i, d := range diffs {
+		if d.Type == diffmatchpatch.DiffEqual && i > 0 && i < len(diffs)-1 {
+			n++
+		}
+	}
+	return n
+}
+
+// oneCollapseRound performs exactly one folding round + normalization (the loop body of
+// collapseCoincidentalReuse), returning the result and whether it folded anything.
+func oneCollapseRound(dmp *diffmatchpatch.DiffMatchPatch, diffs []diffmatchpatch.Diff) ([]diffmatchpatch.Diff, bool) {
+	out := make([]diffmatchpatch.Diff, 0, len(diffs)+2)
+	folded := false
+	for i, d := range diffs {
+		if d.Type != diffmatchpatch.DiffEqual {
+			out = append(out, d)
+			continue
+		}
+		l := maxAdjacentEditLen(diffs, i, -1)
+		r := maxAdjacentEditLen(diffs, i, +1)
+		e := utf16Length(d.Text)
+		if l == 0 || r == 0 || e > l || e > r {
+			out = append(out, d)
+			continue
+		}
+		out = append(out,
+			diffmatchpatch.Diff{Type: diffmatchpatch.DiffDelete, Text: d.Text},
+			diffmatchpatch.Diff{Type: diffmatchpatch.DiffInsert, Text: d.Text},
+		)
+		folded = true
+	}
+	return dmp.DiffCleanupMerge(out), folded
+}
+
+// TestCollapseInteriorEqualityCountStrictlyDecreases proves the structural termination
+// measure: every round that folds anything strictly reduces the interior-equality
+// count (DiffCleanupMerge only factors onto OUTER boundaries, never manufacturing a new
+// interior equality), so the pass reaches its fixpoint in a bounded number of rounds.
+func TestCollapseInteriorEqualityCountStrictlyDecreases(t *testing.T) {
+	dmp := diffmatchpatch.New()
+	corpus := []string{"shared\n|local rewrite\n", "abcxxx\n|xxxdef\n",
+		"AyxxCCCC\n|yBxxDDDD\n", "the cat sat\n|the dog sat\n",
+		"AAAA keep BBBB\n|XXXX keep YYYY\n", "ZZ😀ZZ\n|AAAA😀BBBB\n"}
+	for _, pair := range corpus {
+		parts := strings.SplitN(pair, "|", 2)
+		diffs := dmp.DiffCleanupMerge(dmp.DiffMain(parts[0], parts[1], false))
+		prev := countInteriorEqualities(diffs)
+		for round := 0; round < 64; round++ {
+			next, folded := oneCollapseRound(dmp, diffs)
+			if !folded {
+				break // fixpoint reached
+			}
+			cur := countInteriorEqualities(next)
+			if cur >= prev {
+				t.Fatalf("%q: interior-equality count did not strictly decrease on a folding round: %d -> %d", pair, prev, cur)
+			}
+			prev = cur
+			diffs = next
+			if round == 63 {
+				t.Fatalf("%q: did not reach fixpoint within the interior-count bound", pair)
+			}
+		}
+	}
+}
