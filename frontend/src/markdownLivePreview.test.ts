@@ -78,9 +78,9 @@ describe("markdown live preview", () => {
     expect(tokens).toContainEqual(expect.objectContaining({ kind: "image-alt" }));
     expect(tokens).toContainEqual(expect.objectContaining({ kind: "image-syntax" }));
     expect(tokens).toContainEqual(expect.objectContaining({ kind: "quote-marker" }));
-    expect(tokens).toContainEqual(expect.objectContaining({ kind: "list-marker", marker: "-", taskLine: true, ordered: false }));
+    expect(tokens).toContainEqual(expect.objectContaining({ kind: "list-marker", taskLine: true, ordered: false }));
     expect(tokens).toContainEqual(expect.objectContaining({ kind: "task-marker", checked: true }));
-    expect(tokens).toContainEqual(expect.objectContaining({ kind: "list-marker", marker: "1.", taskLine: false, ordered: true }));
+    expect(tokens).toContainEqual(expect.objectContaining({ kind: "list-marker", taskLine: false, ordered: true }));
     expect(tokens).toContainEqual(expect.objectContaining({ kind: "code-fence" }));
     expect(tokens).toContainEqual(expect.objectContaining({ kind: "table" }));
   });
@@ -152,13 +152,48 @@ describe("markdown live preview", () => {
     view.destroy();
   });
 
-  it("renders inactive unordered and ordered list markers without changing source text", () => {
-    const view = editor("- plain item\n1. ordered item\n2) ordered paren", EditorSelection.cursor(0));
+  it("renders an inactive unordered marker in place (no replace) so the source keeps its width", () => {
+    // Cursor on line 1 leaves line 2 inactive. A 2-line doc keeps the tested row
+    // inside jsdom's rendered viewport (which has no real height).
+    const view = editor("intro\n- bullet item", EditorSelection.cursor(0));
 
-    const listMarkers = Array.from(view.dom.querySelectorAll<HTMLElement>(".cm-md-list-widget")).map((item) => item.textContent);
-    expect(listMarkers).toEqual(["1.", "2)"]);
-    expect(view.state.doc.toString()).toBe("- plain item\n1. ordered item\n2) ordered paren");
+    // The dash is never replaced — it stays in the DOM (painted transparent, with
+    // "•" drawn as a CSS overlay), so it keeps its exact width and the row can't
+    // shift horizontally when clicked into edit view.
+    const bullets = Array.from(view.dom.querySelectorAll<HTMLElement>(".cm-md-list-bullet")).map((item) => item.textContent);
+    expect(bullets).toEqual(["-"]);
+    // No replace widget remains for the bullet marker.
+    expect(view.dom.querySelectorAll(".cm-md-list-widget").length).toBe(0);
+    expect(view.state.doc.toString()).toBe("intro\n- bullet item");
 
     view.destroy();
+  });
+
+  it("renders an inactive ordered marker in place, showing the real source number", () => {
+    const view = editor("intro\n1. ordered item", EditorSelection.cursor(0));
+
+    // Ordered marker keeps the real "1." in place (just restyled), so nothing moves
+    // between rendered and edit views.
+    const numbers = Array.from(view.dom.querySelectorAll<HTMLElement>(".cm-md-list-number")).map((item) => item.textContent);
+    expect(numbers).toEqual(["1."]);
+    expect(view.dom.querySelectorAll(".cm-md-list-widget").length).toBe(0);
+    expect(view.state.doc.toString()).toBe("intro\n1. ordered item");
+
+    view.destroy();
+  });
+
+  it("keeps the heading '#' marker rendered in both states so the line doesn't shift", () => {
+    // Inactive heading (cursor on the intro line): "# " is muted, never collapsed/replaced.
+    const inactive = editor("intro\n# Heading", EditorSelection.cursor(0));
+    expect(inactive.dom.querySelector<HTMLElement>(".cm-md-heading-marker.cm-md-muted-marker")?.textContent).toBe("# ");
+    expect(inactive.dom.querySelectorAll(".cm-md-hidden-marker").length).toBe(0);
+    expect(inactive.state.doc.toString()).toBe("intro\n# Heading");
+    inactive.destroy();
+
+    // Active heading (cursor on the heading line): the same "# " shows the full-ink active
+    // style — same width, only the colour changes, so the text keeps its position.
+    const active = editor("# Heading", EditorSelection.cursor(3));
+    expect(active.dom.querySelector<HTMLElement>(".cm-md-heading-marker.cm-md-heading-active")?.textContent).toBe("# ");
+    active.destroy();
   });
 });

@@ -52,7 +52,6 @@ export type MarkdownPreviewToken = {
   active: boolean;
   level?: number;
   checked?: boolean;
-  marker?: string;
   ordered?: boolean;
   taskLine?: boolean;
 };
@@ -128,7 +127,7 @@ function buildMarkdownPreviewDecorations(view: EditorView): DecorationSet {
         decorations.push(Decoration.line({ class: `cm-md-heading cm-md-heading-${token.level ?? 1}` }).range(lineStart(view.state, token.from)));
         break;
       case "heading-marker":
-        decorations.push(markerDecoration(token, "cm-md-heading-marker"));
+        decorations.push(headingMarkerDecoration(token));
         break;
       case "strong":
         decorations.push(Decoration.mark({ class: "cm-md-strong" }).range(token.from, token.to));
@@ -215,6 +214,18 @@ function buildMarkdownPreviewDecorations(view: EditorView): DecorationSet {
   return Decoration.set(decorations, true);
 }
 
+// Heading "# " markers are NEVER collapsed — kept rendered at full width in both
+// states so the heading line can't shift left/right when it's clicked into edit view
+// (same never-replace-the-source construction as the list bullets). Grey/muted when the
+// line is inactive, the normal marker style when active; only the colour changes, so the
+// width is identical and the text stays put.
+function headingMarkerDecoration(token: MarkdownPreviewToken) {
+  // Active (editing) → full-ink black; inactive → grey/muted. Same size/family in both
+  // (see .cm-md-heading-active / .cm-md-muted-marker) so only the colour changes.
+  const state = token.active ? "cm-md-heading-active" : "cm-md-muted-marker";
+  return Decoration.mark({ class: `cm-md-heading-marker ${state}` }).range(token.from, token.to);
+}
+
 function markerDecoration(token: MarkdownPreviewToken, className: string) {
   if (!token.active) {
     return Decoration.replace({}).range(token.from, token.to);
@@ -229,8 +240,13 @@ function listMarkerDecoration(token: MarkdownPreviewToken) {
   if (token.taskLine) {
     return Decoration.replace({});
   }
-  return Decoration.replace({
-    widget: new ListMarkerWidget(token.marker ?? "", Boolean(token.ordered)),
+  // Keep the source marker in place (never replace it) so it always occupies its
+  // natural width — the rendered form takes exactly the same space as the raw
+  // "- "/"1." and the line cannot shift horizontally when the row is clicked.
+  // Unordered: hide the dash and paint "•" as an out-of-flow overlay. Ordered:
+  // show the real number, just styled.
+  return Decoration.mark({
+    class: token.ordered ? "cm-md-list-number" : "cm-md-list-bullet",
   });
 }
 
@@ -241,30 +257,6 @@ function taskMarkerDecoration(token: MarkdownPreviewToken) {
   return Decoration.replace({
     widget: new TaskCheckboxWidget(token.from, token.to, Boolean(token.checked)),
   });
-}
-
-class ListMarkerWidget extends WidgetType {
-  constructor(
-    private marker: string,
-    private ordered: boolean
-  ) {
-    super();
-  }
-
-  eq(other: ListMarkerWidget) {
-    return this.marker === other.marker && this.ordered === other.ordered;
-  }
-
-  toDOM() {
-    const span = document.createElement("span");
-    span.className = this.ordered ? "cm-md-list-widget cm-md-list-widget-ordered" : "cm-md-list-widget";
-    span.textContent = this.ordered ? this.marker : "•";
-    return span;
-  }
-
-  ignoreEvent() {
-    return false;
-  }
 }
 
 class TaskCheckboxWidget extends WidgetType {
@@ -403,10 +395,9 @@ export function collectMarkdownPreviewTokens(
         if (node.name === "ListMark") {
           const line = state.doc.lineAt(node.from);
           const lineText = line.text;
-          const marker = source;
-          const ordered = /^\d+[.)]$/.test(marker);
+          const ordered = /^\d+[.)]$/.test(source);
           const taskLine = hasTaskMarkerAfterListMarker(lineText, node.from - line.from, node.to - line.from);
-          tokens.push({ kind: "list-marker", from: node.from, to: node.to, active, marker, ordered, taskLine });
+          tokens.push({ kind: "list-marker", from: node.from, to: node.to, active, ordered, taskLine });
           return;
         }
 
@@ -648,7 +639,7 @@ function forEachSelectedLine(state: EditorState, callback: (line: { from: number
 
 const markdownPreviewTheme = EditorView.theme({
   ".cm-md-heading": {
-    fontFamily: "var(--display)",
+    fontFamily: "var(--editor-font)",
     color: "var(--ink)",
     fontWeight: "700",
   },
@@ -705,7 +696,22 @@ const markdownPreviewTheme = EditorView.theme({
   },
   ".cm-md-visible-marker": {
     color: "rgba(91, 76, 58, 0.5)",
-    fontFamily: "var(--sans)",
+    fontFamily: "var(--editor-font)",
+    fontSize: "0.88em",
+  },
+  // Heading "# " when the line is NOT focused: grey and quiet, but still rendered at the
+  // exact same size/family as the active marker so the width is identical — the line
+  // doesn't move when clicked. (Same width discipline as the list bullets.)
+  ".cm-md-muted-marker": {
+    color: "rgba(120, 114, 108, 0.5)",
+    fontFamily: "var(--editor-font)",
+    fontSize: "0.88em",
+  },
+  // Heading "# " when the line IS focused (editing): full-ink black. Same size/family as
+  // the muted state above, so the marker width is identical and the title doesn't move.
+  ".cm-md-heading-active": {
+    color: "var(--ink)",
+    fontFamily: "var(--editor-font)",
     fontSize: "0.88em",
   },
   ".cm-md-hidden-marker": {
@@ -715,19 +721,29 @@ const markdownPreviewTheme = EditorView.theme({
     color: "var(--accent)",
     fontWeight: "700",
   },
-  ".cm-md-list-widget": {
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    minWidth: "1.2em",
-    marginRight: "0.36em",
+  // Unordered bullet: the source dash stays in place but is painted transparent so
+  // it keeps its exact width; "•" is drawn as an out-of-flow overlay. Result: the
+  // rendered bullet occupies the same space as the raw "- " and the line does not
+  // shift when the row is clicked into edit view.
+  ".cm-md-list-bullet": {
+    color: "transparent",
+    position: "relative",
+  },
+  ".cm-md-list-bullet::before": {
+    content: '"\\2022"',
+    position: "absolute",
+    left: "0",
+    top: "50%",
+    transform: "translateY(-50%)",
     color: "var(--accent-700)",
     fontWeight: "800",
+    pointerEvents: "none",
   },
-  ".cm-md-list-widget-ordered": {
-    justifyContent: "flex-end",
-    minWidth: "1.7em",
-    fontVariantNumeric: "tabular-nums",
+  // Ordered marker: the real "1."/"2)" stays in place (identical to the raw form),
+  // only recolored — so nothing moves between rendered and edit views.
+  ".cm-md-list-number": {
+    color: "var(--accent-700)",
+    fontWeight: "700",
   },
   ".cm-md-quote-line": {
     borderLeft: "3px solid rgba(215, 138, 75, 0.5)",
@@ -766,7 +782,7 @@ const markdownPreviewTheme = EditorView.theme({
   },
   ".cm-md-table-line": {
     background: "rgba(38, 82, 68, 0.045)",
-    fontFamily: "var(--sans)",
+    fontFamily: "var(--editor-font)",
   },
   ".cm-md-table-marker": {
     color: "rgba(91, 76, 58, 0.45)",

@@ -96,14 +96,14 @@ const editorTheme = EditorView.theme({
     width: "100%",
     background: "transparent",
     color: "var(--ink)",
-    fontFamily: "var(--sans)",
+    fontFamily: "var(--editor-font)",
     fontSize: "15px",
   },
   ".cm-scroller": {
     height: "100%",
     minHeight: "0",
     overflow: "auto",
-    fontFamily: "var(--sans)",
+    fontFamily: "var(--editor-font)",
     lineHeight: "1.72",
   },
   ".cm-selectionBackground": {

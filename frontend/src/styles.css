@@ -45,6 +45,8 @@
   --display: "Newsreader", Georgia, serif;
   --sans: "Archivo", ui-sans-serif, system-ui, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* Markdown editor: Helvetica Neue everywhere (no serif), code stays mono. */
+  --editor-font: "Helvetica Neue", Helvetica, Arial, sans-serif;
   --font-sans: var(--sans);
   --r-1: 8px;
   --r-2: 10px;
