@@ -78,9 +78,9 @@ describe("markdown live preview", () => {
     expect(tokens).toContainEqual(expect.objectContaining({ kind: "image-alt" }));
     expect(tokens).toContainEqual(expect.objectContaining({ kind: "image-syntax" }));
     expect(tokens).toContainEqual(expect.objectContaining({ kind: "quote-marker" }));
-    expect(tokens).toContainEqual(expect.objectContaining({ kind: "list-marker", marker: "-", taskLine: true, ordered: false }));
+    expect(tokens).toContainEqual(expect.objectContaining({ kind: "list-marker", taskLine: true, ordered: false }));
     expect(tokens).toContainEqual(expect.objectContaining({ kind: "task-marker", checked: true }));
-    expect(tokens).toContainEqual(expect.objectContaining({ kind: "list-marker", marker: "1.", taskLine: false, ordered: true }));
+    expect(tokens).toContainEqual(expect.objectContaining({ kind: "list-marker", taskLine: false, ordered: true }));
     expect(tokens).toContainEqual(expect.objectContaining({ kind: "code-fence" }));
     expect(tokens).toContainEqual(expect.objectContaining({ kind: "table" }));
   });

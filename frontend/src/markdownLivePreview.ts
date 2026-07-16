@@ -52,7 +52,6 @@ export type MarkdownPreviewToken = {
   active: boolean;
   level?: number;
   checked?: boolean;
-  marker?: string;
   ordered?: boolean;
   taskLine?: boolean;
 };
@@ -384,10 +383,9 @@ export function collectMarkdownPreviewTokens(
         if (node.name === "ListMark") {
           const line = state.doc.lineAt(node.from);
           const lineText = line.text;
-          const marker = source;
-          const ordered = /^\d+[.)]$/.test(marker);
+          const ordered = /^\d+[.)]$/.test(source);
           const taskLine = hasTaskMarkerAfterListMarker(lineText, node.from - line.from, node.to - line.from);
-          tokens.push({ kind: "list-marker", from: node.from, to: node.to, active, marker, ordered, taskLine });
+          tokens.push({ kind: "list-marker", from: node.from, to: node.to, active, ordered, taskLine });
           return;
         }
 
