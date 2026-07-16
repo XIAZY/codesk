@@ -12,6 +12,8 @@ import {
   guideSteps,
   activeNode,
   activeTip,
+  activeChapter,
+  chapterSteps,
   isComplete,
   checklistProgress,
   type OnboardingNode,
@@ -135,6 +137,14 @@ export function useOnboardingController(input: OnboardingControllerInput) {
     return node ? toOnboardingStep(node) : null;
   }, [ctx]);
 
+  // The opt-in chapter card for the current role + live state (true next step / done card
+  // / null), plus its position among the role's steps for the step dots + entry badge.
+  const chapterNode = useMemo(() => activeChapter(ctx), [ctx]);
+  const chapter = useMemo(() => (chapterNode ? toOnboardingStep(chapterNode) : null), [chapterNode]);
+  const chapterStepsList = useMemo(() => chapterSteps(ctx), [ctx]);
+  const chapterTotal = chapterStepsList.length;
+  const chapterStepIndex = chapterNode ? chapterStepsList.findIndex((s) => s.id === chapterNode.id) : -1;
+
   const hook = useOnboarding({
     steps,
     completedIds,
@@ -144,6 +154,9 @@ export function useOnboardingController(input: OnboardingControllerInput) {
     checklistDismissedKey: keys.checklistDismissedKey,
     activeSpotlightId,
     tip,
+    chapter,
+    chapterStepIndex,
+    chapterTotal,
     enabled,
   });
 

@@ -12,6 +12,12 @@ type UseOnboardingOptions = {
   checklistDismissedKey: string;
   activeSpotlightId?: string | null;
   tip?: OnboardingStep | null;
+  // The current "Add an AI teammate" chapter card for this role + live state (the engine's
+  // activeChapter, already resolved to the true next step / done card / null), plus its
+  // position for the step dots. The hook only owns whether the chapter is OPEN.
+  chapter?: OnboardingStep | null;
+  chapterStepIndex?: number; // 0-based index of the active step among the chapter's steps
+  chapterTotal?: number; // number of steps in the chapter for this role
   enabled?: boolean;
 };
 
@@ -21,6 +27,11 @@ type SessionState = {
   // track the engine frontier. Never persisted; durable completion is never moved by it.
   revisit: number | null;
   skipped: boolean;
+  // Whether the opt-in "Add an AI teammate" chapter is currently open. Session-only: the
+  // user opens it deliberately (checklist entry) and "Not now"/Close closes it; reopening
+  // resumes from live state (the engine picks the true next card). Never persisted, never
+  // moves completion — completion is live-derived (agent-at-work).
+  chapterOpen: boolean;
 };
 
 function storedTrue(key: string): boolean {
@@ -38,7 +49,7 @@ function persistTrue(key: string) {
 }
 
 function newSession(key: string): SessionState {
-  return { key, revisit: null, skipped: false };
+  return { key, revisit: null, skipped: false, chapterOpen: false };
 }
 
 export function useOnboarding({
@@ -50,6 +61,9 @@ export function useOnboarding({
   checklistDismissedKey,
   activeSpotlightId,
   tip = null,
+  chapter = null,
+  chapterStepIndex = 0,
+  chapterTotal = 0,
   enabled = true,
 }: UseOnboardingOptions) {
   const [sessionState, setSessionState] = useState<SessionState>(() => newSession(scopeKey));
@@ -149,6 +163,20 @@ export function useOnboarding({
     setChecklistState({ key: checklistDismissedKey, value: true });
   }, [checklistDismissedKey]);
 
+  // Opening/closing the opt-in chapter is session-only. "Not now"/Close closes it without
+  // recording any completion (Anton: dismiss only, never advance/complete) — completion is
+  // live-derived, so reopening resumes from the true next card.
+  const openChapter = useCallback(() => {
+    updateSession((current) => ({ ...current, chapterOpen: true }));
+  }, [updateSession]);
+  const closeChapter = useCallback(() => {
+    updateSession((current) => ({ ...current, chapterOpen: false }));
+  }, [updateSession]);
+
+  // The chapter card to render right now: only when enabled, opened this session, and the
+  // engine has a card for this role+state (null e.g. for a member with no agents).
+  const chapterActive = enabled && session.chapterOpen ? chapter ?? null : null;
+
   return {
     active,
     // Presentation binds to the ORIGINAL guide position + total step count, never the
@@ -164,5 +192,13 @@ export function useOnboarding({
     recordedEvents: events,
     checklistDismissed,
     dismissChecklist,
+    // Chapter ("Add an AI teammate"): the card to render when open, its step position for
+    // the dots, whether it's open, and the open/close handlers (checklist entry → open).
+    chapterActive,
+    chapterStepIndex,
+    chapterTotal,
+    chapterOpen: session.chapterOpen,
+    openChapter,
+    closeChapter,
   };
 }

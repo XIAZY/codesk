@@ -80,8 +80,10 @@ describe("P1->P2 adapter (toOnboardingStep) — the seam", () => {
       expect(step.scope).toBe(node.scope);
       expect(step.presentation).toBe(node.presentation);
       expect(step.targetOnboardingId).toBe(node.targetOnboardingId);
+      expect(step.eyebrow).toBe(node.eyebrow);
       expect(step.title).toBe(node.title);
       expect(step.body).toBe(node.body);
+      expect(step.caption).toBe(node.caption);
       expect(step.primaryAction).toEqual(node.primaryAction);
       expect(step.secondaryAction).toEqual(node.secondaryAction);
       expect(step.skippable).toBe(node.skippable);

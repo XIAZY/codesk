@@ -6,7 +6,7 @@
 // fires on a real invite. The pure derivation/adapter is covered in
 // onboarding.test.ts / onboardingController.test.ts; this pins the App.tsx glue.
 
-import { cleanup, render, renderHook, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, cleanup, render, renderHook, screen, fireEvent, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceApp, MembersAndInvite, shouldRenderOnboardingChecklist } from "./App";
 import { useOnboardingController } from "./onboardingController";
@@ -228,5 +228,58 @@ describe("useOnboardingController scope isolation (per user × workspace)", () =
     // NOT suppressed by A's account flag.
     rerender({ accountId: "acctB" });
     expect(result.current.active?.id).toBe("tip-first-selection");
+  });
+});
+
+describe("useOnboardingController — chapter open/close + card exposure (#56)", () => {
+  const chapterBase = {
+    enabled: true,
+    accountId: "acct_c",
+    workspaceId: "ws_c",
+    route: "home",
+    selectionActive: false,
+    documentCount: 1,
+    watchedDocumentCount: 0,
+    nowMs: 0,
+  };
+
+  it("owner: closed by default, opens to step 1, and 'Not now'/Close closes without completing", () => {
+    const { result } = renderHook(() =>
+      useOnboardingController({ ...chapterBase, roles: ["owner"], workspaceState: workspaceState() }),
+    );
+    // Closed by default — no card rendered, though the shape (3 owner/admin steps) is known.
+    expect(result.current.chapterActive).toBeNull();
+    expect(result.current.chapterTotal).toBe(3);
+
+    act(() => result.current.openChapter());
+    expect(result.current.chapterActive?.id).toBe("add-teammate-connect");
+    expect(result.current.chapterStepIndex).toBe(0);
+
+    // Close dismisses only — no completion recorded, so reopening resumes from live state.
+    act(() => result.current.closeChapter());
+    expect(result.current.chapterActive).toBeNull();
+    act(() => result.current.openChapter());
+    expect(result.current.chapterActive?.id).toBe("add-teammate-connect");
+  });
+
+  it("member with no agents: opening yields no card (member+none is absent)", () => {
+    const { result } = renderHook(() =>
+      useOnboardingController({ ...chapterBase, roles: ["member"], workspaceState: workspaceState() }),
+    );
+    act(() => result.current.openChapter());
+    expect(result.current.chapterActive).toBeNull();
+  });
+
+  it("member with an agent: the chapter is the single 'work with an agent' card", () => {
+    const { result } = renderHook(() =>
+      useOnboardingController({
+        ...chapterBase,
+        roles: ["member"],
+        workspaceState: workspaceState({ agents: [agent("a1")] }),
+      }),
+    );
+    act(() => result.current.openChapter());
+    expect(result.current.chapterActive?.id).toBe("add-teammate-member");
+    expect(result.current.chapterTotal).toBe(1);
   });
 });
