@@ -271,11 +271,12 @@ describe("Add an AI teammate chapter (#56)", () => {
   });
 
   it("member never sees connect/create — only the work card, and only once an agent exists", () => {
-    // A member sees exactly one chapter node, the work card.
-    const memberChapterIds = eligibleNodes(ctx({ roles: member }))
-      .filter((n) => n.presentation === "chapter")
-      .map((n) => n.id);
-    expect(memberChapterIds).toEqual(["add-teammate-member"]);
+    // Presentation: a member's chapter is exactly the single work card (audience-filtered).
+    expect(chapterSteps(ctx({ roles: member })).map((n) => n.id)).toEqual(["add-teammate-member"]);
+    // Authz: the owner/admin-gated cards are never even eligible for a member.
+    const memberEligibleIds = eligibleNodes(ctx({ roles: member })).map((n) => n.id);
+    expect(memberEligibleIds).not.toContain("add-teammate-connect");
+    expect(memberEligibleIds).not.toContain("add-teammate-create");
 
     // No agents → nothing to show, no entry offered (2d).
     expect(activeChapter(ctx({ roles: member }))).toBeNull();
@@ -288,6 +289,33 @@ describe("Add an AI teammate chapter (#56)", () => {
 
   it("member: once an agent is at work, the chapter is complete — nothing to show", () => {
     expect(activeChapter(ctx({ roles: member, signals: atWork }))).toBeNull();
+  });
+
+  it("eligibleRoles stays authz-pure; the owner/member split lives in `audience`", () => {
+    const byId = (id: string) => NODES.find((n) => n.id === id)!;
+    // Only connect/create are backend-gated (ManageDaemons/ManageAgents).
+    expect(byId("add-teammate-connect").eligibleRoles).toEqual(["owner", "admin"]);
+    expect(byId("add-teammate-create").eligibleRoles).toEqual(["owner", "admin"]);
+    // Start-run / close are all-roles — eligibleRoles empty; the variant is in `audience`.
+    expect(byId("add-teammate-work").eligibleRoles).toEqual([]);
+    expect(byId("add-teammate-done").eligibleRoles).toEqual([]);
+    expect(byId("add-teammate-member").eligibleRoles).toEqual([]);
+    expect(byId("add-teammate-work").audience).toBe("owner-admin");
+    expect(byId("add-teammate-member").audience).toBe("member");
+  });
+
+  it("complementarity: given an agent exists, every role sees exactly ONE work surface", () => {
+    // The work action (start-run) is all-roles; each backend-permitted role lands on exactly
+    // one surface — owner/admin on step 3, member on the work card — never both, never neither.
+    const ownerCard = activeChapter(ctx({ roles: owner, signals: withAgent }));
+    const adminCard = activeChapter(ctx({ roles: ["admin"], signals: withAgent }));
+    const memberCard = activeChapter(ctx({ roles: member, signals: withAgent }));
+    expect(ownerCard?.id).toBe("add-teammate-work");
+    expect(adminCard?.id).toBe("add-teammate-work");
+    expect(memberCard?.id).toBe("add-teammate-member");
+    // Both surfaces resolve their CTA to the same start-run action.
+    expect(ownerCard?.primaryAction?.event).toBe("open-agent-work");
+    expect(memberCard?.primaryAction?.event).toBe("open-agent-work");
   });
 
   it("chapter cards never auto-surface as a guide spotlight or a tip", () => {

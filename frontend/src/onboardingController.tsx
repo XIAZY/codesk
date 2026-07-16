@@ -62,6 +62,7 @@ export function toOnboardingStep(node: OnboardingNode): OnboardingStep {
     eyebrow: node.eyebrow,
     title: node.title,
     body: node.body,
+    caption: node.caption,
     primaryAction: node.primaryAction,
     secondaryAction: node.secondaryAction,
     skippable: node.skippable,

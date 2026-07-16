@@ -31,6 +31,7 @@ export type OnboardingStep = {
   eyebrow?: string; // small label above the title (chapter cards)
   title: string;
   body: string;
+  caption?: string; // reassurance line, not an action (chapter member card)
   primaryAction?: OnboardingAction;
   secondaryAction?: OnboardingAction;
   skippable: boolean;

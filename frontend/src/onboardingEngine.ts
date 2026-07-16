@@ -31,8 +31,17 @@ export type OnboardingEventKey = (typeof ONBOARDING_EVENT_KEYS)[number];
 export type OnboardingScope = "account" | "workspace";
 
 // The user role a node is scoped to. Empty `eligibleRoles` means "all roles" — the
-// node is removed (not disabled) for anyone outside a non-empty list.
+// node is removed (not disabled) for anyone outside a non-empty list. `eligibleRoles`
+// is AUTHZ-PURE (who the backend permits to perform the node's action) — never a
+// presentation-variant switch. The #57 config↔authz guard depends on that meaning.
 export type OnboardingRole = "owner" | "admin" | "member";
+
+// Which role's VARIANT of a chapter card this is — a presentation dimension, distinct
+// from `eligibleRoles` (authz). The owner/admin work step and the member work card
+// both resolve to start-run (all-roles authz) but are different surfaces; `audience`
+// picks between them. A deliberately different shape from OnboardingRole[] so the
+// config never reads as if it were authz. `undefined` = not a variant (any audience).
+export type OnboardingAudience = "owner-admin" | "member";
 
 export type OnboardingTrigger =
   | { type: "workspace-empty" } // no documents yet
@@ -84,7 +93,10 @@ export type OnboardingNode = {
   version: number; // bump to re-show after a redesign
   scope: OnboardingScope;
   presentation: OnboardingPresentation;
-  eligibleRoles: OnboardingRole[]; // empty = all
+  eligibleRoles: OnboardingRole[]; // empty = all — AUTHZ-PURE (see OnboardingRole)
+  // Presentation variant (which role's version of a chapter card) — NOT authz. Chapter
+  // cards use this to pick owner/admin vs member surfaces without lying via eligibleRoles.
+  audience?: OnboardingAudience;
   trigger: OnboardingTrigger;
   // Extra live-signal preconditions ANDed into the trigger — the node is inert until
   // ALL are true (e.g. the watchers hint needs an agent to exist; the member chapter
@@ -98,6 +110,7 @@ export type OnboardingNode = {
   title: string;
   body: string;
   eyebrow?: string; // small label above the title (chapter cards: "ADD AN AI TEAMMATE · OPTIONAL")
+  caption?: string; // reassurance line, not an action (e.g. member card "No setup needed")
   primaryAction?: OnboardingAction;
   secondaryAction?: OnboardingAction;
   skippable: boolean;
@@ -245,16 +258,22 @@ export const NODES: OnboardingNode[] = [
   // owner/admin path is a 3-step sequence (connect → create → work) that advances on
   // live signals + a terminal "done" card; a member gets a single "work with an agent"
   // card only once an agent exists. Completion is live-derived (agent-at-work) — no new
-  // stored flag. connect/create are eligibleRoles owner/admin (ManageDaemons/ManageAgents
-  // — the #57 permission truth); the work step + member card route to start-run, which
-  // is all-roles, so their role gating is variant-selection, not permission (see the
-  // chapter honesty tests). CTAs open the real controls via the three open-* actions.
+  // stored flag.
+  //
+  // eligibleRoles vs audience (ruled by Anton/Tom/Juan, #56): `eligibleRoles` is
+  // AUTHZ-PURE — connect/create carry ["owner","admin"] because the backend genuinely
+  // gates them (ManageDaemons/ManageAgents); the work step, done card, and member card
+  // carry [] because their action (start-run / close) is all-roles. The owner-vs-member
+  // presentation split lives in `audience`, NOT eligibleRoles, so the #57 authz guard
+  // stays strict and honest everywhere (it keys on the action→permission table, and
+  // never sees a variant switch smuggled into eligibleRoles).
   {
     id: "add-teammate-connect",
     version: 1,
     scope: "workspace",
     presentation: "chapter",
-    eligibleRoles: ["owner", "admin"],
+    eligibleRoles: ["owner", "admin"], // authz: ManageDaemons
+    audience: "owner-admin",
     trigger: { type: "manual" },
     completion: { via: "derived", signal: "live-environment" },
     eyebrow: "ADD AN AI TEAMMATE · OPTIONAL",
@@ -270,7 +289,8 @@ export const NODES: OnboardingNode[] = [
     version: 1,
     scope: "workspace",
     presentation: "chapter",
-    eligibleRoles: ["owner", "admin"],
+    eligibleRoles: ["owner", "admin"], // authz: ManageAgents
+    audience: "owner-admin",
     trigger: { type: "manual" },
     completion: { via: "derived", signal: "agent-exists" },
     eyebrow: "ADD AN AI TEAMMATE · OPTIONAL",
@@ -286,7 +306,8 @@ export const NODES: OnboardingNode[] = [
     version: 1,
     scope: "workspace",
     presentation: "chapter",
-    eligibleRoles: ["owner", "admin"],
+    eligibleRoles: [], // authz: start-run is all-roles — owner/admin see this variant via `audience`
+    audience: "owner-admin",
     trigger: { type: "manual" },
     completion: { via: "derived", signal: "agent-at-work" },
     eyebrow: "ADD AN AI TEAMMATE · OPTIONAL",
@@ -304,7 +325,8 @@ export const NODES: OnboardingNode[] = [
     version: 1,
     scope: "workspace",
     presentation: "chapter",
-    eligibleRoles: ["owner", "admin"],
+    eligibleRoles: [], // authz: closing a done card is universal — audience picks the owner/admin variant
+    audience: "owner-admin",
     trigger: { type: "manual" },
     requiresSignals: ["agent-at-work"],
     chapterTerminal: true,
@@ -321,15 +343,17 @@ export const NODES: OnboardingNode[] = [
     version: 1,
     scope: "workspace",
     presentation: "chapter",
-    eligibleRoles: ["member"],
+    eligibleRoles: [], // authz: start-run is all-roles — the member variant is chosen via `audience`
+    audience: "member",
     trigger: { type: "manual" },
     requiresSignals: ["agent-exists"],
     completion: { via: "derived", signal: "agent-at-work" },
     eyebrow: "WORK WITH AN AGENT",
     title: "Put an agent to work",
     body: "This workspace already has agents ready. Hand one a task or follow its work.",
+    caption: "No setup needed", // reassurance, not an action (Anton: caption, not a dismiss label)
     primaryAction: { label: "Give it a task", event: "open-agent-work" },
-    secondaryAction: { label: "No setup needed", event: "dismiss" },
+    secondaryAction: { label: "Not now", event: "dismiss" },
     skippable: true,
     fallback: "page-card",
   },
@@ -462,15 +486,36 @@ export function checklistProgress(ctx: OnboardingContext): Array<{ item: Onboard
 // guide or from the checklist — and asks the engine which card to show for the current
 // live state. All completion is live-derived (no new stored flag).
 
+// Whether a chapter card's presentation VARIANT is meant for this role (distinct from
+// authz eligibility). `undefined` audience = any. Permission is still enforced upstream
+// by eligibleNodes (eligibleRoles); this only picks owner/admin-vs-member surfaces.
+function audienceMatches(node: OnboardingNode, ctx: OnboardingContext): boolean {
+  switch (node.audience) {
+    case undefined:
+      return true;
+    case "owner-admin":
+      return ctx.roles.includes("owner") || ctx.roles.includes("admin");
+    case "member":
+      return ctx.roles.includes("member");
+  }
+}
+
 // The ordered chapter STEPS for this role (excludes the terminal done card). Owner/admin
 // see connect → create → work; a member sees only the single "work with an agent" card.
+// Filtered by authz (eligibleNodes) AND presentation audience.
 export function chapterSteps(ctx: OnboardingContext): OnboardingNode[] {
-  return eligibleNodes(ctx).filter((n) => n.presentation === "chapter" && !n.chapterTerminal);
+  return eligibleNodes(ctx).filter(
+    (n) => n.presentation === "chapter" && !n.chapterTerminal && audienceMatches(n, ctx),
+  );
 }
 
 // The terminal done card for this role, if the chapter defines one (owner/admin only).
 function chapterTerminalNode(ctx: OnboardingContext): OnboardingNode | null {
-  return eligibleNodes(ctx).find((n) => n.presentation === "chapter" && n.chapterTerminal === true) ?? null;
+  return (
+    eligibleNodes(ctx).find(
+      (n) => n.presentation === "chapter" && n.chapterTerminal === true && audienceMatches(n, ctx),
+    ) ?? null
+  );
 }
 
 // The next incomplete chapter step whose signal preconditions hold — the user's true
