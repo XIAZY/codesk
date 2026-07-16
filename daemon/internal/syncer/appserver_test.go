@@ -858,7 +858,9 @@ func TestRequestReturnsTypedRPCErrorOnJSONRPCError(t *testing.T) {
 
 	buf := make([]byte, 4096)
 	n, _ := stdinReader.Read(buf)
-	var req struct{ ID int64 `json:"id"` }
+	var req struct {
+		ID int64 `json:"id"`
+	}
 	_ = json.Unmarshal(buf[:n], &req)
 
 	response := fmt.Sprintf(`{"id":%d,"error":{"code":-32001,"message":"Server overloaded; retry later."}}`, req.ID)
