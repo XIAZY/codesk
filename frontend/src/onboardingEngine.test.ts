@@ -135,9 +135,10 @@ describe("config ↔ backend authz consistency (mirrors role.go)", () => {
   const REQUIRED_ROLES: Record<string, OnboardingRole[]> = {
     "connect-environment": OWNER_ADMIN, // ActionManageDaemons (owner, admin)
     "create-agent": OWNER_ADMIN, //        ActionManageAgents  (owner, admin)
-    "agent-at-work": OWNER_ADMIN, //       ActionManageAgents  (owner, admin)
     "invite-team": OWNER_ADMIN, //         ActionInviteMembers (owner, admin)
     // create-document / start-discussion -> ActionEditDocuments (all roles) -> []
+    // agent-at-work -> start-run (handleStartAgentRunRequest gates only requireHumanPrincipal,
+    //   NOT ManageAgents) -> all roles -> [] (a member CAN start a run on an existing agent)
   };
   const sortedRoles = (roles: readonly OnboardingRole[]) => [...roles].sort();
 
@@ -167,9 +168,10 @@ describe("eligibility by role (§4.1 — removed, not disabled)", () => {
       "agent-at-work",
       "invite-team",
     ]);
-    // A member sees ONLY the all-role tasks — no environment/agent/invite items, since
-    // the backend 403s those for members (no dead task the UI dares them to fail).
-    expect(member).toEqual(["create-document", "start-discussion"]);
+    // A member sees ONLY the all-role tasks: create-document, start-discussion, and
+    // agent-at-work (start-run is not ManageAgents-gated). No connect/create/invite items,
+    // since the backend 403s those for members (no dead task the UI dares them to fail).
+    expect(member).toEqual(["create-document", "start-discussion", "agent-at-work"]);
   });
 });
 

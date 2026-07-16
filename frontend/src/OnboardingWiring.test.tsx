@@ -141,7 +141,7 @@ describe("onboarding wiring in WorkspaceApp", () => {
     expect(screen.queryByText("These are real files")).toBeNull();
   });
 
-  it("hides owner/admin setup tasks from a member — no dead tasks the backend would 403", () => {
+  it("hides only the ManageDaemons/ManageAgents setup tasks from a member — no dead tasks the backend would 403", () => {
     window.localStorage.setItem(
       "codesk.onboarding.account.account_1.ws.workspace_1.flags",
       JSON.stringify(["seen:threads-intro@v1", "seen:watchers-intro@v1"]),
@@ -151,14 +151,15 @@ describe("onboarding wiring in WorkspaceApp", () => {
     mocks.documents = [{ id: "doc_1", path: "Product.md", title: "Product.md" }];
     renderWorkspace();
 
-    // A member's checklist is only the two all-role tasks; the create-doc one is done.
-    expect(screen.getByText("1 of 2 done")).toBeTruthy();
+    // A member's checklist is the all-role tasks: create-document (done), start-discussion,
+    // and "Put an agent to work" — start-run is not ManageAgents-gated, so it's honest here.
+    expect(screen.getByText("1 of 3 done")).toBeTruthy();
     expect(screen.getByText("Create your first document")).toBeTruthy();
     expect(screen.getByText("Start a discussion")).toBeTruthy();
-    // The permission-gated tasks never render for a member.
+    expect(screen.getByText("Put an agent to work")).toBeTruthy();
+    // The connect/create/invite tasks the backend 403s for a member never render.
     expect(screen.queryByText("Connect a local environment")).toBeNull();
     expect(screen.queryByText("Create your first agent")).toBeNull();
-    expect(screen.queryByText("Put an agent to work")).toBeNull();
     expect(screen.queryByText("Invite your team")).toBeNull();
   });
 
