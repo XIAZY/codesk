@@ -300,6 +300,9 @@ describe("chapter integration in WorkspaceApp (#56 render head)", () => {
     expect(screen.getByText("1 of 3")).toBeTruthy();
     expect(screen.queryByText("Connect a local environment")).toBeNull(); // chapter starts closed
 
+    const flagsKey = "codesk.onboarding.account.account_1.ws.workspace_1.flags";
+    const flagsBefore = window.localStorage.getItem(flagsKey);
+
     fireEvent.click(screen.getByText("Add an AI teammate"));
     // Opens to the true next step (no environment yet → connect), never a spotlight.
     expect(screen.getByText("Connect a local environment")).toBeTruthy();
@@ -309,11 +312,14 @@ describe("chapter integration in WorkspaceApp (#56 render head)", () => {
     // suspended while the chapter is open, so nothing competes for Escape.
     expect(screen.queryByText("Finish setting up this workspace")).toBeNull();
 
-    // "Not now" closes it (dismiss only) and restores the checklist entry — no flags recorded.
+    // "Not now" closes it (dismiss only) and restores the checklist entry.
     fireEvent.click(screen.getByText("Not now"));
     expect(screen.queryByText("Connect a local environment")).toBeNull();
     expect(screen.getByText("Finish setting up this workspace")).toBeTruthy();
     expect(screen.getByText("Add an AI teammate")).toBeTruthy();
+    // Honest pin: opening/dismissing the chapter (and suspending the launcher) recorded NO
+    // seen/dismissed flag — nothing durable changed.
+    expect(window.localStorage.getItem(flagsKey)).toBe(flagsBefore);
   });
 
   it("member with an agent: the entry opens the single work card with the live 'Start a run' label", () => {

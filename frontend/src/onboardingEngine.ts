@@ -390,6 +390,7 @@ export const NODES: OnboardingNode[] = [
     eyebrow: "STARTED",
     title: "You've started working with an agent",
     body: "You can start more work anytime from Agents.",
+    caption: "Chapter complete", // mirror the owner/admin terminal footer (Anton parity note)
     primaryAction: { label: "Close", event: "dismiss" },
     skippable: true,
     fallback: "page-card",

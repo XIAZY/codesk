@@ -315,6 +315,7 @@ describe("Add an AI teammate chapter (#56)", () => {
     const terminal = activeChapter(ctx({ roles: member, signals: atWork }));
     expect(terminal?.id).toBe("add-teammate-member-done");
     expect(terminal?.title).toBe("You've started working with an agent");
+    expect(terminal?.caption).toBe("Chapter complete"); // mirrors the owner/admin terminal footer
     expect(terminal?.primaryAction?.event).toBe("dismiss"); // Close only, never restarts setup
   });
 
