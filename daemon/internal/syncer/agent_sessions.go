@@ -211,6 +211,13 @@ type managedAgentSession struct {
 	// reviving already-settled state.
 	turnOpSeq uint64
 
+	// turnStartAttempts counts consecutive admission-rejected StartTurn RPCs
+	// (JSONRPC -32001); turnBackoffUntil is the earliest time the next attempt is
+	// allowed. Resets only on an accepted StartTurn, not on turn completion or
+	// process restart. Session replacement resets implicitly (new struct).
+	turnStartAttempts int
+	turnBackoffUntil  time.Time
+
 	deliveredForMeSig   string
 	deliveredGeneralSig string
 	activeForMeSig      string
@@ -1126,6 +1133,25 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 		appendAgentLog(s.cfg, agentID, "skipping unchanged notification inbox signatures for_me=%t general=%t", hasForMe, hasGeneral)
 		return nil
 	}
+	if until := session.turnBackoffUntil; !until.IsZero() && s.now().Before(until) {
+		agentID := current.ID
+		wake := s.wakeAgent
+		s.mu.Unlock()
+		appendAgentLog(s.cfg, agentID, "turn-start admission backoff until %s; deferring", until.Format(time.RFC3339))
+		go func() {
+			timer := time.NewTimer(time.Until(until))
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-s.baseCtx.Done():
+				return
+			}
+			if wake != nil {
+				wake(agentID)
+			}
+		}()
+		return nil
+	}
 	// This write is a new authoritative operation: bump the nonce and capture it,
 	// so its own completion can detect whether any later transition (a settled
 	// turn, death, or a newer notification) superseded it while s.mu was dropped.
@@ -1185,6 +1211,30 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 				LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 			})
 		}
+		var rpcErr *appServerRPCError
+		if errors.As(err, &rpcErr) && rpcErr.Code == -32001 {
+			if currentSession := s.sessions[current.ID]; currentSession != nil && currentSession.process == process {
+				currentSession.turnStartAttempts++
+				delay := restartBackoff(currentSession.turnStartAttempts)
+				currentSession.turnBackoffUntil = s.now().Add(delay)
+				appendAgentLog(s.cfg, agentID, "turn-start admission rejected (-32001) attempt=%d backoff=%s", currentSession.turnStartAttempts, delay)
+				wake := s.wakeAgent
+				s.mu.Unlock()
+				go func() {
+					timer := time.NewTimer(delay)
+					defer timer.Stop()
+					select {
+					case <-timer.C:
+					case <-s.baseCtx.Done():
+						return
+					}
+					if wake != nil {
+						wake(agentID)
+					}
+				}()
+				return nil
+			}
+		}
 		s.mu.Unlock()
 		appendAgentLog(s.cfg, agentID, "turn start failed session=%s err=%v", sessionID, err)
 		return err
@@ -1199,6 +1249,8 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 	if !stale {
 		currentSession.activeTurn = turnID
 		currentSession.state = "working"
+		currentSession.turnStartAttempts = 0
+		currentSession.turnBackoffUntil = time.Time{}
 		// The accepted turn is now genuinely underway: refresh the floor again so the
 		// live turn gets a full stall window measured from acceptance, not from the
 		// pre-write decision point.
