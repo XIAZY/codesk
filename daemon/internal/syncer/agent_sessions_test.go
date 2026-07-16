@@ -50,6 +50,7 @@ type fakeRuntimeProcess struct {
 	failResume      bool
 	startIgnoreCtx  bool
 	exitInfo        RuntimeExitInfo
+	activitySeq     uint64
 
 	// Optional StartTurn interception: when startTurnEntered/startTurnRelease are
 	// set, a StartTurn write signals entry then blocks until released, WITHOUT
@@ -231,6 +232,19 @@ func (p *fakeRuntimeProcess) ExitInfo() RuntimeExitInfo {
 func (p *fakeRuntimeProcess) setExitInfo(info RuntimeExitInfo) {
 	p.mu.Lock()
 	p.exitInfo = info
+	p.mu.Unlock()
+}
+
+func (p *fakeRuntimeProcess) ActivitySeq() uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.activitySeq
+}
+
+// advanceActivity simulates the driver decoding one more valid frame.
+func (p *fakeRuntimeProcess) advanceActivity() {
+	p.mu.Lock()
+	p.activitySeq++
 	p.mu.Unlock()
 }
 
@@ -1525,15 +1539,93 @@ func TestAgentSessionTerminalFailedBlocksNotificationWrite(t *testing.T) {
 // the error completion must NOT demote the dead session to idle (which would
 // strand the gated respawn); state stays parked and exactly one gated respawn
 // happens on release.
+// statusRecorder captures every published payload (post-coalesce updater calls) so a
+// fence test can bind the "enqueue nothing" half of the StartTurn-error fence: settle
+// the worker at the superseding status, snapshot the count, run the stale/dead/
+// superseded completion, and require ZERO new payloads afterward (blocker 30).
+type statusRecorder struct {
+	mu       sync.Mutex
+	payloads []updateAgentSessionRequest
+}
+
+func (r *statusRecorder) updater() agentSessionUpdater {
+	return func(ctx context.Context, agentID string, payload updateAgentSessionRequest) error {
+		r.mu.Lock()
+		r.payloads = append(r.payloads, payload)
+		r.mu.Unlock()
+		return nil
+	}
+}
+
+func (r *statusRecorder) snapshot() []updateAgentSessionRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]updateAgentSessionRequest(nil), r.payloads...)
+}
+
+func statusesOf(payloads []updateAgentSessionRequest) []string {
+	out := make([]string, len(payloads))
+	for i := range payloads {
+		out[i] = payloads[i].Status
+	}
+	return out
+}
+
+// waitSettled waits until the latest recorded status == want and the worker is
+// quiescent (stable across a grace window), returning the settled payload count.
+func (r *statusRecorder) waitSettled(t *testing.T, want string) int {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		p := r.snapshot()
+		if len(p) > 0 && p[len(p)-1].Status == want {
+			time.Sleep(40 * time.Millisecond)
+			p2 := r.snapshot()
+			if len(p2) == len(p) && p2[len(p2)-1].Status == want {
+				return len(p2)
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("status never settled at %q; saw %v", want, statusesOf(r.snapshot()))
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// assertNoNewPayloads requires that a fenced completion enqueued nothing beyond the
+// settled `count`, and that the latest payload still carries the superseding status.
+func (r *statusRecorder) assertNoNewPayloads(t *testing.T, count int, wantLatest string) {
+	t.Helper()
+	time.Sleep(60 * time.Millisecond) // allow any wrongly-enqueued payload to be delivered
+	p := r.snapshot()
+	if len(p) != count {
+		t.Fatalf("a fenced stale completion must enqueue nothing; new payloads after %s: %v", wantLatest, statusesOf(p[count:]))
+	}
+	if p[len(p)-1].Status != wantLatest {
+		t.Fatalf("latest payload must remain %q, got %q", wantLatest, p[len(p)-1].Status)
+	}
+}
+
 func TestAgentSessionStaleTurnCompletionDoesNotClobberParkedGeneration(t *testing.T) {
+	rec := &statusRecorder{}
 	factory := newFakeRuntimeDriver()
-	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), rec.updater(), newFakeRuntimeRegistry(factory))
 	defer supervisor.Shutdown()
 
 	restartParked := make(chan struct{})
 	restartRelease := make(chan struct{})
 	restartDone := make(chan struct{})
-	supervisor.restartSleep = func(time.Duration) { close(restartParked); <-restartRelease }
+	baseCtx := supervisor.baseCtx
+	// baseCtx-aware so a Shutdown after an early test failure (before restartRelease is
+	// closed) still drains the parked restarter instead of deadlocking the join.
+	supervisor.restartSleep = func(time.Duration) {
+		close(restartParked)
+		select {
+		case <-restartRelease:
+		case <-baseCtx.Done():
+		}
+	}
 	supervisor.testHookRestartComplete = func() { close(restartDone) }
 
 	current := &agent{ID: "agent_1", Kind: "codex"}
@@ -1559,12 +1651,17 @@ func TestAgentSessionStaleTurnCompletionDoesNotClobberParkedGeneration(t *testin
 	close(proc1.events)
 	<-restartParked
 
+	// Snapshot after the death's disconnected publication settles: the fenced stale
+	// error that follows must add ZERO payloads (blocker 30).
+	settled := rec.waitSettled(t, "disconnected")
+
 	// Release the write with an error. The stale completion must not clobber the
 	// parked/dead generation.
 	close(proc1.startTurnRelease)
 	if err := <-notifyDone; err == nil {
 		t.Fatal("expected the blocked StartTurn to return its injected error")
 	}
+	rec.assertNoNewPayloads(t, settled, "disconnected")
 	if state, _ := sessionState(supervisor, "agent_1"); state != "disconnected" {
 		t.Fatalf("stale error completion clobbered the parked generation: state=%q, want disconnected", state)
 	}
@@ -1583,6 +1680,63 @@ func TestAgentSessionStaleTurnCompletionDoesNotClobberParkedGeneration(t *testin
 	factory.mu.Unlock()
 	if spawned != 2 {
 		t.Fatalf("want exactly one gated respawn after a stale completion: 2 processes, got %d", spawned)
+	}
+}
+
+// Item #5 liveness, blocker 30: an old-process StartTurn error that returns AFTER the
+// generation was fully replaced must enqueue nothing — the process-mismatch fence
+// (writable is false because the resident session now points at the new process)
+// blocks the idle publish, so the replacement's status stays latest. Hoisting the
+// idle publish outside that fence adds a spurious idle payload → RED.
+func TestAgentSessionStaleStartTurnErrorAfterReplacementEnqueuesNothing(t *testing.T) {
+	rec := &statusRecorder{}
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), rec.updater(), newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	restartParked := make(chan struct{})
+	restartRelease := make(chan struct{})
+	restartDone := make(chan struct{})
+	supervisor.restartSleep = func(time.Duration) { close(restartParked); <-restartRelease }
+	supervisor.testHookRestartComplete = func() { close(restartDone) }
+
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	proc1 := factory.only(t)
+	proc1.mu.Lock()
+	proc1.startTurnEntered = make(chan struct{}, 1)
+	proc1.startTurnRelease = make(chan struct{})
+	proc1.startTurnErr = errors.New("write to replaced process")
+	proc1.mu.Unlock()
+
+	notifyDone := make(chan error, 1)
+	go func() {
+		notifyDone <- supervisor.ScheduleNotificationTurn(context.Background(), current, "do work", "sig-forme", "")
+	}()
+	<-proc1.startTurnEntered // op captured; blocked writing to proc1
+
+	// proc1 dies and is fully replaced by proc2 (a new resident generation) while the
+	// StartTurn write is still blocked against proc1.
+	close(proc1.events)
+	<-restartParked
+	close(restartRelease)
+	<-restartDone
+	// Settle at the replacement's fresh idle publication before releasing the old error.
+	settled := rec.waitSettled(t, "idle")
+
+	// The old-process error returns now; the process-mismatch fence must drop it silently.
+	close(proc1.startTurnRelease)
+	if err := <-notifyDone; err == nil {
+		t.Fatal("expected the old-process StartTurn error to surface")
+	}
+	rec.assertNoNewPayloads(t, settled, "idle")
+	factory.mu.Lock()
+	spawned := len(factory.processes)
+	factory.mu.Unlock()
+	if spawned != 2 {
+		t.Fatalf("want exactly one replacement generation: 2 processes, got %d", spawned)
 	}
 }
 
@@ -2226,6 +2380,917 @@ func waitSessionTurn(t *testing.T, s *agentSessionSupervisor, agentID, want stri
 	}
 }
 
+func waitForPublishedStatus(t *testing.T, updates <-chan updateAgentSessionRequest, status, activitySubstr string) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case payload := <-updates:
+			if payload.Status != status {
+				continue
+			}
+			if activitySubstr != "" && !strings.Contains(payload.CurrentActivity, activitySubstr) {
+				t.Fatalf("status %q published without the expected diagnostic %q, got activity %q", status, activitySubstr, payload.CurrentActivity)
+			}
+			return
+		case <-deadline:
+			t.Fatalf("did not observe a published %q status in time", status)
+		}
+	}
+}
+
+// stalledWorkingSession builds a working session under a controllable clock and
+// drives it into `stalled` via total runtime silence past stallAfter. It returns
+// the supervisor, the running process, the agent, and the clock pointer (already
+// advanced past the stall) so recovery/replacement rows can continue from there.
+func stalledWorkingSession(t *testing.T, updater agentSessionUpdater) (*agentSessionSupervisor, *fakeRuntimeDriver, *fakeRuntimeProcess, *agent, *time.Time) {
+	t.Helper()
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), updater, newFakeRuntimeRegistry(factory))
+	clock := time.Unix(1_000_000, 0)
+	supervisor.now = func() time.Time { return clock }
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	supervisor.markWorking("agent_1", process, "turn_1")
+	// Total silence: no fresh frame, advance past stallAfter, evaluate one tick.
+	clock = clock.Add(supervisor.stallAfter + time.Second)
+	supervisor.evaluateLiveness("agent_1", process)
+	if got, _ := sessionState(supervisor, "agent_1"); got != "stalled" {
+		t.Fatalf("precondition: expected stalled, got %q", got)
+	}
+	return supervisor, factory, process, current, &clock
+}
+
+// Item #5 liveness, row 1: a working session with continuous valid telemetry past
+// the stall threshold must never be marked stalled.
+func TestAgentSessionHeartbeatContinuousTelemetryNeverStalls(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	clock := time.Unix(1_000_000, 0)
+	supervisor.now = func() time.Time { return clock }
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	supervisor.markWorking("agent_1", process, "turn_1")
+	// 40 intervals = 40min, well past the 15min stallAfter, with a fresh valid
+	// frame decoded each interval.
+	for i := 0; i < 40; i++ {
+		clock = clock.Add(supervisor.heartbeatInterval)
+		process.advanceActivity() // a fresh valid frame decoded this interval
+		if !supervisor.evaluateLiveness("agent_1", process) {
+			t.Fatal("liveness must keep watching a live working session")
+		}
+	}
+	if got, _ := sessionState(supervisor, "agent_1"); got != "working" {
+		t.Fatalf("continuous telemetry must never stall; state=%q", got)
+	}
+	process.mu.Lock()
+	stopped := process.stopped
+	process.mu.Unlock()
+	if stopped {
+		t.Fatal("a live agent must never be killed by the heartbeat")
+	}
+}
+
+// Item #5 liveness, row 2: total runtime silence past stallAfter surfaces a
+// visible stalled status with a diagnostic, and never kills the process.
+func TestAgentSessionHeartbeatSilenceStallsWithoutKilling(t *testing.T) {
+	updates := make(chan updateAgentSessionRequest, 16)
+	updater := func(ctx context.Context, agentID string, payload updateAgentSessionRequest) error {
+		updates <- payload
+		return nil
+	}
+	supervisor, _, process, _, _ := stalledWorkingSession(t, updater)
+	defer supervisor.Shutdown()
+	process.mu.Lock()
+	stopped := process.stopped
+	process.mu.Unlock()
+	if stopped {
+		t.Fatal("a stalled agent must NOT be killed (it may recover)")
+	}
+	waitForPublishedStatus(t, updates, "stalled", "no runtime activity")
+}
+
+// Item #5 liveness, row 3: a lifecycle event (recovery) clears the stalled state.
+func TestAgentSessionHeartbeatLifecycleRecoveryClearsStalled(t *testing.T) {
+	supervisor, _, process, _, _ := stalledWorkingSession(t, nil)
+	defer supervisor.Shutdown()
+	// A turn-completed lifecycle event flows through markIdle and must clear stalled.
+	supervisor.markIdle("agent_1", process, true)
+	if got, _ := sessionState(supervisor, "agent_1"); got != "idle" {
+		t.Fatalf("lifecycle recovery must clear stalled; state=%q", got)
+	}
+	// A fresh working turn afterward is watched normally, not stuck stalled.
+	supervisor.markWorking("agent_1", process, "turn_2")
+	if got, _ := sessionState(supervisor, "agent_1"); got != "working" {
+		t.Fatalf("post-recovery turn should be working; state=%q", got)
+	}
+}
+
+// Item #5 liveness, row 6: a stalled long turn with NO pending work is not
+// replaced — the process keeps running and Reconcile treats stalled as live.
+func TestAgentSessionHeartbeatStallWithoutPendingWorkDoesNotReplace(t *testing.T) {
+	supervisor, _, process, current, _ := stalledWorkingSession(t, nil)
+	defer supervisor.Shutdown()
+	process.mu.Lock()
+	stopped := process.stopped
+	process.mu.Unlock()
+	if stopped {
+		t.Fatal("a stall without pending work must not stop the process")
+	}
+	// Reconcile treats stalled as live: no replacement, no second spawn.
+	if err := supervisor.Reconcile(context.Background(), []*agent{current}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if got, _ := sessionState(supervisor, "agent_1"); got != "stalled" {
+		t.Fatalf("Reconcile must not clear or replace a stalled session without pending work; state=%q", got)
+	}
+	supervisor.mu.Lock()
+	sessions := len(supervisor.sessions)
+	supervisor.mu.Unlock()
+	if sessions != 1 {
+		t.Fatalf("expected the single stalled session to remain, got %d", sessions)
+	}
+}
+
+// Item #5 liveness: a notification that STARTS a turn must refresh the liveness
+// floor, even though it bypasses markWorking. Otherwise a long-idle session's
+// freshly started turn is measured against the hours-old idle timestamp and can
+// be declared stalled before the provider's first frame.
+func TestAgentSessionNotificationTurnRefreshesLivenessFloor(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	clock := time.Unix(1_000_000, 0)
+	supervisor.now = func() time.Time { return clock }
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	// The session sits idle far longer than stallAfter (a legitimately long-idle
+	// agent), so its lastRuntimeEventAt is now stale.
+	clock = clock.Add(2 * supervisor.stallAfter)
+	// A notification starts a turn. Its freshly started turn must not be judged
+	// stalled against the stale idle timestamp before the first provider frame.
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "start work", "for-me:v1", ""); err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	supervisor.evaluateLiveness("agent_1", process)
+	if got, _ := sessionState(supervisor, "agent_1"); got != "working" {
+		t.Fatalf("a freshly started notification turn must not stall before its first frame; state=%q", got)
+	}
+}
+
+// Item #5 liveness, blocker 24: the PRODUCTION heartbeat loop wiring must be
+// exercised — startSession must actually launch a loop that periodically evaluates
+// liveness. Drive it through real ensureSession/startSession with a short real
+// interval and NO manual evaluateLiveness call; deleting the launch makes it RED.
+func TestAgentSessionHeartbeatLoopWiringDetectsStall(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	// Short real ticker so the launched loop fires promptly; the injected clock is
+	// what actually crosses stallAfter (deterministic silence).
+	supervisor.heartbeatInterval = 2 * time.Millisecond
+	clock := time.Unix(1_000_000, 0)
+	var clockMu sync.Mutex
+	supervisor.now = func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return clock
+	}
+	defer supervisor.Shutdown()
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	supervisor.markWorking("agent_1", process, "turn_1")
+	// Advance the supervisor clock past stallAfter with no activity; the LAUNCHED
+	// loop (not a manual call) must publish stalled on its next tick.
+	clockMu.Lock()
+	clock = clock.Add(supervisor.stallAfter + time.Second)
+	clockMu.Unlock()
+	waitSessionState(t, supervisor, "agent_1", "stalled")
+}
+
+// Item #5 liveness, blocker 11: once a resident generation is dead, evaluateLiveness
+// must tell the heartbeat loop to STOP (return false) — no ticker leak for a
+// parked/failed generation.
+func TestAgentSessionDeadGenerationStopsHeartbeatLoop(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	if !supervisor.evaluateLiveness("agent_1", process) {
+		t.Fatal("a live session must keep the loop watching")
+	}
+	// Mark the resident generation dead (as the stall-replacement / death path does).
+	supervisor.mu.Lock()
+	supervisor.sessions["agent_1"].dead = true
+	supervisor.mu.Unlock()
+	if supervisor.evaluateLiveness("agent_1", process) {
+		t.Fatal("a dead resident generation must make evaluateLiveness return false so the loop exits")
+	}
+}
+
+// Item #5 liveness, blocker 11/29: the REAL heartbeatLoop must terminate (join) when
+// its generation dies — not merely return false from evaluateLiveness. A direct-call
+// row can't see the loop-exit `return`; deleting it (ignoring evaluateLiveness's
+// result) leaves the ticker goroutine leaking for the daemon lifetime. We run the
+// actual loop, prove it is ticking, kill the generation, and require the loop to
+// join promptly; without the `return` it spins forever and the join never fires → RED.
+func TestAgentSessionDeadGenerationJoinsHeartbeatLoop(t *testing.T) {
+	ticks := make(chan struct{}, 1024)
+	updater := func(ctx context.Context, agentID string, payload updateAgentSessionRequest) error {
+		if payload.Status == "working" {
+			select {
+			case ticks <- struct{}{}:
+			default:
+			}
+		}
+		return nil
+	}
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), updater, newFakeRuntimeRegistry(factory))
+	supervisor.heartbeatInterval = 2 * time.Millisecond
+	clock := time.Unix(1_000_000, 0)
+	supervisor.now = func() time.Time { return clock }
+	defer supervisor.Shutdown()
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	supervisor.markWorking("agent_1", process, "turn_1")
+	// Run the ACTUAL loop and observe its completion by joining this goroutine.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		supervisor.heartbeatLoop("agent_1", process)
+	}()
+	// Prove the loop is alive: it must tick (publish working) at least twice.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-ticks:
+		case <-time.After(2 * time.Second):
+			t.Fatal("heartbeat loop never ticked; cannot prove it later stopped")
+		}
+	}
+	// Kill the resident generation (the stall-replacement / death path marks it dead).
+	supervisor.mu.Lock()
+	supervisor.sessions["agent_1"].dead = true
+	supervisor.mu.Unlock()
+	// The loop's next tick must observe the dead generation and RETURN (join). Without
+	// the loop-exit `return`, evaluateLiveness keeps being called on every tick and the
+	// goroutine never completes → this join times out.
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a dead generation must make the heartbeat loop return (join); it kept ticking — ticker leak")
+	}
+}
+
+// Item #5 liveness, blocker 16: repeated stalled heartbeats republish the EXACT
+// same diagnostic/turn (a stable payload), not a per-tick recomputed line — so the
+// backend comparator suppresses the activity flood.
+func TestAgentSessionStalledHeartbeatRepublishesStableDiagnostic(t *testing.T) {
+	updates := make(chan updateAgentSessionRequest, 32)
+	updater := func(ctx context.Context, agentID string, payload updateAgentSessionRequest) error {
+		updates <- payload
+		return nil
+	}
+	supervisor, _, process, _, clock := stalledWorkingSession(t, updater)
+	defer supervisor.Shutdown()
+	// Capture the stalled diagnostic from the transition.
+	first := waitForStalledPayload(t, updates)
+	// Two more unchanged-generation ticks (no new frame): each republishes the SAME
+	// diagnostic + turn (only LastHeartbeatAt differs).
+	for i := 0; i < 2; i++ {
+		*clock = clock.Add(supervisor.heartbeatInterval)
+		supervisor.evaluateLiveness("agent_1", process)
+		next := waitForStalledPayload(t, updates)
+		if next.CurrentActivity != first.CurrentActivity || next.CurrentTurnID != first.CurrentTurnID {
+			t.Fatalf("stalled heartbeat must republish the stable diagnostic/turn: first=(%q,%q) got=(%q,%q)", first.CurrentActivity, first.CurrentTurnID, next.CurrentActivity, next.CurrentTurnID)
+		}
+	}
+}
+
+func waitForStalledPayload(t *testing.T, updates <-chan updateAgentSessionRequest) updateAgentSessionRequest {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case p := <-updates:
+			if p.Status == "stalled" {
+				return p
+			}
+		case <-deadline:
+			t.Fatal("did not observe a stalled payload in time")
+		}
+	}
+}
+
+// Item #5 liveness, blocker 8: recovery at the DESTRUCTIVE Schedule decision — a
+// stalled session whose generation advanced, hit by a notification before the next
+// heartbeat tick, recovers to working and is handled busy (no Stop/spawn).
+func TestAgentSessionStalledRecoversAtScheduleDecision(t *testing.T) {
+	supervisor, factory, wedged, current, _ := stalledSessionWithForMeSig(t, "for-me:v1")
+	defer supervisor.Shutdown()
+	// A fresh frame decodes (generation advances) — but NO heartbeat tick runs.
+	wedged.advanceActivity()
+	// A NEW notification arrives (would otherwise trigger replacement). The Schedule
+	// recheck must observe the advanced generation, recover to working, and handle
+	// it on the busy path — no Stop, no spawn.
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "gen", "for-me:v1", "general:g2"); err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	wedged.mu.Lock()
+	stopped := wedged.stopped
+	wedged.mu.Unlock()
+	if stopped {
+		t.Fatal("a recovered runtime (generation advanced) must not be replaced at the Schedule decision")
+	}
+	factory.mu.Lock()
+	procs := len(factory.processes)
+	factory.mu.Unlock()
+	if procs != 1 {
+		t.Fatalf("no replacement expected after synchronous recovery, got %d processes", procs)
+	}
+	if got, _ := sessionState(supervisor, "agent_1"); got != "working" {
+		t.Fatalf("expected recovery to working at the Schedule decision, got %q", got)
+	}
+}
+
+// Item #5 liveness, blocker 13: a nonce-current StartTurn ERROR must publish idle
+// so the backend's LATEST status is idle — even when a heartbeat published a
+// provisional working while the StartTurn RPC was in flight. Without the error-path
+// idle publish, the stale provisional working stays visible forever.
+func TestAgentSessionDelayedStartTurnErrorPublishesIdleLast(t *testing.T) {
+	var mu sync.Mutex
+	var statuses []string
+	updater := func(ctx context.Context, agentID string, payload updateAgentSessionRequest) error {
+		mu.Lock()
+		statuses = append(statuses, payload.Status)
+		mu.Unlock()
+		return nil
+	}
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), updater, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	clock := time.Unix(1_000_000, 0)
+	supervisor.now = func() time.Time { return clock }
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	// The StartTurn write blocks (entered), then returns an error on release.
+	process.mu.Lock()
+	process.startTurnEntered = make(chan struct{}, 1)
+	process.startTurnRelease = make(chan struct{})
+	process.startTurnErr = errors.New("turn start boom")
+	process.mu.Unlock()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- supervisor.ScheduleNotificationTurn(context.Background(), current, "work", "for-me:v1", "")
+	}()
+	// Wait until the StartTurn RPC is in flight (session already set working).
+	select {
+	case <-process.startTurnEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("StartTurn write never entered")
+	}
+	// A heartbeat fires while the RPC is in flight and publishes provisional working.
+	supervisor.evaluateLiveness("agent_1", process)
+	// Release the StartTurn → it errors → the error path must publish idle.
+	close(process.startTurnRelease)
+	if err := <-done; err == nil {
+		t.Fatal("expected the StartTurn error to surface")
+	}
+	// The backend's LATEST status must end at idle, not the stale provisional working.
+	deadline := time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		last := ""
+		if len(statuses) > 0 {
+			last = statuses[len(statuses)-1]
+		}
+		mu.Unlock()
+		if last == "idle" {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("the delayed StartTurn error must leave the latest status idle, got %q (all: %v)", last, statuses)
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// Item #5 liveness, blocker 27 (heartbeat enqueue is atomic with the s.mu decision):
+// the anti-revival guarantee — a heartbeat cannot leave a stale working after a
+// concurrent death — rests on the STATUS ENQUEUE happening while s.mu is still held,
+// not merely on the pre-publish hook running under it. We bind the enqueue itself:
+// hold the status worker's mutex so the heartbeat parks INSIDE worker.Publish, then
+// assert s.mu is still held at that parked enqueue. Moving the publish after the
+// unlock (separating the enqueue from the decision) leaves s.mu free here → RED.
+func TestAgentSessionHeartbeatEnqueueHoldsLockAtPublish(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), func(context.Context, string, updateAgentSessionRequest) error { return nil }, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	clock := time.Unix(1_000_000, 0)
+	supervisor.now = func() time.Time { return clock }
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	// markWorking creates the status worker (and sets state=working for the heartbeat).
+	supervisor.markWorking("agent_1", process, "turn_1")
+	worker := statusWorkerFor(t, supervisor, "agent_1")
+	// Hold the worker mutex so the heartbeat's status enqueue (worker.Publish, which
+	// locks worker.mu) parks exactly at the enqueue, suspended inside the publish.
+	worker.mu.Lock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		supervisor.evaluateLiveness("agent_1", process)
+	}()
+	// Let the heartbeat reach and park at the blocked enqueue. Once parked it is
+	// suspended there, so the s.mu observation below is stable, not racing.
+	time.Sleep(50 * time.Millisecond)
+	if supervisor.mu.TryLock() {
+		supervisor.mu.Unlock()
+		worker.mu.Unlock() // release so the parked heartbeat can drain before we fail
+		<-done
+		t.Fatal("heartbeat status enqueue must run while holding s.mu; s.mu was free at the parked enqueue — a concurrent death could interleave and be revived")
+	}
+	// Correct: s.mu is held at the enqueue. Release and let the heartbeat finish.
+	worker.mu.Unlock()
+	<-done
+}
+
+// statusWorkerFor returns the resident status worker for an agent, waiting briefly
+// for lazy creation. Same-package access to the internal worker so a test can park
+// an enqueue on its mutex.
+func statusWorkerFor(t *testing.T, s *agentSessionSupervisor, agentID string) *agentStatusWorker {
+	t.Helper()
+	for i := 0; i < 200; i++ {
+		s.status.mu.Lock()
+		worker := s.status.workers[agentID]
+		s.status.mu.Unlock()
+		if worker != nil {
+			return worker
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("status worker for %s was never created", agentID)
+	return nil
+}
+
+// Item #5 liveness, blocker 4: evaluateLiveness publishes the heartbeat status
+// WHILE holding s.mu (serialized with the state decision), so a concurrent
+// transition cannot interleave a stale overwrite. Proven by asserting s.mu is held
+// at the pre-publish seam; moving the publish after the unlock makes it RED.
+func TestAgentSessionHeartbeatPublishesUnderLock(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	clock := time.Unix(1_000_000, 0)
+	supervisor.now = func() time.Time { return clock }
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	supervisor.markWorking("agent_1", process, "turn_1")
+	held := make(chan bool, 1)
+	supervisor.testHookLivenessPrePublish = func() {
+		if supervisor.mu.TryLock() {
+			supervisor.mu.Unlock()
+			held <- false
+		} else {
+			held <- true
+		}
+	}
+	supervisor.evaluateLiveness("agent_1", process)
+	if !<-held {
+		t.Fatal("evaluateLiveness must publish the heartbeat status while holding s.mu")
+	}
+}
+
+// stalledSessionWithForMeSig builds a session that stalled WHILE processing a
+// for-me notification turn, so it retains activeForMeSig — the setup Bill's
+// queued-behind (policy b) selector needs.
+func stalledSessionWithForMeSig(t *testing.T, forMeSig string) (*agentSessionSupervisor, *fakeRuntimeDriver, *fakeRuntimeProcess, *agent, *time.Time) {
+	t.Helper()
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	clock := time.Unix(1_000_000, 0)
+	supervisor.now = func() time.Time { return clock }
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	// Start a notification turn carrying the for-me signature (sets activeForMeSig).
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "work", forMeSig, ""); err != nil {
+		t.Fatalf("schedule for-me turn: %v", err)
+	}
+	supervisor.mu.Lock()
+	active := supervisor.sessions["agent_1"].activeForMeSig
+	supervisor.mu.Unlock()
+	if active != forMeSig {
+		t.Fatalf("precondition: activeForMeSig=%q, want %q", active, forMeSig)
+	}
+	// Stall it (no new frame, advance past stallAfter).
+	clock = clock.Add(supervisor.stallAfter + time.Second)
+	supervisor.evaluateLiveness("agent_1", process)
+	if got, _ := sessionState(supervisor, "agent_1"); got != "stalled" {
+		t.Fatalf("precondition: expected stalled, got %q", got)
+	}
+	return supervisor, factory, process, current, &clock
+}
+
+// Item #5 policy (b), Bill's coverage gap: replacement authority comes ONLY from
+// work QUEUED BEHIND the wedge (a signature differing from BOTH the in-flight
+// active AND delivered sig). The stalled turn's own unchanged active signature is
+// in-flight, not queued-behind, and must never confer replacement.
+func TestAgentSessionStalledQueuedBehindSelector(t *testing.T) {
+	t.Run("own_unchanged_active_sig_does_not_replace", func(t *testing.T) {
+		supervisor, factory, wedged, current, _ := stalledSessionWithForMeSig(t, "for-me:v1")
+		defer supervisor.Shutdown()
+		if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "same", "for-me:v1", ""); err != nil {
+			t.Fatalf("schedule: %v", err)
+		}
+		// Replacement authority is decided SYNCHRONOUSLY under s.mu — the decision to
+		// replace demotes state to `disconnected` and sets dead + restartPending BEFORE
+		// launching the (async) restart worker. A negative case can't assert on the
+		// async Stop/spawn (it hasn't fired yet), so bind the synchronous decision: the
+		// own unchanged active signature must leave the wedge intact — still `stalled`,
+		// not dead, no restart claimed, in-flight active for-me sig retained. Dropping
+		// the `forMeSig != session.activeForMeSig` clause makes the in-flight sig confer
+		// authority, which flips every one of these under s.mu → RED.
+		supervisor.mu.Lock()
+		session := supervisor.sessions["agent_1"]
+		state, dead, restartPending, activeForMe := session.state, session.dead, session.restartPending, session.activeForMeSig
+		supervisor.mu.Unlock()
+		if state != "stalled" {
+			t.Fatalf("own unchanged active sig must not demote the wedge; state=%q want stalled", state)
+		}
+		if dead {
+			t.Fatal("own unchanged active sig must not mark the stalled generation dead (a replacement claim)")
+		}
+		if restartPending {
+			t.Fatal("own unchanged active sig must not claim a restart (restartPending set)")
+		}
+		if activeForMe != "for-me:v1" {
+			t.Fatalf("the in-flight active for-me sig must be retained, got %q", activeForMe)
+		}
+		// Belt-and-suspenders: over a bounded window no async Stop/spawn fires either.
+		time.Sleep(100 * time.Millisecond)
+		wedged.mu.Lock()
+		stopped := wedged.stopped
+		wedged.mu.Unlock()
+		if stopped {
+			t.Fatal("the stalled turn's own unchanged active signature must not confer replacement (async Stop fired)")
+		}
+		factory.mu.Lock()
+		procs := len(factory.processes)
+		factory.mu.Unlock()
+		if procs != 1 {
+			t.Fatalf("no replacement expected for own active sig, got %d processes", procs)
+		}
+	})
+
+	t.Run("changed_general_sig_replaces", func(t *testing.T) {
+		supervisor, factory, wedged, current, _ := stalledSessionWithForMeSig(t, "for-me:v1")
+		defer supervisor.Shutdown()
+		// for-me unchanged, general NEW → queued-behind work → replacement.
+		if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "gen", "for-me:v1", "general:g2"); err != nil {
+			t.Fatalf("schedule: %v", err)
+		}
+		waitProcessStopped(t, wedged)
+		waitSessionLive(t, supervisor, "agent_1")
+		factory.mu.Lock()
+		procs := len(factory.processes)
+		factory.mu.Unlock()
+		if procs != 2 {
+			t.Fatalf("a changed general sig (queued behind) must replace exactly once, got %d processes", procs)
+		}
+	})
+
+	t.Run("mixed_only_changed_component_grants", func(t *testing.T) {
+		supervisor, factory, wedged, current, _ := stalledSessionWithForMeSig(t, "for-me:v1")
+		defer supervisor.Shutdown()
+		// for-me unchanged (in-flight) + general changed → only the changed general
+		// grants authority; the unchanged for-me component does not.
+		if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "mixed", "for-me:v1", "general:g9"); err != nil {
+			t.Fatalf("schedule: %v", err)
+		}
+		waitProcessStopped(t, wedged)
+		waitSessionLive(t, supervisor, "agent_1")
+		factory.mu.Lock()
+		procs := len(factory.processes)
+		factory.mu.Unlock()
+		if procs != 2 {
+			t.Fatalf("mixed sig must replace via the changed component only, got %d processes", procs)
+		}
+	})
+}
+
+// Item #5 liveness, blocker 19: a lifecycle floor reset must snapshot the activity
+// GENERATION, not just the timestamp — otherwise a frame decoded BEFORE the turn
+// (a handshake/init or prior idle frame) is consumed later as fresh turn telemetry
+// and grants an extra stall window, hiding a real wedge.
+func TestAgentSessionStaleDecodedFrameDoesNotGrantExtraStallWindow(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	clock := time.Unix(1_000_000, 0)
+	supervisor.now = func() time.Time { return clock }
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	// A frame decodes BEFORE the turn starts (e.g. handshake/init), advancing the seq.
+	process.advanceActivity()
+	// The turn starts: the floor reset must snapshot this seq so the pre-turn frame
+	// is already accounted for.
+	supervisor.markWorking("agent_1", process, "turn_1")
+	// The turn then goes silent (no NEW frame). Advance past stallAfter.
+	clock = clock.Add(supervisor.stallAfter + time.Second)
+	supervisor.evaluateLiveness("agent_1", process)
+	if got, _ := sessionState(supervisor, "agent_1"); got != "stalled" {
+		t.Fatalf("a frame decoded before the turn must not grant an extra stall window; state=%q", got)
+	}
+}
+
+// Item #5 liveness, blocker 18/28: the initial idle status must be ENQUEUED while
+// holding s.mu (same locked side as the session store), so a concurrent Schedule
+// that observes the resident session cannot publish `working` and then lose to a
+// delayed initial idle. We bind the ENQUEUE itself (not just the pre-publish hook):
+// pre-create the status worker, hold its mutex so startSession parks INSIDE
+// worker.Publish at the initial-idle enqueue, then assert s.mu is still held there.
+// Moving only the enqueue after the unlock leaves s.mu free at the parked enqueue → RED.
+func TestAgentSessionInitialIdlePublishedUnderLock(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), func(context.Context, string, updateAgentSessionRequest) error { return nil }, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	// Pre-create the status worker so the initial-idle enqueue below reuses it and can
+	// be parked on its mutex (the worker is otherwise created by that very enqueue).
+	supervisor.status.Publish("agent_1", updateAgentSessionRequest{Status: "idle"})
+	worker := statusWorkerFor(t, supervisor, "agent_1")
+	worker.mu.Lock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"}); err != nil {
+			t.Errorf("ensure session: %v", err)
+		}
+	}()
+	// Let startSession reach and park at the blocked initial-idle enqueue; once parked
+	// it is suspended there, so the s.mu observation is stable, not racing.
+	time.Sleep(50 * time.Millisecond)
+	if supervisor.mu.TryLock() {
+		supervisor.mu.Unlock()
+		worker.mu.Unlock()
+		<-done
+		t.Fatal("the initial idle status must be enqueued while holding s.mu; s.mu was free at the parked enqueue — a concurrent Schedule could publish working and then lose to a delayed initial idle")
+	}
+	worker.mu.Unlock()
+	<-done
+}
+
+// Item #5 liveness, blocker 7: once stalled, resumed telemetry (the activity
+// generation advancing) must clear the stall on the next poll — a recovered
+// runtime is never left stalled for the next notification to kill.
+func TestAgentSessionStalledRecoversWhenTelemetryResumes(t *testing.T) {
+	supervisor, _, process, _, clock := stalledWorkingSession(t, nil)
+	defer supervisor.Shutdown()
+	// A fresh valid frame decodes (generation advances). The next poll must recover.
+	process.advanceActivity()
+	supervisor.evaluateLiveness("agent_1", process)
+	if got, _ := sessionState(supervisor, "agent_1"); got != "working" {
+		t.Fatalf("resumed telemetry must clear the stall; state=%q", got)
+	}
+	_ = clock
+}
+
+// Item #5 liveness, blocker 12: silence is measured from supervisor-monotonic time
+// and recovery keys off the activity GENERATION, so a backward wall-clock step
+// (the injected clock going back) with unchanged telemetry must NOT falsely
+// "recover" a stalled session.
+func TestAgentSessionStalledDoesNotRecoverOnBackwardClockWithoutNewFrame(t *testing.T) {
+	supervisor, _, process, _, clock := stalledWorkingSession(t, nil)
+	defer supervisor.Shutdown()
+	// Wall clock steps BACKWARD, but no new frame decodes (generation unchanged).
+	*clock = clock.Add(-2 * supervisor.stallAfter)
+	supervisor.evaluateLiveness("agent_1", process)
+	if got, _ := sessionState(supervisor, "agent_1"); got != "stalled" {
+		t.Fatalf("a backward clock step without a new frame must not recover; state=%q", got)
+	}
+	_ = process
+}
+
+// Item #5 stall replacement, row 1 (via notification): a notification whose
+// signature is already delivered leaves a stalled session in place — no pending
+// work means no replacement (it may still recover on its own).
+func TestAgentSessionStalledNotificationWithoutPendingDoesNotReplace(t *testing.T) {
+	supervisor, factory, process, current, _ := stalledWorkingSession(t, nil)
+	defer supervisor.Shutdown()
+	// The signature this notification carries has already been delivered.
+	supervisor.mu.Lock()
+	supervisor.sessions["agent_1"].deliveredForMeSig = "for-me:v1"
+	supervisor.mu.Unlock()
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "already delivered", "for-me:v1", ""); err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	process.mu.Lock()
+	stopped := process.stopped
+	process.mu.Unlock()
+	if stopped {
+		t.Fatal("no pending work: the stalled process must not be replaced")
+	}
+	if got, _ := sessionState(supervisor, "agent_1"); got != "stalled" {
+		t.Fatalf("expected the session to stay stalled, got %q", got)
+	}
+	factory.mu.Lock()
+	procs := len(factory.processes)
+	factory.mu.Unlock()
+	if procs != 1 {
+		t.Fatalf("no replacement expected, got %d processes", procs)
+	}
+}
+
+// Item #5 stall replacement, rows 2 + 4 + 6: a stalled session with genuinely
+// undelivered pending work is replaced by exactly ONE fresh process (the wedged
+// one stopped, max one live); the old generation's tool token is invalid
+// immediately; and the still-pending signature — never marked delivered — is
+// delivered exactly once into the replacement on the next cycle.
+func TestAgentSessionStalledWithPendingWorkReplacesAndRedelivers(t *testing.T) {
+	supervisor, factory, wedged, current, _ := stalledWorkingSession(t, nil)
+	defer supervisor.Shutdown()
+	supervisor.mu.Lock()
+	oldToken := supervisor.sessions["agent_1"].toolToken
+	supervisor.mu.Unlock()
+
+	// Pending (undelivered) work arrives for the wedged session. The resident
+	// session exists, so this replaces (it does NOT create from an empty slot).
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "wedged work", "for-me:v9", ""); err != nil {
+		t.Fatalf("schedule on stalled: %v", err)
+	}
+	// The wedged process is stopped and exactly one replacement becomes live.
+	waitProcessStopped(t, wedged)
+	waitSessionLive(t, supervisor, "agent_1")
+	factory.mu.Lock()
+	procs := len(factory.processes)
+	factory.mu.Unlock()
+	if procs != 2 {
+		t.Fatalf("expected exactly one replacement (2 processes total), got %d", procs)
+	}
+	replacement := latestFakeProcess(factory)
+	if replacement == wedged {
+		t.Fatal("the replacement must be a fresh process")
+	}
+	// Row 4: the old generation's tool token is invalid immediately.
+	if run := supervisor.agentByToolToken(oldToken); run != nil {
+		t.Fatal("the wedged generation's tool token must be invalid after replacement")
+	}
+	// The triggering notification did NOT deliver or mark the signature delivered.
+	if got := len(wedged.inputsByKind(RuntimeInputStartTurn)); got != 0 {
+		t.Fatalf("the stall-replacement must not write a turn to the wedged process, got %d", got)
+	}
+	supervisor.mu.Lock()
+	delivered := supervisor.sessions["agent_1"].deliveredForMeSig
+	supervisor.mu.Unlock()
+	if delivered == "for-me:v9" {
+		t.Fatal("the pending signature must not be marked delivered by the replacement")
+	}
+	// Row 6: the next anti-entropy cycle delivers the still-pending signature
+	// exactly once into the replacement.
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "wedged work", "for-me:v9", ""); err != nil {
+		t.Fatalf("redeliver: %v", err)
+	}
+	if got := len(replacement.inputsByKind(RuntimeInputStartTurn)); got != 1 {
+		t.Fatalf("expected the pending signature delivered exactly once into the replacement, got %d", got)
+	}
+}
+
+// Item #5 stall replacement, row 3 (Thomas): a natural transient exit racing the
+// stall-replacement claim must still yield exactly ONE restarter. The stall path
+// claims restartPending (CAS false->true under s.mu) synchronously; when the
+// wedged generation's own death then reaches consumeEvents, its transient branch
+// sees restartPending already claimed and must NOT launch a second restarter.
+func TestAgentSessionStalledReplacementRaceWithNaturalExitLaunchesOneRestarter(t *testing.T) {
+	supervisor, _, wedged, current, _ := stalledWorkingSession(t, nil)
+	defer supervisor.Shutdown()
+
+	var launchMu sync.Mutex
+	launches := 0
+	supervisor.testHookRestartLaunched = func() {
+		launchMu.Lock()
+		launches++
+		launchMu.Unlock()
+	}
+	deathHandled := make(chan string, 2)
+	supervisor.testHookDeathHandled = func(classification string) { deathHandled <- classification }
+	// Hold every restarter in construction so the wedge's death is classified while
+	// the wedge is still resident and its restart already claimed — pinning the
+	// interleaving the race row must prove. baseCtx-aware so a deferred Shutdown
+	// still drains any (erroneously) leaked restarter.
+	release := make(chan struct{})
+	baseCtx := supervisor.baseCtx
+	supervisor.restartSleep = func(time.Duration) {
+		select {
+		case <-release:
+		case <-baseCtx.Done():
+		}
+	}
+
+	// The wedged runtime also crashes naturally (transient: not a deliberate Stop).
+	wedged.setExitInfo(RuntimeExitInfo{ExitCode: 1})
+	// Pending work triggers the stall-replacement: it claims restartPending and
+	// launches exactly one restarter (which now blocks in restartSleep).
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "wedged work", "for-me:v9", ""); err != nil {
+		t.Fatalf("schedule on stalled: %v", err)
+	}
+	// Deliver the natural death to the wedge's consumeEvents. Its transient branch
+	// must see restartPending already claimed and defer — launching NO second
+	// restarter.
+	close(wedged.events)
+	select {
+	case <-deathHandled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the wedge's death was never handled by consumeEvents")
+	}
+	launchMu.Lock()
+	got := launches
+	launchMu.Unlock()
+	if got != 1 {
+		t.Fatalf("natural-exit vs stall race must launch exactly one restarter, got %d", got)
+	}
+	// Let the single restarter finish and publish the replacement.
+	close(release)
+	waitSessionLive(t, supervisor, "agent_1")
+}
+
+// Item #5 stall replacement, row 5 (Thomas): Shutdown must cancel and JOIN a
+// stall-replacement whose construction is still in flight before returning —
+// the replacement worker is tracked in constructionWG like every other
+// construction, so no blocked replacement is left running past teardown.
+func TestAgentSessionStalledReplacementIsDrainedByShutdown(t *testing.T) {
+	supervisor, _, wedged, current, _ := stalledWorkingSession(t, nil)
+	// Block the stall-replacement in construction; baseCtx-aware so Shutdown's
+	// baseCancel unblocks it (the join must not deadlock).
+	baseCtx := supervisor.baseCtx
+	entered := make(chan struct{}, 1)
+	supervisor.restartSleep = func(time.Duration) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-baseCtx.Done()
+	}
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "wedged work", "for-me:v9", ""); err != nil {
+		t.Fatalf("schedule on stalled: %v", err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the stall-replacement restarter never entered construction")
+	}
+	done := make(chan struct{})
+	go func() {
+		supervisor.Shutdown()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Shutdown did not cancel+join the blocked stall-replacement")
+	}
+	wedged.mu.Lock()
+	stopped := wedged.stopped
+	wedged.mu.Unlock()
+	if !stopped {
+		t.Fatal("the wedged process must be stopped by shutdown")
+	}
+}
+
 func waitProcessStopped(t *testing.T, p *fakeRuntimeProcess) {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
@@ -2248,8 +3313,9 @@ func waitProcessStopped(t *testing.T, p *fakeRuntimeProcess) {
 // StartTurn RPC error returning after the provider accepted the turn cannot demote
 // the event-confirmed live turn to idle.
 func TestAgentSessionTurnStartedEventWinsOverStaleStartTurnError(t *testing.T) {
+	rec := &statusRecorder{}
 	factory := newFakeRuntimeDriver()
-	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), rec.updater(), newFakeRuntimeRegistry(factory))
 	defer supervisor.Shutdown()
 
 	current := &agent{ID: "agent_1", Kind: "codex"}
@@ -2272,9 +3338,20 @@ func TestAgentSessionTurnStartedEventWinsOverStaleStartTurnError(t *testing.T) {
 	proc1.events <- RuntimeEvent{Kind: RuntimeEventTurnStarted, TurnID: "event_turn"}
 	waitSessionTurn(t, supervisor, "agent_1", "event_turn")
 
+	// Snapshot after the authoritative TurnStarted's working publication settles: the
+	// nonce-superseded stale error that follows must add ZERO payloads (blocker 30).
+	settled := rec.waitSettled(t, "working")
+	if p := rec.snapshot(); p[len(p)-1].CurrentTurnID != "event_turn" {
+		t.Fatalf("the settled working payload must carry the event turn, got %q", p[len(p)-1].CurrentTurnID)
+	}
+
 	close(proc1.startTurnRelease)
 	if err := <-notifyDone; err == nil {
 		t.Fatal("expected the StartTurn RPC error to surface")
+	}
+	rec.assertNoNewPayloads(t, settled, "working")
+	if p := rec.snapshot(); p[len(p)-1].CurrentTurnID != "event_turn" {
+		t.Fatalf("the latest payload must remain the event turn, got %q", p[len(p)-1].CurrentTurnID)
 	}
 	if st, turn := sessionState(supervisor, "agent_1"); st != "working" || turn != "event_turn" {
 		t.Fatalf("stale StartTurn error demoted an event-confirmed live turn: state=%q turn=%q, want working/event_turn", st, turn)

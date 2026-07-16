@@ -342,7 +342,7 @@ export function stampDaemonReceipt(event: WorkspaceEvent, nowMs: number): Worksp
   return event;
 }
 
-export type AgentDisplayStatusKey = "running" | "queued" | "waiting-env" | "failed" | "idle";
+export type AgentDisplayStatusKey = "running" | "queued" | "waiting-env" | "failed" | "stalled" | "idle";
 
 export type AgentDisplayStatus = {
   key: AgentDisplayStatusKey;
@@ -429,6 +429,14 @@ export function agentDisplayStatus(
   if (agent.status === "failed" || run?.status === "failed") {
     const reason = failureReason(agent, run);
     return status("failed", "Failed — view reason", `Failed — view reason: ${reason}`, { reason, run });
+  }
+
+  // A wedged working turn the daemon has surfaced as `stalled`: show it as its own
+  // visible status carrying the daemon's diagnostic (currentActivity), never let it
+  // fall through to Idle/Standing by — that is the human-facing half of item #5.
+  if (agent.status === "stalled") {
+    const detail = agent.currentActivity?.trim() || "Stalled — no recent runtime activity";
+    return status("stalled", "Stalled", detail, { detailLabel: detail, run });
   }
 
   if (agent.status === "working" || run?.status === "running" || (run?.desiredStatus === "running" && run && !terminalAgentRunStatuses.has(run.status) && run.status !== "queued")) {

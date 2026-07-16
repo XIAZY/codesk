@@ -30,6 +30,15 @@ type agentSessionSupervisor struct {
 	runtimes     *runtimeRegistry
 	wakeAgent    func(string)
 	restartSleep func(time.Duration)
+
+	// Liveness/heartbeat (item #5): heartbeatInterval is how often a working
+	// session's liveness is re-evaluated and its heartbeat refreshed;
+	// stallAfter is the silence past which a still-"working" session with no
+	// runtime activity is surfaced as `stalled` (never killed). now is the clock,
+	// injectable so liveness tests are deterministic without wall-clock waits.
+	heartbeatInterval time.Duration
+	stallAfter        time.Duration
+	now               func() time.Time
 	// terminalExitReason classifies a process death as a terminal provider
 	// failure (returns the reason) or not (returns ""). Defaults to
 	// defaultTerminalExitReason (empty set until a CLI-proven signal exists);
@@ -44,6 +53,22 @@ type agentSessionSupervisor struct {
 	// process death and taken its action (expected/terminal/transient), passing
 	// the classification. Test seam only.
 	testHookDeathHandled func(classification string)
+
+	// testHookRestartLaunched, when set, fires each time launchRestartWorker
+	// actually launches a restart worker — used to prove the single-owner claim
+	// launches exactly one restarter under a natural-exit-vs-stall race. Test seam.
+	testHookRestartLaunched func()
+
+	// testHookLivenessPrePublish, when set, fires inside evaluateLiveness while
+	// s.mu is held, immediately before the status publish — used to prove the
+	// publish is serialized with the state decision. Test seam only.
+	testHookLivenessPrePublish func()
+
+	// testHookInitialPublish, when set, fires inside startSession while s.mu is held,
+	// after the session is stored and before the initial idle enqueue — used to prove
+	// a concurrent Schedule cannot publish working before initial-idle ordering is
+	// established. Test seam only.
+	testHookInitialPublish func()
 
 	// shutdownOnce guards Shutdown so its teardown (baseCtx cancel, session stop,
 	// construction drain, status stop) runs exactly once even if Shutdown is
@@ -139,6 +164,24 @@ type managedAgentSession struct {
 
 	activeTurn string
 	state      string
+
+	// lastActivitySeq is the driver activity generation (process.ActivitySeq()) last
+	// observed for this session; lastActivityAt is the supervisor's OWN monotonic
+	// time (s.now()) when that generation last advanced OR a lifecycle transition
+	// occurred. Silence is measured only as s.now() - lastActivityAt, so it is
+	// monotonic-sound and never depends on comparing a wall-clock timestamp across a
+	// clock step (blocker 12). Recovery from `stalled` requires the generation to
+	// advance — a genuinely new frame — which resets lastActivityAt to now.
+	lastActivitySeq uint64
+	lastActivityAt  time.Time
+
+	// stallDiagnostic is the human-facing CurrentActivity captured ONCE at the
+	// working->stalled transition. Every subsequent stalled heartbeat republishes
+	// this exact string (proving the daemon is still alive by advancing
+	// LastHeartbeatAt) rather than recomputing a duration-bearing line each minute —
+	// which would be a semantic activity change per tick and recreate the permanent
+	// activity flood the backend comparator suppresses (blocker 16).
+	stallDiagnostic string
 
 	// restartPending marks that a backoff restart owns this (dead) session
 	// generation: no other start path may replace it until the delayed restarter
@@ -364,6 +407,9 @@ func newAgentSessionSupervisor(cfg Config, updater agentSessionUpdater, runtimes
 		status:             newAgentStatusSyncer(updater),
 		runtimes:           runtimes,
 		terminalExitReason: defaultTerminalExitReason,
+		heartbeatInterval:  60 * time.Second,
+		stallAfter:         15 * time.Minute,
+		now:                time.Now,
 		sessions:           map[string]*managedAgentSession{},
 		starting:           map[string]*agentSessionStart{},
 		restartAttempts:    map[string]int{},
@@ -426,6 +472,10 @@ func (s *agentSessionSupervisor) Reconcile(ctx context.Context, agents []*agent)
 				Handle:  current.Handle,
 				Err:     err,
 			})
+			// Publishing the construction failure caller-side is safe: the only
+			// production Reconcile caller (Service.refresh) holds refreshMu across the
+			// whole call, so authoritative Reconciles never overlap and this
+			// disconnected cannot race a concurrent Reconcile's successful idle.
 			s.publish(current.ID, updateAgentSessionRequest{
 				Status:          "disconnected",
 				CurrentActivity: err.Error(),
@@ -832,12 +882,14 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 		appendAgentLog(s.cfg, current.ID, "runtime session started session=%s", sessionID)
 	}
 	session := &managedAgentSession{
-		agent:     cloneAgentValue(current),
-		process:   process,
-		toolToken: toolToken,
-		workdir:   workdir,
-		sessionID: sessionID,
-		state:     "idle",
+		agent:           cloneAgentValue(current),
+		process:         process,
+		toolToken:       toolToken,
+		workdir:         workdir,
+		sessionID:       sessionID,
+		state:           "idle",
+		lastActivityAt:  s.now(),
+		lastActivitySeq: process.ActivitySeq(),
 	}
 	s.mu.Lock()
 	if s.shutdown || s.baseCtx.Err() != nil {
@@ -879,14 +931,23 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 		return nil
 	}
 	s.sessions[current.ID] = session
-	// Track the live event loop in the same barrier as construction workers: it is
-	// added under s.mu on the passing side of the shutdown fence above, so Shutdown
-	// (which sets s.shutdown and cancels baseCtx under s.mu, then Waits) can never
-	// race this Add, and the loop is drained before status teardown — no publish
-	// after Stop (the #145 consumeEvents-join invariant).
-	s.constructionWG.Add(1)
-	s.mu.Unlock()
+	// Track the live event loop AND the heartbeat loop in the same barrier as
+	// construction workers: both are added under s.mu on the passing side of the
+	// shutdown fence above, so Shutdown (which sets s.shutdown and cancels baseCtx
+	// under s.mu, then Waits) can never race these Adds, and both are drained before
+	// status teardown — no publish after Stop (the #145 consumeEvents-join
+	// invariant, now covering the heartbeat too).
+	s.constructionWG.Add(2)
 	started = false
+	// Enqueue the initial idle UNDER s.mu, before exposing the session by unlocking:
+	// the session is already in s.sessions, so a concurrent ScheduleNotificationTurn
+	// can observe it and publish `working`. The initial idle must be ordered before
+	// that (same locked side as the store) or a delayed initial idle could overwrite
+	// an active turn's working in backend state (blocker 18). The enqueue is
+	// nonblocking (separate status mutex), so holding s.mu is safe.
+	if s.testHookInitialPublish != nil {
+		s.testHookInitialPublish()
+	}
 	s.publish(current.ID, updateAgentSessionRequest{
 		Status:          "idle",
 		SessionID:       sessionID,
@@ -894,9 +955,14 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 		CurrentActivity: "Idle",
 		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
+	s.mu.Unlock()
 	go func() {
 		defer s.constructionWG.Done()
 		s.consumeEvents(current.ID, process)
+	}()
+	go func() {
+		defer s.constructionWG.Done()
+		s.heartbeatLoop(current.ID, process)
 	}()
 	return nil
 }
@@ -917,6 +983,14 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 		s.mu.Unlock()
 		return nil
 	}
+	if session.dead {
+		// A dead generation (parked for restart, or a wedge already claimed for
+		// replacement) never accepts a write regardless of its status label — the
+		// parked restarter owns it. Authoritative on generation, not status, so a
+		// buffered late lifecycle event that rewrote the label cannot open a write.
+		s.mu.Unlock()
+		return nil
+	}
 	forMeSig = strings.TrimSpace(forMeSig)
 	generalSig = strings.TrimSpace(generalSig)
 	hasForMe := forMeSig != ""
@@ -924,6 +998,28 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 	if !hasForMe && !hasGeneral {
 		s.mu.Unlock()
 		return nil
+	}
+	if session.state == "stalled" {
+		// `stalled` is a cached observation, not replacement authority. Re-evaluate
+		// liveness at THIS decision point (not only at the next heartbeat tick): if
+		// the runtime has emitted fresh frames since the stall, recover it to working
+		// here and let the busy path handle this notification — never kill a process
+		// whose activity generation already proves it is active again.
+		if s.observeActivity(session, session.process) {
+			// The activity generation advanced since the stall (a genuinely new frame),
+			// so recover to working HERE, synchronously, and handle this notification on
+			// the busy path — never killing a process the generation proves is active,
+			// and without waiting for the next tick.
+			session.state = "working"
+			s.publish(current.ID, updateAgentSessionRequest{
+				Status:          "working",
+				SessionID:       session.sessionID,
+				CurrentTurnID:   session.activeTurn,
+				CurrentActivity: "Working",
+				LastHeartbeatAt: s.now().UTC().Format(time.RFC3339Nano),
+			})
+			appendAgentLog(s.cfg, current.ID, "runtime recovered from stall at notification time: telemetry advanced past the watermark; handling as busy")
+		}
 	}
 	if session.state == "working" {
 		queuedFollowupForMe := false
@@ -967,6 +1063,55 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 		}
 		return nil
 	}
+	if session.state == "stalled" {
+		// A wedged working turn. Replace it ONLY when work is genuinely blocked
+		// behind it (an undelivered inbox signature) — a stall that might still
+		// recover on its own must not be churned. When work IS pending, claim the
+		// restart for this exact resident generation (false->true under s.mu) and
+		// rebuild from the RESIDENT authoritative spec via the parked-token restarter
+		// — a stale notification snapshot must not create/recreate a session (finding
+		// #30), so we never recurse through notification delivery. Claiming before
+		// Stop makes consumeEvents (which will see the wedge's Stop) defer to this as
+		// the sole replacement owner. Do NOT mark the signature delivered: the next
+		// anti-entropy worker cycle delivers it once into the replacement.
+		// Policy (b), queued-behind only: replacement authority comes ONLY from work
+		// genuinely QUEUED BEHIND the wedge — a signature component that differs from
+		// both the in-flight (active) AND the delivered signature. The stalled turn's
+		// own unchanged active signature is the in-flight work, not pending behind
+		// itself, so it never confers replacement authority; the wedge stays visibly
+		// `stalled` (human-facing diagnostic) until genuinely-new work is blocked.
+		queuedForMe := hasForMe && forMeSig != session.activeForMeSig && forMeSig != session.deliveredForMeSig
+		queuedGeneral := hasGeneral && generalSig != session.activeGeneralSig && generalSig != session.deliveredGeneralSig
+		if !(queuedForMe || queuedGeneral) || session.restartPending || session.dead {
+			s.mu.Unlock()
+			return nil
+		}
+		process := session.process
+		sessionID := session.sessionID
+		agentID := current.ID
+		session.dead = true // old tool token invalid immediately
+		session.state = "disconnected"
+		session.activeTurn = ""
+		session.activeForMeSig = ""
+		session.activeGeneralSig = ""
+		session.steeredForMeSig = ""
+		session.turnOpSeq++
+		session.restartPending = true // claim: consumeEvents must not launch a 2nd restarter
+		// Publish the disconnected transition UNDER s.mu (blocker 14) so a delayed
+		// heartbeat can't land a stale working/stalled status after this claim.
+		s.publish(agentID, updateAgentSessionRequest{
+			Status:          "disconnected",
+			CurrentTurnID:   "",
+			CurrentActivity: "Disconnected",
+			LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
+		})
+		s.mu.Unlock()
+		appendAgentLog(s.cfg, agentID, "stalled runtime with pending work; replacing session=%s", sessionID)
+		// Immediate replacement (delay 0): the worker Stops the wedged process and
+		// rebuilds from the resident spec on baseCtx, joined by constructionWG.
+		s.launchRestartWorker(agentID, process, 0)
+		return nil
+	}
 	if session.state == "disconnected" || session.state == "failed" {
 		// A dead generation — whether backing off (disconnected) or terminally
 		// failed — must never be written to. `failed` in particular fell through
@@ -987,6 +1132,12 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 	session.turnOpSeq++
 	op := session.turnOpSeq
 	session.state = "working"
+	// Starting a turn is proof of liveness and resets the stall window: refresh the
+	// floor BEFORE dropping s.mu so a heartbeat tick during the in-flight
+	// WriteStdin(StartTurn) — before the provider's first frame — never judges this
+	// freshly started turn against the prior idle timestamp. This path bypasses
+	// markWorking, so it must refresh the floor itself.
+	s.resetLivenessFloor(session, session.process)
 	session.activeForMeSig = forMeSig
 	session.activeGeneralSig = generalSig
 	session.steeredForMeSig = ""
@@ -1016,10 +1167,23 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 		// generation died (disconnected/failed) while WriteStdin was in flight,
 		// demoting it to idle would strand a gated respawn or revive a corpse for
 		// later notifications.
-		if currentSession := s.sessions[current.ID]; currentSession != nil && currentSession.process == process && !currentSession.dead && currentSession.turnOpSeq == op {
+		if currentSession := s.sessions[current.ID]; writable(currentSession, process) && currentSession.turnOpSeq == op {
 			currentSession.state = "idle"
+			currentSession.activeTurn = ""
 			currentSession.activeForMeSig = ""
 			currentSession.activeGeneralSig = ""
+			s.resetLivenessFloor(currentSession, process)
+			// Publish the idle demotion UNDER s.mu (blocker 13): a heartbeat may have
+			// published provisional `working` before this RPC error returned, so the
+			// nonce-fenced idle must enqueue in the same ordered decision or the backend
+			// stays visibly working forever. A stale/superseded error enqueues nothing.
+			s.publish(current.ID, updateAgentSessionRequest{
+				Status:          "idle",
+				SessionID:       currentSession.sessionID,
+				CurrentTurnID:   "",
+				CurrentActivity: "Idle",
+				LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
+			})
 		}
 		s.mu.Unlock()
 		appendAgentLog(s.cfg, agentID, "turn start failed session=%s err=%v", sessionID, err)
@@ -1031,10 +1195,25 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 	// Fence on BOTH the generation (process) and the operation nonce (turnOpSeq):
 	// a settled turn / death / newer notification that landed during the unlocked
 	// WriteStdin bumped the nonce, so this completion must not revive working.
-	stale := currentSession == nil || currentSession.process != process || currentSession.dead || currentSession.turnOpSeq != op
+	stale := !writable(currentSession, process) || currentSession.turnOpSeq != op
 	if !stale {
 		currentSession.activeTurn = turnID
 		currentSession.state = "working"
+		// The accepted turn is now genuinely underway: refresh the floor again so the
+		// live turn gets a full stall window measured from acceptance, not from the
+		// pre-write decision point.
+		s.resetLivenessFloor(currentSession, process)
+		// Publish UNDER s.mu (see markWorking/markIdle): the turnOpSeq fence guards the
+		// state mutation, but the STATUS enqueue must share the same ordering, or an
+		// authoritative idle that drained during the unlocked WriteStdin could publish
+		// first and this stale `working` land last.
+		s.publish(current.ID, updateAgentSessionRequest{
+			Status:          "working",
+			SessionID:       sessionID,
+			CurrentTurnID:   turnID,
+			CurrentActivity: "Working",
+			LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
+		})
 	}
 	s.mu.Unlock()
 	if stale {
@@ -1043,13 +1222,6 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 		appendAgentLog(s.cfg, agentID, "turn start completed on a stale generation session=%s; dropping status", sessionID)
 		return nil
 	}
-	s.publish(current.ID, updateAgentSessionRequest{
-		Status:          "working",
-		SessionID:       sessionID,
-		CurrentTurnID:   turnID,
-		CurrentActivity: "Working",
-		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
-	})
 	appendAgentLog(s.cfg, agentID, "turn started session=%s turn=%s for_me=%t general=%t", sessionID, turnID, hasForMe, hasGeneral)
 	return nil
 }
@@ -1139,8 +1311,16 @@ disconnected:
 	}
 	transient := !exit.Expected && terminalReason == ""
 
+	published := ""
+	if terminalReason != "" {
+		// Sanitize/bound the provider's line at the PUBLICATION boundary (persisted as
+		// CurrentActivity and shown to humans): control chars and unbounded length
+		// must never reach the backend. Rune-safe truncation.
+		published = sanitizeExitLine(terminalReason)
+	}
 	owned := false
 	attempt := 0
+	claimedRestart := false
 	s.mu.Lock()
 	if session := s.sessions[agentID]; session != nil && session.process == process {
 		owned = true
@@ -1160,7 +1340,12 @@ disconnected:
 		session.activeForMeSig = ""
 		session.activeGeneralSig = ""
 		session.steeredForMeSig = ""
-		if transient {
+		if transient && !session.restartPending {
+			// Claim the restart for this dead generation exactly once. If the
+			// stall-replacement path (ScheduleNotificationTurn) already claimed it —
+			// restartPending is set — consumeEvents must NOT launch a second
+			// restarter; that path is the sole replacement owner. This CAS is what
+			// makes a concurrent natural-exit-vs-stall race resolve to one restarter.
 			s.restartAttempts[agentID]++
 			attempt = s.restartAttempts[agentID]
 			// A backoff restart now owns this dead generation: the parked session
@@ -1168,6 +1353,30 @@ disconnected:
 			// publishes the replacement by a conditional swap against it, so no
 			// other start path may replace it and a racing removal invalidates it.
 			session.restartPending = true
+			claimedRestart = true
+		}
+		// Publish the death status UNDER s.mu (blocker 14): the death is a resident-
+		// session state mutation with a status payload, so it must enqueue in the same
+		// ordered decision or a delayed heartbeat/stall publish could land after and
+		// revive a dead generation in backend state. Expected stop publishes nothing
+		// (clean teardown); terminal publishes failed; a transient death WE claimed
+		// publishes disconnected (a stall-replacement owner publishes its own).
+		if !exit.Expected {
+			if terminalReason != "" {
+				s.publish(agentID, updateAgentSessionRequest{
+					Status:          "failed",
+					CurrentTurnID:   "",
+					CurrentActivity: published,
+					LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
+				})
+			} else if claimedRestart {
+				s.publish(agentID, updateAgentSessionRequest{
+					Status:          "disconnected",
+					CurrentTurnID:   "",
+					CurrentActivity: "Disconnected",
+					LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
+				})
+			}
 		}
 	}
 	s.mu.Unlock()
@@ -1190,62 +1399,61 @@ disconnected:
 	// `failed` with the provider's own (sanitized) line; no restart until a human
 	// acts. The match set is locked only from live-probe evidence.
 	if terminalReason != "" {
-		// Sanitize and bound the provider's line at the PUBLICATION boundary, not
-		// only in the log suffix: it is persisted as CurrentActivity and shown to
-		// humans, so control characters and unbounded length must never reach the
-		// backend. Truncation is rune-safe (never splits a multibyte character).
-		published := sanitizeExitLine(terminalReason)
+		// Status was published under s.mu above (blocker 14); here just log + notify.
 		appendAgentLog(s.cfg, agentID, "runtime terminal failure; no restart: %s", published)
-		s.publish(agentID, updateAgentSessionRequest{
-			Status:          "failed",
-			CurrentTurnID:   "",
-			CurrentActivity: published,
-			LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
-		})
 		if s.testHookDeathHandled != nil {
 			s.testHookDeathHandled("terminal")
 		}
 		return
 	}
 
-	// Transient: an unexpected crash (or self-clearing throttle) — mark
-	// disconnected and restart. Capped backoff lands in facet 4.
-	delay := restartBackoff(attempt)
-	appendAgentLog(s.cfg, agentID, "runtime event stream closed; marking session disconnected%s; restart attempt=%d backoff=%s", crashSuffix(exit), attempt, delay)
-	s.publish(agentID, updateAgentSessionRequest{
-		Status:          "disconnected",
-		CurrentTurnID:   "",
-		CurrentActivity: "Disconnected",
-		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
-	})
-	// Join the restarter through the same construction barrier as fresh workers.
-	// Add under s.mu on the same side as the shutdown check; if shutdown already
-	// won — or the run/base context was cancelled (a service-context teardown that
-	// has not yet reached Shutdown) — do not launch a restart at all (Shutdown's
-	// Wait must not see a new Add, and a cancelled baseCtx must not spin restarts).
-	s.mu.Lock()
-	launchRestart := !s.shutdown && s.baseCtx.Err() == nil
-	if launchRestart {
-		s.constructionWG.Add(1)
-	}
-	s.mu.Unlock()
-	if !launchRestart {
+	// Transient: an unexpected crash (or self-clearing throttle). If the
+	// stall-replacement path already claimed this generation's restart (above), it
+	// is the sole replacement owner and owns the status — consumeEvents must not
+	// re-publish a (now stale) disconnected status nor launch a second restarter.
+	if !claimedRestart {
 		if s.testHookDeathHandled != nil {
 			s.testHookDeathHandled("transient")
 		}
 		return
+	}
+	delay := restartBackoff(attempt)
+	// Disconnected status was published under s.mu above (blocker 14); launch the
+	// restarter for the generation we claimed.
+	appendAgentLog(s.cfg, agentID, "runtime event stream closed; marking session disconnected%s; restart attempt=%d backoff=%s", crashSuffix(exit), attempt, delay)
+	s.launchRestartWorker(agentID, process, delay)
+	if s.testHookDeathHandled != nil {
+		s.testHookDeathHandled("transient")
+	}
+}
+
+// launchRestartWorker starts exactly one detached restart worker for a dead
+// generation whose restartPending the caller has already CLAIMED under s.mu
+// (false->true on the resident session). It adds to constructionWG under s.mu on
+// the passing side of the shutdown/base-context fence — so Shutdown's Wait cannot
+// race the Add and a cancelled baseCtx never spins restarts — and does not launch
+// if that fence has closed. The worker owns EVERY outcome against its one parked
+// token (publish/fail/refresh/remove/shutdown), rebuilding from the resident
+// session.agent + revision each attempt with a capped backoff; a construction
+// failure re-arms instead of stranding the token restartPending forever.
+func (s *agentSessionSupervisor) launchRestartWorker(agentID string, process RuntimeProcess, delay time.Duration) {
+	s.mu.Lock()
+	launch := !s.shutdown && s.baseCtx.Err() == nil
+	if launch {
+		s.constructionWG.Add(1)
+	}
+	s.mu.Unlock()
+	if !launch {
+		return
+	}
+	if s.testHookRestartLaunched != nil {
+		s.testHookRestartLaunched()
 	}
 	go func() {
 		defer s.constructionWG.Done()
 		if s.testHookRestartComplete != nil {
 			defer s.testHookRestartComplete()
 		}
-		// The restarter owns EVERY outcome of the construction window against its
-		// one dead-generation token — publish, fail, refresh, or remove/shutdown —
-		// so a construction failure re-arms the next capped attempt instead of
-		// stranding the token `restartPending` forever (which would gate Reconcile
-		// out permanently). It keeps looping until the token leaves the map (a
-		// successful swap OR a removal/replacement) or shutdown.
 		for {
 			s.restartSleep(delay)
 			s.mu.Lock()
@@ -1307,9 +1515,6 @@ disconnected:
 			s.mu.Unlock()
 		}
 	}()
-	if s.testHookDeathHandled != nil {
-		s.testHookDeathHandled("transient")
-	}
 }
 
 const maxExitLineLen = 200
@@ -1422,18 +1627,30 @@ func sanitizeExitLine(s string) string {
 // It is the single authority every start path consults: a terminal `failed`
 // exit is human-gated, and a `disconnected` generation with an in-flight backoff
 // park is owned by its delayed restarter, which alone may replace it.
+// writable is the single writability authority for a session generation: a
+// lifecycle transition or a write may proceed only for the resident, live (not
+// dead/claimed) generation matching process. Every lifecycle mutator and the
+// notification write path routes through this one predicate, so a dead generation
+// can never have its status/turn rewritten or receive a write regardless of a
+// stale status label a buffered late event may have left (blockers 1/3) — and a
+// future mutator that consults it cannot regress the class.
+func writable(session *managedAgentSession, process RuntimeProcess) bool {
+	return session != nil && session.process == process && !session.dead
+}
+
 func restartGateClosed(session *managedAgentSession) bool {
 	if session == nil {
 		return false
 	}
-	switch session.state {
-	case "failed":
+	if session.state == "failed" {
 		return true
-	case "disconnected":
-		return session.restartPending
-	default:
-		return false
 	}
+	// Authoritative on generation, not the mutable status label: a dead generation
+	// with a parked restart is owned by its restarter regardless of a status a
+	// buffered late lifecycle event may have rewritten. (restartPending is only set
+	// on a generation already marked dead, so this also covers the disconnected+
+	// restartPending park.)
+	return session.dead && session.restartPending
 }
 
 // resetRestartBackoff clears the transient-restart counter for an agent, but
@@ -1460,24 +1677,27 @@ func lastNonEmpty(lines []string) string {
 func (s *agentSessionSupervisor) markWorking(agentID string, process RuntimeProcess, turnID string) {
 	s.mu.Lock()
 	session := s.sessions[agentID]
-	if session == nil || session.process != process {
+	if !writable(session, process) {
+		// Not the resident live generation (nil / replaced / dead): a buffered event
+		// emitted before Stop closed the stream must not overwrite a claimed
+		// disconnected/parked corpse back to working and publish a stale status.
 		s.mu.Unlock()
 		return
 	}
-	if session != nil {
-		session.state = "working"
-		session.activeTurn = turnID
-		// An authoritative TurnStarted is a state transition that must win over a
-		// StartTurn RPC completion still in flight: bump the operation nonce so a
-		// stale StartTurn error/timeout returning afterward cannot demote this live
-		// turn to idle.
-		session.turnOpSeq++
-	}
-	sessionID := ""
-	if session != nil {
-		sessionID = session.sessionID
-	}
-	s.mu.Unlock()
+	session.state = "working"
+	session.activeTurn = turnID
+	// A lifecycle transition is itself proof of liveness: refresh the floor so a
+	// just-started turn has the full stallAfter window before it could be judged
+	// silent, and so it clears any prior `stalled` marking (event-driven recovery).
+	s.resetLivenessFloor(session, process)
+	// An authoritative TurnStarted is a state transition that must win over a
+	// StartTurn RPC completion still in flight: bump the operation nonce so a stale
+	// StartTurn error/timeout returning afterward cannot demote this live turn.
+	session.turnOpSeq++
+	sessionID := session.sessionID
+	// Publish UNDER s.mu so the state decision and its status enqueue are ordered
+	// together: a concurrent transition (or a stale RPC completion) cannot land its
+	// publish between this decision and enqueue and leave a stale status last.
 	s.publish(agentID, updateAgentSessionRequest{
 		Status:          "working",
 		SessionID:       sessionID,
@@ -1485,40 +1705,46 @@ func (s *agentSessionSupervisor) markWorking(agentID string, process RuntimeProc
 		CurrentActivity: "Working",
 		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
+	s.mu.Unlock()
 	appendAgentLog(s.cfg, agentID, "event turn started turn=%s", turnID)
 }
 
 func (s *agentSessionSupervisor) markIdle(agentID string, process RuntimeProcess, delivered bool) {
 	s.mu.Lock()
 	session := s.sessions[agentID]
-	if session == nil || session.process != process {
+	if !writable(session, process) {
+		// Not the resident live generation (see markWorking): a late idle event must
+		// not resurrect a claimed corpse to `idle` and let the next notification fall
+		// through to a WriteStdin on the dead process.
 		s.mu.Unlock()
 		return
 	}
-	sessionID := ""
-	if session != nil {
-		session.state = "idle"
-		session.activeTurn = ""
-		// This idle/failed/completed transition is authoritative: bump the
-		// operation nonce so a StartTurn completion still in flight against this
-		// generation cannot revive it to working.
-		session.turnOpSeq++
-		// NOTE: the transient-restart backoff counter is reset only by
-		// resetRestartBackoff on a proven RuntimeEventTurnCompleted — never here.
-		// markIdle also fires for TurnFailed and bare idle/status events, none of
-		// which prove uptime; resetting on them would defeat the backoff.
-		if delivered && session.activeForMeSig != "" {
-			session.deliveredForMeSig = session.activeForMeSig
-		}
-		if delivered && session.activeGeneralSig != "" {
-			session.deliveredGeneralSig = session.activeGeneralSig
-		}
-		session.activeForMeSig = ""
-		session.activeGeneralSig = ""
-		session.steeredForMeSig = ""
-		sessionID = session.sessionID
+	session.state = "idle"
+	session.activeTurn = ""
+	// A lifecycle transition proves liveness and clears any `stalled` marking
+	// (event-driven recovery).
+	s.resetLivenessFloor(session, process)
+	// This idle/failed/completed transition is authoritative: bump the operation
+	// nonce so a StartTurn completion still in flight against this generation
+	// cannot revive it to working.
+	session.turnOpSeq++
+	// NOTE: the transient-restart backoff counter is reset only by
+	// resetRestartBackoff on a proven RuntimeEventTurnCompleted — never here.
+	// markIdle also fires for TurnFailed and bare idle/status events, none of
+	// which prove uptime; resetting on them would defeat the backoff.
+	if delivered && session.activeForMeSig != "" {
+		session.deliveredForMeSig = session.activeForMeSig
 	}
-	s.mu.Unlock()
+	if delivered && session.activeGeneralSig != "" {
+		session.deliveredGeneralSig = session.activeGeneralSig
+	}
+	session.activeForMeSig = ""
+	session.activeGeneralSig = ""
+	session.steeredForMeSig = ""
+	sessionID := session.sessionID
+	// Publish UNDER s.mu (see markWorking): the idle decision and its status enqueue
+	// are ordered together so a stale in-flight StartTurn completion cannot land a
+	// `working` publish after this authoritative idle.
 	s.publish(agentID, updateAgentSessionRequest{
 		Status:          "idle",
 		SessionID:       sessionID,
@@ -1526,13 +1752,169 @@ func (s *agentSessionSupervisor) markIdle(agentID string, process RuntimeProcess
 		CurrentActivity: "Idle",
 		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
-	appendAgentLog(s.cfg, agentID, "event turn finished delivered=%t", delivered)
-	s.mu.Lock()
 	wake := s.wakeAgent
 	s.mu.Unlock()
+	appendAgentLog(s.cfg, agentID, "event turn finished delivered=%t", delivered)
 	if wake != nil {
 		wake(agentID)
 	}
+}
+
+// heartbeatLoop runs beside consumeEvents for a live session: it re-evaluates
+// liveness every heartbeatInterval and returns when the session's generation is
+// gone (replaced/removed) or the base context is cancelled (Shutdown / service
+// teardown). It is tracked in constructionWG so Shutdown drains it.
+func (s *agentSessionSupervisor) heartbeatLoop(agentID string, process RuntimeProcess) {
+	ticker := time.NewTicker(s.heartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.baseCtx.Done():
+			return
+		case <-ticker.C:
+			if !s.evaluateLiveness(agentID, process) {
+				return
+			}
+		}
+	}
+}
+
+// evaluateLiveness is one heartbeat tick for a session. It returns false when the
+// caller's generation is no longer resident (the loop should stop), true
+// otherwise. For a still-"working" session it either refreshes the heartbeat
+// (recent runtime activity) or, once silent past stallAfter, surfaces a visible
+// `stalled` status with a diagnostic — never killing the process; recovery is
+// event-driven via markWorking/markIdle. Non-working sessions are left untouched.
+func (s *agentSessionSupervisor) evaluateLiveness(agentID string, process RuntimeProcess) bool {
+	// Publish is done WHILE holding s.mu (the status enqueue is non-blocking on a
+	// separate mutex, no lock cycle) so the state decision and its status enqueue
+	// are atomic: a concurrent lifecycle transition cannot interleave between them
+	// and let a stale heartbeat overwrite the newer status.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session := s.sessions[agentID]
+	if session == nil || session.process != process {
+		// Our generation was replaced or removed; stop watching it.
+		return false
+	}
+	if session.dead {
+		// A claimed corpse (parked for restart / terminally failed but still resident
+		// as the token) is owned by its restarter, not the poller. Return false so the
+		// per-process heartbeat loop EXITS — otherwise a failed/parked-dead generation
+		// would retain a ticker goroutine for the daemon lifetime (blocker 11).
+		return false
+	}
+	if session.state != "working" && session.state != "stalled" {
+		// idle/disconnected/failed are not liveness-evaluated. A `stalled` session IS
+		// re-evaluated: resumed telemetry must be able to clear the stall.
+		return true
+	}
+	// Observe the driver's activity generation: a new valid frame advances it and
+	// resets lastActivityAt to supervisor-monotonic now.
+	advanced := s.observeActivity(session, process)
+	silent := s.now().Sub(session.lastActivityAt)
+	sessionID := session.sessionID
+	turnID := session.activeTurn
+	heartbeat := s.now().UTC().Format(time.RFC3339Nano)
+
+	if session.state == "stalled" {
+		// Telemetry recovery keys off the activity GENERATION advancing — a genuinely
+		// new frame this poll — NOT a now-vs-timestamp measure. That makes it exact
+		// and immune to a wall-clock step: unchanged telemetry can never "recover" a
+		// stall even if the clock moves. (Lifecycle recovery is separate: markWorking/
+		// markIdle already cleared the stall before this poll.)
+		if advanced {
+			session.state = "working"
+			session.stallDiagnostic = ""
+			if s.testHookLivenessPrePublish != nil {
+				s.testHookLivenessPrePublish()
+			}
+			s.publish(agentID, updateAgentSessionRequest{
+				Status:          "working",
+				SessionID:       sessionID,
+				CurrentTurnID:   turnID,
+				CurrentActivity: "Working",
+				LastHeartbeatAt: heartbeat,
+			})
+			appendAgentLog(s.cfg, agentID, "runtime recovered from stall: activity generation advanced on turn %s", turnID)
+			return true
+		}
+		// Still stalled: republish the SAME stable diagnostic so LastHeartbeatAt
+		// advances (proving the daemon is alive while the runtime is wedged) without
+		// a per-tick semantic change — the backend comparator then suppresses the
+		// activity row (blocker 16).
+		if s.testHookLivenessPrePublish != nil {
+			s.testHookLivenessPrePublish()
+		}
+		s.publish(agentID, updateAgentSessionRequest{
+			Status:          "stalled",
+			SessionID:       sessionID,
+			CurrentTurnID:   turnID,
+			CurrentActivity: session.stallDiagnostic,
+			LastHeartbeatAt: heartbeat,
+		})
+		return true
+	}
+
+	// Working: refresh the heartbeat while alive; declare stalled once silent past
+	// the threshold, measured from supervisor-monotonic time.
+	if silent < s.stallAfter {
+		if s.testHookLivenessPrePublish != nil {
+			s.testHookLivenessPrePublish()
+		}
+		s.publish(agentID, updateAgentSessionRequest{
+			Status:          "working",
+			SessionID:       sessionID,
+			CurrentTurnID:   turnID,
+			CurrentActivity: "Working",
+			LastHeartbeatAt: heartbeat,
+		})
+		return true
+	}
+	// Working -> stalled: capture the watermark so recovery requires a strictly
+	// newer frame. Visible diagnostic, not killed — it may still recover
+	// (telemetry or lifecycle) and is replaced only if work is queued behind it.
+	session.state = "stalled"
+	// Capture the diagnostic ONCE at the transition; subsequent stalled heartbeats
+	// republish this exact string (blocker 16).
+	session.stallDiagnostic = fmt.Sprintf("Stalled: no runtime activity for %s during turn %s", silent.Round(time.Second), turnID)
+	if s.testHookLivenessPrePublish != nil {
+		s.testHookLivenessPrePublish()
+	}
+	s.publish(agentID, updateAgentSessionRequest{
+		Status:          "stalled",
+		SessionID:       sessionID,
+		CurrentTurnID:   turnID,
+		CurrentActivity: session.stallDiagnostic,
+		LastHeartbeatAt: heartbeat,
+	})
+	appendAgentLog(s.cfg, agentID, "runtime stalled: silent for %s during turn %s; awaiting recovery or pending-work replacement", silent.Round(time.Second), turnID)
+	return true
+}
+
+// observeActivity records a fresh read-boundary frame: if the driver's activity
+// generation has advanced since we last saw it, snapshot the new generation and
+// stamp the supervisor's OWN monotonic time. Silence is then measured from
+// lastActivityAt, so it never depends on comparing a wall-clock timestamp across a
+// clock step. Must be called under s.mu.
+// resetLivenessFloor marks a lifecycle transition as fresh liveness NOW: it resets
+// the silence clock AND snapshots the current activity generation, so a frame
+// already decoded before this transition (e.g. the handshake/init or a prior idle
+// frame) is not later consumed by observeActivity as fresh turn telemetry and
+// granted an extra stall window (blocker 19). Must be called under s.mu.
+func (s *agentSessionSupervisor) resetLivenessFloor(session *managedAgentSession, process RuntimeProcess) {
+	session.lastActivityAt = s.now()
+	session.lastActivitySeq = process.ActivitySeq()
+}
+
+// It returns true iff the generation advanced this call (a genuinely new frame).
+func (s *agentSessionSupervisor) observeActivity(session *managedAgentSession, process RuntimeProcess) bool {
+	if seq := process.ActivitySeq(); seq != session.lastActivitySeq {
+		session.lastActivitySeq = seq
+		session.lastActivityAt = s.now()
+		return true
+	}
+	return false
 }
 
 func (s *agentSessionSupervisor) publish(agentID string, payload updateAgentSessionRequest) {

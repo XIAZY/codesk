@@ -288,6 +288,70 @@ func TestClaudeStartTurnWithoutSpawnFails(t *testing.T) {
 	}
 }
 
+// Item #5 liveness, blocker 25: the Claude read boundary increments the activity
+// generation BEFORE the synchronous logf, so a contended/blocked log sink cannot
+// stall liveness for a demonstrably-live runtime. Proven by holding the global log
+// mutex and asserting ActivitySeq advances WHILE readLoop is still blocked on the
+// log. Moving noteActivity below logf makes this RED.
+func TestClaudeReadBoundaryStampsActivityBeforeBlockedLog(t *testing.T) {
+	logg, err := openAgentLog(Config{DataDir: t.TempDir()}, "agent_claude")
+	if err != nil {
+		t.Fatalf("open agent log: %v", err)
+	}
+	process := &claudeRuntimeProcess{events: make(chan RuntimeEvent, 4), log: logg}
+	agentLogWriteMu.Lock()
+	readDone := make(chan struct{})
+	go func() {
+		process.readLoop(strings.NewReader(`{"type":"telemetry_unmapped"}` + "\n"))
+		close(readDone)
+	}()
+	// ActivitySeq must advance while the read loop is still blocked on the log write.
+	deadline := time.After(2 * time.Second)
+	for process.ActivitySeq() == 0 {
+		select {
+		case <-deadline:
+			agentLogWriteMu.Unlock()
+			t.Fatal("ActivitySeq must advance before the (blocked) log write completes")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	select {
+	case <-readDone:
+		agentLogWriteMu.Unlock()
+		t.Fatal("readLoop finished before the log was released — cannot prove increment-before-log ordering")
+	default:
+	}
+	agentLogWriteMu.Unlock()
+	<-readDone
+}
+
+// Item #5 liveness, row 4: a syntactically valid frame whose type the parser does
+// NOT map still proves the runtime is alive, so it must advance the activity
+// generation at the read boundary. Liveness is syntactic, not semantic — it must
+// not depend on which frame types the parser currently recognizes.
+func TestClaudeReadBoundaryUnknownValidFrameRefreshesLiveness(t *testing.T) {
+	process := &claudeRuntimeProcess{events: make(chan RuntimeEvent, 4)}
+	if process.ActivitySeq() != 0 {
+		t.Fatalf("precondition: expected zero activity generation, got %d", process.ActivitySeq())
+	}
+	// Well-formed JSON object, but "type" is one the parser has no case for.
+	process.readLoop(strings.NewReader(`{"type":"telemetry_unmapped","progress":0.5}` + "\n"))
+	if process.ActivitySeq() == 0 {
+		t.Fatal("an unknown-but-valid frame must advance the activity generation at the read boundary")
+	}
+}
+
+// Item #5 liveness, row 5: malformed output must NOT advance the activity
+// generation — a process spewing junk or partial bytes cannot manufacture a
+// heartbeat and mask a wedge.
+func TestClaudeReadBoundaryMalformedFrameDoesNotRefreshLiveness(t *testing.T) {
+	process := &claudeRuntimeProcess{events: make(chan RuntimeEvent, 4)}
+	process.readLoop(strings.NewReader("{ this is not valid json\n"))
+	if process.ActivitySeq() != 0 {
+		t.Fatalf("a malformed frame must not advance the activity generation, got %d", process.ActivitySeq())
+	}
+}
+
 // A full events channel must never lose a lifecycle event (task #12). The old
 // emit dropped on full, so a dropped turn-end wedged the session as "working"
 // forever with no external cause. This pins the guarantee at the readLoop

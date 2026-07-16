@@ -46,6 +46,10 @@ type codexAppServer struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	nextID atomic.Int64
+	// lastActivity is the count of valid JSON-RPC frames the read loop has decoded,
+	// incremented atomically (one Add per valid frame, no lock) as the activity
+	// generation the supervisor heartbeat polls. 0 means none decoded yet.
+	lastActivity atomic.Int64
 
 	mu         sync.Mutex
 	pending    map[int64]chan appServerResponse
@@ -368,10 +372,21 @@ func (c *codexAppServer) readLoop(stdout io.Reader) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	for scanner.Scan() {
 		line := append([]byte(nil), scanner.Bytes()...)
+		// Liveness at the LITERAL read boundary: increment the activity generation the
+		// instant a syntactically valid JSON-object frame is decoded — BEFORE the
+		// synchronous logf (log/global-write mutexes + file I/O) and before dispatch —
+		// via the SAME shared object validator as the Claude boundary. A contended log
+		// sink must never stall liveness for a demonstrably-live runtime (blocker 17);
+		// `null` and malformed input are non-objects and never count (blocker 2).
+		if isValidRuntimeFrame(line) {
+			c.noteActivity()
+		}
 		c.logf("jsonrpc recv %s", string(line))
 		var raw map[string]json.RawMessage
-		if err := json.Unmarshal(line, &raw); err != nil {
-			c.logf("jsonrpc recv malformed bytes=%d", len(line))
+		if err := json.Unmarshal(line, &raw); err != nil || raw == nil {
+			// Not a JSON-RPC object (malformed, or valid-but-non-object like `null`):
+			// nothing to dispatch. Liveness was already (correctly) not counted above.
+			c.logf("jsonrpc recv non-object bytes=%d", len(line))
 			continue
 		}
 		if idRaw, ok := raw["id"]; ok {
@@ -478,6 +493,16 @@ func (c *codexAppServer) ExitInfo() RuntimeExitInfo {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.exitInfo
+}
+
+// noteActivity records that a valid JSON-RPC frame was just decoded (read
+// boundary) by advancing the activity generation counter.
+func (c *codexAppServer) noteActivity() {
+	c.lastActivity.Add(1)
+}
+
+func (c *codexAppServer) ActivitySeq() uint64 {
+	return uint64(c.lastActivity.Load())
 }
 
 func (c *codexAppServer) handleServerRequest(payload []byte) {

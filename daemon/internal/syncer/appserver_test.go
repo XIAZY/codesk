@@ -191,6 +191,38 @@ func TestCodexRuntimeStartFailureAndSupervisorStopJoinChild(t *testing.T) {
 	}
 }
 
+// Item #5 liveness, blockers 2/17 (Codex read boundary): an unmapped-but-valid
+// JSON-RPC object advances the activity generation, while `null` (valid JSON but
+// not an object) and malformed input do NOT — the same object-frame contract as
+// the Claude boundary, via the shared validator, stamped before dispatch.
+func TestCodexReadBoundaryStampsActivityOnObjectFramesOnly(t *testing.T) {
+	cases := []struct {
+		name    string
+		line    string
+		advance bool
+	}{
+		{"unmapped_object", `{"telemetry":"unmapped","progress":0.5}`, true},
+		{"mapped_notification", `{"method":"turn/started","params":{}}`, true},
+		{"empty_object", `{}`, true},
+		{"null", `null`, false},
+		{"array", `[1,2,3]`, false},
+		{"number", `42`, false},
+		{"string", `"hello"`, false},
+		{"malformed", `{ not json`, false},
+		{"empty_line", ``, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCodexAppServer(Config{DataDir: t.TempDir()}, t.TempDir(), "", "agent_codex")
+			c.readLoop(strings.NewReader(tc.line + "\n"))
+			advanced := c.ActivitySeq() > 0
+			if advanced != tc.advance {
+				t.Fatalf("line %q: activity advanced=%v, want %v (only a JSON object frame counts)", tc.line, advanced, tc.advance)
+			}
+		})
+	}
+}
+
 func TestCodexRuntimePreStartFailureBroadcastsWithoutWaiting(t *testing.T) {
 	cfg := Config{CodexCommand: filepath.Join(t.TempDir(), "missing-codex"), DataDir: t.TempDir()}
 	runtime, err := newCodexDriver(cfg).Spawn(context.Background(), RuntimeSpawnSpec{
@@ -447,6 +479,66 @@ func assertAppServerEventsClosed(t *testing.T, events <-chan appServerEvent) {
 			}
 		case <-time.After(time.Second):
 			t.Fatal("app-server events did not close")
+		}
+	}
+}
+
+// Item #5 liveness, blocker 25: the Codex read boundary increments the activity
+// generation BEFORE the synchronous logf — a blocked log sink cannot stall
+// liveness. Holding the global log mutex, ActivitySeq must advance while readLoop
+// is still blocked on the log. Moving noteActivity below logf makes this RED.
+func TestCodexReadBoundaryStampsActivityBeforeBlockedLog(t *testing.T) {
+	logg, err := openAgentLog(Config{DataDir: t.TempDir()}, "agent_codex")
+	if err != nil {
+		t.Fatalf("open agent log: %v", err)
+	}
+	c := newCodexAppServer(Config{DataDir: t.TempDir()}, t.TempDir(), "", "agent_codex")
+	c.log = logg
+	agentLogWriteMu.Lock()
+	readDone := make(chan struct{})
+	go func() {
+		c.readLoop(strings.NewReader(`{"telemetry":"unmapped"}` + "\n"))
+		close(readDone)
+	}()
+	deadline := time.After(2 * time.Second)
+	for c.ActivitySeq() == 0 {
+		select {
+		case <-deadline:
+			agentLogWriteMu.Unlock()
+			t.Fatal("ActivitySeq must advance before the (blocked) log write completes")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	select {
+	case <-readDone:
+		agentLogWriteMu.Unlock()
+		t.Fatal("readLoop finished before the log was released — cannot prove increment-before-log ordering")
+	default:
+	}
+	agentLogWriteMu.Unlock()
+	<-readDone
+}
+
+// The shared read-boundary validator both drivers gate on, pinned directly.
+func TestIsValidRuntimeFrame(t *testing.T) {
+	cases := []struct {
+		line string
+		want bool
+	}{
+		{`{"a":1}`, true},
+		{`{}`, true},
+		{`  {"x":true}  `, true},
+		{`null`, false},
+		{`[1]`, false},
+		{`42`, false},
+		{`"s"`, false},
+		{`{ broken`, false},
+		{``, false},
+		{`   `, false},
+	}
+	for _, tc := range cases {
+		if got := isValidRuntimeFrame([]byte(tc.line)); got != tc.want {
+			t.Fatalf("isValidRuntimeFrame(%q) = %v, want %v", tc.line, got, tc.want)
 		}
 	}
 }

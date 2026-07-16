@@ -2,6 +2,7 @@ package notty
 
 import (
 	"database/sql"
+	"fmt"
 	"net/http"
 	"sync"
 	"testing"
@@ -211,6 +212,128 @@ func TestUpdateAgentSessionAcceptsFailedStatusPostgres(t *testing.T) {
 	}
 }
 
+// TestUpdateAgentSessionAcceptsStalledStatusPostgres proves the daemon's item #5
+// stalled-liveness status is accepted through the real publish/store path (not
+// bounced as an unsupported status) and persists, carrying its diagnostic.
+func TestUpdateAgentSessionAcceptsStalledStatusPostgres(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	store := newPostgresTestWorkspaceStore(t, database)
+	seedCodexDaemonRuntime(t, store)
+	user := seedTestUser(t, store)
+	meta := OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"}
+
+	agent, err := store.CreateAgent(CreateAgentRequest{Handle: "stalled-agent", Name: "Stalled Agent", Role: "durable", Kind: "codex"}, meta)
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	agentMeta := OperationMeta{ActorID: agent.ID, ActorType: "agent", Source: "test"}
+
+	updated, err := store.UpdateAgentSession(agent.ID, UpdateAgentSessionRequest{
+		Status:          "stalled",
+		CurrentActivity: "Stalled: no runtime activity for 15m0s during turn turn_1",
+	}, agentMeta)
+	if err != nil {
+		t.Fatalf("update session to stalled: %v", err)
+	}
+	if updated.Status != "stalled" {
+		t.Fatalf("status = %q, want stalled", updated.Status)
+	}
+	if updated.CurrentActivity != "Stalled: no runtime activity for 15m0s during turn turn_1" {
+		t.Fatalf("activity = %q, want the published stall diagnostic", updated.CurrentActivity)
+	}
+
+	// A second update re-reads current DB state, so a bare heartbeat proves
+	// `stalled` persisted rather than only round-tripping.
+	reloaded, err := store.UpdateAgentSession(agent.ID, UpdateAgentSessionRequest{
+		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}, agentMeta)
+	if err != nil {
+		t.Fatalf("reload session: %v", err)
+	}
+	if reloaded.Status != "stalled" {
+		t.Fatalf("reloaded status = %q, want stalled to persist", reloaded.Status)
+	}
+}
+
+// TestUpdateAgentSessionHeartbeatOnlyProducesNoActivityAndPreservesFields proves
+// item #5 blockers 6/15/16: the daemon's 60s heartbeat republish (which advances
+// LastHeartbeatAt but changes no semantic field) must NOT create an activity row —
+// activities are never trimmed — and a heartbeat-only update must PRESERVE the
+// status, turn, and stalled diagnostic; a real transition still emits exactly one.
+func TestUpdateAgentSessionHeartbeatOnlyProducesNoActivityAndPreservesFields(t *testing.T) {
+	database := newPostgresTestDatabase(t)
+	db := database.DB
+	store := newPostgresTestWorkspaceStore(t, database)
+	seedCodexDaemonRuntime(t, store)
+	user := seedTestUser(t, store)
+	workspaceID := store.WorkspaceID()
+	meta := OperationMeta{ActorID: user.ID, ActorType: "human", Source: "test"}
+
+	agent, err := store.CreateAgent(CreateAgentRequest{Handle: "hb-agent", Name: "HB Agent", Role: "durable", Kind: "codex"}, meta)
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	agentMeta := OperationMeta{ActorID: agent.ID, ActorType: "agent", Source: "test"}
+	diagnostic := "Stalled: no runtime activity for 15m0s during turn turn_1"
+	if _, err := store.UpdateAgentSession(agent.ID, UpdateAgentSessionRequest{Status: "stalled", CurrentTurnID: "turn_1", CurrentActivity: diagnostic}, agentMeta); err != nil {
+		t.Fatalf("stall transition: %v", err)
+	}
+	baseline, err := listActivitiesPostgres(db, workspaceID)
+	if err != nil {
+		t.Fatalf("list baseline: %v", err)
+	}
+
+	// Two heartbeat-only updates (LastHeartbeatAt only): no status/turn/activity.
+	for i := 0; i < 2; i++ {
+		updated, err := store.UpdateAgentSession(agent.ID, UpdateAgentSessionRequest{LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano)}, agentMeta)
+		if err != nil {
+			t.Fatalf("heartbeat %d: %v", i, err)
+		}
+		if updated.Status != "stalled" || updated.CurrentTurnID != "turn_1" || updated.CurrentActivity != diagnostic {
+			t.Fatalf("heartbeat-only must preserve status/turn/diagnostic, got status=%q turn=%q activity=%q", updated.Status, updated.CurrentTurnID, updated.CurrentActivity)
+		}
+	}
+	afterHeartbeats, err := listActivitiesPostgres(db, workspaceID)
+	if err != nil {
+		t.Fatalf("list after heartbeats: %v", err)
+	}
+	if len(afterHeartbeats) != len(baseline) {
+		t.Fatalf("heartbeat-only updates must create no activity rows: baseline=%d after=%d", len(baseline), len(afterHeartbeats))
+	}
+
+	// Blocker 20: the same-status path (the daemon re-sending Status:"stalled" with
+	// omitted turn/activity, as the stalled heartbeat does) is NOT a transition — it
+	// must preserve the turn + diagnostic and create no activity row.
+	for i := 0; i < 2; i++ {
+		updated, err := store.UpdateAgentSession(agent.ID, UpdateAgentSessionRequest{Status: "stalled", LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano)}, agentMeta)
+		if err != nil {
+			t.Fatalf("same-status stalled heartbeat %d: %v", i, err)
+		}
+		if updated.Status != "stalled" || updated.CurrentTurnID != "turn_1" || updated.CurrentActivity != diagnostic {
+			t.Fatalf("same-status stalled heartbeat must preserve turn/diagnostic, got status=%q turn=%q activity=%q", updated.Status, updated.CurrentTurnID, updated.CurrentActivity)
+		}
+	}
+	afterSameStatus, err := listActivitiesPostgres(db, workspaceID)
+	if err != nil {
+		t.Fatalf("list after same-status: %v", err)
+	}
+	if len(afterSameStatus) != len(baseline) {
+		t.Fatalf("same-status stalled heartbeats must create no activity rows: baseline=%d after=%d", len(baseline), len(afterSameStatus))
+	}
+
+	// A real status transition still emits exactly one activity.
+	if _, err := store.UpdateAgentSession(agent.ID, UpdateAgentSessionRequest{Status: "idle"}, agentMeta); err != nil {
+		t.Fatalf("idle transition: %v", err)
+	}
+	afterTransition, err := listActivitiesPostgres(db, workspaceID)
+	if err != nil {
+		t.Fatalf("list after transition: %v", err)
+	}
+	if len(afterTransition) != len(baseline)+1 {
+		t.Fatalf("a real transition must emit exactly one activity: baseline=%d after=%d", len(baseline), len(afterTransition))
+	}
+}
+
 // TestActivitiesConcurrentWritesPostgres fires many activity-producing
 // operations concurrently and asserts each lands exactly one row — no lost or
 // duplicated activities from the shared pending buffer and post-commit clear.
@@ -276,7 +399,10 @@ func TestActivitiesReadWindowPreservedPostgres(t *testing.T) {
 	baseline := activityCount(t, db, workspaceID)
 	const extra = 120
 	for i := 0; i < extra; i++ {
-		if _, err := store.UpdateAgentSession(agent.ID, UpdateAgentSessionRequest{Status: "working"}, OperationMeta{ActorID: agent.ID, ActorType: "agent", Source: "test"}); err != nil {
+		// Each update carries a DISTINCT semantic field (CurrentActivity) so it is a
+		// real session change that produces one activity — a heartbeat-only or
+		// unchanged repeat is intentionally suppressed now (item #5 blocker 6).
+		if _, err := store.UpdateAgentSession(agent.ID, UpdateAgentSessionRequest{Status: "working", CurrentActivity: fmt.Sprintf("Working step %d", i)}, OperationMeta{ActorID: agent.ID, ActorType: "agent", Source: "test"}); err != nil {
 			t.Fatalf("update session %d: %v", i, err)
 		}
 	}

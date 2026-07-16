@@ -922,7 +922,15 @@ describe("AgentDetailModal live status", () => {
     workspaceRoot: "", workingDirectory: "", prompt: "", status, desiredStatus: "running", updatedAt: "now",
   });
   const props = { api: {} as never, workspaceId: "ws", agentId: "a1", daemons: [daemon], agentEvents: [], onChanged: vi.fn() };
-  const modalStatus = (container: HTMLElement) => (container.querySelector(".modal-identity .col span")?.textContent ?? "").trim();
+  // The modal shows the short label in the chip and the full detail in a separate
+  // wrapping .status-detail span (blocker 21); combine both for the vocabulary checks.
+  const modalChipEl = (container: HTMLElement) => container.querySelector(".modal-identity .col .chip");
+  const modalDetailEl = (container: HTMLElement) => container.querySelector(".modal-identity .col .status-detail");
+  const modalStatus = (container: HTMLElement) => {
+    const chip = modalChipEl(container)?.textContent ?? "";
+    const detail = modalDetailEl(container)?.textContent ?? "";
+    return `${chip} ${detail}`.trim();
+  };
 
   it("reflects a live agent.updated status change on the open modal instead of a click-time snapshot", () => {
     // No active run, so the online daemon falls through to the Idle vocabulary row.
@@ -941,6 +949,23 @@ describe("AgentDetailModal live status", () => {
     // The run completes in live state (no agent.updated). Status derives from runs too, so it moves to Idle.
     rerender(<AgentDetailModal {...props} agents={[baseAgent]} runs={[run("completed")]} onClose={vi.fn()} />);
     expect(modalStatus(container)).toContain("Standing by");
+  });
+
+  it("renders a stalled agent with the stalled chip tone and the diagnostic in a separate wrapping detail (item #5 blocker 21)", () => {
+    const diagnostic = "Stalled: no runtime activity for 15m0s during turn turn_1";
+    const { container } = render(
+      <AgentDetailModal {...props} agents={[{ ...baseAgent, status: "stalled", currentActivity: diagnostic }]} runs={[]} onClose={vi.fn()} />,
+    );
+    const chip = modalChipEl(container);
+    // The chip carries the short label + the `stalled` tone class — never the long
+    // diagnostic (which would overflow the nowrap chip on a 320px modal).
+    expect(chip?.textContent?.trim()).toBe("Stalled");
+    expect(chip?.className).toContain("stalled");
+    expect(chip?.textContent).not.toContain("no runtime activity");
+    // The full diagnostic renders OUTSIDE the chip, in the wrapping status-detail span.
+    const detail = modalDetailEl(container);
+    expect(detail?.textContent).toContain(diagnostic);
+    expect(detail?.className).toContain("status-detail");
   });
 
   it("closes when the agent is removed from the array (the reducer's agent.deleted shape)", () => {
