@@ -62,6 +62,15 @@ type fakeRuntimeProcess struct {
 	startTurnErr     error
 	stopEntered      chan struct{}
 	stopRelease      chan struct{}
+
+	// Optional SteerTurn interception: when steerEntered/steerRelease are set, a
+	// SteerTurn write signals entry then blocks until released, WITHOUT holding
+	// p.mu, so a test can drive a concurrent supervisor-state transition (a new
+	// turn, death, generation replacement, or re-steer) into the window between the
+	// steer reservation and its failure rollback. p.steerErr is returned after
+	// release.
+	steerEntered chan struct{}
+	steerRelease chan struct{}
 }
 
 func newFakeRuntimeDriver() *fakeRuntimeDriver {
@@ -225,6 +234,23 @@ func (p *fakeRuntimeProcess) WriteStdin(ctx context.Context, input RuntimeInput)
 		p.nextTurn++
 		return RuntimeWriteResult{TurnID: fmt.Sprintf("turn_%d", p.nextTurn)}, nil
 	case RuntimeInputSteerTurn:
+		entered := p.steerEntered
+		releaseCh := p.steerRelease
+		if entered != nil || releaseCh != nil {
+			// Drop the lock while blocking so the test can drive a concurrent
+			// supervisor-state transition into the reservation->rollback window.
+			p.mu.Unlock()
+			if entered != nil {
+				select {
+				case entered <- struct{}{}:
+				default:
+				}
+			}
+			if releaseCh != nil {
+				<-releaseCh
+			}
+			p.mu.Lock()
+		}
 		return RuntimeWriteResult{}, p.steerErr
 	case RuntimeInputInterruptTurn:
 		return RuntimeWriteResult{}, nil
@@ -257,6 +283,37 @@ func (p *fakeRuntimeProcess) ActivitySeq() uint64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.activitySeq
+}
+
+// waitForSteerEntry receives the steer-entry signal with a bounded timeout, so a lost
+// signal fails the test fast instead of deadlocking. Paired with a capacity-1
+// steerEntered channel (the fake's nonblocking send always lands into the buffer).
+func waitForSteerEntry(t *testing.T, ch <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the steer write to enter (lost entry signal)")
+	}
+}
+
+// setSteerErr updates the error a SteerTurn write returns, under p.mu so it is
+// safe to flip while a blocked steer is parked on steerRelease.
+func (p *fakeRuntimeProcess) setSteerErr(err error) {
+	p.mu.Lock()
+	p.steerErr = err
+	p.mu.Unlock()
+}
+
+// steeredForMeSignature reads a session's reserved for-me steer latch under the
+// supervisor lock — white-box access for the steer-rollback fence tests.
+func (s *agentSessionSupervisor) steeredForMeSignature(agentID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if session := s.sessions[agentID]; session != nil {
+		return session.steeredForMeSig
+	}
+	return ""
 }
 
 // advanceActivity simulates the driver decoding one more valid frame.
@@ -799,6 +856,201 @@ func TestAgentSessionNoActiveTurnSteerErrorIsNotFatal(t *testing.T) {
 	}
 	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "for-me", "for-me:v1", "general:v1"); err != nil {
 		t.Fatalf("no-active-turn steer should not fail automation: %v", err)
+	}
+}
+
+// steerRetryTestSupervisor starts one active turn (turn_1) with no for-me
+// signature, so a subsequent for-me change steers the live turn. Returns the
+// supervisor, the running agent, and its fake process.
+func steerRetryTestSupervisor(t *testing.T) (*agentSessionSupervisor, *agent, *fakeRuntimeProcess) {
+	t.Helper()
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "active", "", "general:v1"); err != nil {
+		t.Fatalf("schedule active turn: %v", err)
+	}
+	process := factory.only(t)
+	if len(process.inputsByKind(RuntimeInputStartTurn)) != 1 {
+		t.Fatalf("expected one active turn start")
+	}
+	return supervisor, current, process
+}
+
+// A steer that fails with a non-"no active turn" error must roll back the
+// optimistic steer reservation so the SAME for-me signature can steer again.
+func TestAgentSessionFailedSteerRetriesSameInboxSignature(t *testing.T) {
+	supervisor, current, process := steerRetryTestSupervisor(t)
+	defer supervisor.Shutdown()
+
+	process.setSteerErr(fmt.Errorf("runtime steer failed: transient write error"))
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "for-me", "for-me:v1", "general:v1"); err == nil {
+		t.Fatalf("expected the transient steer failure to surface")
+	}
+	if got := len(process.inputsByKind(RuntimeInputSteerTurn)); got != 1 {
+		t.Fatalf("expected exactly one steer attempt, got %d", got)
+	}
+	if sig := supervisor.steeredForMeSignature("agent_1"); sig != "" {
+		t.Fatalf("expected the steer latch cleared after failure, got %q", sig)
+	}
+
+	process.setSteerErr(nil)
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "for-me retry", "for-me:v1", "general:v1"); err != nil {
+		t.Fatalf("retry schedule: %v", err)
+	}
+	if got := len(process.inputsByKind(RuntimeInputSteerTurn)); got != 2 {
+		t.Fatalf("expected the same for-me signature to re-steer after a failed steer, got %d steers", got)
+	}
+}
+
+// A delayed/duplicate TurnStarted for the SAME turn advances turnOpSeq while the
+// steer is in flight, without superseding it (activeTurn and the reserved
+// signature are unchanged). The failure rollback MUST still clear and retry — a
+// turnOpSeq equality fence would wrongly strand the signature.
+func TestAgentSessionSameTurnStartedDuringSteerStillClearsAndRetries(t *testing.T) {
+	supervisor, current, process := steerRetryTestSupervisor(t)
+	defer supervisor.Shutdown()
+
+	process.steerEntered = make(chan struct{}, 1)
+	process.steerRelease = make(chan struct{})
+	process.setSteerErr(fmt.Errorf("runtime steer failed: transient write error"))
+
+	done := make(chan error, 1)
+	go func() {
+		done <- supervisor.ScheduleNotificationTurn(context.Background(), current, "for-me", "for-me:v1", "general:v1")
+	}()
+	waitForSteerEntry(t, process.steerEntered)
+	// Same-turn TurnStarted: bumps turnOpSeq, leaves activeTurn == turn_1.
+	supervisor.markWorking("agent_1", process, "turn_1")
+	close(process.steerRelease)
+	if err := <-done; err == nil {
+		t.Fatalf("expected the transient steer failure to surface")
+	}
+
+	if sig := supervisor.steeredForMeSignature("agent_1"); sig != "" {
+		t.Fatalf("same-turn nonce advance must still clear the steer latch, got %q", sig)
+	}
+	process.setSteerErr(nil)
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "for-me retry", "for-me:v1", "general:v1"); err != nil {
+		t.Fatalf("retry schedule: %v", err)
+	}
+	if got := len(process.inputsByKind(RuntimeInputSteerTurn)); got != 2 {
+		t.Fatalf("expected same-signature re-steer after a same-turn nonce advance, got %d steers", got)
+	}
+}
+
+// When a real supersession lands while the steer is in flight, the failure
+// rollback must NOT clear the newer delivery state. Each case isolates exactly
+// one authority term of the fence so removing that term reddens its row.
+func TestAgentSessionStaleSteerFailureDoesNotClearNewDeliveryState(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(s *agentSessionSupervisor)
+		wantSig string
+	}{
+		{
+			// writable() generation term (process identity): a replaced generation.
+			name: "replaced_process",
+			mutate: func(s *agentSessionSupervisor) {
+				s.mu.Lock()
+				s.sessions["agent_1"].process = &fakeRuntimeProcess{events: make(chan RuntimeEvent, 1)}
+				s.mu.Unlock()
+			},
+			wantSig: "for-me:v1",
+		},
+		{
+			// writable() generation term (!dead): a died generation.
+			name: "dead_generation",
+			mutate: func(s *agentSessionSupervisor) {
+				s.mu.Lock()
+				s.sessions["agent_1"].dead = true
+				s.mu.Unlock()
+			},
+			wantSig: "for-me:v1",
+		},
+		{
+			// activeTurn==turnID term: the turn advanced/settled.
+			name: "changed_turn",
+			mutate: func(s *agentSessionSupervisor) {
+				s.mu.Lock()
+				s.sessions["agent_1"].activeTurn = "turn_2"
+				s.mu.Unlock()
+			},
+			wantSig: "for-me:v1",
+		},
+		{
+			// steeredForMeSig==forMeSig term: a newer re-steer reserved a different sig.
+			name: "changed_signature",
+			mutate: func(s *agentSessionSupervisor) {
+				s.mu.Lock()
+				s.sessions["agent_1"].steeredForMeSig = "for-me:v2"
+				s.mu.Unlock()
+			},
+			wantSig: "for-me:v2",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			supervisor, current, process := steerRetryTestSupervisor(t)
+			defer supervisor.Shutdown()
+
+			process.steerEntered = make(chan struct{}, 1)
+			process.steerRelease = make(chan struct{})
+			process.setSteerErr(fmt.Errorf("runtime steer failed: transient write error"))
+
+			done := make(chan error, 1)
+			go func() {
+				done <- supervisor.ScheduleNotificationTurn(context.Background(), current, "for-me", "for-me:v1", "general:v1")
+			}()
+			waitForSteerEntry(t, process.steerEntered)
+			tc.mutate(supervisor)
+			close(process.steerRelease)
+			<-done
+
+			if got := supervisor.steeredForMeSignature("agent_1"); got != tc.wantSig {
+				t.Fatalf("stale steer failure must preserve newer state: want steer latch %q, got %q", tc.wantSig, got)
+			}
+		})
+	}
+}
+
+// Composition cross-fire (#180 admission backoff + #181 steer rollback): the two fences
+// operate on disjoint fields. #181's steer rollback reads writable/activeTurn/
+// steeredForMeSig and writes ONLY steeredForMeSig; it must never perturb #180's
+// turnStartAttempts / turnBackoffUntil. (Note: #180's -32001 rejection installs backoff
+// but does NOT bump turnOpSeq, so this is field-disjointness, not a nonce race — the two
+// only genuinely co-locate in markWorking, proven by MarkWorkingResetsAdmission and
+// SameTurnStartedDuringSteer both passing on the merged body.)
+func TestSteerRollbackDoesNotPerturbAdmissionBackoff(t *testing.T) {
+	supervisor, current, process := steerRetryTestSupervisor(t)
+	defer supervisor.Shutdown()
+
+	// Seed pre-existing #180 admission backoff on the live session.
+	wantUntil := time.Now().Add(30 * time.Second)
+	supervisor.mu.Lock()
+	cs := supervisor.sessions["agent_1"]
+	cs.turnStartAttempts = 2
+	cs.turnBackoffUntil = wantUntil
+	supervisor.mu.Unlock()
+
+	process.setSteerErr(fmt.Errorf("runtime steer failed: transient write error"))
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "for-me", "for-me:v1", "general:v1"); err == nil {
+		t.Fatalf("expected the transient steer failure to surface")
+	}
+	// The steer rollback ran (latch cleared)...
+	if sig := supervisor.steeredForMeSignature("agent_1"); sig != "" {
+		t.Fatalf("steer latch should have cleared, got %q", sig)
+	}
+	// ...and #180's admission backoff is untouched by it.
+	supervisor.mu.Lock()
+	gotAttempts := supervisor.sessions["agent_1"].turnStartAttempts
+	gotUntil := supervisor.sessions["agent_1"].turnBackoffUntil
+	supervisor.mu.Unlock()
+	if gotAttempts != 2 || !gotUntil.Equal(wantUntil) {
+		t.Fatalf("steer rollback must not perturb #180 admission backoff: turnStartAttempts 2->%d, turnBackoffUntil %v->%v", gotAttempts, wantUntil, gotUntil)
 	}
 }
 

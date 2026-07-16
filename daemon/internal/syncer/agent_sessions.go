@@ -1221,6 +1221,25 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 				TurnID:     turnID,
 				Text:       forMeSteerMessage,
 			}); err != nil {
+				// Roll back the optimistic steer reservation ONLY when this exact failed
+				// attempt is still the authoritative in-flight steer, so a retry of the same
+				// for-me signature is allowed. The steer completion identity is the resident
+				// live process + the exact active turn + the exact reserved signature.
+				// turnOpSeq is deliberately NOT part of this fence: it is the StartTurn
+				// completion token, and a legitimate same-turn TurnStarted(turnID) republished
+				// while this SteerTurn was in flight advances turnOpSeq without superseding the
+				// steer — markWorking assigns activeTurn=turnID and bumps the nonce with no
+				// same-turn early-return — so a nonce equality guard would wrongly strand
+				// steeredForMeSig and block the retry. writable() excludes a replaced/dead
+				// generation; activeTurn==turnID excludes a settled/replaced/newer turn;
+				// steeredForMeSig==forMeSig excludes a newer re-steer of a different signature.
+				s.mu.Lock()
+				if currentSession := s.sessions[agentID]; writable(currentSession, process) &&
+					currentSession.activeTurn == turnID &&
+					currentSession.steeredForMeSig == forMeSig {
+					currentSession.steeredForMeSig = ""
+				}
+				s.mu.Unlock()
 				appendAgentLog(s.cfg, agentID, "turn steer failed session=%s turn=%s err=%v", sessionID, turnID, err)
 				if isNoActiveTurnToSteerError(err) {
 					return nil
