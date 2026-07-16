@@ -33,6 +33,7 @@ func newCodexAppServer(cfg Config, workdir string, toolToken string, agentID str
 		stopping:   make(chan struct{}),
 		readDone:   make(chan struct{}),
 		stderrDone: make(chan struct{}),
+		exited:     make(chan struct{}),
 	}
 }
 
@@ -54,10 +55,18 @@ type codexAppServer struct {
 	stopping   chan struct{}
 	readDone   chan struct{}
 	stderrDone chan struct{}
+	exited     chan struct{}
+	exitOnce   sync.Once
+	eventsOnce sync.Once
+	logOnce    sync.Once
+	stopErr    error
 	log        *agentLog
 	expected   bool            // true once Stop() deliberately killed the process
 	stderrRing []string        // bounded ring of the most recent stderr lines
 	exitInfo   RuntimeExitInfo // set by the exit goroutine before events closes
+
+	// Test-only ordering seam. Production leaves this nil.
+	testHookBeforeExitComplete func()
 }
 
 type appServerResponse struct {
@@ -70,59 +79,62 @@ type appServerResponse struct {
 }
 
 func (c *codexAppServer) Start(ctx context.Context) error {
+	select {
+	case <-c.stopping:
+		return errors.New("codex app-server is stopped")
+	default:
+	}
 	if agentLog, err := openAgentLog(c.cfg, c.agentID); err == nil {
 		c.log = agentLog
 		c.logf("starting codex app-server command=%s agent=%s workdir=%s", c.cfg.CodexCommand, c.agentID, c.workdir)
 	} else {
 		log.Printf("agent log open failed agent=%s data_dir=%s err=%v", c.agentID, c.cfg.DataDir, err)
 	}
-	cmd := exec.CommandContext(ctx, c.cfg.CodexCommand, "app-server")
+	// The context controls construction and the initialize handshake below. Once
+	// Start succeeds, the published RuntimeProcess owns this child until Stop.
+	// Binding the OS child to ctx would kill a healthy session when the supervisor
+	// cancels its per-attempt construction context immediately after publication.
+	cmd := exec.Command(c.cfg.CodexCommand, "app-server")
 	cmd.Dir = c.workdir
 	cmd.Env = append(os.Environ(), buildAgentToolEnv(c.cfg, c.toolToken)...)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		c.logf("stdin pipe failed err=%v", err)
-		c.closeLog()
+		c.completeWithoutProcess()
 		return err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		c.logf("stdout pipe failed err=%v", err)
-		c.closeLog()
+		_ = stdin.Close()
+		c.completeWithoutProcess()
 		return err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		c.logf("stderr pipe failed err=%v", err)
-		c.closeLog()
+		_ = stdin.Close()
+		_ = stdout.Close()
+		c.completeWithoutProcess()
 		return err
 	}
 	if err := cmd.Start(); err != nil {
 		c.logf("codex app-server start failed err=%v", err)
-		c.closeLog()
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = stderr.Close()
+		c.completeWithoutProcess()
 		return err
 	}
+	c.mu.Lock()
 	c.cmd = cmd
 	c.stdin = stdin
+	c.mu.Unlock()
 	c.logf("codex app-server started pid=%d", cmd.Process.Pid)
 	go c.readLoop(stdout)
 	go c.stderrLoop(stderr)
-	go func() {
-		// Drain stderr to its natural EOF BEFORE cmd.Wait(): Wait closes the pipes
-		// on process exit and does NOT wait for the reader goroutines, so calling
-		// it first truncates the scanner mid-line and drops the process's final
-		// diagnostic — the exact evidence death classification depends on. stderr
-		// EOF arrives on its own when the process exits, without Wait.
-		<-c.stderrDone
-		err := cmd.Wait()
-		c.logf("codex app-server exited err=%v", err)
-		// stderr is fully captured now, so the exit forensics are complete.
-		c.recordExitInfo(cmd, err)
-		c.done <- err
-		<-c.readDone
-		close(c.events)
-	}()
+	go c.waitForExit(cmd)
 	if _, err := c.request(ctx, "initialize", map[string]any{
 		"capabilities": map[string]any{"experimentalApi": true},
 		"clientInfo": map[string]string{
@@ -149,24 +161,52 @@ func (c *codexAppServer) logf(format string, args ...any) {
 }
 
 func (c *codexAppServer) closeLog() {
-	if c == nil || c.log == nil {
+	if c == nil {
 		return
 	}
-	c.log.Close()
+	c.logOnce.Do(func() {
+		if c.log != nil {
+			c.log.Close()
+		}
+	})
 }
 
 func (c *codexAppServer) Stop() error {
-	c.mu.Lock()
-	c.expected = true
-	c.mu.Unlock()
-	c.stopOnce.Do(func() { close(c.stopping) })
-	if c.cmd == nil || c.cmd.Process == nil {
+	if c == nil {
 		return nil
 	}
-	c.logf("stopping codex app-server pid=%d", c.cmd.Process.Pid)
-	defer c.closeLog()
-	_ = c.stdin.Close()
-	return c.cmd.Process.Kill()
+	c.stopOnce.Do(func() {
+		close(c.stopping)
+		c.mu.Lock()
+		// ExitInfo snapshots this bit after Wait. Set it before closing stdin or
+		// killing so every deliberate-stop exit is classified as expected.
+		c.expected = true
+		cmd := c.cmd
+		stdin := c.stdin
+		c.mu.Unlock()
+		if cmd == nil || cmd.Process == nil {
+			// A raw Stop before Start has no process/readers whose app event stream
+			// this layer can close safely. The RuntimeProcess wrapper closes its public
+			// stream; still broadcast terminal completion so later Stop calls cannot
+			// hang. Start's own pre-cmd.Start failures use completeWithoutProcess.
+			c.closeLog()
+			c.closeExited()
+			return
+		}
+		c.logf("stopping codex app-server pid=%d", cmd.Process.Pid)
+		if stdin != nil {
+			_ = stdin.Close()
+		}
+		if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			c.stopErr = err
+		}
+	})
+
+	// The exit goroutine owns Wait, reader drainage, ExitInfo, and channel
+	// closure. All Stop callers join that one broadcast completion; none consume
+	// the one-shot process result in done or hold c.mu while waiting.
+	<-c.exited
+	return c.stopErr
 }
 
 func (c *codexAppServer) Events() <-chan appServerEvent {
@@ -174,10 +214,44 @@ func (c *codexAppServer) Events() <-chan appServerEvent {
 }
 
 func (c *codexAppServer) PID() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.cmd == nil || c.cmd.Process == nil {
 		return 0
 	}
 	return c.cmd.Process.Pid
+}
+
+func (c *codexAppServer) waitForExit(cmd *exec.Cmd) {
+	// Drain stderr to its natural EOF BEFORE cmd.Wait(): Wait closes the pipes on
+	// process exit and does not wait for reader goroutines, so calling it first can
+	// truncate the final diagnostic that death classification depends on.
+	<-c.stderrDone
+	err := cmd.Wait()
+	c.logf("codex app-server exited err=%v", err)
+	c.recordExitInfo(cmd, err)
+	c.done <- err
+	<-c.readDone
+	if c.testHookBeforeExitComplete != nil {
+		c.testHookBeforeExitComplete()
+	}
+	c.closeEvents()
+	c.closeLog()
+	c.closeExited()
+}
+
+func (c *codexAppServer) completeWithoutProcess() {
+	c.closeEvents()
+	c.closeLog()
+	c.closeExited()
+}
+
+func (c *codexAppServer) closeEvents() {
+	c.eventsOnce.Do(func() { close(c.events) })
+}
+
+func (c *codexAppServer) closeExited() {
+	c.exitOnce.Do(func() { close(c.exited) })
 }
 
 func (c *codexAppServer) ThreadStart(ctx context.Context, cwd string, instructions string) (string, error) {

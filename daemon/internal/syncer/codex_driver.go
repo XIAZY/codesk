@@ -79,6 +79,7 @@ func (d *codexDriver) Spawn(ctx context.Context, spec RuntimeSpawnSpec) (Runtime
 		app:          app,
 		instructions: spec.Instructions,
 		events:       make(chan RuntimeEvent, 128),
+		eventsDone:   make(chan struct{}),
 		stopping:     make(chan struct{}),
 	}, nil
 }
@@ -87,9 +88,14 @@ type codexRuntimeProcess struct {
 	app          codexRuntimeApp
 	instructions string
 	events       chan RuntimeEvent
+	eventsDone   chan struct{}
+	eventsOnce   sync.Once
 	stopOnce     sync.Once
 	stopping     chan struct{}
 	stopErr      error
+
+	mu      sync.Mutex
+	started bool
 }
 
 func (p *codexRuntimeProcess) Start(ctx context.Context) error {
@@ -97,9 +103,12 @@ func (p *codexRuntimeProcess) Start(ctx context.Context) error {
 		return errors.New("codex runtime process is missing app-server")
 	}
 	if err := p.app.Start(ctx); err != nil {
-		close(p.events)
+		p.closeEvents()
 		return err
 	}
+	p.mu.Lock()
+	p.started = true
+	p.mu.Unlock()
 	go p.forwardEvents()
 	return nil
 }
@@ -114,6 +123,14 @@ func (p *codexRuntimeProcess) Stop() error {
 			p.stopErr = p.app.Stop()
 		}
 	})
+	p.mu.Lock()
+	started := p.started
+	p.mu.Unlock()
+	if !started {
+		// Start either never ran or failed before forwardEvents was launched.
+		p.closeEvents()
+	}
+	<-p.eventsDone
 	return p.stopErr
 }
 
@@ -174,7 +191,7 @@ func (p *codexRuntimeProcess) ExitInfo() RuntimeExitInfo {
 }
 
 func (p *codexRuntimeProcess) forwardEvents() {
-	defer close(p.events)
+	defer p.closeEvents()
 	for event := range p.app.Events() {
 		runtimeEvent, ok := codexRuntimeEvent(event)
 		if !ok {
@@ -191,6 +208,13 @@ func (p *codexRuntimeProcess) forwardEvents() {
 			// misclassify as a transient crash.
 		}
 	}
+}
+
+func (p *codexRuntimeProcess) closeEvents() {
+	p.eventsOnce.Do(func() {
+		close(p.events)
+		close(p.eventsDone)
+	})
 }
 
 func codexRuntimeEvent(event appServerEvent) (RuntimeEvent, bool) {

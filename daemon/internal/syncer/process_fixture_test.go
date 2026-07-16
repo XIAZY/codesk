@@ -15,6 +15,7 @@ const fakeProcessModeEnv = "NOTTY_SYNCER_FAKE_PROCESS"
 const (
 	fakeProcessCodexWithoutAppServer = "codex-without-app-server"
 	fakeProcessCodexLifecycleFlood   = "codex-lifecycle-flood"
+	fakeProcessCodexPersistent       = "codex-persistent"
 	fakeProcessClaude                = "claude"
 )
 
@@ -26,11 +27,89 @@ func TestMain(m *testing.M) {
 		os.Exit(runFakeCodexWithoutAppServer(os.Args[1:]))
 	case fakeProcessCodexLifecycleFlood:
 		os.Exit(runFakeCodexLifecycleFlood())
+	case fakeProcessCodexPersistent:
+		os.Exit(runFakeCodexPersistent(os.Args[1:]))
 	case fakeProcessClaude:
 		os.Exit(runFakeClaude(os.Args[1:]))
 	default:
 		os.Exit(m.Run())
 	}
+}
+
+func runFakeCodexPersistent(args []string) int {
+	if len(args) != 1 || args[0] != "app-server" {
+		return 2
+	}
+	scanner := bufio.NewScanner(os.Stdin)
+	encoder := json.NewEncoder(os.Stdout)
+	for scanner.Scan() {
+		var request struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &request); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		switch request.Method {
+		case "initialize":
+			if os.Getenv("FAKE_CODEX_BLOCK_INITIALIZE") == "1" {
+				continue
+			}
+			if os.Getenv("FAKE_CODEX_FAIL_INITIALIZE") == "1" {
+				if err := encoder.Encode(map[string]any{
+					"id":    request.ID,
+					"error": map[string]any{"code": -1, "message": "fake initialize failure"},
+				}); err != nil {
+					fmt.Fprintln(os.Stderr, err)
+					return 1
+				}
+				continue
+			}
+			if err := encoder.Encode(map[string]any{"id": request.ID, "result": map[string]any{}}); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return 1
+			}
+		case "initialized":
+		case "thread/start":
+			if err := encoder.Encode(map[string]any{
+				"id":     request.ID,
+				"result": map[string]any{"thread": map[string]string{"id": "thread_persistent"}},
+			}); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return 1
+			}
+		case "thread/resume":
+			if err := encoder.Encode(map[string]any{"id": request.ID, "result": map[string]any{}}); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return 1
+			}
+		case "turn/start":
+			if err := encoder.Encode(map[string]any{
+				"id":     request.ID,
+				"result": map[string]any{"turn": map[string]string{"id": "turn_after_cancel"}},
+			}); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return 1
+			}
+		default:
+			if len(request.ID) == 0 {
+				continue
+			}
+			if err := encoder.Encode(map[string]any{
+				"id":    request.ID,
+				"error": map[string]any{"code": -2, "message": "unsupported fake method"},
+			}); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return 1
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return 0
 }
 
 func fakeProcessCommand(t *testing.T, mode string) string {
