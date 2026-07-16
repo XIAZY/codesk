@@ -2568,11 +2568,13 @@ export function WorkspaceApp({
           onMemberInvited={() => onboarding.record("member_invited", "workspace")}
         />
       ) : null}
-      {/* One onboarding surface owns attention: while the chapter is open, the contextual
-          tip AND the checklist launcher are suspended (pure render gating — no seen/dismissed
-          flag recorded), so a single Escape can't close the chapter and silently ack an unseen
-          tip. Both restore the moment the chapter closes. */}
-      {onboarding.active && !chapterCardStep ? (
+      {/* One onboarding surface owns attention: while the chapter is OPEN (the session state,
+          not merely whether a card resolves), the contextual tip AND the checklist launcher are
+          suspended (pure render gating — no seen/dismissed flag recorded), so a single Escape
+          can't close the chapter and silently ack an unseen tip. Keying on chapterOpen (with the
+          hook's auto-close when live state leaves no card) keeps this coherent: the surfaces
+          never flicker back while the chapter is still logically open. */}
+      {onboarding.active && !onboarding.chapterOpen ? (
         <Onboarding
           step={onboarding.active}
           stepIndex={onboarding.stepIndex}
@@ -2592,7 +2594,7 @@ export function WorkspaceApp({
           onDismiss={onboarding.closeChapter}
         />
       ) : null}
-      {!chapterCardStep && shouldRenderOnboardingChecklist(rootNamespace.ready, onboarding.active?.presentation) ? (
+      {!onboarding.chapterOpen && shouldRenderOnboardingChecklist(rootNamespace.ready, onboarding.active?.presentation) ? (
         <OnboardingChecklist
           progress={onboarding.checklist}
           dismissed={onboarding.checklistDismissed}

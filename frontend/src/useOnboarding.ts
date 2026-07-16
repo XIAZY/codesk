@@ -173,6 +173,15 @@ export function useOnboarding({
     updateSession((current) => ({ ...current, chapterOpen: false }));
   }, [updateSession]);
 
+  // If the chapter is open but live state leaves no card (e.g. a member's only agent was
+  // removed before any run), close it — never linger half-open with the tip/checklist
+  // suspended behind nothing (Deniz's live-transition edge). Session-only, records no flag.
+  useEffect(() => {
+    if (enabled && session.chapterOpen && !chapter) {
+      updateSession((current) => ({ ...current, chapterOpen: false }));
+    }
+  }, [enabled, session.chapterOpen, chapter, updateSession]);
+
   // The chapter card to render right now: only when enabled, opened this session, and the
   // engine has a card for this role+state (null e.g. for a member with no agents).
   const chapterActive = enabled && session.chapterOpen ? chapter ?? null : null;

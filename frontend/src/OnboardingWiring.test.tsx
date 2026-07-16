@@ -280,6 +280,28 @@ describe("useOnboardingController — chapter open/close + card exposure (#56)",
     expect(result.current.chapterActive?.id).toBe("add-teammate-member");
     expect(result.current.chapterTotal).toBe(1);
   });
+
+  it("live-transition: an open chapter whose card nulls (last agent removed) auto-closes; reappearance stays closed", () => {
+    const { result, rerender } = renderHook(
+      (props: { workspaceState: WorkspaceState }) => useOnboardingController({ ...chapterBase, roles: ["member"], ...props }),
+      { initialProps: { workspaceState: workspaceState({ agents: [agent("a1")] }) } },
+    );
+    act(() => result.current.openChapter());
+    expect(result.current.chapterActive?.id).toBe("add-teammate-member");
+    expect(result.current.chapterOpen).toBe(true);
+
+    // The member's only agent is removed before any run → no card. The session must not linger
+    // open behind nothing (which would keep the tip/checklist suspended invisibly) — it auto-closes.
+    rerender({ workspaceState: workspaceState() });
+    expect(result.current.chapterActive).toBeNull();
+    expect(result.current.chapterOpen).toBe(false);
+
+    // A later agent reappears → the entry is available again, but the chapter must NOT auto-reopen;
+    // the member relaunches explicitly (no surprise card from a stale open state).
+    rerender({ workspaceState: workspaceState({ agents: [agent("a2")] }) });
+    expect(result.current.chapterOpen).toBe(false);
+    expect(result.current.chapterActive).toBeNull();
+  });
 });
 
 describe("chapter integration in WorkspaceApp (#56 render head)", () => {
