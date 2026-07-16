@@ -181,4 +181,19 @@ describe("markdown live preview", () => {
 
     view.destroy();
   });
+
+  it("keeps the heading '#' marker rendered in both states so the line doesn't shift", () => {
+    // Inactive heading (cursor on the intro line): "# " is muted, never collapsed/replaced.
+    const inactive = editor("intro\n# Heading", EditorSelection.cursor(0));
+    expect(inactive.dom.querySelector<HTMLElement>(".cm-md-heading-marker.cm-md-muted-marker")?.textContent).toBe("# ");
+    expect(inactive.dom.querySelectorAll(".cm-md-hidden-marker").length).toBe(0);
+    expect(inactive.state.doc.toString()).toBe("intro\n# Heading");
+    inactive.destroy();
+
+    // Active heading (cursor on the heading line): the same "# " shows the visible style —
+    // same width, only the colour changes, so the text keeps its position.
+    const active = editor("# Heading", EditorSelection.cursor(3));
+    expect(active.dom.querySelector<HTMLElement>(".cm-md-heading-marker.cm-md-visible-marker")?.textContent).toBe("# ");
+    active.destroy();
+  });
 });

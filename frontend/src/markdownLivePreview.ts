@@ -127,7 +127,7 @@ function buildMarkdownPreviewDecorations(view: EditorView): DecorationSet {
         decorations.push(Decoration.line({ class: `cm-md-heading cm-md-heading-${token.level ?? 1}` }).range(lineStart(view.state, token.from)));
         break;
       case "heading-marker":
-        decorations.push(markerDecoration(token, "cm-md-heading-marker"));
+        decorations.push(headingMarkerDecoration(token));
         break;
       case "strong":
         decorations.push(Decoration.mark({ class: "cm-md-strong" }).range(token.from, token.to));
@@ -212,6 +212,16 @@ function buildMarkdownPreviewDecorations(view: EditorView): DecorationSet {
   }
 
   return Decoration.set(decorations, true);
+}
+
+// Heading "# " markers are NEVER collapsed — kept rendered at full width in both
+// states so the heading line can't shift left/right when it's clicked into edit view
+// (same never-replace-the-source construction as the list bullets). Grey/muted when the
+// line is inactive, the normal marker style when active; only the colour changes, so the
+// width is identical and the text stays put.
+function headingMarkerDecoration(token: MarkdownPreviewToken) {
+  const state = token.active ? "cm-md-visible-marker" : "cm-md-muted-marker";
+  return Decoration.mark({ class: `cm-md-heading-marker ${state}` }).range(token.from, token.to);
 }
 
 function markerDecoration(token: MarkdownPreviewToken, className: string) {
@@ -684,6 +694,14 @@ const markdownPreviewTheme = EditorView.theme({
   },
   ".cm-md-visible-marker": {
     color: "rgba(91, 76, 58, 0.5)",
+    fontFamily: "var(--editor-font)",
+    fontSize: "0.88em",
+  },
+  // Heading "# " when the line is NOT focused: grey and quiet, but still rendered at the
+  // exact same size/family as the active marker so the width is identical — the line
+  // doesn't move when clicked. (Same width discipline as the list bullets.)
+  ".cm-md-muted-marker": {
+    color: "rgba(120, 114, 108, 0.5)",
     fontFamily: "var(--editor-font)",
     fontSize: "0.88em",
   },
