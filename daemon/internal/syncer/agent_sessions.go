@@ -1200,7 +1200,7 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 		}
 		var rpcErr *appServerRPCError
 		if errors.As(err, &rpcErr) && rpcErr.Code == -32001 {
-			if currentSession := s.sessions[current.ID]; currentSession != nil && currentSession.process == process {
+			if currentSession := s.sessions[current.ID]; writable(currentSession, process) && currentSession.turnOpSeq == op {
 				currentSession.turnStartAttempts++
 				delay := restartBackoff(currentSession.turnStartAttempts)
 				currentSession.turnBackoffUntil = s.now().Add(delay)
@@ -1733,6 +1733,8 @@ func (s *agentSessionSupervisor) markWorking(agentID string, process RuntimeProc
 	// StartTurn RPC completion still in flight: bump the operation nonce so a stale
 	// StartTurn error/timeout returning afterward cannot demote this live turn.
 	session.turnOpSeq++
+	session.turnStartAttempts = 0
+	session.turnBackoffUntil = time.Time{}
 	sessionID := session.sessionID
 	// Publish UNDER s.mu so the state decision and its status enqueue are ordered
 	// together: a concurrent transition (or a stale RPC completion) cannot land its

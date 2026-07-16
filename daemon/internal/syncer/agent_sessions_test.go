@@ -4247,3 +4247,90 @@ func TestAdmissionBackoffTurnCompletedDoesNotResetAttempts(t *testing.T) {
 		t.Fatalf("turnStartAttempts = %d after markIdle, want 1 (turn completion must not reset admission backoff)", attempts)
 	}
 }
+
+func TestAdmissionBackoffStaleRejectionDoesNotMutateAdmission(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	supervisor.now = func() time.Time { return clock }
+	supervisor.SetIdleWake(func(string) {})
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+
+	// Block the StartTurn RPC so we can interleave a lifecycle transition.
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	process.startTurnEntered = entered
+	process.startTurnRelease = release
+	process.startTurnErr = &appServerRPCError{Method: "turn/start", Code: -32001, Message: "overloaded"}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- supervisor.ScheduleNotificationTurn(context.Background(), current, "p1", "sig:v1", "")
+	}()
+	<-entered
+
+	// While StartTurn is in flight, an authoritative TurnStarted event bumps the nonce.
+	supervisor.markWorking("agent_1", process, "turn_external")
+
+	// Release the blocked -32001 rejection.
+	close(release)
+	<-done
+
+	supervisor.mu.Lock()
+	session := supervisor.sessions["agent_1"]
+	attempts := session.turnStartAttempts
+	until := session.turnBackoffUntil
+	supervisor.mu.Unlock()
+	if attempts != 0 {
+		t.Fatalf("stale -32001 should not mutate turnStartAttempts, got %d", attempts)
+	}
+	if !until.IsZero() {
+		t.Fatalf("stale -32001 should not set turnBackoffUntil, got %v", until)
+	}
+}
+
+func TestAdmissionBackoffMarkWorkingResetsAdmission(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	supervisor.now = func() time.Time { return clock }
+	supervisor.SetIdleWake(func(string) {})
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	process.startTurnRelease = closedChan()
+	process.startTurnErr = &appServerRPCError{Method: "turn/start", Code: -32001, Message: "overloaded"}
+
+	// Accumulate a rejection.
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "p1", "sig:v1", ""); err != nil {
+		t.Fatalf("rejection: %v", err)
+	}
+	supervisor.mu.Lock()
+	if supervisor.sessions["agent_1"].turnStartAttempts != 1 {
+		t.Fatalf("expected 1 attempt after rejection")
+	}
+	supervisor.mu.Unlock()
+
+	// A TurnStarted event (e.g. winning the response race) resets admission.
+	supervisor.markWorking("agent_1", process, "turn_accepted")
+
+	supervisor.mu.Lock()
+	session := supervisor.sessions["agent_1"]
+	attempts := session.turnStartAttempts
+	until := session.turnBackoffUntil
+	supervisor.mu.Unlock()
+	if attempts != 0 {
+		t.Fatalf("markWorking should reset turnStartAttempts, got %d", attempts)
+	}
+	if !until.IsZero() {
+		t.Fatalf("markWorking should reset turnBackoffUntil, got %v", until)
+	}
+}
