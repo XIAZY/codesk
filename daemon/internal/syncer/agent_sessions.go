@@ -1207,9 +1207,13 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 				appendAgentLog(s.cfg, agentID, "turn-start admission rejected (-32001) attempt=%d backoff=%s", currentSession.turnStartAttempts, delay)
 				wake := s.wakeAgent
 				sleep := s.restartSleep
+				ctx := s.baseCtx
 				s.mu.Unlock()
 				go func() {
 					sleep(delay)
+					if ctx.Err() != nil {
+						return
+					}
 					if wake != nil {
 						wake(agentID)
 					}
