@@ -1293,19 +1293,11 @@ func TestCodexAppServerStartHandlesAgentLogOpenFailure(t *testing.T) {
 	if err := os.WriteFile(dataFile, []byte("not a directory"), 0o644); err != nil {
 		t.Fatalf("write data file: %v", err)
 	}
-	client := &codexAppServer{
-		cfg: Config{
-			CodexCommand: filepath.Join(t.TempDir(), "missing-codex"),
-			DataDir:      dataFile,
-			WorkspaceID:  "workspace:test",
-		},
-		workdir:   t.TempDir(),
-		agentID:   "agent_1",
-		toolToken: "tool_token",
-		pending:   map[int64]chan appServerResponse{},
-		events:    make(chan appServerEvent, 1),
-		done:      make(chan error, 1),
-	}
+	client := newCodexAppServer(Config{
+		CodexCommand: filepath.Join(t.TempDir(), "missing-codex"),
+		DataDir:      dataFile,
+		WorkspaceID:  "workspace:test",
+	}, t.TempDir(), "tool_token", "agent_1")
 
 	defer func() {
 		if recovered := recover(); recovered != nil {

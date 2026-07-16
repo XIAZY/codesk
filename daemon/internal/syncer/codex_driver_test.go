@@ -11,11 +11,12 @@ import (
 )
 
 type fakeCodexRuntimeApp struct {
-	started  bool
-	stopped  bool
-	events   chan appServerEvent
-	pid      int
-	exitInfo RuntimeExitInfo
+	started    bool
+	stopped    bool
+	events     chan appServerEvent
+	eventsOnce sync.Once
+	pid        int
+	exitInfo   RuntimeExitInfo
 
 	threadStartID string
 	turnStartID   string
@@ -37,11 +38,17 @@ type countingStopCodexRuntimeApp struct {
 	stopCalls int
 }
 
+type blockingStopCodexRuntimeApp struct {
+	*fakeCodexRuntimeApp
+	stopEntered chan struct{}
+	releaseStop chan struct{}
+}
+
 func (f *countingStopCodexRuntimeApp) Stop() error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.stopCalls++
-	return nil
+	f.mu.Unlock()
+	return f.fakeCodexRuntimeApp.Stop()
 }
 
 func (f *countingStopCodexRuntimeApp) stopCallCount() int {
@@ -90,7 +97,19 @@ func (f *fakeCodexRuntimeApp) Start(ctx context.Context) error {
 
 func (f *fakeCodexRuntimeApp) Stop() error {
 	f.stopped = true
+	f.exitInfo = RuntimeExitInfo{Expected: true}
+	f.closeEvents()
 	return nil
+}
+
+func (f *fakeCodexRuntimeApp) closeEvents() {
+	f.eventsOnce.Do(func() { close(f.events) })
+}
+
+func (f *blockingStopCodexRuntimeApp) Stop() error {
+	close(f.stopEntered)
+	<-f.releaseStop
+	return f.fakeCodexRuntimeApp.Stop()
 }
 
 func (f *fakeCodexRuntimeApp) Events() <-chan appServerEvent {
@@ -261,6 +280,7 @@ func TestCodexRuntimeProcessMapsAppServerEventsToRuntimeEvents(t *testing.T) {
 		app:          app,
 		instructions: "driver instructions",
 		events:       make(chan RuntimeEvent, 8),
+		eventsDone:   make(chan struct{}),
 		stopping:     make(chan struct{}),
 	}
 	if err := process.Start(context.Background()); err != nil {
@@ -276,7 +296,7 @@ func TestCodexRuntimeProcessMapsAppServerEventsToRuntimeEvents(t *testing.T) {
 	app.events <- appServerEvent{Method: "thread/status/changed", Params: rawJSON(t, `{"status":{"type":"working"}}`)}
 	app.events <- appServerEvent{Method: "thread/status/changed", Params: rawJSON(t, `{"status":{"type":"idle"}}`)}
 	app.events <- appServerEvent{Method: "unknown/event", Params: rawJSON(t, `{}`)}
-	close(app.events)
+	app.closeEvents()
 
 	want := []RuntimeEvent{
 		{Kind: RuntimeEventTurnStarted, TurnID: "turn_1"},
@@ -298,43 +318,41 @@ func TestCodexRuntimeProcessMapsAppServerEventsToRuntimeEvents(t *testing.T) {
 func TestCodexRuntimeStopReleasesBlockedLifecycleForward(t *testing.T) {
 	app := newFakeCodexRuntimeApp()
 	process := &codexRuntimeProcess{
-		app:      app,
-		events:   make(chan RuntimeEvent),
-		stopping: make(chan struct{}),
+		app:        app,
+		events:     make(chan RuntimeEvent),
+		eventsDone: make(chan struct{}),
+		stopping:   make(chan struct{}),
 	}
-
-	forwardDone := make(chan struct{})
-	go func() {
-		process.forwardEvents()
-		close(forwardDone)
-	}()
+	if err := process.Start(context.Background()); err != nil {
+		t.Fatalf("start process: %v", err)
+	}
 	app.events <- appServerEvent{Method: "turn/completed", Params: rawJSON(t, `{}`)}
-	close(app.events)
-	select {
-	case <-forwardDone:
-		t.Fatal("lifecycle forward returned without a runtime consumer")
-	case <-time.After(100 * time.Millisecond):
+	deadline := time.Now().Add(time.Second)
+	for len(app.events) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("forwarder did not receive the blocked lifecycle event")
+		}
+		time.Sleep(time.Millisecond)
 	}
 
 	if err := process.Stop(); err != nil {
 		t.Fatalf("stop process: %v", err)
 	}
-	select {
-	case <-forwardDone:
-	case <-time.After(100 * time.Millisecond):
-		// Release the held-head goroutine so the red test does not leak it.
-		<-process.events
-		<-forwardDone
-		t.Fatal("Stop did not release lifecycle send blocked in codexRuntimeProcess.forwardEvents")
+	if got := collectRuntimeEvents(t, process.Events()); len(got) != 0 {
+		t.Fatalf("stopped process emitted blocked lifecycle events: %#v", got)
 	}
 }
 
 func TestCodexRuntimeStopIsConcurrentAndIdempotent(t *testing.T) {
 	app := &countingStopCodexRuntimeApp{fakeCodexRuntimeApp: newFakeCodexRuntimeApp()}
 	process := &codexRuntimeProcess{
-		app:      app,
-		events:   make(chan RuntimeEvent),
-		stopping: make(chan struct{}),
+		app:        app,
+		events:     make(chan RuntimeEvent),
+		eventsDone: make(chan struct{}),
+		stopping:   make(chan struct{}),
+	}
+	if err := process.Start(context.Background()); err != nil {
+		t.Fatalf("start process: %v", err)
 	}
 
 	const callers = 16
@@ -397,45 +415,66 @@ func collectRuntimeEvents(t *testing.T, events <-chan RuntimeEvent) []RuntimeEve
 // exposes a zero snapshot (Expected=false) and makes a deliberate Stop look
 // like a transient crash that gets restarted.
 func TestCodexRuntimeWrapperWaitsForAppExitInfoBeforeClosing(t *testing.T) {
-	app := newFakeCodexRuntimeApp()
-	process := &codexRuntimeProcess{
-		app:      app,
-		events:   make(chan RuntimeEvent), // unbuffered: forward blocks on send with no consumer
-		stopping: make(chan struct{}),
+	app := &blockingStopCodexRuntimeApp{
+		fakeCodexRuntimeApp: newFakeCodexRuntimeApp(),
+		stopEntered:         make(chan struct{}),
+		releaseStop:         make(chan struct{}),
 	}
-
-	forwardDone := make(chan struct{})
-	go func() {
-		process.forwardEvents()
-		close(forwardDone)
-	}()
+	process := &codexRuntimeProcess{
+		app:        app,
+		events:     make(chan RuntimeEvent), // unbuffered: forward blocks on send with no consumer
+		eventsDone: make(chan struct{}),
+		stopping:   make(chan struct{}),
+	}
+	if err := process.Start(context.Background()); err != nil {
+		t.Fatalf("start process: %v", err)
+	}
 
 	// A final lifecycle event is in flight; forwardEvents receives it and blocks
 	// trying to hand it to a consumer that never reads.
 	app.events <- appServerEvent{Method: "turn/completed", Params: rawJSON(t, `{}`)}
-
-	// Stop wins before the app has published ExitInfo / closed its channel.
-	if err := process.Stop(); err != nil {
-		t.Fatalf("stop process: %v", err)
+	deadline := time.Now().Add(time.Second)
+	for len(app.events) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("forwarder did not receive the final lifecycle event")
+		}
+		time.Sleep(time.Millisecond)
 	}
 
-	// The public channel must stay open: ExitInfo is not available yet.
+	stopResult := make(chan error, 1)
+	go func() { stopResult <- process.Stop() }()
 	select {
-	case <-forwardDone:
-		t.Fatal("wrapper closed public Events() before the app published ExitInfo (deliberate Stop would misclassify as transient)")
+	case <-app.stopEntered:
+	case <-time.After(time.Second):
+		t.Fatal("RuntimeProcess.Stop did not enter the app stop")
+	}
+
+	select {
+	case err := <-stopResult:
+		t.Fatalf("RuntimeProcess.Stop returned before app exit publication: %v", err)
 	case <-time.After(75 * time.Millisecond):
 	}
-
-	// The app's exit goroutine publishes ExitInfo, THEN closes its channel.
-	app.exitInfo = RuntimeExitInfo{Expected: true}
-	close(app.events)
-
 	select {
-	case <-forwardDone:
+	case _, ok := <-process.Events():
+		if !ok {
+			t.Fatal("wrapper closed public Events() before the app published ExitInfo")
+		}
+	default:
+	}
+
+	close(app.releaseStop)
+	select {
+	case err := <-stopResult:
+		if err != nil {
+			t.Fatalf("stop process: %v", err)
+		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("wrapper did not close after the app closed its event channel")
+		t.Fatal("RuntimeProcess.Stop did not join event publication")
 	}
 	if !process.ExitInfo().Expected {
 		t.Fatal("ExitInfo lost: a deliberately-stopped process must report Expected=true after Events() closes")
+	}
+	if got := collectRuntimeEvents(t, process.Events()); len(got) != 0 {
+		t.Fatalf("stopped process emitted final blocked lifecycle events: %#v", got)
 	}
 }
