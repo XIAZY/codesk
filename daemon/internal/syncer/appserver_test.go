@@ -2,7 +2,10 @@ package syncer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -785,4 +788,99 @@ Drain:
 	if !found {
 		t.Fatalf("final stderr line missing from ExitInfo after Events() closed: stderr=%#v", info.Stderr)
 	}
+}
+
+func TestAppServerRPCErrorPreservesCode(t *testing.T) {
+	err := &appServerRPCError{Method: "turn/start", Code: -32001, Message: "Server overloaded; retry later."}
+	if err.Code != -32001 {
+		t.Fatalf("Code = %d, want -32001", err.Code)
+	}
+	if err.Method != "turn/start" {
+		t.Fatalf("Method = %q, want %q", err.Method, "turn/start")
+	}
+	want := "app-server turn/start failed: Server overloaded; retry later."
+	if got := err.Error(); got != want {
+		t.Fatalf("Error() = %q, want %q", got, want)
+	}
+}
+
+func TestAppServerRPCErrorClassifiableViaErrorsAs(t *testing.T) {
+	var wrapped error = fmt.Errorf("write stdin: %w", &appServerRPCError{
+		Method: "turn/start", Code: -32001, Message: "Server overloaded; retry later.",
+	})
+	var rpcErr *appServerRPCError
+	if !errors.As(wrapped, &rpcErr) {
+		t.Fatal("errors.As should unwrap appServerRPCError")
+	}
+	if rpcErr.Code != -32001 {
+		t.Fatalf("unwrapped Code = %d, want -32001", rpcErr.Code)
+	}
+}
+
+func TestAppServerRPCErrorNegativeNeighborCodes(t *testing.T) {
+	tests := []struct {
+		name string
+		code int
+	}{
+		{"internal_error", -32603},
+		{"method_not_found", -32601},
+		{"parse_error", -32700},
+		{"zero", 0},
+		{"positive_429", 429},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := &appServerRPCError{Method: "turn/start", Code: tt.code, Message: "some error"}
+			if err.Code == -32001 {
+				t.Fatalf("code %d should not match -32001", tt.code)
+			}
+		})
+	}
+}
+
+func TestRequestReturnsTypedRPCErrorOnJSONRPCError(t *testing.T) {
+	client := newCodexAppServer(Config{}, t.TempDir(), "", "agent_codex")
+
+	stdinReader, stdinWriter := io.Pipe()
+	client.stdin = stdinWriter
+
+	stdoutReader, stdoutWriter := io.Pipe()
+	go client.readLoop(stdoutReader)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := client.request(ctx, "turn/start", map[string]any{})
+		errCh <- err
+	}()
+
+	buf := make([]byte, 4096)
+	n, _ := stdinReader.Read(buf)
+	var req struct {
+		ID int64 `json:"id"`
+	}
+	_ = json.Unmarshal(buf[:n], &req)
+
+	response := fmt.Sprintf(`{"id":%d,"error":{"code":-32001,"message":"Server overloaded; retry later."}}`, req.ID)
+	stdoutWriter.Write([]byte(response + "\n"))
+
+	err := <-errCh
+	if err == nil {
+		t.Fatal("request should return an error for a JSONRPC error response")
+	}
+	var rpcErr *appServerRPCError
+	if !errors.As(err, &rpcErr) {
+		t.Fatalf("error should be appServerRPCError, got %T: %v", err, err)
+	}
+	if rpcErr.Code != -32001 {
+		t.Fatalf("Code = %d, want -32001", rpcErr.Code)
+	}
+	if rpcErr.Method != "turn/start" {
+		t.Fatalf("Method = %q, want %q", rpcErr.Method, "turn/start")
+	}
+
+	stdoutWriter.Close()
+	stdinReader.Close()
 }
