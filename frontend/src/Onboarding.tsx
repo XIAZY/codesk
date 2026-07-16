@@ -395,3 +395,82 @@ export function Onboarding({
     </div>
   );
 }
+
+type ChapterCardProps = {
+  step: OnboardingStep;
+  stepIndex: number; // among the chapter's steps; -1 for the terminal done card
+  total: number; // number of chapter steps for this role (owner/admin 3, member 1)
+  onAction?: (event: OnboardingActionEvent) => void;
+  onDismiss: () => void; // "Not now" / "Close" — dismiss only, never completes
+};
+
+// The opt-in "Add an AI teammate" chapter card — a quiet page card, NEVER a spotlight.
+// One real CTA (connect / create / start-a-run), a "Not now" that only dismisses, and
+// (for the owner/admin path) step dots. Kept separate from <Onboarding> so it doesn't
+// inherit the spotlight geometry + Enter-advances keyboard model — the chapter advances
+// from live state, not from Next.
+export function OnboardingChapterCard({ step, stepIndex, total, onAction, onDismiss }: ChapterCardProps) {
+  const cardRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    cardRef.current?.querySelector<HTMLElement>("button")?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onDismiss();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [onDismiss]);
+
+  const primary = step.primaryAction;
+  // A primary "Close" (done card) has event "dismiss" — it isn't a real CTA button; it
+  // becomes the footer dismiss control. Only open-* primaries render the dark CTA.
+  const hasCta = primary != null && primary.event !== "dismiss";
+  const dismissAction = step.secondaryAction ?? (primary?.event === "dismiss" ? primary : undefined);
+  const showSteps = total > 1 && stepIndex >= 0; // owner/admin 3-step path only (not member/done)
+
+  return (
+    <section
+      ref={cardRef}
+      className="ob-coach ob-chapter"
+      role="dialog"
+      aria-modal="false"
+      aria-labelledby={`ob-title-${step.id}`}
+      aria-describedby={`ob-body-${step.id}`}
+    >
+      {step.eyebrow ? <span className="ob-eyebrow">{step.eyebrow}</span> : null}
+      <h4 id={`ob-title-${step.id}`}>{step.title}</h4>
+      <p id={`ob-body-${step.id}`}>{step.body}</p>
+      {hasCta ? (
+        <button type="button" className="ob-cta" onClick={() => onAction?.(primary!.event)}>
+          {primary!.label}
+        </button>
+      ) : null}
+      {hasCta && step.caption ? <span className="ob-caption">{step.caption}</span> : null}
+      <div className="ob-chapter-foot">
+        {showSteps ? (
+          <span className="ob-chapter-progress">
+            <span className="ob-dots" aria-hidden="true">
+              {Array.from({ length: total }, (_, index) => (
+                <i className={index === stepIndex ? "on" : ""} key={index} />
+              ))}
+            </span>
+            <span className="ob-step">Step {stepIndex + 1} of {total}</span>
+          </span>
+        ) : !hasCta && step.caption ? (
+          <span className="ob-chapter-status">{step.caption}</span>
+        ) : (
+          <span />
+        )}
+        {dismissAction ? (
+          <button type="button" className="ob-notnow" onClick={onDismiss}>
+            {dismissAction.label}
+          </button>
+        ) : null}
+      </div>
+      <span className="ob-live" aria-live="polite">{step.title}. {step.body}</span>
+    </section>
+  );
+}
