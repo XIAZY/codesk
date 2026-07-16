@@ -419,7 +419,9 @@ export const CHECKLIST_ITEMS: OnboardingChecklistItem[] = [
     subtitle: "Connect an environment, create an agent, put it to work",
     opensChapter: true,
     doneLabel: "You've started working with an agent",
-    doneSubtitle: "Reopen to add more or hand over new work",
+    // The click reopens the completion card (Close-only) — it doesn't start work, so the
+    // subtitle names the destination, not an action (Anton/Juan copy-honesty rule).
+    doneSubtitle: "View completion",
   },
   {
     id: "work-with-agent-entry",
@@ -431,7 +433,7 @@ export const CHECKLIST_ITEMS: OnboardingChecklistItem[] = [
     subtitle: "Choose an agent and start a run",
     opensChapter: true,
     doneLabel: "You've started working with an agent",
-    doneSubtitle: "Reopen to start more work",
+    doneSubtitle: "View completion", // same reopen destination for both audiences (Anton/Juan)
   },
   { id: "invite-team", label: "Invite your team", eligibleRoles: ["owner", "admin"], completion: { via: "flag", key: "member_invited" } },
 ];

@@ -343,9 +343,10 @@ describe("chapter integration in WorkspaceApp (#56 render head)", () => {
     mocks.documents = [{ id: "doc_1", path: "P.md", title: "P.md" }];
     renderWorkspace();
 
-    // The done entry uses historical (past-tense) copy, not the present-tense label.
+    // The done entry uses historical (past-tense) copy, not the present-tense label; the
+    // subtitle names the reopen destination (a completion card), not an action.
     expect(screen.getByText("You've started working with an agent")).toBeTruthy();
-    expect(screen.getByText("Reopen to start more work")).toBeTruthy();
+    expect(screen.getByText("View completion")).toBeTruthy();
 
     // Reopening it lands on the real terminal card — never an empty overlay.
     fireEvent.click(screen.getByText("You've started working with an agent"));
