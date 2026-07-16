@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
   NODES,
-  CHECKLIST_ITEMS,
   ONBOARDING_EVENT_KEYS,
   eligibleNodes,
   guideSteps,
@@ -131,12 +130,24 @@ describe("eligibility by role (§4.1 — removed, not disabled)", () => {
     expect(memberGuideTips).toEqual(allGuideTips);
   });
 
-  it("checklist gates 'Invite your team' to owners/admins only", () => {
+  it("checklist replaces the 3 agent rows with ONE counted chapter entry; invite-team stays owner/admin", () => {
     const owner = checklistProgress(ctx({ roles: ["owner"] })).map((c) => c.item.id);
-    const member = checklistProgress(ctx({ roles: ["member"] })).map((c) => c.item.id);
-    expect(owner).toContain("invite-team");
-    expect(member).not.toContain("invite-team");
-    expect(member).toHaveLength(5);
+    // Owner/admin: the two passive tasks + the "Add an AI teammate" entry + invite-team (4).
+    expect(owner).toEqual(["create-document", "start-discussion", "add-teammate-entry", "invite-team"]);
+    // The old per-action rows are gone (folded into the chapter).
+    expect(owner).not.toContain("connect-environment");
+    expect(owner).not.toContain("create-agent");
+    expect(owner).not.toContain("agent-at-work");
+
+    // Member with no agents: no AI entry at all, denominator is 2.
+    expect(checklistProgress(ctx({ roles: ["member"] })).map((c) => c.item.id)).toEqual([
+      "create-document",
+      "start-discussion",
+    ]);
+    // Member once an agent exists: the "Work with an agent" entry counts → denominator 3.
+    expect(
+      checklistProgress(ctx({ roles: ["member"], signals: { ...emptySignals, agentCount: 1 } })).map((c) => c.item.id),
+    ).toEqual(["create-document", "start-discussion", "work-with-agent-entry"]);
   });
 });
 
@@ -149,19 +160,20 @@ describe("completion derivation (§6.1 — live state is the source of truth)", 
   });
 
   it("local_environment is satisfied only by a receipt-live daemon count, never raw status", () => {
-    // The engine only ever sees liveEnvironmentCount (host derives it via
+    // The chapter's connect step completes on liveEnvironmentCount (host derives it via
     // daemonLiveStatus). A stale-but-'online' daemon contributes 0 here by contract.
-    const item = CHECKLIST_ITEMS.find((i) => i.id === "connect-environment")!;
-    expect(isComplete(item, ctx({ signals: { ...emptySignals, liveEnvironmentCount: 0 } }))).toBe(false);
-    expect(isComplete(item, ctx({ signals: { ...emptySignals, liveEnvironmentCount: 1 } }))).toBe(true);
+    const connect = node("add-teammate-connect");
+    expect(isComplete(connect, ctx({ signals: { ...emptySignals, liveEnvironmentCount: 0 } }))).toBe(false);
+    expect(isComplete(connect, ctx({ signals: { ...emptySignals, liveEnvironmentCount: 1 } }))).toBe(true);
   });
 
   it("agent-at-work is any of: watcher added, agent run started, or agent in a thread", () => {
-    const item = CHECKLIST_ITEMS.find((i) => i.id === "agent-at-work")!;
-    expect(isComplete(item, ctx())).toBe(false);
-    expect(isComplete(item, ctx({ signals: { ...emptySignals, watchedDocumentCount: 1 } }))).toBe(true);
-    expect(isComplete(item, ctx({ signals: { ...emptySignals, agentRunCount: 1 } }))).toBe(true);
-    expect(isComplete(item, ctx({ signals: { ...emptySignals, agentThreadCount: 1 } }))).toBe(true);
+    // The chapter's work step (and the checklist entry) complete on the agent-at-work signal.
+    const work = node("add-teammate-work");
+    expect(isComplete(work, ctx())).toBe(false);
+    expect(isComplete(work, ctx({ signals: { ...emptySignals, watchedDocumentCount: 1 } }))).toBe(true);
+    expect(isComplete(work, ctx({ signals: { ...emptySignals, agentRunCount: 1 } }))).toBe(true);
+    expect(isComplete(work, ctx({ signals: { ...emptySignals, agentThreadCount: 1 } }))).toBe(true);
   });
 });
 
@@ -339,9 +351,14 @@ describe("checklist (§C — derived, never a stored done)", () => {
     const done = new Map(checklistProgress(c).map((r) => [r.item.id, r.done]));
     expect(done.get("create-document")).toBe(true);
     expect(done.get("start-discussion")).toBe(true);
-    expect(done.get("create-agent")).toBe(true);
-    expect(done.get("connect-environment")).toBe(false);
-    expect(done.get("agent-at-work")).toBe(false);
+    // The chapter entry completes only on agent-at-work — an agent merely existing isn't enough.
+    expect(done.get("add-teammate-entry")).toBe(false);
     expect(done.get("invite-team")).toBe(false);
+  });
+
+  it("the chapter entry completes on agent-at-work — same live signal as the chapter", () => {
+    const c = ctx({ signals: { ...emptySignals, agentCount: 1, agentRunCount: 1 } });
+    const done = new Map(checklistProgress(c).map((r) => [r.item.id, r.done]));
+    expect(done.get("add-teammate-entry")).toBe(true);
   });
 });

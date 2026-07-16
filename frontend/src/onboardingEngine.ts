@@ -120,8 +120,17 @@ export type OnboardingNode = {
 export type OnboardingChecklistItem = {
   id: string;
   label: string;
-  eligibleRoles: OnboardingRole[]; // empty = all
+  eligibleRoles: OnboardingRole[]; // empty = all — AUTHZ-PURE (see OnboardingRole)
   completion: OnboardingCondition;
+  // The "Add an AI teammate" / "Work with an agent" entry is a resumable launcher for the
+  // chapter (replace-not-coexist, #56) — these fields describe that entry row. Plain items
+  // leave them unset. `audience` picks the owner/admin vs member variant (NOT authz);
+  // `requiresSignals` hides the member entry until an agent exists; `opensChapter` marks
+  // the row as a chapter launcher (subtitle + derived chapter progress + chevron).
+  audience?: OnboardingAudience;
+  requiresSignals?: DerivedSignal[];
+  subtitle?: string;
+  opensChapter?: boolean;
 };
 
 // ---- Live context ------------------------------------------------------------
@@ -278,9 +287,9 @@ export const NODES: OnboardingNode[] = [
     completion: { via: "derived", signal: "live-environment" },
     eyebrow: "ADD AN AI TEAMMATE · OPTIONAL",
     title: "Connect a local environment",
-    body: "This is the computer where your agents run and keep files in sync. You set it up once.",
+    body: "A local environment is the computer where your agents run.",
     primaryAction: { label: "Connect environment", event: "open-create-environment" },
-    secondaryAction: { label: "Skip for now", event: "dismiss" },
+    secondaryAction: { label: "Not now", event: "dismiss" },
     skippable: true,
     fallback: "page-card",
   },
@@ -295,9 +304,9 @@ export const NODES: OnboardingNode[] = [
     completion: { via: "derived", signal: "agent-exists" },
     eyebrow: "ADD AN AI TEAMMATE · OPTIONAL",
     title: "Create your first agent",
-    body: "An agent has its own name and role, and keeps working in this workspace over time.",
+    body: "An agent has a name, a role, and its own runtime.",
     primaryAction: { label: "Create agent", event: "open-create-agent" },
-    secondaryAction: { label: "Skip for now", event: "dismiss" },
+    secondaryAction: { label: "Not now", event: "dismiss" },
     skippable: true,
     fallback: "page-card",
   },
@@ -312,11 +321,12 @@ export const NODES: OnboardingNode[] = [
     completion: { via: "derived", signal: "agent-at-work" },
     eyebrow: "ADD AN AI TEAMMATE · OPTIONAL",
     title: "Put your agent to work",
-    body: "Hand it a document or a thread. It picks up the task and reports back here.",
-    // Label defaults to the single-agent case (they just created one); the host relabels
-    // to "Choose an agent" when 2+ agents exist. Both resolve via resolveAgentWorkDestination.
-    primaryAction: { label: "Give it a task", event: "open-agent-work" },
-    secondaryAction: { label: "Skip for now", event: "dismiss" },
+    body: "Choose an agent and start a run.",
+    // The label is DYNAMIC (Anton): the host relabels via resolveAgentWorkDestination —
+    // exactly 1 agent → "Start a run" (direct to its Start run); 2+ → "Choose an agent"
+    // (Agents list). The static label here is the 1-agent default and must not ship as-is.
+    primaryAction: { label: "Start a run", event: "open-agent-work" },
+    secondaryAction: { label: "Not now", event: "dismiss" },
     skippable: true,
     fallback: "page-card",
   },
@@ -333,7 +343,8 @@ export const NODES: OnboardingNode[] = [
     completion: { via: "derived", signal: "agent-at-work" },
     eyebrow: "STARTED",
     title: "You've started working with an agent",
-    body: "Its runs and replies show up here alongside your team. Add more anytime from Manage.",
+    body: "You can start more work anytime from Agents.",
+    caption: "Chapter complete",
     primaryAction: { label: "Close", event: "dismiss" },
     skippable: true,
     fallback: "page-card",
@@ -350,9 +361,11 @@ export const NODES: OnboardingNode[] = [
     completion: { via: "derived", signal: "agent-at-work" },
     eyebrow: "WORK WITH AN AGENT",
     title: "Put an agent to work",
-    body: "This workspace already has agents ready. Hand one a task or follow its work.",
+    body: "This workspace has agents. Choose one and start a run.",
     caption: "No setup needed", // reassurance, not an action (Anton: caption, not a dismiss label)
-    primaryAction: { label: "Give it a task", event: "open-agent-work" },
+    // Dynamic label, same rule as the owner/admin work step (host relabels via
+    // resolveAgentWorkDestination: 1 agent → "Start a run", 2+ → "Choose an agent").
+    primaryAction: { label: "Start a run", event: "open-agent-work" },
     secondaryAction: { label: "Not now", event: "dismiss" },
     skippable: true,
     fallback: "page-card",
@@ -363,12 +376,34 @@ export const NODES: OnboardingNode[] = [
 // data (never a stored "done") for every item EXCEPT `invite-team`: an invitation
 // sent is not derivable from the member list until the invitee accepts, so deriving
 // it would falsely read incomplete. It is the one flag-based item, by design.
+//
+// #56 replace-not-coexist: the old connect-environment / create-agent / agent-at-work
+// rows are GONE — they collapse into ONE resumable chapter entry that COUNTS in the
+// progress denominator (Anton) and opens the chapter. Owner/admin get the "Add an AI
+// teammate" variant; a member with agents gets "Work with an agent"; a member with no
+// agents gets no AI entry (requiresSignals hides it). Both complete from agent-at-work.
 export const CHECKLIST_ITEMS: OnboardingChecklistItem[] = [
   { id: "create-document", label: "Create your first document", eligibleRoles: [], completion: { via: "derived", signal: "document-exists" } },
   { id: "start-discussion", label: "Start a discussion", eligibleRoles: [], completion: { via: "derived", signal: "thread-exists" } },
-  { id: "connect-environment", label: "Connect a local environment", eligibleRoles: [], completion: { via: "derived", signal: "live-environment" } },
-  { id: "create-agent", label: "Create your first agent", eligibleRoles: [], completion: { via: "derived", signal: "agent-exists" } },
-  { id: "agent-at-work", label: "Put an agent to work", eligibleRoles: [], completion: { via: "derived", signal: "agent-at-work" } },
+  {
+    id: "add-teammate-entry",
+    label: "Add an AI teammate",
+    eligibleRoles: [], // authz-pure: opening the chapter is not gated (its STEPS are); variant via audience
+    audience: "owner-admin",
+    completion: { via: "derived", signal: "agent-at-work" },
+    subtitle: "Connect an environment, create an agent, put it to work",
+    opensChapter: true,
+  },
+  {
+    id: "work-with-agent-entry",
+    label: "Work with an agent",
+    eligibleRoles: [],
+    audience: "member",
+    requiresSignals: ["agent-exists"], // member sees this only once an agent exists — else no AI entry
+    completion: { via: "derived", signal: "agent-at-work" },
+    subtitle: "Choose an agent and start a run",
+    opensChapter: true,
+  },
   { id: "invite-team", label: "Invite your team", eligibleRoles: ["owner", "admin"], completion: { via: "flag", key: "member_invited" } },
 ];
 
@@ -411,9 +446,10 @@ function roleEligible(eligibleRoles: OnboardingRole[], roles: OnboardingRole[]):
   return eligibleRoles.length === 0 || eligibleRoles.some((r) => roles.includes(r));
 }
 
-// Every live-signal precondition on the node is met (empty = trivially true).
-function requiresSignalsMet(node: OnboardingNode, ctx: OnboardingContext): boolean {
-  return (node.requiresSignals ?? []).every((sig) => derivedSignal(sig, ctx.signals));
+// Every live-signal precondition is met (empty = trivially true). Works for nodes and
+// for the chapter-entry checklist item (both may carry requiresSignals).
+function requiresSignalsMet(item: { requiresSignals?: DerivedSignal[] }, ctx: OnboardingContext): boolean {
+  return (item.requiresSignals ?? []).every((sig) => derivedSignal(sig, ctx.signals));
 }
 
 function isTriggered(node: OnboardingNode, ctx: OnboardingContext): boolean {
@@ -472,9 +508,15 @@ export function activeTip(ctx: OnboardingContext): OnboardingNode | null {
   );
 }
 
-// The checklist for this role, each item with its live-derived done state.
+// The checklist for this role, each item with its live-derived done state. Filtered by
+// authz (eligibleRoles), presentation audience (owner/admin vs member entry variant),
+// and signal preconditions (the member entry appears only once an agent exists). The
+// chapter entry COUNTS as an item (Anton) — so a member with agents sees 3 items, a
+// member with none sees 2, and owner/admin see 4.
 export function checklistProgress(ctx: OnboardingContext): Array<{ item: OnboardingChecklistItem; done: boolean }> {
-  return CHECKLIST_ITEMS.filter((i) => roleEligible(i.eligibleRoles, ctx.roles)).map((item) => ({
+  return CHECKLIST_ITEMS.filter(
+    (i) => roleEligible(i.eligibleRoles, ctx.roles) && audienceMatches(i, ctx) && requiresSignalsMet(i, ctx),
+  ).map((item) => ({
     item,
     done: isComplete(item, ctx),
   }));
@@ -486,11 +528,12 @@ export function checklistProgress(ctx: OnboardingContext): Array<{ item: Onboard
 // guide or from the checklist — and asks the engine which card to show for the current
 // live state. All completion is live-derived (no new stored flag).
 
-// Whether a chapter card's presentation VARIANT is meant for this role (distinct from
+// Whether a card/entry's presentation VARIANT is meant for this role (distinct from
 // authz eligibility). `undefined` audience = any. Permission is still enforced upstream
-// by eligibleNodes (eligibleRoles); this only picks owner/admin-vs-member surfaces.
-function audienceMatches(node: OnboardingNode, ctx: OnboardingContext): boolean {
-  switch (node.audience) {
+// by eligibleRoles; this only picks owner/admin-vs-member surfaces. Works for chapter
+// nodes and the chapter-entry checklist item.
+function audienceMatches(item: { audience?: OnboardingAudience }, ctx: OnboardingContext): boolean {
+  switch (item.audience) {
     case undefined:
       return true;
     case "owner-admin":

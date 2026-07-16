@@ -135,8 +135,12 @@ describe("onboarding wiring in WorkspaceApp", () => {
     mocks.documents = [{ id: "doc_1", path: "Product.md", title: "Product.md" }];
     renderWorkspace();
 
-    // document-exists + agent-exists derive from live state — no stored "done" flags.
-    expect(screen.getByText("2 of 5 done")).toBeTruthy();
+    // Member with an agent: the checklist is create-document (done) + start-discussion +
+    // the "Work with an agent" entry (shown because an agent exists; completes on
+    // agent-at-work) — all live-derived, no stored "done" flags. #56 replace-not-coexist
+    // folded the old connect/create/agent-at-work rows into that single entry.
+    expect(screen.getByText("1 of 3 done")).toBeTruthy();
+    expect(screen.getByText("Work with an agent")).toBeTruthy();
     expect(screen.queryByText("These are real files")).toBeNull();
   });
 
