@@ -194,8 +194,9 @@ describe("useOnboardingController scope isolation (per user × workspace)", () =
         useOnboardingController({ ...baseInput, accountId: "acct_1", route: "document", selectionActive: false, ...props }),
       { initialProps: { workspaceId: "wsA" } },
     );
-    // A: threads-intro acknowledged → the guide sits on watchers-intro.
-    expect(result.current.active?.id).toBe("watchers-intro");
+    // A: threads-intro acknowledged → the 2-step guide is finished, nothing active
+    // (watchers left the sequence in #56; no agent here so its tip is inert too).
+    expect(result.current.active).toBeNull();
     // Switch the still-mounted controller to workspace B (no flags): threads-intro reappears.
     rerender({ workspaceId: "wsB" });
     expect(result.current.active?.id).toBe("threads-intro");

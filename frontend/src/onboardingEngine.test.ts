@@ -7,6 +7,9 @@ import {
   guideSteps,
   activeNode,
   activeTip,
+  activeChapter,
+  chapterSteps,
+  hasChapter,
   nextIncomplete,
   isComplete,
   checklistProgress,
@@ -61,12 +64,8 @@ describe("node config integrity (§4.1)", () => {
       expect(["page-card", "skip"]).toContain(n.fallback);
       expect(typeof n.skippable).toBe("boolean");
     }
-    // The guided sequence is exactly the 3 ruled spotlight steps (Eva's 3-not-4).
-    expect(guideSteps(ctx()).map((n) => n.id)).toEqual([
-      "create-first-document",
-      "threads-intro",
-      "watchers-intro",
-    ]);
+    // The guided sequence is exactly the 2 ruled spotlight steps (#56: watchers left it).
+    expect(guideSteps(ctx()).map((n) => n.id)).toEqual(["create-first-document", "threads-intro"]);
   });
 
   it("teaching nodes complete on acknowledge; the action node derives", () => {
@@ -122,8 +121,14 @@ describe("node config integrity (§4.1)", () => {
 });
 
 describe("eligibility by role (§4.1 — removed, not disabled)", () => {
-  it("all guided/tip nodes are role-agnostic", () => {
-    expect(eligibleNodes(ctx({ roles: ["member"] })).map((n) => n.id)).toEqual(NODES.map((n) => n.id));
+  it("guide + tip nodes are role-agnostic (chapter nodes are role-scoped — see chapter tests)", () => {
+    const allGuideTips = NODES.filter((n) => n.presentation !== "chapter").map((n) => n.id);
+    const memberGuideTips = eligibleNodes(ctx({ roles: ["member"] }))
+      .filter((n) => n.presentation !== "chapter")
+      .map((n) => n.id);
+    // A member sees every non-chapter node (all eligibleRoles []); chapter role-gating
+    // is asserted separately.
+    expect(memberGuideTips).toEqual(allGuideTips);
   });
 
   it("checklist gates 'Invite your team' to owners/admins only", () => {
@@ -176,28 +181,21 @@ describe("guided sequence: activeNode / nextIncomplete", () => {
     expect(activeNode(onDoc)?.id).toBe("threads-intro");
   });
 
-  it("advances to watchers-intro after threads-intro is acknowledged", () => {
+  it("finishes after threads-intro is acknowledged — the guide is 2 steps, watchers no longer follows", () => {
     const c = ctx({
       signals: { ...emptySignals, documentCount: 1 },
       route: "document",
       events: new Set([seen("threads-intro")]),
     });
-    expect(activeNode(c)?.id).toBe("watchers-intro");
-  });
-
-  it("finishes: all steps complete → no active node, nothing left", () => {
-    const c = ctx({
-      signals: { ...emptySignals, documentCount: 1 },
-      route: "document",
-      events: new Set([seen("threads-intro"), seen("watchers-intro")]),
-    });
+    // create-first-document complete (doc exists) + threads-intro acknowledged → done.
     expect(nextIncomplete(c)).toBeNull();
     expect(activeNode(c)).toBeNull();
   });
 
   it("never jumps past an earlier incomplete step to a later triggered one", () => {
-    // threads-intro not seen, but a document is open. watchers-intro is also
-    // document-open-triggered — activeNode must still be threads-intro, not watchers.
+    // threads-intro not seen but a document is open (its trigger). create-first-document
+    // is still incomplete only when no doc exists; here a doc exists so step 1 is done and
+    // activeNode is threads-intro — never a later/other node.
     const c = ctx({ signals: { ...emptySignals, documentCount: 1 }, route: "document" });
     expect(activeNode(c)?.id).toBe("threads-intro");
   });
@@ -213,6 +211,95 @@ describe("contextual tip (standalone, not in the sequence)", () => {
 
   it("the tip is not part of the guided step sequence", () => {
     expect(guideSteps(ctx()).some((n) => n.id === "tip-first-selection")).toBe(false);
+  });
+});
+
+describe("watchers-intro relocated as a contextual tip (#56)", () => {
+  it("left the guided sequence and is now a tip", () => {
+    expect(guideSteps(ctx()).some((n) => n.id === "watchers-intro")).toBe(false);
+    expect(node("watchers-intro").presentation).toBe("tip");
+  });
+
+  it("keeps id + version 1 so the existing ack carries — zero migration, no re-show", () => {
+    const n = node("watchers-intro");
+    expect(n.version).toBe(1);
+    expect(acknowledgeFlag(n)).toBe("seen:watchers-intro@v1");
+    // A user who acknowledged the OLD spotlight form has exactly this flag → still complete,
+    // so the relocated tip never re-appears for them.
+    expect(isComplete(n, ctx({ events: new Set(["seen:watchers-intro@v1"]) }))).toBe(true);
+  });
+
+  it("surfaces only with a document open AND an agent — never before an agent exists", () => {
+    const withAgent = { ...emptySignals, agentCount: 1 };
+    // document open but no agent → inert (watchers make no sense without an agent).
+    expect(activeTip(ctx({ route: "document" }))).toBeNull();
+    // an agent but no document open → inert.
+    expect(activeTip(ctx({ signals: withAgent }))).toBeNull();
+    // document open + agent + not yet acknowledged → shows.
+    expect(activeTip(ctx({ route: "document", signals: withAgent }))?.id).toBe("watchers-intro");
+    // once acknowledged → never again.
+    expect(
+      activeTip(ctx({ route: "document", signals: withAgent, events: new Set([seen("watchers-intro")]) })),
+    ).toBeNull();
+  });
+});
+
+describe("Add an AI teammate chapter (#56)", () => {
+  const owner: OnboardingRole[] = ["owner"];
+  const member: OnboardingRole[] = ["member"];
+  const withEnv = { ...emptySignals, liveEnvironmentCount: 1 };
+  const withAgent = { ...withEnv, agentCount: 1 };
+  const atWork = { ...withAgent, agentRunCount: 1 };
+
+  it("owner/admin: the chapter walks connect → create → work → done on live signals", () => {
+    // 0 environments → step 1 (connect).
+    expect(activeChapter(ctx({ roles: owner }))?.id).toBe("add-teammate-connect");
+    // environment, no agent → step 2 (create).
+    expect(activeChapter(ctx({ roles: owner, signals: withEnv }))?.id).toBe("add-teammate-create");
+    // agent, not yet at work → step 3 (work).
+    expect(activeChapter(ctx({ roles: owner, signals: withAgent }))?.id).toBe("add-teammate-work");
+    // an agent is at work → the terminal done card.
+    expect(activeChapter(ctx({ roles: owner, signals: atWork }))?.id).toBe("add-teammate-done");
+  });
+
+  it("owner/admin chapter is 3 ordered steps + a terminal done card", () => {
+    expect(chapterSteps(ctx({ roles: owner })).map((n) => n.id)).toEqual([
+      "add-teammate-connect",
+      "add-teammate-create",
+      "add-teammate-work",
+    ]);
+  });
+
+  it("member never sees connect/create — only the work card, and only once an agent exists", () => {
+    // A member sees exactly one chapter node, the work card.
+    const memberChapterIds = eligibleNodes(ctx({ roles: member }))
+      .filter((n) => n.presentation === "chapter")
+      .map((n) => n.id);
+    expect(memberChapterIds).toEqual(["add-teammate-member"]);
+
+    // No agents → nothing to show, no entry offered (2d).
+    expect(activeChapter(ctx({ roles: member }))).toBeNull();
+    expect(hasChapter(ctx({ roles: member }))).toBe(false);
+
+    // An agent exists, not yet at work → the member "work with an agent" card (2c).
+    expect(activeChapter(ctx({ roles: member, signals: withAgent }))?.id).toBe("add-teammate-member");
+    expect(hasChapter(ctx({ roles: member, signals: withAgent }))).toBe(true);
+  });
+
+  it("member: once an agent is at work, the chapter is complete — nothing to show", () => {
+    expect(activeChapter(ctx({ roles: member, signals: atWork }))).toBeNull();
+  });
+
+  it("chapter cards never auto-surface as a guide spotlight or a tip", () => {
+    // Even with every trigger condition true, activeNode/activeTip must not return a chapter card.
+    const full = ctx({
+      roles: owner,
+      route: "document",
+      selectionActive: true,
+      signals: { ...atWork, documentCount: 1 },
+    });
+    expect(activeNode(full)?.presentation).not.toBe("chapter");
+    expect(activeTip(full)?.presentation).not.toBe("chapter");
   });
 });
 

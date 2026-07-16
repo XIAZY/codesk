@@ -37,7 +37,8 @@ export type OnboardingRole = "owner" | "admin" | "member";
 export type OnboardingTrigger =
   | { type: "workspace-empty" } // no documents yet
   | { type: "document-open" } // a document view is active (its spotlight target exists)
-  | { type: "first-text-select" }; // the editor has a live text selection
+  | { type: "first-text-select" } // the editor has a live text selection
+  | { type: "manual" }; // never auto-triggers — shown only when its flow is opened (chapter cards)
 
 // A completion condition. `derived` reads live signals (the source of truth);
 // `flag` reads a recorded seen/dismissed/event key; `any` is satisfied if any child
@@ -58,13 +59,25 @@ export type DerivedSignal =
 // The UI actions a node's buttons can fire (distinct from the §4.2 completion event
 // keys). A closed union so a typo dies at compile time and OnboardingNode stays
 // structurally assignable to P2's OnboardingStep by construction — no cast/parser.
-export type OnboardingActionEvent = "advance" | "back" | "complete" | "dismiss" | "open-thread-draft";
+// The three `open-*` events route the "Add an AI teammate" chapter CTAs to real
+// controls (CreateDaemonModal / CreateAgentModal / the shared agent-work destination).
+export type OnboardingActionEvent =
+  | "advance"
+  | "back"
+  | "complete"
+  | "dismiss"
+  | "open-thread-draft"
+  | "open-create-environment"
+  | "open-create-agent"
+  | "open-agent-work";
 
 export type OnboardingAction = { label: string; event: OnboardingActionEvent };
 
 // `spotlight` nodes form the guided sequence (step counter); `tip` nodes are
-// standalone contextual callouts (no counter, one-time).
-export type OnboardingPresentation = "spotlight" | "tip";
+// standalone contextual callouts (no counter, one-time); `chapter` nodes form the
+// optional, non-blocking "Add an AI teammate" flow (its own step sequence + a
+// terminal done card), never auto-triggered — opened deliberately by the user.
+export type OnboardingPresentation = "spotlight" | "tip" | "chapter";
 
 export type OnboardingNode = {
   id: string;
@@ -73,10 +86,18 @@ export type OnboardingNode = {
   presentation: OnboardingPresentation;
   eligibleRoles: OnboardingRole[]; // empty = all
   trigger: OnboardingTrigger;
+  // Extra live-signal preconditions ANDed into the trigger — the node is inert until
+  // ALL are true (e.g. the watchers hint needs an agent to exist; the member chapter
+  // card needs an agent to exist). A real gate on live state, not a fake trigger type.
+  requiresSignals?: DerivedSignal[];
   completion: OnboardingCondition;
+  // Marks the terminal "done" card of a chapter (shown once the chapter's steps are all
+  // complete, gated by its requiresSignals) — not itself a step in the sequence.
+  chapterTerminal?: boolean;
   targetOnboardingId?: string; // data-onboarding-id of the control to spotlight
   title: string;
   body: string;
+  eyebrow?: string; // small label above the title (chapter cards: "ADD AN AI TEAMMATE · OPTIONAL")
   primaryAction?: OnboardingAction;
   secondaryAction?: OnboardingAction;
   skippable: boolean;
@@ -134,7 +155,9 @@ export function acknowledgeFlag(node: OnboardingNode): string {
 }
 
 export const NODES: OnboardingNode[] = [
-  // A. Guided spotlight sequence — scope workspace, all roles, 3 steps.
+  // A. Guided spotlight sequence — scope workspace, all roles, 2 steps every role can
+  // complete (create a document, learn threads). Watchers left this sequence in #56 —
+  // it now teaches as a contextual tip once an agent exists (see B).
   {
     id: "create-first-document",
     version: 1,
@@ -166,23 +189,28 @@ export const NODES: OnboardingNode[] = [
     skippable: true,
     fallback: "skip",
   },
+  // B. Contextual tips — standalone callouts, not in the guided sequence.
+  // watchers-intro RELOCATED here from the guided sequence (#56): SAME id + version 1,
+  // so the existing `seen:watchers-intro@v1` ack carries — users who saw the old
+  // spotlight step 3/3 never see it again (zero migration). Only presentation (tip),
+  // trigger (document-open AND agent-exists), and sequence membership changed. Watchers
+  // only make sense once an agent exists — hence the agent-exists precondition.
   {
     id: "watchers-intro",
     version: 1,
     scope: "workspace",
-    presentation: "spotlight",
+    presentation: "tip",
     eligibleRoles: [],
     trigger: { type: "document-open" },
+    requiresSignals: ["agent-exists"],
     completion: ACKNOWLEDGE,
     targetOnboardingId: "document-watchers",
     title: "Let an agent keep watch",
     body: "Watchers are the agents following this document. When something relevant changes, it lands in their work queue — no need to ping them.",
-    primaryAction: { label: "Done", event: "complete" },
-    secondaryAction: { label: "Back", event: "back" },
+    primaryAction: { label: "Got it", event: "dismiss" },
     skippable: true,
     fallback: "skip",
   },
-  // B. Contextual tip — standalone, account-scoped, not in the sequence.
   {
     id: "tip-first-selection",
     version: 1,
@@ -210,6 +238,100 @@ export const NODES: OnboardingNode[] = [
     secondaryAction: { label: "Got it", event: "dismiss" },
     skippable: true,
     fallback: "skip",
+  },
+  // D. "Add an AI teammate" chapter — optional, non-blocking, resumable. Trigger is
+  // `manual`: never auto-spotlighted, opened deliberately (after the core guide / from
+  // the checklist). Each card renders as a quiet page card (no spotlight target). The
+  // owner/admin path is a 3-step sequence (connect → create → work) that advances on
+  // live signals + a terminal "done" card; a member gets a single "work with an agent"
+  // card only once an agent exists. Completion is live-derived (agent-at-work) — no new
+  // stored flag. connect/create are eligibleRoles owner/admin (ManageDaemons/ManageAgents
+  // — the #57 permission truth); the work step + member card route to start-run, which
+  // is all-roles, so their role gating is variant-selection, not permission (see the
+  // chapter honesty tests). CTAs open the real controls via the three open-* actions.
+  {
+    id: "add-teammate-connect",
+    version: 1,
+    scope: "workspace",
+    presentation: "chapter",
+    eligibleRoles: ["owner", "admin"],
+    trigger: { type: "manual" },
+    completion: { via: "derived", signal: "live-environment" },
+    eyebrow: "ADD AN AI TEAMMATE · OPTIONAL",
+    title: "Connect a local environment",
+    body: "This is the computer where your agents run and keep files in sync. You set it up once.",
+    primaryAction: { label: "Connect environment", event: "open-create-environment" },
+    secondaryAction: { label: "Skip for now", event: "dismiss" },
+    skippable: true,
+    fallback: "page-card",
+  },
+  {
+    id: "add-teammate-create",
+    version: 1,
+    scope: "workspace",
+    presentation: "chapter",
+    eligibleRoles: ["owner", "admin"],
+    trigger: { type: "manual" },
+    completion: { via: "derived", signal: "agent-exists" },
+    eyebrow: "ADD AN AI TEAMMATE · OPTIONAL",
+    title: "Create your first agent",
+    body: "An agent has its own name and role, and keeps working in this workspace over time.",
+    primaryAction: { label: "Create agent", event: "open-create-agent" },
+    secondaryAction: { label: "Skip for now", event: "dismiss" },
+    skippable: true,
+    fallback: "page-card",
+  },
+  {
+    id: "add-teammate-work",
+    version: 1,
+    scope: "workspace",
+    presentation: "chapter",
+    eligibleRoles: ["owner", "admin"],
+    trigger: { type: "manual" },
+    completion: { via: "derived", signal: "agent-at-work" },
+    eyebrow: "ADD AN AI TEAMMATE · OPTIONAL",
+    title: "Put your agent to work",
+    body: "Hand it a document or a thread. It picks up the task and reports back here.",
+    // Label defaults to the single-agent case (they just created one); the host relabels
+    // to "Choose an agent" when 2+ agents exist. Both resolve via resolveAgentWorkDestination.
+    primaryAction: { label: "Give it a task", event: "open-agent-work" },
+    secondaryAction: { label: "Skip for now", event: "dismiss" },
+    skippable: true,
+    fallback: "page-card",
+  },
+  {
+    id: "add-teammate-done",
+    version: 1,
+    scope: "workspace",
+    presentation: "chapter",
+    eligibleRoles: ["owner", "admin"],
+    trigger: { type: "manual" },
+    requiresSignals: ["agent-at-work"],
+    chapterTerminal: true,
+    completion: { via: "derived", signal: "agent-at-work" },
+    eyebrow: "STARTED",
+    title: "You've started working with an agent",
+    body: "Its runs and replies show up here alongside your team. Add more anytime from Manage.",
+    primaryAction: { label: "Close", event: "dismiss" },
+    skippable: true,
+    fallback: "page-card",
+  },
+  {
+    id: "add-teammate-member",
+    version: 1,
+    scope: "workspace",
+    presentation: "chapter",
+    eligibleRoles: ["member"],
+    trigger: { type: "manual" },
+    requiresSignals: ["agent-exists"],
+    completion: { via: "derived", signal: "agent-at-work" },
+    eyebrow: "WORK WITH AN AGENT",
+    title: "Put an agent to work",
+    body: "This workspace already has agents ready. Hand one a task or follow its work.",
+    primaryAction: { label: "Give it a task", event: "open-agent-work" },
+    secondaryAction: { label: "No setup needed", event: "dismiss" },
+    skippable: true,
+    fallback: "page-card",
   },
 ];
 
@@ -265,7 +387,13 @@ function roleEligible(eligibleRoles: OnboardingRole[], roles: OnboardingRole[]):
   return eligibleRoles.length === 0 || eligibleRoles.some((r) => roles.includes(r));
 }
 
+// Every live-signal precondition on the node is met (empty = trivially true).
+function requiresSignalsMet(node: OnboardingNode, ctx: OnboardingContext): boolean {
+  return (node.requiresSignals ?? []).every((sig) => derivedSignal(sig, ctx.signals));
+}
+
 function isTriggered(node: OnboardingNode, ctx: OnboardingContext): boolean {
+  if (!requiresSignalsMet(node, ctx)) return false;
   switch (node.trigger.type) {
     case "workspace-empty":
       return ctx.signals.documentCount === 0;
@@ -273,6 +401,10 @@ function isTriggered(node: OnboardingNode, ctx: OnboardingContext): boolean {
       return ctx.route === "document";
     case "first-text-select":
       return ctx.selectionActive;
+    case "manual":
+      // Chapter cards never auto-trigger — they surface only through the chapter API
+      // (activeChapter) when their flow is opened, not via activeNode/activeTip.
+      return false;
   }
 }
 
@@ -322,4 +454,49 @@ export function checklistProgress(ctx: OnboardingContext): Array<{ item: Onboard
     item,
     done: isComplete(item, ctx),
   }));
+}
+
+// ---- "Add an AI teammate" chapter (#56) --------------------------------------
+// The chapter is opt-in and non-blocking: it is NEVER surfaced by activeNode/activeTip
+// (its cards carry a `manual` trigger). The host opens it deliberately — after the core
+// guide or from the checklist — and asks the engine which card to show for the current
+// live state. All completion is live-derived (no new stored flag).
+
+// The ordered chapter STEPS for this role (excludes the terminal done card). Owner/admin
+// see connect → create → work; a member sees only the single "work with an agent" card.
+export function chapterSteps(ctx: OnboardingContext): OnboardingNode[] {
+  return eligibleNodes(ctx).filter((n) => n.presentation === "chapter" && !n.chapterTerminal);
+}
+
+// The terminal done card for this role, if the chapter defines one (owner/admin only).
+function chapterTerminalNode(ctx: OnboardingContext): OnboardingNode | null {
+  return eligibleNodes(ctx).find((n) => n.presentation === "chapter" && n.chapterTerminal === true) ?? null;
+}
+
+// The next incomplete chapter step whose signal preconditions hold — the user's true
+// next action. Ordered: an earlier incomplete step is never skipped for a later one.
+// For a member the single card is inert until an agent exists (requiresSignals), so
+// this returns null for a member with no agents.
+export function nextChapterStep(ctx: OnboardingContext): OnboardingNode | null {
+  return chapterSteps(ctx).find((n) => !isComplete(n, ctx) && requiresSignalsMet(n, ctx)) ?? null;
+}
+
+// The chapter card to show when the chapter is open: the next incomplete step, or the
+// terminal done card once every step is complete (and its preconditions hold), or null
+// when there is nothing to show (a member with no agents; a member who has already
+// worked with an agent). A pure function of role + live state — the host owns WHEN the
+// chapter is open, the engine owns WHICH card.
+export function activeChapter(ctx: OnboardingContext): OnboardingNode | null {
+  const next = nextChapterStep(ctx);
+  if (next) return next;
+  const done = chapterTerminalNode(ctx);
+  if (done && requiresSignalsMet(done, ctx)) return done;
+  return null;
+}
+
+// Whether this role has any chapter card to show right now — drives whether an entry
+// point (e.g. a checklist row) is offered. Owner/admin always do (setup → done); a
+// member only once an agent exists and before they've put one to work.
+export function hasChapter(ctx: OnboardingContext): boolean {
+  return activeChapter(ctx) !== null;
 }

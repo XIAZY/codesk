@@ -1,8 +1,19 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 
-export type OnboardingActionEvent = "advance" | "back" | "complete" | "dismiss" | "open-thread-draft";
+// Kept structurally in sync with onboardingEngine.ts's unions (the adapter projects
+// OnboardingNode → OnboardingStep). The three open-* events route the "Add an AI
+// teammate" chapter CTAs; "chapter" is that optional flow's presentation.
+export type OnboardingActionEvent =
+  | "advance"
+  | "back"
+  | "complete"
+  | "dismiss"
+  | "open-thread-draft"
+  | "open-create-environment"
+  | "open-create-agent"
+  | "open-agent-work";
 export type OnboardingScope = "account" | "workspace";
-export type OnboardingPresentation = "spotlight" | "tip";
+export type OnboardingPresentation = "spotlight" | "tip" | "chapter";
 
 export type OnboardingAction = {
   label: string;
@@ -17,6 +28,7 @@ export type OnboardingStep = {
   scope: OnboardingScope;
   presentation: OnboardingPresentation;
   targetOnboardingId?: string;
+  eyebrow?: string; // small label above the title (chapter cards)
   title: string;
   body: string;
   primaryAction?: OnboardingAction;
