@@ -4176,8 +4176,20 @@ func TestAdmissionBackoffGateDefersWithinWindow(t *testing.T) {
 }
 
 func TestAdmissionBackoffNegativeNeighborCodesNotClassified(t *testing.T) {
-	for _, code := range []int{-32603, -32601, -32700, 0, 429} {
-		t.Run(fmt.Sprintf("code_%d", code), func(t *testing.T) {
+	tests := []struct {
+		name    string
+		code    int
+		message string
+	}{
+		{"internal_error", -32603, "some error"},
+		{"method_not_found", -32601, "some error"},
+		{"parse_error", -32700, "some error"},
+		{"zero", 0, "some error"},
+		{"positive_429", 429, "some error"},
+		{"same_message_different_code", -32000, "Server overloaded; retry later."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			factory := newFakeRuntimeDriver()
 			supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
 			defer supervisor.Shutdown()
@@ -4188,18 +4200,18 @@ func TestAdmissionBackoffNegativeNeighborCodesNotClassified(t *testing.T) {
 			}
 			process := factory.only(t)
 			process.startTurnRelease = closedChan()
-			process.startTurnErr = &appServerRPCError{Method: "turn/start", Code: code, Message: "some error"}
+			process.startTurnErr = &appServerRPCError{Method: "turn/start", Code: tt.code, Message: tt.message}
 
 			err := supervisor.ScheduleNotificationTurn(context.Background(), current, "p1", "sig:v1", "")
 			if err == nil {
-				t.Fatalf("non-32001 code %d should propagate error, not be swallowed", code)
+				t.Fatalf("code %d should propagate error, not be swallowed", tt.code)
 			}
 			supervisor.mu.Lock()
 			session := supervisor.sessions["agent_1"]
 			attempts := session.turnStartAttempts
 			supervisor.mu.Unlock()
 			if attempts != 0 {
-				t.Fatalf("code %d should not increment turnStartAttempts, got %d", code, attempts)
+				t.Fatalf("code %d should not increment turnStartAttempts, got %d", tt.code, attempts)
 			}
 		})
 	}
