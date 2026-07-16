@@ -152,12 +152,32 @@ describe("markdown live preview", () => {
     view.destroy();
   });
 
-  it("renders inactive unordered and ordered list markers without changing source text", () => {
-    const view = editor("- plain item\n1. ordered item\n2) ordered paren", EditorSelection.cursor(0));
+  it("renders an inactive unordered marker in place (no replace) so the source keeps its width", () => {
+    // Cursor on line 1 leaves line 2 inactive. A 2-line doc keeps the tested row
+    // inside jsdom's rendered viewport (which has no real height).
+    const view = editor("intro\n- bullet item", EditorSelection.cursor(0));
 
-    const listMarkers = Array.from(view.dom.querySelectorAll<HTMLElement>(".cm-md-list-widget")).map((item) => item.textContent);
-    expect(listMarkers).toEqual(["1.", "2)"]);
-    expect(view.state.doc.toString()).toBe("- plain item\n1. ordered item\n2) ordered paren");
+    // The dash is never replaced — it stays in the DOM (painted transparent, with
+    // "•" drawn as a CSS overlay), so it keeps its exact width and the row can't
+    // shift horizontally when clicked into edit view.
+    const bullets = Array.from(view.dom.querySelectorAll<HTMLElement>(".cm-md-list-bullet")).map((item) => item.textContent);
+    expect(bullets).toEqual(["-"]);
+    // No replace widget remains for the bullet marker.
+    expect(view.dom.querySelectorAll(".cm-md-list-widget").length).toBe(0);
+    expect(view.state.doc.toString()).toBe("intro\n- bullet item");
+
+    view.destroy();
+  });
+
+  it("renders an inactive ordered marker in place, showing the real source number", () => {
+    const view = editor("intro\n1. ordered item", EditorSelection.cursor(0));
+
+    // Ordered marker keeps the real "1." in place (just restyled), so nothing moves
+    // between rendered and edit views.
+    const numbers = Array.from(view.dom.querySelectorAll<HTMLElement>(".cm-md-list-number")).map((item) => item.textContent);
+    expect(numbers).toEqual(["1."]);
+    expect(view.dom.querySelectorAll(".cm-md-list-widget").length).toBe(0);
+    expect(view.state.doc.toString()).toBe("intro\n1. ordered item");
 
     view.destroy();
   });
