@@ -4260,6 +4260,53 @@ func TestAdmissionBackoffTurnCompletedDoesNotResetAttempts(t *testing.T) {
 	}
 }
 
+func TestAdmissionBackoffRejectionFiresExactlyOneWakeAtComputedDelay(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	supervisor.now = func() time.Time { return clock }
+	sleepDelays := make(chan time.Duration, 4)
+	supervisor.restartSleep = func(d time.Duration) { sleepDelays <- d }
+	wakes := make(chan string, 4)
+	supervisor.SetIdleWake(func(id string) { wakes <- id })
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	process.startTurnRelease = closedChan()
+	process.startTurnErr = &appServerRPCError{Method: "turn/start", Code: -32001, Message: "overloaded"}
+
+	if err := supervisor.ScheduleNotificationTurn(context.Background(), current, "p1", "sig:v1", ""); err != nil {
+		t.Fatalf("rejection: %v", err)
+	}
+
+	select {
+	case d := <-sleepDelays:
+		if d != 2*time.Second {
+			t.Fatalf("sleep delay = %v, want 2s", d)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no sleep observed after rejection")
+	}
+	select {
+	case id := <-wakes:
+		if id != "agent_1" {
+			t.Fatalf("wake agent = %q, want agent_1", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no wake after sleep completed")
+	}
+
+	// No spurious second wake.
+	select {
+	case <-wakes:
+		t.Fatal("unexpected second wake")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 func TestAdmissionBackoffStaleRejectionDoesNotMutateAdmission(t *testing.T) {
 	factory := newFakeRuntimeDriver()
 	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
