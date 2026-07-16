@@ -119,6 +119,7 @@ func (a *Application) loadDurableState() {
 	}
 	token, tokenErr := a.secrets.Load(desktop.SecretKeyDaemonToken)
 	if tokenErr == nil {
+		defer clear(token)
 		a.token = string(token)
 	} else if !errors.Is(tokenErr, os.ErrNotExist) {
 		a.logger.Printf("load protected credential: %v", tokenErr)
@@ -209,10 +210,11 @@ func (a *Application) run() {
 		select {
 		case <-a.ctx.Done():
 			return
-		case _, ok := <-a.controller.Updates():
+		case snapshot, ok := <-a.controller.Updates():
 			if !ok {
 				return
 			}
+			a.logger.Printf("service generation=%d state=%s sequence=%d", snapshot.Generation, snapshot.State, snapshot.Sequence)
 			a.publishMenu()
 		case <-a.wake:
 			a.publishMenu()
@@ -262,6 +264,7 @@ func (a *Application) beginConnect() {
 	a.connects.Add(1)
 	go func() {
 		defer a.connects.Done()
+		defer clear(priorToken)
 		defer func() {
 			a.stateMu.Lock()
 			a.connecting = false

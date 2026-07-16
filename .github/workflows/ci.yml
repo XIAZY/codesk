@@ -12,6 +12,7 @@
 #   git diff --check                   -> diff-check
 #   Windows GNU compile/link            -> windows-daemon-build
 #   Windows native runtime tests        -> windows-daemon (paused until a runner is available)
+#   macOS native cgo + unsigned universal release -> macos-desktop (opt-in until runner capacity exists)
 #
 # Two meta-properties (Tom's bar):
 #   * Fail loud on infrastructure absence — a skipped live-DB suite reporting green is the exact
@@ -139,6 +140,70 @@ jobs:
           make daemon-uninstall-test
       - name: Build all Go
         run: go build ./...
+
+  macos-desktop:
+    name: macOS desktop native + unsigned release (${{ matrix.architecture }})
+    # Keep the complete native matrix checked in, but report it as skipped while
+    # this repository has no macOS runner capacity. Set the repository variable
+    # CODESK_MACOS_RUNNERS_AVAILABLE=true when capacity is provisioned.
+    if: ${{ vars.CODESK_MACOS_RUNNERS_AVAILABLE == 'true' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            architecture: x86_64
+          - runner: macos-15
+            architecture: arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+      - name: Verify native runner architecture
+        run: test "$(uname -m)" = "${{ matrix.architecture }}"
+      - name: Build host libyrs
+        run: |
+          rm -f third_party/y-crdt/target/release/libyrs.a
+          scripts/build-yffi.sh
+          cmp third_party/y-crdt/target/release/deps/libyrs.a third_party/y-crdt/target/release/libyrs.a
+      - name: Compile and test Darwin cgo composition
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          go test -count=1 \
+            ./daemon/cmd/codesk-macos-release \
+            ./daemon/internal/macosapp \
+            ./daemon/internal/macosuser \
+            ./daemon/internal/desktop \
+            ./daemon/internal/desktopapp \
+            ./daemon/cmd/codesk-desktop
+          go vet \
+            ./daemon/cmd/codesk-macos-release \
+            ./daemon/internal/macosapp \
+            ./daemon/internal/macosuser \
+            ./daemon/internal/desktop \
+            ./daemon/internal/desktopapp \
+            ./daemon/cmd/codesk-desktop
+          go build -buildvcs=false -o "$RUNNER_TEMP/Codesk-host" ./daemon/cmd/codesk-desktop
+      - name: Build and independently verify unsigned universal release
+        env:
+          ALLOW_UNSIGNED_MACOS_DESKTOP: "1"
+        run: |
+          rm -rf third_party/y-crdt/target
+          scripts/build-macos-desktop-release.sh 0.0.0 "$RUNNER_TEMP/macos-release"
+          scripts/verify-macos-desktop-release.sh "$RUNNER_TEMP/macos-release/0.0.0" 0.0.0
+          test "$(plutil -extract signed_and_notarized raw -o - "$RUNNER_TEMP/macos-release/0.0.0/manifest.json")" = false
+          lipo "$RUNNER_TEMP/macos-release/0.0.0/Codesk.app/Contents/MacOS/Codesk" -verify_arch x86_64 arm64
+          lipo "$RUNNER_TEMP/macos-release/0.0.0/Codesk.app/Contents/Helpers/notty-agent-tool" -verify_arch x86_64 arm64
 
   windows-daemon-build:
     name: Windows daemon (Zig AMD64 + ARM64 cross-build)

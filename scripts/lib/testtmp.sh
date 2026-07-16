@@ -17,5 +17,6 @@ notty_test_mktemp() {
 	label="${1:-run}"
 	root="$(notty_test_tmp_root)"
 	mkdir -p "$root"
-	mktemp -d "$root/${label}.XXXXXX"
+	dir="$(mktemp -d "$root/${label}.XXXXXX")" || return
+	(CDPATH= cd -- "$dir" && pwd -P)
 }

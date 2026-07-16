@@ -1,16 +1,18 @@
 package desktop
 
 import (
-	"os"
 	"strings"
 	"testing"
+
+	"notty/daemon/internal/macosuser"
 )
 
 func TestDefaultDirsDarwin(t *testing.T) {
-	home, err := os.UserHomeDir()
+	home, err := macosuser.HomeDir()
 	if err != nil {
-		t.Skipf("UserHomeDir failed: %v", err)
+		t.Skipf("account home lookup failed: %v", err)
 	}
+	t.Setenv("HOME", t.TempDir())
 
 	dirs, err := DefaultDirs()
 	if err != nil {

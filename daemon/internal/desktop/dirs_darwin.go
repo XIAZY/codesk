@@ -1,11 +1,11 @@
 package desktop
 
-import "os"
+import "notty/daemon/internal/macosuser"
 
 const appName = "Codesk"
 
 func DefaultDirs() (Dirs, error) {
-	home, err := os.UserHomeDir()
+	home, err := macosuser.HomeDir()
 	if err != nil {
 		return Dirs{}, errNoAppDir(err.Error())
 	}

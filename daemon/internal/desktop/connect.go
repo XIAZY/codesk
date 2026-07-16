@@ -31,7 +31,9 @@ func Connect(ctx context.Context, codeskOrigin string, secrets SecretStore, open
 		return handoff.Payload{}, err
 	}
 
-	if err := secrets.Save(SecretKeyDaemonToken, []byte(payload.Token())); err != nil {
+	token := []byte(payload.Token())
+	defer clear(token)
+	if err := secrets.Save(SecretKeyDaemonToken, token); err != nil {
 		return handoff.Payload{}, errors.New("desktop connect: persist token failed")
 	}
 

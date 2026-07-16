@@ -73,8 +73,9 @@ func (s *testConfigStore) snapshot() (desktop.Configuration, bool) {
 }
 
 type testSecretStore struct {
-	mu   sync.Mutex
-	data map[string][]byte
+	mu         sync.Mutex
+	data       map[string][]byte
+	lastLoaded []byte
 }
 
 func newTestSecretStore(token string) *testSecretStore {
@@ -99,7 +100,9 @@ func (s *testSecretStore) Load(key string) ([]byte, error) {
 	if !ok {
 		return nil, os.ErrNotExist
 	}
-	return append([]byte(nil), secret...), nil
+	loaded := append([]byte(nil), secret...)
+	s.lastLoaded = loaded
+	return loaded, nil
 }
 
 func (s *testSecretStore) Delete(key string) error {
@@ -112,6 +115,20 @@ func (s *testSecretStore) Delete(key string) error {
 func (s *testSecretStore) token() string {
 	secret, _ := s.Load(desktop.SecretKeyDaemonToken)
 	return string(secret)
+}
+
+func (s *testSecretStore) loadedBufferCleared() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.lastLoaded) == 0 {
+		return false
+	}
+	for _, value := range s.lastLoaded {
+		if value != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 type testLoginItem struct {
@@ -310,6 +327,40 @@ func TestApplicationRoutesOpenRestartLogsAndQuitActions(t *testing.T) {
 	waitForSignal(t, second.stopped, "second service stop")
 	waitForUpdatesClosed(t, app.Updates())
 	app.Shutdown()
+}
+
+func TestApplicationLogsDistinctOnlineServiceGenerationsAfterRestart(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "desktop.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, factory, _, _, _, _ := newTestApplication(t, true, "old-token", newTestOpener())
+	app.logger = log.New(logFile, "codesk-desktop: ", 0)
+	startTestApplication(t, app)
+	waitForStartedService(t, factory)
+	waitForControllerState(t, app, desktop.StateOnline)
+	waitForLogText(t, logPath, "service generation=1 state=online")
+
+	app.Actions() <- desktop.MenuActionRestart
+	waitForStartedService(t, factory)
+	waitForControllerState(t, app, desktop.StateOnline)
+	waitForLogText(t, logPath, "service generation=2 state=online")
+
+	app.Shutdown()
+	if err := logFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestApplicationClearsLoadedSecretBuffer(t *testing.T) {
+	app, _, _, secrets, _, _ := newTestApplication(t, true, "loaded-token", newTestOpener())
+	if app.token != "loaded-token" {
+		t.Fatalf("loaded token = %q, want loaded-token", app.token)
+	}
+	if !secrets.loadedBufferCleared() {
+		t.Fatal("loadDurableState retained the caller-owned secret buffer")
+	}
 }
 
 func TestApplicationConnectCommitsConfigurationAndRestarts(t *testing.T) {
@@ -902,6 +953,23 @@ func waitForOpened(t *testing.T, opener *testOpener) string {
 		t.Fatal("timed out waiting for opened target")
 		return ""
 	}
+}
+
+func waitForLogText(t *testing.T, path, want string) {
+	t.Helper()
+	deadline := time.Now().Add(applicationTestTimeout)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), want) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	data, _ := os.ReadFile(path)
+	t.Fatalf("log never contained %q:\n%s", want, data)
 }
 
 func waitForSignal(t *testing.T, signal <-chan struct{}, name string) {

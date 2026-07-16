@@ -161,6 +161,7 @@ func runNativeTray(ctx context.Context, options nativeTrayOptions) error {
 }
 
 func setNativeTrayIcon(options nativeTrayOptions) {
+	systray.SetRemovalAllowed(false)
 	switch {
 	case len(options.TemplateIcon) > 0:
 		systray.SetTemplateIcon(options.TemplateIcon, options.Icon)
