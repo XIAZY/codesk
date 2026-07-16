@@ -7,43 +7,101 @@ import { OnboardingChecklist } from "./OnboardingChecklist";
 
 afterEach(cleanup);
 
-const progress = CHECKLIST_ITEMS.slice(0, 3).map((item, index) => ({ item, done: index === 0 }));
+const byId = (id: string) => CHECKLIST_ITEMS.find((i) => i.id === id)!;
+// An owner/admin-shaped checklist (#56 single-entry restructure): two plain tasks + the
+// ONE "Add an AI teammate" chapter entry (counts in the denominator) + invite.
+const ownerProgress = [
+  { item: byId("create-document"), done: true },
+  { item: byId("start-discussion"), done: false },
+  { item: byId("add-teammate-entry"), done: false },
+  { item: byId("invite-team"), done: false },
+];
 
 describe("OnboardingChecklist", () => {
-  it("shows honest visible-item progress and text status in configured order", () => {
-    const { container } = render(<OnboardingChecklist progress={progress} dismissed={false} onDismiss={vi.fn()} />);
-
+  it("counts the chapter entry in the denominator and renders in order", () => {
+    render(
+      <OnboardingChecklist progress={ownerProgress} dismissed={false} onDismiss={vi.fn()} chapterStepIndex={0} chapterTotal={3} />,
+    );
     expect(screen.getByRole("complementary", { name: "Finish setting up this workspace" })).toBeTruthy();
-    expect(screen.getByText("Work through these as you go — you don't have to do them all at once.")).toBeTruthy();
-    expect(screen.getByText("1 of 3 done")).toBeTruthy();
-    const meter = screen.getByRole("progressbar", { name: "1 of 3 onboarding tasks done" });
+    // The entry participates honestly: 1 of 4, not a side action (Anton).
+    expect(screen.getByText("1 of 4 done")).toBeTruthy();
+    const meter = screen.getByRole("progressbar", { name: "1 of 4 onboarding tasks done" });
     expect(meter.getAttribute("value")).toBe("1");
-    expect(meter.getAttribute("max")).toBe("3");
-    expect(screen.getAllByRole("listitem").map((row) => row.lastElementChild?.textContent)).toEqual([
-      "Done: Create your first document",
-      "Not done: Start a discussion",
-      "Not done: Connect a local environment",
-    ]);
-    expect(container.querySelectorAll('[data-done="true"]')).toHaveLength(1);
+    expect(meter.getAttribute("max")).toBe("4");
+    expect(screen.getByText("Create your first document")).toBeTruthy();
+    expect(screen.getByText("Invite your team")).toBeTruthy();
+  });
+
+  it("renders the chapter entry as a launcher: subtitle, owner/admin 'N of M' badge, opens on click", () => {
+    const onOpenChapter = vi.fn();
+    render(
+      <OnboardingChecklist
+        progress={ownerProgress}
+        dismissed={false}
+        onDismiss={vi.fn()}
+        onOpenChapter={onOpenChapter}
+        chapterStepIndex={0}
+        chapterTotal={3}
+      />,
+    );
+    expect(screen.getByText("Add an AI teammate")).toBeTruthy();
+    expect(screen.getByText("Connect an environment, create an agent, put it to work")).toBeTruthy();
+    expect(screen.getByText("1 of 3")).toBeTruthy(); // derived owner/admin progress badge
+    fireEvent.click(screen.getByText("Add an AI teammate"));
+    expect(onOpenChapter).toHaveBeenCalledOnce();
+  });
+
+  it("completed chapter entry uses historical past-tense copy + a 'Done' badge, still a launcher", () => {
+    const onOpenChapter = vi.fn();
+    const done = ownerProgress.map((row) => (row.item.id === "add-teammate-entry" ? { ...row, done: true } : row));
+    render(
+      <OnboardingChecklist
+        progress={done}
+        dismissed={false}
+        onDismiss={vi.fn()}
+        onOpenChapter={onOpenChapter}
+        chapterStepIndex={-1}
+        chapterTotal={3}
+      />,
+    );
+    expect(screen.getByText("You've started working with an agent")).toBeTruthy();
+    expect(screen.getByText("Done")).toBeTruthy();
+    expect(screen.queryByText("1 of 3")).toBeNull(); // no progress badge once done
+    fireEvent.click(screen.getByText("You've started working with an agent"));
+    expect(onOpenChapter).toHaveBeenCalledOnce();
+  });
+
+  it("member entry is a single action — no progress badge", () => {
+    const memberProgress = [
+      { item: byId("create-document"), done: true },
+      { item: byId("start-discussion"), done: false },
+      { item: byId("work-with-agent-entry"), done: false },
+    ];
+    render(
+      <OnboardingChecklist progress={memberProgress} dismissed={false} onDismiss={vi.fn()} chapterStepIndex={0} chapterTotal={1} />,
+    );
+    expect(screen.getByText("Work with an agent")).toBeTruthy();
+    expect(screen.queryByText("1 of 1")).toBeNull(); // single action → no dots/counter badge
   });
 
   it("uses an accessible icon-only dismiss action and honors durable dismissal", () => {
     const onDismiss = vi.fn();
-    const { rerender } = render(<OnboardingChecklist progress={progress} dismissed={false} onDismiss={onDismiss} />);
-
+    const { rerender } = render(<OnboardingChecklist progress={ownerProgress} dismissed={false} onDismiss={onDismiss} />);
     fireEvent.click(screen.getByRole("button", { name: "Dismiss checklist" }));
     expect(onDismiss).toHaveBeenCalledOnce();
-    rerender(<OnboardingChecklist progress={progress} dismissed onDismiss={onDismiss} />);
+    rerender(<OnboardingChecklist progress={ownerProgress} dismissed onDismiss={onDismiss} />);
     expect(screen.queryByRole("complementary")).toBeNull();
   });
 
   it("stays visible in a quiet all-done state", () => {
-    const completed = progress.map(({ item }) => ({ item, done: true }));
-    render(<OnboardingChecklist progress={completed} dismissed={false} onDismiss={vi.fn()} />);
-
+    const completed = ownerProgress.map((row) => ({ ...row, done: true }));
+    render(
+      <OnboardingChecklist progress={completed} dismissed={false} onDismiss={vi.fn()} chapterStepIndex={-1} chapterTotal={3} />,
+    );
     expect(screen.getByText("All done")).toBeTruthy();
-    expect(screen.getByRole("progressbar", { name: "All 3 onboarding tasks done" }).getAttribute("value")).toBe("3");
-    expect(screen.getAllByText(/^Done:/)).toHaveLength(3);
+    expect(screen.getByRole("progressbar", { name: "All 4 onboarding tasks done" }).getAttribute("value")).toBe("4");
+    // The completed entry shows its historical label, never the present-tense one.
+    expect(screen.getByText("You've started working with an agent")).toBeTruthy();
   });
 
   it("does not render an empty role-filtered checklist", () => {

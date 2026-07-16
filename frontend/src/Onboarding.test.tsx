@@ -734,4 +734,15 @@ describe("OnboardingChapterCard (#56)", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onDismiss).toHaveBeenCalled();
   });
+
+  it("Escape is inert while a real modal is open — the modal owns it, chapter stays put", () => {
+    const onDismiss = vi.fn();
+    const backdrop = document.createElement("div");
+    backdrop.className = "modal-backdrop";
+    document.body.appendChild(backdrop);
+    render(<OnboardingChapterCard step={connectStep} stepIndex={0} total={3} onDismiss={onDismiss} />);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onDismiss).not.toHaveBeenCalled(); // one Escape must not close both modal and chapter
+    document.body.removeChild(backdrop);
+  });
 });

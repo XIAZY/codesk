@@ -32,14 +32,12 @@ describe("deriveOnboardingSignals", () => {
     const signals = deriveOnboardingSignals({
       workspaceState: ws({ threads: [thread([]), thread([])], agents: [agent("a1")], agentRuns: [run()] }),
       documentCount: 3,
-      watchedDocumentCount: 2,
       nowMs: NOW,
     });
     expect(signals.documentCount).toBe(3);
     expect(signals.threadCount).toBe(2);
     expect(signals.agentCount).toBe(1);
     expect(signals.agentRunCount).toBe(1);
-    expect(signals.watchedDocumentCount).toBe(2);
   });
 
   it("counts a live environment by receipt-elapsed liveness, not by a raw 'online' status", () => {
@@ -50,7 +48,6 @@ describe("deriveOnboardingSignals", () => {
     const signals = deriveOnboardingSignals({
       workspaceState: ws({ daemons: [online, staleButRawOnline] }),
       documentCount: 0,
-      watchedDocumentCount: 0,
       nowMs: NOW,
     });
     expect(signals.liveEnvironmentCount).toBe(1);
@@ -63,7 +60,6 @@ describe("deriveOnboardingSignals", () => {
         threads: [thread(["user-1"]), thread(["user-1", "agent-1"]), thread(["agent-1"])],
       }),
       documentCount: 0,
-      watchedDocumentCount: 0,
       nowMs: NOW,
     });
     expect(signals.threadCount).toBe(3);

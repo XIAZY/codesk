@@ -150,7 +150,6 @@ export type OnboardingLiveSignals = {
   agentCount: number;
   agentRunCount: number;
   agentThreadCount: number; // threads an agent participates in
-  watchedDocumentCount: number;
 };
 
 export type OnboardingContext = {
@@ -374,6 +373,27 @@ export const NODES: OnboardingNode[] = [
     skippable: true,
     fallback: "page-card",
   },
+  // Member terminal card (#56, Anton's behavioral-gate fix): once a member has put an
+  // agent to work, reopening the entry must land on a real completion card — not nothing.
+  // Mirrors the owner/admin done card for the member audience; live-derived (agent-at-work).
+  {
+    id: "add-teammate-member-done",
+    version: 1,
+    scope: "workspace",
+    presentation: "chapter",
+    eligibleRoles: [],
+    audience: "member",
+    trigger: { type: "manual" },
+    requiresSignals: ["agent-at-work"],
+    chapterTerminal: true,
+    completion: { via: "derived", signal: "agent-at-work" },
+    eyebrow: "STARTED",
+    title: "You've started working with an agent",
+    body: "You can start more work anytime from Agents.",
+    primaryAction: { label: "Close", event: "dismiss" },
+    skippable: true,
+    fallback: "page-card",
+  },
 ];
 
 // C. Getting-started checklist — scope workspace. Completion is derived from live
@@ -409,6 +429,8 @@ export const CHECKLIST_ITEMS: OnboardingChecklistItem[] = [
     completion: { via: "derived", signal: "agent-at-work" },
     subtitle: "Choose an agent and start a run",
     opensChapter: true,
+    doneLabel: "You've started working with an agent",
+    doneSubtitle: "Reopen to start more work",
   },
   { id: "invite-team", label: "Invite your team", eligibleRoles: ["owner", "admin"], completion: { via: "flag", key: "member_invited" } },
 ];
@@ -426,7 +448,11 @@ function derivedSignal(signal: DerivedSignal, s: OnboardingLiveSignals): boolean
     case "agent-exists":
       return s.agentCount > 0;
     case "agent-at-work":
-      return s.watchedDocumentCount > 0 || s.agentRunCount > 0 || s.agentThreadCount > 0;
+      // Ratified #56 oracle: a run started OR an agent in a thread. NOT "watching" — a
+      // watcher hasn't done work, so it must not mark the chapter Done (that was a Batch-1
+      // definition; folded out here). If "agent is watching" is ever wanted it needs its
+      // own named signal + product ruling — one signal, one meaning.
+      return s.agentRunCount > 0 || s.agentThreadCount > 0;
   }
 }
 
@@ -581,11 +607,14 @@ export function nextChapterStep(ctx: OnboardingContext): OnboardingNode | null {
 // worked with an agent). A pure function of role + live state — the host owns WHEN the
 // chapter is open, the engine owns WHICH card.
 export function activeChapter(ctx: OnboardingContext): OnboardingNode | null {
-  const next = nextChapterStep(ctx);
-  if (next) return next;
+  // History-first (Juan/Anton/Deniz): once the chapter is complete — its terminal's
+  // preconditions hold, i.e. an agent was put to work — reopen the DONE card even if setup
+  // signals later regress (environment offline, an agent removed). Activation history
+  // doesn't un-happen because a live signal decayed; the chapter is history, not a health
+  // dashboard. So the terminal is checked BEFORE the setup frontier.
   const done = chapterTerminalNode(ctx);
   if (done && requiresSignalsMet(done, ctx)) return done;
-  return null;
+  return nextChapterStep(ctx) ?? null;
 }
 
 // Whether this role has any chapter card to show right now — drives whether an entry

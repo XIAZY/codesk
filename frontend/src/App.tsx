@@ -1669,11 +1669,6 @@ export function WorkspaceApp({
     selectionActive,
     workspaceState: workspace,
     documentCount: rootDocuments.length,
-    // No workspace-wide agent-watcher count exists in Batch 1 (subscribers are fetched
-    // per open document via useDocumentSubscribers), so "put an agent to work" derives
-    // from the agent-run / agent-thread signals; the watcher leg lands with Batch 2's
-    // Watchers/Activity work.
-    watchedDocumentCount: 0,
     nowMs: now,
   });
   const recordOnboardingEvent = onboarding.record;
@@ -2573,7 +2568,11 @@ export function WorkspaceApp({
           onMemberInvited={() => onboarding.record("member_invited", "workspace")}
         />
       ) : null}
-      {onboarding.active ? (
+      {/* One onboarding surface owns attention: while the chapter is open, the contextual
+          tip AND the checklist launcher are suspended (pure render gating — no seen/dismissed
+          flag recorded), so a single Escape can't close the chapter and silently ack an unseen
+          tip. Both restore the moment the chapter closes. */}
+      {onboarding.active && !chapterCardStep ? (
         <Onboarding
           step={onboarding.active}
           stepIndex={onboarding.stepIndex}
@@ -2593,7 +2592,7 @@ export function WorkspaceApp({
           onDismiss={onboarding.closeChapter}
         />
       ) : null}
-      {shouldRenderOnboardingChecklist(rootNamespace.ready, onboarding.active?.presentation) ? (
+      {!chapterCardStep && shouldRenderOnboardingChecklist(rootNamespace.ready, onboarding.active?.presentation) ? (
         <OnboardingChecklist
           progress={onboarding.checklist}
           dismissed={onboarding.checklistDismissed}

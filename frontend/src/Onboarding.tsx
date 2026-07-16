@@ -415,10 +415,12 @@ export function OnboardingChapterCard({ step, stepIndex, total, onAction, onDism
   useEffect(() => {
     cardRef.current?.querySelector<HTMLElement>("button")?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onDismiss();
-      }
+      if (event.key !== "Escape") return;
+      // A real modal (opened by a CTA) owns Escape while it's up — stay inert so one Escape
+      // never closes both the modal and the chapter. Closing the modal returns to the card.
+      if (document.querySelector(".modal-backdrop")) return;
+      event.preventDefault();
+      onDismiss();
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
@@ -434,7 +436,7 @@ export function OnboardingChapterCard({ step, stepIndex, total, onAction, onDism
   return (
     <section
       ref={cardRef}
-      className="ob-coach ob-chapter"
+      className={`ob-coach ob-chapter${hasCta ? "" : " ob-chapter-done"}`}
       role="dialog"
       aria-modal="false"
       aria-labelledby={`ob-title-${step.id}`}

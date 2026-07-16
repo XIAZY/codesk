@@ -27,7 +27,6 @@ import {
 export type OnboardingSignalInput = {
   workspaceState: WorkspaceState;
   documentCount: number; // rootDocuments.length — held by WorkspaceApp, not WorkspaceState
-  watchedDocumentCount: number; // document subscriptions the user has added
   nowMs: number; // for daemon liveness decay
 };
 
@@ -36,7 +35,7 @@ export type OnboardingSignalInput = {
 // reads "online" (receipt-elapsed liveness with a genuine check-in) — never a raw
 // status field, so a stale-but-"online" daemon does not satisfy the local-env node.
 export function deriveOnboardingSignals(input: OnboardingSignalInput): OnboardingLiveSignals {
-  const { workspaceState, documentCount, watchedDocumentCount, nowMs } = input;
+  const { workspaceState, documentCount, nowMs } = input;
   const agentIds = new Set(workspaceState.agents.map((agent) => agent.id));
   return {
     documentCount,
@@ -45,7 +44,6 @@ export function deriveOnboardingSignals(input: OnboardingSignalInput): Onboardin
     agentCount: workspaceState.agents.length,
     agentRunCount: workspaceState.agentRuns.length,
     agentThreadCount: workspaceState.threads.filter((thread) => thread.participantIds.some((id) => agentIds.has(id))).length,
-    watchedDocumentCount,
   };
 }
 
@@ -115,7 +113,6 @@ export type OnboardingControllerInput = {
   selectionActive: boolean;
   workspaceState: WorkspaceState;
   documentCount: number;
-  watchedDocumentCount: number;
   nowMs: number;
 };
 
@@ -123,7 +120,7 @@ export type OnboardingControllerInput = {
 // which step/tip is active, and drives useOnboarding. WorkspaceApp calls this once
 // and renders <Onboarding step={active} .../> plus the checklist.
 export function useOnboardingController(input: OnboardingControllerInput) {
-  const { enabled, accountId, workspaceId, roles, route, selectionActive, workspaceState, documentCount, watchedDocumentCount, nowMs } = input;
+  const { enabled, accountId, workspaceId, roles, route, selectionActive, workspaceState, documentCount, nowMs } = input;
   const keys = useMemo(() => onboardingFlagKeys(accountId, workspaceId), [accountId, workspaceId]);
 
   // ONE keyed store owns the recorded event flags. The engine context and
@@ -133,8 +130,8 @@ export function useOnboardingController(input: OnboardingControllerInput) {
   const flags = useScopedEventFlags(keys.accountFlagsKey, keys.workspaceFlagsKey);
 
   const signals = useMemo(
-    () => deriveOnboardingSignals({ workspaceState, documentCount, watchedDocumentCount, nowMs }),
-    [workspaceState, documentCount, watchedDocumentCount, nowMs],
+    () => deriveOnboardingSignals({ workspaceState, documentCount, nowMs }),
+    [workspaceState, documentCount, nowMs],
   );
 
   const ctx: OnboardingContext = useMemo(

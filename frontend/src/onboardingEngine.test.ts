@@ -26,7 +26,6 @@ const emptySignals: OnboardingLiveSignals = {
   agentCount: 0,
   agentRunCount: 0,
   agentThreadCount: 0,
-  watchedDocumentCount: 0,
 };
 
 function ctx(overrides: Partial<OnboardingContext> = {}): OnboardingContext {
@@ -167,13 +166,14 @@ describe("completion derivation (§6.1 — live state is the source of truth)", 
     expect(isComplete(connect, ctx({ signals: { ...emptySignals, liveEnvironmentCount: 1 } }))).toBe(true);
   });
 
-  it("agent-at-work is any of: watcher added, agent run started, or agent in a thread", () => {
+  it("agent-at-work is a run started OR an agent in a thread — NOT watching (ratified #56 oracle)", () => {
     // The chapter's work step (and the checklist entry) complete on the agent-at-work signal.
     const work = node("add-teammate-work");
     expect(isComplete(work, ctx())).toBe(false);
-    expect(isComplete(work, ctx({ signals: { ...emptySignals, watchedDocumentCount: 1 } }))).toBe(true);
     expect(isComplete(work, ctx({ signals: { ...emptySignals, agentRunCount: 1 } }))).toBe(true);
     expect(isComplete(work, ctx({ signals: { ...emptySignals, agentThreadCount: 1 } }))).toBe(true);
+    // A mere watcher/subscriber does not count — "watching" is not "at work" (Tom/Deniz/Juan).
+    // (watchedDocumentCount no longer exists as a signal; there is no leg to falsely complete.)
   });
 });
 
@@ -299,8 +299,23 @@ describe("Add an AI teammate chapter (#56)", () => {
     expect(hasChapter(ctx({ roles: member, signals: withAgent }))).toBe(true);
   });
 
-  it("member: once an agent is at work, the chapter is complete — nothing to show", () => {
-    expect(activeChapter(ctx({ roles: member, signals: atWork }))).toBeNull();
+  it("terminal-first: a started run keeps Done even if the environment/agent later regresses", () => {
+    // agent-at-work true (a run happened) but the environment is now offline and the agent
+    // was removed — activeChapter must return the terminal Done card, NOT walk back to the
+    // connect step. Activation history doesn't un-happen because a live signal decayed.
+    const regressed = { ...emptySignals, agentRunCount: 1, liveEnvironmentCount: 0, agentCount: 0 };
+    expect(activeChapter(ctx({ roles: owner, signals: regressed }))?.id).toBe("add-teammate-done");
+    expect(activeChapter(ctx({ roles: member, signals: regressed }))?.id).toBe("add-teammate-member-done");
+  });
+
+  it("member: work card → agent-at-work → terminal done card (no dead end, still reopenable)", () => {
+    // Before work: the member sees the work card. After starting a run: the member sees a
+    // REAL terminal card (Anton's fix) — never null, so the entry's reopen lands on a card.
+    expect(activeChapter(ctx({ roles: member, signals: withAgent }))?.id).toBe("add-teammate-member");
+    const terminal = activeChapter(ctx({ roles: member, signals: atWork }));
+    expect(terminal?.id).toBe("add-teammate-member-done");
+    expect(terminal?.title).toBe("You've started working with an agent");
+    expect(terminal?.primaryAction?.event).toBe("dismiss"); // Close only, never restarts setup
   });
 
   it("eligibleRoles stays authz-pure; the owner/member split lives in `audience`", () => {

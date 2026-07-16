@@ -184,7 +184,6 @@ describe("useOnboardingController scope isolation (per user × workspace)", () =
     roles: ["owner"] as OnboardingRole[],
     workspaceState: workspaceState(),
     documentCount: 1, // create-first-document already complete → guide sits past it
-    watchedDocumentCount: 0,
     nowMs: 0,
   };
 
@@ -239,7 +238,6 @@ describe("useOnboardingController — chapter open/close + card exposure (#56)",
     route: "home",
     selectionActive: false,
     documentCount: 1,
-    watchedDocumentCount: 0,
     nowMs: 0,
   };
 
@@ -307,10 +305,14 @@ describe("chapter integration in WorkspaceApp (#56 render head)", () => {
     expect(screen.getByText("Connect a local environment")).toBeTruthy();
     expect(screen.getByText("Connect environment")).toBeTruthy();
     expect(screen.getByText("Step 1 of 3")).toBeTruthy();
+    // One surface owns attention: the checklist launcher (and any tip — same gate) is
+    // suspended while the chapter is open, so nothing competes for Escape.
+    expect(screen.queryByText("Finish setting up this workspace")).toBeNull();
 
-    // "Not now" closes it and leaves the checklist entry intact (dismiss only).
+    // "Not now" closes it (dismiss only) and restores the checklist entry — no flags recorded.
     fireEvent.click(screen.getByText("Not now"));
     expect(screen.queryByText("Connect a local environment")).toBeNull();
+    expect(screen.getByText("Finish setting up this workspace")).toBeTruthy();
     expect(screen.getByText("Add an AI teammate")).toBeTruthy();
   });
 
@@ -326,5 +328,22 @@ describe("chapter integration in WorkspaceApp (#56 render head)", () => {
     // Exactly one agent → the CTA resolves to "Start a run" (direct), not a static label.
     expect(screen.getByText("Start a run")).toBeTruthy();
     expect(screen.getByText(/No setup needed/)).toBeTruthy();
+  });
+
+  it("member whose agent is at work: the entry is 'Done' with historical copy and reopens the terminal card (no dead end)", () => {
+    guideDone();
+    // An agent already at work (a run exists) → the member entry is complete.
+    mocks.workspace = workspaceState({ agents: [agent("agent_1")], agentRuns: [{ id: "run_1" } as never] });
+    mocks.documents = [{ id: "doc_1", path: "P.md", title: "P.md" }];
+    renderWorkspace();
+
+    // The done entry uses historical (past-tense) copy, not the present-tense label.
+    expect(screen.getByText("You've started working with an agent")).toBeTruthy();
+    expect(screen.getByText("Reopen to start more work")).toBeTruthy();
+
+    // Reopening it lands on the real terminal card — never an empty overlay.
+    fireEvent.click(screen.getByText("You've started working with an agent"));
+    expect(screen.getByText("You can start more work anytime from Agents.")).toBeTruthy();
+    expect(screen.getByText("Close")).toBeTruthy();
   });
 });
