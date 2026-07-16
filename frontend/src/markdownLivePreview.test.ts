@@ -190,10 +190,10 @@ describe("markdown live preview", () => {
     expect(inactive.state.doc.toString()).toBe("intro\n# Heading");
     inactive.destroy();
 
-    // Active heading (cursor on the heading line): the same "# " shows the visible style —
-    // same width, only the colour changes, so the text keeps its position.
+    // Active heading (cursor on the heading line): the same "# " shows the full-ink active
+    // style — same width, only the colour changes, so the text keeps its position.
     const active = editor("# Heading", EditorSelection.cursor(3));
-    expect(active.dom.querySelector<HTMLElement>(".cm-md-heading-marker.cm-md-visible-marker")?.textContent).toBe("# ");
+    expect(active.dom.querySelector<HTMLElement>(".cm-md-heading-marker.cm-md-heading-active")?.textContent).toBe("# ");
     active.destroy();
   });
 });

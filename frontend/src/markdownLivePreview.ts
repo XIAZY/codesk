@@ -220,7 +220,9 @@ function buildMarkdownPreviewDecorations(view: EditorView): DecorationSet {
 // line is inactive, the normal marker style when active; only the colour changes, so the
 // width is identical and the text stays put.
 function headingMarkerDecoration(token: MarkdownPreviewToken) {
-  const state = token.active ? "cm-md-visible-marker" : "cm-md-muted-marker";
+  // Active (editing) → full-ink black; inactive → grey/muted. Same size/family in both
+  // (see .cm-md-heading-active / .cm-md-muted-marker) so only the colour changes.
+  const state = token.active ? "cm-md-heading-active" : "cm-md-muted-marker";
   return Decoration.mark({ class: `cm-md-heading-marker ${state}` }).range(token.from, token.to);
 }
 
@@ -702,6 +704,13 @@ const markdownPreviewTheme = EditorView.theme({
   // doesn't move when clicked. (Same width discipline as the list bullets.)
   ".cm-md-muted-marker": {
     color: "rgba(120, 114, 108, 0.5)",
+    fontFamily: "var(--editor-font)",
+    fontSize: "0.88em",
+  },
+  // Heading "# " when the line IS focused (editing): full-ink black. Same size/family as
+  // the muted state above, so the marker width is identical and the title doesn't move.
+  ".cm-md-heading-active": {
+    color: "var(--ink)",
     fontFamily: "var(--editor-font)",
     fontSize: "0.88em",
   },
