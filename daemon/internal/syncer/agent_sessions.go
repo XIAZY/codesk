@@ -1135,21 +1135,8 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 	}
 	if until := session.turnBackoffUntil; !until.IsZero() && s.now().Before(until) {
 		agentID := current.ID
-		wake := s.wakeAgent
 		s.mu.Unlock()
 		appendAgentLog(s.cfg, agentID, "turn-start admission backoff until %s; deferring", until.Format(time.RFC3339))
-		go func() {
-			timer := time.NewTimer(time.Until(until))
-			defer timer.Stop()
-			select {
-			case <-timer.C:
-			case <-s.baseCtx.Done():
-				return
-			}
-			if wake != nil {
-				wake(agentID)
-			}
-		}()
 		return nil
 	}
 	// This write is a new authoritative operation: bump the nonce and capture it,
