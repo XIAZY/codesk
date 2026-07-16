@@ -15,6 +15,9 @@ bin/
 dist/
 tmp/
 
+daemon/cmd/codesk-desktop/zz_codesk_release_rsrc_windows_*.syso
+daemon/cmd/codesk-desktop-setup/zz_codesk_release_rsrc_windows_*.syso
+
 deploy/slock-agent/.env
 deploy/slock-agent/.env.local
 secrets.env

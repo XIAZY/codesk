@@ -2,6 +2,11 @@
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+case "${CARGO_TARGET_DIR:-}" in
+	"") cargo_target_dir="$ROOT/third_party/y-crdt/target" ;;
+	/*) cargo_target_dir="$CARGO_TARGET_DIR" ;;
+	*) cargo_target_dir="$ROOT/third_party/y-crdt/$CARGO_TARGET_DIR" ;;
+esac
 
 stage_link_library() {
 	source_lib="$1"
@@ -17,7 +22,7 @@ stage_link_library() {
 cd "$ROOT/third_party/y-crdt"
 if [ -n "${RUST_TARGET:-}" ]; then
 	cargo rustc -p yffi --release --locked --target "$RUST_TARGET" --lib --crate-type staticlib
-	target_lib="$ROOT/third_party/y-crdt/target/$RUST_TARGET/release/libyrs.a"
+	target_lib="$cargo_target_dir/$RUST_TARGET/release/libyrs.a"
 	link_lib="$ROOT/third_party/y-crdt/target/release/libyrs.a"
 	if [ ! -f "$target_lib" ]; then
 		printf 'build-yffi: missing target library: %s\n' "$target_lib" >&2
@@ -27,7 +32,7 @@ if [ -n "${RUST_TARGET:-}" ]; then
 	stage_link_library "$target_lib" "$link_lib"
 else
 	cargo build -p yffi --release --locked
-	host_lib="$ROOT/third_party/y-crdt/target/release/deps/libyrs.a"
+	host_lib="$cargo_target_dir/release/deps/libyrs.a"
 	link_lib="$ROOT/third_party/y-crdt/target/release/libyrs.a"
 	if [ ! -f "$host_lib" ]; then
 		printf 'build-yffi: missing host library: %s\n' "$host_lib" >&2

@@ -257,6 +257,10 @@ jobs:
               go vet ./daemon/internal/syncer ./internal/ycrdt
             CC="zig cc -target $zig_target" CGO_ENABLED=1 GOOS=windows GOARCH="$arch" \
               go test -c -o "$RUNNER_TEMP/notty-syncer-$arch.test.exe" ./daemon/internal/syncer
+            CGO_ENABLED=0 GOOS=windows GOARCH="$arch" \
+              go vet ./daemon/cmd/codesk-desktop-setup
+            CGO_ENABLED=0 GOOS=windows GOARCH="$arch" \
+              go test -c -o "$RUNNER_TEMP/codesk-desktop-setup-$arch.test.exe" ./daemon/cmd/codesk-desktop-setup
           done
 
   windows-daemon-installer:
@@ -323,6 +327,9 @@ jobs:
       - name: PowerShell installer tests
         shell: pwsh
         run: scripts/test-daemon-installer-windows.ps1
+      - name: Desktop setup process-boundary regression
+        shell: pwsh
+        run: go test -count=1 -v ./daemon/cmd/codesk-desktop-setup
       - name: Stage AMD64 Yrs library for native tests
         shell: bash
         run: RUST_TARGET=x86_64-pc-windows-gnu RUSTFLAGS="-C panic=abort" scripts/build-yffi.sh
