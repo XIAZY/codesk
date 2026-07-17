@@ -46,8 +46,8 @@ to duplicate the coordinator.
 | Launch at login | The setting is per-user, idempotent, and reported as enabled only when the exact Codesk registration is active. | The adapter owns the exact quoted executable value in `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run`. | `SMAppService.mainAppService` registers the signed app on macOS 13+. The adapter verifies the resulting status and reports `RequiresApproval` with the exact System Settings path instead of claiming success. |
 | Instance and process ownership | One desktop generation owns the user state, and quitting or crashing must not leave an embedded daemon/provider generation behind. | A shared per-user file lock excludes other desktop generations across Terminal Services sessions. An unnamed, non-inheritable, kill-on-close Job Object contains descendants before the syncer can spawn them. | `LSMultipleInstancesProhibited` supplies the LaunchServices hint and a private nonblocking `flock` remains authoritative for direct executable launches. Before the syncer can spawn, the app becomes a process-group leader and starts a separately grouped copy of its signed executable in watchdog mode. The watchdog binds to its exact parent with `kqueue(EVFILT_PROC, NOTE_EXIT)` and kills the complete app process group after normal or abnormal parent exit; the parent reciprocally kills its group if the watchdog exits first. |
 | Opening URLs and logs | Only validated application HTTP(S) URLs and the designated log directory are opened; no shell command is assembled. | `ShellExecute` delegates the target to the registered Windows handler. | The macOS composition delegates validated targets to `NSWorkspace`, which is the native Launch Services API. |
-| Directories | Configuration, logs, caches, workspace state, and helper discovery use deterministic, per-user native locations and never touch legacy CLI state. | Runtime data is rooted under `%LOCALAPPDATA%\\Codesk`; setup additionally resolves Windows Known Folders for per-user programs and Start Menu registration. | The current uid's operating-system account record, never caller-controlled `HOME`, roots `Library/Application Support/Codesk`, `Library/Logs/Codesk`, and `Library/Caches/Codesk`; bundle helpers live under `Contents/Helpers`. |
-| Installation, recovery, and trust | Installation is per-user, upgrades do not lose the last committed generation, and every published artifact has platform-native integrity and trust evidence. | `CodeskSetup.exe` owns registry and shortcut snapshots, crash-durable install/uninstall recovery, exact payload verification, and Authenticode signing. | The macOS release owns a signed and notarized universal `.app`, nested helper signing, hardened runtime, stapling, and a notarized DMG. App-bundle replacement and Gatekeeper rules differ fundamentally from registry/shortcut recovery. |
+| Directories | Configuration, logs, caches, workspace state, and helper discovery use deterministic, per-user native locations and never touch legacy CLI state. | Runtime data is rooted from the current user's Local App Data Known Folder under `Codesk`; the WiX definition installs application files below `LocalAppDataFolder\Programs\Codesk` and uses `ProgramMenuFolder` for the Start Menu shortcut. | The current uid's operating-system account record, never caller-controlled `HOME`, roots `Library/Application Support/Codesk`, `Library/Logs/Codesk`, and `Library/Caches/Codesk`; bundle helpers live under `Contents/Helpers`. |
+| Installation and trust | Installation is per-user, installer lifecycle operations preserve the user's exact launch-at-login preference, and every published artifact has platform-native integrity and trust evidence. | The declarative WiX package delegates install, repair, major upgrade, and uninstall to Windows Installer. Product signing and trust verification remain separate release gates; the desktop owns no installer transaction or update engine. | The macOS release owns a signed and notarized universal `.app`, nested helper signing, hardened runtime, stapling, and a notarized DMG. App-bundle replacement and Gatekeeper rules differ fundamentally from Windows Installer ownership. |
 
 The macOS login Keychain keeps the token under the current user's
 operating-system-protected credential store, but it does not provide Keychain
@@ -57,6 +57,59 @@ supported. Moving Codesk to the data-protection Keychain requires an Apple
 Developer App ID, provisioning profile, matching Keychain access-group
 entitlements, and signed native validation; that stronger isolation is a future
 release upgrade rather than a claim of the current app.
+
+## Windows composition and installation
+
+`daemon/cmd/codesk-desktop/main_windows.go` is a composition root for the same
+shared coordinator. It acquires the current user's cross-session instance lock,
+assigns the process to its kill-on-close Job Object, resolves the native data
+directories, and constructs the DPAPI, registry login-item, and ShellExecute
+adapters before calling `desktopapp.New`. It contains no installer state
+machine.
+
+The production desktop executable is linked separately for AMD64 and ARM64
+with the Windows GUI subsystem. Enabled CI constructs both exact production
+commands and inspects each PE machine and subsystem. The cross-build job uploads
+the real architecture-bound desktop and agent-tool bytes; each hosted Windows
+installer row downloads only its matching artifact, re-inspects both PE machine
+and subsystem identities, and links those exact files. This establishes linked
+binary structure, not native execution. `deploy/windows-desktop/Codesk.wixproj`
+then compiles and links the declarative `Package.wxs` for both installer
+platforms. A successful link is followed by a compiler-only invalid-version
+mutation that must be rejected by WiX even though the source contract remains
+unchanged. Versioned release construction must pass distinct AMD64 and ARM64
+ProductCodes while retaining the package UpgradeCode.
+
+The MSI owns one stable `NeverOverwrite="yes"` registry component for the exact
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Codesk` value. Its authored
+empty string is an explicit disabled sentinel, and the runtime reports enabled
+only when the stored value is the exact current quoted executable command.
+Repair and major upgrade must therefore preserve either the exact enabled
+command or the disabled sentinel, while uninstall removes only the owned value.
+The upgrade is scheduled after install execution so the stable component can
+transfer between versioned products without an uninstall gap.
+
+Native Windows acceptance is required for each exact candidate MSI and is not
+substituted by source inspection or cross-construction. The transcript must
+prove all of the following:
+
+- fresh install creates exactly one current product and payload, does not
+  launch the app, and reports the empty sentinel as disabled;
+- repair and same-architecture major upgrade install the candidate bytes,
+  remove the prior product, ARP entry, and payload, leave exactly one current
+  product, and preserve both enabled and disabled preferences in separate rows;
+- uninstall removes the current product, payload, shortcut, and exact owned Run
+  value while preserving sibling registry values and keys;
+- x64-to-ARM64 handoff installs the ARM64 bytes, removes the x64 product, ARP
+  entry, and payload, leaves exactly one current product and correctly preserves
+  the Run preference. If Windows Installer cannot establish that row, the
+  package must explicitly block cross-architecture handoff instead;
+- every installed executable has the expected PE machine and GUI/console
+  subsystem, and every observed Run command names the installed desktop bytes.
+
+Failure of any registry preservation or cleanup row invalidates the cleanup
+component design. The fallback is an explicit persisted launch preference, not
+a custom installer action or a weakened acceptance claim.
 
 ## macOS composition and release
 
@@ -131,8 +184,11 @@ then separately prove process-group containment and disappearance.
 
 ## Deliberate non-abstractions
 
-- `daemon/internal/desktopsetup` and the Windows release/signing scripts remain
-  Windows-specific. There is no generic installer transaction interface.
+- `deploy/windows-desktop/Package.wxs` remains a thin Windows-specific
+  declarative boundary. Windows Installer owns install, repair, major upgrade,
+  and uninstall; the product contains no generic or Windows-specific installer
+  transaction, recovery, or update abstraction. Signing and trust verification
+  remain separate release gates.
 - Native APIs do not enter `desktopapp`, and platform composition roots do not
   reimplement coordinator behavior.
 - Cross-compilation and structural inspection are construction evidence only.
@@ -143,5 +199,5 @@ then separately prove process-group containment and disappearance.
   from legacy CLI configuration and data.
 
 This split lets portable tests seal product behavior once while keeping the
-security, lifecycle, recovery, and trust evidence attached to the operating
+security, lifecycle, installer, and trust evidence attached to the operating
 system that actually provides it.

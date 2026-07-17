@@ -7,6 +7,7 @@ import (
 	"net/url"
 
 	"notty/daemon/internal/desktop/handoff"
+	"notty/daemon/internal/desktopstate"
 )
 
 // Connect opens a browser to the Codesk web app's desktop connect page, waits
@@ -14,7 +15,7 @@ import (
 // SecretStore before returning. If persistence fails the handoff is not
 // reported as successful — the caller never observes a connected-but-unpersisted
 // state.
-func Connect(ctx context.Context, codeskOrigin string, secrets SecretStore, opener OpenURL) (handoff.Payload, error) {
+func Connect(ctx context.Context, codeskOrigin string, secrets desktopstate.SecretStore, opener OpenURL) (handoff.Payload, error) {
 	session, err := handoff.NewSession(codeskOrigin)
 	if err != nil {
 		return handoff.Payload{}, err
@@ -33,7 +34,7 @@ func Connect(ctx context.Context, codeskOrigin string, secrets SecretStore, open
 
 	token := []byte(payload.Token())
 	defer clear(token)
-	if err := secrets.Save(SecretKeyDaemonToken, token); err != nil {
+	if err := secrets.Save(desktopstate.SecretKeyDaemonToken, token); err != nil {
 		return handoff.Payload{}, errors.New("desktop connect: persist token failed")
 	}
 

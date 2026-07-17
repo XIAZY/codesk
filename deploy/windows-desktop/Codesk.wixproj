@@ -1,0 +1,13 @@
+<Project Sdk="WixToolset.Sdk/4.0.5">
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <Platform>$(InstallerPlatform)</Platform>
+    <DefineConstants>
+      ProductVersion=$(ProductVersion);
+      VersionProductCode=$(VersionProductCode);
+      CodeskExe=$(CodeskExe);
+      AgentToolExe=$(AgentToolExe);
+      CodeskIcon=$(CodeskIcon)
+    </DefineConstants>
+  </PropertyGroup>
+</Project>

@@ -45,6 +45,25 @@ func TestSyncerConfigNeverReferencesCLIPaths(t *testing.T) {
 	}
 }
 
+func TestLoginItemRegistrationRequiresExactNonemptyCommand(t *testing.T) {
+	want := `"C:\\Users\\me\\AppData\\Local\\Codesk\\Codesk.exe"`
+	for _, test := range []struct {
+		name   string
+		actual string
+		want   bool
+	}{
+		{name: "exact command", actual: want, want: true},
+		{name: "empty MSI sentinel is disabled", actual: "", want: false},
+		{name: "stale executable path is disabled", actual: `"C:\\old\\Codesk.exe"`, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := loginItemRegistrationMatches(test.actual, want); got != test.want {
+				t.Fatalf("loginItemRegistrationMatches(%q, %q) = %t, want %t", test.actual, want, got, test.want)
+			}
+		})
+	}
+}
+
 func TestSyncerConfigAllPathsUnderDataDir(t *testing.T) {
 	dirs := validDirs(t)
 	cfg := mustSyncerConfig(t, dirs, "https://api.getcodesk.com", "ws-1", "tok-1", "1.0.0")

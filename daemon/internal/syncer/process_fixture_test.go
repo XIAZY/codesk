@@ -17,6 +17,7 @@ const (
 	fakeProcessCodexLifecycleFlood   = "codex-lifecycle-flood"
 	fakeProcessCodexPersistent       = "codex-persistent"
 	fakeProcessClaude                = "claude"
+	fakeProcessManagedChildIO        = "managed-child-io"
 )
 
 // TestMain lets subprocess tests reuse this already-native test executable
@@ -31,9 +32,17 @@ func TestMain(m *testing.M) {
 		os.Exit(runFakeCodexPersistent(os.Args[1:]))
 	case fakeProcessClaude:
 		os.Exit(runFakeClaude(os.Args[1:]))
+	case fakeProcessManagedChildIO:
+		os.Exit(runFakeManagedChildIO(os.Args[1:]))
 	default:
 		os.Exit(m.Run())
 	}
+}
+
+func runFakeManagedChildIO(args []string) int {
+	fmt.Fprintf(os.Stdout, "stdout:%s", strings.Join(args, "|"))
+	fmt.Fprintf(os.Stderr, "stderr:%s", strings.Join(args, "|"))
+	return 23
 }
 
 func runFakeCodexPersistent(args []string) int {

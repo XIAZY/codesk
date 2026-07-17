@@ -10,7 +10,8 @@
 #   frontend typecheck + vitest        -> frontend: "Typecheck + vitest"
 #   frontend production build          -> frontend: "Production build"
 #   git diff --check                   -> diff-check
-#   Windows GNU compile/link            -> windows-daemon-build
+#   Windows GNU compile/link           -> windows-daemon-build
+#   Windows WiX compile/link           -> windows-desktop-msi
 #   Windows native runtime tests        -> windows-daemon (paused until a runner is available)
 #   macOS native cgo + unsigned universal release -> macos-desktop (opt-in until runner capacity exists)
 #
@@ -183,6 +184,7 @@ jobs:
             ./daemon/cmd/codesk-macos-release \
             ./daemon/internal/macosapp \
             ./daemon/internal/macosuser \
+            ./daemon/internal/desktopstate \
             ./daemon/internal/desktop \
             ./daemon/internal/desktopapp \
             ./daemon/cmd/codesk-desktop
@@ -190,6 +192,7 @@ jobs:
             ./daemon/cmd/codesk-macos-release \
             ./daemon/internal/macosapp \
             ./daemon/internal/macosuser \
+            ./daemon/internal/desktopstate \
             ./daemon/internal/desktop \
             ./daemon/internal/desktopapp \
             ./daemon/cmd/codesk-desktop
@@ -244,6 +247,7 @@ jobs:
         run: go run ./scripts/verify-windows-daemon-release.go "$RUNNER_TEMP/notty-release/p1-ci" p1-ci
       - name: Vet and compile Windows-tagged tests for both architectures
         run: |
+          rm -rf "$RUNNER_TEMP/windows-desktop-payload"
           for target in \
             "amd64 x86_64-pc-windows-gnu x86_64-windows-gnu" \
             "arm64 aarch64-pc-windows-gnullvm aarch64-windows-gnu"
@@ -252,12 +256,134 @@ jobs:
             arch="$1"
             rust_target="$2"
             zig_target="$3"
+            payload_dir="$RUNNER_TEMP/windows-desktop-payload/$arch"
+            mkdir -p "$payload_dir"
             RUST_TARGET="$rust_target" RUSTFLAGS="-C panic=abort" scripts/build-yffi.sh
             CC="zig cc -target $zig_target" CGO_ENABLED=1 GOOS=windows GOARCH="$arch" \
               go vet ./daemon/internal/syncer ./internal/ycrdt
             CC="zig cc -target $zig_target" CGO_ENABLED=1 GOOS=windows GOARCH="$arch" \
               go test -c -o "$RUNNER_TEMP/notty-syncer-$arch.test.exe" ./daemon/internal/syncer
+            CC="zig cc -target $zig_target" CGO_ENABLED=1 GOOS=windows GOARCH="$arch" \
+              go vet ./daemon/internal/desktopstate ./daemon/internal/desktop ./daemon/internal/desktopapp ./daemon/cmd/codesk-desktop
+            CC="zig cc -target $zig_target" CGO_ENABLED=1 GOOS=windows GOARCH="$arch" \
+              go test -c -o "$RUNNER_TEMP/codesk-desktop-$arch.test.exe" ./daemon/cmd/codesk-desktop
+            CC="zig cc -target $zig_target" CGO_ENABLED=1 GOOS=windows GOARCH="$arch" \
+              go build -trimpath -buildvcs=false \
+                -ldflags='-H=windowsgui -extldflags=-Wl,--subsystem,windows' \
+                -o "$payload_dir/Codesk.exe" ./daemon/cmd/codesk-desktop
+            CGO_ENABLED=0 GOOS=windows GOARCH="$arch" \
+              go build -trimpath -buildvcs=false -ldflags='-s -w' \
+                -o "$payload_dir/notty-agent-tool.exe" ./daemon/cmd/agenttool
+            go run ./scripts/verify-windows-desktop-pe.go "$payload_dir/Codesk.exe" "$arch" gui
+            go run ./scripts/verify-windows-desktop-pe.go "$payload_dir/notty-agent-tool.exe" "$arch" console
           done
+      - name: Verify CGO-free desktop state boundary
+        run: scripts/test-desktopstate-boundary.sh
+      - name: Upload AMD64 desktop installer payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-desktop-payload-amd64
+          path: ${{ runner.temp }}/windows-desktop-payload/amd64/
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload ARM64 desktop installer payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-desktop-payload-arm64
+          path: ${{ runner.temp }}/windows-desktop-payload/arm64/
+          if-no-files-found: error
+          retention-days: 1
+
+  windows-desktop-msi:
+    name: Windows desktop MSI (WiX ${{ matrix.architecture }})
+    needs: windows-daemon-build
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: AMD64
+            go_arch: amd64
+            platform: x64
+            product_code: F7EFC1E1-CF36-4BAD-9188-5B8145D94289
+          - architecture: ARM64
+            go_arch: arm64
+            platform: arm64
+            product_code: 3E947E2D-775C-4580-827D-4DC7368186F4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Download architecture-matched product payload
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-desktop-payload-${{ matrix.go_arch }}
+          path: ${{ runner.temp }}/wix-payload-${{ matrix.architecture }}
+      - name: Verify downloaded product PE identities
+        shell: pwsh
+        run: |
+          $payload = Join-Path $env:RUNNER_TEMP "wix-payload-${{ matrix.architecture }}"
+          go run ./scripts/verify-windows-desktop-pe.go `
+            (Join-Path $payload "Codesk.exe") `
+            "${{ matrix.go_arch }}" gui
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go run ./scripts/verify-windows-desktop-pe.go `
+            (Join-Path $payload "notty-agent-tool.exe") `
+            "${{ matrix.go_arch }}" console
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Compile and link declarative WiX package
+        shell: pwsh
+        run: |
+          $payload = Join-Path $env:RUNNER_TEMP "wix-payload-${{ matrix.architecture }}"
+          $output = Join-Path $env:RUNNER_TEMP "wix-output-${{ matrix.architecture }}"
+          New-Item -ItemType Directory -Force -Path $output | Out-Null
+
+          dotnet build deploy/windows-desktop/Codesk.wixproj `
+            --configuration Release `
+            "-p:InstallerPlatform=${{ matrix.platform }}" `
+            "-p:ProductVersion=0.0.1" `
+            "-p:VersionProductCode=${{ matrix.product_code }}" `
+            "-p:CodeskExe=$payload\Codesk.exe" `
+            "-p:AgentToolExe=$payload\notty-agent-tool.exe" `
+            "-p:CodeskIcon=${{ github.workspace }}\daemon\cmd\codesk-desktop\assets\codesk.ico" `
+            "-p:OutputPath=$output"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $packages = @(Get-ChildItem -Path $output -Filter *.msi -File -Recurse)
+          if ($packages.Count -ne 1) {
+            throw "expected exactly one linked MSI, found $($packages.Count)"
+          }
+          if ($packages[0].Length -le 0) {
+            throw "linked MSI is empty: $($packages[0].FullName)"
+          }
+          Write-Host "linked ${{ matrix.architecture }} MSI: $($packages[0].FullName) ($($packages[0].Length) bytes)"
+
+          # ProductVersion is a build-time input outside the Go XML source contract. A
+          # successful positive link above proves the compiler is operational; this
+          # isolated invalid value must then be rejected by WiX itself.
+          $negativeOutput = Join-Path $env:RUNNER_TEMP "wix-negative-${{ matrix.architecture }}"
+          New-Item -ItemType Directory -Force -Path $negativeOutput | Out-Null
+          dotnet build deploy/windows-desktop/Codesk.wixproj `
+            --configuration Release `
+            --no-incremental `
+            "-p:InstallerPlatform=${{ matrix.platform }}" `
+            "-p:ProductVersion=not-a-valid-msi-version" `
+            "-p:VersionProductCode=${{ matrix.product_code }}" `
+            "-p:CodeskExe=$payload\Codesk.exe" `
+            "-p:AgentToolExe=$payload\notty-agent-tool.exe" `
+            "-p:CodeskIcon=${{ github.workspace }}\daemon\cmd\codesk-desktop\assets\codesk.ico" `
+            "-p:OutputPath=$negativeOutput"
+          $negativeExit = $LASTEXITCODE
+          if ($negativeExit -eq 0) {
+            throw "WiX accepted the compiler-only invalid ProductVersion mutation"
+          }
+          Write-Host "WiX rejected the compiler-only invalid ProductVersion mutation as required"
+          $global:LASTEXITCODE = 0
 
   windows-daemon-installer:
     name: Windows daemon installer

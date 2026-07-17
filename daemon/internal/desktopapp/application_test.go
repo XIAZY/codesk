@@ -15,37 +15,38 @@ import (
 	"time"
 
 	"notty/daemon/internal/desktop"
+	"notty/daemon/internal/desktopstate"
 )
 
 const applicationTestTimeout = 3 * time.Second
 
 type testConfigStore struct {
 	mu      sync.Mutex
-	config  desktop.Configuration
+	config  desktopstate.Configuration
 	exists  bool
-	saved   chan desktop.Configuration
+	saved   chan desktopstate.Configuration
 	deleted chan struct{}
 }
 
-func newTestConfigStore(config desktop.Configuration, exists bool) *testConfigStore {
+func newTestConfigStore(config desktopstate.Configuration, exists bool) *testConfigStore {
 	return &testConfigStore{
 		config:  config,
 		exists:  exists,
-		saved:   make(chan desktop.Configuration, 8),
+		saved:   make(chan desktopstate.Configuration, 8),
 		deleted: make(chan struct{}, 8),
 	}
 }
 
-func (s *testConfigStore) Load() (desktop.Configuration, error) {
+func (s *testConfigStore) Load() (desktopstate.Configuration, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.exists {
-		return desktop.Configuration{}, os.ErrNotExist
+		return desktopstate.Configuration{}, os.ErrNotExist
 	}
 	return s.config, nil
 }
 
-func (s *testConfigStore) Save(config desktop.Configuration) error {
+func (s *testConfigStore) Save(config desktopstate.Configuration) error {
 	if err := config.Validate(); err != nil {
 		return err
 	}
@@ -59,14 +60,14 @@ func (s *testConfigStore) Save(config desktop.Configuration) error {
 
 func (s *testConfigStore) Delete() error {
 	s.mu.Lock()
-	s.config = desktop.Configuration{}
+	s.config = desktopstate.Configuration{}
 	s.exists = false
 	s.mu.Unlock()
 	s.deleted <- struct{}{}
 	return nil
 }
 
-func (s *testConfigStore) snapshot() (desktop.Configuration, bool) {
+func (s *testConfigStore) snapshot() (desktopstate.Configuration, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.config, s.exists
@@ -81,7 +82,7 @@ type testSecretStore struct {
 func newTestSecretStore(token string) *testSecretStore {
 	store := &testSecretStore{data: make(map[string][]byte)}
 	if token != "" {
-		store.data[desktop.SecretKeyDaemonToken] = []byte(token)
+		store.data[desktopstate.SecretKeyDaemonToken] = []byte(token)
 	}
 	return store
 }
@@ -113,7 +114,7 @@ func (s *testSecretStore) Delete(key string) error {
 }
 
 func (s *testSecretStore) token() string {
-	secret, _ := s.Load(desktop.SecretKeyDaemonToken)
+	secret, _ := s.Load(desktopstate.SecretKeyDaemonToken)
 	return string(secret)
 }
 
@@ -379,7 +380,7 @@ func TestApplicationConnectCommitsConfigurationAndRestarts(t *testing.T) {
 		t.Fatalf("connect response = %d, want %d", response.StatusCode, http.StatusSeeOther)
 	}
 
-	var saved desktop.Configuration
+	var saved desktopstate.Configuration
 	select {
 	case saved = <-configs.saved:
 	case <-time.After(applicationTestTimeout):
@@ -902,8 +903,8 @@ func newTestApplication(
 	return app, factory, configs, secrets, loginItem, dirs
 }
 
-func testConfiguration() desktop.Configuration {
-	return desktop.Configuration{
+func testConfiguration() desktopstate.Configuration {
+	return desktopstate.Configuration{
 		DaemonID:      "daemon-old",
 		WorkspaceID:   "workspace-old",
 		WorkspaceName: "Workspace Old",

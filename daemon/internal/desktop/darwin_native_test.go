@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"notty/daemon/internal/desktopstate"
 )
 
 func TestDarwinKeychainSecretStoreRoundTrip(t *testing.T) {
@@ -46,7 +48,7 @@ func TestDarwinNativeAdaptersRejectUnsafeInputsBeforeNativeCalls(t *testing.T) {
 	if err := store.Save("invalid\nkey", []byte("secret")); err == nil {
 		t.Fatal("Save() unexpectedly accepted a control character in the key")
 	}
-	if err := store.Save(SecretKeyDaemonToken, nil); err == nil {
+	if err := store.Save(desktopstate.SecretKeyDaemonToken, nil); err == nil {
 		t.Fatal("Save() unexpectedly accepted an empty secret")
 	}
 	opener, err := NewDarwinWorkspaceOpener(filepath.Join(t.TempDir(), "Logs"))

@@ -111,6 +111,9 @@ type RuntimeExitInfo struct {
 
 type RuntimeProcess interface {
 	Start(ctx context.Context) error
+	// Stop is idempotent and does not return until the child has exited and the
+	// Events stream is closed. Supervisor removal relies on that join before it
+	// publishes stopped_expected.
 	Stop() error
 	WriteStdin(ctx context.Context, input RuntimeInput) (RuntimeWriteResult, error)
 	Events() <-chan RuntimeEvent
