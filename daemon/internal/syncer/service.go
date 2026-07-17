@@ -43,8 +43,10 @@ type Service struct {
 	daemonStatus            *daemonStatusReporter
 	toolServer              *http.Server
 	toolGateway             *toolGateway
-	refreshMu               sync.Mutex                        // Guards applyFetchedWorkspace; never held during network I/O.
-	pendingSnapshot         atomic.Pointer[json.RawMessage]   // Latest decoded snapshot from the event reader; consumed by the refresh worker.
+	refreshMu               sync.Mutex                          // Guards applyFetchedWorkspace; never held during network I/O.
+	pendingSnapshot         atomic.Pointer[json.RawMessage]     // Latest decoded snapshot from the event reader; consumed by the refresh worker.
+	cancelFetch             atomic.Pointer[context.CancelFunc]  // Canceled by publishSnapshot to preempt a held REST fetch.
+	refreshPending          atomic.Bool                         // Durable ordinary/periodic refresh intent; survives dropped channel signals.
 	mu                      sync.Mutex
 	agentRuntimeSupervisors sync.WaitGroup
 	primaryRuntime          *workspaceRuntime
@@ -465,23 +467,7 @@ func (s *Service) run(ctx context.Context, heartbeatTicks <-chan time.Time) (run
 	refreshDone := make(chan struct{})
 	go func() {
 		defer close(refreshDone)
-		for range s.refreshNeeded {
-			if snap := s.pendingSnapshot.Swap(nil); snap != nil {
-				s.applySnapshot(coreCtx, *snap)
-				continue
-			}
-			if err := s.refresh(coreCtx); err != nil && coreCtx.Err() == nil {
-				if isTerminalAuthError(err) {
-					fmt.Printf("workspace refresh: %v; daemon has been drained, exiting\n", err)
-					select {
-					case drained <- err:
-					default:
-					}
-					return
-				}
-				fmt.Printf("workspace refresh error: %v\n", err)
-			}
-		}
+		s.runRefreshCoordinator(coreCtx, drained)
 	}()
 	joinRefreshWorker = sync.OnceFunc(func() { close(s.refreshNeeded); <-refreshDone })
 
@@ -543,9 +529,40 @@ func (s *Service) signalRefresh() {
 	if s == nil || s.refreshNeeded == nil {
 		return
 	}
+	s.refreshPending.Store(true)
 	select {
 	case s.refreshNeeded <- struct{}{}:
 	default:
+	}
+}
+
+func (s *Service) runRefreshCoordinator(ctx context.Context, drained chan<- error) {
+	for range s.refreshNeeded {
+		if snap := s.pendingSnapshot.Swap(nil); snap != nil {
+			s.applySnapshot(ctx, *snap)
+		}
+		if !s.refreshPending.CompareAndSwap(true, false) {
+			continue
+		}
+		fetchCtx, cancel := context.WithCancel(ctx)
+		s.cancelFetch.Store(&cancel)
+		err := s.refresh(fetchCtx)
+		preempted := fetchCtx.Err() != nil
+		s.cancelFetch.Store(nil)
+		cancel()
+		if err != nil && ctx.Err() == nil && !preempted {
+			if isTerminalAuthError(err) {
+				fmt.Printf("workspace refresh: %v; daemon has been drained, exiting\n", err)
+				if drained != nil {
+					select {
+					case drained <- err:
+					default:
+					}
+				}
+				return
+			}
+			fmt.Printf("workspace refresh error: %v\n", err)
+		}
 	}
 }
 
@@ -703,7 +720,13 @@ func (s *Service) publishSnapshot(data json.RawMessage) {
 	cp := make(json.RawMessage, len(data))
 	copy(cp, data)
 	s.pendingSnapshot.Store(&cp)
-	s.signalRefresh()
+	if cancel := s.cancelFetch.Load(); cancel != nil {
+		(*cancel)()
+	}
+	select {
+	case s.refreshNeeded <- struct{}{}:
+	default:
+	}
 }
 
 func (s *Service) applySnapshot(ctx context.Context, data json.RawMessage) {

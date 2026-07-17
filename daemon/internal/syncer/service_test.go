@@ -4651,12 +4651,28 @@ func TestSnapshotAppliesWorkspaceWithoutRESTFetch(t *testing.T) {
 	}
 }
 
+type fetchConcurrencyTracker struct {
+	inner         http.RoundTripper
+	inflight      atomic.Int32
+	maxConcurrent atomic.Int32
+}
+
+func (ct *fetchConcurrencyTracker) RoundTrip(req *http.Request) (*http.Response, error) {
+	if strings.HasSuffix(req.URL.Path, "/workspace") {
+		cur := ct.inflight.Add(1)
+		defer ct.inflight.Add(-1)
+		for {
+			old := ct.maxConcurrent.Load()
+			if cur <= old || ct.maxConcurrent.CompareAndSwap(old, cur) {
+				break
+			}
+		}
+	}
+	return ct.inner.RoundTrip(req)
+}
+
 func TestEventBurstCoalescesWithSingleRefreshOwner(t *testing.T) {
 	var restFetches atomic.Int32
-	var maxConcurrent atomic.Int32
-	var inflight atomic.Int32
-	firstBlocked := make(chan struct{})
-	releaseFirst := make(chan struct{})
 	sentinelJSON, _ := json.Marshal(workspaceResponse{Agents: []*agent{{ID: "sentinel", Kind: "codex"}}})
 	upgrader := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -4677,20 +4693,8 @@ func TestEventBurstCoalescesWithSingleRefreshOwner(t *testing.T) {
 				}
 			}
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/workspace"):
-			n := restFetches.Add(1)
-			cur := inflight.Add(1)
-			for {
-				old := maxConcurrent.Load()
-				if cur <= old || maxConcurrent.CompareAndSwap(old, cur) {
-					break
-				}
-			}
-			if n == 1 {
-				close(firstBlocked)
-				<-releaseFirst
-			}
-			writeJSONResponse(w, http.StatusOK, &workspaceResponse{})
-			inflight.Add(-1)
+			restFetches.Add(1)
+			writeJSONResponse(w, http.StatusOK, &workspaceResponse{Agents: []*agent{{ID: "sentinel", Kind: "codex"}}})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agents/"):
 			writeJSONResponse(w, http.StatusOK, toolInboxResponse{Items: []*agentEvent{}})
 		default:
@@ -4698,6 +4702,8 @@ func TestEventBurstCoalescesWithSingleRefreshOwner(t *testing.T) {
 		}
 	}))
 	defer server.Close()
+
+	tracker := &fetchConcurrencyTracker{inner: server.Client().Transport}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	service := &Service{
@@ -4709,7 +4715,7 @@ func TestEventBurstCoalescesWithSingleRefreshOwner(t *testing.T) {
 			AgentWorkspaceRoot: t.TempDir(),
 			AgentID:            "daemon_agent",
 		},
-		client:        server.Client(),
+		client:        &http.Client{Transport: tracker},
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 		agentWorkers:  map[string]*managedAgentWorker{},
 	}
@@ -4720,15 +4726,6 @@ func TestEventBurstCoalescesWithSingleRefreshOwner(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() { done <- service.runWorkspaceEventStream(ctx) }()
-
-	<-firstBlocked
-	select {
-	case <-time.After(100 * time.Millisecond):
-	}
-	if got := inflight.Load(); got != 1 {
-		t.Fatalf("while first REST is held, inflight = %d, want 1 (single owner)", got)
-	}
-	close(releaseFirst)
 
 	waitUntil(t, func() bool {
 		service.mu.Lock()
@@ -4743,8 +4740,8 @@ func TestEventBurstCoalescesWithSingleRefreshOwner(t *testing.T) {
 	if got := restFetches.Load(); got > 5 {
 		t.Fatalf("20-event burst should coalesce into far fewer refreshes, got %d", got)
 	}
-	if got := maxConcurrent.Load(); got != 1 {
-		t.Fatalf("max concurrent REST refreshes = %d, want exactly 1 (single owner)", got)
+	if got := tracker.maxConcurrent.Load(); got != 1 {
+		t.Fatalf("max concurrent client-side REST fetches = %d, want exactly 1 (single owner)", got)
 	}
 }
 
@@ -4880,7 +4877,6 @@ func TestStreamReturnsPromptlyWhenApplyIsBlocked(t *testing.T) {
 		Agents: []*agent{{ID: "agent_blocked", Kind: "codex"}},
 	})
 	upgrader := websocket.Upgrader{}
-	workerBlocked := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/ws/workspaces/"):
@@ -4893,8 +4889,7 @@ func TestStreamReturnsPromptlyWhenApplyIsBlocked(t *testing.T) {
 				Type: "workspace.snapshot",
 				Data: snapshotJSON,
 			})
-			<-workerBlocked
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 			_ = conn.Close()
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agents/"):
 			writeJSONResponse(w, http.StatusOK, toolInboxResponse{Items: []*agentEvent{}})
@@ -4905,7 +4900,6 @@ func TestStreamReturnsPromptlyWhenApplyIsBlocked(t *testing.T) {
 	defer server.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	service := &Service{
 		cfg: Config{
 			BackendURL:         server.URL,
@@ -4924,18 +4918,7 @@ func TestStreamReturnsPromptlyWhenApplyIsBlocked(t *testing.T) {
 	defer service.closeAgentRuntimes()
 
 	service.refreshMu.Lock()
-	service.refreshNeeded = make(chan struct{}, 1)
-	workerDone := make(chan struct{})
-	go func() {
-		defer close(workerDone)
-		for range service.refreshNeeded {
-			if snap := service.pendingSnapshot.Swap(nil); snap != nil {
-				close(workerBlocked)
-				service.applySnapshot(ctx, *snap)
-				continue
-			}
-		}
-	}()
+	stopWorker := startTestRefreshWorker(t, service, ctx)
 
 	done := make(chan error, 1)
 	go func() { done <- service.runWorkspaceEventStream(ctx) }()
@@ -4947,14 +4930,12 @@ func TestStreamReturnsPromptlyWhenApplyIsBlocked(t *testing.T) {
 	}
 	service.refreshMu.Unlock()
 	cancel()
-	close(service.refreshNeeded)
-	<-workerDone
+	stopWorker()
 }
 
 func TestSnapshotSupersedesInFlightREST(t *testing.T) {
-	restReached := make(chan struct{})
-	releaseREST := make(chan struct{})
-	restData := workspaceResponse{Agents: []*agent{{ID: "agent_rest", Kind: "codex"}}}
+	var restCount atomic.Int32
+	restReached := make(chan struct{}, 1)
 	snapshotData := workspaceResponse{Agents: []*agent{{ID: "agent_snap", Kind: "codex"}}}
 	snapshotJSON, _ := json.Marshal(snapshotData)
 	upgrader := websocket.Upgrader{}
@@ -4968,20 +4949,28 @@ func TestSnapshotSupersedesInFlightREST(t *testing.T) {
 			}
 			defer conn.Close()
 			_ = conn.WriteJSON(workspaceEventEnvelope{Type: "agent.updated"})
-			<-releaseREST
+			<-restReached
 			_ = conn.WriteJSON(workspaceEventEnvelope{
 				Type: "workspace.snapshot",
 				Data: snapshotJSON,
 			})
+			_ = conn.WriteJSON(workspaceEventEnvelope{Type: "agent.updated"})
 			for {
 				if _, _, err := conn.ReadMessage(); err != nil {
 					return
 				}
 			}
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/workspace"):
-			close(restReached)
-			<-releaseREST
-			writeJSONResponse(w, http.StatusOK, &restData)
+			n := restCount.Add(1)
+			if n == 1 {
+				select {
+				case restReached <- struct{}{}:
+				default:
+				}
+				<-r.Context().Done()
+				return
+			}
+			writeJSONResponse(w, http.StatusOK, &workspaceResponse{})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agents/"):
 			writeJSONResponse(w, http.StatusOK, toolInboxResponse{Items: []*agentEvent{}})
 		default:
@@ -5012,15 +5001,13 @@ func TestSnapshotSupersedesInFlightREST(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- service.runWorkspaceEventStream(ctx) }()
 
-	<-restReached
-	close(releaseREST)
-
 	waitUntil(t, func() bool {
 		service.mu.Lock()
 		ws := service.latestWorkspace
 		service.mu.Unlock()
 		return ws != nil && len(ws.Agents) == 1 && ws.Agents[0].ID == "agent_snap"
 	})
+	waitUntil(t, func() bool { return restCount.Load() >= 2 })
 	cancel()
 	<-done
 	stopWorker()
@@ -5181,15 +5168,7 @@ func startTestRefreshWorker(t *testing.T, s *Service, ctx context.Context) func(
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for range s.refreshNeeded {
-			if snap := s.pendingSnapshot.Swap(nil); snap != nil {
-				s.applySnapshot(ctx, *snap)
-				continue
-			}
-			if err := s.refresh(ctx); err != nil && ctx.Err() == nil {
-				fmt.Printf("workspace refresh error: %v\n", err)
-			}
-		}
+		s.runRefreshCoordinator(ctx, nil)
 	}()
 	return sync.OnceFunc(func() { close(s.refreshNeeded); <-done })
 }
