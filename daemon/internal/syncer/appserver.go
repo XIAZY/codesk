@@ -69,8 +69,9 @@ type codexAppServer struct {
 	stderrRing []string        // bounded ring of the most recent stderr lines
 	exitInfo   RuntimeExitInfo // set by the exit goroutine before events closes
 
-	// Test-only ordering seam. Production leaves this nil.
-	testHookBeforeExitComplete func()
+	// Test-only ordering seams. Production leaves these nil.
+	testHookBeforeExitComplete  func()
+	testHookBeforeRequestSelect func(id int64)
 }
 
 type appServerResponse struct {
@@ -341,12 +342,28 @@ func (c *codexAppServer) request(ctx context.Context, method string, params any)
 		c.mu.Unlock()
 		return nil, err
 	}
+	if c.testHookBeforeRequestSelect != nil {
+		c.testHookBeforeRequestSelect(id)
+	}
 	select {
 	case <-ctx.Done():
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
 		return nil, ctx.Err()
+	case <-c.readDone:
+		select {
+		case res := <-ch:
+			if res.Error != nil {
+				return nil, &appServerRPCError{Method: method, Code: res.Error.Code, Message: res.Error.Message}
+			}
+			return res.Result, nil
+		default:
+		}
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
+		return nil, fmt.Errorf("app-server %s: process exited before responding", method)
 	case res := <-ch:
 		if res.Error != nil {
 			return nil, &appServerRPCError{Method: method, Code: res.Error.Code, Message: res.Error.Message}

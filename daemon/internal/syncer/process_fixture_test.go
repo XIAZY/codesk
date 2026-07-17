@@ -53,6 +53,9 @@ func runFakeCodexPersistent(args []string) int {
 		}
 		switch request.Method {
 		case "initialize":
+			if os.Getenv("FAKE_CODEX_SILENT_EXIT") == "1" {
+				return 1
+			}
 			if os.Getenv("FAKE_CODEX_BLOCK_INITIALIZE") == "1" {
 				continue
 			}
