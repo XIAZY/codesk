@@ -43,10 +43,11 @@ type Service struct {
 	daemonStatus            *daemonStatusReporter
 	toolServer              *http.Server
 	toolGateway             *toolGateway
-	refreshMu               sync.Mutex                          // Guards applyFetchedWorkspace; never held during network I/O.
-	pendingSnapshot         atomic.Pointer[json.RawMessage]     // Latest decoded snapshot from the event reader; consumed by the refresh worker.
-	cancelFetch             atomic.Pointer[context.CancelFunc]  // Canceled by publishSnapshot to preempt a held REST fetch.
-	refreshPending          atomic.Bool                         // Durable ordinary/periodic refresh intent; survives dropped channel signals.
+	refreshMu               sync.Mutex                         // Guards applyFetchedWorkspace; never held during network I/O.
+	pendingSnapshot         atomic.Pointer[json.RawMessage]    // Latest decoded snapshot from the event reader; consumed by the refresh worker.
+	cancelFetch             atomic.Pointer[context.CancelFunc] // Canceled by publishSnapshot to preempt a held REST fetch.
+	refreshPending          atomic.Bool                        // Durable ordinary/periodic refresh intent; survives dropped channel signals.
+	snapshotEpoch           atomic.Uint64                      // Monotonic counter; incremented by publishSnapshot, checked by refresh to skip stale results.
 	mu                      sync.Mutex
 	agentRuntimeSupervisors sync.WaitGroup
 	primaryRuntime          *workspaceRuntime
@@ -544,13 +545,19 @@ func (s *Service) runRefreshCoordinator(ctx context.Context, drained chan<- erro
 		if !s.refreshPending.CompareAndSwap(true, false) {
 			continue
 		}
+		epoch := s.snapshotEpoch.Load()
 		fetchCtx, cancel := context.WithCancel(ctx)
 		s.cancelFetch.Store(&cancel)
-		err := s.refresh(fetchCtx)
+		if s.snapshotEpoch.Load() != epoch {
+			s.cancelFetch.Store(nil)
+			cancel()
+			continue
+		}
+		err := s.refresh(fetchCtx, epoch)
 		preempted := fetchCtx.Err() != nil
 		s.cancelFetch.Store(nil)
 		cancel()
-		if err != nil && ctx.Err() == nil && !preempted {
+		if err != nil && ctx.Err() == nil {
 			if isTerminalAuthError(err) {
 				fmt.Printf("workspace refresh: %v; daemon has been drained, exiting\n", err)
 				if drained != nil {
@@ -561,7 +568,9 @@ func (s *Service) runRefreshCoordinator(ctx context.Context, drained chan<- erro
 				}
 				return
 			}
-			fmt.Printf("workspace refresh error: %v\n", err)
+			if !preempted {
+				fmt.Printf("workspace refresh error: %v\n", err)
+			}
 		}
 	}
 }
@@ -598,7 +607,7 @@ func (s *Service) refreshInitialWorkspace(ctx context.Context) error {
 	backoff := 500 * time.Millisecond
 	var lastErr error
 	for {
-		if err := s.refresh(ctx); err == nil {
+		if err := s.refresh(ctx, s.snapshotEpoch.Load()); err == nil {
 			return nil
 		} else {
 			lastErr = err
@@ -719,6 +728,7 @@ func (s *Service) runWorkspaceEventStream(ctx context.Context) error {
 func (s *Service) publishSnapshot(data json.RawMessage) {
 	cp := make(json.RawMessage, len(data))
 	copy(cp, data)
+	s.snapshotEpoch.Add(1)
 	s.pendingSnapshot.Store(&cp)
 	if cancel := s.cancelFetch.Load(); cancel != nil {
 		(*cancel)()
@@ -765,16 +775,16 @@ func shouldRefreshForEvent(eventType string) bool {
 	}
 }
 
-func (s *Service) refresh(ctx context.Context) error {
+func (s *Service) refresh(ctx context.Context, epoch uint64) error {
 	workspace, err := s.fetchWorkspace(ctx)
 	if err != nil {
 		return err
 	}
-	if s.pendingSnapshot.Load() != nil {
-		return nil
-	}
 	s.refreshMu.Lock()
 	defer s.refreshMu.Unlock()
+	if s.snapshotEpoch.Load() != epoch {
+		return nil
+	}
 	return s.applyFetchedWorkspace(ctx, workspace)
 }
 

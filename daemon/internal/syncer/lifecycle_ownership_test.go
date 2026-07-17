@@ -1574,7 +1574,7 @@ func TestRefreshSerializesStaleRemovalBeforeConcurrentReadd(t *testing.T) {
 	t.Cleanup(func() { releaseOnce.Do(release) })
 
 	olderDone := make(chan error, 1)
-	go func() { olderDone <- service.refresh(ctx) }()
+	go func() { olderDone <- service.refresh(ctx, service.snapshotEpoch.Load()) }()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		service.mu.Lock()
@@ -1593,7 +1593,7 @@ func TestRefreshSerializesStaleRemovalBeforeConcurrentReadd(t *testing.T) {
 	}
 
 	newerDone := make(chan error, 1)
-	go func() { newerDone <- service.refresh(ctx) }()
+	go func() { newerDone <- service.refresh(ctx, service.snapshotEpoch.Load()) }()
 	// On the unfenced implementation the newer snapshot publishes a runtime
 	// into the same root while the older refresh remains blocked in drain.
 	time.Sleep(100 * time.Millisecond)
@@ -1701,7 +1701,7 @@ func TestSupervisorReplacementSerializesWithStaleRootRemoval(t *testing.T) {
 		service.refreshMu.Unlock()
 	}
 	refreshDone := make(chan error, 1)
-	go func() { refreshDone <- service.refresh(ctx) }()
+	go func() { refreshDone <- service.refresh(ctx, service.snapshotEpoch.Load()) }()
 	prematureRemoval := ""
 	if !lifecycleHeld {
 		select {
