@@ -56,6 +56,7 @@ type Service struct {
 	// Lifecycle interleaving seams are nil in production.
 	beforeAgentRuntimePublish func()
 	removeAgentWorkspaceRoot  func(string) error
+	refreshTicks              <-chan time.Time // nil in production; test-only override for the periodic refresh ticker.
 }
 
 // ReconnectRequiredError reports that the daemon's credentials were rejected
@@ -459,8 +460,13 @@ func (s *Service) run(ctx context.Context, heartbeatTicks <-chan time.Time) (run
 	}()
 	s.signalReady()
 
-	ticker := time.NewTicker(workspaceRefreshInterval)
-	defer ticker.Stop()
+	refreshTicks := s.refreshTicks
+	var refreshTicker *time.Ticker
+	if refreshTicks == nil {
+		refreshTicker = time.NewTicker(workspaceRefreshInterval)
+		refreshTicks = refreshTicker.C
+		defer refreshTicker.Stop()
+	}
 
 	for {
 		select {
@@ -482,7 +488,7 @@ func (s *Service) run(ctx context.Context, heartbeatTicks <-chan time.Time) (run
 		case err := <-drained:
 			fmt.Printf("workspace event stream: %v; daemon has been drained, exiting\n", err)
 			return err
-		case <-ticker.C:
+		case <-refreshTicks:
 			if err := s.refresh(coreCtx); err != nil {
 				if isTerminalAuthError(err) {
 					fmt.Printf("workspace refresh: %v; daemon has been drained, exiting\n", err)
@@ -638,6 +644,25 @@ func (s *Service) runWorkspaceEventStream(ctx context.Context) error {
 	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stopClose()
 
+	streamCtx, streamCancel := context.WithCancel(ctx)
+	refreshNeeded := make(chan struct{}, 1)
+	refreshDone := make(chan struct{})
+	go func() {
+		defer close(refreshDone)
+		for range refreshNeeded {
+			if err := s.refresh(streamCtx); err != nil && streamCtx.Err() == nil {
+				log.Printf("workspace refresh error: %v", err)
+			}
+		}
+	}()
+	signalRefresh := func() {
+		select {
+		case refreshNeeded <- struct{}{}:
+		default:
+		}
+	}
+	defer func() { streamCancel(); close(refreshNeeded); <-refreshDone }()
+
 	for {
 		_, payload, err := conn.ReadMessage()
 		if err != nil {
@@ -647,14 +672,27 @@ func (s *Service) runWorkspaceEventStream(ctx context.Context) error {
 		if err := json.Unmarshal(payload, &event); err != nil {
 			continue
 		}
-		if shouldRefreshForEvent(event.Type) {
-			if err := s.refresh(ctx); err != nil && ctx.Err() == nil {
-				log.Printf("workspace refresh error: %v", err)
-			}
+		if strings.TrimSpace(event.Type) == "workspace.snapshot" {
+			s.applySnapshot(ctx, event.Data)
+		} else if shouldRefreshForEvent(event.Type) {
+			signalRefresh()
 		}
 		if change, ok := parseAgentInboxChangedEvent(event); ok {
 			s.wakeAgentWorker(change.AgentID)
 		}
+	}
+}
+
+func (s *Service) applySnapshot(ctx context.Context, data json.RawMessage) {
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
+	var workspace workspaceResponse
+	if err := json.Unmarshal(data, &workspace); err != nil {
+		log.Printf("workspace snapshot decode error: %v", err)
+		return
+	}
+	if err := s.applyFetchedWorkspace(ctx, &workspace); err != nil && ctx.Err() == nil {
+		log.Printf("workspace snapshot apply error: %v", err)
 	}
 }
 
@@ -674,7 +712,7 @@ func parseAgentInboxChangedEvent(event workspaceEventEnvelope) (agentInboxChange
 
 func shouldRefreshForEvent(eventType string) bool {
 	switch strings.TrimSpace(eventType) {
-	case "workspace.snapshot", "presence.updated", "agent.run.updated":
+	case "presence.updated", "agent.run.updated":
 		return false
 	default:
 		return true
@@ -689,7 +727,10 @@ func (s *Service) refresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	return s.applyFetchedWorkspace(ctx, workspace)
+}
 
+func (s *Service) applyFetchedWorkspace(ctx context.Context, workspace *workspaceResponse) error {
 	if err := s.ensurePrimaryRuntime(); err != nil {
 		return err
 	}
