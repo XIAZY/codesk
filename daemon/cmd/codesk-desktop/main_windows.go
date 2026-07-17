@@ -129,7 +129,7 @@ func showFatalError(err error) {
 		return
 	}
 	title, _ := windows.UTF16PtrFromString("Codesk")
-	message, conversionErr := windows.UTF16PtrFromString("Codesk could not start.\n\n" + err.Error() + "\n\nSee %LOCALAPPDATA%\\Codesk\\Logs for details.")
+	message, conversionErr := windows.UTF16PtrFromString("Codesk could not start.\n\n" + err.Error() + "\n\nSee the Codesk Logs folder under your current-user Local AppData directory for details.")
 	if conversionErr != nil {
 		return
 	}
