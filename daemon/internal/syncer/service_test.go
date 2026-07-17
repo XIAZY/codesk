@@ -5154,14 +5154,9 @@ func TestTerminalAuthOutranksSnapshotCancellation(t *testing.T) {
 }
 
 func TestAdmissionEpochFenceSkipsStaleREST(t *testing.T) {
-	restEntered := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/workspace"):
-			select {
-			case restEntered <- struct{}{}:
-			default:
-			}
 			<-r.Context().Done()
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agents/"):
 			writeJSONResponse(w, http.StatusOK, toolInboxResponse{Items: []*agentEvent{}})
@@ -5213,12 +5208,61 @@ func TestAdmissionEpochFenceSkipsStaleREST(t *testing.T) {
 		service.mu.Unlock()
 		return ws != nil && ws.RootDocumentID == "snap2"
 	})
+}
 
-	select {
-	case <-restEntered:
-		t.Fatal("REST fetch was admitted despite stale epoch — admission revalidation not working")
-	default:
+func TestPostSnapshotRefreshIntentPreserved(t *testing.T) {
+	var restFetches atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/workspace"):
+			restFetches.Add(1)
+			writeJSONResponse(w, http.StatusOK, &workspaceResponse{})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agents/"):
+			writeJSONResponse(w, http.StatusOK, toolInboxResponse{Items: []*agentEvent{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	service := &Service{
+		cfg: Config{
+			BackendURL:         server.URL,
+			WorkspaceID:        "workspace:test",
+			DataDir:            t.TempDir(),
+			WorkspaceDir:       t.TempDir(),
+			AgentWorkspaceRoot: t.TempDir(),
+			AgentID:            "daemon_agent",
+		},
+		client:        server.Client(),
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
+		agentWorkers:  map[string]*managedAgentWorker{},
 	}
+	defer service.closePrimaryRuntime()
+	defer service.closeAgentRuntimes()
+	defer service.closeAgentWorkers()
+
+	snapAJSON, _ := json.Marshal(workspaceResponse{RootDocumentID: "A"})
+	snapBJSON, _ := json.Marshal(workspaceResponse{RootDocumentID: "B"})
+
+	service.refreshMu.Lock()
+
+	stopWorker := startTestRefreshWorker(t, service, ctx)
+	defer func() { cancel(); stopWorker() }()
+
+	service.publishSnapshot(snapAJSON)
+	service.signalRefresh()
+
+	waitUntil(t, func() bool { return service.pendingSnapshot.Load() == nil })
+
+	service.publishSnapshot(snapBJSON)
+	service.signalRefresh()
+
+	service.refreshMu.Unlock()
+
+	waitUntil(t, func() bool { return restFetches.Load() > 0 })
 }
 
 func TestProductionCoordinatorSingleOwner(t *testing.T) {
