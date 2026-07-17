@@ -74,6 +74,9 @@ func TestBuildScriptPinsInputsAndDisablesAmbientBuildMetadata(t *testing.T) {
 		"go_repro_ldflags='-buildid='",
 		"go-winres@v0.3.1",
 		"-buildvcs=false",
+		"git -C \"$root_dir\" rev-parse --verify HEAD",
+		"source checkout must have no tracked, staged, or untracked changes before building a release",
+		"--source-revision \"$source_revision\"",
 	} {
 		if !strings.Contains(script, required) {
 			t.Errorf("build script is missing %q", required)

@@ -28,6 +28,11 @@ Setup replaces or removes the installed program only while the desktop is stoppe
 - [x] (2026-07-16 02:38Z) Verified that merged macOS PR #174 consumes the same coordinator, then released the Windows rework hold on current main `7ae7ef3451ede28bf2ee4651dabcee084b072fd1`.
 - [x] (2026-07-16 03:40Z) Reconstructed, committed, and published the canonical 52-path Windows-only remainder directly on current main with no shared PR #173 paths, after passing focused race, full Go test/vet/build, frontend typecheck/354 tests/build, diff/actionlint, AMD64/ARM64 construction, complete unsigned release build, PE verification, host Yrs restoration, and generated-resource cleanup.
 - [x] (2026-07-16 04:02Z) Completed a whole-document currency sweep after publication: reconciled the merged macOS wording, publication state, milestone statuses, exact focused-race and cross-construction commands, historical-head wording, and revision note without embedding the source commit's own SHA.
+- [x] (2026-07-17 06:20Z) Withdrew the merge recommendation and returned PR #172 to draft after the first native Windows build repeatedly flashed PowerShell/console windows. Traced every production child constructor: transactional cleanup covers the historical `Codesk daemon <workspace>` five-second launcher, installer PowerShell already uses hidden/no-window policy, and the recurring uncovered class is the five Codex/Claude detection/runtime constructors in `daemon/internal/syncer`.
+- [x] (2026-07-17 07:05Z) Transplanted the canonical 52-path Windows remainder onto current main `1a2a467ff4e1507ae55262a928dec1ba9bc69aff`, preserving the merged app-server lifecycle fixes, and routed all five syncer-managed background children through one platform policy. Windows sets `CREATE_NO_WINDOW` and `HideWindow`; other platforms are unchanged; context, arguments, streams, and exit status are preserved. Added an aliased-import-aware production AST inventory, portable Windows-policy source guard, native Windows attribute test, exact constructor semantics test, and a separate detached-installer attribute seam/test. Removing either Windows flag or bypassing the factory makes the committed portable rows fail.
+- [x] (2026-07-17 07:45Z) Added the token-free runtime acceptance stream and source-bound release metadata requested by the independent QA runner. Runtime records expose only service/observation/runtime/turn sequences, runtime kind, PID, and bounded lifecycle state; duplicate provider starts are suppressed and a portable crash/replacement row proves generation disambiguation under PID reuse. The Windows builder now requires a clean committed checkout, records its full lowercase `source_revision` beside both setup hashes, and includes the manifest hash in `SHA256SUMS`; generator and verifier mutations reject missing, zero, uppercase, or changed bindings.
+- [x] (2026-07-17 07:54Z) Re-ran focused syncer plus desktop-app race, complete repository Go test/vet/build, frontend typecheck plus 357 tests/build, shell syntax, actionlint, and release metadata/verifier gates on the amended source.
+- [ ] Freeze and publish one exact clean source revision, then construct and externally verify its deterministic AMD64/ARM64 unsigned bundle and attach the source/manifest/Setup hashes to the review and native handoff without editing the bound source afterward.
 - [ ] Have real Windows AMD64 and ARM64 owners run the native lifecycle, cross-session lock, abnormal-death process-tree, exact registration recovery, and injected durability-failure matrix. Do not close the task from cross-compilation alone.
 
 ## Surprises & Discoveries
@@ -67,6 +72,9 @@ Setup replaces or removes the installed program only while the desktop is stoppe
 
 - Observation: a PID is not a durable identity for an unbounded post-exit wait because Windows may reuse it before a helper opens the process.
   Evidence: setup opens an inheritable `SYNCHRONIZE` handle to its current process before creating PowerShell, lists only that handle in `AdditionalInheritedHandles`, and the helper waits indefinitely on that inherited handle without resolving a PID. The manual-reset-handle integration row proves helper-side wait/delete ordering; only the separate native production-creator row can seal real parent-termination signaling.
+
+- Observation: linking the desktop itself as `windowsgui` does not suppress consoles allocated by background console/npm-wrapper children created with default process attributes.
+  Evidence: the first native desktop build repeatedly flashed PowerShell/console windows. Install/shortcut PowerShell already sets `CREATE_NO_WINDOW` plus `HideWindow`, and detached self-delete cannot explain recurring steady-state flashes. The uncovered recurring surface was exactly Codex `--version`, Codex `app-server --help`, Codex `app-server`, Claude `--version`, and the Claude runtime, all constructed with plain `os/exec`. Controller detection/retry and agent starts exercise those constructors repeatedly.
 
 ## Decision Log
 
@@ -110,21 +118,25 @@ Setup replaces or removes the installed program only while the desktop is stoppe
   Rationale: controller ownership, menu publication, connection commit/restart, login-item toggling, action routing, and joined shutdown have no Win32 dependency and must not be copied into the Darwin app. DPAPI versus Keychain, HKCU Run versus `SMAppService`, Windows Job Objects versus macOS process ownership, ShellExecute versus `NSWorkspace`, and the two installation/release models satisfy common invariants through incompatible operating-system APIs. A generic installer abstraction would erase important recovery and trust differences instead of sharing behavior.
   Date/Author: 2026-07-15, Vitaliy, following @AlphaToad's architecture direction.
 
+- Decision: construct every syncer-managed background child through one syncer-owned platform process policy, while retaining desktopsetup's detached process policy as a separate lifecycle boundary.
+  Rationale: probes and long-lived Codex/Claude runtimes share the invariant that a native GUI owner must never expose a console, but they retain distinct context and stream semantics. On Windows the factory adds `CREATE_NO_WINDOW` and `HideWindow` without disabling standard-handle inheritance; other platforms are a no-op. Installer self-delete needs `DETACHED_PROCESS`, an exact inherited wait handle, and process release instead; Windows explicitly ignores redundant `CREATE_NO_WINDOW` when `DETACHED_PROCESS` is present. Production AST inventory plus portable and Windows-specific policy tests make bypasses and flag removal causal failures.
+  Date/Author: 2026-07-17, Vitaliy, following native defect triage with @AlphaToad, @Bill, @Thomas, and @Deniz.
+
 ## Outcomes & Retrospective
 
 The cross-platform architecture correction is accepted on main through PR #173, and merged macOS PR #174 consumes the same shared coordinator. This amended branch is the canonical Windows-only remainder: shared locks prevent concurrent state owners, setup reports real failures, external uninstall is synchronous, committed transactions carry complete registration state, rollback follows observed topology, uncertain proof publication fails closed into forward recovery, desktop descendants are job-contained, final setup deletion waits on an exact inherited process handle, URL validation is shared and causally tested, and release inputs are explicit. The full portable/race/frontend gates and complete unsigned AMD64/ARM64 construction are green on current main.
 
-The work is not accepted yet. The pre-reconstruction PR head and its hashes are historical because the shared extraction and macOS merge changed the base. The 52-path current-main reconstruction is published and its complete local construction gates are green; fresh exact-head reviews/CI and task #42 native Windows AMD64/ARM64 evidence remain.
+The work is not accepted yet. Native Windows use exposed a release-blocking recurring console-flash defect after the prior source/CI seal, so PR #172 is draft and every earlier merge recommendation is withdrawn. The class-level syncer launch-policy correction and causal tests are implemented locally on current main; fresh complete construction, exact-head reviews/CI, and task #42 native Windows AMD64/ARM64 evidence remain. Native evidence must correlate executable/PID creation with zero visible consoles and prove the app owns exactly one daemon after idempotent legacy-launcher removal.
 
 ## Context and Orientation
 
-The Go daemon lives under `daemon/`. `daemon/internal/syncer` is the long-running workspace synchronization service. `daemon/internal/desktop` owns token-free configuration, encrypted secrets, the controller, connection handoff, tray model, platform interfaces, the Windows file lock adapter, and Job Object containment. `daemon/internal/desktopapp` owns the platform-neutral application coordinator: durable-state loading, controller/service construction, menu/action publication, connection commit/restart, login-item toggling, and joined shutdown. `daemon/cmd/codesk-desktop` is the Windows GUI composition root. It acquires the desktop lock and joins the Job Object before constructing `desktopapp.Application` from Windows adapters.
+The Go daemon lives under `daemon/`. `daemon/internal/syncer` is the long-running workspace synchronization service; its managed-process factory owns platform process attributes for every Codex/Claude probe and runtime child. `daemon/internal/desktop` owns token-free configuration, encrypted secrets, the controller, connection handoff, tray model, platform interfaces, the Windows file lock adapter, and Job Object containment. `daemon/internal/desktopapp` owns the platform-neutral application coordinator: durable-state loading, controller/service construction, menu/action publication, connection commit/restart, login-item toggling, and joined shutdown. `daemon/cmd/codesk-desktop` is the Windows GUI composition root. It acquires the desktop lock and joins the Job Object before constructing `desktopapp.Application` from Windows adapters.
 
 The app's mutable user data remains under `%LOCALAPPDATA%\\Codesk`; installed programs live under `%LOCALAPPDATA%\\Programs\\Codesk`; the external versioned uninstaller lives under `%LOCALAPPDATA%\\Codesk\\Setup`. Ordinary uninstall preserves `%LOCALAPPDATA%\\Codesk` user data except for the setup subtree's own final self-removal, and preserves `%USERPROFILE%\\.notty` legacy data.
 
 `daemon/internal/desktopsetup` owns payload parsing plus install, upgrade, recovery, and uninstall. A same-volume staged directory and backup/tombstone are moved with Windows write-through renames. A v2 install record stores the old registration state before mutation. A separate commit proof stores the desired new state before post-commit cleanup. Registration means the HKCU Run value, Start Menu `.lnk`, and the complete HKCU uninstall key. Shortcut bytes and uninstall registry bytes/types are preserved exactly; registry writes and deletions are flushed.
 
-`scripts/build-windows-desktop-release.sh` builds Yrs for `x86_64-pc-windows-gnu` and `aarch64-pc-windows-gnullvm`, links the desktop with Zig targets `x86_64-windows-gnu` and `aarch64-windows-gnu`, builds the agent tool and setup, embeds deterministic resources, and emits setup executables plus `manifest.json` and `SHA256SUMS`. `daemon/cmd/codesk-desktop-release` creates and verifies those artifacts.
+`scripts/build-windows-desktop-release.sh` requires a clean committed checkout, builds Yrs for `x86_64-pc-windows-gnu` and `aarch64-pc-windows-gnullvm`, links the desktop with Zig targets `x86_64-windows-gnu` and `aarch64-windows-gnu`, builds the agent tool and setup, embeds deterministic resources, and emits setup executables plus a source-bound `manifest.json` and `SHA256SUMS`. `daemon/cmd/codesk-desktop-release` creates and verifies those artifacts; `SHA256SUMS` covers both setup executables and the manifest that binds them to the exact source revision.
 
 ## Plan of Work
 
@@ -138,7 +150,7 @@ Milestone four is at exact-head review and CI. The coherent current-main source 
 
 ## Concrete Steps
 
-Run commands from the repository root in `work/notty-windows-desktop-rebase`.
+Run commands from the repository root in `work/notty-windows-desktop-current`.
 
 Format and run portable logic:
 
@@ -178,9 +190,11 @@ For production, unset the unsigned override and set `CODESK_WINDOWS_SIGNER` to a
 
 Portable acceptance requires exact whole-state recovery. Before a commit proof, any crash restores the prior program and the exact prior Run value/type, shortcut bytes, and raw uninstall-key values. After a commit proof, every crash point converges to the committed program and committed registration. A failed registry or file durability operation returns nonzero and leaves the record/proof for retry. Running recovery twice produces no drift and no second registration replay after proof cleanup.
 
-Construction acceptance requires real desktop/syncer links for AMD64 and ARM64, PE machine `0x8664` and `0xaa64`, GUI subsystem for desktop/setup, console subsystem for the agent tool, required icon/version/manifest resources, exact payload hashes, the pinned toolchain manifest, Go build version `go1.26.5`, and no `vcs.*` settings in setup or either embedded Go binary. All four published files must compare byte-for-byte across the two isolated linked-worktree builds.
+Construction acceptance requires real desktop/syncer links for AMD64 and ARM64, PE machine `0x8664` and `0xaa64`, GUI subsystem for desktop/setup, console subsystem for the agent tool, required icon/version/manifest resources, exact payload hashes, the pinned toolchain manifest, a canonical full lowercase nonzero `source_revision`, a `SHA256SUMS` entry for that manifest, Go build version `go1.26.5`, and no `vcs.*` settings in setup or either embedded Go binary. All four published files must compare byte-for-byte across two clean isolated linked-worktree builds at that exact source revision.
 
 Native acceptance requires real Windows AMD64 and ARM64 transcripts bound to the frozen SHA and artifact hashes. Each architecture must install without elevation, connect and sync, persist only DPAPI ciphertext, restart, launch at login, reject a second instance, upgrade with data preserved, and uninstall with program/shortcut/Run/uninstall key gone while user data remains. A cross-session same-user process must fail to acquire the desktop lock. Setup while desktop is active must return nonzero and leave files and registration byte-for-byte unchanged.
+
+Across startup, connect, sync, restart, and update, native executable/PID tracing must attribute every Codex/Claude probe and runtime child to the desktop-owned daemon and show zero visible PowerShell, cmd, or console windows. Existing-install upgrade must remove the exact historical `Codesk daemon <workspace>` Scheduled Task or Startup link idempotently, leave no lifecycle gap, and prove exactly one app-owned daemon with no legacy duplicate or orphan. Logs and traces must never contain tokens.
 
 The native crash matrix must run setup as separate processes and terminate it at four points: before proof, after proof before cleanup, during cleanup, and after cleanup. Restarting setup must recover to a consistent whole, and running recovery again must be a no-op. Injected write-through and registry-flush failures must remain nonzero and recoverable. Killing the desktop owner without calling Shutdown must terminate a spawned child and grandchild before any destructive phase begins.
 
@@ -198,9 +212,9 @@ PowerShell receives only an inherited exact process `SYNCHRONIZE` handle and wai
 
 ## Artifacts and Notes
 
-The coherent Windows-only reconstruction is based directly on current main after the shared coordinator and macOS composition merges:
+The coherent Windows remainder plus class-level syncer process-policy amendment is based directly on current main after the shared coordinator, macOS composition, and daemon lifecycle merges:
 
-    Base: 7ae7ef3451ede28bf2ee4651dabcee084b072fd1
+    Base: 1a2a467ff4e1507ae55262a928dec1ba9bc69aff
 
 The frozen pre-reconstruction PR head is historical and must not be used for amended acceptance:
 
@@ -208,7 +222,7 @@ The frozen pre-reconstruction PR head is historical and must not be used for ame
 
 The earlier unsigned artifact hashes are intentionally retired because the shared extraction and current-main reconstruction change the linked application bytes. Every cross-built result remains construction evidence until native Windows owners bind their transcript to the same frozen SHA and artifacts.
 
-The replacement unsigned construction hashes from the complete current-main build are:
+The following complete current-main construction hashes are historical after the console-policy amendment and must not be used for amended acceptance:
 
     CodeskSetup_dev_windows_amd64.exe: e3e111a6263cbdf46d5c79cd7f40470080a416a0114ed758a077260c71643faf
     CodeskSetup_dev_windows_arm64.exe: 46fe715a413346dbafb4014c5b63c8ea762570367694cad34b3cd563e1947f0a
@@ -245,4 +259,4 @@ There is no detached worker or parent PID interface. `daemon/cmd/codesk-desktop-
 
 Shipped programs use the Go standard library plus existing `golang.org/x/sys` and `fyne.io/systray`. Build-time resources use pinned `github.com/tc-hib/go-winres@v0.3.1`. No credential, release certificate, or signer secret enters the repository.
 
-Plan revision note (2026-07-16 04:02Z): recorded the accepted shared coordinator/documentation split through PR #173, merged macOS consumer PR #174, published canonical Windows-only reconstruction on current main, replacement unsigned construction hashes, completed portable and dual-architecture construction gates, current exact-head review/CI state, and task #42's remaining native Windows evidence. This revision also completed a whole-document current-state and command currency sweep after publication.
+Plan revision note (2026-07-17 07:45Z): recorded the release-blocking native console-flash report, withdrawn merge recommendation/draft state, exhaustive legacy-plus-syncer child-process trace, current-main transplant, class-level managed-process policy, mutation-adequate inventory/flag/semantics tests, separate detached-installer policy rationale, token-free runtime acceptance stream, source-bound manifest/checksum contract, retired pre-fix hashes, and the expanded native acceptance bundle for zero consoles plus exactly one app-owned daemon after legacy removal.

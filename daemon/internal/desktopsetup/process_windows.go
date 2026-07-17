@@ -220,12 +220,7 @@ func startDetachedWithInheritedHandles(
 	if environment != nil {
 		command.Env = environment
 	}
-	command.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags:              windows.DETACHED_PROCESS | windows.CREATE_NEW_PROCESS_GROUP,
-		HideWindow:                 true,
-		NoInheritHandles:           len(inheritedHandles) == 0,
-		AdditionalInheritedHandles: inheritedHandles,
-	}
+	command.SysProcAttr = detachedProcessAttributes(inheritedHandles)
 	if err := command.Start(); err != nil {
 		return fmt.Errorf("desktop setup: start detached process: %w", err)
 	}
@@ -233,4 +228,16 @@ func startDetachedWithInheritedHandles(
 		return fmt.Errorf("desktop setup: release detached process: %w", err)
 	}
 	return nil
+}
+
+func detachedProcessAttributes(inheritedHandles []syscall.Handle) *syscall.SysProcAttr {
+	// DETACHED_PROCESS is the console-suppression policy for installer helpers.
+	// Windows explicitly ignores CREATE_NO_WINDOW when DETACHED_PROCESS is set,
+	// so keep this policy separate from syncer's managed background children.
+	return &syscall.SysProcAttr{
+		CreationFlags:              windows.DETACHED_PROCESS | windows.CREATE_NEW_PROCESS_GROUP,
+		HideWindow:                 true,
+		NoInheritHandles:           len(inheritedHandles) == 0,
+		AdditionalInheritedHandles: inheritedHandles,
+	}
 }

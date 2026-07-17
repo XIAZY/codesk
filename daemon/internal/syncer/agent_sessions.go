@@ -88,6 +88,11 @@ type agentSessionSupervisor struct {
 	// backoff and is reset only on proven uptime (a completed turn), never on a
 	// bare respawn — else a post-handshake quota kill would spin at full rate.
 	restartAttempts map[string]int
+	// observationSequence orders token-free diagnostic events within this service;
+	// runtimeGeneration disambiguates process replacement and PID reuse. Both are
+	// guarded by mu with the session state they describe.
+	observationSequence uint64
+	runtimeGeneration   uint64
 
 	// baseCtx is the parent of every (fresh AND restart) detached construction AND
 	// every live consumeEvents loop; baseCancel (fired by Shutdown) cancels all
@@ -164,6 +169,12 @@ type managedAgentSession struct {
 
 	activeTurn string
 	state      string
+
+	runtimeKind       RuntimeKind
+	runtimeGeneration uint64
+	runtimePID        int
+	turnSequence      uint64
+	observedTurnID    string
 
 	// lastActivitySeq is the driver activity generation (process.ActivitySeq()) last
 	// observed for this session; lastActivityAt is the supervisor's OWN monotonic
@@ -434,6 +445,46 @@ func newAgentSessionSupervisor(cfg Config, updater agentSessionUpdater, runtimes
 		}
 	}
 	return s
+}
+
+func (s *agentSessionSupervisor) runtimeObservationLocked(session *managedAgentSession, state RuntimeObservationState) *RuntimeObservation {
+	if s == nil || s.cfg.RuntimeObserver == nil || session == nil {
+		return nil
+	}
+	s.observationSequence++
+	return &RuntimeObservation{
+		Sequence:          s.observationSequence,
+		RuntimeGeneration: session.runtimeGeneration,
+		RuntimeKind:       session.runtimeKind,
+		PID:               session.runtimePID,
+		TurnSequence:      session.turnSequence,
+		State:             state,
+	}
+}
+
+func (s *agentSessionSupervisor) turnStartedObservationLocked(session *managedAgentSession, turnID string) *RuntimeObservation {
+	turnID = strings.TrimSpace(turnID)
+	if turnID == "" || session == nil || session.observedTurnID == turnID {
+		return nil
+	}
+	session.turnSequence++
+	session.observedTurnID = turnID
+	return s.runtimeObservationLocked(session, RuntimeObservationTurnStarted)
+}
+
+func (s *agentSessionSupervisor) turnTerminalObservationLocked(session *managedAgentSession, state RuntimeObservationState) *RuntimeObservation {
+	if session == nil || session.observedTurnID == "" {
+		return nil
+	}
+	observation := s.runtimeObservationLocked(session, state)
+	session.observedTurnID = ""
+	return observation
+}
+
+func (s *agentSessionSupervisor) emitRuntimeObservation(observation *RuntimeObservation) {
+	if observation != nil && s != nil && s.cfg.RuntimeObserver != nil {
+		s.cfg.RuntimeObserver.ObserveRuntime(*observation)
+	}
 }
 
 // bindServiceContext re-parents baseCtx onto the service run context exactly
@@ -895,6 +946,8 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 		workdir:         workdir,
 		sessionID:       sessionID,
 		state:           "idle",
+		runtimeKind:     driver.Kind(),
+		runtimePID:      process.PID(),
 		lastActivityAt:  s.now(),
 		lastActivitySeq: process.ActivitySeq(),
 	}
@@ -937,6 +990,8 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 		appendAgentLog(s.cfg, current.ID, "discarding runtime process because the fresh-start claim was invalidated (removed/retargeted)")
 		return nil
 	}
+	s.runtimeGeneration++
+	session.runtimeGeneration = s.runtimeGeneration
 	s.sessions[current.ID] = session
 	// Track the live event loop AND the heartbeat loop in the same barrier as
 	// construction workers: both are added under s.mu on the passing side of the
@@ -962,7 +1017,9 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 		CurrentActivity: "Idle",
 		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
+	readyObservation := s.runtimeObservationLocked(session, RuntimeObservationReady)
 	s.mu.Unlock()
+	s.emitRuntimeObservation(readyObservation)
 	go func() {
 		defer s.constructionWG.Done()
 		s.consumeEvents(current.ID, process)
@@ -1232,6 +1289,7 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 	// a settled turn / death / newer notification that landed during the unlocked
 	// WriteStdin bumped the nonce, so this completion must not revive working.
 	stale := !writable(currentSession, process) || currentSession.turnOpSeq != op
+	var turnObservation *RuntimeObservation
 	if !stale {
 		currentSession.activeTurn = turnID
 		currentSession.state = "working"
@@ -1252,8 +1310,10 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 			CurrentActivity: "Working",
 			LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 		})
+		turnObservation = s.turnStartedObservationLocked(currentSession, turnID)
 	}
 	s.mu.Unlock()
+	s.emitRuntimeObservation(turnObservation)
 	if stale {
 		// The generation we wrote to was replaced or died mid-write; do not mark a
 		// different or dead session working, nor publish a stale working status.
@@ -1323,16 +1383,16 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 				s.markWorking(agentID, process, event.TurnID)
 			}
 		case RuntimeEventTurnCompleted:
-			s.markIdle(agentID, process, true)
+			s.markIdleObserved(agentID, process, true, RuntimeObservationTurnCompleted)
 			// A completed turn is the only proof of real uptime — the process ran
 			// actual work, not just respawned. It alone resets the transient
 			// backoff counter (never a failed turn or a bare idle/status event,
 			// which would let a crash->idle->crash agent hot-loop at the floor).
 			s.resetRestartBackoff(agentID, process)
 		case RuntimeEventTurnFailed:
-			s.markIdle(agentID, process, false)
+			s.markIdleObserved(agentID, process, false, RuntimeObservationTurnFailed)
 		case RuntimeEventIdle:
-			s.markIdle(agentID, process, true)
+			s.markIdleObserved(agentID, process, true, RuntimeObservationTurnIdle)
 		}
 	}
 disconnected:
@@ -1348,6 +1408,12 @@ disconnected:
 		terminalReason = s.terminalExitReason(exit)
 	}
 	transient := !exit.Expected && terminalReason == ""
+	stopState := RuntimeObservationStoppedExpected
+	if terminalReason != "" {
+		stopState = RuntimeObservationStoppedTerminal
+	} else if transient {
+		stopState = RuntimeObservationStoppedTransient
+	}
 
 	published := ""
 	if terminalReason != "" {
@@ -1359,6 +1425,7 @@ disconnected:
 	owned := false
 	attempt := 0
 	claimedRestart := false
+	var stopObservation *RuntimeObservation
 	s.mu.Lock()
 	if session := s.sessions[agentID]; session != nil && session.process == process {
 		owned = true
@@ -1416,8 +1483,10 @@ disconnected:
 				})
 			}
 		}
+		stopObservation = s.runtimeObservationLocked(session, stopState)
 	}
 	s.mu.Unlock()
+	s.emitRuntimeObservation(stopObservation)
 	if !owned {
 		// The events belong to a process this session has already replaced.
 		return
@@ -1745,11 +1814,17 @@ func (s *agentSessionSupervisor) markWorking(agentID string, process RuntimeProc
 		CurrentActivity: "Working",
 		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
+	observation := s.turnStartedObservationLocked(session, turnID)
 	s.mu.Unlock()
+	s.emitRuntimeObservation(observation)
 	appendAgentLog(s.cfg, agentID, "event turn started turn=%s", turnID)
 }
 
 func (s *agentSessionSupervisor) markIdle(agentID string, process RuntimeProcess, delivered bool) {
+	s.markIdleObserved(agentID, process, delivered, RuntimeObservationTurnIdle)
+}
+
+func (s *agentSessionSupervisor) markIdleObserved(agentID string, process RuntimeProcess, delivered bool, observationState RuntimeObservationState) {
 	s.mu.Lock()
 	session := s.sessions[agentID]
 	if !writable(session, process) {
@@ -1792,8 +1867,10 @@ func (s *agentSessionSupervisor) markIdle(agentID string, process RuntimeProcess
 		CurrentActivity: "Idle",
 		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
+	observation := s.turnTerminalObservationLocked(session, observationState)
 	wake := s.wakeAgent
 	s.mu.Unlock()
+	s.emitRuntimeObservation(observation)
 	appendAgentLog(s.cfg, agentID, "event turn finished delivered=%t", delivered)
 	if wake != nil {
 		wake(agentID)

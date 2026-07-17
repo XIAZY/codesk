@@ -5,8 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
+
+const testSourceRevision = "0123456789abcdef0123456789abcdef01234567"
 
 func TestResourceVersion(t *testing.T) {
 	tests := map[string]string{
@@ -33,7 +36,7 @@ func TestWriteReleaseMetadataRecordsCanonicalToolchain(t *testing.T) {
 		}
 		paths[arch] = path
 	}
-	if err := writeReleaseMetadata(directory, "dev", false, paths); err != nil {
+	if err := writeReleaseMetadata(directory, "dev", testSourceRevision, false, paths); err != nil {
 		t.Fatal(err)
 	}
 	manifest, err := readReleaseManifest(filepath.Join(directory, "manifest.json"))
@@ -42,6 +45,31 @@ func TestWriteReleaseMetadataRecordsCanonicalToolchain(t *testing.T) {
 	}
 	if manifest.Toolchain != canonicalReleaseToolchain {
 		t.Fatalf("toolchain = %#v, want %#v", manifest.Toolchain, canonicalReleaseToolchain)
+	}
+	if manifest.SourceRevision != testSourceRevision {
+		t.Fatalf("source revision = %q, want %q", manifest.SourceRevision, testSourceRevision)
+	}
+	checksums, err := readChecksums(filepath.Join(directory, "SHA256SUMS"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestHash, err := fileSHA256(filepath.Join(directory, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checksums["manifest.json"] != manifestHash {
+		t.Fatalf("manifest checksum = %q, want %q", checksums["manifest.json"], manifestHash)
+	}
+}
+
+func TestValidateSourceRevisionRejectsZeroAndNonCanonicalValues(t *testing.T) {
+	for _, revision := range []string{strings.Repeat("0", 40), strings.Repeat("A", 40), "abc"} {
+		if err := validateSourceRevision(revision); err == nil {
+			t.Fatalf("validateSourceRevision(%q) unexpectedly succeeded", revision)
+		}
+	}
+	if err := validateSourceRevision(testSourceRevision); err != nil {
+		t.Fatalf("validateSourceRevision(valid) error = %v", err)
 	}
 }
 

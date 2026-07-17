@@ -145,6 +145,12 @@ func (a *Application) newService() (desktop.DaemonService, error) {
 	if err != nil {
 		return nil, err
 	}
+	if a.controller != nil {
+		syncerConfig.RuntimeObserver = desktopRuntimeObserver{
+			serviceGeneration: a.controller.Snapshot().Generation,
+			logger:            a.logger,
+		}
+	}
 	return syncer.New(syncerConfig)
 }
 

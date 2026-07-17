@@ -47,14 +47,8 @@ func verifyRelease(versionDirectory, version string, allowUnsigned bool) error {
 		return err
 	}
 	expectedSigned := !allowUnsigned
-	if manifest.Version != version {
-		return fmt.Errorf("manifest version %q, want %q", manifest.Version, version)
-	}
-	if manifest.Signed != expectedSigned {
-		return fmt.Errorf("manifest signed=%t, want %t", manifest.Signed, expectedSigned)
-	}
-	if manifest.Toolchain != canonicalReleaseToolchain {
-		return fmt.Errorf("manifest toolchain %#v, want %#v", manifest.Toolchain, canonicalReleaseToolchain)
+	if err := validateReleaseManifestHeader(manifest, version, expectedSigned); err != nil {
+		return err
 	}
 	if len(manifest.Artifacts) != len(releaseArchitectures) {
 		return fmt.Errorf("manifest has %d artifacts, want %d", len(manifest.Artifacts), len(releaseArchitectures))
@@ -63,8 +57,11 @@ func verifyRelease(versionDirectory, version string, allowUnsigned bool) error {
 	if err != nil {
 		return err
 	}
-	if len(checksums) != len(releaseArchitectures) {
-		return fmt.Errorf("SHA256SUMS has %d entries, want %d", len(checksums), len(releaseArchitectures))
+	if len(checksums) != len(releaseArchitectures)+1 {
+		return fmt.Errorf("SHA256SUMS has %d entries, want %d", len(checksums), len(releaseArchitectures)+1)
+	}
+	if err := verifyManifestChecksum(versionDirectory, checksums); err != nil {
+		return err
 	}
 
 	artifacts := make(map[string]releaseArtifact, len(manifest.Artifacts))
@@ -121,6 +118,33 @@ func verifyRelease(versionDirectory, version string, allowUnsigned bool) error {
 			return fmt.Errorf("%s: %w", artifact.File, err)
 		}
 		fmt.Printf("verified windows/%s %s (machine=0x%04x signed=%t)\n", arch, artifact.File, windowsMachines[arch], expectedSigned)
+	}
+	return nil
+}
+
+func validateReleaseManifestHeader(manifest releaseManifest, version string, expectedSigned bool) error {
+	if manifest.Version != version {
+		return fmt.Errorf("manifest version %q, want %q", manifest.Version, version)
+	}
+	if err := validateSourceRevision(manifest.SourceRevision); err != nil {
+		return fmt.Errorf("manifest: %w", err)
+	}
+	if manifest.Signed != expectedSigned {
+		return fmt.Errorf("manifest signed=%t, want %t", manifest.Signed, expectedSigned)
+	}
+	if manifest.Toolchain != canonicalReleaseToolchain {
+		return fmt.Errorf("manifest toolchain %#v, want %#v", manifest.Toolchain, canonicalReleaseToolchain)
+	}
+	return nil
+}
+
+func verifyManifestChecksum(versionDirectory string, checksums map[string]string) error {
+	manifestHash, err := fileSHA256(filepath.Join(versionDirectory, "manifest.json"))
+	if err != nil {
+		return err
+	}
+	if checksum := checksums["manifest.json"]; checksum != manifestHash {
+		return fmt.Errorf("SHA256SUMS hash for manifest.json is %q, want %q", checksum, manifestHash)
 	}
 	return nil
 }

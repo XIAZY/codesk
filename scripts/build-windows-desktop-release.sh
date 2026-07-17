@@ -43,12 +43,23 @@ case "$dist_dir" in
 esac
 
 command -v go >/dev/null 2>&1 || fail 'go is required'
+command -v git >/dev/null 2>&1 || fail 'git is required'
 actual_go_version="$(go env GOVERSION 2>/dev/null || true)"
 [ "$actual_go_version" = "$go_toolchain" ] || fail "$go_toolchain is required (got ${actual_go_version:-unknown})"
 resource_version="$(
 	cd "$root_dir"
 	go run -buildvcs=false ./daemon/cmd/codesk-desktop-release resource-version "$version"
 )" || fail 'invalid release version'
+source_revision="$(git -C "$root_dir" rev-parse --verify HEAD 2>/dev/null || true)"
+case "$source_revision" in
+	????????????????????????????????????????) ;;
+	*) fail 'could not resolve a full source revision' ;;
+esac
+case "$source_revision" in
+	*[!0-9a-f]*|0000000000000000000000000000000000000000) fail 'source revision must be a full lowercase Git SHA' ;;
+esac
+source_status="$(git -C "$root_dir" status --porcelain=v1 --untracked-files=all)"
+[ -z "$source_status" ] || fail 'source checkout must have no tracked, staged, or untracked changes before building a release'
 
 tmp_dir="$(notty_test_mktemp codesk-windows-desktop-release)"
 export CARGO_HOME="$tmp_dir/cargo-home"
@@ -289,6 +300,7 @@ restore_host_yffi
 "$release_tool" manifest \
 	--output "$publish_dir" \
 	--version "$version" \
+	--source-revision "$source_revision" \
 	--signed="$signed" \
 	--amd64 "$publish_dir/$(setup_filename amd64)" \
 	--arm64 "$publish_dir/$(setup_filename arm64)"

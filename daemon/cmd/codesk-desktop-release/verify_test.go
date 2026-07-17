@@ -242,3 +242,59 @@ func TestValidateReleaseVersion(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateReleaseManifestHeaderRequiresSourceBinding(t *testing.T) {
+	valid := releaseManifest{
+		Version:        "dev",
+		SourceRevision: testSourceRevision,
+		Signed:         false,
+		Toolchain:      canonicalReleaseToolchain,
+	}
+	if err := validateReleaseManifestHeader(valid, "dev", false); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, mutate := range map[string]func(*releaseManifest){
+		"missing source revision": func(manifest *releaseManifest) { manifest.SourceRevision = "" },
+		"zero source revision":    func(manifest *releaseManifest) { manifest.SourceRevision = strings.Repeat("0", 40) },
+		"uppercase source revision": func(manifest *releaseManifest) {
+			manifest.SourceRevision = strings.ToUpper(testSourceRevision)
+		},
+		"wrong version":   func(manifest *releaseManifest) { manifest.Version = "other" },
+		"wrong signed":    func(manifest *releaseManifest) { manifest.Signed = true },
+		"wrong toolchain": func(manifest *releaseManifest) { manifest.Toolchain.Go = "go0.0.0" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid
+			mutate(&candidate)
+			if err := validateReleaseManifestHeader(candidate, "dev", false); err == nil {
+				t.Fatal("validateReleaseManifestHeader() accepted mutated release metadata")
+			}
+		})
+	}
+}
+
+func TestVerifyManifestChecksumRejectsMissingOrChangedBinding(t *testing.T) {
+	directory := t.TempDir()
+	manifestPath := filepath.Join(directory, "manifest.json")
+	if err := os.WriteFile(manifestPath, []byte("source-bound manifest\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifestHash, err := fileSHA256(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyManifestChecksum(directory, map[string]string{"manifest.json": manifestHash}); err != nil {
+		t.Fatal(err)
+	}
+	for name, checksums := range map[string]map[string]string{
+		"missing": {},
+		"changed": {"manifest.json": strings.Repeat("f", 64)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := verifyManifestChecksum(directory, checksums); err == nil {
+				t.Fatal("verifyManifestChecksum() accepted an unbound manifest")
+			}
+		})
+	}
+}

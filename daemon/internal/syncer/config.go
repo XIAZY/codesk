@@ -15,6 +15,7 @@ type Config struct {
 	ClaudeCommand      string
 	AgentToolBaseURL   string
 	PprofAddr          string
+	RuntimeObserver    RuntimeObserver
 }
 
 func LoadConfig() Config {

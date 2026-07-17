@@ -27,10 +27,11 @@ const (
 )
 
 type releaseManifest struct {
-	Version   string            `json:"version"`
-	Signed    bool              `json:"signed"`
-	Toolchain releaseToolchain  `json:"toolchain"`
-	Artifacts []releaseArtifact `json:"artifacts"`
+	Version        string            `json:"version"`
+	SourceRevision string            `json:"source_revision"`
+	Signed         bool              `json:"signed"`
+	Toolchain      releaseToolchain  `json:"toolchain"`
+	Artifacts      []releaseArtifact `json:"artifacts"`
 }
 
 type releaseToolchain struct {
@@ -125,20 +126,21 @@ func runAppend(arguments []string) error {
 func runManifest(arguments []string) error {
 	flags := flag.NewFlagSet("manifest", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	var output, version, amd64Path, arm64Path string
+	var output, version, sourceRevision, amd64Path, arm64Path string
 	var signed bool
 	flags.StringVar(&output, "output", "", "release output directory")
 	flags.StringVar(&version, "version", "", "release version")
+	flags.StringVar(&sourceRevision, "source-revision", "", "full source Git revision")
 	flags.StringVar(&amd64Path, "amd64", "", "AMD64 setup executable")
 	flags.StringVar(&arm64Path, "arm64", "", "ARM64 setup executable")
 	flags.BoolVar(&signed, "signed", false, "artifacts are Authenticode signed")
 	if err := flags.Parse(arguments); err != nil {
 		return fmt.Errorf("manifest arguments: %w", err)
 	}
-	if flags.NArg() != 0 || output == "" || amd64Path == "" || arm64Path == "" {
-		return errors.New("manifest requires --output, --version, --amd64, and --arm64")
+	if flags.NArg() != 0 || output == "" || sourceRevision == "" || amd64Path == "" || arm64Path == "" {
+		return errors.New("manifest requires --output, --version, --source-revision, --amd64, and --arm64")
 	}
-	return writeReleaseMetadata(output, version, signed, map[string]string{
+	return writeReleaseMetadata(output, version, sourceRevision, signed, map[string]string{
 		"amd64": amd64Path,
 		"arm64": arm64Path,
 	})
@@ -169,18 +171,22 @@ func runVerify(arguments []string) error {
 	return verifyRelease(flags.Arg(0), flags.Arg(1), allowUnsigned)
 }
 
-func writeReleaseMetadata(output, version string, signed bool, paths map[string]string) error {
+func writeReleaseMetadata(output, version, sourceRevision string, signed bool, paths map[string]string) error {
 	if err := validateReleaseVersion(version); err != nil {
+		return err
+	}
+	if err := validateSourceRevision(sourceRevision); err != nil {
 		return err
 	}
 	if len(paths) != len(releaseArchitectures) {
 		return errors.New("release metadata requires both Windows architectures")
 	}
 	manifest := releaseManifest{
-		Version:   version,
-		Signed:    signed,
-		Toolchain: canonicalReleaseToolchain,
-		Artifacts: make([]releaseArtifact, 0, len(paths)),
+		Version:        version,
+		SourceRevision: sourceRevision,
+		Signed:         signed,
+		Toolchain:      canonicalReleaseToolchain,
+		Artifacts:      make([]releaseArtifact, 0, len(paths)),
 	}
 	var checksums strings.Builder
 	for _, arch := range releaseArchitectures {
@@ -206,6 +212,8 @@ func writeReleaseMetadata(output, version string, signed bool, paths map[string]
 	if err := writeAtomic(filepath.Join(output, "manifest.json"), manifestData, 0o600); err != nil {
 		return err
 	}
+	manifestHash := sha256.Sum256(manifestData)
+	fmt.Fprintf(&checksums, "%s  manifest.json\n", hex.EncodeToString(manifestHash[:]))
 	return writeAtomic(filepath.Join(output, "SHA256SUMS"), []byte(checksums.String()), 0o600)
 }
 
@@ -223,6 +231,17 @@ func validateReleaseVersion(version string) error {
 		if !valid {
 			return errors.New("invalid release version")
 		}
+	}
+	return nil
+}
+
+func validateSourceRevision(revision string) error {
+	if len(revision) != 40 || revision != strings.ToLower(revision) || strings.Trim(revision, "0") == "" {
+		return errors.New("source revision must be a full lowercase Git SHA")
+	}
+	decoded, err := hex.DecodeString(revision)
+	if err != nil || len(decoded) != 20 {
+		return errors.New("source revision must be a full lowercase Git SHA")
 	}
 	return nil
 }

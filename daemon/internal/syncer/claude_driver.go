@@ -61,7 +61,7 @@ func (d *claudeDriver) Detect(ctx context.Context) RuntimeDetection {
 	}
 	detectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(detectCtx, path, "--version").CombinedOutput()
+	output, err := managedBackgroundCommandContext(detectCtx, path, "--version").CombinedOutput()
 	if err != nil {
 		return RuntimeDetection{Kind: RuntimeClaudeCode, Available: false, Path: path, Reason: "claude --version failed"}
 	}
@@ -299,7 +299,7 @@ func (p *claudeRuntimeProcess) spawn(ctx context.Context, sessionID string, resu
 	args := p.buildArgs(sessionID, resume)
 	// Intentionally not exec.CommandContext: the spawn ctx is a
 	// per-reconcile request context, while the process must outlive it.
-	cmd := exec.Command(p.command, args...)
+	cmd := managedBackgroundCommand(p.command, args...)
 	cmd.Dir = p.workdir
 	cmd.Env = buildClaudeEnv(p.cfg, p.toolToken)
 

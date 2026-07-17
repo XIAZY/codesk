@@ -33,6 +33,31 @@ func TestSelfDeleteRemovesTheExternalSetupTreeRecursively(t *testing.T) {
 	}
 }
 
+func TestDetachedSelfDeleteProcessPolicySuppressesConsoleAndScopesHandleInheritance(t *testing.T) {
+	inheritedHandle := syscall.Handle(123)
+	attributes := detachedProcessAttributes([]syscall.Handle{inheritedHandle})
+	if attributes.CreationFlags&windows.DETACHED_PROCESS == 0 {
+		t.Fatalf("detached helper creation flags %#x do not include DETACHED_PROCESS", attributes.CreationFlags)
+	}
+	if attributes.CreationFlags&windows.CREATE_NEW_PROCESS_GROUP == 0 {
+		t.Fatalf("detached helper creation flags %#x do not include CREATE_NEW_PROCESS_GROUP", attributes.CreationFlags)
+	}
+	if !attributes.HideWindow {
+		t.Fatal("detached helper does not set HideWindow")
+	}
+	if attributes.NoInheritHandles {
+		t.Fatal("detached helper disables the explicitly inherited exact-parent handle")
+	}
+	if len(attributes.AdditionalInheritedHandles) != 1 || attributes.AdditionalInheritedHandles[0] != inheritedHandle {
+		t.Fatalf("detached helper inherited handles = %#v", attributes.AdditionalInheritedHandles)
+	}
+
+	withoutHandles := detachedProcessAttributes(nil)
+	if !withoutHandles.NoInheritHandles {
+		t.Fatal("detached helper without an allowlist may inherit ambient handles")
+	}
+}
+
 func TestSelfDeleteScriptWaitsOnInheritedExactHandle(t *testing.T) {
 	security := &windows.SecurityAttributes{InheritHandle: 1}
 	security.Length = uint32(unsafe.Sizeof(*security))
