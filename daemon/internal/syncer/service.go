@@ -539,13 +539,13 @@ func (s *Service) signalRefresh() {
 
 func (s *Service) runRefreshCoordinator(ctx context.Context, drained chan<- error) {
 	for range s.refreshNeeded {
+		epoch := s.snapshotEpoch.Load()
 		if snap := s.pendingSnapshot.Swap(nil); snap != nil {
 			s.applySnapshot(ctx, *snap)
 		}
 		if !s.refreshPending.CompareAndSwap(true, false) {
 			continue
 		}
-		epoch := s.snapshotEpoch.Load()
 		fetchCtx, cancel := context.WithCancel(ctx)
 		s.cancelFetch.Store(&cancel)
 		if s.snapshotEpoch.Load() != epoch {
