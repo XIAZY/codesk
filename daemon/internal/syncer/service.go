@@ -43,7 +43,8 @@ type Service struct {
 	daemonStatus            *daemonStatusReporter
 	toolServer              *http.Server
 	toolGateway             *toolGateway
-	refreshMu               sync.Mutex // Agent generation/root lifecycle lock across refresh and supervisor paths.
+	refreshMu               sync.Mutex                        // Guards applyFetchedWorkspace; never held during network I/O.
+	pendingSnapshot         atomic.Pointer[json.RawMessage]   // Latest decoded snapshot from the event reader; consumed by the refresh worker.
 	mu                      sync.Mutex
 	agentRuntimeSupervisors sync.WaitGroup
 	primaryRuntime          *workspaceRuntime
@@ -52,6 +53,8 @@ type Service struct {
 	latestWorkspace         *workspaceResponse
 	ready                   chan struct{}
 	readyOnce               sync.Once
+
+	refreshNeeded chan struct{} // nil until run(); capacity-1 coalesced refresh signal.
 
 	// Lifecycle interleaving seams are nil in production.
 	beforeAgentRuntimePublish func()
@@ -354,6 +357,7 @@ func (s *Service) run(ctx context.Context, heartbeatTicks <-chan time.Time) (run
 	var primaryDone chan struct{}
 	var primaryErr error
 	var eventDone chan struct{}
+	var joinRefreshWorker func()
 	teardown := &serviceTeardown{
 		cancelCore: func() {
 			stopHeartbeat()
@@ -366,6 +370,9 @@ func (s *Service) run(ctx context.Context, heartbeatTicks <-chan time.Time) (run
 			}
 			if eventDone != nil {
 				<-eventDone
+			}
+			if joinRefreshWorker != nil {
+				joinRefreshWorker()
 			}
 		},
 		drainGateway: func() error {
@@ -453,6 +460,31 @@ func (s *Service) run(ctx context.Context, heartbeatTicks <-chan time.Time) (run
 		})
 	}
 	drained := make(chan error, 1)
+
+	s.refreshNeeded = make(chan struct{}, 1)
+	refreshDone := make(chan struct{})
+	go func() {
+		defer close(refreshDone)
+		for range s.refreshNeeded {
+			if snap := s.pendingSnapshot.Swap(nil); snap != nil {
+				s.applySnapshot(coreCtx, *snap)
+				continue
+			}
+			if err := s.refresh(coreCtx); err != nil && coreCtx.Err() == nil {
+				if isTerminalAuthError(err) {
+					fmt.Printf("workspace refresh: %v; daemon has been drained, exiting\n", err)
+					select {
+					case drained <- err:
+					default:
+					}
+					return
+				}
+				fmt.Printf("workspace refresh error: %v\n", err)
+			}
+		}
+	}()
+	joinRefreshWorker = sync.OnceFunc(func() { close(s.refreshNeeded); <-refreshDone })
+
 	eventDone = make(chan struct{})
 	go func() {
 		defer close(eventDone)
@@ -467,7 +499,6 @@ func (s *Service) run(ctx context.Context, heartbeatTicks <-chan time.Time) (run
 		refreshTicks = refreshTicker.C
 		defer refreshTicker.Stop()
 	}
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -489,13 +520,7 @@ func (s *Service) run(ctx context.Context, heartbeatTicks <-chan time.Time) (run
 			fmt.Printf("workspace event stream: %v; daemon has been drained, exiting\n", err)
 			return err
 		case <-refreshTicks:
-			if err := s.refresh(coreCtx); err != nil {
-				if isTerminalAuthError(err) {
-					fmt.Printf("workspace refresh: %v; daemon has been drained, exiting\n", err)
-					return err
-				}
-				fmt.Printf("workspace refresh error: %v\n", err)
-			}
+			s.signalRefresh()
 		}
 	}
 }
@@ -511,6 +536,16 @@ func (s *Service) runDaemonStatusHeartbeat(ctx context.Context, ticks <-chan tim
 			}
 			s.reportDaemonStatus(ctx, false)
 		}
+	}
+}
+
+func (s *Service) signalRefresh() {
+	if s == nil || s.refreshNeeded == nil {
+		return
+	}
+	select {
+	case s.refreshNeeded <- struct{}{}:
+	default:
 	}
 }
 
@@ -644,25 +679,6 @@ func (s *Service) runWorkspaceEventStream(ctx context.Context) error {
 	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stopClose()
 
-	streamCtx, streamCancel := context.WithCancel(ctx)
-	refreshNeeded := make(chan struct{}, 1)
-	refreshDone := make(chan struct{})
-	go func() {
-		defer close(refreshDone)
-		for range refreshNeeded {
-			if err := s.refresh(streamCtx); err != nil && streamCtx.Err() == nil {
-				log.Printf("workspace refresh error: %v", err)
-			}
-		}
-	}()
-	signalRefresh := func() {
-		select {
-		case refreshNeeded <- struct{}{}:
-		default:
-		}
-	}
-	defer func() { streamCancel(); close(refreshNeeded); <-refreshDone }()
-
 	for {
 		_, payload, err := conn.ReadMessage()
 		if err != nil {
@@ -673,9 +689,9 @@ func (s *Service) runWorkspaceEventStream(ctx context.Context) error {
 			continue
 		}
 		if strings.TrimSpace(event.Type) == "workspace.snapshot" {
-			s.applySnapshot(ctx, event.Data)
+			s.publishSnapshot(event.Data)
 		} else if shouldRefreshForEvent(event.Type) {
-			signalRefresh()
+			s.signalRefresh()
 		}
 		if change, ok := parseAgentInboxChangedEvent(event); ok {
 			s.wakeAgentWorker(change.AgentID)
@@ -683,14 +699,21 @@ func (s *Service) runWorkspaceEventStream(ctx context.Context) error {
 	}
 }
 
+func (s *Service) publishSnapshot(data json.RawMessage) {
+	cp := make(json.RawMessage, len(data))
+	copy(cp, data)
+	s.pendingSnapshot.Store(&cp)
+	s.signalRefresh()
+}
+
 func (s *Service) applySnapshot(ctx context.Context, data json.RawMessage) {
-	s.refreshMu.Lock()
-	defer s.refreshMu.Unlock()
 	var workspace workspaceResponse
 	if err := json.Unmarshal(data, &workspace); err != nil {
 		log.Printf("workspace snapshot decode error: %v", err)
 		return
 	}
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
 	if err := s.applyFetchedWorkspace(ctx, &workspace); err != nil && ctx.Err() == nil {
 		log.Printf("workspace snapshot apply error: %v", err)
 	}
@@ -720,13 +743,15 @@ func shouldRefreshForEvent(eventType string) bool {
 }
 
 func (s *Service) refresh(ctx context.Context) error {
-	s.refreshMu.Lock()
-	defer s.refreshMu.Unlock()
-
 	workspace, err := s.fetchWorkspace(ctx)
 	if err != nil {
 		return err
 	}
+	if s.pendingSnapshot.Load() != nil {
+		return nil
+	}
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
 	return s.applyFetchedWorkspace(ctx, workspace)
 }
 
