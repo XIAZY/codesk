@@ -551,7 +551,7 @@ func (s *Service) runRefreshCoordinator(ctx context.Context, drained chan<- erro
 		if s.snapshotEpoch.Load() != epoch {
 			s.cancelFetch.Store(nil)
 			cancel()
-			s.signalRefresh()
+			s.refreshPending.Store(true)
 			continue
 		}
 		err := s.refresh(fetchCtx, epoch)
