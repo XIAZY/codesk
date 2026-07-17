@@ -728,8 +728,8 @@ func (s *Service) runWorkspaceEventStream(ctx context.Context) error {
 func (s *Service) publishSnapshot(data json.RawMessage) {
 	cp := make(json.RawMessage, len(data))
 	copy(cp, data)
-	s.snapshotEpoch.Add(1)
 	s.pendingSnapshot.Store(&cp)
+	s.snapshotEpoch.Add(1)
 	if cancel := s.cancelFetch.Load(); cancel != nil {
 		(*cancel)()
 	}
