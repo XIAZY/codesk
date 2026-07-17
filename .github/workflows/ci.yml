@@ -183,6 +183,7 @@ jobs:
             ./daemon/cmd/codesk-macos-release \
             ./daemon/internal/macosapp \
             ./daemon/internal/macosuser \
+            ./daemon/internal/desktopstate \
             ./daemon/internal/desktop \
             ./daemon/internal/desktopapp \
             ./daemon/cmd/codesk-desktop
@@ -190,6 +191,7 @@ jobs:
             ./daemon/cmd/codesk-macos-release \
             ./daemon/internal/macosapp \
             ./daemon/internal/macosuser \
+            ./daemon/internal/desktopstate \
             ./daemon/internal/desktop \
             ./daemon/internal/desktopapp \
             ./daemon/cmd/codesk-desktop

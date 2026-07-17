@@ -6,20 +6,21 @@ import (
 	"testing"
 
 	"notty/daemon/internal/desktop/handoff"
+	"notty/daemon/internal/desktopstate"
 )
 
 type connectionConfigStore struct {
-	config    Configuration
+	config    desktopstate.Configuration
 	saveErr   error
 	deleteErr error
 	deleted   bool
 }
 
-func (s *connectionConfigStore) Load() (Configuration, error) {
+func (s *connectionConfigStore) Load() (desktopstate.Configuration, error) {
 	return s.config, nil
 }
 
-func (s *connectionConfigStore) Save(config Configuration) error {
+func (s *connectionConfigStore) Save(config desktopstate.Configuration) error {
 	if s.saveErr != nil {
 		return s.saveErr
 	}
@@ -39,7 +40,7 @@ type connectionSecretStore struct {
 }
 
 func (s *connectionSecretStore) Save(key string, secret []byte) error {
-	if key != SecretKeyDaemonToken {
+	if key != desktopstate.SecretKeyDaemonToken {
 		return errors.New("unexpected secret key")
 	}
 	if s.saveErr != nil {
@@ -54,7 +55,7 @@ func (s *connectionSecretStore) Load(string) ([]byte, error) {
 }
 
 func (s *connectionSecretStore) Delete(key string) error {
-	if key != SecretKeyDaemonToken {
+	if key != desktopstate.SecretKeyDaemonToken {
 		return errors.New("unexpected secret key")
 	}
 	if s.deleteErr != nil {
@@ -91,7 +92,7 @@ func TestCommitConnectionMetadataStoresValidatedConfiguration(t *testing.T) {
 }
 
 func TestCommitConnectionMetadataRestoresPreviousTokenAfterMetadataFailure(t *testing.T) {
-	store := &connectionConfigStore{config: validConfiguration(), saveErr: errors.New("disk full")}
+	store := &connectionConfigStore{config: desktopstate.ConfigurationFromPayload(connectionPayload()), saveErr: errors.New("disk full")}
 	secrets := &connectionSecretStore{token: []byte("new-token")}
 
 	_, err := CommitConnectionMetadata(store, secrets, []byte("old-token"), connectionPayload())
@@ -120,7 +121,7 @@ func TestCommitConnectionMetadataDeletesNewTokenWhenPreviouslyUnconfigured(t *te
 }
 
 func TestCommitConnectionMetadataInvalidatesMetadataWhenTokenRollbackFails(t *testing.T) {
-	store := &connectionConfigStore{config: validConfiguration(), saveErr: errors.New("metadata failure")}
+	store := &connectionConfigStore{config: desktopstate.ConfigurationFromPayload(connectionPayload()), saveErr: errors.New("metadata failure")}
 	secrets := &connectionSecretStore{token: []byte("new-token"), saveErr: errors.New("DPAPI failure")}
 
 	_, err := CommitConnectionMetadata(store, secrets, []byte("old-token"), connectionPayload())

@@ -1,4 +1,4 @@
-package desktop
+package desktopstate
 
 import (
 	"bytes"
@@ -43,12 +43,50 @@ func TestFileSecretStoreRoundTripNeverWritesPlaintext(t *testing.T) {
 	if bytes.Equal(onDisk, secret) || !bytes.HasPrefix(onDisk, []byte("protected:")) {
 		t.Fatalf("on-disk secret = %q, want protected bytes", onDisk)
 	}
+	protectedFingerprint, err := store.ProtectedFingerprint(SecretKeyDaemonToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !protectedFingerprint.Present || protectedFingerprint != fingerprint(onDisk) || protectedFingerprint == fingerprint(secret) {
+		t.Fatalf("ProtectedFingerprint() = %#v, want ciphertext-only fingerprint", protectedFingerprint)
+	}
 	loaded, err := store.Load(SecretKeyDaemonToken)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(loaded, secret) {
 		t.Fatalf("Load() = %q, want %q", loaded, secret)
+	}
+}
+
+func TestFileSecretStoreRejectsSymlinkedProtectedState(t *testing.T) {
+	root := filepath.Join(t.TempDir(), protectedSecretsName)
+	store, err := newFileSecretStore(root, prefixProtector{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const secret = "must-not-leak-token-value"
+	if err := store.Save(SecretKeyDaemonToken, []byte(secret)); err != nil {
+		t.Fatal(err)
+	}
+	path, err := store.pathForKey(SecretKeyDaemonToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "protected")
+	if err := os.Rename(path, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := store.Load(SecretKeyDaemonToken); err == nil {
+		t.Fatal("Load() accepted symlinked protected state")
+	}
+	if _, err := store.ProtectedFingerprint(SecretKeyDaemonToken); err == nil {
+		t.Fatal("ProtectedFingerprint() accepted symlinked protected state")
+	} else if strings.Contains(err.Error(), root) || strings.Contains(err.Error(), SecretKeyDaemonToken) || strings.Contains(err.Error(), secret) {
+		t.Fatalf("ProtectedFingerprint() error exposed path or credential material: %v", err)
 	}
 }
 
@@ -109,6 +147,13 @@ func TestFileSecretStoreDeleteIsIdempotent(t *testing.T) {
 	}
 	if _, err := store.Load("key"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Load() error = %v, want os.ErrNotExist", err)
+	}
+	fingerprint, err := store.ProtectedFingerprint("key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fingerprint.Present || fingerprint.SHA256 != "" || fingerprint.Size != 0 {
+		t.Fatalf("ProtectedFingerprint() after delete = %#v, want absent", fingerprint)
 	}
 }
 

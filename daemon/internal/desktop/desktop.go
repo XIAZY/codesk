@@ -3,18 +3,11 @@ package desktop
 import (
 	"errors"
 	"fmt"
-	"notty/daemon/internal/syncer"
 	"path/filepath"
-	"strings"
+
+	"notty/daemon/internal/desktopstate"
+	"notty/daemon/internal/syncer"
 )
-
-const SecretKeyDaemonToken = "codesk:daemon-token"
-
-type SecretStore interface {
-	Save(key string, secret []byte) error
-	Load(key string) ([]byte, error)
-	Delete(key string) error
-}
 
 type LoginItem interface {
 	Enable() error
@@ -48,19 +41,7 @@ func (d Dirs) Validate() error {
 }
 
 func requireAbsolute(name, path string) error {
-	if strings.TrimSpace(path) == "" {
-		return fmt.Errorf("desktop: %s directory is empty", name)
-	}
-	if path != strings.TrimSpace(path) {
-		return fmt.Errorf("desktop: %s directory %q has surrounding whitespace", name, path)
-	}
-	if !filepath.IsAbs(path) {
-		return fmt.Errorf("desktop: %s directory %q is not absolute", name, path)
-	}
-	if path != filepath.Clean(path) {
-		return fmt.Errorf("desktop: %s directory %q is not clean (use %q)", name, path, filepath.Clean(path))
-	}
-	return nil
+	return desktopstate.RequireAbsolute(name, path)
 }
 
 func errNoAppDir(reason string) error {

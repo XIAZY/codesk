@@ -4,6 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+
+	"notty/daemon/internal/desktoprelease"
 )
 
 func main() {
@@ -55,11 +57,11 @@ func runValidateVersion(arguments []string) error {
 	if flags.NArg() != 1 {
 		return fmt.Errorf("usage: codesk-macos-release validate-version [--development] <version>")
 	}
-	version, err := parseReleaseVersion(flags.Arg(0), *development)
+	version, err := desktoprelease.ParseVersion(flags.Arg(0), desktoprelease.VersionPolicy{AllowDevelopment: *development})
 	if err != nil {
 		return err
 	}
-	fmt.Println(version.Bundle)
+	fmt.Println(version.Numeric)
 	return nil
 }
 
@@ -75,11 +77,11 @@ func runPlist(arguments []string) error {
 	if flags.NArg() != 0 || *output == "" || *versionValue == "" {
 		return fmt.Errorf("usage: codesk-macos-release plist --output <path> --version <version> [--development]")
 	}
-	version, err := parseReleaseVersion(*versionValue, *development)
+	version, err := desktoprelease.ParseVersion(*versionValue, desktoprelease.VersionPolicy{AllowDevelopment: *development})
 	if err != nil {
 		return err
 	}
-	return writeAtomic(*output, renderInfoPlist(version), 0o644)
+	return desktoprelease.WriteAtomic(*output, renderInfoPlist(version), 0o644)
 }
 
 func runVerifyApp(arguments []string) error {
@@ -95,7 +97,7 @@ func runVerifyApp(arguments []string) error {
 	if flags.NArg() != 0 || *app == "" || *versionValue == "" {
 		return fmt.Errorf("usage: codesk-macos-release verify-app --app <Codesk.app> --version <version> [--development]")
 	}
-	version, err := parseReleaseVersion(*versionValue, *development)
+	version, err := desktoprelease.ParseVersion(*versionValue, desktoprelease.VersionPolicy{AllowDevelopment: *development})
 	if err != nil {
 		return err
 	}
@@ -123,7 +125,7 @@ func runManifest(arguments []string) error {
 	if flags.NArg() != 0 || *output == "" || *versionValue == "" || *sourceRevision == "" {
 		return fmt.Errorf("usage: codesk-macos-release manifest --output <dir> --version <version> --source-revision <sha> --signed=<bool> [--development]")
 	}
-	version, err := parseReleaseVersion(*versionValue, *development)
+	version, err := desktoprelease.ParseVersion(*versionValue, desktoprelease.VersionPolicy{AllowDevelopment: *development})
 	if err != nil {
 		return err
 	}
@@ -143,7 +145,7 @@ func runVerify(arguments []string) error {
 	if flags.NArg() != 2 {
 		return fmt.Errorf("usage: codesk-macos-release verify [--allow-unsigned] <release-dir> <version>")
 	}
-	version, err := parseReleaseVersion(flags.Arg(1), flags.Arg(1) == "dev")
+	version, err := desktoprelease.ParseVersion(flags.Arg(1), desktoprelease.VersionPolicy{AllowDevelopment: flags.Arg(1) == "dev"})
 	if err != nil {
 		return err
 	}

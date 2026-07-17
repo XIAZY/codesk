@@ -18,6 +18,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"notty/daemon/internal/desktoprelease"
 )
 
 func TestParseReleaseVersion(t *testing.T) {
@@ -40,19 +42,19 @@ func TestParseReleaseVersion(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.raw, func(t *testing.T) {
-			version, err := parseReleaseVersion(test.raw, test.allowDevelopment)
+			version, err := desktoprelease.ParseVersion(test.raw, desktoprelease.VersionPolicy{AllowDevelopment: test.allowDevelopment})
 			if (err != nil) != test.wantFailure {
-				t.Fatalf("parseReleaseVersion() error = %v, wantFailure = %t", err, test.wantFailure)
+				t.Fatalf("desktoprelease.ParseVersion() error = %v, wantFailure = %t", err, test.wantFailure)
 			}
-			if err == nil && version.Bundle != test.wantBundle {
-				t.Fatalf("Bundle = %q, want %q", version.Bundle, test.wantBundle)
+			if err == nil && version.Numeric != test.wantBundle {
+				t.Fatalf("Bundle = %q, want %q", version.Numeric, test.wantBundle)
 			}
 		})
 	}
 }
 
 func TestVerifyReleaseRejectsNonCanonicalManifest(t *testing.T) {
-	version, err := parseReleaseVersion("1.2.3", false)
+	version, err := desktoprelease.ParseVersion("1.2.3", desktoprelease.VersionPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,12 +92,12 @@ func TestVerifyReleaseRejectsNonCanonicalManifest(t *testing.T) {
 
 func TestValidateSourceRevisionRejectsZeroAndNonCanonicalValues(t *testing.T) {
 	for _, revision := range []string{strings.Repeat("0", 40), strings.Repeat("A", 40), "abc"} {
-		if err := validateSourceRevision(revision); err == nil {
-			t.Fatalf("validateSourceRevision(%q) unexpectedly succeeded", revision)
+		if err := desktoprelease.ValidateSourceRevision(revision); err == nil {
+			t.Fatalf("desktoprelease.ValidateSourceRevision(%q) unexpectedly succeeded", revision)
 		}
 	}
-	if err := validateSourceRevision(strings.Repeat("a", 40)); err != nil {
-		t.Fatalf("validateSourceRevision(valid) error = %v", err)
+	if err := desktoprelease.ValidateSourceRevision(strings.Repeat("a", 40)); err != nil {
+		t.Fatalf("desktoprelease.ValidateSourceRevision(valid) error = %v", err)
 	}
 }
 
@@ -213,7 +215,7 @@ func requireEmptyEntitlementsPlist(t *testing.T, data []byte) {
 }
 
 func TestRenderInfoPlistContainsNativeApplicationContract(t *testing.T) {
-	version, err := parseReleaseVersion("1.2.3", false)
+	version, err := desktoprelease.ParseVersion("1.2.3", desktoprelease.VersionPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +234,7 @@ func TestRenderInfoPlistContainsNativeApplicationContract(t *testing.T) {
 }
 
 func TestVerifyAppAndReleaseManifest(t *testing.T) {
-	version, err := parseReleaseVersion("1.2.3", false)
+	version, err := desktoprelease.ParseVersion("1.2.3", desktoprelease.VersionPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +270,7 @@ func TestVerifyAppAndReleaseManifest(t *testing.T) {
 }
 
 func TestVerifyAppRejectsUnexpectedAndSymlinkedEntries(t *testing.T) {
-	version, err := parseReleaseVersion("1.0.0", false)
+	version, err := desktoprelease.ParseVersion("1.0.0", desktoprelease.VersionPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +308,7 @@ func TestVerifyAppRejectsUnexpectedAndSymlinkedEntries(t *testing.T) {
 }
 
 func TestVerifyAppTreeHashIncludesDirectoryModes(t *testing.T) {
-	version, err := parseReleaseVersion("1.0.0", false)
+	version, err := desktoprelease.ParseVersion("1.0.0", desktoprelease.VersionPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +331,7 @@ func TestVerifyAppTreeHashIncludesDirectoryModes(t *testing.T) {
 }
 
 func TestVerifyAppRejectsMismatchedMachODeploymentTarget(t *testing.T) {
-	version, err := parseReleaseVersion("1.0.0", false)
+	version, err := desktoprelease.ParseVersion("1.0.0", desktoprelease.VersionPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +353,7 @@ func TestVerifyAppRejectsMismatchedMachODeploymentTarget(t *testing.T) {
 }
 
 func TestVerifyAppRejectsInvalidICNS(t *testing.T) {
-	version, err := parseReleaseVersion("1.0.0", false)
+	version, err := desktoprelease.ParseVersion("1.0.0", desktoprelease.VersionPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,7 +369,7 @@ func TestVerifyAppRejectsInvalidICNS(t *testing.T) {
 }
 
 func TestVerifyAppRejectsCorruptOrTrailingICNSPayload(t *testing.T) {
-	version, err := parseReleaseVersion("1.0.0", false)
+	version, err := desktoprelease.ParseVersion("1.0.0", desktoprelease.VersionPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,7 +425,7 @@ func TestVerifyAppRejectsCorruptOrTrailingICNSPayload(t *testing.T) {
 }
 
 func TestVerifyAppRejectsIncompleteUniversalMachO(t *testing.T) {
-	version, err := parseReleaseVersion("1.0.0", false)
+	version, err := desktoprelease.ParseVersion("1.0.0", desktoprelease.VersionPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +448,7 @@ func TestVerifyAppRejectsIncompleteUniversalMachO(t *testing.T) {
 }
 
 func TestVerifyAppRejectsFatHeaderSliceIdentityMismatch(t *testing.T) {
-	version, err := parseReleaseVersion("1.0.0", false)
+	version, err := desktoprelease.ParseVersion("1.0.0", desktoprelease.VersionPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -489,7 +491,7 @@ func TestVerifyAppRejectsFatHeaderSliceIdentityMismatch(t *testing.T) {
 }
 
 func TestVerifyReleaseRejectsIntegrityMutations(t *testing.T) {
-	version, err := parseReleaseVersion("1.2.3", false)
+	version, err := desktoprelease.ParseVersion("1.2.3", desktoprelease.VersionPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -586,19 +588,23 @@ func TestVerifyReleaseRejectsIntegrityMutations(t *testing.T) {
 	})
 }
 
-func TestVerifyReleaseRejectsSignedDevelopmentArtifact(t *testing.T) {
-	version, err := parseReleaseVersion("dev", true)
+func TestWriteManifestRejectsSignedDevelopmentArtifact(t *testing.T) {
+	version, err := desktoprelease.ParseVersion("dev", desktoprelease.VersionPolicy{AllowDevelopment: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	root, _ := writeTestRelease(t, version, true)
-	if err := verifyRelease(root, version, true); err == nil {
-		t.Fatal("verifyRelease() accepted a development artifact marked signed")
+	root := t.TempDir()
+	writeTestApp(t, root, version)
+	if err := os.WriteFile(filepath.Join(root, diskImageName(version)), []byte("test disk image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeManifest(root, version, strings.Repeat("a", 40), true); err == nil {
+		t.Fatal("writeManifest() accepted a development artifact marked signed")
 	}
 }
 
 func TestVerifyAppRejectsNonCanonicalMetadataAndModes(t *testing.T) {
-	version, err := parseReleaseVersion("1.0.0", false)
+	version, err := desktoprelease.ParseVersion("1.0.0", desktoprelease.VersionPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -863,6 +869,14 @@ func TestMacOSBuildScriptStagesHostArchiveAndUsesFileFirstLipo(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := string(data)
+	for _, want := range []string{
+		`. "$root_dir/scripts/lib/desktop-release.sh"`,
+		`notty_desktop_release_source_revision "$root_dir"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("build script does not use shared release source validation %q", want)
+		}
+	}
 	requireOrderedFragments(t, script,
 		"build-macos-desktop-release: staging host yffi library from a clean locked build",
 		`"$root_dir/scripts/build-yffi.sh"`,
@@ -1011,7 +1025,7 @@ func requireOrderedFragments(t *testing.T, value string, fragments ...string) {
 	}
 }
 
-func writeTestRelease(t *testing.T, version releaseVersion, signed bool) (string, string) {
+func writeTestRelease(t *testing.T, version desktoprelease.Version, signed bool) (string, string) {
 	t.Helper()
 	root := t.TempDir()
 	app := writeTestApp(t, root, version)
@@ -1036,7 +1050,7 @@ func rewriteTestManifest(t *testing.T, root string, mutate func(*releaseManifest
 		t.Fatal(err)
 	}
 	mutate(&manifest)
-	data, err = encodeManifest(manifest)
+	data, err = desktoprelease.MarshalCanonicalJSON(manifest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1061,7 +1075,7 @@ func writeTestCommand(t *testing.T, directory, name, content string) {
 	}
 }
 
-func writeTestApp(t *testing.T, releaseRoot string, version releaseVersion) string {
+func writeTestApp(t *testing.T, releaseRoot string, version desktoprelease.Version) string {
 	t.Helper()
 	app := filepath.Join(releaseRoot, applicationName)
 	contents := filepath.Join(app, "Contents")

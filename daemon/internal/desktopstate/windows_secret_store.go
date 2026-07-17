@@ -1,6 +1,6 @@
 //go:build windows
 
-package desktop
+package desktopstate
 
 import (
 	"errors"
@@ -13,11 +13,51 @@ import (
 
 type dpapiProtector struct{}
 
-func NewWindowsSecretStore(dataDir string) (SecretStore, error) {
-	if err := requireAbsolute("data", dataDir); err != nil {
+type WindowsSecretStore struct {
+	store *fileSecretStore
+}
+
+var _ SecretStore = (*WindowsSecretStore)(nil)
+
+func NewWindowsSecretStore(dataDir string) (*WindowsSecretStore, error) {
+	if err := RequireAbsolute("data", dataDir); err != nil {
 		return nil, err
 	}
-	return newFileSecretStore(filepath.Join(dataDir, protectedSecretsName), dpapiProtector{})
+	store, err := newFileSecretStore(filepath.Join(dataDir, protectedSecretsName), dpapiProtector{})
+	if err != nil {
+		return nil, err
+	}
+	return &WindowsSecretStore{store: store}, nil
+}
+
+func (s *WindowsSecretStore) Save(key string, secret []byte) error {
+	if s == nil || s.store == nil {
+		return errors.New("desktop: secret store is not initialized")
+	}
+	return s.store.Save(key, secret)
+}
+
+func (s *WindowsSecretStore) Load(key string) ([]byte, error) {
+	if s == nil || s.store == nil {
+		return nil, errors.New("desktop: secret store is not initialized")
+	}
+	return s.store.Load(key)
+}
+
+func (s *WindowsSecretStore) Delete(key string) error {
+	if s == nil || s.store == nil {
+		return errors.New("desktop: secret store is not initialized")
+	}
+	return s.store.Delete(key)
+}
+
+// ProtectedFingerprint identifies the exact persisted DPAPI ciphertext. It is
+// an unchanged-storage checkpoint, not a stable identity for the plaintext.
+func (s *WindowsSecretStore) ProtectedFingerprint(key string) (Fingerprint, error) {
+	if s == nil || s.store == nil {
+		return Fingerprint{}, errors.New("desktop: secret store is not initialized")
+	}
+	return s.store.ProtectedFingerprint(key)
 }
 
 func (dpapiProtector) Protect(secret []byte) ([]byte, error) {

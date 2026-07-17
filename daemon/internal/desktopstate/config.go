@@ -1,4 +1,4 @@
-package desktop
+package desktopstate
 
 import (
 	"bytes"
@@ -85,43 +85,50 @@ type FileConfigurationStore struct {
 }
 
 func NewFileConfigurationStore(dataDir string) (*FileConfigurationStore, error) {
-	if err := requireAbsolute("data", dataDir); err != nil {
+	if err := RequireAbsolute("data", dataDir); err != nil {
 		return nil, err
 	}
 	return &FileConfigurationStore{path: filepath.Join(dataDir, desktopConfigFilename)}, nil
 }
 
 func (s *FileConfigurationStore) Load() (Configuration, error) {
-	if s == nil || s.path == "" {
-		return Configuration{}, errors.New("desktop: configuration store is not initialized")
-	}
-	file, err := os.Open(s.path)
-	if err != nil {
-		return Configuration{}, err
-	}
-	defer file.Close()
+	config, _, err := s.read()
+	return config, err
+}
 
-	data, err := io.ReadAll(io.LimitReader(file, maxDesktopConfigBytes+1))
-	if err != nil {
-		return Configuration{}, fmt.Errorf("desktop: read configuration: %w", err)
+func (s *FileConfigurationStore) read() (Configuration, []byte, error) {
+	if s == nil || s.path == "" {
+		return Configuration{}, nil, errors.New("desktop: configuration store is not initialized")
 	}
-	if len(data) > maxDesktopConfigBytes {
-		return Configuration{}, errors.New("desktop: configuration is too large")
+	data, err := readStateFile(s.path, "configuration", maxDesktopConfigBytes)
+	if err != nil {
+		return Configuration{}, nil, err
 	}
 
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var config Configuration
 	if err := decoder.Decode(&config); err != nil {
-		return Configuration{}, fmt.Errorf("desktop: decode configuration: %w", err)
+		return Configuration{}, nil, fmt.Errorf("desktop: decode configuration: %w", err)
 	}
 	if err := requireJSONEOF(decoder); err != nil {
-		return Configuration{}, err
+		return Configuration{}, nil, err
 	}
 	if err := config.Validate(); err != nil {
-		return Configuration{}, err
+		return Configuration{}, nil, err
 	}
-	return config, nil
+	return config, data, nil
+}
+
+func (s *FileConfigurationStore) Fingerprint() (Fingerprint, error) {
+	_, data, err := s.read()
+	if errors.Is(err, os.ErrNotExist) {
+		return Fingerprint{}, nil
+	}
+	if err != nil {
+		return Fingerprint{}, errors.New("desktop: configuration fingerprint unavailable")
+	}
+	return fingerprint(data), nil
 }
 
 func requireJSONEOF(decoder *json.Decoder) error {

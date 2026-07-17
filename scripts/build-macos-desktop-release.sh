@@ -9,6 +9,7 @@ notary_profile="${CODESK_MACOS_NOTARY_PROFILE:-}"
 
 root_dir="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 . "$root_dir/scripts/lib/testtmp.sh"
+. "$root_dir/scripts/lib/desktop-release.sh"
 
 go_toolchain='go1.26.5'
 minimum_macos='13.0'
@@ -169,13 +170,7 @@ notarize_and_wait() {
 	[ "$status" = Accepted ] || fail "$label notarization status is ${status:-unknown}"
 }
 
-source_revision="$(git -C "$root_dir" rev-parse --verify HEAD)"
-case "$source_revision" in
-	????????????????????????????????????????) ;;
-	*) fail 'could not resolve a full source revision' ;;
-esac
-source_status="$(git -C "$root_dir" status --porcelain=v1 --untracked-files=all)"
-[ -z "$source_status" ] || fail 'source checkout must have no tracked, staged, or untracked changes before building a release'
+source_revision="$(notty_desktop_release_source_revision "$root_dir")" || exit 1
 
 printf '%s\n' 'build-macos-desktop-release: staging host yffi library from a clean locked build'
 (
@@ -186,7 +181,7 @@ printf '%s\n' 'build-macos-desktop-release: staging host yffi library from a cle
 
 (
 	cd "$root_dir"
-	go test ./daemon/cmd/codesk-macos-release ./daemon/internal/macosapp ./daemon/internal/desktop ./daemon/internal/desktopapp ./daemon/cmd/codesk-desktop
+	go test ./daemon/cmd/codesk-macos-release ./daemon/internal/macosapp ./daemon/internal/desktopstate ./daemon/internal/desktop ./daemon/internal/desktopapp ./daemon/cmd/codesk-desktop
 	go build -buildvcs=false -trimpath -ldflags '-buildid=' -o "$release_tool" ./daemon/cmd/codesk-macos-release
 )
 "$release_tool" validate-version $development_arg "$version" >/dev/null

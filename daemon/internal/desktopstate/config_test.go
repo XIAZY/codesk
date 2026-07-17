@@ -1,4 +1,4 @@
-package desktop
+package desktopstate
 
 import (
 	"errors"
@@ -41,6 +41,53 @@ func TestFileConfigurationStoreRoundTripContainsNoTokenField(t *testing.T) {
 	if loaded != config {
 		t.Fatalf("Load() = %#v, want %#v", loaded, config)
 	}
+	actualFingerprint, err := store.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantFingerprint := fingerprint(data)
+	if actualFingerprint != wantFingerprint {
+		t.Fatalf("Fingerprint() = %#v, want exact persisted bytes %#v", actualFingerprint, wantFingerprint)
+	}
+	if !actualFingerprint.Present || strings.Contains(actualFingerprint.SHA256, "opaque") || actualFingerprint.Size != int64(len(data)) {
+		t.Fatalf("Fingerprint() exposed content or wrong size: %#v", actualFingerprint)
+	}
+}
+
+func TestFileConfigurationStoreFingerprintsExactValidatedBytes(t *testing.T) {
+	store, err := NewFileConfigurationStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("{\n  \"workspace_url\": \"https://app.getcodesk.com/w/product\",\n  \"workspace_slug\": \"product\",\n  \"workspace_name\": \"Product\",\n  \"workspace_id\": \"workspace-1\",\n  \"daemon_id\": \"daemon-1\"\n}\n")
+	if err := os.WriteFile(store.path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	actual, err := store.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fingerprint(body); actual != want {
+		t.Fatalf("Fingerprint() = %#v, want exact validated persisted bytes %#v", actual, want)
+	}
+}
+
+func TestFileConfigurationStoreFingerprintRejectsInvalidStateWithoutLeakingIt(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewFileConfigurationStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sensitive = "must-not-leak-token-value"
+	body := []byte(`{"daemon_id":"d","workspace_id":"w","workspace_name":"n","workspace_slug":"s","workspace_url":"https://app.getcodesk.com/w/s","` + sensitive + `":"x"}`)
+	if err := os.WriteFile(store.path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Fingerprint(); err == nil {
+		t.Fatal("Fingerprint() accepted invalid configuration")
+	} else if strings.Contains(err.Error(), root) || strings.Contains(err.Error(), sensitive) {
+		t.Fatalf("Fingerprint() error exposed path or persisted content: %v", err)
+	}
 }
 
 func TestFileConfigurationStoreRejectsUnknownAndTrailingJSON(t *testing.T) {
@@ -77,6 +124,13 @@ func TestFileConfigurationStoreDeleteIsIdempotent(t *testing.T) {
 	}
 	if _, err := store.Load(); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Load() error = %v, want os.ErrNotExist", err)
+	}
+	fingerprint, err := store.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fingerprint.Present || fingerprint.SHA256 != "" || fingerprint.Size != 0 {
+		t.Fatalf("Fingerprint() after delete = %#v, want absent", fingerprint)
 	}
 }
 

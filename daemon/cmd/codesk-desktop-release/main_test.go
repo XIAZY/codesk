@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"notty/daemon/internal/desktoprelease"
 )
 
 const testSourceRevision = "0123456789abcdef0123456789abcdef01234567"
@@ -20,10 +23,110 @@ func TestResourceVersion(t *testing.T) {
 		"1.70000":      "0.0.0.0",
 	}
 	for version, expected := range tests {
-		if actual := resourceVersion(version); actual != expected {
+		parsed, err := desktoprelease.ParseVersion(version, windowsReleaseVersionPolicy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if actual := resourceVersion(parsed); actual != expected {
 			t.Errorf("resourceVersion(%q) = %q, want %q", version, actual, expected)
 		}
 	}
+}
+
+func TestVerifyReleaseRejectsRehashedNonCanonicalMetadata(t *testing.T) {
+	t.Run("manifest JSON", func(t *testing.T) {
+		directory, manifest, manifestData := writeTestReleaseMetadata(t)
+		manifestData = bytes.Replace(manifestData, []byte("  \"version\""), []byte("    \"version\""), 1)
+		if err := os.WriteFile(filepath.Join(directory, "manifest.json"), manifestData, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		checksums := make([]desktoprelease.Checksum, 0, len(manifest.Artifacts)+1)
+		for _, artifact := range manifest.Artifacts {
+			checksums = append(checksums, desktoprelease.Checksum{SHA256: artifact.SHA256, File: artifact.File})
+		}
+		checksums = append(checksums, desktoprelease.Checksum{SHA256: desktoprelease.SHA256(manifestData), File: "manifest.json"})
+		checksumData, err := desktoprelease.MarshalChecksums(checksums)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, "SHA256SUMS"), checksumData, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := verifyRelease(directory, "dev", true); err == nil {
+			t.Fatal("verifyRelease() accepted noncanonical manifest JSON with matching checksums")
+		}
+	})
+
+	t.Run("SHA256SUMS", func(t *testing.T) {
+		directory, _, _ := writeTestReleaseMetadata(t)
+		path := filepath.Join(directory, "SHA256SUMS")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data = bytes.Replace(data, []byte("  "), []byte(" "), 1)
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := verifyRelease(directory, "dev", true); err == nil {
+			t.Fatal("verifyRelease() accepted noncanonical SHA256SUMS")
+		}
+	})
+}
+
+func TestVerifyReleaseRejectsRehashedArtifactOrder(t *testing.T) {
+	directory, manifest, _ := writeTestReleaseMetadata(t)
+	manifest.Artifacts[0], manifest.Artifacts[1] = manifest.Artifacts[1], manifest.Artifacts[0]
+	manifestData, err := desktoprelease.MarshalCanonicalJSON(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "manifest.json"), manifestData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	artifacts := make(map[string]releaseArtifact, len(manifest.Artifacts))
+	for _, artifact := range manifest.Artifacts {
+		artifacts[artifact.Arch] = artifact
+	}
+	checksums := make([]desktoprelease.Checksum, 0, len(releaseArchitectures)+1)
+	for _, arch := range releaseArchitectures {
+		artifact := artifacts[arch]
+		checksums = append(checksums, desktoprelease.Checksum{SHA256: artifact.SHA256, File: artifact.File})
+	}
+	checksums = append(checksums, desktoprelease.Checksum{SHA256: desktoprelease.SHA256(manifestData), File: "manifest.json"})
+	checksumData, err := desktoprelease.MarshalChecksums(checksums)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "SHA256SUMS"), checksumData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = verifyRelease(directory, "dev", true)
+	if err == nil || !strings.Contains(err.Error(), "artifact 1") {
+		t.Fatalf("verifyRelease() error = %v, want canonical artifact order rejection", err)
+	}
+}
+
+func writeTestReleaseMetadata(t *testing.T) (string, releaseManifest, []byte) {
+	t.Helper()
+	directory := t.TempDir()
+	paths := make(map[string]string, len(releaseArchitectures))
+	for _, arch := range releaseArchitectures {
+		path := filepath.Join(directory, setupFilename("dev", arch))
+		if err := os.WriteFile(path, []byte("fixture "+arch), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		paths[arch] = path
+	}
+	if err := writeReleaseMetadata(directory, "dev", testSourceRevision, false, paths); err != nil {
+		t.Fatal(err)
+	}
+	var manifest releaseManifest
+	manifestData, err := desktoprelease.ReadCanonicalJSON(filepath.Join(directory, "manifest.json"), &manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return directory, manifest, manifestData
 }
 
 func TestWriteReleaseMetadataRecordsCanonicalToolchain(t *testing.T) {
@@ -39,7 +142,9 @@ func TestWriteReleaseMetadataRecordsCanonicalToolchain(t *testing.T) {
 	if err := writeReleaseMetadata(directory, "dev", testSourceRevision, false, paths); err != nil {
 		t.Fatal(err)
 	}
-	manifest, err := readReleaseManifest(filepath.Join(directory, "manifest.json"))
+	var manifest releaseManifest
+	manifestPath := filepath.Join(directory, "manifest.json")
+	manifestData, err := desktoprelease.ReadCanonicalJSON(manifestPath, &manifest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,27 +154,13 @@ func TestWriteReleaseMetadataRecordsCanonicalToolchain(t *testing.T) {
 	if manifest.SourceRevision != testSourceRevision {
 		t.Fatalf("source revision = %q, want %q", manifest.SourceRevision, testSourceRevision)
 	}
-	checksums, err := readChecksums(filepath.Join(directory, "SHA256SUMS"))
-	if err != nil {
+	expectedChecksums := make([]desktoprelease.Checksum, 0, len(manifest.Artifacts)+1)
+	for _, artifact := range manifest.Artifacts {
+		expectedChecksums = append(expectedChecksums, desktoprelease.Checksum{SHA256: artifact.SHA256, File: artifact.File})
+	}
+	expectedChecksums = append(expectedChecksums, desktoprelease.Checksum{SHA256: desktoprelease.SHA256(manifestData), File: "manifest.json"})
+	if err := desktoprelease.VerifyChecksums(filepath.Join(directory, "SHA256SUMS"), expectedChecksums); err != nil {
 		t.Fatal(err)
-	}
-	manifestHash, err := fileSHA256(filepath.Join(directory, "manifest.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if checksums["manifest.json"] != manifestHash {
-		t.Fatalf("manifest checksum = %q, want %q", checksums["manifest.json"], manifestHash)
-	}
-}
-
-func TestValidateSourceRevisionRejectsZeroAndNonCanonicalValues(t *testing.T) {
-	for _, revision := range []string{strings.Repeat("0", 40), strings.Repeat("A", 40), "abc"} {
-		if err := validateSourceRevision(revision); err == nil {
-			t.Fatalf("validateSourceRevision(%q) unexpectedly succeeded", revision)
-		}
-	}
-	if err := validateSourceRevision(testSourceRevision); err != nil {
-		t.Fatalf("validateSourceRevision(valid) error = %v", err)
 	}
 }
 

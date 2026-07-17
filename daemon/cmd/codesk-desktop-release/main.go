@@ -1,22 +1,23 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 
+	"notty/daemon/internal/desktoprelease"
 	"notty/daemon/internal/desktopsetup"
 )
 
 var releaseArchitectures = []string{"amd64", "arm64"}
+
+var windowsReleaseVersionPolicy = desktoprelease.VersionPolicy{
+	AllowDevelopment:      true,
+	AllowFlexibleArtifact: true,
+}
 
 const (
 	releaseGoVersion       = "go1.26.5"
@@ -100,6 +101,9 @@ func runArchive(arguments []string) error {
 	if flags.NArg() != 0 || output == "" || desktop == "" || agent == "" || icon == "" {
 		return errors.New("archive requires --output, --version, --arch, --desktop, --agent, and --icon")
 	}
+	if _, err := desktoprelease.ParseVersion(version, windowsReleaseVersionPolicy); err != nil {
+		return err
+	}
 	return desktopsetup.CreatePayloadArchive(output, version, arch, map[string]string{
 		"Codesk.exe":           desktop,
 		"notty-agent-tool.exe": agent,
@@ -150,10 +154,11 @@ func runResourceVersion(arguments []string) error {
 	if len(arguments) != 1 {
 		return errors.New("resource-version requires exactly one release version")
 	}
-	if err := validateReleaseVersion(arguments[0]); err != nil {
+	version, err := desktoprelease.ParseVersion(arguments[0], windowsReleaseVersionPolicy)
+	if err != nil {
 		return err
 	}
-	fmt.Println(resourceVersion(arguments[0]))
+	fmt.Println(resourceVersion(version))
 	return nil
 }
 
@@ -172,154 +177,62 @@ func runVerify(arguments []string) error {
 }
 
 func writeReleaseMetadata(output, version, sourceRevision string, signed bool, paths map[string]string) error {
-	if err := validateReleaseVersion(version); err != nil {
+	releaseVersion, err := desktoprelease.ParseVersion(version, windowsReleaseVersionPolicy)
+	if err != nil {
 		return err
 	}
-	if err := validateSourceRevision(sourceRevision); err != nil {
+	metadata, err := desktoprelease.NewMetadata(releaseVersion, sourceRevision, signed, desktoprelease.TrustPolicy{
+		Signature:              desktoprelease.SignatureOptional,
+		AllowSignedDevelopment: true,
+	})
+	if err != nil {
 		return err
 	}
 	if len(paths) != len(releaseArchitectures) {
 		return errors.New("release metadata requires both Windows architectures")
 	}
 	manifest := releaseManifest{
-		Version:        version,
-		SourceRevision: sourceRevision,
-		Signed:         signed,
+		Version:        metadata.Version,
+		SourceRevision: metadata.SourceRevision,
+		Signed:         metadata.Signed,
 		Toolchain:      canonicalReleaseToolchain,
 		Artifacts:      make([]releaseArtifact, 0, len(paths)),
 	}
-	var checksums strings.Builder
+	checksums := make([]desktoprelease.Checksum, 0, len(paths)+1)
 	for _, arch := range releaseArchitectures {
 		path := paths[arch]
-		expectedName := setupFilename(version, arch)
+		expectedName := setupFilename(releaseVersion.Artifact, arch)
 		if filepath.Base(path) != expectedName {
 			return fmt.Errorf("windows/%s setup is named %q, want %q", arch, filepath.Base(path), expectedName)
 		}
-		hash, err := fileSHA256(path)
+		hash, err := desktoprelease.FileSHA256(path)
 		if err != nil {
 			return err
 		}
 		manifest.Artifacts = append(manifest.Artifacts, releaseArtifact{
 			Arch: arch, File: expectedName, SHA256: hash, Signed: signed,
 		})
-		fmt.Fprintf(&checksums, "%s  %s\n", hash, expectedName)
+		checksums = append(checksums, desktoprelease.Checksum{SHA256: hash, File: expectedName})
 	}
-	manifestData, err := json.MarshalIndent(manifest, "", "  ")
+	manifestData, err := desktoprelease.MarshalCanonicalJSON(manifest)
 	if err != nil {
-		return fmt.Errorf("encode release manifest: %w", err)
-	}
-	manifestData = append(manifestData, '\n')
-	if err := writeAtomic(filepath.Join(output, "manifest.json"), manifestData, 0o600); err != nil {
 		return err
 	}
-	manifestHash := sha256.Sum256(manifestData)
-	fmt.Fprintf(&checksums, "%s  manifest.json\n", hex.EncodeToString(manifestHash[:]))
-	return writeAtomic(filepath.Join(output, "SHA256SUMS"), []byte(checksums.String()), 0o600)
+	if err := desktoprelease.WriteAtomic(filepath.Join(output, "manifest.json"), manifestData, 0o600); err != nil {
+		return err
+	}
+	checksums = append(checksums, desktoprelease.Checksum{SHA256: desktoprelease.SHA256(manifestData), File: "manifest.json"})
+	checksumData, err := desktoprelease.MarshalChecksums(checksums)
+	if err != nil {
+		return err
+	}
+	return desktoprelease.WriteAtomic(filepath.Join(output, "SHA256SUMS"), checksumData, 0o600)
 }
 
 func setupFilename(version, arch string) string {
 	return fmt.Sprintf("CodeskSetup_%s_windows_%s.exe", version, arch)
 }
 
-func validateReleaseVersion(version string) error {
-	if version == "" || len(version) > 128 || version != strings.TrimSpace(version) {
-		return errors.New("invalid release version")
-	}
-	for index, character := range version {
-		valid := character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
-			character >= '0' && character <= '9' || index > 0 && strings.ContainsRune("._+-", character)
-		if !valid {
-			return errors.New("invalid release version")
-		}
-	}
-	return nil
-}
-
-func validateSourceRevision(revision string) error {
-	if len(revision) != 40 || revision != strings.ToLower(revision) || strings.Trim(revision, "0") == "" {
-		return errors.New("source revision must be a full lowercase Git SHA")
-	}
-	decoded, err := hex.DecodeString(revision)
-	if err != nil || len(decoded) != 20 {
-		return errors.New("source revision must be a full lowercase Git SHA")
-	}
-	return nil
-}
-
-func resourceVersion(version string) string {
-	candidate := strings.TrimPrefix(version, "v")
-	if boundary := strings.IndexAny(candidate, "+-"); boundary >= 0 {
-		candidate = candidate[:boundary]
-	}
-	parts := strings.Split(candidate, ".")
-	if len(parts) > 4 {
-		return "0.0.0.0"
-	}
-	components := make([]string, 4)
-	for index := range components {
-		components[index] = "0"
-	}
-	for index, part := range parts {
-		if part == "" {
-			return "0.0.0.0"
-		}
-		value, err := strconv.ParseUint(part, 10, 16)
-		if err != nil {
-			return "0.0.0.0"
-		}
-		components[index] = strconv.FormatUint(value, 10)
-	}
-	return strings.Join(components, ".")
-}
-
-func fileSHA256(path string) (string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", fmt.Errorf("open %s: %w", path, err)
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		return "", fmt.Errorf("%s is not a regular file", path)
-	}
-	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return "", fmt.Errorf("hash %s: %w", path, err)
-	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
-}
-
-func writeAtomic(path string, data []byte, mode os.FileMode) (returnErr error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".codesk-release-*")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	closed := false
-	defer func() {
-		if !closed {
-			_ = temporary.Close()
-		}
-		_ = os.Remove(temporaryPath)
-	}()
-	if err := temporary.Chmod(mode); err != nil {
-		return err
-	}
-	if _, err := temporary.Write(data); err != nil {
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	closed = true
-	if err := os.Rename(temporaryPath, path); err != nil {
-		return err
-	}
-	return nil
+func resourceVersion(version desktoprelease.Version) string {
+	return version.Resource
 }

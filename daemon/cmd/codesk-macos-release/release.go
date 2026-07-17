@@ -6,7 +6,6 @@ import (
 	"debug/macho"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"image/png"
@@ -14,8 +13,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
+
+	"notty/daemon/internal/desktoprelease"
 )
 
 const (
@@ -28,41 +28,7 @@ const (
 	agentToolExecutable  = "notty-agent-tool"
 )
 
-type releaseVersion struct {
-	Artifact    string
-	Bundle      string
-	Development bool
-}
-
-func parseReleaseVersion(raw string, allowDevelopment bool) (releaseVersion, error) {
-	if raw == "dev" {
-		if !allowDevelopment {
-			return releaseVersion{}, errors.New("codesk macOS release: dev is allowed only in explicit development mode")
-		}
-		return releaseVersion{Artifact: raw, Bundle: "0.0.0", Development: true}, nil
-	}
-	parts := strings.Split(raw, ".")
-	if len(parts) != 3 {
-		return releaseVersion{}, errors.New("codesk macOS release: version must be three dot-separated integers")
-	}
-	for _, part := range parts {
-		if part == "" || (len(part) > 1 && part[0] == '0') {
-			return releaseVersion{}, errors.New("codesk macOS release: version components must be canonical non-negative integers")
-		}
-		for _, character := range part {
-			if character < '0' || character > '9' {
-				return releaseVersion{}, errors.New("codesk macOS release: version components must be canonical non-negative integers")
-			}
-		}
-		value, err := strconv.ParseUint(part, 10, 31)
-		if err != nil || value > 2147483647 {
-			return releaseVersion{}, errors.New("codesk macOS release: version component is out of range")
-		}
-	}
-	return releaseVersion{Artifact: raw, Bundle: raw}, nil
-}
-
-func renderInfoPlist(version releaseVersion) []byte {
+func renderInfoPlist(version desktoprelease.Version) []byte {
 	return []byte(fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -105,14 +71,14 @@ func renderInfoPlist(version releaseVersion) []byte {
 	<string>Copyright (c) 2026 Codesk</string>
 </dict>
 </plist>
-`, version.Bundle, version.Bundle))
+`, version.Numeric, version.Numeric))
 }
 
 type appVerification struct {
 	TreeSHA256 string
 }
 
-func verifyApp(root string, version releaseVersion) (appVerification, error) {
+func verifyApp(root string, version desktoprelease.Version) (appVerification, error) {
 	root, err := cleanAbsolute(root)
 	if err != nil {
 		return appVerification{}, err
@@ -391,16 +357,19 @@ type artifactEntry struct {
 	Size   int64  `json:"size"`
 }
 
-func diskImageName(version releaseVersion) string {
+func diskImageName(version desktoprelease.Version) string {
 	return "Codesk_" + version.Artifact + "_macos_universal.dmg"
 }
 
-func writeManifest(root string, version releaseVersion, sourceRevision string, signed bool) error {
+func writeManifest(root string, version desktoprelease.Version, sourceRevision string, signed bool) error {
 	root, err := cleanAbsolute(root)
 	if err != nil {
 		return err
 	}
-	if err := validateSourceRevision(sourceRevision); err != nil {
+	metadata, err := desktoprelease.NewMetadata(version, sourceRevision, signed, desktoprelease.TrustPolicy{
+		Signature: desktoprelease.SignatureOptional,
+	})
+	if err != nil {
 		return err
 	}
 	app, err := verifyApp(filepath.Join(root, applicationName), version)
@@ -415,54 +384,49 @@ func writeManifest(root string, version releaseVersion, sourceRevision string, s
 	manifest := releaseManifest{
 		Schema:               releaseSchemaVersion,
 		Product:              "Codesk Desktop for macOS",
-		Version:              version.Artifact,
+		Version:              metadata.Version,
 		BundleIdentifier:     bundleIdentifier,
 		MinimumSystemVersion: minimumMacOSVersion,
-		SourceRevision:       sourceRevision,
-		SignedAndNotarized:   signed,
+		SourceRevision:       metadata.SourceRevision,
+		SignedAndNotarized:   metadata.Signed,
 		Application:          applicationEntry{Path: applicationName, TreeSHA256: app.TreeSHA256},
 		DiskImage:            dmg,
 	}
-	encoded, err := encodeManifest(manifest)
+	encoded, err := desktoprelease.MarshalCanonicalJSON(manifest)
 	if err != nil {
 		return err
 	}
 	manifestPath := filepath.Join(root, "manifest.json")
-	if err := writeAtomic(manifestPath, encoded, 0o644); err != nil {
+	if err := desktoprelease.WriteAtomic(manifestPath, encoded, 0o644); err != nil {
 		return err
 	}
-	manifestHash := sha256.Sum256(encoded)
-	checksums := fmt.Sprintf("%s  %s\n%s  manifest.json\n", dmg.SHA256, dmg.Path, hex.EncodeToString(manifestHash[:]))
-	return writeAtomic(filepath.Join(root, "SHA256SUMS"), []byte(checksums), 0o644)
+	checksums, err := desktoprelease.MarshalChecksums([]desktoprelease.Checksum{
+		{SHA256: dmg.SHA256, File: dmg.Path},
+		{SHA256: desktoprelease.SHA256(encoded), File: "manifest.json"},
+	})
+	if err != nil {
+		return err
+	}
+	return desktoprelease.WriteAtomic(filepath.Join(root, "SHA256SUMS"), checksums, 0o644)
 }
 
-func verifyRelease(root string, version releaseVersion, allowUnsigned bool) error {
+func verifyRelease(root string, version desktoprelease.Version, allowUnsigned bool) error {
 	root, err := cleanAbsolute(root)
 	if err != nil {
 		return err
 	}
-	if err := verifyReleaseRootEntries(root, version); err != nil {
+	if err := desktoprelease.VerifyEntries(root, []desktoprelease.Entry{
+		{Name: applicationName, Kind: desktoprelease.Directory, ForbidGroupOrOtherWrite: true},
+		{Name: diskImageName(version), Kind: desktoprelease.RegularFile, ForbidGroupOrOtherWrite: true},
+		{Name: "manifest.json", Kind: desktoprelease.RegularFile, ForbidGroupOrOtherWrite: true},
+		{Name: "SHA256SUMS", Kind: desktoprelease.RegularFile, ForbidGroupOrOtherWrite: true},
+	}); err != nil {
 		return err
 	}
-	manifestBytes, err := os.ReadFile(filepath.Join(root, "manifest.json"))
-	if err != nil {
-		return err
-	}
-	decoder := json.NewDecoder(bytes.NewReader(manifestBytes))
-	decoder.DisallowUnknownFields()
 	var manifest releaseManifest
-	if err := decoder.Decode(&manifest); err != nil {
-		return fmt.Errorf("codesk macOS release: decode manifest: %w", err)
-	}
-	if err := requireJSONEOF(decoder); err != nil {
-		return err
-	}
-	canonicalManifest, err := encodeManifest(manifest)
+	manifestBytes, err := desktoprelease.ReadCanonicalJSON(filepath.Join(root, "manifest.json"), &manifest)
 	if err != nil {
 		return err
-	}
-	if !bytes.Equal(manifestBytes, canonicalManifest) {
-		return errors.New("codesk macOS release: manifest JSON is not canonical")
 	}
 	if manifest.Schema != releaseSchemaVersion || manifest.Product != "Codesk Desktop for macOS" ||
 		manifest.Version != version.Artifact || manifest.BundleIdentifier != bundleIdentifier ||
@@ -470,14 +434,17 @@ func verifyRelease(root string, version releaseVersion, allowUnsigned bool) erro
 		manifest.DiskImage.Path != diskImageName(version) {
 		return errors.New("codesk macOS release: manifest identity does not match the requested release")
 	}
-	if err := validateSourceRevision(manifest.SourceRevision); err != nil {
+	metadata := desktoprelease.Metadata{
+		Version:        manifest.Version,
+		SourceRevision: manifest.SourceRevision,
+		Signed:         manifest.SignedAndNotarized,
+	}
+	signaturePolicy := desktoprelease.SignatureRequired
+	if allowUnsigned {
+		signaturePolicy = desktoprelease.SignatureOptional
+	}
+	if err := metadata.Validate(version, desktoprelease.TrustPolicy{Signature: signaturePolicy}); err != nil {
 		return err
-	}
-	if !manifest.SignedAndNotarized && !allowUnsigned {
-		return errors.New("codesk macOS release: artifact is unsigned; use --allow-unsigned only for construction evidence")
-	}
-	if manifest.SignedAndNotarized && version.Development {
-		return errors.New("codesk macOS release: development artifact is incorrectly marked signed")
 	}
 	app, err := verifyApp(filepath.Join(root, applicationName), version)
 	if err != nil {
@@ -493,49 +460,11 @@ func verifyRelease(root string, version releaseVersion, allowUnsigned bool) erro
 	if dmg != manifest.DiskImage {
 		return errors.New("codesk macOS release: disk image hash or size mismatch")
 	}
-	manifestHash := sha256.Sum256(manifestBytes)
-	wantChecksums := fmt.Sprintf("%s  %s\n%s  manifest.json\n", dmg.SHA256, dmg.Path, hex.EncodeToString(manifestHash[:]))
-	checksums, err := os.ReadFile(filepath.Join(root, "SHA256SUMS"))
-	if err != nil {
+	if err := desktoprelease.VerifyChecksums(filepath.Join(root, "SHA256SUMS"), []desktoprelease.Checksum{
+		{SHA256: dmg.SHA256, File: dmg.Path},
+		{SHA256: desktoprelease.SHA256(manifestBytes), File: "manifest.json"},
+	}); err != nil {
 		return err
-	}
-	if string(checksums) != wantChecksums {
-		return errors.New("codesk macOS release: SHA256SUMS is not canonical")
-	}
-	return nil
-}
-
-func verifyReleaseRootEntries(root string, version releaseVersion) error {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return err
-	}
-	want := map[string]bool{
-		applicationName:        false,
-		diskImageName(version): false,
-		"manifest.json":        false,
-		"SHA256SUMS":           false,
-	}
-	for _, entry := range entries {
-		if _, ok := want[entry.Name()]; !ok {
-			return fmt.Errorf("codesk macOS release: unexpected release entry %q", entry.Name())
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("codesk macOS release: release entry %q is a symlink", entry.Name())
-		}
-		if info.Mode().Perm()&0o022 != 0 {
-			return fmt.Errorf("codesk macOS release: release entry %q is group/other writable", entry.Name())
-		}
-		want[entry.Name()] = true
-	}
-	for name, present := range want {
-		if !present {
-			return fmt.Errorf("codesk macOS release: missing release entry %q", name)
-		}
 	}
 	return nil
 }
@@ -604,16 +533,11 @@ func inspectArtifact(path string) (artifactEntry, error) {
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() == 0 {
 		return artifactEntry{}, fmt.Errorf("codesk macOS release: artifact %q is not a non-empty regular file", path)
 	}
-	file, err := os.Open(path)
+	hash, err := desktoprelease.FileSHA256(path)
 	if err != nil {
 		return artifactEntry{}, err
 	}
-	defer file.Close()
-	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return artifactEntry{}, err
-	}
-	return artifactEntry{Path: filepath.Base(path), SHA256: hex.EncodeToString(hash.Sum(nil)), Size: info.Size()}, nil
+	return artifactEntry{Path: filepath.Base(path), SHA256: hash, Size: info.Size()}, nil
 }
 
 func appTreeHash(root string) (string, error) {
@@ -665,76 +589,9 @@ func appTreeHash(root string) (string, error) {
 	return hex.EncodeToString(tree.Sum(nil)), nil
 }
 
-func validateSourceRevision(revision string) error {
-	if len(revision) != 40 || strings.ToLower(revision) != revision || strings.Trim(revision, "0") == "" {
-		return errors.New("codesk macOS release: source revision must be a full lowercase Git SHA")
-	}
-	decoded, err := hex.DecodeString(revision)
-	if err != nil || len(decoded) != 20 {
-		return errors.New("codesk macOS release: source revision must be a full lowercase Git SHA")
-	}
-	return nil
-}
-
-func encodeManifest(manifest releaseManifest) ([]byte, error) {
-	encoded, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	return append(encoded, '\n'), nil
-}
-
 func cleanAbsolute(path string) (string, error) {
 	if path == "" || path != strings.TrimSpace(path) || strings.ContainsRune(path, '\x00') || !filepath.IsAbs(path) || path != filepath.Clean(path) {
 		return "", errors.New("codesk macOS release: path must be absolute and clean")
 	}
 	return path, nil
-}
-
-func requireJSONEOF(decoder *json.Decoder) error {
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return errors.New("codesk macOS release: manifest contains multiple JSON values")
-		}
-		return fmt.Errorf("codesk macOS release: decode manifest trailer: %w", err)
-	}
-	return nil
-}
-
-func writeAtomic(path string, data []byte, mode os.FileMode) (returnErr error) {
-	directory := filepath.Dir(path)
-	if err := os.MkdirAll(directory, 0o755); err != nil {
-		return err
-	}
-	temporary, err := os.CreateTemp(directory, ".codesk-release-*")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	closed := false
-	defer func() {
-		if !closed {
-			if closeErr := temporary.Close(); returnErr == nil && closeErr != nil {
-				returnErr = closeErr
-			}
-		}
-		if removeErr := os.Remove(temporaryPath); returnErr == nil && removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			returnErr = removeErr
-		}
-	}()
-	if err := temporary.Chmod(mode); err != nil {
-		return err
-	}
-	if _, err := temporary.Write(data); err != nil {
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	closed = true
-	return os.Rename(temporaryPath, path)
 }

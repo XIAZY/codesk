@@ -1,20 +1,17 @@
 package main
 
 import (
-	"bytes"
 	"debug/buildinfo"
 	"debug/pe"
 	"encoding/asn1"
 	"encoding/binary"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"notty/daemon/internal/desktoprelease"
 	"notty/daemon/internal/desktopsetup"
 )
 
@@ -36,36 +33,37 @@ var (
 )
 
 func verifyRelease(versionDirectory, version string, allowUnsigned bool) error {
-	if err := validateReleaseVersion(version); err != nil {
+	releaseVersion, err := desktoprelease.ParseVersion(version, windowsReleaseVersionPolicy)
+	if err != nil {
 		return err
 	}
-	if err := verifyReleaseEntries(versionDirectory, version); err != nil {
+	if err := desktoprelease.VerifyEntries(versionDirectory, []desktoprelease.Entry{
+		{Name: "manifest.json", Kind: desktoprelease.RegularFile},
+		{Name: "SHA256SUMS", Kind: desktoprelease.RegularFile},
+		{Name: setupFilename(releaseVersion.Artifact, "amd64"), Kind: desktoprelease.RegularFile},
+		{Name: setupFilename(releaseVersion.Artifact, "arm64"), Kind: desktoprelease.RegularFile},
+	}); err != nil {
 		return err
 	}
-	manifest, err := readReleaseManifest(filepath.Join(versionDirectory, "manifest.json"))
+	manifestPath := filepath.Join(versionDirectory, "manifest.json")
+	var manifest releaseManifest
+	manifestBytes, err := desktoprelease.ReadCanonicalJSON(manifestPath, &manifest)
 	if err != nil {
 		return err
 	}
 	expectedSigned := !allowUnsigned
-	if err := validateReleaseManifestHeader(manifest, version, expectedSigned); err != nil {
+	if err := validateReleaseManifestHeader(manifest, releaseVersion, expectedSigned); err != nil {
 		return err
 	}
 	if len(manifest.Artifacts) != len(releaseArchitectures) {
 		return fmt.Errorf("manifest has %d artifacts, want %d", len(manifest.Artifacts), len(releaseArchitectures))
 	}
-	checksums, err := readChecksums(filepath.Join(versionDirectory, "SHA256SUMS"))
-	if err != nil {
-		return err
-	}
-	if len(checksums) != len(releaseArchitectures)+1 {
-		return fmt.Errorf("SHA256SUMS has %d entries, want %d", len(checksums), len(releaseArchitectures)+1)
-	}
-	if err := verifyManifestChecksum(versionDirectory, checksums); err != nil {
-		return err
-	}
 
 	artifacts := make(map[string]releaseArtifact, len(manifest.Artifacts))
-	for _, artifact := range manifest.Artifacts {
+	for index, artifact := range manifest.Artifacts {
+		if want := releaseArchitectures[index]; artifact.Arch != want {
+			return fmt.Errorf("manifest artifact %d has architecture %q, want %q", index+1, artifact.Arch, want)
+		}
 		if _, supported := windowsMachines[artifact.Arch]; !supported {
 			return fmt.Errorf("manifest has unsupported architecture %q", artifact.Arch)
 		}
@@ -78,26 +76,34 @@ func verifyRelease(versionDirectory, version string, allowUnsigned bool) error {
 		artifacts[artifact.Arch] = artifact
 	}
 
+	checksums := make([]desktoprelease.Checksum, 0, len(releaseArchitectures)+1)
 	for _, arch := range releaseArchitectures {
 		artifact, found := artifacts[arch]
 		if !found {
 			return fmt.Errorf("manifest is missing windows/%s", arch)
 		}
-		expectedName := setupFilename(version, arch)
+		expectedName := setupFilename(releaseVersion.Artifact, arch)
 		if artifact.File != expectedName {
 			return fmt.Errorf("windows/%s artifact is %q, want %q", arch, artifact.File, expectedName)
 		}
 		setupPath := filepath.Join(versionDirectory, artifact.File)
-		actualHash, err := fileSHA256(setupPath)
+		actualHash, err := desktoprelease.FileSHA256(setupPath)
 		if err != nil {
 			return err
 		}
 		if artifact.SHA256 != actualHash {
 			return fmt.Errorf("manifest hash for %s is %q, want %q", artifact.File, artifact.SHA256, actualHash)
 		}
-		if checksum := checksums[artifact.File]; checksum != actualHash {
-			return fmt.Errorf("SHA256SUMS hash for %s is %q, want %q", artifact.File, checksum, actualHash)
-		}
+		checksums = append(checksums, desktoprelease.Checksum{SHA256: actualHash, File: artifact.File})
+	}
+	checksums = append(checksums, desktoprelease.Checksum{SHA256: desktoprelease.SHA256(manifestBytes), File: "manifest.json"})
+	if err := desktoprelease.VerifyChecksums(filepath.Join(versionDirectory, "SHA256SUMS"), checksums); err != nil {
+		return err
+	}
+
+	for _, arch := range releaseArchitectures {
+		artifact := artifacts[arch]
+		setupPath := filepath.Join(versionDirectory, artifact.File)
 		if err := inspectPE(setupPath, windowsMachines[arch], peSubsystemGUI, true, expectedSigned); err != nil {
 			return fmt.Errorf("%s: %w", artifact.File, err)
 		}
@@ -105,7 +111,7 @@ func verifyRelease(versionDirectory, version string, allowUnsigned bool) error {
 		if err != nil {
 			return fmt.Errorf("%s: %w", artifact.File, err)
 		}
-		if _, err := payload.Verify(version, arch); err != nil {
+		if _, err := payload.Verify(releaseVersion.Artifact, arch); err != nil {
 			return fmt.Errorf("%s: %w", artifact.File, err)
 		}
 		temporary, err := os.MkdirTemp("", "codesk-release-verify-*")
@@ -122,69 +128,27 @@ func verifyRelease(versionDirectory, version string, allowUnsigned bool) error {
 	return nil
 }
 
-func validateReleaseManifestHeader(manifest releaseManifest, version string, expectedSigned bool) error {
-	if manifest.Version != version {
-		return fmt.Errorf("manifest version %q, want %q", manifest.Version, version)
+func validateReleaseManifestHeader(manifest releaseManifest, version desktoprelease.Version, expectedSigned bool) error {
+	metadata := desktoprelease.Metadata{
+		Version:        manifest.Version,
+		SourceRevision: manifest.SourceRevision,
+		Signed:         manifest.Signed,
 	}
-	if err := validateSourceRevision(manifest.SourceRevision); err != nil {
+	signaturePolicy := desktoprelease.SignatureRequired
+	if !expectedSigned {
+		signaturePolicy = desktoprelease.SignatureForbidden
+	}
+	if err := metadata.Validate(version, desktoprelease.TrustPolicy{
+		Signature:              signaturePolicy,
+		AllowSignedDevelopment: true,
+	}); err != nil {
 		return fmt.Errorf("manifest: %w", err)
-	}
-	if manifest.Signed != expectedSigned {
-		return fmt.Errorf("manifest signed=%t, want %t", manifest.Signed, expectedSigned)
 	}
 	if manifest.Toolchain != canonicalReleaseToolchain {
 		return fmt.Errorf("manifest toolchain %#v, want %#v", manifest.Toolchain, canonicalReleaseToolchain)
 	}
 	return nil
 }
-
-func verifyManifestChecksum(versionDirectory string, checksums map[string]string) error {
-	manifestHash, err := fileSHA256(filepath.Join(versionDirectory, "manifest.json"))
-	if err != nil {
-		return err
-	}
-	if checksum := checksums["manifest.json"]; checksum != manifestHash {
-		return fmt.Errorf("SHA256SUMS hash for manifest.json is %q, want %q", checksum, manifestHash)
-	}
-	return nil
-}
-
-func verifyReleaseEntries(directory, version string) error {
-	info, err := os.Lstat(directory)
-	if err != nil {
-		return fmt.Errorf("stat release directory: %w", err)
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("release path is not a real directory")
-	}
-	expected := map[string]bool{
-		"manifest.json":                 true,
-		"SHA256SUMS":                    true,
-		setupFilename(version, "amd64"): true,
-		setupFilename(version, "arm64"): true,
-	}
-	entries, err := os.ReadDir(directory)
-	if err != nil {
-		return fmt.Errorf("read release directory: %w", err)
-	}
-	if len(entries) != len(expected) {
-		return fmt.Errorf("release directory has %d entries, want %d", len(entries), len(expected))
-	}
-	for _, entry := range entries {
-		if !expected[entry.Name()] {
-			return fmt.Errorf("release directory has unexpected entry %q", entry.Name())
-		}
-		entryInfo, err := entry.Info()
-		if err != nil {
-			return fmt.Errorf("stat release entry %q: %w", entry.Name(), err)
-		}
-		if entry.Type()&os.ModeSymlink != 0 || !entryInfo.Mode().IsRegular() {
-			return fmt.Errorf("release entry %q is not a regular file", entry.Name())
-		}
-	}
-	return nil
-}
-
 func verifyPayloadBinaries(payload *desktopsetup.Payload, directory, arch string, signed bool) error {
 	if err := payload.Extract(directory); err != nil {
 		return err
@@ -444,47 +408,6 @@ func rootResourceTypes(data []byte) (map[uint32]bool, error) {
 		}
 	}
 	return types, nil
-}
-
-func readReleaseManifest(path string) (releaseManifest, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return releaseManifest{}, fmt.Errorf("read manifest: %w", err)
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	var manifest releaseManifest
-	if err := decoder.Decode(&manifest); err != nil {
-		return releaseManifest{}, fmt.Errorf("decode manifest: %w", err)
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return releaseManifest{}, errors.New("decode manifest: trailing data")
-	}
-	return manifest, nil
-}
-
-func readChecksums(path string) (map[string]string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read SHA256SUMS: %w", err)
-	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	checksums := make(map[string]string, len(lines))
-	for index, line := range lines {
-		fields := strings.Fields(line)
-		if len(fields) != 2 || filepath.Base(fields[1]) != fields[1] {
-			return nil, fmt.Errorf("SHA256SUMS line %d is malformed", index+1)
-		}
-		decoded, err := hex.DecodeString(fields[0])
-		if err != nil || len(decoded) != 32 || fields[0] != strings.ToLower(fields[0]) {
-			return nil, fmt.Errorf("SHA256SUMS line %d has an invalid hash", index+1)
-		}
-		if _, duplicate := checksums[fields[1]]; duplicate {
-			return nil, fmt.Errorf("SHA256SUMS has duplicate file %q", fields[1])
-		}
-		checksums[fields[1]] = fields[0]
-	}
-	return checksums, nil
 }
 
 func allZero(data []byte) bool {

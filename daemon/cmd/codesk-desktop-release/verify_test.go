@@ -9,6 +9,8 @@ import (
 	"runtime/debug"
 	"strings"
 	"testing"
+
+	"notty/daemon/internal/desktoprelease"
 )
 
 func TestVerifyGoBuildInfoRejectsUnpinnedOrVCSStampedBinary(t *testing.T) {
@@ -192,65 +194,18 @@ func marshalASN1(t *testing.T, value any) []byte {
 	return data
 }
 
-func TestVerifyReleaseEntries(t *testing.T) {
-	const version = "v1.2.3"
-	directory := t.TempDir()
-	for _, name := range []string{
-		"manifest.json",
-		"SHA256SUMS",
-		setupFilename(version, "amd64"),
-		setupFilename(version, "arm64"),
-	} {
-		if err := os.WriteFile(filepath.Join(directory, name), []byte("fixture"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := verifyReleaseEntries(directory, version); err != nil {
-		t.Fatal(err)
-	}
-	extra := filepath.Join(directory, "unexpected.txt")
-	if err := os.WriteFile(extra, []byte("fixture"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := verifyReleaseEntries(directory, version); err == nil {
-		t.Fatal("verifyReleaseEntries() accepted an unexpected file")
-	}
-	if err := os.Remove(extra); err != nil {
-		t.Fatal(err)
-	}
-	manifest := filepath.Join(directory, "manifest.json")
-	if err := os.Remove(manifest); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(directory, "SHA256SUMS"), manifest); err != nil {
-		t.Skipf("symlink unavailable: %v", err)
-	}
-	if err := verifyReleaseEntries(directory, version); err == nil {
-		t.Fatal("verifyReleaseEntries() accepted a symlinked file")
-	}
-}
-
-func TestValidateReleaseVersion(t *testing.T) {
-	for _, version := range []string{"v1.2.3", "1.2.3-beta+build", "dev"} {
-		if err := validateReleaseVersion(version); err != nil {
-			t.Errorf("validateReleaseVersion(%q): %v", version, err)
-		}
-	}
-	for _, version := range []string{"", "../release", "-version", " version", "version ", "version/name", strings.Repeat("v", 129)} {
-		if err := validateReleaseVersion(version); err == nil {
-			t.Errorf("validateReleaseVersion(%q) succeeded", version)
-		}
-	}
-}
-
 func TestValidateReleaseManifestHeaderRequiresSourceBinding(t *testing.T) {
+	version, err := desktoprelease.ParseVersion("dev", windowsReleaseVersionPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
 	valid := releaseManifest{
 		Version:        "dev",
 		SourceRevision: testSourceRevision,
 		Signed:         false,
 		Toolchain:      canonicalReleaseToolchain,
 	}
-	if err := validateReleaseManifestHeader(valid, "dev", false); err != nil {
+	if err := validateReleaseManifestHeader(valid, version, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -267,33 +222,8 @@ func TestValidateReleaseManifestHeaderRequiresSourceBinding(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			candidate := valid
 			mutate(&candidate)
-			if err := validateReleaseManifestHeader(candidate, "dev", false); err == nil {
+			if err := validateReleaseManifestHeader(candidate, version, false); err == nil {
 				t.Fatal("validateReleaseManifestHeader() accepted mutated release metadata")
-			}
-		})
-	}
-}
-
-func TestVerifyManifestChecksumRejectsMissingOrChangedBinding(t *testing.T) {
-	directory := t.TempDir()
-	manifestPath := filepath.Join(directory, "manifest.json")
-	if err := os.WriteFile(manifestPath, []byte("source-bound manifest\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	manifestHash, err := fileSHA256(manifestPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := verifyManifestChecksum(directory, map[string]string{"manifest.json": manifestHash}); err != nil {
-		t.Fatal(err)
-	}
-	for name, checksums := range map[string]map[string]string{
-		"missing": {},
-		"changed": {"manifest.json": strings.Repeat("f", 64)},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if err := verifyManifestChecksum(directory, checksums); err == nil {
-				t.Fatal("verifyManifestChecksum() accepted an unbound manifest")
 			}
 		})
 	}

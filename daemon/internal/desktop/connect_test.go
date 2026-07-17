@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"notty/daemon/internal/desktop/handoff"
+	"notty/daemon/internal/desktopstate"
 )
 
 type memSecretStore struct {
@@ -167,7 +168,7 @@ func TestConnectHappyPath(t *testing.T) {
 		t.Errorf("Token() = %q, want %q", payload.Token(), "nottyd_secret_token_value")
 	}
 
-	stored, _ := secrets.Load(SecretKeyDaemonToken)
+	stored, _ := secrets.Load(desktopstate.SecretKeyDaemonToken)
 	if string(stored) != "nottyd_secret_token_value" {
 		t.Errorf("stored token = %q, want %q", stored, "nottyd_secret_token_value")
 	}
@@ -193,7 +194,7 @@ func TestConnectPersistsBeforeReturning(t *testing.T) {
 
 	<-done
 
-	stored, _ := secrets.Load(SecretKeyDaemonToken)
+	stored, _ := secrets.Load(desktopstate.SecretKeyDaemonToken)
 	if len(stored) == 0 {
 		t.Fatal("token was not persisted before Connect returned")
 	}
@@ -255,7 +256,7 @@ func TestConnectContextCancelled(t *testing.T) {
 		t.Errorf("expected context.Canceled, got: %v", connectErr)
 	}
 
-	stored, _ := secrets.Load(SecretKeyDaemonToken)
+	stored, _ := secrets.Load(desktopstate.SecretKeyDaemonToken)
 	if len(stored) > 0 {
 		t.Error("token should not be persisted when context is cancelled")
 	}
@@ -277,7 +278,7 @@ func TestConnectOpenURLFailure(t *testing.T) {
 		t.Errorf("error should mention 'open browser', got: %v", err)
 	}
 
-	stored, _ := secrets.Load(SecretKeyDaemonToken)
+	stored, _ := secrets.Load(desktopstate.SecretKeyDaemonToken)
 	if len(stored) > 0 {
 		t.Error("token should not be persisted when browser open fails")
 	}

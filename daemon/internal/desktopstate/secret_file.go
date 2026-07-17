@@ -1,4 +1,4 @@
-package desktop
+package desktopstate
 
 import (
 	"bytes"
@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,7 +32,7 @@ type fileSecretStore struct {
 }
 
 func newFileSecretStore(root string, protector secretProtector) (*fileSecretStore, error) {
-	if err := requireAbsolute("secrets", root); err != nil {
+	if err := RequireAbsolute("secrets", root); err != nil {
 		return nil, err
 	}
 	if protector == nil {
@@ -71,17 +70,9 @@ func (s *fileSecretStore) Load(key string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	file, err := os.Open(path)
+	protected, err := readProtectedFile(path)
 	if err != nil {
 		return nil, err
-	}
-	defer file.Close()
-	protected, err := io.ReadAll(io.LimitReader(file, maxProtectedBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("desktop: read protected secret: %w", err)
-	}
-	if len(protected) == 0 || len(protected) > maxProtectedBytes {
-		return nil, errors.New("desktop: protected secret has invalid size")
 	}
 	secret, err := s.protector.Unprotect(protected)
 	if err != nil {
@@ -91,6 +82,32 @@ func (s *fileSecretStore) Load(key string) ([]byte, error) {
 		return nil, errors.New("desktop: unprotected secret has invalid size")
 	}
 	return secret, nil
+}
+
+func (s *fileSecretStore) ProtectedFingerprint(key string) (Fingerprint, error) {
+	path, err := s.pathForKey(key)
+	if err != nil {
+		return Fingerprint{}, err
+	}
+	protected, err := readProtectedFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return Fingerprint{}, nil
+	}
+	if err != nil {
+		return Fingerprint{}, err
+	}
+	return fingerprint(protected), nil
+}
+
+func readProtectedFile(path string) ([]byte, error) {
+	protected, err := readStateFile(path, "protected secret", maxProtectedBytes)
+	if err != nil {
+		return nil, err
+	}
+	if len(protected) == 0 {
+		return nil, errors.New("desktop: protected secret has invalid size")
+	}
+	return protected, nil
 }
 
 func (s *fileSecretStore) Delete(key string) error {

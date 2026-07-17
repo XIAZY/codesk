@@ -15,6 +15,7 @@ import (
 
 	"notty/daemon/internal/desktop"
 	"notty/daemon/internal/desktopapp"
+	"notty/daemon/internal/desktopstate"
 )
 
 const (
@@ -79,11 +80,11 @@ func runDesktop() error {
 	if err := prependExecutableDirectoryToPath(executable); err != nil {
 		return err
 	}
-	configStore, err := desktop.NewFileConfigurationStore(dirs.Data)
+	configStore, err := desktopstate.NewFileConfigurationStore(dirs.Data)
 	if err != nil {
 		return err
 	}
-	secrets, err := desktop.NewWindowsSecretStore(dirs.Data)
+	secrets, err := desktopstate.NewWindowsSecretStore(dirs.Data)
 	if err != nil {
 		return err
 	}
