@@ -159,6 +159,29 @@ function Get-RelativePath {
     return $pathFull.Substring($rootFull.Length).Replace('\', '/')
 }
 
+function Resolve-ExtractedSourceFile {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $Source,
+        [Parameter(Mandatory = $true)][string] $Label
+    )
+
+    if ([System.IO.Path]::IsPathRooted($Source)) {
+        $pathFull = [System.IO.Path]::GetFullPath($Source)
+    } else {
+        $relativeSource = $Source -replace '^SourceDir[\\/]', ''
+        $pathFull = [System.IO.Path]::GetFullPath((Join-Path $Root $relativeSource))
+    }
+    $relative = Get-RelativePath -Root $Root -Path $pathFull
+    if (-not (Test-Path -LiteralPath $pathFull -PathType Leaf)) {
+        throw "decompiled $Label is missing: $pathFull"
+    }
+    return [pscustomobject] @{
+        Path = $pathFull
+        Relative = $relative
+    }
+}
+
 function Get-ExtractedFileRecord {
     param([Parameter(Mandatory = $true)][string] $Root)
 
@@ -316,15 +339,14 @@ function Get-PackageIdentity {
             throw "decompiled source has $($matchingFiles.Count) $fileId File rows, want 1"
         }
         $file = $matchingFiles[0]
-        $relative = $file.Source -replace '^SourceDir[\\/]', ''
-        $path = Join-Path $ExtractRoot $relative
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-            throw "decompiled $fileId payload is missing: $path"
-        }
+        $resolvedFile = Resolve-ExtractedSourceFile `
+            -Root $ExtractRoot `
+            -Source ([string] $file.Source) `
+            -Label "$fileId payload"
         $payloads[$fileId] = [ordered] @{
-            path = $relative.Replace('\', '/')
-            size = (Get-Item -LiteralPath $path).Length
-            sha256 = Get-Sha256 $path
+            path = $resolvedFile.Relative
+            size = (Get-Item -LiteralPath $resolvedFile.Path).Length
+            sha256 = Get-Sha256 $resolvedFile.Path
         }
     }
 
@@ -333,15 +355,14 @@ function Get-PackageIdentity {
         throw "decompiled source has $($matchingIcons.Count) Codesk.ico Icon rows, want 1"
     }
     $icon = $matchingIcons[0]
-    $iconRelative = $icon.SourceFile -replace '^SourceDir[\\/]', ''
-    $iconPath = Join-Path $ExtractRoot $iconRelative
-    if (-not (Test-Path -LiteralPath $iconPath -PathType Leaf)) {
-        throw "decompiled icon is missing: $iconPath"
-    }
+    $resolvedIcon = Resolve-ExtractedSourceFile `
+        -Root $ExtractRoot `
+        -Source ([string] $icon.SourceFile) `
+        -Label 'icon'
     $payloads['CodeskIcon'] = [ordered] @{
-        path = $iconRelative.Replace('\', '/')
-        size = (Get-Item -LiteralPath $iconPath).Length
-        sha256 = Get-Sha256 $iconPath
+        path = $resolvedIcon.Relative
+        size = (Get-Item -LiteralPath $resolvedIcon.Path).Length
+        sha256 = Get-Sha256 $resolvedIcon.Path
     }
 
     return [ordered] @{
