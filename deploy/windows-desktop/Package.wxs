@@ -23,7 +23,7 @@
       <Directory Id="PerUserProgramsFolder" Name="Programs">
         <Directory Id="INSTALLFOLDER" Name="Codesk">
           <Component Id="CodeskExecutable" Guid="*">
-            <File Id="CodeskExe" Source="$(CodeskExe)" KeyPath="yes">
+            <File Id="CodeskExe" Source="$(CodeskExe)">
               <Shortcut
                 Id="CodeskStartMenuShortcut"
                 Directory="CodeskProgramsFolder"
@@ -32,10 +32,26 @@
                 WorkingDirectory="INSTALLFOLDER"
                 Icon="Codesk.ico" />
             </File>
+            <RegistryValue
+              Root="HKCU"
+              Key="Software\Codesk\Installer\Components"
+              Name="CodeskExecutable"
+              Type="integer"
+              Value="1"
+              KeyPath="yes" />
             <RemoveFolder Id="RemoveCodeskProgramsFolder" Directory="CodeskProgramsFolder" On="uninstall" />
+            <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+            <RemoveFolder Id="RemovePerUserProgramsFolder" Directory="PerUserProgramsFolder" On="uninstall" />
           </Component>
           <Component Id="AgentToolExecutable" Guid="*">
-            <File Id="AgentToolExe" Name="notty-agent-tool.exe" Source="$(AgentToolExe)" KeyPath="yes" />
+            <File Id="AgentToolExe" Name="notty-agent-tool.exe" Source="$(AgentToolExe)" />
+            <RegistryValue
+              Root="HKCU"
+              Key="Software\Codesk\Installer\Components"
+              Name="AgentToolExecutable"
+              Type="integer"
+              Value="1"
+              KeyPath="yes" />
           </Component>
           <Component
             Id="CodeskLoginItemCleanup"

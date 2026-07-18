@@ -141,8 +141,8 @@ func TestWindowsInstallerIsThinPerUserWiXPackage(t *testing.T) {
 	assertWixElementCounts(t, root, map[string]int{
 		"Wix": 1, "Package": 1, "MajorUpgrade": 1, "MediaTemplate": 1,
 		"Icon": 1, "Property": 1, "StandardDirectory": 2, "Directory": 3,
-		"Component": 3, "File": 2, "Shortcut": 1, "RemoveFolder": 1,
-		"RegistryValue": 1, "Feature": 1, "ComponentRef": 3,
+		"Component": 3, "File": 2, "Shortcut": 1, "RemoveFolder": 3,
+		"RegistryValue": 3, "Feature": 1, "ComponentRef": 3,
 	})
 	assertWixTopology(t, root)
 
@@ -192,15 +192,18 @@ func TestWindowsInstallerIsThinPerUserWiXPackage(t *testing.T) {
 		"Id":   "CodeskProgramsFolder",
 		"Name": "Codesk",
 	})
-	assertWixAttrs(t, assertWixElementByID(t, root, "Component", "CodeskExecutable"), map[string]string{
+	codeskComponent := assertWixElementByID(t, root, "Component", "CodeskExecutable")
+	assertWixAttrs(t, codeskComponent, map[string]string{
 		"Id":   "CodeskExecutable",
 		"Guid": "*",
 	})
-	assertWixAttrs(t, assertWixElementByID(t, root, "Component", "AgentToolExecutable"), map[string]string{
+	agentComponent := assertWixElementByID(t, root, "Component", "AgentToolExecutable")
+	assertWixAttrs(t, agentComponent, map[string]string{
 		"Id":   "AgentToolExecutable",
 		"Guid": "*",
 	})
-	assertWixAttrs(t, assertWixElementByID(t, root, "Component", "CodeskLoginItemCleanup"), map[string]string{
+	loginItemComponent := assertWixElementByID(t, root, "Component", "CodeskLoginItemCleanup")
+	assertWixAttrs(t, loginItemComponent, map[string]string{
 		"Id":             "CodeskLoginItemCleanup",
 		"Guid":           "A11ADE55-B9B8-45E9-9DAB-60203C2A824E",
 		"NeverOverwrite": "yes",
@@ -208,9 +211,8 @@ func TestWindowsInstallerIsThinPerUserWiXPackage(t *testing.T) {
 
 	codeskFile := assertWixElementByID(t, root, "File", "CodeskExe")
 	assertWixAttrs(t, codeskFile, map[string]string{
-		"Id":      "CodeskExe",
-		"Source":  "$(CodeskExe)",
-		"KeyPath": "yes",
+		"Id":     "CodeskExe",
+		"Source": "$(CodeskExe)",
 	})
 	shortcut := assertWixElementByID(t, codeskFile, "Shortcut", "CodeskStartMenuShortcut")
 	assertWixAttrs(t, shortcut, map[string]string{
@@ -223,12 +225,38 @@ func TestWindowsInstallerIsThinPerUserWiXPackage(t *testing.T) {
 	})
 	agentFile := assertWixElementByID(t, root, "File", "AgentToolExe")
 	assertWixAttrs(t, agentFile, map[string]string{
-		"Id":      "AgentToolExe",
-		"Name":    "notty-agent-tool.exe",
-		"Source":  "$(AgentToolExe)",
+		"Id":     "AgentToolExe",
+		"Name":   "notty-agent-tool.exe",
+		"Source": "$(AgentToolExe)",
+	})
+	codeskMarker, err := wixDirectChild(codeskComponent, "RegistryValue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertWixAttrs(t, codeskMarker, map[string]string{
+		"Root":    "HKCU",
+		"Key":     `Software\Codesk\Installer\Components`,
+		"Name":    "CodeskExecutable",
+		"Type":    "integer",
+		"Value":   "1",
 		"KeyPath": "yes",
 	})
-	loginItem := assertWixElementByID(t, root, "RegistryValue", "")
+	agentMarker, err := wixDirectChild(agentComponent, "RegistryValue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertWixAttrs(t, agentMarker, map[string]string{
+		"Root":    "HKCU",
+		"Key":     `Software\Codesk\Installer\Components`,
+		"Name":    "AgentToolExecutable",
+		"Type":    "integer",
+		"Value":   "1",
+		"KeyPath": "yes",
+	})
+	loginItem, err := wixDirectChild(loginItemComponent, "RegistryValue")
+	if err != nil {
+		t.Fatal(err)
+	}
 	assertWixAttrs(t, loginItem, map[string]string{
 		"Root":    "HKCU",
 		"Key":     `Software\Microsoft\Windows\CurrentVersion\Run`,
@@ -241,6 +269,16 @@ func TestWindowsInstallerIsThinPerUserWiXPackage(t *testing.T) {
 	assertWixAttrs(t, removeFolder, map[string]string{
 		"Id":        "RemoveCodeskProgramsFolder",
 		"Directory": "CodeskProgramsFolder",
+		"On":        "uninstall",
+	})
+	assertWixAttrs(t, assertWixElementByID(t, root, "RemoveFolder", "RemoveInstallFolder"), map[string]string{
+		"Id":        "RemoveInstallFolder",
+		"Directory": "INSTALLFOLDER",
+		"On":        "uninstall",
+	})
+	assertWixAttrs(t, assertWixElementByID(t, root, "RemoveFolder", "RemovePerUserProgramsFolder"), map[string]string{
+		"Id":        "RemovePerUserProgramsFolder",
+		"Directory": "PerUserProgramsFolder",
 		"On":        "uninstall",
 	})
 
@@ -293,6 +331,91 @@ func TestWindowsInstallerRejectsUnexpectedElementAttributes(t *testing.T) {
 	}
 }
 
+func TestWindowsInstallerRejectsPerUserFileKeyPathMutations(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "deploy", "windows-desktop", "Package.wxs")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name      string
+		id        string
+		canonical string
+		mutated   string
+		expected  map[string]string
+	}{
+		{
+			name:      "Codesk executable",
+			id:        "CodeskExe",
+			canonical: `<File Id="CodeskExe" Source="$(CodeskExe)">`,
+			mutated:   `<File Id="CodeskExe" Source="$(CodeskExe)" KeyPath="yes">`,
+			expected:  map[string]string{"Id": "CodeskExe", "Source": "$(CodeskExe)"},
+		},
+		{
+			name:      "agent tool",
+			id:        "AgentToolExe",
+			canonical: `<File Id="AgentToolExe" Name="notty-agent-tool.exe" Source="$(AgentToolExe)" />`,
+			mutated:   `<File Id="AgentToolExe" Name="notty-agent-tool.exe" Source="$(AgentToolExe)" KeyPath="yes" />`,
+			expected: map[string]string{
+				"Id": "AgentToolExe", "Name": "notty-agent-tool.exe", "Source": "$(AgentToolExe)",
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := bytes.Count(data, []byte(test.canonical)); got != 1 {
+				t.Fatalf("got %d canonical %s file elements, want 1", got, test.id)
+			}
+			mutated := bytes.Replace(data, []byte(test.canonical), []byte(test.mutated), 1)
+			var root wixElement
+			if err := xml.Unmarshal(mutated, &root); err != nil {
+				t.Fatal(err)
+			}
+			file, err := wixElementByID(root, "File", test.id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := checkWixAttrs(file, test.expected); err == nil {
+				t.Fatal("per-user file KeyPath mutation passed the exact WiX attribute contract")
+			} else if !strings.Contains(err.Error(), "KeyPath") {
+				t.Fatalf("file KeyPath mutation failed for the wrong reason: %v", err)
+			}
+		})
+	}
+}
+
+func TestWindowsInstallerRejectsMissingProfileDirectoryCleanup(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "deploy", "windows-desktop", "Package.wxs")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cleanup := range []struct {
+		id        string
+		directory string
+	}{
+		{id: "RemoveInstallFolder", directory: "INSTALLFOLDER"},
+		{id: "RemovePerUserProgramsFolder", directory: "PerUserProgramsFolder"},
+	} {
+		t.Run(cleanup.id, func(t *testing.T) {
+			row := []byte(fmt.Sprintf("            <RemoveFolder Id=\"%s\" Directory=\"%s\" On=\"uninstall\" />\n", cleanup.id, cleanup.directory))
+			if got := bytes.Count(data, row); got != 1 {
+				t.Fatalf("got %d %s rows, want 1", got, cleanup.id)
+			}
+			mutated := bytes.Replace(data, row, nil, 1)
+			var root wixElement
+			if err := xml.Unmarshal(mutated, &root); err != nil {
+				t.Fatal(err)
+			}
+			if err := checkWixTopology(root); err == nil {
+				t.Fatalf("deleting %s passed the exact WiX topology contract", cleanup.id)
+			} else if !strings.Contains(err.Error(), cleanup.id) {
+				t.Fatalf("deleting %s failed for the wrong reason: %v", cleanup.id, err)
+			}
+		})
+	}
+}
+
 func TestWindowsInstallerRejectsRelocatedAgentComponent(t *testing.T) {
 	path := filepath.Join("..", "..", "..", "deploy", "windows-desktop", "Package.wxs")
 	data, err := os.ReadFile(path)
@@ -300,7 +423,14 @@ func TestWindowsInstallerRejectsRelocatedAgentComponent(t *testing.T) {
 		t.Fatal(err)
 	}
 	agentComponent := []byte(`          <Component Id="AgentToolExecutable" Guid="*">
-            <File Id="AgentToolExe" Name="notty-agent-tool.exe" Source="$(AgentToolExe)" KeyPath="yes" />
+            <File Id="AgentToolExe" Name="notty-agent-tool.exe" Source="$(AgentToolExe)" />
+            <RegistryValue
+              Root="HKCU"
+              Key="Software\Codesk\Installer\Components"
+              Name="AgentToolExecutable"
+              Type="integer"
+              Value="1"
+              KeyPath="yes" />
           </Component>
 `)
 	if got := bytes.Count(data, agentComponent); got != 1 {
@@ -438,10 +568,18 @@ func checkWixTopology(root wixElement) error {
 	if _, err := wixDirectChildByID(codeskFile, "Shortcut", "CodeskStartMenuShortcut"); err != nil {
 		return fmt.Errorf("File[CodeskExe]: %w", err)
 	}
-	if _, err := wixDirectChildByID(codeskComponent, "RemoveFolder", "RemoveCodeskProgramsFolder"); err != nil {
+	if _, err := wixDirectChild(codeskComponent, "RegistryValue"); err != nil {
 		return fmt.Errorf("Component[CodeskExecutable]: %w", err)
 	}
+	for _, id := range []string{"RemoveCodeskProgramsFolder", "RemoveInstallFolder", "RemovePerUserProgramsFolder"} {
+		if _, err := wixDirectChildByID(codeskComponent, "RemoveFolder", id); err != nil {
+			return fmt.Errorf("Component[CodeskExecutable]: %w", err)
+		}
+	}
 	if _, err := wixDirectChildByID(agentComponent, "File", "AgentToolExe"); err != nil {
+		return fmt.Errorf("Component[AgentToolExecutable]: %w", err)
+	}
+	if _, err := wixDirectChild(agentComponent, "RegistryValue"); err != nil {
 		return fmt.Errorf("Component[AgentToolExecutable]: %w", err)
 	}
 	loginItemComponent, err := wixDirectChildByID(installFolder, "Component", "CodeskLoginItemCleanup")
@@ -499,13 +637,20 @@ func wixDirectChildByID(parent wixElement, name, id string) (wixElement, error) 
 
 func assertWixElementByID(t *testing.T, root wixElement, name, id string) wixElement {
 	t.Helper()
+	element, err := wixElementByID(root, name, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return element
+}
+
+func wixElementByID(root wixElement, name, id string) (wixElement, error) {
 	for _, candidate := range wixElements(root, name) {
 		if wixAttr(candidate, "Id") == id {
-			return candidate
+			return candidate, nil
 		}
 	}
-	t.Fatalf("missing %s element with Id=%q", name, id)
-	return wixElement{}
+	return wixElement{}, fmt.Errorf("missing %s element with Id=%q", name, id)
 }
 
 func assertWixAttrs(t *testing.T, element wixElement, expected map[string]string) {
