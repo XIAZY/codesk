@@ -11,7 +11,11 @@ import (
 	"testing"
 )
 
-const wixNamespace = "http://wixtoolset.org/schemas/v4/wxs"
+const (
+	wixNamespace                     = "http://wixtoolset.org/schemas/v4/wxs"
+	codeskExecutableComponentGUID    = "931D5BAC-B213-44A8-B234-E24E415613EC"
+	agentToolExecutableComponentGUID = "4DE1EFE2-7E29-4E46-A615-4CC9A6EB7DBE"
+)
 
 type wixElement struct {
 	XMLName xml.Name
@@ -40,6 +44,7 @@ func TestWindowsInstallerCIUsesArchitectureBoundProductPayloads(t *testing.T) {
 		`go run ./scripts/verify-windows-desktop-pe.go "$payload_dir/notty-agent-tool.exe" "$arch" console`: 1,
 		"path: ${{ runner.temp }}/windows-desktop-payload/amd64/":                                           1,
 		"path: ${{ runner.temp }}/windows-desktop-payload/arm64/":                                           1,
+		"runs-on: [self-hosted, Windows, ARM64]":                                                            1,
 		`(Join-Path $payload "Codesk.exe")`:                                                                 1,
 		`(Join-Path $payload "notty-agent-tool.exe")`:                                                       1,
 		`"-p:ProductVersion=not-a-valid-msi-version"`:                                                       1,
@@ -195,13 +200,16 @@ func TestWindowsInstallerIsThinPerUserWiXPackage(t *testing.T) {
 	codeskComponent := assertWixElementByID(t, root, "Component", "CodeskExecutable")
 	assertWixAttrs(t, codeskComponent, map[string]string{
 		"Id":   "CodeskExecutable",
-		"Guid": "*",
+		"Guid": codeskExecutableComponentGUID,
 	})
 	agentComponent := assertWixElementByID(t, root, "Component", "AgentToolExecutable")
 	assertWixAttrs(t, agentComponent, map[string]string{
 		"Id":   "AgentToolExecutable",
-		"Guid": "*",
+		"Guid": agentToolExecutableComponentGUID,
 	})
+	if codeskExecutableComponentGUID == agentToolExecutableComponentGUID {
+		t.Fatal("payload components must have distinct fixed GUIDs")
+	}
 	loginItemComponent := assertWixElementByID(t, root, "Component", "CodeskLoginItemCleanup")
 	assertWixAttrs(t, loginItemComponent, map[string]string{
 		"Id":             "CodeskLoginItemCleanup",
@@ -310,10 +318,10 @@ func TestWindowsInstallerIsThinPerUserWiXPackage(t *testing.T) {
 func TestWindowsInstallerRejectsUnexpectedElementAttributes(t *testing.T) {
 	expected := map[string]string{
 		"Id":   "CodeskExecutable",
-		"Guid": "*",
+		"Guid": codeskExecutableComponentGUID,
 	}
 	var baseline wixElement
-	if err := xml.Unmarshal([]byte(`<Component xmlns="`+wixNamespace+`" Id="CodeskExecutable" Guid="*" />`), &baseline); err != nil {
+	if err := xml.Unmarshal([]byte(`<Component xmlns="`+wixNamespace+`" Id="CodeskExecutable" Guid="`+codeskExecutableComponentGUID+`" />`), &baseline); err != nil {
 		t.Fatal(err)
 	}
 	if err := checkWixAttrs(baseline, expected); err != nil {
@@ -321,13 +329,104 @@ func TestWindowsInstallerRejectsUnexpectedElementAttributes(t *testing.T) {
 	}
 
 	var mutated wixElement
-	if err := xml.Unmarshal([]byte(`<Component xmlns="`+wixNamespace+`" Id="CodeskExecutable" Guid="*" Permanent="yes" />`), &mutated); err != nil {
+	if err := xml.Unmarshal([]byte(`<Component xmlns="`+wixNamespace+`" Id="CodeskExecutable" Guid="`+codeskExecutableComponentGUID+`" Permanent="yes" />`), &mutated); err != nil {
 		t.Fatal(err)
 	}
 	if err := checkWixAttrs(mutated, expected); err == nil {
 		t.Fatal("unexpected Permanent attribute passed the exact WiX attribute contract")
 	} else if !strings.Contains(err.Error(), "Permanent") {
 		t.Fatalf("unexpected-attribute mutation failed for the wrong reason: %v", err)
+	}
+}
+
+func TestWindowsInstallerRejectsInvalidPayloadComponentGUIDs(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "deploy", "windows-desktop", "Package.wxs")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name      string
+		id        string
+		canonical string
+		mutated   string
+		expected  string
+	}{
+		{
+			name:      "Codesk wildcard",
+			id:        "CodeskExecutable",
+			canonical: `<Component Id="CodeskExecutable" Guid="` + codeskExecutableComponentGUID + `">`,
+			mutated:   `<Component Id="CodeskExecutable" Guid="*">`,
+			expected:  codeskExecutableComponentGUID,
+		},
+		{
+			name:      "agent wildcard",
+			id:        "AgentToolExecutable",
+			canonical: `<Component Id="AgentToolExecutable" Guid="` + agentToolExecutableComponentGUID + `">`,
+			mutated:   `<Component Id="AgentToolExecutable" Guid="*">`,
+			expected:  agentToolExecutableComponentGUID,
+		},
+		{
+			name:      "Codesk empty",
+			id:        "CodeskExecutable",
+			canonical: `<Component Id="CodeskExecutable" Guid="` + codeskExecutableComponentGUID + `">`,
+			mutated:   `<Component Id="CodeskExecutable" Guid="">`,
+			expected:  codeskExecutableComponentGUID,
+		},
+		{
+			name:      "agent empty",
+			id:        "AgentToolExecutable",
+			canonical: `<Component Id="AgentToolExecutable" Guid="` + agentToolExecutableComponentGUID + `">`,
+			mutated:   `<Component Id="AgentToolExecutable" Guid="">`,
+			expected:  agentToolExecutableComponentGUID,
+		},
+		{
+			name:      "duplicate",
+			id:        "AgentToolExecutable",
+			canonical: `<Component Id="AgentToolExecutable" Guid="` + agentToolExecutableComponentGUID + `">`,
+			mutated:   `<Component Id="AgentToolExecutable" Guid="` + codeskExecutableComponentGUID + `">`,
+			expected:  agentToolExecutableComponentGUID,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := bytes.Count(data, []byte(test.canonical)); got != 1 {
+				t.Fatalf("got %d canonical %s component starts, want 1", got, test.id)
+			}
+			mutated := bytes.Replace(data, []byte(test.canonical), []byte(test.mutated), 1)
+			var root wixElement
+			if err := xml.Unmarshal(mutated, &root); err != nil {
+				t.Fatal(err)
+			}
+			component, err := wixElementByID(root, "Component", test.id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := checkWixAttrs(component, map[string]string{"Id": test.id, "Guid": test.expected}); err == nil {
+				t.Fatal("invalid component GUID mutation passed the exact WiX attribute contract")
+			} else if !strings.Contains(err.Error(), "Guid") {
+				t.Fatalf("component GUID mutation failed for the wrong reason: %v", err)
+			}
+		})
+	}
+}
+
+func TestWindowsInstallerRejectsArchitectureConditionedComponentGUIDs(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "deploy", "windows-desktop", "Package.wxs")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical := []byte(`<Component Id="CodeskExecutable" Guid="` + codeskExecutableComponentGUID + `">`)
+	if got := bytes.Count(data, canonical); got != 1 {
+		t.Fatalf("got %d canonical Codesk component starts, want 1", got)
+	}
+	conditioned := append([]byte(`<?if $(InstallerPlatform) = arm64 ?>`), canonical...)
+	mutated := bytes.Replace(data, canonical, conditioned, 1)
+	if err := checkInstallerDirectives(mutated); err == nil {
+		t.Fatal("architecture-conditioned component GUID mutation passed the fixed shared-identity contract")
+	} else if !strings.Contains(err.Error(), "if") {
+		t.Fatalf("architecture-conditioned GUID mutation failed for the wrong reason: %v", err)
 	}
 }
 
@@ -422,7 +521,7 @@ func TestWindowsInstallerRejectsRelocatedAgentComponent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	agentComponent := []byte(`          <Component Id="AgentToolExecutable" Guid="*">
+	agentComponent := []byte(`          <Component Id="AgentToolExecutable" Guid="` + agentToolExecutableComponentGUID + `">
             <File Id="AgentToolExe" Name="notty-agent-tool.exe" Source="$(AgentToolExe)" />
             <RegistryValue
               Root="HKCU"
@@ -458,21 +557,27 @@ func TestWindowsInstallerRejectsRelocatedAgentComponent(t *testing.T) {
 
 func assertNoInstallerDirectives(t *testing.T, data []byte) {
 	t.Helper()
+	if err := checkInstallerDirectives(data); err != nil {
+		t.Error(err)
+	}
+}
+
+func checkInstallerDirectives(data []byte) error {
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	for {
 		token, err := decoder.Token()
 		if err == io.EOF {
-			return
+			return nil
 		}
 		if err != nil {
-			t.Fatalf("scan WiX package tokens: %v", err)
+			return fmt.Errorf("scan WiX package tokens: %w", err)
 		}
 		switch token := token.(type) {
 		case xml.Directive:
-			t.Errorf("installer directives are not allowed: %q", token)
+			return fmt.Errorf("installer directives are not allowed: %q", token)
 		case xml.ProcInst:
 			if token.Target != "xml" {
-				t.Errorf("installer processing instruction %q is not allowed", token.Target)
+				return fmt.Errorf("installer processing instruction %q is not allowed", token.Target)
 			}
 		}
 	}

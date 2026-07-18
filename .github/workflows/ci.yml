@@ -297,7 +297,7 @@ jobs:
   windows-desktop-msi:
     name: Windows desktop MSI (WiX ${{ matrix.architecture }})
     needs: windows-daemon-build
-    runs-on: windows-latest
+    runs-on: [self-hosted, Windows, ARM64]
     timeout-minutes: 15
     strategy:
       fail-fast: false

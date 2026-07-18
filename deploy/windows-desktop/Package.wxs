@@ -22,7 +22,7 @@
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="PerUserProgramsFolder" Name="Programs">
         <Directory Id="INSTALLFOLDER" Name="Codesk">
-          <Component Id="CodeskExecutable" Guid="*">
+          <Component Id="CodeskExecutable" Guid="931D5BAC-B213-44A8-B234-E24E415613EC">
             <File Id="CodeskExe" Source="$(CodeskExe)">
               <Shortcut
                 Id="CodeskStartMenuShortcut"
@@ -43,7 +43,7 @@
             <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
             <RemoveFolder Id="RemovePerUserProgramsFolder" Directory="PerUserProgramsFolder" On="uninstall" />
           </Component>
-          <Component Id="AgentToolExecutable" Guid="*">
+          <Component Id="AgentToolExecutable" Guid="4DE1EFE2-7E29-4E46-A615-4CC9A6EB7DBE">
             <File Id="AgentToolExe" Name="notty-agent-tool.exe" Source="$(AgentToolExe)" />
             <RegistryValue
               Root="HKCU"
