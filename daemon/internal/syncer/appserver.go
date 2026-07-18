@@ -108,7 +108,7 @@ func (c *codexAppServer) Start(ctx context.Context) error {
 	// Start succeeds, the published RuntimeProcess owns this child until Stop.
 	// Binding the OS child to ctx would kill a healthy session when the supervisor
 	// cancels its per-attempt construction context immediately after publication.
-	cmd := exec.Command(c.cfg.CodexCommand, "app-server")
+	cmd := managedBackgroundCommand(c.cfg.CodexCommand, "app-server")
 	cmd.Dir = c.workdir
 	cmd.Env = append(os.Environ(), buildAgentToolEnv(c.cfg, c.toolToken)...)
 

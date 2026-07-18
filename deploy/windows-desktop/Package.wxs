@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" RequiredVersion="4.0.0">
+  <Package
+    Name="Codesk"
+    Manufacturer="Codesk"
+    Version="$(ProductVersion)"
+    ProductCode="$(VersionProductCode)"
+    Language="1033"
+    UpgradeCode="0C8C0BBA-06EE-43BA-BC34-768B9B740A09"
+    Scope="perUser"
+    InstallerVersion="500"
+    Compressed="yes">
+
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of Codesk is already installed."
+      Schedule="afterInstallExecute" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="Codesk.ico" SourceFile="$(CodeskIcon)" />
+    <Property Id="ARPPRODUCTICON" Value="Codesk.ico" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="PerUserProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Codesk">
+          <Component Id="CodeskExecutable" Guid="931D5BAC-B213-44A8-B234-E24E415613EC">
+            <File Id="CodeskExe" Source="$(CodeskExe)">
+              <Shortcut
+                Id="CodeskStartMenuShortcut"
+                Directory="CodeskProgramsFolder"
+                Name="Codesk"
+                Description="Codesk desktop app"
+                WorkingDirectory="INSTALLFOLDER"
+                Icon="Codesk.ico" />
+            </File>
+            <RegistryValue
+              Root="HKCU"
+              Key="Software\Codesk\Installer\Components"
+              Name="CodeskExecutable"
+              Type="integer"
+              Value="1"
+              KeyPath="yes" />
+            <RemoveFolder Id="RemoveCodeskProgramsFolder" Directory="CodeskProgramsFolder" On="uninstall" />
+            <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+            <RemoveFolder Id="RemovePerUserProgramsFolder" Directory="PerUserProgramsFolder" On="uninstall" />
+          </Component>
+          <Component Id="AgentToolExecutable" Guid="4DE1EFE2-7E29-4E46-A615-4CC9A6EB7DBE">
+            <File Id="AgentToolExe" Name="notty-agent-tool.exe" Source="$(AgentToolExe)" />
+            <RegistryValue
+              Root="HKCU"
+              Key="Software\Codesk\Installer\Components"
+              Name="AgentToolExecutable"
+              Type="integer"
+              Value="1"
+              KeyPath="yes" />
+          </Component>
+          <Component
+            Id="CodeskLoginItemCleanup"
+            Guid="A11ADE55-B9B8-45E9-9DAB-60203C2A824E"
+            NeverOverwrite="yes">
+            <RegistryValue
+              Root="HKCU"
+              Key="Software\Microsoft\Windows\CurrentVersion\Run"
+              Name="Codesk"
+              Type="string"
+              Value=""
+              KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="CodeskProgramsFolder" Name="Codesk" />
+    </StandardDirectory>
+
+    <Feature Id="CodeskFeature" Title="Codesk" Level="1">
+      <ComponentRef Id="CodeskExecutable" />
+      <ComponentRef Id="AgentToolExecutable" />
+      <ComponentRef Id="CodeskLoginItemCleanup" />
+    </Feature>
+  </Package>
+</Wix>

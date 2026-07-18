@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"notty/daemon/internal/desktop"
+	"notty/daemon/internal/desktopstate"
 	"notty/daemon/internal/syncer"
 )
 
@@ -23,8 +24,8 @@ type Options struct {
 	CodeskOrigin  string
 	BackendOrigin string
 	Version       string
-	ConfigStore   desktop.ConfigurationStore
-	Secrets       desktop.SecretStore
+	ConfigStore   desktopstate.ConfigurationStore
+	Secrets       desktopstate.SecretStore
 	LoginItem     desktop.LoginItem
 	Opener        desktop.OpenURL
 	Logger        *log.Logger
@@ -38,8 +39,8 @@ type Application struct {
 	codeskOrigin  string
 	backendOrigin string
 	version       string
-	configStore   desktop.ConfigurationStore
-	secrets       desktop.SecretStore
+	configStore   desktopstate.ConfigurationStore
+	secrets       desktopstate.SecretStore
 	loginItem     desktop.LoginItem
 	opener        desktop.OpenURL
 	logger        *log.Logger
@@ -51,7 +52,7 @@ type Application struct {
 	loopDone   chan struct{}
 
 	stateMu       sync.RWMutex
-	config        desktop.Configuration
+	config        desktopstate.Configuration
 	hasConfig     bool
 	token         string
 	connecting    bool
@@ -117,7 +118,7 @@ func (a *Application) loadDurableState() {
 	} else if !errors.Is(configErr, os.ErrNotExist) {
 		a.logger.Printf("load configuration: %v", configErr)
 	}
-	token, tokenErr := a.secrets.Load(desktop.SecretKeyDaemonToken)
+	token, tokenErr := a.secrets.Load(desktopstate.SecretKeyDaemonToken)
 	if tokenErr == nil {
 		defer clear(token)
 		a.token = string(token)
@@ -144,6 +145,12 @@ func (a *Application) newService() (desktop.DaemonService, error) {
 	syncerConfig, err := desktop.SyncerConfig(a.dirs, a.backendOrigin, config.WorkspaceID, token, a.version)
 	if err != nil {
 		return nil, err
+	}
+	if a.controller != nil {
+		syncerConfig.RuntimeObserver = desktopRuntimeObserver{
+			serviceGeneration: a.controller.Snapshot().Generation,
+			logger:            a.logger,
+		}
 	}
 	return syncer.New(syncerConfig)
 }

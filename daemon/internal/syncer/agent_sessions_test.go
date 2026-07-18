@@ -36,7 +36,8 @@ type fakeRuntimeDriver struct {
 type fakeRuntimeProcess struct {
 	mu sync.Mutex
 
-	events chan RuntimeEvent
+	events     chan RuntimeEvent
+	eventsOnce sync.Once
 
 	started         bool
 	stopped         bool
@@ -59,6 +60,8 @@ type fakeRuntimeProcess struct {
 	startTurnEntered chan struct{}
 	startTurnRelease chan struct{}
 	startTurnErr     error
+	stopEntered      chan struct{}
+	stopRelease      chan struct{}
 }
 
 func newFakeRuntimeDriver() *fakeRuntimeDriver {
@@ -161,10 +164,25 @@ func (p *fakeRuntimeProcess) Start(ctx context.Context) error {
 }
 
 func (p *fakeRuntimeProcess) Stop() error {
+	if p.stopEntered != nil {
+		select {
+		case p.stopEntered <- struct{}{}:
+		default:
+		}
+	}
+	if p.stopRelease != nil {
+		<-p.stopRelease
+	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.stopped = true
+	p.exitInfo.Expected = true
+	p.mu.Unlock()
+	p.closeEvents()
 	return nil
+}
+
+func (p *fakeRuntimeProcess) closeEvents() {
+	p.eventsOnce.Do(func() { close(p.events) })
 }
 
 func (p *fakeRuntimeProcess) WriteStdin(ctx context.Context, input RuntimeInput) (RuntimeWriteResult, error) {
@@ -834,7 +852,7 @@ func TestAgentSessionDoesNotRestartAfterShutdown(t *testing.T) {
 
 	// Kill the runtime: closing Events drives consumeEvents into its restart
 	// path, which schedules the delayed respawn — parked at the injected delay.
-	close(process.events)
+	process.closeEvents()
 	<-parked
 
 	// Shutdown wins while the restart is parked. baseCancel unblocks the park; the
@@ -878,7 +896,7 @@ func TestAgentSessionExpectedStopIsNotRestarted(t *testing.T) {
 	// A deliberate stop must be classified expected and never restarted (else a
 	// shutdown/reconcile Stop would respawn what we just tore down).
 	process.setExitInfo(RuntimeExitInfo{Expected: true})
-	close(process.events)
+	process.closeEvents()
 
 	select {
 	case c := <-handled:
@@ -959,7 +977,7 @@ func TestAgentSessionTransientRestartBackoffGrowsAcrossRespawns(t *testing.T) {
 	// Three consecutive transient crashes with no proven uptime in between; the
 	// counter is per-agent so it survives each respawn and the backoff grows.
 	for i := 0; i < 3; i++ {
-		close(latestFakeProcess(factory).events)
+		latestFakeProcess(factory).closeEvents()
 		<-restarted
 	}
 	mu.Lock()
@@ -996,7 +1014,7 @@ func TestAgentSessionRestartCounterResetsOnCompletedTurn(t *testing.T) {
 	}
 
 	// First transient crash -> attempt 1 -> 2s backoff.
-	close(latestFakeProcess(factory).events)
+	latestFakeProcess(factory).closeEvents()
 	<-restarted
 
 	// The respawned agent completes a turn — proven uptime — which must reset the
@@ -1004,7 +1022,7 @@ func TestAgentSessionRestartCounterResetsOnCompletedTurn(t *testing.T) {
 	proc := latestFakeProcess(factory)
 	proc.events <- RuntimeEvent{Kind: RuntimeEventTurnCompleted}
 	waitRestartAttempts(t, supervisor, "agent_1", 0)
-	close(proc.events)
+	proc.closeEvents()
 	<-restarted
 
 	mu.Lock()
@@ -1043,7 +1061,7 @@ func TestAgentSessionUnrequestedCleanExitIsTransient(t *testing.T) {
 	// clean exit we didn't ask for must restart (transient), not be silently
 	// treated as a deliberate teardown.
 	process.setExitInfo(RuntimeExitInfo{ExitCode: 0, Expected: false})
-	close(process.events)
+	process.closeEvents()
 	if got := <-handled; got != "transient" {
 		t.Fatalf("unrequested clean exit classified %q, want transient", got)
 	}
@@ -1078,10 +1096,10 @@ func TestAgentSessionStaleProcessExitIsIgnored(t *testing.T) {
 	stale.setExitInfo(RuntimeExitInfo{ExitCode: 1})
 	done := make(chan struct{})
 	go func() {
-		supervisor.consumeEvents("agent_1", stale)
+		supervisor.consumeEvents(context.Background(), "agent_1", stale)
 		close(done)
 	}()
-	close(stale.events)
+	stale.closeEvents()
 	<-done
 
 	select {
@@ -1130,7 +1148,7 @@ func TestAgentSessionGenericExitDeathDefaultsToTransient(t *testing.T) {
 	}
 	process := factory.only(t)
 	process.setExitInfo(RuntimeExitInfo{ExitCode: 1})
-	close(process.events)
+	process.closeEvents()
 
 	if got := <-handled; got != "transient" {
 		t.Fatalf("generic exit-1 death classified %q, want transient", got)
@@ -1175,7 +1193,7 @@ func TestAgentSessionInjectedTerminalReasonRoutesToFailed(t *testing.T) {
 	}
 	process := factory.only(t)
 	process.setExitInfo(RuntimeExitInfo{ExitCode: 1})
-	close(process.events)
+	process.closeEvents()
 
 	if got := <-handled; got != "terminal" {
 		t.Fatalf("injected terminal reason classified %q, want terminal", got)
@@ -1373,7 +1391,7 @@ func TestAgentSessionReconcileDuringBackoffParkDoesNotBypassCap(t *testing.T) {
 		t.Fatalf("ensure session: %v", err)
 	}
 	proc1 := factory.only(t)
-	close(proc1.events)
+	proc1.closeEvents()
 	<-parked
 
 	if err := supervisor.Reconcile(context.Background(), []*agent{current}); err != nil {
@@ -1418,7 +1436,7 @@ func TestAgentSessionTurnFailedAndIdleDoNotResetBackoff(t *testing.T) {
 		t.Fatalf("ensure session: %v", err)
 	}
 
-	close(latestFakeProcess(factory).events)
+	latestFakeProcess(factory).closeEvents()
 	<-restarted
 
 	proc := latestFakeProcess(factory)
@@ -1427,7 +1445,7 @@ func TestAgentSessionTurnFailedAndIdleDoNotResetBackoff(t *testing.T) {
 	// Counter must remain at 1 through the non-completion events; the ordered,
 	// single consumeEvents goroutine processes them before the close below.
 	waitRestartAttempts(t, supervisor, "agent_1", 1)
-	close(proc.events)
+	proc.closeEvents()
 	<-restarted
 
 	mu.Lock()
@@ -1458,7 +1476,7 @@ func TestAgentSessionRemovalDuringBackoffParkDoesNotResurrect(t *testing.T) {
 		t.Fatalf("ensure session: %v", err)
 	}
 	proc1 := factory.only(t)
-	close(proc1.events)
+	proc1.closeEvents()
 	<-parked
 
 	if err := supervisor.Reconcile(context.Background(), nil); err != nil {
@@ -1499,7 +1517,7 @@ func TestAgentSessionTerminalFailedBlocksNotificationWrite(t *testing.T) {
 	}
 	proc1 := factory.only(t)
 	proc1.setExitInfo(RuntimeExitInfo{Expected: false})
-	close(proc1.events)
+	proc1.closeEvents()
 	if c := <-handled; c != "terminal" {
 		t.Fatalf("death classified %q, want terminal", c)
 	}
@@ -1648,7 +1666,7 @@ func TestAgentSessionStaleTurnCompletionDoesNotClobberParkedGeneration(t *testin
 
 	// The generation dies transiently while the write is blocked: it becomes
 	// disconnected + parked (a gated respawn is scheduled).
-	close(proc1.events)
+	proc1.closeEvents()
 	<-restartParked
 
 	// Snapshot after the death's disconnected publication settles: the fenced stale
@@ -1719,7 +1737,7 @@ func TestAgentSessionStaleStartTurnErrorAfterReplacementEnqueuesNothing(t *testi
 
 	// proc1 dies and is fully replaced by proc2 (a new resident generation) while the
 	// StartTurn write is still blocked against proc1.
-	close(proc1.events)
+	proc1.closeEvents()
 	<-restartParked
 	close(restartRelease)
 	<-restartDone
@@ -1762,7 +1780,7 @@ func TestAgentSessionParkedGenerationToolTokenIsRejected(t *testing.T) {
 		t.Fatal("a live generation's token must authorize")
 	}
 
-	close(latestFakeProcess(factory).events)
+	latestFakeProcess(factory).closeEvents()
 	<-parked
 	if supervisor.agentByToolToken(token1) != nil {
 		t.Fatal("dead (parked-transient) generation token still authorized — use-after-death auth leak")
@@ -1800,7 +1818,7 @@ func TestAgentSessionFailedGenerationToolTokenIsRejected(t *testing.T) {
 	token1 := nthSpawnToolToken(t, factory, 0)
 	proc1 := factory.only(t)
 	proc1.setExitInfo(RuntimeExitInfo{Expected: false})
-	close(proc1.events)
+	proc1.closeEvents()
 	if c := <-handled; c != "terminal" {
 		t.Fatalf("death classified %q, want terminal", c)
 	}
@@ -1835,7 +1853,7 @@ func TestAgentSessionTerminalReasonSanitizedAtPublishBoundary(t *testing.T) {
 	}
 	proc1 := factory.only(t)
 	proc1.setExitInfo(RuntimeExitInfo{Expected: false})
-	close(proc1.events)
+	proc1.closeEvents()
 	if c := <-handled; c != "terminal" {
 		t.Fatalf("death classified %q, want terminal", c)
 	}
@@ -1915,7 +1933,7 @@ func TestAgentSessionRemovalDuringReplacementConstructionDoesNotResurrect(t *tes
 	factory.startEntered = make(chan struct{}, 1)
 	factory.startRelease = make(chan struct{})
 
-	close(proc1.events)
+	proc1.closeEvents()
 	<-factory.startEntered
 
 	if err := supervisor.Reconcile(context.Background(), nil); err != nil {
@@ -1955,7 +1973,7 @@ func TestAgentSessionConfigRefreshBeforeConstructionUsesLatestSpec(t *testing.T)
 		t.Fatalf("ensure session: %v", err)
 	}
 	proc1 := factory.only(t)
-	close(proc1.events)
+	proc1.closeEvents()
 	<-parked
 
 	if err := supervisor.Reconcile(context.Background(), []*agent{{ID: "agent_1", Kind: "codex", SystemPrompt: "new instructions"}}); err != nil {
@@ -1989,7 +2007,7 @@ func TestAgentSessionConfigRefreshDuringConstructionRebuildsLatestSpec(t *testin
 	factory.startEntered = make(chan struct{}, 1)
 	factory.startRelease = make(chan struct{})
 
-	close(proc1.events)
+	proc1.closeEvents()
 	<-factory.startEntered
 	if err := supervisor.Reconcile(context.Background(), []*agent{{ID: "agent_1", Kind: "codex", SystemPrompt: "new instructions"}}); err != nil {
 		t.Fatalf("reconcile refresh during construction: %v", err)
@@ -2078,7 +2096,7 @@ func TestAgentSessionFailedReplacementReArmsNextAttempt(t *testing.T) {
 	factory.startErr = errors.New("replacement start boom")
 	factory.mu.Unlock()
 
-	close(proc1.events)
+	proc1.closeEvents()
 	<-restarted
 
 	mu.Lock()
@@ -2127,7 +2145,7 @@ func TestAgentSessionShutdownCancelsReArmedReplacement(t *testing.T) {
 	factory.startErr = errors.New("replacement start boom")
 	factory.mu.Unlock()
 
-	close(proc1.events)
+	proc1.closeEvents()
 	<-parked
 	supervisor.Shutdown() // joins the re-armed worker after baseCancel unblocks its park
 	<-restartDone
@@ -2228,7 +2246,7 @@ func TestAgentSessionIdenticalRefreshDuringConstructionPreservesReplacement(t *t
 	factory.startEntered = make(chan struct{}, 1)
 	factory.startRelease = make(chan struct{})
 
-	close(proc1.events)
+	proc1.closeEvents()
 	<-factory.startEntered
 
 	// Identical desired spec (no spawn-relevant change) reconciled during construction.
@@ -2269,7 +2287,7 @@ func TestAgentSessionShutdownCancelsBlockedReplacementConstruction(t *testing.T)
 	factory.startEntered = make(chan struct{}, 1)
 	factory.startRelease = make(chan struct{}) // never released
 
-	close(proc1.events)
+	proc1.closeEvents()
 	<-factory.startEntered // replacement blocked in Start
 
 	supervisor.Shutdown() // must cancel the blocked construction, not wait for release
@@ -2312,7 +2330,7 @@ func TestAgentSessionRemovalCancelsBlockedReplacementConstruction(t *testing.T) 
 	factory.startEntered = make(chan struct{}, 1)
 	factory.startRelease = make(chan struct{}) // never released
 
-	close(proc1.events)
+	proc1.closeEvents()
 	<-factory.startEntered
 
 	if err := supervisor.Reconcile(context.Background(), nil); err != nil {
@@ -2637,7 +2655,7 @@ func TestAgentSessionDeadGenerationJoinsHeartbeatLoop(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		supervisor.heartbeatLoop("agent_1", process)
+		supervisor.heartbeatLoop(context.Background(), "agent_1", process)
 	}()
 	// Prove the loop is alive: it must tick (publish working) at least twice.
 	for i := 0; i < 2; i++ {
@@ -3231,7 +3249,7 @@ func TestAgentSessionStalledReplacementRaceWithNaturalExitLaunchesOneRestarter(t
 	// Deliver the natural death to the wedge's consumeEvents. Its transient branch
 	// must see restartPending already claimed and defer — launching NO second
 	// restarter.
-	close(wedged.events)
+	wedged.closeEvents()
 	select {
 	case <-deathHandled:
 	case <-time.After(2 * time.Second):
@@ -3376,7 +3394,7 @@ func TestAgentSessionRestartSpecChangeCancelsBlockedConstruction(t *testing.T) {
 	factory.startEntered = make(chan struct{}, 1)
 	factory.startRelease = make(chan struct{})
 
-	close(proc1.events)
+	proc1.closeEvents()
 	<-factory.startEntered // replacement (old spec) blocked in Start
 	proc2 := latestFakeProcess(factory)
 

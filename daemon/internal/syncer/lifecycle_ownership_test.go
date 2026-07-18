@@ -849,7 +849,7 @@ func TestServiceAgentExitIsNonfatalAndSupervisorStopsRestarts(t *testing.T) {
 		t.Fatal("service did not become ready")
 	}
 	process := driver.only(t)
-	close(process.events)
+	process.closeEvents()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		service.sessions.mu.Lock()

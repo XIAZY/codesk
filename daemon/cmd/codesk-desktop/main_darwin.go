@@ -17,6 +17,7 @@ import (
 
 	"notty/daemon/internal/desktop"
 	"notty/daemon/internal/desktopapp"
+	"notty/daemon/internal/desktopstate"
 	"notty/daemon/internal/macosapp"
 )
 
@@ -90,7 +91,7 @@ func runDesktop() error {
 	log.SetPrefix("codesk-daemon: ")
 	log.SetFlags(log.Ldate | log.Ltime | log.LUTC)
 
-	configStore, err := desktop.NewFileConfigurationStore(dirs.Data)
+	configStore, err := desktopstate.NewFileConfigurationStore(dirs.Data)
 	if err != nil {
 		return err
 	}

@@ -19,6 +19,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 	"unsafe"
+
+	"notty/daemon/internal/desktopstate"
 )
 
 const (
@@ -30,7 +32,7 @@ type darwinKeychainSecretStore struct{}
 
 // NewDarwinKeychainSecretStore returns the current-user Keychain adapter for
 // the fixed Codesk desktop service identity.
-func NewDarwinKeychainSecretStore() SecretStore {
+func NewDarwinKeychainSecretStore() desktopstate.SecretStore {
 	return darwinKeychainSecretStore{}
 }
 

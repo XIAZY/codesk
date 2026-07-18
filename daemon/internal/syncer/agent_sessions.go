@@ -88,6 +88,15 @@ type agentSessionSupervisor struct {
 	// backoff and is reset only on proven uptime (a completed turn), never on a
 	// bare respawn — else a post-handshake quota kill would spin at full rate.
 	restartAttempts map[string]int
+	// observationSequence orders token-free diagnostic events within this service;
+	// runtimeGeneration disambiguates process replacement and PID reuse. Both are
+	// guarded by mu with the session state they describe.
+	observationSequence uint64
+	runtimeGeneration   uint64
+	observationQueue    []RuntimeObservation
+	observationWake     chan struct{}
+	observationDone     chan struct{}
+	observationClosed   bool
 
 	// baseCtx is the parent of every (fresh AND restart) detached construction AND
 	// every live consumeEvents loop; baseCancel (fired by Shutdown) cancels all
@@ -109,6 +118,11 @@ type agentSessionSupervisor struct {
 	// Add is done under s.mu on the same side as the shutdown check, so it can
 	// never race Wait and nothing is admitted after shutdown.
 	constructionWG sync.WaitGroup
+	// removalWG tracks Reconcile-owned session removals. An owner is registered
+	// under mu before the session leaves the map, then stops and joins that exact
+	// runtime generation before enqueueing stopped_expected. Shutdown closes the
+	// observation dispatcher only after every racing removal owner has finished.
+	removalWG sync.WaitGroup
 }
 
 type agentSessionStart struct {
@@ -164,6 +178,16 @@ type managedAgentSession struct {
 
 	activeTurn string
 	state      string
+
+	runtimeKind       RuntimeKind
+	runtimeGeneration uint64
+	runtimePID        int
+	turnSequence      uint64
+	observedTurnID    string
+	expectedStopOwned bool
+	lifecycleCancel   context.CancelFunc
+	eventLoopDone     chan struct{}
+	heartbeatLoopDone chan struct{}
 
 	// lastActivitySeq is the driver activity generation (process.ActivitySeq()) last
 	// observed for this session; lastActivityAt is the supervisor's OWN monotonic
@@ -423,6 +447,11 @@ func newAgentSessionSupervisor(cfg Config, updater agentSessionUpdater, runtimes
 		baseCtx:            baseCtx,
 		baseCancel:         baseCancel,
 	}
+	if cfg.RuntimeObserver != nil {
+		s.observationWake = make(chan struct{}, 1)
+		s.observationDone = make(chan struct{})
+		go s.dispatchRuntimeObservations()
+	}
 	// The default restart delay is baseCtx-aware so a parked restart unblocks
 	// promptly on Shutdown instead of lingering for the full capped backoff.
 	s.restartSleep = func(d time.Duration) {
@@ -434,6 +463,83 @@ func newAgentSessionSupervisor(cfg Config, updater agentSessionUpdater, runtimes
 		}
 	}
 	return s
+}
+
+func (s *agentSessionSupervisor) runtimeObservationLocked(session *managedAgentSession, state RuntimeObservationState) {
+	if s == nil || s.cfg.RuntimeObserver == nil || session == nil || s.observationClosed {
+		return
+	}
+	s.observationSequence++
+	s.observationQueue = append(s.observationQueue, RuntimeObservation{
+		Sequence:          s.observationSequence,
+		RuntimeGeneration: session.runtimeGeneration,
+		RuntimeKind:       session.runtimeKind,
+		PID:               session.runtimePID,
+		TurnSequence:      session.turnSequence,
+		State:             state,
+	})
+	s.signalRuntimeObservationDispatcherLocked()
+}
+
+func (s *agentSessionSupervisor) turnStartedObservationLocked(session *managedAgentSession, turnID string) {
+	turnID = strings.TrimSpace(turnID)
+	if turnID == "" || session == nil || session.observedTurnID == turnID {
+		return
+	}
+	session.turnSequence++
+	session.observedTurnID = turnID
+	s.runtimeObservationLocked(session, RuntimeObservationTurnStarted)
+}
+
+func (s *agentSessionSupervisor) turnTerminalObservationLocked(session *managedAgentSession, state RuntimeObservationState) {
+	if session == nil || session.observedTurnID == "" {
+		return
+	}
+	s.runtimeObservationLocked(session, state)
+	session.observedTurnID = ""
+}
+
+func (s *agentSessionSupervisor) signalRuntimeObservationDispatcherLocked() {
+	if s.observationWake == nil {
+		return
+	}
+	select {
+	case s.observationWake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *agentSessionSupervisor) dispatchRuntimeObservations() {
+	defer close(s.observationDone)
+	for range s.observationWake {
+		for {
+			s.mu.Lock()
+			if len(s.observationQueue) == 0 {
+				closed := s.observationClosed
+				s.mu.Unlock()
+				if closed {
+					return
+				}
+				break
+			}
+			observation := s.observationQueue[0]
+			s.observationQueue[0] = RuntimeObservation{}
+			s.observationQueue = s.observationQueue[1:]
+			s.mu.Unlock()
+			s.cfg.RuntimeObserver.ObserveRuntime(observation)
+		}
+	}
+}
+
+func (s *agentSessionSupervisor) closeRuntimeObservationDispatcher() {
+	if s == nil || s.observationDone == nil {
+		return
+	}
+	s.mu.Lock()
+	s.observationClosed = true
+	s.signalRuntimeObservationDispatcherLocked()
+	s.mu.Unlock()
+	<-s.observationDone
 }
 
 // bindServiceContext re-parents baseCtx onto the service run context exactly
@@ -494,6 +600,9 @@ func (s *agentSessionSupervisor) Reconcile(ctx context.Context, agents []*agent)
 	s.mu.Lock()
 	for agentID, session := range s.sessions {
 		if _, ok := desired[agentID]; !ok {
+			if !session.dead {
+				session.expectedStopOwned = true
+			}
 			stale = append(stale, session)
 			delete(s.sessions, agentID)
 			// Explicit removal ends this agent's lifecycle: drop its transient
@@ -518,9 +627,18 @@ func (s *agentSessionSupervisor) Reconcile(ctx context.Context, agents []*agent)
 			}
 		}
 	}
+	if len(stale) != 0 {
+		// Registered under the same lock Shutdown uses to close admission. If this
+		// Add wins, Shutdown necessarily observes it before Wait; if Shutdown wins,
+		// it has already emptied sessions and no later Reconcile can register work.
+		s.removalWG.Add(1)
+	}
 	s.mu.Unlock()
-	for _, session := range stale {
-		_ = session.process.Stop()
+	if len(stale) != 0 {
+		for _, session := range stale {
+			s.stopAndJoinRemovedSession(session)
+		}
+		s.removalWG.Done()
 	}
 	return errors.Join(errs...)
 }
@@ -539,13 +657,20 @@ func (s *agentSessionSupervisor) Shutdown() {
 		s.baseCancel()
 		sessions := make([]*managedAgentSession, 0, len(s.sessions))
 		for _, session := range s.sessions {
+			if !session.dead {
+				session.expectedStopOwned = true
+			}
 			sessions = append(sessions, session)
 		}
 		s.sessions = map[string]*managedAgentSession{}
 		s.mu.Unlock()
 		for _, session := range sessions {
-			_ = session.process.Stop()
+			s.stopAndJoinRemovedSession(session)
 		}
+		// A Reconcile that removed a generation immediately before shutdown owns
+		// that generation's stop/join/terminal observation. Keep the dispatcher
+		// open until every such owner has enqueued its final observation.
+		s.removalWG.Wait()
 		// Join every detached construction worker (fresh + restart) AND every live
 		// consumeEvents loop before status teardown: baseCancel above makes a real
 		// provider Start/handshake return and every event loop exit, so each drains,
@@ -553,10 +678,38 @@ func (s *agentSessionSupervisor) Shutdown() {
 		// never returns while a worker or event loop can still publish — no
 		// post-Shutdown zombie and no status write after teardown.
 		s.constructionWG.Wait()
+		s.closeRuntimeObservationDispatcher()
 		if s.status != nil {
 			s.status.Stop()
 		}
 	})
+}
+
+func (s *agentSessionSupervisor) stopAndJoinRemovedSession(session *managedAgentSession) {
+	if session == nil {
+		return
+	}
+	if session.process != nil {
+		_ = session.process.Stop()
+	}
+	if session.lifecycleCancel != nil {
+		session.lifecycleCancel()
+	}
+	waitForSessionLoop(session.eventLoopDone)
+	waitForSessionLoop(session.heartbeatLoopDone)
+
+	s.mu.Lock()
+	if session.expectedStopOwned {
+		session.expectedStopOwned = false
+		s.runtimeObservationLocked(session, RuntimeObservationStoppedExpected)
+	}
+	s.mu.Unlock()
+}
+
+func waitForSessionLoop(done <-chan struct{}) {
+	if done != nil {
+		<-done
+	}
 }
 
 // refreshDesiredSpec updates a session's desired agent spec to the latest and
@@ -895,6 +1048,8 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 		workdir:         workdir,
 		sessionID:       sessionID,
 		state:           "idle",
+		runtimeKind:     driver.Kind(),
+		runtimePID:      process.PID(),
 		lastActivityAt:  s.now(),
 		lastActivitySeq: process.ActivitySeq(),
 	}
@@ -937,6 +1092,12 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 		appendAgentLog(s.cfg, current.ID, "discarding runtime process because the fresh-start claim was invalidated (removed/retargeted)")
 		return nil
 	}
+	lifecycleCtx, lifecycleCancel := context.WithCancel(s.baseCtx)
+	session.lifecycleCancel = lifecycleCancel
+	session.eventLoopDone = make(chan struct{})
+	session.heartbeatLoopDone = make(chan struct{})
+	s.runtimeGeneration++
+	session.runtimeGeneration = s.runtimeGeneration
 	s.sessions[current.ID] = session
 	// Track the live event loop AND the heartbeat loop in the same barrier as
 	// construction workers: both are added under s.mu on the passing side of the
@@ -962,14 +1123,17 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 		CurrentActivity: "Idle",
 		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
+	s.runtimeObservationLocked(session, RuntimeObservationReady)
 	s.mu.Unlock()
 	go func() {
 		defer s.constructionWG.Done()
-		s.consumeEvents(current.ID, process)
+		defer close(session.eventLoopDone)
+		s.consumeEvents(lifecycleCtx, current.ID, process)
 	}()
 	go func() {
 		defer s.constructionWG.Done()
-		s.heartbeatLoop(current.ID, process)
+		defer close(session.heartbeatLoopDone)
+		s.heartbeatLoop(lifecycleCtx, current.ID, process)
 	}()
 	return nil
 }
@@ -1252,6 +1416,7 @@ func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, c
 			CurrentActivity: "Working",
 			LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 		})
+		s.turnStartedObservationLocked(currentSession, turnID)
 	}
 	s.mu.Unlock()
 	if stale {
@@ -1304,13 +1469,13 @@ func (s *agentSessionSupervisor) agentByToolToken(token string) *agentRun {
 	return nil
 }
 
-func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimeProcess) {
+func (s *agentSessionSupervisor) consumeEvents(ctx context.Context, agentID string, process RuntimeProcess) {
 	events := process.Events()
 	for {
 		var event RuntimeEvent
 		var ok bool
 		select {
-		case <-s.baseCtx.Done():
+		case <-ctx.Done():
 			return
 		case event, ok = <-events:
 			if !ok {
@@ -1323,16 +1488,16 @@ func (s *agentSessionSupervisor) consumeEvents(agentID string, process RuntimePr
 				s.markWorking(agentID, process, event.TurnID)
 			}
 		case RuntimeEventTurnCompleted:
-			s.markIdle(agentID, process, true)
+			s.markIdleObserved(agentID, process, true, RuntimeObservationTurnCompleted)
 			// A completed turn is the only proof of real uptime — the process ran
 			// actual work, not just respawned. It alone resets the transient
 			// backoff counter (never a failed turn or a bare idle/status event,
 			// which would let a crash->idle->crash agent hot-loop at the floor).
 			s.resetRestartBackoff(agentID, process)
 		case RuntimeEventTurnFailed:
-			s.markIdle(agentID, process, false)
+			s.markIdleObserved(agentID, process, false, RuntimeObservationTurnFailed)
 		case RuntimeEventIdle:
-			s.markIdle(agentID, process, true)
+			s.markIdleObserved(agentID, process, true, RuntimeObservationTurnIdle)
 		}
 	}
 disconnected:
@@ -1348,6 +1513,12 @@ disconnected:
 		terminalReason = s.terminalExitReason(exit)
 	}
 	transient := !exit.Expected && terminalReason == ""
+	stopState := RuntimeObservationStoppedExpected
+	if terminalReason != "" {
+		stopState = RuntimeObservationStoppedTerminal
+	} else if transient {
+		stopState = RuntimeObservationStoppedTransient
+	}
 
 	published := ""
 	if terminalReason != "" {
@@ -1416,6 +1587,7 @@ disconnected:
 				})
 			}
 		}
+		s.runtimeObservationLocked(session, stopState)
 	}
 	s.mu.Unlock()
 	if !owned {
@@ -1745,11 +1917,16 @@ func (s *agentSessionSupervisor) markWorking(agentID string, process RuntimeProc
 		CurrentActivity: "Working",
 		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
+	s.turnStartedObservationLocked(session, turnID)
 	s.mu.Unlock()
 	appendAgentLog(s.cfg, agentID, "event turn started turn=%s", turnID)
 }
 
 func (s *agentSessionSupervisor) markIdle(agentID string, process RuntimeProcess, delivered bool) {
+	s.markIdleObserved(agentID, process, delivered, RuntimeObservationTurnIdle)
+}
+
+func (s *agentSessionSupervisor) markIdleObserved(agentID string, process RuntimeProcess, delivered bool, observationState RuntimeObservationState) {
 	s.mu.Lock()
 	session := s.sessions[agentID]
 	if !writable(session, process) {
@@ -1792,6 +1969,7 @@ func (s *agentSessionSupervisor) markIdle(agentID string, process RuntimeProcess
 		CurrentActivity: "Idle",
 		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
+	s.turnTerminalObservationLocked(session, observationState)
 	wake := s.wakeAgent
 	s.mu.Unlock()
 	appendAgentLog(s.cfg, agentID, "event turn finished delivered=%t", delivered)
@@ -1804,12 +1982,12 @@ func (s *agentSessionSupervisor) markIdle(agentID string, process RuntimeProcess
 // liveness every heartbeatInterval and returns when the session's generation is
 // gone (replaced/removed) or the base context is cancelled (Shutdown / service
 // teardown). It is tracked in constructionWG so Shutdown drains it.
-func (s *agentSessionSupervisor) heartbeatLoop(agentID string, process RuntimeProcess) {
+func (s *agentSessionSupervisor) heartbeatLoop(ctx context.Context, agentID string, process RuntimeProcess) {
 	ticker := time.NewTicker(s.heartbeatInterval)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-s.baseCtx.Done():
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			if !s.evaluateLiveness(agentID, process) {

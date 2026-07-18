@@ -61,7 +61,7 @@ func (d *claudeDriver) Detect(ctx context.Context) RuntimeDetection {
 	}
 	detectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(detectCtx, path, "--version").CombinedOutput()
+	output, err := managedBackgroundCommandContext(detectCtx, path, "--version").CombinedOutput()
 	if err != nil {
 		return RuntimeDetection{Kind: RuntimeClaudeCode, Available: false, Path: path, Reason: "claude --version failed"}
 	}
@@ -78,6 +78,7 @@ func (d *claudeDriver) Spawn(ctx context.Context, spec RuntimeSpawnSpec) (Runtim
 		instructions:  spec.Instructions,
 		handshakeWait: d.handshakeWait,
 		events:        make(chan RuntimeEvent, 128),
+		eventsDone:    make(chan struct{}),
 		stopping:      make(chan struct{}),
 	}, nil
 }
@@ -91,8 +92,9 @@ type claudeRuntimeProcess struct {
 	instructions  string
 	handshakeWait time.Duration
 
-	events    chan RuntimeEvent
-	closeOnce sync.Once
+	events     chan RuntimeEvent
+	eventsDone chan struct{}
+	closeOnce  sync.Once
 	// stopping is closed by Stop (once, ever) and releases a lifecycle emit
 	// blocked on a full events channel; see emitLifecycle. It spans the whole
 	// process lifetime, like events — a failed spawn attempt that the
@@ -159,13 +161,16 @@ func (p *claudeRuntimeProcess) Stop() error {
 			err = nil
 		}
 		// The exit goroutine closes the events channel once cmd.Wait returns and
-		// readLoop drains (which is why it, not Stop, owns the close): stopped=true
-		// makes it terminal even if the kill lands inside the handshake window.
+		// readLoop drains (which is why it, not Stop, owns the close). Wait for that
+		// join so RuntimeProcess.Stop does not return while the child or event stream
+		// is still live.
+		p.waitEventsClosed()
 		p.closeLog()
 		return err
 	}
 	// Never spawned: no exit goroutine exists, so close the event stream here.
 	p.closeEvents()
+	p.waitEventsClosed()
 	p.closeLog()
 	return nil
 }
@@ -299,7 +304,7 @@ func (p *claudeRuntimeProcess) spawn(ctx context.Context, sessionID string, resu
 	args := p.buildArgs(sessionID, resume)
 	// Intentionally not exec.CommandContext: the spawn ctx is a
 	// per-reconcile request context, while the process must outlive it.
-	cmd := exec.Command(p.command, args...)
+	cmd := managedBackgroundCommand(p.command, args...)
 	cmd.Dir = p.workdir
 	cmd.Env = buildClaudeEnv(p.cfg, p.toolToken)
 
@@ -522,7 +527,16 @@ func (p *claudeRuntimeProcess) wasStopped() bool {
 func (p *claudeRuntimeProcess) closeEvents() {
 	p.closeOnce.Do(func() {
 		close(p.events)
+		if p.eventsDone != nil {
+			close(p.eventsDone)
+		}
 	})
+}
+
+func (p *claudeRuntimeProcess) waitEventsClosed() {
+	if p.eventsDone != nil {
+		<-p.eventsDone
+	}
 }
 
 // recordExitInfo captures why the process ended, before the events channel is
