@@ -32,11 +32,13 @@ func TestWindowsInstallerCIUsesArchitectureBoundProductPayloads(t *testing.T) {
 	}
 	workflow := string(data)
 	for source, count := range map[string]int{
-		"uses: actions/upload-artifact@v4":                                                                  2,
+		"uses: actions/upload-artifact@v4":                                                                  3,
 		"uses: actions/download-artifact@v4":                                                                1,
 		"name: windows-desktop-payload-amd64":                                                               1,
 		"name: windows-desktop-payload-arm64":                                                               1,
 		"name: windows-desktop-payload-${{ matrix.go_arch }}":                                               1,
+		"name: windows-desktop-msi-${{ matrix.go_arch }}":                                                   1,
+		"path: ${{ runner.temp }}/windows-desktop-msi-${{ matrix.go_arch }}/":                               1,
 		"needs: windows-daemon-build":                                                                       1,
 		`-o "$payload_dir/Codesk.exe" ./daemon/cmd/codesk-desktop`:                                          1,
 		`-o "$payload_dir/notty-agent-tool.exe" ./daemon/cmd/agenttool`:                                     1,
@@ -45,8 +47,15 @@ func TestWindowsInstallerCIUsesArchitectureBoundProductPayloads(t *testing.T) {
 		"path: ${{ runner.temp }}/windows-desktop-payload/amd64/":                                           1,
 		"path: ${{ runner.temp }}/windows-desktop-payload/arm64/":                                           1,
 		"runs-on: [self-hosted, Windows, ARM64]":                                                            1,
-		`(Join-Path $payload "Codesk.exe")`:                                                                 1,
-		`(Join-Path $payload "notty-agent-tool.exe")`:                                                       1,
+		`(Join-Path $payload "Codesk.exe")`:                                                                 2,
+		`(Join-Path $payload "notty-agent-tool.exe")`:                                                       2,
+		`./scripts/build-windows-desktop-msi-artifact.ps1`:                                                  1,
+		`-PreviousProductCode "${{ matrix.previous_product_code }}"`:                                        1,
+		`-CandidateProductCode "${{ matrix.candidate_product_code }}"`:                                      1,
+		"previous_product_code: 776C324C-1DC9-460F-9A20-2EF5A16F4E1E":                                       1,
+		"candidate_product_code: F7EFC1E1-CF36-4BAD-9188-5B8145D94289":                                      1,
+		"previous_product_code: 83D25A98-8C7D-4DB0-98F7-95BA31732600":                                       1,
+		"candidate_product_code: 3E947E2D-775C-4580-827D-4DC7368186F4":                                      1,
 		`"-p:ProductVersion=not-a-valid-msi-version"`:                                                       1,
 		`throw "WiX accepted the compiler-only invalid ProductVersion mutation"`:                            1,
 	} {
@@ -59,6 +68,212 @@ func TestWindowsInstallerCIUsesArchitectureBoundProductPayloads(t *testing.T) {
 			t.Errorf("CI installer payload must not use placeholder construction %q", placeholder)
 		}
 	}
+	if err := checkWindowsInstallerPowerShellContract(workflow); err != nil {
+		t.Fatal(err)
+	}
+	for name, replacement := range map[string]string{
+		"missing explicit shell": "",
+		"pwsh regression":        "\n        shell: pwsh",
+	} {
+		t.Run(name, func(t *testing.T) {
+			const declaration = "\n        shell: powershell"
+			if strings.Count(workflow, declaration) != 2 {
+				t.Fatalf("MSI job explicit shell count changed")
+			}
+			mutated := strings.Replace(workflow, declaration, replacement, 1)
+			if err := checkWindowsInstallerPowerShellContract(mutated); err == nil {
+				t.Fatal("MSI PowerShell contract mutation passed")
+			}
+		})
+	}
+}
+
+func checkWindowsInstallerPowerShellContract(workflow string) error {
+	const (
+		start = "  windows-desktop-msi:\n"
+		end   = "\n  windows-daemon-installer:\n"
+	)
+	startAt := strings.Index(workflow, start)
+	if startAt < 0 {
+		return fmt.Errorf("CI has no windows-desktop-msi job")
+	}
+	endAt := strings.Index(workflow[startAt:], end)
+	if endAt < 0 {
+		return fmt.Errorf("CI has no boundary after windows-desktop-msi job")
+	}
+	job := workflow[startAt : startAt+endAt]
+	if strings.Contains(job, "shell: pwsh") {
+		return fmt.Errorf("MSI job requires unavailable pwsh")
+	}
+
+	runSteps := 0
+	for _, step := range strings.Split(job, "\n      - ") {
+		if !strings.Contains(step, "\n        run:") {
+			continue
+		}
+		runSteps++
+		if !strings.Contains(step, "\n        shell: powershell\n") {
+			return fmt.Errorf("MSI run step does not explicitly use Windows PowerShell: %q", strings.SplitN(step, "\n", 2)[0])
+		}
+	}
+	if runSteps != 2 {
+		return fmt.Errorf("MSI job has %d run steps, want 2", runSteps)
+	}
+	return nil
+}
+
+func TestWindowsInstallerReproducibilityScriptsAreFailClosed(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "scripts")
+	buildData, err := os.ReadFile(filepath.Join(root, "build-windows-desktop-msi-artifact.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifyData, err := os.ReadFile(filepath.Join(root, "verify-windows-desktop-msi-reproducibility.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkWindowsInstallerReproducibilityScripts(string(buildData), string(verifyData)); err != nil {
+		t.Fatal(err)
+	}
+
+	mutations := []struct {
+		name      string
+		buildOld  string
+		buildNew  string
+		verifyOld string
+		verifyNew string
+	}{
+		{
+			name:     "suppressed ICE",
+			buildOld: "-p:SuppressValidation=false",
+			buildNew: "-p:SuppressValidation=true",
+		},
+		{
+			name:     "no independent-link clock boundary",
+			buildOld: "Start-Sleep -Seconds 2",
+			buildNew: "Start-Sleep -Seconds 0",
+		},
+		{
+			name:     "one clean link only",
+			buildOld: "$secondMsi = Invoke-CleanLink -Version $version -BuildNumber 2",
+			buildNew: "$secondMsi = $firstMsi",
+		},
+		{
+			name:     "architecture tuple not enforced",
+			buildOld: "$GoArchitecture -cne $expectedTarget.GoArchitecture",
+			buildNew: "$GoArchitecture -ceq $GoArchitecture",
+		},
+		{
+			name:      "no causal database mutation",
+			verifyOld: "'CodeskCausalMismatch'",
+			verifyNew: "'Codesk'",
+		},
+		{
+			name:      "PackageCode no longer allowed",
+			verifyOld: "$AllowedSummaryDifferencePids = @(9, 12, 13)",
+			verifyNew: "$AllowedSummaryDifferencePids = @(12, 13)",
+		},
+		{
+			name:      "LastPrintTime volatility broadened",
+			verifyOld: "$AllowedSummaryDifferencePids = @(9, 12, 13)",
+			verifyNew: "$AllowedSummaryDifferencePids = @(9, 11, 12, 13)",
+		},
+		{
+			name:      "component identity unpinned",
+			verifyOld: "CodeskExecutable = '{931D5BAC-B213-44A8-B234-E24E415613EC}'",
+			verifyNew: "CodeskExecutable = '*'",
+		},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			mutatedBuild := string(buildData)
+			mutatedVerify := string(verifyData)
+			if mutation.buildOld != "" {
+				if strings.Count(mutatedBuild, mutation.buildOld) != 1 {
+					t.Fatalf("build mutation source %q is not unique", mutation.buildOld)
+				}
+				mutatedBuild = strings.Replace(mutatedBuild, mutation.buildOld, mutation.buildNew, 1)
+			}
+			if mutation.verifyOld != "" {
+				if strings.Count(mutatedVerify, mutation.verifyOld) != 1 {
+					t.Fatalf("verifier mutation source %q is not unique", mutation.verifyOld)
+				}
+				mutatedVerify = strings.Replace(mutatedVerify, mutation.verifyOld, mutation.verifyNew, 1)
+			}
+			if err := checkWindowsInstallerReproducibilityScripts(mutatedBuild, mutatedVerify); err == nil {
+				t.Fatal("reproducibility contract mutation passed")
+			}
+		})
+	}
+}
+
+func checkWindowsInstallerReproducibilityScripts(build, verify string) error {
+	for _, required := range []string{
+		"previous and candidate ProductCodes must be distinct",
+		"Start-Sleep -Seconds 2",
+		"$firstMsi = Invoke-CleanLink -Version $version -BuildNumber 1",
+		"$secondMsi = Invoke-CleanLink -Version $version -BuildNumber 2",
+		"-p:SuppressValidation=false",
+		"verify-windows-desktop-msi-reproducibility.ps1",
+		"Codesk_0.0.1_windows_",
+		"Codesk_0.0.2_windows_",
+		"cleanLinksPerVersion = 2",
+		"provenance.json",
+		"SHA256SUMS",
+		"source head mismatch",
+		"inconsistent target tuple",
+		"$GoArchitecture -cne $expectedTarget.GoArchitecture",
+		"$InstallerPlatform -cne $expectedTarget.InstallerPlatform",
+	} {
+		if !strings.Contains(build, required) {
+			return fmt.Errorf("MSI artifact builder is missing %q", required)
+		}
+	}
+	if strings.Contains(build, "-p:SuppressValidation=true") {
+		return fmt.Errorf("MSI artifact builder suppresses ICE validation")
+	}
+
+	for _, required := range []string{
+		"msi decompile",
+		"WixToolset.Dtf.WindowsInstaller.Database",
+		"$database.ExportAll($Destination)",
+		"tools\\net472\\WixToolset.Dtf.WindowsInstaller.dll",
+		"$AllowedSummaryDifferencePids = @(9, 12, 13)",
+		"'9' = 'RevisionNumber'",
+		"'11' = 'LastPrintTime'",
+		"'12' = 'CreateTime'",
+		"'13' = 'LastSaveTime'",
+		"normalized MSI tables differ between clean links",
+		"normalized MSI database schema, rows, or streams differ between clean links",
+		"normalized MSI resources or embedded payloads differ between clean links",
+		"nonvolatile summary information",
+		"independent clean links reused the same PackageCode (SummaryInformation PID 9)",
+		"reproducibility comparison requires two distinct MSI paths",
+		"CodeskExecutable = '{931D5BAC-B213-44A8-B234-E24E415613EC}'",
+		"AgentToolExecutable = '{4DE1EFE2-7E29-4E46-A615-4CC9A6EB7DBE}'",
+		"'CodeskCausalMismatch'",
+		"MSI database causal mismatch was not rejected",
+	} {
+		if !strings.Contains(verify, required) {
+			return fmt.Errorf("MSI reproducibility verifier is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"[System.IO.Path]::GetRelativePath",
+		"RuntimeInformation",
+		"ConvertFrom-Json -AsHashtable",
+		"ForEach-Object -Parallel",
+		"Join-String",
+		"??",
+		"?.",
+		" && ",
+		" || ",
+	} {
+		if strings.Contains(build, forbidden) || strings.Contains(verify, forbidden) {
+			return fmt.Errorf("MSI PowerShell 5.1 scripts use unsupported source %q", forbidden)
+		}
+	}
+	return nil
 }
 
 func TestWindowsInstallerProjectPinsWiXBuildInputs(t *testing.T) {
