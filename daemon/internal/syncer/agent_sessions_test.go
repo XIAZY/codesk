@@ -4042,6 +4042,18 @@ func TestAgentSessionNonAuthoritativeEmptySlotNotificationRedeliversAfterReconci
 	}
 }
 
+func killProcess(t *testing.T, pid int) {
+	t.Helper()
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		t.Fatalf("find pid %d: %v", pid, err)
+	}
+	defer p.Release()
+	if err := p.Kill(); err != nil {
+		t.Fatalf("kill pid %d: %v", pid, err)
+	}
+}
+
 // closedChan returns a pre-closed channel suitable for unblocking the
 // startTurnRelease gate immediately.
 func closedChan() chan struct{} {
@@ -4443,5 +4455,75 @@ func TestAdmissionBackoffShutdownSuppressesWake(t *testing.T) {
 	case id := <-wakes:
 		t.Fatalf("wake fired after shutdown: %q", id)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestRestartConstructionSilentExitReportsAndRetries(t *testing.T) {
+	codexPath := fakeProcessCommand(t, fakeProcessCodexPersistent)
+	workspaceRoot := t.TempDir()
+	cfg := agentSessionTestConfig(t, workspaceRoot)
+	cfg.CodexCommand = codexPath
+
+	driver := newCodexDriver(cfg)
+	registry := newRuntimeRegistry(driver)
+	registry.detections[RuntimeCodex] = RuntimeDetection{Kind: RuntimeCodex, Available: true}
+
+	supervisor := newAgentSessionSupervisor(cfg, nil, registry)
+	defer supervisor.Shutdown()
+
+	sleepDelays := make(chan time.Duration, 8)
+	supervisor.restartSleep = func(d time.Duration) {
+		sleepDelays <- d
+	}
+
+	current := &agent{ID: "agent_1", Kind: "codex", WorkspaceRoot: workspaceRoot}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+
+	os.Setenv("FAKE_CODEX_SILENT_EXIT", "1")
+	defer os.Unsetenv("FAKE_CODEX_SILENT_EXIT")
+
+	supervisor.mu.Lock()
+	process := supervisor.sessions["agent_1"].process
+	supervisor.mu.Unlock()
+	pid := process.PID()
+	if pid <= 0 {
+		t.Fatal("published process has no PID")
+	}
+	killProcess(t, pid)
+
+	select {
+	case d := <-sleepDelays:
+		if d != 2*time.Second {
+			t.Fatalf("first restart delay = %v, want 2s", d)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("restart loop stranded — request did not unblock on silent child exit")
+	}
+
+	select {
+	case d := <-sleepDelays:
+		if d != 4*time.Second {
+			t.Fatalf("second restart delay = %v, want 4s (growing backoff)", d)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("restart loop did not re-arm after second failure")
+	}
+
+	logDir := filepath.Join(cfg.DataDir, "daemons", "workspace-test", "agents", "agent_1")
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		t.Fatalf("read agent log dir: %v", err)
+	}
+	var logContent []byte
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".logs") {
+			logContent, _ = os.ReadFile(filepath.Join(logDir, e.Name()))
+			break
+		}
+	}
+	if !strings.Contains(string(logContent), "process exited before responding") {
+		t.Fatalf("agent log missing diagnostic — got:\n%s", logContent)
 	}
 }

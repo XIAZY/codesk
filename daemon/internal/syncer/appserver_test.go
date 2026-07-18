@@ -884,3 +884,105 @@ func TestRequestReturnsTypedRPCErrorOnJSONRPCError(t *testing.T) {
 	stdoutWriter.Close()
 	stdinReader.Close()
 }
+
+func TestRequestUnblocksOnProcessExit(t *testing.T) {
+	client := newCodexAppServer(Config{}, t.TempDir(), "", "agent_codex")
+
+	stdinReader, stdinWriter := io.Pipe()
+	client.stdin = stdinWriter
+	copyDone := make(chan struct{})
+	go func() { io.Copy(io.Discard, stdinReader); close(copyDone) }()
+	t.Cleanup(func() { stdinWriter.Close(); stdinReader.Close(); <-copyDone })
+
+	stdoutReader, stdoutWriter := io.Pipe()
+	go client.readLoop(stdoutReader)
+
+	ready := make(chan struct{}, 1)
+	client.testHookBeforeRequestSelect = func(_ int64) {
+		select {
+		case ready <- struct{}{}:
+		default:
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := client.request(ctx, "initialize", map[string]any{})
+		errCh <- err
+	}()
+
+	select {
+	case <-ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("request did not reach select within 2s")
+	}
+	stdoutWriter.Close()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("request should return an error when process exits")
+		}
+		if !strings.Contains(err.Error(), "process exited before responding") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("request did not unblock after stdout closed")
+	}
+}
+
+func TestRequestDeliversResponseBeforeEOF(t *testing.T) {
+	client := newCodexAppServer(Config{}, t.TempDir(), "", "agent_codex")
+
+	stdinReader, stdinWriter := io.Pipe()
+	client.stdin = stdinWriter
+	copyDone := make(chan struct{})
+	go func() { io.Copy(io.Discard, stdinReader); close(copyDone) }()
+	t.Cleanup(func() { stdinWriter.Close(); stdinReader.Close(); <-copyDone })
+
+	close(client.readDone)
+
+	client.testHookBeforeRequestSelect = func(id int64) {
+		client.mu.Lock()
+		ch := client.pending[id]
+		delete(client.pending, id)
+		client.mu.Unlock()
+		if ch != nil {
+			ch <- appServerResponse{ID: id, Result: json.RawMessage(`{}`)}
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	for i := 0; i < 100; i++ {
+		res, err := client.request(ctx, "initialize", map[string]any{})
+		if err != nil {
+			t.Fatalf("iteration %d: response-precedence failed — got exit error instead of buffered response: %v", i, err)
+		}
+		if string(res) != "{}" {
+			t.Fatalf("iteration %d: result = %s, want {}", i, res)
+		}
+	}
+}
+
+func TestStartReturnsErrorOnSilentChildExit(t *testing.T) {
+	codexPath := fakeProcessCommand(t, fakeProcessCodexPersistent)
+	t.Setenv("FAKE_CODEX_SILENT_EXIT", "1")
+	client := newCodexAppServer(Config{CodexCommand: codexPath, DataDir: t.TempDir()}, t.TempDir(), "", "agent_codex")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := client.Start(ctx)
+	if err == nil {
+		_ = client.Stop()
+		t.Fatal("Start should return an error when child exits during initialize")
+	}
+	if !strings.Contains(err.Error(), "process exited before responding") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
