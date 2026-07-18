@@ -90,6 +90,27 @@ function Get-StringSha256 {
     }
 }
 
+function Get-NormalizedDecompiledSourceText {
+    param(
+        [Parameter(Mandatory = $true)][string] $SourcePath,
+        [Parameter(Mandatory = $true)][string] $ExtractRoot
+    )
+
+    $normalized = [System.IO.File]::ReadAllText($SourcePath).Replace("`r`n", "`n")
+    $extractRootToken = '__WIX_EXTRACT_ROOT__'
+    if ($normalized.Contains($extractRootToken)) {
+        throw "decompiled source contains reserved extract-root token: $extractRootToken"
+    }
+
+    $extractRootFull = [System.IO.Path]::GetFullPath($ExtractRoot)
+    $extractRootForms = @($extractRootFull, $extractRootFull.Replace('\', '/'))
+    foreach ($extractRootForm in $extractRootForms) {
+        $extractRootPattern = [regex]::Escape($extractRootForm) + '(?=[\\/])'
+        $normalized = $normalized -replace $extractRootPattern, $extractRootToken
+    }
+    return $normalized
+}
+
 function ConvertTo-NormalizedGuid {
     param([Parameter(Mandatory = $true)][string] $Value)
 
@@ -498,7 +519,7 @@ function Get-NormalizedSnapshot {
         throw "WiX decompile produced no source for $Name"
     }
 
-    $sourceText = [System.IO.File]::ReadAllText($source).Replace("`r`n", "`n")
+    $sourceText = Get-NormalizedDecompiledSourceText -SourcePath $source -ExtractRoot $extract
     $files = Get-ExtractedFileRecord $extract
     if ($files.Count -eq 0) {
         throw "WiX decompile extracted no resources for $Name"
@@ -529,6 +550,43 @@ function Get-NormalizedSnapshot {
     }
 }
 
+function Get-FirstDifferenceExcerpt {
+    param(
+        [Parameter(Mandatory = $true)][string] $Value,
+        [Parameter(Mandatory = $true)][int] $Offset
+    )
+
+    $contextLength = 160
+    $start = [Math]::Max(0, $Offset - $contextLength)
+    $length = [Math]::Min($Value.Length - $start, $contextLength * 2)
+    $excerpt = $Value.Substring($start, $length)
+    return ConvertTo-Json $excerpt -Compress
+}
+
+function Assert-TextEqual {
+    param(
+        [Parameter(Mandatory = $true)][string] $Label,
+        [Parameter(Mandatory = $true)][string] $First,
+        [Parameter(Mandatory = $true)][string] $Second
+    )
+
+    if ($First -ceq $Second) {
+        return
+    }
+
+    $commonLength = [Math]::Min($First.Length, $Second.Length)
+    $offset = 0
+    while ($offset -lt $commonLength -and $First[$offset] -ceq $Second[$offset]) {
+        $offset++
+    }
+    $firstExcerpt = Get-FirstDifferenceExcerpt -Value $First -Offset $offset
+    $secondExcerpt = Get-FirstDifferenceExcerpt -Value $Second -Offset $offset
+    Write-Host "$Label first difference at character $offset (first length $($First.Length), second length $($Second.Length))"
+    Write-Host "$Label first differing excerpt: $firstExcerpt"
+    Write-Host "$Label second differing excerpt: $secondExcerpt"
+    throw "$Label differs between clean links"
+}
+
 function Assert-JsonEqual {
     param(
         [Parameter(Mandatory = $true)][string] $Label,
@@ -538,9 +596,7 @@ function Assert-JsonEqual {
 
     $firstJson = ConvertTo-Json $First -Depth 20 -Compress
     $secondJson = ConvertTo-Json $Second -Depth 20 -Compress
-    if ($firstJson -cne $secondJson) {
-        throw "$Label differs between clean links"
-    }
+    Assert-TextEqual -Label $Label -First $firstJson -Second $secondJson
 }
 
 function Assert-SnapshotsEquivalent {
@@ -549,15 +605,9 @@ function Assert-SnapshotsEquivalent {
         [Parameter(Mandatory = $true)] $Second
     )
 
-    if ($First.SourceText -cne $Second.SourceText) {
-        throw 'normalized MSI tables differ between clean links'
-    }
-    if ($First.DatabaseFilesJson -cne $Second.DatabaseFilesJson) {
-        throw 'normalized MSI database schema, rows, or streams differ between clean links'
-    }
-    if ($First.ExtractedFilesJson -cne $Second.ExtractedFilesJson) {
-        throw 'normalized MSI resources or embedded payloads differ between clean links'
-    }
+    Assert-TextEqual -Label 'normalized MSI tables' -First $First.SourceText -Second $Second.SourceText
+    Assert-TextEqual -Label 'normalized MSI database schema, rows, or streams' -First $First.DatabaseFilesJson -Second $Second.DatabaseFilesJson
+    Assert-TextEqual -Label 'normalized MSI resources or embedded payloads' -First $First.ExtractedFilesJson -Second $Second.ExtractedFilesJson
     Assert-JsonEqual -Label 'package identity' -First $First.Identity -Second $Second.Identity
 
     $firstStableSummary = [ordered] @{}
