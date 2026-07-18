@@ -12,6 +12,10 @@ param(
     [string] $ExpectedProductVersion,
 
     [Parameter(Mandatory = $true)]
+    [ValidateSet('x64', 'arm64')]
+    [string] $ExpectedInstallerPlatform,
+
+    [Parameter(Mandatory = $true)]
     [string] $ExpectedCodeskSha256,
 
     [Parameter(Mandatory = $true)]
@@ -22,6 +26,9 @@ param(
 
     [Parameter(Mandatory = $true)]
     [string] $WorkingDirectory,
+
+    [Parameter(Mandatory = $true)]
+    [string] $SafeParentDirectory,
 
     [Parameter(Mandatory = $true)]
     [string] $ReportPath,
@@ -60,6 +67,10 @@ $SummaryPropertyNames = [ordered] @{
     '19' = 'Security'
 }
 $AllowedSummaryDifferencePids = @(9, 12, 13)
+$ExpectedSummaryTemplate = switch ($ExpectedInstallerPlatform) {
+    'x64' { 'x64;1033' }
+    'arm64' { 'Arm64;1033' }
+}
 
 function Get-Sha256 {
     param([Parameter(Mandatory = $true)][string] $Path)
@@ -83,6 +94,44 @@ function ConvertTo-NormalizedGuid {
     param([Parameter(Mandatory = $true)][string] $Value)
 
     return ([guid] $Value).ToString('B').ToUpperInvariant()
+}
+
+function Reset-EmptyDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $ExpectedParent,
+        [Parameter(Mandatory = $true)][string] $Label
+    )
+
+    if (-not (Test-Path -LiteralPath $ExpectedParent -PathType Container)) {
+        throw "$Label safe parent is missing: $ExpectedParent"
+    }
+    $parentFull = [System.IO.Path]::GetFullPath($ExpectedParent)
+    $pathFull = [System.IO.Path]::GetFullPath($Path)
+    $separator = [string] [System.IO.Path]::DirectorySeparatorChar
+    $parentPrefix = $parentFull
+    if (-not $parentPrefix.EndsWith($separator)) {
+        $parentPrefix += $separator
+    }
+    if (-not $pathFull.StartsWith($parentPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "$Label is not a safe child of $parentFull`: $pathFull"
+    }
+
+    if (Test-Path -LiteralPath $pathFull) {
+        Remove-Item -LiteralPath $pathFull -Recurse -Force -ErrorAction Stop
+    }
+    if (Test-Path -LiteralPath $pathFull) {
+        throw "$Label still exists after reset removal: $pathFull"
+    }
+    New-Item -ItemType Directory -Path $pathFull -ErrorAction Stop | Out-Null
+    if (-not (Test-Path -LiteralPath $pathFull -PathType Container)) {
+        throw "$Label was not recreated as a directory: $pathFull"
+    }
+    $remaining = @(Get-ChildItem -LiteralPath $pathFull -Force -ErrorAction Stop)
+    if ($remaining.Count -ne 0) {
+        throw "$Label is not empty after reset: $pathFull"
+    }
+    return $pathFull
 }
 
 function Get-NuGetRoot {
@@ -334,10 +383,59 @@ function Get-SummaryInformation {
             $result["PID$propertyId-$($SummaryPropertyNames[$propertyKey])"] = $fields[1]
         }
     }
-    if (-not $seen.ContainsKey(9)) {
-        throw 'exported SummaryInformation has no PackageCode PID 9'
+    foreach ($propertyId in $AllowedSummaryDifferencePids) {
+        if (-not $seen.ContainsKey($propertyId)) {
+            throw "exported SummaryInformation has no required allowed PID $propertyId"
+        }
+        $propertyKey = [string] $propertyId
+        $valueKey = "PID$propertyId-$($SummaryPropertyNames[$propertyKey])"
+        if ([string]::IsNullOrWhiteSpace([string] $result[$valueKey])) {
+            throw "exported SummaryInformation PID $propertyId has no value"
+        }
     }
     return $result
+}
+
+function Get-ValidatedAllowedSummaryInformation {
+    param([Parameter(Mandatory = $true)][string] $MsiPath)
+
+    $database = [WixToolset.Dtf.WindowsInstaller.Database]::new(
+        $MsiPath,
+        [WixToolset.Dtf.WindowsInstaller.DatabaseOpenMode]::ReadOnly
+    )
+    $summaryInfo = $null
+    try {
+        $summaryInfo = $database.SummaryInfo
+        $packageCodeValue = [string] $summaryInfo.RevisionNumber
+        try {
+            $packageCode = ConvertTo-NormalizedGuid $packageCodeValue
+        } catch {
+            throw "SummaryInformation PID 9 is not a PackageCode GUID: $packageCodeValue"
+        }
+        if ($packageCode -ceq ([guid]::Empty).ToString('B').ToUpperInvariant()) {
+            throw 'SummaryInformation PID 9 PackageCode must not be empty'
+        }
+
+        $createTime = [datetime] $summaryInfo.CreateTime
+        if ($createTime -eq [datetime]::MinValue) {
+            throw 'SummaryInformation PID 12 is not a parseable MSI timestamp'
+        }
+        $lastSaveTime = [datetime] $summaryInfo.LastSaveTime
+        if ($lastSaveTime -eq [datetime]::MinValue) {
+            throw 'SummaryInformation PID 13 is not a parseable MSI timestamp'
+        }
+
+        return [ordered] @{
+            packageCode = $packageCode
+            createTime = $createTime.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+            lastSaveTime = $lastSaveTime.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+        }
+    } finally {
+        if ($null -ne $summaryInfo) {
+            $summaryInfo.Close()
+        }
+        $database.Close()
+    }
 }
 
 function Get-NormalizedSnapshot {
@@ -347,12 +445,26 @@ function Get-NormalizedSnapshot {
     )
 
     $root = Join-Path $WorkingDirectory $Name
-    Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+    $root = Reset-EmptyDirectory `
+        -Path $root `
+        -ExpectedParent $WorkingDirectory `
+        -Label "$Name snapshot root"
     $extract = Join-Path $root 'extract'
+    $extract = Reset-EmptyDirectory `
+        -Path $extract `
+        -ExpectedParent $root `
+        -Label "$Name extracted resources"
     $databaseExport = Join-Path $root 'database'
+    $databaseExport = Reset-EmptyDirectory `
+        -Path $databaseExport `
+        -ExpectedParent $root `
+        -Label "$Name database export"
     $intermediate = Join-Path $root 'intermediate'
+    $intermediate = Reset-EmptyDirectory `
+        -Path $intermediate `
+        -ExpectedParent $root `
+        -Label "$Name decompiler intermediate"
     $source = Join-Path $root 'package.wxs'
-    New-Item -ItemType Directory -Force -Path $extract, $databaseExport, $intermediate | Out-Null
 
     & dotnet $script:WixDll msi decompile $MsiPath `
         -intermediateFolder $intermediate `
@@ -375,6 +487,7 @@ function Get-NormalizedSnapshot {
     $databaseFiles = Get-NormalizedDatabaseFileRecord $databaseExport
     $databaseFilesJson = ConvertTo-Json $databaseFiles -Depth 5 -Compress
     $summary = Get-SummaryInformation (Join-Path $databaseExport '_SummaryInformation.idt')
+    $validatedAllowedSummary = Get-ValidatedAllowedSummaryInformation -MsiPath $MsiPath
 
     return [pscustomobject] @{
         Name = $Name
@@ -391,6 +504,7 @@ function Get-NormalizedSnapshot {
         DatabaseTreeSha256 = Get-StringSha256 $databaseFilesJson
         Identity = Get-PackageIdentity -SourcePath $source -ExtractRoot $extract
         Summary = $summary
+        ValidatedAllowedSummary = $validatedAllowedSummary
     }
 }
 
@@ -451,6 +565,9 @@ function Assert-ExpectedIdentity {
     if ($identity.productVersion -cne $ExpectedProductVersion) {
         throw "ProductVersion $($identity.productVersion) does not match expected $ExpectedProductVersion"
     }
+    if ($Snapshot.Summary['PID7-Template'] -cne $ExpectedSummaryTemplate) {
+        throw "MSI SummaryInformation Template $($Snapshot.Summary['PID7-Template']) does not match expected $ExpectedSummaryTemplate"
+    }
     Assert-JsonEqual -Label 'component identities' -First $ExpectedComponents -Second $identity.components
 
     $expectedPayloads = [ordered] @{
@@ -470,8 +587,14 @@ $second = (Resolve-Path -LiteralPath $SecondMsi).Path
 if ($first -ceq $second) {
     throw 'reproducibility comparison requires two distinct MSI paths'
 }
-Remove-Item -LiteralPath $WorkingDirectory -Recurse -Force -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force -Path $WorkingDirectory | Out-Null
+if (-not (Test-Path -LiteralPath $SafeParentDirectory -PathType Container)) {
+    throw "safe parent directory is missing: $SafeParentDirectory"
+}
+$SafeParentDirectory = (Resolve-Path -LiteralPath $SafeParentDirectory).Path
+$WorkingDirectory = Reset-EmptyDirectory `
+    -Path $WorkingDirectory `
+    -ExpectedParent $SafeParentDirectory `
+    -Label 'reproducibility working directory'
 
 $nugetRoot = Get-NuGetRoot
 $toolRoot = Join-Path $nugetRoot "wixtoolset.sdk\$WixSdkVersion\tools\net6.0"
@@ -561,12 +684,14 @@ $report = [ordered] @{
             msiSha256 = Get-Sha256 $first
             msiSize = (Get-Item -LiteralPath $first).Length
             summaryInformation = $firstSnapshot.Summary
+            validatedAllowedSummaryInformation = $firstSnapshot.ValidatedAllowedSummary
         },
         [ordered] @{
             name = 'second'
             msiSha256 = Get-Sha256 $second
             msiSize = (Get-Item -LiteralPath $second).Length
             summaryInformation = $secondSnapshot.Summary
+            validatedAllowedSummaryInformation = $secondSnapshot.ValidatedAllowedSummary
         }
     )
     causalMismatch = [ordered] @{
@@ -577,8 +702,9 @@ $report = [ordered] @{
 }
 
 $reportDirectory = Split-Path -Parent $ReportPath
-if (-not [string]::IsNullOrEmpty($reportDirectory)) {
-    New-Item -ItemType Directory -Force -Path $reportDirectory | Out-Null
+if ([string]::IsNullOrEmpty($reportDirectory) -or
+    -not (Test-Path -LiteralPath $reportDirectory -PathType Container)) {
+    throw "reproducibility report directory is missing: $reportDirectory"
 }
 $json = ConvertTo-Json $report -Depth 20
 [System.IO.File]::WriteAllText($ReportPath, $json + "`n", [System.Text.UTF8Encoding]::new($false))

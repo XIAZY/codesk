@@ -315,21 +315,34 @@ jobs:
             candidate_product_code: 3E947E2D-775C-4580-827D-4DC7368186F4
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: 8.0.423
       - name: Download architecture-matched product payload
         uses: actions/download-artifact@v4
         with:
           name: windows-desktop-payload-${{ matrix.go_arch }}
-          path: ${{ runner.temp }}/wix-payload-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/wix-payload-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.architecture }}
       - name: Verify downloaded product PE identities
-        shell: powershell
+        shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '{0}'"
         run: |
-          $payload = Join-Path $env:RUNNER_TEMP "wix-payload-${{ matrix.architecture }}"
+          $payload = Join-Path $env:RUNNER_TEMP "wix-payload-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.architecture }}"
+          $payloadDirectories = @(Get-ChildItem -LiteralPath $payload -Directory -Recurse -Force)
+          if ($payloadDirectories.Count -ne 0) {
+            throw "downloaded payload contains unexpected directories: $($payloadDirectories.FullName -join ', ')"
+          }
+          $payloadFiles = @(Get-ChildItem -LiteralPath $payload -File -Recurse -Force)
+          $actualPayloadNames = @($payloadFiles | ForEach-Object Name | Sort-Object)
+          $expectedPayloadNames = @("Codesk.exe", "notty-agent-tool.exe")
+          if ((ConvertTo-Json $actualPayloadNames -Compress) -cne
+              (ConvertTo-Json ($expectedPayloadNames | Sort-Object) -Compress)) {
+            throw "unexpected downloaded payload set: $($actualPayloadNames -join ', ')"
+          }
           go run ./scripts/verify-windows-desktop-pe.go `
             (Join-Path $payload "Codesk.exe") `
             "${{ matrix.go_arch }}" gui
@@ -339,9 +352,9 @@ jobs:
             "${{ matrix.go_arch }}" console
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build reproducible previous and candidate WiX packages
-        shell: powershell
+        shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '{0}'"
         run: |
-          $payload = Join-Path $env:RUNNER_TEMP "wix-payload-${{ matrix.architecture }}"
+          $payload = Join-Path $env:RUNNER_TEMP "wix-payload-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.architecture }}"
           $output = Join-Path $env:RUNNER_TEMP "windows-desktop-msi-${{ matrix.go_arch }}"
           $work = Join-Path $env:RUNNER_TEMP "windows-desktop-msi-work-${{ matrix.go_arch }}"
           ./scripts/build-windows-desktop-msi-artifact.ps1 `
@@ -353,7 +366,12 @@ jobs:
             -CodeskExe (Join-Path $payload "Codesk.exe") `
             -AgentToolExe (Join-Path $payload "notty-agent-tool.exe") `
             -CodeskIcon "${{ github.workspace }}\daemon\cmd\codesk-desktop\assets\codesk.ico" `
-            -SourceHead "${{ github.sha }}" `
+            -SourceEvent "${{ github.event_name }}" `
+            -SourceCheckoutCommit "${{ github.sha }}" `
+            -SourceHead "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}" `
+            -SourceBase "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}" `
+            -SafeParentDirectory $env:RUNNER_TEMP `
+            -DotnetSdkVersion "8.0.423" `
             -OutputDirectory $output `
             -WorkingDirectory $work
 

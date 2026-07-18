@@ -31,33 +31,43 @@ func TestWindowsInstallerCIUsesArchitectureBoundProductPayloads(t *testing.T) {
 		t.Fatal(err)
 	}
 	workflow := string(data)
+	const msiShell = `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '{0}'"`
 	for source, count := range map[string]int{
-		"uses: actions/upload-artifact@v4":                                                                  3,
-		"uses: actions/download-artifact@v4":                                                                1,
-		"name: windows-desktop-payload-amd64":                                                               1,
-		"name: windows-desktop-payload-arm64":                                                               1,
-		"name: windows-desktop-payload-${{ matrix.go_arch }}":                                               1,
-		"name: windows-desktop-msi-${{ matrix.go_arch }}":                                                   1,
-		"path: ${{ runner.temp }}/windows-desktop-msi-${{ matrix.go_arch }}/":                               1,
-		"needs: windows-daemon-build":                                                                       1,
-		`-o "$payload_dir/Codesk.exe" ./daemon/cmd/codesk-desktop`:                                          1,
-		`-o "$payload_dir/notty-agent-tool.exe" ./daemon/cmd/agenttool`:                                     1,
-		`go run ./scripts/verify-windows-desktop-pe.go "$payload_dir/Codesk.exe" "$arch" gui`:               1,
-		`go run ./scripts/verify-windows-desktop-pe.go "$payload_dir/notty-agent-tool.exe" "$arch" console`: 1,
-		"path: ${{ runner.temp }}/windows-desktop-payload/amd64/":                                           1,
-		"path: ${{ runner.temp }}/windows-desktop-payload/arm64/":                                           1,
-		"runs-on: [self-hosted, Windows, ARM64]":                                                            1,
-		`(Join-Path $payload "Codesk.exe")`:                                                                 2,
-		`(Join-Path $payload "notty-agent-tool.exe")`:                                                       2,
-		`./scripts/build-windows-desktop-msi-artifact.ps1`:                                                  1,
-		`-PreviousProductCode "${{ matrix.previous_product_code }}"`:                                        1,
-		`-CandidateProductCode "${{ matrix.candidate_product_code }}"`:                                      1,
-		"previous_product_code: 776C324C-1DC9-460F-9A20-2EF5A16F4E1E":                                       1,
-		"candidate_product_code: F7EFC1E1-CF36-4BAD-9188-5B8145D94289":                                      1,
-		"previous_product_code: 83D25A98-8C7D-4DB0-98F7-95BA31732600":                                       1,
-		"candidate_product_code: 3E947E2D-775C-4580-827D-4DC7368186F4":                                      1,
-		`"-p:ProductVersion=not-a-valid-msi-version"`:                                                       1,
-		`throw "WiX accepted the compiler-only invalid ProductVersion mutation"`:                            1,
+		"uses: actions/upload-artifact@v4":                                                                                      3,
+		"uses: actions/download-artifact@v4":                                                                                    1,
+		"name: windows-desktop-payload-amd64":                                                                                   1,
+		"name: windows-desktop-payload-arm64":                                                                                   1,
+		"name: windows-desktop-payload-${{ matrix.go_arch }}":                                                                   1,
+		"name: windows-desktop-msi-${{ matrix.go_arch }}":                                                                       1,
+		"path: ${{ runner.temp }}/windows-desktop-msi-${{ matrix.go_arch }}/":                                                   1,
+		"needs: windows-daemon-build":                                                                                           1,
+		`-o "$payload_dir/Codesk.exe" ./daemon/cmd/codesk-desktop`:                                                              1,
+		`-o "$payload_dir/notty-agent-tool.exe" ./daemon/cmd/agenttool`:                                                         1,
+		`go run ./scripts/verify-windows-desktop-pe.go "$payload_dir/Codesk.exe" "$arch" gui`:                                   1,
+		`go run ./scripts/verify-windows-desktop-pe.go "$payload_dir/notty-agent-tool.exe" "$arch" console`:                     1,
+		"path: ${{ runner.temp }}/windows-desktop-payload/amd64/":                                                               1,
+		"path: ${{ runner.temp }}/windows-desktop-payload/arm64/":                                                               1,
+		"runs-on: [self-hosted, Windows, ARM64]":                                                                                1,
+		"shell: " + msiShell:                                                                                                    2,
+		`(Join-Path $payload "Codesk.exe")`:                                                                                     2,
+		`(Join-Path $payload "notty-agent-tool.exe")`:                                                                           2,
+		`./scripts/build-windows-desktop-msi-artifact.ps1`:                                                                      1,
+		`-PreviousProductCode "${{ matrix.previous_product_code }}"`:                                                            1,
+		`-CandidateProductCode "${{ matrix.candidate_product_code }}"`:                                                          1,
+		`-SourceEvent "${{ github.event_name }}"`:                                                                               1,
+		`-SourceCheckoutCommit "${{ github.sha }}"`:                                                                             1,
+		`-SourceHead "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"`:          1,
+		`-SourceBase "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}"`: 1,
+		`-SafeParentDirectory $env:RUNNER_TEMP`:                                                                                 1,
+		`-DotnetSdkVersion "8.0.423"`:                                                                                           1,
+		"dotnet-version: 8.0.423":                                                                                               1,
+		"path: ${{ runner.temp }}/wix-payload-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.architecture }}":        1,
+		"previous_product_code: 776C324C-1DC9-460F-9A20-2EF5A16F4E1E":                                                           1,
+		"candidate_product_code: F7EFC1E1-CF36-4BAD-9188-5B8145D94289":                                                          1,
+		"previous_product_code: 83D25A98-8C7D-4DB0-98F7-95BA31732600":                                                           1,
+		"candidate_product_code: 3E947E2D-775C-4580-827D-4DC7368186F4":                                                          1,
+		`"-p:ProductVersion=not-a-valid-msi-version"`:                                                                           1,
+		`throw "WiX accepted the compiler-only invalid ProductVersion mutation"`:                                                1,
 	} {
 		if got := strings.Count(workflow, source); got != count {
 			t.Errorf("CI source count for %q = %d, want %d", source, got, count)
@@ -71,24 +81,71 @@ func TestWindowsInstallerCIUsesArchitectureBoundProductPayloads(t *testing.T) {
 	if err := checkWindowsInstallerPowerShellContract(workflow); err != nil {
 		t.Fatal(err)
 	}
-	for name, replacement := range map[string]string{
-		"missing explicit shell": "",
-		"pwsh regression":        "\n        shell: pwsh",
-	} {
-		t.Run(name, func(t *testing.T) {
-			const declaration = "\n        shell: powershell"
-			if strings.Count(workflow, declaration) != 2 {
+	mutations := []struct {
+		name string
+		old  string
+		new  string
+	}{
+		{name: "missing explicit shell", old: "\n        shell: " + msiShell, new: ""},
+		{name: "bare PowerShell regression", old: "\n        shell: " + msiShell, new: "\n        shell: powershell"},
+		{name: "pwsh regression", old: "\n        shell: " + msiShell, new: "\n        shell: pwsh"},
+		{
+			name: "execution policy bypass removed",
+			old:  "\n        shell: " + msiShell,
+			new:  "\n        shell: powershell -NoProfile -NonInteractive -Command \". '{0}'\"",
+		},
+		{name: "floating dotnet SDK", old: "dotnet-version: 8.0.423", new: "dotnet-version: 8.0.x"},
+		{
+			name: "shallow provenance checkout",
+			old:  "      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n      - uses: actions/setup-go@v5",
+			new:  "      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 1\n      - uses: actions/setup-go@v5",
+		},
+		{name: "missing checkout identity", old: `-SourceCheckoutCommit "${{ github.sha }}"`, new: ""},
+		{
+			name: "swapped reviewed head identity",
+			old:  `-SourceHead "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"`,
+			new:  `-SourceHead "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}"`,
+		},
+		{name: "missing source base identity", old: `-SourceBase "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}"`, new: ""},
+		{
+			name: "payload path reuses prior run",
+			old:  "path: ${{ runner.temp }}/wix-payload-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.architecture }}",
+			new:  "path: ${{ runner.temp }}/wix-payload-${{ matrix.architecture }}",
+		},
+		{
+			name: "payload inventory is not recursive",
+			old:  "$payloadFiles = @(Get-ChildItem -LiteralPath $payload -File -Recurse -Force)",
+			new:  "$payloadFiles = @(Get-ChildItem -LiteralPath $payload -File -Force)",
+		},
+		{
+			name: "payload directory rejection removed",
+			old:  "if ($payloadDirectories.Count -ne 0)",
+			new:  "if ($payloadDirectories.Count -lt 0)",
+		},
+		{
+			name: "payload inventory drops agent tool",
+			old:  `$expectedPayloadNames = @("Codesk.exe", "notty-agent-tool.exe")`,
+			new:  `$expectedPayloadNames = @("Codesk.exe")`,
+		},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			if mutation.old == "\n        shell: "+msiShell && strings.Count(workflow, mutation.old) != 2 {
 				t.Fatalf("MSI job explicit shell count changed")
 			}
-			mutated := strings.Replace(workflow, declaration, replacement, 1)
+			if mutation.old != "\n        shell: "+msiShell && strings.Count(workflow, mutation.old) != 1 {
+				t.Fatalf("workflow mutation source %q is not unique", mutation.old)
+			}
+			mutated := strings.Replace(workflow, mutation.old, mutation.new, 1)
 			if err := checkWindowsInstallerPowerShellContract(mutated); err == nil {
-				t.Fatal("MSI PowerShell contract mutation passed")
+				t.Fatal("MSI workflow contract mutation passed")
 			}
 		})
 	}
 }
 
 func checkWindowsInstallerPowerShellContract(workflow string) error {
+	const msiShell = `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '{0}'"`
 	const (
 		start = "  windows-desktop-msi:\n"
 		end   = "\n  windows-daemon-installer:\n"
@@ -105,6 +162,32 @@ func checkWindowsInstallerPowerShellContract(workflow string) error {
 	if strings.Contains(job, "shell: pwsh") {
 		return fmt.Errorf("MSI job requires unavailable pwsh")
 	}
+	if strings.Contains(job, "\n        shell: powershell\n") {
+		return fmt.Errorf("MSI job uses execution-policy-sensitive bare PowerShell")
+	}
+	for required, count := range map[string]int{
+		"fetch-depth: 0":                            1,
+		"dotnet-version: 8.0.423":                   1,
+		`-SourceEvent "${{ github.event_name }}"`:   1,
+		`-SourceCheckoutCommit "${{ github.sha }}"`: 1,
+		`-SourceHead "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"`:          1,
+		`-SourceBase "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}"`: 1,
+		`-SafeParentDirectory $env:RUNNER_TEMP`: 1,
+		`-DotnetSdkVersion "8.0.423"`:           1,
+		"path: ${{ runner.temp }}/wix-payload-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.architecture }}":                1,
+		`$payload = Join-Path $env:RUNNER_TEMP "wix-payload-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.architecture }}"`: 2,
+		`$payloadDirectories = @(Get-ChildItem -LiteralPath $payload -Directory -Recurse -Force)`:                                       1,
+		`if ($payloadDirectories.Count -ne 0)`:                                         1,
+		`$payloadFiles = @(Get-ChildItem -LiteralPath $payload -File -Recurse -Force)`: 1,
+		`$expectedPayloadNames = @("Codesk.exe", "notty-agent-tool.exe")`:              1,
+	} {
+		if got := strings.Count(job, required); got != count {
+			return fmt.Errorf("MSI job source count for %q = %d, want %d", required, got, count)
+		}
+	}
+	if strings.Contains(job, "dotnet-version: 8.0.x") {
+		return fmt.Errorf("MSI job uses a floating .NET SDK")
+	}
 
 	runSteps := 0
 	for _, step := range strings.Split(job, "\n      - ") {
@@ -112,7 +195,7 @@ func checkWindowsInstallerPowerShellContract(workflow string) error {
 			continue
 		}
 		runSteps++
-		if !strings.Contains(step, "\n        shell: powershell\n") {
+		if !strings.Contains(step, "\n        shell: "+msiShell+"\n") {
 			return fmt.Errorf("MSI run step does not explicitly use Windows PowerShell: %q", strings.SplitN(step, "\n", 2)[0])
 		}
 	}
@@ -162,6 +245,81 @@ func TestWindowsInstallerReproducibilityScriptsAreFailClosed(t *testing.T) {
 			name:     "architecture tuple not enforced",
 			buildOld: "$GoArchitecture -cne $expectedTarget.GoArchitecture",
 			buildNew: "$GoArchitecture -ceq $GoArchitecture",
+		},
+		{
+			name:     "actual dotnet SDK drift accepted",
+			buildOld: "$dotnetVersion -cne $DotnetSdkVersion",
+			buildNew: "$dotnetVersion -ceq $DotnetSdkVersion",
+		},
+		{
+			name:     "pull request parents swapped",
+			buildOld: "$mergeBase -cne $SourceBase -or $mergeHead -cne $SourceHead",
+			buildNew: "$mergeBase -cne $SourceHead -or $mergeHead -cne $SourceBase",
+		},
+		{
+			name:     "reviewed head omitted from provenance",
+			buildOld: "sourceHead = $SourceHead",
+			buildNew: "omittedSourceHead = $SourceHead",
+		},
+		{
+			name:     "builder reset ignores deletion failure",
+			buildOld: "Remove-Item -LiteralPath $pathFull -Recurse -Force -ErrorAction Stop",
+			buildNew: "Remove-Item -LiteralPath $pathFull -Recurse -Force -ErrorAction SilentlyContinue",
+		},
+		{
+			name:      "verifier reset ignores deletion failure",
+			verifyOld: "Remove-Item -LiteralPath $pathFull -Recurse -Force -ErrorAction Stop",
+			verifyNew: "Remove-Item -LiteralPath $pathFull -Recurse -Force -ErrorAction SilentlyContinue",
+		},
+		{
+			name:     "builder reset skips empty assertion",
+			buildOld: "$remaining.Count -ne 0",
+			buildNew: "$remaining.Count -lt 0",
+		},
+		{
+			name:      "verifier reset skips empty assertion",
+			verifyOld: "$remaining.Count -ne 0",
+			verifyNew: "$remaining.Count -lt 0",
+		},
+		{
+			name:     "canonical artifact inventory not recursive",
+			buildOld: "Get-ChildItem -LiteralPath $Root -File -Recurse -Force -ErrorAction Stop",
+			buildNew: "Get-ChildItem -LiteralPath $Root -File -Force -ErrorAction Stop",
+		},
+		{
+			name:     "canonical artifact directories accepted",
+			buildOld: "$directories.Count -ne 0",
+			buildNew: "$directories.Count -lt 0",
+		},
+		{
+			name:      "required allowed summary PID omitted",
+			verifyOld: "if (-not $seen.ContainsKey($propertyId))",
+			verifyNew: "if ($seen.ContainsKey($propertyId))",
+		},
+		{
+			name:      "PackageCode GUID domain check removed",
+			verifyOld: "$packageCode = ConvertTo-NormalizedGuid $packageCodeValue",
+			verifyNew: "$packageCode = $packageCodeValue",
+		},
+		{
+			name:      "CreateTime domain check removed",
+			verifyOld: "$createTime -eq [datetime]::MinValue",
+			verifyNew: "$createTime -ne $createTime",
+		},
+		{
+			name:      "LastSaveTime domain check removed",
+			verifyOld: "$lastSaveTime -eq [datetime]::MinValue",
+			verifyNew: "$lastSaveTime -ne $lastSaveTime",
+		},
+		{
+			name:      "linked MSI platform not enforced",
+			verifyOld: "$Snapshot.Summary['PID7-Template'] -cne $ExpectedSummaryTemplate",
+			verifyNew: "$Snapshot.Summary['PID7-Template'] -cne $Snapshot.Summary['PID7-Template']",
+		},
+		{
+			name:      "DTF summary handle retained",
+			verifyOld: "$summaryInfo.Close()",
+			verifyNew: "$null = $summaryInfo",
 		},
 		{
 			name:      "no causal database mutation",
@@ -220,7 +378,33 @@ func checkWindowsInstallerReproducibilityScripts(build, verify string) error {
 		"cleanLinksPerVersion = 2",
 		"provenance.json",
 		"SHA256SUMS",
-		"source head mismatch",
+		"source checkout commit mismatch",
+		"pull request checkout parents do not map to source base then source head",
+		"$mergeBase -cne $SourceBase -or $mergeHead -cne $SourceHead",
+		"checkout-first-parent-fallback",
+		"git merge-base --is-ancestor",
+		"checkoutCommit = $SourceCheckoutCommit",
+		"sourceHead = $SourceHead",
+		"sourceBase = $SourceBase",
+		"sourceBaseResolution = $sourceBaseResolution",
+		"schemaVersion = 2",
+		"DotnetSdkVersion = '8.0.423'",
+		"$dotnetVersion -cne $DotnetSdkVersion",
+		"dotnet SDK mismatch before the first WiX link",
+		"Reset-EmptyDirectory",
+		"Remove-Item -LiteralPath $pathFull -Recurse -Force -ErrorAction Stop",
+		"$remaining.Count -ne 0",
+		"still exists after reset removal",
+		"is not empty after reset",
+		"-SafeParentDirectory $WorkingDirectory",
+		"-ExpectedInstallerPlatform $InstallerPlatform",
+		"Get-CanonicalArtifactFiles",
+		"Get-ChildItem -LiteralPath $Root -Directory -Recurse -Force -ErrorAction Stop",
+		"Get-ChildItem -LiteralPath $Root -File -Recurse -Force -ErrorAction Stop",
+		"$directories.Count -ne 0",
+		"canonical artifact set contains directories",
+		"unexpected checksummed artifact set",
+		"unexpected canonical artifact set",
 		"inconsistent target tuple",
 		"$GoArchitecture -cne $expectedTarget.GoArchitecture",
 		"$InstallerPlatform -cne $expectedTarget.InstallerPlatform",
@@ -231,6 +415,9 @@ func checkWindowsInstallerReproducibilityScripts(build, verify string) error {
 	}
 	if strings.Contains(build, "-p:SuppressValidation=true") {
 		return fmt.Errorf("MSI artifact builder suppresses ICE validation")
+	}
+	if strings.Contains(build, "-ErrorAction SilentlyContinue") || strings.Contains(verify, "-ErrorAction SilentlyContinue") {
+		return fmt.Errorf("MSI reproducibility cleanup ignores deletion failures")
 	}
 
 	for _, required := range []string{
@@ -253,6 +440,24 @@ func checkWindowsInstallerReproducibilityScripts(build, verify string) error {
 		"AgentToolExecutable = '{4DE1EFE2-7E29-4E46-A615-4CC9A6EB7DBE}'",
 		"'CodeskCausalMismatch'",
 		"MSI database causal mismatch was not rejected",
+		"'x64' { 'x64;1033' }",
+		"'arm64' { 'Arm64;1033' }",
+		"if (-not $seen.ContainsKey($propertyId))",
+		"exported SummaryInformation has no required allowed PID",
+		"$packageCode = ConvertTo-NormalizedGuid $packageCodeValue",
+		"SummaryInformation PID 9 is not a PackageCode GUID",
+		"$createTime -eq [datetime]::MinValue",
+		"SummaryInformation PID 12 is not a parseable MSI timestamp",
+		"$lastSaveTime -eq [datetime]::MinValue",
+		"SummaryInformation PID 13 is not a parseable MSI timestamp",
+		"$Snapshot.Summary['PID7-Template'] -cne $ExpectedSummaryTemplate",
+		"does not match expected $ExpectedSummaryTemplate",
+		"$summaryInfo.Close()",
+		"Reset-EmptyDirectory",
+		"Remove-Item -LiteralPath $pathFull -Recurse -Force -ErrorAction Stop",
+		"$remaining.Count -ne 0",
+		"still exists after reset removal",
+		"is not empty after reset",
 	} {
 		if !strings.Contains(verify, required) {
 			return fmt.Errorf("MSI reproducibility verifier is missing %q", required)
