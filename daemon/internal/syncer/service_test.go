@@ -1033,7 +1033,7 @@ func TestRefreshSharesFetchedWorkspaceWithWorkersAndReplicas(t *testing.T) {
 	}
 	defer service.closePrimaryRuntime()
 
-	if err := service.refresh(ctx); err != nil {
+	if err := service.refresh(ctx, service.snapshotEpoch.Load()); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 	time.Sleep(150 * time.Millisecond)
@@ -1184,7 +1184,7 @@ func TestRefreshStartsAgentSessionFromWorkspaceSnapshot(t *testing.T) {
 	defer service.closeAgentWorkers()
 	defer service.closeAgentRuntimes()
 
-	if err := service.refresh(context.Background()); err != nil {
+	if err := service.refresh(context.Background(), service.snapshotEpoch.Load()); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 	if got := workspaceRequests.Load(); got != 1 {
@@ -1269,7 +1269,7 @@ func TestRefreshStopsAgentSessionWhenWorkspaceSnapshotRemovesAgent(t *testing.T)
 	defer service.closeAgentWorkers()
 	defer service.closeAgentRuntimes()
 
-	if err := service.refresh(context.Background()); err != nil {
+	if err := service.refresh(context.Background(), service.snapshotEpoch.Load()); err != nil {
 		t.Fatalf("initial refresh: %v", err)
 	}
 	process := factory.only(t)
@@ -1280,7 +1280,7 @@ func TestRefreshStopsAgentSessionWhenWorkspaceSnapshotRemovesAgent(t *testing.T)
 		t.Fatal("expected initial refresh to start runtime process for workspace agent")
 	}
 
-	if err := service.refresh(context.Background()); err != nil {
+	if err := service.refresh(context.Background(), service.snapshotEpoch.Load()); err != nil {
 		t.Fatalf("removal refresh: %v", err)
 	}
 	if got := workspaceRequests.Load(); got != 2 {
@@ -4572,4 +4572,980 @@ func waitUntil(t *testing.T, condition func() bool) {
 	if !condition() {
 		t.Fatal("condition was not met before timeout")
 	}
+}
+
+func TestSnapshotAppliesWorkspaceWithoutRESTFetch(t *testing.T) {
+	var restFetches atomic.Int32
+	upgrader := websocket.Upgrader{}
+	snapshotData := workspaceResponse{
+		RootDocumentID: "doc_root",
+		Agents: []*agent{{
+			ID:     "agent_snap",
+			Handle: "snap-agent",
+			Kind:   "codex",
+		}},
+	}
+	snapshotJSON, _ := json.Marshal(snapshotData)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/ws/workspaces/"):
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			_ = conn.WriteJSON(workspaceEventEnvelope{
+				Type: "workspace.snapshot",
+				Data: snapshotJSON,
+			})
+			for {
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/workspace"):
+			restFetches.Add(1)
+			writeJSONResponse(w, http.StatusOK, &workspaceResponse{})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agents/"):
+			writeJSONResponse(w, http.StatusOK, toolInboxResponse{Items: []*agentEvent{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	service := &Service{
+		cfg: Config{
+			BackendURL:         server.URL,
+			WorkspaceID:        "workspace:test",
+			DataDir:            t.TempDir(),
+			WorkspaceDir:       t.TempDir(),
+			AgentWorkspaceRoot: t.TempDir(),
+			AgentID:            "daemon_agent",
+		},
+		client:        server.Client(),
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
+		agentWorkers:  map[string]*managedAgentWorker{},
+	}
+	defer service.closePrimaryRuntime()
+	defer service.closeAgentWorkers()
+	defer service.closeAgentRuntimes()
+	stopWorker := startTestRefreshWorker(t, service, ctx)
+
+	done := make(chan error, 1)
+	go func() { done <- service.runWorkspaceEventStream(ctx) }()
+
+	waitUntil(t, func() bool {
+		service.mu.Lock()
+		ws := service.latestWorkspace
+		service.mu.Unlock()
+		return ws != nil && len(ws.Agents) == 1 && ws.Agents[0].ID == "agent_snap"
+	})
+	cancel()
+	<-done
+	stopWorker()
+
+	if got := restFetches.Load(); got != 0 {
+		t.Fatalf("snapshot should not trigger REST fetch, got %d", got)
+	}
+}
+
+type fetchConcurrencyTracker struct {
+	inner         http.RoundTripper
+	inflight      atomic.Int32
+	maxConcurrent atomic.Int32
+}
+
+func (ct *fetchConcurrencyTracker) RoundTrip(req *http.Request) (*http.Response, error) {
+	if strings.HasSuffix(req.URL.Path, "/workspace") {
+		cur := ct.inflight.Add(1)
+		defer ct.inflight.Add(-1)
+		for {
+			old := ct.maxConcurrent.Load()
+			if cur <= old || ct.maxConcurrent.CompareAndSwap(old, cur) {
+				break
+			}
+		}
+	}
+	return ct.inner.RoundTrip(req)
+}
+
+func TestEventBurstCoalescesWithSingleRefreshOwner(t *testing.T) {
+	var restFetches atomic.Int32
+	sentinelJSON, _ := json.Marshal(workspaceResponse{Agents: []*agent{{ID: "sentinel", Kind: "codex"}}})
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/ws/workspaces/"):
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			for i := 0; i < 20; i++ {
+				_ = conn.WriteJSON(workspaceEventEnvelope{Type: "agent.updated"})
+			}
+			_ = conn.WriteJSON(workspaceEventEnvelope{Type: "workspace.snapshot", Data: sentinelJSON})
+			for {
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/workspace"):
+			restFetches.Add(1)
+			writeJSONResponse(w, http.StatusOK, &workspaceResponse{Agents: []*agent{{ID: "sentinel", Kind: "codex"}}})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agents/"):
+			writeJSONResponse(w, http.StatusOK, toolInboxResponse{Items: []*agentEvent{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	tracker := &fetchConcurrencyTracker{inner: server.Client().Transport}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	service := &Service{
+		cfg: Config{
+			BackendURL:         server.URL,
+			WorkspaceID:        "workspace:test",
+			DataDir:            t.TempDir(),
+			WorkspaceDir:       t.TempDir(),
+			AgentWorkspaceRoot: t.TempDir(),
+			AgentID:            "daemon_agent",
+		},
+		client:        &http.Client{Transport: tracker},
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
+		agentWorkers:  map[string]*managedAgentWorker{},
+	}
+	defer service.closePrimaryRuntime()
+	defer service.closeAgentWorkers()
+	defer service.closeAgentRuntimes()
+	stopWorker := startTestRefreshWorker(t, service, ctx)
+
+	done := make(chan error, 1)
+	go func() { done <- service.runWorkspaceEventStream(ctx) }()
+
+	waitUntil(t, func() bool {
+		service.mu.Lock()
+		ws := service.latestWorkspace
+		service.mu.Unlock()
+		return ws != nil && len(ws.Agents) == 1 && ws.Agents[0].ID == "sentinel"
+	})
+	cancel()
+	<-done
+	stopWorker()
+
+	if got := restFetches.Load(); got > 5 {
+		t.Fatalf("20-event burst should coalesce into far fewer refreshes, got %d", got)
+	}
+	if got := tracker.maxConcurrent.Load(); got != 1 {
+		t.Fatalf("max concurrent client-side REST fetches = %d, want exactly 1 (single owner)", got)
+	}
+}
+
+func TestPeriodicTickerTriggersRefresh(t *testing.T) {
+	var restFetches atomic.Int32
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/ws/workspaces/"):
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			for {
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/workspace"):
+			restFetches.Add(1)
+			writeJSONResponse(w, http.StatusOK, &workspaceResponse{})
+		case strings.HasSuffix(r.URL.Path, "/daemon/status"):
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agents/"):
+			writeJSONResponse(w, http.StatusOK, toolInboxResponse{Items: []*agentEvent{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ticks := make(chan time.Time, 1)
+	cfg := Config{
+		BackendURL:         server.URL,
+		WorkspaceID:        "workspace:test",
+		DaemonToken:        "daemon_token",
+		DataDir:            t.TempDir(),
+		WorkspaceDir:       t.TempDir(),
+		AgentWorkspaceRoot: t.TempDir(),
+		AgentID:            "daemon_agent",
+		AgentToolBaseURL:   "http://127.0.0.1:0",
+	}
+	service := &Service{
+		cfg:           cfg,
+		client:        server.Client(),
+		daemonStatus:  newDaemonStatusReporter(cfg, server.Client()),
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
+		agentWorkers:  map[string]*managedAgentWorker{},
+		ready:         make(chan struct{}),
+		refreshTicks:  ticks,
+	}
+	defer service.closePrimaryRuntime()
+	defer service.closeAgentWorkers()
+	defer service.closeAgentRuntimes()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- service.Run(ctx) }()
+
+	<-service.ready
+	restFetches.Store(0)
+	ticks <- time.Now()
+
+	waitUntil(t, func() bool { return restFetches.Load() >= 1 })
+	cancel()
+	<-done
+
+	if got := restFetches.Load(); got < 1 {
+		t.Fatalf("periodic tick should trigger REST refresh, got %d fetches", got)
+	}
+}
+
+func TestStreamReturnsPromptlyWhenRESTIsBlocked(t *testing.T) {
+	restBlocked := make(chan struct{})
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/ws/workspaces/"):
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			_ = conn.WriteJSON(workspaceEventEnvelope{Type: "agent.updated"})
+			<-restBlocked
+			time.Sleep(50 * time.Millisecond)
+			_ = conn.Close()
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/workspace"):
+			close(restBlocked)
+			<-r.Context().Done()
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agents/"):
+			writeJSONResponse(w, http.StatusOK, toolInboxResponse{Items: []*agentEvent{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	service := &Service{
+		cfg: Config{
+			BackendURL:         server.URL,
+			WorkspaceID:        "workspace:test",
+			DataDir:            t.TempDir(),
+			WorkspaceDir:       t.TempDir(),
+			AgentWorkspaceRoot: t.TempDir(),
+			AgentID:            "daemon_agent",
+		},
+		client:        server.Client(),
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
+		agentWorkers:  map[string]*managedAgentWorker{},
+	}
+	defer service.closePrimaryRuntime()
+	defer service.closeAgentWorkers()
+	defer service.closeAgentRuntimes()
+	stopWorker := startTestRefreshWorker(t, service, ctx)
+
+	done := make(chan error, 1)
+	go func() { done <- service.runWorkspaceEventStream(ctx) }()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runWorkspaceEventStream did not return after websocket close while REST was blocked")
+	}
+	cancel()
+	stopWorker()
+}
+
+func TestStreamReturnsPromptlyWhenApplyIsBlocked(t *testing.T) {
+	snapshotJSON, _ := json.Marshal(workspaceResponse{
+		Agents: []*agent{{ID: "agent_blocked", Kind: "codex"}},
+	})
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/ws/workspaces/"):
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			_ = conn.WriteJSON(workspaceEventEnvelope{
+				Type: "workspace.snapshot",
+				Data: snapshotJSON,
+			})
+			time.Sleep(100 * time.Millisecond)
+			_ = conn.Close()
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agents/"):
+			writeJSONResponse(w, http.StatusOK, toolInboxResponse{Items: []*agentEvent{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	service := &Service{
+		cfg: Config{
+			BackendURL:         server.URL,
+			WorkspaceID:        "workspace:test",
+			DataDir:            t.TempDir(),
+			WorkspaceDir:       t.TempDir(),
+			AgentWorkspaceRoot: t.TempDir(),
+			AgentID:            "daemon_agent",
+		},
+		client:        server.Client(),
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
+		agentWorkers:  map[string]*managedAgentWorker{},
+	}
+	defer service.closePrimaryRuntime()
+	defer service.closeAgentWorkers()
+	defer service.closeAgentRuntimes()
+
+	service.refreshMu.Lock()
+	stopWorker := startTestRefreshWorker(t, service, ctx)
+
+	done := make(chan error, 1)
+	go func() { done <- service.runWorkspaceEventStream(ctx) }()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runWorkspaceEventStream did not return after websocket close while apply was blocked on refreshMu")
+	}
+	service.refreshMu.Unlock()
+	cancel()
+	stopWorker()
+}
+
+func TestSnapshotSupersedesInFlightREST(t *testing.T) {
+	var restCount atomic.Int32
+	restReached := make(chan struct{}, 1)
+	snapshotData := workspaceResponse{Agents: []*agent{{ID: "agent_snap", Kind: "codex"}}}
+	snapshotJSON, _ := json.Marshal(snapshotData)
+	upgrader := websocket.Upgrader{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/ws/workspaces/"):
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			_ = conn.WriteJSON(workspaceEventEnvelope{Type: "agent.updated"})
+			<-restReached
+			_ = conn.WriteJSON(workspaceEventEnvelope{
+				Type: "workspace.snapshot",
+				Data: snapshotJSON,
+			})
+			_ = conn.WriteJSON(workspaceEventEnvelope{Type: "agent.updated"})
+			for {
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/workspace"):
+			n := restCount.Add(1)
+			if n == 1 {
+				select {
+				case restReached <- struct{}{}:
+				default:
+				}
+				<-r.Context().Done()
+				return
+			}
+			writeJSONResponse(w, http.StatusOK, &workspaceResponse{})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agents/"):
+			writeJSONResponse(w, http.StatusOK, toolInboxResponse{Items: []*agentEvent{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	service := &Service{
+		cfg: Config{
+			BackendURL:         server.URL,
+			WorkspaceID:        "workspace:test",
+			DataDir:            t.TempDir(),
+			WorkspaceDir:       t.TempDir(),
+			AgentWorkspaceRoot: t.TempDir(),
+			AgentID:            "daemon_agent",
+		},
+		client:        server.Client(),
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
+		agentWorkers:  map[string]*managedAgentWorker{},
+	}
+	defer service.closePrimaryRuntime()
+	defer service.closeAgentWorkers()
+	defer service.closeAgentRuntimes()
+	stopWorker := startTestRefreshWorker(t, service, ctx)
+
+	done := make(chan error, 1)
+	go func() { done <- service.runWorkspaceEventStream(ctx) }()
+
+	waitUntil(t, func() bool {
+		service.mu.Lock()
+		ws := service.latestWorkspace
+		service.mu.Unlock()
+		return ws != nil && len(ws.Agents) == 1 && ws.Agents[0].ID == "agent_snap"
+	})
+	waitUntil(t, func() bool { return restCount.Load() >= 2 })
+	cancel()
+	<-done
+	stopWorker()
+}
+
+func TestStaleRESTSkippedBySnapshotEpoch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/workspace"):
+			writeJSONResponse(w, http.StatusOK, &workspaceResponse{Agents: []*agent{{ID: "stale", Kind: "codex"}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	service := &Service{
+		cfg: Config{
+			BackendURL:         server.URL,
+			WorkspaceID:        "workspace:test",
+			DataDir:            t.TempDir(),
+			WorkspaceDir:       t.TempDir(),
+			AgentWorkspaceRoot: t.TempDir(),
+			AgentID:            "daemon_agent",
+		},
+		client:        server.Client(),
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
+		agentWorkers:  map[string]*managedAgentWorker{},
+	}
+	defer service.closePrimaryRuntime()
+	defer service.closeAgentRuntimes()
+	defer service.closeAgentWorkers()
+
+	snapshotJSON, _ := json.Marshal(workspaceResponse{Agents: []*agent{{ID: "snap", Kind: "codex"}}})
+	service.publishSnapshot(snapshotJSON)
+
+	if err := service.refresh(context.Background(), 0); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	service.mu.Lock()
+	ws := service.latestWorkspace
+	service.mu.Unlock()
+	if ws != nil {
+		t.Fatal("stale REST result should have been skipped by epoch fence, but latestWorkspace was set")
+	}
+}
+
+type blockingCloseTransport struct {
+	inner        http.RoundTripper
+	closeBlocked chan struct{}
+	closeRelease chan struct{}
+}
+
+func (t *blockingCloseTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.inner.RoundTrip(req)
+	if err != nil || !strings.HasSuffix(req.URL.Path, "/workspace") {
+		return resp, err
+	}
+	resp.Body = &blockingCloseBody{ReadCloser: resp.Body, blocked: t.closeBlocked, release: t.closeRelease}
+	return resp, nil
+}
+
+type blockingCloseBody struct {
+	io.ReadCloser
+	blocked chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingCloseBody) Close() error {
+	b.once.Do(func() { close(b.blocked) })
+	<-b.release
+	return b.ReadCloser.Close()
+}
+
+func TestTerminalAuthOutranksSnapshotCancellation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/workspace"):
+			w.WriteHeader(http.StatusGone)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agents/"):
+			writeJSONResponse(w, http.StatusOK, toolInboxResponse{Items: []*agentEvent{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	closeBlocked := make(chan struct{})
+	closeRelease := make(chan struct{})
+	transport := &blockingCloseTransport{
+		inner:        server.Client().Transport,
+		closeBlocked: closeBlocked,
+		closeRelease: closeRelease,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	service := &Service{
+		cfg: Config{
+			BackendURL:         server.URL,
+			WorkspaceID:        "workspace:test",
+			DataDir:            t.TempDir(),
+			WorkspaceDir:       t.TempDir(),
+			AgentWorkspaceRoot: t.TempDir(),
+			AgentID:            "daemon_agent",
+		},
+		client:        &http.Client{Transport: transport},
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
+		agentWorkers:  map[string]*managedAgentWorker{},
+	}
+	defer service.closePrimaryRuntime()
+	defer service.closeAgentRuntimes()
+	defer service.closeAgentWorkers()
+
+	drained := make(chan error, 1)
+	service.refreshNeeded = make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		service.runRefreshCoordinator(ctx, drained)
+	}()
+	stopCoordinator := sync.OnceFunc(func() { close(service.refreshNeeded); <-done })
+	defer stopCoordinator()
+
+	service.signalRefresh()
+	<-closeBlocked
+
+	snapshotJSON, _ := json.Marshal(workspaceResponse{})
+	service.publishSnapshot(snapshotJSON)
+	close(closeRelease)
+
+	select {
+	case err := <-drained:
+		var statusErr *backendStatusError
+		if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusGone {
+			t.Fatalf("drained should carry 410, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("terminal 410 was suppressed; drained channel never received the error")
+	}
+	stopCoordinator()
+}
+
+func TestAdmissionEpochFenceSkipsStaleREST(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/workspace"):
+			<-r.Context().Done()
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agents/"):
+			writeJSONResponse(w, http.StatusOK, toolInboxResponse{Items: []*agentEvent{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	service := &Service{
+		cfg: Config{
+			BackendURL:         server.URL,
+			WorkspaceID:        "workspace:test",
+			DataDir:            t.TempDir(),
+			WorkspaceDir:       t.TempDir(),
+			AgentWorkspaceRoot: t.TempDir(),
+			AgentID:            "daemon_agent",
+		},
+		client:        server.Client(),
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
+		agentWorkers:  map[string]*managedAgentWorker{},
+	}
+	defer service.closePrimaryRuntime()
+	defer service.closeAgentRuntimes()
+	defer service.closeAgentWorkers()
+
+	snap1JSON, _ := json.Marshal(workspaceResponse{RootDocumentID: "snap1"})
+	snap2JSON, _ := json.Marshal(workspaceResponse{RootDocumentID: "snap2"})
+
+	service.refreshMu.Lock()
+
+	stopWorker := startTestRefreshWorker(t, service, ctx)
+	defer func() { cancel(); stopWorker() }()
+
+	service.publishSnapshot(snap1JSON)
+	service.signalRefresh()
+
+	waitUntil(t, func() bool { return service.pendingSnapshot.Load() == nil })
+
+	service.publishSnapshot(snap2JSON)
+
+	service.refreshMu.Unlock()
+
+	waitUntil(t, func() bool {
+		service.mu.Lock()
+		ws := service.latestWorkspace
+		service.mu.Unlock()
+		return ws != nil && ws.RootDocumentID == "snap2"
+	})
+}
+
+func TestPublishSnapshotStoresBeforeEpochIncrement(t *testing.T) {
+	// Reversal admits an uncanceled REST ahead of a pending snapshot:
+	// coordinator captures the new epoch, swaps nil, passes the admission
+	// fence, and starts REST while the snapshot is still being stored.
+	src, err := os.ReadFile("service.go")
+	if err != nil {
+		t.Fatalf("read service.go: %v", err)
+	}
+	fnSig := []byte("func (s *Service) publishSnapshot(")
+	fnStart := bytes.Index(src, fnSig)
+	if fnStart < 0 {
+		t.Fatal("publishSnapshot not found in service.go")
+	}
+	body := src[fnStart:]
+	braceStart := bytes.IndexByte(body, '{')
+	depth := 1
+	pos := braceStart + 1
+	for pos < len(body) && depth > 0 {
+		switch body[pos] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+		}
+		pos++
+	}
+	fnBody := body[:pos]
+	storeIdx := bytes.Index(fnBody, []byte("pendingSnapshot.Store"))
+	addIdx := bytes.Index(fnBody, []byte("snapshotEpoch.Add"))
+	if storeIdx < 0 || addIdx < 0 {
+		t.Fatal("pendingSnapshot.Store and snapshotEpoch.Add not found in publishSnapshot")
+	}
+	if addIdx < storeIdx {
+		t.Fatal("snapshotEpoch.Add must appear after pendingSnapshot.Store in publishSnapshot")
+	}
+}
+
+func TestPostSnapshotRefreshIntentPreserved(t *testing.T) {
+	var restFetches atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/workspace"):
+			restFetches.Add(1)
+			writeJSONResponse(w, http.StatusOK, &workspaceResponse{})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agents/"):
+			writeJSONResponse(w, http.StatusOK, toolInboxResponse{Items: []*agentEvent{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	service := &Service{
+		cfg: Config{
+			BackendURL:         server.URL,
+			WorkspaceID:        "workspace:test",
+			DataDir:            t.TempDir(),
+			WorkspaceDir:       t.TempDir(),
+			AgentWorkspaceRoot: t.TempDir(),
+			AgentID:            "daemon_agent",
+		},
+		client:        server.Client(),
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
+		agentWorkers:  map[string]*managedAgentWorker{},
+	}
+	defer service.closePrimaryRuntime()
+	defer service.closeAgentRuntimes()
+	defer service.closeAgentWorkers()
+
+	snapAJSON, _ := json.Marshal(workspaceResponse{RootDocumentID: "A"})
+	snapBJSON, _ := json.Marshal(workspaceResponse{RootDocumentID: "B"})
+
+	service.refreshMu.Lock()
+
+	stopWorker := startTestRefreshWorker(t, service, ctx)
+	defer func() { cancel(); stopWorker() }()
+
+	service.publishSnapshot(snapAJSON)
+	service.signalRefresh()
+
+	waitUntil(t, func() bool { return service.pendingSnapshot.Load() == nil })
+
+	service.publishSnapshot(snapBJSON)
+	service.signalRefresh()
+
+	service.refreshMu.Unlock()
+
+	waitUntil(t, func() bool { return restFetches.Load() > 0 })
+}
+
+func TestProductionCoordinatorSingleOwner(t *testing.T) {
+	var restCount atomic.Int32
+	periodicBlocked := make(chan struct{}, 1)
+	releaseREST := make(chan struct{})
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/ws/workspaces/"):
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			for {
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/workspace"):
+			n := restCount.Add(1)
+			if n > 1 {
+				select {
+				case periodicBlocked <- struct{}{}:
+				default:
+				}
+				select {
+				case <-releaseREST:
+				case <-r.Context().Done():
+					return
+				}
+			}
+			writeJSONResponse(w, http.StatusOK, &workspaceResponse{})
+		case strings.HasSuffix(r.URL.Path, "/daemon/status"):
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agents/"):
+			writeJSONResponse(w, http.StatusOK, toolInboxResponse{Items: []*agentEvent{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ticks := make(chan time.Time, 1)
+	tracker := &fetchConcurrencyTracker{inner: server.Client().Transport}
+	cfg := Config{
+		BackendURL:         server.URL,
+		WorkspaceID:        "workspace:test",
+		DaemonToken:        "daemon_token",
+		DataDir:            t.TempDir(),
+		WorkspaceDir:       t.TempDir(),
+		AgentWorkspaceRoot: t.TempDir(),
+		AgentID:            "daemon_agent",
+		AgentToolBaseURL:   "http://127.0.0.1:0",
+	}
+	service := &Service{
+		cfg:           cfg,
+		client:        &http.Client{Transport: tracker},
+		daemonStatus:  newDaemonStatusReporter(cfg, server.Client()),
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
+		agentWorkers:  map[string]*managedAgentWorker{},
+		ready:         make(chan struct{}),
+		refreshTicks:  ticks,
+	}
+	defer service.closePrimaryRuntime()
+	defer service.closeAgentWorkers()
+	defer service.closeAgentRuntimes()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- service.Run(ctx) }()
+
+	<-service.ready
+	tracker.maxConcurrent.Store(0)
+
+	ticks <- time.Now()
+	<-periodicBlocked
+	ticks <- time.Now()
+	time.Sleep(200 * time.Millisecond)
+
+	close(releaseREST)
+	cancel()
+	<-done
+
+	if got := tracker.maxConcurrent.Load(); got != 1 {
+		t.Fatalf("max concurrent client-side REST fetches = %d, want exactly 1 (single owner)", got)
+	}
+}
+
+func TestReconnectSnapshotConvergence(t *testing.T) {
+	var restFetches atomic.Int32
+	var connCount atomic.Int32
+	upgrader := websocket.Upgrader{}
+
+	snapshotA := workspaceResponse{Agents: []*agent{{ID: "agent_A", Kind: "codex"}}}
+	snapshotB := workspaceResponse{Agents: []*agent{{ID: "agent_B", Kind: "codex"}}}
+	snapshotAJSON, _ := json.Marshal(snapshotA)
+	snapshotBJSON, _ := json.Marshal(snapshotB)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/ws/workspaces/"):
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			n := connCount.Add(1)
+			if n == 1 {
+				_ = conn.WriteJSON(workspaceEventEnvelope{Type: "workspace.snapshot", Data: snapshotAJSON})
+				time.Sleep(50 * time.Millisecond)
+				_ = conn.Close()
+				return
+			}
+			_ = conn.WriteJSON(workspaceEventEnvelope{Type: "workspace.snapshot", Data: snapshotBJSON})
+			for {
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/workspace"):
+			restFetches.Add(1)
+			writeJSONResponse(w, http.StatusOK, &workspaceResponse{})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agents/"):
+			writeJSONResponse(w, http.StatusOK, toolInboxResponse{Items: []*agentEvent{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	service := &Service{
+		cfg: Config{
+			BackendURL:         server.URL,
+			WorkspaceID:        "workspace:test",
+			DataDir:            t.TempDir(),
+			WorkspaceDir:       t.TempDir(),
+			AgentWorkspaceRoot: t.TempDir(),
+			AgentID:            "daemon_agent",
+		},
+		client:        server.Client(),
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
+		agentWorkers:  map[string]*managedAgentWorker{},
+	}
+	defer service.closePrimaryRuntime()
+	defer service.closeAgentWorkers()
+	defer service.closeAgentRuntimes()
+	stopWorker := startTestRefreshWorker(t, service, ctx)
+
+	done := make(chan error, 1)
+	go func() {
+		for ctx.Err() == nil {
+			err := service.runWorkspaceEventStream(ctx)
+			if ctx.Err() != nil {
+				done <- nil
+				return
+			}
+			if err != nil {
+				continue
+			}
+		}
+		done <- nil
+	}()
+
+	waitUntil(t, func() bool {
+		service.mu.Lock()
+		ws := service.latestWorkspace
+		service.mu.Unlock()
+		return ws != nil && len(ws.Agents) == 1 && ws.Agents[0].ID == "agent_B"
+	})
+
+	cancel()
+	<-done
+	stopWorker()
+
+	if got := restFetches.Load(); got != 0 {
+		t.Fatalf("reconnect snapshots should not trigger REST fetch, got %d", got)
+	}
+}
+
+func TestSnapshotAndRefreshAreSerialized(t *testing.T) {
+	snapshotJSON, _ := json.Marshal(workspaceResponse{
+		Agents: []*agent{{ID: "agent_snap", Kind: "codex"}},
+	})
+
+	service := &Service{
+		cfg: Config{
+			DataDir:            t.TempDir(),
+			WorkspaceDir:       t.TempDir(),
+			AgentWorkspaceRoot: t.TempDir(),
+			AgentID:            "daemon_agent",
+		},
+		client:        http.DefaultClient,
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
+		agentWorkers:  map[string]*managedAgentWorker{},
+	}
+	defer service.closePrimaryRuntime()
+	defer service.closeAgentWorkers()
+	defer service.closeAgentRuntimes()
+
+	service.refreshMu.Lock()
+
+	applied := make(chan struct{})
+	go func() {
+		service.applySnapshot(context.Background(), snapshotJSON)
+		close(applied)
+	}()
+
+	select {
+	case <-applied:
+		t.Fatal("applySnapshot must block while refreshMu is held")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	service.mu.Lock()
+	ws := service.latestWorkspace
+	service.mu.Unlock()
+	if ws != nil {
+		t.Fatal("snapshot applied before refreshMu was released")
+	}
+
+	service.refreshMu.Unlock()
+
+	select {
+	case <-applied:
+	case <-time.After(2 * time.Second):
+		t.Fatal("applySnapshot did not complete after refreshMu was released")
+	}
+
+	service.mu.Lock()
+	ws = service.latestWorkspace
+	service.mu.Unlock()
+	if ws == nil || len(ws.Agents) != 1 || ws.Agents[0].ID != "agent_snap" {
+		t.Fatalf("expected snapshot agent after lock release, got %+v", ws)
+	}
+}
+
+func startTestRefreshWorker(t *testing.T, s *Service, ctx context.Context) func() {
+	t.Helper()
+	s.refreshNeeded = make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.runRefreshCoordinator(ctx, nil)
+	}()
+	return sync.OnceFunc(func() { close(s.refreshNeeded); <-done })
 }
