@@ -478,29 +478,31 @@ $provenanceJson = ConvertTo-Json $provenance -Depth 30
 [System.IO.File]::WriteAllText($provenancePath, $provenanceJson + "`n", [System.Text.UTF8Encoding]::new($false))
 
 $checksumFiles = @(Get-CanonicalArtifactFiles -Root $OutputDirectory)
-$expectedChecksumNames = @(
+[string[]] $expectedChecksumNames = @(
     "Codesk_0.0.1_windows_$GoArchitecture.msi",
     "Codesk_0.0.2_windows_$GoArchitecture.msi",
     'provenance.json'
 )
+[Array]::Sort($expectedChecksumNames, [System.StringComparer]::Ordinal)
 $actualChecksumNames = @($checksumFiles | ForEach-Object Name)
 if ((ConvertTo-Json $actualChecksumNames -Compress) -cne
-    (ConvertTo-Json ($expectedChecksumNames | Sort-Object) -Compress)) {
+    (ConvertTo-Json $expectedChecksumNames -Compress)) {
     throw "unexpected checksummed artifact set: $($actualChecksumNames -join ', ')"
 }
 $checksumLines = @($checksumFiles | ForEach-Object { "$(Get-Sha256 $_.FullName)  $($_.Name)" })
 $checksumsPath = Join-Path $OutputDirectory 'SHA256SUMS'
 [System.IO.File]::WriteAllLines($checksumsPath, $checksumLines, [System.Text.UTF8Encoding]::new($false))
 
-$expectedNames = @(
+[string[]] $expectedNames = @(
     "Codesk_0.0.1_windows_$GoArchitecture.msi",
     "Codesk_0.0.2_windows_$GoArchitecture.msi",
     'provenance.json',
     'SHA256SUMS'
 )
+[Array]::Sort($expectedNames, [System.StringComparer]::Ordinal)
 $canonicalFiles = @(Get-CanonicalArtifactFiles -Root $OutputDirectory)
 $actualNames = @($canonicalFiles | ForEach-Object Name)
-if ((ConvertTo-Json $actualNames -Compress) -cne (ConvertTo-Json ($expectedNames | Sort-Object) -Compress)) {
+if ((ConvertTo-Json $actualNames -Compress) -cne (ConvertTo-Json $expectedNames -Compress)) {
     throw "unexpected canonical artifact set: $($actualNames -join ', ')"
 }
 Write-Host "canonical $Architecture MSI artifact ready: $OutputDirectory"

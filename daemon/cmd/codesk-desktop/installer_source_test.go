@@ -292,6 +292,11 @@ func TestWindowsInstallerReproducibilityScriptsAreFailClosed(t *testing.T) {
 			buildNew: "$directories.Count -lt 0",
 		},
 		{
+			name:     "canonical expected inventory uses case-insensitive sort",
+			buildOld: "[Array]::Sort($expectedNames, [System.StringComparer]::Ordinal)",
+			buildNew: "[Array]::Sort($expectedNames, [System.StringComparer]::OrdinalIgnoreCase)",
+		},
+		{
 			name:      "required allowed summary PID omitted",
 			verifyOld: "if (-not $seen.ContainsKey($propertyId))",
 			verifyNew: "if ($seen.ContainsKey($propertyId))",
@@ -473,6 +478,11 @@ func checkWindowsInstallerReproducibilityScripts(build, verify string) error {
 		"Get-ChildItem -LiteralPath $Root -File -Recurse -Force -ErrorAction Stop",
 		"$directories.Count -ne 0",
 		"canonical artifact set contains directories",
+		"[Array]::Sort($paths, [System.StringComparer]::Ordinal)",
+		"[Array]::Sort($expectedChecksumNames, [System.StringComparer]::Ordinal)",
+		"[Array]::Sort($expectedNames, [System.StringComparer]::Ordinal)",
+		"(ConvertTo-Json $expectedChecksumNames -Compress)",
+		"(ConvertTo-Json $expectedNames -Compress)",
 		"unexpected checksummed artifact set",
 		"unexpected canonical artifact set",
 		"inconsistent target tuple",
@@ -485,6 +495,9 @@ func checkWindowsInstallerReproducibilityScripts(build, verify string) error {
 	}
 	if strings.Contains(build, "-p:SuppressValidation=true") {
 		return fmt.Errorf("MSI artifact builder suppresses ICE validation")
+	}
+	if strings.Contains(build, "Sort-Object") {
+		return fmt.Errorf("MSI artifact builder mixes canonical artifact comparers")
 	}
 	if strings.Contains(build, "-ErrorAction SilentlyContinue") || strings.Contains(verify, "-ErrorAction SilentlyContinue") {
 		return fmt.Errorf("MSI reproducibility cleanup ignores deletion failures")
