@@ -99,6 +99,41 @@ and fails before tool execution on every non-Windows kernel. GNU Make users on
 Windows can use the Make target without `uname` or a POSIX recipe shell;
 ordinary PowerShell users use the root shim without installing Make:
 
+### Prerequisites
+
+Install these tools and make their commands available on `PATH`:
+
+- Windows PowerShell 5.1 or newer.
+- Git for Windows, including its `bash.exe`.
+- Go 1.23 or newer, as required by `go.mod`.
+- Rustup with a stable Rust toolchain, Cargo, and the Windows targets used below.
+- Zig exactly 0.16.0. The payload script rejects other Zig versions.
+- .NET SDK exactly 8.0.423 for MSI releases. The MSI builder restores WiX SDK
+  4.0.5 through NuGet, so a separate WiX installation is not required.
+
+GNU Make is optional; `make.ps1` is the Make-free entry point. On Windows
+ARM64, put native ARM64 Go first on `PATH` (`go env GOHOSTARCH` must print
+`arm64`). Zig may be the AMD64 0.16.0 build running under Windows emulation
+because Zig is used as the target C compiler and linker driver.
+
+Prepare the Rust targets and the source submodule once per toolchain/checkout:
+
+```powershell
+rustup target add x86_64-pc-windows-gnu aarch64-pc-windows-gnullvm
+git submodule update --init --recursive
+```
+
+The first build may need network access for Go modules, Cargo crates, and NuGet
+packages. Before building, these checks should succeed:
+
+```powershell
+go env GOHOSTARCH
+cargo --version
+zig version       # must print 0.16.0
+dotnet --version  # must print 8.0.423
+git --version
+```
+
 ```sh
 make windows-gui-build
 ```
@@ -142,10 +177,9 @@ make windows-gui-release GUI_VERSION=1.2.3
 ```
 
 That target fails closed unless it is running on real Windows; Linux, macOS,
-Wine, and WSL do not produce a release claim. It also requires a clean source
-checkout and a canonical numeric `GUI_VERSION` in the MSI range (major and
-minor at most 255, build at most 65535) before compiling. It produces exactly
-one MSI per requested architecture:
+Wine, and WSL do not produce a release claim. It requires a canonical numeric
+`GUI_VERSION` in the MSI range (major and minor at most 255, build at most
+65535) before compiling. It produces exactly one MSI per requested architecture:
 
 ```text
 dist/windows-gui/msi/amd64/Codesk_1.2.3_windows_amd64.msi

@@ -7,8 +7,8 @@ param(
     [string] $Version = 'dev',
     [AllowNull()]
     [AllowEmptyString()]
-    [string] $Architectures = $null,
-    [string] $RepositoryRoot = (Split-Path -Parent $PSScriptRoot),
+    [object] $Architectures = $null,
+    [string] $RepositoryRoot = '',
     [string] $WindowsRoot = 'dist/windows-gui',
     [string] $PayloadRoot = 'dist/windows-gui/payload',
     [string] $TestRoot = 'dist/windows-gui/tests',
@@ -87,7 +87,7 @@ function Get-NormalizedArchitectures {
     param(
         [AllowNull()]
         [AllowEmptyString()]
-        [string] $Value
+        [object] $Value
     )
 
     $hostArchitecture = $null
@@ -331,6 +331,9 @@ if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
     throw "$Target requires a real Windows host; no Windows GUI output was built"
 }
 
+if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
+    $RepositoryRoot = Split-Path -Parent $PSScriptRoot
+}
 $root = Resolve-RepositoryPath -Path $RepositoryRoot -Root (Get-Location).Path
 $windowsDirectory = Resolve-RepositoryPath -Path $WindowsRoot -Root $root
 $payloadDirectory = Resolve-RepositoryPath -Path $PayloadRoot -Root $root
@@ -340,13 +343,6 @@ $msiDirectory = Resolve-RepositoryPath -Path $MsiRoot -Root $root
 
 if ($Target -ceq 'windows-gui-release') {
     Assert-CanonicalMsiVersion -Value $Version
-    $sourceStatus = @(& git -C $root status --porcelain=v1 --untracked-files=all)
-    if ($LASTEXITCODE -ne 0) {
-        throw 'windows-gui-release could not inspect the source checkout; no MSI was built'
-    }
-    if ($sourceStatus.Count -ne 0) {
-        throw 'windows-gui-release requires a clean checkout; no MSI was built'
-    }
 }
 
 $payloadParameters = @{

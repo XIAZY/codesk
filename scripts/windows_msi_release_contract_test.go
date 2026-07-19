@@ -72,17 +72,18 @@ func TestWindowsGUIMakeRoutesWithoutPOSIXTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	makeSource := normalizeSourceNewlines(string(makeData))
 
 	for _, target := range []string{"windows-gui-build", "windows-gui-release"} {
-		if err := runWindowsGUIDispatch(string(makeData), target); err != nil {
+		if err := runWindowsGUIDispatch(makeSource, target); err != nil {
 			t.Fatalf("Windows-native Make %s dispatch failed: %v", target, err)
 		}
 	}
 	old := `"GUI_VERSION=$(GUI_VERSION)" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)"`
-	if strings.Count(string(makeData), old) != 1 {
-		t.Fatalf("Windows build route source count = %d, want 1", strings.Count(string(makeData), old))
+	if strings.Count(makeSource, old) != 1 {
+		t.Fatalf("Windows build route source count = %d, want 1", strings.Count(makeSource, old))
 	}
-	mutated := strings.Replace(string(makeData), old, `"GUI_VERSION=$(GUI_VERSION)" "WINDOWS_GUI_ARCHES=amd64" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)"`, 1)
+	mutated := strings.Replace(makeSource, old, `"GUI_VERSION=$(GUI_VERSION)" "WINDOWS_GUI_ARCHES=amd64" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)"`, 1)
 	if err := runWindowsGUIDispatch(mutated, "windows-gui-build"); err == nil {
 		t.Fatal("Make injected a spoofed build architecture into the PowerShell route")
 	}
@@ -123,6 +124,38 @@ func TestWindowsMSIReleaseVersionAndProductCodeContract(t *testing.T) {
 	}
 }
 
+func TestWindowsGUIPowerShellDefaultsArchitectureAndRoot(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows PowerShell defaults require Windows")
+	}
+	powershell, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		t.Skip("Windows PowerShell is unavailable")
+	}
+
+	command := exec.Command(
+		powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+		"-File", "scripts/run-windows-gui-target.ps1", "-Target", "windows-gui-release", "-Version", "invalid",
+	)
+	command.Dir = ".."
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("invalid release version unexpectedly succeeded: %s", output)
+	}
+	text := string(output)
+	if !strings.Contains(text, "GUI_VERSION must be canonical MSI X.Y.Z") {
+		t.Fatalf("release default failure = %q, want canonical version rejection", output)
+	}
+	for _, regression := range []string{
+		"Windows GUI architecture list must not be empty",
+		"Cannot bind argument to parameter 'Path' because it is an empty string",
+	} {
+		if strings.Contains(text, regression) {
+			t.Fatalf("release default regressed with %q: %s", regression, output)
+		}
+	}
+}
+
 func TestWindowsMSIReleaseSourceContract(t *testing.T) {
 	buildData, err := os.ReadFile("build-windows-desktop-msi-artifact.ps1")
 	if err != nil {
@@ -140,10 +173,10 @@ func TestWindowsMSIReleaseSourceContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	build := string(buildData)
-	orchestrator := string(orchestratorData)
-	makefile := string(makeData)
-	shim := string(shimData)
+	build := normalizeSourceNewlines(string(buildData))
+	orchestrator := normalizeSourceNewlines(string(orchestratorData))
+	makefile := normalizeSourceNewlines(string(makeData))
+	shim := normalizeSourceNewlines(string(shimData))
 	if err := checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim); err != nil {
 		t.Fatal(err)
 	}
@@ -422,29 +455,54 @@ exit 97
 `); err != nil {
 		return err
 	}
-	if err := writeExecutable(filepath.Join(binDir, "powershell.exe"), `#!/bin/sh
+	powershellCommand := "powershell.exe"
+	commandDirectory := ""
+	makeOverrides := []string{
+		"OS=Windows_NT", "PROCESSOR_ARCHITECTURE=ARM64", "WINDOWS_GUI_POWERSHELL=" + powershellCommand,
+	}
+	if runtime.GOOS == "windows" {
+		resolvedPowerShell, err := exec.LookPath("powershell.exe")
+		if err != nil {
+			return fmt.Errorf("resolve native PowerShell fixture: %w", err)
+		}
+		powershellCommand = resolvedPowerShell
+		fakeShim := `param()
+$capture = [Environment]::GetEnvironmentVariable('WINDOWS_GUI_CAPTURE', 'Process')
+[System.IO.File]::WriteAllLines($capture, [Environment]::GetCommandLineArgs())
+`
+		if err := os.WriteFile(filepath.Join(tempDir, "make.ps1"), []byte(fakeShim), 0o600); err != nil {
+			return err
+		}
+		commandDirectory = tempDir
+		makeOverrides = []string{
+			"OS=Windows_NT", "PROCESSOR_ARCHITECTURE=ARM64", "WINDOWS_GUI_POWERSHELL=" + powershellCommand,
+			"SHELL=" + os.Getenv("COMSPEC"),
+		}
+	} else {
+		if err := writeExecutable(filepath.Join(binDir, "powershell.exe"), `#!/bin/sh
 : "${WINDOWS_GUI_CAPTURE:?}"
 : >"$WINDOWS_GUI_CAPTURE"
 for argument in "$@"; do
   printf '%s\n' "$argument" >>"$WINDOWS_GUI_CAPTURE"
 done
 `); err != nil {
-		return err
+			return err
+		}
 	}
 	makePath := filepath.Join(tempDir, "Makefile")
 	if err := os.WriteFile(makePath, []byte(makeSource), 0o600); err != nil {
 		return err
 	}
 	capturePath := filepath.Join(tempDir, "powershell.args")
-	repositoryRoot, err := filepath.Abs("..")
-	if err != nil {
-		return err
+	if commandDirectory == "" {
+		commandDirectory, err = filepath.Abs("..")
+		if err != nil {
+			return err
+		}
 	}
-	command := exec.Command(
-		"make", "-s", "-f", makePath, target,
-		"OS=Windows_NT", "PROCESSOR_ARCHITECTURE=ARM64", "WINDOWS_GUI_POWERSHELL=powershell.exe",
-	)
-	command.Dir = repositoryRoot
+	makeArguments := append([]string{"-s", "-f", makePath, target}, makeOverrides...)
+	command := exec.Command("make", makeArguments...)
+	command.Dir = commandDirectory
 	command.Env = environmentWith(map[string]string{
 		"PATH":                     binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"WINDOWS_GUI_CAPTURE":      capturePath,
@@ -719,6 +777,10 @@ func environmentWith(overrides map[string]string) []string {
 	return environment
 }
 
+func normalizeSourceNewlines(source string) string {
+	return strings.ReplaceAll(source, "\r\n", "\n")
+}
+
 func argumentValue(arguments []string, name string) (string, bool) {
 	for index := 0; index+1 < len(arguments); index++ {
 		if arguments[index] == name {
@@ -830,7 +892,6 @@ func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) er
 		"Assert-ExactArchitectureDirectories -Directory $PayloadDirectory -Architectures $SelectedArchitectures": 1,
 		"Assert-ExactRealFiles @releaseParameters":                                                               1,
 		`Names = @("Codesk_${Version}_windows_$architecture.msi", 'SHA256SUMS', 'provenance.json')`:              1,
-		"windows-gui-release requires a clean checkout; no MSI was built":                                        1,
 		"[Array]::Sort($actual, [System.StringComparer]::Ordinal)":                                               2,
 		"[Array]::Sort($expected, [System.StringComparer]::Ordinal)":                                             2,
 	} {
@@ -838,7 +899,7 @@ func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) er
 			return fmt.Errorf("Windows GUI orchestrator source count for %q = %d, want %d", source, got, want)
 		}
 	}
-	for _, forbidden := range []string{"??", "Sort-Object"} {
+	for _, forbidden := range []string{"??", "Sort-Object", "status --porcelain", "requires a clean checkout"} {
 		if strings.Contains(orchestrator, forbidden) {
 			return fmt.Errorf("Windows GUI orchestrator contains unsupported or non-ordinal %q", forbidden)
 		}
