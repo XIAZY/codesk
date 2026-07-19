@@ -49,6 +49,20 @@ CODESK_MACOS_NOTARY_PROFILE='codesk-notary' \
 scripts/build-macos-desktop-release.sh 1.2.3
 ```
 
+The native build entry point builds the same universal application in explicit
+unsigned, construction-only mode:
+
+```sh
+make macos-gui-build
+make macos-gui-build GUI_VERSION=1.2.3
+```
+
+The signed release entry point is `make macos-gui-release GUI_VERSION=1.2.3`;
+provide both signing variables documented above. `MACOS_GUI_UNSIGNED=1` remains
+an explicit construction-only escape hatch. Both human-facing targets fail
+before construction on a non-macOS kernel; the release script still owns every
+toolchain, signing, notarization, and source-cleanliness check.
+
 The script signs the universal nested helper before `Codesk.app`, enables the
 hardened runtime, notarizes and staples the app, produces and notarizes the
 drag-to-Applications DMG, and writes a source-bound `manifest.json` plus
@@ -75,6 +89,89 @@ checks. The manifest selects the obligations: a `signed_and_notarized=true`
 claim always executes every trust check even when unsigned relaxation is set;
 an unsigned claim requires explicit relaxation and produces unmistakably
 construction-only output. It does not exercise runtime behavior.
+
+## Windows desktop build and release
+
+The Windows GUI payloads reuse the same locked Rust bridge, Zig cross-compiler,
+PE subsystem flags, and PE verifier as CI. The human-facing build target is
+native-only, builds exactly the architecture reported by the Windows runtime,
+and fails before tool execution on every non-Windows kernel. GNU Make users on
+Windows can use the Make target without `uname` or a POSIX recipe shell;
+ordinary PowerShell users use the root shim without installing Make:
+
+```sh
+make windows-gui-build
+```
+
+```powershell
+.\make.ps1 windows-gui-build
+```
+
+The build architecture is not supplied by a Make variable: the shared
+PowerShell orchestrator resolves and enforces the real Windows host
+architecture. `WINDOWS_GUI_ARCHES` defaults to `amd64 arm64` for releases. CI
+and explicit cross-compile users invoke the honestly named
+`make windows-gui-payloads` target or the shared script directly from any host
+with Go, Rust/Cargo, the required Rust targets, and Zig 0.16.0. Native Windows
+entry points also require Git for Windows because that shared payload script is
+the single cross-toolchain implementation:
+
+```sh
+WINDOWS_GUI_ARCHES="amd64 arm64" \
+WINDOWS_GUI_SAFE_PARENT_DIRECTORY="$RUNNER_TEMP" \
+scripts/build-windows-desktop-payloads.sh \
+  "$RUNNER_TEMP/windows-desktop-payload" \
+  "$RUNNER_TEMP/windows-desktop-tests"
+```
+
+The two positional arguments are the payload and compiled-test output roots.
+The script requires both to resolve as distinct, non-overlapping, nonsymlink
+children of `WINDOWS_GUI_SAFE_PARENT_DIRECTORY`, then cleans both before
+compiling. Cross-target Yffi staging is transactional: the script restores the
+exact pre-build host `libyrs.a` bytes on success, failure, or interruption, and
+removes the staged archive when no host archive existed. The release entry
+point builds both payload architectures and passes each to the reproducible WiX
+builder, which links the requested release twice and runs ICE validation:
+
+```sh
+make windows-gui-release GUI_VERSION=1.2.3
+```
+
+```powershell
+.\make.ps1 windows-gui-release GUI_VERSION=1.2.3
+```
+
+That target fails closed unless it is running on real Windows; Linux, macOS,
+Wine, and WSL do not produce a release claim. It also requires a clean source
+checkout and a canonical numeric `GUI_VERSION` in the MSI range (major and
+minor at most 255, build at most 65535) before compiling. It produces exactly
+one MSI per requested architecture:
+
+```text
+dist/windows-gui/msi/amd64/Codesk_1.2.3_windows_amd64.msi
+dist/windows-gui/msi/arm64/Codesk_1.2.3_windows_arm64.msi
+```
+
+Each architecture directory also contains `provenance.json` and
+`SHA256SUMS`. The builder derives the MSI ProductCode with UUIDv5 from its
+pinned product namespace and the canonical `"<version>+<arch>"` name while
+preserving the package's stable UpgradeCode. Its existing
+`-PreviousProductCode`/`-CandidateProductCode` parameter set remains the
+two-version QA mode used by the upgrade/reproducibility CI. Signing and
+publication remain separate release-policy work.
+
+From any host with `gh` plus `sha256sum` or `shasum`, download both
+architecture bundles from a successful CI run bound to the checked-out `HEAD`
+and verify their exact inventories and checksums with:
+
+```sh
+make windows-verify
+make windows-verify WINDOWS_GUI_RUN_ID=123456789
+```
+
+Without an explicit run ID, the target selects the newest successful CI run
+for the exact checked-out commit. It never falls back to a stale commit or a
+non-successful run.
 
 ### Native acceptance
 
