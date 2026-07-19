@@ -102,14 +102,39 @@ export function desktopPlatformInstallTarget(platform: DesktopPlatform): DaemonI
   return platform === "windows" ? "windows" : "unix";
 }
 
-// Per-platform desktop-app download URLs. EMPTY until lane A (#69 publish → #61 resolver)
-// lands real GitHub Releases — until then every download resolves to null, the CTA stays
-// DISABLED ("Download unavailable"), and nothing ships pointing at a URL that isn't there
-// (a button pointing at nothing is a lying control). @Vitaliy's #61 contract populates this.
-export const DESKTOP_APP_DOWNLOAD_URLS: Partial<Record<DesktopPlatform, string>> = {};
+// The download is by TARGET, not platform (Vitaliy's #61 contract): macOS is one universal
+// build, but Windows publishes x64 AND ARM64 MSIs separately and a browser UA cannot
+// authoritatively pick between them — so both Windows arches are shown, with detection only
+// choosing a default (same hint-not-lock rule as platform). Linux/unknown have no app target.
+export type DesktopDownloadTarget = "macos-universal" | "windows-amd64" | "windows-arm64";
 
-export function desktopAppDownloadUrl(platform: DesktopPlatform): string | null {
-  return DESKTOP_APP_DOWNLOAD_URLS[platform] ?? null;
+export function desktopDownloadTargets(platform: DesktopPlatform): DesktopDownloadTarget[] {
+  if (platform === "mac") return ["macos-universal"];
+  if (platform === "windows") return ["windows-amd64", "windows-arm64"];
+  return []; // linux/unknown → terminal, no download
+}
+
+// The target to preselect for a platform — a recommendation, not a lock. Windows defaults to
+// x64 unless the UA clearly reads ARM (arm64/aarch64); the user can always switch arches.
+export function defaultDesktopDownloadTarget(platform: DesktopPlatform, userAgent?: string): DesktopDownloadTarget | null {
+  const targets = desktopDownloadTargets(platform);
+  if (targets.length === 0) return null;
+  if (platform === "windows") {
+    const ua = (userAgent ?? (typeof navigator === "undefined" ? "" : navigator.userAgent)).toLowerCase();
+    return /arm64|aarch64/.test(ua) ? "windows-arm64" : "windows-amd64";
+  }
+  return targets[0];
+}
+
+// Per-TARGET desktop-app download URLs, keyed by the frozen asset keys. EMPTY until lane A
+// (#69 publish → #61 validating resolver) lands real GitHub Releases — until then every
+// target resolves to null, the CTA stays DISABLED ("Download unavailable"), and nothing ships
+// pointing at a URL that isn't there (a button pointing at nothing is a lying control).
+// @Vitaliy's #61 resolver (manifest.json → per-asset URL, fail-closed) replaces this.
+export const DESKTOP_APP_DOWNLOAD_URLS: Partial<Record<DesktopDownloadTarget, string>> = {};
+
+export function desktopAppDownloadUrl(target: DesktopDownloadTarget): string | null {
+  return DESKTOP_APP_DOWNLOAD_URLS[target] ?? null;
 }
 
 export function buildDaemonInstallCommand(input: {

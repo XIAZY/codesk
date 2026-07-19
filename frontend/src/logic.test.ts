@@ -22,6 +22,8 @@ import {
   detectDesktopPlatform,
   desktopPlatformHasApp,
   desktopPlatformInstallTarget,
+  desktopDownloadTargets,
+  defaultDesktopDownloadTarget,
   desktopAppDownloadUrl,
   emptyWorkspace,
   activityCategory,
@@ -1159,10 +1161,26 @@ describe("desktop platform detection (task #62 — a hint, not a lock)", () => {
     expect(desktopPlatformInstallTarget("unknown")).toBe("unix");
   });
 
+  it("download is by target: mac = one universal, windows = both arches, linux/unknown = none", () => {
+    // Windows publishes x64 AND ARM64 MSIs separately (Vitaliy's #61 contract) — both shown.
+    expect(desktopDownloadTargets("mac")).toEqual(["macos-universal"]);
+    expect(desktopDownloadTargets("windows")).toEqual(["windows-amd64", "windows-arm64"]);
+    expect(desktopDownloadTargets("linux")).toEqual([]);
+    expect(desktopDownloadTargets("unknown")).toEqual([]);
+  });
+
+  it("default target is a recommendation: windows → x64 unless the UA reads ARM, mac → universal", () => {
+    expect(defaultDesktopDownloadTarget("mac")).toBe("macos-universal");
+    expect(defaultDesktopDownloadTarget("windows", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")).toBe("windows-amd64");
+    expect(defaultDesktopDownloadTarget("windows", "Mozilla/5.0 (Windows NT 10.0; Win64; ARM64)")).toBe("windows-arm64");
+    expect(defaultDesktopDownloadTarget("linux")).toBeNull();
+  });
+
   it("download URLs resolve to null until lane A publishes — the CTA stays disabled-honest", () => {
-    // No stable release URL yet (#69/#61 pending) → every platform is null → button disabled,
+    // No stable release URL yet (#69/#61 pending) → every target is null → button disabled,
     // never a link pointing at nothing. Vitaliy's #61 resolver populates the real URLs.
-    expect(desktopAppDownloadUrl("mac")).toBeNull();
-    expect(desktopAppDownloadUrl("windows")).toBeNull();
+    expect(desktopAppDownloadUrl("macos-universal")).toBeNull();
+    expect(desktopAppDownloadUrl("windows-amd64")).toBeNull();
+    expect(desktopAppDownloadUrl("windows-arm64")).toBeNull();
   });
 });
