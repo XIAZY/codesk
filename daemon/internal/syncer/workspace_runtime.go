@@ -157,11 +157,6 @@ func workspaceSyncDBPath(root string) string {
 	return filepath.Join(root, ".notty", "sync.db")
 }
 
-func (r *workspaceRuntime) Run(ctx context.Context) (runErr error) {
-	defer func() { runErr = errors.Join(runErr, r.Close()) }()
-	return r.run(ctx, nil)
-}
-
 func (r *workspaceRuntime) run(ctx context.Context, ready chan<- error) (runErr error) {
 	reportReady := func(err error) {
 		if ready == nil {

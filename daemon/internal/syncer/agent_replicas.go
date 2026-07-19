@@ -141,17 +141,6 @@ func (s *Service) startAgentWorkspaceRuntimeAttempt(
 	workspace *workspaceResponse,
 	restartAttempt int,
 ) *managedWorkspaceRuntime {
-	return s.startAgentWorkspaceRuntimeAttemptWithReady(ctx, agentID, runtime, workspace, restartAttempt, nil)
-}
-
-func (s *Service) startAgentWorkspaceRuntimeAttemptWithReady(
-	ctx context.Context,
-	agentID string,
-	runtime *workspaceRuntime,
-	workspace *workspaceResponse,
-	restartAttempt int,
-	ready chan<- error,
-) *managedWorkspaceRuntime {
 	runtimeCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	managed := &managedWorkspaceRuntime{
@@ -178,9 +167,6 @@ func (s *Service) startAgentWorkspaceRuntimeAttemptWithReady(
 				managed.starting = false
 			}
 			managed.borrowMu.Unlock()
-		}
-		if ready != nil {
-			ready <- startupErr
 		}
 		runErr := <-runDone
 		managed.recordResult(runErr)

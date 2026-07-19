@@ -152,7 +152,7 @@ func (a *Application) newService() (desktop.DaemonService, error) {
 			logger:            a.logger,
 		}
 	}
-	return syncer.New(syncerConfig)
+	return syncer.New(syncerConfig), nil
 }
 
 // Start starts the embedded daemon controller and menu action loop.

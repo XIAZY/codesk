@@ -34,10 +34,7 @@ type documentUpdateTestResponse struct {
 }
 
 func TestNewServiceHasFreshReadinessSignal(t *testing.T) {
-	first, err := New(Config{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	first := New(Config{})
 	if first.Ready() == nil {
 		t.Fatal("Ready() returned nil")
 	}
@@ -55,10 +52,7 @@ func TestNewServiceHasFreshReadinessSignal(t *testing.T) {
 		t.Fatal("Ready() did not close after signalReady")
 	}
 
-	second, err := New(Config{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	second := New(Config{})
 	if second.Ready() == first.Ready() {
 		t.Fatal("separate service generations share a readiness signal")
 	}

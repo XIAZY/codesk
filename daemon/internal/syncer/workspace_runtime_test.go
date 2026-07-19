@@ -888,7 +888,7 @@ func TestWorkspaceRuntimeRunReconcilesLocalCreateEvents(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if err := runtime.Run(ctx); err != nil && ctx.Err() == nil {
+		if err := runtime.run(ctx, nil); err != nil && ctx.Err() == nil {
 			t.Errorf("runtime run: %v", err)
 		}
 	}()
