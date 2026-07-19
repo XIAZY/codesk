@@ -68,6 +68,50 @@ export function isMarkdownDocumentPath(path: string) {
   return /\.(md|markdown)$/i.test(path);
 }
 
+// ---- Desktop install (task #62) ----------------------------------------------
+// The daemon-install redesign detects the user's platform to DEFAULT the download card,
+// but a UA is a hint, not a lock — the machine you connect is often not the one you're
+// browsing on, so the Mac/Win/Linux selector stays visible everywhere and an
+// unrecognized UA falls to a neutral chooser rather than a guessed default (AlphaToad/Eva).
+export type DesktopPlatform = "mac" | "windows" | "linux" | "unknown";
+
+export function detectDesktopPlatform(userAgent?: string): DesktopPlatform {
+  const ua = (
+    userAgent ?? (typeof navigator === "undefined" ? "" : `${navigator.userAgent} ${navigator.platform}`)
+  ).toLowerCase();
+  if (/windows|win32|win64/.test(ua)) return "windows";
+  // iOS carries "like Mac OS X" but is not a Mac desktop and has no app — chooser, not Mac.
+  if (/iphone|ipad|ipod/.test(ua)) return "unknown";
+  if (/macintosh|mac os x/.test(ua)) return "mac";
+  // Linux desktop, but NOT Android or ChromeOS — both carry linux/X11 tokens yet are not a
+  // "connect your computer" target, so they fall through to the neutral chooser.
+  if (/linux|x11/.test(ua) && !/android/.test(ua) && !/cros/.test(ua)) return "linux";
+  // iOS, Android, ChromeOS, bots, anything unrecognized → neutral chooser, no false default.
+  return "unknown";
+}
+
+// Only macOS & Windows ship a real desktop app (no Linux desktop build) — Linux connects
+// via the terminal as its honest primary path, never a fake download.
+export function desktopPlatformHasApp(platform: DesktopPlatform): boolean {
+  return platform === "mac" || platform === "windows";
+}
+
+// The terminal install-command platform for a desktop platform: Windows → PowerShell,
+// mac/linux/unknown → the unix shell script.
+export function desktopPlatformInstallTarget(platform: DesktopPlatform): DaemonInstallPlatform {
+  return platform === "windows" ? "windows" : "unix";
+}
+
+// Per-platform desktop-app download URLs. EMPTY until lane A (#69 publish → #61 resolver)
+// lands real GitHub Releases — until then every download resolves to null, the CTA stays
+// DISABLED ("Download unavailable"), and nothing ships pointing at a URL that isn't there
+// (a button pointing at nothing is a lying control). @Vitaliy's #61 contract populates this.
+export const DESKTOP_APP_DOWNLOAD_URLS: Partial<Record<DesktopPlatform, string>> = {};
+
+export function desktopAppDownloadUrl(platform: DesktopPlatform): string | null {
+  return DESKTOP_APP_DOWNLOAD_URLS[platform] ?? null;
+}
+
 export function buildDaemonInstallCommand(input: {
   backendUrl: string;
   workspaceId: string;

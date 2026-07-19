@@ -19,6 +19,10 @@ import {
   personOnline,
   documentActivity,
   defaultDaemonInstallPlatform,
+  detectDesktopPlatform,
+  desktopPlatformHasApp,
+  desktopPlatformInstallTarget,
+  desktopAppDownloadUrl,
   emptyWorkspace,
   activityCategory,
   relativeTime,
@@ -1123,5 +1127,42 @@ describe("daemon install platform", () => {
     expect(defaultDaemonInstallPlatform("linux", "Windows NT 10.0")).toBe("unix");
     expect(defaultDaemonInstallPlatform("", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")).toBe("windows");
     expect(defaultDaemonInstallPlatform("", "Mozilla/5.0 (Macintosh; Intel Mac OS X)")).toBe("unix");
+  });
+});
+
+describe("desktop platform detection (task #62 — a hint, not a lock)", () => {
+  it("detects mac / windows / linux from the UA", () => {
+    expect(detectDesktopPlatform("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")).toBe("mac");
+    expect(detectDesktopPlatform("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")).toBe("windows");
+    expect(detectDesktopPlatform("Mozilla/5.0 (X11; Ubuntu; Linux x86_64)")).toBe("linux");
+  });
+
+  it("falls to a neutral 'unknown' for non-desktop UAs — never a false default", () => {
+    // Errs toward the neutral chooser rather than guessing (AlphaToad/Eva).
+    expect(detectDesktopPlatform("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)")).toBe("unknown");
+    expect(detectDesktopPlatform("Mozilla/5.0 (Linux; Android 14)")).toBe("unknown"); // linux kernel, not a computer
+    expect(detectDesktopPlatform("Mozilla/5.0 (X11; CrOS x86_64)")).toBe("unknown"); // ChromeOS → CrOS not linux
+    expect(detectDesktopPlatform("")).toBe("unknown");
+  });
+
+  it("only mac & windows have a real desktop app; linux/unknown do not", () => {
+    expect(desktopPlatformHasApp("mac")).toBe(true);
+    expect(desktopPlatformHasApp("windows")).toBe(true);
+    expect(desktopPlatformHasApp("linux")).toBe(false); // terminal is Linux's honest path
+    expect(desktopPlatformHasApp("unknown")).toBe(false);
+  });
+
+  it("maps to the terminal install target: windows → PowerShell, else the unix shell", () => {
+    expect(desktopPlatformInstallTarget("windows")).toBe("windows");
+    expect(desktopPlatformInstallTarget("mac")).toBe("unix");
+    expect(desktopPlatformInstallTarget("linux")).toBe("unix");
+    expect(desktopPlatformInstallTarget("unknown")).toBe("unix");
+  });
+
+  it("download URLs resolve to null until lane A publishes — the CTA stays disabled-honest", () => {
+    // No stable release URL yet (#69/#61 pending) → every platform is null → button disabled,
+    // never a link pointing at nothing. Vitaliy's #61 resolver populates the real URLs.
+    expect(desktopAppDownloadUrl("mac")).toBeNull();
+    expect(desktopAppDownloadUrl("windows")).toBeNull();
   });
 });
