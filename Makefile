@@ -92,8 +92,8 @@ build-frontend:
 
 build-daemon: build-yffi
 	mkdir -p bin
-	CGO_ENABLED=1 go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS)" -o bin/notty-daemon ./daemon/cmd/daemon
-	CGO_ENABLED=0 go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS)" -o bin/notty-agent-tool ./daemon/cmd/agenttool
+	CGO_ENABLED=1 go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS) -X main.version=$(FILE_VERSION)" -o bin/notty-daemon ./daemon/cmd/daemon
+	CGO_ENABLED=0 go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS) -X main.version=$(FILE_VERSION)" -o bin/notty-agent-tool ./daemon/cmd/agenttool
 
 daemon-build: build-daemon
 

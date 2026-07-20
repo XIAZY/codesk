@@ -11,7 +11,10 @@ import (
 	"notty/daemon/internal/syncer"
 )
 
+var version = "dev"
+
 func main() {
+	log.Printf("notty daemon version %s", version)
 	cfg := syncer.LoadConfig()
 	if cfg.PprofAddr != "" {
 		go func() {
