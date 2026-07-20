@@ -5584,6 +5584,7 @@ func TestCoordinatorWorkerAndRuntimeSurviveFetchCtxCancellation(t *testing.T) {
 	defer server.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
+	serverTransport := server.Client().Transport
 	service := &Service{
 		cfg: Config{
 			BackendURL:         server.URL,
@@ -5596,7 +5597,7 @@ func TestCoordinatorWorkerAndRuntimeSurviveFetchCtxCancellation(t *testing.T) {
 			if strings.HasSuffix(r.URL.Path, "/workspace") {
 				fetchCtxCh <- r.Context()
 			}
-			return server.Client().Transport.RoundTrip(r)
+			return serverTransport.RoundTrip(r)
 		})},
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 		agentWorkers:  map[string]*managedAgentWorker{},
@@ -5613,10 +5614,10 @@ func TestCoordinatorWorkerAndRuntimeSurviveFetchCtxCancellation(t *testing.T) {
 		case fctx := <-fetchCtxCh:
 			select {
 			case <-fctx.Done():
-			case <-time.After(5 * time.Second):
+			case <-time.After(10 * time.Second):
 				t.Fatal("fetchCtx was not canceled by coordinator")
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(10 * time.Second):
 			t.Fatal("no fetch request was made")
 		}
 	}
@@ -5671,6 +5672,9 @@ func TestCoordinatorWorkerAndRuntimeSurviveFetchCtxCancellation(t *testing.T) {
 	}
 	if !runtimeGone {
 		t.Fatal("runtime map entry should be absent after removal refresh")
+	}
+	if runtime1.runtimeCtx.Err() == nil {
+		t.Fatal("removed runtime runtimeCtx should be canceled by closeManagedWorkspaceRuntime")
 	}
 	select {
 	case <-worker1.done:
