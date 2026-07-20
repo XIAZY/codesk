@@ -1,0 +1,213 @@
+# Release desktop — tag-triggered publish of the Codesk desktop apps.
+#
+# Trigger: pushing a `desktop-v<X.Y.Z>` tag. The tag is only the publish trigger;
+# the version itself comes from the repo VERSION file (the single source of
+# truth, baked into every binary via ldflags). The tag MUST match the VERSION
+# file — resolve-version fails loud otherwise.
+#
+# Output: one immutable `desktop-v<X.Y.Z>` GitHub Release plus a rolling
+# `desktop-latest` release, each carrying exactly three versionless assets
+# (Codesk-macos-universal.dmg, Codesk-windows-amd64.msi, Codesk-windows-arm64.msi)
+# and a manifest.json. All-three-or-nothing: publish aborts unless every asset is
+# present, so no dead download link is ever produced.
+#
+# NOTE: the first real run requires hosted Windows + macOS runner capacity. Until
+# `vars.CODESK_MACOS_RUNNERS_AVAILABLE == 'true'` and a Windows runner is online,
+# the build jobs cannot complete and the (correctly) all-or-nothing publish will
+# not run. Runner labels below match the existing ci.yml; migrate to hosted
+# runners when billing capacity is provisioned.
+name: Release desktop
+
+on:
+  push:
+    tags:
+      - 'desktop-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  resolve-version:
+    name: Resolve + verify release version
+    runs-on: [self-hosted, Linux, ARM64]
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: resolve
+        name: Verify tag matches VERSION file
+        run: |
+          version="$(scripts/normalize-release-version.sh "$GITHUB_REF_NAME")"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'release_tag=%s\n' "$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          printf 'Resolved release version %s from tag %s\n' "$version" "$GITHUB_REF_NAME"
+
+  windows-payloads:
+    name: Windows payloads (Zig cross-compile AMD64 + ARM64)
+    needs: resolve-version
+    runs-on: [self-hosted, Linux, ARM64]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu,aarch64-pc-windows-gnullvm
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Cache cargo + Windows libyrs build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            third_party/y-crdt/target
+          key: yffi-windows-zig-cross-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('third_party/y-crdt/**/Cargo.lock') }}
+          restore-keys: |
+            yffi-windows-zig-cross-${{ runner.os }}-${{ runner.arch }}-
+      - name: Cross-compile Windows payloads
+        env:
+          WINDOWS_GUI_ARCHES: amd64 arm64
+        run: scripts/build-windows-desktop-payloads.sh "$RUNNER_TEMP/windows-gui/payload" "$RUNNER_TEMP/windows-gui/tests"
+      - name: Upload AMD64 payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-gui-payload-amd64
+          path: ${{ runner.temp }}/windows-gui/payload/amd64/
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload ARM64 payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-gui-payload-arm64
+          path: ${{ runner.temp }}/windows-gui/payload/arm64/
+          if-no-files-found: error
+          retention-days: 1
+
+  windows-msi:
+    name: Windows MSI (WiX ${{ matrix.arch }})
+    needs: windows-payloads
+    runs-on: [self-hosted, Windows, ARM64]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download ${{ matrix.arch }} payload
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-gui-payload-${{ matrix.arch }}
+          path: dist/windows-gui/payload/${{ matrix.arch }}
+      - name: Build MSI (reads VERSION file)
+        shell: pwsh
+        env:
+          WINDOWS_GUI_ARCHES: ${{ matrix.arch }}
+        run: .\make.ps1 windows-gui-release
+      - name: Upload ${{ matrix.arch }} MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-gui-msi-${{ matrix.arch }}
+          path: dist/windows-gui/msi/${{ matrix.arch }}/
+          if-no-files-found: error
+          retention-days: 1
+
+  macos-dmg:
+    name: macOS universal DMG (unsigned)
+    needs: resolve-version
+    # Gated on macOS runner capacity. Until this is provisioned the DMG is not
+    # produced and the all-or-nothing publish below correctly cannot complete.
+    if: ${{ vars.CODESK_MACOS_RUNNERS_AVAILABLE == 'true' }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+      - name: Build unsigned universal DMG (reads VERSION file)
+        env:
+          MACOS_GUI_UNSIGNED: '1'
+        run: make macos-gui-release
+      - name: Upload macOS DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-gui-dmg
+          path: dist/macos-desktop/*.dmg
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish release (all-three-or-nothing)
+    needs: [resolve-version, windows-msi, macos-dmg]
+    runs-on: [self-hosted, Linux, ARM64]
+    env:
+      VERSION: ${{ needs.resolve-version.outputs.version }}
+      RELEASE_TAG: ${{ needs.resolve-version.outputs.release_tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/artifacts
+      - name: Assemble versionless assets + manifest
+        run: |
+          set -eu
+          art="$RUNNER_TEMP/artifacts"
+          stage="$RUNNER_TEMP/release"
+          mkdir -p "$stage"
+
+          # Map the version-stamped build outputs to the frozen versionless asset
+          # names. Fail loud if any required asset is missing (all-or-nothing).
+          cp "$art/macos-gui-dmg/Codesk_${VERSION}_macos_universal.dmg" "$stage/Codesk-macos-universal.dmg"
+          cp "$art/windows-gui-msi-amd64/Codesk_${VERSION}_windows_amd64.msi" "$stage/Codesk-windows-amd64.msi"
+          cp "$art/windows-gui-msi-arm64/Codesk_${VERSION}_windows_arm64.msi" "$stage/Codesk-windows-arm64.msi"
+
+          scripts/build-release-manifest.sh \
+            --version "$VERSION" --release-tag "$RELEASE_TAG" \
+            --macos-universal "$stage/Codesk-macos-universal.dmg" \
+            --windows-amd64 "$stage/Codesk-windows-amd64.msi" \
+            --windows-arm64 "$stage/Codesk-windows-arm64.msi" \
+            --out "$stage/manifest.json"
+      - name: Publish immutable desktop-v release
+        run: |
+          set -eu
+          stage="$RUNNER_TEMP/release"
+          assets="$stage/Codesk-macos-universal.dmg $stage/Codesk-windows-amd64.msi $stage/Codesk-windows-arm64.msi $stage/manifest.json"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            # shellcheck disable=SC2086
+            gh release upload "$RELEASE_TAG" $assets --clobber
+          else
+            # shellcheck disable=SC2086
+            gh release create "$RELEASE_TAG" $assets \
+              --title "Codesk desktop $VERSION" \
+              --notes "Automated desktop release $VERSION."
+          fi
+      - name: Update rolling desktop-latest release
+        run: |
+          set -eu
+          stage="$RUNNER_TEMP/release"
+          assets="$stage/Codesk-macos-universal.dmg $stage/Codesk-windows-amd64.msi $stage/Codesk-windows-arm64.msi $stage/manifest.json"
+          if gh release view desktop-latest >/dev/null 2>&1; then
+            # shellcheck disable=SC2086
+            gh release upload desktop-latest $assets --clobber
+          else
+            # shellcheck disable=SC2086
+            gh release create desktop-latest $assets \
+              --title "Codesk desktop (latest)" \
+              --notes "Rolling latest desktop release. Currently $VERSION ($RELEASE_TAG)." \
+              --latest=false
+          fi
