@@ -86,4 +86,4 @@ if ($Target -ceq 'windows-gui-release' -and $settings.ContainsKey('WINDOWS_GUI_A
     $parameters['Architectures'] = $settings['WINDOWS_GUI_ARCHES']
 }
 
-& (Join-Path $PSScriptRoot 'scripts/run-windows-gui-target.ps1') @parameters
+& (Join-Path $PSScriptRoot 'scripts/run-windows-gui-container.ps1') @parameters

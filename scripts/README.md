@@ -92,64 +92,70 @@ construction-only output. It does not exercise runtime behavior.
 
 ## Windows desktop build and release
 
-The Windows GUI payloads reuse the same locked Rust bridge, Zig cross-compiler,
-PE subsystem flags, and PE verifier as CI. The human-facing build target is
-native-only, builds exactly the architecture reported by the Windows runtime,
-and fails before tool execution on every non-Windows kernel. GNU Make users on
-Windows can use the Make target without `uname` or a POSIX recipe shell;
-ordinary PowerShell users use the root shim without installing Make:
+The public Windows GUI targets run the complete payload and MSI toolchain in a
+process-isolated Windows container. The container pins Go 1.23.12, Rust 1.97.0,
+Zig 0.16.0, LLVM-MinGW 20260616, .NET SDK 8.0.423, Git for Windows 2.55.0.3,
+WiX SDK 4.0.5, and the checksums of every downloaded tool archive. Build
+products are written through the repository bind mount and retain the existing
+layout under `dist/windows-gui`.
 
 ### Prerequisites
 
-Install these tools and make their commands available on `PATH`:
-
-- Windows PowerShell 5.1 or newer.
-- Git for Windows, including its `bash.exe`.
-- Go 1.23 or newer, as required by `go.mod`.
-- Rustup with a stable Rust toolchain, Cargo, and the Windows targets used below.
-- Zig exactly 0.16.0. The payload script rejects other Zig versions.
-- .NET SDK exactly 8.0.423 for MSI releases. The MSI builder restores WiX SDK
-  4.0.5 through NuGet, so a separate WiX installation is not required.
-
-GNU Make is optional; `make.ps1` is the Make-free entry point. On Windows
-ARM64, put native ARM64 Go first on `PATH` (`go env GOHOSTARCH` must print
-`arm64`). Zig may be the AMD64 0.16.0 build running under Windows emulation
-because Zig is used as the target C compiler and linker driver.
-
-Prepare the Rust targets and the source submodule once per toolchain/checkout:
+The host needs Windows 11 24H2 or newer (or Windows Server 2025) and a Docker
+engine configured for Windows containers. The engine must allow process
+isolation; Hyper-V isolation is not used. The checkout must include the
+`third_party/y-crdt` submodule. Initialize it once if the checkout tool did not:
 
 ```powershell
-rustup target add x86_64-pc-windows-gnu aarch64-pc-windows-gnullvm
 git submodule update --init --recursive
 ```
 
-The first build may need network access for Go modules, Cargo crates, and NuGet
-packages. Before building, these checks should succeed:
+GNU Make is optional. `make.ps1` is the Make-free entry point. Docker must be
+available from the same PowerShell session:
 
 ```powershell
-go env GOHOSTARCH
-cargo --version
-zig version       # must print 0.16.0
-dotnet --version  # must print 8.0.423
-git --version
+docker info --format '{{.OSType}} {{.Architecture}} {{.OSVersion}}'
+# prints windows arm64 ... on Windows ARM64, or windows amd64 ... on AMD64
 ```
+
+The first build downloads a pinned Windows Server Core base plus the pinned
+tool archives and restores WiX into the image's NuGet cache. Payload builds may
+also download the source tree's Go modules and Cargo crates. Later image builds
+reuse Docker's toolchain layers. Server Core is intentional:
+Nano Server is smaller, but it omits both Windows PowerShell and `msi.dll`; the
+WiX reproducibility and ICE validation path requires those operating-system
+components.
 
 ```sh
 make windows-gui-build
 ```
 
 ```powershell
-.\make.ps1 windows-gui-build
+powershell.exe -ExecutionPolicy Bypass -File .\make.ps1 windows-gui-build
 ```
 
-The build architecture is not supplied by a Make variable: the shared
-PowerShell orchestrator resolves and enforces the real Windows host
-architecture. `WINDOWS_GUI_ARCHES` defaults to `amd64 arm64` for releases. CI
-and explicit cross-compile users invoke the honestly named
-`make windows-gui-payloads` target or the shared script directly from any host
-with Go, Rust/Cargo, the required Rust targets, and Zig 0.16.0. Native Windows
-entry points also require Git for Windows because that shared payload script is
-the single cross-toolchain implementation:
+The wrapper reads the Docker server architecture and requires it to match the
+host. It selects an architecture-qualified, digest-pinned LTSC 2025 base and
+native Go, Zig, LLVM-MinGW, .NET, and MinGit archives. Both `docker build` and
+`docker run` explicitly use `--isolation=process`. The build target does not
+accept `WINDOWS_GUI_ARCHES`; it builds exactly the native container
+architecture. On this machine that means an ARM64 container and ARM64 payload.
+
+Rust is the narrow exception to native host tools on ARM64. Rust's native
+Windows ARM64 host uses the MSVC ABI and would require the much larger Visual
+Studio Build Tools plus Windows SDK. The image instead uses Rust's self-contained
+`x86_64-pc-windows-gnu` host under Windows ARM64 emulation and installs both
+Windows target libraries. Go cgo uses the native LLVM-MinGW clang driver for
+the selected output architecture. Zig remains available for the shared inner
+script and non-container CI path, but the container supplies
+`WINDOWS_GUI_CC_AMD64` and `WINDOWS_GUI_CC_ARM64` overrides because Zig 0.16.0's
+native ARM64 compiler does not complete a cgo compile in process-isolated
+Server Core.
+
+CI and explicit native-toolchain users can still invoke the honestly named
+`make windows-gui-payloads` target or the shared inner script directly from a
+host that already has Go, Rust/Cargo, the required Rust targets, a POSIX shell,
+and Zig 0.16.0:
 
 ```sh
 WINDOWS_GUI_ARCHES="amd64 arm64" \
@@ -159,13 +165,19 @@ scripts/build-windows-desktop-payloads.sh \
   "$RUNNER_TEMP/windows-desktop-tests"
 ```
 
+The inner script also accepts `WINDOWS_GUI_CC_AMD64` and
+`WINDOWS_GUI_CC_ARM64` as full compiler commands. When unset, each defaults to
+the existing `zig cc -target ...` command.
+
 The two positional arguments are the payload and compiled-test output roots.
-The script requires both to resolve as distinct, non-overlapping, nonsymlink
-children of `WINDOWS_GUI_SAFE_PARENT_DIRECTORY`, then cleans both before
-compiling. Cross-target Yffi staging is transactional: the script restores the
-exact pre-build host `libyrs.a` bytes on success, failure, or interruption, and
-removes the staged archive when no host archive existed. The release entry
-point builds both payload architectures and passes each to the reproducible WiX
+The inner script requires both to resolve as distinct, non-overlapping,
+nonsymlink children of `WINDOWS_GUI_SAFE_PARENT_DIRECTORY`, then cleans both
+before compiling. Cross-target Yffi staging is transactional: the script
+restores the exact pre-build host `libyrs.a` bytes on success, failure, or
+interruption, and removes the staged archive when no host archive existed.
+
+The public release entry point uses the same native container, builds both
+payload architectures by default, and passes each to the reproducible WiX
 builder, which links the requested release twice and runs ICE validation:
 
 ```sh
@@ -173,13 +185,16 @@ make windows-gui-release GUI_VERSION=1.2.3
 ```
 
 ```powershell
-.\make.ps1 windows-gui-release GUI_VERSION=1.2.3
+powershell.exe -ExecutionPolicy Bypass -File .\make.ps1 windows-gui-release GUI_VERSION=1.2.3
 ```
 
-That target fails closed unless it is running on real Windows; Linux, macOS,
-Wine, and WSL do not produce a release claim. It requires a canonical numeric
-`GUI_VERSION` in the MSI range (major and minor at most 255, build at most
-65535) before compiling. It produces exactly one MSI per requested architecture:
+That target fails closed unless both the host and Docker engine are real
+Windows, the Docker engine architecture matches the host, and all requested
+output paths remain under the repository bind mount. Linux containers, Wine,
+WSL, cross-architecture images, and Hyper-V isolation do not produce a release
+claim. The target requires a canonical numeric `GUI_VERSION` in the MSI range
+(major and minor at most 255, build at most 65535) before compiling. It produces
+exactly one MSI per requested architecture:
 
 ```text
 dist/windows-gui/msi/amd64/Codesk_1.2.3_windows_amd64.msi

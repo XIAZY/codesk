@@ -148,10 +148,12 @@ for architecture in $validated_architectures; do
 		amd64)
 			rust_target=x86_64-pc-windows-gnu
 			zig_target=x86_64-windows-gnu
+			cc_command="${WINDOWS_GUI_CC_AMD64:-zig cc -target $zig_target}"
 			;;
 		arm64)
 			rust_target=aarch64-pc-windows-gnullvm
 			zig_target=aarch64-windows-gnu
+			cc_command="${WINDOWS_GUI_CC_ARM64:-zig cc -target $zig_target}"
 			;;
 	esac
 	arch_payload_dir="$payload_dir/$architecture"
@@ -159,15 +161,15 @@ for architecture in $validated_architectures; do
 
 	yffi_touched=1
 	RUST_TARGET="$rust_target" RUSTFLAGS='-C panic=abort' scripts/build-yffi.sh
-	CC="zig cc -target $zig_target" CGO_ENABLED=1 GOOS=windows GOARCH="$architecture" \
+	CC="$cc_command" CGO_ENABLED=1 GOOS=windows GOARCH="$architecture" \
 		go vet ./daemon/internal/syncer ./internal/ycrdt
-	CC="zig cc -target $zig_target" CGO_ENABLED=1 GOOS=windows GOARCH="$architecture" \
+	CC="$cc_command" CGO_ENABLED=1 GOOS=windows GOARCH="$architecture" \
 		go test -c -o "$test_dir/notty-syncer-$architecture.test.exe" ./daemon/internal/syncer
-	CC="zig cc -target $zig_target" CGO_ENABLED=1 GOOS=windows GOARCH="$architecture" \
+	CC="$cc_command" CGO_ENABLED=1 GOOS=windows GOARCH="$architecture" \
 		go vet ./daemon/internal/desktopstate ./daemon/internal/desktop ./daemon/internal/desktopapp ./daemon/cmd/codesk-desktop
-	CC="zig cc -target $zig_target" CGO_ENABLED=1 GOOS=windows GOARCH="$architecture" \
+	CC="$cc_command" CGO_ENABLED=1 GOOS=windows GOARCH="$architecture" \
 		go test -c -o "$test_dir/codesk-desktop-$architecture.test.exe" ./daemon/cmd/codesk-desktop
-	CC="zig cc -target $zig_target" CGO_ENABLED=1 GOOS=windows GOARCH="$architecture" \
+	CC="$cc_command" CGO_ENABLED=1 GOOS=windows GOARCH="$architecture" \
 		go build -trimpath -buildvcs=false \
 			-ldflags="-H=windowsgui -extldflags=-Wl,--subsystem,windows -X main.desktopVersion=$build_version" \
 			-o "$arch_payload_dir/Codesk.exe" ./daemon/cmd/codesk-desktop

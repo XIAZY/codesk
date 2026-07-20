@@ -43,7 +43,7 @@ function Resolve-GitBashExecutable {
 
     $directory = Split-Path -Parent $gitCommand.Source
     for ($depth = 0; $depth -lt 4 -and -not [string]::IsNullOrWhiteSpace($directory); $depth++) {
-        foreach ($relative in @('bin/bash.exe', 'usr/bin/bash.exe')) {
+        foreach ($relative in @('bin/bash.exe', 'usr/bin/bash.exe', 'usr/bin/sh.exe')) {
             $candidate = Join-Path $directory $relative
             if (Test-Path -LiteralPath $candidate -PathType Leaf) {
                 return $candidate
@@ -55,7 +55,7 @@ function Resolve-GitBashExecutable {
         }
         $directory = $parent
     }
-    throw 'windows-gui targets require Git for Windows bash.exe'
+    throw 'windows-gui targets require a Git for Windows POSIX shell'
 }
 
 function Get-WindowsHostArchitecture {

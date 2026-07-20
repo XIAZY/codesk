@@ -278,8 +278,8 @@ func TestWindowsMSIReleaseSourceContract(t *testing.T) {
 			shimNew: "'macos-gui-build', 'macos-gui-release', 'windows-gui-build'",
 		},
 		{
-			name:    "PowerShell shim bypasses the shared orchestrator",
-			shimOld: "scripts/run-windows-gui-target.ps1",
+			name:    "PowerShell shim bypasses the container orchestrator",
+			shimOld: "scripts/run-windows-gui-container.ps1",
 			shimNew: "scripts/build-windows-desktop-msi-artifact.ps1",
 		},
 	}
@@ -317,6 +317,78 @@ func TestWindowsMSIReleaseSourceContract(t *testing.T) {
 				t.Fatal("release contract mutation passed")
 			}
 		})
+	}
+}
+
+func TestWindowsGUIContainerSourceContract(t *testing.T) {
+	wrapperData, err := os.ReadFile("run-windows-gui-container.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dockerfileData, err := os.ReadFile("../deploy/windows-desktop/Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper := normalizeSourceNewlines(string(wrapperData))
+	dockerfile := normalizeSourceNewlines(string(dockerfileData))
+
+	for source, want := range map[string]int{
+		"docker info --format '{{.OSType}}|{{.Architecture}}|{{.OSVersion}}'": 1,
+		"[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()": 1,
+		"Docker engine architecture $dockerArchitecture does not match host architecture $hostArchitecture": 1,
+		"'build', '--isolation=process'": 1,
+		"'run', '--rm', '--isolation=process'": 1,
+		"mcr.microsoft.com/windows/servercore:ltsc2025-amd64@sha256:bf9f85729e61bf27cad3844c506a41140c88b95d1388947e7a5e051a4672cebf": 1,
+		"mcr.microsoft.com/windows/servercore:ltsc2025-arm64@sha256:cc1af59d5d6a39f38d6df0e35df71a1e83d2c9e88a12041a84d3b6fe6f4a8cfd": 1,
+		"go1.23.12.windows-amd64.zip": 1,
+		"go1.23.12.windows-arm64.zip": 1,
+		"zig-x86_64-windows-0.16.0.zip": 1,
+		"zig-aarch64-windows-0.16.0.zip": 1,
+		"x86_64-pc-windows-msvc/rustup-init.exe": 1,
+		"aarch64-pc-windows-msvc/rustup-init.exe": 1,
+		"dotnet-sdk-8.0.423-win-x64.zip": 1,
+		"dotnet-sdk-8.0.423-win-arm64.zip": 1,
+		"MinGit-2.55.0.3-64-bit.zip": 1,
+		"MinGit-2.55.0.3-arm64.zip": 1,
+		"llvm-mingw-20260616-ucrt-x86_64.zip": 1,
+		"llvm-mingw-20260616-ucrt-aarch64.zip": 1,
+		"WINDOWS_GUI_CC_AMD64=C:/toolchains/llvm-mingw/bin/x86_64-w64-mingw32-clang.exe -static": 1,
+		"WINDOWS_GUI_CC_ARM64=C:/toolchains/llvm-mingw/bin/aarch64-w64-mingw32-clang.exe -static": 1,
+		"third_party/y-crdt/Cargo.lock": 1,
+		"target=C:\\workspace": 1,
+		"scripts\\run-windows-gui-target.ps1": 1,
+	} {
+		if got := strings.Count(wrapper, source); got != want {
+			t.Errorf("Windows container wrapper source count for %q = %d, want %d", source, got, want)
+		}
+	}
+	for source, want := range map[string]int{
+		"ARG BASE_IMAGE": 1,
+		"FROM ${BASE_IMAGE}": 1,
+		"Get-FileHash -LiteralPath $path -Algorithm $item.Algorithm": 1,
+		"--default-toolchain 1.97.0": 1,
+		"x86_64-pc-windows-gnu aarch64-pc-windows-gnullvm": 1,
+		"go1\\.23\\.12 windows/": 1,
+		"rustc 1\\.97\\.0 ": 1,
+		"(zig version).Trim() -cne '0.16.0'": 1,
+		"(dotnet --version).Trim() -cne '8.0.423'": 1,
+		"git version 2.55.0.windows.3": 1,
+		"LLVM_MINGW_SHA256": 2,
+		"aarch64-w64-mingw32-clang.exe": 1,
+		"x86_64-w64-mingw32-clang.exe": 1,
+		"C:\\Windows\\System32\\msi.dll": 1,
+		"dotnet restore C:\\toolchain-restore\\Codesk.wixproj": 1,
+		"wixtoolset.sdk\\4.0.5": 1,
+		"ENTRYPOINT [\"powershell.exe\"": 1,
+	} {
+		if got := strings.Count(dockerfile, source); got != want {
+			t.Errorf("Windows toolchain Dockerfile source count for %q = %d, want %d", source, got, want)
+		}
+	}
+	for _, forbidden := range []string{"--isolation=hyperv", "nanoserver:", "windows/amd64"} {
+		if strings.Contains(wrapper, forbidden) || strings.Contains(dockerfile, forbidden) {
+			t.Errorf("Windows container build contains forbidden %q", forbidden)
+		}
 	}
 }
 
@@ -937,7 +1009,7 @@ func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) er
 		return err
 	}
 	for source, want := range map[string]int{
-		"scripts/run-windows-gui-target.ps1": 1,
+		"scripts/run-windows-gui-container.ps1": 1,
 		"'WINDOWS_GUI_ARCHES'":               3,
 		"'Architectures'":                    1,
 		"macos-gui-build requires a real macOS host; no GUI was built":       1,
