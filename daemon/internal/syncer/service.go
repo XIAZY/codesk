@@ -53,6 +53,7 @@ type Service struct {
 	primaryRuntime          *workspaceRuntime
 	agentRuntimes           map[string]*managedWorkspaceRuntime
 	agentWorkers            map[string]*managedAgentWorker
+	agentBaseCtx            context.Context // Service-lifetime context for agent workers and runtimes; set in run(), outlives any single fetch cycle.
 	latestWorkspace         *workspaceResponse
 	ready                   chan struct{}
 	readyOnce               sync.Once
@@ -356,6 +357,7 @@ func (s *Service) run(ctx context.Context, heartbeatTicks <-chan time.Time) (run
 	s.toolGateway = gateway
 	s.toolServer = gateway.server
 	coreCtx, cancelCore := context.WithCancel(ctx)
+	s.agentBaseCtx = coreCtx
 	stopHeartbeat := func() {}
 	var primaryDone chan struct{}
 	var primaryErr error
@@ -804,7 +806,7 @@ func (s *Service) applyFetchedWorkspace(ctx context.Context, workspace *workspac
 	s.mu.Lock()
 	s.latestWorkspace = workspace
 	s.mu.Unlock()
-	if err := s.syncAgentWorkers(ctx, workspace.Agents); err != nil {
+	if err := s.syncAgentWorkers(workspace.Agents); err != nil {
 		return err
 	}
 	if s.sessions != nil {
@@ -1146,7 +1148,10 @@ func (s *workspaceRuntime) createDocumentFromLocalIntent(ctx context.Context, in
 	return &created, nil
 }
 
-func (s *Service) syncAgentWorkers(ctx context.Context, agents []*agent) error {
+func (s *Service) syncAgentWorkers(agents []*agent) error {
+	if s.agentBaseCtx == nil {
+		return errors.New("syncer: syncAgentWorkers called before agentBaseCtx is bound")
+	}
 	desired := make(map[string]struct{}, len(agents))
 	skills := agentSkillExecutor{service: s}
 
@@ -1159,7 +1164,7 @@ func (s *Service) syncAgentWorkers(ctx context.Context, agents []*agent) error {
 		if _, ok := s.agentWorkers[currentAgent.ID]; ok {
 			continue
 		}
-		workerCtx, cancel := context.WithCancel(ctx)
+		workerCtx, cancel := context.WithCancel(s.agentBaseCtx)
 		done := make(chan struct{})
 		worker := &managedAgentWorker{cancel: cancel, wake: make(chan struct{}, 1), done: done}
 		s.agentWorkers[currentAgent.ID] = worker
