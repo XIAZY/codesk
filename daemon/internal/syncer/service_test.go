@@ -5549,6 +5549,7 @@ func TestSnapshotAndRefreshAreSerialized(t *testing.T) {
 func TestCoordinatorWorkerAndRuntimeSurviveFetchCtxCancellation(t *testing.T) {
 	var refreshCount atomic.Int32
 	var inboxPolls atomic.Int32
+	fetchCtxCh := make(chan context.Context, 8)
 	withAgent := workspaceResponse{
 		Agents: []*agent{{
 			ID:     "agent_1",
@@ -5591,7 +5592,12 @@ func TestCoordinatorWorkerAndRuntimeSurviveFetchCtxCancellation(t *testing.T) {
 			AgentWorkspaceRoot: t.TempDir(),
 			AgentID:            "daemon_agent",
 		},
-		client:        server.Client(),
+		client: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(r.URL.Path, "/workspace") {
+				fetchCtxCh <- r.Context()
+			}
+			return server.Client().Transport.RoundTrip(r)
+		})},
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 		agentWorkers:  map[string]*managedAgentWorker{},
 	}
@@ -5601,6 +5607,20 @@ func TestCoordinatorWorkerAndRuntimeSurviveFetchCtxCancellation(t *testing.T) {
 	stopWorker := startTestRefreshWorker(t, service, ctx)
 	defer func() { cancel(); stopWorker() }()
 
+	waitFetchCanceled := func() {
+		t.Helper()
+		select {
+		case fctx := <-fetchCtxCh:
+			select {
+			case <-fctx.Done():
+			case <-time.After(5 * time.Second):
+				t.Fatal("fetchCtx was not canceled by coordinator")
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("no fetch request was made")
+		}
+	}
+
 	// Hot-add: first refresh adds agent_1.
 	service.signalRefresh()
 	waitUntil(t, func() bool {
@@ -5608,15 +5628,17 @@ func TestCoordinatorWorkerAndRuntimeSurviveFetchCtxCancellation(t *testing.T) {
 		defer service.mu.Unlock()
 		return service.agentWorkers["agent_1"] != nil && service.agentRuntimes["agent_1"] != nil
 	})
-	// Wait for coordinator to release fetchCtx (cancelFetch stored nil).
-	waitUntil(t, func() bool { return service.cancelFetch.Load() == nil })
+	waitFetchCanceled()
 
-	// Fetch release: coordinator canceled fetchCtx. Verify both survive.
+	// fetchCtx is now canceled. Verify both survive.
 	service.mu.Lock()
 	worker1 := service.agentWorkers["agent_1"]
 	runtime1 := service.agentRuntimes["agent_1"]
 	service.mu.Unlock()
 
+	if runtime1.parentCtx != service.agentBaseCtx {
+		t.Fatal("runtime parentCtx should be agentBaseCtx, not transient fetchCtx")
+	}
 	select {
 	case <-worker1.done:
 		t.Fatal("worker died after fetchCtx cancellation; should survive on agentBaseCtx")
@@ -5641,8 +5663,7 @@ func TestCoordinatorWorkerAndRuntimeSurviveFetchCtxCancellation(t *testing.T) {
 
 	// Removal: second refresh removes agent_1.
 	service.signalRefresh()
-	waitUntil(t, func() bool { return service.cancelFetch.Load() == nil && refreshCount.Load() >= 2 })
-	// Both maps absent and both done channels closed.
+	waitFetchCanceled()
 	service.mu.Lock()
 	workerGone := service.agentWorkers["agent_1"] == nil
 	runtimeGone := service.agentRuntimes["agent_1"] == nil
@@ -5655,18 +5676,18 @@ func TestCoordinatorWorkerAndRuntimeSurviveFetchCtxCancellation(t *testing.T) {
 	}
 	select {
 	case <-worker1.done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("worker did not join after removal")
 	}
 	select {
 	case <-runtime1.done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("runtime did not join after removal")
 	}
 
 	// Re-add: third refresh adds agent_1 back.
 	service.signalRefresh()
-	waitUntil(t, func() bool { return service.cancelFetch.Load() == nil && refreshCount.Load() >= 3 })
+	waitFetchCanceled()
 	service.mu.Lock()
 	worker2 := service.agentWorkers["agent_1"]
 	runtime2 := service.agentRuntimes["agent_1"]
@@ -5676,6 +5697,9 @@ func TestCoordinatorWorkerAndRuntimeSurviveFetchCtxCancellation(t *testing.T) {
 	}
 	if worker2 == worker1 {
 		t.Fatal("re-add should create a new worker, not reuse the removed one")
+	}
+	if runtime2.parentCtx != service.agentBaseCtx {
+		t.Fatal("re-added runtime parentCtx should be agentBaseCtx")
 	}
 	select {
 	case <-worker2.done:
@@ -5691,12 +5715,12 @@ func TestCoordinatorWorkerAndRuntimeSurviveFetchCtxCancellation(t *testing.T) {
 	stopWorker()
 	select {
 	case <-worker2.done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("re-added worker did not join on shutdown")
 	}
 	select {
 	case <-runtime2.done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("re-added runtime did not join on shutdown")
 	}
 	service.closeAgentWorkers()
