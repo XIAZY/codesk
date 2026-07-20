@@ -49,6 +49,20 @@ CODESK_MACOS_NOTARY_PROFILE='codesk-notary' \
 scripts/build-macos-desktop-release.sh 1.2.3
 ```
 
+The native build entry point builds the same universal application in explicit
+unsigned, construction-only mode:
+
+```sh
+make macos-gui-build
+make macos-gui-build GUI_VERSION=1.2.3
+```
+
+The signed release entry point is `make macos-gui-release GUI_VERSION=1.2.3`;
+provide both signing variables documented above. `MACOS_GUI_UNSIGNED=1` remains
+an explicit construction-only escape hatch. Both human-facing targets fail
+before construction on a non-macOS kernel; the release script still owns every
+toolchain, signing, notarization, and source-cleanliness check.
+
 The script signs the universal nested helper before `Codesk.app`, enables the
 hardened runtime, notarizes and staples the app, produces and notarizes the
 drag-to-Applications DMG, and writes a source-bound `manifest.json` plus
@@ -75,6 +89,158 @@ checks. The manifest selects the obligations: a `signed_and_notarized=true`
 claim always executes every trust check even when unsigned relaxation is set;
 an unsigned claim requires explicit relaxation and produces unmistakably
 construction-only output. It does not exercise runtime behavior.
+
+## Windows desktop build and release
+
+The public Windows GUI targets consume the reusable
+`alphatoad/notty:windows-builder` image and run the complete payload and MSI
+toolchain in a process-isolated Windows container. The image pins Go 1.23.12,
+Rust 1.97.0, Zig 0.16.0, LLVM-MinGW 20260616, .NET SDK 8.0.423, Git for Windows
+2.55.0.3, and WiX SDK 4.0.5. Build products are written through the repository
+bind mount and retain the existing layout under `dist/windows-gui`.
+
+### Prerequisites
+
+The host needs Windows 11 24H2 or newer (or Windows Server 2025) and a Docker
+engine configured for Windows containers. The engine must allow process
+isolation; Hyper-V isolation is not used. The checkout must include the
+`third_party/y-crdt` submodule. Initialize it once if the checkout tool did not:
+
+```powershell
+git submodule update --init --recursive
+```
+
+GNU Make is optional. `make.ps1` is the Make-free entry point. Docker must be
+available from the same PowerShell session:
+
+```powershell
+docker info --format '{{.OSType}} {{.Architecture}} {{.OSVersion}}'
+# prints windows arm64 ... on Windows ARM64, or windows amd64 ... on AMD64
+```
+
+Build the reusable builder image independently from the product build:
+
+```sh
+make build-windows-builder-image
+```
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\make.ps1 build-windows-builder-image
+```
+
+This image build downloads Windows Server Core plus versioned tool archives over
+HTTPS and restores WiX into the image's NuGet cache. Payload builds may
+also download the source tree's Go modules and Cargo crates. Later image builds
+reuse Docker's toolchain layers. Server Core is intentional:
+Nano Server is smaller, but it omits both Windows PowerShell and `msi.dll`; the
+WiX reproducibility and ICE validation path requires those operating-system
+components.
+
+The product build targets do not rebuild or mutate the builder image. They fail
+with an instruction to run `make build-windows-builder-image` when the image is
+missing, and they reject an image whose Windows architecture does not match the
+Docker engine. To use another local or pre-pulled tag, set
+`WINDOWS_GUI_BUILDER_IMAGE`; the image-build and product-build jobs must use the
+same value.
+
+```sh
+make windows-gui-build
+```
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\make.ps1 windows-gui-build
+```
+
+The Dockerfile uses BuildKit's `TARGETARCH` argument to select the LTSC 2025
+Server Core variant and native Go, Zig, LLVM-MinGW, .NET, MinGit, and rustup
+archives. Docker's legacy Windows builder does not populate automatic platform
+arguments, so the lightweight image-builder supplies only
+`TARGETARCH=<Docker server architecture>` as a compatibility fallback. Image
+construction and product execution both explicitly use `--isolation=process`.
+The product build target does not accept `WINDOWS_GUI_ARCHES`; it builds exactly
+the native container architecture. On this machine that means an ARM64
+container and ARM64 payload.
+
+Rust is the narrow exception to native host tools on ARM64. Rust's native
+Windows ARM64 host uses the MSVC ABI and would require the much larger Visual
+Studio Build Tools plus Windows SDK. The image instead uses Rust's self-contained
+`x86_64-pc-windows-gnu` host under Windows ARM64 emulation and installs both
+Windows target libraries. Go cgo uses the native LLVM-MinGW clang driver for
+the selected output architecture. Zig remains available for the shared inner
+script and non-container CI path, but the container supplies
+`WINDOWS_GUI_CC_AMD64` and `WINDOWS_GUI_CC_ARM64` overrides because Zig 0.16.0's
+native ARM64 compiler does not complete a cgo compile in process-isolated
+Server Core.
+
+CI and explicit native-toolchain users can still invoke the honestly named
+`make windows-gui-payloads` target or the shared inner script directly from a
+host that already has Go, Rust/Cargo, the required Rust targets, a POSIX shell,
+and Zig 0.16.0:
+
+```sh
+WINDOWS_GUI_ARCHES="amd64 arm64" \
+WINDOWS_GUI_SAFE_PARENT_DIRECTORY="$RUNNER_TEMP" \
+scripts/build-windows-desktop-payloads.sh \
+  "$RUNNER_TEMP/windows-desktop-payload" \
+  "$RUNNER_TEMP/windows-desktop-tests"
+```
+
+The inner script also accepts `WINDOWS_GUI_CC_AMD64` and
+`WINDOWS_GUI_CC_ARM64` as full compiler commands. When unset, each defaults to
+the existing `zig cc -target ...` command.
+
+The two positional arguments are the payload and compiled-test output roots.
+The inner script requires both to resolve as distinct, non-overlapping,
+nonsymlink children of `WINDOWS_GUI_SAFE_PARENT_DIRECTORY`, then cleans both
+before compiling. Cross-target Yffi staging is transactional: the script
+restores the exact pre-build host `libyrs.a` bytes on success, failure, or
+interruption, and removes the staged archive when no host archive existed.
+
+The public release entry point uses the same native container, builds both
+payload architectures by default, and passes each to the reproducible WiX
+builder, which links the requested release twice and runs ICE validation:
+
+```sh
+make windows-gui-release GUI_VERSION=1.2.3
+```
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\make.ps1 windows-gui-release GUI_VERSION=1.2.3
+```
+
+That target fails closed unless both the host and Docker engine are real
+Windows, the Docker engine architecture matches the host, and all requested
+output paths remain under the repository bind mount. Linux containers, Wine,
+WSL, cross-architecture images, and Hyper-V isolation do not produce a release
+claim. The target requires a canonical numeric `GUI_VERSION` in the MSI range
+(major and minor at most 255, build at most 65535) before compiling. It produces
+exactly one MSI per requested architecture:
+
+```text
+dist/windows-gui/msi/amd64/Codesk_1.2.3_windows_amd64.msi
+dist/windows-gui/msi/arm64/Codesk_1.2.3_windows_arm64.msi
+```
+
+Each architecture directory also contains `provenance.json` and
+`SHA256SUMS`. The builder derives the MSI ProductCode with UUIDv5 from its
+pinned product namespace and the canonical `"<version>+<arch>"` name while
+preserving the package's stable UpgradeCode. Its existing
+`-PreviousProductCode`/`-CandidateProductCode` parameter set remains the
+two-version QA mode used by the upgrade/reproducibility CI. Signing and
+publication remain separate release-policy work.
+
+From any host with `gh` plus `sha256sum` or `shasum`, download both
+architecture bundles from a successful CI run bound to the checked-out `HEAD`
+and verify their exact inventories and checksums with:
+
+```sh
+make windows-verify
+make windows-verify WINDOWS_GUI_RUN_ID=123456789
+```
+
+Without an explicit run ID, the target selects the newest successful CI run
+for the exact checked-out commit. It never falls back to a stale commit or a
+non-successful run.
 
 ### Native acceptance
 

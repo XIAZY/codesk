@@ -1,3 +1,4 @@
+[CmdletBinding(DefaultParameterSetName = 'QaPair')]
 param(
     [Parameter(Mandatory = $true)]
     [ValidateSet('AMD64', 'ARM64')]
@@ -11,11 +12,14 @@ param(
     [ValidateSet('x64', 'arm64')]
     [string] $InstallerPlatform,
 
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'QaPair')]
     [string] $PreviousProductCode,
 
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'QaPair')]
     [string] $CandidateProductCode,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'Release')]
+    [string] $ProductVersion,
 
     [Parameter(Mandatory = $true)]
     [string] $CodeskExe,
@@ -56,6 +60,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# UUIDv5(URL, "https://github.com/XIAZY/notty/codesk/windows/product-code").
+$ProductCodeNamespace = [guid] '55A27873-BF9C-5DC3-AA8B-9D6F996041EF'
+
 function Get-Sha256 {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -66,6 +73,62 @@ function ConvertTo-NormalizedGuid {
     param([Parameter(Mandatory = $true)][string] $Value)
 
     return ([guid] $Value).ToString('B').ToUpperInvariant()
+}
+
+function ConvertTo-CanonicalMsiProductVersion {
+    param([Parameter(Mandatory = $true)][string] $Value)
+
+    if ($Value -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+        throw "ProductVersion must be canonical numeric X.Y.Z without leading zeros: $Value"
+    }
+
+    $fields = @($Value.Split('.'))
+    [uint32] $major = 0
+    [uint32] $minor = 0
+    [uint32] $build = 0
+    $style = [System.Globalization.NumberStyles]::None
+    $culture = [System.Globalization.CultureInfo]::InvariantCulture
+    if (-not [uint32]::TryParse($fields[0], $style, $culture, [ref] $major) -or
+        -not [uint32]::TryParse($fields[1], $style, $culture, [ref] $minor) -or
+        -not [uint32]::TryParse($fields[2], $style, $culture, [ref] $build)) {
+        throw "ProductVersion contains a field outside the unsigned integer domain: $Value"
+    }
+    if ($major -gt 255 -or $minor -gt 255 -or $build -gt 65535) {
+        throw "ProductVersion exceeds MSI limits (major/minor <= 255, build <= 65535): $Value"
+    }
+    return $Value
+}
+
+function Get-UuidV5 {
+    param(
+        [Parameter(Mandatory = $true)][guid] $Namespace,
+        [Parameter(Mandatory = $true)][string] $Name
+    )
+
+    [byte[]] $namespaceBytes = $Namespace.ToByteArray()
+    [Array]::Reverse($namespaceBytes, 0, 4)
+    [Array]::Reverse($namespaceBytes, 4, 2)
+    [Array]::Reverse($namespaceBytes, 6, 2)
+    [byte[]] $nameBytes = [System.Text.Encoding]::UTF8.GetBytes($Name)
+    [byte[]] $inputBytes = [byte[]]::new($namespaceBytes.Length + $nameBytes.Length)
+    [Array]::Copy($namespaceBytes, 0, $inputBytes, 0, $namespaceBytes.Length)
+    [Array]::Copy($nameBytes, 0, $inputBytes, $namespaceBytes.Length, $nameBytes.Length)
+
+    $sha1 = [System.Security.Cryptography.SHA1]::Create()
+    try {
+        [byte[]] $hashBytes = $sha1.ComputeHash($inputBytes)
+    } finally {
+        $sha1.Dispose()
+    }
+
+    [byte[]] $uuidBytes = [byte[]]::new(16)
+    [Array]::Copy($hashBytes, 0, $uuidBytes, 0, $uuidBytes.Length)
+    $uuidBytes[6] = ($uuidBytes[6] -band 0x0f) -bor 0x50
+    $uuidBytes[8] = ($uuidBytes[8] -band 0x3f) -bor 0x80
+    [Array]::Reverse($uuidBytes, 0, 4)
+    [Array]::Reverse($uuidBytes, 4, 2)
+    [Array]::Reverse($uuidBytes, 6, 2)
+    return ([guid]::new($uuidBytes)).ToString('B').ToUpperInvariant()
 }
 
 function ConvertTo-NormalizedCommit {
@@ -339,20 +402,33 @@ foreach ($path in @(
     }
 }
 
-$versions = @(
-    [pscustomobject] @{
-        name = 'previous'
-        version = '0.0.1'
-        productCode = ConvertTo-NormalizedGuid $PreviousProductCode
-    },
-    [pscustomobject] @{
-        name = 'candidate'
-        version = '0.0.2'
-        productCode = ConvertTo-NormalizedGuid $CandidateProductCode
+$buildMode = if ($PSCmdlet.ParameterSetName -ceq 'Release') { 'release' } else { 'qa-pair' }
+if ($buildMode -ceq 'release') {
+    $ProductVersion = ConvertTo-CanonicalMsiProductVersion $ProductVersion
+    $productCodeName = "$ProductVersion+$GoArchitecture"
+    $versions = @(
+        [pscustomobject] @{
+            name = 'release'
+            version = $ProductVersion
+            productCode = Get-UuidV5 -Namespace $ProductCodeNamespace -Name $productCodeName
+        }
+    )
+} else {
+    $versions = @(
+        [pscustomobject] @{
+            name = 'previous'
+            version = '0.0.1'
+            productCode = ConvertTo-NormalizedGuid $PreviousProductCode
+        },
+        [pscustomobject] @{
+            name = 'candidate'
+            version = '0.0.2'
+            productCode = ConvertTo-NormalizedGuid $CandidateProductCode
+        }
+    )
+    if ($versions[0].productCode -ceq $versions[1].productCode) {
+        throw 'previous and candidate ProductCodes must be distinct'
     }
-)
-if ($versions[0].productCode -ceq $versions[1].productCode) {
-    throw 'previous and candidate ProductCodes must be distinct'
 }
 
 if (-not (Test-Path -LiteralPath $SafeParentDirectory -PathType Container)) {
@@ -457,6 +533,7 @@ $provenance = [ordered] @{
         architecture = $Architecture
         goArchitecture = $GoArchitecture
         installerPlatform = $InstallerPlatform
+        buildMode = $buildMode
     }
     toolchain = [ordered] @{
         dotnetSdk = $dotnetVersion
@@ -472,17 +549,31 @@ $provenance = [ordered] @{
     }
     packages = $packageReports
 }
+if ($buildMode -ceq 'release') {
+    $provenance['productCodeDerivation'] = [ordered] @{
+        algorithm = 'UUIDv5-SHA1'
+        namespace = ConvertTo-NormalizedGuid $ProductCodeNamespace
+        name = $productCodeName
+    }
+}
 
 $provenancePath = Join-Path $OutputDirectory 'provenance.json'
 $provenanceJson = ConvertTo-Json $provenance -Depth 30
 [System.IO.File]::WriteAllText($provenancePath, $provenanceJson + "`n", [System.Text.UTF8Encoding]::new($false))
 
 $checksumFiles = @(Get-CanonicalArtifactFiles -Root $OutputDirectory)
-[string[]] $expectedChecksumNames = @(
-    "Codesk_0.0.1_windows_$GoArchitecture.msi",
-    "Codesk_0.0.2_windows_$GoArchitecture.msi",
-    'provenance.json'
-)
+if ($buildMode -ceq 'release') {
+    [string[]] $expectedChecksumNames = @(
+        "Codesk_${ProductVersion}_windows_$GoArchitecture.msi",
+        'provenance.json'
+    )
+} else {
+    [string[]] $expectedChecksumNames = @(
+        "Codesk_0.0.1_windows_$GoArchitecture.msi",
+        "Codesk_0.0.2_windows_$GoArchitecture.msi",
+        'provenance.json'
+    )
+}
 [Array]::Sort($expectedChecksumNames, [System.StringComparer]::Ordinal)
 $actualChecksumNames = @($checksumFiles | ForEach-Object Name)
 if ((ConvertTo-Json $actualChecksumNames -Compress) -cne
@@ -493,12 +584,20 @@ $checksumLines = @($checksumFiles | ForEach-Object { "$(Get-Sha256 $_.FullName) 
 $checksumsPath = Join-Path $OutputDirectory 'SHA256SUMS'
 [System.IO.File]::WriteAllLines($checksumsPath, $checksumLines, [System.Text.UTF8Encoding]::new($false))
 
-[string[]] $expectedNames = @(
-    "Codesk_0.0.1_windows_$GoArchitecture.msi",
-    "Codesk_0.0.2_windows_$GoArchitecture.msi",
-    'provenance.json',
-    'SHA256SUMS'
-)
+if ($buildMode -ceq 'release') {
+    [string[]] $expectedNames = @(
+        "Codesk_${ProductVersion}_windows_$GoArchitecture.msi",
+        'provenance.json',
+        'SHA256SUMS'
+    )
+} else {
+    [string[]] $expectedNames = @(
+        "Codesk_0.0.1_windows_$GoArchitecture.msi",
+        "Codesk_0.0.2_windows_$GoArchitecture.msi",
+        'provenance.json',
+        'SHA256SUMS'
+    )
+}
 [Array]::Sort($expectedNames, [System.StringComparer]::Ordinal)
 $canonicalFiles = @(Get-CanonicalArtifactFiles -Root $OutputDirectory)
 $actualNames = @($canonicalFiles | ForEach-Object Name)
