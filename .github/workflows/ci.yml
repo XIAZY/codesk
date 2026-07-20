@@ -248,6 +248,7 @@ jobs:
       - name: Vet and compile Windows-tagged tests for both architectures
         run: |
           rm -rf "$RUNNER_TEMP/windows-desktop-payload"
+          build_version="$(cat VERSION 2>/dev/null || printf dev)"
           for target in \
             "amd64 x86_64-pc-windows-gnu x86_64-windows-gnu" \
             "arm64 aarch64-pc-windows-gnullvm aarch64-windows-gnu"
@@ -269,10 +270,10 @@ jobs:
               go test -c -o "$RUNNER_TEMP/codesk-desktop-$arch.test.exe" ./daemon/cmd/codesk-desktop
             CC="zig cc -target $zig_target" CGO_ENABLED=1 GOOS=windows GOARCH="$arch" \
               go build -trimpath -buildvcs=false \
-                -ldflags='-H=windowsgui -extldflags=-Wl,--subsystem,windows' \
+                -ldflags="-H=windowsgui -extldflags=-Wl,--subsystem,windows -X notty/daemon/internal/buildinfo.Version=$build_version" \
                 -o "$payload_dir/Codesk.exe" ./daemon/cmd/codesk-desktop
             CGO_ENABLED=0 GOOS=windows GOARCH="$arch" \
-              go build -trimpath -buildvcs=false -ldflags='-s -w' \
+              go build -trimpath -buildvcs=false -ldflags="-s -w -X notty/daemon/internal/buildinfo.Version=$build_version" \
                 -o "$payload_dir/notty-agent-tool.exe" ./daemon/cmd/agenttool
             go run ./scripts/verify-windows-desktop-pe.go "$payload_dir/Codesk.exe" "$arch" gui
             go run ./scripts/verify-windows-desktop-pe.go "$payload_dir/notty-agent-tool.exe" "$arch" console
