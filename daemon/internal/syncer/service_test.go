@@ -5548,7 +5548,7 @@ func TestSnapshotAndRefreshAreSerialized(t *testing.T) {
 
 func TestCoordinatorWorkerAndRuntimeSurviveFetchCtxCancellation(t *testing.T) {
 	var refreshCount atomic.Int32
-	refreshDone := make(chan struct{}, 8)
+	var inboxPolls atomic.Int32
 	withAgent := workspaceResponse{
 		Agents: []*agent{{
 			ID:     "agent_1",
@@ -5573,8 +5573,8 @@ func TestCoordinatorWorkerAndRuntimeSurviveFetchCtxCancellation(t *testing.T) {
 				ws = withAgent
 			}
 			writeJSONResponse(w, http.StatusOK, &ws)
-			refreshDone <- struct{}{}
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agents/"):
+			inboxPolls.Add(1)
 			writeJSONResponse(w, http.StatusOK, toolInboxResponse{Items: []*agentEvent{}})
 		default:
 			http.NotFound(w, r)
@@ -5603,19 +5603,15 @@ func TestCoordinatorWorkerAndRuntimeSurviveFetchCtxCancellation(t *testing.T) {
 
 	// Hot-add: first refresh adds agent_1.
 	service.signalRefresh()
-	select {
-	case <-refreshDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("first refresh did not complete")
-	}
 	waitUntil(t, func() bool {
 		service.mu.Lock()
 		defer service.mu.Unlock()
 		return service.agentWorkers["agent_1"] != nil && service.agentRuntimes["agent_1"] != nil
 	})
+	// Wait for coordinator to release fetchCtx (cancelFetch stored nil).
+	waitUntil(t, func() bool { return service.cancelFetch.Load() == nil })
 
-	// Fetch release: coordinator canceled fetchCtx after the refresh above.
-	// Verify worker and runtime survive.
+	// Fetch release: coordinator canceled fetchCtx. Verify both survive.
 	service.mu.Lock()
 	worker1 := service.agentWorkers["agent_1"]
 	runtime1 := service.agentRuntimes["agent_1"]
@@ -5630,53 +5626,54 @@ func TestCoordinatorWorkerAndRuntimeSurviveFetchCtxCancellation(t *testing.T) {
 		t.Fatal("runtime stopped after fetchCtx cancellation; should survive on agentBaseCtx")
 	}
 
-	// Wake worker to prove it can still process after fetchCtx release.
+	// Wake worker and prove it completed an inbox poll after fetchCtx release.
+	baseline := inboxPolls.Load()
 	select {
 	case worker1.wake <- struct{}{}:
 	default:
 	}
-	time.Sleep(50 * time.Millisecond)
+	waitUntil(t, func() bool { return inboxPolls.Load() > baseline })
 	select {
 	case <-worker1.done:
-		t.Fatal("worker died after wake; should remain alive")
+		t.Fatal("worker died after post-release inbox poll; should remain alive")
 	default:
 	}
 
 	// Removal: second refresh removes agent_1.
 	service.signalRefresh()
-	select {
-	case <-refreshDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("second refresh did not complete")
+	waitUntil(t, func() bool { return service.cancelFetch.Load() == nil && refreshCount.Load() >= 2 })
+	// Both maps absent and both done channels closed.
+	service.mu.Lock()
+	workerGone := service.agentWorkers["agent_1"] == nil
+	runtimeGone := service.agentRuntimes["agent_1"] == nil
+	service.mu.Unlock()
+	if !workerGone {
+		t.Fatal("worker map entry should be absent after removal refresh")
 	}
-	waitUntil(t, func() bool {
-		service.mu.Lock()
-		defer service.mu.Unlock()
-		return service.agentWorkers["agent_1"] == nil
-	})
+	if !runtimeGone {
+		t.Fatal("runtime map entry should be absent after removal refresh")
+	}
 	select {
 	case <-worker1.done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("worker did not join after removal")
 	}
+	select {
+	case <-runtime1.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runtime did not join after removal")
+	}
 
 	// Re-add: third refresh adds agent_1 back.
 	service.signalRefresh()
-	select {
-	case <-refreshDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("third refresh did not complete")
-	}
-	waitUntil(t, func() bool {
-		service.mu.Lock()
-		defer service.mu.Unlock()
-		return service.agentWorkers["agent_1"] != nil && service.agentRuntimes["agent_1"] != nil
-	})
-
+	waitUntil(t, func() bool { return service.cancelFetch.Load() == nil && refreshCount.Load() >= 3 })
 	service.mu.Lock()
 	worker2 := service.agentWorkers["agent_1"]
 	runtime2 := service.agentRuntimes["agent_1"]
 	service.mu.Unlock()
+	if worker2 == nil || runtime2 == nil {
+		t.Fatal("re-add should create new worker and runtime")
+	}
 	if worker2 == worker1 {
 		t.Fatal("re-add should create a new worker, not reuse the removed one")
 	}
@@ -5689,9 +5686,19 @@ func TestCoordinatorWorkerAndRuntimeSurviveFetchCtxCancellation(t *testing.T) {
 		t.Fatal("re-added runtime stopped immediately")
 	}
 
-	// Service shutdown: cancel ctx, everything joins.
+	// Service shutdown: cancel ctx, wait for both new records to join.
 	cancel()
 	stopWorker()
+	select {
+	case <-worker2.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("re-added worker did not join on shutdown")
+	}
+	select {
+	case <-runtime2.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("re-added runtime did not join on shutdown")
+	}
 	service.closeAgentWorkers()
 	service.closeAgentRuntimes()
 }
