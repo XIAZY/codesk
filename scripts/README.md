@@ -92,12 +92,12 @@ construction-only output. It does not exercise runtime behavior.
 
 ## Windows desktop build and release
 
-The public Windows GUI targets run the complete payload and MSI toolchain in a
-process-isolated Windows container. The container pins Go 1.23.12, Rust 1.97.0,
-Zig 0.16.0, LLVM-MinGW 20260616, .NET SDK 8.0.423, Git for Windows 2.55.0.3,
-WiX SDK 4.0.5, and the checksums of every downloaded tool archive. Build
-products are written through the repository bind mount and retain the existing
-layout under `dist/windows-gui`.
+The public Windows GUI targets consume the reusable
+`alphatoad/notty:windows-builder` image and run the complete payload and MSI
+toolchain in a process-isolated Windows container. The image pins Go 1.23.12,
+Rust 1.97.0, Zig 0.16.0, LLVM-MinGW 20260616, .NET SDK 8.0.423, Git for Windows
+2.55.0.3, and WiX SDK 4.0.5. Build products are written through the repository
+bind mount and retain the existing layout under `dist/windows-gui`.
 
 ### Prerequisites
 
@@ -118,13 +118,30 @@ docker info --format '{{.OSType}} {{.Architecture}} {{.OSVersion}}'
 # prints windows arm64 ... on Windows ARM64, or windows amd64 ... on AMD64
 ```
 
-The first build downloads a pinned Windows Server Core base plus the pinned
-tool archives and restores WiX into the image's NuGet cache. Payload builds may
+Build the reusable builder image independently from the product build:
+
+```sh
+make build-windows-builder-image
+```
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\make.ps1 build-windows-builder-image
+```
+
+This image build downloads Windows Server Core plus versioned tool archives over
+HTTPS and restores WiX into the image's NuGet cache. Payload builds may
 also download the source tree's Go modules and Cargo crates. Later image builds
 reuse Docker's toolchain layers. Server Core is intentional:
 Nano Server is smaller, but it omits both Windows PowerShell and `msi.dll`; the
 WiX reproducibility and ICE validation path requires those operating-system
 components.
+
+The product build targets do not rebuild or mutate the builder image. They fail
+with an instruction to run `make build-windows-builder-image` when the image is
+missing, and they reject an image whose Windows architecture does not match the
+Docker engine. To use another local or pre-pulled tag, set
+`WINDOWS_GUI_BUILDER_IMAGE`; the image-build and product-build jobs must use the
+same value.
 
 ```sh
 make windows-gui-build
@@ -134,12 +151,15 @@ make windows-gui-build
 powershell.exe -ExecutionPolicy Bypass -File .\make.ps1 windows-gui-build
 ```
 
-The wrapper reads the Docker server architecture and requires it to match the
-host. It selects an architecture-qualified, digest-pinned LTSC 2025 base and
-native Go, Zig, LLVM-MinGW, .NET, and MinGit archives. Both `docker build` and
-`docker run` explicitly use `--isolation=process`. The build target does not
-accept `WINDOWS_GUI_ARCHES`; it builds exactly the native container
-architecture. On this machine that means an ARM64 container and ARM64 payload.
+The Dockerfile uses BuildKit's `TARGETARCH` argument to select the LTSC 2025
+Server Core variant and native Go, Zig, LLVM-MinGW, .NET, MinGit, and rustup
+archives. Docker's legacy Windows builder does not populate automatic platform
+arguments, so the lightweight image-builder supplies only
+`TARGETARCH=<Docker server architecture>` as a compatibility fallback. Image
+construction and product execution both explicitly use `--isolation=process`.
+The product build target does not accept `WINDOWS_GUI_ARCHES`; it builds exactly
+the native container architecture. On this machine that means an ARM64
+container and ARM64 payload.
 
 Rust is the narrow exception to native host tools on ARM64. Rust's native
 Windows ARM64 host uses the MSVC ABI and would require the much larger Visual

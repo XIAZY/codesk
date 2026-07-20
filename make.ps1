@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet('macos-gui-build', 'macos-gui-release', 'windows-gui-build', 'windows-gui-release')]
+    [ValidateSet('macos-gui-build', 'macos-gui-release', 'build-windows-builder-image', 'windows-gui-build', 'windows-gui-release')]
     [string] $Target,
 
     [Parameter(Position = 1, ValueFromRemainingArguments = $true)]
@@ -19,6 +19,7 @@ $supportedSettings = @(
     'WINDOWS_GUI_TEST_DIR',
     'WINDOWS_GUI_MSI_ROOT',
     'WINDOWS_GUI_REPOSITORY',
+    'WINDOWS_GUI_BUILDER_IMAGE',
     'WINDOWS_GUI_ZIG_VERSION'
 )
 $settings = @{}
@@ -66,12 +67,24 @@ $mapping = @{
     'WINDOWS_GUI_TEST_DIR' = 'TestRoot'
     'WINDOWS_GUI_MSI_ROOT' = 'MsiRoot'
     'WINDOWS_GUI_REPOSITORY' = 'Repository'
+    'WINDOWS_GUI_BUILDER_IMAGE' = 'BuilderImage'
     'WINDOWS_GUI_ZIG_VERSION' = 'ZigVersion'
 }
 foreach ($name in $mapping.Keys) {
     if ($settings.ContainsKey($name)) {
         $parameters[$mapping[$name]] = $settings[$name]
     }
+}
+
+if ($Target -ceq 'build-windows-builder-image') {
+    $builderParameters = @{
+        RepositoryRoot = $PSScriptRoot
+    }
+    if ($parameters.ContainsKey('BuilderImage')) {
+        $builderParameters['BuilderImage'] = $parameters['BuilderImage']
+    }
+    & (Join-Path $PSScriptRoot 'scripts/build-windows-gui-builder-image.ps1') @builderParameters
+    return
 }
 
 if (-not $settings.ContainsKey('GUI_VERSION')) {

@@ -274,7 +274,7 @@ func TestWindowsMSIReleaseSourceContract(t *testing.T) {
 		},
 		{
 			name:    "PowerShell shim loses a public target",
-			shimOld: "'macos-gui-build', 'macos-gui-release', 'windows-gui-build', 'windows-gui-release'",
+			shimOld: "'macos-gui-build', 'macos-gui-release', 'build-windows-builder-image', 'windows-gui-build', 'windows-gui-release'",
 			shimNew: "'macos-gui-build', 'macos-gui-release', 'windows-gui-build'",
 		},
 		{
@@ -321,6 +321,10 @@ func TestWindowsMSIReleaseSourceContract(t *testing.T) {
 }
 
 func TestWindowsGUIContainerSourceContract(t *testing.T) {
+	builderData, err := os.ReadFile("build-windows-gui-builder-image.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	wrapperData, err := os.ReadFile("run-windows-gui-container.ps1")
 	if err != nil {
 		t.Fatal(err)
@@ -329,65 +333,89 @@ func TestWindowsGUIContainerSourceContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	builder := normalizeSourceNewlines(string(builderData))
 	wrapper := normalizeSourceNewlines(string(wrapperData))
 	dockerfile := normalizeSourceNewlines(string(dockerfileData))
 
 	for source, want := range map[string]int{
-		"docker info --format '{{.OSType}}|{{.Architecture}}|{{.OSVersion}}'": 1,
-		"[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()": 1,
+		"[string] $BuilderImage = 'alphatoad/notty:windows-builder'":                                        1,
+		"docker info --format '{{.OSType}}|{{.Architecture}}|{{.OSVersion}}'":                               1,
+		"[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()":                    1,
 		"Docker engine architecture $dockerArchitecture does not match host architecture $hostArchitecture": 1,
-		"'build', '--isolation=process'": 1,
-		"'run', '--rm', '--isolation=process'": 1,
-		"mcr.microsoft.com/windows/servercore:ltsc2025-amd64@sha256:bf9f85729e61bf27cad3844c506a41140c88b95d1388947e7a5e051a4672cebf": 1,
-		"mcr.microsoft.com/windows/servercore:ltsc2025-arm64@sha256:cc1af59d5d6a39f38d6df0e35df71a1e83d2c9e88a12041a84d3b6fe6f4a8cfd": 1,
-		"go1.23.12.windows-amd64.zip": 1,
-		"go1.23.12.windows-arm64.zip": 1,
-		"zig-x86_64-windows-0.16.0.zip": 1,
-		"zig-aarch64-windows-0.16.0.zip": 1,
-		"x86_64-pc-windows-msvc/rustup-init.exe": 1,
-		"aarch64-pc-windows-msvc/rustup-init.exe": 1,
-		"dotnet-sdk-8.0.423-win-x64.zip": 1,
-		"dotnet-sdk-8.0.423-win-arm64.zip": 1,
-		"MinGit-2.55.0.3-64-bit.zip": 1,
-		"MinGit-2.55.0.3-arm64.zip": 1,
-		"llvm-mingw-20260616-ucrt-x86_64.zip": 1,
-		"llvm-mingw-20260616-ucrt-aarch64.zip": 1,
-		"WINDOWS_GUI_CC_AMD64=C:/toolchains/llvm-mingw/bin/x86_64-w64-mingw32-clang.exe -static": 1,
-		"WINDOWS_GUI_CC_ARM64=C:/toolchains/llvm-mingw/bin/aarch64-w64-mingw32-clang.exe -static": 1,
-		"third_party/y-crdt/Cargo.lock": 1,
-		"target=C:\\workspace": 1,
-		"scripts\\run-windows-gui-target.ps1": 1,
+		"'run', '--rm', '--isolation=process'":                                                              1,
+		"docker image inspect $BuilderImage":                                                                1,
+		"run make build-windows-builder-image":                                                              1,
+		"WINDOWS_GUI_CC_AMD64=C:/toolchains/llvm-mingw/bin/x86_64-w64-mingw32-clang.exe -static":            1,
+		"WINDOWS_GUI_CC_ARM64=C:/toolchains/llvm-mingw/bin/aarch64-w64-mingw32-clang.exe -static":           1,
+		"third_party/y-crdt/Cargo.lock":                                                                     1,
+		"target=C:\\workspace":                                                                              1,
+		"scripts\\run-windows-gui-target.ps1":                                                               1,
 	} {
 		if got := strings.Count(wrapper, source); got != want {
-			t.Errorf("Windows container wrapper source count for %q = %d, want %d", source, got, want)
+			t.Errorf("Windows container runner source count for %q = %d, want %d", source, got, want)
 		}
 	}
 	for source, want := range map[string]int{
-		"ARG BASE_IMAGE": 1,
-		"FROM ${BASE_IMAGE}": 1,
-		"Get-FileHash -LiteralPath $path -Algorithm $item.Algorithm": 1,
-		"--default-toolchain 1.97.0": 1,
-		"x86_64-pc-windows-gnu aarch64-pc-windows-gnullvm": 1,
-		"go1\\.23\\.12 windows/": 1,
-		"rustc 1\\.97\\.0 ": 1,
-		"(zig version).Trim() -cne '0.16.0'": 1,
-		"(dotnet --version).Trim() -cne '8.0.423'": 1,
-		"git version 2.55.0.windows.3": 1,
-		"LLVM_MINGW_SHA256": 2,
-		"aarch64-w64-mingw32-clang.exe": 1,
-		"x86_64-w64-mingw32-clang.exe": 1,
-		"C:\\Windows\\System32\\msi.dll": 1,
-		"dotnet restore C:\\toolchain-restore\\Codesk.wixproj": 1,
-		"wixtoolset.sdk\\4.0.5": 1,
-		"ENTRYPOINT [\"powershell.exe\"": 1,
+		"[string] $BuilderImage = 'alphatoad/notty:windows-builder'":                                        1,
+		"docker info --format '{{.OSType}}|{{.Architecture}}|{{.OSVersion}}'":                               1,
+		"[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()":                    1,
+		"Docker engine architecture $dockerArchitecture does not match host architecture $hostArchitecture": 1,
+		"& docker build":      1,
+		"--isolation=process": 1,
+		"--build-arg \"TARGETARCH=$dockerArchitecture\"": 1,
+	} {
+		if got := strings.Count(builder, source); got != want {
+			t.Errorf("Windows builder image source count for %q = %d, want %d", source, got, want)
+		}
+	}
+	for source, want := range map[string]int{
+		"ARG TARGETARCH": 2,
+		"FROM mcr.microsoft.com/windows/servercore:ltsc2025-${TARGETARCH}": 1,
+		"GO_VERSION=\"1.23.12\"":                                    1,
+		"ZIG_VERSION=\"0.16.0\"":                                    1,
+		"RUSTUP_VERSION=\"1.29.0\"":                                 1,
+		"RUST_VERSION=\"1.97.0\"":                                   1,
+		"DOTNET_VERSION=\"8.0.423\"":                                1,
+		"MINGIT_VERSION=\"2.55.0\"":                                 1,
+		"MINGIT_RELEASE=\"3\"":                                      1,
+		"LLVM_MINGW_VERSION=\"20260616\"":                           1,
+		"$architecture = $env:TARGETARCH.ToLowerInvariant()":        1,
+		"$env:PROCESSOR_ARCHITECTURE.ToUpperInvariant()":            1,
+		"https://go.dev/dl/go{0}.windows-{1}.zip":                   1,
+		"https://ziglang.org/download/{0}/":                         1,
+		"https://static.rust-lang.org/rustup/archive/":              1,
+		"https://builds.dotnet.microsoft.com/dotnet/Sdk/":           1,
+		"https://github.com/git-for-windows/git/releases/download/": 1,
+		"https://github.com/mstorsjo/llvm-mingw/releases/download/": 1,
+		"Invoke-WebRequest -UseBasicParsing":                        1,
+		"x86_64-pc-windows-gnu aarch64-pc-windows-gnullvm":          1,
+		"aarch64-w64-mingw32-clang.exe":                             1,
+		"x86_64-w64-mingw32-clang.exe":                              1,
+		"C:\\Windows\\System32\\msi.dll":                            1,
+		"dotnet restore C:\\toolchain-restore\\Codesk.wixproj":      1,
+		"wixtoolset.sdk\\4.0.5":                                     1,
+		"ENTRYPOINT [\"powershell.exe\"":                            1,
 	} {
 		if got := strings.Count(dockerfile, source); got != want {
 			t.Errorf("Windows toolchain Dockerfile source count for %q = %d, want %d", source, got, want)
 		}
 	}
 	for _, forbidden := range []string{"--isolation=hyperv", "nanoserver:", "windows/amd64"} {
-		if strings.Contains(wrapper, forbidden) || strings.Contains(dockerfile, forbidden) {
+		if strings.Contains(builder, forbidden) || strings.Contains(wrapper, forbidden) || strings.Contains(dockerfile, forbidden) {
 			t.Errorf("Windows container build contains forbidden %q", forbidden)
+		}
+	}
+	if strings.Contains(wrapper, "'build', '--isolation=process'") {
+		t.Error("Windows product container runner must not build the builder image")
+	}
+	for _, forbidden := range []string{"go.dev", "ziglang.org", "rust-lang.org", "dotnet.microsoft.com", "git-for-windows", "llvm-mingw", "SHA256", "SHA512"} {
+		if strings.Contains(builder, forbidden) {
+			t.Errorf("lightweight Windows builder script contains Dockerfile dependency detail %q", forbidden)
+		}
+	}
+	for _, forbidden := range []string{"Get-FileHash", "SHA256", "SHA512", "@sha256:"} {
+		if strings.Contains(dockerfile, forbidden) {
+			t.Errorf("Windows toolchain Dockerfile contains unwanted checksum pin %q", forbidden)
 		}
 	}
 }
@@ -980,22 +1008,25 @@ func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) er
 		return fmt.Errorf("Windows GUI orchestrator contains a shell-style line continuation")
 	}
 	for source, want := range map[string]int{
-		"ifeq ($(OS),Windows_NT)":                       2,
-		"\nVERSION ?= $(FILE_VERSION)\n":                 2,
-		"WINDOWS_PROCESSOR_ARCH :=":                     1,
-		"override MACOS_GUI_HOST_OS :=":                 2,
-		`if [ "$(MACOS_GUI_HOST_OS)" != darwin ]; then`: 2,
-		"-File make.ps1":                                4,
-		"-File make.ps1 windows-gui-build":              1,
-		"-File make.ps1 windows-gui-release":            1,
-		`"WINDOWS_GUI_ARCHES=$(WINDOWS_GUI_ARCHES)"`:    1,
-		"scripts/build-windows-desktop-payloads.sh":     1,
+		"ifeq ($(OS),Windows_NT)":                                      2,
+		"\nVERSION ?= $(FILE_VERSION)\n":                               2,
+		"WINDOWS_PROCESSOR_ARCH :=":                                    1,
+		"override MACOS_GUI_HOST_OS :=":                                2,
+		`if [ "$(MACOS_GUI_HOST_OS)" != darwin ]; then`:                2,
+		"-File make.ps1":                                               5,
+		"WINDOWS_GUI_BUILDER_IMAGE ?= alphatoad/notty:windows-builder": 1,
+		"-File make.ps1 build-windows-builder-image":                   1,
+		`"WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"`:     3,
+		"-File make.ps1 windows-gui-build":                             1,
+		"-File make.ps1 windows-gui-release":                           1,
+		`"WINDOWS_GUI_ARCHES=$(WINDOWS_GUI_ARCHES)"`:                   1,
+		"scripts/build-windows-desktop-payloads.sh":                    1,
 	} {
 		if got := strings.Count(makefile, source); got != want {
 			return fmt.Errorf("Windows GUI Make source count for %q = %d, want %d", source, got, want)
 		}
 	}
-	publicTargets := []string{"macos-gui-build", "macos-gui-release", "windows-gui-build", "windows-gui-release"}
+	publicTargets := []string{"macos-gui-build", "macos-gui-release", "build-windows-builder-image", "windows-gui-build", "windows-gui-release"}
 	for _, target := range publicTargets {
 		pattern := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(target) + `:\s*$`)
 		if got := len(pattern.FindAllString(makefile, -1)); got != 2 {
@@ -1009,9 +1040,11 @@ func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) er
 		return err
 	}
 	for source, want := range map[string]int{
-		"scripts/run-windows-gui-container.ps1": 1,
-		"'WINDOWS_GUI_ARCHES'":               3,
-		"'Architectures'":                    1,
+		"scripts/build-windows-gui-builder-image.ps1":                        1,
+		"scripts/run-windows-gui-container.ps1":                              1,
+		"'WINDOWS_GUI_BUILDER_IMAGE'":                                        2,
+		"'WINDOWS_GUI_ARCHES'":                                               3,
+		"'Architectures'":                                                    1,
 		"macos-gui-build requires a real macOS host; no GUI was built":       1,
 		"macos-gui-release requires a real macOS host; no release was built": 1,
 	} {

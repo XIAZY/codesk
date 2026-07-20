@@ -29,6 +29,7 @@ WINDOWS_GUI_TEST_DIR ?= $(WINDOWS_GUI_ROOT)/tests
 WINDOWS_GUI_MSI_ROOT ?= $(WINDOWS_GUI_ROOT)/msi
 WINDOWS_GUI_CI_DIR ?= $(WINDOWS_GUI_ROOT)/ci
 WINDOWS_GUI_REPOSITORY ?= XIAZY/notty
+WINDOWS_GUI_BUILDER_IMAGE ?= alphatoad/notty:windows-builder
 WINDOWS_GUI_RUN_ID ?=
 WINDOWS_GUI_POWERSHELL ?= powershell.exe
 WINDOWS_GUI_ZIG_VERSION ?= 0.16.0
@@ -39,7 +40,7 @@ WINDOWS_GUI_ZIG_VERSION ?= 0.16.0
 	publish publish-backend publish-frontend publish-static \
 	deploy deploy-backend deploy-frontend deploy-static \
 	prod-config-check static-build static-build-local static-publish backend-image daemon-build daemon-release daemon-release-all release-daemons daemon-checksums daemon-clean daemon-installer-check daemon-installer-windows-check daemon-uninstall-test \
-	macos-gui-build macos-gui-release windows-gui-payloads windows-gui-build windows-gui-release windows-verify
+	macos-gui-build macos-gui-release build-windows-builder-image windows-gui-payloads windows-gui-build windows-gui-release windows-verify
 
 dev: static-build-local
 	docker compose --env-file deploy/env/dev.server.env up --build
@@ -118,11 +119,14 @@ macos-gui-build:
 macos-gui-release:
 	@"$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File make.ps1 macos-gui-release
 
+build-windows-builder-image:
+	@"$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File make.ps1 build-windows-builder-image "WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"
+
 windows-gui-build:
-	@"$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File make.ps1 windows-gui-build "GUI_VERSION=$(GUI_VERSION)" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)" "WINDOWS_GUI_PAYLOAD_ROOT=$(WINDOWS_GUI_PAYLOAD_ROOT)" "WINDOWS_GUI_TEST_DIR=$(WINDOWS_GUI_TEST_DIR)" "WINDOWS_GUI_MSI_ROOT=$(WINDOWS_GUI_MSI_ROOT)" "WINDOWS_GUI_REPOSITORY=$(WINDOWS_GUI_REPOSITORY)" "WINDOWS_GUI_ZIG_VERSION=$(WINDOWS_GUI_ZIG_VERSION)"
+	@"$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File make.ps1 windows-gui-build "GUI_VERSION=$(GUI_VERSION)" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)" "WINDOWS_GUI_PAYLOAD_ROOT=$(WINDOWS_GUI_PAYLOAD_ROOT)" "WINDOWS_GUI_TEST_DIR=$(WINDOWS_GUI_TEST_DIR)" "WINDOWS_GUI_MSI_ROOT=$(WINDOWS_GUI_MSI_ROOT)" "WINDOWS_GUI_REPOSITORY=$(WINDOWS_GUI_REPOSITORY)" "WINDOWS_GUI_ZIG_VERSION=$(WINDOWS_GUI_ZIG_VERSION)" "WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"
 
 windows-gui-release:
-	@"$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File make.ps1 windows-gui-release "GUI_VERSION=$(GUI_VERSION)" "WINDOWS_GUI_ARCHES=$(WINDOWS_GUI_ARCHES)" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)" "WINDOWS_GUI_PAYLOAD_ROOT=$(WINDOWS_GUI_PAYLOAD_ROOT)" "WINDOWS_GUI_TEST_DIR=$(WINDOWS_GUI_TEST_DIR)" "WINDOWS_GUI_MSI_ROOT=$(WINDOWS_GUI_MSI_ROOT)" "WINDOWS_GUI_REPOSITORY=$(WINDOWS_GUI_REPOSITORY)" "WINDOWS_GUI_ZIG_VERSION=$(WINDOWS_GUI_ZIG_VERSION)"
+	@"$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File make.ps1 windows-gui-release "GUI_VERSION=$(GUI_VERSION)" "WINDOWS_GUI_ARCHES=$(WINDOWS_GUI_ARCHES)" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)" "WINDOWS_GUI_PAYLOAD_ROOT=$(WINDOWS_GUI_PAYLOAD_ROOT)" "WINDOWS_GUI_TEST_DIR=$(WINDOWS_GUI_TEST_DIR)" "WINDOWS_GUI_MSI_ROOT=$(WINDOWS_GUI_MSI_ROOT)" "WINDOWS_GUI_REPOSITORY=$(WINDOWS_GUI_REPOSITORY)" "WINDOWS_GUI_ZIG_VERSION=$(WINDOWS_GUI_ZIG_VERSION)" "WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"
 else
 macos-gui-build:
 	@if [ "$(MACOS_GUI_HOST_OS)" != darwin ]; then \
@@ -139,6 +143,10 @@ macos-gui-release:
 	fi
 	ALLOW_UNSIGNED_MACOS_DESKTOP="$(MACOS_GUI_UNSIGNED)" \
 		scripts/build-macos-desktop-release.sh "$(GUI_VERSION)" "$(MACOS_GUI_DIST_DIR)"
+
+build-windows-builder-image:
+	@printf '%s\n' 'build-windows-builder-image requires a real Windows host running Windows containers' >&2
+	@exit 1
 
 windows-gui-build:
 	@printf '%s\n' 'windows-gui-build requires a real Windows host; no GUI was built' >&2
