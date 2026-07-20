@@ -1032,7 +1032,7 @@ func TestRefreshSharesFetchedWorkspaceWithWorkersAndReplicas(t *testing.T) {
 		client:        client,
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 		agentWorkers:  map[string]*managedAgentWorker{},
-		agentBaseCtx:     ctx,
+		agentBaseCtx:  ctx,
 	}
 	defer service.closePrimaryRuntime()
 
@@ -1103,7 +1103,7 @@ func TestInitialRefreshFailsFastOnAgentStartupError(t *testing.T) {
 		client:        client,
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 		agentWorkers:  map[string]*managedAgentWorker{},
-		agentBaseCtx:     context.Background(),
+		agentBaseCtx:  context.Background(),
 	}
 	defer service.closePrimaryRuntime()
 	service.sessions = newAgentSessionSupervisor(service.cfg, nil, newFakeRuntimeRegistry(factory))
@@ -1181,7 +1181,7 @@ func TestRefreshStartsAgentSessionFromWorkspaceSnapshot(t *testing.T) {
 		client:        client,
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 		agentWorkers:  map[string]*managedAgentWorker{},
-		agentBaseCtx:     context.Background(),
+		agentBaseCtx:  context.Background(),
 	}
 	defer service.closePrimaryRuntime()
 	service.sessions = newAgentSessionSupervisor(service.cfg, nil, newFakeRuntimeRegistry(factory))
@@ -1267,7 +1267,7 @@ func TestRefreshStopsAgentSessionWhenWorkspaceSnapshotRemovesAgent(t *testing.T)
 		client:        client,
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 		agentWorkers:  map[string]*managedAgentWorker{},
-		agentBaseCtx:     context.Background(),
+		agentBaseCtx:  context.Background(),
 	}
 	defer service.closePrimaryRuntime()
 	service.sessions = newAgentSessionSupervisor(service.cfg, nil, newFakeRuntimeRegistry(factory))
