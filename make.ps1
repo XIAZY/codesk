@@ -74,6 +74,14 @@ foreach ($name in $mapping.Keys) {
     }
 }
 
+if (-not $settings.ContainsKey('GUI_VERSION')) {
+    $versionFile = Join-Path $PSScriptRoot 'VERSION'
+    if (Test-Path -LiteralPath $versionFile -PathType Leaf) {
+        $settings['GUI_VERSION'] = (Get-Content -LiteralPath $versionFile -TotalCount 1).Trim()
+        $parameters['Version'] = $settings['GUI_VERSION']
+    }
+}
+
 if ($Target -ceq 'windows-gui-release' -and $settings.ContainsKey('WINDOWS_GUI_ARCHES')) {
     $parameters['Architectures'] = $settings['WINDOWS_GUI_ARCHES']
 }

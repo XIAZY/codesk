@@ -343,7 +343,7 @@ func TestWindowsDesktopPayloadSourceContract(t *testing.T) {
 		{name: "test output may contain payload", old: `case "$test_dir" in`, new: `case "$safe_parent" in`},
 		{name: "stale tests retained", old: `rm -rf "$payload_dir" "$test_dir"`, new: `rm -rf "$payload_dir"`},
 		{name: "Zig pin floated", old: `required_zig_version="${WINDOWS_GUI_ZIG_VERSION:-0.16.0}"`, new: `required_zig_version="$(zig version)"`},
-		{name: "GUI subsystem dropped", old: `-ldflags='-H=windowsgui -extldflags=-Wl,--subsystem,windows'`, new: `-ldflags='-s -w'`},
+		{name: "GUI subsystem dropped", old: `-ldflags="-H=windowsgui -extldflags=-Wl,--subsystem,windows -X main.desktopVersion=$build_version"`, new: `-ldflags="-s -w"`},
 		{name: "agent payload omitted", old: `-o "$arch_payload_dir/notty-agent-tool.exe" ./daemon/cmd/agenttool`, new: `-o "$arch_payload_dir/notty-agent-tool.exe" ./daemon/cmd/codesk-desktop`},
 		{name: "cross build not marked as touching host yffi", old: `yffi_touched=1`, new: `yffi_touched=0`},
 		{name: "exit trap omitted", old: `trap cleanup EXIT`, new: `trap - EXIT`},
@@ -817,7 +817,7 @@ func checkWindowsDesktopPayloadSource(source string) error {
 		`go test -c -o "$test_dir/notty-syncer-$architecture.test.exe" ./daemon/internal/syncer`:                                   1,
 		`go vet ./daemon/internal/desktopstate ./daemon/internal/desktop ./daemon/internal/desktopapp ./daemon/cmd/codesk-desktop`: 1,
 		`go test -c -o "$test_dir/codesk-desktop-$architecture.test.exe" ./daemon/cmd/codesk-desktop`:                              1,
-		`-ldflags='-H=windowsgui -extldflags=-Wl,--subsystem,windows'`:                                                             1,
+		`-ldflags="-H=windowsgui -extldflags=-Wl,--subsystem,windows -X main.desktopVersion=$build_version"`:                       1,
 		`-o "$arch_payload_dir/Codesk.exe" ./daemon/cmd/codesk-desktop`:                                                            1,
 		`-o "$arch_payload_dir/notty-agent-tool.exe" ./daemon/cmd/agenttool`:                                                       1,
 		`verify-windows-desktop-pe.go "$arch_payload_dir/Codesk.exe" "$architecture" gui`:                                          1,
@@ -909,7 +909,7 @@ func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) er
 	}
 	for source, want := range map[string]int{
 		"ifeq ($(OS),Windows_NT)":                       2,
-		"\nVERSION ?= dev\n":                            1,
+		"\nVERSION ?= $(FILE_VERSION)\n":                 2,
 		"WINDOWS_PROCESSOR_ARCH :=":                     1,
 		"override MACOS_GUI_HOST_OS :=":                 2,
 		`if [ "$(MACOS_GUI_HOST_OS)" != darwin ]; then`: 2,

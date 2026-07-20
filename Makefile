@@ -1,14 +1,15 @@
 DIST_DIR ?= dist/static/daemons
 GO_BUILD_FLAGS ?= -trimpath
+FILE_VERSION := $(shell cat VERSION 2>/dev/null || printf dev)
 GO_LDFLAGS ?= -s -w
 ifeq ($(OS),Windows_NT)
-VERSION ?= dev
+VERSION ?= $(FILE_VERSION)
 WINDOWS_PROCESSOR_ARCH := $(if $(PROCESSOR_ARCHITEW6432),$(PROCESSOR_ARCHITEW6432),$(PROCESSOR_ARCHITECTURE))
 HOST_OS := windows
 HOST_ARCH := $(if $(filter AMD64 amd64 x86_64,$(WINDOWS_PROCESSOR_ARCH)),amd64,$(if $(filter ARM64 arm64 aarch64,$(WINDOWS_PROCESSOR_ARCH)),arm64,$(WINDOWS_PROCESSOR_ARCH)))
 override MACOS_GUI_HOST_OS :=
 else
-VERSION ?= $(shell git rev-parse --short HEAD 2>/dev/null || printf dev)
+VERSION ?= $(FILE_VERSION)
 UNAME_S := $(shell uname -s | tr '[:upper:]' '[:lower:]')
 UNAME_M := $(shell uname -m)
 HOST_OS := $(if $(filter darwin,$(UNAME_S)),darwin,$(if $(filter linux,$(UNAME_S)),linux,$(UNAME_S)))
@@ -18,7 +19,7 @@ endif
 HOST_PLATFORM := $(HOST_OS)/$(HOST_ARCH)
 PLATFORMS ?= $(HOST_PLATFORM)
 DAEMON_ALL_PLATFORMS ?= all
-GUI_VERSION ?= dev
+GUI_VERSION ?= $(FILE_VERSION)
 MACOS_GUI_DIST_DIR ?= dist/macos-desktop
 MACOS_GUI_UNSIGNED ?=
 WINDOWS_GUI_ARCHES ?= amd64 arm64
