@@ -5623,18 +5623,16 @@ func TestCoordinatorWorkerAndRuntimeSurviveFetchCtxCancellation(t *testing.T) {
 
 	// Hot-add: first refresh adds agent_1.
 	service.signalRefresh()
-	waitUntil(t, func() bool {
-		service.mu.Lock()
-		defer service.mu.Unlock()
-		return service.agentWorkers["agent_1"] != nil && service.agentRuntimes["agent_1"] != nil
-	})
 	waitFetchCanceled()
 
-	// fetchCtx is now canceled. Verify both survive.
+	// fetchCtx is now canceled; applyFetchedWorkspace has completed. Freeze records.
 	service.mu.Lock()
 	worker1 := service.agentWorkers["agent_1"]
 	runtime1 := service.agentRuntimes["agent_1"]
 	service.mu.Unlock()
+	if worker1 == nil || runtime1 == nil {
+		t.Fatal("hot-add should create both worker and runtime")
+	}
 
 	if runtime1.parentCtx != service.agentBaseCtx {
 		t.Fatal("runtime parentCtx should be agentBaseCtx, not transient fetchCtx")
