@@ -10,16 +10,16 @@ import (
 	"net/url"
 	"os"
 	"strings"
-)
 
-var version = "dev"
+	"notty/daemon/internal/buildinfo"
+)
 
 func main() {
 	if len(os.Args) < 2 {
 		fatalf("usage: notty-agent-tool <list-documents|get-document-by-path|get-thread|list-threads-for-document|list-inbox|get-inbox-item|complete-inbox-item|dismiss-inbox-item|diff-document|mark-document-viewed|create-thread|reply-thread> [flags] (legacy notification aliases are also supported)")
 	}
 	if os.Args[1] == "--version" || os.Args[1] == "version" {
-		fmt.Println(version)
+		fmt.Println(buildinfo.Version)
 		return
 	}
 	if os.Args[1] == "--help" || os.Args[1] == "-h" || os.Args[1] == "help" {

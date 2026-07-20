@@ -171,10 +171,10 @@ for architecture in $validated_architectures; do
 		go test -c -o "$test_dir/codesk-desktop-$architecture.test.exe" ./daemon/cmd/codesk-desktop
 	CC="$cc_command" CGO_ENABLED=1 GOOS=windows GOARCH="$architecture" \
 		go build -trimpath -buildvcs=false \
-			-ldflags="-H=windowsgui -extldflags=-Wl,--subsystem,windows -X main.desktopVersion=$build_version" \
+			-ldflags="-H=windowsgui -extldflags=-Wl,--subsystem,windows -X notty/daemon/internal/buildinfo.Version=$build_version" \
 			-o "$arch_payload_dir/Codesk.exe" ./daemon/cmd/codesk-desktop
 	CGO_ENABLED=0 GOOS=windows GOARCH="$architecture" \
-		go build -trimpath -buildvcs=false -ldflags='-s -w' \
+		go build -trimpath -buildvcs=false -ldflags="-s -w -X notty/daemon/internal/buildinfo.Version=$build_version" \
 			-o "$arch_payload_dir/notty-agent-tool.exe" ./daemon/cmd/agenttool
 	go run ./scripts/verify-windows-desktop-pe.go "$arch_payload_dir/Codesk.exe" "$architecture" gui
 	go run ./scripts/verify-windows-desktop-pe.go "$arch_payload_dir/notty-agent-tool.exe" "$architecture" console

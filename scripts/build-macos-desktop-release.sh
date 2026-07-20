@@ -225,7 +225,7 @@ for arch in amd64 arm64; do
 			CGO_LDFLAGS="-arch $clang_arch -mmacosx-version-min=$minimum_macos" \
 			CGO_ENABLED=1 GOOS=darwin GOARCH="$arch" \
 			go build -buildvcs=false -trimpath \
-			-ldflags "-buildid= -linkmode external -s -w -X main.desktopVersion=$version" \
+			-ldflags "-buildid= -linkmode external -s -w -X notty/daemon/internal/buildinfo.Version=$version" \
 			-o "$arch_dir/Codesk" ./daemon/cmd/codesk-desktop
 		SDKROOT="$sdk_root" MACOSX_DEPLOYMENT_TARGET="$minimum_macos" \
 			CC="$clang" CXX="$clangxx" \
@@ -233,7 +233,8 @@ for arch in amd64 arm64; do
 			CGO_CXXFLAGS="-arch $clang_arch -mmacosx-version-min=$minimum_macos" \
 			CGO_LDFLAGS="-arch $clang_arch -mmacosx-version-min=$minimum_macos" \
 			CGO_ENABLED=1 GOOS=darwin GOARCH="$arch" \
-			go build -buildvcs=false -trimpath -ldflags '-buildid= -linkmode external -s -w' \
+			go build -buildvcs=false -trimpath \
+			-ldflags "-buildid= -linkmode external -s -w -X notty/daemon/internal/buildinfo.Version=$version" \
 			-o "$arch_dir/notty-agent-tool" ./daemon/cmd/agenttool
 	)
 done

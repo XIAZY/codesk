@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"notty/daemon/internal/buildinfo"
 	"notty/daemon/internal/desktop"
 	"notty/daemon/internal/desktopapp"
 	"notty/daemon/internal/desktopstate"
@@ -22,8 +23,7 @@ import (
 )
 
 var (
-	desktopVersion = "dev"
-	codeskOrigin   = "https://app.getcodesk.com"
+	codeskOrigin  = "https://app.getcodesk.com"
 	backendOrigin  = "https://api.getcodesk.com"
 
 	//go:embed assets/codesk-tray-template.png
@@ -103,7 +103,7 @@ func runDesktop() error {
 		Dirs:          dirs,
 		CodeskOrigin:  codeskOrigin,
 		BackendOrigin: backendOrigin,
-		Version:       desktopVersion,
+		Version:       buildinfo.Version,
 		ConfigStore:   configStore,
 		Secrets:       desktop.NewDarwinKeychainSecretStore(),
 		LoginItem:     desktop.NewDarwinLoginItem(),
