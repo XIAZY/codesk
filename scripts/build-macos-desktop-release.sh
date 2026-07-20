@@ -8,6 +8,8 @@ sign_identity="${CODESK_MACOS_SIGN_IDENTITY:-}"
 notary_profile="${CODESK_MACOS_NOTARY_PROFILE:-}"
 
 root_dir="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+binary_version="$(cat "$root_dir/VERSION")" || { printf 'build-macos-desktop-release: VERSION file is required\n' >&2; exit 1; }
+[ -n "$binary_version" ] || { printf 'build-macos-desktop-release: VERSION file must not be empty\n' >&2; exit 1; }
 . "$root_dir/scripts/lib/testtmp.sh"
 
 go_toolchain='go1.26.5'
@@ -225,7 +227,7 @@ for arch in amd64 arm64; do
 			CGO_LDFLAGS="-arch $clang_arch -mmacosx-version-min=$minimum_macos" \
 			CGO_ENABLED=1 GOOS=darwin GOARCH="$arch" \
 			go build -buildvcs=false -trimpath \
-			-ldflags "-buildid= -linkmode external -s -w -X notty/daemon/internal/buildinfo.Version=$version" \
+			-ldflags "-buildid= -linkmode external -s -w -X notty/daemon/internal/buildinfo.Version=$binary_version" \
 			-o "$arch_dir/Codesk" ./daemon/cmd/codesk-desktop
 		SDKROOT="$sdk_root" MACOSX_DEPLOYMENT_TARGET="$minimum_macos" \
 			CC="$clang" CXX="$clangxx" \
@@ -234,7 +236,7 @@ for arch in amd64 arm64; do
 			CGO_LDFLAGS="-arch $clang_arch -mmacosx-version-min=$minimum_macos" \
 			CGO_ENABLED=1 GOOS=darwin GOARCH="$arch" \
 			go build -buildvcs=false -trimpath \
-			-ldflags "-buildid= -linkmode external -s -w -X notty/daemon/internal/buildinfo.Version=$version" \
+			-ldflags "-buildid= -linkmode external -s -w -X notty/daemon/internal/buildinfo.Version=$binary_version" \
 			-o "$arch_dir/notty-agent-tool" ./daemon/cmd/agenttool
 	)
 done

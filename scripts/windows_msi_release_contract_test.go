@@ -443,6 +443,7 @@ func TestWindowsDesktopPayloadSourceContract(t *testing.T) {
 		{name: "test output may contain payload", old: `case "$test_dir" in`, new: `case "$safe_parent" in`},
 		{name: "stale tests retained", old: `rm -rf "$payload_dir" "$test_dir"`, new: `rm -rf "$payload_dir"`},
 		{name: "Zig pin floated", old: `required_zig_version="${WINDOWS_GUI_ZIG_VERSION:-0.16.0}"`, new: `required_zig_version="$(zig version)"`},
+		{name: "VERSION fallback to dev", old: `|| fail 'VERSION file is required'`, new: `|| printf dev)`},
 		{name: "GUI subsystem dropped", old: `-ldflags="-H=windowsgui -extldflags=-Wl,--subsystem,windows -X notty/daemon/internal/buildinfo.Version=$build_version"`, new: `-ldflags="-s -w"`},
 		{name: "agent payload omitted", old: `-o "$arch_payload_dir/notty-agent-tool.exe" ./daemon/cmd/agenttool`, new: `-o "$arch_payload_dir/notty-agent-tool.exe" ./daemon/cmd/codesk-desktop`},
 		{name: "cross build not marked as touching host yffi", old: `yffi_touched=1`, new: `yffi_touched=0`},
@@ -700,6 +701,9 @@ func runWindowsPayloadYffiFixture(source string, preexisting, failGo bool) error
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		return err
 	}
+	if err := os.WriteFile(filepath.Join(root, "VERSION"), []byte("0.0.1\n"), 0o644); err != nil {
+		return err
+	}
 	payloadScript := filepath.Join(scriptsDir, "build-windows-desktop-payloads.sh")
 	if err := writeExecutable(payloadScript, source); err != nil {
 		return err
@@ -897,6 +901,8 @@ func checkWindowsDesktopPayloadSource(source string) error {
 		`/*|[A-Za-z]:/*)`: 1,
 		`required_zig_version="${WINDOWS_GUI_ZIG_VERSION:-0.16.0}"`: 1,
 		`[ "$actual_zig_version" = "$required_zig_version" ]`:       1,
+		`VERSION file is required`:                       1,
+		`VERSION file must not be empty`:                 1,
 		`[ ! -L "$path" ]`:                              1,
 		`case "$payload_dir/" in`:                       1,
 		`case "$test_dir/" in`:                          1,

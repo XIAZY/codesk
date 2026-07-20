@@ -7,7 +7,8 @@ platforms="${PLATFORMS:-}"
 all_platforms="darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64"
 
 root_dir="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
-binary_version="$version"
+binary_version="$(cat "$root_dir/VERSION")" || { printf 'build-daemon-release: VERSION file is required\n' >&2; exit 1; }
+[ -n "$binary_version" ] || { printf 'build-daemon-release: VERSION file must not be empty\n' >&2; exit 1; }
 . "$root_dir/scripts/lib/testtmp.sh"
 case "$dist_dir" in
 	/*) dist_abs="$dist_dir" ;;
