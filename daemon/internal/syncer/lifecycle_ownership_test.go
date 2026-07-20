@@ -1375,6 +1375,7 @@ func TestAgentRuntimeIsUnavailableUntilStartupReady(t *testing.T) {
 	service.primaryRuntime = &workspaceRuntime{rootDocumentID: "primary-root", docCache: primaryCache}
 	service.agentRuntimes = map[string]*managedWorkspaceRuntime{}
 	ctx, cancel := context.WithCancel(context.Background())
+	service.agentBaseCtx = ctx
 	ready := make(chan error, 1)
 	managed := startSupervisedAgentWorkspaceRuntimeForTest(t, service, ctx, "agent-1", runtime, workspace, 0, ready)
 	t.Cleanup(func() {
@@ -1464,6 +1465,7 @@ func TestAgentWorkspaceApplyBorrowSurvivesConcurrentRetirement(t *testing.T) {
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	service.agentBaseCtx = ctx
 	t.Cleanup(func() {
 		cancel()
 		service.closeAgentRuntimes()
@@ -1552,14 +1554,15 @@ func TestRefreshSerializesStaleRemovalBeforeConcurrentReadd(t *testing.T) {
 		runtime:   oldRuntime,
 		workspace: &workspaceResponse{Agents: []*agent{{ID: "agent-1"}}},
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	service := &Service{
 		cfg:            cfg,
 		client:         backend.Client(),
 		primaryRuntime: &workspaceRuntime{},
 		agentRuntimes:  map[string]*managedWorkspaceRuntime{"agent-1": old},
 		agentWorkers:   map[string]*managedAgentWorker{},
+		agentBaseCtx:   ctx,
 	}
-	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() {
 		cancel()
 		service.closeAgentWorkers()
@@ -1666,6 +1669,7 @@ func TestSupervisorReplacementSerializesWithStaleRootRemoval(t *testing.T) {
 		primaryRuntime: &workspaceRuntime{},
 		agentRuntimes:  map[string]*managedWorkspaceRuntime{"agent-1": failed},
 		agentWorkers:   map[string]*managedAgentWorker{},
+		agentBaseCtx:   ctx,
 		beforeAgentRuntimePublish: func() {
 			close(publishReached)
 			<-releasePublish
@@ -2121,15 +2125,16 @@ func TestWorkspaceRuntimeConstructorFailureClosesAcquiredPathLocks(t *testing.T)
 
 func TestManagedAgentRuntimeRetainsStoresUntilRegistryOwnerCloses(t *testing.T) {
 	root := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	service := &Service{
 		cfg: Config{
 			AgentWorkspaceRoot: filepath.Join(root, "agents"),
 		},
 		client:        http.DefaultClient,
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
+		agentBaseCtx:  ctx,
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	if err := service.syncAgentRuntimes(ctx, &workspaceResponse{Agents: []*agent{{ID: "agent-1"}}}); err != nil {
 		cancel()
 		t.Fatal(err)
@@ -2243,6 +2248,7 @@ func TestSyncAgentRuntimesHonorsRepeatedFailureBackoff(t *testing.T) {
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	service.agentBaseCtx = ctx
 	t.Cleanup(func() {
 		cancel()
 		service.closeAgentRuntimes()

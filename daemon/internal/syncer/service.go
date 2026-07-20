@@ -53,7 +53,7 @@ type Service struct {
 	primaryRuntime          *workspaceRuntime
 	agentRuntimes           map[string]*managedWorkspaceRuntime
 	agentWorkers            map[string]*managedAgentWorker
-	workerCtx               context.Context // Service-lifetime context for agent workers; set in run(), outlives any single fetch cycle.
+	agentBaseCtx            context.Context // Service-lifetime context for agent workers and runtimes; set in run(), outlives any single fetch cycle.
 	latestWorkspace         *workspaceResponse
 	ready                   chan struct{}
 	readyOnce               sync.Once
@@ -357,7 +357,7 @@ func (s *Service) run(ctx context.Context, heartbeatTicks <-chan time.Time) (run
 	s.toolGateway = gateway
 	s.toolServer = gateway.server
 	coreCtx, cancelCore := context.WithCancel(ctx)
-	s.workerCtx = coreCtx
+	s.agentBaseCtx = coreCtx
 	stopHeartbeat := func() {}
 	var primaryDone chan struct{}
 	var primaryErr error
@@ -1149,6 +1149,9 @@ func (s *workspaceRuntime) createDocumentFromLocalIntent(ctx context.Context, in
 }
 
 func (s *Service) syncAgentWorkers(agents []*agent) error {
+	if s.agentBaseCtx == nil {
+		return errors.New("syncer: syncAgentWorkers called before agentBaseCtx is bound")
+	}
 	desired := make(map[string]struct{}, len(agents))
 	skills := agentSkillExecutor{service: s}
 
@@ -1161,7 +1164,7 @@ func (s *Service) syncAgentWorkers(agents []*agent) error {
 		if _, ok := s.agentWorkers[currentAgent.ID]; ok {
 			continue
 		}
-		workerCtx, cancel := context.WithCancel(s.workerCtx)
+		workerCtx, cancel := context.WithCancel(s.agentBaseCtx)
 		done := make(chan struct{})
 		worker := &managedAgentWorker{cancel: cancel, wake: make(chan struct{}, 1), done: done}
 		s.agentWorkers[currentAgent.ID] = worker

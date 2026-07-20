@@ -30,6 +30,9 @@ type preparedAgentRuntimeReplacement struct {
 }
 
 func (s *Service) syncAgentRuntimes(ctx context.Context, workspace *workspaceResponse) error {
+	if s.agentBaseCtx == nil {
+		return errors.New("syncer: syncAgentRuntimes called before agentBaseCtx is bound")
+	}
 	if s.agentRuntimes == nil {
 		s.agentRuntimes = map[string]*managedWorkspaceRuntime{}
 	}
@@ -71,7 +74,7 @@ func (s *Service) syncAgentRuntimes(ctx context.Context, workspace *workspaceRes
 			break
 		}
 		runtime.initialWorkspace = workspace
-		s.agentRuntimes[agentID] = s.startAgentWorkspaceRuntimeAttempt(ctx, agentID, runtime, workspace, 0)
+		s.agentRuntimes[agentID] = s.startAgentWorkspaceRuntimeAttempt(s.agentBaseCtx, agentID, runtime, workspace, 0)
 	}
 
 	staleIDs := make([]string, 0)

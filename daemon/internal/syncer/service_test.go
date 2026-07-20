@@ -614,6 +614,7 @@ func TestReconcileAgentReplicasKeepsUUIDActorWhenHandleChanges(t *testing.T) {
 				},
 			},
 		},
+		agentBaseCtx: context.Background(),
 	}
 	workspace := &workspaceResponse{
 		Agents: []*agent{{ID: "agent_1", Handle: "renamed-agent"}},
@@ -649,6 +650,7 @@ func TestReconcileAgentReplicasCleanupRemovesOnlyCanonicalAgentPath(t *testing.T
 		agentRuntimes: map[string]*managedWorkspaceRuntime{
 			"agent/four": {},
 		},
+		agentBaseCtx: context.Background(),
 	}
 	if err := service.syncAgentRuntimes(context.Background(), &workspaceResponse{}); err != nil {
 		t.Fatalf("sync agent runtimes: %v", err)
@@ -1030,6 +1032,7 @@ func TestRefreshSharesFetchedWorkspaceWithWorkersAndReplicas(t *testing.T) {
 		client:        client,
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 		agentWorkers:  map[string]*managedAgentWorker{},
+		agentBaseCtx:     ctx,
 	}
 	defer service.closePrimaryRuntime()
 
@@ -1100,6 +1103,7 @@ func TestInitialRefreshFailsFastOnAgentStartupError(t *testing.T) {
 		client:        client,
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 		agentWorkers:  map[string]*managedAgentWorker{},
+		agentBaseCtx:     context.Background(),
 	}
 	defer service.closePrimaryRuntime()
 	service.sessions = newAgentSessionSupervisor(service.cfg, nil, newFakeRuntimeRegistry(factory))
@@ -1177,6 +1181,7 @@ func TestRefreshStartsAgentSessionFromWorkspaceSnapshot(t *testing.T) {
 		client:        client,
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 		agentWorkers:  map[string]*managedAgentWorker{},
+		agentBaseCtx:     context.Background(),
 	}
 	defer service.closePrimaryRuntime()
 	service.sessions = newAgentSessionSupervisor(service.cfg, nil, newFakeRuntimeRegistry(factory))
@@ -1262,6 +1267,7 @@ func TestRefreshStopsAgentSessionWhenWorkspaceSnapshotRemovesAgent(t *testing.T)
 		client:        client,
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 		agentWorkers:  map[string]*managedAgentWorker{},
+		agentBaseCtx:     context.Background(),
 	}
 	defer service.closePrimaryRuntime()
 	service.sessions = newAgentSessionSupervisor(service.cfg, nil, newFakeRuntimeRegistry(factory))
@@ -5497,6 +5503,7 @@ func TestSnapshotAndRefreshAreSerialized(t *testing.T) {
 		client:        http.DefaultClient,
 		agentRuntimes: map[string]*managedWorkspaceRuntime{},
 		agentWorkers:  map[string]*managedAgentWorker{},
+		agentBaseCtx:  context.Background(),
 	}
 	defer service.closePrimaryRuntime()
 	defer service.closeAgentWorkers()
@@ -5539,8 +5546,161 @@ func TestSnapshotAndRefreshAreSerialized(t *testing.T) {
 	}
 }
 
+func TestCoordinatorWorkerAndRuntimeSurviveFetchCtxCancellation(t *testing.T) {
+	var refreshCount atomic.Int32
+	refreshDone := make(chan struct{}, 8)
+	withAgent := workspaceResponse{
+		Agents: []*agent{{
+			ID:     "agent_1",
+			Handle: "agent-one",
+			Name:   "Agent One",
+			Kind:   "codex",
+		}},
+	}
+	withoutAgents := workspaceResponse{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/workspace"):
+			n := refreshCount.Add(1)
+			var ws workspaceResponse
+			switch n {
+			case 1:
+				ws = withAgent
+			case 2:
+				ws = withoutAgents
+			default:
+				ws = withAgent
+			}
+			writeJSONResponse(w, http.StatusOK, &ws)
+			refreshDone <- struct{}{}
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agents/"):
+			writeJSONResponse(w, http.StatusOK, toolInboxResponse{Items: []*agentEvent{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	service := &Service{
+		cfg: Config{
+			BackendURL:         server.URL,
+			DataDir:            t.TempDir(),
+			WorkspaceDir:       t.TempDir(),
+			AgentWorkspaceRoot: t.TempDir(),
+			AgentID:            "daemon_agent",
+		},
+		client:        server.Client(),
+		agentRuntimes: map[string]*managedWorkspaceRuntime{},
+		agentWorkers:  map[string]*managedAgentWorker{},
+	}
+	defer service.closePrimaryRuntime()
+	defer service.closeAgentRuntimes()
+	defer service.closeAgentWorkers()
+	stopWorker := startTestRefreshWorker(t, service, ctx)
+	defer func() { cancel(); stopWorker() }()
+
+	// Hot-add: first refresh adds agent_1.
+	service.signalRefresh()
+	select {
+	case <-refreshDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first refresh did not complete")
+	}
+	waitUntil(t, func() bool {
+		service.mu.Lock()
+		defer service.mu.Unlock()
+		return service.agentWorkers["agent_1"] != nil && service.agentRuntimes["agent_1"] != nil
+	})
+
+	// Fetch release: coordinator canceled fetchCtx after the refresh above.
+	// Verify worker and runtime survive.
+	service.mu.Lock()
+	worker1 := service.agentWorkers["agent_1"]
+	runtime1 := service.agentRuntimes["agent_1"]
+	service.mu.Unlock()
+
+	select {
+	case <-worker1.done:
+		t.Fatal("worker died after fetchCtx cancellation; should survive on agentBaseCtx")
+	default:
+	}
+	if runtime1.stopped() {
+		t.Fatal("runtime stopped after fetchCtx cancellation; should survive on agentBaseCtx")
+	}
+
+	// Wake worker to prove it can still process after fetchCtx release.
+	select {
+	case worker1.wake <- struct{}{}:
+	default:
+	}
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-worker1.done:
+		t.Fatal("worker died after wake; should remain alive")
+	default:
+	}
+
+	// Removal: second refresh removes agent_1.
+	service.signalRefresh()
+	select {
+	case <-refreshDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second refresh did not complete")
+	}
+	waitUntil(t, func() bool {
+		service.mu.Lock()
+		defer service.mu.Unlock()
+		return service.agentWorkers["agent_1"] == nil
+	})
+	select {
+	case <-worker1.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not join after removal")
+	}
+
+	// Re-add: third refresh adds agent_1 back.
+	service.signalRefresh()
+	select {
+	case <-refreshDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("third refresh did not complete")
+	}
+	waitUntil(t, func() bool {
+		service.mu.Lock()
+		defer service.mu.Unlock()
+		return service.agentWorkers["agent_1"] != nil && service.agentRuntimes["agent_1"] != nil
+	})
+
+	service.mu.Lock()
+	worker2 := service.agentWorkers["agent_1"]
+	runtime2 := service.agentRuntimes["agent_1"]
+	service.mu.Unlock()
+	if worker2 == worker1 {
+		t.Fatal("re-add should create a new worker, not reuse the removed one")
+	}
+	select {
+	case <-worker2.done:
+		t.Fatal("re-added worker died immediately")
+	default:
+	}
+	if runtime2.stopped() {
+		t.Fatal("re-added runtime stopped immediately")
+	}
+
+	// Service shutdown: cancel ctx, everything joins.
+	cancel()
+	stopWorker()
+	service.closeAgentWorkers()
+	service.closeAgentRuntimes()
+}
+
 func startTestRefreshWorker(t *testing.T, s *Service, ctx context.Context) func() {
 	t.Helper()
+	if s.agentBaseCtx == nil {
+		s.agentBaseCtx = ctx
+	}
 	s.refreshNeeded = make(chan struct{}, 1)
 	done := make(chan struct{})
 	go func() {
