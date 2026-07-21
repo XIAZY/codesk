@@ -78,6 +78,25 @@ assert_exact_top_level_entries() {
 		die "$assert_entries_label inventory mismatch"
 }
 
+stage_windows_gui_arch() {
+	stage_arch="$1"
+	stage_source_dir="$windows_gui_input_root/$stage_arch"
+	stage_arch_dir="$windows_gui_staged_root/$stage_arch"
+	stage_msi_name="Codesk_${version}_windows_${stage_arch}.msi"
+
+	need_dir "$stage_source_dir"
+	printf '%s\n' "$stage_msi_name" SHA256SUMS provenance.json | LC_ALL=C sort >"$tmp_dir/$stage_arch.source-expected-files"
+	assert_exact_top_level_entries "$stage_source_dir" "$tmp_dir/$stage_arch.source-expected-files" "$stage_arch-source-files"
+	mkdir "$stage_arch_dir" || die "could not create private Windows GUI staging directory: $stage_arch_dir"
+	for stage_name in "$stage_msi_name" SHA256SUMS provenance.json; do
+		stage_source_file="$stage_source_dir/$stage_name"
+		need_file "$stage_source_file"
+		[ -s "$stage_source_file" ] || die "empty Windows GUI release file: $stage_source_file"
+		cp "$stage_source_file" "$stage_arch_dir/$stage_name" ||
+			die "could not stage Windows GUI release file: $stage_source_file"
+	done
+}
+
 preflight_windows_gui_arch() {
 	preflight_arch="$1"
 	preflight_arch_dir="$windows_gui_msi_root/$preflight_arch"
@@ -345,9 +364,17 @@ fi
 if [ "$target" = windows-gui ]; then
 	windows_gui_prefix="$(join_key "${R2_DESKTOP_PREFIX:-desktop}" windows)"
 	tmp_dir="$(notty_test_mktemp notty-windows-gui-upload)"
-	need_dir "$windows_gui_msi_root"
+	windows_gui_input_root="$windows_gui_msi_root"
+	windows_gui_staged_root="$tmp_dir/msi"
+	need_dir "$windows_gui_input_root"
 	printf '%s\n' amd64 arm64 >"$tmp_dir/windows-architectures.expected"
-	assert_exact_top_level_entries "$windows_gui_msi_root" "$tmp_dir/windows-architectures.expected" windows-architectures
+	assert_exact_top_level_entries "$windows_gui_input_root" "$tmp_dir/windows-architectures.expected" windows-source-architectures
+	mkdir "$windows_gui_staged_root" || die "could not create private Windows GUI staging root: $windows_gui_staged_root"
+	for arch in amd64 arm64; do
+		stage_windows_gui_arch "$arch"
+	done
+	windows_gui_msi_root="$windows_gui_staged_root"
+	assert_exact_top_level_entries "$windows_gui_staged_root" "$tmp_dir/windows-architectures.expected" windows-staged-architectures
 	for arch in amd64 arm64; do
 		preflight_windows_gui_arch "$arch"
 	done
@@ -381,7 +408,6 @@ if [ "$target" = windows-gui ]; then
 	printf '{\n  "version": "%s",\n  "artifacts": [\n' "$version" >"$manifest"
 	first=1
 	for arch in amd64 arm64; do
-		arch_dir="$windows_gui_msi_root/$arch"
 		msi_name="Codesk_${version}_windows_${arch}.msi"
 		sum="$(sed -n '1p' "$tmp_dir/$arch.msi-sha256")"
 		if [ "$first" -eq 0 ]; then printf ',\n' >>"$manifest"; fi
@@ -392,7 +418,7 @@ if [ "$target" = windows-gui ]; then
 	printf '\n  ]\n}\n' >>"$manifest"
 
 	for arch in amd64 arm64; do
-		arch_dir="$windows_gui_msi_root/$arch"
+		arch_dir="$windows_gui_staged_root/$arch"
 		msi_name="Codesk_${version}_windows_${arch}.msi"
 		upload_file "$R2_DESKTOP_BUCKET" "$windows_gui_prefix/$version/$arch/$msi_name" "$arch_dir/$msi_name" "$release_cache_control"
 		upload_file "$R2_DESKTOP_BUCKET" "$windows_gui_prefix/$version/$arch/SHA256SUMS" "$arch_dir/SHA256SUMS" "$release_cache_control"

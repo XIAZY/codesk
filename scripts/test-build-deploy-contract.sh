@@ -97,6 +97,21 @@ mkdir -p "$fake_bin"
 cat >"$fake_bin/aws" <<'AWS'
 #!/usr/bin/env sh
 printf '%s\n' "$*" >>"$AWS_LOG"
+if [ -n "${AWS_CAPTURE_DIR:-}" ] && [ "${4:-}" = cp ]; then
+	aws_source="$5"
+	aws_destination="$6"
+	case "$aws_destination" in
+		*"/desktop/windows/0.0.1/arm64/Codesk_0.0.1_windows_arm64.msi")
+			cp "$aws_source" "$AWS_CAPTURE_DIR/arm64.msi"
+			;;
+		*"/desktop/windows/0.0.1/arm64/SHA256SUMS")
+			cp "$aws_source" "$AWS_CAPTURE_DIR/arm64.SHA256SUMS"
+			;;
+		*"/desktop/windows/0.0.1/manifest.json")
+			cp "$aws_source" "$AWS_CAPTURE_DIR/manifest.json"
+			;;
+	esac
+fi
 AWS
 cat >"$fake_bin/powershell.exe" <<'POWERSHELL'
 #!/usr/bin/env sh
@@ -140,6 +155,9 @@ for arch in amd64 arm64; do
 	grep -Fq "\"canonicalFile\":\"$msi\"" "$provenance"
 	grep -Fq "\"name\":\"$version+$arch\"" "$provenance"
 done
+if [ -n "${WINDOWS_GUI_MUTATE_SOURCE_ROOT:-}" ]; then
+	printf 'post-staging mutation\n' >>"$WINDOWS_GUI_MUTATE_SOURCE_ROOT/arm64/Codesk_${version}_windows_arm64.msi"
+fi
 POWERSHELL
 chmod +x "$fake_bin/aws" "$fake_bin/powershell.exe"
 aws_log="$tmp_dir/aws.log"
@@ -232,6 +250,37 @@ done
 PATH="$fake_bin:$PATH" AWS_LOG="$aws_log" WINDOWS_GUI_MSI_ROOT="$windows_dist" UPLOAD_TARGET=windows-gui \
 	R2_ENDPOINT_URL=https://example.invalid R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
 	"$repo_dir/scripts/upload-r2.sh" >/dev/null
+
+toctou_dist="$tmp_dir/windows-post-staging-mutation"
+for arch in amd64 arm64; do
+	write_windows_bundle "$toctou_dist" "$arch" "$source_head" "$source_base" true
+done
+toctou_source_before="$(fixture_sha256 "$toctou_dist/arm64/Codesk_0.0.1_windows_arm64.msi")"
+toctou_aws_log="$tmp_dir/windows-post-staging-mutation.aws.log"
+toctou_capture="$tmp_dir/windows-post-staging-mutation.capture"
+mkdir "$toctou_capture"
+: >"$toctou_aws_log"
+PATH="$fake_bin:$PATH" AWS_LOG="$toctou_aws_log" AWS_CAPTURE_DIR="$toctou_capture" \
+	WINDOWS_GUI_MUTATE_SOURCE_ROOT="$toctou_dist" WINDOWS_GUI_MSI_ROOT="$toctou_dist" \
+	UPLOAD_TARGET=windows-gui R2_ENDPOINT_URL=https://example.invalid \
+	R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
+	"$repo_dir/scripts/upload-r2.sh" >/dev/null
+toctou_source_after="$(fixture_sha256 "$toctou_dist/arm64/Codesk_0.0.1_windows_arm64.msi")"
+[ "$toctou_source_before" != "$toctou_source_after" ] || fail 'Windows GUI post-staging source mutation hook did not run'
+for captured in arm64.msi arm64.SHA256SUMS manifest.json; do
+	[ -f "$toctou_capture/$captured" ] || fail "Windows GUI staged upload did not capture $captured"
+done
+toctou_uploaded_sha="$(fixture_sha256 "$toctou_capture/arm64.msi")"
+toctou_checksum_sha="$(awk 'NR == 1 { print $1 }' "$toctou_capture/arm64.SHA256SUMS")"
+toctou_manifest_sha="$(awk -F '"sha256": "' '/"arch": "arm64"/ { split($2, fields, "\""); print fields[1] }' "$toctou_capture/manifest.json")"
+[ "$toctou_uploaded_sha" = "$toctou_source_before" ] || fail 'Windows GUI upload did not preserve the staged ARM64 MSI bytes'
+[ "$toctou_uploaded_sha" = "$toctou_checksum_sha" ] || fail 'Windows GUI uploaded ARM64 MSI differs from uploaded SHA256SUMS'
+[ "$toctou_uploaded_sha" = "$toctou_manifest_sha" ] || fail 'Windows GUI uploaded ARM64 MSI differs from generated manifest'
+[ "$toctou_uploaded_sha" != "$toctou_source_after" ] || fail 'Windows GUI upload followed the mutable shared source after staging'
+if grep -Fq "$toctou_dist/" "$toctou_aws_log"; then
+	fail 'Windows GUI uploader received a mutable shared-source path'
+fi
+pass 'Windows GUI upload validates and publishes one private staged snapshot'
 
 wrong_hash_dist="$tmp_dir/windows-wrong-hash"
 for arch in amd64 arm64; do

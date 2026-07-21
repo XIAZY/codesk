@@ -399,6 +399,16 @@ func TestWindowsGUIUploadPreflightSourceContract(t *testing.T) {
 			uploadNew: `: "$arch"`,
 		},
 		{
+			name:      "private staging skipped",
+			uploadOld: `stage_windows_gui_arch "$arch"`,
+			uploadNew: `: "$arch"`,
+		},
+		{
+			name:      "upload returns to mutable source",
+			uploadOld: `arch_dir="$windows_gui_staged_root/$arch"`,
+			uploadNew: `arch_dir="$windows_gui_input_root/$arch"`,
+		},
+		{
 			name:          "JSON parser removed",
 			provenanceOld: `ConvertFrom-Json`,
 			provenanceNew: `ConvertTo-Json`,
@@ -1225,7 +1235,11 @@ func checkPowerShellVersionReaderSource(source string) error {
 func checkWindowsGUIUploadPreflightSource(upload, provenance string) error {
 	for _, required := range []string{
 		`printf '%s\n' amd64 arm64 >"$tmp_dir/windows-architectures.expected"`,
-		`assert_exact_top_level_entries "$windows_gui_msi_root" "$tmp_dir/windows-architectures.expected" windows-architectures`,
+		`windows_gui_input_root="$windows_gui_msi_root"`,
+		`windows_gui_staged_root="$tmp_dir/msi"`,
+		`assert_exact_top_level_entries "$windows_gui_input_root" "$tmp_dir/windows-architectures.expected" windows-source-architectures`,
+		`cp "$stage_source_file" "$stage_arch_dir/$stage_name"`,
+		`windows_gui_msi_root="$windows_gui_staged_root"`,
 		`printf '%s\n' "$preflight_msi_name" SHA256SUMS provenance.json`,
 		`if (bad || NR != 2) exit 1`,
 		`cmp -s "$tmp_dir/$preflight_arch.expected-checksum-files" "$tmp_dir/$preflight_arch.actual-checksum-files"`,
@@ -1236,6 +1250,7 @@ func checkWindowsGUIUploadPreflightSource(upload, provenance string) error {
 		`windows_gui_ps_script="$root_dir/scripts/verify-windows-gui-upload-provenance.ps1"`,
 		`MSYS2_ARG_CONV_EXCL='*' "$windows_gui_ps"`,
 		`-Repository "${WINDOWS_GUI_REPOSITORY:-XIAZY/notty}"`,
+		`arch_dir="$windows_gui_staged_root/$arch"`,
 	} {
 		if !strings.Contains(upload, required) {
 			return fmt.Errorf("Windows GUI upload preflight is missing %q", required)
@@ -1247,13 +1262,14 @@ func checkWindowsGUIUploadPreflightSource(upload, provenance string) error {
 		return fmt.Errorf("shared uploader has no Windows GUI block")
 	}
 	windowsBlock := upload[windowsBlockIndex:]
+	stageIndex := strings.Index(windowsBlock, `stage_windows_gui_arch "$arch"`)
 	preflightIndex := strings.Index(windowsBlock, `preflight_windows_gui_arch "$arch"`)
 	provenanceIndex := strings.Index(windowsBlock, `"$windows_gui_ps" -NoLogo`)
 	manifestIndex := strings.Index(windowsBlock, `manifest="$tmp_dir/manifest.json"`)
 	uploadIndex := strings.Index(windowsBlock, `upload_file "$R2_DESKTOP_BUCKET"`)
-	if preflightIndex < 0 || provenanceIndex < 0 || manifestIndex < 0 || uploadIndex < 0 ||
-		!(preflightIndex < provenanceIndex && provenanceIndex < manifestIndex && manifestIndex < uploadIndex) {
-		return fmt.Errorf("Windows GUI two-phase ordering is preflight=%d provenance=%d manifest=%d upload=%d", preflightIndex, provenanceIndex, manifestIndex, uploadIndex)
+	if stageIndex < 0 || preflightIndex < 0 || provenanceIndex < 0 || manifestIndex < 0 || uploadIndex < 0 ||
+		!(stageIndex < preflightIndex && preflightIndex < provenanceIndex && provenanceIndex < manifestIndex && manifestIndex < uploadIndex) {
+		return fmt.Errorf("Windows GUI staged two-phase ordering is stage=%d preflight=%d provenance=%d manifest=%d upload=%d", stageIndex, preflightIndex, provenanceIndex, manifestIndex, uploadIndex)
 	}
 
 	for _, required := range []string{
