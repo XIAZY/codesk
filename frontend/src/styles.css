@@ -719,6 +719,7 @@ a:focus-visible,
 }
 .shell.sidebar-collapsed .sb .workspace-switcher .col,
 .shell.sidebar-collapsed .sb .workspace-switcher select,
+.shell.sidebar-collapsed .sb .workspace-switcher-actions,
 .shell.sidebar-collapsed .sb .sb-search,
 .shell.sidebar-collapsed .sb .nav-item > span,
 .shell.sidebar-collapsed .sb .nav-item .ct,
@@ -877,6 +878,17 @@ a:focus-visible,
   background-repeat: no-repeat;
 }
 
+.workspace-switcher-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.create-workspace-trigger {
+  flex: 0 0 28px;
+}
+
 .sb-search {
   padding: 8px;
 }
@@ -990,6 +1002,22 @@ a:focus-visible,
 
 .folder-row {
   color: var(--ink-2);
+}
+
+.folder-row-wrap {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.folder-row-wrap .folder-row {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.folder-create-document {
+  flex: 0 0 28px;
 }
 
 .folder-row:hover .car {
@@ -1197,6 +1225,11 @@ a:focus-visible,
   padding: 0 18px;
 }
 
+.doc-toolbar.notifications-open {
+  position: relative;
+  z-index: 43;
+}
+
 .document-threads-entry {
   position: relative;
 }
@@ -1275,6 +1308,151 @@ a:focus-visible,
 
 .document-more-trigger {
   padding-inline: 0;
+}
+
+.thread-notifications-entry {
+  position: relative;
+}
+
+.thread-notifications-trigger {
+  position: relative;
+  flex: 0 0 28px;
+  padding-inline: 0;
+}
+
+.thread-notifications-badge {
+  position: absolute;
+  top: -5px;
+  right: -6px;
+  min-width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--paper);
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--ink);
+  padding: 0 3px;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.thread-notifications-popover {
+  position: absolute;
+  z-index: 42;
+  top: calc(100% + 8px);
+  right: 0;
+  width: min(390px, calc(100vw - 24px));
+  max-height: calc(100vh - 68px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--paper);
+}
+
+.thread-notifications-head {
+  min-height: 48px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+  padding: 8px 10px 8px 14px;
+}
+
+.thread-notifications-list {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.thread-notification-row {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  padding: 4px 0;
+}
+
+.thread-notification-row:last-child {
+  border-bottom: 0;
+}
+
+.thread-notification-open,
+.thread-notification-unavailable {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  padding: 9px 10px;
+  text-align: left;
+}
+
+.thread-notification-open {
+  cursor: pointer;
+}
+
+.thread-notification-open:hover {
+  background: var(--paper-2);
+}
+
+.thread-notification-unavailable {
+  color: var(--ink-3);
+}
+
+.thread-notification-copy {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.thread-notification-count {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--accent-100);
+  color: var(--accent-700);
+  padding: 2px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.thread-notification-preview {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-height: 1.35;
+}
+
+.thread-notification-mark-read {
+  flex: 0 0 auto;
+  align-self: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-3);
+  padding: 7px 8px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.thread-notification-mark-read:hover {
+  background: var(--paper-2);
+  color: var(--ink);
 }
 
 .document-more-menu {
@@ -3684,6 +3862,17 @@ pre.code {
     width: auto;
     height: auto;
     max-height: none;
+  }
+
+  .thread-notifications-popover {
+    position: fixed;
+    top: 52px;
+    right: 12px;
+    bottom: auto;
+    left: 12px;
+    width: auto;
+    max-height: calc(100vh - 64px);
+    max-height: calc(100dvh - 64px);
   }
 
   .document-threads-popover .thread-document-detail {

@@ -7,6 +7,7 @@ import { AgentDetailModal, CreateDaemonModal, DaemonDetailModal, DaemonsManageme
 import { ApiError, publicOrigin } from "./api";
 import { emptyWorkspace, identifierFromName, identifierHelpText, identifierPattern, workspaceSlugMaxLength } from "./logic";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
+import { threadReadStorageKey } from "./threadUnread";
 import type { Account, Agent, AgentRun, Daemon, DocumentItem, WorkspaceState, WorkspaceSummary } from "./types";
 import appSource from "./App.tsx?raw";
 
@@ -46,6 +47,9 @@ function workspaceFixture(overrides: Partial<WorkspaceState> = {}): WorkspaceSta
 
 let workspaceMock = workspaceFixture();
 let rootDocumentsMock: DocumentItem[] = [{ id: "doc_1", path: "docs/Product Plan.md", title: "Product Plan.md" }];
+const rootUpsertFileMock = vi.fn();
+const rootMoveFileMock = vi.fn();
+const rootTombstoneFileMock = vi.fn();
 
 vi.mock("./useWorkspace", () => ({
   useWorkspace: () => ({
@@ -61,13 +65,24 @@ vi.mock("./useRootNamespace", () => ({
   useRootNamespace: () => ({
     documents: rootDocumentsMock,
     ready: true,
-    upsertFile: vi.fn(),
-    moveFile: vi.fn(),
-    tombstoneFile: vi.fn(),
+    upsertFile: rootUpsertFileMock,
+    moveFile: rootMoveFileMock,
+    tombstoneFile: rootTombstoneFileMock,
   }),
 }));
 
+vi.mock("./useDocument", () => ({
+  useDocumentSync: () => ({ ydoc: null, ytext: null, ready: false, connected: true }),
+}));
+
+vi.mock("./DocumentSurface", () => ({
+  DocumentSurface: () => <div data-testid="document-surface" />,
+}));
+
 afterEach(() => {
+  vi.restoreAllMocks();
+  vi.clearAllMocks();
+  Reflect.deleteProperty(document, "visibilityState");
   workspaceMock = workspaceFixture();
   rootDocumentsMock = [{ id: "doc_1", path: "docs/Product Plan.md", title: "Product Plan.md" }];
   vi.useRealTimers();
@@ -100,6 +115,29 @@ describe("WorkspaceOnboarding", () => {
     expect(screen.getByRole("heading", { name: "Join with invite link" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Join with invite link" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Choose a workspace" })).toBeNull();
+  });
+
+  it("distinguishes additional-workspace creation and offers an explicit return path", async () => {
+    const user = userEvent.setup();
+    const onBack = vi.fn();
+    const currentWorkspace = { id: "workspace_1", slug: "research", name: "Research" };
+    render(
+      <WorkspaceOnboarding
+        api={{ createWorkspace: vi.fn() }}
+        account={account()}
+        workspaces={[currentWorkspace]}
+        currentWorkspace={currentWorkspace}
+        onBack={onBack}
+        onWorkspaces={vi.fn()}
+        onSelect={vi.fn()}
+        onSignOut={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "Create a workspace" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Create your first workspace" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Back to Research" }));
+    expect(onBack).toHaveBeenCalledTimes(1);
   });
 
   it("opens an invite route from a pasted invite link", async () => {
@@ -465,6 +503,143 @@ describe("WorkspaceApp workspace management", () => {
 
     await waitFor(() => expect(onWorkspaceDeleted).toHaveBeenCalledWith("ws"));
     expect(window.location.pathname).toBe("/w/other");
+  });
+});
+
+describe("WorkspaceApp creation entry points", () => {
+  function workspaceApi(createDocument = vi.fn().mockResolvedValue({ id: "document_new" })) {
+    return {
+      updateLastAccessed: vi.fn().mockResolvedValue({}),
+      createDocument,
+      listDocumentSubscribers: vi.fn().mockResolvedValue({ agents: [] }),
+    } as never;
+  }
+
+  function renderWorkspace(overrides: Partial<React.ComponentProps<typeof WorkspaceApp>> = {}) {
+    return render(
+      <WorkspaceApp
+        api={workspaceApi()}
+        token="token"
+        workspaceId="ws"
+        workspaceSlug="workspace"
+        view={{ kind: "home" }}
+        account={{ id: "account_1", email: "you@example.com", displayName: "You" }}
+        workspaces={[{ id: "ws", slug: "workspace", name: "Workspace" }]}
+        onAccess={vi.fn()}
+        onWorkspaceChange={vi.fn()}
+        onSignOut={vi.fn()}
+        {...overrides}
+      />,
+    );
+  }
+
+  it("keeps workspace creation discoverable beside the switcher", async () => {
+    const user = userEvent.setup();
+    const onCreateWorkspace = vi.fn();
+    renderWorkspace({ onCreateWorkspace });
+
+    await user.click(screen.getByRole("button", { name: "Create workspace" }));
+    expect(onCreateWorkspace).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates at workspace root from both the Documents plus and Cmd/Ctrl+N", async () => {
+    const user = userEvent.setup();
+    const createDocument = vi.fn()
+      .mockResolvedValueOnce({ id: "document_button" })
+      .mockResolvedValueOnce({ id: "document_shortcut" });
+    rootDocumentsMock = [{ id: "doc_nested", path: "Specs/Existing.md", title: "Existing.md" }];
+    renderWorkspace({ api: workspaceApi(createDocument) });
+
+    await user.click(screen.getByRole("button", { name: "New document at workspace root" }));
+    await waitFor(() => expect(rootUpsertFileMock).toHaveBeenCalledWith("document_button", "Untitled.md"));
+
+    fireEvent.keyDown(window, { key: "n", ctrlKey: true });
+    await waitFor(() => expect(rootUpsertFileMock).toHaveBeenCalledWith("document_shortcut", "Untitled.md"));
+    expect(createDocument).toHaveBeenCalledTimes(2);
+  });
+
+  it("creates inside the explicit folder, leaves the folder toggle independent, and expands the target", async () => {
+    const user = userEvent.setup();
+    const createDocument = vi.fn().mockResolvedValue({ id: "document_nested" });
+    rootDocumentsMock = [
+      { id: "doc_root", path: "Overview.md", title: "Overview.md" },
+      { id: "doc_existing", path: "Specs/Existing.md", title: "Existing.md" },
+    ];
+    const { container } = renderWorkspace({ api: workspaceApi(createDocument) });
+
+    expect(screen.getByText("Existing.md")).toBeTruthy();
+    fireEvent.click(container.querySelector(".folder-row")!);
+    expect(screen.queryByText("Existing.md")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "New document in Specs" }));
+    await waitFor(() => expect(rootUpsertFileMock).toHaveBeenCalledWith("document_nested", "Specs/Untitled.md"));
+    await waitFor(() => expect(screen.getByText("Existing.md")).toBeTruthy());
+  });
+});
+
+describe("WorkspaceApp thread-reply acknowledgement", () => {
+  it("keeps a notification unread through navigation and clears it only after the exact detail becomes visible", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    rootDocumentsMock = [
+      { id: "doc_1", path: "Overview.md", title: "Overview.md" },
+      { id: "doc_2", path: "Specs/Retry.md", title: "Retry.md" },
+    ];
+    workspaceMock = workspaceFixture({
+      threads: [{
+        id: "thread_1",
+        documentId: "doc_2",
+        title: "Retry behavior",
+        status: "open",
+        anchor: { kind: "document" },
+        createdById: "user_1",
+        createdByType: "human",
+        createdByHandle: "ada",
+        createdByName: "Ada",
+        participantIds: ["user_1", "agent_1"],
+        participantHandles: ["ada", "codex"],
+        messages: [
+          { id: "message_1", threadId: "thread_1", authorId: "user_1", authorType: "human", authorHandle: "ada", authorName: "Ada", body: "Please review", kind: "comment", createdAt: "2026-07-21T12:00:00Z" },
+          { id: "message_2", threadId: "thread_1", authorId: "agent_1", authorType: "agent", authorHandle: "codex", authorName: "Codex", body: "The retry path is stale", kind: "comment", createdAt: "2026-07-21T12:01:00Z" },
+        ],
+        createdAt: "2026-07-21T12:00:00Z",
+        updatedAt: "2026-07-21T12:01:00Z",
+      }],
+    });
+    const storageKey = threadReadStorageKey("account_1", "ws");
+    localStorage.setItem(storageKey, JSON.stringify({
+      thread_1: { createdAt: "2026-07-21T12:00:00Z", messageId: "message_1" },
+    }));
+    const api = {
+      updateLastAccessed: vi.fn().mockResolvedValue({}),
+      listDocumentSubscribers: vi.fn().mockResolvedValue({ agents: [] }),
+    } as never;
+    const props = {
+      api,
+      token: "token",
+      workspaceId: "ws",
+      workspaceSlug: "workspace",
+      account: { id: "account_1", email: "you@example.com", displayName: "You" },
+      workspaces: [{ id: "ws", slug: "workspace", name: "Workspace" }],
+      onAccess: vi.fn(),
+      onWorkspaceChange: vi.fn(),
+      onSignOut: vi.fn(),
+    };
+
+    const { rerender } = render(<WorkspaceApp {...props} view={{ kind: "document", documentId: "doc_1" }} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "1 unread thread reply" })).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: "1 unread thread reply" }));
+    await user.click(screen.getByRole("button", { name: "Open 1 new reply in Specs/Retry.md" }));
+
+    expect(JSON.parse(localStorage.getItem(storageKey)!).reads.thread_1.messageId).toBe("message_1");
+
+    rerender(<WorkspaceApp {...props} view={{ kind: "document", documentId: "doc_2" }} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "No unread thread replies" })).toBeTruthy());
+    expect(JSON.parse(localStorage.getItem(storageKey)!).reads.thread_1).toEqual({
+      createdAt: "2026-07-21T12:01:00Z",
+      messageId: "message_2",
+    });
   });
 });
 
