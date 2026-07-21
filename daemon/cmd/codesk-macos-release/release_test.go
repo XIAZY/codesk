@@ -891,7 +891,7 @@ func TestMacOSBuildScriptStagesHostArchiveAndUsesFileFirstLipo(t *testing.T) {
 	}
 	requireOrderedFragments(t, string(workflow),
 		"rm -rf third_party/y-crdt/target",
-		`scripts/build-macos-desktop-release.sh 0.0.0`,
+		`scripts/build-macos-desktop-release.sh "$RUNNER_TEMP/macos-release"`,
 	)
 }
 
