@@ -38,9 +38,15 @@ function mockApi(overrides: Partial<ApiClient> = {}): ApiClient {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
+  Reflect.deleteProperty(document, "visibilityState");
   localStorage.clear();
   cleanup();
 });
+
+function setVisibility(state: DocumentVisibilityState) {
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: state });
+}
 
 describe("ThreadsPanel grouped status rendering", () => {
   it("starts open rows with the avatar and no redundant status dot", () => {
@@ -465,5 +471,37 @@ describe("ThreadsPanel empty state", () => {
     );
 
     expect(screen.getByText(/No threads on this document yet/)).toBeTruthy();
+  });
+});
+
+describe("ThreadsPanel unread acknowledgement", () => {
+  it("does not acknowledge a mounted detail until the document is visible and focused", () => {
+    let focused = false;
+    vi.spyOn(document, "hasFocus").mockImplementation(() => focused);
+    setVisibility("hidden");
+    const onThreadViewed = vi.fn();
+
+    render(
+      <ThreadsPanel
+        api={mockApi()}
+        workspaceId="ws"
+        threads={[threadFixture({ id: "t1" })]}
+        selectedThreadId="t1"
+        onSelectThread={vi.fn()}
+        onJumpToThread={vi.fn()}
+        onReply={vi.fn()}
+        onThreadViewed={onThreadViewed}
+      />,
+    );
+
+    expect(onThreadViewed).not.toHaveBeenCalled();
+
+    setVisibility("visible");
+    fireEvent(document, new Event("visibilitychange"));
+    expect(onThreadViewed).not.toHaveBeenCalled();
+
+    focused = true;
+    fireEvent.focus(window);
+    expect(onThreadViewed).toHaveBeenCalledWith("t1");
   });
 });

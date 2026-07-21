@@ -62,7 +62,15 @@ function mockApi(overrides: Partial<ApiClient> = {}): ApiClient {
   } as unknown as ApiClient;
 }
 
-afterEach(cleanup);
+afterEach(() => {
+  vi.restoreAllMocks();
+  Reflect.deleteProperty(document, "visibilityState");
+  cleanup();
+});
+
+function setVisibility(state: DocumentVisibilityState) {
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: state });
+}
 
 describe("ThreadPopover", () => {
   it("uses the open thread's complete stored anchor excerpt in the list header", () => {
@@ -225,6 +233,35 @@ describe("ThreadPopover", () => {
     await user.click(screen.getByRole("button", { name: "Back to threads on this line" }));
     expect(screen.queryByRole("button", { name: "Open thread by @ada" })).toBeNull();
     expect(screen.getByRole("button", { name: "Open thread by @lin" })).toBeTruthy();
+  });
+
+  it("does not acknowledge a selected detail while the browser document is hidden or unfocused", () => {
+    let focused = false;
+    vi.spyOn(document, "hasFocus").mockImplementation(() => focused);
+    setVisibility("hidden");
+    const onThreadViewed = vi.fn();
+    render(
+      <ThreadPopover
+        api={mockApi()}
+        workspaceId="ws"
+        group={{ line: 5, threads: [threadFixture()] }}
+        point={{ x: 20, y: 30 }}
+        onClose={vi.fn()}
+        onThreadsChanged={vi.fn()}
+        onThreadViewed={onThreadViewed}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Open thread by @ada" }));
+    expect(onThreadViewed).not.toHaveBeenCalled();
+
+    setVisibility("visible");
+    fireEvent(document, new Event("visibilitychange"));
+    expect(onThreadViewed).not.toHaveBeenCalled();
+
+    focused = true;
+    fireEvent(window, new Event("focus"));
+    expect(onThreadViewed).toHaveBeenCalledWith("thread_open");
   });
 
   it("omits redundant Jump and supports Escape/outside dismissal", () => {

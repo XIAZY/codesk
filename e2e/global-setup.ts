@@ -99,10 +99,39 @@ export default async function globalSetup(): Promise<void> {
     body: JSON.stringify({ name: "Smoke Bravo", slug: `smoke-bravo-${stamp}`, handle: `smoke-owner-b-${stamp}` }) });
   const workspaceB = b.workspace ?? b;
 
+  // A second verified human is a real external reply author for the notification journey. Join through
+  // the public invite contract so the test exercises the same membership/auth boundary as production.
+  const memberEmail = `e2e-member-${stamp}@example.invalid`;
+  const memberPassword = "smoke-member-pass-12345";
+  const memberHandle = `smoke-member-${stamp}`;
+  await api("/api/auth/register", {
+    method: "POST",
+    body: JSON.stringify({ email: memberEmail, password: memberPassword, name: "Smoke Member" }),
+  });
+  markVerified(memberEmail);
+  const memberLogin = await api("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email: memberEmail, password: memberPassword }),
+  });
+  const memberToken: string = memberLogin.token;
+  if (!memberToken) throw new Error("member login returned no token after verification");
+
+  const invite = await api(`/api/workspaces/${workspaceA.id}/invites`, { method: "POST", token });
+  const inviteURL = String(invite.url ?? "");
+  const inviteToken = inviteURL.startsWith("/invite/") ? inviteURL.slice("/invite/".length) : "";
+  if (!inviteToken) throw new Error(`workspace invite returned an invalid URL: ${inviteURL}`);
+  await api(`/api/invites/${encodeURIComponent(inviteToken)}/accept`, {
+    method: "POST",
+    token: memberToken,
+    body: JSON.stringify({ handle: memberHandle }),
+  });
+
   const seed = {
     email, password,
+    workspaceAId: workspaceA.id,
     slugA: workspaceA.slug, nameA: workspaceA.name,
     slugB: workspaceB.slug, nameB: workspaceB.name,
+    memberToken, memberHandle,
   };
   writeFileSync(join(__dirname, "seed.json"), JSON.stringify(seed, null, 2));
 }

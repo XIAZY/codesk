@@ -41,11 +41,13 @@ import { navigate, useRoute } from "./useRoute";
 import { useRootNamespace } from "./useRootNamespace";
 import { useDocumentSync } from "./useDocument";
 import { useWorkspace } from "./useWorkspace";
+import { useThreadUnread } from "./useThreadUnread";
 import { Onboarding, type OnboardingActionEvent, type OnboardingPresentation } from "./Onboarding";
 import { OnboardingChecklist } from "./OnboardingChecklist";
 import { useOnboardingController } from "./onboardingController";
 import type { OnboardingRole } from "./onboardingEngine";
 import type { Account, ActivityEvent, Agent, Daemon, DocumentItem, ThreadItem, UserItem, WorkspaceInvitePreview, WorkspaceState, WorkspaceSummary } from "./types";
+import type { UnreadThreadReply } from "./threadUnread";
 import { resolveRuntimeTiles, selectableRuntimeKinds, type RuntimeTile } from "./runtimes";
 import "./styles.css";
 
@@ -170,9 +172,8 @@ function uniqueDocumentPath(documents: DocumentItem[], path: string, currentDocu
   return joinDocumentPath(folder, `${stem}-${Date.now()}${extension}`);
 }
 
-function untitledDocumentPath(documents: DocumentItem[], activePath?: string) {
-  const folder = parentPath(activePath);
-  return uniqueDocumentPath(documents, joinDocumentPath(folder, "Untitled.md"));
+function untitledDocumentPath(documents: DocumentItem[], folderPath = "") {
+  return uniqueDocumentPath(documents, joinDocumentPath(folderPath, "Untitled.md"));
 }
 
 function documentPathFromFileName(document: DocumentItem, documents: DocumentItem[], draftFileName: string) {
@@ -522,6 +523,7 @@ export function App() {
   }
 
   if (route.kind === "newWorkspace") {
+    const returnWorkspace = workspaces.find((workspace) => workspace.id === account.lastAccessedWorkspaceId) ?? workspaces[0] ?? null;
     return (
       <WorkspaceOnboarding
         api={api}
@@ -531,6 +533,10 @@ export function App() {
         onSelect={(workspace) => {
           navigate({ kind: "workspace", slug: workspace.slug, view: { kind: "home" } }, { replace: true });
         }}
+        currentWorkspace={returnWorkspace}
+        onBack={returnWorkspace ? () => {
+          navigate({ kind: "workspace", slug: returnWorkspace.slug, view: { kind: "home" } }, { replace: true });
+        } : undefined}
         onSignOut={signOut}
       />
     );
@@ -571,6 +577,7 @@ export function App() {
       onWorkspaceChange={(slug) => {
         navigate({ kind: "workspace", slug, view: { kind: "home" } });
       }}
+      onCreateWorkspace={() => navigate({ kind: "newWorkspace" })}
       onSignOut={signOut}
     />
   );
@@ -1214,6 +1221,8 @@ export function WorkspaceOnboarding({
   workspaces,
   onWorkspaces,
   onSelect,
+  currentWorkspace = null,
+  onBack,
   onSignOut,
 }: {
   api: Pick<ApiClient, "createWorkspace">;
@@ -1221,9 +1230,12 @@ export function WorkspaceOnboarding({
   workspaces: WorkspaceSummary[];
   onWorkspaces: (workspaces: WorkspaceSummary[]) => void;
   onSelect: (workspace: WorkspaceSummary) => void;
+  currentWorkspace?: WorkspaceSummary | null;
+  onBack?: () => void;
   onSignOut: () => void;
 }) {
   const initialHandle = identifierFromName(account?.email.split("@")[0] ?? "owner", handleMaxLength) || "owner";
+  const hasWorkspace = workspaces.length > 0;
 
   return (
     <main className="auth-screen picker-screen">
@@ -1233,7 +1245,7 @@ export function WorkspaceOnboarding({
           <button className="btn ghost sm" onClick={onSignOut}>Sign out</button>
         </div>
         <div className="picker-head">
-          <h1 className="auth-title">Create your first workspace</h1>
+          <h1 className="auth-title">{hasWorkspace ? "Create a workspace" : "Create your first workspace"}</h1>
           <p className="small muted">A workspace is the shared home for one project or team. Documents, members, local files, and agents all live here.</p>
         </div>
         <CreateWorkspaceForm
@@ -1243,6 +1255,11 @@ export function WorkspaceOnboarding({
           onWorkspaces={onWorkspaces}
           onSelect={onSelect}
         />
+        {currentWorkspace && onBack ? (
+          <button className="btn full" type="button" onClick={onBack}>
+            Back to {currentWorkspace.name}
+          </button>
+        ) : null}
         <div className="divider" />
         <JoinInviteLinkForm />
       </section>
@@ -1524,6 +1541,195 @@ export function useDocumentSubscribers(api: ApiClient, workspaceId: string, docu
   return { subscriberIds, loaded, busyIds, error, reload, mutate };
 }
 
+export function ThreadNotifications({
+  open,
+  unread,
+  unreadCount,
+  documents,
+  threads,
+  nowMs,
+  onToggle,
+  onClose,
+  onOpenThread,
+  onMarkRead,
+}: {
+  open: boolean;
+  unread: UnreadThreadReply[];
+  unreadCount: number;
+  documents: DocumentItem[];
+  threads: ThreadItem[];
+  nowMs: number;
+  onToggle: () => void;
+  onClose: () => void;
+  onOpenThread: (threadId: string, documentId: string) => void;
+  onMarkRead: (threadId: string) => void;
+}) {
+  const entryRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const documentsById = useMemo(() => new Map(documents.map((document) => [document.id, document])), [documents]);
+  const threadsById = useMemo(() => new Map(threads.map((thread) => [thread.id, thread])), [threads]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const focusTimer = window.setTimeout(() => {
+      const dialog = dialogRef.current;
+      if (!dialog) {
+        return;
+      }
+      const first = focusableElements(dialog)[0];
+      (first ?? dialog).focus();
+    }, 0);
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && entryRef.current?.contains(event.target)) {
+        return;
+      }
+      onClose();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+        window.setTimeout(() => triggerRef.current?.focus(), 0);
+        return;
+      }
+      if (event.key !== "Tab") {
+        return;
+      }
+      const dialog = dialogRef.current;
+      if (!dialog) {
+        return;
+      }
+      const focusable = focusableElements(dialog);
+      if (!focusable.length) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.clearTimeout(focusTimer);
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [onClose, open]);
+
+  return (
+    <div className="thread-notifications-entry" ref={entryRef}>
+      <button
+        ref={triggerRef}
+        className={`btn ghost icon sm thread-notifications-trigger${open ? " selected" : ""}`}
+        type="button"
+        title="New thread replies"
+        aria-label={unreadCount ? `${unreadCount} unread thread ${unreadCount === 1 ? "reply" : "replies"}` : "No unread thread replies"}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-controls="thread-notifications-popover"
+        onClick={onToggle}
+      >
+        <Icon name="bell" />
+        {unreadCount ? <span className="thread-notifications-badge" aria-hidden="true">{unreadCount > 99 ? "99+" : unreadCount}</span> : null}
+      </button>
+      {open ? (
+        <div
+          ref={dialogRef}
+          id="thread-notifications-popover"
+          className="thread-notifications-popover card lifted"
+          role="dialog"
+          aria-modal="false"
+          aria-label="Unread thread replies"
+          tabIndex={-1}
+        >
+          <div className="thread-notifications-head">
+            <div className="row gap-8 min-0">
+              <Icon name="bell" />
+              <b>New replies</b>
+              <span className="small muted">· {unreadCount}</span>
+            </div>
+            <button
+              className="btn ghost icon sm"
+              type="button"
+              onClick={() => {
+                onClose();
+                window.setTimeout(() => triggerRef.current?.focus(), 0);
+              }}
+              aria-label="Close new replies"
+            >
+              ×
+            </button>
+          </div>
+          <div className="thread-notifications-list">
+            {unread.map((item) => {
+              const targetDocument = documentsById.get(item.documentId);
+              const targetThread = threadsById.get(item.threadId);
+              const targetAvailable = Boolean(targetDocument && targetThread?.documentId === item.documentId);
+              const actor = item.newestMessage.authorHandle
+                ? `@${item.newestMessage.authorHandle}`
+                : item.newestMessage.authorName || "Someone";
+              return (
+                <div className={`thread-notification-row${targetAvailable ? "" : " unavailable"}`} key={item.threadId}>
+                  {targetAvailable && targetDocument ? (
+                    <button
+                      className="thread-notification-open"
+                      type="button"
+                      onClick={() => onOpenThread(item.threadId, item.documentId)}
+                      aria-label={`Open ${item.count} new ${item.count === 1 ? "reply" : "replies"} in ${targetDocument.path}`}
+                    >
+                      <div className={`avi sm ${item.newestMessage.authorType === "agent" ? "agent" : "you"}`}>
+                        {initials(item.newestMessage.authorHandle || item.newestMessage.authorName || item.newestMessage.authorId)}
+                      </div>
+                      <div className="thread-notification-copy min-0">
+                        <div className="row between gap-8 min-0">
+                          <b className="small truncate">{actor}</b>
+                          <span className="thread-notification-count">{item.count} new</span>
+                        </div>
+                        <span className="tiny muted truncate">{targetDocument.path}</span>
+                        <span className="small thread-notification-preview">{item.newestMessage.body}</span>
+                        <span className="tiny muted">{relativeTime(item.newestMessage.createdAt, nowMs)}</span>
+                      </div>
+                    </button>
+                  ) : (
+                    <>
+                      <div className="thread-notification-unavailable">
+                        <Icon name="alert" />
+                        <div className="thread-notification-copy min-0">
+                          <div className="row between gap-8 min-0">
+                            <b className="small truncate">{actor}</b>
+                            <span className="thread-notification-count">{item.count} new</span>
+                          </div>
+                          <span className="tiny muted">{targetDocument ? "Thread unavailable" : "Document unavailable"}</span>
+                          <span className="small thread-notification-preview">{item.newestMessage.body}</span>
+                        </div>
+                      </div>
+                      <button className="thread-notification-mark-read" type="button" onClick={() => onMarkRead(item.threadId)}>
+                        Mark read
+                      </button>
+                    </>
+                  )}
+                </div>
+              );
+            })}
+            {!unread.length ? <p className="empty-note">No unread thread replies.</p> : null}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function WorkspaceApp({
   api,
   token,
@@ -1536,6 +1742,7 @@ export function WorkspaceApp({
   onWorkspaceUpdated = () => {},
   onWorkspaceDeleted = () => {},
   onWorkspaceChange,
+  onCreateWorkspace = () => navigate({ kind: "newWorkspace" }),
   onSignOut,
 }: {
   api: ApiClient;
@@ -1549,6 +1756,7 @@ export function WorkspaceApp({
   onWorkspaceUpdated?: (workspace: WorkspaceSummary) => void;
   onWorkspaceDeleted?: (workspaceId: string) => void;
   onWorkspaceChange: (slug: string) => void;
+  onCreateWorkspace?: () => void;
   onSignOut: () => void;
 }) {
   const { workspace, connected, loading, error, reload } = useWorkspace(workspaceId, token);
@@ -1588,6 +1796,8 @@ export function WorkspaceApp({
   const [selectedThreadId, setSelectedThreadId] = useState("");
   const [focusThreadId, setFocusThreadId] = useState("");
   const [documentThreadsOpen, setDocumentThreadsOpen] = useState(false);
+  const [threadNotificationsOpen, setThreadNotificationsOpen] = useState(false);
+  const [pendingThreadTarget, setPendingThreadTarget] = useState<{ threadId: string; documentId: string } | null>(null);
   const documentThreadsRef = useRef<HTMLDivElement>(null);
   const documentThreadsDialogRef = useRef<HTMLDivElement>(null);
   const documentThreadsTriggerRef = useRef<HTMLButtonElement>(null);
@@ -1649,6 +1859,17 @@ export function WorkspaceApp({
   const currentWorkspaceUserHandle = currentWorkspaceUser?.handle ? `@${currentWorkspaceUser.handle}` : "Workspace user";
   const currentWorkspaceUserIdentity = currentWorkspaceUser?.handle || currentWorkspaceUser?.name || "Workspace user";
   const canInviteMembers = workspace.currentMembershipRole === "owner" || workspace.currentMembershipRole === "admin";
+  const {
+    unread: unreadThreadRows,
+    unreadCount: unreadThreadReplyCount,
+    markThreadRead,
+  } = useThreadUnread({
+    accountId: account?.id ?? "",
+    workspaceId,
+    currentUserId: workspace.currentUserId ?? "",
+    threads: workspace.threads,
+    snapshotReady: !loading && workspace.workspaceId === workspaceId && Boolean(account?.id && workspace.currentUserId),
+  });
 
   // --- Onboarding (Batch 1 wiring) --------------------------------------------
   // selectionActive is lifted from DocumentEditor (below) so the account-scoped
@@ -1734,6 +1955,24 @@ export function WorkspaceApp({
     if (restoreFocus) {
       window.setTimeout(() => documentMoreTriggerRef.current?.focus(), 0);
     }
+  }, []);
+
+  const closeThreadNotifications = useCallback(() => {
+    setThreadNotificationsOpen(false);
+  }, []);
+
+  const toggleThreadNotifications = useCallback(() => {
+    setThreadNotificationsOpen((open) => {
+      if (open) {
+        return false;
+      }
+      setDocumentThreadsOpen(false);
+      setSelectedThreadId("");
+      setDocumentWatchersOpen(false);
+      setDocumentActivityOpen(false);
+      setMoreMenuOpen(false);
+      return true;
+    });
   }, []);
 
   useEffect(() => {
@@ -1939,7 +2178,26 @@ export function WorkspaceApp({
     setDocumentWatchersOpen(false);
     setDocumentActivityOpen(false);
     setMoreMenuOpen(false);
+    setThreadNotificationsOpen(false);
   }, [activeDocument?.id]);
+
+  useEffect(() => {
+    if (!pendingThreadTarget || !rootNamespace.ready) {
+      return;
+    }
+    const targetDocument = rootDocuments.find((document) => document.id === pendingThreadTarget.documentId);
+    const targetThread = workspace.threads.find((thread) => thread.id === pendingThreadTarget.threadId);
+    if (!targetDocument || !targetThread) {
+      setPendingThreadTarget(null);
+      return;
+    }
+    if (activeDocument?.id !== pendingThreadTarget.documentId) {
+      return;
+    }
+    setDocumentThreadsOpen(true);
+    setSelectedThreadId(pendingThreadTarget.threadId);
+    setPendingThreadTarget(null);
+  }, [activeDocument?.id, pendingThreadTarget, rootDocuments, rootNamespace.ready, workspace.threads]);
 
   useEffect(() => {
     if (view.kind !== "home" || !workspace.workspaceId || !rootNamespace.ready || !activeWorkspace) {
@@ -1989,7 +2247,7 @@ export function WorkspaceApp({
     [rootDocuments, rootNamespace],
   );
 
-  const createDocument = useCallback(async () => {
+  const createDocument = useCallback(async (folderPath = "") => {
     if (creatingDocument || !workspace.rootDocumentId) {
       return;
     }
@@ -1997,8 +2255,19 @@ export function WorkspaceApp({
     setCreateError("");
     try {
       const doc = await api.createDocument(workspaceId);
-      const path = untitledDocumentPath(rootDocuments, activeDocument?.path);
+      const path = untitledDocumentPath(rootDocuments, folderPath);
       rootNamespace.upsertFile(doc.id, path);
+      setCollapsedFolders((current) => {
+        const ancestors = folderAncestors(path);
+        if (!ancestors.some((folder) => current.has(folder))) {
+          return current;
+        }
+        const next = new Set(current);
+        for (const folder of ancestors) {
+          next.delete(folder);
+        }
+        return next;
+      });
       navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "document", documentId: doc.id } });
       setSelectedThreadId("");
       setRenamingDocumentId(doc.id);
@@ -2012,7 +2281,6 @@ export function WorkspaceApp({
       setCreatingDocument(false);
     }
   }, [
-    activeDocument?.path,
     api,
     creatingDocument,
     recordOnboardingEvent,
@@ -2074,7 +2342,7 @@ export function WorkspaceApp({
     const handleKeyDown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "n") {
         event.preventDefault();
-        void createDocument();
+        void createDocument("");
       }
     };
     window.addEventListener("keydown", handleKeyDown);
@@ -2105,11 +2373,22 @@ export function WorkspaceApp({
               <span className="tiny muted truncate">{currentWorkspaceUserHandle}</span>
             </div>
           </div>
-          <select aria-label="Workspace" value={workspaceSlug} onChange={(event) => onWorkspaceChange(event.target.value)}>
-            {workspaces.map((workspace) => (
-              <option value={workspace.slug} key={workspace.id}>{workspace.name}</option>
-            ))}
-          </select>
+          <div className="workspace-switcher-actions">
+            <select aria-label="Workspace" value={workspaceSlug} onChange={(event) => onWorkspaceChange(event.target.value)}>
+              {workspaces.map((workspace) => (
+                <option value={workspace.slug} key={workspace.id}>{workspace.name}</option>
+              ))}
+            </select>
+            <button
+              className="btn ghost icon sm create-workspace-trigger"
+              type="button"
+              aria-label="Create workspace"
+              title="Create workspace"
+              onClick={onCreateWorkspace}
+            >
+              <Icon name="plus" />
+            </button>
+          </div>
         </div>
 
         <div className="sb-search">
@@ -2126,11 +2405,11 @@ export function WorkspaceApp({
             <span className="label">Documents</span>
             <button
               className="btn ghost icon sm"
-              title="New doc"
-              aria-label="New document"
+              title="New document at workspace root"
+              aria-label="New document at workspace root"
               data-onboarding-id="new-document"
               type="button"
-              onClick={() => void createDocument()}
+              onClick={() => void createDocument("")}
               disabled={creatingDocument || !workspace.rootDocumentId}
             >
               <Icon name="plus" />
@@ -2145,6 +2424,7 @@ export function WorkspaceApp({
               freshDocumentId={freshDocumentId}
               renamingDraft={titleDraft}
               onToggleFolder={toggleFolder}
+              onCreateDocument={(folderPath) => void createDocument(folderPath)}
               threadCountFor={(id) => threadCountByDocument.get(id) ?? 0}
               onSelectDocument={(id) => {
                 navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "document", documentId: id } });
@@ -2218,7 +2498,7 @@ export function WorkspaceApp({
       </aside>
 
       <section className="doc-area">
-        <header className="doc-toolbar">
+        <header className={`doc-toolbar${threadNotificationsOpen ? " notifications-open" : ""}`}>
           <div className="breadcrumb document-breadcrumb">
             {activeDocument ? (
               <DocumentPathBar
@@ -2256,6 +2536,7 @@ export function WorkspaceApp({
                       setDocumentWatchersOpen(false);
                       setDocumentActivityOpen(false);
                       setMoreMenuOpen(false);
+                      setThreadNotificationsOpen(false);
                       setSelectedThreadId("");
                       setDocumentThreadsOpen(true);
                     }
@@ -2296,6 +2577,7 @@ export function WorkspaceApp({
                         setFocusThreadId(threadId);
                       }}
                       onReply={() => void reload()}
+                      onThreadViewed={markThreadRead}
                       onClose={() => closeDocumentThreads()}
                       embedded
                     />
@@ -2322,6 +2604,7 @@ export function WorkspaceApp({
                       setDocumentThreadsOpen(false);
                       setDocumentActivityOpen(false);
                       setMoreMenuOpen(false);
+                      setThreadNotificationsOpen(false);
                       setSelectedThreadId("");
                       // Refetch on open so the always-visible badge self-heals cross-client subscription
                       // changes (no workspace WS event carries them); between opens the count can read a
@@ -2378,6 +2661,7 @@ export function WorkspaceApp({
                   } else {
                     // One document surface at a time — opening the menu closes the Activity popover.
                     setDocumentActivityOpen(false);
+                    setThreadNotificationsOpen(false);
                     setMoreMenuOpen(true);
                   }
                 }}
@@ -2437,6 +2721,30 @@ export function WorkspaceApp({
                 </div>
               ) : null}
             </div>
+            <ThreadNotifications
+              open={threadNotificationsOpen}
+              unread={unreadThreadRows}
+              unreadCount={unreadThreadReplyCount}
+              documents={rootDocuments}
+              threads={workspace.threads}
+              nowMs={now}
+              onToggle={toggleThreadNotifications}
+              onClose={closeThreadNotifications}
+              onOpenThread={(threadId, documentId) => {
+                const targetDocument = rootDocuments.find((document) => document.id === documentId);
+                const targetThread = workspace.threads.find((thread) => thread.id === threadId && thread.documentId === documentId);
+                if (!targetDocument || !targetThread) {
+                  return;
+                }
+                setThreadNotificationsOpen(false);
+                setDocumentWatchersOpen(false);
+                setDocumentActivityOpen(false);
+                setMoreMenuOpen(false);
+                setPendingThreadTarget({ threadId, documentId });
+                navigate({ kind: "workspace", slug: workspaceSlug, view: { kind: "document", documentId } });
+              }}
+              onMarkRead={markThreadRead}
+            />
           </div>
         </header>
         {loading ? <div className="notice compact">Loading workspace...</div> : null}
@@ -2466,6 +2774,7 @@ export function WorkspaceApp({
               onboarding.record("first_thread_created", "account");
             }}
             onThreadsChanged={() => void reload()}
+            onThreadViewed={markThreadRead}
             titleEditing={renamingDocumentId === activeDocument.id}
             titleDraft={renamingDocumentId === activeDocument.id ? titleDraft : fileName(activeDocument.path)}
             onTitleEditStart={() => startRenamingDocument(activeDocument)}
@@ -2480,7 +2789,7 @@ export function WorkspaceApp({
           <div className="notice compact">Opening document...</div>
         ) : (
           <EmptyWorkspace
-            onCreateDocument={() => void createDocument()}
+            onCreateDocument={() => void createDocument("")}
             onCreateDaemon={() => setModal("daemon")}
             creatingDocument={creatingDocument}
             canCreateDocument={Boolean(workspace.rootDocumentId)}
@@ -2706,6 +3015,7 @@ export function DocumentTree(props: {
   freshDocumentId: string;
   renamingDraft: string;
   onToggleFolder: (path: string) => void;
+  onCreateDocument: (folderPath: string) => void;
   threadCountFor: (documentId: string) => number;
   onSelectDocument: (documentId: string) => void;
 }) {
@@ -2717,6 +3027,7 @@ export function DocumentTree(props: {
     freshDocumentId,
     renamingDraft,
     onToggleFolder,
+    onCreateDocument,
     threadCountFor,
     onSelectDocument,
   } = props;
@@ -2727,18 +3038,29 @@ export function DocumentTree(props: {
           const expanded = !collapsedFolders.has(node.path);
           return (
             <div className="tree-group" key={`folder:${node.path}`}>
-              <button
-                className="nav-item folder-row"
-                type="button"
-                onClick={() => onToggleFolder(node.path)}
-                aria-expanded={expanded}
-              >
-                <span className={`car ${expanded ? "open" : ""}`}>
-                  <Icon name="caret" />
-                </span>
-                <span className="truncate">{node.name}</span>
-                <span className="ct">{node.fileCount}</span>
-              </button>
+              <div className="folder-row-wrap">
+                <button
+                  className="nav-item folder-row"
+                  type="button"
+                  onClick={() => onToggleFolder(node.path)}
+                  aria-expanded={expanded}
+                >
+                  <span className={`car ${expanded ? "open" : ""}`}>
+                    <Icon name="caret" />
+                  </span>
+                  <span className="truncate">{node.name}</span>
+                  <span className="ct">{node.fileCount}</span>
+                </button>
+                <button
+                  className="btn ghost icon sm folder-create-document"
+                  type="button"
+                  title={`New document in ${node.path}`}
+                  aria-label={`New document in ${node.path}`}
+                  onClick={() => onCreateDocument(node.path)}
+                >
+                  <Icon name="plus" />
+                </button>
+              </div>
               {expanded && node.children.length ? (
                 <div className="tree-children">
                   <DocumentTree {...props} nodes={node.children} />
@@ -3101,6 +3423,26 @@ function ThreadDetailContent({
   );
 }
 
+function useVisibleThreadView(threadId: string, onThreadViewed?: (threadId: string) => void) {
+  useEffect(() => {
+    if (!threadId || !onThreadViewed) {
+      return;
+    }
+    const markIfVisible = () => {
+      if (document.visibilityState === "visible" && document.hasFocus()) {
+        onThreadViewed(threadId);
+      }
+    };
+    markIfVisible();
+    document.addEventListener("visibilitychange", markIfVisible);
+    window.addEventListener("focus", markIfVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", markIfVisible);
+      window.removeEventListener("focus", markIfVisible);
+    };
+  }, [onThreadViewed, threadId]);
+}
+
 export function ThreadPopover({
   api,
   workspaceId,
@@ -3108,6 +3450,7 @@ export function ThreadPopover({
   point,
   onClose,
   onThreadsChanged,
+  onThreadViewed,
 }: {
   api: ApiClient;
   workspaceId: string;
@@ -3115,6 +3458,7 @@ export function ThreadPopover({
   point: { x: number; y: number };
   onClose: () => void;
   onThreadsChanged: () => void;
+  onThreadViewed?: (threadId: string) => void;
 }) {
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const backButtonRef = useRef<HTMLButtonElement>(null);
@@ -3128,6 +3472,7 @@ export function ThreadPopover({
   const [placement, setPlacement] = useState<{ left: number; top: number } | null>(null);
   const groupKey = `${group.line}:${group.threads.map((thread) => thread.id).sort().join("|")}`;
   const selected = selectedThreadId ? threadItems.find((thread) => thread.id === selectedThreadId) ?? null : null;
+  useVisibleThreadView(selected?.id ?? "", onThreadViewed);
   const openThreadItems = threadItems.filter((thread) => thread.status !== "resolved");
   const headerThread = threadItems.find((thread) => thread.status !== "resolved") ?? threadItems[0];
   const headerExcerpt = headerThread?.anchor.excerpt || headerThread?.title || "Thread";
@@ -3372,6 +3717,7 @@ export function DocumentEditor({
   onFocusThreadHandled,
   onThreadCreated,
   onThreadsChanged,
+  onThreadViewed,
   titleEditing,
   titleDraft,
   onTitleEditStart,
@@ -3393,6 +3739,7 @@ export function DocumentEditor({
   onFocusThreadHandled: () => void;
   onThreadCreated: (threadId: string) => void;
   onThreadsChanged: () => void;
+  onThreadViewed?: (threadId: string) => void;
   titleEditing: boolean;
   titleDraft: string;
   onTitleEditStart: () => void;
@@ -3638,6 +3985,7 @@ export function DocumentEditor({
             point={threadPopoverPoint}
             onClose={() => setActiveThreadGroup(null)}
             onThreadsChanged={onThreadsChanged}
+            onThreadViewed={onThreadViewed}
           />
         ) : null}
       </div>
@@ -3654,6 +4002,7 @@ export function ThreadsPanel({
   onSelectThread,
   onJumpToThread,
   onReply,
+  onThreadViewed,
   onClose,
   embedded = false,
 }: {
@@ -3665,6 +4014,7 @@ export function ThreadsPanel({
   onSelectThread: (threadId: string) => void;
   onJumpToThread: (threadId: string) => void;
   onReply: () => void;
+  onThreadViewed?: (threadId: string) => void;
   onClose?: () => void;
   embedded?: boolean;
 }) {
@@ -3679,6 +4029,7 @@ export function ThreadsPanel({
     try { return localStorage.getItem("codesk.threads.resolvedFolded") !== "false"; } catch { return true; }
   });
   const selected = selectedThreadId ? threads.find((thread) => thread.id === selectedThreadId) ?? null : null;
+  useVisibleThreadView(selected?.id ?? "", onThreadViewed);
   const selectedResolved = selected?.status === "resolved";
   const selectedObsolete = Boolean(selected && threadIsObsolete(selected, threadAnchorInfo));
   const openThreads = threads.filter((thread) => thread.status !== "resolved" && !threadIsObsolete(thread, threadAnchorInfo));
@@ -5301,6 +5652,8 @@ export function Icon({ name }: { name: string }) {
       return <svg className="i sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" /><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8" /></svg>;
     case "alert":
       return <svg className="i sm" viewBox="0 0 24 24"><path d="M12 3l10 18H2L12 3z" /><path d="M12 9v5M12 18h.01" /></svg>;
+    case "bell":
+      return <svg className="i sm" viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" /><path d="M10 21h4" /></svg>;
     case "thread":
       return <svg className="i sm" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-8.5 8.5A8.5 8.5 0 1 1 21 11.5z" /></svg>;
     case "message":
