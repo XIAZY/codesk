@@ -103,10 +103,11 @@ Install the cross prerequisites when they are not already present:
 
 Build and verify the two Windows releases:
 
+    release_version="$(scripts/read-version.sh)"
     PLATFORMS="windows/amd64 windows/arm64" \
-      scripts/build-daemon-release.sh task31 /tmp/notty-task31-release
+      scripts/build-daemon-release.sh /tmp/notty-task31-release
     go run ./scripts/verify-windows-daemon-release.go \
-      /tmp/notty-task31-release/task31 task31
+      "/tmp/notty-task31-release/$release_version" "$release_version"
 
 The verifier must report both rows:
 

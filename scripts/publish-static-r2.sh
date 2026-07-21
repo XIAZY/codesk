@@ -1,11 +1,13 @@
 #!/usr/bin/env sh
 set -eu
 
+[ "$#" -eq 0 ] || { printf 'publish-static-r2: usage: publish-static-r2.sh\n' >&2; exit 1; }
+
 root_dir="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
 . "$root_dir/scripts/lib/deploy-env.sh"
 load_notty_deploy_env "$root_dir"
 
-version="${1:-${VERSION:-}}"
+version="$("$root_dir/scripts/read-version.sh")"
 target="${PUBLISH_TARGET:-all}"
 static_dist_dir="${STATIC_DIST_DIR:-$root_dir/dist/static}"
 daemon_dist_dir="${DAEMON_DIST_DIR:-$static_dist_dir/daemons}"
@@ -97,9 +99,6 @@ wrangler_upload_dir() {
 	done
 }
 
-[ -n "$version" ] || version="$(git -C "$root_dir" rev-parse --short HEAD 2>/dev/null || true)"
-[ -n "$version" ] || die "version argument or VERSION is required"
-
 case "$target" in
 	all|frontend|daemons) ;;
 	*) die "PUBLISH_TARGET must be all, frontend, or daemons" ;;
@@ -167,12 +166,6 @@ if [ "$target" = "all" ] || [ "$target" = "daemons" ]; then
 
 	daemon_dest="$(s3_uri "$R2_DAEMONS_BUCKET" "$daemons_prefix")"
 	release_cache_control="${DAEMON_RELEASE_CACHE_CONTROL:-public, max-age=31536000, immutable}"
-	case "$version" in
-		dev|latest)
-			release_cache_control="${DAEMON_RELEASE_CACHE_CONTROL:-public, max-age=60}"
-			;;
-	esac
-
 	printf 'Publishing daemon release %s to %s/%s\n' "$version" "$daemon_dest" "$version"
 	if [ "$uploader" = "aws" ]; then
 		aws_s3 sync "$daemon_dist_dir/$version/" "$daemon_dest/$version/" --cache-control "$release_cache_control"

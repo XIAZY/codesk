@@ -1,23 +1,23 @@
 DIST_DIR ?= dist/static/daemons
 GO_BUILD_FLAGS ?= -trimpath
-override FILE_VERSION := $(shell cat VERSION 2>/dev/null)
-ifeq ($(FILE_VERSION),)
-$(error VERSION file is missing or empty)
-endif
+WINDOWS_GUI_POWERSHELL ?= powershell.exe
 GO_LDFLAGS ?= -s -w
 ifeq ($(OS),Windows_NT)
-override VERSION := $(FILE_VERSION)
+override REPOSITORY_VERSION := $(shell "$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/read-version.ps1)
 WINDOWS_PROCESSOR_ARCH := $(if $(PROCESSOR_ARCHITEW6432),$(PROCESSOR_ARCHITEW6432),$(PROCESSOR_ARCHITECTURE))
 HOST_OS := windows
 HOST_ARCH := $(if $(filter AMD64 amd64 x86_64,$(WINDOWS_PROCESSOR_ARCH)),amd64,$(if $(filter ARM64 arm64 aarch64,$(WINDOWS_PROCESSOR_ARCH)),arm64,$(WINDOWS_PROCESSOR_ARCH)))
 override MACOS_GUI_HOST_OS :=
 else
-override VERSION := $(FILE_VERSION)
+override REPOSITORY_VERSION := $(shell scripts/read-version.sh)
 UNAME_S := $(shell uname -s | tr '[:upper:]' '[:lower:]')
 UNAME_M := $(shell uname -m)
 HOST_OS := $(if $(filter darwin,$(UNAME_S)),darwin,$(if $(filter linux,$(UNAME_S)),linux,$(UNAME_S)))
 HOST_ARCH := $(if $(filter x86_64 amd64,$(UNAME_M)),amd64,$(if $(filter arm64 aarch64,$(UNAME_M)),arm64,$(UNAME_M)))
 override MACOS_GUI_HOST_OS := $(if $(filter darwin,$(UNAME_S)),darwin,)
+endif
+ifeq ($(REPOSITORY_VERSION),)
+$(error root VERSION is invalid)
 endif
 HOST_PLATFORM := $(HOST_OS)/$(HOST_ARCH)
 PLATFORMS ?= $(HOST_PLATFORM)
@@ -33,7 +33,6 @@ WINDOWS_GUI_CI_DIR ?= $(WINDOWS_GUI_ROOT)/ci
 WINDOWS_GUI_REPOSITORY ?= XIAZY/notty
 WINDOWS_GUI_BUILDER_IMAGE ?= alphatoad/notty:windows-builder
 WINDOWS_GUI_RUN_ID ?=
-WINDOWS_GUI_POWERSHELL ?= powershell.exe
 WINDOWS_GUI_ZIG_VERSION ?= 0.16.0
 
 .PHONY: dev dev-down dev-config-check prod-config-check \
@@ -94,8 +93,8 @@ build-frontend:
 
 build-daemon: build-yffi
 	mkdir -p bin
-	CGO_ENABLED=1 go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS) -X notty/daemon/internal/buildinfo.Version=$(FILE_VERSION)" -o bin/notty-daemon ./daemon/cmd/daemon
-	CGO_ENABLED=0 go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS) -X notty/daemon/internal/buildinfo.Version=$(FILE_VERSION)" -o bin/notty-agent-tool ./daemon/cmd/agenttool
+	CGO_ENABLED=1 go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS) -X notty/daemon/internal/buildinfo.Version=$(REPOSITORY_VERSION)" -o bin/notty-daemon ./daemon/cmd/daemon
+	CGO_ENABLED=0 go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS) -X notty/daemon/internal/buildinfo.Version=$(REPOSITORY_VERSION)" -o bin/notty-agent-tool ./daemon/cmd/agenttool
 
 daemon-build: build-daemon
 
@@ -228,45 +227,45 @@ windows-verify:
 	printf 'Verified Windows GUI CI artifacts for %s from run %s in %s\n' "$$head" "$$run_id" "$$out"
 
 build-static:
-	VERSION="$(VERSION)" scripts/build-static.sh
+	scripts/build-static.sh
 
 static-build: build-static
 
 build-static-local:
-	VERSION="dev" STATIC_BUILD_TARGET=daemons STATIC_DIST_DIR=dist/static PLATFORMS="$(HOST_PLATFORM)" scripts/build-static.sh
+	STATIC_BUILD_TARGET=daemons STATIC_DIST_DIR=dist/static PLATFORMS="$(HOST_PLATFORM)" scripts/build-static.sh
 
 static-build-local: build-static-local
 
 build-backend-image:
-	VERSION="$(VERSION)" scripts/build-backend-image.sh
+	scripts/build-backend-image.sh
 
 backend-image: build-backend-image
 
 publish: publish-backend publish-frontend publish-static
 
 publish-backend:
-	VERSION="$(VERSION)" scripts/publish-backend.sh
+	scripts/publish-backend.sh
 
 publish-frontend:
-	VERSION="$(VERSION)" scripts/publish-frontend.sh
+	scripts/publish-frontend.sh
 
 publish-static:
-	VERSION="$(VERSION)" scripts/publish-static.sh
+	scripts/publish-static.sh
 
 static-publish:
-	VERSION="$(VERSION)" scripts/publish-static-r2.sh "$(VERSION)"
+	scripts/publish-static-r2.sh
 
 deploy:
-	VERSION="$(VERSION)" scripts/deploy-notty.sh
+	scripts/deploy-notty.sh
 
 deploy-backend:
-	VERSION="$(VERSION)" scripts/deploy-backend.sh
+	scripts/deploy-backend.sh
 
 deploy-frontend:
-	VERSION="$(VERSION)" scripts/deploy-frontend.sh
+	scripts/deploy-frontend.sh
 
 deploy-static:
-	VERSION="$(VERSION)" scripts/deploy-static.sh
+	scripts/deploy-static.sh
 
 prod-config-check:
 	tmp_secrets="$$(mktemp)" && \
@@ -279,7 +278,7 @@ prod-config-check:
 	NOTTY_BACKEND_IMAGE=alphatoad/notty:backend-test NOTTY_SECRETS_ENV_FILE="$$tmp_secrets" docker compose -f compose.prod.yml --env-file deploy/env/prod.server.env config >/dev/null
 
 daemon-checksums:
-	cd "$(DIST_DIR)/$(VERSION)" && shasum -a 256 *.tar.gz > SHA256SUMS
+	cd "$(DIST_DIR)/$(REPOSITORY_VERSION)" && shasum -a 256 *.tar.gz > SHA256SUMS
 
 daemon-installer-check:
 	sh -n deploy/daemons/install.sh

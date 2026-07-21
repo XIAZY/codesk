@@ -19,7 +19,7 @@ param(
     [string] $CandidateProductCode,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Release')]
-    [string] $ProductVersion,
+    [switch] $Release,
 
     [Parameter(Mandatory = $true)]
     [string] $CodeskExe,
@@ -73,30 +73,6 @@ function ConvertTo-NormalizedGuid {
     param([Parameter(Mandatory = $true)][string] $Value)
 
     return ([guid] $Value).ToString('B').ToUpperInvariant()
-}
-
-function ConvertTo-CanonicalMsiProductVersion {
-    param([Parameter(Mandatory = $true)][string] $Value)
-
-    if ($Value -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
-        throw "ProductVersion must be canonical numeric X.Y.Z without leading zeros: $Value"
-    }
-
-    $fields = @($Value.Split('.'))
-    [uint32] $major = 0
-    [uint32] $minor = 0
-    [uint32] $build = 0
-    $style = [System.Globalization.NumberStyles]::None
-    $culture = [System.Globalization.CultureInfo]::InvariantCulture
-    if (-not [uint32]::TryParse($fields[0], $style, $culture, [ref] $major) -or
-        -not [uint32]::TryParse($fields[1], $style, $culture, [ref] $minor) -or
-        -not [uint32]::TryParse($fields[2], $style, $culture, [ref] $build)) {
-        throw "ProductVersion contains a field outside the unsigned integer domain: $Value"
-    }
-    if ($major -gt 255 -or $minor -gt 255 -or $build -gt 65535) {
-        throw "ProductVersion exceeds MSI limits (major/minor <= 255, build <= 65535): $Value"
-    }
-    return $Value
 }
 
 function Get-UuidV5 {
@@ -404,7 +380,7 @@ foreach ($path in @(
 
 $buildMode = if ($PSCmdlet.ParameterSetName -ceq 'Release') { 'release' } else { 'qa-pair' }
 if ($buildMode -ceq 'release') {
-    $ProductVersion = ConvertTo-CanonicalMsiProductVersion $ProductVersion
+    $ProductVersion = & (Join-Path $scriptRoot 'read-version.ps1')
     $productCodeName = "$ProductVersion+$GoArchitecture"
     $versions = @(
         [pscustomobject] @{

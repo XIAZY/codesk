@@ -55,19 +55,11 @@ switch ($Target) {
     }
 }
 
-$versionFile = Join-Path $PSScriptRoot 'VERSION'
-if (-not (Test-Path -LiteralPath $versionFile -PathType Leaf)) {
-    throw 'VERSION file is missing'
-}
-$fileVersion = (Get-Content -LiteralPath $versionFile -TotalCount 1).Trim()
-if ([string]::IsNullOrEmpty($fileVersion)) {
-    throw 'VERSION file must not be empty'
-}
+$null = & (Join-Path $PSScriptRoot 'scripts/read-version.ps1')
 
 $parameters = @{
     Target = $Target
     RepositoryRoot = $PSScriptRoot
-    Version = $fileVersion
 }
 $mapping = @{
     'WINDOWS_GUI_ROOT' = 'WindowsRoot'

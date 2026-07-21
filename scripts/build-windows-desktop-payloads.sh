@@ -14,8 +14,7 @@ payload_dir="${1:-$root_dir/dist/windows-gui/payload}"
 test_dir="${2:-$root_dir/dist/windows-gui/tests}"
 safe_parent="${WINDOWS_GUI_SAFE_PARENT_DIRECTORY:-$root_dir/dist/windows-gui}"
 architectures="${WINDOWS_GUI_ARCHES-amd64 arm64}"
-build_version="$(cat "$root_dir/VERSION")" || fail 'VERSION file is required'
-[ -n "$build_version" ] || fail 'VERSION file must not be empty'
+build_version="$("$root_dir/scripts/read-version.sh")"
 required_zig_version="${WINDOWS_GUI_ZIG_VERSION:-0.16.0}"
 host_yffi_link="$root_dir/third_party/y-crdt/target/release/libyrs.a"
 host_yffi_backup=

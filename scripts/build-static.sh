@@ -10,7 +10,7 @@ app_out="$out_dir/app"
 homepage_out="$out_dir/homepage"
 daemons_out="$out_dir/daemons"
 target="${STATIC_BUILD_TARGET:-all}"
-version="${VERSION:-$(git -C "$root_dir" rev-parse --short HEAD 2>/dev/null || printf dev)}"
+version="$("$root_dir/scripts/read-version.sh")"
 
 case "$target" in
 	all|frontend|daemons) ;;
@@ -52,7 +52,7 @@ if [ "$target" = "all" ] || [ "$target" = "daemons" ]; then
 	fi
 fi
 
-printf 'Built static assets:\n'
+printf 'Built static assets for %s:\n' "$version"
 if [ "$target" = "all" ] || [ "$target" = "frontend" ]; then
 	printf '  app: %s\n' "$app_out"
 	printf '  homepage: %s\n' "$homepage_out"

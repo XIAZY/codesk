@@ -1,14 +1,15 @@
 #!/usr/bin/env sh
 set -eu
 
+[ "$#" -le 1 ] || { printf 'build-macos-desktop-release: usage: build-macos-desktop-release.sh [dist-dir]\n' >&2; exit 1; }
+
 dist_dir="${1:-${DIST_DIR:-dist/macos-desktop}}"
 unsigned_override="${ALLOW_UNSIGNED_MACOS_DESKTOP:-}"
 sign_identity="${CODESK_MACOS_SIGN_IDENTITY:-}"
 notary_profile="${CODESK_MACOS_NOTARY_PROFILE:-}"
 
 root_dir="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-version="$(cat "$root_dir/VERSION")" || { printf 'build-macos-desktop-release: VERSION file is required\n' >&2; exit 1; }
-[ -n "$version" ] || { printf 'build-macos-desktop-release: VERSION file must not be empty\n' >&2; exit 1; }
+version="$("$root_dir/scripts/read-version.sh")"
 . "$root_dir/scripts/lib/testtmp.sh"
 
 go_toolchain='go1.26.5'
@@ -56,7 +57,6 @@ if [ "$signed" = true ]; then
 		*) fail 'CODESK_MACOS_SIGN_IDENTITY must name a Developer ID Application identity' ;;
 	esac
 	[ -n "$notary_profile" ] || fail 'CODESK_MACOS_NOTARY_PROFILE is required'
-	[ "$version" != dev ] || fail 'signed releases require a numeric X.Y.Z version'
 else
 	[ -z "$sign_identity" ] || fail 'do not combine CODESK_MACOS_SIGN_IDENTITY with ALLOW_UNSIGNED_MACOS_DESKTOP=1'
 	[ -z "$notary_profile" ] || fail 'do not combine CODESK_MACOS_NOTARY_PROFILE with ALLOW_UNSIGNED_MACOS_DESKTOP=1'
@@ -83,10 +83,7 @@ lipo="$(xcrun --sdk macosx --find lipo)"
 [ -x "$clangxx" ] || fail 'the macOS clang++ toolchain is unavailable'
 [ -x "$lipo" ] || fail 'lipo is unavailable'
 
-case "$version" in
-	dev) development_arg='--development' ;;
-	*) development_arg='' ;;
-esac
+development_arg=''
 
 mkdir -p "$dist_abs"
 dist_abs="$(CDPATH= cd -- "$dist_abs" && pwd -P)"

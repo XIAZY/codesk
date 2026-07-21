@@ -1,199 +1,174 @@
 #!/usr/bin/env sh
 set -eu
 
-repo_dir="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-. "$repo_dir/scripts/lib/testtmp.sh"
-tmp_dir="$(notty_test_mktemp notty-version-contract)"
+repo_dir="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)"
+tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/notty-version-contract.XXXXXX")"
+trap 'rm -rf "$tmp_dir"' EXIT INT TERM
 
-cleanup() {
-	rm -rf "$tmp_dir"
-}
-trap cleanup EXIT INT TERM
-
-fail() {
-	printf 'version-contract FAIL: %s\n' "$*" >&2
-	exit 1
-}
-
-pass() {
-	printf 'version-contract PASS: %s\n' "$*"
-}
-
-setup_fake_repo() {
-	rm -rf "$tmp_dir/fake"
-	mkdir -p "$tmp_dir/fake/scripts/lib" "$tmp_dir/fake/deploy/daemons"
-	cp "$repo_dir/scripts/build-daemon-release.sh" "$tmp_dir/fake/scripts/"
-	cp "$repo_dir/scripts/build-macos-desktop-release.sh" "$tmp_dir/fake/scripts/"
-	cp "$repo_dir/scripts/lib/testtmp.sh" "$tmp_dir/fake/scripts/lib/"
-	touch "$tmp_dir/fake/deploy/daemons/install.sh"
-	touch "$tmp_dir/fake/deploy/daemons/uninstall.sh"
-	touch "$tmp_dir/fake/deploy/daemons/install.ps1"
-	touch "$tmp_dir/fake/deploy/daemons/uninstall.ps1"
-	touch "$tmp_dir/fake/deploy/daemons/run-windows.ps1"
-	cp "$repo_dir/Makefile" "$tmp_dir/fake/"
-	printf 'module notty\ngo 1.26\n' > "$tmp_dir/fake/go.mod"
-}
-
+pass() { printf 'PASS: %s\n' "$1"; }
+fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 expect_fail() {
-	label="$1"
+	expect_name="$1"
 	shift
-	if "$@" >/dev/null 2>&1; then
-		fail "$label: expected failure but command succeeded"
+	if "$@" >"$tmp_dir/output" 2>&1; then
+		fail "$expect_name"
 	fi
-	pass "$label"
+	pass "$expect_name"
 }
 
-# ── Makefile: missing VERSION ──
-setup_fake_repo
-expect_fail "Makefile rejects missing VERSION" \
-	make -C "$tmp_dir/fake" -n build-daemon
+new_fixture() {
+	new_fixture_dir="$1"
+	rm -rf "$new_fixture_dir"
+	mkdir -p "$new_fixture_dir/scripts/lib"
+	cp "$repo_dir/Makefile" "$new_fixture_dir/Makefile"
+	cp "$repo_dir/scripts/read-version.sh" "$new_fixture_dir/scripts/read-version.sh"
+	cp "$repo_dir/scripts/read-version.ps1" "$new_fixture_dir/scripts/read-version.ps1"
+	cp "$repo_dir/scripts/lib/deploy-env.sh" "$new_fixture_dir/scripts/lib/deploy-env.sh"
+	for script in \
+		build-daemon-release.sh build-macos-desktop-release.sh \
+		build-windows-desktop-payloads.sh build-backend-image.sh build-static.sh \
+		publish-backend.sh publish-frontend.sh publish-static.sh publish-static-r2.sh \
+		deploy-backend.sh deploy-frontend.sh deploy-static.sh deploy-notty.sh
+	do
+		cp "$repo_dir/scripts/$script" "$new_fixture_dir/scripts/$script"
+	done
+}
 
-# ── Makefile: empty VERSION ──
-setup_fake_repo
-printf '' > "$tmp_dir/fake/VERSION"
-expect_fail "Makefile rejects empty VERSION" \
-	make -C "$tmp_dir/fake" -n build-daemon
+fixture="$tmp_dir/repo"
+new_fixture "$fixture"
+mkdir -p "$tmp_dir/invalid"
 
-# ── Makefile: VERSION cannot be overridden by env ──
-setup_fake_repo
-printf '1.2.3\n' > "$tmp_dir/fake/VERSION"
-resolved="$(VERSION=injected make -C "$tmp_dir/fake" -n -p 2>/dev/null \
-	| grep '^override VERSION := ' | head -1 | sed 's/^override VERSION := //')" || true
-if [ "$resolved" = "injected" ]; then
-	fail "Makefile VERSION was overridden by environment variable"
-fi
-pass "Makefile VERSION ignores environment override"
-
-# ── Makefile: VERSION cannot be overridden by CLI ──
-resolved="$(make -C "$tmp_dir/fake" -n -p VERSION=injected 2>/dev/null \
-	| grep '^override VERSION := ' | head -1 | sed 's/^override VERSION := //')" || true
-if [ "$resolved" = "injected" ]; then
-	fail "Makefile VERSION was overridden by command-line"
-fi
-pass "Makefile VERSION ignores command-line override"
-
-# ── Makefile: FILE_VERSION cannot be overridden by CLI ──
-resolved="$(make -C "$tmp_dir/fake" -n -p FILE_VERSION=injected 2>/dev/null \
-	| grep '^override FILE_VERSION := ' | head -1 | sed 's/^override FILE_VERSION := //')" || true
-if [ "$resolved" = "injected" ]; then
-	fail "Makefile FILE_VERSION was overridden by command-line"
-fi
-pass "Makefile FILE_VERSION ignores command-line override"
-
-# ── build-daemon-release.sh: missing VERSION ──
-setup_fake_repo
-expect_fail "build-daemon-release.sh rejects missing VERSION" \
-	sh "$tmp_dir/fake/scripts/build-daemon-release.sh" "$tmp_dir/fake-dist"
-
-# ── build-daemon-release.sh: empty VERSION ──
-setup_fake_repo
-printf '' > "$tmp_dir/fake/VERSION"
-expect_fail "build-daemon-release.sh rejects empty VERSION" \
-	sh "$tmp_dir/fake/scripts/build-daemon-release.sh" "$tmp_dir/fake-dist"
-
-# ── build-daemon-release.sh: positional arg is dist_dir, not version ──
-setup_fake_repo
-printf '1.2.3\n' > "$tmp_dir/fake/VERSION"
-dry_output="$(sh -x "$tmp_dir/fake/scripts/build-daemon-release.sh" "$tmp_dir/fake-dist" 2>&1 || true)"
-if printf '%s' "$dry_output" | grep -q 'version=.*fake-dist'; then
-	fail "build-daemon-release.sh still treats \$1 as version"
-fi
-pass "build-daemon-release.sh \$1 is dist_dir, not version"
-
-# ── build-macos-desktop-release.sh: missing VERSION ──
-setup_fake_repo
-expect_fail "build-macos-desktop-release.sh rejects missing VERSION" \
-	sh "$tmp_dir/fake/scripts/build-macos-desktop-release.sh" "$tmp_dir/fake-dist"
-
-# ── build-macos-desktop-release.sh: empty VERSION ──
-setup_fake_repo
-printf '' > "$tmp_dir/fake/VERSION"
-expect_fail "build-macos-desktop-release.sh rejects empty VERSION" \
-	sh "$tmp_dir/fake/scripts/build-macos-desktop-release.sh" "$tmp_dir/fake-dist"
-
-# ── build-macos-desktop-release.sh: positional arg is dist_dir, not version ──
-setup_fake_repo
-printf '1.2.3\n' > "$tmp_dir/fake/VERSION"
-dry_output="$(sh -x "$tmp_dir/fake/scripts/build-macos-desktop-release.sh" "$tmp_dir/fake-dist" 2>&1 || true)"
-if printf '%s' "$dry_output" | grep -q 'version=.*fake-dist'; then
-	fail "build-macos-desktop-release.sh still treats \$1 as version"
-fi
-pass "build-macos-desktop-release.sh \$1 is dist_dir, not version"
-
-# ── make.ps1: missing VERSION (requires pwsh) ──
-if command -v pwsh >/dev/null 2>&1; then
-	setup_fake_repo
-	cp "$repo_dir/make.ps1" "$tmp_dir/fake/"
-	expect_fail "make.ps1 rejects missing VERSION" \
-		pwsh -NoLogo -NoProfile -NonInteractive -File "$tmp_dir/fake/make.ps1" windows-gui-build
-
-	setup_fake_repo
-	cp "$repo_dir/make.ps1" "$tmp_dir/fake/"
-	printf '' > "$tmp_dir/fake/VERSION"
-	expect_fail "make.ps1 rejects empty VERSION" \
-		pwsh -NoLogo -NoProfile -NonInteractive -File "$tmp_dir/fake/make.ps1" windows-gui-build
-
-	setup_fake_repo
-	cp "$repo_dir/make.ps1" "$tmp_dir/fake/"
-	printf '1.2.3\n' > "$tmp_dir/fake/VERSION"
-	expect_fail "make.ps1 rejects GUI_VERSION setting" \
-		pwsh -NoLogo -NoProfile -NonInteractive -File "$tmp_dir/fake/make.ps1" windows-gui-build "GUI_VERSION=injected"
-
-	pass "make.ps1 PowerShell contract verified"
-else
-	printf 'version-contract SKIP: pwsh not available for make.ps1 tests\n'
-fi
-
-# ── Static assertion: no fail-open fallback to "dev" in release scripts ──
-for script in build-daemon-release.sh build-macos-desktop-release.sh; do
-	path="$repo_dir/scripts/$script"
-	if grep -Eq 'VERSION:-dev|VERSION:-\}' "$path"; then
-		fail "$script contains fail-open dev fallback"
-	fi
+for version in 0.0.0 1.2.3 255.255.65535; do
+	printf '%s\n' "$version" >"$fixture/VERSION"
+	actual="$("$fixture/scripts/read-version.sh")"
+	[ "$actual" = "$version" ] || fail "POSIX reader changed valid $version"
+	pass "POSIX reader accepts $version"
 done
-pass "release scripts contain no fail-open dev fallback"
 
-# ── Static assertion: Makefile uses override for FILE_VERSION and VERSION ──
-if ! grep -q '^override FILE_VERSION :=' "$repo_dir/Makefile"; then
-	fail "Makefile FILE_VERSION is not override-protected"
-fi
-override_count="$(grep -c '^override VERSION :=' "$repo_dir/Makefile")"
-if [ "$override_count" -lt 2 ]; then
-	fail "Makefile VERSION is not override-protected in both branches"
-fi
-pass "Makefile FILE_VERSION and VERSION are override-protected"
+check_invalid() {
+	invalid_name="$1"
+	shift
+	"$@" >"$fixture/VERSION"
+	cp "$fixture/VERSION" "$tmp_dir/invalid/$invalid_name"
+	expect_fail "POSIX reader rejects $invalid_name" "$fixture/scripts/read-version.sh"
+}
 
-# ── Static assertion: GUI_VERSION is not defined in Makefile ──
-if grep -q '^GUI_VERSION' "$repo_dir/Makefile"; then
-	fail "Makefile still defines GUI_VERSION"
-fi
-pass "Makefile does not define GUI_VERSION"
+rm -f "$fixture/VERSION"
+expect_fail 'POSIX reader rejects missing VERSION' "$fixture/scripts/read-version.sh"
+check_invalid empty printf ''
+check_invalid leading-zero printf '01.2.3\n'
+check_invalid prefix printf 'v1.2.3\n'
+check_invalid suffix printf '1.2.3-rc1\n'
+check_invalid leading-whitespace printf ' 1.2.3\n'
+check_invalid trailing-whitespace printf '1.2.3 \n'
+check_invalid CRLF printf '1.2.3\r\n'
+check_invalid NUL printf '1.2.3\000\n'
+check_invalid non-ASCII printf '1.2.\200\n'
+check_invalid multiline printf '1.2.3\n2.3.4\n'
+check_invalid missing-LF printf '1.2.3'
+check_invalid major-overflow printf '256.0.0\n'
+check_invalid minor-overflow printf '0.256.0\n'
+check_invalid build-overflow printf '0.0.65536\n'
 
-# ── Static assertion: Makefile daemon-release does not pass version arg ──
-daemon_release_line="$(grep 'scripts/build-daemon-release.sh' "$repo_dir/Makefile" || true)"
-if printf '%s' "$daemon_release_line" | grep -q '"$(VERSION)".*"$(DIST_DIR)"'; then
-	fail "Makefile daemon-release still passes VERSION as first positional arg"
-fi
-pass "Makefile daemon-release calls script without version arg"
+printf '1.2.3\n' >"$fixture/VERSION"
+[ "$(VERSION=injected "$fixture/scripts/read-version.sh")" = 1.2.3 ] ||
+	fail 'environment VERSION overrode the repository file'
+pass 'environment VERSION cannot override the repository file'
 
-# ── Static assertion: Makefile macos-gui does not pass version arg ──
-macos_gui_line="$(grep 'scripts/build-macos-desktop-release.sh' "$repo_dir/Makefile" || true)"
-if printf '%s' "$macos_gui_line" | grep -q '"$(GUI_VERSION)"'; then
-	fail "Makefile macos-gui still passes GUI_VERSION as first positional arg"
-fi
-pass "Makefile macos-gui calls script without version arg"
+for version in 0.0.0 1.2.3 255.255.65535; do
+	printf '%s\n' "$version" >"$fixture/VERSION"
+	resolved="$(make -s -C "$fixture" -pn 2>/dev/null | sed -n 's/^REPOSITORY_VERSION := //p' | head -1)"
+	[ "$resolved" = "$version" ] || fail "Make did not resolve $version from the shared reader"
+	pass "Make resolves $version from the shared reader"
+done
+printf '1.2.3\n' >"$fixture/VERSION"
+resolved="$(make -s -C "$fixture" -pn VERSION=9.9.9 FILE_VERSION=8.8.8 2>/dev/null | sed -n 's/^REPOSITORY_VERSION := //p' | head -1)"
+[ "$resolved" = 1.2.3 ] || fail 'Make caller version variables overrode the repository file'
+pass 'Make caller version variables cannot override the repository file'
+for invalid in '01.2.3' '256.0.0'; do
+	printf '%s\n' "$invalid" >"$fixture/VERSION"
+	expect_fail "Make rejects $invalid" make -s -C "$fixture" -pn
+done
 
-# ── Static assertion: Makefile windows-gui calls do not pass GUI_VERSION ──
-windows_gui_lines="$(grep 'make.ps1 windows-gui' "$repo_dir/Makefile" || true)"
-if printf '%s' "$windows_gui_lines" | grep -q 'GUI_VERSION='; then
-	fail "Makefile windows-gui calls still pass GUI_VERSION"
-fi
-pass "Makefile windows-gui calls do not pass GUI_VERSION"
+rm -f "$fixture/VERSION"
+expect_fail 'Make rejects missing VERSION' make -s -C "$fixture" -pn
+for invalid_file in "$tmp_dir/invalid"/*; do
+	name="$(basename -- "$invalid_file")"
+	cp "$invalid_file" "$fixture/VERSION"
+	expect_fail "Make rejects invalid $name file" make -s -C "$fixture" -pn
+	for script in build-daemon-release.sh build-macos-desktop-release.sh build-windows-desktop-payloads.sh; do
+		expect_fail "$script rejects invalid $name file before build work" sh "$fixture/scripts/$script"
+	done
+done
 
-# ── Static assertion: build-static.sh does not pass version arg to daemon release ──
-if grep -q 'build-daemon-release.sh.*"\$version"' "$repo_dir/scripts/build-static.sh"; then
-	fail "build-static.sh still passes version arg to build-daemon-release.sh"
-fi
-pass "build-static.sh calls daemon release without version arg"
+rm -f "$fixture/VERSION"
+for script in build-daemon-release.sh build-macos-desktop-release.sh build-windows-desktop-payloads.sh; do
+	expect_fail "$script rejects missing VERSION before build work" sh "$fixture/scripts/$script"
+done
 
-printf '\nversion-contract: all tests passed\n'
+for script in build-daemon-release.sh build-macos-desktop-release.sh; do
+	expect_fail "$script rejects excess positional arguments" sh "$fixture/scripts/$script" one two
+	grep -q 'usage:' "$tmp_dir/output" || fail "$script excess-arity failure did not report usage"
+done
+expect_fail 'publish-static-r2.sh rejects every positional argument' sh "$fixture/scripts/publish-static-r2.sh" 1.2.3
+grep -q 'usage:' "$tmp_dir/output" || fail 'publish-static-r2.sh excess-arity failure did not report usage'
+
+run_static_route_contract() {
+	route_repo="$1"
+	want_platforms="$2"
+	rm -f "$route_repo/route.log"
+	printf '1.2.3\n' >"$route_repo/VERSION"
+	cat >"$route_repo/scripts/build-daemon-release.sh" <<'ROUTE'
+#!/usr/bin/env sh
+printf '%s|%s|%s\n' "$1" "$DIST_DIR" "${PLATFORMS:-}" >"$ROUTE_LOG"
+ROUTE
+	chmod +x "$route_repo/scripts/build-daemon-release.sh"
+	if [ -n "$want_platforms" ]; then
+		ROUTE_LOG="$route_repo/route.log" STATIC_BUILD_TARGET=daemons \
+			STATIC_DIST_DIR="$route_repo/dist/static" DAEMON_PLATFORMS="$want_platforms" \
+			sh "$route_repo/scripts/build-static.sh" >/dev/null
+	else
+		ROUTE_LOG="$route_repo/route.log" STATIC_BUILD_TARGET=daemons \
+			STATIC_DIST_DIR="$route_repo/dist/static" \
+			sh "$route_repo/scripts/build-static.sh" >/dev/null
+	fi
+	want="$route_repo/dist/static/daemons|$route_repo/dist/static/daemons|$want_platforms"
+	[ "$(cat "$route_repo/route.log")" = "$want" ]
+}
+
+route_repo="$tmp_dir/route"
+new_fixture "$route_repo"
+run_static_route_contract "$route_repo" 'windows/amd64 windows/arm64' ||
+	fail 'build-static platform branch did not route to dist/static/daemons'
+pass 'build-static platform branch routes to dist/static/daemons'
+run_static_route_contract "$route_repo" '' ||
+	fail 'build-static default branch did not route to dist/static/daemons'
+pass 'build-static default branch routes to dist/static/daemons'
+
+mutated_repo="$tmp_dir/route-mutated"
+new_fixture "$mutated_repo"
+sed 's/"\$daemons_out"/"$out_dir"/g' "$repo_dir/scripts/build-static.sh" >"$mutated_repo/scripts/build-static.sh"
+if run_static_route_contract "$mutated_repo" 'windows/amd64'; then
+	fail 'static route mutation to parent output directory survived'
+fi
+pass 'static route mutation to parent output directory is killed'
+
+if command -v pwsh >/dev/null 2>&1; then
+	for version in 0.0.0 1.2.3 255.255.65535; do
+		printf '%s\n' "$version" >"$fixture/VERSION"
+		actual="$(pwsh -NoLogo -NoProfile -NonInteractive -File "$fixture/scripts/read-version.ps1")"
+		[ "$actual" = "$version" ] || fail "PowerShell reader changed valid $version"
+		pass "PowerShell reader accepts $version"
+	done
+	rm -f "$fixture/VERSION"
+	expect_fail 'PowerShell reader rejects missing VERSION' pwsh -NoLogo -NoProfile -NonInteractive -File "$fixture/scripts/read-version.ps1"
+	for invalid_file in "$tmp_dir/invalid"/*; do
+		name="$(basename -- "$invalid_file")"
+		cp "$invalid_file" "$fixture/VERSION"
+		expect_fail "PowerShell reader rejects $name" pwsh -NoLogo -NoProfile -NonInteractive -File "$fixture/scripts/read-version.ps1"
+	done
+else
+	printf '%s\n' 'SKIP: PowerShell runtime assertions (pwsh unavailable)'
+fi
+
+printf '%s\n' 'All version contract tests passed.'

@@ -1,13 +1,14 @@
 #!/usr/bin/env sh
 set -eu
 
+[ "$#" -le 1 ] || { printf 'build-daemon-release: usage: build-daemon-release.sh [dist-dir]\n' >&2; exit 1; }
+
 dist_dir="${1:-${DIST_DIR:-dist/static/daemons}}"
 platforms="${PLATFORMS:-}"
 all_platforms="darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64"
 
 root_dir="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
-version="$(cat "$root_dir/VERSION")" || { printf 'build-daemon-release: VERSION file is required\n' >&2; exit 1; }
-[ -n "$version" ] || { printf 'build-daemon-release: VERSION file must not be empty\n' >&2; exit 1; }
+version="$("$root_dir/scripts/read-version.sh")"
 . "$root_dir/scripts/lib/testtmp.sh"
 case "$dist_dir" in
 	/*) dist_abs="$dist_dir" ;;

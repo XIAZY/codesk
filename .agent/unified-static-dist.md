@@ -46,7 +46,7 @@ Notty has three kinds of static assets: the Vite application, the homepage, and 
 
 ## Outcomes & Retrospective
 
-Completed. Local development now uses `dist/static` as the static service root. `make static-build-local` builds `dist/static/daemons` with `VERSION=dev` for the current host platform. `docker-compose.yml` serves `dist/static`, so the local daemon installer URL and production daemon installer URL have the same path shape. Production publishing and direct daemon release builds read and write daemon artifacts from `dist/static/daemons` by default.
+Completed. Local development now uses `dist/static` as the static service root. `make static-build-local` builds `dist/static/daemons` with the canonical root `VERSION` for the current host platform. `docker-compose.yml` serves `dist/static`, so the local daemon installer URL and production daemon installer URL have the same path shape. Production publishing and direct daemon release builds read and write daemon artifacts from `dist/static/daemons` by default.
 
 The temporary generated directories `deploy/daemons/dev` and `deploy/daemons/latest` were removed after the static service moved to `dist/static`, leaving `deploy/daemons` source-only again.
 
@@ -119,4 +119,4 @@ Important files changed by this plan are expected to include `scripts/build-stat
 
 ## Interfaces and Dependencies
 
-`scripts/build-static.sh` must support `STATIC_BUILD_TARGET=all`, `STATIC_BUILD_TARGET=frontend`, and `STATIC_BUILD_TARGET=daemons`. `STATIC_DIST_DIR` remains the root output directory and defaults to `dist/static`. For daemon builds, `VERSION` controls the daemon release version and `PLATFORMS` controls the platform list passed to `scripts/build-daemon-release.sh`.
+`scripts/build-static.sh` must support `STATIC_BUILD_TARGET=all`, `STATIC_BUILD_TARGET=frontend`, and `STATIC_BUILD_TARGET=daemons`. `STATIC_DIST_DIR` remains the root output directory and defaults to `dist/static`. For daemon builds, the root `VERSION` file controls the daemon release version and `PLATFORMS` controls the platform list passed to `scripts/build-daemon-release.sh`.

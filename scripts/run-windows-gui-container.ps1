@@ -4,7 +4,6 @@ param(
     [ValidateSet('windows-gui-build', 'windows-gui-release')]
     [string] $Target,
 
-    [string] $Version = 'dev',
     [AllowNull()]
     [AllowEmptyString()]
     [object] $Architectures = $null,
@@ -152,7 +151,6 @@ $runArguments = @(
     $BuilderImage,
     '-File', 'C:\workspace\scripts\run-windows-gui-target.ps1',
     '-Target', $Target,
-    '-Version', $Version,
     '-RepositoryRoot', 'C:\workspace',
     '-WindowsRoot', $containerWindowsRoot,
     '-PayloadRoot', $containerPayloadRoot,

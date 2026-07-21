@@ -5,7 +5,7 @@ root_dir="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
 . "$root_dir/scripts/lib/deploy-env.sh"
 load_notty_deploy_env "$root_dir"
 
-version="${VERSION:-$(git -C "$root_dir" rev-parse --short HEAD)}"
+version="$("$root_dir/scripts/read-version.sh")"
 docker_repo="${DOCKER_REPO:-alphatoad/notty}"
 backend_image="$docker_repo:backend-$version"
 ssh_host="${NOTTY_DEPLOY_SSH_HOST:-notty}"
@@ -28,7 +28,7 @@ command -v scp >/dev/null 2>&1 || die "scp is required"
 
 ssh "$ssh_host" "docker ps >/dev/null 2>&1" || die "remote user cannot access Docker on $ssh_host; add the SSH user to the docker group or configure passwordless Docker access before deploying"
 
-VERSION="$version" "$root_dir/scripts/publish-backend.sh"
+"$root_dir/scripts/publish-backend.sh"
 
 quoted_remote_dir="$(shell_quote "$remote_dir")"
 quoted_backend_image="$(shell_quote "$backend_image")"

@@ -38,7 +38,7 @@ is set up (tech-debts task #9); a daily `sweep-test-tmp.sh` is enough at current
 
 ## macOS desktop release
 
-`build-macos-desktop-release.sh <version> [dist-dir]` must run on macOS with
+`build-macos-desktop-release.sh [dist-dir]` must run on macOS with
 Go 1.26.5, Rust/Cargo 1.97.0, the x86_64 and arm64 Apple Rust targets, Xcode
 command-line tools, a Developer ID Application identity, and a notarytool
 Keychain profile. Signed releases require:
@@ -46,7 +46,7 @@ Keychain profile. Signed releases require:
 ```sh
 CODESK_MACOS_SIGN_IDENTITY='Developer ID Application: Example Corp (TEAMID)' \
 CODESK_MACOS_NOTARY_PROFILE='codesk-notary' \
-scripts/build-macos-desktop-release.sh 1.2.3
+scripts/build-macos-desktop-release.sh
 ```
 
 The native build entry point builds the same universal application in explicit
