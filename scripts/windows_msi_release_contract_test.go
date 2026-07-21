@@ -447,6 +447,34 @@ func TestWindowsGUIUploadPreflightSourceContract(t *testing.T) {
 	}
 }
 
+func TestBuildDeployContractIsCIGated(t *testing.T) {
+	workflowData, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := normalizeSourceNewlines(string(workflowData))
+	if err := checkBuildDeployContractCIGate(workflow); err != nil {
+		t.Fatal(err)
+	}
+	mutated := strings.Replace(workflow, "          make build-deploy-contract-check\n", "          : build-deploy-contract-check\n", 1)
+	if err := checkBuildDeployContractCIGate(mutated); err == nil {
+		t.Fatal("build/deploy CI gate removal mutation passed")
+	}
+}
+
+func checkBuildDeployContractCIGate(workflow string) error {
+	const gate = `      - name: Installer and release contract tests
+        run: |
+          make daemon-installer-check
+          make daemon-uninstall-test
+          make build-deploy-contract-check
+`
+	if got := strings.Count(workflow, gate); got != 1 {
+		return fmt.Errorf("build/deploy CI gate count = %d, want 1", got)
+	}
+	return nil
+}
+
 func TestWindowsMSITestOnlyUpgradeFixtureCannotBecomeReleaseArtifact(t *testing.T) {
 	buildData, err := os.ReadFile("build-windows-desktop-msi-artifact.ps1")
 	if err != nil {
