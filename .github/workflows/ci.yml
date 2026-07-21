@@ -202,11 +202,12 @@ jobs:
           ALLOW_UNSIGNED_MACOS_DESKTOP: "1"
         run: |
           rm -rf third_party/y-crdt/target
-          scripts/build-macos-desktop-release.sh 0.0.0 "$RUNNER_TEMP/macos-release"
-          scripts/verify-macos-desktop-release.sh "$RUNNER_TEMP/macos-release/0.0.0" 0.0.0
-          test "$(plutil -extract signed_and_notarized raw -o - "$RUNNER_TEMP/macos-release/0.0.0/manifest.json")" = false
-          lipo "$RUNNER_TEMP/macos-release/0.0.0/Codesk.app/Contents/MacOS/Codesk" -verify_arch x86_64 arm64
-          lipo "$RUNNER_TEMP/macos-release/0.0.0/Codesk.app/Contents/Helpers/notty-agent-tool" -verify_arch x86_64 arm64
+          release_version="$(cat VERSION)"
+          scripts/build-macos-desktop-release.sh "$RUNNER_TEMP/macos-release"
+          scripts/verify-macos-desktop-release.sh "$RUNNER_TEMP/macos-release/$release_version" "$release_version"
+          test "$(plutil -extract signed_and_notarized raw -o - "$RUNNER_TEMP/macos-release/$release_version/manifest.json")" = false
+          lipo "$RUNNER_TEMP/macos-release/$release_version/Codesk.app/Contents/MacOS/Codesk" -verify_arch x86_64 arm64
+          lipo "$RUNNER_TEMP/macos-release/$release_version/Codesk.app/Contents/Helpers/notty-agent-tool" -verify_arch x86_64 arm64
 
   windows-daemon-build:
     name: Windows daemon (Zig AMD64 + ARM64 cross-build)
