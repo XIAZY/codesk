@@ -1774,7 +1774,6 @@ Important daemon environment variables:
 - `NOTTY_BACKEND_URL`: backend URL.
 - `NOTTY_WORKSPACE_ID`: workspace the daemon belongs to.
 - `NOTTY_DAEMON_TOKEN`: one-time daemon token from backend.
-- `NOTTY_DAEMON_VERSION`: installed daemon version reported to the backend.
 - `NOTTY_WORKSPACE_DIR`: local canonical workspace projection.
 - `NOTTY_AGENT_WORKSPACE_ROOT`: parent directory for per-agent workspaces.
 - `NOTTY_CODEX_COMMAND`: optional Codex executable used for Codex runtime detection, default `codex`.

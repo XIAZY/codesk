@@ -24,7 +24,7 @@ import (
 
 var (
 	codeskOrigin  = "https://app.getcodesk.com"
-	backendOrigin  = "https://api.getcodesk.com"
+	backendOrigin = "https://api.getcodesk.com"
 
 	//go:embed assets/codesk-tray-template.png
 	codeskTemplateIcon []byte
@@ -45,6 +45,10 @@ func main() {
 }
 
 func runDesktop() error {
+	version, err := buildinfo.Require()
+	if err != nil {
+		return fmt.Errorf("start desktop: %w", err)
+	}
 	bundle, err := macosapp.ResolveCurrent()
 	if err != nil {
 		return err
@@ -103,7 +107,7 @@ func runDesktop() error {
 		Dirs:          dirs,
 		CodeskOrigin:  codeskOrigin,
 		BackendOrigin: backendOrigin,
-		Version:       buildinfo.Version,
+		Version:       version,
 		ConfigStore:   configStore,
 		Secrets:       desktop.NewDarwinKeychainSecretStore(),
 		LoginItem:     desktop.NewDarwinLoginItem(),

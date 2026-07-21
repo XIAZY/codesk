@@ -1,4 +1,4 @@
-[CmdletBinding(DefaultParameterSetName = 'QaPair')]
+[CmdletBinding(DefaultParameterSetName = 'Release')]
 param(
     [Parameter(Mandatory = $true)]
     [ValidateSet('AMD64', 'ARM64')]
@@ -12,14 +12,11 @@ param(
     [ValidateSet('x64', 'arm64')]
     [string] $InstallerPlatform,
 
-    [Parameter(Mandatory = $true, ParameterSetName = 'QaPair')]
-    [string] $PreviousProductCode,
-
-    [Parameter(Mandatory = $true, ParameterSetName = 'QaPair')]
-    [string] $CandidateProductCode,
-
-    [Parameter(Mandatory = $true, ParameterSetName = 'Release')]
+    [Parameter(ParameterSetName = 'Release')]
     [switch] $Release,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'TestOnlyUpgradeQa')]
+    [switch] $TestOnlyUpgradeQa,
 
     [Parameter(Mandatory = $true)]
     [string] $CodeskExe,
@@ -378,7 +375,7 @@ foreach ($path in @(
     }
 }
 
-$buildMode = if ($PSCmdlet.ParameterSetName -ceq 'Release') { 'release' } else { 'qa-pair' }
+$buildMode = if ($PSCmdlet.ParameterSetName -ceq 'Release') { 'release' } else { 'test-only-upgrade-qa' }
 if ($buildMode -ceq 'release') {
     $ProductVersion = & (Join-Path $scriptRoot 'read-version.ps1')
     $productCodeName = "$ProductVersion+$GoArchitecture"
@@ -390,21 +387,24 @@ if ($buildMode -ceq 'release') {
         }
     )
 } else {
-    $versions = @(
-        [pscustomobject] @{
-            name = 'previous'
-            version = '0.0.1'
-            productCode = ConvertTo-NormalizedGuid $PreviousProductCode
-        },
-        [pscustomobject] @{
-            name = 'candidate'
-            version = '0.0.2'
-            productCode = ConvertTo-NormalizedGuid $CandidateProductCode
-        }
-    )
-    if ($versions[0].productCode -ceq $versions[1].productCode) {
-        throw 'previous and candidate ProductCodes must be distinct'
+    $fixturePath = Join-Path $scriptRoot 'testdata\windows-msi-upgrade-versions.ps1'
+    if (-not (Test-Path -LiteralPath $fixturePath -PathType Leaf)) {
+        throw "test-only upgrade fixture is missing: $fixturePath"
     }
+    $fixtureVersions = @(& $fixturePath)
+    if ($fixtureVersions.Count -ne 2 -or
+        [string] $fixtureVersions[0].name -cne 'previous' -or
+        [string] $fixtureVersions[1].name -cne 'candidate') {
+        throw 'test-only upgrade fixture must define exactly previous then candidate'
+    }
+    $versions = @($fixtureVersions | ForEach-Object {
+        $fixtureVersion = [string] $_.version
+        [pscustomobject] @{
+            name = [string] $_.name
+            version = $fixtureVersion
+            productCode = Get-UuidV5 -Namespace $ProductCodeNamespace -Name "$fixtureVersion+$GoArchitecture"
+        }
+    })
 }
 
 if (-not (Test-Path -LiteralPath $SafeParentDirectory -PathType Container)) {
@@ -510,6 +510,7 @@ $provenance = [ordered] @{
         goArchitecture = $GoArchitecture
         installerPlatform = $InstallerPlatform
         buildMode = $buildMode
+        publishable = ($buildMode -ceq 'release')
     }
     toolchain = [ordered] @{
         dotnetSdk = $dotnetVersion
@@ -538,18 +539,10 @@ $provenanceJson = ConvertTo-Json $provenance -Depth 30
 [System.IO.File]::WriteAllText($provenancePath, $provenanceJson + "`n", [System.Text.UTF8Encoding]::new($false))
 
 $checksumFiles = @(Get-CanonicalArtifactFiles -Root $OutputDirectory)
-if ($buildMode -ceq 'release') {
-    [string[]] $expectedChecksumNames = @(
-        "Codesk_${ProductVersion}_windows_$GoArchitecture.msi",
-        'provenance.json'
-    )
-} else {
-    [string[]] $expectedChecksumNames = @(
-        "Codesk_0.0.1_windows_$GoArchitecture.msi",
-        "Codesk_0.0.2_windows_$GoArchitecture.msi",
-        'provenance.json'
-    )
-}
+[string[]] $expectedChecksumNames = @(
+    @($versions | ForEach-Object { "Codesk_$($_.version)_windows_$GoArchitecture.msi" })
+    'provenance.json'
+)
 [Array]::Sort($expectedChecksumNames, [System.StringComparer]::Ordinal)
 $actualChecksumNames = @($checksumFiles | ForEach-Object Name)
 if ((ConvertTo-Json $actualChecksumNames -Compress) -cne
@@ -560,20 +553,11 @@ $checksumLines = @($checksumFiles | ForEach-Object { "$(Get-Sha256 $_.FullName) 
 $checksumsPath = Join-Path $OutputDirectory 'SHA256SUMS'
 [System.IO.File]::WriteAllLines($checksumsPath, $checksumLines, [System.Text.UTF8Encoding]::new($false))
 
-if ($buildMode -ceq 'release') {
-    [string[]] $expectedNames = @(
-        "Codesk_${ProductVersion}_windows_$GoArchitecture.msi",
-        'provenance.json',
-        'SHA256SUMS'
-    )
-} else {
-    [string[]] $expectedNames = @(
-        "Codesk_0.0.1_windows_$GoArchitecture.msi",
-        "Codesk_0.0.2_windows_$GoArchitecture.msi",
-        'provenance.json',
-        'SHA256SUMS'
-    )
-}
+[string[]] $expectedNames = @(
+    @($versions | ForEach-Object { "Codesk_$($_.version)_windows_$GoArchitecture.msi" })
+    'provenance.json'
+    'SHA256SUMS'
+)
 [Array]::Sort($expectedNames, [System.StringComparer]::Ordinal)
 $canonicalFiles = @(Get-CanonicalArtifactFiles -Root $OutputDirectory)
 $actualNames = @($canonicalFiles | ForEach-Object Name)

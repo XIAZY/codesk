@@ -226,9 +226,9 @@ func TestWindowsMSIReleaseSourceContract(t *testing.T) {
 		shimNew         string
 	}{
 		{
-			name:     "release mode merged into QA parameter set",
-			buildOld: "[Parameter(Mandatory = $true, ParameterSetName = 'Release')]",
-			buildNew: "[Parameter(Mandatory = $true, ParameterSetName = 'QaPair')]",
+			name:     "QA fixture becomes the default mode",
+			buildOld: "[CmdletBinding(DefaultParameterSetName = 'Release')]",
+			buildNew: "[CmdletBinding(DefaultParameterSetName = 'TestOnlyUpgradeQa')]",
 		},
 		{
 			name:     "architecture removed from UUID name",
@@ -247,8 +247,8 @@ func TestWindowsMSIReleaseSourceContract(t *testing.T) {
 		},
 		{
 			name:     "release output loses requested version",
-			buildOld: "Codesk_${ProductVersion}_windows_$GoArchitecture.msi",
-			buildNew: "Codesk_release_windows_$GoArchitecture.msi",
+			buildOld: `$canonicalName = "Codesk_$($version.version)_windows_$GoArchitecture.msi"`,
+			buildNew: `$canonicalName = "Codesk_release_windows_$GoArchitecture.msi"`,
 		},
 		{
 			name:            "release invokes QA mode",
@@ -284,6 +284,11 @@ func TestWindowsMSIReleaseSourceContract(t *testing.T) {
 			name:    "Make injects a spoofable build architecture",
 			makeOld: `make.ps1 windows-gui-build "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)"`,
 			makeNew: `make.ps1 windows-gui-build "WINDOWS_GUI_ARCHES=amd64" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)"`,
+		},
+		{
+			name:    "download verifier restores a fixture version",
+			makeOld: `Codesk_$${release_version}_windows_$$arch.msi`,
+			makeNew: `Codesk_0.0.1_windows_$$arch.msi`,
 		},
 		{
 			name:    "PowerShell shim loses a public target",
@@ -331,6 +336,116 @@ func TestWindowsMSIReleaseSourceContract(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWindowsMSITestOnlyUpgradeFixtureCannotBecomeReleaseArtifact(t *testing.T) {
+	buildData, err := os.ReadFile("build-windows-desktop-msi-artifact.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtureData, err := os.ReadFile(filepath.Join("testdata", "windows-msi-upgrade-versions.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflowData, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := normalizeSourceNewlines(string(buildData))
+	fixture := normalizeSourceNewlines(string(fixtureData))
+	workflow := normalizeSourceNewlines(string(workflowData))
+	if err := checkWindowsMSITestOnlyFixtureBoundary(build, fixture, workflow); err != nil {
+		t.Fatal(err)
+	}
+
+	mutations := []struct {
+		name, target, old, replacement string
+	}{
+		{"fixture escapes testdata", "build", `testdata\windows-msi-upgrade-versions.ps1`, `windows-msi-upgrade-versions.ps1`},
+		{"fixture becomes default", "build", "[CmdletBinding(DefaultParameterSetName = 'Release')]", "[CmdletBinding(DefaultParameterSetName = 'TestOnlyUpgradeQa')]"},
+		{"production invokes fixture", "workflow", "            -Release `", "            -TestOnlyUpgradeQa `"},
+		{"fixture overwrites production output", "workflow", `windows-desktop-msi-upgrade-qa-${{ matrix.go_arch }}`, `windows-desktop-msi-${{ matrix.go_arch }}`},
+		{"fixture marked publishable", "workflow", `$provenance.target.publishable -ne $false`, `$provenance.target.publishable -eq $false`},
+		{"fixture uploaded", "workflow", `path: ${{ runner.temp }}/windows-desktop-msi-${{ matrix.go_arch }}/`, `path: ${{ runner.temp }}/windows-desktop-msi-upgrade-qa-${{ matrix.go_arch }}/`},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			mutatedBuild, mutatedFixture, mutatedWorkflow := build, fixture, workflow
+			var source *string
+			switch mutation.target {
+			case "build":
+				source = &mutatedBuild
+			case "workflow":
+				source = &mutatedWorkflow
+			default:
+				t.Fatalf("unsupported mutation target %q", mutation.target)
+			}
+			if strings.Count(*source, mutation.old) != 1 {
+				t.Fatalf("mutation source %q is not unique", mutation.old)
+			}
+			*source = strings.Replace(*source, mutation.old, mutation.replacement, 1)
+			if err := checkWindowsMSITestOnlyFixtureBoundary(mutatedBuild, mutatedFixture, mutatedWorkflow); err == nil {
+				t.Fatal("test-only fixture boundary mutation survived")
+			}
+		})
+	}
+}
+
+func checkWindowsMSITestOnlyFixtureBoundary(build, fixture, workflow string) error {
+	for required, count := range map[string]int{
+		"[CmdletBinding(DefaultParameterSetName = 'Release')]":                   1,
+		"[Parameter(Mandatory = $true, ParameterSetName = 'TestOnlyUpgradeQa')]": 1,
+		`testdata\windows-msi-upgrade-versions.ps1`:                              1,
+		"publishable = ($buildMode -ceq 'release')":                              1,
+	} {
+		if got := strings.Count(build, required); got != count {
+			return fmt.Errorf("MSI builder fixture boundary count for %q = %d, want %d", required, got, count)
+		}
+	}
+	for _, forbidden := range []string{"version = '0.0.1'", "version = '0.0.2'"} {
+		if strings.Contains(build, forbidden) {
+			return fmt.Errorf("production builder contains fixture version %q", forbidden)
+		}
+	}
+	for required, count := range map[string]int{
+		"production artifact path never reads this fixture": 1,
+		"version = '0.0.1'": 1,
+		"version = '0.0.2'": 1,
+	} {
+		if got := strings.Count(fixture, required); got != count {
+			return fmt.Errorf("MSI test fixture count for %q = %d, want %d", required, got, count)
+		}
+	}
+
+	const productionMarker = "      - name: Build reproducible root-version WiX release package\n"
+	const fixtureMarker = "      - name: Build non-publishable MSI upgrade QA fixture\n"
+	const uploadMarker = "      - name: Upload reproducible root-version MSI and provenance\n"
+	productionAt := strings.Index(workflow, productionMarker)
+	fixtureAt := strings.Index(workflow, fixtureMarker)
+	uploadAt := strings.Index(workflow, uploadMarker)
+	if productionAt < 0 || fixtureAt <= productionAt || uploadAt <= fixtureAt {
+		return fmt.Errorf("CI does not isolate production, fixture, and upload steps")
+	}
+	productionStep := workflow[productionAt:fixtureAt]
+	fixtureStep := workflow[fixtureAt:uploadAt]
+	uploadStep := workflow[uploadAt:]
+	if strings.Count(productionStep, "            -Release `") != 1 || strings.Contains(productionStep, "-TestOnlyUpgradeQa") {
+		return fmt.Errorf("CI production MSI step does not exclusively use release mode")
+	}
+	for _, required := range []string{
+		"            -TestOnlyUpgradeQa `",
+		`windows-desktop-msi-upgrade-qa-${{ matrix.go_arch }}`,
+		`$provenance.target.buildMode -cne 'test-only-upgrade-qa'`,
+		`$provenance.target.publishable -ne $false`,
+	} {
+		if !strings.Contains(fixtureStep, required) {
+			return fmt.Errorf("CI test-only fixture step is missing %q", required)
+		}
+	}
+	if !strings.Contains(uploadStep, `path: ${{ runner.temp }}/windows-desktop-msi-${{ matrix.go_arch }}/`) || strings.Contains(uploadStep, "upgrade-qa") {
+		return fmt.Errorf("CI upload can publish the test-only fixture path")
+	}
+	return nil
 }
 
 func TestWindowsGUIContainerSourceContract(t *testing.T) {
@@ -1014,33 +1129,38 @@ func checkPowerShellVersionReaderSource(source string) error {
 
 func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) error {
 	buildRequired := map[string]int{
-		"[CmdletBinding(DefaultParameterSetName = 'QaPair')]":          1,
-		"[Parameter(Mandatory = $true, ParameterSetName = 'QaPair')]":  2,
-		"[Parameter(Mandatory = $true, ParameterSetName = 'Release')]": 1,
-		"[switch] $Release": 1,
-		"$ProductCodeNamespace = [guid] '55A27873-BF9C-5DC3-AA8B-9D6F996041EF'":                        1,
-		"$ProductVersion = & (Join-Path $scriptRoot 'read-version.ps1')":                               1,
-		"$productCodeName = \"$ProductVersion+$GoArchitecture\"":                                       1,
-		"Get-UuidV5 -Namespace $ProductCodeNamespace -Name $productCodeName":                           1,
-		"[System.Text.Encoding]::UTF8.GetBytes($Name)":                                                 1,
-		"[System.Security.Cryptography.SHA1]::Create()":                                                1,
-		"$uuidBytes[6] = ($uuidBytes[6] -band 0x0f) -bor 0x50":                                         1,
-		"$uuidBytes[8] = ($uuidBytes[8] -band 0x3f) -bor 0x80":                                         1,
-		"$buildMode = if ($PSCmdlet.ParameterSetName -ceq 'Release') { 'release' } else { 'qa-pair' }": 1,
-		"name = 'release'":  1,
-		"version = '0.0.1'": 1,
-		"version = '0.0.2'": 1,
-		"previous and candidate ProductCodes must be distinct": 1,
-		"buildMode = $buildMode":                               1,
-		"productCodeDerivation":                                1,
-		"algorithm = 'UUIDv5-SHA1'":                            1,
-		"Codesk_${ProductVersion}_windows_$GoArchitecture.msi": 2,
-		"Codesk_0.0.1_windows_$GoArchitecture.msi":             2,
-		"Codesk_0.0.2_windows_$GoArchitecture.msi":             2,
+		"[CmdletBinding(DefaultParameterSetName = 'Release')]":                   1,
+		"[Parameter(ParameterSetName = 'Release')]":                              1,
+		"[Parameter(Mandatory = $true, ParameterSetName = 'TestOnlyUpgradeQa')]": 1,
+		"[switch] $Release":           1,
+		"[switch] $TestOnlyUpgradeQa": 1,
+		"$ProductCodeNamespace = [guid] '55A27873-BF9C-5DC3-AA8B-9D6F996041EF'":                                     1,
+		"$ProductVersion = & (Join-Path $scriptRoot 'read-version.ps1')":                                            1,
+		"$productCodeName = \"$ProductVersion+$GoArchitecture\"":                                                    1,
+		"Get-UuidV5 -Namespace $ProductCodeNamespace -Name $productCodeName":                                        1,
+		"[System.Text.Encoding]::UTF8.GetBytes($Name)":                                                              1,
+		"[System.Security.Cryptography.SHA1]::Create()":                                                             1,
+		"$uuidBytes[6] = ($uuidBytes[6] -band 0x0f) -bor 0x50":                                                      1,
+		"$uuidBytes[8] = ($uuidBytes[8] -band 0x3f) -bor 0x80":                                                      1,
+		"$buildMode = if ($PSCmdlet.ParameterSetName -ceq 'Release') { 'release' } else { 'test-only-upgrade-qa' }": 1,
+		"name = 'release'":                           1,
+		"testdata\\windows-msi-upgrade-versions.ps1": 1,
+		"test-only upgrade fixture must define exactly previous then candidate": 1,
+		"buildMode = $buildMode":                    1,
+		"publishable = ($buildMode -ceq 'release')": 1,
+		"productCodeDerivation":                     1,
+		"algorithm = 'UUIDv5-SHA1'":                 1,
+		`$canonicalName = "Codesk_$($version.version)_windows_$GoArchitecture.msi"`: 1,
+		`Codesk_$($_.version)_windows_$GoArchitecture.msi`:                          2,
 	}
 	for source, want := range buildRequired {
 		if got := strings.Count(build, source); got != want {
 			return fmt.Errorf("Windows MSI release source count for %q = %d, want %d", source, got, want)
+		}
+	}
+	for _, forbidden := range []string{"version = '0.0.1'", "version = '0.0.2'", "QaPair", "PreviousProductCode", "CandidateProductCode"} {
+		if strings.Contains(build, forbidden) {
+			return fmt.Errorf("Windows MSI production builder contains test-only identity %q", forbidden)
 		}
 	}
 	for source, want := range map[string]int{
@@ -1092,6 +1212,8 @@ func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) er
 		"-File make.ps1 windows-gui-release":                              1,
 		`"WINDOWS_GUI_ARCHES=$(WINDOWS_GUI_ARCHES)"`:                      1,
 		"scripts/build-windows-desktop-payloads.sh":                       1,
+		`release_version="$$(scripts/read-version.sh)"`:                   1,
+		`Codesk_$${release_version}_windows_$$arch.msi`:                   2,
 	} {
 		if got := strings.Count(makefile, source); got != want {
 			return fmt.Errorf("Windows GUI Make source count for %q = %d, want %d", source, got, want)

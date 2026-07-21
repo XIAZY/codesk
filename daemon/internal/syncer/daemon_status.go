@@ -7,8 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"runtime"
-	"strings"
 	"time"
+
+	"notty/daemon/internal/buildinfo"
 )
 
 type daemonStatusReporter struct {
@@ -34,8 +35,12 @@ func (r *daemonStatusReporter) Report(ctx context.Context, detections []RuntimeD
 	if r == nil {
 		return nil
 	}
+	version, err := buildinfo.Require()
+	if err != nil {
+		return fmt.Errorf("report daemon status: %w", err)
+	}
 	payload := daemonStatusUpdate{
-		Version:  firstNonEmptyText(strings.TrimSpace(r.cfg.DaemonVersion), "dev"),
+		Version:  version,
 		OS:       runtime.GOOS,
 		Arch:     runtime.GOARCH,
 		Runtimes: detections,

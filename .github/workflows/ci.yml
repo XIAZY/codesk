@@ -310,13 +310,9 @@ jobs:
           - architecture: AMD64
             go_arch: amd64
             platform: x64
-            previous_product_code: 776C324C-1DC9-460F-9A20-2EF5A16F4E1E
-            candidate_product_code: F7EFC1E1-CF36-4BAD-9188-5B8145D94289
           - architecture: ARM64
             go_arch: arm64
             platform: arm64
-            previous_product_code: 83D25A98-8C7D-4DB0-98F7-95BA31732600
-            candidate_product_code: 3E947E2D-775C-4580-827D-4DC7368186F4
     steps:
       - uses: actions/checkout@v4
         with:
@@ -355,7 +351,7 @@ jobs:
             (Join-Path $payload "notty-agent-tool.exe") `
             "${{ matrix.go_arch }}" console
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Build reproducible previous and candidate WiX packages
+      - name: Build reproducible root-version WiX release package
         shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '{0}'"
         run: |
           $payload = Join-Path $env:RUNNER_TEMP "wix-payload-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.architecture }}"
@@ -365,8 +361,7 @@ jobs:
             -Architecture "${{ matrix.architecture }}" `
             -GoArchitecture "${{ matrix.go_arch }}" `
             -InstallerPlatform "${{ matrix.platform }}" `
-            -PreviousProductCode "${{ matrix.previous_product_code }}" `
-            -CandidateProductCode "${{ matrix.candidate_product_code }}" `
+            -Release `
             -CodeskExe (Join-Path $payload "Codesk.exe") `
             -AgentToolExe (Join-Path $payload "notty-agent-tool.exe") `
             -CodeskIcon "${{ github.workspace }}\daemon\cmd\codesk-desktop\assets\codesk.ico" `
@@ -389,7 +384,7 @@ jobs:
             --no-incremental `
             "-p:InstallerPlatform=${{ matrix.platform }}" `
             "-p:ProductVersion=not-a-valid-msi-version" `
-            "-p:VersionProductCode=${{ matrix.candidate_product_code }}" `
+            "-p:VersionProductCode={00000000-0000-0000-0000-000000000001}" `
             "-p:CodeskExe=$payload\Codesk.exe" `
             "-p:AgentToolExe=$payload\notty-agent-tool.exe" `
             "-p:CodeskIcon=${{ github.workspace }}\daemon\cmd\codesk-desktop\assets\codesk.ico" `
@@ -400,7 +395,34 @@ jobs:
           }
           Write-Host "WiX rejected the compiler-only invalid ProductVersion mutation as required"
           $global:LASTEXITCODE = 0
-      - name: Upload reproducible MSI candidates and provenance
+      - name: Build non-publishable MSI upgrade QA fixture
+        shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '{0}'"
+        run: |
+          $payload = Join-Path $env:RUNNER_TEMP "wix-payload-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.architecture }}"
+          $output = Join-Path $env:RUNNER_TEMP "windows-desktop-msi-upgrade-qa-${{ matrix.go_arch }}"
+          $work = Join-Path $env:RUNNER_TEMP "windows-desktop-msi-upgrade-qa-work-${{ matrix.go_arch }}"
+          ./scripts/build-windows-desktop-msi-artifact.ps1 `
+            -Architecture "${{ matrix.architecture }}" `
+            -GoArchitecture "${{ matrix.go_arch }}" `
+            -InstallerPlatform "${{ matrix.platform }}" `
+            -TestOnlyUpgradeQa `
+            -CodeskExe (Join-Path $payload "Codesk.exe") `
+            -AgentToolExe (Join-Path $payload "notty-agent-tool.exe") `
+            -CodeskIcon "${{ github.workspace }}\daemon\cmd\codesk-desktop\assets\codesk.ico" `
+            -SourceEvent "${{ github.event_name }}" `
+            -SourceCheckoutCommit "${{ github.sha }}" `
+            -SourceHead "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}" `
+            -SourceBase "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}" `
+            -SafeParentDirectory $env:RUNNER_TEMP `
+            -DotnetSdkVersion "8.0.423" `
+            -OutputDirectory $output `
+            -WorkingDirectory $work
+
+          $provenance = Get-Content -LiteralPath (Join-Path $output 'provenance.json') -Raw | ConvertFrom-Json
+          if ($provenance.target.buildMode -cne 'test-only-upgrade-qa' -or $provenance.target.publishable -ne $false) {
+            throw 'upgrade QA fixture was not marked non-publishable'
+          }
+      - name: Upload reproducible root-version MSI and provenance
         id: msi-upload
         uses: actions/upload-artifact@v4
         with:

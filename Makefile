@@ -185,12 +185,13 @@ windows-verify:
 		exit 1 ;; \
 	esac; \
 	out="$(WINDOWS_GUI_CI_DIR)/$$run_id"; \
+	release_version="$$(scripts/read-version.sh)"; \
 	rm -rf "$$out"; \
 	mkdir -p "$$out/amd64" "$$out/arm64"; \
 	for arch in amd64 arm64; do \
 		gh run download "$$run_id" -R "$(WINDOWS_GUI_REPOSITORY)" -n "windows-desktop-msi-$$arch" -D "$$out/$$arch" || exit $$?; \
 		dir="$$out/$$arch"; \
-		expected="$$(printf '%s\n' "Codesk_0.0.1_windows_$$arch.msi" "Codesk_0.0.2_windows_$$arch.msi" SHA256SUMS provenance.json | LC_ALL=C sort)"; \
+		expected="$$(printf '%s\n' "Codesk_$${release_version}_windows_$$arch.msi" SHA256SUMS provenance.json | LC_ALL=C sort)"; \
 		actual="$$(LC_ALL=C ls -1A "$$dir")"; \
 		if [ "$$actual" != "$$expected" ]; then \
 			printf 'unexpected %s artifact inventory:\n%s\n' "$$arch" "$$actual" >&2; \
@@ -205,7 +206,7 @@ windows-verify:
 		done; \
 		normalized="$$out/.SHA256SUMS-$$arch"; \
 		awk '{ sub(/\r$$/, ""); print }' "$$dir/SHA256SUMS" >"$$normalized"; \
-		expected_checksums="$$(printf '%s\n' "Codesk_0.0.1_windows_$$arch.msi" "Codesk_0.0.2_windows_$$arch.msi" provenance.json)"; \
+		expected_checksums="$$(printf '%s\n' "Codesk_$${release_version}_windows_$$arch.msi" provenance.json)"; \
 		actual_checksums="$$(awk 'length($$1) == 64 && $$1 ~ /^[0-9a-f]+$$/ && NF == 2 { print $$2; next } { exit 1 }' "$$normalized")" || { \
 			printf 'invalid %s SHA256SUMS format\n' "$$arch" >&2; \
 			exit 1; \

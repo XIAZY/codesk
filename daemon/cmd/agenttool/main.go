@@ -15,11 +15,15 @@ import (
 )
 
 func main() {
+	version, err := buildinfo.Require()
+	if err != nil {
+		fatalf("start agent tool: %v", err)
+	}
 	if len(os.Args) < 2 {
 		fatalf("usage: notty-agent-tool <list-documents|get-document-by-path|get-thread|list-threads-for-document|list-inbox|get-inbox-item|complete-inbox-item|dismiss-inbox-item|diff-document|mark-document-viewed|create-thread|reply-thread> [flags] (legacy notification aliases are also supported)")
 	}
 	if os.Args[1] == "--version" || os.Args[1] == "version" {
-		fmt.Println(buildinfo.Version)
+		fmt.Println(version)
 		return
 	}
 	if os.Args[1] == "--help" || os.Args[1] == "-h" || os.Args[1] == "help" {

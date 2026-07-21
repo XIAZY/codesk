@@ -54,7 +54,7 @@ func errNoAppDir(reason string) error {
 
 var ErrUnsupportedPlatform = errors.New("desktop: unsupported platform")
 
-func SyncerConfig(dirs Dirs, backendURL, workspaceID, daemonToken, daemonVersion string) (syncer.Config, error) {
+func SyncerConfig(dirs Dirs, backendURL, workspaceID, daemonToken string) (syncer.Config, error) {
 	if err := dirs.Validate(); err != nil {
 		return syncer.Config{}, err
 	}
@@ -62,7 +62,6 @@ func SyncerConfig(dirs Dirs, backendURL, workspaceID, daemonToken, daemonVersion
 		BackendURL:         backendURL,
 		WorkspaceID:        workspaceID,
 		DaemonToken:        daemonToken,
-		DaemonVersion:      daemonVersion,
 		DataDir:            dirs.Data,
 		WorkspaceDir:       filepath.Join(dirs.Data, "workspace"),
 		AgentWorkspaceRoot: filepath.Join(dirs.Data, "agents"),

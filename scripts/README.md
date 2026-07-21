@@ -225,10 +225,12 @@ dist/windows-gui/msi/arm64/Codesk_1.2.3_windows_arm64.msi
 Each architecture directory also contains `provenance.json` and
 `SHA256SUMS`. The builder derives the MSI ProductCode with UUIDv5 from its
 pinned product namespace and the canonical `"<version>+<arch>"` name while
-preserving the package's stable UpgradeCode. Its existing
-`-PreviousProductCode`/`-CandidateProductCode` parameter set remains the
-two-version QA mode used by the upgrade/reproducibility CI. Signing and
-publication remain separate release-policy work.
+preserving the package's stable UpgradeCode. Production and uploaded CI
+artifacts always use the root `VERSION`. Upgrade/reproducibility CI uses the
+explicit `-TestOnlyUpgradeQa` mode and versions from
+`scripts/testdata/windows-msi-upgrade-versions.ps1`; those artifacts are
+written under an `upgrade-qa` path, marked `publishable=false`, and never
+uploaded. Signing and publication remain separate release-policy work.
 
 From any host with `gh` plus `sha256sum` or `shasum`, download both
 architecture bundles from a successful CI run bound to the checked-out `HEAD`

@@ -192,7 +192,6 @@ try {
     Assert-True ($config.NOTTY_BACKEND_URL -eq "https://api.example.test") "backend URL was not normalized"
     Assert-True ($config.NOTTY_WORKSPACE_ID -eq $workspaceId) "workspace ID was not preserved"
     Assert-True ($config.NOTTY_DAEMON_TOKEN -eq "nottyd_test_secret") "daemon token was not preserved"
-    Assert-True ($config.NOTTY_DAEMON_VERSION -eq $version) "daemon version was not preserved"
     Assert-True ($config.NOTTY_BINARY_DIR -eq $binaryDir) "versioned binary directory was not persisted"
     Assert-True ($config.NOTTY_CODEX_COMMAND -eq $env:NOTTY_CODEX_COMMAND) "Codex command was not preserved"
     Assert-True ((Get-Acl -LiteralPath $configPath).AreAccessRulesProtected) "daemon config still inherits ACL entries"

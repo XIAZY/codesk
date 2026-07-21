@@ -142,7 +142,7 @@ func (a *Application) newService() (desktop.DaemonService, error) {
 	if !hasConfig || token == "" {
 		return nil, &syncer.ReconnectRequiredError{Err: errDesktopNotConfigured}
 	}
-	syncerConfig, err := desktop.SyncerConfig(a.dirs, a.backendOrigin, config.WorkspaceID, token, a.version)
+	syncerConfig, err := desktop.SyncerConfig(a.dirs, a.backendOrigin, config.WorkspaceID, token)
 	if err != nil {
 		return nil, err
 	}

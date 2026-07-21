@@ -13,7 +13,11 @@ import (
 )
 
 func main() {
-	log.Printf("notty daemon version %s", buildinfo.Version)
+	version, err := buildinfo.Require()
+	if err != nil {
+		log.Fatalf("start daemon: %v", err)
+	}
+	log.Printf("notty daemon version %s", version)
 	cfg := syncer.LoadConfig()
 	if cfg.PprofAddr != "" {
 		go func() {

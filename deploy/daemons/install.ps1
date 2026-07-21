@@ -398,7 +398,7 @@ if ([string]::IsNullOrWhiteSpace($StaticBase)) {
     throw "Codesk install: -StaticBase is required"
 }
 if ([string]::IsNullOrWhiteSpace($Version)) {
-    $Version = if ([string]::IsNullOrWhiteSpace($env:NOTTY_DAEMON_VERSION)) { "latest" } else { $env:NOTTY_DAEMON_VERSION }
+    $Version = "latest"
 }
 if ([string]::IsNullOrWhiteSpace($InstallDir)) {
     $InstallDir = if ([string]::IsNullOrWhiteSpace($env:NOTTY_INSTALL_DIR)) {
@@ -503,7 +503,6 @@ try {
         NOTTY_BACKEND_URL = $BackendUrl
         NOTTY_WORKSPACE_ID = $WorkspaceId
         NOTTY_DAEMON_TOKEN = $DaemonToken
-        NOTTY_DAEMON_VERSION = $Version
         NOTTY_DATA_DIR = $DataDir
         NOTTY_WORKSPACE_DIR = $workspaceDir
         NOTTY_AGENT_WORKSPACE_ROOT = $agentWorkspaceRoot
