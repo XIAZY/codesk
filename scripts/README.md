@@ -54,11 +54,11 @@ unsigned, construction-only mode:
 
 ```sh
 make macos-gui-build
-make macos-gui-build GUI_VERSION=1.2.3
 ```
 
-The signed release entry point is `make macos-gui-release GUI_VERSION=1.2.3`;
-provide both signing variables documented above. `MACOS_GUI_UNSIGNED=1` remains
+The signed release entry point is `make macos-gui-release`;
+provide both signing variables documented above. The version is read from the
+root `VERSION` file (fail-closed). `MACOS_GUI_UNSIGNED=1` remains
 an explicit construction-only escape hatch. Both human-facing targets fail
 before construction on a non-macOS kernel; the release script still owns every
 toolchain, signing, notarization, and source-cleanliness check.
@@ -201,18 +201,19 @@ payload architectures by default, and passes each to the reproducible WiX
 builder, which links the requested release twice and runs ICE validation:
 
 ```sh
-make windows-gui-release GUI_VERSION=1.2.3
+make windows-gui-release
 ```
 
 ```powershell
-powershell.exe -ExecutionPolicy Bypass -File .\make.ps1 windows-gui-release GUI_VERSION=1.2.3
+powershell.exe -ExecutionPolicy Bypass -File .\make.ps1 windows-gui-release
 ```
 
 That target fails closed unless both the host and Docker engine are real
 Windows, the Docker engine architecture matches the host, and all requested
 output paths remain under the repository bind mount. Linux containers, Wine,
 WSL, cross-architecture images, and Hyper-V isolation do not produce a release
-claim. The target requires a canonical numeric `GUI_VERSION` in the MSI range
+claim. The version is read from the root `VERSION` file (fail-closed) and must
+be a canonical numeric value in the MSI range
 (major and minor at most 255, build at most 65535) before compiling. It produces
 exactly one MSI per requested architecture:
 

@@ -127,15 +127,15 @@ function Assert-CanonicalMsiVersion {
     param([Parameter(Mandatory = $true)] [string] $Value)
 
     if ($Value -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
-        throw "GUI_VERSION must be canonical MSI X.Y.Z without leading zeros: $Value"
+        throw "VERSION must be canonical MSI X.Y.Z without leading zeros: $Value"
     }
     try {
         [uint64[]] $fields = @($Value.Split('.') | ForEach-Object { [uint64] $_ })
     } catch {
-        throw "GUI_VERSION contains a field outside the unsigned integer domain: $Value"
+        throw "VERSION contains a field outside the unsigned integer domain: $Value"
     }
     if ($fields[0] -gt 255 -or $fields[1] -gt 255 -or $fields[2] -gt 65535) {
-        throw "GUI_VERSION exceeds MSI limits (major/minor <= 255, build <= 65535): $Value"
+        throw "VERSION exceeds MSI limits (major/minor <= 255, build <= 65535): $Value"
     }
 }
 

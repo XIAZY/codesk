@@ -161,7 +161,7 @@ fi
 if [ "$target" = "all" ] || [ "$target" = "daemons" ]; then
 	daemons_prefix="${R2_DAEMONS_PREFIX:-daemons}"
 
-	[ -d "$daemon_dist_dir/$version" ] || die "missing daemon release $daemon_dist_dir/$version; run scripts/build-daemon-release.sh $version"
+	[ -d "$daemon_dist_dir/$version" ] || die "missing daemon release $daemon_dist_dir/$version; run scripts/build-daemon-release.sh"
 	[ -f "$daemon_dist_dir/$version/SHA256SUMS" ] || die "missing daemon SHA256SUMS for $version"
 	[ -f "$daemon_dist_dir/$version/manifest.json" ] || die "missing daemon manifest for $version"
 

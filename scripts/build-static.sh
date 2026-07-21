@@ -46,9 +46,9 @@ fi
 if [ "$target" = "all" ] || [ "$target" = "daemons" ]; then
 	daemon_platforms="${DAEMON_PLATFORMS:-${PLATFORMS:-}}"
 	if [ -n "$daemon_platforms" ]; then
-		VERSION="$version" DIST_DIR="$daemons_out" PLATFORMS="$daemon_platforms" "$root_dir/scripts/build-daemon-release.sh" "$version" "$daemons_out"
+		DIST_DIR="$daemons_out" PLATFORMS="$daemon_platforms" "$root_dir/scripts/build-daemon-release.sh" "$daemons_out"
 	else
-		VERSION="$version" DIST_DIR="$daemons_out" "$root_dir/scripts/build-daemon-release.sh" "$version" "$daemons_out"
+		DIST_DIR="$daemons_out" "$root_dir/scripts/build-daemon-release.sh" "$daemons_out"
 	fi
 fi
 

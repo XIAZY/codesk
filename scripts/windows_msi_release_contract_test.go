@@ -79,11 +79,11 @@ func TestWindowsGUIMakeRoutesWithoutPOSIXTools(t *testing.T) {
 			t.Fatalf("Windows-native Make %s dispatch failed: %v", target, err)
 		}
 	}
-	old := `"GUI_VERSION=$(GUI_VERSION)" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)"`
+	old := `make.ps1 windows-gui-build "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)"`
 	if strings.Count(makeSource, old) != 1 {
 		t.Fatalf("Windows build route source count = %d, want 1", strings.Count(makeSource, old))
 	}
-	mutated := strings.Replace(makeSource, old, `"GUI_VERSION=$(GUI_VERSION)" "WINDOWS_GUI_ARCHES=amd64" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)"`, 1)
+	mutated := strings.Replace(makeSource, old, `make.ps1 windows-gui-build "WINDOWS_GUI_ARCHES=amd64" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)"`, 1)
 	if err := runWindowsGUIDispatch(mutated, "windows-gui-build"); err == nil {
 		t.Fatal("Make injected a spoofed build architecture into the PowerShell route")
 	}
@@ -143,7 +143,7 @@ func TestWindowsGUIPowerShellDefaultsArchitectureAndRoot(t *testing.T) {
 		t.Fatalf("invalid release version unexpectedly succeeded: %s", output)
 	}
 	text := string(output)
-	if !strings.Contains(text, "GUI_VERSION must be canonical MSI X.Y.Z") {
+	if !strings.Contains(text, "VERSION must be canonical MSI X.Y.Z") {
 		t.Fatalf("release default failure = %q, want canonical version rejection", output)
 	}
 	for _, regression := range []string{
@@ -269,8 +269,8 @@ func TestWindowsMSIReleaseSourceContract(t *testing.T) {
 		},
 		{
 			name:    "Make injects a spoofable build architecture",
-			makeOld: `"GUI_VERSION=$(GUI_VERSION)" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)"`,
-			makeNew: `"GUI_VERSION=$(GUI_VERSION)" "WINDOWS_GUI_ARCHES=amd64" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)"`,
+			makeOld: `make.ps1 windows-gui-build "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)"`,
+			makeNew: `make.ps1 windows-gui-build "WINDOWS_GUI_ARCHES=amd64" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)"`,
 		},
 		{
 			name:    "PowerShell shim loses a public target",
@@ -592,6 +592,9 @@ done
 	}
 	makePath := filepath.Join(tempDir, "Makefile")
 	if err := os.WriteFile(makePath, []byte(makeSource), 0o600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "VERSION"), []byte("0.0.1\n"), 0o644); err != nil {
 		return err
 	}
 	capturePath := filepath.Join(tempDir, "powershell.args")
@@ -1015,7 +1018,7 @@ func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) er
 	}
 	for source, want := range map[string]int{
 		"ifeq ($(OS),Windows_NT)":                                      2,
-		"\nVERSION ?= $(FILE_VERSION)\n":                               2,
+		"\noverride VERSION := $(FILE_VERSION)\n":                       2,
 		"WINDOWS_PROCESSOR_ARCH :=":                                    1,
 		"override MACOS_GUI_HOST_OS :=":                                2,
 		`if [ "$(MACOS_GUI_HOST_OS)" != darwin ]; then`:                2,
