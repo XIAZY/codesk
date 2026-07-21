@@ -1614,23 +1614,23 @@ Focused build targets:
 - `make build-daemon`: compile local `notty-daemon` and `notty-agent-tool` binaries into `bin`.
 - `make build-static-local`: build local host-platform daemon artifacts into `dist/static/daemons`.
 - `make build-backend-image`: build the backend Docker image locally without pushing.
-- `make build-static VERSION=v0.1.0`: build the full production static tree.
-- `make daemon-release-all VERSION=v0.1.0`: build daemon release archives for every supported target.
+- `make build-static`: build the full production static tree.
+- `make daemon-release-all`: build daemon release archives for every supported target.
 
 Build daemon release artifacts for every supported target:
 
 ```sh
-make daemon-release-all VERSION=v0.1.0
+make daemon-release-all
 ```
 
-This creates stable `install.sh`, `uninstall.sh`, `install.ps1`, and `uninstall.ps1` entrypoints, plus `latest/manifest.json`, `latest/SHA256SUMS`, and versioned archives containing `notty-daemon` and `notty-agent-tool`. Unix archives are `.tar.gz`; native Windows AMD64 and ARM64 releases are `.zip` files that also contain `run-windows.ps1`. Use `make daemon-release VERSION=v0.1.0 PLATFORMS="windows/amd64 windows/arm64"` for a focused Windows release.
+The canonical release version is read from the root `VERSION` file. This creates stable `install.sh`, `uninstall.sh`, `install.ps1`, and `uninstall.ps1` entrypoints, plus `latest/manifest.json`, `latest/SHA256SUMS`, and versioned archives containing `notty-daemon` and `notty-agent-tool`. Unix archives are `.tar.gz`; native Windows AMD64 and ARM64 releases are `.zip` files that also contain `run-windows.ps1`. Use `make daemon-release PLATFORMS="windows/amd64 windows/arm64"` for a focused Windows release.
 
 Publish artifacts without changing the running backend:
 
-- `make publish-backend VERSION=v0.1.0`: build and push `alphatoad/notty:backend-v0.1.0` plus `backend-latest`.
-- `make publish-frontend VERSION=v0.1.0`: build and upload frontend/homepage assets to Cloudflare R2.
-- `make publish-static VERSION=v0.1.0`: build and upload daemon installer and release tarballs to Cloudflare R2.
-- `make publish VERSION=v0.1.0`: run all three publish jobs.
+- `make publish-backend`: build and push `alphatoad/notty:backend-<VERSION>` plus `backend-latest`.
+- `make publish-frontend`: build and upload frontend/homepage assets to Cloudflare R2.
+- `make publish-static`: build and upload daemon installer and release tarballs to Cloudflare R2.
+- `make publish`: run all three publish jobs.
 
 Build only local daemon artifacts for the current host platform:
 
@@ -1638,33 +1638,33 @@ Build only local daemon artifacts for the current host platform:
 make build-static-local
 ```
 
-This creates `dist/static/daemons` with `VERSION=dev` and only the current host platform, which is enough for local installer testing at `http://localhost:${NOTTY_STATIC_PORT:-5174}/daemons/install.sh`.
+This creates `dist/static/daemons` with the canonical root `VERSION` and only the current host platform, which is enough for local installer testing at `http://localhost:${NOTTY_STATIC_PORT:-5174}/daemons/install.sh`.
 
 Deploy frontend/homepage assets to Cloudflare R2:
 
 ```sh
 source ~/.zshrc
-make deploy-frontend VERSION=v0.1.0
+make deploy-frontend
 ```
 
 Deploy daemon installer and release tarballs to Cloudflare R2:
 
 ```sh
 source ~/.zshrc
-make deploy-static VERSION=v0.1.0
+make deploy-static
 ```
 
 Deploy only the backend to the production server:
 
 ```sh
-make deploy-backend VERSION=v0.1.0
+make deploy-backend
 ```
 
 Deploy the full release in order, frontend, daemon static artifacts, then backend:
 
 ```sh
 source ~/.zshrc
-make deploy VERSION=v0.1.0
+make deploy
 ```
 
 Non-secret deployment defaults are split by consumer:
@@ -1704,7 +1704,7 @@ key. Daemon artifacts stay under `daemons/` so installer URLs remain stable.
 Production backend deployment uses `compose.prod.yml`. The remote server should keep `/opt/notty/secrets.env` outside git with only secrets such as `NOTTY_DATABASE_URL`, `NOTTY_JWT_SECRET`, and `NOTTY_MAILGUN_API_KEY`. `scripts/deploy-backend.sh` calls `scripts/publish-backend.sh` to build and push `alphatoad/notty:backend-<version>`, uploads `compose.prod.yml`, `deploy/env/prod.server.env`, and the Compose-mounted nginx config to SSH host `notty`, then restarts the production Compose stack:
 
 ```sh
-make deploy-backend VERSION=v0.1.0
+make deploy-backend
 ```
 
 Production API traffic is routed by the Compose-managed nginx service. The nginx config lives at `deploy/nginx/notty-api.conf` and is mounted into the nginx container as `/etc/nginx/conf.d/default.conf`. It handles:
@@ -1774,7 +1774,6 @@ Important daemon environment variables:
 - `NOTTY_BACKEND_URL`: backend URL.
 - `NOTTY_WORKSPACE_ID`: workspace the daemon belongs to.
 - `NOTTY_DAEMON_TOKEN`: one-time daemon token from backend.
-- `NOTTY_DAEMON_VERSION`: installed daemon version reported to the backend.
 - `NOTTY_WORKSPACE_DIR`: local canonical workspace projection.
 - `NOTTY_AGENT_WORKSPACE_ROOT`: parent directory for per-agent workspaces.
 - `NOTTY_CODEX_COMMAND`: optional Codex executable used for Codex runtime detection, default `codex`.

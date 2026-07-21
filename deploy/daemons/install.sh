@@ -2,7 +2,7 @@
 set -eu
 
 static_base="${NOTTY_DAEMON_STATIC_BASE:-}"
-version="${NOTTY_DAEMON_VERSION:-latest}"
+version="latest"
 install_dir="${NOTTY_INSTALL_DIR:-$HOME/.notty/bin}"
 data_dir="${NOTTY_DATA_DIR:-$HOME/.notty}"
 backend_url=""
@@ -366,7 +366,6 @@ mv "$install_dir/.notty-agent-tool.$$" "$install_dir/notty-agent-tool"
 	printf 'export NOTTY_BACKEND_URL=%s\n' "$(shell_quote "$backend_url")"
 	printf 'export NOTTY_WORKSPACE_ID=%s\n' "$(shell_quote "$workspace_id")"
 	printf 'export NOTTY_DAEMON_TOKEN=%s\n' "$(shell_quote "$daemon_token")"
-	printf 'export NOTTY_DAEMON_VERSION=%s\n' "$(shell_quote "$version")"
 	printf 'export NOTTY_DATA_DIR=%s\n' "$(shell_quote "$data_dir")"
 	printf 'export NOTTY_WORKSPACE_DIR=%s\n' "$(shell_quote "$workspace_dir")"
 	printf 'export NOTTY_AGENT_WORKSPACE_ROOT=%s\n' "$(shell_quote "$agent_workspace_root")"
@@ -385,7 +384,7 @@ chmod 600 "$env_file"
 	printf '#!/usr/bin/env sh\n'
 	printf 'set -eu\n'
 	printf '. %s\n' "$(shell_quote "$env_file")"
-	printf 'export NOTTY_BACKEND_URL NOTTY_WORKSPACE_ID NOTTY_DAEMON_TOKEN NOTTY_DAEMON_VERSION NOTTY_DATA_DIR NOTTY_WORKSPACE_DIR NOTTY_AGENT_WORKSPACE_ROOT NOTTY_CODEX_COMMAND NOTTY_CLAUDE_COMMAND NOTTY_TOOL_DIR_CODEX NOTTY_TOOL_DIR_CLAUDE\n'
+	printf 'export NOTTY_BACKEND_URL NOTTY_WORKSPACE_ID NOTTY_DAEMON_TOKEN NOTTY_DATA_DIR NOTTY_WORKSPACE_DIR NOTTY_AGENT_WORKSPACE_ROOT NOTTY_CODEX_COMMAND NOTTY_CLAUDE_COMMAND NOTTY_TOOL_DIR_CODEX NOTTY_TOOL_DIR_CLAUDE\n'
 	printf '%s\n' "$notty_path_helpers"
 	printf 'notty_derive_daemon_path\n'
 	printf 'export PATH=%s:"$PATH"\n' "$(shell_quote "$install_dir")"

@@ -8,10 +8,18 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"runtime"
+	"strings"
 	"testing"
+
+	"notty/daemon/internal/buildinfo"
 )
 
 func TestDaemonStatusReporterSendsRuntimeDetections(t *testing.T) {
+	previousVersion := buildinfo.Version
+	buildinfo.Version = "0.62.0"
+	t.Cleanup(func() { buildinfo.Version = previousVersion })
+	t.Setenv("NOTTY_DAEMON_VERSION", "9.9.9")
+
 	var gotPath string
 	var gotAuth string
 	var gotPayload daemonStatusUpdate
@@ -32,13 +40,11 @@ func TestDaemonStatusReporterSendsRuntimeDetections(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{
-		BackendURL:         server.URL,
-		WorkspaceID:        "workspace:test",
-		DaemonToken:        "daemon_token",
-		DaemonVersion:      "0.62.0",
-		AgentWorkspaceRoot: t.TempDir(),
-	}
+	cfg := LoadConfig()
+	cfg.BackendURL = server.URL
+	cfg.WorkspaceID = "workspace:test"
+	cfg.DaemonToken = "daemon_token"
+	cfg.AgentWorkspaceRoot = t.TempDir()
 	reporter := newDaemonStatusReporter(cfg, server.Client())
 	detections := []RuntimeDetection{{
 		Kind:      RuntimeCodex,
@@ -62,5 +68,30 @@ func TestDaemonStatusReporterSendsRuntimeDetections(t *testing.T) {
 	}
 	if len(gotPayload.Runtimes) != 1 || gotPayload.Runtimes[0].Kind != RuntimeCodex || !gotPayload.Runtimes[0].Available {
 		t.Fatalf("unexpected runtime detections: %#v", gotPayload.Runtimes)
+	}
+}
+
+func TestDaemonStatusReporterRejectsMissingEmbeddedVersion(t *testing.T) {
+	previousVersion := buildinfo.Version
+	buildinfo.Version = ""
+	t.Cleanup(func() { buildinfo.Version = previousVersion })
+
+	requestSeen := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestSeen = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	reporter := newDaemonStatusReporter(Config{
+		BackendURL:  server.URL,
+		WorkspaceID: "workspace:test",
+		DaemonToken: "daemon_token",
+	}, server.Client())
+	if err := reporter.Report(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "embedded build version") {
+		t.Fatalf("Report() error = %v, want missing embedded version", err)
+	}
+	if requestSeen {
+		t.Fatal("status reporter sent a request without an embedded build version")
 	}
 }

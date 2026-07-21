@@ -4,7 +4,6 @@ param(
     [ValidateSet('windows-gui-build', 'windows-gui-release')]
     [string] $Target,
 
-    [string] $Version = 'dev',
     [AllowNull()]
     [AllowEmptyString()]
     [object] $Architectures = $null,
@@ -121,22 +120,6 @@ function Get-NormalizedArchitectures {
         throw "windows-gui-build architecture $($result[0]) does not match host $hostArchitecture"
     }
     return $result
-}
-
-function Assert-CanonicalMsiVersion {
-    param([Parameter(Mandatory = $true)] [string] $Value)
-
-    if ($Value -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
-        throw "GUI_VERSION must be canonical MSI X.Y.Z without leading zeros: $Value"
-    }
-    try {
-        [uint64[]] $fields = @($Value.Split('.') | ForEach-Object { [uint64] $_ })
-    } catch {
-        throw "GUI_VERSION contains a field outside the unsigned integer domain: $Value"
-    }
-    if ($fields[0] -gt 255 -or $fields[1] -gt 255 -or $fields[2] -gt 65535) {
-        throw "GUI_VERSION exceeds MSI limits (major/minor <= 255, build <= 65535): $Value"
-    }
 }
 
 function Assert-ExactRealFiles {
@@ -300,7 +283,7 @@ function Invoke-WindowsMsiRelease {
                 Architecture = $runnerArchitecture
                 GoArchitecture = $architecture
                 InstallerPlatform = $installerPlatform
-                ProductVersion = $Version
+                Release = $true
                 CodeskExe = Join-Path (Join-Path $PayloadDirectory $architecture) 'Codesk.exe'
                 AgentToolExe = Join-Path (Join-Path $PayloadDirectory $architecture) 'notty-agent-tool.exe'
                 CodeskIcon = $icon
@@ -315,7 +298,7 @@ function Invoke-WindowsMsiRelease {
             & $builder @parameters
             $releaseParameters = @{
                 Directory = $outputDirectory
-                Names = @("Codesk_${Version}_windows_$architecture.msi", 'SHA256SUMS', 'provenance.json')
+                Names = @("Codesk_${version}_windows_$architecture.msi", 'SHA256SUMS', 'provenance.json')
                 Label = "$architecture release"
             }
             Assert-ExactRealFiles @releaseParameters
@@ -335,15 +318,12 @@ if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
     $RepositoryRoot = Split-Path -Parent $PSScriptRoot
 }
 $root = Resolve-RepositoryPath -Path $RepositoryRoot -Root (Get-Location).Path
+$version = & (Join-Path $root 'scripts/read-version.ps1')
 $windowsDirectory = Resolve-RepositoryPath -Path $WindowsRoot -Root $root
 $payloadDirectory = Resolve-RepositoryPath -Path $PayloadRoot -Root $root
 $testDirectory = Resolve-RepositoryPath -Path $TestRoot -Root $root
 $msiDirectory = Resolve-RepositoryPath -Path $MsiRoot -Root $root
 [string[]] $selectedArchitectures = @(Get-NormalizedArchitectures -Value $Architectures)
-
-if ($Target -ceq 'windows-gui-release') {
-    Assert-CanonicalMsiVersion -Value $Version
-}
 
 $payloadParameters = @{
     SelectedArchitectures = $selectedArchitectures

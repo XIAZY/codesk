@@ -51,7 +51,7 @@ The observable local outcome is that `docker compose up --build` starts the loca
   Evidence: `backend/internal/notty/server_http.go` sets `Access-Control-Allow-Origin: *`; `deploy/nginx/notty-api.conf` uses `proxy_hide_header` for upstream CORS headers.
 
 - Observation: The available Cloudflare token is present but cannot list account IDs, so non-interactive Wrangler R2 publishing needs `CLOUDFLARE_ACCOUNT_ID`.
-  Evidence: `npx wrangler r2 bucket list` and `scripts/publish-static-r2.sh dev` both failed with "Failed to automatically retrieve account IDs" before uploading `homepage/index.html`.
+  Evidence: `npx wrangler r2 bucket list` and `scripts/publish-static-r2.sh` both failed with "Failed to automatically retrieve account IDs" before uploading `homepage/index.html`.
 
 - Observation: The created R2 bucket is named `notty-staic-prod`, not `notty-static-prod`.
   Evidence: `npx wrangler r2 bucket list` with `CLOUDFLARE_ACCOUNT_ID=d8cad58199d138868f519a3a55c7e3c5` returned `name: notty-staic-prod`.

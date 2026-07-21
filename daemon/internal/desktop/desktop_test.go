@@ -17,9 +17,9 @@ func validDirs(t *testing.T) Dirs {
 	}
 }
 
-func mustSyncerConfig(t *testing.T, dirs Dirs, backendURL, workspaceID, daemonToken, daemonVersion string) syncer.Config {
+func mustSyncerConfig(t *testing.T, dirs Dirs, backendURL, workspaceID, daemonToken string) syncer.Config {
 	t.Helper()
-	cfg, err := SyncerConfig(dirs, backendURL, workspaceID, daemonToken, daemonVersion)
+	cfg, err := SyncerConfig(dirs, backendURL, workspaceID, daemonToken)
 	if err != nil {
 		t.Fatalf("SyncerConfig() unexpected error: %v", err)
 	}
@@ -28,7 +28,7 @@ func mustSyncerConfig(t *testing.T, dirs Dirs, backendURL, workspaceID, daemonTo
 
 func TestSyncerConfigNeverReferencesCLIPaths(t *testing.T) {
 	dirs := validDirs(t)
-	cfg := mustSyncerConfig(t, dirs, "https://api.getcodesk.com", "ws-1", "tok-1", "1.0.0")
+	cfg := mustSyncerConfig(t, dirs, "https://api.getcodesk.com", "ws-1", "tok-1")
 
 	cliPaths := []string{".notty", string(filepath.Separator) + "notty"}
 	fields := map[string]string{
@@ -66,7 +66,7 @@ func TestLoginItemRegistrationRequiresExactNonemptyCommand(t *testing.T) {
 
 func TestSyncerConfigAllPathsUnderDataDir(t *testing.T) {
 	dirs := validDirs(t)
-	cfg := mustSyncerConfig(t, dirs, "https://api.getcodesk.com", "ws-1", "tok-1", "1.0.0")
+	cfg := mustSyncerConfig(t, dirs, "https://api.getcodesk.com", "ws-1", "tok-1")
 
 	paths := map[string]string{
 		"DataDir":            cfg.DataDir,
@@ -83,7 +83,7 @@ func TestSyncerConfigAllPathsUnderDataDir(t *testing.T) {
 
 func TestSyncerConfigFieldMapping(t *testing.T) {
 	dirs := validDirs(t)
-	cfg := mustSyncerConfig(t, dirs, "https://backend", "workspace-id", "secret-token", "2.0.0")
+	cfg := mustSyncerConfig(t, dirs, "https://backend", "workspace-id", "secret-token")
 
 	if cfg.BackendURL != "https://backend" {
 		t.Errorf("BackendURL = %q, want %q", cfg.BackendURL, "https://backend")
@@ -93,9 +93,6 @@ func TestSyncerConfigFieldMapping(t *testing.T) {
 	}
 	if cfg.DaemonToken != "secret-token" {
 		t.Errorf("DaemonToken = %q, want %q", cfg.DaemonToken, "secret-token")
-	}
-	if cfg.DaemonVersion != "2.0.0" {
-		t.Errorf("DaemonVersion = %q, want %q", cfg.DaemonVersion, "2.0.0")
 	}
 	if cfg.DataDir != dirs.Data {
 		t.Errorf("DataDir = %q, want %q", cfg.DataDir, dirs.Data)
@@ -131,7 +128,7 @@ func TestSyncerConfigDoesNotReadEnv(t *testing.T) {
 	}
 
 	dirs := validDirs(t)
-	cfg := mustSyncerConfig(t, dirs, "https://clean.api", "ws-clean", "tok-clean", "1.0.0")
+	cfg := mustSyncerConfig(t, dirs, "https://clean.api", "ws-clean", "tok-clean")
 
 	if strings.Contains(cfg.BackendURL, "poisoned") {
 		t.Errorf("BackendURL read from env: %q", cfg.BackendURL)
@@ -181,7 +178,7 @@ func TestSyncerConfigRejectsInvalidDirs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg, err := SyncerConfig(tt.dirs, "https://api", "ws", "tok", "1.0")
+			cfg, err := SyncerConfig(tt.dirs, "https://api", "ws", "tok")
 			if err == nil {
 				t.Errorf("SyncerConfig() should reject invalid dirs, got DataDir=%q", cfg.DataDir)
 			}
@@ -191,7 +188,7 @@ func TestSyncerConfigRejectsInvalidDirs(t *testing.T) {
 
 func TestSyncerConfigSuccessInvariants(t *testing.T) {
 	dirs := validDirs(t)
-	cfg, err := SyncerConfig(dirs, "https://api", "ws", "tok", "1.0")
+	cfg, err := SyncerConfig(dirs, "https://api", "ws", "tok")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

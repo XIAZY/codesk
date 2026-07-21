@@ -14,7 +14,7 @@ payload_dir="${1:-$root_dir/dist/windows-gui/payload}"
 test_dir="${2:-$root_dir/dist/windows-gui/tests}"
 safe_parent="${WINDOWS_GUI_SAFE_PARENT_DIRECTORY:-$root_dir/dist/windows-gui}"
 architectures="${WINDOWS_GUI_ARCHES-amd64 arm64}"
-build_version="$(cat "$root_dir/VERSION" 2>/dev/null || printf dev)"
+build_version="$("$root_dir/scripts/read-version.sh")"
 required_zig_version="${WINDOWS_GUI_ZIG_VERSION:-0.16.0}"
 host_yffi_link="$root_dir/third_party/y-crdt/target/release/libyrs.a"
 host_yffi_backup=
@@ -171,10 +171,10 @@ for architecture in $validated_architectures; do
 		go test -c -o "$test_dir/codesk-desktop-$architecture.test.exe" ./daemon/cmd/codesk-desktop
 	CC="$cc_command" CGO_ENABLED=1 GOOS=windows GOARCH="$architecture" \
 		go build -trimpath -buildvcs=false \
-			-ldflags="-H=windowsgui -extldflags=-Wl,--subsystem,windows -X main.desktopVersion=$build_version" \
+			-ldflags="-H=windowsgui -extldflags=-Wl,--subsystem,windows -X notty/daemon/internal/buildinfo.Version=$build_version" \
 			-o "$arch_payload_dir/Codesk.exe" ./daemon/cmd/codesk-desktop
 	CGO_ENABLED=0 GOOS=windows GOARCH="$architecture" \
-		go build -trimpath -buildvcs=false -ldflags='-s -w' \
+		go build -trimpath -buildvcs=false -ldflags="-s -w -X notty/daemon/internal/buildinfo.Version=$build_version" \
 			-o "$arch_payload_dir/notty-agent-tool.exe" ./daemon/cmd/agenttool
 	go run ./scripts/verify-windows-desktop-pe.go "$arch_payload_dir/Codesk.exe" "$architecture" gui
 	go run ./scripts/verify-windows-desktop-pe.go "$arch_payload_dir/notty-agent-tool.exe" "$architecture" console

@@ -12,7 +12,6 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $supportedSettings = @(
-    'GUI_VERSION',
     'WINDOWS_GUI_ARCHES',
     'WINDOWS_GUI_ROOT',
     'WINDOWS_GUI_PAYLOAD_ROOT',
@@ -56,12 +55,13 @@ switch ($Target) {
     }
 }
 
+$null = & (Join-Path $PSScriptRoot 'scripts/read-version.ps1')
+
 $parameters = @{
     Target = $Target
     RepositoryRoot = $PSScriptRoot
 }
 $mapping = @{
-    'GUI_VERSION' = 'Version'
     'WINDOWS_GUI_ROOT' = 'WindowsRoot'
     'WINDOWS_GUI_PAYLOAD_ROOT' = 'PayloadRoot'
     'WINDOWS_GUI_TEST_DIR' = 'TestRoot'
@@ -85,14 +85,6 @@ if ($Target -ceq 'build-windows-builder-image') {
     }
     & (Join-Path $PSScriptRoot 'scripts/build-windows-gui-builder-image.ps1') @builderParameters
     return
-}
-
-if (-not $settings.ContainsKey('GUI_VERSION')) {
-    $versionFile = Join-Path $PSScriptRoot 'VERSION'
-    if (Test-Path -LiteralPath $versionFile -PathType Leaf) {
-        $settings['GUI_VERSION'] = (Get-Content -LiteralPath $versionFile -TotalCount 1).Trim()
-        $parameters['Version'] = $settings['GUI_VERSION']
-    }
 }
 
 if ($Target -ceq 'windows-gui-release' -and $settings.ContainsKey('WINDOWS_GUI_ARCHES')) {

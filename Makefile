@@ -1,25 +1,27 @@
 DIST_DIR ?= dist/static/daemons
 GO_BUILD_FLAGS ?= -trimpath
-FILE_VERSION := $(shell cat VERSION 2>/dev/null || printf dev)
+WINDOWS_GUI_POWERSHELL ?= powershell.exe
 GO_LDFLAGS ?= -s -w
 ifeq ($(OS),Windows_NT)
-VERSION ?= $(FILE_VERSION)
+override REPOSITORY_VERSION := $(shell "$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/read-version.ps1)
 WINDOWS_PROCESSOR_ARCH := $(if $(PROCESSOR_ARCHITEW6432),$(PROCESSOR_ARCHITEW6432),$(PROCESSOR_ARCHITECTURE))
 HOST_OS := windows
 HOST_ARCH := $(if $(filter AMD64 amd64 x86_64,$(WINDOWS_PROCESSOR_ARCH)),amd64,$(if $(filter ARM64 arm64 aarch64,$(WINDOWS_PROCESSOR_ARCH)),arm64,$(WINDOWS_PROCESSOR_ARCH)))
 override MACOS_GUI_HOST_OS :=
 else
-VERSION ?= $(FILE_VERSION)
+override REPOSITORY_VERSION := $(shell scripts/read-version.sh)
 UNAME_S := $(shell uname -s | tr '[:upper:]' '[:lower:]')
 UNAME_M := $(shell uname -m)
 HOST_OS := $(if $(filter darwin,$(UNAME_S)),darwin,$(if $(filter linux,$(UNAME_S)),linux,$(UNAME_S)))
 HOST_ARCH := $(if $(filter x86_64 amd64,$(UNAME_M)),amd64,$(if $(filter arm64 aarch64,$(UNAME_M)),arm64,$(UNAME_M)))
 override MACOS_GUI_HOST_OS := $(if $(filter darwin,$(UNAME_S)),darwin,)
 endif
+ifeq ($(REPOSITORY_VERSION),)
+$(error root VERSION is invalid)
+endif
 HOST_PLATFORM := $(HOST_OS)/$(HOST_ARCH)
 PLATFORMS ?= $(HOST_PLATFORM)
 DAEMON_ALL_PLATFORMS ?= all
-GUI_VERSION ?= $(FILE_VERSION)
 MACOS_GUI_DIST_DIR ?= dist/macos-desktop
 MACOS_GUI_UNSIGNED ?=
 WINDOWS_GUI_ARCHES ?= amd64 arm64
@@ -31,7 +33,6 @@ WINDOWS_GUI_CI_DIR ?= $(WINDOWS_GUI_ROOT)/ci
 WINDOWS_GUI_REPOSITORY ?= XIAZY/notty
 WINDOWS_GUI_BUILDER_IMAGE ?= alphatoad/notty:windows-builder
 WINDOWS_GUI_RUN_ID ?=
-WINDOWS_GUI_POWERSHELL ?= powershell.exe
 WINDOWS_GUI_ZIG_VERSION ?= 0.16.0
 
 .PHONY: dev dev-down dev-config-check prod-config-check \
@@ -39,7 +40,7 @@ WINDOWS_GUI_ZIG_VERSION ?= 0.16.0
 	build build-yffi build-go build-frontend build-daemon build-static build-static-local build-backend-image \
 	publish publish-backend publish-frontend publish-static \
 	deploy deploy-backend deploy-frontend deploy-static \
-	prod-config-check static-build static-build-local static-publish backend-image daemon-build daemon-release daemon-release-all release-daemons daemon-checksums daemon-clean daemon-installer-check daemon-installer-windows-check daemon-uninstall-test \
+	prod-config-check static-build static-build-local static-publish backend-image daemon-build daemon-release daemon-release-all release-daemons daemon-checksums daemon-clean daemon-installer-check daemon-installer-windows-check daemon-uninstall-test version-contract-check \
 	macos-gui-build macos-gui-release build-windows-builder-image windows-gui-payloads windows-gui-build windows-gui-release windows-verify
 
 dev: static-build-local
@@ -62,7 +63,7 @@ test: tests
 
 tests: test-unit test-postgres test-regression test-live
 
-test-unit: test-go test-frontend daemon-installer-check daemon-uninstall-test
+test-unit: test-go test-frontend daemon-installer-check daemon-uninstall-test version-contract-check
 
 test-go: build-yffi
 	go test ./...
@@ -92,16 +93,16 @@ build-frontend:
 
 build-daemon: build-yffi
 	mkdir -p bin
-	CGO_ENABLED=1 go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS)" -o bin/notty-daemon ./daemon/cmd/daemon
-	CGO_ENABLED=0 go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS)" -o bin/notty-agent-tool ./daemon/cmd/agenttool
+	CGO_ENABLED=1 go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS) -X notty/daemon/internal/buildinfo.Version=$(REPOSITORY_VERSION)" -o bin/notty-daemon ./daemon/cmd/daemon
+	CGO_ENABLED=0 go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS) -X notty/daemon/internal/buildinfo.Version=$(REPOSITORY_VERSION)" -o bin/notty-agent-tool ./daemon/cmd/agenttool
 
 daemon-build: build-daemon
 
 daemon-release:
-	VERSION="$(VERSION)" DIST_DIR="$(DIST_DIR)" PLATFORMS="$(PLATFORMS)" scripts/build-daemon-release.sh "$(VERSION)" "$(DIST_DIR)"
+	DIST_DIR="$(DIST_DIR)" PLATFORMS="$(PLATFORMS)" scripts/build-daemon-release.sh "$(DIST_DIR)"
 
 daemon-release-all:
-	VERSION="$(VERSION)" DIST_DIR="$(DIST_DIR)" PLATFORMS="$(DAEMON_ALL_PLATFORMS)" scripts/build-daemon-release.sh "$(VERSION)" "$(DIST_DIR)"
+	DIST_DIR="$(DIST_DIR)" PLATFORMS="$(DAEMON_ALL_PLATFORMS)" scripts/build-daemon-release.sh "$(DIST_DIR)"
 
 release-daemons: daemon-release-all
 
@@ -123,10 +124,10 @@ build-windows-builder-image:
 	@"$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File make.ps1 build-windows-builder-image "WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"
 
 windows-gui-build:
-	@"$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File make.ps1 windows-gui-build "GUI_VERSION=$(GUI_VERSION)" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)" "WINDOWS_GUI_PAYLOAD_ROOT=$(WINDOWS_GUI_PAYLOAD_ROOT)" "WINDOWS_GUI_TEST_DIR=$(WINDOWS_GUI_TEST_DIR)" "WINDOWS_GUI_MSI_ROOT=$(WINDOWS_GUI_MSI_ROOT)" "WINDOWS_GUI_REPOSITORY=$(WINDOWS_GUI_REPOSITORY)" "WINDOWS_GUI_ZIG_VERSION=$(WINDOWS_GUI_ZIG_VERSION)" "WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"
+	@"$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File make.ps1 windows-gui-build "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)" "WINDOWS_GUI_PAYLOAD_ROOT=$(WINDOWS_GUI_PAYLOAD_ROOT)" "WINDOWS_GUI_TEST_DIR=$(WINDOWS_GUI_TEST_DIR)" "WINDOWS_GUI_MSI_ROOT=$(WINDOWS_GUI_MSI_ROOT)" "WINDOWS_GUI_REPOSITORY=$(WINDOWS_GUI_REPOSITORY)" "WINDOWS_GUI_ZIG_VERSION=$(WINDOWS_GUI_ZIG_VERSION)" "WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"
 
 windows-gui-release:
-	@"$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File make.ps1 windows-gui-release "GUI_VERSION=$(GUI_VERSION)" "WINDOWS_GUI_ARCHES=$(WINDOWS_GUI_ARCHES)" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)" "WINDOWS_GUI_PAYLOAD_ROOT=$(WINDOWS_GUI_PAYLOAD_ROOT)" "WINDOWS_GUI_TEST_DIR=$(WINDOWS_GUI_TEST_DIR)" "WINDOWS_GUI_MSI_ROOT=$(WINDOWS_GUI_MSI_ROOT)" "WINDOWS_GUI_REPOSITORY=$(WINDOWS_GUI_REPOSITORY)" "WINDOWS_GUI_ZIG_VERSION=$(WINDOWS_GUI_ZIG_VERSION)" "WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"
+	@"$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File make.ps1 windows-gui-release "WINDOWS_GUI_ARCHES=$(WINDOWS_GUI_ARCHES)" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)" "WINDOWS_GUI_PAYLOAD_ROOT=$(WINDOWS_GUI_PAYLOAD_ROOT)" "WINDOWS_GUI_TEST_DIR=$(WINDOWS_GUI_TEST_DIR)" "WINDOWS_GUI_MSI_ROOT=$(WINDOWS_GUI_MSI_ROOT)" "WINDOWS_GUI_REPOSITORY=$(WINDOWS_GUI_REPOSITORY)" "WINDOWS_GUI_ZIG_VERSION=$(WINDOWS_GUI_ZIG_VERSION)" "WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"
 else
 macos-gui-build:
 	@if [ "$(MACOS_GUI_HOST_OS)" != darwin ]; then \
@@ -134,7 +135,7 @@ macos-gui-build:
 		exit 1; \
 	fi
 	ALLOW_UNSIGNED_MACOS_DESKTOP=1 \
-		scripts/build-macos-desktop-release.sh "$(GUI_VERSION)" "$(MACOS_GUI_DIST_DIR)"
+		scripts/build-macos-desktop-release.sh "$(MACOS_GUI_DIST_DIR)"
 
 macos-gui-release:
 	@if [ "$(MACOS_GUI_HOST_OS)" != darwin ]; then \
@@ -142,7 +143,7 @@ macos-gui-release:
 		exit 1; \
 	fi
 	ALLOW_UNSIGNED_MACOS_DESKTOP="$(MACOS_GUI_UNSIGNED)" \
-		scripts/build-macos-desktop-release.sh "$(GUI_VERSION)" "$(MACOS_GUI_DIST_DIR)"
+		scripts/build-macos-desktop-release.sh "$(MACOS_GUI_DIST_DIR)"
 
 build-windows-builder-image:
 	@printf '%s\n' 'build-windows-builder-image requires a real Windows host running Windows containers' >&2
@@ -184,12 +185,13 @@ windows-verify:
 		exit 1 ;; \
 	esac; \
 	out="$(WINDOWS_GUI_CI_DIR)/$$run_id"; \
+	release_version="$$(scripts/read-version.sh)"; \
 	rm -rf "$$out"; \
 	mkdir -p "$$out/amd64" "$$out/arm64"; \
 	for arch in amd64 arm64; do \
 		gh run download "$$run_id" -R "$(WINDOWS_GUI_REPOSITORY)" -n "windows-desktop-msi-$$arch" -D "$$out/$$arch" || exit $$?; \
 		dir="$$out/$$arch"; \
-		expected="$$(printf '%s\n' "Codesk_0.0.1_windows_$$arch.msi" "Codesk_0.0.2_windows_$$arch.msi" SHA256SUMS provenance.json | LC_ALL=C sort)"; \
+		expected="$$(printf '%s\n' "Codesk_$${release_version}_windows_$$arch.msi" SHA256SUMS provenance.json | LC_ALL=C sort)"; \
 		actual="$$(LC_ALL=C ls -1A "$$dir")"; \
 		if [ "$$actual" != "$$expected" ]; then \
 			printf 'unexpected %s artifact inventory:\n%s\n' "$$arch" "$$actual" >&2; \
@@ -204,7 +206,7 @@ windows-verify:
 		done; \
 		normalized="$$out/.SHA256SUMS-$$arch"; \
 		awk '{ sub(/\r$$/, ""); print }' "$$dir/SHA256SUMS" >"$$normalized"; \
-		expected_checksums="$$(printf '%s\n' "Codesk_0.0.1_windows_$$arch.msi" "Codesk_0.0.2_windows_$$arch.msi" provenance.json)"; \
+		expected_checksums="$$(printf '%s\n' "Codesk_$${release_version}_windows_$$arch.msi" provenance.json)"; \
 		actual_checksums="$$(awk 'length($$1) == 64 && $$1 ~ /^[0-9a-f]+$$/ && NF == 2 { print $$2; next } { exit 1 }' "$$normalized")" || { \
 			printf 'invalid %s SHA256SUMS format\n' "$$arch" >&2; \
 			exit 1; \
@@ -226,45 +228,45 @@ windows-verify:
 	printf 'Verified Windows GUI CI artifacts for %s from run %s in %s\n' "$$head" "$$run_id" "$$out"
 
 build-static:
-	VERSION="$(VERSION)" scripts/build-static.sh
+	scripts/build-static.sh
 
 static-build: build-static
 
 build-static-local:
-	VERSION="dev" STATIC_BUILD_TARGET=daemons STATIC_DIST_DIR=dist/static PLATFORMS="$(HOST_PLATFORM)" scripts/build-static.sh
+	STATIC_BUILD_TARGET=daemons STATIC_DIST_DIR=dist/static PLATFORMS="$(HOST_PLATFORM)" scripts/build-static.sh
 
 static-build-local: build-static-local
 
 build-backend-image:
-	VERSION="$(VERSION)" scripts/build-backend-image.sh
+	scripts/build-backend-image.sh
 
 backend-image: build-backend-image
 
 publish: publish-backend publish-frontend publish-static
 
 publish-backend:
-	VERSION="$(VERSION)" scripts/publish-backend.sh
+	scripts/publish-backend.sh
 
 publish-frontend:
-	VERSION="$(VERSION)" scripts/publish-frontend.sh
+	scripts/publish-frontend.sh
 
 publish-static:
-	VERSION="$(VERSION)" scripts/publish-static.sh
+	scripts/publish-static.sh
 
 static-publish:
-	VERSION="$(VERSION)" scripts/publish-static-r2.sh "$(VERSION)"
+	scripts/publish-static-r2.sh
 
 deploy:
-	VERSION="$(VERSION)" scripts/deploy-notty.sh
+	scripts/deploy-notty.sh
 
 deploy-backend:
-	VERSION="$(VERSION)" scripts/deploy-backend.sh
+	scripts/deploy-backend.sh
 
 deploy-frontend:
-	VERSION="$(VERSION)" scripts/deploy-frontend.sh
+	scripts/deploy-frontend.sh
 
 deploy-static:
-	VERSION="$(VERSION)" scripts/deploy-static.sh
+	scripts/deploy-static.sh
 
 prod-config-check:
 	tmp_secrets="$$(mktemp)" && \
@@ -277,7 +279,7 @@ prod-config-check:
 	NOTTY_BACKEND_IMAGE=alphatoad/notty:backend-test NOTTY_SECRETS_ENV_FILE="$$tmp_secrets" docker compose -f compose.prod.yml --env-file deploy/env/prod.server.env config >/dev/null
 
 daemon-checksums:
-	cd "$(DIST_DIR)/$(VERSION)" && shasum -a 256 *.tar.gz > SHA256SUMS
+	cd "$(DIST_DIR)/$(REPOSITORY_VERSION)" && shasum -a 256 *.tar.gz > SHA256SUMS
 
 daemon-installer-check:
 	sh -n deploy/daemons/install.sh
@@ -296,6 +298,9 @@ daemon-installer-windows-check:
 
 daemon-uninstall-test:
 	sh scripts/test-daemon-uninstall.sh
+
+version-contract-check:
+	sh scripts/test-version-contract.sh
 
 daemon-clean:
 	rm -rf bin "$(DIST_DIR)"

@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"notty/daemon/internal/buildinfo"
 	"notty/daemon/internal/desktop"
 	"notty/daemon/internal/desktopapp"
 	"notty/daemon/internal/desktopstate"
@@ -23,9 +24,8 @@ const (
 )
 
 var (
-	desktopVersion = "dev"
-	codeskOrigin   = "https://app.getcodesk.com"
-	backendOrigin  = "https://api.getcodesk.com"
+	codeskOrigin  = "https://app.getcodesk.com"
+	backendOrigin = "https://api.getcodesk.com"
 
 	//go:embed assets/codesk.ico
 	codeskIcon []byte
@@ -39,6 +39,10 @@ func main() {
 }
 
 func runDesktop() error {
+	version, err := buildinfo.Require()
+	if err != nil {
+		return fmt.Errorf("start desktop: %w", err)
+	}
 	dirs, err := desktop.DefaultDirs()
 	if err != nil {
 		return err
@@ -97,7 +101,7 @@ func runDesktop() error {
 		Dirs:          dirs,
 		CodeskOrigin:  codeskOrigin,
 		BackendOrigin: backendOrigin,
-		Version:       desktopVersion,
+		Version:       version,
 		ConfigStore:   configStore,
 		Secrets:       secrets,
 		LoginItem:     loginItem,

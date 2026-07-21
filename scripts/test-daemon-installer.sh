@@ -216,14 +216,12 @@ assert_file "$tmp_dir/data/daemons/ws-test/daemon.env"
 grep -q "NOTTY_CODEX_COMMAND='$ok_codex'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "env file did not preserve configured Codex command"
 grep -q "NOTTY_CLAUDE_COMMAND='$ok_claude'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "env file did not preserve configured Claude Code command"
 if grep -q "Claude Code runtime unavailable" "$tmp_dir/ok.err"; then fail "healthy claude should not warn about runtime availability"; fi
-grep -q "NOTTY_DAEMON_VERSION='$version'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "env file did not preserve daemon version"
 grep -q "NOTTY_DATA_DIR='$tmp_dir/data'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "env file did not preserve daemon data dir"
 if grep -q "^export PATH=" "$tmp_dir/data/daemons/ws-test/daemon.env"; then
 	fail "env file must not persist a PATH snapshot"
 fi
 grep -q "NOTTY_TOOL_DIR_CODEX='" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "env file did not persist resolved codex tool dir"
 grep -q "NOTTY_TOOL_DIR_CLAUDE='$tmp_dir'" "$tmp_dir/data/daemons/ws-test/daemon.env" || fail "env file did not persist resolved claude tool dir"
-grep -q "NOTTY_DAEMON_VERSION NOTTY_DATA_DIR" "$tmp_dir/data/daemons/ws-test/run.sh" || fail "run script did not export daemon version"
 grep -q "NOTTY_DATA_DIR NOTTY_WORKSPACE_DIR" "$tmp_dir/data/daemons/ws-test/run.sh" || fail "run script did not export daemon data dir"
 grep -q "NOTTY_CODEX_COMMAND NOTTY_CLAUDE_COMMAND NOTTY_TOOL_DIR_CODEX NOTTY_TOOL_DIR_CLAUDE" "$tmp_dir/data/daemons/ws-test/run.sh" || fail "run script did not export runtime commands and tool dirs"
 grep -q "notty_derive_daemon_path" "$tmp_dir/data/daemons/ws-test/run.sh" || fail "run script does not re-derive PATH at start"

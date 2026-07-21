@@ -8,10 +8,16 @@ import (
 	"os/signal"
 	"syscall"
 
+	"notty/daemon/internal/buildinfo"
 	"notty/daemon/internal/syncer"
 )
 
 func main() {
+	version, err := buildinfo.Require()
+	if err != nil {
+		log.Fatalf("start daemon: %v", err)
+	}
+	log.Printf("notty daemon version %s", version)
 	cfg := syncer.LoadConfig()
 	if cfg.PprofAddr != "" {
 		go func() {

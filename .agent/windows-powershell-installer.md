@@ -169,7 +169,7 @@ Run frontend coverage and production compilation:
 
 Run a focused Windows release build on a host with `x86_64-pc-windows-gnu`, MinGW-w64, and ZIP installed:
 
-    PLATFORMS=windows/amd64 scripts/build-daemon-release.sh windows-installer-test /tmp/codesk-windows-release
+    PLATFORMS=windows/amd64 scripts/build-daemon-release.sh /tmp/codesk-windows-release
 
 The result must include `/tmp/codesk-windows-release/install.ps1`, `/tmp/codesk-windows-release/uninstall.ps1`, and a ZIP under the version directory. Expanding that ZIP must show both `.exe` files plus `run-windows.ps1`.
 

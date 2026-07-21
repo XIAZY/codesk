@@ -79,11 +79,11 @@ func TestWindowsGUIMakeRoutesWithoutPOSIXTools(t *testing.T) {
 			t.Fatalf("Windows-native Make %s dispatch failed: %v", target, err)
 		}
 	}
-	old := `"GUI_VERSION=$(GUI_VERSION)" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)"`
+	old := `make.ps1 windows-gui-build "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)"`
 	if strings.Count(makeSource, old) != 1 {
 		t.Fatalf("Windows build route source count = %d, want 1", strings.Count(makeSource, old))
 	}
-	mutated := strings.Replace(makeSource, old, `"GUI_VERSION=$(GUI_VERSION)" "WINDOWS_GUI_ARCHES=amd64" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)"`, 1)
+	mutated := strings.Replace(makeSource, old, `make.ps1 windows-gui-build "WINDOWS_GUI_ARCHES=amd64" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)"`, 1)
 	if err := runWindowsGUIDispatch(mutated, "windows-gui-build"); err == nil {
 		t.Fatal("Make injected a spoofed build architecture into the PowerShell route")
 	}
@@ -124,7 +124,7 @@ func TestWindowsMSIReleaseVersionAndProductCodeContract(t *testing.T) {
 	}
 }
 
-func TestWindowsGUIPowerShellDefaultsArchitectureAndRoot(t *testing.T) {
+func TestWindowsGUIPowerShellRejectsRemovedVersionArgument(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows PowerShell defaults require Windows")
 	}
@@ -143,8 +143,8 @@ func TestWindowsGUIPowerShellDefaultsArchitectureAndRoot(t *testing.T) {
 		t.Fatalf("invalid release version unexpectedly succeeded: %s", output)
 	}
 	text := string(output)
-	if !strings.Contains(text, "GUI_VERSION must be canonical MSI X.Y.Z") {
-		t.Fatalf("release default failure = %q, want canonical version rejection", output)
+	if !strings.Contains(text, "Version") || !strings.Contains(text, "parameter") {
+		t.Fatalf("removed version argument failure = %q, want parameter rejection", output)
 	}
 	for _, regression := range []string{
 		"Windows GUI architecture list must not be empty",
@@ -153,6 +153,39 @@ func TestWindowsGUIPowerShellDefaultsArchitectureAndRoot(t *testing.T) {
 		if strings.Contains(text, regression) {
 			t.Fatalf("release default regressed with %q: %s", regression, output)
 		}
+	}
+}
+
+func TestPowerShellVersionReaderSourceContract(t *testing.T) {
+	data, err := os.ReadFile("read-version.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := normalizeSourceNewlines(string(data))
+	if err := checkPowerShellVersionReaderSource(source); err != nil {
+		t.Fatal(err)
+	}
+	mutations := []struct{ name, old, new string }{
+		{"text reader fallback", "[System.IO.File]::ReadAllBytes", "[System.IO.File]::ReadAllText"},
+		{"trailing LF changed", "$bytes[$bytes.Length - 1] -ne 10", "$bytes[$bytes.Length - 1] -ne 13"},
+		{"embedded LF scan shortened", "$index -lt $bytes.Length - 1", "$index -lt $bytes.Length - 2"},
+		{"embedded LF changed", "$bytes[$index] -eq 10", "$bytes[$index] -eq 13"},
+		{"leading zeros accepted", "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$", "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+		{"major range widened", "$major -gt 255", "$major -gt 256"},
+		{"minor range widened", "$minor -gt 255", "$minor -gt 256"},
+		{"build range widened", "$build -gt 65535", "$build -gt 65536"},
+		{"numeric overflow check removed", "[uint32]::TryParse($fields[0]", "[uint64]::TryParse($fields[0]"},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			if strings.Count(source, mutation.old) != 1 {
+				t.Fatalf("mutation source count for %q is not one", mutation.old)
+			}
+			mutated := strings.Replace(source, mutation.old, mutation.new, 1)
+			if err := checkPowerShellVersionReaderSource(mutated); err == nil {
+				t.Fatal("PowerShell reader mutation survived")
+			}
+		})
 	}
 }
 
@@ -193,24 +226,9 @@ func TestWindowsMSIReleaseSourceContract(t *testing.T) {
 		shimNew         string
 	}{
 		{
-			name:     "release mode merged into QA parameter set",
-			buildOld: "[Parameter(Mandatory = $true, ParameterSetName = 'Release')]",
-			buildNew: "[Parameter(Mandatory = $true, ParameterSetName = 'QaPair')]",
-		},
-		{
-			name:     "leading-zero versions accepted",
-			buildOld: "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
-			buildNew: "^[0-9]+\\.[0-9]+\\.[0-9]+$",
-		},
-		{
-			name:     "MSI major range widened",
-			buildOld: "$major -gt 255",
-			buildNew: "$major -gt 256",
-		},
-		{
-			name:     "MSI build range widened",
-			buildOld: "$build -gt 65535",
-			buildNew: "$build -gt 65536",
+			name:     "QA fixture becomes the default mode",
+			buildOld: "[CmdletBinding(DefaultParameterSetName = 'Release')]",
+			buildNew: "[CmdletBinding(DefaultParameterSetName = 'TestOnlyUpgradeQa')]",
 		},
 		{
 			name:     "architecture removed from UUID name",
@@ -229,18 +247,13 @@ func TestWindowsMSIReleaseSourceContract(t *testing.T) {
 		},
 		{
 			name:     "release output loses requested version",
-			buildOld: "Codesk_${ProductVersion}_windows_$GoArchitecture.msi",
-			buildNew: "Codesk_release_windows_$GoArchitecture.msi",
+			buildOld: `$canonicalName = "Codesk_$($version.version)_windows_$GoArchitecture.msi"`,
+			buildNew: `$canonicalName = "Codesk_release_windows_$GoArchitecture.msi"`,
 		},
 		{
 			name:            "release invokes QA mode",
-			orchestratorOld: "ProductVersion = $Version",
-			orchestratorNew: "PreviousProductCode = $Version",
-		},
-		{
-			name:            "release accepts out-of-range build",
-			orchestratorOld: "$fields[2] -gt 65535",
-			orchestratorNew: "$fields[2] -gt 65536",
+			orchestratorOld: "Release = $true",
+			orchestratorNew: "PreviousProductCode = $version",
 		},
 		{
 			name:            "Windows build host gate removed",
@@ -269,8 +282,13 @@ func TestWindowsMSIReleaseSourceContract(t *testing.T) {
 		},
 		{
 			name:    "Make injects a spoofable build architecture",
-			makeOld: `"GUI_VERSION=$(GUI_VERSION)" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)"`,
-			makeNew: `"GUI_VERSION=$(GUI_VERSION)" "WINDOWS_GUI_ARCHES=amd64" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)"`,
+			makeOld: `make.ps1 windows-gui-build "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)"`,
+			makeNew: `make.ps1 windows-gui-build "WINDOWS_GUI_ARCHES=amd64" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)"`,
+		},
+		{
+			name:    "download verifier restores a fixture version",
+			makeOld: `Codesk_$${release_version}_windows_$$arch.msi`,
+			makeNew: `Codesk_0.0.1_windows_$$arch.msi`,
 		},
 		{
 			name:    "PowerShell shim loses a public target",
@@ -318,6 +336,116 @@ func TestWindowsMSIReleaseSourceContract(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWindowsMSITestOnlyUpgradeFixtureCannotBecomeReleaseArtifact(t *testing.T) {
+	buildData, err := os.ReadFile("build-windows-desktop-msi-artifact.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtureData, err := os.ReadFile(filepath.Join("testdata", "windows-msi-upgrade-versions.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflowData, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := normalizeSourceNewlines(string(buildData))
+	fixture := normalizeSourceNewlines(string(fixtureData))
+	workflow := normalizeSourceNewlines(string(workflowData))
+	if err := checkWindowsMSITestOnlyFixtureBoundary(build, fixture, workflow); err != nil {
+		t.Fatal(err)
+	}
+
+	mutations := []struct {
+		name, target, old, replacement string
+	}{
+		{"fixture escapes testdata", "build", `testdata\windows-msi-upgrade-versions.ps1`, `windows-msi-upgrade-versions.ps1`},
+		{"fixture becomes default", "build", "[CmdletBinding(DefaultParameterSetName = 'Release')]", "[CmdletBinding(DefaultParameterSetName = 'TestOnlyUpgradeQa')]"},
+		{"production invokes fixture", "workflow", "            -Release `", "            -TestOnlyUpgradeQa `"},
+		{"fixture overwrites production output", "workflow", `windows-desktop-msi-upgrade-qa-${{ matrix.go_arch }}`, `windows-desktop-msi-${{ matrix.go_arch }}`},
+		{"fixture marked publishable", "workflow", `$provenance.target.publishable -ne $false`, `$provenance.target.publishable -eq $false`},
+		{"fixture uploaded", "workflow", `path: ${{ runner.temp }}/windows-desktop-msi-${{ matrix.go_arch }}/`, `path: ${{ runner.temp }}/windows-desktop-msi-upgrade-qa-${{ matrix.go_arch }}/`},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			mutatedBuild, mutatedFixture, mutatedWorkflow := build, fixture, workflow
+			var source *string
+			switch mutation.target {
+			case "build":
+				source = &mutatedBuild
+			case "workflow":
+				source = &mutatedWorkflow
+			default:
+				t.Fatalf("unsupported mutation target %q", mutation.target)
+			}
+			if strings.Count(*source, mutation.old) != 1 {
+				t.Fatalf("mutation source %q is not unique", mutation.old)
+			}
+			*source = strings.Replace(*source, mutation.old, mutation.replacement, 1)
+			if err := checkWindowsMSITestOnlyFixtureBoundary(mutatedBuild, mutatedFixture, mutatedWorkflow); err == nil {
+				t.Fatal("test-only fixture boundary mutation survived")
+			}
+		})
+	}
+}
+
+func checkWindowsMSITestOnlyFixtureBoundary(build, fixture, workflow string) error {
+	for required, count := range map[string]int{
+		"[CmdletBinding(DefaultParameterSetName = 'Release')]":                   1,
+		"[Parameter(Mandatory = $true, ParameterSetName = 'TestOnlyUpgradeQa')]": 1,
+		`testdata\windows-msi-upgrade-versions.ps1`:                              1,
+		"publishable = ($buildMode -ceq 'release')":                              1,
+	} {
+		if got := strings.Count(build, required); got != count {
+			return fmt.Errorf("MSI builder fixture boundary count for %q = %d, want %d", required, got, count)
+		}
+	}
+	for _, forbidden := range []string{"version = '0.0.1'", "version = '0.0.2'"} {
+		if strings.Contains(build, forbidden) {
+			return fmt.Errorf("production builder contains fixture version %q", forbidden)
+		}
+	}
+	for required, count := range map[string]int{
+		"production artifact path never reads this fixture": 1,
+		"version = '0.0.1'": 1,
+		"version = '0.0.2'": 1,
+	} {
+		if got := strings.Count(fixture, required); got != count {
+			return fmt.Errorf("MSI test fixture count for %q = %d, want %d", required, got, count)
+		}
+	}
+
+	const productionMarker = "      - name: Build reproducible root-version WiX release package\n"
+	const fixtureMarker = "      - name: Build non-publishable MSI upgrade QA fixture\n"
+	const uploadMarker = "      - name: Upload reproducible root-version MSI and provenance\n"
+	productionAt := strings.Index(workflow, productionMarker)
+	fixtureAt := strings.Index(workflow, fixtureMarker)
+	uploadAt := strings.Index(workflow, uploadMarker)
+	if productionAt < 0 || fixtureAt <= productionAt || uploadAt <= fixtureAt {
+		return fmt.Errorf("CI does not isolate production, fixture, and upload steps")
+	}
+	productionStep := workflow[productionAt:fixtureAt]
+	fixtureStep := workflow[fixtureAt:uploadAt]
+	uploadStep := workflow[uploadAt:]
+	if strings.Count(productionStep, "            -Release `") != 1 || strings.Contains(productionStep, "-TestOnlyUpgradeQa") {
+		return fmt.Errorf("CI production MSI step does not exclusively use release mode")
+	}
+	for _, required := range []string{
+		"            -TestOnlyUpgradeQa `",
+		`windows-desktop-msi-upgrade-qa-${{ matrix.go_arch }}`,
+		`$provenance.target.buildMode -cne 'test-only-upgrade-qa'`,
+		`$provenance.target.publishable -ne $false`,
+	} {
+		if !strings.Contains(fixtureStep, required) {
+			return fmt.Errorf("CI test-only fixture step is missing %q", required)
+		}
+	}
+	if !strings.Contains(uploadStep, `path: ${{ runner.temp }}/windows-desktop-msi-${{ matrix.go_arch }}/`) || strings.Contains(uploadStep, "upgrade-qa") {
+		return fmt.Errorf("CI upload can publish the test-only fixture path")
+	}
+	return nil
 }
 
 func TestWindowsGUIContainerSourceContract(t *testing.T) {
@@ -405,6 +533,11 @@ func TestWindowsGUIContainerSourceContract(t *testing.T) {
 			t.Errorf("Windows container build contains forbidden %q", forbidden)
 		}
 	}
+	for _, forbidden := range []string{"[string] $Version", "'-Version'", "GUI_VERSION"} {
+		if strings.Contains(wrapper, forbidden) {
+			t.Errorf("Windows container runner retains removed version input %q", forbidden)
+		}
+	}
 	if strings.Contains(wrapper, "'build', '--isolation=process'") {
 		t.Error("Windows product container runner must not build the builder image")
 	}
@@ -443,7 +576,8 @@ func TestWindowsDesktopPayloadSourceContract(t *testing.T) {
 		{name: "test output may contain payload", old: `case "$test_dir" in`, new: `case "$safe_parent" in`},
 		{name: "stale tests retained", old: `rm -rf "$payload_dir" "$test_dir"`, new: `rm -rf "$payload_dir"`},
 		{name: "Zig pin floated", old: `required_zig_version="${WINDOWS_GUI_ZIG_VERSION:-0.16.0}"`, new: `required_zig_version="$(zig version)"`},
-		{name: "GUI subsystem dropped", old: `-ldflags="-H=windowsgui -extldflags=-Wl,--subsystem,windows -X main.desktopVersion=$build_version"`, new: `-ldflags="-s -w"`},
+		{name: "shared VERSION reader bypassed", old: `build_version="$("$root_dir/scripts/read-version.sh")"`, new: `build_version="$(cat "$root_dir/VERSION")"`},
+		{name: "GUI subsystem dropped", old: `-ldflags="-H=windowsgui -extldflags=-Wl,--subsystem,windows -X notty/daemon/internal/buildinfo.Version=$build_version"`, new: `-ldflags="-s -w"`},
 		{name: "agent payload omitted", old: `-o "$arch_payload_dir/notty-agent-tool.exe" ./daemon/cmd/agenttool`, new: `-o "$arch_payload_dir/notty-agent-tool.exe" ./daemon/cmd/codesk-desktop`},
 		{name: "cross build not marked as touching host yffi", old: `yffi_touched=1`, new: `yffi_touched=0`},
 		{name: "exit trap omitted", old: `trap cleanup EXIT`, new: `trap - EXIT`},
@@ -573,6 +707,16 @@ $capture = [Environment]::GetEnvironmentVariable('WINDOWS_GUI_CAPTURE', 'Process
 		if err := os.WriteFile(filepath.Join(tempDir, "make.ps1"), []byte(fakeShim), 0o600); err != nil {
 			return err
 		}
+		if err := os.MkdirAll(filepath.Join(tempDir, "scripts"), 0o755); err != nil {
+			return err
+		}
+		reader, err := os.ReadFile("read-version.ps1")
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(tempDir, "scripts", "read-version.ps1"), reader, 0o600); err != nil {
+			return err
+		}
 		commandDirectory = tempDir
 		makeOverrides = []string{
 			"OS=Windows_NT", "PROCESSOR_ARCHITECTURE=ARM64", "WINDOWS_GUI_POWERSHELL=" + powershellCommand,
@@ -581,6 +725,9 @@ $capture = [Environment]::GetEnvironmentVariable('WINDOWS_GUI_CAPTURE', 'Process
 	} else {
 		if err := writeExecutable(filepath.Join(binDir, "powershell.exe"), `#!/bin/sh
 : "${WINDOWS_GUI_CAPTURE:?}"
+case "$*" in
+  *read-version.ps1*) printf '%s\n' '0.0.1'; exit 0 ;;
+esac
 : >"$WINDOWS_GUI_CAPTURE"
 for argument in "$@"; do
   printf '%s\n' "$argument" >>"$WINDOWS_GUI_CAPTURE"
@@ -591,6 +738,9 @@ done
 	}
 	makePath := filepath.Join(tempDir, "Makefile")
 	if err := os.WriteFile(makePath, []byte(makeSource), 0o600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "VERSION"), []byte("0.0.1\n"), 0o644); err != nil {
 		return err
 	}
 	capturePath := filepath.Join(tempDir, "powershell.args")
@@ -700,8 +850,18 @@ func runWindowsPayloadYffiFixture(source string, preexisting, failGo bool) error
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		return err
 	}
+	if err := os.WriteFile(filepath.Join(root, "VERSION"), []byte("0.0.1\n"), 0o644); err != nil {
+		return err
+	}
 	payloadScript := filepath.Join(scriptsDir, "build-windows-desktop-payloads.sh")
 	if err := writeExecutable(payloadScript, source); err != nil {
+		return err
+	}
+	reader, err := os.ReadFile("read-version.sh")
+	if err != nil {
+		return err
+	}
+	if err := writeExecutable(filepath.Join(scriptsDir, "read-version.sh"), string(reader)); err != nil {
 		return err
 	}
 	if err := writeExecutable(filepath.Join(scriptsDir, "build-yffi.sh"), `#!/bin/sh
@@ -897,6 +1057,7 @@ func checkWindowsDesktopPayloadSource(source string) error {
 		`/*|[A-Za-z]:/*)`: 1,
 		`required_zig_version="${WINDOWS_GUI_ZIG_VERSION:-0.16.0}"`: 1,
 		`[ "$actual_zig_version" = "$required_zig_version" ]`:       1,
+		`build_version="$("$root_dir/scripts/read-version.sh")"`:    1,
 		`[ ! -L "$path" ]`:                              1,
 		`case "$payload_dir/" in`:                       1,
 		`case "$test_dir/" in`:                          1,
@@ -917,7 +1078,7 @@ func checkWindowsDesktopPayloadSource(source string) error {
 		`go test -c -o "$test_dir/notty-syncer-$architecture.test.exe" ./daemon/internal/syncer`:                                   1,
 		`go vet ./daemon/internal/desktopstate ./daemon/internal/desktop ./daemon/internal/desktopapp ./daemon/cmd/codesk-desktop`: 1,
 		`go test -c -o "$test_dir/codesk-desktop-$architecture.test.exe" ./daemon/cmd/codesk-desktop`:                              1,
-		`-ldflags="-H=windowsgui -extldflags=-Wl,--subsystem,windows -X main.desktopVersion=$build_version"`:                       1,
+		`-ldflags="-H=windowsgui -extldflags=-Wl,--subsystem,windows -X notty/daemon/internal/buildinfo.Version=$build_version"`:   1,
 		`-o "$arch_payload_dir/Codesk.exe" ./daemon/cmd/codesk-desktop`:                                                            1,
 		`-o "$arch_payload_dir/notty-agent-tool.exe" ./daemon/cmd/agenttool`:                                                       1,
 		`verify-windows-desktop-pe.go "$arch_payload_dir/Codesk.exe" "$architecture" gui`:                                          1,
@@ -938,37 +1099,68 @@ func checkWindowsDesktopPayloadSource(source string) error {
 	return nil
 }
 
+func checkPowerShellVersionReaderSource(source string) error {
+	for required, want := range map[string]int{
+		"param()":                          1,
+		"[System.IO.File]::ReadAllBytes":   1,
+		"$bytes[$bytes.Length - 1] -ne 10": 1,
+		"$index -lt $bytes.Length - 1":     1,
+		"$bytes[$index] -eq 10":            1,
+		"[System.Text.Encoding]::ASCII.GetString($bytes, 0, $bytes.Length - 1)": 1,
+		"^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$":                 1,
+		"[uint32]::TryParse($fields[0]":                                         1,
+		"[uint32]::TryParse($fields[1]":                                         1,
+		"[uint32]::TryParse($fields[2]":                                         1,
+		"$major -gt 255":                                                        1,
+		"$minor -gt 255":                                                        1,
+		"$build -gt 65535":                                                      1,
+	} {
+		if got := strings.Count(source, required); got != want {
+			return fmt.Errorf("PowerShell VERSION reader source count for %q = %d, want %d", required, got, want)
+		}
+	}
+	for _, forbidden := range []string{"Get-Content", "ReadAllText", "TotalCount", ".Trim()", "$env:", "git "} {
+		if strings.Contains(source, forbidden) {
+			return fmt.Errorf("PowerShell VERSION reader contains forbidden fallback %q", forbidden)
+		}
+	}
+	return nil
+}
+
 func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) error {
 	buildRequired := map[string]int{
-		"[CmdletBinding(DefaultParameterSetName = 'QaPair')]":                   1,
-		"[Parameter(Mandatory = $true, ParameterSetName = 'QaPair')]":           2,
-		"[Parameter(Mandatory = $true, ParameterSetName = 'Release')]":          1,
-		"$ProductCodeNamespace = [guid] '55A27873-BF9C-5DC3-AA8B-9D6F996041EF'": 1,
-		"^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$":                 1,
-		"$major -gt 255":   1,
-		"$minor -gt 255":   1,
-		"$build -gt 65535": 1,
-		"$productCodeName = \"$ProductVersion+$GoArchitecture\"":                                       1,
-		"Get-UuidV5 -Namespace $ProductCodeNamespace -Name $productCodeName":                           1,
-		"[System.Text.Encoding]::UTF8.GetBytes($Name)":                                                 1,
-		"[System.Security.Cryptography.SHA1]::Create()":                                                1,
-		"$uuidBytes[6] = ($uuidBytes[6] -band 0x0f) -bor 0x50":                                         1,
-		"$uuidBytes[8] = ($uuidBytes[8] -band 0x3f) -bor 0x80":                                         1,
-		"$buildMode = if ($PSCmdlet.ParameterSetName -ceq 'Release') { 'release' } else { 'qa-pair' }": 1,
-		"name = 'release'":  1,
-		"version = '0.0.1'": 1,
-		"version = '0.0.2'": 1,
-		"previous and candidate ProductCodes must be distinct": 1,
-		"buildMode = $buildMode":                               1,
-		"productCodeDerivation":                                1,
-		"algorithm = 'UUIDv5-SHA1'":                            1,
-		"Codesk_${ProductVersion}_windows_$GoArchitecture.msi": 2,
-		"Codesk_0.0.1_windows_$GoArchitecture.msi":             2,
-		"Codesk_0.0.2_windows_$GoArchitecture.msi":             2,
+		"[CmdletBinding(DefaultParameterSetName = 'Release')]":                   1,
+		"[Parameter(ParameterSetName = 'Release')]":                              1,
+		"[Parameter(Mandatory = $true, ParameterSetName = 'TestOnlyUpgradeQa')]": 1,
+		"[switch] $Release":           1,
+		"[switch] $TestOnlyUpgradeQa": 1,
+		"$ProductCodeNamespace = [guid] '55A27873-BF9C-5DC3-AA8B-9D6F996041EF'":                                     1,
+		"$ProductVersion = & (Join-Path $scriptRoot 'read-version.ps1')":                                            1,
+		"$productCodeName = \"$ProductVersion+$GoArchitecture\"":                                                    1,
+		"Get-UuidV5 -Namespace $ProductCodeNamespace -Name $productCodeName":                                        1,
+		"[System.Text.Encoding]::UTF8.GetBytes($Name)":                                                              1,
+		"[System.Security.Cryptography.SHA1]::Create()":                                                             1,
+		"$uuidBytes[6] = ($uuidBytes[6] -band 0x0f) -bor 0x50":                                                      1,
+		"$uuidBytes[8] = ($uuidBytes[8] -band 0x3f) -bor 0x80":                                                      1,
+		"$buildMode = if ($PSCmdlet.ParameterSetName -ceq 'Release') { 'release' } else { 'test-only-upgrade-qa' }": 1,
+		"name = 'release'":                           1,
+		"testdata\\windows-msi-upgrade-versions.ps1": 1,
+		"test-only upgrade fixture must define exactly previous then candidate": 1,
+		"buildMode = $buildMode":                    1,
+		"publishable = ($buildMode -ceq 'release')": 1,
+		"productCodeDerivation":                     1,
+		"algorithm = 'UUIDv5-SHA1'":                 1,
+		`$canonicalName = "Codesk_$($version.version)_windows_$GoArchitecture.msi"`: 1,
+		`Codesk_$($_.version)_windows_$GoArchitecture.msi`:                          2,
 	}
 	for source, want := range buildRequired {
 		if got := strings.Count(build, source); got != want {
 			return fmt.Errorf("Windows MSI release source count for %q = %d, want %d", source, got, want)
+		}
+	}
+	for _, forbidden := range []string{"version = '0.0.1'", "version = '0.0.2'", "QaPair", "PreviousProductCode", "CandidateProductCode"} {
+		if strings.Contains(build, forbidden) {
+			return fmt.Errorf("Windows MSI production builder contains test-only identity %q", forbidden)
 		}
 	}
 	for source, want := range map[string]int{
@@ -983,15 +1175,12 @@ func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) er
 		"scripts/build-windows-desktop-payloads.sh":                                      1,
 		"scripts/build-windows-desktop-msi-artifact.ps1":                                 1,
 		"local/scripts/run-windows-gui-target.ps1@$head":                                 1,
-		"^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$":                          1,
-		"$fields[0] -gt 255":                                                             1,
-		"$fields[1] -gt 255":                                                             1,
-		"$fields[2] -gt 65535":                                                           1,
-		"ProductVersion = $Version":                                                      1,
-		"$item.Length -le 0":                                                             1,
+		"$version = & (Join-Path $root 'scripts/read-version.ps1')":                      1,
+		"Release = $true":    1,
+		"$item.Length -le 0": 1,
 		"Assert-ExactArchitectureDirectories -Directory $PayloadDirectory -Architectures $SelectedArchitectures": 1,
 		"Assert-ExactRealFiles @releaseParameters":                                                               1,
-		`Names = @("Codesk_${Version}_windows_$architecture.msi", 'SHA256SUMS', 'provenance.json')`:              1,
+		`Names = @("Codesk_${version}_windows_$architecture.msi", 'SHA256SUMS', 'provenance.json')`:              1,
 		"[Array]::Sort($actual, [System.StringComparer]::Ordinal)":                                               2,
 		"[Array]::Sort($expected, [System.StringComparer]::Ordinal)":                                             2,
 	} {
@@ -999,7 +1188,7 @@ func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) er
 			return fmt.Errorf("Windows GUI orchestrator source count for %q = %d, want %d", source, got, want)
 		}
 	}
-	for _, forbidden := range []string{"??", "Sort-Object", "status --porcelain", "requires a clean checkout"} {
+	for _, forbidden := range []string{"??", "Sort-Object", "status --porcelain", "requires a clean checkout", "[string] $Version", "Assert-CanonicalMsiVersion", "Get-Content"} {
 		if strings.Contains(orchestrator, forbidden) {
 			return fmt.Errorf("Windows GUI orchestrator contains unsupported or non-ordinal %q", forbidden)
 		}
@@ -1008,19 +1197,23 @@ func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) er
 		return fmt.Errorf("Windows GUI orchestrator contains a shell-style line continuation")
 	}
 	for source, want := range map[string]int{
-		"ifeq ($(OS),Windows_NT)":                                      2,
-		"\nVERSION ?= $(FILE_VERSION)\n":                               2,
-		"WINDOWS_PROCESSOR_ARCH :=":                                    1,
-		"override MACOS_GUI_HOST_OS :=":                                2,
-		`if [ "$(MACOS_GUI_HOST_OS)" != darwin ]; then`:                2,
-		"-File make.ps1":                                               5,
-		"WINDOWS_GUI_BUILDER_IMAGE ?= alphatoad/notty:windows-builder": 1,
-		"-File make.ps1 build-windows-builder-image":                   1,
-		`"WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"`:     3,
-		"-File make.ps1 windows-gui-build":                             1,
-		"-File make.ps1 windows-gui-release":                           1,
-		`"WINDOWS_GUI_ARCHES=$(WINDOWS_GUI_ARCHES)"`:                   1,
-		"scripts/build-windows-desktop-payloads.sh":                    1,
+		"ifeq ($(OS),Windows_NT)":                                         2,
+		"override REPOSITORY_VERSION := $(shell":                          2,
+		"-File scripts/read-version.ps1)":                                 1,
+		"override REPOSITORY_VERSION := $(shell scripts/read-version.sh)": 1,
+		"WINDOWS_PROCESSOR_ARCH :=":                                       1,
+		"override MACOS_GUI_HOST_OS :=":                                   2,
+		`if [ "$(MACOS_GUI_HOST_OS)" != darwin ]; then`:                   2,
+		"-File make.ps1":                                                  5,
+		"WINDOWS_GUI_BUILDER_IMAGE ?= alphatoad/notty:windows-builder":    1,
+		"-File make.ps1 build-windows-builder-image":                      1,
+		`"WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"`:        3,
+		"-File make.ps1 windows-gui-build":                                1,
+		"-File make.ps1 windows-gui-release":                              1,
+		`"WINDOWS_GUI_ARCHES=$(WINDOWS_GUI_ARCHES)"`:                      1,
+		"scripts/build-windows-desktop-payloads.sh":                       1,
+		`release_version="$$(scripts/read-version.sh)"`:                   1,
+		`Codesk_$${release_version}_windows_$$arch.msi`:                   2,
 	} {
 		if got := strings.Count(makefile, source); got != want {
 			return fmt.Errorf("Windows GUI Make source count for %q = %d, want %d", source, got, want)
@@ -1047,6 +1240,7 @@ func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) er
 		"'Architectures'":                                                    1,
 		"macos-gui-build requires a real macOS host; no GUI was built":       1,
 		"macos-gui-release requires a real macOS host; no release was built": 1,
+		"scripts/read-version.ps1":                                           1,
 	} {
 		if got := strings.Count(shim, source); got != want {
 			return fmt.Errorf("Windows GUI PowerShell shim source count for %q = %d, want %d", source, got, want)
@@ -1058,6 +1252,8 @@ func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) er
 		"windows-gui-release-arch",
 		"scripts/build-windows-desktop-msi-artifact.ps1",
 		"WINDOWS_GUI_ARCH ?=",
+		"GUI_VERSION",
+		"FILE_VERSION",
 	} {
 		if strings.Contains(makefile, forbidden) {
 			return fmt.Errorf("Windows release Make path still pins QA identity %q", forbidden)
@@ -1076,6 +1272,9 @@ func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) er
 		"go build",
 		"cargo",
 		"wix",
+		"Get-Content",
+		"fileVersion",
+		"Version =",
 	} {
 		if strings.Contains(shim, forbidden) {
 			return fmt.Errorf("Windows GUI PowerShell shim duplicates build logic %q", forbidden)
@@ -1099,7 +1298,7 @@ func checkWindowsMakeBranch(makefile string) error {
 		return fmt.Errorf("Make Windows-native variable branch has no else")
 	}
 	variableBranch := makefile[first : first+firstElse]
-	for _, forbidden := range []string{"$(shell", "uname", "/dev/null", "printf"} {
+	for _, forbidden := range []string{"uname", "/dev/null", "printf"} {
 		if strings.Contains(variableBranch, forbidden) {
 			return fmt.Errorf("Make Windows-native variable branch uses POSIX dependency %q", forbidden)
 		}

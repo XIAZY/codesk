@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"notty/daemon/internal/buildinfo"
 )
 
 const fakeProcessModeEnv = "NOTTY_SYNCER_FAKE_PROCESS"
@@ -35,6 +37,7 @@ func TestMain(m *testing.M) {
 	case fakeProcessManagedChildIO:
 		os.Exit(runFakeManagedChildIO(os.Args[1:]))
 	default:
+		buildinfo.Version = "test-version"
 		os.Exit(m.Run())
 	}
 }

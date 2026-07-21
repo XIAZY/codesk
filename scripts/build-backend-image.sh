@@ -5,7 +5,7 @@ root_dir="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
 . "$root_dir/scripts/lib/deploy-env.sh"
 load_notty_deploy_env "$root_dir"
 
-version="${VERSION:-$(git -C "$root_dir" rev-parse --short HEAD)}"
+version="$("$root_dir/scripts/read-version.sh")"
 docker_repo="${DOCKER_REPO:-alphatoad/notty}"
 backend_image="$docker_repo:backend-$version"
 latest_image="$docker_repo:backend-latest"
