@@ -1,15 +1,18 @@
 DIST_DIR ?= dist/static/daemons
 GO_BUILD_FLAGS ?= -trimpath
-FILE_VERSION := $(shell cat VERSION 2>/dev/null || printf dev)
+FILE_VERSION := $(shell cat VERSION 2>/dev/null)
+ifeq ($(FILE_VERSION),)
+$(error VERSION file is missing or empty)
+endif
 GO_LDFLAGS ?= -s -w
 ifeq ($(OS),Windows_NT)
-VERSION ?= $(FILE_VERSION)
+VERSION := $(FILE_VERSION)
 WINDOWS_PROCESSOR_ARCH := $(if $(PROCESSOR_ARCHITEW6432),$(PROCESSOR_ARCHITEW6432),$(PROCESSOR_ARCHITECTURE))
 HOST_OS := windows
 HOST_ARCH := $(if $(filter AMD64 amd64 x86_64,$(WINDOWS_PROCESSOR_ARCH)),amd64,$(if $(filter ARM64 arm64 aarch64,$(WINDOWS_PROCESSOR_ARCH)),arm64,$(WINDOWS_PROCESSOR_ARCH)))
 override MACOS_GUI_HOST_OS :=
 else
-VERSION ?= $(FILE_VERSION)
+VERSION := $(FILE_VERSION)
 UNAME_S := $(shell uname -s | tr '[:upper:]' '[:lower:]')
 UNAME_M := $(shell uname -m)
 HOST_OS := $(if $(filter darwin,$(UNAME_S)),darwin,$(if $(filter linux,$(UNAME_S)),linux,$(UNAME_S)))
@@ -19,7 +22,7 @@ endif
 HOST_PLATFORM := $(HOST_OS)/$(HOST_ARCH)
 PLATFORMS ?= $(HOST_PLATFORM)
 DAEMON_ALL_PLATFORMS ?= all
-GUI_VERSION ?= $(FILE_VERSION)
+GUI_VERSION := $(FILE_VERSION)
 MACOS_GUI_DIST_DIR ?= dist/macos-desktop
 MACOS_GUI_UNSIGNED ?=
 WINDOWS_GUI_ARCHES ?= amd64 arm64
@@ -39,7 +42,7 @@ WINDOWS_GUI_ZIG_VERSION ?= 0.16.0
 	build build-yffi build-go build-frontend build-daemon build-static build-static-local build-backend-image \
 	publish publish-backend publish-frontend publish-static \
 	deploy deploy-backend deploy-frontend deploy-static \
-	prod-config-check static-build static-build-local static-publish backend-image daemon-build daemon-release daemon-release-all release-daemons daemon-checksums daemon-clean daemon-installer-check daemon-installer-windows-check daemon-uninstall-test \
+	prod-config-check static-build static-build-local static-publish backend-image daemon-build daemon-release daemon-release-all release-daemons daemon-checksums daemon-clean daemon-installer-check daemon-installer-windows-check daemon-uninstall-test version-contract-check \
 	macos-gui-build macos-gui-release build-windows-builder-image windows-gui-payloads windows-gui-build windows-gui-release windows-verify
 
 dev: static-build-local
@@ -62,7 +65,7 @@ test: tests
 
 tests: test-unit test-postgres test-regression test-live
 
-test-unit: test-go test-frontend daemon-installer-check daemon-uninstall-test
+test-unit: test-go test-frontend daemon-installer-check daemon-uninstall-test version-contract-check
 
 test-go: build-yffi
 	go test ./...
@@ -98,10 +101,10 @@ build-daemon: build-yffi
 daemon-build: build-daemon
 
 daemon-release:
-	VERSION="$(VERSION)" DIST_DIR="$(DIST_DIR)" PLATFORMS="$(PLATFORMS)" scripts/build-daemon-release.sh "$(VERSION)" "$(DIST_DIR)"
+	DIST_DIR="$(DIST_DIR)" PLATFORMS="$(PLATFORMS)" scripts/build-daemon-release.sh "$(DIST_DIR)"
 
 daemon-release-all:
-	VERSION="$(VERSION)" DIST_DIR="$(DIST_DIR)" PLATFORMS="$(DAEMON_ALL_PLATFORMS)" scripts/build-daemon-release.sh "$(VERSION)" "$(DIST_DIR)"
+	DIST_DIR="$(DIST_DIR)" PLATFORMS="$(DAEMON_ALL_PLATFORMS)" scripts/build-daemon-release.sh "$(DIST_DIR)"
 
 release-daemons: daemon-release-all
 
@@ -123,10 +126,10 @@ build-windows-builder-image:
 	@"$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File make.ps1 build-windows-builder-image "WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"
 
 windows-gui-build:
-	@"$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File make.ps1 windows-gui-build "GUI_VERSION=$(GUI_VERSION)" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)" "WINDOWS_GUI_PAYLOAD_ROOT=$(WINDOWS_GUI_PAYLOAD_ROOT)" "WINDOWS_GUI_TEST_DIR=$(WINDOWS_GUI_TEST_DIR)" "WINDOWS_GUI_MSI_ROOT=$(WINDOWS_GUI_MSI_ROOT)" "WINDOWS_GUI_REPOSITORY=$(WINDOWS_GUI_REPOSITORY)" "WINDOWS_GUI_ZIG_VERSION=$(WINDOWS_GUI_ZIG_VERSION)" "WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"
+	@"$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File make.ps1 windows-gui-build "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)" "WINDOWS_GUI_PAYLOAD_ROOT=$(WINDOWS_GUI_PAYLOAD_ROOT)" "WINDOWS_GUI_TEST_DIR=$(WINDOWS_GUI_TEST_DIR)" "WINDOWS_GUI_MSI_ROOT=$(WINDOWS_GUI_MSI_ROOT)" "WINDOWS_GUI_REPOSITORY=$(WINDOWS_GUI_REPOSITORY)" "WINDOWS_GUI_ZIG_VERSION=$(WINDOWS_GUI_ZIG_VERSION)" "WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"
 
 windows-gui-release:
-	@"$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File make.ps1 windows-gui-release "GUI_VERSION=$(GUI_VERSION)" "WINDOWS_GUI_ARCHES=$(WINDOWS_GUI_ARCHES)" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)" "WINDOWS_GUI_PAYLOAD_ROOT=$(WINDOWS_GUI_PAYLOAD_ROOT)" "WINDOWS_GUI_TEST_DIR=$(WINDOWS_GUI_TEST_DIR)" "WINDOWS_GUI_MSI_ROOT=$(WINDOWS_GUI_MSI_ROOT)" "WINDOWS_GUI_REPOSITORY=$(WINDOWS_GUI_REPOSITORY)" "WINDOWS_GUI_ZIG_VERSION=$(WINDOWS_GUI_ZIG_VERSION)" "WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"
+	@"$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File make.ps1 windows-gui-release "WINDOWS_GUI_ARCHES=$(WINDOWS_GUI_ARCHES)" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)" "WINDOWS_GUI_PAYLOAD_ROOT=$(WINDOWS_GUI_PAYLOAD_ROOT)" "WINDOWS_GUI_TEST_DIR=$(WINDOWS_GUI_TEST_DIR)" "WINDOWS_GUI_MSI_ROOT=$(WINDOWS_GUI_MSI_ROOT)" "WINDOWS_GUI_REPOSITORY=$(WINDOWS_GUI_REPOSITORY)" "WINDOWS_GUI_ZIG_VERSION=$(WINDOWS_GUI_ZIG_VERSION)" "WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"
 else
 macos-gui-build:
 	@if [ "$(MACOS_GUI_HOST_OS)" != darwin ]; then \
@@ -134,7 +137,7 @@ macos-gui-build:
 		exit 1; \
 	fi
 	ALLOW_UNSIGNED_MACOS_DESKTOP=1 \
-		scripts/build-macos-desktop-release.sh "$(GUI_VERSION)" "$(MACOS_GUI_DIST_DIR)"
+		scripts/build-macos-desktop-release.sh "$(MACOS_GUI_DIST_DIR)"
 
 macos-gui-release:
 	@if [ "$(MACOS_GUI_HOST_OS)" != darwin ]; then \
@@ -142,7 +145,7 @@ macos-gui-release:
 		exit 1; \
 	fi
 	ALLOW_UNSIGNED_MACOS_DESKTOP="$(MACOS_GUI_UNSIGNED)" \
-		scripts/build-macos-desktop-release.sh "$(GUI_VERSION)" "$(MACOS_GUI_DIST_DIR)"
+		scripts/build-macos-desktop-release.sh "$(MACOS_GUI_DIST_DIR)"
 
 build-windows-builder-image:
 	@printf '%s\n' 'build-windows-builder-image requires a real Windows host running Windows containers' >&2
@@ -296,6 +299,9 @@ daemon-installer-windows-check:
 
 daemon-uninstall-test:
 	sh scripts/test-daemon-uninstall.sh
+
+version-contract-check:
+	sh scripts/test-version-contract.sh
 
 daemon-clean:
 	rm -rf bin "$(DIST_DIR)"

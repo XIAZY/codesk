@@ -1,14 +1,13 @@
 #!/usr/bin/env sh
 set -eu
 
-version="${1:-${VERSION:-dev}}"
-dist_dir="${2:-${DIST_DIR:-dist/static/daemons}}"
+dist_dir="${1:-${DIST_DIR:-dist/static/daemons}}"
 platforms="${PLATFORMS:-}"
 all_platforms="darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64"
 
 root_dir="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
-binary_version="$(cat "$root_dir/VERSION")" || { printf 'build-daemon-release: VERSION file is required\n' >&2; exit 1; }
-[ -n "$binary_version" ] || { printf 'build-daemon-release: VERSION file must not be empty\n' >&2; exit 1; }
+version="$(cat "$root_dir/VERSION")" || { printf 'build-daemon-release: VERSION file is required\n' >&2; exit 1; }
+[ -n "$version" ] || { printf 'build-daemon-release: VERSION file must not be empty\n' >&2; exit 1; }
 . "$root_dir/scripts/lib/testtmp.sh"
 case "$dist_dir" in
 	/*) dist_abs="$dist_dir" ;;
@@ -255,8 +254,8 @@ build_host_binaries() {
 	(
 		cd "$root_dir"
 		"$root_dir/scripts/build-yffi.sh"
-		CGO_ENABLED=1 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w -X notty/daemon/internal/buildinfo.Version=$binary_version" -o "$package_dir/bin/$(binary_name_for notty-daemon "$os")" ./daemon/cmd/daemon
-		CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w -X notty/daemon/internal/buildinfo.Version=$binary_version" -o "$package_dir/bin/$(binary_name_for notty-agent-tool "$os")" ./daemon/cmd/agenttool
+		CGO_ENABLED=1 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w -X notty/daemon/internal/buildinfo.Version=$version" -o "$package_dir/bin/$(binary_name_for notty-daemon "$os")" ./daemon/cmd/daemon
+		CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w -X notty/daemon/internal/buildinfo.Version=$version" -o "$package_dir/bin/$(binary_name_for notty-agent-tool "$os")" ./daemon/cmd/agenttool
 	)
 }
 
@@ -286,8 +285,8 @@ build_cross_binaries() {
 
 	(
 		cd "$root_dir"
-		CC="$cc" CGO_ENABLED=1 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "$(go_ldflags_for "$os") -X notty/daemon/internal/buildinfo.Version=$binary_version" -o "$package_dir/bin/$(binary_name_for notty-daemon "$os")" ./daemon/cmd/daemon
-		CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w -X notty/daemon/internal/buildinfo.Version=$binary_version" -o "$package_dir/bin/$(binary_name_for notty-agent-tool "$os")" ./daemon/cmd/agenttool
+		CC="$cc" CGO_ENABLED=1 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "$(go_ldflags_for "$os") -X notty/daemon/internal/buildinfo.Version=$version" -o "$package_dir/bin/$(binary_name_for notty-daemon "$os")" ./daemon/cmd/daemon
+		CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w -X notty/daemon/internal/buildinfo.Version=$version" -o "$package_dir/bin/$(binary_name_for notty-agent-tool "$os")" ./daemon/cmd/agenttool
 	)
 }
 
