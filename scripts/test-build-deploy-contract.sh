@@ -94,6 +94,11 @@ pass 'daemon builds isolate platform manifests and require both unique architect
 
 fake_bin="$tmp_dir/bin"
 mkdir -p "$fake_bin"
+source_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+source_base=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+export BUILD_DEPLOY_FIXTURE_GIT_REPO="$repo_dir"
+export BUILD_DEPLOY_FIXTURE_GIT_HEAD="$source_head"
+export BUILD_DEPLOY_FIXTURE_GIT_BASE="$source_base"
 cat >"$fake_bin/aws" <<'AWS'
 #!/usr/bin/env sh
 printf '%s\n' "$*" >>"$AWS_LOG"
@@ -113,6 +118,28 @@ if [ -n "${AWS_CAPTURE_DIR:-}" ] && [ "${4:-}" = cp ]; then
 	esac
 fi
 AWS
+cat >"$fake_bin/git" <<'GIT'
+#!/usr/bin/env sh
+set -eu
+
+if [ "$#" -ne 5 ] ||
+	[ "$1" != -C ] ||
+	[ "$2" != "$BUILD_DEPLOY_FIXTURE_GIT_REPO" ] ||
+	[ "$3" != rev-parse ] ||
+	[ "$4" != --verify ]; then
+	printf 'unexpected git invocation\n' >&2
+	exit 64
+fi
+
+case "$5" in
+	HEAD) printf '%s\n' "$BUILD_DEPLOY_FIXTURE_GIT_HEAD" ;;
+	'HEAD^1') printf '%s\n' "$BUILD_DEPLOY_FIXTURE_GIT_BASE" ;;
+	*)
+		printf 'unexpected git revision: %s\n' "$5" >&2
+		exit 64
+		;;
+esac
+GIT
 cat >"$fake_bin/powershell.exe" <<'POWERSHELL'
 #!/usr/bin/env sh
 set -eu
@@ -159,7 +186,7 @@ if [ -n "${WINDOWS_GUI_MUTATE_SOURCE_ROOT:-}" ]; then
 	printf 'post-staging mutation\n' >>"$WINDOWS_GUI_MUTATE_SOURCE_ROOT/arm64/Codesk_${version}_windows_arm64.msi"
 fi
 POWERSHELL
-chmod +x "$fake_bin/aws" "$fake_bin/powershell.exe"
+chmod +x "$fake_bin/aws" "$fake_bin/git" "$fake_bin/powershell.exe"
 aws_log="$tmp_dir/aws.log"
 
 fixture_sha256() {
@@ -242,8 +269,6 @@ PATH="$fake_bin:$PATH" AWS_LOG="$aws_log" MACOS_GUI_DIST_DIR="$macos_dist" UPLOA
 	"$repo_dir/scripts/upload-r2.sh" >/dev/null
 
 windows_dist="$tmp_dir/windows"
-source_head="$(git -C "$repo_dir" rev-parse --verify HEAD)"
-source_base="$(git -C "$repo_dir" rev-parse --verify 'HEAD^1')"
 for arch in amd64 arm64; do
 	write_windows_bundle "$windows_dist" "$arch" "$source_head" "$source_base" true
 done
