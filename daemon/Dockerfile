@@ -2,15 +2,17 @@ FROM golang:1.23-alpine AS build
 WORKDIR /app
 RUN apk add --no-cache build-base cargo
 COPY go.mod go.sum ./
+COPY VERSION ./VERSION
 COPY third_party ./third_party
 COPY scripts/build-yffi.sh ./scripts/build-yffi.sh
+COPY scripts/read-version.sh ./scripts/read-version.sh
 RUN go mod download
 RUN scripts/build-yffi.sh
 COPY backend ./backend
 COPY daemon ./daemon
 COPY internal ./internal
-RUN CGO_ENABLED=1 GOOS=linux go build -o /bin/notty-daemon ./daemon/cmd/daemon
-RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/notty-agent-tool ./daemon/cmd/agenttool
+RUN version="$(scripts/read-version.sh)" && CGO_ENABLED=1 GOOS=linux go build -ldflags "-X notty/daemon/internal/buildinfo.Version=$version" -o /bin/notty-daemon ./daemon/cmd/daemon
+RUN version="$(scripts/read-version.sh)" && CGO_ENABLED=0 GOOS=linux go build -ldflags "-X notty/daemon/internal/buildinfo.Version=$version" -o /bin/notty-agent-tool ./daemon/cmd/agenttool
 
 FROM alpine:3.20
 WORKDIR /app

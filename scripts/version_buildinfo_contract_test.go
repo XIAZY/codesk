@@ -93,6 +93,36 @@ func TestAgentToolRawBuildFailsClosedWithoutEmbeddedVersion(t *testing.T) {
 	}
 }
 
+func TestDaemonContainerBuildBindsRootVersion(t *testing.T) {
+	data, err := os.ReadFile("../daemon/Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(data)
+	if err := checkDaemonContainerVersionSource(source); err != nil {
+		t.Fatal(err)
+	}
+
+	mutations := []struct {
+		name, old, replacement string
+	}{
+		{"root version input removed", "COPY VERSION ./VERSION", "# VERSION input removed"},
+		{"strict version reader removed", "COPY scripts/read-version.sh ./scripts/read-version.sh", "# strict reader removed"},
+		{"one product binding removed", `-ldflags "-X notty/daemon/internal/buildinfo.Version=$version"`, ""},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			mutated := strings.Replace(source, mutation.old, mutation.replacement, 1)
+			if mutated == source {
+				t.Fatalf("mutation source %q was not found", mutation.old)
+			}
+			if err := checkDaemonContainerVersionSource(mutated); err == nil {
+				t.Fatal("daemon container version mutation survived")
+			}
+		})
+	}
+}
+
 func TestDaemonReportedVersionHasNoRuntimeOrInstallerOwner(t *testing.T) {
 	paths := map[string]string{
 		"config":          "../daemon/internal/syncer/config.go",
@@ -165,6 +195,22 @@ func checkEmbeddedVersionSource(sources map[string]string) error {
 		strings.Count(sources["desktop-windows"], "Version:       version") != 1 ||
 		strings.Count(sources["desktop-darwin"], "Version:       version") != 1 {
 		return fmt.Errorf("a product entrypoint bypasses its required embedded version")
+	}
+	return nil
+}
+
+func checkDaemonContainerVersionSource(source string) error {
+	for required, want := range map[string]int{
+		"COPY VERSION ./VERSION":                                         1,
+		"COPY scripts/read-version.sh ./scripts/read-version.sh":         1,
+		`version="$(scripts/read-version.sh)"`:                           2,
+		`-ldflags "-X notty/daemon/internal/buildinfo.Version=$version"`: 2,
+		"-o /bin/notty-daemon ./daemon/cmd/daemon":                       1,
+		"-o /bin/notty-agent-tool ./daemon/cmd/agenttool":                1,
+	} {
+		if got := strings.Count(source, required); got != want {
+			return fmt.Errorf("daemon container source count for %q = %d, want %d", required, got, want)
+		}
 	}
 	return nil
 }
