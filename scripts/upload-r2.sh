@@ -1,0 +1,406 @@
+#!/usr/bin/env sh
+set -eu
+
+[ "$#" -eq 0 ] || { printf 'upload-r2: usage: upload-r2.sh\n' >&2; exit 1; }
+
+root_dir="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
+. "$root_dir/scripts/lib/deploy-env.sh"
+. "$root_dir/scripts/lib/testtmp.sh"
+load_notty_deploy_env "$root_dir"
+
+version="$("$root_dir/scripts/read-version.sh")"
+target="${UPLOAD_TARGET:-}"
+static_dist_dir="${STATIC_DIST_DIR:-$root_dir/dist/static}"
+daemon_dist_root="${DAEMON_DIST_ROOT:-$static_dist_dir/daemons}"
+macos_gui_dist_dir="${MACOS_GUI_DIST_DIR:-$root_dir/dist/macos-desktop}"
+windows_gui_msi_root="${WINDOWS_GUI_MSI_ROOT:-$root_dir/dist/windows-gui/msi}"
+tmp_dir=
+
+resolve_source_path() {
+	case "$1" in
+		/*) printf '%s' "$1" ;;
+		[A-Za-z]:/*|[A-Za-z]:\\*)
+			if command -v cygpath >/dev/null 2>&1; then
+				cygpath -u "$1"
+			else
+				printf '%s' "$1"
+			fi
+			;;
+		*) printf '%s/%s' "$root_dir" "$1" ;;
+	esac
+}
+
+static_dist_dir="$(resolve_source_path "$static_dist_dir")"
+daemon_dist_root="$(resolve_source_path "$daemon_dist_root")"
+macos_gui_dist_dir="$(resolve_source_path "$macos_gui_dist_dir")"
+windows_gui_msi_root="$(resolve_source_path "$windows_gui_msi_root")"
+
+die() {
+	printf 'upload-r2: %s\n' "$*" >&2
+	exit 1
+}
+
+cleanup() {
+	[ -z "$tmp_dir" ] || rm -rf "$tmp_dir"
+}
+trap cleanup EXIT INT TERM
+
+need() {
+	eval "value=\${$1:-}"
+	[ -n "$value" ] || die "$1 is required"
+}
+
+need_file() {
+	[ -f "$1" ] && [ ! -L "$1" ] || die "missing real file: $1"
+}
+
+need_dir() {
+	[ -d "$1" ] && [ ! -L "$1" ] || die "missing real directory: $1"
+}
+
+sha256_file() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | awk '{ print $1 }'
+	elif command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 "$1" | awk '{ print $1 }'
+	else
+		die 'sha256sum or shasum is required for Windows GUI uploads'
+	fi
+}
+
+assert_exact_top_level_entries() {
+	assert_entries_dir="$1"
+	assert_entries_expected="$2"
+	assert_entries_label="$3"
+	assert_entries_actual="$tmp_dir/$assert_entries_label.actual"
+	find "$assert_entries_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort >"$assert_entries_actual"
+	cmp -s "$assert_entries_expected" "$assert_entries_actual" ||
+		die "$assert_entries_label inventory mismatch"
+}
+
+preflight_windows_gui_arch() {
+	preflight_arch="$1"
+	preflight_arch_dir="$windows_gui_msi_root/$preflight_arch"
+	preflight_msi_name="Codesk_${version}_windows_${preflight_arch}.msi"
+	preflight_msi="$preflight_arch_dir/$preflight_msi_name"
+	preflight_checksums="$preflight_arch_dir/SHA256SUMS"
+	preflight_provenance="$preflight_arch_dir/provenance.json"
+
+	need_dir "$preflight_arch_dir"
+	printf '%s\n' "$preflight_msi_name" SHA256SUMS provenance.json | LC_ALL=C sort >"$tmp_dir/$preflight_arch.expected-files"
+	assert_exact_top_level_entries "$preflight_arch_dir" "$tmp_dir/$preflight_arch.expected-files" "$preflight_arch-files"
+	for preflight_file in "$preflight_msi" "$preflight_checksums" "$preflight_provenance"; do
+		need_file "$preflight_file"
+		[ -s "$preflight_file" ] || die "empty Windows GUI release file: $preflight_file"
+	done
+
+	preflight_normalized="$tmp_dir/$preflight_arch.checksums"
+	awk '
+		{
+			line = $0
+			sub(/\r$/, "", line)
+			hash = substr(line, 1, 64)
+			separator = substr(line, 65, 2)
+			name = substr(line, 67)
+			if (length(hash) != 64 || hash ~ /[^0-9a-f]/ || separator != "  " ||
+				name == "" || name ~ /[[:space:]]/) {
+				bad = 1
+				exit
+			}
+			print hash "\t" name
+		}
+		END {
+			if (bad || NR != 2) exit 1
+		}
+	' "$preflight_checksums" >"$preflight_normalized" || die "invalid $preflight_arch SHA256SUMS"
+	printf '%s\n' "$preflight_msi_name" provenance.json >"$tmp_dir/$preflight_arch.expected-checksum-files"
+	cut -f 2 "$preflight_normalized" >"$tmp_dir/$preflight_arch.actual-checksum-files"
+	cmp -s "$tmp_dir/$preflight_arch.expected-checksum-files" "$tmp_dir/$preflight_arch.actual-checksum-files" ||
+		die "$preflight_arch SHA256SUMS inventory mismatch"
+
+	for preflight_name in "$preflight_msi_name" provenance.json; do
+		preflight_expected_hash="$(awk -F '\t' -v name="$preflight_name" '$2 == name { print $1 }' "$preflight_normalized")"
+		preflight_actual_hash="$(sha256_file "$preflight_arch_dir/$preflight_name")"
+		[ "$preflight_expected_hash" = "$preflight_actual_hash" ] ||
+			die "$preflight_arch checksum mismatch for $preflight_name"
+	done
+	printf '%s\n' "$(awk -F '\t' -v name="$preflight_msi_name" '$2 == name { print $1 }' "$preflight_normalized")" >"$tmp_dir/$preflight_arch.msi-sha256"
+}
+
+windows_gui_powershell() {
+	if [ -n "${WINDOWS_GUI_POWERSHELL:-}" ]; then
+		printf '%s' "$WINDOWS_GUI_POWERSHELL"
+	elif command -v powershell.exe >/dev/null 2>&1; then
+		printf '%s' powershell.exe
+	elif command -v pwsh >/dev/null 2>&1; then
+		printf '%s' pwsh
+	else
+		die 'PowerShell is required for Windows GUI provenance validation'
+	fi
+}
+
+strip_prefix_slashes() {
+	printf '%s' "$1" | sed 's:^/*::; s:/*$::'
+}
+
+join_key() {
+	join_key_prefix="$(strip_prefix_slashes "$1")"
+	join_key_path="$(printf '%s' "$2" | sed 's:^/*::')"
+	if [ -n "$join_key_prefix" ]; then
+		printf '%s/%s' "$join_key_prefix" "$join_key_path"
+	else
+		printf '%s' "$join_key_path"
+	fi
+}
+
+s3_uri() {
+	s3_uri_bucket="$1"
+	s3_uri_prefix="$(strip_prefix_slashes "$2")"
+	if [ -n "$s3_uri_prefix" ]; then
+		printf 's3://%s/%s' "$s3_uri_bucket" "$s3_uri_prefix"
+	else
+		printf 's3://%s' "$s3_uri_bucket"
+	fi
+}
+
+content_type_for() {
+	case "$1" in
+		*.html) printf 'text/html; charset=utf-8' ;;
+		*.css) printf 'text/css; charset=utf-8' ;;
+		*.js|*.mjs) printf 'application/javascript; charset=utf-8' ;;
+		*.json) printf 'application/json; charset=utf-8' ;;
+		*.svg) printf 'image/svg+xml' ;;
+		*.png) printf 'image/png' ;;
+		*.jpg|*.jpeg) printf 'image/jpeg' ;;
+		*.webp) printf 'image/webp' ;;
+		*.txt|*SHA256SUMS) printf 'text/plain; charset=utf-8' ;;
+		*.sh) printf 'text/x-shellscript; charset=utf-8' ;;
+		*.ps1) printf 'text/plain; charset=utf-8' ;;
+		*.tar.gz) printf 'application/gzip' ;;
+		*.zip) printf 'application/zip' ;;
+		*.msi) printf 'application/x-msi' ;;
+		*.dmg) printf 'application/x-apple-diskimage' ;;
+		*) printf 'application/octet-stream' ;;
+	esac
+}
+
+aws_s3() {
+	aws --endpoint-url "$R2_ENDPOINT_URL" s3 "$@"
+}
+
+wrangler_cmd() {
+	if command -v wrangler >/dev/null 2>&1; then
+		wrangler "$@"
+	else
+		npx wrangler "$@"
+	fi
+}
+
+wrangler_put() {
+	wrangler_put_bucket="$1"
+	wrangler_put_key="$2"
+	wrangler_put_file="$3"
+	wrangler_put_cache_control="$4"
+	wrangler_cmd r2 object put "$wrangler_put_bucket/$wrangler_put_key" \
+		--remote \
+		--file "$wrangler_put_file" \
+		--content-type "$(content_type_for "$wrangler_put_file")" \
+		--cache-control "$wrangler_put_cache_control" \
+		--force
+}
+
+upload_file() {
+	upload_file_bucket="$1"
+	upload_file_key="$2"
+	upload_file_path="$3"
+	upload_file_cache_control="$4"
+	need_file "$upload_file_path"
+	if [ "$uploader" = aws ]; then
+		aws_s3 cp "$upload_file_path" "$(s3_uri "$upload_file_bucket" "$upload_file_key")" \
+			--content-type "$(content_type_for "$upload_file_path")" \
+			--cache-control "$upload_file_cache_control"
+	else
+		wrangler_put "$upload_file_bucket" "$(strip_prefix_slashes "$upload_file_key")" "$upload_file_path" "$upload_file_cache_control"
+	fi
+}
+
+upload_dir() {
+	upload_dir_src="$1"
+	upload_dir_bucket="$2"
+	upload_dir_prefix="$3"
+	upload_dir_cache_control="$4"
+	upload_dir_delete_mode="$5"
+	need_dir "$upload_dir_src"
+	if [ "$uploader" = aws ]; then
+		if [ "$upload_dir_delete_mode" = delete ]; then
+			aws_s3 sync "$upload_dir_src/" "$(s3_uri "$upload_dir_bucket" "$upload_dir_prefix")/" --delete --cache-control "$upload_dir_cache_control"
+		else
+			aws_s3 sync "$upload_dir_src/" "$(s3_uri "$upload_dir_bucket" "$upload_dir_prefix")/" --cache-control "$upload_dir_cache_control"
+		fi
+	else
+		find "$upload_dir_src" -type f | LC_ALL=C sort | while IFS= read -r upload_dir_file; do
+			upload_dir_rel="${upload_dir_file#"$upload_dir_src"/}"
+			upload_dir_key="$(join_key "$upload_dir_prefix" "$upload_dir_rel")"
+			printf '  %s\n' "$upload_dir_key"
+			wrangler_put "$upload_dir_bucket" "$upload_dir_key" "$upload_dir_file" "$upload_dir_cache_control"
+		done
+	fi
+}
+
+case "$target" in
+	frontend|daemon|macos-gui|windows-gui) ;;
+	*) die 'UPLOAD_TARGET must be frontend, daemon, macos-gui, or windows-gui' ;;
+esac
+
+case "$target" in
+	frontend)
+		need R2_HOMEPAGE_BUCKET
+		need R2_APP_BUCKET
+		;;
+	daemon)
+		need R2_DAEMONS_BUCKET
+		;;
+	macos-gui|windows-gui)
+		need R2_DESKTOP_BUCKET
+		;;
+esac
+
+if command -v aws >/dev/null 2>&1 && [ -n "${R2_ENDPOINT_URL:-}" ]; then
+	uploader=aws
+else
+	if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] && [ -n "${NOTTY_CLOUDFLARE_TOKEN:-}" ]; then
+		CLOUDFLARE_API_TOKEN="$NOTTY_CLOUDFLARE_TOKEN"
+		export CLOUDFLARE_API_TOKEN
+	fi
+	[ -n "${CLOUDFLARE_API_TOKEN:-}" ] || die 'aws with R2_ENDPOINT_URL or CLOUDFLARE_API_TOKEN/NOTTY_CLOUDFLARE_TOKEN is required'
+	[ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ] || die 'CLOUDFLARE_ACCOUNT_ID is required for Wrangler R2 uploads'
+	command -v wrangler >/dev/null 2>&1 || command -v npx >/dev/null 2>&1 || die 'wrangler or npx is required for Cloudflare API-token uploads'
+	uploader=wrangler
+fi
+
+release_cache_control="${RELEASE_CACHE_CONTROL:-public, max-age=31536000, immutable}"
+latest_cache_control="${LATEST_CACHE_CONTROL:-public, max-age=60}"
+
+if [ "$target" = frontend ]; then
+	homepage_prefix="${R2_HOMEPAGE_PREFIX:-}"
+	app_prefix="${R2_APP_PREFIX:-}"
+	need_file "$static_dist_dir/homepage/index.html"
+	need_file "$static_dist_dir/app/index.html"
+
+	printf 'Uploading homepage to %s\n' "$(s3_uri "$R2_HOMEPAGE_BUCKET" "$homepage_prefix")"
+	upload_dir "$static_dist_dir/homepage" "$R2_HOMEPAGE_BUCKET" "$homepage_prefix" 'public, max-age=300' delete
+	if [ -z "$homepage_prefix" ] && [ "$uploader" = wrangler ]; then
+		upload_file "$R2_HOMEPAGE_BUCKET" '' "$static_dist_dir/homepage/index.html" 'public, max-age=300'
+	fi
+
+	printf 'Uploading app to %s\n' "$(s3_uri "$R2_APP_BUCKET" "$app_prefix")"
+	upload_dir "$static_dist_dir/app" "$R2_APP_BUCKET" "$app_prefix" "$release_cache_control" delete
+	upload_file "$R2_APP_BUCKET" "$(join_key "$app_prefix" index.html)" "$static_dist_dir/app/index.html" 'public, max-age=60'
+	if [ -z "$app_prefix" ] && [ "$uploader" = wrangler ]; then
+		upload_file "$R2_APP_BUCKET" '' "$static_dist_dir/app/index.html" 'public, max-age=60'
+	fi
+fi
+
+if [ "$target" = daemon ]; then
+	platform="${UPLOAD_PLATFORM:-}"
+	case "$platform" in
+		linux|macos|windows) ;;
+		*) die 'UPLOAD_PLATFORM must be linux, macos, or windows for daemon uploads' ;;
+	esac
+	daemon_dir="$daemon_dist_root/$platform"
+	version_dir="$daemon_dir/$version"
+	daemon_prefix="$(join_key "${R2_DAEMONS_PREFIX:-daemons}" "$platform")"
+	need_file "$version_dir/manifest.json"
+	need_file "$version_dir/SHA256SUMS"
+
+	printf 'Uploading %s daemon release %s to %s\n' "$platform" "$version" "$(s3_uri "$R2_DAEMONS_BUCKET" "$daemon_prefix/$version")"
+	upload_dir "$version_dir" "$R2_DAEMONS_BUCKET" "$daemon_prefix/$version" "$release_cache_control" keep
+
+	for installer in install.sh uninstall.sh install.ps1 uninstall.ps1; do
+		if [ -f "$daemon_dist_root/$installer" ]; then
+			installer_file="$daemon_dist_root/$installer"
+		else
+			installer_file="$root_dir/deploy/daemons/$installer"
+		fi
+		upload_file "$R2_DAEMONS_BUCKET" "$(join_key "${R2_DAEMONS_PREFIX:-daemons}" "$installer")" "$installer_file" 'public, max-age=300'
+	done
+	upload_file "$R2_DAEMONS_BUCKET" "$daemon_prefix/latest/manifest.json" "$version_dir/manifest.json" "$latest_cache_control"
+	upload_file "$R2_DAEMONS_BUCKET" "$daemon_prefix/latest/SHA256SUMS" "$version_dir/SHA256SUMS" "$latest_cache_control"
+fi
+
+if [ "$target" = macos-gui ]; then
+	macos_gui_prefix="$(join_key "${R2_DESKTOP_PREFIX:-desktop}" macos)"
+	version_dir="$macos_gui_dist_dir/$version"
+	dmg="$version_dir/Codesk_${version}_macos_universal.dmg"
+	need_file "$dmg"
+	need_file "$version_dir/manifest.json"
+	need_file "$version_dir/SHA256SUMS"
+
+	printf 'Uploading macOS GUI release %s to %s\n' "$version" "$(s3_uri "$R2_DESKTOP_BUCKET" "$macos_gui_prefix/$version")"
+	upload_dir "$version_dir" "$R2_DESKTOP_BUCKET" "$macos_gui_prefix/$version" "$release_cache_control" keep
+	upload_file "$R2_DESKTOP_BUCKET" "$macos_gui_prefix/latest/manifest.json" "$version_dir/manifest.json" "$latest_cache_control"
+	upload_file "$R2_DESKTOP_BUCKET" "$macos_gui_prefix/latest/SHA256SUMS" "$version_dir/SHA256SUMS" "$latest_cache_control"
+fi
+
+if [ "$target" = windows-gui ]; then
+	windows_gui_prefix="$(join_key "${R2_DESKTOP_PREFIX:-desktop}" windows)"
+	tmp_dir="$(notty_test_mktemp notty-windows-gui-upload)"
+	need_dir "$windows_gui_msi_root"
+	printf '%s\n' amd64 arm64 >"$tmp_dir/windows-architectures.expected"
+	assert_exact_top_level_entries "$windows_gui_msi_root" "$tmp_dir/windows-architectures.expected" windows-architectures
+	for arch in amd64 arm64; do
+		preflight_windows_gui_arch "$arch"
+	done
+
+	command -v git >/dev/null 2>&1 || die 'git is required for Windows GUI provenance validation'
+	windows_gui_source_head="$(git -C "$root_dir" rev-parse --verify HEAD 2>/dev/null)" ||
+		die 'could not resolve the Windows GUI upload source HEAD'
+	windows_gui_source_base="$(git -C "$root_dir" rev-parse --verify 'HEAD^1' 2>/dev/null)" ||
+		die 'could not resolve the Windows GUI upload source parent'
+	for windows_gui_source_commit in "$windows_gui_source_head" "$windows_gui_source_base"; do
+		printf '%s\n' "$windows_gui_source_commit" | grep -Eq '^[0-9a-f]{40}$' ||
+			die 'Windows GUI upload source commits must be full lowercase object IDs'
+	done
+	windows_gui_ps="$(windows_gui_powershell)"
+	windows_gui_ps_script="$root_dir/scripts/verify-windows-gui-upload-provenance.ps1"
+	windows_gui_ps_msi_root="$windows_gui_msi_root"
+	if command -v cygpath >/dev/null 2>&1; then
+		windows_gui_ps_script="$(cygpath -w "$windows_gui_ps_script")"
+		windows_gui_ps_msi_root="$(cygpath -w "$windows_gui_ps_msi_root")"
+	fi
+	MSYS2_ARG_CONV_EXCL='*' "$windows_gui_ps" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+		-File "$windows_gui_ps_script" \
+		-MsiRoot "$windows_gui_ps_msi_root" \
+		-Version "$version" \
+		-SourceHead "$windows_gui_source_head" \
+		-SourceBase "$windows_gui_source_base" \
+		-Repository "${WINDOWS_GUI_REPOSITORY:-XIAZY/notty}" ||
+		die 'Windows GUI provenance preflight failed'
+
+	manifest="$tmp_dir/manifest.json"
+	printf '{\n  "version": "%s",\n  "artifacts": [\n' "$version" >"$manifest"
+	first=1
+	for arch in amd64 arm64; do
+		arch_dir="$windows_gui_msi_root/$arch"
+		msi_name="Codesk_${version}_windows_${arch}.msi"
+		sum="$(sed -n '1p' "$tmp_dir/$arch.msi-sha256")"
+		if [ "$first" -eq 0 ]; then printf ',\n' >>"$manifest"; fi
+		first=0
+		printf '    {"os": "windows", "arch": "%s", "file": "%s/%s", "sha256": "%s"}' \
+			"$arch" "$arch" "$msi_name" "$sum" >>"$manifest"
+	done
+	printf '\n  ]\n}\n' >>"$manifest"
+
+	for arch in amd64 arm64; do
+		arch_dir="$windows_gui_msi_root/$arch"
+		msi_name="Codesk_${version}_windows_${arch}.msi"
+		upload_file "$R2_DESKTOP_BUCKET" "$windows_gui_prefix/$version/$arch/$msi_name" "$arch_dir/$msi_name" "$release_cache_control"
+		upload_file "$R2_DESKTOP_BUCKET" "$windows_gui_prefix/$version/$arch/SHA256SUMS" "$arch_dir/SHA256SUMS" "$release_cache_control"
+		upload_file "$R2_DESKTOP_BUCKET" "$windows_gui_prefix/$version/$arch/provenance.json" "$arch_dir/provenance.json" "$release_cache_control"
+	done
+	upload_file "$R2_DESKTOP_BUCKET" "$windows_gui_prefix/$version/manifest.json" "$manifest" "$release_cache_control"
+	upload_file "$R2_DESKTOP_BUCKET" "$windows_gui_prefix/latest/manifest.json" "$manifest" "$latest_cache_control"
+	printf 'Uploaded Windows GUI release %s to %s\n' "$version" "$(s3_uri "$R2_DESKTOP_BUCKET" "$windows_gui_prefix/$version")"
+fi
+
+printf 'Uploaded %s assets for %s\n' "$target" "$version"

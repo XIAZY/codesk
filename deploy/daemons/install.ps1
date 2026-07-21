@@ -416,6 +416,7 @@ if ([string]::IsNullOrWhiteSpace($DataDir)) {
 }
 
 $StaticBase = $StaticBase.TrimEnd("/")
+$artifactBase = Join-RemotePath $StaticBase "windows"
 $BackendUrl = $BackendUrl.TrimEnd("/")
 $codexCommand = if ([string]::IsNullOrWhiteSpace($env:NOTTY_CODEX_COMMAND)) { "codex" } else { $env:NOTTY_CODEX_COMMAND }
 $claudeCommand = if ([string]::IsNullOrWhiteSpace($env:NOTTY_CLAUDE_COMMAND)) { "claude" } else { $env:NOTTY_CLAUDE_COMMAND }
@@ -430,7 +431,7 @@ New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
 try {
     if ($Version -eq "latest") {
         $manifestPath = Join-Path $tempDir "manifest.json"
-        Copy-Download -Url (Join-RemotePath $StaticBase "latest/manifest.json") -Destination $manifestPath
+        Copy-Download -Url (Join-RemotePath $artifactBase "latest/manifest.json") -Destination $manifestPath
         $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
         $Version = [string]$manifest.version
         if ([string]::IsNullOrWhiteSpace($Version)) {
@@ -442,7 +443,7 @@ try {
     }
 
     $artifact = Get-WindowsArtifactName -ReleaseVersion $Version -ReleaseArchitecture $releaseArchitecture
-    $versionBase = Join-RemotePath $StaticBase $Version
+    $versionBase = Join-RemotePath $artifactBase $Version
     $archivePath = Join-Path $tempDir $artifact
     $checksumsPath = Join-Path $tempDir "SHA256SUMS"
 

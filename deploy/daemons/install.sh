@@ -104,10 +104,11 @@ static_base="$(printf '%s' "$static_base" | sed 's:/*$::')"
 backend_url="$(printf '%s' "$backend_url" | sed 's:/*$::')"
 
 case "$(uname -s)" in
-	Darwin) os="darwin" ;;
-	Linux) os="linux" ;;
+	Darwin) os="darwin"; artifact_platform="macos" ;;
+	Linux) os="linux"; artifact_platform="linux" ;;
 	*) die "unsupported operating system: $(uname -s)" ;;
 esac
+artifact_base="$static_base/$artifact_platform"
 
 case "$(uname -m)" in
 	x86_64|amd64) arch="amd64" ;;
@@ -323,13 +324,13 @@ trap cleanup EXIT INT TERM
 
 if [ "$version" = "latest" ]; then
 	manifest="$tmp_dir/manifest.json"
-	download_to "$static_base/latest/manifest.json" "$manifest"
+	download_to "$artifact_base/latest/manifest.json" "$manifest"
 	version="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -n 1)"
 	[ -n "$version" ] || die "could not determine latest daemon version"
 fi
 
 artifact="notty-daemon_${version}_${os}_${arch}.tar.gz"
-version_base="$static_base/$version"
+version_base="$artifact_base/$version"
 archive="$tmp_dir/$artifact"
 sums="$tmp_dir/SHA256SUMS"
 

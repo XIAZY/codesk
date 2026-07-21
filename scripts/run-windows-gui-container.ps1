@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('windows-gui-build', 'windows-gui-release')]
+    [ValidateSet('windows-gui-build', 'windows-gui-deploy')]
     [string] $Target,
 
     [AllowNull()]
@@ -127,7 +127,18 @@ $imageOutput = @(& docker image inspect $BuilderImage --format '{{.Os}}|{{.Archi
 $imageInspectExitCode = $LASTEXITCODE
 $ErrorActionPreference = $savedErrorActionPreference
 if ($imageInspectExitCode -ne 0 -or $imageOutput.Count -ne 1) {
-    throw "Windows GUI builder image $BuilderImage is not available; run make build-windows-builder-image"
+    Write-Host "Windows GUI builder image $BuilderImage is not available; building it now"
+    & (Join-Path $root 'scripts/build-windows-gui-builder-image.ps1') `
+        -RepositoryRoot $root `
+        -BuilderImage $BuilderImage
+    $savedErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    $imageOutput = @(& docker image inspect $BuilderImage --format '{{.Os}}|{{.Architecture}}|{{.OsVersion}}' 2>$null)
+    $imageInspectExitCode = $LASTEXITCODE
+    $ErrorActionPreference = $savedErrorActionPreference
+    if ($imageInspectExitCode -ne 0 -or $imageOutput.Count -ne 1) {
+        throw "Windows GUI builder image $BuilderImage is unavailable after construction"
+    }
 }
 $imageFields = @(([string] $imageOutput[0]).Trim().Split('|'))
 if ($imageFields.Count -ne 3 -or $imageFields[0] -cne 'windows') {

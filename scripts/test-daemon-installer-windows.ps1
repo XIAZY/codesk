@@ -130,7 +130,8 @@ $machineArchitecture = if (-not [string]::IsNullOrWhiteSpace($env:PROCESSOR_ARCH
 }
 $releaseArchitecture = Get-WindowsReleaseArchitecture -MachineArchitecture $machineArchitecture
 $packageName = "notty-daemon_${version}_windows_${releaseArchitecture}"
-$releaseDir = Join-Path $staticRoot $version
+$artifactRoot = Join-Path $staticRoot "windows"
+$releaseDir = Join-Path $artifactRoot $version
 $packageDir = Join-Path $releaseDir $packageName
 $archive = Join-Path $releaseDir "$packageName.zip"
 $testHome = Join-Path $tempDir "home"
@@ -143,7 +144,7 @@ foreach ($name in @("USERPROFILE", "PROCESSOR_ARCHITECTURE", "PROCESSOR_ARCHITEW
     $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
 }
 
-New-Item -ItemType Directory -Path (Join-Path $packageDir "bin"), (Join-Path $staticRoot "latest"), $testHome -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $packageDir "bin"), (Join-Path $artifactRoot "latest"), $testHome -Force | Out-Null
 $fixtureOverride = if ($releaseArchitecture -eq "arm64") { $Arm64Fixture } else { $Amd64Fixture }
 $testExecutable = if ([string]::IsNullOrWhiteSpace($fixtureOverride)) {
     Join-Path $env:SystemRoot "System32\where.exe"
@@ -161,7 +162,7 @@ Copy-Item -LiteralPath $runner -Destination (Join-Path $packageDir "run-windows.
 Compress-Archive -LiteralPath $packageDir -DestinationPath $archive -Force
 $archiveHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
 Set-Content -LiteralPath (Join-Path $releaseDir "SHA256SUMS") -Value "$archiveHash  $packageName.zip" -Encoding ASCII
-Set-Content -LiteralPath (Join-Path $staticRoot "latest\manifest.json") -Value '{"version":"test"}' -Encoding ASCII
+Set-Content -LiteralPath (Join-Path $artifactRoot "latest\manifest.json") -Value '{"version":"test"}' -Encoding ASCII
 $staticBase = ([Uri]::new($staticRoot.TrimEnd("\") + "\")).AbsoluteUri.TrimEnd("/")
 
 try {

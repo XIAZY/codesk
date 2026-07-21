@@ -20,30 +20,26 @@ ifeq ($(REPOSITORY_VERSION),)
 $(error root VERSION is invalid)
 endif
 HOST_PLATFORM := $(HOST_OS)/$(HOST_ARCH)
-PLATFORMS ?= $(HOST_PLATFORM)
-DAEMON_ALL_PLATFORMS ?= all
+HOST_DAEMON_PLATFORM := $(if $(filter darwin,$(HOST_OS)),macos,$(HOST_OS))
+DAEMON_DIST_ROOT ?= $(DIST_DIR)
 MACOS_GUI_DIST_DIR ?= dist/macos-desktop
-MACOS_GUI_UNSIGNED ?=
-WINDOWS_GUI_ARCHES ?= amd64 arm64
 WINDOWS_GUI_ROOT ?= dist/windows-gui
 WINDOWS_GUI_PAYLOAD_ROOT ?= $(WINDOWS_GUI_ROOT)/payload
 WINDOWS_GUI_TEST_DIR ?= $(WINDOWS_GUI_ROOT)/tests
 WINDOWS_GUI_MSI_ROOT ?= $(WINDOWS_GUI_ROOT)/msi
-WINDOWS_GUI_CI_DIR ?= $(WINDOWS_GUI_ROOT)/ci
 WINDOWS_GUI_REPOSITORY ?= XIAZY/notty
 WINDOWS_GUI_BUILDER_IMAGE ?= alphatoad/notty:windows-builder
-WINDOWS_GUI_RUN_ID ?=
 WINDOWS_GUI_ZIG_VERSION ?= 0.16.0
 
 .PHONY: dev dev-down dev-config-check prod-config-check \
 	test tests test-unit test-go test-frontend test-postgres test-regression test-live \
-	build build-yffi build-go build-frontend build-daemon build-static build-static-local build-backend-image \
-	publish publish-backend publish-frontend publish-static \
-	deploy deploy-backend deploy-frontend deploy-static \
-	prod-config-check static-build static-build-local static-publish backend-image daemon-build daemon-release daemon-release-all release-daemons daemon-checksums daemon-clean daemon-installer-check daemon-installer-windows-check daemon-uninstall-test version-contract-check \
-	macos-gui-build macos-gui-release build-windows-builder-image windows-gui-payloads windows-gui-build windows-gui-release windows-verify
+	build build-yffi build-go _build-daemon-host _static-build-local \
+	linux-daemon-build linux-daemon-deploy macos-daemon-build macos-daemon-deploy windows-daemon-build windows-daemon-deploy \
+	macos-gui-build macos-gui-deploy windows-gui-build windows-gui-deploy \
+	frontend-build frontend-deploy backend-build backend-deploy deploy \
+	daemon-clean daemon-installer-check daemon-installer-windows-check daemon-uninstall-test version-contract-check build-deploy-contract-check
 
-dev: static-build-local
+dev: _static-build-local
 	docker compose --env-file deploy/env/dev.server.env up --build
 
 dev-down:
@@ -63,7 +59,7 @@ test: tests
 
 tests: test-unit test-postgres test-regression test-live
 
-test-unit: test-go test-frontend daemon-installer-check daemon-uninstall-test version-contract-check
+test-unit: test-go test-frontend daemon-installer-check daemon-uninstall-test version-contract-check build-deploy-contract-check
 
 test-go: build-yffi
 	go test ./...
@@ -80,7 +76,7 @@ test-regression:
 test-live:
 	scripts/test-live.sh
 
-build: build-go build-frontend build-daemon build-static-local
+build: build-go frontend-build _build-daemon-host _static-build-local
 
 build-yffi:
 	scripts/build-yffi.sh
@@ -88,46 +84,47 @@ build-yffi:
 build-go: build-yffi
 	go build ./...
 
-build-frontend:
-	cd frontend && if [ ! -d node_modules ]; then npm ci; fi && npm run build
+frontend-build:
+	scripts/build-frontend.sh
 
-build-daemon: build-yffi
+_build-daemon-host: build-yffi
 	mkdir -p bin
 	CGO_ENABLED=1 go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS) -X notty/daemon/internal/buildinfo.Version=$(REPOSITORY_VERSION)" -o bin/notty-daemon ./daemon/cmd/daemon
 	CGO_ENABLED=0 go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS) -X notty/daemon/internal/buildinfo.Version=$(REPOSITORY_VERSION)" -o bin/notty-agent-tool ./daemon/cmd/agenttool
 
-daemon-build: build-daemon
+_static-build-local:
+	DAEMON_DIST_ROOT="$(DAEMON_DIST_ROOT)" DAEMON_ARCHES="$(HOST_ARCH)" scripts/build-daemon-platform.sh "$(HOST_DAEMON_PLATFORM)"
 
-daemon-release:
-	DIST_DIR="$(DIST_DIR)" PLATFORMS="$(PLATFORMS)" scripts/build-daemon-release.sh "$(DIST_DIR)"
+linux-daemon-build:
+	DAEMON_DIST_ROOT="$(DAEMON_DIST_ROOT)" DAEMON_ARCHES="amd64 arm64" scripts/build-daemon-platform.sh linux
 
-daemon-release-all:
-	DIST_DIR="$(DIST_DIR)" PLATFORMS="$(DAEMON_ALL_PLATFORMS)" scripts/build-daemon-release.sh "$(DIST_DIR)"
+linux-daemon-deploy:
+	DAEMON_DIST_ROOT="$(DAEMON_DIST_ROOT)" scripts/deploy-daemon.sh linux
 
-release-daemons: daemon-release-all
+macos-daemon-build:
+	DAEMON_DIST_ROOT="$(DAEMON_DIST_ROOT)" DAEMON_ARCHES="amd64 arm64" scripts/build-daemon-platform.sh macos
 
-windows-gui-payloads:
-	WINDOWS_GUI_ARCHES="$(WINDOWS_GUI_ARCHES)" \
-	WINDOWS_GUI_ZIG_VERSION="$(WINDOWS_GUI_ZIG_VERSION)" \
-	WINDOWS_GUI_SAFE_PARENT_DIRECTORY="$(WINDOWS_GUI_ROOT)" \
-		scripts/build-windows-desktop-payloads.sh \
-		"$(WINDOWS_GUI_PAYLOAD_ROOT)" "$(WINDOWS_GUI_TEST_DIR)"
+macos-daemon-deploy:
+	DAEMON_DIST_ROOT="$(DAEMON_DIST_ROOT)" scripts/deploy-daemon.sh macos
+
+windows-daemon-build:
+	DAEMON_DIST_ROOT="$(DAEMON_DIST_ROOT)" DAEMON_ARCHES="amd64 arm64" scripts/build-daemon-platform.sh windows
+
+windows-daemon-deploy:
+	DAEMON_DIST_ROOT="$(DAEMON_DIST_ROOT)" scripts/deploy-daemon.sh windows
 
 ifeq ($(OS),Windows_NT)
 macos-gui-build:
 	@"$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File make.ps1 macos-gui-build
 
-macos-gui-release:
-	@"$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File make.ps1 macos-gui-release
-
-build-windows-builder-image:
-	@"$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File make.ps1 build-windows-builder-image "WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"
+macos-gui-deploy:
+	@"$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File make.ps1 macos-gui-deploy
 
 windows-gui-build:
 	@"$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File make.ps1 windows-gui-build "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)" "WINDOWS_GUI_PAYLOAD_ROOT=$(WINDOWS_GUI_PAYLOAD_ROOT)" "WINDOWS_GUI_TEST_DIR=$(WINDOWS_GUI_TEST_DIR)" "WINDOWS_GUI_MSI_ROOT=$(WINDOWS_GUI_MSI_ROOT)" "WINDOWS_GUI_REPOSITORY=$(WINDOWS_GUI_REPOSITORY)" "WINDOWS_GUI_ZIG_VERSION=$(WINDOWS_GUI_ZIG_VERSION)" "WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"
 
-windows-gui-release:
-	@"$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File make.ps1 windows-gui-release "WINDOWS_GUI_ARCHES=$(WINDOWS_GUI_ARCHES)" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)" "WINDOWS_GUI_PAYLOAD_ROOT=$(WINDOWS_GUI_PAYLOAD_ROOT)" "WINDOWS_GUI_TEST_DIR=$(WINDOWS_GUI_TEST_DIR)" "WINDOWS_GUI_MSI_ROOT=$(WINDOWS_GUI_MSI_ROOT)" "WINDOWS_GUI_REPOSITORY=$(WINDOWS_GUI_REPOSITORY)" "WINDOWS_GUI_ZIG_VERSION=$(WINDOWS_GUI_ZIG_VERSION)" "WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"
+windows-gui-deploy:
+	@"$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File make.ps1 windows-gui-deploy "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)" "WINDOWS_GUI_PAYLOAD_ROOT=$(WINDOWS_GUI_PAYLOAD_ROOT)" "WINDOWS_GUI_TEST_DIR=$(WINDOWS_GUI_TEST_DIR)" "WINDOWS_GUI_MSI_ROOT=$(WINDOWS_GUI_MSI_ROOT)" "WINDOWS_GUI_REPOSITORY=$(WINDOWS_GUI_REPOSITORY)" "WINDOWS_GUI_ZIG_VERSION=$(WINDOWS_GUI_ZIG_VERSION)" "WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"
 else
 macos-gui-build:
 	@if [ "$(MACOS_GUI_HOST_OS)" != darwin ]; then \
@@ -137,136 +134,39 @@ macos-gui-build:
 	ALLOW_UNSIGNED_MACOS_DESKTOP=1 \
 		scripts/build-macos-desktop-release.sh "$(MACOS_GUI_DIST_DIR)"
 
-macos-gui-release:
+macos-gui-deploy:
 	@if [ "$(MACOS_GUI_HOST_OS)" != darwin ]; then \
-		printf '%s\n' 'macos-gui-release requires a real macOS host; no release was built' >&2; \
+		printf '%s\n' 'macos-gui-deploy requires a real macOS host; no GUI was deployed' >&2; \
 		exit 1; \
 	fi
-	ALLOW_UNSIGNED_MACOS_DESKTOP="$(MACOS_GUI_UNSIGNED)" \
-		scripts/build-macos-desktop-release.sh "$(MACOS_GUI_DIST_DIR)"
-
-build-windows-builder-image:
-	@printf '%s\n' 'build-windows-builder-image requires a real Windows host running Windows containers' >&2
-	@exit 1
+	MACOS_GUI_DIST_DIR="$(MACOS_GUI_DIST_DIR)" scripts/deploy-macos-gui.sh
 
 windows-gui-build:
 	@printf '%s\n' 'windows-gui-build requires a real Windows host; no GUI was built' >&2
-	@printf '%s\n' 'Use the Windows build CI, or invoke make windows-gui-payloads for an explicit cross-compile' >&2
+	@printf '%s\n' 'Use the Windows build CI or scripts/build-windows-desktop-payloads.sh for an explicit cross-compile' >&2
 	@exit 1
 
-windows-gui-release:
-	@printf '%s\n' 'windows-gui-release requires real Windows for WiX link and ICE validation; no MSI was built' >&2
-	@printf '%s\n' 'Use the Windows release CI, then run make windows-verify [WINDOWS_GUI_RUN_ID=<run-id>]' >&2
+windows-gui-deploy:
+	@printf '%s\n' 'windows-gui-deploy requires real Windows for WiX link and ICE validation; no GUI was deployed' >&2
+	@printf '%s\n' 'Use the Windows release CI, then run scripts/verify-windows-gui-ci.sh for exact-head evidence' >&2
 	@exit 1
 endif
 
-windows-verify:
-	@command -v gh >/dev/null 2>&1 || { \
-		printf '%s\n' 'windows-verify requires the GitHub CLI (gh)' >&2; \
-		exit 1; \
-	}
-	@set -eu; \
-	head="$$(git rev-parse --verify HEAD)"; \
-	run_id="$(WINDOWS_GUI_RUN_ID)"; \
-	if [ -z "$$run_id" ]; then \
-		run_id="$$(gh run list -R "$(WINDOWS_GUI_REPOSITORY)" --workflow ci.yml --commit "$$head" --status success --limit 1 --json databaseId --jq '.[0].databaseId')"; \
-	fi; \
-	case "$$run_id" in ''|*[!0-9]*) \
-		printf '%s\n' 'No successful exact-HEAD CI run was found; set WINDOWS_GUI_RUN_ID to an exact successful release run' >&2; \
-		exit 1 ;; \
-	esac; \
-	metadata="$$(gh run view "$$run_id" -R "$(WINDOWS_GUI_REPOSITORY)" --json headSha,conclusion --jq '.headSha + " " + .conclusion')"; \
-	if [ "$$metadata" != "$$head success" ]; then \
-		printf 'CI run %s is not a successful exact-HEAD run: %s (want %s success)\n' "$$run_id" "$$metadata" "$$head" >&2; \
-		exit 1; \
-	fi; \
-	case "$(WINDOWS_GUI_CI_DIR)" in ''|/|.) \
-		printf 'unsafe WINDOWS_GUI_CI_DIR: %s\n' "$(WINDOWS_GUI_CI_DIR)" >&2; \
-		exit 1 ;; \
-	esac; \
-	out="$(WINDOWS_GUI_CI_DIR)/$$run_id"; \
-	release_version="$$(scripts/read-version.sh)"; \
-	rm -rf "$$out"; \
-	mkdir -p "$$out/amd64" "$$out/arm64"; \
-	for arch in amd64 arm64; do \
-		gh run download "$$run_id" -R "$(WINDOWS_GUI_REPOSITORY)" -n "windows-desktop-msi-$$arch" -D "$$out/$$arch" || exit $$?; \
-		dir="$$out/$$arch"; \
-		expected="$$(printf '%s\n' "Codesk_$${release_version}_windows_$$arch.msi" SHA256SUMS provenance.json | LC_ALL=C sort)"; \
-		actual="$$(LC_ALL=C ls -1A "$$dir")"; \
-		if [ "$$actual" != "$$expected" ]; then \
-			printf 'unexpected %s artifact inventory:\n%s\n' "$$arch" "$$actual" >&2; \
-			exit 1; \
-		fi; \
-		for path in "$$dir"/* "$$dir"/.[!.]* "$$dir"/..?*; do \
-			[ -e "$$path" ] || continue; \
-			[ -f "$$path" ] && [ ! -L "$$path" ] || { \
-				printf 'artifact entry is not a real file: %s\n' "$$path" >&2; \
-				exit 1; \
-			}; \
-		done; \
-		normalized="$$out/.SHA256SUMS-$$arch"; \
-		awk '{ sub(/\r$$/, ""); print }' "$$dir/SHA256SUMS" >"$$normalized"; \
-		expected_checksums="$$(printf '%s\n' "Codesk_$${release_version}_windows_$$arch.msi" provenance.json)"; \
-		actual_checksums="$$(awk 'length($$1) == 64 && $$1 ~ /^[0-9a-f]+$$/ && NF == 2 { print $$2; next } { exit 1 }' "$$normalized")" || { \
-			printf 'invalid %s SHA256SUMS format\n' "$$arch" >&2; \
-			exit 1; \
-		}; \
-		if [ "$$actual_checksums" != "$$expected_checksums" ]; then \
-			printf 'unexpected %s SHA256SUMS inventory:\n%s\n' "$$arch" "$$actual_checksums" >&2; \
-			exit 1; \
-		fi; \
-		if command -v sha256sum >/dev/null 2>&1; then \
-			(cd "$$dir" && sha256sum -c -) <"$$normalized" || exit $$?; \
-		elif command -v shasum >/dev/null 2>&1; then \
-			(cd "$$dir" && shasum -a 256 -c -) <"$$normalized" || exit $$?; \
-		else \
-			printf '%s\n' 'windows-verify requires sha256sum or shasum' >&2; \
-			exit 1; \
-		fi; \
-		rm -f "$$normalized"; \
-	done; \
-	printf 'Verified Windows GUI CI artifacts for %s from run %s in %s\n' "$$head" "$$run_id" "$$out"
-
-build-static:
-	scripts/build-static.sh
-
-static-build: build-static
-
-build-static-local:
-	STATIC_BUILD_TARGET=daemons STATIC_DIST_DIR=dist/static PLATFORMS="$(HOST_PLATFORM)" scripts/build-static.sh
-
-static-build-local: build-static-local
-
-build-backend-image:
+backend-build:
 	scripts/build-backend-image.sh
 
-backend-image: build-backend-image
-
-publish: publish-backend publish-frontend publish-static
-
-publish-backend:
-	scripts/publish-backend.sh
-
-publish-frontend:
-	scripts/publish-frontend.sh
-
-publish-static:
-	scripts/publish-static.sh
-
-static-publish:
-	scripts/publish-static-r2.sh
-
-deploy:
-	scripts/deploy-notty.sh
-
-deploy-backend:
+backend-deploy:
 	scripts/deploy-backend.sh
 
-deploy-frontend:
+frontend-deploy:
 	scripts/deploy-frontend.sh
 
-deploy-static:
-	scripts/deploy-static.sh
+deploy:
+	$(MAKE) frontend-deploy
+	$(MAKE) linux-daemon-deploy
+	$(MAKE) macos-daemon-deploy
+	$(MAKE) windows-daemon-deploy
+	$(MAKE) backend-deploy
 
 prod-config-check:
 	tmp_secrets="$$(mktemp)" && \
@@ -277,9 +177,6 @@ prod-config-check:
 		printf '%s\n' 'NOTTY_MAILGUN_API_KEY=notty-test-mailgun-key'; \
 	} > "$$tmp_secrets" && \
 	NOTTY_BACKEND_IMAGE=alphatoad/notty:backend-test NOTTY_SECRETS_ENV_FILE="$$tmp_secrets" docker compose -f compose.prod.yml --env-file deploy/env/prod.server.env config >/dev/null
-
-daemon-checksums:
-	cd "$(DIST_DIR)/$(REPOSITORY_VERSION)" && shasum -a 256 *.tar.gz > SHA256SUMS
 
 daemon-installer-check:
 	sh -n deploy/daemons/install.sh
@@ -301,6 +198,9 @@ daemon-uninstall-test:
 
 version-contract-check:
 	sh scripts/test-version-contract.sh
+
+build-deploy-contract-check:
+	sh scripts/test-build-deploy-contract.sh
 
 daemon-clean:
 	rm -rf bin "$(DIST_DIR)"

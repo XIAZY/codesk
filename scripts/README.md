@@ -56,12 +56,14 @@ unsigned, construction-only mode:
 make macos-gui-build
 ```
 
-The signed release entry point is `make macos-gui-release`;
-provide both signing variables documented above. The version is read from the
-root `VERSION` file (fail-closed). `MACOS_GUI_UNSIGNED=1` remains
-an explicit construction-only escape hatch. Both human-facing targets fail
-before construction on a non-macOS kernel; the release script still owns every
-toolchain, signing, notarization, and source-cleanliness check.
+The signed deployment entry point is `make macos-gui-deploy`; provide both
+signing variables documented above. It builds, signs, notarizes, and uploads the
+versioned release plus `latest` metadata through `scripts/upload-r2.sh`. The
+version is read from the root `VERSION` file (fail-closed). Unsigned mode is
+available only through `make macos-gui-build`; deploy never accepts it. Both
+human-facing targets fail before construction on a non-macOS kernel, and the
+release script still owns every toolchain, signing, notarization, and
+source-cleanliness check.
 
 The script signs the universal nested helper before `Codesk.app`, enables the
 hardened runtime, notarizes and staples the app, produces and notarizes the
@@ -90,7 +92,7 @@ claim always executes every trust check even when unsigned relaxation is set;
 an unsigned claim requires explicit relaxation and produces unmistakably
 construction-only output. It does not exercise runtime behavior.
 
-## Windows desktop build and release
+## Windows desktop build and deploy
 
 The public Windows GUI targets consume the reusable
 `alphatoad/notty:windows-builder` image and run the complete payload and MSI
@@ -118,17 +120,9 @@ docker info --format '{{.OSType}} {{.Architecture}} {{.OSVersion}}'
 # prints windows arm64 ... on Windows ARM64, or windows amd64 ... on AMD64
 ```
 
-Build the reusable builder image independently from the product build:
-
-```sh
-make build-windows-builder-image
-```
-
-```powershell
-powershell.exe -ExecutionPolicy Bypass -File .\make.ps1 build-windows-builder-image
-```
-
-This image build downloads Windows Server Core plus versioned tool archives over
+The first `windows-gui-build` or `windows-gui-deploy` invocation constructs the
+reusable builder image automatically when it is absent. That image build
+downloads Windows Server Core plus versioned tool archives over
 HTTPS and restores WiX into the image's NuGet cache. Payload builds may
 also download the source tree's Go modules and Cargo crates. Later image builds
 reuse Docker's toolchain layers. Server Core is intentional:
@@ -136,10 +130,8 @@ Nano Server is smaller, but it omits both Windows PowerShell and `msi.dll`; the
 WiX reproducibility and ICE validation path requires those operating-system
 components.
 
-The product build targets do not rebuild or mutate the builder image. They fail
-with an instruction to run `make build-windows-builder-image` when the image is
-missing, and they reject an image whose Windows architecture does not match the
-Docker engine. To use another local or pre-pulled tag, set
+Later product builds reuse the image and reject one whose Windows architecture
+does not match the Docker engine. To use another local or pre-pulled tag, set
 `WINDOWS_GUI_BUILDER_IMAGE`; the image-build and product-build jobs must use the
 same value.
 
@@ -172,10 +164,9 @@ script and non-container CI path, but the container supplies
 native ARM64 compiler does not complete a cgo compile in process-isolated
 Server Core.
 
-CI and explicit native-toolchain users can still invoke the honestly named
-`make windows-gui-payloads` target or the shared inner script directly from a
-host that already has Go, Rust/Cargo, the required Rust targets, a POSIX shell,
-and Zig 0.16.0:
+CI and explicit native-toolchain users invoke the shared inner script directly
+from a host that already has Go, Rust/Cargo, the required Rust targets, a POSIX
+shell, and Zig 0.16.0:
 
 ```sh
 WINDOWS_GUI_ARCHES="amd64 arm64" \
@@ -196,26 +187,29 @@ before compiling. Cross-target Yffi staging is transactional: the script
 restores the exact pre-build host `libyrs.a` bytes on success, failure, or
 interruption, and removes the staged archive when no host archive existed.
 
-The public release entry point uses the same native container, builds both
-payload architectures by default, and passes each to the reproducible WiX
-builder, which links the requested release twice and runs ICE validation:
+The public deploy entry point uses the same native container, requires both
+payload architectures in canonical `amd64 arm64` order, passes each to the
+reproducible WiX builder, then uploads both validated bundles through the shared
+R2 uploader on the host:
 
 ```sh
-make windows-gui-release
+make windows-gui-deploy
 ```
 
 ```powershell
-powershell.exe -ExecutionPolicy Bypass -File .\make.ps1 windows-gui-release
+powershell.exe -ExecutionPolicy Bypass -File .\make.ps1 windows-gui-deploy
 ```
 
 That target fails closed unless both the host and Docker engine are real
 Windows, the Docker engine architecture matches the host, and all requested
 output paths remain under the repository bind mount. Linux containers, Wine,
 WSL, cross-architecture images, and Hyper-V isolation do not produce a release
-claim. The version is read from the root `VERSION` file (fail-closed) and must
+claim. The deploy target does not accept an architecture override: either both
+canonical bundles pass preflight and publish together, or no R2 write starts.
+The version is read from the root `VERSION` file (fail-closed) and must
 be a canonical numeric value in the MSI range
 (major and minor at most 255, build at most 65535) before compiling. It produces
-exactly one MSI per requested architecture:
+exactly one MSI for each architecture:
 
 ```text
 dist/windows-gui/msi/amd64/Codesk_1.2.3_windows_amd64.msi
@@ -223,25 +217,31 @@ dist/windows-gui/msi/arm64/Codesk_1.2.3_windows_arm64.msi
 ```
 
 Each architecture directory also contains `provenance.json` and
-`SHA256SUMS`. The builder derives the MSI ProductCode with UUIDv5 from its
+`SHA256SUMS`. Before its first remote write, the uploader requires exactly those
+three real files in each of exactly two architecture directories, verifies both
+checksum inventories and actual hashes, and binds structured release provenance
+to the root version, architecture, repository, and checked-out source commits.
+The builder derives the MSI ProductCode with UUIDv5 from its
 pinned product namespace and the canonical `"<version>+<arch>"` name while
 preserving the package's stable UpgradeCode. Production and uploaded CI
 artifacts always use the root `VERSION`. Upgrade/reproducibility CI uses the
 explicit `-TestOnlyUpgradeQa` mode and versions from
 `scripts/testdata/windows-msi-upgrade-versions.ps1`; those artifacts are
 written under an `upgrade-qa` path, marked `publishable=false`, and never
-uploaded. Signing and publication remain separate release-policy work.
+uploaded. Deployed bundles live under `desktop/windows/<VERSION>/<arch>`; a
+short-cache `desktop/windows/latest/manifest.json` pointer is written only
+after both architecture bundles are present.
 
 From any host with `gh` plus `sha256sum` or `shasum`, download both
 architecture bundles from a successful CI run bound to the checked-out `HEAD`
 and verify their exact inventories and checksums with:
 
 ```sh
-make windows-verify
-make windows-verify WINDOWS_GUI_RUN_ID=123456789
+scripts/verify-windows-gui-ci.sh
+WINDOWS_GUI_RUN_ID=123456789 scripts/verify-windows-gui-ci.sh
 ```
 
-Without an explicit run ID, the target selects the newest successful CI run
+Without an explicit run ID, the script selects the newest successful CI run
 for the exact checked-out commit. It never falls back to a stale commit or a
 non-successful run.
 

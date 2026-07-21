@@ -74,7 +74,7 @@ func TestWindowsGUIMakeRoutesWithoutPOSIXTools(t *testing.T) {
 	}
 	makeSource := normalizeSourceNewlines(string(makeData))
 
-	for _, target := range []string{"windows-gui-build", "windows-gui-release"} {
+	for _, target := range []string{"windows-gui-build", "windows-gui-deploy"} {
 		if err := runWindowsGUIDispatch(makeSource, target); err != nil {
 			t.Fatalf("Windows-native Make %s dispatch failed: %v", target, err)
 		}
@@ -135,7 +135,7 @@ func TestWindowsGUIPowerShellRejectsRemovedVersionArgument(t *testing.T) {
 
 	command := exec.Command(
 		powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-		"-File", "scripts/run-windows-gui-target.ps1", "-Target", "windows-gui-release", "-Version", "invalid",
+		"-File", "scripts/run-windows-gui-target.ps1", "-Target", "windows-gui-deploy", "-Version", "invalid",
 	)
 	command.Dir = ".."
 	output, err := command.CombinedOutput()
@@ -153,6 +153,29 @@ func TestWindowsGUIPowerShellRejectsRemovedVersionArgument(t *testing.T) {
 		if strings.Contains(text, regression) {
 			t.Fatalf("release default regressed with %q: %s", regression, output)
 		}
+	}
+}
+
+func TestWindowsGUIDeployRejectsArchitectureSubset(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows PowerShell defaults require Windows")
+	}
+	powershell, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		t.Skip("Windows PowerShell is unavailable")
+	}
+
+	command := exec.Command(
+		powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+		"-File", "scripts/run-windows-gui-target.ps1", "-Target", "windows-gui-deploy", "-Architectures", "amd64",
+	)
+	command.Dir = ".."
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("single-architecture deploy unexpectedly succeeded: %s", output)
+	}
+	if !strings.Contains(string(output), "windows-gui-deploy requires exactly amd64 then arm64") {
+		t.Fatalf("single-architecture deploy failure = %q", output)
 	}
 }
 
@@ -276,6 +299,11 @@ func TestWindowsMSIReleaseSourceContract(t *testing.T) {
 			orchestratorNew: "$item.Length -lt 0",
 		},
 		{
+			name:            "release accepts an architecture subset",
+			orchestratorOld: "$result.Count -ne 2 -or $result[0] -cne 'amd64' -or $result[1] -cne 'arm64'",
+			orchestratorNew: "$result.Count -lt 1",
+		},
+		{
 			name:    "Make bypasses the shared orchestrator",
 			makeOld: "-File make.ps1 windows-gui-build",
 			makeNew: "-File scripts/build-windows-desktop-msi-artifact.ps1 windows-gui-build",
@@ -286,14 +314,14 @@ func TestWindowsMSIReleaseSourceContract(t *testing.T) {
 			makeNew: `make.ps1 windows-gui-build "WINDOWS_GUI_ARCHES=amd64" "WINDOWS_GUI_ROOT=$(WINDOWS_GUI_ROOT)"`,
 		},
 		{
-			name:    "download verifier restores a fixture version",
-			makeOld: `Codesk_$${release_version}_windows_$$arch.msi`,
-			makeNew: `Codesk_0.0.1_windows_$$arch.msi`,
+			name:    "PowerShell shim loses a public target",
+			shimOld: "'macos-gui-build', 'macos-gui-deploy', 'windows-gui-build', 'windows-gui-deploy'",
+			shimNew: "'macos-gui-build', 'macos-gui-deploy', 'windows-gui-build'",
 		},
 		{
-			name:    "PowerShell shim loses a public target",
-			shimOld: "'macos-gui-build', 'macos-gui-release', 'build-windows-builder-image', 'windows-gui-build', 'windows-gui-release'",
-			shimNew: "'macos-gui-build', 'macos-gui-release', 'windows-gui-build'",
+			name:    "PowerShell shim skips the shared R2 uploader",
+			shimOld: "Invoke-WindowsGuiUpload -RepositoryRoot $PSScriptRoot -ResolvedSettings $settings",
+			shimNew: "Write-Host 'upload skipped'",
 		},
 		{
 			name:    "PowerShell shim bypasses the container orchestrator",
@@ -333,6 +361,77 @@ func TestWindowsMSIReleaseSourceContract(t *testing.T) {
 			}
 			if err := checkWindowsMSIReleaseSource(mutatedBuild, mutatedOrchestrator, mutatedMake, mutatedShim); err == nil {
 				t.Fatal("release contract mutation passed")
+			}
+		})
+	}
+}
+
+func TestWindowsGUIUploadPreflightSourceContract(t *testing.T) {
+	uploadData, err := os.ReadFile("upload-r2.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provenanceData, err := os.ReadFile("verify-windows-gui-upload-provenance.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upload := normalizeSourceNewlines(string(uploadData))
+	provenance := normalizeSourceNewlines(string(provenanceData))
+	if err := checkWindowsGUIUploadPreflightSource(upload, provenance); err != nil {
+		t.Fatal(err)
+	}
+
+	mutations := []struct {
+		name          string
+		uploadOld     string
+		uploadNew     string
+		provenanceOld string
+		provenanceNew string
+	}{
+		{
+			name:      "actual checksum comparison removed",
+			uploadOld: `[ "$preflight_expected_hash" = "$preflight_actual_hash" ]`,
+			uploadNew: `[ -n "$preflight_expected_hash" ]`,
+		},
+		{
+			name:      "one architecture skips preflight",
+			uploadOld: `preflight_windows_gui_arch "$arch"`,
+			uploadNew: `: "$arch"`,
+		},
+		{
+			name:          "JSON parser removed",
+			provenanceOld: `ConvertFrom-Json`,
+			provenanceNew: `ConvertTo-Json`,
+		},
+		{
+			name:          "publishability binding removed",
+			provenanceOld: `$publishable -isnot [bool] -or -not $publishable`,
+			provenanceNew: `$null -eq $publishable`,
+		},
+		{
+			name:          "source head binding removed",
+			provenanceOld: `source.sourceHead`,
+			provenanceNew: `source.unboundHead`,
+		},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			mutatedUpload := upload
+			mutatedProvenance := provenance
+			if mutation.uploadOld != "" {
+				if strings.Count(mutatedUpload, mutation.uploadOld) != 1 {
+					t.Fatalf("upload mutation source count for %q = %d, want 1", mutation.uploadOld, strings.Count(mutatedUpload, mutation.uploadOld))
+				}
+				mutatedUpload = strings.Replace(mutatedUpload, mutation.uploadOld, mutation.uploadNew, 1)
+			}
+			if mutation.provenanceOld != "" {
+				if strings.Count(mutatedProvenance, mutation.provenanceOld) != 1 {
+					t.Fatalf("provenance mutation source count for %q = %d, want 1", mutation.provenanceOld, strings.Count(mutatedProvenance, mutation.provenanceOld))
+				}
+				mutatedProvenance = strings.Replace(mutatedProvenance, mutation.provenanceOld, mutation.provenanceNew, 1)
+			}
+			if err := checkWindowsGUIUploadPreflightSource(mutatedUpload, mutatedProvenance); err == nil {
+				t.Fatal("Windows GUI upload preflight mutation passed")
 			}
 		})
 	}
@@ -471,8 +570,9 @@ func TestWindowsGUIContainerSourceContract(t *testing.T) {
 		"[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()":                    1,
 		"Docker engine architecture $dockerArchitecture does not match host architecture $hostArchitecture": 1,
 		"'run', '--rm', '--isolation=process'":                                                              1,
-		"docker image inspect $BuilderImage":                                                                1,
-		"run make build-windows-builder-image":                                                              1,
+		"docker image inspect $BuilderImage":                                                                2,
+		"scripts/build-windows-gui-builder-image.ps1":                                                       1,
+		"is not available; building it now":                                                                 1,
 		"WINDOWS_GUI_CC_AMD64=C:/toolchains/llvm-mingw/bin/x86_64-w64-mingw32-clang.exe -static":            1,
 		"WINDOWS_GUI_CC_ARM64=C:/toolchains/llvm-mingw/bin/aarch64-w64-mingw32-clang.exe -static":           1,
 		"third_party/y-crdt/Cargo.lock":                                                                     1,
@@ -668,7 +768,7 @@ func TestWindowsDesktopPayloadRestoresHostYffi(t *testing.T) {
 }
 
 func runWindowsGUIDispatch(makeSource, target string) error {
-	if target != "windows-gui-build" && target != "windows-gui-release" {
+	if target != "windows-gui-build" && target != "windows-gui-deploy" {
 		return fmt.Errorf("unsupported Windows GUI dispatch target %q", target)
 	}
 	tempDir, err := os.MkdirTemp("", "notty-windows-gui-make-")
@@ -787,16 +887,11 @@ done
 	for _, argument := range arguments {
 		if strings.HasPrefix(argument, "WINDOWS_GUI_ARCH") {
 			architectureAssignments++
-			if target == "windows-gui-build" {
-				return fmt.Errorf("PowerShell build route contains spoofable architecture %q", argument)
-			}
-			if argument != "WINDOWS_GUI_ARCHES=amd64 arm64" {
-				return fmt.Errorf("PowerShell release route architecture assignment = %q", argument)
-			}
+			return fmt.Errorf("PowerShell public route contains spoofable architecture %q", argument)
 		}
 	}
-	if target == "windows-gui-release" && architectureAssignments != 1 {
-		return fmt.Errorf("PowerShell release route architecture assignment count = %d, want 1", architectureAssignments)
+	if architectureAssignments != 0 {
+		return fmt.Errorf("PowerShell public route architecture assignment count = %d, want 0", architectureAssignments)
 	}
 	return nil
 }
@@ -1127,6 +1222,70 @@ func checkPowerShellVersionReaderSource(source string) error {
 	return nil
 }
 
+func checkWindowsGUIUploadPreflightSource(upload, provenance string) error {
+	for _, required := range []string{
+		`printf '%s\n' amd64 arm64 >"$tmp_dir/windows-architectures.expected"`,
+		`assert_exact_top_level_entries "$windows_gui_msi_root" "$tmp_dir/windows-architectures.expected" windows-architectures`,
+		`printf '%s\n' "$preflight_msi_name" SHA256SUMS provenance.json`,
+		`if (bad || NR != 2) exit 1`,
+		`cmp -s "$tmp_dir/$preflight_arch.expected-checksum-files" "$tmp_dir/$preflight_arch.actual-checksum-files"`,
+		`preflight_actual_hash="$(sha256_file "$preflight_arch_dir/$preflight_name")"`,
+		`[ "$preflight_expected_hash" = "$preflight_actual_hash" ]`,
+		`git -C "$root_dir" rev-parse --verify HEAD`,
+		`git -C "$root_dir" rev-parse --verify 'HEAD^1'`,
+		`windows_gui_ps_script="$root_dir/scripts/verify-windows-gui-upload-provenance.ps1"`,
+		`MSYS2_ARG_CONV_EXCL='*' "$windows_gui_ps"`,
+		`-Repository "${WINDOWS_GUI_REPOSITORY:-XIAZY/notty}"`,
+	} {
+		if !strings.Contains(upload, required) {
+			return fmt.Errorf("Windows GUI upload preflight is missing %q", required)
+		}
+	}
+
+	windowsBlockIndex := strings.Index(upload, `if [ "$target" = windows-gui ]; then`)
+	if windowsBlockIndex < 0 {
+		return fmt.Errorf("shared uploader has no Windows GUI block")
+	}
+	windowsBlock := upload[windowsBlockIndex:]
+	preflightIndex := strings.Index(windowsBlock, `preflight_windows_gui_arch "$arch"`)
+	provenanceIndex := strings.Index(windowsBlock, `"$windows_gui_ps" -NoLogo`)
+	manifestIndex := strings.Index(windowsBlock, `manifest="$tmp_dir/manifest.json"`)
+	uploadIndex := strings.Index(windowsBlock, `upload_file "$R2_DESKTOP_BUCKET"`)
+	if preflightIndex < 0 || provenanceIndex < 0 || manifestIndex < 0 || uploadIndex < 0 ||
+		!(preflightIndex < provenanceIndex && provenanceIndex < manifestIndex && manifestIndex < uploadIndex) {
+		return fmt.Errorf("Windows GUI two-phase ordering is preflight=%d provenance=%d manifest=%d upload=%d", preflightIndex, provenanceIndex, manifestIndex, uploadIndex)
+	}
+
+	for _, required := range []string{
+		`ConvertFrom-Json`,
+		`Write-Output -NoEnumerate $property.Value`,
+		`$schemaVersion -isnot [int] -and $schemaVersion -isnot [long]`,
+		`source.checkoutCommit`,
+		`source.sourceHead`,
+		`source.sourceBase`,
+		`source.workflowRef`,
+		`target.goArchitecture`,
+		`target.installerPlatform`,
+		`target.buildMode`,
+		`$publishable -isnot [bool] -or -not $publishable`,
+		`$packageValue -isnot [System.Array]`,
+		`$packages.Count -ne 1`,
+		`package.version`,
+		`package.canonicalFile`,
+		`Get-FileHash -LiteralPath $msiPath -Algorithm SHA256`,
+		`package.canonicalSha256`,
+		`package.canonicalSize`,
+		`$canonicalSize -isnot [int] -and $canonicalSize -isnot [long]`,
+		`productCodeDerivation.algorithm`,
+		`productCodeDerivation.name`,
+	} {
+		if !strings.Contains(provenance, required) {
+			return fmt.Errorf("Windows GUI structured provenance preflight is missing %q", required)
+		}
+	}
+	return nil
+}
+
 func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) error {
 	buildRequired := map[string]int{
 		"[CmdletBinding(DefaultParameterSetName = 'Release')]":                   1,
@@ -1164,13 +1323,15 @@ func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) er
 		}
 	}
 	for source, want := range map[string]int{
-		"[ValidateSet('windows-gui-build', 'windows-gui-release')]":                      1,
+		"[ValidateSet('windows-gui-build', 'windows-gui-deploy')]":                       1,
 		"function Get-WindowsHostArchitecture":                                           1,
 		"[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()": 1,
 		"'ARM64' { return 'arm64' }":                                                     1,
 		"$hostArchitecture = Get-WindowsHostArchitecture":                                1,
 		"windows-gui-build requires exactly one host architecture":                       1,
 		"does not match host $hostArchitecture":                                          1,
+		"windows-gui-deploy requires exactly amd64 then arm64":                           1,
+		"$result.Count -ne 2 -or $result[0] -cne 'amd64' -or $result[1] -cne 'arm64'":    1,
 		"[System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT":      1,
 		"scripts/build-windows-desktop-payloads.sh":                                      1,
 		"scripts/build-windows-desktop-msi-artifact.ps1":                                 1,
@@ -1180,6 +1341,8 @@ func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) er
 		"$item.Length -le 0": 1,
 		"Assert-ExactArchitectureDirectories -Directory $PayloadDirectory -Architectures $SelectedArchitectures": 1,
 		"Assert-ExactRealFiles @releaseParameters":                                                               1,
+		"Assert-ExactArchitectureDirectories -Directory $MsiDirectory -Architectures $SelectedArchitectures":     1,
+		"Remove-Item -LiteralPath $workingDirectory -Recurse -Force":                                             1,
 		`Names = @("Codesk_${version}_windows_$architecture.msi", 'SHA256SUMS', 'provenance.json')`:              1,
 		"[Array]::Sort($actual, [System.StringComparer]::Ordinal)":                                               2,
 		"[Array]::Sort($expected, [System.StringComparer]::Ordinal)":                                             2,
@@ -1204,22 +1367,17 @@ func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) er
 		"WINDOWS_PROCESSOR_ARCH :=":                                       1,
 		"override MACOS_GUI_HOST_OS :=":                                   2,
 		`if [ "$(MACOS_GUI_HOST_OS)" != darwin ]; then`:                   2,
-		"-File make.ps1":                                                  5,
+		"-File make.ps1":                                                  4,
 		"WINDOWS_GUI_BUILDER_IMAGE ?= alphatoad/notty:windows-builder":    1,
-		"-File make.ps1 build-windows-builder-image":                      1,
-		`"WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"`:        3,
+		`"WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"`:        2,
 		"-File make.ps1 windows-gui-build":                                1,
-		"-File make.ps1 windows-gui-release":                              1,
-		`"WINDOWS_GUI_ARCHES=$(WINDOWS_GUI_ARCHES)"`:                      1,
-		"scripts/build-windows-desktop-payloads.sh":                       1,
-		`release_version="$$(scripts/read-version.sh)"`:                   1,
-		`Codesk_$${release_version}_windows_$$arch.msi`:                   2,
+		"-File make.ps1 windows-gui-deploy":                               1,
 	} {
 		if got := strings.Count(makefile, source); got != want {
 			return fmt.Errorf("Windows GUI Make source count for %q = %d, want %d", source, got, want)
 		}
 	}
-	publicTargets := []string{"macos-gui-build", "macos-gui-release", "build-windows-builder-image", "windows-gui-build", "windows-gui-release"}
+	publicTargets := []string{"macos-gui-build", "macos-gui-deploy", "windows-gui-build", "windows-gui-deploy"}
 	for _, target := range publicTargets {
 		pattern := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(target) + `:\s*$`)
 		if got := len(pattern.FindAllString(makefile, -1)); got != 2 {
@@ -1233,14 +1391,15 @@ func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) er
 		return err
 	}
 	for source, want := range map[string]int{
-		"scripts/build-windows-gui-builder-image.ps1":                        1,
-		"scripts/run-windows-gui-container.ps1":                              1,
-		"'WINDOWS_GUI_BUILDER_IMAGE'":                                        2,
-		"'WINDOWS_GUI_ARCHES'":                                               3,
-		"'Architectures'":                                                    1,
-		"macos-gui-build requires a real macOS host; no GUI was built":       1,
-		"macos-gui-release requires a real macOS host; no release was built": 1,
-		"scripts/read-version.ps1":                                           1,
+		"scripts/run-windows-gui-container.ps1":                            1,
+		"scripts/upload-r2.sh":                                             1,
+		"'WINDOWS_GUI_BUILDER_IMAGE'":                                      2,
+		"'WINDOWS_GUI_REPOSITORY'":                                         6,
+		"macos-gui-build requires a real macOS host; no GUI was built":     1,
+		"macos-gui-deploy requires a real macOS host; no GUI was deployed": 1,
+		"scripts/read-version.ps1":                                         1,
+		"Invoke-WindowsGuiUpload":                                          2,
+		"$env:UPLOAD_TARGET = 'windows-gui'":                               1,
 	} {
 		if got := strings.Count(shim, source); got != want {
 			return fmt.Errorf("Windows GUI PowerShell shim source count for %q = %d, want %d", source, got, want)
@@ -1249,11 +1408,12 @@ func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) er
 	for _, forbidden := range []string{
 		"WINDOWS_GUI_PREVIOUS_PRODUCT_CODE",
 		"WINDOWS_GUI_CANDIDATE_PRODUCT_CODE",
-		"windows-gui-release-arch",
+		"windows-gui-deploy-arch",
 		"scripts/build-windows-desktop-msi-artifact.ps1",
 		"WINDOWS_GUI_ARCH ?=",
 		"GUI_VERSION",
 		"FILE_VERSION",
+		"WINDOWS_GUI_ARCHES",
 	} {
 		if strings.Contains(makefile, forbidden) {
 			return fmt.Errorf("Windows release Make path still pins QA identity %q", forbidden)
