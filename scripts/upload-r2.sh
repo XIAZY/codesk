@@ -73,7 +73,16 @@ assert_exact_top_level_entries() {
 	assert_entries_expected="$2"
 	assert_entries_label="$3"
 	assert_entries_actual="$tmp_dir/$assert_entries_label.actual"
-	find "$assert_entries_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort >"$assert_entries_actual"
+	{
+		for assert_entries_path in \
+			"$assert_entries_dir"/* \
+			"$assert_entries_dir"/.[!.]* \
+			"$assert_entries_dir"/..?*
+		do
+			[ -e "$assert_entries_path" ] || [ -L "$assert_entries_path" ] || continue
+			printf '%s\n' "${assert_entries_path##*/}"
+		done
+	} | LC_ALL=C sort >"$assert_entries_actual"
 	cmp -s "$assert_entries_expected" "$assert_entries_actual" ||
 		die "$assert_entries_label inventory mismatch"
 }
@@ -275,6 +284,72 @@ wrangler_put() {
 		--force
 }
 
+download_optional_file() {
+	download_bucket="$1"
+	download_key="$(strip_prefix_slashes "$2")"
+	download_path="$3"
+	rm -f "$download_path" "$download_path.listing" "$download_path.stdout" "$download_path.stderr"
+	if [ "$uploader" = aws ]; then
+		if ! aws_s3 ls "$(s3_uri "$download_bucket" "$download_key")" >"$download_path.listing"; then
+			rm -f "$download_path.listing"
+			return 2
+		fi
+		if [ ! -s "$download_path.listing" ]; then
+			rm -f "$download_path.listing"
+			return 1
+		fi
+		rm -f "$download_path.listing"
+		if ! aws_s3 cp "$(s3_uri "$download_bucket" "$download_key")" "$download_path"; then
+			rm -f "$download_path"
+			return 2
+		fi
+		return 0
+	fi
+
+	if wrangler_cmd r2 object get "$download_bucket/$download_key" \
+		--remote --file "$download_path" >"$download_path.stdout" 2>"$download_path.stderr"; then
+		rm -f "$download_path.stdout" "$download_path.stderr"
+		return 0
+	fi
+	if grep -Fq 'The specified key does not exist.' "$download_path.stderr"; then
+		rm -f "$download_path" "$download_path.stdout" "$download_path.stderr"
+		return 1
+	fi
+	cat "$download_path.stdout" "$download_path.stderr" >&2
+	rm -f "$download_path" "$download_path.stdout" "$download_path.stderr"
+	return 2
+}
+
+guard_versioned_release() {
+	guard_label="$1"
+	guard_bucket="$2"
+	guard_latest_key="$3"
+	guard_candidate_manifest="$4"
+	guard_remote_manifest="$tmp_dir/$guard_label.remote-latest-manifest.json"
+	command -v go >/dev/null 2>&1 || die 'go is required for immutable release publication checks'
+
+	if download_optional_file "$guard_bucket" "$guard_latest_key" "$guard_remote_manifest"; then
+		if ! guard_state="$(go run "$root_dir/scripts/verify-daemon-release.go" publication-state \
+			"$guard_remote_manifest" "$guard_candidate_manifest" "$version")"; then
+			die "$guard_label remote latest manifest could not be validated"
+		fi
+		case "$guard_state" in
+			identical)
+				printf '%s release %s is already published; no writes needed\n' "$guard_label" "$version"
+				exit 0
+				;;
+			different-version) ;;
+			same-version-conflict)
+				die "$guard_label release $version is already published with a different manifest"
+				;;
+			*) die "$guard_label publication check returned unexpected state: $guard_state" ;;
+		esac
+	else
+		guard_download_status="$?"
+		[ "$guard_download_status" -eq 1 ] || die "$guard_label remote latest manifest could not be read"
+	fi
+}
+
 upload_file() {
 	upload_file_bucket="$1"
 	upload_file_key="$2"
@@ -371,6 +446,8 @@ if [ "$target" = daemon ]; then
 	tmp_dir="$(notty_test_mktemp notty-daemon-upload)"
 	stage_daemon_release
 	daemon_prefix="$(strip_prefix_slashes "${R2_DAEMONS_PREFIX:-daemons}")"
+	guard_versioned_release daemon "$R2_DAEMONS_BUCKET" \
+		"$daemon_prefix/latest/manifest.json" "$daemon_staged_dir/manifest.json"
 
 	printf 'Uploading complete daemon release %s to %s\n' "$version" "$(s3_uri "$R2_DAEMONS_BUCKET" "$daemon_prefix/$version")"
 	upload_dir "$daemon_staged_dir" "$R2_DAEMONS_BUCKET" "$daemon_prefix/$version" "$release_cache_control" keep
@@ -382,17 +459,20 @@ if [ "$target" = daemon ]; then
 fi
 
 if [ "$target" = macos-gui ]; then
+	tmp_dir="$(notty_test_mktemp notty-macos-gui-upload)"
 	macos_gui_prefix="$(join_key "${R2_DESKTOP_PREFIX:-desktop}" macos)"
 	version_dir="$macos_gui_dist_dir/$version"
 	dmg="$version_dir/Codesk_${version}_macos_universal.dmg"
 	need_file "$dmg"
 	need_file "$version_dir/manifest.json"
 	need_file "$version_dir/SHA256SUMS"
+	guard_versioned_release macos-gui "$R2_DESKTOP_BUCKET" \
+		"$macos_gui_prefix/latest/manifest.json" "$version_dir/manifest.json"
 
 	printf 'Uploading macOS GUI release %s to %s\n' "$version" "$(s3_uri "$R2_DESKTOP_BUCKET" "$macos_gui_prefix/$version")"
 	upload_dir "$version_dir" "$R2_DESKTOP_BUCKET" "$macos_gui_prefix/$version" "$release_cache_control" keep
-	upload_file "$R2_DESKTOP_BUCKET" "$macos_gui_prefix/latest/manifest.json" "$version_dir/manifest.json" "$latest_cache_control"
 	upload_file "$R2_DESKTOP_BUCKET" "$macos_gui_prefix/latest/SHA256SUMS" "$version_dir/SHA256SUMS" "$latest_cache_control"
+	upload_file "$R2_DESKTOP_BUCKET" "$macos_gui_prefix/latest/manifest.json" "$version_dir/manifest.json" "$latest_cache_control"
 fi
 
 if [ "$target" = windows-gui ]; then
@@ -450,6 +530,8 @@ if [ "$target" = windows-gui ]; then
 			"$arch" "$arch" "$msi_name" "$sum" >>"$manifest"
 	done
 	printf '\n  ]\n}\n' >>"$manifest"
+	guard_versioned_release windows-gui "$R2_DESKTOP_BUCKET" \
+		"$windows_gui_prefix/latest/manifest.json" "$manifest"
 
 	for arch in amd64 arm64; do
 		arch_dir="$windows_gui_staged_root/$arch"

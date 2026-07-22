@@ -27,6 +27,10 @@ type releaseArtifact struct {
 	SHA256 string `json:"sha256"`
 }
 
+type publicationManifest struct {
+	Version string `json:"version"`
+}
+
 type releaseTarget struct {
 	os   string
 	arch string
@@ -43,14 +47,66 @@ var releaseTargets = []releaseTarget{
 }
 
 func main() {
-	if len(os.Args) != 3 {
-		fmt.Fprintln(os.Stderr, "usage: go run ./scripts/verify-daemon-release.go <version-dir> <version>")
+	var err error
+	switch {
+	case len(os.Args) == 3:
+		err = verifyRelease(os.Args[1], os.Args[2])
+	case len(os.Args) == 5 && os.Args[1] == "publication-state":
+		var state string
+		state, err = publicationState(os.Args[2], os.Args[3], os.Args[4])
+		if err == nil {
+			fmt.Println(state)
+		}
+	default:
+		fmt.Fprintln(os.Stderr, "usage:")
+		fmt.Fprintln(os.Stderr, "  go run ./scripts/verify-daemon-release.go <version-dir> <version>")
+		fmt.Fprintln(os.Stderr, "  go run ./scripts/verify-daemon-release.go publication-state <remote-manifest> <candidate-manifest> <version>")
 		os.Exit(2)
 	}
-	if err := verifyRelease(os.Args[1], os.Args[2]); err != nil {
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "verify-daemon-release: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func publicationState(remotePath, candidatePath, version string) (string, error) {
+	remoteBytes, remote, err := readPublicationManifest(remotePath)
+	if err != nil {
+		return "", fmt.Errorf("remote latest: %w", err)
+	}
+	candidateBytes, candidate, err := readPublicationManifest(candidatePath)
+	if err != nil {
+		return "", fmt.Errorf("candidate: %w", err)
+	}
+	if candidate.Version != version {
+		return "", fmt.Errorf("candidate manifest version %q, want %q", candidate.Version, version)
+	}
+	if remote.Version != version {
+		return "different-version", nil
+	}
+	if bytes.Equal(remoteBytes, candidateBytes) {
+		return "identical", nil
+	}
+	return "same-version-conflict", nil
+}
+
+func readPublicationManifest(path string) ([]byte, publicationManifest, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, publicationManifest{}, fmt.Errorf("read manifest: %w", err)
+	}
+	var manifest publicationManifest
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if err := decoder.Decode(&manifest); err != nil {
+		return nil, publicationManifest{}, fmt.Errorf("decode manifest: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, publicationManifest{}, fmt.Errorf("decode manifest: trailing data")
+	}
+	if manifest.Version == "" {
+		return nil, publicationManifest{}, fmt.Errorf("manifest version is empty")
+	}
+	return data, manifest, nil
 }
 
 func verifyRelease(versionDir, version string) error {

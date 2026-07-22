@@ -127,6 +127,18 @@ pass 'one daemon deploy rebuilds all targets and publishes once without a platfo
 
 fake_bin="$tmp_dir/bin"
 mkdir -p "$fake_bin"
+bsd_find_bin="$tmp_dir/bsd-find-bin"
+mkdir -p "$bsd_find_bin"
+cat >"$bsd_find_bin/find" <<'FIND'
+#!/usr/bin/env sh
+set -eu
+for find_arg in "$@"; do
+	[ "$find_arg" != -printf ] || exit 64
+done
+exec "$BSD_FIND_REAL" "$@"
+FIND
+chmod +x "$bsd_find_bin/find"
+bsd_find_real="$(command -v find)"
 source_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 source_base=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 export BUILD_DEPLOY_FIXTURE_GIT_REPO="$repo_dir"
@@ -134,7 +146,34 @@ export BUILD_DEPLOY_FIXTURE_GIT_HEAD="$source_head"
 export BUILD_DEPLOY_FIXTURE_GIT_BASE="$source_base"
 cat >"$fake_bin/aws" <<'AWS'
 #!/usr/bin/env sh
+set -eu
 printf '%s\n' "$*" >>"$AWS_LOG"
+if [ "${4:-}" = ls ]; then
+	[ "${AWS_FAIL_LATEST_READ:-0}" -eq 0 ] || exit 70
+	if [ -n "${AWS_REMOTE_LATEST:-}" ] && [ -f "$AWS_REMOTE_LATEST" ]; then
+		printf '2026-01-01 00:00:00 %s manifest.json\n' "$(wc -c <"$AWS_REMOTE_LATEST" | tr -d ' ')"
+	fi
+	exit 0
+fi
+if [ "${4:-}" = cp ]; then
+	aws_source="$5"
+	aws_destination="$6"
+	case "$aws_source" in
+		s3://*/latest/manifest.json)
+			[ -n "${AWS_REMOTE_LATEST:-}" ] && [ -f "$AWS_REMOTE_LATEST" ] || exit 71
+			cp "$AWS_REMOTE_LATEST" "$aws_destination"
+			exit 0
+			;;
+	esac
+fi
+if [ "${4:-}" = sync ] && [ "${AWS_FAIL_VERSION_SYNC:-0}" -ne 0 ]; then
+	exit 72
+fi
+if [ "${4:-}" = cp ] && [ "${AWS_FAIL_LATEST_SHA:-0}" -ne 0 ]; then
+	case "$6" in
+		*/latest/SHA256SUMS) exit 73 ;;
+	esac
+fi
 if [ -n "${AWS_CAPTURE_DIR:-}" ] && [ "${4:-}" = cp ]; then
 	aws_source="$5"
 	aws_destination="$6"
@@ -164,6 +203,32 @@ if [ -n "${DAEMON_CAPTURE_DIR:-}" ] && [ "${4:-}" = sync ]; then
 	esac
 fi
 AWS
+cat >"$fake_bin/wrangler" <<'WRANGLER'
+#!/usr/bin/env sh
+set -eu
+printf '%s\n' "$*" >>"$WRANGLER_LOG"
+if [ "$#" -ge 4 ] && [ "$1" = r2 ] && [ "$2" = object ] && [ "$3" = get ]; then
+	shift 4
+	wrangler_output=
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			--file) wrangler_output="$2"; shift 2 ;;
+			*) shift ;;
+		esac
+	done
+	[ -n "$wrangler_output" ] || exit 64
+	if [ -n "${WRANGLER_REMOTE_LATEST:-}" ] && [ -f "$WRANGLER_REMOTE_LATEST" ]; then
+		cp "$WRANGLER_REMOTE_LATEST" "$wrangler_output"
+		exit 0
+	fi
+	printf 'The specified key does not exist.\n' >&2
+	exit 1
+fi
+if [ "$#" -ge 3 ] && [ "$1" = r2 ] && [ "$2" = object ] && [ "$3" = put ]; then
+	exit 0
+fi
+exit 64
+WRANGLER
 cat >"$fake_bin/git" <<'GIT'
 #!/usr/bin/env sh
 set -eu
@@ -232,7 +297,7 @@ if [ -n "${WINDOWS_GUI_MUTATE_SOURCE_ROOT:-}" ]; then
 	printf 'post-staging mutation\n' >>"$WINDOWS_GUI_MUTATE_SOURCE_ROOT/arm64/Codesk_${version}_windows_arm64.msi"
 fi
 POWERSHELL
-chmod +x "$fake_bin/aws" "$fake_bin/git" "$fake_bin/powershell.exe"
+chmod +x "$fake_bin/aws" "$fake_bin/wrangler" "$fake_bin/git" "$fake_bin/powershell.exe"
 aws_log="$tmp_dir/aws.log"
 
 fixture_sha256() {
@@ -243,12 +308,31 @@ fixture_sha256() {
 	fi
 }
 
+aws_write_count() {
+	aws_write_log="$1"
+	aws_write_needle="${2:-}"
+	awk -v needle="$aws_write_needle" '
+		($4 == "sync" || ($4 == "cp" && $6 ~ /^s3:\/\//)) && index($0, needle) { count++ }
+		END { print count + 0 }
+	' "$aws_write_log"
+}
+
+aws_first_write_line() {
+	aws_write_log="$1"
+	aws_write_needle="$2"
+	awk -v needle="$aws_write_needle" '
+		($4 == "sync" || ($4 == "cp" && $6 ~ /^s3:\/\//)) && index($0, needle) { print NR; exit }
+	' "$aws_write_log"
+}
+
 write_daemon_release() {
 	daemon_root="$1"
-	daemon_release_dir="$daemon_root/0.0.1"
+	daemon_version="${2:-0.0.1}"
+	daemon_payload="${3:-release}"
+	daemon_release_dir="$daemon_root/$daemon_version"
 	mkdir -p "$daemon_release_dir"
 	: >"$daemon_release_dir/SHA256SUMS"
-	printf '{\n  "version": "0.0.1",\n  "artifacts": [\n' >"$daemon_release_dir/manifest.json"
+	printf '{\n  "version": "%s",\n  "artifacts": [\n' "$daemon_version" >"$daemon_release_dir/manifest.json"
 	daemon_first=1
 	for daemon_spec in \
 		'linux amd64 .tar.gz' 'linux arm64 .tar.gz' \
@@ -259,8 +343,8 @@ write_daemon_release() {
 		daemon_os="$1"
 		daemon_arch="$2"
 		daemon_ext="$3"
-		daemon_name="notty-daemon_0.0.1_${daemon_os}_${daemon_arch}${daemon_ext}"
-		printf '%s/%s release\n' "$daemon_os" "$daemon_arch" >"$daemon_release_dir/$daemon_name"
+		daemon_name="notty-daemon_${daemon_version}_${daemon_os}_${daemon_arch}${daemon_ext}"
+		printf '%s/%s %s\n' "$daemon_os" "$daemon_arch" "$daemon_payload" >"$daemon_release_dir/$daemon_name"
 		daemon_sum="$(fixture_sha256 "$daemon_release_dir/$daemon_name")"
 		printf '%s  %s\n' "$daemon_sum" "$daemon_name" >>"$daemon_release_dir/SHA256SUMS"
 		if [ "$daemon_first" -eq 0 ]; then printf ',\n' >>"$daemon_release_dir/manifest.json"; fi
@@ -272,6 +356,19 @@ write_daemon_release() {
 	for daemon_installer in install.sh uninstall.sh install.ps1 uninstall.ps1; do
 		printf '%s\n' "$daemon_installer" >"$daemon_root/$daemon_installer"
 	done
+}
+
+write_macos_release() {
+	macos_root="$1"
+	macos_payload="${2:-release}"
+	macos_release_dir="$macos_root/0.0.1"
+	macos_dmg="Codesk_0.0.1_macos_universal.dmg"
+	mkdir -p "$macos_release_dir"
+	printf 'macOS %s\n' "$macos_payload" >"$macos_release_dir/$macos_dmg"
+	macos_hash="$(fixture_sha256 "$macos_release_dir/$macos_dmg")"
+	printf '%s  %s\n' "$macos_hash" "$macos_dmg" >"$macos_release_dir/SHA256SUMS"
+	printf '{\n  "version": "0.0.1",\n  "artifacts": [\n    {"os": "darwin", "arch": "universal", "file": "%s", "sha256": "%s"}\n  ]\n}\n' \
+		"$macos_dmg" "$macos_hash" >"$macos_release_dir/manifest.json"
 }
 
 expect_daemon_preflight_failure() {
@@ -294,6 +391,7 @@ write_windows_bundle() {
 	bundle_head="$3"
 	bundle_base="$4"
 	bundle_publishable="$5"
+	bundle_payload="${6:-release}"
 	case "$bundle_arch" in
 		amd64) bundle_native=AMD64; bundle_installer=x64 ;;
 		arm64) bundle_native=ARM64; bundle_installer=arm64 ;;
@@ -302,13 +400,29 @@ write_windows_bundle() {
 	bundle_dir="$bundle_root/$bundle_arch"
 	bundle_msi="Codesk_0.0.1_windows_${bundle_arch}.msi"
 	mkdir -p "$bundle_dir"
-	printf 'msi-%s\n' "$bundle_arch" >"$bundle_dir/$bundle_msi"
+	printf 'msi-%s-%s\n' "$bundle_arch" "$bundle_payload" >"$bundle_dir/$bundle_msi"
 	bundle_msi_sha="$(fixture_sha256 "$bundle_dir/$bundle_msi")"
 	bundle_msi_size="$(wc -c <"$bundle_dir/$bundle_msi" | tr -d ' ')"
 	printf '%s\n' "{\"schemaVersion\":2,\"source\":{\"repository\":\"XIAZY/notty\",\"event\":\"push\",\"checkoutCommit\":\"$bundle_head\",\"sourceHead\":\"$bundle_head\",\"sourceBase\":\"$bundle_base\",\"sourceBaseResolution\":\"event\",\"workflowRef\":\"local/scripts/run-windows-gui-target.ps1@$bundle_head\",\"runId\":\"local\",\"runAttempt\":\"1\"},\"runner\":{\"os\":\"Windows\",\"architecture\":\"$bundle_native\"},\"target\":{\"architecture\":\"$bundle_native\",\"goArchitecture\":\"$bundle_arch\",\"installerPlatform\":\"$bundle_installer\",\"buildMode\":\"release\",\"publishable\":$bundle_publishable},\"packages\":[{\"role\":\"release\",\"version\":\"0.0.1\",\"canonicalFile\":\"$bundle_msi\",\"canonicalSha256\":\"$bundle_msi_sha\",\"canonicalSize\":$bundle_msi_size}],\"productCodeDerivation\":{\"algorithm\":\"UUIDv5-SHA1\",\"name\":\"0.0.1+$bundle_arch\"}}" >"$bundle_dir/provenance.json"
 	bundle_provenance_sha="$(fixture_sha256 "$bundle_dir/provenance.json")"
 	printf '%s  %s\r\n%s  provenance.json\r\n' \
 		"$bundle_msi_sha" "$bundle_msi" "$bundle_provenance_sha" >"$bundle_dir/SHA256SUMS"
+}
+
+write_windows_manifest() {
+	windows_manifest_root="$1"
+	windows_manifest_path="$2"
+	printf '{\n  "version": "0.0.1",\n  "artifacts": [\n' >"$windows_manifest_path"
+	windows_manifest_first=1
+	for windows_manifest_arch in amd64 arm64; do
+		windows_manifest_msi="Codesk_0.0.1_windows_${windows_manifest_arch}.msi"
+		windows_manifest_sum="$(fixture_sha256 "$windows_manifest_root/$windows_manifest_arch/$windows_manifest_msi")"
+		if [ "$windows_manifest_first" -eq 0 ]; then printf ',\n' >>"$windows_manifest_path"; fi
+		windows_manifest_first=0
+		printf '    {"os": "windows", "arch": "%s", "file": "%s/%s", "sha256": "%s"}' \
+			"$windows_manifest_arch" "$windows_manifest_arch" "$windows_manifest_msi" "$windows_manifest_sum" >>"$windows_manifest_path"
+	done
+	printf '\n  ]\n}\n' >>"$windows_manifest_path"
 }
 
 expect_windows_preflight_failure() {
@@ -335,10 +449,31 @@ PATH="$fake_bin:$PATH" AWS_LOG="$aws_log" STATIC_DIST_DIR="$static_dist" UPLOAD_
 
 daemon_dist="$tmp_dir/daemons"
 write_daemon_release "$daemon_dist"
-PATH="$fake_bin:$PATH" AWS_LOG="$aws_log" DAEMON_DIST_ROOT="$daemon_dist" \
+BSD_FIND_REAL="$bsd_find_real" PATH="$bsd_find_bin:$fake_bin:$PATH" \
+	AWS_LOG="$aws_log" DAEMON_DIST_ROOT="$daemon_dist" \
 	UPLOAD_TARGET=daemon R2_ENDPOINT_URL=https://example.invalid \
 	R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
 	"$repo_dir/scripts/upload-r2.sh" >/dev/null
+pass 'daemon upload inventory is portable when find rejects GNU -printf'
+
+daemon_version_uri='s3://static/daemons/0.0.1/'
+daemon_latest_uri='s3://static/daemons/latest/manifest.json'
+[ "$(aws_write_count "$aws_log" "$daemon_version_uri")" -eq 1 ] ||
+	fail 'daemon deploy did not write the version directory exactly once'
+[ "$(aws_write_count "$aws_log" "$daemon_latest_uri")" -eq 1 ] ||
+	fail 'daemon deploy did not write latest exactly once'
+daemon_version_line="$(aws_first_write_line "$aws_log" "$daemon_version_uri")"
+daemon_latest_line="$(aws_first_write_line "$aws_log" "$daemon_latest_uri")"
+[ "$daemon_version_line" -lt "$daemon_latest_line" ] || fail 'daemon latest preceded the version directory write'
+for daemon_stable_installer in install.sh uninstall.sh install.ps1 uninstall.ps1; do
+	daemon_installer_uri="s3://static/daemons/$daemon_stable_installer"
+	[ "$(aws_write_count "$aws_log" "$daemon_installer_uri")" -eq 1 ] ||
+		fail "daemon deploy did not write $daemon_stable_installer exactly once"
+	daemon_installer_line="$(aws_first_write_line "$aws_log" "$daemon_installer_uri")"
+	[ "$daemon_version_line" -lt "$daemon_installer_line" ] && [ "$daemon_installer_line" -lt "$daemon_latest_line" ] ||
+		fail "daemon $daemon_stable_installer write was outside the pre-commit window"
+done
+pass 'daemon latest is the sole write after the complete version and installer publication'
 
 daemon_missing_dist="$tmp_dir/daemon-missing-archive"
 cp -R "$daemon_dist" "$daemon_missing_dist"
@@ -363,6 +498,76 @@ awk -v zero="$daemon_zero_hash" 'NR == 1 { $1 = zero } { print $1 "  " $2 }' \
 mv "$daemon_wrong_checksum_dist/SHA256SUMS.new" "$daemon_wrong_checksum_dist/0.0.1/SHA256SUMS"
 expect_daemon_preflight_failure wrong-checksum "$daemon_wrong_checksum_dist"
 pass 'daemon upload rejects missing, stale, partial-manifest, and checksum inputs before any R2 write'
+
+daemon_remote_latest="$daemon_dist/0.0.1/manifest.json"
+daemon_noop_log="$tmp_dir/daemon-identical-redeploy.aws.log"
+: >"$daemon_noop_log"
+PATH="$fake_bin:$PATH" AWS_LOG="$daemon_noop_log" AWS_REMOTE_LATEST="$daemon_remote_latest" \
+	DAEMON_DIST_ROOT="$daemon_dist" UPLOAD_TARGET=daemon \
+	R2_ENDPOINT_URL=https://example.invalid R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
+	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/daemon-identical-redeploy.output"
+[ "$(aws_write_count "$daemon_noop_log")" -eq 0 ] || fail 'identical daemon redeploy was not a zero-write no-op'
+grep -Fq 'already published; no writes needed' "$tmp_dir/daemon-identical-redeploy.output" ||
+	fail 'identical daemon redeploy did not report the no-op'
+
+daemon_wrangler_log="$tmp_dir/daemon-identical-redeploy.wrangler.log"
+: >"$daemon_wrangler_log"
+PATH="$fake_bin:$PATH" R2_ENDPOINT_URL= CLOUDFLARE_API_TOKEN=test CLOUDFLARE_ACCOUNT_ID=test \
+	WRANGLER_LOG="$daemon_wrangler_log" WRANGLER_REMOTE_LATEST="$daemon_remote_latest" \
+	DAEMON_DIST_ROOT="$daemon_dist" UPLOAD_TARGET=daemon \
+	R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
+	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/daemon-identical-redeploy-wrangler.output"
+grep -Fq 'r2 object get static/daemons/latest/manifest.json --remote --file' "$daemon_wrangler_log" ||
+	fail 'Wrangler publication guard did not read the daemon commit point'
+if grep -Fq 'r2 object put' "$daemon_wrangler_log"; then
+	fail 'identical Wrangler daemon redeploy was not a zero-write no-op'
+fi
+
+daemon_conflict_dist="$tmp_dir/daemon-same-version-conflict"
+write_daemon_release "$daemon_conflict_dist" 0.0.1 changed
+daemon_conflict_log="$tmp_dir/daemon-same-version-conflict.aws.log"
+: >"$daemon_conflict_log"
+if PATH="$fake_bin:$PATH" AWS_LOG="$daemon_conflict_log" AWS_REMOTE_LATEST="$daemon_remote_latest" \
+	DAEMON_DIST_ROOT="$daemon_conflict_dist" UPLOAD_TARGET=daemon \
+	R2_ENDPOINT_URL=https://example.invalid R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
+	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/daemon-same-version-conflict.output" 2>&1; then
+	fail 'daemon deploy rewrote an already-published version'
+fi
+[ "$(aws_write_count "$daemon_conflict_log")" -eq 0 ] || fail 'conflicting daemon redeploy wrote before failing'
+
+daemon_older_dist="$tmp_dir/daemon-older-release"
+write_daemon_release "$daemon_older_dist" 0.0.0 old
+daemon_new_version_log="$tmp_dir/daemon-new-version.aws.log"
+: >"$daemon_new_version_log"
+PATH="$fake_bin:$PATH" AWS_LOG="$daemon_new_version_log" \
+	AWS_REMOTE_LATEST="$daemon_older_dist/0.0.0/manifest.json" DAEMON_DIST_ROOT="$daemon_dist" \
+	UPLOAD_TARGET=daemon R2_ENDPOINT_URL=https://example.invalid \
+	R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
+	"$repo_dir/scripts/upload-r2.sh" >/dev/null
+[ "$(aws_write_count "$daemon_new_version_log" "$daemon_latest_uri")" -eq 1 ] ||
+	fail 'daemon deploy did not publish when latest named a different version'
+
+daemon_read_failure_log="$tmp_dir/daemon-latest-read-failure.aws.log"
+: >"$daemon_read_failure_log"
+if PATH="$fake_bin:$PATH" AWS_LOG="$daemon_read_failure_log" AWS_FAIL_LATEST_READ=1 \
+	DAEMON_DIST_ROOT="$daemon_dist" UPLOAD_TARGET=daemon \
+	R2_ENDPOINT_URL=https://example.invalid R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
+	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/daemon-latest-read-failure.output" 2>&1; then
+	fail 'daemon deploy treated a latest read failure as an unpublished release'
+fi
+[ "$(aws_write_count "$daemon_read_failure_log")" -eq 0 ] || fail 'daemon latest read failure allowed writes'
+
+daemon_sync_failure_log="$tmp_dir/daemon-version-sync-failure.aws.log"
+: >"$daemon_sync_failure_log"
+if PATH="$fake_bin:$PATH" AWS_LOG="$daemon_sync_failure_log" AWS_FAIL_VERSION_SYNC=1 \
+	DAEMON_DIST_ROOT="$daemon_dist" UPLOAD_TARGET=daemon \
+	R2_ENDPOINT_URL=https://example.invalid R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
+	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/daemon-version-sync-failure.output" 2>&1; then
+	fail 'daemon deploy swallowed a version-directory sync failure'
+fi
+[ "$(aws_write_count "$daemon_sync_failure_log" "$daemon_latest_uri")" -eq 0 ] ||
+	fail 'daemon deploy advanced latest after a version-directory sync failure'
+pass 'daemon immutable publication is no-op safe, conflict safe, retryable, and commit ordered'
 
 daemon_toctou_dist="$tmp_dir/daemon-post-staging-mutation"
 write_daemon_release "$daemon_toctou_dist"
@@ -403,18 +608,59 @@ daemon_toctou_manifest="$(awk -F '"sha256": "' '/"file": "notty-daemon_0.0.1_lin
 if grep -Fq "$daemon_toctou_dist/" "$daemon_toctou_aws_log"; then
 	fail 'daemon uploader received a mutable shared-source path'
 fi
-[ "$(grep -Fc 's3://static/daemons/latest/manifest.json' "$daemon_toctou_aws_log")" -eq 1 ] ||
+[ "$(aws_write_count "$daemon_toctou_aws_log" "$daemon_latest_uri")" -eq 1 ] ||
 	fail 'daemon deploy did not advance latest exactly once after staged publication'
 pass 'daemon upload publishes one verified private snapshot and advances latest once'
 
 macos_dist="$tmp_dir/macos"
-mkdir -p "$macos_dist/0.0.1"
-printf 'dmg\n' >"$macos_dist/0.0.1/Codesk_0.0.1_macos_universal.dmg"
-printf '{"version":"0.0.1"}\n' >"$macos_dist/0.0.1/manifest.json"
-printf '%064d  Codesk_0.0.1_macos_universal.dmg\n' 0 >"$macos_dist/0.0.1/SHA256SUMS"
+write_macos_release "$macos_dist"
 PATH="$fake_bin:$PATH" AWS_LOG="$aws_log" MACOS_GUI_DIST_DIR="$macos_dist" UPLOAD_TARGET=macos-gui \
 	R2_ENDPOINT_URL=https://example.invalid R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
 	"$repo_dir/scripts/upload-r2.sh" >/dev/null
+
+macos_latest_manifest_uri='s3://static/desktop/macos/latest/manifest.json'
+macos_latest_sha_uri='s3://static/desktop/macos/latest/SHA256SUMS'
+macos_version_uri='s3://static/desktop/macos/0.0.1/'
+macos_version_line="$(aws_first_write_line "$aws_log" "$macos_version_uri")"
+macos_latest_sha_line="$(aws_first_write_line "$aws_log" "$macos_latest_sha_uri")"
+macos_latest_manifest_line="$(aws_first_write_line "$aws_log" "$macos_latest_manifest_uri")"
+[ "$macos_version_line" -lt "$macos_latest_sha_line" ] &&
+	[ "$macos_latest_sha_line" -lt "$macos_latest_manifest_line" ] ||
+	fail 'macOS latest manifest was not the final commit-point write'
+
+macos_noop_log="$tmp_dir/macos-identical-redeploy.aws.log"
+: >"$macos_noop_log"
+PATH="$fake_bin:$PATH" AWS_LOG="$macos_noop_log" \
+	AWS_REMOTE_LATEST="$macos_dist/0.0.1/manifest.json" MACOS_GUI_DIST_DIR="$macos_dist" \
+	UPLOAD_TARGET=macos-gui R2_ENDPOINT_URL=https://example.invalid \
+	R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
+	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/macos-identical-redeploy.output"
+[ "$(aws_write_count "$macos_noop_log")" -eq 0 ] || fail 'identical macOS GUI redeploy was not a zero-write no-op'
+
+macos_conflict_dist="$tmp_dir/macos-same-version-conflict"
+write_macos_release "$macos_conflict_dist" changed
+macos_conflict_log="$tmp_dir/macos-same-version-conflict.aws.log"
+: >"$macos_conflict_log"
+if PATH="$fake_bin:$PATH" AWS_LOG="$macos_conflict_log" \
+	AWS_REMOTE_LATEST="$macos_dist/0.0.1/manifest.json" MACOS_GUI_DIST_DIR="$macos_conflict_dist" \
+	UPLOAD_TARGET=macos-gui R2_ENDPOINT_URL=https://example.invalid \
+	R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
+	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/macos-same-version-conflict.output" 2>&1; then
+	fail 'macOS GUI deploy rewrote an already-published version'
+fi
+[ "$(aws_write_count "$macos_conflict_log")" -eq 0 ] || fail 'conflicting macOS GUI redeploy wrote before failing'
+
+macos_sha_failure_log="$tmp_dir/macos-latest-sha-failure.aws.log"
+: >"$macos_sha_failure_log"
+if PATH="$fake_bin:$PATH" AWS_LOG="$macos_sha_failure_log" AWS_FAIL_LATEST_SHA=1 \
+	MACOS_GUI_DIST_DIR="$macos_dist" UPLOAD_TARGET=macos-gui \
+	R2_ENDPOINT_URL=https://example.invalid R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
+	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/macos-latest-sha-failure.output" 2>&1; then
+	fail 'macOS GUI deploy swallowed a latest checksum failure'
+fi
+[ "$(aws_write_count "$macos_sha_failure_log" "$macos_latest_manifest_uri")" -eq 0 ] ||
+	fail 'macOS GUI deploy committed latest before its checksum pointer succeeded'
+pass 'macOS GUI immutable publication rejects rewrites and commits the manifest last'
 
 windows_dist="$tmp_dir/windows"
 for arch in amd64 arm64; do
@@ -423,6 +669,42 @@ done
 PATH="$fake_bin:$PATH" AWS_LOG="$aws_log" WINDOWS_GUI_MSI_ROOT="$windows_dist" UPLOAD_TARGET=windows-gui \
 	R2_ENDPOINT_URL=https://example.invalid R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
 	"$repo_dir/scripts/upload-r2.sh" >/dev/null
+
+windows_latest_uri='s3://static/desktop/windows/latest/manifest.json'
+windows_remote_latest="$tmp_dir/windows-remote-latest-manifest.json"
+write_windows_manifest "$windows_dist" "$windows_remote_latest"
+windows_latest_line="$(aws_first_write_line "$aws_log" "$windows_latest_uri")"
+for windows_version_write in \
+	's3://static/desktop/windows/0.0.1/amd64/' \
+	's3://static/desktop/windows/0.0.1/arm64/' \
+	's3://static/desktop/windows/0.0.1/manifest.json'
+do
+	windows_version_line="$(aws_first_write_line "$aws_log" "$windows_version_write")"
+	[ "$windows_version_line" -lt "$windows_latest_line" ] || fail 'Windows GUI latest preceded a versioned release write'
+done
+
+windows_noop_log="$tmp_dir/windows-identical-redeploy.aws.log"
+: >"$windows_noop_log"
+PATH="$fake_bin:$PATH" AWS_LOG="$windows_noop_log" AWS_REMOTE_LATEST="$windows_remote_latest" \
+	WINDOWS_GUI_MSI_ROOT="$windows_dist" UPLOAD_TARGET=windows-gui \
+	R2_ENDPOINT_URL=https://example.invalid R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
+	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/windows-identical-redeploy.output"
+[ "$(aws_write_count "$windows_noop_log")" -eq 0 ] || fail 'identical Windows GUI redeploy was not a zero-write no-op'
+
+windows_conflict_dist="$tmp_dir/windows-same-version-conflict"
+for arch in amd64 arm64; do
+	write_windows_bundle "$windows_conflict_dist" "$arch" "$source_head" "$source_base" true changed
+done
+windows_conflict_log="$tmp_dir/windows-same-version-conflict.aws.log"
+: >"$windows_conflict_log"
+if PATH="$fake_bin:$PATH" AWS_LOG="$windows_conflict_log" AWS_REMOTE_LATEST="$windows_remote_latest" \
+	WINDOWS_GUI_MSI_ROOT="$windows_conflict_dist" UPLOAD_TARGET=windows-gui \
+	R2_ENDPOINT_URL=https://example.invalid R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
+	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/windows-same-version-conflict.output" 2>&1; then
+	fail 'Windows GUI deploy rewrote an already-published version'
+fi
+[ "$(aws_write_count "$windows_conflict_log")" -eq 0 ] || fail 'conflicting Windows GUI redeploy wrote before failing'
+pass 'Windows GUI immutable publication is an identical no-op and rejects changed same-version bytes'
 
 toctou_dist="$tmp_dir/windows-post-staging-mutation"
 for arch in amd64 arm64; do
@@ -497,7 +779,7 @@ for required in \
 do
 	grep -Fq "$required" "$aws_log" || fail "shared R2 uploader missed route: $required"
 done
-[ "$(grep -Fc 's3://static/daemons/latest/manifest.json' "$aws_log")" -eq 1 ] ||
+[ "$(aws_write_count "$aws_log" 's3://static/daemons/latest/manifest.json')" -eq 1 ] ||
 	fail 'daemon uploader did not perform exactly one shared latest update'
 for forbidden_daemon_route in \
 	's3://static/daemons/linux/' 's3://static/daemons/macos/' 's3://static/daemons/windows/' \
