@@ -11,15 +11,20 @@ if (-not (Test-Path -LiteralPath $versionFile -PathType Leaf)) {
 
 [byte[]] $bytes = [System.IO.File]::ReadAllBytes($versionFile)
 if ($bytes.Length -lt 2 -or $bytes[$bytes.Length - 1] -ne 10) {
-    throw 'VERSION must end with exactly one LF'
+    throw 'VERSION must end with exactly one LF or CRLF'
 }
-for ($index = 0; $index -lt $bytes.Length - 1; $index++) {
-    if ($bytes[$index] -eq 10) {
-        throw 'VERSION must contain exactly one LF-terminated line'
+
+$lineLength = $bytes.Length - 1
+if ($lineLength -gt 0 -and $bytes[$lineLength - 1] -eq 13) {
+    $lineLength--
+}
+for ($index = 0; $index -lt $lineLength; $index++) {
+    if ($bytes[$index] -eq 10 -or $bytes[$index] -eq 13) {
+        throw 'VERSION must contain exactly one LF- or CRLF-terminated line'
     }
 }
 
-$version = [System.Text.Encoding]::ASCII.GetString($bytes, 0, $bytes.Length - 1)
+$version = [System.Text.Encoding]::ASCII.GetString($bytes, 0, $lineLength)
 if ($version -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
     throw 'VERSION must be canonical X.Y.Z without whitespace or leading zeros'
 }

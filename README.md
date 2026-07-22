@@ -1607,65 +1607,40 @@ Build all local artifacts without publishing:
 make build
 ```
 
-Focused build targets:
+Every releasable component has one local build command and one deploy command:
 
-- `make build-go`: compile all Go packages.
-- `make build-frontend`: compile the Vite frontend into `frontend/dist`.
-- `make build-daemon`: compile local `notty-daemon` and `notty-agent-tool` binaries into `bin`.
-- `make build-static-local`: build local host-platform daemon artifacts into `dist/static/daemons`.
-- `make build-backend-image`: build the backend Docker image locally without pushing.
-- `make build-static`: build the full production static tree.
-- `make daemon-release-all`: build daemon release archives for every supported target.
+| Component | Build | Deploy |
+| --- | --- | --- |
+| Linux daemon and agent tool, AMD64 + ARM64 | `make linux-daemon-build` | `make daemon-deploy` |
+| macOS daemon and agent tool, AMD64 + ARM64 | `make macos-daemon-build` | `make daemon-deploy` |
+| Windows daemon and agent tool, AMD64 + ARM64 | `make windows-daemon-build` | `make daemon-deploy` |
+| macOS desktop GUI | `make macos-gui-build` | `make macos-gui-deploy` |
+| Windows desktop GUI | `make windows-gui-build` | `make windows-gui-deploy` |
+| Frontend and homepage | `make frontend-build` | `make frontend-deploy` |
+| Backend image and service | `make backend-build` | `make backend-deploy` |
 
-Build daemon release artifacts for every supported target:
+All commands read the canonical release version from the root `VERSION` file.
+The three platform build targets are focused local helpers and never publish.
+`make daemon-deploy` rebuilds all six OS/architecture archives sequentially,
+preflights one complete staged snapshot, uploads it under
+`/daemons/<VERSION>`, and advances `/daemons/latest/manifest.json` only after
+the immutable version directory is complete. Unix archives are
+`.tar.gz`; Windows archives are `.zip` files containing both `notty-daemon` and
+`notty-agent-tool` plus `run-windows.ps1`. The stable installer entrypoints and
+versioned releases remain directly under `/daemons/`, matching the existing
+public layout.
 
-```sh
-make daemon-release-all
-```
-
-The canonical release version is read from the root `VERSION` file. This creates stable `install.sh`, `uninstall.sh`, `install.ps1`, and `uninstall.ps1` entrypoints, plus `latest/manifest.json`, `latest/SHA256SUMS`, and versioned archives containing `notty-daemon` and `notty-agent-tool`. Unix archives are `.tar.gz`; native Windows AMD64 and ARM64 releases are `.zip` files that also contain `run-windows.ps1`. Use `make daemon-release PLATFORMS="windows/amd64 windows/arm64"` for a focused Windows release.
-
-Publish artifacts without changing the running backend:
-
-- `make publish-backend`: build and push `alphatoad/notty:backend-<VERSION>` plus `backend-latest`.
-- `make publish-frontend`: build and upload frontend/homepage assets to Cloudflare R2.
-- `make publish-static`: build and upload daemon installer and release tarballs to Cloudflare R2.
-- `make publish`: run all three publish jobs.
-
-Build only local daemon artifacts for the current host platform:
-
-```sh
-make build-static-local
-```
-
-This creates `dist/static/daemons` with the canonical root `VERSION` and only the current host platform, which is enough for local installer testing at `http://localhost:${NOTTY_STATIC_PORT:-5174}/daemons/install.sh`.
-
-Deploy frontend/homepage assets to Cloudflare R2:
-
-```sh
-source ~/.zshrc
-make deploy-frontend
-```
-
-Deploy daemon installer and release tarballs to Cloudflare R2:
-
-```sh
-source ~/.zshrc
-make deploy-static
-```
-
-Deploy only the backend to the production server:
-
-```sh
-make deploy-backend
-```
-
-Deploy the full release in order, frontend, daemon static artifacts, then backend:
+Deploy the complete non-GUI production release in fail-fast order:
 
 ```sh
 source ~/.zshrc
 make deploy
 ```
+
+The aggregate runs frontend, the complete six-artifact daemon deploy, then
+backend deploy. Desktop GUI deploys are intentionally excluded because no one
+host can produce both a notarized macOS DMG and native, ICE-validated Windows
+MSIs.
 
 Non-secret deployment defaults are split by consumer:
 
@@ -1688,7 +1663,7 @@ such as `NOTTY_DATABASE_URL`, `NOTTY_JWT_SECRET`, and
 
 `R2_ENDPOINT_URL` is the account endpoint only. Do not include the bucket name in
 that URL; bucket names are supplied through `R2_HOMEPAGE_BUCKET`,
-`R2_APP_BUCKET`, and `R2_DAEMONS_BUCKET`.
+`R2_APP_BUCKET`, `R2_DAEMONS_BUCKET`, and `R2_DESKTOP_BUCKET`.
 
 Current static routing uses separate R2 buckets:
 
@@ -1696,15 +1671,16 @@ Current static routing uses separate R2 buckets:
 - `app.nottyai.co`: R2 custom domain connected to `notty-app-prod`.
 - `static.nottyai.co`: R2 custom domain connected to `notty-static-prod`.
 
-R2 serves object keys directly. To make root requests work without a transform
-rule, `scripts/publish-static-r2.sh` uploads each root `index.html` twice when
-the bucket prefix is empty: once as `index.html`, and once as the empty object
-key. Daemon artifacts stay under `daemons/` so installer URLs remain stable.
+`scripts/upload-r2.sh` is the shared R2 uploader used by every static deploy.
+Frontend roots stay in their dedicated buckets, daemon artifacts use
+`daemons/<VERSION>`, and desktop releases use `desktop/{macos,windows}`.
+Immutable version directories are uploaded before their short-cache
+`latest/manifest.json` pointer.
 
-Production backend deployment uses `compose.prod.yml`. The remote server should keep `/opt/notty/secrets.env` outside git with only secrets such as `NOTTY_DATABASE_URL`, `NOTTY_JWT_SECRET`, and `NOTTY_MAILGUN_API_KEY`. `scripts/deploy-backend.sh` calls `scripts/publish-backend.sh` to build and push `alphatoad/notty:backend-<version>`, uploads `compose.prod.yml`, `deploy/env/prod.server.env`, and the Compose-mounted nginx config to SSH host `notty`, then restarts the production Compose stack:
+Production backend deployment uses `compose.prod.yml`. The remote server should keep `/opt/notty/secrets.env` outside git with only secrets such as `NOTTY_DATABASE_URL`, `NOTTY_JWT_SECRET`, and `NOTTY_MAILGUN_API_KEY`. `scripts/deploy-backend.sh` calls `scripts/push-backend-image.sh` to build and push `alphatoad/notty:backend-<version>`, uploads `compose.prod.yml`, `deploy/env/prod.server.env`, and the Compose-mounted nginx config to SSH host `notty`, then restarts the production Compose stack:
 
 ```sh
-make deploy-backend
+make backend-deploy
 ```
 
 Production API traffic is routed by the Compose-managed nginx service. The nginx config lives at `deploy/nginx/notty-api.conf` and is mounted into the nginx container as `/etc/nginx/conf.d/default.conf`. It handles:
@@ -1743,8 +1719,8 @@ Important deployment environment variables in `deploy/env/prod.deploy.env`:
 - `NOTTY_DEPLOY_SSH_HOST`: SSH host used by `scripts/deploy-backend.sh`, default `notty`.
 - `NOTTY_REMOTE_DIR`: remote deploy directory, default `/opt/notty`.
 - `DOCKER_REPO` and `DOCKER_PLATFORMS`: backend image repository and build platforms.
-- `DAEMON_PLATFORMS`: comma- or space-separated daemon release platforms, or `all` for every supported target: Darwin AMD64/ARM64, Linux AMD64/ARM64, and Windows AMD64/ARM64. Production uses Rust/Go cross-compilation for non-host targets. Linux builds require installed Rust musl targets plus `zig`, or `CC_LINUX_AMD64`/`CC_LINUX_ARM64` pointing at target C compilers. Windows AMD64 builds use Rust `x86_64-pc-windows-gnu` with Zig `x86_64-windows-gnu`; Windows ARM64 builds use Rust `aarch64-pc-windows-gnullvm` with Zig `aarch64-windows-gnu`. Install both Rust targets and `zig`, or set `CC_WINDOWS_AMD64`/`CC_WINDOWS_ARM64` to equivalent target C compiler commands. Darwin cross builds on macOS use `xcrun clang -arch`; Darwin cross builds from Linux require installed Rust targets plus `CC_DARWIN_AMD64`/`CC_DARWIN_ARM64` pointing at Darwin-capable compilers such as osxcross clang with an Apple SDK.
-- `CLOUDFLARE_ACCOUNT_ID`, `R2_ENDPOINT_URL`, `R2_*_BUCKET`, and `R2_*_PREFIX`: static publish targets.
+- Daemon deploys always build both AMD64 and ARM64 for their named platform. Linux builds require installed Rust musl targets plus `zig`, or `CC_LINUX_AMD64`/`CC_LINUX_ARM64` pointing at target C compilers. Windows AMD64 builds use Rust `x86_64-pc-windows-gnu` with Zig `x86_64-windows-gnu`; Windows ARM64 builds use Rust `aarch64-pc-windows-gnullvm` with Zig `aarch64-windows-gnu`. Install both Rust targets and `zig`, or set `CC_WINDOWS_AMD64`/`CC_WINDOWS_ARM64` to equivalent target C compiler commands. Darwin cross builds on macOS use `xcrun clang -arch`; Darwin cross builds from Linux require installed Rust targets plus `CC_DARWIN_AMD64`/`CC_DARWIN_ARM64` pointing at Darwin-capable compilers such as osxcross clang with an Apple SDK.
+- `CLOUDFLARE_ACCOUNT_ID`, `R2_ENDPOINT_URL`, `R2_*_BUCKET`, and `R2_*_PREFIX`: R2 upload destinations.
 
 Important production server defaults in `deploy/env/prod.server.env`:
 

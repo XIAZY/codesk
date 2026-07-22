@@ -24,7 +24,7 @@ function Get-NormalizedWindowsArchitecture {
 }
 
 if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
-    throw 'build-windows-builder-image requires a Windows host running Windows containers'
+    throw 'Windows GUI builder image construction requires a Windows host running Windows containers'
 }
 if ([string]::IsNullOrWhiteSpace($BuilderImage)) {
     throw 'WINDOWS_GUI_BUILDER_IMAGE must not be empty'

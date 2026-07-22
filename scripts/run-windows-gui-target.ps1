@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('windows-gui-build', 'windows-gui-release')]
+    [ValidateSet('windows-gui-build', 'windows-gui-deploy')]
     [string] $Target,
 
     [AllowNull()]
@@ -119,6 +119,10 @@ function Get-NormalizedArchitectures {
     if ($Target -ceq 'windows-gui-build' -and $result[0] -cne $hostArchitecture) {
         throw "windows-gui-build architecture $($result[0]) does not match host $hostArchitecture"
     }
+    if ($Target -ceq 'windows-gui-deploy' -and
+        ($result.Count -ne 2 -or $result[0] -cne 'amd64' -or $result[1] -cne 'arm64')) {
+        throw 'windows-gui-deploy requires exactly amd64 then arm64'
+    }
     return $result
 }
 
@@ -230,7 +234,7 @@ function Invoke-WindowsPayloadBuild {
     Assert-ExactRealFiles -Directory $TestDirectory -Names $testNames -Label 'compiled test'
 }
 
-function Invoke-WindowsMsiRelease {
+function Invoke-WindowsMsiBundle {
     param(
         [Parameter(Mandatory = $true)] [string[]] $SelectedArchitectures,
         [Parameter(Mandatory = $true)] [string] $Root,
@@ -240,11 +244,11 @@ function Invoke-WindowsMsiRelease {
 
     $head = (& git -C $Root rev-parse --verify HEAD).Trim()
     if ($LASTEXITCODE -ne 0 -or $head -cnotmatch '^[0-9a-f]{40}$') {
-        throw 'windows-gui-release could not resolve the source checkout HEAD'
+        throw 'windows-gui-deploy could not resolve the source checkout HEAD'
     }
     $base = (& git -C $Root rev-parse --verify 'HEAD^1').Trim()
     if ($LASTEXITCODE -ne 0 -or $base -cnotmatch '^[0-9a-f]{40}$') {
-        throw 'windows-gui-release could not resolve the source checkout parent'
+        throw 'windows-gui-deploy could not resolve the source checkout parent'
     }
 
     [System.IO.Directory]::CreateDirectory($MsiDirectory) | Out-Null
@@ -302,7 +306,9 @@ function Invoke-WindowsMsiRelease {
                 Label = "$architecture release"
             }
             Assert-ExactRealFiles @releaseParameters
+            Remove-Item -LiteralPath $workingDirectory -Recurse -Force
         }
+        Assert-ExactArchitectureDirectories -Directory $MsiDirectory -Architectures $SelectedArchitectures
     } finally {
         foreach ($name in $previous.Keys) {
             [Environment]::SetEnvironmentVariable($name, $previous[$name], 'Process')
@@ -334,12 +340,12 @@ $payloadParameters = @{
 }
 Invoke-WindowsPayloadBuild @payloadParameters
 
-if ($Target -ceq 'windows-gui-release') {
+if ($Target -ceq 'windows-gui-deploy') {
     $releaseParameters = @{
         SelectedArchitectures = $selectedArchitectures
         Root = $root
         PayloadDirectory = $payloadDirectory
         MsiDirectory = $msiDirectory
     }
-    Invoke-WindowsMsiRelease @releaseParameters
+    Invoke-WindowsMsiBundle @releaseParameters
 }

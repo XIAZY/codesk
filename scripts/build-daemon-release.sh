@@ -5,7 +5,7 @@ set -eu
 
 dist_dir="${1:-${DIST_DIR:-dist/static/daemons}}"
 platforms="${PLATFORMS:-}"
-all_platforms="darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64"
+all_platforms="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64"
 
 root_dir="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
 version="$("$root_dir/scripts/read-version.sh")"
@@ -394,12 +394,8 @@ printf '\n  ]\n}\n' >> "$manifest"
 cp "$out_dir/manifest.json" "$latest_dir/manifest.json"
 cp "$out_dir/SHA256SUMS" "$latest_dir/SHA256SUMS"
 cp "$installer" "$dist_abs/install.sh"
-cp "$installer" "$out_dir/install.sh"
 cp "$uninstaller" "$dist_abs/uninstall.sh"
-cp "$uninstaller" "$out_dir/uninstall.sh"
 cp "$powershell_installer" "$dist_abs/install.ps1"
-cp "$powershell_installer" "$out_dir/install.ps1"
 cp "$powershell_uninstaller" "$dist_abs/uninstall.ps1"
-cp "$powershell_uninstaller" "$out_dir/uninstall.ps1"
 
 printf 'Built daemon release %s in %s\n' "$version" "$out_dir"

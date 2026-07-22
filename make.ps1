@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet('macos-gui-build', 'macos-gui-release', 'build-windows-builder-image', 'windows-gui-build', 'windows-gui-release')]
+    [ValidateSet('macos-gui-build', 'macos-gui-deploy', 'windows-gui-build', 'windows-gui-deploy')]
     [string] $Target,
 
     [Parameter(Position = 1, ValueFromRemainingArguments = $true)]
@@ -11,8 +11,63 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Resolve-GitBashExecutable {
+    $gitCommand = Get-Command 'git.exe' -ErrorAction SilentlyContinue
+    if ($null -eq $gitCommand) {
+        $gitCommand = Get-Command 'git' -ErrorAction SilentlyContinue
+    }
+    if ($null -eq $gitCommand) {
+        throw 'windows-gui-deploy requires Git for Windows'
+    }
+
+    $directory = Split-Path -Parent $gitCommand.Source
+    for ($depth = 0; $depth -lt 4 -and -not [string]::IsNullOrWhiteSpace($directory); $depth++) {
+        foreach ($relative in @('bin/bash.exe', 'usr/bin/bash.exe')) {
+            $candidate = Join-Path $directory $relative
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                return $candidate
+            }
+        }
+        $parent = Split-Path -Parent $directory
+        if ($parent -ceq $directory) {
+            break
+        }
+        $directory = $parent
+    }
+    throw 'windows-gui-deploy requires a Git for Windows Bash executable'
+}
+
+function Invoke-WindowsGuiUpload {
+    param(
+        [Parameter(Mandatory = $true)] [string] $RepositoryRoot,
+        [Parameter(Mandatory = $true)] [hashtable] $ResolvedSettings
+    )
+
+    $bash = Resolve-GitBashExecutable
+    $script = (Join-Path $RepositoryRoot 'scripts/upload-r2.sh').Replace('\', '/')
+    $previousTarget = [Environment]::GetEnvironmentVariable('UPLOAD_TARGET', 'Process')
+    $previousMsiRoot = [Environment]::GetEnvironmentVariable('WINDOWS_GUI_MSI_ROOT', 'Process')
+    $previousRepository = [Environment]::GetEnvironmentVariable('WINDOWS_GUI_REPOSITORY', 'Process')
+    try {
+        $env:UPLOAD_TARGET = 'windows-gui'
+        if ($ResolvedSettings.ContainsKey('WINDOWS_GUI_MSI_ROOT')) {
+            $env:WINDOWS_GUI_MSI_ROOT = $ResolvedSettings['WINDOWS_GUI_MSI_ROOT']
+        }
+        if ($ResolvedSettings.ContainsKey('WINDOWS_GUI_REPOSITORY')) {
+            $env:WINDOWS_GUI_REPOSITORY = $ResolvedSettings['WINDOWS_GUI_REPOSITORY']
+        }
+        & $bash $script
+        if ($LASTEXITCODE -ne 0) {
+            throw "Windows GUI R2 upload failed with exit $LASTEXITCODE"
+        }
+    } finally {
+        [Environment]::SetEnvironmentVariable('UPLOAD_TARGET', $previousTarget, 'Process')
+        [Environment]::SetEnvironmentVariable('WINDOWS_GUI_MSI_ROOT', $previousMsiRoot, 'Process')
+        [Environment]::SetEnvironmentVariable('WINDOWS_GUI_REPOSITORY', $previousRepository, 'Process')
+    }
+}
+
 $supportedSettings = @(
-    'WINDOWS_GUI_ARCHES',
     'WINDOWS_GUI_ROOT',
     'WINDOWS_GUI_PAYLOAD_ROOT',
     'WINDOWS_GUI_TEST_DIR',
@@ -50,8 +105,8 @@ switch ($Target) {
     'macos-gui-build' {
         throw 'macos-gui-build requires a real macOS host; no GUI was built'
     }
-    'macos-gui-release' {
-        throw 'macos-gui-release requires a real macOS host; no release was built'
+    'macos-gui-deploy' {
+        throw 'macos-gui-deploy requires a real macOS host; no GUI was deployed'
     }
 }
 
@@ -76,19 +131,7 @@ foreach ($name in $mapping.Keys) {
     }
 }
 
-if ($Target -ceq 'build-windows-builder-image') {
-    $builderParameters = @{
-        RepositoryRoot = $PSScriptRoot
-    }
-    if ($parameters.ContainsKey('BuilderImage')) {
-        $builderParameters['BuilderImage'] = $parameters['BuilderImage']
-    }
-    & (Join-Path $PSScriptRoot 'scripts/build-windows-gui-builder-image.ps1') @builderParameters
-    return
-}
-
-if ($Target -ceq 'windows-gui-release' -and $settings.ContainsKey('WINDOWS_GUI_ARCHES')) {
-    $parameters['Architectures'] = $settings['WINDOWS_GUI_ARCHES']
-}
-
 & (Join-Path $PSScriptRoot 'scripts/run-windows-gui-container.ps1') @parameters
+if ($Target -ceq 'windows-gui-deploy') {
+    Invoke-WindowsGuiUpload -RepositoryRoot $PSScriptRoot -ResolvedSettings $settings
+}

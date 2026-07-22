@@ -5,7 +5,7 @@
 #   build (Go + libyrs cgo)            -> backend: "Build all Go"
 #   backend suite on LIVE Postgres     -> backend: "Backend + full Go suite on live Postgres" (+ skip-guard)
 #   regression tag (deterministic + compose E2E) -> regression-e2e
-#   installer tests                    -> backend: "Installer tests"
+#   installer + release routing contracts -> backend: "Installer and release contract tests"
 #   gofmt / vet                        -> backend: "gofmt", "go vet"
 #   frontend typecheck + vitest        -> frontend: "Typecheck + vitest"
 #   frontend production build          -> frontend: "Production build"
@@ -135,10 +135,11 @@ jobs:
           if echo "$out" | grep -q -- '--- SKIP'; then
             echo "::error::Yjs cross-compat test SKIPPED in CI — the CRDT gate must run, not skip"; exit 1
           fi
-      - name: Installer tests
+      - name: Installer and release contract tests
         run: |
           make daemon-installer-check
           make daemon-uninstall-test
+          make build-deploy-contract-check
       - name: Build all Go
         run: go build ./...
 

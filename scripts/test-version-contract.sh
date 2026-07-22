@@ -24,11 +24,12 @@ new_fixture() {
 	cp "$repo_dir/scripts/read-version.sh" "$new_fixture_dir/scripts/read-version.sh"
 	cp "$repo_dir/scripts/read-version.ps1" "$new_fixture_dir/scripts/read-version.ps1"
 	cp "$repo_dir/scripts/lib/deploy-env.sh" "$new_fixture_dir/scripts/lib/deploy-env.sh"
+	cp "$repo_dir/scripts/lib/testtmp.sh" "$new_fixture_dir/scripts/lib/testtmp.sh"
 	for script in \
-		build-daemon-release.sh build-macos-desktop-release.sh \
-		build-windows-desktop-payloads.sh build-backend-image.sh build-static.sh \
-		publish-backend.sh publish-frontend.sh publish-static.sh publish-static-r2.sh \
-		deploy-backend.sh deploy-frontend.sh deploy-static.sh deploy-notty.sh
+		build-daemon-release.sh build-daemon-platform.sh build-macos-desktop-release.sh \
+		build-windows-desktop-payloads.sh build-backend-image.sh build-frontend.sh \
+		push-backend-image.sh upload-r2.sh deploy-backend.sh deploy-daemon.sh \
+		deploy-frontend.sh deploy-macos-gui.sh
 	do
 		cp "$repo_dir/scripts/$script" "$new_fixture_dir/scripts/$script"
 	done
@@ -44,6 +45,10 @@ for version in 0.0.0 1.2.3 255.255.65535; do
 	[ "$actual" = "$version" ] || fail "POSIX reader changed valid $version"
 	pass "POSIX reader accepts $version"
 done
+printf '1.2.3\r\n' >"$fixture/VERSION"
+actual="$("$fixture/scripts/read-version.sh")"
+[ "$actual" = 1.2.3 ] || fail 'POSIX reader changed valid CRLF-terminated version'
+pass 'POSIX reader accepts a CRLF-terminated version'
 
 check_invalid() {
 	invalid_name="$1"
@@ -61,7 +66,6 @@ check_invalid prefix printf 'v1.2.3\n'
 check_invalid suffix printf '1.2.3-rc1\n'
 check_invalid leading-whitespace printf ' 1.2.3\n'
 check_invalid trailing-whitespace printf '1.2.3 \n'
-check_invalid CRLF printf '1.2.3\r\n'
 check_invalid NUL printf '1.2.3\000\n'
 check_invalid non-ASCII printf '1.2.\200\n'
 check_invalid multiline printf '1.2.3\n2.3.4\n'
@@ -110,48 +114,10 @@ for script in build-daemon-release.sh build-macos-desktop-release.sh; do
 	expect_fail "$script rejects excess positional arguments" sh "$fixture/scripts/$script" one two
 	grep -q 'usage:' "$tmp_dir/output" || fail "$script excess-arity failure did not report usage"
 done
-expect_fail 'publish-static-r2.sh rejects every positional argument' sh "$fixture/scripts/publish-static-r2.sh" 1.2.3
-grep -q 'usage:' "$tmp_dir/output" || fail 'publish-static-r2.sh excess-arity failure did not report usage'
-
-run_static_route_contract() {
-	route_repo="$1"
-	want_platforms="$2"
-	rm -f "$route_repo/route.log"
-	printf '1.2.3\n' >"$route_repo/VERSION"
-	cat >"$route_repo/scripts/build-daemon-release.sh" <<'ROUTE'
-#!/usr/bin/env sh
-printf '%s|%s|%s\n' "$1" "$DIST_DIR" "${PLATFORMS:-}" >"$ROUTE_LOG"
-ROUTE
-	chmod +x "$route_repo/scripts/build-daemon-release.sh"
-	if [ -n "$want_platforms" ]; then
-		ROUTE_LOG="$route_repo/route.log" STATIC_BUILD_TARGET=daemons \
-			STATIC_DIST_DIR="$route_repo/dist/static" DAEMON_PLATFORMS="$want_platforms" \
-			sh "$route_repo/scripts/build-static.sh" >/dev/null
-	else
-		ROUTE_LOG="$route_repo/route.log" STATIC_BUILD_TARGET=daemons \
-			STATIC_DIST_DIR="$route_repo/dist/static" \
-			sh "$route_repo/scripts/build-static.sh" >/dev/null
-	fi
-	want="$route_repo/dist/static/daemons|$route_repo/dist/static/daemons|$want_platforms"
-	[ "$(cat "$route_repo/route.log")" = "$want" ]
-}
-
-route_repo="$tmp_dir/route"
-new_fixture "$route_repo"
-run_static_route_contract "$route_repo" 'windows/amd64 windows/arm64' ||
-	fail 'build-static platform branch did not route to dist/static/daemons'
-pass 'build-static platform branch routes to dist/static/daemons'
-run_static_route_contract "$route_repo" '' ||
-	fail 'build-static default branch did not route to dist/static/daemons'
-pass 'build-static default branch routes to dist/static/daemons'
-
-mutated_repo="$tmp_dir/route-mutated"
-new_fixture "$mutated_repo"
-sed 's/"\$daemons_out"/"$out_dir"/g' "$repo_dir/scripts/build-static.sh" >"$mutated_repo/scripts/build-static.sh"
-if run_static_route_contract "$mutated_repo" 'windows/amd64'; then
-	fail 'static route mutation to parent output directory survived'
-fi
-pass 'static route mutation to parent output directory is killed'
+expect_fail 'upload-r2.sh rejects every positional argument' sh "$fixture/scripts/upload-r2.sh" 1.2.3
+grep -q 'usage:' "$tmp_dir/output" || fail 'upload-r2.sh excess-arity failure did not report usage'
+expect_fail 'build-frontend.sh rejects every positional argument' sh "$fixture/scripts/build-frontend.sh" 1.2.3
+grep -q 'usage:' "$tmp_dir/output" || fail 'build-frontend.sh excess-arity failure did not report usage'
 
 if command -v pwsh >/dev/null 2>&1; then
 	for version in 0.0.0 1.2.3 255.255.65535; do
@@ -160,6 +126,10 @@ if command -v pwsh >/dev/null 2>&1; then
 		[ "$actual" = "$version" ] || fail "PowerShell reader changed valid $version"
 		pass "PowerShell reader accepts $version"
 	done
+	printf '1.2.3\r\n' >"$fixture/VERSION"
+	actual="$(pwsh -NoLogo -NoProfile -NonInteractive -File "$fixture/scripts/read-version.ps1")"
+	[ "$actual" = 1.2.3 ] || fail 'PowerShell reader changed valid CRLF-terminated version'
+	pass 'PowerShell reader accepts a CRLF-terminated version'
 	rm -f "$fixture/VERSION"
 	expect_fail 'PowerShell reader rejects missing VERSION' pwsh -NoLogo -NoProfile -NonInteractive -File "$fixture/scripts/read-version.ps1"
 	for invalid_file in "$tmp_dir/invalid"/*; do
