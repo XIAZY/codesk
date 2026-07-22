@@ -192,6 +192,10 @@ payload architectures in canonical `amd64 arm64` order, passes each to the
 reproducible WiX builder, then uploads both validated bundles through the shared
 R2 uploader on the host:
 
+Run public deploy targets as single-writer operations, one publisher at a time.
+Automating or parallelizing publication requires atomic R2 conditional admission
+before any immutable write.
+
 ```sh
 make windows-gui-deploy
 ```

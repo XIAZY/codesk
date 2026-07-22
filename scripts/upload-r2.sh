@@ -320,33 +320,115 @@ download_optional_file() {
 	return 2
 }
 
+publication_manifest_version() {
+	publication_manifest_path="$1"
+	awk '
+		{
+			line = $0
+			version_tokens += gsub(/"version"/, "", line)
+			if ($0 ~ /^  "version": "(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)",$/) {
+				version_lines++
+				value = $0
+				sub(/^  "version": "/, "", value)
+				sub(/",$/, "", value)
+			}
+		}
+		END {
+			if (version_tokens != 1 || version_lines != 1) exit 1
+			split(value, parts, ".")
+			if (parts[1] > 255 || parts[2] > 255 || parts[3] > 65535) exit 1
+			print value
+		}
+	' "$publication_manifest_path"
+}
+
+compare_release_versions() {
+	compare_candidate="$1"
+	compare_remote="$2"
+	awk -v candidate="$compare_candidate" -v remote="$compare_remote" 'BEGIN {
+		split(candidate, candidate_parts, ".")
+		split(remote, remote_parts, ".")
+		for (i = 1; i <= 3; i++) {
+			if (candidate_parts[i] > remote_parts[i]) { print 1; exit }
+			if (candidate_parts[i] < remote_parts[i]) { print -1; exit }
+		}
+		print 0
+	}'
+}
+
+# Public deploys are serialized by contract. Automating or parallelizing them
+# requires atomic R2 conditional admission before this read/write state machine.
 guard_versioned_release() {
 	guard_label="$1"
 	guard_bucket="$2"
-	guard_latest_key="$3"
-	guard_candidate_manifest="$4"
-	guard_remote_manifest="$tmp_dir/$guard_label.remote-latest-manifest.json"
-	command -v go >/dev/null 2>&1 || die 'go is required for immutable release publication checks'
+	guard_ledger_key="$3"
+	guard_latest_key="$4"
+	guard_candidate_manifest="$5"
+	guard_remote_ledger="$tmp_dir/$guard_label.remote-version-manifest.json"
+	guard_remote_latest="$tmp_dir/$guard_label.remote-latest-manifest.json"
+	guard_ledger_state=missing
+	guard_latest_state=missing
+	guard_candidate_version="$(publication_manifest_version "$guard_candidate_manifest")" ||
+		die "$guard_label candidate manifest version is invalid or ambiguous"
+	[ "$guard_candidate_version" = "$version" ] ||
+		die "$guard_label candidate manifest version $guard_candidate_version does not match $version"
 
-	if download_optional_file "$guard_bucket" "$guard_latest_key" "$guard_remote_manifest"; then
-		if ! guard_state="$(go run "$root_dir/scripts/verify-daemon-release.go" publication-state \
-			"$guard_remote_manifest" "$guard_candidate_manifest" "$version")"; then
-			die "$guard_label remote latest manifest could not be validated"
+	if download_optional_file "$guard_bucket" "$guard_ledger_key" "$guard_remote_ledger"; then
+		if cmp -s "$guard_remote_ledger" "$guard_candidate_manifest"; then
+			guard_ledger_state=identical
+		else
+			guard_ledger_state=conflict
 		fi
-		case "$guard_state" in
-			identical)
-				printf '%s release %s is already published; no writes needed\n' "$guard_label" "$version"
-				exit 0
-				;;
-			different-version) ;;
-			same-version-conflict)
-				die "$guard_label release $version is already published with a different manifest"
-				;;
-			*) die "$guard_label publication check returned unexpected state: $guard_state" ;;
-		esac
+	else
+		guard_download_status="$?"
+		[ "$guard_download_status" -eq 1 ] || die "$guard_label version ledger could not be read"
+	fi
+	if download_optional_file "$guard_bucket" "$guard_latest_key" "$guard_remote_latest"; then
+		guard_latest_state=present
 	else
 		guard_download_status="$?"
 		[ "$guard_download_status" -eq 1 ] || die "$guard_label remote latest manifest could not be read"
+	fi
+
+	[ "$guard_ledger_state" != conflict ] ||
+		die "$guard_label release $version is already published with a different manifest"
+
+	if [ "$guard_latest_state" = present ]; then
+		guard_latest_version="$(publication_manifest_version "$guard_remote_latest")" ||
+			die "$guard_label remote latest manifest version is invalid or ambiguous"
+		guard_version_order="$(compare_release_versions "$version" "$guard_latest_version")"
+		case "$guard_version_order" in
+			-1) guard_latest_state=newer ;;
+			0) guard_latest_state=equal ;;
+			1) guard_latest_state=older ;;
+			*) die "$guard_label version comparison returned an unexpected result" ;;
+		esac
+	fi
+
+	case "$guard_ledger_state:$guard_latest_state" in
+		missing:missing|missing:older)
+			publication_state=fresh-publish
+			;;
+		identical:missing|identical:older)
+			publication_state=forward-completion
+			;;
+		identical:equal)
+			cmp -s "$guard_remote_latest" "$guard_candidate_manifest" ||
+				die "$guard_label latest names release $version with a different manifest"
+			publication_state=already-current
+			;;
+		missing:equal)
+			die "$guard_label latest names release $version but its version ledger is missing"
+			;;
+		missing:newer|identical:newer)
+			die "$guard_label release $version would move latest backward from $guard_latest_version"
+			;;
+		*) die "$guard_label publication state is invalid: $guard_ledger_state:$guard_latest_state" ;;
+	esac
+
+	if [ "$publication_state" = already-current ]; then
+		printf '%s release %s is already published; no writes needed\n' "$guard_label" "$version"
+		exit 0
 	fi
 }
 
@@ -363,6 +445,30 @@ upload_file() {
 	else
 		wrangler_put "$upload_file_bucket" "$(strip_prefix_slashes "$upload_file_key")" "$upload_file_path" "$upload_file_cache_control"
 	fi
+}
+
+upload_committed_release_dir() {
+	upload_release_src="$1"
+	upload_release_bucket="$2"
+	upload_release_prefix="$3"
+	upload_release_cache_control="$4"
+	upload_release_manifest="$upload_release_src/manifest.json"
+	need_dir "$upload_release_src"
+	need_file "$upload_release_manifest"
+
+	if [ "$uploader" = aws ]; then
+		aws_s3 sync "$upload_release_src/" "$(s3_uri "$upload_release_bucket" "$upload_release_prefix")/" \
+			--exclude manifest.json --cache-control "$upload_release_cache_control"
+	else
+		find "$upload_release_src" -type f | LC_ALL=C sort | while IFS= read -r upload_release_file; do
+			upload_release_rel="${upload_release_file#"$upload_release_src"/}"
+			[ "$upload_release_rel" = manifest.json ] ||
+				wrangler_put "$upload_release_bucket" "$(join_key "$upload_release_prefix" "$upload_release_rel")" \
+					"$upload_release_file" "$upload_release_cache_control"
+		done
+	fi
+	upload_file "$upload_release_bucket" "$(join_key "$upload_release_prefix" manifest.json)" \
+		"$upload_release_manifest" "$upload_release_cache_control"
 }
 
 upload_dir() {
@@ -447,10 +553,14 @@ if [ "$target" = daemon ]; then
 	stage_daemon_release
 	daemon_prefix="$(strip_prefix_slashes "${R2_DAEMONS_PREFIX:-daemons}")"
 	guard_versioned_release daemon "$R2_DAEMONS_BUCKET" \
-		"$daemon_prefix/latest/manifest.json" "$daemon_staged_dir/manifest.json"
+		"$daemon_prefix/$version/manifest.json" "$daemon_prefix/latest/manifest.json" \
+		"$daemon_staged_dir/manifest.json"
 
-	printf 'Uploading complete daemon release %s to %s\n' "$version" "$(s3_uri "$R2_DAEMONS_BUCKET" "$daemon_prefix/$version")"
-	upload_dir "$daemon_staged_dir" "$R2_DAEMONS_BUCKET" "$daemon_prefix/$version" "$release_cache_control" keep
+	if [ "$publication_state" = fresh-publish ]; then
+		printf 'Uploading complete daemon release %s to %s\n' "$version" "$(s3_uri "$R2_DAEMONS_BUCKET" "$daemon_prefix/$version")"
+		upload_committed_release_dir "$daemon_staged_dir" "$R2_DAEMONS_BUCKET" \
+			"$daemon_prefix/$version" "$release_cache_control"
+	fi
 
 	for installer in install.sh uninstall.sh install.ps1 uninstall.ps1; do
 		upload_file "$R2_DAEMONS_BUCKET" "$(join_key "$daemon_prefix" "$installer")" "$daemon_staged_installers/$installer" 'public, max-age=300'
@@ -467,10 +577,14 @@ if [ "$target" = macos-gui ]; then
 	need_file "$version_dir/manifest.json"
 	need_file "$version_dir/SHA256SUMS"
 	guard_versioned_release macos-gui "$R2_DESKTOP_BUCKET" \
-		"$macos_gui_prefix/latest/manifest.json" "$version_dir/manifest.json"
+		"$macos_gui_prefix/$version/manifest.json" "$macos_gui_prefix/latest/manifest.json" \
+		"$version_dir/manifest.json"
 
-	printf 'Uploading macOS GUI release %s to %s\n' "$version" "$(s3_uri "$R2_DESKTOP_BUCKET" "$macos_gui_prefix/$version")"
-	upload_dir "$version_dir" "$R2_DESKTOP_BUCKET" "$macos_gui_prefix/$version" "$release_cache_control" keep
+	if [ "$publication_state" = fresh-publish ]; then
+		printf 'Uploading macOS GUI release %s to %s\n' "$version" "$(s3_uri "$R2_DESKTOP_BUCKET" "$macos_gui_prefix/$version")"
+		upload_committed_release_dir "$version_dir" "$R2_DESKTOP_BUCKET" \
+			"$macos_gui_prefix/$version" "$release_cache_control"
+	fi
 	upload_file "$R2_DESKTOP_BUCKET" "$macos_gui_prefix/latest/SHA256SUMS" "$version_dir/SHA256SUMS" "$latest_cache_control"
 	upload_file "$R2_DESKTOP_BUCKET" "$macos_gui_prefix/latest/manifest.json" "$version_dir/manifest.json" "$latest_cache_control"
 fi
@@ -531,16 +645,19 @@ if [ "$target" = windows-gui ]; then
 	done
 	printf '\n  ]\n}\n' >>"$manifest"
 	guard_versioned_release windows-gui "$R2_DESKTOP_BUCKET" \
-		"$windows_gui_prefix/latest/manifest.json" "$manifest"
+		"$windows_gui_prefix/$version/manifest.json" "$windows_gui_prefix/latest/manifest.json" \
+		"$manifest"
 
-	for arch in amd64 arm64; do
-		arch_dir="$windows_gui_staged_root/$arch"
-		msi_name="Codesk_${version}_windows_${arch}.msi"
-		upload_file "$R2_DESKTOP_BUCKET" "$windows_gui_prefix/$version/$arch/$msi_name" "$arch_dir/$msi_name" "$release_cache_control"
-		upload_file "$R2_DESKTOP_BUCKET" "$windows_gui_prefix/$version/$arch/SHA256SUMS" "$arch_dir/SHA256SUMS" "$release_cache_control"
-		upload_file "$R2_DESKTOP_BUCKET" "$windows_gui_prefix/$version/$arch/provenance.json" "$arch_dir/provenance.json" "$release_cache_control"
-	done
-	upload_file "$R2_DESKTOP_BUCKET" "$windows_gui_prefix/$version/manifest.json" "$manifest" "$release_cache_control"
+	if [ "$publication_state" = fresh-publish ]; then
+		for arch in amd64 arm64; do
+			arch_dir="$windows_gui_staged_root/$arch"
+			msi_name="Codesk_${version}_windows_${arch}.msi"
+			upload_file "$R2_DESKTOP_BUCKET" "$windows_gui_prefix/$version/$arch/$msi_name" "$arch_dir/$msi_name" "$release_cache_control"
+			upload_file "$R2_DESKTOP_BUCKET" "$windows_gui_prefix/$version/$arch/SHA256SUMS" "$arch_dir/SHA256SUMS" "$release_cache_control"
+			upload_file "$R2_DESKTOP_BUCKET" "$windows_gui_prefix/$version/$arch/provenance.json" "$arch_dir/provenance.json" "$release_cache_control"
+		done
+		upload_file "$R2_DESKTOP_BUCKET" "$windows_gui_prefix/$version/manifest.json" "$manifest" "$release_cache_control"
+	fi
 	upload_file "$R2_DESKTOP_BUCKET" "$windows_gui_prefix/latest/manifest.json" "$manifest" "$latest_cache_control"
 	printf 'Uploaded Windows GUI release %s to %s\n' "$version" "$(s3_uri "$R2_DESKTOP_BUCKET" "$windows_gui_prefix/$version")"
 fi

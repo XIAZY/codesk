@@ -129,6 +129,8 @@ fake_bin="$tmp_dir/bin"
 mkdir -p "$fake_bin"
 bsd_find_bin="$tmp_dir/bsd-find-bin"
 mkdir -p "$bsd_find_bin"
+no_go_bin="$tmp_dir/no-go-bin"
+mkdir -p "$no_go_bin"
 cat >"$bsd_find_bin/find" <<'FIND'
 #!/usr/bin/env sh
 set -eu
@@ -138,6 +140,13 @@ done
 exec "$BSD_FIND_REAL" "$@"
 FIND
 chmod +x "$bsd_find_bin/find"
+cat >"$no_go_bin/go" <<'GO'
+#!/usr/bin/env sh
+set -eu
+printf 'native go invoked: %s\n' "$*" >>"$NO_GO_LOG"
+exit 64
+GO
+chmod +x "$no_go_bin/go"
 bsd_find_real="$(command -v find)"
 source_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 source_base=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -149,9 +158,16 @@ cat >"$fake_bin/aws" <<'AWS'
 set -eu
 printf '%s\n' "$*" >>"$AWS_LOG"
 if [ "${4:-}" = ls ]; then
-	[ "${AWS_FAIL_LATEST_READ:-0}" -eq 0 ] || exit 70
-	if [ -n "${AWS_REMOTE_LATEST:-}" ] && [ -f "$AWS_REMOTE_LATEST" ]; then
-		printf '2026-01-01 00:00:00 %s manifest.json\n' "$(wc -c <"$AWS_REMOTE_LATEST" | tr -d ' ')"
+	case "$5" in
+		*/latest/manifest.json)
+			[ "${AWS_FAIL_LATEST_READ:-0}" -eq 0 ] || exit 70
+			aws_remote_file="${AWS_REMOTE_LATEST:-}"
+			;;
+		*/manifest.json) aws_remote_file="${AWS_REMOTE_LEDGER:-}" ;;
+		*) exit 64 ;;
+	esac
+	if [ -n "$aws_remote_file" ] && [ -f "$aws_remote_file" ]; then
+		printf '2026-01-01 00:00:00 %s manifest.json\n' "$(wc -c <"$aws_remote_file" | tr -d ' ')"
 	fi
 	exit 0
 fi
@@ -162,6 +178,11 @@ if [ "${4:-}" = cp ]; then
 		s3://*/latest/manifest.json)
 			[ -n "${AWS_REMOTE_LATEST:-}" ] && [ -f "$AWS_REMOTE_LATEST" ] || exit 71
 			cp "$AWS_REMOTE_LATEST" "$aws_destination"
+			exit 0
+			;;
+		s3://*/manifest.json)
+			[ -n "${AWS_REMOTE_LEDGER:-}" ] && [ -f "$AWS_REMOTE_LEDGER" ] || exit 71
+			cp "$AWS_REMOTE_LEDGER" "$aws_destination"
 			exit 0
 			;;
 	esac
@@ -189,13 +210,20 @@ if [ -n "${AWS_CAPTURE_DIR:-}" ] && [ "${4:-}" = cp ]; then
 			;;
 	esac
 fi
+if [ -n "${DAEMON_CAPTURE_DIR:-}" ] && [ "${4:-}" = cp ]; then
+	case "$6" in
+		*"/daemons/0.0.1/manifest.json")
+			cp "$5" "$DAEMON_CAPTURE_DIR/manifest.json"
+			;;
+	esac
+fi
 if [ -n "${DAEMON_CAPTURE_DIR:-}" ] && [ "${4:-}" = sync ]; then
 	aws_source="$5"
 	aws_destination="$6"
 	case "$aws_destination" in
 		*"/daemons/0.0.1/")
 			for daemon_capture_name in \
-				notty-daemon_0.0.1_linux_arm64.tar.gz SHA256SUMS manifest.json
+				notty-daemon_0.0.1_linux_arm64.tar.gz SHA256SUMS
 			do
 				cp "${aws_source%/}/$daemon_capture_name" "$DAEMON_CAPTURE_DIR/$daemon_capture_name"
 			done
@@ -208,6 +236,7 @@ cat >"$fake_bin/wrangler" <<'WRANGLER'
 set -eu
 printf '%s\n' "$*" >>"$WRANGLER_LOG"
 if [ "$#" -ge 4 ] && [ "$1" = r2 ] && [ "$2" = object ] && [ "$3" = get ]; then
+	wrangler_key="$4"
 	shift 4
 	wrangler_output=
 	while [ "$#" -gt 0 ]; do
@@ -217,8 +246,13 @@ if [ "$#" -ge 4 ] && [ "$1" = r2 ] && [ "$2" = object ] && [ "$3" = get ]; then
 		esac
 	done
 	[ -n "$wrangler_output" ] || exit 64
-	if [ -n "${WRANGLER_REMOTE_LATEST:-}" ] && [ -f "$WRANGLER_REMOTE_LATEST" ]; then
-		cp "$WRANGLER_REMOTE_LATEST" "$wrangler_output"
+	case "$wrangler_key" in
+		*/latest/manifest.json) wrangler_remote_file="${WRANGLER_REMOTE_LATEST:-}" ;;
+		*/manifest.json) wrangler_remote_file="${WRANGLER_REMOTE_LEDGER:-}" ;;
+		*) exit 64 ;;
+	esac
+	if [ -n "$wrangler_remote_file" ] && [ -f "$wrangler_remote_file" ]; then
+		cp "$wrangler_remote_file" "$wrangler_output"
 		exit 0
 	fi
 	printf 'The specified key does not exist.\n' >&2
@@ -439,6 +473,57 @@ expect_windows_preflight_failure() {
 	[ ! -s "$failure_aws_log" ] || fail "Windows GUI $failure_label wrote to R2 before failing"
 }
 
+expect_daemon_publication_failure() {
+	failure_label="$1"
+	failure_root="$2"
+	failure_latest="$3"
+	failure_ledger="$4"
+	failure_aws_log="$tmp_dir/$failure_label.aws.log"
+	: >"$failure_aws_log"
+	if PATH="$fake_bin:$PATH" AWS_LOG="$failure_aws_log" \
+		AWS_REMOTE_LATEST="$failure_latest" AWS_REMOTE_LEDGER="$failure_ledger" \
+		DAEMON_DIST_ROOT="$failure_root" UPLOAD_TARGET=daemon \
+		R2_ENDPOINT_URL=https://example.invalid R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
+		"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/$failure_label.output" 2>&1; then
+		fail "daemon publication accepted $failure_label"
+	fi
+	[ "$(aws_write_count "$failure_aws_log")" -eq 0 ] || fail "daemon $failure_label wrote before failing"
+}
+
+expect_macos_publication_failure() {
+	failure_label="$1"
+	failure_root="$2"
+	failure_latest="$3"
+	failure_ledger="$4"
+	failure_aws_log="$tmp_dir/$failure_label.aws.log"
+	: >"$failure_aws_log"
+	if PATH="$fake_bin:$PATH" AWS_LOG="$failure_aws_log" \
+		AWS_REMOTE_LATEST="$failure_latest" AWS_REMOTE_LEDGER="$failure_ledger" \
+		MACOS_GUI_DIST_DIR="$failure_root" UPLOAD_TARGET=macos-gui \
+		R2_ENDPOINT_URL=https://example.invalid R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
+		"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/$failure_label.output" 2>&1; then
+		fail "macOS GUI publication accepted $failure_label"
+	fi
+	[ "$(aws_write_count "$failure_aws_log")" -eq 0 ] || fail "macOS GUI $failure_label wrote before failing"
+}
+
+expect_windows_publication_failure() {
+	failure_label="$1"
+	failure_root="$2"
+	failure_latest="$3"
+	failure_ledger="$4"
+	failure_aws_log="$tmp_dir/$failure_label.aws.log"
+	: >"$failure_aws_log"
+	if PATH="$fake_bin:$PATH" AWS_LOG="$failure_aws_log" \
+		AWS_REMOTE_LATEST="$failure_latest" AWS_REMOTE_LEDGER="$failure_ledger" \
+		WINDOWS_GUI_MSI_ROOT="$failure_root" UPLOAD_TARGET=windows-gui \
+		R2_ENDPOINT_URL=https://example.invalid R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
+		"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/$failure_label.output" 2>&1; then
+		fail "Windows GUI publication accepted $failure_label"
+	fi
+	[ "$(aws_write_count "$failure_aws_log")" -eq 0 ] || fail "Windows GUI $failure_label wrote before failing"
+}
+
 static_dist="$tmp_dir/static"
 mkdir -p "$static_dist/homepage" "$static_dist/app"
 printf '<html>home</html>\n' >"$static_dist/homepage/index.html"
@@ -457,23 +542,30 @@ BSD_FIND_REAL="$bsd_find_real" PATH="$bsd_find_bin:$fake_bin:$PATH" \
 pass 'daemon upload inventory is portable when find rejects GNU -printf'
 
 daemon_version_uri='s3://static/daemons/0.0.1/'
+daemon_ledger_uri='s3://static/daemons/0.0.1/manifest.json'
 daemon_latest_uri='s3://static/daemons/latest/manifest.json'
-[ "$(aws_write_count "$aws_log" "$daemon_version_uri")" -eq 1 ] ||
-	fail 'daemon deploy did not write the version directory exactly once'
+[ "$(aws_write_count "$aws_log" "$daemon_version_uri")" -eq 2 ] ||
+	fail 'daemon deploy did not write version payloads and their ledger exactly once each'
+awk -v uri="$daemon_version_uri" '
+	$4 == "sync" && index($0, uri) && index($0, "--exclude manifest.json") { found = 1 }
+	END { exit !found }
+' "$aws_log" || fail 'daemon payload sync did not exclude the version ledger'
 [ "$(aws_write_count "$aws_log" "$daemon_latest_uri")" -eq 1 ] ||
 	fail 'daemon deploy did not write latest exactly once'
-daemon_version_line="$(aws_first_write_line "$aws_log" "$daemon_version_uri")"
+daemon_version_payload_line="$(aws_first_write_line "$aws_log" "$daemon_version_uri")"
+daemon_ledger_line="$(aws_first_write_line "$aws_log" "$daemon_ledger_uri")"
 daemon_latest_line="$(aws_first_write_line "$aws_log" "$daemon_latest_uri")"
-[ "$daemon_version_line" -lt "$daemon_latest_line" ] || fail 'daemon latest preceded the version directory write'
+[ "$daemon_version_payload_line" -lt "$daemon_ledger_line" ] ||
+	fail 'daemon version ledger preceded immutable payload publication'
 for daemon_stable_installer in install.sh uninstall.sh install.ps1 uninstall.ps1; do
 	daemon_installer_uri="s3://static/daemons/$daemon_stable_installer"
 	[ "$(aws_write_count "$aws_log" "$daemon_installer_uri")" -eq 1 ] ||
 		fail "daemon deploy did not write $daemon_stable_installer exactly once"
 	daemon_installer_line="$(aws_first_write_line "$aws_log" "$daemon_installer_uri")"
-	[ "$daemon_version_line" -lt "$daemon_installer_line" ] && [ "$daemon_installer_line" -lt "$daemon_latest_line" ] ||
+	[ "$daemon_ledger_line" -lt "$daemon_installer_line" ] && [ "$daemon_installer_line" -lt "$daemon_latest_line" ] ||
 		fail "daemon $daemon_stable_installer write was outside the pre-commit window"
 done
-pass 'daemon latest is the sole write after the complete version and installer publication'
+pass 'daemon version ledger commits after payloads and latest commits after stable installers'
 
 daemon_missing_dist="$tmp_dir/daemon-missing-archive"
 cp -R "$daemon_dist" "$daemon_missing_dist"
@@ -503,6 +595,7 @@ daemon_remote_latest="$daemon_dist/0.0.1/manifest.json"
 daemon_noop_log="$tmp_dir/daemon-identical-redeploy.aws.log"
 : >"$daemon_noop_log"
 PATH="$fake_bin:$PATH" AWS_LOG="$daemon_noop_log" AWS_REMOTE_LATEST="$daemon_remote_latest" \
+	AWS_REMOTE_LEDGER="$daemon_remote_latest" \
 	DAEMON_DIST_ROOT="$daemon_dist" UPLOAD_TARGET=daemon \
 	R2_ENDPOINT_URL=https://example.invalid R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
 	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/daemon-identical-redeploy.output"
@@ -514,6 +607,7 @@ daemon_wrangler_log="$tmp_dir/daemon-identical-redeploy.wrangler.log"
 : >"$daemon_wrangler_log"
 PATH="$fake_bin:$PATH" R2_ENDPOINT_URL= CLOUDFLARE_API_TOKEN=test CLOUDFLARE_ACCOUNT_ID=test \
 	WRANGLER_LOG="$daemon_wrangler_log" WRANGLER_REMOTE_LATEST="$daemon_remote_latest" \
+	WRANGLER_REMOTE_LEDGER="$daemon_remote_latest" \
 	DAEMON_DIST_ROOT="$daemon_dist" UPLOAD_TARGET=daemon \
 	R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
 	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/daemon-identical-redeploy-wrangler.output"
@@ -528,6 +622,7 @@ write_daemon_release "$daemon_conflict_dist" 0.0.1 changed
 daemon_conflict_log="$tmp_dir/daemon-same-version-conflict.aws.log"
 : >"$daemon_conflict_log"
 if PATH="$fake_bin:$PATH" AWS_LOG="$daemon_conflict_log" AWS_REMOTE_LATEST="$daemon_remote_latest" \
+	AWS_REMOTE_LEDGER="$daemon_remote_latest" \
 	DAEMON_DIST_ROOT="$daemon_conflict_dist" UPLOAD_TARGET=daemon \
 	R2_ENDPOINT_URL=https://example.invalid R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
 	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/daemon-same-version-conflict.output" 2>&1; then
@@ -537,15 +632,65 @@ fi
 
 daemon_older_dist="$tmp_dir/daemon-older-release"
 write_daemon_release "$daemon_older_dist" 0.0.0 old
+daemon_older_latest="$daemon_older_dist/0.0.0/manifest.json"
+daemon_newer_dist="$tmp_dir/daemon-newer-release"
+write_daemon_release "$daemon_newer_dist" 0.0.2 newer
+daemon_newer_latest="$daemon_newer_dist/0.0.2/manifest.json"
 daemon_new_version_log="$tmp_dir/daemon-new-version.aws.log"
 : >"$daemon_new_version_log"
 PATH="$fake_bin:$PATH" AWS_LOG="$daemon_new_version_log" \
-	AWS_REMOTE_LATEST="$daemon_older_dist/0.0.0/manifest.json" DAEMON_DIST_ROOT="$daemon_dist" \
+	AWS_REMOTE_LATEST="$daemon_older_latest" DAEMON_DIST_ROOT="$daemon_dist" \
 	UPLOAD_TARGET=daemon R2_ENDPOINT_URL=https://example.invalid \
 	R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
 	"$repo_dir/scripts/upload-r2.sh" >/dev/null
+[ "$(aws_write_count "$daemon_new_version_log" "$daemon_version_uri")" -eq 2 ] ||
+	fail 'fresh forward daemon publish did not write payloads and ledger'
 [ "$(aws_write_count "$daemon_new_version_log" "$daemon_latest_uri")" -eq 1 ] ||
 	fail 'daemon deploy did not publish when latest named a different version'
+
+daemon_forward_completion_log="$tmp_dir/daemon-forward-completion.aws.log"
+: >"$daemon_forward_completion_log"
+PATH="$fake_bin:$PATH" AWS_LOG="$daemon_forward_completion_log" \
+	AWS_REMOTE_LATEST="$daemon_older_latest" AWS_REMOTE_LEDGER="$daemon_remote_latest" \
+	DAEMON_DIST_ROOT="$daemon_dist" UPLOAD_TARGET=daemon \
+	R2_ENDPOINT_URL=https://example.invalid R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
+	"$repo_dir/scripts/upload-r2.sh" >/dev/null
+[ "$(aws_write_count "$daemon_forward_completion_log" "$daemon_version_uri")" -eq 0 ] ||
+	fail 'daemon forward completion rewrote immutable version bytes'
+for daemon_stable_installer in install.sh uninstall.sh install.ps1 uninstall.ps1; do
+	[ "$(aws_write_count "$daemon_forward_completion_log" "s3://static/daemons/$daemon_stable_installer")" -eq 1 ] ||
+		fail "daemon forward completion did not refresh $daemon_stable_installer"
+done
+[ "$(aws_write_count "$daemon_forward_completion_log" "$daemon_latest_uri")" -eq 1 ] ||
+	fail 'daemon forward completion did not advance latest exactly once'
+
+daemon_missing_pointer_completion_log="$tmp_dir/daemon-missing-pointer-completion.aws.log"
+: >"$daemon_missing_pointer_completion_log"
+PATH="$fake_bin:$PATH" AWS_LOG="$daemon_missing_pointer_completion_log" \
+	AWS_REMOTE_LEDGER="$daemon_remote_latest" DAEMON_DIST_ROOT="$daemon_dist" \
+	UPLOAD_TARGET=daemon R2_ENDPOINT_URL=https://example.invalid \
+	R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
+	"$repo_dir/scripts/upload-r2.sh" >/dev/null
+[ "$(aws_write_count "$daemon_missing_pointer_completion_log" "$daemon_version_uri")" -eq 0 ] ||
+	fail 'daemon missing-pointer completion rewrote immutable version bytes'
+[ "$(aws_write_count "$daemon_missing_pointer_completion_log" "$daemon_latest_uri")" -eq 1 ] ||
+	fail 'daemon missing-pointer completion did not advance latest exactly once'
+
+daemon_malformed_latest="$tmp_dir/daemon-malformed-latest.json"
+printf '{"version":"0.0.0"}\n' >"$daemon_malformed_latest"
+expect_daemon_publication_failure daemon-malformed-latest "$daemon_dist" "$daemon_malformed_latest" ''
+daemon_ambiguous_latest="$tmp_dir/daemon-ambiguous-latest.json"
+printf '{\n  "version": "0.0.0",\n  "duplicate": {"version": "0.0.0"}\n}\n' >"$daemon_ambiguous_latest"
+expect_daemon_publication_failure daemon-ambiguous-latest "$daemon_dist" "$daemon_ambiguous_latest" ''
+expect_daemon_publication_failure daemon-missing-ledger-current "$daemon_dist" "$daemon_remote_latest" ''
+expect_daemon_publication_failure daemon-downgrade-missing-ledger "$daemon_dist" "$daemon_newer_latest" ''
+expect_daemon_publication_failure daemon-downgrade-identical-ledger \
+	"$daemon_dist" "$daemon_newer_latest" "$daemon_remote_latest"
+expect_daemon_publication_failure daemon-pointer-conflict \
+	"$daemon_dist" "$daemon_conflict_dist/0.0.1/manifest.json" "$daemon_remote_latest"
+expect_daemon_publication_failure daemon-historical-rewrite \
+	"$daemon_conflict_dist" "$daemon_older_latest" "$daemon_remote_latest"
+pass 'daemon ledger/pointer matrix preserves fresh publish, no-op, forward completion, and every fail-closed state'
 
 daemon_read_failure_log="$tmp_dir/daemon-latest-read-failure.aws.log"
 : >"$daemon_read_failure_log"
@@ -621,17 +766,24 @@ PATH="$fake_bin:$PATH" AWS_LOG="$aws_log" MACOS_GUI_DIST_DIR="$macos_dist" UPLOA
 macos_latest_manifest_uri='s3://static/desktop/macos/latest/manifest.json'
 macos_latest_sha_uri='s3://static/desktop/macos/latest/SHA256SUMS'
 macos_version_uri='s3://static/desktop/macos/0.0.1/'
-macos_version_line="$(aws_first_write_line "$aws_log" "$macos_version_uri")"
+macos_ledger_uri='s3://static/desktop/macos/0.0.1/manifest.json'
+macos_version_payload_line="$(aws_first_write_line "$aws_log" "$macos_version_uri")"
+macos_ledger_line="$(aws_first_write_line "$aws_log" "$macos_ledger_uri")"
 macos_latest_sha_line="$(aws_first_write_line "$aws_log" "$macos_latest_sha_uri")"
 macos_latest_manifest_line="$(aws_first_write_line "$aws_log" "$macos_latest_manifest_uri")"
-[ "$macos_version_line" -lt "$macos_latest_sha_line" ] &&
+[ "$(aws_write_count "$aws_log" "$macos_version_uri")" -eq 2 ] ||
+	fail 'macOS GUI deploy did not write payloads and their version ledger exactly once each'
+[ "$macos_version_payload_line" -lt "$macos_ledger_line" ] &&
+	[ "$macos_ledger_line" -lt "$macos_latest_sha_line" ] &&
 	[ "$macos_latest_sha_line" -lt "$macos_latest_manifest_line" ] ||
-	fail 'macOS latest manifest was not the final commit-point write'
+	fail 'macOS GUI payload, ledger, checksum pointer, and latest pointer were not commit ordered'
 
+macos_remote_manifest="$macos_dist/0.0.1/manifest.json"
 macos_noop_log="$tmp_dir/macos-identical-redeploy.aws.log"
 : >"$macos_noop_log"
 PATH="$fake_bin:$PATH" AWS_LOG="$macos_noop_log" \
-	AWS_REMOTE_LATEST="$macos_dist/0.0.1/manifest.json" MACOS_GUI_DIST_DIR="$macos_dist" \
+	AWS_REMOTE_LATEST="$macos_remote_manifest" AWS_REMOTE_LEDGER="$macos_remote_manifest" \
+	MACOS_GUI_DIST_DIR="$macos_dist" \
 	UPLOAD_TARGET=macos-gui R2_ENDPOINT_URL=https://example.invalid \
 	R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
 	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/macos-identical-redeploy.output"
@@ -642,13 +794,41 @@ write_macos_release "$macos_conflict_dist" changed
 macos_conflict_log="$tmp_dir/macos-same-version-conflict.aws.log"
 : >"$macos_conflict_log"
 if PATH="$fake_bin:$PATH" AWS_LOG="$macos_conflict_log" \
-	AWS_REMOTE_LATEST="$macos_dist/0.0.1/manifest.json" MACOS_GUI_DIST_DIR="$macos_conflict_dist" \
+	AWS_REMOTE_LATEST="$macos_remote_manifest" AWS_REMOTE_LEDGER="$macos_remote_manifest" \
+	MACOS_GUI_DIST_DIR="$macos_conflict_dist" \
 	UPLOAD_TARGET=macos-gui R2_ENDPOINT_URL=https://example.invalid \
 	R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
 	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/macos-same-version-conflict.output" 2>&1; then
 	fail 'macOS GUI deploy rewrote an already-published version'
 fi
 [ "$(aws_write_count "$macos_conflict_log")" -eq 0 ] || fail 'conflicting macOS GUI redeploy wrote before failing'
+
+macos_forward_completion_log="$tmp_dir/macos-forward-completion.aws.log"
+: >"$macos_forward_completion_log"
+PATH="$fake_bin:$PATH" AWS_LOG="$macos_forward_completion_log" \
+	AWS_REMOTE_LATEST="$daemon_older_latest" AWS_REMOTE_LEDGER="$macos_remote_manifest" \
+	MACOS_GUI_DIST_DIR="$macos_dist" UPLOAD_TARGET=macos-gui \
+	R2_ENDPOINT_URL=https://example.invalid R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
+	"$repo_dir/scripts/upload-r2.sh" >/dev/null
+[ "$(aws_write_count "$macos_forward_completion_log" "$macos_version_uri")" -eq 0 ] ||
+	fail 'macOS GUI forward completion rewrote immutable version bytes'
+[ "$(aws_write_count "$macos_forward_completion_log" "$macos_latest_sha_uri")" -eq 1 ] ||
+	fail 'macOS GUI forward completion did not refresh latest checksums exactly once'
+[ "$(aws_write_count "$macos_forward_completion_log" "$macos_latest_manifest_uri")" -eq 1 ] ||
+	fail 'macOS GUI forward completion did not advance latest exactly once'
+macos_forward_sha_line="$(aws_first_write_line "$macos_forward_completion_log" "$macos_latest_sha_uri")"
+macos_forward_manifest_line="$(aws_first_write_line "$macos_forward_completion_log" "$macos_latest_manifest_uri")"
+[ "$macos_forward_sha_line" -lt "$macos_forward_manifest_line" ] ||
+	fail 'macOS GUI forward completion committed latest before its checksums'
+
+expect_macos_publication_failure macos-historical-rewrite \
+	"$macos_conflict_dist" "$daemon_older_latest" "$macos_remote_manifest"
+macos_wrong_version_dist="$tmp_dir/macos-candidate-version-mismatch"
+write_macos_release "$macos_wrong_version_dist"
+sed 's/^  "version": "0\.0\.1",$/  "version": "0.0.2",/' \
+	"$macos_wrong_version_dist/0.0.1/manifest.json" >"$macos_wrong_version_dist/manifest.json.new"
+mv "$macos_wrong_version_dist/manifest.json.new" "$macos_wrong_version_dist/0.0.1/manifest.json"
+expect_macos_publication_failure macos-candidate-version-mismatch "$macos_wrong_version_dist" '' ''
 
 macos_sha_failure_log="$tmp_dir/macos-latest-sha-failure.aws.log"
 : >"$macos_sha_failure_log"
@@ -660,32 +840,47 @@ if PATH="$fake_bin:$PATH" AWS_LOG="$macos_sha_failure_log" AWS_FAIL_LATEST_SHA=1
 fi
 [ "$(aws_write_count "$macos_sha_failure_log" "$macos_latest_manifest_uri")" -eq 0 ] ||
 	fail 'macOS GUI deploy committed latest before its checksum pointer succeeded'
-pass 'macOS GUI immutable publication rejects rewrites and commits the manifest last'
+pass 'macOS GUI ledger/pointer states preserve immutable bytes and commit metadata in order'
 
 windows_dist="$tmp_dir/windows"
 for arch in amd64 arm64; do
 	write_windows_bundle "$windows_dist" "$arch" "$source_head" "$source_base" true
 done
-PATH="$fake_bin:$PATH" AWS_LOG="$aws_log" WINDOWS_GUI_MSI_ROOT="$windows_dist" UPLOAD_TARGET=windows-gui \
+windows_no_go_log="$tmp_dir/windows-native-go.log"
+: >"$windows_no_go_log"
+PATH="$no_go_bin:$fake_bin:$PATH" NO_GO_LOG="$windows_no_go_log" \
+	AWS_LOG="$aws_log" WINDOWS_GUI_MSI_ROOT="$windows_dist" UPLOAD_TARGET=windows-gui \
 	R2_ENDPOINT_URL=https://example.invalid R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
 	"$repo_dir/scripts/upload-r2.sh" >/dev/null
+[ ! -s "$windows_no_go_log" ] || fail 'Windows GUI deploy invoked native host Go'
 
+windows_version_uri='s3://static/desktop/windows/0.0.1/'
+windows_ledger_uri='s3://static/desktop/windows/0.0.1/manifest.json'
 windows_latest_uri='s3://static/desktop/windows/latest/manifest.json'
 windows_remote_latest="$tmp_dir/windows-remote-latest-manifest.json"
 write_windows_manifest "$windows_dist" "$windows_remote_latest"
+windows_ledger_line="$(aws_first_write_line "$aws_log" "$windows_ledger_uri")"
 windows_latest_line="$(aws_first_write_line "$aws_log" "$windows_latest_uri")"
-for windows_version_write in \
-	's3://static/desktop/windows/0.0.1/amd64/' \
-	's3://static/desktop/windows/0.0.1/arm64/' \
-	's3://static/desktop/windows/0.0.1/manifest.json'
-do
-	windows_version_line="$(aws_first_write_line "$aws_log" "$windows_version_write")"
-	[ "$windows_version_line" -lt "$windows_latest_line" ] || fail 'Windows GUI latest preceded a versioned release write'
+[ "$(aws_write_count "$aws_log" "$windows_version_uri")" -eq 7 ] ||
+	fail 'Windows GUI deploy did not write six payload files and one version ledger'
+for windows_arch in amd64 arm64; do
+	for windows_version_file in \
+		"Codesk_0.0.1_windows_${windows_arch}.msi" SHA256SUMS provenance.json
+	do
+		windows_payload_uri="s3://static/desktop/windows/0.0.1/$windows_arch/$windows_version_file"
+		windows_payload_line="$(aws_first_write_line "$aws_log" "$windows_payload_uri")"
+		[ "$windows_payload_line" -lt "$windows_ledger_line" ] ||
+			fail "Windows GUI version ledger preceded $windows_arch/$windows_version_file"
+	done
 done
+[ "$windows_ledger_line" -lt "$windows_latest_line" ] ||
+	fail 'Windows GUI latest preceded its version ledger'
+pass 'Windows GUI deploy needs no native Go and commits its version ledger after all six payload files'
 
 windows_noop_log="$tmp_dir/windows-identical-redeploy.aws.log"
 : >"$windows_noop_log"
-PATH="$fake_bin:$PATH" AWS_LOG="$windows_noop_log" AWS_REMOTE_LATEST="$windows_remote_latest" \
+PATH="$fake_bin:$PATH" AWS_LOG="$windows_noop_log" \
+	AWS_REMOTE_LATEST="$windows_remote_latest" AWS_REMOTE_LEDGER="$windows_remote_latest" \
 	WINDOWS_GUI_MSI_ROOT="$windows_dist" UPLOAD_TARGET=windows-gui \
 	R2_ENDPOINT_URL=https://example.invalid R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
 	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/windows-identical-redeploy.output"
@@ -697,14 +892,32 @@ for arch in amd64 arm64; do
 done
 windows_conflict_log="$tmp_dir/windows-same-version-conflict.aws.log"
 : >"$windows_conflict_log"
-if PATH="$fake_bin:$PATH" AWS_LOG="$windows_conflict_log" AWS_REMOTE_LATEST="$windows_remote_latest" \
+if PATH="$fake_bin:$PATH" AWS_LOG="$windows_conflict_log" \
+	AWS_REMOTE_LATEST="$windows_remote_latest" AWS_REMOTE_LEDGER="$windows_remote_latest" \
 	WINDOWS_GUI_MSI_ROOT="$windows_conflict_dist" UPLOAD_TARGET=windows-gui \
 	R2_ENDPOINT_URL=https://example.invalid R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
 	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/windows-same-version-conflict.output" 2>&1; then
 	fail 'Windows GUI deploy rewrote an already-published version'
 fi
 [ "$(aws_write_count "$windows_conflict_log")" -eq 0 ] || fail 'conflicting Windows GUI redeploy wrote before failing'
-pass 'Windows GUI immutable publication is an identical no-op and rejects changed same-version bytes'
+
+windows_forward_completion_log="$tmp_dir/windows-forward-completion.aws.log"
+: >"$windows_forward_completion_log"
+PATH="$no_go_bin:$fake_bin:$PATH" NO_GO_LOG="$windows_no_go_log" \
+	AWS_LOG="$windows_forward_completion_log" AWS_REMOTE_LATEST="$daemon_older_latest" \
+	AWS_REMOTE_LEDGER="$windows_remote_latest" WINDOWS_GUI_MSI_ROOT="$windows_dist" \
+	UPLOAD_TARGET=windows-gui R2_ENDPOINT_URL=https://example.invalid \
+	R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
+	"$repo_dir/scripts/upload-r2.sh" >/dev/null
+[ "$(aws_write_count "$windows_forward_completion_log" "$windows_version_uri")" -eq 0 ] ||
+	fail 'Windows GUI forward completion rewrote immutable MSI release bytes'
+[ "$(aws_write_count "$windows_forward_completion_log" "$windows_latest_uri")" -eq 1 ] ||
+	fail 'Windows GUI forward completion did not advance latest exactly once'
+[ ! -s "$windows_no_go_log" ] || fail 'Windows GUI forward completion invoked native host Go'
+
+expect_windows_publication_failure windows-historical-rewrite \
+	"$windows_conflict_dist" "$daemon_older_latest" "$windows_remote_latest"
+pass 'Windows GUI ledger/pointer states preserve immutable MSI bytes across no-op, conflict, and forward completion'
 
 toctou_dist="$tmp_dir/windows-post-staging-mutation"
 for arch in amd64 arm64; do
