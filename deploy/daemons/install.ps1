@@ -416,7 +416,7 @@ if ([string]::IsNullOrWhiteSpace($DataDir)) {
 }
 
 $StaticBase = $StaticBase.TrimEnd("/")
-$artifactBase = Join-RemotePath $StaticBase "windows"
+$artifactBase = $StaticBase
 $BackendUrl = $BackendUrl.TrimEnd("/")
 $codexCommand = if ([string]::IsNullOrWhiteSpace($env:NOTTY_CODEX_COMMAND)) { "codex" } else { $env:NOTTY_CODEX_COMMAND }
 $claudeCommand = if ([string]::IsNullOrWhiteSpace($env:NOTTY_CLAUDE_COMMAND)) { "claude" } else { $env:NOTTY_CLAUDE_COMMAND }

@@ -33,14 +33,7 @@ case "$dist_root" in
 	/*) dist_abs="$dist_root" ;;
 	*) dist_abs="$root_dir/$dist_root" ;;
 esac
-platform_dist="$dist_abs/$platform"
+DIST_DIR="$dist_abs" PLATFORMS="$platforms" \
+	"$root_dir/scripts/build-daemon-release.sh" "$dist_abs"
 
-DIST_DIR="$platform_dist" PLATFORMS="$platforms" \
-	"$root_dir/scripts/build-daemon-release.sh" "$platform_dist"
-
-mkdir -p "$dist_abs"
-for installer in install.sh uninstall.sh install.ps1 uninstall.ps1; do
-	cp "$root_dir/deploy/daemons/$installer" "$dist_abs/$installer"
-done
-
-printf 'Built %s daemon artifacts for %s in %s\n' "$platform" "$version" "$platform_dist/$version"
+printf 'Built local %s daemon artifacts for %s in %s\n' "$platform" "$version" "$dist_abs/$version"

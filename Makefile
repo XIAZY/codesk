@@ -34,7 +34,7 @@ WINDOWS_GUI_ZIG_VERSION ?= 0.16.0
 .PHONY: dev dev-down dev-config-check prod-config-check \
 	test tests test-unit test-go test-frontend test-postgres test-regression test-live \
 	build build-yffi build-go _build-daemon-host _static-build-local \
-	linux-daemon-build linux-daemon-deploy macos-daemon-build macos-daemon-deploy windows-daemon-build windows-daemon-deploy \
+	linux-daemon-build macos-daemon-build windows-daemon-build daemon-deploy \
 	macos-gui-build macos-gui-deploy windows-gui-build windows-gui-deploy \
 	frontend-build frontend-deploy backend-build backend-deploy deploy \
 	daemon-clean daemon-installer-check daemon-installer-windows-check daemon-uninstall-test version-contract-check build-deploy-contract-check
@@ -98,20 +98,14 @@ _static-build-local:
 linux-daemon-build:
 	DAEMON_DIST_ROOT="$(DAEMON_DIST_ROOT)" DAEMON_ARCHES="amd64 arm64" scripts/build-daemon-platform.sh linux
 
-linux-daemon-deploy:
-	DAEMON_DIST_ROOT="$(DAEMON_DIST_ROOT)" scripts/deploy-daemon.sh linux
-
 macos-daemon-build:
 	DAEMON_DIST_ROOT="$(DAEMON_DIST_ROOT)" DAEMON_ARCHES="amd64 arm64" scripts/build-daemon-platform.sh macos
-
-macos-daemon-deploy:
-	DAEMON_DIST_ROOT="$(DAEMON_DIST_ROOT)" scripts/deploy-daemon.sh macos
 
 windows-daemon-build:
 	DAEMON_DIST_ROOT="$(DAEMON_DIST_ROOT)" DAEMON_ARCHES="amd64 arm64" scripts/build-daemon-platform.sh windows
 
-windows-daemon-deploy:
-	DAEMON_DIST_ROOT="$(DAEMON_DIST_ROOT)" scripts/deploy-daemon.sh windows
+daemon-deploy:
+	DAEMON_DIST_ROOT="$(DAEMON_DIST_ROOT)" scripts/deploy-daemon.sh
 
 ifeq ($(OS),Windows_NT)
 macos-gui-build:
@@ -163,9 +157,7 @@ frontend-deploy:
 
 deploy:
 	$(MAKE) frontend-deploy
-	$(MAKE) linux-daemon-deploy
-	$(MAKE) macos-daemon-deploy
-	$(MAKE) windows-daemon-deploy
+	$(MAKE) daemon-deploy
 	$(MAKE) backend-deploy
 
 prod-config-check:

@@ -14,9 +14,7 @@ target_count() {
 }
 
 for target in \
-	linux-daemon-build linux-daemon-deploy \
-	macos-daemon-build macos-daemon-deploy \
-	windows-daemon-build windows-daemon-deploy \
+	linux-daemon-build macos-daemon-build windows-daemon-build daemon-deploy \
 	frontend-build frontend-deploy backend-build backend-deploy
 do
 	[ "$(target_count "$target")" -eq 1 ] || fail "$target must have exactly one Make definition"
@@ -29,6 +27,7 @@ pass 'exact build/deploy pairs are present'
 for target in \
 	release static all promote \
 	daemon-build daemon-release daemon-release-all release-daemons \
+	linux-daemon-deploy macos-daemon-deploy windows-daemon-deploy \
 	macos-gui-release windows-gui-release windows-gui-payloads \
 	build-windows-builder-image windows-verify \
 	build-frontend build-daemon build-static build-static-local build-backend-image \
@@ -45,8 +44,7 @@ deploy_recipe="$(awk '
 	capture && /^[^[:space:]]/ { exit }
 	capture && /^\t/ { print }
 ' "$repo_dir/Makefile")"
-want_deploy_recipe="$(printf '\t$(MAKE) %s\n' \
-	frontend-deploy linux-daemon-deploy macos-daemon-deploy windows-daemon-deploy backend-deploy)"
+want_deploy_recipe="$(printf '\t$(MAKE) %s\n' frontend-deploy daemon-deploy backend-deploy)"
 [ "$deploy_recipe" = "$want_deploy_recipe" ] || fail "aggregate deploy order changed:\n$deploy_recipe"
 case "$deploy_recipe" in
 	*gui*) fail 'aggregate deploy must not include desktop GUI targets' ;;
@@ -68,6 +66,10 @@ printf '%s|%s|%s\n' "$1" "$DIST_DIR" "$PLATFORMS" >>"$BUILD_ROUTE_LOG"
 mkdir -p "$1/1.2.3"
 printf '{}\n' >"$1/1.2.3/manifest.json"
 printf 'sum\n' >"$1/1.2.3/SHA256SUMS"
+fixture_root="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
+for installer in install.sh uninstall.sh install.ps1 uninstall.ps1; do
+	cp "$fixture_root/deploy/daemons/$installer" "$1/$installer"
+done
 FIXTURE
 chmod +x "$build_fixture/scripts/"*.sh
 build_dist="$tmp_dir/daemon-dist"
@@ -77,12 +79,12 @@ for platform in linux macos windows; do
 		"$build_fixture/scripts/build-daemon-platform.sh" "$platform" >/dev/null
 done
 want_build_routes="$(cat <<ROUTES
-$build_dist/linux|$build_dist/linux|linux/amd64 linux/arm64
-$build_dist/macos|$build_dist/macos|darwin/amd64 darwin/arm64
-$build_dist/windows|$build_dist/windows|windows/amd64 windows/arm64
+$build_dist|$build_dist|linux/amd64 linux/arm64
+$build_dist|$build_dist|darwin/amd64 darwin/arm64
+$build_dist|$build_dist|windows/amd64 windows/arm64
 ROUTES
 )"
-[ "$(cat "$build_log")" = "$want_build_routes" ] || fail 'daemon platform build routes are not isolated or complete'
+[ "$(cat "$build_log")" = "$want_build_routes" ] || fail 'local daemon platform build routes are not version-first or complete'
 for installer in install.sh uninstall.sh install.ps1 uninstall.ps1; do
 	[ -f "$build_dist/$installer" ] || fail "root daemon installer was not staged: $installer"
 done
@@ -90,7 +92,38 @@ if BUILD_ROUTE_LOG="$build_log" DAEMON_DIST_ROOT="$build_dist" DAEMON_ARCHES='am
 	"$build_fixture/scripts/build-daemon-platform.sh" linux >/dev/null 2>&1; then
 	fail 'duplicate daemon architecture was accepted'
 fi
-pass 'daemon builds isolate platform manifests and require both unique architectures'
+pass 'local daemon platform builds use the version-first layout and require both unique architectures'
+
+grep -Fq 'all_platforms="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64"' \
+	"$repo_dir/scripts/build-daemon-release.sh" || fail 'complete daemon build does not enumerate the exact six targets'
+if grep -Eq 'cp .*\$out_dir/(install|uninstall)' "$repo_dir/scripts/build-daemon-release.sh"; then
+	fail 'versioned daemon inventory retained stable installer copies'
+fi
+pass 'complete daemon build owns exactly six archives plus manifest and checksum inventories'
+
+mkdir -p "$build_fixture/scripts/lib"
+cp "$repo_dir/scripts/deploy-daemon.sh" "$build_fixture/scripts/deploy-daemon.sh"
+cat >"$build_fixture/scripts/lib/deploy-env.sh" <<'FIXTURE'
+load_notty_deploy_env() { :; }
+FIXTURE
+cat >"$build_fixture/scripts/upload-r2.sh" <<'FIXTURE'
+#!/usr/bin/env sh
+set -eu
+printf '%s|%s\n' "$UPLOAD_TARGET" "${UPLOAD_PLATFORM-unset}" >>"$UPLOAD_ROUTE_LOG"
+FIXTURE
+chmod +x "$build_fixture/scripts/deploy-daemon.sh" "$build_fixture/scripts/upload-r2.sh"
+: >"$build_log"
+upload_route_log="$tmp_dir/daemon-upload-route.log"
+BUILD_ROUTE_LOG="$build_log" UPLOAD_ROUTE_LOG="$upload_route_log" DAEMON_DIST_ROOT="$build_dist" \
+	"$build_fixture/scripts/deploy-daemon.sh" >/dev/null
+[ "$(cat "$build_log")" = "$build_dist|$build_dist|all" ] ||
+	fail 'daemon deploy did not drive one complete sequential build'
+[ "$(cat "$upload_route_log")" = 'daemon|unset' ] ||
+	fail 'daemon deploy retained a per-platform upload route'
+if "$build_fixture/scripts/deploy-daemon.sh" linux >/dev/null 2>&1; then
+	fail 'daemon deploy accepted a platform argument'
+fi
+pass 'one daemon deploy rebuilds all targets and publishes once without a platform selector'
 
 fake_bin="$tmp_dir/bin"
 mkdir -p "$fake_bin"
@@ -114,6 +147,19 @@ if [ -n "${AWS_CAPTURE_DIR:-}" ] && [ "${4:-}" = cp ]; then
 			;;
 		*"/desktop/windows/0.0.1/manifest.json")
 			cp "$aws_source" "$AWS_CAPTURE_DIR/manifest.json"
+			;;
+	esac
+fi
+if [ -n "${DAEMON_CAPTURE_DIR:-}" ] && [ "${4:-}" = sync ]; then
+	aws_source="$5"
+	aws_destination="$6"
+	case "$aws_destination" in
+		*"/daemons/0.0.1/")
+			for daemon_capture_name in \
+				notty-daemon_0.0.1_linux_arm64.tar.gz SHA256SUMS manifest.json
+			do
+				cp "${aws_source%/}/$daemon_capture_name" "$DAEMON_CAPTURE_DIR/$daemon_capture_name"
+			done
 			;;
 	esac
 fi
@@ -197,6 +243,51 @@ fixture_sha256() {
 	fi
 }
 
+write_daemon_release() {
+	daemon_root="$1"
+	daemon_release_dir="$daemon_root/0.0.1"
+	mkdir -p "$daemon_release_dir"
+	: >"$daemon_release_dir/SHA256SUMS"
+	printf '{\n  "version": "0.0.1",\n  "artifacts": [\n' >"$daemon_release_dir/manifest.json"
+	daemon_first=1
+	for daemon_spec in \
+		'linux amd64 .tar.gz' 'linux arm64 .tar.gz' \
+		'darwin amd64 .tar.gz' 'darwin arm64 .tar.gz' \
+		'windows amd64 .zip' 'windows arm64 .zip'
+	do
+		set -- $daemon_spec
+		daemon_os="$1"
+		daemon_arch="$2"
+		daemon_ext="$3"
+		daemon_name="notty-daemon_0.0.1_${daemon_os}_${daemon_arch}${daemon_ext}"
+		printf '%s/%s release\n' "$daemon_os" "$daemon_arch" >"$daemon_release_dir/$daemon_name"
+		daemon_sum="$(fixture_sha256 "$daemon_release_dir/$daemon_name")"
+		printf '%s  %s\n' "$daemon_sum" "$daemon_name" >>"$daemon_release_dir/SHA256SUMS"
+		if [ "$daemon_first" -eq 0 ]; then printf ',\n' >>"$daemon_release_dir/manifest.json"; fi
+		daemon_first=0
+		printf '    {"os": "%s", "arch": "%s", "file": "%s", "sha256": "%s"}' \
+			"$daemon_os" "$daemon_arch" "$daemon_name" "$daemon_sum" >>"$daemon_release_dir/manifest.json"
+	done
+	printf '\n  ]\n}\n' >>"$daemon_release_dir/manifest.json"
+	for daemon_installer in install.sh uninstall.sh install.ps1 uninstall.ps1; do
+		printf '%s\n' "$daemon_installer" >"$daemon_root/$daemon_installer"
+	done
+}
+
+expect_daemon_preflight_failure() {
+	failure_label="$1"
+	failure_root="$2"
+	failure_aws_log="$tmp_dir/$failure_label.aws.log"
+	: >"$failure_aws_log"
+	if PATH="$fake_bin:$PATH" AWS_LOG="$failure_aws_log" DAEMON_DIST_ROOT="$failure_root" \
+		UPLOAD_TARGET=daemon R2_ENDPOINT_URL=https://example.invalid \
+		R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
+		"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/$failure_label.output" 2>&1; then
+		fail "daemon preflight accepted $failure_label"
+	fi
+	[ ! -s "$failure_aws_log" ] || fail "daemon $failure_label wrote to R2 before failing"
+}
+
 write_windows_bundle() {
 	bundle_root="$1"
 	bundle_arch="$2"
@@ -243,21 +334,78 @@ PATH="$fake_bin:$PATH" AWS_LOG="$aws_log" STATIC_DIST_DIR="$static_dist" UPLOAD_
 	"$repo_dir/scripts/upload-r2.sh" >/dev/null
 
 daemon_dist="$tmp_dir/daemons"
-mkdir -p "$daemon_dist"
-for installer in install.sh uninstall.sh install.ps1 uninstall.ps1; do
-	printf '%s\n' "$installer" >"$daemon_dist/$installer"
+write_daemon_release "$daemon_dist"
+PATH="$fake_bin:$PATH" AWS_LOG="$aws_log" DAEMON_DIST_ROOT="$daemon_dist" \
+	UPLOAD_TARGET=daemon R2_ENDPOINT_URL=https://example.invalid \
+	R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
+	"$repo_dir/scripts/upload-r2.sh" >/dev/null
+
+daemon_missing_dist="$tmp_dir/daemon-missing-archive"
+cp -R "$daemon_dist" "$daemon_missing_dist"
+rm "$daemon_missing_dist/0.0.1/notty-daemon_0.0.1_windows_arm64.zip"
+expect_daemon_preflight_failure missing-archive "$daemon_missing_dist"
+
+daemon_extra_dist="$tmp_dir/daemon-extra-archive"
+cp -R "$daemon_dist" "$daemon_extra_dist"
+printf 'stale\n' >"$daemon_extra_dist/0.0.1/notty-daemon_0.0.1_linux_386.tar.gz"
+expect_daemon_preflight_failure stale-extra-archive "$daemon_extra_dist"
+
+daemon_partial_manifest_dist="$tmp_dir/daemon-partial-manifest"
+cp -R "$daemon_dist" "$daemon_partial_manifest_dist"
+printf '{"version":"0.0.1","artifacts":[]}\n' >"$daemon_partial_manifest_dist/0.0.1/manifest.json"
+expect_daemon_preflight_failure partial-manifest "$daemon_partial_manifest_dist"
+
+daemon_wrong_checksum_dist="$tmp_dir/daemon-wrong-checksum"
+cp -R "$daemon_dist" "$daemon_wrong_checksum_dist"
+daemon_zero_hash="$(printf '%064d' 0)"
+awk -v zero="$daemon_zero_hash" 'NR == 1 { $1 = zero } { print $1 "  " $2 }' \
+	"$daemon_wrong_checksum_dist/0.0.1/SHA256SUMS" >"$daemon_wrong_checksum_dist/SHA256SUMS.new"
+mv "$daemon_wrong_checksum_dist/SHA256SUMS.new" "$daemon_wrong_checksum_dist/0.0.1/SHA256SUMS"
+expect_daemon_preflight_failure wrong-checksum "$daemon_wrong_checksum_dist"
+pass 'daemon upload rejects missing, stale, partial-manifest, and checksum inputs before any R2 write'
+
+daemon_toctou_dist="$tmp_dir/daemon-post-staging-mutation"
+write_daemon_release "$daemon_toctou_dist"
+daemon_toctou_source="$daemon_toctou_dist/0.0.1/notty-daemon_0.0.1_linux_arm64.tar.gz"
+daemon_toctou_before="$(fixture_sha256 "$daemon_toctou_source")"
+daemon_toctou_aws_log="$tmp_dir/daemon-post-staging-mutation.aws.log"
+daemon_toctou_capture="$tmp_dir/daemon-post-staging-mutation.capture"
+daemon_mutation_bin="$tmp_dir/daemon-mutation-bin"
+daemon_real_go="$(command -v go)"
+mkdir "$daemon_toctou_capture" "$daemon_mutation_bin"
+cat >"$daemon_mutation_bin/go" <<'GO'
+#!/usr/bin/env sh
+set -eu
+[ "${1:-}" = run ] || exit 64
+printf 'post-staging mutation\n' >>"$DAEMON_MUTATE_SOURCE"
+exec "$DAEMON_REAL_GO" "$@"
+GO
+chmod +x "$daemon_mutation_bin/go"
+: >"$daemon_toctou_aws_log"
+PATH="$daemon_mutation_bin:$fake_bin:$PATH" AWS_LOG="$daemon_toctou_aws_log" \
+	DAEMON_CAPTURE_DIR="$daemon_toctou_capture" DAEMON_MUTATE_SOURCE="$daemon_toctou_source" \
+	DAEMON_REAL_GO="$daemon_real_go" DAEMON_DIST_ROOT="$daemon_toctou_dist" \
+	UPLOAD_TARGET=daemon R2_ENDPOINT_URL=https://example.invalid \
+	R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
+	"$repo_dir/scripts/upload-r2.sh" >/dev/null
+daemon_toctou_after="$(fixture_sha256 "$daemon_toctou_source")"
+[ "$daemon_toctou_before" != "$daemon_toctou_after" ] || fail 'daemon post-staging source mutation hook did not run'
+for daemon_captured in notty-daemon_0.0.1_linux_arm64.tar.gz SHA256SUMS manifest.json; do
+	[ -f "$daemon_toctou_capture/$daemon_captured" ] || fail "daemon staged upload did not capture $daemon_captured"
 done
-for platform in linux macos windows; do
-	version_dir="$daemon_dist/$platform/0.0.1"
-	mkdir -p "$version_dir"
-	printf '{"version":"0.0.1"}\n' >"$version_dir/manifest.json"
-	printf '%064d  artifact\n' 0 >"$version_dir/SHA256SUMS"
-	printf 'artifact\n' >"$version_dir/artifact"
-	PATH="$fake_bin:$PATH" AWS_LOG="$aws_log" DAEMON_DIST_ROOT="$daemon_dist" \
-		UPLOAD_TARGET=daemon UPLOAD_PLATFORM="$platform" R2_ENDPOINT_URL=https://example.invalid \
-		R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
-		"$repo_dir/scripts/upload-r2.sh" >/dev/null
-done
+daemon_toctou_uploaded="$(fixture_sha256 "$daemon_toctou_capture/notty-daemon_0.0.1_linux_arm64.tar.gz")"
+daemon_toctou_checksum="$(awk '$2 == "notty-daemon_0.0.1_linux_arm64.tar.gz" { print $1 }' "$daemon_toctou_capture/SHA256SUMS")"
+daemon_toctou_manifest="$(awk -F '"sha256": "' '/"file": "notty-daemon_0.0.1_linux_arm64.tar.gz"/ { split($2, fields, "\""); print fields[1] }' "$daemon_toctou_capture/manifest.json")"
+[ "$daemon_toctou_uploaded" = "$daemon_toctou_before" ] || fail 'daemon upload did not preserve staged archive bytes'
+[ "$daemon_toctou_uploaded" = "$daemon_toctou_checksum" ] || fail 'daemon staged archive differs from staged SHA256SUMS'
+[ "$daemon_toctou_uploaded" = "$daemon_toctou_manifest" ] || fail 'daemon staged archive differs from staged manifest'
+[ "$daemon_toctou_uploaded" != "$daemon_toctou_after" ] || fail 'daemon upload followed the mutable source after staging'
+if grep -Fq "$daemon_toctou_dist/" "$daemon_toctou_aws_log"; then
+	fail 'daemon uploader received a mutable shared-source path'
+fi
+[ "$(grep -Fc 's3://static/daemons/latest/manifest.json' "$daemon_toctou_aws_log")" -eq 1 ] ||
+	fail 'daemon deploy did not advance latest exactly once after staged publication'
+pass 'daemon upload publishes one verified private snapshot and advances latest once'
 
 macos_dist="$tmp_dir/macos"
 mkdir -p "$macos_dist/0.0.1"
@@ -339,12 +487,8 @@ expect_windows_preflight_failure missing-second-arch "$missing_arch_dist"
 pass 'Windows GUI upload preflights both exact bundles and makes zero writes on causal failures'
 
 for required in \
-	's3://static/daemons/linux/0.0.1/' \
-	's3://static/daemons/macos/0.0.1/' \
-	's3://static/daemons/windows/0.0.1/' \
-	's3://static/daemons/linux/latest/manifest.json' \
-	's3://static/daemons/macos/latest/manifest.json' \
-	's3://static/daemons/windows/latest/manifest.json' \
+	's3://static/daemons/0.0.1/' \
+	's3://static/daemons/latest/manifest.json' \
 	's3://static/desktop/macos/0.0.1/' \
 	's3://static/desktop/macos/latest/manifest.json' \
 	's3://static/desktop/windows/0.0.1/amd64/Codesk_0.0.1_windows_amd64.msi' \
@@ -353,15 +497,26 @@ for required in \
 do
 	grep -Fq "$required" "$aws_log" || fail "shared R2 uploader missed route: $required"
 done
-if grep -Fq 's3://static/daemons/latest/manifest.json' "$aws_log"; then
-	fail 'daemon upload retained the cross-platform latest manifest collision'
-fi
-pass 'one shared R2 uploader routes frontend, isolated daemons, and both desktop GUIs'
+[ "$(grep -Fc 's3://static/daemons/latest/manifest.json' "$aws_log")" -eq 1 ] ||
+	fail 'daemon uploader did not perform exactly one shared latest update'
+for forbidden_daemon_route in \
+	's3://static/daemons/linux/' 's3://static/daemons/macos/' 's3://static/daemons/windows/' \
+	's3://static/daemons/latest/SHA256SUMS'
+do
+	if grep -Fq "$forbidden_daemon_route" "$aws_log"; then
+		fail "daemon uploader retained obsolete route: $forbidden_daemon_route"
+	fi
+done
+pass 'one shared R2 uploader routes one complete daemon release and both desktop GUIs'
 
-grep -Fq 'artifact_base="$static_base/$artifact_platform"' "$repo_dir/deploy/daemons/install.sh" ||
-	fail 'POSIX installer does not select the platform-scoped daemon root'
-grep -Fq '$artifactBase = Join-RemotePath $StaticBase "windows"' "$repo_dir/deploy/daemons/install.ps1" ||
-	fail 'PowerShell installer does not select the Windows daemon root'
-pass 'daemon installers consume platform-scoped latest metadata'
+grep -Fq 'artifact_base="$static_base"' "$repo_dir/deploy/daemons/install.sh" ||
+	fail 'POSIX installer does not preserve the live unprefixed daemon root'
+grep -Fq '$artifactBase = $StaticBase' "$repo_dir/deploy/daemons/install.ps1" ||
+	fail 'PowerShell installer does not preserve the live unprefixed daemon root'
+grep -Fq 'artifact_platform' "$repo_dir/deploy/daemons/install.sh" &&
+	fail 'POSIX installer retained a platform-prefixed daemon root'
+grep -Fq 'Join-RemotePath $StaticBase "windows"' "$repo_dir/deploy/daemons/install.ps1" &&
+	fail 'PowerShell installer retained a platform-prefixed daemon root'
+pass 'daemon installers preserve the live version-first latest metadata path'
 
 printf '%s\n' 'All build/deploy contract tests passed.'

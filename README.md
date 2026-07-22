@@ -1611,22 +1611,24 @@ Every releasable component has one local build command and one deploy command:
 
 | Component | Build | Deploy |
 | --- | --- | --- |
-| Linux daemon and agent tool, AMD64 + ARM64 | `make linux-daemon-build` | `make linux-daemon-deploy` |
-| macOS daemon and agent tool, AMD64 + ARM64 | `make macos-daemon-build` | `make macos-daemon-deploy` |
-| Windows daemon and agent tool, AMD64 + ARM64 | `make windows-daemon-build` | `make windows-daemon-deploy` |
+| Linux daemon and agent tool, AMD64 + ARM64 | `make linux-daemon-build` | `make daemon-deploy` |
+| macOS daemon and agent tool, AMD64 + ARM64 | `make macos-daemon-build` | `make daemon-deploy` |
+| Windows daemon and agent tool, AMD64 + ARM64 | `make windows-daemon-build` | `make daemon-deploy` |
 | macOS desktop GUI | `make macos-gui-build` | `make macos-gui-deploy` |
 | Windows desktop GUI | `make windows-gui-build` | `make windows-gui-deploy` |
 | Frontend and homepage | `make frontend-build` | `make frontend-deploy` |
 | Backend image and service | `make backend-build` | `make backend-deploy` |
 
 All commands read the canonical release version from the root `VERSION` file.
-Daemon builds stage platform-isolated outputs under
-`dist/static/daemons/{linux,macos,windows}/<VERSION>`. Each platform has its own
-`latest/manifest.json` and `latest/SHA256SUMS` R2 keys, so deploying one platform
-cannot overwrite another. Unix archives are `.tar.gz`; Windows archives are
-`.zip` files containing both `notty-daemon` and `notty-agent-tool` plus
-`run-windows.ps1`. The stable installer entrypoints remain directly under
-`/daemons/` and select the platform prefix before resolving `latest`.
+The three platform build targets are focused local helpers and never publish.
+`make daemon-deploy` rebuilds all six OS/architecture archives sequentially,
+preflights one complete staged snapshot, uploads it under
+`/daemons/<VERSION>`, and advances `/daemons/latest/manifest.json` only after
+the immutable version directory is complete. Unix archives are
+`.tar.gz`; Windows archives are `.zip` files containing both `notty-daemon` and
+`notty-agent-tool` plus `run-windows.ps1`. The stable installer entrypoints and
+versioned releases remain directly under `/daemons/`, matching the existing
+public layout.
 
 Deploy the complete non-GUI production release in fail-fast order:
 
@@ -1635,7 +1637,7 @@ source ~/.zshrc
 make deploy
 ```
 
-The aggregate runs frontend, Linux daemon, macOS daemon, Windows daemon, then
+The aggregate runs frontend, the complete six-artifact daemon deploy, then
 backend deploy. Desktop GUI deploys are intentionally excluded because no one
 host can produce both a notarized macOS DMG and native, ICE-validated Windows
 MSIs.
@@ -1671,9 +1673,9 @@ Current static routing uses separate R2 buckets:
 
 `scripts/upload-r2.sh` is the shared R2 uploader used by every static deploy.
 Frontend roots stay in their dedicated buckets, daemon artifacts use
-`daemons/{linux,macos,windows}`, and desktop releases use
-`desktop/{macos,windows}`. Immutable version directories are uploaded before
-their short-cache `latest/manifest.json` pointer.
+`daemons/<VERSION>`, and desktop releases use `desktop/{macos,windows}`.
+Immutable version directories are uploaded before their short-cache
+`latest/manifest.json` pointer.
 
 Production backend deployment uses `compose.prod.yml`. The remote server should keep `/opt/notty/secrets.env` outside git with only secrets such as `NOTTY_DATABASE_URL`, `NOTTY_JWT_SECRET`, and `NOTTY_MAILGUN_API_KEY`. `scripts/deploy-backend.sh` calls `scripts/push-backend-image.sh` to build and push `alphatoad/notty:backend-<version>`, uploads `compose.prod.yml`, `deploy/env/prod.server.env`, and the Compose-mounted nginx config to SSH host `notty`, then restarts the production Compose stack:
 

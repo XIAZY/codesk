@@ -104,11 +104,11 @@ static_base="$(printf '%s' "$static_base" | sed 's:/*$::')"
 backend_url="$(printf '%s' "$backend_url" | sed 's:/*$::')"
 
 case "$(uname -s)" in
-	Darwin) os="darwin"; artifact_platform="macos" ;;
-	Linux) os="linux"; artifact_platform="linux" ;;
+	Darwin) os="darwin" ;;
+	Linux) os="linux" ;;
 	*) die "unsupported operating system: $(uname -s)" ;;
 esac
-artifact_base="$static_base/$artifact_platform"
+artifact_base="$static_base"
 
 case "$(uname -m)" in
 	x86_64|amd64) arch="amd64" ;;

@@ -39,8 +39,8 @@ checksum_file() {
 }
 
 case "$(uname -s)" in
-	Darwin) os="darwin"; artifact_platform="macos" ;;
-	Linux) os="linux"; artifact_platform="linux" ;;
+	Darwin) os="darwin" ;;
+	Linux) os="linux" ;;
 	*) fail "unsupported test operating system: $(uname -s)" ;;
 esac
 
@@ -52,13 +52,12 @@ esac
 
 version="test"
 static_root="$tmp_dir/static"
-artifact_root="$static_root/$artifact_platform"
-release_dir="$artifact_root/$version"
+release_dir="$static_root/$version"
 
 create_package() {
 	package="notty-daemon_${version}_${1}_${2}"
 	package_dir="$release_dir/$package"
-	mkdir -p "$package_dir/bin" "$artifact_root/latest"
+	mkdir -p "$package_dir/bin" "$static_root/latest"
 	cat > "$package_dir/bin/notty-daemon" <<'EOF'
 #!/usr/bin/env sh
 echo fake notty daemon
@@ -81,7 +80,7 @@ fi
 		checksum_file "$archive"
 	done > SHA256SUMS
 )
-printf '{"version":"%s"}\n' "$version" > "$artifact_root/latest/manifest.json"
+printf '{"version":"%s"}\n' "$version" > "$static_root/latest/manifest.json"
 package="notty-daemon_${version}_${os}_${arch}"
 
 ok_codex="$tmp_dir/codex-ok"

@@ -78,6 +78,53 @@ assert_exact_top_level_entries() {
 		die "$assert_entries_label inventory mismatch"
 }
 
+daemon_archive_names() {
+	for daemon_os in linux darwin windows; do
+		for daemon_arch in amd64 arm64; do
+			case "$daemon_os" in
+				windows) daemon_ext=.zip ;;
+				*) daemon_ext=.tar.gz ;;
+			esac
+			printf 'notty-daemon_%s_%s_%s%s\n' "$version" "$daemon_os" "$daemon_arch" "$daemon_ext"
+		done
+	done
+}
+
+stage_daemon_release() {
+	daemon_source_dir="$daemon_dist_root/$version"
+	daemon_staged_dir="$tmp_dir/release"
+	daemon_staged_installers="$tmp_dir/installers"
+	need_dir "$daemon_source_dir"
+	{
+		daemon_archive_names
+		printf '%s\n' manifest.json SHA256SUMS
+	} | LC_ALL=C sort >"$tmp_dir/daemon-release.expected-files"
+	assert_exact_top_level_entries "$daemon_source_dir" "$tmp_dir/daemon-release.expected-files" daemon-release-source-files
+	mkdir "$daemon_staged_dir" "$daemon_staged_installers" ||
+		die 'could not create private daemon staging directories'
+	while IFS= read -r daemon_name; do
+		daemon_source_file="$daemon_source_dir/$daemon_name"
+		need_file "$daemon_source_file"
+		[ -s "$daemon_source_file" ] || die "empty daemon release file: $daemon_source_file"
+		cp "$daemon_source_file" "$daemon_staged_dir/$daemon_name" ||
+			die "could not stage daemon release file: $daemon_source_file"
+	done <"$tmp_dir/daemon-release.expected-files"
+	for daemon_installer in install.sh uninstall.sh install.ps1 uninstall.ps1; do
+		if [ -f "$daemon_dist_root/$daemon_installer" ]; then
+			daemon_installer_source="$daemon_dist_root/$daemon_installer"
+		else
+			daemon_installer_source="$root_dir/deploy/daemons/$daemon_installer"
+		fi
+		need_file "$daemon_installer_source"
+		[ -s "$daemon_installer_source" ] || die "empty daemon installer: $daemon_installer_source"
+		cp "$daemon_installer_source" "$daemon_staged_installers/$daemon_installer" ||
+			die "could not stage daemon installer: $daemon_installer_source"
+	done
+	command -v go >/dev/null 2>&1 || die 'go is required for daemon release validation'
+	go run "$root_dir/scripts/verify-daemon-release.go" "$daemon_staged_dir" "$version" ||
+		die 'daemon release preflight failed'
+}
+
 stage_windows_gui_arch() {
 	stage_arch="$1"
 	stage_source_dir="$windows_gui_input_root/$stage_arch"
@@ -321,30 +368,17 @@ if [ "$target" = frontend ]; then
 fi
 
 if [ "$target" = daemon ]; then
-	platform="${UPLOAD_PLATFORM:-}"
-	case "$platform" in
-		linux|macos|windows) ;;
-		*) die 'UPLOAD_PLATFORM must be linux, macos, or windows for daemon uploads' ;;
-	esac
-	daemon_dir="$daemon_dist_root/$platform"
-	version_dir="$daemon_dir/$version"
-	daemon_prefix="$(join_key "${R2_DAEMONS_PREFIX:-daemons}" "$platform")"
-	need_file "$version_dir/manifest.json"
-	need_file "$version_dir/SHA256SUMS"
+	tmp_dir="$(notty_test_mktemp notty-daemon-upload)"
+	stage_daemon_release
+	daemon_prefix="$(strip_prefix_slashes "${R2_DAEMONS_PREFIX:-daemons}")"
 
-	printf 'Uploading %s daemon release %s to %s\n' "$platform" "$version" "$(s3_uri "$R2_DAEMONS_BUCKET" "$daemon_prefix/$version")"
-	upload_dir "$version_dir" "$R2_DAEMONS_BUCKET" "$daemon_prefix/$version" "$release_cache_control" keep
+	printf 'Uploading complete daemon release %s to %s\n' "$version" "$(s3_uri "$R2_DAEMONS_BUCKET" "$daemon_prefix/$version")"
+	upload_dir "$daemon_staged_dir" "$R2_DAEMONS_BUCKET" "$daemon_prefix/$version" "$release_cache_control" keep
 
 	for installer in install.sh uninstall.sh install.ps1 uninstall.ps1; do
-		if [ -f "$daemon_dist_root/$installer" ]; then
-			installer_file="$daemon_dist_root/$installer"
-		else
-			installer_file="$root_dir/deploy/daemons/$installer"
-		fi
-		upload_file "$R2_DAEMONS_BUCKET" "$(join_key "${R2_DAEMONS_PREFIX:-daemons}" "$installer")" "$installer_file" 'public, max-age=300'
+		upload_file "$R2_DAEMONS_BUCKET" "$(join_key "$daemon_prefix" "$installer")" "$daemon_staged_installers/$installer" 'public, max-age=300'
 	done
-	upload_file "$R2_DAEMONS_BUCKET" "$daemon_prefix/latest/manifest.json" "$version_dir/manifest.json" "$latest_cache_control"
-	upload_file "$R2_DAEMONS_BUCKET" "$daemon_prefix/latest/SHA256SUMS" "$version_dir/SHA256SUMS" "$latest_cache_control"
+	upload_file "$R2_DAEMONS_BUCKET" "$daemon_prefix/latest/manifest.json" "$daemon_staged_dir/manifest.json" "$latest_cache_control"
 fi
 
 if [ "$target" = macos-gui ]; then
