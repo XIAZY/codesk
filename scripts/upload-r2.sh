@@ -453,20 +453,21 @@ upload_committed_release_dir() {
 	upload_release_prefix="$3"
 	upload_release_cache_control="$4"
 	upload_release_manifest="$upload_release_src/manifest.json"
+	upload_release_unsorted="$tmp_dir/committed-release-files.unsorted"
+	upload_release_sorted="$tmp_dir/committed-release-files.sorted"
 	need_dir "$upload_release_src"
 	need_file "$upload_release_manifest"
 
-	if [ "$uploader" = aws ]; then
-		aws_s3 sync "$upload_release_src/" "$(s3_uri "$upload_release_bucket" "$upload_release_prefix")/" \
-			--exclude manifest.json --cache-control "$upload_release_cache_control"
-	else
-		find "$upload_release_src" -type f | LC_ALL=C sort | while IFS= read -r upload_release_file; do
-			upload_release_rel="${upload_release_file#"$upload_release_src"/}"
-			[ "$upload_release_rel" = manifest.json ] ||
-				wrangler_put "$upload_release_bucket" "$(join_key "$upload_release_prefix" "$upload_release_rel")" \
-					"$upload_release_file" "$upload_release_cache_control"
-		done
-	fi
+	find "$upload_release_src" -type f >"$upload_release_unsorted" ||
+		die 'could not enumerate immutable release payloads'
+	LC_ALL=C sort "$upload_release_unsorted" >"$upload_release_sorted" ||
+		die 'could not sort immutable release payloads'
+	while IFS= read -r upload_release_file; do
+		upload_release_rel="${upload_release_file#"$upload_release_src"/}"
+		[ "$upload_release_rel" = manifest.json ] ||
+			upload_file "$upload_release_bucket" "$(join_key "$upload_release_prefix" "$upload_release_rel")" \
+				"$upload_release_file" "$upload_release_cache_control"
+	done <"$upload_release_sorted"
 	upload_file "$upload_release_bucket" "$(join_key "$upload_release_prefix" manifest.json)" \
 		"$upload_release_manifest" "$upload_release_cache_control"
 }

@@ -134,12 +134,27 @@ mkdir -p "$no_go_bin"
 cat >"$bsd_find_bin/find" <<'FIND'
 #!/usr/bin/env sh
 set -eu
+if [ "${FAIL_COMMITTED_FIND:-0}" -ne 0 ] &&
+	[ "${1##*/}" = "${FAIL_COMMITTED_FIND_BASENAME:-}" ]; then
+	printf '%s/SHA256SUMS\n' "$1"
+	exit 75
+fi
 for find_arg in "$@"; do
 	[ "$find_arg" != -printf ] || exit 64
 done
 exec "$BSD_FIND_REAL" "$@"
 FIND
-chmod +x "$bsd_find_bin/find"
+cat >"$bsd_find_bin/sort" <<'SORT'
+#!/usr/bin/env sh
+set -eu
+if [ "${FAIL_COMMITTED_SORT:-0}" -ne 0 ]; then
+	case "${1:-}" in
+		*/committed-release-files.unsorted) exit 76 ;;
+	esac
+fi
+exec "$BSD_SORT_REAL" "$@"
+SORT
+chmod +x "$bsd_find_bin/find" "$bsd_find_bin/sort"
 cat >"$no_go_bin/go" <<'GO'
 #!/usr/bin/env sh
 set -eu
@@ -148,6 +163,7 @@ exit 64
 GO
 chmod +x "$no_go_bin/go"
 bsd_find_real="$(command -v find)"
+bsd_sort_real="$(command -v sort)"
 source_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 source_base=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 export BUILD_DEPLOY_FIXTURE_GIT_REPO="$repo_dir"
@@ -157,6 +173,14 @@ cat >"$fake_bin/aws" <<'AWS'
 #!/usr/bin/env sh
 set -eu
 printf '%s\n' "$*" >>"$AWS_LOG"
+
+aws_object_path() {
+	case "$1" in
+		s3://*) printf '%s/%s\n' "$AWS_OBJECT_STORE_DIR" "${1#s3://}" ;;
+		*) exit 64 ;;
+	esac
+}
+
 if [ "${4:-}" = ls ]; then
 	case "$5" in
 		*/latest/manifest.json)
@@ -187,8 +211,11 @@ if [ "${4:-}" = cp ]; then
 			;;
 	esac
 fi
-if [ "${4:-}" = sync ] && [ "${AWS_FAIL_VERSION_SYNC:-0}" -ne 0 ]; then
-	exit 72
+if [ "${4:-}" = cp ] && [ "${AWS_FAIL_VERSION_PAYLOAD:-0}" -ne 0 ]; then
+	case "$6" in
+		*/daemons/0.0.1/manifest.json) ;;
+		*/daemons/0.0.1/*) exit 72 ;;
+	esac
 fi
 if [ "${4:-}" = cp ] && [ "${AWS_FAIL_LATEST_SHA:-0}" -ne 0 ]; then
 	case "$6" in
@@ -212,23 +239,63 @@ if [ -n "${AWS_CAPTURE_DIR:-}" ] && [ "${4:-}" = cp ]; then
 fi
 if [ -n "${DAEMON_CAPTURE_DIR:-}" ] && [ "${4:-}" = cp ]; then
 	case "$6" in
+		*"/daemons/0.0.1/notty-daemon_0.0.1_linux_arm64.tar.gz")
+			cp "$5" "$DAEMON_CAPTURE_DIR/notty-daemon_0.0.1_linux_arm64.tar.gz"
+			;;
+		*"/daemons/0.0.1/SHA256SUMS")
+			cp "$5" "$DAEMON_CAPTURE_DIR/SHA256SUMS"
+			;;
 		*"/daemons/0.0.1/manifest.json")
 			cp "$5" "$DAEMON_CAPTURE_DIR/manifest.json"
 			;;
 	esac
 fi
-if [ -n "${DAEMON_CAPTURE_DIR:-}" ] && [ "${4:-}" = sync ]; then
+if [ -n "${AWS_OBJECT_STORE_DIR:-}" ] && [ "${4:-}" = cp ]; then
 	aws_source="$5"
 	aws_destination="$6"
 	case "$aws_destination" in
-		*"/daemons/0.0.1/")
-			for daemon_capture_name in \
-				notty-daemon_0.0.1_linux_arm64.tar.gz SHA256SUMS
-			do
-				cp "${aws_source%/}/$daemon_capture_name" "$DAEMON_CAPTURE_DIR/$daemon_capture_name"
-			done
+		s3://*)
+			if [ -n "${AWS_LEDGER_ASSERT_COMMIT_URI:-}" ] &&
+				[ "$aws_destination" = "$AWS_LEDGER_ASSERT_COMMIT_URI" ]; then
+				[ -n "${AWS_LEDGER_ASSERT_PAYLOAD_URI:-}" ] &&
+					[ -n "${AWS_LEDGER_ASSERT_PAYLOAD_SOURCE:-}" ] || exit 64
+				aws_assert_payload_path="$(aws_object_path "$AWS_LEDGER_ASSERT_PAYLOAD_URI")"
+				if [ ! -f "$aws_assert_payload_path" ] ||
+					! cmp -s "$AWS_LEDGER_ASSERT_PAYLOAD_SOURCE" "$aws_assert_payload_path"; then
+					printf 'ledger commit preceded unconditional payload replacement: %s\n' \
+						"$AWS_LEDGER_ASSERT_PAYLOAD_URI" >&2
+					exit 74
+				fi
+				if [ -n "${AWS_LEDGER_ASSERT_LOG:-}" ]; then
+					printf '%s\n' "$aws_destination" >>"$AWS_LEDGER_ASSERT_LOG"
+				fi
+			fi
+			aws_destination_path="$(aws_object_path "$aws_destination")"
+			mkdir -p "$(dirname "$aws_destination_path")"
+			cp "$aws_source" "$aws_destination_path"
 			;;
 	esac
+fi
+if [ -n "${AWS_OBJECT_STORE_DIR:-}" ] && [ "${4:-}" = sync ]; then
+	aws_sync_source="${5%/}"
+	aws_sync_destination="${6%/}"
+	aws_sync_exclude_manifest=0
+	case " $* " in
+		*" --exclude manifest.json "*) aws_sync_exclude_manifest=1 ;;
+	esac
+	find "$aws_sync_source" -type f | LC_ALL=C sort | while IFS= read -r aws_sync_file; do
+		aws_sync_rel="${aws_sync_file#"$aws_sync_source"/}"
+		if [ "$aws_sync_exclude_manifest" -eq 1 ] && [ "$aws_sync_rel" = manifest.json ]; then
+			continue
+		fi
+		aws_sync_uri="$aws_sync_destination/$aws_sync_rel"
+		aws_sync_path="$(aws_object_path "$aws_sync_uri")"
+		mkdir -p "$(dirname "$aws_sync_path")"
+		if [ ! -f "$aws_sync_path" ] ||
+			[ "$(wc -c <"$aws_sync_file" | tr -d ' ')" -ne "$(wc -c <"$aws_sync_path" | tr -d ' ')" ]; then
+			cp "$aws_sync_file" "$aws_sync_path"
+		fi
+	done
 fi
 AWS
 cat >"$fake_bin/wrangler" <<'WRANGLER'
@@ -258,7 +325,10 @@ if [ "$#" -ge 4 ] && [ "$1" = r2 ] && [ "$2" = object ] && [ "$3" = get ]; then
 	printf 'The specified key does not exist.\n' >&2
 	exit 1
 fi
-if [ "$#" -ge 3 ] && [ "$1" = r2 ] && [ "$2" = object ] && [ "$3" = put ]; then
+if [ "$#" -ge 4 ] && [ "$1" = r2 ] && [ "$2" = object ] && [ "$3" = put ]; then
+	if [ -n "${WRANGLER_FAIL_PAYLOAD_KEY:-}" ] && [ "$4" = "$WRANGLER_FAIL_PAYLOAD_KEY" ]; then
+		exit 76
+	fi
 	exit 0
 fi
 exit 64
@@ -342,6 +412,18 @@ fixture_sha256() {
 	fi
 }
 
+preseed_equal_size_mismatch() {
+	preseed_source="$1"
+	preseed_destination="$2"
+	mkdir -p "$(dirname "$preseed_destination")"
+	sed '1s/^./X/' "$preseed_source" >"$preseed_destination"
+	[ "$(wc -c <"$preseed_source" | tr -d ' ')" -eq \
+		"$(wc -c <"$preseed_destination" | tr -d ' ')" ] ||
+		fail 'stale-object fixture did not preserve payload size'
+	! cmp -s "$preseed_source" "$preseed_destination" ||
+		fail 'stale-object fixture did not change payload bytes'
+}
+
 aws_write_count() {
 	aws_write_log="$1"
 	aws_write_needle="${2:-}"
@@ -357,6 +439,15 @@ aws_first_write_line() {
 	awk -v needle="$aws_write_needle" '
 		($4 == "sync" || ($4 == "cp" && $6 ~ /^s3:\/\//)) && index($0, needle) { print NR; exit }
 	' "$aws_write_log"
+}
+
+wrangler_put_count() {
+	wrangler_put_log="$1"
+	wrangler_put_needle="${2:-}"
+	awk -v needle="$wrangler_put_needle" '
+		$1 == "r2" && $2 == "object" && $3 == "put" && index($0, needle) { count++ }
+		END { print count + 0 }
+	' "$wrangler_put_log"
 }
 
 write_daemon_release() {
@@ -534,7 +625,7 @@ PATH="$fake_bin:$PATH" AWS_LOG="$aws_log" STATIC_DIST_DIR="$static_dist" UPLOAD_
 
 daemon_dist="$tmp_dir/daemons"
 write_daemon_release "$daemon_dist"
-BSD_FIND_REAL="$bsd_find_real" PATH="$bsd_find_bin:$fake_bin:$PATH" \
+BSD_FIND_REAL="$bsd_find_real" BSD_SORT_REAL="$bsd_sort_real" PATH="$bsd_find_bin:$fake_bin:$PATH" \
 	AWS_LOG="$aws_log" DAEMON_DIST_ROOT="$daemon_dist" \
 	UPLOAD_TARGET=daemon R2_ENDPOINT_URL=https://example.invalid \
 	R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
@@ -544,19 +635,28 @@ pass 'daemon upload inventory is portable when find rejects GNU -printf'
 daemon_version_uri='s3://static/daemons/0.0.1/'
 daemon_ledger_uri='s3://static/daemons/0.0.1/manifest.json'
 daemon_latest_uri='s3://static/daemons/latest/manifest.json'
-[ "$(aws_write_count "$aws_log" "$daemon_version_uri")" -eq 2 ] ||
+[ "$(aws_write_count "$aws_log" "$daemon_version_uri")" -eq 8 ] ||
 	fail 'daemon deploy did not write version payloads and their ledger exactly once each'
-awk -v uri="$daemon_version_uri" '
-	$4 == "sync" && index($0, uri) && index($0, "--exclude manifest.json") { found = 1 }
-	END { exit !found }
-' "$aws_log" || fail 'daemon payload sync did not exclude the version ledger'
 [ "$(aws_write_count "$aws_log" "$daemon_latest_uri")" -eq 1 ] ||
 	fail 'daemon deploy did not write latest exactly once'
-daemon_version_payload_line="$(aws_first_write_line "$aws_log" "$daemon_version_uri")"
 daemon_ledger_line="$(aws_first_write_line "$aws_log" "$daemon_ledger_uri")"
 daemon_latest_line="$(aws_first_write_line "$aws_log" "$daemon_latest_uri")"
-[ "$daemon_version_payload_line" -lt "$daemon_ledger_line" ] ||
-	fail 'daemon version ledger preceded immutable payload publication'
+for daemon_payload_name in \
+	SHA256SUMS \
+	notty-daemon_0.0.1_linux_amd64.tar.gz \
+	notty-daemon_0.0.1_linux_arm64.tar.gz \
+	notty-daemon_0.0.1_darwin_amd64.tar.gz \
+	notty-daemon_0.0.1_darwin_arm64.tar.gz \
+	notty-daemon_0.0.1_windows_amd64.zip \
+	notty-daemon_0.0.1_windows_arm64.zip
+do
+	daemon_payload_uri="$daemon_version_uri$daemon_payload_name"
+	[ "$(aws_write_count "$aws_log" "$daemon_payload_uri")" -eq 1 ] ||
+		fail "daemon payload was not put exactly once: $daemon_payload_name"
+	daemon_payload_line="$(aws_first_write_line "$aws_log" "$daemon_payload_uri")"
+	[ "$daemon_payload_line" -lt "$daemon_ledger_line" ] ||
+		fail "daemon version ledger preceded payload publication: $daemon_payload_name"
+done
 for daemon_stable_installer in install.sh uninstall.sh install.ps1 uninstall.ps1; do
 	daemon_installer_uri="s3://static/daemons/$daemon_stable_installer"
 	[ "$(aws_write_count "$aws_log" "$daemon_installer_uri")" -eq 1 ] ||
@@ -566,6 +666,78 @@ for daemon_stable_installer in install.sh uninstall.sh install.ps1 uninstall.ps1
 		fail "daemon $daemon_stable_installer write was outside the pre-commit window"
 done
 pass 'daemon version ledger commits after payloads and latest commits after stable installers'
+
+daemon_retry_store="$tmp_dir/daemon-retry-store"
+daemon_retry_log="$tmp_dir/daemon-retry.aws.log"
+daemon_retry_assert_log="$tmp_dir/daemon-retry-ledger-assert.log"
+daemon_retry_payload_name=notty-daemon_0.0.1_linux_amd64.tar.gz
+daemon_retry_payload_source="$daemon_dist/0.0.1/$daemon_retry_payload_name"
+daemon_retry_payload_uri="$daemon_version_uri$daemon_retry_payload_name"
+daemon_retry_payload_store="$daemon_retry_store/${daemon_retry_payload_uri#s3://}"
+preseed_equal_size_mismatch "$daemon_retry_payload_source" "$daemon_retry_payload_store"
+: >"$daemon_retry_log"
+: >"$daemon_retry_assert_log"
+PATH="$fake_bin:$PATH" AWS_LOG="$daemon_retry_log" AWS_OBJECT_STORE_DIR="$daemon_retry_store" \
+	AWS_LEDGER_ASSERT_COMMIT_URI="$daemon_ledger_uri" \
+	AWS_LEDGER_ASSERT_PAYLOAD_URI="$daemon_retry_payload_uri" \
+	AWS_LEDGER_ASSERT_PAYLOAD_SOURCE="$daemon_retry_payload_source" \
+	AWS_LEDGER_ASSERT_LOG="$daemon_retry_assert_log" \
+	DAEMON_DIST_ROOT="$daemon_dist" UPLOAD_TARGET=daemon \
+	R2_ENDPOINT_URL=https://example.invalid R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
+	"$repo_dir/scripts/upload-r2.sh" >/dev/null
+cmp -s "$daemon_retry_payload_source" "$daemon_retry_payload_store" ||
+	fail 'daemon retry did not replace an equal-sized stale payload'
+[ "$(cat "$daemon_retry_assert_log")" = "$daemon_ledger_uri" ] ||
+	fail 'daemon retry did not verify payload bytes before committing the ledger'
+[ -f "$daemon_retry_store/${daemon_ledger_uri#s3://}" ] ||
+	fail 'daemon retry did not commit the version ledger after payload replacement'
+pass 'daemon retry unconditionally replaces stale equal-sized payloads before ledger commit'
+
+daemon_find_failure_log="$tmp_dir/daemon-release-find-failure.wrangler.log"
+: >"$daemon_find_failure_log"
+if BSD_FIND_REAL="$bsd_find_real" BSD_SORT_REAL="$bsd_sort_real" \
+	FAIL_COMMITTED_FIND=1 FAIL_COMMITTED_FIND_BASENAME=release \
+	PATH="$bsd_find_bin:$fake_bin:$PATH" WRANGLER_LOG="$daemon_find_failure_log" \
+	DAEMON_DIST_ROOT="$daemon_dist" UPLOAD_TARGET=daemon \
+	R2_ENDPOINT_URL= CLOUDFLARE_API_TOKEN=test CLOUDFLARE_ACCOUNT_ID=test \
+	R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
+	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/daemon-release-find-failure.output" 2>&1; then
+	fail 'Wrangler daemon deploy masked immutable payload enumeration failure'
+fi
+[ "$(wrangler_put_count "$daemon_find_failure_log")" -eq 0 ] ||
+	fail 'Wrangler daemon payload enumeration failure allowed an R2 write'
+
+daemon_sort_failure_log="$tmp_dir/daemon-release-sort-failure.wrangler.log"
+: >"$daemon_sort_failure_log"
+if BSD_FIND_REAL="$bsd_find_real" BSD_SORT_REAL="$bsd_sort_real" FAIL_COMMITTED_SORT=1 \
+	PATH="$bsd_find_bin:$fake_bin:$PATH" WRANGLER_LOG="$daemon_sort_failure_log" \
+	DAEMON_DIST_ROOT="$daemon_dist" UPLOAD_TARGET=daemon \
+	R2_ENDPOINT_URL= CLOUDFLARE_API_TOKEN=test CLOUDFLARE_ACCOUNT_ID=test \
+	R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
+	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/daemon-release-sort-failure.output" 2>&1; then
+	fail 'Wrangler daemon deploy masked immutable payload ordering failure'
+fi
+[ "$(wrangler_put_count "$daemon_sort_failure_log")" -eq 0 ] ||
+	fail 'Wrangler daemon payload ordering failure allowed an R2 write'
+
+daemon_wrangler_payload_failure_log="$tmp_dir/daemon-payload-put-failure.wrangler.log"
+daemon_wrangler_payload_failure_key='static/daemons/0.0.1/notty-daemon_0.0.1_linux_arm64.tar.gz'
+: >"$daemon_wrangler_payload_failure_log"
+if PATH="$fake_bin:$PATH" WRANGLER_LOG="$daemon_wrangler_payload_failure_log" \
+	WRANGLER_FAIL_PAYLOAD_KEY="$daemon_wrangler_payload_failure_key" \
+	DAEMON_DIST_ROOT="$daemon_dist" UPLOAD_TARGET=daemon \
+	R2_ENDPOINT_URL= CLOUDFLARE_API_TOKEN=test CLOUDFLARE_ACCOUNT_ID=test \
+	R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
+	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/daemon-payload-put-failure.output" 2>&1; then
+	fail 'Wrangler daemon deploy swallowed an immutable payload PUT failure'
+fi
+[ "$(wrangler_put_count "$daemon_wrangler_payload_failure_log" 'static/daemons/0.0.1/')" -gt 0 ] ||
+	fail 'Wrangler daemon payload failure hook did not run mid-loop'
+[ "$(wrangler_put_count "$daemon_wrangler_payload_failure_log" 'static/daemons/0.0.1/manifest.json')" -eq 0 ] ||
+	fail 'Wrangler daemon payload failure allowed the version ledger commit'
+[ "$(wrangler_put_count "$daemon_wrangler_payload_failure_log" 'static/daemons/latest/manifest.json')" -eq 0 ] ||
+	fail 'Wrangler daemon payload failure allowed the latest commit'
+pass 'Wrangler daemon discovery and payload failures cannot reach a commit PUT'
 
 daemon_missing_dist="$tmp_dir/daemon-missing-archive"
 cp -R "$daemon_dist" "$daemon_missing_dist"
@@ -643,7 +815,7 @@ PATH="$fake_bin:$PATH" AWS_LOG="$daemon_new_version_log" \
 	UPLOAD_TARGET=daemon R2_ENDPOINT_URL=https://example.invalid \
 	R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
 	"$repo_dir/scripts/upload-r2.sh" >/dev/null
-[ "$(aws_write_count "$daemon_new_version_log" "$daemon_version_uri")" -eq 2 ] ||
+[ "$(aws_write_count "$daemon_new_version_log" "$daemon_version_uri")" -eq 8 ] ||
 	fail 'fresh forward daemon publish did not write payloads and ledger'
 [ "$(aws_write_count "$daemon_new_version_log" "$daemon_latest_uri")" -eq 1 ] ||
 	fail 'daemon deploy did not publish when latest named a different version'
@@ -702,16 +874,16 @@ if PATH="$fake_bin:$PATH" AWS_LOG="$daemon_read_failure_log" AWS_FAIL_LATEST_REA
 fi
 [ "$(aws_write_count "$daemon_read_failure_log")" -eq 0 ] || fail 'daemon latest read failure allowed writes'
 
-daemon_sync_failure_log="$tmp_dir/daemon-version-sync-failure.aws.log"
-: >"$daemon_sync_failure_log"
-if PATH="$fake_bin:$PATH" AWS_LOG="$daemon_sync_failure_log" AWS_FAIL_VERSION_SYNC=1 \
+daemon_payload_failure_log="$tmp_dir/daemon-version-payload-failure.aws.log"
+: >"$daemon_payload_failure_log"
+if PATH="$fake_bin:$PATH" AWS_LOG="$daemon_payload_failure_log" AWS_FAIL_VERSION_PAYLOAD=1 \
 	DAEMON_DIST_ROOT="$daemon_dist" UPLOAD_TARGET=daemon \
 	R2_ENDPOINT_URL=https://example.invalid R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
-	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/daemon-version-sync-failure.output" 2>&1; then
-	fail 'daemon deploy swallowed a version-directory sync failure'
+	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/daemon-version-payload-failure.output" 2>&1; then
+	fail 'daemon deploy swallowed an immutable payload PUT failure'
 fi
-[ "$(aws_write_count "$daemon_sync_failure_log" "$daemon_latest_uri")" -eq 0 ] ||
-	fail 'daemon deploy advanced latest after a version-directory sync failure'
+[ "$(aws_write_count "$daemon_payload_failure_log" "$daemon_latest_uri")" -eq 0 ] ||
+	fail 'daemon deploy advanced latest after an immutable payload PUT failure'
 pass 'daemon immutable publication is no-op safe, conflict safe, retryable, and commit ordered'
 
 daemon_toctou_dist="$tmp_dir/daemon-post-staging-mutation"
@@ -767,16 +939,81 @@ macos_latest_manifest_uri='s3://static/desktop/macos/latest/manifest.json'
 macos_latest_sha_uri='s3://static/desktop/macos/latest/SHA256SUMS'
 macos_version_uri='s3://static/desktop/macos/0.0.1/'
 macos_ledger_uri='s3://static/desktop/macos/0.0.1/manifest.json'
-macos_version_payload_line="$(aws_first_write_line "$aws_log" "$macos_version_uri")"
 macos_ledger_line="$(aws_first_write_line "$aws_log" "$macos_ledger_uri")"
 macos_latest_sha_line="$(aws_first_write_line "$aws_log" "$macos_latest_sha_uri")"
 macos_latest_manifest_line="$(aws_first_write_line "$aws_log" "$macos_latest_manifest_uri")"
-[ "$(aws_write_count "$aws_log" "$macos_version_uri")" -eq 2 ] ||
+[ "$(aws_write_count "$aws_log" "$macos_version_uri")" -eq 3 ] ||
 	fail 'macOS GUI deploy did not write payloads and their version ledger exactly once each'
-[ "$macos_version_payload_line" -lt "$macos_ledger_line" ] &&
-	[ "$macos_ledger_line" -lt "$macos_latest_sha_line" ] &&
+for macos_payload_name in Codesk_0.0.1_macos_universal.dmg SHA256SUMS; do
+	macos_payload_uri="$macos_version_uri$macos_payload_name"
+	[ "$(aws_write_count "$aws_log" "$macos_payload_uri")" -eq 1 ] ||
+		fail "macOS GUI payload was not put exactly once: $macos_payload_name"
+	macos_payload_line="$(aws_first_write_line "$aws_log" "$macos_payload_uri")"
+	[ "$macos_payload_line" -lt "$macos_ledger_line" ] ||
+		fail "macOS GUI version ledger preceded payload publication: $macos_payload_name"
+done
+[ "$macos_ledger_line" -lt "$macos_latest_sha_line" ] &&
 	[ "$macos_latest_sha_line" -lt "$macos_latest_manifest_line" ] ||
 	fail 'macOS GUI payload, ledger, checksum pointer, and latest pointer were not commit ordered'
+
+macos_retry_store="$tmp_dir/macos-retry-store"
+macos_retry_log="$tmp_dir/macos-retry.aws.log"
+macos_retry_assert_log="$tmp_dir/macos-retry-ledger-assert.log"
+macos_retry_payload_name=Codesk_0.0.1_macos_universal.dmg
+macos_retry_payload_source="$macos_dist/0.0.1/$macos_retry_payload_name"
+macos_retry_payload_uri="$macos_version_uri$macos_retry_payload_name"
+macos_retry_payload_store="$macos_retry_store/${macos_retry_payload_uri#s3://}"
+preseed_equal_size_mismatch "$macos_retry_payload_source" "$macos_retry_payload_store"
+: >"$macos_retry_log"
+: >"$macos_retry_assert_log"
+PATH="$fake_bin:$PATH" AWS_LOG="$macos_retry_log" AWS_OBJECT_STORE_DIR="$macos_retry_store" \
+	AWS_LEDGER_ASSERT_COMMIT_URI="$macos_ledger_uri" \
+	AWS_LEDGER_ASSERT_PAYLOAD_URI="$macos_retry_payload_uri" \
+	AWS_LEDGER_ASSERT_PAYLOAD_SOURCE="$macos_retry_payload_source" \
+	AWS_LEDGER_ASSERT_LOG="$macos_retry_assert_log" \
+	MACOS_GUI_DIST_DIR="$macos_dist" UPLOAD_TARGET=macos-gui \
+	R2_ENDPOINT_URL=https://example.invalid R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
+	"$repo_dir/scripts/upload-r2.sh" >/dev/null
+cmp -s "$macos_retry_payload_source" "$macos_retry_payload_store" ||
+	fail 'macOS GUI retry did not replace an equal-sized stale payload'
+[ "$(cat "$macos_retry_assert_log")" = "$macos_ledger_uri" ] ||
+	fail 'macOS GUI retry did not verify payload bytes before committing the ledger'
+[ -f "$macos_retry_store/${macos_ledger_uri#s3://}" ] ||
+	fail 'macOS GUI retry did not commit the version ledger after payload replacement'
+pass 'macOS GUI retry unconditionally replaces stale equal-sized payloads before ledger commit'
+
+macos_find_failure_log="$tmp_dir/macos-release-find-failure.wrangler.log"
+: >"$macos_find_failure_log"
+if BSD_FIND_REAL="$bsd_find_real" BSD_SORT_REAL="$bsd_sort_real" \
+	FAIL_COMMITTED_FIND=1 FAIL_COMMITTED_FIND_BASENAME=0.0.1 \
+	PATH="$bsd_find_bin:$fake_bin:$PATH" WRANGLER_LOG="$macos_find_failure_log" \
+	MACOS_GUI_DIST_DIR="$macos_dist" UPLOAD_TARGET=macos-gui \
+	R2_ENDPOINT_URL= CLOUDFLARE_API_TOKEN=test CLOUDFLARE_ACCOUNT_ID=test \
+	R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
+	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/macos-release-find-failure.output" 2>&1; then
+	fail 'Wrangler macOS GUI deploy masked immutable payload enumeration failure'
+fi
+[ "$(wrangler_put_count "$macos_find_failure_log")" -eq 0 ] ||
+	fail 'Wrangler macOS GUI payload enumeration failure allowed an R2 write'
+
+macos_wrangler_payload_failure_log="$tmp_dir/macos-payload-put-failure.wrangler.log"
+macos_wrangler_payload_failure_key='static/desktop/macos/0.0.1/SHA256SUMS'
+: >"$macos_wrangler_payload_failure_log"
+if PATH="$fake_bin:$PATH" WRANGLER_LOG="$macos_wrangler_payload_failure_log" \
+	WRANGLER_FAIL_PAYLOAD_KEY="$macos_wrangler_payload_failure_key" \
+	MACOS_GUI_DIST_DIR="$macos_dist" UPLOAD_TARGET=macos-gui \
+	R2_ENDPOINT_URL= CLOUDFLARE_API_TOKEN=test CLOUDFLARE_ACCOUNT_ID=test \
+	R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
+	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/macos-payload-put-failure.output" 2>&1; then
+	fail 'Wrangler macOS GUI deploy swallowed an immutable payload PUT failure'
+fi
+[ "$(wrangler_put_count "$macos_wrangler_payload_failure_log" 'static/desktop/macos/0.0.1/')" -gt 0 ] ||
+	fail 'Wrangler macOS GUI payload failure hook did not run mid-loop'
+[ "$(wrangler_put_count "$macos_wrangler_payload_failure_log" 'static/desktop/macos/0.0.1/manifest.json')" -eq 0 ] ||
+	fail 'Wrangler macOS GUI payload failure allowed the version ledger commit'
+[ "$(wrangler_put_count "$macos_wrangler_payload_failure_log" 'static/desktop/macos/latest/')" -eq 0 ] ||
+	fail 'Wrangler macOS GUI payload failure allowed a latest commit'
+pass 'Wrangler macOS GUI discovery and payload failures cannot reach a commit PUT'
 
 macos_remote_manifest="$macos_dist/0.0.1/manifest.json"
 macos_noop_log="$tmp_dir/macos-identical-redeploy.aws.log"
