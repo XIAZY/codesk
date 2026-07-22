@@ -45,6 +45,10 @@ for version in 0.0.0 1.2.3 255.255.65535; do
 	[ "$actual" = "$version" ] || fail "POSIX reader changed valid $version"
 	pass "POSIX reader accepts $version"
 done
+printf '1.2.3\r\n' >"$fixture/VERSION"
+actual="$("$fixture/scripts/read-version.sh")"
+[ "$actual" = 1.2.3 ] || fail 'POSIX reader changed valid CRLF-terminated version'
+pass 'POSIX reader accepts a CRLF-terminated version'
 
 check_invalid() {
 	invalid_name="$1"
@@ -62,7 +66,6 @@ check_invalid prefix printf 'v1.2.3\n'
 check_invalid suffix printf '1.2.3-rc1\n'
 check_invalid leading-whitespace printf ' 1.2.3\n'
 check_invalid trailing-whitespace printf '1.2.3 \n'
-check_invalid CRLF printf '1.2.3\r\n'
 check_invalid NUL printf '1.2.3\000\n'
 check_invalid non-ASCII printf '1.2.\200\n'
 check_invalid multiline printf '1.2.3\n2.3.4\n'
@@ -131,7 +134,6 @@ if command -v pwsh >/dev/null 2>&1; then
 	expect_fail 'PowerShell reader rejects missing VERSION' pwsh -NoLogo -NoProfile -NonInteractive -File "$fixture/scripts/read-version.ps1"
 	for invalid_file in "$tmp_dir/invalid"/*; do
 		name="$(basename -- "$invalid_file")"
-		[ "$name" = CRLF ] && continue
 		cp "$invalid_file" "$fixture/VERSION"
 		expect_fail "PowerShell reader rejects $name" pwsh -NoLogo -NoProfile -NonInteractive -File "$fixture/scripts/read-version.ps1"
 	done
