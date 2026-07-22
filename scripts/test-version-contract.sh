@@ -123,10 +123,15 @@ if command -v pwsh >/dev/null 2>&1; then
 		[ "$actual" = "$version" ] || fail "PowerShell reader changed valid $version"
 		pass "PowerShell reader accepts $version"
 	done
+	printf '1.2.3\r\n' >"$fixture/VERSION"
+	actual="$(pwsh -NoLogo -NoProfile -NonInteractive -File "$fixture/scripts/read-version.ps1")"
+	[ "$actual" = 1.2.3 ] || fail 'PowerShell reader changed valid CRLF-terminated version'
+	pass 'PowerShell reader accepts a CRLF-terminated version'
 	rm -f "$fixture/VERSION"
 	expect_fail 'PowerShell reader rejects missing VERSION' pwsh -NoLogo -NoProfile -NonInteractive -File "$fixture/scripts/read-version.ps1"
 	for invalid_file in "$tmp_dir/invalid"/*; do
 		name="$(basename -- "$invalid_file")"
+		[ "$name" = CRLF ] && continue
 		cp "$invalid_file" "$fixture/VERSION"
 		expect_fail "PowerShell reader rejects $name" pwsh -NoLogo -NoProfile -NonInteractive -File "$fixture/scripts/read-version.ps1"
 	done

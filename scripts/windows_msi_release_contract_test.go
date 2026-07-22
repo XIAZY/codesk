@@ -191,7 +191,8 @@ func TestPowerShellVersionReaderSourceContract(t *testing.T) {
 	mutations := []struct{ name, old, new string }{
 		{"text reader fallback", "[System.IO.File]::ReadAllBytes", "[System.IO.File]::ReadAllText"},
 		{"trailing LF changed", "$bytes[$bytes.Length - 1] -ne 10", "$bytes[$bytes.Length - 1] -ne 13"},
-		{"embedded LF scan shortened", "$index -lt $bytes.Length - 1", "$index -lt $bytes.Length - 2"},
+		{"CRLF detection changed", "$bytes[$lineLength - 1] -eq 13", "$bytes[$lineLength - 1] -eq 10"},
+		{"embedded newline scan shortened", "for ($index = 0; $index -lt $lineLength; $index++)", "for ($index = 0; $index -lt $lineLength - 1; $index++)"},
 		{"embedded LF changed", "$bytes[$index] -eq 10", "$bytes[$index] -eq 13"},
 		{"leading zeros accepted", "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$", "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
 		{"major range widened", "$major -gt 255", "$major -gt 256"},
@@ -1234,19 +1235,21 @@ func checkWindowsDesktopPayloadSource(source string) error {
 
 func checkPowerShellVersionReaderSource(source string) error {
 	for required, want := range map[string]int{
-		"param()":                          1,
-		"[System.IO.File]::ReadAllBytes":   1,
-		"$bytes[$bytes.Length - 1] -ne 10": 1,
-		"$index -lt $bytes.Length - 1":     1,
-		"$bytes[$index] -eq 10":            1,
-		"[System.Text.Encoding]::ASCII.GetString($bytes, 0, $bytes.Length - 1)": 1,
-		"^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$":                 1,
-		"[uint32]::TryParse($fields[0]":                                         1,
-		"[uint32]::TryParse($fields[1]":                                         1,
-		"[uint32]::TryParse($fields[2]":                                         1,
-		"$major -gt 255":                                                        1,
-		"$minor -gt 255":                                                        1,
-		"$build -gt 65535":                                                      1,
+		"param()":                                                         1,
+		"[System.IO.File]::ReadAllBytes":                                  1,
+		"$bytes[$bytes.Length - 1] -ne 10":                                1,
+		"$lineLength = $bytes.Length - 1":                                 1,
+		"$bytes[$lineLength - 1] -eq 13":                                  1,
+		"for ($index = 0; $index -lt $lineLength; $index++)":              1,
+		"$bytes[$index] -eq 10 -or $bytes[$index] -eq 13":                 1,
+		"[System.Text.Encoding]::ASCII.GetString($bytes, 0, $lineLength)": 1,
+		"^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$":           1,
+		"[uint32]::TryParse($fields[0]":                                   1,
+		"[uint32]::TryParse($fields[1]":                                   1,
+		"[uint32]::TryParse($fields[2]":                                   1,
+		"$major -gt 255":                                                  1,
+		"$minor -gt 255":                                                  1,
+		"$build -gt 65535":                                                1,
 	} {
 		if got := strings.Count(source, required); got != want {
 			return fmt.Errorf("PowerShell VERSION reader source count for %q = %d, want %d", required, got, want)
