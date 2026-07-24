@@ -3787,4 +3787,4 @@ pre.code {
 
 /* Terminal panel states (#62/#6): Preparing line + explicit failure + retry. */
 .ds-preparing { font-style: italic; }
-.ds-terminal-failed { display: flex; flex-direction: column; gap: 9px; align-items: flex-start; }
+.ds-terminal-unconfirmed { display: flex; flex-direction: column; gap: 9px; align-items: flex-start; }

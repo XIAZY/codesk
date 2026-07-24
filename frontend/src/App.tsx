@@ -4406,14 +4406,15 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
   const [terminalMode, setTerminalMode] = useState(false); // mac/win "Rather use the terminal?"
   const [token, setToken] = useState("");
   const [daemonId, setDaemonId] = useState("");
-  const [createStatus, setCreateStatus] = useState<"idle" | "preparing" | "ready" | "failed">("idle");
+  const [createStatus, setCreateStatus] = useState<"idle" | "preparing" | "ready" | "unconfirmed">("idle");
   // Single-fire guard: the terminal daemon is created AT MOST ONCE per modal, and a successful
   // creation survives Back / platform switches (a real server-side resource must never be orphaned
   // or duplicated by a second POST). Reset only on genuine failure, to allow an explicit retry.
   const createStartedRef = useRef(false);
-  // Daemons already online at open — so ANY path can detect a NEW daemon checking in (the app
-  // creates its own via DesktopConnectPage; this modal's terminal daemon is also created post-open).
-  const [initialOnlineIds] = useState(() => new Set(daemons.filter((d) => daemonStatus(d) === "online").map((d) => d.id)));
+  // Snapshot ALL daemon ids at open (not only the online ones) so detection recognizes a genuinely
+  // NEW record — the desktop app's own daemon, or this modal's terminal daemon, both created after
+  // open — and NEVER a pre-existing daemon that was merely OFFLINE at open and later reconnects.
+  const [initialDaemonIds] = useState(() => new Set(daemons.map((d) => d.id)));
 
   const hasApp = desktopPlatformHasApp(platform); // mac/win
   const manifest = useDesktopManifest(platform); // live R2 URLs + macOS notarization state
@@ -4444,8 +4445,15 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
       setCreateStatus("ready");
       onDone();
     } catch {
-      setCreateStatus("failed");
-      createStartedRef.current = false; // let the user retry
+      // POST /daemons is non-idempotent and carries no request key (backend mints a fresh UUID +
+      // one-time token per call), so on ANY failure we cannot know whether the record committed
+      // before the response was lost. A blind retry could duplicate it, and the one-time token is
+      // gone with the lost response — there is nothing recoverable to retry toward. So we refresh
+      // the list ONCE (any committed record surfaces in Local environments) and settle into a single
+      // honest "unconfirmed" state: no command, no copy, no retry. The guard stays set — no re-fire.
+      // (A future idempotency key + recoverable token is the real fix; ledgered, not this round.)
+      onDone();
+      setCreateStatus("unconfirmed");
     }
   }, [api, workspaceId, onDone]);
 
@@ -4454,12 +4462,13 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
     void runTerminalCreate();
   }, [showTerminal, isUnknown, runTerminalCreate]);
 
-  // Connected is LIVE-DERIVED from a real check-in, never a Download click. It accepts the owned
-  // terminal record OR any daemon newly online since open — so terminal→Back→app and
-  // Linux→mac/win→app both still recognize the desktop app's own daemon when it connects.
+  // Connected is LIVE-DERIVED from a real check-in, never a Download click. It accepts this flow's
+  // owned terminal record OR a genuinely NEW record (id unseen at open) coming online — so
+  // terminal→Back→app and Linux→mac/win→app recognize the desktop app's own daemon, while a
+  // pre-existing daemon that was offline at open and merely reconnects is NOT mistaken for it.
   const connectedDaemon =
     daemons.find((d) => d.id === daemonId && daemonStatus(d) === "online")
-    ?? daemons.find((d) => daemonStatus(d) === "online" && !initialOnlineIds.has(d.id));
+    ?? daemons.find((d) => daemonStatus(d) === "online" && !initialDaemonIds.has(d.id));
   const connected = Boolean(connectedDaemon);
   const terminalDaemon = daemonId ? daemons.find((d) => d.id === daemonId) : undefined;
   const terminalFailed = terminalDaemon ? isDaemonOffline(terminalDaemon) && hasGenuineCheckIn(terminalDaemon) : false;
@@ -4511,10 +4520,11 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
               ? "Install with a command instead — run it in a terminal on the computer you want to connect."
               : "On Linux, connect from the terminal — run this on the computer you want to connect."}
           </p>
-          {createStatus === "failed" ? (
-            <div className="ds-terminal-failed">
-              <p className="chip"><StatusDot tone="stale" />Couldn't prepare the install command.</p>
-              <button type="button" className="btn accent" onClick={() => void runTerminalCreate()}>Try again</button>
+          {createStatus === "unconfirmed" ? (
+            // Non-idempotent create failed ambiguously — one honest state, no command, no copy, no
+            // blind Retry (which could duplicate). The user closes and verifies in Local environments.
+            <div className="ds-terminal-unconfirmed">
+              <p className="chip"><StatusDot tone="stale" />We couldn't confirm whether the install command was prepared. To avoid creating a duplicate, close this dialog and check Local environments before trying again.</p>
             </div>
           ) : createStatus === "ready" && command ? (
             <>

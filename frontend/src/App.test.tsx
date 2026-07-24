@@ -590,19 +590,20 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
     await waitFor(() => expect(document.querySelector("pre.code")?.textContent).toContain("nottyd_realtoken"));
   });
 
-  it("terminal shows an explicit failure + retry when create rejects, no command exposed (#6)", async () => {
+  it("terminal create failure → one honest 'unconfirmed' state: no command, no Copy, NO blind retry (#3)", async () => {
     stubUA(LINUX);
-    const user = userEvent.setup();
-    const created: Daemon = { ...daemonFixtures.neverSeen, id: "daemon_new", name: "Local daemon" };
-    const api = { createDaemon: vi.fn()
-      .mockRejectedValueOnce(new Error("boom"))
-      .mockResolvedValueOnce({ daemon: created, token: "nottyd_retry" }) };
-    render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
-    expect(await screen.findByText("Couldn't prepare the install command.")).toBeTruthy();
+    const onDone = vi.fn();
+    // Non-idempotent create with no request key: an ambiguous failure could have committed. We must
+    // NOT offer a blind retry (it would duplicate) and there is no recoverable token to retry toward.
+    const api = { createDaemon: vi.fn().mockRejectedValue(new Error("network dropped")) };
+    render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={onDone} />);
+    expect(await screen.findByText(/We couldn't confirm whether the install command was prepared/)).toBeTruthy();
+    expect(screen.getByText(/close this dialog and check Local environments/)).toBeTruthy();
     expect(document.querySelector("pre.code")).toBeNull();
-    await user.click(screen.getByRole("button", { name: "Try again" }));
-    await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(document.querySelector("pre.code")?.textContent).toContain("nottyd_retry"));
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+    // Refresh-once so any committed record surfaces in Local environments; and exactly ONE POST ever.
+    await waitFor(() => expect(onDone).toHaveBeenCalled());
+    expect(api.createDaemon).toHaveBeenCalledTimes(1);
   });
 
   it("terminal create is single-fire: Back before it resolves, then re-enter, still ONE POST + result kept (#3)", async () => {
@@ -676,6 +677,40 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
     const appDaemon: Daemon = { ...daemonFixtures.justSeen, id: "daemon_app_new", name: "App daemon" };
     rerender(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[appDaemon]} onClose={vi.fn()} onDone={vi.fn()} />);
     expect(screen.getByText("Connected. You can create an agent now.")).toBeTruthy();
+  });
+
+  it("connection detection IGNORES a pre-existing OFFLINE daemon that merely reconnects — not a new connect (#7 false-positive)", () => {
+    stubUA(MAC);
+    // A pre-existing daemon that is OFFLINE at open: its id IS known at open, but it is not online.
+    const preexistingOffline = withReceipt({ ...daemonFixtures.dead, id: "daemon_old" }, Date.now());
+    const { rerender } = render(<CreateDaemonModal api={{ createDaemon: vi.fn() } as never} workspaceId="ws" daemons={[preexistingOffline]} onClose={vi.fn()} onDone={vi.fn()} />);
+    expect(screen.queryByText("Connected. You can create an agent now.")).toBeNull();
+    // It reconnects (comes online). This is NOT the desktop app connecting — with an all-IDs opening
+    // snapshot its id was seen at open, so it must NOT flip the modal to connected. (An online-only
+    // snapshot would misread this reconnect as a brand-new connection.)
+    const reconnected = withReceipt({ ...daemonFixtures.justSeen, id: "daemon_old" }, Date.now());
+    rerender(<CreateDaemonModal api={{ createDaemon: vi.fn() } as never} workspaceId="ws" daemons={[reconnected]} onClose={vi.fn()} onDone={vi.fn()} />);
+    expect(screen.queryByText("Connected. You can create an agent now.")).toBeNull();
+  });
+
+  it("terminal→Back→app NEVER auto-deletes the deliberately-created terminal record (accepted orphan pin)", async () => {
+    stubUA(MAC);
+    const user = userEvent.setup();
+    const terminalDaemon: Daemon = { ...daemonFixtures.neverSeen, id: "daemon_terminal", name: "Terminal daemon" };
+    const deleteDaemon = vi.fn();
+    const api = { createDaemon: vi.fn().mockResolvedValue({ daemon: terminalDaemon, token: "nottyd_z" }), deleteDaemon };
+    const { rerender } = render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Rather use the terminal?" }));
+    await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
+    await user.click(screen.getByRole("button", { name: "← Back to the app download" }));
+    // The app connects its own daemon. The never-used terminal record must NOT be auto-deleted —
+    // it stays visible in Local environments (as a never-checked-in record) and is separately
+    // deletable via the confirmed Delete-record path. Auto-deleting would race a still-running copied
+    // command and could fail silently (Anton/Juan ruling).
+    const appDaemon: Daemon = { ...daemonFixtures.justSeen, id: "daemon_app_new" };
+    rerender(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[terminalDaemon, appDaemon]} onClose={vi.fn()} onDone={vi.fn()} />);
+    expect(screen.getByText("Connected. You can create an agent now.")).toBeTruthy();
+    expect(deleteDaemon).not.toHaveBeenCalled();
   });
 
   it("unknown UA: neutral chooser, no faked default and no daemon created", () => {
