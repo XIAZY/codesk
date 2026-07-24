@@ -186,8 +186,16 @@ export function DocumentSurface({
           drawSelection(),
           bracketMatching(),
           highlightSelectionMatches(),
-          ...(enableMarkdownLivePreview ? [markdown({ base: markdownLanguage }), nottyMarkdownLivePreview()] : []),
-          syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+          // When live preview is on it is the SINGLE styler of the markdown grammar
+          // (headings, list markers, emphasis…). defaultHighlightStyle must not also colour
+          // those same tokens underneath the decorations — syntax highlighting and decorations
+          // are separate CodeMirror layers and don't suppress each other, so running both
+          // double-styles the grammar (grey-over-underlined headings, dash showing under the
+          // bullet). No codeLanguages are configured, so it adds nothing for code-fence content
+          // in this mode. It stays for the plain (non-live-preview) editor.
+          ...(enableMarkdownLivePreview
+            ? [markdown({ base: markdownLanguage }), nottyMarkdownLivePreview()]
+            : [syntaxHighlighting(defaultHighlightStyle, { fallback: true })]),
           threadDecorationField,
           editorTheme,
           documentPaneTheme,
