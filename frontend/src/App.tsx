@@ -4407,9 +4407,11 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
   const [token, setToken] = useState("");
   const [daemonId, setDaemonId] = useState("");
   const [createStatus, setCreateStatus] = useState<"idle" | "preparing" | "ready" | "unconfirmed">("idle");
-  // Single-fire guard: the terminal daemon is created AT MOST ONCE per modal, and a successful
-  // creation survives Back / platform switches (a real server-side resource must never be orphaned
-  // or duplicated by a second POST). Reset only on genuine failure, to allow an explicit retry.
+  // Single-fire guard: the terminal daemon is created AT MOST ONCE per modal. POST /daemons is
+  // non-idempotent with no request key, so this guard MUST survive BOTH success and an ambiguous
+  // failure for the modal's lifetime — it is only ever set true, NEVER reset. Resetting it would let
+  // re-entry after a failure (Back / platform switch → return) issue a second POST and duplicate the
+  // record; the failure settles into the unconfirmed state with no retry instead.
   const createStartedRef = useRef(false);
   // Snapshot ALL daemon ids at open (not only the online ones) so detection recognizes a genuinely
   // NEW record — the desktop app's own daemon, or this modal's terminal daemon, both created after
@@ -4432,8 +4434,9 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
 
   // Provision the terminal daemon (token + install command). Fires only when the terminal panel is
   // active — a deliberate "Rather use the terminal?" on mac/win, or Linux's native path — never on
-  // the download main path or a bare open. Owns its Preparing/Ready/Failed state; a successful
-  // result is kept even if the user navigates away, and a failure allows an explicit retry.
+  // the download main path or a bare open. Owns its Preparing/Ready/unconfirmed state; a successful
+  // result is kept even if the user navigates away, and an AMBIGUOUS failure settles into the
+  // unconfirmed state with NO retry — the guard stays set (never reset) so re-entry cannot duplicate.
   const runTerminalCreate = useCallback(async () => {
     if (createStartedRef.current) return;
     createStartedRef.current = true;
