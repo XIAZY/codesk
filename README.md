@@ -1619,12 +1619,26 @@ Every releasable component has one local build command and one deploy command:
 | Frontend and homepage | `make frontend-build` | `make frontend-deploy` |
 | Backend image and service | `make backend-build` | `make backend-deploy` |
 
-All commands read the canonical release version from the root `VERSION` file.
+`make macos-gui-deploy` signs and notarizes by default. To explicitly publish
+an unsigned construction-only desktop build, use
+`ALLOW_UNSIGNED_MACOS_DESKTOP=1 make macos-gui-deploy`; the uploaded manifest
+records `signed_and_notarized=false` and provides no Apple trust evidence.
+macOS desktop builds and deploys permit tracked, staged, and untracked
+working-tree changes; manifest provenance continues to record the checkout's
+current `HEAD` commit.
+
+Daemon-family commands, including the macOS and Windows desktop apps, read the
+canonical release version from the root `DAEMON_VERSION` file. Frontend
+commands do not use a release version, and backend Docker images use the
+checked-out commit as `backend-<short-git-sha>`.
 The three platform build targets are focused local helpers and never publish.
 `make daemon-deploy` rebuilds all six OS/architecture archives sequentially,
 preflights one complete staged snapshot, uploads it under
-`/daemons/<VERSION>`, and advances `/daemons/latest/manifest.json` only after
-the immutable version directory is complete. Unix archives are
+`/daemons/<DAEMON_VERSION>`, and advances `/daemons/latest/manifest.json` only after
+the version directory is complete. Re-running the deploy for the current
+version replaces that daemon version in R2, so daemon version objects use a
+short cache lifetime and both installers add a unique cache-busting query to
+every download. Unix archives are
 `.tar.gz`; Windows archives are `.zip` files containing both `notty-daemon` and
 `notty-agent-tool` plus `run-windows.ps1`. The stable installer entrypoints and
 versioned releases remain directly under `/daemons/`, matching the existing
@@ -1644,7 +1658,7 @@ MSIs.
 
 Non-secret deployment defaults are split by consumer:
 
-- `deploy/env/prod.deploy.env`: local deploy-machine defaults for Docker image tags, R2 publishing, static build origins, SSH host, and remote directory.
+- `deploy/env/prod.deploy.env`: local deploy-machine defaults for Docker builds, R2 publishing, static build origins, SSH host, and remote directory.
 - `deploy/env/prod.server.env`: production backend runtime defaults copied to `/opt/notty/notty.server.env`.
 - `deploy/env/dev.server.env`: local Docker Compose defaults for the development server.
 - `secrets.env`: git-ignored local Docker Compose secrets. On production, keep the same file name at `/opt/notty/secrets.env`.
@@ -1673,11 +1687,12 @@ Current static routing uses separate R2 buckets:
 
 `scripts/upload-r2.sh` is the shared R2 uploader used by every static deploy.
 Frontend roots stay in their dedicated buckets, daemon artifacts use
-`daemons/<VERSION>`, and desktop releases use `desktop/{macos,windows}`.
-Immutable version directories are uploaded before their short-cache
-`latest/manifest.json` pointer.
+`daemons/<DAEMON_VERSION>`, and desktop releases use `desktop/{macos,windows}`.
+Replaceable daemon version directories and immutable desktop version
+directories are uploaded before their short-cache `latest/manifest.json`
+pointers.
 
-Production backend deployment uses `compose.prod.yml`. The remote server should keep `/opt/notty/secrets.env` outside git with only secrets such as `NOTTY_DATABASE_URL`, `NOTTY_JWT_SECRET`, and `NOTTY_MAILGUN_API_KEY`. `scripts/deploy-backend.sh` calls `scripts/push-backend-image.sh` to build and push `alphatoad/notty:backend-<version>`, uploads `compose.prod.yml`, `deploy/env/prod.server.env`, and the Compose-mounted nginx config to SSH host `notty`, then restarts the production Compose stack:
+Production backend deployment uses `compose.prod.yml`. The remote server should keep `/opt/notty/secrets.env` outside git with only secrets such as `NOTTY_DATABASE_URL`, `NOTTY_JWT_SECRET`, and `NOTTY_MAILGUN_API_KEY`. `scripts/deploy-backend.sh` resolves the checked-out Git commit, calls `scripts/push-backend-image.sh` to build and push `alphatoad/notty:backend-<short-git-sha>`, uploads `compose.prod.yml`, `deploy/env/prod.server.env`, and the Compose-mounted nginx config to SSH host `notty`, then restarts the production Compose stack with that exact image. This backend flow does not read the repository `DAEMON_VERSION` file:
 
 ```sh
 make backend-deploy
@@ -1704,7 +1719,7 @@ NOTTY_MAILGUN_API_KEY=replace-with-mailgun-api-key
 
 Important backend environment variables:
 
-- `NOTTY_BACKEND_IMAGE`: required by production Compose. `scripts/deploy-backend.sh` sets this to the immutable `backend-<version>` image; direct Compose users must export it explicitly.
+- `NOTTY_BACKEND_IMAGE`: required by production Compose. `scripts/deploy-backend.sh` sets this to the commit-addressed `backend-<short-git-sha>` image; direct Compose users must export it explicitly.
 - `NOTTY_PORT`: backend port, default `8080`.
 - `NOTTY_DATABASE_URL`: Postgres DSN.
 - `NOTTY_JWT_SECRET`: required JWT signing secret.

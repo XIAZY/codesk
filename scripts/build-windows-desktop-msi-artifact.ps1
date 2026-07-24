@@ -377,7 +377,7 @@ foreach ($path in @(
 
 $buildMode = if ($PSCmdlet.ParameterSetName -ceq 'Release') { 'release' } else { 'test-only-upgrade-qa' }
 if ($buildMode -ceq 'release') {
-    $ProductVersion = & (Join-Path $scriptRoot 'read-version.ps1')
+    $ProductVersion = & (Join-Path $scriptRoot 'read-daemon-version.ps1')
     $productCodeName = "$ProductVersion+$GoArchitecture"
     $versions = @(
         [pscustomobject] @{

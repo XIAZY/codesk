@@ -8,8 +8,8 @@ root_dir="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
 . "$root_dir/scripts/lib/testtmp.sh"
 load_notty_deploy_env "$root_dir"
 
-version="$("$root_dir/scripts/read-version.sh")"
 target="${UPLOAD_TARGET:-}"
+version=
 static_dist_dir="${STATIC_DIST_DIR:-$root_dir/dist/static}"
 daemon_dist_root="${DAEMON_DIST_ROOT:-$static_dist_dir/daemons}"
 macos_gui_dist_dir="${MACOS_GUI_DIST_DIR:-$root_dir/dist/macos-desktop}"
@@ -364,10 +364,15 @@ guard_versioned_release() {
 	guard_ledger_key="$3"
 	guard_latest_key="$4"
 	guard_candidate_manifest="$5"
+	guard_conflict_policy="$6"
 	guard_remote_ledger="$tmp_dir/$guard_label.remote-version-manifest.json"
 	guard_remote_latest="$tmp_dir/$guard_label.remote-latest-manifest.json"
 	guard_ledger_state=missing
 	guard_latest_state=missing
+	case "$guard_conflict_policy" in
+		deny|replace-current) ;;
+		*) die "$guard_label conflict policy is invalid: $guard_conflict_policy" ;;
+	esac
 	guard_candidate_version="$(publication_manifest_version "$guard_candidate_manifest")" ||
 		die "$guard_label candidate manifest version is invalid or ambiguous"
 	[ "$guard_candidate_version" = "$version" ] ||
@@ -389,9 +394,6 @@ guard_versioned_release() {
 		guard_download_status="$?"
 		[ "$guard_download_status" -eq 1 ] || die "$guard_label remote latest manifest could not be read"
 	fi
-
-	[ "$guard_ledger_state" != conflict ] ||
-		die "$guard_label release $version is already published with a different manifest"
 
 	if [ "$guard_latest_state" = present ]; then
 		guard_latest_version="$(publication_manifest_version "$guard_remote_latest")" ||
@@ -417,11 +419,19 @@ guard_versioned_release() {
 				die "$guard_label latest names release $version with a different manifest"
 			publication_state=already-current
 			;;
+		conflict:equal)
+			[ "$guard_conflict_policy" = replace-current ] ||
+				die "$guard_label release $version is already published with a different manifest"
+			publication_state=replace-current
+			;;
 		missing:equal)
 			die "$guard_label latest names release $version but its version ledger is missing"
 			;;
 		missing:newer|identical:newer)
 			die "$guard_label release $version would move latest backward from $guard_latest_version"
+			;;
+		conflict:*)
+			die "$guard_label release $version is already published with a different manifest"
 			;;
 		*) die "$guard_label publication state is invalid: $guard_ledger_state:$guard_latest_state" ;;
 	esac
@@ -506,9 +516,11 @@ case "$target" in
 		need R2_APP_BUCKET
 		;;
 	daemon)
+		version="$("$root_dir/scripts/read-daemon-version.sh")"
 		need R2_DAEMONS_BUCKET
 		;;
 	macos-gui|windows-gui)
+		version="$("$root_dir/scripts/read-daemon-version.sh")"
 		need R2_DESKTOP_BUCKET
 		;;
 esac
@@ -527,6 +539,7 @@ else
 fi
 
 release_cache_control="${RELEASE_CACHE_CONTROL:-public, max-age=31536000, immutable}"
+daemon_release_cache_control="${DAEMON_RELEASE_CACHE_CONTROL:-public, max-age=60}"
 latest_cache_control="${LATEST_CACHE_CONTROL:-public, max-age=60}"
 
 if [ "$target" = frontend ]; then
@@ -555,12 +568,16 @@ if [ "$target" = daemon ]; then
 	daemon_prefix="$(strip_prefix_slashes "${R2_DAEMONS_PREFIX:-daemons}")"
 	guard_versioned_release daemon "$R2_DAEMONS_BUCKET" \
 		"$daemon_prefix/$version/manifest.json" "$daemon_prefix/latest/manifest.json" \
-		"$daemon_staged_dir/manifest.json"
+		"$daemon_staged_dir/manifest.json" replace-current
 
-	if [ "$publication_state" = fresh-publish ]; then
-		printf 'Uploading complete daemon release %s to %s\n' "$version" "$(s3_uri "$R2_DAEMONS_BUCKET" "$daemon_prefix/$version")"
+	if [ "$publication_state" = fresh-publish ] || [ "$publication_state" = replace-current ]; then
+		if [ "$publication_state" = replace-current ]; then
+			printf 'Replacing daemon release %s in %s\n' "$version" "$(s3_uri "$R2_DAEMONS_BUCKET" "$daemon_prefix/$version")"
+		else
+			printf 'Uploading complete daemon release %s to %s\n' "$version" "$(s3_uri "$R2_DAEMONS_BUCKET" "$daemon_prefix/$version")"
+		fi
 		upload_committed_release_dir "$daemon_staged_dir" "$R2_DAEMONS_BUCKET" \
-			"$daemon_prefix/$version" "$release_cache_control"
+			"$daemon_prefix/$version" "$daemon_release_cache_control"
 	fi
 
 	for installer in install.sh uninstall.sh install.ps1 uninstall.ps1; do
@@ -579,7 +596,7 @@ if [ "$target" = macos-gui ]; then
 	need_file "$version_dir/SHA256SUMS"
 	guard_versioned_release macos-gui "$R2_DESKTOP_BUCKET" \
 		"$macos_gui_prefix/$version/manifest.json" "$macos_gui_prefix/latest/manifest.json" \
-		"$version_dir/manifest.json"
+		"$version_dir/manifest.json" deny
 
 	if [ "$publication_state" = fresh-publish ]; then
 		printf 'Uploading macOS GUI release %s to %s\n' "$version" "$(s3_uri "$R2_DESKTOP_BUCKET" "$macos_gui_prefix/$version")"
@@ -647,7 +664,7 @@ if [ "$target" = windows-gui ]; then
 	printf '\n  ]\n}\n' >>"$manifest"
 	guard_versioned_release windows-gui "$R2_DESKTOP_BUCKET" \
 		"$windows_gui_prefix/$version/manifest.json" "$windows_gui_prefix/latest/manifest.json" \
-		"$manifest"
+		"$manifest" deny
 
 	if [ "$publication_state" = fresh-publish ]; then
 		for arch in amd64 arm64; do
@@ -663,4 +680,8 @@ if [ "$target" = windows-gui ]; then
 	printf 'Uploaded Windows GUI release %s to %s\n' "$version" "$(s3_uri "$R2_DESKTOP_BUCKET" "$windows_gui_prefix/$version")"
 fi
 
-printf 'Uploaded %s assets for %s\n' "$target" "$version"
+if [ "$target" = frontend ]; then
+	printf 'Uploaded frontend assets\n'
+else
+	printf 'Uploaded %s assets for %s\n' "$target" "$version"
+fi

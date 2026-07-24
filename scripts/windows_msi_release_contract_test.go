@@ -179,13 +179,13 @@ func TestWindowsGUIDeployRejectsArchitectureSubset(t *testing.T) {
 	}
 }
 
-func TestPowerShellVersionReaderSourceContract(t *testing.T) {
-	data, err := os.ReadFile("read-version.ps1")
+func TestPowerShellDaemonVersionReaderSourceContract(t *testing.T) {
+	data, err := os.ReadFile("read-daemon-version.ps1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	source := normalizeSourceNewlines(string(data))
-	if err := checkPowerShellVersionReaderSource(source); err != nil {
+	if err := checkPowerShellDaemonVersionReaderSource(source); err != nil {
 		t.Fatal(err)
 	}
 	mutations := []struct{ name, old, new string }{
@@ -206,7 +206,7 @@ func TestPowerShellVersionReaderSourceContract(t *testing.T) {
 				t.Fatalf("mutation source count for %q is not one", mutation.old)
 			}
 			mutated := strings.Replace(source, mutation.old, mutation.new, 1)
-			if err := checkPowerShellVersionReaderSource(mutated); err == nil {
+			if err := checkPowerShellDaemonVersionReaderSource(mutated); err == nil {
 				t.Fatal("PowerShell reader mutation survived")
 			}
 		})
@@ -715,7 +715,7 @@ func TestWindowsDesktopPayloadSourceContract(t *testing.T) {
 		{name: "test output may contain payload", old: `case "$test_dir" in`, new: `case "$safe_parent" in`},
 		{name: "stale tests retained", old: `rm -rf "$payload_dir" "$test_dir"`, new: `rm -rf "$payload_dir"`},
 		{name: "Zig pin floated", old: `required_zig_version="${WINDOWS_GUI_ZIG_VERSION:-0.16.0}"`, new: `required_zig_version="$(zig version)"`},
-		{name: "shared VERSION reader bypassed", old: `build_version="$("$root_dir/scripts/read-version.sh")"`, new: `build_version="$(cat "$root_dir/VERSION")"`},
+		{name: "shared DAEMON_VERSION reader bypassed", old: `build_version="$("$root_dir/scripts/read-daemon-version.sh")"`, new: `build_version="$(cat "$root_dir/DAEMON_VERSION")"`},
 		{name: "GUI subsystem dropped", old: `-ldflags="-H=windowsgui -extldflags=-Wl,--subsystem,windows -X notty/daemon/internal/buildinfo.Version=$build_version"`, new: `-ldflags="-s -w"`},
 		{name: "agent payload omitted", old: `-o "$arch_payload_dir/notty-agent-tool.exe" ./daemon/cmd/agenttool`, new: `-o "$arch_payload_dir/notty-agent-tool.exe" ./daemon/cmd/codesk-desktop`},
 		{name: "cross build not marked as touching host yffi", old: `yffi_touched=1`, new: `yffi_touched=0`},
@@ -849,11 +849,11 @@ $capture = [Environment]::GetEnvironmentVariable('WINDOWS_GUI_CAPTURE', 'Process
 		if err := os.MkdirAll(filepath.Join(tempDir, "scripts"), 0o755); err != nil {
 			return err
 		}
-		reader, err := os.ReadFile("read-version.ps1")
+		reader, err := os.ReadFile("read-daemon-version.ps1")
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(tempDir, "scripts", "read-version.ps1"), reader, 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(tempDir, "scripts", "read-daemon-version.ps1"), reader, 0o600); err != nil {
 			return err
 		}
 		commandDirectory = tempDir
@@ -865,7 +865,7 @@ $capture = [Environment]::GetEnvironmentVariable('WINDOWS_GUI_CAPTURE', 'Process
 		if err := writeExecutable(filepath.Join(binDir, "powershell.exe"), `#!/bin/sh
 : "${WINDOWS_GUI_CAPTURE:?}"
 case "$*" in
-  *read-version.ps1*) printf '%s\n' '0.0.1'; exit 0 ;;
+  *read-daemon-version.ps1*) printf '%s\n' '0.0.1'; exit 0 ;;
 esac
 : >"$WINDOWS_GUI_CAPTURE"
 for argument in "$@"; do
@@ -879,7 +879,7 @@ done
 	if err := os.WriteFile(makePath, []byte(makeSource), 0o600); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(tempDir, "VERSION"), []byte("0.0.1\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(tempDir, "DAEMON_VERSION"), []byte("0.0.1\n"), 0o644); err != nil {
 		return err
 	}
 	capturePath := filepath.Join(tempDir, "powershell.args")
@@ -984,18 +984,18 @@ func runWindowsPayloadYffiFixture(source string, preexisting, failGo bool) error
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(root, "VERSION"), []byte("0.0.1\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "DAEMON_VERSION"), []byte("0.0.1\n"), 0o644); err != nil {
 		return err
 	}
 	payloadScript := filepath.Join(scriptsDir, "build-windows-desktop-payloads.sh")
 	if err := writeExecutable(payloadScript, source); err != nil {
 		return err
 	}
-	reader, err := os.ReadFile("read-version.sh")
+	reader, err := os.ReadFile("read-daemon-version.sh")
 	if err != nil {
 		return err
 	}
-	if err := writeExecutable(filepath.Join(scriptsDir, "read-version.sh"), string(reader)); err != nil {
+	if err := writeExecutable(filepath.Join(scriptsDir, "read-daemon-version.sh"), string(reader)); err != nil {
 		return err
 	}
 	if err := writeExecutable(filepath.Join(scriptsDir, "build-yffi.sh"), `#!/bin/sh
@@ -1189,9 +1189,9 @@ func checkWindowsDesktopPayloadSource(source string) error {
 		"set -eu":         1,
 		"set -f":          1,
 		`/*|[A-Za-z]:/*)`: 1,
-		`required_zig_version="${WINDOWS_GUI_ZIG_VERSION:-0.16.0}"`: 1,
-		`[ "$actual_zig_version" = "$required_zig_version" ]`:       1,
-		`build_version="$("$root_dir/scripts/read-version.sh")"`:    1,
+		`required_zig_version="${WINDOWS_GUI_ZIG_VERSION:-0.16.0}"`:     1,
+		`[ "$actual_zig_version" = "$required_zig_version" ]`:           1,
+		`build_version="$("$root_dir/scripts/read-daemon-version.sh")"`: 1,
 		`[ ! -L "$path" ]`:                              1,
 		`case "$payload_dir/" in`:                       1,
 		`case "$test_dir/" in`:                          1,
@@ -1233,31 +1233,33 @@ func checkWindowsDesktopPayloadSource(source string) error {
 	return nil
 }
 
-func checkPowerShellVersionReaderSource(source string) error {
+func checkPowerShellDaemonVersionReaderSource(source string) error {
 	for required, want := range map[string]int{
-		"param()":                                                         1,
-		"[System.IO.File]::ReadAllBytes":                                  1,
-		"$bytes[$bytes.Length - 1] -ne 10":                                1,
-		"$lineLength = $bytes.Length - 1":                                 1,
-		"$bytes[$lineLength - 1] -eq 13":                                  1,
-		"for ($index = 0; $index -lt $lineLength; $index++)":              1,
-		"$bytes[$index] -eq 10 -or $bytes[$index] -eq 13":                 1,
-		"[System.Text.Encoding]::ASCII.GetString($bytes, 0, $lineLength)": 1,
-		"^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$":           1,
-		"[uint32]::TryParse($fields[0]":                                   1,
-		"[uint32]::TryParse($fields[1]":                                   1,
-		"[uint32]::TryParse($fields[2]":                                   1,
-		"$major -gt 255":                                                  1,
-		"$minor -gt 255":                                                  1,
-		"$build -gt 65535":                                                1,
+		"param()": 1,
+		"$versionFile = Join-Path (Split-Path -Parent $PSScriptRoot) 'DAEMON_VERSION'": 1,
+		"DAEMON_VERSION must be a regular file":                                        1,
+		"[System.IO.File]::ReadAllBytes":                                               1,
+		"$bytes[$bytes.Length - 1] -ne 10":                                             1,
+		"$lineLength = $bytes.Length - 1":                                              1,
+		"$bytes[$lineLength - 1] -eq 13":                                               1,
+		"for ($index = 0; $index -lt $lineLength; $index++)":                           1,
+		"$bytes[$index] -eq 10 -or $bytes[$index] -eq 13":                              1,
+		"[System.Text.Encoding]::ASCII.GetString($bytes, 0, $lineLength)":              1,
+		"^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$":                        1,
+		"[uint32]::TryParse($fields[0]":                                                1,
+		"[uint32]::TryParse($fields[1]":                                                1,
+		"[uint32]::TryParse($fields[2]":                                                1,
+		"$major -gt 255":                                                               1,
+		"$minor -gt 255":                                                               1,
+		"$build -gt 65535":                                                             1,
 	} {
 		if got := strings.Count(source, required); got != want {
-			return fmt.Errorf("PowerShell VERSION reader source count for %q = %d, want %d", required, got, want)
+			return fmt.Errorf("PowerShell DAEMON_VERSION reader source count for %q = %d, want %d", required, got, want)
 		}
 	}
 	for _, forbidden := range []string{"Get-Content", "ReadAllText", "TotalCount", ".Trim()", "$env:", "git "} {
 		if strings.Contains(source, forbidden) {
-			return fmt.Errorf("PowerShell VERSION reader contains forbidden fallback %q", forbidden)
+			return fmt.Errorf("PowerShell DAEMON_VERSION reader contains forbidden fallback %q", forbidden)
 		}
 	}
 	return nil
@@ -1341,7 +1343,7 @@ func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) er
 		"[switch] $Release":           1,
 		"[switch] $TestOnlyUpgradeQa": 1,
 		"$ProductCodeNamespace = [guid] '55A27873-BF9C-5DC3-AA8B-9D6F996041EF'":                                     1,
-		"$ProductVersion = & (Join-Path $scriptRoot 'read-version.ps1')":                                            1,
+		"$ProductVersion = & (Join-Path $scriptRoot 'read-daemon-version.ps1')":                                     1,
 		"$productCodeName = \"$ProductVersion+$GoArchitecture\"":                                                    1,
 		"Get-UuidV5 -Namespace $ProductCodeNamespace -Name $productCodeName":                                        1,
 		"[System.Text.Encoding]::UTF8.GetBytes($Name)":                                                              1,
@@ -1383,7 +1385,7 @@ func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) er
 		"scripts/build-windows-desktop-payloads.sh":                                      1,
 		"scripts/build-windows-desktop-msi-artifact.ps1":                                 1,
 		"local/scripts/run-windows-gui-target.ps1@$head":                                 1,
-		"$version = & (Join-Path $root 'scripts/read-version.ps1')":                      1,
+		"$version = & (Join-Path $root 'scripts/read-daemon-version.ps1')":               1,
 		"Release = $true":    1,
 		"$item.Length -le 0": 1,
 		"Assert-ExactArchitectureDirectories -Directory $PayloadDirectory -Architectures $SelectedArchitectures": 1,
@@ -1407,18 +1409,18 @@ func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) er
 		return fmt.Errorf("Windows GUI orchestrator contains a shell-style line continuation")
 	}
 	for source, want := range map[string]int{
-		"ifeq ($(OS),Windows_NT)":                                         2,
-		"override REPOSITORY_VERSION := $(shell":                          2,
-		"-File scripts/read-version.ps1)":                                 1,
-		"override REPOSITORY_VERSION := $(shell scripts/read-version.sh)": 1,
-		"WINDOWS_PROCESSOR_ARCH :=":                                       1,
-		"override MACOS_GUI_HOST_OS :=":                                   2,
-		`if [ "$(MACOS_GUI_HOST_OS)" != darwin ]; then`:                   2,
-		"-File make.ps1":                                                  4,
-		"WINDOWS_GUI_BUILDER_IMAGE ?= alphatoad/notty:windows-builder":    1,
-		`"WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"`:        2,
-		"-File make.ps1 windows-gui-build":                                1,
-		"-File make.ps1 windows-gui-deploy":                               1,
+		"ifeq ($(OS),Windows_NT)":                                                      2,
+		"override REPOSITORY_DAEMON_VERSION = $(shell":                                 2,
+		"-File scripts/read-daemon-version.ps1)":                                       1,
+		"override REPOSITORY_DAEMON_VERSION = $(shell scripts/read-daemon-version.sh)": 1,
+		"WINDOWS_PROCESSOR_ARCH :=":                                                    1,
+		"override MACOS_GUI_HOST_OS :=":                                                2,
+		`if [ "$(MACOS_GUI_HOST_OS)" != darwin ]; then`:                                2,
+		"-File make.ps1":                                                               4,
+		"WINDOWS_GUI_BUILDER_IMAGE ?= alphatoad/notty:windows-builder":                 1,
+		`"WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"`:                     2,
+		"-File make.ps1 windows-gui-build":                                             1,
+		"-File make.ps1 windows-gui-deploy":                                            1,
 	} {
 		if got := strings.Count(makefile, source); got != want {
 			return fmt.Errorf("Windows GUI Make source count for %q = %d, want %d", source, got, want)
@@ -1444,7 +1446,7 @@ func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) er
 		"'WINDOWS_GUI_REPOSITORY'":                                         6,
 		"macos-gui-build requires a real macOS host; no GUI was built":     1,
 		"macos-gui-deploy requires a real macOS host; no GUI was deployed": 1,
-		"scripts/read-version.ps1":                                         1,
+		"scripts/read-daemon-version.ps1":                                  1,
 		"Invoke-WindowsGuiUpload":                                          2,
 		"$env:UPLOAD_TARGET = 'windows-gui'":                               1,
 	} {

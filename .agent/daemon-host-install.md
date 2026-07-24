@@ -64,7 +64,7 @@ Users should be able to deploy a Notty daemon without cloning the repository or 
 
 ## Outcomes & Retrospective
 
-Implemented the host-native daemon deployment path. Release builders can set the canonical version in the root `VERSION` file, run `make daemon-release`, and serve `dist/daemons` from Nginx. Users creating a daemon in the frontend now receive a hosted installer command instead of a Docker Compose command. The installer supports Linux/macOS on amd64/arm64, checksum verification, workspace-scoped config, LaunchAgent/systemd user services, and a background-process fallback.
+Implemented the host-native daemon deployment path. Release builders can set the canonical version in the root `DAEMON_VERSION` file, run `make daemon-release`, and serve `dist/daemons` from Nginx. Users creating a daemon in the frontend now receive a hosted installer command instead of a Docker Compose command. The installer supports Linux/macOS on amd64/arm64, checksum verification, workspace-scoped config, LaunchAgent/systemd user services, and a background-process fallback.
 
 ## Context and Orientation
 
@@ -92,7 +92,7 @@ Observed:
     CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin/notty-daemon ./daemon/cmd/daemon
     CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin/notty-agent-tool ./daemon/cmd/agenttool
 
-Run `make daemon-release PLATFORMS=darwin/arm64` to verify packaging and static installer placement with the canonical root `VERSION`.
+Run `make daemon-release PLATFORMS=darwin/arm64` to verify packaging and static installer placement with the canonical root `DAEMON_VERSION`.
 
 Observed:
 

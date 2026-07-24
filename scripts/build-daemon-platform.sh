@@ -7,7 +7,7 @@ root_dir="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
 platform="$1"
 arches="${DAEMON_ARCHES:-amd64 arm64}"
 dist_root="${DAEMON_DIST_ROOT:-$root_dir/dist/static/daemons}"
-version="$("$root_dir/scripts/read-version.sh")"
+version="$("$root_dir/scripts/read-daemon-version.sh")"
 
 case "$platform" in
 	linux) goos=linux ;;

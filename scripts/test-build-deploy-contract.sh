@@ -9,13 +9,29 @@ trap 'rm -rf "$tmp_dir"' EXIT INT TERM
 pass() { printf 'PASS: %s\n' "$1"; }
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 
+crlf_deploy_env="$tmp_dir/crlf.deploy.env"
+printf '# Windows checkout\r\n\r\nCRLF_DEPLOY_VALUE=from-file\r\nCRLF_DEPLOY_EMPTY=\r\nCRLF_DEPLOY_PRESERVED=from-file\r\n' \
+	>"$crlf_deploy_env"
+unset CRLF_DEPLOY_VALUE CRLF_DEPLOY_EMPTY
+CRLF_DEPLOY_PRESERVED=from-process
+export CRLF_DEPLOY_PRESERVED
+. "$repo_dir/scripts/lib/deploy-env.sh"
+load_notty_env_file "$crlf_deploy_env"
+[ "$CRLF_DEPLOY_VALUE" = from-file ] || fail 'CRLF deploy env value was not loaded'
+[ "${CRLF_DEPLOY_EMPTY+x}" = x ] && [ -z "$CRLF_DEPLOY_EMPTY" ] ||
+	fail 'CRLF deploy env empty value was not loaded'
+[ "$CRLF_DEPLOY_PRESERVED" = from-process ] || fail 'CRLF deploy env replaced an existing value'
+unset CRLF_DEPLOY_VALUE CRLF_DEPLOY_EMPTY CRLF_DEPLOY_PRESERVED
+pass 'deploy env loader accepts CRLF records without changing precedence'
+
 target_count() {
 	awk -v target="$1" '$0 ~ ("^" target ":[[:space:]]*$") { count++ } END { print count + 0 }' "$repo_dir/Makefile"
 }
 
 for target in \
 	linux-daemon-build macos-daemon-build windows-daemon-build daemon-deploy \
-	frontend-build frontend-deploy backend-build backend-deploy
+	frontend-build frontend-deploy backend-build backend-deploy \
+	daemon-version-contract-check
 do
 	[ "$(target_count "$target")" -eq 1 ] || fail "$target must have exactly one Make definition"
 done
@@ -33,7 +49,8 @@ for target in \
 	build-frontend build-daemon build-static build-static-local build-backend-image \
 	static-build static-build-local static-publish backend-image \
 	publish publish-backend publish-frontend publish-static \
-	deploy-backend deploy-frontend deploy-static daemon-checksums
+	deploy-backend deploy-frontend deploy-static daemon-checksums \
+	version-contract-check
 do
 	[ "$(target_count "$target")" -eq 0 ] || fail "obsolete public Make target survived: $target"
 done
@@ -54,8 +71,8 @@ pass 'aggregate deploy is ordered and excludes desktop GUI'
 build_fixture="$tmp_dir/build-fixture"
 mkdir -p "$build_fixture/scripts" "$build_fixture/deploy/daemons"
 cp "$repo_dir/scripts/build-daemon-platform.sh" "$build_fixture/scripts/build-daemon-platform.sh"
-cp "$repo_dir/scripts/read-version.sh" "$build_fixture/scripts/read-version.sh"
-printf '1.2.3\n' >"$build_fixture/VERSION"
+cp "$repo_dir/scripts/read-daemon-version.sh" "$build_fixture/scripts/read-daemon-version.sh"
+printf '1.2.3\n' >"$build_fixture/DAEMON_VERSION"
 for installer in install.sh uninstall.sh install.ps1 uninstall.ps1; do
 	printf '%s\n' "$installer" >"$build_fixture/deploy/daemons/$installer"
 done
@@ -124,6 +141,70 @@ if "$build_fixture/scripts/deploy-daemon.sh" linux >/dev/null 2>&1; then
 	fail 'daemon deploy accepted a platform argument'
 fi
 pass 'one daemon deploy rebuilds all targets and publishes once without a platform selector'
+
+macos_deploy_fixture="$tmp_dir/macos-deploy-fixture"
+mkdir -p "$macos_deploy_fixture/scripts/lib"
+cp "$repo_dir/scripts/deploy-macos-gui.sh" "$macos_deploy_fixture/scripts/deploy-macos-gui.sh"
+cp "$repo_dir/scripts/read-daemon-version.sh" "$macos_deploy_fixture/scripts/read-daemon-version.sh"
+printf '1.2.3\n' >"$macos_deploy_fixture/DAEMON_VERSION"
+cat >"$macos_deploy_fixture/scripts/lib/deploy-env.sh" <<'FIXTURE'
+load_notty_deploy_env() { :; }
+FIXTURE
+cat >"$macos_deploy_fixture/scripts/build-macos-desktop-release.sh" <<'FIXTURE'
+#!/usr/bin/env sh
+set -eu
+printf 'build|%s|%s\n' "$1" "${ALLOW_UNSIGNED_MACOS_DESKTOP-unset}" >>"$MACOS_DEPLOY_LOG"
+FIXTURE
+cat >"$macos_deploy_fixture/scripts/upload-r2.sh" <<'FIXTURE'
+#!/usr/bin/env sh
+set -eu
+printf 'upload|%s|%s|%s\n' "$UPLOAD_TARGET" "$MACOS_GUI_DIST_DIR" \
+	"${ALLOW_UNSIGNED_MACOS_DESKTOP-unset}" >>"$MACOS_DEPLOY_LOG"
+FIXTURE
+chmod +x "$macos_deploy_fixture/scripts/"*.sh
+macos_deploy_dist="$tmp_dir/macos-deploy-dist"
+macos_deploy_log="$tmp_dir/macos-deploy.log"
+
+unset ALLOW_UNSIGNED_MACOS_DESKTOP
+: >"$macos_deploy_log"
+MACOS_DEPLOY_LOG="$macos_deploy_log" MACOS_GUI_DIST_DIR="$macos_deploy_dist" \
+	"$macos_deploy_fixture/scripts/deploy-macos-gui.sh" >"$tmp_dir/macos-signed-deploy.output" 2>&1
+want_macos_signed_routes="$(cat <<ROUTES
+build|$macos_deploy_dist|unset
+upload|macos-gui|$macos_deploy_dist|unset
+ROUTES
+)"
+[ "$(cat "$macos_deploy_log")" = "$want_macos_signed_routes" ] ||
+	fail 'default macOS GUI deploy did not preserve signed mode through build and upload'
+grep -Fq 'Building signed and notarized macOS GUI release 1.2.3' \
+	"$tmp_dir/macos-signed-deploy.output" || fail 'signed macOS GUI deploy did not report its mode'
+
+: >"$macos_deploy_log"
+ALLOW_UNSIGNED_MACOS_DESKTOP=1 MACOS_DEPLOY_LOG="$macos_deploy_log" \
+	MACOS_GUI_DIST_DIR="$macos_deploy_dist" \
+	"$macos_deploy_fixture/scripts/deploy-macos-gui.sh" >"$tmp_dir/macos-unsigned-deploy.output" 2>&1
+want_macos_unsigned_routes="$(cat <<ROUTES
+build|$macos_deploy_dist|1
+upload|macos-gui|$macos_deploy_dist|1
+ROUTES
+)"
+[ "$(cat "$macos_deploy_log")" = "$want_macos_unsigned_routes" ] ||
+	fail 'unsigned macOS GUI deploy did not propagate its explicit opt-in'
+grep -Fq 'WARNING: publishing without signing, notarization, stapling, or Gatekeeper trust' \
+	"$tmp_dir/macos-unsigned-deploy.output" || fail 'unsigned macOS GUI deploy did not report its missing trust evidence'
+grep -Fq 'macOS GUI deploy complete: 1.2.3 (UNSIGNED construction-only)' \
+	"$tmp_dir/macos-unsigned-deploy.output" || fail 'unsigned macOS GUI deploy did not label its completion'
+
+: >"$macos_deploy_log"
+if ALLOW_UNSIGNED_MACOS_DESKTOP=yes MACOS_DEPLOY_LOG="$macos_deploy_log" \
+	MACOS_GUI_DIST_DIR="$macos_deploy_dist" \
+	"$macos_deploy_fixture/scripts/deploy-macos-gui.sh" >"$tmp_dir/macos-invalid-deploy.output" 2>&1; then
+	fail 'macOS GUI deploy accepted a non-canonical unsigned override'
+fi
+[ ! -s "$macos_deploy_log" ] || fail 'invalid unsigned override reached macOS build or upload work'
+grep -Fq 'ALLOW_UNSIGNED_MACOS_DESKTOP must be unset or exactly 1' \
+	"$tmp_dir/macos-invalid-deploy.output" || fail 'invalid unsigned override failed without guidance'
+pass 'macOS GUI deploy defaults to signed mode and permits one explicit unsigned publication mode'
 
 fake_bin="$tmp_dir/bin"
 mkdir -p "$fake_bin"
@@ -793,14 +874,53 @@ daemon_conflict_dist="$tmp_dir/daemon-same-version-conflict"
 write_daemon_release "$daemon_conflict_dist" 0.0.1 changed
 daemon_conflict_log="$tmp_dir/daemon-same-version-conflict.aws.log"
 : >"$daemon_conflict_log"
-if PATH="$fake_bin:$PATH" AWS_LOG="$daemon_conflict_log" AWS_REMOTE_LATEST="$daemon_remote_latest" \
+PATH="$fake_bin:$PATH" AWS_LOG="$daemon_conflict_log" AWS_REMOTE_LATEST="$daemon_remote_latest" \
 	AWS_REMOTE_LEDGER="$daemon_remote_latest" \
 	DAEMON_DIST_ROOT="$daemon_conflict_dist" UPLOAD_TARGET=daemon \
 	R2_ENDPOINT_URL=https://example.invalid R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
-	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/daemon-same-version-conflict.output" 2>&1; then
-	fail 'daemon deploy rewrote an already-published version'
-fi
-[ "$(aws_write_count "$daemon_conflict_log")" -eq 0 ] || fail 'conflicting daemon redeploy wrote before failing'
+	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/daemon-same-version-conflict.output"
+[ "$(aws_write_count "$daemon_conflict_log" "$daemon_version_uri")" -eq 8 ] ||
+	fail 'same-version daemon replacement did not rewrite every version object'
+[ "$(aws_write_count "$daemon_conflict_log" "$daemon_latest_uri")" -eq 1 ] ||
+	fail 'same-version daemon replacement did not commit latest exactly once'
+grep -Fq 'Replacing daemon release 0.0.1' "$tmp_dir/daemon-same-version-conflict.output" ||
+	fail 'same-version daemon replacement did not report replacement mode'
+grep -F "$daemon_version_uri" "$daemon_conflict_log" | grep -Fq -- '--cache-control public, max-age=60' ||
+	fail 'replaceable daemon version objects retained immutable cache metadata'
+daemon_conflict_ledger_line="$(aws_first_write_line "$daemon_conflict_log" "$daemon_ledger_uri")"
+daemon_conflict_latest_line="$(aws_first_write_line "$daemon_conflict_log" "$daemon_latest_uri")"
+for daemon_conflict_payload_name in \
+	SHA256SUMS \
+	notty-daemon_0.0.1_linux_amd64.tar.gz \
+	notty-daemon_0.0.1_linux_arm64.tar.gz \
+	notty-daemon_0.0.1_darwin_amd64.tar.gz \
+	notty-daemon_0.0.1_darwin_arm64.tar.gz \
+	notty-daemon_0.0.1_windows_amd64.zip \
+	notty-daemon_0.0.1_windows_arm64.zip
+do
+	daemon_conflict_payload_line="$(aws_first_write_line "$daemon_conflict_log" "$daemon_version_uri$daemon_conflict_payload_name")"
+	[ "$daemon_conflict_payload_line" -lt "$daemon_conflict_ledger_line" ] ||
+		fail "same-version daemon replacement committed its ledger before $daemon_conflict_payload_name"
+done
+[ "$daemon_conflict_ledger_line" -lt "$daemon_conflict_latest_line" ] ||
+	fail 'same-version daemon replacement committed latest before its version ledger'
+
+daemon_conflict_wrangler_log="$tmp_dir/daemon-same-version-conflict.wrangler.log"
+: >"$daemon_conflict_wrangler_log"
+PATH="$fake_bin:$PATH" R2_ENDPOINT_URL= CLOUDFLARE_API_TOKEN=test CLOUDFLARE_ACCOUNT_ID=test \
+	WRANGLER_LOG="$daemon_conflict_wrangler_log" WRANGLER_REMOTE_LATEST="$daemon_remote_latest" \
+	WRANGLER_REMOTE_LEDGER="$daemon_remote_latest" \
+	DAEMON_DIST_ROOT="$daemon_conflict_dist" UPLOAD_TARGET=daemon \
+	R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
+	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/daemon-same-version-conflict-wrangler.output"
+[ "$(wrangler_put_count "$daemon_conflict_wrangler_log" 'static/daemons/0.0.1/')" -eq 8 ] ||
+	fail 'Wrangler same-version daemon replacement did not rewrite every version object'
+[ "$(wrangler_put_count "$daemon_conflict_wrangler_log" 'static/daemons/latest/manifest.json')" -eq 1 ] ||
+	fail 'Wrangler same-version daemon replacement did not commit latest exactly once'
+grep -F 'r2 object put static/daemons/0.0.1/' "$daemon_conflict_wrangler_log" |
+	grep -Fq -- '--cache-control public, max-age=60 --force' ||
+	fail 'Wrangler daemon replacement did not use short-cache forced PUTs'
+pass 'same-version daemon rebuild replaces R2 payloads and commits manifests in order'
 
 daemon_older_dist="$tmp_dir/daemon-older-release"
 write_daemon_release "$daemon_older_dist" 0.0.0 old
@@ -862,7 +982,7 @@ expect_daemon_publication_failure daemon-pointer-conflict \
 	"$daemon_dist" "$daemon_conflict_dist/0.0.1/manifest.json" "$daemon_remote_latest"
 expect_daemon_publication_failure daemon-historical-rewrite \
 	"$daemon_conflict_dist" "$daemon_older_latest" "$daemon_remote_latest"
-pass 'daemon ledger/pointer matrix preserves fresh publish, no-op, forward completion, and every fail-closed state'
+pass 'daemon ledger/pointer matrix preserves fresh publish, no-op, current replacement, forward completion, and fail-closed historical states'
 
 daemon_read_failure_log="$tmp_dir/daemon-latest-read-failure.aws.log"
 : >"$daemon_read_failure_log"
@@ -884,7 +1004,7 @@ if PATH="$fake_bin:$PATH" AWS_LOG="$daemon_payload_failure_log" AWS_FAIL_VERSION
 fi
 [ "$(aws_write_count "$daemon_payload_failure_log" "$daemon_latest_uri")" -eq 0 ] ||
 	fail 'daemon deploy advanced latest after an immutable payload PUT failure'
-pass 'daemon immutable publication is no-op safe, conflict safe, retryable, and commit ordered'
+pass 'daemon publication is no-op safe, replaceable at current version, retryable, and commit ordered'
 
 daemon_toctou_dist="$tmp_dir/daemon-post-staging-mutation"
 write_daemon_release "$daemon_toctou_dist"

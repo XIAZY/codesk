@@ -110,7 +110,7 @@ switch ($Target) {
     }
 }
 
-$null = & (Join-Path $PSScriptRoot 'scripts/read-version.ps1')
+$null = & (Join-Path $PSScriptRoot 'scripts/read-daemon-version.ps1')
 
 $parameters = @{
     Target = $Target

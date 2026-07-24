@@ -10,7 +10,6 @@ load_notty_deploy_env "$root_dir"
 out_dir="${STATIC_DIST_DIR:-$root_dir/dist/static}"
 app_out="$out_dir/app"
 homepage_out="$out_dir/homepage"
-version="$("$root_dir/scripts/read-version.sh")"
 
 frontend_origin="${NOTTY_FRONTEND_ORIGIN:-https://app.nottyai.co}"
 backend_origin="${NOTTY_BACKEND_ORIGIN:-https://api.nottyai.co}"
@@ -36,6 +35,6 @@ mkdir -p "$app_out" "$homepage_out"
 cp -R "$root_dir/frontend/dist/." "$app_out/"
 cp -R "$root_dir/homepage/." "$homepage_out/"
 
-printf 'Built frontend assets for %s:\n' "$version"
+printf 'Built frontend assets:\n'
 printf '  app: %s\n' "$app_out"
 printf '  homepage: %s\n' "$homepage_out"

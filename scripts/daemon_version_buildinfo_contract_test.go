@@ -74,11 +74,11 @@ func TestAgentToolRawBuildFailsClosedWithoutEmbeddedVersion(t *testing.T) {
 		t.Fatalf("raw agent tool --version = %q, %v; want fail-closed embedded-version error", output, err)
 	}
 
-	reader := exec.Command("scripts/read-version.sh")
+	reader := exec.Command("scripts/read-daemon-version.sh")
 	reader.Dir = root
 	versionBytes, err := reader.Output()
 	if err != nil {
-		t.Fatalf("read root VERSION: %v", err)
+		t.Fatalf("read root DAEMON_VERSION: %v", err)
 	}
 	version := strings.TrimSpace(string(versionBytes))
 	boundBinary := filepath.Join(t.TempDir(), "notty-agent-tool-bound")
@@ -93,7 +93,7 @@ func TestAgentToolRawBuildFailsClosedWithoutEmbeddedVersion(t *testing.T) {
 	}
 }
 
-func TestDaemonContainerBuildBindsRootVersion(t *testing.T) {
+func TestDaemonContainerBuildBindsRootDaemonVersion(t *testing.T) {
 	data, err := os.ReadFile("../daemon/Dockerfile")
 	if err != nil {
 		t.Fatal(err)
@@ -106,8 +106,8 @@ func TestDaemonContainerBuildBindsRootVersion(t *testing.T) {
 	mutations := []struct {
 		name, old, replacement string
 	}{
-		{"root version input removed", "COPY VERSION ./VERSION", "# VERSION input removed"},
-		{"strict version reader removed", "COPY scripts/read-version.sh ./scripts/read-version.sh", "# strict reader removed"},
+		{"root daemon version input removed", "COPY DAEMON_VERSION ./DAEMON_VERSION", "# DAEMON_VERSION input removed"},
+		{"strict version reader removed", "COPY scripts/read-daemon-version.sh ./scripts/read-daemon-version.sh", "# strict reader removed"},
 		{"one product binding removed", `-ldflags "-X notty/daemon/internal/buildinfo.Version=$version"`, ""},
 	}
 	for _, mutation := range mutations {
@@ -201,12 +201,12 @@ func checkEmbeddedVersionSource(sources map[string]string) error {
 
 func checkDaemonContainerVersionSource(source string) error {
 	for required, want := range map[string]int{
-		"COPY VERSION ./VERSION":                                         1,
-		"COPY scripts/read-version.sh ./scripts/read-version.sh":         1,
-		`version="$(scripts/read-version.sh)"`:                           2,
-		`-ldflags "-X notty/daemon/internal/buildinfo.Version=$version"`: 2,
-		"-o /bin/notty-daemon ./daemon/cmd/daemon":                       1,
-		"-o /bin/notty-agent-tool ./daemon/cmd/agenttool":                1,
+		"COPY DAEMON_VERSION ./DAEMON_VERSION":                                 1,
+		"COPY scripts/read-daemon-version.sh ./scripts/read-daemon-version.sh": 1,
+		`version="$(scripts/read-daemon-version.sh)"`:                          2,
+		`-ldflags "-X notty/daemon/internal/buildinfo.Version=$version"`:       2,
+		"-o /bin/notty-daemon ./daemon/cmd/daemon":                             1,
+		"-o /bin/notty-agent-tool ./daemon/cmd/agenttool":                      1,
 	} {
 		if got := strings.Count(source, required); got != want {
 			return fmt.Errorf("daemon container source count for %q = %d, want %d", required, got, want)
