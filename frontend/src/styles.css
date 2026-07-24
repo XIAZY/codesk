@@ -3785,6 +3785,6 @@ pre.code {
 
 .ds-delete-record { margin-top: 6px; padding-top: 12px; border-top: 1px solid var(--border-2, var(--border)); display: flex; flex-direction: column; gap: 6px; }
 
-/* Terminal panel states (#62/#6): Preparing line + explicit failure + retry. */
+/* Terminal panel states (#62/#6): Preparing line + ambiguous-failure unconfirmed state (no retry). */
 .ds-preparing { font-style: italic; }
 .ds-terminal-unconfirmed { display: flex; flex-direction: column; gap: 9px; align-items: flex-start; }
