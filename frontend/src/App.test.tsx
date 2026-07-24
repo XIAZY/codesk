@@ -492,65 +492,70 @@ describe("WorkspaceApp coming-soon controls", () => {
   });
 });
 
-describe("CreateDaemonModal install status", () => {
-  it("flips the install chip from waiting to connected when the daemon checks in live", async () => {
-    const user = userEvent.setup();
-    const created: Daemon = { ...daemonFixtures.dead, id: "daemon_new", name: "Local daemon" };
-    const api = { createDaemon: vi.fn().mockResolvedValue({ daemon: created, token: "nottyd_secret" }) };
+describe("CreateDaemonModal (desktop install redesign #62)", () => {
+  const stubUA = (ua: string) =>
+    Object.defineProperty(window.navigator, "userAgent", { value: ua, configurable: true });
+  const MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)";
+  const LINUX = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64)";
+  const IOS = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)";
 
-    const { rerender } = render(
-      <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />
-    );
-
-    await user.click(screen.getByRole("button", { name: "Create local environment" }));
-
-    // Local environment created but has not checked in yet: the chip must say waiting.
-    expect(await screen.findByText("Install command ready. Run it in a terminal on the target computer — Codesk detects the connection automatically.")).toBeTruthy();
-    expect(screen.queryByText("Local environment connected. You can create an agent now.")).toBeNull();
-    const unixButton = screen.getByRole("button", { name: "macOS / Linux" });
-    const windowsButton = screen.getByRole("button", { name: "Windows" });
-    expect(unixButton.getAttribute("aria-pressed")).toBe("true");
-    expect(document.querySelector("pre.code")?.textContent).toContain("install.sh");
-
-    await user.click(windowsButton);
-    expect(windowsButton.getAttribute("aria-pressed")).toBe("true");
-    expect(document.querySelector("pre.code")?.textContent).toContain("install.ps1");
-    expect(screen.getByText("PowerShell")).toBeTruthy();
-
-    // A daemon.updated event lands via the workspace socket, so live state now reports
-    // the daemon online. The chip must flip without a manual refresh.
-    rerender(
-      <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[{ ...daemonFixtures.justSeen, id: "daemon_new", name: "Local daemon" }]} onClose={vi.fn()} onDone={vi.fn()} />
-    );
-
-    expect(screen.getByText("Local environment connected. You can create an agent now.")).toBeTruthy();
-    expect(screen.queryByText("Install command ready. Run it in a terminal on the target computer — Codesk detects the connection automatically.")).toBeNull();
+  it("mac: download-app main path creates NO daemon and shows NO token; download is disabled-honest until URLs resolve", () => {
+    stubUA(MAC);
+    const api = { createDaemon: vi.fn() };
+    render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    expect(screen.getByText("Codesk for Mac")).toBeTruthy();
+    expect(screen.getByText("No terminal commands or access tokens to copy.")).toBeTruthy();
+    expect(screen.getByText("Waiting for Codesk to connect…")).toBeTruthy();
+    // The app creates the daemon via DesktopConnectPage on approval — this modal must not, and shows no token.
+    expect(api.createDaemon).not.toHaveBeenCalled();
+    expect(document.querySelector("pre.code")).toBeNull();
+    // Null resolver (no CORS-readable manifest yet) → disabled, never a dead link (Anton's copy).
+    expect(screen.getByRole("button", { name: "Desktop download temporarily unavailable" })).toBeTruthy();
   });
 
-  it("shows waiting, not failure, for a freshly created daemon that has never checked in", async () => {
+  it("mac: 'Rather use the terminal?' is the deliberate choice that creates the daemon + shows the curl command", async () => {
+    stubUA(MAC);
     const user = userEvent.setup();
     const created: Daemon = { ...daemonFixtures.neverSeen, id: "daemon_new", name: "Local daemon" };
     const api = { createDaemon: vi.fn().mockResolvedValue({ daemon: created, token: "nottyd_secret" }) };
+    render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    expect(api.createDaemon).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Rather use the terminal?" }));
+    await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
+    expect(document.querySelector("pre.code")?.textContent).toContain("install.sh");
+  });
 
-    const { rerender } = render(
-      <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />
-    );
-    await user.click(screen.getByRole("button", { name: "Create local environment" }));
-
-    // A never-seen daemon reads as "disconnected" on the wire (zero-time lastSeenAt) but the user
-    // hasn't run the install command yet — it must show Waiting, never accuse them of a failed run.
-    rerender(
-      <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[created]} onClose={vi.fn()} onDone={vi.fn()} />
-    );
+  it("linux: terminal is the primary path — waiting for a never-seen daemon, honest failure only after a real check-in", async () => {
+    stubUA(LINUX);
+    const created: Daemon = { ...daemonFixtures.neverSeen, id: "daemon_new", name: "Local daemon" };
+    const api = { createDaemon: vi.fn().mockResolvedValue({ daemon: created, token: "nottyd_secret" }) };
+    const { rerender } = render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    // Linux has no desktop app → the terminal command is created on open (its real path).
+    await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
+    expect(document.querySelector("pre.code")?.textContent).toContain("install.sh");
+    rerender(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[created]} onClose={vi.fn()} onDone={vi.fn()} />);
     expect(screen.getByText(/Install command ready/)).toBeTruthy();
     expect(screen.queryByText(/No connection yet/)).toBeNull();
-
-    // Once it has genuinely checked in and then gone offline, the failure line is the honest state.
-    rerender(
-      <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[{ ...daemonFixtures.dead, id: "daemon_new", name: "Local daemon" }]} onClose={vi.fn()} onDone={vi.fn()} />
-    );
+    rerender(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[{ ...daemonFixtures.dead, id: "daemon_new", name: "Local daemon" }]} onClose={vi.fn()} onDone={vi.fn()} />);
     expect(screen.getByText(/No connection yet/)).toBeTruthy();
-    expect(screen.queryByText(/Install command ready/)).toBeNull();
+  });
+
+  it("connected is live-derived: a real check-in flips any path to the connected state", async () => {
+    stubUA(LINUX);
+    const created: Daemon = { ...daemonFixtures.neverSeen, id: "daemon_new", name: "Local daemon" };
+    const api = { createDaemon: vi.fn().mockResolvedValue({ daemon: created, token: "nottyd_secret" }) };
+    const { rerender } = render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
+    rerender(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[{ ...daemonFixtures.justSeen, id: "daemon_new", name: "Local daemon" }]} onClose={vi.fn()} onDone={vi.fn()} />);
+    expect(screen.getByText("Connected. You can create an agent now.")).toBeTruthy();
+  });
+
+  it("unknown UA: neutral chooser, no faked default and no daemon created", () => {
+    stubUA(IOS);
+    const api = { createDaemon: vi.fn() };
+    render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    expect(screen.getByText("Which computer are you connecting?")).toBeTruthy();
+    expect(api.createDaemon).not.toHaveBeenCalled();
   });
 });
 

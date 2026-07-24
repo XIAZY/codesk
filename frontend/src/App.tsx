@@ -26,12 +26,20 @@ import {
   identifierHelpText,
   identifierPattern,
   isMarkdownDocumentPath,
+  detectDesktopPlatform,
+  desktopPlatformHasApp,
+  desktopPlatformInstallTarget,
+  desktopDownloadTargets,
+  defaultDesktopDownloadTarget,
+  desktopAppDownloadUrl,
   randomWorkspaceName,
   threadReplyLabel,
   workspaceSlugMaxLength,
   workspaceSlugMinLength,
   type ActivityCategory,
   type DaemonInstallPlatform,
+  type DesktopPlatform,
+  type DesktopDownloadTarget,
   type WorkspacePerson,
   type LineThreadGroup,
   resolveThreadAnchorLive,
@@ -4290,61 +4298,172 @@ export function DaemonPlatformControl({ value, onChange }: { value: DaemonInstal
   );
 }
 
+// The per-platform download button. macOS is one universal target; Windows publishes x64 AND
+// ARM64 MSIs (UA can't authoritatively pick, so x64 is the default with an always-visible ARM64
+// link). Any target whose URL isn't resolved yet (null — until #61 wires the real R2 manifest)
+// renders DISABLED "Download unavailable" rather than a link pointing at nothing.
+function DesktopDownloadButton({ platform }: { platform: DesktopPlatform }) {
+  const targets = desktopDownloadTargets(platform);
+  const primary = defaultDesktopDownloadTarget(platform);
+  const primaryUrl = primary ? desktopAppDownloadUrl(primary) : null;
+  const primaryLabel = platform === "mac" ? "Download for Mac" : "Download for Windows (x64)";
+  const altTarget = targets.find((target) => target !== primary); // Windows ARM64
+  const altUrl = altTarget ? desktopAppDownloadUrl(altTarget) : null;
+  return (
+    <div className="ds-download-btn">
+      {primaryUrl ? (
+        <a className="btn accent full" href={primaryUrl} download>↓ {primaryLabel}</a>
+      ) : (
+        // No resolved URL yet — the resolver returns null until the R2 manifest is browser-readable
+        // (CORS/proxy, AlphaToad). Honest fail-closed state, never a dead link, terminal still works.
+        <button type="button" className="btn accent full" disabled aria-disabled="true">Desktop download temporarily unavailable</button>
+      )}
+      {altTarget ? (
+        altUrl ? (
+          <a className="ds-alt-arch" href={altUrl} download>On Windows on ARM? Get the ARM64 build →</a>
+        ) : (
+          <span className="ds-alt-arch muted" aria-disabled="true">On Windows on ARM? The ARM64 build is temporarily unavailable.</span>
+        )
+      ) : null}
+    </div>
+  );
+}
+
 export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }: { api: ApiClient; workspaceId: string; daemons: Daemon[]; onClose: () => void; onDone: () => void }) {
-  const [name, setName] = useState("Local environment");
+  // Platform is a HINT (UA), not a lock — the machine you connect is often not the one you're
+  // browsing on, so the Mac/Win/Linux selector stays visible and an unknown UA gets a neutral
+  // chooser instead of a guessed default. mac/win default to the download-app path; Linux is
+  // terminal-native (no desktop app).
+  const [platform, setPlatform] = useState<DesktopPlatform>(() => detectDesktopPlatform());
+  const [terminalMode, setTerminalMode] = useState(false); // mac/win "Rather use the terminal?"
   const [token, setToken] = useState("");
   const [daemonId, setDaemonId] = useState("");
-  const [installPlatform, setInstallPlatform] = useState<DaemonInstallPlatform>(() => defaultDaemonInstallPlatform());
-  const command = buildDaemonInstallCommand({
-    backendUrl: apiBase,
-    workspaceId,
-    daemonToken: token || "nottyd_...",
-    staticBaseUrl: daemonStaticBase,
-    platform: installPlatform,
-  });
-  // Track the created daemon in live workspace state so the chip reflects its real
-  // check-in instead of a hard-coded "waiting". `daemon.updated` events flow through
-  // the workspace socket the moment the daemon calls home, flipping this to online.
-  const createdDaemon = daemons.find((daemon) => daemon.id === daemonId);
-  const connected = createdDaemon ? daemonStatus(createdDaemon) === "online" : false;
-  // Failed only after a genuine check-in that then dropped — never on a fresh daemon. A never-seen
-  // daemon reads as "disconnected" with a zero-time lastSeenAt, so gate on hasGenuineCheckIn (year
-  // >= 2020) instead of Boolean(lastSeenAt), which the "0001-01-01" zero time would satisfy.
-  const failed = createdDaemon ? isDaemonOffline(createdDaemon) && hasGenuineCheckIn(createdDaemon) : false;
+  // Daemons already online at open — so the download path can detect the app's NEW daemon
+  // checking in (the app creates it via DesktopConnectPage; this modal never creates one there).
+  const [initialOnlineIds] = useState(() => new Set(daemons.filter((d) => daemonStatus(d) === "online").map((d) => d.id)));
+
+  const hasApp = desktopPlatformHasApp(platform); // mac/win
+  const showTerminal = !hasApp || terminalMode; // Linux, or mac/win chose the terminal
+  const isUnknown = platform === "unknown";
+  const installTarget = desktopPlatformInstallTarget(platform);
+  const command = buildDaemonInstallCommand({ backendUrl: apiBase, workspaceId, daemonToken: token || "nottyd_...", staticBaseUrl: daemonStaticBase, platform: installTarget });
+
+  const selectPlatform = (next: DesktopPlatform) => {
+    setPlatform(next);
+    setTerminalMode(false);
+  };
+
+  // The terminal token+command is created ONLY when the terminal panel is active — a deliberate
+  // "Rather use the terminal?" on mac/win, or the path itself on Linux. NEVER on the download main
+  // path and never on a bare open of the download default (Anton/Eva honesty rule).
+  useEffect(() => {
+    if (!showTerminal || isUnknown || daemonId) return;
+    let cancelled = false;
+    void (async () => {
+      const response = await api.createDaemon(workspaceId, "Local environment");
+      if (cancelled) return;
+      setDaemonId(response.daemon.id);
+      setToken(response.token);
+      onDone();
+    })();
+    return () => { cancelled = true; };
+  }, [showTerminal, isUnknown, daemonId, api, workspaceId, onDone]);
+
+  // Connected is LIVE-DERIVED from a real daemon check-in — never from a Download click. The
+  // terminal path watches its created daemon; the download path watches for a NEW online daemon.
+  const connectedDaemon = daemonId
+    ? daemons.find((d) => d.id === daemonId && daemonStatus(d) === "online")
+    : daemons.find((d) => daemonStatus(d) === "online" && !initialOnlineIds.has(d.id));
+  const connected = Boolean(connectedDaemon);
+  const terminalDaemon = daemonId ? daemons.find((d) => d.id === daemonId) : undefined;
+  const terminalFailed = terminalDaemon ? isDaemonOffline(terminalDaemon) && hasGenuineCheckIn(terminalDaemon) : false;
+
+  const platformSelector = (
+    <div className="ds-platform-select" role="group" aria-label="Which computer are you connecting?">
+      {(["mac", "windows", "linux"] as const).map((p) => (
+        <button key={p} type="button" className={`ds-platform-pill${platform === p ? " selected" : ""}`} aria-pressed={platform === p} onClick={() => selectPlatform(p)}>
+          {p === "mac" ? "Mac" : p === "windows" ? "Win" : "Linux"}
+        </button>
+      ))}
+    </div>
+  );
+
   return (
     <Modal title="Connect this workspace to your computer" onClose={onClose}>
-      {token ? (
-        <div className="token-reveal">
-          <DaemonPlatformControl value={installPlatform} onChange={setInstallPlatform} />
-          <ShellScriptBlock title="Install command" badge={installPlatform === "windows" ? "PowerShell" : "Shell"} command={command}>
-            <p className="small muted">Run this in a terminal on the computer you want to connect. It sets up local file sync and the space where your agents run.</p>
-          </ShellScriptBlock>
-          {connected ? (
-            <p className="chip online"><StatusDot tone="online" />Local environment connected. You can create an agent now.</p>
-          ) : failed ? (
-            <p className="chip"><StatusDot tone="stale" />No connection yet. Make sure the command ran completely, or generate a new install command.</p>
-          ) : (
-            <p className="chip"><StatusDot tone="stale" />Install command ready. Run it in a terminal on the target computer — Codesk detects the connection automatically.</p>
-          )}
-          <div className="row end">
-            <button className="btn accent" onClick={onClose}>Done</button>
+      {connected ? (
+        <div className="ds-connected">
+          <div className="ds-connected-card">
+            <span className="ds-check" aria-hidden="true">✓</span>
+            <div><strong>Local environment connected</strong><span className="small muted">Checked in just now</span></div>
           </div>
+          <p className="chip online"><StatusDot tone="online" />Connected. You can create an agent now.</p>
+          <div className="row end"><button className="btn accent" onClick={onClose}>Done</button></div>
+        </div>
+      ) : isUnknown ? (
+        <div className="ds-chooser">
+          <p className="small muted">Which computer are you connecting?</p>
+          <button type="button" className="ds-choice" onClick={() => selectPlatform("mac")}>
+            <span className="ds-choice-icon" aria-hidden="true">↓</span>
+            <span className="ds-choice-text"><strong>Mac</strong><span className="small muted">Download the app</span></span>
+            <span className="ds-choice-chev" aria-hidden="true">›</span>
+          </button>
+          <button type="button" className="ds-choice" onClick={() => selectPlatform("windows")}>
+            <span className="ds-choice-icon" aria-hidden="true">↓</span>
+            <span className="ds-choice-text"><strong>Windows</strong><span className="small muted">Download the .msi</span></span>
+            <span className="ds-choice-chev" aria-hidden="true">›</span>
+          </button>
+          <button type="button" className="ds-choice" onClick={() => selectPlatform("linux")}>
+            <span className="ds-choice-icon" aria-hidden="true">▸</span>
+            <span className="ds-choice-text"><strong>Linux</strong><span className="small muted">Connect from the terminal</span></span>
+            <span className="ds-choice-chev" aria-hidden="true">›</span>
+          </button>
+        </div>
+      ) : showTerminal ? (
+        <div className="ds-terminal">
+          <p className="small muted">
+            {hasApp
+              ? "Install with a command instead — run it in a terminal on the computer you want to connect."
+              : "On Linux, connect from the terminal — run this on the computer you want to connect."}
+          </p>
+          <ShellScriptBlock title="Install command" badge={installTarget === "windows" ? "PowerShell" : "Shell"} command={command} />
+          {terminalFailed ? (
+            <p className="chip"><StatusDot tone="stale" />No connection yet. Make sure the command ran completely.</p>
+          ) : (
+            <p className="chip"><StatusDot tone="stale" />{hasApp ? "Waiting — Codesk detects the connection automatically." : "Install command ready — Codesk detects the connection automatically."}</p>
+          )}
+          {hasApp ? (
+            <button type="button" className="ds-back" onClick={() => setTerminalMode(false)}>← Back to the app download</button>
+          ) : (
+            platformSelector
+          )}
         </div>
       ) : (
-        <form
-          className="form-stack"
-          onSubmit={async (event) => {
-            event.preventDefault();
-            const response = await api.createDaemon(workspaceId, name);
-            setDaemonId(response.daemon.id);
-            setToken(response.token);
-            onDone();
-          }}
-        >
-          <p className="small muted">A local environment syncs your Codesk documents to your machine and hosts long-running agents. Once connected, the same file opens in the browser, VS Code, or any local tool.</p>
-          <label className="field"><span className="lab">Name</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label>
-          <button className="btn accent full">Create local environment</button>
-        </form>
+        <div className="ds-download">
+          <div className="ds-app-card">
+            <span className="ds-app-icon" aria-hidden="true">↓</span>
+            <div><strong>{platform === "mac" ? "Codesk for Mac" : "Codesk for Windows"}</strong><span className="small muted">{platform === "mac" ? "macOS · .dmg" : "Windows · .msi"}</span></div>
+          </div>
+          <DesktopDownloadButton platform={platform} />
+          <ol className="ds-steps">
+            <li>{platform === "mac" ? "Open the .dmg and drag Codesk to Applications, then open it." : "Run the .msi installer, then open Codesk."}</li>
+            <li>Codesk opens a browser page — choose this workspace and select Connect.</li>
+            <li>This page updates when the app connects.</li>
+          </ol>
+          {/* Behavior-only first-run guidance. We do NOT claim signing/notarization state here —
+              the Windows manifest carries no signing metadata, and macOS's notarization line is
+              rendered only when the resolver reads signed_and_notarized from the live manifest. */}
+          <p className="ds-firstrun small muted">
+            {platform === "mac"
+              ? "First open: macOS may warn about an unidentified developer — right-click Codesk and choose Open to confirm."
+              : "First run: Windows may show a SmartScreen notice — choose More info, then Run anyway."}
+          </p>
+          <p className="small muted">No terminal commands or access tokens to copy.</p>
+          <p className="chip"><StatusDot tone="stale" />Waiting for Codesk to connect…</p>
+          <div className="ds-download-foot">
+            <button type="button" className="ds-terminal-link" onClick={() => setTerminalMode(true)}>{platform === "windows" ? "Rather use PowerShell?" : "Rather use the terminal?"}</button>
+            {platformSelector}
+          </div>
+        </div>
       )}
     </Modal>
   );
