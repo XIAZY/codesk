@@ -606,6 +606,25 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
     expect(api.createDaemon).toHaveBeenCalledTimes(1);
   });
 
+  it("ambiguous create failure does NOT re-fire on re-entry — no duplicate POST after failure→switch→back (#3 re-entry)", async () => {
+    stubUA(LINUX);
+    const user = userEvent.setup();
+    // The single-fire guard must SURVIVE an ambiguous failure: resetting it in the catch would let
+    // failure → switch platform away → return to the terminal issue a SECOND non-idempotent POST and
+    // duplicate the record. (This row is the mutation-complete guard for blocker ③: re-adding
+    // `createStartedRef.current = false` in the catch turns it RED with 2 createDaemon calls.)
+    const api = { createDaemon: vi.fn().mockRejectedValue(new Error("network dropped")) };
+    render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    // Linux terminal fires the create on open → it fails ambiguously → the unconfirmed state.
+    await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
+    await screen.findByText(/We couldn't confirm whether the install command was prepared/);
+    // Switch Linux → Mac → Linux, re-entering the terminal panel. No second POST may fire.
+    await user.click(screen.getByRole("button", { name: "Mac" }));
+    await user.click(screen.getByRole("button", { name: "Linux" }));
+    await waitFor(() => expect(screen.getByText(/We couldn't confirm whether the install command was prepared/)).toBeTruthy());
+    expect(api.createDaemon).toHaveBeenCalledTimes(1);
+  });
+
   it("terminal create is single-fire: Back before it resolves, then re-enter, still ONE POST + result kept (#3)", async () => {
     stubUA(MAC);
     const user = userEvent.setup();
