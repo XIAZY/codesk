@@ -2,7 +2,7 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentDetailModal, CreateDaemonModal, DaemonDetailModal, DaemonsManagement, documentFolders, ManageModal, MoveDocumentModal, WorkspaceApp, WorkspaceOnboarding } from "./App";
 import { ApiError, publicOrigin } from "./api";
 import { emptyWorkspace, identifierFromName, identifierHelpText, identifierPattern, workspaceSlugMaxLength } from "./logic";
@@ -73,6 +73,14 @@ afterEach(() => {
   vi.useRealTimers();
   localStorage.clear();
   cleanup();
+  vi.unstubAllGlobals();
+});
+
+// The desktop-manifest hook fetches on mount. Default every test to a CORS-like failure (the
+// current production reality until AlphaToad opens CORS) so downloads stay disabled-honest and
+// no test hits the real network; tests that exercise a readable manifest override this.
+beforeEach(() => {
+  vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network blocked")));
 });
 
 function account(): Account {
@@ -499,7 +507,7 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
   const LINUX = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64)";
   const IOS = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)";
 
-  it("mac: download-app main path creates NO daemon and shows NO token; download is disabled-honest until URLs resolve", () => {
+  it("mac: download-app main path creates NO daemon and shows NO token; download is disabled-honest when the manifest can't be read", async () => {
     stubUA(MAC);
     const api = { createDaemon: vi.fn() };
     render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
@@ -509,8 +517,34 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
     // The app creates the daemon via DesktopConnectPage on approval — this modal must not, and shows no token.
     expect(api.createDaemon).not.toHaveBeenCalled();
     expect(document.querySelector("pre.code")).toBeNull();
-    // Null resolver (no CORS-readable manifest yet) → disabled, never a dead link (Anton's copy).
-    expect(screen.getByRole("button", { name: "Desktop download temporarily unavailable" })).toBeTruthy();
+    // Manifest fetch fails (CORS default) → settles to the honest disabled state, never a dead link.
+    expect(await screen.findByRole("button", { name: "Desktop download temporarily unavailable" })).toBeTruthy();
+  });
+
+  it("mac: a browser-readable manifest wires the REAL R2 download link + the honest not-notarized note", async () => {
+    stubUA(MAC);
+    const dmg = { schema: 1, version: "0.0.1", signed_and_notarized: false, disk_image: { path: "Codesk_0.0.1_macos_universal.dmg", sha256: "a".repeat(64), size: 1 } };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(dmg) }));
+    render(<CreateDaemonModal api={{ createDaemon: vi.fn() } as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    const link = await screen.findByRole("link", { name: /Download for Mac/ });
+    expect(link.getAttribute("href")).toContain("/macos/0.0.1/Codesk_0.0.1_macos_universal.dmg");
+    // signed_and_notarized:false → the honest parenthetical appears (verified from the manifest, not invented).
+    expect(screen.getByText(/isn't notarized yet/)).toBeTruthy();
+  });
+
+  it("windows: a browser-readable manifest wires x64 primary + the ARM64 secondary, and never claims signing", async () => {
+    stubUA("Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+    const win = { version: "0.0.1", artifacts: [
+      { os: "windows", arch: "amd64", file: "amd64/Codesk_0.0.1_windows_amd64.msi", sha256: "b".repeat(64) },
+      { os: "windows", arch: "arm64", file: "arm64/Codesk_0.0.1_windows_arm64.msi", sha256: "c".repeat(64) },
+    ] };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(win) }));
+    render(<CreateDaemonModal api={{ createDaemon: vi.fn() } as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    const primary = await screen.findByRole("link", { name: /Download for Windows \(x64\)/ });
+    expect(primary.getAttribute("href")).toContain("/windows/0.0.1/amd64/Codesk_0.0.1_windows_amd64.msi");
+    expect(screen.getByRole("link", { name: /ARM64 build/ }).getAttribute("href")).toContain("/windows/0.0.1/arm64/Codesk_0.0.1_windows_arm64.msi");
+    // Windows manifest carries no signing metadata → never assert signed/notarized.
+    expect(screen.queryByText(/notarized/)).toBeNull();
   });
 
   it("mac: 'Rather use the terminal?' is the deliberate choice that creates the daemon + shows the curl command", async () => {
@@ -944,6 +978,18 @@ describe("DaemonDetailModal live status", () => {
     await user.click(screen.getByRole("button", { name: "Desktop app" }));
     expect(screen.getByText(/move Codesk to the Trash/)).toBeTruthy();
     expect(container.querySelector("pre.code")).toBeNull();
+  });
+
+  it("#63 app reinstall wires the live re-download when the manifest is readable", async () => {
+    const user = userEvent.setup();
+    const dmg = { schema: 1, version: "0.0.1", signed_and_notarized: false, disk_image: { path: "Codesk_0.0.1_macos_universal.dmg", sha256: "a".repeat(64), size: 1 } };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(dmg) }));
+    const daemon = withReceipt({ ...daemonFixtures.justSeen, id: "d1", os: "darwin" }, Date.now());
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
+    render(<DaemonDetailModal {...props} daemons={[daemon]} />);
+    await user.click(screen.getByRole("button", { name: "Desktop app" }));
+    const link = await screen.findByRole("link", { name: "Reinstall — re-download the app" });
+    expect(link.getAttribute("href")).toContain("/macos/0.0.1/Codesk_0.0.1_macos_universal.dmg");
   });
 
   it("#63 linux: skips the install-method question and shows the terminal uninstall script directly", () => {

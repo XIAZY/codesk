@@ -150,6 +150,102 @@ export function desktopAppDownloadUrl(target: DesktopDownloadTarget): string | n
   return DESKTOP_APP_DOWNLOAD_URLS[target] ?? null;
 }
 
+// ---- Desktop download resolver (#61 consumer half) ---------------------------
+// Parses the live R2 manifests into per-target download URLs. The two manifests are NOT one
+// schema (Vitaliy): macOS carries {schema:1, version, signed_and_notarized, disk_image:{path,
+// sha256,size}}; Windows carries {version, artifacts[]:{os,arch,file,sha256}} with no schema/
+// size/signing. We FAIL CLOSED with an exact allowlist, never arbitrary URL joining: the
+// declared filename must EQUAL the name computed from the validated version, sha must be 64
+// lowercase hex, and anything unsafe (absolute URL, `..`, query/fragment, backslash, leading
+// slash, duplicate/missing arch, malformed version) drops THAT target only — a corrupt Windows
+// arm64 entry must not take amd64 down with it. We never invent size/signing the manifest can't
+// prove; macOS's notarization state is surfaced only from its explicit boolean field.
+export type DesktopManifestResult = {
+  urls: Partial<Record<DesktopDownloadTarget, string>>;
+  // true/false from the macOS manifest's explicit field; null when unknown / not a mac manifest.
+  macNotarized: boolean | null;
+};
+
+const DESKTOP_SHA256_RE = /^[0-9a-f]{64}$/;
+// A safe semver-ish version that is also path-safe (no slash, no `..`, no dangerous chars).
+const DESKTOP_VERSION_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+
+// A manifest-declared filename segment must be exactly a plain relative path — reject anything
+// that could escape the versioned prefix or smuggle a different origin.
+function isSafeAssetPath(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    !value.startsWith("/") &&
+    !value.includes("..") &&
+    !/[?#\\]/.test(value) &&
+    !/^[a-z][a-z0-9+.-]*:\/\//i.test(value)
+  );
+}
+
+export function resolveDesktopManifest(
+  platform: DesktopPlatform,
+  raw: unknown,
+  staticBase: string,
+): DesktopManifestResult {
+  const empty: DesktopManifestResult = { urls: {}, macNotarized: null };
+  if (!raw || typeof raw !== "object") return empty;
+  const base = staticBase.trim().replace(/\/+$/, "");
+  if (!base) return empty;
+  const manifest = raw as Record<string, unknown>;
+  const version = typeof manifest.version === "string" ? manifest.version : "";
+  if (!DESKTOP_VERSION_RE.test(version)) {
+    // Version is unusable for the whole manifest — but still surface macOS notarization state,
+    // which is honest regardless of whether the download URL resolves.
+    const notarized = platform === "mac" && typeof manifest.signed_and_notarized === "boolean"
+      ? manifest.signed_and_notarized
+      : null;
+    return { urls: {}, macNotarized: notarized };
+  }
+
+  if (platform === "mac") {
+    const notarized = typeof manifest.signed_and_notarized === "boolean" ? manifest.signed_and_notarized : null;
+    if (manifest.schema !== 1) return { urls: {}, macNotarized: notarized };
+    const diskImage = manifest.disk_image;
+    if (!diskImage || typeof diskImage !== "object") return { urls: {}, macNotarized: notarized };
+    const image = diskImage as Record<string, unknown>;
+    const path = image.path;
+    const sha = image.sha256;
+    const expected = `Codesk_${version}_macos_universal.dmg`;
+    if (!isSafeAssetPath(path) || path !== expected || typeof sha !== "string" || !DESKTOP_SHA256_RE.test(sha)) {
+      return { urls: {}, macNotarized: notarized };
+    }
+    return { urls: { "macos-universal": `${base}/macos/${version}/${path}` }, macNotarized: notarized };
+  }
+
+  if (platform === "windows") {
+    const artifacts = Array.isArray(manifest.artifacts) ? manifest.artifacts : null;
+    if (!artifacts) return empty;
+    const urls: Partial<Record<DesktopDownloadTarget, string>> = {};
+    const archTarget = { amd64: "windows-amd64", arm64: "windows-arm64" } as const;
+    for (const arch of ["amd64", "arm64"] as const) {
+      const matches = artifacts.filter(
+        (a): a is Record<string, unknown> =>
+          !!a && typeof a === "object" &&
+          (a as Record<string, unknown>).os === "windows" &&
+          (a as Record<string, unknown>).arch === arch,
+      );
+      if (matches.length !== 1) continue; // missing OR duplicate arch → drop only this target
+      const artifact = matches[0];
+      const file = artifact.file;
+      const sha = artifact.sha256;
+      const expected = `${arch}/Codesk_${version}_windows_${arch}.msi`;
+      if (!isSafeAssetPath(file) || file !== expected || typeof sha !== "string" || !DESKTOP_SHA256_RE.test(sha)) {
+        continue;
+      }
+      urls[archTarget[arch]] = `${base}/windows/${version}/${file}`;
+    }
+    return { urls, macNotarized: null };
+  }
+
+  return empty;
+}
+
 export function buildDaemonInstallCommand(input: {
   backendUrl: string;
   workspaceId: string;

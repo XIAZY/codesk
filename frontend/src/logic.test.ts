@@ -22,6 +22,7 @@ import {
   detectDesktopPlatform,
   desktopPlatformHasApp,
   daemonDesktopPlatform,
+  resolveDesktopManifest,
   desktopPlatformInstallTarget,
   desktopDownloadTargets,
   defaultDesktopDownloadTarget,
@@ -1195,5 +1196,92 @@ describe("desktop platform detection (task #62 — a hint, not a lock)", () => {
     expect(desktopAppDownloadUrl("macos-universal")).toBeNull();
     expect(desktopAppDownloadUrl("windows-amd64")).toBeNull();
     expect(desktopAppDownloadUrl("windows-arm64")).toBeNull();
+  });
+});
+
+describe("desktop manifest resolver (#61 — fail-closed, two schemas)", () => {
+  const BASE = "https://static.getcodesk.com/desktop";
+  const macManifest = (over: Record<string, unknown> = {}, v = "0.0.1") => ({
+    schema: 1,
+    version: v,
+    signed_and_notarized: false,
+    disk_image: { path: `Codesk_${v}_macos_universal.dmg`, sha256: "a".repeat(64), size: 18012811 },
+    ...over,
+  });
+  const winArtifacts = (v = "0.0.1") => [
+    { os: "windows", arch: "amd64", file: `amd64/Codesk_${v}_windows_amd64.msi`, sha256: "b".repeat(64) },
+    { os: "windows", arch: "arm64", file: `arm64/Codesk_${v}_windows_arm64.msi`, sha256: "c".repeat(64) },
+  ];
+  const winManifest = (artifacts: unknown[] = winArtifacts(), v = "0.0.1") => ({ version: v, artifacts });
+
+  it("macOS: resolves the universal DMG URL matching the verified live object + surfaces notarization", () => {
+    const r = resolveDesktopManifest("mac", macManifest(), BASE);
+    expect(r.urls["macos-universal"]).toBe(`${BASE}/macos/0.0.1/Codesk_0.0.1_macos_universal.dmg`);
+    expect(r.macNotarized).toBe(false);
+    expect(resolveDesktopManifest("mac", macManifest({ signed_and_notarized: true }), BASE).macNotarized).toBe(true);
+    // Missing/typeless field → unknown (null), never assumed.
+    expect(resolveDesktopManifest("mac", macManifest({ signed_and_notarized: "no" }), BASE).macNotarized).toBeNull();
+  });
+
+  it("macOS: fails closed on wrong schema / wrong filename / bad sha / traversal — never arbitrary joins", () => {
+    // Wrong schema → no URL, but the notarization state is still honestly surfaced.
+    const wrongSchema = resolveDesktopManifest("mac", macManifest({ schema: 2 }), BASE);
+    expect(wrongSchema.urls).toEqual({});
+    expect(wrongSchema.macNotarized).toBe(false);
+    // Filename not equal to the version-derived name → rejected (no arbitrary URL joining).
+    expect(resolveDesktopManifest("mac", macManifest({ disk_image: { path: "evil.dmg", sha256: "a".repeat(64) } }), BASE).urls).toEqual({});
+    // Bad sha (not 64 lowercase hex) → rejected.
+    expect(resolveDesktopManifest("mac", macManifest({ disk_image: { path: "Codesk_0.0.1_macos_universal.dmg", sha256: "A".repeat(64) } }), BASE).urls).toEqual({});
+    // Path traversal / absolute / query → rejected even though it can't equal `expected` anyway.
+    expect(resolveDesktopManifest("mac", macManifest({ disk_image: { path: "../secret.dmg", sha256: "a".repeat(64) } }), BASE).urls).toEqual({});
+  });
+
+  it("macOS: malformed version fails closed but still surfaces notarization", () => {
+    const r = resolveDesktopManifest("mac", macManifest({}, "not-a-version"), BASE);
+    expect(r.urls).toEqual({});
+    expect(r.macNotarized).toBe(false);
+  });
+
+  it("Windows: resolves BOTH arches to the verified live objects", () => {
+    const r = resolveDesktopManifest("windows", winManifest(), BASE);
+    expect(r.urls["windows-amd64"]).toBe(`${BASE}/windows/0.0.1/amd64/Codesk_0.0.1_windows_amd64.msi`);
+    expect(r.urls["windows-arm64"]).toBe(`${BASE}/windows/0.0.1/arm64/Codesk_0.0.1_windows_arm64.msi`);
+    expect(r.macNotarized).toBeNull(); // windows has no signing metadata — never invented
+  });
+
+  it("Windows: partial corruption drops ONLY that arch (arm64 bad → amd64 still resolves)", () => {
+    const artifacts = winArtifacts();
+    (artifacts[1] as Record<string, unknown>).sha256 = "z".repeat(64); // arm64 bad hex
+    const r = resolveDesktopManifest("windows", winManifest(artifacts), BASE);
+    expect(r.urls["windows-amd64"]).toBeTruthy();
+    expect(r.urls["windows-arm64"]).toBeUndefined();
+  });
+
+  it("Windows: duplicate arch → that target dropped (ambiguous, fail closed)", () => {
+    const dup = [...winArtifacts(), { os: "windows", arch: "amd64", file: "amd64/Codesk_0.0.1_windows_amd64.msi", sha256: "d".repeat(64) }];
+    const r = resolveDesktopManifest("windows", winManifest(dup), BASE);
+    expect(r.urls["windows-amd64"]).toBeUndefined(); // duplicated → ambiguous → dropped
+    expect(r.urls["windows-arm64"]).toBeTruthy(); // arm64 still unique
+  });
+
+  it("Windows: wrong filename / wrong os / missing arch each drop their target", () => {
+    const wrongFile = winArtifacts();
+    (wrongFile[0] as Record<string, unknown>).file = "amd64/notcodesk.msi";
+    expect(resolveDesktopManifest("windows", winManifest(wrongFile), BASE).urls["windows-amd64"]).toBeUndefined();
+    // os != windows → not matched at all.
+    const wrongOs = [{ os: "linux", arch: "amd64", file: "amd64/Codesk_0.0.1_windows_amd64.msi", sha256: "b".repeat(64) }];
+    expect(resolveDesktopManifest("windows", winManifest(wrongOs), BASE).urls).toEqual({});
+    // Only amd64 present → arm64 absent, amd64 resolves.
+    const onlyAmd = resolveDesktopManifest("windows", winManifest([winArtifacts()[0]]), BASE);
+    expect(onlyAmd.urls["windows-amd64"]).toBeTruthy();
+    expect(onlyAmd.urls["windows-arm64"]).toBeUndefined();
+  });
+
+  it("junk input fails closed: non-object, empty base, wrong-platform, missing artifacts", () => {
+    expect(resolveDesktopManifest("mac", null, BASE)).toEqual({ urls: {}, macNotarized: null });
+    expect(resolveDesktopManifest("mac", "nope", BASE)).toEqual({ urls: {}, macNotarized: null });
+    expect(resolveDesktopManifest("mac", macManifest(), "").urls).toEqual({});
+    expect(resolveDesktopManifest("linux", macManifest(), BASE)).toEqual({ urls: {}, macNotarized: null });
+    expect(resolveDesktopManifest("windows", { version: "0.0.1" }, BASE).urls).toEqual({});
   });
 });

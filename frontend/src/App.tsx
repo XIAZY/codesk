@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, RefObject } from "react";
-import { ApiClient, ApiError, apiBase, daemonStaticBase, publicOrigin, type UpdateWorkspaceSettingsInput } from "./api";
+import { ApiClient, ApiError, apiBase, daemonStaticBase, desktopStaticBase, publicOrigin, type UpdateWorkspaceSettingsInput } from "./api";
 import { DocumentSurface, type LiveThread, type SurfaceSelection } from "./DocumentSurface";
 import type { MarkdownPreviewCommandName } from "./markdownLivePreview";
 import {
@@ -29,10 +29,10 @@ import {
   detectDesktopPlatform,
   desktopPlatformHasApp,
   daemonDesktopPlatform,
+  resolveDesktopManifest,
   desktopPlatformInstallTarget,
   desktopDownloadTargets,
   defaultDesktopDownloadTarget,
-  desktopAppDownloadUrl,
   randomWorkspaceName,
   threadReplyLabel,
   workspaceSlugMaxLength,
@@ -4299,31 +4299,83 @@ export function DaemonPlatformControl({ value, onChange }: { value: DaemonInstal
   );
 }
 
-// The per-platform download button. macOS is one universal target; Windows publishes x64 AND
-// ARM64 MSIs (UA can't authoritatively pick, so x64 is the default with an always-visible ARM64
-// link). Any target whose URL isn't resolved yet (null — until #61 wires the real R2 manifest)
-// renders DISABLED "Download unavailable" rather than a link pointing at nothing.
-function DesktopDownloadButton({ platform }: { platform: DesktopPlatform }) {
+// The resolved state of the live desktop manifest for a platform. `idle` = no app on this
+// platform (linux/unknown, no fetch); `loading` = fetch in flight; `ready` = at least one URL
+// resolved; `unavailable` = fetch failed / CORS-blocked / manifest yielded no valid target.
+type DesktopManifestState = {
+  status: "idle" | "loading" | "ready" | "unavailable";
+  urls: Partial<Record<DesktopDownloadTarget, string>>;
+  macNotarized: boolean | null;
+};
+
+const DESKTOP_MANIFEST_TIMEOUT_MS = 8000;
+
+// Fetches + validates the live R2 manifest for a platform — #61's consumer half. Bounded wait
+// (AbortController + timeout), unmount-safe, and race-safe: a platform change or unmount cancels
+// the in-flight request and the `active` guard drops any late/stale result. On ANY failure
+// (network, CORS, non-2xx, invalid manifest) it settles to `unavailable` — never an infinite
+// spinner, never a dead link. The fetch is currently expected to fail on CORS until AlphaToad
+// opens GET/HEAD for app.getcodesk.com (or a same-origin proxy is chosen).
+function useDesktopManifest(platform: DesktopPlatform): DesktopManifestState {
+  const [state, setState] = useState<DesktopManifestState>({ status: "idle", urls: {}, macNotarized: null });
+  useEffect(() => {
+    if (!desktopPlatformHasApp(platform)) {
+      setState({ status: "idle", urls: {}, macNotarized: null });
+      return;
+    }
+    let active = true;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), DESKTOP_MANIFEST_TIMEOUT_MS);
+    setState({ status: "loading", urls: {}, macNotarized: null });
+    const manifestOS = platform === "mac" ? "macos" : "windows";
+    fetch(`${desktopStaticBase}/${manifestOS}/latest/manifest.json`, { signal: controller.signal, headers: { Accept: "application/json" } })
+      .then((response) => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
+      .then((raw) => {
+        if (!active) return;
+        const resolved = resolveDesktopManifest(platform, raw, desktopStaticBase);
+        const hasUrl = Object.keys(resolved.urls).length > 0;
+        setState({ status: hasUrl ? "ready" : "unavailable", urls: resolved.urls, macNotarized: resolved.macNotarized });
+      })
+      .catch(() => {
+        if (!active) return;
+        setState({ status: "unavailable", urls: {}, macNotarized: null });
+      })
+      .finally(() => clearTimeout(timer));
+    return () => {
+      active = false;
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [platform]);
+  return state;
+}
+
+// The per-platform download button, resolved from the live manifest. macOS is one universal
+// target; Windows publishes x64 AND ARM64 (UA can't authoritatively pick, so x64 is the default
+// with an always-visible ARM64 link). A target with no resolved URL renders DISABLED — "Checking…"
+// while the manifest loads, then "Desktop download temporarily unavailable" — never a dead link.
+function DesktopDownloadButton({ platform, manifest }: { platform: DesktopPlatform; manifest: DesktopManifestState }) {
   const targets = desktopDownloadTargets(platform);
   const primary = defaultDesktopDownloadTarget(platform);
-  const primaryUrl = primary ? desktopAppDownloadUrl(primary) : null;
+  const primaryUrl = primary ? manifest.urls[primary] ?? null : null;
   const primaryLabel = platform === "mac" ? "Download for Mac" : "Download for Windows (x64)";
   const altTarget = targets.find((target) => target !== primary); // Windows ARM64
-  const altUrl = altTarget ? desktopAppDownloadUrl(altTarget) : null;
+  const altUrl = altTarget ? manifest.urls[altTarget] ?? null : null;
+  const loading = manifest.status === "loading";
   return (
     <div className="ds-download-btn">
       {primaryUrl ? (
         <a className="btn accent full" href={primaryUrl} download>↓ {primaryLabel}</a>
       ) : (
-        // No resolved URL yet — the resolver returns null until the R2 manifest is browser-readable
-        // (CORS/proxy, AlphaToad). Honest fail-closed state, never a dead link, terminal still works.
-        <button type="button" className="btn accent full" disabled aria-disabled="true">Desktop download temporarily unavailable</button>
+        <button type="button" className="btn accent full" disabled aria-disabled="true">
+          {loading ? "Checking for the latest build…" : "Desktop download temporarily unavailable"}
+        </button>
       )}
       {altTarget ? (
         altUrl ? (
           <a className="ds-alt-arch" href={altUrl} download>On Windows on ARM? Get the ARM64 build →</a>
         ) : (
-          <span className="ds-alt-arch muted" aria-disabled="true">On Windows on ARM? The ARM64 build is temporarily unavailable.</span>
+          <span className="ds-alt-arch muted" aria-disabled="true">{loading ? "Checking for the ARM64 build…" : "On Windows on ARM? The ARM64 build is temporarily unavailable."}</span>
         )
       ) : null}
     </div>
@@ -4344,6 +4396,7 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
   const [initialOnlineIds] = useState(() => new Set(daemons.filter((d) => daemonStatus(d) === "online").map((d) => d.id)));
 
   const hasApp = desktopPlatformHasApp(platform); // mac/win
+  const manifest = useDesktopManifest(platform); // live R2 URLs + macOS notarization state
   const showTerminal = !hasApp || terminalMode; // Linux, or mac/win chose the terminal
   const isUnknown = platform === "unknown";
   const installTarget = desktopPlatformInstallTarget(platform);
@@ -4444,18 +4497,19 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
             <span className="ds-app-icon" aria-hidden="true">↓</span>
             <div><strong>{platform === "mac" ? "Codesk for Mac" : "Codesk for Windows"}</strong><span className="small muted">{platform === "mac" ? "macOS · .dmg" : "Windows · .msi"}</span></div>
           </div>
-          <DesktopDownloadButton platform={platform} />
+          <DesktopDownloadButton platform={platform} manifest={manifest} />
           <ol className="ds-steps">
             <li>{platform === "mac" ? "Open the .dmg and drag Codesk to Applications, then open it." : "Run the .msi installer, then open Codesk."}</li>
             <li>Codesk opens a browser page — choose this workspace and select Connect.</li>
             <li>This page updates when the app connects.</li>
           </ol>
-          {/* Behavior-only first-run guidance. We do NOT claim signing/notarization state here —
-              the Windows manifest carries no signing metadata, and macOS's notarization line is
-              rendered only when the resolver reads signed_and_notarized from the live manifest. */}
+          {/* First-run guidance is behavior-only by default (macOS "may warn" / Windows SmartScreen).
+              The macOS notarization CLAIM is added ONLY when the live manifest's signed_and_notarized
+              is explicitly false — never invented. The Windows manifest carries no signing metadata,
+              so we never assert its signing state. */}
           <p className="ds-firstrun small muted">
             {platform === "mac"
-              ? "First open: macOS may warn about an unidentified developer — right-click Codesk and choose Open to confirm."
+              ? `First open: macOS may warn about an unidentified developer — right-click Codesk and choose Open to confirm.${manifest.macNotarized === false ? " (This build isn't notarized yet.)" : ""}`
               : "First run: Windows may show a SmartScreen notice — choose More info, then Run anyway."}
           </p>
           <p className="small muted">No terminal commands or access tokens to copy.</p>
@@ -4853,6 +4907,10 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
       setInstallPlatform(defaultDaemonInstallPlatform(daemon.os));
     }
   }, [daemon?.os]);
+  // Derived from the stable initial OS so the manifest hook runs unconditionally BEFORE the early
+  // return below (hooks can't sit after a conditional return); a connected daemon's OS is stable.
+  const deskPlatform = daemonDesktopPlatform(initialDaemonOS);
+  const manifest = useDesktopManifest(deskPlatform);
   if (!daemon) {
     return null;
   }
@@ -4883,12 +4941,12 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
     staticBaseUrl: daemonStaticBase,
     platform: installPlatform,
   });
-  const deskPlatform = daemonDesktopPlatform(daemon.os);
   const hasApp = desktopPlatformHasApp(deskPlatform);
-  // App-path reinstall = re-download the app, through the SAME resolver seam as install → null
-  // stays disabled-honest until the R2 manifest is browser-readable (CORS), never a dead link.
+  // App-path reinstall = re-download the app, through the SAME live-manifest resolver as install →
+  // an unresolved target stays disabled-honest until the R2 manifest is browser-readable (CORS),
+  // never a dead link.
   const appReinstallTarget = defaultDesktopDownloadTarget(deskPlatform);
-  const appReinstallUrl = appReinstallTarget ? desktopAppDownloadUrl(appReinstallTarget) : null;
+  const appReinstallUrl = appReinstallTarget ? manifest.urls[appReinstallTarget] ?? null : null;
   return (
     <>
       <Modal title={daemon.name} onClose={onClose}>
