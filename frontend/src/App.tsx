@@ -4530,7 +4530,7 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
               {/* This multi-sentence recovery copy must WRAP — the global `.chip` is a nowrap pill and
                   clips it at 390px, truncating the honest failure message exactly where honesty matters.
                   Fix lives on this element, not on global `.chip`. */}
-              <p className="ds-unconfirmed-msg"><StatusDot tone="stale" />We couldn't confirm whether the install command was prepared. To avoid creating a duplicate, close this dialog and check Local environments before trying again.</p>
+              <p className="ds-unconfirmed-msg"><StatusDot tone="stale" />We lost contact while creating this environment. It may already exist. Close this dialog and check Local environments before trying again.</p>
             </div>
           ) : createStatus === "ready" && command ? (
             <>

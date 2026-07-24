@@ -597,8 +597,8 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
     // NOT offer a blind retry (it would duplicate) and there is no recoverable token to retry toward.
     const api = { createDaemon: vi.fn().mockRejectedValue(new Error("network dropped")) };
     render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={onDone} />);
-    expect(await screen.findByText(/We couldn't confirm whether the install command was prepared/)).toBeTruthy();
-    expect(screen.getByText(/close this dialog and check Local environments/)).toBeTruthy();
+    expect(await screen.findByText(/We lost contact while creating this environment/)).toBeTruthy();
+    expect(screen.getByText(/It may already exist\. Close this dialog and check Local environments/)).toBeTruthy();
     expect(document.querySelector("pre.code")).toBeNull();
     expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
     // Refresh-once so any committed record surfaces in Local environments; and exactly ONE POST ever.
@@ -610,13 +610,13 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
     stubUA(LINUX);
     const api = { createDaemon: vi.fn().mockRejectedValue(new Error("network dropped")) };
     render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
-    const msg = await screen.findByText(/We couldn't confirm whether the install command was prepared/);
+    const msg = await screen.findByText(/We lost contact while creating this environment/);
     // jsdom can't measure clipping, so pin the structural guarantee Deniz's 390px screenshot proved:
     // the multi-sentence honest recovery copy must NOT sit in the global nowrap `.chip` pill (which
-    // truncated it after "…was"), but on its own wrapping element. chip = short tokens only.
+    // truncated it mid-sentence at 390px), but on its own wrapping element. chip = short tokens only.
     expect(msg.className).toContain("ds-unconfirmed-msg");
     expect(msg.className.split(/\s+/)).not.toContain("chip");
-    // The full final word must be present in the DOM (the clip dropped everything after "was").
+    // The whole sentence — including its final clause — must be present, not clipped.
     expect(msg.textContent).toContain("before trying again.");
   });
 
@@ -631,11 +631,11 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
     render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
     // Linux terminal fires the create on open → it fails ambiguously → the unconfirmed state.
     await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
-    await screen.findByText(/We couldn't confirm whether the install command was prepared/);
+    await screen.findByText(/We lost contact while creating this environment/);
     // Switch Linux → Mac → Linux, re-entering the terminal panel. No second POST may fire.
     await user.click(screen.getByRole("button", { name: "Mac" }));
     await user.click(screen.getByRole("button", { name: "Linux" }));
-    await waitFor(() => expect(screen.getByText(/We couldn't confirm whether the install command was prepared/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/We lost contact while creating this environment/)).toBeTruthy());
     expect(api.createDaemon).toHaveBeenCalledTimes(1);
   });
 
