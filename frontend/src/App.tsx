@@ -29,6 +29,7 @@ import {
   detectDesktopPlatform,
   desktopPlatformHasApp,
   daemonDesktopPlatform,
+  daemonDownloadTarget,
   resolveDesktopManifest,
   desktopPlatformInstallTarget,
   desktopDownloadTargets,
@@ -4354,12 +4355,26 @@ function useDesktopManifest(platform: DesktopPlatform): DesktopManifestState {
 // target; Windows publishes x64 AND ARM64 (UA can't authoritatively pick, so x64 is the default
 // with an always-visible ARM64 link). A target with no resolved URL renders DISABLED — "Checking…"
 // while the manifest loads, then "Desktop download temporarily unavailable" — never a dead link.
+// Labels are keyed to the ACTUAL target, never assumed — the primary is UA-picked and on an ARM
+// browser IS windows-arm64, so a hard-coded "x64" primary label would point ARM users at the wrong
+// file. Both the button and the alternate link derive their text from whichever target they resolve.
+const DESKTOP_TARGET_LABEL: Record<DesktopDownloadTarget, string> = {
+  "macos-universal": "Download for Mac",
+  "windows-amd64": "Download for Windows (x64)",
+  "windows-arm64": "Download for Windows (ARM64)",
+};
+const DESKTOP_TARGET_ALT_PROMPT: Record<DesktopDownloadTarget, string> = {
+  "macos-universal": "Get another build →",
+  "windows-amd64": "Prefer the x64 build? Get it →",
+  "windows-arm64": "On Windows on ARM? Get the ARM64 build →",
+};
+
 function DesktopDownloadButton({ platform, manifest }: { platform: DesktopPlatform; manifest: DesktopManifestState }) {
   const targets = desktopDownloadTargets(platform);
   const primary = defaultDesktopDownloadTarget(platform);
   const primaryUrl = primary ? manifest.urls[primary] ?? null : null;
-  const primaryLabel = platform === "mac" ? "Download for Mac" : "Download for Windows (x64)";
-  const altTarget = targets.find((target) => target !== primary); // Windows ARM64
+  const primaryLabel = primary ? DESKTOP_TARGET_LABEL[primary] : "Download";
+  const altTarget = targets.find((target) => target !== primary); // the other Windows arch
   const altUrl = altTarget ? manifest.urls[altTarget] ?? null : null;
   const loading = manifest.status === "loading";
   return (
@@ -4373,9 +4388,9 @@ function DesktopDownloadButton({ platform, manifest }: { platform: DesktopPlatfo
       )}
       {altTarget ? (
         altUrl ? (
-          <a className="ds-alt-arch" href={altUrl} download>On Windows on ARM? Get the ARM64 build →</a>
+          <a className="ds-alt-arch" href={altUrl} download>{DESKTOP_TARGET_ALT_PROMPT[altTarget]}</a>
         ) : (
-          <span className="ds-alt-arch muted" aria-disabled="true">{loading ? "Checking for the ARM64 build…" : "On Windows on ARM? The ARM64 build is temporarily unavailable."}</span>
+          <span className="ds-alt-arch muted" aria-disabled="true">{loading ? "Checking for the other build…" : `${DESKTOP_TARGET_LABEL[altTarget]} is temporarily unavailable.`}</span>
         )
       ) : null}
     </div>
@@ -4391,8 +4406,13 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
   const [terminalMode, setTerminalMode] = useState(false); // mac/win "Rather use the terminal?"
   const [token, setToken] = useState("");
   const [daemonId, setDaemonId] = useState("");
-  // Daemons already online at open — so the download path can detect the app's NEW daemon
-  // checking in (the app creates it via DesktopConnectPage; this modal never creates one there).
+  const [createStatus, setCreateStatus] = useState<"idle" | "preparing" | "ready" | "failed">("idle");
+  // Single-fire guard: the terminal daemon is created AT MOST ONCE per modal, and a successful
+  // creation survives Back / platform switches (a real server-side resource must never be orphaned
+  // or duplicated by a second POST). Reset only on genuine failure, to allow an explicit retry.
+  const createStartedRef = useRef(false);
+  // Daemons already online at open — so ANY path can detect a NEW daemon checking in (the app
+  // creates its own via DesktopConnectPage; this modal's terminal daemon is also created post-open).
   const [initialOnlineIds] = useState(() => new Set(daemons.filter((d) => daemonStatus(d) === "online").map((d) => d.id)));
 
   const hasApp = desktopPlatformHasApp(platform); // mac/win
@@ -4400,34 +4420,46 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
   const showTerminal = !hasApp || terminalMode; // Linux, or mac/win chose the terminal
   const isUnknown = platform === "unknown";
   const installTarget = desktopPlatformInstallTarget(platform);
-  const command = buildDaemonInstallCommand({ backendUrl: apiBase, workspaceId, daemonToken: token || "nottyd_...", staticBaseUrl: daemonStaticBase, platform: installTarget });
+  // Built ONLY from a real token — never a placeholder — so nothing copyable ever claims to be a
+  // valid install command before the token exists.
+  const command = token ? buildDaemonInstallCommand({ backendUrl: apiBase, workspaceId, daemonToken: token, staticBaseUrl: daemonStaticBase, platform: installTarget }) : "";
 
   const selectPlatform = (next: DesktopPlatform) => {
     setPlatform(next);
     setTerminalMode(false);
   };
 
-  // The terminal token+command is created ONLY when the terminal panel is active — a deliberate
-  // "Rather use the terminal?" on mac/win, or the path itself on Linux. NEVER on the download main
-  // path and never on a bare open of the download default (Anton/Eva honesty rule).
-  useEffect(() => {
-    if (!showTerminal || isUnknown || daemonId) return;
-    let cancelled = false;
-    void (async () => {
+  // Provision the terminal daemon (token + install command). Fires only when the terminal panel is
+  // active — a deliberate "Rather use the terminal?" on mac/win, or Linux's native path — never on
+  // the download main path or a bare open. Owns its Preparing/Ready/Failed state; a successful
+  // result is kept even if the user navigates away, and a failure allows an explicit retry.
+  const runTerminalCreate = useCallback(async () => {
+    if (createStartedRef.current) return;
+    createStartedRef.current = true;
+    setCreateStatus("preparing");
+    try {
       const response = await api.createDaemon(workspaceId, "Local environment");
-      if (cancelled) return;
       setDaemonId(response.daemon.id);
       setToken(response.token);
+      setCreateStatus("ready");
       onDone();
-    })();
-    return () => { cancelled = true; };
-  }, [showTerminal, isUnknown, daemonId, api, workspaceId, onDone]);
+    } catch {
+      setCreateStatus("failed");
+      createStartedRef.current = false; // let the user retry
+    }
+  }, [api, workspaceId, onDone]);
 
-  // Connected is LIVE-DERIVED from a real daemon check-in — never from a Download click. The
-  // terminal path watches its created daemon; the download path watches for a NEW online daemon.
-  const connectedDaemon = daemonId
-    ? daemons.find((d) => d.id === daemonId && daemonStatus(d) === "online")
-    : daemons.find((d) => daemonStatus(d) === "online" && !initialOnlineIds.has(d.id));
+  useEffect(() => {
+    if (!showTerminal || isUnknown) return;
+    void runTerminalCreate();
+  }, [showTerminal, isUnknown, runTerminalCreate]);
+
+  // Connected is LIVE-DERIVED from a real check-in, never a Download click. It accepts the owned
+  // terminal record OR any daemon newly online since open — so terminal→Back→app and
+  // Linux→mac/win→app both still recognize the desktop app's own daemon when it connects.
+  const connectedDaemon =
+    daemons.find((d) => d.id === daemonId && daemonStatus(d) === "online")
+    ?? daemons.find((d) => daemonStatus(d) === "online" && !initialOnlineIds.has(d.id));
   const connected = Boolean(connectedDaemon);
   const terminalDaemon = daemonId ? daemons.find((d) => d.id === daemonId) : undefined;
   const terminalFailed = terminalDaemon ? isDaemonOffline(terminalDaemon) && hasGenuineCheckIn(terminalDaemon) : false;
@@ -4479,11 +4511,23 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
               ? "Install with a command instead — run it in a terminal on the computer you want to connect."
               : "On Linux, connect from the terminal — run this on the computer you want to connect."}
           </p>
-          <ShellScriptBlock title="Install command" badge={installTarget === "windows" ? "PowerShell" : "Shell"} command={command} />
-          {terminalFailed ? (
-            <p className="chip"><StatusDot tone="stale" />No connection yet. Make sure the command ran completely.</p>
+          {createStatus === "failed" ? (
+            <div className="ds-terminal-failed">
+              <p className="chip"><StatusDot tone="stale" />Couldn't prepare the install command.</p>
+              <button type="button" className="btn accent" onClick={() => void runTerminalCreate()}>Try again</button>
+            </div>
+          ) : createStatus === "ready" && command ? (
+            <>
+              <ShellScriptBlock title="Install command" badge={installTarget === "windows" ? "PowerShell" : "Shell"} command={command} />
+              {terminalFailed ? (
+                <p className="chip"><StatusDot tone="stale" />No connection yet. Make sure the command ran completely.</p>
+              ) : (
+                <p className="chip"><StatusDot tone="stale" />{hasApp ? "Waiting — Codesk detects the connection automatically." : "Install command ready — Codesk detects the connection automatically."}</p>
+              )}
+            </>
           ) : (
-            <p className="chip"><StatusDot tone="stale" />{hasApp ? "Waiting — Codesk detects the connection automatically." : "Install command ready — Codesk detects the connection automatically."}</p>
+            // Preparing: a real token doesn't exist yet — show no command and nothing copyable.
+            <p className="small muted ds-preparing">Preparing your install command…</p>
           )}
           {hasApp ? (
             <button type="button" className="ds-back" onClick={() => setTerminalMode(false)}>← Back to the app download</button>
@@ -4883,6 +4927,9 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
   const [reinstallToken, setReinstallToken] = useState("");
   const [reinstallError, setReinstallError] = useState("");
   const [reinstallLoading, setReinstallLoading] = useState(false);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const [installPlatform, setInstallPlatform] = useState<DaemonInstallPlatform>(() => defaultDaemonInstallPlatform(initialDaemonOS));
   // #63 uninstall is honest by INSTALL METHOD, and the record never stores how it was installed —
   // the desktop app is new, so many existing mac/win environments were terminal-installed. So
@@ -4945,7 +4992,9 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
   // App-path reinstall = re-download the app, through the SAME live-manifest resolver as install →
   // an unresolved target stays disabled-honest until the R2 manifest is browser-readable (CORS),
   // never a dead link.
-  const appReinstallTarget = defaultDesktopDownloadTarget(deskPlatform);
+  // Use the DAEMON's real architecture, not the browser's — a Windows ARM64 daemon managed from an
+  // x64/mac browser must get the ARM64 MSI, and an unrecognized arch fails closed (no wrong build).
+  const appReinstallTarget = daemonDownloadTarget(deskPlatform, daemon.arch);
   const appReinstallUrl = appReinstallTarget ? manifest.urls[appReinstallTarget] ?? null : null;
   return (
     <>
@@ -5019,10 +5068,11 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
             </>
           )}
 
-          {/* Orthogonal to uninstall — removes the Codesk-side record only, never touches the machine. */}
+          {/* Orthogonal to uninstall — removes the Codesk-side record only, never touches the machine.
+              Disclaimer is method-agnostic: "Codesk software" holds for both the GUI app and the CLI. */}
           <div className="ds-delete-record">
-            <button className="btn danger full" onClick={async () => { await api.deleteDaemon(workspaceId, daemon.id); onChanged(); onClose(); }}>Delete local environment record</button>
-            <p className="tiny muted">Removes this environment from Codesk — it does not uninstall the app on your computer{installMethod === "app" ? "; use the steps above for that" : ""}.</p>
+            <button className="btn danger full" onClick={() => { setDeleteError(""); setDeleteConfirmOpen(true); }}>Delete local environment record</button>
+            <p className="tiny muted">Removes this environment from Codesk — it does not remove the Codesk software from your computer.</p>
           </div>
         </div>
       </Modal>
@@ -5053,6 +5103,38 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
                 </ShellScriptBlock>
               </>
             )}
+          </div>
+        </Modal>
+      ) : null}
+      {deleteConfirmOpen ? (
+        <Modal title="Delete local environment record" onClose={() => { if (!deleting) setDeleteConfirmOpen(false); }}>
+          <div className="form-stack">
+            <p className="small">Delete this local environment record? Removes “{daemon.name}” from Codesk.</p>
+            <p className="small muted">This will not remove the Codesk software on your computer — to uninstall the software, use the steps above.</p>
+            {deleteError ? <p className="error-text">{deleteError}</p> : null}
+            <div className="row end gap-8">
+              <button type="button" className="btn" disabled={deleting} onClick={() => setDeleteConfirmOpen(false)}>Cancel</button>
+              <button
+                type="button"
+                className="btn danger"
+                disabled={deleting}
+                onClick={async () => {
+                  setDeleting(true);
+                  setDeleteError("");
+                  try {
+                    await api.deleteDaemon(workspaceId, daemon.id);
+                    onChanged();
+                    onClose();
+                  } catch (error) {
+                    // Explicit failure, never silent — the record still exists, so let the user retry.
+                    setDeleteError(error instanceof Error ? error.message : "Couldn't delete the record. Try again.");
+                    setDeleting(false);
+                  }
+                }}
+              >
+                {deleting ? "Deleting…" : "Delete record"}
+              </button>
+            </div>
           </div>
         </Modal>
       ) : null}

@@ -139,6 +139,22 @@ export function defaultDesktopDownloadTarget(platform: DesktopPlatform, userAgen
   return targets[0];
 }
 
+// The download target for an EXISTING daemon's re-download (#63 app reinstall). Unlike the
+// install page — where the browser UA is the only hint — the daemon reports its real `arch`, so
+// we must use it: a Windows ARM64 daemon managed from an x64/mac browser needs the ARM64 MSI, not
+// the browser's arch. macOS is one universal build; an unrecognized Windows arch FAILS CLOSED
+// (null) rather than shipping a wrong-architecture installer.
+export function daemonDownloadTarget(platform: DesktopPlatform, arch?: string): DesktopDownloadTarget | null {
+  if (platform === "mac") return "macos-universal";
+  if (platform === "windows") {
+    const normalized = (arch ?? "").trim().toLowerCase();
+    if (normalized === "amd64" || normalized === "x86_64" || normalized === "x64") return "windows-amd64";
+    if (normalized === "arm64" || normalized === "aarch64") return "windows-arm64";
+    return null; // unknown arch → no guessed installer
+  }
+  return null;
+}
+
 // Per-TARGET desktop-app download URLs, keyed by the frozen asset keys. EMPTY until lane A
 // (#69 publish → #61 validating resolver) lands real GitHub Releases — until then every
 // target resolves to null, the CTA stays DISABLED ("Download unavailable"), and nothing ships
@@ -211,8 +227,12 @@ export function resolveDesktopManifest(
     const image = diskImage as Record<string, unknown>;
     const path = image.path;
     const sha = image.sha256;
+    const size = image.size;
     const expected = `Codesk_${version}_macos_universal.dmg`;
-    if (!isSafeAssetPath(path) || path !== expected || typeof sha !== "string" || !DESKTOP_SHA256_RE.test(sha)) {
+    // The frozen manifest contract carries a positive size; reject zero/negative/non-integer/
+    // string/missing so a malformed disk_image can't resolve to a "valid" object.
+    const sizeValid = typeof size === "number" && Number.isInteger(size) && size > 0;
+    if (!isSafeAssetPath(path) || path !== expected || typeof sha !== "string" || !DESKTOP_SHA256_RE.test(sha) || !sizeValid) {
       return { urls: {}, macNotarized: notarized };
     }
     return { urls: { "macos-universal": `${base}/macos/${version}/${path}` }, macNotarized: notarized };
