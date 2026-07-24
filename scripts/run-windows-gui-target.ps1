@@ -324,7 +324,7 @@ if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
     $RepositoryRoot = Split-Path -Parent $PSScriptRoot
 }
 $root = Resolve-RepositoryPath -Path $RepositoryRoot -Root (Get-Location).Path
-$version = & (Join-Path $root 'scripts/read-version.ps1')
+$version = & (Join-Path $root 'scripts/read-daemon-version.ps1')
 $windowsDirectory = Resolve-RepositoryPath -Path $WindowsRoot -Root $root
 $payloadDirectory = Resolve-RepositoryPath -Path $PayloadRoot -Root $root
 $testDirectory = Resolve-RepositoryPath -Path $TestRoot -Root $root

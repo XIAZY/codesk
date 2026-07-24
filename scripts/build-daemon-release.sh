@@ -8,7 +8,7 @@ platforms="${PLATFORMS:-}"
 all_platforms="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64"
 
 root_dir="$(CDPATH= cd "$(dirname "$0")/.." && pwd)"
-version="$("$root_dir/scripts/read-version.sh")"
+version="$("$root_dir/scripts/read-daemon-version.sh")"
 . "$root_dir/scripts/lib/testtmp.sh"
 case "$dist_dir" in
 	/*) dist_abs="$dist_dir" ;;

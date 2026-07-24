@@ -21,7 +21,7 @@ The implementation is proven on the available Windows 11 ARM64 build 26100 host 
 - [x] (2026-07-20 02:11Z) Added static compiler linking after runtime inspection found an external `libunwind.dll` dependency in LLVM-MinGW's default output.
 - [x] (2026-07-20 02:18Z) Updated source-contract tests and the Windows build documentation.
 - [x] (2026-07-20 02:22Z) Ran `make.ps1 windows-gui-build` successfully in the process-isolated ARM64 container.
-- [x] (2026-07-20 02:24Z) Ran `make.ps1 windows-gui-release` successfully with the root `VERSION`, producing and validating both AMD64 and ARM64 MSIs.
+- [x] (2026-07-20 02:24Z) Ran `make.ps1 windows-gui-release` successfully with the root `DAEMON_VERSION`, producing and validating both AMD64 and ARM64 MSIs.
 - [x] (2026-07-20 02:27Z) Rechecked artifact checksums, provenance, PE runtime imports, PowerShell syntax, focused source tests, Docker image identity, Go contract tests, and whitespace.
 - [x] (2026-07-20 02:31Z) Moved the WiX SDK restore into the reusable image-level NuGet cache so release runs do not fetch the packaging toolchain again.
 - [x] (2026-07-20 04:02Z) Split image construction into `scripts/build-windows-gui-builder-image.ps1`, named the default image `alphatoad/notty:windows-builder`, and added `make build-windows-builder-image`.

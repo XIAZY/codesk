@@ -203,7 +203,7 @@ jobs:
           ALLOW_UNSIGNED_MACOS_DESKTOP: "1"
         run: |
           rm -rf third_party/y-crdt/target
-          release_version="$(scripts/read-version.sh)"
+          release_version="$(scripts/read-daemon-version.sh)"
           scripts/build-macos-desktop-release.sh "$RUNNER_TEMP/macos-release"
           scripts/verify-macos-desktop-release.sh "$RUNNER_TEMP/macos-release/$release_version" "$release_version"
           test "$(plutil -extract signed_and_notarized raw -o - "$RUNNER_TEMP/macos-release/$release_version/manifest.json")" = false
@@ -247,12 +247,12 @@ jobs:
         run: scripts/build-daemon-release.sh "$RUNNER_TEMP/notty-release"
       - name: Verify archives, PE machines, manifest, and checksums
         run: |
-          release_version="$(scripts/read-version.sh)"
+          release_version="$(scripts/read-daemon-version.sh)"
           go run ./scripts/verify-windows-daemon-release.go "$RUNNER_TEMP/notty-release/$release_version" "$release_version"
       - name: Vet and compile Windows-tagged tests for both architectures
         run: |
           rm -rf "$RUNNER_TEMP/windows-desktop-payload"
-          build_version="$(scripts/read-version.sh)"
+          build_version="$(scripts/read-daemon-version.sh)"
           for target in \
             "amd64 x86_64-pc-windows-gnu x86_64-windows-gnu" \
             "arm64 aarch64-pc-windows-gnullvm aarch64-windows-gnu"
@@ -494,7 +494,7 @@ jobs:
       - name: Verify canonical Windows release
         shell: pwsh
         run: |
-          $release_version = & ./scripts/read-version.ps1
+          $release_version = & ./scripts/read-daemon-version.ps1
           go run ./scripts/verify-windows-daemon-release.go "$env:RUNNER_TEMP/notty-release/$release_version" $release_version
       - name: PowerShell installer tests
         shell: pwsh

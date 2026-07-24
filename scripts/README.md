@@ -56,20 +56,28 @@ unsigned, construction-only mode:
 make macos-gui-build
 ```
 
-The signed deployment entry point is `make macos-gui-deploy`; provide both
-signing variables documented above. It builds, signs, notarizes, and uploads the
-versioned release plus `latest` metadata through `scripts/upload-r2.sh`. The
-version is read from the root `VERSION` file (fail-closed). Unsigned mode is
-available only through `make macos-gui-build`; deploy never accepts it. Both
+The deployment entry point is `make macos-gui-deploy`. By default it requires
+both signing variables documented above, then builds, signs, notarizes, and
+uploads the versioned release plus `latest` metadata through
+`scripts/upload-r2.sh`. To explicitly publish an unsigned build instead, run:
+
+```sh
+ALLOW_UNSIGNED_MACOS_DESKTOP=1 make macos-gui-deploy
+```
+
+The version is read from the root `DAEMON_VERSION` file (fail-closed). Both
 human-facing targets fail before construction on a non-macOS kernel, and the
-release script still owns every toolchain, signing, notarization, and
-source-cleanliness check.
+release script still owns every toolchain check. Signed mode additionally owns
+the signing and notarization checks. Tracked, staged, and untracked working-tree
+changes do not block either build or deploy mode.
 
 The script signs the universal nested helper before `Codesk.app`, enables the
 hardened runtime, notarizes and staples the app, produces and notarizes the
 drag-to-Applications DMG, and writes a source-bound `manifest.json` plus
-`SHA256SUMS`. `ALLOW_UNSIGNED_MACOS_DESKTOP=1` exists only for construction
-debugging and cannot produce publishable or trust evidence.
+`SHA256SUMS`. An explicitly deployed unsigned release records
+`signed_and_notarized=false` and has no signing, notarization, stapling, or
+Gatekeeper trust evidence. It is publishable to R2 but remains a visibly labeled
+construction-only artifact.
 
 The desktop credential uses the standard per-user login Keychain so the same
 runtime path works without an Apple provisioning profile. The token remains in
@@ -210,7 +218,7 @@ output paths remain under the repository bind mount. Linux containers, Wine,
 WSL, cross-architecture images, and Hyper-V isolation do not produce a release
 claim. The deploy target does not accept an architecture override: either both
 canonical bundles pass preflight and publish together, or no R2 write starts.
-The version is read from the root `VERSION` file (fail-closed) and must
+The version is read from the root `DAEMON_VERSION` file (fail-closed) and must
 be a canonical numeric value in the MSI range
 (major and minor at most 255, build at most 65535) before compiling. It produces
 exactly one MSI for each architecture:
@@ -228,11 +236,11 @@ to the root version, architecture, repository, and checked-out source commits.
 The builder derives the MSI ProductCode with UUIDv5 from its
 pinned product namespace and the canonical `"<version>+<arch>"` name while
 preserving the package's stable UpgradeCode. Production and uploaded CI
-artifacts always use the root `VERSION`. Upgrade/reproducibility CI uses the
+artifacts always use the root `DAEMON_VERSION`. Upgrade/reproducibility CI uses the
 explicit `-TestOnlyUpgradeQa` mode and versions from
 `scripts/testdata/windows-msi-upgrade-versions.ps1`; those artifacts are
 written under an `upgrade-qa` path, marked `publishable=false`, and never
-uploaded. Deployed bundles live under `desktop/windows/<VERSION>/<arch>`; a
+uploaded. Deployed bundles live under `desktop/windows/<DAEMON_VERSION>/<arch>`; a
 short-cache `desktop/windows/latest/manifest.json` pointer is written only
 after both architecture bundles are present.
 
@@ -262,11 +270,12 @@ with manifests explicitly marked unsigned. That mode records
 `evidence_scope=native-functional-only`, `artifact_trust=NOT_ESTABLISHED`, and
 `publishable=false`; it cannot establish signing, notarization, stapling,
 Gatekeeper acceptance, trust, or publishability. The candidate manifest source
-SHA must equal the clean checkout's `HEAD`. The evidence directory must be
-outside that checkout so untracked source can never affect the verifier used
-for the run. Prepare copies the verified candidate DMG into a private read-only
-evidence snapshot. Resume revalidates that snapshot's exact hash and size at
-installation, and the installed app tree must equal the persisted manifest tree.
+SHA must equal the checkout's `HEAD`, but tracked, staged, and untracked
+working-tree changes are permitted. The evidence directory must be outside that
+checkout so evidence artifacts remain isolated from source files. Prepare copies
+the verified candidate DMG into a private read-only evidence snapshot. Resume
+revalidates that snapshot's exact hash and size at installation, and the installed
+app tree must equal the persisted manifest tree.
 
 The harness requires three external environment drivers because browser
 authentication, remote workspace mutation, and starting a real provider belong

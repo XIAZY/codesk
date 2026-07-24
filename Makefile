@@ -3,21 +3,18 @@ GO_BUILD_FLAGS ?= -trimpath
 WINDOWS_GUI_POWERSHELL ?= powershell.exe
 GO_LDFLAGS ?= -s -w
 ifeq ($(OS),Windows_NT)
-override REPOSITORY_VERSION := $(shell "$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/read-version.ps1)
+override REPOSITORY_DAEMON_VERSION = $(shell "$(WINDOWS_GUI_POWERSHELL)" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/read-daemon-version.ps1)
 WINDOWS_PROCESSOR_ARCH := $(if $(PROCESSOR_ARCHITEW6432),$(PROCESSOR_ARCHITEW6432),$(PROCESSOR_ARCHITECTURE))
 HOST_OS := windows
 HOST_ARCH := $(if $(filter AMD64 amd64 x86_64,$(WINDOWS_PROCESSOR_ARCH)),amd64,$(if $(filter ARM64 arm64 aarch64,$(WINDOWS_PROCESSOR_ARCH)),arm64,$(WINDOWS_PROCESSOR_ARCH)))
 override MACOS_GUI_HOST_OS :=
 else
-override REPOSITORY_VERSION := $(shell scripts/read-version.sh)
+override REPOSITORY_DAEMON_VERSION = $(shell scripts/read-daemon-version.sh)
 UNAME_S := $(shell uname -s | tr '[:upper:]' '[:lower:]')
 UNAME_M := $(shell uname -m)
 HOST_OS := $(if $(filter darwin,$(UNAME_S)),darwin,$(if $(filter linux,$(UNAME_S)),linux,$(UNAME_S)))
 HOST_ARCH := $(if $(filter x86_64 amd64,$(UNAME_M)),amd64,$(if $(filter arm64 aarch64,$(UNAME_M)),arm64,$(UNAME_M)))
 override MACOS_GUI_HOST_OS := $(if $(filter darwin,$(UNAME_S)),darwin,)
-endif
-ifeq ($(REPOSITORY_VERSION),)
-$(error root VERSION is invalid)
 endif
 HOST_PLATFORM := $(HOST_OS)/$(HOST_ARCH)
 HOST_DAEMON_PLATFORM := $(if $(filter darwin,$(HOST_OS)),macos,$(HOST_OS))
@@ -37,7 +34,7 @@ WINDOWS_GUI_ZIG_VERSION ?= 0.16.0
 	linux-daemon-build macos-daemon-build windows-daemon-build daemon-deploy \
 	macos-gui-build macos-gui-deploy windows-gui-build windows-gui-deploy \
 	frontend-build frontend-deploy backend-build backend-deploy deploy \
-	daemon-clean daemon-installer-check daemon-installer-windows-check daemon-uninstall-test version-contract-check build-deploy-contract-check
+	daemon-clean daemon-installer-check daemon-installer-windows-check daemon-uninstall-test daemon-version-contract-check build-deploy-contract-check
 
 dev: _static-build-local
 	docker compose --env-file deploy/env/dev.server.env up --build
@@ -59,7 +56,7 @@ test: tests
 
 tests: test-unit test-postgres test-regression test-live
 
-test-unit: test-go test-frontend daemon-installer-check daemon-uninstall-test version-contract-check build-deploy-contract-check
+test-unit: test-go test-frontend daemon-installer-check daemon-uninstall-test daemon-version-contract-check build-deploy-contract-check
 
 test-go: build-yffi
 	go test ./...
@@ -88,9 +85,11 @@ frontend-build:
 	scripts/build-frontend.sh
 
 _build-daemon-host: build-yffi
-	mkdir -p bin
-	CGO_ENABLED=1 go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS) -X notty/daemon/internal/buildinfo.Version=$(REPOSITORY_VERSION)" -o bin/notty-daemon ./daemon/cmd/daemon
-	CGO_ENABLED=0 go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS) -X notty/daemon/internal/buildinfo.Version=$(REPOSITORY_VERSION)" -o bin/notty-agent-tool ./daemon/cmd/agenttool
+	repository_daemon_version="$(REPOSITORY_DAEMON_VERSION)" && \
+	[ -n "$$repository_daemon_version" ] && \
+	mkdir -p bin && \
+	CGO_ENABLED=1 go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS) -X notty/daemon/internal/buildinfo.Version=$$repository_daemon_version" -o bin/notty-daemon ./daemon/cmd/daemon && \
+	CGO_ENABLED=0 go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS) -X notty/daemon/internal/buildinfo.Version=$$repository_daemon_version" -o bin/notty-agent-tool ./daemon/cmd/agenttool
 
 _static-build-local:
 	DAEMON_DIST_ROOT="$(DAEMON_DIST_ROOT)" DAEMON_ARCHES="$(HOST_ARCH)" scripts/build-daemon-platform.sh "$(HOST_DAEMON_PLATFORM)"
@@ -188,8 +187,8 @@ daemon-installer-windows-check:
 daemon-uninstall-test:
 	sh scripts/test-daemon-uninstall.sh
 
-version-contract-check:
-	sh scripts/test-version-contract.sh
+daemon-version-contract-check:
+	sh scripts/test-daemon-version-contract.sh
 
 build-deploy-contract-check:
 	sh scripts/test-build-deploy-contract.sh

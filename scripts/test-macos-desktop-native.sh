@@ -158,8 +158,6 @@ require_driver CODESK_MACOS_SYNC_DRIVER "$sync_driver"
 
 umask 077
 source_revision="$(git -C "$root_dir" rev-parse --verify HEAD)"
-source_status="$(git -C "$root_dir" status --porcelain=v1 --untracked-files=all)"
-[ -z "$source_status" ] || fail 'source checkout must have no tracked, staged, or untracked changes during native acceptance'
 if [ "$phase" = prepare ]; then
 	[ ! -e "$evidence_dir" ] || fail "prepare requires a new evidence directory: $evidence_dir"
 	mkdir -p "$evidence_dir"

@@ -32,7 +32,7 @@ metadata="$(gh run view "$run_id" -R "$repository" --json headSha,conclusion --j
 case "$out" in
 	''|/|.) die "unsafe WINDOWS_GUI_CI_DIR: $out" ;;
 esac
-release_version="$("$root_dir/scripts/read-version.sh")"
+release_version="$("$root_dir/scripts/read-daemon-version.sh")"
 rm -rf "$out/$run_id"
 mkdir -p "$out/$run_id/amd64" "$out/$run_id/arm64"
 

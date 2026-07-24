@@ -864,10 +864,15 @@ func TestMacOSBuildScriptStagesHostArchiveAndUsesFileFirstLipo(t *testing.T) {
 	}
 	script := string(data)
 	requireOrderedFragments(t, script,
-		"build-macos-desktop-release: staging host yffi library from a clean locked build",
+		"build-macos-desktop-release: staging host yffi library from the pinned toolchain build",
 		`"$root_dir/scripts/build-yffi.sh"`,
 		"go test ./daemon/cmd/codesk-macos-release",
 	)
+	for _, forbidden := range []string{"status --porcelain", "diff --quiet", "diff-index", "source checkout must have no", "requires a clean checkout"} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("build script retained Git-cleanliness guard %q", forbidden)
+		}
+	}
 	for _, want := range []string{
 		`"$lipo" "$desktop" -verify_arch x86_64 arm64`,
 		`"$lipo" "$agent_tool" -verify_arch x86_64 arm64`,
@@ -936,6 +941,11 @@ func TestNativeAcceptanceHarnessCausalBindings(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := string(data)
+	for _, forbidden := range []string{"status --porcelain", "diff --quiet", "diff-index", "source checkout must have no", "requires a clean checkout"} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("native acceptance harness retained Git-cleanliness guard %q", forbidden)
+		}
+	}
 	t.Run("unsigned functional evidence never claims trust", func(t *testing.T) {
 		requireOrderedFragments(t, script,
 			`case "${CODESK_MACOS_ACCEPT_UNSIGNED_FUNCTIONAL:-}" in`,

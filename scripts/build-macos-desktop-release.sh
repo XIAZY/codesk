@@ -9,7 +9,7 @@ sign_identity="${CODESK_MACOS_SIGN_IDENTITY:-}"
 notary_profile="${CODESK_MACOS_NOTARY_PROFILE:-}"
 
 root_dir="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-version="$("$root_dir/scripts/read-version.sh")"
+version="$("$root_dir/scripts/read-daemon-version.sh")"
 . "$root_dir/scripts/lib/testtmp.sh"
 
 go_toolchain='go1.26.5'
@@ -172,10 +172,8 @@ case "$source_revision" in
 	????????????????????????????????????????) ;;
 	*) fail 'could not resolve a full source revision' ;;
 esac
-source_status="$(git -C "$root_dir" status --porcelain=v1 --untracked-files=all)"
-[ -z "$source_status" ] || fail 'source checkout must have no tracked, staged, or untracked changes before building a release'
 
-printf '%s\n' 'build-macos-desktop-release: staging host yffi library from a clean locked build'
+printf '%s\n' 'build-macos-desktop-release: staging host yffi library from the pinned toolchain build'
 (
 	unset RUST_TARGET RUSTFLAGS CARGO_TARGET_DIR RUSTC MACOSX_DEPLOYMENT_TARGET SDKROOT
 	cd "$root_dir"
