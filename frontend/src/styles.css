@@ -3768,3 +3768,19 @@ pre.code {
 .ds-choice-icon { width: 32px; height: 32px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 8px; background: var(--accent); color: var(--paper); font-size: 15px; }
 .ds-choice-text { flex: 1 1 auto; display: flex; flex-direction: column; }
 .ds-choice-chev { flex: 0 0 auto; color: var(--ink-4); font-size: 17px; }
+
+/* Desktop uninstall redesign (#63) — honest-by-install-method: neutral question + app/terminal paths. */
+.ds-method { display: flex; flex-direction: column; gap: 8px; }
+.toglab { font-size: 12.5px; font-weight: 600; color: var(--ink-3); }
+.ds-method-toggle { display: flex; gap: 6px; background: var(--paper-3, var(--paper-2)); border-radius: 10px; padding: 4px; }
+.ds-method-opt {
+  flex: 1; text-align: center; padding: 7px 8px; border: 0; border-radius: 7px;
+  background: transparent; color: var(--ink-3); font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;
+}
+.ds-method-opt.on { background: var(--paper); color: var(--ink); box-shadow: 0 1px 3px -1px oklch(0.3 0.02 60/.3); }
+
+.ds-uninstall-app { display: flex; flex-direction: column; gap: 9px; }
+.ds-uninstall-app .uh { font-size: 12.5px; font-weight: 660; color: var(--ink); }
+.ds-osteps { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 8px; color: var(--ink-2); font-size: 12.5px; line-height: 1.45; }
+
+.ds-delete-record { margin-top: 6px; padding-top: 12px; border-top: 1px solid var(--border-2, var(--border)); display: flex; flex-direction: column; gap: 6px; }

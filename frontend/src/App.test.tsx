@@ -895,22 +895,73 @@ describe("DaemonDetailModal live status", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("defaults to a connected Windows daemon and keeps uninstall and reinstall commands on PowerShell", async () => {
+  it("#63 windows: asks the install method with NO guessed default; Terminal reveals the PowerShell script + reinstall", async () => {
     const user = userEvent.setup();
     const daemon = withReceipt({ ...daemonFixtures.justSeen, id: "d1", os: "windows", arch: "amd64" }, Date.now());
     const api = { createDaemonReinstallToken: vi.fn().mockResolvedValue({ token: "nottyd_fresh" }) };
     const props = { api: api as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
     const { container } = render(<DaemonDetailModal {...props} daemons={[daemon]} />);
 
-    const windowsButton = screen.getByRole("button", { name: "Windows" });
-    expect(windowsButton.getAttribute("aria-pressed")).toBe("true");
+    // Neutral question, neither method pre-selected → no uninstall action yet.
+    expect(screen.getByText("How did you install Codesk on this computer?")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Desktop app" }).getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByRole("button", { name: "Terminal" }).getAttribute("aria-pressed")).toBe("false");
+    expect(container.querySelector("pre.code")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Terminal" }));
+    expect(screen.getByRole("button", { name: "Windows" }).getAttribute("aria-pressed")).toBe("true");
     expect(container.querySelector("pre.code")?.textContent).toContain("uninstall.ps1");
 
-    await user.click(screen.getByRole("button", { name: "Reinstall local environment" }));
+    await user.click(screen.getByRole("button", { name: "Reinstall — run the reinstall script" }));
     await waitFor(() => {
       const commands = Array.from(container.querySelectorAll("pre.code"), (node) => node.textContent ?? "");
-      expect(commands.some((command) => command.includes("uninstall.ps1") && command.includes("install.ps1") && command.includes("nottyd_fresh"))).toBe(true);
+      expect(commands.some((c) => c.includes("uninstall.ps1") && c.includes("install.ps1") && c.includes("nottyd_fresh"))).toBe(true);
     });
+  });
+
+  it("#63 windows: Desktop app shows OS-native uninstall steps (Settings → Apps), NO script and NO token", async () => {
+    const user = userEvent.setup();
+    const daemon = withReceipt({ ...daemonFixtures.justSeen, id: "d1", os: "windows", arch: "amd64" }, Date.now());
+    const api = { createDaemonReinstallToken: vi.fn() };
+    const props = { api: api as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
+    const { container } = render(<DaemonDetailModal {...props} daemons={[daemon]} />);
+
+    await user.click(screen.getByRole("button", { name: "Desktop app" }));
+    expect(screen.getByText(/Settings → Apps → Codesk → Uninstall/)).toBeTruthy();
+    // OS-native path: no terminal script, no reinstall token minted.
+    expect(container.querySelector("pre.code")).toBeNull();
+    expect(api.createDaemonReinstallToken).not.toHaveBeenCalled();
+    // Re-download rides the disabled-honest resolver seam (null until CORS) — never a dead link.
+    expect(screen.getByRole("button", { name: "Reinstall — re-download temporarily unavailable" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("#63 macos: Desktop app shows the Applications/Trash steps, not a script", async () => {
+    const user = userEvent.setup();
+    const daemon = withReceipt({ ...daemonFixtures.justSeen, id: "d1", os: "darwin" }, Date.now());
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
+    const { container } = render(<DaemonDetailModal {...props} daemons={[daemon]} />);
+
+    await user.click(screen.getByRole("button", { name: "Desktop app" }));
+    expect(screen.getByText(/move Codesk to the Trash/)).toBeTruthy();
+    expect(container.querySelector("pre.code")).toBeNull();
+  });
+
+  it("#63 linux: skips the install-method question and shows the terminal uninstall script directly", () => {
+    const daemon = withReceipt({ ...daemonFixtures.justSeen, id: "d1", os: "linux" }, Date.now());
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
+    const { container } = render(<DaemonDetailModal {...props} daemons={[daemon]} />);
+
+    // No desktop app on Linux → no question, terminal is the direct honest path.
+    expect(screen.queryByText("How did you install Codesk on this computer?")).toBeNull();
+    expect(container.querySelector("pre.code")?.textContent).toContain("uninstall.sh");
+  });
+
+  it("#63 'Delete record' is labelled orthogonal to uninstall — it does not touch the machine", () => {
+    const daemon = withReceipt({ ...daemonFixtures.justSeen, id: "d1", os: "linux" }, Date.now());
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
+    render(<DaemonDetailModal {...props} daemons={[daemon]} />);
+    expect(screen.getByRole("button", { name: "Delete local environment record" })).toBeTruthy();
+    expect(screen.getByText(/does not uninstall the app on your computer/)).toBeTruthy();
   });
 });
 

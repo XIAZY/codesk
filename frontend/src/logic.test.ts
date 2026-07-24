@@ -21,6 +21,7 @@ import {
   defaultDaemonInstallPlatform,
   detectDesktopPlatform,
   desktopPlatformHasApp,
+  daemonDesktopPlatform,
   desktopPlatformInstallTarget,
   desktopDownloadTargets,
   defaultDesktopDownloadTarget,
@@ -1152,6 +1153,18 @@ describe("desktop platform detection (task #62 — a hint, not a lock)", () => {
     expect(desktopPlatformHasApp("windows")).toBe(true);
     expect(desktopPlatformHasApp("linux")).toBe(false); // terminal is Linux's honest path
     expect(desktopPlatformHasApp("unknown")).toBe(false);
+  });
+
+  it("maps a daemon's reported OS to its uninstall platform class (#63)", () => {
+    // darwin/windows have a desktop app → the uninstall flow asks "app or terminal?".
+    expect(daemonDesktopPlatform("darwin")).toBe("mac");
+    expect(daemonDesktopPlatform("windows")).toBe("windows");
+    expect(daemonDesktopPlatform("Darwin")).toBe("mac"); // case-insensitive
+    // linux has no app → terminal-only; unknown/absent OS also stays terminal-only (no
+    // OS-native app steps we can't verify), never a guessed app path.
+    expect(daemonDesktopPlatform("linux")).toBe("linux");
+    expect(daemonDesktopPlatform("")).toBe("unknown");
+    expect(daemonDesktopPlatform("freebsd")).toBe("unknown");
   });
 
   it("maps to the terminal install target: windows → PowerShell, else the unix shell", () => {

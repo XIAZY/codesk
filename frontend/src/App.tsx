@@ -28,6 +28,7 @@ import {
   isMarkdownDocumentPath,
   detectDesktopPlatform,
   desktopPlatformHasApp,
+  daemonDesktopPlatform,
   desktopPlatformInstallTarget,
   desktopDownloadTargets,
   defaultDesktopDownloadTarget,
@@ -4829,6 +4830,13 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
   const [reinstallError, setReinstallError] = useState("");
   const [reinstallLoading, setReinstallLoading] = useState(false);
   const [installPlatform, setInstallPlatform] = useState<DaemonInstallPlatform>(() => defaultDaemonInstallPlatform(initialDaemonOS));
+  // #63 uninstall is honest by INSTALL METHOD, and the record never stores how it was installed —
+  // the desktop app is new, so many existing mac/win environments were terminal-installed. So
+  // mac/win open on a neutral question with NO pre-selection (Anton's no-guessed-default rule);
+  // Linux/unknown have no app → terminal-only, question skipped.
+  const [installMethod, setInstallMethod] = useState<"app" | "terminal" | null>(
+    () => (desktopPlatformHasApp(daemonDesktopPlatform(initialDaemonOS)) ? null : "terminal")
+  );
   // Derive the live daemon from workspace state every render, so daemon.updated events and the
   // liveness tick reach the open modal instead of a frozen snapshot captured at click time. Exclude
   // soft-deleted rows: a daemon.deleted event upserts the daemon with status "deleted" (it stays in
@@ -4875,6 +4883,12 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
     staticBaseUrl: daemonStaticBase,
     platform: installPlatform,
   });
+  const deskPlatform = daemonDesktopPlatform(daemon.os);
+  const hasApp = desktopPlatformHasApp(deskPlatform);
+  // App-path reinstall = re-download the app, through the SAME resolver seam as install → null
+  // stays disabled-honest until the R2 manifest is browser-readable (CORS), never a dead link.
+  const appReinstallTarget = defaultDesktopDownloadTarget(deskPlatform);
+  const appReinstallUrl = appReinstallTarget ? desktopAppDownloadUrl(appReinstallTarget) : null;
   return (
     <>
       <Modal title={daemon.name} onClose={onClose}>
@@ -4892,12 +4906,66 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
               return <p className="small" key={agent.id}>@{agent.handle} · {detailStatusLabel(agentStatus)}</p>;
             })}
           </div>
-          <button className="btn accent full" onClick={() => void prepareReinstall()} disabled={reinstallLoading}>Reinstall local environment</button>
-          <DaemonPlatformControl value={installPlatform} onChange={setInstallPlatform} />
-          <ShellScriptBlock title="Uninstall local environment" badge={installPlatform === "windows" ? "PowerShell" : "Shell"} command={uninstallCommand}>
-            <p className="small muted">Run this on the local environment host to remove the local Codesk installation. This uses the global uninstall script because workspace-specific uninstall is not supported yet.</p>
-          </ShellScriptBlock>
-          <button className="btn danger full" onClick={async () => { await api.deleteDaemon(workspaceId, daemon.id); onChanged(); onClose(); }}>Delete local environment record</button>
+
+          {/* Honest by install method: the record never stores HOW it was installed and — unlike
+              platform — there's no truthful signal, so mac/win ask with NO guessed default; the
+              switcher stays for correction. Linux/unknown have no app → terminal-only, no question. */}
+          {hasApp ? (
+            <div className="ds-method">
+              <p className="toglab">How did you install Codesk on this computer?</p>
+              <div className="ds-method-toggle" role="group" aria-label="Install method">
+                <button type="button" className={`ds-method-opt${installMethod === "app" ? " on" : ""}`} aria-pressed={installMethod === "app"} onClick={() => setInstallMethod("app")}>Desktop app</button>
+                <button type="button" className={`ds-method-opt${installMethod === "terminal" ? " on" : ""}`} aria-pressed={installMethod === "terminal"} onClick={() => setInstallMethod("terminal")}>Terminal</button>
+              </div>
+            </div>
+          ) : null}
+
+          {installMethod === null ? (
+            <p className="small muted">Pick one to see the matching Reinstall and Uninstall steps. We don't guess — the desktop app is new, so many Macs and PCs were set up from the terminal.</p>
+          ) : installMethod === "app" ? (
+            <>
+              {appReinstallUrl ? (
+                <a className="btn full" href={appReinstallUrl} download>Reinstall — re-download the app</a>
+              ) : (
+                <button type="button" className="btn full" disabled aria-disabled="true">Reinstall — re-download temporarily unavailable</button>
+              )}
+              <div className="ds-uninstall-app">
+                <p className="uh">Uninstall the Codesk app</p>
+                <ol className="ds-osteps">
+                  {deskPlatform === "windows" ? (
+                    <>
+                      <li>Quit Codesk from the system tray (right-click → Quit).</li>
+                      <li>Settings → Apps → Codesk → Uninstall.</li>
+                    </>
+                  ) : (
+                    <>
+                      <li>Quit Codesk — click the menu-bar icon and choose Quit.</li>
+                      <li>Open Applications and move Codesk to the Trash.</li>
+                    </>
+                  )}
+                </ol>
+                <p className="small muted">
+                  {deskPlatform === "windows"
+                    ? "The installer registered a standard Windows uninstaller — no command needed."
+                    : "This removes the app and its background sync. To also remove it from Codesk, use “Delete record” below."}
+                </p>
+              </div>
+            </>
+          ) : (
+            <>
+              <button className="btn accent full" onClick={() => void prepareReinstall()} disabled={reinstallLoading}>Reinstall — run the reinstall script</button>
+              <DaemonPlatformControl value={installPlatform} onChange={setInstallPlatform} />
+              <ShellScriptBlock title="Uninstall local environment" badge={installPlatform === "windows" ? "PowerShell" : "Shell"} command={uninstallCommand}>
+                <p className="small muted">This script is computer-wide — it may stop every Codesk environment and agent on this machine. It's the global uninstall script; workspace-specific uninstall isn't supported yet.</p>
+              </ShellScriptBlock>
+            </>
+          )}
+
+          {/* Orthogonal to uninstall — removes the Codesk-side record only, never touches the machine. */}
+          <div className="ds-delete-record">
+            <button className="btn danger full" onClick={async () => { await api.deleteDaemon(workspaceId, daemon.id); onChanged(); onClose(); }}>Delete local environment record</button>
+            <p className="tiny muted">Removes this environment from Codesk — it does not uninstall the app on your computer{installMethod === "app" ? "; use the steps above for that" : ""}.</p>
+          </div>
         </div>
       </Modal>
       {reinstallOpen ? (

@@ -96,6 +96,19 @@ export function desktopPlatformHasApp(platform: DesktopPlatform): boolean {
   return platform === "mac" || platform === "windows";
 }
 
+// A connected daemon reports its OS (darwin/windows/linux); map it to the desktop-platform
+// class the UNINSTALL flow keys on (#63). This answers which OS, NOT how it was installed —
+// the record never stores install method, so mac/windows still ask "app or terminal?". Linux
+// has no desktop app (terminal-only); an unrecognized/absent OS also stays terminal-only,
+// because we can't give correct OS-native app steps we can't verify.
+export function daemonDesktopPlatform(osHint = ""): DesktopPlatform {
+  const normalized = osHint.trim().toLowerCase();
+  if (normalized === "windows") return "windows";
+  if (normalized === "darwin") return "mac";
+  if (normalized === "linux") return "linux";
+  return "unknown";
+}
+
 // The terminal install-command platform for a desktop platform: Windows → PowerShell,
 // mac/linux/unknown → the unix shell script.
 export function desktopPlatformInstallTarget(platform: DesktopPlatform): DaemonInstallPlatform {
