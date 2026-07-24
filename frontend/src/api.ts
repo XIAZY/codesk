@@ -23,10 +23,15 @@ const browserOrigin = typeof window !== "undefined" ? window.location.origin : "
 const configuredPublicOrigin = cleanOrigin(import.meta.env.VITE_PUBLIC_ORIGIN || "");
 const configuredApiBase = cleanOrigin(import.meta.env.VITE_API_BASE || "");
 const configuredDaemonStaticBase = cleanOrigin(import.meta.env.VITE_DAEMON_STATIC_BASE || "");
+const configuredDesktopStaticBase = cleanOrigin(import.meta.env.VITE_DESKTOP_STATIC_BASE || "");
 
 export const publicOrigin = configuredPublicOrigin || cleanOrigin(browserOrigin);
 export const apiBase = configuredApiBase || publicOrigin;
 export const daemonStaticBase = configuredDaemonStaticBase || `${publicOrigin}/daemons`;
+// Base for the desktop GUI app manifests/assets on object storage (R2). Prod sets this to the
+// CDN root that hosts `<base>/<os>/latest/manifest.json` (e.g. https://static.getcodesk.com/desktop);
+// unset falls back to same-origin `/desktop`, where the fetch fails closed → disabled-honest download.
+export const desktopStaticBase = configuredDesktopStaticBase || `${publicOrigin}/desktop`;
 
 export class ApiError extends Error {
   status: number;

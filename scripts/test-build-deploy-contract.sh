@@ -68,6 +68,18 @@ case "$deploy_recipe" in
 esac
 pass 'aggregate deploy is ordered and excludes desktop GUI'
 
+# The frontend build must forward EVERY VITE_ origin the app reads at runtime — including the
+# desktop GUI static base — so the production bundle binds the real R2 route instead of falling
+# back to the same-origin default. A missing forward means the download modal fetches the wrong
+# host even after CORS is enabled (deep-review P1).
+frontend_build="$repo_dir/scripts/build-frontend.sh"
+for vite_var in VITE_PUBLIC_ORIGIN VITE_API_BASE VITE_DAEMON_STATIC_BASE VITE_DESKTOP_STATIC_BASE; do
+	grep -q "${vite_var}=" "$frontend_build" || fail "build-frontend.sh does not forward $vite_var to the vite build"
+done
+grep -q 'vite_desktop_static_base="${VITE_DESKTOP_STATIC_BASE:-${NOTTY_DESKTOP_STATIC_BASE:-$static_origin/desktop}}"' "$frontend_build" ||
+	fail 'build-frontend.sh does not derive the desktop static base from the static origin'
+pass 'frontend build forwards the desktop static base (VITE_DESKTOP_STATIC_BASE)'
+
 build_fixture="$tmp_dir/build-fixture"
 mkdir -p "$build_fixture/scripts" "$build_fixture/deploy/daemons"
 cp "$repo_dir/scripts/build-daemon-platform.sh" "$build_fixture/scripts/build-daemon-platform.sh"

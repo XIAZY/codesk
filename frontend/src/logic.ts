@@ -68,6 +68,204 @@ export function isMarkdownDocumentPath(path: string) {
   return /\.(md|markdown)$/i.test(path);
 }
 
+// ---- Desktop install (task #62) ----------------------------------------------
+// The daemon-install redesign detects the user's platform to DEFAULT the download card,
+// but a UA is a hint, not a lock — the machine you connect is often not the one you're
+// browsing on, so the Mac/Win/Linux selector stays visible everywhere and an
+// unrecognized UA falls to a neutral chooser rather than a guessed default (AlphaToad/Eva).
+export type DesktopPlatform = "mac" | "windows" | "linux" | "unknown";
+
+export function detectDesktopPlatform(userAgent?: string): DesktopPlatform {
+  const ua = (
+    userAgent ?? (typeof navigator === "undefined" ? "" : `${navigator.userAgent} ${navigator.platform}`)
+  ).toLowerCase();
+  if (/windows|win32|win64/.test(ua)) return "windows";
+  // iOS carries "like Mac OS X" but is not a Mac desktop and has no app — chooser, not Mac.
+  if (/iphone|ipad|ipod/.test(ua)) return "unknown";
+  if (/macintosh|mac os x/.test(ua)) return "mac";
+  // Linux desktop, but NOT Android or ChromeOS — both carry linux/X11 tokens yet are not a
+  // "connect your computer" target, so they fall through to the neutral chooser.
+  if (/linux|x11/.test(ua) && !/android/.test(ua) && !/cros/.test(ua)) return "linux";
+  // iOS, Android, ChromeOS, bots, anything unrecognized → neutral chooser, no false default.
+  return "unknown";
+}
+
+// Only macOS & Windows ship a real desktop app (no Linux desktop build) — Linux connects
+// via the terminal as its honest primary path, never a fake download.
+export function desktopPlatformHasApp(platform: DesktopPlatform): boolean {
+  return platform === "mac" || platform === "windows";
+}
+
+// A connected daemon reports its OS (darwin/windows/linux); map it to the desktop-platform
+// class the UNINSTALL flow keys on (#63). This answers which OS, NOT how it was installed —
+// the record never stores install method, so mac/windows still ask "app or terminal?". Linux
+// has no desktop app (terminal-only); an unrecognized/absent OS also stays terminal-only,
+// because we can't give correct OS-native app steps we can't verify.
+export function daemonDesktopPlatform(osHint = ""): DesktopPlatform {
+  const normalized = osHint.trim().toLowerCase();
+  if (normalized === "windows") return "windows";
+  if (normalized === "darwin") return "mac";
+  if (normalized === "linux") return "linux";
+  return "unknown";
+}
+
+// The terminal install-command platform for a desktop platform: Windows → PowerShell,
+// mac/linux/unknown → the unix shell script.
+export function desktopPlatformInstallTarget(platform: DesktopPlatform): DaemonInstallPlatform {
+  return platform === "windows" ? "windows" : "unix";
+}
+
+// The download is by TARGET, not platform (Vitaliy's #61 contract): macOS is one universal
+// build, but Windows publishes x64 AND ARM64 MSIs separately and a browser UA cannot
+// authoritatively pick between them — so both Windows arches are shown, with detection only
+// choosing a default (same hint-not-lock rule as platform). Linux/unknown have no app target.
+export type DesktopDownloadTarget = "macos-universal" | "windows-amd64" | "windows-arm64";
+
+export function desktopDownloadTargets(platform: DesktopPlatform): DesktopDownloadTarget[] {
+  if (platform === "mac") return ["macos-universal"];
+  if (platform === "windows") return ["windows-amd64", "windows-arm64"];
+  return []; // linux/unknown → terminal, no download
+}
+
+// The target to preselect for a platform — a recommendation, not a lock. Windows defaults to
+// x64 unless the UA clearly reads ARM (arm64/aarch64); the user can always switch arches.
+export function defaultDesktopDownloadTarget(platform: DesktopPlatform, userAgent?: string): DesktopDownloadTarget | null {
+  const targets = desktopDownloadTargets(platform);
+  if (targets.length === 0) return null;
+  if (platform === "windows") {
+    const ua = (userAgent ?? (typeof navigator === "undefined" ? "" : navigator.userAgent)).toLowerCase();
+    return /arm64|aarch64/.test(ua) ? "windows-arm64" : "windows-amd64";
+  }
+  return targets[0];
+}
+
+// The download target for an EXISTING daemon's re-download (#63 app reinstall). Unlike the
+// install page — where the browser UA is the only hint — the daemon reports its real `arch`, so
+// we must use it: a Windows ARM64 daemon managed from an x64/mac browser needs the ARM64 MSI, not
+// the browser's arch. macOS is one universal build; an unrecognized Windows arch FAILS CLOSED
+// (null) rather than shipping a wrong-architecture installer.
+export function daemonDownloadTarget(platform: DesktopPlatform, arch?: string): DesktopDownloadTarget | null {
+  if (platform === "mac") return "macos-universal";
+  if (platform === "windows") {
+    const normalized = (arch ?? "").trim().toLowerCase();
+    if (normalized === "amd64" || normalized === "x86_64" || normalized === "x64") return "windows-amd64";
+    if (normalized === "arm64" || normalized === "aarch64") return "windows-arm64";
+    return null; // unknown arch → no guessed installer
+  }
+  return null;
+}
+
+// Per-TARGET desktop-app download URLs, keyed by the frozen asset keys. EMPTY until lane A
+// (#69 publish → #61 validating resolver) lands real GitHub Releases — until then every
+// target resolves to null, the CTA stays DISABLED ("Download unavailable"), and nothing ships
+// pointing at a URL that isn't there (a button pointing at nothing is a lying control).
+// @Vitaliy's #61 resolver (manifest.json → per-asset URL, fail-closed) replaces this.
+export const DESKTOP_APP_DOWNLOAD_URLS: Partial<Record<DesktopDownloadTarget, string>> = {};
+
+export function desktopAppDownloadUrl(target: DesktopDownloadTarget): string | null {
+  return DESKTOP_APP_DOWNLOAD_URLS[target] ?? null;
+}
+
+// ---- Desktop download resolver (#61 consumer half) ---------------------------
+// Parses the live R2 manifests into per-target download URLs. The two manifests are NOT one
+// schema (Vitaliy): macOS carries {schema:1, version, signed_and_notarized, disk_image:{path,
+// sha256,size}}; Windows carries {version, artifacts[]:{os,arch,file,sha256}} with no schema/
+// size/signing. We FAIL CLOSED with an exact allowlist, never arbitrary URL joining: the
+// declared filename must EQUAL the name computed from the validated version, sha must be 64
+// lowercase hex, and anything unsafe (absolute URL, `..`, query/fragment, backslash, leading
+// slash, duplicate/missing arch, malformed version) drops THAT target only — a corrupt Windows
+// arm64 entry must not take amd64 down with it. We never invent size/signing the manifest can't
+// prove; macOS's notarization state is surfaced only from its explicit boolean field.
+export type DesktopManifestResult = {
+  urls: Partial<Record<DesktopDownloadTarget, string>>;
+  // true/false from the macOS manifest's explicit field; null when unknown / not a mac manifest.
+  macNotarized: boolean | null;
+};
+
+const DESKTOP_SHA256_RE = /^[0-9a-f]{64}$/;
+// A safe semver-ish version that is also path-safe (no slash, no `..`, no dangerous chars).
+const DESKTOP_VERSION_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+
+// A manifest-declared filename segment must be exactly a plain relative path — reject anything
+// that could escape the versioned prefix or smuggle a different origin.
+function isSafeAssetPath(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    !value.startsWith("/") &&
+    !value.includes("..") &&
+    !/[?#\\]/.test(value) &&
+    !/^[a-z][a-z0-9+.-]*:\/\//i.test(value)
+  );
+}
+
+export function resolveDesktopManifest(
+  platform: DesktopPlatform,
+  raw: unknown,
+  staticBase: string,
+): DesktopManifestResult {
+  const empty: DesktopManifestResult = { urls: {}, macNotarized: null };
+  if (!raw || typeof raw !== "object") return empty;
+  const base = staticBase.trim().replace(/\/+$/, "");
+  if (!base) return empty;
+  const manifest = raw as Record<string, unknown>;
+  const version = typeof manifest.version === "string" ? manifest.version : "";
+  if (!DESKTOP_VERSION_RE.test(version)) {
+    // Version is unusable for the whole manifest — but still surface macOS notarization state,
+    // which is honest regardless of whether the download URL resolves.
+    const notarized = platform === "mac" && typeof manifest.signed_and_notarized === "boolean"
+      ? manifest.signed_and_notarized
+      : null;
+    return { urls: {}, macNotarized: notarized };
+  }
+
+  if (platform === "mac") {
+    const notarized = typeof manifest.signed_and_notarized === "boolean" ? manifest.signed_and_notarized : null;
+    if (manifest.schema !== 1) return { urls: {}, macNotarized: notarized };
+    const diskImage = manifest.disk_image;
+    if (!diskImage || typeof diskImage !== "object") return { urls: {}, macNotarized: notarized };
+    const image = diskImage as Record<string, unknown>;
+    const path = image.path;
+    const sha = image.sha256;
+    const size = image.size;
+    const expected = `Codesk_${version}_macos_universal.dmg`;
+    // The frozen manifest contract carries a positive size; reject zero/negative/non-integer/
+    // string/missing so a malformed disk_image can't resolve to a "valid" object.
+    const sizeValid = typeof size === "number" && Number.isInteger(size) && size > 0;
+    if (!isSafeAssetPath(path) || path !== expected || typeof sha !== "string" || !DESKTOP_SHA256_RE.test(sha) || !sizeValid) {
+      return { urls: {}, macNotarized: notarized };
+    }
+    return { urls: { "macos-universal": `${base}/macos/${version}/${path}` }, macNotarized: notarized };
+  }
+
+  if (platform === "windows") {
+    const artifacts = Array.isArray(manifest.artifacts) ? manifest.artifacts : null;
+    if (!artifacts) return empty;
+    const urls: Partial<Record<DesktopDownloadTarget, string>> = {};
+    const archTarget = { amd64: "windows-amd64", arm64: "windows-arm64" } as const;
+    for (const arch of ["amd64", "arm64"] as const) {
+      const matches = artifacts.filter(
+        (a): a is Record<string, unknown> =>
+          !!a && typeof a === "object" &&
+          (a as Record<string, unknown>).os === "windows" &&
+          (a as Record<string, unknown>).arch === arch,
+      );
+      if (matches.length !== 1) continue; // missing OR duplicate arch → drop only this target
+      const artifact = matches[0];
+      const file = artifact.file;
+      const sha = artifact.sha256;
+      const expected = `${arch}/Codesk_${version}_windows_${arch}.msi`;
+      if (!isSafeAssetPath(file) || file !== expected || typeof sha !== "string" || !DESKTOP_SHA256_RE.test(sha)) {
+        continue;
+      }
+      urls[archTarget[arch]] = `${base}/windows/${version}/${file}`;
+    }
+    return { urls, macNotarized: null };
+  }
+
+  return empty;
+}
+
 export function buildDaemonInstallCommand(input: {
   backendUrl: string;
   workspaceId: string;

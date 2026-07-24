@@ -2,7 +2,7 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentDetailModal, CreateDaemonModal, DaemonDetailModal, DaemonsManagement, documentFolders, ManageModal, MoveDocumentModal, WorkspaceApp, WorkspaceOnboarding } from "./App";
 import { ApiError, publicOrigin } from "./api";
 import { emptyWorkspace, identifierFromName, identifierHelpText, identifierPattern, workspaceSlugMaxLength } from "./logic";
@@ -73,6 +73,14 @@ afterEach(() => {
   vi.useRealTimers();
   localStorage.clear();
   cleanup();
+  vi.unstubAllGlobals();
+});
+
+// The desktop-manifest hook fetches on mount. Default every test to a CORS-like failure (the
+// current production reality until AlphaToad opens CORS) so downloads stay disabled-honest and
+// no test hits the real network; tests that exercise a readable manifest override this.
+beforeEach(() => {
+  vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network blocked")));
 });
 
 function account(): Account {
@@ -492,65 +500,258 @@ describe("WorkspaceApp coming-soon controls", () => {
   });
 });
 
-describe("CreateDaemonModal install status", () => {
-  it("flips the install chip from waiting to connected when the daemon checks in live", async () => {
-    const user = userEvent.setup();
-    const created: Daemon = { ...daemonFixtures.dead, id: "daemon_new", name: "Local daemon" };
-    const api = { createDaemon: vi.fn().mockResolvedValue({ daemon: created, token: "nottyd_secret" }) };
+describe("CreateDaemonModal (desktop install redesign #62)", () => {
+  const stubUA = (ua: string) =>
+    Object.defineProperty(window.navigator, "userAgent", { value: ua, configurable: true });
+  const MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)";
+  const LINUX = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64)";
+  const IOS = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)";
 
-    const { rerender } = render(
-      <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />
-    );
-
-    await user.click(screen.getByRole("button", { name: "Create local environment" }));
-
-    // Local environment created but has not checked in yet: the chip must say waiting.
-    expect(await screen.findByText("Install command ready. Run it in a terminal on the target computer — Codesk detects the connection automatically.")).toBeTruthy();
-    expect(screen.queryByText("Local environment connected. You can create an agent now.")).toBeNull();
-    const unixButton = screen.getByRole("button", { name: "macOS / Linux" });
-    const windowsButton = screen.getByRole("button", { name: "Windows" });
-    expect(unixButton.getAttribute("aria-pressed")).toBe("true");
-    expect(document.querySelector("pre.code")?.textContent).toContain("install.sh");
-
-    await user.click(windowsButton);
-    expect(windowsButton.getAttribute("aria-pressed")).toBe("true");
-    expect(document.querySelector("pre.code")?.textContent).toContain("install.ps1");
-    expect(screen.getByText("PowerShell")).toBeTruthy();
-
-    // A daemon.updated event lands via the workspace socket, so live state now reports
-    // the daemon online. The chip must flip without a manual refresh.
-    rerender(
-      <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[{ ...daemonFixtures.justSeen, id: "daemon_new", name: "Local daemon" }]} onClose={vi.fn()} onDone={vi.fn()} />
-    );
-
-    expect(screen.getByText("Local environment connected. You can create an agent now.")).toBeTruthy();
-    expect(screen.queryByText("Install command ready. Run it in a terminal on the target computer — Codesk detects the connection automatically.")).toBeNull();
+  it("mac: download-app main path creates NO daemon and shows NO token; download is disabled-honest when the manifest can't be read", async () => {
+    stubUA(MAC);
+    const api = { createDaemon: vi.fn() };
+    render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    expect(screen.getByText("Codesk for Mac")).toBeTruthy();
+    expect(screen.getByText("No terminal commands or access tokens to copy.")).toBeTruthy();
+    expect(screen.getByText("Waiting for Codesk to connect…")).toBeTruthy();
+    // The app creates the daemon via DesktopConnectPage on approval — this modal must not, and shows no token.
+    expect(api.createDaemon).not.toHaveBeenCalled();
+    expect(document.querySelector("pre.code")).toBeNull();
+    // Manifest fetch fails (CORS default) → settles to the honest disabled state, never a dead link.
+    expect(await screen.findByRole("button", { name: "Desktop download temporarily unavailable" })).toBeTruthy();
   });
 
-  it("shows waiting, not failure, for a freshly created daemon that has never checked in", async () => {
+  it("mac: a browser-readable manifest wires the REAL R2 download link + the honest not-notarized note", async () => {
+    stubUA(MAC);
+    const dmg = { schema: 1, version: "0.0.1", signed_and_notarized: false, disk_image: { path: "Codesk_0.0.1_macos_universal.dmg", sha256: "a".repeat(64), size: 1 } };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(dmg) }));
+    render(<CreateDaemonModal api={{ createDaemon: vi.fn() } as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    const link = await screen.findByRole("link", { name: /Download for Mac/ });
+    expect(link.getAttribute("href")).toContain("/macos/0.0.1/Codesk_0.0.1_macos_universal.dmg");
+    // signed_and_notarized:false → the honest parenthetical appears (verified from the manifest, not invented).
+    expect(screen.getByText(/isn't notarized yet/)).toBeTruthy();
+  });
+
+  it("windows: a browser-readable manifest wires x64 primary + the ARM64 secondary, and never claims signing", async () => {
+    stubUA("Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+    const win = { version: "0.0.1", artifacts: [
+      { os: "windows", arch: "amd64", file: "amd64/Codesk_0.0.1_windows_amd64.msi", sha256: "b".repeat(64) },
+      { os: "windows", arch: "arm64", file: "arm64/Codesk_0.0.1_windows_arm64.msi", sha256: "c".repeat(64) },
+    ] };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(win) }));
+    render(<CreateDaemonModal api={{ createDaemon: vi.fn() } as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    const primary = await screen.findByRole("link", { name: /Download for Windows \(x64\)/ });
+    expect(primary.getAttribute("href")).toContain("/windows/0.0.1/amd64/Codesk_0.0.1_windows_amd64.msi");
+    expect(screen.getByRole("link", { name: /ARM64 build/ }).getAttribute("href")).toContain("/windows/0.0.1/arm64/Codesk_0.0.1_windows_arm64.msi");
+    // Windows manifest carries no signing metadata → never assert signed/notarized.
+    expect(screen.queryByText(/notarized/)).toBeNull();
+  });
+
+  it("windows on ARM: labels match the ACTUAL target (ARM64 primary, x64 alternate) — no reversal (#2)", async () => {
+    stubUA("Mozilla/5.0 (Windows NT 10.0; Win64; ARM64)");
+    const win = { version: "0.0.1", artifacts: [
+      { os: "windows", arch: "amd64", file: "amd64/Codesk_0.0.1_windows_amd64.msi", sha256: "b".repeat(64) },
+      { os: "windows", arch: "arm64", file: "arm64/Codesk_0.0.1_windows_arm64.msi", sha256: "c".repeat(64) },
+    ] };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(win) }));
+    render(<CreateDaemonModal api={{ createDaemon: vi.fn() } as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    // Primary is UA-picked ARM64 — its label must say ARM64 and resolve /arm64/, never a mislabeled x64.
+    const primary = await screen.findByRole("link", { name: /Download for Windows \(ARM64\)/ });
+    expect(primary.getAttribute("href")).toContain("/arm64/Codesk_0.0.1_windows_arm64.msi");
+    // The alternate is x64 → /amd64/.
+    const alt = screen.getByRole("link", { name: /x64 build/ });
+    expect(alt.getAttribute("href")).toContain("/amd64/Codesk_0.0.1_windows_amd64.msi");
+  });
+
+  it("mac: 'Rather use the terminal?' is the deliberate choice that creates the daemon + shows the curl command", async () => {
+    stubUA(MAC);
     const user = userEvent.setup();
     const created: Daemon = { ...daemonFixtures.neverSeen, id: "daemon_new", name: "Local daemon" };
     const api = { createDaemon: vi.fn().mockResolvedValue({ daemon: created, token: "nottyd_secret" }) };
+    render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    expect(api.createDaemon).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Rather use the terminal?" }));
+    await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(document.querySelector("pre.code")?.textContent).toContain("install.sh"));
+  });
 
-    const { rerender } = render(
-      <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />
-    );
-    await user.click(screen.getByRole("button", { name: "Create local environment" }));
+  it("terminal shows a Preparing state with NO copyable command or placeholder until a real token exists (#6)", async () => {
+    stubUA(LINUX);
+    let resolveCreate: (value: unknown) => void = () => {};
+    const created: Daemon = { ...daemonFixtures.neverSeen, id: "daemon_new", name: "Local daemon" };
+    const api = { createDaemon: vi.fn().mockImplementation(() => new Promise((resolve) => { resolveCreate = resolve; })) };
+    render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    // Preparing: no command block, nothing copyable, and no `nottyd_...` placeholder anywhere.
+    expect(await screen.findByText("Preparing your install command…")).toBeTruthy();
+    expect(document.querySelector("pre.code")).toBeNull();
+    expect(document.body.textContent).not.toContain("nottyd_...");
+    // Ready: the real token resolves → the command appears carrying the real token.
+    await act(async () => { resolveCreate({ daemon: created, token: "nottyd_realtoken" }); });
+    await waitFor(() => expect(document.querySelector("pre.code")?.textContent).toContain("nottyd_realtoken"));
+  });
 
-    // A never-seen daemon reads as "disconnected" on the wire (zero-time lastSeenAt) but the user
-    // hasn't run the install command yet — it must show Waiting, never accuse them of a failed run.
-    rerender(
-      <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[created]} onClose={vi.fn()} onDone={vi.fn()} />
-    );
+  it("terminal create failure → one honest 'unconfirmed' state: no command, no Copy, NO blind retry (#3)", async () => {
+    stubUA(LINUX);
+    const onDone = vi.fn();
+    // Non-idempotent create with no request key: an ambiguous failure could have committed. We must
+    // NOT offer a blind retry (it would duplicate) and there is no recoverable token to retry toward.
+    const api = { createDaemon: vi.fn().mockRejectedValue(new Error("network dropped")) };
+    render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={onDone} />);
+    expect(await screen.findByText(/We lost contact while creating this environment/)).toBeTruthy();
+    expect(screen.getByText(/It may already exist\. Close this dialog and check Local environments/)).toBeTruthy();
+    expect(document.querySelector("pre.code")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+    // Refresh-once so any committed record surfaces in Local environments; and exactly ONE POST ever.
+    await waitFor(() => expect(onDone).toHaveBeenCalled());
+    expect(api.createDaemon).toHaveBeenCalledTimes(1);
+  });
+
+  it("terminal unconfirmed copy renders on its own WRAPPING element, never the nowrap chip that clips it at 390px (#4)", async () => {
+    stubUA(LINUX);
+    const api = { createDaemon: vi.fn().mockRejectedValue(new Error("network dropped")) };
+    render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    const msg = await screen.findByText(/We lost contact while creating this environment/);
+    // jsdom can't measure clipping, so pin the structural guarantee Deniz's 390px screenshot proved:
+    // the multi-sentence honest recovery copy must NOT sit in the global nowrap `.chip` pill (which
+    // truncated it mid-sentence at 390px), but on its own wrapping element. chip = short tokens only.
+    expect(msg.className).toContain("ds-unconfirmed-msg");
+    expect(msg.className.split(/\s+/)).not.toContain("chip");
+    // The whole sentence — including its final clause — must be present, not clipped.
+    expect(msg.textContent).toContain("before trying again.");
+  });
+
+  it("ambiguous create failure does NOT re-fire on re-entry — no duplicate POST after failure→switch→back (#3 re-entry)", async () => {
+    stubUA(LINUX);
+    const user = userEvent.setup();
+    // The single-fire guard must SURVIVE an ambiguous failure: resetting it in the catch would let
+    // failure → switch platform away → return to the terminal issue a SECOND non-idempotent POST and
+    // duplicate the record. (This row is the mutation-complete guard for blocker ③: re-adding
+    // `createStartedRef.current = false` in the catch turns it RED with 2 createDaemon calls.)
+    const api = { createDaemon: vi.fn().mockRejectedValue(new Error("network dropped")) };
+    render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    // Linux terminal fires the create on open → it fails ambiguously → the unconfirmed state.
+    await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
+    await screen.findByText(/We lost contact while creating this environment/);
+    // Switch Linux → Mac → Linux, re-entering the terminal panel. No second POST may fire.
+    await user.click(screen.getByRole("button", { name: "Mac" }));
+    await user.click(screen.getByRole("button", { name: "Linux" }));
+    await waitFor(() => expect(screen.getByText(/We lost contact while creating this environment/)).toBeTruthy());
+    expect(api.createDaemon).toHaveBeenCalledTimes(1);
+  });
+
+  it("terminal create is single-fire: Back before it resolves, then re-enter, still ONE POST + result kept (#3)", async () => {
+    stubUA(MAC);
+    const user = userEvent.setup();
+    let resolveCreate: (value: unknown) => void = () => {};
+    const created: Daemon = { ...daemonFixtures.neverSeen, id: "daemon_new", name: "Local daemon" };
+    const api = { createDaemon: vi.fn().mockImplementation(() => new Promise((resolve) => { resolveCreate = resolve; })) };
+    render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Rather use the terminal?" }));
+    await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
+    // Back to the app download BEFORE the create resolves — must not discard the pending creation.
+    await user.click(screen.getByRole("button", { name: "← Back to the app download" }));
+    await act(async () => { resolveCreate({ daemon: created, token: "nottyd_kept" }); });
+    // Re-enter the terminal: no second POST (no orphan/duplicate), and the kept token is reused.
+    await user.click(screen.getByRole("button", { name: "Rather use the terminal?" }));
+    await waitFor(() => expect(document.querySelector("pre.code")?.textContent).toContain("nottyd_kept"));
+    expect(api.createDaemon).toHaveBeenCalledTimes(1);
+  });
+
+  it("linux: terminal is the primary path — waiting for a never-seen daemon, honest failure only after a real check-in", async () => {
+    stubUA(LINUX);
+    const created: Daemon = { ...daemonFixtures.neverSeen, id: "daemon_new", name: "Local daemon" };
+    const api = { createDaemon: vi.fn().mockResolvedValue({ daemon: created, token: "nottyd_secret" }) };
+    const { rerender } = render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    // Linux has no desktop app → the terminal command is created on open (its real path).
+    await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(document.querySelector("pre.code")?.textContent).toContain("install.sh"));
+    rerender(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[created]} onClose={vi.fn()} onDone={vi.fn()} />);
     expect(screen.getByText(/Install command ready/)).toBeTruthy();
     expect(screen.queryByText(/No connection yet/)).toBeNull();
-
-    // Once it has genuinely checked in and then gone offline, the failure line is the honest state.
-    rerender(
-      <CreateDaemonModal api={api as never} workspaceId="ws" daemons={[{ ...daemonFixtures.dead, id: "daemon_new", name: "Local daemon" }]} onClose={vi.fn()} onDone={vi.fn()} />
-    );
+    rerender(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[{ ...daemonFixtures.dead, id: "daemon_new", name: "Local daemon" }]} onClose={vi.fn()} onDone={vi.fn()} />);
     expect(screen.getByText(/No connection yet/)).toBeTruthy();
-    expect(screen.queryByText(/Install command ready/)).toBeNull();
+  });
+
+  it("connected is live-derived: a real check-in flips any path to the connected state", async () => {
+    stubUA(LINUX);
+    const created: Daemon = { ...daemonFixtures.neverSeen, id: "daemon_new", name: "Local daemon" };
+    const api = { createDaemon: vi.fn().mockResolvedValue({ daemon: created, token: "nottyd_secret" }) };
+    const { rerender } = render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
+    rerender(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[{ ...daemonFixtures.justSeen, id: "daemon_new", name: "Local daemon" }]} onClose={vi.fn()} onDone={vi.fn()} />);
+    expect(screen.getByText("Connected. You can create an agent now.")).toBeTruthy();
+  });
+
+  it("connection detection accepts a NEW app daemon after terminal→Back, not only the terminal record (#7)", async () => {
+    stubUA(MAC);
+    const user = userEvent.setup();
+    const terminalDaemon: Daemon = { ...daemonFixtures.neverSeen, id: "daemon_terminal", name: "Terminal daemon" };
+    const api = { createDaemon: vi.fn().mockResolvedValue({ daemon: terminalDaemon, token: "nottyd_x" }) };
+    const { rerender } = render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Rather use the terminal?" }));
+    await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
+    await user.click(screen.getByRole("button", { name: "← Back to the app download" }));
+    // The desktop app creates its OWN daemon (different id) which comes online — detection must accept it
+    // even though daemonId points at the never-online terminal record.
+    const appDaemon: Daemon = { ...daemonFixtures.justSeen, id: "daemon_app_new", name: "App daemon" };
+    rerender(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[appDaemon]} onClose={vi.fn()} onDone={vi.fn()} />);
+    expect(screen.getByText("Connected. You can create an agent now.")).toBeTruthy();
+  });
+
+  it("connection detection accepts the app daemon after Linux→mac/win platform switch (#7)", async () => {
+    stubUA(LINUX);
+    const user = userEvent.setup();
+    const terminalDaemon: Daemon = { ...daemonFixtures.neverSeen, id: "daemon_terminal", name: "Terminal daemon" };
+    const api = { createDaemon: vi.fn().mockResolvedValue({ daemon: terminalDaemon, token: "nottyd_y" }) };
+    const { rerender } = render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
+    // Switch to Mac (the platform selector stays visible in the terminal panel on Linux).
+    await user.click(screen.getByRole("button", { name: "Mac" }));
+    const appDaemon: Daemon = { ...daemonFixtures.justSeen, id: "daemon_app_new", name: "App daemon" };
+    rerender(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[appDaemon]} onClose={vi.fn()} onDone={vi.fn()} />);
+    expect(screen.getByText("Connected. You can create an agent now.")).toBeTruthy();
+  });
+
+  it("connection detection IGNORES a pre-existing OFFLINE daemon that merely reconnects — not a new connect (#7 false-positive)", () => {
+    stubUA(MAC);
+    // A pre-existing daemon that is OFFLINE at open: its id IS known at open, but it is not online.
+    const preexistingOffline = withReceipt({ ...daemonFixtures.dead, id: "daemon_old" }, Date.now());
+    const { rerender } = render(<CreateDaemonModal api={{ createDaemon: vi.fn() } as never} workspaceId="ws" daemons={[preexistingOffline]} onClose={vi.fn()} onDone={vi.fn()} />);
+    expect(screen.queryByText("Connected. You can create an agent now.")).toBeNull();
+    // It reconnects (comes online). This is NOT the desktop app connecting — with an all-IDs opening
+    // snapshot its id was seen at open, so it must NOT flip the modal to connected. (An online-only
+    // snapshot would misread this reconnect as a brand-new connection.)
+    const reconnected = withReceipt({ ...daemonFixtures.justSeen, id: "daemon_old" }, Date.now());
+    rerender(<CreateDaemonModal api={{ createDaemon: vi.fn() } as never} workspaceId="ws" daemons={[reconnected]} onClose={vi.fn()} onDone={vi.fn()} />);
+    expect(screen.queryByText("Connected. You can create an agent now.")).toBeNull();
+  });
+
+  it("terminal→Back→app NEVER auto-deletes the deliberately-created terminal record (accepted orphan pin)", async () => {
+    stubUA(MAC);
+    const user = userEvent.setup();
+    const terminalDaemon: Daemon = { ...daemonFixtures.neverSeen, id: "daemon_terminal", name: "Terminal daemon" };
+    const deleteDaemon = vi.fn();
+    const api = { createDaemon: vi.fn().mockResolvedValue({ daemon: terminalDaemon, token: "nottyd_z" }), deleteDaemon };
+    const { rerender } = render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Rather use the terminal?" }));
+    await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
+    await user.click(screen.getByRole("button", { name: "← Back to the app download" }));
+    // The app connects its own daemon. The never-used terminal record must NOT be auto-deleted —
+    // it stays visible in Local environments (as a never-checked-in record) and is separately
+    // deletable via the confirmed Delete-record path. Auto-deleting would race a still-running copied
+    // command and could fail silently (Anton/Juan ruling).
+    const appDaemon: Daemon = { ...daemonFixtures.justSeen, id: "daemon_app_new" };
+    rerender(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[terminalDaemon, appDaemon]} onClose={vi.fn()} onDone={vi.fn()} />);
+    expect(screen.getByText("Connected. You can create an agent now.")).toBeTruthy();
+    expect(deleteDaemon).not.toHaveBeenCalled();
+  });
+
+  it("unknown UA: neutral chooser, no faked default and no daemon created", () => {
+    stubUA(IOS);
+    const api = { createDaemon: vi.fn() };
+    render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    expect(screen.getByText("Which computer are you connecting?")).toBeTruthy();
+    expect(api.createDaemon).not.toHaveBeenCalled();
   });
 });
 
@@ -890,22 +1091,163 @@ describe("DaemonDetailModal live status", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("defaults to a connected Windows daemon and keeps uninstall and reinstall commands on PowerShell", async () => {
+  it("#63 windows: asks the install method with NO guessed default; Terminal reveals the PowerShell script + reinstall", async () => {
     const user = userEvent.setup();
     const daemon = withReceipt({ ...daemonFixtures.justSeen, id: "d1", os: "windows", arch: "amd64" }, Date.now());
     const api = { createDaemonReinstallToken: vi.fn().mockResolvedValue({ token: "nottyd_fresh" }) };
     const props = { api: api as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
     const { container } = render(<DaemonDetailModal {...props} daemons={[daemon]} />);
 
-    const windowsButton = screen.getByRole("button", { name: "Windows" });
-    expect(windowsButton.getAttribute("aria-pressed")).toBe("true");
+    // Neutral question, neither method pre-selected → no uninstall action yet.
+    expect(screen.getByText("How did you install Codesk on this computer?")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Desktop app" }).getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByRole("button", { name: "Terminal" }).getAttribute("aria-pressed")).toBe("false");
+    expect(container.querySelector("pre.code")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Terminal" }));
+    expect(screen.getByRole("button", { name: "Windows" }).getAttribute("aria-pressed")).toBe("true");
     expect(container.querySelector("pre.code")?.textContent).toContain("uninstall.ps1");
 
-    await user.click(screen.getByRole("button", { name: "Reinstall local environment" }));
+    await user.click(screen.getByRole("button", { name: "Reinstall — run the reinstall script" }));
     await waitFor(() => {
       const commands = Array.from(container.querySelectorAll("pre.code"), (node) => node.textContent ?? "");
-      expect(commands.some((command) => command.includes("uninstall.ps1") && command.includes("install.ps1") && command.includes("nottyd_fresh"))).toBe(true);
+      expect(commands.some((c) => c.includes("uninstall.ps1") && c.includes("install.ps1") && c.includes("nottyd_fresh"))).toBe(true);
     });
+  });
+
+  it("#63 windows: Desktop app shows OS-native uninstall steps (Settings → Apps), NO script and NO token", async () => {
+    const user = userEvent.setup();
+    const daemon = withReceipt({ ...daemonFixtures.justSeen, id: "d1", os: "windows", arch: "amd64" }, Date.now());
+    const api = { createDaemonReinstallToken: vi.fn() };
+    const props = { api: api as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
+    const { container } = render(<DaemonDetailModal {...props} daemons={[daemon]} />);
+
+    await user.click(screen.getByRole("button", { name: "Desktop app" }));
+    expect(screen.getByText(/Settings → Apps → Codesk → Uninstall/)).toBeTruthy();
+    // OS-native path: no terminal script, no reinstall token minted.
+    expect(container.querySelector("pre.code")).toBeNull();
+    expect(api.createDaemonReinstallToken).not.toHaveBeenCalled();
+    // Re-download rides the disabled-honest resolver seam (null until CORS) — never a dead link.
+    expect(screen.getByRole("button", { name: "Reinstall — re-download temporarily unavailable" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("#63 macos: Desktop app shows the Applications/Trash steps, not a script", async () => {
+    const user = userEvent.setup();
+    const daemon = withReceipt({ ...daemonFixtures.justSeen, id: "d1", os: "darwin" }, Date.now());
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
+    const { container } = render(<DaemonDetailModal {...props} daemons={[daemon]} />);
+
+    await user.click(screen.getByRole("button", { name: "Desktop app" }));
+    expect(screen.getByText(/move Codesk to the Trash/)).toBeTruthy();
+    expect(container.querySelector("pre.code")).toBeNull();
+  });
+
+  it("#63 app reinstall wires the live re-download when the manifest is readable", async () => {
+    const user = userEvent.setup();
+    const dmg = { schema: 1, version: "0.0.1", signed_and_notarized: false, disk_image: { path: "Codesk_0.0.1_macos_universal.dmg", sha256: "a".repeat(64), size: 1 } };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(dmg) }));
+    const daemon = withReceipt({ ...daemonFixtures.justSeen, id: "d1", os: "darwin" }, Date.now());
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
+    render(<DaemonDetailModal {...props} daemons={[daemon]} />);
+    await user.click(screen.getByRole("button", { name: "Desktop app" }));
+    const link = await screen.findByRole("link", { name: "Reinstall — re-download the app" });
+    expect(link.getAttribute("href")).toContain("/macos/0.0.1/Codesk_0.0.1_macos_universal.dmg");
+  });
+
+  it("#63 linux: skips the install-method question and shows the terminal uninstall script directly", () => {
+    const daemon = withReceipt({ ...daemonFixtures.justSeen, id: "d1", os: "linux" }, Date.now());
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
+    const { container } = render(<DaemonDetailModal {...props} daemons={[daemon]} />);
+
+    // No desktop app on Linux → no question, terminal is the direct honest path.
+    expect(screen.queryByText("How did you install Codesk on this computer?")).toBeNull();
+    expect(container.querySelector("pre.code")?.textContent).toContain("uninstall.sh");
+  });
+
+  it("#63 'Delete record' disclaimer is method-agnostic — 'Codesk software', not 'app' (#8)", () => {
+    const daemon = withReceipt({ ...daemonFixtures.justSeen, id: "d1", os: "linux" }, Date.now());
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
+    render(<DaemonDetailModal {...props} daemons={[daemon]} />);
+    expect(screen.getByRole("button", { name: "Delete local environment record" })).toBeTruthy();
+    // Neutral wording that holds for CLI installs too — no "app" language on terminal/Linux.
+    expect(screen.getByText(/does not remove the Codesk software from your computer/)).toBeTruthy();
+    expect(screen.queryByText(/does not uninstall the app/)).toBeNull();
+  });
+
+  it("#63 detail view renders a never-checked-in (Go zero-time) daemon as 'Last seen: Never', not year 1 (orphan honesty)", () => {
+    // The REAL zero-time payload from an ambiguously-committed create — a non-empty string that a
+    // truthy check would swallow into a fake "1/1/1, 12:00:00 AM". The accepted-orphan contract
+    // requires it to read Never, honestly, exactly in the failure-recovery path (Deniz real-stack).
+    const orphan: Daemon = { ...daemonFixtures.justSeen, id: "d1", os: "linux", lastSeenAt: "0001-01-01T00:00:00Z" };
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
+    render(<DaemonDetailModal {...props} daemons={[orphan]} />);
+    expect(screen.getByText("Last seen: Never")).toBeTruthy();
+    expect(screen.queryByText(/Last seen: .*0001|Last seen: 1\/1\/1/)).toBeNull();
+  });
+
+  it("#63 detail view still shows a GENUINE receipt's real date (the year-2020 gate, not a blanket Never)", () => {
+    const seen: Daemon = withReceipt({ ...daemonFixtures.justSeen, id: "d1", os: "linux" }, Date.parse("2026-07-24T10:00:00Z"));
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
+    render(<DaemonDetailModal {...props} daemons={[seen]} />);
+    expect(screen.queryByText("Last seen: Never")).toBeNull();
+    expect(screen.getByText(/^Last seen: /)).toBeTruthy();
+  });
+
+  it("#63 Delete record asks for confirmation first, then deletes with a pending state (#8)", async () => {
+    const user = userEvent.setup();
+    const deleteDaemon = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+    const onChanged = vi.fn();
+    const daemon = withReceipt({ ...daemonFixtures.justSeen, id: "d1", os: "linux", name: "My env" }, Date.now());
+    const props = { api: { deleteDaemon } as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose, onChanged };
+    render(<DaemonDetailModal {...props} daemons={[daemon]} />);
+    await user.click(screen.getByRole("button", { name: "Delete local environment record" }));
+    // Confirmation appears — nothing deleted yet, and it names Codesk-record vs local software.
+    expect(deleteDaemon).not.toHaveBeenCalled();
+    expect(screen.getByText(/will not remove the Codesk software on your computer/i)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Delete record" }));
+    await waitFor(() => expect(deleteDaemon).toHaveBeenCalledWith("ws", "d1"));
+  });
+
+  it("#63 Delete record surfaces an explicit failure, never silent (#8)", async () => {
+    const user = userEvent.setup();
+    const deleteDaemon = vi.fn().mockRejectedValue(new Error("record is busy"));
+    const daemon = withReceipt({ ...daemonFixtures.justSeen, id: "d1", os: "linux" }, Date.now());
+    const props = { api: { deleteDaemon } as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
+    render(<DaemonDetailModal {...props} daemons={[daemon]} />);
+    await user.click(screen.getByRole("button", { name: "Delete local environment record" }));
+    await user.click(screen.getByRole("button", { name: "Delete record" }));
+    expect(await screen.findByText("record is busy")).toBeTruthy();
+  });
+
+  it("#63 app Reinstall uses the DAEMON's arch, not the browser — ARM64 daemon → ARM64 MSI (#4)", async () => {
+    const user = userEvent.setup();
+    const win = { version: "0.0.1", artifacts: [
+      { os: "windows", arch: "amd64", file: "amd64/Codesk_0.0.1_windows_amd64.msi", sha256: "b".repeat(64) },
+      { os: "windows", arch: "arm64", file: "arm64/Codesk_0.0.1_windows_arm64.msi", sha256: "c".repeat(64) },
+    ] };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(win) }));
+    // Windows ARM64 daemon, managed from the (non-ARM jsdom) browser — must still get the ARM64 build.
+    const daemon = withReceipt({ ...daemonFixtures.justSeen, id: "d1", os: "windows", arch: "arm64" }, Date.now());
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
+    render(<DaemonDetailModal {...props} daemons={[daemon]} />);
+    await user.click(screen.getByRole("button", { name: "Desktop app" }));
+    const link = await screen.findByRole("link", { name: "Reinstall — re-download the app" });
+    expect(link.getAttribute("href")).toContain("/arm64/Codesk_0.0.1_windows_arm64.msi");
+  });
+
+  it("#63 app Reinstall fails closed for an unknown daemon arch — no wrong-arch installer (#4)", async () => {
+    const user = userEvent.setup();
+    const win = { version: "0.0.1", artifacts: [
+      { os: "windows", arch: "amd64", file: "amd64/Codesk_0.0.1_windows_amd64.msi", sha256: "b".repeat(64) },
+      { os: "windows", arch: "arm64", file: "arm64/Codesk_0.0.1_windows_arm64.msi", sha256: "c".repeat(64) },
+    ] };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(win) }));
+    const daemon = withReceipt({ ...daemonFixtures.justSeen, id: "d1", os: "windows", arch: "sparc64" }, Date.now());
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
+    render(<DaemonDetailModal {...props} daemons={[daemon]} />);
+    await user.click(screen.getByRole("button", { name: "Desktop app" }));
+    expect(await screen.findByRole("button", { name: "Reinstall — re-download temporarily unavailable" })).toBeTruthy();
   });
 });
 

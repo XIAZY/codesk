@@ -192,6 +192,7 @@ daemon-version-contract-check:
 
 build-deploy-contract-check:
 	sh scripts/test-build-deploy-contract.sh
+	sh scripts/test-frontend-desktop-binding.sh
 
 daemon-clean:
 	rm -rf bin "$(DIST_DIR)"

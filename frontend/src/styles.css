@@ -3722,3 +3722,72 @@ pre.code {
     grid-template-columns: 1fr;
   }
 }
+
+/* Desktop install modal redesign (#62) — download-app main path + terminal fallback + chooser. */
+.ds-download, .ds-terminal, .ds-chooser, .ds-connected { display: flex; flex-direction: column; gap: 12px; }
+
+.ds-app-card, .ds-connected-card {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--paper);
+}
+.ds-app-card > div, .ds-connected-card > div { display: flex; flex-direction: column; }
+.ds-app-icon {
+  width: 36px; height: 36px; flex: 0 0 auto; display: grid; place-items: center;
+  border-radius: 9px; background: var(--accent); color: var(--paper); font-size: 17px;
+}
+.ds-check {
+  width: 34px; height: 34px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 9px;
+  background: oklch(0.92 0.05 150); color: oklch(0.45 0.1 150); font-size: 16px; font-weight: 700;
+}
+
+.ds-download-btn { display: flex; flex-direction: column; gap: 8px; align-items: center; }
+.ds-alt-arch { font-size: 12px; color: var(--accent); text-decoration: none; }
+.ds-alt-arch.muted { color: var(--ink-4); }
+.ds-alt-arch:hover:not(.muted) { text-decoration: underline; }
+
+.ds-steps { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 6px; color: var(--ink-3); font-size: 13px; line-height: 1.5; }
+
+.ds-download-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 2px; }
+.ds-terminal-link, .ds-back {
+  padding: 4px 2px; color: var(--accent); background: none; border: 0; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; text-align: left;
+}
+.ds-terminal-link:hover, .ds-back:hover { text-decoration: underline; }
+
+.ds-platform-select { display: inline-flex; gap: 4px; }
+.ds-platform-pill {
+  padding: 4px 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--paper);
+  color: var(--ink-3); font-size: 12.5px; font-weight: 600; cursor: pointer;
+}
+.ds-platform-pill.selected { background: var(--ink); border-color: var(--ink); color: var(--paper); }
+
+.ds-choice {
+  display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px 14px;
+  border: 1px solid var(--border); border-radius: 12px; background: var(--paper); cursor: pointer; text-align: left; font: inherit;
+}
+.ds-choice:hover { border-color: var(--border-strong); }
+.ds-choice-icon { width: 32px; height: 32px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 8px; background: var(--accent); color: var(--paper); font-size: 15px; }
+.ds-choice-text { flex: 1 1 auto; display: flex; flex-direction: column; }
+.ds-choice-chev { flex: 0 0 auto; color: var(--ink-4); font-size: 17px; }
+
+/* Desktop uninstall redesign (#63) — honest-by-install-method: neutral question + app/terminal paths. */
+.ds-method { display: flex; flex-direction: column; gap: 8px; }
+.toglab { font-size: 12.5px; font-weight: 600; color: var(--ink-3); }
+.ds-method-toggle { display: flex; gap: 6px; background: var(--paper-3, var(--paper-2)); border-radius: 10px; padding: 4px; }
+.ds-method-opt {
+  flex: 1; text-align: center; padding: 7px 8px; border: 0; border-radius: 7px;
+  background: transparent; color: var(--ink-3); font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;
+}
+.ds-method-opt.on { background: var(--paper); color: var(--ink); box-shadow: 0 1px 3px -1px oklch(0.3 0.02 60/.3); }
+
+.ds-uninstall-app { display: flex; flex-direction: column; gap: 9px; }
+.ds-uninstall-app .uh { font-size: 12.5px; font-weight: 660; color: var(--ink); }
+.ds-osteps { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 8px; color: var(--ink-2); font-size: 12.5px; line-height: 1.45; }
+
+.ds-delete-record { margin-top: 6px; padding-top: 12px; border-top: 1px solid var(--border-2, var(--border)); display: flex; flex-direction: column; gap: 6px; }
+
+/* Terminal panel states (#62/#6): Preparing line + ambiguous-failure unconfirmed state (no retry). */
+.ds-preparing { font-style: italic; }
+.ds-terminal-unconfirmed { display: flex; flex-direction: column; gap: 9px; align-items: flex-start; }
+/* The ambiguous-create honest recovery copy — a multi-sentence message, NOT a status pill. It must
+   wrap (never the nowrap `.chip`) so the full sentence renders at narrow widths (e.g. 390px). */
+.ds-unconfirmed-msg { display: flex; gap: 6px; align-items: flex-start; white-space: normal; font-size: 12px; font-weight: 500; color: var(--ink-3); line-height: 1.5; }

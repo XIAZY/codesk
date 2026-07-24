@@ -19,6 +19,15 @@ import {
   personOnline,
   documentActivity,
   defaultDaemonInstallPlatform,
+  detectDesktopPlatform,
+  desktopPlatformHasApp,
+  daemonDesktopPlatform,
+  daemonDownloadTarget,
+  resolveDesktopManifest,
+  desktopPlatformInstallTarget,
+  desktopDownloadTargets,
+  defaultDesktopDownloadTarget,
+  desktopAppDownloadUrl,
   emptyWorkspace,
   activityCategory,
   relativeTime,
@@ -1123,5 +1132,184 @@ describe("daemon install platform", () => {
     expect(defaultDaemonInstallPlatform("linux", "Windows NT 10.0")).toBe("unix");
     expect(defaultDaemonInstallPlatform("", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")).toBe("windows");
     expect(defaultDaemonInstallPlatform("", "Mozilla/5.0 (Macintosh; Intel Mac OS X)")).toBe("unix");
+  });
+});
+
+describe("desktop platform detection (task #62 — a hint, not a lock)", () => {
+  it("detects mac / windows / linux from the UA", () => {
+    expect(detectDesktopPlatform("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")).toBe("mac");
+    expect(detectDesktopPlatform("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")).toBe("windows");
+    expect(detectDesktopPlatform("Mozilla/5.0 (X11; Ubuntu; Linux x86_64)")).toBe("linux");
+  });
+
+  it("falls to a neutral 'unknown' for non-desktop UAs — never a false default", () => {
+    // Errs toward the neutral chooser rather than guessing (AlphaToad/Eva).
+    expect(detectDesktopPlatform("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)")).toBe("unknown");
+    expect(detectDesktopPlatform("Mozilla/5.0 (Linux; Android 14)")).toBe("unknown"); // linux kernel, not a computer
+    expect(detectDesktopPlatform("Mozilla/5.0 (X11; CrOS x86_64)")).toBe("unknown"); // ChromeOS → CrOS not linux
+    expect(detectDesktopPlatform("")).toBe("unknown");
+  });
+
+  it("only mac & windows have a real desktop app; linux/unknown do not", () => {
+    expect(desktopPlatformHasApp("mac")).toBe(true);
+    expect(desktopPlatformHasApp("windows")).toBe(true);
+    expect(desktopPlatformHasApp("linux")).toBe(false); // terminal is Linux's honest path
+    expect(desktopPlatformHasApp("unknown")).toBe(false);
+  });
+
+  it("maps a daemon's reported OS to its uninstall platform class (#63)", () => {
+    // darwin/windows have a desktop app → the uninstall flow asks "app or terminal?".
+    expect(daemonDesktopPlatform("darwin")).toBe("mac");
+    expect(daemonDesktopPlatform("windows")).toBe("windows");
+    expect(daemonDesktopPlatform("Darwin")).toBe("mac"); // case-insensitive
+    // linux has no app → terminal-only; unknown/absent OS also stays terminal-only (no
+    // OS-native app steps we can't verify), never a guessed app path.
+    expect(daemonDesktopPlatform("linux")).toBe("linux");
+    expect(daemonDesktopPlatform("")).toBe("unknown");
+    expect(daemonDesktopPlatform("freebsd")).toBe("unknown");
+  });
+
+  it("daemonDownloadTarget picks by the DAEMON's arch, never the browser (#4)", () => {
+    // A daemon reports its real arch, so its re-download must follow that arch — not the UA.
+    expect(daemonDownloadTarget("windows", "amd64")).toBe("windows-amd64");
+    expect(daemonDownloadTarget("windows", "x86_64")).toBe("windows-amd64");
+    expect(daemonDownloadTarget("windows", "arm64")).toBe("windows-arm64");
+    expect(daemonDownloadTarget("windows", "aarch64")).toBe("windows-arm64");
+    expect(daemonDownloadTarget("windows", "ARM64")).toBe("windows-arm64"); // case-insensitive
+    expect(daemonDownloadTarget("mac", "whatever")).toBe("macos-universal"); // one universal build
+    // Unknown/absent Windows arch → fail closed (never a wrong-architecture installer).
+    expect(daemonDownloadTarget("windows", "sparc64")).toBeNull();
+    expect(daemonDownloadTarget("windows", undefined)).toBeNull();
+    expect(daemonDownloadTarget("linux", "amd64")).toBeNull();
+  });
+
+  it("maps to the terminal install target: windows → PowerShell, else the unix shell", () => {
+    expect(desktopPlatformInstallTarget("windows")).toBe("windows");
+    expect(desktopPlatformInstallTarget("mac")).toBe("unix");
+    expect(desktopPlatformInstallTarget("linux")).toBe("unix");
+    expect(desktopPlatformInstallTarget("unknown")).toBe("unix");
+  });
+
+  it("download is by target: mac = one universal, windows = both arches, linux/unknown = none", () => {
+    // Windows publishes x64 AND ARM64 MSIs separately (Vitaliy's #61 contract) — both shown.
+    expect(desktopDownloadTargets("mac")).toEqual(["macos-universal"]);
+    expect(desktopDownloadTargets("windows")).toEqual(["windows-amd64", "windows-arm64"]);
+    expect(desktopDownloadTargets("linux")).toEqual([]);
+    expect(desktopDownloadTargets("unknown")).toEqual([]);
+  });
+
+  it("default target is a recommendation: windows → x64 unless the UA reads ARM, mac → universal", () => {
+    expect(defaultDesktopDownloadTarget("mac")).toBe("macos-universal");
+    expect(defaultDesktopDownloadTarget("windows", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")).toBe("windows-amd64");
+    expect(defaultDesktopDownloadTarget("windows", "Mozilla/5.0 (Windows NT 10.0; Win64; ARM64)")).toBe("windows-arm64");
+    expect(defaultDesktopDownloadTarget("linux")).toBeNull();
+  });
+
+  it("download URLs resolve to null until lane A publishes — the CTA stays disabled-honest", () => {
+    // No stable release URL yet (#69/#61 pending) → every target is null → button disabled,
+    // never a link pointing at nothing. Vitaliy's #61 resolver populates the real URLs.
+    expect(desktopAppDownloadUrl("macos-universal")).toBeNull();
+    expect(desktopAppDownloadUrl("windows-amd64")).toBeNull();
+    expect(desktopAppDownloadUrl("windows-arm64")).toBeNull();
+  });
+});
+
+describe("desktop manifest resolver (#61 — fail-closed, two schemas)", () => {
+  const BASE = "https://static.getcodesk.com/desktop";
+  const macManifest = (over: Record<string, unknown> = {}, v = "0.0.1") => ({
+    schema: 1,
+    version: v,
+    signed_and_notarized: false,
+    disk_image: { path: `Codesk_${v}_macos_universal.dmg`, sha256: "a".repeat(64), size: 18012811 },
+    ...over,
+  });
+  const winArtifacts = (v = "0.0.1") => [
+    { os: "windows", arch: "amd64", file: `amd64/Codesk_${v}_windows_amd64.msi`, sha256: "b".repeat(64) },
+    { os: "windows", arch: "arm64", file: `arm64/Codesk_${v}_windows_arm64.msi`, sha256: "c".repeat(64) },
+  ];
+  const winManifest = (artifacts: unknown[] = winArtifacts(), v = "0.0.1") => ({ version: v, artifacts });
+
+  it("macOS: resolves the universal DMG URL matching the verified live object + surfaces notarization", () => {
+    const r = resolveDesktopManifest("mac", macManifest(), BASE);
+    expect(r.urls["macos-universal"]).toBe(`${BASE}/macos/0.0.1/Codesk_0.0.1_macos_universal.dmg`);
+    expect(r.macNotarized).toBe(false);
+    expect(resolveDesktopManifest("mac", macManifest({ signed_and_notarized: true }), BASE).macNotarized).toBe(true);
+    // Missing/typeless field → unknown (null), never assumed.
+    expect(resolveDesktopManifest("mac", macManifest({ signed_and_notarized: "no" }), BASE).macNotarized).toBeNull();
+  });
+
+  it("macOS: fails closed on wrong schema / wrong filename / bad sha / traversal — never arbitrary joins", () => {
+    // Wrong schema → no URL, but the notarization state is still honestly surfaced.
+    const wrongSchema = resolveDesktopManifest("mac", macManifest({ schema: 2 }), BASE);
+    expect(wrongSchema.urls).toEqual({});
+    expect(wrongSchema.macNotarized).toBe(false);
+    // Filename not equal to the version-derived name → rejected (no arbitrary URL joining).
+    expect(resolveDesktopManifest("mac", macManifest({ disk_image: { path: "evil.dmg", sha256: "a".repeat(64) } }), BASE).urls).toEqual({});
+    // Bad sha (not 64 lowercase hex) → rejected.
+    expect(resolveDesktopManifest("mac", macManifest({ disk_image: { path: "Codesk_0.0.1_macos_universal.dmg", sha256: "A".repeat(64) } }), BASE).urls).toEqual({});
+    // Path traversal / absolute / query → rejected even though it can't equal `expected` anyway.
+    expect(resolveDesktopManifest("mac", macManifest({ disk_image: { path: "../secret.dmg", sha256: "a".repeat(64) } }), BASE).urls).toEqual({});
+  });
+
+  it("macOS: rejects a non-positive / non-integer / non-number / missing disk_image.size (#5)", () => {
+    const withSize = (size: unknown) =>
+      resolveDesktopManifest("mac", macManifest({ disk_image: { path: "Codesk_0.0.1_macos_universal.dmg", sha256: "a".repeat(64), size } }), BASE);
+    expect(withSize(0).urls).toEqual({});
+    expect(withSize(-5).urls).toEqual({});
+    expect(withSize(3.5).urls).toEqual({});
+    expect(withSize("18012811").urls).toEqual({}); // string, not a number
+    expect(withSize(undefined).urls).toEqual({}); // missing
+    expect(withSize(Number.NaN).urls).toEqual({});
+    // A positive finite integer is the only accepted form.
+    expect(withSize(18012811).urls["macos-universal"]).toBeTruthy();
+  });
+
+  it("macOS: malformed version fails closed but still surfaces notarization", () => {
+    const r = resolveDesktopManifest("mac", macManifest({}, "not-a-version"), BASE);
+    expect(r.urls).toEqual({});
+    expect(r.macNotarized).toBe(false);
+  });
+
+  it("Windows: resolves BOTH arches to the verified live objects", () => {
+    const r = resolveDesktopManifest("windows", winManifest(), BASE);
+    expect(r.urls["windows-amd64"]).toBe(`${BASE}/windows/0.0.1/amd64/Codesk_0.0.1_windows_amd64.msi`);
+    expect(r.urls["windows-arm64"]).toBe(`${BASE}/windows/0.0.1/arm64/Codesk_0.0.1_windows_arm64.msi`);
+    expect(r.macNotarized).toBeNull(); // windows has no signing metadata — never invented
+  });
+
+  it("Windows: partial corruption drops ONLY that arch (arm64 bad → amd64 still resolves)", () => {
+    const artifacts = winArtifacts();
+    (artifacts[1] as Record<string, unknown>).sha256 = "z".repeat(64); // arm64 bad hex
+    const r = resolveDesktopManifest("windows", winManifest(artifacts), BASE);
+    expect(r.urls["windows-amd64"]).toBeTruthy();
+    expect(r.urls["windows-arm64"]).toBeUndefined();
+  });
+
+  it("Windows: duplicate arch → that target dropped (ambiguous, fail closed)", () => {
+    const dup = [...winArtifacts(), { os: "windows", arch: "amd64", file: "amd64/Codesk_0.0.1_windows_amd64.msi", sha256: "d".repeat(64) }];
+    const r = resolveDesktopManifest("windows", winManifest(dup), BASE);
+    expect(r.urls["windows-amd64"]).toBeUndefined(); // duplicated → ambiguous → dropped
+    expect(r.urls["windows-arm64"]).toBeTruthy(); // arm64 still unique
+  });
+
+  it("Windows: wrong filename / wrong os / missing arch each drop their target", () => {
+    const wrongFile = winArtifacts();
+    (wrongFile[0] as Record<string, unknown>).file = "amd64/notcodesk.msi";
+    expect(resolveDesktopManifest("windows", winManifest(wrongFile), BASE).urls["windows-amd64"]).toBeUndefined();
+    // os != windows → not matched at all.
+    const wrongOs = [{ os: "linux", arch: "amd64", file: "amd64/Codesk_0.0.1_windows_amd64.msi", sha256: "b".repeat(64) }];
+    expect(resolveDesktopManifest("windows", winManifest(wrongOs), BASE).urls).toEqual({});
+    // Only amd64 present → arm64 absent, amd64 resolves.
+    const onlyAmd = resolveDesktopManifest("windows", winManifest([winArtifacts()[0]]), BASE);
+    expect(onlyAmd.urls["windows-amd64"]).toBeTruthy();
+    expect(onlyAmd.urls["windows-arm64"]).toBeUndefined();
+  });
+
+  it("junk input fails closed: non-object, empty base, wrong-platform, missing artifacts", () => {
+    expect(resolveDesktopManifest("mac", null, BASE)).toEqual({ urls: {}, macNotarized: null });
+    expect(resolveDesktopManifest("mac", "nope", BASE)).toEqual({ urls: {}, macNotarized: null });
+    expect(resolveDesktopManifest("mac", macManifest(), "").urls).toEqual({});
+    expect(resolveDesktopManifest("linux", macManifest(), BASE)).toEqual({ urls: {}, macNotarized: null });
+    expect(resolveDesktopManifest("windows", { version: "0.0.1" }, BASE).urls).toEqual({});
   });
 });
