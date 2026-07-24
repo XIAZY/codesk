@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
-import { ensureSyntaxTree } from "@codemirror/language";
+import { forceParsing } from "@codemirror/language";
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { afterEach, describe, expect, it } from "vitest";
@@ -16,22 +16,23 @@ afterEach(() => {
 });
 
 function markdownState(doc: string, selection = EditorSelection.cursor(doc.length)) {
-  const state = EditorState.create({
-    doc,
-    selection,
-    extensions: [markdown({ base: markdownLanguage }), nottyMarkdownLivePreview()],
+  const view = new EditorView({
+    state: EditorState.create({
+      doc,
+      selection,
+      extensions: [markdown({ base: markdownLanguage }), nottyMarkdownLivePreview()],
+    }),
   });
-  // Force a complete parse before the test reads tokens. collectMarkdownPreviewTokens calls
-  // syntaxTree(), which advances the Lezer parse within a real-time work budget and returns whatever
-  // is parsed so far — correct for the live editor's viewport, but under CPU load the parse can halt
-  // mid-document in a test, dropping tokens for later lines (the observed flake: the ordered "1."
-  // list marker, and everything after it, went missing). ensureSyntaxTree parses to the document end
-  // deterministically, so token collection no longer races the parser's wall-clock budget. It returns
-  // null if it can't finish within the budget — fail loudly rather than silently falling back to the
-  // flaky partial-parse path.
-  if (!ensureSyntaxTree(state, doc.length, 5000)) {
+  // collectMarkdownPreviewTokens reads syntaxTree(view.state). forceParsing both completes the
+  // mutable parse context and dispatches a state update that publishes that tree. Calling
+  // ensureSyntaxTree alone is insufficient: it returns the completed tree while view.state still
+  // exposes the old partial tree, which caused the load-dependent missing-token failure.
+  if (!forceParsing(view, doc.length, 5000)) {
+    view.destroy();
     throw new Error("markdown live preview test: syntax tree did not fully parse within the budget");
   }
+  const state = view.state;
+  view.destroy();
   return state;
 }
 
@@ -83,6 +84,17 @@ describe("markdown live preview", () => {
     expect(tokens).toContainEqual(expect.objectContaining({ kind: "list-marker", taskLine: false, ordered: true }));
     expect(tokens).toContainEqual(expect.objectContaining({ kind: "code-fence" }));
     expect(tokens).toContainEqual(expect.objectContaining({ kind: "table" }));
+  });
+
+  it("publishes a complete tree past the parser's initial viewport", () => {
+    const doc = `${"plain text\n".repeat(400)}> late quote`;
+    const quoteFrom = doc.lastIndexOf(">");
+    expect(quoteFrom).toBeGreaterThan(3000);
+
+    const state = markdownState(doc);
+    const tokens = collectMarkdownPreviewTokens(state, [{ from: quoteFrom, to: doc.length }]);
+
+    expect(tokens).toContainEqual(expect.objectContaining({ kind: "quote-marker", from: quoteFrom }));
   });
 
   it("reveals source syntax for the active line", () => {
