@@ -202,6 +202,12 @@ beforeEach(() => {
     if (path.endsWith("/api/workspaces/workspace_created/documents") && init?.method === "POST") {
       return jsonResponse({ id: "doc_created", updatedAt: "2026-06-29T00:00:00Z" });
     }
+    if (path.endsWith("/api/workspaces/workspace_alpha/daemons") && init?.method === "POST") {
+      return jsonResponse({
+        daemon: { id: "daemon_desktop", workspaceId: "workspace_alpha", name: "Editing MacBook", status: "active", createdAt: "now" },
+        token: "nottyd_desktop",
+      });
+    }
     if (patchLastAccessed(path, init)) {
       return jsonResponse({ status: "ok" });
     }
@@ -588,7 +594,32 @@ describe("App URL routing", () => {
     await waitFor(() => expect(screen.getByRole("heading", { name: "Connect desktop app" })).toBeTruthy());
     expect(screen.getByText("Alpha Workspace")).toBeTruthy();
     expect(screen.getByText("Team Workspace")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Connect" })).toBeTruthy();
+    expect(screen.getByLabelText("Local environment name")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Connect" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("requires and submits the user's local environment name on desktop approval", async () => {
+    const user = userEvent.setup();
+    const formSubmit = vi.spyOn(HTMLFormElement.prototype, "submit").mockImplementation(() => {});
+    localStorage.setItem("codesk.auth.token", "token");
+    window.history.replaceState(null, "", "/desktop/connect?callback=http%3A%2F%2F127.0.0.1%3A12345%2Fdesktop%2Fconnect%2FABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopA");
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Connect desktop app" })).toBeTruthy());
+    await user.click(screen.getByRole("radio", { name: /Alpha Workspace/ }));
+    const connect = screen.getByRole("button", { name: "Connect" });
+    expect(connect.hasAttribute("disabled")).toBe(true);
+    await user.type(screen.getByLabelText("Local environment name"), "Editing MacBook");
+    expect(connect.hasAttribute("disabled")).toBe(false);
+    await user.click(connect);
+
+    const createCall = vi.mocked(fetch).mock.calls.find(([url, init]) => (
+      String(url).endsWith("/api/workspaces/workspace_alpha/daemons") && init?.method === "POST"
+    ));
+    expect(createCall).toBeTruthy();
+    expect(JSON.parse(String(createCall?.[1]?.body))).toEqual({ name: "Editing MacBook" });
+    await waitFor(() => expect(formSubmit).toHaveBeenCalledTimes(1));
   });
 
   it("rejects non-loopback desktop connect callback", async () => {

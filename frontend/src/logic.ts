@@ -71,8 +71,9 @@ export function isMarkdownDocumentPath(path: string) {
 // ---- Desktop install (task #62) ----------------------------------------------
 // The daemon-install redesign detects the user's platform to DEFAULT the download card,
 // but a UA is a hint, not a lock — the machine you connect is often not the one you're
-// browsing on, so the Mac/Win/Linux selector stays visible everywhere and an
-// unrecognized UA falls to a neutral chooser rather than a guessed default (AlphaToad/Eva).
+// browsing on. The GUI chooser offers only the platforms with desktop apps (Mac/Windows);
+// Linux remains available in the explicitly entered command-line setup. An unrecognized
+// UA falls to a neutral GUI chooser rather than a guessed default (AlphaToad/Eva).
 export type DesktopPlatform = "mac" | "windows" | "linux" | "unknown";
 
 export function detectDesktopPlatform(userAgent?: string): DesktopPlatform {

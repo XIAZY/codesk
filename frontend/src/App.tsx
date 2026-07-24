@@ -793,6 +793,7 @@ function DesktopConnectPage({
   workspaces: WorkspaceSummary[];
 }) {
   const [selected, setSelected] = useState<string | null>(workspaces.length === 1 ? workspaces[0].id : null);
+  const [environmentName, setEnvironmentName] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const formRef = useRef<HTMLFormElement>(null);
@@ -805,11 +806,12 @@ function DesktopConnectPage({
   const selectedWorkspace = workspaces.find((w) => w.id === selected) ?? null;
 
   const submit = async () => {
-    if (!selectedWorkspace) return;
+    const name = environmentName.trim();
+    if (!selectedWorkspace || !name) return;
     setSubmitting(true);
     setError("");
     try {
-      const response = await api.createDaemon(selectedWorkspace.id, "Codesk Desktop");
+      const response = await api.createDaemon(selectedWorkspace.id, name);
       setFormFields({
         daemon_id: response.daemon.id,
         token: response.token,
@@ -839,7 +841,7 @@ function DesktopConnectPage({
       <section className="card p-24 auth-panel">
         <Logo />
         <h1 className="auth-title">Connect desktop app</h1>
-        <p className="muted">Select the workspace your desktop app will sync with.</p>
+        <p className="muted">Choose where your desktop app will sync and name the local environment it creates.</p>
         <div className="form-stack">
           {workspaces.map((w) => (
             <label key={w.id} className="row gap-8 items-center" style={{ cursor: "pointer", padding: "8px 0" }}>
@@ -851,8 +853,20 @@ function DesktopConnectPage({
               </div>
             </label>
           ))}
+          <label className="field">
+            <span className="lab">Local environment name</span>
+            <input
+              aria-label="Local environment name"
+              value={environmentName}
+              placeholder="Build server"
+              onChange={(event) => setEnvironmentName(event.target.value)}
+              disabled={submitting}
+              required
+            />
+            <span className="hint">This is what you'll see in Local environments.</span>
+          </label>
           {error ? <p className="error-text">{error}</p> : null}
-          <button className="btn accent full lg" disabled={!selected || submitting} onClick={submit}>
+          <button className="btn accent full lg" disabled={!selected || !environmentName.trim() || submitting} onClick={submit}>
             {submitting ? "Connecting..." : "Connect"}
           </button>
         </div>
@@ -4398,12 +4412,19 @@ function DesktopDownloadButton({ platform, manifest }: { platform: DesktopPlatfo
 }
 
 export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }: { api: ApiClient; workspaceId: string; daemons: Daemon[]; onClose: () => void; onDone: () => void }) {
-  // Platform is a HINT (UA), not a lock — the machine you connect is often not the one you're
-  // browsing on, so the Mac/Win/Linux selector stays visible and an unknown UA gets a neutral
-  // chooser instead of a guessed default. mac/win default to the download-app path; Linux is
-  // terminal-native (no desktop app).
-  const [platform, setPlatform] = useState<DesktopPlatform>(() => detectDesktopPlatform());
-  const [terminalMode, setTerminalMode] = useState(false); // mac/win "Rather use the terminal?"
+  // Desktop-app selection and command-line selection are separate dimensions. Linux has no GUI
+  // download, so it must never appear as a peer in the desktop-app chooser; it remains available
+  // in the explicitly entered command-line setup alongside macOS and Windows.
+  const [detectedPlatform] = useState<DesktopPlatform>(() => detectDesktopPlatform());
+  const [platform, setPlatform] = useState<DesktopPlatform>(() => (
+    desktopPlatformHasApp(detectedPlatform) ? detectedPlatform : "unknown"
+  ));
+  const [commandPlatform, setCommandPlatform] = useState<Exclude<DesktopPlatform, "unknown">>(() => (
+    detectedPlatform === "unknown" ? "linux" : detectedPlatform
+  ));
+  const [terminalMode, setTerminalMode] = useState(false);
+  const [environmentName, setEnvironmentName] = useState("");
+  const [nameError, setNameError] = useState("");
   const [token, setToken] = useState("");
   const [daemonId, setDaemonId] = useState("");
   const [createStatus, setCreateStatus] = useState<"idle" | "preparing" | "ready" | "unconfirmed">("idle");
@@ -4418,31 +4439,25 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
   // open — and NEVER a pre-existing daemon that was merely OFFLINE at open and later reconnects.
   const [initialDaemonIds] = useState(() => new Set(daemons.map((d) => d.id)));
 
-  const hasApp = desktopPlatformHasApp(platform); // mac/win
   const manifest = useDesktopManifest(platform); // live R2 URLs + macOS notarization state
-  const showTerminal = !hasApp || terminalMode; // Linux, or mac/win chose the terminal
   const isUnknown = platform === "unknown";
-  const installTarget = desktopPlatformInstallTarget(platform);
+  const installTarget = desktopPlatformInstallTarget(commandPlatform);
   // Built ONLY from a real token — never a placeholder — so nothing copyable ever claims to be a
   // valid install command before the token exists.
   const command = token ? buildDaemonInstallCommand({ backendUrl: apiBase, workspaceId, daemonToken: token, staticBaseUrl: daemonStaticBase, platform: installTarget }) : "";
 
   const selectPlatform = (next: DesktopPlatform) => {
     setPlatform(next);
-    setTerminalMode(false);
   };
 
-  // Provision the terminal daemon (token + install command). Fires only when the terminal panel is
-  // active — a deliberate "Rather use the terminal?" on mac/win, or Linux's native path — never on
-  // the download main path or a bare open. Owns its Preparing/Ready/unconfirmed state; a successful
-  // result is kept even if the user navigates away, and an AMBIGUOUS failure settles into the
-  // unconfirmed state with NO retry — the guard stays set (never reset) so re-entry cannot duplicate.
-  const runTerminalCreate = useCallback(async () => {
+  // Provision the command-line daemon only after the named form is deliberately submitted.
+  // Opening the panel and switching operating systems are reversible navigation and issue no POST.
+  const runTerminalCreate = useCallback(async (name: string) => {
     if (createStartedRef.current) return;
     createStartedRef.current = true;
     setCreateStatus("preparing");
     try {
-      const response = await api.createDaemon(workspaceId, "Local environment");
+      const response = await api.createDaemon(workspaceId, name);
       setDaemonId(response.daemon.id);
       setToken(response.token);
       setCreateStatus("ready");
@@ -4460,10 +4475,16 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
     }
   }, [api, workspaceId, onDone]);
 
-  useEffect(() => {
-    if (!showTerminal || isUnknown) return;
-    void runTerminalCreate();
-  }, [showTerminal, isUnknown, runTerminalCreate]);
+  const generateInstallCommand = (event: FormEvent) => {
+    event.preventDefault();
+    const name = environmentName.trim();
+    if (!name) {
+      setNameError("Enter a name for this local environment.");
+      return;
+    }
+    setNameError("");
+    void runTerminalCreate(name);
+  };
 
   // Connected is LIVE-DERIVED from a real check-in, never a Download click. It accepts this flow's
   // owned terminal record OR a genuinely NEW record (id unseen at open) coming online — so
@@ -4476,18 +4497,33 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
   const terminalDaemon = daemonId ? daemons.find((d) => d.id === daemonId) : undefined;
   const terminalFailed = terminalDaemon ? isDaemonOffline(terminalDaemon) && hasGenuineCheckIn(terminalDaemon) : false;
 
-  const platformSelector = (
+  const desktopPlatformSelector = (
     <div className="ds-platform-select" role="group" aria-label="Which computer are you connecting?">
-      {(["mac", "windows", "linux"] as const).map((p) => (
+      {(["mac", "windows"] as const).map((p) => (
         <button key={p} type="button" className={`ds-platform-pill${platform === p ? " selected" : ""}`} aria-pressed={platform === p} onClick={() => selectPlatform(p)}>
-          {p === "mac" ? "Mac" : p === "windows" ? "Win" : "Linux"}
+          {p === "mac" ? "Mac" : "Win"}
+        </button>
+      ))}
+    </div>
+  );
+  const commandPlatformSelector = (
+    <div className="ds-platform-select" role="group" aria-label="Command-line operating system">
+      {(["mac", "linux", "windows"] as const).map((p) => (
+        <button
+          key={p}
+          type="button"
+          className={`ds-platform-pill${commandPlatform === p ? " selected" : ""}`}
+          aria-pressed={commandPlatform === p}
+          onClick={() => setCommandPlatform(p)}
+        >
+          {p === "mac" ? "macOS" : p === "windows" ? "Windows" : "Linux"}
         </button>
       ))}
     </div>
   );
 
   return (
-    <Modal title="Connect this workspace to your computer" onClose={onClose}>
+    <Modal title={terminalMode ? "Set up from the command line" : "Connect this workspace to your computer"} onClose={onClose}>
       {connected ? (
         <div className="ds-connected">
           <div className="ds-connected-card">
@@ -4497,32 +4533,35 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
           <p className="chip online"><StatusDot tone="online" />Connected. You can create an agent now.</p>
           <div className="row end"><button className="btn accent" onClick={onClose}>Done</button></div>
         </div>
-      ) : isUnknown ? (
-        <div className="ds-chooser">
-          <p className="small muted">Which computer are you connecting?</p>
-          <button type="button" className="ds-choice" onClick={() => selectPlatform("mac")}>
-            <span className="ds-choice-icon" aria-hidden="true">↓</span>
-            <span className="ds-choice-text"><strong>Mac</strong><span className="small muted">Download the app</span></span>
-            <span className="ds-choice-chev" aria-hidden="true">›</span>
-          </button>
-          <button type="button" className="ds-choice" onClick={() => selectPlatform("windows")}>
-            <span className="ds-choice-icon" aria-hidden="true">↓</span>
-            <span className="ds-choice-text"><strong>Windows</strong><span className="small muted">Download the .msi</span></span>
-            <span className="ds-choice-chev" aria-hidden="true">›</span>
-          </button>
-          <button type="button" className="ds-choice" onClick={() => selectPlatform("linux")}>
-            <span className="ds-choice-icon" aria-hidden="true">▸</span>
-            <span className="ds-choice-text"><strong>Linux</strong><span className="small muted">Connect from the terminal</span></span>
-            <span className="ds-choice-chev" aria-hidden="true">›</span>
-          </button>
-        </div>
-      ) : showTerminal ? (
+      ) : terminalMode ? (
         <div className="ds-terminal">
-          <p className="small muted">
-            {hasApp
-              ? "Install with a command instead — run it in a terminal on the computer you want to connect."
-              : "On Linux, connect from the terminal — run this on the computer you want to connect."}
-          </p>
+          <p className="small muted">For servers and headless computers.</p>
+          {commandPlatformSelector}
+          <form className="ds-command-form" onSubmit={generateInstallCommand}>
+            <label className="field">
+              <span className="lab">Local environment name</span>
+              <input
+                aria-label="Local environment name"
+                value={environmentName}
+                placeholder="Build server"
+                onChange={(event) => {
+                  setEnvironmentName(event.target.value);
+                  if (nameError) setNameError("");
+                }}
+                aria-invalid={Boolean(nameError)}
+                aria-describedby={nameError ? "daemon-name-error" : undefined}
+                disabled={createStartedRef.current}
+              />
+              <span className="hint">Name it before we create it — this is what you'll see in Local environments.</span>
+            </label>
+            {nameError ? <p id="daemon-name-error" className="error-text">{nameError}</p> : null}
+            {createStatus === "idle" ? (
+              <>
+                <p className="tiny muted">Nothing is created until you submit this name.</p>
+                <button type="submit" className="btn accent full">Generate install command</button>
+              </>
+            ) : null}
+          </form>
           {createStatus === "unconfirmed" ? (
             // Non-idempotent create failed ambiguously — one honest state, no command, no copy, no
             // blind Retry (which could duplicate). The user closes and verifies in Local environments.
@@ -4538,18 +4577,32 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
               {terminalFailed ? (
                 <p className="chip"><StatusDot tone="stale" />No connection yet. Make sure the command ran completely.</p>
               ) : (
-                <p className="chip"><StatusDot tone="stale" />{hasApp ? "Waiting — Codesk detects the connection automatically." : "Install command ready — Codesk detects the connection automatically."}</p>
+                <p className="chip"><StatusDot tone="stale" />Install command ready — Codesk detects the connection automatically.</p>
               )}
             </>
-          ) : (
+          ) : createStatus === "preparing" ? (
             // Preparing: a real token doesn't exist yet — show no command and nothing copyable.
             <p className="small muted ds-preparing">Preparing your install command…</p>
-          )}
-          {hasApp ? (
-            <button type="button" className="ds-back" onClick={() => setTerminalMode(false)}>← Back to the app download</button>
-          ) : (
-            platformSelector
-          )}
+          ) : null}
+          <button type="button" className="ds-back" onClick={() => setTerminalMode(false)}>← Back to desktop app downloads</button>
+        </div>
+      ) : isUnknown ? (
+        <div className="ds-chooser">
+          <p className="small muted">Which computer are you connecting?</p>
+          <button type="button" className="ds-choice" onClick={() => selectPlatform("mac")}>
+            <span className="ds-choice-icon" aria-hidden="true">↓</span>
+            <span className="ds-choice-text"><strong>Mac</strong><span className="small muted">Download the app</span></span>
+            <span className="ds-choice-chev" aria-hidden="true">›</span>
+          </button>
+          <button type="button" className="ds-choice" onClick={() => selectPlatform("windows")}>
+            <span className="ds-choice-icon" aria-hidden="true">↓</span>
+            <span className="ds-choice-text"><strong>Windows</strong><span className="small muted">Download the .msi</span></span>
+            <span className="ds-choice-chev" aria-hidden="true">›</span>
+          </button>
+          <div className="ds-headless-entry">
+            <span className="small muted">Running on a server or headless computer? Set up Codesk from the command line.</span>
+            <button type="button" className="ds-terminal-link" onClick={() => setTerminalMode(true)}>Use command line setup</button>
+          </div>
         </div>
       ) : (
         <div className="ds-download">
@@ -4575,8 +4628,11 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
           <p className="small muted">No terminal commands or access tokens to copy.</p>
           <p className="chip"><StatusDot tone="stale" />Waiting for Codesk to connect…</p>
           <div className="ds-download-foot">
-            <button type="button" className="ds-terminal-link" onClick={() => setTerminalMode(true)}>{platform === "windows" ? "Rather use PowerShell?" : "Rather use the terminal?"}</button>
-            {platformSelector}
+            <div className="ds-headless-entry">
+              <span className="small muted">Running on a server or headless computer? Set up Codesk from the command line.</span>
+              <button type="button" className="ds-terminal-link" onClick={() => setTerminalMode(true)}>Use command line setup</button>
+            </div>
+            {desktopPlatformSelector}
           </div>
         </div>
       )}
