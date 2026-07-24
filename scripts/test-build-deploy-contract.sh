@@ -9,6 +9,21 @@ trap 'rm -rf "$tmp_dir"' EXIT INT TERM
 pass() { printf 'PASS: %s\n' "$1"; }
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 
+crlf_deploy_env="$tmp_dir/crlf.deploy.env"
+printf '# Windows checkout\r\n\r\nCRLF_DEPLOY_VALUE=from-file\r\nCRLF_DEPLOY_EMPTY=\r\nCRLF_DEPLOY_PRESERVED=from-file\r\n' \
+	>"$crlf_deploy_env"
+unset CRLF_DEPLOY_VALUE CRLF_DEPLOY_EMPTY
+CRLF_DEPLOY_PRESERVED=from-process
+export CRLF_DEPLOY_PRESERVED
+. "$repo_dir/scripts/lib/deploy-env.sh"
+load_notty_env_file "$crlf_deploy_env"
+[ "$CRLF_DEPLOY_VALUE" = from-file ] || fail 'CRLF deploy env value was not loaded'
+[ "${CRLF_DEPLOY_EMPTY+x}" = x ] && [ -z "$CRLF_DEPLOY_EMPTY" ] ||
+	fail 'CRLF deploy env empty value was not loaded'
+[ "$CRLF_DEPLOY_PRESERVED" = from-process ] || fail 'CRLF deploy env replaced an existing value'
+unset CRLF_DEPLOY_VALUE CRLF_DEPLOY_EMPTY CRLF_DEPLOY_PRESERVED
+pass 'deploy env loader accepts CRLF records without changing precedence'
+
 target_count() {
 	awk -v target="$1" '$0 ~ ("^" target ":[[:space:]]*$") { count++ } END { print count + 0 }' "$repo_dir/Makefile"
 }

@@ -1,8 +1,10 @@
 load_notty_env_file() {
 	env_file="$1"
 	[ -f "$env_file" ] || return 0
+	env_cr="$(printf '\r')"
 
 	while IFS= read -r line || [ -n "$line" ]; do
+		line="${line%"$env_cr"}"
 		case "$line" in
 			''|\#*) continue ;;
 		esac
