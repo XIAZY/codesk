@@ -22,6 +22,7 @@ import {
   detectDesktopPlatform,
   desktopPlatformHasApp,
   daemonDesktopPlatform,
+  daemonDownloadTarget,
   resolveDesktopManifest,
   desktopPlatformInstallTarget,
   desktopDownloadTargets,
@@ -1168,6 +1169,20 @@ describe("desktop platform detection (task #62 — a hint, not a lock)", () => {
     expect(daemonDesktopPlatform("freebsd")).toBe("unknown");
   });
 
+  it("daemonDownloadTarget picks by the DAEMON's arch, never the browser (#4)", () => {
+    // A daemon reports its real arch, so its re-download must follow that arch — not the UA.
+    expect(daemonDownloadTarget("windows", "amd64")).toBe("windows-amd64");
+    expect(daemonDownloadTarget("windows", "x86_64")).toBe("windows-amd64");
+    expect(daemonDownloadTarget("windows", "arm64")).toBe("windows-arm64");
+    expect(daemonDownloadTarget("windows", "aarch64")).toBe("windows-arm64");
+    expect(daemonDownloadTarget("windows", "ARM64")).toBe("windows-arm64"); // case-insensitive
+    expect(daemonDownloadTarget("mac", "whatever")).toBe("macos-universal"); // one universal build
+    // Unknown/absent Windows arch → fail closed (never a wrong-architecture installer).
+    expect(daemonDownloadTarget("windows", "sparc64")).toBeNull();
+    expect(daemonDownloadTarget("windows", undefined)).toBeNull();
+    expect(daemonDownloadTarget("linux", "amd64")).toBeNull();
+  });
+
   it("maps to the terminal install target: windows → PowerShell, else the unix shell", () => {
     expect(desktopPlatformInstallTarget("windows")).toBe("windows");
     expect(desktopPlatformInstallTarget("mac")).toBe("unix");
@@ -1234,6 +1249,19 @@ describe("desktop manifest resolver (#61 — fail-closed, two schemas)", () => {
     expect(resolveDesktopManifest("mac", macManifest({ disk_image: { path: "Codesk_0.0.1_macos_universal.dmg", sha256: "A".repeat(64) } }), BASE).urls).toEqual({});
     // Path traversal / absolute / query → rejected even though it can't equal `expected` anyway.
     expect(resolveDesktopManifest("mac", macManifest({ disk_image: { path: "../secret.dmg", sha256: "a".repeat(64) } }), BASE).urls).toEqual({});
+  });
+
+  it("macOS: rejects a non-positive / non-integer / non-number / missing disk_image.size (#5)", () => {
+    const withSize = (size: unknown) =>
+      resolveDesktopManifest("mac", macManifest({ disk_image: { path: "Codesk_0.0.1_macos_universal.dmg", sha256: "a".repeat(64), size } }), BASE);
+    expect(withSize(0).urls).toEqual({});
+    expect(withSize(-5).urls).toEqual({});
+    expect(withSize(3.5).urls).toEqual({});
+    expect(withSize("18012811").urls).toEqual({}); // string, not a number
+    expect(withSize(undefined).urls).toEqual({}); // missing
+    expect(withSize(Number.NaN).urls).toEqual({});
+    // A positive finite integer is the only accepted form.
+    expect(withSize(18012811).urls["macos-universal"]).toBeTruthy();
   });
 
   it("macOS: malformed version fails closed but still surfaces notarization", () => {

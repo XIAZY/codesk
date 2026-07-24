@@ -3784,3 +3784,7 @@ pre.code {
 .ds-osteps { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 8px; color: var(--ink-2); font-size: 12.5px; line-height: 1.45; }
 
 .ds-delete-record { margin-top: 6px; padding-top: 12px; border-top: 1px solid var(--border-2, var(--border)); display: flex; flex-direction: column; gap: 6px; }
+
+/* Terminal panel states (#62/#6): Preparing line + explicit failure + retry. */
+.ds-preparing { font-style: italic; }
+.ds-terminal-failed { display: flex; flex-direction: column; gap: 9px; align-items: flex-start; }
