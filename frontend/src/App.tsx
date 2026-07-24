@@ -4527,7 +4527,10 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
             // Non-idempotent create failed ambiguously — one honest state, no command, no copy, no
             // blind Retry (which could duplicate). The user closes and verifies in Local environments.
             <div className="ds-terminal-unconfirmed">
-              <p className="chip"><StatusDot tone="stale" />We couldn't confirm whether the install command was prepared. To avoid creating a duplicate, close this dialog and check Local environments before trying again.</p>
+              {/* This multi-sentence recovery copy must WRAP — the global `.chip` is a nowrap pill and
+                  clips it at 390px, truncating the honest failure message exactly where honesty matters.
+                  Fix lives on this element, not on global `.chip`. */}
+              <p className="ds-unconfirmed-msg"><StatusDot tone="stale" />We couldn't confirm whether the install command was prepared. To avoid creating a duplicate, close this dialog and check Local environments before trying again.</p>
             </div>
           ) : createStatus === "ready" && command ? (
             <>
@@ -5019,7 +5022,11 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
               <span className={`chip sm ${status}`}><StatusDot tone={status} />{status}</span>
             </div>
             <p className="tiny muted mono">ID: {daemon.id}</p>
-            <p className="small muted">Last seen: {daemon.lastSeenAt ? new Date(daemon.lastSeenAt).toLocaleString() : "Never"}</p>
+            {/* One predicate for "did this daemon ever check in": hasGenuineCheckIn (year-2020 gate).
+                A truthy check swallows Go's zero time (0001-01-01 is a non-empty string), rendering a
+                fake "1/1/1" date for a never-checked-in orphan — dishonest exactly in the failure-
+                recovery path. A genuine receipt still shows its real date. */}
+            <p className="small muted">Last seen: {hasGenuineCheckIn(daemon) ? new Date(daemon.lastSeenAt!).toLocaleString() : "Never"}</p>
             <p className="small muted">Agents: {daemonAgents.length}</p>
             {daemonAgents.map((agent) => {
               const agentStatus = visibleAgentStatus(agent, runs, [daemon], now);

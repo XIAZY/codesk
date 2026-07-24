@@ -606,6 +606,20 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
     expect(api.createDaemon).toHaveBeenCalledTimes(1);
   });
 
+  it("terminal unconfirmed copy renders on its own WRAPPING element, never the nowrap chip that clips it at 390px (#4)", async () => {
+    stubUA(LINUX);
+    const api = { createDaemon: vi.fn().mockRejectedValue(new Error("network dropped")) };
+    render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    const msg = await screen.findByText(/We couldn't confirm whether the install command was prepared/);
+    // jsdom can't measure clipping, so pin the structural guarantee Deniz's 390px screenshot proved:
+    // the multi-sentence honest recovery copy must NOT sit in the global nowrap `.chip` pill (which
+    // truncated it after "…was"), but on its own wrapping element. chip = short tokens only.
+    expect(msg.className).toContain("ds-unconfirmed-msg");
+    expect(msg.className.split(/\s+/)).not.toContain("chip");
+    // The full final word must be present in the DOM (the clip dropped everything after "was").
+    expect(msg.textContent).toContain("before trying again.");
+  });
+
   it("ambiguous create failure does NOT re-fire on re-entry — no duplicate POST after failure→switch→back (#3 re-entry)", async () => {
     stubUA(LINUX);
     const user = userEvent.setup();
@@ -1158,6 +1172,25 @@ describe("DaemonDetailModal live status", () => {
     // Neutral wording that holds for CLI installs too — no "app" language on terminal/Linux.
     expect(screen.getByText(/does not remove the Codesk software from your computer/)).toBeTruthy();
     expect(screen.queryByText(/does not uninstall the app/)).toBeNull();
+  });
+
+  it("#63 detail view renders a never-checked-in (Go zero-time) daemon as 'Last seen: Never', not year 1 (orphan honesty)", () => {
+    // The REAL zero-time payload from an ambiguously-committed create — a non-empty string that a
+    // truthy check would swallow into a fake "1/1/1, 12:00:00 AM". The accepted-orphan contract
+    // requires it to read Never, honestly, exactly in the failure-recovery path (Deniz real-stack).
+    const orphan: Daemon = { ...daemonFixtures.justSeen, id: "d1", os: "linux", lastSeenAt: "0001-01-01T00:00:00Z" };
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
+    render(<DaemonDetailModal {...props} daemons={[orphan]} />);
+    expect(screen.getByText("Last seen: Never")).toBeTruthy();
+    expect(screen.queryByText(/Last seen: .*0001|Last seen: 1\/1\/1/)).toBeNull();
+  });
+
+  it("#63 detail view still shows a GENUINE receipt's real date (the year-2020 gate, not a blanket Never)", () => {
+    const seen: Daemon = withReceipt({ ...daemonFixtures.justSeen, id: "d1", os: "linux" }, Date.parse("2026-07-24T10:00:00Z"));
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
+    render(<DaemonDetailModal {...props} daemons={[seen]} />);
+    expect(screen.queryByText("Last seen: Never")).toBeNull();
+    expect(screen.getByText(/^Last seen: /)).toBeTruthy();
   });
 
   it("#63 Delete record asks for confirmation first, then deletes with a pending state (#8)", async () => {

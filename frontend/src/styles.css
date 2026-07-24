@@ -3788,3 +3788,6 @@ pre.code {
 /* Terminal panel states (#62/#6): Preparing line + ambiguous-failure unconfirmed state (no retry). */
 .ds-preparing { font-style: italic; }
 .ds-terminal-unconfirmed { display: flex; flex-direction: column; gap: 9px; align-items: flex-start; }
+/* The ambiguous-create honest recovery copy — a multi-sentence message, NOT a status pill. It must
+   wrap (never the nowrap `.chip`) so the full sentence renders at narrow widths (e.g. 390px). */
+.ds-unconfirmed-msg { display: flex; gap: 6px; align-items: flex-start; white-space: normal; font-size: 12px; font-weight: 500; color: var(--ink-3); line-height: 1.5; }
