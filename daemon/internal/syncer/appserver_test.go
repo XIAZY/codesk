@@ -855,6 +855,29 @@ func TestCodexAppServerModelListUsesHiddenFenceAndOpaqueCursor(t *testing.T) {
 	}
 }
 
+func TestCodexAppServerModelListRejectsMalformedResultJSON(t *testing.T) {
+	stdin := &captureWriteCloser{}
+	client := &codexAppServer{
+		stdin:    stdin,
+		pending:  map[int64]chan appServerResponse{},
+		readDone: make(chan struct{}),
+	}
+	client.testHookBeforeRequestSelect = func(id int64) {
+		client.mu.Lock()
+		ch := client.pending[id]
+		client.mu.Unlock()
+		ch <- appServerResponse{
+			ID:     id,
+			Result: json.RawMessage(`{"data":`),
+		}
+	}
+
+	if _, err := client.ModelList(context.Background(), ""); err == nil ||
+		!strings.Contains(err.Error(), "decode app-server model/list result") {
+		t.Fatalf("malformed model/list result error = %v", err)
+	}
+}
+
 func TestAppServerRPCErrorClassifiableViaErrorsAs(t *testing.T) {
 	var wrapped error = fmt.Errorf("write stdin: %w", &appServerRPCError{
 		Method: "turn/start", Code: -32001, Message: "Server overloaded; retry later.",

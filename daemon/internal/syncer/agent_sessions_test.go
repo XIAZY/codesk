@@ -526,6 +526,24 @@ func TestAgentSessionRuntimeProfileValidationPrecedesSpawn(t *testing.T) {
 			wantReason: "runtime default model cannot be resolved",
 		},
 		{
+			name: "inherited model with no default",
+			catalog: &RuntimeModelCatalog{Models: []RuntimeModel{
+				{Model: "one", DisplayName: "One", ReasoningEfforts: []string{"high"}},
+				{Model: "two", DisplayName: "Two", ReasoningEfforts: []string{"high"}},
+			}},
+			current:    &agent{ReasoningEffort: "high"},
+			wantReason: "runtime default model cannot be resolved",
+		},
+		{
+			name: "duplicate explicit model is ambiguous",
+			catalog: &RuntimeModelCatalog{Models: []RuntimeModel{
+				{Model: "duplicate", DisplayName: "First", ReasoningEfforts: []string{"high"}},
+				{Model: "duplicate", DisplayName: "Second", ReasoningEfforts: []string{"high"}},
+			}},
+			current:    &agent{Model: "duplicate"},
+			wantReason: `model "duplicate" is ambiguous in the runtime catalog`,
+		},
+		{
 			name:       "successful but empty catalog",
 			catalog:    &RuntimeModelCatalog{Models: []RuntimeModel{}},
 			current:    &agent{Model: "gpt-5.6-sol"},
@@ -583,6 +601,11 @@ func TestAgentSessionRuntimeProfilePassesTrimmedExplicitAndInheritedValues(t *te
 			name:    "partial inheritance preserves empty model",
 			current: &agent{ReasoningEffort: " ultra "},
 			want:    RuntimeProfile{ReasoningEffort: "ultra"},
+		},
+		{
+			name:    "explicit model with inherited effort",
+			current: &agent{Model: " gpt-5.6-sol "},
+			want:    RuntimeProfile{Model: "gpt-5.6-sol"},
 		},
 	}
 	for _, test := range tests {

@@ -23,6 +23,7 @@ func TestDaemonStatusReporterSendsRuntimeDetections(t *testing.T) {
 
 	var gotPath string
 	var gotAuth string
+	var gotRawPayload []byte
 	var gotPayload daemonStatusUpdate
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.EscapedPath()
@@ -31,6 +32,7 @@ func TestDaemonStatusReporterSendsRuntimeDetections(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read request body: %v", err)
 		}
+		gotRawPayload = append([]byte(nil), body...)
 		if err := json.Unmarshal(body, &gotPayload); err != nil {
 			t.Fatalf("decode daemon status payload: %v", err)
 		}
@@ -79,6 +81,24 @@ func TestDaemonStatusReporterSendsRuntimeDetections(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotPayload.Runtimes[0].ModelCatalog, detections[0].ModelCatalog) {
 		t.Fatalf("runtime model catalog = %#v, want %#v", gotPayload.Runtimes[0].ModelCatalog, detections[0].ModelCatalog)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(gotRawPayload, &raw); err != nil {
+		t.Fatalf("decode raw status JSON: %v", err)
+	}
+	runtimes, ok := raw["runtimes"].([]any)
+	if !ok || len(runtimes) != 1 {
+		t.Fatalf("raw runtimes = %#v", raw["runtimes"])
+	}
+	runtimePayload, ok := runtimes[0].(map[string]any)
+	if !ok {
+		t.Fatalf("raw runtime payload = %#v", runtimes[0])
+	}
+	if _, ok := runtimePayload["modelCatalog"]; !ok {
+		t.Fatalf("raw runtime payload is missing exact modelCatalog key: %#v", runtimePayload)
+	}
+	if _, ok := runtimePayload["model_catalog"]; ok {
+		t.Fatalf("raw runtime payload emitted model_catalog drift: %#v", runtimePayload)
 	}
 }
 

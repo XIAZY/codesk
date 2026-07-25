@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -105,7 +106,7 @@ func TestCodexDriverModelCatalogProjectsVisiblePaginatedModels(t *testing.T) {
 				Data: []codexModelWire{
 					fakeCodexModel("gpt-5.6-sol", "GPT-5.6-Sol", true, "low", "low", "medium", "ultra"),
 					func() codexModelWire {
-						hidden := fakeCodexModel("hidden-model", "Hidden Model", false, "medium", "medium")
+						hidden := fakeCodexModel("", "", false, "unsupported", "")
 						hidden.Hidden = true
 						return hidden
 					}(),
@@ -186,6 +187,116 @@ func TestCodexDriverModelCatalogRejectsMalformedProjection(t *testing.T) {
 				t.Fatal("malformed catalog must stop its app-server")
 			}
 		})
+	}
+}
+
+func TestCodexDriverModelCatalogRejectsDuplicateModelAcrossPages(t *testing.T) {
+	app := newFakeCodexRuntimeApp()
+	cursor := "page-2"
+	app.modelList = func(_ context.Context, gotCursor string) (codexModelListPage, error) {
+		switch gotCursor {
+		case "":
+			return codexModelListPage{
+				Data:       []codexModelWire{fakeCodexModel("duplicate", "First", true, "low", "low")},
+				NextCursor: &cursor,
+			}, nil
+		case cursor:
+			return codexModelListPage{
+				Data: []codexModelWire{fakeCodexModel(" duplicate ", "Second", false, "low", "low")},
+			}, nil
+		default:
+			return codexModelListPage{}, errors.New("unexpected cursor")
+		}
+	}
+	driver := &codexDriver{factory: func(Config, string, string, string, RuntimeProfile) codexRuntimeApp {
+		return app
+	}}
+
+	catalog := driver.detectModelCatalog(context.Background())
+
+	if catalog.Error != "model catalog unavailable" || len(catalog.Models) != 0 {
+		t.Fatalf("duplicate model catalog = %#v", catalog)
+	}
+	if !reflect.DeepEqual(app.modelCursors, []string{"", cursor}) {
+		t.Fatalf("model/list cursors = %#v", app.modelCursors)
+	}
+}
+
+func TestCodexDriverModelCatalogRejectsDuplicateEffortAfterTrim(t *testing.T) {
+	tests := []struct {
+		name    string
+		efforts []string
+	}{
+		{name: "exact duplicate", efforts: []string{"low", "low"}},
+		{name: "duplicate after trim", efforts: []string{"low", " low "}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			app := newFakeCodexRuntimeApp()
+			app.modelList = func(context.Context, string) (codexModelListPage, error) {
+				return codexModelListPage{
+					Data: []codexModelWire{fakeCodexModel("model", "Model", true, "low", test.efforts...)},
+				}, nil
+			}
+			driver := &codexDriver{factory: func(Config, string, string, string, RuntimeProfile) codexRuntimeApp {
+				return app
+			}}
+
+			catalog := driver.detectModelCatalog(context.Background())
+
+			if catalog.Error != "model catalog unavailable" || len(catalog.Models) != 0 {
+				t.Fatalf("duplicate effort catalog = %#v", catalog)
+			}
+		})
+	}
+}
+
+func TestCodexDriverModelCatalogRejectsEmptyNextCursor(t *testing.T) {
+	app := newFakeCodexRuntimeApp()
+	emptyCursor := ""
+	app.modelList = func(context.Context, string) (codexModelListPage, error) {
+		return codexModelListPage{
+			Data:       []codexModelWire{fakeCodexModel("model", "Model", true, "low", "low")},
+			NextCursor: &emptyCursor,
+		}, nil
+	}
+	driver := &codexDriver{factory: func(Config, string, string, string, RuntimeProfile) codexRuntimeApp {
+		return app
+	}}
+
+	catalog := driver.detectModelCatalog(context.Background())
+
+	if catalog.Error != "model catalog unavailable" || len(catalog.Models) != 0 {
+		t.Fatalf("empty next cursor catalog = %#v", catalog)
+	}
+	if !reflect.DeepEqual(app.modelCursors, []string{""}) {
+		t.Fatalf("model/list cursors = %#v", app.modelCursors)
+	}
+}
+
+func TestCodexDriverModelCatalogDiscardsEarlierPagesAfterLaterFailure(t *testing.T) {
+	app := newFakeCodexRuntimeApp()
+	cursor := "page-2"
+	app.modelList = func(_ context.Context, gotCursor string) (codexModelListPage, error) {
+		if gotCursor == "" {
+			return codexModelListPage{
+				Data:       []codexModelWire{fakeCodexModel("model", "Model", true, "low", "low")},
+				NextCursor: &cursor,
+			}, nil
+		}
+		return codexModelListPage{}, errors.New("page two failed")
+	}
+	driver := &codexDriver{factory: func(Config, string, string, string, RuntimeProfile) codexRuntimeApp {
+		return app
+	}}
+
+	catalog := driver.detectModelCatalog(context.Background())
+
+	if catalog.Error != "model catalog unavailable" || len(catalog.Models) != 0 {
+		t.Fatalf("partially published catalog = %#v", catalog)
+	}
+	if !reflect.DeepEqual(app.modelCursors, []string{"", cursor}) {
+		t.Fatalf("model/list cursors = %#v", app.modelCursors)
 	}
 }
 
@@ -513,6 +624,179 @@ func TestCodexRuntimeProcessMapsRuntimeInputsToAppServer(t *testing.T) {
 	}
 	if !reflect.DeepEqual(app.calls, want) {
 		t.Fatalf("unexpected appserver calls:\n got: %#v\nwant: %#v", app.calls, want)
+	}
+}
+
+func TestCodexRuntimeProcessProductionFactoryCarriesProfileToAppServer(t *testing.T) {
+	profile := RuntimeProfile{Model: "gpt-5.6-sol", ReasoningEffort: "ultra"}
+	driver := newCodexDriver(Config{})
+
+	process, err := driver.Spawn(context.Background(), RuntimeSpawnSpec{
+		AgentID: "agent_profile_bridge",
+		Profile: profile,
+	})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	runtimeProcess, ok := process.(*codexRuntimeProcess)
+	if !ok {
+		t.Fatalf("runtime process type = %T, want *codexRuntimeProcess", process)
+	}
+	app, ok := runtimeProcess.app.(*codexAppServer)
+	if !ok {
+		t.Fatalf("runtime app type = %T, want *codexAppServer", runtimeProcess.app)
+	}
+	if !reflect.DeepEqual(app.profile, profile) {
+		t.Fatalf("production app profile = %#v, want %#v", app.profile, profile)
+	}
+	if err := process.Stop(); err != nil {
+		t.Fatalf("stop unstarted process: %v", err)
+	}
+}
+
+// TestCodexLiveModelProfileSmoke validates the installed Codex CLI end to end
+// without pinning provider-specific model names or catalog sizes:
+//
+//	NOTTY_CODEX_LIVE_TEST=1 go test ./daemon/internal/syncer -run TestCodexLiveModelProfileSmoke -count=2 -v
+func TestCodexLiveModelProfileSmoke(t *testing.T) {
+	if os.Getenv("NOTTY_CODEX_LIVE_TEST") != "1" {
+		t.Skip("set NOTTY_CODEX_LIVE_TEST=1 to run against the real codex CLI")
+	}
+	cfg := LoadConfig()
+	cfg.DataDir = t.TempDir()
+	driver := newCodexDriver(cfg)
+	detection := driver.Detect(context.Background())
+	if !detection.Available {
+		t.Fatalf("codex CLI unavailable: %s", detection.Reason)
+	}
+	if detection.ModelCatalog == nil || detection.ModelCatalog.Error != "" {
+		t.Fatalf("model catalog unavailable: %#v", detection.ModelCatalog)
+	}
+
+	seenModels := map[string]struct{}{}
+	defaults := []RuntimeModel{}
+	for _, model := range detection.ModelCatalog.Models {
+		if model.Model == "" || model.DisplayName == "" {
+			t.Fatalf("catalog contains an invalid model: %#v", model)
+		}
+		if _, duplicate := seenModels[model.Model]; duplicate {
+			t.Fatalf("catalog contains duplicate model %q", model.Model)
+		}
+		seenModels[model.Model] = struct{}{}
+		seenEfforts := map[string]struct{}{}
+		for _, effort := range model.ReasoningEfforts {
+			if effort == "" {
+				t.Fatalf("model %q contains an empty effort", model.Model)
+			}
+			if _, duplicate := seenEfforts[effort]; duplicate {
+				t.Fatalf("model %q contains duplicate effort %q", model.Model, effort)
+			}
+			seenEfforts[effort] = struct{}{}
+		}
+		if model.DefaultReasoningEffort != "" {
+			if _, supported := seenEfforts[model.DefaultReasoningEffort]; !supported {
+				t.Fatalf("model %q default effort %q is unsupported", model.Model, model.DefaultReasoningEffort)
+			}
+		}
+		if model.IsDefault {
+			defaults = append(defaults, model)
+		}
+	}
+	if len(seenModels) == 0 {
+		t.Fatal("model catalog is empty")
+	}
+	if len(defaults) != 1 {
+		t.Fatalf("model catalog defaults = %d, want exactly one", len(defaults))
+	}
+
+	selected := defaults[0]
+	profile := RuntimeProfile{
+		Model:           selected.Model,
+		ReasoningEffort: selected.DefaultReasoningEffort,
+	}
+	workdir := t.TempDir()
+	spec := RuntimeSpawnSpec{
+		AgentID:      "agent_codex_live",
+		Workdir:      workdir,
+		Instructions: "Reply with the single word ok and do nothing else.",
+		Profile:      profile,
+	}
+	process, err := driver.Spawn(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	t.Cleanup(func() { _ = process.Stop() })
+	startCtx, cancelStart := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelStart()
+	if err := process.Start(startCtx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	sessionCtx, cancelSession := context.WithTimeout(context.Background(), 30*time.Second)
+	session, err := process.WriteStdin(sessionCtx, RuntimeInput{
+		Kind: RuntimeInputStartSession,
+		CWD:  workdir,
+	})
+	cancelSession()
+	if err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	turnCtx, cancelTurn := context.WithTimeout(context.Background(), 30*time.Second)
+	_, err = process.WriteStdin(turnCtx, RuntimeInput{
+		Kind:      RuntimeInputStartTurn,
+		SessionID: session.SessionID,
+		CWD:       workdir,
+		Text:      "Reply with exactly: ok",
+	})
+	cancelTurn()
+	if err != nil {
+		t.Fatalf("start turn: %v", err)
+	}
+	waitForCodexLiveTurnCompletion(t, process.Events(), 3*time.Minute)
+	if err := process.Stop(); err != nil {
+		t.Fatalf("stop first process: %v", err)
+	}
+
+	resumed, err := driver.Spawn(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("spawn for resume: %v", err)
+	}
+	t.Cleanup(func() { _ = resumed.Stop() })
+	resumeCtx, cancelResume := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelResume()
+	if err := resumed.Start(resumeCtx); err != nil {
+		t.Fatalf("start for resume: %v", err)
+	}
+	if _, err := resumed.WriteStdin(resumeCtx, RuntimeInput{
+		Kind:      RuntimeInputResumeSession,
+		SessionID: session.SessionID,
+		CWD:       workdir,
+	}); err != nil {
+		t.Fatalf("resume session: %v", err)
+	}
+	if err := resumed.Stop(); err != nil {
+		t.Fatalf("stop resumed process: %v", err)
+	}
+}
+
+func waitForCodexLiveTurnCompletion(t *testing.T, events <-chan RuntimeEvent, timeout time.Duration) {
+	t.Helper()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case event, ok := <-events:
+			if !ok {
+				t.Fatal("codex event channel closed before turn completion")
+			}
+			switch event.Kind {
+			case RuntimeEventTurnCompleted:
+				return
+			case RuntimeEventTurnFailed:
+				t.Fatal("codex turn failed")
+			}
+		case <-timer.C:
+			t.Fatal("timed out waiting for codex turn completion")
+		}
 	}
 }
 
