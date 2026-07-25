@@ -573,13 +573,12 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
     expect(screen.getByText("Running on a server or headless computer? Set up Codesk from the command line.")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Use command line setup" }));
     expect(screen.getByRole("heading", { name: "Set up from the command line" })).toBeTruthy();
-    expect(screen.getByText("Nothing is created until you submit this name.")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "macOS" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Linux" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Windows" })).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Linux" }));
-    await user.click(screen.getByRole("button", { name: "Windows" }));
-    expect(api.createDaemon).not.toHaveBeenCalled();
+    expect(screen.getByText("Nothing is created until you generate the install command — opening this panel makes no changes.")).toBeTruthy();
+    // #76: NO OS control on the setup page — OS is a command-format choice that lives on the command
+    // view after Generate, so it can't wrongly imply the OS is part of what you're creating.
+    expect(screen.queryByRole("button", { name: "macOS" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Linux" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Windows" })).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Generate install command" }));
     expect(screen.getByText("Enter a name for this local environment.")).toBeTruthy();
@@ -589,9 +588,35 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
     await user.click(screen.getByRole("button", { name: "Generate install command" }));
     await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
     expect(api.createDaemon).toHaveBeenCalledWith("ws", "Build server");
+    // Command view: the OS switcher appears now; detected macOS is preselected → unix shell command.
+    await waitFor(() => expect(document.querySelector("pre.code")?.textContent).toContain("install.sh"));
+    // Switching OS on the command view re-formats the SAME token — never a new POST.
+    await user.click(screen.getByRole("button", { name: "Windows" }));
     await waitFor(() => expect(document.querySelector("pre.code")?.textContent).toContain("install.ps1"));
     await user.click(screen.getByRole("button", { name: "Linux" }));
     await waitFor(() => expect(document.querySelector("pre.code")?.textContent).toContain("install.sh"));
+    expect(api.createDaemon).toHaveBeenCalledTimes(1);
+  });
+
+  it("command-line setup: an unknown UA has NO preselected OS on the command view and must choose before a command shows (#76)", async () => {
+    stubUA(IOS); // unknown → the modal opens on the neutral chooser, and cmd-OS must not be guessed
+    const user = userEvent.setup();
+    const created: Daemon = { ...daemonFixtures.neverSeen, id: "daemon_new", name: "Local daemon" };
+    const api = { createDaemon: vi.fn().mockResolvedValue({ daemon: created, token: "nottyd_secret" }) };
+    render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Use command line setup" }));
+    await user.type(screen.getByLabelText("Local environment name"), "Build server");
+    await user.click(screen.getByRole("button", { name: "Generate install command" }));
+    await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
+    // No OS was guessed: the switcher shows with none pressed, no command yet, and a prompt to choose.
+    expect(screen.getByText("Choose the OS you'll run this on to see the install command.")).toBeTruthy();
+    expect(document.querySelector("pre.code")).toBeNull();
+    for (const os of ["macOS", "Linux", "Windows"]) {
+      expect(screen.getByRole("button", { name: os }).getAttribute("aria-pressed")).toBe("false");
+    }
+    // Choosing an OS reveals the command for that format — still no new POST.
+    await user.click(screen.getByRole("button", { name: "Windows" }));
+    await waitFor(() => expect(document.querySelector("pre.code")?.textContent).toContain("install.ps1"));
     expect(api.createDaemon).toHaveBeenCalledTimes(1);
   });
 
@@ -668,9 +693,8 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
     await user.click(screen.getByRole("button", { name: "Generate install command" }));
     await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
     await screen.findByText(/We lost contact while creating this environment/);
-    // OS switches and panel re-entry after the ambiguous result cannot issue another POST.
-    await user.click(screen.getByRole("button", { name: "Windows" }));
-    await user.click(screen.getByRole("button", { name: "macOS" }));
+    // Panel re-entry after the ambiguous result cannot issue another POST (the OS switcher only
+    // exists on the successful command view, so the failure state offers no switch to exercise).
     await user.click(screen.getByRole("button", { name: "← Back to desktop app downloads" }));
     await user.click(screen.getByRole("button", { name: "Use command line setup" }));
     await waitFor(() => expect(screen.getByText(/We lost contact while creating this environment/)).toBeTruthy());
@@ -707,11 +731,14 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
     expect(screen.queryByRole("button", { name: "Linux" })).toBeNull();
     expect(api.createDaemon).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "Use command line setup" }));
-    expect(screen.getByRole("button", { name: "Linux" }).getAttribute("aria-pressed")).toBe("true");
+    // No OS control before Generate; the detected Linux is preselected only on the command view.
+    expect(screen.queryByRole("button", { name: "Linux" })).toBeNull();
     expect(api.createDaemon).not.toHaveBeenCalled();
     await user.type(screen.getByLabelText("Local environment name"), "Build server");
     await user.click(screen.getByRole("button", { name: "Generate install command" }));
     await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
+    // Command view: detected Linux preselected → unix shell command shown.
+    expect(screen.getByRole("button", { name: "Linux" }).getAttribute("aria-pressed")).toBe("true");
     await waitFor(() => expect(document.querySelector("pre.code")?.textContent).toContain("install.sh"));
     rerender(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[created]} onClose={vi.fn()} onDone={vi.fn()} />);
     expect(screen.getByText(/Install command ready/)).toBeTruthy();

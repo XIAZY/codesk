@@ -3797,3 +3797,7 @@ pre.code {
 @media (max-width: 520px) {
   .ds-download-foot { align-items: flex-start; flex-direction: column; }
 }
+
+/* Command-line result view (#76): OS switcher relocated here, above the token's command. */
+.ds-command-result { display: flex; flex-direction: column; gap: 10px; }
+.ds-pick-os { font-style: italic; }

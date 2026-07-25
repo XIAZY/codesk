@@ -4419,8 +4419,11 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
   const [platform, setPlatform] = useState<DesktopPlatform>(() => (
     desktopPlatformHasApp(detectedPlatform) ? detectedPlatform : "unknown"
   ));
-  const [commandPlatform, setCommandPlatform] = useState<Exclude<DesktopPlatform, "unknown">>(() => (
-    detectedPlatform === "unknown" ? "linux" : detectedPlatform
+  // The command-line OS is a command-PRESENTATION choice, not a creation input (the token is
+  // OS-independent), so it lives on the command page after Generate — never the setup page. A
+  // detected platform is preselected; an unknown UA is ASKED (null) rather than guessed.
+  const [commandPlatform, setCommandPlatform] = useState<Exclude<DesktopPlatform, "unknown"> | null>(() => (
+    detectedPlatform === "unknown" ? null : detectedPlatform
   ));
   const [terminalMode, setTerminalMode] = useState(false);
   const [environmentName, setEnvironmentName] = useState("");
@@ -4441,10 +4444,10 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
 
   const manifest = useDesktopManifest(platform); // live R2 URLs + macOS notarization state
   const isUnknown = platform === "unknown";
-  const installTarget = desktopPlatformInstallTarget(commandPlatform);
-  // Built ONLY from a real token — never a placeholder — so nothing copyable ever claims to be a
-  // valid install command before the token exists.
-  const command = token ? buildDaemonInstallCommand({ backendUrl: apiBase, workspaceId, daemonToken: token, staticBaseUrl: daemonStaticBase, platform: installTarget }) : "";
+  const installTarget = commandPlatform ? desktopPlatformInstallTarget(commandPlatform) : null;
+  // Built ONLY from a real token AND a chosen OS — never a placeholder, and nothing until the user
+  // has picked the OS (an unknown UA is asked, never guessed).
+  const command = token && installTarget ? buildDaemonInstallCommand({ backendUrl: apiBase, workspaceId, daemonToken: token, staticBaseUrl: daemonStaticBase, platform: installTarget }) : "";
 
   const selectPlatform = (next: DesktopPlatform) => {
     setPlatform(next);
@@ -4536,7 +4539,8 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
       ) : terminalMode ? (
         <div className="ds-terminal">
           <p className="small muted">For servers and headless computers.</p>
-          {commandPlatformSelector}
+          {/* No OS control on the setup page — the OS is a command-format choice that only matters
+              AFTER a token exists, so it lives on the command view below. */}
           <form className="ds-command-form" onSubmit={generateInstallCommand}>
             <label className="field">
               <span className="lab">Local environment name</span>
@@ -4557,7 +4561,7 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
             {nameError ? <p id="daemon-name-error" className="error-text">{nameError}</p> : null}
             {createStatus === "idle" ? (
               <>
-                <p className="tiny muted">Nothing is created until you submit this name.</p>
+                <p className="tiny muted">Nothing is created until you generate the install command — opening this panel makes no changes.</p>
                 <button type="submit" className="btn accent full">Generate install command</button>
               </>
             ) : null}
@@ -4571,15 +4575,25 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
                   Fix lives on this element, not on global `.chip`. */}
               <p className="ds-unconfirmed-msg"><StatusDot tone="stale" />We lost contact while creating this environment. It may already exist. Close this dialog and check Local environments before trying again.</p>
             </div>
-          ) : createStatus === "ready" && command ? (
-            <>
-              <ShellScriptBlock title="Install command" badge={installTarget === "windows" ? "PowerShell" : "Shell"} command={command} />
-              {terminalFailed ? (
-                <p className="chip"><StatusDot tone="stale" />No connection yet. Make sure the command ran completely.</p>
+          ) : createStatus === "ready" ? (
+            <div className="ds-command-result">
+              {/* The OS is picked HERE, on the command view — it re-formats the SAME token's command
+                  (shell vs Windows PowerShell) and issues NO POST. A detected UA is preselected; an
+                  unknown UA has none preselected and must choose before any command appears. */}
+              {commandPlatformSelector}
+              {command ? (
+                <>
+                  <ShellScriptBlock title="Install command" badge={installTarget === "windows" ? "PowerShell" : "Shell"} command={command} />
+                  {terminalFailed ? (
+                    <p className="chip"><StatusDot tone="stale" />No connection yet. Make sure the command ran completely.</p>
+                  ) : (
+                    <p className="chip"><StatusDot tone="stale" />Install command ready — Codesk detects the connection automatically.</p>
+                  )}
+                </>
               ) : (
-                <p className="chip"><StatusDot tone="stale" />Install command ready — Codesk detects the connection automatically.</p>
+                <p className="small muted ds-pick-os">Choose the OS you'll run this on to see the install command.</p>
               )}
-            </>
+            </div>
           ) : createStatus === "preparing" ? (
             // Preparing: a real token doesn't exist yet — show no command and nothing copyable.
             <p className="small muted ds-preparing">Preparing your install command…</p>
