@@ -9,6 +9,16 @@ trap 'rm -rf "$tmp_dir"' EXIT INT TERM
 pass() { printf 'PASS: %s\n' "$1"; }
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 
+release_version="$("$repo_dir/scripts/read-daemon-version.sh")"
+daemon_older_version=0.0.0
+daemon_newer_version=255.255.65535
+[ "$release_version" != "$daemon_older_version" ] ||
+	fail "daemon publication fixture needs a version newer than $daemon_older_version"
+[ "$release_version" != "$daemon_newer_version" ] ||
+	fail "daemon publication fixture needs a version older than $daemon_newer_version"
+NOTTY_TEST_RELEASE_VERSION="$release_version"
+export NOTTY_TEST_RELEASE_VERSION
+
 crlf_deploy_env="$tmp_dir/crlf.deploy.env"
 printf '# Windows checkout\r\n\r\nCRLF_DEPLOY_VALUE=from-file\r\nCRLF_DEPLOY_EMPTY=\r\nCRLF_DEPLOY_PRESERVED=from-file\r\n' \
 	>"$crlf_deploy_env"
@@ -307,8 +317,8 @@ if [ "${4:-}" = cp ]; then
 fi
 if [ "${4:-}" = cp ] && [ "${AWS_FAIL_VERSION_PAYLOAD:-0}" -ne 0 ]; then
 	case "$6" in
-		*/daemons/0.0.1/manifest.json) ;;
-		*/daemons/0.0.1/*) exit 72 ;;
+		*/daemons/"$NOTTY_TEST_RELEASE_VERSION"/manifest.json) ;;
+		*/daemons/"$NOTTY_TEST_RELEASE_VERSION"/*) exit 72 ;;
 	esac
 fi
 if [ "${4:-}" = cp ] && [ "${AWS_FAIL_LATEST_SHA:-0}" -ne 0 ]; then
@@ -320,26 +330,26 @@ if [ -n "${AWS_CAPTURE_DIR:-}" ] && [ "${4:-}" = cp ]; then
 	aws_source="$5"
 	aws_destination="$6"
 	case "$aws_destination" in
-		*"/desktop/windows/0.0.1/arm64/Codesk_0.0.1_windows_arm64.msi")
+		*"/desktop/windows/$NOTTY_TEST_RELEASE_VERSION/arm64/Codesk_${NOTTY_TEST_RELEASE_VERSION}_windows_arm64.msi")
 			cp "$aws_source" "$AWS_CAPTURE_DIR/arm64.msi"
 			;;
-		*"/desktop/windows/0.0.1/arm64/SHA256SUMS")
+		*"/desktop/windows/$NOTTY_TEST_RELEASE_VERSION/arm64/SHA256SUMS")
 			cp "$aws_source" "$AWS_CAPTURE_DIR/arm64.SHA256SUMS"
 			;;
-		*"/desktop/windows/0.0.1/manifest.json")
+		*"/desktop/windows/$NOTTY_TEST_RELEASE_VERSION/manifest.json")
 			cp "$aws_source" "$AWS_CAPTURE_DIR/manifest.json"
 			;;
 	esac
 fi
 if [ -n "${DAEMON_CAPTURE_DIR:-}" ] && [ "${4:-}" = cp ]; then
 	case "$6" in
-		*"/daemons/0.0.1/notty-daemon_0.0.1_linux_arm64.tar.gz")
-			cp "$5" "$DAEMON_CAPTURE_DIR/notty-daemon_0.0.1_linux_arm64.tar.gz"
+		*"/daemons/$NOTTY_TEST_RELEASE_VERSION/notty-daemon_${NOTTY_TEST_RELEASE_VERSION}_linux_arm64.tar.gz")
+			cp "$5" "$DAEMON_CAPTURE_DIR/notty-daemon_${NOTTY_TEST_RELEASE_VERSION}_linux_arm64.tar.gz"
 			;;
-		*"/daemons/0.0.1/SHA256SUMS")
+		*"/daemons/$NOTTY_TEST_RELEASE_VERSION/SHA256SUMS")
 			cp "$5" "$DAEMON_CAPTURE_DIR/SHA256SUMS"
 			;;
-		*"/daemons/0.0.1/manifest.json")
+		*"/daemons/$NOTTY_TEST_RELEASE_VERSION/manifest.json")
 			cp "$5" "$DAEMON_CAPTURE_DIR/manifest.json"
 			;;
 	esac
@@ -546,7 +556,7 @@ wrangler_put_count() {
 
 write_daemon_release() {
 	daemon_root="$1"
-	daemon_version="${2:-0.0.1}"
+	daemon_version="${2:?write_daemon_release requires a version}"
 	daemon_payload="${3:-release}"
 	daemon_release_dir="$daemon_root/$daemon_version"
 	mkdir -p "$daemon_release_dir"
@@ -580,14 +590,14 @@ write_daemon_release() {
 write_macos_release() {
 	macos_root="$1"
 	macos_payload="${2:-release}"
-	macos_release_dir="$macos_root/0.0.1"
-	macos_dmg="Codesk_0.0.1_macos_universal.dmg"
+	macos_release_dir="$macos_root/$release_version"
+	macos_dmg="Codesk_${release_version}_macos_universal.dmg"
 	mkdir -p "$macos_release_dir"
 	printf 'macOS %s\n' "$macos_payload" >"$macos_release_dir/$macos_dmg"
 	macos_hash="$(fixture_sha256 "$macos_release_dir/$macos_dmg")"
 	printf '%s  %s\n' "$macos_hash" "$macos_dmg" >"$macos_release_dir/SHA256SUMS"
-	printf '{\n  "version": "0.0.1",\n  "artifacts": [\n    {"os": "darwin", "arch": "universal", "file": "%s", "sha256": "%s"}\n  ]\n}\n' \
-		"$macos_dmg" "$macos_hash" >"$macos_release_dir/manifest.json"
+	printf '{\n  "version": "%s",\n  "artifacts": [\n    {"os": "darwin", "arch": "universal", "file": "%s", "sha256": "%s"}\n  ]\n}\n' \
+		"$release_version" "$macos_dmg" "$macos_hash" >"$macos_release_dir/manifest.json"
 }
 
 expect_daemon_preflight_failure() {
@@ -617,12 +627,12 @@ write_windows_bundle() {
 		*) fail "unsupported Windows fixture architecture: $bundle_arch" ;;
 	esac
 	bundle_dir="$bundle_root/$bundle_arch"
-	bundle_msi="Codesk_0.0.1_windows_${bundle_arch}.msi"
+	bundle_msi="Codesk_${release_version}_windows_${bundle_arch}.msi"
 	mkdir -p "$bundle_dir"
 	printf 'msi-%s-%s\n' "$bundle_arch" "$bundle_payload" >"$bundle_dir/$bundle_msi"
 	bundle_msi_sha="$(fixture_sha256 "$bundle_dir/$bundle_msi")"
 	bundle_msi_size="$(wc -c <"$bundle_dir/$bundle_msi" | tr -d ' ')"
-	printf '%s\n' "{\"schemaVersion\":2,\"source\":{\"repository\":\"XIAZY/notty\",\"event\":\"push\",\"checkoutCommit\":\"$bundle_head\",\"sourceHead\":\"$bundle_head\",\"sourceBase\":\"$bundle_base\",\"sourceBaseResolution\":\"event\",\"workflowRef\":\"local/scripts/run-windows-gui-target.ps1@$bundle_head\",\"runId\":\"local\",\"runAttempt\":\"1\"},\"runner\":{\"os\":\"Windows\",\"architecture\":\"$bundle_native\"},\"target\":{\"architecture\":\"$bundle_native\",\"goArchitecture\":\"$bundle_arch\",\"installerPlatform\":\"$bundle_installer\",\"buildMode\":\"release\",\"publishable\":$bundle_publishable},\"packages\":[{\"role\":\"release\",\"version\":\"0.0.1\",\"canonicalFile\":\"$bundle_msi\",\"canonicalSha256\":\"$bundle_msi_sha\",\"canonicalSize\":$bundle_msi_size}],\"productCodeDerivation\":{\"algorithm\":\"UUIDv5-SHA1\",\"name\":\"0.0.1+$bundle_arch\"}}" >"$bundle_dir/provenance.json"
+	printf '%s\n' "{\"schemaVersion\":2,\"source\":{\"repository\":\"XIAZY/notty\",\"event\":\"push\",\"checkoutCommit\":\"$bundle_head\",\"sourceHead\":\"$bundle_head\",\"sourceBase\":\"$bundle_base\",\"sourceBaseResolution\":\"event\",\"workflowRef\":\"local/scripts/run-windows-gui-target.ps1@$bundle_head\",\"runId\":\"local\",\"runAttempt\":\"1\"},\"runner\":{\"os\":\"Windows\",\"architecture\":\"$bundle_native\"},\"target\":{\"architecture\":\"$bundle_native\",\"goArchitecture\":\"$bundle_arch\",\"installerPlatform\":\"$bundle_installer\",\"buildMode\":\"release\",\"publishable\":$bundle_publishable},\"packages\":[{\"role\":\"release\",\"version\":\"$release_version\",\"canonicalFile\":\"$bundle_msi\",\"canonicalSha256\":\"$bundle_msi_sha\",\"canonicalSize\":$bundle_msi_size}],\"productCodeDerivation\":{\"algorithm\":\"UUIDv5-SHA1\",\"name\":\"$release_version+$bundle_arch\"}}" >"$bundle_dir/provenance.json"
 	bundle_provenance_sha="$(fixture_sha256 "$bundle_dir/provenance.json")"
 	printf '%s  %s\r\n%s  provenance.json\r\n' \
 		"$bundle_msi_sha" "$bundle_msi" "$bundle_provenance_sha" >"$bundle_dir/SHA256SUMS"
@@ -631,10 +641,10 @@ write_windows_bundle() {
 write_windows_manifest() {
 	windows_manifest_root="$1"
 	windows_manifest_path="$2"
-	printf '{\n  "version": "0.0.1",\n  "artifacts": [\n' >"$windows_manifest_path"
+	printf '{\n  "version": "%s",\n  "artifacts": [\n' "$release_version" >"$windows_manifest_path"
 	windows_manifest_first=1
 	for windows_manifest_arch in amd64 arm64; do
-		windows_manifest_msi="Codesk_0.0.1_windows_${windows_manifest_arch}.msi"
+		windows_manifest_msi="Codesk_${release_version}_windows_${windows_manifest_arch}.msi"
 		windows_manifest_sum="$(fixture_sha256 "$windows_manifest_root/$windows_manifest_arch/$windows_manifest_msi")"
 		if [ "$windows_manifest_first" -eq 0 ]; then printf ',\n' >>"$windows_manifest_path"; fi
 		windows_manifest_first=0
@@ -742,7 +752,8 @@ grep -F 's3://app/favicon.ico' "$aws_log" | grep -Fq -- '--content-type image/x-
 pass 'browser icons are explicitly uploaded with compatible metadata and short caching'
 
 daemon_dist="$tmp_dir/daemons"
-write_daemon_release "$daemon_dist"
+write_daemon_release "$daemon_dist" "$release_version"
+daemon_release_dir="$daemon_dist/$release_version"
 BSD_FIND_REAL="$bsd_find_real" BSD_SORT_REAL="$bsd_sort_real" PATH="$bsd_find_bin:$fake_bin:$PATH" \
 	AWS_LOG="$aws_log" DAEMON_DIST_ROOT="$daemon_dist" \
 	UPLOAD_TARGET=daemon R2_ENDPOINT_URL=https://example.invalid \
@@ -750,8 +761,8 @@ BSD_FIND_REAL="$bsd_find_real" BSD_SORT_REAL="$bsd_sort_real" PATH="$bsd_find_bi
 	"$repo_dir/scripts/upload-r2.sh" >/dev/null
 pass 'daemon upload inventory is portable when find rejects GNU -printf'
 
-daemon_version_uri='s3://static/daemons/0.0.1/'
-daemon_ledger_uri='s3://static/daemons/0.0.1/manifest.json'
+daemon_version_uri="s3://static/daemons/$release_version/"
+daemon_ledger_uri="${daemon_version_uri}manifest.json"
 daemon_latest_uri='s3://static/daemons/latest/manifest.json'
 [ "$(aws_write_count "$aws_log" "$daemon_version_uri")" -eq 8 ] ||
 	fail 'daemon deploy did not write version payloads and their ledger exactly once each'
@@ -761,12 +772,12 @@ daemon_ledger_line="$(aws_first_write_line "$aws_log" "$daemon_ledger_uri")"
 daemon_latest_line="$(aws_first_write_line "$aws_log" "$daemon_latest_uri")"
 for daemon_payload_name in \
 	SHA256SUMS \
-	notty-daemon_0.0.1_linux_amd64.tar.gz \
-	notty-daemon_0.0.1_linux_arm64.tar.gz \
-	notty-daemon_0.0.1_darwin_amd64.tar.gz \
-	notty-daemon_0.0.1_darwin_arm64.tar.gz \
-	notty-daemon_0.0.1_windows_amd64.zip \
-	notty-daemon_0.0.1_windows_arm64.zip
+	"notty-daemon_${release_version}_linux_amd64.tar.gz" \
+	"notty-daemon_${release_version}_linux_arm64.tar.gz" \
+	"notty-daemon_${release_version}_darwin_amd64.tar.gz" \
+	"notty-daemon_${release_version}_darwin_arm64.tar.gz" \
+	"notty-daemon_${release_version}_windows_amd64.zip" \
+	"notty-daemon_${release_version}_windows_arm64.zip"
 do
 	daemon_payload_uri="$daemon_version_uri$daemon_payload_name"
 	[ "$(aws_write_count "$aws_log" "$daemon_payload_uri")" -eq 1 ] ||
@@ -788,8 +799,8 @@ pass 'daemon version ledger commits after payloads and latest commits after stab
 daemon_retry_store="$tmp_dir/daemon-retry-store"
 daemon_retry_log="$tmp_dir/daemon-retry.aws.log"
 daemon_retry_assert_log="$tmp_dir/daemon-retry-ledger-assert.log"
-daemon_retry_payload_name=notty-daemon_0.0.1_linux_amd64.tar.gz
-daemon_retry_payload_source="$daemon_dist/0.0.1/$daemon_retry_payload_name"
+daemon_retry_payload_name="notty-daemon_${release_version}_linux_amd64.tar.gz"
+daemon_retry_payload_source="$daemon_release_dir/$daemon_retry_payload_name"
 daemon_retry_payload_uri="$daemon_version_uri$daemon_retry_payload_name"
 daemon_retry_payload_store="$daemon_retry_store/${daemon_retry_payload_uri#s3://}"
 preseed_equal_size_mismatch "$daemon_retry_payload_source" "$daemon_retry_payload_store"
@@ -839,7 +850,7 @@ fi
 	fail 'Wrangler daemon payload ordering failure allowed an R2 write'
 
 daemon_wrangler_payload_failure_log="$tmp_dir/daemon-payload-put-failure.wrangler.log"
-daemon_wrangler_payload_failure_key='static/daemons/0.0.1/notty-daemon_0.0.1_linux_arm64.tar.gz'
+daemon_wrangler_payload_failure_key="static/daemons/$release_version/notty-daemon_${release_version}_linux_arm64.tar.gz"
 : >"$daemon_wrangler_payload_failure_log"
 if PATH="$fake_bin:$PATH" WRANGLER_LOG="$daemon_wrangler_payload_failure_log" \
 	WRANGLER_FAIL_PAYLOAD_KEY="$daemon_wrangler_payload_failure_key" \
@@ -849,9 +860,9 @@ if PATH="$fake_bin:$PATH" WRANGLER_LOG="$daemon_wrangler_payload_failure_log" \
 	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/daemon-payload-put-failure.output" 2>&1; then
 	fail 'Wrangler daemon deploy swallowed an immutable payload PUT failure'
 fi
-[ "$(wrangler_put_count "$daemon_wrangler_payload_failure_log" 'static/daemons/0.0.1/')" -gt 0 ] ||
+[ "$(wrangler_put_count "$daemon_wrangler_payload_failure_log" "static/daemons/$release_version/")" -gt 0 ] ||
 	fail 'Wrangler daemon payload failure hook did not run mid-loop'
-[ "$(wrangler_put_count "$daemon_wrangler_payload_failure_log" 'static/daemons/0.0.1/manifest.json')" -eq 0 ] ||
+[ "$(wrangler_put_count "$daemon_wrangler_payload_failure_log" "static/daemons/$release_version/manifest.json")" -eq 0 ] ||
 	fail 'Wrangler daemon payload failure allowed the version ledger commit'
 [ "$(wrangler_put_count "$daemon_wrangler_payload_failure_log" 'static/daemons/latest/manifest.json')" -eq 0 ] ||
 	fail 'Wrangler daemon payload failure allowed the latest commit'
@@ -859,29 +870,31 @@ pass 'Wrangler daemon discovery and payload failures cannot reach a commit PUT'
 
 daemon_missing_dist="$tmp_dir/daemon-missing-archive"
 cp -R "$daemon_dist" "$daemon_missing_dist"
-rm "$daemon_missing_dist/0.0.1/notty-daemon_0.0.1_windows_arm64.zip"
+rm "$daemon_missing_dist/$release_version/notty-daemon_${release_version}_windows_arm64.zip"
 expect_daemon_preflight_failure missing-archive "$daemon_missing_dist"
 
 daemon_extra_dist="$tmp_dir/daemon-extra-archive"
 cp -R "$daemon_dist" "$daemon_extra_dist"
-printf 'stale\n' >"$daemon_extra_dist/0.0.1/notty-daemon_0.0.1_linux_386.tar.gz"
+printf 'stale\n' >"$daemon_extra_dist/$release_version/notty-daemon_${release_version}_linux_386.tar.gz"
 expect_daemon_preflight_failure stale-extra-archive "$daemon_extra_dist"
 
 daemon_partial_manifest_dist="$tmp_dir/daemon-partial-manifest"
 cp -R "$daemon_dist" "$daemon_partial_manifest_dist"
-printf '{"version":"0.0.1","artifacts":[]}\n' >"$daemon_partial_manifest_dist/0.0.1/manifest.json"
+printf '{"version":"%s","artifacts":[]}\n' "$release_version" \
+	>"$daemon_partial_manifest_dist/$release_version/manifest.json"
 expect_daemon_preflight_failure partial-manifest "$daemon_partial_manifest_dist"
 
 daemon_wrong_checksum_dist="$tmp_dir/daemon-wrong-checksum"
 cp -R "$daemon_dist" "$daemon_wrong_checksum_dist"
 daemon_zero_hash="$(printf '%064d' 0)"
 awk -v zero="$daemon_zero_hash" 'NR == 1 { $1 = zero } { print $1 "  " $2 }' \
-	"$daemon_wrong_checksum_dist/0.0.1/SHA256SUMS" >"$daemon_wrong_checksum_dist/SHA256SUMS.new"
-mv "$daemon_wrong_checksum_dist/SHA256SUMS.new" "$daemon_wrong_checksum_dist/0.0.1/SHA256SUMS"
+	"$daemon_wrong_checksum_dist/$release_version/SHA256SUMS" >"$daemon_wrong_checksum_dist/SHA256SUMS.new"
+mv "$daemon_wrong_checksum_dist/SHA256SUMS.new" \
+	"$daemon_wrong_checksum_dist/$release_version/SHA256SUMS"
 expect_daemon_preflight_failure wrong-checksum "$daemon_wrong_checksum_dist"
 pass 'daemon upload rejects missing, stale, partial-manifest, and checksum inputs before any R2 write'
 
-daemon_remote_latest="$daemon_dist/0.0.1/manifest.json"
+daemon_remote_latest="$daemon_release_dir/manifest.json"
 daemon_noop_log="$tmp_dir/daemon-identical-redeploy.aws.log"
 : >"$daemon_noop_log"
 PATH="$fake_bin:$PATH" AWS_LOG="$daemon_noop_log" AWS_REMOTE_LATEST="$daemon_remote_latest" \
@@ -908,7 +921,7 @@ if grep -Fq 'r2 object put' "$daemon_wrangler_log"; then
 fi
 
 daemon_conflict_dist="$tmp_dir/daemon-same-version-conflict"
-write_daemon_release "$daemon_conflict_dist" 0.0.1 changed
+write_daemon_release "$daemon_conflict_dist" "$release_version" changed
 daemon_conflict_log="$tmp_dir/daemon-same-version-conflict.aws.log"
 : >"$daemon_conflict_log"
 PATH="$fake_bin:$PATH" AWS_LOG="$daemon_conflict_log" AWS_REMOTE_LATEST="$daemon_remote_latest" \
@@ -920,7 +933,7 @@ PATH="$fake_bin:$PATH" AWS_LOG="$daemon_conflict_log" AWS_REMOTE_LATEST="$daemon
 	fail 'same-version daemon replacement did not rewrite every version object'
 [ "$(aws_write_count "$daemon_conflict_log" "$daemon_latest_uri")" -eq 1 ] ||
 	fail 'same-version daemon replacement did not commit latest exactly once'
-grep -Fq 'Replacing daemon release 0.0.1' "$tmp_dir/daemon-same-version-conflict.output" ||
+grep -Fq "Replacing daemon release $release_version" "$tmp_dir/daemon-same-version-conflict.output" ||
 	fail 'same-version daemon replacement did not report replacement mode'
 grep -F "$daemon_version_uri" "$daemon_conflict_log" | grep -Fq -- '--cache-control public, max-age=60' ||
 	fail 'replaceable daemon version objects retained immutable cache metadata'
@@ -928,12 +941,12 @@ daemon_conflict_ledger_line="$(aws_first_write_line "$daemon_conflict_log" "$dae
 daemon_conflict_latest_line="$(aws_first_write_line "$daemon_conflict_log" "$daemon_latest_uri")"
 for daemon_conflict_payload_name in \
 	SHA256SUMS \
-	notty-daemon_0.0.1_linux_amd64.tar.gz \
-	notty-daemon_0.0.1_linux_arm64.tar.gz \
-	notty-daemon_0.0.1_darwin_amd64.tar.gz \
-	notty-daemon_0.0.1_darwin_arm64.tar.gz \
-	notty-daemon_0.0.1_windows_amd64.zip \
-	notty-daemon_0.0.1_windows_arm64.zip
+	"notty-daemon_${release_version}_linux_amd64.tar.gz" \
+	"notty-daemon_${release_version}_linux_arm64.tar.gz" \
+	"notty-daemon_${release_version}_darwin_amd64.tar.gz" \
+	"notty-daemon_${release_version}_darwin_arm64.tar.gz" \
+	"notty-daemon_${release_version}_windows_amd64.zip" \
+	"notty-daemon_${release_version}_windows_arm64.zip"
 do
 	daemon_conflict_payload_line="$(aws_first_write_line "$daemon_conflict_log" "$daemon_version_uri$daemon_conflict_payload_name")"
 	[ "$daemon_conflict_payload_line" -lt "$daemon_conflict_ledger_line" ] ||
@@ -950,21 +963,21 @@ PATH="$fake_bin:$PATH" R2_ENDPOINT_URL= CLOUDFLARE_API_TOKEN=test CLOUDFLARE_ACC
 	DAEMON_DIST_ROOT="$daemon_conflict_dist" UPLOAD_TARGET=daemon \
 	R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
 	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/daemon-same-version-conflict-wrangler.output"
-[ "$(wrangler_put_count "$daemon_conflict_wrangler_log" 'static/daemons/0.0.1/')" -eq 8 ] ||
+[ "$(wrangler_put_count "$daemon_conflict_wrangler_log" "static/daemons/$release_version/")" -eq 8 ] ||
 	fail 'Wrangler same-version daemon replacement did not rewrite every version object'
 [ "$(wrangler_put_count "$daemon_conflict_wrangler_log" 'static/daemons/latest/manifest.json')" -eq 1 ] ||
 	fail 'Wrangler same-version daemon replacement did not commit latest exactly once'
-grep -F 'r2 object put static/daemons/0.0.1/' "$daemon_conflict_wrangler_log" |
+grep -F "r2 object put static/daemons/$release_version/" "$daemon_conflict_wrangler_log" |
 	grep -Fq -- '--cache-control public, max-age=60 --force' ||
 	fail 'Wrangler daemon replacement did not use short-cache forced PUTs'
 pass 'same-version daemon rebuild replaces R2 payloads and commits manifests in order'
 
 daemon_older_dist="$tmp_dir/daemon-older-release"
-write_daemon_release "$daemon_older_dist" 0.0.0 old
-daemon_older_latest="$daemon_older_dist/0.0.0/manifest.json"
+write_daemon_release "$daemon_older_dist" "$daemon_older_version" old
+daemon_older_latest="$daemon_older_dist/$daemon_older_version/manifest.json"
 daemon_newer_dist="$tmp_dir/daemon-newer-release"
-write_daemon_release "$daemon_newer_dist" 0.0.2 newer
-daemon_newer_latest="$daemon_newer_dist/0.0.2/manifest.json"
+write_daemon_release "$daemon_newer_dist" "$daemon_newer_version" newer
+daemon_newer_latest="$daemon_newer_dist/$daemon_newer_version/manifest.json"
 daemon_new_version_log="$tmp_dir/daemon-new-version.aws.log"
 : >"$daemon_new_version_log"
 PATH="$fake_bin:$PATH" AWS_LOG="$daemon_new_version_log" \
@@ -1006,17 +1019,18 @@ PATH="$fake_bin:$PATH" AWS_LOG="$daemon_missing_pointer_completion_log" \
 	fail 'daemon missing-pointer completion did not advance latest exactly once'
 
 daemon_malformed_latest="$tmp_dir/daemon-malformed-latest.json"
-printf '{"version":"0.0.0"}\n' >"$daemon_malformed_latest"
+printf '{"version":"%s"}\n' "$daemon_older_version" >"$daemon_malformed_latest"
 expect_daemon_publication_failure daemon-malformed-latest "$daemon_dist" "$daemon_malformed_latest" ''
 daemon_ambiguous_latest="$tmp_dir/daemon-ambiguous-latest.json"
-printf '{\n  "version": "0.0.0",\n  "duplicate": {"version": "0.0.0"}\n}\n' >"$daemon_ambiguous_latest"
+printf '{\n  "version": "%s",\n  "duplicate": {"version": "%s"}\n}\n' \
+	"$daemon_older_version" "$daemon_older_version" >"$daemon_ambiguous_latest"
 expect_daemon_publication_failure daemon-ambiguous-latest "$daemon_dist" "$daemon_ambiguous_latest" ''
 expect_daemon_publication_failure daemon-missing-ledger-current "$daemon_dist" "$daemon_remote_latest" ''
 expect_daemon_publication_failure daemon-downgrade-missing-ledger "$daemon_dist" "$daemon_newer_latest" ''
 expect_daemon_publication_failure daemon-downgrade-identical-ledger \
 	"$daemon_dist" "$daemon_newer_latest" "$daemon_remote_latest"
 expect_daemon_publication_failure daemon-pointer-conflict \
-	"$daemon_dist" "$daemon_conflict_dist/0.0.1/manifest.json" "$daemon_remote_latest"
+	"$daemon_dist" "$daemon_conflict_dist/$release_version/manifest.json" "$daemon_remote_latest"
 expect_daemon_publication_failure daemon-historical-rewrite \
 	"$daemon_conflict_dist" "$daemon_older_latest" "$daemon_remote_latest"
 pass 'daemon ledger/pointer matrix preserves fresh publish, no-op, current replacement, forward completion, and fail-closed historical states'
@@ -1044,8 +1058,9 @@ fi
 pass 'daemon publication is no-op safe, replaceable at current version, retryable, and commit ordered'
 
 daemon_toctou_dist="$tmp_dir/daemon-post-staging-mutation"
-write_daemon_release "$daemon_toctou_dist"
-daemon_toctou_source="$daemon_toctou_dist/0.0.1/notty-daemon_0.0.1_linux_arm64.tar.gz"
+write_daemon_release "$daemon_toctou_dist" "$release_version"
+daemon_toctou_name="notty-daemon_${release_version}_linux_arm64.tar.gz"
+daemon_toctou_source="$daemon_toctou_dist/$release_version/$daemon_toctou_name"
 daemon_toctou_before="$(fixture_sha256 "$daemon_toctou_source")"
 daemon_toctou_aws_log="$tmp_dir/daemon-post-staging-mutation.aws.log"
 daemon_toctou_capture="$tmp_dir/daemon-post-staging-mutation.capture"
@@ -1069,12 +1084,16 @@ PATH="$daemon_mutation_bin:$fake_bin:$PATH" AWS_LOG="$daemon_toctou_aws_log" \
 	"$repo_dir/scripts/upload-r2.sh" >/dev/null
 daemon_toctou_after="$(fixture_sha256 "$daemon_toctou_source")"
 [ "$daemon_toctou_before" != "$daemon_toctou_after" ] || fail 'daemon post-staging source mutation hook did not run'
-for daemon_captured in notty-daemon_0.0.1_linux_arm64.tar.gz SHA256SUMS manifest.json; do
+for daemon_captured in "$daemon_toctou_name" SHA256SUMS manifest.json; do
 	[ -f "$daemon_toctou_capture/$daemon_captured" ] || fail "daemon staged upload did not capture $daemon_captured"
 done
-daemon_toctou_uploaded="$(fixture_sha256 "$daemon_toctou_capture/notty-daemon_0.0.1_linux_arm64.tar.gz")"
-daemon_toctou_checksum="$(awk '$2 == "notty-daemon_0.0.1_linux_arm64.tar.gz" { print $1 }' "$daemon_toctou_capture/SHA256SUMS")"
-daemon_toctou_manifest="$(awk -F '"sha256": "' '/"file": "notty-daemon_0.0.1_linux_arm64.tar.gz"/ { split($2, fields, "\""); print fields[1] }' "$daemon_toctou_capture/manifest.json")"
+daemon_toctou_uploaded="$(fixture_sha256 "$daemon_toctou_capture/$daemon_toctou_name")"
+daemon_toctou_checksum="$(awk -v name="$daemon_toctou_name" '$2 == name { print $1 }' "$daemon_toctou_capture/SHA256SUMS")"
+daemon_toctou_manifest="$(
+	awk -F '"sha256": "' -v name="$daemon_toctou_name" \
+		'index($0, "\"file\": \"" name "\"") { split($2, fields, "\""); print fields[1] }' \
+		"$daemon_toctou_capture/manifest.json"
+)"
 [ "$daemon_toctou_uploaded" = "$daemon_toctou_before" ] || fail 'daemon upload did not preserve staged archive bytes'
 [ "$daemon_toctou_uploaded" = "$daemon_toctou_checksum" ] || fail 'daemon staged archive differs from staged SHA256SUMS'
 [ "$daemon_toctou_uploaded" = "$daemon_toctou_manifest" ] || fail 'daemon staged archive differs from staged manifest'
@@ -1094,14 +1113,14 @@ PATH="$fake_bin:$PATH" AWS_LOG="$aws_log" MACOS_GUI_DIST_DIR="$macos_dist" UPLOA
 
 macos_latest_manifest_uri='s3://static/desktop/macos/latest/manifest.json'
 macos_latest_sha_uri='s3://static/desktop/macos/latest/SHA256SUMS'
-macos_version_uri='s3://static/desktop/macos/0.0.1/'
-macos_ledger_uri='s3://static/desktop/macos/0.0.1/manifest.json'
+macos_version_uri="s3://static/desktop/macos/$release_version/"
+macos_ledger_uri="${macos_version_uri}manifest.json"
 macos_ledger_line="$(aws_first_write_line "$aws_log" "$macos_ledger_uri")"
 macos_latest_sha_line="$(aws_first_write_line "$aws_log" "$macos_latest_sha_uri")"
 macos_latest_manifest_line="$(aws_first_write_line "$aws_log" "$macos_latest_manifest_uri")"
 [ "$(aws_write_count "$aws_log" "$macos_version_uri")" -eq 3 ] ||
 	fail 'macOS GUI deploy did not write payloads and their version ledger exactly once each'
-for macos_payload_name in Codesk_0.0.1_macos_universal.dmg SHA256SUMS; do
+for macos_payload_name in "Codesk_${release_version}_macos_universal.dmg" SHA256SUMS; do
 	macos_payload_uri="$macos_version_uri$macos_payload_name"
 	[ "$(aws_write_count "$aws_log" "$macos_payload_uri")" -eq 1 ] ||
 		fail "macOS GUI payload was not put exactly once: $macos_payload_name"
@@ -1116,8 +1135,8 @@ done
 macos_retry_store="$tmp_dir/macos-retry-store"
 macos_retry_log="$tmp_dir/macos-retry.aws.log"
 macos_retry_assert_log="$tmp_dir/macos-retry-ledger-assert.log"
-macos_retry_payload_name=Codesk_0.0.1_macos_universal.dmg
-macos_retry_payload_source="$macos_dist/0.0.1/$macos_retry_payload_name"
+macos_retry_payload_name="Codesk_${release_version}_macos_universal.dmg"
+macos_retry_payload_source="$macos_dist/$release_version/$macos_retry_payload_name"
 macos_retry_payload_uri="$macos_version_uri$macos_retry_payload_name"
 macos_retry_payload_store="$macos_retry_store/${macos_retry_payload_uri#s3://}"
 preseed_equal_size_mismatch "$macos_retry_payload_source" "$macos_retry_payload_store"
@@ -1142,7 +1161,7 @@ pass 'macOS GUI retry unconditionally replaces stale equal-sized payloads before
 macos_find_failure_log="$tmp_dir/macos-release-find-failure.wrangler.log"
 : >"$macos_find_failure_log"
 if BSD_FIND_REAL="$bsd_find_real" BSD_SORT_REAL="$bsd_sort_real" \
-	FAIL_COMMITTED_FIND=1 FAIL_COMMITTED_FIND_BASENAME=0.0.1 \
+	FAIL_COMMITTED_FIND=1 FAIL_COMMITTED_FIND_BASENAME="$release_version" \
 	PATH="$bsd_find_bin:$fake_bin:$PATH" WRANGLER_LOG="$macos_find_failure_log" \
 	MACOS_GUI_DIST_DIR="$macos_dist" UPLOAD_TARGET=macos-gui \
 	R2_ENDPOINT_URL= CLOUDFLARE_API_TOKEN=test CLOUDFLARE_ACCOUNT_ID=test \
@@ -1154,7 +1173,7 @@ fi
 	fail 'Wrangler macOS GUI payload enumeration failure allowed an R2 write'
 
 macos_wrangler_payload_failure_log="$tmp_dir/macos-payload-put-failure.wrangler.log"
-macos_wrangler_payload_failure_key='static/desktop/macos/0.0.1/SHA256SUMS'
+macos_wrangler_payload_failure_key="static/desktop/macos/$release_version/SHA256SUMS"
 : >"$macos_wrangler_payload_failure_log"
 if PATH="$fake_bin:$PATH" WRANGLER_LOG="$macos_wrangler_payload_failure_log" \
 	WRANGLER_FAIL_PAYLOAD_KEY="$macos_wrangler_payload_failure_key" \
@@ -1164,15 +1183,15 @@ if PATH="$fake_bin:$PATH" WRANGLER_LOG="$macos_wrangler_payload_failure_log" \
 	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/macos-payload-put-failure.output" 2>&1; then
 	fail 'Wrangler macOS GUI deploy swallowed an immutable payload PUT failure'
 fi
-[ "$(wrangler_put_count "$macos_wrangler_payload_failure_log" 'static/desktop/macos/0.0.1/')" -gt 0 ] ||
+[ "$(wrangler_put_count "$macos_wrangler_payload_failure_log" "static/desktop/macos/$release_version/")" -gt 0 ] ||
 	fail 'Wrangler macOS GUI payload failure hook did not run mid-loop'
-[ "$(wrangler_put_count "$macos_wrangler_payload_failure_log" 'static/desktop/macos/0.0.1/manifest.json')" -eq 0 ] ||
+[ "$(wrangler_put_count "$macos_wrangler_payload_failure_log" "static/desktop/macos/$release_version/manifest.json")" -eq 0 ] ||
 	fail 'Wrangler macOS GUI payload failure allowed the version ledger commit'
 [ "$(wrangler_put_count "$macos_wrangler_payload_failure_log" 'static/desktop/macos/latest/')" -eq 0 ] ||
 	fail 'Wrangler macOS GUI payload failure allowed a latest commit'
 pass 'Wrangler macOS GUI discovery and payload failures cannot reach a commit PUT'
 
-macos_remote_manifest="$macos_dist/0.0.1/manifest.json"
+macos_remote_manifest="$macos_dist/$release_version/manifest.json"
 macos_noop_log="$tmp_dir/macos-identical-redeploy.aws.log"
 : >"$macos_noop_log"
 PATH="$fake_bin:$PATH" AWS_LOG="$macos_noop_log" \
@@ -1219,9 +1238,11 @@ expect_macos_publication_failure macos-historical-rewrite \
 	"$macos_conflict_dist" "$daemon_older_latest" "$macos_remote_manifest"
 macos_wrong_version_dist="$tmp_dir/macos-candidate-version-mismatch"
 write_macos_release "$macos_wrong_version_dist"
-sed 's/^  "version": "0\.0\.1",$/  "version": "0.0.2",/' \
-	"$macos_wrong_version_dist/0.0.1/manifest.json" >"$macos_wrong_version_dist/manifest.json.new"
-mv "$macos_wrong_version_dist/manifest.json.new" "$macos_wrong_version_dist/0.0.1/manifest.json"
+awk -v version="$daemon_newer_version" \
+	'/^  "version": / { $0 = "  \"version\": \"" version "\"," } { print }' \
+	"$macos_wrong_version_dist/$release_version/manifest.json" >"$macos_wrong_version_dist/manifest.json.new"
+mv "$macos_wrong_version_dist/manifest.json.new" \
+	"$macos_wrong_version_dist/$release_version/manifest.json"
 expect_macos_publication_failure macos-candidate-version-mismatch "$macos_wrong_version_dist" '' ''
 
 macos_sha_failure_log="$tmp_dir/macos-latest-sha-failure.aws.log"
@@ -1248,8 +1269,8 @@ PATH="$no_go_bin:$fake_bin:$PATH" NO_GO_LOG="$windows_no_go_log" \
 	"$repo_dir/scripts/upload-r2.sh" >/dev/null
 [ ! -s "$windows_no_go_log" ] || fail 'Windows GUI deploy invoked native host Go'
 
-windows_version_uri='s3://static/desktop/windows/0.0.1/'
-windows_ledger_uri='s3://static/desktop/windows/0.0.1/manifest.json'
+windows_version_uri="s3://static/desktop/windows/$release_version/"
+windows_ledger_uri="${windows_version_uri}manifest.json"
 windows_latest_uri='s3://static/desktop/windows/latest/manifest.json'
 windows_remote_latest="$tmp_dir/windows-remote-latest-manifest.json"
 write_windows_manifest "$windows_dist" "$windows_remote_latest"
@@ -1259,9 +1280,9 @@ windows_latest_line="$(aws_first_write_line "$aws_log" "$windows_latest_uri")"
 	fail 'Windows GUI deploy did not write six payload files and one version ledger'
 for windows_arch in amd64 arm64; do
 	for windows_version_file in \
-		"Codesk_0.0.1_windows_${windows_arch}.msi" SHA256SUMS provenance.json
+		"Codesk_${release_version}_windows_${windows_arch}.msi" SHA256SUMS provenance.json
 	do
-		windows_payload_uri="s3://static/desktop/windows/0.0.1/$windows_arch/$windows_version_file"
+		windows_payload_uri="${windows_version_uri}${windows_arch}/$windows_version_file"
 		windows_payload_line="$(aws_first_write_line "$aws_log" "$windows_payload_uri")"
 		[ "$windows_payload_line" -lt "$windows_ledger_line" ] ||
 			fail "Windows GUI version ledger preceded $windows_arch/$windows_version_file"
@@ -1317,7 +1338,7 @@ toctou_dist="$tmp_dir/windows-post-staging-mutation"
 for arch in amd64 arm64; do
 	write_windows_bundle "$toctou_dist" "$arch" "$source_head" "$source_base" true
 done
-toctou_source_before="$(fixture_sha256 "$toctou_dist/arm64/Codesk_0.0.1_windows_arm64.msi")"
+toctou_source_before="$(fixture_sha256 "$toctou_dist/arm64/Codesk_${release_version}_windows_arm64.msi")"
 toctou_aws_log="$tmp_dir/windows-post-staging-mutation.aws.log"
 toctou_capture="$tmp_dir/windows-post-staging-mutation.capture"
 mkdir "$toctou_capture"
@@ -1327,7 +1348,7 @@ PATH="$fake_bin:$PATH" AWS_LOG="$toctou_aws_log" AWS_CAPTURE_DIR="$toctou_captur
 	UPLOAD_TARGET=windows-gui R2_ENDPOINT_URL=https://example.invalid \
 	R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
 	"$repo_dir/scripts/upload-r2.sh" >/dev/null
-toctou_source_after="$(fixture_sha256 "$toctou_dist/arm64/Codesk_0.0.1_windows_arm64.msi")"
+toctou_source_after="$(fixture_sha256 "$toctou_dist/arm64/Codesk_${release_version}_windows_arm64.msi")"
 [ "$toctou_source_before" != "$toctou_source_after" ] || fail 'Windows GUI post-staging source mutation hook did not run'
 for captured in arm64.msi arm64.SHA256SUMS manifest.json; do
 	[ -f "$toctou_capture/$captured" ] || fail "Windows GUI staged upload did not capture $captured"
@@ -1349,8 +1370,8 @@ for arch in amd64 arm64; do
 	write_windows_bundle "$wrong_hash_dist" "$arch" "$source_head" "$source_base" true
 done
 wrong_hash_provenance="$(fixture_sha256 "$wrong_hash_dist/amd64/provenance.json")"
-printf '%064d  Codesk_0.0.1_windows_amd64.msi\r\n%s  provenance.json\r\n' \
-	0 "$wrong_hash_provenance" >"$wrong_hash_dist/amd64/SHA256SUMS"
+printf '%064d  Codesk_%s_windows_amd64.msi\r\n%s  provenance.json\r\n' \
+	0 "$release_version" "$wrong_hash_provenance" >"$wrong_hash_dist/amd64/SHA256SUMS"
 expect_windows_preflight_failure wrong-hash "$wrong_hash_dist"
 
 wrong_provenance_dist="$tmp_dir/windows-wrong-provenance"
@@ -1376,12 +1397,12 @@ expect_windows_preflight_failure missing-second-arch "$missing_arch_dist"
 pass 'Windows GUI upload preflights both exact bundles and makes zero writes on causal failures'
 
 for required in \
-	's3://static/daemons/0.0.1/' \
+	"s3://static/daemons/$release_version/" \
 	's3://static/daemons/latest/manifest.json' \
-	's3://static/desktop/macos/0.0.1/' \
+	"s3://static/desktop/macos/$release_version/" \
 	's3://static/desktop/macos/latest/manifest.json' \
-	's3://static/desktop/windows/0.0.1/amd64/Codesk_0.0.1_windows_amd64.msi' \
-	's3://static/desktop/windows/0.0.1/arm64/Codesk_0.0.1_windows_arm64.msi' \
+	"s3://static/desktop/windows/$release_version/amd64/Codesk_${release_version}_windows_amd64.msi" \
+	"s3://static/desktop/windows/$release_version/arm64/Codesk_${release_version}_windows_arm64.msi" \
 	's3://static/desktop/windows/latest/manifest.json'
 do
 	grep -Fq "$required" "$aws_log" || fail "shared R2 uploader missed route: $required"
