@@ -246,6 +246,7 @@ content_type_for() {
 		*.json) printf 'application/json; charset=utf-8' ;;
 		*.svg) printf 'image/svg+xml' ;;
 		*.png) printf 'image/png' ;;
+		*.ico) printf 'image/x-icon' ;;
 		*.jpg|*.jpeg) printf 'image/jpeg' ;;
 		*.webp) printf 'image/webp' ;;
 		*.txt|*SHA256SUMS) printf 'text/plain; charset=utf-8' ;;
@@ -506,14 +507,17 @@ upload_dir() {
 }
 
 case "$target" in
-	frontend|daemon|macos-gui|windows-gui) ;;
-	*) die 'UPLOAD_TARGET must be frontend, daemon, macos-gui, or windows-gui' ;;
+	frontend|homepage|daemon|macos-gui|windows-gui) ;;
+	*) die 'UPLOAD_TARGET must be frontend, homepage, daemon, macos-gui, or windows-gui' ;;
 esac
 
 case "$target" in
 	frontend)
 		need R2_HOMEPAGE_BUCKET
 		need R2_APP_BUCKET
+		;;
+	homepage)
+		need R2_HOMEPAGE_BUCKET
 		;;
 	daemon)
 		version="$("$root_dir/scripts/read-daemon-version.sh")"
@@ -542,20 +546,48 @@ release_cache_control="${RELEASE_CACHE_CONTROL:-public, max-age=31536000, immuta
 daemon_release_cache_control="${DAEMON_RELEASE_CACHE_CONTROL:-public, max-age=60}"
 latest_cache_control="${LATEST_CACHE_CONTROL:-public, max-age=60}"
 
-if [ "$target" = frontend ]; then
+upload_browser_assets() {
+	browser_assets_bucket="$1"
+	browser_assets_prefix="$2"
+	browser_assets_dir="$3"
+	for browser_asset in \
+		favicon.svg \
+		favicon.ico \
+		favicon-32x32.png \
+		favicon-16x16.png \
+		apple-touch-icon.png \
+		safari-pinned-tab.svg
+	do
+		upload_file "$browser_assets_bucket" "$(join_key "$browser_assets_prefix" "$browser_asset")" \
+			"$browser_assets_dir/$browser_asset" 'public, max-age=300'
+	done
+}
+
+upload_homepage() {
 	homepage_prefix="${R2_HOMEPAGE_PREFIX:-}"
-	app_prefix="${R2_APP_PREFIX:-}"
 	need_file "$static_dist_dir/homepage/index.html"
-	need_file "$static_dist_dir/app/index.html"
 
 	printf 'Uploading homepage to %s\n' "$(s3_uri "$R2_HOMEPAGE_BUCKET" "$homepage_prefix")"
 	upload_dir "$static_dist_dir/homepage" "$R2_HOMEPAGE_BUCKET" "$homepage_prefix" 'public, max-age=300' delete
+	upload_browser_assets "$R2_HOMEPAGE_BUCKET" "$homepage_prefix" "$static_dist_dir/homepage"
 	if [ -z "$homepage_prefix" ] && [ "$uploader" = wrangler ]; then
 		upload_file "$R2_HOMEPAGE_BUCKET" '' "$static_dist_dir/homepage/index.html" 'public, max-age=300'
 	fi
+}
+
+if [ "$target" = homepage ]; then
+	upload_homepage
+fi
+
+if [ "$target" = frontend ]; then
+	app_prefix="${R2_APP_PREFIX:-}"
+	need_file "$static_dist_dir/app/index.html"
+
+	upload_homepage
 
 	printf 'Uploading app to %s\n' "$(s3_uri "$R2_APP_BUCKET" "$app_prefix")"
 	upload_dir "$static_dist_dir/app" "$R2_APP_BUCKET" "$app_prefix" "$release_cache_control" delete
+	upload_browser_assets "$R2_APP_BUCKET" "$app_prefix" "$static_dist_dir/app"
 	upload_file "$R2_APP_BUCKET" "$(join_key "$app_prefix" index.html)" "$static_dist_dir/app/index.html" 'public, max-age=60'
 	if [ -z "$app_prefix" ] && [ "$uploader" = wrangler ]; then
 		upload_file "$R2_APP_BUCKET" '' "$static_dist_dir/app/index.html" 'public, max-age=60'
@@ -682,6 +714,8 @@ fi
 
 if [ "$target" = frontend ]; then
 	printf 'Uploaded frontend assets\n'
+elif [ "$target" = homepage ]; then
+	printf 'Uploaded homepage assets\n'
 else
 	printf 'Uploaded %s assets for %s\n' "$target" "$version"
 fi

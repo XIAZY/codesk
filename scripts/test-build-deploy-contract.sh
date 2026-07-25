@@ -30,7 +30,8 @@ target_count() {
 
 for target in \
 	linux-daemon-build macos-daemon-build windows-daemon-build daemon-deploy \
-	frontend-build frontend-deploy backend-build backend-deploy \
+	frontend-build frontend-deploy homepage-build homepage-deploy \
+	backend-build backend-deploy \
 	daemon-version-contract-check
 do
 	[ "$(target_count "$target")" -eq 1 ] || fail "$target must have exactly one Make definition"
@@ -712,9 +713,33 @@ static_dist="$tmp_dir/static"
 mkdir -p "$static_dist/homepage" "$static_dist/app"
 printf '<html>home</html>\n' >"$static_dist/homepage/index.html"
 printf '<html>app</html>\n' >"$static_dist/app/index.html"
+for browser_asset in \
+	favicon.svg favicon.ico favicon-32x32.png favicon-16x16.png \
+	apple-touch-icon.png safari-pinned-tab.svg
+do
+	printf '%s\n' "$browser_asset" >"$static_dist/homepage/$browser_asset"
+	printf '%s\n' "$browser_asset" >"$static_dist/app/$browser_asset"
+done
 PATH="$fake_bin:$PATH" AWS_LOG="$aws_log" STATIC_DIST_DIR="$static_dist" UPLOAD_TARGET=frontend \
 	R2_ENDPOINT_URL=https://example.invalid R2_HOMEPAGE_BUCKET=homepage R2_APP_BUCKET=app \
 	"$repo_dir/scripts/upload-r2.sh" >/dev/null
+for browser_asset in \
+	favicon.svg favicon.ico favicon-32x32.png favicon-16x16.png \
+	apple-touch-icon.png safari-pinned-tab.svg
+do
+	for browser_bucket in homepage app; do
+		browser_uri="s3://$browser_bucket/$browser_asset"
+		[ "$(aws_write_count "$aws_log" "$browser_uri")" -eq 1 ] ||
+			fail "$browser_uri was not explicitly uploaded exactly once"
+		grep -F "$browser_uri" "$aws_log" | grep -Fq -- '--cache-control public, max-age=300' ||
+			fail "$browser_uri did not receive the short browser-shell cache policy"
+	done
+done
+grep -F 's3://homepage/favicon.ico' "$aws_log" | grep -Fq -- '--content-type image/x-icon' ||
+	fail 'homepage favicon.ico did not receive an icon content type'
+grep -F 's3://app/favicon.ico' "$aws_log" | grep -Fq -- '--content-type image/x-icon' ||
+	fail 'app favicon.ico did not receive an icon content type'
+pass 'browser icons are explicitly uploaded with compatible metadata and short caching'
 
 daemon_dist="$tmp_dir/daemons"
 write_daemon_release "$daemon_dist"

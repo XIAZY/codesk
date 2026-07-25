@@ -33,7 +33,8 @@ WINDOWS_GUI_ZIG_VERSION ?= 0.16.0
 	build build-yffi build-go _build-daemon-host _static-build-local \
 	linux-daemon-build macos-daemon-build windows-daemon-build daemon-deploy \
 	macos-gui-build macos-gui-deploy windows-gui-build windows-gui-deploy \
-	frontend-build frontend-deploy backend-build backend-deploy deploy \
+	frontend-build frontend-deploy homepage-build homepage-deploy \
+	backend-build backend-deploy deploy \
 	daemon-clean daemon-installer-check daemon-installer-windows-check daemon-uninstall-test daemon-version-contract-check build-deploy-contract-check
 
 dev: _static-build-local
@@ -83,6 +84,9 @@ build-go: build-yffi
 
 frontend-build:
 	scripts/build-frontend.sh
+
+homepage-build:
+	scripts/build-homepage.sh
 
 _build-daemon-host: build-yffi
 	repository_daemon_version="$(REPOSITORY_DAEMON_VERSION)" && \
@@ -153,6 +157,9 @@ backend-deploy:
 
 frontend-deploy:
 	scripts/deploy-frontend.sh
+
+homepage-deploy:
+	scripts/deploy-homepage.sh
 
 deploy:
 	$(MAKE) frontend-deploy

@@ -19,8 +19,8 @@ vite_api_base="${VITE_API_BASE:-$backend_origin}"
 vite_daemon_static_base="${VITE_DAEMON_STATIC_BASE:-${NOTTY_DAEMON_STATIC_BASE:-$static_origin/daemons}}"
 vite_desktop_static_base="${VITE_DESKTOP_STATIC_BASE:-${NOTTY_DESKTOP_STATIC_BASE:-$static_origin/desktop}}"
 
-rm -rf "$app_out" "$homepage_out"
-mkdir -p "$app_out" "$homepage_out"
+rm -rf "$app_out"
+mkdir -p "$app_out"
 
 (
 	cd "$root_dir/frontend"
@@ -35,7 +35,8 @@ mkdir -p "$app_out" "$homepage_out"
 )
 
 cp -R "$root_dir/frontend/dist/." "$app_out/"
-cp -R "$root_dir/homepage/." "$homepage_out/"
+
+STATIC_DIST_DIR="$out_dir" "$root_dir/scripts/build-homepage.sh" >/dev/null
 
 printf 'Built frontend assets:\n'
 printf '  app: %s\n' "$app_out"
