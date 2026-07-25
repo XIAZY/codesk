@@ -563,24 +563,49 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
     expect(alt.getAttribute("href")).toContain("/amd64/Codesk_0.0.1_windows_amd64.msi");
   });
 
-  it("mac: 'Rather use the terminal?' is the deliberate choice that creates the daemon + shows the curl command", async () => {
+  it("command-line setup: navigation and OS switching create nothing; a required named submit creates exactly once", async () => {
     stubUA(MAC);
     const user = userEvent.setup();
     const created: Daemon = { ...daemonFixtures.neverSeen, id: "daemon_new", name: "Local daemon" };
     const api = { createDaemon: vi.fn().mockResolvedValue({ daemon: created, token: "nottyd_secret" }) };
     render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
     expect(api.createDaemon).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "Rather use the terminal?" }));
+    expect(screen.getByText("Running on a server or headless computer? Set up Codesk from the command line.")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Use command line setup" }));
+    expect(screen.getByRole("heading", { name: "Set up from the command line" })).toBeTruthy();
+    expect(screen.getByText("Nothing is created until you submit this name.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "macOS" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Linux" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Windows" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Linux" }));
+    await user.click(screen.getByRole("button", { name: "Windows" }));
+    expect(api.createDaemon).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Generate install command" }));
+    expect(screen.getByText("Enter a name for this local environment.")).toBeTruthy();
+    expect(api.createDaemon).not.toHaveBeenCalled();
+
+    await user.type(screen.getByLabelText("Local environment name"), "  Build server  ");
+    await user.click(screen.getByRole("button", { name: "Generate install command" }));
     await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
+    expect(api.createDaemon).toHaveBeenCalledWith("ws", "Build server");
+    await waitFor(() => expect(document.querySelector("pre.code")?.textContent).toContain("install.ps1"));
+    await user.click(screen.getByRole("button", { name: "Linux" }));
     await waitFor(() => expect(document.querySelector("pre.code")?.textContent).toContain("install.sh"));
+    expect(api.createDaemon).toHaveBeenCalledTimes(1);
   });
 
   it("terminal shows a Preparing state with NO copyable command or placeholder until a real token exists (#6)", async () => {
     stubUA(LINUX);
+    const user = userEvent.setup();
     let resolveCreate: (value: unknown) => void = () => {};
     const created: Daemon = { ...daemonFixtures.neverSeen, id: "daemon_new", name: "Local daemon" };
     const api = { createDaemon: vi.fn().mockImplementation(() => new Promise((resolve) => { resolveCreate = resolve; })) };
     render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    expect(api.createDaemon).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Use command line setup" }));
+    await user.type(screen.getByLabelText("Local environment name"), "Build server");
+    await user.click(screen.getByRole("button", { name: "Generate install command" }));
     // Preparing: no command block, nothing copyable, and no `nottyd_...` placeholder anywhere.
     expect(await screen.findByText("Preparing your install command…")).toBeTruthy();
     expect(document.querySelector("pre.code")).toBeNull();
@@ -592,11 +617,15 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
 
   it("terminal create failure → one honest 'unconfirmed' state: no command, no Copy, NO blind retry (#3)", async () => {
     stubUA(LINUX);
+    const user = userEvent.setup();
     const onDone = vi.fn();
     // Non-idempotent create with no request key: an ambiguous failure could have committed. We must
     // NOT offer a blind retry (it would duplicate) and there is no recoverable token to retry toward.
     const api = { createDaemon: vi.fn().mockRejectedValue(new Error("network dropped")) };
     render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={onDone} />);
+    await user.click(screen.getByRole("button", { name: "Use command line setup" }));
+    await user.type(screen.getByLabelText("Local environment name"), "Build server");
+    await user.click(screen.getByRole("button", { name: "Generate install command" }));
     expect(await screen.findByText(/We lost contact while creating this environment/)).toBeTruthy();
     expect(screen.getByText(/It may already exist\. Close this dialog and check Local environments/)).toBeTruthy();
     expect(document.querySelector("pre.code")).toBeNull();
@@ -604,12 +633,17 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
     // Refresh-once so any committed record surfaces in Local environments; and exactly ONE POST ever.
     await waitFor(() => expect(onDone).toHaveBeenCalled());
     expect(api.createDaemon).toHaveBeenCalledTimes(1);
+    expect((screen.getByLabelText("Local environment name") as HTMLInputElement).value).toBe("Build server");
   });
 
   it("terminal unconfirmed copy renders on its own WRAPPING element, never the nowrap chip that clips it at 390px (#4)", async () => {
     stubUA(LINUX);
+    const user = userEvent.setup();
     const api = { createDaemon: vi.fn().mockRejectedValue(new Error("network dropped")) };
     render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Use command line setup" }));
+    await user.type(screen.getByLabelText("Local environment name"), "Build server");
+    await user.click(screen.getByRole("button", { name: "Generate install command" }));
     const msg = await screen.findByText(/We lost contact while creating this environment/);
     // jsdom can't measure clipping, so pin the structural guarantee Deniz's 390px screenshot proved:
     // the multi-sentence honest recovery copy must NOT sit in the global nowrap `.chip` pill (which
@@ -621,7 +655,7 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
   });
 
   it("ambiguous create failure does NOT re-fire on re-entry — no duplicate POST after failure→switch→back (#3 re-entry)", async () => {
-    stubUA(LINUX);
+    stubUA(MAC);
     const user = userEvent.setup();
     // The single-fire guard must SURVIVE an ambiguous failure: resetting it in the catch would let
     // failure → switch platform away → return to the terminal issue a SECOND non-idempotent POST and
@@ -629,12 +663,16 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
     // `createStartedRef.current = false` in the catch turns it RED with 2 createDaemon calls.)
     const api = { createDaemon: vi.fn().mockRejectedValue(new Error("network dropped")) };
     render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
-    // Linux terminal fires the create on open → it fails ambiguously → the unconfirmed state.
+    await user.click(screen.getByRole("button", { name: "Use command line setup" }));
+    await user.type(screen.getByLabelText("Local environment name"), "Build server");
+    await user.click(screen.getByRole("button", { name: "Generate install command" }));
     await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
     await screen.findByText(/We lost contact while creating this environment/);
-    // Switch Linux → Mac → Linux, re-entering the terminal panel. No second POST may fire.
-    await user.click(screen.getByRole("button", { name: "Mac" }));
-    await user.click(screen.getByRole("button", { name: "Linux" }));
+    // OS switches and panel re-entry after the ambiguous result cannot issue another POST.
+    await user.click(screen.getByRole("button", { name: "Windows" }));
+    await user.click(screen.getByRole("button", { name: "macOS" }));
+    await user.click(screen.getByRole("button", { name: "← Back to desktop app downloads" }));
+    await user.click(screen.getByRole("button", { name: "Use command line setup" }));
     await waitFor(() => expect(screen.getByText(/We lost contact while creating this environment/)).toBeTruthy());
     expect(api.createDaemon).toHaveBeenCalledTimes(1);
   });
@@ -646,23 +684,33 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
     const created: Daemon = { ...daemonFixtures.neverSeen, id: "daemon_new", name: "Local daemon" };
     const api = { createDaemon: vi.fn().mockImplementation(() => new Promise((resolve) => { resolveCreate = resolve; })) };
     render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
-    await user.click(screen.getByRole("button", { name: "Rather use the terminal?" }));
+    await user.click(screen.getByRole("button", { name: "Use command line setup" }));
+    await user.type(screen.getByLabelText("Local environment name"), "Build server");
+    await user.click(screen.getByRole("button", { name: "Generate install command" }));
     await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
     // Back to the app download BEFORE the create resolves — must not discard the pending creation.
-    await user.click(screen.getByRole("button", { name: "← Back to the app download" }));
+    await user.click(screen.getByRole("button", { name: "← Back to desktop app downloads" }));
     await act(async () => { resolveCreate({ daemon: created, token: "nottyd_kept" }); });
     // Re-enter the terminal: no second POST (no orphan/duplicate), and the kept token is reused.
-    await user.click(screen.getByRole("button", { name: "Rather use the terminal?" }));
+    await user.click(screen.getByRole("button", { name: "Use command line setup" }));
     await waitFor(() => expect(document.querySelector("pre.code")?.textContent).toContain("nottyd_kept"));
     expect(api.createDaemon).toHaveBeenCalledTimes(1);
   });
 
-  it("linux: terminal is the primary path — waiting for a never-seen daemon, honest failure only after a real check-in", async () => {
+  it("linux UA: default GUI chooser has no Linux peer and command setup creates only after the named submit", async () => {
     stubUA(LINUX);
+    const user = userEvent.setup();
     const created: Daemon = { ...daemonFixtures.neverSeen, id: "daemon_new", name: "Local daemon" };
     const api = { createDaemon: vi.fn().mockResolvedValue({ daemon: created, token: "nottyd_secret" }) };
     const { rerender } = render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
-    // Linux has no desktop app → the terminal command is created on open (its real path).
+    expect(screen.getByText("Which computer are you connecting?")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Linux" })).toBeNull();
+    expect(api.createDaemon).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Use command line setup" }));
+    expect(screen.getByRole("button", { name: "Linux" }).getAttribute("aria-pressed")).toBe("true");
+    expect(api.createDaemon).not.toHaveBeenCalled();
+    await user.type(screen.getByLabelText("Local environment name"), "Build server");
+    await user.click(screen.getByRole("button", { name: "Generate install command" }));
     await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(document.querySelector("pre.code")?.textContent).toContain("install.sh"));
     rerender(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[created]} onClose={vi.fn()} onDone={vi.fn()} />);
@@ -674,9 +722,13 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
 
   it("connected is live-derived: a real check-in flips any path to the connected state", async () => {
     stubUA(LINUX);
+    const user = userEvent.setup();
     const created: Daemon = { ...daemonFixtures.neverSeen, id: "daemon_new", name: "Local daemon" };
     const api = { createDaemon: vi.fn().mockResolvedValue({ daemon: created, token: "nottyd_secret" }) };
     const { rerender } = render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Use command line setup" }));
+    await user.type(screen.getByLabelText("Local environment name"), "Build server");
+    await user.click(screen.getByRole("button", { name: "Generate install command" }));
     await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
     rerender(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[{ ...daemonFixtures.justSeen, id: "daemon_new", name: "Local daemon" }]} onClose={vi.fn()} onDone={vi.fn()} />);
     expect(screen.getByText("Connected. You can create an agent now.")).toBeTruthy();
@@ -688,9 +740,11 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
     const terminalDaemon: Daemon = { ...daemonFixtures.neverSeen, id: "daemon_terminal", name: "Terminal daemon" };
     const api = { createDaemon: vi.fn().mockResolvedValue({ daemon: terminalDaemon, token: "nottyd_x" }) };
     const { rerender } = render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
-    await user.click(screen.getByRole("button", { name: "Rather use the terminal?" }));
+    await user.click(screen.getByRole("button", { name: "Use command line setup" }));
+    await user.type(screen.getByLabelText("Local environment name"), "Build server");
+    await user.click(screen.getByRole("button", { name: "Generate install command" }));
     await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
-    await user.click(screen.getByRole("button", { name: "← Back to the app download" }));
+    await user.click(screen.getByRole("button", { name: "← Back to desktop app downloads" }));
     // The desktop app creates its OWN daemon (different id) which comes online — detection must accept it
     // even though daemonId points at the never-online terminal record.
     const appDaemon: Daemon = { ...daemonFixtures.justSeen, id: "daemon_app_new", name: "App daemon" };
@@ -698,15 +752,19 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
     expect(screen.getByText("Connected. You can create an agent now.")).toBeTruthy();
   });
 
-  it("connection detection accepts the app daemon after Linux→mac/win platform switch (#7)", async () => {
+  it("connection detection accepts the app daemon after Linux command setup → desktop download switch (#7)", async () => {
     stubUA(LINUX);
     const user = userEvent.setup();
     const terminalDaemon: Daemon = { ...daemonFixtures.neverSeen, id: "daemon_terminal", name: "Terminal daemon" };
     const api = { createDaemon: vi.fn().mockResolvedValue({ daemon: terminalDaemon, token: "nottyd_y" }) };
     const { rerender } = render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Use command line setup" }));
+    await user.type(screen.getByLabelText("Local environment name"), "Build server");
+    await user.click(screen.getByRole("button", { name: "Generate install command" }));
     await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
-    // Switch to Mac (the platform selector stays visible in the terminal panel on Linux).
-    await user.click(screen.getByRole("button", { name: "Mac" }));
+    await user.click(screen.getByRole("button", { name: "← Back to desktop app downloads" }));
+    // Switch to Mac from the GUI-only chooser.
+    await user.click(screen.getByRole("button", { name: /Mac.*Download the app/ }));
     const appDaemon: Daemon = { ...daemonFixtures.justSeen, id: "daemon_app_new", name: "App daemon" };
     rerender(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[appDaemon]} onClose={vi.fn()} onDone={vi.fn()} />);
     expect(screen.getByText("Connected. You can create an agent now.")).toBeTruthy();
@@ -733,9 +791,11 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
     const deleteDaemon = vi.fn();
     const api = { createDaemon: vi.fn().mockResolvedValue({ daemon: terminalDaemon, token: "nottyd_z" }), deleteDaemon };
     const { rerender } = render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
-    await user.click(screen.getByRole("button", { name: "Rather use the terminal?" }));
+    await user.click(screen.getByRole("button", { name: "Use command line setup" }));
+    await user.type(screen.getByLabelText("Local environment name"), "Build server");
+    await user.click(screen.getByRole("button", { name: "Generate install command" }));
     await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
-    await user.click(screen.getByRole("button", { name: "← Back to the app download" }));
+    await user.click(screen.getByRole("button", { name: "← Back to desktop app downloads" }));
     // The app connects its own daemon. The never-used terminal record must NOT be auto-deleted —
     // it stays visible in Local environments (as a never-checked-in record) and is separately
     // deletable via the confirmed Delete-record path. Auto-deleting would race a still-running copied
@@ -751,6 +811,10 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
     const api = { createDaemon: vi.fn() };
     render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
     expect(screen.getByText("Which computer are you connecting?")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Mac.*Download the app/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Windows.*Download the \.msi/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Linux" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Use command line setup" })).toBeTruthy();
     expect(api.createDaemon).not.toHaveBeenCalled();
   });
 });

@@ -3747,7 +3747,8 @@ pre.code {
 
 .ds-steps { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 6px; color: var(--ink-3); font-size: 13px; line-height: 1.5; }
 
-.ds-download-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 2px; }
+.ds-download-foot { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin-top: 2px; }
+.ds-headless-entry { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; min-width: 0; }
 .ds-terminal-link, .ds-back {
   padding: 4px 2px; color: var(--accent); background: none; border: 0; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; text-align: left;
 }
@@ -3768,6 +3769,7 @@ pre.code {
 .ds-choice-icon { width: 32px; height: 32px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 8px; background: var(--accent); color: var(--paper); font-size: 15px; }
 .ds-choice-text { flex: 1 1 auto; display: flex; flex-direction: column; }
 .ds-choice-chev { flex: 0 0 auto; color: var(--ink-4); font-size: 17px; }
+.ds-command-form { display: flex; flex-direction: column; gap: 8px; }
 
 /* Desktop uninstall redesign (#63) — honest-by-install-method: neutral question + app/terminal paths. */
 .ds-method { display: flex; flex-direction: column; gap: 8px; }
@@ -3791,3 +3793,7 @@ pre.code {
 /* The ambiguous-create honest recovery copy — a multi-sentence message, NOT a status pill. It must
    wrap (never the nowrap `.chip`) so the full sentence renders at narrow widths (e.g. 390px). */
 .ds-unconfirmed-msg { display: flex; gap: 6px; align-items: flex-start; white-space: normal; font-size: 12px; font-weight: 500; color: var(--ink-3); line-height: 1.5; }
+
+@media (max-width: 520px) {
+  .ds-download-foot { align-items: flex-start; flex-direction: column; }
+}
