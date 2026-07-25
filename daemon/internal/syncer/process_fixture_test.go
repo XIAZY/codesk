@@ -16,6 +16,7 @@ const fakeProcessModeEnv = "NOTTY_SYNCER_FAKE_PROCESS"
 
 const (
 	fakeProcessCodexWithoutAppServer = "codex-without-app-server"
+	fakeProcessCodexDetectAvailable  = "codex-detect-available"
 	fakeProcessCodexLifecycleFlood   = "codex-lifecycle-flood"
 	fakeProcessCodexPersistent       = "codex-persistent"
 	fakeProcessClaude                = "claude"
@@ -28,6 +29,8 @@ func TestMain(m *testing.M) {
 	switch os.Getenv(fakeProcessModeEnv) {
 	case fakeProcessCodexWithoutAppServer:
 		os.Exit(runFakeCodexWithoutAppServer(os.Args[1:]))
+	case fakeProcessCodexDetectAvailable:
+		os.Exit(runFakeCodexDetectAvailable(os.Args[1:]))
 	case fakeProcessCodexLifecycleFlood:
 		os.Exit(runFakeCodexLifecycleFlood())
 	case fakeProcessCodexPersistent:
@@ -140,6 +143,17 @@ func fakeProcessCommand(t *testing.T, mode string) string {
 func runFakeCodexWithoutAppServer(args []string) int {
 	if len(args) == 1 && args[0] == "--version" {
 		fmt.Println("codex 0.1.0")
+		return 0
+	}
+	return 2
+}
+
+func runFakeCodexDetectAvailable(args []string) int {
+	if len(args) == 1 && args[0] == "--version" {
+		fmt.Println("codex 0.144.5")
+		return 0
+	}
+	if len(args) == 2 && args[0] == "app-server" && args[1] == "--help" {
 		return 0
 	}
 	return 2

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"os/exec"
 	"strings"
 	"sync"
@@ -11,11 +13,12 @@ import (
 )
 
 type codexDriver struct {
-	cfg     Config
-	factory codexAppServerFactory
+	cfg            Config
+	factory        codexAppServerFactory
+	catalogTimeout time.Duration
 }
 
-type codexAppServerFactory func(cfg Config, workdir string, toolToken string, agentID string) codexRuntimeApp
+type codexAppServerFactory func(cfg Config, workdir string, toolToken string, agentID string, profile RuntimeProfile) codexRuntimeApp
 
 type codexRuntimeApp interface {
 	Start(context.Context) error
@@ -26,19 +29,23 @@ type codexRuntimeApp interface {
 	PID() int
 	ThreadResume(context.Context, string, string, string) error
 	ThreadStart(context.Context, string, string) (string, error)
+	ModelList(context.Context, string) (codexModelListPage, error)
 	TurnStart(context.Context, string, string, string) (string, error)
 	TurnSteer(context.Context, string, string, string) error
 	TurnInterrupt(context.Context, string, string) error
 }
 
-func newCodexRuntimeApp(cfg Config, workdir string, toolToken string, agentID string) codexRuntimeApp {
-	return newCodexAppServer(cfg, workdir, toolToken, agentID)
+func newCodexRuntimeApp(cfg Config, workdir string, toolToken string, agentID string, profile RuntimeProfile) codexRuntimeApp {
+	app := newCodexAppServer(cfg, workdir, toolToken, agentID)
+	app.profile = profile
+	return app
 }
 
 func newCodexDriver(cfg Config) RuntimeDriver {
 	return &codexDriver{
-		cfg:     cfg,
-		factory: newCodexRuntimeApp,
+		cfg:            cfg,
+		factory:        newCodexRuntimeApp,
+		catalogTimeout: 5 * time.Second,
 	}
 }
 
@@ -66,7 +73,127 @@ func (d *codexDriver) Detect(ctx context.Context) RuntimeDetection {
 	if _, err := managedBackgroundCommandContext(detectCtx, path, "app-server", "--help").CombinedOutput(); err != nil {
 		return RuntimeDetection{Kind: RuntimeCodex, Available: false, Version: version, Path: path, Reason: "codex app-server is not available"}
 	}
-	return RuntimeDetection{Kind: RuntimeCodex, Available: true, Version: version, Path: path}
+	detection := RuntimeDetection{Kind: RuntimeCodex, Available: true, Version: version, Path: path}
+	detection.ModelCatalog = d.detectModelCatalog(ctx)
+	return detection
+}
+
+type codexModelListPage struct {
+	Data       []codexModelWire `json:"data"`
+	NextCursor *string          `json:"nextCursor"`
+}
+
+type codexModelWire struct {
+	Model                     string `json:"model"`
+	DisplayName               string `json:"displayName"`
+	Hidden                    bool   `json:"hidden"`
+	SupportedReasoningEfforts []struct {
+		ReasoningEffort string `json:"reasoningEffort"`
+	} `json:"supportedReasoningEfforts"`
+	DefaultReasoningEffort string `json:"defaultReasoningEffort"`
+	IsDefault              bool   `json:"isDefault"`
+}
+
+func (d *codexDriver) detectModelCatalog(ctx context.Context) *RuntimeModelCatalog {
+	timeout := d.catalogTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	catalogCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	factory := d.factory
+	if factory == nil {
+		factory = newCodexRuntimeApp
+	}
+	app := factory(d.cfg, "", "", "runtime-detection", RuntimeProfile{})
+	if app == nil {
+		return codexModelCatalogError(errors.New("codex app-server factory returned nil"))
+	}
+	defer func() {
+		if err := app.Stop(); err != nil {
+			log.Printf("codex model catalog app-server stop failed: %v", err)
+		}
+	}()
+	if err := app.Start(catalogCtx); err != nil {
+		return codexModelCatalogError(fmt.Errorf("start codex app-server: %w", err))
+	}
+
+	models := []RuntimeModel{}
+	seenModels := map[string]struct{}{}
+	seenCursors := map[string]struct{}{}
+	cursor := ""
+	for {
+		page, err := app.ModelList(catalogCtx, cursor)
+		if err != nil {
+			return codexModelCatalogError(fmt.Errorf("codex model/list cursor %q: %w", cursor, err))
+		}
+		for _, candidate := range page.Data {
+			if candidate.Hidden {
+				continue
+			}
+			model, err := projectCodexModel(candidate)
+			if err != nil {
+				return codexModelCatalogError(err)
+			}
+			if _, duplicate := seenModels[model.Model]; duplicate {
+				return codexModelCatalogError(fmt.Errorf("codex model/list returned duplicate model %q", model.Model))
+			}
+			seenModels[model.Model] = struct{}{}
+			models = append(models, model)
+		}
+		if page.NextCursor == nil {
+			return &RuntimeModelCatalog{Models: models}
+		}
+		next := *page.NextCursor
+		if next == "" {
+			return codexModelCatalogError(errors.New("codex model/list returned an empty next cursor"))
+		}
+		if _, duplicate := seenCursors[next]; duplicate {
+			return codexModelCatalogError(fmt.Errorf("codex model/list repeated cursor %q", next))
+		}
+		seenCursors[next] = struct{}{}
+		cursor = next
+	}
+}
+
+func projectCodexModel(candidate codexModelWire) (RuntimeModel, error) {
+	model := strings.TrimSpace(candidate.Model)
+	displayName := strings.TrimSpace(candidate.DisplayName)
+	defaultEffort := strings.TrimSpace(candidate.DefaultReasoningEffort)
+	if model == "" || displayName == "" {
+		return RuntimeModel{}, errors.New("codex model/list returned a model without model or displayName")
+	}
+	efforts := make([]string, 0, len(candidate.SupportedReasoningEfforts))
+	seen := map[string]struct{}{}
+	for _, supported := range candidate.SupportedReasoningEfforts {
+		effort := strings.TrimSpace(supported.ReasoningEffort)
+		if effort == "" {
+			return RuntimeModel{}, fmt.Errorf("codex model/list returned an empty effort for model %q", model)
+		}
+		if _, duplicate := seen[effort]; duplicate {
+			return RuntimeModel{}, fmt.Errorf("codex model/list returned duplicate effort %q for model %q", effort, model)
+		}
+		seen[effort] = struct{}{}
+		efforts = append(efforts, effort)
+	}
+	if defaultEffort != "" {
+		if _, ok := seen[defaultEffort]; !ok {
+			return RuntimeModel{}, fmt.Errorf("codex model/list default effort %q is unsupported by model %q", defaultEffort, model)
+		}
+	}
+	return RuntimeModel{
+		Model:                  model,
+		DisplayName:            displayName,
+		IsDefault:              candidate.IsDefault,
+		ReasoningEfforts:       efforts,
+		DefaultReasoningEffort: defaultEffort,
+	}, nil
+}
+
+func codexModelCatalogError(err error) *RuntimeModelCatalog {
+	log.Printf("codex model catalog unavailable: %v", err)
+	return &RuntimeModelCatalog{Models: []RuntimeModel{}, Error: "model catalog unavailable"}
 }
 
 func (d *codexDriver) Spawn(ctx context.Context, spec RuntimeSpawnSpec) (RuntimeProcess, error) {
@@ -75,7 +202,7 @@ func (d *codexDriver) Spawn(ctx context.Context, spec RuntimeSpawnSpec) (Runtime
 	if factory == nil {
 		factory = newCodexRuntimeApp
 	}
-	app := factory(d.cfg, spec.Workdir, spec.ToolToken, spec.AgentID)
+	app := factory(d.cfg, spec.Workdir, spec.ToolToken, spec.AgentID, spec.Profile)
 	return &codexRuntimeProcess{
 		app:          app,
 		instructions: spec.Instructions,

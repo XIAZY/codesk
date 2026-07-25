@@ -3,6 +3,7 @@ package syncer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 type fakeCodexRuntimeApp struct {
 	started     bool
 	stopped     bool
+	startErr    error
 	events      chan appServerEvent
 	eventsOnce  sync.Once
 	pid         int
@@ -22,6 +24,8 @@ type fakeCodexRuntimeApp struct {
 	threadStartID string
 	turnStartID   string
 	calls         []fakeCodexRuntimeCall
+	modelList     func(context.Context, string) (codexModelListPage, error)
+	modelCursors  []string
 }
 
 type fakeCodexRuntimeCall struct {
@@ -90,10 +94,234 @@ func TestCodexDriverDetectRequiresAppServer(t *testing.T) {
 	}
 }
 
+func TestCodexDriverModelCatalogProjectsVisiblePaginatedModels(t *testing.T) {
+	app := newFakeCodexRuntimeApp()
+	cursor2 := "opaque cursor / page 2"
+	app.modelList = func(ctx context.Context, cursor string) (codexModelListPage, error) {
+		_ = ctx
+		switch cursor {
+		case "":
+			return codexModelListPage{
+				Data: []codexModelWire{
+					fakeCodexModel("gpt-5.6-sol", "GPT-5.6-Sol", true, "low", "low", "medium", "ultra"),
+					func() codexModelWire {
+						hidden := fakeCodexModel("hidden-model", "Hidden Model", false, "medium", "medium")
+						hidden.Hidden = true
+						return hidden
+					}(),
+				},
+				NextCursor: &cursor2,
+			}, nil
+		case cursor2:
+			return codexModelListPage{
+				Data: []codexModelWire{
+					fakeCodexModel("gpt-5.6-luna", "GPT-5.6-Luna", false, "medium", "low", "medium", "max"),
+				},
+			}, nil
+		default:
+			return codexModelListPage{}, errors.New("unexpected cursor")
+		}
+	}
+	driver := &codexDriver{factory: func(Config, string, string, string, RuntimeProfile) codexRuntimeApp {
+		return app
+	}}
+
+	catalog := driver.detectModelCatalog(context.Background())
+
+	if catalog.Error != "" {
+		t.Fatalf("unexpected catalog error: %#v", catalog)
+	}
+	want := []RuntimeModel{
+		{
+			Model:                  "gpt-5.6-sol",
+			DisplayName:            "GPT-5.6-Sol",
+			IsDefault:              true,
+			ReasoningEfforts:       []string{"low", "medium", "ultra"},
+			DefaultReasoningEffort: "low",
+		},
+		{
+			Model:                  "gpt-5.6-luna",
+			DisplayName:            "GPT-5.6-Luna",
+			ReasoningEfforts:       []string{"low", "medium", "max"},
+			DefaultReasoningEffort: "medium",
+		},
+	}
+	if !reflect.DeepEqual(catalog.Models, want) {
+		t.Fatalf("projected catalog = %#v, want %#v", catalog.Models, want)
+	}
+	if !reflect.DeepEqual(app.modelCursors, []string{"", cursor2}) {
+		t.Fatalf("model/list cursors = %#v", app.modelCursors)
+	}
+	if !app.started || !app.stopped {
+		t.Fatalf("catalog app lifecycle start=%v stop=%v", app.started, app.stopped)
+	}
+}
+
+func TestCodexDriverModelCatalogRejectsMalformedProjection(t *testing.T) {
+	tests := []struct {
+		name  string
+		model codexModelWire
+	}{
+		{name: "missing model", model: fakeCodexModel("", "Display", true, "low", "low")},
+		{name: "missing display name", model: fakeCodexModel("model", "", true, "low", "low")},
+		{name: "empty effort", model: fakeCodexModel("model", "Display", true, "low", "")},
+		{name: "unsupported default effort", model: fakeCodexModel("model", "Display", true, "max", "low")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			app := newFakeCodexRuntimeApp()
+			app.modelList = func(context.Context, string) (codexModelListPage, error) {
+				return codexModelListPage{Data: []codexModelWire{test.model}}, nil
+			}
+			driver := &codexDriver{factory: func(Config, string, string, string, RuntimeProfile) codexRuntimeApp {
+				return app
+			}}
+
+			catalog := driver.detectModelCatalog(context.Background())
+
+			if catalog.Error != "model catalog unavailable" || len(catalog.Models) != 0 {
+				t.Fatalf("malformed catalog result = %#v", catalog)
+			}
+			if !app.stopped {
+				t.Fatal("malformed catalog must stop its app-server")
+			}
+		})
+	}
+}
+
+func TestCodexDriverCatalogFailureDoesNotFlipRuntimeAvailability(t *testing.T) {
+	codexPath := fakeProcessCommand(t, fakeProcessCodexDetectAvailable)
+	app := newFakeCodexRuntimeApp()
+	app.modelList = func(context.Context, string) (codexModelListPage, error) {
+		return codexModelListPage{}, errors.New("provider catalog failed")
+	}
+	driver := &codexDriver{
+		cfg: Config{CodexCommand: codexPath},
+		factory: func(Config, string, string, string, RuntimeProfile) codexRuntimeApp {
+			return app
+		},
+	}
+
+	detection := driver.Detect(context.Background())
+
+	if !detection.Available || detection.Version != "codex 0.144.5" {
+		t.Fatalf("catalog failure changed availability: %#v", detection)
+	}
+	if detection.ModelCatalog == nil || detection.ModelCatalog.Error != "model catalog unavailable" {
+		t.Fatalf("catalog failure not projected independently: %#v", detection)
+	}
+	if !app.stopped {
+		t.Fatal("failed catalog detection must stop its app-server")
+	}
+}
+
+func TestCodexDriverModelCatalogBoundsTimeoutAndStops(t *testing.T) {
+	app := newFakeCodexRuntimeApp()
+	app.modelList = func(ctx context.Context, cursor string) (codexModelListPage, error) {
+		_ = cursor
+		<-ctx.Done()
+		return codexModelListPage{}, ctx.Err()
+	}
+	driver := &codexDriver{
+		catalogTimeout: 20 * time.Millisecond,
+		factory: func(Config, string, string, string, RuntimeProfile) codexRuntimeApp {
+			return app
+		},
+	}
+
+	started := time.Now()
+	catalog := driver.detectModelCatalog(context.Background())
+
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("catalog timeout was not bounded: %s", elapsed)
+	}
+	if catalog.Error != "model catalog unavailable" || !app.stopped {
+		t.Fatalf("timeout catalog result=%#v stopped=%v", catalog, app.stopped)
+	}
+}
+
+func TestCodexDriverModelCatalogStopsAfterStartFailure(t *testing.T) {
+	app := newFakeCodexRuntimeApp()
+	app.startErr = errors.New("initialize failed")
+	driver := &codexDriver{factory: func(Config, string, string, string, RuntimeProfile) codexRuntimeApp {
+		return app
+	}}
+
+	catalog := driver.detectModelCatalog(context.Background())
+
+	if catalog.Error != "model catalog unavailable" || !app.stopped {
+		t.Fatalf("start failure catalog result=%#v stopped=%v", catalog, app.stopped)
+	}
+	if len(app.modelCursors) != 0 {
+		t.Fatalf("start failure should not request model/list: %#v", app.modelCursors)
+	}
+}
+
+func TestCodexDriverModelCatalogStopsDuringProviderPanic(t *testing.T) {
+	app := newFakeCodexRuntimeApp()
+	app.modelList = func(context.Context, string) (codexModelListPage, error) {
+		panic("provider panic")
+	}
+	driver := &codexDriver{factory: func(Config, string, string, string, RuntimeProfile) codexRuntimeApp {
+		return app
+	}}
+
+	func() {
+		defer func() {
+			if recovered := recover(); recovered != "provider panic" {
+				t.Fatalf("panic = %#v, want provider panic", recovered)
+			}
+		}()
+		_ = driver.detectModelCatalog(context.Background())
+	}()
+
+	if !app.stopped {
+		t.Fatal("provider panic must still stop the catalog app-server")
+	}
+}
+
+func TestCodexDriverModelCatalogRejectsRepeatedCursor(t *testing.T) {
+	app := newFakeCodexRuntimeApp()
+	cursor := "same opaque cursor"
+	app.modelList = func(context.Context, string) (codexModelListPage, error) {
+		return codexModelListPage{NextCursor: &cursor}, nil
+	}
+	driver := &codexDriver{factory: func(Config, string, string, string, RuntimeProfile) codexRuntimeApp {
+		return app
+	}}
+
+	catalog := driver.detectModelCatalog(context.Background())
+
+	if catalog.Error != "model catalog unavailable" {
+		t.Fatalf("repeated cursor silently truncated the catalog: %#v", catalog)
+	}
+	if !reflect.DeepEqual(app.modelCursors, []string{"", cursor}) {
+		t.Fatalf("model/list cursors = %#v", app.modelCursors)
+	}
+	if !app.stopped {
+		t.Fatal("repeated cursor failure must stop the app-server")
+	}
+}
+
+func fakeCodexModel(model string, displayName string, isDefault bool, defaultEffort string, efforts ...string) codexModelWire {
+	candidate := codexModelWire{
+		Model:                  model,
+		DisplayName:            displayName,
+		IsDefault:              isDefault,
+		DefaultReasoningEffort: defaultEffort,
+	}
+	for _, effort := range efforts {
+		candidate.SupportedReasoningEfforts = append(candidate.SupportedReasoningEfforts, struct {
+			ReasoningEffort string `json:"reasoningEffort"`
+		}{ReasoningEffort: effort})
+	}
+	return candidate
+}
+
 func (f *fakeCodexRuntimeApp) Start(ctx context.Context) error {
 	_ = ctx
 	f.started = true
-	return nil
+	return f.startErr
 }
 
 func (f *fakeCodexRuntimeApp) Stop() error {
@@ -150,6 +378,14 @@ func (f *fakeCodexRuntimeApp) ThreadStart(ctx context.Context, cwd string, instr
 	return f.threadStartID, nil
 }
 
+func (f *fakeCodexRuntimeApp) ModelList(ctx context.Context, cursor string) (codexModelListPage, error) {
+	f.modelCursors = append(f.modelCursors, cursor)
+	if f.modelList != nil {
+		return f.modelList(ctx, cursor)
+	}
+	return codexModelListPage{}, nil
+}
+
 func (f *fakeCodexRuntimeApp) TurnStart(ctx context.Context, sessionID string, text string, cwd string) (string, error) {
 	_ = ctx
 	f.calls = append(f.calls, fakeCodexRuntimeCall{
@@ -186,8 +422,9 @@ func TestCodexRuntimeProcessMapsRuntimeInputsToAppServer(t *testing.T) {
 	app := newFakeCodexRuntimeApp()
 	var gotWorkdir, gotToolToken, gotAgentID string
 	driver := &codexDriver{
-		factory: func(cfg Config, workdir string, toolToken string, agentID string) codexRuntimeApp {
+		factory: func(cfg Config, workdir string, toolToken string, agentID string, profile RuntimeProfile) codexRuntimeApp {
 			_ = cfg
+			_ = profile
 			gotWorkdir = workdir
 			gotToolToken = toolToken
 			gotAgentID = agentID

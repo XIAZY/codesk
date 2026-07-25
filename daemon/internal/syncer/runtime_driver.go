@@ -30,11 +30,30 @@ type RuntimeKind string
 const RuntimeCodex RuntimeKind = "codex"
 
 type RuntimeDetection struct {
-	Kind      RuntimeKind `json:"kind"`
-	Available bool        `json:"available"`
-	Version   string      `json:"version,omitempty"`
-	Path      string      `json:"path,omitempty"`
-	Reason    string      `json:"reason,omitempty"`
+	Kind         RuntimeKind          `json:"kind"`
+	Available    bool                 `json:"available"`
+	Version      string               `json:"version,omitempty"`
+	Path         string               `json:"path,omitempty"`
+	Reason       string               `json:"reason,omitempty"`
+	ModelCatalog *RuntimeModelCatalog `json:"modelCatalog,omitempty"`
+}
+
+type RuntimeModelCatalog struct {
+	Models []RuntimeModel `json:"models"`
+	Error  string         `json:"error,omitempty"`
+}
+
+type RuntimeModel struct {
+	Model                  string   `json:"model"`
+	DisplayName            string   `json:"displayName"`
+	IsDefault              bool     `json:"isDefault"`
+	ReasoningEfforts       []string `json:"reasoningEfforts"`
+	DefaultReasoningEffort string   `json:"defaultReasoningEffort,omitempty"`
+}
+
+type RuntimeProfile struct {
+	Model           string
+	ReasoningEffort string
 }
 
 type RuntimeSpawnSpec struct {
@@ -42,6 +61,7 @@ type RuntimeSpawnSpec struct {
 	Workdir      string
 	ToolToken    string
 	Instructions string
+	Profile      RuntimeProfile
 }
 
 type RuntimeDriver interface {

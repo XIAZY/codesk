@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -51,6 +52,13 @@ func TestDaemonStatusReporterSendsRuntimeDetections(t *testing.T) {
 		Available: true,
 		Version:   "codex 0.1.0",
 		Path:      "/usr/local/bin/codex",
+		ModelCatalog: &RuntimeModelCatalog{Models: []RuntimeModel{{
+			Model:                  "gpt-5.6-sol",
+			DisplayName:            "GPT-5.6-Sol",
+			IsDefault:              true,
+			ReasoningEfforts:       []string{"low", "ultra"},
+			DefaultReasoningEffort: "low",
+		}}},
 	}}
 
 	if err := reporter.Report(context.Background(), detections); err != nil {
@@ -68,6 +76,9 @@ func TestDaemonStatusReporterSendsRuntimeDetections(t *testing.T) {
 	}
 	if len(gotPayload.Runtimes) != 1 || gotPayload.Runtimes[0].Kind != RuntimeCodex || !gotPayload.Runtimes[0].Available {
 		t.Fatalf("unexpected runtime detections: %#v", gotPayload.Runtimes)
+	}
+	if !reflect.DeepEqual(gotPayload.Runtimes[0].ModelCatalog, detections[0].ModelCatalog) {
+		t.Fatalf("runtime model catalog = %#v, want %#v", gotPayload.Runtimes[0].ModelCatalog, detections[0].ModelCatalog)
 	}
 }
 

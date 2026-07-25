@@ -42,6 +42,7 @@ type codexAppServer struct {
 	workdir   string
 	toolToken string
 	agentID   string
+	profile   RuntimeProfile
 
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
@@ -282,6 +283,22 @@ func (c *codexAppServer) ThreadResume(ctx context.Context, threadID string, cwd 
 	return err
 }
 
+func (c *codexAppServer) ModelList(ctx context.Context, cursor string) (codexModelListPage, error) {
+	params := map[string]any{"includeHidden": false}
+	if cursor != "" {
+		params["cursor"] = cursor
+	}
+	result, err := c.request(ctx, "model/list", params)
+	if err != nil {
+		return codexModelListPage{}, err
+	}
+	var page codexModelListPage
+	if err := json.Unmarshal(result, &page); err != nil {
+		return codexModelListPage{}, fmt.Errorf("decode app-server model/list result: %w", err)
+	}
+	return page, nil
+}
+
 func (c *codexAppServer) TurnStart(ctx context.Context, threadID string, prompt string, cwd string) (string, error) {
 	result, err := c.request(ctx, "turn/start", map[string]any{
 		"threadId":       threadID,
@@ -326,6 +343,12 @@ func (c *codexAppServer) threadParams(cwd string, threadID string, instructions 
 	}
 	if strings.TrimSpace(instructions) != "" {
 		params["developerInstructions"] = instructions
+	}
+	if model := strings.TrimSpace(c.profile.Model); model != "" {
+		params["model"] = model
+	}
+	if effort := strings.TrimSpace(c.profile.ReasoningEffort); effort != "" {
+		params["config"] = map[string]any{"model_reasoning_effort": effort}
 	}
 	return params
 }
