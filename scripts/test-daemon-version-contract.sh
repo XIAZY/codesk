@@ -41,8 +41,8 @@ new_fixture() {
 	for script in \
 		build-daemon-release.sh build-daemon-platform.sh build-macos-desktop-release.sh \
 		build-windows-desktop-payloads.sh build-backend-image.sh build-frontend.sh \
-		push-backend-image.sh upload-r2.sh deploy-backend.sh deploy-daemon.sh \
-		deploy-frontend.sh deploy-macos-gui.sh
+		build-homepage.sh push-backend-image.sh upload-r2.sh deploy-backend.sh \
+		deploy-daemon.sh deploy-frontend.sh deploy-homepage.sh deploy-macos-gui.sh
 	do
 		cp "$repo_dir/scripts/$script" "$new_fixture_dir/scripts/$script"
 	done
@@ -196,7 +196,7 @@ grep -Fq 'example/notty:backend-deadbee' "$backend_ssh_log" ||
 	fail 'backend deploy did not restart Compose with the commit-addressed image'
 pass 'backend build and deploy use Git SHA without reading DAEMON_VERSION'
 
-for frontend_script in build-frontend.sh deploy-frontend.sh; do
+for frontend_script in build-frontend.sh deploy-frontend.sh build-homepage.sh deploy-homepage.sh; do
 	if grep -Fq 'scripts/read-daemon-version.sh' "$fixture/scripts/$frontend_script"; then
 		fail "$frontend_script still reads the repository DAEMON_VERSION"
 	fi
@@ -204,6 +204,13 @@ done
 mkdir -p "$fixture/frontend/node_modules" "$fixture/frontend/dist" "$fixture/homepage"
 printf '<html>app</html>\n' >"$fixture/frontend/dist/index.html"
 printf '<html>home</html>\n' >"$fixture/homepage/index.html"
+for browser_asset in \
+	favicon.svg favicon.ico favicon-32x32.png favicon-16x16.png \
+	apple-touch-icon.png safari-pinned-tab.svg
+do
+	printf '%s\n' "$browser_asset" >"$fixture/frontend/dist/$browser_asset"
+	printf '%s\n' "$browser_asset" >"$fixture/homepage/$browser_asset"
+done
 : >"$frontend_aws_log"
 PATH="$backend_fake_bin:$PATH" FRONTEND_AWS_LOG="$frontend_aws_log" \
 	R2_ENDPOINT_URL=https://example.invalid R2_HOMEPAGE_BUCKET=homepage \
@@ -213,6 +220,19 @@ PATH="$backend_fake_bin:$PATH" FRONTEND_AWS_LOG="$frontend_aws_log" \
 	fail 'frontend deploy did not stage app and homepage assets'
 [ -s "$frontend_aws_log" ] || fail 'frontend deploy did not invoke the R2 uploader'
 pass 'frontend build and deploy work without a DAEMON_VERSION file'
+
+# The homepage-only deploy must publish the homepage bucket without needing the app bundle or an
+# R2_APP_BUCKET, so a copy edit ships without a Vite rebuild.
+rm -rf "$fixture/dist/static"
+: >"$frontend_aws_log"
+PATH="$backend_fake_bin:$PATH" FRONTEND_AWS_LOG="$frontend_aws_log" \
+	R2_ENDPOINT_URL=https://example.invalid R2_HOMEPAGE_BUCKET=homepage \
+	"$fixture/scripts/deploy-homepage.sh" >/dev/null
+[ -f "$fixture/dist/static/homepage/index.html" ] ||
+	fail 'homepage deploy did not stage homepage assets'
+[ -d "$fixture/dist/static/app" ] && fail 'homepage deploy staged app assets'
+[ -s "$frontend_aws_log" ] || fail 'homepage deploy did not invoke the R2 uploader'
+pass 'homepage deploy publishes the homepage alone without an app bundle'
 
 for invalid_file in "$tmp_dir/invalid"/*; do
 	name="$(basename -- "$invalid_file")"

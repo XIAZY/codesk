@@ -1617,7 +1617,14 @@ Every releasable component has one local build command and one deploy command:
 | macOS desktop GUI | `make macos-gui-build` | `make macos-gui-deploy` |
 | Windows desktop GUI | `make windows-gui-build` | `make windows-gui-deploy` |
 | Frontend and homepage | `make frontend-build` | `make frontend-deploy` |
+| Homepage only | `make homepage-build` | `make homepage-deploy` |
 | Backend image and service | `make backend-build` | `make backend-deploy` |
+
+`make homepage-deploy` publishes only `https://nottyai.co` from the `homepage`
+directory. It skips the Vite build entirely, so it is the fast path for
+homepage copy, metadata, and static-asset edits. Use `make frontend-deploy`
+when the app bundle changed too; it still publishes both the app and the
+homepage.
 
 `make macos-gui-deploy` signs and notarizes by default. To explicitly publish
 an unsigned construction-only desktop build, use
