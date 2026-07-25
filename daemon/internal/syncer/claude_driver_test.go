@@ -13,6 +13,12 @@ import (
 
 const claudeTestHandshakeWait = 500 * time.Millisecond
 
+// A generous window for startup-exit tests: under -race the re-exec'd fake
+// subprocess (race runtime + cgo init) can take ~500ms just to reach its code,
+// which the default 500ms window races. These tests exit as soon as the child
+// exits, so a larger window costs nothing and only removes the flake.
+const claudeTestSpawnExitHandshakeWait = 5 * time.Second
+
 func writeFakeClaude(t *testing.T) string {
 	t.Helper()
 	return fakeProcessCommand(t, fakeProcessClaude)
@@ -20,9 +26,14 @@ func writeFakeClaude(t *testing.T) string {
 
 func newTestClaudeProcess(t *testing.T, claudePath string) *claudeRuntimeProcess {
 	t.Helper()
+	return newTestClaudeProcessWithHandshake(t, claudePath, claudeTestHandshakeWait)
+}
+
+func newTestClaudeProcessWithHandshake(t *testing.T, claudePath string, handshakeWait time.Duration) *claudeRuntimeProcess {
+	t.Helper()
 	driver := &claudeDriver{
 		cfg:           Config{ClaudeCommand: claudePath, DataDir: t.TempDir()},
-		handshakeWait: claudeTestHandshakeWait,
+		handshakeWait: handshakeWait,
 	}
 	process, err := driver.Spawn(context.Background(), RuntimeSpawnSpec{
 		AgentID:      "agent_claude",
@@ -302,7 +313,7 @@ func TestClaudeReadBoundaryStampsActivityBeforeBlockedLog(t *testing.T) {
 	agentLogWriteMu.Lock()
 	readDone := make(chan struct{})
 	go func() {
-		process.readLoop(strings.NewReader(`{"type":"telemetry_unmapped"}` + "\n"))
+		process.readLoop(strings.NewReader(`{"type":"telemetry_unmapped"}`+"\n"), &claudeStdoutTail{})
 		close(readDone)
 	}()
 	// ActivitySeq must advance while the read loop is still blocked on the log write.
@@ -335,7 +346,7 @@ func TestClaudeReadBoundaryUnknownValidFrameRefreshesLiveness(t *testing.T) {
 		t.Fatalf("precondition: expected zero activity generation, got %d", process.ActivitySeq())
 	}
 	// Well-formed JSON object, but "type" is one the parser has no case for.
-	process.readLoop(strings.NewReader(`{"type":"telemetry_unmapped","progress":0.5}` + "\n"))
+	process.readLoop(strings.NewReader(`{"type":"telemetry_unmapped","progress":0.5}`+"\n"), &claudeStdoutTail{})
 	if process.ActivitySeq() == 0 {
 		t.Fatal("an unknown-but-valid frame must advance the activity generation at the read boundary")
 	}
@@ -346,7 +357,7 @@ func TestClaudeReadBoundaryUnknownValidFrameRefreshesLiveness(t *testing.T) {
 // heartbeat and mask a wedge.
 func TestClaudeReadBoundaryMalformedFrameDoesNotRefreshLiveness(t *testing.T) {
 	process := &claudeRuntimeProcess{events: make(chan RuntimeEvent, 4)}
-	process.readLoop(strings.NewReader("{ this is not valid json\n"))
+	process.readLoop(strings.NewReader("{ this is not valid json\n"), &claudeStdoutTail{})
 	if process.ActivitySeq() != 0 {
 		t.Fatalf("a malformed frame must not advance the activity generation, got %d", process.ActivitySeq())
 	}
@@ -369,7 +380,7 @@ func TestClaudeFullChannelCannotLoseTurnEnd(t *testing.T) {
 
 	readDone := make(chan struct{})
 	go func() {
-		process.readLoop(strings.NewReader(`{"type":"result","subtype":"success","session_id":"sess_full"}` + "\n"))
+		process.readLoop(strings.NewReader(`{"type":"result","subtype":"success","session_id":"sess_full"}`+"\n"), &claudeStdoutTail{})
 		close(readDone)
 	}()
 
@@ -899,5 +910,112 @@ func TestClaudeStderrTailSnapshotIncludesUnterminatedFinalLine(t *testing.T) {
 	// String() must stay consistent with the snapshot it summarizes.
 	if want := "first line | fatal: provider quota exhausted"; tail.String() != want {
 		t.Fatalf("String()=%q, want %q", tail.String(), want)
+	}
+}
+
+// A fatal reason Claude prints to stdout with empty stderr must survive into the
+// startup error, not be lost to the generic "exit status 1". Asserts the
+// diagnostic TEXT itself — the fallback at :373 would otherwise false-pass on a
+// merely-non-generic error.
+func TestClaudeStartupStdoutDiagnosticSurfaces(t *testing.T) {
+	const sentinel = "STDOUT_STARTUP_DIAG_bad_flag_pick_another"
+	t.Setenv("FAKE_CLAUDE_STARTUP_STDOUT_DIAG", sentinel)
+	process := newTestClaudeProcessWithHandshake(t, writeFakeClaude(t), claudeTestSpawnExitHandshakeWait)
+
+	_, err := process.WriteStdin(context.Background(), RuntimeInput{Kind: RuntimeInputStartSession})
+	if err == nil {
+		t.Fatal("expected a startup failure, got nil error")
+	}
+	if !strings.Contains(err.Error(), sentinel) {
+		t.Fatalf("startup error must carry the stdout diagnostic %q, got %v", sentinel, err)
+	}
+	if strings.Contains(err.Error(), "no output") {
+		t.Fatalf("expected the diagnostic, not the empty-output fallback: %v", err)
+	}
+}
+
+// Control: adding the stdout tail must not regress the pre-existing stderr path
+// — a fatal reason on stderr with empty stdout still surfaces.
+func TestClaudeStartupStderrDiagnosticStillSurfaces(t *testing.T) {
+	const sentinel = "STDERR_STARTUP_DIAG_refused_permissions"
+	t.Setenv("FAKE_CLAUDE_STARTUP_STDERR_DIAG", sentinel)
+	process := newTestClaudeProcessWithHandshake(t, writeFakeClaude(t), claudeTestSpawnExitHandshakeWait)
+
+	_, err := process.WriteStdin(context.Background(), RuntimeInput{Kind: RuntimeInputStartSession})
+	if err == nil || !strings.Contains(err.Error(), sentinel) {
+		t.Fatalf("startup error must carry the stderr diagnostic %q, got %v", sentinel, err)
+	}
+}
+
+// Oversized stdout must stay bounded: a flood of lines is capped by count, and a
+// single huge line is capped per-line via truncateForLog.
+func TestClaudeStdoutTailBounded(t *testing.T) {
+	tail := &claudeStdoutTail{}
+	for i := 0; i < 50; i++ {
+		tail.record("startup noise line")
+	}
+	tail.record(strings.Repeat("x", 1<<20)) // 1 MiB single line
+
+	got := tail.String()
+	if seps := strings.Count(got, " | "); seps > 7 {
+		t.Fatalf("expected at most 8 retained lines (7 separators), got %d", seps)
+	}
+	if len(got) > 9*claudeLogLineLimit {
+		t.Fatalf("expected a bounded tail, got %d bytes (oversized line not truncated?)", len(got))
+	}
+	if !strings.Contains(got, "bytes truncated") {
+		t.Fatalf("expected the oversized line truncated with a marker, got a %d-byte tail", len(got))
+	}
+}
+
+// The bounded stdout drain must fence a readLoop parked in emitLifecycle on a
+// full events channel: the child emits a turn-end frame (parking readLoop) then
+// exits inside the handshake window, and the handshake must still return within
+// the bound rather than waiting on readDone forever. An unbounded <-readDone
+// hangs here — the causal row a small-output test cannot reach.
+//
+// DEFENSE-IN-DEPTH against a state that is protocol-impossible in production, not
+// a reachable-bug regression. readLoop parks only in emitLifecycle, whose sole
+// caller is the turn-end (`result`) frame; a `result` marks a turn, and a turn
+// begins only on the first user message, which the daemon sends via a LATER
+// WriteStdin(StartTurn) after this handshake establishes (`--resume` replays
+// nothing until it receives input — verified against the real CLI). So no
+// lifecycle event can arrive during the handshake window and readLoop cannot
+// park at a real startup exit; the fence just stops the wait silently regressing
+// into a hang if a future frame ever maps to turnEnd. This fixture emits a
+// `result` during startup — impossible for a real claude — purely to drive that
+// synthetic parked state, which the post-assertion drain then unparks before
+// cleanup (the events/Stop cleanup ordering is only reachable via this fixture).
+func TestClaudeStartupExitDoesNotHangWhenReadLoopParkedOnFullEvents(t *testing.T) {
+	t.Setenv("FAKE_CLAUDE_STARTUP_EMIT_RESULT_THEN_EXIT", "1")
+	process := newTestClaudeProcessWithHandshake(t, writeFakeClaude(t), claudeTestSpawnExitHandshakeWait)
+	// Fill the events channel so the turn-end emit blocks in emitLifecycle, parking readLoop.
+	for i := 0; i < cap(process.events); i++ {
+		process.events <- RuntimeEvent{Kind: RuntimeEventIdle}
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := process.WriteStdin(context.Background(), RuntimeInput{Kind: RuntimeInputStartSession})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected a startup failure, got nil error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("handshake hung: bounded stdout drain did not fence a readLoop parked on a full events channel")
+	}
+
+	// Let readLoop's blocked emit complete before cleanup: drain the fillers so its
+	// turn-end lands and it exits on EOF. Otherwise cleanup's Stop closes the events
+	// channel while that emit is still in flight — a pre-existing events/Stop
+	// interaction the codebase already forbids, outside this task's scope.
+	for {
+		if ev := <-process.events; ev.Kind != RuntimeEventIdle {
+			break
+		}
 	}
 }

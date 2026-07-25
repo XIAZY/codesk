@@ -228,6 +228,25 @@ func runFakeClaude(args []string) int {
 		sessionID = resumeID
 	}
 
+	// Startup diagnostics some fatal reasons print before any handshake, one per
+	// stream, then exit 1 — used to prove the daemon preserves whichever stream
+	// carries the provider's reason.
+	if diag := os.Getenv("FAKE_CLAUDE_STARTUP_STDOUT_DIAG"); diag != "" {
+		fmt.Fprintln(os.Stdout, diag)
+		return 1
+	}
+	if diag := os.Getenv("FAKE_CLAUDE_STARTUP_STDERR_DIAG"); diag != "" {
+		fmt.Fprintln(os.Stderr, diag)
+		return 1
+	}
+	if os.Getenv("FAKE_CLAUDE_STARTUP_EMIT_RESULT_THEN_EXIT") == "1" {
+		// Emit one turn-end (result) frame then exit, during startup. With the
+		// daemon's events channel pre-filled, readLoop parks in emitLifecycle on
+		// this frame — exercising the bounded stdout-drain fence at startup exit.
+		fmt.Fprintln(os.Stdout, `{"type":"result","subtype":"success"}`)
+		return 0
+	}
+
 	holdTurn := os.Getenv("FAKE_CLAUDE_HOLD_TURN") == "1"
 	ioPath := os.Getenv("FAKE_CLAUDE_IO_FILE")
 	initialized := false
