@@ -726,11 +726,16 @@ const markdownPreviewTheme = EditorView.theme({
   // rendered bullet occupies the same space as the raw "- " and the line does not
   // shift when the row is clicked into edit view.
   ".cm-md-list-bullet": {
-    color: "transparent",
+    // visibility (not color:transparent) so an inner syntax-highlight colour rule can't
+    // reveal the raw dash under the "•" overlay; visibility still preserves the dash's
+    // width, so the line does not shift. The ::before must re-assert visibility:visible
+    // because pseudo-elements inherit the parent's hidden visibility.
+    visibility: "hidden",
     position: "relative",
   },
   ".cm-md-list-bullet::before": {
     content: '"\\2022"',
+    visibility: "visible",
     position: "absolute",
     left: "0",
     top: "50%",
