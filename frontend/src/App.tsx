@@ -4510,7 +4510,10 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
     </div>
   );
   const commandPlatformSelector = (
-    <div className="ds-platform-select" role="group" aria-label="Command-line operating system">
+    // aria-describedby links this group to the "Choose the OS…" required-choice prompt so SR users
+    // hear the requirement on focus — but ONLY while that prompt exists (none selected / no command
+    // yet). Once an OS is picked the prompt is gone, so the reference must drop or it would dangle.
+    <div className="ds-platform-select" role="group" aria-label="Command-line operating system" aria-describedby={!command ? "command-os-hint" : undefined}>
       {(["mac", "linux", "windows"] as const).map((p) => (
         <button
           key={p}
@@ -4558,7 +4561,9 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
               />
               <span className="hint">Name it before we create it — this is what you'll see in Local environments.</span>
             </label>
-            {nameError ? <p id="daemon-name-error" className="error-text">{nameError}</p> : null}
+            {/* role=alert (assertive) announces this submit-blocking validation error immediately —
+                the user is waiting on the submit result, so it must not queue behind other speech. */}
+            {nameError ? <p id="daemon-name-error" className="error-text" role="alert" aria-live="assertive">{nameError}</p> : null}
             {createStatus === "idle" ? (
               <>
                 <p className="tiny muted">Nothing is created until you generate the install command — opening this panel makes no changes.</p>
@@ -4591,7 +4596,7 @@ export function CreateDaemonModal({ api, workspaceId, daemons, onClose, onDone }
                   )}
                 </>
               ) : (
-                <p className="small muted ds-pick-os">Choose the OS you'll run this on to see the install command.</p>
+                <p className="small muted ds-pick-os" id="command-os-hint">Choose the OS you'll run this on to see the install command.</p>
               )}
             </div>
           ) : createStatus === "preparing" ? (

@@ -620,6 +620,46 @@ describe("CreateDaemonModal (desktop install redesign #62)", () => {
     expect(api.createDaemon).toHaveBeenCalledTimes(1);
   });
 
+  it("command-line setup: the name-required error is exposed as an assertive alert, announced on failed submit (#79)", async () => {
+    stubUA(MAC);
+    const user = userEvent.setup();
+    const api = { createDaemon: vi.fn() };
+    render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Use command line setup" }));
+    // Submit with an empty name → the validation error must carry role="alert" (implying aria-live
+    // assertive) so a screen-reader user hears it immediately. Stripping the alert role leaves the
+    // text visible but unannounced — getByRole("alert") then finds nothing, so this row goes RED.
+    await user.click(screen.getByRole("button", { name: "Generate install command" }));
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toBe("Enter a name for this local environment.");
+    expect(alert.getAttribute("aria-live")).toBe("assertive");
+    expect(api.createDaemon).not.toHaveBeenCalled();
+  });
+
+  it("command-line setup: the none-selected OS group is programmatically described by its required-choice prompt, and the reference drops once an OS is picked (#79)", async () => {
+    stubUA(IOS); // unknown UA → OS starts none-selected, so the required-choice prompt is present
+    const user = userEvent.setup();
+    const created: Daemon = { ...daemonFixtures.neverSeen, id: "daemon_new", name: "Local daemon" };
+    const api = { createDaemon: vi.fn().mockResolvedValue({ daemon: created, token: "nottyd_secret" }) };
+    render(<CreateDaemonModal api={api as never} workspaceId="ws" daemons={[]} onClose={vi.fn()} onDone={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Use command line setup" }));
+    await user.type(screen.getByLabelText("Local environment name"), "Build server");
+    await user.click(screen.getByRole("button", { name: "Generate install command" }));
+    await waitFor(() => expect(api.createDaemon).toHaveBeenCalledTimes(1));
+    // None selected: the OS group must point at the "Choose the OS…" prompt via aria-describedby so a
+    // screen-reader user hears the required choice on focus, and that description must actually exist.
+    // Stripping the attribute → hintId null → the .toBe assertion goes RED.
+    const group = await screen.findByRole("group", { name: "Command-line operating system" });
+    const hintId = group.getAttribute("aria-describedby");
+    expect(hintId).toBe("command-os-hint");
+    expect(document.getElementById(hintId!)?.textContent).toBe("Choose the OS you'll run this on to see the install command.");
+    // Once an OS is picked the prompt is gone → the reference MUST drop, or it dangles at a missing id.
+    // Making aria-describedby unconditional keeps it "command-os-hint" here → this assertion goes RED.
+    await user.click(screen.getByRole("button", { name: "Windows" }));
+    await waitFor(() => expect(document.querySelector("pre.code")?.textContent).toContain("install.ps1"));
+    expect(screen.getByRole("group", { name: "Command-line operating system" }).getAttribute("aria-describedby")).toBeNull();
+  });
+
   it("terminal shows a Preparing state with NO copyable command or placeholder until a real token exists (#6)", async () => {
     stubUA(LINUX);
     const user = userEvent.setup();
