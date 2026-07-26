@@ -11,57 +11,48 @@ import (
 // LEARNING milestones from existing state — the same existence signals the old live derivation
 // used — aggregated across the account's active workspaces.
 //
-// SIX milestones are backfilled, each reproducing today's derivation. The other two onboarding keys
-// are deliberately NOT, because neither has an honest existence signal — leaving them out fails
-// toward the user re-earning them once, never toward a permanently-broken new-user path:
-//   - account_intro_seen — purely "saw the intro modal", nothing in the DB witnesses it. Backfilling
-//     it would silently skip the intro for a brand-new user. Left out: an existing user sees the
-//     intro once and dismisses it, and with the other milestones marked the guide reports complete.
-//   - first_document_edited — "has a document" is not "edited one", and updated_at moves for other
-//     reasons. Left out: re-earned by a single edit.
-//
-// The three SETUP-state milestones (local_environment_connected, first_agent_created,
-// first_agent_run_started) are absent by design — they stay live-derived per workspace, because a
-// write-once row would keep asserting "connected" after the daemon/agent is gone.
+// THREE milestones are backfilled — exactly the learning keys #14's "Getting started" surfaces
+// (confirmed by Eva against the checklist): first_document_created (create-document step),
+// first_thread_created (start-discussion step), member_invited (invite-team step). Everything else
+// is deliberately NOT backfilled:
+//   - workspace_created, first_thread_replied, first_document_watcher_added — no checklist item in
+//     #14, so a backfilled row would be written and never read. NOT a forward-compatible superset:
+//     if a future step ever needs one, add the key AND its derivation then.
+//   - account_intro_seen, first_document_edited — no honest existence signal in the DB. Left out so
+//     they fail toward the user re-earning them once, never toward a permanently-broken new path.
+//   - local_environment_connected, first_agent_created, first_agent_run_started, and the agent step
+//     (agent-at-work) — SETUP-state, kept live-derived per workspace, because a write-once row would
+//     keep asserting "connected" after the daemon/agent is gone.
 //
 // Run-once, per-account, single statement:
-//   - Per-account guard: a row is inserted only for an account that has NO completion rows yet.
-//     So a stray row affects only its own account (not the whole table), and a new account created
-//     later — having no rows — is derived from its own (near-empty) state: only workspace_created
-//     ends up true, leaving the rest of onboarding to show. No launch-time cutoff/marker needed.
-//   - Single INSERT (UNION ALL of the six milestone selects, guarded once at the outer WHERE):
-//     the NOT EXISTS check evaluates against the pre-statement snapshot. Running it as six separate
-//     INSERTs would be wrong — a transaction sees its own writes, so the guard would go false after
-//     the first insert and every account would get exactly one milestone.
+//   - Per-account guard: a row is inserted only for an account that has NO completion rows yet, so a
+//     stray row affects only its own account. Unlike the earlier form, NO milestone is unconditional
+//     now, so an account with a workspace but no content earns 0 rows and stays eligible on later
+//     boots — harmless: it matches nothing until it earns a real milestone, and once it does the
+//     frontend client-insert + ON CONFLICT DO NOTHING dedupe with any server-side re-derivation.
+//   - Single INSERT (UNION ALL guarded once at the outer WHERE): the NOT EXISTS check evaluates
+//     against the pre-statement snapshot. Separate per-milestone INSERTs would be wrong — a
+//     transaction sees its own writes, so the guard would go false after the first insert and every
+//     account would get exactly one milestone.
 //   - ON CONFLICT DO NOTHING makes re-execution and concurrent boots idempotent.
 //
-// Item keys are the string literals of the onboarding.go consts (OnboardingWorkspaceCreated etc.);
-// TestOnboardingBackfill* pins that they land as the expected six.
+// Item keys are the string literals of the onboarding.go consts (OnboardingFirstDocumentCreated etc.);
+// TestOnboardingBackfill* pins that they land as the expected three.
 const onboardingLearningBackfillStatement = `
 INSERT INTO onboarding_completions (account_id, item_key, completed_at)
 SELECT sub.account_id, sub.item_key, now()
   FROM (
-    SELECT DISTINCT m.account_id, 'workspace_created'::text AS item_key
-      FROM workspace_members m WHERE m.status = 'active'
-    UNION ALL
     -- A "created document" is a CONTENT document = a non-hidden documents row. The workspace's
     -- auto-created root namespace doc and any deleted docs are hidden, so NOT d.hidden excludes
     -- exactly what the frontend's documentCount (rootNamespace.documents.length) excludes.
-    SELECT DISTINCT m.account_id, 'first_document_created'
+    SELECT DISTINCT m.account_id, 'first_document_created'::text AS item_key
       FROM workspace_members m WHERE m.status = 'active'
        AND EXISTS (SELECT 1 FROM documents d WHERE d.workspace_id = m.workspace_id AND NOT d.hidden)
     UNION ALL
+    -- thread EXISTS = created (the start-discussion step completes on created, NOT replied).
     SELECT DISTINCT m.account_id, 'first_thread_created'
       FROM workspace_members m WHERE m.status = 'active'
        AND EXISTS (SELECT 1 FROM threads t WHERE t.workspace_id = m.workspace_id)
-    UNION ALL
-    SELECT DISTINCT m.account_id, 'first_thread_replied'
-      FROM workspace_members m WHERE m.status = 'active'
-       AND EXISTS (SELECT 1 FROM thread_messages tm WHERE tm.workspace_id = m.workspace_id)
-    UNION ALL
-    SELECT DISTINCT m.account_id, 'first_document_watcher_added'
-      FROM workspace_members m WHERE m.status = 'active'
-       AND EXISTS (SELECT 1 FROM agent_document_subscriptions s WHERE s.workspace_id = m.workspace_id)
     UNION ALL
     -- member_invited: THIS account invited someone — its own workspace user created an invite
     -- (workspace_members.user_id = workspace_invites.created_by_user_id). Faithful to today's
