@@ -27,10 +27,7 @@ func main() {
 			}
 		}()
 	}
-	service, err := syncer.New(cfg)
-	if err != nil {
-		log.Fatalf("create daemon: %v", err)
-	}
+	service := syncer.New(cfg)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()

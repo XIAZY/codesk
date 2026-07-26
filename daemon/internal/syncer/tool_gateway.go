@@ -11,10 +11,9 @@ import (
 )
 
 type toolGateway struct {
-	server   *http.Server
-	listener net.Listener
-	handler  http.Handler
-	done     chan struct{}
+	server  *http.Server
+	handler http.Handler
+	done    chan struct{}
 
 	mu             sync.Mutex
 	handlerCond    *sync.Cond
@@ -56,9 +55,8 @@ func (s *Service) startToolGateway() (*toolGateway, error) {
 		return nil, err
 	}
 	gateway := &toolGateway{
-		listener: listener,
-		handler:  mux,
-		done:     make(chan struct{}),
+		handler: mux,
+		done:    make(chan struct{}),
 	}
 	gateway.handlerCond = sync.NewCond(&gateway.mu)
 	server := &http.Server{Handler: gateway}

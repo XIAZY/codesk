@@ -89,7 +89,7 @@ func TestRunExposesReconnectRequiredError(t *testing.T) {
 			defer server.Close()
 
 			root := t.TempDir()
-			service, err := New(Config{
+			service := New(Config{
 				BackendURL:         server.URL,
 				WorkspaceID:        "workspace:test",
 				DaemonToken:        "daemon_token",
@@ -99,13 +99,10 @@ func TestRunExposesReconnectRequiredError(t *testing.T) {
 				AgentID:            "daemon_agent",
 				AgentToolBaseURL:   "http://127.0.0.1:0",
 			})
-			if err != nil {
-				t.Fatalf("New() error = %v", err)
-			}
 
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			err = service.Run(ctx)
+			err := service.Run(ctx)
 			if errors.Is(err, context.DeadlineExceeded) {
 				t.Fatal("Run() retried a terminal credential error until timeout")
 			}
@@ -116,6 +113,9 @@ func TestRunExposesReconnectRequiredError(t *testing.T) {
 			var statusErr *backendStatusError
 			if !errors.As(err, &statusErr) || statusErr.StatusCode != status {
 				t.Fatalf("Run() cause = %v, want HTTP %d", err, status)
+			}
+			if service.primaryRuntime != nil {
+				t.Fatal("failed initial refresh left a primary runtime behind")
 			}
 		})
 	}

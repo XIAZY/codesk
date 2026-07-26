@@ -180,10 +180,6 @@ func (r *workspaceReplica) markDocumentDirty(documentID string) {
 	}
 }
 
-func (r *workspaceReplica) Run(ctx context.Context) error {
-	return r.run(ctx, nil)
-}
-
 func (r *workspaceReplica) run(ctx context.Context, ready chan<- error) (runErr error) {
 	reportReady := func(err error) {
 		if ready == nil {

@@ -1376,8 +1376,7 @@ func TestAgentRuntimeIsUnavailableUntilStartupReady(t *testing.T) {
 	service.agentRuntimes = map[string]*managedWorkspaceRuntime{}
 	ctx, cancel := context.WithCancel(context.Background())
 	service.agentBaseCtx = ctx
-	ready := make(chan error, 1)
-	managed := startSupervisedAgentWorkspaceRuntimeForTest(t, service, ctx, "agent-1", runtime, workspace, 0, ready)
+	managed := startSupervisedAgentWorkspaceRuntimeForTest(t, service, ctx, "agent-1", runtime, workspace, 0)
 	t.Cleanup(func() {
 		releaseStartup()
 		cancel()
@@ -1432,9 +1431,7 @@ func TestAgentRuntimeIsUnavailableUntilStartupReady(t *testing.T) {
 	}
 
 	releaseStartup()
-	if err := <-ready; err != nil {
-		t.Fatalf("replacement startup: %v", err)
-	}
+	waitForManagedWorkspaceRuntimeStarted(t, managed)
 	started := request()
 	if started.Code != http.StatusOK || strings.Contains(started.Body.String(), "primary/secret.md") {
 		t.Fatalf("ready runtime request status = %d body=%q, want the agent runtime without primary data", started.Code, started.Body.String())
@@ -2170,22 +2167,57 @@ func startSupervisedAgentWorkspaceRuntimeForTest(
 	runtime *workspaceRuntime,
 	workspace *workspaceResponse,
 	restartAttempt int,
-	ready chan<- error,
 ) *managedWorkspaceRuntime {
 	t.Helper()
 	runtime.initialWorkspace = workspace
 	service.mu.Lock()
-	managed := service.startAgentWorkspaceRuntimeAttemptWithReady(
+	managed := service.startAgentWorkspaceRuntimeAttempt(
 		ctx,
 		agentID,
 		runtime,
 		workspace,
 		restartAttempt,
-		ready,
 	)
 	service.agentRuntimes[agentID] = managed
 	service.mu.Unlock()
 	return managed
+}
+
+func waitForManagedWorkspaceRuntimeStarted(t *testing.T, managed *managedWorkspaceRuntime) {
+	t.Helper()
+	waitUntil(t, func() bool {
+		managed.borrowMu.Lock()
+		starting := managed.starting
+		managed.borrowMu.Unlock()
+		return !starting || managed.stopped()
+	})
+	managed.borrowMu.Lock()
+	started := !managed.starting && !managed.retiring
+	managed.borrowMu.Unlock()
+	if !started || managed.stopped() {
+		runErr, _ := managed.result()
+		t.Fatalf("managed workspace runtime did not remain started: %v", runErr)
+	}
+}
+
+func waitForManagedWorkspaceRuntimeStartupFailure(t *testing.T, managed *managedWorkspaceRuntime) error {
+	t.Helper()
+	select {
+	case <-managed.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("failed agent runtime did not stop")
+	}
+	managed.borrowMu.Lock()
+	neverStarted := managed.starting
+	managed.borrowMu.Unlock()
+	if !neverStarted {
+		t.Fatal("failed agent runtime was marked started")
+	}
+	runErr, _ := managed.result()
+	if runErr == nil {
+		t.Fatal("failed agent runtime returned no error")
+	}
+	return runErr
 }
 
 func TestManagedWorkspaceRuntimeRestartBackoffClassifiesFailures(t *testing.T) {
@@ -2253,7 +2285,6 @@ func TestSyncAgentRuntimesHonorsRepeatedFailureBackoff(t *testing.T) {
 		cancel()
 		service.closeAgentRuntimes()
 	})
-	ready := make(chan error, 1)
 	managed := startSupervisedAgentWorkspaceRuntimeForTest(
 		t,
 		service,
@@ -2262,15 +2293,10 @@ func TestSyncAgentRuntimesHonorsRepeatedFailureBackoff(t *testing.T) {
 		runtime,
 		workspace,
 		1,
-		ready,
 	)
-	if err := <-ready; !errors.Is(err, wantErr) {
-		t.Fatalf("agent runtime error = %v, want %v", err, wantErr)
-	}
-	select {
-	case <-managed.done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("failed agent runtime did not stop")
+	runErr := waitForManagedWorkspaceRuntimeStartupFailure(t, managed)
+	if !errors.Is(runErr, wantErr) {
+		t.Fatalf("agent runtime error = %v, want %v", runErr, wantErr)
 	}
 	if err := service.syncAgentRuntimes(ctx, workspace); err != nil {
 		t.Fatalf("workspace refresh during completion-owned backoff: %v", err)
@@ -2316,7 +2342,6 @@ func TestSyncAgentRuntimesRestartsAfterStartupAddFailure(t *testing.T) {
 		cancel()
 		service.closeAgentRuntimes()
 	})
-	ready := make(chan error, 1)
 	managed := startSupervisedAgentWorkspaceRuntimeForTest(
 		t,
 		service,
@@ -2325,15 +2350,10 @@ func TestSyncAgentRuntimesRestartsAfterStartupAddFailure(t *testing.T) {
 		runtime,
 		workspace,
 		0,
-		ready,
 	)
-	if err := <-ready; !errors.Is(err, wantErr) {
-		t.Fatalf("agent runtime error = %v, want %v", err, wantErr)
-	}
-	select {
-	case <-managed.done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("failed agent runtime did not stop")
+	runErr := waitForManagedWorkspaceRuntimeStartupFailure(t, managed)
+	if !errors.Is(runErr, wantErr) {
+		t.Fatalf("agent runtime error = %v, want %v", runErr, wantErr)
 	}
 	replacement, _ := waitForAgentRuntimeWatcher(t, service, "agent-1", managed)
 	select {
@@ -2370,7 +2390,6 @@ func TestSyncAgentRuntimesRestartsAfterStartupStoreRecoveryFailure(t *testing.T)
 		cancel()
 		service.closeAgentRuntimes()
 	})
-	ready := make(chan error, 1)
 	managed := startSupervisedAgentWorkspaceRuntimeForTest(
 		t,
 		service,
@@ -2379,15 +2398,10 @@ func TestSyncAgentRuntimesRestartsAfterStartupStoreRecoveryFailure(t *testing.T)
 		runtime,
 		workspace,
 		0,
-		ready,
 	)
-	if err := <-ready; err == nil || !strings.Contains(err.Error(), "startup store recovery") {
-		t.Fatalf("agent runtime error = %v, want startup store recovery failure", err)
-	}
-	select {
-	case <-managed.done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("failed agent runtime did not stop")
+	runErr := waitForManagedWorkspaceRuntimeStartupFailure(t, managed)
+	if !strings.Contains(runErr.Error(), "startup store recovery") {
+		t.Fatalf("agent runtime error = %v, want startup store recovery failure", runErr)
 	}
 	replacement, _ := waitForAgentRuntimeWatcher(t, service, "agent-1", managed)
 	select {
@@ -2423,7 +2437,6 @@ func TestSyncAgentRuntimesDoesNotRestartAfterRecoverableWatcherEventError(t *tes
 		cancel()
 		service.closeAgentRuntimes()
 	})
-	ready := make(chan error, 1)
 	managed := startSupervisedAgentWorkspaceRuntimeForTest(
 		t,
 		service,
@@ -2432,11 +2445,8 @@ func TestSyncAgentRuntimesDoesNotRestartAfterRecoverableWatcherEventError(t *tes
 		runtime,
 		workspace,
 		0,
-		ready,
 	)
-	if err := <-ready; err != nil {
-		t.Fatalf("agent runtime startup: %v", err)
-	}
+	waitForManagedWorkspaceRuntimeStarted(t, managed)
 	badPath := filepath.Join(runtime.replica.rootDir, strings.Repeat("x", 5000))
 	watcher.events <- fsnotify.Event{Name: badPath, Op: fsnotify.Create}
 	select {
@@ -2478,11 +2488,15 @@ func TestServiceEarlyWorkspaceSetupFailureClosesGateway(t *testing.T) {
 	if conn != nil {
 		_ = conn.Close()
 	}
-	if service.toolServer != nil {
-		_ = service.toolServer.Close()
-	}
 	if dialErr == nil {
 		t.Fatal("tool gateway still accepted connections after setup failed")
+	}
+	rebound, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatalf("tool gateway listener was not released: %v", err)
+	}
+	if err := rebound.Close(); err != nil {
+		t.Fatalf("close rebound listener: %v", err)
 	}
 }
 

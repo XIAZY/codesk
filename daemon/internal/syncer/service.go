@@ -41,8 +41,6 @@ type Service struct {
 	sessions                *agentSessionSupervisor
 	runtimes                *runtimeRegistry
 	daemonStatus            *daemonStatusReporter
-	toolServer              *http.Server
-	toolGateway             *toolGateway
 	refreshMu               sync.Mutex                         // Guards applyFetchedWorkspace; never held during network I/O.
 	pendingSnapshot         atomic.Pointer[json.RawMessage]    // Latest decoded snapshot from the event reader; consumed by the refresh worker.
 	cancelFetch             atomic.Pointer[context.CancelFunc] // Canceled by publishSnapshot to preempt a held REST fetch.
@@ -272,7 +270,7 @@ func (q *localCreateQueue) Drain() []localCreateCandidate {
 	return candidates
 }
 
-func New(cfg Config) (*Service, error) {
+func New(cfg Config) *Service {
 	client := &http.Client{Timeout: 30 * time.Second}
 	runtimes := defaultRuntimeRegistry(cfg)
 	service := &Service{
@@ -286,7 +284,7 @@ func New(cfg Config) (*Service, error) {
 	}
 	service.sessions = newAgentSessionSupervisor(cfg, service.updateRemoteAgentSession, runtimes)
 	service.sessions.SetIdleWake(service.wakeAgentWorker)
-	return service, nil
+	return service
 }
 
 func (s *Service) ensurePrimaryRuntime() error {
@@ -354,8 +352,6 @@ func (s *Service) run(ctx context.Context, heartbeatTicks <-chan time.Time) (run
 	if err != nil {
 		return err
 	}
-	s.toolGateway = gateway
-	s.toolServer = gateway.server
 	coreCtx, cancelCore := context.WithCancel(ctx)
 	s.agentBaseCtx = coreCtx
 	stopHeartbeat := func() {}
@@ -403,15 +399,16 @@ func (s *Service) run(ctx context.Context, heartbeatTicks <-chan time.Time) (run
 	if err := os.MkdirAll(s.cfg.AgentWorkspaceRoot, 0o755); err != nil {
 		return err
 	}
-	if err := s.ensurePrimaryRuntime(); err != nil {
-		return err
-	}
-	primaryRuntime := s.primaryRuntime
 	if err := s.refreshInitialWorkspace(coreCtx); err != nil {
 		if ctx.Err() != nil {
 			return nil
 		}
 		return err
+	}
+	primaryRuntime := s.primaryRuntime
+	// The event reader starts after this refresh, so a stale-epoch skip cannot leave the runtime nil.
+	if primaryRuntime == nil {
+		return errors.New("initial refresh completed without constructing primary runtime")
 	}
 	primaryReady := make(chan error, 1)
 	primaryDone = make(chan struct{})
