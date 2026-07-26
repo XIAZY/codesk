@@ -151,11 +151,38 @@ type Daemon struct {
 }
 
 type RuntimeDetection struct {
-	Kind      string `json:"kind"`
-	Available bool   `json:"available"`
-	Version   string `json:"version,omitempty"`
-	Path      string `json:"path,omitempty"`
-	Reason    string `json:"reason,omitempty"`
+	Kind         string               `json:"kind"`
+	Available    bool                 `json:"available"`
+	Version      string               `json:"version,omitempty"`
+	Path         string               `json:"path,omitempty"`
+	Reason       string               `json:"reason,omitempty"`
+	ModelCatalog *RuntimeModelCatalog `json:"modelCatalog,omitempty"`
+}
+
+// RuntimeModelCatalog is the backend mirror of the daemon's projected model
+// catalog. It is a protocol mirror of the daemon-side type (daemon owns the
+// producer); the sealed JSON casing below is the only coupling, so these tags
+// must match the daemon's RuntimeDetection.ModelCatalog exactly. A nil
+// *RuntimeModelCatalog means the runtime reported no catalog (an old/unsupported
+// daemon, or a runtime like Claude with no catalog today); a non-nil catalog
+// with a non-empty Error means the runtime is capable but the probe failed; a
+// non-nil catalog with an empty Error and empty Models means capable but the
+// account has no available models. Explicit model/effort choices require a
+// present, error-free catalog; inheritance ("", "") never depends on it.
+type RuntimeModelCatalog struct {
+	Models []RuntimeModel `json:"models"`
+	Error  string         `json:"error,omitempty"`
+}
+
+// RuntimeModel is one entry in the projected model catalog. Model is the opaque
+// provider value passed to thread/start and thread/resume; DisplayName is for
+// rendering only and must never be substituted for Model.
+type RuntimeModel struct {
+	Model                  string   `json:"model"`
+	DisplayName            string   `json:"displayName"`
+	IsDefault              bool     `json:"isDefault"`
+	ReasoningEfforts       []string `json:"reasoningEfforts"`
+	DefaultReasoningEffort string   `json:"defaultReasoningEffort,omitempty"`
 }
 
 type Presence struct {
@@ -176,6 +203,8 @@ type Agent struct {
 	Name             string    `json:"name"`
 	Role             string    `json:"role"`
 	Kind             string    `json:"kind"`
+	Model            string    `json:"model"`
+	ReasoningEffort  string    `json:"reasoningEffort"`
 	SystemPrompt     string    `json:"systemPrompt"`
 	WorkspaceRoot    string    `json:"workspaceRoot"`
 	CurrentTurnID    string    `json:"currentTurnId,omitempty"`
@@ -468,12 +497,14 @@ type StartAgentRunRequest struct {
 }
 
 type CreateAgentRequest struct {
-	DaemonID     string `json:"daemonId"`
-	Handle       string `json:"handle"`
-	Name         string `json:"name"`
-	Role         string `json:"role"`
-	Kind         string `json:"kind"`
-	SystemPrompt string `json:"systemPrompt"`
+	DaemonID        string `json:"daemonId"`
+	Handle          string `json:"handle"`
+	Name            string `json:"name"`
+	Role            string `json:"role"`
+	Kind            string `json:"kind"`
+	Model           string `json:"model"`
+	ReasoningEffort string `json:"reasoningEffort"`
+	SystemPrompt    string `json:"systemPrompt"`
 }
 
 type UpdateAgentRequest struct {
