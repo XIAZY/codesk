@@ -34,6 +34,18 @@
   --daemon: oklch(0.60 0.08 155);
   --daemon-50: oklch(0.955 0.018 155);
   --daemon-700: oklch(0.40 0.06 155);
+  /* Code-file syntax highlighting (task #2). Dedicated semantic roles — NOT brand identity
+     colors — so code reads as its own quiet system. Low chroma (a code file still reads like a
+     warm document); each targets WCAG AA (>=4.5:1) on --paper. Same role = same color across all
+     grammars. Comments also carry italic, so color is never the sole legibility cue. Values are
+     for the single (light) theme that exists today; a dark theme would add its own --code-* set. */
+  --code-comment: oklch(0.50 0.016 75);
+  --code-kw: oklch(0.48 0.12 45);
+  --code-str: oklch(0.44 0.085 145);
+  --code-num: oklch(0.49 0.10 68);
+  --code-fn: oklch(0.46 0.10 250);
+  --code-type: oklch(0.47 0.10 300);
+  --code-punc: oklch(0.46 0.012 75);
   --ok: oklch(0.60 0.08 155);
   --warn: oklch(0.74 0.10 80);
   --warn-50: oklch(0.97 0.02 80);
