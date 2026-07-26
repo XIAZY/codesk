@@ -32,6 +32,8 @@ func (s *Server) Routes() http.Handler {
 		router.Get("/api/workspaces", s.handleListWorkspaces)
 		router.Post("/api/workspaces", s.handleCreateWorkspace)
 		router.Post("/api/invites/{token}/accept", s.handleAcceptWorkspaceInvite)
+		router.Get("/api/onboarding", s.handleGetOnboarding)
+		router.Post("/api/onboarding", s.handleCreateOnboardingCompletion)
 	})
 
 	router.Route("/api/workspaces/{workspaceID}", func(router chi.Router) {

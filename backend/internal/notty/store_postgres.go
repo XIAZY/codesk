@@ -71,6 +71,18 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		`,
 		`CREATE INDEX IF NOT EXISTS idx_account_email_tokens_account_purpose_created ON account_email_tokens (account_id, purpose, created_at DESC)`,
 		`
+		CREATE TABLE IF NOT EXISTS onboarding_completions (
+			account_id UUID NOT NULL,
+			item_key TEXT NOT NULL,
+			completed_at TIMESTAMPTZ NOT NULL,
+			PRIMARY KEY (account_id, item_key),
+			CONSTRAINT fk_onboarding_completions_account
+				FOREIGN KEY (account_id)
+				REFERENCES accounts(id)
+				ON DELETE CASCADE
+		)
+		`,
+		`
 		CREATE TABLE IF NOT EXISTS users (
 			workspace_id UUID NOT NULL,
 			id UUID PRIMARY KEY,
