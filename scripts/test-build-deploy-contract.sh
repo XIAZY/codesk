@@ -1433,10 +1433,18 @@ pass 'daemon installers preserve the live version-first latest metadata path'
 # script. Uppercase names are env vars and excluded, so this catches the real failure
 # class: an append-only hunk referencing a variable renamed out from under it (e.g.
 # $version after the version->git_sha rename), which set -eu would otherwise only fail
-# on mid-deploy, after the image is already pushed. shellcheck's SC2154 is the proper
-# tool but is not installed on the runner; this is the cheap equivalent for these scripts.
-for deploy_script in "$repo_dir/scripts/deploy-backend.sh" "$repo_dir/scripts/build-backend-image.sh"; do
-	assigned_vars="$(sed -n 's/^[[:space:]]*\([a-z_][a-z0-9_]*\)=.*/\1/p' "$deploy_script" | sort -u)"
+# on mid-deploy, after the image is already pushed. Covers all deploy legs plus the
+# backend image build. The build-daemon-*/build-macos-* scripts are intentionally out
+# of scope — they assign via patterns this cheap scan doesn't model (case branches,
+# arithmetic), so they'd false-positive; shellcheck SC2154 is the proper tool for those.
+# This is a net, not a proof: `export name=`, `read name`, and `for name in` are handled,
+# but a sourced assignment would still slip through.
+for deploy_script in "$repo_dir"/scripts/deploy-*.sh "$repo_dir/scripts/build-backend-image.sh"; do
+	assigned_vars="$( {
+		sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}\([a-z_][a-z0-9_]*\)=.*/\2/p' "$deploy_script"
+		sed -n 's/^[[:space:]]*read[[:space:]]\{1,\}//p' "$deploy_script" | tr ' ' '\n'
+		sed -n 's/^[[:space:]]*for[[:space:]]\{1,\}\([a-z_][a-z0-9_]*\)[[:space:]].*/\1/p' "$deploy_script"
+	} | grep -E '^[a-z_][a-z0-9_]*$' | sort -u)"
 	for referenced_var in $(grep -oE '\$\{?[a-z_][a-z0-9_]*' "$deploy_script" | sed 's/[${]//g' | sort -u); do
 		printf '%s\n' "$assigned_vars" | grep -qx "$referenced_var" ||
 			fail "$(basename "$deploy_script") references \$$referenced_var but never assigns it — a renamed or typo'd variable set -eu would abort a live deploy on"
