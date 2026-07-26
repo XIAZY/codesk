@@ -890,6 +890,8 @@ func TestRouteTableMatchesAuthenticatedWorkspaceAllowlist(t *testing.T) {
 		"GET /api/workspaces":              true,
 		"POST /api/workspaces":             true,
 		"POST /api/invites/{token}/accept": true,
+		"GET /api/onboarding":              true,
+		"POST /api/onboarding":             true,
 	}
 	workspaceAPI := map[string]bool{
 		"GET /api/workspaces/{workspaceID}/workspace":                                          true,
