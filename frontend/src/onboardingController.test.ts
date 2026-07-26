@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { deriveOnboardingSignals, toOnboardingStep } from "./onboardingController";
+import { deriveOnboardingSignals, toOnboardingStep, resolveAgentWorkDestination } from "./onboardingController";
 import { NODES, acknowledgeFlag } from "./onboardingEngine";
 import type { WorkspaceState, Daemon, Agent, ThreadItem, AgentRun } from "./types";
 
@@ -32,14 +32,12 @@ describe("deriveOnboardingSignals", () => {
     const signals = deriveOnboardingSignals({
       workspaceState: ws({ threads: [thread([]), thread([])], agents: [agent("a1")], agentRuns: [run()] }),
       documentCount: 3,
-      watchedDocumentCount: 2,
       nowMs: NOW,
     });
     expect(signals.documentCount).toBe(3);
     expect(signals.threadCount).toBe(2);
     expect(signals.agentCount).toBe(1);
     expect(signals.agentRunCount).toBe(1);
-    expect(signals.watchedDocumentCount).toBe(2);
   });
 
   it("counts a live environment by receipt-elapsed liveness, not by a raw 'online' status", () => {
@@ -50,7 +48,6 @@ describe("deriveOnboardingSignals", () => {
     const signals = deriveOnboardingSignals({
       workspaceState: ws({ daemons: [online, staleButRawOnline] }),
       documentCount: 0,
-      watchedDocumentCount: 0,
       nowMs: NOW,
     });
     expect(signals.liveEnvironmentCount).toBe(1);
@@ -63,7 +60,6 @@ describe("deriveOnboardingSignals", () => {
         threads: [thread(["user-1"]), thread(["user-1", "agent-1"]), thread(["agent-1"])],
       }),
       documentCount: 0,
-      watchedDocumentCount: 0,
       nowMs: NOW,
     });
     expect(signals.threadCount).toBe(3);
@@ -80,8 +76,10 @@ describe("P1->P2 adapter (toOnboardingStep) — the seam", () => {
       expect(step.scope).toBe(node.scope);
       expect(step.presentation).toBe(node.presentation);
       expect(step.targetOnboardingId).toBe(node.targetOnboardingId);
+      expect(step.eyebrow).toBe(node.eyebrow);
       expect(step.title).toBe(node.title);
       expect(step.body).toBe(node.body);
+      expect(step.caption).toBe(node.caption);
       expect(step.primaryAction).toEqual(node.primaryAction);
       expect(step.secondaryAction).toEqual(node.secondaryAction);
       expect(step.skippable).toBe(node.skippable);
@@ -97,5 +95,27 @@ describe("P1->P2 adapter (toOnboardingStep) — the seam", () => {
       const step = toOnboardingStep(node);
       expect(`seen:${step.id}@v${step.version}`).toBe(acknowledgeFlag(node));
     }
+  });
+});
+
+describe("resolveAgentWorkDestination (#56 §2e — one rule, two surfaces)", () => {
+  it("exactly one agent → that agent's Start run surface directly (no list hop)", () => {
+    expect(resolveAgentWorkDestination([{ id: "agent-7" }])).toEqual({
+      label: "Start a run",
+      kind: "start-run",
+      agentId: "agent-7",
+    });
+  });
+
+  it("two or more agents → the Agents list chooser", () => {
+    expect(resolveAgentWorkDestination([{ id: "a" }, { id: "b" }])).toEqual({
+      label: "Choose an agent",
+      kind: "agents-list",
+    });
+  });
+
+  it("the label tracks the destination (never a static label hiding the outcome)", () => {
+    expect(resolveAgentWorkDestination([{ id: "a" }]).label).toBe("Start a run");
+    expect(resolveAgentWorkDestination([{ id: "a" }, { id: "b" }, { id: "c" }]).label).toBe("Choose an agent");
   });
 });

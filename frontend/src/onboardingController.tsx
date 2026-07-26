@@ -12,6 +12,8 @@ import {
   guideSteps,
   activeNode,
   activeTip,
+  activeChapter,
+  chapterSteps,
   isComplete,
   checklistProgress,
   type OnboardingNode,
@@ -25,7 +27,6 @@ import {
 export type OnboardingSignalInput = {
   workspaceState: WorkspaceState;
   documentCount: number; // rootDocuments.length — held by WorkspaceApp, not WorkspaceState
-  watchedDocumentCount: number; // document subscriptions the user has added
   nowMs: number; // for daemon liveness decay
 };
 
@@ -34,7 +35,7 @@ export type OnboardingSignalInput = {
 // reads "online" (receipt-elapsed liveness with a genuine check-in) — never a raw
 // status field, so a stale-but-"online" daemon does not satisfy the local-env node.
 export function deriveOnboardingSignals(input: OnboardingSignalInput): OnboardingLiveSignals {
-  const { workspaceState, documentCount, watchedDocumentCount, nowMs } = input;
+  const { workspaceState, documentCount, nowMs } = input;
   const agentIds = new Set(workspaceState.agents.map((agent) => agent.id));
   return {
     documentCount,
@@ -43,7 +44,6 @@ export function deriveOnboardingSignals(input: OnboardingSignalInput): Onboardin
     agentCount: workspaceState.agents.length,
     agentRunCount: workspaceState.agentRuns.length,
     agentThreadCount: workspaceState.threads.filter((thread) => thread.participantIds.some((id) => agentIds.has(id))).length,
-    watchedDocumentCount,
   };
 }
 
@@ -59,13 +59,31 @@ export function toOnboardingStep(node: OnboardingNode): OnboardingStep {
     scope: node.scope,
     presentation: node.presentation,
     targetOnboardingId: node.targetOnboardingId,
+    eyebrow: node.eyebrow,
     title: node.title,
     body: node.body,
+    caption: node.caption,
     primaryAction: node.primaryAction,
     secondaryAction: node.secondaryAction,
     skippable: node.skippable,
     fallback: node.fallback,
   };
+}
+
+// ---- Shared "work with an agent" destination (#56 §2e) -----------------------
+
+// One rule for BOTH the owner/admin chapter step 3 CTA and the member work card so the
+// two surfaces can't diverge (Anton/Juan): exactly 1 agent → that agent's Start run
+// surface directly (no list hop); 2+ → the Agents list. The label is state-dependent for
+// the same reason — a static label would hide the materially different outcome. 0 agents
+// can't reach here (the card requires agent-exists), but falls back to the list safely.
+export type AgentWorkDestination =
+  | { label: "Start a run"; kind: "start-run"; agentId: string }
+  | { label: "Choose an agent"; kind: "agents-list" };
+
+export function resolveAgentWorkDestination(agents: readonly { id: string }[]): AgentWorkDestination {
+  if (agents.length === 1) return { label: "Start a run", kind: "start-run", agentId: agents[0].id };
+  return { label: "Choose an agent", kind: "agents-list" };
 }
 
 // ---- Persistence keys (plan §4.3/§6.1) ---------------------------------------
@@ -95,7 +113,6 @@ export type OnboardingControllerInput = {
   selectionActive: boolean;
   workspaceState: WorkspaceState;
   documentCount: number;
-  watchedDocumentCount: number;
   nowMs: number;
 };
 
@@ -103,7 +120,7 @@ export type OnboardingControllerInput = {
 // which step/tip is active, and drives useOnboarding. WorkspaceApp calls this once
 // and renders <Onboarding step={active} .../> plus the checklist.
 export function useOnboardingController(input: OnboardingControllerInput) {
-  const { enabled, accountId, workspaceId, roles, route, selectionActive, workspaceState, documentCount, watchedDocumentCount, nowMs } = input;
+  const { enabled, accountId, workspaceId, roles, route, selectionActive, workspaceState, documentCount, nowMs } = input;
   const keys = useMemo(() => onboardingFlagKeys(accountId, workspaceId), [accountId, workspaceId]);
 
   // ONE keyed store owns the recorded event flags. The engine context and
@@ -113,8 +130,8 @@ export function useOnboardingController(input: OnboardingControllerInput) {
   const flags = useScopedEventFlags(keys.accountFlagsKey, keys.workspaceFlagsKey);
 
   const signals = useMemo(
-    () => deriveOnboardingSignals({ workspaceState, documentCount, watchedDocumentCount, nowMs }),
-    [workspaceState, documentCount, watchedDocumentCount, nowMs],
+    () => deriveOnboardingSignals({ workspaceState, documentCount, nowMs }),
+    [workspaceState, documentCount, nowMs],
   );
 
   const ctx: OnboardingContext = useMemo(
@@ -133,6 +150,14 @@ export function useOnboardingController(input: OnboardingControllerInput) {
     return node ? toOnboardingStep(node) : null;
   }, [ctx]);
 
+  // The opt-in chapter card for the current role + live state (true next step / done card
+  // / null), plus its position among the role's steps for the step dots + entry badge.
+  const chapterNode = useMemo(() => activeChapter(ctx), [ctx]);
+  const chapter = useMemo(() => (chapterNode ? toOnboardingStep(chapterNode) : null), [chapterNode]);
+  const chapterStepsList = useMemo(() => chapterSteps(ctx), [ctx]);
+  const chapterTotal = chapterStepsList.length;
+  const chapterStepIndex = chapterNode ? chapterStepsList.findIndex((s) => s.id === chapterNode.id) : -1;
+
   const hook = useOnboarding({
     steps,
     completedIds,
@@ -142,6 +167,9 @@ export function useOnboardingController(input: OnboardingControllerInput) {
     checklistDismissedKey: keys.checklistDismissedKey,
     activeSpotlightId,
     tip,
+    chapter,
+    chapterStepIndex,
+    chapterTotal,
     enabled,
   });
 

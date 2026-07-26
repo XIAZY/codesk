@@ -6,7 +6,7 @@
 // fires on a real invite. The pure derivation/adapter is covered in
 // onboarding.test.ts / onboardingController.test.ts; this pins the App.tsx glue.
 
-import { cleanup, render, renderHook, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, cleanup, render, renderHook, screen, fireEvent, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceApp, MembersAndInvite, shouldRenderOnboardingChecklist } from "./App";
 import { useOnboardingController } from "./onboardingController";
@@ -135,8 +135,12 @@ describe("onboarding wiring in WorkspaceApp", () => {
     mocks.documents = [{ id: "doc_1", path: "Product.md", title: "Product.md" }];
     renderWorkspace();
 
-    // document-exists + agent-exists derive from live state — no stored "done" flags.
-    expect(screen.getByText("2 of 5 done")).toBeTruthy();
+    // Member with an agent: the checklist is create-document (done) + start-discussion +
+    // the "Work with an agent" entry (shown because an agent exists; completes on
+    // agent-at-work) — all live-derived, no stored "done" flags. #56 replace-not-coexist
+    // folded the old connect/create/agent-at-work rows into that single entry.
+    expect(screen.getByText("1 of 3 done")).toBeTruthy();
+    expect(screen.getByText("Work with an agent")).toBeTruthy();
     expect(screen.queryByText("These are real files")).toBeNull();
   });
 
@@ -180,7 +184,6 @@ describe("useOnboardingController scope isolation (per user × workspace)", () =
     roles: ["owner"] as OnboardingRole[],
     workspaceState: workspaceState(),
     documentCount: 1, // create-first-document already complete → guide sits past it
-    watchedDocumentCount: 0,
     nowMs: 0,
   };
 
@@ -194,8 +197,9 @@ describe("useOnboardingController scope isolation (per user × workspace)", () =
         useOnboardingController({ ...baseInput, accountId: "acct_1", route: "document", selectionActive: false, ...props }),
       { initialProps: { workspaceId: "wsA" } },
     );
-    // A: threads-intro acknowledged → the guide sits on watchers-intro.
-    expect(result.current.active?.id).toBe("watchers-intro");
+    // A: threads-intro acknowledged → the 2-step guide is finished, nothing active
+    // (watchers left the sequence in #56; no agent here so its tip is inert too).
+    expect(result.current.active).toBeNull();
     // Switch the still-mounted controller to workspace B (no flags): threads-intro reappears.
     rerender({ workspaceId: "wsB" });
     expect(result.current.active?.id).toBe("threads-intro");
@@ -223,5 +227,152 @@ describe("useOnboardingController scope isolation (per user × workspace)", () =
     // NOT suppressed by A's account flag.
     rerender({ accountId: "acctB" });
     expect(result.current.active?.id).toBe("tip-first-selection");
+  });
+});
+
+describe("useOnboardingController — chapter open/close + card exposure (#56)", () => {
+  const chapterBase = {
+    enabled: true,
+    accountId: "acct_c",
+    workspaceId: "ws_c",
+    route: "home",
+    selectionActive: false,
+    documentCount: 1,
+    nowMs: 0,
+  };
+
+  it("owner: closed by default, opens to step 1, and 'Not now'/Close closes without completing", () => {
+    const { result } = renderHook(() =>
+      useOnboardingController({ ...chapterBase, roles: ["owner"], workspaceState: workspaceState() }),
+    );
+    // Closed by default — no card rendered, though the shape (3 owner/admin steps) is known.
+    expect(result.current.chapterActive).toBeNull();
+    expect(result.current.chapterTotal).toBe(3);
+
+    act(() => result.current.openChapter());
+    expect(result.current.chapterActive?.id).toBe("add-teammate-connect");
+    expect(result.current.chapterStepIndex).toBe(0);
+
+    // Close dismisses only — no completion recorded, so reopening resumes from live state.
+    act(() => result.current.closeChapter());
+    expect(result.current.chapterActive).toBeNull();
+    act(() => result.current.openChapter());
+    expect(result.current.chapterActive?.id).toBe("add-teammate-connect");
+  });
+
+  it("member with no agents: opening yields no card (member+none is absent)", () => {
+    const { result } = renderHook(() =>
+      useOnboardingController({ ...chapterBase, roles: ["member"], workspaceState: workspaceState() }),
+    );
+    act(() => result.current.openChapter());
+    expect(result.current.chapterActive).toBeNull();
+  });
+
+  it("member with an agent: the chapter is the single 'work with an agent' card", () => {
+    const { result } = renderHook(() =>
+      useOnboardingController({
+        ...chapterBase,
+        roles: ["member"],
+        workspaceState: workspaceState({ agents: [agent("a1")] }),
+      }),
+    );
+    act(() => result.current.openChapter());
+    expect(result.current.chapterActive?.id).toBe("add-teammate-member");
+    expect(result.current.chapterTotal).toBe(1);
+  });
+
+  it("live-transition: an open chapter whose card nulls (last agent removed) auto-closes; reappearance stays closed", () => {
+    const { result, rerender } = renderHook(
+      (props: { workspaceState: WorkspaceState }) => useOnboardingController({ ...chapterBase, roles: ["member"], ...props }),
+      { initialProps: { workspaceState: workspaceState({ agents: [agent("a1")] }) } },
+    );
+    act(() => result.current.openChapter());
+    expect(result.current.chapterActive?.id).toBe("add-teammate-member");
+    expect(result.current.chapterOpen).toBe(true);
+
+    // The member's only agent is removed before any run → no card. The session must not linger
+    // open behind nothing (which would keep the tip/checklist suspended invisibly) — it auto-closes.
+    rerender({ workspaceState: workspaceState() });
+    expect(result.current.chapterActive).toBeNull();
+    expect(result.current.chapterOpen).toBe(false);
+
+    // A later agent reappears → the entry is available again, but the chapter must NOT auto-reopen;
+    // the member relaunches explicitly (no surprise card from a stale open state).
+    rerender({ workspaceState: workspaceState({ agents: [agent("a2")] }) });
+    expect(result.current.chapterOpen).toBe(false);
+    expect(result.current.chapterActive).toBeNull();
+  });
+});
+
+describe("chapter integration in WorkspaceApp (#56 render head)", () => {
+  const guideDone = () =>
+    window.localStorage.setItem(
+      "codesk.onboarding.account.account_1.ws.workspace_1.flags",
+      JSON.stringify(["seen:threads-intro@v1"]),
+    );
+
+  it("owner: the single entry shows derived '1 of 3' and opens the chapter to the live next step", () => {
+    guideDone();
+    mocks.workspace = workspaceState({ currentMembershipRole: "owner" });
+    mocks.documents = [{ id: "doc_1", path: "P.md", title: "P.md" }];
+    renderWorkspace();
+
+    // ONE "Add an AI teammate" entry with a derived badge — not the old three rows.
+    expect(screen.getByText("Add an AI teammate")).toBeTruthy();
+    expect(screen.getByText("1 of 3")).toBeTruthy();
+    expect(screen.queryByText("Connect a local environment")).toBeNull(); // chapter starts closed
+
+    const flagsKey = "codesk.onboarding.account.account_1.ws.workspace_1.flags";
+    const flagsBefore = window.localStorage.getItem(flagsKey);
+
+    fireEvent.click(screen.getByText("Add an AI teammate"));
+    // Opens to the true next step (no environment yet → connect), never a spotlight.
+    expect(screen.getByText("Connect a local environment")).toBeTruthy();
+    expect(screen.getByText("Connect environment")).toBeTruthy();
+    expect(screen.getByText("Step 1 of 3")).toBeTruthy();
+    // One surface owns attention: the checklist launcher (and any tip — same gate) is
+    // suspended while the chapter is open, so nothing competes for Escape.
+    expect(screen.queryByText("Finish setting up this workspace")).toBeNull();
+
+    // "Not now" closes it (dismiss only) and restores the checklist entry.
+    fireEvent.click(screen.getByText("Not now"));
+    expect(screen.queryByText("Connect a local environment")).toBeNull();
+    expect(screen.getByText("Finish setting up this workspace")).toBeTruthy();
+    expect(screen.getByText("Add an AI teammate")).toBeTruthy();
+    // Honest pin: opening/dismissing the chapter (and suspending the launcher) recorded NO
+    // seen/dismissed flag — nothing durable changed.
+    expect(window.localStorage.getItem(flagsKey)).toBe(flagsBefore);
+  });
+
+  it("member with an agent: the entry opens the single work card with the live 'Start a run' label", () => {
+    guideDone();
+    mocks.workspace = workspaceState({ agents: [agent("agent_1")] }); // no role → member
+    mocks.documents = [{ id: "doc_1", path: "P.md", title: "P.md" }];
+    renderWorkspace();
+
+    expect(screen.getByText("Work with an agent")).toBeTruthy();
+    fireEvent.click(screen.getByText("Work with an agent"));
+    expect(screen.getByText("Put an agent to work")).toBeTruthy();
+    // Exactly one agent → the CTA resolves to "Start a run" (direct), not a static label.
+    expect(screen.getByText("Start a run")).toBeTruthy();
+    expect(screen.getByText(/No setup needed/)).toBeTruthy();
+  });
+
+  it("member whose agent is at work: the entry is 'Done' with historical copy and reopens the terminal card (no dead end)", () => {
+    guideDone();
+    // An agent already at work (a run exists) → the member entry is complete.
+    mocks.workspace = workspaceState({ agents: [agent("agent_1")], agentRuns: [{ id: "run_1" } as never] });
+    mocks.documents = [{ id: "doc_1", path: "P.md", title: "P.md" }];
+    renderWorkspace();
+
+    // The done entry uses historical (past-tense) copy, not the present-tense label; the
+    // subtitle names the reopen destination (a completion card), not an action.
+    expect(screen.getByText("You've started working with an agent")).toBeTruthy();
+    expect(screen.getByText("View completion")).toBeTruthy();
+
+    // Reopening it lands on the real terminal card — never an empty overlay.
+    fireEvent.click(screen.getByText("You've started working with an agent"));
+    expect(screen.getByText("You can start more work anytime from Agents.")).toBeTruthy();
+    expect(screen.getByText("Close")).toBeTruthy();
   });
 });

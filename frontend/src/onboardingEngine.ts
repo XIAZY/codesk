@@ -31,13 +31,23 @@ export type OnboardingEventKey = (typeof ONBOARDING_EVENT_KEYS)[number];
 export type OnboardingScope = "account" | "workspace";
 
 // The user role a node is scoped to. Empty `eligibleRoles` means "all roles" — the
-// node is removed (not disabled) for anyone outside a non-empty list.
+// node is removed (not disabled) for anyone outside a non-empty list. `eligibleRoles`
+// is AUTHZ-PURE (who the backend permits to perform the node's action) — never a
+// presentation-variant switch. The #57 config↔authz guard depends on that meaning.
 export type OnboardingRole = "owner" | "admin" | "member";
+
+// Which role's VARIANT of a chapter card this is — a presentation dimension, distinct
+// from `eligibleRoles` (authz). The owner/admin work step and the member work card
+// both resolve to start-run (all-roles authz) but are different surfaces; `audience`
+// picks between them. A deliberately different shape from OnboardingRole[] so the
+// config never reads as if it were authz. `undefined` = not a variant (any audience).
+export type OnboardingAudience = "owner-admin" | "member";
 
 export type OnboardingTrigger =
   | { type: "workspace-empty" } // no documents yet
   | { type: "document-open" } // a document view is active (its spotlight target exists)
-  | { type: "first-text-select" }; // the editor has a live text selection
+  | { type: "first-text-select" } // the editor has a live text selection
+  | { type: "manual" }; // never auto-triggers — shown only when its flow is opened (chapter cards)
 
 // A completion condition. `derived` reads live signals (the source of truth);
 // `flag` reads a recorded seen/dismissed/event key; `any` is satisfied if any child
@@ -58,25 +68,49 @@ export type DerivedSignal =
 // The UI actions a node's buttons can fire (distinct from the §4.2 completion event
 // keys). A closed union so a typo dies at compile time and OnboardingNode stays
 // structurally assignable to P2's OnboardingStep by construction — no cast/parser.
-export type OnboardingActionEvent = "advance" | "back" | "complete" | "dismiss" | "open-thread-draft";
+// The three `open-*` events route the "Add an AI teammate" chapter CTAs to real
+// controls (CreateDaemonModal / CreateAgentModal / the shared agent-work destination).
+export type OnboardingActionEvent =
+  | "advance"
+  | "back"
+  | "complete"
+  | "dismiss"
+  | "open-thread-draft"
+  | "open-create-environment"
+  | "open-create-agent"
+  | "open-agent-work";
 
 export type OnboardingAction = { label: string; event: OnboardingActionEvent };
 
 // `spotlight` nodes form the guided sequence (step counter); `tip` nodes are
-// standalone contextual callouts (no counter, one-time).
-export type OnboardingPresentation = "spotlight" | "tip";
+// standalone contextual callouts (no counter, one-time); `chapter` nodes form the
+// optional, non-blocking "Add an AI teammate" flow (its own step sequence + a
+// terminal done card), never auto-triggered — opened deliberately by the user.
+export type OnboardingPresentation = "spotlight" | "tip" | "chapter";
 
 export type OnboardingNode = {
   id: string;
   version: number; // bump to re-show after a redesign
   scope: OnboardingScope;
   presentation: OnboardingPresentation;
-  eligibleRoles: OnboardingRole[]; // empty = all
+  eligibleRoles: OnboardingRole[]; // empty = all — AUTHZ-PURE (see OnboardingRole)
+  // Presentation variant (which role's version of a chapter card) — NOT authz. Chapter
+  // cards use this to pick owner/admin vs member surfaces without lying via eligibleRoles.
+  audience?: OnboardingAudience;
   trigger: OnboardingTrigger;
+  // Extra live-signal preconditions ANDed into the trigger — the node is inert until
+  // ALL are true (e.g. the watchers hint needs an agent to exist; the member chapter
+  // card needs an agent to exist). A real gate on live state, not a fake trigger type.
+  requiresSignals?: DerivedSignal[];
   completion: OnboardingCondition;
+  // Marks the terminal "done" card of a chapter (shown once the chapter's steps are all
+  // complete, gated by its requiresSignals) — not itself a step in the sequence.
+  chapterTerminal?: boolean;
   targetOnboardingId?: string; // data-onboarding-id of the control to spotlight
   title: string;
   body: string;
+  eyebrow?: string; // small label above the title (chapter cards: "ADD AN AI TEAMMATE · OPTIONAL")
+  caption?: string; // reassurance line, not an action (e.g. member card "No setup needed")
   primaryAction?: OnboardingAction;
   secondaryAction?: OnboardingAction;
   skippable: boolean;
@@ -86,8 +120,21 @@ export type OnboardingNode = {
 export type OnboardingChecklistItem = {
   id: string;
   label: string;
-  eligibleRoles: OnboardingRole[]; // empty = all
+  eligibleRoles: OnboardingRole[]; // empty = all — AUTHZ-PURE (see OnboardingRole)
   completion: OnboardingCondition;
+  // The "Add an AI teammate" / "Work with an agent" entry is a resumable launcher for the
+  // chapter (replace-not-coexist, #56) — these fields describe that entry row. Plain items
+  // leave them unset. `audience` picks the owner/admin vs member variant (NOT authz);
+  // `requiresSignals` hides the member entry until an agent exists; `opensChapter` marks
+  // the row as a chapter launcher (subtitle + derived chapter progress + chevron).
+  audience?: OnboardingAudience;
+  requiresSignals?: DerivedSignal[];
+  subtitle?: string;
+  opensChapter?: boolean;
+  // Historical copy shown on the entry ROW once complete (agent-at-work) — past tense,
+  // still resumable. Falls back to label/subtitle when unset (e.g. the member entry).
+  doneLabel?: string;
+  doneSubtitle?: string;
 };
 
 // ---- Live context ------------------------------------------------------------
@@ -103,7 +150,6 @@ export type OnboardingLiveSignals = {
   agentCount: number;
   agentRunCount: number;
   agentThreadCount: number; // threads an agent participates in
-  watchedDocumentCount: number;
 };
 
 export type OnboardingContext = {
@@ -134,7 +180,9 @@ export function acknowledgeFlag(node: OnboardingNode): string {
 }
 
 export const NODES: OnboardingNode[] = [
-  // A. Guided spotlight sequence — scope workspace, all roles, 3 steps.
+  // A. Guided spotlight sequence — scope workspace, all roles, 2 steps every role can
+  // complete (create a document, learn threads). Watchers left this sequence in #56 —
+  // it now teaches as a contextual tip once an agent exists (see B).
   {
     id: "create-first-document",
     version: 1,
@@ -166,23 +214,28 @@ export const NODES: OnboardingNode[] = [
     skippable: true,
     fallback: "skip",
   },
+  // B. Contextual tips — standalone callouts, not in the guided sequence.
+  // watchers-intro RELOCATED here from the guided sequence (#56): SAME id + version 1,
+  // so the existing `seen:watchers-intro@v1` ack carries — users who saw the old
+  // spotlight step 3/3 never see it again (zero migration). Only presentation (tip),
+  // trigger (document-open AND agent-exists), and sequence membership changed. Watchers
+  // only make sense once an agent exists — hence the agent-exists precondition.
   {
     id: "watchers-intro",
     version: 1,
     scope: "workspace",
-    presentation: "spotlight",
+    presentation: "tip",
     eligibleRoles: [],
     trigger: { type: "document-open" },
+    requiresSignals: ["agent-exists"],
     completion: ACKNOWLEDGE,
     targetOnboardingId: "document-watchers",
     title: "Let an agent keep watch",
     body: "Watchers are the agents following this document. When something relevant changes, it lands in their work queue — no need to ping them.",
-    primaryAction: { label: "Done", event: "complete" },
-    secondaryAction: { label: "Back", event: "back" },
+    primaryAction: { label: "Got it", event: "dismiss" },
     skippable: true,
     fallback: "skip",
   },
-  // B. Contextual tip — standalone, account-scoped, not in the sequence.
   {
     id: "tip-first-selection",
     version: 1,
@@ -211,18 +264,177 @@ export const NODES: OnboardingNode[] = [
     skippable: true,
     fallback: "skip",
   },
+  // D. "Add an AI teammate" chapter — optional, non-blocking, resumable. Trigger is
+  // `manual`: never auto-spotlighted, opened deliberately (after the core guide / from
+  // the checklist). Each card renders as a quiet page card (no spotlight target). The
+  // owner/admin path is a 3-step sequence (connect → create → work) that advances on
+  // live signals + a terminal "done" card; a member gets a single "work with an agent"
+  // card only once an agent exists. Completion is live-derived (agent-at-work) — no new
+  // stored flag.
+  //
+  // eligibleRoles vs audience (ruled by Anton/Tom/Juan, #56): `eligibleRoles` is
+  // AUTHZ-PURE — connect/create carry ["owner","admin"] because the backend genuinely
+  // gates them (ManageDaemons/ManageAgents); the work step, done card, and member card
+  // carry [] because their action (start-run / close) is all-roles. The owner-vs-member
+  // presentation split lives in `audience`, NOT eligibleRoles, so the #57 authz guard
+  // stays strict and honest everywhere (it keys on the action→permission table, and
+  // never sees a variant switch smuggled into eligibleRoles).
+  {
+    id: "add-teammate-connect",
+    version: 1,
+    scope: "workspace",
+    presentation: "chapter",
+    eligibleRoles: ["owner", "admin"], // authz: ManageDaemons
+    audience: "owner-admin",
+    trigger: { type: "manual" },
+    completion: { via: "derived", signal: "live-environment" },
+    eyebrow: "ADD AN AI TEAMMATE · OPTIONAL",
+    title: "Connect a local environment",
+    body: "A local environment is the computer where your agents run.",
+    primaryAction: { label: "Connect environment", event: "open-create-environment" },
+    secondaryAction: { label: "Not now", event: "dismiss" },
+    skippable: true,
+    fallback: "page-card",
+  },
+  {
+    id: "add-teammate-create",
+    version: 1,
+    scope: "workspace",
+    presentation: "chapter",
+    eligibleRoles: ["owner", "admin"], // authz: ManageAgents
+    audience: "owner-admin",
+    trigger: { type: "manual" },
+    completion: { via: "derived", signal: "agent-exists" },
+    eyebrow: "ADD AN AI TEAMMATE · OPTIONAL",
+    title: "Create your first agent",
+    body: "An agent has a name, a role, and its own runtime.",
+    primaryAction: { label: "Create agent", event: "open-create-agent" },
+    secondaryAction: { label: "Not now", event: "dismiss" },
+    skippable: true,
+    fallback: "page-card",
+  },
+  {
+    id: "add-teammate-work",
+    version: 1,
+    scope: "workspace",
+    presentation: "chapter",
+    eligibleRoles: [], // authz: start-run is all-roles — owner/admin see this variant via `audience`
+    audience: "owner-admin",
+    trigger: { type: "manual" },
+    completion: { via: "derived", signal: "agent-at-work" },
+    eyebrow: "ADD AN AI TEAMMATE · OPTIONAL",
+    title: "Put your agent to work",
+    body: "Choose an agent and start a run.",
+    // The label is DYNAMIC (Anton): the host relabels via resolveAgentWorkDestination —
+    // exactly 1 agent → "Start a run" (direct to its Start run); 2+ → "Choose an agent"
+    // (Agents list). The static label here is the 1-agent default and must not ship as-is.
+    primaryAction: { label: "Start a run", event: "open-agent-work" },
+    secondaryAction: { label: "Not now", event: "dismiss" },
+    skippable: true,
+    fallback: "page-card",
+  },
+  {
+    id: "add-teammate-done",
+    version: 1,
+    scope: "workspace",
+    presentation: "chapter",
+    eligibleRoles: [], // authz: closing a done card is universal — audience picks the owner/admin variant
+    audience: "owner-admin",
+    trigger: { type: "manual" },
+    requiresSignals: ["agent-at-work"],
+    chapterTerminal: true,
+    completion: { via: "derived", signal: "agent-at-work" },
+    eyebrow: "STARTED",
+    title: "You've started working with an agent",
+    body: "You can start more work anytime from Agents.",
+    caption: "Chapter complete",
+    primaryAction: { label: "Close", event: "dismiss" },
+    skippable: true,
+    fallback: "page-card",
+  },
+  {
+    id: "add-teammate-member",
+    version: 1,
+    scope: "workspace",
+    presentation: "chapter",
+    eligibleRoles: [], // authz: start-run is all-roles — the member variant is chosen via `audience`
+    audience: "member",
+    trigger: { type: "manual" },
+    requiresSignals: ["agent-exists"],
+    completion: { via: "derived", signal: "agent-at-work" },
+    eyebrow: "WORK WITH AN AGENT",
+    title: "Put an agent to work",
+    body: "This workspace has agents. Choose one and start a run.",
+    caption: "No setup needed", // reassurance, not an action (Anton: caption, not a dismiss label)
+    // Dynamic label, same rule as the owner/admin work step (host relabels via
+    // resolveAgentWorkDestination: 1 agent → "Start a run", 2+ → "Choose an agent").
+    primaryAction: { label: "Start a run", event: "open-agent-work" },
+    secondaryAction: { label: "Not now", event: "dismiss" },
+    skippable: true,
+    fallback: "page-card",
+  },
+  // Member terminal card (#56, Anton's behavioral-gate fix): once a member has put an
+  // agent to work, reopening the entry must land on a real completion card — not nothing.
+  // Mirrors the owner/admin done card for the member audience; live-derived (agent-at-work).
+  {
+    id: "add-teammate-member-done",
+    version: 1,
+    scope: "workspace",
+    presentation: "chapter",
+    eligibleRoles: [],
+    audience: "member",
+    trigger: { type: "manual" },
+    requiresSignals: ["agent-at-work"],
+    chapterTerminal: true,
+    completion: { via: "derived", signal: "agent-at-work" },
+    eyebrow: "STARTED",
+    title: "You've started working with an agent",
+    body: "You can start more work anytime from Agents.",
+    caption: "Chapter complete", // mirror the owner/admin terminal footer (Anton parity note)
+    primaryAction: { label: "Close", event: "dismiss" },
+    skippable: true,
+    fallback: "page-card",
+  },
 ];
 
 // C. Getting-started checklist — scope workspace. Completion is derived from live
 // data (never a stored "done") for every item EXCEPT `invite-team`: an invitation
 // sent is not derivable from the member list until the invitee accepts, so deriving
 // it would falsely read incomplete. It is the one flag-based item, by design.
+//
+// #56 replace-not-coexist: the old connect-environment / create-agent / agent-at-work
+// rows are GONE — they collapse into ONE resumable chapter entry that COUNTS in the
+// progress denominator (Anton) and opens the chapter. Owner/admin get the "Add an AI
+// teammate" variant; a member with agents gets "Work with an agent"; a member with no
+// agents gets no AI entry (requiresSignals hides it). Both complete from agent-at-work.
 export const CHECKLIST_ITEMS: OnboardingChecklistItem[] = [
   { id: "create-document", label: "Create your first document", eligibleRoles: [], completion: { via: "derived", signal: "document-exists" } },
   { id: "start-discussion", label: "Start a discussion", eligibleRoles: [], completion: { via: "derived", signal: "thread-exists" } },
-  { id: "connect-environment", label: "Connect a local environment", eligibleRoles: [], completion: { via: "derived", signal: "live-environment" } },
-  { id: "create-agent", label: "Create your first agent", eligibleRoles: [], completion: { via: "derived", signal: "agent-exists" } },
-  { id: "agent-at-work", label: "Put an agent to work", eligibleRoles: [], completion: { via: "derived", signal: "agent-at-work" } },
+  {
+    id: "add-teammate-entry",
+    label: "Add an AI teammate",
+    eligibleRoles: [], // authz-pure: opening the chapter is not gated (its STEPS are); variant via audience
+    audience: "owner-admin",
+    completion: { via: "derived", signal: "agent-at-work" },
+    subtitle: "Connect an environment, create an agent, put it to work",
+    opensChapter: true,
+    doneLabel: "You've started working with an agent",
+    // The click reopens the completion card (Close-only) — it doesn't start work, so the
+    // subtitle names the destination, not an action (Anton/Juan copy-honesty rule).
+    doneSubtitle: "View completion",
+  },
+  {
+    id: "work-with-agent-entry",
+    label: "Work with an agent",
+    eligibleRoles: [],
+    audience: "member",
+    requiresSignals: ["agent-exists"], // member sees this only once an agent exists — else no AI entry
+    completion: { via: "derived", signal: "agent-at-work" },
+    subtitle: "Choose an agent and start a run",
+    opensChapter: true,
+    doneLabel: "You've started working with an agent",
+    doneSubtitle: "View completion", // same reopen destination for both audiences (Anton/Juan)
+  },
   { id: "invite-team", label: "Invite your team", eligibleRoles: ["owner", "admin"], completion: { via: "flag", key: "member_invited" } },
 ];
 
@@ -239,7 +451,11 @@ function derivedSignal(signal: DerivedSignal, s: OnboardingLiveSignals): boolean
     case "agent-exists":
       return s.agentCount > 0;
     case "agent-at-work":
-      return s.watchedDocumentCount > 0 || s.agentRunCount > 0 || s.agentThreadCount > 0;
+      // Ratified #56 oracle: a run started OR an agent in a thread. NOT "watching" — a
+      // watcher hasn't done work, so it must not mark the chapter Done (that was a Batch-1
+      // definition; folded out here). If "agent is watching" is ever wanted it needs its
+      // own named signal + product ruling — one signal, one meaning.
+      return s.agentRunCount > 0 || s.agentThreadCount > 0;
   }
 }
 
@@ -265,7 +481,14 @@ function roleEligible(eligibleRoles: OnboardingRole[], roles: OnboardingRole[]):
   return eligibleRoles.length === 0 || eligibleRoles.some((r) => roles.includes(r));
 }
 
+// Every live-signal precondition is met (empty = trivially true). Works for nodes and
+// for the chapter-entry checklist item (both may carry requiresSignals).
+function requiresSignalsMet(item: { requiresSignals?: DerivedSignal[] }, ctx: OnboardingContext): boolean {
+  return (item.requiresSignals ?? []).every((sig) => derivedSignal(sig, ctx.signals));
+}
+
 function isTriggered(node: OnboardingNode, ctx: OnboardingContext): boolean {
+  if (!requiresSignalsMet(node, ctx)) return false;
   switch (node.trigger.type) {
     case "workspace-empty":
       return ctx.signals.documentCount === 0;
@@ -273,6 +496,10 @@ function isTriggered(node: OnboardingNode, ctx: OnboardingContext): boolean {
       return ctx.route === "document";
     case "first-text-select":
       return ctx.selectionActive;
+    case "manual":
+      // Chapter cards never auto-trigger — they surface only through the chapter API
+      // (activeChapter) when their flow is opened, not via activeNode/activeTip.
+      return false;
   }
 }
 
@@ -316,10 +543,86 @@ export function activeTip(ctx: OnboardingContext): OnboardingNode | null {
   );
 }
 
-// The checklist for this role, each item with its live-derived done state.
+// The checklist for this role, each item with its live-derived done state. Filtered by
+// authz (eligibleRoles), presentation audience (owner/admin vs member entry variant),
+// and signal preconditions (the member entry appears only once an agent exists). The
+// chapter entry COUNTS as an item (Anton) — so a member with agents sees 3 items, a
+// member with none sees 2, and owner/admin see 4.
 export function checklistProgress(ctx: OnboardingContext): Array<{ item: OnboardingChecklistItem; done: boolean }> {
-  return CHECKLIST_ITEMS.filter((i) => roleEligible(i.eligibleRoles, ctx.roles)).map((item) => ({
+  return CHECKLIST_ITEMS.filter(
+    (i) => roleEligible(i.eligibleRoles, ctx.roles) && audienceMatches(i, ctx) && requiresSignalsMet(i, ctx),
+  ).map((item) => ({
     item,
     done: isComplete(item, ctx),
   }));
+}
+
+// ---- "Add an AI teammate" chapter (#56) --------------------------------------
+// The chapter is opt-in and non-blocking: it is NEVER surfaced by activeNode/activeTip
+// (its cards carry a `manual` trigger). The host opens it deliberately — after the core
+// guide or from the checklist — and asks the engine which card to show for the current
+// live state. All completion is live-derived (no new stored flag).
+
+// Whether a card/entry's presentation VARIANT is meant for this role (distinct from
+// authz eligibility). `undefined` audience = any. Permission is still enforced upstream
+// by eligibleRoles; this only picks owner/admin-vs-member surfaces. Works for chapter
+// nodes and the chapter-entry checklist item.
+function audienceMatches(item: { audience?: OnboardingAudience }, ctx: OnboardingContext): boolean {
+  switch (item.audience) {
+    case undefined:
+      return true;
+    case "owner-admin":
+      return ctx.roles.includes("owner") || ctx.roles.includes("admin");
+    case "member":
+      return ctx.roles.includes("member");
+  }
+}
+
+// The ordered chapter STEPS for this role (excludes the terminal done card). Owner/admin
+// see connect → create → work; a member sees only the single "work with an agent" card.
+// Filtered by authz (eligibleNodes) AND presentation audience.
+export function chapterSteps(ctx: OnboardingContext): OnboardingNode[] {
+  return eligibleNodes(ctx).filter(
+    (n) => n.presentation === "chapter" && !n.chapterTerminal && audienceMatches(n, ctx),
+  );
+}
+
+// The terminal done card for this role, if the chapter defines one (owner/admin only).
+function chapterTerminalNode(ctx: OnboardingContext): OnboardingNode | null {
+  return (
+    eligibleNodes(ctx).find(
+      (n) => n.presentation === "chapter" && n.chapterTerminal === true && audienceMatches(n, ctx),
+    ) ?? null
+  );
+}
+
+// The next incomplete chapter step whose signal preconditions hold — the user's true
+// next action. Ordered: an earlier incomplete step is never skipped for a later one.
+// For a member the single card is inert until an agent exists (requiresSignals), so
+// this returns null for a member with no agents.
+export function nextChapterStep(ctx: OnboardingContext): OnboardingNode | null {
+  return chapterSteps(ctx).find((n) => !isComplete(n, ctx) && requiresSignalsMet(n, ctx)) ?? null;
+}
+
+// The chapter card to show when the chapter is open: the next incomplete step, or the
+// terminal done card once every step is complete (and its preconditions hold), or null
+// when there is nothing to show (a member with no agents; a member who has already
+// worked with an agent). A pure function of role + live state — the host owns WHEN the
+// chapter is open, the engine owns WHICH card.
+export function activeChapter(ctx: OnboardingContext): OnboardingNode | null {
+  // History-first (Juan/Anton/Deniz): once the chapter is complete — its terminal's
+  // preconditions hold, i.e. an agent was put to work — reopen the DONE card even if setup
+  // signals later regress (environment offline, an agent removed). Activation history
+  // doesn't un-happen because a live signal decayed; the chapter is history, not a health
+  // dashboard. So the terminal is checked BEFORE the setup frontier.
+  const done = chapterTerminalNode(ctx);
+  if (done && requiresSignalsMet(done, ctx)) return done;
+  return nextChapterStep(ctx) ?? null;
+}
+
+// Whether this role has any chapter card to show right now — drives whether an entry
+// point (e.g. a checklist row) is offered. Owner/admin always do (setup → done); a
+// member only once an agent exists and before they've put one to work.
+export function hasChapter(ctx: OnboardingContext): boolean {
+  return activeChapter(ctx) !== null;
 }
