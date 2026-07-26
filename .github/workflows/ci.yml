@@ -303,6 +303,8 @@ jobs:
   windows-desktop-msi:
     name: Windows desktop MSI (WiX ${{ matrix.architecture }})
     needs: windows-daemon-build
+    # Re-enable when matching self-hosted Windows ARM64 runner capacity exists.
+    if: false
     runs-on: [self-hosted, Windows, ARM64]
     timeout-minutes: 15
     strategy:
