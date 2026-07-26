@@ -27,6 +27,26 @@ const (
 	OnboardingDismissed                 = "onboarding_dismissed"
 )
 
+// Each item key is registered in exactly one of the two maps below — client-insertable or
+// backend-witnessed. The full valid set and the client/backend classification are derived
+// from them, so a key can never be half-registered (valid but unclassified, or listed as
+// valid in one place and forgotten in another).
+
+// onboardingClientItemKeys are the items a client may insert directly: user actions plus the
+// dismiss marker.
+var onboardingClientItemKeys = map[string]bool{
+	OnboardingAccountIntroSeen:          true,
+	OnboardingWorkspaceCreated:          true,
+	OnboardingFirstDocumentCreated:      true,
+	OnboardingFirstDocumentEdited:       true,
+	OnboardingFirstThreadCreated:        true,
+	OnboardingFirstThreadReplied:        true,
+	OnboardingFirstAgentCreated:         true,
+	OnboardingFirstDocumentWatcherAdded: true,
+	OnboardingMemberInvited:             true,
+	OnboardingDismissed:                 true,
+}
+
 // onboardingBackendItemKeys are the two milestones only the server witnesses — the daemon
 // connecting and an agent run starting can both happen while the browser is closed, so the
 // backend inserts them at its own seams and a client is not allowed to claim them.
@@ -35,32 +55,17 @@ var onboardingBackendItemKeys = map[string]bool{
 	OnboardingFirstAgentRunStarted:      true,
 }
 
-// onboardingItemKeys is the full set of valid item keys (client actions + the two
-// backend-witnessed milestones + the dismiss marker). Any insert must be one of these; an
-// unknown key is rejected so a typo can never silently create a permanent phantom row.
-var onboardingItemKeys = map[string]bool{
-	OnboardingAccountIntroSeen:          true,
-	OnboardingWorkspaceCreated:          true,
-	OnboardingFirstDocumentCreated:      true,
-	OnboardingFirstDocumentEdited:       true,
-	OnboardingFirstThreadCreated:        true,
-	OnboardingFirstThreadReplied:        true,
-	OnboardingLocalEnvironmentConnected: true,
-	OnboardingFirstAgentCreated:         true,
-	OnboardingFirstAgentRunStarted:      true,
-	OnboardingFirstDocumentWatcherAdded: true,
-	OnboardingMemberInvited:             true,
-	OnboardingDismissed:                 true,
+// isOnboardingItemKey reports whether key is a recognized onboarding item (client or
+// backend). Any insert must be one of these; an unknown key is rejected so a typo can never
+// silently create a permanent phantom row.
+func isOnboardingItemKey(key string) bool {
+	return onboardingClientItemKeys[key] || onboardingBackendItemKeys[key]
 }
 
-// isOnboardingItemKey reports whether key is a recognized onboarding item.
-func isOnboardingItemKey(key string) bool { return onboardingItemKeys[key] }
-
-// isClientOnboardingItemKey reports whether the client may insert key directly. It excludes
-// the two server-witnessed milestones; everything else — user actions and the dismiss
-// marker — is a legitimate client insert.
+// isClientOnboardingItemKey reports whether the client may insert key directly — i.e. it is a
+// user action or the dismiss marker, not one of the two server-witnessed milestones.
 func isClientOnboardingItemKey(key string) bool {
-	return onboardingItemKeys[key] && !onboardingBackendItemKeys[key]
+	return onboardingClientItemKeys[key]
 }
 
 // OnboardingCompletion is one completed onboarding item for an account.
