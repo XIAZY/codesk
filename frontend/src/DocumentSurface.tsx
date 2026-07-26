@@ -1,13 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
-import {
-  bracketMatching,
-  defaultHighlightStyle,
-  syntaxHighlighting,
-} from "@codemirror/language";
+import { bracketMatching } from "@codemirror/language";
 import {
   Annotation,
+  Compartment,
   EditorState,
   StateEffect,
   StateField,
@@ -36,6 +33,7 @@ import {
   nottyMarkdownLivePreview,
   type MarkdownPreviewCommandName,
 } from "./markdownLivePreview";
+import { codeHighlightExtension, grammarLoaderForExtension } from "./codeHighlight";
 import type { ThreadItem } from "./types";
 
 export type LiveThread = ThreadItem & { anchor: ResolvedThreadAnchor };
@@ -65,6 +63,9 @@ type DocumentSurfaceProps = {
   onLineThreadsOpen: (group: LineThreadGroup<LiveThread>, point: { x: number; y: number }) => void;
   formatRequest?: { id: number; command: MarkdownPreviewCommandName } | null;
   enableMarkdownLivePreview?: boolean;
+  // Extension (incl. leading dot) of a code file, e.g. ".py"/".tex". Selects the syntax grammar
+  // for the non-Markdown editor; unmapped/undefined → plain monospace. Never used for Markdown.
+  codeFileExtension?: string;
 };
 
 type ThreadRailMarker = LineThreadGroup<LiveThread> & {
@@ -120,6 +121,14 @@ const editorTheme = EditorView.theme({
   },
 });
 
+// Code files render in the single --mono face (added AFTER editorTheme so it wins over
+// --editor-font). Paired with no line-wrapping, so long code lines scroll horizontally.
+const codeFileFontTheme = EditorView.theme({
+  ".cm-content, .cm-scroller": {
+    fontFamily: "var(--mono)",
+  },
+});
+
 const documentPaneTheme = EditorView.theme({
   ".cm-content": {
     boxSizing: "border-box",
@@ -143,10 +152,14 @@ export function DocumentSurface({
   onLineThreadsOpen,
   formatRequest,
   enableMarkdownLivePreview = false,
+  codeFileExtension,
 }: DocumentSurfaceProps) {
   const shellRef = useRef<HTMLDivElement | null>(null);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
+  // Holds the async-loaded code-file grammar. Reconfigured (not recreated) as the grammar
+  // resolves or the file's extension changes, so a swap never rebuilds the editor or moves text.
+  const languageCompartmentRef = useRef(new Compartment());
   const threadsRef = useRef(threads);
   const onSelectionChangeRef = useRef(onSelectionChange);
   const onLineThreadsOpenRef = useRef(onLineThreadsOpen);
@@ -195,11 +208,16 @@ export function DocumentSurface({
           // in this mode. It stays for the plain (non-live-preview) editor.
           ...(enableMarkdownLivePreview
             ? [markdown({ base: markdownLanguage }), nottyMarkdownLivePreview()]
-            : [syntaxHighlighting(defaultHighlightStyle, { fallback: true })]),
+            // Code file: an (initially empty) language compartment the grammar loads into, plus the
+            // code HighlightStyle. Empty compartment + this style colours nothing = plain mono, the
+            // honest fallback for an unmapped extension or a not-yet-resolved / failed grammar load.
+            : [languageCompartmentRef.current.of([]), codeHighlightExtension]),
           threadDecorationField,
           editorTheme,
           documentPaneTheme,
-          EditorView.lineWrapping,
+          // Markdown wraps; code files use --mono and scroll horizontally (never wrap-mutate).
+          // codeFileFontTheme is placed after editorTheme so its --mono wins over --editor-font.
+          ...(enableMarkdownLivePreview ? [EditorView.lineWrapping] : [codeFileFontTheme]),
           EditorView.updateListener.of((update) => {
             if (update.docChanged && !update.transactions.some((transaction) => transaction.annotation(remoteYjsAnnotation))) {
               applyCodeMirrorChangesToYText(ydoc, ytext, update, localOriginRef.current);
@@ -255,6 +273,37 @@ export function DocumentSurface({
       }
     };
   }, [documentId, enableMarkdownLivePreview, ydoc, ytext]);
+
+  // Load the code-file grammar for the current extension into the language compartment. Runs on
+  // document change (documentId), rename (codeFileExtension), and md-toggle. Race-safe: the async
+  // import only applies if this effect is still current AND the same view is alive, so a rename or
+  // rapid switch never paints the previous file's grammar onto the new one. Unmapped extension or
+  // a failed import → the compartment stays empty = plain monospace (never an error).
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || enableMarkdownLivePreview) return;
+    const compartment = languageCompartmentRef.current;
+    // Clear synchronously on EVERY load: the switch drops to plain mono immediately, so no stale
+    // grammar lingers during the async import, and an unmapped extension or a REJECTED import
+    // simply stays plain — never the previous file's grammar.
+    view.dispatch({ effects: compartment.reconfigure([]) });
+    const loader = grammarLoaderForExtension(codeFileExtension ?? "");
+    if (!loader) return;
+    let cancelled = false;
+    loader()
+      .then((grammar) => {
+        // Guard on both resolve and reject: a late import for a superseded file/effect (cancelled)
+        // or a replaced view must never repaint.
+        if (cancelled || viewRef.current !== view) return;
+        view.dispatch({ effects: compartment.reconfigure(grammar) });
+      })
+      .catch(() => {
+        // Failed grammar import: already cleared to plain above; nothing to restore.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [documentId, codeFileExtension, enableMarkdownLivePreview]);
 
   useEffect(() => {
     const view = viewRef.current;
