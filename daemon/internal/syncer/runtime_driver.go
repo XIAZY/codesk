@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 	"sync"
+	"time"
 )
 
 // isValidRuntimeFrame reports whether line is a syntactically valid JSON object
@@ -68,6 +69,10 @@ type RuntimeDriver interface {
 	Kind() RuntimeKind
 	Detect(ctx context.Context) RuntimeDetection
 	Spawn(ctx context.Context, spec RuntimeSpawnSpec) (RuntimeProcess, error)
+}
+
+type runtimeModelCatalogDetector interface {
+	detectModelCatalog(context.Context) *RuntimeModelCatalog
 }
 
 type RuntimeInputKind string
@@ -151,15 +156,26 @@ type RuntimeProcess interface {
 }
 
 type runtimeRegistry struct {
-	mu         sync.Mutex
-	drivers    map[RuntimeKind]RuntimeDriver
-	detections map[RuntimeKind]RuntimeDetection
+	mu             sync.Mutex
+	drivers        map[RuntimeKind]RuntimeDriver
+	detections     map[RuntimeKind]RuntimeDetection
+	catalogRetries map[RuntimeKind]runtimeCatalogRetry
 }
+
+type runtimeCatalogRetry struct {
+	nextAttempt time.Time
+	inFlight    bool
+}
+
+// The first heartbeat retries immediately; persistent failures settle into this
+// low-duty-cycle probe instead of spawning an app-server every 10 seconds.
+const failedCatalogRetryInterval = 5 * time.Minute
 
 func newRuntimeRegistry(drivers ...RuntimeDriver) *runtimeRegistry {
 	registry := &runtimeRegistry{
-		drivers:    map[RuntimeKind]RuntimeDriver{},
-		detections: map[RuntimeKind]RuntimeDetection{},
+		drivers:        map[RuntimeKind]RuntimeDriver{},
+		detections:     map[RuntimeKind]RuntimeDetection{},
+		catalogRetries: map[RuntimeKind]runtimeCatalogRetry{},
 	}
 	for _, driver := range drivers {
 		if driver == nil {
@@ -194,9 +210,63 @@ func (r *runtimeRegistry) DetectAll(ctx context.Context) []RuntimeDetection {
 		detections = append(detections, detection)
 		r.mu.Lock()
 		r.detections[driver.Kind()] = detection
+		delete(r.catalogRetries, driver.Kind())
 		r.mu.Unlock()
 	}
 	return detections
+}
+
+func (r *runtimeRegistry) refreshFailedModelCatalogs(ctx context.Context, now time.Time) {
+	if r == nil {
+		return
+	}
+	type candidate struct {
+		kind     RuntimeKind
+		detector runtimeModelCatalogDetector
+	}
+	r.mu.Lock()
+	candidates := make([]candidate, 0, len(r.drivers))
+	for kind, driver := range r.drivers {
+		detection := r.detections[kind]
+		if !detection.Available || detection.ModelCatalog == nil || detection.ModelCatalog.Error == "" {
+			continue
+		}
+		detector, ok := driver.(runtimeModelCatalogDetector)
+		if !ok {
+			continue
+		}
+		retry := r.catalogRetries[kind]
+		if retry.inFlight || (!retry.nextAttempt.IsZero() && now.Before(retry.nextAttempt)) {
+			continue
+		}
+		retry.inFlight = true
+		r.catalogRetries[kind] = retry
+		candidates = append(candidates, candidate{kind: kind, detector: detector})
+	}
+	r.mu.Unlock()
+
+	for _, candidate := range candidates {
+		catalog := candidate.detector.detectModelCatalog(ctx)
+		r.mu.Lock()
+		detection := r.detections[candidate.kind]
+		if detection.ModelCatalog == nil || detection.ModelCatalog.Error == "" {
+			delete(r.catalogRetries, candidate.kind)
+			r.mu.Unlock()
+			continue
+		}
+		if catalog != nil {
+			detection.ModelCatalog = catalog
+			r.detections[candidate.kind] = detection
+		}
+		if catalog != nil && catalog.Error == "" {
+			delete(r.catalogRetries, candidate.kind)
+		} else {
+			r.catalogRetries[candidate.kind] = runtimeCatalogRetry{
+				nextAttempt: now.Add(failedCatalogRetryInterval),
+			}
+		}
+		r.mu.Unlock()
+	}
 }
 
 func (r *runtimeRegistry) Lookup(kind string) (RuntimeDriver, RuntimeDetection, bool) {

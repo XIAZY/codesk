@@ -521,6 +521,9 @@ func (s *Service) runDaemonStatusHeartbeat(ctx context.Context, ticks <-chan tim
 				return
 			}
 			s.reportDaemonStatus(ctx, false)
+			if s.runtimes != nil {
+				s.runtimes.refreshFailedModelCatalogs(ctx, time.Now())
+			}
 		}
 	}
 }
