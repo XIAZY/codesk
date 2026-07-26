@@ -37,6 +37,13 @@ const claudeDisallowedTools = "EnterPlanMode,ExitPlanMode,ScheduleWakeup,CronCre
 // through the supervisor's restart path.
 const claudeSpawnHandshakeWait = 2 * time.Second
 
+// claudeStdoutDrainWait bounds how long a startup-exit will wait for readLoop to
+// finish draining stdout before snapshotting the (best-effort) diagnostic tail.
+// It exists only so a readLoop parked in emitLifecycle on a full events channel
+// cannot make provider diagnostics gate Start() teardown; the normal drain of a
+// dead process's buffered stdout completes far inside it.
+const claudeStdoutDrainWait = 250 * time.Millisecond
+
 type claudeDriver struct {
 	cfg           Config
 	handshakeWait time.Duration
@@ -332,11 +339,12 @@ func (p *claudeRuntimeProcess) spawn(ctx context.Context, sessionID string, resu
 	p.mu.Unlock()
 	p.logf("claude started pid=%d resume=%t session=%s", cmd.Process.Pid, resume, sessionID)
 
+	stdoutTail := &claudeStdoutTail{}
 	readDone := make(chan struct{})
 	exited := make(chan error, 1)
 	established := make(chan bool, 1)
 	go func() {
-		p.readLoop(stdout)
+		p.readLoop(stdout, stdoutTail)
 		close(readDone)
 	}()
 	go func() {
@@ -370,11 +378,24 @@ func (p *claudeRuntimeProcess) spawn(ctx context.Context, sessionID string, resu
 	case err := <-exited:
 		established <- false
 		p.resetSpawn(stdin)
-		detail := stderrTail.String()
-		if detail == "" && err != nil {
-			detail = err.Error()
+		// A fatal startup reason can land on stdout with empty stderr (bad flags,
+		// refused permissions), and readLoop is the sole stdout reader. Prefer a
+		// complete tail by waiting for readDone (closed when readLoop returns on
+		// stdout EOF), but NEVER let it gate teardown: if readLoop is parked in
+		// emitLifecycle on a full events channel it won't close readDone, so bound
+		// the wait. record/String are mutex-guarded, so a partial snapshot here is
+		// race-free — the wait only buys the final line.
+		select {
+		case <-readDone:
+		case <-ctx.Done():
+		case <-time.After(claudeStdoutDrainWait):
 		}
-		return fmt.Errorf("claude exited during startup: %s", firstNonEmptyText(detail, "no output"))
+		errText := ""
+		if err != nil {
+			errText = err.Error()
+		}
+		return fmt.Errorf("claude exited during startup: %s",
+			firstNonEmptyText(stderrTail.String(), stdoutTail.String(), errText, "no output"))
 	case <-timer.C:
 		established <- true
 		return nil
@@ -448,7 +469,7 @@ func (p *claudeRuntimeProcess) writeLine(stdin io.Writer, payload map[string]any
 	return nil
 }
 
-func (p *claudeRuntimeProcess) readLoop(stdout io.Reader) {
+func (p *claudeRuntimeProcess) readLoop(stdout io.Reader, stdoutTail *claudeStdoutTail) {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	for scanner.Scan() {
@@ -463,6 +484,11 @@ func (p *claudeRuntimeProcess) readLoop(stdout io.Reader) {
 			p.noteActivity()
 		}
 		p.logf("stream recv %s", truncateForLog(string(line)))
+		// Retain every stdout line (frame or not, mapped or not) in the bounded tail
+		// so a fatal startup diagnostic printed here survives — lines that map to no
+		// event otherwise vanish at the continue below. Kept after the logf/liveness
+		// above deliberately: that ordering must not move (blocker-17).
+		stdoutTail.record(string(line))
 		event := parseClaudeStreamLine(line)
 		if event == nil {
 			continue
@@ -641,6 +667,36 @@ func (t *claudeStderrTail) linesCopy() []string {
 
 func (t *claudeStderrTail) String() string {
 	return strings.Join(t.linesCopy(), " | ")
+}
+
+// claudeStdoutTail keeps the last few stdout lines so a fatal startup reason
+// Claude prints to stdout (e.g. bad flags, refused permissions) with empty
+// stderr survives into the startup error instead of a bare "exit status 1".
+// It is fed only by the sole readLoop reader — never a second reader on the
+// pipe — and per-line/count bounds keep an oversized stream from growing it.
+type claudeStdoutTail struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (t *claudeStdoutTail) record(line string) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return
+	}
+	line = truncateForLog(line)
+	t.mu.Lock()
+	t.lines = append(t.lines, line)
+	if len(t.lines) > 8 {
+		t.lines = t.lines[len(t.lines)-8:]
+	}
+	t.mu.Unlock()
+}
+
+func (t *claudeStdoutTail) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return strings.Join(t.lines, " | ")
 }
 
 func (p *claudeRuntimeProcess) logf(format string, args ...any) {
