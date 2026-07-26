@@ -51,7 +51,15 @@ import {
   selectionLabel,
   threadReplyCount,
   threadReplyLabel,
+  runtimeModelCatalog,
+  modelCatalogState,
+  uniqueDefaultModel,
+  findRuntimeModel,
+  availableReasoningEfforts,
+  isModelProfileValid,
+  agentModelDisplay,
 } from "./logic";
+import type { RuntimeModelCatalog } from "./types";
 import { daemonFixtures, withReceipt } from "./daemonFixtures";
 import type { ActivityEvent, Agent, AgentRun, Daemon, DocumentItem, PresenceItem, UserItem, WorkspaceState } from "./types";
 
@@ -454,7 +462,7 @@ describe("workspace reduction", () => {
       rootDocumentId: "root",
       name: "Old name",
       users: [{ id: "u1", handle: "owner", name: "Owner", role: "Owner", kind: "human", status: "active", updatedAt: "now" }],
-      agents: [{ id: "a1", daemonId: "d1", handle: "codex", name: "Codex", role: "Reviewer", kind: "codex", workspaceRoot: "agents/a1", status: "idle", currentTask: "", currentActivity: "", currentRunId: "", updatedAt: "now" }],
+      agents: [{ id: "a1", daemonId: "d1", handle: "codex", name: "Codex", role: "Reviewer", kind: "codex", model: "", reasoningEffort: "", workspaceRoot: "agents/a1", status: "idle", currentTask: "", currentActivity: "", currentRunId: "", updatedAt: "now" }],
     };
 
     const next = reduceWorkspaceEvent(state, {
@@ -595,6 +603,8 @@ describe("presentation grouping", () => {
       name: "Codex",
       role: "Review",
       kind: "codex",
+      model: "",
+      reasoningEffort: "",
       workspaceRoot: "agents/agent",
       status: "idle",
       currentTask: "",
@@ -618,6 +628,8 @@ describe("presentation grouping", () => {
       name: "Codex",
       role: "Review",
       kind: "codex",
+      model: "",
+      reasoningEffort: "",
       workspaceRoot: "agents/agent",
       status: "idle",
       currentTask: "",
@@ -700,6 +712,8 @@ describe("presentation grouping", () => {
       name: "Codex",
       role: "Review",
       kind: "codex",
+      model: "",
+      reasoningEffort: "",
       workspaceRoot: "agents/agent",
       status: "idle",
       currentTask: "",
@@ -737,6 +751,8 @@ describe("presentation grouping", () => {
           name: "Codex",
           role: "Review",
           kind: "codex",
+          model: "",
+          reasoningEffort: "",
           workspaceRoot: "agents/agent_1",
           status: "idle",
           currentTask: "",
@@ -751,6 +767,8 @@ describe("presentation grouping", () => {
           name: "Scribe",
           role: "Draft",
           kind: "codex",
+          model: "",
+          reasoningEffort: "",
           workspaceRoot: "agents/agent_2",
           status: "disconnected",
           currentTask: "",
@@ -769,7 +787,7 @@ describe("workspacePeople", () => {
   const ws = (over: Partial<WorkspaceState>): WorkspaceState => ({ ...baseWorkspace(), ...over });
   const user = (id: string, handle: string, kind = "human"): UserItem => ({ id, handle, name: handle, role: "", kind, status: "", updatedAt: "now" });
   const agent = (id: string, handle: string): Agent => ({
-    id, daemonId: "d1", handle, name: handle, role: "", kind: "agent", workspaceRoot: "",
+    id, daemonId: "d1", handle, name: handle, role: "", kind: "agent", model: "", reasoningEffort: "", workspaceRoot: "",
     status: "idle", currentTask: "", currentActivity: "", currentRunId: "", updatedAt: "now",
   });
   const presence = (actorId: string, documentId: string | undefined): PresenceItem => ({
@@ -839,7 +857,7 @@ describe("documentParticipants", () => {
   const ws = (over: Partial<WorkspaceState>): WorkspaceState => ({ ...baseWorkspace(), ...over });
   const user = (id: string, handle: string): UserItem => ({ id, handle, name: handle, role: "", kind: "human", status: "", updatedAt: "now" });
   const agent = (id: string, handle: string): Agent => ({
-    id, daemonId: "d1", handle, name: handle, role: "", kind: "agent", workspaceRoot: "",
+    id, daemonId: "d1", handle, name: handle, role: "", kind: "agent", model: "", reasoningEffort: "", workspaceRoot: "",
     status: "idle", currentTask: "", currentActivity: "", currentRunId: "", updatedAt: "now",
   });
   const presence = (actorId: string, documentId: string | undefined, updatedAt: string): PresenceItem => ({
@@ -1311,5 +1329,106 @@ describe("desktop manifest resolver (#61 — fail-closed, two schemas)", () => {
     expect(resolveDesktopManifest("mac", macManifest(), "").urls).toEqual({});
     expect(resolveDesktopManifest("linux", macManifest(), BASE)).toEqual({ urls: {}, macNotarized: null });
     expect(resolveDesktopManifest("windows", { version: "0.0.1" }, BASE).urls).toEqual({});
+  });
+});
+
+describe("model catalog resolution (daemon-model-selection task #4)", () => {
+  const sol = { model: "gpt-5.6-sol", displayName: "GPT-5.6-Sol", isDefault: true, reasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"], defaultReasoningEffort: "low" };
+  const terra = { model: "gpt-5.6-terra", displayName: "GPT-5.6-Terra", isDefault: false, reasoningEfforts: ["low", "medium", "high", "xhigh"], defaultReasoningEffort: "medium" };
+  const ready: RuntimeModelCatalog = { models: [sol, terra] };
+  const daemon = (catalog?: RuntimeModelCatalog): Daemon => ({
+    id: "d1", name: "box", status: "active", createdAt: "2026-01-01T00:00:00Z",
+    runtimes: [{ kind: "codex", available: true, ...(catalog ? { modelCatalog: catalog } : {}) }, { kind: "claude", available: true }],
+  } as Daemon);
+
+  it("runtimeModelCatalog scans daemon.runtimes by kind", () => {
+    expect(runtimeModelCatalog(daemon(ready), "codex")).toBe(ready);
+    expect(runtimeModelCatalog(daemon(ready), "claude")).toBeUndefined(); // no catalog on that runtime
+    expect(runtimeModelCatalog(daemon(ready), "missing")).toBeUndefined();
+    expect(runtimeModelCatalog(undefined, "codex")).toBeUndefined();
+  });
+
+  it("modelCatalogState distinguishes the three honest states", () => {
+    expect(modelCatalogState(undefined)).toBe("unsupported"); // old daemon
+    expect(modelCatalogState({ models: [], error: "probe timed out" })).toBe("error"); // transient, capable
+    expect(modelCatalogState({ models: [] })).toBe("empty"); // capable but genuinely empty
+    expect(modelCatalogState(ready)).toBe("ready");
+    // error takes priority over empty so a transient failure never reads as "genuinely empty"
+    expect(modelCatalogState({ models: [sol], error: "x" })).toBe("error");
+    // FIELD PRESENCE, not truthiness: a present-but-empty error still fails closed (Thomas)
+    expect(modelCatalogState({ models: [], error: "" })).toBe("error");
+    expect(modelCatalogState({ models: [sol], error: "" })).toBe("error");
+  });
+
+  it("uniqueDefaultModel returns the row only when exactly one is default", () => {
+    expect(uniqueDefaultModel(ready)?.model).toBe("gpt-5.6-sol");
+    expect(uniqueDefaultModel({ models: [terra] })).toBeNull(); // none
+    expect(uniqueDefaultModel({ models: [sol, { ...terra, isDefault: true }] })).toBeNull(); // ambiguous
+    expect(uniqueDefaultModel(undefined)).toBeNull();
+  });
+
+  it("findRuntimeModel looks up by opaque id, never displayName", () => {
+    expect(findRuntimeModel(ready, "gpt-5.6-sol")).toBe(sol);
+    expect(findRuntimeModel(ready, "GPT-5.6-Sol")).toBeUndefined(); // displayName is not the id
+    expect(findRuntimeModel(ready, "nope")).toBeUndefined();
+  });
+
+  it("availableReasoningEfforts resolves per-model, never a global enum", () => {
+    expect(availableReasoningEfforts(ready, "gpt-5.6-terra")).toEqual(terra.reasoningEfforts); // explicit model
+    expect(availableReasoningEfforts(ready, "")).toEqual(sol.reasoningEfforts); // runtime default → unique default row
+    expect(availableReasoningEfforts({ models: [terra] }, "")).toEqual([]); // no unique default
+    expect(availableReasoningEfforts(ready, "nope")).toEqual([]);
+  });
+
+  it("isModelProfileValid: full inheritance is always valid", () => {
+    expect(isModelProfileValid(undefined, "", "")).toBe(true); // even on an old daemon
+    expect(isModelProfileValid({ models: [], error: "x" }, "", "")).toBe(true);
+    expect(isModelProfileValid(ready, "", "")).toBe(true);
+  });
+
+  it("isModelProfileValid: explicit choices require a ready catalog", () => {
+    expect(isModelProfileValid(undefined, "gpt-5.6-sol", "")).toBe(false);
+    expect(isModelProfileValid({ models: [], error: "x" }, "", "high")).toBe(false);
+    expect(isModelProfileValid({ models: [] }, "gpt-5.6-sol", "")).toBe(false);
+  });
+
+  it("isModelProfileValid: explicit model must exist; effort must be advertised", () => {
+    expect(isModelProfileValid(ready, "gpt-5.6-sol", "ultra")).toBe(true); // sol advertises ultra
+    expect(isModelProfileValid(ready, "gpt-5.6-terra", "ultra")).toBe(false); // terra does not advertise ultra
+    expect(isModelProfileValid(ready, "gpt-5.6-sol", "medium")).toBe(true);
+    expect(isModelProfileValid(ready, "ghost-model", "")).toBe(false); // model not in catalog
+    expect(isModelProfileValid(ready, "gpt-5.6-terra", "")).toBe(true); // explicit model, inherit its effort
+  });
+
+  it("isModelProfileValid: runtime-default + effort needs exactly one visible default", () => {
+    expect(isModelProfileValid(ready, "", "ultra")).toBe(true); // default is sol, which has ultra
+    expect(isModelProfileValid(ready, "", "nonsense")).toBe(false); // effort not in sol's list
+    // ambiguous default: "default model + effort" is withheld (invalid) even for a real effort
+    const ambiguous: RuntimeModelCatalog = { models: [sol, { ...terra, isDefault: true }] };
+    expect(isModelProfileValid(ambiguous, "", "low")).toBe(false);
+    // …but an explicit model still works when the default is ambiguous
+    expect(isModelProfileValid(ambiguous, "gpt-5.6-terra", "high")).toBe(true);
+  });
+
+  it("isModelProfileValid detects a background daemon.updated invalidation", () => {
+    // A live selection that was valid becomes invalid when the model vanishes from a refreshed
+    // catalog — the caller preserves+blocks rather than silently resetting.
+    expect(isModelProfileValid(ready, "gpt-5.6-terra", "high")).toBe(true);
+    const withoutTerra: RuntimeModelCatalog = { models: [sol] };
+    expect(isModelProfileValid(withoutTerra, "gpt-5.6-terra", "high")).toBe(false);
+    // Or when an effort is dropped from the still-present model:
+    const solNoUltra: RuntimeModelCatalog = { models: [{ ...sol, reasoningEfforts: ["low", "medium", "high"] }] };
+    expect(isModelProfileValid(ready, "gpt-5.6-sol", "ultra")).toBe(true);
+    expect(isModelProfileValid(solNoUltra, "gpt-5.6-sol", "ultra")).toBe(false);
+  });
+
+  it("agentModelDisplay renders the read-only label, never the opaque id", () => {
+    expect(agentModelDisplay(daemon(ready), "codex", "")).toBe("Runtime default");
+    expect(agentModelDisplay(daemon(ready), "codex", "gpt-5.6-sol")).toBe("GPT-5.6-Sol");
+    // Unresolvable stored model — removed from the catalog, or no catalog at all → "Unavailable".
+    expect(agentModelDisplay(daemon({ models: [terra] }), "codex", "gpt-5.6-sol")).toBe("Unavailable");
+    expect(agentModelDisplay(daemon(), "codex", "gpt-5.6-sol")).toBe("Unavailable");
+    // Never the opaque id, in any branch.
+    expect(agentModelDisplay(daemon({ models: [terra] }), "codex", "gpt-5.6-sol")).not.toContain("gpt-5.6-sol");
   });
 });

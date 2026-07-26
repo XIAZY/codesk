@@ -306,6 +306,18 @@ svg.i.sm {
   outline: none;
 }
 
+/* daemon-model-selection task #4: the stale model-profile display (a preserved, now-invalid
+   selection shown as a disabled label — never the opaque id) and its reset alignment. */
+.disabled-value {
+  color: var(--ink-2);
+  background: var(--paper-2);
+  display: flex;
+  align-items: center;
+}
+.self-start {
+  align-self: flex-start;
+}
+
 .field input:focus,
 .field textarea:focus,
 .field select:focus,
