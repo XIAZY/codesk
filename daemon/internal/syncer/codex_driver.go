@@ -73,9 +73,7 @@ func (d *codexDriver) Detect(ctx context.Context) RuntimeDetection {
 	if _, err := managedBackgroundCommandContext(detectCtx, path, "app-server", "--help").CombinedOutput(); err != nil {
 		return RuntimeDetection{Kind: RuntimeCodex, Available: false, Version: version, Path: path, Reason: "codex app-server is not available"}
 	}
-	detection := RuntimeDetection{Kind: RuntimeCodex, Available: true, Version: version, Path: path}
-	detection.ModelCatalog = d.detectModelCatalog(ctx)
-	return detection
+	return RuntimeDetection{Kind: RuntimeCodex, Available: true, Version: version, Path: path}
 }
 
 type codexModelListPage struct {

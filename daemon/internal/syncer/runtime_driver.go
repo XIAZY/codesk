@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 	"sync"
+	"time"
 )
 
 // isValidRuntimeFrame reports whether line is a syntactically valid JSON object
@@ -68,6 +69,10 @@ type RuntimeDriver interface {
 	Kind() RuntimeKind
 	Detect(ctx context.Context) RuntimeDetection
 	Spawn(ctx context.Context, spec RuntimeSpawnSpec) (RuntimeProcess, error)
+}
+
+type runtimeModelCatalogDetector interface {
+	detectModelCatalog(context.Context) *RuntimeModelCatalog
 }
 
 type RuntimeInputKind string
@@ -151,15 +156,24 @@ type RuntimeProcess interface {
 }
 
 type runtimeRegistry struct {
-	mu         sync.Mutex
-	drivers    map[RuntimeKind]RuntimeDriver
-	detections map[RuntimeKind]RuntimeDetection
+	mu            sync.Mutex
+	drivers       map[RuntimeKind]RuntimeDriver
+	detections    map[RuntimeKind]RuntimeDetection
+	catalogProbes map[RuntimeKind]runtimeCatalogProbe
 }
+
+type runtimeCatalogProbe struct {
+	nextAttempt time.Time
+	inFlight    bool
+}
+
+const failedCatalogRetryInterval = 5 * time.Minute
 
 func newRuntimeRegistry(drivers ...RuntimeDriver) *runtimeRegistry {
 	registry := &runtimeRegistry{
-		drivers:    map[RuntimeKind]RuntimeDriver{},
-		detections: map[RuntimeKind]RuntimeDetection{},
+		drivers:       map[RuntimeKind]RuntimeDriver{},
+		detections:    map[RuntimeKind]RuntimeDetection{},
+		catalogProbes: map[RuntimeKind]runtimeCatalogProbe{},
 	}
 	for _, driver := range drivers {
 		if driver == nil {
@@ -191,12 +205,84 @@ func (r *runtimeRegistry) DetectAll(ctx context.Context) []RuntimeDetection {
 		if detection.Kind == "" {
 			detection.Kind = driver.Kind()
 		}
+		_, discoversCatalog := driver.(runtimeModelCatalogDetector)
+		catalogPending := detection.Available && discoversCatalog &&
+			(detection.ModelCatalog == nil || detection.ModelCatalog.Error != "")
+		if detection.Available && discoversCatalog && detection.ModelCatalog == nil {
+			detection.ModelCatalog = &RuntimeModelCatalog{Models: []RuntimeModel{}}
+		}
 		detections = append(detections, detection)
 		r.mu.Lock()
 		r.detections[driver.Kind()] = detection
+		if catalogPending {
+			r.catalogProbes[driver.Kind()] = runtimeCatalogProbe{}
+		} else {
+			delete(r.catalogProbes, driver.Kind())
+		}
 		r.mu.Unlock()
 	}
 	return detections
+}
+
+// discoverModelCatalogs runs outside daemon startup. DetectAll publishes runtime
+// availability metadata with an empty catalog first; the first post-start
+// heartbeat owns the initial probe. Failures retry at a bounded cadence, while a
+// successful result (including a genuinely empty catalog) completes discovery.
+// It reports whether any catalog completed so the service can immediately
+// reconcile agents that were held by the pre-discovery empty state.
+func (r *runtimeRegistry) discoverModelCatalogs(ctx context.Context, now time.Time) bool {
+	if r == nil {
+		return false
+	}
+	type candidate struct {
+		kind     RuntimeKind
+		detector runtimeModelCatalogDetector
+	}
+
+	r.mu.Lock()
+	candidates := make([]candidate, 0, len(r.catalogProbes))
+	for kind, probe := range r.catalogProbes {
+		if probe.inFlight || (!probe.nextAttempt.IsZero() && now.Before(probe.nextAttempt)) {
+			continue
+		}
+		detection := r.detections[kind]
+		detector, ok := r.drivers[kind].(runtimeModelCatalogDetector)
+		if !ok || !detection.Available {
+			delete(r.catalogProbes, kind)
+			continue
+		}
+		probe.inFlight = true
+		r.catalogProbes[kind] = probe
+		candidates = append(candidates, candidate{kind: kind, detector: detector})
+	}
+	r.mu.Unlock()
+
+	completed := false
+	for _, candidate := range candidates {
+		catalog := candidate.detector.detectModelCatalog(ctx)
+
+		r.mu.Lock()
+		probe, pending := r.catalogProbes[candidate.kind]
+		detection := r.detections[candidate.kind]
+		if !pending || !probe.inFlight || !detection.Available {
+			r.mu.Unlock()
+			continue
+		}
+		if catalog != nil {
+			detection.ModelCatalog = catalog
+			r.detections[candidate.kind] = detection
+		}
+		if catalog != nil && catalog.Error == "" {
+			delete(r.catalogProbes, candidate.kind)
+			completed = true
+		} else {
+			r.catalogProbes[candidate.kind] = runtimeCatalogProbe{
+				nextAttempt: now.Add(failedCatalogRetryInterval),
+			}
+		}
+		r.mu.Unlock()
+	}
+	return completed
 }
 
 func (r *runtimeRegistry) Lookup(kind string) (RuntimeDriver, RuntimeDetection, bool) {
