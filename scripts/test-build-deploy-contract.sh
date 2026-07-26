@@ -1429,4 +1429,19 @@ grep -Fq 'Join-RemotePath $StaticBase "windows"' "$repo_dir/deploy/daemons/insta
 	fail 'PowerShell installer retained a platform-prefixed daemon root'
 pass 'daemon installers preserve the live version-first latest metadata path'
 
+# Every lowercase $var referenced in a deploy script must be assigned in that same
+# script. Uppercase names are env vars and excluded, so this catches the real failure
+# class: an append-only hunk referencing a variable renamed out from under it (e.g.
+# $version after the version->git_sha rename), which set -eu would otherwise only fail
+# on mid-deploy, after the image is already pushed. shellcheck's SC2154 is the proper
+# tool but is not installed on the runner; this is the cheap equivalent for these scripts.
+for deploy_script in "$repo_dir/scripts/deploy-backend.sh" "$repo_dir/scripts/build-backend-image.sh"; do
+	assigned_vars="$(sed -n 's/^[[:space:]]*\([a-z_][a-z0-9_]*\)=.*/\1/p' "$deploy_script" | sort -u)"
+	for referenced_var in $(grep -oE '\$\{?[a-z_][a-z0-9_]*' "$deploy_script" | sed 's/[${]//g' | sort -u); do
+		printf '%s\n' "$assigned_vars" | grep -qx "$referenced_var" ||
+			fail "$(basename "$deploy_script") references \$$referenced_var but never assigns it — a renamed or typo'd variable set -eu would abort a live deploy on"
+	done
+	pass "$(basename "$deploy_script"): every referenced shell variable is assigned in-script"
+done
+
 printf '%s\n' 'All build/deploy contract tests passed.'
