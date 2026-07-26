@@ -3646,6 +3646,7 @@ export function DocumentEditor({
             onLineThreadsOpen={openLineThreads}
             formatRequest={formatRequest}
             enableMarkdownLivePreview={isMarkdownDocument}
+            codeFileExtension={isMarkdownDocument ? undefined : documentExtension(document.path)}
           />
         </div>
 

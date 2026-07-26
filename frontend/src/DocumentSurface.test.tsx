@@ -65,10 +65,10 @@ afterEach(() => {
   cleanup();
 });
 
-function renderSurface(input: { ydoc: Y.Doc; ytext: Y.Text; threads?: ThreadItem[]; enableMarkdownLivePreview?: boolean }) {
+function renderSurface(input: { ydoc: Y.Doc; ytext: Y.Text; threads?: ThreadItem[]; enableMarkdownLivePreview?: boolean; codeFileExtension?: string; documentId?: string }) {
   return render(
     <DocumentSurface
-      documentId="doc"
+      documentId={input.documentId ?? "doc"}
       ydoc={input.ydoc}
       ytext={input.ytext}
       ready
@@ -78,6 +78,7 @@ function renderSurface(input: { ydoc: Y.Doc; ytext: Y.Text; threads?: ThreadItem
       onSelectionChange={vi.fn()}
       onLineThreadsOpen={vi.fn()}
       enableMarkdownLivePreview={input.enableMarkdownLivePreview}
+      codeFileExtension={input.codeFileExtension}
     />
   );
 }
@@ -292,5 +293,58 @@ describe("DocumentSurface", () => {
     const { container } = renderSurface({ ydoc, ytext, threads: [thread] });
     await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
     expect(container.querySelector(".thread-rail-marker")).toBeNull();
+  });
+
+  describe("code-file highlighting", () => {
+    const CODE = 'def greet(name):\n    return f"hi {name}"\n';
+
+    it("renders a code file and preserves the source byte-for-byte (highlighting is decoration-only)", async () => {
+      const ydoc = new Y.Doc();
+      const ytext = ydoc.getText("content");
+      ytext.insert(0, CODE);
+      const { container } = renderSurface({ ydoc, ytext, codeFileExtension: ".py" });
+      await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
+      // Zero character mutation: the Y.Text (source of truth for thread-anchor offsets) is unchanged.
+      expect(ytext.toString()).toBe(CODE);
+      expect(container.querySelector(".cm-content")?.textContent).toContain("def greet");
+    });
+
+    it("falls back to plain text for an unrecognized extension without crashing", async () => {
+      const ydoc = new Y.Doc();
+      const ytext = ydoc.getText("content");
+      ytext.insert(0, CODE);
+      const { container } = renderSurface({ ydoc, ytext, codeFileExtension: ".unknownext" });
+      await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
+      expect(ytext.toString()).toBe(CODE);
+    });
+
+    it("leaves a Markdown document on the live-preview path, untouched by the code grammar", async () => {
+      const ydoc = new Y.Doc();
+      const ytext = ydoc.getText("content");
+      const md = "# Title\n\nBody with `inline`.";
+      ytext.insert(0, md);
+      const { container } = renderSurface({ ydoc, ytext, enableMarkdownLivePreview: true });
+      await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
+      expect(ytext.toString()).toBe(md);
+    });
+
+    it("survives a rename and rapid extension switches without crashing or mutating the buffer", async () => {
+      const ydoc = new Y.Doc();
+      const ytext = ydoc.getText("content");
+      ytext.insert(0, CODE);
+      const props = (ext?: string, md = false) => ({
+        documentId: "doc", ydoc, ytext, ready: true as const, threads: [],
+        focusThreadId: "", onFocusThreadHandled: vi.fn(), onSelectionChange: vi.fn(),
+        onLineThreadsOpen: vi.fn(), codeFileExtension: ext, enableMarkdownLivePreview: md,
+      });
+      const { container, rerender } = render(<DocumentSurface {...props(".ts")} />);
+      await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
+      // A late-resolving grammar import for a prior extension must never paint the wrong file.
+      for (const ext of [".py", ".rs", ".sh", ".tex", ".unknownext"]) {
+        rerender(<DocumentSurface {...props(ext)} />);
+      }
+      await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
+      expect(ytext.toString()).toBe(CODE);
+    });
   });
 });
