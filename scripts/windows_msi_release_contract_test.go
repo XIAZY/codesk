@@ -476,6 +476,79 @@ func checkBuildDeployContractCIGate(workflow string) error {
 	return nil
 }
 
+func TestWindowsMSICIRemainsTemporarilyDisabled(t *testing.T) {
+	workflowData, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := normalizeSourceNewlines(string(workflowData))
+	if err := checkWindowsMSICIDisabled(workflow); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, mutation := range []struct {
+		name, old, replacement string
+	}{
+		{
+			"re-enable directive removed",
+			"    # Re-enable when matching self-hosted Windows ARM64 runner capacity exists.\n",
+			"",
+		},
+		{"disable guard removed", "    if: false\n", ""},
+		{"disable guard enabled", "    if: false\n", "    if: true\n"},
+		{"failures tolerated", "    runs-on: [self-hosted, Windows, ARM64]\n", "    runs-on: [self-hosted, Windows, ARM64]\n    continue-on-error: true\n"},
+	} {
+		t.Run(mutation.name, func(t *testing.T) {
+			if got := strings.Count(workflow, mutation.old); got != 1 {
+				t.Fatalf("mutation source count for %q = %d, want 1", mutation.old, got)
+			}
+			mutated := strings.Replace(workflow, mutation.old, mutation.replacement, 1)
+			if err := checkWindowsMSICIDisabled(mutated); err == nil {
+				t.Fatal("Windows MSI CI disable mutation passed")
+			}
+		})
+	}
+}
+
+func checkWindowsMSICIDisabled(workflow string) error {
+	const (
+		jobMarker          = "  windows-desktop-msi:\n"
+		nextJobMarker      = "\n  windows-daemon-installer:\n"
+		recoveryDirective  = "    # Re-enable when matching self-hosted Windows ARM64 runner capacity exists.\n"
+		disableGuard       = "    if: false\n"
+		versionedHardGuard = recoveryDirective + disableGuard
+	)
+	jobAt := strings.Index(workflow, jobMarker)
+	if jobAt < 0 {
+		return fmt.Errorf("Windows MSI CI job is missing")
+	}
+	nextJobAt := strings.Index(workflow[jobAt+len(jobMarker):], nextJobMarker)
+	if nextJobAt < 0 {
+		return fmt.Errorf("Windows MSI CI job boundary is missing")
+	}
+	job := workflow[jobAt : jobAt+len(jobMarker)+nextJobAt]
+
+	for required, count := range map[string]int{
+		"    needs: windows-daemon-build\n":                  1,
+		versionedHardGuard:                                   1,
+		"    runs-on: [self-hosted, Windows, ARM64]\n":       1,
+		"      fail-fast: false\n":                           1,
+		"      - name: Build reproducible root-version WiX":  1,
+		"      - name: Upload reproducible root-version MSI": 1,
+	} {
+		if got := strings.Count(job, required); got != count {
+			return fmt.Errorf("Windows MSI CI job count for %q = %d, want %d", required, got, count)
+		}
+	}
+	if strings.Contains(job, "continue-on-error:") {
+		return fmt.Errorf("Windows MSI CI job masks failures with continue-on-error")
+	}
+	if strings.Contains(job, "vars.") {
+		return fmt.Errorf("Windows MSI CI disable is controlled outside versioned source")
+	}
+	return nil
+}
+
 func TestWindowsMSITestOnlyUpgradeFixtureCannotBecomeReleaseArtifact(t *testing.T) {
 	buildData, err := os.ReadFile("build-windows-desktop-msi-artifact.ps1")
 	if err != nil {
