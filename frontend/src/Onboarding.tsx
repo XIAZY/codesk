@@ -360,7 +360,14 @@ export function Onboarding({
               {step.secondaryAction.label}
             </button>
           ) : null}
-          <button type="button" className="ob-next" onClick={() => takeAction(step.primaryAction, isTip ? undefined : onNext)}>
+          <button
+            type="button"
+            className="ob-next"
+            onClick={() => takeAction(
+              step.primaryAction,
+              step.primaryAction?.event === "dismiss" ? onSkip : isTip ? undefined : onNext,
+            )}
+          >
             {step.primaryAction?.label ?? "Next"}
           </button>
         </div>

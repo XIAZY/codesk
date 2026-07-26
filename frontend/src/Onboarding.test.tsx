@@ -274,6 +274,44 @@ describe("Onboarding", () => {
     expect(onSkip).toHaveBeenCalledOnce();
   });
 
+  it("routes a primary tip dismiss through onSkip so Got it closes durably", async () => {
+    const onAction = vi.fn();
+    const onSkip = vi.fn();
+    render(
+      <>
+        <button
+          data-onboarding-id="document-watchers"
+          ref={(node) => {
+            if (node) node.getBoundingClientRect = () => ({ left: 420, top: 280, right: 580, bottom: 320, width: 160, height: 40 }) as DOMRect;
+          }}
+        >
+          Watchers
+        </button>
+        <Onboarding
+          step={{
+            ...tip,
+            id: "watchers-intro",
+            scope: "workspace",
+            targetOnboardingId: "document-watchers",
+            title: "Let an agent keep watch",
+            primaryAction: { label: "Got it", event: "dismiss" },
+            secondaryAction: undefined,
+          }}
+          stepIndex={0}
+          total={1}
+          onNext={vi.fn()}
+          onBack={vi.fn()}
+          onSkip={onSkip}
+          onAction={onAction}
+        />
+      </>,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "Got it" }));
+    expect(onAction).toHaveBeenCalledWith("dismiss");
+    expect(onSkip).toHaveBeenCalledOnce();
+  });
+
   it("renders a contextual tip without a blocking layer and leaves its live target clickable", async () => {
     const onTarget = vi.fn();
     const onSkip = vi.fn();
