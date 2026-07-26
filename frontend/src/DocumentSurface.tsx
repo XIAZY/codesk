@@ -160,6 +160,12 @@ export function DocumentSurface({
   // Holds the async-loaded code-file grammar. Reconfigured (not recreated) as the grammar
   // resolves or the file's extension changes, so a swap never rebuilds the editor or moves text.
   const languageCompartmentRef = useRef(new Compartment());
+  // The Markdown-vs-code mode lives in compartments too, so toggling enableMarkdownLivePreview
+  // (e.g. a .md<->.ts rename) reconfigures rather than rebuilding the view — preserving the user's
+  // selection and undo/redo history. Two compartments because the mode's grammar/preview must sit
+  // BEFORE editorTheme and its font/wrap MUST sit after it (so --mono wins over --editor-font).
+  const modeGrammarCompartmentRef = useRef(new Compartment());
+  const modeStyleCompartmentRef = useRef(new Compartment());
   const threadsRef = useRef(threads);
   const onSelectionChangeRef = useRef(onSelectionChange);
   const onLineThreadsOpenRef = useRef(onLineThreadsOpen);
@@ -170,6 +176,15 @@ export function DocumentSurface({
   threadsRef.current = threads;
   onSelectionChangeRef.current = onSelectionChange;
   onLineThreadsOpenRef.current = onLineThreadsOpen;
+
+  // The mode's extensions, keyed off enableMarkdownLivePreview. Markdown gets the live-preview
+  // grammar + soft wrap; a code file gets the (empty) language compartment + code HighlightStyle,
+  // the --mono face, and horizontal scroll (no wrap).
+  const modeGrammarExtensions = (md: boolean) =>
+    md
+      ? [markdown({ base: markdownLanguage }), nottyMarkdownLivePreview()]
+      : [languageCompartmentRef.current.of([]), codeHighlightExtension];
+  const modeStyleExtensions = (md: boolean) => (md ? [EditorView.lineWrapping] : [codeFileFontTheme]);
 
   useEffect(() => {
     const shell = shellRef.current;
@@ -199,25 +214,18 @@ export function DocumentSurface({
           drawSelection(),
           bracketMatching(),
           highlightSelectionMatches(),
-          // When live preview is on it is the SINGLE styler of the markdown grammar
-          // (headings, list markers, emphasis…). defaultHighlightStyle must not also colour
-          // those same tokens underneath the decorations — syntax highlighting and decorations
-          // are separate CodeMirror layers and don't suppress each other, so running both
-          // double-styles the grammar (grey-over-underlined headings, dash showing under the
-          // bullet). No codeLanguages are configured, so it adds nothing for code-fence content
-          // in this mode. It stays for the plain (non-live-preview) editor.
-          ...(enableMarkdownLivePreview
-            ? [markdown({ base: markdownLanguage }), nottyMarkdownLivePreview()]
-            // Code file: an (initially empty) language compartment the grammar loads into, plus the
-            // code HighlightStyle. Empty compartment + this style colours nothing = plain mono, the
-            // honest fallback for an unmapped extension or a not-yet-resolved / failed grammar load.
-            : [languageCompartmentRef.current.of([]), codeHighlightExtension]),
+          // The mode (Markdown live-preview grammar vs code language compartment + HighlightStyle)
+          // lives in a compartment so a .md<->.ts rename reconfigures instead of rebuilding the view.
+          // Markdown live preview is the SINGLE styler of the markdown grammar; on the code side an
+          // empty language compartment + the HighlightStyle colours nothing = plain mono, the honest
+          // fallback for an unmapped/unresolved/failed grammar.
+          modeGrammarCompartmentRef.current.of(modeGrammarExtensions(enableMarkdownLivePreview)),
           threadDecorationField,
           editorTheme,
           documentPaneTheme,
-          // Markdown wraps; code files use --mono and scroll horizontally (never wrap-mutate).
-          // codeFileFontTheme is placed after editorTheme so its --mono wins over --editor-font.
-          ...(enableMarkdownLivePreview ? [EditorView.lineWrapping] : [codeFileFontTheme]),
+          // Font/wrap mode — also a compartment, placed after editorTheme so --mono wins over
+          // --editor-font. Markdown wraps; code files use --mono and scroll horizontally.
+          modeStyleCompartmentRef.current.of(modeStyleExtensions(enableMarkdownLivePreview)),
           EditorView.updateListener.of((update) => {
             if (update.docChanged && !update.transactions.some((transaction) => transaction.annotation(remoteYjsAnnotation))) {
               applyCodeMirrorChangesToYText(ydoc, ytext, update, localOriginRef.current);
@@ -272,7 +280,25 @@ export function DocumentSurface({
         viewRef.current = null;
       }
     };
-  }, [documentId, enableMarkdownLivePreview, ydoc, ytext]);
+    // enableMarkdownLivePreview is intentionally NOT a dependency: a mode toggle reconfigures the
+    // mode compartments below rather than recreating the view, so selection + undo history survive.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [documentId, ydoc, ytext]);
+
+  // Reconfigure the mode compartments when the Markdown/code mode flips (e.g. a .md<->.ts rename),
+  // instead of rebuilding the view. Runs BEFORE the grammar effect so the code branch's language
+  // compartment is in the config before a grammar loads into it.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: [
+        modeGrammarCompartmentRef.current.reconfigure(modeGrammarExtensions(enableMarkdownLivePreview)),
+        modeStyleCompartmentRef.current.reconfigure(modeStyleExtensions(enableMarkdownLivePreview)),
+      ],
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enableMarkdownLivePreview]);
 
   // Load the code-file grammar for the current extension into the language compartment. Runs on
   // document change (documentId), rename (codeFileExtension), and md-toggle. Race-safe: the async
@@ -283,19 +309,22 @@ export function DocumentSurface({
     const view = viewRef.current;
     if (!view || enableMarkdownLivePreview) return;
     const compartment = languageCompartmentRef.current;
+    // Clear synchronously on EVERY load: the switch drops to plain mono immediately, so no stale
+    // grammar lingers during the async import, and an unmapped extension or a REJECTED import
+    // simply stays plain — never the previous file's grammar.
+    view.dispatch({ effects: compartment.reconfigure([]) });
     const loader = grammarLoaderForExtension(codeFileExtension ?? "");
-    if (!loader) {
-      view.dispatch({ effects: compartment.reconfigure([]) });
-      return;
-    }
+    if (!loader) return;
     let cancelled = false;
     loader()
       .then((grammar) => {
+        // Guard on both resolve and reject: a late import for a superseded file/effect (cancelled)
+        // or a replaced view must never repaint.
         if (cancelled || viewRef.current !== view) return;
         view.dispatch({ effects: compartment.reconfigure(grammar) });
       })
       .catch(() => {
-        // Failed grammar import: leave the compartment empty (plain mono). Honest, not an error.
+        // Failed grammar import: already cleared to plain above; nothing to restore.
       });
     return () => {
       cancelled = true;

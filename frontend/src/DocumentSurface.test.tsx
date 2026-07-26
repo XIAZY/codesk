@@ -1,9 +1,13 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { Compartment, EditorState } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
+import { undoDepth } from "@codemirror/commands";
 import * as Y from "yjs";
 import { DocumentSurface } from "./DocumentSurface";
+import * as codeHighlight from "./codeHighlight";
 import { encodeRelativeAnchor } from "./logic";
 import type { ThreadItem } from "./types";
 
@@ -345,6 +349,144 @@ describe("DocumentSurface", () => {
       }
       await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
       expect(ytext.toString()).toBe(CODE);
+    });
+
+    // Anton's causal gate: controllable loaders + a reconfigure spy prove the lifecycle, since the
+    // rendered highlight classes are not reliably assertable in jsdom. A non-empty reconfigure arg =
+    // a grammar installed; an empty-array arg = cleared to plain.
+    function codeProps(ext?: string, md = false) {
+      const ydoc = new Y.Doc();
+      const ytext = ydoc.getText("content");
+      ytext.insert(0, "x = 1\n");
+      return {
+        documentId: "doc", ydoc, ytext, ready: true as const, threads: [] as ThreadItem[],
+        focusThreadId: "", onFocusThreadHandled: vi.fn(), onSelectionChange: vi.fn(),
+        onLineThreadsOpen: vi.fn(), codeFileExtension: ext, enableMarkdownLivePreview: md,
+      };
+    }
+
+    it("clears the old grammar synchronously on switch and stays plain when the new import rejects", async () => {
+      const GRAMMAR_A = EditorState.tabSize.of(4); // valid, harmless, non-empty stand-in for grammar A
+      let resolveA!: (g: unknown) => void;
+      let rejectB!: (e: unknown) => void;
+      vi.spyOn(codeHighlight, "grammarLoaderForExtension").mockImplementation((ext: string) => {
+        if (ext === ".py") return () => new Promise((res) => { resolveA = res as never; });
+        if (ext === ".ts") return () => new Promise((_res, rej) => { rejectB = rej as never; });
+        return null;
+      });
+      const reconfig = vi.spyOn(Compartment.prototype, "reconfigure");
+      const isClear = (arg: unknown) => Array.isArray(arg) && arg.length === 0;
+      const clears = () => reconfig.mock.calls.filter((c) => isClear(c[0])).length;
+      const grammars = () => reconfig.mock.calls.filter((c) => !Array.isArray(c[0])).length;
+
+      const props = codeProps(".py");
+      const { rerender } = render(<DocumentSurface {...props} />);
+      await waitFor(() => expect(document.querySelector(".cm-editor")).toBeTruthy());
+
+      // Mount cleared to plain synchronously, before A resolves.
+      expect(clears()).toBeGreaterThanOrEqual(1);
+      expect(grammars()).toBe(0);
+
+      // A resolves → grammar A installed.
+      await act(async () => { resolveA(GRAMMAR_A); await Promise.resolve(); });
+      expect(grammars()).toBe(1);
+
+      reconfig.mockClear();
+      // Switch .py -> .ts clears synchronously (immediate plain) before B settles.
+      rerender(<DocumentSurface {...props} codeFileExtension=".ts" />);
+      expect(clears()).toBeGreaterThanOrEqual(1);
+
+      // B rejects → stays plain; no grammar reconfigure.
+      await act(async () => { rejectB(new Error("import failed")); await Promise.resolve(); });
+      expect(grammars()).toBe(0);
+    });
+
+    it("ignores a late grammar resolve for a file that has been switched away", async () => {
+      const GRAMMAR = EditorState.tabSize.of(2);
+      let resolveLate!: (g: unknown) => void;
+      vi.spyOn(codeHighlight, "grammarLoaderForExtension").mockImplementation((ext: string) => {
+        if (ext === ".py") return () => new Promise((res) => { resolveLate = res as never; });
+        return null; // .ts here is "unmapped" → plain, so switching away is clean
+      });
+      const reconfig = vi.spyOn(Compartment.prototype, "reconfigure");
+      const grammars = () => reconfig.mock.calls.filter((c) => !Array.isArray(c[0])).length;
+
+      const props = codeProps(".py");
+      const { rerender } = render(<DocumentSurface {...props} />);
+      await waitFor(() => expect(document.querySelector(".cm-editor")).toBeTruthy());
+      // Switch away BEFORE .py's grammar resolves (its effect is now superseded/cancelled).
+      rerender(<DocumentSurface {...props} codeFileExtension=".ts" />);
+      reconfig.mockClear();
+      // The stale .py import resolves late — the cancelled guard must drop it.
+      await act(async () => { resolveLate(GRAMMAR); await Promise.resolve(); });
+      expect(grammars()).toBe(0);
+    });
+
+    it("re-routes across the .md <-> .ts boundary (grammar only on the code side)", async () => {
+      const GRAMMAR = EditorState.tabSize.of(4);
+      vi.spyOn(codeHighlight, "grammarLoaderForExtension").mockImplementation((ext: string) =>
+        ext === ".ts" ? () => Promise.resolve(GRAMMAR) : null);
+      const reconfig = vi.spyOn(Compartment.prototype, "reconfigure");
+      const grammars = () => reconfig.mock.calls.filter((c) => !Array.isArray(c[0])).length;
+
+      const props = codeProps(undefined, true); // start as Markdown
+      const { rerender } = render(<DocumentSurface {...props} />);
+      await waitFor(() => expect(document.querySelector(".cm-editor")).toBeTruthy());
+      // Markdown side: the grammar effect early-returns, so no grammar is installed.
+      expect(grammars()).toBe(0);
+
+      // -> .ts (code): grammar installs.
+      rerender(<DocumentSurface {...props} codeFileExtension=".ts" enableMarkdownLivePreview={false} />);
+      await act(async () => { await Promise.resolve(); });
+      expect(grammars()).toBeGreaterThanOrEqual(1);
+
+      // -> .md again (back to Markdown): the code branch no longer runs; ytext is intact.
+      reconfig.mockClear();
+      rerender(<DocumentSurface {...props} codeFileExtension={undefined} enableMarkdownLivePreview />);
+      await waitFor(() => expect(document.querySelector(".cm-editor")).toBeTruthy());
+      expect(grammars()).toBe(0);
+    });
+
+    it("preserves selection and undo history across a .ts <-> .md rename (reconfigures, never rebuilds)", async () => {
+      const ydoc = new Y.Doc();
+      const ytext = ydoc.getText("content");
+      ytext.insert(0, "const answer = 42\n");
+      const props = (md: boolean, ext?: string) => ({
+        documentId: "doc", ydoc, ytext, ready: true as const, threads: [] as ThreadItem[],
+        focusThreadId: "", onFocusThreadHandled: vi.fn(), onSelectionChange: vi.fn(),
+        onLineThreadsOpen: vi.fn(), enableMarkdownLivePreview: md, codeFileExtension: ext,
+      });
+      const { container, rerender } = render(<DocumentSurface {...props(false, ".ts")} />);
+      await waitFor(() => expect(container.querySelector(".cm-editor")).toBeTruthy());
+      const editorEl = container.querySelector(".cm-editor") as HTMLElement;
+      const view = EditorView.findFromDOM(editorEl)!;
+      expect(view).toBeTruthy();
+
+      // Select "answer" (6..12) and make an edit AFTER it so the selection is unmoved but undo depth grows.
+      view.dispatch({ selection: { anchor: 6, head: 12 } });
+      view.dispatch({ changes: { from: view.state.doc.length, insert: "// note" } });
+      const undoBefore = undoDepth(view.state);
+      expect(undoBefore).toBeGreaterThanOrEqual(1);
+
+      // Rename .ts -> .md: mode flips.
+      rerender(<DocumentSurface {...props(true, undefined)} />);
+      await act(async () => { await Promise.resolve(); });
+      // Same DOM node + same view instance = reconfigured, not rebuilt.
+      expect(container.querySelector(".cm-editor")).toBe(editorEl);
+      const viewMd = EditorView.findFromDOM(editorEl)!;
+      expect(viewMd).toBe(view);
+      // Selection and undo history survive.
+      expect(viewMd.state.selection.main.anchor).toBe(6);
+      expect(viewMd.state.selection.main.head).toBe(12);
+      expect(undoDepth(viewMd.state)).toBe(undoBefore);
+
+      // And back .md -> .ts: still preserved.
+      rerender(<DocumentSurface {...props(false, ".ts")} />);
+      await act(async () => { await Promise.resolve(); });
+      expect(container.querySelector(".cm-editor")).toBe(editorEl);
+      const viewTs = EditorView.findFromDOM(editorEl)!;
+      expect(viewTs.state.selection.main.anchor).toBe(6);
+      expect(undoDepth(viewTs.state)).toBe(undoBefore);
     });
   });
 });
