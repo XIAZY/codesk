@@ -29,7 +29,7 @@ function deferred<T>() {
 }
 
 const agent = (id: string): Agent => ({
-  id, daemonId: "d1", handle: id, name: id, role: "", kind: "agent",
+  id, daemonId: "d1", handle: id, name: id, role: "", kind: "agent", model: "", reasoningEffort: "",
   workspaceRoot: "", status: "idle", currentTask: "", currentActivity: "", currentRunId: "", updatedAt: "now",
 });
 const alpha = agent("alpha");

@@ -56,6 +56,8 @@ function agent(id: string): Agent {
     name: id,
     role: "assistant",
     kind: "agent",
+    model: "",
+    reasoningEffort: "",
     workspaceRoot: "/root",
     status: "idle",
     currentTask: "",

@@ -1,5 +1,5 @@
 import * as Y from "yjs";
-import type { ActivityEvent, Agent, AgentEvent, AgentRun, Daemon, DocumentItem, ThreadAnchor, ThreadItem, WorkspaceEvent, WorkspaceState } from "./types";
+import type { ActivityEvent, Agent, AgentEvent, AgentRun, Daemon, DocumentItem, RuntimeModel, RuntimeModelCatalog, ThreadAnchor, ThreadItem, WorkspaceEvent, WorkspaceState } from "./types";
 
 export const identifierPattern = "[a-z0-9_-]+";
 export const identifierHelpText = "Only lowercase letters, numbers, underscores, and dashes.";
@@ -524,6 +524,103 @@ export function daemonLiveStatus(daemon: Daemon, nowMs: number): string {
     return "stale";
   }
   return "disconnected";
+}
+
+// ---- daemon-model-selection task #4: catalog resolution (pure) --------------------------------
+// The projected model catalog for a runtime lives on its RuntimeDetection (daemon.runtimes[]). All
+// consumers branch on the *shape*, never on convention, so a decode-drop can only fail conservative.
+
+export function runtimeModelCatalog(daemon: Daemon | undefined, kind: string): RuntimeModelCatalog | undefined {
+  return daemon?.runtimes?.find((runtime) => runtime.kind === kind)?.modelCatalog;
+}
+
+// The honest capability states. Order matters: a missing catalog reads as the conservative
+// "unsupported" rather than a false "ready", and a transient error is distinct from a genuine empty.
+//   "unsupported" → old/incapable daemon (field absent): inherited defaults only, calm — not an error
+//   "error"       → capable daemon, transient probe failure: "couldn't load models, retrying"
+//   "empty"       → capable daemon, genuinely no models: first-class, not a misleading "not found"
+//   "ready"       → offer the selectors
+export type ModelCatalogState = "unsupported" | "error" | "empty" | "ready";
+
+export function modelCatalogState(catalog: RuntimeModelCatalog | undefined): ModelCatalogState {
+  if (!catalog) {
+    return "unsupported";
+  }
+  // Field PRESENCE, not truthiness: the wire omits `error` when there is none (omitempty), so a
+  // present `error` — even "" from a malformed/drifted payload — must fail closed as a probe error
+  // rather than masquerade as a genuine empty catalog. (Thomas, architecture seat.)
+  if (catalog.error !== undefined) {
+    return "error";
+  }
+  if (catalog.models.length === 0) {
+    return "empty";
+  }
+  return "ready";
+}
+
+// The runtime default (model === "") is offerable only when EXACTLY ONE visible row is isDefault.
+// None or ambiguous (>1) → null, so "runtime default + explicit effort" is withheld while an explicit
+// model still derives its own efforts.
+export function uniqueDefaultModel(catalog: RuntimeModelCatalog | undefined): RuntimeModel | null {
+  if (!catalog) {
+    return null;
+  }
+  const defaults = catalog.models.filter((model) => model.isDefault);
+  return defaults.length === 1 ? defaults[0] : null;
+}
+
+// Look up a model row by its opaque id (never the displayName).
+export function findRuntimeModel(catalog: RuntimeModelCatalog | undefined, model: string): RuntimeModel | undefined {
+  return catalog?.models.find((entry) => entry.model === model);
+}
+
+// Efforts offered for the current profile: an explicit model derives its own reasoningEfforts;
+// runtime default (model === "") derives from the unique default row, or [] when there is none.
+// Never a global effort enum.
+export function availableReasoningEfforts(catalog: RuntimeModelCatalog | undefined, model: string): string[] {
+  if (model) {
+    return findRuntimeModel(catalog, model)?.reasoningEfforts ?? [];
+  }
+  return uniqueDefaultModel(catalog)?.reasoningEfforts ?? [];
+}
+
+// Whether a model/effort profile is still valid against the current catalog. Full inheritance
+// (empty/empty) is always valid. Used to gate submit AND — critically — to detect when a background
+// daemon.updated has invalidated a live selection, which must then be preserved+blocked (never
+// silently reset behind the user's click).
+export function isModelProfileValid(
+  catalog: RuntimeModelCatalog | undefined,
+  model: string,
+  reasoningEffort: string,
+): boolean {
+  if (!model && !reasoningEffort) {
+    return true; // full inheritance is always valid
+  }
+  if (modelCatalogState(catalog) !== "ready") {
+    return false; // any explicit choice requires a ready catalog
+  }
+  if (model && !findRuntimeModel(catalog, model)) {
+    return false; // an explicit model must exist in the catalog
+  }
+  if (!model && reasoningEffort && !uniqueDefaultModel(catalog)) {
+    return false; // runtime-default + explicit effort needs exactly one visible default
+  }
+  if (reasoningEffort && !availableReasoningEfforts(catalog, model).includes(reasoningEffort)) {
+    return false; // an explicit effort must be in the effective model's advertised efforts
+  }
+  return true;
+}
+
+// Read-only label for a persisted agent model profile (agent surface, task #4). The agent record
+// stores only the opaque `model` id, so an unresolvable stored model — no catalog (old/offline
+// daemon) or a model since removed from it — renders an explicit "Unavailable" rather than the
+// opaque id. "" is the runtime default.
+export function agentModelDisplay(daemon: Daemon | undefined, kind: string, model: string): string {
+  if (!model) {
+    return "Runtime default";
+  }
+  const found = findRuntimeModel(runtimeModelCatalog(daemon, kind), model);
+  return found ? found.displayName : "Unavailable";
 }
 
 // Stamp the client receipt time onto daemon payloads as they land, so daemonLiveStatus can decay

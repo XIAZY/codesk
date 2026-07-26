@@ -79,6 +79,31 @@ export type RuntimeDetection = {
   version?: string;
   path?: string;
   reason?: string;
+  // Projected model catalog for this runtime (daemon-model-selection task #4). The presence and
+  // shape encode three capability states, so consumers branch on the type, not on convention:
+  //   undefined       → old/unsupported daemon (no model selection; inherited defaults only)
+  //   { error: "…" }  → capable daemon, transient probe failure ("couldn't load models, retrying")
+  //   { models: [] }  → capable daemon, genuinely empty catalog (first-class, not "model not found")
+  //   { models: [...] } → offer selectors
+  modelCatalog?: RuntimeModelCatalog;
+};
+
+// Projected Codex model catalog (daemon-model-selection, sealed contract df1354ab). Identity vs
+// presentation is normative: `model` is the opaque provider id that is persisted/validated/sent;
+// `displayName` is human label, rendered everywhere but NEVER sent or stored. Efforts are per-model
+// (`reasoningEfforts`), never a global enum. Hidden rows are stripped by the daemon projection (#2),
+// so there is no `hidden` field here to re-filter on.
+export type RuntimeModelCatalog = {
+  models: RuntimeModel[];
+  error?: string;
+};
+
+export type RuntimeModel = {
+  model: string;
+  displayName: string;
+  isDefault: boolean;
+  reasoningEfforts: string[];
+  defaultReasoningEffort?: string;
 };
 
 export type Agent = {
@@ -88,6 +113,11 @@ export type Agent = {
   name: string;
   role: string;
   kind: string;
+  // Persisted model profile (daemon-model-selection task #4). Default-empty = inherit the runtime
+  // default: model "" → runtime default model, reasoningEffort "" → that model's default effort.
+  // `model` is the opaque provider id (never the displayName). Read-only on the agent surface in v1.
+  model: string;
+  reasoningEffort: string;
   systemPrompt?: string;
   workspaceRoot: string;
   currentTurnId?: string;

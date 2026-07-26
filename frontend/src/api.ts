@@ -197,7 +197,10 @@ export class ApiClient {
     });
   }
 
-  async createAgent(workspaceId: string, daemonId: string, input: { handle: string; name: string; role: string; kind: string }) {
+  // model/reasoningEffort are the opaque provider ids ("" = inherit the runtime default); empty is
+  // always valid, explicit values are validated server-side against the transaction-selected daemon's
+  // projected catalog (daemon-model-selection task #4). No model fields on updateAgent in v1.
+  async createAgent(workspaceId: string, daemonId: string, input: { handle: string; name: string; role: string; kind: string; model: string; reasoningEffort: string }) {
     return this.request<Agent>(workspacePath(workspaceId, `/daemons/${encodeURIComponent(daemonId)}/agents`), {
       method: "POST",
       body: JSON.stringify(input),

@@ -32,6 +32,8 @@ function workspaceFixture(overrides: Partial<WorkspaceState> = {}): WorkspaceSta
         name: "Codex",
         role: "Review",
         kind: "codex",
+        model: "",
+        reasoningEffort: "",
         workspaceRoot: "agents/agent_1",
         status: "idle",
         currentTask: "",
@@ -1387,7 +1389,7 @@ describe("AgentDetailModal live status", () => {
   // rather than forcing "Waiting for local environment".
   const daemon: Daemon = { ...daemonFixtures.justSeen, id: "d1" };
   const baseAgent: Agent = {
-    id: "a1", daemonId: "d1", handle: "codex", name: "Codex", role: "Review", kind: "codex",
+    id: "a1", daemonId: "d1", handle: "codex", name: "Codex", role: "Review", kind: "codex", model: "", reasoningEffort: "",
     workspaceRoot: "agents/a1", status: "idle", currentTask: "", currentActivity: "", currentRunId: "run1", updatedAt: "now",
   };
   const run = (status: string): AgentRun => ({
