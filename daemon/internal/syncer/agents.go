@@ -15,6 +15,8 @@ type agent struct {
 	Name            string `json:"name"`
 	Role            string `json:"role"`
 	Kind            string `json:"kind"`
+	Model           string `json:"model"`
+	ReasoningEffort string `json:"reasoningEffort"`
 	SystemPrompt    string `json:"systemPrompt"`
 	WorkspaceRoot   string `json:"workspaceRoot"`
 	CurrentTurnID   string `json:"currentTurnId"`

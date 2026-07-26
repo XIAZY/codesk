@@ -804,6 +804,80 @@ func TestAppServerRPCErrorPreservesCode(t *testing.T) {
 	}
 }
 
+func TestCodexAppServerModelListUsesHiddenFenceAndOpaqueCursor(t *testing.T) {
+	tests := []struct {
+		name       string
+		cursor     string
+		wantCursor bool
+	}{
+		{name: "first page"},
+		{name: "opaque cursor", cursor: "opaque / + cursor", wantCursor: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stdin := &captureWriteCloser{}
+			client := &codexAppServer{
+				stdin:    stdin,
+				pending:  map[int64]chan appServerResponse{},
+				readDone: make(chan struct{}),
+			}
+			client.testHookBeforeRequestSelect = func(id int64) {
+				client.mu.Lock()
+				ch := client.pending[id]
+				client.mu.Unlock()
+				ch <- appServerResponse{
+					ID:     id,
+					Result: json.RawMessage(`{"data":[],"nextCursor":null}`),
+				}
+			}
+
+			if _, err := client.ModelList(context.Background(), test.cursor); err != nil {
+				t.Fatalf("model/list: %v", err)
+			}
+			var request struct {
+				Method string         `json:"method"`
+				Params map[string]any `json:"params"`
+			}
+			if err := json.Unmarshal([]byte(strings.TrimSpace(stdin.String())), &request); err != nil {
+				t.Fatalf("decode request: %v\n%s", err, stdin.String())
+			}
+			if request.Method != "model/list" || request.Params["includeHidden"] != false {
+				t.Fatalf("model/list request = %#v", request)
+			}
+			gotCursor, hasCursor := request.Params["cursor"]
+			if hasCursor != test.wantCursor {
+				t.Fatalf("cursor presence=%v, want %v in %#v", hasCursor, test.wantCursor, request.Params)
+			}
+			if hasCursor && gotCursor != test.cursor {
+				t.Fatalf("cursor = %#v, want exact opaque %q", gotCursor, test.cursor)
+			}
+		})
+	}
+}
+
+func TestCodexAppServerModelListRejectsMalformedResultJSON(t *testing.T) {
+	stdin := &captureWriteCloser{}
+	client := &codexAppServer{
+		stdin:    stdin,
+		pending:  map[int64]chan appServerResponse{},
+		readDone: make(chan struct{}),
+	}
+	client.testHookBeforeRequestSelect = func(id int64) {
+		client.mu.Lock()
+		ch := client.pending[id]
+		client.mu.Unlock()
+		ch <- appServerResponse{
+			ID:     id,
+			Result: json.RawMessage(`{"data":`),
+		}
+	}
+
+	if _, err := client.ModelList(context.Background(), ""); err == nil ||
+		!strings.Contains(err.Error(), "decode app-server model/list result") {
+		t.Fatalf("malformed model/list result error = %v", err)
+	}
+}
+
 func TestAppServerRPCErrorClassifiableViaErrorsAs(t *testing.T) {
 	var wrapped error = fmt.Errorf("write stdin: %w", &appServerRPCError{
 		Method: "turn/start", Code: -32001, Message: "Server overloaded; retry later.",

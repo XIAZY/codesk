@@ -713,8 +713,8 @@ func waitForSessionLoop(done <-chan struct{}) {
 }
 
 // refreshDesiredSpec updates a session's desired agent spec to the latest and
-// bumps its revision ONLY when a spawn-relevant field actually changed (kind or
-// instructions). An identical reconcile/notification must not advance the
+// bumps its revision ONLY when a spawn-relevant field actually changed. An
+// identical reconcile/notification must not advance the
 // revision: a parked token under construction would otherwise be reaped and
 // rebuilt on every touch, starving the restart under frequent reconciles or
 // notifications (which also call ensureSession).
@@ -725,18 +725,20 @@ func waitForSessionLoop(done <-chan struct{}) {
 // field). Enumerating the current construction inputs from `current`:
 //   - ID           -> workdir (agentWorkspacePath(cfg, ID)) + AgentID; it is the
 //     session's identity / map key and cannot change in place.
-//   - Kind         -> runtime driver selection.            [fingerprinted]
-//   - SystemPrompt -> Spawn/resume/start-session Instructions. [fingerprinted]
+//   - Kind            -> runtime driver selection.               [fingerprinted]
+//   - Model           -> runtime profile model.                  [fingerprinted]
+//   - ReasoningEffort -> runtime profile reasoning effort.       [fingerprinted]
+//   - SystemPrompt    -> Spawn/resume/start-session Instructions. [fingerprinted]
 //   - SessionID    -> resume continuity; for a restart it is taken from the
 //     session, not the desired spec, so it is not a config change.
 //
 // Workdir is ID-derived (NOT WorkspaceRoot), ToolToken is generated, and env is
-// built from cfg — none are desired-spec inputs. So Kind+SystemPrompt is the
-// complete changeable set; extend this fingerprint if the constructor grows a
-// new `current.*` input.
+// built from cfg — none are desired-spec inputs.
 func (session *managedAgentSession) refreshDesiredSpec(current *agent) (changed bool) {
 	changed = session.agent == nil ||
 		session.agent.Kind != current.Kind ||
+		strings.TrimSpace(session.agent.Model) != strings.TrimSpace(current.Model) ||
+		strings.TrimSpace(session.agent.ReasoningEffort) != strings.TrimSpace(current.ReasoningEffort) ||
 		session.agent.SystemPrompt != current.SystemPrompt
 	session.agent = cloneAgentValue(current)
 	if changed {
@@ -754,11 +756,13 @@ func (session *managedAgentSession) refreshDesiredSpec(current *agent) (changed 
 // fingerprint — a changed authoritative SessionID has to retarget the claim and
 // rebuild the correct resume target. The restart path takes SessionID from the
 // parked session (continuity), not the desired spec, so refreshDesiredSpec
-// correctly omits it. Both cover Kind (driver) and SystemPrompt (Instructions);
+// correctly omits it. Both cover Kind, Model, ReasoningEffort, and SystemPrompt;
 // ID is the fixed identity, Workdir is ID-derived, ToolToken is generated.
 func (start *agentSessionStart) spawnFingerprintChanged(current *agent) bool {
 	return start.agent == nil ||
 		start.agent.Kind != current.Kind ||
+		strings.TrimSpace(start.agent.Model) != strings.TrimSpace(current.Model) ||
+		strings.TrimSpace(start.agent.ReasoningEffort) != strings.TrimSpace(current.ReasoningEffort) ||
 		start.agent.SystemPrompt != current.SystemPrompt ||
 		// Normalized: startSession compares strings.TrimSpace(current.SessionID)
 		// to decide resume vs start, so whitespace-only differences aren't a real
@@ -989,6 +993,19 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 		})
 		return nil
 	}
+	profile, profileErr := resolveRuntimeProfile(current, detection.ModelCatalog)
+	if profileErr != nil {
+		kind := firstNonEmptyText(strings.TrimSpace(current.Kind), "agent")
+		activity := fmt.Sprintf("%s runtime profile unavailable: %s", kind, profileErr)
+		appendAgentLog(s.cfg, current.ID, "runtime profile unavailable kind=%s model=%q effort=%q err=%v", current.Kind, current.Model, current.ReasoningEffort, profileErr)
+		s.publish(current.ID, updateAgentSessionRequest{
+			Status:          "disconnected",
+			CurrentTurnID:   "",
+			CurrentActivity: activity,
+			LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
+		})
+		return nil
+	}
 	toolToken, err := newToolToken()
 	if err != nil {
 		return err
@@ -998,6 +1015,7 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 		Workdir:      workdir,
 		ToolToken:    toolToken,
 		Instructions: current.SystemPrompt,
+		Profile:      profile,
 	})
 	if err != nil {
 		return err
@@ -1136,6 +1154,65 @@ func (s *agentSessionSupervisor) startSession(ctx context.Context, current *agen
 		s.heartbeatLoop(lifecycleCtx, current.ID, process)
 	}()
 	return nil
+}
+
+func resolveRuntimeProfile(current *agent, catalog *RuntimeModelCatalog) (RuntimeProfile, error) {
+	if current == nil {
+		return RuntimeProfile{}, nil
+	}
+	modelName := strings.TrimSpace(current.Model)
+	effort := strings.TrimSpace(current.ReasoningEffort)
+	profile := RuntimeProfile{Model: modelName, ReasoningEffort: effort}
+	if modelName == "" && effort == "" {
+		return profile, nil
+	}
+	if catalog == nil {
+		return RuntimeProfile{}, errors.New("model catalog is unavailable")
+	}
+	if strings.TrimSpace(catalog.Error) != "" {
+		return RuntimeProfile{}, errors.New("model catalog probe failed")
+	}
+
+	var effective *RuntimeModel
+	if modelName != "" {
+		for i := range catalog.Models {
+			if catalog.Models[i].Model == modelName {
+				if effective != nil {
+					return RuntimeProfile{}, fmt.Errorf("model %q is ambiguous in the runtime catalog", modelName)
+				}
+				effective = &catalog.Models[i]
+			}
+		}
+		if effective == nil {
+			return RuntimeProfile{}, fmt.Errorf("model %q is no longer available", modelName)
+		}
+	} else {
+		for i := range catalog.Models {
+			if catalog.Models[i].IsDefault {
+				if effective != nil {
+					return RuntimeProfile{}, errors.New("runtime default model cannot be resolved")
+				}
+				effective = &catalog.Models[i]
+			}
+		}
+		if effective == nil {
+			return RuntimeProfile{}, errors.New("runtime default model cannot be resolved")
+		}
+	}
+
+	if effort == "" {
+		return profile, nil
+	}
+	for _, supported := range effective.ReasoningEfforts {
+		if supported == effort {
+			return profile, nil
+		}
+	}
+	displayName := firstNonEmptyText(strings.TrimSpace(effective.DisplayName), effective.Model)
+	if modelName == "" {
+		return RuntimeProfile{}, fmt.Errorf("runtime default is now %s and does not support %q", displayName, effort)
+	}
+	return RuntimeProfile{}, fmt.Errorf("model %s does not support reasoning effort %q", displayName, effort)
 }
 
 func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, current *agent, prompt string, forMeSig string, generalSig string) error {

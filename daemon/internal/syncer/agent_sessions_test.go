@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -474,6 +475,186 @@ func TestAgentSessionMissingRuntimePublishesDisconnectedWithoutSpawn(t *testing.
 		!strings.Contains(update.payload.CurrentActivity, "codex command not found") {
 		t.Fatalf("unexpected disconnected activity: %#v", update.payload)
 	}
+}
+
+func TestAgentSessionRuntimeProfileValidationPrecedesSpawn(t *testing.T) {
+	tests := []struct {
+		name       string
+		catalog    *RuntimeModelCatalog
+		current    *agent
+		wantReason string
+	}{
+		{
+			name:       "catalog absent",
+			current:    &agent{Model: "gpt-5.6-sol"},
+			wantReason: "model catalog is unavailable",
+		},
+		{
+			name:       "catalog probe failed",
+			catalog:    &RuntimeModelCatalog{Models: []RuntimeModel{}, Error: "model catalog unavailable"},
+			current:    &agent{Model: "gpt-5.6-sol"},
+			wantReason: "model catalog probe failed",
+		},
+		{
+			name:       "model vanished",
+			catalog:    testRuntimeModelCatalog(),
+			current:    &agent{Model: "gpt-5.7-missing"},
+			wantReason: `model "gpt-5.7-missing" is no longer available`,
+		},
+		{
+			name:       "explicit effort unsupported",
+			catalog:    testRuntimeModelCatalog(),
+			current:    &agent{Model: "gpt-5.6-luna", ReasoningEffort: "ultra"},
+			wantReason: `model GPT-5.6-Luna does not support reasoning effort "ultra"`,
+		},
+		{
+			name: "default moved and inherited effort drifted",
+			catalog: &RuntimeModelCatalog{Models: []RuntimeModel{
+				{Model: "gpt-5.6-sol", DisplayName: "GPT-5.6-Sol", ReasoningEfforts: []string{"ultra"}},
+				{Model: "gpt-5.6-luna", DisplayName: "GPT-5.6-Luna", IsDefault: true, ReasoningEfforts: []string{"low", "medium", "max"}},
+			}},
+			current:    &agent{ReasoningEffort: "ultra"},
+			wantReason: `runtime default is now GPT-5.6-Luna and does not support "ultra"`,
+		},
+		{
+			name: "ambiguous default",
+			catalog: &RuntimeModelCatalog{Models: []RuntimeModel{
+				{Model: "one", DisplayName: "One", IsDefault: true, ReasoningEfforts: []string{"high"}},
+				{Model: "two", DisplayName: "Two", IsDefault: true, ReasoningEfforts: []string{"high"}},
+			}},
+			current:    &agent{ReasoningEffort: "high"},
+			wantReason: "runtime default model cannot be resolved",
+		},
+		{
+			name: "inherited model with no default",
+			catalog: &RuntimeModelCatalog{Models: []RuntimeModel{
+				{Model: "one", DisplayName: "One", ReasoningEfforts: []string{"high"}},
+				{Model: "two", DisplayName: "Two", ReasoningEfforts: []string{"high"}},
+			}},
+			current:    &agent{ReasoningEffort: "high"},
+			wantReason: "runtime default model cannot be resolved",
+		},
+		{
+			name: "duplicate explicit model is ambiguous",
+			catalog: &RuntimeModelCatalog{Models: []RuntimeModel{
+				{Model: "duplicate", DisplayName: "First", ReasoningEfforts: []string{"high"}},
+				{Model: "duplicate", DisplayName: "Second", ReasoningEfforts: []string{"high"}},
+			}},
+			current:    &agent{Model: "duplicate"},
+			wantReason: `model "duplicate" is ambiguous in the runtime catalog`,
+		},
+		{
+			name:       "successful but empty catalog",
+			catalog:    &RuntimeModelCatalog{Models: []RuntimeModel{}},
+			current:    &agent{Model: "gpt-5.6-sol"},
+			wantReason: `model "gpt-5.6-sol" is no longer available`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			factory := newFakeRuntimeDriver()
+			factory.detection.ModelCatalog = test.catalog
+			updates := make(chan agentSessionStatusUpdate, 4)
+			updater := func(ctx context.Context, agentID string, payload updateAgentSessionRequest) error {
+				_ = ctx
+				updates <- agentSessionStatusUpdate{agentID: agentID, payload: payload}
+				return nil
+			}
+			supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), updater, newFakeRuntimeRegistry(factory))
+			defer supervisor.Shutdown()
+			test.current.ID = "agent_1"
+			test.current.Kind = "codex"
+
+			if err := supervisor.Reconcile(context.Background(), []*agent{test.current}); err != nil {
+				t.Fatalf("invalid profile should publish a soft disconnected state: %v", err)
+			}
+			factory.mu.Lock()
+			spawnCount := len(factory.spawnSpecs)
+			factory.mu.Unlock()
+			if spawnCount != 0 {
+				t.Fatalf("invalid profile called Spawn %d times", spawnCount)
+			}
+			update := waitAgentSessionStatus(t, updates, "agent_1", "disconnected")
+			if !strings.Contains(update.payload.CurrentActivity, test.wantReason) {
+				t.Fatalf("activity = %q, want %q", update.payload.CurrentActivity, test.wantReason)
+			}
+			if update.payload.CurrentTurnID != "" {
+				t.Fatalf("invalid profile retained a current turn: %#v", update.payload)
+			}
+		})
+	}
+}
+
+func TestAgentSessionRuntimeProfilePassesTrimmedExplicitAndInheritedValues(t *testing.T) {
+	tests := []struct {
+		name    string
+		current *agent
+		want    RuntimeProfile
+	}{
+		{
+			name:    "explicit model and effort",
+			current: &agent{Model: " gpt-5.6-luna ", ReasoningEffort: " max "},
+			want:    RuntimeProfile{Model: "gpt-5.6-luna", ReasoningEffort: "max"},
+		},
+		{
+			name:    "partial inheritance preserves empty model",
+			current: &agent{ReasoningEffort: " ultra "},
+			want:    RuntimeProfile{ReasoningEffort: "ultra"},
+		},
+		{
+			name:    "explicit model with inherited effort",
+			current: &agent{Model: " gpt-5.6-sol "},
+			want:    RuntimeProfile{Model: "gpt-5.6-sol"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			factory := newFakeRuntimeDriver()
+			factory.detection.ModelCatalog = testRuntimeModelCatalog()
+			supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+			defer supervisor.Shutdown()
+			test.current.ID = "agent_1"
+			test.current.Kind = "codex"
+
+			if err := supervisor.ensureSession(context.Background(), test.current); err != nil {
+				t.Fatalf("ensure session: %v", err)
+			}
+			if got := factory.onlySpawnSpec(t).Profile; !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("spawn profile = %#v, want %#v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestAgentSessionEmptyRuntimeProfileDoesNotRequireCatalog(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.detection.ModelCatalog = nil
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"}); err != nil {
+		t.Fatalf("empty profile must retain old-daemon compatibility: %v", err)
+	}
+	if got := factory.onlySpawnSpec(t).Profile; got != (RuntimeProfile{}) {
+		t.Fatalf("empty profile = %#v", got)
+	}
+}
+
+func testRuntimeModelCatalog() *RuntimeModelCatalog {
+	return &RuntimeModelCatalog{Models: []RuntimeModel{
+		{
+			Model:            "gpt-5.6-sol",
+			DisplayName:      "GPT-5.6-Sol",
+			IsDefault:        true,
+			ReasoningEfforts: []string{"low", "medium", "high", "ultra"},
+		},
+		{
+			Model:            "gpt-5.6-luna",
+			DisplayName:      "GPT-5.6-Luna",
+			ReasoningEfforts: []string{"low", "medium", "high", "max"},
+		},
+	}}
 }
 
 func TestAgentSessionUnregisteredRuntimePublishesDisconnectedWithoutSpawn(t *testing.T) {
@@ -1486,7 +1667,10 @@ func TestAgentSessionSupervisorDoesNotUseCodexWireMethods(t *testing.T) {
 }
 
 func TestCodexAppServerThreadParamsUseSharedInstructionsAndSlimResume(t *testing.T) {
-	client := &codexAppServer{}
+	client := &codexAppServer{profile: RuntimeProfile{
+		Model:           " gpt-5.6-sol ",
+		ReasoningEffort: " ultra ",
+	}}
 	start := client.threadParams("/tmp/agent", "", "shared instructions")
 	if start["developerInstructions"] != "shared instructions" {
 		t.Fatalf("missing developer instructions: %#v", start)
@@ -1497,10 +1681,33 @@ func TestCodexAppServerThreadParamsUseSharedInstructionsAndSlimResume(t *testing
 	if _, ok := start["excludeTurns"]; ok {
 		t.Fatalf("new thread should not set resume-only excludeTurns: %#v", start)
 	}
+	if start["model"] != "gpt-5.6-sol" {
+		t.Fatalf("new thread missing model: %#v", start)
+	}
+	if !reflect.DeepEqual(start["config"], map[string]any{"model_reasoning_effort": "ultra"}) {
+		t.Fatalf("new thread missing reasoning effort config: %#v", start)
+	}
 
 	resume := client.threadParams("/tmp/agent", "thread_1", "shared instructions")
 	if resume["threadId"] != "thread_1" || resume["excludeTurns"] != true {
 		t.Fatalf("resume params should include thread id and excludeTurns: %#v", resume)
+	}
+	if resume["model"] != "gpt-5.6-sol" ||
+		!reflect.DeepEqual(resume["config"], map[string]any{"model_reasoning_effort": "ultra"}) {
+		t.Fatalf("resume must carry the same runtime profile: %#v", resume)
+	}
+
+	inheritedClient := &codexAppServer{}
+	for _, params := range []map[string]any{
+		inheritedClient.threadParams("/tmp/agent", "", "shared instructions"),
+		inheritedClient.threadParams("/tmp/agent", "thread_1", "shared instructions"),
+	} {
+		if _, ok := params["model"]; ok {
+			t.Fatalf("inherited model must be omitted, not sent empty: %#v", params)
+		}
+		if _, ok := params["config"]; ok {
+			t.Fatalf("inherited reasoning effort must be omitted, not sent empty: %#v", params)
+		}
 	}
 }
 
@@ -3668,6 +3875,58 @@ func TestAgentSessionRestartSpecChangeCancelsBlockedConstruction(t *testing.T) {
 	}
 }
 
+func TestAgentSessionRestartProfileChangesCancelBlockedConstruction(t *testing.T) {
+	tests := []struct {
+		name string
+		old  RuntimeProfile
+		next RuntimeProfile
+	}{
+		{
+			name: "model",
+			old:  RuntimeProfile{Model: "gpt-5.6-sol", ReasoningEffort: "high"},
+			next: RuntimeProfile{Model: "gpt-5.6-luna", ReasoningEffort: "high"},
+		},
+		{
+			name: "reasoning effort",
+			old:  RuntimeProfile{Model: "gpt-5.6-sol", ReasoningEffort: "low"},
+			next: RuntimeProfile{Model: "gpt-5.6-sol", ReasoningEffort: "ultra"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			factory := newFakeRuntimeDriver()
+			factory.detection.ModelCatalog = testRuntimeModelCatalog()
+			supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+			defer supervisor.Shutdown()
+			supervisor.restartSleep = func(time.Duration) {}
+			restartDone := make(chan struct{})
+			supervisor.testHookRestartComplete = func() { close(restartDone) }
+
+			if err := supervisor.ensureSession(context.Background(), agentWithRuntimeProfile(test.old)); err != nil {
+				t.Fatalf("ensure session: %v", err)
+			}
+			proc1 := factory.only(t)
+			factory.startEntered = make(chan struct{}, 1)
+			factory.startRelease = make(chan struct{})
+
+			proc1.closeEvents()
+			<-factory.startEntered
+			blocked := latestFakeProcess(factory)
+
+			if err := supervisor.Reconcile(context.Background(), []*agent{agentWithRuntimeProfile(test.next)}); err != nil {
+				t.Fatalf("reconcile profile change: %v", err)
+			}
+			waitProcessStopped(t, blocked)
+			close(factory.startRelease)
+			<-restartDone
+
+			if got := latestSpawnSpec(t, factory).Profile; !reflect.DeepEqual(got, test.next) {
+				t.Fatalf("restart spawned profile %#v, want %#v", got, test.next)
+			}
+		})
+	}
+}
+
 // Spoke 17: a changed-spec reconcile during a blocked fresh construction supersedes
 // it — the old attempt is cancelled promptly, the new spec is published, and no
 // caller surfaces the superseded attempt's context.Canceled.
@@ -3704,6 +3963,69 @@ func TestAgentSessionFreshSpecChangeSupersedesConstruction(t *testing.T) {
 	// late waiter can refresh even while the live runtime is stale).
 	if got := publishedProcessInstructions(t, supervisor, factory, "agent_1"); got != "new instructions" {
 		t.Fatalf("live process was actually spawned with stale instructions: %q, want %q", got, "new instructions")
+	}
+}
+
+func TestAgentSessionFreshProfileChangesSupersedeConstruction(t *testing.T) {
+	tests := []struct {
+		name string
+		old  RuntimeProfile
+		next RuntimeProfile
+	}{
+		{
+			name: "model",
+			old:  RuntimeProfile{Model: "gpt-5.6-sol", ReasoningEffort: "high"},
+			next: RuntimeProfile{Model: "gpt-5.6-luna", ReasoningEffort: "high"},
+		},
+		{
+			name: "reasoning effort",
+			old:  RuntimeProfile{Model: "gpt-5.6-sol", ReasoningEffort: "low"},
+			next: RuntimeProfile{Model: "gpt-5.6-sol", ReasoningEffort: "ultra"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			factory := newFakeRuntimeDriver()
+			factory.detection.ModelCatalog = testRuntimeModelCatalog()
+			factory.startEntered = make(chan struct{}, 1)
+			factory.startRelease = make(chan struct{})
+			supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+			defer supervisor.Shutdown()
+
+			oldDone := make(chan error, 1)
+			go func() {
+				oldDone <- supervisor.ensureSession(context.Background(), agentWithRuntimeProfile(test.old))
+			}()
+			<-factory.startEntered
+			blocked := latestFakeProcess(factory)
+
+			nextDone := make(chan error, 1)
+			go func() {
+				nextDone <- supervisor.ensureSession(context.Background(), agentWithRuntimeProfile(test.next))
+			}()
+			waitProcessStopped(t, blocked)
+			<-factory.startEntered
+			close(factory.startRelease)
+
+			if err := <-oldDone; err != nil {
+				t.Fatalf("superseded caller: %v", err)
+			}
+			if err := <-nextDone; err != nil {
+				t.Fatalf("new caller: %v", err)
+			}
+			if got := latestSpawnSpec(t, factory).Profile; !reflect.DeepEqual(got, test.next) {
+				t.Fatalf("fresh construction spawned profile %#v, want %#v", got, test.next)
+			}
+		})
+	}
+}
+
+func agentWithRuntimeProfile(profile RuntimeProfile) *agent {
+	return &agent{
+		ID:              "agent_1",
+		Kind:            "codex",
+		Model:           profile.Model,
+		ReasoningEffort: profile.ReasoningEffort,
 	}
 }
 
