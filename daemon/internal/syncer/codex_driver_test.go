@@ -95,6 +95,29 @@ func TestCodexDriverDetectRequiresAppServer(t *testing.T) {
 	}
 }
 
+func TestCodexDriverDetectVersionProbeUsesStdoutOnly(t *testing.T) {
+	t.Run("successful stderr warning does not pollute version", func(t *testing.T) {
+		codexPath := fakeVersionProbeCommand(
+			t,
+			"codex-cli 0.144.5\n",
+			"WARNING: failed to clean up stale temp dirs\n",
+		)
+		app := newFakeCodexRuntimeApp()
+		driver := &codexDriver{
+			cfg: Config{CodexCommand: codexPath},
+			factory: func(Config, string, string, string, RuntimeProfile) codexRuntimeApp {
+				return app
+			},
+		}
+
+		detection := driver.Detect(context.Background())
+
+		if !detection.Available || detection.Version != "codex-cli 0.144.5" || detection.Reason != "" {
+			t.Fatalf("stdout-only successful version detection = %#v", detection)
+		}
+	})
+}
+
 func TestCodexDriverModelCatalogProjectsVisiblePaginatedModels(t *testing.T) {
 	app := newFakeCodexRuntimeApp()
 	cursor2 := "opaque cursor / page 2"

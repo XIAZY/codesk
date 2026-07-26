@@ -21,6 +21,7 @@ const (
 	fakeProcessCodexPersistent       = "codex-persistent"
 	fakeProcessClaude                = "claude"
 	fakeProcessManagedChildIO        = "managed-child-io"
+	fakeProcessVersionProbe          = "version-probe"
 )
 
 // TestMain lets subprocess tests reuse this already-native test executable
@@ -39,10 +40,32 @@ func TestMain(m *testing.M) {
 		os.Exit(runFakeClaude(os.Args[1:]))
 	case fakeProcessManagedChildIO:
 		os.Exit(runFakeManagedChildIO(os.Args[1:]))
+	case fakeProcessVersionProbe:
+		os.Exit(runFakeVersionProbe(os.Args[1:]))
 	default:
 		buildinfo.Version = "test-version"
 		os.Exit(m.Run())
 	}
+}
+
+func runFakeVersionProbe(args []string) int {
+	if len(args) == 2 && args[0] == "app-server" && args[1] == "--help" {
+		return 0
+	}
+	if len(args) != 1 || args[0] != "--version" {
+		return 2
+	}
+	fmt.Fprint(os.Stdout, os.Getenv("FAKE_VERSION_STDOUT"))
+	fmt.Fprint(os.Stderr, os.Getenv("FAKE_VERSION_STDERR"))
+	return 0
+}
+
+func fakeVersionProbeCommand(t *testing.T, stdout string, stderr string) string {
+	t.Helper()
+	command := fakeProcessCommand(t, fakeProcessVersionProbe)
+	t.Setenv("FAKE_VERSION_STDOUT", stdout)
+	t.Setenv("FAKE_VERSION_STDERR", stderr)
+	return command
 }
 
 func runFakeManagedChildIO(args []string) int {
