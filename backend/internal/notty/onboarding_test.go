@@ -41,38 +41,39 @@ func hasKey(keys []string, want string) bool {
 // database — a pure guard so a typo'd key can never persist and a client can never claim a
 // server-witnessed milestone.
 func TestOnboardingItemKeyClassification(t *testing.T) {
-	all := []string{
+	// The eight learning milestones + dismiss are the only stored keys, and each is a client
+	// action today (the backend map is empty), so every valid key is also client-insertable.
+	stored := []string{
 		OnboardingAccountIntroSeen, OnboardingWorkspaceCreated,
 		OnboardingFirstDocumentCreated, OnboardingFirstDocumentEdited,
 		OnboardingFirstThreadCreated, OnboardingFirstThreadReplied,
-		OnboardingLocalEnvironmentConnected, OnboardingFirstAgentCreated,
-		OnboardingFirstAgentRunStarted, OnboardingFirstDocumentWatcherAdded,
-		OnboardingMemberInvited, OnboardingDismissed,
+		OnboardingFirstDocumentWatcherAdded, OnboardingMemberInvited,
+		OnboardingDismissed,
 	}
-	for _, key := range all {
+	for _, key := range stored {
 		if !isOnboardingItemKey(key) {
 			t.Errorf("isOnboardingItemKey(%q) = false, want true", key)
+		}
+		if !isClientOnboardingItemKey(key) {
+			t.Errorf("isClientOnboardingItemKey(%q) = false, want true (backend map is empty)", key)
 		}
 	}
 	if isOnboardingItemKey("not_a_real_key") {
 		t.Errorf("isOnboardingItemKey(unknown) = true, want false")
 	}
 
-	// The two server-witnessed milestones must be rejected as client inserts; every other
-	// known key (user actions + the dismiss marker) must be accepted.
-	backendOnly := map[string]bool{
-		OnboardingLocalEnvironmentConnected: true,
-		OnboardingFirstAgentRunStarted:      true,
+	// The three "Add an AI teammate" chapter items are per-workspace setup state, deliberately
+	// NOT stored here — the table must never recognize them. If one is ever re-added to a map
+	// this fails, which is the intended guard.
+	notStored := []string{
+		"local_environment_connected",
+		"first_agent_created",
+		"first_agent_run_started",
 	}
-	for _, key := range all {
-		got := isClientOnboardingItemKey(key)
-		want := !backendOnly[key]
-		if got != want {
-			t.Errorf("isClientOnboardingItemKey(%q) = %v, want %v", key, got, want)
+	for _, key := range notStored {
+		if isOnboardingItemKey(key) {
+			t.Errorf("isOnboardingItemKey(%q) = true, want false — setup state is live-derived, not stored", key)
 		}
-	}
-	if isClientOnboardingItemKey("not_a_real_key") {
-		t.Errorf("isClientOnboardingItemKey(unknown) = true, want false")
 	}
 }
 
@@ -116,16 +117,19 @@ func TestOnboardingCompletionsRoundTripThroughEndpoints(t *testing.T) {
 	}
 }
 
-// The client POST surface accepts only client-insertable items: an unknown key and the two
-// server-witnessed milestones are rejected, and nothing is persisted on rejection.
-func TestOnboardingRejectsUnknownAndBackendOnlyClientInserts(t *testing.T) {
+// The client POST surface stores only recognized learning milestones. An unknown key and the
+// three setup-state items — which are live-derived per workspace and never stored — are all
+// rejected with nothing persisted, so no phantom rows and no way to store a milestone meant to
+// track live workspace state.
+func TestOnboardingRejectsUnknownAndNonStoredKeys(t *testing.T) {
 	_, router := newAuthTestServer(t)
 	owner := authTestRegister(t, router, "onboarding-reject@example.com", "owner-pass", "Onboarding Reject")
 
 	rejected := []string{
 		"totally_made_up_key",
-		OnboardingLocalEnvironmentConnected,
-		OnboardingFirstAgentRunStarted,
+		"local_environment_connected",
+		"first_agent_created",
+		"first_agent_run_started",
 	}
 	for _, key := range rejected {
 		rec := authTestRequest(t, router, http.MethodPost, "/api/onboarding", owner.Token, nil, map[string]any{"itemKey": key})
@@ -140,33 +144,31 @@ func TestOnboardingRejectsUnknownAndBackendOnlyClientInserts(t *testing.T) {
 	}
 }
 
-// The two server-witnessed milestones reach the table through the store (the backend seams'
-// path, not the client POST), the store insert is idempotent, and completions never leak
-// across accounts.
-func TestOnboardingBackendInsertAndAccountScoping(t *testing.T) {
+// A completion recorded through the store is write-once (idempotent re-insert), readable back,
+// and never leaks across accounts.
+func TestOnboardingCompletionStoreScopingAndIdempotency(t *testing.T) {
 	server, router := newAuthTestServer(t)
 	accountA := authTestRegister(t, router, "onboarding-scope-a@example.com", "owner-pass", "Onboarding Scope A")
 	accountB := authTestRegister(t, router, "onboarding-scope-b@example.com", "owner-pass", "Onboarding Scope B")
 	db := server.sqlDB()
 
-	// Backend seam path: a server-witnessed milestone the client may not claim.
-	if err := insertOnboardingCompletion(db, accountA.Account.ID, OnboardingLocalEnvironmentConnected); err != nil {
-		t.Fatalf("backend insert: %v", err)
+	if err := insertOnboardingCompletion(db, accountA.Account.ID, OnboardingFirstDocumentCreated); err != nil {
+		t.Fatalf("store insert: %v", err)
 	}
-	// Write-once at the store layer too: a repeat is a no-op, not a primary-key error.
-	if err := insertOnboardingCompletion(db, accountA.Account.ID, OnboardingLocalEnvironmentConnected); err != nil {
-		t.Fatalf("idempotent backend re-insert: %v", err)
+	// Write-once at the store layer: a repeat is a no-op, not a primary-key error.
+	if err := insertOnboardingCompletion(db, accountA.Account.ID, OnboardingFirstDocumentCreated); err != nil {
+		t.Fatalf("idempotent re-insert: %v", err)
 	}
 
 	aCompletions, err := listOnboardingCompletions(db, accountA.Account.ID)
 	if err != nil {
 		t.Fatalf("list A: %v", err)
 	}
-	if len(aCompletions) != 1 || aCompletions[0].ItemKey != OnboardingLocalEnvironmentConnected {
-		t.Fatalf("account A completions = %+v, want exactly one %q", aCompletions, OnboardingLocalEnvironmentConnected)
+	if len(aCompletions) != 1 || aCompletions[0].ItemKey != OnboardingFirstDocumentCreated {
+		t.Fatalf("account A completions = %+v, want exactly one %q", aCompletions, OnboardingFirstDocumentCreated)
 	}
 
-	// Account B never witnessed the milestone — its set must be empty (no cross-account leak).
+	// Account B never recorded it — its set must be empty (no cross-account leak).
 	bCompletions, err := listOnboardingCompletions(db, accountB.Account.ID)
 	if err != nil {
 		t.Fatalf("list B: %v", err)
@@ -176,8 +178,8 @@ func TestOnboardingBackendInsertAndAccountScoping(t *testing.T) {
 	}
 
 	// The same isolation must hold through the read endpoint.
-	if keys := onboardingKeys(t, authTestRequest(t, router, http.MethodGet, "/api/onboarding", accountA.Token, nil, nil)); !hasKey(keys, OnboardingLocalEnvironmentConnected) {
-		t.Fatalf("account A GET keys = %v, want %q", keys, OnboardingLocalEnvironmentConnected)
+	if keys := onboardingKeys(t, authTestRequest(t, router, http.MethodGet, "/api/onboarding", accountA.Token, nil, nil)); !hasKey(keys, OnboardingFirstDocumentCreated) {
+		t.Fatalf("account A GET keys = %v, want %q", keys, OnboardingFirstDocumentCreated)
 	}
 	if keys := onboardingKeys(t, authTestRequest(t, router, http.MethodGet, "/api/onboarding", accountB.Token, nil, nil)); len(keys) != 0 {
 		t.Fatalf("account B GET keys = %v, want none", keys)

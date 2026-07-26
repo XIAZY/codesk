@@ -7,11 +7,18 @@ import (
 	"time"
 )
 
-// Onboarding item keys mirror the frontend ONBOARDING_EVENT_KEYS verbatim, plus a
-// dismissed key for early-skip. A row in onboarding_completions means the item is done;
-// no row means not done. The table is insert-only — nothing is ever updated or deleted at
-// runtime — so completion is write-once and can never drift back to "incomplete" the way
-// the old live-derived state could (deleting your last document used to un-complete a step).
+// Onboarding item keys — the eight *learning* milestones the backend stores, plus a dismissed
+// marker for early-skip. A row in onboarding_completions means the item is done; no row means
+// not done. The table is insert-only — never updated or deleted at runtime — so completion is
+// write-once and can never drift back to "incomplete" the way the old live-derived state could
+// (deleting your last document used to un-complete a step).
+//
+// The three "Add an AI teammate" chapter items — local environment connected, agent created,
+// agent run started — are deliberately NOT stored here. They are per-workspace *setup state*,
+// not learning: a write-once row would keep asserting "connected" after the daemon is removed,
+// which is a lie under any scoping. Setup state stays live-derived on the frontend (where it
+// already is) so it tracks reality; only genuine "the human learned X" milestones, which are
+// permanent, belong in this write-once table.
 const (
 	OnboardingAccountIntroSeen          = "account_intro_seen"
 	OnboardingWorkspaceCreated          = "workspace_created"
@@ -19,21 +26,18 @@ const (
 	OnboardingFirstDocumentEdited       = "first_document_edited"
 	OnboardingFirstThreadCreated        = "first_thread_created"
 	OnboardingFirstThreadReplied        = "first_thread_replied"
-	OnboardingLocalEnvironmentConnected = "local_environment_connected"
-	OnboardingFirstAgentCreated         = "first_agent_created"
-	OnboardingFirstAgentRunStarted      = "first_agent_run_started"
 	OnboardingFirstDocumentWatcherAdded = "first_document_watcher_added"
 	OnboardingMemberInvited             = "member_invited"
 	OnboardingDismissed                 = "onboarding_dismissed"
 )
 
-// Each item key is registered in exactly one of the two maps below — client-insertable or
-// backend-witnessed. The full valid set and the client/backend classification are derived
-// from them, so a key can never be half-registered (valid but unclassified, or listed as
-// valid in one place and forgotten in another).
+// Each stored item key is registered in exactly one of the two maps below — client-insertable
+// or backend-witnessed. The full valid set and the client/backend classification are derived
+// from them, so a key can never be half-registered (valid but unclassified, or listed valid in
+// one place and forgotten in another).
 
-// onboardingClientItemKeys are the items a client may insert directly: user actions plus the
-// dismiss marker.
+// onboardingClientItemKeys are the items a client may insert directly: the eight learning
+// milestones plus the dismiss marker. Every stored milestone is a client action today.
 var onboardingClientItemKeys = map[string]bool{
 	OnboardingAccountIntroSeen:          true,
 	OnboardingWorkspaceCreated:          true,
@@ -41,19 +45,18 @@ var onboardingClientItemKeys = map[string]bool{
 	OnboardingFirstDocumentEdited:       true,
 	OnboardingFirstThreadCreated:        true,
 	OnboardingFirstThreadReplied:        true,
-	OnboardingFirstAgentCreated:         true,
 	OnboardingFirstDocumentWatcherAdded: true,
 	OnboardingMemberInvited:             true,
 	OnboardingDismissed:                 true,
 }
 
-// onboardingBackendItemKeys are the two milestones only the server witnesses — the daemon
-// connecting and an agent run starting can both happen while the browser is closed, so the
-// backend inserts them at its own seams and a client is not allowed to claim them.
-var onboardingBackendItemKeys = map[string]bool{
-	OnboardingLocalEnvironmentConnected: true,
-	OnboardingFirstAgentRunStarted:      true,
-}
+// onboardingBackendItemKeys are milestones only the server witnesses — inserted by the backend
+// at its own seams, never client-insertable. Empty today: every stored milestone is a client
+// action. The split is kept deliberately even so — the moment a server-witnessed *learning*
+// milestone appears, the client-forgery guard must already exist rather than be reintroduced
+// under pressure (which is how the hole gets opened). The write-split tests assert behavior, so
+// the structure stays safe to extend.
+var onboardingBackendItemKeys = map[string]bool{}
 
 // isOnboardingItemKey reports whether key is a recognized onboarding item (client or
 // backend). Any insert must be one of these; an unknown key is rejected so a typo can never
