@@ -30,6 +30,13 @@ func OpenDatabase(databaseURL string) (*Database, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	// One-time data migration: seed existing accounts' already-earned learning milestones so the
+	// frontend cutover doesn't re-onboard them. The per-account guard + ON CONFLICT make it a no-op
+	// for any account that already has completion rows, so it's safe to run on every boot.
+	if err := backfillOnboardingLearningCompletions(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return &Database{DB: db, URL: databaseURL}, nil
 }
 
