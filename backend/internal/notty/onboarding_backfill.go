@@ -11,9 +11,9 @@ import (
 // LEARNING milestones from existing state — the same existence signals the old live derivation
 // used — aggregated across the account's active workspaces.
 //
-// SIX milestones are backfilled. The other onboarding keys are deliberately NOT, because they
-// have no honest existence signal — leaving them out fails toward the user re-earning them once,
-// never toward a permanently-broken new-user path:
+// SIX milestones are backfilled, each reproducing today's derivation. The other two onboarding keys
+// are deliberately NOT, because neither has an honest existence signal — leaving them out fails
+// toward the user re-earning them once, never toward a permanently-broken new-user path:
 //   - account_intro_seen — purely "saw the intro modal", nothing in the DB witnesses it. Backfilling
 //     it would silently skip the intro for a brand-new user. Left out: an existing user sees the
 //     intro once and dismisses it, and with the other milestones marked the guide reports complete.
@@ -63,9 +63,13 @@ SELECT sub.account_id, sub.item_key, now()
       FROM workspace_members m WHERE m.status = 'active'
        AND EXISTS (SELECT 1 FROM agent_document_subscriptions s WHERE s.workspace_id = m.workspace_id)
     UNION ALL
+    -- member_invited: THIS account invited someone — its own workspace user created an invite
+    -- (workspace_members.user_id = workspace_invites.created_by_user_id). Faithful to today's
+    -- per-inviter flag; does NOT over-mark other members of a workspace that merely has invites.
     SELECT DISTINCT m.account_id, 'member_invited'
       FROM workspace_members m WHERE m.status = 'active'
-       AND EXISTS (SELECT 1 FROM workspace_invites i WHERE i.workspace_id = m.workspace_id)
+       AND EXISTS (SELECT 1 FROM workspace_invites i
+                    WHERE i.workspace_id = m.workspace_id AND i.created_by_user_id = m.user_id)
   ) sub
  WHERE NOT EXISTS (SELECT 1 FROM onboarding_completions c WHERE c.account_id = sub.account_id)
 ON CONFLICT DO NOTHING`

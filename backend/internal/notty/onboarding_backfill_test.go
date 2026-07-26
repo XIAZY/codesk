@@ -28,6 +28,41 @@ func seedThread(t *testing.T, db *sql.DB, workspaceID, documentID string) {
 	}
 }
 
+// accountWorkspaceUserID returns the account's workspace user id — the identity that authors invites.
+func accountWorkspaceUserID(t *testing.T, db *sql.DB, accountID, workspaceID string) string {
+	t.Helper()
+	var userID string
+	if err := db.QueryRow(
+		`SELECT user_id::text FROM workspace_members WHERE account_id = $1 AND workspace_id = $2`, accountID, workspaceID).Scan(&userID); err != nil {
+		t.Fatalf("workspace user id: %v", err)
+	}
+	return userID
+}
+
+// seedInviteBy records an invite authored by a specific workspace user (member_invited is derived
+// from authorship, so who invites determines who is backfilled).
+func seedInviteBy(t *testing.T, db *sql.DB, workspaceID, userID string) {
+	t.Helper()
+	if _, err := db.Exec(
+		`INSERT INTO workspace_invites (id, workspace_id, token_hash, created_by_user_id, expires_at, created_at)
+		 VALUES (gen_random_uuid(), $1, gen_random_uuid()::text, $2, now() + interval '1 day', now())`, workspaceID, userID); err != nil {
+		t.Fatalf("seed invite by user: %v", err)
+	}
+}
+
+// seedInviteByOtherUser records an invite authored by a NEW, unrelated workspace user — used to
+// prove member_invited does not over-mark other members of a workspace that merely has invites.
+func seedInviteByOtherUser(t *testing.T, db *sql.DB, workspaceID string) {
+	t.Helper()
+	var userID string
+	if err := db.QueryRow(
+		`INSERT INTO users (workspace_id, id, handle, name, role, kind, status, created_at, updated_at)
+		 VALUES ($1, gen_random_uuid(), 'inviter', 'Inviter', 'owner', 'human', 'active', now(), now()) RETURNING id::text`, workspaceID).Scan(&userID); err != nil {
+		t.Fatalf("seed other workspace user: %v", err)
+	}
+	seedInviteBy(t, db, workspaceID, userID)
+}
+
 func backfilledKeys(t *testing.T, db *sql.DB, accountID string) []string {
 	t.Helper()
 	completions, err := listOnboardingCompletions(db, accountID)
@@ -48,15 +83,20 @@ func TestOnboardingBackfillDerivesEarnedLearningMilestones(t *testing.T) {
 	server, router := newAuthTestServer(t)
 	db := server.sqlDB()
 
-	// Account A: a workspace with a content document + a thread → three learning milestones.
+	// Account A: a workspace with a content document, a thread, and an invite A itself authored →
+	// four learning milestones (including member_invited, derived from A's own authorship).
 	accountA := authTestRegister(t, router, "backfill-active@example.com", "owner-pass", "Backfill Active")
 	wsA := authTestCreateWorkspace(t, router, accountA.Token, "Active Tenant")
 	docA := seedContentDocument(t, db, wsA.ID)
 	seedThread(t, db, wsA.ID, docA)
+	seedInviteBy(t, db, wsA.ID, accountWorkspaceUserID(t, db, accountA.Account.ID, wsA.ID))
 
-	// Account B: a workspace only — just the auto-created root document, no content.
+	// Account B: a workspace with only the auto-created root document, plus an invite authored by a
+	// DIFFERENT user — so B earns only workspace_created (the root doesn't count, and a stranger's
+	// invite must not over-mark member_invited).
 	accountB := authTestRegister(t, router, "backfill-empty@example.com", "owner-pass", "Backfill Empty")
-	authTestCreateWorkspace(t, router, accountB.Token, "Empty Tenant")
+	wsB := authTestCreateWorkspace(t, router, accountB.Token, "Empty Tenant")
+	seedInviteByOtherUser(t, db, wsB.ID)
 
 	// Account C: qualifies (a content document) BUT already has a completion row. The per-account
 	// guard must skip it entirely — and, crucially, its stray row must not stop A and B from being
@@ -76,22 +116,22 @@ func TestOnboardingBackfillDerivesEarnedLearningMilestones(t *testing.T) {
 	// one, because a transaction sees its own writes and the per-account guard would go false after
 	// the first; the single UNION statement is what makes all three land.)
 	aKeys := backfilledKeys(t, db, accountA.Account.ID)
-	for _, want := range []string{OnboardingWorkspaceCreated, OnboardingFirstDocumentCreated, OnboardingFirstThreadCreated} {
+	for _, want := range []string{OnboardingWorkspaceCreated, OnboardingFirstDocumentCreated, OnboardingFirstThreadCreated, OnboardingMemberInvited} {
 		if !hasKey(aKeys, want) {
 			t.Errorf("account A missing earned milestone %q; got %v", want, aKeys)
 		}
 	}
 	// ...and not the signal-less keys, nor milestones it never earned.
-	for _, notWant := range []string{OnboardingAccountIntroSeen, OnboardingFirstDocumentEdited, OnboardingFirstThreadReplied, OnboardingMemberInvited} {
+	for _, notWant := range []string{OnboardingAccountIntroSeen, OnboardingFirstDocumentEdited, OnboardingFirstThreadReplied} {
 		if hasKey(aKeys, notWant) {
 			t.Errorf("account A has un-earned/signal-less key %q; got %v", notWant, aKeys)
 		}
 	}
 
-	// B: only workspace_created — the auto-created root document must NOT count as a created document.
+	// B: only workspace_created — the root doc doesn't count, and a stranger's invite doesn't over-mark.
 	bKeys := backfilledKeys(t, db, accountB.Account.ID)
 	if len(bKeys) != 1 || bKeys[0] != OnboardingWorkspaceCreated {
-		t.Errorf("account B keys = %v, want exactly [workspace_created] (root doc must not count)", bKeys)
+		t.Errorf("account B keys = %v, want exactly [workspace_created] (root must not count; stranger's invite must not over-mark)", bKeys)
 	}
 
 	// C: untouched — still exactly its stray row, no derived milestones even though it qualifies.
