@@ -1439,6 +1439,10 @@ pass 'daemon installers preserve the live version-first latest metadata path'
 # arithmetic), so they'd false-positive; shellcheck SC2154 is the proper tool for those.
 # This is a net, not a proof: `export name=`, `read name`, and `for name in` are handled,
 # but a sourced assignment would still slip through.
+# DO NOT REMOVE thinking "we already execute these": no fixture runs deploy-backend.sh,
+# deploy-frontend.sh, deploy-homepage.sh, or deploy-macos-gui.sh, so set -eu never fires
+# for them in tests — this static scan is the ONLY thing catching a dangling variable
+# before a live deploy, which is exactly why the original $version bug sat for 17 days.
 for deploy_script in "$repo_dir"/scripts/deploy-*.sh "$repo_dir/scripts/build-backend-image.sh"; do
 	assigned_vars="$( {
 		sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}\([a-z_][a-z0-9_]*\)=.*/\2/p' "$deploy_script"
