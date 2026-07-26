@@ -42,8 +42,11 @@ services:
       NOTTY_DAEMON_TOKEN: ${NOTTY_DAEMON_TOKEN:-}
       NOTTY_WORKSPACE_DIR: /workspace/notty/${NOTTY_WORKSPACE_ID:-default}
       NOTTY_AGENT_WORKSPACE_ROOT: /workspace/agents/${NOTTY_WORKSPACE_ID:-default}
+      NOTTY_CODEX_COMMAND: ${NOTTY_CODEX_COMMAND:-codex}
+      NOTTY_TEST_MODEL_PROFILE_DELAY_MS: ${NOTTY_TEST_MODEL_PROFILE_DELAY_MS:-0}
     volumes:
       - daemon_workspace:/workspace
+      - ./fixtures:/opt/notty-test/fixtures:ro
 
 volumes:
   postgres_data:

@@ -79,6 +79,10 @@ func regressionScaledTimeout(t *testing.T, timeout time.Duration) time.Duration 
 	if err != nil {
 		t.Fatalf("invalid %s: %v", regressionDeadlineScaleEnv, err)
 	}
+	return scaleRegressionTimeout(timeout, scale)
+}
+
+func scaleRegressionTimeout(timeout time.Duration, scale float64) time.Duration {
 	if scale == 1 || timeout <= 0 {
 		return timeout
 	}

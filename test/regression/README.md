@@ -28,6 +28,8 @@ Daemon filesystem lifecycle coverage includes a local-filesystem-driven regressi
 
 Thread integrity coverage verifies that clients can create document threads with Yjs relative anchors, that the backend preserves those caller-supplied anchors without materializing document text, and that raw-offset text-range thread creation is rejected.
 
+Model-profile coverage runs a deterministic local Codex app-server fixture through the real daemon, authenticated backend APIs, and Postgres. It verifies the exact seven-model catalog after a slow successful probe, explicit and inherited create-agent profiles, thread start/resume parameters, and zero-spawn rejection when a model vanishes, an effort is unsupported, or the runtime default moves.
+
 Known gap: the backend-restart append test is opt-in because it currently reproduces a lost-write/reconnect problem. During a 1000-line reduced run, backend reconstruction stopped at 143 lines after restart, indicating websocket write success is being treated as persistence without a server-level acknowledgement.
 
 Merge/conflict coverage:
