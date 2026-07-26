@@ -1429,4 +1429,31 @@ grep -Fq 'Join-RemotePath $StaticBase "windows"' "$repo_dir/deploy/daemons/insta
 	fail 'PowerShell installer retained a platform-prefixed daemon root'
 pass 'daemon installers preserve the live version-first latest metadata path'
 
+# Every lowercase $var referenced in a deploy script must be assigned in that same
+# script. Uppercase names are env vars and excluded, so this catches the real failure
+# class: an append-only hunk referencing a variable renamed out from under it (e.g.
+# $version after the version->git_sha rename), which set -eu would otherwise only fail
+# on mid-deploy, after the image is already pushed. Covers all deploy legs plus the
+# backend image build. The build-daemon-*/build-macos-* scripts are intentionally out
+# of scope — they assign via patterns this cheap scan doesn't model (case branches,
+# arithmetic), so they'd false-positive; shellcheck SC2154 is the proper tool for those.
+# This is a net, not a proof: `export name=`, `read name`, and `for name in` are handled,
+# but a sourced assignment would still slip through.
+# DO NOT REMOVE thinking "we already execute these": no fixture runs deploy-backend.sh,
+# deploy-frontend.sh, deploy-homepage.sh, or deploy-macos-gui.sh, so set -eu never fires
+# for them in tests — this static scan is the ONLY thing catching a dangling variable
+# before a live deploy, which is exactly why the original $version bug sat for 17 days.
+for deploy_script in "$repo_dir"/scripts/deploy-*.sh "$repo_dir/scripts/build-backend-image.sh"; do
+	assigned_vars="$( {
+		sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}\([a-z_][a-z0-9_]*\)=.*/\2/p' "$deploy_script"
+		sed -n 's/^[[:space:]]*read[[:space:]]\{1,\}//p' "$deploy_script" | tr ' ' '\n'
+		sed -n 's/^[[:space:]]*for[[:space:]]\{1,\}\([a-z_][a-z0-9_]*\)[[:space:]].*/\1/p' "$deploy_script"
+	} | grep -E '^[a-z_][a-z0-9_]*$' | sort -u)"
+	for referenced_var in $(grep -oE '\$\{?[a-z_][a-z0-9_]*' "$deploy_script" | sed 's/[${]//g' | sort -u); do
+		printf '%s\n' "$assigned_vars" | grep -qx "$referenced_var" ||
+			fail "$(basename "$deploy_script") references \$$referenced_var but never assigns it — a renamed or typo'd variable set -eu would abort a live deploy on"
+	done
+	pass "$(basename "$deploy_script"): every referenced shell variable is assigned in-script"
+done
+
 printf '%s\n' 'All build/deploy contract tests passed.'
