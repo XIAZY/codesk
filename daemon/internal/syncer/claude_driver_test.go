@@ -71,6 +71,23 @@ func TestClaudeDriverDetect(t *testing.T) {
 	}
 }
 
+func TestClaudeDriverDetectVersionProbeUsesStdoutOnly(t *testing.T) {
+	t.Run("successful stderr warning does not pollute version", func(t *testing.T) {
+		claudePath := fakeVersionProbeCommand(
+			t,
+			"9.9.9 (Claude Code)\n",
+			"WARNING: provider cache cleanup skipped\n",
+		)
+		driver := newClaudeDriver(Config{ClaudeCommand: claudePath})
+
+		detection := driver.Detect(context.Background())
+
+		if !detection.Available || detection.Version != "9.9.9 (Claude Code)" || detection.Reason != "" {
+			t.Fatalf("stdout-only successful version detection = %#v", detection)
+		}
+	})
+}
+
 func TestClaudeDriverDetectMissingCommand(t *testing.T) {
 	driver := newClaudeDriver(Config{ClaudeCommand: filepath.Join(t.TempDir(), "claude-not-installed")})
 

@@ -68,7 +68,7 @@ func (d *claudeDriver) Detect(ctx context.Context) RuntimeDetection {
 	}
 	detectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	output, err := managedBackgroundCommandContext(detectCtx, path, "--version").CombinedOutput()
+	output, err := managedBackgroundCommandContext(detectCtx, path, "--version").Output()
 	if err != nil {
 		return RuntimeDetection{Kind: RuntimeClaudeCode, Available: false, Path: path, Reason: "claude --version failed"}
 	}

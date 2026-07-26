@@ -65,7 +65,7 @@ func (d *codexDriver) Detect(ctx context.Context) RuntimeDetection {
 	version := ""
 	detectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	output, err := managedBackgroundCommandContext(detectCtx, path, "--version").CombinedOutput()
+	output, err := managedBackgroundCommandContext(detectCtx, path, "--version").Output()
 	if err != nil {
 		return RuntimeDetection{Kind: RuntimeCodex, Available: false, Path: path, Reason: "codex --version failed"}
 	}
