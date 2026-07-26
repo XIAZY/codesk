@@ -35,4 +35,4 @@ Known gap: the backend-restart append test is opt-in because it currently reprod
 Merge/conflict coverage:
 
 - Non-overlapping local filesystem append plus remote websocket append must converge across backend, daemon projection, and a fresh websocket recipient.
-- Overlapping local/remote rewrites are treated as unresolved divergence for now: the regression asserts the local edit is not silently clobbered while backend websocket recipients stay consistent on the remote CRDT state.
+- Overlapping local/remote whole-line rewrites must converge across backend, daemon projection, and a fresh websocket recipient without losing either complete rewritten line.
