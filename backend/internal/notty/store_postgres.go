@@ -194,6 +194,8 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			name TEXT NOT NULL,
 			role TEXT NOT NULL,
 			kind TEXT NOT NULL,
+			model TEXT NOT NULL DEFAULT '',
+			reasoning_effort TEXT NOT NULL DEFAULT '',
 			system_prompt TEXT NOT NULL,
 			workspace_root TEXT NOT NULL,
 			current_turn_id TEXT NOT NULL DEFAULT '',
@@ -217,6 +219,10 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		)
 		`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_workspace_handle ON agents (workspace_id, handle)`,
+		// Idempotent column-adds for databases created before model selection
+		// (instant backfill: the empty default means "inherit the runtime default").
+		`ALTER TABLE agents ADD COLUMN IF NOT EXISTS model TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE agents ADD COLUMN IF NOT EXISTS reasoning_effort TEXT NOT NULL DEFAULT ''`,
 		`
 		CREATE TABLE IF NOT EXISTS agent_runs (
 			workspace_id UUID NOT NULL,
@@ -988,13 +994,13 @@ func insertAgentPostgres(tx *sql.Tx, workspaceID string, agent *Agent) error {
 	}
 	_, err := tx.Exec(
 		`INSERT INTO agents (
-			workspace_id, id, daemon_id, handle, name, role, kind, system_prompt, workspace_root,
+			workspace_id, id, daemon_id, handle, name, role, kind, model, reasoning_effort, system_prompt, workspace_root,
 			current_turn_id, session_id, status, current_task, current_activity,
 			current_run_id, last_heartbeat_at, last_run_completed, updated_at
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9,
-			$10, $11, $12, $13, $14,
-			$15, $16, $17, $18
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+			$11, $12, $13, $14, $15, $16,
+			$17, $18, $19, $20
 		)`,
 		workspaceID,
 		agent.ID,
@@ -1003,6 +1009,8 @@ func insertAgentPostgres(tx *sql.Tx, workspaceID string, agent *Agent) error {
 		agent.Name,
 		agent.Role,
 		agent.Kind,
+		agent.Model,
+		agent.ReasoningEffort,
 		agent.SystemPrompt,
 		agent.WorkspaceRoot,
 		agent.CurrentTurnID,
@@ -1024,13 +1032,13 @@ func upsertAgentPostgresTx(tx *sql.Tx, workspaceID string, agent *Agent) error {
 	}
 	_, err := tx.Exec(
 		`INSERT INTO agents (
-			workspace_id, id, daemon_id, handle, name, role, kind, system_prompt, workspace_root,
+			workspace_id, id, daemon_id, handle, name, role, kind, model, reasoning_effort, system_prompt, workspace_root,
 			current_turn_id, session_id, status, current_task, current_activity,
 			current_run_id, last_heartbeat_at, last_run_completed, updated_at
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9,
-			$10, $11, $12, $13, $14,
-			$15, $16, $17, $18
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+			$11, $12, $13, $14, $15, $16,
+			$17, $18, $19, $20
 		)
 		ON CONFLICT (id)
 		DO UPDATE SET daemon_id = EXCLUDED.daemon_id,
@@ -1038,6 +1046,8 @@ func upsertAgentPostgresTx(tx *sql.Tx, workspaceID string, agent *Agent) error {
 		              name = EXCLUDED.name,
 		              role = EXCLUDED.role,
 		              kind = EXCLUDED.kind,
+		              model = EXCLUDED.model,
+		              reasoning_effort = EXCLUDED.reasoning_effort,
 		              system_prompt = EXCLUDED.system_prompt,
 		              workspace_root = EXCLUDED.workspace_root,
 		              current_turn_id = EXCLUDED.current_turn_id,
@@ -1056,6 +1066,8 @@ func upsertAgentPostgresTx(tx *sql.Tx, workspaceID string, agent *Agent) error {
 		agent.Name,
 		agent.Role,
 		agent.Kind,
+		agent.Model,
+		agent.ReasoningEffort,
 		agent.SystemPrompt,
 		agent.WorkspaceRoot,
 		agent.CurrentTurnID,
@@ -1993,7 +2005,7 @@ func listUsersPostgres(q querier, workspaceID string) ([]*User, error) {
 
 func listAgentsPostgres(q querier, workspaceID string) ([]*Agent, error) {
 	rows, err := q.Query(
-		`SELECT id::text, COALESCE(daemon_id::text, ''), handle, name, role, kind, system_prompt, workspace_root,
+		`SELECT id::text, COALESCE(daemon_id::text, ''), handle, name, role, kind, model, reasoning_effort, system_prompt, workspace_root,
 		        current_turn_id, session_id, status,
 		        current_task, current_activity, COALESCE(current_run_id::text, ''), last_heartbeat_at,
 		        last_run_completed, updated_at
@@ -2023,7 +2035,7 @@ func getAgentPostgres(q querier, workspaceID string, agentID string) (*Agent, er
 		return nil, ErrNotFound
 	}
 	row := q.QueryRow(
-		`SELECT id::text, COALESCE(daemon_id::text, ''), handle, name, role, kind, system_prompt, workspace_root,
+		`SELECT id::text, COALESCE(daemon_id::text, ''), handle, name, role, kind, model, reasoning_effort, system_prompt, workspace_root,
 		        current_turn_id, session_id, status,
 		        current_task, current_activity, COALESCE(current_run_id::text, ''), last_heartbeat_at,
 		        last_run_completed, updated_at
@@ -2045,7 +2057,7 @@ func getAgentForUpdatePostgres(tx *sql.Tx, workspaceID string, agentID string) (
 		return nil, ErrNotFound
 	}
 	row := tx.QueryRow(
-		`SELECT id::text, COALESCE(daemon_id::text, ''), handle, name, role, kind, system_prompt, workspace_root,
+		`SELECT id::text, COALESCE(daemon_id::text, ''), handle, name, role, kind, model, reasoning_effort, system_prompt, workspace_root,
 		        current_turn_id, session_id, status,
 		        current_task, current_activity, COALESCE(current_run_id::text, ''), last_heartbeat_at,
 		        last_run_completed, updated_at
@@ -2261,6 +2273,8 @@ func scanAgent(scanner interface{ Scan(...any) error }) (*Agent, error) {
 		&agent.Name,
 		&agent.Role,
 		&agent.Kind,
+		&agent.Model,
+		&agent.ReasoningEffort,
 		&agent.SystemPrompt,
 		&agent.WorkspaceRoot,
 		&agent.CurrentTurnID,

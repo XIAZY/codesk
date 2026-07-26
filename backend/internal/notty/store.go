@@ -1171,6 +1171,8 @@ func (s *Store) CreateAgent(req CreateAgentRequest, meta OperationMeta) (*Agent,
 	}
 	agent.ID = uuid.NewString()
 	agent.WorkspaceRoot = "agents/" + agent.ID
+	agent.Model = strings.TrimSpace(req.Model)
+	agent.ReasoningEffort = strings.TrimSpace(req.ReasoningEffort)
 	now := time.Now().UTC()
 	agent.UpdatedAt = now
 
@@ -1217,6 +1219,9 @@ func (s *Store) CreateAgent(req CreateAgentRequest, meta OperationMeta) (*Agent,
 		return nil, ErrNotFound
 	}
 	if err := validateDaemonRuntimeKind(daemon, kind); err != nil {
+		return nil, err
+	}
+	if err := validateAgentModelProfile(daemon, kind, agent.Model, agent.ReasoningEffort); err != nil {
 		return nil, err
 	}
 	agent.DaemonID = daemonID
@@ -2361,6 +2366,98 @@ func validateDaemonRuntimeKind(daemon *Daemon, kind string) error {
 		return fmt.Errorf("runtime %q is unavailable on daemon %q", kind, daemon.ID)
 	}
 	return fmt.Errorf("runtime %q is not reported by daemon %q", kind, daemon.ID)
+}
+
+// validateAgentModelProfile enforces the model / reasoning-effort selection
+// contract against the selected runtime's reported model catalog. Capability is
+// catalog presence, not a provider switch, so the runtime is selected by the
+// normalized request kind (not a hardcoded provider) and the three catalog-state
+// error strings are kept provider-agnostic.
+//
+// Rules:
+//   - model=="" && effort=="" : full inheritance; always allowed, even when the
+//     runtime reports no catalog (old daemon, or a runtime with none today).
+//   - any explicit model/effort requires a present, error-free, non-empty catalog.
+//   - explicit model must match a projected model; an explicit effort must be one
+//     of that model's reasoning efforts (empty effort inherits the model's).
+//   - model=="" && explicit effort resolves the single visible default model and
+//     validates the effort against it, while the partial-inheritance state
+//     {model:"", effort} is persisted unchanged by the caller (never canonicalized).
+//
+// It never mutates the agent; it only accepts or rejects, failing closed.
+func validateAgentModelProfile(daemon *Daemon, kind, model, effort string) error {
+	if model == "" && effort == "" {
+		return nil
+	}
+	if daemon == nil {
+		return ErrNotFound
+	}
+	var catalog *RuntimeModelCatalog
+	found := false
+	for i := range daemon.Runtimes {
+		runtimeKind, err := normalizeAgentRuntimeKind(daemon.Runtimes[i].Kind)
+		if err != nil || runtimeKind != kind {
+			continue
+		}
+		found = true
+		catalog = daemon.Runtimes[i].ModelCatalog
+		break
+	}
+	if !found {
+		return fmt.Errorf("runtime %q is not reported by daemon %q", kind, daemon.ID)
+	}
+	if catalog == nil {
+		return fmt.Errorf("daemon %q has not reported a model catalog", daemon.ID)
+	}
+	if strings.TrimSpace(catalog.Error) != "" {
+		return fmt.Errorf("model catalog discovery failed on daemon %q", daemon.ID)
+	}
+	if len(catalog.Models) == 0 {
+		return fmt.Errorf("no models available on daemon %q", daemon.ID)
+	}
+	if model != "" {
+		var selected *RuntimeModel
+		for i := range catalog.Models {
+			if catalog.Models[i].Model == model {
+				selected = &catalog.Models[i]
+				break
+			}
+		}
+		if selected == nil {
+			return fmt.Errorf("model %q is not available on daemon %q", model, daemon.ID)
+		}
+		if effort != "" && !reasoningEffortSupported(selected.ReasoningEfforts, effort) {
+			return fmt.Errorf("reasoning effort %q is not available for model %q on daemon %q", effort, model, daemon.ID)
+		}
+		return nil
+	}
+	// model=="" && effort!="" : resolve the single visible default model.
+	var defaultModel *RuntimeModel
+	for i := range catalog.Models {
+		if !catalog.Models[i].IsDefault {
+			continue
+		}
+		if defaultModel != nil {
+			return fmt.Errorf("daemon %q reports more than one default model; reasoning effort for the default cannot be resolved", daemon.ID)
+		}
+		defaultModel = &catalog.Models[i]
+	}
+	if defaultModel == nil {
+		return fmt.Errorf("daemon %q reports no default model; reasoning effort for the default cannot be resolved", daemon.ID)
+	}
+	if !reasoningEffortSupported(defaultModel.ReasoningEfforts, effort) {
+		return fmt.Errorf("reasoning effort %q is not available for the default model on daemon %q", effort, daemon.ID)
+	}
+	return nil
+}
+
+func reasoningEffortSupported(efforts []string, effort string) bool {
+	for _, candidate := range efforts {
+		if candidate == effort {
+			return true
+		}
+	}
+	return false
 }
 
 func sharedAgentSystemPrompt(agent *Agent) string {
