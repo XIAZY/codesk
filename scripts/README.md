@@ -257,6 +257,14 @@ Without an explicit run ID, the script selects the newest successful CI run
 for the exact checked-out commit. It never falls back to a stale commit or a
 non-successful run.
 
+The CI MSI matrix is gated by the repository variable
+`CODESK_WINDOWS_MSI_RUNNERS_AVAILABLE`. Leave it unset or set it to any value
+other than `true` when no matching self-hosted Windows ARM64 runner is online;
+the MSI rows then report as skipped instead of waiting indefinitely. Set it to
+`true` only while that runner capacity is available. The gate does not use
+`continue-on-error`, so any checkout, payload, WiX, validation, or upload
+failure remains a blocking CI failure whenever the matrix runs.
+
 ### Native acceptance
 
 `test-macos-desktop-native.sh` is the destructive runtime harness. Run it in a

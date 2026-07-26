@@ -303,6 +303,10 @@ jobs:
   windows-desktop-msi:
     name: Windows desktop MSI (WiX ${{ matrix.architecture }})
     needs: windows-daemon-build
+    # A queued job cannot discover that no matching self-hosted runner exists.
+    # Keep the matrix visible but skipped until an owner sets this repository
+    # variable while the Windows ARM64 runner is provisioned and online.
+    if: ${{ vars.CODESK_WINDOWS_MSI_RUNNERS_AVAILABLE == 'true' }}
     runs-on: [self-hosted, Windows, ARM64]
     timeout-minutes: 15
     strategy:
