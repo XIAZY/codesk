@@ -230,6 +230,16 @@ func runFakeClaude(args []string) int {
 		fmt.Println("9.9.9 (Claude Code)")
 		return 0
 	}
+	if len(args) == 1 && args[0] == "--help" {
+		if os.Getenv("FAKE_CLAUDE_HELP_DRIFT") == "1" {
+			fmt.Println("--effort <level>  Choose effort (low, medium, high)")
+			return 0
+		}
+		fmt.Println("--model <model>  Model alias (fable, opus, sonnet)")
+		fmt.Println("--effort <level>  Choose effort (low, medium, high, xhigh, max)")
+		fmt.Println("--fallback-model <model>  Fallback model")
+		return 0
+	}
 	if path := os.Getenv("FAKE_CLAUDE_ENV_FILE"); path != "" {
 		contents := strings.Join(os.Environ(), "\n") + "\n"
 		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {

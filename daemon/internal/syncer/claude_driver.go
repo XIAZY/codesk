@@ -22,6 +22,14 @@ import (
 
 const RuntimeClaudeCode RuntimeKind = "claude-code"
 
+var claudeCuratedModels = []RuntimeModel{
+	{Model: "fable", DisplayName: "Fable"},
+	{Model: "opus", DisplayName: "Opus"},
+	{Model: "sonnet", DisplayName: "Sonnet"},
+}
+
+var claudeDocumentedReasoningEfforts = []string{"low", "medium", "high", "xhigh", "max"}
+
 // Claude Code has no app-server equivalent: one process hosts exactly one
 // session, and session identity is fixed by CLI flags at launch. The daemon
 // talks to it over the CLI's stream-json stdin/stdout protocol.
@@ -75,6 +83,34 @@ func (d *claudeDriver) Detect(ctx context.Context) RuntimeDetection {
 	return RuntimeDetection{Kind: RuntimeClaudeCode, Available: true, Version: strings.TrimSpace(string(output)), Path: path}
 }
 
+func (d *claudeDriver) detectModelCatalog(ctx context.Context) *RuntimeModelCatalog {
+	detectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	output, err := managedBackgroundCommandContext(detectCtx, d.command(), "--help").Output()
+	if err != nil {
+		return &RuntimeModelCatalog{Models: []RuntimeModel{}, Error: "model catalog unavailable"}
+	}
+	help := string(output)
+	effortSignature := "(" + strings.Join(claudeDocumentedReasoningEfforts, ", ") + ")"
+	if !strings.Contains(help, "--effort <level>") || !strings.Contains(help, effortSignature) {
+		return &RuntimeModelCatalog{Models: []RuntimeModel{}, Error: "model catalog unavailable"}
+	}
+
+	efforts := append([]string(nil), claudeDocumentedReasoningEfforts...)
+	models := make([]RuntimeModel, 0, len(claudeCuratedModels))
+	for _, candidate := range claudeCuratedModels {
+		model := candidate
+		model.ReasoningEfforts = append([]string(nil), efforts...)
+		models = append(models, model)
+	}
+	return &RuntimeModelCatalog{
+		Models:                    models,
+		ModelProvenance:           "curated",
+		ReasoningEfforts:          efforts,
+		ReasoningEffortProvenance: "detected",
+	}
+}
+
 func (d *claudeDriver) Spawn(ctx context.Context, spec RuntimeSpawnSpec) (RuntimeProcess, error) {
 	return &claudeRuntimeProcess{
 		cfg:           d.cfg,
@@ -83,6 +119,7 @@ func (d *claudeDriver) Spawn(ctx context.Context, spec RuntimeSpawnSpec) (Runtim
 		workdir:       spec.Workdir,
 		toolToken:     spec.ToolToken,
 		instructions:  spec.Instructions,
+		profile:       spec.Profile,
 		handshakeWait: d.handshakeWait,
 		events:        make(chan RuntimeEvent, 128),
 		eventsDone:    make(chan struct{}),
@@ -97,6 +134,7 @@ type claudeRuntimeProcess struct {
 	workdir       string
 	toolToken     string
 	instructions  string
+	profile       RuntimeProfile
 	handshakeWait time.Duration
 
 	events     chan RuntimeEvent
@@ -264,6 +302,12 @@ func (p *claudeRuntimeProcess) buildArgs(sessionID string, resume bool) []string
 		"--dangerously-skip-permissions",
 		"--permission-mode", "bypassPermissions",
 		"--disallowed-tools", claudeDisallowedTools,
+	}
+	if model := strings.TrimSpace(p.profile.Model); model != "" {
+		args = append(args, "--model", model)
+	}
+	if effort := strings.TrimSpace(p.profile.ReasoningEffort); effort != "" {
+		args = append(args, "--effort", effort)
 	}
 	if resume {
 		args = append(args, "--resume", sessionID)
@@ -500,6 +544,24 @@ func (p *claudeRuntimeProcess) readLoop(stdout io.Reader, stdoutTail *claudeStdo
 				p.sessionID = event.sessionID
 			}
 			p.mu.Unlock()
+		case claudeStreamTerminalProfile:
+			p.mu.Lock()
+			turnID := p.activeTurn
+			sessionID := p.sessionID
+			explicitModel := strings.TrimSpace(p.profile.Model) != ""
+			p.activeTurn = ""
+			p.mu.Unlock()
+			failureKind := RuntimeFailureKind("")
+			if explicitModel {
+				failureKind = RuntimeFailureTerminalProfile
+			}
+			p.emitLifecycle(RuntimeEvent{
+				Kind:        RuntimeEventTurnFailed,
+				SessionID:   sessionID,
+				TurnID:      turnID,
+				Error:       event.errText,
+				FailureKind: failureKind,
+			})
 		case claudeStreamTurnEnd:
 			p.mu.Lock()
 			turnID := p.activeTurn
@@ -732,8 +794,9 @@ func truncateForLog(line string) string {
 type claudeStreamEventKind string
 
 const (
-	claudeStreamInit    claudeStreamEventKind = "init"
-	claudeStreamTurnEnd claudeStreamEventKind = "turnEnd"
+	claudeStreamInit            claudeStreamEventKind = "init"
+	claudeStreamTerminalProfile claudeStreamEventKind = "terminalProfile"
+	claudeStreamTurnEnd         claudeStreamEventKind = "turnEnd"
 )
 
 type claudeStreamEvent struct {
@@ -748,17 +811,38 @@ type claudeStreamEvent struct {
 // deltas, tool calls, and control responses are intentionally ignored.
 func parseClaudeStreamLine(line []byte) *claudeStreamEvent {
 	var payload struct {
-		Type      string   `json:"type"`
-		Subtype   string   `json:"subtype"`
-		SessionID string   `json:"session_id"`
-		IsError   bool     `json:"is_error"`
-		Errors    []string `json:"errors"`
-		Result    string   `json:"result"`
+		Type              string   `json:"type"`
+		Subtype           string   `json:"subtype"`
+		SessionID         string   `json:"session_id"`
+		IsError           bool     `json:"is_error"`
+		Errors            []string `json:"errors"`
+		Result            string   `json:"result"`
+		Error             string   `json:"error"`
+		IsAPIErrorMessage bool     `json:"is_api_error_message"`
+		Message           struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"message"`
 	}
 	if err := json.Unmarshal(line, &payload); err != nil {
 		return nil
 	}
 	switch payload.Type {
+	case "assistant":
+		if payload.Error == "model_not_found" && payload.IsAPIErrorMessage {
+			parts := make([]string, 0, len(payload.Message.Content))
+			for _, content := range payload.Message.Content {
+				if content.Type == "text" && strings.TrimSpace(content.Text) != "" {
+					parts = append(parts, strings.TrimSpace(content.Text))
+				}
+			}
+			return &claudeStreamEvent{
+				kind:    claudeStreamTerminalProfile,
+				errText: firstNonEmptyText(strings.Join(parts, " | "), "Claude rejected the selected model"),
+			}
+		}
 	case "system":
 		if payload.Subtype == "init" {
 			return &claudeStreamEvent{kind: claudeStreamInit, sessionID: strings.TrimSpace(payload.SessionID)}

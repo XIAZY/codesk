@@ -5065,9 +5065,9 @@ export function ModelProfileFields({
 
   const models = catalog?.models ?? [];
   const defaultRow = uniqueDefaultModel(catalog);
-  // "Runtime default + explicit effort" is offered only when exactly one visible default resolves;
-  // otherwise the effort control is disabled while an explicit model still derives its own efforts.
-  const effortDisabled = !model && !defaultRow;
+  // "Runtime default + explicit effort" comes from either one visible default
+  // model or provider-wide effort choices for a runtime with no inferred default.
+  const effortDisabled = !model && !defaultRow && !catalog?.reasoningEfforts?.length;
 
   return (
     <div className="col gap-8 model-profile">
@@ -5098,6 +5098,7 @@ export function ModelProfileFields({
             : defaultRow
               ? `Follows this runtime's default — currently ${defaultRow.displayName}. That default can change.`
               : "Follows this runtime's default."}
+          {catalog?.modelProvenance === "curated" ? " Model choices are curated; the provider verifies account access on first use." : ""}
         </span>
       </label>
       <label className="field">
@@ -5112,6 +5113,7 @@ export function ModelProfileFields({
           {effortDisabled
             ? "Choose a specific model to set an explicit effort."
             : "Leave as default, or pin a specific effort."}
+          {catalog?.reasoningEffortProvenance === "detected" ? " Effort choices are detected from the installed CLI." : ""}
         </span>
       </label>
     </div>

@@ -40,8 +40,11 @@ type RuntimeDetection struct {
 }
 
 type RuntimeModelCatalog struct {
-	Models []RuntimeModel `json:"models"`
-	Error  string         `json:"error,omitempty"`
+	Models                    []RuntimeModel `json:"models"`
+	ModelProvenance           string         `json:"modelProvenance,omitempty"`
+	ReasoningEfforts          []string       `json:"reasoningEfforts,omitempty"`
+	ReasoningEffortProvenance string         `json:"reasoningEffortProvenance,omitempty"`
+	Error                     string         `json:"error,omitempty"`
 }
 
 type RuntimeModel struct {
@@ -117,11 +120,16 @@ const (
 )
 
 type RuntimeEvent struct {
-	Kind      RuntimeEventKind
-	SessionID string
-	TurnID    string
-	Error     string
+	Kind        RuntimeEventKind
+	SessionID   string
+	TurnID      string
+	Error       string
+	FailureKind RuntimeFailureKind
 }
+
+type RuntimeFailureKind string
+
+const RuntimeFailureTerminalProfile RuntimeFailureKind = "terminalProfile"
 
 // RuntimeExitInfo describes why a runtime process ended. It is valid only once
 // Events() has closed — the exit goroutine records it before the close, so a

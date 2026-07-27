@@ -641,6 +641,55 @@ func TestAgentSessionEmptyRuntimeProfileDoesNotRequireCatalog(t *testing.T) {
 	}
 }
 
+func TestAgentSessionProviderWideEffortPreservesRuntimeDefaultModel(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.detection.ModelCatalog = &RuntimeModelCatalog{
+		Models:           []RuntimeModel{{Model: "fable"}, {Model: "opus"}, {Model: "sonnet"}},
+		ReasoningEfforts: []string{"low", "medium", "high", "xhigh", "max"},
+	}
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	current := &agent{ID: "agent_1", Kind: "codex", ReasoningEffort: "xhigh"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	want := RuntimeProfile{ReasoningEffort: "xhigh"}
+	if got := factory.onlySpawnSpec(t).Profile; got != want {
+		t.Fatalf("spawn profile = %#v, want %#v", got, want)
+	}
+}
+
+func TestAgentSessionProviderWideEffortRejectsUnknownValueWithoutInferringModel(t *testing.T) {
+	catalog := &RuntimeModelCatalog{
+		Models:           []RuntimeModel{{Model: "fable"}, {Model: "opus"}, {Model: "sonnet"}},
+		ReasoningEfforts: []string{"low", "medium", "high", "xhigh", "max"},
+	}
+	_, err := resolveRuntimeProfile(&agent{ReasoningEffort: "ultra"}, catalog)
+	if err == nil || !strings.Contains(err.Error(), `runtime default does not support reasoning effort "ultra"`) {
+		t.Fatalf("resolve error = %v", err)
+	}
+}
+
+func TestAgentSessionExplicitModelUsesProviderWideEffortsWhenRowOmitsThem(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.detection.ModelCatalog = &RuntimeModelCatalog{
+		Models:           []RuntimeModel{{Model: "sonnet", DisplayName: "Sonnet"}},
+		ReasoningEfforts: []string{"low", "high"},
+	}
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	current := &agent{ID: "agent_1", Kind: "codex", Model: "sonnet", ReasoningEffort: "high"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	want := RuntimeProfile{Model: "sonnet", ReasoningEffort: "high"}
+	if got := factory.onlySpawnSpec(t).Profile; got != want {
+		t.Fatalf("spawn profile = %#v, want %#v", got, want)
+	}
+}
+
 type asyncProfileRuntimeDriver struct {
 	*fakeRuntimeDriver
 	catalog *RuntimeModelCatalog
@@ -1433,7 +1482,7 @@ func waitRestartAttempts(t *testing.T, s *agentSessionSupervisor, agentID string
 	deadline := time.After(2 * time.Second)
 	for {
 		s.mu.Lock()
-		got := s.restartAttempts[agentID]
+		got := s.restartAttempts[agentID].attempts
 		s.mu.Unlock()
 		if got == want {
 			return
@@ -1528,6 +1577,224 @@ func TestAgentSessionRestartCounterResetsOnCompletedTurn(t *testing.T) {
 			t.Fatalf("restart delay[%d] = %s, want %s — counter did not reset on proven uptime", i, got[i], want[i])
 		}
 	}
+}
+
+func TestAgentSessionTypedProfileFailureDominatesLaterResultAndExpectedExit(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.detection.ModelCatalog = testRuntimeModelCatalog()
+	updates := make(chan agentSessionStatusUpdate, 16)
+	updater := func(ctx context.Context, agentID string, payload updateAgentSessionRequest) error {
+		updates <- agentSessionStatusUpdate{agentID: agentID, payload: payload}
+		return nil
+	}
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), updater, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	handled := make(chan string, 1)
+	supervisor.testHookDeathHandled = func(class string) { handled <- class }
+	current := &agent{ID: "agent_1", Kind: "codex", Model: "gpt-5.6-sol"}
+	if err := supervisor.ensureSession(context.Background(), current); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+
+	// Hold the supervisor lock while buffering both frames. The typed failure is
+	// consumed first; the generic result remains buffered and must be ignored
+	// after the terminal transition rather than restoring idle.
+	supervisor.mu.Lock()
+	process.events <- RuntimeEvent{
+		Kind:        RuntimeEventTurnFailed,
+		Error:       "  Selected model is unavailable\ncontact support  ",
+		FailureKind: RuntimeFailureTerminalProfile,
+	}
+	process.events <- RuntimeEvent{Kind: RuntimeEventTurnFailed, Error: "generic 404 result"}
+	supervisor.mu.Unlock()
+
+	failed := waitAgentSessionStatus(t, updates, "agent_1", "failed")
+	if failed.payload.CurrentActivity != "Selected model is unavailable contact support" {
+		t.Fatalf("failed activity = %q", failed.payload.CurrentActivity)
+	}
+	select {
+	case class := <-handled:
+		if class != "terminal" {
+			t.Fatalf("death class = %q, want terminal", class)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for terminal exit classification")
+	}
+	supervisor.mu.Lock()
+	session := supervisor.sessions["agent_1"]
+	attempts := supervisor.restartAttempts["agent_1"].attempts
+	supervisor.mu.Unlock()
+	if session == nil || session.state != "failed" || !session.dead || session.restartPending {
+		t.Fatalf("terminal session = %#v", session)
+	}
+	if attempts != 0 {
+		t.Fatalf("typed terminal failure consumed %d restart attempts", attempts)
+	}
+	factory.mu.Lock()
+	spawns := len(factory.processes)
+	factory.mu.Unlock()
+	if spawns != 1 {
+		t.Fatalf("typed terminal failure spawned %d processes, want 1", spawns)
+	}
+}
+
+func TestAgentSessionInheritedModelNotFoundRemainsOrdinaryTurnFailure(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	if err := supervisor.ensureSession(context.Background(), &agent{ID: "agent_1", Kind: "codex"}); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	process := factory.only(t)
+	process.events <- RuntimeEvent{Kind: RuntimeEventTurnStarted, TurnID: "turn_1"}
+	deadline := time.After(2 * time.Second)
+	for {
+		supervisor.mu.Lock()
+		session := supervisor.sessions["agent_1"]
+		working := session != nil && session.state == "working"
+		supervisor.mu.Unlock()
+		if working {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("runtime did not enter working before inherited-model control")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	process.events <- RuntimeEvent{
+		Kind:        RuntimeEventTurnFailed,
+		Error:       "default model unavailable",
+		FailureKind: RuntimeFailureTerminalProfile,
+	}
+	deadline = time.After(2 * time.Second)
+	for {
+		supervisor.mu.Lock()
+		session := supervisor.sessions["agent_1"]
+		idle := session != nil && session.state == "idle" && !session.dead
+		supervisor.mu.Unlock()
+		if idle {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("inherited model failure did not remain an ordinary idle turn failure")
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+func TestAgentSessionExplicitConstructionFailuresRespectEligibilityAndCap(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.detection.ModelCatalog = testRuntimeModelCatalog()
+	factory.startErr = errors.New("provider rejected startup")
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	now := time.Unix(1_700_000_000, 0)
+	supervisor.now = func() time.Time { return now }
+	current := agentWithRuntimeProfile(RuntimeProfile{Model: "gpt-5.6-sol"})
+
+	if err := supervisor.Reconcile(context.Background(), []*agent{current}); err == nil {
+		t.Fatal("first construction failure returned nil")
+	}
+	if got := fakeRuntimeSpawnCount(factory); got != 1 {
+		t.Fatalf("spawn count after first failure = %d", got)
+	}
+	if err := supervisor.Reconcile(context.Background(), []*agent{current}); err != nil {
+		t.Fatalf("pre-eligibility reconcile = %v", err)
+	}
+	if got := fakeRuntimeSpawnCount(factory); got != 1 {
+		t.Fatalf("pre-eligibility reconcile spawned %d processes", got)
+	}
+
+	now = now.Add(restartBackoff(1))
+	if err := supervisor.Reconcile(context.Background(), []*agent{current}); err == nil {
+		t.Fatal("second construction failure returned nil")
+	}
+	now = now.Add(restartBackoff(2))
+	if err := supervisor.Reconcile(context.Background(), []*agent{current}); err == nil {
+		t.Fatal("third construction failure returned nil")
+	}
+	if got := fakeRuntimeSpawnCount(factory); got != explicitProfileConstructionAttemptCap {
+		t.Fatalf("spawn count at cap = %d", got)
+	}
+	supervisor.mu.Lock()
+	state := supervisor.restartAttempts[current.ID]
+	supervisor.mu.Unlock()
+	if !state.exhausted || state.attempts != explicitProfileConstructionAttemptCap {
+		t.Fatalf("construction state at cap = %#v", state)
+	}
+
+	now = now.Add(24 * time.Hour)
+	if err := supervisor.Reconcile(context.Background(), []*agent{current}); err != nil {
+		t.Fatalf("post-cap reconcile = %v", err)
+	}
+	if got := fakeRuntimeSpawnCount(factory); got != explicitProfileConstructionAttemptCap {
+		t.Fatalf("post-cap reconcile spawned %d processes", got)
+	}
+
+	factory.startErr = nil
+	corrected := agentWithRuntimeProfile(RuntimeProfile{Model: "gpt-5.6-luna"})
+	if err := supervisor.Reconcile(context.Background(), []*agent{corrected}); err != nil {
+		t.Fatalf("corrected profile did not recover: %v", err)
+	}
+	if got := fakeRuntimeSpawnCount(factory); got != explicitProfileConstructionAttemptCap+1 {
+		t.Fatalf("corrected profile spawn count = %d", got)
+	}
+}
+
+func TestAgentSessionExplicitConstructionRecoversBeforeCap(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.detection.ModelCatalog = testRuntimeModelCatalog()
+	factory.startErr = errors.New("temporary startup failure")
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	now := time.Unix(1_700_000_000, 0)
+	supervisor.now = func() time.Time { return now }
+	current := agentWithRuntimeProfile(RuntimeProfile{Model: "gpt-5.6-sol"})
+	if err := supervisor.Reconcile(context.Background(), []*agent{current}); err == nil {
+		t.Fatal("first construction failure returned nil")
+	}
+	factory.startErr = nil
+	now = now.Add(restartBackoff(1))
+	if err := supervisor.Reconcile(context.Background(), []*agent{current}); err != nil {
+		t.Fatalf("eligible recovery: %v", err)
+	}
+	if got := fakeRuntimeSpawnCount(factory); got != 2 {
+		t.Fatalf("recovery spawn count = %d", got)
+	}
+	supervisor.mu.Lock()
+	state := supervisor.restartAttempts[current.ID]
+	supervisor.mu.Unlock()
+	if state.exhausted || state.attempts != 1 {
+		t.Fatalf("recovery ledger = %#v; bare spawn must not reset proven-progress accounting", state)
+	}
+}
+
+func TestAgentSessionInheritedConstructionFailuresRemainUncapped(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.startErr = errors.New("temporary startup failure")
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	current := &agent{ID: "agent_1", Kind: "codex"}
+	for i := 0; i < explicitProfileConstructionAttemptCap+2; i++ {
+		if err := supervisor.Reconcile(context.Background(), []*agent{current}); err == nil {
+			t.Fatalf("construction failure %d returned nil", i+1)
+		}
+	}
+	supervisor.mu.Lock()
+	state := supervisor.restartAttempts[current.ID]
+	supervisor.mu.Unlock()
+	if state.exhausted || state.attempts != explicitProfileConstructionAttemptCap+2 {
+		t.Fatalf("inherited construction ledger = %#v", state)
+	}
+}
+
+func fakeRuntimeSpawnCount(factory *fakeRuntimeDriver) int {
+	factory.mu.Lock()
+	defer factory.mu.Unlock()
+	return len(factory.processes)
 }
 
 func TestAgentSessionUnrequestedCleanExitIsTransient(t *testing.T) {

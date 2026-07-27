@@ -170,8 +170,11 @@ type RuntimeDetection struct {
 // account has no available models. Explicit model/effort choices require a
 // present, error-free catalog; inheritance ("", "") never depends on it.
 type RuntimeModelCatalog struct {
-	Models []RuntimeModel `json:"models"`
-	Error  string         `json:"error,omitempty"`
+	Models                    []RuntimeModel `json:"models"`
+	ModelProvenance           string         `json:"modelProvenance,omitempty"`
+	ReasoningEfforts          []string       `json:"reasoningEfforts,omitempty"`
+	ReasoningEffortProvenance string         `json:"reasoningEffortProvenance,omitempty"`
+	Error                     string         `json:"error,omitempty"`
 }
 
 // RuntimeModel is one entry in the projected model catalog. Model is the opaque

@@ -83,11 +83,12 @@ type agentSessionSupervisor struct {
 	// refused. It is the authority both the crash-classification restart gate and
 	// the #145 lifecycle checks consult.
 	shutdown bool
-	// restartAttempts counts consecutive transient restarts per agent, keyed by
-	// agentID so it survives the per-restart session replacement. It grows the
-	// backoff and is reset only on proven uptime (a completed turn), never on a
-	// bare respawn — else a post-handshake quota kill would spin at full rate.
-	restartAttempts map[string]int
+	// restartAttempts is the single per-agent failure ledger. It survives process
+	// replacement and fresh construction claims, so an explicit profile that can
+	// never establish a session cannot evade its finite cap through reconcile.
+	// Proven turn completion, removal, or an authoritative profile change resets
+	// it; a bare respawn/reconcile does not.
+	restartAttempts map[string]runtimeRestartState
 	// observationSequence orders token-free diagnostic events within this service;
 	// runtimeGeneration disambiguates process replacement and PID reuse. Both are
 	// guarded by mu with the session state they describe.
@@ -140,6 +141,14 @@ type agentSessionStart struct {
 	// a stale-spec runtime.
 	agent *agent
 	rev   uint64
+}
+
+type runtimeRestartState struct {
+	attempts    int
+	nextAttempt time.Time
+	profile     RuntimeProfile
+	lastFailure string
+	exhausted   bool
 }
 
 type agentSessionStartupError struct {
@@ -214,6 +223,10 @@ type managedAgentSession struct {
 	// only for the generation whose process actually exited.
 	restartPending bool
 	dead           bool
+	// terminalProfileReason records a typed provider rejection observed while the
+	// process was live. It dominates the generic result/exit that follows, even
+	// when Stop makes that later exit look expected.
+	terminalProfileReason string
 
 	// constructCancel interrupts an in-flight restart construction for this
 	// (parked) token; Reconcile removal fires it so a blocked replacement
@@ -443,7 +456,7 @@ func newAgentSessionSupervisor(cfg Config, updater agentSessionUpdater, runtimes
 		now:                time.Now,
 		sessions:           map[string]*managedAgentSession{},
 		starting:           map[string]*agentSessionStart{},
-		restartAttempts:    map[string]int{},
+		restartAttempts:    map[string]runtimeRestartState{},
 		baseCtx:            baseCtx,
 		baseCancel:         baseCancel,
 	}
@@ -589,9 +602,17 @@ func (s *agentSessionSupervisor) Reconcile(ctx context.Context, agents []*agent)
 			// production Reconcile caller (Service.refresh) holds refreshMu across the
 			// whole call, so authoritative Reconciles never overlap and this
 			// disconnected cannot race a concurrent Reconcile's successful idle.
+			status := "disconnected"
+			activity := err.Error()
+			s.mu.Lock()
+			if failure := s.restartAttempts[current.ID]; failure.exhausted {
+				status = "failed"
+				activity = firstNonEmptyText(failure.lastFailure, activity)
+			}
+			s.mu.Unlock()
 			s.publish(current.ID, updateAgentSessionRequest{
-				Status:          "disconnected",
-				CurrentActivity: err.Error(),
+				Status:          status,
+				CurrentActivity: activity,
 				LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
 			})
 		}
@@ -747,6 +768,24 @@ func (session *managedAgentSession) refreshDesiredSpec(current *agent) (changed 
 	return changed
 }
 
+func runtimeProfileForAgent(current *agent) RuntimeProfile {
+	if current == nil {
+		return RuntimeProfile{}
+	}
+	return RuntimeProfile{
+		Model:           strings.TrimSpace(current.Model),
+		ReasoningEffort: strings.TrimSpace(current.ReasoningEffort),
+	}
+}
+
+func explicitRuntimeProfile(profile RuntimeProfile) bool {
+	return profile.Model != "" || profile.ReasoningEffort != ""
+}
+
+func runtimeProfileChanged(previous, current *agent) bool {
+	return runtimeProfileForAgent(previous) != runtimeProfileForAgent(current)
+}
+
 // spawnFingerprintChanged reports whether the spawn-relevant desired spec differs
 // from the latest spec this fresh-start claim is building.
 //
@@ -795,6 +834,10 @@ func (s *agentSessionSupervisor) ensureSessionDesired(ctx context.Context, curre
 			return nil
 		}
 		if session := s.sessions[current.ID]; session != nil {
+			profileChanged := authoritative && runtimeProfileChanged(session.agent, current)
+			if profileChanged {
+				delete(s.restartAttempts, current.ID)
+			}
 			if restartGateClosed(session) {
 				// A terminal `failed` generation (human-gated) or a `disconnected`
 				// generation with an in-flight backoff park (owned by its delayed
@@ -807,6 +850,13 @@ func (s *agentSessionSupervisor) ensureSessionDesired(ctx context.Context, curre
 				// only bump the revision on a real spec change (see refreshDesiredSpec).
 				// Only an authoritative caller may advance the desired spec; a stale
 				// notification/worker snapshot must not roll it back (finding 29).
+				if authoritative && profileChanged && session.state == "failed" {
+					session.refreshDesiredSpec(current)
+					delete(s.sessions, current.ID)
+					s.mu.Unlock()
+					_ = session.process.Stop()
+					continue
+				}
 				if authoritative && session.refreshDesiredSpec(current) && session.constructCancel != nil {
 					// A genuine spec change with an in-flight restart construction:
 					// cancel the blocked old-spec Spawn/Start/handshake now so the
@@ -841,6 +891,9 @@ func (s *agentSessionSupervisor) ensureSessionDesired(ctx context.Context, curre
 			// Only an AUTHORITATIVE caller retargets; a non-authoritative caller
 			// (stale snapshot) waits and must not roll the desired spec back (#29).
 			if authoritative && start.spawnFingerprintChanged(current) {
+				if runtimeProfileChanged(start.agent, current) {
+					delete(s.restartAttempts, current.ID)
+				}
 				start.agent = cloneAgentValue(current)
 				start.rev++
 				if start.cancel != nil {
@@ -883,6 +936,28 @@ func (s *agentSessionSupervisor) ensureSessionDesired(ctx context.Context, curre
 		if ctx.Err() != nil {
 			s.mu.Unlock()
 			return ctx.Err()
+		}
+		profile := runtimeProfileForAgent(current)
+		if state, ok := s.restartAttempts[current.ID]; ok {
+			if state.profile != profile {
+				delete(s.restartAttempts, current.ID)
+			} else if explicitRuntimeProfile(profile) {
+				if state.exhausted {
+					activity := firstNonEmptyText(state.lastFailure, "Runtime profile could not establish a session")
+					s.publish(current.ID, updateAgentSessionRequest{
+						Status:          "failed",
+						CurrentTurnID:   "",
+						CurrentActivity: activity,
+						LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
+					})
+					s.mu.Unlock()
+					return nil
+				}
+				if s.now().Before(state.nextAttempt) {
+					s.mu.Unlock()
+					return nil
+				}
+			}
 		}
 		start := &agentSessionStart{done: make(chan struct{}), agent: cloneAgentValue(current)}
 		s.starting[current.ID] = start
@@ -952,6 +1027,11 @@ func (s *agentSessionSupervisor) runFreshStart(agentID string, start *agentSessi
 		}
 		// A genuine construction failure (Spawn/Start/handshake) — surfaces to a
 		// waiting synchronous Reconcile as agentSessionStartupError.
+		if attemptErr != nil {
+			s.mu.Lock()
+			s.recordConstructionFailureLocked(agentID, spec, attemptErr)
+			s.mu.Unlock()
+		}
 		err = attemptErr
 		break
 	}
@@ -962,6 +1042,37 @@ func (s *agentSessionSupervisor) runFreshStart(agentID string, start *agentSessi
 	}
 	close(start.done)
 	s.mu.Unlock()
+}
+
+const explicitProfileConstructionAttemptCap = 3
+
+func (s *agentSessionSupervisor) recordConstructionFailureLocked(agentID string, current *agent, err error) runtimeRestartState {
+	state := s.nextRestartAttemptLocked(agentID, current)
+	state.lastFailure = sanitizeExitLine(firstNonEmptyText(errorText(err), "Runtime profile could not establish a session"))
+	if explicitRuntimeProfile(state.profile) && state.attempts >= explicitProfileConstructionAttemptCap {
+		state.exhausted = true
+	}
+	s.restartAttempts[agentID] = state
+	return state
+}
+
+func (s *agentSessionSupervisor) nextRestartAttemptLocked(agentID string, current *agent) runtimeRestartState {
+	profile := runtimeProfileForAgent(current)
+	state := s.restartAttempts[agentID]
+	if state.profile != profile {
+		state = runtimeRestartState{profile: profile}
+	}
+	state.attempts++
+	state.nextAttempt = s.now().Add(restartBackoff(state.attempts))
+	s.restartAttempts[agentID] = state
+	return state
+}
+
+func errorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // startSession spawns a runtime and publishes the session by an atomic
@@ -1187,6 +1298,12 @@ func resolveRuntimeProfile(current *agent, catalog *RuntimeModelCatalog) (Runtim
 			return RuntimeProfile{}, fmt.Errorf("model %q is no longer available", modelName)
 		}
 	} else {
+		if effort != "" && len(catalog.ReasoningEfforts) > 0 {
+			if runtimeReasoningEffortSupported(catalog.ReasoningEfforts, effort) {
+				return profile, nil
+			}
+			return RuntimeProfile{}, fmt.Errorf("runtime default does not support reasoning effort %q", effort)
+		}
 		for i := range catalog.Models {
 			if catalog.Models[i].IsDefault {
 				if effective != nil {
@@ -1203,16 +1320,27 @@ func resolveRuntimeProfile(current *agent, catalog *RuntimeModelCatalog) (Runtim
 	if effort == "" {
 		return profile, nil
 	}
-	for _, supported := range effective.ReasoningEfforts {
-		if supported == effort {
-			return profile, nil
-		}
+	efforts := effective.ReasoningEfforts
+	if len(efforts) == 0 {
+		efforts = catalog.ReasoningEfforts
+	}
+	if runtimeReasoningEffortSupported(efforts, effort) {
+		return profile, nil
 	}
 	displayName := firstNonEmptyText(strings.TrimSpace(effective.DisplayName), effective.Model)
 	if modelName == "" {
 		return RuntimeProfile{}, fmt.Errorf("runtime default is now %s and does not support %q", displayName, effort)
 	}
 	return RuntimeProfile{}, fmt.Errorf("model %s does not support reasoning effort %q", displayName, effort)
+}
+
+func runtimeReasoningEffortSupported(efforts []string, want string) bool {
+	for _, effort := range efforts {
+		if effort == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *agentSessionSupervisor) ScheduleNotificationTurn(ctx context.Context, current *agent, prompt string, forMeSig string, generalSig string) error {
@@ -1591,7 +1719,14 @@ func (s *agentSessionSupervisor) consumeEvents(ctx context.Context, agentID stri
 			// which would let a crash->idle->crash agent hot-loop at the floor).
 			s.resetRestartBackoff(agentID, process)
 		case RuntimeEventTurnFailed:
-			s.markIdleObserved(agentID, process, false, RuntimeObservationTurnFailed)
+			if event.FailureKind == RuntimeFailureTerminalProfile && s.markTerminalProfileFailure(agentID, process, event.Error) {
+				// The typed provider frame is authoritative. Stop the process so its
+				// later generic result/404/exit cannot run another turn; the stored
+				// terminal reason dominates the expected exit caused by this Stop.
+				_ = process.Stop()
+			} else {
+				s.markIdleObserved(agentID, process, false, RuntimeObservationTurnFailed)
+			}
 		case RuntimeEventIdle:
 			s.markIdleObserved(agentID, process, true, RuntimeObservationTurnIdle)
 		}
@@ -1605,7 +1740,12 @@ disconnected:
 	// agent.
 	exit := process.ExitInfo()
 	terminalReason := ""
-	if !exit.Expected {
+	s.mu.Lock()
+	if session := s.sessions[agentID]; session != nil && session.process == process {
+		terminalReason = session.terminalProfileReason
+	}
+	s.mu.Unlock()
+	if terminalReason == "" && !exit.Expected {
 		terminalReason = s.terminalExitReason(exit)
 	}
 	transient := !exit.Expected && terminalReason == ""
@@ -1651,8 +1791,7 @@ disconnected:
 			// restartPending is set — consumeEvents must NOT launch a second
 			// restarter; that path is the sole replacement owner. This CAS is what
 			// makes a concurrent natural-exit-vs-stall race resolve to one restarter.
-			s.restartAttempts[agentID]++
-			attempt = s.restartAttempts[agentID]
+			attempt = s.nextRestartAttemptLocked(agentID, session.agent).attempts
 			// A backoff restart now owns this dead generation: the parked session
 			// stays authoritative in the map (no delete) until the restarter
 			// publishes the replacement by a conditional swap against it, so no
@@ -1666,15 +1805,15 @@ disconnected:
 		// revive a dead generation in backend state. Expected stop publishes nothing
 		// (clean teardown); terminal publishes failed; a transient death WE claimed
 		// publishes disconnected (a stall-replacement owner publishes its own).
-		if !exit.Expected {
-			if terminalReason != "" {
-				s.publish(agentID, updateAgentSessionRequest{
-					Status:          "failed",
-					CurrentTurnID:   "",
-					CurrentActivity: published,
-					LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
-				})
-			} else if claimedRestart {
+		if terminalReason != "" {
+			s.publish(agentID, updateAgentSessionRequest{
+				Status:          "failed",
+				CurrentTurnID:   "",
+				CurrentActivity: published,
+				LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
+			})
+		} else if !exit.Expected {
+			if claimedRestart {
 				s.publish(agentID, updateAgentSessionRequest{
 					Status:          "disconnected",
 					CurrentTurnID:   "",
@@ -1693,14 +1832,6 @@ disconnected:
 
 	// Expected: the daemon deliberately Stop()ped this process — clean teardown,
 	// no restart, no status noise.
-	if exit.Expected {
-		appendAgentLog(s.cfg, agentID, "runtime stopped as expected; no restart")
-		if s.testHookDeathHandled != nil {
-			s.testHookDeathHandled("expected")
-		}
-		return
-	}
-
 	// Terminal: a CLI-proven, non-self-recovering provider failure. Surface it as
 	// `failed` with the provider's own (sanitized) line; no restart until a human
 	// acts. The match set is locked only from live-probe evidence.
@@ -1709,6 +1840,14 @@ disconnected:
 		appendAgentLog(s.cfg, agentID, "runtime terminal failure; no restart: %s", published)
 		if s.testHookDeathHandled != nil {
 			s.testHookDeathHandled("terminal")
+		}
+		return
+	}
+
+	if exit.Expected {
+		appendAgentLog(s.cfg, agentID, "runtime stopped as expected; no restart")
+		if s.testHookDeathHandled != nil {
+			s.testHookDeathHandled("expected")
 		}
 		return
 	}
@@ -1816,8 +1955,34 @@ func (s *agentSessionSupervisor) launchRestartWorker(agentID string, process Run
 				s.mu.Unlock()
 				return
 			}
-			s.restartAttempts[agentID]++
-			delay = restartBackoff(s.restartAttempts[agentID])
+			if session.agentRev != rev {
+				// An authoritative spec refresh invalidated this construction.
+				// Rebuild immediately from the new revision; profile changes have
+				// already reset the shared ledger in ensureSessionDesired.
+				delay = 0
+				s.mu.Unlock()
+				continue
+			}
+			var state runtimeRestartState
+			if err != nil {
+				state = s.recordConstructionFailureLocked(agentID, session.agent, err)
+			} else {
+				state = s.nextRestartAttemptLocked(agentID, session.agent)
+			}
+			if state.exhausted {
+				session.restartPending = false
+				session.state = "failed"
+				activity := firstNonEmptyText(state.lastFailure, "Runtime profile could not establish a session")
+				s.publish(agentID, updateAgentSessionRequest{
+					Status:          "failed",
+					CurrentTurnID:   "",
+					CurrentActivity: activity,
+					LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
+				})
+				s.mu.Unlock()
+				return
+			}
+			delay = restartBackoff(state.attempts)
 			s.mu.Unlock()
 		}
 	}()
@@ -2020,6 +2185,38 @@ func (s *agentSessionSupervisor) markWorking(agentID string, process RuntimeProc
 
 func (s *agentSessionSupervisor) markIdle(agentID string, process RuntimeProcess, delivered bool) {
 	s.markIdleObserved(agentID, process, delivered, RuntimeObservationTurnIdle)
+}
+
+func (s *agentSessionSupervisor) markTerminalProfileFailure(agentID string, process RuntimeProcess, reason string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session := s.sessions[agentID]
+	// Defense in depth: a driver may only classify this failure when it launched
+	// an explicit model, and the supervisor independently verifies that the
+	// authoritative desired profile still names one. Inherited/default models
+	// never become human-gated from a provider's model_not_found frame.
+	if !writable(session, process) || session.agent == nil || strings.TrimSpace(session.agent.Model) == "" {
+		return false
+	}
+	published := sanitizeExitLine(firstNonEmptyText(reason, "Claude rejected the selected model"))
+	session.terminalProfileReason = published
+	session.dead = true
+	session.restartPending = false
+	session.state = "failed"
+	session.activeTurn = ""
+	session.activeForMeSig = ""
+	session.activeGeneralSig = ""
+	session.steeredForMeSig = ""
+	session.turnOpSeq++
+	s.publish(agentID, updateAgentSessionRequest{
+		Status:          "failed",
+		SessionID:       session.sessionID,
+		CurrentTurnID:   "",
+		CurrentActivity: published,
+		LastHeartbeatAt: time.Now().UTC().Format(time.RFC3339Nano),
+	})
+	s.runtimeObservationLocked(session, RuntimeObservationTurnFailed)
+	return true
 }
 
 func (s *agentSessionSupervisor) markIdleObserved(agentID string, process RuntimeProcess, delivered bool, observationState RuntimeObservationState) {

@@ -558,9 +558,9 @@ export function modelCatalogState(catalog: RuntimeModelCatalog | undefined): Mod
   return "ready";
 }
 
-// The runtime default (model === "") is offerable only when EXACTLY ONE visible row is isDefault.
-// None or ambiguous (>1) → null, so "runtime default + explicit effort" is withheld while an explicit
-// model still derives its own efforts.
+// Return the one visible default row, when the runtime reports one. Runtimes
+// with provider-wide efforts can still offer "runtime default + explicit
+// effort" without this row.
 export function uniqueDefaultModel(catalog: RuntimeModelCatalog | undefined): RuntimeModel | null {
   if (!catalog) {
     return null;
@@ -574,14 +574,17 @@ export function findRuntimeModel(catalog: RuntimeModelCatalog | undefined, model
   return catalog?.models.find((entry) => entry.model === model);
 }
 
-// Efforts offered for the current profile: an explicit model derives its own reasoningEfforts;
-// runtime default (model === "") derives from the unique default row, or [] when there is none.
-// Never a global effort enum.
+// Efforts offered for the current profile: prefer the selected/default model's
+// row, then fall back to provider-wide choices. Unknown explicit models never
+// inherit the provider-wide choices.
 export function availableReasoningEfforts(catalog: RuntimeModelCatalog | undefined, model: string): string[] {
   if (model) {
-    return findRuntimeModel(catalog, model)?.reasoningEfforts ?? [];
+    const selected = findRuntimeModel(catalog, model);
+    if (!selected) return [];
+    return selected.reasoningEfforts.length ? selected.reasoningEfforts : catalog?.reasoningEfforts ?? [];
   }
-  return uniqueDefaultModel(catalog)?.reasoningEfforts ?? [];
+  const defaultModel = uniqueDefaultModel(catalog);
+  return defaultModel?.reasoningEfforts.length ? defaultModel.reasoningEfforts : catalog?.reasoningEfforts ?? [];
 }
 
 // Whether a model/effort profile is still valid against the current catalog. Full inheritance
@@ -601,9 +604,6 @@ export function isModelProfileValid(
   }
   if (model && !findRuntimeModel(catalog, model)) {
     return false; // an explicit model must exist in the catalog
-  }
-  if (!model && reasoningEffort && !uniqueDefaultModel(catalog)) {
-    return false; // runtime-default + explicit effort needs exactly one visible default
   }
   if (reasoningEffort && !availableReasoningEfforts(catalog, model).includes(reasoningEffort)) {
     return false; // an explicit effort must be in the effective model's advertised efforts

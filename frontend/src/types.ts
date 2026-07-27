@@ -95,6 +95,9 @@ export type RuntimeDetection = {
 // so there is no `hidden` field here to re-filter on.
 export type RuntimeModelCatalog = {
   models: RuntimeModel[];
+  modelProvenance?: "curated" | "detected";
+  reasoningEfforts?: string[];
+  reasoningEffortProvenance?: "curated" | "detected";
   error?: string;
 };
 

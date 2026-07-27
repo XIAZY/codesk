@@ -109,6 +109,25 @@ describe("ModelProfileFields — selection + effort gating", () => {
     expect(effort.disabled).toBe(false);
   });
 
+  it("provider-wide efforts work without an inferred default and explain provenance", () => {
+    const claude: RuntimeModelCatalog = {
+      models: [
+        { model: "fable", displayName: "Fable", isDefault: false, reasoningEfforts: [] },
+        { model: "opus", displayName: "Opus", isDefault: false, reasoningEfforts: [] },
+        { model: "sonnet", displayName: "Sonnet", isDefault: false, reasoningEfforts: [] },
+      ],
+      modelProvenance: "curated",
+      reasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+      reasoningEffortProvenance: "detected",
+    };
+    renderFields({ daemon: daemonWith(claude), model: "" });
+    const effort = screen.getByRole("combobox", { name: /reasoning effort/i }) as HTMLSelectElement;
+    expect(effort.disabled).toBe(false);
+    expect(screen.getByRole("option", { name: "xhigh" })).toBeTruthy();
+    expect(screen.getByText(/model choices are curated; the provider verifies account access on first use/i)).toBeTruthy();
+    expect(screen.getByText(/effort choices are detected from the installed CLI/i)).toBeTruthy();
+  });
+
   // The model-change dependent-reset branch: switching model drops an effort the new model doesn't
   // advertise, but keeps one it does. This is a distinct production path from the daemon/runtime
   // effect (it lives in the model <select> onChange), so it needs its own two rows.

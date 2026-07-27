@@ -1373,11 +1373,22 @@ describe("model catalog resolution (daemon-model-selection task #4)", () => {
     expect(findRuntimeModel(ready, "nope")).toBeUndefined();
   });
 
-  it("availableReasoningEfforts resolves per-model, never a global enum", () => {
+  it("availableReasoningEfforts resolves row efforts and provider-wide runtime-default efforts", () => {
     expect(availableReasoningEfforts(ready, "gpt-5.6-terra")).toEqual(terra.reasoningEfforts); // explicit model
     expect(availableReasoningEfforts(ready, "")).toEqual(sol.reasoningEfforts); // runtime default → unique default row
     expect(availableReasoningEfforts({ models: [terra] }, "")).toEqual([]); // no unique default
     expect(availableReasoningEfforts(ready, "nope")).toEqual([]);
+    const claude: RuntimeModelCatalog = {
+      models: [
+        { model: "fable", displayName: "Fable", isDefault: false, reasoningEfforts: [] },
+        { model: "opus", displayName: "Opus", isDefault: false, reasoningEfforts: [] },
+        { model: "sonnet", displayName: "Sonnet", isDefault: false, reasoningEfforts: [] },
+      ],
+      reasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+    };
+    expect(availableReasoningEfforts(claude, "")).toEqual(claude.reasoningEfforts);
+    expect(availableReasoningEfforts(claude, "sonnet")).toEqual(claude.reasoningEfforts);
+    expect(availableReasoningEfforts(claude, "missing")).toEqual([]);
   });
 
   it("isModelProfileValid: full inheritance is always valid", () => {
@@ -1408,6 +1419,22 @@ describe("model catalog resolution (daemon-model-selection task #4)", () => {
     expect(isModelProfileValid(ambiguous, "", "low")).toBe(false);
     // …but an explicit model still works when the default is ambiguous
     expect(isModelProfileValid(ambiguous, "gpt-5.6-terra", "high")).toBe(true);
+  });
+
+  it("isModelProfileValid accepts provider-wide effort without inventing a default model", () => {
+    const claude: RuntimeModelCatalog = {
+      models: [
+        { model: "fable", displayName: "Fable", isDefault: false, reasoningEfforts: [] },
+        { model: "opus", displayName: "Opus", isDefault: false, reasoningEfforts: [] },
+        { model: "sonnet", displayName: "Sonnet", isDefault: false, reasoningEfforts: [] },
+      ],
+      reasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+    };
+    expect(uniqueDefaultModel(claude)).toBeNull();
+    expect(isModelProfileValid(claude, "", "xhigh")).toBe(true);
+    expect(isModelProfileValid(claude, "sonnet", "max")).toBe(true);
+    expect(isModelProfileValid(claude, "", "ultra")).toBe(false);
+    expect(isModelProfileValid(claude, "missing", "high")).toBe(false);
   });
 
   it("isModelProfileValid detects a background daemon.updated invalidation", () => {
