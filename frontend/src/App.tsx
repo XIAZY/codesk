@@ -5065,9 +5065,13 @@ export function ModelProfileFields({
 
   const models = catalog?.models ?? [];
   const defaultRow = uniqueDefaultModel(catalog);
-  // "Runtime default + explicit effort" comes from either one visible default
-  // model or provider-wide effort choices for a runtime with no inferred default.
-  const effortDisabled = !model && !defaultRow && !catalog?.reasoningEfforts?.length;
+  const hasAnyEffortChoices = Boolean(
+    catalog?.reasoningEfforts?.length ||
+    models.some((entry) => entry.reasoningEfforts.length > 0),
+  );
+  // The effective list already applies row-first/provider-fallback precedence.
+  // Empty means there is no honest explicit choice for the current selection.
+  const effortDisabled = efforts.length === 0;
 
   return (
     <div className="col gap-8 model-profile">
@@ -5111,7 +5115,9 @@ export function ModelProfileFields({
         </select>
         <span className="hint">
           {effortDisabled
-            ? "Choose a specific model to set an explicit effort."
+            ? !model && !defaultRow && hasAnyEffortChoices
+              ? "Choose a specific model to set an explicit effort."
+              : "Reasoning effort choices aren't available yet."
             : "Leave as default, or pin a specific effort."}
           {catalog?.reasoningEffortProvenance === "detected" ? " Effort choices are detected from the installed CLI." : ""}
         </span>

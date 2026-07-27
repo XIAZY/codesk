@@ -128,6 +128,23 @@ describe("ModelProfileFields — selection + effort gating", () => {
     expect(screen.getByText(/effort choices are detected from the installed CLI/i)).toBeTruthy();
   });
 
+  it("a partial Claude catalog disables effort after explicit model selection and reports pending choices", () => {
+    const partialClaude: RuntimeModelCatalog = {
+      models: [
+        { model: "fable", displayName: "Fable", isDefault: false, reasoningEfforts: [] },
+        { model: "opus", displayName: "Opus", isDefault: false, reasoningEfforts: [] },
+        { model: "sonnet", displayName: "Sonnet", isDefault: false, reasoningEfforts: [] },
+      ],
+      modelProvenance: "curated",
+    };
+    renderFields({ daemon: daemonWith(partialClaude), model: "fable", modelLabel: "Fable" });
+
+    const effort = screen.getByRole("combobox", { name: /reasoning effort/i }) as HTMLSelectElement;
+    expect(effort.disabled).toBe(true);
+    expect(screen.getByText(/reasoning effort choices aren't available yet/i)).toBeTruthy();
+    expect(screen.queryByText(/pin a specific effort/i)).toBeNull();
+  });
+
   // The model-change dependent-reset branch: switching model drops an effort the new model doesn't
   // advertise, but keeps one it does. This is a distinct production path from the daemon/runtime
   // effect (it lives in the model <select> onChange), so it needs its own two rows.
