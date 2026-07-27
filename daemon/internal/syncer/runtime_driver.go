@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +46,10 @@ type RuntimeModelCatalog struct {
 	ReasoningEfforts          []string       `json:"reasoningEfforts,omitempty"`
 	ReasoningEffortProvenance string         `json:"reasoningEffortProvenance,omitempty"`
 	Error                     string         `json:"error,omitempty"`
+	// discoveryPending is daemon-local state. A provider can publish a usable
+	// partial catalog without exposing an error while retaining bounded probes
+	// for a missing dimension.
+	discoveryPending bool
 }
 
 type RuntimeModel struct {
@@ -215,7 +220,8 @@ func (r *runtimeRegistry) DetectAll(ctx context.Context) []RuntimeDetection {
 		}
 		_, discoversCatalog := driver.(runtimeModelCatalogDetector)
 		catalogPending := detection.Available && discoversCatalog &&
-			(detection.ModelCatalog == nil || detection.ModelCatalog.Error != "")
+			(detection.ModelCatalog == nil || detection.ModelCatalog.Error != "" ||
+				detection.ModelCatalog.discoveryPending)
 		if detection.Available && discoversCatalog && detection.ModelCatalog == nil {
 			detection.ModelCatalog = &RuntimeModelCatalog{Models: []RuntimeModel{}}
 		}
@@ -236,8 +242,8 @@ func (r *runtimeRegistry) DetectAll(ctx context.Context) []RuntimeDetection {
 // availability metadata with an empty catalog first; the first post-start
 // heartbeat owns the initial probe. Failures retry at a bounded cadence, while a
 // successful result (including a genuinely empty catalog) completes discovery.
-// It reports whether any catalog completed so the service can immediately
-// reconcile agents that were held by the pre-discovery empty state.
+// It reports whether any usable catalog changed or completed so the service can
+// immediately reconcile agents that were held by the prior catalog state.
 func (r *runtimeRegistry) discoverModelCatalogs(ctx context.Context, now time.Time) bool {
 	if r == nil {
 		return false
@@ -265,7 +271,7 @@ func (r *runtimeRegistry) discoverModelCatalogs(ctx context.Context, now time.Ti
 	}
 	r.mu.Unlock()
 
-	completed := false
+	reconcileNeeded := false
 	for _, candidate := range candidates {
 		catalog := candidate.detector.detectModelCatalog(ctx)
 
@@ -276,21 +282,25 @@ func (r *runtimeRegistry) discoverModelCatalogs(ctx context.Context, now time.Ti
 			r.mu.Unlock()
 			continue
 		}
+		priorCatalog := detection.ModelCatalog
 		if catalog != nil {
 			detection.ModelCatalog = catalog
 			r.detections[candidate.kind] = detection
 		}
-		if catalog != nil && catalog.Error == "" {
+		if catalog != nil && catalog.Error == "" && !catalog.discoveryPending {
 			delete(r.catalogProbes, candidate.kind)
-			completed = true
+			reconcileNeeded = true
 		} else {
 			r.catalogProbes[candidate.kind] = runtimeCatalogProbe{
 				nextAttempt: now.Add(failedCatalogRetryInterval),
 			}
+			if catalog != nil && catalog.Error == "" && !reflect.DeepEqual(catalog, priorCatalog) {
+				reconcileNeeded = true
+			}
 		}
 		r.mu.Unlock()
 	}
-	return completed
+	return reconcileNeeded
 }
 
 func (r *runtimeRegistry) Lookup(kind string) (RuntimeDriver, RuntimeDetection, bool) {

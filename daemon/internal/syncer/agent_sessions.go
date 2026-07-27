@@ -70,6 +70,12 @@ type agentSessionSupervisor struct {
 	// established. Test seam only.
 	testHookInitialPublish func()
 
+	// testHookFreshStartPreFinalize, when set, fires inside runFreshStart while
+	// s.mu is held, after the attempt's publication/terminal/revision state has
+	// been sampled and immediately before failure accounting + claim finalization.
+	// Test seam only.
+	testHookFreshStartPreFinalize func()
+
 	// shutdownOnce guards Shutdown so its teardown (baseCtx cancel, session stop,
 	// construction drain, status stop) runs exactly once even if Shutdown is
 	// called multiple times (the #145 idempotency invariant).
@@ -1021,12 +1027,16 @@ func (s *agentSessionSupervisor) runFreshStart(agentID string, start *agentSessi
 		s.mu.Lock()
 		published := s.sessions[agentID] != nil
 		terminal := s.shutdown || start.cancelled || s.baseCtx.Err() != nil || s.starting[agentID] != start
+		revChanged := start.rev != rev
+		if s.testHookFreshStartPreFinalize != nil {
+			s.testHookFreshStartPreFinalize()
+		}
 		if published {
 			attemptErr = nil
 		} else if terminal {
 			// Keep the attempt result (often context.Canceled) for existing
 			// waiters, but never account a removed/shutdown claim as a failure.
-		} else if start.rev != rev {
+		} else if revChanged {
 			// The desired spec changed mid-construction; the stale-spec process was
 			// reaped by the rev-CAS. Rebuild from the claim's latest spec.
 			s.mu.Unlock()

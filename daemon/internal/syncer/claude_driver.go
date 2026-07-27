@@ -94,8 +94,9 @@ func (d *claudeDriver) detectModelCatalog(ctx context.Context) *RuntimeModelCata
 		models = append(models, model)
 	}
 	catalog := &RuntimeModelCatalog{
-		Models:          models,
-		ModelProvenance: "curated",
+		Models:           models,
+		ModelProvenance:  "curated",
+		discoveryPending: true,
 	}
 
 	detectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -116,6 +117,7 @@ func (d *claudeDriver) detectModelCatalog(ctx context.Context) *RuntimeModelCata
 	}
 	catalog.ReasoningEfforts = efforts
 	catalog.ReasoningEffortProvenance = "detected"
+	catalog.discoveryPending = false
 	return catalog
 }
 

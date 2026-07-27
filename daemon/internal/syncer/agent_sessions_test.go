@@ -4368,7 +4368,7 @@ func TestAgentSessionFreshSpecChangeSupersedesConstruction(t *testing.T) {
 	}
 }
 
-func TestAgentSessionFreshFailedAttemptRetargetsBeforeAccounting(t *testing.T) {
+func TestAgentSessionFreshFailedAttemptRetargetsWhileAttemptInFlight(t *testing.T) {
 	factory := newFakeRuntimeDriver()
 	factory.detection.ModelCatalog = testRuntimeModelCatalog()
 	factory.startEntered = make(chan struct{}, 2)
@@ -4411,6 +4411,52 @@ func TestAgentSessionFreshFailedAttemptRetargetsBeforeAccounting(t *testing.T) {
 	supervisor.mu.Unlock()
 	if ledgerPresent {
 		t.Fatal("superseded failed attempt repopulated the restart ledger")
+	}
+}
+
+func TestAgentSessionFreshDecisionHoldsMutexThroughAccountingAndFinalization(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.detection.ModelCatalog = testRuntimeModelCatalog()
+	factory.startErr = errors.New("profile rejected startup")
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	decisionSampled := make(chan struct{})
+	releaseDecision := make(chan struct{})
+	supervisor.testHookFreshStartPreFinalize = func() {
+		close(decisionSampled)
+		<-releaseDecision
+	}
+
+	current := agentWithRuntimeProfile(RuntimeProfile{Model: "gpt-5.6-sol"})
+	done := make(chan error, 1)
+	go func() {
+		done <- supervisor.ensureSession(context.Background(), current)
+	}()
+	<-decisionSampled
+
+	// The hook is immediately before accounting/finalization. If the revision
+	// decision is sampled under one lock and accounting/finalization happen under
+	// a later lock, this succeeds and the causal row turns RED.
+	if supervisor.mu.TryLock() {
+		supervisor.mu.Unlock()
+		close(releaseDecision)
+		t.Fatal("fresh-start decision released s.mu before accounting/finalization")
+	}
+	close(releaseDecision)
+
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "profile rejected startup") {
+		t.Fatalf("fresh construction error = %v", err)
+	}
+	supervisor.mu.Lock()
+	state, ok := supervisor.restartAttempts[current.ID]
+	_, claimPresent := supervisor.starting[current.ID]
+	supervisor.mu.Unlock()
+	if !ok || state.attempts != 1 || state.profile != runtimeProfileForAgent(current) {
+		t.Fatalf("construction failure ledger = %#v, present=%t", state, ok)
+	}
+	if claimPresent {
+		t.Fatal("failed fresh-start claim remained after finalization")
 	}
 }
 

@@ -5,6 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -133,6 +137,57 @@ func TestRuntimeRegistryCatalogDiscoveryBacksOffUntilSuccess(t *testing.T) {
 	}
 	if detection.ModelCatalog == nil || detection.ModelCatalog.Error != "" || len(detection.ModelCatalog.Models) != 1 {
 		t.Fatalf("catalog did not recover after bounded retries: %#v", detection.ModelCatalog)
+	}
+}
+
+func TestClaudeCatalogDiscoveryPublishesPartialModelsThenRecoversEfforts(t *testing.T) {
+	failOnce := filepath.Join(t.TempDir(), "help-failed")
+	t.Setenv("FAKE_CLAUDE_HELP_FAIL_ONCE_FILE", failOnce)
+	driver := &claudeDriver{cfg: Config{ClaudeCommand: writeFakeClaude(t)}}
+	registry := newRuntimeRegistry(driver)
+	registry.DetectAll(context.Background())
+
+	now := time.Unix(1_700_000_000, 0)
+	if reconcileNeeded := registry.discoverModelCatalogs(context.Background(), now); !reconcileNeeded {
+		t.Fatal("partial Claude catalog did not request reconciliation")
+	}
+	partial := registry.cachedDetections()[0].ModelCatalog
+	assertClaudeCatalogWithoutEfforts(t, partial)
+
+	wire, err := json.Marshal(partial)
+	if err != nil {
+		t.Fatalf("marshal partial Claude catalog: %v", err)
+	}
+	if strings.Contains(string(wire), "discoveryPending") {
+		t.Fatalf("partial Claude catalog leaked discovery state on wire: %s", wire)
+	}
+
+	registry.discoverModelCatalogs(context.Background(), now.Add(failedCatalogRetryInterval-time.Nanosecond))
+	if _, err := os.Stat(failOnce); err != nil {
+		t.Fatalf("first effort probe did not run: %v", err)
+	}
+	if got := registry.cachedDetections()[0].ModelCatalog; got != partial {
+		t.Fatalf("catalog changed before retry deadline: %#v", got)
+	}
+
+	if reconcileNeeded := registry.discoverModelCatalogs(context.Background(), now.Add(failedCatalogRetryInterval)); !reconcileNeeded {
+		t.Fatal("recovered Claude catalog did not request reconciliation")
+	}
+	recovered := registry.cachedDetections()[0].ModelCatalog
+	if recovered == nil || recovered.discoveryPending || recovered.Error != "" ||
+		recovered.ReasoningEffortProvenance != "detected" ||
+		!reflect.DeepEqual(recovered.ReasoningEfforts, claudeDocumentedReasoningEfforts) {
+		t.Fatalf("Claude effort catalog did not recover: %#v", recovered)
+	}
+	for i, model := range recovered.Models {
+		if !reflect.DeepEqual(model.ReasoningEfforts, claudeDocumentedReasoningEfforts) {
+			t.Fatalf("recovered model[%d] efforts = %#v", i, model.ReasoningEfforts)
+		}
+	}
+
+	registry.discoverModelCatalogs(context.Background(), now.Add(2*failedCatalogRetryInterval))
+	if got := registry.cachedDetections()[0].ModelCatalog; got != recovered {
+		t.Fatalf("completed Claude catalog was probed again: %#v", got)
 	}
 }
 

@@ -76,8 +76,8 @@ func TestClaudeDriverModelCatalogUsesCuratedAliasesAndDetectedEfforts(t *testing
 	driver := &claudeDriver{cfg: Config{ClaudeCommand: writeFakeClaude(t)}}
 	catalog := driver.detectModelCatalog(context.Background())
 
-	if catalog.Error != "" {
-		t.Fatalf("catalog error = %q", catalog.Error)
+	if catalog.Error != "" || catalog.discoveryPending {
+		t.Fatalf("completed catalog state = %#v", catalog)
 	}
 	if catalog.ModelProvenance != "curated" || catalog.ReasoningEffortProvenance != "detected" {
 		t.Fatalf("catalog provenance = %#v", catalog)
@@ -118,7 +118,8 @@ func TestClaudeDriverModelCatalogPreservesCuratedAliasesWhenEffortProbeFails(t *
 func assertClaudeCatalogWithoutEfforts(t *testing.T, catalog *RuntimeModelCatalog) {
 	t.Helper()
 	if catalog == nil || catalog.Error != "" || catalog.ModelProvenance != "curated" ||
-		catalog.ReasoningEffortProvenance != "" || len(catalog.ReasoningEfforts) != 0 {
+		catalog.ReasoningEffortProvenance != "" || len(catalog.ReasoningEfforts) != 0 ||
+		!catalog.discoveryPending {
 		t.Fatalf("partial Claude catalog metadata = %#v", catalog)
 	}
 	if len(catalog.Models) != len(claudeCuratedModels) {
