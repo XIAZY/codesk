@@ -1389,6 +1389,17 @@ describe("model catalog resolution (daemon-model-selection task #4)", () => {
     expect(availableReasoningEfforts(claude, "")).toEqual(claude.reasoningEfforts);
     expect(availableReasoningEfforts(claude, "sonnet")).toEqual(claude.reasoningEfforts);
     expect(availableReasoningEfforts(claude, "missing")).toEqual([]);
+
+    const mixed: RuntimeModelCatalog = {
+      models: [{ model: "default", displayName: "Default", isDefault: true, reasoningEfforts: ["row-only"] }],
+      reasoningEfforts: ["provider-only"],
+    };
+    expect(availableReasoningEfforts(mixed, "")).toEqual(["row-only"]);
+    expect(isModelProfileValid(mixed, "", "row-only")).toBe(true);
+    expect(isModelProfileValid(mixed, "", "provider-only")).toBe(false);
+    mixed.models[0].reasoningEfforts = [];
+    expect(availableReasoningEfforts(mixed, "")).toEqual(["provider-only"]);
+    expect(isModelProfileValid(mixed, "", "provider-only")).toBe(true);
   });
 
   it("isModelProfileValid: full inheritance is always valid", () => {

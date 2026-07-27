@@ -2380,8 +2380,8 @@ func validateDaemonRuntimeKind(daemon *Daemon, kind string) error {
 //   - any explicit model/effort requires a present, error-free, non-empty catalog.
 //   - explicit model must match a projected model; an explicit effort must be one
 //     of that model's reasoning efforts (empty effort inherits the model's).
-//   - model=="" && explicit effort uses provider-wide efforts when advertised,
-//     otherwise it resolves the single visible default model. The
+//   - model=="" && explicit effort prefers a single visible default model's
+//     non-empty effort list, then falls back to provider-wide efforts. The
 //     partial-inheritance state {model:"", effort} is persisted unchanged by the
 //     caller (never canonicalized).
 //
@@ -2436,22 +2436,33 @@ func validateAgentModelProfile(daemon *Daemon, kind, model, effort string) error
 		}
 		return nil
 	}
+	// model=="" && effort!="" : resolve the single visible default model.
+	var defaultModel *RuntimeModel
+	ambiguousDefault := false
+	for i := range catalog.Models {
+		if !catalog.Models[i].IsDefault {
+			continue
+		}
+		if defaultModel != nil {
+			ambiguousDefault = true
+			break
+		}
+		defaultModel = &catalog.Models[i]
+	}
+	if defaultModel != nil && !ambiguousDefault && len(defaultModel.ReasoningEfforts) > 0 {
+		if reasoningEffortSupported(defaultModel.ReasoningEfforts, effort) {
+			return nil
+		}
+		return fmt.Errorf("reasoning effort %q is not available for the default model on daemon %q", effort, daemon.ID)
+	}
 	if len(catalog.ReasoningEfforts) > 0 {
 		if reasoningEffortSupported(catalog.ReasoningEfforts, effort) {
 			return nil
 		}
 		return fmt.Errorf("reasoning effort %q is not available for the runtime default on daemon %q", effort, daemon.ID)
 	}
-	// model=="" && effort!="" : resolve the single visible default model.
-	var defaultModel *RuntimeModel
-	for i := range catalog.Models {
-		if !catalog.Models[i].IsDefault {
-			continue
-		}
-		if defaultModel != nil {
-			return fmt.Errorf("daemon %q reports more than one default model; reasoning effort for the default cannot be resolved", daemon.ID)
-		}
-		defaultModel = &catalog.Models[i]
+	if ambiguousDefault {
+		return fmt.Errorf("daemon %q reports more than one default model; reasoning effort for the default cannot be resolved", daemon.ID)
 	}
 	if defaultModel == nil {
 		return fmt.Errorf("daemon %q reports no default model; reasoning effort for the default cannot be resolved", daemon.ID)

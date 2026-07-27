@@ -1298,22 +1298,27 @@ func resolveRuntimeProfile(current *agent, catalog *RuntimeModelCatalog) (Runtim
 			return RuntimeProfile{}, fmt.Errorf("model %q is no longer available", modelName)
 		}
 	} else {
-		if effort != "" && len(catalog.ReasoningEfforts) > 0 {
-			if runtimeReasoningEffortSupported(catalog.ReasoningEfforts, effort) {
-				return profile, nil
-			}
-			return RuntimeProfile{}, fmt.Errorf("runtime default does not support reasoning effort %q", effort)
-		}
+		ambiguousDefault := false
 		for i := range catalog.Models {
 			if catalog.Models[i].IsDefault {
 				if effective != nil {
-					return RuntimeProfile{}, errors.New("runtime default model cannot be resolved")
+					ambiguousDefault = true
+					break
 				}
 				effective = &catalog.Models[i]
 			}
 		}
-		if effective == nil {
-			return RuntimeProfile{}, errors.New("runtime default model cannot be resolved")
+		useDefaultEfforts := effective != nil && !ambiguousDefault && len(effective.ReasoningEfforts) > 0
+		if !useDefaultEfforts {
+			if effort != "" && len(catalog.ReasoningEfforts) > 0 {
+				if runtimeReasoningEffortSupported(catalog.ReasoningEfforts, effort) {
+					return profile, nil
+				}
+				return RuntimeProfile{}, fmt.Errorf("runtime default does not support reasoning effort %q", effort)
+			}
+			if effective == nil || ambiguousDefault {
+				return RuntimeProfile{}, errors.New("runtime default model cannot be resolved")
+			}
 		}
 	}
 

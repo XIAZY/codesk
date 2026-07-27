@@ -671,6 +671,40 @@ func TestAgentSessionProviderWideEffortRejectsUnknownValueWithoutInferringModel(
 	}
 }
 
+func TestAgentSessionDefaultRowEffortsPrecedeProviderWideEfforts(t *testing.T) {
+	catalog := &RuntimeModelCatalog{
+		Models: []RuntimeModel{{
+			Model:            "default",
+			DisplayName:      "Default",
+			IsDefault:        true,
+			ReasoningEfforts: []string{"row-only"},
+		}},
+		ReasoningEfforts: []string{"provider-only"},
+	}
+
+	got, err := resolveRuntimeProfile(&agent{ReasoningEffort: "row-only"}, catalog)
+	if err != nil {
+		t.Fatalf("default-row effort rejected: %v", err)
+	}
+	if want := (RuntimeProfile{ReasoningEffort: "row-only"}); got != want {
+		t.Fatalf("profile = %#v, want %#v", got, want)
+	}
+
+	_, err = resolveRuntimeProfile(&agent{ReasoningEffort: "provider-only"}, catalog)
+	if err == nil || !strings.Contains(err.Error(), `runtime default is now Default and does not support "provider-only"`) {
+		t.Fatalf("provider-only effort error = %v", err)
+	}
+
+	catalog.Models[0].ReasoningEfforts = nil
+	got, err = resolveRuntimeProfile(&agent{ReasoningEffort: "provider-only"}, catalog)
+	if err != nil {
+		t.Fatalf("provider fallback rejected after empty default row: %v", err)
+	}
+	if want := (RuntimeProfile{ReasoningEffort: "provider-only"}); got != want {
+		t.Fatalf("fallback profile = %#v, want %#v", got, want)
+	}
+}
+
 func TestAgentSessionExplicitModelUsesProviderWideEffortsWhenRowOmitsThem(t *testing.T) {
 	factory := newFakeRuntimeDriver()
 	factory.detection.ModelCatalog = &RuntimeModelCatalog{

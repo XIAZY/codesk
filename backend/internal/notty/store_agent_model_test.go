@@ -246,6 +246,30 @@ func TestValidateAgentModelProfile(t *testing.T) {
 			model: "sonnet", effort: "high",
 		},
 		{
+			name: "generic runtime default row efforts precede provider-wide efforts", kind: "claude-code",
+			catalog: &RuntimeModelCatalog{
+				Models:           []RuntimeModel{{Model: "default", IsDefault: true, ReasoningEfforts: []string{"row-only"}}},
+				ReasoningEfforts: []string{"provider-only"},
+			},
+			effort: "row-only",
+		},
+		{
+			name: "generic runtime default row rejects provider-only effort", kind: "claude-code",
+			catalog: &RuntimeModelCatalog{
+				Models:           []RuntimeModel{{Model: "default", IsDefault: true, ReasoningEfforts: []string{"row-only"}}},
+				ReasoningEfforts: []string{"provider-only"},
+			},
+			effort: "provider-only", wantErr: []string{"not available for the default model"},
+		},
+		{
+			name: "generic runtime empty default row falls back to provider-wide efforts", kind: "claude-code",
+			catalog: &RuntimeModelCatalog{
+				Models:           []RuntimeModel{{Model: "default", IsDefault: true}},
+				ReasoningEfforts: []string{"provider-only"},
+			},
+			effort: "provider-only",
+		},
+		{
 			name: "generic runtime rejects unknown provider-wide effort", kind: "claude-code",
 			catalog: &RuntimeModelCatalog{
 				Models:           []RuntimeModel{{Model: "fable"}, {Model: "opus"}, {Model: "sonnet"}},
