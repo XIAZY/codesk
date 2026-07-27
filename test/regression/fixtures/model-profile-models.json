@@ -1,0 +1,98 @@
+[
+  {
+    "model": "gpt-5.6-sol",
+    "displayName": "GPT-5.6-Sol",
+    "hidden": false,
+    "supportedReasoningEfforts": [
+      {"reasoningEffort": "low"},
+      {"reasoningEffort": "medium"},
+      {"reasoningEffort": "high"},
+      {"reasoningEffort": "xhigh"},
+      {"reasoningEffort": "max"},
+      {"reasoningEffort": "ultra"}
+    ],
+    "defaultReasoningEffort": "low",
+    "isDefault": true
+  },
+  {
+    "model": "gpt-5.6-terra",
+    "displayName": "GPT-5.6-Terra",
+    "hidden": false,
+    "supportedReasoningEfforts": [
+      {"reasoningEffort": "low"},
+      {"reasoningEffort": "medium"},
+      {"reasoningEffort": "high"},
+      {"reasoningEffort": "xhigh"},
+      {"reasoningEffort": "max"},
+      {"reasoningEffort": "ultra"}
+    ],
+    "defaultReasoningEffort": "medium",
+    "isDefault": false
+  },
+  {
+    "model": "gpt-5.6-luna",
+    "displayName": "GPT-5.6-Luna",
+    "hidden": false,
+    "supportedReasoningEfforts": [
+      {"reasoningEffort": "low"},
+      {"reasoningEffort": "medium"},
+      {"reasoningEffort": "high"},
+      {"reasoningEffort": "xhigh"},
+      {"reasoningEffort": "max"}
+    ],
+    "defaultReasoningEffort": "medium",
+    "isDefault": false
+  },
+  {
+    "model": "gpt-5.5",
+    "displayName": "GPT-5.5",
+    "hidden": false,
+    "supportedReasoningEfforts": [
+      {"reasoningEffort": "low"},
+      {"reasoningEffort": "medium"},
+      {"reasoningEffort": "high"},
+      {"reasoningEffort": "xhigh"}
+    ],
+    "defaultReasoningEffort": "medium",
+    "isDefault": false
+  },
+  {
+    "model": "gpt-5.4",
+    "displayName": "GPT-5.4",
+    "hidden": false,
+    "supportedReasoningEfforts": [
+      {"reasoningEffort": "low"},
+      {"reasoningEffort": "medium"},
+      {"reasoningEffort": "high"},
+      {"reasoningEffort": "xhigh"}
+    ],
+    "defaultReasoningEffort": "medium",
+    "isDefault": false
+  },
+  {
+    "model": "gpt-5.4-mini",
+    "displayName": "GPT-5.4-Mini",
+    "hidden": false,
+    "supportedReasoningEfforts": [
+      {"reasoningEffort": "low"},
+      {"reasoningEffort": "medium"},
+      {"reasoningEffort": "high"},
+      {"reasoningEffort": "xhigh"}
+    ],
+    "defaultReasoningEffort": "medium",
+    "isDefault": false
+  },
+  {
+    "model": "gpt-5.3-codex-spark",
+    "displayName": "GPT-5.3-Codex-Spark",
+    "hidden": false,
+    "supportedReasoningEfforts": [
+      {"reasoningEffort": "low"},
+      {"reasoningEffort": "medium"},
+      {"reasoningEffort": "high"},
+      {"reasoningEffort": "xhigh"}
+    ],
+    "defaultReasoningEffort": "high",
+    "isDefault": false
+  }
+]

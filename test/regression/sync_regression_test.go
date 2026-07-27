@@ -565,21 +565,29 @@ func TestOverlappingLocalAndRemoteRewritePreservesLocalDivergence(t *testing.T) 
 }
 
 type regressionStack struct {
-	root        string
-	composeFile string
-	project     string
-	authToken   string
-	workspaceID string
-	daemonToken string
+	root          string
+	composeFile   string
+	project       string
+	authToken     string
+	workspaceID   string
+	daemonID      string
+	daemonToken   string
+	daemonEnv     map[string]string
+	deadlineScale float64
 }
 
 func newRegressionStack(t *testing.T) *regressionStack {
 	t.Helper()
 	root := repoRoot(t)
+	deadlineScale, err := regressionDeadlineScaleFromEnv()
+	if err != nil {
+		t.Fatalf("invalid %s: %v", regressionDeadlineScaleEnv, err)
+	}
 	return &regressionStack{
-		root:        root,
-		composeFile: filepath.Join(root, "test", "regression", "docker-compose.yml"),
-		project:     "notty_regression_" + strconv.FormatInt(time.Now().UnixNano(), 36),
+		root:          root,
+		composeFile:   filepath.Join(root, "test", "regression", "docker-compose.yml"),
+		project:       "notty_regression_" + strconv.FormatInt(time.Now().UnixNano(), 36),
+		deadlineScale: deadlineScale,
 	}
 }
 
@@ -596,10 +604,14 @@ func (s *regressionStack) up(t *testing.T) {
 	})
 	s.waitForBackend(t, 2*time.Minute)
 	s.bootstrapWorkspace(t)
-	s.runWithEnv(t, map[string]string{
+	daemonEnv := map[string]string{
 		"NOTTY_WORKSPACE_ID": s.workspaceID,
 		"NOTTY_DAEMON_TOKEN": s.daemonToken,
-	}, "up", "-d", "--build", "daemon")
+	}
+	for key, value := range s.daemonEnv {
+		daemonEnv[key] = value
+	}
+	s.runWithEnv(t, daemonEnv, "up", "-d", "--build", "daemon")
 }
 
 func (s *regressionStack) backendURL(t *testing.T) string {
@@ -650,6 +662,9 @@ func (s *regressionStack) bootstrapWorkspace(t *testing.T) {
 	s.workspaceID = workspaceResponse.Workspace.ID
 
 	var daemonResponse struct {
+		Daemon struct {
+			ID string `json:"id"`
+		} `json:"daemon"`
 		Token string `json:"token"`
 	}
 	s.postJSON(t, s.workspaceAPIPath("/daemons"), s.authToken, map[string]string{
@@ -658,6 +673,7 @@ func (s *regressionStack) bootstrapWorkspace(t *testing.T) {
 	if daemonResponse.Token == "" {
 		t.Fatal("daemon token creation returned empty token")
 	}
+	s.daemonID = daemonResponse.Daemon.ID
 	s.daemonToken = daemonResponse.Token
 }
 
@@ -787,7 +803,7 @@ func (s *regressionStack) runOutput(t *testing.T, args ...string) string {
 
 func (s *regressionStack) runOutputWithEnv(t *testing.T, env map[string]string, args ...string) string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), regressionScaledTimeout(t, 5*time.Minute))
+	ctx, cancel := context.WithTimeout(context.Background(), regressionScaledTimeout(t, 15*time.Minute))
 	defer cancel()
 	cmd := s.command(ctx, args...)
 	if len(env) > 0 {
@@ -1373,7 +1389,7 @@ func (s *regressionStack) documentUpdates(documentID string, afterID int64, thro
 }
 
 func (s *regressionStack) psql(query string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), scaleRegressionTimeout(2*time.Minute, s.deadlineScale))
 	defer cancel()
 	output, err := s.command(ctx, "exec", "-T", "postgres", "psql", "-U", "notty", "-d", "notty", "-At", "-c", query).CombinedOutput()
 	if err != nil {

@@ -650,7 +650,7 @@ func (d *asyncProfileRuntimeDriver) detectModelCatalog(context.Context) *Runtime
 	return d.catalog
 }
 
-func TestAgentSessionExplicitProfileStartsImmediatelyAfterCatalogDiscovery(t *testing.T) {
+func TestAgentSessionExplicitProfileWaitsForCatalogWithoutBlockingDefaultProfile(t *testing.T) {
 	factory := newFakeRuntimeDriver()
 	driver := &asyncProfileRuntimeDriver{
 		fakeRuntimeDriver: factory,
@@ -666,25 +666,35 @@ func TestAgentSessionExplicitProfileStartsImmediatelyAfterCatalogDiscovery(t *te
 		Model:           "gpt-5.6-luna",
 		ReasoningEffort: "max",
 	}
+	localDefault := &agent{ID: "agent_2", Kind: "codex"}
 
-	if err := supervisor.Reconcile(context.Background(), []*agent{current}); err != nil {
+	if err := supervisor.Reconcile(context.Background(), []*agent{current, localDefault}); err != nil {
 		t.Fatalf("pre-discovery reconcile: %v", err)
 	}
 	factory.mu.Lock()
-	preDiscoverySpawns := len(factory.spawnSpecs)
+	preDiscoverySpawns := append([]RuntimeSpawnSpec(nil), factory.spawnSpecs...)
 	factory.mu.Unlock()
-	if preDiscoverySpawns != 0 {
-		t.Fatalf("explicit profile spawned %d times before catalog discovery", preDiscoverySpawns)
+	if len(preDiscoverySpawns) != 1 || preDiscoverySpawns[0].AgentID != localDefault.ID {
+		t.Fatalf("pre-discovery spawns = %#v, want local-default agent only", preDiscoverySpawns)
+	}
+	if preDiscoverySpawns[0].Profile != (RuntimeProfile{}) {
+		t.Fatalf("local-default pre-discovery profile = %#v, want omitted runtime default", preDiscoverySpawns[0].Profile)
 	}
 
 	if completed := registry.discoverModelCatalogs(context.Background(), time.Now()); !completed {
 		t.Fatal("catalog discovery did not report completion")
 	}
-	if err := supervisor.Reconcile(context.Background(), []*agent{current}); err != nil {
+	if err := supervisor.Reconcile(context.Background(), []*agent{current, localDefault}); err != nil {
 		t.Fatalf("post-discovery reconcile: %v", err)
 	}
 	want := RuntimeProfile{Model: "gpt-5.6-luna", ReasoningEffort: "max"}
-	if got := factory.onlySpawnSpec(t).Profile; !reflect.DeepEqual(got, want) {
+	factory.mu.Lock()
+	postDiscoverySpawns := append([]RuntimeSpawnSpec(nil), factory.spawnSpecs...)
+	factory.mu.Unlock()
+	if len(postDiscoverySpawns) != 2 {
+		t.Fatalf("post-discovery spawns = %#v, want local-default plus explicit", postDiscoverySpawns)
+	}
+	if got := postDiscoverySpawns[1]; got.AgentID != current.ID || !reflect.DeepEqual(got.Profile, want) {
 		t.Fatalf("post-discovery spawn profile = %#v, want %#v", got, want)
 	}
 }
