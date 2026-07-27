@@ -170,6 +170,77 @@ func TestDaemonStatusHeartbeatRunsWithoutWorkspaceRefresh(t *testing.T) {
 	}
 }
 
+func TestDaemonStatusHeartbeatSignalsRefreshOnlyWhenCatalogDiscoveryCompletes(t *testing.T) {
+	tests := []struct {
+		name        string
+		catalog     *RuntimeModelCatalog
+		wantRefresh bool
+	}{
+		{
+			name: "success",
+			catalog: &RuntimeModelCatalog{Models: []RuntimeModel{{
+				Model: "gpt-5.6-sol",
+			}}},
+			wantRefresh: true,
+		},
+		{
+			name: "failure",
+			catalog: &RuntimeModelCatalog{
+				Models: []RuntimeModel{},
+				Error:  "model catalog unavailable",
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			driver := &asyncCatalogDriver{
+				catalogs: []*RuntimeModelCatalog{test.catalog},
+				called:   make(chan struct{}, 1),
+			}
+			registry := newRuntimeRegistry(driver)
+			registry.DetectAll(context.Background())
+
+			service := &Service{
+				runtimes:      registry,
+				refreshNeeded: make(chan struct{}, 1),
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			ticks := make(chan time.Time)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				service.runDaemonStatusHeartbeat(ctx, ticks)
+			}()
+			t.Cleanup(func() {
+				cancel()
+				<-done
+			})
+
+			ticks <- time.Now()
+			select {
+			case <-driver.called:
+			case <-time.After(time.Second):
+				t.Fatal("heartbeat did not run catalog discovery")
+			}
+			// The unbuffered send is accepted only after the first heartbeat
+			// has completed its discovery and optional refresh signal.
+			ticks <- time.Now()
+
+			select {
+			case <-service.refreshNeeded:
+				if !test.wantRefresh {
+					t.Fatal("failed catalog discovery woke agent reconciliation")
+				}
+			default:
+				if test.wantRefresh {
+					t.Fatal("successful catalog discovery did not wake agent reconciliation")
+				}
+			}
+		})
+	}
+}
+
 func TestRunReportsDaemonOnlineOnlyAfterInitialRefreshSucceeds(t *testing.T) {
 	workspaceStarted := make(chan struct{}, 1)
 	allowWorkspace := make(chan struct{})

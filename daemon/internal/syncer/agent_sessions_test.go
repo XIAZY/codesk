@@ -641,6 +641,54 @@ func TestAgentSessionEmptyRuntimeProfileDoesNotRequireCatalog(t *testing.T) {
 	}
 }
 
+type asyncProfileRuntimeDriver struct {
+	*fakeRuntimeDriver
+	catalog *RuntimeModelCatalog
+}
+
+func (d *asyncProfileRuntimeDriver) detectModelCatalog(context.Context) *RuntimeModelCatalog {
+	return d.catalog
+}
+
+func TestAgentSessionExplicitProfileStartsImmediatelyAfterCatalogDiscovery(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	driver := &asyncProfileRuntimeDriver{
+		fakeRuntimeDriver: factory,
+		catalog:           testRuntimeModelCatalog(),
+	}
+	registry := newRuntimeRegistry(driver)
+	registry.DetectAll(context.Background())
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, registry)
+	defer supervisor.Shutdown()
+	current := &agent{
+		ID:              "agent_1",
+		Kind:            "codex",
+		Model:           "gpt-5.6-luna",
+		ReasoningEffort: "max",
+	}
+
+	if err := supervisor.Reconcile(context.Background(), []*agent{current}); err != nil {
+		t.Fatalf("pre-discovery reconcile: %v", err)
+	}
+	factory.mu.Lock()
+	preDiscoverySpawns := len(factory.spawnSpecs)
+	factory.mu.Unlock()
+	if preDiscoverySpawns != 0 {
+		t.Fatalf("explicit profile spawned %d times before catalog discovery", preDiscoverySpawns)
+	}
+
+	if completed := registry.discoverModelCatalogs(context.Background(), time.Now()); !completed {
+		t.Fatal("catalog discovery did not report completion")
+	}
+	if err := supervisor.Reconcile(context.Background(), []*agent{current}); err != nil {
+		t.Fatalf("post-discovery reconcile: %v", err)
+	}
+	want := RuntimeProfile{Model: "gpt-5.6-luna", ReasoningEffort: "max"}
+	if got := factory.onlySpawnSpec(t).Profile; !reflect.DeepEqual(got, want) {
+		t.Fatalf("post-discovery spawn profile = %#v, want %#v", got, want)
+	}
+}
+
 func testRuntimeModelCatalog() *RuntimeModelCatalog {
 	return &RuntimeModelCatalog{Models: []RuntimeModel{
 		{

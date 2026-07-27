@@ -323,7 +323,7 @@ func TestCodexDriverModelCatalogDiscardsEarlierPagesAfterLaterFailure(t *testing
 	}
 }
 
-func TestCodexDriverCatalogFailureDoesNotFlipRuntimeAvailability(t *testing.T) {
+func TestCodexDriverDetectDefersModelCatalogDiscovery(t *testing.T) {
 	codexPath := fakeProcessCommand(t, fakeProcessCodexDetectAvailable)
 	app := newFakeCodexRuntimeApp()
 	app.modelList = func(context.Context, string) (codexModelListPage, error) {
@@ -339,13 +339,13 @@ func TestCodexDriverCatalogFailureDoesNotFlipRuntimeAvailability(t *testing.T) {
 	detection := driver.Detect(context.Background())
 
 	if !detection.Available || detection.Version != "codex 0.144.5" {
-		t.Fatalf("catalog failure changed availability: %#v", detection)
+		t.Fatalf("runtime metadata detection = %#v", detection)
 	}
-	if detection.ModelCatalog == nil || detection.ModelCatalog.Error != "model catalog unavailable" {
-		t.Fatalf("catalog failure not projected independently: %#v", detection)
+	if detection.ModelCatalog != nil {
+		t.Fatalf("startup detection performed catalog discovery: %#v", detection)
 	}
-	if !app.stopped {
-		t.Fatal("failed catalog detection must stop its app-server")
+	if app.started || app.stopped || len(app.modelCursors) != 0 {
+		t.Fatalf("startup touched catalog app-server: started=%v stopped=%v cursors=%#v", app.started, app.stopped, app.modelCursors)
 	}
 }
 
