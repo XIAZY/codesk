@@ -84,31 +84,39 @@ func (d *claudeDriver) Detect(ctx context.Context) RuntimeDetection {
 }
 
 func (d *claudeDriver) detectModelCatalog(ctx context.Context) *RuntimeModelCatalog {
+	models := make([]RuntimeModel, 0, len(claudeCuratedModels))
+	for _, candidate := range claudeCuratedModels {
+		model := candidate
+		// RuntimeModel.ReasoningEfforts is non-omitempty on the wire. Keep a
+		// non-nil empty slice when effort discovery is unavailable so clients
+		// receive [] rather than null.
+		model.ReasoningEfforts = []string{}
+		models = append(models, model)
+	}
+	catalog := &RuntimeModelCatalog{
+		Models:          models,
+		ModelProvenance: "curated",
+	}
+
 	detectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	output, err := managedBackgroundCommandContext(detectCtx, d.command(), "--help").Output()
 	if err != nil {
-		return &RuntimeModelCatalog{Models: []RuntimeModel{}, Error: "model catalog unavailable"}
+		return catalog
 	}
 	help := string(output)
 	effortSignature := "(" + strings.Join(claudeDocumentedReasoningEfforts, ", ") + ")"
 	if !strings.Contains(help, "--effort <level>") || !strings.Contains(help, effortSignature) {
-		return &RuntimeModelCatalog{Models: []RuntimeModel{}, Error: "model catalog unavailable"}
+		return catalog
 	}
 
 	efforts := append([]string(nil), claudeDocumentedReasoningEfforts...)
-	models := make([]RuntimeModel, 0, len(claudeCuratedModels))
-	for _, candidate := range claudeCuratedModels {
-		model := candidate
-		model.ReasoningEfforts = append([]string(nil), efforts...)
-		models = append(models, model)
+	for i := range catalog.Models {
+		catalog.Models[i].ReasoningEfforts = append([]string(nil), efforts...)
 	}
-	return &RuntimeModelCatalog{
-		Models:                    models,
-		ModelProvenance:           "curated",
-		ReasoningEfforts:          efforts,
-		ReasoningEffortProvenance: "detected",
-	}
+	catalog.ReasoningEfforts = efforts
+	catalog.ReasoningEffortProvenance = "detected"
+	return catalog
 }
 
 func (d *claudeDriver) Spawn(ctx context.Context, spec RuntimeSpawnSpec) (RuntimeProcess, error) {
@@ -811,15 +819,14 @@ type claudeStreamEvent struct {
 // deltas, tool calls, and control responses are intentionally ignored.
 func parseClaudeStreamLine(line []byte) *claudeStreamEvent {
 	var payload struct {
-		Type              string   `json:"type"`
-		Subtype           string   `json:"subtype"`
-		SessionID         string   `json:"session_id"`
-		IsError           bool     `json:"is_error"`
-		Errors            []string `json:"errors"`
-		Result            string   `json:"result"`
-		Error             string   `json:"error"`
-		IsAPIErrorMessage bool     `json:"is_api_error_message"`
-		Message           struct {
+		Type      string   `json:"type"`
+		Subtype   string   `json:"subtype"`
+		SessionID string   `json:"session_id"`
+		IsError   bool     `json:"is_error"`
+		Errors    []string `json:"errors"`
+		Result    string   `json:"result"`
+		Error     string   `json:"error"`
+		Message   struct {
 			Content []struct {
 				Type string `json:"type"`
 				Text string `json:"text"`
@@ -831,7 +838,7 @@ func parseClaudeStreamLine(line []byte) *claudeStreamEvent {
 	}
 	switch payload.Type {
 	case "assistant":
-		if payload.Error == "model_not_found" && payload.IsAPIErrorMessage {
+		if payload.Error == "model_not_found" {
 			parts := make([]string, 0, len(payload.Message.Content))
 			for _, content := range payload.Message.Content {
 				if content.Type == "text" && strings.TrimSpace(content.Text) != "" {

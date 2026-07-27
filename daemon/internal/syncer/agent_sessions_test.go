@@ -1806,6 +1806,49 @@ func TestAgentSessionExplicitConstructionRecoversBeforeCap(t *testing.T) {
 	}
 }
 
+func TestAgentSessionRemovalClearsNeverEstablishedConstructionLedger(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.detection.ModelCatalog = testRuntimeModelCatalog()
+	factory.startErr = errors.New("provider rejected startup")
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	now := time.Unix(1_700_000_000, 0)
+	supervisor.now = func() time.Time { return now }
+	current := agentWithRuntimeProfile(RuntimeProfile{Model: "gpt-5.6-sol"})
+
+	for attempt := 1; attempt <= explicitProfileConstructionAttemptCap; attempt++ {
+		if err := supervisor.Reconcile(context.Background(), []*agent{current}); err == nil {
+			t.Fatalf("construction failure %d returned nil", attempt)
+		}
+		now = now.Add(restartBackoff(attempt))
+	}
+	supervisor.mu.Lock()
+	state := supervisor.restartAttempts[current.ID]
+	_, resident := supervisor.sessions[current.ID]
+	supervisor.mu.Unlock()
+	if resident || !state.exhausted {
+		t.Fatalf("pre-removal state: resident=%t ledger=%#v", resident, state)
+	}
+
+	if err := supervisor.Reconcile(context.Background(), nil); err != nil {
+		t.Fatalf("remove never-established agent: %v", err)
+	}
+	supervisor.mu.Lock()
+	_, ledgerPresent := supervisor.restartAttempts[current.ID]
+	supervisor.mu.Unlock()
+	if ledgerPresent {
+		t.Fatal("authoritative removal retained never-established construction ledger")
+	}
+
+	factory.startErr = nil
+	if err := supervisor.Reconcile(context.Background(), []*agent{current}); err != nil {
+		t.Fatalf("same-ID/profile re-add did not start fresh: %v", err)
+	}
+	if got := fakeRuntimeSpawnCount(factory); got != explicitProfileConstructionAttemptCap+1 {
+		t.Fatalf("same-ID/profile re-add spawn count = %d, want %d", got, explicitProfileConstructionAttemptCap+1)
+	}
+}
+
 func TestAgentSessionInheritedConstructionFailuresRemainUncapped(t *testing.T) {
 	factory := newFakeRuntimeDriver()
 	factory.startErr = errors.New("temporary startup failure")
@@ -4322,6 +4365,52 @@ func TestAgentSessionFreshSpecChangeSupersedesConstruction(t *testing.T) {
 	// late waiter can refresh even while the live runtime is stale).
 	if got := publishedProcessInstructions(t, supervisor, factory, "agent_1"); got != "new instructions" {
 		t.Fatalf("live process was actually spawned with stale instructions: %q, want %q", got, "new instructions")
+	}
+}
+
+func TestAgentSessionFreshFailedAttemptRetargetsBeforeAccounting(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.detection.ModelCatalog = testRuntimeModelCatalog()
+	factory.startEntered = make(chan struct{}, 2)
+	factory.startRelease = make(chan struct{})
+	factory.startIgnoreCtx = true
+	factory.startErr = errors.New("old profile rejected startup")
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+
+	old := agentWithRuntimeProfile(RuntimeProfile{Model: "gpt-5.6-sol"})
+	oldDone := make(chan error, 1)
+	go func() {
+		oldDone <- supervisor.ensureSession(context.Background(), old)
+	}()
+	<-factory.startEntered // old profile sampled at claim rev 0 and blocked in Start
+
+	// A corrected authoritative profile retargets the shared claim while the old
+	// attempt is still in flight. The old fake process captured startErr already;
+	// only the replacement spawned after rev=1 will succeed.
+	factory.startErr = nil
+	corrected := agentWithRuntimeProfile(RuntimeProfile{Model: "gpt-5.6-luna"})
+	correctedDone := make(chan error, 1)
+	go func() {
+		correctedDone <- supervisor.ensureSession(context.Background(), corrected)
+	}()
+	waitClaimRev(t, supervisor, old.ID, 1)
+	close(factory.startRelease)
+
+	if err := <-oldDone; err != nil {
+		t.Fatalf("old waiter received stale attempt error: %v", err)
+	}
+	if err := <-correctedDone; err != nil {
+		t.Fatalf("corrected waiter: %v", err)
+	}
+	if got := latestSpawnSpec(t, factory).Profile; !reflect.DeepEqual(got, runtimeProfileForAgent(corrected)) {
+		t.Fatalf("replacement profile = %#v, want %#v", got, runtimeProfileForAgent(corrected))
+	}
+	supervisor.mu.Lock()
+	_, ledgerPresent := supervisor.restartAttempts[old.ID]
+	supervisor.mu.Unlock()
+	if ledgerPresent {
+		t.Fatal("superseded failed attempt repopulated the restart ledger")
 	}
 }
 

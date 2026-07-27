@@ -626,15 +626,18 @@ func (s *agentSessionSupervisor) Reconcile(ctx context.Context, agents []*agent)
 			}
 			stale = append(stale, session)
 			delete(s.sessions, agentID)
-			// Explicit removal ends this agent's lifecycle: drop its transient
-			// restart counter so a future re-add starts backoff from scratch, and
-			// invalidate any in-flight parked restarter (its conditional swap now
-			// fails because the token is gone). Cancel a blocked restart
-			// construction so its process is reaped promptly, not after the CAS.
-			delete(s.restartAttempts, agentID)
 			if session.constructCancel != nil {
 				session.constructCancel()
 			}
+		}
+	}
+	// Explicit removal ends an agent's lifecycle even when construction never
+	// established a resident session. Clear every absent desired ID directly
+	// from the shared ledger so a later same-ID/profile add starts from attempt
+	// zero instead of inheriting backoff or exhaustion.
+	for agentID := range s.restartAttempts {
+		if _, ok := desired[agentID]; !ok {
+			delete(s.restartAttempts, agentID)
 		}
 	}
 	// Invalidate any in-flight FRESH construction for a removed agent: mark the
@@ -987,13 +990,16 @@ func (s *agentSessionSupervisor) ensureSessionDesired(ctx context.Context, curre
 // final result. Retarget rebuilds from the latest; removal/Shutdown/service
 // cancellation are terminal (never resurrect a removed or abandoned agent).
 func (s *agentSessionSupervisor) runFreshStart(agentID string, start *agentSessionStart) {
-	var err error
 	for {
 		s.mu.Lock()
 		if s.shutdown || start.cancelled || s.baseCtx.Err() != nil {
+			start.err = context.Canceled
+			if s.starting[agentID] == start {
+				delete(s.starting, agentID)
+			}
+			close(start.done)
 			s.mu.Unlock()
-			err = context.Canceled
-			break
+			return
 		}
 		spec := cloneAgentValue(start.agent)
 		rev := start.rev
@@ -1007,41 +1013,37 @@ func (s *agentSessionSupervisor) runFreshStart(agentID string, start *agentSessi
 		attemptErr := s.startSession(cctx, spec, nil, 0, start, rev)
 		ccancel()
 
+		// Decide revision freshness, account a genuine failure, and finalize the
+		// shared claim in one critical section. An authoritative retarget either
+		// wins before this lock (so the stale attempt rebuilds) or after the claim
+		// is final; it can never slip between a stale-revision check and ledger /
+		// waiter finalization.
 		s.mu.Lock()
 		published := s.sessions[agentID] != nil
 		terminal := s.shutdown || start.cancelled || s.baseCtx.Err() != nil || s.starting[agentID] != start
-		revChanged := start.rev != rev
-		s.mu.Unlock()
 		if published {
-			err = nil
-			break
-		}
-		if terminal {
-			err = attemptErr
-			break
-		}
-		if revChanged {
+			attemptErr = nil
+		} else if terminal {
+			// Keep the attempt result (often context.Canceled) for existing
+			// waiters, but never account a removed/shutdown claim as a failure.
+		} else if start.rev != rev {
 			// The desired spec changed mid-construction; the stale-spec process was
 			// reaped by the rev-CAS. Rebuild from the claim's latest spec.
-			continue
-		}
-		// A genuine construction failure (Spawn/Start/handshake) — surfaces to a
-		// waiting synchronous Reconcile as agentSessionStartupError.
-		if attemptErr != nil {
-			s.mu.Lock()
-			s.recordConstructionFailureLocked(agentID, spec, attemptErr)
 			s.mu.Unlock()
+			continue
+		} else if attemptErr != nil {
+			// A genuine construction failure (Spawn/Start/handshake) — surfaces to
+			// every waiter and enters the shared restart ledger.
+			s.recordConstructionFailureLocked(agentID, spec, attemptErr)
 		}
-		err = attemptErr
-		break
+		start.err = attemptErr
+		if s.starting[agentID] == start {
+			delete(s.starting, agentID)
+		}
+		close(start.done)
+		s.mu.Unlock()
+		return
 	}
-	s.mu.Lock()
-	start.err = err
-	if s.starting[agentID] == start {
-		delete(s.starting, agentID)
-	}
-	close(start.done)
-	s.mu.Unlock()
 }
 
 const explicitProfileConstructionAttemptCap = 3
