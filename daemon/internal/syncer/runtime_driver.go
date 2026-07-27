@@ -134,7 +134,7 @@ type RuntimeEvent struct {
 
 type RuntimeFailureKind string
 
-const RuntimeFailureTerminalProfile RuntimeFailureKind = "terminalProfile"
+const RuntimeFailureTerminalModel RuntimeFailureKind = "terminalModel"
 
 // RuntimeExitInfo describes why a runtime process ended. It is valid only once
 // Events() has closed — the exit goroutine records it before the close, so a

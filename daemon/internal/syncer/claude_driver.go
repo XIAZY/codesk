@@ -554,7 +554,7 @@ func (p *claudeRuntimeProcess) readLoop(stdout io.Reader, stdoutTail *claudeStdo
 				p.sessionID = event.sessionID
 			}
 			p.mu.Unlock()
-		case claudeStreamTerminalProfile:
+		case claudeStreamTerminalModel:
 			p.mu.Lock()
 			turnID := p.activeTurn
 			sessionID := p.sessionID
@@ -563,7 +563,7 @@ func (p *claudeRuntimeProcess) readLoop(stdout io.Reader, stdoutTail *claudeStdo
 			p.mu.Unlock()
 			failureKind := RuntimeFailureKind("")
 			if explicitModel {
-				failureKind = RuntimeFailureTerminalProfile
+				failureKind = RuntimeFailureTerminalModel
 			}
 			p.emitLifecycle(RuntimeEvent{
 				Kind:        RuntimeEventTurnFailed,
@@ -804,9 +804,9 @@ func truncateForLog(line string) string {
 type claudeStreamEventKind string
 
 const (
-	claudeStreamInit            claudeStreamEventKind = "init"
-	claudeStreamTerminalProfile claudeStreamEventKind = "terminalProfile"
-	claudeStreamTurnEnd         claudeStreamEventKind = "turnEnd"
+	claudeStreamInit          claudeStreamEventKind = "init"
+	claudeStreamTerminalModel claudeStreamEventKind = "terminalModel"
+	claudeStreamTurnEnd       claudeStreamEventKind = "turnEnd"
 )
 
 type claudeStreamEvent struct {
@@ -848,7 +848,7 @@ func parseClaudeStreamLine(line []byte) *claudeStreamEvent {
 				}
 			}
 			return &claudeStreamEvent{
-				kind:    claudeStreamTerminalProfile,
+				kind:    claudeStreamTerminalModel,
 				errText: firstNonEmptyText(strings.Join(parts, " | "), "Claude rejected the selected model"),
 			}
 		}

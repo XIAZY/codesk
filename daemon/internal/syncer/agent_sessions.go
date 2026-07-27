@@ -229,10 +229,10 @@ type managedAgentSession struct {
 	// only for the generation whose process actually exited.
 	restartPending bool
 	dead           bool
-	// terminalProfileReason records a typed provider rejection observed while the
+	// terminalModelReason records a typed provider rejection observed while the
 	// process was live. It dominates the generic result/exit that follows, even
 	// when Stop makes that later exit look expected.
-	terminalProfileReason string
+	terminalModelReason string
 
 	// constructCancel interrupts an in-flight restart construction for this
 	// (parked) token; Reconcile removal fires it so a blocked replacement
@@ -1736,7 +1736,7 @@ func (s *agentSessionSupervisor) consumeEvents(ctx context.Context, agentID stri
 			// which would let a crash->idle->crash agent hot-loop at the floor).
 			s.resetRestartBackoff(agentID, process)
 		case RuntimeEventTurnFailed:
-			if event.FailureKind == RuntimeFailureTerminalProfile && s.markTerminalProfileFailure(agentID, process, event.Error) {
+			if event.FailureKind == RuntimeFailureTerminalModel && s.markTerminalModelFailure(agentID, process, event.Error) {
 				// The typed provider frame is authoritative. Stop the process so its
 				// later generic result/404/exit cannot run another turn; the stored
 				// terminal reason dominates the expected exit caused by this Stop.
@@ -1759,7 +1759,7 @@ disconnected:
 	terminalReason := ""
 	s.mu.Lock()
 	if session := s.sessions[agentID]; session != nil && session.process == process {
-		terminalReason = session.terminalProfileReason
+		terminalReason = session.terminalModelReason
 	}
 	s.mu.Unlock()
 	if terminalReason == "" && !exit.Expected {
@@ -2204,7 +2204,7 @@ func (s *agentSessionSupervisor) markIdle(agentID string, process RuntimeProcess
 	s.markIdleObserved(agentID, process, delivered, RuntimeObservationTurnIdle)
 }
 
-func (s *agentSessionSupervisor) markTerminalProfileFailure(agentID string, process RuntimeProcess, reason string) bool {
+func (s *agentSessionSupervisor) markTerminalModelFailure(agentID string, process RuntimeProcess, reason string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	session := s.sessions[agentID]
@@ -2215,8 +2215,8 @@ func (s *agentSessionSupervisor) markTerminalProfileFailure(agentID string, proc
 	if !writable(session, process) || session.agent == nil || strings.TrimSpace(session.agent.Model) == "" {
 		return false
 	}
-	published := sanitizeExitLine(firstNonEmptyText(reason, "Claude rejected the selected model"))
-	session.terminalProfileReason = published
+	published := sanitizeExitLine(firstNonEmptyText(reason, "Runtime rejected the selected model"))
+	session.terminalModelReason = published
 	session.dead = true
 	session.restartPending = false
 	session.state = "failed"

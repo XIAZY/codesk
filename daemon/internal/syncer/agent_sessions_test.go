@@ -1613,7 +1613,7 @@ func TestAgentSessionRestartCounterResetsOnCompletedTurn(t *testing.T) {
 	}
 }
 
-func TestAgentSessionTypedProfileFailureDominatesLaterResultAndExpectedExit(t *testing.T) {
+func TestAgentSessionTypedModelFailureDominatesLaterResultAndExpectedExit(t *testing.T) {
 	factory := newFakeRuntimeDriver()
 	factory.detection.ModelCatalog = testRuntimeModelCatalog()
 	updates := make(chan agentSessionStatusUpdate, 16)
@@ -1638,7 +1638,7 @@ func TestAgentSessionTypedProfileFailureDominatesLaterResultAndExpectedExit(t *t
 	process.events <- RuntimeEvent{
 		Kind:        RuntimeEventTurnFailed,
 		Error:       "  Selected model is unavailable\ncontact support  ",
-		FailureKind: RuntimeFailureTerminalProfile,
+		FailureKind: RuntimeFailureTerminalModel,
 	}
 	process.events <- RuntimeEvent{Kind: RuntimeEventTurnFailed, Error: "generic 404 result"}
 	supervisor.mu.Unlock()
@@ -1673,6 +1673,34 @@ func TestAgentSessionTypedProfileFailureDominatesLaterResultAndExpectedExit(t *t
 	}
 }
 
+func TestAgentSessionTypedModelFailureUsesProviderNeutralFallback(t *testing.T) {
+	factory := newFakeRuntimeDriver()
+	factory.detection.ModelCatalog = testRuntimeModelCatalog()
+	updates := make(chan agentSessionStatusUpdate, 16)
+	updater := func(ctx context.Context, agentID string, payload updateAgentSessionRequest) error {
+		updates <- agentSessionStatusUpdate{agentID: agentID, payload: payload}
+		return nil
+	}
+	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), updater, newFakeRuntimeRegistry(factory))
+	defer supervisor.Shutdown()
+	if err := supervisor.ensureSession(context.Background(), &agent{
+		ID:    "agent_1",
+		Kind:  "codex",
+		Model: "gpt-5.6-sol",
+	}); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+
+	factory.only(t).events <- RuntimeEvent{
+		Kind:        RuntimeEventTurnFailed,
+		FailureKind: RuntimeFailureTerminalModel,
+	}
+	failed := waitAgentSessionStatus(t, updates, "agent_1", "failed")
+	if failed.payload.CurrentActivity != "Runtime rejected the selected model" {
+		t.Fatalf("failed activity = %q", failed.payload.CurrentActivity)
+	}
+}
+
 func TestAgentSessionInheritedModelNotFoundRemainsOrdinaryTurnFailure(t *testing.T) {
 	factory := newFakeRuntimeDriver()
 	supervisor := newAgentSessionSupervisor(agentSessionTestConfig(t, t.TempDir()), nil, newFakeRuntimeRegistry(factory))
@@ -1700,7 +1728,7 @@ func TestAgentSessionInheritedModelNotFoundRemainsOrdinaryTurnFailure(t *testing
 	process.events <- RuntimeEvent{
 		Kind:        RuntimeEventTurnFailed,
 		Error:       "default model unavailable",
-		FailureKind: RuntimeFailureTerminalProfile,
+		FailureKind: RuntimeFailureTerminalModel,
 	}
 	deadline = time.After(2 * time.Second)
 	for {

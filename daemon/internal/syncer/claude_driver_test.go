@@ -758,12 +758,12 @@ func TestParseClaudeStreamLine(t *testing.T) {
 		{
 			name: "structured model not found without auxiliary boolean",
 			line: `{"type":"assistant","error":"model_not_found","message":{"content":[{"type":"text","text":"Selected model is unavailable"}]}}`,
-			want: &claudeStreamEvent{kind: claudeStreamTerminalProfile, errText: "Selected model is unavailable"},
+			want: &claudeStreamEvent{kind: claudeStreamTerminalModel, errText: "Selected model is unavailable"},
 		},
 		{
 			name: "structured model not found with false auxiliary boolean",
 			line: `{"type":"assistant","error":"model_not_found","is_api_error_message":false,"message":{"content":[{"type":"text","text":"Selected model is unavailable"}]}}`,
-			want: &claudeStreamEvent{kind: claudeStreamTerminalProfile, errText: "Selected model is unavailable"},
+			want: &claudeStreamEvent{kind: claudeStreamTerminalModel, errText: "Selected model is unavailable"},
 		},
 		{name: "404 alone ignored", line: `{"type":"assistant","is_api_error_message":true,"api_error_status":404,"message":{"content":[{"type":"text","text":"not found"}]}}`, want: nil},
 		{name: "429 ignored", line: `{"type":"assistant","error":"rate_limit","is_api_error_message":true,"api_error_status":429}`, want: nil},
@@ -795,7 +795,7 @@ func TestClaudeReadLoopTypesModelNotFoundOnlyForExplicitModel(t *testing.T) {
 		model string
 		want  RuntimeFailureKind
 	}{
-		{name: "explicit", model: "sonnet", want: RuntimeFailureTerminalProfile},
+		{name: "explicit", model: "sonnet", want: RuntimeFailureTerminalModel},
 		{name: "inherited"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
