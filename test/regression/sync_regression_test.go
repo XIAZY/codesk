@@ -524,7 +524,23 @@ func TestLocalAndRemoteAppendMergeConvergesAcrossRecipients(t *testing.T) {
 	syncDocumentClient(t, freshConn, freshDoc, finalContent)
 }
 
-func TestOverlappingLocalAndRemoteRewritePreservesLocalDivergence(t *testing.T) {
+func TestOverlappingRewriteConvergencePredicate(t *testing.T) {
+	tests := map[string]bool{
+		"title\nlocal rewrite\nremote rewrite\n":               true,
+		"title\nremote rewrite\nlocal rewrite\n":               true,
+		"title\njunk\nlocal rewrite\nremote rewrite\n":         false,
+		"title\nlocal rewrite\nremote rewrite\nremote rewrite": false,
+		"title\nlocal rewrite\nshared\nremote rewrite\n":       false,
+	}
+
+	for content, want := range tests {
+		if got := validOverlappingRewriteContent(content); got != want {
+			t.Fatalf("validOverlappingRewriteContent(%q) = %t, want %t", content, got, want)
+		}
+	}
+}
+
+func TestOverlappingLocalAndRemoteRewriteConvergesWithoutLoss(t *testing.T) {
 	stack := newRegressionStack(t)
 	stack.up(t)
 
@@ -547,21 +563,19 @@ func TestOverlappingLocalAndRemoteRewritePreservesLocalDivergence(t *testing.T) 
 	writeBinary(t, remoteConn, yproto.BuildSyncUpdate(remoteUpdate))
 
 	finalContent := stack.waitForBackendContentPredicate(t, documentID, 60*time.Second, func(content string) bool {
-		return strings.HasPrefix(content, "title\n") &&
-			strings.Contains(content, "remote rewrite\n") &&
-			content != "title\nshared\n"
+		return validOverlappingRewriteContent(content)
 	})
-	localContent := stack.waitForLocalContentPredicate(t, path, 60*time.Second, func(content string) bool {
-		return strings.HasPrefix(content, "title\n") && strings.Contains(content, "local rewrite")
-	})
-	if localContent == finalContent {
-		t.Fatalf("expected overlapping rewrite to remain locally divergent until resolved; both sides have %q", finalContent)
-	}
+	stack.waitForLocalContent(t, path, finalContent, 60*time.Second)
 
 	freshDoc := crdt.New(crdt.WithClientID(502))
 	freshConn := dialDocumentWebsocket(t, wsURL, "fresh-overlap-reader", 502)
 	defer freshConn.Close()
 	syncDocumentClient(t, freshConn, freshDoc, finalContent)
+}
+
+func validOverlappingRewriteContent(content string) bool {
+	return content == "title\nlocal rewrite\nremote rewrite\n" ||
+		content == "title\nremote rewrite\nlocal rewrite\n"
 }
 
 type regressionStack struct {
