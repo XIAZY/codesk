@@ -18,7 +18,7 @@ After this change, every deploy target that publishes to Cloudflare R2 uses the 
 - [x] (2026-07-28 19:49Z) Advanced the canonical release version to 0.0.3 and completed the user-requested real Windows GUI deploy with exit 0.
 - [x] (2026-07-28 19:50Z) Independently verified the seven remote objects, manifest equality, both MSI hashes, and provenance source commit for 0.0.3.
 - [x] (2026-07-28 19:57Z) Passed the complete build/deploy contract suite again with canonical version 0.0.3.
-- [ ] Push the existing branch and update draft PR #225.
+- [x] (2026-07-28 20:00Z) Pushed the existing branch and updated draft PR #225 to describe the rclone-only uploader and verified 0.0.3 release.
 
 ## Surprises & Discoveries
 
@@ -46,7 +46,7 @@ After this change, every deploy target that publishes to Cloudflare R2 uses the 
 
 ## Outcomes & Retrospective
 
-The implementation now has one production uploader path for all five R2 targets and removes 270 lines while adding the rclone fixtures and contracts needed to preserve failure ordering. The complete contract suite passes with canonical version 0.0.3. A real Windows GUI 0.0.3 deployment completed successfully, and independent R2 reads verified its exact inventory, manifests, MSI hashes, and provenance. Only publishing the already-committed work and updating draft PR #225 remain.
+The implementation now has one production uploader path for all five R2 targets and removes 270 lines while adding the rclone fixtures and contracts needed to preserve failure ordering. The complete contract suite passes with canonical version 0.0.3. A real Windows GUI 0.0.3 deployment completed successfully, and independent R2 reads verified its exact inventory, manifests, MSI hashes, and provenance. The branch is pushed and draft PR #225 now describes the complete rclone-only result.
 
 ## Context and Orientation
 
@@ -108,4 +108,4 @@ Earlier R2 verification found the exact seven Windows GUI 0.0.2 objects, matchin
 
 The external dependency is rclone 1.59 or newer. The script exposes no new command-line interface: callers continue to set `UPLOAD_TARGET` and run the existing Make targets. The required secret environment interface is `AWS_ACCESS_KEY_ID` plus `AWS_SECRET_ACCESS_KEY`; `R2_ENDPOINT_URL` and the existing `R2_*_BUCKET` and `R2_*_PREFIX` values remain non-secret destination configuration. The named remote `nottyr2:` exists only through exported environment variables in the uploader process and is never persisted.
 
-Plan revision note (2026-07-28): Created this plan after the user broadened PR #225 from a Windows-only rclone migration to a single rclone uploader for every R2 deploy target. Updated it after implementation and after the user explicitly required another real Windows GUI deployment from the final source.
+Plan revision note (2026-07-28): Created this plan after the user broadened PR #225 from a Windows-only rclone migration to a single rclone uploader for every R2 deploy target. Updated it after implementation, after the user explicitly required another real Windows GUI deployment, after the immutable 0.0.2 conflict required version 0.0.3, and after the verified release and PR update completed.
