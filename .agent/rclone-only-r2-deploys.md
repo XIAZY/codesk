@@ -13,8 +13,9 @@ After this change, every deploy target that publishes to Cloudflare R2 uses the 
 - [x] (2026-07-28 19:20Z) Removed Wrangler- and AWS-specific workarounds, configuration checks, and dead test fixtures.
 - [x] (2026-07-28 19:20Z) Updated contract assertions and operator documentation for the single rclone dependency.
 - [x] (2026-07-28 19:27Z) Passed shell syntax, the focused Windows source contract, and the complete build/deploy contract suite.
-- [ ] Commit the final source so Windows provenance resolves to the intended PR head.
-- [ ] Run the user-requested real Windows GUI deploy and observe a safe successful no-op for immutable 0.0.2.
+- [x] (2026-07-28 19:32Z) Committed the rclone-only source as `d5dd7da` so the real build could bind provenance to a concrete commit.
+- [x] (2026-07-28 19:40Z) Confirmed a rebuilt 0.0.2 cannot replace its different immutable R2 manifest; no objects were written.
+- [ ] Advance the canonical release version to 0.0.3 and run the user-requested successful real Windows GUI deploy.
 - [ ] Push the existing branch and update draft PR #225.
 
 ## Surprises & Discoveries
@@ -23,6 +24,8 @@ After this change, every deploy target that publishes to Cloudflare R2 uses the 
   Evidence: the real Windows GUI deploy initially reported a conflicting empty manifest; `rclone lsjson <remote> --stat --files-only` returns `null` for an absent object and a JSON file record with `"IsDir": false` for a present object.
 - Observation: the old shared uploader gives directory deletion semantics only to the AWS CLI path. Its Wrangler path uploads enumerated files without deleting stale remote objects.
   Evidence: `scripts/upload-r2.sh` calls `aws s3 sync --delete` for AWS but loops over `wrangler r2 object put` for Wrangler.
+- Observation: rebuilding Windows GUI 0.0.2 from the rclone-only commit produces a different MSI manifest than the already-published 0.0.2 release, so the immutable release guard rejects it.
+  Evidence: both architecture builds completed, rclone read the remote ledger, and the deploy exited with `windows-gui release 0.0.2 is already published with a different manifest` before any write.
 
 ## Decision Log
 
@@ -35,6 +38,9 @@ After this change, every deploy target that publishes to Cloudflare R2 uses the 
 - Decision: Use rclone directory synchronization for static directory deploys and explicit single-object uploads for release commit ordering and metadata overrides.
   Rationale: Every static directory caller requires stale-object deletion, so one `rclone sync` path is sufficient. Release targets require payload-before-manifest ordering that is already expressed by `upload_file` and `upload_committed_release_dir`.
   Date/Author: 2026-07-28 / Codex
+- Decision: Advance `DAEMON_VERSION` from 0.0.2 to 0.0.3 for the requested real deployment.
+  Rationale: The user requires a successful real deploy, 0.0.2 is already immutable with different payload bytes, and a read-only rclone stat confirmed `desktop/windows/0.0.3/manifest.json` is absent.
+  Date/Author: 2026-07-28 / Codex
 
 ## Outcomes & Retrospective
 
@@ -44,7 +50,7 @@ Implementation is in progress. Completion requires one clean production uploader
 
 `scripts/upload-r2.sh` is the only shared R2 publisher. `UPLOAD_TARGET` selects homepage, frontend, daemon, macOS GUI, or Windows GUI behavior. A release ledger is the versioned `manifest.json` object written after all payload objects; the `latest/manifest.json` object is a short-cache pointer written after the ledger. `scripts/test-build-deploy-contract.sh` supplies fake upload commands and exercises failure ordering, retries, immutable desktop releases, and replaceable daemon releases. `scripts/windows_msi_release_contract_test.go` checks source-level invariants for the Windows path. `README.md` and `scripts/README.md` document operator prerequisites.
 
-The branch `agent/use-rclone-r2-upload` already contains a narrower Windows-only migration and draft PR #225. This plan broadens that same branch and PR rather than creating another branch. Existing Windows GUI release 0.0.2 has already been published and independently verified, so validation of the broader migration should use local contract fixtures and read-only remote checks rather than republishing that immutable version.
+The branch `agent/use-rclone-r2-upload` already contains a narrower Windows-only migration and draft PR #225. This plan broadens that same branch and PR rather than creating another branch. Existing Windows GUI release 0.0.2 has already been published and independently verified. The broader migration changed the built payload identity, so the requested real deployment uses the next canonical release, 0.0.3, rather than weakening the 0.0.2 immutability guard.
 
 ## Plan of Work
 
@@ -72,13 +78,13 @@ After editing, validate with:
 
 The focused Go test must print `ok`. The shell suite must finish with `All build/deploy contract tests passed.` A final search must show no Wrangler or AWS CLI uploader implementation in `scripts/upload-r2.sh`.
 
-After committing, run `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\make.ps1 windows-gui-deploy` with the permanent R2 credentials and rclone on `PATH`. Expect both architectures to build and the uploader to report `windows-gui release 0.0.2 is already published; no writes needed`. Publish the existing branch and update the existing draft PR only after that result.
+After committing the 0.0.3 version, run `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\make.ps1 windows-gui-deploy` with the permanent R2 credentials and rclone on `PATH`. Expect both architectures to build, seven version objects to publish, and `latest/manifest.json` to advance. Verify the remote inventory, hashes, and provenance before publishing the branch and updating the existing draft PR.
 
 ## Validation and Acceptance
 
 Acceptance requires all five `UPLOAD_TARGET` values to fail early when rclone or any of the three credential inputs are missing and to configure the Cloudflare S3 provider without writing a config file. Static homepage and app fixtures must prove the correct destination and synchronization semantics. Daemon and both GUI fixture sets must prove that rclone reads version ledgers, uploads payloads before manifests, stops before commit points on injected failures, and preserves their existing conflict policies. The complete contract suite must pass with no fake Wrangler executable. The final committed source must also complete a real Windows GUI deploy without changing immutable 0.0.2 objects.
 
-The production script must contain no uploader selector and no invocation of `aws`, `wrangler`, or `npx wrangler`. Documentation must name `rclone`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `R2_ENDPOINT_URL` as the common R2 deployment prerequisites.
+The production script must contain no uploader selector and no invocation of `aws`, `wrangler`, or `npx wrangler`. Documentation must name `rclone`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `R2_ENDPOINT_URL` as the common R2 deployment prerequisites. Windows GUI 0.0.3 must exist remotely only after all six architecture payload files are present, and its provenance must name the release commit.
 
 ## Idempotence and Recovery
 
@@ -86,7 +92,7 @@ Local fixture validation is repeatable and writes only under test temporary dire
 
 ## Artifacts and Notes
 
-The prior real deploy verified this rclone configuration against Cloudflare R2:
+The real deploys verify this rclone configuration against Cloudflare R2:
 
     RCLONE_CONFIG_NOTTYR2_TYPE=s3
     RCLONE_CONFIG_NOTTYR2_PROVIDER=Cloudflare
@@ -94,7 +100,7 @@ The prior real deploy verified this rclone configuration against Cloudflare R2:
     RCLONE_CONFIG_NOTTYR2_ENDPOINT=<R2_ENDPOINT_URL>
     RCLONE_CONFIG_NOTTYR2_REGION=auto
 
-R2 verification found the exact seven Windows GUI 0.0.2 objects, matching version and latest manifests, matching local MSI hashes, and provenance bound to commit `dcd488632b49954eb8d30965211959f7934c3399`.
+Earlier R2 verification found the exact seven Windows GUI 0.0.2 objects, matching version and latest manifests, matching local MSI hashes, and provenance bound to commit `dcd488632b49954eb8d30965211959f7934c3399`. The final validation will repeat those checks for 0.0.3.
 
 ## Interfaces and Dependencies
 
