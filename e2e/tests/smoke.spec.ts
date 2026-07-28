@@ -1,7 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { dismissOnboarding } from "../utils";
+import { dismissOnboarding, expectDocumentPersisted } from "../utils";
 
 type Seed = {
   email: string; password: string;
@@ -99,9 +99,10 @@ test("false-orphan pin: a healthy-anchored thread shows no 'anchor lost' after r
   await dismissOnboarding(page);
   await editor.click();
   await page.keyboard.type("anchored content for a healthy thread");
-  // Wait for the document to report synced before creating the anchor, so the relative position is written
-  // against content the backend has persisted (the anchor must survive the reopen below).
-  await expect(page.locator(".doc-meta-row .chip.ok")).toBeVisible({ timeout: 15_000 });
+  // The green "Live" chip reports websocket connectivity, not whether the
+  // current write reached the backend. Observe the complete text through a
+  // second real subscriber before creating an anchor that must survive reload.
+  await expectDocumentPersisted(page, "anchored content for a healthy thread");
   await page.keyboard.press("Home");
   await page.keyboard.press("Shift+End"); // select the line -> a real text-range anchor
   await page.locator(".selection-toolbar button.primary").first().click();
@@ -118,7 +119,6 @@ test("false-orphan pin: a healthy-anchored thread shows no 'anchor lost' after r
   await dismissOnboarding(page);
   await expect(editor).toBeVisible({ timeout: 20_000 });
   await expect(editor).toContainText("anchored content for a healthy thread", { timeout: 20_000 });
-  await expect(page.locator(".doc-meta-row .chip.ok")).toBeVisible({ timeout: 15_000 });
   await expect(page.locator(".thread-orphan-warning")).toHaveCount(0);
   await expect(page.getByText(/anchor lost/i)).toHaveCount(0);
 
