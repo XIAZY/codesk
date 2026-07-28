@@ -18,6 +18,9 @@ daemon_newer_version=255.255.65535
 	fail "daemon publication fixture needs a version older than $daemon_newer_version"
 NOTTY_TEST_RELEASE_VERSION="$release_version"
 export NOTTY_TEST_RELEASE_VERSION
+AWS_ACCESS_KEY_ID=test-access-key
+AWS_SECRET_ACCESS_KEY=test-secret-key
+export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 
 crlf_deploy_env="$tmp_dir/crlf.deploy.env"
 printf '# Windows checkout\r\n\r\nCRLF_DEPLOY_VALUE=from-file\r\nCRLF_DEPLOY_EMPTY=\r\nCRLF_DEPLOY_PRESERVED=from-file\r\n' \
@@ -402,6 +405,85 @@ if [ -n "${AWS_OBJECT_STORE_DIR:-}" ] && [ "${4:-}" = sync ]; then
 	done
 fi
 AWS
+cat >"$fake_bin/rclone" <<'RCLONE'
+#!/usr/bin/env sh
+set -eu
+[ "${RCLONE_CONFIG_NOTTYR2_TYPE:-}" = s3 ]
+[ "${RCLONE_CONFIG_NOTTYR2_PROVIDER:-}" = Cloudflare ]
+[ "${RCLONE_CONFIG_NOTTYR2_ENV_AUTH:-}" = true ]
+[ "${RCLONE_CONFIG_NOTTYR2_ENDPOINT:-}" = https://example.invalid ]
+[ "${RCLONE_CONFIG_NOTTYR2_REGION:-}" = auto ]
+if [ -n "${RCLONE_LOG:-}" ]; then
+	printf '%s\n' "$*" >>"$RCLONE_LOG"
+fi
+if [ "${1:-}" = lsjson ]; then
+	rclone_source="$2"
+	case "$rclone_source" in
+		nottyr2:*) ;;
+		*) exit 64 ;;
+	esac
+	case "$rclone_source" in
+		*/latest/manifest.json)
+			[ "${AWS_FAIL_LATEST_READ:-0}" -eq 0 ] || exit 70
+			;;
+	esac
+	rclone_stat_file="${TMPDIR:-/tmp}/notty-rclone-stat.$$"
+	set +e
+	"$(dirname "$0")/aws" --endpoint-url https://example.invalid s3 cp \
+		"s3://${rclone_source#nottyr2:}" "$rclone_stat_file"
+	rclone_status="$?"
+	set -e
+	if [ "$rclone_status" -eq 71 ]; then
+		printf 'null\n'
+		exit 0
+	fi
+	[ "$rclone_status" -eq 0 ] || exit "$rclone_status"
+	rm -f "$rclone_stat_file"
+	printf '{"Path":"manifest.json","Name":"manifest.json","Size":1,"IsDir":false}\n'
+	exit 0
+fi
+[ "${1:-}" = copyto ] || exit 64
+rclone_source="$2"
+rclone_destination="$3"
+case "$rclone_source" in
+	nottyr2:*)
+		case "$rclone_source" in
+			*/latest/manifest.json)
+				[ "${AWS_FAIL_LATEST_READ:-0}" -eq 0 ] || exit 70
+				;;
+		esac
+		set +e
+		"$(dirname "$0")/aws" --endpoint-url https://example.invalid s3 cp \
+			"s3://${rclone_source#nottyr2:}" "$rclone_destination"
+		rclone_status="$?"
+		set -e
+		[ "$rclone_status" -ne 71 ] || exit 0
+		exit "$rclone_status"
+		;;
+esac
+case "$rclone_destination" in
+	nottyr2:*) ;;
+	*) exit 64 ;;
+esac
+shift 3
+rclone_content_type=
+rclone_cache_control=
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--header-upload)
+			case "$2" in
+				'Content-Type: '*) rclone_content_type="${2#Content-Type: }" ;;
+				'Cache-Control: '*) rclone_cache_control="${2#Cache-Control: }" ;;
+			esac
+			shift 2
+			;;
+		*) shift ;;
+	esac
+done
+"$(dirname "$0")/aws" --endpoint-url https://example.invalid s3 cp \
+	"$rclone_source" "s3://${rclone_destination#nottyr2:}" \
+	--content-type "$rclone_content_type" --cache-control "$rclone_cache_control"
+RCLONE
 cat >"$fake_bin/wrangler" <<'WRANGLER'
 #!/usr/bin/env sh
 set -eu
@@ -505,7 +587,7 @@ if [ -n "${WINDOWS_GUI_MUTATE_SOURCE_ROOT:-}" ]; then
 	printf 'post-staging mutation\n' >>"$WINDOWS_GUI_MUTATE_SOURCE_ROOT/arm64/Codesk_${version}_windows_arm64.msi"
 fi
 POWERSHELL
-chmod +x "$fake_bin/aws" "$fake_bin/wrangler" "$fake_bin/git" "$fake_bin/powershell.exe"
+chmod +x "$fake_bin/aws" "$fake_bin/rclone" "$fake_bin/wrangler" "$fake_bin/git" "$fake_bin/powershell.exe"
 aws_log="$tmp_dir/aws.log"
 
 fixture_sha256() {
@@ -1262,12 +1344,19 @@ for arch in amd64 arm64; do
 	write_windows_bundle "$windows_dist" "$arch" "$source_head" "$source_base" true
 done
 windows_no_go_log="$tmp_dir/windows-native-go.log"
+windows_rclone_log="$tmp_dir/windows-rclone.log"
 : >"$windows_no_go_log"
+: >"$windows_rclone_log"
 PATH="$no_go_bin:$fake_bin:$PATH" NO_GO_LOG="$windows_no_go_log" \
-	AWS_LOG="$aws_log" WINDOWS_GUI_MSI_ROOT="$windows_dist" UPLOAD_TARGET=windows-gui \
+	AWS_LOG="$aws_log" RCLONE_LOG="$windows_rclone_log" \
+	WINDOWS_GUI_MSI_ROOT="$windows_dist" UPLOAD_TARGET=windows-gui \
 	R2_ENDPOINT_URL=https://example.invalid R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
 	"$repo_dir/scripts/upload-r2.sh" >/dev/null
 [ ! -s "$windows_no_go_log" ] || fail 'Windows GUI deploy invoked native host Go'
+grep -Fq 'lsjson nottyr2:static/desktop/windows/latest/manifest.json --stat --files-only' "$windows_rclone_log" ||
+	fail 'Windows GUI publication guard did not stat its latest object with rclone'
+grep -F 'copyto ' "$windows_rclone_log" | grep -Fq -- '--no-check-dest --header-upload Content-Type:' ||
+	fail 'Windows GUI publication did not use forced rclone uploads with explicit metadata'
 
 windows_version_uri="s3://static/desktop/windows/$release_version/"
 windows_ledger_uri="${windows_version_uri}manifest.json"

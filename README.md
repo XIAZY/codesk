@@ -1638,6 +1638,10 @@ Daemon-family commands, including the macOS and Windows desktop apps, read the
 canonical release version from the root `DAEMON_VERSION` file. Frontend
 commands do not use a release version, and backend Docker images use the
 checked-out commit as `backend-<short-git-sha>`.
+Windows GUI publication uses `rclone` with `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` for Cloudflare R2; the uploader constructs an ephemeral
+remote from `R2_ENDPOINT_URL` and does not persist those credentials in an
+rclone configuration file.
 The three platform build targets are focused local helpers and never publish.
 `make daemon-deploy` rebuilds all six OS/architecture archives sequentially,
 preflights one complete staged snapshot, uploads it under

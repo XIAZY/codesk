@@ -285,6 +285,23 @@ wrangler_put() {
 		--force
 }
 
+rclone_remote() {
+	rclone_remote_bucket="$1"
+	rclone_remote_key="$(strip_prefix_slashes "$2")"
+	printf 'nottyr2:%s/%s' "$rclone_remote_bucket" "$rclone_remote_key"
+}
+
+rclone_put() {
+	rclone_put_bucket="$1"
+	rclone_put_key="$2"
+	rclone_put_file="$3"
+	rclone_put_cache_control="$4"
+	rclone copyto "$rclone_put_file" "$(rclone_remote "$rclone_put_bucket" "$rclone_put_key")" \
+		--no-check-dest \
+		--header-upload "Content-Type: $(content_type_for "$rclone_put_file")" \
+		--header-upload "Cache-Control: $rclone_put_cache_control"
+}
+
 download_optional_file() {
 	download_bucket="$1"
 	download_key="$(strip_prefix_slashes "$2")"
@@ -304,6 +321,31 @@ download_optional_file() {
 			rm -f "$download_path"
 			return 2
 		fi
+		return 0
+	fi
+	if [ "$uploader" = rclone ]; then
+		download_remote="$(rclone_remote "$download_bucket" "$download_key")"
+		if ! rclone lsjson "$download_remote" --stat --files-only \
+			>"$download_path.listing" 2>"$download_path.stderr"; then
+			cat "$download_path.stderr" >&2
+			rm -f "$download_path.listing" "$download_path.stderr"
+			return 2
+		fi
+		if grep -Eq '^[[:space:]]*null[[:space:]]*$' "$download_path.listing"; then
+			rm -f "$download_path.listing" "$download_path.stderr"
+			return 1
+		fi
+		if ! grep -Eq '"IsDir"[[:space:]]*:[[:space:]]*false' "$download_path.listing"; then
+			cat "$download_path.listing" "$download_path.stderr" >&2
+			rm -f "$download_path.listing" "$download_path.stderr"
+			return 2
+		fi
+		rm -f "$download_path.listing" "$download_path.stderr"
+		if ! rclone copyto "$download_remote" "$download_path" --no-traverse; then
+			rm -f "$download_path"
+			return 2
+		fi
+		[ -f "$download_path" ] || return 2
 		return 0
 	fi
 
@@ -453,6 +495,9 @@ upload_file() {
 		aws_s3 cp "$upload_file_path" "$(s3_uri "$upload_file_bucket" "$upload_file_key")" \
 			--content-type "$(content_type_for "$upload_file_path")" \
 			--cache-control "$upload_file_cache_control"
+	elif [ "$uploader" = rclone ]; then
+		rclone_put "$upload_file_bucket" "$(strip_prefix_slashes "$upload_file_key")" \
+			"$upload_file_path" "$upload_file_cache_control"
 	else
 		wrangler_put "$upload_file_bucket" "$(strip_prefix_slashes "$upload_file_key")" "$upload_file_path" "$upload_file_cache_control"
 	fi
@@ -529,9 +574,9 @@ case "$target" in
 		;;
 esac
 
-if command -v aws >/dev/null 2>&1 && [ -n "${R2_ENDPOINT_URL:-}" ]; then
+if [ "$target" != windows-gui ] && command -v aws >/dev/null 2>&1 && [ -n "${R2_ENDPOINT_URL:-}" ]; then
 	uploader=aws
-else
+elif [ "$target" != windows-gui ]; then
 	if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] && [ -n "${NOTTY_CLOUDFLARE_TOKEN:-}" ]; then
 		CLOUDFLARE_API_TOKEN="$NOTTY_CLOUDFLARE_TOKEN"
 		export CLOUDFLARE_API_TOKEN
@@ -540,6 +585,20 @@ else
 	[ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ] || die 'CLOUDFLARE_ACCOUNT_ID is required for Wrangler R2 uploads'
 	command -v wrangler >/dev/null 2>&1 || command -v npx >/dev/null 2>&1 || die 'wrangler or npx is required for Cloudflare API-token uploads'
 	uploader=wrangler
+else
+	command -v rclone >/dev/null 2>&1 || die 'rclone is required for Windows GUI R2 uploads'
+	need R2_ENDPOINT_URL
+	need AWS_ACCESS_KEY_ID
+	need AWS_SECRET_ACCESS_KEY
+	RCLONE_CONFIG_NOTTYR2_TYPE=s3
+	RCLONE_CONFIG_NOTTYR2_PROVIDER=Cloudflare
+	RCLONE_CONFIG_NOTTYR2_ENV_AUTH=true
+	RCLONE_CONFIG_NOTTYR2_ENDPOINT="$R2_ENDPOINT_URL"
+	RCLONE_CONFIG_NOTTYR2_REGION=auto
+	export RCLONE_CONFIG_NOTTYR2_TYPE RCLONE_CONFIG_NOTTYR2_PROVIDER \
+		RCLONE_CONFIG_NOTTYR2_ENV_AUTH RCLONE_CONFIG_NOTTYR2_ENDPOINT \
+		RCLONE_CONFIG_NOTTYR2_REGION
+	uploader=rclone
 fi
 
 release_cache_control="${RELEASE_CACHE_CONTROL:-public, max-age=31536000, immutable}"
