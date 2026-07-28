@@ -5,9 +5,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
+
+var daemonStatusVersionAssignment = regexp.MustCompile(`(?m)^([ \t]*)Version:[ \t]+version,[ \t]*$`)
 
 func TestProductEntrypointsRequireEmbeddedVersion(t *testing.T) {
 	paths := map[string]string{
@@ -146,22 +149,30 @@ func TestDaemonReportedVersionHasNoRuntimeOrInstallerOwner(t *testing.T) {
 
 	mutations := []struct {
 		name, file, old, replacement string
+		pattern                      *regexp.Regexp
 	}{
-		{"config field restored", "config", "DaemonToken        string", "DaemonToken        string\n\tDaemonVersion      string"},
-		{"status dev fallback restored", "status", "Version:  version", `Version: "dev"`},
-		{"POSIX installer environment override restored", "install-posix", `version="latest"`, `version="${NOTTY_DAEMON_VERSION:-latest}"`},
-		{"Windows installer environment override restored", "install-windows", `$Version = "latest"`, `$Version = $env:NOTTY_DAEMON_VERSION`},
+		{"config field restored", "config", "DaemonToken        string", "DaemonToken        string\n\tDaemonVersion      string", nil},
+		{"status dev fallback restored", "status", "", `${1}Version: "dev",`, daemonStatusVersionAssignment},
+		{"POSIX installer environment override restored", "install-posix", `version="latest"`, `version="${NOTTY_DAEMON_VERSION:-latest}"`, nil},
+		{"Windows installer environment override restored", "install-windows", `$Version = "latest"`, `$Version = $env:NOTTY_DAEMON_VERSION`, nil},
 	}
 	for _, mutation := range mutations {
 		t.Run(mutation.name, func(t *testing.T) {
-			if strings.Count(sources[mutation.file], mutation.old) != 1 {
-				t.Fatalf("mutation source %q is not unique", mutation.old)
-			}
 			mutated := make(map[string]string, len(sources))
 			for name, source := range sources {
 				mutated[name] = source
 			}
-			mutated[mutation.file] = strings.Replace(mutated[mutation.file], mutation.old, mutation.replacement, 1)
+			if mutation.pattern != nil {
+				if matches := mutation.pattern.FindAllStringIndex(mutated[mutation.file], -1); len(matches) != 1 {
+					t.Fatalf("mutation source pattern %q matched %d times, want 1", mutation.pattern, len(matches))
+				}
+				mutated[mutation.file] = mutation.pattern.ReplaceAllString(mutated[mutation.file], mutation.replacement)
+			} else {
+				if strings.Count(mutated[mutation.file], mutation.old) != 1 {
+					t.Fatalf("mutation source %q is not unique", mutation.old)
+				}
+				mutated[mutation.file] = strings.Replace(mutated[mutation.file], mutation.old, mutation.replacement, 1)
+			}
 			if err := checkDaemonVersionOwnerSource(mutated); err == nil {
 				t.Fatal("alternate daemon version owner mutation survived")
 			}
@@ -217,7 +228,7 @@ func checkDaemonContainerVersionSource(source string) error {
 
 func checkDaemonVersionOwnerSource(sources map[string]string) error {
 	if strings.Count(sources["status"], "version, err := buildinfo.Require()") != 1 ||
-		strings.Count(sources["status"], "Version:  version") != 1 {
+		len(daemonStatusVersionAssignment.FindAllStringIndex(sources["status"], -1)) != 1 {
 		return fmt.Errorf("daemon status does not report the required embedded version")
 	}
 	if strings.Count(sources["install-posix"], `version="latest"`) != 1 ||
