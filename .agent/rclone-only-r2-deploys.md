@@ -15,7 +15,9 @@ After this change, every deploy target that publishes to Cloudflare R2 uses the 
 - [x] (2026-07-28 19:27Z) Passed shell syntax, the focused Windows source contract, and the complete build/deploy contract suite.
 - [x] (2026-07-28 19:32Z) Committed the rclone-only source as `d5dd7da` so the real build could bind provenance to a concrete commit.
 - [x] (2026-07-28 19:40Z) Confirmed a rebuilt 0.0.2 cannot replace its different immutable R2 manifest; no objects were written.
-- [ ] Advance the canonical release version to 0.0.3 and run the user-requested successful real Windows GUI deploy.
+- [x] (2026-07-28 19:49Z) Advanced the canonical release version to 0.0.3 and completed the user-requested real Windows GUI deploy with exit 0.
+- [x] (2026-07-28 19:50Z) Independently verified the seven remote objects, manifest equality, both MSI hashes, and provenance source commit for 0.0.3.
+- [x] (2026-07-28 19:57Z) Passed the complete build/deploy contract suite again with canonical version 0.0.3.
 - [ ] Push the existing branch and update draft PR #225.
 
 ## Surprises & Discoveries
@@ -44,7 +46,7 @@ After this change, every deploy target that publishes to Cloudflare R2 uses the 
 
 ## Outcomes & Retrospective
 
-Implementation is in progress. Completion requires one clean production uploader path, green contracts for all five R2 targets, and an updated draft PR.
+The implementation now has one production uploader path for all five R2 targets and removes 270 lines while adding the rclone fixtures and contracts needed to preserve failure ordering. The complete contract suite passes with canonical version 0.0.3. A real Windows GUI 0.0.3 deployment completed successfully, and independent R2 reads verified its exact inventory, manifests, MSI hashes, and provenance. Only publishing the already-committed work and updating draft PR #225 remain.
 
 ## Context and Orientation
 
@@ -100,7 +102,7 @@ The real deploys verify this rclone configuration against Cloudflare R2:
     RCLONE_CONFIG_NOTTYR2_ENDPOINT=<R2_ENDPOINT_URL>
     RCLONE_CONFIG_NOTTYR2_REGION=auto
 
-Earlier R2 verification found the exact seven Windows GUI 0.0.2 objects, matching version and latest manifests, matching local MSI hashes, and provenance bound to commit `dcd488632b49954eb8d30965211959f7934c3399`. The final validation will repeat those checks for 0.0.3.
+Earlier R2 verification found the exact seven Windows GUI 0.0.2 objects, matching version and latest manifests, matching local MSI hashes, and provenance bound to commit `dcd488632b49954eb8d30965211959f7934c3399`. Final verification found the same exact seven-object, manifest, hash, and provenance guarantees for 0.0.3, bound to release commit `cb9b95d025faea94f2da0dea31d4e469f8e95a8f`.
 
 ## Interfaces and Dependencies
 
