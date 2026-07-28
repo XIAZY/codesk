@@ -19,6 +19,7 @@ import {
   personOnline,
   documentActivity,
   defaultDaemonInstallPlatform,
+  daemonInstallMethod,
   detectDesktopPlatform,
   desktopPlatformHasApp,
   daemonDesktopPlatform,
@@ -1151,6 +1152,13 @@ describe("daemon install platform", () => {
     expect(defaultDaemonInstallPlatform("linux", "Windows NT 10.0")).toBe("unix");
     expect(defaultDaemonInstallPlatform("", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")).toBe("windows");
     expect(defaultDaemonInstallPlatform("", "Mozilla/5.0 (Macintosh; Intel Mac OS X)")).toBe("unix");
+  });
+
+  it("maps reported daemon client kinds without guessing unknown values", () => {
+    expect(daemonInstallMethod("gui")).toBe("app");
+    expect(daemonInstallMethod(" cli ")).toBe("terminal");
+    expect(daemonInstallMethod("service")).toBeNull();
+    expect(daemonInstallMethod("")).toBeNull();
   });
 });
 

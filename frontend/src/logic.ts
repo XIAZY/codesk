@@ -28,6 +28,7 @@ export type ResolvedThreadAnchor = ThreadAnchor & {
 };
 
 export type DaemonInstallPlatform = "unix" | "windows";
+export type DaemonInstallMethod = "app" | "terminal";
 
 export function shellQuote(value: string) {
   if (value.length === 0) {
@@ -64,6 +65,17 @@ export function defaultDaemonInstallPlatform(osHint = "", userAgent?: string): D
   return /windows|win32|win64/i.test(browserIdentity) ? "windows" : "unix";
 }
 
+export function daemonInstallMethod(clientKind = ""): DaemonInstallMethod | null {
+  const normalized = clientKind.trim().toLowerCase();
+  if (normalized === "gui") {
+    return "app";
+  }
+  if (normalized === "cli") {
+    return "terminal";
+  }
+  return null;
+}
+
 export function isMarkdownDocumentPath(path: string) {
   return /\.(md|markdown)$/i.test(path);
 }
@@ -98,10 +110,9 @@ export function desktopPlatformHasApp(platform: DesktopPlatform): boolean {
 }
 
 // A connected daemon reports its OS (darwin/windows/linux); map it to the desktop-platform
-// class the UNINSTALL flow keys on (#63). This answers which OS, NOT how it was installed —
-// the record never stores install method, so mac/windows still ask "app or terminal?". Linux
-// has no desktop app (terminal-only); an unrecognized/absent OS also stays terminal-only,
-// because we can't give correct OS-native app steps we can't verify.
+// class the UNINSTALL flow keys on (#63). Launch kind is resolved separately: Linux has no
+// desktop app (terminal-only), while an unrecognized/absent OS also stays terminal-only because
+// we cannot give OS-native app steps we cannot verify.
 export function daemonDesktopPlatform(osHint = ""): DesktopPlatform {
   const normalized = osHint.trim().toLowerCase();
   if (normalized === "windows") return "windows";

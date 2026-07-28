@@ -1227,11 +1227,11 @@ func createDaemonReinstallToken(db *sql.DB, workspaceID string, daemonID string)
 		    AND workspace_id = $3
 		    AND status = 'active'
 		    AND deleted_at IS NULL
-		  RETURNING id::text, workspace_id::text, name, status, daemon_version, os, arch, runtime_detections::text, COALESCE(last_seen_at, '0001-01-01T00:00:00Z'::timestamptz), created_at, COALESCE(deleted_at, '0001-01-01T00:00:00Z'::timestamptz)`,
+		  RETURNING id::text, workspace_id::text, name, status, daemon_version, os, arch, client_kind, runtime_detections::text, COALESCE(last_seen_at, '0001-01-01T00:00:00Z'::timestamptz), created_at, COALESCE(deleted_at, '0001-01-01T00:00:00Z'::timestamptz)`,
 		tokenHash(token),
 		strings.TrimSpace(daemonID),
 		strings.TrimSpace(workspaceID),
-	).Scan(&daemon.ID, &daemon.WorkspaceID, &daemon.Name, &daemon.Status, &daemon.Version, &daemon.OS, &daemon.Arch, runtimeDetectionsScanner(&daemon.Runtimes), &daemon.LastSeenAt, &daemon.CreatedAt, &daemon.DeletedAt)
+	).Scan(&daemon.ID, &daemon.WorkspaceID, &daemon.Name, &daemon.Status, &daemon.Version, &daemon.OS, &daemon.Arch, &daemon.ClientKind, runtimeDetectionsScanner(&daemon.Runtimes), &daemon.LastSeenAt, &daemon.CreatedAt, &daemon.DeletedAt)
 	if err == sql.ErrNoRows {
 		return nil, "", ErrNotFound
 	}
@@ -1245,7 +1245,7 @@ func createDaemonReinstallToken(db *sql.DB, workspaceID string, daemonID string)
 func listDaemons(q querier, workspaceID string) ([]*Daemon, error) {
 	now := time.Now().UTC()
 	rows, err := q.Query(
-		`SELECT id::text, workspace_id::text, name, status, daemon_version, os, arch, runtime_detections::text, last_seen_at, created_at, deleted_at
+		`SELECT id::text, workspace_id::text, name, status, daemon_version, os, arch, client_kind, runtime_detections::text, last_seen_at, created_at, deleted_at
 		   FROM daemons
 		  WHERE workspace_id = $1
 		    AND status <> 'deleted'
@@ -1261,7 +1261,7 @@ func listDaemons(q querier, workspaceID string) ([]*Daemon, error) {
 		daemon := &Daemon{}
 		var lastSeen sql.NullTime
 		var deletedAt sql.NullTime
-		if err := rows.Scan(&daemon.ID, &daemon.WorkspaceID, &daemon.Name, &daemon.Status, &daemon.Version, &daemon.OS, &daemon.Arch, runtimeDetectionsScanner(&daemon.Runtimes), &lastSeen, &daemon.CreatedAt, &deletedAt); err != nil {
+		if err := rows.Scan(&daemon.ID, &daemon.WorkspaceID, &daemon.Name, &daemon.Status, &daemon.Version, &daemon.OS, &daemon.Arch, &daemon.ClientKind, runtimeDetectionsScanner(&daemon.Runtimes), &lastSeen, &daemon.CreatedAt, &deletedAt); err != nil {
 			return nil, err
 		}
 		if lastSeen.Valid {
@@ -1323,20 +1323,22 @@ func updateDaemonStatus(db *sql.DB, workspaceID string, daemonID string, req Upd
 		        daemon_version = $2,
 		        os = $3,
 		        arch = $4,
-		        runtime_detections = $5::jsonb
-		  WHERE id = $6
-		    AND workspace_id = $7
+		        client_kind = COALESCE(NULLIF($5, ''), client_kind),
+		        runtime_detections = $6::jsonb
+		  WHERE id = $7
+		    AND workspace_id = $8
 		    AND status = 'active'
 		    AND deleted_at IS NULL
-		  RETURNING id::text, workspace_id::text, name, status, daemon_version, os, arch, runtime_detections::text, COALESCE(last_seen_at, '0001-01-01T00:00:00Z'::timestamptz), created_at, COALESCE(deleted_at, '0001-01-01T00:00:00Z'::timestamptz)`,
+		  RETURNING id::text, workspace_id::text, name, status, daemon_version, os, arch, client_kind, runtime_detections::text, COALESCE(last_seen_at, '0001-01-01T00:00:00Z'::timestamptz), created_at, COALESCE(deleted_at, '0001-01-01T00:00:00Z'::timestamptz)`,
 		now,
 		strings.TrimSpace(req.Version),
 		strings.TrimSpace(req.OS),
 		strings.TrimSpace(req.Arch),
+		strings.TrimSpace(req.ClientKind),
 		string(runtimeJSON),
 		strings.TrimSpace(daemonID),
 		strings.TrimSpace(workspaceID),
-	).Scan(&daemon.ID, &daemon.WorkspaceID, &daemon.Name, &daemon.Status, &daemon.Version, &daemon.OS, &daemon.Arch, runtimeDetectionsScanner(&daemon.Runtimes), &daemon.LastSeenAt, &daemon.CreatedAt, &daemon.DeletedAt)
+	).Scan(&daemon.ID, &daemon.WorkspaceID, &daemon.Name, &daemon.Status, &daemon.Version, &daemon.OS, &daemon.Arch, &daemon.ClientKind, runtimeDetectionsScanner(&daemon.Runtimes), &daemon.LastSeenAt, &daemon.CreatedAt, &daemon.DeletedAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
 	}
@@ -1366,11 +1368,11 @@ func deleteDaemon(db *sql.DB, workspaceID string, daemonID string) (*Daemon, err
 		  WHERE id = $2
 		    AND workspace_id = $3
 		    AND status <> 'deleted'
-		  RETURNING id::text, workspace_id::text, name, status, daemon_version, os, arch, runtime_detections::text, COALESCE(last_seen_at, '0001-01-01T00:00:00Z'::timestamptz), created_at, COALESCE(deleted_at, '0001-01-01T00:00:00Z'::timestamptz)`,
+		  RETURNING id::text, workspace_id::text, name, status, daemon_version, os, arch, client_kind, runtime_detections::text, COALESCE(last_seen_at, '0001-01-01T00:00:00Z'::timestamptz), created_at, COALESCE(deleted_at, '0001-01-01T00:00:00Z'::timestamptz)`,
 		now,
 		strings.TrimSpace(daemonID),
 		strings.TrimSpace(workspaceID),
-	).Scan(&daemon.ID, &daemon.WorkspaceID, &daemon.Name, &daemon.Status, &daemon.Version, &daemon.OS, &daemon.Arch, runtimeDetectionsScanner(&daemon.Runtimes), &daemon.LastSeenAt, &daemon.CreatedAt, &daemon.DeletedAt)
+	).Scan(&daemon.ID, &daemon.WorkspaceID, &daemon.Name, &daemon.Status, &daemon.Version, &daemon.OS, &daemon.Arch, &daemon.ClientKind, runtimeDetectionsScanner(&daemon.Runtimes), &daemon.LastSeenAt, &daemon.CreatedAt, &daemon.DeletedAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
 	}
@@ -1412,11 +1414,11 @@ func authenticateDaemonToken(db *sql.DB, token string, workspaceID string) (*Dae
 		    AND workspace_id = $3
 		    AND status = 'active'
 		    AND deleted_at IS NULL
-		  RETURNING id::text, workspace_id::text, name, status, daemon_version, os, arch, runtime_detections::text, COALESCE(last_seen_at, '0001-01-01T00:00:00Z'::timestamptz), created_at, COALESCE(deleted_at, '0001-01-01T00:00:00Z'::timestamptz)`,
+		  RETURNING id::text, workspace_id::text, name, status, daemon_version, os, arch, client_kind, runtime_detections::text, COALESCE(last_seen_at, '0001-01-01T00:00:00Z'::timestamptz), created_at, COALESCE(deleted_at, '0001-01-01T00:00:00Z'::timestamptz)`,
 		now,
 		tokenHash(token),
 		workspaceID,
-	).Scan(&daemon.ID, &daemon.WorkspaceID, &daemon.Name, &daemon.Status, &daemon.Version, &daemon.OS, &daemon.Arch, runtimeDetectionsScanner(&daemon.Runtimes), &daemon.LastSeenAt, &daemon.CreatedAt, &daemon.DeletedAt)
+	).Scan(&daemon.ID, &daemon.WorkspaceID, &daemon.Name, &daemon.Status, &daemon.Version, &daemon.OS, &daemon.Arch, &daemon.ClientKind, runtimeDetectionsScanner(&daemon.Runtimes), &daemon.LastSeenAt, &daemon.CreatedAt, &daemon.DeletedAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
 	}

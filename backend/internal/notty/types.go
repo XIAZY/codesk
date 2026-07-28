@@ -143,6 +143,7 @@ type Daemon struct {
 	Version            string             `json:"version,omitempty"`
 	OS                 string             `json:"os,omitempty"`
 	Arch               string             `json:"arch,omitempty"`
+	ClientKind         string             `json:"clientKind,omitempty"`
 	Runtimes           []RuntimeDetection `json:"runtimes,omitempty"`
 	LastSeenAt         time.Time          `json:"lastSeenAt,omitempty"`
 	LastSeenAgeSeconds int64              `json:"lastSeenAgeSeconds"`
@@ -539,10 +540,11 @@ type UpdateAgentSessionRequest struct {
 }
 
 type UpdateDaemonStatusRequest struct {
-	Version  string             `json:"version,omitempty"`
-	OS       string             `json:"os,omitempty"`
-	Arch     string             `json:"arch,omitempty"`
-	Runtimes []RuntimeDetection `json:"runtimes,omitempty"`
+	Version    string             `json:"version,omitempty"`
+	OS         string             `json:"os,omitempty"`
+	Arch       string             `json:"arch,omitempty"`
+	ClientKind string             `json:"clientKind,omitempty"`
+	Runtimes   []RuntimeDetection `json:"runtimes,omitempty"`
 }
 
 type UpdateAgentNotificationRequest struct {

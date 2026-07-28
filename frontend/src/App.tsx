@@ -10,6 +10,7 @@ import {
   buildDaemonReinstallCommand,
   buildDaemonUninstallCommand,
   defaultDaemonInstallPlatform,
+  daemonInstallMethod,
   workspacePeople,
   documentParticipants,
   clampPopoverPosition,
@@ -5242,11 +5243,9 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
   const [installPlatform, setInstallPlatform] = useState<DaemonInstallPlatform>(() => defaultDaemonInstallPlatform(initialDaemonOS));
-  // #63 uninstall is honest by INSTALL METHOD, and the record never stores how it was installed —
-  // the desktop app is new, so many existing mac/win environments were terminal-installed. So
-  // mac/win open on a neutral question with NO pre-selection (Anton's no-guessed-default rule);
-  // Linux/unknown have no app → terminal-only, question skipped.
-  const [installMethod, setInstallMethod] = useState<"app" | "terminal" | null>(
+  // Legacy daemons predate clientKind. Only those rows retain the no-guessed-default question on
+  // macOS/Windows; current daemons report GUI/CLI authoritatively in every status heartbeat.
+  const [legacyInstallMethod, setLegacyInstallMethod] = useState<"app" | "terminal" | null>(
     () => (desktopPlatformHasApp(daemonDesktopPlatform(initialDaemonOS)) ? null : "terminal")
   );
   // Derive the live daemon from workspace state every render, so daemon.updated events and the
@@ -5261,13 +5260,16 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
     }
   }, [daemon, onClose]);
   useEffect(() => {
-    if (daemon?.os) {
-      setInstallPlatform(defaultDaemonInstallPlatform(daemon.os));
-    }
+    const reportedOS = daemon?.os ?? "";
+    const reportedPlatform = daemonDesktopPlatform(reportedOS);
+    setInstallPlatform(defaultDaemonInstallPlatform(reportedOS));
+    // If a legacy daemon's first OS heartbeat arrives while this modal is open, do not carry the
+    // unknown/Linux terminal default into the newly applicable macOS/Windows method question.
+    setLegacyInstallMethod(desktopPlatformHasApp(reportedPlatform) ? null : "terminal");
   }, [daemon?.os]);
-  // Derived from the stable initial OS so the manifest hook runs unconditionally BEFORE the early
-  // return below (hooks can't sit after a conditional return); a connected daemon's OS is stable.
-  const deskPlatform = daemonDesktopPlatform(initialDaemonOS);
+  // The hook remains unconditional, while a daemon.updated event can fill an initially unknown OS
+  // without requiring the modal to close and reopen.
+  const deskPlatform = daemonDesktopPlatform(daemon?.os ?? initialDaemonOS);
   const manifest = useDesktopManifest(deskPlatform);
   if (!daemon) {
     return null;
@@ -5300,6 +5302,10 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
     platform: installPlatform,
   });
   const hasApp = desktopPlatformHasApp(deskPlatform);
+  const reportedInstallMethod = daemonInstallMethod(daemon.clientKind);
+  // Linux and unknown platforms cannot take an app path even if a malformed/future client kind
+  // arrives. macOS/Windows use the authoritative report; only a legacy empty value asks the user.
+  const installMethod = hasApp ? (reportedInstallMethod ?? legacyInstallMethod) : "terminal";
   // App-path reinstall = re-download the app, through the SAME live-manifest resolver as install →
   // an unresolved target stays disabled-honest until the R2 manifest is browser-readable (CORS),
   // never a dead link.
@@ -5329,15 +5335,14 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
             })}
           </div>
 
-          {/* Honest by install method: the record never stores HOW it was installed and — unlike
-              platform — there's no truthful signal, so mac/win ask with NO guessed default; the
-              switcher stays for correction. Linux/unknown have no app → terminal-only, no question. */}
-          {hasApp ? (
+          {/* Current daemons report GUI/CLI, so no question is needed. Preserve the neutral chooser
+              only for pre-clientKind macOS/Windows rows; Linux/unknown remain terminal-only. */}
+          {hasApp && reportedInstallMethod === null ? (
             <div className="ds-method">
               <p className="toglab">How did you install Codesk on this computer?</p>
               <div className="ds-method-toggle" role="group" aria-label="Install method">
-                <button type="button" className={`ds-method-opt${installMethod === "app" ? " on" : ""}`} aria-pressed={installMethod === "app"} onClick={() => setInstallMethod("app")}>Desktop app</button>
-                <button type="button" className={`ds-method-opt${installMethod === "terminal" ? " on" : ""}`} aria-pressed={installMethod === "terminal"} onClick={() => setInstallMethod("terminal")}>Terminal</button>
+                <button type="button" className={`ds-method-opt${installMethod === "app" ? " on" : ""}`} aria-pressed={installMethod === "app"} onClick={() => setLegacyInstallMethod("app")}>Desktop app</button>
+                <button type="button" className={`ds-method-opt${installMethod === "terminal" ? " on" : ""}`} aria-pressed={installMethod === "terminal"} onClick={() => setLegacyInstallMethod("terminal")}>Terminal</button>
               </div>
             </div>
           ) : null}
@@ -5376,7 +5381,7 @@ export function DaemonDetailModal({ api, workspaceId, daemonId, daemons, agents,
           ) : (
             <>
               <button className="btn accent full" onClick={() => void prepareReinstall()} disabled={reinstallLoading}>Reinstall — run the reinstall script</button>
-              <DaemonPlatformControl value={installPlatform} onChange={setInstallPlatform} />
+              {deskPlatform === "unknown" ? <DaemonPlatformControl value={installPlatform} onChange={setInstallPlatform} /> : null}
               <ShellScriptBlock title="Uninstall local environment" badge={installPlatform === "windows" ? "PowerShell" : "Shell"} command={uninstallCommand}>
                 <p className="small muted">This script is computer-wide — it may stop every Codesk environment and agent on this machine. It's the global uninstall script; workspace-specific uninstall isn't supported yet.</p>
               </ShellScriptBlock>

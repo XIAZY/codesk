@@ -16,3 +16,9 @@ func TestLoadConfigDoesNotInventAgentID(t *testing.T) {
 		t.Fatalf("expected explicit agent id override, got %q", cfg.AgentID)
 	}
 }
+
+func TestLoadConfigReportsStandaloneDaemonAsCLI(t *testing.T) {
+	if got := LoadConfig().ClientKind; got != DaemonClientKindCLI {
+		t.Fatalf("ClientKind = %q, want %q", got, DaemonClientKindCLI)
+	}
+}

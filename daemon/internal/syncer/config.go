@@ -2,10 +2,18 @@ package syncer
 
 import "os"
 
+type DaemonClientKind string
+
+const (
+	DaemonClientKindCLI DaemonClientKind = "cli"
+	DaemonClientKindGUI DaemonClientKind = "gui"
+)
+
 type Config struct {
 	BackendURL         string
 	WorkspaceID        string
 	DaemonToken        string
+	ClientKind         DaemonClientKind
 	DataDir            string
 	WorkspaceDir       string
 	AgentWorkspaceRoot string
@@ -22,6 +30,7 @@ func LoadConfig() Config {
 		BackendURL:         getenv("NOTTY_BACKEND_URL", "http://backend:8080"),
 		WorkspaceID:        getenv("NOTTY_WORKSPACE_ID", ""),
 		DaemonToken:        getenv("NOTTY_DAEMON_TOKEN", ""),
+		ClientKind:         DaemonClientKindCLI,
 		DataDir:            getenv("NOTTY_DATA_DIR", defaultNottyDataDir()),
 		WorkspaceDir:       getenv("NOTTY_WORKSPACE_DIR", "/workspace/notty"),
 		AgentWorkspaceRoot: getenv("NOTTY_AGENT_WORKSPACE_ROOT", "/workspace/agents"),

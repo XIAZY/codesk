@@ -62,6 +62,7 @@ func SyncerConfig(dirs Dirs, backendURL, workspaceID, daemonToken string) (synce
 		BackendURL:         backendURL,
 		WorkspaceID:        workspaceID,
 		DaemonToken:        daemonToken,
+		ClientKind:         syncer.DaemonClientKindGUI,
 		DataDir:            dirs.Data,
 		WorkspaceDir:       filepath.Join(dirs.Data, "workspace"),
 		AgentWorkspaceRoot: filepath.Join(dirs.Data, "agents"),

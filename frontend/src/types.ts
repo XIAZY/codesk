@@ -62,6 +62,7 @@ export type Daemon = {
   version?: string;
   os?: string;
   arch?: string;
+  clientKind?: "gui" | "cli" | string;
   runtimes?: RuntimeDetection[];
   lastSeenAt?: string;
   lastSeenAgeSeconds?: number;
