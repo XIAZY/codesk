@@ -1638,8 +1638,8 @@ Daemon-family commands, including the macOS and Windows desktop apps, read the
 canonical release version from the root `DAEMON_VERSION` file. Frontend
 commands do not use a release version, and backend Docker images use the
 checked-out commit as `backend-<short-git-sha>`.
-Windows GUI publication uses `rclone` with `AWS_ACCESS_KEY_ID` and
-`AWS_SECRET_ACCESS_KEY` for Cloudflare R2; the uploader constructs an ephemeral
+Every R2 publication uses `rclone` with `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY`; the uploader constructs an ephemeral Cloudflare S3
 remote from `R2_ENDPOINT_URL` and does not persist those credentials in an
 rclone configuration file.
 The three platform build targets are focused local helpers and never publish.
@@ -1681,9 +1681,9 @@ config without real credentials.
 
 Deployment scripts load `deploy/env/prod.deploy.env` automatically. Use
 `NOTTY_DEPLOY_ENV_FILE=/path/to/env` to test another set of deploy-machine
-defaults. Keep secrets outside git: set `CLOUDFLARE_API_TOKEN` or
-`NOTTY_CLOUDFLARE_TOKEN` locally for R2 publishing, and store backend secrets
-such as `NOTTY_DATABASE_URL`, `NOTTY_JWT_SECRET`, and
+defaults. Keep secrets outside git: set `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` locally for R2 publishing, and store backend secrets such
+as `NOTTY_DATABASE_URL`, `NOTTY_JWT_SECRET`, and
 `NOTTY_MAILGUN_API_KEY` in `/opt/notty/secrets.env` on the server.
 
 `R2_ENDPOINT_URL` is the account endpoint only. Do not include the bucket name in
@@ -1746,7 +1746,7 @@ Important deployment environment variables in `deploy/env/prod.deploy.env`:
 - `NOTTY_REMOTE_DIR`: remote deploy directory, default `/opt/notty`.
 - `DOCKER_REPO` and `DOCKER_PLATFORMS`: backend image repository and build platforms.
 - Daemon deploys always build both AMD64 and ARM64 for their named platform. Linux builds require installed Rust musl targets plus `zig`, or `CC_LINUX_AMD64`/`CC_LINUX_ARM64` pointing at target C compilers. Windows AMD64 builds use Rust `x86_64-pc-windows-gnu` with Zig `x86_64-windows-gnu`; Windows ARM64 builds use Rust `aarch64-pc-windows-gnullvm` with Zig `aarch64-windows-gnu`. Install both Rust targets and `zig`, or set `CC_WINDOWS_AMD64`/`CC_WINDOWS_ARM64` to equivalent target C compiler commands. Darwin cross builds on macOS use `xcrun clang -arch`; Darwin cross builds from Linux require installed Rust targets plus `CC_DARWIN_AMD64`/`CC_DARWIN_ARM64` pointing at Darwin-capable compilers such as osxcross clang with an Apple SDK.
-- `CLOUDFLARE_ACCOUNT_ID`, `R2_ENDPOINT_URL`, `R2_*_BUCKET`, and `R2_*_PREFIX`: R2 upload destinations.
+- `R2_ENDPOINT_URL`, `R2_*_BUCKET`, and `R2_*_PREFIX`: R2 upload destinations. Every R2 deploy also requires `rclone`, `AWS_ACCESS_KEY_ID`, and `AWS_SECRET_ACCESS_KEY` on the deploy machine.
 
 Important production server defaults in `deploy/env/prod.server.env`:
 

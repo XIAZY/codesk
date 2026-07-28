@@ -200,11 +200,10 @@ payload architectures in canonical `amd64 arm64` order, passes each to the
 reproducible WiX builder, then uploads both validated bundles through the shared
 R2 uploader on the host:
 
-The Windows GUI upload path requires `rclone` 1.59 or newer and authenticates
-its ephemeral Cloudflare R2 remote from `AWS_ACCESS_KEY_ID`,
-`AWS_SECRET_ACCESS_KEY`, and the configured `R2_ENDPOINT_URL`. It does not read
-or write an rclone configuration file. Other deploy targets retain their
-existing uploader selection.
+Every R2 deploy path requires `rclone` 1.59 or newer and authenticates its
+ephemeral Cloudflare S3 remote from `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, and the configured `R2_ENDPOINT_URL`. The shared
+uploader does not read or write an rclone configuration file.
 
 Run public deploy targets as single-writer operations, one publisher at a time.
 Automating or parallelizing publication requires atomic R2 conditional admission

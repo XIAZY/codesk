@@ -54,6 +54,30 @@ for target in macos-gui-build macos-gui-deploy windows-gui-build windows-gui-dep
 done
 pass 'exact build/deploy pairs are present'
 
+uploader_source="$repo_dir/scripts/upload-r2.sh"
+for required_uploader_source in \
+	"command -v rclone >/dev/null 2>&1 || die 'rclone is required for R2 uploads'" \
+	'need R2_ENDPOINT_URL' \
+	'need AWS_ACCESS_KEY_ID' \
+	'need AWS_SECRET_ACCESS_KEY' \
+	'RCLONE_CONFIG_NOTTYR2_PROVIDER=Cloudflare' \
+	'rclone sync' \
+	'rclone copyto' \
+	'rclone lsjson'
+do
+	grep -Fq "$required_uploader_source" "$uploader_source" ||
+		fail "shared R2 uploader is missing: $required_uploader_source"
+done
+for obsolete_uploader_source in \
+	wrangler aws_s3 'command -v aws' 'uploader=' \
+	CLOUDFLARE_API_TOKEN NOTTY_CLOUDFLARE_TOKEN CLOUDFLARE_ACCOUNT_ID
+do
+	if grep -Fiq "$obsolete_uploader_source" "$uploader_source"; then
+		fail "shared R2 uploader retained obsolete implementation: $obsolete_uploader_source"
+	fi
+done
+pass 'every R2 deploy uses one rclone-only uploader'
+
 for target in \
 	release static all promote \
 	daemon-build daemon-release daemon-release-all release-daemons \
@@ -279,7 +303,9 @@ export BUILD_DEPLOY_FIXTURE_GIT_BASE="$source_base"
 cat >"$fake_bin/aws" <<'AWS'
 #!/usr/bin/env sh
 set -eu
-printf '%s\n' "$*" >>"$AWS_LOG"
+if [ -n "${AWS_LOG:-}" ]; then
+	printf '%s\n' "$*" >>"$AWS_LOG"
+fi
 
 aws_object_path() {
 	case "$1" in
@@ -416,6 +442,31 @@ set -eu
 if [ -n "${RCLONE_LOG:-}" ]; then
 	printf '%s\n' "$*" >>"$RCLONE_LOG"
 fi
+if [ "${1:-}" = sync ]; then
+	rclone_source="${2%/}"
+	rclone_destination="${3%/}"
+	case "$rclone_destination" in
+		nottyr2:*) ;;
+		*) exit 64 ;;
+	esac
+	shift 3
+	rclone_cache_control=
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			--header-upload)
+				case "$2" in
+					'Cache-Control: '*) rclone_cache_control="${2#Cache-Control: }" ;;
+				esac
+				shift 2
+				;;
+			*) shift ;;
+		esac
+	done
+	"$(dirname "$0")/aws" --endpoint-url https://example.invalid s3 sync \
+		"$rclone_source/" "s3://${rclone_destination#nottyr2:}/" \
+		--delete --cache-control "$rclone_cache_control"
+	exit "$?"
+fi
 if [ "${1:-}" = lsjson ]; then
 	rclone_source="$2"
 	case "$rclone_source" in
@@ -465,6 +516,10 @@ case "$rclone_destination" in
 	nottyr2:*) ;;
 	*) exit 64 ;;
 esac
+if [ -n "${RCLONE_FAIL_PAYLOAD_KEY:-}" ] &&
+	[ "${rclone_destination#nottyr2:}" = "$RCLONE_FAIL_PAYLOAD_KEY" ]; then
+	exit 76
+fi
 shift 3
 rclone_content_type=
 rclone_cache_control=
@@ -484,41 +539,6 @@ done
 	"$rclone_source" "s3://${rclone_destination#nottyr2:}" \
 	--content-type "$rclone_content_type" --cache-control "$rclone_cache_control"
 RCLONE
-cat >"$fake_bin/wrangler" <<'WRANGLER'
-#!/usr/bin/env sh
-set -eu
-printf '%s\n' "$*" >>"$WRANGLER_LOG"
-if [ "$#" -ge 4 ] && [ "$1" = r2 ] && [ "$2" = object ] && [ "$3" = get ]; then
-	wrangler_key="$4"
-	shift 4
-	wrangler_output=
-	while [ "$#" -gt 0 ]; do
-		case "$1" in
-			--file) wrangler_output="$2"; shift 2 ;;
-			*) shift ;;
-		esac
-	done
-	[ -n "$wrangler_output" ] || exit 64
-	case "$wrangler_key" in
-		*/latest/manifest.json) wrangler_remote_file="${WRANGLER_REMOTE_LATEST:-}" ;;
-		*/manifest.json) wrangler_remote_file="${WRANGLER_REMOTE_LEDGER:-}" ;;
-		*) exit 64 ;;
-	esac
-	if [ -n "$wrangler_remote_file" ] && [ -f "$wrangler_remote_file" ]; then
-		cp "$wrangler_remote_file" "$wrangler_output"
-		exit 0
-	fi
-	printf 'The specified key does not exist.\n' >&2
-	exit 1
-fi
-if [ "$#" -ge 4 ] && [ "$1" = r2 ] && [ "$2" = object ] && [ "$3" = put ]; then
-	if [ -n "${WRANGLER_FAIL_PAYLOAD_KEY:-}" ] && [ "$4" = "$WRANGLER_FAIL_PAYLOAD_KEY" ]; then
-		exit 76
-	fi
-	exit 0
-fi
-exit 64
-WRANGLER
 cat >"$fake_bin/git" <<'GIT'
 #!/usr/bin/env sh
 set -eu
@@ -587,7 +607,7 @@ if [ -n "${WINDOWS_GUI_MUTATE_SOURCE_ROOT:-}" ]; then
 	printf 'post-staging mutation\n' >>"$WINDOWS_GUI_MUTATE_SOURCE_ROOT/arm64/Codesk_${version}_windows_arm64.msi"
 fi
 POWERSHELL
-chmod +x "$fake_bin/aws" "$fake_bin/rclone" "$fake_bin/wrangler" "$fake_bin/git" "$fake_bin/powershell.exe"
+chmod +x "$fake_bin/aws" "$fake_bin/rclone" "$fake_bin/git" "$fake_bin/powershell.exe"
 aws_log="$tmp_dir/aws.log"
 
 fixture_sha256() {
@@ -627,13 +647,13 @@ aws_first_write_line() {
 	' "$aws_write_log"
 }
 
-wrangler_put_count() {
-	wrangler_put_log="$1"
-	wrangler_put_needle="${2:-}"
-	awk -v needle="$wrangler_put_needle" '
-		$1 == "r2" && $2 == "object" && $3 == "put" && index($0, needle) { count++ }
+rclone_write_count() {
+	rclone_write_log="$1"
+	rclone_write_needle="${2:-}"
+	awk -v needle="$rclone_write_needle" '
+		(($1 == "copyto" && $3 ~ /^nottyr2:/) || $1 == "sync") && index($0, needle) { count++ }
 		END { print count + 0 }
-	' "$wrangler_put_log"
+	' "$rclone_write_log"
 }
 
 write_daemon_release() {
@@ -904,51 +924,51 @@ cmp -s "$daemon_retry_payload_source" "$daemon_retry_payload_store" ||
 	fail 'daemon retry did not commit the version ledger after payload replacement'
 pass 'daemon retry unconditionally replaces stale equal-sized payloads before ledger commit'
 
-daemon_find_failure_log="$tmp_dir/daemon-release-find-failure.wrangler.log"
+daemon_find_failure_log="$tmp_dir/daemon-release-find-failure.rclone.log"
 : >"$daemon_find_failure_log"
 if BSD_FIND_REAL="$bsd_find_real" BSD_SORT_REAL="$bsd_sort_real" \
 	FAIL_COMMITTED_FIND=1 FAIL_COMMITTED_FIND_BASENAME=release \
-	PATH="$bsd_find_bin:$fake_bin:$PATH" WRANGLER_LOG="$daemon_find_failure_log" \
+	PATH="$bsd_find_bin:$fake_bin:$PATH" RCLONE_LOG="$daemon_find_failure_log" \
 	DAEMON_DIST_ROOT="$daemon_dist" UPLOAD_TARGET=daemon \
-	R2_ENDPOINT_URL= CLOUDFLARE_API_TOKEN=test CLOUDFLARE_ACCOUNT_ID=test \
+	R2_ENDPOINT_URL=https://example.invalid \
 	R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
 	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/daemon-release-find-failure.output" 2>&1; then
-	fail 'Wrangler daemon deploy masked immutable payload enumeration failure'
+	fail 'rclone daemon deploy masked immutable payload enumeration failure'
 fi
-[ "$(wrangler_put_count "$daemon_find_failure_log")" -eq 0 ] ||
-	fail 'Wrangler daemon payload enumeration failure allowed an R2 write'
+[ "$(rclone_write_count "$daemon_find_failure_log")" -eq 0 ] ||
+	fail 'rclone daemon payload enumeration failure allowed an R2 write'
 
-daemon_sort_failure_log="$tmp_dir/daemon-release-sort-failure.wrangler.log"
+daemon_sort_failure_log="$tmp_dir/daemon-release-sort-failure.rclone.log"
 : >"$daemon_sort_failure_log"
 if BSD_FIND_REAL="$bsd_find_real" BSD_SORT_REAL="$bsd_sort_real" FAIL_COMMITTED_SORT=1 \
-	PATH="$bsd_find_bin:$fake_bin:$PATH" WRANGLER_LOG="$daemon_sort_failure_log" \
+	PATH="$bsd_find_bin:$fake_bin:$PATH" RCLONE_LOG="$daemon_sort_failure_log" \
 	DAEMON_DIST_ROOT="$daemon_dist" UPLOAD_TARGET=daemon \
-	R2_ENDPOINT_URL= CLOUDFLARE_API_TOKEN=test CLOUDFLARE_ACCOUNT_ID=test \
+	R2_ENDPOINT_URL=https://example.invalid \
 	R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
 	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/daemon-release-sort-failure.output" 2>&1; then
-	fail 'Wrangler daemon deploy masked immutable payload ordering failure'
+	fail 'rclone daemon deploy masked immutable payload ordering failure'
 fi
-[ "$(wrangler_put_count "$daemon_sort_failure_log")" -eq 0 ] ||
-	fail 'Wrangler daemon payload ordering failure allowed an R2 write'
+[ "$(rclone_write_count "$daemon_sort_failure_log")" -eq 0 ] ||
+	fail 'rclone daemon payload ordering failure allowed an R2 write'
 
-daemon_wrangler_payload_failure_log="$tmp_dir/daemon-payload-put-failure.wrangler.log"
-daemon_wrangler_payload_failure_key="static/daemons/$release_version/notty-daemon_${release_version}_linux_arm64.tar.gz"
-: >"$daemon_wrangler_payload_failure_log"
-if PATH="$fake_bin:$PATH" WRANGLER_LOG="$daemon_wrangler_payload_failure_log" \
-	WRANGLER_FAIL_PAYLOAD_KEY="$daemon_wrangler_payload_failure_key" \
+daemon_rclone_payload_failure_log="$tmp_dir/daemon-payload-put-failure.rclone.log"
+daemon_rclone_payload_failure_key="static/daemons/$release_version/notty-daemon_${release_version}_linux_arm64.tar.gz"
+: >"$daemon_rclone_payload_failure_log"
+if PATH="$fake_bin:$PATH" RCLONE_LOG="$daemon_rclone_payload_failure_log" \
+	RCLONE_FAIL_PAYLOAD_KEY="$daemon_rclone_payload_failure_key" \
 	DAEMON_DIST_ROOT="$daemon_dist" UPLOAD_TARGET=daemon \
-	R2_ENDPOINT_URL= CLOUDFLARE_API_TOKEN=test CLOUDFLARE_ACCOUNT_ID=test \
+	R2_ENDPOINT_URL=https://example.invalid \
 	R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
 	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/daemon-payload-put-failure.output" 2>&1; then
-	fail 'Wrangler daemon deploy swallowed an immutable payload PUT failure'
+	fail 'rclone daemon deploy swallowed an immutable payload upload failure'
 fi
-[ "$(wrangler_put_count "$daemon_wrangler_payload_failure_log" "static/daemons/$release_version/")" -gt 0 ] ||
-	fail 'Wrangler daemon payload failure hook did not run mid-loop'
-[ "$(wrangler_put_count "$daemon_wrangler_payload_failure_log" "static/daemons/$release_version/manifest.json")" -eq 0 ] ||
-	fail 'Wrangler daemon payload failure allowed the version ledger commit'
-[ "$(wrangler_put_count "$daemon_wrangler_payload_failure_log" 'static/daemons/latest/manifest.json')" -eq 0 ] ||
-	fail 'Wrangler daemon payload failure allowed the latest commit'
-pass 'Wrangler daemon discovery and payload failures cannot reach a commit PUT'
+[ "$(rclone_write_count "$daemon_rclone_payload_failure_log" "nottyr2:static/daemons/$release_version/")" -gt 0 ] ||
+	fail 'rclone daemon payload failure hook did not run mid-loop'
+[ "$(rclone_write_count "$daemon_rclone_payload_failure_log" "nottyr2:static/daemons/$release_version/manifest.json")" -eq 0 ] ||
+	fail 'rclone daemon payload failure allowed the version ledger commit'
+[ "$(rclone_write_count "$daemon_rclone_payload_failure_log" 'nottyr2:static/daemons/latest/manifest.json')" -eq 0 ] ||
+	fail 'rclone daemon payload failure allowed the latest commit'
+pass 'rclone daemon discovery and payload failures cannot reach a commit upload'
 
 daemon_missing_dist="$tmp_dir/daemon-missing-archive"
 cp -R "$daemon_dist" "$daemon_missing_dist"
@@ -988,20 +1008,6 @@ PATH="$fake_bin:$PATH" AWS_LOG="$daemon_noop_log" AWS_REMOTE_LATEST="$daemon_rem
 grep -Fq 'already published; no writes needed' "$tmp_dir/daemon-identical-redeploy.output" ||
 	fail 'identical daemon redeploy did not report the no-op'
 
-daemon_wrangler_log="$tmp_dir/daemon-identical-redeploy.wrangler.log"
-: >"$daemon_wrangler_log"
-PATH="$fake_bin:$PATH" R2_ENDPOINT_URL= CLOUDFLARE_API_TOKEN=test CLOUDFLARE_ACCOUNT_ID=test \
-	WRANGLER_LOG="$daemon_wrangler_log" WRANGLER_REMOTE_LATEST="$daemon_remote_latest" \
-	WRANGLER_REMOTE_LEDGER="$daemon_remote_latest" \
-	DAEMON_DIST_ROOT="$daemon_dist" UPLOAD_TARGET=daemon \
-	R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
-	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/daemon-identical-redeploy-wrangler.output"
-grep -Fq 'r2 object get static/daemons/latest/manifest.json --remote --file' "$daemon_wrangler_log" ||
-	fail 'Wrangler publication guard did not read the daemon commit point'
-if grep -Fq 'r2 object put' "$daemon_wrangler_log"; then
-	fail 'identical Wrangler daemon redeploy was not a zero-write no-op'
-fi
-
 daemon_conflict_dist="$tmp_dir/daemon-same-version-conflict"
 write_daemon_release "$daemon_conflict_dist" "$release_version" changed
 daemon_conflict_log="$tmp_dir/daemon-same-version-conflict.aws.log"
@@ -1037,21 +1043,6 @@ done
 [ "$daemon_conflict_ledger_line" -lt "$daemon_conflict_latest_line" ] ||
 	fail 'same-version daemon replacement committed latest before its version ledger'
 
-daemon_conflict_wrangler_log="$tmp_dir/daemon-same-version-conflict.wrangler.log"
-: >"$daemon_conflict_wrangler_log"
-PATH="$fake_bin:$PATH" R2_ENDPOINT_URL= CLOUDFLARE_API_TOKEN=test CLOUDFLARE_ACCOUNT_ID=test \
-	WRANGLER_LOG="$daemon_conflict_wrangler_log" WRANGLER_REMOTE_LATEST="$daemon_remote_latest" \
-	WRANGLER_REMOTE_LEDGER="$daemon_remote_latest" \
-	DAEMON_DIST_ROOT="$daemon_conflict_dist" UPLOAD_TARGET=daemon \
-	R2_DAEMONS_BUCKET=static R2_DAEMONS_PREFIX=daemons \
-	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/daemon-same-version-conflict-wrangler.output"
-[ "$(wrangler_put_count "$daemon_conflict_wrangler_log" "static/daemons/$release_version/")" -eq 8 ] ||
-	fail 'Wrangler same-version daemon replacement did not rewrite every version object'
-[ "$(wrangler_put_count "$daemon_conflict_wrangler_log" 'static/daemons/latest/manifest.json')" -eq 1 ] ||
-	fail 'Wrangler same-version daemon replacement did not commit latest exactly once'
-grep -F "r2 object put static/daemons/$release_version/" "$daemon_conflict_wrangler_log" |
-	grep -Fq -- '--cache-control public, max-age=60 --force' ||
-	fail 'Wrangler daemon replacement did not use short-cache forced PUTs'
 pass 'same-version daemon rebuild replaces R2 payloads and commits manifests in order'
 
 daemon_older_dist="$tmp_dir/daemon-older-release"
@@ -1240,38 +1231,38 @@ cmp -s "$macos_retry_payload_source" "$macos_retry_payload_store" ||
 	fail 'macOS GUI retry did not commit the version ledger after payload replacement'
 pass 'macOS GUI retry unconditionally replaces stale equal-sized payloads before ledger commit'
 
-macos_find_failure_log="$tmp_dir/macos-release-find-failure.wrangler.log"
+macos_find_failure_log="$tmp_dir/macos-release-find-failure.rclone.log"
 : >"$macos_find_failure_log"
 if BSD_FIND_REAL="$bsd_find_real" BSD_SORT_REAL="$bsd_sort_real" \
 	FAIL_COMMITTED_FIND=1 FAIL_COMMITTED_FIND_BASENAME="$release_version" \
-	PATH="$bsd_find_bin:$fake_bin:$PATH" WRANGLER_LOG="$macos_find_failure_log" \
+	PATH="$bsd_find_bin:$fake_bin:$PATH" RCLONE_LOG="$macos_find_failure_log" \
 	MACOS_GUI_DIST_DIR="$macos_dist" UPLOAD_TARGET=macos-gui \
-	R2_ENDPOINT_URL= CLOUDFLARE_API_TOKEN=test CLOUDFLARE_ACCOUNT_ID=test \
+	R2_ENDPOINT_URL=https://example.invalid \
 	R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
 	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/macos-release-find-failure.output" 2>&1; then
-	fail 'Wrangler macOS GUI deploy masked immutable payload enumeration failure'
+	fail 'rclone macOS GUI deploy masked immutable payload enumeration failure'
 fi
-[ "$(wrangler_put_count "$macos_find_failure_log")" -eq 0 ] ||
-	fail 'Wrangler macOS GUI payload enumeration failure allowed an R2 write'
+[ "$(rclone_write_count "$macos_find_failure_log")" -eq 0 ] ||
+	fail 'rclone macOS GUI payload enumeration failure allowed an R2 write'
 
-macos_wrangler_payload_failure_log="$tmp_dir/macos-payload-put-failure.wrangler.log"
-macos_wrangler_payload_failure_key="static/desktop/macos/$release_version/SHA256SUMS"
-: >"$macos_wrangler_payload_failure_log"
-if PATH="$fake_bin:$PATH" WRANGLER_LOG="$macos_wrangler_payload_failure_log" \
-	WRANGLER_FAIL_PAYLOAD_KEY="$macos_wrangler_payload_failure_key" \
+macos_rclone_payload_failure_log="$tmp_dir/macos-payload-put-failure.rclone.log"
+macos_rclone_payload_failure_key="static/desktop/macos/$release_version/SHA256SUMS"
+: >"$macos_rclone_payload_failure_log"
+if PATH="$fake_bin:$PATH" RCLONE_LOG="$macos_rclone_payload_failure_log" \
+	RCLONE_FAIL_PAYLOAD_KEY="$macos_rclone_payload_failure_key" \
 	MACOS_GUI_DIST_DIR="$macos_dist" UPLOAD_TARGET=macos-gui \
-	R2_ENDPOINT_URL= CLOUDFLARE_API_TOKEN=test CLOUDFLARE_ACCOUNT_ID=test \
+	R2_ENDPOINT_URL=https://example.invalid \
 	R2_DESKTOP_BUCKET=static R2_DESKTOP_PREFIX=desktop \
 	"$repo_dir/scripts/upload-r2.sh" >"$tmp_dir/macos-payload-put-failure.output" 2>&1; then
-	fail 'Wrangler macOS GUI deploy swallowed an immutable payload PUT failure'
+	fail 'rclone macOS GUI deploy swallowed an immutable payload upload failure'
 fi
-[ "$(wrangler_put_count "$macos_wrangler_payload_failure_log" "static/desktop/macos/$release_version/")" -gt 0 ] ||
-	fail 'Wrangler macOS GUI payload failure hook did not run mid-loop'
-[ "$(wrangler_put_count "$macos_wrangler_payload_failure_log" "static/desktop/macos/$release_version/manifest.json")" -eq 0 ] ||
-	fail 'Wrangler macOS GUI payload failure allowed the version ledger commit'
-[ "$(wrangler_put_count "$macos_wrangler_payload_failure_log" 'static/desktop/macos/latest/')" -eq 0 ] ||
-	fail 'Wrangler macOS GUI payload failure allowed a latest commit'
-pass 'Wrangler macOS GUI discovery and payload failures cannot reach a commit PUT'
+[ "$(rclone_write_count "$macos_rclone_payload_failure_log" "nottyr2:static/desktop/macos/$release_version/")" -gt 0 ] ||
+	fail 'rclone macOS GUI payload failure hook did not run mid-loop'
+[ "$(rclone_write_count "$macos_rclone_payload_failure_log" "nottyr2:static/desktop/macos/$release_version/manifest.json")" -eq 0 ] ||
+	fail 'rclone macOS GUI payload failure allowed the version ledger commit'
+[ "$(rclone_write_count "$macos_rclone_payload_failure_log" 'nottyr2:static/desktop/macos/latest/')" -eq 0 ] ||
+	fail 'rclone macOS GUI payload failure allowed a latest commit'
+pass 'rclone macOS GUI discovery and payload failures cannot reach a commit upload'
 
 macos_remote_manifest="$macos_dist/$release_version/manifest.json"
 macos_noop_log="$tmp_dir/macos-identical-redeploy.aws.log"

@@ -260,31 +260,6 @@ content_type_for() {
 	esac
 }
 
-aws_s3() {
-	aws --endpoint-url "$R2_ENDPOINT_URL" s3 "$@"
-}
-
-wrangler_cmd() {
-	if command -v wrangler >/dev/null 2>&1; then
-		wrangler "$@"
-	else
-		npx wrangler "$@"
-	fi
-}
-
-wrangler_put() {
-	wrangler_put_bucket="$1"
-	wrangler_put_key="$2"
-	wrangler_put_file="$3"
-	wrangler_put_cache_control="$4"
-	wrangler_cmd r2 object put "$wrangler_put_bucket/$wrangler_put_key" \
-		--remote \
-		--file "$wrangler_put_file" \
-		--content-type "$(content_type_for "$wrangler_put_file")" \
-		--cache-control "$wrangler_put_cache_control" \
-		--force
-}
-
 rclone_remote() {
 	rclone_remote_bucket="$1"
 	rclone_remote_key="$(strip_prefix_slashes "$2")"
@@ -306,60 +281,31 @@ download_optional_file() {
 	download_bucket="$1"
 	download_key="$(strip_prefix_slashes "$2")"
 	download_path="$3"
-	rm -f "$download_path" "$download_path.listing" "$download_path.stdout" "$download_path.stderr"
-	if [ "$uploader" = aws ]; then
-		if ! aws_s3 ls "$(s3_uri "$download_bucket" "$download_key")" >"$download_path.listing"; then
-			rm -f "$download_path.listing"
-			return 2
-		fi
-		if [ ! -s "$download_path.listing" ]; then
-			rm -f "$download_path.listing"
-			return 1
-		fi
-		rm -f "$download_path.listing"
-		if ! aws_s3 cp "$(s3_uri "$download_bucket" "$download_key")" "$download_path"; then
-			rm -f "$download_path"
-			return 2
-		fi
-		return 0
-	fi
-	if [ "$uploader" = rclone ]; then
-		download_remote="$(rclone_remote "$download_bucket" "$download_key")"
-		if ! rclone lsjson "$download_remote" --stat --files-only \
-			>"$download_path.listing" 2>"$download_path.stderr"; then
-			cat "$download_path.stderr" >&2
-			rm -f "$download_path.listing" "$download_path.stderr"
-			return 2
-		fi
-		if grep -Eq '^[[:space:]]*null[[:space:]]*$' "$download_path.listing"; then
-			rm -f "$download_path.listing" "$download_path.stderr"
-			return 1
-		fi
-		if ! grep -Eq '"IsDir"[[:space:]]*:[[:space:]]*false' "$download_path.listing"; then
-			cat "$download_path.listing" "$download_path.stderr" >&2
-			rm -f "$download_path.listing" "$download_path.stderr"
-			return 2
-		fi
+	rm -f "$download_path" "$download_path.listing" "$download_path.stderr"
+	download_remote="$(rclone_remote "$download_bucket" "$download_key")"
+	if ! rclone lsjson "$download_remote" --stat --files-only \
+		>"$download_path.listing" 2>"$download_path.stderr"; then
+		cat "$download_path.stderr" >&2
 		rm -f "$download_path.listing" "$download_path.stderr"
-		if ! rclone copyto "$download_remote" "$download_path" --no-traverse; then
-			rm -f "$download_path"
-			return 2
-		fi
-		[ -f "$download_path" ] || return 2
-		return 0
+		return 2
 	fi
-
-	if wrangler_cmd r2 object get "$download_bucket/$download_key" \
-		--remote --file "$download_path" >"$download_path.stdout" 2>"$download_path.stderr"; then
-		rm -f "$download_path.stdout" "$download_path.stderr"
-		return 0
-	fi
-	if grep -Fq 'The specified key does not exist.' "$download_path.stderr"; then
-		rm -f "$download_path" "$download_path.stdout" "$download_path.stderr"
+	if grep -Eq '^[[:space:]]*null[[:space:]]*$' "$download_path.listing"; then
+		rm -f "$download_path.listing" "$download_path.stderr"
 		return 1
 	fi
-	cat "$download_path.stdout" "$download_path.stderr" >&2
-	rm -f "$download_path" "$download_path.stdout" "$download_path.stderr"
+	if ! grep -Eq '"IsDir"[[:space:]]*:[[:space:]]*false' "$download_path.listing"; then
+		cat "$download_path.listing" "$download_path.stderr" >&2
+		rm -f "$download_path.listing" "$download_path.stderr"
+		return 2
+	fi
+	rm -f "$download_path.listing" "$download_path.stderr"
+	if ! rclone copyto "$download_remote" "$download_path" --no-traverse; then
+		rm -f "$download_path"
+		return 2
+	fi
+	if [ -f "$download_path" ]; then
+		return 0
+	fi
 	return 2
 }
 
@@ -491,16 +437,8 @@ upload_file() {
 	upload_file_path="$3"
 	upload_file_cache_control="$4"
 	need_file "$upload_file_path"
-	if [ "$uploader" = aws ]; then
-		aws_s3 cp "$upload_file_path" "$(s3_uri "$upload_file_bucket" "$upload_file_key")" \
-			--content-type "$(content_type_for "$upload_file_path")" \
-			--cache-control "$upload_file_cache_control"
-	elif [ "$uploader" = rclone ]; then
-		rclone_put "$upload_file_bucket" "$(strip_prefix_slashes "$upload_file_key")" \
-			"$upload_file_path" "$upload_file_cache_control"
-	else
-		wrangler_put "$upload_file_bucket" "$(strip_prefix_slashes "$upload_file_key")" "$upload_file_path" "$upload_file_cache_control"
-	fi
+	rclone_put "$upload_file_bucket" "$(strip_prefix_slashes "$upload_file_key")" \
+		"$upload_file_path" "$upload_file_cache_control"
 }
 
 upload_committed_release_dir() {
@@ -533,22 +471,10 @@ upload_dir() {
 	upload_dir_bucket="$2"
 	upload_dir_prefix="$3"
 	upload_dir_cache_control="$4"
-	upload_dir_delete_mode="$5"
 	need_dir "$upload_dir_src"
-	if [ "$uploader" = aws ]; then
-		if [ "$upload_dir_delete_mode" = delete ]; then
-			aws_s3 sync "$upload_dir_src/" "$(s3_uri "$upload_dir_bucket" "$upload_dir_prefix")/" --delete --cache-control "$upload_dir_cache_control"
-		else
-			aws_s3 sync "$upload_dir_src/" "$(s3_uri "$upload_dir_bucket" "$upload_dir_prefix")/" --cache-control "$upload_dir_cache_control"
-		fi
-	else
-		find "$upload_dir_src" -type f | LC_ALL=C sort | while IFS= read -r upload_dir_file; do
-			upload_dir_rel="${upload_dir_file#"$upload_dir_src"/}"
-			upload_dir_key="$(join_key "$upload_dir_prefix" "$upload_dir_rel")"
-			printf '  %s\n' "$upload_dir_key"
-			wrangler_put "$upload_dir_bucket" "$upload_dir_key" "$upload_dir_file" "$upload_dir_cache_control"
-		done
-	fi
+	upload_dir_remote="$(rclone_remote "$upload_dir_bucket" "$upload_dir_prefix")"
+	rclone sync "$upload_dir_src" "$upload_dir_remote" --no-check-dest \
+		--header-upload "Cache-Control: $upload_dir_cache_control"
 }
 
 case "$target" in
@@ -574,32 +500,18 @@ case "$target" in
 		;;
 esac
 
-if [ "$target" != windows-gui ] && command -v aws >/dev/null 2>&1 && [ -n "${R2_ENDPOINT_URL:-}" ]; then
-	uploader=aws
-elif [ "$target" != windows-gui ]; then
-	if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] && [ -n "${NOTTY_CLOUDFLARE_TOKEN:-}" ]; then
-		CLOUDFLARE_API_TOKEN="$NOTTY_CLOUDFLARE_TOKEN"
-		export CLOUDFLARE_API_TOKEN
-	fi
-	[ -n "${CLOUDFLARE_API_TOKEN:-}" ] || die 'aws with R2_ENDPOINT_URL or CLOUDFLARE_API_TOKEN/NOTTY_CLOUDFLARE_TOKEN is required'
-	[ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ] || die 'CLOUDFLARE_ACCOUNT_ID is required for Wrangler R2 uploads'
-	command -v wrangler >/dev/null 2>&1 || command -v npx >/dev/null 2>&1 || die 'wrangler or npx is required for Cloudflare API-token uploads'
-	uploader=wrangler
-else
-	command -v rclone >/dev/null 2>&1 || die 'rclone is required for Windows GUI R2 uploads'
-	need R2_ENDPOINT_URL
-	need AWS_ACCESS_KEY_ID
-	need AWS_SECRET_ACCESS_KEY
-	RCLONE_CONFIG_NOTTYR2_TYPE=s3
-	RCLONE_CONFIG_NOTTYR2_PROVIDER=Cloudflare
-	RCLONE_CONFIG_NOTTYR2_ENV_AUTH=true
-	RCLONE_CONFIG_NOTTYR2_ENDPOINT="$R2_ENDPOINT_URL"
-	RCLONE_CONFIG_NOTTYR2_REGION=auto
-	export RCLONE_CONFIG_NOTTYR2_TYPE RCLONE_CONFIG_NOTTYR2_PROVIDER \
-		RCLONE_CONFIG_NOTTYR2_ENV_AUTH RCLONE_CONFIG_NOTTYR2_ENDPOINT \
-		RCLONE_CONFIG_NOTTYR2_REGION
-	uploader=rclone
-fi
+command -v rclone >/dev/null 2>&1 || die 'rclone is required for R2 uploads'
+need R2_ENDPOINT_URL
+need AWS_ACCESS_KEY_ID
+need AWS_SECRET_ACCESS_KEY
+RCLONE_CONFIG_NOTTYR2_TYPE=s3
+RCLONE_CONFIG_NOTTYR2_PROVIDER=Cloudflare
+RCLONE_CONFIG_NOTTYR2_ENV_AUTH=true
+RCLONE_CONFIG_NOTTYR2_ENDPOINT="$R2_ENDPOINT_URL"
+RCLONE_CONFIG_NOTTYR2_REGION=auto
+export RCLONE_CONFIG_NOTTYR2_TYPE RCLONE_CONFIG_NOTTYR2_PROVIDER \
+	RCLONE_CONFIG_NOTTYR2_ENV_AUTH RCLONE_CONFIG_NOTTYR2_ENDPOINT \
+	RCLONE_CONFIG_NOTTYR2_REGION
 
 release_cache_control="${RELEASE_CACHE_CONTROL:-public, max-age=31536000, immutable}"
 daemon_release_cache_control="${DAEMON_RELEASE_CACHE_CONTROL:-public, max-age=60}"
@@ -627,11 +539,8 @@ upload_homepage() {
 	need_file "$static_dist_dir/homepage/index.html"
 
 	printf 'Uploading homepage to %s\n' "$(s3_uri "$R2_HOMEPAGE_BUCKET" "$homepage_prefix")"
-	upload_dir "$static_dist_dir/homepage" "$R2_HOMEPAGE_BUCKET" "$homepage_prefix" 'public, max-age=300' delete
+	upload_dir "$static_dist_dir/homepage" "$R2_HOMEPAGE_BUCKET" "$homepage_prefix" 'public, max-age=300'
 	upload_browser_assets "$R2_HOMEPAGE_BUCKET" "$homepage_prefix" "$static_dist_dir/homepage"
-	if [ -z "$homepage_prefix" ] && [ "$uploader" = wrangler ]; then
-		upload_file "$R2_HOMEPAGE_BUCKET" '' "$static_dist_dir/homepage/index.html" 'public, max-age=300'
-	fi
 }
 
 if [ "$target" = homepage ]; then
@@ -645,12 +554,9 @@ if [ "$target" = frontend ]; then
 	upload_homepage
 
 	printf 'Uploading app to %s\n' "$(s3_uri "$R2_APP_BUCKET" "$app_prefix")"
-	upload_dir "$static_dist_dir/app" "$R2_APP_BUCKET" "$app_prefix" "$release_cache_control" delete
+	upload_dir "$static_dist_dir/app" "$R2_APP_BUCKET" "$app_prefix" "$release_cache_control"
 	upload_browser_assets "$R2_APP_BUCKET" "$app_prefix" "$static_dist_dir/app"
 	upload_file "$R2_APP_BUCKET" "$(join_key "$app_prefix" index.html)" "$static_dist_dir/app/index.html" 'public, max-age=60'
-	if [ -z "$app_prefix" ] && [ "$uploader" = wrangler ]; then
-		upload_file "$R2_APP_BUCKET" '' "$static_dist_dir/app/index.html" 'public, max-age=60'
-	fi
 fi
 
 if [ "$target" = daemon ]; then
