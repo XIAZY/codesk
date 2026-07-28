@@ -141,7 +141,11 @@ func (d *codexDriver) detectModelCatalog(ctx context.Context) *RuntimeModelCatal
 			models = append(models, model)
 		}
 		if page.NextCursor == nil {
-			return &RuntimeModelCatalog{Models: models}
+			return &RuntimeModelCatalog{
+				Models:                    models,
+				ModelProvenance:           "detected",
+				ReasoningEffortProvenance: "detected",
+			}
 		}
 		next := *page.NextCursor
 		if next == "" {

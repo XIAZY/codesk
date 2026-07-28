@@ -88,13 +88,16 @@ export type RuntimeDetection = {
   modelCatalog?: RuntimeModelCatalog;
 };
 
-// Projected Codex model catalog (daemon-model-selection, sealed contract df1354ab). Identity vs
-// presentation is normative: `model` is the opaque provider id that is persisted/validated/sent;
-// `displayName` is human label, rendered everywhere but NEVER sent or stored. Efforts are per-model
-// (`reasoningEfforts`), never a global enum. Hidden rows are stripped by the daemon projection (#2),
-// so there is no `hidden` field here to re-filter on.
+// Projected runtime model catalog. Identity vs presentation is normative: `model` is the opaque
+// provider id that is persisted/validated/sent; `displayName` is human label, rendered everywhere
+// but NEVER sent or stored. Efforts may be row-specific or provider-wide; the selected/default
+// row's non-empty list is authoritative and the provider-wide list is the fallback. Hidden rows are
+// stripped by the daemon projection, so there is no `hidden` field here to re-filter on.
 export type RuntimeModelCatalog = {
   models: RuntimeModel[];
+  modelProvenance?: "curated" | "detected";
+  reasoningEfforts?: string[];
+  reasoningEffortProvenance?: "curated" | "detected";
   error?: string;
 };
 

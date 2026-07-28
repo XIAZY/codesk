@@ -3,6 +3,7 @@ package syncer
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -228,6 +229,24 @@ func runFakeCodexLifecycleFlood() int {
 func runFakeClaude(args []string) int {
 	if len(args) == 1 && args[0] == "--version" {
 		fmt.Println("9.9.9 (Claude Code)")
+		return 0
+	}
+	if len(args) == 1 && args[0] == "--help" {
+		if path := os.Getenv("FAKE_CLAUDE_HELP_FAIL_ONCE_FILE"); path != "" {
+			if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+				if err := os.WriteFile(path, []byte("failed\n"), 0o644); err != nil {
+					fmt.Fprintln(os.Stderr, err)
+				}
+				return 1
+			}
+		}
+		if os.Getenv("FAKE_CLAUDE_HELP_DRIFT") == "1" {
+			fmt.Println("--effort <level>  Choose effort (low, medium, high)")
+			return 0
+		}
+		fmt.Println("--model <model>  Model alias (fable, opus, sonnet)")
+		fmt.Println("--effort <level>  Choose effort (low, medium, high, xhigh, max)")
+		fmt.Println("--fallback-model <model>  Fallback model")
 		return 0
 	}
 	if path := os.Getenv("FAKE_CLAUDE_ENV_FILE"); path != "" {

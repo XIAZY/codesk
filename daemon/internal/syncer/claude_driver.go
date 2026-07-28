@@ -22,6 +22,14 @@ import (
 
 const RuntimeClaudeCode RuntimeKind = "claude-code"
 
+var claudeCuratedModels = []RuntimeModel{
+	{Model: "fable", DisplayName: "Fable"},
+	{Model: "opus", DisplayName: "Opus"},
+	{Model: "sonnet", DisplayName: "Sonnet"},
+}
+
+var claudeDocumentedReasoningEfforts = []string{"low", "medium", "high", "xhigh", "max"}
+
 // Claude Code has no app-server equivalent: one process hosts exactly one
 // session, and session identity is fixed by CLI flags at launch. The daemon
 // talks to it over the CLI's stream-json stdin/stdout protocol.
@@ -75,6 +83,44 @@ func (d *claudeDriver) Detect(ctx context.Context) RuntimeDetection {
 	return RuntimeDetection{Kind: RuntimeClaudeCode, Available: true, Version: strings.TrimSpace(string(output)), Path: path}
 }
 
+func (d *claudeDriver) detectModelCatalog(ctx context.Context) *RuntimeModelCatalog {
+	models := make([]RuntimeModel, 0, len(claudeCuratedModels))
+	for _, candidate := range claudeCuratedModels {
+		model := candidate
+		// RuntimeModel.ReasoningEfforts is non-omitempty on the wire. Keep a
+		// non-nil empty slice when effort discovery is unavailable so clients
+		// receive [] rather than null.
+		model.ReasoningEfforts = []string{}
+		models = append(models, model)
+	}
+	catalog := &RuntimeModelCatalog{
+		Models:           models,
+		ModelProvenance:  "curated",
+		discoveryPending: true,
+	}
+
+	detectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	output, err := managedBackgroundCommandContext(detectCtx, d.command(), "--help").Output()
+	if err != nil {
+		return catalog
+	}
+	help := string(output)
+	effortSignature := "(" + strings.Join(claudeDocumentedReasoningEfforts, ", ") + ")"
+	if !strings.Contains(help, "--effort <level>") || !strings.Contains(help, effortSignature) {
+		return catalog
+	}
+
+	efforts := append([]string(nil), claudeDocumentedReasoningEfforts...)
+	for i := range catalog.Models {
+		catalog.Models[i].ReasoningEfforts = append([]string(nil), efforts...)
+	}
+	catalog.ReasoningEfforts = efforts
+	catalog.ReasoningEffortProvenance = "detected"
+	catalog.discoveryPending = false
+	return catalog
+}
+
 func (d *claudeDriver) Spawn(ctx context.Context, spec RuntimeSpawnSpec) (RuntimeProcess, error) {
 	return &claudeRuntimeProcess{
 		cfg:           d.cfg,
@@ -83,6 +129,7 @@ func (d *claudeDriver) Spawn(ctx context.Context, spec RuntimeSpawnSpec) (Runtim
 		workdir:       spec.Workdir,
 		toolToken:     spec.ToolToken,
 		instructions:  spec.Instructions,
+		profile:       spec.Profile,
 		handshakeWait: d.handshakeWait,
 		events:        make(chan RuntimeEvent, 128),
 		eventsDone:    make(chan struct{}),
@@ -97,6 +144,7 @@ type claudeRuntimeProcess struct {
 	workdir       string
 	toolToken     string
 	instructions  string
+	profile       RuntimeProfile
 	handshakeWait time.Duration
 
 	events     chan RuntimeEvent
@@ -264,6 +312,12 @@ func (p *claudeRuntimeProcess) buildArgs(sessionID string, resume bool) []string
 		"--dangerously-skip-permissions",
 		"--permission-mode", "bypassPermissions",
 		"--disallowed-tools", claudeDisallowedTools,
+	}
+	if model := strings.TrimSpace(p.profile.Model); model != "" {
+		args = append(args, "--model", model)
+	}
+	if effort := strings.TrimSpace(p.profile.ReasoningEffort); effort != "" {
+		args = append(args, "--effort", effort)
 	}
 	if resume {
 		args = append(args, "--resume", sessionID)
@@ -500,6 +554,24 @@ func (p *claudeRuntimeProcess) readLoop(stdout io.Reader, stdoutTail *claudeStdo
 				p.sessionID = event.sessionID
 			}
 			p.mu.Unlock()
+		case claudeStreamTerminalModel:
+			p.mu.Lock()
+			turnID := p.activeTurn
+			sessionID := p.sessionID
+			explicitModel := strings.TrimSpace(p.profile.Model) != ""
+			p.activeTurn = ""
+			p.mu.Unlock()
+			failureKind := RuntimeFailureKind("")
+			if explicitModel {
+				failureKind = RuntimeFailureTerminalModel
+			}
+			p.emitLifecycle(RuntimeEvent{
+				Kind:        RuntimeEventTurnFailed,
+				SessionID:   sessionID,
+				TurnID:      turnID,
+				Error:       event.errText,
+				FailureKind: failureKind,
+			})
 		case claudeStreamTurnEnd:
 			p.mu.Lock()
 			turnID := p.activeTurn
@@ -732,8 +804,9 @@ func truncateForLog(line string) string {
 type claudeStreamEventKind string
 
 const (
-	claudeStreamInit    claudeStreamEventKind = "init"
-	claudeStreamTurnEnd claudeStreamEventKind = "turnEnd"
+	claudeStreamInit          claudeStreamEventKind = "init"
+	claudeStreamTerminalModel claudeStreamEventKind = "terminalModel"
+	claudeStreamTurnEnd       claudeStreamEventKind = "turnEnd"
 )
 
 type claudeStreamEvent struct {
@@ -754,11 +827,31 @@ func parseClaudeStreamLine(line []byte) *claudeStreamEvent {
 		IsError   bool     `json:"is_error"`
 		Errors    []string `json:"errors"`
 		Result    string   `json:"result"`
+		Error     string   `json:"error"`
+		Message   struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"message"`
 	}
 	if err := json.Unmarshal(line, &payload); err != nil {
 		return nil
 	}
 	switch payload.Type {
+	case "assistant":
+		if payload.Error == "model_not_found" {
+			parts := make([]string, 0, len(payload.Message.Content))
+			for _, content := range payload.Message.Content {
+				if content.Type == "text" && strings.TrimSpace(content.Text) != "" {
+					parts = append(parts, strings.TrimSpace(content.Text))
+				}
+			}
+			return &claudeStreamEvent{
+				kind:    claudeStreamTerminalModel,
+				errText: firstNonEmptyText(strings.Join(parts, " | "), "Claude rejected the selected model"),
+			}
+		}
 	case "system":
 		if payload.Subtype == "init" {
 			return &claudeStreamEvent{kind: claudeStreamInit, sessionID: strings.TrimSpace(payload.SessionID)}

@@ -164,14 +164,18 @@ type RuntimeDetection struct {
 // producer); the sealed JSON casing below is the only coupling, so these tags
 // must match the daemon's RuntimeDetection.ModelCatalog exactly. A nil
 // *RuntimeModelCatalog means the runtime reported no catalog (an old/unsupported
-// daemon, or a runtime like Claude with no catalog today); a non-nil catalog
-// with a non-empty Error means the runtime is capable but the probe failed; a
-// non-nil catalog with an empty Error and empty Models means capable but the
-// account has no available models. Explicit model/effort choices require a
-// present, error-free catalog; inheritance ("", "") never depends on it.
+// daemon or runtime); a non-nil catalog with a non-empty Error means the runtime
+// is capable but the probe failed; a non-nil catalog with an empty Error may be
+// complete or usable by only one dimension while asynchronous discovery fills
+// another (for example, curated Claude models before effort detection succeeds).
+// Explicit choices must appear in the catalog's effective model/effort lists;
+// inheritance ("", "") never depends on it.
 type RuntimeModelCatalog struct {
-	Models []RuntimeModel `json:"models"`
-	Error  string         `json:"error,omitempty"`
+	Models                    []RuntimeModel `json:"models"`
+	ModelProvenance           string         `json:"modelProvenance,omitempty"`
+	ReasoningEfforts          []string       `json:"reasoningEfforts,omitempty"`
+	ReasoningEffortProvenance string         `json:"reasoningEffortProvenance,omitempty"`
+	Error                     string         `json:"error,omitempty"`
 }
 
 // RuntimeModel is one entry in the projected model catalog. Model is the opaque

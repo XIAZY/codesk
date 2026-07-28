@@ -52,6 +52,9 @@ func TestRuntimeDetectionDecodesModelCatalog(t *testing.T) {
 		"available": true,
 		"version": "codex 1.2.3",
 		"modelCatalog": {
+			"modelProvenance": "curated",
+			"reasoningEfforts": ["low","medium","high","xhigh","max"],
+			"reasoningEffortProvenance": "detected",
 			"models": [
 				{"model":"gpt-5.6-sol","displayName":"GPT-5.6 Sol","isDefault":true,"reasoningEfforts":["low","medium","high"],"defaultReasoningEffort":"low"},
 				{"model":"gpt-5.6-luna","displayName":"GPT-5.6 Luna","isDefault":false,"reasoningEfforts":["medium","high","ultra"]}
@@ -68,6 +71,11 @@ func TestRuntimeDetectionDecodesModelCatalog(t *testing.T) {
 	}
 	if len(got.ModelCatalog.Models) != 2 {
 		t.Fatalf("expected 2 models, got %d", len(got.ModelCatalog.Models))
+	}
+	if got.ModelCatalog.ModelProvenance != "curated" ||
+		got.ModelCatalog.ReasoningEffortProvenance != "detected" ||
+		!reflect.DeepEqual(got.ModelCatalog.ReasoningEfforts, []string{"low", "medium", "high", "xhigh", "max"}) {
+		t.Fatalf("catalog-level metadata silently dropped: %#v", got.ModelCatalog)
 	}
 	sol := got.ModelCatalog.Models[0]
 	if sol.Model != "gpt-5.6-sol" || sol.DisplayName != "GPT-5.6 Sol" || !sol.IsDefault {
@@ -221,6 +229,54 @@ func TestValidateAgentModelProfile(t *testing.T) {
 		// identically (proves selection is by kind, not a hardcoded "codex").
 		{name: "generic runtime valid", kind: "claude-code", catalog: standardModelCatalog(), model: "gpt-5.6-sol", effort: "high"},
 		{name: "generic runtime invalid model", kind: "claude-code", catalog: standardModelCatalog(), model: "gpt-5.6-nope", wantErr: []string{"is not available"}},
+		{
+			name: "generic runtime provider-wide effort with inherited model", kind: "claude-code",
+			catalog: &RuntimeModelCatalog{
+				Models:           []RuntimeModel{{Model: "fable"}, {Model: "opus"}, {Model: "sonnet"}},
+				ReasoningEfforts: []string{"low", "medium", "high", "xhigh", "max"},
+			},
+			effort: "xhigh",
+		},
+		{
+			name: "generic runtime explicit model falls back to provider-wide efforts", kind: "claude-code",
+			catalog: &RuntimeModelCatalog{
+				Models:           []RuntimeModel{{Model: "sonnet"}},
+				ReasoningEfforts: []string{"low", "high"},
+			},
+			model: "sonnet", effort: "high",
+		},
+		{
+			name: "generic runtime default row efforts precede provider-wide efforts", kind: "claude-code",
+			catalog: &RuntimeModelCatalog{
+				Models:           []RuntimeModel{{Model: "default", IsDefault: true, ReasoningEfforts: []string{"row-only"}}},
+				ReasoningEfforts: []string{"provider-only"},
+			},
+			effort: "row-only",
+		},
+		{
+			name: "generic runtime default row rejects provider-only effort", kind: "claude-code",
+			catalog: &RuntimeModelCatalog{
+				Models:           []RuntimeModel{{Model: "default", IsDefault: true, ReasoningEfforts: []string{"row-only"}}},
+				ReasoningEfforts: []string{"provider-only"},
+			},
+			effort: "provider-only", wantErr: []string{"not available for the default model"},
+		},
+		{
+			name: "generic runtime empty default row falls back to provider-wide efforts", kind: "claude-code",
+			catalog: &RuntimeModelCatalog{
+				Models:           []RuntimeModel{{Model: "default", IsDefault: true}},
+				ReasoningEfforts: []string{"provider-only"},
+			},
+			effort: "provider-only",
+		},
+		{
+			name: "generic runtime rejects unknown provider-wide effort", kind: "claude-code",
+			catalog: &RuntimeModelCatalog{
+				Models:           []RuntimeModel{{Model: "fable"}, {Model: "opus"}, {Model: "sonnet"}},
+				ReasoningEfforts: []string{"low", "medium", "high", "xhigh", "max"},
+			},
+			effort: "ultra", wantErr: []string{"not available for the runtime default"},
+		},
 	}
 
 	for _, tc := range cases {

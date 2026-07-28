@@ -54,13 +54,18 @@ func TestDaemonStatusReporterSendsRuntimeDetections(t *testing.T) {
 		Available: true,
 		Version:   "codex 0.1.0",
 		Path:      "/usr/local/bin/codex",
-		ModelCatalog: &RuntimeModelCatalog{Models: []RuntimeModel{{
-			Model:                  "gpt-5.6-sol",
-			DisplayName:            "GPT-5.6-Sol",
-			IsDefault:              true,
-			ReasoningEfforts:       []string{"low", "ultra"},
-			DefaultReasoningEffort: "low",
-		}}},
+		ModelCatalog: &RuntimeModelCatalog{
+			Models: []RuntimeModel{{
+				Model:                  "gpt-5.6-sol",
+				DisplayName:            "GPT-5.6-Sol",
+				IsDefault:              true,
+				ReasoningEfforts:       []string{"low", "ultra"},
+				DefaultReasoningEffort: "low",
+			}},
+			ModelProvenance:           "curated",
+			ReasoningEfforts:          []string{"low", "ultra"},
+			ReasoningEffortProvenance: "detected",
+		},
 	}}
 
 	if err := reporter.Report(context.Background(), detections); err != nil {
@@ -94,8 +99,16 @@ func TestDaemonStatusReporterSendsRuntimeDetections(t *testing.T) {
 	if !ok {
 		t.Fatalf("raw runtime payload = %#v", runtimes[0])
 	}
-	if _, ok := runtimePayload["modelCatalog"]; !ok {
+	rawCatalog, ok := runtimePayload["modelCatalog"].(map[string]any)
+	if !ok {
 		t.Fatalf("raw runtime payload is missing exact modelCatalog key: %#v", runtimePayload)
+	}
+	if rawCatalog["modelProvenance"] != "curated" ||
+		rawCatalog["reasoningEffortProvenance"] != "detected" {
+		t.Fatalf("raw model catalog dropped provenance: %#v", rawCatalog)
+	}
+	if efforts, ok := rawCatalog["reasoningEfforts"].([]any); !ok || !reflect.DeepEqual(efforts, []any{"low", "ultra"}) {
+		t.Fatalf("raw model catalog dropped provider-wide efforts: %#v", rawCatalog)
 	}
 	if _, ok := runtimePayload["model_catalog"]; ok {
 		t.Fatalf("raw runtime payload emitted model_catalog drift: %#v", runtimePayload)

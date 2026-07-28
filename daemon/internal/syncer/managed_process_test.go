@@ -116,7 +116,7 @@ func TestManagedBackgroundProcessConstructorInventory(t *testing.T) {
 	}
 	wantManaged := map[string]map[string]int{
 		"appserver.go":     {"managedBackgroundCommand": 1},
-		"claude_driver.go": {"managedBackgroundCommand": 1, "managedBackgroundCommandContext": 1},
+		"claude_driver.go": {"managedBackgroundCommand": 1, "managedBackgroundCommandContext": 2},
 		"codex_driver.go":  {"managedBackgroundCommandContext": 2},
 	}
 	if !reflect.DeepEqual(managedCalls, wantManaged) {

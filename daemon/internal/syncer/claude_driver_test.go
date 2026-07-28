@@ -2,6 +2,7 @@ package syncer
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,6 +69,106 @@ func TestClaudeDriverDetect(t *testing.T) {
 	}
 	if detection.Version != "9.9.9 (Claude Code)" {
 		t.Fatalf("expected version from --version probe, got %q", detection.Version)
+	}
+}
+
+func TestClaudeDriverModelCatalogUsesCuratedAliasesAndDetectedEfforts(t *testing.T) {
+	driver := &claudeDriver{cfg: Config{ClaudeCommand: writeFakeClaude(t)}}
+	catalog := driver.detectModelCatalog(context.Background())
+
+	if catalog.Error != "" || catalog.discoveryPending {
+		t.Fatalf("completed catalog state = %#v", catalog)
+	}
+	if catalog.ModelProvenance != "curated" || catalog.ReasoningEffortProvenance != "detected" {
+		t.Fatalf("catalog provenance = %#v", catalog)
+	}
+	if got, want := strings.Join(catalog.ReasoningEfforts, ","), "low,medium,high,xhigh,max"; got != want {
+		t.Fatalf("catalog efforts = %q, want %q", got, want)
+	}
+	if len(catalog.Models) != 3 {
+		t.Fatalf("catalog models = %#v", catalog.Models)
+	}
+	for i, want := range []string{"fable", "opus", "sonnet"} {
+		if catalog.Models[i].Model != want || catalog.Models[i].IsDefault {
+			t.Fatalf("catalog model[%d] = %#v, want non-default %q", i, catalog.Models[i], want)
+		}
+		if got := strings.Join(catalog.Models[i].ReasoningEfforts, ","); got != "low,medium,high,xhigh,max" {
+			t.Fatalf("model[%d] efforts = %q", i, got)
+		}
+	}
+	catalog.Models[0].ReasoningEfforts[0] = "mutated"
+	if catalog.Models[1].ReasoningEfforts[0] != "low" || catalog.ReasoningEfforts[0] != "low" {
+		t.Fatalf("catalog effort slices alias each other: %#v", catalog)
+	}
+}
+
+func TestClaudeDriverModelCatalogPreservesCuratedAliasesWhenEffortHelpDrifts(t *testing.T) {
+	t.Setenv("FAKE_CLAUDE_HELP_DRIFT", "1")
+	driver := &claudeDriver{cfg: Config{ClaudeCommand: writeFakeClaude(t)}}
+	catalog := driver.detectModelCatalog(context.Background())
+	assertClaudeCatalogWithoutEfforts(t, catalog)
+}
+
+func TestClaudeDriverModelCatalogPreservesCuratedAliasesWhenEffortProbeFails(t *testing.T) {
+	driver := &claudeDriver{cfg: Config{ClaudeCommand: filepath.Join(t.TempDir(), "missing-claude")}}
+	catalog := driver.detectModelCatalog(context.Background())
+	assertClaudeCatalogWithoutEfforts(t, catalog)
+}
+
+func assertClaudeCatalogWithoutEfforts(t *testing.T, catalog *RuntimeModelCatalog) {
+	t.Helper()
+	if catalog == nil || catalog.Error != "" || catalog.ModelProvenance != "curated" ||
+		catalog.ReasoningEffortProvenance != "" || len(catalog.ReasoningEfforts) != 0 ||
+		!catalog.discoveryPending {
+		t.Fatalf("partial Claude catalog metadata = %#v", catalog)
+	}
+	if len(catalog.Models) != len(claudeCuratedModels) {
+		t.Fatalf("partial Claude catalog models = %#v", catalog.Models)
+	}
+	for i, want := range []string{"fable", "opus", "sonnet"} {
+		if catalog.Models[i].Model != want || catalog.Models[i].ReasoningEfforts == nil ||
+			len(catalog.Models[i].ReasoningEfforts) != 0 {
+			t.Fatalf("partial Claude model[%d] = %#v, want %q with non-nil empty efforts", i, catalog.Models[i], want)
+		}
+	}
+	wire, err := json.Marshal(catalog)
+	if err != nil {
+		t.Fatalf("marshal partial Claude catalog: %v", err)
+	}
+	if got := strings.Count(string(wire), `"reasoningEfforts":[]`); got != len(claudeCuratedModels) {
+		t.Fatalf("partial Claude catalog wire = %s, empty effort arrays = %d", wire, got)
+	}
+}
+
+func TestClaudeBuildArgsProjectsOnlyExplicitProfile(t *testing.T) {
+	tests := []struct {
+		name    string
+		profile RuntimeProfile
+		want    []string
+	}{
+		{name: "inherited"},
+		{name: "model", profile: RuntimeProfile{Model: " sonnet "}, want: []string{"--model", "sonnet"}},
+		{name: "effort", profile: RuntimeProfile{ReasoningEffort: " xhigh "}, want: []string{"--effort", "xhigh"}},
+		{name: "both", profile: RuntimeProfile{Model: "opus", ReasoningEffort: "max"}, want: []string{"--model", "opus", "--effort", "max"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			process := &claudeRuntimeProcess{profile: test.profile}
+			args := process.buildArgs("session", false)
+			if containsSequence(args, []string{"--fallback-model"}) {
+				t.Fatalf("args contain forbidden fallback flag: %v", args)
+			}
+			for _, flag := range []string{"--model", "--effort"} {
+				hasFlag := containsSequence(args, []string{flag})
+				wantFlag := containsSequence(test.want, []string{flag})
+				if hasFlag != wantFlag {
+					t.Fatalf("args %v flag %s presence = %t, want %t", args, flag, hasFlag, wantFlag)
+				}
+			}
+			if len(test.want) > 0 && !containsSequence(args, test.want) {
+				t.Fatalf("args = %v, want sequence %v", args, test.want)
+			}
+		})
 	}
 }
 
@@ -654,6 +755,19 @@ func TestParseClaudeStreamLine(t *testing.T) {
 			line: `{"type":"result","is_error":true}`,
 			want: &claudeStreamEvent{kind: claudeStreamTurnEnd, failed: true, errText: "claude turn failed"},
 		},
+		{
+			name: "structured model not found without auxiliary boolean",
+			line: `{"type":"assistant","error":"model_not_found","message":{"content":[{"type":"text","text":"Selected model is unavailable"}]}}`,
+			want: &claudeStreamEvent{kind: claudeStreamTerminalModel, errText: "Selected model is unavailable"},
+		},
+		{
+			name: "structured model not found with false auxiliary boolean",
+			line: `{"type":"assistant","error":"model_not_found","is_api_error_message":false,"message":{"content":[{"type":"text","text":"Selected model is unavailable"}]}}`,
+			want: &claudeStreamEvent{kind: claudeStreamTerminalModel, errText: "Selected model is unavailable"},
+		},
+		{name: "404 alone ignored", line: `{"type":"assistant","is_api_error_message":true,"api_error_status":404,"message":{"content":[{"type":"text","text":"not found"}]}}`, want: nil},
+		{name: "429 ignored", line: `{"type":"assistant","error":"rate_limit","is_api_error_message":true,"api_error_status":429}`, want: nil},
+		{name: "5xx ignored", line: `{"type":"assistant","error":"server_error","is_api_error_message":true,"api_error_status":500}`, want: nil},
 		{name: "assistant ignored", line: `{"type":"assistant","message":{"content":[]}}`, want: nil},
 		{name: "other system subtype ignored", line: `{"type":"system","subtype":"status"}`, want: nil},
 		{name: "malformed ignored", line: `{not json`, want: nil},
@@ -669,6 +783,33 @@ func TestParseClaudeStreamLine(t *testing.T) {
 			}
 			if got == nil || *got != *tc.want {
 				t.Fatalf("unexpected event:\n got: %#v\nwant: %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestClaudeReadLoopTypesModelNotFoundOnlyForExplicitModel(t *testing.T) {
+	line := `{"type":"assistant","error":"model_not_found","message":{"content":[{"type":"text","text":"Selected model is unavailable"}]}}` + "\n"
+	for _, test := range []struct {
+		name  string
+		model string
+		want  RuntimeFailureKind
+	}{
+		{name: "explicit", model: "sonnet", want: RuntimeFailureTerminalModel},
+		{name: "inherited"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			process := &claudeRuntimeProcess{
+				profile:    RuntimeProfile{Model: test.model},
+				sessionID:  "session",
+				activeTurn: "turn",
+				events:     make(chan RuntimeEvent, 1),
+				stopping:   make(chan struct{}),
+			}
+			process.readLoop(strings.NewReader(line), &claudeStdoutTail{})
+			event := <-process.events
+			if event.Kind != RuntimeEventTurnFailed || event.FailureKind != test.want || event.Error != "Selected model is unavailable" {
+				t.Fatalf("event = %#v", event)
 			}
 		})
 	}
