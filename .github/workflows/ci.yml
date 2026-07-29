@@ -627,6 +627,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive # the compose backend image build needs third_party/y-crdt source
+      # Validate the teardown contract before running the thing whose teardown it governs — a broken
+      # run-smoke.sh that leaks its stack should be caught before it gets the chance to leak one.
+      - name: run-smoke teardown contract
+        run: ./test-run-smoke-teardown.sh
+        working-directory: e2e
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
