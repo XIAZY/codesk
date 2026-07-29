@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { OnboardingScope, OnboardingStep } from "./Onboarding";
 
 type UseOnboardingOptions = {
@@ -210,10 +210,16 @@ export function useOnboarding({
     setChecklistState({ key: checklistDismissedKey, value: true });
   }, [checklistDismissedKey]);
 
-  // Opening the chapter from the checklist is a MANUAL open: normal copy (no bridge), and
-  // it never records the promo-dismiss on close. It also trips the fire-once guard so an
-  // auto-open can't then surprise the user in the same session.
+  // Opening the chapter from the checklist is a MANUAL open: normal copy (no bridge). A
+  // deliberate open means the user has already seen the chapter, so it ALSO persists the
+  // promo-dismiss flag (#90 bug 3) — a reload must not re-auto-open a chapter they opened
+  // themselves. Manual reopen via the checklist stays available (dismissal suppresses
+  // AUTO-open only). It also trips the session fire-once guard for the current session.
   const openChapter = useCallback(() => {
+    if (teammatePromoDismissedKey) {
+      persistTrue(teammatePromoDismissedKey);
+      setPromoState({ key: teammatePromoDismissedKey, value: true });
+    }
     updateSession((current) => ({
       ...current,
       chapterOpen: true,
@@ -222,7 +228,7 @@ export function useOnboarding({
       chapterFreshEntryId: null,
       autoOpenFired: true,
     }));
-  }, [updateSession]);
+  }, [teammatePromoDismissedKey, updateSession]);
   // "Not now"/Close closes without recording any completion (Anton: dismiss only) —
   // completion is live-derived, so reopening resumes from the true next card. If the chapter
   // was AUTO-opened, closing also records the promo-dismiss flag (permanently suppress future
@@ -252,16 +258,37 @@ export function useOnboarding({
     prevDocCount: null,
     sawFresh: false,
   });
-  useEffect(() => {
+  // A promotion is "pending" this frame when it is eligible AND a discussion spotlight could
+  // otherwise paint (documentOpen). The App suppresses the spotlight synchronously on this,
+  // and the layout effect below flips chapterOpen before paint — together the locked order
+  // (document → teammate chapter → discussion) never shows a one-frame discussion flash
+  // (#90 bug 2). No ref read here: when documentOpen, both fresh and catch-up fire this frame.
+  const promotionPending =
+    enabled
+    && promotable
+    && !promoDismissed
+    && !session.chapterOpen
+    && !session.autoOpenFired
+    && documentCount >= 1
+    && documentOpen;
+  // useLayoutEffect (not useEffect): React flushes it synchronously before the browser paints,
+  // so the chapter takes the screen in the same visual frame the document opens — the discussion
+  // spotlight never becomes visible in between.
+  useLayoutEffect(() => {
     if (promoRef.current.key !== scopeKey) {
       promoRef.current = { key: scopeKey, prevDocCount: null, sawFresh: false };
     }
+    // Only track document-count transitions once onboarding is actually enabled (namespace/
+    // workspace ready). A 0→1 seen during disabled startup is the app loading an EXISTING
+    // workspace, NOT a user creating a fresh document — counting it would mislabel catch-up as
+    // fresh and show the bridge title on an existing workspace (#90 bug 1).
+    if (!enabled) return;
     const ref = promoRef.current;
     const prev = ref.prevDocCount;
     ref.prevDocCount = documentCount;
     if (prev === 0 && documentCount > 0) ref.sawFresh = true;
 
-    if (!enabled || !promotable || promoDismissed) return;
+    if (!promotable || promoDismissed) return;
     if (session.chapterOpen || session.autoOpenFired) return;
     if (documentCount < 1) return;
     const fresh = ref.sawFresh;
@@ -337,6 +364,9 @@ export function useOnboarding({
     chapterTotal,
     chapterOpen: session.chapterOpen,
     chapterBridge,
+    // True on the frame a promotion is about to auto-open (before the layout effect flips
+    // chapterOpen) — the host uses it to keep the discussion spotlight from flashing.
+    promotionPending,
     promoDismissed,
     openChapter,
     closeChapter,

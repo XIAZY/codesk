@@ -8,7 +8,7 @@
 
 import { act, cleanup, render, renderHook, screen, fireEvent, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WorkspaceApp, MembersAndInvite, shouldRenderOnboardingChecklist } from "./App";
+import { WorkspaceApp, MembersAndInvite, shouldRenderOnboardingChecklist, shouldRenderOnboardingSpotlight } from "./App";
 import { useOnboardingController } from "./onboardingController";
 import type { OnboardingRole } from "./onboardingEngine";
 import type { Account, Agent, Daemon, WorkspaceState, WorkspaceSummary } from "./types";
@@ -165,6 +165,18 @@ describe("onboarding wiring in WorkspaceApp", () => {
     expect(shouldRenderOnboardingChecklist(true, null)).toBe(true);
     expect(shouldRenderOnboardingChecklist(false, null)).toBe(false);
   });
+
+  it("suppresses the discussion spotlight while a promotion is pending or the chapter is open (#90 bug 2)", () => {
+    // Normal: an active surface with no chapter/promotion → the spotlight renders.
+    expect(shouldRenderOnboardingSpotlight(true, false, false)).toBe(true);
+    // A promotion is about to auto-open this frame → the discussion spotlight must NOT paint,
+    // so it never flashes before the teammate chapter takes the screen.
+    expect(shouldRenderOnboardingSpotlight(true, false, true)).toBe(false);
+    // Chapter already open (interlude) → suppressed.
+    expect(shouldRenderOnboardingSpotlight(true, true, false)).toBe(false);
+    // No active surface → nothing to render regardless.
+    expect(shouldRenderOnboardingSpotlight(false, false, false)).toBe(false);
+  });
 });
 
 describe("member_invited record site", () => {
@@ -311,8 +323,9 @@ describe("chapter integration in WorkspaceApp (#56 render head, promoted #90)", 
     renderWorkspace();
 
     // Auto-opened to the true first-incomplete card (connect), NEVER a spotlight, and with
-    // NORMAL copy — the promotion bridge line is a fresh-only lead-in, absent on catch-up.
-    expect(screen.getByText("Connect a local environment")).toBeTruthy();
+    // NORMAL copy — the bridge is a fresh-only TITLE, so catch-up shows the plain title and
+    // never the bridge line.
+    expect(screen.getByText("Bring in an AI teammate")).toBeTruthy();
     expect(screen.getByText("Step 1 of 2")).toBeTruthy();
     expect(screen.queryByText(BRIDGE_LINE)).toBeNull();
     // One surface owns attention: the checklist launcher is suspended while the chapter is up.
@@ -323,7 +336,7 @@ describe("chapter integration in WorkspaceApp (#56 render head, promoted #90)", 
     // "Not now" on an AUTO-opened chapter records the per-workspace promo-dismiss flag (a
     // presentation flag — NOT a completion), closes, and restores the checklist entry.
     fireEvent.click(screen.getByText("Not now"));
-    expect(screen.queryByText("Connect a local environment")).toBeNull();
+    expect(screen.queryByText("Bring in an AI teammate")).toBeNull();
     expect(window.localStorage.getItem(PROMO_KEY)).toBe("true");
     // No completion/seen flag was written — only the presentation promo-dismiss key.
     expect(window.localStorage.getItem(FLAGS_KEY)).toBe(flagsBefore);
@@ -332,7 +345,7 @@ describe("chapter integration in WorkspaceApp (#56 render head, promoted #90)", 
     expect(screen.getByText("Add an AI teammate")).toBeTruthy();
     expect(screen.getByText("1 of 2")).toBeTruthy();
     fireEvent.click(screen.getByText("Add an AI teammate"));
-    expect(screen.getByText("Connect a local environment")).toBeTruthy();
+    expect(screen.getByText("Bring in an AI teammate")).toBeTruthy();
     expect(screen.queryByText(BRIDGE_LINE)).toBeNull();
   });
 
@@ -344,11 +357,11 @@ describe("chapter integration in WorkspaceApp (#56 render head, promoted #90)", 
     renderWorkspace();
 
     // Suppressed: the chapter does not auto-open; the checklist launcher is present.
-    expect(screen.queryByText("Connect a local environment")).toBeNull();
+    expect(screen.queryByText("Bring in an AI teammate")).toBeNull();
     expect(screen.getByText("Add an AI teammate")).toBeTruthy();
     // Manual open still works (dismissal suppresses AUTO-open only) — normal copy.
     fireEvent.click(screen.getByText("Add an AI teammate"));
-    expect(screen.getByText("Connect a local environment")).toBeTruthy();
+    expect(screen.getByText("Bring in an AI teammate")).toBeTruthy();
     expect(screen.queryByText(BRIDGE_LINE)).toBeNull();
   });
 
@@ -363,7 +376,7 @@ describe("chapter integration in WorkspaceApp (#56 render head, promoted #90)", 
     mocks.documents = [{ id: "doc_1", path: "P.md", title: "P.md" }];
     renderWorkspace();
 
-    expect(screen.queryByText("Connect a local environment")).toBeNull(); // no auto-open
+    expect(screen.queryByText("Bring in an AI teammate")).toBeNull(); // no auto-open
     // The entry reads done with the Ready (historical) label and a View-completion reopen.
     expect(screen.getByText("Your AI teammate is ready")).toBeTruthy();
     expect(screen.getByText("View completion")).toBeTruthy();
@@ -375,7 +388,7 @@ describe("chapter integration in WorkspaceApp (#56 render head, promoted #90)", 
     mocks.documents = [{ id: "doc_1", path: "P.md", title: "P.md" }];
     renderWorkspace();
 
-    expect(screen.queryByText("Connect a local environment")).toBeNull();
+    expect(screen.queryByText("Bring in an AI teammate")).toBeNull();
     expect(screen.queryByText("Work with an agent")).toBeNull();
     expect(screen.queryByText("Add an AI teammate")).toBeNull();
     // The checklist is present (create-document done + start-discussion), no promotion.
@@ -536,5 +549,48 @@ describe("useOnboardingController — teammate promotion auto-open (#90)", () =>
     expect(result.current.total).toBe(2); // guide = 2 spotlight steps
     expect(result.current.stepIndex).toBe(1); // threads-intro = "2 of 2" (0-based 1)
     expect(result.current.chapterTotal).toBe(2); // the chapter's OWN, separate step count
+    // The discussion spotlight is SUSPENDED behind the chapter, not lost — activeSpotlightId
+    // still resolves to threads-intro, ready to resume the instant the chapter is closed (#90 bug 2).
+    expect(result.current.active?.id).toBe("threads-intro");
+  });
+
+  it("FRESH mislabel guard (#90 bug 1): a startup 0→1 seen while DISABLED is catch-up, not fresh", () => {
+    const { result, rerender } = renderHook(
+      (props: { enabled: boolean; documentCount: number; route: string }) =>
+        useOnboardingController({ ...promoBase, roles: ["owner"], workspaceState: workspaceState(), ...props }),
+      { initialProps: { enabled: false, documentCount: 0, route: "home" } },
+    );
+    // Disabled startup (namespace not ready): no auto-open, and the 0-doc snapshot must NOT be
+    // recorded as a baseline that a later doc would look like a "fresh" transition against.
+    expect(result.current.chapterOpen).toBe(false);
+    // Namespace becomes ready with a document ALREADY present — the app finishing startup for an
+    // EXISTING workspace. This must auto-open CATCH-UP (normal title), never FRESH (bridge).
+    rerender({ enabled: true, documentCount: 1, route: "document" });
+    expect(result.current.chapterActive?.id).toBe("add-teammate-connect");
+    expect(result.current.chapterOpen).toBe(true);
+    expect(result.current.chapterBridge).toBe(false);
+  });
+
+  it("manual-open persistence (#90 bug 3): a manual open persists promo-dismiss; a reload does NOT auto-open", () => {
+    // documentCount 0 so nothing auto-opens — the only open here is the deliberate manual one.
+    const first = renderHook(() =>
+      useOnboardingController({ ...promoBase, roles: ["owner"], route: "home", documentCount: 0, workspaceState: workspaceState() }),
+    );
+    expect(first.result.current.chapterOpen).toBe(false);
+    act(() => first.result.current.openChapter());
+    expect(first.result.current.chapterActive?.id).toBe("add-teammate-connect");
+    // A deliberate open persists the browser-local promo-dismiss flag (they've seen it now).
+    expect(window.localStorage.getItem(PROMO_DISMISS_KEY)).toBe("true");
+    first.unmount();
+
+    // Simulate a reload with a document now present (would otherwise catch-up auto-open):
+    // because the user already opened it manually, it must NOT auto-open.
+    const second = renderHook(() =>
+      useOnboardingController({ ...promoBase, roles: ["owner"], route: "document", documentCount: 1, workspaceState: workspaceState() }),
+    );
+    expect(second.result.current.chapterOpen).toBe(false);
+    // Manual reopen via the checklist stays available afterward.
+    act(() => second.result.current.openChapter());
+    expect(second.result.current.chapterActive?.id).toBe("add-teammate-connect");
   });
 });

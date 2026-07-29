@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { deriveOnboardingSignals, toOnboardingStep, resolveAgentWorkDestination } from "./onboardingController";
+import { deriveOnboardingSignals, toOnboardingStep } from "./onboardingController";
 import { NODES, acknowledgeFlag } from "./onboardingEngine";
 import type { WorkspaceState, Daemon, Agent, ThreadItem } from "./types";
 
@@ -84,26 +84,13 @@ describe("P1->P2 adapter (toOnboardingStep) — the seam", () => {
       expect(`seen:${step.id}@v${step.version}`).toBe(acknowledgeFlag(node));
     }
   });
-});
 
-describe("resolveAgentWorkDestination (#56 §2e — one rule, two surfaces)", () => {
-  it("exactly one agent → that agent's Start run surface directly (no list hop)", () => {
-    expect(resolveAgentWorkDestination([{ id: "agent-7" }])).toEqual({
-      label: "Start a run",
-      kind: "start-run",
-      agentId: "agent-7",
-    });
-  });
-
-  it("two or more agents → the Agents list chooser", () => {
-    expect(resolveAgentWorkDestination([{ id: "a" }, { id: "b" }])).toEqual({
-      label: "Choose an agent",
-      kind: "agents-list",
-    });
-  });
-
-  it("the label tracks the destination (never a static label hiding the outcome)", () => {
-    expect(resolveAgentWorkDestination([{ id: "a" }]).label).toBe("Start a run");
-    expect(resolveAgentWorkDestination([{ id: "a" }, { id: "b" }, { id: "c" }]).label).toBe("Choose an agent");
+  it("projects the fresh-only promoTitle so the card can swap its title on a fresh auto-open", () => {
+    const connect = toOnboardingStep(NODES.find((n) => n.id === "add-teammate-connect")!);
+    expect(connect.promoTitle).toBe(
+      "Your first document's ready. Now bring in an AI teammate to work on it with you.",
+    );
+    // A card without a fresh variant projects undefined (Create keeps its fixed title).
+    expect(toOnboardingStep(NODES.find((n) => n.id === "add-teammate-create")!).promoTitle).toBeUndefined();
   });
 });

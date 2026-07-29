@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 
 // Kept structurally in sync with onboardingEngine.ts's unions (the adapter projects
-// OnboardingNode → OnboardingStep). The three open-* events route the "Add an AI
-// teammate" chapter CTAs; "chapter" is that optional flow's presentation.
+// OnboardingNode → OnboardingStep). The two open-* chapter events route the "Add an AI
+// teammate" CTAs; "chapter" is that promoted flow's presentation.
 export type OnboardingActionEvent =
   | "advance"
   | "back"
@@ -10,8 +10,7 @@ export type OnboardingActionEvent =
   | "dismiss"
   | "open-thread-draft"
   | "open-create-environment"
-  | "open-create-agent"
-  | "open-agent-work";
+  | "open-create-agent";
 export type OnboardingScope = "account" | "workspace";
 export type OnboardingPresentation = "spotlight" | "tip" | "chapter";
 
@@ -30,8 +29,9 @@ export type OnboardingStep = {
   targetOnboardingId?: string;
   eyebrow?: string; // small label above the title (chapter cards)
   title: string;
+  promoTitle?: string; // fresh auto-open entry-card title (#90 promotion bridge)
   body: string;
-  caption?: string; // reassurance line, not an action (chapter member card)
+  caption?: string; // reassurance/status line, not an action (chapter Done card)
   primaryAction?: OnboardingAction;
   secondaryAction?: OnboardingAction;
   skippable: boolean;
@@ -403,18 +403,15 @@ export function Onboarding({
   );
 }
 
-// The auto-promotion bridge line (Eva, #90) — shown ONLY on a fresh auto-open's entry
-// card, framing the teammate setup as the natural next move after the first document.
-export const TEAMMATE_BRIDGE_COPY =
-  "Your first document's ready. Now bring in an AI teammate to work on it with you.";
-
 type ChapterCardProps = {
   step: OnboardingStep;
   stepIndex: number; // among the chapter's steps; -1 for the terminal done card
   total: number; // number of chapter steps for this role (owner/admin 2; members have none)
   onAction?: (event: OnboardingActionEvent) => void;
   onDismiss: () => void; // "Not now" / "Close" — dismiss only, never completes
-  // #90: show the promotion bridge line above the card (fresh auto-open entry card only).
+  // #90: a fresh auto-open's entry card — the card's TITLE becomes the promotion bridge
+  // (step.promoTitle) instead of its normal title. Only a card that carries promoTitle
+  // swaps, so an A1 fresh open landing on Create keeps its own fixed title.
   showBridge?: boolean;
 };
 
@@ -443,6 +440,9 @@ export function OnboardingChapterCard({ step, stepIndex, total, onAction, onDism
   // A primary "Close" (done card) has event "dismiss" — it isn't a real CTA button; it
   // becomes the footer dismiss control. Only open-* primaries render the dark CTA.
   const hasCta = primary != null && primary.event !== "dismiss";
+  // On a fresh auto-open the entry card's TITLE is the promotion bridge (only cards carrying
+  // a promoTitle swap — catch-up/manual/other cards keep their normal title).
+  const title = showBridge && step.promoTitle ? step.promoTitle : step.title;
   const dismissAction = step.secondaryAction ?? (primary?.event === "dismiss" ? primary : undefined);
   const showSteps = total > 1 && stepIndex >= 0; // owner/admin 3-step path only (not member/done)
 
@@ -455,9 +455,8 @@ export function OnboardingChapterCard({ step, stepIndex, total, onAction, onDism
       aria-labelledby={`ob-title-${step.id}`}
       aria-describedby={`ob-body-${step.id}`}
     >
-      {showBridge ? <p className="ob-chapter-bridge">{TEAMMATE_BRIDGE_COPY}</p> : null}
       {step.eyebrow ? <span className="ob-eyebrow">{step.eyebrow}</span> : null}
-      <h4 id={`ob-title-${step.id}`}>{step.title}</h4>
+      <h4 id={`ob-title-${step.id}`}>{title}</h4>
       <p id={`ob-body-${step.id}`}>{step.body}</p>
       {hasCta ? (
         <button type="button" className="ob-cta" onClick={() => onAction?.(primary!.event)}>
@@ -486,7 +485,7 @@ export function OnboardingChapterCard({ step, stepIndex, total, onAction, onDism
           </button>
         ) : null}
       </div>
-      <span className="ob-live" aria-live="polite">{step.title}. {step.body}</span>
+      <span className="ob-live" aria-live="polite">{title}. {step.body}</span>
     </section>
   );
 }

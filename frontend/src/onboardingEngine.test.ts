@@ -181,13 +181,32 @@ describe("completion derivation (§6.1 — live state is the source of truth)", 
     expect(isComplete(done, ctx({ signals: { ...emptySignals, liveEnvironmentCount: 1, agentCount: 1 } }))).toBe(true);
   });
 
-  it("the checklist entry completes at agent-exists (agent ready) — NOT any run/at-work signal (#90)", () => {
+  it("the checklist entry shares the chapter Done oracle: env AND agent, never a run/at-work signal (#90)", () => {
     const entry = CHECKLIST_ITEMS.find((i) => i.id === "add-teammate-entry")!;
+    const done = node("add-teammate-done");
     expect(isComplete(entry, ctx())).toBe(false);
-    // An agent existing (created) is the whole bar — no run to kick off.
-    expect(isComplete(entry, ctx({ signals: { ...emptySignals, agentCount: 1 } }))).toBe(true);
+    // Env + agent → done (same bar as the Done card); no run to kick off.
+    expect(isComplete(entry, ctx({ signals: { ...emptySignals, liveEnvironmentCount: 1, agentCount: 1 } }))).toBe(true);
+    // Parity guard (#90 bug 4): the row and the Done card resolve identically for every state,
+    // so the row can never read Done while the card walks back to Connect.
+    for (const s of [
+      { liveEnvironmentCount: 0, agentCount: 0 },
+      { liveEnvironmentCount: 1, agentCount: 0 },
+      { liveEnvironmentCount: 0, agentCount: 1 }, // env offline, agent present → BOTH incomplete
+      { liveEnvironmentCount: 1, agentCount: 1 },
+    ]) {
+      const c = ctx({ signals: { ...emptySignals, ...s } });
+      expect(isComplete(entry, c)).toBe(isComplete(done, c));
+    }
     // The banned agent-at-work signal (and its inputs) are gone — grep guard.
     expect(JSON.stringify(entry.completion)).not.toContain("agent-at-work");
+  });
+
+  it("oracle parity (#90 bug 4): env offline + agent present → the entry is NOT complete", () => {
+    const entry = CHECKLIST_ITEMS.find((i) => i.id === "add-teammate-entry")!;
+    // An agent exists but the environment went offline — the row must read incomplete, matching
+    // the chapter (which walks the frontier back to Connect).
+    expect(isComplete(entry, ctx({ signals: { ...emptySignals, liveEnvironmentCount: 0, agentCount: 1 } }))).toBe(false);
   });
 });
 
@@ -357,22 +376,24 @@ describe("Add an AI teammate chapter (#56, reshaped #90)", () => {
 });
 
 describe("checklist (§C — derived, never a stored done)", () => {
-  it("reflects live completion per item; the chapter entry is done once an agent exists (#90)", () => {
+  it("reflects live completion per item; the chapter entry is done once env AND agent hold (#90)", () => {
     const c = ctx({
-      signals: { ...emptySignals, documentCount: 1, threadCount: 1, agentCount: 1 },
+      signals: { ...emptySignals, documentCount: 1, threadCount: 1, liveEnvironmentCount: 1, agentCount: 1 },
     });
     const done = new Map(checklistProgress(c).map((r) => [r.item.id, r.done]));
     expect(done.get("create-document")).toBe(true);
     expect(done.get("start-discussion")).toBe(true);
-    // The chapter entry now completes at agent-exists — an agent existing IS enough (#90).
+    // The chapter entry completes on the env AND agent oracle (#90 bug 4 parity).
     expect(done.get("add-teammate-entry")).toBe(true);
     expect(done.get("invite-team")).toBe(false);
   });
 
-  it("the chapter entry is incomplete until an agent exists — same live bar as the chapter", () => {
-    const beforeAgent = ctx({ signals: { ...emptySignals, liveEnvironmentCount: 1 } }); // env only
-    expect(new Map(checklistProgress(beforeAgent).map((r) => [r.item.id, r.done])).get("add-teammate-entry")).toBe(false);
-    const withAgent = ctx({ signals: { ...emptySignals, agentCount: 1 } });
-    expect(new Map(checklistProgress(withAgent).map((r) => [r.item.id, r.done])).get("add-teammate-entry")).toBe(true);
+  it("the chapter entry needs BOTH env and agent — neither alone completes it", () => {
+    const envOnly = ctx({ signals: { ...emptySignals, liveEnvironmentCount: 1 } });
+    expect(new Map(checklistProgress(envOnly).map((r) => [r.item.id, r.done])).get("add-teammate-entry")).toBe(false);
+    const agentOnly = ctx({ signals: { ...emptySignals, agentCount: 1 } }); // env offline
+    expect(new Map(checklistProgress(agentOnly).map((r) => [r.item.id, r.done])).get("add-teammate-entry")).toBe(false);
+    const both = ctx({ signals: { ...emptySignals, liveEnvironmentCount: 1, agentCount: 1 } });
+    expect(new Map(checklistProgress(both).map((r) => [r.item.id, r.done])).get("add-teammate-entry")).toBe(true);
   });
 });

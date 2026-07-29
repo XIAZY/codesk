@@ -71,8 +71,8 @@ export type DerivedSignal =
 // The UI actions a node's buttons can fire (distinct from the §4.2 completion event
 // keys). A closed union so a typo dies at compile time and OnboardingNode stays
 // structurally assignable to P2's OnboardingStep by construction — no cast/parser.
-// The three `open-*` events route the "Add an AI teammate" chapter CTAs to real
-// controls (CreateDaemonModal / CreateAgentModal / the shared agent-work destination).
+// The two `open-*` chapter events route the "Add an AI teammate" CTAs to real controls
+// (CreateDaemonModal / CreateAgentModal); open-thread-draft routes the first-selection tip.
 export type OnboardingActionEvent =
   | "advance"
   | "back"
@@ -80,8 +80,7 @@ export type OnboardingActionEvent =
   | "dismiss"
   | "open-thread-draft"
   | "open-create-environment"
-  | "open-create-agent"
-  | "open-agent-work";
+  | "open-create-agent";
 
 export type OnboardingAction = { label: string; event: OnboardingActionEvent };
 
@@ -111,9 +110,13 @@ export type OnboardingNode = {
   chapterTerminal?: boolean;
   targetOnboardingId?: string; // data-onboarding-id of the control to spotlight
   title: string;
+  // Alternate title used on a FRESH auto-open's entry card (#90) — the promotion bridge is
+  // the title itself, not a separate line. Only the connect card carries one; a card without
+  // it never swaps, so an A1 fresh open landing on Create keeps its own fixed title.
+  promoTitle?: string;
   body: string;
-  eyebrow?: string; // small label above the title (chapter cards: "ADD AN AI TEAMMATE · OPTIONAL")
-  caption?: string; // reassurance line, not an action (e.g. member card "No setup needed")
+  eyebrow?: string; // small label above the title (chapter cards: "ADD AN AI TEAMMATE")
+  caption?: string; // reassurance/status line, not an action (chapter Done card: "Setup complete")
   primaryAction?: OnboardingAction;
   secondaryAction?: OnboardingAction;
   skippable: boolean;
@@ -290,9 +293,11 @@ export const NODES: OnboardingNode[] = [
     audience: "owner-admin",
     trigger: { type: "manual" },
     completion: { via: "derived", signal: "live-environment" },
-    eyebrow: "ADD AN AI TEAMMATE · OPTIONAL",
-    title: "Connect a local environment",
-    body: "A local environment is the computer where your agents work.",
+    eyebrow: "ADD AN AI TEAMMATE",
+    // Catch-up/normal title; a fresh auto-open swaps in promoTitle (the bridge) on this card.
+    title: "Bring in an AI teammate",
+    promoTitle: "Your first document's ready. Now bring in an AI teammate to work on it with you.",
+    body: "A local environment is the computer where your AI teammate works.",
     primaryAction: { label: "Connect environment", event: "open-create-environment" },
     secondaryAction: { label: "Not now", event: "dismiss" },
     skippable: true,
@@ -307,10 +312,10 @@ export const NODES: OnboardingNode[] = [
     audience: "owner-admin",
     trigger: { type: "manual" },
     completion: { via: "derived", signal: "agent-exists" },
-    eyebrow: "ADD AN AI TEAMMATE · OPTIONAL",
+    eyebrow: "ADD AN AI TEAMMATE",
     title: "Create your AI teammate",
     body: "Give it a name and role. Once created, it's ready in this workspace.",
-    primaryAction: { label: "Create agent", event: "open-create-agent" },
+    primaryAction: { label: "Create teammate", event: "open-create-agent" },
     secondaryAction: { label: "Not now", event: "dismiss" },
     skippable: true,
     fallback: "page-card",
@@ -338,10 +343,13 @@ export const NODES: OnboardingNode[] = [
         { via: "derived", signal: "agent-exists" },
       ],
     },
-    eyebrow: "READY",
-    title: "Your AI teammate is ready",
-    body: "We'll pick the tour back up.",
-    caption: "Chapter complete",
+    eyebrow: "ALL SET",
+    title: "Your AI teammate is ready.",
+    // Replay-safe (Anton): the Done card is ALSO opened on manual re-review / checklist
+    // completion, where a "we'll pick the tour back up" promise would be false — so the body
+    // states only the durable fact.
+    body: "It's connected and set up in your workspace.",
+    caption: "Setup complete",
     primaryAction: { label: "Close", event: "dismiss" },
     skippable: true,
     fallback: "page-card",
@@ -366,7 +374,16 @@ export const CHECKLIST_ITEMS: OnboardingChecklistItem[] = [
     label: "Add an AI teammate",
     eligibleRoles: [], // authz-pure: opening the chapter is not gated (its STEPS are); variant via audience
     audience: "owner-admin",
-    completion: { via: "derived", signal: "agent-exists" },
+    // Oracle parity (#90): the row is Done on the SAME env AND agent oracle as the chapter's
+    // Done card — not agent-exists alone — so the row can't read Done while the card walks
+    // back to Connect after an environment goes offline.
+    completion: {
+      via: "all",
+      of: [
+        { via: "derived", signal: "live-environment" },
+        { via: "derived", signal: "agent-exists" },
+      ],
+    },
     subtitle: "Connect an environment and create an agent",
     opensChapter: true,
     doneLabel: "Your AI teammate is ready",
