@@ -2623,6 +2623,7 @@ export function WorkspaceApp({
           total={onboarding.chapterTotal}
           onAction={handleOnboardingAction}
           onDismiss={onboarding.closeChapter}
+          showBridge={onboarding.chapterBridge}
         />
       ) : null}
       {!onboarding.chapterOpen && shouldRenderOnboardingChecklist(rootNamespace.ready, onboarding.active?.presentation) ? (

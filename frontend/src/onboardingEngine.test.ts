@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   NODES,
+  CHECKLIST_ITEMS,
   ONBOARDING_EVENT_KEYS,
   eligibleNodes,
   guideSteps,
@@ -8,6 +9,7 @@ import {
   activeTip,
   activeChapter,
   chapterSteps,
+  nextChapterStep,
   hasChapter,
   nextIncomplete,
   isComplete,
@@ -24,8 +26,6 @@ const emptySignals: OnboardingLiveSignals = {
   threadCount: 0,
   liveEnvironmentCount: 0,
   agentCount: 0,
-  agentRunCount: 0,
-  agentThreadCount: 0,
 };
 
 function ctx(overrides: Partial<OnboardingContext> = {}): OnboardingContext {
@@ -97,6 +97,7 @@ describe("node config integrity (§4.1)", () => {
         case "derived":
           return false;
         case "any":
+        case "all":
           return cond.of.some(hasNonDerivedLeg);
       }
     };
@@ -129,7 +130,7 @@ describe("eligibility by role (§4.1 — removed, not disabled)", () => {
     expect(memberGuideTips).toEqual(allGuideTips);
   });
 
-  it("checklist replaces the 3 agent rows with ONE counted chapter entry; invite-team stays owner/admin", () => {
+  it("checklist folds the agent rows into ONE counted owner/admin chapter entry; members get NO AI entry (#90)", () => {
     const owner = checklistProgress(ctx({ roles: ["owner"] })).map((c) => c.item.id);
     // Owner/admin: the two passive tasks + the "Add an AI teammate" entry + invite-team (4).
     expect(owner).toEqual(["create-document", "start-discussion", "add-teammate-entry", "invite-team"]);
@@ -143,10 +144,14 @@ describe("eligibility by role (§4.1 — removed, not disabled)", () => {
       "create-document",
       "start-discussion",
     ]);
-    // Member once an agent exists: the "Work with an agent" entry counts → denominator 3.
+    // #90 member regression: a member NEVER gets an AI onboarding item, even once an agent
+    // exists — work-with-agent-entry was removed (an incomplete row is a completion demand,
+    // not an offer). The denominator stays 2.
     expect(
       checklistProgress(ctx({ roles: ["member"], signals: { ...emptySignals, agentCount: 1 } })).map((c) => c.item.id),
-    ).toEqual(["create-document", "start-discussion", "work-with-agent-entry"]);
+    ).toEqual(["create-document", "start-discussion"]);
+    // The removed entry id is gone from the config entirely.
+    expect(CHECKLIST_ITEMS.some((i) => i.id === "work-with-agent-entry")).toBe(false);
   });
 });
 
@@ -166,14 +171,23 @@ describe("completion derivation (§6.1 — live state is the source of truth)", 
     expect(isComplete(connect, ctx({ signals: { ...emptySignals, liveEnvironmentCount: 1 } }))).toBe(true);
   });
 
-  it("agent-at-work is a run started OR an agent in a thread — NOT watching (ratified #56 oracle)", () => {
-    // The chapter's work step (and the checklist entry) complete on the agent-at-work signal.
-    const work = node("add-teammate-work");
-    expect(isComplete(work, ctx())).toBe(false);
-    expect(isComplete(work, ctx({ signals: { ...emptySignals, agentRunCount: 1 } }))).toBe(true);
-    expect(isComplete(work, ctx({ signals: { ...emptySignals, agentThreadCount: 1 } }))).toBe(true);
-    // A mere watcher/subscriber does not count — "watching" is not "at work" (Tom/Deniz/Juan).
-    // (watchedDocumentCount no longer exists as a signal; there is no leg to falsely complete.)
+  it("the teammate Done card completes on env AND agent (the #90 oracle — no manufactured run)", () => {
+    // The terminal Done card's completion is the AND of a live environment and an agent
+    // existing — the banned agent-at-work signal is gone entirely.
+    const done = node("add-teammate-done");
+    expect(isComplete(done, ctx())).toBe(false);
+    expect(isComplete(done, ctx({ signals: { ...emptySignals, liveEnvironmentCount: 1 } }))).toBe(false); // env only
+    expect(isComplete(done, ctx({ signals: { ...emptySignals, agentCount: 1 } }))).toBe(false); // agent only
+    expect(isComplete(done, ctx({ signals: { ...emptySignals, liveEnvironmentCount: 1, agentCount: 1 } }))).toBe(true);
+  });
+
+  it("the checklist entry completes at agent-exists (agent ready) — NOT any run/at-work signal (#90)", () => {
+    const entry = CHECKLIST_ITEMS.find((i) => i.id === "add-teammate-entry")!;
+    expect(isComplete(entry, ctx())).toBe(false);
+    // An agent existing (created) is the whole bar — no run to kick off.
+    expect(isComplete(entry, ctx({ signals: { ...emptySignals, agentCount: 1 } }))).toBe(true);
+    // The banned agent-at-work signal (and its inputs) are gone — grep guard.
+    expect(JSON.stringify(entry.completion)).not.toContain("agent-at-work");
   });
 });
 
@@ -256,94 +270,70 @@ describe("watchers-intro relocated as a contextual tip (#56)", () => {
   });
 });
 
-describe("Add an AI teammate chapter (#56)", () => {
+describe("Add an AI teammate chapter (#56, reshaped #90)", () => {
   const owner: OnboardingRole[] = ["owner"];
   const member: OnboardingRole[] = ["member"];
   const withEnv = { ...emptySignals, liveEnvironmentCount: 1 };
-  const withAgent = { ...withEnv, agentCount: 1 };
-  const atWork = { ...withAgent, agentRunCount: 1 };
+  const withAgent = { ...withEnv, agentCount: 1 }; // env + agent → activation complete
 
-  it("owner/admin: the chapter walks connect → create → work → done on live signals", () => {
+  it("owner/admin: the chapter walks connect → create → Done on live signals (no work step)", () => {
     // 0 environments → step 1 (connect).
     expect(activeChapter(ctx({ roles: owner }))?.id).toBe("add-teammate-connect");
     // environment, no agent → step 2 (create).
     expect(activeChapter(ctx({ roles: owner, signals: withEnv }))?.id).toBe("add-teammate-create");
-    // agent, not yet at work → step 3 (work).
-    expect(activeChapter(ctx({ roles: owner, signals: withAgent }))?.id).toBe("add-teammate-work");
-    // an agent is at work → the terminal done card.
-    expect(activeChapter(ctx({ roles: owner, signals: atWork }))?.id).toBe("add-teammate-done");
+    // env + agent → the terminal Done card directly (there is no third "work" step).
+    expect(activeChapter(ctx({ roles: owner, signals: withAgent }))?.id).toBe("add-teammate-done");
+    // The banned step is gone from the config.
+    expect(NODES.some((n) => n.id === "add-teammate-work")).toBe(false);
   });
 
-  it("owner/admin chapter is 3 ordered steps + a terminal done card", () => {
+  it("owner/admin chapter is 2 ordered steps + a terminal Done card", () => {
     expect(chapterSteps(ctx({ roles: owner })).map((n) => n.id)).toEqual([
       "add-teammate-connect",
       "add-teammate-create",
-      "add-teammate-work",
     ]);
   });
 
-  it("member never sees connect/create — only the work card, and only once an agent exists", () => {
-    // Presentation: a member's chapter is exactly the single work card (audience-filtered).
-    expect(chapterSteps(ctx({ roles: member })).map((n) => n.id)).toEqual(["add-teammate-member"]);
-    // Authz: the owner/admin-gated cards are never even eligible for a member.
-    const memberEligibleIds = eligibleNodes(ctx({ roles: member })).map((n) => n.id);
-    expect(memberEligibleIds).not.toContain("add-teammate-connect");
-    expect(memberEligibleIds).not.toContain("add-teammate-create");
-
-    // No agents → nothing to show, no entry offered (2d).
+  it("member has NO chapter at all — even once an agent exists (#90)", () => {
+    // The member chapter cards were removed; a member sees no steps and no card, ever.
+    expect(chapterSteps(ctx({ roles: member })).map((n) => n.id)).toEqual([]);
     expect(activeChapter(ctx({ roles: member }))).toBeNull();
     expect(hasChapter(ctx({ roles: member }))).toBe(false);
-
-    // An agent exists, not yet at work → the member "work with an agent" card (2c).
-    expect(activeChapter(ctx({ roles: member, signals: withAgent }))?.id).toBe("add-teammate-member");
-    expect(hasChapter(ctx({ roles: member, signals: withAgent }))).toBe(true);
+    // Not even with an agent present (the old "work with an agent" card is gone).
+    expect(activeChapter(ctx({ roles: member, signals: withAgent }))).toBeNull();
+    expect(hasChapter(ctx({ roles: member, signals: withAgent }))).toBe(false);
+    // The orphaned member nodes are deleted from the config.
+    expect(NODES.some((n) => n.id === "add-teammate-member")).toBe(false);
+    expect(NODES.some((n) => n.id === "add-teammate-member-done")).toBe(false);
   });
 
-  it("terminal-first: a started run keeps Done even if the environment/agent later regresses", () => {
-    // agent-at-work true (a run happened) but the environment is now offline and the agent
-    // was removed — activeChapter must return the terminal Done card, NOT walk back to the
-    // connect step. Activation history doesn't un-happen because a live signal decayed.
-    const regressed = { ...emptySignals, agentRunCount: 1, liveEnvironmentCount: 0, agentCount: 0 };
-    expect(activeChapter(ctx({ roles: owner, signals: regressed }))?.id).toBe("add-teammate-done");
-    expect(activeChapter(ctx({ roles: member, signals: regressed }))?.id).toBe("add-teammate-member-done");
+  it("Done is live-derived (#90): if the environment regresses, the frontier walks back — no stored done", () => {
+    // env + agent → Done. Then the environment goes offline (agent still created): the Done
+    // card's preconditions no longer hold, so activeChapter honestly returns the connect
+    // frontier again. No stored completion flag defeats live truth (drops the old
+    // agent-at-work "history doesn't un-happen" semantics — that signal is banned).
+    expect(activeChapter(ctx({ roles: owner, signals: withAgent }))?.id).toBe("add-teammate-done");
+    const envRegressed = { ...emptySignals, liveEnvironmentCount: 0, agentCount: 1 };
+    expect(activeChapter(ctx({ roles: owner, signals: envRegressed }))?.id).toBe("add-teammate-connect");
   });
 
-  it("member: work card → agent-at-work → terminal done card (no dead end, still reopenable)", () => {
-    // Before work: the member sees the work card. After starting a run: the member sees a
-    // REAL terminal card (Anton's fix) — never null, so the entry's reopen lands on a card.
-    expect(activeChapter(ctx({ roles: member, signals: withAgent }))?.id).toBe("add-teammate-member");
-    const terminal = activeChapter(ctx({ roles: member, signals: atWork }));
-    expect(terminal?.id).toBe("add-teammate-member-done");
-    expect(terminal?.title).toBe("You've started working with an agent");
-    expect(terminal?.caption).toBe("Chapter complete"); // mirrors the owner/admin terminal footer
-    expect(terminal?.primaryAction?.event).toBe("dismiss"); // Close only, never restarts setup
-  });
-
-  it("eligibleRoles stays authz-pure; the owner/member split lives in `audience`", () => {
+  it("eligibleRoles stays authz-pure; the owner/admin audience lives in `audience`", () => {
     const byId = (id: string) => NODES.find((n) => n.id === id)!;
     // Only connect/create are backend-gated (ManageDaemons/ManageAgents).
     expect(byId("add-teammate-connect").eligibleRoles).toEqual(["owner", "admin"]);
     expect(byId("add-teammate-create").eligibleRoles).toEqual(["owner", "admin"]);
-    // Start-run / close are all-roles — eligibleRoles empty; the variant is in `audience`.
-    expect(byId("add-teammate-work").eligibleRoles).toEqual([]);
+    // Closing the Done card is all-roles — eligibleRoles empty; the audience is owner-admin.
     expect(byId("add-teammate-done").eligibleRoles).toEqual([]);
-    expect(byId("add-teammate-member").eligibleRoles).toEqual([]);
-    expect(byId("add-teammate-work").audience).toBe("owner-admin");
-    expect(byId("add-teammate-member").audience).toBe("member");
+    expect(byId("add-teammate-done").audience).toBe("owner-admin");
+    expect(byId("add-teammate-connect").audience).toBe("owner-admin");
   });
 
-  it("complementarity: given an agent exists, every role sees exactly ONE work surface", () => {
-    // The work action (start-run) is all-roles; each backend-permitted role lands on exactly
-    // one surface — owner/admin on step 3, member on the work card — never both, never neither.
-    const ownerCard = activeChapter(ctx({ roles: owner, signals: withAgent }));
-    const adminCard = activeChapter(ctx({ roles: ["admin"], signals: withAgent }));
-    const memberCard = activeChapter(ctx({ roles: member, signals: withAgent }));
-    expect(ownerCard?.id).toBe("add-teammate-work");
-    expect(adminCard?.id).toBe("add-teammate-work");
-    expect(memberCard?.id).toBe("add-teammate-member");
-    // Both surfaces resolve their CTA to the same start-run action.
-    expect(ownerCard?.primaryAction?.event).toBe("open-agent-work");
-    expect(memberCard?.primaryAction?.event).toBe("open-agent-work");
+  it("only owner/admin have a chapter; a member never does (audience gate, not eligibleRoles)", () => {
+    expect(hasChapter(ctx({ roles: owner, signals: withAgent }))).toBe(true);
+    expect(hasChapter(ctx({ roles: ["admin"], signals: withAgent }))).toBe(true);
+    expect(hasChapter(ctx({ roles: member, signals: withAgent }))).toBe(false);
+    // The member exclusion is purely presentation (audience) — eligibleRoles never lies.
+    expect(eligibleNodes(ctx({ roles: member })).map((n) => n.id)).not.toContain("add-teammate-connect");
   });
 
   it("chapter cards never auto-surface as a guide spotlight or a tip", () => {
@@ -352,29 +342,37 @@ describe("Add an AI teammate chapter (#56)", () => {
       roles: owner,
       route: "document",
       selectionActive: true,
-      signals: { ...atWork, documentCount: 1 },
+      signals: { ...withAgent, documentCount: 1 },
     });
     expect(activeNode(full)?.presentation).not.toBe("chapter");
     expect(activeTip(full)?.presentation).not.toBe("chapter");
   });
+
+  it("nextChapterStep is the #90 'activation incomplete' oracle: non-null while incomplete, null when complete", () => {
+    expect(nextChapterStep(ctx({ roles: owner }))?.id).toBe("add-teammate-connect"); // no env
+    expect(nextChapterStep(ctx({ roles: owner, signals: withEnv }))?.id).toBe("add-teammate-create"); // env, no agent
+    expect(nextChapterStep(ctx({ roles: owner, signals: withAgent }))).toBeNull(); // complete → never auto-open
+    expect(nextChapterStep(ctx({ roles: member, signals: withAgent }))).toBeNull(); // member has no chapter
+  });
 });
 
 describe("checklist (§C — derived, never a stored done)", () => {
-  it("reflects live completion per item", () => {
+  it("reflects live completion per item; the chapter entry is done once an agent exists (#90)", () => {
     const c = ctx({
       signals: { ...emptySignals, documentCount: 1, threadCount: 1, agentCount: 1 },
     });
     const done = new Map(checklistProgress(c).map((r) => [r.item.id, r.done]));
     expect(done.get("create-document")).toBe(true);
     expect(done.get("start-discussion")).toBe(true);
-    // The chapter entry completes only on agent-at-work — an agent merely existing isn't enough.
-    expect(done.get("add-teammate-entry")).toBe(false);
+    // The chapter entry now completes at agent-exists — an agent existing IS enough (#90).
+    expect(done.get("add-teammate-entry")).toBe(true);
     expect(done.get("invite-team")).toBe(false);
   });
 
-  it("the chapter entry completes on agent-at-work — same live signal as the chapter", () => {
-    const c = ctx({ signals: { ...emptySignals, agentCount: 1, agentRunCount: 1 } });
-    const done = new Map(checklistProgress(c).map((r) => [r.item.id, r.done]));
-    expect(done.get("add-teammate-entry")).toBe(true);
+  it("the chapter entry is incomplete until an agent exists — same live bar as the chapter", () => {
+    const beforeAgent = ctx({ signals: { ...emptySignals, liveEnvironmentCount: 1 } }); // env only
+    expect(new Map(checklistProgress(beforeAgent).map((r) => [r.item.id, r.done])).get("add-teammate-entry")).toBe(false);
+    const withAgent = ctx({ signals: { ...emptySignals, agentCount: 1 } });
+    expect(new Map(checklistProgress(withAgent).map((r) => [r.item.id, r.done])).get("add-teammate-entry")).toBe(true);
   });
 });

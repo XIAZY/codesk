@@ -4,7 +4,7 @@ import { useState } from "react";
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Onboarding, OnboardingChapterCard, contextualTipPlacement, spotlightGeometry, type OnboardingStep } from "./Onboarding";
+import { Onboarding, OnboardingChapterCard, TEAMMATE_BRIDGE_COPY, contextualTipPlacement, spotlightGeometry, type OnboardingStep } from "./Onboarding";
 import { useOnboarding } from "./useOnboarding";
 
 const step: OnboardingStep = {
@@ -690,7 +690,7 @@ describe("useOnboarding", () => {
   });
 });
 
-describe("OnboardingChapterCard (#56)", () => {
+describe("OnboardingChapterCard (#56, reshaped #90)", () => {
   const connectStep: OnboardingStep = {
     id: "add-teammate-connect",
     version: 1,
@@ -698,22 +698,8 @@ describe("OnboardingChapterCard (#56)", () => {
     presentation: "chapter",
     eyebrow: "ADD AN AI TEAMMATE · OPTIONAL",
     title: "Connect a local environment",
-    body: "A local environment is the computer where your agents run.",
+    body: "A local environment is the computer where your agents work.",
     primaryAction: { label: "Connect environment", event: "open-create-environment" },
-    secondaryAction: { label: "Not now", event: "dismiss" },
-    skippable: true,
-    fallback: "page-card",
-  };
-  const memberCard: OnboardingStep = {
-    id: "add-teammate-member",
-    version: 1,
-    scope: "workspace",
-    presentation: "chapter",
-    eyebrow: "WORK WITH AN AGENT",
-    title: "Put an agent to work",
-    body: "This workspace has agents. Choose one and start a run.",
-    caption: "No setup needed",
-    primaryAction: { label: "Start a run", event: "open-agent-work" },
     secondaryAction: { label: "Not now", event: "dismiss" },
     skippable: true,
     fallback: "page-card",
@@ -723,9 +709,9 @@ describe("OnboardingChapterCard (#56)", () => {
     version: 1,
     scope: "workspace",
     presentation: "chapter",
-    eyebrow: "STARTED",
-    title: "You've started working with an agent",
-    body: "You can start more work anytime from Agents.",
+    eyebrow: "READY",
+    title: "Your AI teammate is ready",
+    body: "We'll pick the tour back up.",
     caption: "Chapter complete",
     primaryAction: { label: "Close", event: "dismiss" },
     skippable: true,
@@ -735,9 +721,9 @@ describe("OnboardingChapterCard (#56)", () => {
   it("owner step: eyebrow + real CTA + step dots + Not now; primary fires the action, Not now only dismisses", () => {
     const onAction = vi.fn();
     const onDismiss = vi.fn();
-    render(<OnboardingChapterCard step={connectStep} stepIndex={0} total={3} onAction={onAction} onDismiss={onDismiss} />);
+    render(<OnboardingChapterCard step={connectStep} stepIndex={0} total={2} onAction={onAction} onDismiss={onDismiss} />);
     expect(screen.getByText("ADD AN AI TEAMMATE · OPTIONAL")).toBeTruthy();
-    expect(screen.getByText("Step 1 of 3")).toBeTruthy();
+    expect(screen.getByText("Step 1 of 2")).toBeTruthy();
     fireEvent.click(screen.getByText("Connect environment"));
     expect(onAction).toHaveBeenCalledWith("open-create-environment");
     fireEvent.click(screen.getByText("Not now"));
@@ -746,19 +732,21 @@ describe("OnboardingChapterCard (#56)", () => {
     expect(onAction).toHaveBeenCalledTimes(1);
   });
 
-  it("member card: single action with a caption, no step counter", () => {
-    const onAction = vi.fn();
-    render(<OnboardingChapterCard step={memberCard} stepIndex={0} total={1} onAction={onAction} onDismiss={vi.fn()} />);
-    expect(screen.getByText(/No setup needed/)).toBeTruthy();
-    expect(screen.queryByText(/Step 1 of/)).toBeNull(); // single action → no dots/counter
-    fireEvent.click(screen.getByText("Start a run"));
-    expect(onAction).toHaveBeenCalledWith("open-agent-work");
+  it("bridge line: shown only when showBridge is set (fresh auto-open entry card), never otherwise", () => {
+    const { rerender } = render(
+      <OnboardingChapterCard step={connectStep} stepIndex={0} total={2} onDismiss={vi.fn()} showBridge />,
+    );
+    expect(screen.getByText(TEAMMATE_BRIDGE_COPY)).toBeTruthy();
+    // Catch-up / manual / any later card → no bridge.
+    rerender(<OnboardingChapterCard step={connectStep} stepIndex={0} total={2} onDismiss={vi.fn()} />);
+    expect(screen.queryByText(TEAMMATE_BRIDGE_COPY)).toBeNull();
   });
 
-  it("done card: no CTA button; 'Close' dismisses and never fires an action; shows completion status", () => {
+  it("done/Ready card: no CTA button; 'Close' dismisses and never fires an action; shows completion status", () => {
     const onAction = vi.fn();
     const onDismiss = vi.fn();
-    render(<OnboardingChapterCard step={doneCard} stepIndex={-1} total={3} onAction={onAction} onDismiss={onDismiss} />);
+    render(<OnboardingChapterCard step={doneCard} stepIndex={-1} total={2} onAction={onAction} onDismiss={onDismiss} />);
+    expect(screen.getByText("Your AI teammate is ready")).toBeTruthy();
     expect(screen.getByText("Chapter complete")).toBeTruthy();
     expect(screen.queryByText(/Step .* of/)).toBeNull();
     fireEvent.click(screen.getByText("Close"));
@@ -768,7 +756,7 @@ describe("OnboardingChapterCard (#56)", () => {
 
   it("Escape dismisses the chapter", () => {
     const onDismiss = vi.fn();
-    render(<OnboardingChapterCard step={connectStep} stepIndex={0} total={3} onDismiss={onDismiss} />);
+    render(<OnboardingChapterCard step={connectStep} stepIndex={0} total={2} onDismiss={onDismiss} />);
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onDismiss).toHaveBeenCalled();
   });
@@ -778,7 +766,7 @@ describe("OnboardingChapterCard (#56)", () => {
     const backdrop = document.createElement("div");
     backdrop.className = "modal-backdrop";
     document.body.appendChild(backdrop);
-    render(<OnboardingChapterCard step={connectStep} stepIndex={0} total={3} onDismiss={onDismiss} />);
+    render(<OnboardingChapterCard step={connectStep} stepIndex={0} total={2} onDismiss={onDismiss} />);
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onDismiss).not.toHaveBeenCalled(); // one Escape must not close both modal and chapter
     document.body.removeChild(backdrop);

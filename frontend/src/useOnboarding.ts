@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { OnboardingScope, OnboardingStep } from "./Onboarding";
 
 type UseOnboardingOptions = {
@@ -10,6 +10,10 @@ type UseOnboardingOptions = {
   record: (event: string, scope: OnboardingScope) => void;
   scopeKey: string; // account×workspace identity — resets the session on a switch
   checklistDismissedKey: string;
+  // #90: per account×workspace browser-local flag suppressing future auto-opens of the
+  // teammate chapter (distinct from checklistDismissed; set by "Not now"/Close on an
+  // AUTO-opened chapter — never a manual open).
+  teammatePromoDismissedKey?: string;
   activeSpotlightId?: string | null;
   tip?: OnboardingStep | null;
   // The current "Add an AI teammate" chapter card for this role + live state (the engine's
@@ -18,6 +22,12 @@ type UseOnboardingOptions = {
   chapter?: OnboardingStep | null;
   chapterStepIndex?: number; // 0-based index of the active step among the chapter's steps
   chapterTotal?: number; // number of steps in the chapter for this role
+  // #90 auto-open (promotion) inputs. `promotable` = owner/admin + activation-incomplete
+  // (host-computed). `documentCount` + `documentOpen` drive the fresh (0→1 + navigated in)
+  // vs catch-up (doc already present) discrimination — fresh shows the bridge line.
+  promotable?: boolean;
+  documentCount?: number;
+  documentOpen?: boolean;
   enabled?: boolean;
 };
 
@@ -27,11 +37,23 @@ type SessionState = {
   // track the engine frontier. Never persisted; durable completion is never moved by it.
   revisit: number | null;
   skipped: boolean;
-  // Whether the opt-in "Add an AI teammate" chapter is currently open. Session-only: the
-  // user opens it deliberately (checklist entry) and "Not now"/Close closes it; reopening
+  // Whether the "Add an AI teammate" chapter is currently open. Session-only: opened via a
+  // checklist click OR the #90 auto-open promotion; "Not now"/Close closes it; reopening
   // resumes from live state (the engine picks the true next card). Never persisted, never
-  // moves completion — completion is live-derived (agent-at-work).
+  // moves completion — completion is live-derived (env + agent).
   chapterOpen: boolean;
+  // Was the CURRENT open an auto-open (vs a manual checklist open)? Closing an auto-opened
+  // chapter records the promo-dismiss flag; a manual open never does.
+  chapterAuto: boolean;
+  // Is the current auto-open a FRESH one (first-document 0→1)? Fresh opens show the bridge
+  // line on their entry card; catch-up and manual opens show normal copy.
+  chapterFresh: boolean;
+  // The card id a fresh auto-open landed on — the bridge line shows ONLY on that entry card
+  // (once the user advances past it, the bridge is gone).
+  chapterFreshEntryId: string | null;
+  // Fire-once guard: the auto-open promotion fires at most once per session (even after it
+  // is closed/dismissed). Reset on a scope switch (new workspace gets its own one-time try).
+  autoOpenFired: boolean;
 };
 
 function storedTrue(key: string): boolean {
@@ -49,7 +71,16 @@ function persistTrue(key: string) {
 }
 
 function newSession(key: string): SessionState {
-  return { key, revisit: null, skipped: false, chapterOpen: false };
+  return {
+    key,
+    revisit: null,
+    skipped: false,
+    chapterOpen: false,
+    chapterAuto: false,
+    chapterFresh: false,
+    chapterFreshEntryId: null,
+    autoOpenFired: false,
+  };
 }
 
 export function useOnboarding({
@@ -59,11 +90,15 @@ export function useOnboarding({
   record,
   scopeKey,
   checklistDismissedKey,
+  teammatePromoDismissedKey = "",
   activeSpotlightId,
   tip = null,
   chapter = null,
   chapterStepIndex = 0,
   chapterTotal = 0,
+  promotable = false,
+  documentCount = 0,
+  documentOpen = false,
   enabled = true,
 }: UseOnboardingOptions) {
   const [sessionState, setSessionState] = useState<SessionState>(() => newSession(scopeKey));
@@ -74,6 +109,12 @@ export function useOnboarding({
     key: checklistDismissedKey,
     value: storedTrue(checklistDismissedKey),
   }));
+  // The #90 promo-dismiss flag — same durable, browser-local, account×workspace keying as
+  // checklistDismissed, but a distinct key and meaning (suppress auto-open only).
+  const [promoState, setPromoState] = useState<{ key: string; value: boolean }>(() => ({
+    key: teammatePromoDismissedKey,
+    value: storedTrue(teammatePromoDismissedKey),
+  }));
 
   // WorkspaceApp keeps this hook mounted across account/workspace switches. Key the
   // session and the dismissed flag so the first render in the new scope is already honest.
@@ -82,6 +123,9 @@ export function useOnboarding({
   const checklistDismissed = checklistState.key === checklistDismissedKey
     ? checklistState.value
     : storedTrue(checklistDismissedKey);
+  const promoDismissed = promoState.key === teammatePromoDismissedKey
+    ? promoState.value
+    : storedTrue(teammatePromoDismissedKey);
 
   useEffect(() => {
     setSessionState(newSession(scopeKey));
@@ -89,6 +133,9 @@ export function useOnboarding({
   useEffect(() => {
     setChecklistState({ key: checklistDismissedKey, value: storedTrue(checklistDismissedKey) });
   }, [checklistDismissedKey]);
+  useEffect(() => {
+    setPromoState({ key: teammatePromoDismissedKey, value: storedTrue(teammatePromoDismissedKey) });
+  }, [teammatePromoDismissedKey]);
 
   const updateSession = useCallback((update: (current: SessionState) => SessionState) => {
     setSessionState((current) => update(current.key === scopeKey ? current : newSession(scopeKey)));
@@ -163,28 +210,109 @@ export function useOnboarding({
     setChecklistState({ key: checklistDismissedKey, value: true });
   }, [checklistDismissedKey]);
 
-  // Opening/closing the opt-in chapter is session-only. "Not now"/Close closes it without
-  // recording any completion (Anton: dismiss only, never advance/complete) — completion is
-  // live-derived, so reopening resumes from the true next card.
+  // Opening the chapter from the checklist is a MANUAL open: normal copy (no bridge), and
+  // it never records the promo-dismiss on close. It also trips the fire-once guard so an
+  // auto-open can't then surprise the user in the same session.
   const openChapter = useCallback(() => {
-    updateSession((current) => ({ ...current, chapterOpen: true }));
+    updateSession((current) => ({
+      ...current,
+      chapterOpen: true,
+      chapterAuto: false,
+      chapterFresh: false,
+      chapterFreshEntryId: null,
+      autoOpenFired: true,
+    }));
   }, [updateSession]);
+  // "Not now"/Close closes without recording any completion (Anton: dismiss only) —
+  // completion is live-derived, so reopening resumes from the true next card. If the chapter
+  // was AUTO-opened, closing also records the promo-dismiss flag (permanently suppress future
+  // auto-opens in this workspace/profile); a manual open never does.
   const closeChapter = useCallback(() => {
-    updateSession((current) => ({ ...current, chapterOpen: false }));
-  }, [updateSession]);
+    if (session.chapterAuto && teammatePromoDismissedKey) {
+      persistTrue(teammatePromoDismissedKey);
+      setPromoState({ key: teammatePromoDismissedKey, value: true });
+    }
+    updateSession((current) => ({
+      ...current,
+      chapterOpen: false,
+      chapterAuto: false,
+      chapterFresh: false,
+      chapterFreshEntryId: null,
+    }));
+  }, [session.chapterAuto, teammatePromoDismissedKey, updateSession]);
 
-  // If the chapter is open but live state leaves no card (e.g. a member's only agent was
-  // removed before any run), close it — never linger half-open with the tip/checklist
-  // suspended behind nothing (Deniz's live-transition edge). Session-only, records no flag.
+  // #90 auto-open (promotion). Owner/admin only (promotable is false for members and once
+  // activation is complete). Fires ONCE per session when a document exists and either a
+  // fresh 0→1 transition + navigated-into-doc (FRESH → bridge) or the doc was already
+  // present at first eligible load (CATCH-UP → normal copy). The engine picks WHICH card
+  // (activeChapter) — this only flips the session open. `promoRef` tracks the previous
+  // document count so we can tell fresh from catch-up; it resets on a scope switch.
+  const promoRef = useRef<{ key: string; prevDocCount: number | null; sawFresh: boolean }>({
+    key: scopeKey,
+    prevDocCount: null,
+    sawFresh: false,
+  });
+  useEffect(() => {
+    if (promoRef.current.key !== scopeKey) {
+      promoRef.current = { key: scopeKey, prevDocCount: null, sawFresh: false };
+    }
+    const ref = promoRef.current;
+    const prev = ref.prevDocCount;
+    ref.prevDocCount = documentCount;
+    if (prev === 0 && documentCount > 0) ref.sawFresh = true;
+
+    if (!enabled || !promotable || promoDismissed) return;
+    if (session.chapterOpen || session.autoOpenFired) return;
+    if (documentCount < 1) return;
+    const fresh = ref.sawFresh;
+    // A fresh open waits until the user has actually navigated into the new document;
+    // catch-up (doc already there) opens on the first eligible load regardless of route.
+    if (fresh && !documentOpen) return;
+    const entryId = chapter?.id ?? null;
+    updateSession((current) => ({
+      ...current,
+      chapterOpen: true,
+      chapterAuto: true,
+      chapterFresh: fresh,
+      chapterFreshEntryId: fresh ? entryId : null,
+      autoOpenFired: true,
+    }));
+  }, [
+    enabled,
+    promotable,
+    promoDismissed,
+    session.chapterOpen,
+    session.autoOpenFired,
+    documentCount,
+    documentOpen,
+    chapter,
+    scopeKey,
+    updateSession,
+  ]);
+
+  // If the chapter is open but live state leaves no card, close it — never linger half-open
+  // with the tip/checklist suspended behind nothing (Deniz's live-transition edge).
+  // Session-only, records no flag. (Owner/admin always have a card, so this is a safety net.)
   useEffect(() => {
     if (enabled && session.chapterOpen && !chapter) {
-      updateSession((current) => ({ ...current, chapterOpen: false }));
+      updateSession((current) => ({
+        ...current,
+        chapterOpen: false,
+        chapterAuto: false,
+        chapterFresh: false,
+        chapterFreshEntryId: null,
+      }));
     }
   }, [enabled, session.chapterOpen, chapter, updateSession]);
 
   // The chapter card to render right now: only when enabled, opened this session, and the
-  // engine has a card for this role+state (null e.g. for a member with no agents).
+  // engine has a card for this role+state.
   const chapterActive = enabled && session.chapterOpen ? chapter ?? null : null;
+  // The bridge line shows ONLY on a fresh auto-open, and ONLY while the user is still on the
+  // entry card it landed on (catch-up + manual + any later card → normal copy).
+  const chapterBridge = Boolean(
+    chapterActive && session.chapterFresh && chapterActive.id === session.chapterFreshEntryId,
+  );
 
   return {
     active,
@@ -202,11 +330,14 @@ export function useOnboarding({
     checklistDismissed,
     dismissChecklist,
     // Chapter ("Add an AI teammate"): the card to render when open, its step position for
-    // the dots, whether it's open, and the open/close handlers (checklist entry → open).
+    // the dots, whether it's open, whether to show the promotion bridge line, and the
+    // open/close handlers (checklist entry → open; auto-open sets it internally).
     chapterActive,
     chapterStepIndex,
     chapterTotal,
     chapterOpen: session.chapterOpen,
+    chapterBridge,
+    promoDismissed,
     openChapter,
     closeChapter,
   };

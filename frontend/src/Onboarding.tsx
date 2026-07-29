@@ -403,20 +403,26 @@ export function Onboarding({
   );
 }
 
+// The auto-promotion bridge line (Eva, #90) — shown ONLY on a fresh auto-open's entry
+// card, framing the teammate setup as the natural next move after the first document.
+export const TEAMMATE_BRIDGE_COPY =
+  "Your first document's ready. Now bring in an AI teammate to work on it with you.";
+
 type ChapterCardProps = {
   step: OnboardingStep;
   stepIndex: number; // among the chapter's steps; -1 for the terminal done card
-  total: number; // number of chapter steps for this role (owner/admin 3, member 1)
+  total: number; // number of chapter steps for this role (owner/admin 2; members have none)
   onAction?: (event: OnboardingActionEvent) => void;
   onDismiss: () => void; // "Not now" / "Close" — dismiss only, never completes
+  // #90: show the promotion bridge line above the card (fresh auto-open entry card only).
+  showBridge?: boolean;
 };
 
-// The opt-in "Add an AI teammate" chapter card — a quiet page card, NEVER a spotlight.
-// One real CTA (connect / create / start-a-run), a "Not now" that only dismisses, and
-// (for the owner/admin path) step dots. Kept separate from <Onboarding> so it doesn't
-// inherit the spotlight geometry + Enter-advances keyboard model — the chapter advances
-// from live state, not from Next.
-export function OnboardingChapterCard({ step, stepIndex, total, onAction, onDismiss }: ChapterCardProps) {
+// The "Add an AI teammate" chapter card — a quiet page card, NEVER a spotlight. One real
+// CTA (connect / create), a "Not now" that only dismisses, and (on the multi-step path)
+// step dots. Kept separate from <Onboarding> so it doesn't inherit the spotlight geometry +
+// Enter-advances keyboard model — the chapter advances from live state, not from Next.
+export function OnboardingChapterCard({ step, stepIndex, total, onAction, onDismiss, showBridge }: ChapterCardProps) {
   const cardRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
@@ -449,6 +455,7 @@ export function OnboardingChapterCard({ step, stepIndex, total, onAction, onDism
       aria-labelledby={`ob-title-${step.id}`}
       aria-describedby={`ob-body-${step.id}`}
     >
+      {showBridge ? <p className="ob-chapter-bridge">{TEAMMATE_BRIDGE_COPY}</p> : null}
       {step.eyebrow ? <span className="ob-eyebrow">{step.eyebrow}</span> : null}
       <h4 id={`ob-title-${step.id}`}>{step.title}</h4>
       <p id={`ob-body-${step.id}`}>{step.body}</p>

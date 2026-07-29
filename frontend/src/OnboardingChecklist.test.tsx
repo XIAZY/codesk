@@ -20,7 +20,7 @@ const ownerProgress = [
 describe("OnboardingChecklist", () => {
   it("counts the chapter entry in the denominator and renders in order", () => {
     render(
-      <OnboardingChecklist progress={ownerProgress} dismissed={false} onDismiss={vi.fn()} chapterStepIndex={0} chapterTotal={3} />,
+      <OnboardingChecklist progress={ownerProgress} dismissed={false} onDismiss={vi.fn()} chapterStepIndex={0} chapterTotal={2} />,
     );
     expect(screen.getByRole("complementary", { name: "Finish setting up this workspace" })).toBeTruthy();
     // The entry participates honestly: 1 of 4, not a side action (Anton).
@@ -41,12 +41,13 @@ describe("OnboardingChecklist", () => {
         onDismiss={vi.fn()}
         onOpenChapter={onOpenChapter}
         chapterStepIndex={0}
-        chapterTotal={3}
+        chapterTotal={2}
       />,
     );
     expect(screen.getByText("Add an AI teammate")).toBeTruthy();
-    expect(screen.getByText("Connect an environment, create an agent, put it to work")).toBeTruthy();
-    expect(screen.getByText("1 of 3")).toBeTruthy(); // derived owner/admin progress badge
+    // #90: subtitle drops any "put it to work" wording (2 steps: connect + create).
+    expect(screen.getByText("Connect an environment and create an agent")).toBeTruthy();
+    expect(screen.getByText("1 of 2")).toBeTruthy(); // derived owner/admin progress badge
     fireEvent.click(screen.getByText("Add an AI teammate"));
     expect(onOpenChapter).toHaveBeenCalledOnce();
   });
@@ -61,27 +62,15 @@ describe("OnboardingChecklist", () => {
         onDismiss={vi.fn()}
         onOpenChapter={onOpenChapter}
         chapterStepIndex={-1}
-        chapterTotal={3}
+        chapterTotal={2}
       />,
     );
-    expect(screen.getByText("You've started working with an agent")).toBeTruthy();
+    // #90: the done label is the Ready framing, never a work/"started" line.
+    expect(screen.getByText("Your AI teammate is ready")).toBeTruthy();
     expect(screen.getByText("Done")).toBeTruthy();
-    expect(screen.queryByText("1 of 3")).toBeNull(); // no progress badge once done
-    fireEvent.click(screen.getByText("You've started working with an agent"));
+    expect(screen.queryByText("1 of 2")).toBeNull(); // no progress badge once done
+    fireEvent.click(screen.getByText("Your AI teammate is ready"));
     expect(onOpenChapter).toHaveBeenCalledOnce();
-  });
-
-  it("member entry is a single action — no progress badge", () => {
-    const memberProgress = [
-      { item: byId("create-document"), done: true },
-      { item: byId("start-discussion"), done: false },
-      { item: byId("work-with-agent-entry"), done: false },
-    ];
-    render(
-      <OnboardingChecklist progress={memberProgress} dismissed={false} onDismiss={vi.fn()} chapterStepIndex={0} chapterTotal={1} />,
-    );
-    expect(screen.getByText("Work with an agent")).toBeTruthy();
-    expect(screen.queryByText("1 of 1")).toBeNull(); // single action → no dots/counter badge
   });
 
   it("uses an accessible icon-only dismiss action and honors durable dismissal", () => {
@@ -96,12 +85,12 @@ describe("OnboardingChecklist", () => {
   it("stays visible in a quiet all-done state", () => {
     const completed = ownerProgress.map((row) => ({ ...row, done: true }));
     render(
-      <OnboardingChecklist progress={completed} dismissed={false} onDismiss={vi.fn()} chapterStepIndex={-1} chapterTotal={3} />,
+      <OnboardingChecklist progress={completed} dismissed={false} onDismiss={vi.fn()} chapterStepIndex={-1} chapterTotal={2} />,
     );
     expect(screen.getByText("All done")).toBeTruthy();
     expect(screen.getByRole("progressbar", { name: "All 4 onboarding tasks done" }).getAttribute("value")).toBe("4");
-    // The completed entry shows its historical label, never the present-tense one.
-    expect(screen.getByText("You've started working with an agent")).toBeTruthy();
+    // The completed entry shows its historical (Ready) label, never a present-tense action.
+    expect(screen.getByText("Your AI teammate is ready")).toBeTruthy();
   });
 
   it("does not render an empty role-filtered checklist", () => {
