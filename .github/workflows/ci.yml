@@ -579,10 +579,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive # third_party/y-crdt is a submodule; build-yffi needs its source
-      - name: Remove stale regression compose projects
-        run: scripts/cleanup-stale-regression-stacks.sh
       - name: Regression stack janitor contract
         run: scripts/test-cleanup-stale-regression-stacks.sh
+      - name: Remove stale regression compose projects
+        run: scripts/cleanup-stale-regression-stacks.sh
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod

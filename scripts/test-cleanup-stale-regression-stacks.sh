@@ -15,6 +15,7 @@ export FAKE_STOPPED_CREATED="$(date -u -d "@$((now_epoch - 14400))" +%Y-%m-%dT%H
 export FAKE_RECENT_CREATED="$(date -u -d "@$((now_epoch - 300))" +%Y-%m-%dT%H:%M:%SZ)"
 export FAKE_FAILURE_CREATED="$(date -u -d "@$((now_epoch - 18000))" +%Y-%m-%dT%H:%M:%SZ)"
 export FAKE_FOREIGN_CREATED="$FAKE_OLD_CREATED"
+export FAKE_INVALID_SIBLING_CREATED="$FAKE_OLD_CREATED"
 export FAKE_DOCKER_LOG="$TMP_DIR/docker.log"
 export FAKE_DOCKER_STATE="$TMP_DIR/state"
 
@@ -23,6 +24,7 @@ touch \
   "$FAKE_DOCKER_STATE/volume-notty_regression_stopped" \
   "$FAKE_DOCKER_STATE/volume-notty_regression_recent" \
   "$FAKE_DOCKER_STATE/volume-notty_regression_cleanup_failure" \
+  "$FAKE_DOCKER_STATE/volume-notty_regression_incomplete" \
   "$FAKE_DOCKER_STATE/volume-unrelated_project"
 
 cat > "$TMP_DIR/bin/docker" <<'FAKEDOCKER'
@@ -30,18 +32,40 @@ cat > "$TMP_DIR/bin/docker" <<'FAKEDOCKER'
 set -euo pipefail
 
 if [[ "$#" -eq 4 && "$1" == ps && "$2" == -aq && "$3" == --filter && "$4" == label=com.docker.compose.project ]]; then
-  printf '%s\n' old-a old-b stopped-a recent-a failure-a foreign-a
+  echo "benign fake docker ps warning" >&2
+  printf '%s\n' old-a old-b stopped-a recent-a failure-a foreign-a invalid-a invalid-b
   exit 0
 fi
 
-if [[ "$#" -ge 4 && "$1" == inspect && "$2" == --format ]]; then
-  printf '%s %s\n' \
-    "$FAKE_OLD_CREATED" notty_regression_oldest_mix \
-    "$FAKE_OLD_NEWEST_CREATED" notty_regression_oldest_mix \
-    "$FAKE_STOPPED_CREATED" notty_regression_stopped \
-    "$FAKE_RECENT_CREATED" notty_regression_recent \
-    "$FAKE_FAILURE_CREATED" notty_regression_cleanup_failure \
-    "$FAKE_FOREIGN_CREATED" unrelated_project
+if [[ "$#" -ge 4 && "$1" == inspect && "$2" == --format && "$3" == '{{.Created}} {{index .Config.Labels "com.docker.compose.project"}}' ]]; then
+  shift 3
+  expected_ids=(old-a old-b stopped-a recent-a failure-a foreign-a invalid-a invalid-b)
+  if [[ "$#" -ne "${#expected_ids[@]}" ]]; then
+    echo "inspect did not receive the complete container ID set" >&2
+    exit 65
+  fi
+  declare -A seen=()
+  for container_id in "$@"; do
+    if [[ -n "${seen[$container_id]+set}" ]]; then
+      echo "inspect received duplicate container ID: $container_id" >&2
+      exit 65
+    fi
+    seen["$container_id"]=1
+    case "$container_id" in
+      old-a) printf '%s %s\n' "$FAKE_OLD_CREATED" notty_regression_oldest_mix ;;
+      old-b) printf '%s %s\n' "$FAKE_OLD_NEWEST_CREATED" notty_regression_oldest_mix ;;
+      stopped-a) printf '%s %s\n' "$FAKE_STOPPED_CREATED" notty_regression_stopped ;;
+      recent-a) printf '%s %s\n' "$FAKE_RECENT_CREATED" notty_regression_recent ;;
+      failure-a) printf '%s %s\n' "$FAKE_FAILURE_CREATED" notty_regression_cleanup_failure ;;
+      foreign-a) printf '%s %s\n' "$FAKE_FOREIGN_CREATED" unrelated_project ;;
+      invalid-a) printf '%s %s\n' invalid-timestamp notty_regression_incomplete ;;
+      invalid-b) printf '%s %s\n' "$FAKE_INVALID_SIBLING_CREATED" notty_regression_incomplete ;;
+      *)
+        echo "inspect received unknown container ID: $container_id" >&2
+        exit 65
+        ;;
+    esac
+  done
   exit 0
 fi
 
@@ -70,6 +94,7 @@ test ! -e "$FAKE_DOCKER_STATE/volume-notty_regression_oldest_mix"
 test ! -e "$FAKE_DOCKER_STATE/volume-notty_regression_stopped"
 test -e "$FAKE_DOCKER_STATE/volume-notty_regression_recent"
 test -e "$FAKE_DOCKER_STATE/volume-notty_regression_cleanup_failure"
+test -e "$FAKE_DOCKER_STATE/volume-notty_regression_incomplete"
 test -e "$FAKE_DOCKER_STATE/volume-unrelated_project"
 
 grep -F "notty_regression_oldest_mix|$COMPOSE_FILE|down|-v|--remove-orphans" "$FAKE_DOCKER_LOG" >/dev/null
@@ -83,7 +108,13 @@ if grep -Fq 'unrelated_project|' "$FAKE_DOCKER_LOG"; then
   echo "foreign compose project was removed" >&2
   exit 1
 fi
+if grep -Fq 'notty_regression_incomplete|' "$FAKE_DOCKER_LOG"; then
+  echo "regression project with incomplete age data was removed" >&2
+  exit 1
+fi
 
+grep -F 'benign fake docker ps warning' <<< "$output" >/dev/null
+grep -F 'could not parse creation time for notty_regression_incomplete: invalid-timestamp' <<< "$output" >/dev/null
 grep -F 'Removed stale regression project notty_regression_oldest_mix (age=' <<< "$output" >/dev/null
 grep -F 'Removed stale regression project notty_regression_stopped (age=' <<< "$output" >/dev/null
 grep -F 'Failed to remove stale regression project notty_regression_cleanup_failure (age=' <<< "$output" >/dev/null

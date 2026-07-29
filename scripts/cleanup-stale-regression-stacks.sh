@@ -10,16 +10,16 @@ if ! now_epoch="$(date +%s)"; then
   echo "::warning::Regression stack janitor could not read the current time; continuing without cleanup"
   exit 0
 fi
-if ! container_ids="$(docker ps -aq --filter 'label=com.docker.compose.project' 2>&1)"; then
-  echo "::warning::Regression stack janitor could not list compose containers: $container_ids"
+if ! container_ids="$(docker ps -aq --filter 'label=com.docker.compose.project')"; then
+  echo "::warning::Regression stack janitor could not list compose containers; continuing without cleanup"
   exit 0
 fi
 if [[ -z "$container_ids" ]]; then
   exit 0
 fi
 mapfile -t container_id_list <<< "$container_ids"
-if ! container_rows="$(docker inspect --format '{{.Created}} {{index .Config.Labels "com.docker.compose.project"}}' "${container_id_list[@]}" 2>&1)"; then
-  echo "::warning::Regression stack janitor could not inspect compose containers: $container_rows"
+if ! container_rows="$(docker inspect --format '{{.Created}} {{index .Config.Labels "com.docker.compose.project"}}' "${container_id_list[@]}")"; then
+  echo "::warning::Regression stack janitor could not inspect compose containers; continuing without cleanup"
   exit 0
 fi
 
