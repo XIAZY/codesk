@@ -43,7 +43,7 @@ type SessionState = {
   // moves completion — completion is live-derived (env + agent).
   chapterOpen: boolean;
   // Was the CURRENT open an auto-open (vs a manual checklist open)? Closing an auto-opened
-  // chapter records the promo-dismiss flag; a manual open never does.
+  // chapter records the promo-dismiss flag; a manual open records it immediately on open.
   chapterAuto: boolean;
   // Is the current auto-open a FRESH one (first-document 0→1)? Fresh opens show the bridge
   // line on their entry card; catch-up and manual opens show normal copy.
@@ -232,7 +232,7 @@ export function useOnboarding({
   // "Not now"/Close closes without recording any completion (Anton: dismiss only) —
   // completion is live-derived, so reopening resumes from the true next card. If the chapter
   // was AUTO-opened, closing also records the promo-dismiss flag (permanently suppress future
-  // auto-opens in this workspace/profile); a manual open never does.
+  // auto-opens in this workspace/profile); a manual open already recorded it on open.
   const closeChapter = useCallback(() => {
     if (session.chapterAuto && teammatePromoDismissedKey) {
       persistTrue(teammatePromoDismissedKey);

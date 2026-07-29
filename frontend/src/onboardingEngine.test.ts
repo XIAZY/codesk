@@ -44,10 +44,10 @@ const node = (id: string) => NODES.find((n) => n.id === id)!;
 const seen = (id: string) => acknowledgeFlag(node(id));
 
 describe("onboarding event keys (§4.2 contract)", () => {
-  it("has the 11 stable keys and never a step_N key", () => {
-    expect(ONBOARDING_EVENT_KEYS).toHaveLength(11);
+  it("has the 3 stable keys and never a step_N key", () => {
+    expect(ONBOARDING_EVENT_KEYS).toHaveLength(3);
     expect(ONBOARDING_EVENT_KEYS).toContain("first_document_created");
-    expect(ONBOARDING_EVENT_KEYS).toContain("local_environment_connected");
+    expect(ONBOARDING_EVENT_KEYS).toContain("member_invited");
     for (const key of ONBOARDING_EVENT_KEYS) {
       expect(key).not.toMatch(/step[_ ]?\d/i);
     }

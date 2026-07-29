@@ -11,16 +11,8 @@
 // ---- Event keys (stable contract, plan §4.2) ---------------------------------
 
 export const ONBOARDING_EVENT_KEYS = [
-  "account_intro_seen",
-  "workspace_created",
   "first_document_created",
-  "first_document_edited",
   "first_thread_created",
-  "first_thread_replied",
-  "local_environment_connected",
-  "first_agent_created",
-  "first_agent_run_started",
-  "first_document_watcher_added",
   "member_invited",
 ] as const;
 
@@ -86,8 +78,10 @@ export type OnboardingAction = { label: string; event: OnboardingActionEvent };
 
 // `spotlight` nodes form the guided sequence (step counter); `tip` nodes are
 // standalone contextual callouts (no counter, one-time); `chapter` nodes form the
-// optional, non-blocking "Add an AI teammate" flow (its own step sequence + a
-// terminal done card), never auto-triggered — opened deliberately by the user.
+// promoted "Add an AI teammate" flow (its own step sequence + a terminal done card).
+// Its cards use a `manual` trigger (never surfaced by the guide/tip spotlights); the
+// flow is opened by the #90 promotion (auto-opens after the first document for
+// owner/admins) or deliberately from the checklist.
 export type OnboardingPresentation = "spotlight" | "tip" | "chapter";
 
 export type OnboardingNode = {
@@ -148,7 +142,7 @@ export type OnboardingChecklistItem = {
 // Signals derived by the host (WorkspaceApp / useOnboarding) from live data. NOTE:
 // `liveEnvironmentCount` MUST be derived via daemonLiveStatus (receipt-elapsed
 // liveness), never a raw `status:'online'` field — a stale daemon that still reads
-// online must not satisfy `local_environment_connected`.
+// online must not satisfy the `live-environment` signal.
 export type OnboardingLiveSignals = {
   documentCount: number;
   threadCount: number; // any thread created (a reply implies a thread)
