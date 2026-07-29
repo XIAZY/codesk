@@ -133,7 +133,7 @@ expect_fail 'Make host daemon build rejects missing DAEMON_VERSION' \
 backend_fake_bin="$tmp_dir/backend-bin"
 backend_docker_log="$tmp_dir/backend-docker.log"
 backend_ssh_log="$tmp_dir/backend-ssh.log"
-frontend_aws_log="$tmp_dir/frontend-aws.log"
+frontend_rclone_log="$tmp_dir/frontend-rclone.log"
 mkdir -p "$backend_fake_bin"
 cat >"$backend_fake_bin/git" <<'GIT'
 #!/usr/bin/env sh
@@ -151,24 +151,33 @@ cat >"$backend_fake_bin/ssh" <<'SSH'
 #!/usr/bin/env sh
 set -eu
 printf '%s\n' "$*" >>"$BACKEND_SSH_LOG"
+case "$*" in
+	*'/healthz'*)
+		printf '{"status":"ok","commit":"%s"}\n' "${FAKE_HEALTH_COMMIT-}"
+		;;
+esac
 SSH
 cat >"$backend_fake_bin/scp" <<'SCP'
 #!/usr/bin/env sh
 set -eu
 SCP
-cat >"$backend_fake_bin/aws" <<'AWS'
+cat >"$backend_fake_bin/sleep" <<'SLEEP'
 #!/usr/bin/env sh
 set -eu
-printf '%s\n' "$*" >>"$FRONTEND_AWS_LOG"
-AWS
+SLEEP
+cat >"$backend_fake_bin/rclone" <<'RCLONE'
+#!/usr/bin/env sh
+set -eu
+printf '%s\n' "$*" >>"$FRONTEND_RCLONE_LOG"
+RCLONE
 cat >"$backend_fake_bin/npm" <<'NPM'
 #!/usr/bin/env sh
 set -eu
 [ "$#" -eq 2 ] && [ "$1" = run ] && [ "$2" = build ] || exit 64
 NPM
 chmod +x "$backend_fake_bin/git" "$backend_fake_bin/docker" \
-	"$backend_fake_bin/ssh" "$backend_fake_bin/scp" "$backend_fake_bin/aws" \
-	"$backend_fake_bin/npm"
+	"$backend_fake_bin/ssh" "$backend_fake_bin/scp" "$backend_fake_bin/rclone" \
+	"$backend_fake_bin/npm" "$backend_fake_bin/sleep"
 
 [ "$(PATH="$backend_fake_bin:$PATH" FAKE_GIT_SHA=deadbee "$fixture/scripts/read-git-sha.sh")" = deadbee ] ||
 	fail 'Git SHA reader changed the resolved short commit'
@@ -186,7 +195,8 @@ done
 : >"$backend_docker_log"
 : >"$backend_ssh_log"
 PATH="$backend_fake_bin:$PATH" BACKEND_DOCKER_LOG="$backend_docker_log" \
-	BACKEND_SSH_LOG="$backend_ssh_log" DOCKER_REPO=example/notty DAEMON_VERSION=9.9.9 \
+	BACKEND_SSH_LOG="$backend_ssh_log" FAKE_HEALTH_COMMIT=deadbee \
+	DOCKER_REPO=example/notty DAEMON_VERSION=9.9.9 \
 	make -s -C "$fixture" backend-deploy >/dev/null
 grep -Fq -- '-t example/notty:backend-deadbee' "$backend_docker_log" ||
 	fail 'backend deploy did not build the commit-addressed image'
@@ -194,7 +204,25 @@ grep -Fq -- '-t example/notty:backend-latest' "$backend_docker_log" ||
 	fail 'backend deploy did not update the convenience latest image'
 grep -Fq 'example/notty:backend-deadbee' "$backend_ssh_log" ||
 	fail 'backend deploy did not restart Compose with the commit-addressed image'
-pass 'backend build and deploy use Git SHA without reading DAEMON_VERSION'
+grep -Fq '/healthz' "$backend_ssh_log" ||
+	fail 'backend deploy did not verify the served commit'
+pass 'backend build and deploy use and verify Git SHA without reading DAEMON_VERSION'
+
+expect_fail 'backend deploy rejects a wrong served commit' \
+	env "PATH=$backend_fake_bin:$PATH" "BACKEND_DOCKER_LOG=$backend_docker_log" \
+	"BACKEND_SSH_LOG=$backend_ssh_log" "FAKE_HEALTH_COMMIT=badcafe" \
+	"DOCKER_REPO=example/notty" "DAEMON_VERSION=9.9.9" \
+	make -s -C "$fixture" backend-deploy
+grep -Fq "/healthz reports commit 'badcafe', expected 'deadbee'" "$tmp_dir/output" ||
+	fail 'wrong served commit failure did not identify both commits'
+
+expect_fail 'backend deploy rejects a missing served commit' \
+	env "PATH=$backend_fake_bin:$PATH" "BACKEND_DOCKER_LOG=$backend_docker_log" \
+	"BACKEND_SSH_LOG=$backend_ssh_log" "FAKE_HEALTH_COMMIT=" \
+	"DOCKER_REPO=example/notty" "DAEMON_VERSION=9.9.9" \
+	make -s -C "$fixture" backend-deploy
+grep -Fq "/healthz reports commit '', expected 'deadbee'" "$tmp_dir/output" ||
+	fail 'missing served commit failure did not identify the expected commit'
 
 for frontend_script in build-frontend.sh deploy-frontend.sh build-homepage.sh deploy-homepage.sh; do
 	if grep -Fq 'scripts/read-daemon-version.sh' "$fixture/scripts/$frontend_script"; then
@@ -211,27 +239,29 @@ do
 	printf '%s\n' "$browser_asset" >"$fixture/frontend/dist/$browser_asset"
 	printf '%s\n' "$browser_asset" >"$fixture/homepage/$browser_asset"
 done
-: >"$frontend_aws_log"
-PATH="$backend_fake_bin:$PATH" FRONTEND_AWS_LOG="$frontend_aws_log" \
+: >"$frontend_rclone_log"
+PATH="$backend_fake_bin:$PATH" FRONTEND_RCLONE_LOG="$frontend_rclone_log" \
+	AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
 	R2_ENDPOINT_URL=https://example.invalid R2_HOMEPAGE_BUCKET=homepage \
 	R2_APP_BUCKET=app "$fixture/scripts/deploy-frontend.sh" >/dev/null
 [ -f "$fixture/dist/static/app/index.html" ] &&
 	[ -f "$fixture/dist/static/homepage/index.html" ] ||
 	fail 'frontend deploy did not stage app and homepage assets'
-[ -s "$frontend_aws_log" ] || fail 'frontend deploy did not invoke the R2 uploader'
+[ -s "$frontend_rclone_log" ] || fail 'frontend deploy did not invoke the R2 uploader'
 pass 'frontend build and deploy work without a DAEMON_VERSION file'
 
 # The homepage-only deploy must publish the homepage bucket without needing the app bundle or an
 # R2_APP_BUCKET, so a copy edit ships without a Vite rebuild.
 rm -rf "$fixture/dist/static"
-: >"$frontend_aws_log"
-PATH="$backend_fake_bin:$PATH" FRONTEND_AWS_LOG="$frontend_aws_log" \
+: >"$frontend_rclone_log"
+PATH="$backend_fake_bin:$PATH" FRONTEND_RCLONE_LOG="$frontend_rclone_log" \
+	AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test \
 	R2_ENDPOINT_URL=https://example.invalid R2_HOMEPAGE_BUCKET=homepage \
 	"$fixture/scripts/deploy-homepage.sh" >/dev/null
 [ -f "$fixture/dist/static/homepage/index.html" ] ||
 	fail 'homepage deploy did not stage homepage assets'
 [ -d "$fixture/dist/static/app" ] && fail 'homepage deploy staged app assets'
-[ -s "$frontend_aws_log" ] || fail 'homepage deploy did not invoke the R2 uploader'
+[ -s "$frontend_rclone_log" ] || fail 'homepage deploy did not invoke the R2 uploader'
 pass 'homepage deploy publishes the homepage alone without an app bundle'
 
 for invalid_file in "$tmp_dir/invalid"/*; do
