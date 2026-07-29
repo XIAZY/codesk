@@ -6,24 +6,27 @@ export async function dismissOnboarding(page: Page): Promise<void> {
   const guide = page.locator(".ob-layer");
   const skip = guide.locator(".ob-skip");
 
-  // Dismiss the promoted #90 chapter FIRST, then the guided tour. The chapter auto-opens for
-  // owner/admins after the first document and its "Not now" (.ob-notnow) overlays the editor;
-  // dismissing it HANDS BACK to the tour, which resumes its next spotlight — so the guide is
-  // dismissed AFTER the chapter, catching that resume (Tomas's teardown-order note). Each
-  // waitFor is a bounded no-op when its surface isn't present (member, complete setup, or no guide).
-  const chapterVisible = await notNow.waitFor({ state: "visible", timeout: 2_000 })
-    .then(() => true, () => false);
-  if (chapterVisible) {
-    await notNow.click();
-    await expect(chapter).toHaveCount(0);
-  }
-
-  // The guide measures its target after the workspace renders (or resumes after the chapter
-  // closes), so allow that bounded layout pass.
-  const guideVisible = await skip.waitFor({ state: "visible", timeout: 2_000 })
-    .then(() => true, () => false);
-  if (guideVisible) {
-    await skip.click();
-    await expect(guide).toHaveCount(0);
+  // Lifecycle-aware teardown: the promoted #90 chapter auto-opens after the first document and
+  // its "Not now" (.ob-notnow) overlays the editor; dismissing it HANDS BACK to the guided tour,
+  // whose next spotlight (.ob-layer) then resumes — and either can surface behind the other. So
+  // dismiss whichever onboarding surface is up and re-check, until NEITHER remains. Bounded so it
+  // can never spin; the first pass tolerates a surface still mounting, later passes settle fast.
+  for (let pass = 0; pass < 4; pass++) {
+    const timeout = pass === 0 ? 2_000 : 500;
+    const chapterVisible = await notNow.waitFor({ state: "visible", timeout })
+      .then(() => true, () => false);
+    if (chapterVisible) {
+      await notNow.click();
+      await expect(chapter).toHaveCount(0);
+      continue;
+    }
+    const guideVisible = await skip.waitFor({ state: "visible", timeout })
+      .then(() => true, () => false);
+    if (guideVisible) {
+      await skip.click();
+      await expect(guide).toHaveCount(0);
+      continue;
+    }
+    return; // neither onboarding surface visible — teardown complete
   }
 }
