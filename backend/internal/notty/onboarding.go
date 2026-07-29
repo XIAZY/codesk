@@ -7,28 +7,35 @@ import (
 	"time"
 )
 
-// Onboarding item keys — the eight *learning* milestones the backend stores, plus a dismissed
-// marker for early-skip. A row in onboarding_completions means the item is done; no row means
-// not done. The table is insert-only — never updated or deleted at runtime — so completion is
-// write-once and can never drift back to "incomplete" the way the old live-derived state could
-// (deleting your last document used to un-complete a step).
+// Onboarding item keys. The frontend's "Getting started" surface stores exactly three *learning*
+// milestones in onboarding_completions — the ones a user action produces and the one-time backfill
+// seeds. A row means the item is done; no row means not done. The table is insert-only — never
+// updated or deleted at runtime — so completion is write-once and can never drift back to
+// "incomplete" the way the old live-derived state could (deleting your last document used to
+// un-complete a step).
 //
-// The three "Add an AI teammate" chapter items — local environment connected, agent created,
-// agent run started — are deliberately NOT stored here. They are per-workspace *setup state*,
-// not learning: a write-once row would keep asserting "connected" after the daemon is removed,
-// which is a lie under any scoping. Setup state stays live-derived on the frontend (where it
-// already is) so it tracks reality; only genuine "the human learned X" milestones, which are
-// permanent, belong in this write-once table.
+// Everything else is deliberately NOT stored here:
+//   - Setup state (local environment connected, agent created, agent-at-work) is per-workspace and
+//     stays live-derived on the frontend — a write-once row would keep asserting "connected" after
+//     the daemon is removed, a lie under any scoping.
+//   - The checklist-dismiss preference is per-workspace client state (localStorage), not an
+//     account-durable milestone, so it has no key here.
+//   - The remaining milestone names below have no honest existence signal or no surfaced step; they
+//     are named only so the backfill/exclusion tests can assert they never land.
 const (
+	// Stored + client-insertable: exactly the learning milestones the frontend writes and the
+	// backfill seeds.
+	OnboardingFirstDocumentCreated = "first_document_created"
+	OnboardingFirstThreadCreated   = "first_thread_created"
+	OnboardingMemberInvited        = "member_invited"
+
+	// Recognized names that are deliberately NOT stored (no honest signal, setup-state, or no
+	// surfaced step). Not client-insertable, not backend-witnessed — named for exclusion tests only.
 	OnboardingAccountIntroSeen          = "account_intro_seen"
 	OnboardingWorkspaceCreated          = "workspace_created"
-	OnboardingFirstDocumentCreated      = "first_document_created"
 	OnboardingFirstDocumentEdited       = "first_document_edited"
-	OnboardingFirstThreadCreated        = "first_thread_created"
 	OnboardingFirstThreadReplied        = "first_thread_replied"
 	OnboardingFirstDocumentWatcherAdded = "first_document_watcher_added"
-	OnboardingMemberInvited             = "member_invited"
-	OnboardingDismissed                 = "onboarding_dismissed"
 )
 
 // Each stored item key is registered in exactly one of the two maps below — client-insertable
@@ -36,18 +43,13 @@ const (
 // from them, so a key can never be half-registered (valid but unclassified, or listed valid in
 // one place and forgotten in another).
 
-// onboardingClientItemKeys are the items a client may insert directly: the eight learning
-// milestones plus the dismiss marker. Every stored milestone is a client action today.
+// onboardingClientItemKeys are the items a client may insert directly — exactly the three learning
+// milestones the frontend writes (create-document, start-discussion, invite-team). This set IS the
+// API contract: POST accepts only these, so we never accept a write for a key nothing reads.
 var onboardingClientItemKeys = map[string]bool{
-	OnboardingAccountIntroSeen:          true,
-	OnboardingWorkspaceCreated:          true,
-	OnboardingFirstDocumentCreated:      true,
-	OnboardingFirstDocumentEdited:       true,
-	OnboardingFirstThreadCreated:        true,
-	OnboardingFirstThreadReplied:        true,
-	OnboardingFirstDocumentWatcherAdded: true,
-	OnboardingMemberInvited:             true,
-	OnboardingDismissed:                 true,
+	OnboardingFirstDocumentCreated: true,
+	OnboardingFirstThreadCreated:   true,
+	OnboardingMemberInvited:        true,
 }
 
 // onboardingBackendItemKeys are milestones only the server witnesses — inserted by the backend
@@ -65,8 +67,8 @@ func isOnboardingItemKey(key string) bool {
 	return onboardingClientItemKeys[key] || onboardingBackendItemKeys[key]
 }
 
-// isClientOnboardingItemKey reports whether the client may insert key directly — i.e. it is a
-// user action or the dismiss marker, not one of the two server-witnessed milestones.
+// isClientOnboardingItemKey reports whether the client may insert key directly — i.e. it is one of
+// the three learning milestones the frontend writes, not a server-witnessed key.
 func isClientOnboardingItemKey(key string) bool {
 	return onboardingClientItemKeys[key]
 }

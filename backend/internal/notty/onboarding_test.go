@@ -41,14 +41,12 @@ func hasKey(keys []string, want string) bool {
 // database — a pure guard so a typo'd key can never persist and a client can never claim a
 // server-witnessed milestone.
 func TestOnboardingItemKeyClassification(t *testing.T) {
-	// The eight learning milestones + dismiss are the only stored keys, and each is a client
-	// action today (the backend map is empty), so every valid key is also client-insertable.
+	// Exactly three learning milestones are stored, and each is client-insertable (the backend map
+	// is empty). This set IS the API contract the write-split rides on.
 	stored := []string{
-		OnboardingAccountIntroSeen, OnboardingWorkspaceCreated,
-		OnboardingFirstDocumentCreated, OnboardingFirstDocumentEdited,
-		OnboardingFirstThreadCreated, OnboardingFirstThreadReplied,
-		OnboardingFirstDocumentWatcherAdded, OnboardingMemberInvited,
-		OnboardingDismissed,
+		OnboardingFirstDocumentCreated,
+		OnboardingFirstThreadCreated,
+		OnboardingMemberInvited,
 	}
 	for _, key := range stored {
 		if !isOnboardingItemKey(key) {
@@ -60,6 +58,26 @@ func TestOnboardingItemKeyClassification(t *testing.T) {
 	}
 	if isOnboardingItemKey("not_a_real_key") {
 		t.Errorf("isOnboardingItemKey(unknown) = true, want false")
+	}
+
+	// Keys trimmed out of the contract: no surfaced #14 step / no honest signal, or a per-workspace
+	// client preference (dismiss). The API must reject them — not valid, not client-insertable — so
+	// we never accept a write for a key nothing reads. Re-adding one to a map fails here (the guard).
+	trimmed := []string{
+		OnboardingAccountIntroSeen,
+		OnboardingWorkspaceCreated,
+		OnboardingFirstDocumentEdited,
+		OnboardingFirstThreadReplied,
+		OnboardingFirstDocumentWatcherAdded,
+		"onboarding_dismissed",
+	}
+	for _, key := range trimmed {
+		if isOnboardingItemKey(key) {
+			t.Errorf("isOnboardingItemKey(%q) = true, want false — trimmed from the client contract", key)
+		}
+		if isClientOnboardingItemKey(key) {
+			t.Errorf("isClientOnboardingItemKey(%q) = true, want false — trimmed from the client contract", key)
+		}
 	}
 
 	// The three "Add an AI teammate" chapter items are per-workspace setup state, deliberately
