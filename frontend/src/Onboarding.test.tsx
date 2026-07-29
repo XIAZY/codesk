@@ -690,30 +690,18 @@ describe("useOnboarding", () => {
   });
 });
 
-describe("OnboardingChapterCard (#56)", () => {
+describe("OnboardingChapterCard (#56, reshaped #90)", () => {
+  const BRIDGE_TITLE = "Your first document's ready. Now bring in an AI teammate to work on it with you.";
   const connectStep: OnboardingStep = {
     id: "add-teammate-connect",
     version: 1,
     scope: "workspace",
     presentation: "chapter",
-    eyebrow: "ADD AN AI TEAMMATE · OPTIONAL",
-    title: "Connect a local environment",
-    body: "A local environment is the computer where your agents run.",
+    eyebrow: "ADD AN AI TEAMMATE",
+    title: "Bring in an AI teammate",
+    promoTitle: BRIDGE_TITLE,
+    body: "A local environment is the computer where your AI teammate works.",
     primaryAction: { label: "Connect environment", event: "open-create-environment" },
-    secondaryAction: { label: "Not now", event: "dismiss" },
-    skippable: true,
-    fallback: "page-card",
-  };
-  const memberCard: OnboardingStep = {
-    id: "add-teammate-member",
-    version: 1,
-    scope: "workspace",
-    presentation: "chapter",
-    eyebrow: "WORK WITH AN AGENT",
-    title: "Put an agent to work",
-    body: "This workspace has agents. Choose one and start a run.",
-    caption: "No setup needed",
-    primaryAction: { label: "Start a run", event: "open-agent-work" },
     secondaryAction: { label: "Not now", event: "dismiss" },
     skippable: true,
     fallback: "page-card",
@@ -723,10 +711,10 @@ describe("OnboardingChapterCard (#56)", () => {
     version: 1,
     scope: "workspace",
     presentation: "chapter",
-    eyebrow: "STARTED",
-    title: "You've started working with an agent",
-    body: "You can start more work anytime from Agents.",
-    caption: "Chapter complete",
+    eyebrow: "ALL SET",
+    title: "Your AI teammate is ready.",
+    body: "It's connected and set up in your workspace.",
+    caption: "Setup complete",
     primaryAction: { label: "Close", event: "dismiss" },
     skippable: true,
     fallback: "page-card",
@@ -735,9 +723,9 @@ describe("OnboardingChapterCard (#56)", () => {
   it("owner step: eyebrow + real CTA + step dots + Not now; primary fires the action, Not now only dismisses", () => {
     const onAction = vi.fn();
     const onDismiss = vi.fn();
-    render(<OnboardingChapterCard step={connectStep} stepIndex={0} total={3} onAction={onAction} onDismiss={onDismiss} />);
-    expect(screen.getByText("ADD AN AI TEAMMATE · OPTIONAL")).toBeTruthy();
-    expect(screen.getByText("Step 1 of 3")).toBeTruthy();
+    render(<OnboardingChapterCard step={connectStep} stepIndex={0} total={2} onAction={onAction} onDismiss={onDismiss} />);
+    expect(screen.getByText("ADD AN AI TEAMMATE")).toBeTruthy();
+    expect(screen.getByText("Step 1 of 2")).toBeTruthy();
     fireEvent.click(screen.getByText("Connect environment"));
     expect(onAction).toHaveBeenCalledWith("open-create-environment");
     fireEvent.click(screen.getByText("Not now"));
@@ -746,20 +734,43 @@ describe("OnboardingChapterCard (#56)", () => {
     expect(onAction).toHaveBeenCalledTimes(1);
   });
 
-  it("member card: single action with a caption, no step counter", () => {
-    const onAction = vi.fn();
-    render(<OnboardingChapterCard step={memberCard} stepIndex={0} total={1} onAction={onAction} onDismiss={vi.fn()} />);
-    expect(screen.getByText(/No setup needed/)).toBeTruthy();
-    expect(screen.queryByText(/Step 1 of/)).toBeNull(); // single action → no dots/counter
-    fireEvent.click(screen.getByText("Start a run"));
-    expect(onAction).toHaveBeenCalledWith("open-agent-work");
+  it("fresh title swap: showBridge renders promoTitle as the title; otherwise the normal title", () => {
+    const { rerender } = render(
+      <OnboardingChapterCard step={connectStep} stepIndex={0} total={2} onDismiss={vi.fn()} showBridge />,
+    );
+    // Fresh auto-open: the TITLE is the bridge line (no separate prepended line), and the
+    // normal title is absent.
+    expect(screen.getByRole("heading", { name: BRIDGE_TITLE })).toBeTruthy();
+    expect(screen.queryByText("Bring in an AI teammate")).toBeNull();
+    // Catch-up / manual: the normal title, never the bridge.
+    rerender(<OnboardingChapterCard step={connectStep} stepIndex={0} total={2} onDismiss={vi.fn()} />);
+    expect(screen.getByRole("heading", { name: "Bring in an AI teammate" })).toBeTruthy();
+    expect(screen.queryByText(BRIDGE_TITLE)).toBeNull();
   });
 
-  it("done card: no CTA button; 'Close' dismisses and never fires an action; shows completion status", () => {
+  it("a card without a promoTitle never swaps its title, even when showBridge is set (A1 Create edge)", () => {
+    const createStep: OnboardingStep = {
+      ...connectStep,
+      id: "add-teammate-create",
+      title: "Create your AI teammate",
+      promoTitle: undefined,
+      primaryAction: { label: "Create teammate", event: "open-create-agent" },
+    };
+    render(<OnboardingChapterCard step={createStep} stepIndex={1} total={2} onDismiss={vi.fn()} showBridge />);
+    expect(screen.getByRole("heading", { name: "Create your AI teammate" })).toBeTruthy();
+    expect(screen.queryByText(BRIDGE_TITLE)).toBeNull();
+  });
+
+  it("done/Ready card: no CTA button; 'Close' dismisses and never fires an action; shows completion status", () => {
     const onAction = vi.fn();
     const onDismiss = vi.fn();
-    render(<OnboardingChapterCard step={doneCard} stepIndex={-1} total={3} onAction={onAction} onDismiss={onDismiss} />);
-    expect(screen.getByText("Chapter complete")).toBeTruthy();
+    render(<OnboardingChapterCard step={doneCard} stepIndex={-1} total={2} onAction={onAction} onDismiss={onDismiss} />);
+    expect(screen.getByText("Your AI teammate is ready.")).toBeTruthy();
+    // Replay-safe body (#90 bug 5): a durable fact only, no "pick the tour back up" promise
+    // (the Done card is also opened on manual re-review).
+    expect(screen.getByText("It's connected and set up in your workspace.")).toBeTruthy();
+    expect(screen.queryByText(/pick the tour back up/)).toBeNull();
+    expect(screen.getByText("Setup complete")).toBeTruthy();
     expect(screen.queryByText(/Step .* of/)).toBeNull();
     fireEvent.click(screen.getByText("Close"));
     expect(onDismiss).toHaveBeenCalledTimes(1);
@@ -768,7 +779,7 @@ describe("OnboardingChapterCard (#56)", () => {
 
   it("Escape dismisses the chapter", () => {
     const onDismiss = vi.fn();
-    render(<OnboardingChapterCard step={connectStep} stepIndex={0} total={3} onDismiss={onDismiss} />);
+    render(<OnboardingChapterCard step={connectStep} stepIndex={0} total={2} onDismiss={onDismiss} />);
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onDismiss).toHaveBeenCalled();
   });
@@ -778,7 +789,7 @@ describe("OnboardingChapterCard (#56)", () => {
     const backdrop = document.createElement("div");
     backdrop.className = "modal-backdrop";
     document.body.appendChild(backdrop);
-    render(<OnboardingChapterCard step={connectStep} stepIndex={0} total={3} onDismiss={onDismiss} />);
+    render(<OnboardingChapterCard step={connectStep} stepIndex={0} total={2} onDismiss={onDismiss} />);
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onDismiss).not.toHaveBeenCalled(); // one Escape must not close both modal and chapter
     document.body.removeChild(backdrop);

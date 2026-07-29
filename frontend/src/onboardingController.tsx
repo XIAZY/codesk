@@ -14,6 +14,8 @@ import {
   activeTip,
   activeChapter,
   chapterSteps,
+  nextChapterStep,
+  audienceMatches,
   isComplete,
   checklistProgress,
   type OnboardingNode,
@@ -36,14 +38,11 @@ export type OnboardingSignalInput = {
 // status field, so a stale-but-"online" daemon does not satisfy the local-env node.
 export function deriveOnboardingSignals(input: OnboardingSignalInput): OnboardingLiveSignals {
   const { workspaceState, documentCount, nowMs } = input;
-  const agentIds = new Set(workspaceState.agents.map((agent) => agent.id));
   return {
     documentCount,
     threadCount: workspaceState.threads.length,
     liveEnvironmentCount: workspaceState.daemons.filter((daemon) => daemonLiveStatus(daemon, nowMs) === "online").length,
     agentCount: workspaceState.agents.length,
-    agentRunCount: workspaceState.agentRuns.length,
-    agentThreadCount: workspaceState.threads.filter((thread) => thread.participantIds.some((id) => agentIds.has(id))).length,
   };
 }
 
@@ -61,6 +60,7 @@ export function toOnboardingStep(node: OnboardingNode): OnboardingStep {
     targetOnboardingId: node.targetOnboardingId,
     eyebrow: node.eyebrow,
     title: node.title,
+    promoTitle: node.promoTitle,
     body: node.body,
     caption: node.caption,
     primaryAction: node.primaryAction,
@@ -68,22 +68,6 @@ export function toOnboardingStep(node: OnboardingNode): OnboardingStep {
     skippable: node.skippable,
     fallback: node.fallback,
   };
-}
-
-// ---- Shared "work with an agent" destination (#56 §2e) -----------------------
-
-// One rule for BOTH the owner/admin chapter step 3 CTA and the member work card so the
-// two surfaces can't diverge (Anton/Juan): exactly 1 agent → that agent's Start run
-// surface directly (no list hop); 2+ → the Agents list. The label is state-dependent for
-// the same reason — a static label would hide the materially different outcome. 0 agents
-// can't reach here (the card requires agent-exists), but falls back to the list safely.
-export type AgentWorkDestination =
-  | { label: "Start a run"; kind: "start-run"; agentId: string }
-  | { label: "Choose an agent"; kind: "agents-list" };
-
-export function resolveAgentWorkDestination(agents: readonly { id: string }[]): AgentWorkDestination {
-  if (agents.length === 1) return { label: "Start a run", kind: "start-run", agentId: agents[0].id };
-  return { label: "Choose an agent", kind: "agents-list" };
 }
 
 // ---- Persistence keys (plan §4.3/§6.1) ---------------------------------------
@@ -99,6 +83,11 @@ export function onboardingFlagKeys(accountId: string, workspaceId: string) {
     accountFlagsKey: `${account}.flags`,
     workspaceFlagsKey: `${workspace}.flags`,
     checklistDismissedKey: `${workspace}.checklistDismissed`,
+    // #90 promotion-dismiss: distinct from checklistDismissed. A per account×workspace,
+    // browser-local presentation flag (no DB write) — "Not now"/Close on an AUTO-opened
+    // teammate chapter sets it, permanently suppressing future auto-opens in this
+    // workspace/profile. It records NO completion; the checklist row + manual open stay.
+    teammatePromoDismissedKey: `${workspace}.teammatePromoDismissed`,
   };
 }
 
@@ -150,13 +139,23 @@ export function useOnboardingController(input: OnboardingControllerInput) {
     return node ? toOnboardingStep(node) : null;
   }, [ctx]);
 
-  // The opt-in chapter card for the current role + live state (true next step / done card
-  // / null), plus its position among the role's steps for the step dots + entry badge.
+  // The chapter card for the current role + live state (true next step / done card /
+  // null), plus its position among the role's steps for the step dots + entry badge.
   const chapterNode = useMemo(() => activeChapter(ctx), [ctx]);
   const chapter = useMemo(() => (chapterNode ? toOnboardingStep(chapterNode) : null), [chapterNode]);
   const chapterStepsList = useMemo(() => chapterSteps(ctx), [ctx]);
   const chapterTotal = chapterStepsList.length;
   const chapterStepIndex = chapterNode ? chapterStepsList.findIndex((s) => s.id === chapterNode.id) : -1;
+
+  // #90 promotion eligibility: owner/admin AUDIENCE (never members — the member-exclusion
+  // gate is `audience`, not eligibleRoles) AND activation is incomplete (there is a genuine
+  // live-incomplete chapter step to auto-open at; null once env+agent both hold → never
+  // auto-open a complete workspace). The hook owns the fire timing (fresh vs catch-up).
+  const promotable = useMemo(
+    () => audienceMatches({ audience: "owner-admin" }, ctx) && nextChapterStep(ctx) !== null,
+    [ctx],
+  );
+  const documentOpen = route === "document";
 
   const hook = useOnboarding({
     steps,
@@ -165,11 +164,15 @@ export function useOnboardingController(input: OnboardingControllerInput) {
     record: flags.record,
     scopeKey: keys.workspaceFlagsKey,
     checklistDismissedKey: keys.checklistDismissedKey,
+    teammatePromoDismissedKey: keys.teammatePromoDismissedKey,
     activeSpotlightId,
     tip,
     chapter,
     chapterStepIndex,
     chapterTotal,
+    promotable,
+    documentCount,
+    documentOpen,
     enabled,
   });
 

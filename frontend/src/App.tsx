@@ -60,7 +60,7 @@ import { useDocumentSync } from "./useDocument";
 import { useWorkspace } from "./useWorkspace";
 import { Onboarding, OnboardingChapterCard, type OnboardingActionEvent, type OnboardingPresentation } from "./Onboarding";
 import { OnboardingChecklist } from "./OnboardingChecklist";
-import { useOnboardingController, resolveAgentWorkDestination } from "./onboardingController";
+import { useOnboardingController } from "./onboardingController";
 import type { OnboardingRole } from "./onboardingEngine";
 import type { Account, ActivityEvent, Agent, Daemon, DocumentItem, ThreadItem, UserItem, WorkspaceInvitePreview, WorkspaceState, WorkspaceSummary } from "./types";
 import { resolveRuntimeTiles, selectableRuntimeKinds, type RuntimeTile } from "./runtimes";
@@ -75,6 +75,19 @@ export function shouldRenderOnboardingChecklist(
   activePresentation: OnboardingPresentation | null | undefined,
 ): boolean {
   return namespaceReady && activePresentation !== "spotlight";
+}
+
+// The guide spotlight (incl. the "Every discussion has a home" discussion step) renders only
+// when there is an active surface, the teammate chapter isn't open, AND no promotion is about
+// to auto-open (#90 bug 2): suppressing on promotionPending keeps the discussion spotlight
+// from painting for one frame before the chapter takes the screen — the locked order is
+// document → teammate chapter → discussion, with no visible swap.
+export function shouldRenderOnboardingSpotlight(
+  hasActive: boolean,
+  chapterOpen: boolean,
+  promotionPending: boolean,
+): boolean {
+  return hasActive && !chapterOpen && !promotionPending;
 }
 
 function clearLegacyClientStorage() {
@@ -1714,32 +1727,10 @@ export function WorkspaceApp({
       case "open-create-agent":
         setModal("agent");
         break;
-      case "open-agent-work": {
-        // One shared destination for the owner/admin work step and the member card
-        // (#56 §2e): 1 agent → its Start run directly; 2+ → the Agents list chooser.
-        const destination = resolveAgentWorkDestination(workspace.agents);
-        if (destination.kind === "start-run") {
-          setSelectedAgentId(destination.agentId);
-          setModal("agent-detail");
-        } else {
-          setManageTab("agents");
-          setModal("manage");
-        }
-        break;
-      }
       default:
         break; // advance/back/complete/dismiss are guide events handled via onNext/onBack/onSkip
     }
-  }, [workspace.agents]);
-
-  // The chapter card to render — with the work CTA's label resolved to its live destination
-  // ("Start a run" for one agent, "Choose an agent" for 2+), so the label never hides the
-  // outcome (Anton). Non-work cards pass through unchanged.
-  const chapterCardStep = useMemo(() => {
-    const card = onboarding.chapterActive;
-    if (!card || card.primaryAction?.event !== "open-agent-work") return card;
-    return { ...card, primaryAction: { ...card.primaryAction, label: resolveAgentWorkDestination(workspace.agents).label } };
-  }, [onboarding.chapterActive, workspace.agents]);
+  }, []);
 
   const documentOpenThreadCount = useMemo(
     () => documentThreads.filter((thread) => (
@@ -2605,7 +2596,7 @@ export function WorkspaceApp({
           can't close the chapter and silently ack an unseen tip. Keying on chapterOpen (with the
           hook's auto-close when live state leaves no card) keeps this coherent: the surfaces
           never flicker back while the chapter is still logically open. */}
-      {onboarding.active && !onboarding.chapterOpen ? (
+      {onboarding.active && shouldRenderOnboardingSpotlight(true, onboarding.chapterOpen, onboarding.promotionPending) ? (
         <Onboarding
           step={onboarding.active}
           stepIndex={onboarding.stepIndex}
@@ -2616,13 +2607,14 @@ export function WorkspaceApp({
           onAction={handleOnboardingAction}
         />
       ) : null}
-      {chapterCardStep ? (
+      {onboarding.chapterActive ? (
         <OnboardingChapterCard
-          step={chapterCardStep}
+          step={onboarding.chapterActive}
           stepIndex={onboarding.chapterStepIndex}
           total={onboarding.chapterTotal}
           onAction={handleOnboardingAction}
           onDismiss={onboarding.closeChapter}
+          showBridge={onboarding.chapterBridge}
         />
       ) : null}
       {!onboarding.chapterOpen && shouldRenderOnboardingChecklist(rootNamespace.ready, onboarding.active?.presentation) ? (

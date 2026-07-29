@@ -237,7 +237,7 @@ describe("App URL routing", () => {
     render(<App />);
 
     await waitFor(() => expect(window.location.pathname).toBe("/w/team/d/doc_1"));
-    expect(screen.getByTestId("document-surface").textContent).toBe("doc_1");
+    await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_1"));
   });
 
   it("does not resolve workspace home through stale root docs from another workspace", async () => {
@@ -259,7 +259,7 @@ describe("App URL routing", () => {
     rerender(<App />);
 
     await waitFor(() => expect(window.location.pathname).toBe("/w/beta/d/doc_beta"));
-    expect(screen.getByTestId("document-surface").textContent).toBe("doc_beta");
+    await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_beta"));
   });
 
   it("ignores legacy route storage when restoring a different account", async () => {
@@ -274,7 +274,7 @@ describe("App URL routing", () => {
     render(<App />);
 
     await waitFor(() => expect(window.location.pathname).toBe("/w/alpha/d/doc_alpha"));
-    expect(screen.getByTestId("document-surface").textContent).toBe("doc_alpha");
+    await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_alpha"));
     expect(localStorage.getItem("notty.workspace.slug")).toBeNull();
     expect(localStorage.getItem("notty.workspace.team.lastDoc")).toBeNull();
   });
@@ -300,7 +300,7 @@ describe("App URL routing", () => {
     await user.click(screen.getByRole("button", { name: "Log in" }));
 
     await waitFor(() => expect(window.location.pathname).toBe("/w/alpha/d/doc_alpha"));
-    expect(screen.getByTestId("document-surface").textContent).toBe("doc_alpha");
+    await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_alpha"));
   });
 
   it("redirects a protected deep link to login and then routes from backend account state", async () => {
@@ -322,7 +322,7 @@ describe("App URL routing", () => {
     await user.click(screen.getByRole("button", { name: "Log in" }));
 
     await waitFor(() => expect(window.location.pathname).toBe("/w/alpha/d/doc_alpha"));
-    expect(screen.getByTestId("document-surface").textContent).toBe("doc_alpha");
+    await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_alpha"));
   });
 
   it("redirects unauthenticated workspace URLs to login", async () => {
@@ -489,7 +489,7 @@ describe("App URL routing", () => {
 
     await waitFor(() => expect(window.location.pathname).toBe("/w/team/d/doc_1"));
     expect(screen.queryByRole("heading", { name: "Workspace not found" })).toBeNull();
-    expect(screen.getByTestId("document-surface").textContent).toBe("doc_1");
+    await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_1"));
   });
 
   it("renders bad workspace slugs as not found and clears legacy route storage", async () => {
@@ -555,7 +555,7 @@ describe("App URL routing", () => {
 
     await user.click(screen.getByRole("button", { name: /Create your first doc/ }));
     await waitFor(() => expect(window.location.pathname).toBe("/w/product-workspace/d/doc_created"));
-    expect(screen.getByTestId("document-surface").textContent).toBe("doc_created");
+    await waitFor(() => expect(screen.getByTestId("document-surface").textContent).toBe("doc_created"));
 
     cleanup();
     window.history.replaceState(null, "", "/w/product-workspace/d/doc_created");

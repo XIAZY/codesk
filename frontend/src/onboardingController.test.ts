@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { deriveOnboardingSignals, toOnboardingStep, resolveAgentWorkDestination } from "./onboardingController";
+import { deriveOnboardingSignals, toOnboardingStep } from "./onboardingController";
 import { NODES, acknowledgeFlag } from "./onboardingEngine";
-import type { WorkspaceState, Daemon, Agent, ThreadItem, AgentRun } from "./types";
+import type { WorkspaceState, Daemon, Agent, ThreadItem } from "./types";
 
 // Minimal fixtures — only the fields deriveOnboardingSignals reads. Cast so the
 // tests stay focused on the derivation, not on constructing full domain objects.
@@ -9,7 +9,6 @@ const NOW = 1_700_000_000_000;
 const daemon = (over: Partial<Daemon>): Daemon => ({ status: "connected", receivedAtMs: NOW, ...over }) as Daemon;
 const agent = (id: string): Agent => ({ id }) as Agent;
 const thread = (participantIds: string[]): ThreadItem => ({ participantIds }) as ThreadItem;
-const run = (): AgentRun => ({}) as AgentRun;
 
 function ws(partial: Partial<WorkspaceState>): WorkspaceState {
   return {
@@ -28,16 +27,18 @@ function ws(partial: Partial<WorkspaceState>): WorkspaceState {
 }
 
 describe("deriveOnboardingSignals", () => {
-  it("passes through counts from live workspace state", () => {
+  it("passes through the live counts the engine still consumes (#90 trimmed agent run/thread inputs)", () => {
     const signals = deriveOnboardingSignals({
-      workspaceState: ws({ threads: [thread([]), thread([])], agents: [agent("a1")], agentRuns: [run()] }),
+      workspaceState: ws({ threads: [thread([]), thread([])], agents: [agent("a1")] }),
       documentCount: 3,
       nowMs: NOW,
     });
     expect(signals.documentCount).toBe(3);
     expect(signals.threadCount).toBe(2);
     expect(signals.agentCount).toBe(1);
-    expect(signals.agentRunCount).toBe(1);
+    // agentRunCount / agentThreadCount were removed — no onboarding consumer after #90.
+    expect("agentRunCount" in signals).toBe(false);
+    expect("agentThreadCount" in signals).toBe(false);
   });
 
   it("counts a live environment by receipt-elapsed liveness, not by a raw 'online' status", () => {
@@ -51,19 +52,6 @@ describe("deriveOnboardingSignals", () => {
       nowMs: NOW,
     });
     expect(signals.liveEnvironmentCount).toBe(1);
-  });
-
-  it("counts a thread as agent-participating only when an agent id is a participant", () => {
-    const signals = deriveOnboardingSignals({
-      workspaceState: ws({
-        agents: [agent("agent-1")],
-        threads: [thread(["user-1"]), thread(["user-1", "agent-1"]), thread(["agent-1"])],
-      }),
-      documentCount: 0,
-      nowMs: NOW,
-    });
-    expect(signals.threadCount).toBe(3);
-    expect(signals.agentThreadCount).toBe(2);
   });
 });
 
@@ -96,26 +84,13 @@ describe("P1->P2 adapter (toOnboardingStep) — the seam", () => {
       expect(`seen:${step.id}@v${step.version}`).toBe(acknowledgeFlag(node));
     }
   });
-});
 
-describe("resolveAgentWorkDestination (#56 §2e — one rule, two surfaces)", () => {
-  it("exactly one agent → that agent's Start run surface directly (no list hop)", () => {
-    expect(resolveAgentWorkDestination([{ id: "agent-7" }])).toEqual({
-      label: "Start a run",
-      kind: "start-run",
-      agentId: "agent-7",
-    });
-  });
-
-  it("two or more agents → the Agents list chooser", () => {
-    expect(resolveAgentWorkDestination([{ id: "a" }, { id: "b" }])).toEqual({
-      label: "Choose an agent",
-      kind: "agents-list",
-    });
-  });
-
-  it("the label tracks the destination (never a static label hiding the outcome)", () => {
-    expect(resolveAgentWorkDestination([{ id: "a" }]).label).toBe("Start a run");
-    expect(resolveAgentWorkDestination([{ id: "a" }, { id: "b" }, { id: "c" }]).label).toBe("Choose an agent");
+  it("projects the fresh-only promoTitle so the card can swap its title on a fresh auto-open", () => {
+    const connect = toOnboardingStep(NODES.find((n) => n.id === "add-teammate-connect")!);
+    expect(connect.promoTitle).toBe(
+      "Your first document's ready. Now bring in an AI teammate to work on it with you.",
+    );
+    // A card without a fresh variant projects undefined (Create keeps its fixed title).
+    expect(toOnboardingStep(NODES.find((n) => n.id === "add-teammate-create")!).promoTitle).toBeUndefined();
   });
 });
