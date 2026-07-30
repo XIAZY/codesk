@@ -888,6 +888,17 @@ root_write_line="$(grep -n -- 'put-object .*--bucket app --key[[:space:]]*--body
 	fail 'root object must be written AFTER the named index.html, or the two can disagree'
 grep -F -- '--content-type text/html' "$root_log" | grep -Eq -- '--key[[:space:]]*--body' ||
 	fail 'root object was not written as text/html'
+# The root object and the named index must come from the SAME source file. Without this the write
+# is only same-content by construction, and "by construction" is exactly the invariant that drifts
+# silently under refactoring — which is how "/" and "/index.html" diverged in the first place.
+for root_pair in "homepage:$static_dist/homepage/index.html" "app:$static_dist/app/index.html"; do
+	root_pair_bucket="${root_pair%%:*}"
+	root_pair_source="${root_pair#*:}"
+	grep -E -- "put-object .*--bucket $root_pair_bucket " "$root_log" |
+		grep -Fq -- "--body $root_pair_source" ||
+		fail "$root_pair_bucket root object was not written from $root_pair_source — it can drift from the named index"
+done
+pass 'the root object is written from the same file as the named index'
 pass 'the root object that serves "/" is written once per bucket, after the named index'
 
 # Fails closed, both ways: a root write that errors, and an aws binary that is absent. A silent
