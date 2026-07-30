@@ -61,7 +61,7 @@ for required_uploader_source in \
 	'need AWS_ACCESS_KEY_ID' \
 	'need AWS_SECRET_ACCESS_KEY' \
 	'RCLONE_CONFIG_NOTTYR2_PROVIDER=Cloudflare' \
-	'rclone sync' \
+	'rclone sync "$upload_dir_src" "$upload_dir_remote" --ignore-times' \
 	'rclone copyto' \
 	'rclone lsjson'
 do
@@ -453,6 +453,7 @@ if [ "${1:-}" = sync ]; then
 	rclone_cache_control=
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
+			--no-check-dest) exit 64 ;;
 			--header-upload)
 				case "$2" in
 					'Cache-Control: '*) rclone_cache_control="${2#Cache-Control: }" ;;
