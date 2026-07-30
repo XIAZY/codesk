@@ -37,6 +37,7 @@ case " $* " in *" --max-time "*) ;; *) echo "curl invoked without --max-time" >&
 case " $* " in *" --connect-timeout "*) ;; *) echo "curl invoked without --connect-timeout" >&2; exit 64 ;; esac
 url=""
 for arg in "$@"; do case "$arg" in http*) url="$arg" ;; esac; done
+printf '%s\n' "$url" >> "$FAKE_CURL_LOG"
 case "$url" in
   */assets/*)
     [ "${FAKE_ASSET_REACHABLE:-1}" = "1" ] || exit 22
@@ -66,6 +67,7 @@ export FAKE_BUILT_REF="$TMP_DIR/built.txt"
 export FAKE_SERVED_ASSET="$TMP_DIR/served-asset.js"
 export FAKE_BUILT_ASSET="$TMP_DIR/built-asset.js"
 export FAKE_UPLOAD_LOG="$TMP_DIR/uploads.log"
+export FAKE_CURL_LOG="$TMP_DIR/curl.log"
 export NOTTY_FRONTEND_ORIGIN="https://app.example.test"
 export NOTTY_DEPLOY_VERIFY_ATTEMPTS=2
 export NOTTY_DEPLOY_VERIFY_INTERVAL=0
@@ -81,6 +83,7 @@ run_case() {
 	rm -f "$TMP_DIR/dist/static/app/assets/"*
 	cp "$FAKE_BUILT_ASSET" "$TMP_DIR/dist/static/app/assets/$built"
 	: > "$FAKE_UPLOAD_LOG"
+	: > "$FAKE_CURL_LOG"
 	set +e
 	CASE_OUT="$(env PATH="$TMP_DIR/bin:$PATH" "$@" sh "$TMP_DIR/scripts/deploy-frontend.sh" 2>&1)"
 	CASE_RC=$?
@@ -146,4 +149,10 @@ run_case index-NEW.js index-OLD.js NOTTY_DEPLOY_VERIFY_ATTEMPTS=0
 [ "$CASE_RC" -ne 0 ] || fail "a non-positive attempt budget must be rejected, got exit 0"
 assert_no_upload "invalid attempts"
 
+# The probe must read "/" — the URL users hit — not "/index.html". On 2026-07-30 those resolved
+# to DIFFERENT objects, and a check against the named path called that deploy verified while every
+# real user saw a two-day-old app. Pinning the probed path is what makes the check about users.
+run_case index-NEW.js index-OLD.js FAKE_UPLOAD_WORKS=1
+grep -q '/index.html' "$FAKE_CURL_LOG" && fail "the verifier probed /index.html — it must read '/', the URL users actually hit"
+grep -qE '^https://app\.example\.test/(\?|$)' "$FAKE_CURL_LOG" || fail "the verifier never probed the bare '/' path"
 echo "deploy-frontend verification contract passed."

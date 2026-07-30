@@ -109,3 +109,33 @@ Earlier R2 verification found the exact seven Windows GUI 0.0.2 objects, matchin
 The external dependency is rclone 1.59 or newer. The script exposes no new command-line interface: callers continue to set `UPLOAD_TARGET` and run the existing Make targets. The required secret environment interface is `AWS_ACCESS_KEY_ID` plus `AWS_SECRET_ACCESS_KEY`; `R2_ENDPOINT_URL` and the existing `R2_*_BUCKET` and `R2_*_PREFIX` values remain non-secret destination configuration. The named remote `nottyr2:` exists only through exported environment variables in the uploader process and is never persisted.
 
 Plan revision note (2026-07-28): Created this plan after the user broadened PR #225 from a Windows-only rclone migration to a single rclone uploader for every R2 deploy target. Updated it after implementation, after the user explicitly required another real Windows GUI deployment, after the immutable 0.0.2 conflict required version 0.0.3, and after the verified release and PR update completed.
+
+## How `/` is served (2026-07-30) — READ BEFORE TOUCHING CLOUDFLARE CONFIG
+
+An R2 custom domain serves the object whose key matches the request path exactly, and a bare `/`
+matches the **empty key** — not `index.html`. There is no built-in index-document fallback.
+
+The old uploader wrote that empty-key object. rclone cannot: `remote:bucket/key` has no way to
+express an empty key, so an object stored there reads as the directory itself and rclone skips it
+with `Entry doesn't belong in directory "" (same as directory) - ignoring`. That line appears on
+every frontend deploy and is expected.
+
+Consequence, and the reason this section exists: from #225 until 2026-07-30 no deploy updated that
+object. On 2026-07-30 it was two days stale while `index.html` was current, so `/` served an old
+app while `/index.html` served the new one — and every deploy reported success throughout, because
+every tool involved was telling the truth about the file it was looking at.
+
+**`/` is now served by a per-domain Cloudflare rewrite rule** (`/` → `/index.html`) on both
+`app.getcodesk.com` and `getcodesk.com`, and the empty-key object was **deliberately deleted**.
+Deleting it without the rule in place returns HTTP 404 for every visitor to the bare URL — that
+happened, briefly, on 2026-07-30.
+
+Two things follow:
+
+- **The rewrite rule is production infrastructure that lives outside this repo.** Do not remove it
+  in a Cloudflare cleanup, and add it when configuring a new domain — otherwise `/` 404s.
+- **Do not re-add an empty-key write to the uploader.** It would reintroduce an `aws` dependency
+  (only the raw S3 API can address that key) to maintain an object nothing reads.
+
+`scripts/deploy-frontend.sh` fingerprints `/` — not `/index.html` — after every deploy, so a
+broken rewrite rule fails the deploy loudly instead of silently serving a stale or missing page.
