@@ -173,6 +173,24 @@ FAKE_BREAK_BUILT_INDEX=0
 assert_no_upload "malformed built index"
 grep -q "no bundle reference found" <<< "$CASE_OUT" || fail "a malformed built index must say what is wrong with it"
 
+# A machine with no hash tool must not deploy. Before this was preflighted, `file_digest` fell
+# through to `shasum | cut` — and a pipeline ending in `cut` exits 0 even when the hash command is
+# missing, so BOTH digests became empty and "" = "" reported "digest matches". A verifier that can
+# assert a match without computing a digest is this script's own failure domain in miniature.
+hashless_bin="$TMP_DIR/nohash"
+mkdir -p "$hashless_bin"
+for needed in sh dirname basename pwd date grep head mktemp rm sleep cat cp sed printf wc tr cut ln mkdir touch env; do
+	needed_path="$(command -v "$needed" 2>/dev/null || true)"
+	[ -n "$needed_path" ] && ln -sf "$needed_path" "$hashless_bin/$needed"
+done
+cp "$TMP_DIR/bin/curl" "$hashless_bin/curl"
+cp "$TMP_DIR/bin/git" "$hashless_bin/git"
+[ -x "$hashless_bin/sha256sum" ] || [ -x "$hashless_bin/shasum" ] && fail "the hashless fixture still provides a digest tool"
+run_case index-NEW.js index-OLD.js PATH="$hashless_bin"
+[ "$CASE_RC" -ne 0 ] || fail "a deploy with no digest tool must fail, got exit 0"
+assert_no_upload "missing digest tool"
+grep -qE "sha256sum nor shasum" <<< "$CASE_OUT" || fail "a missing digest tool must be named"
+
 # A bad probe budget must be rejected outright rather than silently making the bound meaningless.
 run_case index-NEW.js index-OLD.js NOTTY_DEPLOY_VERIFY_ATTEMPTS=0
 [ "$CASE_RC" -ne 0 ] || fail "a non-positive attempt budget must be rejected, got exit 0"

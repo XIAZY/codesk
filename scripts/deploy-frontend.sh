@@ -37,6 +37,13 @@ esac
 frontend_origin="${NOTTY_FRONTEND_ORIGIN:-}"
 [ -n "$frontend_origin" ] || die 'NOTTY_FRONTEND_ORIGIN is unset — refusing to deploy something we cannot verify'
 command -v curl >/dev/null 2>&1 || die 'curl not found — refusing to deploy something we cannot verify'
+if command -v sha256sum >/dev/null 2>&1; then
+	digest_tool=sha256sum
+elif command -v shasum >/dev/null 2>&1; then
+	digest_tool=shasum
+else
+	die 'neither sha256sum nor shasum found — refusing to deploy something we cannot verify'
+fi
 
 fetch_live() {
 	curl -fsS --connect-timeout "$live_check_timeout" --max-time "$live_check_timeout" \
@@ -56,12 +63,24 @@ live_bundle_ref() {
 		grep -oE 'index-[A-Za-z0-9_-]+\.js' | head -1
 }
 
+# Every operand of a pass/fail comparison must be validated before the comparison. An empty
+# digest compared against an empty digest reports "match", which is this script's own failure
+# domain in miniature: a check that passes while verifying nothing.
 file_digest() {
-	if command -v sha256sum >/dev/null 2>&1; then
-		sha256sum "$1" | cut -d' ' -f1
-	else
-		shasum -a 256 "$1" | cut -d' ' -f1
-	fi
+	case "$digest_tool" in
+		sha256sum) digest_value="$(sha256sum "$1" | cut -d' ' -f1)" ;;
+		shasum) digest_value="$(shasum -a 256 "$1" | cut -d' ' -f1)" ;;
+		*) die 'no digest tool resolved — refusing to compare digests that were never computed' ;;
+	esac
+	# A pipeline ending in `cut` exits 0 even when the hash command failed, so the exit status
+	# proves nothing here; only the shape of the output does.
+	case "$digest_value" in
+		[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*)
+			[ "${#digest_value}" -eq 64 ] ||
+				die "digest of $1 is not a sha256 (got '$digest_value') — refusing to compare" ;;
+		*) die "digest of $1 is empty or malformed (got '$digest_value') — refusing to compare" ;;
+	esac
+	printf '%s' "$digest_value"
 }
 
 # A checkout behind origin/main rebuilds OLD code into a byte-identical bundle and uploads it
@@ -94,13 +113,16 @@ expected_ref="$(bundle_ref "$app_index")"
 expected_asset="$app_dist_dir/assets/$expected_ref"
 [ -f "$expected_asset" ] || die "built index references $expected_ref but $expected_asset does not exist"
 
+# Computed before publishing: if the built asset cannot be hashed, nothing should ship, and
+# discovering that after the upload leaves prod changed and unverifiable.
+expected_digest="$(file_digest "$expected_asset")"
+
 UPLOAD_TARGET=frontend "$root_dir/scripts/upload-r2.sh"
 
 # The uploader exiting 0 is not evidence it reached users: on 2026-07-30 `rclone sync
 # --no-check-dest` transferred zero bytes for two days while reporting success. Only the served
 # object proves a deploy happened — and only fetching the referenced bundle proves the app LOADS.
 # A live index pointing at a missing asset is a white screen that a filename comparison calls fine.
-expected_digest="$(file_digest "$expected_asset")"
 attempt=1
 while :; do
 	served_ref="$(live_bundle_ref || true)"
