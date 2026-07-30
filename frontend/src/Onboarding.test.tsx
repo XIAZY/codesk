@@ -403,6 +403,28 @@ describe("Onboarding", () => {
     expect(screen.getByRole("button", { name: "Next" })).toBeTruthy();
   });
 
+  // #94 Back pair: the generic Back on the FIRST visible step points nowhere, so it must not render
+  // at all (it was shown *disabled* — a dead control AlphaToad hit right after #234 removed the
+  // phantom Next beside it). Same node at stepIndex 0 vs 1 isolates the position contract.
+  it("renders no Back button on the first step — nothing to go back to (#94)", async () => {
+    const createFirstDocument = NODES.find((n) => n.id === "create-first-document")!;
+    const { container } = render(
+      <Onboarding step={createFirstDocument} stepIndex={0} total={2} onNext={vi.fn()} onBack={vi.fn()} onSkip={vi.fn()} />,
+    );
+    await waitFor(() => expect(container.querySelector(".ob-page-fallback")).toBeTruthy());
+    expect(container.querySelector(".ob-back")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Back" })).toBeNull();
+  });
+
+  it("still renders Back on a later step — position contract, not a blanket removal (#94)", async () => {
+    const createFirstDocument = NODES.find((n) => n.id === "create-first-document")!;
+    const { container } = render(
+      <Onboarding step={createFirstDocument} stepIndex={1} total={2} onNext={vi.fn()} onBack={vi.fn()} onSkip={vi.fn()} />,
+    );
+    await waitFor(() => expect(container.querySelector(".ob-page-fallback")).toBeTruthy());
+    expect(screen.getByRole("button", { name: "Back" })).toBeTruthy();
+  });
+
   it("skips and logs a missing skip-fallback target without rendering a bubble", async () => {
     const onMissingTarget = vi.fn();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);

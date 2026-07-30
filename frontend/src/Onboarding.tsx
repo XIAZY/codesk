@@ -345,9 +345,9 @@ export function Onboarding({
       <div className="ob-actions">
         {!isTip && step.skippable ? <button type="button" className="ob-skip" onClick={onSkip}>Skip</button> : <span />}
         <div className="ob-actions-main">
-          {isTip || step.secondaryAction?.event === "back"
+          {isTip || step.secondaryAction?.event === "back" || stepIndex === 0
             ? null
-            : <button type="button" className="ob-back" onClick={onBack} disabled={stepIndex === 0}>Back</button>}
+            : <button type="button" className="ob-back" onClick={onBack}>Back</button>}
           {step.secondaryAction ? (
             <button
               type="button"
