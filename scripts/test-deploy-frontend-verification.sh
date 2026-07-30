@@ -191,6 +191,24 @@ run_case index-NEW.js index-OLD.js PATH="$hashless_bin"
 assert_no_upload "missing digest tool"
 grep -qE "sha256sum nor shasum" <<< "$CASE_OUT" || fail "a missing digest tool must be named"
 
+# A hash tool that EXISTS but emits garbage is the subtler half: `cut` still exits 0, so only the
+# output shape can catch it. 8 hex chars followed by 56 arbitrary bytes is the specific case a
+# prefix-glob validator admits.
+bad_hash_bin="$TMP_DIR/badhash"
+mkdir -p "$bad_hash_bin"
+for needed in sh dirname basename pwd date grep head mktemp rm sleep cat cp sed printf wc tr cut ln mkdir touch env; do
+	needed_path="$(command -v "$needed" 2>/dev/null || true)"
+	[ -n "$needed_path" ] && ln -sf "$needed_path" "$bad_hash_bin/$needed"
+done
+cp "$TMP_DIR/bin/curl" "$bad_hash_bin/curl"
+cp "$TMP_DIR/bin/git" "$bad_hash_bin/git"
+printf '#!/bin/sh\nprintf "deadbeefZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ  %%s\\n" "$1"\n' > "$bad_hash_bin/sha256sum"
+chmod +x "$bad_hash_bin/sha256sum"
+run_case index-NEW.js index-OLD.js PATH="$bad_hash_bin"
+[ "$CASE_RC" -ne 0 ] || fail "a malformed digest must fail, got exit 0"
+assert_no_upload "malformed digest"
+grep -q "not a sha256" <<< "$CASE_OUT" || fail "a malformed digest must be named as such"
+
 # A bad probe budget must be rejected outright rather than silently making the bound meaningless.
 run_case index-NEW.js index-OLD.js NOTTY_DEPLOY_VERIFY_ATTEMPTS=0
 [ "$CASE_RC" -ne 0 ] || fail "a non-positive attempt budget must be rejected, got exit 0"

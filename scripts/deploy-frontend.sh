@@ -74,13 +74,11 @@ file_digest() {
 		*) die 'no digest tool resolved — refusing to compare digests that were never computed' ;;
 	esac
 	# A pipeline ending in `cut` exits 0 even when the hash command failed, so the exit status
-	# proves nothing here; only the shape of the output does.
-	case "$digest_value" in
-		[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*)
-			[ "${#digest_value}" -eq 64 ] ||
-				die "digest of $1 is not a sha256 (got '$digest_value') — refusing to compare" ;;
-		*) die "digest of $1 is empty or malformed (got '$digest_value') — refusing to compare" ;;
-	esac
+	# proves nothing here; only the shape of the output does. Anchored and fully quantified on
+	# purpose: a glob that pins a prefix and wildcards the rest admits 56 arbitrary trailing
+	# bytes — the same "the wildcard is the hole" mistake this file's guards keep making.
+	printf '%s' "$digest_value" | grep -qE '^[0-9a-f]{64}$' ||
+		die "digest of $1 is not a sha256 (got '$digest_value') — refusing to compare"
 	printf '%s' "$digest_value"
 }
 
