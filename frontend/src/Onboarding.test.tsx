@@ -6,6 +6,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Onboarding, OnboardingChapterCard, contextualTipPlacement, spotlightGeometry, type OnboardingStep } from "./Onboarding";
 import { useOnboarding } from "./useOnboarding";
+import { NODES } from "./onboardingEngine";
 
 const step: OnboardingStep = {
   id: "create-first-document",
@@ -376,6 +377,30 @@ describe("Onboarding", () => {
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Next" })));
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onSkip).toHaveBeenCalledOnce();
+  });
+
+  // #91 render pair: an absent primaryAction must render NO primary button (the old code drew one
+  // unconditionally with a `?? "Next"` fallback, which is the trap AlphaToad hit). Uses the REAL
+  // nodes so re-adding an advance action to a live-derived step also trips this.
+  it("renders no primary button for a live-derived step with no primaryAction (#91 dead-Next)", async () => {
+    const createFirstDocument = NODES.find((n) => n.id === "create-first-document")!;
+    const { container } = render(
+      <Onboarding step={createFirstDocument} stepIndex={0} total={2} onNext={vi.fn()} onBack={vi.fn()} onSkip={vi.fn()} />,
+    );
+    await waitFor(() => expect(container.querySelector(".ob-page-fallback")).toBeTruthy());
+    expect(container.querySelector(".ob-next")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Next" })).toBeNull();
+    // Skip stays — the user still has a way forward.
+    expect(screen.getByRole("button", { name: "Skip" })).toBeTruthy();
+  });
+
+  it("still renders the primary button when the step carries an advance action (#91 not over-removed)", async () => {
+    const threadsIntro = NODES.find((n) => n.id === "threads-intro")!;
+    const { container } = render(
+      <Onboarding step={{ ...threadsIntro, fallback: "page-card" }} stepIndex={1} total={2} onNext={vi.fn()} onBack={vi.fn()} onSkip={vi.fn()} />,
+    );
+    await waitFor(() => expect(container.querySelector(".ob-page-fallback")).toBeTruthy());
+    expect(screen.getByRole("button", { name: "Next" })).toBeTruthy();
   });
 
   it("skips and logs a missing skip-fallback target without rendering a bubble", async () => {
