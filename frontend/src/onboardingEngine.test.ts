@@ -73,6 +73,23 @@ describe("node config integrity (§4.1)", () => {
     expect(isComplete(node("threads-intro"), ctx({ events: new Set([seen("threads-intro")]) }))).toBe(true);
   });
 
+  // Class guard (#91): `advance` completes a step by recording its acknowledge flag, so it is
+  // only honored when the completion is acknowledge-based. A node completed by live workspace
+  // state (derived/flag/any/all) cannot be advanced by a click — the "Next" becomes a dead no-op
+  // that recomputes to the same step and traps the user (the create-first-document "Next", #91).
+  // Forbid the class so no future live-derived step can ever ship an advance button it can't honor.
+  it("no non-acknowledge node carries an 'advance' action it cannot honor (#91)", () => {
+    for (const n of NODES) {
+      if (n.completion.via !== "acknowledge") {
+        expect(n.primaryAction?.event).not.toBe("advance");
+      }
+    }
+    // Anchors, both directions: the live-derived step has no advance action; the acknowledge
+    // teaching step keeps its legitimate one.
+    expect(node("create-first-document").primaryAction).toBeUndefined();
+    expect(node("threads-intro").primaryAction?.event).toBe("advance");
+  });
+
   it("bumping a node's version re-shows it — the acknowledge flag is version-scoped", () => {
     const n = node("threads-intro");
     expect(acknowledgeFlag(n)).toBe(`seen:${n.id}@v${n.version}`);

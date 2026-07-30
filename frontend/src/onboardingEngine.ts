@@ -192,7 +192,10 @@ export const NODES: OnboardingNode[] = [
     targetOnboardingId: "create-document",
     title: "These are real files",
     body: "What you write syncs to your computer as an actual file — open the same document in the browser or your local editor.",
-    primaryAction: { label: "Next", event: "advance" },
+    // No primaryAction: this step completes by actually creating a document (live-derived
+    // `document-exists`), not by acknowledging. An "advance" button here can't complete the
+    // step — it recomputes to the same step and traps the user (#91). The spotlighted create
+    // button is the real CTA; the user proceeds by using it (or Skip).
     skippable: true,
     fallback: "page-card",
   },
