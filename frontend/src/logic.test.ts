@@ -66,6 +66,7 @@ import type { ActivityEvent, Agent, AgentRun, Daemon, DocumentItem, PresenceItem
 function baseWorkspace(): WorkspaceState {
   return {
     workspaceId: "ws",
+    slug: "ws",
     rootDocumentId: "doc_root_ws",
     name: "Workspace",
     users: [],

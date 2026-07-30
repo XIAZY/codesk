@@ -12,6 +12,7 @@ import (
 
 type workspaceView struct {
 	WorkspaceID    string
+	Slug           string
 	Name           string
 	RootDocumentID string
 	UpdatedAt      time.Time
@@ -42,6 +43,7 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"workspaceId":           view.WorkspaceID,
+		"slug":                  view.Slug,
 		"rootDocumentId":        view.RootDocumentID,
 		"currentUserId":         currentUserID,
 		"currentDaemonId":       currentDaemonID,
@@ -76,11 +78,11 @@ func loadWorkspaceView(ctx context.Context, db *sql.DB, workspaceID string, auth
 
 	view := &workspaceView{}
 	if err := tx.QueryRow(
-		`SELECT id::text, name, root_document_id::text, updated_at
+		`SELECT id::text, slug, name, root_document_id::text, updated_at
 		   FROM workspaces
 		  WHERE id = $1::uuid`,
 		workspaceID,
-	).Scan(&view.WorkspaceID, &view.Name, &view.RootDocumentID, &view.UpdatedAt); err != nil {
+	).Scan(&view.WorkspaceID, &view.Slug, &view.Name, &view.RootDocumentID, &view.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if view.Users, err = listUsersPostgres(tx, workspaceID); err != nil {
@@ -157,6 +159,7 @@ func (s *Server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	if err := conn.WriteJSON(EventEnvelope{
 		Type: "workspace.snapshot",
 		Data: map[string]interface{}{
+			"slug":                  view.Slug,
 			"rootDocumentId":        view.RootDocumentID,
 			"currentMembershipRole": currentMembershipRole,
 			"users":                 view.Users,

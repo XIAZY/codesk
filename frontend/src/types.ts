@@ -252,7 +252,10 @@ export type WorkspaceState = {
   currentDaemonId?: string;
   currentMembershipRole?: "owner" | "admin" | "member" | string;
   name: string;
-  slug?: string;
+  // Required: the workspace-state endpoint and the websocket snapshot both send it. It was
+  // optional until 2026-07-30, which meant nothing type-checked as wrong when the payload
+  // never included it — every workspace rendered "/w/undefined" in settings.
+  slug: string;
   defaultRuntime?: string;
   users: UserItem[];
   daemons: Daemon[];
