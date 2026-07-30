@@ -35,6 +35,7 @@ WINDOWS_GUI_ZIG_VERSION ?= 0.16.0
 	macos-gui-build macos-gui-deploy windows-gui-build windows-gui-deploy \
 	frontend-build frontend-deploy homepage-build homepage-deploy \
 	backend-build backend-deploy deploy \
+	deploy-frontend deploy-backend deploy-homepage deploy-daemon \
 	daemon-clean daemon-installer-check daemon-installer-windows-check daemon-uninstall-test daemon-version-contract-check build-deploy-contract-check
 
 dev: _static-build-local
@@ -161,6 +162,22 @@ frontend-deploy:
 homepage-deploy:
 	scripts/deploy-homepage.sh
 
+# Tombstones for the pre-rename verb-first names. The scripts are deploy-<thing>.sh but the
+# targets are <thing>-deploy, and five people ran `make deploy-frontend` on 2026-07-30 because
+# the old name was correct until #189. Make's own "No rule to make target" says nothing about
+# which name to use; these say it. Deliberately NOT working aliases — one true name stays one.
+deploy-frontend:
+	@printf 'make: "deploy-frontend" was renamed. Use: make frontend-deploy\n' >&2; exit 1
+
+deploy-backend:
+	@printf 'make: "deploy-backend" was renamed. Use: make backend-deploy\n' >&2; exit 1
+
+deploy-homepage:
+	@printf 'make: "deploy-homepage" was renamed. Use: make homepage-deploy\n' >&2; exit 1
+
+deploy-daemon:
+	@printf 'make: "deploy-daemon" was renamed. Use: make daemon-deploy\n' >&2; exit 1
+
 deploy:
 	$(MAKE) frontend-deploy
 	$(MAKE) daemon-deploy
@@ -199,6 +216,7 @@ daemon-version-contract-check:
 
 build-deploy-contract-check:
 	sh scripts/test-build-deploy-contract.sh
+	./scripts/test-deploy-frontend-verification.sh
 	sh scripts/test-frontend-desktop-binding.sh
 
 daemon-clean:

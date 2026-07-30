@@ -87,12 +87,37 @@ for target in \
 	build-frontend build-daemon build-static build-static-local build-backend-image \
 	static-build static-build-local static-publish backend-image \
 	publish publish-backend publish-frontend publish-static \
-	deploy-backend deploy-frontend deploy-static daemon-checksums \
+	deploy-static daemon-checksums \
 	version-contract-check
 do
 	[ "$(target_count "$target")" -eq 0 ] || fail "obsolete public Make target survived: $target"
 done
 pass 'obsolete public target vocabulary is absent'
+
+# The renamed deploy verbs are TOMBSTONES, not absences. #189's invariant is "one USABLE deploy
+# name"; absence was only the cheapest proxy for it. A target that always exits nonzero with a
+# redirect is an error message with better wording, not a second way to deploy — and asserting
+# the behaviour instead of the absence is what stops a tombstone silently becoming a live alias,
+# which is the failure #189 actually cared about. Five people ran `make deploy-frontend` on
+# 2026-07-30 and got make's "No rule to make target", which names no cure.
+for tombstone in deploy-frontend:frontend-deploy deploy-backend:backend-deploy \
+	deploy-homepage:homepage-deploy deploy-daemon:daemon-deploy
+do
+	dead_name="${tombstone%%:*}"
+	live_name="${tombstone##*:}"
+	[ "$(target_count "$dead_name")" -eq 1 ] || fail "tombstone missing for renamed target: $dead_name"
+	set +e
+	tombstone_out="$(make -C "$repo_dir" "$dead_name" 2>&1)"
+	tombstone_rc=$?
+	set -e
+	# The row that matters: turn this recipe into a working alias and it exits 0 — RED.
+	[ "$tombstone_rc" -ne 0 ] || fail "tombstone $dead_name succeeded — it is a live alias, not a tombstone"
+	case "$tombstone_out" in
+		*"$live_name"*) ;;
+		*) fail "tombstone $dead_name does not name its replacement ($live_name)" ;;
+	esac
+done
+pass 'renamed deploy targets are failing tombstones that name their replacement'
 
 deploy_recipe="$(awk '
 	/^deploy:[[:space:]]*$/ { capture = 1; next }
