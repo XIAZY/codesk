@@ -209,6 +209,40 @@ run_case index-NEW.js index-OLD.js PATH="$bad_hash_bin"
 assert_no_upload "malformed digest"
 grep -q "not a sha256" <<< "$CASE_OUT" || fail "a malformed digest must be named as such"
 
+# A hash tool that prints a PERFECTLY VALID digest and exits nonzero. `sha256sum | cut` returns
+# cut's status, so this reads as success and the deploy proceeds on a digest that was never
+# actually produced. Only removing the pipeline can catch it — no output check ever will.
+mk_hash_fixture() {
+	fixture_dir="$1"; fixture_body="$2"
+	mkdir -p "$fixture_dir"
+	for needed in sh dirname basename pwd date grep head mktemp rm sleep cat cp sed printf wc tr cut ln mkdir touch env; do
+		needed_path="$(command -v "$needed" 2>/dev/null || true)"
+		[ -n "$needed_path" ] && ln -sf "$needed_path" "$fixture_dir/$needed"
+	done
+	cp "$TMP_DIR/bin/curl" "$fixture_dir/curl"
+	cp "$TMP_DIR/bin/git" "$fixture_dir/git"
+	printf '%s' "$fixture_body" > "$fixture_dir/sha256sum"
+	chmod +x "$fixture_dir/sha256sum"
+}
+
+mk_hash_fixture "$TMP_DIR/failhash" '#!/bin/sh
+printf "%s  %s\n" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$1"
+exit 7
+'
+run_case index-NEW.js index-OLD.js PATH="$TMP_DIR/failhash"
+[ "$CASE_RC" -ne 0 ] || fail "a digest tool exiting nonzero must fail the deploy, got exit 0"
+assert_no_upload "failing digest tool"
+grep -q "failed on" <<< "$CASE_OUT" || fail "a failing digest tool must be named"
+
+# Empty output with a zero exit: nothing to compare, and "" = "" would report a match.
+mk_hash_fixture "$TMP_DIR/emptyhash" '#!/bin/sh
+printf ""
+'
+run_case index-NEW.js index-OLD.js PATH="$TMP_DIR/emptyhash"
+[ "$CASE_RC" -ne 0 ] || fail "an empty digest must fail the deploy, got exit 0"
+assert_no_upload "empty digest"
+grep -q "not a sha256" <<< "$CASE_OUT" || fail "an empty digest must be rejected by shape"
+
 # A bad probe budget must be rejected outright rather than silently making the bound meaningless.
 run_case index-NEW.js index-OLD.js NOTTY_DEPLOY_VERIFY_ATTEMPTS=0
 [ "$CASE_RC" -ne 0 ] || fail "a non-positive attempt budget must be rejected, got exit 0"

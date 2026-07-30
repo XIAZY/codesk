@@ -67,16 +67,21 @@ live_bundle_ref() {
 # digest compared against an empty digest reports "match", which is this script's own failure
 # domain in miniature: a check that passes while verifying nothing.
 file_digest() {
+	digest_raw=""
 	digest_value=""
+	# No pipeline. `sha256sum "$1" | cut ...` returns CUT's status, so a hash tool that fails —
+	# or that prints a valid-looking token and exits nonzero — reads as success. Assigning from a
+	# plain command substitution preserves the command's own status, so `|| die` can see it.
 	case "$digest_tool" in
-		sha256sum) digest_value="$(sha256sum "$1" | cut -d' ' -f1)" ;;
-		shasum) digest_value="$(shasum -a 256 "$1" | cut -d' ' -f1)" ;;
+		sha256sum) digest_raw="$(sha256sum "$1")" || die "sha256sum failed on $1 — refusing to compare a digest that was not produced" ;;
+		shasum) digest_raw="$(shasum -a 256 "$1")" || die "shasum failed on $1 — refusing to compare a digest that was not produced" ;;
 		*) die 'no digest tool resolved — refusing to compare digests that were never computed' ;;
 	esac
-	# A pipeline ending in `cut` exits 0 even when the hash command failed, so the exit status
-	# proves nothing here; only the shape of the output does. Anchored and fully quantified on
-	# purpose: a glob that pins a prefix and wildcards the rest admits 56 arbitrary trailing
-	# bytes — the same "the wildcard is the hole" mistake this file's guards keep making.
+	# Token extracted only after a successful exit, by parameter expansion rather than another
+	# process whose status would need checking too.
+	digest_value="${digest_raw%% *}"
+	# Anchored and fully quantified: a glob that pins a prefix and wildcards the tail admits 56
+	# arbitrary trailing bytes — the same "the wildcard is the hole" mistake as the tombstone guard.
 	printf '%s' "$digest_value" | grep -qE '^[0-9a-f]{64}$' ||
 		die "digest of $1 is not a sha256 (got '$digest_value') — refusing to compare"
 	printf '%s' "$digest_value"
