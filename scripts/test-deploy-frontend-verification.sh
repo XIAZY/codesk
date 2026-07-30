@@ -79,7 +79,11 @@ run_case() {
 	printf '%s' "$served" > "$FAKE_SERVED_STATE"
 	printf 'BUILT-%s' "$built" > "$FAKE_BUILT_ASSET"
 	printf 'SERVED-%s' "$served" > "$FAKE_SERVED_ASSET"
-	printf '<script src="/assets/%s"></script>\n' "$built" > "$TMP_DIR/dist/static/app/index.html"
+	if [ "${FAKE_BREAK_BUILT_INDEX:-0}" = "1" ]; then
+		printf '<html>no bundle reference</html>\n' > "$TMP_DIR/dist/static/app/index.html"
+	else
+		printf '<script src="/assets/%s"></script>\n' "$built" > "$TMP_DIR/dist/static/app/index.html"
+	fi
 	rm -f "$TMP_DIR/dist/static/app/assets/"*
 	cp "$FAKE_BUILT_ASSET" "$TMP_DIR/dist/static/app/assets/$built"
 	: > "$FAKE_UPLOAD_LOG"
@@ -143,6 +147,31 @@ grep -q "WARNING" <<< "$CASE_OUT" || fail "the override must be loud"
 run_case index-NEW.js index-OLD.js NOTTY_FRONTEND_ORIGIN=
 [ "$CASE_RC" -ne 0 ] || fail "unverifiable deploy must fail, got exit 0"
 assert_no_upload "missing origin"
+
+# curl absent is knowable before publishing. Without the explicit precheck the deploy still fails
+# closed — but with a bare "command not found" instead of naming the tool, which is exactly the
+# diagnosis you do not want at 2am. So the message is asserted, not just the exit code.
+# A PATH that genuinely lacks curl: every other tool the script needs, symlinked, nothing else.
+# Prepending a fake dir to the real PATH would not work — curl is still found further along it.
+curl_less_bin="$TMP_DIR/nocurl"
+mkdir -p "$curl_less_bin"
+cp "$TMP_DIR/bin/git" "$curl_less_bin/git"
+for needed in sh dirname basename pwd date grep head sha256sum shasum mktemp rm sleep cat cp sed printf wc tr cut ln mkdir touch env; do
+	needed_path="$(command -v "$needed" 2>/dev/null || true)"
+	[ -n "$needed_path" ] && ln -sf "$needed_path" "$curl_less_bin/$needed"
+done
+[ -x "$curl_less_bin/curl" ] && fail "the no-curl fixture still provides curl"
+run_case index-NEW.js index-OLD.js PATH="$curl_less_bin"
+[ "$CASE_RC" -ne 0 ] || fail "a deploy with no curl must fail, got exit 0"
+assert_no_upload "missing curl"
+grep -q "curl not found" <<< "$CASE_OUT" || fail "a missing curl must be named, not left as 'command not found'"
+
+# A build that produced no usable index is knowable after the build and before the upload.
+FAKE_BREAK_BUILT_INDEX=1 run_case index-NEW.js index-OLD.js
+FAKE_BREAK_BUILT_INDEX=0
+[ "$CASE_RC" -ne 0 ] || fail "a malformed built index must fail, got exit 0"
+assert_no_upload "malformed built index"
+grep -q "no bundle reference found" <<< "$CASE_OUT" || fail "a malformed built index must say what is wrong with it"
 
 # A bad probe budget must be rejected outright rather than silently making the bound meaningless.
 run_case index-NEW.js index-OLD.js NOTTY_DEPLOY_VERIFY_ATTEMPTS=0

