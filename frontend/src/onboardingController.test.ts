@@ -13,6 +13,7 @@ const thread = (participantIds: string[]): ThreadItem => ({ participantIds }) as
 function ws(partial: Partial<WorkspaceState>): WorkspaceState {
   return {
     workspaceId: "w",
+    slug: "w",
     rootDocumentId: "",
     name: "",
     users: [],

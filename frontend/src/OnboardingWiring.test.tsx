@@ -83,6 +83,7 @@ function agent(id: string): Agent {
 function workspaceState(overrides: Partial<WorkspaceState> = {}): WorkspaceState {
   return {
     workspaceId: "workspace_1",
+    slug: "workspace_1",
     rootDocumentId: "root_doc",
     currentUserId: "user_owner",
     name: "Product Workspace",

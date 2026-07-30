@@ -76,6 +76,36 @@ func TestContractWorkspaceSnapshotRESTParity(t *testing.T) {
 		t.Fatalf("unmarshal snapshot data: %v", err)
 	}
 
+	// Scalars shared by both surfaces must agree AND be non-empty. The collection loop below
+	// cannot see them, so before this row a transport could silently drop slug: the reducer's
+	// `?? state.slug` and the HTTP load mask a websocket-only omission at runtime, which makes it
+	// exactly the kind of unpinned invariant that regresses without anyone noticing.
+	for _, key := range []string{"slug"} {
+		restVal, restOK := restObj[key]
+		snapVal, snapOK := snapObj[key]
+		if !restOK {
+			t.Errorf("scalar %q missing from GET /workspace", key)
+			continue
+		}
+		if !snapOK {
+			t.Errorf("scalar %q missing from the workspace snapshot", key)
+			continue
+		}
+		var restStr, snapStr string
+		if err := json.Unmarshal(restVal, &restStr); err != nil {
+			t.Fatalf("unmarshal REST %q: %v", key, err)
+		}
+		if err := json.Unmarshal(snapVal, &snapStr); err != nil {
+			t.Fatalf("unmarshal snapshot %q: %v", key, err)
+		}
+		if restStr == "" {
+			t.Errorf("scalar %q is empty on GET /workspace", key)
+		}
+		if restStr != snapStr {
+			t.Errorf("scalar %q differs across surfaces: REST %q, snapshot %q", key, restStr, snapStr)
+		}
+	}
+
 	// Each shared collection must be byte-identical after canonicalization across the two surfaces.
 	for _, key := range workspaceCollectionKeys {
 		restVal, restOK := restObj[key]

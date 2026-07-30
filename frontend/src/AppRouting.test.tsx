@@ -82,6 +82,7 @@ function workspaceState(workspaceId = "workspace_team"): WorkspaceState {
   };
   return {
     workspaceId,
+    slug: "workspace-slug",
     rootDocumentId: "root_doc",
     currentUserId: "user_owner",
     currentMembershipRole: "owner",

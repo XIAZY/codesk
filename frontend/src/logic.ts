@@ -352,6 +352,7 @@ export function emptyWorkspace(): WorkspaceState {
     rootDocumentId: "",
     currentMembershipRole: "",
     name: "",
+    slug: "",
     users: [],
     daemons: [],
     agents: [],
