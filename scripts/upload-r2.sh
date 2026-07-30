@@ -441,6 +441,24 @@ upload_file() {
 		"$upload_file_path" "$upload_file_cache_control"
 }
 
+# The object that a bare "/" actually serves. It lives under the empty key, which rclone cannot
+# express, so this is the one write in the whole uploader that is not rclone's. It must run AFTER
+# the named index.html upload so the two can never disagree about which build is live.
+upload_root_object() {
+	upload_root_bucket="$1"
+	upload_root_path="$2"
+	need_file "$upload_root_path"
+	printf 'Writing root object (serves "/") for %s\n' "$upload_root_bucket"
+	aws s3api put-object \
+		--endpoint-url "$R2_ENDPOINT_URL" \
+		--bucket "$upload_root_bucket" \
+		--key '' \
+		--body "$upload_root_path" \
+		--content-type text/html \
+		--cache-control 'public, max-age=60' >/dev/null ||
+		die "could not write the root object for $upload_root_bucket — \"/\" would keep serving the previous build"
+}
+
 upload_committed_release_dir() {
 	upload_release_src="$1"
 	upload_release_bucket="$2"
@@ -501,6 +519,17 @@ case "$target" in
 esac
 
 command -v rclone >/dev/null 2>&1 || die 'rclone is required for R2 uploads'
+case "$target" in
+	frontend | homepage)
+		# A bare visit to https://<domain>/ is served by an object stored under the EMPTY key, not
+		# by index.html. rclone cannot address that key at all — it reports "Entry doesn't belong
+		# in directory" and skips it — so since #225 every deploy has left it untouched. On
+		# 2026-07-30 that object was two days stale while index.html was current, and every deploy
+		# reported success. aws s3api is the only tool here that can name an empty key.
+		command -v aws >/dev/null 2>&1 ||
+			die 'aws CLI is required to write the root object that serves "/" (rclone cannot address an empty key)'
+		;;
+esac
 need R2_ENDPOINT_URL
 need AWS_ACCESS_KEY_ID
 need AWS_SECRET_ACCESS_KEY
@@ -541,6 +570,7 @@ upload_homepage() {
 	printf 'Uploading homepage to %s\n' "$(s3_uri "$R2_HOMEPAGE_BUCKET" "$homepage_prefix")"
 	upload_dir "$static_dist_dir/homepage" "$R2_HOMEPAGE_BUCKET" "$homepage_prefix" 'public, max-age=300'
 	upload_browser_assets "$R2_HOMEPAGE_BUCKET" "$homepage_prefix" "$static_dist_dir/homepage"
+	upload_root_object "$R2_HOMEPAGE_BUCKET" "$static_dist_dir/homepage/index.html"
 }
 
 if [ "$target" = homepage ]; then
@@ -557,6 +587,7 @@ if [ "$target" = frontend ]; then
 	upload_dir "$static_dist_dir/app" "$R2_APP_BUCKET" "$app_prefix" "$release_cache_control"
 	upload_browser_assets "$R2_APP_BUCKET" "$app_prefix" "$static_dist_dir/app"
 	upload_file "$R2_APP_BUCKET" "$(join_key "$app_prefix" index.html)" "$static_dist_dir/app/index.html" 'public, max-age=60'
+	upload_root_object "$R2_APP_BUCKET" "$static_dist_dir/app/index.html"
 fi
 
 if [ "$target" = daemon ]; then

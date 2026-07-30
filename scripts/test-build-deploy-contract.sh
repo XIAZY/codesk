@@ -68,8 +68,17 @@ do
 	grep -Fq "$required_uploader_source" "$uploader_source" ||
 		fail "shared R2 uploader is missing: $required_uploader_source"
 done
+# #225 made this uploader rclone-only and this guard keeps it that way. The ONE documented
+# exception is the root object that serves "/": it lives under the empty key, rclone cannot
+# express that key at all, and leaving it unwritten is what served a two-day-old site on
+# 2026-07-30. So `aws s3api put-object` is permitted for exactly that write and nothing else —
+# asserted positively below, so the exception cannot quietly widen back into a second uploader.
+grep -Fq "aws s3api put-object" "$uploader_source" ||
+	fail 'shared R2 uploader lost the root-object write that serves "/"'
+[ "$(grep -cE '^[[:space:]]*aws ' "$uploader_source")" -eq 1 ] ||
+	fail 'shared R2 uploader invokes aws for more than the single root-object write'
 for obsolete_uploader_source in \
-	wrangler aws_s3 'command -v aws' 'uploader=' \
+	wrangler aws_s3 'uploader=' \
 	CLOUDFLARE_API_TOKEN NOTTY_CLOUDFLARE_TOKEN CLOUDFLARE_ACCOUNT_ID
 do
 	if grep -Fiq "$obsolete_uploader_source" "$uploader_source"; then
@@ -314,6 +323,10 @@ aws_object_path() {
 	esac
 }
 
+if [ "${1:-}" = s3api ] && [ "${2:-}" = put-object ]; then
+	[ "${AWS_FAIL_ROOT_WRITE:-0}" -eq 0 ] || exit 75
+	exit 0
+fi
 if [ "${4:-}" = ls ]; then
 	case "$5" in
 		*/latest/manifest.json)
@@ -853,6 +866,56 @@ grep -F 's3://homepage/favicon.ico' "$aws_log" | grep -Fq -- '--content-type ima
 grep -F 's3://app/favicon.ico' "$aws_log" | grep -Fq -- '--content-type image/x-icon' ||
 	fail 'app favicon.ico did not receive an icon content type'
 pass 'browser icons are explicitly uploaded with compatible metadata and short caching'
+
+# The object a bare "/" serves lives under the EMPTY key, which rclone cannot address. Before this
+# was written, every deploy left it untouched: on 2026-07-30 it was two days stale while
+# index.html was current, and the deploy reported success both times.
+root_log="$tmp_dir/root-order.log"
+: >"$root_log"
+PATH="$fake_bin:$PATH" AWS_LOG="$root_log" RCLONE_LOG="$root_log" \
+	STATIC_DIST_DIR="$static_dist" UPLOAD_TARGET=frontend \
+	R2_ENDPOINT_URL=https://example.invalid R2_HOMEPAGE_BUCKET=homepage R2_APP_BUCKET=app \
+	"$repo_dir/scripts/upload-r2.sh" >/dev/null
+for root_bucket in homepage app; do
+	[ "$(grep -c -- "put-object .*--bucket $root_bucket --key[[:space:]]*--body" "$root_log")" -eq 1 ] ||
+		fail "$root_bucket root object (serves \"/\") was not written exactly once"
+done
+# Ordering is the correctness property: if the root write preceded the named upload, "/" and
+# "/index.html" could disagree about which build is live — exactly tonight's failure.
+root_named_line="$(grep -n -- 'copyto .*app/index.html' "$root_log" | tail -1 | cut -d: -f1)"
+root_write_line="$(grep -n -- 'put-object .*--bucket app --key[[:space:]]*--body' "$root_log" | tail -1 | cut -d: -f1)"
+[ -n "$root_named_line" ] && [ -n "$root_write_line" ] && [ "$root_write_line" -gt "$root_named_line" ] ||
+	fail 'root object must be written AFTER the named index.html, or the two can disagree'
+grep -F -- '--content-type text/html' "$root_log" | grep -Eq -- '--key[[:space:]]*--body' ||
+	fail 'root object was not written as text/html'
+pass 'the root object that serves "/" is written once per bucket, after the named index'
+
+# Fails closed, both ways: a root write that errors, and an aws binary that is absent. A silent
+# skip here is the entire disease — the deploy would report success and "/" would stay stale.
+if PATH="$fake_bin:$PATH" AWS_LOG="$tmp_dir/root-fail.log" AWS_FAIL_ROOT_WRITE=1 \
+	STATIC_DIST_DIR="$static_dist" UPLOAD_TARGET=frontend \
+	R2_ENDPOINT_URL=https://example.invalid R2_HOMEPAGE_BUCKET=homepage R2_APP_BUCKET=app \
+	"$repo_dir/scripts/upload-r2.sh" >/dev/null 2>&1
+then
+	fail 'a failed root-object write did not fail the deploy'
+fi
+rclone_only_bin="$tmp_dir/rclone-only-bin"
+mkdir -p "$rclone_only_bin"
+cp "$fake_bin/rclone" "$rclone_only_bin/rclone"
+missing_aws_err="$tmp_dir/missing-aws.err"
+if PATH="$rclone_only_bin:/usr/bin:/bin" \
+	STATIC_DIST_DIR="$static_dist" UPLOAD_TARGET=frontend \
+	R2_ENDPOINT_URL=https://example.invalid R2_HOMEPAGE_BUCKET=homepage R2_APP_BUCKET=app \
+	"$repo_dir/scripts/upload-r2.sh" >/dev/null 2>"$missing_aws_err"
+then
+	fail 'a missing aws CLI did not fail the deploy — the root object would silently stay stale'
+fi
+# Failing is not enough: it must fail BEFORE uploading anything and say which tool is missing.
+# Without the explicit precheck the deploy still fails, but only after publishing assets and with
+# a message about the root write rather than the absent binary.
+grep -Fq 'aws CLI is required' "$missing_aws_err" ||
+	fail 'a missing aws CLI must be reported as such, before any upload runs'
+pass 'root-object write fails closed on error and on a missing aws CLI'
 
 daemon_dist="$tmp_dir/daemons"
 write_daemon_release "$daemon_dist" "$release_version"
