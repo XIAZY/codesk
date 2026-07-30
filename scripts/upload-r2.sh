@@ -473,7 +473,7 @@ upload_dir() {
 	upload_dir_cache_control="$4"
 	need_dir "$upload_dir_src"
 	upload_dir_remote="$(rclone_remote "$upload_dir_bucket" "$upload_dir_prefix")"
-	rclone sync "$upload_dir_src" "$upload_dir_remote" --no-check-dest \
+	rclone sync "$upload_dir_src" "$upload_dir_remote" --ignore-times \
 		--header-upload "Cache-Control: $upload_dir_cache_control"
 }
 
