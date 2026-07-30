@@ -106,13 +106,25 @@ do
 	dead_name="${tombstone%%:*}"
 	live_name="${tombstone##*:}"
 	[ "$(target_count "$dead_name")" -eq 1 ] || fail "tombstone missing for renamed target: $dead_name"
-	set +e
-	tombstone_out="$(make -C "$repo_dir" "$dead_name" 2>&1)"
-	tombstone_rc=$?
-	set -e
-	# The row that matters: turn this recipe into a working alias and it exits 0 — RED.
-	[ "$tombstone_rc" -ne 0 ] || fail "tombstone $dead_name succeeded — it is a live alias, not a tombstone"
-	case "$tombstone_out" in
+	# Pin the recipe STRUCTURALLY rather than running it. The regression this guard exists to catch
+	# is "the tombstone became a working alias" — and executing a dead deploy target to find that
+	# out would run the production deploy under ambient credentials before the assertion could fail.
+	# A guard must not be able to cause the damage it is watching for.
+	tombstone_recipe="$(awk -v target="$dead_name" '
+		$0 ~ ("^" target ":[[:space:]]*$") { capture = 1; next }
+		capture && /^[^\t]/ { exit }
+		capture { print }
+	' "$repo_dir/Makefile" | sed '/^[[:space:]]*$/d')"
+	[ "$(printf '%s\n' "$tombstone_recipe" | wc -l)" -eq 1 ] ||
+		fail "tombstone $dead_name must be exactly one line; a multi-line recipe can do work"
+	# Whitelist the exact shape rather than blacklisting dangerous substrings: a blacklist cannot
+	# tell a command from the same word quoted inside the message, and anything not matching this
+	# one form — printf to stderr, then exit 1 — is by construction incapable of doing work.
+	case "$tombstone_recipe" in
+		"$(printf '\t')@printf '"*"' >&2; exit 1") ;;
+		*) fail "tombstone $dead_name must be exactly: @printf '...' >&2; exit 1 (got: $tombstone_recipe)" ;;
+	esac
+	case "$tombstone_recipe" in
 		*"$live_name"*) ;;
 		*) fail "tombstone $dead_name does not name its replacement ($live_name)" ;;
 	esac
