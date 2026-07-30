@@ -67,6 +67,7 @@ live_bundle_ref() {
 # digest compared against an empty digest reports "match", which is this script's own failure
 # domain in miniature: a check that passes while verifying nothing.
 file_digest() {
+	digest_value=""
 	case "$digest_tool" in
 		sha256sum) digest_value="$(sha256sum "$1" | cut -d' ' -f1)" ;;
 		shasum) digest_value="$(shasum -a 256 "$1" | cut -d' ' -f1)" ;;
