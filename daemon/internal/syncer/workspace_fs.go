@@ -30,6 +30,20 @@ type FileSnapshot struct {
 	Hash   projectedContentHash
 }
 
+type workspacePathOccupantKind uint8
+
+const (
+	workspacePathAbsent workspacePathOccupantKind = iota
+	workspacePathRegularFile
+	workspacePathDirectory
+	workspacePathOther
+)
+
+type workspacePathOccupant struct {
+	Kind workspacePathOccupantKind
+	Mode os.FileMode
+}
+
 type FSError struct {
 	Op         string
 	Path       string
@@ -182,14 +196,6 @@ func (fs *WorkspaceFS) CreateEmptyOrRead(path string) (FileSnapshot, error) {
 	return fs.createEmptyOrRead(path, createEmptyFileExclusive)
 }
 
-// CreateOrRead publishes content only if path is still absent. A concurrently
-// created working copy wins and is returned unchanged.
-func (fs *WorkspaceFS) CreateOrRead(path string, content []byte) (FileSnapshot, error) {
-	return fs.createEmptyOrRead(path, func(candidate string) error {
-		return createFileExclusive(candidate, content)
-	})
-}
-
 func (fs *WorkspaceFS) createEmptyOrRead(path string, createEmpty func(string) error) (FileSnapshot, error) {
 	path, err := fs.cleanPath(path)
 	if err != nil {
@@ -217,22 +223,6 @@ func (fs *WorkspaceFS) createEmptyOrRead(path string, createEmpty func(string) e
 func createEmptyFileExclusive(path string) error {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
-		return err
-	}
-	return file.Close()
-}
-
-func createFileExclusive(path string, content []byte) error {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	if err := writeFullString(file, string(content)); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
 		return err
 	}
 	return file.Close()
@@ -340,6 +330,14 @@ func (fs *WorkspaceFS) MoveIfNoTarget(from string, to string) error {
 }
 
 func (fs *WorkspaceFS) Archive(path string, reason string) (string, error) {
+	return fs.archive(path, reason, false)
+}
+
+func (fs *WorkspaceFS) archiveRegularFile(path string, reason string) (string, error) {
+	return fs.archive(path, reason, true)
+}
+
+func (fs *WorkspaceFS) archive(path string, reason string, regularOnly bool) (string, error) {
 	path, err := fs.cleanPath(path)
 	if err != nil {
 		return "", err
@@ -351,7 +349,17 @@ func (fs *WorkspaceFS) Archive(path string, reason string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if _, statErr := os.Stat(path); errors.Is(statErr, os.ErrNotExist) {
+		if regularOnly {
+			occupant, classifyErr := classifyWorkspacePathOccupant(path)
+			if classifyErr != nil {
+				unlock()
+				return "", &FSError{Op: "archive", Path: path, TargetPath: archivePath, Err: classifyErr}
+			}
+			if occupant.Kind != workspacePathRegularFile {
+				unlock()
+				return "", nil
+			}
+		} else if _, statErr := os.Stat(path); errors.Is(statErr, os.ErrNotExist) {
 			unlock()
 			return "", nil
 		} else if statErr != nil {
@@ -386,6 +394,43 @@ func (fs *WorkspaceFS) Archive(path string, reason string) (string, error) {
 		return archivePath, nil
 	}
 	return "", &FSError{Op: "archive", Path: path, Err: errors.New("failed to allocate recovered workspace file name")}
+}
+
+func classifyWorkspacePathOccupant(path string) (workspacePathOccupant, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return workspacePathOccupant{Kind: workspacePathAbsent}, nil
+	}
+	if err != nil {
+		return workspacePathOccupant{}, err
+	}
+	occupant := workspacePathOccupant{Mode: info.Mode()}
+	switch {
+	case info.Mode().IsRegular():
+		occupant.Kind = workspacePathRegularFile
+	case info.IsDir():
+		occupant.Kind = workspacePathDirectory
+	default:
+		occupant.Kind = workspacePathOther
+	}
+	return occupant, nil
+}
+
+func workspacePathProvidesFileContent(path string, occupant workspacePathOccupant) (bool, error) {
+	if occupant.Kind == workspacePathRegularFile {
+		return true, nil
+	}
+	if occupant.Kind != workspacePathOther || occupant.Mode&os.ModeSymlink == 0 {
+		return false, nil
+	}
+	resolved, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return resolved.Mode().IsRegular(), nil
 }
 
 func (fs *WorkspaceFS) EnsureParent(path string) error {

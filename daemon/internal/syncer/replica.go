@@ -539,6 +539,7 @@ func (r *workspaceReplica) handleWatcherEvent(event fsnotify.Event, now time.Tim
 		}
 		if tracked != nil {
 			r.changes.markTrackedPresent(tracked.DocumentID, path, identity)
+			tracked.clearLocalDeleted()
 			if err := markTrackedLocalDirty(tracked, path); err != nil {
 				return err
 			}
@@ -568,6 +569,7 @@ func (r *workspaceReplica) handleWatcherEvent(event fsnotify.Event, now time.Tim
 				return nil
 			}
 			r.changes.markTrackedPresent(tracked.DocumentID, path, statFileIdentity(path))
+			tracked.clearLocalDeleted()
 			if err := markTrackedLocalDirty(tracked, path); err != nil {
 				return err
 			}
@@ -661,6 +663,7 @@ func (r *workspaceReplica) reconcileLocalWorkspace(ctx context.Context) error {
 			}
 		}
 		if exists {
+			tracked.clearLocalDeleted()
 			if r.changes != nil {
 				r.changes.markTrackedPresent(tracked.DocumentID, tracked.Path, statFileIdentity(tracked.Path))
 			}
@@ -680,9 +683,7 @@ func (r *workspaceReplica) reconcileLocalWorkspace(ctx context.Context) error {
 			r.recordTrackedIdentity(nextPath)
 			continue
 		}
-		// Local absence cannot distinguish an intentional delete from the gap in
-		// an unlink-and-create replacement. Keep document identity authoritative
-		// and let central reconciliation restore a truly missing working copy.
+		tracked.markLocalDeleted()
 		r.markDocumentDirty(tracked.DocumentID)
 	}
 
@@ -708,15 +709,15 @@ func (r *workspaceReplica) reconcileLocalWorkspace(ctx context.Context) error {
 }
 
 func observeTrackedFileAfterMissingSignal(path string) (string, bool, error) {
-	info, err := os.Lstat(path)
-	switch {
-	case err == nil:
-	case errors.Is(err, os.ErrNotExist):
-		return "", false, nil
-	default:
+	occupant, err := classifyWorkspacePathOccupant(path)
+	if err != nil {
 		return "", false, err
 	}
-	if info.IsDir() {
+	providesContent, err := workspacePathProvidesFileContent(path, occupant)
+	if err != nil {
+		return "", false, err
+	}
+	if !providesContent {
 		return "", false, nil
 	}
 
@@ -764,22 +765,44 @@ func (r *workspaceReplica) drainPathChanges(ctx context.Context, now time.Time) 
 		r.markDocumentDirty(tracked.DocumentID)
 		r.recordTrackedIdentity(move.NewPath)
 	}
-	for _, missing := range changes.ReadyMissing {
+	for _, deletion := range changes.LocalDeletes {
 		r.mu.Lock()
-		tracked := r.projectedByID[missing.DocumentID]
+		tracked := r.projectedByID[deletion.DocumentID]
 		r.mu.Unlock()
-		if tracked == nil || tracked.isProjecting() || tracked.Path != missing.Path {
-			r.changes.resolvePendingMissing(missing)
+		if tracked == nil || tracked.isProjecting() || tracked.Path != deletion.Path {
+			r.changes.resolvePendingMissing(deletion)
 			continue
 		}
-		if !r.changes.resolvePendingMissing(missing) {
+		current, exists, err := r.observeTrackedFileAfterMissingSignal(deletion.Path)
+		if err != nil {
+			return r.changes.hasPendingMissing(), fmt.Errorf(
+				"re-observe tracked file %q before pending delete: %w",
+				deletion.Path,
+				err,
+			)
+		}
+		if exists {
+			r.changes.markTrackedPresent(
+				tracked.DocumentID,
+				deletion.Path,
+				statFileIdentity(deletion.Path),
+			)
+			tracked.clearLocalDeleted()
+			if !tracked.matchesProjectedString(current) {
+				if err := r.handleLocalChange(deletion.Path); err != nil {
+					return r.changes.hasPendingMissing(), err
+				}
+			}
 			continue
 		}
-		// A ready missing signal only wakes document reconciliation. That locked
-		// read either adopts replacement bytes or restores canonical content; it
-		// never promotes path absence into remote delete intent.
+		if !r.changes.resolvePendingMissing(deletion) {
+			continue
+		}
+		tracked.markLocalDeleted()
 		r.markDocumentDirty(tracked.DocumentID)
-		r.changes.removeIdentity(missing.Path)
+		if r.changes != nil {
+			r.changes.removeIdentity(deletion.Path)
+		}
 	}
 	for _, candidate := range changes.LocalCreates {
 		if r.markCreate != nil {
@@ -925,6 +948,7 @@ func (r *workspaceReplica) untrack(tracked *trackedFile) {
 		r.changes.removeIdentity(tracked.Path)
 	}
 	tracked.clearLocalDirty()
+	tracked.clearLocalDeleted()
 	tracked.clearLocalMoved()
 	tracked.clearRemoteDeleted()
 }

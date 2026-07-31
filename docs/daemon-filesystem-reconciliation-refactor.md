@@ -594,18 +594,48 @@ If backend metadata says document path changed:
 
 If a tracked file disappears locally:
 
-1. Treat the missing path as a move-correlation and retry signal, never as
-   authority to delete the backend document.
-2. If no matching move appears, project the canonical content back to the
-   document's tracked path with exclusive-create semantics.
-3. If another file wins that create race, preserve its bytes and reconcile
-   them under the already tracked `documentID`.
+1. Start a generation-tagged missing candidate and allow the move/replacement
+   correlation window to expire.
+2. Any confirmed-present scan, `CREATE`, or `WRITE` cancels the current
+   candidate. Observation errors retain it for retry.
+3. Immediately before propagation, directly observe the tracked path again.
+   Present cancels; confirmed absence while the exact candidate is still
+   current tombstones the root entry by its already-known `documentID`.
+4. Queue the root tombstone and its local-delete projection intent for the
+   root/document ID pair in one SQLite transaction. Keep the tracked identity
+   until the root projection applies the tombstone. If a replacement appears
+   after the final absence check, archive any regular-file occupant under that
+   document ID before removing the visible path, including a replacement whose
+   bytes equal the previous projection. Recovery visits the union of the
+   persisted materialized path and the current tracked path, if a post-commit
+   move rekeyed it, so every regular-file path still associated with the
+   document is archived before untracking. An absent or non-regular occupant
+   has no document bytes to recover, so projection leaves it unchanged and
+   completes the tombstone. Send or projection failures retain the outbox
+   update and intent for retry.
+5. Clear durable local-delete intents in the same SQLite transaction that
+   stores the successfully applied root projection. This makes the recovery
+   boundary survive daemon restarts without leaving a permanently armed
+   marker. On restart, root-first projection uses the persisted materialized
+   path and exact document ID before consulting in-memory tracking, which has
+   not been restored yet. Explicit remote/UI tombstones keep the normal
+   clean-delete/dirty-archive behavior.
+6. If projected state is unknown, do not tombstone the root entry.
 
-Only an explicit tombstone in the root CRDT deletes a document. A shell
-`rm`, watcher REMOVE, or scan omission cannot distinguish deletion intent from
-an unlink-and-replace operation and therefore must not produce a tombstone.
-This keeps document identity keyed by `documentID`, including when multiple
-documents have the same desired visible path.
+Candidate confirmation, propagation-boundary observation, and the periodic
+workspace scan share one physical-occupant classifier before content I/O. A
+regular file or a symlink resolving to a regular file provides readable
+document content; absence, directories, dangling symlinks, and other physical
+objects do not. Post-commit recovery is intentionally stricter and archives
+only physical regular files, so a FIFO, socket, directory, or symlink cannot
+block reconciliation or be moved as recovered document bytes.
+
+This contract deliberately does not infer identity from a pathname. It also
+does not claim that a local filesystem check and a remote CRDT commit are
+atomic: an unlink-then-create sequence that spans the final cutoff can still
+produce a tombstone. The late replacement remains recoverable by document ID;
+eliminating the tombstone itself would require an explicit delete intent rather
+than inference from filesystem absence.
 
 ### Remote Delete
 
