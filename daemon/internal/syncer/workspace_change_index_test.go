@@ -2,6 +2,7 @@ package syncer
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -61,11 +62,17 @@ func TestWorkspaceChangeIndexDelaysUnmatchedMissingBeforeDelete(t *testing.T) {
 	}
 
 	changes, pending = index.drain(now.Add(workspaceMissingPathDelay + time.Millisecond))
-	if pending {
-		t.Fatal("missing path should be drained after delay")
+	if !pending {
+		t.Fatal("ready delete should remain pending until the filesystem decision is confirmed")
 	}
 	if got := changes.LocalDeletes; len(got) != 1 || got[0].DocumentID != "doc_gone" {
 		t.Fatalf("local deletes = %#v", got)
+	}
+	if !index.resolvePendingMissing("doc_gone", "/workspace/docs/gone.md") {
+		t.Fatal("ready delete should resolve the matching pending path")
+	}
+	if index.hasPendingMissing() {
+		t.Fatal("confirmed missing path should no longer be pending")
 	}
 }
 
@@ -369,6 +376,207 @@ func TestWorkspaceReplicaEventPathTrackedReplaceAtSamePathCancelsMissing(t *test
 	}
 	if !containsTestString(dirty, "doc_replace") {
 		t.Fatalf("same-path replacement did not mark document dirty: %#v", dirty)
+	}
+}
+
+type trackedEventPathFixture struct {
+	root    string
+	path    string
+	replica *workspaceReplica
+	tracked *trackedFile
+	dirty   []string
+}
+
+func newTrackedEventPathFixture(t *testing.T, documentID string) *trackedEventPathFixture {
+	t.Helper()
+	fixture := &trackedEventPathFixture{root: t.TempDir()}
+	fixture.path = filepath.Join(fixture.root, "docs", "tracked.md")
+	if err := os.MkdirAll(filepath.Dir(fixture.path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(fixture.path, []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+	fixture.replica = &workspaceReplica{
+		rootDir:   fixture.root,
+		actorID:   "daemon_agent",
+		actorType: "daemon",
+		markDirty: func(documentID string) {
+			fixture.dirty = append(fixture.dirty, documentID)
+		},
+		fs:              NewWorkspaceFS(fixture.root),
+		projectedByPath: map[string]*trackedFile{},
+		projectedByID:   map[string]*trackedFile{},
+		changes:         newWorkspaceChangeIndex(),
+	}
+	fixture.tracked = &trackedFile{
+		DocumentID:    documentID,
+		DocumentPath:  "docs/tracked.md",
+		Path:          fixture.path,
+		WorkspaceRoot: fixture.root,
+		FS:            fixture.replica.fs,
+		Owner:         fixture.replica,
+	}
+	fixture.tracked.setProjectedContent("base\n")
+	fixture.replica.projectedByPath[fixture.path] = fixture.tracked
+	fixture.replica.projectedByID[documentID] = fixture.tracked
+	fixture.replica.recordTrackedIdentity(fixture.path)
+	return fixture
+}
+
+func (f *trackedEventPathFixture) removeAndQueue(t *testing.T) time.Time {
+	t.Helper()
+	if err := os.Remove(f.path); err != nil {
+		t.Fatalf("remove base: %v", err)
+	}
+	now := time.Now()
+	if err := f.replica.handleWatcherEvent(fsnotify.Event{Name: f.path, Op: fsnotify.Remove}, now); err != nil {
+		t.Fatalf("handle remove: %v", err)
+	}
+	return now
+}
+
+func TestWorkspaceReplicaEventPathCoalescedCreateAfterRemoveRequiresExactPathConfirmation(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		symlink     bool
+		replacement string
+		wantDirty   bool
+	}{
+		{name: "unchanged regular file", replacement: "base\n"},
+		{name: "changed regular file", replacement: "replacement\n", wantDirty: true},
+		{name: "unchanged symlinked file", symlink: true, replacement: "base\n"},
+		{name: "changed symlinked file", symlink: true, replacement: "replacement\n", wantDirty: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newTrackedEventPathFixture(t, "doc_replace")
+			now := fixture.removeAndQueue(t)
+
+			contentPath := fixture.path
+			if tc.symlink {
+				contentPath = filepath.Join(fixture.root, "replacement-target.md")
+			}
+			if err := os.WriteFile(contentPath, []byte(tc.replacement), 0o644); err != nil {
+				t.Fatalf("write replacement: %v", err)
+			}
+			if tc.symlink {
+				if err := os.Symlink(contentPath, fixture.path); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			}
+
+			if pending, err := fixture.replica.drainPathChanges(
+				context.Background(),
+				now.Add(workspaceMissingPathDelay+time.Millisecond),
+			); err != nil {
+				t.Fatalf("drain replacement without create event: %v", err)
+			} else if pending {
+				t.Fatal("present replacement should cancel pending missing work")
+			}
+			if fixture.tracked.isLocalDeleted() {
+				t.Fatal("present replacement became a local delete when its create event was omitted")
+			}
+			if got := fixture.tracked.isLocalDirty(); got != tc.wantDirty {
+				t.Fatalf("replacement local dirty = %t, want %t", got, tc.wantDirty)
+			}
+			if got := containsTestString(fixture.dirty, fixture.tracked.DocumentID); got != tc.wantDirty {
+				t.Fatalf("replacement did not mark document dirty: %#v", fixture.dirty)
+			}
+		})
+	}
+}
+
+func TestWorkspaceReplicaEventPathCreateDuringDeleteConfirmationWins(t *testing.T) {
+	fixture := newTrackedEventPathFixture(t, "doc_interleaved_create")
+	now := fixture.removeAndQueue(t)
+	fixture.replica.observeMissingPath = func(gotPath string) (string, bool, error) {
+		if gotPath != fixture.path {
+			t.Fatalf("observe path = %q, want %q", gotPath, fixture.path)
+		}
+		if err := os.WriteFile(fixture.path, []byte("replacement\n"), 0o644); err != nil {
+			t.Fatalf("write replacement: %v", err)
+		}
+		if err := fixture.replica.handleWatcherEvent(
+			fsnotify.Event{Name: fixture.path, Op: fsnotify.Create},
+			now.Add(workspaceMissingPathDelay),
+		); err != nil {
+			t.Fatalf("handle interleaved create: %v", err)
+		}
+		// Model an absence observation that completed just before the create.
+		return "", false, nil
+	}
+
+	if pending, err := fixture.replica.drainPathChanges(
+		context.Background(),
+		now.Add(workspaceMissingPathDelay+time.Millisecond),
+	); err != nil {
+		t.Fatalf("drain interleaved create: %v", err)
+	} else if pending {
+		t.Fatal("newer create should resolve the pending missing signal")
+	}
+	if fixture.tracked.isLocalDeleted() {
+		t.Fatal("stale absence observation overwrote a newer create")
+	}
+	if !fixture.tracked.isLocalDirty() {
+		t.Fatal("newer create should mark the replacement dirty")
+	}
+}
+
+func TestWorkspaceReplicaEventPathConfirmsDirectoryReplacementAsDelete(t *testing.T) {
+	fixture := newTrackedEventPathFixture(t, "doc_directory")
+	now := fixture.removeAndQueue(t)
+	if err := os.Mkdir(fixture.path, 0o755); err != nil {
+		t.Fatalf("mkdir replacement: %v", err)
+	}
+	if pending, err := fixture.replica.drainPathChanges(
+		context.Background(),
+		now.Add(workspaceMissingPathDelay+time.Millisecond),
+	); err != nil {
+		t.Fatalf("drain directory replacement: %v", err)
+	} else if pending {
+		t.Fatal("confirmed directory replacement should resolve pending missing work")
+	}
+	if !fixture.tracked.isLocalDeleted() || !fixture.tracked.isLocalDirty() {
+		t.Fatal("directory replacement should remain a confirmed local delete")
+	}
+}
+
+func TestWorkspaceReplicaEventPathRetainsPendingDeleteAfterObservationError(t *testing.T) {
+	fixture := newTrackedEventPathFixture(t, "doc_retry")
+	now := fixture.removeAndQueue(t)
+	observeErr := errors.New("injected observation failure")
+	calls := 0
+	fixture.replica.observeMissingPath = func(gotPath string) (string, bool, error) {
+		calls++
+		if calls == 1 {
+			return "", false, observeErr
+		}
+		return observeTrackedFileAfterMissingSignal(gotPath)
+	}
+
+	readyAt := now.Add(workspaceMissingPathDelay + time.Millisecond)
+	if pending, err := fixture.replica.drainPathChanges(context.Background(), readyAt); !errors.Is(err, observeErr) {
+		t.Fatalf("first drain error = %v, want %v", err, observeErr)
+	} else if !pending {
+		t.Fatal("observation failure should retain pending delete work")
+	}
+	if fixture.tracked.isLocalDeleted() {
+		t.Fatal("observation failure consumed the pending delete")
+	}
+	if !fixture.replica.changes.hasPendingMissing() {
+		t.Fatal("observation failure removed the pending missing signal")
+	}
+
+	if pending, err := fixture.replica.drainPathChanges(context.Background(), readyAt.Add(time.Millisecond)); err != nil {
+		t.Fatalf("retry pending delete: %v", err)
+	} else if pending {
+		t.Fatal("confirmed absence should resolve pending delete work")
+	}
+	if calls != 2 {
+		t.Fatalf("observation calls = %d, want 2", calls)
+	}
+	if !fixture.tracked.isLocalDeleted() || !fixture.tracked.isLocalDirty() {
+		t.Fatal("confirmed absence after retry should mark the tracked file deleted")
 	}
 }
 
