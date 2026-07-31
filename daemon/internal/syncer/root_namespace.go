@@ -210,16 +210,6 @@ func (s *workspaceRuntime) upsertRootFileEntry(ctx context.Context, contentDocum
 	})
 }
 
-func (s *workspaceRuntime) tombstoneRootFileEntry(ctx context.Context, contentDocumentID, actorID, actorType string) error {
-	contentDocumentID = strings.TrimSpace(contentDocumentID)
-	if contentDocumentID == "" {
-		return nil
-	}
-	return s.mutateRootDoc(ctx, actorID, actorType, func(doc *crdt.Doc) ([]byte, error) {
-		return TombstoneRootFile(doc, contentDocumentID, rootMutationActor{ID: actorID, Kind: actorType})
-	})
-}
-
 func (s *workspaceRuntime) mutateRootDoc(ctx context.Context, actorID, actorType string, mutate func(*crdt.Doc) ([]byte, error)) error {
 	if s == nil || s.docCache == nil || strings.TrimSpace(s.rootDocumentID) == "" || mutate == nil {
 		return nil

@@ -2,7 +2,6 @@ package syncer
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -12,7 +11,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-func TestWorkspaceChangeIndexCoalescesDirtyCreatesMovesAndDeletes(t *testing.T) {
+func TestWorkspaceChangeIndexCoalescesDirtyCreatesMovesAndMissingPaths(t *testing.T) {
 	now := time.Now()
 	oldPath := "/workspace/docs/old.md"
 	newPath := "/workspace/docs/new.md"
@@ -40,15 +39,15 @@ func TestWorkspaceChangeIndexCoalescesDirtyCreatesMovesAndDeletes(t *testing.T) 
 	if got := changes.LocalCreates; len(got) != 1 || got[0].Path != "/workspace/docs/unmatched.md" {
 		t.Fatalf("local creates = %#v", got)
 	}
-	if len(changes.LocalDeletes) != 0 {
-		t.Fatalf("unexpected local deletes: %#v", changes.LocalDeletes)
+	if len(changes.ReadyMissing) != 0 {
+		t.Fatalf("unexpected ready missing paths: %#v", changes.ReadyMissing)
 	}
 	if got := index.drainDiscoverDirs(); len(got) != 1 || got[0] != "/workspace/docs" {
 		t.Fatalf("discover dirs = %#v", got)
 	}
 }
 
-func TestWorkspaceChangeIndexDelaysUnmatchedMissingBeforeDelete(t *testing.T) {
+func TestWorkspaceChangeIndexDelaysUnmatchedMissingBeforeReconcile(t *testing.T) {
 	now := time.Now()
 	index := newWorkspaceChangeIndex()
 	index.markPendingMissing("doc_gone", "/workspace/docs/gone.md", now)
@@ -57,19 +56,19 @@ func TestWorkspaceChangeIndexDelaysUnmatchedMissingBeforeDelete(t *testing.T) {
 	if !pending {
 		t.Fatal("missing path should remain pending before delay")
 	}
-	if len(changes.LocalDeletes) != 0 {
-		t.Fatalf("delete should not be emitted before delay: %#v", changes.LocalDeletes)
+	if len(changes.ReadyMissing) != 0 {
+		t.Fatalf("missing path should not be emitted before delay: %#v", changes.ReadyMissing)
 	}
 
 	changes, pending = index.drain(now.Add(workspaceMissingPathDelay + time.Millisecond))
 	if !pending {
-		t.Fatal("ready delete should remain pending until the filesystem decision is confirmed")
+		t.Fatal("ready missing path should remain pending until its generation is resolved")
 	}
-	if got := changes.LocalDeletes; len(got) != 1 || got[0].DocumentID != "doc_gone" {
-		t.Fatalf("local deletes = %#v", got)
+	if got := changes.ReadyMissing; len(got) != 1 || got[0].DocumentID != "doc_gone" {
+		t.Fatalf("ready missing paths = %#v", got)
 	}
-	if !index.resolvePendingMissing(changes.LocalDeletes[0]) {
-		t.Fatal("ready delete should resolve the matching pending path")
+	if !index.resolvePendingMissing(changes.ReadyMissing[0]) {
+		t.Fatal("ready missing path should resolve the matching pending generation")
 	}
 	if index.hasPendingMissing() {
 		t.Fatal("confirmed missing path should no longer be pending")
@@ -256,7 +255,7 @@ func TestWorkspaceReplicaEventPathCoalescesTrackedDeleteAndMove(t *testing.T) {
 	}
 }
 
-func TestWorkspaceReplicaEventPathExpiresUnmatchedDelete(t *testing.T) {
+func TestWorkspaceReplicaEventPathExpiresUnmatchedMissingIntoCanonicalReconcile(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "docs", "gone.md")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -266,11 +265,14 @@ func TestWorkspaceReplicaEventPathExpiresUnmatchedDelete(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
+	var dirty []string
 	replica := &workspaceReplica{
-		rootDir:         root,
-		actorID:         "daemon_agent",
-		actorType:       "daemon",
-		markDirty:       func(string) {},
+		rootDir:   root,
+		actorID:   "daemon_agent",
+		actorType: "daemon",
+		markDirty: func(documentID string) {
+			dirty = append(dirty, documentID)
+		},
 		fs:              NewWorkspaceFS(root),
 		projectedByPath: map[string]*trackedFile{},
 		projectedByID:   map[string]*trackedFile{},
@@ -301,16 +303,19 @@ func TestWorkspaceReplicaEventPathExpiresUnmatchedDelete(t *testing.T) {
 	} else if !pending {
 		t.Fatal("delete should stay pending before delay")
 	}
-	if tracked.isLocalDeleted() {
-		t.Fatal("tracked delete should not be marked before missing delay")
+	if containsTestString(dirty, tracked.DocumentID) {
+		t.Fatal("tracked document should not be reconciled before missing delay")
 	}
 	if pending, err := replica.drainPathChanges(context.Background(), now.Add(workspaceMissingPathDelay+time.Millisecond)); err != nil {
-		t.Fatalf("drain expired delete: %v", err)
+		t.Fatalf("drain expired missing path: %v", err)
 	} else if pending {
 		t.Fatal("delete should not stay pending after delay")
 	}
-	if !tracked.isLocalDeleted() || !tracked.isLocalDirty() {
-		t.Fatal("expired missing path should mark tracked file locally deleted and dirty")
+	if !containsTestString(dirty, tracked.DocumentID) {
+		t.Fatalf("expired missing path did not queue canonical document reconcile: %#v", dirty)
+	}
+	if replica.projectedByID[tracked.DocumentID] != tracked || replica.projectedByPath[path] != tracked {
+		t.Fatal("expired missing path must retain document identity and tracking")
 	}
 }
 
@@ -367,9 +372,6 @@ func TestWorkspaceReplicaEventPathTrackedReplaceAtSamePathCancelsMissing(t *test
 		t.Fatalf("drain same-path replacement: %v", err)
 	} else if pending {
 		t.Fatal("same-path replacement should not leave pending missing work")
-	}
-	if tracked.isLocalDeleted() {
-		t.Fatal("same-path replacement should not become local delete")
 	}
 	if !tracked.isLocalDirty() {
 		t.Fatal("same-path replacement should mark tracked file dirty")
@@ -436,113 +438,12 @@ func (f *trackedEventPathFixture) removeAndQueue(t *testing.T) time.Time {
 	return now
 }
 
-func TestWorkspaceReplicaPresentEventsCancelConfirmedDeleteCandidate(t *testing.T) {
-	for _, op := range []struct {
-		name string
-		op   fsnotify.Op
-	}{
-		{name: "create", op: fsnotify.Create},
-		{name: "write", op: fsnotify.Write},
-	} {
-		t.Run(op.name, func(t *testing.T) {
-			fixture := newTrackedEventPathFixture(t, "doc_present_event")
-			fixture.tracked.markLocalDeleted()
-
-			if err := fixture.replica.handleWatcherEvent(
-				fsnotify.Event{Name: fixture.path, Op: op.op},
-				time.Now(),
-			); err != nil {
-				t.Fatalf("handle confirmed-present %s: %v", op.name, err)
-			}
-			if fixture.tracked.isLocalDeleted() {
-				t.Fatalf("confirmed-present %s did not cancel the delete candidate", op.name)
-			}
-			if !fixture.tracked.isLocalDirty() {
-				t.Fatalf("confirmed-present %s did not retain content reconciliation", op.name)
-			}
-		})
-	}
-}
-
-func TestWorkspaceReplicaPresentScanCancelsConfirmedDeleteCandidate(t *testing.T) {
-	fixture := newTrackedEventPathFixture(t, "doc_present_scan")
-	fixture.tracked.markLocalDeleted()
-
-	if err := fixture.replica.reconcileLocalWorkspace(context.Background()); err != nil {
-		t.Fatalf("reconcile confirmed-present scan: %v", err)
-	}
-	if fixture.tracked.isLocalDeleted() {
-		t.Fatal("confirmed-present scan did not cancel the delete candidate")
-	}
-}
-
-func TestWorkspaceReplicaEventPathCoalescedCreateAfterRemoveRequiresExactPathConfirmation(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		symlink     bool
-		replacement string
-		wantDirty   bool
-	}{
-		{name: "unchanged regular file", replacement: "base\n"},
-		{name: "changed regular file", replacement: "replacement\n", wantDirty: true},
-		{name: "unchanged symlinked file", symlink: true, replacement: "base\n"},
-		{name: "changed symlinked file", symlink: true, replacement: "replacement\n", wantDirty: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			fixture := newTrackedEventPathFixture(t, "doc_replace")
-			now := fixture.removeAndQueue(t)
-
-			contentPath := fixture.path
-			if tc.symlink {
-				contentPath = filepath.Join(fixture.root, "replacement-target.md")
-			}
-			if err := os.WriteFile(contentPath, []byte(tc.replacement), 0o644); err != nil {
-				t.Fatalf("write replacement: %v", err)
-			}
-			if tc.symlink {
-				if err := os.Symlink(contentPath, fixture.path); err != nil {
-					t.Skipf("symlinks unavailable: %v", err)
-				}
-			}
-
-			if pending, err := fixture.replica.drainPathChanges(
-				context.Background(),
-				now.Add(workspaceMissingPathDelay+time.Millisecond),
-			); err != nil {
-				t.Fatalf("drain replacement without create event: %v", err)
-			} else if pending {
-				t.Fatal("present replacement should cancel pending missing work")
-			}
-			if fixture.tracked.isLocalDeleted() {
-				t.Fatal("present replacement became a local delete when its create event was omitted")
-			}
-			if got := fixture.tracked.isLocalDirty(); got != tc.wantDirty {
-				t.Fatalf("replacement local dirty = %t, want %t", got, tc.wantDirty)
-			}
-			if got := containsTestString(fixture.dirty, fixture.tracked.DocumentID); got != tc.wantDirty {
-				t.Fatalf("replacement did not mark document dirty: %#v", fixture.dirty)
-			}
-		})
-	}
-}
-
-func TestWorkspaceReplicaEventPathCreateDuringDeleteConfirmationWins(t *testing.T) {
-	fixture := newTrackedEventPathFixture(t, "doc_interleaved_create")
+func TestWorkspaceReplicaEventPathReadyMissingOnlyQueuesCanonicalReconcile(t *testing.T) {
+	fixture := newTrackedEventPathFixture(t, "doc_missing")
 	now := fixture.removeAndQueue(t)
-	fixture.replica.observeMissingPath = func(gotPath string) (string, bool, error) {
-		if gotPath != fixture.path {
-			t.Fatalf("observe path = %q, want %q", gotPath, fixture.path)
-		}
-		if err := os.WriteFile(fixture.path, []byte("replacement\n"), 0o644); err != nil {
-			t.Fatalf("write replacement: %v", err)
-		}
-		if err := fixture.replica.handleWatcherEvent(
-			fsnotify.Event{Name: fixture.path, Op: fsnotify.Create},
-			now.Add(workspaceMissingPathDelay),
-		); err != nil {
-			t.Fatalf("handle interleaved create: %v", err)
-		}
-		// Model an absence observation that completed just before the create.
+	observations := 0
+	fixture.replica.observeMissingPath = func(string) (string, bool, error) {
+		observations++
 		return "", false, nil
 	}
 
@@ -550,90 +451,68 @@ func TestWorkspaceReplicaEventPathCreateDuringDeleteConfirmationWins(t *testing.
 		context.Background(),
 		now.Add(workspaceMissingPathDelay+time.Millisecond),
 	); err != nil {
-		t.Fatalf("drain interleaved create: %v", err)
+		t.Fatalf("drain ready missing path: %v", err)
 	} else if pending {
-		t.Fatal("newer create should resolve the pending missing signal")
+		t.Fatal("ready missing path should resolve its pending generation")
 	}
-	if fixture.tracked.isLocalDeleted() {
-		t.Fatal("stale absence observation overwrote a newer create")
+	if observations != 0 {
+		t.Fatalf("ready missing drain performed %d path observation(s); identity-bearing reconcile must decide content", observations)
 	}
-	if !fixture.tracked.isLocalDirty() {
-		t.Fatal("newer create should mark the replacement dirty")
+	if !containsTestString(fixture.dirty, fixture.tracked.DocumentID) {
+		t.Fatalf("ready missing path did not queue canonical reconcile: %#v", fixture.dirty)
+	}
+	if fixture.replica.projectedByID[fixture.tracked.DocumentID] != fixture.tracked ||
+		fixture.replica.projectedByPath[fixture.path] != fixture.tracked {
+		t.Fatal("ready missing path removed canonical document tracking")
 	}
 }
 
-func TestWorkspaceReplicaEventPathNewRemoveDuringDeleteConfirmationStaysPending(t *testing.T) {
+func TestWorkspaceReplicaEventPathNewRemoveGenerationKeepsItsOwnDelay(t *testing.T) {
 	fixture := newTrackedEventPathFixture(t, "doc_interleaved_remove")
-	now := fixture.removeAndQueue(t)
-	secondRemoveAt := now.Add(workspaceMissingPathDelay)
-	calls := 0
-	fixture.replica.observeMissingPath = func(gotPath string) (string, bool, error) {
-		calls++
-		if calls > 1 {
-			return observeTrackedFileAfterMissingSignal(gotPath)
-		}
-		if err := os.WriteFile(fixture.path, []byte("replacement\n"), 0o644); err != nil {
-			t.Fatalf("write replacement: %v", err)
-		}
-		if err := fixture.replica.handleWatcherEvent(
-			fsnotify.Event{Name: fixture.path, Op: fsnotify.Create},
-			secondRemoveAt,
-		); err != nil {
-			t.Fatalf("handle interleaved create: %v", err)
-		}
-		if err := os.Remove(fixture.path); err != nil {
-			t.Fatalf("remove replacement: %v", err)
-		}
-		if err := fixture.replica.handleWatcherEvent(
-			fsnotify.Event{Name: fixture.path, Op: fsnotify.Remove},
-			secondRemoveAt,
-		); err != nil {
-			t.Fatalf("handle interleaved remove: %v", err)
-		}
-		// Model the first candidate's absence observation completing after a
-		// newer missing-path generation was queued for the same document/path.
-		return "", false, nil
-	}
+	firstRemoveAt := fixture.removeAndQueue(t)
+	secondRemoveAt := firstRemoveAt.Add(workspaceMissingPathDelay / 2)
 
-	firstReadyAt := now.Add(workspaceMissingPathDelay + time.Millisecond)
-	if pending, err := fixture.replica.drainPathChanges(context.Background(), firstReadyAt); err != nil {
-		t.Fatalf("drain stale delete candidate: %v", err)
-	} else if !pending {
-		t.Fatal("newer remove should remain pending after the stale candidate resolves")
+	if err := os.WriteFile(fixture.path, []byte("replacement\n"), 0o644); err != nil {
+		t.Fatalf("write replacement: %v", err)
 	}
-	if fixture.tracked.isLocalDeleted() {
-		t.Fatal("stale delete candidate consumed a newer remove generation")
+	if err := fixture.replica.handleWatcherEvent(
+		fsnotify.Event{Name: fixture.path, Op: fsnotify.Create},
+		secondRemoveAt,
+	); err != nil {
+		t.Fatalf("handle replacement create: %v", err)
+	}
+	if err := os.Remove(fixture.path); err != nil {
+		t.Fatalf("remove replacement: %v", err)
+	}
+	if err := fixture.replica.handleWatcherEvent(
+		fsnotify.Event{Name: fixture.path, Op: fsnotify.Remove},
+		secondRemoveAt,
+	); err != nil {
+		t.Fatalf("handle second remove: %v", err)
 	}
 
 	if pending, err := fixture.replica.drainPathChanges(
 		context.Background(),
-		secondRemoveAt.Add(workspaceMissingPathDelay/2),
+		firstRemoveAt.Add(workspaceMissingPathDelay+time.Millisecond),
 	); err != nil {
-		t.Fatalf("drain newer remove before delay: %v", err)
+		t.Fatalf("drain at stale generation deadline: %v", err)
 	} else if !pending {
-		t.Fatal("newer remove should retain its own debounce window")
+		t.Fatal("newer remove generation lost its own debounce window")
 	}
-	if fixture.tracked.isLocalDeleted() {
-		t.Fatal("newer remove deleted before its debounce window elapsed")
-	}
-
 	if pending, err := fixture.replica.drainPathChanges(
 		context.Background(),
 		secondRemoveAt.Add(workspaceMissingPathDelay+time.Millisecond),
 	); err != nil {
-		t.Fatalf("drain confirmed newer remove: %v", err)
+		t.Fatalf("drain newer remove generation: %v", err)
 	} else if pending {
-		t.Fatal("confirmed newer remove should resolve after its own delay")
+		t.Fatal("newer remove generation remained pending past its own deadline")
 	}
-	if calls != 2 {
-		t.Fatalf("observation calls = %d, want 2", calls)
-	}
-	if !fixture.tracked.isLocalDeleted() {
-		t.Fatal("confirmed newer remove did not delete after its own delay")
+	if !containsTestString(fixture.dirty, fixture.tracked.DocumentID) {
+		t.Fatalf("newer remove generation did not queue canonical reconcile: %#v", fixture.dirty)
 	}
 }
 
-func TestWorkspaceReplicaEventPathConfirmsDirectoryReplacementAsDelete(t *testing.T) {
+func TestWorkspaceReplicaEventPathDirectoryReplacementCannotDeleteDocument(t *testing.T) {
 	fixture := newTrackedEventPathFixture(t, "doc_directory")
 	now := fixture.removeAndQueue(t)
 	if err := os.Mkdir(fixture.path, 0o755); err != nil {
@@ -645,49 +524,13 @@ func TestWorkspaceReplicaEventPathConfirmsDirectoryReplacementAsDelete(t *testin
 	); err != nil {
 		t.Fatalf("drain directory replacement: %v", err)
 	} else if pending {
-		t.Fatal("confirmed directory replacement should resolve pending missing work")
+		t.Fatal("directory replacement should resolve pending missing work")
 	}
-	if !fixture.tracked.isLocalDeleted() || !fixture.tracked.isLocalDirty() {
-		t.Fatal("directory replacement should remain a confirmed local delete")
+	if !containsTestString(fixture.dirty, fixture.tracked.DocumentID) {
+		t.Fatalf("directory replacement did not queue canonical reconcile: %#v", fixture.dirty)
 	}
-}
-
-func TestWorkspaceReplicaEventPathRetainsPendingDeleteAfterObservationError(t *testing.T) {
-	fixture := newTrackedEventPathFixture(t, "doc_retry")
-	now := fixture.removeAndQueue(t)
-	observeErr := errors.New("injected observation failure")
-	calls := 0
-	fixture.replica.observeMissingPath = func(gotPath string) (string, bool, error) {
-		calls++
-		if calls == 1 {
-			return "", false, observeErr
-		}
-		return observeTrackedFileAfterMissingSignal(gotPath)
-	}
-
-	readyAt := now.Add(workspaceMissingPathDelay + time.Millisecond)
-	if pending, err := fixture.replica.drainPathChanges(context.Background(), readyAt); !errors.Is(err, observeErr) {
-		t.Fatalf("first drain error = %v, want %v", err, observeErr)
-	} else if !pending {
-		t.Fatal("observation failure should retain pending delete work")
-	}
-	if fixture.tracked.isLocalDeleted() {
-		t.Fatal("observation failure consumed the pending delete")
-	}
-	if !fixture.replica.changes.hasPendingMissing() {
-		t.Fatal("observation failure removed the pending missing signal")
-	}
-
-	if pending, err := fixture.replica.drainPathChanges(context.Background(), readyAt.Add(time.Millisecond)); err != nil {
-		t.Fatalf("retry pending delete: %v", err)
-	} else if pending {
-		t.Fatal("confirmed absence should resolve pending delete work")
-	}
-	if calls != 2 {
-		t.Fatalf("observation calls = %d, want 2", calls)
-	}
-	if !fixture.tracked.isLocalDeleted() || !fixture.tracked.isLocalDirty() {
-		t.Fatal("confirmed absence after retry should mark the tracked file deleted")
+	if fixture.replica.projectedByID[fixture.tracked.DocumentID] != fixture.tracked {
+		t.Fatal("directory replacement removed canonical document tracking")
 	}
 }
 
@@ -926,9 +769,6 @@ func TestWorkspaceReplicaAuthoritativePathRekeyRetiresWatcherMoveArtifacts(t *te
 			}
 			if tracked.isLocalMoved() {
 				t.Fatal("projected move was misclassified as a local move")
-			}
-			if tracked.isLocalDeleted() {
-				t.Fatal("projected move was misclassified as a local delete")
 			}
 			if len(creates) != 0 {
 				t.Fatalf("projected move created local documents: %#v", creates)
