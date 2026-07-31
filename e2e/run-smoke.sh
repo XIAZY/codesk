@@ -17,6 +17,7 @@ if [ "${NOTTY_E2E_KEEP:-0}" = "1" ]; then PROJECT="$PROJECT-keep"; fi
 # stack the (c) seeding pattern targets; the main compose needs deploy secrets we don't want here.
 COMPOSE_FILE="$ROOT_DIR/test/regression/docker-compose.yml"
 PREVIEW_PORT="${NOTTY_E2E_PREVIEW_PORT:-4173}"
+PREVIEW_LOG="${TMPDIR:-/tmp}/$PROJECT-preview.log"
 DC="docker compose -p $PROJECT -f $COMPOSE_FILE"
 
 # Announced up front, not at teardown: a run that is killed never reaches its trap, and the whole
@@ -30,6 +31,23 @@ cleanup() {
   status=$?
   trap - EXIT INT TERM
   [ -n "${PREVIEW_PID:-}" ] && kill "$PREVIEW_PID" >/dev/null 2>&1 || true
+  if [ "$status" -ne 0 ]; then
+    printf 'e2e: FAILURE DIAGNOSTICS for project %s\n' "$PROJECT" >&2
+    if compose_ps="$($DC ps -a 2>&1)"; then
+      printf '%s\n' "$compose_ps" >&2
+    else
+      printf 'e2e: docker compose ps failed:\n%s\n' "$compose_ps" >&2
+    fi
+    if compose_logs="$($DC logs --no-color --tail=500 2>&1)"; then
+      printf '%s\n' "$compose_logs" >&2
+    else
+      printf 'e2e: docker compose logs failed:\n%s\n' "$compose_logs" >&2
+    fi
+    if [ -s "$PREVIEW_LOG" ]; then
+      printf 'e2e: frontend preview log:\n' >&2
+      cat "$PREVIEW_LOG" >&2
+    fi
+  fi
   if [ "${NOTTY_E2E_KEEP:-0}" != "1" ]; then
     # A green suite that leaked its stack is not a green run — the cost lands on the next person to
     # use this box. Report what docker said and fail, rather than swallowing it into a silent leak.
@@ -41,6 +59,7 @@ cleanup() {
       if [ "$status" -eq 0 ]; then status=1; fi
     fi
   fi
+  rm -f "$PREVIEW_LOG"
   exit "$status"
 }
 trap cleanup EXIT INT TERM
@@ -56,8 +75,8 @@ echo "e2e: backend at $BACKEND_URL"
 
 echo "e2e: building production frontend (VITE_API_BASE=$BACKEND_URL)…"
 ( cd "$ROOT_DIR/frontend" && VITE_API_BASE="$BACKEND_URL" VITE_PUBLIC_ORIGIN="http://127.0.0.1:$PREVIEW_PORT" npm run build )
-( cd "$ROOT_DIR/frontend" && npx vite preview --port "$PREVIEW_PORT" --strictPort --host 127.0.0.1 >/tmp/e2e-preview.log 2>&1 & echo $! > /tmp/e2e-preview.pid )
-PREVIEW_PID="$(cat /tmp/e2e-preview.pid)"
+( cd "$ROOT_DIR/frontend" && exec npx vite preview --port "$PREVIEW_PORT" --strictPort --host 127.0.0.1 ) >"$PREVIEW_LOG" 2>&1 &
+PREVIEW_PID=$!
 
 export NOTTY_E2E_BACKEND_URL="$BACKEND_URL"
 export NOTTY_E2E_PREVIEW_URL="http://127.0.0.1:$PREVIEW_PORT"
