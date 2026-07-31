@@ -539,6 +539,7 @@ func (r *workspaceReplica) handleWatcherEvent(event fsnotify.Event, now time.Tim
 		}
 		if tracked != nil {
 			r.changes.markTrackedPresent(tracked.DocumentID, path, identity)
+			tracked.clearLocalDeleted()
 			if err := markTrackedLocalDirty(tracked, path); err != nil {
 				return err
 			}
@@ -560,7 +561,15 @@ func (r *workspaceReplica) handleWatcherEvent(event fsnotify.Event, now time.Tim
 
 	if event.Op&fsnotify.Write != 0 {
 		if tracked != nil {
+			_, exists, err := r.observeTrackedFileAfterMissingSignal(path)
+			if err != nil {
+				return fmt.Errorf("observe tracked file %q after write event: %w", path, err)
+			}
+			if !exists {
+				return nil
+			}
 			r.changes.markTrackedPresent(tracked.DocumentID, path, statFileIdentity(path))
+			tracked.clearLocalDeleted()
 			if err := markTrackedLocalDirty(tracked, path); err != nil {
 				return err
 			}
@@ -654,6 +663,10 @@ func (r *workspaceReplica) reconcileLocalWorkspace(ctx context.Context) error {
 			}
 		}
 		if exists {
+			tracked.clearLocalDeleted()
+			if r.changes != nil {
+				r.changes.markTrackedPresent(tracked.DocumentID, tracked.Path, statFileIdentity(tracked.Path))
+			}
 			if !tracked.matchesProjectedString(current) {
 				if err := r.handleLocalChange(tracked.Path); err != nil {
 					return err
@@ -774,6 +787,7 @@ func (r *workspaceReplica) drainPathChanges(ctx context.Context, now time.Time) 
 				deletion.Path,
 				statFileIdentity(deletion.Path),
 			)
+			tracked.clearLocalDeleted()
 			if !tracked.matchesProjectedString(current) {
 				if err := r.handleLocalChange(deletion.Path); err != nil {
 					return r.changes.hasPendingMissing(), err
