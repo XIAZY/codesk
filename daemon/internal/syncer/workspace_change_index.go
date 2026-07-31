@@ -155,6 +155,30 @@ func (c *workspaceChangeIndex) markTrackedPresent(documentID, path string, ident
 	c.mu.Unlock()
 }
 
+func (c *workspaceChangeIndex) resolvePendingMissing(documentID, path string) bool {
+	if c == nil || strings.TrimSpace(documentID) == "" || strings.TrimSpace(path) == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	missing, ok := c.missing[documentID]
+	if !ok || missing.path != path {
+		return false
+	}
+	delete(c.missing, documentID)
+	delete(c.identities, path)
+	return true
+}
+
+func (c *workspaceChangeIndex) hasPendingMissing() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.missing) > 0
+}
+
 func (c *workspaceChangeIndex) markDiscoverDir(path string) {
 	if c == nil || strings.TrimSpace(path) == "" {
 		return
@@ -216,7 +240,7 @@ func (c *workspaceChangeIndex) drain(now time.Time) (workspaceChanges, bool) {
 	for path := range usedCreates {
 		delete(c.creates, path)
 	}
-	for documentID, missing := range c.missing {
+	for _, missing := range c.missing {
 		if now.Before(missing.readyAt) {
 			continue
 		}
@@ -224,8 +248,6 @@ func (c *workspaceChangeIndex) drain(now time.Time) (workspaceChanges, bool) {
 			DocumentID: missing.documentID,
 			Path:       missing.path,
 		})
-		delete(c.missing, documentID)
-		delete(c.identities, missing.path)
 	}
 	for path, created := range c.creates {
 		changes.LocalCreates = append(changes.LocalCreates, created.candidate)
