@@ -476,7 +476,7 @@ func checkBuildDeployContractCIGate(workflow string) error {
 	return nil
 }
 
-func TestWindowsMSICIRemainsTemporarilyDisabled(t *testing.T) {
+func TestWindowsMSICIStaysRemoved(t *testing.T) {
 	workflowData, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "ci.yml"))
 	if err != nil {
 		t.Fatal(err)
@@ -486,65 +486,45 @@ func TestWindowsMSICIRemainsTemporarilyDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Each mutation reintroduces one piece of the deleted subgraph. The guard has to reject every
+	// one individually: bringing back the job, either half of the artifact handoff, or the payload
+	// name is enough to refill the quota and start failing unrelated rows again.
 	for _, mutation := range []struct {
-		name, old, replacement string
+		name, reintroduced string
 	}{
-		{
-			"re-enable directive removed",
-			"    # Re-enable when matching self-hosted Windows ARM64 runner capacity exists.\n",
-			"",
-		},
-		{"disable guard removed", "    if: false\n", ""},
-		{"disable guard enabled", "    if: false\n", "    if: true\n"},
-		{"failures tolerated", "    runs-on: [self-hosted, Windows, ARM64]\n", "    runs-on: [self-hosted, Windows, ARM64]\n    continue-on-error: true\n"},
+		{"MSI job returns", "\n  windows-desktop-msi:\n    name: Windows desktop MSI\n"},
+		{"upload step returns", "\n      - uses: actions/upload-artifact@v4\n"},
+		{"download step returns", "\n      - uses: actions/download-artifact@v4\n"},
+		{"payload artifact name returns", "\n          name: windows-desktop-payload-amd64\n"},
 	} {
 		t.Run(mutation.name, func(t *testing.T) {
-			if got := strings.Count(workflow, mutation.old); got != 1 {
-				t.Fatalf("mutation source count for %q = %d, want 1", mutation.old, got)
+			if strings.Contains(workflow, mutation.reintroduced) {
+				t.Fatalf("mutation target %q is already present; the guard proves nothing", mutation.reintroduced)
 			}
-			mutated := strings.Replace(workflow, mutation.old, mutation.replacement, 1)
+			mutated := workflow + mutation.reintroduced
 			if err := checkWindowsMSICIDisabled(mutated); err == nil {
-				t.Fatal("Windows MSI CI disable mutation passed")
+				t.Fatal("reintroducing removed Windows MSI CI plumbing passed the guard")
 			}
 		})
 	}
 }
 
 func checkWindowsMSICIDisabled(workflow string) error {
-	const (
-		jobMarker          = "  windows-desktop-msi:\n"
-		nextJobMarker      = "\n  windows-daemon-installer:\n"
-		recoveryDirective  = "    # Re-enable when matching self-hosted Windows ARM64 runner capacity exists.\n"
-		disableGuard       = "    if: false\n"
-		versionedHardGuard = recoveryDirective + disableGuard
-	)
-	jobAt := strings.Index(workflow, jobMarker)
-	if jobAt < 0 {
-		return fmt.Errorf("Windows MSI CI job is missing")
-	}
-	nextJobAt := strings.Index(workflow[jobAt+len(jobMarker):], nextJobMarker)
-	if nextJobAt < 0 {
-		return fmt.Errorf("Windows MSI CI job boundary is missing")
-	}
-	job := workflow[jobAt : jobAt+len(jobMarker)+nextJobAt]
-
-	for required, count := range map[string]int{
-		"    needs: windows-daemon-build\n":                  1,
-		versionedHardGuard:                                   1,
-		"    runs-on: [self-hosted, Windows, ARM64]\n":       1,
-		"      fail-fast: false\n":                           1,
-		"      - name: Build reproducible root-version WiX":  1,
-		"      - name: Upload reproducible root-version MSI": 1,
+	// The windows-desktop-msi job was deleted on 2026-07-31: it was `if: false` for want of a
+	// Windows ARM64 runner, so its two payload uploads ran on every build for a consumer that
+	// could never execute, filling the artifact quota and failing unrelated rows. The old
+	// contract asserted the job existed and stayed disabled; the property is now stronger — it
+	// must not exist at all, and neither must the artifact plumbing that fed it. Rebuilding MSI
+	// means rebuilding its handoff deliberately (task #21), not having it reappear unnoticed.
+	for _, forbidden := range []string{
+		"  windows-desktop-msi:\n",
+		"actions/upload-artifact",
+		"actions/download-artifact",
+		"windows-desktop-payload-",
 	} {
-		if got := strings.Count(job, required); got != count {
-			return fmt.Errorf("Windows MSI CI job count for %q = %d, want %d", required, got, count)
+		if strings.Contains(workflow, forbidden) {
+			return fmt.Errorf("removed Windows MSI CI plumbing reappeared in ci.yml: %q", forbidden)
 		}
-	}
-	if strings.Contains(job, "continue-on-error:") {
-		return fmt.Errorf("Windows MSI CI job masks failures with continue-on-error")
-	}
-	if strings.Contains(job, "vars.") {
-		return fmt.Errorf("Windows MSI CI disable is controlled outside versioned source")
 	}
 	return nil
 }
@@ -572,12 +552,13 @@ func TestWindowsMSITestOnlyUpgradeFixtureCannotBecomeReleaseArtifact(t *testing.
 	mutations := []struct {
 		name, target, old, replacement string
 	}{
+		// The workflow-targeted mutations were removed with the MSI CI job on 2026-07-31 — their
+		// targets no longer exist in ci.yml, so they would fail on "source not unique" rather than
+		// prove anything. The builder mutations below are the ones with a live subject: they pin
+		// the source property that a test-only fixture can never be produced as publishable,
+		// which holds no matter how CI is later rewired.
 		{"fixture escapes testdata", "build", `testdata\windows-msi-upgrade-versions.ps1`, `windows-msi-upgrade-versions.ps1`},
 		{"fixture becomes default", "build", "[CmdletBinding(DefaultParameterSetName = 'Release')]", "[CmdletBinding(DefaultParameterSetName = 'TestOnlyUpgradeQa')]"},
-		{"production invokes fixture", "workflow", "            -Release `", "            -TestOnlyUpgradeQa `"},
-		{"fixture overwrites production output", "workflow", `windows-desktop-msi-upgrade-qa-${{ matrix.go_arch }}`, `windows-desktop-msi-${{ matrix.go_arch }}`},
-		{"fixture marked publishable", "workflow", `$provenance.target.publishable -ne $false`, `$provenance.target.publishable -eq $false`},
-		{"fixture uploaded", "workflow", `path: ${{ runner.temp }}/windows-desktop-msi-${{ matrix.go_arch }}/`, `path: ${{ runner.temp }}/windows-desktop-msi-upgrade-qa-${{ matrix.go_arch }}/`},
 	}
 	for _, mutation := range mutations {
 		t.Run(mutation.name, func(t *testing.T) {
@@ -628,33 +609,14 @@ func checkWindowsMSITestOnlyFixtureBoundary(build, fixture, workflow string) err
 		}
 	}
 
-	const productionMarker = "      - name: Build reproducible root-version WiX release package\n"
-	const fixtureMarker = "      - name: Build non-publishable MSI upgrade QA fixture\n"
-	const uploadMarker = "      - name: Upload reproducible root-version MSI and provenance\n"
-	productionAt := strings.Index(workflow, productionMarker)
-	fixtureAt := strings.Index(workflow, fixtureMarker)
-	uploadAt := strings.Index(workflow, uploadMarker)
-	if productionAt < 0 || fixtureAt <= productionAt || uploadAt <= fixtureAt {
-		return fmt.Errorf("CI does not isolate production, fixture, and upload steps")
-	}
-	productionStep := workflow[productionAt:fixtureAt]
-	fixtureStep := workflow[fixtureAt:uploadAt]
-	uploadStep := workflow[uploadAt:]
-	if strings.Count(productionStep, "            -Release `") != 1 || strings.Contains(productionStep, "-TestOnlyUpgradeQa") {
-		return fmt.Errorf("CI production MSI step does not exclusively use release mode")
-	}
-	for _, required := range []string{
-		"            -TestOnlyUpgradeQa `",
-		`windows-desktop-msi-upgrade-qa-${{ matrix.go_arch }}`,
-		`$provenance.target.buildMode -cne 'test-only-upgrade-qa'`,
-		`$provenance.target.publishable -ne $false`,
-	} {
-		if !strings.Contains(fixtureStep, required) {
-			return fmt.Errorf("CI test-only fixture step is missing %q", required)
-		}
-	}
-	if !strings.Contains(uploadStep, `path: ${{ runner.temp }}/windows-desktop-msi-${{ matrix.go_arch }}/`) || strings.Contains(uploadStep, "upgrade-qa") {
-		return fmt.Errorf("CI upload can publish the test-only fixture path")
+	// The workflow half of this boundary is gone: the MSI CI job that ordered production/fixture/
+	// upload steps was deleted on 2026-07-31 (see checkWindowsMSICIDisabled). The builder and
+	// fixture assertions above are the half that still has a subject — they guard the SOURCE
+	// property (a test-only fixture can never be produced as publishable), which is what actually
+	// prevents a bad artifact regardless of how CI is wired. When MSI CI is rebuilt, its step
+	// isolation needs a fresh contract written against the new job rather than this one restored.
+	if workflow == "" {
+		return fmt.Errorf("workflow source is empty")
 	}
 	return nil
 }
