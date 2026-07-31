@@ -109,3 +109,20 @@ Earlier R2 verification found the exact seven Windows GUI 0.0.2 objects, matchin
 The external dependency is rclone 1.59 or newer. The script exposes no new command-line interface: callers continue to set `UPLOAD_TARGET` and run the existing Make targets. The required secret environment interface is `AWS_ACCESS_KEY_ID` plus `AWS_SECRET_ACCESS_KEY`; `R2_ENDPOINT_URL` and the existing `R2_*_BUCKET` and `R2_*_PREFIX` values remain non-secret destination configuration. The named remote `nottyr2:` exists only through exported environment variables in the uploader process and is never persisted.
 
 Plan revision note (2026-07-28): Created this plan after the user broadened PR #225 from a Windows-only rclone migration to a single rclone uploader for every R2 deploy target. Updated it after implementation, after the user explicitly required another real Windows GUI deployment, after the immutable 0.0.2 conflict required version 0.0.3, and after the verified release and PR update completed.
+
+## Windows MSI CI path removed (2026-07-31)
+
+The `windows-desktop-msi` job and the two `upload-artifact` steps that fed it were deleted. The job
+had been `if: false` since no Windows ARM64 runner exists, so its two payload uploads ran on every
+build for a consumer that could never execute — 1.5 GB of the repository's 2.63 GB artifact quota,
+which then failed every `Windows daemon (Zig …)` row at `Upload AMD64 desktop installer payload`
+while the cross-build itself passed.
+
+Note the uploads already carried `retention-days: 1` and 138 artifacts aged 1–7 days were still
+present with `expired: false` — **the retention policy was set and not honored**, so bounding the
+quota with retention would have been a no-op.
+
+The payload build and PE/manifest/checksum verification are unchanged; only the uploads and their
+dead consumer are gone. **Rebuilding MSI means rebuilding its artifact handoff too** — the
+producer/consumer pair went together deliberately, so nothing is left dangling. Windows runner
+revival is tracked in task #21.
