@@ -3,6 +3,7 @@ package syncer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -641,6 +642,15 @@ func (r *workspaceReplica) reconcileLocalWorkspace(ctx context.Context) error {
 			// File projection can briefly look like a local edit, move, or delete.
 			continue
 		}
+		if !exists {
+			// WalkDir is not a namespace snapshot. A concurrent same-name
+			// replacement can be omitted from one scan, so re-observe a tracked
+			// path before classifying the miss as a move or deletion.
+			current, exists, err = observeFileAfterScanMiss(tracked.Path)
+			if err != nil {
+				return fmt.Errorf("re-observe tracked file %q after scan miss: %w", tracked.Path, err)
+			}
+		}
 		if exists {
 			if !tracked.matchesProjectedString(current) {
 				if err := r.handleLocalChange(tracked.Path); err != nil {
@@ -681,6 +691,30 @@ func (r *workspaceReplica) reconcileLocalWorkspace(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func observeFileAfterScanMiss(path string) (string, bool, error) {
+	info, err := os.Lstat(path)
+	switch {
+	case err == nil:
+	case errors.Is(err, os.ErrNotExist):
+		return "", false, nil
+	default:
+		return "", false, err
+	}
+	if info.IsDir() {
+		return "", false, nil
+	}
+
+	content, err := readFileObservation(path)
+	switch {
+	case err == nil:
+		return string(content), true, nil
+	case errors.Is(err, os.ErrNotExist):
+		return "", false, nil
+	default:
+		return "", false, err
+	}
 }
 
 func (r *workspaceReplica) drainPathChanges(ctx context.Context, now time.Time) (bool, error) {
