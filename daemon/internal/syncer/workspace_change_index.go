@@ -28,6 +28,7 @@ type localMoveCandidate struct {
 type localDeleteCandidate struct {
 	DocumentID string
 	Path       string
+	generation uint64
 }
 
 type workspaceChanges struct {
@@ -42,6 +43,7 @@ type pendingMissingPath struct {
 	path       string
 	identity   fileIdentity
 	readyAt    time.Time
+	generation uint64
 }
 
 type pendingCreatedPath struct {
@@ -50,12 +52,13 @@ type pendingCreatedPath struct {
 }
 
 type workspaceChangeIndex struct {
-	mu             sync.Mutex
-	dirtyDocuments map[string]struct{}
-	creates        map[string]pendingCreatedPath
-	missing        map[string]pendingMissingPath
-	discoverDirs   map[string]struct{}
-	identities     map[string]fileIdentity
+	mu                    sync.Mutex
+	dirtyDocuments        map[string]struct{}
+	creates               map[string]pendingCreatedPath
+	missing               map[string]pendingMissingPath
+	discoverDirs          map[string]struct{}
+	identities            map[string]fileIdentity
+	nextMissingGeneration uint64
 }
 
 func newWorkspaceChangeIndex() *workspaceChangeIndex {
@@ -131,11 +134,13 @@ func (c *workspaceChangeIndex) markPendingMissing(documentID, path string, now t
 	}
 	c.mu.Lock()
 	identity := c.identities[path]
+	c.nextMissingGeneration++
 	c.missing[documentID] = pendingMissingPath{
 		documentID: documentID,
 		path:       path,
 		identity:   identity,
 		readyAt:    now.Add(workspaceMissingPathDelay),
+		generation: c.nextMissingGeneration,
 	}
 	delete(c.identities, path)
 	c.mu.Unlock()
@@ -155,18 +160,21 @@ func (c *workspaceChangeIndex) markTrackedPresent(documentID, path string, ident
 	c.mu.Unlock()
 }
 
-func (c *workspaceChangeIndex) resolvePendingMissing(documentID, path string) bool {
-	if c == nil || strings.TrimSpace(documentID) == "" || strings.TrimSpace(path) == "" {
+func (c *workspaceChangeIndex) resolvePendingMissing(candidate localDeleteCandidate) bool {
+	if c == nil ||
+		strings.TrimSpace(candidate.DocumentID) == "" ||
+		strings.TrimSpace(candidate.Path) == "" ||
+		candidate.generation == 0 {
 		return false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	missing, ok := c.missing[documentID]
-	if !ok || missing.path != path {
+	missing, ok := c.missing[candidate.DocumentID]
+	if !ok || missing.path != candidate.Path || missing.generation != candidate.generation {
 		return false
 	}
-	delete(c.missing, documentID)
-	delete(c.identities, path)
+	delete(c.missing, candidate.DocumentID)
+	delete(c.identities, candidate.Path)
 	return true
 }
 
@@ -247,6 +255,7 @@ func (c *workspaceChangeIndex) drain(now time.Time) (workspaceChanges, bool) {
 		changes.LocalDeletes = append(changes.LocalDeletes, localDeleteCandidate{
 			DocumentID: missing.documentID,
 			Path:       missing.path,
+			generation: missing.generation,
 		})
 	}
 	for path, created := range c.creates {

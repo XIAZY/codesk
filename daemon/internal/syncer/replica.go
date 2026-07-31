@@ -757,7 +757,7 @@ func (r *workspaceReplica) drainPathChanges(ctx context.Context, now time.Time) 
 		tracked := r.projectedByID[deletion.DocumentID]
 		r.mu.Unlock()
 		if tracked == nil || tracked.isProjecting() || tracked.Path != deletion.Path {
-			r.changes.resolvePendingMissing(deletion.DocumentID, deletion.Path)
+			r.changes.resolvePendingMissing(deletion)
 			continue
 		}
 		current, exists, err := r.observeTrackedFileAfterMissingSignal(deletion.Path)
@@ -781,7 +781,7 @@ func (r *workspaceReplica) drainPathChanges(ctx context.Context, now time.Time) 
 			}
 			continue
 		}
-		if !r.changes.resolvePendingMissing(deletion.DocumentID, deletion.Path) {
+		if !r.changes.resolvePendingMissing(deletion) {
 			continue
 		}
 		tracked.markLocalDeleted()
