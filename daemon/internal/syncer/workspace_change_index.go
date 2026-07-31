@@ -25,7 +25,7 @@ type localMoveCandidate struct {
 	NewPath    string
 }
 
-type localDeleteCandidate struct {
+type readyMissingPath struct {
 	DocumentID string
 	Path       string
 	generation uint64
@@ -35,7 +35,7 @@ type workspaceChanges struct {
 	DirtyDocumentIDs []string
 	LocalCreates     []localCreateCandidate
 	LocalMoves       []localMoveCandidate
-	LocalDeletes     []localDeleteCandidate
+	ReadyMissing     []readyMissingPath
 }
 
 type pendingMissingPath struct {
@@ -160,7 +160,7 @@ func (c *workspaceChangeIndex) markTrackedPresent(documentID, path string, ident
 	c.mu.Unlock()
 }
 
-func (c *workspaceChangeIndex) resolvePendingMissing(candidate localDeleteCandidate) bool {
+func (c *workspaceChangeIndex) resolvePendingMissing(candidate readyMissingPath) bool {
 	if c == nil ||
 		strings.TrimSpace(candidate.DocumentID) == "" ||
 		strings.TrimSpace(candidate.Path) == "" ||
@@ -252,7 +252,7 @@ func (c *workspaceChangeIndex) drain(now time.Time) (workspaceChanges, bool) {
 		if now.Before(missing.readyAt) {
 			continue
 		}
-		changes.LocalDeletes = append(changes.LocalDeletes, localDeleteCandidate{
+		changes.ReadyMissing = append(changes.ReadyMissing, readyMissingPath{
 			DocumentID: missing.documentID,
 			Path:       missing.path,
 			generation: missing.generation,
@@ -273,11 +273,11 @@ func (c *workspaceChangeIndex) drain(now time.Time) (workspaceChanges, bool) {
 		}
 		return changes.LocalMoves[i].NewPath < changes.LocalMoves[j].NewPath
 	})
-	sort.Slice(changes.LocalDeletes, func(i, j int) bool {
-		if changes.LocalDeletes[i].DocumentID != changes.LocalDeletes[j].DocumentID {
-			return changes.LocalDeletes[i].DocumentID < changes.LocalDeletes[j].DocumentID
+	sort.Slice(changes.ReadyMissing, func(i, j int) bool {
+		if changes.ReadyMissing[i].DocumentID != changes.ReadyMissing[j].DocumentID {
+			return changes.ReadyMissing[i].DocumentID < changes.ReadyMissing[j].DocumentID
 		}
-		return changes.LocalDeletes[i].Path < changes.LocalDeletes[j].Path
+		return changes.ReadyMissing[i].Path < changes.ReadyMissing[j].Path
 	})
 
 	return changes, len(c.missing) > 0

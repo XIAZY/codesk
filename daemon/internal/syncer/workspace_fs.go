@@ -182,6 +182,14 @@ func (fs *WorkspaceFS) CreateEmptyOrRead(path string) (FileSnapshot, error) {
 	return fs.createEmptyOrRead(path, createEmptyFileExclusive)
 }
 
+// CreateOrRead publishes content only if path is still absent. A concurrently
+// created working copy wins and is returned unchanged.
+func (fs *WorkspaceFS) CreateOrRead(path string, content []byte) (FileSnapshot, error) {
+	return fs.createEmptyOrRead(path, func(candidate string) error {
+		return createFileExclusive(candidate, content)
+	})
+}
+
 func (fs *WorkspaceFS) createEmptyOrRead(path string, createEmpty func(string) error) (FileSnapshot, error) {
 	path, err := fs.cleanPath(path)
 	if err != nil {
@@ -209,6 +217,22 @@ func (fs *WorkspaceFS) createEmptyOrRead(path string, createEmpty func(string) e
 func createEmptyFileExclusive(path string) error {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
+		return err
+	}
+	return file.Close()
+}
+
+func createFileExclusive(path string, content []byte) error {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	if err := writeFullString(file, string(content)); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
 		return err
 	}
 	return file.Close()

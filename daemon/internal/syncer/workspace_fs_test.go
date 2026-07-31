@@ -81,6 +81,43 @@ func TestWorkspaceFSCreateEmptyOrReadPreservesExistingFile(t *testing.T) {
 	}
 }
 
+func TestWorkspaceFSCreateOrReadCreatesCanonicalContent(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "nested", "doc.md")
+	canonical := []byte("canonical\n")
+	snapshot, err := NewWorkspaceFS(root).CreateOrRead(path, canonical)
+	if err != nil {
+		t.Fatalf("create or read canonical content: %v", err)
+	}
+	if !snapshot.Exists || string(snapshot.Bytes) != string(canonical) || snapshot.Hash != projectedHashBytes(canonical) {
+		t.Fatalf("created snapshot = %+v, want canonical bytes", snapshot)
+	}
+}
+
+func TestWorkspaceFSCreateOrReadPreservesReplacementAfterAbsentObservation(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "doc.md")
+	fs := NewWorkspaceFS(root)
+	before, err := fs.Read(path)
+	if err != nil {
+		t.Fatalf("observe absent path: %v", err)
+	}
+	if before.Exists {
+		t.Fatalf("path unexpectedly existed: %+v", before)
+	}
+	replacement := []byte("replacement\n")
+	if err := os.WriteFile(path, replacement, 0o644); err != nil {
+		t.Fatalf("write replacement: %v", err)
+	}
+	snapshot, err := fs.CreateOrRead(path, []byte("canonical\n"))
+	if err != nil {
+		t.Fatalf("create or read after replacement: %v", err)
+	}
+	if string(snapshot.Bytes) != string(replacement) {
+		t.Fatalf("replacement was overwritten: got %q want %q", snapshot.Bytes, replacement)
+	}
+}
+
 func TestWorkspaceFSCreateEmptyOrReadPreservesFileCreatedAfterAbsentObservation(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "doc.md")

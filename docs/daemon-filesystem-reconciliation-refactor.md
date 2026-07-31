@@ -594,9 +594,18 @@ If backend metadata says document path changed:
 
 If a tracked file disappears locally:
 
-1. If previous projected base is known and clean deletion is intended, DELETE backend document.
-2. If state is unknown, do not delete backend.
-3. If the file reappears or was moved, let scan detect it.
+1. Treat the missing path as a move-correlation and retry signal, never as
+   authority to delete the backend document.
+2. If no matching move appears, project the canonical content back to the
+   document's tracked path with exclusive-create semantics.
+3. If another file wins that create race, preserve its bytes and reconcile
+   them under the already tracked `documentID`.
+
+Only an explicit tombstone in the root CRDT deletes a document. A shell
+`rm`, watcher REMOVE, or scan omission cannot distinguish deletion intent from
+an unlink-and-replace operation and therefore must not produce a tombstone.
+This keeps document identity keyed by `documentID`, including when multiple
+documents have the same desired visible path.
 
 ### Remote Delete
 
