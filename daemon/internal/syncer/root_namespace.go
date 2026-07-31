@@ -37,6 +37,7 @@ type rootProjectionEntry struct {
 	DesiredPath       string
 	MaterializedPath  string
 	Active            bool
+	LocalDeleteIntent bool
 	ProjectedSeq      int64
 }
 
@@ -210,7 +211,27 @@ func (s *workspaceRuntime) upsertRootFileEntry(ctx context.Context, contentDocum
 	})
 }
 
+func (s *workspaceRuntime) tombstoneRootFileEntry(ctx context.Context, contentDocumentID, actorID, actorType string) error {
+	contentDocumentID = strings.TrimSpace(contentDocumentID)
+	if contentDocumentID == "" {
+		return nil
+	}
+	return s.mutateRootDocWithLocalDeleteIntent(ctx, actorID, actorType, contentDocumentID, func(doc *crdt.Doc) ([]byte, error) {
+		return TombstoneRootFile(doc, contentDocumentID, rootMutationActor{ID: actorID, Kind: actorType})
+	})
+}
+
 func (s *workspaceRuntime) mutateRootDoc(ctx context.Context, actorID, actorType string, mutate func(*crdt.Doc) ([]byte, error)) error {
+	return s.mutateRootDocWithLocalDeleteIntent(ctx, actorID, actorType, "", mutate)
+}
+
+func (s *workspaceRuntime) mutateRootDocWithLocalDeleteIntent(
+	ctx context.Context,
+	actorID string,
+	actorType string,
+	localDeleteContentDocumentID string,
+	mutate func(*crdt.Doc) ([]byte, error),
+) error {
 	if s == nil || s.docCache == nil || strings.TrimSpace(s.rootDocumentID) == "" || mutate == nil {
 		return nil
 	}
@@ -251,7 +272,13 @@ func (s *workspaceRuntime) mutateRootDoc(ctx context.Context, actorID, actorType
 		ActorType:  firstNonEmptyText(actorType, s.actorKind()),
 		CreatedAt:  time.Now().UTC(),
 	}
-	if err := cache.storeOutboxUpdateLocked(entry, s.rootDocumentID, rootDocumentPath, record); err != nil {
+	if err := cache.storeOutboxUpdateWithRootLocalDeleteIntentLocked(
+		entry,
+		s.rootDocumentID,
+		rootDocumentPath,
+		record,
+		localDeleteContentDocumentID,
+	); err != nil {
 		unlock()
 		return err
 	}
@@ -522,6 +549,30 @@ func (s *workspaceRuntime) projectRootRemovedEntry(projected rootProjectionEntry
 	s.replica.mu.Lock()
 	tracked := s.replica.projectedByID[projected.ContentDocumentID]
 	s.replica.mu.Unlock()
+	if projected.LocalDeleteIntent {
+		materializedPath, err := normalizeVisibleRootPath(projected.MaterializedPath)
+		if err != nil {
+			return err
+		}
+		fs, err := requireWorkspaceFS(s.replica.fs, s.replica.rootDir)
+		if err != nil {
+			return err
+		}
+		absolutePath := filepath.Join(s.replica.rootDir, filepath.FromSlash(materializedPath))
+		recoveryPaths := []string{absolutePath}
+		if tracked != nil && filepath.Clean(tracked.Path) != filepath.Clean(absolutePath) {
+			recoveryPaths = append(recoveryPaths, tracked.Path)
+		}
+		for _, recoveryPath := range recoveryPaths {
+			if _, err := fs.archiveRegularFile(recoveryPath, safeDocumentCacheName(projected.ContentDocumentID)); err != nil {
+				return err
+			}
+		}
+		if tracked != nil {
+			tracked.untrack()
+		}
+		return nil
+	}
 	if tracked == nil {
 		return nil
 	}

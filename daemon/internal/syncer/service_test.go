@@ -793,6 +793,35 @@ func TestScanWorkspaceFilesIgnoresDotPaths(t *testing.T) {
 	}
 }
 
+func TestScanWorkspaceFilesUsesOccupantClassification(t *testing.T) {
+	root := t.TempDir()
+	targetPath := filepath.Join(root, ".linked-target.md")
+	if err := os.WriteFile(targetPath, []byte("linked content\n"), 0o644); err != nil {
+		t.Fatalf("write symlink target: %v", err)
+	}
+	linkedPath := filepath.Join(root, "linked.md")
+	if err := os.Symlink(targetPath, linkedPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "missing-target.md"), filepath.Join(root, "dangling.md")); err != nil {
+		t.Fatalf("create dangling symlink: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "directory.md"), 0o755); err != nil {
+		t.Fatalf("create directory occupant: %v", err)
+	}
+
+	files, err := scanWorkspaceFiles(root)
+	if err != nil {
+		t.Fatalf("scan classified workspace: %v", err)
+	}
+	if got := files[linkedPath]; got != "linked content\n" {
+		t.Fatalf("symlinked file content = %q, want linked content", got)
+	}
+	if len(files) != 1 {
+		t.Fatalf("classified workspace files = %#v, want only symlinked regular content", files)
+	}
+}
+
 func TestNextAwarenessClientIDIsSafeForYjsClients(t *testing.T) {
 	awarenessClientCounter.Store(0)
 	for index := 0; index < 10; index++ {
@@ -3628,8 +3657,8 @@ func TestReconcileLocalWorkspaceReobservesTrackedFileOmittedByScan(t *testing.T)
 			if err := replica.reconcileLocalWorkspace(context.Background()); err != nil {
 				t.Fatalf("reconcile workspace: %v", err)
 			}
-			if tracked.isLocalDirty() {
-				t.Fatal("scan omission marked an unchanged tracked file dirty")
+			if tracked.isLocalDeleted() || tracked.isLocalDirty() {
+				t.Fatal("scan omission promoted a still-present tracked file to a local deletion")
 			}
 
 			if err := os.WriteFile(contentPath, []byte("changed"), 0o644); err != nil {
@@ -3638,8 +3667,8 @@ func TestReconcileLocalWorkspaceReobservesTrackedFileOmittedByScan(t *testing.T)
 			if err := replica.reconcileLocalWorkspace(context.Background()); err != nil {
 				t.Fatalf("reconcile changed workspace: %v", err)
 			}
-			if !tracked.isLocalDirty() {
-				t.Fatal("scan omission hid changed bytes")
+			if tracked.isLocalDeleted() || !tracked.isLocalDirty() {
+				t.Fatal("scan omission hid changed bytes or promoted them to a local deletion")
 			}
 		})
 	}
@@ -3673,7 +3702,7 @@ func TestWorkspaceReplicaReconcileSkipsMissingTrackedFileDuringProjection(t *tes
 	}
 }
 
-func TestReconcileLocalWorkspaceQueuesMissingTrackedDocumentForProjection(t *testing.T) {
+func TestReconcileLocalWorkspaceDeletesMissingTrackedDocument(t *testing.T) {
 	root := t.TempDir()
 	oldPath := filepath.Join(root, "docs", "gone.md")
 
@@ -3687,10 +3716,8 @@ func TestReconcileLocalWorkspaceQueuesMissingTrackedDocumentForProjection(t *tes
 	}
 	tracked.setProjectedContent("gone")
 
-	var dirty []string
 	replica := &workspaceReplica{
 		rootDir:         root,
-		markDirty:       func(documentID string) { dirty = append(dirty, documentID) },
 		fs:              NewWorkspaceFS(root),
 		projectedByPath: map[string]*trackedFile{oldPath: tracked},
 		projectedByID:   map[string]*trackedFile{"doc_1": tracked},
@@ -3701,15 +3728,12 @@ func TestReconcileLocalWorkspaceQueuesMissingTrackedDocumentForProjection(t *tes
 	if err := replica.reconcileLocalWorkspace(context.Background()); err != nil {
 		t.Fatalf("reconcile workspace: %v", err)
 	}
-	if !containsTestString(dirty, tracked.DocumentID) {
-		t.Fatalf("missing tracked file did not queue canonical projection: %#v", dirty)
-	}
-	if replica.projectedByID[tracked.DocumentID] != tracked || replica.projectedByPath[oldPath] != tracked {
-		t.Fatal("missing tracked file removed canonical document tracking")
+	if !tracked.isLocalDeleted() || !tracked.isLocalDirty() {
+		t.Fatal("expected missing tracked file to be queued as local deletion")
 	}
 }
 
-func TestReconcileLocalWorkspaceRetainsTrackedFileReplacedByDirectory(t *testing.T) {
+func TestReconcileLocalWorkspaceDeletesTrackedFileReplacedByDirectory(t *testing.T) {
 	root := t.TempDir()
 	oldPath := filepath.Join(root, "docs", "gone.md")
 	if err := os.MkdirAll(oldPath, 0o755); err != nil {
@@ -3725,10 +3749,8 @@ func TestReconcileLocalWorkspaceRetainsTrackedFileReplacedByDirectory(t *testing
 	}
 	tracked.setProjectedContent("gone")
 
-	var dirty []string
 	replica := &workspaceReplica{
 		rootDir:         root,
-		markDirty:       func(documentID string) { dirty = append(dirty, documentID) },
 		fs:              NewWorkspaceFS(root),
 		projectedByPath: map[string]*trackedFile{oldPath: tracked},
 		projectedByID:   map[string]*trackedFile{"doc_1": tracked},
@@ -3739,11 +3761,8 @@ func TestReconcileLocalWorkspaceRetainsTrackedFileReplacedByDirectory(t *testing
 	if err := replica.reconcileLocalWorkspace(context.Background()); err != nil {
 		t.Fatalf("reconcile workspace: %v", err)
 	}
-	if !containsTestString(dirty, tracked.DocumentID) {
-		t.Fatalf("directory replacement did not queue canonical projection: %#v", dirty)
-	}
-	if replica.projectedByID[tracked.DocumentID] != tracked || replica.projectedByPath[oldPath] != tracked {
-		t.Fatal("directory replacement removed canonical document tracking")
+	if !tracked.isLocalDeleted() || !tracked.isLocalDirty() {
+		t.Fatal("expected tracked file replaced by a directory to be queued as a local deletion")
 	}
 }
 

@@ -167,6 +167,7 @@ type trackedFile struct {
 	stateMu               sync.Mutex
 	projecting            int
 	localDirty            bool
+	localDeleted          bool
 	localMoved            bool
 	remoteDeleted         bool
 	hash                  projectedContentHash
@@ -1625,18 +1626,6 @@ func (s *workspaceRuntime) reconcileTrackedDocument(ctx context.Context, documen
 				}
 				continue
 			}
-			if !state.fileExists && state.baseKnown {
-				clean, err := createProjectedContentIfMissing(state.tracked, finalContent, finalState, projectedSeq)
-				if err != nil {
-					return err
-				}
-				if clean {
-					state.tracked.clearLocalDirty()
-				} else {
-					state.tracked.markLocalDirty()
-				}
-				continue
-			}
 			if state.localDirty {
 				state.tracked.markLocalDirty()
 				continue
@@ -1674,6 +1663,49 @@ func (s *workspaceRuntime) reconcileLocalMetadataOperations(ctx context.Context,
 	}
 	for _, state := range states {
 		tracked := state.tracked
+		if tracked == nil || !tracked.isLocalDeleted() {
+			continue
+		}
+		if !state.baseKnown {
+			tracked.clearLocalDeleted()
+			tracked.clearLocalDirty()
+			continue
+		}
+		present, err := revalidateLocalDeleteCandidate(tracked)
+		if err != nil {
+			return false, err
+		}
+		if present {
+			tracked.clearLocalDeleted()
+			tracked.markLocalDirty()
+			if tracked.Owner != nil && tracked.Owner.changes != nil {
+				tracked.Owner.changes.markTrackedPresent(
+					tracked.DocumentID,
+					tracked.Path,
+					statFileIdentity(tracked.Path),
+				)
+			}
+			s.markDocumentDirty(tracked.DocumentID)
+			return true, nil
+		}
+		// A newer confirmed-present observation cancels this reversible candidate.
+		if !tracked.isLocalDeleted() {
+			tracked.markLocalDirty()
+			s.markDocumentDirty(tracked.DocumentID)
+			return true, nil
+		}
+		actorID, actorType := s.actorForTracked(tracked)
+		if err := s.tombstoneRootFileEntry(ctx, tracked.DocumentID, actorID, actorType); err != nil {
+			s.markDocumentDirty(s.rootDocumentID)
+			return false, err
+		}
+		// Root projection owns terminal cleanup. The durable intent keeps this
+		// exact document identity recoverable across send retries and restarts.
+		s.markDocumentDirty(s.rootDocumentID)
+		return true, errDocumentRemovedDuringReconcile
+	}
+	for _, state := range states {
+		tracked := state.tracked
 		if tracked == nil || !tracked.isLocalMoved() {
 			continue
 		}
@@ -1701,6 +1733,28 @@ func (s *workspaceRuntime) reconcileLocalMetadataOperations(ctx context.Context,
 		return true, nil
 	}
 	return false, nil
+}
+
+func revalidateLocalDeleteCandidate(tracked *trackedFile) (bool, error) {
+	if tracked == nil {
+		return false, errors.New("revalidate local delete candidate: tracked file is nil")
+	}
+	if strings.TrimSpace(tracked.Path) == "" {
+		return false, fmt.Errorf("revalidate local delete candidate for %q: path is empty", tracked.DocumentID)
+	}
+	var (
+		exists bool
+		err    error
+	)
+	if tracked.Owner != nil {
+		_, exists, err = tracked.Owner.observeTrackedFileAfterMissingSignal(tracked.Path)
+	} else {
+		_, exists, err = observeTrackedFileAfterMissingSignal(tracked.Path)
+	}
+	if err != nil {
+		return false, fmt.Errorf("re-observe tracked file %q before propagating delete: %w", tracked.Path, err)
+	}
+	return exists, nil
 }
 
 func cleanupRemovedDocument(cache *documentCache, entry *documentCacheEntry, documentID string, states []trackedReconcileState) error {
@@ -1787,7 +1841,7 @@ func hasTrackedLocalDirty(trackedFiles []*trackedFile) bool {
 
 func hasTrackedLocalMetadataWork(trackedFiles []*trackedFile) bool {
 	for _, tracked := range trackedFiles {
-		if tracked != nil && (tracked.isLocalMoved() || tracked.isRemoteDeleted()) {
+		if tracked != nil && (tracked.isLocalMoved() || tracked.isLocalDeleted() || tracked.isRemoteDeleted()) {
 			return true
 		}
 	}
@@ -1937,6 +1991,10 @@ func collectTrackedReconcileStates(trackedFiles []*trackedFile) ([]trackedReconc
 				continue
 			}
 		}
+		if tracked.isLocalDeleted() && !tracked.isRemoteDeleted() {
+			states = append(states, state)
+			continue
+		}
 		fs, err := tracked.workspaceFS()
 		if err != nil {
 			return nil, err
@@ -2031,27 +2089,6 @@ func applyProjectedContent(tracked *trackedFile, nextContent string, nextState [
 		projectedSeq,
 		fs.WriteIfUnchanged,
 	)
-}
-
-func createProjectedContentIfMissing(tracked *trackedFile, nextContent string, nextState []byte, projectedSeq int64) (bool, error) {
-	fs, err := tracked.workspaceFS()
-	if err != nil {
-		return false, err
-	}
-	tracked.beginProjection()
-	defer tracked.endProjection()
-	snapshot, err := fs.CreateOrRead(tracked.Path, []byte(nextContent))
-	if err != nil {
-		return false, err
-	}
-	if snapshot.Hash != projectedHashString(nextContent) {
-		return false, nil
-	}
-	tracked.setProjectedContent(nextContent)
-	if err := tracked.storeProjectedBaseAtSeq(nextContent, nextState, projectedSeq); err != nil {
-		return false, err
-	}
-	return true, nil
 }
 
 func applyProjectedContentWithWrite(
@@ -2290,6 +2327,17 @@ func scanWorkspaceFiles(root string) (map[string]string, error) {
 		if entry.IsDir() {
 			return nil
 		}
+		occupant, err := classifyWorkspacePathOccupant(path)
+		if err != nil {
+			return err
+		}
+		providesContent, err := workspacePathProvidesFileContent(path, occupant)
+		if err != nil {
+			return err
+		}
+		if !providesContent {
+			return nil
+		}
 		content, err := readFileObservation(path)
 		if err != nil {
 			return err
@@ -2429,6 +2477,7 @@ func (t *trackedFile) untrack() {
 		return
 	}
 	t.clearLocalDirty()
+	t.clearLocalDeleted()
 	t.clearLocalMoved()
 	t.clearRemoteDeleted()
 }
@@ -2517,6 +2566,25 @@ func (t *trackedFile) isLocalDirty() bool {
 	t.stateMu.Lock()
 	defer t.stateMu.Unlock()
 	return t.localDirty
+}
+
+func (t *trackedFile) markLocalDeleted() {
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
+	t.localDeleted = true
+	t.localDirty = true
+}
+
+func (t *trackedFile) clearLocalDeleted() {
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
+	t.localDeleted = false
+}
+
+func (t *trackedFile) isLocalDeleted() bool {
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
+	return t.localDeleted
 }
 
 func (t *trackedFile) markLocalMoved() {

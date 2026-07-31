@@ -922,6 +922,129 @@ func TestDocumentCacheDoesNotCreateFileBackedState(t *testing.T) {
 	}
 }
 
+func TestStoreRootOutboxAndLocalDeleteIntentIsAtomic(t *testing.T) {
+	cache, err := newTestDocumentCache(t, t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	const (
+		rootDocumentID = "root_atomic_outbox"
+		documentID     = "doc_atomic_outbox"
+	)
+	if _, err := cache.db.Exec(`create trigger fail_atomic_local_delete_intent
+		before insert on root_local_delete_intents
+		when new.root_document_id = 'root_atomic_outbox'
+		begin
+			select raise(abort, 'injected local-delete intent failure');
+		end`); err != nil {
+		t.Fatalf("create local-delete intent failure trigger: %v", err)
+	}
+	record := outboxUpdateRecord{Update: []byte("root tombstone update"), SourcePath: rootDocumentPath}
+	if err := cache.storeOutboxUpdateWithRootLocalDeleteIntentLocked(
+		nil,
+		rootDocumentID,
+		rootDocumentPath,
+		record,
+		documentID,
+	); err == nil {
+		t.Fatal("root outbox store unexpectedly succeeded through the intent failure trigger")
+	}
+	var outboxCount int
+	if err := cache.db.QueryRow(`select count(*) from content_outbox where document_id = ?`, rootDocumentID).Scan(&outboxCount); err != nil {
+		t.Fatalf("count rolled-back root outbox: %v", err)
+	}
+	if outboxCount != 0 {
+		t.Fatalf("rolled-back root outbox count = %d, want 0", outboxCount)
+	}
+	assertRootLocalDeleteIntent(t, cache, rootDocumentID, documentID, false)
+
+	if _, err := cache.db.Exec(`drop trigger fail_atomic_local_delete_intent`); err != nil {
+		t.Fatalf("drop local-delete intent failure trigger: %v", err)
+	}
+	if err := cache.storeOutboxUpdateWithRootLocalDeleteIntentLocked(
+		nil,
+		rootDocumentID,
+		rootDocumentPath,
+		record,
+		documentID,
+	); err != nil {
+		t.Fatalf("store atomic root outbox and local-delete intent: %v", err)
+	}
+	if err := cache.db.QueryRow(`select count(*) from content_outbox where document_id = ?`, rootDocumentID).Scan(&outboxCount); err != nil {
+		t.Fatalf("count committed root outbox: %v", err)
+	}
+	if outboxCount != 1 {
+		t.Fatalf("committed root outbox count = %d, want 1", outboxCount)
+	}
+	assertRootLocalDeleteIntent(t, cache, rootDocumentID, documentID, true)
+}
+
+func TestStoreRootProjectionEntriesClearsLocalDeleteIntentsAtomically(t *testing.T) {
+	cache, err := newTestDocumentCache(t, t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	const (
+		rootDocumentID = "root_atomic_projection"
+		documentID     = "doc_atomic_projection"
+	)
+	previous := rootProjectionEntry{
+		EntryID:           rootEntryIDForDocument(documentID),
+		Kind:              rootEntryKindFile,
+		ContentDocumentID: documentID,
+		DesiredPath:       "docs/atomic.md",
+		MaterializedPath:  "docs/atomic.md",
+		Active:            true,
+		ProjectedSeq:      1,
+	}
+	if err := cache.storeRootProjectionEntries(rootDocumentID, []rootProjectionEntry{previous}); err != nil {
+		t.Fatalf("store previous root projection: %v", err)
+	}
+	if _, err := cache.db.Exec(`insert into root_local_delete_intents (
+		root_document_id, content_document_id, created_at
+	) values (?, ?, 1)`, rootDocumentID, documentID); err != nil {
+		t.Fatalf("store local-delete intent: %v", err)
+	}
+	if _, err := cache.db.Exec(`create trigger fail_atomic_root_projection
+		before insert on root_projection_entries
+		when new.root_document_id = 'root_atomic_projection'
+		begin
+			select raise(abort, 'injected root projection store failure');
+		end`); err != nil {
+		t.Fatalf("create projection failure trigger: %v", err)
+	}
+
+	next := previous
+	next.Active = false
+	next.MaterializedPath = ""
+	next.ProjectedSeq = 2
+	if err := cache.storeRootProjectionEntries(rootDocumentID, []rootProjectionEntry{next}); err == nil {
+		t.Fatal("root projection store unexpectedly succeeded through the failure trigger")
+	}
+	stored, err := cache.loadRootProjectionEntries(rootDocumentID)
+	if err != nil {
+		t.Fatalf("load projection after rolled-back store: %v", err)
+	}
+	got := stored[previous.EntryID]
+	if !got.Active || got.ProjectedSeq != previous.ProjectedSeq || !got.LocalDeleteIntent {
+		t.Fatalf("rolled-back projection = %#v, want previous active projection with durable intent", got)
+	}
+	if _, err := cache.db.Exec(`drop trigger fail_atomic_root_projection`); err != nil {
+		t.Fatalf("drop projection failure trigger: %v", err)
+	}
+	if err := cache.storeRootProjectionEntries(rootDocumentID, []rootProjectionEntry{next}); err != nil {
+		t.Fatalf("store successful root projection: %v", err)
+	}
+	stored, err = cache.loadRootProjectionEntries(rootDocumentID)
+	if err != nil {
+		t.Fatalf("load successful projection: %v", err)
+	}
+	got = stored[next.EntryID]
+	if got.Active || got.ProjectedSeq != next.ProjectedSeq || got.LocalDeleteIntent {
+		t.Fatalf("successful projection = %#v, want inactive projection with cleared intent", got)
+	}
+}
+
 func TestWorkspaceStoreSchemaUsesAgreedDurableTables(t *testing.T) {
 	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {
@@ -940,7 +1063,7 @@ func TestWorkspaceStoreSchemaUsesAgreedDurableTables(t *testing.T) {
 		}
 		tables = append(tables, table)
 	}
-	want := []string{"content_outbox", "crdt_updates", "document_snapshots", "documents", "incoming_updates", "local_namespace_intents", "projected_bases", "root_projection_entries", "thread_outbox"}
+	want := []string{"content_outbox", "crdt_updates", "document_snapshots", "documents", "incoming_updates", "local_namespace_intents", "projected_bases", "root_local_delete_intents", "root_projection_entries", "thread_outbox"}
 	if !reflect.DeepEqual(tables, want) {
 		t.Fatalf("sqlite schema tables = %#v, want %#v", tables, want)
 	}

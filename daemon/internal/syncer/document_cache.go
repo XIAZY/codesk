@@ -282,6 +282,12 @@ func (c *workspaceStore) initSchema() error {
 			primary key (root_document_id, entry_id)
 		)`,
 		`create index if not exists root_projection_entries_by_content on root_projection_entries(root_document_id, content_document_id)`,
+		`create table if not exists root_local_delete_intents (
+			root_document_id text not null,
+			content_document_id text not null,
+			created_at integer not null,
+			primary key (root_document_id, content_document_id)
+		)`,
 		`create table if not exists local_namespace_intents (
 			id text primary key,
 			workspace_relative_path text not null,
@@ -632,10 +638,36 @@ func (c *workspaceStore) loadOutboxUpdatesLocked(_ *documentCacheEntry, document
 }
 
 func (c *workspaceStore) storeOutboxUpdateLocked(entry *documentCacheEntry, documentID, path string, record outboxUpdateRecord) error {
-	return c.storeOutboxUpdatesLocked(entry, documentID, path, []outboxUpdateRecord{record})
+	return c.storeOutboxUpdatesWithRootLocalDeleteIntentLocked(entry, documentID, path, []outboxUpdateRecord{record}, "")
+}
+
+func (c *workspaceStore) storeOutboxUpdateWithRootLocalDeleteIntentLocked(
+	entry *documentCacheEntry,
+	documentID string,
+	path string,
+	record outboxUpdateRecord,
+	contentDocumentID string,
+) error {
+	return c.storeOutboxUpdatesWithRootLocalDeleteIntentLocked(
+		entry,
+		documentID,
+		path,
+		[]outboxUpdateRecord{record},
+		contentDocumentID,
+	)
 }
 
 func (c *workspaceStore) storeOutboxUpdatesLocked(entry *documentCacheEntry, documentID, path string, records []outboxUpdateRecord) error {
+	return c.storeOutboxUpdatesWithRootLocalDeleteIntentLocked(entry, documentID, path, records, "")
+}
+
+func (c *workspaceStore) storeOutboxUpdatesWithRootLocalDeleteIntentLocked(
+	entry *documentCacheEntry,
+	documentID string,
+	path string,
+	records []outboxUpdateRecord,
+	localDeleteContentDocumentID string,
+) error {
 	if c == nil || documentID == "" {
 		return nil
 	}
@@ -673,6 +705,15 @@ func (c *workspaceStore) storeOutboxUpdatesLocked(entry *documentCacheEntry, doc
 				record.ID, documentID, record.UpdateSHA256, record.Update, record.ObservedProjectedSeq,
 				record.ObservedContentSHA256, record.ObservedContent, record.SourcePath, record.ActorID, record.ActorType,
 				unixNano(record.CreatedAt), unixNano(now)); err != nil {
+				return err
+			}
+		}
+		if localDeleteContentDocumentID != "" {
+			if _, err := tx.Exec(`insert into root_local_delete_intents (
+					root_document_id, content_document_id, created_at
+				) values (?, ?, ?)
+				on conflict(root_document_id, content_document_id) do update set created_at = excluded.created_at`,
+				documentID, localDeleteContentDocumentID, unixNano(now)); err != nil {
 				return err
 			}
 		}
@@ -823,8 +864,15 @@ func (c *workspaceStore) loadRootProjectionEntries(rootDocumentID string) (map[s
 	if c == nil || rootDocumentID == "" {
 		return result, nil
 	}
-	rows, err := c.db.Query(`select entry_id, kind, content_document_id, desired_path, materialized_path, active, projected_seq
-		from root_projection_entries where root_document_id = ?`, rootDocumentID)
+	rows, err := c.db.Query(`select projection.entry_id, projection.kind,
+			projection.content_document_id, projection.desired_path,
+			projection.materialized_path, projection.active, projection.projected_seq,
+			case when local_delete.content_document_id is null then 0 else 1 end
+		from root_projection_entries projection
+		left join root_local_delete_intents local_delete
+			on local_delete.root_document_id = projection.root_document_id
+			and local_delete.content_document_id = projection.content_document_id
+		where projection.root_document_id = ?`, rootDocumentID)
 	if err != nil {
 		return nil, err
 	}
@@ -832,10 +880,21 @@ func (c *workspaceStore) loadRootProjectionEntries(rootDocumentID string) (map[s
 	for rows.Next() {
 		var entry rootProjectionEntry
 		var active int
-		if err := rows.Scan(&entry.EntryID, &entry.Kind, &entry.ContentDocumentID, &entry.DesiredPath, &entry.MaterializedPath, &active, &entry.ProjectedSeq); err != nil {
+		var localDeleteIntent int
+		if err := rows.Scan(
+			&entry.EntryID,
+			&entry.Kind,
+			&entry.ContentDocumentID,
+			&entry.DesiredPath,
+			&entry.MaterializedPath,
+			&active,
+			&entry.ProjectedSeq,
+			&localDeleteIntent,
+		); err != nil {
 			return nil, err
 		}
 		entry.Active = active != 0
+		entry.LocalDeleteIntent = localDeleteIntent != 0
 		result[entry.EntryID] = entry
 	}
 	return result, rows.Err()
@@ -867,6 +926,9 @@ func (c *workspaceStore) storeRootProjectionEntries(rootDocumentID string, entri
 				entry.ProjectedSeq, unixNano(now)); err != nil {
 				return err
 			}
+		}
+		if _, err := tx.Exec(`delete from root_local_delete_intents where root_document_id = ?`, rootDocumentID); err != nil {
+			return err
 		}
 		return nil
 	})

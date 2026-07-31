@@ -81,43 +81,6 @@ func TestWorkspaceFSCreateEmptyOrReadPreservesExistingFile(t *testing.T) {
 	}
 }
 
-func TestWorkspaceFSCreateOrReadCreatesCanonicalContent(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "nested", "doc.md")
-	canonical := []byte("canonical\n")
-	snapshot, err := NewWorkspaceFS(root).CreateOrRead(path, canonical)
-	if err != nil {
-		t.Fatalf("create or read canonical content: %v", err)
-	}
-	if !snapshot.Exists || string(snapshot.Bytes) != string(canonical) || snapshot.Hash != projectedHashBytes(canonical) {
-		t.Fatalf("created snapshot = %+v, want canonical bytes", snapshot)
-	}
-}
-
-func TestWorkspaceFSCreateOrReadPreservesReplacementAfterAbsentObservation(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "doc.md")
-	fs := NewWorkspaceFS(root)
-	before, err := fs.Read(path)
-	if err != nil {
-		t.Fatalf("observe absent path: %v", err)
-	}
-	if before.Exists {
-		t.Fatalf("path unexpectedly existed: %+v", before)
-	}
-	replacement := []byte("replacement\n")
-	if err := os.WriteFile(path, replacement, 0o644); err != nil {
-		t.Fatalf("write replacement: %v", err)
-	}
-	snapshot, err := fs.CreateOrRead(path, []byte("canonical\n"))
-	if err != nil {
-		t.Fatalf("create or read after replacement: %v", err)
-	}
-	if string(snapshot.Bytes) != string(replacement) {
-		t.Fatalf("replacement was overwritten: got %q want %q", snapshot.Bytes, replacement)
-	}
-}
-
 func TestWorkspaceFSCreateEmptyOrReadPreservesFileCreatedAfterAbsentObservation(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "doc.md")
@@ -360,6 +323,76 @@ func TestWorkspaceFSArchiveUsesRenameWithinWorkspace(t *testing.T) {
 	}
 	if string(got) != "recover me" {
 		t.Fatalf("archive content mismatch: %q", got)
+	}
+}
+
+func TestClassifyWorkspacePathOccupant(t *testing.T) {
+	root := t.TempDir()
+	regularPath := filepath.Join(root, "regular.md")
+	if err := os.WriteFile(regularPath, []byte("content\n"), 0o644); err != nil {
+		t.Fatalf("write regular occupant: %v", err)
+	}
+	directoryPath := filepath.Join(root, "directory")
+	if err := os.Mkdir(directoryPath, 0o755); err != nil {
+		t.Fatalf("create directory occupant: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name        string
+		path        string
+		wantKind    workspacePathOccupantKind
+		wantContent bool
+	}{
+		{name: "absent", path: filepath.Join(root, "absent"), wantKind: workspacePathAbsent},
+		{name: "regular file", path: regularPath, wantKind: workspacePathRegularFile, wantContent: true},
+		{name: "directory", path: directoryPath, wantKind: workspacePathDirectory},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := classifyWorkspacePathOccupant(tc.path)
+			if err != nil {
+				t.Fatalf("classify occupant: %v", err)
+			}
+			if got.Kind != tc.wantKind {
+				t.Fatalf("occupant kind = %v, want %v", got.Kind, tc.wantKind)
+			}
+			providesContent, err := workspacePathProvidesFileContent(tc.path, got)
+			if err != nil {
+				t.Fatalf("classify file content: %v", err)
+			}
+			if providesContent != tc.wantContent {
+				t.Fatalf("provides content = %v, want %v", providesContent, tc.wantContent)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name        string
+		target      string
+		wantContent bool
+	}{
+		{name: "symlink to regular file", target: regularPath, wantContent: true},
+		{name: "dangling symlink", target: filepath.Join(root, "missing-target")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(root, strings.ReplaceAll(tc.name, " ", "-"))
+			if err := os.Symlink(tc.target, path); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			got, err := classifyWorkspacePathOccupant(path)
+			if err != nil {
+				t.Fatalf("classify symlink occupant: %v", err)
+			}
+			if got.Kind != workspacePathOther || got.Mode&os.ModeSymlink == 0 {
+				t.Fatalf("symlink occupant = %#v, want physical other/symlink", got)
+			}
+			providesContent, err := workspacePathProvidesFileContent(path, got)
+			if err != nil {
+				t.Fatalf("classify symlink content: %v", err)
+			}
+			if providesContent != tc.wantContent {
+				t.Fatalf("symlink provides content = %v, want %v", providesContent, tc.wantContent)
+			}
+		})
 	}
 }
 
