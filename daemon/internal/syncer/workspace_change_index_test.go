@@ -436,6 +436,46 @@ func (f *trackedEventPathFixture) removeAndQueue(t *testing.T) time.Time {
 	return now
 }
 
+func TestWorkspaceReplicaPresentEventsCancelConfirmedDeleteCandidate(t *testing.T) {
+	for _, op := range []struct {
+		name string
+		op   fsnotify.Op
+	}{
+		{name: "create", op: fsnotify.Create},
+		{name: "write", op: fsnotify.Write},
+	} {
+		t.Run(op.name, func(t *testing.T) {
+			fixture := newTrackedEventPathFixture(t, "doc_present_event")
+			fixture.tracked.markLocalDeleted()
+
+			if err := fixture.replica.handleWatcherEvent(
+				fsnotify.Event{Name: fixture.path, Op: op.op},
+				time.Now(),
+			); err != nil {
+				t.Fatalf("handle confirmed-present %s: %v", op.name, err)
+			}
+			if fixture.tracked.isLocalDeleted() {
+				t.Fatalf("confirmed-present %s did not cancel the delete candidate", op.name)
+			}
+			if !fixture.tracked.isLocalDirty() {
+				t.Fatalf("confirmed-present %s did not retain content reconciliation", op.name)
+			}
+		})
+	}
+}
+
+func TestWorkspaceReplicaPresentScanCancelsConfirmedDeleteCandidate(t *testing.T) {
+	fixture := newTrackedEventPathFixture(t, "doc_present_scan")
+	fixture.tracked.markLocalDeleted()
+
+	if err := fixture.replica.reconcileLocalWorkspace(context.Background()); err != nil {
+		t.Fatalf("reconcile confirmed-present scan: %v", err)
+	}
+	if fixture.tracked.isLocalDeleted() {
+		t.Fatal("confirmed-present scan did not cancel the delete candidate")
+	}
+}
+
 func TestWorkspaceReplicaEventPathCoalescedCreateAfterRemoveRequiresExactPathConfirmation(t *testing.T) {
 	for _, tc := range []struct {
 		name        string

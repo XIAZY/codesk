@@ -1671,6 +1671,29 @@ func (s *workspaceRuntime) reconcileLocalMetadataOperations(ctx context.Context,
 			tracked.clearLocalDirty()
 			continue
 		}
+		present, err := revalidateLocalDeleteCandidate(tracked)
+		if err != nil {
+			return false, err
+		}
+		if present {
+			tracked.clearLocalDeleted()
+			tracked.markLocalDirty()
+			if tracked.Owner != nil && tracked.Owner.changes != nil {
+				tracked.Owner.changes.markTrackedPresent(
+					tracked.DocumentID,
+					tracked.Path,
+					statFileIdentity(tracked.Path),
+				)
+			}
+			s.markDocumentDirty(tracked.DocumentID)
+			return true, nil
+		}
+		// A newer confirmed-present observation cancels this reversible candidate.
+		if !tracked.isLocalDeleted() {
+			tracked.markLocalDirty()
+			s.markDocumentDirty(tracked.DocumentID)
+			return true, nil
+		}
 		actorID, actorType := s.actorForTracked(tracked)
 		if err := s.tombstoneRootFileEntry(ctx, tracked.DocumentID, actorID, actorType); err != nil {
 			return false, err
@@ -1708,6 +1731,28 @@ func (s *workspaceRuntime) reconcileLocalMetadataOperations(ctx context.Context,
 		return true, nil
 	}
 	return false, nil
+}
+
+func revalidateLocalDeleteCandidate(tracked *trackedFile) (bool, error) {
+	if tracked == nil {
+		return false, errors.New("revalidate local delete candidate: tracked file is nil")
+	}
+	if strings.TrimSpace(tracked.Path) == "" {
+		return false, fmt.Errorf("revalidate local delete candidate for %q: path is empty", tracked.DocumentID)
+	}
+	var (
+		exists bool
+		err    error
+	)
+	if tracked.Owner != nil {
+		_, exists, err = tracked.Owner.observeTrackedFileAfterMissingSignal(tracked.Path)
+	} else {
+		_, exists, err = observeTrackedFileAfterMissingSignal(tracked.Path)
+	}
+	if err != nil {
+		return false, fmt.Errorf("re-observe tracked file %q before propagating delete: %w", tracked.Path, err)
+	}
+	return exists, nil
 }
 
 func cleanupRemovedDocument(cache *documentCache, entry *documentCacheEntry, documentID string, states []trackedReconcileState) error {
