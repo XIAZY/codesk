@@ -68,7 +68,7 @@ func TestWorkspaceChangeIndexDelaysUnmatchedMissingBeforeDelete(t *testing.T) {
 	if got := changes.LocalDeletes; len(got) != 1 || got[0].DocumentID != "doc_gone" {
 		t.Fatalf("local deletes = %#v", got)
 	}
-	if !index.resolvePendingMissing("doc_gone", "/workspace/docs/gone.md") {
+	if !index.resolvePendingMissing(changes.LocalDeletes[0]) {
 		t.Fatal("ready delete should resolve the matching pending path")
 	}
 	if index.hasPendingMissing() {
@@ -519,6 +519,77 @@ func TestWorkspaceReplicaEventPathCreateDuringDeleteConfirmationWins(t *testing.
 	}
 	if !fixture.tracked.isLocalDirty() {
 		t.Fatal("newer create should mark the replacement dirty")
+	}
+}
+
+func TestWorkspaceReplicaEventPathNewRemoveDuringDeleteConfirmationStaysPending(t *testing.T) {
+	fixture := newTrackedEventPathFixture(t, "doc_interleaved_remove")
+	now := fixture.removeAndQueue(t)
+	secondRemoveAt := now.Add(workspaceMissingPathDelay)
+	calls := 0
+	fixture.replica.observeMissingPath = func(gotPath string) (string, bool, error) {
+		calls++
+		if calls > 1 {
+			return observeTrackedFileAfterMissingSignal(gotPath)
+		}
+		if err := os.WriteFile(fixture.path, []byte("replacement\n"), 0o644); err != nil {
+			t.Fatalf("write replacement: %v", err)
+		}
+		if err := fixture.replica.handleWatcherEvent(
+			fsnotify.Event{Name: fixture.path, Op: fsnotify.Create},
+			secondRemoveAt,
+		); err != nil {
+			t.Fatalf("handle interleaved create: %v", err)
+		}
+		if err := os.Remove(fixture.path); err != nil {
+			t.Fatalf("remove replacement: %v", err)
+		}
+		if err := fixture.replica.handleWatcherEvent(
+			fsnotify.Event{Name: fixture.path, Op: fsnotify.Remove},
+			secondRemoveAt,
+		); err != nil {
+			t.Fatalf("handle interleaved remove: %v", err)
+		}
+		// Model the first candidate's absence observation completing after a
+		// newer missing-path generation was queued for the same document/path.
+		return "", false, nil
+	}
+
+	firstReadyAt := now.Add(workspaceMissingPathDelay + time.Millisecond)
+	if pending, err := fixture.replica.drainPathChanges(context.Background(), firstReadyAt); err != nil {
+		t.Fatalf("drain stale delete candidate: %v", err)
+	} else if !pending {
+		t.Fatal("newer remove should remain pending after the stale candidate resolves")
+	}
+	if fixture.tracked.isLocalDeleted() {
+		t.Fatal("stale delete candidate consumed a newer remove generation")
+	}
+
+	if pending, err := fixture.replica.drainPathChanges(
+		context.Background(),
+		secondRemoveAt.Add(workspaceMissingPathDelay/2),
+	); err != nil {
+		t.Fatalf("drain newer remove before delay: %v", err)
+	} else if !pending {
+		t.Fatal("newer remove should retain its own debounce window")
+	}
+	if fixture.tracked.isLocalDeleted() {
+		t.Fatal("newer remove deleted before its debounce window elapsed")
+	}
+
+	if pending, err := fixture.replica.drainPathChanges(
+		context.Background(),
+		secondRemoveAt.Add(workspaceMissingPathDelay+time.Millisecond),
+	); err != nil {
+		t.Fatalf("drain confirmed newer remove: %v", err)
+	} else if pending {
+		t.Fatal("confirmed newer remove should resolve after its own delay")
+	}
+	if calls != 2 {
+		t.Fatalf("observation calls = %d, want 2", calls)
+	}
+	if !fixture.tracked.isLocalDeleted() {
+		t.Fatal("confirmed newer remove did not delete after its own delay")
 	}
 }
 
