@@ -185,6 +185,18 @@ func TestScanWorkspaceFilesObservesCompleteContentDuringAtomicReplacement(t *tes
 	if err := os.WriteFile(path, []byte(oldContent), 0o644); err != nil {
 		t.Fatalf("write original: %v", err)
 	}
+	files, err := scanWorkspaceFiles(root)
+	if err != nil {
+		t.Fatalf("baseline scan: %v", err)
+	}
+	got, ok := files[path]
+	if !ok {
+		t.Fatalf("baseline scan omitted %q", path)
+	}
+	if got != oldContent {
+		t.Fatalf("baseline scan content = %d bytes, want %d", len(got), len(oldContent))
+	}
+
 	fs := NewWorkspaceFS(root)
 	writerDone := make(chan error, 1)
 	go func() {
@@ -208,7 +220,10 @@ func TestScanWorkspaceFilesObservesCompleteContentDuringAtomicReplacement(t *tes
 		if err != nil {
 			t.Fatalf("scan during replacement: %v", err)
 		}
-		got := files[path]
+		got, ok := files[path]
+		if !ok {
+			continue
+		}
 		if got != oldContent && got != newContent {
 			t.Fatalf("scan observed partial content: %d bytes", len(got))
 		}
