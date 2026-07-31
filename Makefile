@@ -145,7 +145,7 @@ windows-gui-build:
 
 windows-gui-deploy:
 	@printf '%s\n' 'windows-gui-deploy requires real Windows for WiX link and ICE validation; no GUI was deployed' >&2
-	@printf '%s\n' 'Use the Windows release CI, then run scripts/verify-windows-gui-ci.sh for exact-head evidence' >&2
+	@printf '%s\n' 'Windows MSI CI was removed 2026-07-31 (no Windows runner); rebuild it with task #21 before expecting CI evidence' >&2
 	@exit 1
 endif
 
