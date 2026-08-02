@@ -11,8 +11,9 @@
 #   frontend production build          -> frontend: "Production build"
 #   git diff --check                   -> diff-check
 #   Windows GNU compile/link           -> windows-daemon-build
-#   Windows WiX compile/link           -> windows-desktop-msi
-#   Windows native runtime tests        -> windows-daemon (paused until a runner is available)
+#   Windows WiX compile/link           -> REMOVED 2026-07-31 (no Windows runner; see task #21)
+#   Windows installer lifecycle         -> windows-daemon-installer
+#   Windows native runtime tests        -> windows-daemon
 #   macOS native cgo + unsigned universal release -> macos-desktop (opt-in until runner capacity exists)
 #
 # Two meta-properties (Tom's bar):
@@ -285,162 +286,8 @@ jobs:
           done
       - name: Verify CGO-free desktop state boundary
         run: scripts/test-desktopstate-boundary.sh
-      - name: Upload AMD64 desktop installer payload
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-desktop-payload-amd64
-          path: ${{ runner.temp }}/windows-desktop-payload/amd64/
-          if-no-files-found: error
-          retention-days: 1
-      - name: Upload ARM64 desktop installer payload
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-desktop-payload-arm64
-          path: ${{ runner.temp }}/windows-desktop-payload/arm64/
-          if-no-files-found: error
-          retention-days: 1
-
-  windows-desktop-msi:
-    name: Windows desktop MSI (WiX ${{ matrix.architecture }})
-    needs: windows-daemon-build
-    # Re-enable when matching self-hosted Windows ARM64 runner capacity exists.
-    if: false
-    runs-on: [self-hosted, Windows, ARM64]
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - architecture: AMD64
-            go_arch: amd64
-            platform: x64
-          - architecture: ARM64
-            go_arch: arm64
-            platform: arm64
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 8.0.423
-      - name: Download architecture-matched product payload
-        uses: actions/download-artifact@v4
-        with:
-          name: windows-desktop-payload-${{ matrix.go_arch }}
-          path: ${{ runner.temp }}/wix-payload-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.architecture }}
-      - name: Verify downloaded product PE identities
-        shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '{0}'"
-        run: |
-          $payload = Join-Path $env:RUNNER_TEMP "wix-payload-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.architecture }}"
-          $payloadDirectories = @(Get-ChildItem -LiteralPath $payload -Directory -Recurse -Force)
-          if ($payloadDirectories.Count -ne 0) {
-            throw "downloaded payload contains unexpected directories: $($payloadDirectories.FullName -join ', ')"
-          }
-          $payloadFiles = @(Get-ChildItem -LiteralPath $payload -File -Recurse -Force)
-          $actualPayloadNames = @($payloadFiles | ForEach-Object Name | Sort-Object)
-          $expectedPayloadNames = @("Codesk.exe", "notty-agent-tool.exe")
-          if ((ConvertTo-Json $actualPayloadNames -Compress) -cne
-              (ConvertTo-Json ($expectedPayloadNames | Sort-Object) -Compress)) {
-            throw "unexpected downloaded payload set: $($actualPayloadNames -join ', ')"
-          }
-          go run ./scripts/verify-windows-desktop-pe.go `
-            (Join-Path $payload "Codesk.exe") `
-            "${{ matrix.go_arch }}" gui
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          go run ./scripts/verify-windows-desktop-pe.go `
-            (Join-Path $payload "notty-agent-tool.exe") `
-            "${{ matrix.go_arch }}" console
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Build reproducible root-version WiX release package
-        shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '{0}'"
-        run: |
-          $payload = Join-Path $env:RUNNER_TEMP "wix-payload-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.architecture }}"
-          $output = Join-Path $env:RUNNER_TEMP "windows-desktop-msi-${{ matrix.go_arch }}"
-          $work = Join-Path $env:RUNNER_TEMP "windows-desktop-msi-work-${{ matrix.go_arch }}"
-          ./scripts/build-windows-desktop-msi-artifact.ps1 `
-            -Architecture "${{ matrix.architecture }}" `
-            -GoArchitecture "${{ matrix.go_arch }}" `
-            -InstallerPlatform "${{ matrix.platform }}" `
-            -Release `
-            -CodeskExe (Join-Path $payload "Codesk.exe") `
-            -AgentToolExe (Join-Path $payload "notty-agent-tool.exe") `
-            -CodeskIcon "${{ github.workspace }}\daemon\cmd\codesk-desktop\assets\codesk.ico" `
-            -SourceEvent "${{ github.event_name }}" `
-            -SourceCheckoutCommit "${{ github.sha }}" `
-            -SourceHead "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}" `
-            -SourceBase "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}" `
-            -SafeParentDirectory $env:RUNNER_TEMP `
-            -DotnetSdkVersion "8.0.423" `
-            -OutputDirectory $output `
-            -WorkingDirectory $work
-
-          # ProductVersion is a build-time input outside the Go XML source contract. A
-          # successful validated link above proves the compiler is operational; this
-          # isolated invalid value must then be rejected by WiX itself.
-          $negativeOutput = Join-Path $env:RUNNER_TEMP "wix-negative-${{ matrix.architecture }}"
-          New-Item -ItemType Directory -Force -Path $negativeOutput | Out-Null
-          dotnet build deploy/windows-desktop/Codesk.wixproj `
-            --configuration Release `
-            --no-incremental `
-            "-p:InstallerPlatform=${{ matrix.platform }}" `
-            "-p:ProductVersion=not-a-valid-msi-version" `
-            "-p:VersionProductCode={00000000-0000-0000-0000-000000000001}" `
-            "-p:CodeskExe=$payload\Codesk.exe" `
-            "-p:AgentToolExe=$payload\notty-agent-tool.exe" `
-            "-p:CodeskIcon=${{ github.workspace }}\daemon\cmd\codesk-desktop\assets\codesk.ico" `
-            "-p:OutputPath=$negativeOutput"
-          $negativeExit = $LASTEXITCODE
-          if ($negativeExit -eq 0) {
-            throw "WiX accepted the compiler-only invalid ProductVersion mutation"
-          }
-          Write-Host "WiX rejected the compiler-only invalid ProductVersion mutation as required"
-          $global:LASTEXITCODE = 0
-      - name: Build non-publishable MSI upgrade QA fixture
-        shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '{0}'"
-        run: |
-          $payload = Join-Path $env:RUNNER_TEMP "wix-payload-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.architecture }}"
-          $output = Join-Path $env:RUNNER_TEMP "windows-desktop-msi-upgrade-qa-${{ matrix.go_arch }}"
-          $work = Join-Path $env:RUNNER_TEMP "windows-desktop-msi-upgrade-qa-work-${{ matrix.go_arch }}"
-          ./scripts/build-windows-desktop-msi-artifact.ps1 `
-            -Architecture "${{ matrix.architecture }}" `
-            -GoArchitecture "${{ matrix.go_arch }}" `
-            -InstallerPlatform "${{ matrix.platform }}" `
-            -TestOnlyUpgradeQa `
-            -CodeskExe (Join-Path $payload "Codesk.exe") `
-            -AgentToolExe (Join-Path $payload "notty-agent-tool.exe") `
-            -CodeskIcon "${{ github.workspace }}\daemon\cmd\codesk-desktop\assets\codesk.ico" `
-            -SourceEvent "${{ github.event_name }}" `
-            -SourceCheckoutCommit "${{ github.sha }}" `
-            -SourceHead "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}" `
-            -SourceBase "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}" `
-            -SafeParentDirectory $env:RUNNER_TEMP `
-            -DotnetSdkVersion "8.0.423" `
-            -OutputDirectory $output `
-            -WorkingDirectory $work
-
-          $provenance = Get-Content -LiteralPath (Join-Path $output 'provenance.json') -Raw | ConvertFrom-Json
-          if ($provenance.target.buildMode -cne 'test-only-upgrade-qa' -or $provenance.target.publishable -ne $false) {
-            throw 'upgrade QA fixture was not marked non-publishable'
-          }
-      - name: Upload reproducible root-version MSI and provenance
-        id: msi-upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-desktop-msi-${{ matrix.go_arch }}
-          path: ${{ runner.temp }}/windows-desktop-msi-${{ matrix.go_arch }}/
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
-
   windows-daemon-installer:
     name: Windows daemon installer
-    # Preserve the installer lifecycle test, but do not schedule hosted Windows
-    # jobs until a Windows CI runner is available for this repository.
-    if: ${{ false }}
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
@@ -451,9 +298,6 @@ jobs:
 
   windows-daemon:
     name: Windows daemon (native Zig build + platform tests)
-    # Preserve the native execution matrix, but do not schedule it until a
-    # Windows CI runner is available for this repository.
-    if: ${{ false }}
     runs-on: windows-latest
     timeout-minutes: 30
     steps:

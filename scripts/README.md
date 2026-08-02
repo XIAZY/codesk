@@ -249,18 +249,13 @@ uploaded. Deployed bundles live under `desktop/windows/<DAEMON_VERSION>/<arch>`;
 short-cache `desktop/windows/latest/manifest.json` pointer is written only
 after both architecture bundles are present.
 
-From any host with `gh` plus `sha256sum` or `shasum`, download both
-architecture bundles from a successful CI run bound to the checked-out `HEAD`
-and verify their exact inventories and checksums with:
-
-```sh
-scripts/verify-windows-gui-ci.sh
-WINDOWS_GUI_RUN_ID=123456789 scripts/verify-windows-gui-ci.sh
-```
-
-Without an explicit run ID, the script selects the newest successful CI run
-for the exact checked-out commit. It never falls back to a stale commit or a
-non-successful run.
+The Windows MSI CI surface was removed on 2026-07-31: its job had been disabled for want of a
+Windows ARM64 runner while its artifact uploads still ran on every build, filling the repository's
+artifact quota and failing unrelated CI rows. `scripts/verify-windows-gui-ci.sh` went with it — it
+downloaded `windows-desktop-msi-<arch>`, which no workflow produces any more, so it could only fail
+confusingly. Rebuilding MSI CI (task #21) means rebuilding its artifact handoff and its verifier
+together. The builder scripts and their contracts are unchanged and still cover local and native
+construction.
 
 ### Native acceptance
 
