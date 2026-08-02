@@ -2,14 +2,280 @@ package syncer
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	crdt "notty/internal/ycrdt"
 )
+
+func TestRootLocalDeleteIntentMigrationPreservesLegacyRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sync.db")
+	db, err := sql.Open("sqlite3", sqliteFileDSN(path))
+	if err != nil {
+		t.Fatalf("open legacy sqlite: %v", err)
+	}
+	if _, err := db.Exec(`create table root_local_delete_intents (
+		root_document_id text not null,
+		content_document_id text not null,
+		created_at integer not null,
+		primary key (root_document_id, content_document_id)
+	)`); err != nil {
+		t.Fatalf("create legacy table: %v", err)
+	}
+	const createdAt = int64(123456789)
+	if _, err := db.Exec(`insert into root_local_delete_intents (
+		root_document_id, content_document_id, created_at
+	) values ('root-1', 'doc-1', ?)`, createdAt); err != nil {
+		t.Fatalf("seed legacy row: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy sqlite: %v", err)
+	}
+
+	cache, err := newTestDocumentCache(t, path)
+	if err != nil {
+		t.Fatalf("migrate legacy cache: %v", err)
+	}
+	intent, ok, err := cache.loadRootLocalDeleteIntent("root-1", "doc-1")
+	if err != nil {
+		t.Fatalf("load migrated intent: %v", err)
+	}
+	if !ok {
+		t.Fatal("legacy intent was dropped")
+	}
+	if intent.Phase != rootLocalDeletePhaseLegacyFloor || unixNano(intent.CreatedAt) != createdAt || unixNano(intent.UpdatedAt) != createdAt {
+		t.Fatalf("migrated intent = %#v", intent)
+	}
+	if intent.EntryID != "" || intent.MaterializedPath != "" || intent.WindowGeneration != 0 || intent.ExpectedWindowGeneration != 0 {
+		t.Fatalf("legacy intent gained invented identity/generation: %#v", intent)
+	}
+
+	columns := sqliteTableColumns(t, cache.db, "root_local_delete_intents")
+	for _, required := range []string{
+		"entry_id", "desired_path", "materialized_path", "tombstone_operation_id",
+		"expected_window_generation", "window_generation", "opened_at", "reverse_until",
+		"restore_operation_id", "required_content_state_vector", "observed_file_identity",
+		"observed_content_sha256", "phase", "attempts", "next_attempt_at", "last_error", "updated_at",
+	} {
+		if !columns[required] {
+			t.Errorf("migrated table missing column %q: %#v", required, columns)
+		}
+	}
+}
+
+func TestRootLocalDeleteIntentMigrationRollsBackOnIndexFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sync.db")
+	db, err := sql.Open("sqlite3", sqliteFileDSN(path))
+	if err != nil {
+		t.Fatalf("open legacy sqlite: %v", err)
+	}
+	if _, err := db.Exec(`create table root_local_delete_intents (
+		root_document_id text not null,
+		content_document_id text not null,
+		created_at integer not null,
+		primary key (root_document_id, content_document_id)
+	)`); err != nil {
+		t.Fatalf("create legacy table: %v", err)
+	}
+	if _, err := db.Exec(`insert into root_local_delete_intents values ('root-1', 'doc-1', 7)`); err != nil {
+		t.Fatalf("seed legacy row: %v", err)
+	}
+	// SQLite object names share one namespace. This forces the final index
+	// creation to fail after copy/drop/rename, proving the rebuild is one tx.
+	if _, err := db.Exec(`create table root_local_delete_intents_materialized_path (id integer)`); err != nil {
+		t.Fatalf("create migration blocker: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy sqlite: %v", err)
+	}
+
+	if cache, err := newDocumentCache(path); err == nil {
+		if cache != nil {
+			_ = cache.Close()
+		}
+		t.Fatal("migration unexpectedly succeeded through index-name conflict")
+	}
+
+	check, err := sql.Open("sqlite3", sqliteFileDSN(path))
+	if err != nil {
+		t.Fatalf("reopen failed migration sqlite: %v", err)
+	}
+	defer check.Close()
+	columns := sqliteTableColumns(t, check, "root_local_delete_intents")
+	if columns["phase"] {
+		t.Fatalf("failed migration left replacement schema behind: %#v", columns)
+	}
+	var count int
+	if err := check.QueryRow(`select count(*) from root_local_delete_intents
+		where root_document_id = 'root-1' and content_document_id = 'doc-1' and created_at = 7`).Scan(&count); err != nil {
+		t.Fatalf("read rolled-back legacy row: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("rolled-back legacy row count = %d, want 1", count)
+	}
+}
+
+func TestRootLocalDeleteIntentPersistsTypedRecordAcrossReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sync.db")
+	cache, err := newTestDocumentCache(t, path)
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	now := time.Unix(1_700_000_000, 123).UTC()
+	want := rootLocalDeleteIntent{
+		RootDocumentID:             "root-1",
+		ContentDocumentID:          "doc-1",
+		EntryID:                    "entry-1",
+		DesiredPath:                "docs/a.md",
+		MaterializedPath:           "docs/a.md",
+		TombstoneOperationID:       "tombstone-1",
+		ExpectedWindowGeneration:   6,
+		WindowGeneration:           7,
+		OpenedAt:                   now,
+		ReverseUntil:               now.Add(5 * time.Minute),
+		RestoreOperationID:         "restore-1",
+		RequiredContentStateVector: []byte{1, 2, 3},
+		ObservedFileIdentity:       "identity-1",
+		ObservedContentSHA256:      strings.Repeat("a", 64),
+		Phase:                      rootLocalDeletePhaseRestorePending,
+		Attempts:                   3,
+		NextAttemptAt:              now.Add(time.Minute),
+		LastError:                  "retry",
+		CreatedAt:                  now,
+		UpdatedAt:                  now.Add(time.Second),
+	}
+	if err := cache.storeRootLocalDeleteIntent(want); err != nil {
+		t.Fatalf("store typed intent: %v", err)
+	}
+	if err := cache.Close(); err != nil {
+		t.Fatalf("close cache: %v", err)
+	}
+
+	reopened, err := newTestDocumentCache(t, path)
+	if err != nil {
+		t.Fatalf("reopen cache: %v", err)
+	}
+	got, ok, err := reopened.loadRootLocalDeleteIntent("root-1", "doc-1")
+	if err != nil {
+		t.Fatalf("load typed intent: %v", err)
+	}
+	if !ok || !reflect.DeepEqual(got, want) {
+		t.Fatalf("reopened intent = %#v, present=%v; want %#v", got, ok, want)
+	}
+
+	legacy := rootLocalDeleteIntent{
+		RootDocumentID: "root-1", ContentDocumentID: "doc-legacy",
+		Phase: rootLocalDeletePhaseLegacyFloor, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := reopened.storeRootLocalDeleteIntent(legacy); err != nil {
+		t.Fatalf("store generation-less intent: %v", err)
+	}
+	var expectedGeneration, generation sql.NullInt64
+	if err := reopened.db.QueryRow(`select expected_window_generation, window_generation
+		from root_local_delete_intents
+		where root_document_id = ? and content_document_id = ?`,
+		legacy.RootDocumentID, legacy.ContentDocumentID,
+	).Scan(&expectedGeneration, &generation); err != nil {
+		t.Fatalf("read nullable generations: %v", err)
+	}
+	if expectedGeneration.Valid || generation.Valid {
+		t.Fatalf("generation-less intent stored non-null generations: expected=%#v actual=%#v", expectedGeneration, generation)
+	}
+}
+
+func TestRootProjectionClearsOnlyLegacyDeleteIntents(t *testing.T) {
+	cache, err := newTestDocumentCache(t, t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	now := time.Now().UTC()
+	legacy := rootLocalDeleteIntent{
+		RootDocumentID: "root-1", ContentDocumentID: "doc-legacy",
+		Phase: rootLocalDeletePhaseLegacyFloor, CreatedAt: now, UpdatedAt: now,
+	}
+	feature := rootLocalDeleteIntent{
+		RootDocumentID: "root-1", ContentDocumentID: "doc-feature", EntryID: "doc-feature",
+		DesiredPath: "docs/feature.md", MaterializedPath: "docs/feature.md",
+		TombstoneOperationID: "tombstone-1", ExpectedWindowGeneration: 3, WindowGeneration: 4,
+		Phase: rootLocalDeletePhaseWindowOpen, CreatedAt: now, UpdatedAt: now,
+	}
+	for _, intent := range []rootLocalDeleteIntent{legacy, feature} {
+		if err := cache.storeRootLocalDeleteIntent(intent); err != nil {
+			t.Fatalf("store %s intent: %v", intent.ContentDocumentID, err)
+		}
+	}
+	if err := cache.storeRootProjectionEntries("root-1", []rootProjectionEntry{
+		{EntryID: "doc-legacy", ContentDocumentID: "doc-legacy", DesiredPath: "docs/legacy.md", MaterializedPath: "docs/legacy.md"},
+		{EntryID: "doc-feature", ContentDocumentID: "doc-feature", DesiredPath: "docs/feature.md", MaterializedPath: "", Active: false},
+	}); err != nil {
+		t.Fatalf("store root projection: %v", err)
+	}
+	if _, ok, err := cache.loadRootLocalDeleteIntent("root-1", "doc-legacy"); err != nil {
+		t.Fatalf("load legacy intent: %v", err)
+	} else if ok {
+		t.Fatal("legacy floor intent survived successful projection")
+	}
+	got, ok, err := cache.loadRootLocalDeleteIntent("root-1", "doc-feature")
+	if err != nil {
+		t.Fatalf("load feature intent: %v", err)
+	}
+	if !ok || got.MaterializedPath != "docs/feature.md" || got.Phase != rootLocalDeletePhaseWindowOpen || got.WindowGeneration != 4 {
+		t.Fatalf("feature intent after inactive projection = %#v, present=%v", got, ok)
+	}
+}
+
+func TestRootLocalDeleteIntentConstraintsRejectInvalidRows(t *testing.T) {
+	cache, err := newTestDocumentCache(t, t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	now := unixNano(time.Now().UTC())
+	if _, err := cache.db.Exec(`insert into root_local_delete_intents (
+		root_document_id, content_document_id, phase, created_at, updated_at
+	) values ('root', 'bad-phase', 'unknown', ?, ?)`, now, now); err == nil {
+		t.Fatal("phase CHECK accepted unknown phase")
+	}
+	if _, err := cache.db.Exec(`insert into root_local_delete_intents (
+		root_document_id, content_document_id, materialized_path, phase, created_at, updated_at
+	) values ('root', 'doc-1', 'docs/a.md', 'window_open', ?, ?)`, now, now); err != nil {
+		t.Fatalf("insert first materialized path: %v", err)
+	}
+	if _, err := cache.db.Exec(`insert into root_local_delete_intents (
+		root_document_id, content_document_id, materialized_path, phase, created_at, updated_at
+	) values ('root', 'doc-2', 'docs/a.md', 'window_open', ?, ?)`, now, now); err == nil {
+		t.Fatal("materialized-path uniqueness accepted a second correlation")
+	}
+}
+
+func sqliteTableColumns(t *testing.T, db *sql.DB, table string) map[string]bool {
+	t.Helper()
+	rows, err := db.Query(`pragma table_info(` + table + `)`)
+	if err != nil {
+		t.Fatalf("table info %s: %v", table, err)
+	}
+	defer rows.Close()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, dataType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatalf("scan table info %s: %v", table, err)
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate table info %s: %v", table, err)
+	}
+	return columns
+}
 
 func TestDocumentCacheMaterializesCachedStateWithoutBackendFetch(t *testing.T) {
 	root := t.TempDir()

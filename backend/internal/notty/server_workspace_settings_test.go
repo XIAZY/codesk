@@ -222,7 +222,7 @@ func TestWorkspaceDeleteRequiresOwnerAndExactNameThenCascades(t *testing.T) {
 
 	// Deletion proof: zero rows remain in any workspace-scoped table.
 	for _, table := range []string{
-		"users", "documents", "document_updates", "document_checkpoints",
+		"users", "documents", "document_updates", "document_checkpoints", "document_reverse_windows",
 		"threads", "thread_messages", "thread_participants",
 		"agents", "agent_runs", "agent_events", "agent_document_views",
 		"agent_document_subscriptions",

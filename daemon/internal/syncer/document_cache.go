@@ -282,12 +282,6 @@ func (c *workspaceStore) initSchema() error {
 			primary key (root_document_id, entry_id)
 		)`,
 		`create index if not exists root_projection_entries_by_content on root_projection_entries(root_document_id, content_document_id)`,
-		`create table if not exists root_local_delete_intents (
-			root_document_id text not null,
-			content_document_id text not null,
-			created_at integer not null,
-			primary key (root_document_id, content_document_id)
-		)`,
 		`create table if not exists local_namespace_intents (
 			id text primary key,
 			workspace_relative_path text not null,
@@ -310,7 +304,7 @@ func (c *workspaceStore) initSchema() error {
 			return err
 		}
 	}
-	return nil
+	return c.migrateRootLocalDeleteIntents()
 }
 
 func (c *workspaceStore) materialize(ctx context.Context, meta *document) (*materializedCachedDocument, error) {
@@ -710,10 +704,13 @@ func (c *workspaceStore) storeOutboxUpdatesWithRootLocalDeleteIntentLocked(
 		}
 		if localDeleteContentDocumentID != "" {
 			if _, err := tx.Exec(`insert into root_local_delete_intents (
-					root_document_id, content_document_id, created_at
-				) values (?, ?, ?)
-				on conflict(root_document_id, content_document_id) do update set created_at = excluded.created_at`,
-				documentID, localDeleteContentDocumentID, unixNano(now)); err != nil {
+						root_document_id, content_document_id, phase, created_at, updated_at
+					) values (?, ?, ?, ?, ?)
+					on conflict(root_document_id, content_document_id) do update set
+						phase = excluded.phase,
+						created_at = excluded.created_at,
+						updated_at = excluded.updated_at`,
+				documentID, localDeleteContentDocumentID, rootLocalDeletePhaseLegacyFloor, unixNano(now), unixNano(now)); err != nil {
 				return err
 			}
 		}
@@ -927,7 +924,8 @@ func (c *workspaceStore) storeRootProjectionEntries(rootDocumentID string, entri
 				return err
 			}
 		}
-		if _, err := tx.Exec(`delete from root_local_delete_intents where root_document_id = ?`, rootDocumentID); err != nil {
+		if _, err := tx.Exec(`delete from root_local_delete_intents
+			where root_document_id = ? and phase = ?`, rootDocumentID, rootLocalDeletePhaseLegacyFloor); err != nil {
 			return err
 		}
 		return nil

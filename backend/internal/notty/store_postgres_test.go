@@ -1598,6 +1598,7 @@ func mustExec(t *testing.T, db *sql.DB, query string, args ...any) {
 func clearNottyTables(db *sql.DB) error {
 	if _, err := db.Exec(`TRUNCATE TABLE
 		agent_document_views,
+		document_reverse_windows,
 		document_checkpoints,
 		document_updates,
 		document_heads,
