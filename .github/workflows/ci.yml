@@ -298,12 +298,33 @@ jobs:
 
   windows-daemon:
     name: Windows daemon (native Zig build + platform tests)
-    runs-on: windows-latest
+    runs-on: [self-hosted, Windows]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Resolve runner-native Windows toolchain
+        id: native
+        shell: powershell
+        run: |
+          switch ("${{ runner.arch }}") {
+            "X64" {
+              "go_arch=amd64" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+              "rust_target=x86_64-pc-windows-gnu" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+              "zig_target=x86_64-windows-gnu" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+              "race=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            }
+            "ARM64" {
+              "go_arch=arm64" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+              "rust_target=aarch64-pc-windows-gnullvm" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+              "zig_target=aarch64-windows-gnu" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+              "race=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            }
+            default {
+              throw "Unsupported native Windows runner architecture: ${{ runner.arch }}"
+            }
+          }
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -311,7 +332,7 @@ jobs:
         with:
           version: 0.16.0
       - name: Expose 7-Zip for release packaging
-        shell: pwsh
+        shell: powershell
         run: |
           $sevenZip = Join-Path $env:ProgramFiles "7-Zip"
           if (-not (Test-Path (Join-Path $sevenZip "7z.exe") -PathType Leaf)) {
@@ -320,7 +341,7 @@ jobs:
           $sevenZip | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-gnu,aarch64-pc-windows-gnullvm
+          targets: ${{ steps.native.outputs.rust_target }}
       - name: Cache cargo + Windows libyrs build
         uses: actions/cache@v4
         with:
@@ -328,32 +349,40 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             third_party/y-crdt/target
-          key: yffi-windows-zig-${{ hashFiles('third_party/y-crdt/**/Cargo.lock') }}
+          key: yffi-windows-zig-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('third_party/y-crdt/**/Cargo.lock') }}
           restore-keys: |
-            yffi-windows-zig-
+            yffi-windows-zig-${{ runner.os }}-${{ runner.arch }}-
       - name: Build canonical Windows release
         shell: bash
         env:
-          PLATFORMS: windows/amd64 windows/arm64
+          PLATFORMS: windows/${{ steps.native.outputs.go_arch }}
         run: |
           release_dir="$(cygpath -u "$RUNNER_TEMP")/notty-release"
           scripts/build-daemon-release.sh "$release_dir"
       - name: Verify canonical Windows release
-        shell: pwsh
+        shell: powershell
         run: |
           $release_version = & ./scripts/read-daemon-version.ps1
-          go run ./scripts/verify-windows-daemon-release.go "$env:RUNNER_TEMP/notty-release/$release_version" $release_version
+          go run ./scripts/verify-windows-daemon-release.go `
+            "$env:RUNNER_TEMP/notty-release/$release_version" `
+            $release_version `
+            "${{ steps.native.outputs.go_arch }}"
       - name: PowerShell installer tests
-        shell: pwsh
+        shell: powershell
         run: scripts/test-daemon-installer-windows.ps1
-      - name: Stage AMD64 Yrs library for native tests
+      - name: Stage runner-native Yrs library for native tests
         shell: bash
-        run: RUST_TARGET=x86_64-pc-windows-gnu RUSTFLAGS="-C panic=abort" scripts/build-yffi.sh
-      - name: Run Windows-native syncer suite and require platform rows
-        shell: pwsh
         env:
-          CC: zig cc -target x86_64-windows-gnu
+          RUST_TARGET: ${{ steps.native.outputs.rust_target }}
+          RUSTFLAGS: -C panic=abort
+        run: scripts/build-yffi.sh
+      - name: Run Windows-native syncer suite and require platform rows
+        shell: powershell
+        env:
+          CC: zig cc -target ${{ steps.native.outputs.zig_target }}
           CGO_ENABLED: "1"
+          GOARCH: ${{ steps.native.outputs.go_arch }}
+          GOOS: windows
         run: |
           $legacyFiles = @(
             "daemon/internal/syncer/file_lock.go",
@@ -372,7 +401,13 @@ jobs:
             throw "retired target byte-lock API returned"
           }
 
-          $output = & go test -race -count=1 -v ./daemon/internal/syncer 2>&1
+          $goArgs = @("test", "-count=1", "-v")
+          if ("${{ steps.native.outputs.race }}" -eq "true") {
+            $goArgs += "-race"
+          }
+          $goArgs += "./daemon/internal/syncer"
+          Write-Host "go $($goArgs -join ' ')"
+          $output = & go @goArgs 2>&1
           $testExit = $LASTEXITCODE
           $output | ForEach-Object { Write-Host $_ }
           if ($testExit -ne 0) { exit $testExit }

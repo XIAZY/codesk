@@ -73,6 +73,115 @@ func TestWindowsInstallerCIUsesArchitectureBoundProductPayloads(t *testing.T) {
 	}
 }
 
+func TestWindowsNativeCIUsesRunnerArchitecture(t *testing.T) {
+	path := filepath.Join("..", "..", "..", ".github", "workflows", "ci.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(data)
+	if err := checkWindowsNativeCIContract(workflow); err != nil {
+		t.Fatal(err)
+	}
+
+	mutations := []struct {
+		name        string
+		old         string
+		replacement string
+	}{
+		{"hosted X64 routing restored", "runs-on: [self-hosted, Windows]", "runs-on: windows-latest"},
+		{"ARM64 mapping removed", `"ARM64" {`, `"ARM64-disabled" {`},
+		{"native Rust target hard-coded", "targets: ${{ steps.native.outputs.rust_target }}", "targets: x86_64-pc-windows-gnu"},
+		{"cache architecture omitted", "key: yffi-windows-zig-${{ runner.os }}-${{ runner.arch }}-", "key: yffi-windows-zig-${{ runner.os }}-"},
+		{"release cross-build restored", "PLATFORMS: windows/${{ steps.native.outputs.go_arch }}", "PLATFORMS: windows/amd64 windows/arm64"},
+		{"native Yrs target hard-coded", "RUST_TARGET: ${{ steps.native.outputs.rust_target }}", "RUST_TARGET: x86_64-pc-windows-gnu"},
+		{"native C target hard-coded", "CC: zig cc -target ${{ steps.native.outputs.zig_target }}", "CC: zig cc -target x86_64-windows-gnu"},
+		{"unsupported ARM64 race enabled", `if ("${{ steps.native.outputs.race }}" -eq "true")`, "if ($true)"},
+		{"unknown architecture accepted", "default {", `"X86" {`},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			job, err := windowsNativeCIJob(workflow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Count(job, mutation.old) != 1 {
+				t.Fatalf("mutation source %q is not unique in the Windows-native job", mutation.old)
+			}
+			mutated := strings.Replace(workflow, mutation.old, mutation.replacement, 1)
+			if err := checkWindowsNativeCIContract(mutated); err == nil {
+				t.Fatal("Windows-native CI contract mutation passed")
+			}
+		})
+	}
+}
+
+func checkWindowsNativeCIContract(workflow string) error {
+	job, err := windowsNativeCIJob(workflow)
+	if err != nil {
+		return err
+	}
+	for required, count := range map[string]int{
+		"runs-on: [self-hosted, Windows]":                  1,
+		`switch ("${{ runner.arch }}")`:                    1,
+		`"X64" {`:                                          1,
+		`"go_arch=amd64"`:                                  1,
+		`"rust_target=x86_64-pc-windows-gnu"`:              1,
+		`"zig_target=x86_64-windows-gnu"`:                  1,
+		`"race=true"`:                                      1,
+		`"ARM64" {`:                                        1,
+		`"go_arch=arm64"`:                                  1,
+		`"rust_target=aarch64-pc-windows-gnullvm"`:         1,
+		`"zig_target=aarch64-windows-gnu"`:                 1,
+		`"race=false"`:                                     1,
+		"default {":                                        1,
+		"targets: ${{ steps.native.outputs.rust_target }}": 1,
+		"key: yffi-windows-zig-${{ runner.os }}-${{ runner.arch }}-": 1,
+		"PLATFORMS: windows/${{ steps.native.outputs.go_arch }}":     1,
+		`"${{ steps.native.outputs.go_arch }}"`:                      1,
+		"RUST_TARGET: ${{ steps.native.outputs.rust_target }}":       1,
+		"CC: zig cc -target ${{ steps.native.outputs.zig_target }}":  1,
+		"GOARCH: ${{ steps.native.outputs.go_arch }}":                1,
+		`if ("${{ steps.native.outputs.race }}" -eq "true")`:         1,
+		`$goArgs += "-race"`:                    1,
+		`$goArgs += "./daemon/internal/syncer"`: 1,
+	} {
+		if got := strings.Count(job, required); got != count {
+			return fmt.Errorf("Windows-native CI source count for %q = %d, want %d", required, got, count)
+		}
+	}
+	for _, forbidden := range []string{
+		"runs-on: windows-latest",
+		"shell: pwsh",
+		"PLATFORMS: windows/amd64 windows/arm64",
+		"Stage AMD64 Yrs library for native tests",
+		"RUST_TARGET=x86_64-pc-windows-gnu",
+		"CC: zig cc -target x86_64-windows-gnu",
+		"go test -race",
+	} {
+		if strings.Contains(job, forbidden) {
+			return fmt.Errorf("Windows-native CI retains architecture-specific source %q", forbidden)
+		}
+	}
+	return nil
+}
+
+func windowsNativeCIJob(workflow string) (string, error) {
+	const (
+		start = "\n  windows-daemon:\n"
+		end   = "\n  regression-e2e:\n"
+	)
+	startAt := strings.Index(workflow, start)
+	if startAt < 0 {
+		return "", fmt.Errorf("CI has no windows-daemon job")
+	}
+	endAt := strings.Index(workflow[startAt+len(start):], end)
+	if endAt < 0 {
+		return "", fmt.Errorf("CI has no boundary after windows-daemon job")
+	}
+	return workflow[startAt : startAt+len(start)+endAt], nil
+}
+
 func TestWindowsInstallerReproducibilityScriptsAreFailClosed(t *testing.T) {
 	root := filepath.Join("..", "..", "..", "scripts")
 	buildData, err := os.ReadFile(filepath.Join(root, "build-windows-desktop-msi-artifact.ps1"))
