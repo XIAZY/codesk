@@ -209,17 +209,10 @@ func (p *claudeRuntimeProcess) Stop() error {
 	}
 	if cmd != nil && cmd.Process != nil {
 		p.logf("stopping claude process pid=%d", cmd.Process.Pid)
-		err := cmd.Process.Kill()
-		if errors.Is(err, os.ErrProcessDone) {
-			// Closing stdin above can trigger a clean exit before the kill lands;
-			// an already-finished process is a successful stop, not an error.
-			err = nil
-		}
-		// The exit goroutine closes the events channel once cmd.Wait returns and
-		// readLoop drains (which is why it, not Stop, owns the close). Wait for that
-		// join so RuntimeProcess.Stop does not return while the child or event stream
-		// is still live.
-		p.waitEventsClosed()
+		// Closing stdin above can trigger a clean exit before Kill lands. The
+		// helper joins the exit goroutine's completion broadcast and suppresses a
+		// kill error only when that join proves the process is already gone.
+		err := killManagedProcessAndJoin(p.eventsDone, cmd.Process.Kill)
 		p.closeLog()
 		return err
 	}

@@ -18,6 +18,7 @@ const fakeProcessModeEnv = "NOTTY_SYNCER_FAKE_PROCESS"
 const (
 	fakeProcessCodexWithoutAppServer = "codex-without-app-server"
 	fakeProcessCodexDetectAvailable  = "codex-detect-available"
+	fakeProcessCodexFinalStderr      = "codex-final-stderr"
 	fakeProcessCodexLifecycleFlood   = "codex-lifecycle-flood"
 	fakeProcessCodexPersistent       = "codex-persistent"
 	fakeProcessClaude                = "claude"
@@ -33,6 +34,8 @@ func TestMain(m *testing.M) {
 		os.Exit(runFakeCodexWithoutAppServer(os.Args[1:]))
 	case fakeProcessCodexDetectAvailable:
 		os.Exit(runFakeCodexDetectAvailable(os.Args[1:]))
+	case fakeProcessCodexFinalStderr:
+		os.Exit(runFakeCodexFinalStderr())
 	case fakeProcessCodexLifecycleFlood:
 		os.Exit(runFakeCodexLifecycleFlood())
 	case fakeProcessCodexPersistent:
@@ -217,6 +220,39 @@ func runFakeCodexLifecycleFlood() int {
 			}
 			time.Sleep(time.Second)
 			return 0
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return 0
+}
+
+func runFakeCodexFinalStderr() int {
+	scanner := bufio.NewScanner(os.Stdin)
+	encoder := json.NewEncoder(os.Stdout)
+	for scanner.Scan() {
+		var request struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &request); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		switch request.Method {
+		case "initialize":
+			if err := encoder.Encode(map[string]any{"id": request.ID, "result": map[string]any{}}); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return 1
+			}
+		case "initialized":
+			for i := 0; i < 3000; i++ {
+				fmt.Fprintf(os.Stderr, "stderr noise %d\n", i)
+			}
+			fmt.Fprintln(os.Stderr, "FINAL-STDERR-SENTINEL")
+			return 7
 		}
 	}
 	if err := scanner.Err(); err != nil {

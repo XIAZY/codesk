@@ -213,15 +213,12 @@ func (c *codexAppServer) Stop() error {
 		if stdin != nil {
 			_ = stdin.Close()
 		}
-		if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
-			c.stopErr = err
-		}
+		c.stopErr = killManagedProcessAndJoin(c.exited, cmd.Process.Kill)
 	})
 
 	// The exit goroutine owns Wait, reader drainage, ExitInfo, and channel
-	// closure. All Stop callers join that one broadcast completion; none consume
-	// the one-shot process result in done or hold c.mu while waiting.
-	<-c.exited
+	// closure. The shared kill/join helper consumes only its broadcast completion,
+	// never the one-shot process result in done.
 	return c.stopErr
 }
 
