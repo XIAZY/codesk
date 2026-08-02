@@ -34,6 +34,7 @@ func TestPostgresSchemaForeignKeyConstraints(t *testing.T) {
 		{"fk_document_heads_workspace", "document_heads", "workspaces", "CASCADE"},
 		{"fk_document_updates_workspace", "document_updates", "workspaces", "CASCADE"},
 		{"fk_document_checkpoints_workspace", "document_checkpoints", "workspaces", "CASCADE"},
+		{"fk_document_reverse_window_workspace", "document_reverse_windows", "workspaces", "CASCADE"},
 		{"fk_users_workspace", "users", "workspaces", "CASCADE"},
 		{"fk_agents_workspace", "agents", "workspaces", "CASCADE"},
 		{"fk_agent_runs_workspace", "agent_runs", "workspaces", "CASCADE"},
@@ -71,6 +72,9 @@ func TestPostgresSchemaForeignKeyConstraints(t *testing.T) {
 		{"fk_threads_document", "threads", "documents", "CASCADE"},
 		{"fk_presences_document", "presences", "documents", "CASCADE"},
 		{"fk_agent_document_views_document", "agent_document_views", "documents", "CASCADE"},
+		{"fk_document_reverse_window_document", "document_reverse_windows", "documents", "CASCADE"},
+		{"fk_document_reverse_window_root", "document_reverse_windows", "documents", "CASCADE"},
+		{"fk_document_reverse_window_daemon", "document_reverse_windows", "daemons", "CASCADE"},
 		{"fk_workspace_members_last_doc", "workspace_members", "documents", "SET NULL"},
 		{"fk_activities_document", "activities", "documents", "SET NULL"},
 		{"fk_agent_events_document", "agent_events", "documents", "SET NULL"},
@@ -268,6 +272,17 @@ func (f *fkTestFixture) insertDocumentCheckpoint(t *testing.T, docID string) {
 	mustExecFK(t, f.db, `INSERT INTO document_checkpoints (workspace_id, document_id, update_id, crdt_state, state_vector, created_at)
 		VALUES ($1, $2, 0, '', '', $3)`,
 		f.workspaceID, docID, f.now)
+}
+
+func (f *fkTestFixture) insertDocumentReverseWindow(t *testing.T, docID, daemonID string) {
+	t.Helper()
+	mustExecFK(t, f.db, `INSERT INTO document_reverse_windows (
+		document_id, workspace_id, root_document_id, entry_id, desired_path,
+		origin_daemon_id, origin_scope, tombstone_operation_id,
+		tombstone_request_fingerprint, opened_at, reverse_until, created_at, updated_at
+	) VALUES ($1, $2, $3, $4, 'docs/a.md', $5, 'primary', $6,
+		'fingerprint', $7, $8, $7, $7)`,
+		docID, f.workspaceID, f.rootDocID, docID, daemonID, uuid.NewString(), f.now, f.now.Add(time.Minute))
 }
 
 func (f *fkTestFixture) insertUser(t *testing.T, userID string) {
@@ -564,6 +579,7 @@ func TestWorkspaceDeleteCascadesAllChildren(t *testing.T) {
 	f.insertDocumentCheckpoint(t, docID)
 	f.insertUser(t, userID)
 	f.insertDaemon(t, daemonID)
+	f.insertDocumentReverseWindow(t, docID, daemonID)
 	f.insertAgent(t, agentID, daemonID)
 	f.insertAgentRun(t, runID, agentID)
 	f.insertThread(t, threadID, docID)
@@ -587,7 +603,7 @@ func TestWorkspaceDeleteCascadesAllChildren(t *testing.T) {
 
 	// Assert all children are gone.
 	for _, table := range []string{
-		"documents", "document_heads", "document_updates", "document_checkpoints",
+		"documents", "document_heads", "document_updates", "document_checkpoints", "document_reverse_windows",
 		"users", "daemons", "agents", "agent_runs",
 		"threads", "thread_messages", "thread_participants",
 		"presences", "activities", "agent_events", "agent_document_views",
@@ -620,6 +636,7 @@ func TestDocumentDeleteCascadesStorageAndNullsAttribution(t *testing.T) {
 	f.insertDocumentCheckpoint(t, docID)
 	f.insertUser(t, userID)
 	f.insertDaemon(t, daemonID)
+	f.insertDocumentReverseWindow(t, docID, daemonID)
 	f.insertAgent(t, agentID, daemonID)
 	f.insertThread(t, threadID, docID)
 	f.insertThreadMessage(t, msgID, threadID)
@@ -635,6 +652,9 @@ func TestDocumentDeleteCascadesStorageAndNullsAttribution(t *testing.T) {
 	// Storage should be gone.
 	if c := f.countRowsNoWS(t, "document_heads", "document_id", docID); c != 0 {
 		t.Errorf("document_heads: expected 0 after doc delete, got %d", c)
+	}
+	if c := f.countRowsNoWS(t, "document_reverse_windows", "document_id", docID); c != 0 {
+		t.Errorf("document_reverse_windows: expected 0 after doc delete, got %d", c)
 	}
 
 	// Threads should be gone (CASCADE via document).
@@ -808,6 +828,8 @@ func TestCompositeUniqueIndexesExist(t *testing.T) {
 		"uq_threads_workspace_id",
 		"uq_thread_messages_workspace_id",
 		"uq_agent_runs_workspace_id",
+		"uq_document_reverse_window_restore_operation",
+		"uq_document_reverse_window_tombstone_operation",
 	}
 
 	rows, err := db.Query(`
@@ -1929,6 +1951,7 @@ func TestActorDeleteCleanupStateMachine(t *testing.T) {
 		docID := uuid.NewString()
 		f.insertDocument(t, docID)
 		actors := f.insertActors(t)
+		f.insertDocumentReverseWindow(t, docID, actors.daemonID)
 		threadID := uuid.NewString()
 		msgID := uuid.NewString()
 		mustExecFK(t, f.db, `INSERT INTO threads (workspace_id, id, document_id, title, status,
@@ -1951,6 +1974,10 @@ func TestActorDeleteCleanupStateMachine(t *testing.T) {
 			f.workspaceID, docID, f.now, actors.daemonID)
 
 		mustExecFK(t, f.db, `DELETE FROM daemons WHERE id = $1`, actors.daemonID)
+
+		if got := countMatchingFK(t, f.db, "document_reverse_windows", `workspace_id = $1`, f.workspaceID); got != 0 {
+			t.Fatalf("daemon reverse-window count = %d, want 0", got)
+		}
 
 		if got := countMatchingFK(t, f.db, "document_updates", `workspace_id = $1 AND actor_type = 'daemon' AND actor_id IS NULL`, f.workspaceID); got != 1 {
 			t.Fatalf("daemon document_updates nulled = %d, want 1", got)
