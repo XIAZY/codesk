@@ -210,6 +210,7 @@ func (e *backendStatusError) Error() string {
 type workspaceResponse struct {
 	CurrentDaemonID string        `json:"currentDaemonId"`
 	RootDocumentID  string        `json:"rootDocumentId"`
+	Capabilities    []string      `json:"capabilities"`
 	Agents          []*agent      `json:"agents"`
 	AgentRuns       []*agentRun   `json:"agentRuns"`
 	Threads         []*thread     `json:"threads"`
@@ -856,6 +857,15 @@ func (s *workspaceRuntime) processLocalCreates(ctx context.Context) error {
 		return nil
 	}
 	candidates := s.localCreates.Drain()
+	reverseResult, err := s.reconcileRootLocalDeleteIntents(ctx, time.Now().UTC(), candidates)
+	if err != nil {
+		for _, candidate := range reverseResult.LocalCreates {
+			s.markLocalCreate(candidate)
+		}
+		return err
+	}
+	s.setNextReverseWindowWake(reverseResult.NextWake)
+	candidates = reverseResult.LocalCreates
 	workspaceLoaded := false
 	loadWorkspace := func() error {
 		if workspaceLoaded {

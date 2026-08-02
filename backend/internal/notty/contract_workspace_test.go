@@ -18,7 +18,7 @@ import (
 // invariant: none may ever serialize as JSON null — the frontend reducer dereferences them, and a
 // null is what white-screened workspace switching. They must be [] / {}.
 var workspaceCollectionKeys = []string{
-	"users", "daemons", "agents", "agentRuns", "threads", "agentEvents", "presences", "activities",
+	"capabilities", "users", "daemons", "agents", "agentRuns", "threads", "agentEvents", "presences", "activities",
 }
 
 func contractGoldenPath(name string) string {

@@ -908,6 +908,8 @@ func TestRouteTableMatchesAuthenticatedWorkspaceAllowlist(t *testing.T) {
 		"DELETE /api/workspaces/{workspaceID}/daemons/{daemonID}":                              true,
 		"POST /api/workspaces/{workspaceID}/daemons/{daemonID}/agents":                         true,
 		"POST /api/workspaces/{workspaceID}/documents":                                         true,
+		"POST /api/workspaces/{workspaceID}/documents/reverse-window/open":                     true,
+		"POST /api/workspaces/{workspaceID}/documents/reverse-window/consume":                  true,
 		"GET /api/workspaces/{workspaceID}/documents/{id}/threads":                             true,
 		"GET /api/workspaces/{workspaceID}/documents/{id}/subscribers":                         true,
 		"POST /api/workspaces/{workspaceID}/agents":                                            true,

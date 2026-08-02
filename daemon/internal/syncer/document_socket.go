@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	crdt "notty/internal/ycrdt"
 	"notty/internal/yproto"
 )
 
@@ -21,9 +22,15 @@ type workspaceDocumentSocket struct {
 	desired   map[string]*document
 	needsSync map[string]struct{}
 	synced    map[string]struct{}
+	waiters   map[string]map[*stateVectorWaiter]struct{}
 
 	wake chan struct{}
 	send chan outboundDocumentMessage
+}
+
+type stateVectorWaiter struct {
+	required crdt.StateVector
+	ready    chan struct{}
 }
 
 type outboundDocumentMessage struct {
@@ -40,9 +47,104 @@ func newWorkspaceDocumentSocket(runtime *workspaceRuntime) *workspaceDocumentSoc
 		desired:   map[string]*document{},
 		needsSync: map[string]struct{}{},
 		synced:    map[string]struct{}{},
+		waiters:   map[string]map[*stateVectorWaiter]struct{}{},
 		wake:      make(chan struct{}, 1),
 		send:      make(chan outboundDocumentMessage, 64),
 	}
+}
+
+func (s *workspaceDocumentSocket) WaitForBackendStateVector(ctx context.Context, documentID string, required []byte) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ready, cancel, err := s.registerStateVectorWaiter(documentID, required)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	if err := s.SendProtocolMessage(ctx, documentID, yproto.BuildSyncStep1FromStateVector(required)); err != nil {
+		return err
+	}
+	select {
+	case <-ready:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *workspaceDocumentSocket) registerStateVectorWaiter(documentID string, required []byte) (<-chan struct{}, func(), error) {
+	if s == nil || documentID == "" {
+		return nil, nil, fmt.Errorf("document state-vector waiter requires a document")
+	}
+	if len(required) == 0 {
+		return nil, nil, fmt.Errorf("document state-vector waiter requires a frontier")
+	}
+	requiredVector, err := crdt.DecodeStateVectorV1(required)
+	if err != nil {
+		return nil, nil, fmt.Errorf("decode required document state vector: %w", err)
+	}
+	waiter := &stateVectorWaiter{required: requiredVector, ready: make(chan struct{})}
+	s.mu.Lock()
+	if s.waiters == nil {
+		s.waiters = map[string]map[*stateVectorWaiter]struct{}{}
+	}
+	if s.waiters[documentID] == nil {
+		s.waiters[documentID] = map[*stateVectorWaiter]struct{}{}
+	}
+	s.waiters[documentID][waiter] = struct{}{}
+	s.mu.Unlock()
+
+	var cancelOnce sync.Once
+	cancel := func() {
+		cancelOnce.Do(func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			delete(s.waiters[documentID], waiter)
+			if len(s.waiters[documentID]) == 0 {
+				delete(s.waiters, documentID)
+			}
+		})
+	}
+	return waiter.ready, cancel, nil
+}
+
+func (s *workspaceDocumentSocket) observeBackendStateVector(documentID string, stateVector []byte) error {
+	if s == nil || documentID == "" {
+		return nil
+	}
+	s.mu.Lock()
+	hasWaiters := len(s.waiters[documentID]) > 0
+	s.mu.Unlock()
+	if !hasWaiters {
+		return nil
+	}
+	current, err := crdt.DecodeStateVectorV1(stateVector)
+	if err != nil {
+		return fmt.Errorf("decode backend document state vector: %w", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for waiter := range s.waiters[documentID] {
+		if !stateVectorDominates(current, waiter.required) {
+			continue
+		}
+		close(waiter.ready)
+		delete(s.waiters[documentID], waiter)
+	}
+	if len(s.waiters[documentID]) == 0 {
+		delete(s.waiters, documentID)
+	}
+	return nil
+}
+
+func stateVectorDominates(current, required crdt.StateVector) bool {
+	for client, requiredClock := range required {
+		if current.Clock(client) < requiredClock {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *workspaceDocumentSocket) SetDesiredDocuments(documents []*document) {
@@ -358,6 +460,11 @@ func (r *workspaceRuntime) handleDocumentSyncMessage(documentID string, payload 
 	syncType, data, err := yproto.DecodeSyncMessage(reader)
 	if err != nil {
 		return err
+	}
+	if syncType == yproto.SyncStep1 {
+		if err := r.documentSocket.observeBackendStateVector(documentID, data); err != nil {
+			return err
+		}
 	}
 	document := r.documentSocket.Document(documentID)
 	if document == nil || document.ID == "" {

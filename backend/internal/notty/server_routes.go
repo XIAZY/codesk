@@ -60,6 +60,8 @@ func (s *Server) Routes() http.Handler {
 		router.Delete("/daemons/{daemonID}", s.handleDeleteDaemon)
 		router.Post("/daemons/{daemonID}/agents", s.handleCreateDaemonAgent)
 		router.Post("/documents", s.handleCreateDocument)
+		router.Post("/documents/reverse-window/open", s.handleOpenReverseWindow)
+		router.Post("/documents/reverse-window/consume", s.handleConsumeReverseWindow)
 		router.Get("/documents/{id}/threads", s.handleDocumentThreads)
 		router.Get("/documents/{id}/subscribers", s.handleDocumentSubscribers)
 		router.Post("/agents", s.handleCreateAgent)
