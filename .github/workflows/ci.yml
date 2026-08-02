@@ -12,7 +12,8 @@
 #   git diff --check                   -> diff-check
 #   Windows GNU compile/link           -> windows-daemon-build
 #   Windows WiX compile/link           -> REMOVED 2026-07-31 (no Windows runner; see task #21)
-#   Windows native runtime tests        -> windows-daemon (paused until a runner is available)
+#   Windows installer lifecycle         -> windows-daemon-installer
+#   Windows native runtime tests        -> windows-daemon
 #   macOS native cgo + unsigned universal release -> macos-desktop (opt-in until runner capacity exists)
 #
 # Two meta-properties (Tom's bar):
@@ -287,9 +288,6 @@ jobs:
         run: scripts/test-desktopstate-boundary.sh
   windows-daemon-installer:
     name: Windows daemon installer
-    # Preserve the installer lifecycle test, but do not schedule hosted Windows
-    # jobs until a Windows CI runner is available for this repository.
-    if: ${{ false }}
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
@@ -300,9 +298,6 @@ jobs:
 
   windows-daemon:
     name: Windows daemon (native Zig build + platform tests)
-    # Preserve the native execution matrix, but do not schedule it until a
-    # Windows CI runner is available for this repository.
-    if: ${{ false }}
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
