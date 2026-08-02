@@ -26,6 +26,12 @@ type workspaceView struct {
 	Activities     []*ActivityEvent
 }
 
+const documentTombstoneReverseWindowV1 = "documentTombstoneReverseWindowV1"
+
+func serverWorkspaceCapabilities() []string {
+	return []string{documentTombstoneReverseWindowV1}
+}
+
 func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	currentUserID := ""
 	currentDaemonID := ""
@@ -42,6 +48,7 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"capabilities":          serverWorkspaceCapabilities(),
 		"workspaceId":           view.WorkspaceID,
 		"slug":                  view.Slug,
 		"rootDocumentId":        view.RootDocumentID,
@@ -159,6 +166,7 @@ func (s *Server) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	if err := conn.WriteJSON(EventEnvelope{
 		Type: "workspace.snapshot",
 		Data: map[string]interface{}{
+			"capabilities":          serverWorkspaceCapabilities(),
 			"slug":                  view.Slug,
 			"rootDocumentId":        view.RootDocumentID,
 			"currentMembershipRole": currentMembershipRole,

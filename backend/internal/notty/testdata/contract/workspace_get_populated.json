@@ -95,6 +95,9 @@
       "workspaceRoot": "agents/<id-1>"
     }
   ],
+  "capabilities": [
+    "documentTombstoneReverseWindowV1"
+  ],
   "currentDaemonId": "",
   "currentMembershipRole": "owner",
   "currentUserId": "<id-3>",

@@ -3,6 +3,9 @@
   "agentEvents": [],
   "agentRuns": [],
   "agents": [],
+  "capabilities": [
+    "documentTombstoneReverseWindowV1"
+  ],
   "currentDaemonId": "",
   "currentMembershipRole": "owner",
   "currentUserId": "<id-1>",

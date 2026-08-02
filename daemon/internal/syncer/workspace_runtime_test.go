@@ -124,6 +124,20 @@ func TestWorkspaceRuntimeStartupRecoveryQueuesDurableSQLiteWork(t *testing.T) {
 	if err := cache.storeLocalNamespaceIntent(newLocalCreateIntent("local-create.md", "daemon_agent", "daemon", "local-create-hash", time.Now().UnixNano())); err != nil {
 		t.Fatalf("store local namespace intent: %v", err)
 	}
+	if err := cache.storeRootLocalDeleteIntent(rootLocalDeleteIntent{
+		RootDocumentID:           "root-reverse-startup",
+		ContentDocumentID:        "doc-reverse-startup",
+		EntryID:                  "entry-reverse-startup",
+		DesiredPath:              "reverse.md",
+		MaterializedPath:         "reverse.md",
+		TombstoneOperationID:     uuid.NewString(),
+		ExpectedWindowGeneration: 0,
+		Phase:                    rootLocalDeletePhaseTombstonePending,
+		CreatedAt:                time.Now().UTC(),
+		UpdatedAt:                time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("store reverse-window startup intent: %v", err)
+	}
 	if err := cache.Close(); err != nil {
 		t.Fatalf("close cache: %v", err)
 	}
@@ -137,6 +151,7 @@ func TestWorkspaceRuntimeStartupRecoveryQueuesDurableSQLiteWork(t *testing.T) {
 		docCache:           reopened,
 		reconcileQueue:     queue,
 		threadDeliveryWake: make(chan struct{}, 1),
+		rootDocumentID:     "root-reverse-startup",
 	}
 	if err := runtime.enqueueStartupStoreWork(); err != nil {
 		t.Fatalf("enqueue startup store work: %v", err)
@@ -150,6 +165,9 @@ func TestWorkspaceRuntimeStartupRecoveryQueuesDurableSQLiteWork(t *testing.T) {
 	}
 	if !containsString(dirty, localCreateReconcileWake) {
 		t.Fatalf("expected startup recovery to queue pending local create work, got %#v", dirty)
+	}
+	if !containsString(dirty, rootLocalDeleteReconcileWake) {
+		t.Fatalf("expected startup recovery to queue reverse-window work, got %#v", dirty)
 	}
 	if containsString(dirty, "doc_thread_ready") {
 		t.Fatalf("ready thread delivery must not dirty the document, got %#v", dirty)
@@ -1543,15 +1561,21 @@ func TestWorkspaceRuntimeFilesystemLifecycleRecordsSQLiteAndDaemonCalls(t *testi
 
 type workspaceRuntimeRegressionServer struct {
 	*httptest.Server
-	mu             sync.Mutex
-	nextID         int
-	rootDocumentID string
-	rootDoc        *crdt.Doc
-	byID           map[string]*regressionDocument
-	byPath         map[string]string
-	deleted        map[string]struct{}
-	requests       []string
-	syncUpdates    []regressionSyncUpdate
+	mu                       sync.Mutex
+	nextID                   int
+	rootDocumentID           string
+	rootDoc                  *crdt.Doc
+	byID                     map[string]*regressionDocument
+	byPath                   map[string]string
+	deleted                  map[string]struct{}
+	requests                 []string
+	syncUpdates              []regressionSyncUpdate
+	capabilities             []string
+	reverseGeneration        int64
+	reverseRequests          []string
+	reverseConsumeStatus     int
+	reverseConsumeGeneration int64
+	reverseConsumeGenSet     bool
 }
 
 type regressionDocument struct {
@@ -1615,11 +1639,103 @@ func (s *workspaceRuntimeRegressionServer) handle(w http.ResponseWriter, r *http
 		return
 
 	case r.Method == http.MethodGet && r.URL.Path == "/api/workspace":
-		writeJSONResponse(w, http.StatusOK, &workspaceResponse{RootDocumentID: s.rootDocumentID})
+		writeJSONResponse(w, http.StatusOK, &workspaceResponse{
+			RootDocumentID: s.rootDocumentID,
+			Capabilities:   append([]string(nil), s.capabilities...),
+		})
+		return
+
+	case r.Method == http.MethodPost && r.URL.Path == "/api/documents/reverse-window/open":
+		var req struct {
+			ExpectedWindowGeneration int64 `json:"expectedWindowGeneration"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		s.reverseRequests = append(s.reverseRequests, "open")
+		if req.ExpectedWindowGeneration != s.reverseGeneration {
+			writeJSONResponse(w, http.StatusOK, map[string]any{
+				"outcome":                 "window_generation_conflict",
+				"currentWindowGeneration": s.reverseGeneration,
+			})
+			return
+		}
+		s.reverseGeneration++
+		now := time.Now().UTC()
+		writeJSONResponse(w, http.StatusOK, map[string]any{
+			"outcome":                 "accepted_new",
+			"windowGeneration":        s.reverseGeneration,
+			"currentWindowGeneration": s.reverseGeneration,
+			"openedAt":                now,
+			"reverseUntil":            now.Add(5 * time.Minute),
+			"tombstoneUpdateId":       s.reverseGeneration,
+		})
+		return
+
+	case r.Method == http.MethodPost && r.URL.Path == "/api/documents/reverse-window/consume":
+		var req struct {
+			WindowGeneration   int64  `json:"windowGeneration"`
+			ContentStateVector []byte `json:"contentStateVector"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.WindowGeneration != s.reverseGeneration || len(req.ContentStateVector) == 0 {
+			http.Error(w, "reverse-window identity mismatch", http.StatusConflict)
+			return
+		}
+		s.reverseRequests = append(s.reverseRequests, "consume")
+		if s.reverseConsumeStatus != 0 {
+			http.Error(w, "injected reverse-window consume status", s.reverseConsumeStatus)
+			return
+		}
+		responseGeneration := s.reverseGeneration
+		if s.reverseConsumeGenSet {
+			responseGeneration = s.reverseConsumeGeneration
+		}
+		writeJSONResponse(w, http.StatusOK, map[string]any{
+			"outcome":          "accepted",
+			"windowGeneration": responseGeneration,
+			"consumedAt":       time.Now().UTC(),
+			"restoreUpdateId":  s.reverseGeneration + 100,
+		})
 		return
 	}
 
 	http.Error(w, "unexpected request", http.StatusNotFound)
+}
+
+func (s *workspaceRuntimeRegressionServer) setCapabilities(capabilities ...string) {
+	s.mu.Lock()
+	s.capabilities = append([]string(nil), capabilities...)
+	s.mu.Unlock()
+}
+
+func (s *workspaceRuntimeRegressionServer) setReverseGeneration(generation int64) {
+	s.mu.Lock()
+	s.reverseGeneration = generation
+	s.mu.Unlock()
+}
+
+func (s *workspaceRuntimeRegressionServer) setReverseConsumeStatus(status int) {
+	s.mu.Lock()
+	s.reverseConsumeStatus = status
+	s.mu.Unlock()
+}
+
+func (s *workspaceRuntimeRegressionServer) setReverseConsumeGeneration(generation int64) {
+	s.mu.Lock()
+	s.reverseConsumeGeneration = generation
+	s.reverseConsumeGenSet = true
+	s.mu.Unlock()
+}
+
+func (s *workspaceRuntimeRegressionServer) reverseRequestLog() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.reverseRequests...)
 }
 
 func (s *workspaceRuntimeRegressionServer) assertContents(t *testing.T, want map[string]string) {

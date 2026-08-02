@@ -1311,6 +1311,94 @@ func TestStoreRootProjectionEntriesClearsLocalDeleteIntentsAtomically(t *testing
 	}
 }
 
+func TestStoreRootProjectionEntriesReverseProofMismatchRollsBackProjectionAndClear(t *testing.T) {
+	cache, err := newTestDocumentCache(t, t.TempDir())
+	if err != nil {
+		t.Fatalf("new cache: %v", err)
+	}
+	const (
+		rootDocumentID = "root_reverse_proof_atomic"
+		documentID     = "doc_reverse_proof_atomic"
+		path           = "docs/reverse-proof.md"
+	)
+	previous := rootProjectionEntry{
+		EntryID:           rootEntryIDForDocument(documentID),
+		Kind:              rootEntryKindFile,
+		ContentDocumentID: documentID,
+		DesiredPath:       path,
+		MaterializedPath:  path,
+		Active:            false,
+		ProjectedSeq:      7,
+	}
+	if err := cache.storeRootProjectionEntries(rootDocumentID, []rootProjectionEntry{previous}); err != nil {
+		t.Fatalf("store previous reverse projection: %v", err)
+	}
+	intent := rootLocalDeleteIntent{
+		RootDocumentID:             rootDocumentID,
+		ContentDocumentID:          documentID,
+		EntryID:                    previous.EntryID,
+		DesiredPath:                path,
+		MaterializedPath:           path,
+		TombstoneOperationID:       "tombstone-proof-operation",
+		ExpectedWindowGeneration:   4,
+		WindowGeneration:           5,
+		RestoreOperationID:         "restore-proof-operation",
+		RequiredContentStateVector: []byte{1},
+		ObservedFileIdentity:       "proof-file-identity",
+		ObservedContentSHA256:      "proof-content-sha",
+		Phase:                      rootLocalDeletePhaseProjectionPending,
+		CreatedAt:                  time.Now().UTC(),
+		UpdatedAt:                  time.Now().UTC(),
+	}
+	if err := cache.storeRootLocalDeleteIntent(intent); err != nil {
+		t.Fatalf("store projection-pending reverse workflow: %v", err)
+	}
+
+	next := previous
+	next.Active = true
+	next.ProjectedSeq = 8
+	proof := rootProjectionClearProof{
+		RootDocumentID:       intent.RootDocumentID,
+		ContentDocumentID:    intent.ContentDocumentID,
+		EntryID:              intent.EntryID,
+		DesiredPath:          intent.DesiredPath,
+		MaterializedPath:     intent.MaterializedPath,
+		TombstoneOperationID: intent.TombstoneOperationID,
+		RestoreOperationID:   "superseded-restore-operation",
+		WindowGeneration:     intent.WindowGeneration,
+	}
+	if err := cache.storeRootProjectionEntriesWithReverseProofs(rootDocumentID, []rootProjectionEntry{next}, []rootProjectionClearProof{proof}); err == nil {
+		t.Fatal("projection store unexpectedly committed through a mismatched reverse proof")
+	}
+	stored, err := cache.loadRootProjectionEntries(rootDocumentID)
+	if err != nil {
+		t.Fatalf("load rolled-back reverse projection: %v", err)
+	}
+	if got := stored[previous.EntryID]; got.Active || got.ProjectedSeq != previous.ProjectedSeq {
+		t.Fatalf("proof-mismatch projection committed partially: %#v", got)
+	}
+	if got := loadReverseWindowIntent(t, cache, rootDocumentID, documentID); got.RestoreOperationID != intent.RestoreOperationID || got.Phase != rootLocalDeletePhaseProjectionPending {
+		t.Fatalf("proof-mismatch workflow changed: %#v", got)
+	}
+
+	proof.RestoreOperationID = intent.RestoreOperationID
+	if err := cache.storeRootProjectionEntriesWithReverseProofs(rootDocumentID, []rootProjectionEntry{next}, []rootProjectionClearProof{proof}); err != nil {
+		t.Fatalf("commit exact reverse proof and projection: %v", err)
+	}
+	stored, err = cache.loadRootProjectionEntries(rootDocumentID)
+	if err != nil {
+		t.Fatalf("load committed reverse projection: %v", err)
+	}
+	if got := stored[next.EntryID]; !got.Active || got.ProjectedSeq != next.ProjectedSeq {
+		t.Fatalf("exact-proof projection = %#v, want active seq %d", got, next.ProjectedSeq)
+	}
+	if _, ok, err := cache.loadRootLocalDeleteIntent(rootDocumentID, documentID); err != nil {
+		t.Fatalf("load exactly cleared reverse workflow: %v", err)
+	} else if ok {
+		t.Fatal("exact reverse proof did not clear the workflow")
+	}
+}
+
 func TestWorkspaceStoreSchemaUsesAgreedDurableTables(t *testing.T) {
 	cache, err := newTestDocumentCache(t, t.TempDir())
 	if err != nil {

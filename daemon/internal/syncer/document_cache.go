@@ -898,6 +898,14 @@ func (c *workspaceStore) loadRootProjectionEntries(rootDocumentID string) (map[s
 }
 
 func (c *workspaceStore) storeRootProjectionEntries(rootDocumentID string, entries []rootProjectionEntry) error {
+	return c.storeRootProjectionEntriesWithReverseProofs(rootDocumentID, entries, nil)
+}
+
+func (c *workspaceStore) storeRootProjectionEntriesWithReverseProofs(
+	rootDocumentID string,
+	entries []rootProjectionEntry,
+	proofs []rootProjectionClearProof,
+) error {
 	if c == nil || rootDocumentID == "" {
 		return nil
 	}
@@ -927,6 +935,28 @@ func (c *workspaceStore) storeRootProjectionEntries(rootDocumentID string, entri
 		if _, err := tx.Exec(`delete from root_local_delete_intents
 			where root_document_id = ? and phase = ?`, rootDocumentID, rootLocalDeletePhaseLegacyFloor); err != nil {
 			return err
+		}
+		for _, proof := range proofs {
+			result, err := tx.Exec(`delete from root_local_delete_intents
+				where root_document_id = ?
+					and content_document_id = ?
+					and entry_id = ?
+					and desired_path = ?
+					and materialized_path = ?
+					and tombstone_operation_id = ?
+					and restore_operation_id = ?
+					and window_generation = ?
+					and phase = ?`,
+				proof.RootDocumentID, proof.ContentDocumentID, proof.EntryID,
+				proof.DesiredPath, proof.MaterializedPath, proof.TombstoneOperationID,
+				proof.RestoreOperationID, proof.WindowGeneration,
+				rootLocalDeletePhaseProjectionPending)
+			if err != nil {
+				return err
+			}
+			if err := requireSingleRootIntentTransition(result, "clear projected reverse-window intent"); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
