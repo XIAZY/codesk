@@ -17,8 +17,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $MsiErrorSuccess = [uint32] 0
-$MsiErrorUnknownProduct = [uint32] 1605
-$MsiInstallContextUserUnmanaged = [uint32] 2
+$MsiInstallStateUnknown = [int32] -1
+$MsiInstallStateAdvertised = [int32] 1
+$MsiInstallStateAbsent = [int32] 2
+$MsiInstallStateDefault = [int32] 5
 
 if (-not ('CodeskWindowsInstallerNative' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -28,10 +30,11 @@ using System.Text;
 public static class CodeskWindowsInstallerNative
 {
     [DllImport("msi.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
-    public static extern uint MsiGetProductInfoExW(
+    public static extern int MsiQueryProductStateW(string productCode);
+
+    [DllImport("msi.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+    public static extern uint MsiGetProductInfoW(
         string productCode,
-        string userSid,
-        uint context,
         string property,
         StringBuilder value,
         ref uint valueLength);
@@ -143,48 +146,49 @@ function Get-MsiProductProperty {
         [Parameter(Mandatory = $true)] [string] $Property
     )
 
-    [uint32] $length = 0
-    $result = [CodeskWindowsInstallerNative]::MsiGetProductInfoExW(
-        $ProductCode,
-        $null,
-        $MsiInstallContextUserUnmanaged,
-        $Property,
-        $null,
-        [ref] $length)
-    if ($result -eq $MsiErrorUnknownProduct) {
-        return $null
-    }
-    Assert-True ($result -eq $MsiErrorSuccess) `
-        "MsiGetProductInfoExW size query for $Property failed with exit $result"
-    if ($length -eq 0) {
-        return ''
-    }
-
-    $value = [System.Text.StringBuilder]::new([int] $length + 1)
+    $value = [System.Text.StringBuilder]::new(256)
     [uint32] $capacity = $value.Capacity
-    $result = [CodeskWindowsInstallerNative]::MsiGetProductInfoExW(
+    $result = [CodeskWindowsInstallerNative]::MsiGetProductInfoW(
         $ProductCode,
-        $null,
-        $MsiInstallContextUserUnmanaged,
         $Property,
         $value,
         [ref] $capacity)
-    Assert-True ($result -eq $MsiErrorSuccess) "MsiGetProductInfoExW read for $Property failed with exit $result"
+    Assert-True ($result -eq $MsiErrorSuccess) "MsiGetProductInfoW read for $Property failed with exit $result"
     return $value.ToString()
 }
 
 function Get-MsiProductRegistration {
     param([Parameter(Mandatory = $true)] [string] $ProductCode)
 
-    $state = Get-MsiProductProperty -ProductCode $ProductCode -Property 'ProductState'
-    if ($null -eq $state) {
+    $state = [CodeskWindowsInstallerNative]::MsiQueryProductStateW($ProductCode)
+    if (($state -eq $MsiInstallStateUnknown) -or ($state -eq $MsiInstallStateAbsent)) {
         return $null
+    }
+    Assert-True (($state -eq $MsiInstallStateAdvertised) -or ($state -eq $MsiInstallStateDefault)) `
+        "MsiQueryProductStateW returned unexpected product state $state"
+
+    $displayName = $null
+    $displayVersion = $null
+    if ($state -eq $MsiInstallStateDefault) {
+        $displayName = Get-MsiProductProperty -ProductCode $ProductCode -Property 'InstalledProductName'
+        $displayVersion = Get-MsiProductProperty -ProductCode $ProductCode -Property 'VersionString'
     }
     return [pscustomobject] @{
         ProductState = $state
-        DisplayName = Get-MsiProductProperty -ProductCode $ProductCode -Property 'InstalledProductName'
-        DisplayVersion = Get-MsiProductProperty -ProductCode $ProductCode -Property 'VersionString'
+        AssignmentType = Get-MsiProductProperty -ProductCode $ProductCode -Property 'AssignmentType'
+        DisplayName = $displayName
+        DisplayVersion = $displayVersion
     }
+}
+
+function Assert-PerUserProductRegistration {
+    param(
+        [Parameter(Mandatory = $true)] $Package,
+        [Parameter(Mandatory = $true)] $Registration
+    )
+
+    Assert-True ($Registration.AssignmentType -ceq '0') `
+        "$($Package.Role) assignment type is $($Registration.AssignmentType), want per-user"
 }
 
 function Assert-ProductAbsent {
@@ -204,7 +208,8 @@ function Assert-InstalledProduct {
 
     $registration = Get-MsiProductRegistration -ProductCode $Package.ProductCode
     Assert-True ($null -ne $registration) "$($Package.Role) product is not registered"
-    Assert-True ($registration.ProductState -ceq '5') "$($Package.Role) product state is $($registration.ProductState), want installed"
+    Assert-PerUserProductRegistration -Package $Package -Registration $registration
+    Assert-True ($registration.ProductState -eq $MsiInstallStateDefault) "$($Package.Role) product state is $($registration.ProductState), want installed"
     Assert-True ($registration.DisplayName -ceq 'Codesk') "$($Package.Role) DisplayName is not Codesk"
     Assert-True ($registration.DisplayVersion -ceq $Package.Version) "$($Package.Role) DisplayVersion is $($registration.DisplayVersion), want $($Package.Version)"
 
@@ -257,7 +262,9 @@ New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
 # Remove only the exact deterministic ProductCode this test owns. Any other Codesk installation
 # remains a hard contamination failure rather than being deleted from a shared runner.
 foreach ($package in @($release.release)) {
-    if ($null -ne (Get-MsiProductRegistration -ProductCode $package.ProductCode)) {
+    $registration = Get-MsiProductRegistration -ProductCode $package.ProductCode
+    if ($null -ne $registration) {
+        Assert-PerUserProductRegistration -Package $package -Registration $registration
         Invoke-Msi -Operation uninstall -Package $package.ProductCode `
             -LogPath (Join-Path $logDirectory "baseline-$($package.Role)-uninstall.log")
     }
@@ -278,7 +285,9 @@ try {
 } finally {
     foreach ($package in @($release.release)) {
         try {
-            if ($null -ne (Get-MsiProductRegistration -ProductCode $package.ProductCode)) {
+            $registration = Get-MsiProductRegistration -ProductCode $package.ProductCode
+            if ($null -ne $registration) {
+                Assert-PerUserProductRegistration -Package $package -Registration $registration
                 Invoke-Msi -Operation uninstall -Package $package.ProductCode `
                     -LogPath (Join-Path $logDirectory "cleanup-$($package.Role)-uninstall.log")
             }
