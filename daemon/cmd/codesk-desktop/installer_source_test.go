@@ -99,6 +99,7 @@ func TestWindowsNativeCIUsesPublishedBuilderImage(t *testing.T) {
 		{"container reuses mutable tag after pull", "-BuilderImage \"${{ steps.builder.outputs.image_id }}\"", "-BuilderImage \"${{ needs.builder-manifest.outputs.image }}\""},
 		{"container deploy removed", "-Target windows-gui-deploy", "-Target windows-gui-build"},
 		{"native executable not run", "$output = & $testBinary '-test.count=1' '-test.v' 2>&1", "Write-Host \"native suite skipped\""},
+		{"native stderr treated as terminating", "$ErrorActionPreference = \"Continue\"", "$ErrorActionPreference = \"Stop\""},
 	}
 	for _, mutation := range mutations {
 		t.Run(mutation.name, func(t *testing.T) {
@@ -175,12 +176,23 @@ func checkWindowsNativeCIContract(workflow string) error {
 		"dist\\windows-gui\\msi\\$architecture":                         1,
 		"dist\\windows-gui\\payload\\$architecture":                     1,
 		"dist\\windows-gui\\tests\\notty-syncer-$architecture.test.exe": 1,
+		"$savedErrorActionPreference = $ErrorActionPreference":          1,
+		"$ErrorActionPreference = \"Continue\"":                         1,
 		"$output = & $testBinary '-test.count=1' '-test.v' 2>&1":        1,
+		"$testExit = $LASTEXITCODE":                                     1,
+		"$ErrorActionPreference = $savedErrorActionPreference":          1,
 		"$output -match \"--- PASS: $test\"":                            1,
 	} {
 		if got := strings.Count(job, required); got != count {
 			return fmt.Errorf("Windows-native CI source count for %q = %d, want %d", required, got, count)
 		}
+	}
+	continueAt := strings.Index(job, `$ErrorActionPreference = "Continue"`)
+	invokeAt := strings.Index(job, `$output = & $testBinary '-test.count=1' '-test.v' 2>&1`)
+	exitAt := strings.Index(job, `$testExit = $LASTEXITCODE`)
+	restoreAt := strings.Index(job, `$ErrorActionPreference = $savedErrorActionPreference`)
+	if !(continueAt < invokeAt && invokeAt < exitAt && exitAt < restoreAt) {
+		return fmt.Errorf("Windows-native CI does not scope native stderr tolerance around invocation and exit capture")
 	}
 	if strings.Contains(job, "packages: write") {
 		return fmt.Errorf("Windows-native test job has package write permission")

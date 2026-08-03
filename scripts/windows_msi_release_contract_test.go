@@ -499,6 +499,7 @@ func TestWindowsMSICIRunsNativeValidationAndLifecycle(t *testing.T) {
 		{"container does not perform WiX deploy", "workflow", `-Target windows-gui-deploy`, `-Target windows-gui-build`},
 		{"lifecycle not invoked", "workflow", `./scripts/test-windows-desktop-msi-lifecycle.ps1`, `Write-Host "MSI lifecycle skipped"`},
 		{"native Go test flags not passed as literal arguments", "workflow", `$output = & $testBinary '-test.count=1' '-test.v' 2>&1`, `$output = & $testBinary -test.count=1 -test.v 2>&1`},
+		{"native stderr treated as terminating", "workflow", `$ErrorActionPreference = "Continue"`, `$ErrorActionPreference = "Stop"`},
 		{"release install removed", "lifecycle", `Invoke-Msi -Operation install -Package $release.release.MsiPath`, `Write-Host "release install skipped"`},
 		{"release uninstall removed", "lifecycle", `Invoke-Msi -Operation uninstall -Package $release.release.MsiPath`, `Write-Host "release uninstall skipped"`},
 		{"installed payload hash not checked", "lifecycle", `installed Codesk.exe does not match the validated payload`, `installed Codesk.exe was not checked`},
@@ -558,11 +559,22 @@ func checkWindowsMSICILifecycle(workflow, lifecycle string) error {
 		`./scripts/test-windows-desktop-msi-lifecycle.ps1`:                              1,
 		`dist\windows-gui\msi\$architecture`:                                            1,
 		`dist\windows-gui\payload\$architecture`:                                        1,
+		`$savedErrorActionPreference = $ErrorActionPreference`:                          1,
+		`$ErrorActionPreference = "Continue"`:                                           1,
 		`$output = & $testBinary '-test.count=1' '-test.v' 2>&1`:                        1,
+		`$testExit = $LASTEXITCODE`:                                                     1,
+		`$ErrorActionPreference = $savedErrorActionPreference`:                          1,
 	} {
 		if got := strings.Count(job, required); got != count {
 			return fmt.Errorf("Windows MSI CI source count for %q = %d, want %d", required, got, count)
 		}
+	}
+	continueAt := strings.Index(job, `$ErrorActionPreference = "Continue"`)
+	invokeAt := strings.Index(job, `$output = & $testBinary '-test.count=1' '-test.v' 2>&1`)
+	exitAt := strings.Index(job, `$testExit = $LASTEXITCODE`)
+	restoreAt := strings.Index(job, `$ErrorActionPreference = $savedErrorActionPreference`)
+	if !(continueAt < invokeAt && invokeAt < exitAt && exitAt < restoreAt) {
+		return fmt.Errorf("Windows MSI CI does not scope native stderr tolerance around invocation and exit capture")
 	}
 	for _, forbidden := range []string{
 		"actions/upload-artifact",

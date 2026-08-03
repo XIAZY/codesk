@@ -475,8 +475,14 @@ jobs:
           if (-not (Test-Path -LiteralPath $testBinary -PathType Leaf)) {
             throw "Windows syncer test binary is missing: $testBinary"
           }
-          $output = & $testBinary '-test.count=1' '-test.v' 2>&1
-          $testExit = $LASTEXITCODE
+          $savedErrorActionPreference = $ErrorActionPreference
+          $ErrorActionPreference = "Continue"
+          try {
+            $output = & $testBinary '-test.count=1' '-test.v' 2>&1
+            $testExit = $LASTEXITCODE
+          } finally {
+            $ErrorActionPreference = $savedErrorActionPreference
+          }
           $output | ForEach-Object { Write-Host $_ }
           if ($testExit -ne 0) { exit $testExit }
 

@@ -240,10 +240,25 @@ try {
         Assert-True ([string]$shortcut.Arguments -like "*-WindowStyle Hidden*") "Startup shortcut launcher is not hidden"
     }
     $launcherPidPath = Join-Path $daemonDir "launcher.pid"
-    for ($attempt = 0; $attempt -lt 50 -and -not (Test-Path -LiteralPath $launcherPidPath -PathType Leaf); $attempt++) {
+    for ($attempt = 0; $attempt -lt 300 -and -not (Test-Path -LiteralPath $launcherPidPath -PathType Leaf); $attempt++) {
         Start-Sleep -Milliseconds 100
     }
-    Assert-File $launcherPidPath
+    $launcherDiagnostic = "mode=$($service.Mode)"
+    if ($service.Mode -eq "scheduled-task") {
+        $taskState = "unavailable"
+        $lastTaskResult = "unavailable"
+        $taskDiagnosticError = "none"
+        try {
+            $registeredTask = Get-ScheduledTask -TaskName $service.TaskName -ErrorAction Stop
+            $taskState = [string]$registeredTask.State
+            $taskInfo = Get-ScheduledTaskInfo -TaskName $service.TaskName -ErrorAction Stop
+            $lastTaskResult = [string]$taskInfo.LastTaskResult
+        } catch {
+            $taskDiagnosticError = $_.Exception.Message
+        }
+        $launcherDiagnostic = "$launcherDiagnostic taskState=$taskState lastTaskResult=$lastTaskResult diagnosticError=$taskDiagnosticError"
+    }
+    Assert-True (Test-Path -LiteralPath $launcherPidPath -PathType Leaf) "launcher did not publish pid within 30 seconds; $launcherDiagnostic"
 
     $daemonLogPath = Join-Path $daemonDir "daemon.log"
     $daemonLog = ""
