@@ -477,7 +477,7 @@ func checkBuildDeployContractCIGate(workflow string) error {
 }
 
 func TestWindowsMSICIRunsNativeValidationAndLifecycle(t *testing.T) {
-	workflowData, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "ci.yml"))
+	workflowData, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "windows-native.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -495,7 +495,7 @@ func TestWindowsMSICIRunsNativeValidationAndLifecycle(t *testing.T) {
 		name, target, old, replacement string
 	}{
 		{"published builder image not pulled", "workflow", `docker pull $imageRef`, `Write-Host "builder pull skipped"`},
-		{"pulled image ID not pinned", "workflow", `-BuilderImage "${{ steps.builder.outputs.image_id }}"`, `-BuilderImage "$($env:WINDOWS_BUILDER_REPOSITORY):latest"`},
+		{"pulled image ID not pinned", "workflow", `-BuilderImage "${{ steps.builder.outputs.image_id }}"`, `-BuilderImage "${{ inputs.builder_image }}"`},
 		{"container does not perform WiX deploy", "workflow", `-Target windows-gui-deploy`, `-Target windows-gui-build`},
 		{"lifecycle not invoked", "workflow", `./scripts/test-windows-desktop-msi-lifecycle.ps1`, `Write-Host "MSI lifecycle skipped"`},
 		{"native Go test flags not passed as literal arguments", "workflow", `$output = & $testBinary '-test.count=1' '-test.v' "-test.run=$runPattern" 2>&1`, `$output = & $testBinary -test.count=1 -test.v -test.run=$runPattern 2>&1`},
@@ -550,8 +550,8 @@ func checkWindowsMSICILifecycle(workflow, lifecycle string) error {
 	}
 	for required, count := range map[string]int{
 		"fetch-depth: 0": 1,
-		`$imageRef = "$($env:WINDOWS_BUILDER_REPOSITORY):latest"`:                        1,
-		`docker pull $imageRef`:                                                          1,
+		`$imageRef = "${{ inputs.builder_image }}"`: 1,
+		`docker pull $imageRef`:                     1,
 		"- name: Build and ICE-validate Windows payloads and MSIs in the builder image":  1,
 		`./scripts/run-windows-gui-container.ps1`:                                        1,
 		`-Target windows-gui-deploy`:                                                     1,
@@ -642,16 +642,11 @@ func checkWindowsMSICILifecycle(workflow, lifecycle string) error {
 
 func windowsNativeCIJob(workflow string) (string, error) {
 	const start = "\n  windows-daemon:\n"
-	const end = "\n  regression-e2e:\n"
 	startAt := strings.Index(workflow, start)
 	if startAt < 0 {
 		return "", fmt.Errorf("Windows native workflow has no windows-daemon job")
 	}
-	endOffset := strings.Index(workflow[startAt+len(start):], end)
-	if endOffset < 0 {
-		return "", fmt.Errorf("Windows native workflow has no job boundary after windows-daemon")
-	}
-	return workflow[startAt : startAt+len(start)+endOffset], nil
+	return workflow[startAt:], nil
 }
 
 func TestWindowsMSITestOnlyUpgradeFixtureCannotBecomeReleaseArtifact(t *testing.T) {
@@ -663,13 +658,19 @@ func TestWindowsMSITestOnlyUpgradeFixtureCannotBecomeReleaseArtifact(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	workflowData, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "ci.yml"))
-	if err != nil {
-		t.Fatal(err)
+	workflowRoot := filepath.Join("..", ".github", "workflows")
+	workflowFiles := []string{"ci.yml", "windows-builder.yml", "windows-native.yml"}
+	var workflowSources []string
+	for _, name := range workflowFiles {
+		workflowData, err := os.ReadFile(filepath.Join(workflowRoot, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		workflowSources = append(workflowSources, string(workflowData))
 	}
 	build := normalizeSourceNewlines(string(buildData))
 	fixture := normalizeSourceNewlines(string(fixtureData))
-	workflow := normalizeSourceNewlines(string(workflowData))
+	workflow := normalizeSourceNewlines(strings.Join(workflowSources, "\n"))
 	if err := checkWindowsMSITestOnlyFixtureBoundary(build, fixture, workflow); err != nil {
 		t.Fatal(err)
 	}

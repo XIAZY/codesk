@@ -1,0 +1,126 @@
+name: Windows native validation
+
+on:
+  workflow_call:
+    inputs:
+      builder_image:
+        description: Published Windows builder image to validate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  windows-daemon:
+    name: Windows daemon (native build + platform tests)
+    runs-on:
+      - self-hosted
+      - Windows
+      - ARM64
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Resolve runner architecture
+        id: native
+        shell: powershell
+        run: |
+          switch ("${{ runner.arch }}") {
+            "X64" { "go_arch=amd64" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append }
+            "ARM64" { "go_arch=arm64" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append }
+            default { throw "Unsupported native Windows runner architecture: ${{ runner.arch }}" }
+          }
+      - name: Pull the published Windows builder image
+        id: builder
+        shell: powershell
+        run: |
+          $imageRef = "${{ inputs.builder_image }}"
+          & docker pull $imageRef
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not pull the published Windows builder image $imageRef. Builder publication is owned by the merged-main Windows builder workflow."
+          }
+          $imageId = (& docker image inspect $imageRef --format '{{.Id}}').Trim()
+          if ($LASTEXITCODE -ne 0 -or $imageId -cnotmatch '^sha256:[0-9a-f]{64}$') {
+            throw "Could not resolve the pulled Windows builder image ID: $imageId"
+          }
+          "image_id=$imageId" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Build and ICE-validate Windows payloads and MSIs in the builder image
+        shell: powershell
+        run: |
+          ./scripts/run-windows-gui-container.ps1 `
+            -Target windows-gui-deploy `
+            -RepositoryRoot "${{ github.workspace }}" `
+            -BuilderImage "${{ steps.builder.outputs.image_id }}"
+      - name: Install, verify, and uninstall the runner-native MSI
+        shell: powershell
+        run: |
+          $architecture = "${{ steps.native.outputs.go_arch }}"
+          ./scripts/test-windows-desktop-msi-lifecycle.ps1 `
+            -ReleaseDirectory (Join-Path "${{ github.workspace }}" "dist\windows-gui\msi\$architecture") `
+            -PayloadDirectory (Join-Path "${{ github.workspace }}" "dist\windows-gui\payload\$architecture") `
+            -GoArchitecture $architecture `
+            -ExpectedVersion ((& ./scripts/read-daemon-version.ps1).Trim())
+      - name: Run the image-built Windows-native syncer suite
+        shell: powershell
+        run: |
+          $architecture = "${{ steps.native.outputs.go_arch }}"
+          $testBinary = Join-Path "${{ github.workspace }}" "dist\windows-gui\tests\notty-syncer-$architecture.test.exe"
+          if (-not (Test-Path -LiteralPath $testBinary -PathType Leaf)) {
+            throw "Windows syncer test binary is missing: $testBinary"
+          }
+          $required = @(
+            "TestWorkspaceFSAppendUsesCanonicalPathLease",
+            "TestWorkspaceFSCreateEmptyOrReadCreatesAbsentFile",
+            "TestWorkspaceFSCreateEmptyOrReadPreservesExistingFile",
+            "TestWorkspaceFSCreateEmptyOrReadPreservesFileCreatedAfterAbsentObservation",
+            "TestWorkspaceFSCreateEmptyOrReadDoesNotRemoveReplacementAfterCloseFailure",
+            "TestWorkspaceFSCreateEmptyOrReadReturnsReplacementAfterCreate",
+            "TestMaterializeTrackedFileWithoutCacheCreatesEmptyProjection",
+            "TestMaterializeTrackedFileWithoutCachePreservesExistingLocalContent",
+            "TestSQLiteFileDSNOpensWindowsDrivePath",
+            "TestScanWorkspaceFilesObservesCompleteContentDuringAtomicReplacement",
+            "TestApplyProjectedContentDoesNotAdvanceBaseAfterDurabilityFailure",
+            "TestProjectMergedContentDoesNotAdvanceBaseAfterWriteFailure",
+            "TestFileIdentityTracksHardLinks",
+            "TestStatFileWithIdentityReturnsMetadataAndStableIdentity",
+            "TestFileRenameInfoIncludesTrailingNUL",
+            "TestFileIdentityFromWindowsInfoRejectsZeroFileIndex",
+            "TestFileIdentitySurvivesRenameOnWindows",
+            "TestDirectoryIdentitySurvivesRenameOnWindows",
+            "TestFileIdentityChangesAfterDeleteAndRecreateOnWindows",
+            "TestFileIdentityFollowsDistinctReplacementObjectOnWindows",
+            "TestReplaceFileAtomicallyReplacesContentAndCleansStagingFile",
+            "TestReplaceFileAtomicallySyncsStagedContentBeforeCommit",
+            "TestReplaceFileAtomicallyPreservesDestinationWhenStagedSyncFails",
+            "TestReplaceFileAtomicallyPreservesDestinationWhenCommitUnsupported",
+            "TestReplaceFileAtomicallyLeavesDestinationCompleteWhenDeleteSharingIsDenied",
+            "TestAtomicReplacementSucceedsWhileDeleteSharedObservationIsOpenOnWindows",
+            "TestAtomicReplacementReturnsErrorWhenPostRenameFlushFailsOnWindows",
+            "TestIsCrossDeviceErrorWindows"
+          )
+          $runPattern = "^(" + ($required -join "|") + ")$"
+          $savedErrorActionPreference = $ErrorActionPreference
+          $ErrorActionPreference = "Continue"
+          try {
+            $output = & $testBinary '-test.count=1' '-test.v' "-test.run=$runPattern" 2>&1
+            $testExit = $LASTEXITCODE
+          } finally {
+            $ErrorActionPreference = $savedErrorActionPreference
+          }
+          $output | ForEach-Object { Write-Host $_ }
+          if ($testExit -ne 0) { exit $testExit }
+
+          foreach ($test in $required) {
+            if (-not ($output -match "--- PASS: $test")) {
+              throw "Required Windows platform test did not PASS: $test"
+            }
+          }

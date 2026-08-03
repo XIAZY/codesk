@@ -1,0 +1,121 @@
+name: Windows builder image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - deploy/windows-desktop/Dockerfile
+      - deploy/windows-desktop/Codesk.wixproj
+
+concurrency:
+  group: windows-builder-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  WINDOWS_BUILDER_REPOSITORY: ghcr.io/xiazy/notty-windows-builder
+
+jobs:
+  builder-key:
+    name: Resolve Windows builder image
+    runs-on: [self-hosted, Linux, ARM64]
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Derive image tag from the complete build context
+        id: image
+        shell: bash
+        run: |
+          image_hash="$({
+            sha256sum deploy/windows-desktop/Dockerfile
+            sha256sum deploy/windows-desktop/Codesk.wixproj
+          } | sha256sum | cut -d ' ' -f 1)"
+          printf 'image=%s:sha-%s\n' "$WINDOWS_BUILDER_REPOSITORY" "$image_hash" >> "$GITHUB_OUTPUT"
+
+  builder-image:
+    name: Windows builder image (arm64)
+    needs: builder-key
+    permissions:
+      contents: read
+      packages: write
+    runs-on: [self-hosted, Windows, ARM64]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Check immutable architecture image
+        id: image
+        shell: powershell
+        run: |
+          $tag = "${{ needs.builder-key.outputs.image }}-arm64"
+          $savedPreference = $ErrorActionPreference
+          $ErrorActionPreference = "SilentlyContinue"
+          & docker manifest inspect $tag *> $null
+          $exists = $LASTEXITCODE -eq 0
+          $ErrorActionPreference = $savedPreference
+          "build=$((-not $exists).ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          if ($exists) {
+            Write-Host "Reusing immutable Windows builder image $tag"
+          }
+          # A missing manifest is expected for a newly merged build context.
+          # Clear the probe's native nonzero status after publishing the output.
+          exit 0
+      - name: Build and push changed Windows builder image
+        if: steps.image.outputs.build == 'true'
+        shell: powershell
+        run: |
+          $tag = "${{ needs.builder-key.outputs.image }}-arm64"
+          ./scripts/build-windows-gui-builder-image.ps1 `
+            -RepositoryRoot "${{ github.workspace }}" `
+            -BuilderImage $tag
+          & docker push $tag
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  builder-manifest:
+    name: Publish Windows builder manifest
+    needs: [builder-key, builder-image]
+    permissions:
+      packages: write
+    runs-on: [self-hosted, Linux, ARM64]
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Publish immutable Windows builder image manifest
+        shell: bash
+        env:
+          IMAGE: ${{ needs.builder-key.outputs.image }}
+        run: |
+          docker manifest rm "$IMAGE" >/dev/null 2>&1 || true
+          docker manifest create "$IMAGE" "$IMAGE-arm64"
+          docker manifest push --purge "$IMAGE"
+          docker manifest inspect "$IMAGE" >/dev/null
+      - name: Promote the landed build context to latest
+        shell: bash
+        env:
+          IMAGE: ${{ needs.builder-key.outputs.image }}
+        run: |
+          latest="$WINDOWS_BUILDER_REPOSITORY:latest"
+          docker manifest rm "$latest" >/dev/null 2>&1 || true
+          docker manifest create "$latest" "$IMAGE-arm64"
+          docker manifest push --purge "$latest"
+          docker manifest inspect "$latest" >/dev/null
+
+  windows-native:
+    name: Validate published Windows builder image
+    needs: builder-manifest
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/windows-native.yml
+    with:
+      builder_image: ghcr.io/xiazy/notty-windows-builder:latest

@@ -70,72 +70,72 @@ func TestWindowsInstallerCIUsesArchitectureBoundProductPayloads(t *testing.T) {
 }
 
 func TestWindowsNativeCIUsesPublishedBuilderImage(t *testing.T) {
-	path := filepath.Join("..", "..", "..", ".github", "workflows", "ci.yml")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
+	root := filepath.Join("..", "..", "..", ".github", "workflows")
+	readWorkflow := func(name string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
 	}
-	workflow := string(data)
-	if err := checkWindowsNativeCIContract(workflow); err != nil {
+	ci := readWorkflow("ci.yml")
+	builder := readWorkflow("windows-builder.yml")
+	native := readWorkflow("windows-native.yml")
+	if err := checkWindowsNativeCIContract(ci, builder, native); err != nil {
 		t.Fatal(err)
 	}
 
 	mutations := []struct {
-		name        string
-		old         string
-		replacement string
+		name, target, old, replacement string
 	}{
-		{"Dockerfile leaves image key", "sha256sum deploy/windows-desktop/Dockerfile", "printf Dockerfile"},
-		{"WiX project leaves image key", "sha256sum deploy/windows-desktop/Codesk.wixproj", "printf Codesk.wixproj"},
-		{"publication event guard weakened", `$GITHUB_EVENT_NAME" == "push`, `$GITHUB_EVENT_NAME" != ""`},
-		{"publication branch guard weakened", `$GITHUB_REF" == "refs/heads/main`, `$GITHUB_REF" != ""`},
-		{
-			"Dockerfile leaves publication change gate",
-			"deploy/windows-desktop/Dockerfile \\\n              deploy/windows-desktop/Codesk.wixproj",
-			"deploy/windows-desktop/Codesk.wixproj \\\n              deploy/windows-desktop/Codesk.wixproj",
-		},
-		{
-			"WiX project leaves publication change gate",
-			"deploy/windows-desktop/Dockerfile \\\n              deploy/windows-desktop/Codesk.wixproj",
-			"deploy/windows-desktop/Dockerfile \\\n              deploy/windows-desktop/Dockerfile",
-		},
-		{
-			"builder image can publish outside policy gate",
-			"  builder-image:\n    name: Windows builder image (arm64)\n    needs: builder-key\n    if: needs.builder-key.outputs.publish == 'true'",
-			"  builder-image:\n    name: Windows builder image (arm64)\n    needs: builder-key\n    if: always()",
-		},
-		{
-			"builder manifest can publish outside policy gate",
-			"  builder-manifest:\n    name: Publish Windows builder manifest\n    needs: [builder-key, builder-image]\n    if: needs.builder-key.outputs.publish == 'true'",
-			"  builder-manifest:\n    name: Publish Windows builder manifest\n    needs: [builder-key, builder-image]\n    if: always()",
-		},
-		{"builder targets absent X64 runner", "runs-on: [self-hosted, Windows, ARM64]", "runs-on: [self-hosted, Windows, X64]"},
-		{"native consumer loses ARM64 pin", "      - Windows\n      - ARM64\n", "      - Windows\n      - X64\n"},
-		{"missing architecture image still fails probe step", "          exit 0\n", ""},
-		{"builder construction removed", "./scripts/build-windows-gui-builder-image.ps1", "Write-Host \"builder skipped\""},
-		{"architecture image not pushed", "docker push $tag", "Write-Host \"push skipped\""},
-		{"manifest adds unavailable AMD64 image", "docker manifest create \"$IMAGE\" \"$IMAGE-arm64\"", "docker manifest create \"$IMAGE\" \"$IMAGE-amd64\" \"$IMAGE-arm64\""},
-		{
-			"native job masks a failed required publication",
-			"needs.builder-key.outputs.publish != 'true' || needs.builder-manifest.result == 'success'",
-			"needs.builder-key.outputs.publish != 'true' || needs.builder-manifest.result != 'cancelled'",
-		},
-		{"native job cannot run when publication is intentionally skipped", "always() && needs.builder-key.result", "needs.builder-key.result"},
-		{"native job no longer waits for image policy", "needs: [builder-key, builder-manifest]", "needs: builder-manifest"},
-		{"native job bypasses published latest", `$imageRef = "$($env:WINDOWS_BUILDER_REPOSITORY):latest"`, `$imageRef = "${{ needs.builder-key.outputs.image }}"`},
-		{"container reuses mutable tag after pull", "-BuilderImage \"${{ steps.builder.outputs.image_id }}\"", "-BuilderImage \"${{ needs.builder-manifest.outputs.image }}\""},
-		{"container deploy removed", "-Target windows-gui-deploy", "-Target windows-gui-build"},
-		{"native executable not run", "$output = & $testBinary '-test.count=1' '-test.v' \"-test.run=$runPattern\" 2>&1", "Write-Host \"native suite skipped\""},
-		{"native stderr treated as terminating", "$ErrorActionPreference = \"Continue\"", "$ErrorActionPreference = \"Stop\""},
-		{"native suite not restricted to required tests", `"-test.run=$runPattern"`, `'-test.run=.'`},
+		{"CI can publish packages", "ci", "      packages: read\n    uses: ./.github/workflows/windows-native.yml", "      packages: write\n    uses: ./.github/workflows/windows-native.yml"},
+		{"CI runs native validation concurrently on main", "ci", "if: github.event_name == 'pull_request'", "if: always()"},
+		{"CI bypasses reusable native workflow", "ci", "uses: ./.github/workflows/windows-native.yml", "uses: actions/checkout@v4"},
+		{"CI bypasses published latest", "ci", "builder_image: ghcr.io/xiazy/notty-windows-builder:latest", "builder_image: ghcr.io/xiazy/notty-windows-builder:sha-unmerged"},
+		{"builder workflow accepts pull requests", "builder", "on:\n  push:", "on:\n  pull_request:\n  push:"},
+		{"builder workflow can publish off main", "builder", "branches: [main]", "branches: ['**']"},
+		{"Dockerfile leaves publication path gate", "builder", "      - deploy/windows-desktop/Dockerfile\n      - deploy/windows-desktop/Codesk.wixproj", "      - deploy/windows-desktop/Codesk.wixproj"},
+		{"WiX project leaves publication path gate", "builder", "      - deploy/windows-desktop/Dockerfile\n      - deploy/windows-desktop/Codesk.wixproj", "      - deploy/windows-desktop/Dockerfile"},
+		{"Dockerfile leaves image key", "builder", "sha256sum deploy/windows-desktop/Dockerfile", "printf Dockerfile"},
+		{"WiX project leaves image key", "builder", "sha256sum deploy/windows-desktop/Codesk.wixproj", "printf Codesk.wixproj"},
+		{"builder targets absent X64 runner", "builder", "runs-on: [self-hosted, Windows, ARM64]", "runs-on: [self-hosted, Windows, X64]"},
+		{"missing architecture image still fails probe step", "builder", "          exit 0\n", ""},
+		{"builder construction removed", "builder", "./scripts/build-windows-gui-builder-image.ps1", "Write-Host \"builder skipped\""},
+		{"architecture image not pushed", "builder", "& docker push $tag", "Write-Host \"push skipped\""},
+		{"manifest adds unavailable AMD64 image", "builder", "docker manifest create \"$IMAGE\" \"$IMAGE-arm64\"", "docker manifest create \"$IMAGE\" \"$IMAGE-amd64\" \"$IMAGE-arm64\""},
+		{"published latest not promoted", "builder", "docker manifest create \"$latest\" \"$IMAGE-arm64\"", "docker manifest create \"$latest\" \"$latest\""},
+		{"post-publish validation does not wait for manifest", "builder", "needs: builder-manifest\n    permissions:", "needs: builder-image\n    permissions:"},
+		{"post-publish validation bypasses latest", "builder", "builder_image: ghcr.io/xiazy/notty-windows-builder:latest", "builder_image: ${{ needs.builder-key.outputs.image }}"},
+		{"native workflow is directly triggerable", "native", "on:\n  workflow_call:", "on:\n  pull_request:\n  workflow_call:"},
+		{"native builder image input becomes optional", "native", "        required: true", "        required: false"},
+		{"native consumer loses ARM64 pin", "native", "      - Windows\n      - ARM64\n", "      - Windows\n      - X64\n"},
+		{"native job bypasses caller image", "native", `$imageRef = "${{ inputs.builder_image }}"`, `$imageRef = "ghcr.io/xiazy/notty-windows-builder:sha-unmerged"`},
+		{"container reuses mutable tag after pull", "native", "-BuilderImage \"${{ steps.builder.outputs.image_id }}\"", "-BuilderImage \"${{ inputs.builder_image }}\""},
+		{"container deploy removed", "native", "-Target windows-gui-deploy", "-Target windows-gui-build"},
+		{"native executable not run", "native", "$output = & $testBinary '-test.count=1' '-test.v' \"-test.run=$runPattern\" 2>&1", "Write-Host \"native suite skipped\""},
+		{"native stderr treated as terminating", "native", "$ErrorActionPreference = \"Continue\"", "$ErrorActionPreference = \"Stop\""},
+		{"native suite not restricted to required tests", "native", `"-test.run=$runPattern"`, `'-test.run=.'`},
 	}
 	for _, mutation := range mutations {
 		t.Run(mutation.name, func(t *testing.T) {
-			if strings.Count(workflow, mutation.old) != 1 {
+			mutatedCI, mutatedBuilder, mutatedNative := ci, builder, native
+			var source *string
+			switch mutation.target {
+			case "ci":
+				source = &mutatedCI
+			case "builder":
+				source = &mutatedBuilder
+			case "native":
+				source = &mutatedNative
+			default:
+				t.Fatalf("unsupported mutation target %q", mutation.target)
+			}
+			if strings.Count(*source, mutation.old) != 1 {
 				t.Fatalf("mutation source %q is not unique", mutation.old)
 			}
-			mutated := strings.Replace(workflow, mutation.old, mutation.replacement, 1)
-			if err := checkWindowsNativeCIContract(mutated); err == nil {
+			*source = strings.Replace(*source, mutation.old, mutation.replacement, 1)
+			if err := checkWindowsNativeCIContract(mutatedCI, mutatedBuilder, mutatedNative); err == nil {
 				t.Fatal("Windows-native image CI contract mutation passed")
 			}
 		})
@@ -156,61 +156,78 @@ func TestWindowsNativeCIUsesPublishedBuilderImage(t *testing.T) {
 	}
 }
 
-func checkWindowsNativeCIContract(workflow string) error {
+func checkWindowsNativeCIContract(ci, builder, native string) error {
 	for required, count := range map[string]int{
-		"name: CI":        1,
-		"packages: write": 2,
-		"WINDOWS_BUILDER_REPOSITORY: ghcr.io/xiazy/notty-windows-builder": 1,
-		"publish: ${{ steps.image.outputs.publish }}":                     1,
-		"fetch-depth: 0": 3,
-		"PUSH_BEFORE: ${{ github.event.before }}":                                                   1,
-		`if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main" ]]; then`:       1,
-		`if [[ "$PUSH_BEFORE" == "0000000000000000000000000000000000000000" ]]; then`:               1,
-		`elif git diff --quiet "$PUSH_BEFORE" "$GITHUB_SHA" -- \`:                                   1,
-		"sha256sum deploy/windows-desktop/Dockerfile":                                               1,
-		"sha256sum deploy/windows-desktop/Codesk.wixproj":                                           1,
-		"deploy/windows-desktop/Dockerfile \\\n              deploy/windows-desktop/Codesk.wixproj": 1,
-		"printf 'publish=%s\\n' \"$publish\" >> \"$GITHUB_OUTPUT\"":                                 1,
-		"if: needs.builder-key.outputs.publish == 'true'":                                           2,
-		"name: Windows builder image (arm64)":                                                       1,
-		"runs-on: [self-hosted, Windows, ARM64]":                                                    1,
-		"docker manifest inspect $tag *> $null":                                                     1,
-		"          exit 0\n":                                                                        1,
-		"./scripts/build-windows-gui-builder-image.ps1":                                             1,
-		"docker push $tag": 1,
-		"docker manifest create \"$IMAGE\" \"$IMAGE-arm64\"": 1,
-		"latest=\"$WINDOWS_BUILDER_REPOSITORY:latest\"":      1,
+		"name: CI": 1,
+		"if: github.event_name == 'pull_request'": 1,
+		"packages: read": 1,
+		"uses: ./.github/workflows/windows-native.yml":              1,
+		"builder_image: ghcr.io/xiazy/notty-windows-builder:latest": 1,
 	} {
-		if got := strings.Count(workflow, required); got != count {
-			return fmt.Errorf("Windows builder workflow source count for %q = %d, want %d", required, got, count)
+		if got := strings.Count(ci, required); got != count {
+			return fmt.Errorf("read-only CI source count for %q = %d, want %d", required, got, count)
 		}
 	}
-	for _, forbidden := range []string{
-		"image: ${{ steps.ci-image.outputs.image }}",
-		"if docker manifest inspect \"$latest\" >/dev/null 2>&1; then",
-		"image=\"$EXACT_IMAGE\"",
-		"needs.builder-manifest.outputs.image",
-	} {
-		if strings.Contains(workflow, forbidden) {
-			return fmt.Errorf("Windows builder workflow retains publication fallback %q", forbidden)
+	for _, forbidden := range []string{"packages: write", "docker push", "docker manifest", "build-windows-gui-builder-image", "WINDOWS_BUILDER_REPOSITORY"} {
+		if strings.Contains(ci, forbidden) {
+			return fmt.Errorf("CI owns forbidden builder publication source %q", forbidden)
 		}
 	}
-	job, err := windowsNativeCIJob(workflow)
+
+	for required, count := range map[string]int{
+		"name: Windows builder image\n": 1,
+		"  push:\n    branches: [main]\n    paths:\n      - deploy/windows-desktop/Dockerfile\n      - deploy/windows-desktop/Codesk.wixproj": 1,
+		"group: windows-builder-main": 1,
+		"cancel-in-progress: false":   1,
+		"packages: write":             2,
+		"WINDOWS_BUILDER_REPOSITORY: ghcr.io/xiazy/notty-windows-builder":                                  1,
+		"sha256sum deploy/windows-desktop/Dockerfile":                                                      1,
+		"sha256sum deploy/windows-desktop/Codesk.wixproj":                                                  1,
+		"runs-on: [self-hosted, Windows, ARM64]":                                                           1,
+		"docker manifest inspect $tag *> $null":                                                            1,
+		"          exit 0\n":                                                                               1,
+		"./scripts/build-windows-gui-builder-image.ps1":                                                    1,
+		"& docker push $tag":                                                                               1,
+		"docker manifest create \"$IMAGE\" \"$IMAGE-arm64\"":                                               1,
+		"docker manifest create \"$latest\" \"$IMAGE-arm64\"":                                              1,
+		"windows-native:\n    name: Validate published Windows builder image\n    needs: builder-manifest": 1,
+		"uses: ./.github/workflows/windows-native.yml":                                                     1,
+		"builder_image: ghcr.io/xiazy/notty-windows-builder:latest":                                        1,
+	} {
+		if got := strings.Count(builder, required); got != count {
+			return fmt.Errorf("dedicated builder workflow source count for %q = %d, want %d", required, got, count)
+		}
+	}
+	for _, forbidden := range []string{"pull_request", "workflow_dispatch", "if docker manifest inspect \"$latest\"", "image=\"$EXACT_IMAGE\""} {
+		if strings.Contains(builder, forbidden) {
+			return fmt.Errorf("dedicated builder workflow contains forbidden trigger or fallback %q", forbidden)
+		}
+	}
+
+	for required, count := range map[string]int{
+		"name: Windows native validation": 1,
+		"workflow_call:":                  1,
+		"builder_image:":                  1,
+		"required: true":                  1,
+		"packages: read":                  1,
+	} {
+		if got := strings.Count(native, required); got != count {
+			return fmt.Errorf("reusable native workflow source count for %q = %d, want %d", required, got, count)
+		}
+	}
+
+	job, err := windowsNativeCIJob(native)
 	if err != nil {
 		return err
 	}
 	for required, count := range map[string]int{
-		"needs: [builder-key, builder-manifest]":                                                    1,
-		"always() && needs.builder-key.result == 'success'":                                         1,
-		"needs.builder-key.outputs.publish != 'true' || needs.builder-manifest.result == 'success'": 1,
-		"packages: read": 1,
 		"      - self-hosted\n      - Windows\n      - ARM64":                              1,
 		"submodules: recursive":                                                            1,
 		"fetch-depth: 0":                                                                   1,
 		"switch (\"${{ runner.arch }}\")":                                                  1,
 		"\"X64\" { \"go_arch=amd64\"":                                                      1,
 		"\"ARM64\" { \"go_arch=arm64\"":                                                    1,
-		`$imageRef = "$($env:WINDOWS_BUILDER_REPOSITORY):latest"`:                          1,
+		`$imageRef = "${{ inputs.builder_image }}"`:                                        1,
 		"docker pull $imageRef":                                                            1,
 		"docker image inspect $imageRef --format '{{.Id}}'":                                1,
 		"image_id=$imageId":                                                                1,
@@ -259,12 +276,10 @@ func checkWindowsNativeCIContract(workflow string) error {
 			return fmt.Errorf("Windows-native test job reinstalls dependency %q outside the builder image", forbidden)
 		}
 	}
-	jobsAt := strings.Index(workflow, "\njobs:\n")
-	if jobsAt < 0 {
-		return fmt.Errorf("Windows-native workflow has no jobs section")
-	}
-	if strings.Contains(workflow[:jobsAt], "packages: write") {
-		return fmt.Errorf("Windows-native workflow grants package write permission outside publication jobs")
+	for _, forbidden := range []string{"pull_request:", "push:", "workflow_dispatch:", "packages: write", "docker push", "docker manifest", "build-windows-gui-builder-image"} {
+		if strings.Contains(native, forbidden) {
+			return fmt.Errorf("reusable native workflow contains forbidden trigger or publication source %q", forbidden)
+		}
 	}
 	return nil
 }
@@ -285,16 +300,11 @@ func checkWindowsNativeTestBuildContract(payload string) error {
 }
 func windowsNativeCIJob(workflow string) (string, error) {
 	const start = "\n  windows-daemon:\n"
-	const end = "\n  regression-e2e:\n"
 	startAt := strings.Index(workflow, start)
 	if startAt < 0 {
-		return "", fmt.Errorf("CI has no windows-daemon job")
+		return "", fmt.Errorf("workflow has no windows-daemon job")
 	}
-	endOffset := strings.Index(workflow[startAt+len(start):], end)
-	if endOffset < 0 {
-		return "", fmt.Errorf("CI has no job boundary after windows-daemon")
-	}
-	return workflow[startAt : startAt+len(start)+endOffset], nil
+	return workflow[startAt:], nil
 }
 
 func TestWindowsInstallerReproducibilityScriptsAreFailClosed(t *testing.T) {
