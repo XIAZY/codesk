@@ -475,17 +475,6 @@ jobs:
           if (-not (Test-Path -LiteralPath $testBinary -PathType Leaf)) {
             throw "Windows syncer test binary is missing: $testBinary"
           }
-          $savedErrorActionPreference = $ErrorActionPreference
-          $ErrorActionPreference = "Continue"
-          try {
-            $output = & $testBinary '-test.count=1' '-test.v' 2>&1
-            $testExit = $LASTEXITCODE
-          } finally {
-            $ErrorActionPreference = $savedErrorActionPreference
-          }
-          $output | ForEach-Object { Write-Host $_ }
-          if ($testExit -ne 0) { exit $testExit }
-
           $required = @(
             "TestWorkspaceFSAppendUsesCanonicalPathLease",
             "TestWorkspaceFSCreateEmptyOrReadCreatesAbsentFile",
@@ -516,6 +505,18 @@ jobs:
             "TestAtomicReplacementReturnsErrorWhenPostRenameFlushFailsOnWindows",
             "TestIsCrossDeviceErrorWindows"
           )
+          $runPattern = "^(" + ($required -join "|") + ")$"
+          $savedErrorActionPreference = $ErrorActionPreference
+          $ErrorActionPreference = "Continue"
+          try {
+            $output = & $testBinary '-test.count=1' '-test.v' "-test.run=$runPattern" 2>&1
+            $testExit = $LASTEXITCODE
+          } finally {
+            $ErrorActionPreference = $savedErrorActionPreference
+          }
+          $output | ForEach-Object { Write-Host $_ }
+          if ($testExit -ne 0) { exit $testExit }
+
           foreach ($test in $required) {
             if (-not ($output -match "--- PASS: $test")) {
               throw "Required Windows platform test did not PASS: $test"
