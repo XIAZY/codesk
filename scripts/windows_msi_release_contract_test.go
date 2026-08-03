@@ -498,9 +498,9 @@ func TestWindowsMSICIRunsNativeValidationAndLifecycle(t *testing.T) {
 		{"pulled image ID not pinned", "workflow", `-BuilderImage "${{ steps.builder.outputs.image_id }}"`, `-BuilderImage "ghcr.io/xiazy/notty-windows-builder:latest"`},
 		{"container does not perform WiX deploy", "workflow", `-Target windows-gui-deploy`, `-Target windows-gui-build`},
 		{"lifecycle not invoked", "workflow", `./scripts/test-windows-desktop-msi-lifecycle.ps1`, `Write-Host "MSI lifecycle skipped"`},
-		{"native Go test flags not passed as literal arguments", "workflow", `$output = & $testBinary '-test.count=1' '-test.v' "-test.run=$runPattern" 2>&1`, `$output = & $testBinary -test.count=1 -test.v -test.run=$runPattern 2>&1`},
+		{"native Go test flags not passed as literal arguments", "workflow", `$output = & $testBinary '-test.count=1' '-test.v' 2>&1`, `$output = & $testBinary -test.count=1 -test.v 2>&1`},
 		{"native stderr treated as terminating", "workflow", `$ErrorActionPreference = "Continue"`, `$ErrorActionPreference = "Stop"`},
-		{"native suite not restricted to required tests", "workflow", `"-test.run=$runPattern"`, `'-test.run=.'`},
+		{"native suite is filtered", "workflow", `$output = & $testBinary '-test.count=1' '-test.v' 2>&1`, `$output = & $testBinary '-test.count=1' '-test.v' '-test.run=TestWorkspaceFS' 2>&1`},
 		{"release install removed", "lifecycle", `Invoke-Msi -Operation install -Package $release.release.MsiPath`, `Write-Host "release install skipped"`},
 		{"release uninstall removed", "lifecycle", `Invoke-Msi -Operation uninstall -Package $release.release.MsiPath`, `Write-Host "release uninstall skipped"`},
 		{"installed payload hash not checked", "lifecycle", `installed Codesk.exe does not match the validated payload`, `installed Codesk.exe was not checked`},
@@ -552,37 +552,36 @@ func checkWindowsMSICILifecycle(workflow, lifecycle string) error {
 		"fetch-depth: 0": 1,
 		`$imageRef = "ghcr.io/xiazy/notty-windows-builder:latest"`: 1,
 		`docker pull $imageRef`: 1,
-		"- name: Build and ICE-validate Windows payloads and MSIs in the builder image":  1,
-		`./scripts/run-windows-gui-container.ps1`:                                        1,
-		`-Target windows-gui-deploy`:                                                     1,
-		`-BuilderImage "${{ steps.builder.outputs.image_id }}"`:                          1,
-		"- name: Install, verify, and uninstall the runner-native MSI":                   1,
-		`./scripts/test-windows-desktop-msi-lifecycle.ps1`:                               1,
-		`dist\windows-gui\msi\$architecture`:                                             1,
-		`dist\windows-gui\payload\$architecture`:                                         1,
-		`$required = @(`:                                                                 1,
-		`$runPattern = "^(" + ($required -join "|") + ")$"`:                              1,
-		`$savedErrorActionPreference = $ErrorActionPreference`:                           1,
-		`$ErrorActionPreference = "Continue"`:                                            1,
-		`$output = & $testBinary '-test.count=1' '-test.v' "-test.run=$runPattern" 2>&1`: 1,
-		`$testExit = $LASTEXITCODE`:                                                      1,
-		`$ErrorActionPreference = $savedErrorActionPreference`:                           1,
+		"- name: Build and ICE-validate Windows payloads and MSIs in the builder image": 1,
+		`./scripts/run-windows-gui-container.ps1`:                                       1,
+		`-Target windows-gui-deploy`:                                                    1,
+		`-BuilderImage "${{ steps.builder.outputs.image_id }}"`:                         1,
+		"- name: Install, verify, and uninstall the runner-native MSI":                  1,
+		`./scripts/test-windows-desktop-msi-lifecycle.ps1`:                              1,
+		`dist\windows-gui\msi\$architecture`:                                            1,
+		`dist\windows-gui\payload\$architecture`:                                        1,
+		`$required = @(`:                                                                1,
+		`$savedErrorActionPreference = $ErrorActionPreference`:                          1,
+		`$ErrorActionPreference = "Continue"`:                                           1,
+		`$output = & $testBinary '-test.count=1' '-test.v' 2>&1`:                        1,
+		`$testExit = $LASTEXITCODE`:                                                     1,
+		`$ErrorActionPreference = $savedErrorActionPreference`:                          1,
 	} {
 		if got := strings.Count(job, required); got != count {
 			return fmt.Errorf("Windows MSI CI source count for %q = %d, want %d", required, got, count)
 		}
 	}
 	requiredAt := strings.Index(job, `$required = @(`)
-	patternAt := strings.Index(job, `$runPattern = "^(" + ($required -join "|") + ")$"`)
 	continueAt := strings.Index(job, `$ErrorActionPreference = "Continue"`)
-	invokeAt := strings.Index(job, `$output = & $testBinary '-test.count=1' '-test.v' "-test.run=$runPattern" 2>&1`)
+	invokeAt := strings.Index(job, `$output = & $testBinary '-test.count=1' '-test.v' 2>&1`)
 	exitAt := strings.Index(job, `$testExit = $LASTEXITCODE`)
 	restoreAt := strings.Index(job, `$ErrorActionPreference = $savedErrorActionPreference`)
 	verifyAt := strings.Index(job, `foreach ($test in $required)`)
-	if !(requiredAt < patternAt && patternAt < continueAt && continueAt < invokeAt && invokeAt < exitAt && exitAt < restoreAt && restoreAt < verifyAt) {
-		return fmt.Errorf("Windows MSI CI does not scope required-test selection, native invocation, exit capture, and PASS verification")
+	if !(requiredAt < continueAt && continueAt < invokeAt && invokeAt < exitAt && exitAt < restoreAt && restoreAt < verifyAt) {
+		return fmt.Errorf("Windows MSI CI does not run the full native suite before required PASS verification")
 	}
 	for _, forbidden := range []string{
+		"-test.run",
 		"actions/upload-artifact",
 		"actions/download-artifact",
 		"actions/setup-dotnet",

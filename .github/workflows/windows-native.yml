@@ -105,11 +105,10 @@ jobs:
             "TestAtomicReplacementReturnsErrorWhenPostRenameFlushFailsOnWindows",
             "TestIsCrossDeviceErrorWindows"
           )
-          $runPattern = "^(" + ($required -join "|") + ")$"
           $savedErrorActionPreference = $ErrorActionPreference
           $ErrorActionPreference = "Continue"
           try {
-            $output = & $testBinary '-test.count=1' '-test.v' "-test.run=$runPattern" 2>&1
+            $output = & $testBinary '-test.count=1' '-test.v' 2>&1
             $testExit = $LASTEXITCODE
           } finally {
             $ErrorActionPreference = $savedErrorActionPreference

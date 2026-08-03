@@ -121,9 +121,9 @@ func TestWindowsNativeCIUsesPublishedBuilderImage(t *testing.T) {
 		{"validation pushes the builder image", "native", "& docker pull $imageRef", "& docker pull $imageRef\n          & docker push $imageRef"},
 		{"container reuses mutable tag after pull", "native", "-BuilderImage \"${{ steps.builder.outputs.image_id }}\"", "-BuilderImage \"${{ inputs.builder_image }}\""},
 		{"container deploy removed", "native", "-Target windows-gui-deploy", "-Target windows-gui-build"},
-		{"native executable not run", "native", "$output = & $testBinary '-test.count=1' '-test.v' \"-test.run=$runPattern\" 2>&1", "Write-Host \"native suite skipped\""},
+		{"native executable not run", "native", "$output = & $testBinary '-test.count=1' '-test.v' 2>&1", "Write-Host \"native suite skipped\""},
 		{"native stderr treated as terminating", "native", "$ErrorActionPreference = \"Continue\"", "$ErrorActionPreference = \"Stop\""},
-		{"native suite not restricted to required tests", "native", `"-test.run=$runPattern"`, `'-test.run=.'`},
+		{"native suite is filtered", "native", "$output = & $testBinary '-test.count=1' '-test.v' 2>&1", "$output = & $testBinary '-test.count=1' '-test.v' '-test.run=TestWorkspaceFS' 2>&1"},
 	}
 	for _, mutation := range mutations {
 		t.Run(mutation.name, func(t *testing.T) {
@@ -267,50 +267,49 @@ func checkWindowsNativeCIContract(ci, builder, native string) error {
 		return err
 	}
 	for required, count := range map[string]int{
-		"runs-on: ${{ fromJSON(inputs.runner_labels) }}":                                   1,
-		"submodules: recursive":                                                            1,
-		"fetch-depth: 0":                                                                   1,
-		"switch (\"${{ runner.arch }}\")":                                                  1,
-		"\"X64\" { \"go_arch=amd64\"":                                                      1,
-		"\"ARM64\" { \"go_arch=arm64\"":                                                    1,
-		`$imageRef = "ghcr.io/xiazy/notty-windows-builder:latest"`:                         1,
-		"docker pull $imageRef":                                                            1,
-		"docker image inspect $imageRef --format '{{.Id}}'":                                1,
-		"image_id=$imageId":                                                                1,
-		"./scripts/run-windows-gui-container.ps1":                                          1,
-		"-Target windows-gui-deploy":                                                       1,
-		"-BuilderImage \"${{ steps.builder.outputs.image_id }}\"":                          1,
-		"./scripts/test-windows-desktop-msi-lifecycle.ps1":                                 1,
-		"dist\\windows-gui\\msi\\$architecture":                                            1,
-		"dist\\windows-gui\\payload\\$architecture":                                        1,
-		"dist\\windows-gui\\tests\\notty-syncer-$architecture.test.exe":                    1,
-		"$required = @(":                                                                   1,
-		"$runPattern = \"^(\" + ($required -join \"|\") + \")$\"":                          1,
-		"$savedErrorActionPreference = $ErrorActionPreference":                             1,
-		"$ErrorActionPreference = \"Continue\"":                                            1,
-		"$output = & $testBinary '-test.count=1' '-test.v' \"-test.run=$runPattern\" 2>&1": 1,
-		"$testExit = $LASTEXITCODE":                                                        1,
-		"$ErrorActionPreference = $savedErrorActionPreference":                             1,
-		"$output -match \"--- PASS: $test\"":                                               1,
+		"runs-on: ${{ fromJSON(inputs.runner_labels) }}":                1,
+		"submodules: recursive":                                         1,
+		"fetch-depth: 0":                                                1,
+		"switch (\"${{ runner.arch }}\")":                               1,
+		"\"X64\" { \"go_arch=amd64\"":                                   1,
+		"\"ARM64\" { \"go_arch=arm64\"":                                 1,
+		`$imageRef = "ghcr.io/xiazy/notty-windows-builder:latest"`:      1,
+		"docker pull $imageRef":                                         1,
+		"docker image inspect $imageRef --format '{{.Id}}'":             1,
+		"image_id=$imageId":                                             1,
+		"./scripts/run-windows-gui-container.ps1":                       1,
+		"-Target windows-gui-deploy":                                    1,
+		"-BuilderImage \"${{ steps.builder.outputs.image_id }}\"":       1,
+		"./scripts/test-windows-desktop-msi-lifecycle.ps1":              1,
+		"dist\\windows-gui\\msi\\$architecture":                         1,
+		"dist\\windows-gui\\payload\\$architecture":                     1,
+		"dist\\windows-gui\\tests\\notty-syncer-$architecture.test.exe": 1,
+		"$required = @(":                                                1,
+		"$savedErrorActionPreference = $ErrorActionPreference":          1,
+		"$ErrorActionPreference = \"Continue\"":                         1,
+		"$output = & $testBinary '-test.count=1' '-test.v' 2>&1":        1,
+		"$testExit = $LASTEXITCODE":                                     1,
+		"$ErrorActionPreference = $savedErrorActionPreference":          1,
+		"$output -match \"--- PASS: $test\"":                            1,
 	} {
 		if got := strings.Count(job, required); got != count {
 			return fmt.Errorf("Windows-native CI source count for %q = %d, want %d", required, got, count)
 		}
 	}
 	requiredAt := strings.Index(job, `$required = @(`)
-	patternAt := strings.Index(job, `$runPattern = "^(" + ($required -join "|") + ")$"`)
 	continueAt := strings.Index(job, `$ErrorActionPreference = "Continue"`)
-	invokeAt := strings.Index(job, `$output = & $testBinary '-test.count=1' '-test.v' "-test.run=$runPattern" 2>&1`)
+	invokeAt := strings.Index(job, `$output = & $testBinary '-test.count=1' '-test.v' 2>&1`)
 	exitAt := strings.Index(job, `$testExit = $LASTEXITCODE`)
 	restoreAt := strings.Index(job, `$ErrorActionPreference = $savedErrorActionPreference`)
 	verifyAt := strings.Index(job, `foreach ($test in $required)`)
-	if !(requiredAt < patternAt && patternAt < continueAt && continueAt < invokeAt && invokeAt < exitAt && exitAt < restoreAt && restoreAt < verifyAt) {
-		return fmt.Errorf("Windows-native CI does not scope required-test selection, native invocation, exit capture, and PASS verification")
+	if !(requiredAt < continueAt && continueAt < invokeAt && invokeAt < exitAt && exitAt < restoreAt && restoreAt < verifyAt) {
+		return fmt.Errorf("Windows-native CI does not run the full native suite before required PASS verification")
 	}
 	if strings.Contains(job, "packages: write") {
 		return fmt.Errorf("Windows-native test job has package write permission")
 	}
 	for _, forbidden := range []string{
+		"-test.run",
 		"actions/setup-go",
 		"actions/setup-dotnet",
 		"dtolnay/rust-toolchain",
