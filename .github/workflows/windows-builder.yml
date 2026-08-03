@@ -20,7 +20,7 @@ env:
 jobs:
   builder-key:
     name: Resolve Windows builder image
-    runs-on: [self-hosted, Linux, ARM64]
+    runs-on: [self-hosted, Linux]
     outputs:
       image: ${{ steps.image.outputs.image }}
     steps:
@@ -36,12 +36,15 @@ jobs:
           printf 'image=%s:sha-%s\n' "$WINDOWS_BUILDER_REPOSITORY" "$image_hash" >> "$GITHUB_OUTPUT"
 
   builder-image:
-    name: Windows builder image (arm64)
+    name: Windows builder image (native)
     needs: builder-key
+    outputs:
+      image: ${{ steps.platform.outputs.image }}
+      runner_label: ${{ steps.platform.outputs.runner_label }}
     permissions:
       contents: read
       packages: write
-    runs-on: [self-hosted, Windows, ARM64]
+    runs-on: [self-hosted, Windows]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -50,11 +53,23 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
+      - name: Resolve the native image platform
+        id: platform
+        shell: powershell
+        run: |
+          $runnerLabel = "${{ runner.arch }}"
+          $architecture = switch ($runnerLabel) {
+            "X64" { "amd64" }
+            "ARM64" { "arm64" }
+            default { throw "Unsupported native Windows runner architecture: $runnerLabel" }
+          }
+          "image=${{ needs.builder-key.outputs.image }}-$architecture" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "runner_label=$runnerLabel" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - name: Check immutable architecture image
         id: image
         shell: powershell
         run: |
-          $tag = "${{ needs.builder-key.outputs.image }}-arm64"
+          $tag = "${{ steps.platform.outputs.image }}"
           $savedPreference = $ErrorActionPreference
           $ErrorActionPreference = "SilentlyContinue"
           & docker manifest inspect $tag *> $null
@@ -71,7 +86,7 @@ jobs:
         if: steps.image.outputs.build == 'true'
         shell: powershell
         run: |
-          $tag = "${{ needs.builder-key.outputs.image }}-arm64"
+          $tag = "${{ steps.platform.outputs.image }}"
           ./scripts/build-windows-gui-builder-image.ps1 `
             -RepositoryRoot "${{ github.workspace }}" `
             -BuilderImage $tag
@@ -83,39 +98,37 @@ jobs:
     needs: [builder-key, builder-image]
     permissions:
       packages: write
-    runs-on: [self-hosted, Linux, ARM64]
+    runs-on: [self-hosted, Linux]
     steps:
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
-      - name: Publish immutable Windows builder image manifest
+      - name: Verify the immutable native Windows builder image
         shell: bash
         env:
-          IMAGE: ${{ needs.builder-key.outputs.image }}
+          ARCHITECTURE_IMAGE: ${{ needs.builder-image.outputs.image }}
         run: |
-          docker manifest rm "$IMAGE" >/dev/null 2>&1 || true
-          docker manifest create "$IMAGE" "$IMAGE-arm64"
-          docker manifest push --purge "$IMAGE"
-          docker manifest inspect "$IMAGE" >/dev/null
+          docker manifest inspect "$ARCHITECTURE_IMAGE" >/dev/null
       - name: Promote the landed build context to latest
         shell: bash
         env:
-          IMAGE: ${{ needs.builder-key.outputs.image }}
+          ARCHITECTURE_IMAGE: ${{ needs.builder-image.outputs.image }}
         run: |
           latest="$WINDOWS_BUILDER_REPOSITORY:latest"
           docker manifest rm "$latest" >/dev/null 2>&1 || true
-          docker manifest create "$latest" "$IMAGE-arm64"
+          docker manifest create "$latest" "$ARCHITECTURE_IMAGE"
           docker manifest push --purge "$latest"
           docker manifest inspect "$latest" >/dev/null
 
   windows-native:
     name: Validate published Windows builder image
-    needs: builder-manifest
+    needs: [builder-image, builder-manifest]
     permissions:
       contents: read
       packages: read
     uses: ./.github/workflows/windows-native.yml
     with:
       builder_image: ghcr.io/xiazy/notty-windows-builder:latest
+      runner_labels: ${{ format('["self-hosted","Windows","{0}"]', needs.builder-image.outputs.runner_label) }}

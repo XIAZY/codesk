@@ -142,13 +142,16 @@ does not match the Docker engine. To use another local or pre-pulled tag, set
 `WINDOWS_GUI_BUILDER_IMAGE`; the image-build and product-build jobs must use the
 same value. The dedicated Windows-builder workflow is the only package-write
 path. It runs only on a merged `main` push changing the Dockerfile or copied WiX
-project, builds and pushes the missing ARM64 content tag, publishes its
-immutable manifest, and promotes it to `latest`. Its final job invokes the same
-read-only native validation used by pull-request CI, after promotion, so the
-new image receives the real MSI and Windows-platform acceptance without a
-cross-workflow race. Pull-request CI consumes the existing `latest` manifest;
-there is no PR bootstrap or immutable-tag fallback. A missing published image
-fails validation instead of mutating the registry from an unmerged revision.
+project, schedules on any native Windows runner, derives the image architecture
+from `runner.arch`, builds and pushes that content tag, publishes its immutable
+manifest, and promotes it to `latest`. Its final job invokes the same read-only
+native validation used by pull-request CI, after promotion and on the discovered
+builder platform, so the new image receives the real MSI and Windows-platform
+acceptance without a cross-architecture scheduling race. Pull-request CI is not
+architecture-pinned: it consumes the existing `latest` manifest on any matching
+native Windows runner. There is no PR bootstrap or immutable-tag fallback. A
+missing published image fails validation instead of mutating the registry from
+an unmerged revision.
 
 ```sh
 make windows-gui-build
@@ -165,8 +168,7 @@ arguments, so the lightweight image-builder supplies only
 `TARGETARCH=<Docker server architecture>` as a compatibility fallback. Image
 construction and product execution both explicitly use `--isolation=process`.
 The product build target does not accept `WINDOWS_GUI_ARCHES`; it builds exactly
-the native container architecture. On this machine that means an ARM64
-container and ARM64 payload.
+the native container architecture selected by the Windows runner.
 
 Rust 1.97 supplies LLVM-MinGW host tools for both Windows architectures, so the
 image selects `x86_64-pc-windows-gnullvm` or

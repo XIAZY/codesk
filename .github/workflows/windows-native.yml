@@ -7,6 +7,11 @@ on:
         description: Published Windows builder image to validate
         required: true
         type: string
+      runner_labels:
+        description: JSON runner labels; defaults to any native Windows runner
+        required: false
+        type: string
+        default: '["self-hosted","Windows"]'
 
 permissions:
   contents: read
@@ -15,10 +20,7 @@ permissions:
 jobs:
   windows-daemon:
     name: Windows daemon (native build + platform tests)
-    runs-on:
-      - self-hosted
-      - Windows
-      - ARM64
+    runs-on: ${{ fromJSON(inputs.runner_labels) }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
