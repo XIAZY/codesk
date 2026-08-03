@@ -504,6 +504,9 @@ func TestWindowsMSICIRunsNativeValidationAndLifecycle(t *testing.T) {
 		{"checksum inventory not parsed", "lifecycle", `Get-Content -LiteralPath $checksumsPath`, `@()`},
 		{"post-uninstall registry state not checked", "lifecycle", `release uninstall left component registry state`, `component registry state was not checked`},
 		{"installed binary not executed", "lifecycle", `$installedAgentTool --version`, `$ExpectedVersion`},
+		{"Windows Installer inventory bypassed", "lifecycle", `public static extern uint MsiGetProductInfoExW(`, `public static extern uint Get-ItemProperty(`},
+		{"per-user MSI context weakened", "lifecycle", `$MsiInstallContextUserUnmanaged = [uint32] 2`, `$MsiInstallContextUserUnmanaged = [uint32] 4`},
+		{"installed product state not required", "lifecycle", `$registration.ProductState -ceq '5'`, `$registration.ProductState -ne ''`},
 		{"quiet install removed", "lifecycle", `'/qn'`, `'/passive'`},
 		{"restart suppression removed", "lifecycle", `'/norestart'`, `'/forcerestart'`},
 	} {
@@ -572,12 +575,20 @@ func checkWindowsMSICILifecycle(workflow, lifecycle string) error {
 		"Get-Content -LiteralPath $checksumsPath":                                     1,
 		"SHA256SUMS does not match provenance for $name":                              1,
 		"Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\\msiexec.exe')": 1,
+		"$MsiInstallContextUserUnmanaged = [uint32] 2":                                1,
+		"public static extern uint MsiGetProductInfoExW(":                             1,
+		"MsiGetProductInfoExW size query for $Property failed with exit $result":      1,
+		"MsiGetProductInfoExW read for $Property failed with exit $result":            1,
+		"-Property 'ProductState'":                                                    1,
+		"-Property 'InstalledProductName'":                                            1,
+		"-Property 'VersionString'":                                                   1,
 		"$verb = if ($Operation -ceq 'install') { '/i' } else { '/x' }":               1,
 		"'/qn'":        1,
 		"'/norestart'": 1,
 		"'/l*v'":       1,
 		"installed Codesk.exe does not match the validated payload":         1,
 		"installed agent tool does not match the validated payload":         1,
+		"$registration.ProductState -ceq '5'":                               1,
 		"$installedAgentTool --version":                                     1,
 		"Start Menu shortcut targets the wrong executable":                  1,
 		"Codesk component registration is missing":                          1,
@@ -588,6 +599,14 @@ func checkWindowsMSICILifecycle(workflow, lifecycle string) error {
 	} {
 		if got := strings.Count(lifecycle, required); got != count {
 			return fmt.Errorf("Windows MSI lifecycle source count for %q = %d, want %d", required, got, count)
+		}
+	}
+	for _, forbidden := range []string{
+		`HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall`,
+		`HKCU:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall`,
+	} {
+		if strings.Contains(lifecycle, forbidden) {
+			return fmt.Errorf("Windows MSI lifecycle uses registry-view-specific product inventory %q", forbidden)
 		}
 	}
 	return nil

@@ -16,6 +16,28 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$MsiErrorSuccess = [uint32] 0
+$MsiErrorUnknownProduct = [uint32] 1605
+$MsiInstallContextUserUnmanaged = [uint32] 2
+
+if (-not ('CodeskWindowsInstallerNative' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class CodeskWindowsInstallerNative
+{
+    [DllImport("msi.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+    public static extern uint MsiGetProductInfoExW(
+        string productCode,
+        string userSid,
+        uint context,
+        string property,
+        StringBuilder value,
+        ref uint valueLength);
+}
+'@
+}
 
 function Assert-True {
     param(
@@ -115,25 +137,60 @@ function Invoke-Msi {
     }
 }
 
-function Get-UninstallKey {
+function Get-MsiProductProperty {
+    param(
+        [Parameter(Mandatory = $true)] [string] $ProductCode,
+        [Parameter(Mandatory = $true)] [string] $Property
+    )
+
+    [uint32] $length = 0
+    $result = [CodeskWindowsInstallerNative]::MsiGetProductInfoExW(
+        $ProductCode,
+        $null,
+        $MsiInstallContextUserUnmanaged,
+        $Property,
+        $null,
+        [ref] $length)
+    if ($result -eq $MsiErrorUnknownProduct) {
+        return $null
+    }
+    Assert-True ($result -eq $MsiErrorSuccess) `
+        "MsiGetProductInfoExW size query for $Property failed with exit $result"
+    if ($length -eq 0) {
+        return ''
+    }
+
+    $value = [System.Text.StringBuilder]::new([int] $length + 1)
+    [uint32] $capacity = $value.Capacity
+    $result = [CodeskWindowsInstallerNative]::MsiGetProductInfoExW(
+        $ProductCode,
+        $null,
+        $MsiInstallContextUserUnmanaged,
+        $Property,
+        $value,
+        [ref] $capacity)
+    Assert-True ($result -eq $MsiErrorSuccess) "MsiGetProductInfoExW read for $Property failed with exit $result"
+    return $value.ToString()
+}
+
+function Get-MsiProductRegistration {
     param([Parameter(Mandatory = $true)] [string] $ProductCode)
 
-    foreach ($root in @(
-        'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
-        'HKCU:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
-    )) {
-        $candidate = Join-Path $root $ProductCode
-        if (Test-Path -LiteralPath $candidate) {
-            return $candidate
-        }
+    $state = Get-MsiProductProperty -ProductCode $ProductCode -Property 'ProductState'
+    if ($null -eq $state) {
+        return $null
     }
-    return $null
+    return [pscustomobject] @{
+        ProductState = $state
+        DisplayName = Get-MsiProductProperty -ProductCode $ProductCode -Property 'InstalledProductName'
+        DisplayVersion = Get-MsiProductProperty -ProductCode $ProductCode -Property 'VersionString'
+    }
 }
 
 function Assert-ProductAbsent {
     param([Parameter(Mandatory = $true)] $Package)
 
-    Assert-True ($null -eq (Get-UninstallKey -ProductCode $Package.ProductCode)) "$($Package.Role) product remains registered"
+    Assert-True ($null -eq (Get-MsiProductRegistration -ProductCode $Package.ProductCode)) "$($Package.Role) product remains registered"
 }
 
 function Assert-InstalledProduct {
@@ -145,9 +202,9 @@ function Assert-InstalledProduct {
         [Parameter(Mandatory = $true)] [string] $ShortcutPath
     )
 
-    $key = Get-UninstallKey -ProductCode $Package.ProductCode
-    Assert-True ($null -ne $key) "$($Package.Role) product is not registered"
-    $registration = Get-ItemProperty -LiteralPath $key
+    $registration = Get-MsiProductRegistration -ProductCode $Package.ProductCode
+    Assert-True ($null -ne $registration) "$($Package.Role) product is not registered"
+    Assert-True ($registration.ProductState -ceq '5') "$($Package.Role) product state is $($registration.ProductState), want installed"
     Assert-True ($registration.DisplayName -ceq 'Codesk') "$($Package.Role) DisplayName is not Codesk"
     Assert-True ($registration.DisplayVersion -ceq $Package.Version) "$($Package.Role) DisplayVersion is $($registration.DisplayVersion), want $($Package.Version)"
 
@@ -200,9 +257,10 @@ New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
 # Remove only the exact deterministic ProductCode this test owns. Any other Codesk installation
 # remains a hard contamination failure rather than being deleted from a shared runner.
 foreach ($package in @($release.release)) {
-    Invoke-Msi -Operation uninstall -Package $package.ProductCode `
-        -LogPath (Join-Path $logDirectory "baseline-$($package.Role)-uninstall.log") `
-        -AllowedExitCodes @(0, 1605)
+    if ($null -ne (Get-MsiProductRegistration -ProductCode $package.ProductCode)) {
+        Invoke-Msi -Operation uninstall -Package $package.ProductCode `
+            -LogPath (Join-Path $logDirectory "baseline-$($package.Role)-uninstall.log")
+    }
     Assert-ProductAbsent -Package $package
 }
 Assert-True (-not (Test-Path -LiteralPath $installDirectory)) "pre-existing Codesk install directory contaminates the runner: $installDirectory"
@@ -220,9 +278,10 @@ try {
 } finally {
     foreach ($package in @($release.release)) {
         try {
-            Invoke-Msi -Operation uninstall -Package $package.ProductCode `
-                -LogPath (Join-Path $logDirectory "cleanup-$($package.Role)-uninstall.log") `
-                -AllowedExitCodes @(0, 1605)
+            if ($null -ne (Get-MsiProductRegistration -ProductCode $package.ProductCode)) {
+                Invoke-Msi -Operation uninstall -Package $package.ProductCode `
+                    -LogPath (Join-Path $logDirectory "cleanup-$($package.Role)-uninstall.log")
+            }
         } catch {
             Write-Warning $_
         }
