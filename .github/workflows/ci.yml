@@ -354,6 +354,9 @@ jobs:
           if ($exists) {
             Write-Host "Reusing immutable Windows builder image $tag"
           }
+          # A missing manifest is the expected bootstrap path. Clear the native
+          # command's nonzero status after publishing the `build` output.
+          exit 0
       - name: Build and push changed Windows builder image
         if: steps.image.outputs.build == 'true'
         shell: powershell
