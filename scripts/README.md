@@ -141,11 +141,13 @@ Later product builds reuse the image and reject one whose Windows architecture
 does not match the Docker engine. To use another local or pre-pulled tag, set
 `WINDOWS_GUI_BUILDER_IMAGE`; the image-build and product-build jobs must use the
 same value. The Windows-native CI jobs hash the Dockerfile plus WiX project,
-builds and pushes missing AMD64/ARM64 images to GHCR, publishes an immutable
-multi-architecture manifest, and promotes that manifest to `latest` only after
-it lands on `main`. Windows CI consumes the published `latest` manifest; only
-the initial empty-package bootstrap uses the exact content-derived tag that the
-same run just published.
+but package-write jobs run only on a merged `main` push whose range changes one
+of those build-context files. That path builds and pushes the missing ARM64
+content tag, publishes its immutable manifest, and then promotes it to
+`latest`. Pull requests and unrelated `main` pushes skip both publication jobs
+and consume the existing `latest` manifest. There is no pull-request bootstrap
+or immutable-tag fallback; a missing published `latest` image fails the native
+job instead of mutating the registry from an unmerged revision.
 
 ```sh
 make windows-gui-build

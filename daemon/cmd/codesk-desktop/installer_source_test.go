@@ -87,15 +87,42 @@ func TestWindowsNativeCIUsesPublishedBuilderImage(t *testing.T) {
 	}{
 		{"Dockerfile leaves image key", "sha256sum deploy/windows-desktop/Dockerfile", "printf Dockerfile"},
 		{"WiX project leaves image key", "sha256sum deploy/windows-desktop/Codesk.wixproj", "printf Codesk.wixproj"},
+		{"publication event guard weakened", `$GITHUB_EVENT_NAME" == "push`, `$GITHUB_EVENT_NAME" != ""`},
+		{"publication branch guard weakened", `$GITHUB_REF" == "refs/heads/main`, `$GITHUB_REF" != ""`},
+		{
+			"Dockerfile leaves publication change gate",
+			"deploy/windows-desktop/Dockerfile \\\n              deploy/windows-desktop/Codesk.wixproj",
+			"deploy/windows-desktop/Codesk.wixproj \\\n              deploy/windows-desktop/Codesk.wixproj",
+		},
+		{
+			"WiX project leaves publication change gate",
+			"deploy/windows-desktop/Dockerfile \\\n              deploy/windows-desktop/Codesk.wixproj",
+			"deploy/windows-desktop/Dockerfile \\\n              deploy/windows-desktop/Dockerfile",
+		},
+		{
+			"builder image can publish outside policy gate",
+			"  builder-image:\n    name: Windows builder image (arm64)\n    needs: builder-key\n    if: needs.builder-key.outputs.publish == 'true'",
+			"  builder-image:\n    name: Windows builder image (arm64)\n    needs: builder-key\n    if: always()",
+		},
+		{
+			"builder manifest can publish outside policy gate",
+			"  builder-manifest:\n    name: Publish Windows builder manifest\n    needs: [builder-key, builder-image]\n    if: needs.builder-key.outputs.publish == 'true'",
+			"  builder-manifest:\n    name: Publish Windows builder manifest\n    needs: [builder-key, builder-image]\n    if: always()",
+		},
 		{"builder targets absent X64 runner", "runs-on: [self-hosted, Windows, ARM64]", "runs-on: [self-hosted, Windows, X64]"},
 		{"native consumer loses ARM64 pin", "      - Windows\n      - ARM64\n", "      - Windows\n      - X64\n"},
 		{"missing architecture image still fails probe step", "          exit 0\n", ""},
 		{"builder construction removed", "./scripts/build-windows-gui-builder-image.ps1", "Write-Host \"builder skipped\""},
 		{"architecture image not pushed", "docker push $tag", "Write-Host \"push skipped\""},
 		{"manifest adds unavailable AMD64 image", "docker manifest create \"$IMAGE\" \"$IMAGE-arm64\"", "docker manifest create \"$IMAGE\" \"$IMAGE-amd64\" \"$IMAGE-arm64\""},
-		{"latest can move on a PR", "if: github.event_name == 'push' && github.ref == 'refs/heads/main'", "if: always()"},
-		{"native job no longer waits for image", "needs: builder-manifest", "needs: builder-key"},
-		{"native job bypasses bootstrap-aware image resolution", "$imageRef = \"${{ needs.builder-manifest.outputs.image }}\"", "$imageRef = \"$WINDOWS_BUILDER_REPOSITORY:latest\""},
+		{
+			"native job masks a failed required publication",
+			"needs.builder-key.outputs.publish != 'true' || needs.builder-manifest.result == 'success'",
+			"needs.builder-key.outputs.publish != 'true' || needs.builder-manifest.result != 'cancelled'",
+		},
+		{"native job cannot run when publication is intentionally skipped", "always() && needs.builder-key.result", "needs.builder-key.result"},
+		{"native job no longer waits for image policy", "needs: [builder-key, builder-manifest]", "needs: builder-manifest"},
+		{"native job bypasses published latest", `$imageRef = "$($env:WINDOWS_BUILDER_REPOSITORY):latest"`, `$imageRef = "${{ needs.builder-key.outputs.image }}"`},
 		{"container reuses mutable tag after pull", "-BuilderImage \"${{ steps.builder.outputs.image_id }}\"", "-BuilderImage \"${{ needs.builder-manifest.outputs.image }}\""},
 		{"container deploy removed", "-Target windows-gui-deploy", "-Target windows-gui-build"},
 		{"native executable not run", "$output = & $testBinary '-test.count=1' '-test.v' \"-test.run=$runPattern\" 2>&1", "Write-Host \"native suite skipped\""},
@@ -133,24 +160,39 @@ func checkWindowsNativeCIContract(workflow string) error {
 	for required, count := range map[string]int{
 		"name: CI":        1,
 		"packages: write": 2,
-		"WINDOWS_BUILDER_REPOSITORY: ghcr.io/xiazy/notty-windows-builder":    1,
-		"sha256sum deploy/windows-desktop/Dockerfile":                        1,
-		"sha256sum deploy/windows-desktop/Codesk.wixproj":                    1,
-		"name: Windows builder image (arm64)":                                1,
-		"runs-on: [self-hosted, Windows, ARM64]":                             1,
-		"docker manifest inspect $tag *> $null":                              1,
-		"          exit 0\n":                                                 1,
-		"./scripts/build-windows-gui-builder-image.ps1":                      1,
-		"docker push $tag":                                                   1,
-		"docker manifest create \"$IMAGE\" \"$IMAGE-arm64\"":                 1,
-		"if: github.event_name == 'push' && github.ref == 'refs/heads/main'": 1,
-		"image: ${{ steps.ci-image.outputs.image }}":                         1,
-		"latest=\"$WINDOWS_BUILDER_REPOSITORY:latest\"":                      2,
-		"if docker manifest inspect \"$latest\" >/dev/null 2>&1; then":       1,
-		"image=\"$EXACT_IMAGE\"":                                             1,
+		"WINDOWS_BUILDER_REPOSITORY: ghcr.io/xiazy/notty-windows-builder": 1,
+		"publish: ${{ steps.image.outputs.publish }}":                     1,
+		"fetch-depth: 0": 3,
+		"PUSH_BEFORE: ${{ github.event.before }}":                                                   1,
+		`if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main" ]]; then`:       1,
+		`if [[ "$PUSH_BEFORE" == "0000000000000000000000000000000000000000" ]]; then`:               1,
+		`elif git diff --quiet "$PUSH_BEFORE" "$GITHUB_SHA" -- \`:                                   1,
+		"sha256sum deploy/windows-desktop/Dockerfile":                                               1,
+		"sha256sum deploy/windows-desktop/Codesk.wixproj":                                           1,
+		"deploy/windows-desktop/Dockerfile \\\n              deploy/windows-desktop/Codesk.wixproj": 1,
+		"printf 'publish=%s\\n' \"$publish\" >> \"$GITHUB_OUTPUT\"":                                 1,
+		"if: needs.builder-key.outputs.publish == 'true'":                                           2,
+		"name: Windows builder image (arm64)":                                                       1,
+		"runs-on: [self-hosted, Windows, ARM64]":                                                    1,
+		"docker manifest inspect $tag *> $null":                                                     1,
+		"          exit 0\n":                                                                        1,
+		"./scripts/build-windows-gui-builder-image.ps1":                                             1,
+		"docker push $tag": 1,
+		"docker manifest create \"$IMAGE\" \"$IMAGE-arm64\"": 1,
+		"latest=\"$WINDOWS_BUILDER_REPOSITORY:latest\"":      1,
 	} {
 		if got := strings.Count(workflow, required); got != count {
 			return fmt.Errorf("Windows builder workflow source count for %q = %d, want %d", required, got, count)
+		}
+	}
+	for _, forbidden := range []string{
+		"image: ${{ steps.ci-image.outputs.image }}",
+		"if docker manifest inspect \"$latest\" >/dev/null 2>&1; then",
+		"image=\"$EXACT_IMAGE\"",
+		"needs.builder-manifest.outputs.image",
+	} {
+		if strings.Contains(workflow, forbidden) {
+			return fmt.Errorf("Windows builder workflow retains publication fallback %q", forbidden)
 		}
 	}
 	job, err := windowsNativeCIJob(workflow)
@@ -158,15 +200,17 @@ func checkWindowsNativeCIContract(workflow string) error {
 		return err
 	}
 	for required, count := range map[string]int{
-		"needs: builder-manifest": 1,
-		"packages: read":          1,
+		"needs: [builder-key, builder-manifest]":                                                    1,
+		"always() && needs.builder-key.result == 'success'":                                         1,
+		"needs.builder-key.outputs.publish != 'true' || needs.builder-manifest.result == 'success'": 1,
+		"packages: read": 1,
 		"      - self-hosted\n      - Windows\n      - ARM64":                              1,
 		"submodules: recursive":                                                            1,
 		"fetch-depth: 0":                                                                   1,
 		"switch (\"${{ runner.arch }}\")":                                                  1,
 		"\"X64\" { \"go_arch=amd64\"":                                                      1,
 		"\"ARM64\" { \"go_arch=arm64\"":                                                    1,
-		"$imageRef = \"${{ needs.builder-manifest.outputs.image }}\"":                      1,
+		`$imageRef = "$($env:WINDOWS_BUILDER_REPOSITORY):latest"`:                          1,
 		"docker pull $imageRef":                                                            1,
 		"docker image inspect $imageRef --format '{{.Id}}'":                                1,
 		"image_id=$imageId":                                                                1,
