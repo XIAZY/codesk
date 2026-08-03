@@ -98,7 +98,7 @@ func TestWindowsNativeCIUsesPublishedBuilderImage(t *testing.T) {
 		{"native job bypasses bootstrap-aware image resolution", "$imageRef = \"${{ needs.builder-manifest.outputs.image }}\"", "$imageRef = \"$WINDOWS_BUILDER_REPOSITORY:latest\""},
 		{"container reuses mutable tag after pull", "-BuilderImage \"${{ steps.builder.outputs.image_id }}\"", "-BuilderImage \"${{ needs.builder-manifest.outputs.image }}\""},
 		{"container deploy removed", "-Target windows-gui-deploy", "-Target windows-gui-build"},
-		{"native executable not run", "$output = & $testBinary -test.count=1 -test.v 2>&1", "Write-Host \"native suite skipped\""},
+		{"native executable not run", "$output = & $testBinary '-test.count=1' '-test.v' 2>&1", "Write-Host \"native suite skipped\""},
 	}
 	for _, mutation := range mutations {
 		t.Run(mutation.name, func(t *testing.T) {
@@ -175,7 +175,7 @@ func checkWindowsNativeCIContract(workflow string) error {
 		"dist\\windows-gui\\msi\\$architecture":                         1,
 		"dist\\windows-gui\\payload\\$architecture":                     1,
 		"dist\\windows-gui\\tests\\notty-syncer-$architecture.test.exe": 1,
-		"$output = & $testBinary -test.count=1 -test.v 2>&1":            1,
+		"$output = & $testBinary '-test.count=1' '-test.v' 2>&1":        1,
 		"$output -match \"--- PASS: $test\"":                            1,
 	} {
 		if got := strings.Count(job, required); got != count {
