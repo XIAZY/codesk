@@ -193,6 +193,8 @@ $createArguments = @(
     '--workdir', 'C:\workspace',
     '--env', 'WINDOWS_GUI_CC_AMD64=C:/toolchains/llvm-mingw/bin/x86_64-w64-mingw32-clang.exe -static',
     '--env', 'WINDOWS_GUI_CC_ARM64=C:/toolchains/llvm-mingw/bin/aarch64-w64-mingw32-clang.exe -static',
+    '--env', 'CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=C:/toolchains/llvm-mingw/bin/x86_64-w64-mingw32-clang.exe',
+    '--env', 'CARGO_TARGET_AARCH64_PC_WINDOWS_GNULLVM_LINKER=C:/toolchains/llvm-mingw/bin/aarch64-w64-mingw32-clang.exe',
     $BuilderImage,
     '-File', 'C:\workspace\scripts\run-windows-gui-target.ps1',
     '-Target', $Target,
